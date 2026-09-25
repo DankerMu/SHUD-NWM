@@ -1162,6 +1162,13 @@ _NETWORK_IDENTITY_RESOLUTION = (
     "      WHERE river_network_version_id = %(river_network_version_id)s\n"
 )
 
+_DISCOVERY_NETWORK_IDENTITY_RESOLUTION = (
+    "(SELECT river_segment_key FROM core.river_segment WHERE river_segment_id = %(river_segment_id)s"
+    " AND river_network_version_id = %(river_network_version_id)s) AS river_segment_key,"
+    " (SELECT river_network_version_key FROM core.river_network_version"
+    " WHERE river_network_version_id = %(river_network_version_id)s) AS river_network_version_key"
+)
+
 
 def test_forecast_series_duplicate_segment_filters_forecast_analysis_and_latest_by_selected_network() -> None:
     issue_time = _dt("2026-05-07T00:00:00Z")
@@ -1231,8 +1238,16 @@ def test_forecast_series_duplicate_segment_filters_forecast_analysis_and_latest_
     for sql, params in facts:
         assert "UNION ALL" not in sql
         assert "rt.river_network_version_id" not in sql
-        assert _NETWORK_IDENTITY_RESOLUTION in sql
+        # #2424 D1: latest-cycle discovery resolves the selected network's key once
+        # in its `seg` CTE and probes the fact table with it; the fact reads carry
+        # the shared source's sub-select.
+        if "cand AS MATERIALIZED" in sql:
+            assert _DISCOVERY_NETWORK_IDENTITY_RESOLUTION in " ".join(sql.split())
+            assert "rt.river_network_version_key IS NOT DISTINCT FROM seg.river_network_version_key" in sql
+        else:
+            assert _NETWORK_IDENTITY_RESOLUTION in sql
         assert params["river_network_version_id"] == "rnv_selected"
+    assert sum("cand AS MATERIALIZED" in sql for sql, _params in facts) == 1
 
 
 def test_forecast_series_explicit_issue_time_interpolates_scenario_filter() -> None:

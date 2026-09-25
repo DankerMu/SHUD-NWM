@@ -223,6 +223,33 @@ def _segment_rows_source_sql(run_pushdown: str = "") -> str:
     return f"({render_river_ts_sql(_segment_rows_source_template('narrow', run_pushdown), 'narrow').sql})"
 
 
+#: #2424 D1: the latest-cycle discovery's ONLY fact-table read, a membership
+#: probe correlated to one candidate run (`o`) and the scalar identity keys
+#: resolved once in the statement's `seg` CTE. Its fact-side predicates are
+#: exactly `_SEGMENT_ROWS_SOURCE_SQL`'s, including the #2451 C1 spelling: the
+#: basin and network keys are the guarded non-sargable pair so
+#: `river_ts_run_discovery_key_idx` stays confined to its `run_key` prefix,
+#: while the segment key and the variable keep their `=`. A NULL `seg` key
+#: (unknown basin, network or segment) matches nothing, as the old join did.
+_LATEST_CYCLE_FACT_PROBE_SQL = """
+                    SELECT 1
+                    FROM hydro.river_timeseries rt
+                    WHERE rt.run_key = o.run_key
+                      AND rt.river_segment_key = seg.river_segment_key
+                      AND rt.basin_version_key IS NOT NULL
+                      AND rt.basin_version_key IS NOT DISTINCT FROM seg.basin_version_key
+                      AND rt.river_network_version_key IS NOT NULL
+                      AND rt.river_network_version_key IS NOT DISTINCT FROM seg.river_network_version_key
+                      AND rt.variable_e = 'q_down'::hydro.river_variable
+"""
+
+
+def _latest_cycle_fact_probe_template(store: str) -> str:
+    if store != "narrow":
+        raise ValueError(f"Invalid river timeseries store: {store!r}")
+    return _LATEST_CYCLE_FACT_PROBE_SQL
+
+
 def _segment_identity_params(
     basin_version_id: str,
     segment_id: str,
@@ -391,6 +418,7 @@ _LATEST_PRODUCT_STATION_SOURCE_TEMPLATES = ForcingTemplatePair(
                         AND iw.station_id = ms.station_id
                         AND iw.variable = fst.variable_e::text
                         AND LOWER(iw.source_id) = LOWER(cr.source_id)
+                      OFFSET 0
                   )
 """,
 )
@@ -1158,20 +1186,67 @@ class PsycopgForecastStore:
         scenario_filter: "_ScenarioFilter",
         identity_filter: "_ScenarioFilter",
     ) -> dict[str, datetime]:
+        """Each scenario's latest cycle that has ``q_down`` rows for this segment.
+
+        #2424 D1: driven from ``hydro.hydro_run`` rather than from the segment's
+        fact rows. ``hydro_run`` is read ONCE, in the ``MATERIALIZED`` candidate
+        CTE, which also carries the only rendering of the scenario and identity
+        filters. Per scenario, candidates are sorted by ``cycle_time DESC`` behind
+        the ``OFFSET 0`` fence, so the correlated membership probe runs lazily
+        until the first hit; the outer ``ORDER BY o.cycle_time DESC`` before
+        ``LIMIT 1`` keeps the pick correct under any plan. There is deliberately
+        no ``status`` predicate (user decision (a)): a run with rows is eligible
+        whatever its status, as before. ``h.basin_version_id`` narrows the
+        candidates (user decision (b)); that rests on a run's basin being the
+        basin of its fact rows, which node-27's per-run check confirmed.
+        """
+        fact_probe_sql = render_river_ts_sql(
+            _latest_cycle_fact_probe_template("narrow"),
+            "narrow",
+            entry="forecast_store.latest_cycle_fact_probe",
+        ).sql
         rows = self._fetch_all(
             cursor,
             f"""
-            SELECT
-                h.scenario_id,
-                MAX(h.cycle_time) AS cycle_time
-            FROM {_segment_rows_source_sql()} rt
-            JOIN hydro.hydro_run h ON h.run_key = rt.run_key
-            WHERE h.run_type = 'forecast'
-              AND h.cycle_time IS NOT NULL
-              {scenario_filter.sql}
-              {identity_filter.sql}
-            GROUP BY h.scenario_id
-            ORDER BY h.scenario_id
+            WITH seg AS (
+                SELECT
+                    (SELECT basin_version_key FROM core.basin_version
+                     WHERE basin_version_id = %(basin_version_id)s) AS basin_version_key,
+                    (SELECT river_segment_key FROM core.river_segment
+                     WHERE river_segment_id = %(river_segment_id)s
+                       AND river_network_version_id = %(river_network_version_id)s) AS river_segment_key,
+                    (SELECT river_network_version_key FROM core.river_network_version
+                     WHERE river_network_version_id = %(river_network_version_id)s) AS river_network_version_key
+            ),
+            cand AS MATERIALIZED (
+                SELECT h.run_key, h.scenario_id, h.cycle_time
+                FROM hydro.hydro_run h
+                WHERE h.run_type = 'forecast'
+                  AND h.cycle_time IS NOT NULL
+                  AND h.basin_version_id = %(basin_version_id)s
+                  {scenario_filter.sql}
+                  {identity_filter.sql}
+            ),
+            scen AS (
+                SELECT DISTINCT scenario_id FROM cand
+            )
+            SELECT scen.scenario_id, pick.cycle_time
+            FROM scen
+            CROSS JOIN seg
+            CROSS JOIN LATERAL (
+                SELECT o.cycle_time
+                FROM (
+                    SELECT c.run_key, c.cycle_time
+                    FROM cand c
+                    WHERE c.scenario_id = scen.scenario_id
+                    ORDER BY c.cycle_time DESC
+                    OFFSET 0
+                ) o
+                WHERE EXISTS ({fact_probe_sql}                )
+                ORDER BY o.cycle_time DESC
+                LIMIT 1
+            ) pick
+            ORDER BY scen.scenario_id
             """,
             {
                 **_segment_identity_params(basin_version_id, segment_id, river_network_version_id),

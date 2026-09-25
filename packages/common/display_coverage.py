@@ -277,6 +277,7 @@ _STATION_SAMPLE_ROWS_TEMPLATES = ForcingTemplatePair(
                     AND iw.station_id = ms.station_id
                     AND iw.variable = fst.variable_e::text
                     AND LOWER(iw.source_id) = LOWER(cr.source_id)
+                  OFFSET 0
               )
 """,
 )

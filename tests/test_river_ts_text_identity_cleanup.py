@@ -186,7 +186,9 @@ RIVER_TABLE = "hydro.river_timeseries"
 #   two mixed-store INSERT/source pairs + two decoy UPDATEs.
 #   The copy/decoy SQL has its scoped key/enum owner below.
 RIVER_TABLE_CENSUS: dict[str, int] = {
-    "packages/common/forecast_store.py": 3,
+    # 4 since #2424 D1: `_per_source_latest_cycles` reads the fact table through
+    # its own registered membership probe (`forecast_store:latest_cycle_fact_probe`).
+    "packages/common/forecast_store.py": 4,
     "services/tile_publisher/publisher.py": 2,
     "services/tile_publisher/forcing_copyback_backfill.py": 1,
     "scripts/node27_autopipeline.py": 0,
@@ -811,6 +813,21 @@ def test_forecast_store_deliberately_spanning_branches_push_nothing_that_pins_a_
         assert "AND h.scenario_id = 'analysis_true_field'" in _fact_branch(rendered[label]), label
 
 
+#: The seven segment blocks that inline ``_segment_rows_source_sql()``. #2424 D1
+#: moved ``per_source_latest_cycles`` off that shared source onto its own
+#: correlated membership probe, whose identity spelling is pinned below and in
+#: ``tests/test_latest_cycle_discovery_shape.py``; it stays a segment block, so
+#: it is excluded here BY NAME rather than by dropping the count.
+LATEST_CYCLE_DISCOVERY_BLOCK = "per_source_latest_cycles"
+
+
+def _source_row_block_statements() -> dict[str, str]:
+    rendered = _segment_block_statements()
+    assert len(rendered) == 8
+    assert LATEST_CYCLE_DISCOVERY_BLOCK in rendered
+    return {label: sql for label, sql in rendered.items() if label != LATEST_CYCLE_DISCOVERY_BLOCK}
+
+
 def test_forecast_store_segment_blocks_carry_no_text_pushdown_aid() -> None:
     """The inverse of the D10.7 presence pin this test used to be.
 
@@ -827,7 +844,11 @@ def test_forecast_store_segment_blocks_carry_no_text_pushdown_aid() -> None:
     assert len(rendered) == 8
     for label, sql in rendered.items():
         assert "rt.river_segment_id" not in sql, label
-        assert "AND rt.river_segment_key = (" in sql, label
+        if label == LATEST_CYCLE_DISCOVERY_BLOCK:
+            # The key is resolved once in the `seg` CTE and probed per candidate.
+            assert "AND rt.river_segment_key = seg.river_segment_key" in sql, label
+        else:
+            assert "AND rt.river_segment_key = (" in sql, label
 
 
 def _assert_segment_block_identity_predicates(sql: str, label: str) -> None:
@@ -900,10 +921,14 @@ def _assert_segment_block_identity_predicates(sql: str, label: str) -> None:
 
 def test_forecast_store_segment_blocks_resolve_identity_through_the_authority_tables() -> None:
     """Non-vacuity: every block really predicates on the four keys and the enum."""
-    rendered = _segment_block_statements()
-    assert len(rendered) == 8
+    from tests.test_latest_cycle_discovery_shape import assert_latest_cycle_discovery
+
+    rendered = _source_row_block_statements()
+    assert len(rendered) == 7
     for label, sql in rendered.items():
         _assert_segment_block_identity_predicates(sql, label)
+    discovery, parameters = _segment_block_executions()[LATEST_CYCLE_DISCOVERY_BLOCK]
+    assert_latest_cycle_discovery(discovery, parameters)
 
 
 def test_the_identity_predicate_pin_reddens_if_the_c1_spelling_is_reverted() -> None:
@@ -914,11 +939,24 @@ def test_the_identity_predicate_pin_reddens_if_the_c1_spelling_is_reverted() -> 
     symmetric rewrite of a conjunct leaves it silent — its silence is not evidence
     the spelling survived. This pin is the one that bites, and this case is the
     proof that it does: reverting exactly C1's substitution, on every one of the
-    eight blocks, must make it RED. If this ever passes, the pin above has been
-    weakened to something a plain ``=`` also satisfies.
+    seven source-row blocks and on #2424's discovery probe, must make it RED. If
+    this ever passes, the pin above has been weakened to something a plain ``=``
+    also satisfies.
     """
-    rendered = _segment_block_statements()
-    assert len(rendered) == 8
+    from tests.test_latest_cycle_discovery_shape import assert_latest_cycle_discovery
+
+    discovery, parameters = _segment_block_executions()[LATEST_CYCLE_DISCOVERY_BLOCK]
+    for column in ("basin_version_key", "river_network_version_key"):
+        reverted = discovery.replace(f"rt.{column} IS NOT DISTINCT FROM seg.", f"rt.{column} = seg.")
+        assert reverted != discovery, column
+        with pytest.raises(AssertionError):
+            assert_latest_cycle_discovery(reverted, parameters)
+        unguarded = discovery.replace(f"rt.{column} IS NOT NULL", "TRUE")
+        assert unguarded != discovery, column
+        with pytest.raises(AssertionError):
+            assert_latest_cycle_discovery(unguarded, parameters)
+    rendered = _source_row_block_statements()
+    assert len(rendered) == 7
     for label, sql in rendered.items():
         reverted = sql.replace(" IS NOT DISTINCT FROM (", " = (")
         assert reverted != sql, label

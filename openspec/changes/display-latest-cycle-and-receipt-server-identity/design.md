@@ -105,15 +105,23 @@ ORDER BY scen.scenario_id
 - **`_latest_analysis_issue_time`:** reached only when `include_analysis` is set and no forecast cycle exists. Its source carries the `analysis_true_field` pushdown (#2417), and the sibling analysis fetch with the same pushdown costs 1299 on the pin. Left unchanged, with this measurement recorded. It is measured again on the post-deploy pin (tasks 5.2).
 - **`_latest_run_type_valid_time`** (hindcast, `MAX(rt.valid_time)`): it genuinely needs fact values, so it does not have the same shape. Out of scope.
 
-### D3 (#2516): candidate D, a de-duplicated requested-variable relation
+### D3 (#2516): fence the membership EXISTS with `OFFSET 0` (revised after the live 3.4 run)
 
-- In the `narrow` variants of the latest-product station leg (`forecast_store.py`) and the display-coverage station leg (`display_coverage.py`):
-  - Replace `fst.variable_e = ANY(%(variables)s::met.forcing_variable[])` with a join to `(SELECT DISTINCT v AS variable FROM unnest(%(variables)s::text[]) AS u(v)) req` on `fst.variable_e = req.variable::met.forcing_variable`.
-  - In the EXISTS, compare `iw.variable = req.variable`.
-  - `DISTINCT` keeps duplicates in the bound list from multiplying rows.
-- Legacy variants are unchanged.
-- The parameter name, the bound Python value (`MVP_STATION_VARIABLES`) and every caller stay the same. The SQL cast of the placeholder changes from `::met.forcing_variable[]` to `::text[]`, and the enum cast moves to each `req` row. As a result so callers, the render registry and the #1990 pin tests see only template text changes. The template golden or registry entries that pin the text are updated deliberately; they are not loosened.
-- **Precondition:** none. No new index, no enum superset, no IMMUTABLE question. A bound value outside the enum raises `invalid input value for enum` today; with D it raises the same error from the `::met.forcing_variable` cast of the constant side.
+- **Outcome of candidate D (the first implementation, `cc2cf177c`):** live on node-27 it did **not** restore the index column.
+  - Input: the production latest-product request `source=gfs&basin_id=basins_huaiyss`, model `dg_fed73a15ec9ff9b7c4cba8dd644d5458`, forcing `forc_gfs_2026092400_dg_fed73a15…`, with the CTE fallback forced.
+  - The join filter merely moved from `(fst.variable_e)::text = iw.variable` to `(u.v = iw.variable)`.
+  - rows per loop stayed 4 (52080 loops); the node stayed at 326648 hit; the whole statement stayed at 517544 (master 517524).
+  - The planner pulls the EXISTS up into a semi-join and never builds a path parameterised by the variable. Per the 3.4 failure branch, candidate D is dropped.
+- **Chosen shape (zero DDL, measured):** keep the text comparison `iw.variable = fst.variable_e::text` and add `OFFSET 0` as the last clause inside the membership EXISTS of the **narrow** latest-product station leg (`forecast_store.py`) and of the narrow display-coverage station leg (`display_coverage.py`).
+  - The fence stops the pull-up, so the probe runs as a correlated SubPlan whose outer values, including `fst.variable_e::text`, are parameters of the index scan.
+  - Live, on the same identity, with master SQL plus the fence:
+    - Index Cond `((model_id = cr_1.model_id) AND (station_id = ms.station_id) AND (variable = (fst_1.variable_e)::text) AND (lower(source_id) = lower(cr_1.source_id)))`;
+    - rows per loop **1**; no join filter on the variable;
+    - node 275464 hit, which is 5.3 blocks per probe against the legacy leg's 7.3 (173376 / 23856);
+    - whole statement 466284 hit against 517524;
+    - the station leg is the same 52080 rows with sha256 `0db1b694…4bd1376` on master and fenced.
+- The bound `%(variables)s::met.forcing_variable[]`, the parameter name, every caller and the legacy variants are unchanged. The only template change is the fence line. The #1990 pins and goldens that pin the text are updated deliberately.
+- **Precondition:** none (no DDL, no enum superset, unknown-variable behaviour unchanged).
 - `best_available.py:67` (`fvc.variable = fst.variable_e::text` against `met.forcing_version_component`) has not been measured. It is reported in the PR, not changed.
 
 ### D4 (#2418): the receipt `server` block

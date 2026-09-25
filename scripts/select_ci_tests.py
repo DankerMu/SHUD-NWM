@@ -1681,6 +1681,9 @@ NODE27_PGDATA_WORKLOAD_TESTS: tuple[str, ...] = (
     "tests/test_node27_pgdata_workload.py",
     "tests/test_node27_pgdata_workload_plan.py",
     "tests/test_node27_pgdata_workload_io.py",
+    # #2418 D4: the receipt `server` block, its SERVER_IDENTITY_MISSING refusal
+    # and the archived-1.0 byte pins, driven through the same CLI.
+    "tests/test_node27_pgdata_workload_server_identity.py",
     "tests/test_forecast_api.py",
     "tests/test_forecast_store_routing.py",
     "tests/test_select_ci_tests.py",
@@ -1715,6 +1718,11 @@ CHANGED_TEST_FILE_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         "tests/test_node27_pgdata_workload_io.py",
+        NODE27_PGDATA_WORKLOAD_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "tests/test_node27_pgdata_workload_server_identity.py",
         NODE27_PGDATA_WORKLOAD_TESTS,
         stop_on_match=True,
     ),
@@ -2180,6 +2188,9 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             *SQL_SHAPE_ORACLE_TESTS,
             "tests/test_forecast_store_routing.py",
             "tests/test_hydro_display_mvt_scaling_instants.py",
+            # #2424 D1: renders the registered `latest_cycle_fact_probe` entry and
+            # the `per_source_latest_cycles` execution against its shape pins.
+            "tests/test_latest_cycle_discovery_shape.py",
         ),
     ),
     PathTestRule(
@@ -2312,6 +2323,14 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         # sub-runbook by path are governed by the same surface decision.
         PRODUCTION_OPS_RUNBOOK_HELPERS_PATH,
         PRODUCTION_OPS_RUNBOOK_TESTS,
+    ),
+    PathTestRule(
+        # #2516 D3: master's frozen station legs (legacy + narrow) that the
+        # membership-fence shape suite compares both templates with. Its only
+        # non-gated importer is that suite; the filename is not `test_*`, so
+        # without this row an oracle-only diff collapses to the meta-guard.
+        "tests/station_membership_fence_oracle.py",
+        ("tests/test_station_membership_fence.py",),
     ),
 )
 
@@ -3971,6 +3990,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             *FORCING_SQL_SHAPE_ORACLE_TESTS,
             "tests/test_forecast_api.py",
             "tests/test_forecast_store_routing.py",
+            # #2424 D1: `_per_source_latest_cycles` lives here; its hydro_run-driven
+            # shape (fence, outer ORDER BY, no status, EXISTS-only fact read) is
+            # pinned only by this suite.
+            "tests/test_latest_cycle_discovery_shape.py",
+            # #2516 D3: the narrow latest-product station leg's membership-EXISTS
+            # `OFFSET 0` fence; its display_coverage.py twin routes here too.
+            "tests/test_station_membership_fence.py",
             # #2222: `HYDRO_RUN_PUBLIC_COLUMNS` / `_hydro_run_response` live here;
             # only this suite pins the `/runs` SQL allowlist (no `h.*`).
             HYDRO_RUN_PUBLIC_PROJECTION_TEST,
@@ -4041,6 +4067,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # met.forcing_station_timeseries mention here must redden the
             # census on THIS PR rather than on the post-merge master run.
             *FORCING_SQL_SHAPE_ORACLE_TESTS,
+            # #2516 D3: the narrow station leg's membership-EXISTS `OFFSET 0`
+            # fence (and its forecast_store.py twin) is pinned only by this suite.
+            "tests/test_station_membership_fence.py",
             "tests/test_display_coverage_refresh.py",
             "tests/test_display_coverage_parallel.py",
             "tests/test_forecast_api.py",

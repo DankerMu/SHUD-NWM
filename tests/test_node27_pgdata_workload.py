@@ -57,6 +57,14 @@ RUN = "run-gfs-hot"
 MODEL = "model-1"
 API_PATH = f"/api/v1/basin-versions/{BV}/river-segments/{SEGMENT}/forecast-series"
 SHA = "a" * 40
+#: What `prove_server_identity` reads from a cluster (#2418), for the stubs below.
+SERVER_IDENTITY_ROW = {
+    "database": "nhms",
+    "system_identifier": "7651116524569100322",
+    "server_version": "15.2",
+    "server_addr": "127.0.0.1",
+    "server_port": 5432,
+}
 
 
 class _Cursor:
@@ -831,6 +839,10 @@ def test_cli_executes_complete_measurement_not_capture_only(tmp_path: Path) -> N
                 return {"current_setting": "on"}
             if "pg_roles" in last:
                 return {"current_user": "nhms_display_ro", "rolsuper": False}
+            if "has_function_privilege" in last:
+                return {"control_executable": True}
+            if "pg_control_system" in last:
+                return dict(SERVER_IDENTITY_ROW)
             return super().fetchone()
 
     connection = _Connection(IdentityCursor())
@@ -1005,6 +1017,11 @@ class _MeasureCursor(_Cursor):
             return {"current_setting": self.read_only}
         if "pg_roles" in last:
             return {"current_user": self.current_user, "rolsuper": False}
+        # #2418: the cluster identity probe that follows the readonly proof.
+        if "has_function_privilege" in last:
+            return {"control_executable": True}
+        if "pg_control_system" in last:
+            return dict(SERVER_IDENTITY_ROW)
         return super().fetchone()
 
 

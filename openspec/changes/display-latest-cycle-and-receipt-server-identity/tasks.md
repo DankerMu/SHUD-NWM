@@ -29,7 +29,7 @@
 
 ## 2. Implementation
 
-- [ ] 2.1 #2424 D1: rewrite `_per_source_latest_cycles`.
+- [x] 2.1 #2424 D1: rewrite `_per_source_latest_cycles`.
   - The EXISTS body is rendered through `render_river_ts_sql(..., 'narrow')` and registered in `tests/river_ts_template_registry.py` (design, sibling surfaces).
   - The shape test pins the #2451 non-sargable `IS NOT NULL AND IS NOT DISTINCT FROM` basin/network key spelling inside the EXISTS body.
   - The pins listed there go red and are updated deliberately.
@@ -47,18 +47,20 @@
     - duplicate max cycle across two runs of one scenario;
     - an unrelated segment's rows.
   - Every case must give equal dicts.
-- [ ] 2.2 #2516 D3: both narrow legs use the de-duplicated `req(variable)` relation. Pin and golden tests are updated deliberately. Tests:
-  - duplicate bound variables do not duplicate rows;
-  - an unknown variable raises the same error class as before;
-  - a real-DB result-equality test (old narrow SQL vs new) over seeded forcing rows with 4 variables per station, for **both** templates: the latest-product narrow leg (`forecast_store.py`) and the display-coverage narrow leg (`display_coverage.py`).
-  - The unknown-variable error test binds a non-empty fact side, because the per-row cast can otherwise be skipped. Production always binds `MVP_STATION_VARIABLES`.
-- [ ] 2.3 #2418 D4:
+  - **Done:** `tests/test_latest_cycle_discovery_shape.py` (shape), `tests/test_latest_cycle_discovery_integration.py` (15 seeded cases, old == new == hand-worked cycles; frozen oracle `tests/latest_cycle_discovery_oracle.py`), green on a disposable PG 15.2 / TimescaleDB 2.10.2 container; node-27 disposable run pending (3.6).
+- [x] 2.2 #2516 D3 (revised): both narrow legs fence the membership EXISTS with `OFFSET 0`; the candidate-D `req` relation from `cc2cf177c` is reverted. Pin and golden tests are updated deliberately. Tests:
+  - A shape test pins the fence inside the membership EXISTS of both narrow templates, and pins that the legacy templates are unchanged.
+  - A real-DB result-equality test (old narrow SQL vs new) over seeded forcing rows with 4 variables per station, for **both** templates: the latest-product narrow leg (`forecast_store.py`) and the display-coverage narrow leg (`display_coverage.py`).
+  - A real-DB plan test on the seeded DB that the `interp_weight` probe's Index Cond includes `variable`, if the seeded planner reproduces the SubPlan. If it does not, 3.4 on node-27 is the evidence, and the test states which one it is.
+- [x] 2.3 #2418 D4:
   - Add `prove_server_identity`, the receipt `server` block and `SCHEMA_VERSION = "1.1"`.
   - `live` refuses with `SERVER_IDENTITY_MISSING`.
   - Update the runbook §4.10.
   - Call site: inside `measure_workload`, after `prove_readonly_session` and before any sample. The probe is non-raising (privilege check first).
   - Tests: the block is present with the exact key set; `system_identifier` is a decimal string when present, and `null` only for `isolated`; redaction leaves no credential (a DSN with a password in the session must not appear); refusal when the function raises or returns NULL on `live`; `isolated` records `null`, and after an isolated identity miss the samples still run with the `SET LOCAL` timeouts in force; a test that the archived 1.0 receipts are unchanged.
-- [ ] 2.4 Selector / CI routing for new tests; tracked-tree guards green. File a follow-up for the non-partial `hydro_run` index (D1 growth caveat) against #2048 / batch M. `timeseries-narrow-store-expand-contract/design.md` gains a D13 pointer to D1 (the #2424 acceptance wants the shape decision in that change).
+- [x] 2.4 Selector / CI routing for new tests; tracked-tree guards green. File a follow-up for the non-partial `hydro_run` index (D1 growth caveat) against #2048 / batch M. `timeseries-narrow-store-expand-contract/design.md` gains a D13 pointer to D1 (the #2424 acceptance wants the shape decision in that change).
+  - **Done here:** `scripts/select_ci_tests.py` routes `tests/test_latest_cycle_discovery_shape.py` (forecast_store.py + river_ts_template_registry.py rules), `tests/test_station_membership_fence.py` (forecast_store.py + display_coverage.py rules, plus the support-module rule for `tests/station_membership_fence_oracle.py`) and `tests/test_node27_pgdata_workload_server_identity.py` (`NODE27_PGDATA_WORKLOAD_TESTS` + its own changed-test rule); anchors in `tests/test_select_ci_tests.py`; full selector suite green. D13 pointer landed with the fixture (`86bcacc5e`).
+  - Follow-up for the non-partial `hydro_run` index: #2626.
 
 ## 3. Verification
 
@@ -82,7 +84,7 @@
     - rows per loop is 1;
     - the node's buffers are of the same order as the legacy leg's 173376;
     - old and new narrow SQL give the same row count and row hash;
-    - whole-statement `shared hit` and execution time, master vs branch, are recorded. A whole-statement regression (the `req` join changing the `fst` access path) fails 3.4 even if the `interp_weight` node improves.
+    - whole-statement `shared hit` and execution time, master vs branch, are recorded. A whole-statement regression fails 3.4 even if the `interp_weight` node improves.
 - [ ] 3.5 node-27 `scripts/node27_pgdata_workload.py` run (isolated or live kind as the runbook permits for a read-only probe), showing the `server` block with node-27's `system_identifier`.
 - [ ] 3.6 node-27 full pytest on the frozen SHA (disposable DB). The failure set must equal master's (#2615 only).
 

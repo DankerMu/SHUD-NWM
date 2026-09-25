@@ -22,10 +22,7 @@ Batch L2 of the 10-batch serial run (master `64f47adee`, after L1 #2623 / #2625)
     - (a) **No `status` predicate is introduced**; the current semantics are kept.
     - (b) Candidates are narrowed by `h.basin_version_id = <requested basin>`, backed by a node-27 equivalence regression.
   - The per-scenario `dict[scenario_id -> cycle_time]` contract is unchanged.
-- **#2516:** candidate D (zero DDL), for both the latest-product narrow leg and the display-coverage narrow copy.
-  - The bound variables become a de-duplicated text relation `req(variable)`.
-  - The fact side compares `fst.variable_e = req.variable::met.forcing_variable`, with the cast on the constant side.
-  - The membership probe compares `iw.variable = req.variable`, text against text, so the index keeps its third column.
+- **#2516:** zero DDL. The membership EXISTS of the narrow latest-product and display-coverage station legs gets an `OFFSET 0` fence, so it runs as a correlated SubPlan and the probe's index condition includes `variable`. Candidate D was implemented first and dropped after the live 3.4 run; see design D3.
 - **#2418:** the workload receipt gains a non-secret `server` block, captured on the same connection as the samples: `current_database()`, `pg_control_system().system_identifier`, `server_version`, and `inet_server_addr()` / `inet_server_port()`.
   - Addr and port are nullable (unix socket / container-internal).
   - `SCHEMA_VERSION` goes from `1.0` to `1.1`.
