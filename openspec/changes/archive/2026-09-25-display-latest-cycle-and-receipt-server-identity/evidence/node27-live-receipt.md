@@ -28,7 +28,10 @@ post latest-product: 0.053189 0.051789 0.051317 0.049188 0.047017 0.049737 0.047
 ```
 
 - **D11 (500 ms P95), indicative with 8 samples:** the issue URL max is 0.283 s, under 500 ms.
-- **Attribution:** statement 2 (`latest_cycle_discovery`) is ~4 ms of that request. The latest-product request does not go through `_per_source_latest_cycles`, and its p50 is unchanged. The #2516 fence acts on the narrow station leg, which tasks 3.4 measured with the CTE fallback forced (statement 517524 → 466291 hit); the default request above does not take that fallback.
+- **Attribution:**
+  - Statement 2 (`latest_cycle_discovery`) is ~4 ms of the issue-URL request.
+  - The latest-product request does not go through `_per_source_latest_cycles`, and its p50 is unchanged.
+  - The #2516 fence acts on the narrow station leg. Tasks 3.4 measured that leg with the CTE fallback forced (statement 517524 → 466291 hit); the default request above does not take that fallback.
 - **Statement 3 (#2417):** on the issue pin, `forecast_segment_rows` is 2882 hit / ~4.3 ms for `[IFS]`, but 247264 hit / ~151 ms for `[GFS, IFS]`. That is the remaining cost of a two-source request, tracked in #2417, and is not changed by this PR.
 
 ## Statement 2 EXPLAIN after deploy (tasks 5.2)
@@ -44,4 +47,6 @@ post latest-product: 0.053189 0.051789 0.051317 0.049188 0.047017 0.049737 0.047
 
 ## Production log (tasks 5.2)
 
-`/tmp/display-api.log` from the first `Started server process` of this restart (line 1835417) onward: **0** lines with an HTTP 500 or a `Traceback`. The log also holds 500s from before the previous restart (the #2623 deploy), for `/api/v1/met/stations` and a `forecast-series` call without `variables`. None falls between that restart and this one, so none of them comes from this change.
+`/tmp/display-api.log` from the first `Started server process` of this restart (line 1835417) onward: **0** lines with an HTTP 500 or a `Traceback`.
+
+The log also holds 500s from before the previous restart (the #2623 deploy), for `/api/v1/met/stations` and for a `forecast-series` call without `variables`. None falls between that restart and this one, so none of them comes from this change.
