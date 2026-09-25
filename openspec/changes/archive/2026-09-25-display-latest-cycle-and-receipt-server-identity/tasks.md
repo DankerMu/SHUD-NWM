@@ -108,12 +108,14 @@
 
 ## 4. Review / CI
 
-- [ ] 4.1 Review rounds recorded with fix_gate. CI green.
+- [x] 4.1 Review rounds recorded with fix_gate. CI green.
+  - **Result:** round 1 not clean (`3597f960d`), fix pass 1 `413760f92`, round 2 clean. The first ready run failed SQL Migration Dry Run on an unrelated SQLAlchemy 2.1.0 release (default driver moved to psycopg v3); #2631 capped `sqlalchemy<2.1` (follow-up #2632), and the re-run on the fresh merge ref was green (279 passed). Merged as `2024a5e4e`.
 
 ## 5. After merge
 
-- [ ] 5.1 node-27 `git pull --ff-only`, display restart, C1 checks.
-- [ ] 5.2 Live receipt:
+- [x] 5.1 node-27 `git pull --ff-only`, display restart, C1 checks.
+  - **Result:** clean checkout, `0c75aba8` → `2024a5e4`; restart OK (main_pid 1736309, 2 workers, smoke passed); C1 `/health` 200, `runtime/config` `display_readonly`, `/api/v1/slurm/health` 404.
+- [x] 5.2 Live receipt: `evidence/node27-live-receipt.md` in the archived change. Issue URL p50 1.381 s → 0.237 s (max 0.283 s); latest-product p50 0.049 s → 0.049 s; statement 2 1381 / 1454 hit warm; 0 500s since the restart.
   - the issue URL (`issue_time=latest`, IFS pin) curl warm ×8, p50 compared with the pre value;
   - latest-product warm ×8 p50;
   - the post-deploy `EXPLAIN` of statement 2;
