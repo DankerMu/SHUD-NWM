@@ -120,13 +120,14 @@ ORDER BY scen.scenario_id
     - node 275464 hit, which is 5.3 blocks per probe against the legacy leg's 7.3 (173376 / 23856);
     - whole statement 466284 hit against 517524;
     - the station leg is the same 52080 rows with sha256 `0db1b694…4bd1376` on master and fenced.
-- The bound `%(variables)s::met.forcing_variable[]`, the parameter name, every caller and the legacy variants are unchanged. The only template change is the fence line. The #1990 pins and goldens that pin the text are updated deliberately.
+- The bound `%(variables)s::met.forcing_variable[]`, the parameter name, every caller and the legacy variants are unchanged. The only template change is the fence line. No #1990 forcing pin or golden references this text. The fence is pinned by `tests/test_station_membership_fence.py`, which compares against master's text frozen in `tests/station_membership_fence_oracle.py`.
 - **Precondition:** none (no DDL, no enum superset, unknown-variable behaviour unchanged).
 - `best_available.py:67` (`fvc.variable = fst.variable_e::text` against `met.forcing_version_component`) has not been measured. It is reported in the PR, not changed.
 
 ### D4 (#2418): the receipt `server` block
 
 - **Capture:** `prove_server_identity(connection)` (in `node27_pgdata_workload_io.py`) is called inside `measure_workload`, after `prove_readonly_session` and before any warmup or accepted sample. It runs on the same connection and transaction, which carries `autocommit=False` and the `SET LOCAL` timeouts.
+  - It runs inside a `SAVEPOINT`. On any inner error it does `ROLLBACK TO SAVEPOINT` then `RELEASE`, which reverts only settings made after the savepoint, so the earlier `SET LOCAL` timeouts survive.
   - It must never raise inside that transaction. It first checks `has_function_privilege('pg_catalog.pg_control_system()', 'EXECUTE')`; only if that is true does it call the function, so a missing privilege yields `null` without aborting the transaction.
   - Other probe failures (for example the function returning NULL) are handled as values, not exceptions.
   - The query:
@@ -137,7 +138,9 @@ ORDER BY scen.scenario_id
   - The block is added under `redact_payload`; no DSN, user or password field exists in it.
 - **Refusal:** when `system_identifier` is missing, or the function is not executable, `refuse(code="SERVER_IDENTITY_MISSING", stage="performance")` applies for `live`, and no PASS receipt is written. `isolated` records it when available and otherwise records `null`; the samples then proceed with the timeouts still in force.
 - **Limitation:** `system_identifier` is set by `initdb` and copied by physical clones (pg_basebackup, PGDATA copy or snapshot, streaming standby). It distinguishes independently initialised clusters, not a physical copy from its origin. The archived node-22 :55433 cluster may share node-27's lineage. The runbook states this; the block is evidence of cluster lineage, not of host.
-- **Version:** `SCHEMA_VERSION = "1.1"`. The archived `1.0` receipts (`openspec/changes/archive/2026-09-16-compressed-chunk-cold-tablespace-tiering/evidence/receipts/retirement-pgdata-workload-smoke.json`, `openspec/changes/fix-narrow-segment-read-index-applicability/receipts/2026-09-18-live-ab/d11-live-receipt.json`) stay as they are: historical, never re-validated by code.
+- **Version:** `SCHEMA_VERSION = "1.1"`. The archived artifacts stay as they are: historical, never re-validated by code, and byte-pinned by sha256 in `tests/test_node27_pgdata_workload_server_identity.py`.
+  - `openspec/changes/fix-narrow-segment-read-index-applicability/receipts/2026-09-18-live-ab/d11-live-receipt.json` is a 1.0 workload receipt.
+  - `openspec/changes/archive/2026-09-16-compressed-chunk-cold-tablespace-tiering/evidence/receipts/retirement-pgdata-workload-smoke.json` is a smoke wrapper that embeds workload documents; it has no top-level `artifact` / `schema_version`.
 - The runbook §4.10 receipt description adds the block and one sentence: a live receipt's `server.system_identifier` must equal node-27's.
 
 ## Sibling surfaces
@@ -149,13 +152,15 @@ ORDER BY scen.scenario_id
   - These pins go red and must be updated deliberately, not loosened:
     - `tests/test_forecast_store_routing.py:143-150` (`OUTER_CLAUSES["per_source_latest_cycles"]`) and the `PROJECTION` count check at `:216`;
     - `tests/test_river_ts_stats_harness_offline.py:305-314` (the `MAX(h.cycle_time)` companion assertion);
-    - `tests/test_river_timeseries_stats_index_choice_integration.py:~840` (the must-preserve #5 companion baseline);
+    - `tests/test_river_timeseries_stats_index_choice_integration.py:~840` (the must-preserve #5 companion baseline). This is an unasserted companion record, so it did not go red. Its comments at `:32` / `:840` ("98.8 % of the latest shape's cost") are now stale. The file is 1056 lines and not excluded from the large-file guard, so the comment refresh is deferred and recorded here;
     - `tests/test_river_ts_text_identity_cleanup.py:495,1097`;
     - the segment-block census or golden (`tests/fixtures/river_ts_templates_51f9d273.json`) if it covers this statement.
 - **#2516:** latest-product and display-coverage narrow legs; `_STATION_SERIES_ROWS_TEMPLATES` (already on the relation shape, and the precedent).
 - **#2418:** `scripts/node27_pgdata_workload.py` CLI output; `tests/test_node27_pgdata_workload*.py`; runbook `docs/runbooks/tier-node27-timeseries-storage.md` §4.10.
 
 ## Risks / Trade-offs
+
+- **D1 EXISTS is not fenced.** Laziness (probe candidates in order and stop at the first hit) relies on the planner keeping the EXISTS as a per-candidate probe. At thousands of estimated candidates it could choose a hashed semi-join, which rescans the segment's rows. Correctness is unaffected, because of the outer `ORDER BY`. An `OFFSET 0` inside the EXISTS would force the SubPlan; it is not added (review round 1 note; the live plan is lazy).
 
 - **The `server` block covers the SQL-sample cluster only.** API samples go through the display API's own DSN, so the receipt does not name the API's backing cluster. This is recorded, not fixed.
 

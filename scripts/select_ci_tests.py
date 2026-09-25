@@ -2332,6 +2332,18 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         "tests/station_membership_fence_oracle.py",
         ("tests/test_station_membership_fence.py",),
     ),
+    PathTestRule(
+        # #2424 D1: master's frozen `_per_source_latest_cycles` statement, the
+        # Evidence-Floor-1 oracle. The shape suite pins its bytes to master's
+        # sha256 and is its only non-gated importer; the equality suite
+        # (tests/test_latest_cycle_discovery_integration.py) is a module-scope
+        # importer too but deliberately ABSENT: its file-level
+        # `pytestmark = pytest.mark.integration` would skip it in the PR lane
+        # (the #1447 / #2208 call). Without this row an oracle-only diff collapses
+        # to the meta-guard and the pin never runs.
+        "tests/latest_cycle_discovery_oracle.py",
+        ("tests/test_latest_cycle_discovery_shape.py",),
+    ),
 )
 
 

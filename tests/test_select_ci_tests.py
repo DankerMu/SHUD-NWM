@@ -12116,6 +12116,9 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
     # #2516 D3: master's frozen station legs; the shape suite is its only
     # non-gated importer (the integration suite is gated, so not an anchor).
     ("tests/station_membership_fence_oracle.py", "tests/test_station_membership_fence.py"),
+    # #2424 D1: master's frozen latest-cycle statement; the shape suite (which pins
+    # its sha256) is its only non-gated importer (the integration suite is gated).
+    ("tests/latest_cycle_discovery_oracle.py", "tests/test_latest_cycle_discovery_shape.py"),
 )
 
 # At least this many support modules must derive a non-empty consumer set (10 of
@@ -20182,6 +20185,9 @@ def test_pgdata_workload_owners_select_their_suite() -> None:
         # fact probe are pinned only by the shape suite.
         ("packages/common/forecast_store.py", ("tests/test_latest_cycle_discovery_shape.py",)),
         ("tests/river_ts_template_registry.py", ("tests/test_latest_cycle_discovery_shape.py",)),
+        # The frozen pre-#2424 oracle routes to the suite that pins it to master.
+        ("tests/latest_cycle_discovery_oracle.py", ("tests/test_latest_cycle_discovery_shape.py",)),
+        ("tests/station_membership_fence_oracle.py", ("tests/test_station_membership_fence.py",)),
         # #2516 D3: both narrow station legs route to the membership-fence pin.
         ("packages/common/forecast_store.py", ("tests/test_station_membership_fence.py",)),
         ("packages/common/display_coverage.py", ("tests/test_station_membership_fence.py",)),

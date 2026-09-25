@@ -13,6 +13,7 @@ statement SELECTS the same cycles as before is a database question; that is
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -21,6 +22,7 @@ import pytest
 
 from packages.common import forecast_store
 from packages.common.river_ts_render import render_river_ts_sql
+from tests.latest_cycle_discovery_oracle import PRE_2424_PER_SOURCE_LATEST_CYCLES_SQL, pre_2424_statement
 from tests.river_ts_template_registry import FORECAST_STORE_EXECUTIONS, entry_by_key
 from tests.test_river_ts_text_identity_cleanup import _CaptureCursor
 
@@ -39,6 +41,16 @@ FACT_PROBE_CONJUNCTS = (
     "rt.river_network_version_key IS NOT DISTINCT FROM seg.river_network_version_key",
     "rt.variable_e = 'q_down'::hydro.river_variable",
 )
+
+#: sha256 of the statement master ``64f47adee`` executed. Recomputed from master's
+#: bytes, not from this tree: load ``git show 64f47adee:packages/common/forecast_store.py``
+#: as a module, call its ``PsycopgForecastStore._per_source_latest_cycles`` on a
+#: capture cursor with ``_ScenarioFilter("{scenario_filter}", {})`` and
+#: ``_ScenarioFilter("{identity_filter}", {})`` as the two filters, and hash the one
+#: captured statement (UTF-8). A digest, not a re-derivation from the live
+#: ``_segment_rows_source_sql()``: the oracle must stay master's text even when the
+#: shared template legitimately moves on.
+PRE_2424_MASTER_STATEMENT_SHA256 = "2448bae0243658623d2217e2c8b9f85aaab16e21237aede87bc247e3b002b4c1"
 
 
 def _flat(sql: str) -> str:
@@ -197,3 +209,20 @@ def test_the_fact_probe_is_a_registered_narrow_template():
     assert _flat(template) == fact_probe(sql)
     with pytest.raises(ValueError, match="Invalid river timeseries store"):
         forecast_store._latest_cycle_fact_probe_template("legacy")
+
+
+def test_the_frozen_oracle_is_byte_for_byte_the_statement_master_ran():
+    """Evidence Floor 1's oracle must stay master's text; an edit to it is red here."""
+    digest = hashlib.sha256(PRE_2424_PER_SOURCE_LATEST_CYCLES_SQL.encode()).hexdigest()
+    assert digest == PRE_2424_MASTER_STATEMENT_SHA256
+
+
+def test_the_frozen_oracle_cannot_collapse_into_the_new_statement():
+    """The old shape (a fact scan feeding MAX/GROUP BY) is what the oracle keeps."""
+    old = pre_2424_statement(scenario_filter=NO_FILTER, identity_filter=NO_FILTER)
+    new, _params, _ = _capture(NO_FILTER, NO_FILTER)
+    assert old != new
+    assert "MAX(h.cycle_time)" in old
+    assert "GROUP BY h.scenario_id" in old
+    assert "hydro.river_timeseries" in old
+    assert "cand AS MATERIALIZED" not in old

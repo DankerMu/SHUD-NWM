@@ -17,11 +17,16 @@ question in ``test_station_membership_fence_integration.py``.
 
 from __future__ import annotations
 
+import hashlib
+import textwrap
+
 import pytest
 
 from packages.common import display_coverage, forecast_store
 from tests.station_membership_fence_oracle import (
     MEMBERSHIP_FENCE,
+    PRE_2516_LEGACY_STATION_LEG,
+    PRE_2516_NARROW_STATION_LEG,
     flat,
     membership_exists_body,
     pre_2516_leg,
@@ -32,6 +37,43 @@ LEGS = {
     "forecast_store.latest_product_station_source": forecast_store._LATEST_PRODUCT_STATION_SOURCE_TEMPLATES,
     "display_coverage.station_sample_rows": display_coverage._STATION_SAMPLE_ROWS_TEMPLATES,
 }
+
+#: sha256 (UTF-8) of each station template AS MASTER ``64f47adee`` BUILT IT, at its
+#: own indentation and after ``FORCING_TABLE_TOKEN`` interpolation. Recomputed from
+#: master's bytes, not from this tree: load ``git show 64f47adee:packages/common/
+#: forecast_store.py`` / ``.../display_coverage.py`` as modules and hash
+#: ``_LATEST_PRODUCT_STATION_SOURCE_TEMPLATES.<store>`` (16-space indent) and
+#: ``_STATION_SAMPLE_ROWS_TEMPLATES.<store>`` (12-space indent). The oracle keeps
+#: ONE dedented copy per variant; re-indented, it must hash to all four.
+MASTER_STATION_LEG_SHA256 = {
+    ("forecast_store.latest_product_station_source", "legacy", 16): (
+        "464273ab7d053dbbfe25ca1d662f0d710638dd757a5a573449afc78eca6a710e"
+    ),
+    ("forecast_store.latest_product_station_source", "narrow", 16): (
+        "371a8156b1eb70d42b186f4d5756866e1fc0b51b4be170a86e423eb45242dc82"
+    ),
+    ("display_coverage.station_sample_rows", "legacy", 12): (
+        "c31e5d05389ed077a27e5f5cfb36702dd5c0c55bd1638086cabd1d7d0fd928a7"
+    ),
+    ("display_coverage.station_sample_rows", "narrow", 12): (
+        "a2ccf3041cdd5525548704d109e5afa65ab89e35d00bbdab8856ffc1d4336972"
+    ),
+}
+ORACLE_LEGS = {"legacy": PRE_2516_LEGACY_STATION_LEG, "narrow": PRE_2516_NARROW_STATION_LEG}
+
+
+@pytest.mark.parametrize(("key", "store", "indent"), tuple(MASTER_STATION_LEG_SHA256))
+def test_the_frozen_oracle_is_byte_for_byte_each_master_template(key, store, indent):
+    """An edit to the frozen master text (whitespace included) is red here."""
+    reindented = textwrap.indent(ORACLE_LEGS[store], " " * indent)
+    digest = hashlib.sha256(reindented.encode()).hexdigest()
+    assert digest == MASTER_STATION_LEG_SHA256[(key, store, indent)]
+
+
+def test_the_frozen_narrow_oracle_cannot_collapse_into_the_fenced_leg():
+    assert MEMBERSHIP_FENCE not in PRE_2516_NARROW_STATION_LEG
+    for pair in LEGS.values():
+        assert flat(PRE_2516_NARROW_STATION_LEG) != flat(pair.narrow)
 
 
 @pytest.mark.parametrize("key", tuple(LEGS))
