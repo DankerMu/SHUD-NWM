@@ -235,9 +235,11 @@ receipt；其冷层 rollout 授权已撤回。以下通用 C1–C4 仍是既有�
     CREATE 全被拒，记录 `current_user` + DB role 类型。
   - 缺真实 DB 时入口必须报 `BLOCKED`，不得 mock 冒充 PASS。
   - 无人值守即可（#2484）：discovery 自己绑定 strict tuple——最新 display-ready
-    run（`succeeded`/`parsed`/`published`，可用 `--source` / `--strict-run-id`
-    收窄）、该 run 的 `basin_id`（`latest_product` 按它请求）、该 run 自己最新的带
-    `log_uri` 的 job；手供 tuple（`--cycle-time`/`--model-id`/`--job-id`）只是可选覆盖。
+    run（`succeeded`/`parsed`/`published`，可用 `--source` 收窄；给
+    `--strict-run-id` 则恰取该 run，不看状态）、该 run 的 `basin_id`（`latest_product`
+    按它请求）、该 run 自己最新的带 `log_uri` 的 job；手供 `--cycle-time`/`--model-id`/`--job-id`
+    只是逐字段覆盖，须与 `--strict-run-id` 指向同一 run，否则 tuple 自相矛盾（路由 404/409，判
+    `BLOCKED`/`FAIL`，不会误判 PASS）。
     identity-bound 路由按字段比对 echo：`source` 大小写不敏感，`cycle_time`
     按 UTC cycle hour（`Z` 与 `+00:00` 拼写等价，不再影响结果），其余精确；echo
     矛盾是 `FAIL`，echo 缺字段是 `BLOCKED`。

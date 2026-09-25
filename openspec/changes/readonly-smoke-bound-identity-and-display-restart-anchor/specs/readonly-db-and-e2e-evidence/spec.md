@@ -52,7 +52,7 @@ The display service SHALL be validated with readonly database credentials for di
 #### Scenario: Discovered identity is self-consistent
 
 - **WHEN** readonly DB validation discovers the display identity from the database instead of taking every field from the operator
-- **THEN** the discovered run is the newest display-ready run, restricted to the configured source or business run id when one is configured
+- **THEN** the discovered run is the newest display-ready run, restricted to the configured source when one is configured, or, when a business run id is configured, exactly that run whatever its status
 - **AND** the discovered `job_id`, when present, belongs to that run and has a recorded log URI, and no job of another run is ever paired with it
 - **AND** the latest-product smoke requests the discovered run's basin
 - **AND** fields the operator configures still override the discovered ones

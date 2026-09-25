@@ -96,6 +96,19 @@ def test_configured_fields_still_override_the_discovered_identity(monkeypatch: p
     }
 
 
+def test_a_lower_case_source_override_keys_display_identity_upper_case(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("NHMS_READONLY_DB_VALIDATION_SOURCE", raising=False)
+    monkeypatch.delenv("NHMS_READONLY_DB_VALIDATION_RUN_ID", raising=False)
+    adapter = _FakeReadonlyAdapter()
+
+    summary = _validate(_config(source="gfs"), adapter)
+
+    assert adapter.discovery_calls == [{"source": "gfs", "run_id": None}]
+    assert summary["display_identity"]["source"] == "GFS"
+    latest = next(route for route in summary["route_smoke"] if route["name"] == "latest_product")
+    assert "source=GFS" in latest["path"]
+
+
 # -- D4: the adapter's SQL ------------------------------------------------------------
 
 

@@ -15302,8 +15302,13 @@ def test_readonly_discovery_merge_and_identity_producers_select_the_readonly_con
     ):
         selected = set(select_tests([producer], repo_root=Path(".")))
         assert set(READONLY_DB_VALIDATION_TESTS) <= selected, producer
-    identity_selected = set(select_tests(["services/production_closure/identity_matching.py"], repo_root=Path(".")))
-    assert {"tests/test_identity_matching.py", "tests/test_two_node_e2e_evidence.py"} <= identity_selected
+    for producer in (
+        "services/production_closure/identity_matching.py",
+        "services/production_closure/two_node_e2e_evidence.py",
+        "services/production_closure/__init__.py",
+    ):
+        selected = set(select_tests([producer], repo_root=Path(".")))
+        assert {"tests/test_identity_matching.py", "tests/test_two_node_e2e_evidence.py"} <= selected, producer
     assert {
         "tests/test_readonly_db_route_identity.py",
         "tests/test_readonly_db_discovery_and_lane_statuses.py",

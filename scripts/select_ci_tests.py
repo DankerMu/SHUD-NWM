@@ -3768,6 +3768,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_production_met_validation.py",
             *READONLY_DB_VALIDATION_TESTS,
             "tests/test_two_node_e2e_evidence.py",
+            # #2484 D3: the shared cycle-hour helper's suite also pins the
+            # two-node facade's private-name bindings, so it imports the package
+            # and two_node_e2e_evidence and must ride the directory rule.
+            "tests/test_identity_matching.py",
         ),
     ),
     PathTestRule(

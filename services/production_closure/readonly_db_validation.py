@@ -422,6 +422,12 @@ def _merged_identity(config: ReadonlyDbValidationConfig, discovered: Mapping[str
     for key, value in overrides.items():
         if value:
             merged[key] = value
+    # Discovery returns the source upper-cased; an operator override (`--source
+    # gfs`) is normalised the same way so the merge keys display_identity by
+    # `GFS` either way. The routes accept both spellings.
+    source = _identity_text(merged, "source")
+    if source:
+        merged["source"] = source.upper()
     return _json_ready(merged)
 
 
