@@ -3974,6 +3974,39 @@
           "rounds": 2
         }
       ]
+    },
+    "1922": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 2646,
+          "outcome": "merged",
+          "rounds": 1
+        }
+      ]
+    },
+    "2478": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 2646,
+          "outcome": "merged",
+          "rounds": 1
+        }
+      ]
+    },
+    "2476": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 2646,
+          "outcome": "merged",
+          "rounds": 1
+        }
+      ]
     }
   }
 }

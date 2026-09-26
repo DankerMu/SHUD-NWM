@@ -1,8 +1,10 @@
 # production-object-store-migration Specification
 
 ## Purpose
-TBD - created by archiving change m10-production-closure. Update Purpose after archive.
+Define how production Basins packages move into object-store storage. This covers reuse of the M9 copied-data evidence, extension of M9 publication to production-like storage, safe publish/import rollback, and the path-safety resource guarantees of the production-closure validators that check that storage.
+
 ## Requirements
+
 ### Requirement: Production Basins migration reuses M9 copied-data evidence
 
 The system SHALL reuse the M9 Basins migration-report capability in a production-like environment, rejecting symlink-only roots as production evidence and accepting copied roots with count/checksum evidence.
@@ -42,3 +44,23 @@ The system SHALL provide cleanup or rollback evidence for failed object-store pu
 - **AND** cleanup/rollback can remove or quarantine partial artifacts
 - **AND** no new model becomes active without an explicit activation action
 
+### Requirement: Runtime staging prefix open releases its descriptor on every rejection
+
+Every owner of the runtime staging prefix directory open (`_open_runtime_prefix_dir`) SHALL close the directory descriptor exactly once on every exception raised after `os.open()` succeeds. This covers a post-open `fstat` failure, a containment or no-follow rejection, and a not-a-directory rejection. The owner SHALL then raise the same `ProductionObjectStoreValidationError` code and message as before. A failure to close SHALL NOT replace that error. On success, the owner SHALL return a live descriptor that is owned by the caller.
+
+#### Scenario: Containment rejection after open closes the descriptor
+
+- **WHEN** the directory opens but `stat_no_follow()` rejects it because it lies outside the containment root
+- **THEN** the owner raises `PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE`, as before
+- **AND** the descriptor that was opened is closed
+
+#### Scenario: Not-a-directory rejection after open closes the descriptor
+
+- **WHEN** the opened descriptor is not a directory
+- **THEN** the owner raises `Runtime staging prefix is not a directory: <path>` with the existing code
+- **AND** the descriptor is closed exactly once
+
+#### Scenario: Success returns a live descriptor
+
+- **WHEN** every check passes
+- **THEN** the returned descriptor is open, and the caller's existing cleanup closes it once
