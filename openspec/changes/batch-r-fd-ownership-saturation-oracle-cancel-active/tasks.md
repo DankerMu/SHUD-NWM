@@ -15,8 +15,8 @@
 
 ## 1. #1922 fd ownership
 
-- [ ] 1.1 Both owners use the D1 shape, and their bodies are byte-identical.
-- [ ] 1.2 Tests, for each owner:
+- [x] 1.1 Both owners use the D1 shape, and their bodies are byte-identical.
+- [x] 1.2 Tests, for each owner:
   - A real `stat_no_follow()` raises `SafeFilesystemError` after the open: the owner opens the repo root and uses a `containment_root` that does not contain it. The existing `ProductionObjectStoreValidationError` code and message are raised, and the captured fd is closed (`os.fstat(fd)` → `EBADF`). Capture the fd by wrapping `os.open`.
   - The forced not-a-directory branch leaves the fd closed. The test asserts the exact message `Runtime staging prefix is not a directory: <path>`, which proves the helper's own `S_ISDIR` branch ran.
   - A post-open `OSError` from the helper's first `os.fstat` leaves the fd closed. The test asserts the `Failed to open runtime staging prefix directory` message with an `OSError` `__cause__`.
@@ -30,23 +30,23 @@
   - The `EBADF` check uses the saved real `os.fstat`.
   - Every `os.*` patch is scoped with `monkeypatch.context()`, per `pyproject.toml:88-96`: `tmp_path` teardown walks the filesystem through `os.*`.
   - Import each owner module directly. The facade re-exports only the runtime copy.
-- [ ] 1.3 Red proof: with the old body, the new cleanup tests fail. Record this.
+- [x] 1.3 Red proof: with the old body, the new cleanup tests fail. Record this.
 
 ## 2. #2478 saturation oracle
 
-- [ ] 2.1 Byte and row legs:
+- [x] 2.1 Byte and row legs:
   - a 30 s safety-net deadline;
   - `caplog` asserts `exceeded bounded output (bytes|rows)` and no `timed out`, placed **before** the marker assertion (right after the `action == "query_unavailable"` check), so that a timeout fails on the reason and not on the missing marker;
   - the marker, durable-write, cohort and reap assertions are kept.
-- [ ] 2.2 Red proof: with a forced timeout (the fake sleeps before output, `COMMENT_SACCT_TIMEOUT_SECONDS` small for the probe only), the byte and row legs fail on the reason assertion. Record this, then restore.
-- [ ] 2.3 Load run (issue Verification): with about 2× cores of `yes > /dev/null` plus parallel workers and an isolated `TMPDIR`, `[byte]` and `[row]` each pass ≥100 consecutive times, driven by a shell loop (there is no repeat plugin). Then the whole file passes.
+- [x] 2.2 Red proof: with a forced timeout (the fake sleeps before output, `COMMENT_SACCT_TIMEOUT_SECONDS` small for the probe only), the byte and row legs fail on the reason assertion. Record this, then restore.
+- [x] 2.3 Load run (issue Verification): with about 2× cores of `yes > /dev/null` plus parallel workers and an isolated `TMPDIR`, `[byte]` and `[row]` each pass ≥100 consecutive times, driven by a shell loop (there is no repeat plugin). Then the whole file passes.
 
   **Stop rule:** if a load run shows the signature `saturated` warning present, marker missing, `returncode == -9`, stop and report it. That is the `_terminate_and_reap` 1 s SIGTERM grace expiring under starvation. `reconcile.py` is out of scope, and accepting `rc < 0`, retries or a weaker marker check are all forbidden, so the orchestrator escalates instead.
 
 ## 3. #2476 cancel-while-active
 
-- [ ] 3.1 The D3 check comes after a successful cleanup DELETE, and the blocker includes the last status. The docstring says RUNNING is required.
-- [ ] 3.2 `_FakeClient` gets a never-running mode. The test asserts:
+- [x] 3.1 The D3 check comes after a successful cleanup DELETE, and the blocker includes the last status. The docstring says RUNNING is required.
+- [x] 3.2 `_FakeClient` gets a never-running mode. The test asserts:
   - the submit_cancel stage is `BLOCKED` and the top level is `BLOCKED`;
   - `live_proof_accepted is False`;
   - `dependency_blocker` contains `'pending'`;
@@ -55,13 +55,13 @@
   - `validate_receipt(receipt)` accepts the receipt.
 
   The existing PASS tests stay green.
-- [ ] 3.3 Red proof: the new test fails against the old code.
+- [x] 3.3 Red proof: the new test fails against the old code.
 
 ## 4. Verification (local)
 
-- [ ] 4.1 `uv run pytest -q tests/test_production_object_store_validation.py tests/test_object_store_validation_facade_contract.py tests/test_gateway_reconcile_comment_sacct_bounds.py tests/test_m24_gateway_proof.py` plus any new test file.
-- [ ] 4.2 `uv run ruff check .`
-- [ ] 4.3 `openspec validate batch-r-fd-ownership-saturation-oracle-cancel-active --strict --no-interactive`
+- [x] 4.1 `uv run pytest -q tests/test_production_object_store_validation.py tests/test_object_store_validation_facade_contract.py tests/test_gateway_reconcile_comment_sacct_bounds.py tests/test_m24_gateway_proof.py` plus any new test file.
+- [x] 4.2 `uv run ruff check .`
+- [x] 4.3 `openspec validate batch-r-fd-ownership-saturation-oracle-cancel-active --strict --no-interactive`
 
 ## Evidence Floor
 

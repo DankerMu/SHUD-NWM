@@ -4,6 +4,7 @@ detection across pages, per-page limits, and real-process reaping.
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import time
@@ -260,6 +261,7 @@ def test_inflight_sacct_querier_uses_shared_bounded_stream_reader(
 def test_real_sacct_process_bounds_reap_and_leave_inflight_cohort_unchanged(
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
     boundary: str,
 ) -> None:
     from services.orchestrator import reconcile as reconcile_module
@@ -294,11 +296,15 @@ esac
     monkeypatch.setenv("FAKE_SACCT_TERMINATED_PATH", str(terminated_path))
     monkeypatch.setattr(reconcile_module, "MAX_COMMENT_SACCT_BYTES", 128 if boundary == "byte" else 1_000_000)
     monkeypatch.setattr(reconcile_module, "MAX_COMMENT_SACCT_ROWS", 2 if boundary == "row" else 10_000)
+    # For byte/row the wall clock is only a safety net: saturation ends the read in
+    # milliseconds, and the oracle below is the saturation reason itself (#2478).  The
+    # wall_time leg's oracle *is* the timeout, so its deadline stays short (#2107).
     monkeypatch.setattr(
         reconcile_module,
         "COMMENT_SACCT_TIMEOUT_SECONDS",
-        1.0 if boundary == "wall_time" else 2.0,
+        1.0 if boundary == "wall_time" else 30.0,
     )
+    caplog.set_level(logging.WARNING, logger=reconcile_module.__name__)
 
     # The child's own startup work (a shell writing its PID) is not ordered against the
     # wall-time deadline, so it cannot be the startup oracle.  Record the handle the
@@ -327,6 +333,22 @@ esac
 
     assert len(outcomes) == 1
     assert outcomes[0].action == "query_unavailable"
+    if boundary != "wall_time":
+        # A wall-clock timeout also surfaces as ``query_unavailable``, so only the
+        # saturation warning proves this leg's bound fired.  Asserted before the marker:
+        # a fake that times out never writes it, and that would hide the reason (#2478).
+        expected_bound = "bytes" if boundary == "byte" else "rows"
+        warnings = [
+            record.getMessage()
+            for record in caplog.records
+            if record.name == reconcile_module.__name__ and record.levelno == logging.WARNING
+        ]
+        assert any(f"sacct query exceeded bounded output ({expected_bound})" in message for message in warnings), (
+            f"{boundary} leg must fail on its {expected_bound} bound, got warnings {warnings!r}"
+        )
+        assert not any("sacct query timed out" in message for message in warnings), (
+            f"{boundary} leg must not reach the wall-clock deadline, got warnings {warnings!r}"
+        )
     assert outcomes[0].durable_write_count == 0
     assert len(repr(outcomes[0])) < 1_000
     assert repository.get_pipeline_job(job_id) == before
