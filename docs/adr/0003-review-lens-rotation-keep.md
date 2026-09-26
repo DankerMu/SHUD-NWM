@@ -3500,7 +3500,7 @@ exemption clause:
   The 1-minute figure is the v1 envelope's magnitude, applied to an envelope
   19× larger. Round-2 verified P1.
 - Design point 7️⃣ declared a third terminal state "legal" because "the clamped
-  window is empty". `services/tiles/mvt.py:1985-1987` filters exactly those
+  window is empty". `services/tiles/mvt.py@395793dfc:1985-1987` filters exactly those
   cycles out of `cycles[]`, so `default_cycle` can never be one. The false
   premise was then copied into a runbook paragraph and a test docstring.
   Round-2 verified finding.

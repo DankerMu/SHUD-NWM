@@ -246,15 +246,15 @@ cycle-aware；#2121-A 起默认整周期）：
 **「在 3 h 网格上」并不蕴含「在 horizon 之内」**：网格没有上界而 horizon 有，`cycle+171h` 就是
 一个在网格上、却在 horizon 之外的时次。真出现这种时次时按下文的越界口径走。
 另注：「以 cycle 为原点的 3 h 网格」本身依赖
-`NATIONAL_DISCHARGE_VALID_TIME_STRIDE_HOURS`（`services/tiles/mvt.py:122`）与
+`NATIONAL_DISCHARGE_VALID_TIME_STRIDE_HOURS`（`services/tiles/mvt.py` 模块常量，当前 `:144`）与
 `PRECIP_STEP_HOURS`（`services/precip/constants.py:28`）这两个各自声明的 3 相等，仓内没有断言把它们锁在一起。
 
 某源 `default_cycle` 为 `null` 是合法终态（该源零请求）；`default_cycle` 有值但
 `valid-times` 返回 `[]` 则是**两跳互不一致**：`/cycles` 逐候选周期先算一遍
 `_national_cycle_valid_times`，时次列表为空的周期直接 `continue`
-（`services/tiles/mvt.py:1985-1987`），
+（`services/tiles/mvt.py::national_discharge_cycles()` 的 `if not discovery.valid_times: continue`，当前 `:2210-2212`），
 所以 `default_cycle` 不可能是这种周期；真正的来源是两跳之间的**发布竞态**（同周期重跑
-落地而 `run_display_coverage` 矩形尚未补齐，`mvt.py:2129-2135` 返回 `None`），下个 tick
+落地而 `run_display_coverage` 矩形尚未补齐，`mvt.py::_national_coverage_window()`（当前 def `:2464`）返回 `None`），下个 tick
 自愈，故保持 rc 不变——**有记录、不告警**（`scripts/node27_autopipe_cron.sh:244` 每 tick
 把整份汇总 JSON 写进 `$LOG`，`:245` 只在失败时另加一行）。发现失败是**另一种**终态，
 按源记 `per_source[<s>].error` 并置非零退出码，另一源照常预热。汇总 schema 为

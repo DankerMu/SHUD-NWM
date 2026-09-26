@@ -13,17 +13,17 @@
 
 ## 1. #2085 mvt.py anchors (implementer A)
 
-- [ ] 1.1 Run `grep -rn 'mvt\.py' docs/ openspec/` and classify every hit using the D2 partition. Record the table (fixed / excluded + reason) for the PR.
-- [ ] 1.2 Fix the in-scope hits by symbol per D1. Re-run the `active_flag` census (`grep -n active_flag services/tiles/mvt.py`) and rewrite both census copies so they agree. Add `_national_discharge_coverage_rows` to the glossary.
-- [ ] 1.3 Pin the ADR 0002 measurement (the #1338 pre-drop baseline Q1/Q8 text, cited by content) at `af49ced22`. Pin other dated plans and ADRs likewise (D2): find each SHA with `git log -S '<cited line text>' -- <doc>` on the doc line that introduced the citation, then read it back pinned. Mark `feat-reach-geom-oq-findings.md` historical and neutralise its deep links (D2).
-- [ ] 1.4 Read-back evidence for the PR: for each current-truth `mvt.py:N`, `sed -n` at HEAD shows the claimed symbol. For each SHA-pinned one, `git show <sha>:services/tiles/mvt.py | sed -n` shows it.
+- [x] 1.1 Run `grep -rn 'mvt\.py' docs/ openspec/` and classify every hit using the D2 partition. Record the table (fixed / excluded + reason) for the PR.
+- [x] 1.2 Fix the in-scope hits by symbol per D1. Re-run the `active_flag` census (`grep -n active_flag services/tiles/mvt.py`) and rewrite both census copies so they agree. Add `_national_discharge_coverage_rows` to the glossary.
+- [x] 1.3 Pin the ADR 0002 measurement (the #1338 pre-drop baseline Q1/Q8 text, cited by content) at `af49ced22`. Pin other dated plans and ADRs likewise (D2): find each SHA with `git log -S '<cited line text>' -- <doc>` on the doc line that introduced the citation, then read it back pinned. Mark `feat-reach-geom-oq-findings.md` historical and neutralise its deep links (D2).
+- [x] 1.4 Read-back evidence for the PR: for each current-truth `mvt.py:N`, `sed -n` at HEAD shows the claimed symbol. For each SHA-pinned one, `git show <sha>:services/tiles/mvt.py | sed -n` shows it.
 
 ## 2. #2423 archived design coordinates (implementer A)
 
-- [ ] 2.1 Fix the one stale `_event_matches_candidate_rows` coordinate by symbol at `2ee1f53ed` (def `:13706`, `forecast_cycle` branch `:13719-13729`, with the SHA prefix).
-- [ ] 2.2 Turn the "检测工具与后续清理见 #2423" line into a closure note (detection script declined).
-- [ ] 2.3 Prove with `git diff` that no other line of the archived design changed.
-- [ ] 2.4 Read-back table for the PR: `git show 2ee1f53ed:<path> | sed -n <N>p` for all 13 coordinates.
+- [x] 2.1 Fix the one stale `_event_matches_candidate_rows` coordinate by symbol at `2ee1f53ed` (def `:13706`, `forecast_cycle` branch `:13719-13729`, with the SHA prefix).
+- [x] 2.2 Turn the "检测工具与后续清理见 #2423" line into a closure note (detection script declined).
+- [x] 2.3 Prove with `git diff` that no other line of the archived design changed.
+- [x] 2.4 Read-back table for the PR: `git show 2ee1f53ed:<path> | sed -n <N>p` for all 13 coordinates.
 
 ## 3. #2263 references and retention tests (implementer B)
 
