@@ -1,8 +1,11 @@
 # production-scheduler-orchestration Specification
 
 ## Purpose
-TBD - created by archiving change m20-production-multibasin-continuous-automation. Update Purpose after archive.
+Define the backend production scheduler that drives the full forecast chain across basins: its entrypoint and chain orchestration; retention and deletion that respect the pipeline frontier and canonical run identities; bounded, attributable pass evidence; retry and identity-authority rules; and the operator actions (demotion, pinned re-entry confirmation) that resolve blocked candidates.
+
+
 ## Requirements
+
 ### Requirement: Backend scheduler entrypoint
 
 The system SHALL provide a backend scheduler entrypoint that can run once or continuously and create production forecast work for all selected registered basins.
@@ -1278,3 +1281,16 @@ The closed allowlist of evaluating pass statuses SHALL be reconciled by a test t
 - **WHEN** a writer gains a new pass-status literal not reconciled with the allowlists
 - **THEN** the closure test SHALL fail
 
+### Requirement: Additional retention roots are discarded by value shape
+
+The retention additional-root resolver SHALL discard a `None`, empty or whitespace-only value silently, recording no skip entry. It SHALL discard a non-blank relative value loudly, with a skip entry that uses the not-absolute reason. It SHALL admit an absolute value. The resolver SHALL base this decision only on the value's shape, because it cannot see the deployment topology. This refines the existing requirement "Retention covers every configured run-workspace root".
+
+#### Scenario: Unset and blank values are silent
+
+- **WHEN** the configured additional roots are `None`, `""` and `"   "`
+- **THEN** no root is resolved and no skip entry is recorded
+
+#### Scenario: A relative value is recorded while an absolute one is admitted
+
+- **WHEN** the configured additional roots are a relative path and an absolute path
+- **THEN** the relative path produces one not-absolute skip entry and the absolute path is admitted
