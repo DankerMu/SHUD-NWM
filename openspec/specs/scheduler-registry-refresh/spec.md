@@ -1,8 +1,18 @@
 # scheduler-registry-refresh Specification
 
 ## Purpose
-TBD - created by archiving change unify-cutover-gate-audit-normalizer. Update Purpose after archive.
+
+The node-22 file-provider refresh lane republishes, database-free, the scheduler registry, its worker mirror, the readiness index and the state index. This spec is the contract for that lane:
+
+- the refresh runner's provider transactions and rollbacks, and the receipts it writes (primary, emergency and history), including what their `after_*` evidence may claim;
+- the cutover-gate audit and the classification modes;
+- retirement declarations;
+- provider snapshot reads;
+- the systemd installers that arm and roll back the lane and its independent liveness probe, with their failure paths and restore baselines;
+- the health probe that grades the lane's timer and manifest age before the consumers' 168-hour freshness bound expires.
+
 ## Requirements
+
 ### Requirement: cutover_gate audit blocks MUST pass one shared strict normalizer on every persistence channel
 
 Every persisted `cutover_gate` audit block — CLI summary, runner receipt, and manifest companion receipt — SHALL be produced by the single shared normalizer (`packages/scheduler/registry_audit.py`), which enforces the three-field shape (`mode` ∈ the audited mode set, `declaration_env` str-or-null, `declaration_present` bool — a missing or explicit-null `declaration_present` defaults to `false`; any other present value that is not a boolean rejects) and rejects malformed input with error code `SCHEDULER_REGISTRY_CUTOVER_AUDIT_INVALID`; no channel may silently rewrite a malformed block to `"not_wired"`, and no field may be silently coerced to a different value.
@@ -630,16 +640,32 @@ write any file under the provider store.
 
 #### Scenario: The probe installer reports a disarmed probe only when it really is
 
-- **WHEN** the probe installer's install or rollback runs and systemd refuses to
-  disable or stop the probe timer or service
+- **WHEN** the probe installer's install has placed the unit files and reloaded
+  systemd and the probe timer or service then reads back as enabled or active,
+  or its rollback runs and systemd refuses to disable or stop the probe timer or
+  service
 - **THEN** the run exits non-zero and does not report an installed-stopped or
   rolled-back status
 - **AND** success is reported only after re-reading each probe unit on its own
   shows neither is enabled nor active, where a failed probe service left behind
   by a non-healthy verdict counts as disarmed and an unreachable user manager
   does not
-- **AND** disarmed means inert rather than removed: rollback restores whatever
-  unit files preceded the last install and never re-arms them
+- **AND** disarmed means inert rather than removed: rollback restores the unit
+  files that preceded the first install recorded in the installer's restore
+  baseline and never re-arms them
+
+#### Scenario: The probe installer never disarms an armed probe or rewrites its baseline
+
+- **WHEN** the probe installer's install runs while the probe timer or service
+  is enabled or active
+- **THEN** it exits non-zero, tells the operator to roll back first, and leaves
+  every unit, unit file, and file under the installer's state root unchanged,
+  including the per-invocation protected-state capture
+- **AND** when it runs against a disarmed probe whose restore baseline is already
+  marked complete, it keeps that baseline, so installing twice and then rolling
+  back restores the unit files that preceded the first install
+- **AND** a baseline whose completion marker is absent is captured afresh, so an
+  interrupted first install never leaves a partial baseline in force
 
 ### Requirement: The tracked DB-free scheduler env template carries every key the documentation declares mandatory
 
@@ -696,3 +722,151 @@ gate SHALL retain its own failure reason.
 - **AND** it is not replaced by a receipt-assembly failure such as
   `primary_receipt_failed`
 
+### Requirement: The refresh installer backs out every failure once, reads the result back, and never rewrites its restore baseline
+
+The node-22 file-provider refresh installer SHALL run under `errtrace`. Every
+failure after its first mutation SHALL run exactly one restore handler, and
+only in the installer's main shell. That handler SHALL attempt every restore
+step whatever the earlier steps did, SHALL always finish with read-back
+assertions, and SHALL exit non-zero without printing a status line.
+
+Every restore SHALL be confirmed by reading the refresh units back against
+their restore target before the installer reports success:
+
+- the timer is compared on unit-file state and active state;
+- the service, a timer-driven oneshot, is compared on unit-file state.
+
+The restore target of a rollback and of a failed install SHALL be the recorded
+restore baseline. The restore target of a failed enable SHALL be the state that
+invocation started from.
+
+The compute-scheduler comparison SHALL be per unit type, captured at the start
+of each invocation. It SHALL NOT read any baseline written by another
+invocation.
+
+The install action SHALL refuse without mutation while the refresh timer or
+service is armed. It SHALL NOT overwrite a restore baseline that is already
+recorded.
+
+A recorded unit state that does not have exactly the expected fields and lines
+SHALL fail rather than be interpreted.
+
+#### Scenario: A failure before any mutation changes nothing
+
+- **WHEN** an action fails before its first mutation: the current receipt does
+  not validate for enable, the install refuses, the install or the rollback
+  finds an existing baseline malformed, or the rollback finds its baseline
+  missing
+- **THEN** the run exits non-zero without a status line, issues no mutating
+  systemd call, runs no restore, and changes no unit file or baseline
+
+#### Scenario: A failure inside a function backs the action out
+
+- **WHEN** an assertion or command inside a function fails after the
+  installer's first mutation, in install or in enable
+- **THEN** the restore handler runs exactly once, in the main shell, including
+  when the failing command ran inside a command substitution
+- **AND** the run exits non-zero and prints no status line
+
+#### Scenario: A failing restore step does not cut the restore short
+
+- **WHEN** any single restore step fails inside the handler, whether a unit-file
+  restore, a daemon reload, or an enable, disable, start, or stop
+- **THEN** every later restore step is still attempted
+- **AND** both read-back assertions still run
+- **AND** the run exits non-zero without a status line
+
+#### Scenario: Rollback success is decided by reading the units back
+
+- **WHEN** a rollback's restore calls all return success but the refresh timer
+  reads back in a state other than the recorded baseline
+- **THEN** the rollback exits non-zero and does not report rolled back
+- **AND** it reports rolled back only when both hold on read-back: the refresh
+  units equal the baseline, and the compute-scheduler units are unchanged
+
+#### Scenario: A compute-scheduler oneshot firing mid-run is not a divergence
+
+- **WHEN** the compute scheduler's service activates on its own timer while
+  an installer action is running
+- **THEN** the action does not abort, because that service is compared on its
+  unit-file state only
+- **AND** the compute scheduler's timer is still compared on both its unit-file
+  state and its active state
+
+#### Scenario: A legacy scheduler baseline file is ignored
+
+- **WHEN** the installer's state root holds a scheduler baseline file written
+  by an earlier installer version, in any format
+- **THEN** no action reads or rewrites it
+- **AND** enable and rollback succeed or fail on the protected state captured
+  by their own invocation
+
+#### Scenario: Installing never disarms an armed lane
+
+- **WHEN** the install action runs while the refresh timer or service reads
+  back as enabled or active
+- **THEN** it exits non-zero, tells the operator to roll back first, and issues
+  no mutating systemd call
+- **AND** it changes no unit file and no recorded baseline
+
+#### Scenario: Install reports installed-stopped only when the lane reads back disarmed
+
+- **WHEN** the install action has placed the unit files and reloaded systemd,
+  and the refresh timer or service then reads back as enabled or active
+- **THEN** the install exits non-zero, runs its restore handler, and does not
+  report installed-stopped
+- **AND** it reports installed-stopped only after the refresh timer and service
+  each read back as neither enabled nor active, using the same disarmed
+  definition as the refusal above
+
+#### Scenario: A second install keeps the first install's restore baseline
+
+- **WHEN** the install action runs on a disarmed lane whose restore baseline is
+  already recorded
+- **THEN** the baseline and its saved unit files are left byte-identical
+- **AND** a later rollback restores the state and unit files that preceded the
+  first install
+- **AND** the baseline counts as recorded only once it has been written
+  completely, so an interrupted first install is recaptured by the next one
+
+#### Scenario: A malformed recorded state fails
+
+- **WHEN** a recorded unit state has other than exactly two non-empty fields,
+  or the recorded baseline has other than exactly one line per refresh unit
+- **THEN** a rollback fails before its first mutation
+- **AND** inside a restore handler the failure counts as a failed step, while
+  the read-back still runs
+
+### Requirement: A replace-uncertain refresh receipt describes the bytes on disk for every provider whose rollback was verified
+
+When a refresh transaction's provider rollback is verified but the run must
+still report `replace_uncertain`, because another lane's outcome is unknown, the
+receipt SHALL describe the restored generation for each committed provider whose
+rollback was verified. Its post-run digest, schema version, generation time and
+payload checksum SHALL describe the bytes on disk when the receipt is written.
+The receipt SHALL NOT describe the generation that was published and then rolled
+back.
+
+This SHALL NOT change the receipt schema. It SHALL NOT change any receipt whose
+rollback was not verified, and it SHALL NOT change the outcome-based field
+selection that the refresh-timer health probe applies to every receipt.
+
+#### Scenario: A later lane's uncertainty does not leave restored providers claiming rolled-back bytes
+
+- **WHEN** the registry, its worker mirror and the readiness index are
+  published, a later lane's write leaves ownership unknowable, and the rollback
+  of the three published providers is verified
+- **THEN** the receipt's outcome is `replace_uncertain`
+- **AND** for each of the three providers its post-run digest equals the digest
+  of the bytes on disk, or is absent when the path is absent
+- **AND** its post-run generation time is never newer than the manifest on disk
+- **AND** the receipt, and any emergency record carrying it, still validates
+  against the unchanged schema
+
+#### Scenario: An unverified rollback keeps its evidence unchanged
+
+- **WHEN** the provider rollback itself cannot be verified
+- **THEN** the `replace_uncertain` receipt carries the committed evidence
+  exactly as before this change
+- **AND** readers keep choosing the registry generation time by outcome, because
+  such a receipt may still describe bytes that are not on disk

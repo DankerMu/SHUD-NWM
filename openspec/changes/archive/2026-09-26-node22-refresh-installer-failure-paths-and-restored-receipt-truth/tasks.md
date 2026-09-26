@@ -132,6 +132,8 @@
 
 ## 5. node-22 live drill: PENDING the #1831 maintenance window
 
+> **Status at archive (2026-09-26, after PR #2641 merged as `f2f893531`):** still **pending the #1831 window**. These boxes stay unticked on purpose. The item is carried by #2294, which stays open (see its comment 5843310640 for the drill order), and the drill receipt will land under `docs/runbooks/receipts/`.
+
 This section is **not done in this PR** and is not claimed done. #1831 forbids pulling onto the node-22 active checkout before the window. The PR body states that this is pending, and #2294 stays open for its last acceptance item.
 
 - [ ] 5.1 During the window only: `git status --porcelain` → `git pull --ff-only` on `/scratch/frd_muziyao/NWM`. Only the active interpreter or the checked-in wrappers are used; no `uv`.
