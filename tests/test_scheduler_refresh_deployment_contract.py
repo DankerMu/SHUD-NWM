@@ -117,24 +117,19 @@ def test_systemd_refresh_contract_is_db_free_daily_and_scheduler_independent() -
     assert "is-active --quiet nhms-compute-scheduler.service" in wrapper
     assert "NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true" in environment
     assert '[[ "$NHMS_SCHEDULER_REQUIRE_DIRECT_GRID" == true ]]' in wrapper
-    assert "grep -Ec '^NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true$'" in installer
     for selector in ("DATABASE_URL=", "PIPELINE_DATABASE_URL=", "PGHOST=", "PGPORT="):
         assert selector not in environment
     assert "stat -c '%a'" in wrapper
     assert "DATABASE_URL PIPELINE_DATABASE_URL PGAPPNAME" in wrapper
-    assert "cmp -s" in installer
-    assert "scheduler_unchanged" in installer
-    assert "rollback_files" in installer and "restore_refresh_state" in installer
-    assert "--validate-current-receipt" in installer
-    assert "assert_refresh_service_inactive" in installer
+    # #2294: what the installer DOES -- its env-file checks, `cmp -s`, the
+    # receipt validation before arming, the status lines, the restore and its
+    # read-backs, and touching only the refresh units -- is asserted by running
+    # it against a fake systemctl in tests/test_scheduler_refresh_installer_failure_paths.py
+    # and the lifecycle case below, not by source substrings.
     assert "stat -c '%a'" in installer
     assert installer.index("stat -c '%a'") < installer.index("stat -f '%Lp'")
     assert "stat -c '%a'" in wrapper
     assert wrapper.index("stat -c '%a'") < wrapper.index("stat -f '%Lp'")
-    assert 'unit_state "$timer"' in installer and 'unit_state "$service"' in installer
-    assert 'restore_unit_state "$timer"' in installer and 'restore_unit_state "$service"' in installer
-    assert "enable --now \"$timer\"" in installer
-    assert "enable --now nhms-compute-scheduler" not in installer
     assert "Persistent=false" in timer
     for selector in refresh.LIBPQ_CONNECTION_ENV_KEYS:
         assert selector in service

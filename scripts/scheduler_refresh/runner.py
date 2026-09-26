@@ -138,13 +138,34 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
                 registry_classification=registry_classification,
                 cutover_gate=runner_cutover_gate_audit,
             )
+        providers = committed
+        if restored:
+            # #2297: the rollback was verified (every record's path is back to
+            # `record.previous` by sha256) but another lane's outcome is unknown,
+            # so the receipt stays `replace_uncertain`.  Its after_* must still
+            # describe the bytes on disk, not the generation that was published
+            # and rolled back -- the same substitution the dry-run lane makes.
+            # `entry_count` keeps the attempted generation's count, as dry-run.
+            restored_names = {record.name for record in rollback_stack}
+            providers = [
+                {
+                    **provider,
+                    "after_sha256": provider["before_sha256"],
+                    "after_schema_version": provider["before_schema_version"],
+                    "after_generated_at": provider["before_generated_at"],
+                    "after_payload_checksum": provider["before_payload_checksum"],
+                }
+                if provider.get("name") in restored_names
+                else provider
+                for provider in committed
+            ]
         return _receipt(
             run_id=run_id,
             started=started,
             outcome="replace_uncertain",
             reason="provider_replace_uncertain",
             phase="postcommit",
-            providers=committed,
+            providers=providers,
             orphan_paths=orphan_paths,
             orphan_total=orphan_total,
             orphan_discovered_total=orphan_discovered_total,

@@ -58,32 +58,32 @@
 
 ## 2. #2294: installers
 
-- [ ] 2.1 **D1** in `scripts/install_node22_scheduler_file_provider_refresh.sh`:
+- [x] 2.1 **D1** in `scripts/install_node22_scheduler_file_provider_refresh.sh`:
   - `set -Eeuo pipefail`;
   - the `install_failure_restore` / `enable_failure_restore` handlers: main-shell guard first, `trap - ERR`, every step `|| rc=1`, read-backs always run, stderr diagnostics, `exit 1`, no status line;
   - `restore_unit_state` `enable`/`start` guarded;
   - the in-trap `is-active` substitution captured with `|| true`.
-- [ ] 2.2 **D2**:
+- [x] 2.2 **D2**:
   - `assert_refresh_state_restored` (timer: both fields; service: UnitFileState), with targets as in the design table;
   - the `refresh_units_disarmed` predicate, used by the refusal and by the `--install` success read-back.
-- [ ] 2.3 **D3**:
+- [x] 2.3 **D3**:
   - a per-invocation, in-memory, typed `protected_state` for the compute-scheduler timer (both fields) and service (UnitFileState);
   - `scheduler.before` neither read nor written.
-- [ ] 2.4 **D4** in both installers:
+- [x] 2.4 **D4** in both installers:
   - refusal while armed, with no mutation;
   - the baseline is written once: refresh = `refresh.before` written last via temp + `mv`; probe = an `install.baseline` marker via temp + `mv`;
   - rollback keeps the baseline;
   - the probe refusal runs before the `protected.before` capture, with its own `refusing --install:` stderr text;
   - the sibling R15c test is rewritten to "restore the files that preceded the first install";
   - `test_install_refuses_installed_stopped_when_systemctl_refused_to_disarm_the_probe` (`tests/test_node22_refresh_timer_health_installer.py:519-544`) is rewritten into two cases: the armed-probe refusal (asserting the `refusing --install:` text), and a reachable read-back case, in which a disarmed probe reads back `enabled`/`active` after install and must hit `probe read-back:` with no status line.
-- [ ] 2.5 **D5** in both installers: `parse_unit_state` with a strict 2-field check, and `refresh.before` held to exactly 2 lines.
-- [ ] 2.6 **D7 tests.** New files `tests/scheduler_refresh_installer_harness.py`, `tests/test_scheduler_refresh_installer_failure_paths.py`, `tests/test_scheduler_refresh_installer_mutations.py`, plus a sibling partition if needed.
+- [x] 2.5 **D5** in both installers: `parse_unit_state` with a strict 2-field check, and `refresh.before` held to exactly 2 lines.
+- [x] 2.6 **D7 tests.** New files `tests/scheduler_refresh_installer_harness.py`, `tests/test_scheduler_refresh_installer_failure_paths.py`, `tests/test_scheduler_refresh_installer_mutations.py`, plus a sibling partition if needed.
   - The divergence list in D7, each scenario asserting rc, the missing status line, and the fake-systemctl trace.
   - The mutation list in D7: each mutation asserts `source.count(anchor) == 1`, then shows the scenario's verdict flipping.
   - The installer-behaviour substring checks at `tests/test_scheduler_refresh_deployment_contract.py:96-142` are replaced. Its unit/env/DB-free assertions stay.
   - The existing lifecycle test stays green, updated only where D4 changes the expected trace.
-- [ ] 2.7 **CI routing:** `scripts/select_ci_tests.py` tuples and helper constants for every new file, and the exact-set pins in `tests/test_select_ci_tests.py` updated. Checked with `git add -N` plus a local run of `tests/test_select_ci_tests.py`.
-- [ ] 2.8 **D8 runbook:** `docs/runbooks/production-ops/file-provider-refresh.md`:
+- [x] 2.7 **CI routing:** `scripts/select_ci_tests.py` tuples and helper constants for every new file, and the exact-set pins in `tests/test_select_ci_tests.py` updated. Checked with `git add -N` plus a local run of `tests/test_select_ci_tests.py`.
+- [x] 2.8 **D8 runbook:** `docs/runbooks/production-ops/file-provider-refresh.md`:
   - the installer promise;
   - the refusal when armed;
   - the baseline lifecycle and reset;
@@ -94,8 +94,8 @@
 
 ## 3. #2297: receipt truth
 
-- [ ] 3.1 **D6** in `scripts/scheduler_refresh/runner.py` `rollback_receipt_if_needed`, and only there. On `restored and uncertainty`, the name-matched copies of `committed` get `after_* := before_*` for the four fields; `entry_count` is kept. No other branch changes.
-- [ ] 3.2 **Tests** in `tests/test_scheduler_refresh_restored_receipt_truth.py`:
+- [x] 3.1 **D6** in `scripts/scheduler_refresh/runner.py` `rollback_receipt_if_needed`, and only there. On `restored and uncertainty`, the name-matched copies of `committed` get `after_* := before_*` for the four fields; `entry_count` is kept. No other branch changes.
+- [x] 3.2 **Tests** in `tests/test_scheduler_refresh_restored_receipt_truth.py`:
   - the disk-truth assertions for `registry`, `registry_worker_mirror` and `readiness`;
   - `state` absent;
   - `latest.json == receipt`;
@@ -104,7 +104,7 @@
   - a forced `restored is False` gives exactly the pre-change evidence.
 
   The pinning test in `tests/test_scheduler_refresh_worker_mirror_transactions.py:626-652`, with its D3b docstring, is removed or rewritten. No other test's claim is weakened; any that pinned the old `after_*` is listed in the PR.
-- [ ] 3.3 **R9e evaluation:** kept (design D6). The runbook prose is updated and the pinned substrings are preserved.
+- [x] 3.3 **R9e evaluation:** kept (design D6). The runbook prose is updated and the pinned substrings are preserved.
 
 ## 4. Verification (node-27 oracle + local)
 

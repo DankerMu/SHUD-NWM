@@ -260,7 +260,11 @@ def _installer_fake_systemctl(tmp_path: Path) -> tuple[Path, Path]:
       stateful fake never produces (`static`, `not-found`, `failed`, no answer);
     * ``NHMS_FAKE_PROBE_TIMER_IS_*`` / ``NHMS_FAKE_PROBE_SERVICE_IS_*`` do the
       same for ONE probe unit and win over the shared knob, so the timer and
-      the service can answer differently.
+      the service can answer differently;
+    * ``NHMS_FAKE_PROBE_AFTER_RELOAD``, when non-empty, holds those literal
+      answers back until this invocation has issued a ``daemon-reload`` -- a
+      disarmed probe that reads back armed only once the install placed its
+      units, which is how the install read-back is reached past the refusal.
     """
     log = tmp_path / "installer-systemctl.log"
     state = tmp_path / "fake-state"
@@ -293,6 +297,7 @@ def _installer_fake_systemctl(tmp_path: Path) -> tuple[Path, Path]:
         "esac\n"
         'printf "%s" "$enabled" > "$state/probe.enabled"\n'
         'printf "%s" "$active" > "$state/probe.active"\n'
+        '[ "$verb" = daemon-reload ] && : > "$state/reloaded"\n'
         'case "$verb" in\n'
         "  is-enabled|is-active) ;;\n"
         "  *) exit 0 ;;\n"
@@ -301,9 +306,11 @@ def _installer_fake_systemctl(tmp_path: Path) -> tuple[Path, Path]:
         "  nhms-node22-refresh-timer-health.*)\n"
         r"""    kind=SERVICE; case "$unit" in *.timer) kind=TIMER ;; esac
     query=IS_ENABLED; [ "$verb" = is-active ] && query=IS_ACTIVE
+    held=no
+    if [ -n "${NHMS_FAKE_PROBE_AFTER_RELOAD:-}" ] && [ ! -e "$state/reloaded" ]; then held=yes; fi
     for name in "NHMS_FAKE_PROBE_${kind}_${query}" "NHMS_FAKE_PROBE_${query}"; do
       eval "isset=\${$name+set}"
-      if [ -n "$isset" ]; then eval "printf '%s\n' \"\$$name\""; exit 0; fi
+      if [ "$held" = no ] && [ -n "$isset" ]; then eval "printf '%s\n' \"\$$name\""; exit 0; fi
     done
 """
         '    if [ "$verb" = is-enabled ]; then printf "%s\\n" "$enabled"; '
@@ -336,6 +343,7 @@ def _run_installer(
     probe_answers: dict[str, str] | None = None,
     timer_answers: dict[str, str] | None = None,
     service_answers: dict[str, str] | None = None,
+    answers_after_reload: bool = False,
     installer: Path = INSTALLER,
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
     script, log = _installer_fake_systemctl(tmp_path)
@@ -356,6 +364,7 @@ def _run_installer(
             "NHMS_FAKE_DIVERGE": diverge,
             "NHMS_FAKE_DIVERGE_VALUE": diverge_value,
             "NHMS_FAKE_FAIL_VERB": fail_verb,
+            "NHMS_FAKE_PROBE_AFTER_RELOAD": "1" if answers_after_reload else "",
         }
     )
     for scope in ("", "TIMER_", "SERVICE_"):

@@ -483,17 +483,26 @@ def test_the_read_back_judges_each_probe_unit_on_its_own(
     service_answers: dict[str, str],
 ) -> None:
     """R15c: a disarmed timer does not vouch for a service that is still
-    running, and a stopped service does not vouch for an armed timer."""
+    running, and a stopped service does not vouch for an armed timer.
+
+    On `--install` the answers are held back until the install's
+    `daemon-reload`, so the refusal passes and it is the read-back that
+    refuses (#2294: `--install` refuses an armed probe before touching it)."""
     if action == "--rollback":
         assert _run_installer(tmp_path, "--install")[0].returncode == 0
 
     completed, _log = _run_installer(
-        tmp_path, action, timer_answers=timer_answers, service_answers=service_answers
+        tmp_path,
+        action,
+        timer_answers=timer_answers,
+        service_answers=service_answers,
+        answers_after_reload=action == "--install",
     )
 
     assert status not in completed.stdout, completed.stdout
     assert completed.stdout == ""
     assert completed.returncode != 0
+    assert "probe read-back:" in completed.stderr
 
 
 @pytest.mark.parametrize(("action", "status"), READ_BACK_ACTIONS)
@@ -516,60 +525,164 @@ def test_the_read_back_accepts_a_disarmed_timer_beside_a_stopped_service(
     assert json.loads(completed.stdout) == {"status": status, "protected_unchanged": True}
 
 
-def test_install_refuses_installed_stopped_when_systemctl_refused_to_disarm_the_probe(
+MUTATING_PROBE_VERBS = ("enable", "disable", "start", "stop", "restart", "daemon-reload")
+
+
+def _state_files(tmp_path: Path) -> dict[str, bytes]:
+    return {
+        str(path.relative_to(tmp_path)): path.read_bytes()
+        for base in (tmp_path / "install-state", tmp_path / "units")
+        for path in sorted(base.rglob("*"))
+        if path.is_file()
+    }
+
+
+def _armed_install_is_refused(tmp_path: Path, installer: Path = INSTALLER) -> bool:
+    """#2294 item 6: `--install` over an armed probe refuses before it touches
+    anything -- no mutating verb, every state-root and unit file byte-identical,
+    `protected.before` included -- and the probe stays armed."""
+    assert _run_installer(tmp_path, "--install")[0].returncode == 0
+    enabled, enable_log = _run_installer(tmp_path, "--enable")
+    assert enabled.returncode == 0, enabled.stderr
+    enable_log.write_text("")  # the fake appends; read only the refused install
+    before = _state_files(tmp_path)
+
+    completed, log = _run_installer(tmp_path, "--install", installer=installer)
+    mutated = [line for line in log.read_text().splitlines() if line.split()[1] in MUTATING_PROBE_VERBS]
+
+    return (
+        completed.returncode != 0
+        and completed.stdout == ""
+        and f"refusing --install: {PROBE_TIMER} is enabled/active; run --rollback first" in completed.stderr
+        and "probe read-back:" not in completed.stderr
+        and not mutated
+        and _state_files(tmp_path) == before
+        and _probe_timer_state(tmp_path) == ("enabled", "active")
+    )
+
+
+def test_install_refuses_an_armed_probe_and_changes_nothing(tmp_path: Path) -> None:
+    assert _armed_install_is_refused(tmp_path)
+
+
+def test_install_refuses_installed_stopped_when_the_probe_reads_back_armed_after_install(
     tmp_path: Path,
 ) -> None:
-    """R15c on the `--install` main path, whose `disable --now` is `|| true`.
-
-    A re-install over an armed probe whose disarm systemctl refuses used to
-    print `installed_stopped` with the timer still armed.  Now the read-back
-    refuses inside the ERR trap window, so the trap backs the install out: no
-    status line, non-zero, the timer's arm state is what it was before this
-    invocation, and the unit files are byte-equal to what preceded it (an
-    operator-local edit included, so "restored" is not "reinstalled").
-    """
-    assert _run_installer(tmp_path, "--install")[0].returncode == 0
-    assert _run_installer(tmp_path, "--enable")[0].returncode == 0
-    assert _probe_timer_state(tmp_path) == ("enabled", "active")
-    timer_file = tmp_path / "units" / PROBE_TIMER
-    timer_file.write_text(timer_file.read_text() + "# operator-local edit\n")
-    before = {unit: (tmp_path / "units" / unit).read_bytes() for unit in PROBE_UNITS}
-
-    completed, _log = _run_installer(tmp_path, "--install", fail_verb="disable")
+    """R15c on the `--install` main path, whose `disable --now` is `|| true`:
+    a disarmed probe that reads back enabled/active once its units are placed
+    hits the read-back inside the ERR trap window, so no status line, non-zero,
+    and the trap backs the install out."""
+    completed, _log = _run_installer(
+        tmp_path,
+        "--install",
+        probe_answers={"is-enabled": "enabled", "is-active": "active"},
+        answers_after_reload=True,
+    )
 
     assert completed.stdout == "", completed.stdout
     assert completed.returncode != 0
-    assert "still enabled" in completed.stderr
-    assert _probe_timer_state(tmp_path) == ("enabled", "active")
-    assert {unit: (tmp_path / "units" / unit).read_bytes() for unit in PROBE_UNITS} == before
+    assert "probe read-back:" in completed.stderr
+    assert "refusing --install" not in completed.stderr
+    for unit in PROBE_UNITS:
+        assert not (tmp_path / "units" / unit).exists()
 
 
-def test_rollback_after_two_installs_keeps_the_first_installs_disarmed_files(
-    tmp_path: Path,
-) -> None:
-    """Disarmed means inert, not file-absent (R15c): `--rollback` restores the
-    unit files that preceded the LAST `--install`, so after two installs the
-    probe's own files remain -- disarmed, and never re-armed by the rollback."""
+def _seed_operator_probe_units(tmp_path: Path) -> dict[str, bytes]:
+    (tmp_path / "units").mkdir(parents=True, exist_ok=True)
+    seeded = {unit: f"# operator-local {unit}\n".encode() for unit in PROBE_UNITS}
+    for unit, content in seeded.items():
+        (tmp_path / "units" / unit).write_bytes(content)
+    return seeded
+
+
+def _two_installs_then_rollback_restore_the_first_baseline(
+    tmp_path: Path, installer: Path = INSTALLER
+) -> bool:
+    seeded = _seed_operator_probe_units(tmp_path)
     for _ in range(2):
-        assert _run_installer(tmp_path, "--install")[0].returncode == 0
-    enabled, enable_log = _run_installer(tmp_path, "--enable")
+        assert _run_installer(tmp_path, "--install", installer=installer)[0].returncode == 0
+    enabled, enable_log = _run_installer(tmp_path, "--enable", installer=installer)
     assert enabled.returncode == 0, enabled.stderr
     enable_log.write_text("")  # the fake appends; read only the rollback
 
-    completed, log = _run_installer(tmp_path, "--rollback")
-
-    assert completed.returncode == 0, completed.stderr
-    assert json.loads(completed.stdout)["status"] == "rolled_back"
-    repo_units = Path(__file__).resolve().parents[1] / "infra" / "systemd"
-    for unit in PROBE_UNITS:
-        assert (tmp_path / "units" / unit).read_bytes() == (repo_units / unit).read_bytes()
-    assert _probe_timer_state(tmp_path) == ("disabled", "inactive")
+    completed, log = _run_installer(tmp_path, "--rollback", installer=installer)
+    restored = {
+        unit: (tmp_path / "units" / unit).read_bytes()
+        for unit in PROBE_UNITS
+        if (tmp_path / "units" / unit).exists()
+    }
     rearming = [
-        line
-        for line in log.read_text().splitlines()
-        if line.startswith(("--user enable", "--user start"))
+        line for line in log.read_text().splitlines() if line.startswith(("--user enable", "--user start"))
     ]
-    assert rearming == []
+    return (
+        completed.returncode == 0
+        and json.loads(completed.stdout or "{}").get("status") == "rolled_back"
+        and restored == seeded
+        and _probe_timer_state(tmp_path) == ("disabled", "inactive")
+        and rearming == []
+    )
+
+
+def test_rollback_after_two_installs_restores_the_files_that_preceded_the_first_install(
+    tmp_path: Path,
+) -> None:
+    """Disarmed means inert, not file-absent (R15c), and the restore baseline is
+    the FIRST install's: a second install keeps it, so the rollback puts back
+    the unit files that preceded the first install and never re-arms them."""
+    assert _two_installs_then_rollback_restore_the_first_baseline(tmp_path)
+
+
+def test_an_interrupted_first_install_is_recaptured_without_temp_residue(tmp_path: Path) -> None:
+    """No `install.baseline` marker means no complete baseline: partial `.before`
+    captures are replaced, and the temp marker never survives."""
+    state_root = tmp_path / "install-state"
+    state_root.mkdir(mode=0o700, parents=True)
+    for unit in PROBE_UNITS:
+        (state_root / f"{unit}.before").write_bytes(b"partial capture\n")
+    (state_root / "install.baseline.tmp").write_bytes(b"partial\n")
+
+    assert _run_installer(tmp_path, "--install")[0].returncode == 0
+
+    assert sorted(path.name for path in state_root.iterdir()) == ["install.baseline", "protected.before"]
+    completed, _log = _run_installer(tmp_path, "--rollback")
+    assert completed.returncode == 0, completed.stderr
+    for unit in PROBE_UNITS:
+        assert not (tmp_path / "units" / unit).exists()
+
+
+SIBLING_MUTATIONS = [
+    pytest.param(
+        "[[ \"$action\" != --install ]] || probe_units_disarmed || {\n",
+        "[[ \"$action\" != --install ]] || true || {\n",
+        _armed_install_is_refused,
+        id="refusal-deleted",
+    ),
+    pytest.param(
+        '  if [[ ! -f "$state_root/install.baseline" ]]; then\n',
+        "  if true; then\n",
+        _two_installs_then_rollback_restore_the_first_baseline,
+        id="marker-preservation-deleted",
+    ),
+]
+
+
+@pytest.mark.parametrize(("anchor", "replacement", "scenario"), SIBLING_MUTATIONS)
+def test_each_sibling_mutation_flips_its_scenario(
+    tmp_path: Path, anchor: str, replacement: str, scenario
+) -> None:
+    """#2294 D7: exact-anchor mutation of the probe installer's refusal and
+    baseline-marker preservation; the verdict holds on the real installer and
+    flips on the mutant."""
+    source = INSTALLER.read_text()
+    assert source.count(anchor) == 1
+    mutant = tmp_path / "installer-mutant.sh"
+    mutant.write_text(source.replace(anchor, replacement))
+    real_root, mutant_root = tmp_path / "real", tmp_path / "mutant"
+    real_root.mkdir()
+    mutant_root.mkdir()
+
+    assert scenario(real_root)
+    assert not scenario(mutant_root, installer=mutant)
 
 
 def test_r15_without_errtrace_the_install_trap_never_runs(tmp_path: Path) -> None:

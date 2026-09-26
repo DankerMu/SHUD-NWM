@@ -174,11 +174,12 @@ def _registry_evidence(
 def test_r9e_a_replace_uncertain_receipt_never_grades_ok_from_its_after_generated_at(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, where: str
 ) -> None:
-    """A `replace_uncertain` receipt can carry a fresh registry
-    `after_generated_at` for bytes that were rolled back
-    (`test_replace_uncertain_receipt_carries_after_evidence_for_restored_registry_bytes`
-    in the runner suite).  Fresh after (1 h), stale before (150 h): the probe
-    answers with before, from `latest.json` and from a history candidate alike.
+    """A `replace_uncertain` receipt whose provider rollback was NOT verified
+    still carries the fresh post-publish registry `after_generated_at` of bytes
+    that may not be on disk (`test_an_unverified_rollback_keeps_the_committed_evidence`
+    in the runner suite; #2297 fixed only the verified case).  Fresh after
+    (1 h), stale before (150 h): the probe answers with before, from
+    `latest.json` and from a history candidate alike.
     """
     providers = _registry_evidence(after_hours=1.0, before_hours=150.0)
     if where == "latest":

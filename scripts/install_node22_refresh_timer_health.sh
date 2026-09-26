@@ -17,6 +17,12 @@
 # into a retry loop.  UnitFileState is what "unchanged" means for a unit whose
 # activity is driven by its timer.
 #
+# `--install` never disarms an armed probe and never rewrites its restore
+# baseline (#2294 item 6): it refuses while the probe timer or service is armed,
+# BEFORE the protected capture, and the unit `.before` files are captured only
+# while the `install.baseline` marker is absent -- the marker is written last,
+# through a temp file and `mv`, so it marks a complete baseline.
+#
 # `-E` is load-bearing, not decoration: without it an ERR trap set here is NOT
 # inherited by function bodies, so `assert_protected_unchanged` failing inside a
 # function exits 1 without ever running the trap that is supposed to back the
@@ -88,18 +94,40 @@ probe_timer_state() {
   printf '%s\t%s\n' "${enabled:-not-found}" "${active:-inactive}"
 }
 
+# A recorded unit state is exactly `<UnitFileState><TAB><ActiveState>`: two
+# non-empty fields, one tab, no newline.  Anything else fails loudly.
+parse_unit_state() {
+  local state=$1 tabs
+  parsed_enabled=
+  parsed_active=
+  if [[ "$state" == *$'\n'* ]]; then
+    printf 'malformed unit state %q: embedded newline\n' "$state" >&2
+    return 1
+  fi
+  tabs=${state//[!$'\t']/}
+  if [[ ${#tabs} -ne 1 ]]; then
+    printf 'malformed unit state %q: expected 2 tab-separated fields, found %d\n' "$state" "$((${#tabs} + 1))" >&2
+    return 1
+  fi
+  parsed_enabled=${state%%$'\t'*}
+  parsed_active=${state#*$'\t'}
+  if [[ -z "$parsed_enabled" || -z "$parsed_active" ]]; then
+    printf 'malformed unit state %q: empty field\n' "$state" >&2
+    return 1
+  fi
+}
+
 # Restore the probe timer to the state it was in when THIS invocation started,
 # rather than blanket-disarming it: a re-run of `--enable` that trips on a
 # divergent protected read must not disarm a probe that was already armed.
 restore_probe_timer() {
-  local enabled active
-  IFS=$'\t' read -r enabled active <<< "$invocation_timer_state"
-  if [[ "$enabled" == enabled ]]; then
+  parse_unit_state "$invocation_timer_state" || return 1
+  if [[ "$parsed_enabled" == enabled ]]; then
     $systemctl_bin --user enable "$timer" >/dev/null 2>&1 || true
   else
     $systemctl_bin --user disable "$timer" >/dev/null 2>&1 || true
   fi
-  if [[ "$active" == active ]]; then
+  if [[ "$parsed_active" == active ]]; then
     $systemctl_bin --user start "$timer" >/dev/null 2>&1 || true
   else
     $systemctl_bin --user stop "$timer" >/dev/null 2>&1 || true
@@ -107,7 +135,7 @@ restore_probe_timer() {
 }
 
 enable_failure_restore() {
-  restore_probe_timer
+  restore_probe_timer || printf 'probe restore: skipped, the recorded timer state is malformed\n' >&2
   assert_protected_unchanged
 }
 
@@ -177,16 +205,50 @@ assert_probe_units_gone() {
   done
 }
 
+# The refusal's own check, with the same accept sets as the read-back above but
+# its own message: a refusal must never be mistaken for a failed read-back.
+probe_units_disarmed() {
+  local unit enabled active
+  for unit in "$timer" "$service"; do
+    enabled=$($systemctl_bin --user is-enabled "$unit" 2>/dev/null || true)
+    active=$($systemctl_bin --user is-active "$unit" 2>/dev/null || true)
+    armed_unit=$unit
+    armed_enabled=${enabled:-<no answer>}
+    armed_active=${active:-<no answer>}
+    case "$enabled" in
+      disabled | static | not-found | '') ;;
+      *) return 1 ;;
+    esac
+    case "$active" in
+      inactive | failed) ;;
+      *) return 1 ;;
+    esac
+  done
+}
+
+# Refuse before the protected capture, so a refused `--install` leaves every
+# file under the state root -- `protected.before` included -- byte-identical.
+[[ "$action" != --install ]] || probe_units_disarmed || {
+  printf 'refusing --install: %s is %s/%s; run --rollback first\n' "$armed_unit" "$armed_enabled" "$armed_active" >&2
+  exit 1
+}
+
 protected_state > "$state_root/protected.before"
 
 if [[ "$action" == --install ]]; then
-  for unit in "$service" "$timer"; do
-    if [[ -f "$unit_dir/$unit" && ! -L "$unit_dir/$unit" ]]; then
-      install -m 0600 "$unit_dir/$unit" "$state_root/$unit.before"
-    else
-      rm -f "$state_root/$unit.before"
-    fi
-  done
+  # The unit-file baseline is captured once; a later install keeps it.
+  if [[ ! -f "$state_root/install.baseline" ]]; then
+    for unit in "$service" "$timer"; do
+      if [[ -f "$unit_dir/$unit" && ! -L "$unit_dir/$unit" ]]; then
+        install -m 0600 "$unit_dir/$unit" "$state_root/$unit.before"
+      else
+        rm -f "$state_root/$unit.before"
+      fi
+    done
+    rm -f "$state_root/install.baseline.tmp"
+    printf 'complete\n' > "$state_root/install.baseline.tmp"
+    mv -f "$state_root/install.baseline.tmp" "$state_root/install.baseline"
+  fi
   trap 'remove_probe_units; assert_protected_unchanged' ERR
   for unit in "$service" "$timer"; do
     [[ -f "$repo/infra/systemd/$unit" && ! -L "$repo/infra/systemd/$unit" ]]
