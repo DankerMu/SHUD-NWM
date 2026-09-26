@@ -109,7 +109,7 @@
 - [x] 2.4 **Live spec** (`e2e/live-display.spec.ts`): it uses the new lane and still passes the static no-mock guard. The Playwright profile, workers, retries and timeout are unchanged.
 - [x] 2.5 **Mocked and component suites**: any test that relied on `selectRenderedRiver` or on direct dispatch is rewritten to the new API. No mocked spec may emit a live receipt.
 - [x] 2.6 **Checks**: a repo-wide `grep` for `selectRenderedRiver` and `dispatchNowMs` returns nothing. Exempt: `openspec/changes/archive/**`, the main spec `openspec/specs/frontend-river-click-live-evidence/spec.md` (until the archive folds the delta in), this change's own files, and `docs/review-loop-log.jsonl`.
-- [ ] 2.7 **D4 runbooks**:
+- [x] 2.7 **D4 runbooks**:
   - `docs/runbooks/node-27-bringup-checklist.md` C4 ④⑤ and `docs/runbooks/tier-node27-timeseries-storage.md` §4.9: the real-click mechanism, schema 1.1, the pin rule (the discharge-layer `…_shud_shud_riv_…` id family, with the `HOOK_FEATURE_MISMATCH` symptom of a `shud_reach` id), the three-network selection rule with its read-only commands, and the three-receipt acceptance;
   - the "does not claim live PASS" sentence is updated once §5 lands.
 
@@ -124,6 +124,7 @@ Root cause, measured on node-27: maplibre-gl 4.7.1 `queryRenderedFeatures(geomet
 - [x] 2F.3 Round the located client point to whole CSS px, and run the product-hit query at the rounded canvas point (`rounded client − canvas rect`), so the check and the real click hit-test the same pixel (correctness note). The capture tolerance stays 2 px.
 - [x] 2F.4 One test wires the real `createRiverClickPointerCapture().take()` output into `classifyRiverClickPointerCapture` (test+spec note).
 - [x] 2F.5 Runbook discovery block (both runbooks): build the pin from the latest-product `model_id` (`${model_id}_shud_riv_000001`), not `${basin}_shud`, and stop on a non-200 detail or the BLOCKED branch (`set -e` semantics or an explicit `exit 1`). The `runbookContract` `bash -n` case stays green. Add one line naming the hover prefetch before the pointer-down as a 1.0 vs 1.1 difference.
+  - Post-merge correction (2026-09-26, node-27): the `model_id` rule was wrong live. The latest-product `model_id` is a deployment-group id (`dg_…`), so the built pin 404'd and the block stopped fail-closed. Replaced in both runbooks: the read-only query returns each network's single `core.river_segment` id matching `LIKE '%\_shud\_riv\_000001'` and its match count; a count other than 1 is BLOCKED `exit 1`. `runbookContract` asserts the new form.
 
 ## 3. Local verification
 
@@ -166,13 +167,13 @@ Root cause, measured on node-27: maplibre-gl 4.7.1 `queryRenderedFeatures(geomet
 
 ## 5. node-27 post-merge: public-site receipts
 
-- [ ] 5.1 Deploy per design D5:
+- [x] 5.1 Deploy per design D5:
   - `git status --porcelain` → `git pull --ff-only` on `/home/nwm/NWM`;
   - `install --frozen-lockfile`;
   - build to `dist.new`; move any existing `dist.old` aside to a timestamped name; then the two-rename `mv -T` swap, keeping `dist.old` for rollback;
   - record the served `index.html` hash before and after.
-- [ ] 5.2 Produce three receipts against `https://test.nwm.ac.cn` (D4 pins, re-checked live), each in a fresh private run directory, and run the binder on each one.
-- [ ] 5.3 Write the receipt at `openspec/changes/archive/<date>-river-click-trusted-pointer-dispatch/evidence/node27-live-receipt.md` (in the archive PR). It holds the pins and their discovery evidence, the binder result, P95s and durations, `click_dispatch`, and the before/after comparison with §1.3. It is recorded honestly: a FAIL stays a FAIL.
+- [x] 5.2 Produce three receipts against `https://test.nwm.ac.cn` (D4 pins, re-checked live), each in a fresh private run directory, and run the binder on each one.
+- [x] 5.3 Write the receipt at `openspec/changes/archive/<date>-river-click-trusted-pointer-dispatch/evidence/node27-live-receipt.md` (in the archive PR). Done: PASS on all three pins (P95 432.3 / 431.4 / 421.9 ms). It holds the pins and their discovery evidence, the binder result, P95s and durations, `click_dispatch`, and the before/after comparison with §1.3. It is recorded honestly: a FAIL stays a FAIL.
 
 ## Evidence Floor
 

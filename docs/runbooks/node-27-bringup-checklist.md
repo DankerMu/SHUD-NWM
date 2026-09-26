@@ -559,14 +559,17 @@ click 只能人工截图、无法纳入 C4 自动 receipt：
     `river_network_version_id` 在 `core.river_network_version.segment_count`（display 只读角色，
     `BEGIN READ ONLY`）排序，取**最大**、**最接近中位数**（在去掉最大/最小后的其余网中取
     |count − median| 最小，平局取 count 小者）、**最小**三个；不足三个 => BLOCKED，不得凑数。
-  - **pin**：由该网 GFS latest-product（`identity_only=true`）payload 的 `model_id` 构造
-    `${model_id}_shud_riv_000001`（当前即 `<basin_id>_shud_shud_riv_000001`，discharge 图层实际渲染的
-    `…_shud_shud_riv_…` id 族），不要用 `${basin}_shud` 拼接；使用前 segment detail 必须 200。**不要用 `…_shud_reach_…`**：
+  - **pin**：该网在 `core.river_segment` 中**唯一**一条 `river_segment_id LIKE '%\_shud\_riv\_000001'`
+    的河段（当前即 `<basin_id>_shud_shud_riv_000001`，discharge 图层实际渲染的 `…_shud_shud_riv_…` id 族），
+    在同一个 `BEGIN READ ONLY` 查询里取出；匹配数 ≠ 1 即 BLOCKED `exit 1`。**不要用 latest-product 的
+    `model_id` 构造 pin**：它是部署组 id（如 `dg_be70a045…`），拼出的 id 会 404（2026-09-26 node-27 实测）；
+    也不要用 `${basin}_shud` 拼接。使用前 segment detail 必须 200。**不要用 `…_shud_reach_…`**：
     segment detail 对两种 id 都回 200，preflight 能过，但地图 discharge 图层渲染的是
     `shud_riv` id，钩子会以 `HOOK_FEATURE_MISMATCH` 拒绝（lane 记 `HOOK_SELECTION_FAILED`，message
     `hook HOOK_FEATURE_MISMATCH`）。
   - **只读发现命令**（证据落在私有 PIN_DIR，随 receipt 一并记录；`set -euo pipefail`，
-    BLOCKED 分支或任一 pin 的 segment detail 非 200 都会 `exit 1` 停下，不会带着坏 pin 继续）：
+    BLOCKED 分支（不足三网或某网 `_shud_riv_000001` 匹配数 ≠ 1）或任一 pin 的 segment detail 非 200
+    都会 `exit 1` 停下，不会带着坏 pin 继续）：
 
 ```bash
 set -euo pipefail
@@ -586,10 +589,7 @@ while read -r BASIN; do
   if [ "$G" = "200" ] && [ "$I" = "200" ]; then
     RNV=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(0, "utf8")).data.river_network_version_id)' \
       < "$PIN_DIR/gfs-$BASIN.json")
-    MODEL=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(0, "utf8")).data.model_id ?? "")' \
-      < "$PIN_DIR/gfs-$BASIN.json")
-    test -n "$MODEL" || { echo "BLOCKED: $BASIN latest-product has no model_id" >&2; exit 1; }
-    printf '%s\t%s\t%s\n' "$BASIN" "$RNV" "$MODEL" >> "$PIN_DIR/product_networks.tsv"
+    printf '%s\t%s\n' "$BASIN" "$RNV" >> "$PIN_DIR/product_networks.tsv"
   fi
 done < "$PIN_DIR/basin_ids.txt"
 RNV_LIST=$(cut -f2 "$PIN_DIR/product_networks.tsv" | sort -u | paste -sd, -)
@@ -597,28 +597,38 @@ RNV_LIST=$(cut -f2 "$PIN_DIR/product_networks.tsv" | sort -u | paste -sd, -)
 ( set -a; . "$REPO_ROOT/infra/env/display.env"; set +a
   psql "$DATABASE_URL" -X -q -At -F "$(printf '\t')" -v ON_ERROR_STOP=1 -v rnvs="$RNV_LIST" <<'SQL'
 BEGIN READ ONLY;
-SELECT river_network_version_id, segment_count
-FROM core.river_network_version
-WHERE river_network_version_id = ANY (string_to_array(:'rnvs', ','));
+SELECT v.river_network_version_id, v.segment_count,
+  (SELECT min(s.river_segment_id) FROM core.river_segment s
+   WHERE s.river_network_version_id = v.river_network_version_id
+     AND s.river_segment_id LIKE '%\_shud\_riv\_000001'),
+  (SELECT count(*) FROM core.river_segment s
+   WHERE s.river_network_version_id = v.river_network_version_id
+     AND s.river_segment_id LIKE '%\_shud\_riv\_000001')
+FROM core.river_network_version v
+WHERE v.river_network_version_id = ANY (string_to_array(:'rnvs', ','));
 COMMIT;
 SQL
-) > "$PIN_DIR/segment_counts.tsv"
+) > "$PIN_DIR/network_pins.tsv"
 node - "$PIN_DIR" > "$PIN_DIR/pins.tsv" <<'JS' || { echo 'BLOCKED: pin discovery did not produce three pins' >&2; exit 1; }
 const fs = require('fs')
 const dir = process.argv[2]
 const lines = (name) => fs.readFileSync(`${dir}/${name}`, 'utf8').split('\n').filter(Boolean).map((line) => line.split('\t'))
-const counts = new Map(lines('segment_counts.tsv').map(([rnv, count]) => [rnv, Number(count)]))
+const networks = new Map(lines('network_pins.tsv')
+  .map(([rnv, count, pin, matches]) => [rnv, { count: Number(count), pin, matches: Number(matches) }]))
 const rows = lines('product_networks.tsv')
-  .map(([basin, rnv, model]) => ({ basin, model, count: counts.get(rnv) }))
+  .map(([basin, rnv]) => ({ basin, rnv, ...networks.get(rnv) }))
   .filter((row) => Number.isInteger(row.count))
   .sort((a, b) => a.count - b.count || a.basin.localeCompare(b.basin))
+// Pin: the network's single discharge-layer `…_shud_riv_000001` segment in core.river_segment.
+for (const row of rows) {
+  if (row.matches !== 1) { console.error(`BLOCKED: ${row.rnv} has ${row.matches} _shud_riv_000001 segments`); process.exit(1) }
+}
 if (rows.length < 3) { console.error('BLOCKED: fewer than three product networks'); process.exit(1) }
 const n = rows.length
 const median = n % 2 ? rows[(n - 1) / 2].count : (rows[n / 2 - 1].count + rows[n / 2].count) / 2
 const mid = rows.slice(1, -1).reduce((best, row) => (Math.abs(row.count - median) < Math.abs(best.count - median) ? row : best))
 for (const [role, row] of [['largest', rows[n - 1]], ['median', mid], ['smallest', rows[0]]]) {
-  // Pin: the latest-product model_id's first discharge-layer segment (<basin_id>_shud_shud_riv_000001 today).
-  console.log([role, row.basin, `${row.model}_shud_riv_000001`, row.count].join('\t'))
+  console.log([role, row.basin, row.pin, row.count].join('\t'))
 }
 JS
 while IFS="$(printf '\t')" read -r ROLE BASIN SEG COUNT; do
@@ -632,7 +642,7 @@ done < "$PIN_DIR/pins.tsv"
 ```
 
 - **三 receipt 验收**：对 `pins.tsv` 的三行（largest / median / smallest）逐行设置
-  `PLAYWRIGHT_LIVE_RIVER_BASIN_ID=<basin>`（第 2 列）、`PLAYWRIGHT_LIVE_RIVER_SEGMENT_ID=<pin>`（第 3 列，即 `${model_id}_shud_riv_000001`），
+  `PLAYWRIGHT_LIVE_RIVER_BASIN_ID=<basin>`（第 2 列）、`PLAYWRIGHT_LIVE_RIVER_SEGMENT_ID=<pin>`（第 3 列，即该网唯一的 `…_shud_riv_000001`），
   各自重新执行上面的私有运行目录 prelude、exact merged command 与 binder（`set -euo pipefail`）。
   **三次都必须 `BINDER: PASS`**（schema 1.1、`click_dispatch=trusted_pointer_event`、warmup 1 +
   20 samples、`p95_ms < 2000`）门才算过；任一 FAIL/BLOCKED 即 NO-GO，如实记录，不得重跑到绿。完整样本下的

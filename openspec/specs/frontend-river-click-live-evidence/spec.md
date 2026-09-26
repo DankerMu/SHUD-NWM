@@ -9,7 +9,9 @@ Define the gated, no-mock browser oracle and private current-run evidence contra
 ### Requirement: The live river hook MUST be absent by default and select one actual rendered discharge feature
 
 `M11MapLibreSurface` SHALL expose exactly
-`window.__nhmsRiverClickEvidence.selectRenderedRiver(input)` only when the exact
+`window.__nhmsRiverClickEvidence` with the three methods
+`locateRenderedRiver(input)`, `armPointerCapture()` and `takePointerCapture()`,
+only when the exact
 pre-start boolean `window.__NHMS_E2E_HOOKS__ === true` is present. The global
 SHALL register on the gated component mount without exposing a map ref or generic
 query/control method. Without the flag it SHALL be absent and ordinary pointer,
@@ -29,17 +31,41 @@ total results and require exactly one actual rendered feature whose `basin_id`,
 be `river_segment_id` falling back to `segment_id`; if both exist they SHALL be
 equal and the normalized value SHALL match the pin.
 
-Immediately before dispatch, the hook SHALL record browser `performance.now()`
-and pass that same actual feature, product `layerId: "discharge"`, and finite
-input-anchor `event.lngLat` through the existing `onOverlayClick` callback. It
-SHALL resolve only the four normalized feature identities and `dispatchNowMs`.
-It SHALL never synthesize/modify feature properties, fetch an API, expose a body
-or credential, or offer arbitrary application mutation. Rejections SHALL use
-only the closed hook codes `HOOK_INVALID_INPUT`, `HOOK_MAP_UNAVAILABLE`,
-`HOOK_WRONG_LAYER`, `HOOK_MAP_TIMEOUT`, `HOOK_QUERY_FAILED`, `HOOK_QUERY_LIMIT`,
-or `HOOK_FEATURE_MISMATCH`, with bounded redacted messages. Registration and
-cleanup SHALL compare both object identity and a generation token so stale
-cleanup cannot delete a newer hook.
+After the match, `locateRenderedRiver` SHALL convert the projected anchor to
+viewport client coordinates using the map canvas bounding rectangle, rounded to
+whole CSS pixels. It SHALL
+require `document.elementFromPoint` at that point to be the map canvas, and it
+SHALL require the product's own click-target resolution for that point to select
+the matched river feature. The resolver is shared with the product click handler
+and walks station cluster, station point, overlay hit-layer feature and then basin
+fill. It is fed the features rendered at that rounded point (in canvas
+coordinates, queried with an array point geometry, never a whole-viewport query)
+in the interactive layers that currently exist on the map. Otherwise the hook SHALL reject with
+`HOOK_POINT_OCCLUDED`. It SHALL resolve only the four normalized feature
+identities and finite `clientX`/`clientY`. It SHALL NOT call `onOverlayClick` or
+any other product selection callback; no hook method SHALL be able to put a
+feature into the product click path, which only the map's own click event
+reaches.
+
+`armPointerCapture()` SHALL clear any previous capture and install one
+capture-phase `pointerdown` listener on the map canvas that observes every
+pointer-down targeting the canvas, trusted or not. `takePointerCapture()` SHALL
+remove that listener and return, when exactly one trusted event arrived, its
+`timeStamp` (a high-resolution timestamp in the same time origin as
+`performance.now()`), `clientX`, `clientY` and `isTrusted: true`; otherwise a
+closed error code: `HOOK_POINTER_MISSING` when none arrived or the capture was
+not armed, and `HOOK_POINTER_INVALID` when more than one arrived or any arrived
+untrusted.
+
+The hook SHALL never synthesize/modify feature properties, dispatch a DOM or map
+event, fetch an API, expose a body or credential, or offer arbitrary application
+mutation. Rejections SHALL use only the closed hook codes `HOOK_INVALID_INPUT`,
+`HOOK_MAP_UNAVAILABLE`, `HOOK_WRONG_LAYER`, `HOOK_MAP_TIMEOUT`,
+`HOOK_QUERY_FAILED`, `HOOK_QUERY_LIMIT`, `HOOK_FEATURE_MISMATCH`,
+`HOOK_POINT_OCCLUDED`, `HOOK_POINTER_MISSING`, or `HOOK_POINTER_INVALID`, with
+bounded redacted messages. Registration and cleanup SHALL compare both object
+identity and a generation token so stale cleanup cannot delete a newer hook, and
+cleanup SHALL remove any armed listener.
 
 #### Scenario: Ordinary users have no hook surface
 
@@ -48,8 +74,18 @@ cleanup cannot delete a newer hook.
 
 #### Scenario: One current rendered river uses the product click path
 
-- **WHEN** the gate is enabled and exactly one result from the bounded discharge hit-layer query matches the four live identities
-- **THEN** the hook dispatches that unmodified rendered feature through `onOverlayClick` with product layer `discharge`, finite anchor, and t0 immediately before dispatch
+- **WHEN** the gate is enabled, exactly one result from the bounded discharge hit-layer query matches the four live identities, the map canvas is the top element at the anchor point, and the product's click-target resolution at that point selects that river
+- **THEN** the hook resolves the identities and the finite viewport point without calling any product callback, and only a real click at that point, handled by the map's own click event, enters the product click path
+
+#### Scenario: A located point another feature would win is refused
+
+- **WHEN** a DOM element covers the anchor point, or the product's click-target resolution at that point selects a station, a cluster, basin fill or a different river
+- **THEN** `locateRenderedRiver` rejects with `HOOK_POINT_OCCLUDED` and no click is attempted
+
+#### Scenario: Only a trusted pointer event becomes t0
+
+- **WHEN** the capture is armed and a synthetic, untrusted, duplicated, or absent pointer-down reaches the map canvas
+- **THEN** `takePointerCapture()` returns `HOOK_POINTER_INVALID` or `HOOK_POINTER_MISSING` instead of a timestamp
 
 #### Scenario: Invalid, stale, or ambiguous selection fails closed
 
@@ -95,9 +131,15 @@ The spec SHALL set the hook flag with `page.addInitScript` before navigating to
 exactly `/`, leaving shipping defaults `source=best` and `layer=discharge` and no
 identity query parameters. It SHALL run one complete discarded warmup followed
 by exactly 20 serial accepted samples. For every attempt it SHALL arm response
-observation before hook dispatch. Both t0 and t1 SHALL be browser
-`performance.now()` values in that page; t0 is the hook's immediate pre-dispatch
-value, while t1 is read only after:
+observation, arm the pointer capture, locate the river through
+`locateRenderedRiver`, and then click the returned viewport point with the
+browser automation's real mouse input (`page.mouse.click`), which the browser
+delivers as trusted input through the map's own click handling. t0 SHALL be the
+captured trusted pointer-down `timeStamp`; a capture error, or a captured point
+more than 2 CSS pixels from the located point on either axis, SHALL fail the
+attempt with `CLICK_DISPATCH_INVALID`. Locating happens before t0 and is not
+part of a sample. t1 SHALL be browser `performance.now()` in that page, read only
+after:
 
 - exactly one GFS and one IFS `forecast-series` response finish without network
   error and have HTTP status 200..299;
@@ -123,7 +165,7 @@ leave publication/cleanup margin. Workers SHALL be exactly 1 and retries exactly
 `关闭面板` button scoped to `m11-river-forecast-panel` closes that panel, the panel
 unmounts, and no series request appears for a 250-ms quiet interval. The same
 `m11-map-surface` and hook object SHALL stay mounted. The observer SHALL then be
-removed and a fresh one armed before the next dispatch.
+removed and a fresh one armed before the next click.
 
 P95 SHALL sort all 20 finite non-negative warm durations and select nearest-rank
 index `ceil(0.95 * 20) - 1`, exactly index 18. PASS requires `p95_ms < 2000`;
@@ -134,7 +176,8 @@ index `ceil(0.95 * 20) - 1`, exactly index 18. PASS requires `p95_ms < 2000`;
   flag is BLOCKED;
 - missing/invalid pin, supplied malformed URL/path, a registered hook still
   absent after gated readiness, current product/detail/geometry absence or
-  incompatibility, any hook rejection, warmup/sample source/request/network/
+  incompatibility, any hook rejection (reported as `HOOK_SELECTION_FAILED` with the
+  closed hook code in its bounded message), any invalid click dispatch, warmup/sample source/request/network/
   chart/timing/identity error, per-attempt or whole-run timeout, skipped sample,
   internal unexpected error, or `p95_ms >= 2000` is FAIL; and
 - Playwright `skip`, `fixme`, retry, discarded outlier, API-only timing, partial
@@ -144,7 +187,7 @@ The closed BLOCKED failure codes SHALL be `REQUIRED_ENV_MISSING`,
 `RUNTIME_UNAVAILABLE`, and `HOOK_PREREQUISITE_MISSING`. The closed FAIL codes
 SHALL be `CONFIG_INVALID`, `PREFLIGHT_HTTP_ERROR`,
 `PREFLIGHT_RESPONSE_INVALID`, `PRODUCT_UNAVAILABLE`, `IDENTITY_MISMATCH`,
-`SEGMENT_GEOMETRY_INVALID`, `HOOK_SELECTION_FAILED`,
+`SEGMENT_GEOMETRY_INVALID`, `HOOK_SELECTION_FAILED`, `CLICK_DISPATCH_INVALID`,
 `SERIES_REQUEST_INVALID`, `SERIES_RESPONSE_ERROR`, `SAMPLE_TIMEOUT`,
 `WHOLE_RUN_TIMEOUT`, `CHART_INCOMPLETE`, `TIMING_INVALID`, `IDENTITY_DRIFT`,
 `THRESHOLD_EXCEEDED`, and `INTERNAL_ERROR`.
@@ -174,14 +217,16 @@ SHALL be `CONFIG_INVALID`, `PREFLIGHT_HTTP_ERROR`,
 The Node-20-compatible POSIX owner SHALL be
 `apps/frontend/playwright.river-click-evidence.ts`; application/browser modules
 SHALL NOT import `node:fs`. It SHALL validate before writing one Draft 2020-12
-schema-`1.0` document named `nhms-frontend-river-click-live-evidence`. The exact
+schema-`1.1` document named `nhms-frontend-river-click-live-evidence`. The exact
 top-level fields SHALL be:
 
-`artifact`, `schema_version`, `status`, `generated_at`, `started_at`, `ended_at`,
+`artifact`, `schema_version`, `click_dispatch`, `status`, `generated_at`, `started_at`, `ended_at`,
 `threshold_ms`, `percentile_method`, `warmup_count`, `accepted_count`, `origins`,
 `requested_feature`, `rendered_feature`, `gfs`, `ifs`, `warmup`, `samples`,
 `p95_ms`, and `failure`.
 
+`click_dispatch` SHALL be the constant `trusted_pointer_event`. A schema-`1.0`
+document, which described a hook-dispatched click, SHALL NOT validate or bind.
 All objects SHALL reject additional properties. `status` SHALL be
 `PASS|FAIL|BLOCKED`; threshold/method SHALL be `2000`/`nearest-rank`.
 `warmup_count` SHALL equal actual completed warmup count 0..1;
@@ -246,7 +291,7 @@ When a safe receipt path is owned by the running test, it SHALL publish terminal
 FAIL/BLOCKED before throwing; every non-PASS exits nonzero. A missing/unsafe path,
 launcher/browser failure before test ownership, or publication failure SHALL
 emit only a bounded redacted `BLOCKED:`/`FAIL:` diagnostic and no receipt; it
-SHALL never accept an old file. #1895 SHALL bind PASS to an absent unique path,
+SHALL never accept an old file. The node-27 display runbook SHALL bind PASS to an absent unique path,
 private run directory, command time bracket, successful command, exact schema
 readback, and mode 0600.
 
@@ -280,7 +325,7 @@ retries. The new metric SHALL visit only viewer-accessible `/`; the existing
 `/monitoring` test SHALL remain unchanged on the two-URL `live-display`
 profile, and this issue SHALL add no `/ops` visit or claim. A two-URL
 monitoring-only invocation SHALL NOT run river-click `globalSetup` or infer a
-`/` PASS. #1895 SHALL invoke `test:e2e:live-river-click`.
+`/` PASS. The node-27 display runbook SHALL invoke `test:e2e:live-river-click`.
 
 Focused Node publisher/unit tests MAY import the Node owner and write only their
 private temporary fixtures. React/component tests and mocked browser specs SHALL
@@ -289,13 +334,17 @@ responses, `/monitoring`, and `/ops` SHALL not satisfy or imply the `/` click
 metric. Existing frontend `pnpm test`/build ownership, the static live no-mock
 guard, and the root schema/example loop SHALL cover this change; frontend files
 SHALL not be routed through backend `scripts/select_ci_tests.py`. Node-27 live
-execution is deferred to #1895, which SHALL use the exact merged command and
-current pins before accepting this capability.
+execution belongs to this capability: after the frontend build carrying it is
+deployed, the runbook SHALL produce one receipt per pin for three current product
+river networks - the largest, one near the median, and the smallest by segment
+count - each pinned to that network's discharge-layer segment id and checked
+against live `/api/v1` first, and SHALL accept the gate only when all three bind
+as PASS.
 
 #### Scenario: Mocked or sibling evidence cannot satisfy live readiness
 
 - **WHEN** pure helpers, hook components, mocked browser tests, screenshots, `/monitoring`, or `/ops` pass
-- **THEN** none emits or implies a live river-click PASS and #1895 remains blocked
+- **THEN** none emits or implies a live river-click PASS
 
 #### Scenario: Live spec attempts a broad API mock
 
@@ -304,5 +353,5 @@ current pins before accepting this capability.
 
 #### Scenario: Runbook consumes exact merged evidence
 
-- **WHEN** #1895 runs the merged live profile on node-27 with current pins and an absent private receipt path
-- **THEN** it accepts the click gate only from the current command's schema-valid mode-0600 PASS with matching origins, feature/products, counts, nearest-rank method, and P95 below 2000 ms
+- **WHEN** the node-27 runbook runs the merged live profile for each of the three current pins with an absent private receipt path
+- **THEN** it accepts the click gate only from the three current commands' schema-1.1 mode-0600 PASS receipts with `click_dispatch=trusted_pointer_event`, matching origins, feature/products, counts, nearest-rank method, and P95 below 2000 ms
