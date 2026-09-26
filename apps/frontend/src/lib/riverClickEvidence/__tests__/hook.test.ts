@@ -94,15 +94,30 @@ function makeCanvas(rect = { left: 100, top: 50 }): FakeCanvas {
   return canvas
 }
 
+/** A different rendered segment on the same hit layer (a whole-viewport query sees many). */
+function otherRiverFeature() {
+  return makeFeature({
+    id: 'feature-other',
+    properties: { ...makeFeature().properties, river_segment_id: 'seg-OTHER', segment_id: 'seg-OTHER' },
+  })
+}
+
 /**
- * Map stand-in: the 16px box query (array geometry) returns `boxResults`; the
- * point query the product click path would issue returns `pointResults(layers)`.
- * An absent layer passed to queryRenderedFeatures throws, like MapLibre's
- * ErrorEvent for an unknown layer id.
+ * Map stand-in mirroring maplibre-gl 4.7.1 `queryRenderedFeatures(geometryOrOptions, options)`
+ * geometry semantics: only an array (or a `Point` instance) is geometry. Box
+ * corners `[[x0, y0], [x1, y1]]` return `boxResults` (the 16px hook box); a
+ * point `[x, y]` returns `pointResults(layers)` (what the product click path
+ * sees at that pixel); ANY other first argument, such as a plain `{x, y}`, is
+ * the options object and the query covers the WHOLE viewport, returning
+ * `viewportResults(layers)` — by default another segment first, as a real
+ * viewport would. An absent layer passed to a point/viewport query throws, like
+ * MapLibre's ErrorEvent for an unknown layer id.
  */
 function makeMap(options: {
   boxResults?: unknown
   pointResults?: (layers: string[]) => unknown[]
+  viewportResults?: (layers: string[]) => unknown[]
+  project?: { x: number; y: number }
   existingLayers?: string[]
   canvas?: FakeCanvas
   overrides?: Record<string, unknown>
@@ -113,13 +128,16 @@ function makeMap(options: {
     loaded: () => true,
     isStyleLoaded: () => true,
     fitBounds: vi.fn(),
-    project: vi.fn(() => ({ x: 40, y: 40 })),
+    project: vi.fn(() => options.project ?? { x: 40, y: 40 }),
     queryRenderedFeatures: vi.fn((geometry: unknown, query: { layers: string[] }) => {
-      if (Array.isArray(geometry)) return options.boxResults ?? [makeFeature()]
+      const isGeometry = Array.isArray(geometry)
+      if (isGeometry && typeof geometry[0] !== 'number') return options.boxResults ?? [makeFeature()]
       for (const layer of query.layers) {
         if (!existing.has(layer)) throw new Error(`layer ${layer} does not exist`)
       }
-      return options.pointResults ? options.pointResults(query.layers) : [makeFeature()]
+      const point = options.pointResults ? options.pointResults(query.layers) : [makeFeature()]
+      if (isGeometry) return point
+      return options.viewportResults ? options.viewportResults(query.layers) : [otherRiverFeature(), ...point]
     }),
     getLayer: vi.fn((id: string) => (existing.has(id) ? { id } : undefined)),
     getCanvas: vi.fn(() => canvas),
@@ -269,7 +287,7 @@ describe('river-click locate core (bounded query, exact match)', () => {
     const result = await locate(map)
     expect(result.ok).toBe(true)
     expect(map.fitBounds).toHaveBeenCalledWith([[100, 30], [102, 32]], { padding: 48, duration: 0, maxZoom: 14 })
-    expect(map.queryRenderedFeatures).toHaveBeenCalledWith([{ x: 32, y: 32 }, { x: 48, y: 48 }], { layers: [HIT] })
+    expect(map.queryRenderedFeatures).toHaveBeenCalledWith([[32, 32], [48, 48]], { layers: [HIT] })
   })
 
   it('rejects 65 total query results as HOOK_QUERY_LIMIT', async () => {
@@ -357,7 +375,40 @@ describe('river-click locate: the located point must reach the river through the
       clientY: 90,
     })
     expect(elementFromPoint).toHaveBeenCalledWith(140, 90)
-    expect(map.queryRenderedFeatures).toHaveBeenCalledWith({ x: 40, y: 40 }, { layers: [M11_BASIN_FILL_LAYER_ID, HIT] })
+    expect(map.queryRenderedFeatures).toHaveBeenCalledWith([40, 40], { layers: [M11_BASIN_FILL_LAYER_ID, HIT] })
+  })
+
+  it('queries the product click path at the POINT (array geometry), not the whole viewport: another segment first in the viewport does not occlude the pin', async () => {
+    // Live regression (#1970 §4.3 on ef19c721e): maplibre 4.7.1 reads a plain
+    // {x, y} first argument as options and queries the whole viewport, where the
+    // resolver's first-in-layer pick is another segment -> HOOK_POINT_OCCLUDED on
+    // every real pin. At the pixel itself only the pin is rendered.
+    const river = makeFeature()
+    const { map } = makeMap({
+      boxResults: [river],
+      pointResults: () => [river],
+      viewportResults: () => [otherRiverFeature(), river],
+    })
+    const result = await locate(map)
+    expect(result).toMatchObject({ ok: true, output: { normalized: { riverSegmentId: 'seg-001' }, clientX: 140, clientY: 90 } })
+    const productCall = (map.queryRenderedFeatures as ReturnType<typeof vi.fn>).mock.calls[1]
+    expect(productCall[0]).toEqual([40, 40])
+  })
+
+  it('rounds the located client point to whole CSS px and runs the product-hit query at that rounded point in canvas coordinates', async () => {
+    const canvas = makeCanvas({ left: 100.25, top: 50 })
+    const { map } = makeMap({ canvas, project: { x: 40.375, y: 40.625 } })
+    const elementFromPoint = vi.fn(() => canvas)
+    const result = await locate(map, { elementFromPoint })
+    // client = round(100.25 + 40.375, 50 + 40.625) = round(140.625, 90.625) = (141, 91); canvas point = client - rect.
+    expect(result).toMatchObject({ ok: true, output: { clientX: 141, clientY: 91 } })
+    expect(elementFromPoint).toHaveBeenCalledWith(141, 91)
+    const productCall = (map.queryRenderedFeatures as ReturnType<typeof vi.fn>).mock.calls[1]
+    expect(productCall[0]).toEqual([40.75, 41])
+    // The 16px exactly-one box stays centred on the raw projection.
+    expect(map.queryRenderedFeatures).toHaveBeenNthCalledWith(1, [[32.375, 32.625], [48.375, 48.625]], { layers: [HIT] })
+    const { hook } = makeHook(makeMap({ canvas, project: { x: 40.375, y: 40.625 } }).map)
+    await expect(hook.locateRenderedRiver(selectionInput())).resolves.toMatchObject({ clientX: 141, clientY: 91 })
   })
 
   it('filters an absent interactive layer id through map.getLayer so the point query raises no map error', async () => {
@@ -367,7 +418,7 @@ describe('river-click locate: the located point must reach the river through the
     })
     expect(result.ok).toBe(true)
     expect(map.getLayer).toHaveBeenCalledWith(M11_BASIN_FILL_LAYER_ID)
-    expect(map.queryRenderedFeatures).toHaveBeenCalledWith({ x: 40, y: 40 }, { layers: [HIT] })
+    expect(map.queryRenderedFeatures).toHaveBeenCalledWith([40, 40], { layers: [HIT] })
   })
 
   it('rejects HOOK_POINT_OCCLUDED when a DOM element covers the point (a real click would hit that control)', async () => {
@@ -567,12 +618,12 @@ describe('river-click native map adapter (maplibre-gl Map -> RiverClickHookMap)'
     map.fitBounds(bbox, { padding: 48, duration: 0, maxZoom: 14 })
     expect(nativeMap.fitBounds).toHaveBeenCalledWith(bbox, { padding: 48, duration: 0, maxZoom: 14 })
     expect(map.project([101, 31])).toEqual({ x: 102, y: 32 })
-    const box = [{ x: 40, y: 40 }, { x: 56, y: 56 }] as [{ x: number; y: number }, { x: number; y: number }]
+    const box: [[number, number], [number, number]] = [[40, 40], [56, 56]]
     const features = map.queryRenderedFeatures(box, { layers: [HIT] })
     expect(nativeMap.queryRenderedFeatures).toHaveBeenCalledWith(box, { layers: [HIT] })
     expect(features[0]).toBe((nativeMap.queryRenderedFeatures as ReturnType<typeof vi.fn>).mock.results[0].value[0])
-    map.queryRenderedFeatures({ x: 40, y: 40 }, { layers: [HIT] })
-    expect(nativeMap.queryRenderedFeatures).toHaveBeenLastCalledWith({ x: 40, y: 40 }, { layers: [HIT] })
+    map.queryRenderedFeatures([40, 40], { layers: [HIT] })
+    expect(nativeMap.queryRenderedFeatures).toHaveBeenLastCalledWith([40, 40], { layers: [HIT] })
     expect(map.getLayer(HIT)).toEqual({ id: HIT })
     expect(map.getLayer('absent')).toBeUndefined()
     // The native canvas element itself (identity), never a copy.

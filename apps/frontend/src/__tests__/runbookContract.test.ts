@@ -521,6 +521,8 @@ describe('river-click runbook contract', () => {
       expect(section).toContain('click_dispatch=trusted_pointer_event')
       expect(section).toMatch(/schema-?`?1\.1/)
       expect(section).not.toMatch(/receipt 是 schema-1\.0|schema-`1\.0` artifacts/)
+      // The mouse move before press fires the hover latest-product prefetch before pointer-down (1.0 vs 1.1).
+      expect(section).toContain('prefetchHydroMetLatestProducts')
       // Pin rule: discharge-layer id family; shud_reach fails with HOOK_FEATURE_MISMATCH.
       expect(section).toContain('_shud_shud_riv_000001')
       expect(section).toContain('…_shud_reach_…')
@@ -532,7 +534,14 @@ describe('river-click runbook contract', () => {
       const discovery = extractBashBlocks(section).find((block) => block.includes('.nhms-issue1970-riverclick-pins-XXXXXX'))
       expect(discovery, 'read-only pin discovery block').toBeDefined()
       expect(discovery).toContain('identity_only=true')
-      expect(discovery).toContain('_shud_shud_riv_000001')
+      // Pin built from the latest-product model_id, never a `${basin}_shud` concatenation.
+      expect(discovery).toContain('.data.model_id')
+      expect(discovery).toContain('${row.model}_shud_riv_000001')
+      expect(discovery).not.toMatch(/\$\{(row\.basin|BASIN|basin)\}_shud/)
+      // BLOCKED and a non-200 segment detail actually stop the block.
+      expect(discovery).toMatch(/^set -euo pipefail$/m)
+      expect(discovery).toMatch(/<<'JS' \|\| \{ echo 'BLOCKED: [^']+' >&2; exit 1; \}/)
+      expect(discovery).toMatch(/test "\$CODE" = "200" \|\| \{ echo "FAIL: [^"]+" >&2; exit 1; \}/)
       expect(discovery).not.toMatch(/\b(INSERT|UPDATE|DELETE|ALTER|DROP|TRUNCATE)\b/)
       bashSyntaxCheck(discovery as string)
     }

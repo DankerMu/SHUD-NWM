@@ -90,6 +90,12 @@ const ORDINARY_CLICK_FEATURE = {
   },
 }
 
+const VIEWPORT_OTHER_FEATURE = {
+  ...ORDINARY_CLICK_FEATURE,
+  id: 'feature-other',
+  properties: { ...ORDINARY_CLICK_FEATURE.properties, river_segment_id: 'seg-OTHER', segment_id: 'seg-OTHER' },
+}
+
 const ORDINARY_CLICK_LNGLAT = { lng: 100.5, lat: 30.5 }
 
 function ordinaryMapClickEvent() {
@@ -140,9 +146,14 @@ function installStubMap(options: { pointFeatures?: (layers: string[]) => unknown
     isStyleLoaded: () => true,
     fitBounds: vi.fn(),
     project: vi.fn((coord: [number, number]) => ({ x: 40 + (coord[0] - 100) * 10, y: 40 + (coord[1] - 30) * 10 })),
+    // maplibre-gl 4.7.1 semantics: only an array is geometry (box corners or a
+    // [x, y] point); any other first argument is options and the query covers
+    // the whole viewport, where another segment renders first.
     queryRenderedFeatures: vi.fn((geometry: unknown, query: { layers: string[] }) => {
-      if (Array.isArray(geometry)) return [ORDINARY_CLICK_FEATURE]
-      return options.pointFeatures ? options.pointFeatures(query.layers) : [ORDINARY_CLICK_FEATURE]
+      const point = options.pointFeatures ? options.pointFeatures(query.layers) : [ORDINARY_CLICK_FEATURE]
+      if (!Array.isArray(geometry)) return [VIEWPORT_OTHER_FEATURE, ...point]
+      if (typeof geometry[0] !== 'number') return [ORDINARY_CLICK_FEATURE]
+      return point
     }),
     getLayer: vi.fn((id: string) => (layers.has(id) ? { id } : undefined)),
     getCanvas: () => canvas,
@@ -248,7 +259,7 @@ describe('M11MapLibreSurface river-click hook', () => {
     })
     expect(onOverlayClick).not.toHaveBeenCalled()
     // The product point query uses the current interactive layer ids (read through a ref).
-    expect(map.queryRenderedFeatures).toHaveBeenCalledWith({ x: 45, y: 45 }, { layers: ['m11-discharge-line-hit'] })
+    expect(map.queryRenderedFeatures).toHaveBeenCalledWith([45, 45], { layers: ['m11-discharge-line-hit'] })
   })
 
   it('reads the render-local station flag through a ref: with stations shown a station at the point makes the located point occluded', async () => {

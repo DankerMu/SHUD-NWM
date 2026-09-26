@@ -26,13 +26,15 @@ be `river_segment_id` falling back to `segment_id`; if both exist they SHALL be
 equal and the normalized value SHALL match the pin.
 
 After the match, `locateRenderedRiver` SHALL convert the projected anchor to
-viewport client coordinates using the map canvas bounding rectangle. It SHALL
+viewport client coordinates using the map canvas bounding rectangle, rounded to
+whole CSS pixels. It SHALL
 require `document.elementFromPoint` at that point to be the map canvas, and it
 SHALL require the product's own click-target resolution for that point to select
 the matched river feature. The resolver is shared with the product click handler
 and walks station cluster, station point, overlay hit-layer feature and then basin
-fill. It is fed the features rendered at that point in the interactive layers that
-currently exist on the map. Otherwise the hook SHALL reject with
+fill. It is fed the features rendered at that rounded point (in canvas
+coordinates, queried with an array point geometry, never a whole-viewport query)
+in the interactive layers that currently exist on the map. Otherwise the hook SHALL reject with
 `HOOK_POINT_OCCLUDED`. It SHALL resolve only the four normalized feature
 identities and finite `clientX`/`clientY`. It SHALL NOT call `onOverlayClick` or
 any other product selection callback; no hook method SHALL be able to put a

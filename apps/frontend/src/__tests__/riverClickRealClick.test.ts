@@ -8,6 +8,12 @@ import {
   RIVER_CLICK_ARM_CAPTURE_SCRIPT,
   RIVER_CLICK_TAKE_CAPTURE_SCRIPT,
 } from '../../playwright.river-click-lane'
+import { classifyRiverClickPointerCapture as classifyAttemptCapture } from '../../playwright.river-click-lane-attempt'
+import {
+  createRiverClickPointerCapture,
+  type RiverClickHookCanvas,
+  type RiverClickPointerEventLike,
+} from '../lib/riverClickEvidence/hook'
 import { FAKE_LOCATED as LOCATED, fakeLocateThenClick as locateThenClick, makeFakePage, type RiverClickFakePageState } from '../test/riverClickFakePage'
 import { config, emitSeriesPair, freshState, isLocate, makeIdentity } from '../test/riverClickLaneFixtures'
 
@@ -209,5 +215,69 @@ describe('river-click lane attempt: one real click, t0 from the trusted pointer 
     expect(classifyRiverClickPointerCapture({ timeStamp: 5, clientX: 102, clientY: 198, isTrusted: true }, located)).toEqual({ ok: true, timeStamp: 5 })
     expect(classifyRiverClickPointerCapture({ timeStamp: 5, clientX: 102.001, clientY: 200, isTrusted: true }, located).ok).toBe(false)
     expect(classifyRiverClickLocateOutcome({ ok: true, value: LOCATED })).toEqual({ ok: true, located: LOCATED })
+  })
+})
+
+/**
+ * 2F.4: the page-side capture's REAL `take()` output, from a listener installed
+ * on a jsdom `<canvas>`, feeds the lane's classifier unchanged. jsdom cannot
+ * produce `isTrusted === true` (the property is an own, non-configurable
+ * [LegacyUnforgeable] attribute, so `Object.defineProperty` throws). The
+ * untrusted case is therefore a fully real `dispatchEvent`; the trusted case
+ * invokes the listener the capture registered on the real canvas directly, with
+ * the fields of a real jsdom `pointerdown` MouseEvent and `isTrusted: true`.
+ */
+describe('river-click capture -> lane classifier round-trip (real createRiverClickPointerCapture().take())', () => {
+  function armedCanvas() {
+    const canvas = document.createElement('canvas')
+    document.body.appendChild(canvas)
+    const addSpy = vi.spyOn(canvas, 'addEventListener')
+    const capture = createRiverClickPointerCapture({ getCanvas: () => canvas as unknown as RiverClickHookCanvas })
+    capture.arm()
+    expect(addSpy).toHaveBeenCalledWith('pointerdown', expect.any(Function), { capture: true })
+    const listener = addSpy.mock.calls[0][1] as unknown as (event: RiverClickPointerEventLike) => void
+    const trustedDown = (clientX: number, clientY: number) => {
+      const real = new MouseEvent('pointerdown', { clientX, clientY, bubbles: true })
+      listener({ isTrusted: true, timeStamp: real.timeStamp, clientX: real.clientX, clientY: real.clientY, target: canvas })
+      return real.timeStamp
+    }
+    return { canvas, capture, trustedDown }
+  }
+
+  it('accepts a single trusted capture within 2 CSS px and returns its timeStamp as t0', () => {
+    const { canvas, capture, trustedDown } = armedCanvas()
+    try {
+      const timeStamp = trustedDown(142, 88)
+      const raw = capture.take()
+      expect(raw).toEqual({ timeStamp, clientX: 142, clientY: 88, isTrusted: true })
+      expect(classifyAttemptCapture(raw, { clientX: 140, clientY: 90 })).toEqual({ ok: true, timeStamp })
+    } finally {
+      canvas.remove()
+    }
+  })
+
+  it('rejects a trusted capture displaced more than 2 CSS px', () => {
+    const { canvas, capture, trustedDown } = armedCanvas()
+    try {
+      trustedDown(143, 90)
+      expect(classifyAttemptCapture(capture.take(), { clientX: 140, clientY: 90 })).toEqual({
+        ok: false,
+        message: 'pointer capture is displaced more than 2 CSS px from the located point',
+      })
+    } finally {
+      canvas.remove()
+    }
+  })
+
+  it('rejects a real untrusted dispatchEvent and a missing capture with the closed hook code in the message', () => {
+    const { canvas, capture } = armedCanvas()
+    try {
+      canvas.dispatchEvent(new MouseEvent('pointerdown', { clientX: 140, clientY: 90, bubbles: true }))
+      expect(classifyAttemptCapture(capture.take(), { clientX: 140, clientY: 90 })).toEqual({ ok: false, message: 'pointer capture HOOK_POINTER_INVALID' })
+      capture.arm()
+      expect(classifyAttemptCapture(capture.take(), { clientX: 140, clientY: 90 })).toEqual({ ok: false, message: 'pointer capture HOOK_POINTER_MISSING' })
+    } finally {
+      canvas.remove()
+    }
   })
 })

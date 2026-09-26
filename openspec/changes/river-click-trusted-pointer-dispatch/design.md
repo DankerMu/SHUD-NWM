@@ -64,7 +64,7 @@ window.__nhmsRiverClickEvidence = {
 2. converts the result to viewport client coordinates with the canvas's `getBoundingClientRect()`;
 3. runs a **DOM check**: `document.elementFromPoint(clientX, clientY)` must be the map canvas. DOM elements above the canvas include the layer and basemap switchers (`z-[120]`), the control bar, the navigation, scale and attribution controls, basin label markers and status overlays. A real click on one of them would activate that control; a layer switch, for example, clears the popup (`OverviewPage.tsx:399-402`). Otherwise the hook rejects with `HOOK_POINT_OCCLUDED`;
 4. runs a **product-hit check**, which must be the product's own priority walk and not "first result overall". Extract a pure resolver from `handleM11MapClick` (`m11MapInteractions.ts:82-108`): station cluster → station point (only when stations are shown) → the first feature in the overlay hit layer → basin fill. Both `handleM11MapClick` and the hook then use it, so they cannot drift apart.
-   - The hook feeds it what react-map-gl would pass for a click at that point: `queryRenderedFeatures(point, {layers: interactiveLayerIds.filter(id => map.getLayer(id))})`. react-map-gl 7.1.9 filters the same way (`mapbox.js:473`), and an absent layer id makes MapLibre 4.7.1 raise an `ErrorEvent` that the map's error banner would show.
+   - The hook feeds it what react-map-gl would pass for a click at that point: `queryRenderedFeatures([x, y], {layers: interactiveLayerIds.filter(id => map.getLayer(id))})`, at the canvas point of the client point rounded to whole CSS px (the pixel the real click hit-tests). The point MUST be an array: MapLibre 4.7.1 treats a plain `{x, y}` object as the options argument and queries the whole viewport (found by the first §4.3 run, fixed in 2F.1). react-map-gl 7.1.9 filters the same way (`mapbox.js:473`), and an absent layer id makes MapLibre 4.7.1 raise an `ErrorEvent` that the map's error banner would show.
    - `interactiveLayerIds` and the station flag are render-local, so the hook reads them through refs kept current each render, like `overlayRef`.
    - The resolver must return the overlay target with the matched river identity. Otherwise the hook rejects with `HOOK_POINT_OCCLUDED`, because a real click at that point would open something else.
 
@@ -107,7 +107,7 @@ The existing 15 s per-attempt and 360 s whole-run deadlines apply unchanged.
 - The new FAIL code `CLICK_DISPATCH_INVALID` joins the closed set.
 - The PASS / FAIL / BLOCKED rules are otherwise unchanged.
 
-The Node semantic validator (`playwright.river-click-evidence.ts`), the JSON schema, the three examples and the binder all move to 1.1 together. The binder rejects 1.0 with a fixed `BINDER:` line.
+The semantic validator (`src/lib/riverClickEvidence/receipt.ts`, imported by `playwright.river-click-evidence.ts`), the JSON schema, the three examples and the binder all move to 1.1 together. The binder rejects 1.0 with a fixed `BINDER:` line.
 
 No compatibility path is kept for 1.0. The only consumer is the binder recipe in the runbooks.
 
@@ -117,7 +117,7 @@ No compatibility path is kept for 1.0. The only consumer is the binder recipe in
 
 For each of the three networks, the operator records the discovery evidence in the receipt directory and runs the unchanged single-pin command once:
 - **Networks:** from `/api/v1/basins`, keep the basins whose GFS and IFS `latest-product?identity_only=true` are both 200. Rank them by `core.river_network_version.segment_count`, read-only, and take the largest, the one nearest the median, and the smallest.
-- **Pin:** the network's `<basin>_shud_shud_riv_000001`, the discharge-layer id family. Check that segment detail returns 200. Never use a `…_shud_reach_…` id: it is not the id the discharge layer renders, and it fails with `HOOK_FEATURE_MISMATCH`.
+- **Pin:** the network's `${model_id}_shud_riv_000001` (`model_id` from the identity_only latest-product payload; today `<basin>_shud_shud_riv_000001`), the discharge-layer id family. Check that segment detail returns 200. Never use a `…_shud_reach_…` id: it is not the id the discharge layer renders, and it fails with `HOOK_FEATURE_MISMATCH`.
 - **Acceptance:** three binder-PASS receipts.
 
 ### D5 — Verification
@@ -135,8 +135,9 @@ For each of the three networks, the operator records the discovery evidence in t
      - Record a redacted check after sourcing and before launch: the `DATABASE_URL` user is `nhms_display_ro`, and `NHMS_SERVICE_ROLE=display_readonly`. The display API opens its connection from `DATABASE_URL` only (`apps/api/routes/hydro_display.py:238`, `apps/api/routes/pipeline.py:148`). `NHMS_DISPLAY_READONLY_DATABASE_URL` is read only by the validation tooling, so exporting it would prove nothing.
      - Run `/home/nwm/NWM/.venv/bin/python -m uvicorn apps.api.main:app --host 127.0.0.1 --port <free> --workers 1`, with cwd and `PYTHONPATH` set to the worktree. Never use `scripts/ops/start-display-api.sh`, which manages the production unit and port 8080.
      - Record `apps.api.startup_wiring.FRONTEND_DIST_DIR` as the process resolves it (it is repo-relative to the imported code, `startup_wiring.py:12-13`), and check that the served `index.html` hash equals the worktree `dist/index.html`.
-  3. Run the lane three times against `http://127.0.0.1:<port>` with the three pins.
-  4. Stop the process by its recorded PID and delete the private cache directory.
+  3. Warm the private MVT cache before each pin: one page load of `/` to network idle, then one hook locate for that pin (fit + idle; it never clicks). The private cache starts empty; on the first §4.3 run (ef19c721e) a cold national z3 river tile took longer than the whole 15 s warmup budget, so shj timed out before any click. The public site's cache is warm from real traffic, so the warm-up only restores that condition. It is recorded in the receipt and is not part of any sample.
+  4. Run the lane three times against `http://127.0.0.1:<port>` with the three pins.
+  5. Stop the process by its recorded PID and delete the private cache directory.
 
   The production `:8080` process, `/home/nwm/NWM` files and the production MVT cache are not touched. The DB is only read, through the read-only role, with one worker's pool.
 - **Pre-merge gate.** For all three pins: rc 0, status PASS, `click_dispatch=trusted_pointer_event`, one warmup plus 20 complete samples, and no `CLICK_DISPATCH_INVALID`, `HOOK_*` or `SERIES_REQUEST_INVALID` failure.

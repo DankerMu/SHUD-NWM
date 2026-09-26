@@ -39,8 +39,14 @@ export interface RiverClickHookMap {
   isStyleLoaded(): boolean
   fitBounds(bounds: [[number, number], [number, number]], options: { padding: number; duration: number; maxZoom: number }): unknown
   project(coord: [number, number]): { x: number; y: number }
+  /**
+   * Geometry is ALWAYS an array: a canvas point `[x, y]` or box corners
+   * `[[x0, y0], [x1, y1]]`. MapLibre 4.7.1 treats only a `Point` instance or
+   * an array as geometry; any other first argument (e.g. a plain `{x, y}`)
+   * is taken as the options object and the query covers the whole viewport.
+   */
   queryRenderedFeatures(
-    geometry: { x: number; y: number } | [{ x: number; y: number }, { x: number; y: number }],
+    geometry: [number, number] | [[number, number], [number, number]],
     options: { layers: string[] },
   ): unknown[]
   getLayer(id: string): unknown
@@ -333,10 +339,12 @@ function sameIdentity(a: RiverClickNormalizedFeatureIdentity, input: RiverClickH
  * identities match.
  *
  * It then proves a REAL click at the anchor reaches that river through the
- * product path: the viewport client point (canvas rect + projected point)
- * must hit the map canvas itself (`elementFromPoint`), and the product's own
- * click-target resolution, fed exactly what react-map-gl would hand a click
- * there (`queryRenderedFeatures(point, {layers: interactive ids that exist})`),
+ * product path: the viewport client point (canvas rect + projected point,
+ * rounded to whole CSS px) must hit the map canvas itself
+ * (`elementFromPoint`), and the product's own click-target resolution, fed
+ * exactly what react-map-gl would hand a click there
+ * (`queryRenderedFeatures([x, y], {layers: interactive ids that exist})` at
+ * the rounded point in canvas coordinates),
  * must select the overlay hit-layer feature with the pinned identity. Either
  * failing is HOOK_POINT_OCCLUDED. It never dispatches anything.
  */
@@ -402,9 +410,9 @@ export async function locateRenderedRiverFeature({
     return { ok: false, code: 'HOOK_QUERY_FAILED', message: 'river-click hook anchor projection failed' }
   }
   const half = HOOK_QUERY_SIZE_PX / 2
-  const queryBox: [{ x: number; y: number }, { x: number; y: number }] = [
-    { x: projected.x - half, y: projected.y - half },
-    { x: projected.x + half, y: projected.y + half },
+  const queryBox: [[number, number], [number, number]] = [
+    [projected.x - half, projected.y - half],
+    [projected.x + half, projected.y + half],
   ]
 
   let rawResults: unknown
@@ -445,19 +453,26 @@ export async function locateRenderedRiverFeature({
   }
 
   // Viewport client point of the anchor: the canvas rect origin plus the
-  // canvas-relative projected point.
+  // canvas-relative projected point, rounded to whole CSS px (the pixel a real
+  // pointer at that point hits). The product-hit query below runs at the same
+  // rounded point in canvas coordinates, so the check and the click hit-test
+  // the same pixel.
   let canvas: RiverClickHookCanvas
   let clientX: number
   let clientY: number
+  let canvasX: number
+  let canvasY: number
   try {
     canvas = map.getCanvas()
     const rect = canvas.getBoundingClientRect()
-    clientX = rect.left + projected.x
-    clientY = rect.top + projected.y
+    clientX = Math.round(rect.left + projected.x)
+    clientY = Math.round(rect.top + projected.y)
+    canvasX = clientX - rect.left
+    canvasY = clientY - rect.top
   } catch {
     return { ok: false, code: 'HOOK_QUERY_FAILED', message: 'river-click hook canvas client point is unavailable' }
   }
-  if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) {
+  if (!Number.isFinite(clientX) || !Number.isFinite(clientY) || !Number.isFinite(canvasX) || !Number.isFinite(canvasY)) {
     return { ok: false, code: 'HOOK_QUERY_FAILED', message: 'river-click hook canvas client point is not finite' }
   }
 
@@ -475,7 +490,9 @@ export async function locateRenderedRiverFeature({
 
   // Product-hit check: exactly what react-map-gl hands the click handler for
   // this point (interactive ids filtered by map.getLayer, so an absent layer id
-  // never raises a map ErrorEvent), resolved by the product's own walk.
+  // never raises a map ErrorEvent), resolved by the product's own walk. The
+  // point MUST be an array: a plain {x, y} is read by MapLibre as options and
+  // queries the whole viewport.
   let interactiveFeatures: unknown
   try {
     const layers = productClick.getInteractiveLayerIds().filter((id) => {
@@ -485,7 +502,7 @@ export async function locateRenderedRiverFeature({
         return false
       }
     })
-    interactiveFeatures = map.queryRenderedFeatures({ x: projected.x, y: projected.y }, { layers })
+    interactiveFeatures = map.queryRenderedFeatures([canvasX, canvasY], { layers })
   } catch {
     return { ok: false, code: 'HOOK_QUERY_FAILED', message: 'river-click hook interactive feature query failed' }
   }

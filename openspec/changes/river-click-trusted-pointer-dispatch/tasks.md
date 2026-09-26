@@ -88,7 +88,7 @@
   - the gate is absent without the flag;
   - locate resolves identity and point and calls no product callback; a spy on `onOverlayClick` is never called;
   - a DOM-covered point, and a point where the resolver picks a station, a cluster, basin fill or another river, each reject;
-  - `handleM11MapClick` behaviour is unchanged after the resolver is extracted (its existing tests stay green);
+  - `handleM11MapClick` behaviour is unchanged after the resolver is extracted (pinned by the new `m11MapInteractions.test.ts`: its 6 cases are green both before and after the extraction; there were no earlier tests);
   - an absent interactive layer id is filtered out and raises no map error;
   - a trusted capture returns the event's `timeStamp`;
   - untrusted (a synthetic `dispatchEvent`), duplicate, missing and unarmed captures each give their code;
@@ -112,6 +112,18 @@
 - [ ] 2.7 **D4 runbooks**:
   - `docs/runbooks/node-27-bringup-checklist.md` C4 ④⑤ and `docs/runbooks/tier-node27-timeseries-storage.md` §4.9: the real-click mechanism, schema 1.1, the pin rule (the discharge-layer `…_shud_shud_riv_…` id family, with the `HOOK_FEATURE_MISMATCH` symptom of a `shud_reach` id), the three-network selection rule with its read-only commands, and the three-receipt acceptance;
   - the "does not claim live PASS" sentence is updated once §5 lands.
+
+## 2F. Fix pass 1 (§4.3 live gate on ef19c721e, plus review round 1 notes)
+
+The first throwaway-stack run FAILed all three pins at warmup. ziya and tailan: `HOOK_POINT_OCCLUDED`. shj: `SAMPLE_TIMEOUT` (cold private cache, handled by D5 step 3).
+
+Root cause, measured on node-27: maplibre-gl 4.7.1 `queryRenderedFeatures(geometryOrOptions, options)` treats only a `Point` instance or an array as geometry. The hook's product-hit query passed a plain `{x, y}` object, which maplibre took as options, so it queried the **whole viewport**. For ziya that returned 8 hit-layer features, first `…_riv_000741`, and the resolver's first-in-layer pick was not the pin. The same query with `[x, y]` returned exactly `…_riv_000001`. A real click at the located point then produced GFS+IFS 200 and a visible chart in about 590 ms (shj).
+
+- [x] 2F.1 Hook product-hit query uses an array point, `[x, y]`. The box query uses array corners. The `RiverClickHookMap.queryRenderedFeatures` type admits only `[number, number]` or `[[number, number], [number, number]]` geometry, so a plain object no longer typechecks.
+- [x] 2F.2 The fake map used by the hook tests mirrors maplibre 4.7.1 geometry semantics: a non-array, non-Point first argument is options, and the query covers the whole viewport. Add a regression test in which the whole-viewport result lists another segment first: the pre-fix code must fail it, and the fixed code must pass. Red-proof recorded.
+- [x] 2F.3 Round the located client point to whole CSS px, and run the product-hit query at the rounded canvas point (`rounded client − canvas rect`), so the check and the real click hit-test the same pixel (correctness note). The capture tolerance stays 2 px.
+- [x] 2F.4 One test wires the real `createRiverClickPointerCapture().take()` output into `classifyRiverClickPointerCapture` (test+spec note).
+- [x] 2F.5 Runbook discovery block (both runbooks): build the pin from the latest-product `model_id` (`${model_id}_shud_riv_000001`), not `${basin}_shud`, and stop on a non-200 detail or the BLOCKED branch (`set -e` semantics or an explicit `exit 1`). The `runbookContract` `bash -n` case stays green. Add one line naming the hover prefetch before the pointer-down as a 1.0 vs 1.1 difference.
 
 ## 3. Local verification
 
@@ -138,7 +150,7 @@
   - not `start-display-api.sh`.
 
   Record the resolved `FRONTEND_DIST_DIR`, and check that the served `index.html` hash equals the worktree `dist`. Afterwards, stop the process by its recorded PID and delete the private cache.
-- [ ] 4.3 **Merge gate.** Run the lane three times against `http://127.0.0.1:<port>` (both origins), one run per D4 pin. Record rc, status, P95, `click_dispatch` and the durations. Expected for every pin: rc 0, status PASS, `click_dispatch=trusted_pointer_event`, warmup 1 plus 20 samples, and no `CLICK_DISPATCH_INVALID`, `HOOK_*` or `SERIES_REQUEST_INVALID` failure. A mechanism failure blocks the merge. A `THRESHOLD_EXCEEDED` with complete samples is a product finding and is reported to the user before merge.
+- [ ] 4.3 **Merge gate.** Before each pin, warm the private cache (design D5 step 3; recorded, not a sample). Run the lane three times against `http://127.0.0.1:<port>` (both origins), one run per D4 pin. Record rc, status, P95, `click_dispatch` and the durations. Expected for every pin: rc 0, status PASS, `click_dispatch=trusted_pointer_event`, warmup 1 plus 20 samples, and no `CLICK_DISPATCH_INVALID`, `HOOK_*` or `SERIES_REQUEST_INVALID` failure. A mechanism failure blocks the merge. A `THRESHOLD_EXCEEDED` with complete samples is a product finding and is reported to the user before merge.
 
 ## 5. node-27 post-merge: public-site receipts
 

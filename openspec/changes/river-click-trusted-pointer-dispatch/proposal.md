@@ -63,7 +63,7 @@ Live baseline with the existing lane, run on node-27 against `https://test.nwm.a
   - `apps/frontend/src/components/map/M11MapLibreSurface.tsx` (hook wiring and refs only);
   - `apps/frontend/src/components/map/m11MapInteractions.ts` (pure click-target resolver extracted; behaviour unchanged);
   - the rewritten consumers listed in tasks Must-preserve (`runbookContract`, the surface hook test, the fake page, the lane readiness probe, the C4 negative tests);
-  - `apps/frontend/playwright.river-click-lane-attempt.ts`, `playwright.river-click-lane.ts`, `playwright.river-click-terminal.ts`, `playwright.river-click-evidence.ts`;
+  - `apps/frontend/playwright.river-click-lane-attempt.ts`, `playwright.river-click-lane.ts` (the 1.1 semantic validator lives in `src/lib/riverClickEvidence/receipt.ts`, which the evidence owner imports, so `playwright.river-click-evidence.ts` and `playwright.river-click-terminal.ts` need no edit);
   - `apps/frontend/scripts/river-click-receipt-binder.mjs`;
   - the unit tests under `src/__tests__/riverClick*` and `src/lib/riverClickEvidence/__tests__/*`.
 - **Schema:** `schemas/frontend_river_click_live_evidence.schema.json` and its three examples.
