@@ -29,6 +29,7 @@ from packages.common.state_manager import (
     StateSnapshot,
     publish_state_snapshot_index,
 )
+from tests.provider_mode_helpers import make_directory_with_explicit_mode
 
 NOW = datetime(2026, 9, 22, 12, tzinfo=UTC)
 PREFIX = "s3://nhms"
@@ -57,9 +58,10 @@ def _seed_entry(index: int) -> dict[str, Any]:
 
 def _seed_index(tmp_path: Path, entry_count: int) -> tuple[Path, Path]:
     object_root = (tmp_path / "object-store").resolve()
-    object_root.mkdir(parents=True)
     index_path = object_root / "scheduler" / "state-index" / "index-last.json"
-    index_path.parent.mkdir(parents=True)
+    # #2614: the index parent is the provider lock parent; a bare mkdir lands at
+    # the ambient umask (0o775 under node-27's 0002) and the lock gate refuses it.
+    make_directory_with_explicit_mode(index_path.parent)
     publish_state_snapshot_index(
         [_seed_entry(index) for index in range(entry_count)],
         str(index_path),

@@ -12,6 +12,7 @@ from types import MappingProxyType
 from typing import Any
 from uuid import uuid4 as _uuid4
 
+from packages.common import scheduler_limits as _scheduler_limits
 from packages.common.model_registry import PsycopgModelRegistryStore
 from packages.common.redaction import redact_payload  # noqa: F401
 from packages.common.slurm_env import (
@@ -299,7 +300,7 @@ DEFAULT_LOCK_TTL_SECONDS = 3600
 # Used by the Slurm gateway self-reference check to reject a gateway URL that
 # points back at the scheduler/orchestrator itself instead of a real gateway.
 DEFAULT_SERVICE_PORT = 8000
-MAX_LOOKBACK_HOURS = 336
+MAX_LOOKBACK_HOURS = _scheduler_limits.MAX_LOOKBACK_HOURS
 MAX_SOURCES = 4
 MAX_CYCLES_PER_SOURCE = 16
 MAX_DISCOVERED_MODELS = 1000

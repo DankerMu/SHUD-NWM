@@ -1976,6 +1976,10 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             # gated surface, so listing them would be routing noise.
             "tests/test_publish_registry_manifest_audit.py",
             "tests/test_publish_registry_manual_cli.py",
+            # #2614 / #2548: both pre-create the state-index lock parent through
+            # `make_directory_with_explicit_mode`.
+            "tests/test_state_index_upsert_cost.py",
+            "tests/test_state_index_retention.py",
         ),
     ),
     PathTestRule(
@@ -4201,11 +4205,25 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_production_scheduler.py::test_build_candidates_suppresses_a_model_before_its_lineage_cutover",
             "tests/test_production_scheduler.py::test_build_candidates_admits_a_model_at_its_lineage_cutover",
             "tests/test_production_scheduler.py::test_build_candidates_without_lineage_is_unchanged",
+            # #2548 / #2541: the prune-retention planner and capacity evidence, and
+            # the per-pass validation cost pin, live in this module.
+            "tests/test_state_index_retention.py",
+            "tests/test_state_index_upsert_cost.py",
             # #1728: this module carries the connection-attribution injection
             # seam for nhms-api-state-snapshots (StateManager.from_env ->
             # PsycopgStateSnapshotRepository -> connect). MERGED here for the
             # same duplicate-pattern reason as forecast_store.py above.
             *CONNECTION_ATTRIBUTION_TESTS,
+        ),
+    ),
+    PathTestRule(
+        # #2548: the scheduler lookback cap lives here so the state-index
+        # retention floor can enforce it without importing the scheduler; the
+        # scheduler re-exports it and its config rejects larger lookbacks.
+        "packages/common/scheduler_limits.py",
+        (
+            "tests/test_state_index_retention.py",
+            "tests/test_production_scheduler.py::test_scheduler_caps_reject_oversized_config_and_bound_candidate_work",
         ),
     ),
     PathTestRule(

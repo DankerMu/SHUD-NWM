@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Repair one logical identity in the two production state-index lanes.
+"""Repair or prune the two production state-index lanes.
 
 The shared scheduler state index is a checksummed JSON payload. An out-of-band
 edit invalidates the top-level checksum and blocks every candidate before
@@ -8,6 +8,12 @@ removes exactly one unique identity from both the private/reference scratch
 index and the shared/destination canonical index, or recomputes the checksum
 of one explicit lane, using the production publisher, validator, locks, and
 compare-and-swap.
+
+``prune-retention`` (#2548) removes index entries (never state objects) outside
+``--retention-days`` of each ``(model_id, source_id)`` group's newest
+``valid_time`` except the generation / run-start / clone anchors, planning each
+lane from its own entries. It refuses unless ``retention_days * 24`` exceeds the
+scheduler ``MAX_LOOKBACK_HOURS`` + cycle lag + 48 h.
 
 The two indexes are not whole-file mirrors. Repair never copies one payload
 over the other; each lane keeps its own unrelated entries and order. Default
@@ -25,6 +31,8 @@ Environment:
 * ``OBJECT_STORE_PREFIX`` — object-store prefix
 * ``NHMS_SCHEDULER_STATE_INDEX_REPAIR_ARCHIVE_ROOT`` — owner-private archive root
 * ``NHMS_SCHEDULER_STATE_INDEX_REPAIR_RECEIPT_ROOT`` — owner-private receipt root
+* ``NHMS_SCHEDULER_CYCLE_LAG_HOURS`` — ``prune-retention`` lag when
+  ``--cycle-lag-hours`` is omitted (missing → refusal ``repair_cycle_lag_unset``)
 
 Exit codes: ``0`` complete success, ``2`` only when no index CAS could have
 occurred, ``3`` any partial, committed-incomplete, or commit-uncertain result.
@@ -49,6 +57,7 @@ from packages.common.safe_fs import (
     verify_directory_no_follow,
 )
 from packages.common.state_manager import (
+    DEFAULT_STATE_INDEX_RETENTION_DAYS,
     STATE_INDEX_REPAIR_LANES,
     StateIndexRepairError,
     StateManagerError,
@@ -61,6 +70,7 @@ DESTINATION_ROOT_ENV = "NHMS_OBJECT_STORE_COPYBACK_ROOT"
 OBJECT_STORE_PREFIX_ENV = "OBJECT_STORE_PREFIX"
 ARCHIVE_ROOT_ENV = "NHMS_SCHEDULER_STATE_INDEX_REPAIR_ARCHIVE_ROOT"
 RECEIPT_ROOT_ENV = "NHMS_SCHEDULER_STATE_INDEX_REPAIR_RECEIPT_ROOT"
+CYCLE_LAG_HOURS_ENV = "NHMS_SCHEDULER_CYCLE_LAG_HOURS"
 MAX_RECEIPT_BYTES = 1024 * 1024
 
 _POST_CAS_PHASES = frozenset({"replace_uncertain", "postcommit", "release_uncertain"})
@@ -112,6 +122,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             valid_time=args.valid_time,
             allow_missing_reference=args.allow_missing_reference,
             allow_missing_destination=args.allow_missing_destination,
+            retention_days=args.retention_days,
+            cycle_lag_hours=args.cycle_lag_hours,
         )
     except RepairIncompleteError as error:
         print(json.dumps(error.summary, ensure_ascii=False, sort_keys=True))
@@ -139,8 +151,16 @@ def repair_state_index(
     valid_time: str | None,
     allow_missing_reference: bool,
     allow_missing_destination: bool,
+    retention_days: int = DEFAULT_STATE_INDEX_RETENTION_DAYS,
+    cycle_lag_hours: int | None = None,
 ) -> dict[str, Any]:
     started_at = _format_time(datetime.now(tz=UTC))
+    retention_kwargs: dict[str, Any] = {}
+    if operation == "prune-retention":
+        retention_kwargs = {
+            "retention_days": retention_days,
+            "cycle_lag_hours": cycle_lag_hours if cycle_lag_hours is not None else _env_cycle_lag_hours(),
+        }
     receipt_root = _receipt_root(required=enforce) if enforce else None
     archive_root = _archive_root(required=enforce) if enforce else None
     try:
@@ -161,6 +181,7 @@ def repair_state_index(
             valid_time=valid_time,
             allow_missing_reference=allow_missing_reference,
             allow_missing_destination=allow_missing_destination,
+            **retention_kwargs,
         )
     except StateIndexRepairError as error:
         return _raise_from_helper_error(error, started_at=started_at, receipt_root=receipt_root)
@@ -276,6 +297,16 @@ def _object_store_prefix(value: str | None) -> str:
     return prefix
 
 
+def _env_cycle_lag_hours() -> int | None:
+    value = os.getenv(CYCLE_LAG_HOURS_ENV, "").strip()
+    if not value:
+        return None
+    try:
+        return int(value)
+    except ValueError as error:
+        raise RepairCliError("repair_cycle_lag_unset", {"env": CYCLE_LAG_HOURS_ENV}) from error
+
+
 def _env_path(env: str, *, field: str) -> Path:
     value = os.getenv(env, "").strip()
     if not value:
@@ -339,7 +370,7 @@ def _format_time(value: datetime) -> str:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("remove-entry", "recompute-checksum"))
+    parser.add_argument("operation", choices=("remove-entry", "recompute-checksum", "prune-retention"))
     parser.add_argument("--reference-root", type=Path, default=None)
     parser.add_argument("--destination-root", type=Path, default=None)
     parser.add_argument("--object-store-prefix", default=None)
@@ -356,6 +387,18 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--valid-time", default=None)
     parser.add_argument("--allow-missing-reference", action="store_true")
     parser.add_argument("--allow-missing-destination", action="store_true")
+    parser.add_argument(
+        "--retention-days",
+        type=int,
+        default=DEFAULT_STATE_INDEX_RETENTION_DAYS,
+        help="prune-retention window per (model_id, source_id) group (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--cycle-lag-hours",
+        type=int,
+        default=None,
+        help=f"prune-retention scheduler cycle lag; defaults to ${CYCLE_LAG_HOURS_ENV}.",
+    )
     return parser
 
 
