@@ -590,8 +590,78 @@ proof 任一步失败，执行：
 
 ```bash
 scripts/install_node22_scheduler_file_provider_refresh.sh --rollback
-# 脚本按 install 前记录恢复 refresh 初态，并断言 scheduler units 完全未变。
+# 按 install-state/refresh.before 恢复 refresh 两个 unit 并读回确认；再读回断言 scheduler units 未变。
 ```
+
+**installer 的失败路径与恢复基线（#2294）**：
+
+- 脚本以 `set -Eeuo pipefail` 运行。`--install` / `--enable` 在第一次 mutation 之后的任何失败
+  （函数内部、命令替换内部的失败也算）都只在主 shell 里跑**一次**恢复：每一步都会尝试，
+  前一步失败不会截断后一步；最后必跑两次读回，然后非零退出、**不打印**状态行。
+- 读回按 unit 类型：refresh timer 比 `UnitFileState` 和 `is-active`，refresh service（timer
+  驱动的 oneshot）只比 `UnitFileState`；compute scheduler 同理，timer 两列都比，service 只比
+  `UnitFileState`（它每 5 分钟自己翻一次 `is-active`，比它只会误报）。
+- 恢复目标：`--rollback` 和失败的 `--install` 都回到 `refresh.before` 记录的基线——失败的重装
+  会被回退成 rollback 之后的样子，而不是停在半更新；失败的 `--enable` 回到本次调用开始时的
+  状态，不会把一条已经 armed 的 lane 解除。
+- `--rollback` 只有在读回确认两件事都成立后才打印 `{"status":"rolled_back",...}`：refresh
+  units 等于基线，compute scheduler 未变。`refresh.before` 缺失或格式不对（不是恰好两行、
+  每行不是恰好两个 tab 分隔的非空字段）时，`--rollback` 在任何 mutation 之前就失败。
+- **入口闸门先于一切（原有行为，未改）**：三个动作（`--install` / `--enable` / `--rollback`）
+  在读 compute scheduler、做任何 mutation 之前，都要求 refresh service 的 `is-active` 恰为
+  `inactive`；`active`、`activating`、`failed` 等一律非零退出、不打印状态行、不做 mutation
+  （stderr 无 `refusing --install` 行）。所以 `failed` 的 refresh service 必须先
+  `systemctl --user reset-failed nhms-scheduler-file-provider-refresh.service`，才能跑**任何**
+  installer 动作，包括 `--rollback`；在跑的 tick 等它结束再来。
+- **armed 时拒绝 `--install`**：过了入口闸门之后，refresh timer 或 service 的 `is-enabled` 不在
+  `disabled` / `static` / `not-found` / 空，或 `is-active` 不在 `inactive` / `failed` 时，
+  `--install` 在 stderr 打印 `refusing --install: <unit> is <enabled>/<active>; run --rollback first`
+  并退出 1，不做任何 mutation。这里的 `failed` 只对 refresh **timer** 有实际意义——service
+  的 `failed` 已经被入口闸门拦下，不会被当成解除态。处置：先 `--rollback` 再装；没有基线、
+  timer 是手工 arm 的主机，先手工 `systemctl --user disable --now nhms-scheduler-file-provider-refresh.timer` 再装。
+  `--install` 的成功同样以读回为准：`disable --now` 之后两个 refresh unit 都读回为解除态才打印
+  `{"status":"installed_stopped",...}`，否则走上面的恢复。
+- **基线只写一次**：`refresh.before` 不存在时，首次 `--install` 先记录两个 unit 的 `.before`
+  文件，最后经 `refresh.before.tmp` + `mv` 写出 `refresh.before`——它的存在就表示基线完整，
+  中途被打断的首装不留下 `refresh.before`，下一次 `--install` 会整套重新记录。`refresh.before`
+  已存在时，后续 `--install` 和 `--rollback` 都**不改写、不删除**它和两个 `.before` 文件，所以
+  连装两次再回滚恢复的是第一次安装之前的状态，重复 `--rollback` 也是幂等的。`--install` 在第一次
+  mutation 之前就按 `--rollback` 的同一套严格规则解析已存在的 `refresh.before`：格式不对（或它是符号链接）就非零
+  退出、不打印状态行、不做任何 mutation，基线原样留着——不会在一份 `--rollback` 会拒绝的基线上
+  装出一条 lane。处置：确认主机状态后按下面的"重置基线"删掉整套基线再装。
+  **重置基线**：一次成功的 `--rollback` 之后，删掉 `refresh.before` 和
+  `nhms-scheduler-file-provider-refresh.{service,timer}.before`。
+- **`scheduler.before` 已废弃**：compute scheduler 的比较基线改为每次调用开始时在内存里捕获，
+  不读、也不写任何跨调用的文件。node-22 上遗留的 31 字节 `scheduler.before` 被忽略，原样留着即可。
+- **node-22 现状**：`install-state/` 里的基线写于 2026-07-15（`refresh.before` =
+  `disabled\tinactive\nstatic\tinactive\n`），是一次**重装快照**：当时 unit 已经存在且已解除。
+  对它 `--rollback` 恢复的是 7 月的 unit 文件、disabled 状态，而不是"没有这条 lane"。那是解除态，
+  所以安全。
+- **维护窗口内的演练顺序**（#1831 窗口前不得在 node-22 active checkout 上 pull）：timer 现在是
+  armed。issue 原文的演练从 `--install` 开始：在 D4 下它会被拒绝，照原文跑完还会让生产停在
+  解除态。所以演练顺序是：
+  1. `git status --porcelain` → `git pull --ff-only`（仅窗口内）。
+  2. 记录 before-state：`od -c` `install-state/refresh.before` 和 `scheduler.before`（后者仅供参考，
+     installer 不读它），四个 unit 的 `systemctl --user show -p UnitFileState -p ActiveState`。
+  3. **Pre-flight**：`systemctl --user is-active nhms-scheduler-file-provider-refresh.service` 必须是
+     `inactive`。02:15-04:15Z 之外没有 tick 到期；若是 `failed`，先
+     `systemctl --user reset-failed nhms-scheduler-file-provider-refresh.service`。每个动作的入口闸门
+     只接受 `inactive`，这是原有行为，未改。
+  4. `--rollback`：refresh units 读回等于基线（disabled/inactive、static/inactive），scheduler 未变。
+  5. `--install`：基线保留（`refresh.before` 与第 2 步字节一致），lane 为 `installed_stopped`。
+  6. **Manual refresh**：`scripts/scheduler_file_provider_refresh_once.sh`，然后
+     `jq -r .outcome /scratch/frd_muziyao/nhms-prod/workspace/provider-refresh/receipts/latest.json`
+     必须输出 `published`。`--enable` 的 `validate_current_receipt` 要求一份 `published` receipt，
+     且其中各 provider 的 `after_sha256` 仍与磁盘一致；而每 5 分钟一次的 compute copyback 会在每次
+     nightly refresh 之后挪动 `index-last.json`，所以必须紧挨着 `--enable` 现跑一次。
+  7. `--enable` → `enabled_active`。**恢复**：若失败，再跑一次 manual refresh（第 6 步），然后再
+     `--enable`。
+  8. 失败路径演练：armed 状态下再跑 `--install`，必须拒绝且无 mutation。
+  9. lane 保持 armed（第 7 步已 `--enable`），记录 after-state。
+  10. 探针 installer：`--rollback` → `--install` → `--enable`，并记录其状态。
+
+  每一步的 stdout、stderr、rc，以及前后两份 `show` 输出，都写进 `docs/runbooks/receipts/` 下的
+  receipt。
 
 ##### `enabled` + `inactive` 是失败态（#2041 / #2146）
 
@@ -614,6 +684,13 @@ jq -r '.outcome as $o | .providers[] | select(.name == "registry")
     then .after_generated_at else .before_generated_at end' \
   /scratch/frd_muziyao/nhms-prod/workspace/provider-refresh/receipts/latest.json
 ```
+
+`replace_uncertain` receipt 的 `after_*`（#2297）：provider 回滚**已验证**（逐个 sha256 核对回到
+发布前的字节）、只是另一条 lane 的结果未知而仍报 `replace_uncertain` 时，每个已回滚 provider 的
+`after_sha256` / `after_schema_version` / `after_generated_at` / `after_payload_checksum` 描述的是
+回滚后磁盘上的字节（等于它的 `before_*`，与 dry-run 同一替换；`entry_count` 仍是本次尝试的条数）。
+回滚**未能验证**时，receipt 原样保留发布后的 `after_*`，那些字节可能已不在磁盘上——所以上面按
+`outcome` 取字段的规则保留不变。
 
 `enabled` + `inactive` + `NEXT=-` 是一个**看起来全绿、实际永不触发**的组合：
 `UnitFileState=enabled` 只说明 unit 在 `default.target` 的 wants 里，不说明 timer
@@ -731,7 +808,8 @@ off-host 路由是另一条有自己认证与投递面的告警链路，另案�
   `published`、`published_receipt_failed`、`dry_run` 时取 `registry.after_generated_at`；
   其余 outcome（`replace_uncertain`、`restored_previous`、`failed`、`already_running`）
   取 `registry.before_generated_at`，该字段缺失或不可解析时这份 receipt 解不出，继续往下找。
-  原因：`replace_uncertain` 的 receipt 可能带着一个已被回滚掉的、更新的 `after_generated_at`，
+  原因：回滚**未能验证**的 `replace_uncertain` receipt 仍可能带着一个已被回滚掉的、更新的
+  `after_generated_at`（#2297 起，回滚已验证的 provider 的 `after_*` 已改写为磁盘上的字节），
   而它的 `before_generated_at` 不会比磁盘上的 manifest 更新。
 
 效果：一次失败的演练不再产生告警，上一份成功 receipt 还能回答；
@@ -761,16 +839,26 @@ scripts/install_node22_refresh_timer_health.sh --rollback   # 停用并复位到
 ```
 
 "停用"指不会再触发，不是文件不在。`--rollback` 先 `disable --now` 探针 timer，再把两个
-unit 文件复位成上一次 `--install` 之前的样子（那时没有就删掉），然后 `daemon-reload`；
-停用在复位文件之前，所以回滚**从不重新 arm**。连装两次再回滚，留下的是第一次安装落下的、
-已停用的探针文件。
+unit 文件复位成恢复基线里记录的样子——**第一次** `--install` 之前的内容（那时没有就删掉），
+然后 `daemon-reload`；停用在复位文件之前，所以回滚**从不重新 arm**。
+
+恢复基线只记录一次（#2294）：首次 `--install` 先存两个 unit 的 `.before` 文件，再经
+`install.baseline.tmp` + `mv` 写出标记文件 `install.baseline`；标记在时后续 `--install` 保留这份
+基线，所以连装两次再回滚，恢复的是第一次安装之前的文件；标记不在（首装被打断，或旧版本留下的
+状态）时重新记录。`protected.before` 仍是每次调用各自捕获、不跨调用。探针 timer 或 service
+仍处于 enabled/active 时 `--install` 直接拒绝（stderr `refusing --install: ...; run --rollback first`，
+退出 1），而且拒绝发生在 `protected.before` 捕获之前，state root 与 unit 目录里的文件一个字节都不变。
+node-22 旧状态没有这个标记：探针 timer 是 armed 的，所以 `--install` 会先要求 `--rollback`；那次
+回滚会删掉探针 unit（旧状态没有 `.before` 文件），这是正确的，下一次 `--install` 就把"没有探针
+unit"记为基线。已安装但未 arm 的旧主机，第一次新 `--install` 之前先跑一次 `--rollback`，否则已
+安装的文件会被记成基线。
 
 `--install` 与 `--rollback` 的成功都**以读回为准，不以 systemctl 调用是否报错为准**：
 `--install` 在 `disable --now` 之后、`--rollback` 在 `daemon-reload` 之后，脚本对探针
 timer 和 service **各自独立**读一次 `is-enabled` / `is-active`，只有两者都落在下表里才打印
 `{"status":"installed_stopped",...}` / `{"status":"rolled_back",...}` 并退出 0；否则非零
 退出、stderr 说明哪个 unit 处于什么状态、**不打印**状态行。`--install` 读回不过时 ERR trap
-照常回退：unit 文件复位成本次调用之前的内容，探针 timer 不会因此被 arm。
+照常回退：unit 文件复位成恢复基线里的内容，探针 timer 不会因此被 arm。
 
 | 读数 | 接受 | 为什么 |
 | --- | --- | --- |

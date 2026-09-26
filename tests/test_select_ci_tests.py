@@ -94,6 +94,9 @@ from scripts.select_ci_tests import (
     SCHEDULER_REFRESH_DEPLOYMENT_TESTS,
     SCHEDULER_REFRESH_HELPER_TESTS,
     SCHEDULER_REFRESH_HELPERS_PATH,
+    SCHEDULER_REFRESH_INSTALLER_HARNESS_PATH,
+    SCHEDULER_REFRESH_INSTALLER_HARNESS_TESTS,
+    SCHEDULER_REFRESH_INSTALLER_TESTS,
     SCHEDULER_REFRESH_OWNER_PATH,
     SCHEDULER_REFRESH_PACKAGE_MODULES,
     SCHEDULER_REFRESH_RECEIPT_HELPER_TESTS,
@@ -2534,10 +2537,12 @@ def test_replay_partition_tracked_tree_is_exactly_four_suites_and_one_helper() -
     assert set(helper_rule.tests) == partitions, sorted(set(helper_rule.tests) ^ partitions)
 
 
-def test_scheduler_refresh_partition_tracked_tree_is_exactly_fifteen_suites_and_two_helpers() -> None:
-    # #1101: fifteen collectible partitions plus two non-collectible helpers is a
-    # floor, not a preference. A sixteenth partition, a leftover compatibility
-    # shim for the deleted 9614-line monolith, or either helper renamed into a
+def test_scheduler_refresh_partition_tracked_tree_is_exactly_eighteen_suites_and_three_helpers() -> None:
+    # #1101: fifteen collectible partitions plus two non-collectible helpers was
+    # the floor; #2294/#2297 added the installer failure-path, installer mutation
+    # and restored-receipt-truth suites and the installer harness, so it is
+    # eighteen plus three. A nineteenth partition, a leftover compatibility
+    # shim for the deleted 9614-line monolith, or any helper renamed into a
     # `test_*.py` suite all redden here. Expected membership is the selector's
     # own tuples, never a glob result — the glob is the MUTANT side.
     #
@@ -2545,10 +2550,14 @@ def test_scheduler_refresh_partition_tracked_tree_is_exactly_fifteen_suites_and_
     # the tests/test_node22_refresh_timer_health_*.py partitions, a different lane with its own
     # owner rows.
     partitions = set(SCHEDULER_REFRESH_TESTS)
-    helpers = {SCHEDULER_REFRESH_HELPERS_PATH, SCHEDULER_REFRESH_RECEIPT_HELPERS_PATH}
+    helpers = {
+        SCHEDULER_REFRESH_HELPERS_PATH,
+        SCHEDULER_REFRESH_RECEIPT_HELPERS_PATH,
+        SCHEDULER_REFRESH_INSTALLER_HARNESS_PATH,
+    }
     tracked = set(_tracked_python_files("tests"))
 
-    assert len(partitions) == 15, sorted(partitions)
+    assert len(partitions) == 18, sorted(partitions)
     assert partitions <= tracked, sorted(partitions - tracked)
     assert helpers <= tracked, sorted(helpers - tracked)
     assert not Path("tests/test_scheduler_file_provider_refresh.py").exists(), (
@@ -2573,7 +2582,8 @@ def test_scheduler_refresh_partition_tracked_tree_is_exactly_fifteen_suites_and_
     # Every route that used to carry the monolith must carry the right reach, or
     # the tracked-tree count above is satisfied by files nothing selects. The
     # runner and the broad orchestrator directory rule carry the WHOLE corpus;
-    # the five deployment paths carry only the partition that reads them; the two
+    # the four deployment paths carry only the partition that reads them, and the
+    # installer additionally the two suites that run it (#2294); the three
     # helper support rules carry their derived importer closures.
     def rule_for(pattern: str, table: tuple[PathTestRule, ...] = PATH_TEST_RULES) -> PathTestRule:
         return next(rule for rule in table if rule.pattern == pattern)
@@ -2584,24 +2594,27 @@ def test_scheduler_refresh_partition_tracked_tree_is_exactly_fifteen_suites_and_
     assert partitions <= set(directory_rule.tests), sorted(partitions - set(directory_rule.tests))
 
     deployment = set(SCHEDULER_REFRESH_DEPLOYMENT_TESTS)
-    assert deployment <= partitions
-    for pattern in (
-        "infra/systemd/nhms-scheduler-file-provider-refresh.service",
-        "infra/systemd/nhms-scheduler-file-provider-refresh.timer",
-        "infra/env/compute.scheduler-provider-refresh.env.example",
-        "scripts/scheduler_file_provider_refresh_once.sh",
-        "scripts/install_node22_scheduler_file_provider_refresh.sh",
+    installer = set(SCHEDULER_REFRESH_INSTALLER_TESTS)
+    assert deployment <= installer <= partitions
+    assert installer - deployment == set(SCHEDULER_REFRESH_INSTALLER_HARNESS_TESTS)
+    for pattern, readers in (
+        ("infra/systemd/nhms-scheduler-file-provider-refresh.service", deployment),
+        ("infra/systemd/nhms-scheduler-file-provider-refresh.timer", deployment),
+        ("infra/env/compute.scheduler-provider-refresh.env.example", deployment),
+        ("scripts/scheduler_file_provider_refresh_once.sh", deployment),
+        ("scripts/install_node22_scheduler_file_provider_refresh.sh", installer),
     ):
         targets = set(rule_for(pattern).tests)
-        assert deployment <= targets, f"{pattern} lost its reader: {sorted(deployment - targets)}"
-        assert not (partitions - deployment) & targets, (
+        assert readers <= targets, f"{pattern} lost its reader: {sorted(readers - targets)}"
+        assert not (partitions - readers) & targets, (
             f"{pattern} widened to partitions that never open it: "
-            f"{sorted((partitions - deployment) & targets)}"
+            f"{sorted((partitions - readers) & targets)}"
         )
 
     for helper, expected in (
         (SCHEDULER_REFRESH_HELPERS_PATH, set(SCHEDULER_REFRESH_HELPER_TESTS)),
         (SCHEDULER_REFRESH_RECEIPT_HELPERS_PATH, set(SCHEDULER_REFRESH_RECEIPT_HELPER_TESTS)),
+        (SCHEDULER_REFRESH_INSTALLER_HARNESS_PATH, set(SCHEDULER_REFRESH_INSTALLER_HARNESS_TESTS)),
     ):
         targets = set(rule_for(helper, SUPPORT_MODULE_TEST_RULES).tests)
         assert targets == expected, sorted(targets ^ expected)
@@ -12050,6 +12063,10 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
         SCHEDULER_REFRESH_RECEIPT_HELPERS_PATH,
         "tests/test_scheduler_refresh_cutover_gate_audit.py",
     ),
+    # #2294: the failure-path partition drives every case through the harness's
+    # rig and fake systemctl, so it cannot stop importing it without the
+    # partition itself being gutted.
+    (SCHEDULER_REFRESH_INSTALLER_HARNESS_PATH, "tests/test_scheduler_refresh_installer_failure_paths.py"),
     # #2532: the verdict-table partition drives every case through the helper's
     # `_run` / `_verdict`, so it cannot stop importing the shared fakes without
     # the partition itself being gutted.

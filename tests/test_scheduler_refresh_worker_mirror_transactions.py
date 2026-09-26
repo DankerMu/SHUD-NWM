@@ -8,14 +8,15 @@ generation binding and its dry-run mismatch refusal, the direct-grid mirror
 dry-run family (entry counts, byte/preimage invariance, receipt persistence,
 the two empty-model fail-closed cases), and the tracked four-lane rollback
 family: readiness failure, state failure, CAS conflict, typed preimage
-conflict, the generic write-after-exception uncertainty and the
-restored-registry after evidence.
+conflict and the generic write-after-exception uncertainty. The
+restored-provider evidence of the ``replace_uncertain`` receipt moved to
+``tests/test_scheduler_refresh_restored_receipt_truth.py`` (#2297).
 """
 from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -621,35 +622,6 @@ def test_generic_write_after_exception_without_commit_token_is_uncertain(
     assert paths["registry"].read_bytes() == old["registry"]
     assert paths["registry_worker_mirror"].read_bytes() == old["registry_worker_mirror"]
     assert paths["readiness"].read_bytes() == old["readiness"]
-
-
-def test_replace_uncertain_receipt_carries_after_evidence_for_restored_registry_bytes(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Why a receipt's ``outcome`` must decide which registry time a reader
-    trusts (design D3b, R9e): the transaction uncertainty from a LATER lane
-    forces a ``replace_uncertain`` receipt that still carries the registry's
-    post-publish ``after_generated_at``, although the registry bytes on disk
-    were verifiably restored to the older generation.  Its
-    ``before_generated_at`` is never newer than what is on disk.
-    """
-    config, old, paths = _tracked_transaction_fixture(
-        tmp_path,
-        monkeypatch,
-        fail_lane="",
-        unowned_lane="state",
-    )
-
-    receipt = refresh.refresh_scheduler_file_providers(config, dry_run=False)
-
-    assert receipt["outcome"] == "replace_uncertain"
-    assert paths["registry"].read_bytes() == old["registry"]
-    on_disk = datetime.fromisoformat(json.loads(paths["registry"].read_bytes())["generated_at"])
-    (registry,) = [provider for provider in receipt["providers"] if provider["name"] == "registry"]
-    assert datetime.fromisoformat(registry["after_generated_at"]) > on_disk
-    assert datetime.fromisoformat(registry["before_generated_at"]) <= on_disk
-    assert json.loads((config.receipt_root / "latest.json").read_text()) == receipt
 
 
 @pytest.mark.parametrize("lane", ["readiness", "state"])

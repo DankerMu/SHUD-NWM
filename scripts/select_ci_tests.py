@@ -589,12 +589,20 @@ NODE22_REFRESH_TIMER_HEALTH_RUNBOOK_TESTS: tuple[str, ...] = (
 #     those five rows to the whole corpus would make a unit-only PR pay for 315
 #     cases and would break the exact-set pins in tests/test_select_ci_tests.py.
 #
+# #2294 added three suites and one helper to the corpus: the installer's
+# failure-path and mutation suites, which run the installer against the fake
+# `systemctl` of tests/scheduler_refresh_installer_harness.py, and the #2297
+# restored-receipt-truth suite. The two installer suites ride the installer's
+# own row (SCHEDULER_REFRESH_INSTALLER_TESTS below), not the deployment tuple:
+# neither opens the units' contract, the env template or the runner wrapper.
+#
 # tests/test_select_ci_tests.py closes the corpus against the tracked tree
-# (exactly fifteen suites + two helpers), so a sixteenth partition, a leftover
-# shim or a helper renamed into a `test_*.py` suite reddens instead of falling
-# out of the PR lane.
+# (exactly eighteen suites + three helpers), so a nineteenth partition, a
+# leftover shim or a helper renamed into a `test_*.py` suite reddens instead of
+# falling out of the PR lane.
 SCHEDULER_REFRESH_HELPERS_PATH = "tests/scheduler_refresh_helpers.py"
 SCHEDULER_REFRESH_RECEIPT_HELPERS_PATH = "tests/scheduler_refresh_receipt_helpers.py"
+SCHEDULER_REFRESH_INSTALLER_HARNESS_PATH = "tests/scheduler_refresh_installer_harness.py"
 SCHEDULER_REFRESH_TESTS: tuple[str, ...] = (
     "tests/test_scheduler_refresh_barrier_seam.py",
     "tests/test_scheduler_refresh_catalog_derivation.py",
@@ -604,9 +612,12 @@ SCHEDULER_REFRESH_TESTS: tuple[str, ...] = (
     "tests/test_scheduler_refresh_cutover_round2.py",
     "tests/test_scheduler_refresh_deployment_contract.py",
     "tests/test_scheduler_refresh_emergency_receipts.py",
+    "tests/test_scheduler_refresh_installer_failure_paths.py",
+    "tests/test_scheduler_refresh_installer_mutations.py",
     "tests/test_scheduler_refresh_predicates_and_dry_run_reconciliation.py",
     "tests/test_scheduler_refresh_provider_atomic.py",
     "tests/test_scheduler_refresh_receipt_block_presence.py",
+    "tests/test_scheduler_refresh_restored_receipt_truth.py",
     "tests/test_scheduler_refresh_retirement_declaration.py",
     "tests/test_scheduler_refresh_retirement_reconciliation.py",
     "tests/test_scheduler_refresh_terminability_probes.py",
@@ -614,6 +625,18 @@ SCHEDULER_REFRESH_TESTS: tuple[str, ...] = (
 )
 SCHEDULER_REFRESH_DEPLOYMENT_TESTS: tuple[str, ...] = (
     "tests/test_scheduler_refresh_deployment_contract.py",
+)
+# The two suites that import the installer harness -- its derived importer
+# closure, and the harness row's targets.
+SCHEDULER_REFRESH_INSTALLER_HARNESS_TESTS: tuple[str, ...] = (
+    "tests/test_scheduler_refresh_installer_failure_paths.py",
+    "tests/test_scheduler_refresh_installer_mutations.py",
+)
+# Every suite that runs the refresh installer: the deployment-contract lifecycle
+# case plus the two harness suites. Only the installer's own row carries it.
+SCHEDULER_REFRESH_INSTALLER_TESTS: tuple[str, ...] = (
+    *SCHEDULER_REFRESH_DEPLOYMENT_TESTS,
+    *SCHEDULER_REFRESH_INSTALLER_HARNESS_TESTS,
 )
 # The whole reach of the refresh RUNNER: the fifteen partitions plus the node-22
 # probe suite, which both imports the runner and reads its source for the
@@ -663,6 +686,7 @@ SCHEDULER_REFRESH_HELPER_TESTS: tuple[str, ...] = (
     "tests/test_scheduler_refresh_emergency_receipts.py",
     "tests/test_scheduler_refresh_predicates_and_dry_run_reconciliation.py",
     "tests/test_scheduler_refresh_receipt_block_presence.py",
+    "tests/test_scheduler_refresh_restored_receipt_truth.py",
     "tests/test_scheduler_refresh_retirement_declaration.py",
     "tests/test_scheduler_refresh_retirement_reconciliation.py",
     "tests/test_scheduler_refresh_worker_mirror_transactions.py",
@@ -1990,6 +2014,14 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         # an eleventh importer reddens there instead of rotting.
         SCHEDULER_REFRESH_RECEIPT_HELPERS_PATH,
         SCHEDULER_REFRESH_RECEIPT_HELPER_TESTS,
+    ),
+    PathTestRule(
+        # #2294: the refresh installer's fake-`systemctl` harness (real systemd
+        # exit codes, the per-call failure/no-op/after injectors, the rig and
+        # its snapshot). Both installer suites import it at module scope, so
+        # they are its derived importer closure.
+        SCHEDULER_REFRESH_INSTALLER_HARNESS_PATH,
+        SCHEDULER_REFRESH_INSTALLER_HARNESS_TESTS,
     ),
     PathTestRule(
         # A 0-byte package file with a rule looks wrong until you follow the
@@ -4744,9 +4776,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "scripts/scheduler_file_provider_refresh_once.sh",
         SCHEDULER_REFRESH_DEPLOYMENT_TESTS,
     ),
+    # #2294: the installer row also carries the two suites that run it
+    # against the harness's fake systemctl (failure paths, mutations).
     PathTestRule(
         "scripts/install_node22_scheduler_file_provider_refresh.sh",
-        SCHEDULER_REFRESH_DEPLOYMENT_TESTS,
+        SCHEDULER_REFRESH_INSTALLER_TESTS,
     ),
     # #2146 round 2: the refresh RUNNER had no explicit row -- only the
     # same-name derivation, which cannot know about a second reader. The probe
