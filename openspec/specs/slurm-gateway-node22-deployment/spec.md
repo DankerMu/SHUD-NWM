@@ -1,8 +1,10 @@
 # slurm-gateway-node22-deployment Specification
 
 ## Purpose
-TBD - created by archiving change m24-multibasin-continuous-daemon-live. Update Purpose after archive.
+Define the standalone Slurm gateway deployed on node-22, together with the live evidence that proves it. This covers submit, poll-to-terminal and cancel-while-active receipts that are never collapsed into one unfalsifiable step, stale-job reconcile from a durable job-id source, and defence in depth for Slurm mutations.
+
 ## Requirements
+
 ### Requirement: A standalone Slurm gateway service is deployed on node-22
 A standalone HTTP Slurm gateway (app + systemd unit + listen URL) SHALL be deployed on node-22,
 because the generic chain submits only via the gateway and no such service is proven there today
@@ -97,3 +99,12 @@ The production Slurm gateway SHALL combine application-layer service authenticat
 - **THEN** its HTTP Slurm client attaches the service bearer to submit/cancel calls and gateway preflight remains healthy
 - **AND** health and read-only gateway requests do not carry the service token.
 
+### Requirement: The gateway proof cancel stage requires an observed RUNNING state
+
+The gateway live-proof emitter SHALL record the `submit_cancel` stage as PASS only if the long smoke job was observed in `running` before it was cancelled. If the job never reached `running` within the bounded wait, the emitter SHALL still cancel the job for cleanup, and SHALL then record the stage and the receipt as BLOCKED with `live_proof_accepted=false` and a blocker that names the last observed status.
+
+#### Scenario: A job that stays pending is cancelled for cleanup and the stage is BLOCKED
+
+- **WHEN** every bounded poll of the long job returns `pending`
+- **THEN** a cancel request is still sent for the job
+- **AND** the stage and the receipt are BLOCKED, `live_proof_accepted` is false, and the blocker contains `pending`
