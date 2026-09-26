@@ -27,27 +27,27 @@
 
 ## 3. #2263 references and retention tests (implementer B)
 
-- [ ] 3.1 `publisher.py` `_copyback_batch_mutex`: remove the `` `:207-210` `` reference and replace it with a symbol reference. `grep -nE '`:[0-9]+' services/tile_publisher/publisher.py` must return nothing.
-- [ ] 3.2 Fix the stale references by symbol (D4):
+- [x] 3.1 `publisher.py` `_copyback_batch_mutex`: remove the `` `:207-210` `` reference and replace it with a symbol reference. `grep -nE '`:[0-9]+' services/tile_publisher/publisher.py` must return nothing.
+- [x] 3.2 Fix the stale references by symbol (D4):
   - `scheduler_discovery.py` → `scheduler_generation_gate.strict_warm_start_evidence`'s `COLD_NEW_MODEL` / `COLD_DECLARED_CUTOVER` branches;
   - `scheduler_state_failure.py` → `retry.failure_classifier`'s `"policy_blocked"` arm.
-- [ ] 3.3 Add the two `_resolve_runs_only_roots` tests in `tests/test_retention_extra_roots.py` per D4, and reword the docstring and comment. Red proof: temporarily make blank values produce a skip entry, confirm test 1 fails, and record the output. The PR names the test file and both test names, and records `grep -n "db-free" services/orchestrator/retention.py`.
-- [ ] 3.4 PR records: the census counts (`\.py:[0-9]+` over `services/ packages/ apps/api`), the decision not to add a gate, and the pattern's known blind spots. The orchestrator files the follow-up issue for the gate through issue-scribe, after a dedup check.
+- [x] 3.3 Add the two `_resolve_runs_only_roots` tests in `tests/test_retention_extra_roots.py` per D4, and reword the docstring and comment. Red proof: temporarily make blank values produce a skip entry, confirm test 1 fails, and record the output. The PR names the test file and both test names, and records `grep -n "db-free" services/orchestrator/retention.py`.
+- [x] 3.4 PR records: the census counts (`\.py:[0-9]+` over `services/ packages/ apps/api`), the decision not to add a gate, and the pattern's known blind spots. The orchestrator files the follow-up issue for the gate through issue-scribe, after a dedup check.
 
 ## 4. #2365 republish identity receipt (implementer B)
 
-- [ ] 4.1 Write `docs/runbooks/receipts/2026-08-24-issue-1816-republish-identity.md` per D5, using the captured files in the orchestrator scratchpad `p-evidence/`. Include:
+- [x] 4.1 Write `docs/runbooks/receipts/2026-08-24-issue-1816-republish-identity.md` per D5, using the captured files in the orchestrator scratchpad `p-evidence/`. Include:
   - the 16-row map;
   - the check commands **and their output**;
   - the per-id first-admitted-run and clone-row evidence;
   - the clone-provenance source statement;
   - the hetianhe and shj_2shj observations.
-- [ ] 4.2 Add a §5.7.1 pointer in `docs/runbooks/production-ops/recalibration-and-archive.md`: M1′ was superseded by #1816, see the receipt.
-- [ ] 4.3 `grep -rn 'dg_5bd9935f3c32ac5b2936f68588489575\|dg_67210bfe424cdcdc69aaa7469485a382' docs/` hits the receipt, and the receipt names the predecessors `dg_281ff8c7…` / `dg_03b3cd97…`.
+- [x] 4.2 Add a §5.7.1 pointer in `docs/runbooks/production-ops/recalibration-and-archive.md`: M1′ was superseded by #1816, see the receipt.
+- [x] 4.3 `grep -rn 'dg_5bd9935f3c32ac5b2936f68588489575\|dg_67210bfe424cdcdc69aaa7469485a382' docs/` hits the receipt, and the receipt names the predecessors `dg_281ff8c7…` / `dg_03b3cd97…`.
 
 ## 5. K3 receipt completion (implementer B)
 
-- [ ] 5.1 Append to the K3 receipt the **first** statement of `k3-catalog.sql` (the `== FK dependents` `pg_constraint` query) and its 20 rows from `.workplans/k3/k3-catalog.out`, verbatim. Capture context: node-27, `BEGIN READ ONLY`. The output file was last written 2026-09-24T09:17:33Z, which is an upper bound on the capture time and falls before the 12:30–12:42Z delete window. Do not claim it ran inside that window.
+- [x] 5.1 Append to the K3 receipt the **first** statement of `k3-catalog.sql` (the `== FK dependents` `pg_constraint` query) and its 20 rows from `.workplans/k3/k3-catalog.out`, verbatim. Capture context: node-27, `BEGIN READ ONLY`. The output file was last written 2026-09-24T09:17:33Z, which is an upper bound on the capture time and falls before the 12:30–12:42Z delete window. Do not claim it ran inside that window.
 
 ## 6. #2326 m11-popup rebase and archive (implementer C)
 

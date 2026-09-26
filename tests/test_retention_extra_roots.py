@@ -9,7 +9,10 @@ from pathlib import Path
 import pytest
 
 from services.orchestrator.retention import (
+    EXTRA_ROOT_NOT_ABSOLUTE_REASON,
     PIPELINE_FRONTIER_EXEMPT_REASON,
+    RUNS_PREFIX,
+    _resolve_runs_only_roots,
     plan_retention,
     run_retention,
 )
@@ -748,3 +751,36 @@ def test_relative_extra_root_is_discarded_with_a_recorded_reason(
     # physical: nothing under the working directory was touched
     assert (cwd / cwd_key / "output/out.nc").exists()
     assert (nested / nested_key / "output/out.nc").exists()
+
+
+# ---------------------------------------------------------------------------
+# Issue #2263 — the silent discard of an additional root is keyed on the
+# value's shape. ``_resolve_runs_only_roots`` sees only the values, never the
+# deployment topology, so these two tests pin what it can guarantee: unset and
+# blank values leave no trace, a relative value is recorded, an absolute one is
+# admitted.
+# ---------------------------------------------------------------------------
+
+
+def test_unset_and_blank_additional_roots_are_discarded_silently(tmp_path: Path) -> None:
+    """[#2263] ``None``, ``""`` and whitespace-only values resolve no root and
+    record no skip entry."""
+    resolved, skipped = _resolve_runs_only_roots([None, "", "   "], primary=tmp_path / "store")
+
+    assert resolved == []
+    assert skipped == []
+
+
+def test_relative_additional_root_is_recorded_while_absolute_is_admitted(tmp_path: Path) -> None:
+    """[#2263] The same call records a relative value as not-absolute and admits
+    an absolute one, so the silence above depends on the value's shape."""
+    admitted = tmp_path / "copyback"
+
+    resolved, skipped = _resolve_runs_only_roots(
+        ["relative/runs", str(admitted)], primary=tmp_path / "store"
+    )
+
+    assert resolved == [admitted.resolve()]
+    assert [(entry["key"], entry["reason"]) for entry in skipped] == [
+        (RUNS_PREFIX, EXTRA_ROOT_NOT_ABSOLUTE_REASON)
+    ]

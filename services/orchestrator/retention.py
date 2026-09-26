@@ -540,10 +540,17 @@ def _resolve_runs_only_roots(
     Hygiene (issue #1318 task 1.2): ``None``, empty and whitespace-only values
     are discarded **before** ``Path()`` is ever constructed --
     ``Path("").expanduser().resolve()`` is the process working directory, which
-    would drag ``<cwd>/runs`` into the deletion surface, and
-    ``NHMS_OBJECT_STORE_COPYBACK_ROOT`` is unset (``None``) on any deployment
-    that is not db-free. Those discards stay silent: an unset copyback root is
-    the normal case, not a misconfiguration.
+    would drag ``<cwd>/runs`` into the deletion surface. Those discards stay
+    silent (no skip entry), and the decision is keyed on the value's shape
+    alone: this function sees only the values, never the deployment topology.
+    ``tests/test_retention_extra_roots.py`` pins exactly that shape rule --
+    ``test_unset_and_blank_additional_roots_are_discarded_silently`` (no root,
+    no skip entry) and
+    ``test_relative_additional_root_is_recorded_while_absolute_is_admitted``.
+    Unverified operational context, not pinned by those tests and not visible
+    here: ``NHMS_OBJECT_STORE_COPYBACK_ROOT`` is expected to be unset
+    (``None``) on deployments that are not db-free, which is why silence is the
+    chosen shape for an unset value.
 
     A non-blank value that is still relative after ``expanduser()`` is discarded
     **before** ``resolve()`` and recorded in ``skipped`` (task 5.1): resolving it
@@ -571,9 +578,11 @@ def _resolve_runs_only_roots(
     for value in values:
         raw, candidate, rejected = _sanitize_root_candidate(
             value,
-            # #1318 contract: an unset/blank additional root is a SILENT discard
-            # (``None`` is the normal case on non-db-free deployments). Only the
-            # relative shape is a misconfiguration worth recording.
+            # #1318 contract: an unset/blank additional root is a SILENT discard,
+            # keyed on the value's shape only (pinned by the two shape tests
+            # named in the docstring). Only the relative shape is a
+            # misconfiguration worth recording. That ``None`` is the usual value
+            # on non-db-free deployments is operational context, not verified here.
             reason_blank=None,
             reason_not_absolute=EXTRA_ROOT_NOT_ABSOLUTE_REASON,
         )

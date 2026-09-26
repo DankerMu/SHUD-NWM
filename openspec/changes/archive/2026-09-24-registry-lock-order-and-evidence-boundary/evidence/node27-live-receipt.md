@@ -81,3 +81,57 @@ Rollback commands, if ever needed (run from `/home/nwm/NWM` with the same env):
 - `met.forcing_station_timeseries.station_key` and `_legacy.station_id` have NO ACTION FKs, which the delete relied on. The commit succeeded, so no referencing row existed.
 - Listed but not scanned (no FK to the deleted rows): `met.canonical_grid_*`, `ops.pipeline_event`, `ops.qc_result`.
 - Provenance of the 20-FK pin: `.workplans/k3/k3-catalog.out` is the live `pg_constraint` inventory with `conrelid` restricted to schemas other than `_timescaledb_internal`. It matches `c_expected_fks` in the delete script entry for entry.
+
+## 6. The 20-FK inventory, pasted (batch P)
+
+Added by batch P (#2085 #2423 #2365 #2263 #2326) so the pin in section 5 no longer depends on the gitignored
+`.workplans/k3/k3-catalog.out`. The text above is unchanged.
+
+- Where: node-27 primary, one `psql` session opened with `BEGIN READ ONLY;`; the script ends with `ROLLBACK;`.
+- When: no capture timestamp is recorded in this receipt or in the output file. The output file's mtime,
+  2026-09-24T09:17:33Z, is the upper bound (batch P also observed a byte-identical copy in its session scratch
+  space with mtime 2026-09-24T09:05:58Z). Both are before the 12:30–12:42Z window of this receipt, so this
+  inventory was taken before the dry-run and apply, not inside that window.
+- What: the session setup plus the **first** statement of `k3-catalog.sql`, an ad-hoc probe file that is not
+  checked in (hence this paste), i.e. its `== FK dependents` block. The
+  file's three later blocks (column-name scan, triggers, evidence ids) and its closing `ROLLBACK;` are not
+  reproduced here.
+
+```sql
+\set ON_ERROR_STOP on
+\pset pager off
+BEGIN READ ONLY;
+\echo == FK dependents (non-chunk)
+SELECT conrelid::regclass child, confrelid::regclass parent, pg_get_constraintdef(oid) def FROM pg_constraint
+WHERE contype='f' AND confrelid::regclass::text IN ('core.basin','core.basin_version','core.river_network_version','core.mesh_version','core.model_instance','met.met_station','met.forcing_version')
+AND conrelid::regclass::text NOT LIKE '_timescaledb_internal.%' ORDER BY 2,1;
+```
+
+Output, the first block of `k3-catalog.out`, verbatim:
+
+```text
+== FK dependents (non-chunk)
+                 child                 |           parent           |                                                  def                                                   
+---------------------------------------+----------------------------+--------------------------------------------------------------------------------------------------------
+ core.basin_version                    | core.basin                 | FOREIGN KEY (basin_id) REFERENCES core.basin(basin_id)
+ core.river_network_version            | core.basin_version         | FOREIGN KEY (basin_version_id) REFERENCES core.basin_version(basin_version_id)
+ core.mesh_version                     | core.basin_version         | FOREIGN KEY (basin_version_id) REFERENCES core.basin_version(basin_version_id)
+ core.model_instance                   | core.basin_version         | FOREIGN KEY (basin_version_id) REFERENCES core.basin_version(basin_version_id)
+ met.met_station                       | core.basin_version         | FOREIGN KEY (basin_version_id) REFERENCES core.basin_version(basin_version_id)
+ hydro.hydro_run                       | core.basin_version         | FOREIGN KEY (basin_version_id) REFERENCES core.basin_version(basin_version_id)
+ core.river_segment                    | core.river_network_version | FOREIGN KEY (river_network_version_id) REFERENCES core.river_network_version(river_network_version_id)
+ core.model_instance                   | core.river_network_version | FOREIGN KEY (river_network_version_id) REFERENCES core.river_network_version(river_network_version_id)
+ met.interp_weight                     | core.model_instance        | FOREIGN KEY (model_id) REFERENCES core.model_instance(model_id)
+ met.forcing_version                   | core.model_instance        | FOREIGN KEY (model_id) REFERENCES core.model_instance(model_id)
+ hydro.hydro_run                       | core.model_instance        | FOREIGN KEY (model_id) REFERENCES core.model_instance(model_id)
+ hydro.state_snapshot                  | core.model_instance        | FOREIGN KEY (model_id) REFERENCES core.model_instance(model_id)
+ flood.flood_frequency_curve           | core.model_instance        | FOREIGN KEY (model_id) REFERENCES core.model_instance(model_id)
+ met.interp_weight                     | met.met_station            | FOREIGN KEY (station_id) REFERENCES met.met_station(station_id)
+ met.forcing_station_timeseries_legacy | met.met_station            | FOREIGN KEY (station_id) REFERENCES met.met_station(station_id)
+ met.forcing_station_timeseries        | met.met_station            | FOREIGN KEY (station_key) REFERENCES met.met_station(station_key)
+ met.forcing_version_component         | met.forcing_version        | FOREIGN KEY (forcing_version_id) REFERENCES met.forcing_version(forcing_version_id)
+ met.forcing_station_timeseries_legacy | met.forcing_version        | FOREIGN KEY (forcing_version_id) REFERENCES met.forcing_version(forcing_version_id)
+ hydro.hydro_run                       | met.forcing_version        | FOREIGN KEY (forcing_version_id) REFERENCES met.forcing_version(forcing_version_id)
+ met.forcing_station_timeseries        | met.forcing_version        | FOREIGN KEY (forcing_version_key) REFERENCES met.forcing_version(forcing_version_key)
+(20 rows)
+```
