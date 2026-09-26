@@ -230,6 +230,14 @@ class DisplayLogPublicationAttempt:
 class TerminalJobObservation:
     job: dict[str, Any]
     publication_attempt: DisplayLogPublicationAttempt | None = None
+    #: #2570 A: set when the poll ended without a trustworthy terminal status
+    #: (``SLURM_STATUS_QUERY_UNAVAILABLE`` / ``STAGE_RUNTIME_STATUS_PERSIST_FAILED``).
+    #: The caller then performs no further write or gateway call for the stage and
+    #: returns ``reconcile_unverified``; the row keeps its bound Slurm id.
+    unverified_error_code: str | None = None
+    status_query_failures: int = 0
+    status_query_last_error: str | None = None
+    event_write_failures: int = 0
 
 
 @dataclass

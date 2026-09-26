@@ -6,6 +6,7 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 
 from packages.common.source_identity import normalize_source_id
+from services.orchestrator.scheduler_state_types import cohort_member_row_is_attributed
 from workers.data_adapters.base import format_cycle_time
 
 TERMINAL_PIPELINE_SUCCESS_STATUSES = {"succeeded", "complete", "published"}
@@ -515,6 +516,10 @@ def _pipeline_job_is_repaired_stage_evidence(job: Mapping[str, Any]) -> bool:
 
 def _job_belongs_to_candidate(job: Mapping[str, Any], *, run_id: str, model_id: str) -> bool:
     if str(job.get("run_id") or "") == run_id:
+        return True
+    if cohort_member_row_is_attributed(job):
+        # #2603 B2: a model-less cohort row whose recorded membership provably
+        # contains this candidate is the candidate's own row.
         return True
     return str(job.get("model_id") or "") == model_id
 

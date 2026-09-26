@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 import os
 import time
 from collections.abc import Callable
@@ -42,8 +43,19 @@ class StageExecutionOrchestrator(Protocol):
     object_store: Any
 
 
+LOGGER = logging.getLogger(__name__)
+
 _FORECAST_STAGE_ALIASES = frozenset({"forecast", "run_shud_forecast", "run_shud_forecast_array"})
 STATE_SAVE_SUBMIT_AMBIGUOUS = "STATE_SAVE_SUBMIT_AMBIGUOUS"
+#: #2570 A poll-loop outcomes: both are ``reconcile_unverified``, never resubmitted.
+SLURM_STATUS_QUERY_UNAVAILABLE = "SLURM_STATUS_QUERY_UNAVAILABLE"
+STAGE_RUNTIME_STATUS_PERSIST_FAILED = "STAGE_RUNTIME_STATUS_PERSIST_FAILED"
+#: Runtime-transition errors that stay governed conflicts/contract faults, never
+#: a persist failure: the CAS lost (another writer moved the row) or the API is
+#: absent (a configuration fault, not a transient one).
+_GOVERNED_RUNTIME_TRANSITION_ERRORS = frozenset(
+    {"ACCEPTED_SUBMIT_RUNTIME_TRANSITION_CONFLICT", "ACCEPTED_SUBMIT_RUNTIME_TRANSITION_UNAVAILABLE"}
+)
 _ACCEPTED_GATEWAY_SUBMIT_STATUSES = frozenset(
     {
         "submitted",
@@ -785,6 +797,16 @@ def submit_and_wait_cycle_stage(
             initial_status=submitted_status,
             log_publication=log_publication,
         )
+    if terminal_observation.unverified_error_code is not None:
+        return (
+            unverified_poll_stage_result(
+                stage,
+                pipeline_job_id=pipeline_job_id,
+                slurm_job_id=slurm_job_id,
+                observation=terminal_observation,
+            ),
+            None,
+        )
     terminal = terminal_observation.job
     publication_attempt = terminal_observation.publication_attempt
     log_uri = str(terminal.get("log_uri") or "")
@@ -840,7 +862,10 @@ def submit_and_wait_cycle_stage(
             error_code=result_error_code,
             error_message=result_error_message,
             log_uri=log_uri,
-            accounting=deps.slurm_accounting_from_payload(terminal),
+            accounting={
+                **deps.slurm_accounting_from_payload(terminal),
+                **poll_isolation_evidence(terminal_observation),
+            },
             task_results=deps.stage_task_result_evidence(aggregation, context=context),
             finished_at=deps.parse_gateway_time(terminal.get("finished_at")),
         ),
@@ -1077,6 +1102,7 @@ def resume_cycle_stage(
     status = str(job.get("status"))
     terminal = dict(job)
     deferred_publish_attempt: DisplayLogPublicationAttempt | None = None
+    poll_evidence: dict[str, Any] = {}
     accepted_submit_projection = bool(
         getattr(orchestrator.repository, "supports_accepted_submit_reconcile", False)
         and is_forecast_cohort_stage(stage)
@@ -1092,8 +1118,19 @@ def resume_cycle_stage(
             initial_status=status,
             log_publication=orchestrator._display_log_publication_for_pipeline_job(job),
         )
+        if terminal_observation.unverified_error_code is not None:
+            return (
+                unverified_poll_stage_result(
+                    stage,
+                    pipeline_job_id=str(job["job_id"]),
+                    slurm_job_id=str(job["slurm_job_id"]),
+                    observation=terminal_observation,
+                ),
+                None,
+            )
         terminal = terminal_observation.job
         deferred_publish_attempt = terminal_observation.publication_attempt
+        poll_evidence = poll_isolation_evidence(terminal_observation)
         status = deps.status_from_gateway_job(terminal)
 
     aggregation = None
@@ -1219,7 +1256,7 @@ def resume_cycle_stage(
             error_code=effective_job.get("error_code"),
             error_message=effective_job.get("error_message"),
             log_uri=result_log_uri,
-            accounting=deps.slurm_accounting_from_payload(terminal),
+            accounting={**deps.slurm_accounting_from_payload(terminal), **poll_evidence},
             task_results=deps.stage_task_result_evidence(aggregation, context=resume_context),
             finished_at=deps.parse_gateway_time(
                 (effective_job or {}).get("finished_at")
@@ -1242,12 +1279,44 @@ def poll_cycle_stage_until_terminal(
     log_publication: DisplayLogPublication | None,
     deps: StageExecutionDependencies | None = None,
 ) -> TerminalJobObservation:
+    """Poll a bound Slurm job to a terminal status (#2570 A: failures are governed).
+
+    A gateway status-query failure is retried until the job deadline; a deadline
+    reached after at least one failure ends with the non-resubmitting
+    ``SLURM_STATUS_QUERY_UNAVAILABLE`` marker instead of the timeout write (whose
+    transient ``SLURM_JOB_TIMEOUT`` would resubmit a job whose status is merely
+    unknown).  A non-conflict status-write failure ends with the
+    ``STAGE_RUNTIME_STATUS_PERSIST_FAILED`` marker.  On either marker the caller
+    writes nothing more and the row keeps its bound Slurm id for the next pass.
+    An event-write failure is counted and polling continues.
+    """
+
     deps = _dependencies(orchestrator, deps)
     job = dict(initial_job)
     current_status = initial_status
     deadline = time.monotonic() + orchestrator.config.job_timeout_seconds
+    query_failures = 0
+    last_query_error: str | None = None
+    event_write_failures = 0
+
+    def _observation(
+        publication_attempt: DisplayLogPublicationAttempt | None = None,
+        *,
+        unverified_error_code: str | None = None,
+    ) -> TerminalJobObservation:
+        return TerminalJobObservation(
+            job=job,
+            publication_attempt=publication_attempt,
+            unverified_error_code=unverified_error_code,
+            status_query_failures=query_failures,
+            status_query_last_error=last_query_error,
+            event_write_failures=event_write_failures,
+        )
+
     while deps.status_from_gateway_job(job) not in deps.terminal_job_statuses:
         if time.monotonic() >= deadline:
+            if query_failures:
+                return _observation(unverified_error_code=SLURM_STATUS_QUERY_UNAVAILABLE)
             return _call_orchestrator_helper(
                 orchestrator,
                 "_record_cycle_stage_poll_timeout",
@@ -1259,7 +1328,20 @@ def poll_cycle_stage_until_terminal(
                 log_publication=log_publication,
             )
         time.sleep(orchestrator.config.poll_interval_seconds)
-        job = deps.coerce_mapping(orchestrator.slurm_client.get_job_status(str(job["job_id"])))
+        try:
+            polled = deps.coerce_mapping(orchestrator.slurm_client.get_job_status(str(job["job_id"])))
+        except Exception as error:  # noqa: BLE001 - any gateway failure is retried until the deadline.
+            query_failures += 1
+            last_query_error = type(error).__name__
+            LOGGER.warning(
+                "stage %s job %s status query failed (%d so far): %s",
+                stage.stage,
+                pipeline_job_id,
+                query_failures,
+                last_query_error,
+            )
+            continue
+        job = polled
         new_status = deps.status_from_gateway_job(job)
         if new_status == current_status:
             continue
@@ -1271,19 +1353,32 @@ def poll_cycle_stage_until_terminal(
         if new_status in deps.terminal_job_statuses and log_publication is not None:
             publication_attempt = orchestrator._try_publish_log_for_advertise(str(job["job_id"]), log_publication)
             log_uri = publication_attempt.advertised_uri
-        previous_status, record = _update_runtime_pipeline_status(
-            orchestrator,
-            stage,
-            pipeline_job_id,
-            new_status,
-            current_status=current_status,
-            started_at=deps.parse_gateway_time(job.get("started_at")),
-            finished_at=deps.parse_gateway_time(job.get("finished_at")),
-            exit_code=job.get("exit_code"),
-            error_code=job.get("error_code"),
-            error_message=job.get("error_message"),
-            log_uri=log_uri if new_status in deps.terminal_job_statuses else None,
-        )
+        try:
+            previous_status, record = _update_runtime_pipeline_status(
+                orchestrator,
+                stage,
+                pipeline_job_id,
+                new_status,
+                current_status=current_status,
+                started_at=deps.parse_gateway_time(job.get("started_at")),
+                finished_at=deps.parse_gateway_time(job.get("finished_at")),
+                exit_code=job.get("exit_code"),
+                error_code=job.get("error_code"),
+                error_message=job.get("error_message"),
+                log_uri=log_uri if new_status in deps.terminal_job_statuses else None,
+            )
+        except Exception as error:
+            if getattr(error, "error_code", None) in _GOVERNED_RUNTIME_TRANSITION_ERRORS:
+                raise
+            LOGGER.warning(
+                "stage %s job %s runtime status write %s->%s failed: %s",
+                stage.stage,
+                pipeline_job_id,
+                current_status,
+                new_status,
+                type(error).__name__,
+            )
+            return _observation(publication_attempt, unverified_error_code=STAGE_RUNTIME_STATUS_PERSIST_FAILED)
         if log_uri and new_status in deps.terminal_job_statuses:
             job["log_uri"] = log_uri
         persisted_status = str(record.get("status") or new_status)
@@ -1291,37 +1386,94 @@ def poll_cycle_stage_until_terminal(
             job["status"] = persisted_status
             current_status = persisted_status
             if persisted_status in deps.terminal_job_statuses:
-                return TerminalJobObservation(job=job, publication_attempt=publication_attempt)
+                return _observation(publication_attempt)
             continue
-        orchestrator.repository.insert_pipeline_event(
-            entity_type="pipeline_job",
-            entity_id=pipeline_job_id,
-            event_type="status_change",
-            status_from=previous_status or current_status,
-            status_to=new_status,
-            message=deps.stage_status_message(stage.stage, new_status, job),
-            details=deps.safe_pipeline_event_details(
-                {
-                    "stage": stage.stage,
-                    "job_type": stage.job_type,
-                    "slurm_job_id": job["job_id"],
-                    "exit_code": job.get("exit_code"),
-                    "error_code": job.get("error_code"),
-                    "slurm": {
-                        "job_id": job["job_id"],
-                        "state": job.get("state") or job.get("status"),
+        try:
+            orchestrator.repository.insert_pipeline_event(
+                entity_type="pipeline_job",
+                entity_id=pipeline_job_id,
+                event_type="status_change",
+                status_from=previous_status or current_status,
+                status_to=new_status,
+                message=deps.stage_status_message(stage.stage, new_status, job),
+                details=deps.safe_pipeline_event_details(
+                    {
+                        "stage": stage.stage,
+                        "job_type": stage.job_type,
+                        "slurm_job_id": job["job_id"],
                         "exit_code": job.get("exit_code"),
-                        "log_uri": log_uri if new_status in deps.terminal_job_statuses else None,
-                        "accounting": deps.slurm_accounting_from_payload(job),
-                        "resource_metrics": deps.resource_metrics_from_payload(job),
-                    },
-                }
-            ),
-        )
+                        "error_code": job.get("error_code"),
+                        "slurm": {
+                            "job_id": job["job_id"],
+                            "state": job.get("state") or job.get("status"),
+                            "exit_code": job.get("exit_code"),
+                            "log_uri": log_uri if new_status in deps.terminal_job_statuses else None,
+                            "accounting": deps.slurm_accounting_from_payload(job),
+                            "resource_metrics": deps.resource_metrics_from_payload(job),
+                        },
+                    }
+                ),
+            )
+        except Exception as error:  # noqa: BLE001 - the status write already landed; the event is evidence only.
+            event_write_failures += 1
+            LOGGER.warning(
+                "stage %s job %s status_change event write failed (%d so far): %s",
+                stage.stage,
+                pipeline_job_id,
+                event_write_failures,
+                type(error).__name__,
+            )
         current_status = new_status
         if publication_attempt is not None and publication_attempt.error is not None:
-            return TerminalJobObservation(job=job, publication_attempt=publication_attempt)
-    return TerminalJobObservation(job=job)
+            return _observation(publication_attempt)
+    return _observation()
+
+
+def poll_isolation_evidence(observation: TerminalJobObservation) -> dict[str, Any]:
+    """The #2570 A poll-loop fault counters, or ``{}`` when the poll saw none."""
+
+    if not (observation.status_query_failures or observation.event_write_failures):
+        return {}
+    return {
+        "poll_isolation": {
+            "status_query_failures": observation.status_query_failures,
+            "status_query_last_error": observation.status_query_last_error,
+            "pipeline_event_write_failures": observation.event_write_failures,
+        }
+    }
+
+
+def unverified_poll_stage_result(
+    stage: StageDefinition,
+    *,
+    pipeline_job_id: str,
+    slurm_job_id: str,
+    observation: TerminalJobObservation,
+) -> StageRunResult:
+    """The governed ``reconcile_unverified`` result of a poll that ended on a marker."""
+
+    if observation.unverified_error_code == SLURM_STATUS_QUERY_UNAVAILABLE:
+        message = (
+            f"Slurm status of {stage.stage} job {slurm_job_id} stayed unavailable until the deadline "
+            f"({observation.status_query_failures} failed queries, last {observation.status_query_last_error}); "
+            "the bound job is resolved by the next pass."
+        )
+    else:
+        message = (
+            f"The runtime status of {stage.stage} job {slurm_job_id} could not be persisted; "
+            "the bound job is resolved by the next pass."
+        )
+    return StageRunResult(
+        stage=stage.stage,
+        job_type=stage.job_type,
+        pipeline_job_id=pipeline_job_id,
+        slurm_job_id=slurm_job_id,
+        status="reconcile_unverified",
+        error_code=observation.unverified_error_code,
+        error_message=message,
+        accounting=poll_isolation_evidence(observation),
+        task_results=(),
+    )
 
 
 def record_cycle_stage_poll_timeout(

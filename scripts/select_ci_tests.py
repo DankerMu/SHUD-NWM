@@ -1314,6 +1314,10 @@ CHAIN_IMPORTER_TESTS: tuple[str, ...] = (
     # real stage loop through it. Stop-rule owned module, so the addition rides
     # this at-site tuple. DB-free, sub-second.
     "tests/test_state_save_submit_ambiguity.py",
+    # #2570 A: the poll-isolation suite top-level-imports the chain facade's
+    # OrchestratorError and drives the real stage loop through it. Stop-rule
+    # owned module, so the addition rides this at-site tuple. DB-free, ~4s.
+    "tests/test_chain_stage_poll_isolation.py",
     "tests/test_warm_start.py",
     "tests/test_warm_start_chaining.py",
 )
@@ -1372,6 +1376,11 @@ SCHEDULER_IMPORTER_TESTS: tuple[str, ...] = (
     "tests/test_scheduler_root_check_loop_convergence.py",
     "tests/test_scheduler_timing.py",
     "tests/test_source_scoped_dispatch.py",
+    # #2603: the cohort-membership attribution suite top-level-imports
+    # `services.orchestrator.scheduler`, takes its cohort run ids from the
+    # facade's `_candidate_execution_cohort_run_id` and reads every decision at
+    # its `_candidate_state_decision` seam. DB-free, 15 tests in ~6s.
+    "tests/test_cohort_membership_attribution.py",
 )
 
 ORCHESTRATOR_CLI_IMPORTER_TESTS: tuple[str, ...] = (
@@ -1440,6 +1449,15 @@ FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     # `FileJournalRetryService`, and drives the in-stage resubmit on it. Stop-rule
     # owned module, so the addition rides this at-site tuple. DB-free, sub-second.
     "tests/test_state_save_submit_ambiguity.py",
+    # #2570 A / #2603 / #2559: the poll-isolation, cohort-membership and
+    # forecast-projection suites drive the real stage loop against this
+    # repository and read rows, candidate states and cohort projections back
+    # through it (the membership classification lives in `candidate_state`).
+    # Stop-rule owned module, so the additions ride this at-site tuple.
+    # DB-free, together ~12s.
+    "tests/test_chain_stage_poll_isolation.py",
+    "tests/test_cohort_membership_attribution.py",
+    "tests/test_forecast_cohort_projection_restart_stage.py",
     # #1953: the whole-tree budget contract is ABOUT this module — the read
     # lane its `_RecordBudget` tags, and the synthetic blocked row the five
     # query entrypoints return when the budget refuses. Its static pins read
@@ -3067,6 +3085,19 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # and file_orchestration_journal.py pairs ride CHAIN_IMPORTER_TESTS and
             # FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS. DB-free, sub-second.
             "tests/test_state_save_submit_ambiguity.py",
+            # #2570 A / #2603 / #2559: the poll-isolation, cohort-membership and
+            # forecast-projection suites. Their subjects are chain_stage_execution.py,
+            # chain_forecast_execution.py, chain_types.py, chain_array_accounting.py,
+            # chain_forecast_orchestrator_cycle.py, chain_source_cycle.py and the
+            # scheduler_state_* readers; their top-level importer gaps on
+            # accepted_submit_identity.py, chain_stages.py, retry.py,
+            # scheduler_candidate_quality.py, scheduler_timing.py and the package
+            # __init__ close on this directory rule. The chain.py / scheduler.py /
+            # file_orchestration_journal.py pairs ride their stop-rule tuples.
+            # DB-free, together ~12s.
+            "tests/test_chain_stage_poll_isolation.py",
+            "tests/test_cohort_membership_attribution.py",
+            "tests/test_forecast_cohort_projection_restart_stage.py",
             "tests/test_cli_cleanup_frontier.py",
             "tests/test_cli_publish_qdown.py",
             "tests/test_orchestrator_demote_cli_security.py",

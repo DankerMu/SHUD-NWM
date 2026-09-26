@@ -86,6 +86,11 @@ from services.orchestrator.retry_identity import (
     RETRY_JOB_ID_MARKER,
     split_retry_job_identity,
 )
+from services.orchestrator.scheduler_state_types import DOWNSTREAM_STAGE_ALIASES
+
+#: Canonical stages after forecast whose model-less cohort master rows record
+#: their ``cohort_members`` at reservation (#2603 B4).
+_MEMBER_RECORDING_DOWNSTREAM_STAGES = frozenset({"parse", "state_save_qc", "publish"})
 
 
 class ForecastOrchestratorCycleMixin:
@@ -768,20 +773,43 @@ class ForecastOrchestratorCycleMixin:
                     "forcing reservation requires complete pre-Gateway member identity",
                     {"stage": stage.stage, "pipeline_job_id": pipeline_job_id},
                 )
+        row_model_id = accepted_submit_pipeline_job_model_id(
+            supports_accepted_submit_reconcile=getattr(
+                self.repository, "supports_accepted_submit_reconcile", False
+            ),
+            stage=stage.stage,
+            job_type=stage.job_type,
+            model_id=_chain._cycle_pipeline_job_model_id(context),
+        )
+        downstream_stage = DOWNSTREAM_STAGE_ALIASES.get(str(stage.stage or stage.job_type or ""))
+        if (
+            reservation_evidence is None
+            and getattr(self.repository, "supports_accepted_submit_reconcile", False)
+            and downstream_stage in _MEMBER_RECORDING_DOWNSTREAM_STAGES
+            and row_model_id in (None, "")
+        ):
+            # #2603 B4: a model-less downstream cohort row records exactly which
+            # candidates it runs for, so its failure (and success) is attributed
+            # to its members by its own list -- including a strict-subset
+            # restart cohort.  Members only: no accepted-submit master marker,
+            # so the row keeps its plain (non-master) contract.
+            reservation_evidence = {
+                "cohort_members": [
+                    {**member, "restart_stage": downstream_stage}
+                    for member in canonical_forecast_cohort_members(
+                        source_id=context.source_id,
+                        cycle_time=context.cycle_time,
+                        basins=context.active_basins,
+                    )
+                ]
+            }
         reserve_kwargs = {
             "idempotency_key": idempotency_key,
             "job_id": pipeline_job_id,
             "run_id": context.run_id,
             "cycle_id": context.cycle_id,
             "job_type": stage.job_type,
-            "model_id": accepted_submit_pipeline_job_model_id(
-                supports_accepted_submit_reconcile=getattr(
-                    self.repository, "supports_accepted_submit_reconcile", False
-                ),
-                stage=stage.stage,
-                job_type=stage.job_type,
-                model_id=_chain._cycle_pipeline_job_model_id(context),
-            ),
+            "model_id": row_model_id,
             "stage": stage.stage,
             "candidate_id": context.run_id,
         }

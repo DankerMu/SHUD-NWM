@@ -2,7 +2,7 @@
 
 display API 在 `display_readonly` 模式下对控制面动作返回 409，payload 的
 `recovery_runbook` 指向本文（slug `node22-control-plane-manual-recovery`，
-`apps/api/routes/pipeline.py`）。DB-free scheduler 在五类终态决策上写
+`apps/api/routes/pipeline.py`）。DB-free scheduler 在六类终态决策上写
 `retry_policy.manual_retry_required: true`，本文给出"怎么找到它们"和"每一类走哪个
 入口"。
 
@@ -29,7 +29,7 @@ display API 在 `display_readonly` 模式下对控制面动作返回 409，paylo
 `list-operator-actions`（#1186）是只读列举面：不连 DB、不读 journal（决策只在 evidence 里）、
 不写任何字节。它扫 evidence root 顶层按 mtime 最新的 `--passes` 份终态 pass 文件
 （`scheduler_*.json`；`*.pre_execution.json` 不是终态 pass，不计），**按 decision 字面**列出第二步那张表里
-**五类**等待 operator 的候选（不看 `manual_retry_required` 布尔，所以 bounded 摘要 pass 里的条目照样
+**六类**等待 operator 的候选（不看 `manual_retry_required` 布尔，所以 bounded 摘要 pass 里的条目照样
 列出），并额外列出 breaker 释放了执行槽的 backfill cycle 的每个模型——这类 cycle 不构造候选，
 只出现在 not-selected `source_cycles` 里。
 
@@ -71,7 +71,7 @@ echo "exit=$?"
 | exit | 含义 | 处置 |
 |---|---|---|
 | `1` | 列出了至少一条待办（`operator_actions` 非空） | 按第二步逐条处置 |
-| `0` | 扫过的窗口里**没有在册的五类待办，且窗口本身可信** | 不用动手；但它不是健康检查，见下 |
+| `0` | 扫过的窗口里**没有在册的六类待办，且窗口本身可信** | 不用动手；但它不是健康检查，见下 |
 | `3` | **无法判定**——命令本身跑成功了，只是这批 pass（或一份掉队的 pre-execution 预留）不足以下结论 | 读 receipt 定位原因（`non_evaluating_passes` / `unreadable_passes` / `candidate_lists_dropped_passes` / `orphan_reservations`），等下一趟范围完整的 pass 再跑；**不得**当成 `0` |
 | `2` | **root 级**用法错误：evidence root 缺失/不可读（多半是 root 取错），或 `--passes` 不是 ≥ 1 的整数 | 核对上面的 root 口径与 `--passes` 后重跑 |
 
@@ -238,11 +238,11 @@ receipt 字段：`evidence_root`（**实际扫描的** root，按上面那条自
      （`:728` 在 `:744` 之前），所以被收回的 cycle 对它同样不可见。
      查法：怀疑收回过就把 `runtime_config.allowed_cycle_hours_utc` 与 `cycle_window.lookback_hours`
      在窗口内各趟之间比一遍，变过就别把 `0` 读成「全都没待办」。
-- **`0` 的含义是"没有在册的五类待办"，不是"调度器健康"**。本面只认第二步表里那五个 decision 字面；别的
+- **`0` 的含义是"没有在册的六类待办"，不是"调度器健康"**。本面只认第二步表里那六个 decision 字面；别的
   error_code 再多、再红，它也不会出现在 `operator_actions` 里。实例（#2432）：2026-09-15 13:45 CST
   起 node-22 的 `raw → forcing → runs` 停止推进，2026-09-16 实测最近 20 趟共 760 条 blocked
   candidate 全部是 `error_code=FORCING_VERSION_ROW_ABSENT` 且 `manual_retry_required=False`——
-  这批候选不在那五类之列，于是本命令在管线已经死了一天多的情况下**照契约返回 `exit 0`**。
+  这批候选不在那几类之列，于是本命令在管线已经死了一天多的情况下**照契约返回 `exit 0`**。
   **不要拿它当健康检查**，管线是否推进看各自的监控面。
 - **窗口之外看不见**：只扫最近 `--passes` 趟，这是定义不是缺陷；`3` 的存在就是为了不把"窗口内
   没看见"说成"没有"。需要更宽的窗口就加大 `--passes`（无上限，但每份 pass 文件接近 5 MB，按需
@@ -278,6 +278,7 @@ receipt 字段：`evidence_root`（**实际扫描的** root，按上面那条自
 | `blocked_journal_predecessor_identity_quarantine` | `confirm-operator-reentry`（§8.7 断路器） |
 | `blocked_strict_warm_start_init_state_mismatch` | `confirm-operator-reentry`（strict warm-start 预算） |
 | `blocked_operator_reentry_restart_stage_refused` | **不要再签一次**；带外修好 forecast 之前的输入，见下面「已知限制」的 sink 拒绝那条 |
+| `blocked_cohort_membership_unprovable` | `scripts/node22_manual_retry_failed_runs.py`（manual-retry marker，打在该 cohort 的 run id 上）；成因见 [`scheduler-dbfree-typed-reasons.md`](scheduler-dbfree-typed-reasons.md)「多成员 cohort 的失败归属」（#2603） |
 
 ### `permanent_failure` / `cancelled_manual_retry_required`
 

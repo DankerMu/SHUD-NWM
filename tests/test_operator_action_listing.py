@@ -2426,6 +2426,7 @@ def test_operator_action_decisions_are_closed_over_every_manual_retry_writer() -
         "blocked_strict_warm_start_init_state_mismatch",
         "blocked_journal_predecessor_identity_quarantine",
         "blocked_operator_reentry_restart_stage_refused",
+        "blocked_cohort_membership_unprovable",
     }
     assert set(operator_action_listing.OPERATOR_ACTION_DECISIONS) == decisions
 

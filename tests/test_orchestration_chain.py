@@ -1138,6 +1138,11 @@ def test_chain_type_exports_preserve_legacy_identity_and_dataclass_contracts() -
             [
                 ("job", "required"),
                 ("publication_attempt", None),
+                # #2570 A1-A3: the poll-isolation marker and its counters.
+                ("unverified_error_code", None),
+                ("status_query_failures", 0),
+                ("status_query_last_error", None),
+                ("event_write_failures", 0),
             ],
         ),
         "CycleOrchestrationContext": (

@@ -45,6 +45,7 @@ from services.orchestrator.scheduler_state_types import (
     TERMINAL_PIPELINE_COMPLETION_STAGES,
     TERMINAL_PIPELINE_SUCCESS_STATUSES,
     SchedulerCandidateLike,
+    cohort_member_row_is_attributed,
 )
 
 # Same key order ``_latest_failure_truth_timestamp`` reads for each row type.
@@ -119,7 +120,11 @@ def _pipeline_success_truth_timestamp(
         status = str(job.get("status") or job.get("pipeline_status") or job.get("job_status") or "")
         if status not in TERMINAL_PIPELINE_SUCCESS_STATUSES or not _pipeline_success_job_is_completion_stage(job):
             continue
-        if str(job.get("run_id") or "") != candidate.run_id and str(job.get("model_id") or "") != candidate.model_id:
+        if (
+            str(job.get("run_id") or "") != candidate.run_id
+            and str(job.get("model_id") or "") != candidate.model_id
+            and not cohort_member_row_is_attributed(job)
+        ):
             continue
         timestamp = _first_state_datetime(job, *_JOB_TIME_KEYS)
         if timestamp is not None:
