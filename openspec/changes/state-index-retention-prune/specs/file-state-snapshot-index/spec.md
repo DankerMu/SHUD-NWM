@@ -10,11 +10,11 @@ Each lane SHALL be planned from its own validated entries. Entries SHALL be grou
 
 - its `valid_time` is at or after the group's newest `valid_time` minus `retention_days`;
 - it is its generation's earliest usable entry, latest usable entry, or latest usable entry before that window start;
-- it is the first usable entry of a maximal run of consecutive usable entries sharing one generation;
+- it is the first entry of a maximal run of consecutive usable entries (the usable subsequence, unusable entries skipped) sharing one generation;
 - it carries `cloned_from_model_id`;
 - its `state_id` is named by a retained entry's `cloned_from_state_id`.
 
-All other entries SHALL be removed from the index only, and referenced state objects SHALL NOT be deleted. Retained entries SHALL be republished as their original raw mappings in their original relative order. The reference lane SHALL be written before the destination lane. A lane with nothing to remove SHALL be left untouched and recorded as such.
+All other entries SHALL be removed from the index only, and referenced state objects SHALL NOT be deleted. Retained entries SHALL be republished as their raw mappings (excluding only the read-time injected `index_generated_at` and `object_evidence` fields, as every repair operation does) in their original relative order. Pruning an already-pruned lane with the same window and newest entries SHALL remove nothing. The reference lane SHALL be written before the destination lane. A lane with nothing to remove SHALL be left untouched and recorded as such.
 
 For every group and every cutoff instant, pruning SHALL leave these unchanged:
 
@@ -68,7 +68,7 @@ The enforce receipt SHALL stay within the receipt size limit.
 
 ### Requirement: State snapshot index evidence SHALL expose capacity against its hard limits
 
-Every state-index evidence block and every publish result SHALL carry a `capacity` object. The object SHALL contain the entry count, the JSON-node count, and the byte size, together with the corresponding hard limits. It SHALL also contain the highest utilization ratio, the `0.70` warning threshold, and a boolean `warning`. A logger warning SHALL be emitted when `warning` is true. Capacity reporting SHALL NOT make any reader or publisher fail earlier than the existing hard limits.
+`state_index_evidence()`, the renewal evidence, every publish result, and every repair preview/receipt lane SHALL carry a `capacity` object; per-reader nested evidence blocks embedded into scheduler pass evidence SHALL NOT, to keep the pass evidence byte budget. The object SHALL contain the entry count, the JSON-node count, and the byte size, together with the corresponding hard limits. It SHALL also contain the highest utilization ratio, the `0.70` warning threshold, and a boolean `warning`. A logger warning SHALL be emitted when `warning` is true. Capacity reporting SHALL NOT make any reader or publisher fail earlier than the existing hard limits.
 
 #### Scenario: Capacity warning at 70 percent
 

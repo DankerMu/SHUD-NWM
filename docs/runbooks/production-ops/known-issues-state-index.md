@@ -471,9 +471,11 @@ direct 文件删除之后，这一行不再喂给 reconcile scan、也无法被 
 fail-closed。2026-09-25 的 node-22 private index 是 9,950 条 / 203,581 个 JSON 节点 /
 11.33 MB，节点与字节两个上限大约在 14.6k 条时同时触顶。
 
-**信号**：每个 state-index evidence 块（`state_index_evidence()`、各 reader 嵌套的
-`state_snapshot_index`、`validated_entries_for_renewal`）以及
-`publish_state_snapshot_index` 的返回都带 `capacity`：
+**信号**：`state_index_evidence()`、`validated_entries_for_renewal` 的 evidence
+（provider-refresh 的 state 证据）、`publish_state_snapshot_index` 的返回、以及本操作
+每 lane 的 `retention.capacity_before/after` 都带 `capacity`；各 reader 回答里嵌套的
+`state_snapshot_index` 块**不带**（它们整块进 scheduler pass evidence，node-22 最大
+pass evidence 已是 4,526,683 / 5,000,000 B、含 384 个这种块）。字段：
 `entry_count/max_entries`、`json_nodes/max_json_nodes`、`index_bytes/max_bytes`、
 `utilization_ratio`（三者最大值）、`warning_threshold`（0.70）、`warning`。
 `warning` 为 true 时 `packages.common.state_manager` 每次加载打一条 WARNING
@@ -489,7 +491,8 @@ generation 为 `str(model_package_checksum or "")`（无 checksum 即 `""` 这�
 
 - K1 `valid_time ≥ W_g`；
 - K2 每个 generation 的最早 usable、最新 usable、`W_g` 之前最新 usable；
-- K3 每段"连续 usable 且同 generation"的首条（unusable 或换代即断段）；
+- K3 在 usable 子序列上（unusable 行跳过、不断段），每段同 generation 连续条目的
+  首条——只有换代才断段，所以对剪过的 index 再剪一次不会再删任何条目；
 - K4 带非空 `cloned_from_model_id` 的 clone 行；
 - K5 被任何保留行 `cloned_from_state_id` 指向的 source 行（传递闭包）。
 
@@ -531,12 +534,16 @@ systemctl --user is-active nhms-compute-scheduler.service   # 必须是 inactive
 systemctl --user start nhms-compute-scheduler.timer
 ```
 
-**审核 dry-run**：每 lane 的 `lanes.<lane>.retention`：
+**审核 dry-run**：先看每 lane 的 `lanes.<lane>.checksum_valid`——**两 lane 都必须是
+`true`**。任一为 `false` 说明 payload 被带外改过，prune 会用新 checksum 把它重新签名；
+停下来走 8.9，查清并修好之后再回来。然后看每 lane 的 `lanes.<lane>.retention`：
 
 - `entry_count_before/after`、`json_nodes_before/after`、`index_bytes_before/after`、
   `utilization_ratio_before/after`、`removed_count`；
 - `groups[]`（有移除的组：`model_id`、`source_id`、`window_start`、`removed_count`、
-  `removed_valid_time_min/max`、`kept_count`；超过 2000 组时 `groups_truncated`）；
+  `removed_valid_time_min/max`、`kept_count`；每 lane 摘要有 256 KiB 字节预算，放不下
+  的组数记在 `group_summaries_truncated`，保证 enforce receipt 落在 1 MiB 以内）；
+- `capacity_before` / `capacity_after`（完整 capacity 对象，见"信号"）；
 - `kept_out_of_window_count` 与 `kept_out_of_window_by_anchor`（各锚点命中数，可重叠）；
 - `removed_state_ids`（仅 dry-run 列全量）与 `removed_state_ids_sha256`
   = `sha256(json.dumps(sorted(ids), separators=(",", ":")))`。
@@ -553,8 +560,8 @@ provider-refresh 仍按 8.9 冻结。
 
 **退出码与部分提交**：同 8.9（0 / 2 / 3）。先写 reference、后写 destination；
 destination CAS 失败时 exit 3，reference 已剪、destination 字节不变——**不要**用
-reference 回填 destination，重新 dry-run 后再跑一次即可（reference 会是
-`nothing_to_prune`）。两 lane 都无可剪时 enforce 的 `status=untouched`，不写 archive。
+reference 回填 destination，重新 dry-run 后再跑一次即可：planner 是不动点（K3 跳过
+unusable 行），已剪的 reference 必然是 `nothing_to_prune`，只剪 destination（已测）。两 lane 都无可剪时 enforce 的 `status=untouched`，不写 archive。
 
 **已知限制**：
 
@@ -565,7 +572,10 @@ reference 回填 destination，重新 dry-run 后再跑一次即可（reference 
 - `GET /state-snapshots/{state_id}` 对被剪 id 返回 404；预像在 archive 里。
 - 早于窗口的 cycle 的手工 retry：精确 checkpoint 已剪时 strict warm start 报
   `state_snapshot_index_exact_checkpoint_missing`，transition 只会变成 block
-  （例如 `warm_continue` → `block_predecessor_pending`），不会变成 warm/cold admit。
+  （例如 `warm_continue` → `block_predecessor_pending`；被剪的错代 entry 也会让
+  `block_wrong_generation` 读成 `block_predecessor_pending`），不会变成 warm/cold
+  admit。变成 `block_predecessor_pending` 的候选**可能触发 8.6 的 predecessor 补账
+  工作**——它仍然是 block，只是多了一次补账尝试。
 - 回滚：用各 lane 自己的 archive 字节，先核对当前 preimage；CLI 不会覆盖后来的发布。
 
 **2026-09-25 生产副本 dry-run**（本地 staging，lag 16，默认 21 天）：两 lane 都从
@@ -573,4 +583,16 @@ reference 回填 destination，重新 dry-run 后再跑一次即可（reference 
 106,639 节点、11,334,892 → 6,048,768 字节，utilization 0.679 → 0.361；shared
 183,681 → 106,639 节点、10,439,392 → 6,048,768 字节，0.622 → 0.361。窗口外保留 196 条
 （earliest/run-start/latest-before-window 各 98，clone 行 46）。private 的字节降幅
-有一部分来自去掉读时注入的两个字段，不只是剪条目。
+有一部分来自去掉读时注入的两个字段，不只是剪条目。对剪完的副本再跑一次 dry-run：
+两 lane 都是 `nothing_to_prune`。
+
+**reference lane 的回弹与余量**（同一副本实测）：repair 发布的是不含
+`index_generated_at` / `object_evidence` 的条目；reference lane 的下一次
+`upsert_state_snapshot` 会把这两个字段重新注入每一条。实测剪完 5,772 条 /
+106,639 节点 / 6,048,768 B（0.361），一次 upsert 后 5,773 条 / 118,202 节点 /
+6,569,110 B（0.394）——每条约 +2.0 节点、+90 B。所以 reference 的余量按回弹后的形状
+算：约 20.5 节点、1,138 B / 条，节点上限约在 14,652 条、字节上限约在 14,744 条触顶，
+即剪完后还能再长约 8,900 条，按 192 条/天约 46 天；到 0.70 再次告警约在 10,256 条，
+约 4,500 条、约 23 天。shared lane 由 copyback 写入、不回弹（18.5 节点、1,048 B / 条）：
+字节上限约 16,010 条（余量约 10,200 条、约 53 天），0.70 约 11,200 条（约 28 天）。
+这些是"不再剪"的上限；实际节奏按 `warning` 触发重跑。

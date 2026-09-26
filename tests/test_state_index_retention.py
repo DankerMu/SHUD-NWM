@@ -397,7 +397,7 @@ def _answers(repository: FileStateSnapshotIndexRepository, entries: list[dict[st
 @pytest.fixture(name="invariant_run", scope="module")
 def invariant_run_factory(
     tmp_path_factory: pytest.TempPathFactory,
-) -> tuple[list[dict[str, Any]], dict[Any, Any], dict[Any, Any], dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[Any, Any], dict[Any, Any], dict[str, Any], Lanes]:
     lanes = Lanes(tmp_path_factory.mktemp("invariant"))
     entries = _invariant_entries(lanes)
     lanes.publish(entries)
@@ -406,11 +406,11 @@ def invariant_run_factory(
     summary = lanes.prune(enforce=True)
     repository.refresh()
     after = _answers(repository, entries)
-    return entries, before, after, summary
+    return entries, before, after, summary, lanes
 
 
 def test_governing_invariant_all_cutoffs_and_in_window_payloads(invariant_run: Any) -> None:
-    entries, before, after, summary = invariant_run
+    entries, before, after, summary, _lanes = invariant_run
     assert summary["lanes"]["reference"]["action"] == "prune-retention"
     assert summary["lanes"]["reference"]["retention"]["removed_count"] > 50  # the fixture really prunes
     for model_id, _source_id, window_start in GROUPS:
@@ -448,7 +448,7 @@ def test_governing_invariant_all_cutoffs_and_in_window_payloads(invariant_run: A
 
 
 def test_transition_decisions_move_only_admit_to_block_and_only_before_the_window(invariant_run: Any) -> None:
-    entries, before, after, _summary = invariant_run
+    entries, before, after, _summary, _lanes = invariant_run
     warm = {TransitionDecision.WARM_CONTINUE}
     cold = TransitionDecision.ADMIT - warm
     seen_before: set[str] = set()
@@ -489,8 +489,13 @@ def test_transition_decisions_move_only_admit_to_block_and_only_before_the_windo
     )
 
 
+def test_invariant_fixture_second_prune_removes_nothing(invariant_run: Any) -> None:
+    *_ignored, lanes = invariant_run
+    _assert_second_prune_removes_nothing(lanes)
+
+
 def test_pruned_old_exact_checkpoint_fails_closed_and_history_stays(invariant_run: Any) -> None:
-    _entries, before, after, _summary = invariant_run
+    _entries, before, after, _summary, _lanes = invariant_run
     cutoff = _day("2026-06-01T00:00:00")  # generation B, mid-run: not an anchor
     strict_before = before[("m_main", cutoff, "strict", GEN_B)]
     strict_after = after[("m_main", cutoff, "strict", GEN_B)]
@@ -535,7 +540,9 @@ def _anchor_fixture(lanes: Lanes) -> tuple[list[dict[str, Any]], dict[str, str]]
         (_k(4), {"generation_checksum": GEN_A}),  # K3 run start after B
         (_k(5), {"generation_checksum": GEN_A}),  # removed
         (_k(6), {"generation_checksum": GEN_A, "usable": False}),  # unusable non-anchor: removed
-        (_k(7), {"generation_checksum": GEN_A}),  # K3 run start after unusable
+        # Not a run start: K3 runs are over the usable subsequence, so the unusable
+        # d6 is skipped and A simply continues from d5 -> removed.
+        (_k(7), {"generation_checksum": GEN_A}),
         (_k(8), {"generation_checksum": GEN_A}),  # K2 latest A / latest A before window
         (_k(9), {"generation_checksum": None}),  # K2 earliest "" + K3
         (_k(10), {"generation_checksum": None}),  # removed
@@ -556,6 +563,7 @@ def _anchor_fixture(lanes: Lanes) -> tuple[list[dict[str, Any]], dict[str, str]]
         "k_d2": group[2]["state_id"],
         "k_d5": group[5]["state_id"],
         "k_d6": group[6]["state_id"],
+        "k_d7": group[7]["state_id"],
         "k_d10": group[10]["state_id"],
         "k_d13": group[13]["state_id"],
         "k_early": group[15]["state_id"],
@@ -583,6 +591,7 @@ def test_boundary_and_each_anchor_keep_exactly_the_contracted_entries(lanes: Lan
             ids["k_d2"],
             ids["k_d5"],
             ids["k_d6"],
+            ids["k_d7"],
             ids["k_d10"],
             ids["k_d13"],
             ids["k_early"],
@@ -600,7 +609,7 @@ def test_boundary_and_each_anchor_keep_exactly_the_contracted_entries(lanes: Lan
         assert block["kept_out_of_window_by_anchor"]["clone_provenance"] == 1
         assert block["kept_out_of_window_by_anchor"]["clone_source"] == 1
         groups = {group["model_id"]: group for group in block["groups"]}
-        assert groups["m_k"]["removed_count"] == 6
+        assert groups["m_k"]["removed_count"] == 7
         assert groups["m_k"]["removed_valid_time_min"] == _iso(_k(2))
         assert groups["m_k"]["removed_valid_time_max"] == _iso(K_WINDOW - timedelta(seconds=1))
         assert groups["m_src"]["removed_count"] == 2
@@ -611,6 +620,24 @@ def test_boundary_and_each_anchor_keep_exactly_the_contracted_entries(lanes: Lan
         after = lanes.entries(lane)
         assert after == [_stripped(entry) for entry in entries if entry["state_id"] not in expected_removed]
     assert {len(entry) for entry in entries} == set(SHAPES)
+    _assert_second_prune_removes_nothing(lanes)
+
+
+def _assert_second_prune_removes_nothing(lanes: Lanes) -> None:
+    """The planner is a fixed point: re-running on its own output removes nothing."""
+
+    reference_before = lanes.reference_index.read_bytes()
+    destination_before = lanes.destination_index.read_bytes()
+    preview = lanes.prune()
+    for lane in ("reference", "destination"):
+        lane_summary = preview["lanes"][lane]
+        assert lane_summary["retention"]["removed_count"] == 0, lane_summary["retention"]["removed_state_ids"]
+        assert lane_summary["action"] == "skip"
+        assert lane_summary["untouched_reason"] == "nothing_to_prune"
+    summary = lanes.prune(enforce=True)
+    assert summary["status"] == "untouched"
+    assert lanes.reference_index.read_bytes() == reference_before
+    assert lanes.destination_index.read_bytes() == destination_before
 
 
 def test_source_spelling_is_normalized_into_one_group(lanes: Lanes) -> None:
@@ -735,6 +762,15 @@ def test_destination_cas_failure_after_reference_commit_is_partial_exit_3(
     assert summary["lanes"]["reference"]["committed"] is True
     assert lanes.entries("reference") == [_stripped(entry) for entry in entries[:1] + entries[58:]]
     assert lanes.destination_index.read_bytes() == destination_before
+
+    # Recovery (runbook 8.12): a plain re-run finishes the destination and finds
+    # nothing left to prune in the already-pruned reference.
+    monkeypatch.setattr(state_manager_module, "atomic_replace_provider_bytes", real_replace)
+    assert repair.main(["prune-retention", "--enforce"]) == 0
+    receipt = json.loads((lanes.receipt_root / "latest.json").read_text(encoding="utf-8"))
+    assert receipt["lanes"]["reference"]["untouched_reason"] == "nothing_to_prune"
+    assert receipt["lanes"]["destination"]["action"] == "prune-retention"
+    assert lanes.entries("destination") == lanes.entries("reference")
 
 
 @pytest.mark.parametrize(
@@ -883,6 +919,36 @@ def test_enforce_receipt_for_over_5000_removals_stays_under_limit(
     assert receipt["lanes"]["destination"]["untouched_reason"] == "nothing_to_prune"
 
 
+def test_enforce_receipt_with_group_summaries_over_budget_in_both_lanes_is_written(
+    lanes: Lanes,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Long model ids and more groups-with-removals per lane than the summary byte
+    # budget holds, in BOTH lanes: the receipt must still be written under the cap.
+    group_count = 1500
+    entries = [
+        lanes.entry(f"model_{index:04d}_{'x' * 90}", "gfs", _k(day), generation_checksum=GEN_A, shape=14)
+        for index in range(group_count)
+        for day in (0, 1, 2, 30)
+    ]
+    lanes.publish(entries)
+    lanes.apply_env(monkeypatch)
+
+    exit_code = repair.main(["prune-retention", "--enforce"])
+
+    receipt_path = lanes.receipt_root / "latest.json"
+    assert exit_code == 0
+    assert receipt_path.exists()
+    assert len(receipt_path.read_bytes()) < repair.MAX_RECEIPT_BYTES
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    for lane in ("reference", "destination"):
+        block = receipt["lanes"][lane]["retention"]
+        assert block["groups_with_removals"] == group_count
+        assert block["group_summaries_truncated"] > 0
+        assert len(block["groups"]) + block["group_summaries_truncated"] == group_count
+        assert block["removed_count"] == group_count  # day 1 of each group; day 2 is latest-before-window
+
+
 def test_cli_round_trip_with_retention_days(
     lanes: Lanes,
     monkeypatch: pytest.MonkeyPatch,
@@ -1001,3 +1067,50 @@ def test_capacity_warning_threshold_never_fails_reads_or_publishes(
     assert publish_warnings == (1 if warning else 0)
     # One warning per load: the cached snapshot serves the later reads.
     assert read_warnings == (1 if warning else 0)
+
+
+def test_reader_answers_do_not_embed_capacity_but_state_index_evidence_does(lanes: Lanes) -> None:
+    # Node-22's largest pass evidence is 4.5 MB of a 5 MB budget with 384 nested
+    # state_snapshot_index blocks: capacity must stay out of every reader answer.
+    valid_time = K_END
+    entries = [
+        lanes.entry("m_r", "gfs", valid_time - timedelta(days=day), generation_checksum=GEN_A) for day in range(3)
+    ]
+    lanes.publish(entries)
+    repository = lanes.repository()
+
+    answers = [
+        repository.usable_state_history_evidence(model_id="m_r", source_id="gfs", before_time=NOW),
+        repository.strict_warm_start_evidence(
+            model_id="m_r",
+            source_id="gfs",
+            valid_time=valid_time,
+            model_package_checksum=GEN_A,
+            required_lead_hours=LEAD,
+        ),
+        _generation_signal(repository, "m_r", "gfs", valid_time, GEN_A),
+        repository.clone_lineage_signal(model_id="m_r", source_id="gfs"),
+    ]
+    assert answers[1]["ready"] is True
+    for answer in answers:
+        assert answer["state_snapshot_index"]["entry_count"] == 3
+        assert "capacity" not in answer["state_snapshot_index"]
+        assert "capacity" not in answer
+
+    evidence = repository.state_index_evidence()
+    assert evidence["capacity"]["entry_count"] == 3
+    assert evidence["capacity"]["index_bytes"] == len(lanes.reference_index.read_bytes())
+
+
+def test_renewal_evidence_carries_capacity(lanes: Lanes) -> None:
+    entries = [lanes.entry("m_w", "gfs", K_END - timedelta(days=day), generation_checksum=GEN_A) for day in range(4)]
+    lanes.publish(entries)
+
+    renewal_entries, evidence, _preimage = lanes.repository().validated_entries_for_renewal()
+
+    assert len(renewal_entries) == 4
+    capacity = evidence["capacity"]
+    assert capacity["entry_count"] == 4
+    assert capacity["index_bytes"] == len(lanes.reference_index.read_bytes())
+    assert capacity["max_entries"] == state_manager_module.MAX_STATE_SNAPSHOT_INDEX_ENTRIES
+    assert capacity["warning"] is False

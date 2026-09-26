@@ -94,8 +94,13 @@ STATE_INDEX_REPAIR_OPERATIONS = frozenset({"remove-entry", "recompute-checksum",
 # (<= 24 h with allowed cycles 0/12) + the self-heal producer probe (<= 24 h).
 DEFAULT_STATE_INDEX_RETENTION_DAYS = 21
 STATE_INDEX_RETENTION_STEP_BACK_HOURS = 48
-# Per-group summaries in one lane's retention block; bounds the enforce receipt.
-MAX_STATE_INDEX_RETENTION_SUMMARY_GROUPS = 2000
+# Byte budget for one lane's per-group summaries (measured as the indent=2 receipt
+# rendering at its nesting depth). Two lanes stay far below the CLI receipt cap
+# (``MAX_RECEIPT_BYTES`` = 1 MiB); omitted groups are counted, never silently lost.
+MAX_STATE_INDEX_RETENTION_SUMMARY_BYTES = 256 * 1024
+# Upper bound on the leading indentation of one summary line inside the receipt
+# (receipt > lanes > lane > retention > groups > summary: at most 6 levels x 2).
+_RETENTION_SUMMARY_INDENT_BYTES = 12
 STATE_INDEX_CAPACITY_WARNING_THRESHOLD = 0.70
 STATE_INDEX_REPAIR_LANES = ("reference", "destination")
 _STATE_INDEX_REPAIR_POST_CAS_PHASES = frozenset({"replace_uncertain", "postcommit", "release_uncertain"})
@@ -183,6 +188,10 @@ class _StateIndexSnapshot:
     content: bytes
     entries: dict[tuple[str, str, str, str, str], dict[str, Any]]
     evidence: dict[str, Any]
+    # #2548: exposed by ``state_index_evidence()`` only. ``evidence`` is embedded in
+    # every reader answer and so in scheduler pass evidence (5 MB budget), which
+    # must not grow by one capacity object per nested block.
+    capacity: dict[str, Any] = dataclass_field(default_factory=dict)
 
 
 class StateSnapshotRepository(Protocol):
@@ -1840,7 +1849,8 @@ class FileStateSnapshotIndexRepository:
 
     def state_index_evidence(self) -> dict[str, Any]:
         try:
-            return dict(self._load_index_snapshot(allow_empty=False).evidence)
+            snapshot = self._load_index_snapshot(allow_empty=False)
+            return {**snapshot.evidence, "capacity": dict(snapshot.capacity)}
         except StateManagerError as error:
             return self._blocked_index_evidence(error)
 
@@ -2041,10 +2051,15 @@ class FileStateSnapshotIndexRepository:
                 else False,
                 "entry_count": len(entries),
                 "index_bytes": len(content),
-                "capacity": capacity,
             }
         )
-        snapshot = _StateIndexSnapshot(payload=dict(payload), content=content, entries=entries, evidence=evidence)
+        snapshot = _StateIndexSnapshot(
+            payload=dict(payload),
+            content=content,
+            entries=entries,
+            evidence=evidence,
+            capacity=capacity,
+        )
         if use_cache:
             object.__setattr__(self, "_index_snapshot_cache", snapshot)
         return snapshot
@@ -3075,6 +3090,11 @@ def _state_index_repair_enforce(
                     lane_summary["entry_count_after"] = len(readback["raw_entries"])
                     if isinstance(lane_summary.get("retention"), dict):
                         lane_summary["retention"]["index_bytes_after"] = len(readback["content"])
+                        lane_summary["retention"]["capacity_after"] = _state_index_capacity(
+                            entry_count=len(readback["raw_entries"]),
+                            json_nodes=int(readback["json_nodes"]),
+                            index_bytes=len(readback["content"]),
+                        )
                     lane_summary["postimage_sha256"] = result.get("content_sha256") or readback["digest"]
                     lane_summary["archive_path"] = archives[name]["path"]
                     lane_summary["archive_sha256"] = archives[name]["sha256"]
@@ -3352,8 +3372,9 @@ def _plan_state_index_retention_lane(
 
     * K1 ``valid_time >= W_g`` (group's newest ``valid_time`` - retention_days);
     * K2 per generation: earliest usable, latest usable, latest usable < ``W_g``;
-    * K3 first entry of every maximal run of consecutive usable entries sharing
-      one generation (an unusable entry or a generation change ends a run);
+    * K3 first entry of every maximal same-generation run of the usable
+      subsequence (unusable entries are skipped, only a generation change ends
+      a run), so a second prune with the same window removes nothing;
     * K4 it carries a non-blank ``cloned_from_model_id``;
     * K5 its ``state_id`` is the ``cloned_from_state_id`` of a kept entry
       (closed transitively, any group).
@@ -3386,7 +3407,8 @@ def _plan_state_index_retention_lane(
             if str(entry.get("cloned_from_model_id") or "").strip():
                 reasons.setdefault(index, set()).add("clone_provenance")
             if not _require_state_index_bool(entry.get("usable_flag"), field="usable_flag"):
-                previous_generation = _RETENTION_NO_RUN
+                # Skipped, not a run break: a run start must not depend on an
+                # unusable row this prune may remove (fixed point, #2548 K3).
                 continue
             generation = str(entry.get("model_package_checksum") or "")
             earliest.setdefault(generation, index)
@@ -3452,6 +3474,16 @@ def _plan_state_index_retention_lane(
             }
         )
 
+    bounded_summaries: list[dict[str, Any]] = []
+    summary_bytes = 0
+    for group_summary in group_summaries:
+        rendered = json.dumps(group_summary, ensure_ascii=False, indent=2, sort_keys=True)
+        cost = len(rendered.encode("utf-8")) + (rendered.count("\n") + 1) * _RETENTION_SUMMARY_INDENT_BYTES + 2
+        if summary_bytes + cost > MAX_STATE_INDEX_RETENTION_SUMMARY_BYTES:
+            break
+        summary_bytes += cost
+        bounded_summaries.append(group_summary)
+
     nodes_before = int(snapshot["json_nodes"])
     bytes_before = len(snapshot["content"])
     if removed:
@@ -3484,6 +3516,8 @@ def _plan_state_index_retention_lane(
         "index_bytes_after": bytes_after,
         "utilization_ratio_before": capacity_before["utilization_ratio"],
         "utilization_ratio_after": capacity_after["utilization_ratio"],
+        "capacity_before": capacity_before,
+        "capacity_after": capacity_after,
         "removed_count": len(removed),
         "group_count": len(groups),
         "groups_with_removals": len(group_summaries),
@@ -3491,8 +3525,8 @@ def _plan_state_index_retention_lane(
         "kept_out_of_window_by_anchor": anchor_counts,
         "removed_state_ids_sha256": "sha256:"
         + sha256_bytes(json.dumps(removed_state_ids, separators=(",", ":")).encode("utf-8")),
-        "groups": group_summaries[:MAX_STATE_INDEX_RETENTION_SUMMARY_GROUPS],
-        "groups_truncated": len(group_summaries) > MAX_STATE_INDEX_RETENTION_SUMMARY_GROUPS,
+        "groups": bounded_summaries,
+        "group_summaries_truncated": len(group_summaries) - len(bounded_summaries),
     }
     return {
         "action": "prune-retention" if removed else "skip",

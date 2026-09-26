@@ -4227,6 +4227,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
+        # #2548: the retention suite's decision test feeds before/after-prune
+        # reader signals through `evaluate_transition_decision`; a change to the
+        # decision matrix moves exactly what "a prune never admits" is asserted
+        # against. Sub-5s, DB-free.
+        "services/orchestrator/scheduler_generation.py",
+        ("tests/test_state_index_retention.py",),
+    ),
+    PathTestRule(
         "packages/common/state_cli.py",
         (
             "tests/test_state_manager.py",
