@@ -113,16 +113,45 @@ def test_install_over_the_armed_steady_state_refuses_and_leaves_it_armed(rig: Ri
 
 
 @pytest.mark.parametrize(
-    "baseline",
+    ("action", "service_active"),
     [
-        pytest.param(b"disabled\nstatic\tinactive\n", id="one-field"),
-        pytest.param(b"disabled\tinactive\textra\nstatic\tinactive\n", id="three-field"),
-        pytest.param(b"disabled\tinactive\nstatic\tinactive\nstatic\tinactive\n", id="three-line"),
-        pytest.param(b"disabled\tinactive\n", id="one-line"),
-        pytest.param(b"disabled\t\nstatic\tinactive\n", id="empty-field"),
-        pytest.param(b"", id="empty"),
+        (action, service_active)
+        for action in ("--install", "--enable", "--rollback")
+        for service_active in ("active", "failed")
     ],
 )
+def test_every_action_refuses_a_refresh_service_that_is_not_inactive_before_any_mutation(
+    rig: Rig, action: str, service_active: str
+) -> None:
+    """The entry gate accepts only `inactive`, before the scheduler capture and
+    before `--install`'s own armed refusal (whose stderr must stay silent), so a
+    running refresh tick -- or a `failed` one not yet `reset-failed` -- is never
+    raced by any action, `--rollback` included."""
+    if action == "--enable":
+        assert rig.run("--install").stdout == STATUS["--install"]
+    elif action == "--rollback":
+        installed_and_armed(rig)
+    rig.set_unit(SERVICE, "static", service_active)
+    before = rig.snapshot()
+
+    result = rig.run(action)
+
+    assert_unmutated(result, rig, before)
+    assert "refusing --install" not in result.stderr
+    assert rig.unit(SERVICE) == ("static", service_active)
+
+
+MALFORMED_BASELINES = [
+    pytest.param(b"disabled\nstatic\tinactive\n", id="one-field"),
+    pytest.param(b"disabled\tinactive\textra\nstatic\tinactive\n", id="three-field"),
+    pytest.param(b"disabled\tinactive\nstatic\tinactive\nstatic\tinactive\n", id="three-line"),
+    pytest.param(b"disabled\tinactive\n", id="one-line"),
+    pytest.param(b"disabled\t\nstatic\tinactive\n", id="empty-field"),
+    pytest.param(b"", id="empty"),
+]
+
+
+@pytest.mark.parametrize("baseline", MALFORMED_BASELINES)
 def test_rollback_with_a_malformed_baseline_fails_before_any_mutation(rig: Rig, baseline: bytes) -> None:
     installed_and_armed(rig)
     (rig.state_root / "refresh.before").write_bytes(baseline)
@@ -130,6 +159,23 @@ def test_rollback_with_a_malformed_baseline_fails_before_any_mutation(rig: Rig, 
 
     assert_unmutated(rig.run("--rollback"), rig, before)
     assert rig.unit(TIMER) == ("enabled", "active")
+
+
+@pytest.mark.parametrize("baseline", MALFORMED_BASELINES)
+def test_install_over_a_malformed_existing_baseline_fails_before_any_mutation(rig: Rig, baseline: bytes) -> None:
+    """D4: an existing `refresh.before` is parsed before the first mutation, so
+    no host is ever installed over a baseline its `--rollback` would refuse."""
+    seeded = _seed_operator_units(rig)
+    assert rig.run("--install").stdout == STATUS["--install"]
+    (rig.state_root / "refresh.before").write_bytes(baseline)
+    before = rig.snapshot()
+
+    result = rig.run("--install")
+
+    assert_unmutated(result, rig, before)
+    assert "refusing --install" not in result.stderr
+    assert (rig.state_root / "refresh.before").read_bytes() == baseline
+    assert {unit: (rig.state_root / f"{unit}.before").read_bytes() for unit in REFRESH_UNITS} == seeded
 
 
 def test_rollback_without_a_recorded_baseline_fails_before_any_mutation(rig: Rig) -> None:
@@ -372,10 +418,13 @@ def test_a_failing_enable_step_in_the_restore_is_counted_and_start_still_runs(ri
 def test_the_install_restore_counts_a_malformed_baseline_as_a_failed_step_and_still_reads_back(
     rig: Rig,
 ) -> None:
+    """Corrupted only AFTER `--install`'s pre-mutation parse accepted it (the
+    failing reload writes it), so the handler's own read is what fails."""
     assert rig.run("--install").stdout == STATUS["--install"]
-    (rig.state_root / "refresh.before").write_bytes(b"disabled\tinactive\textra\nstatic\tinactive\n")
+    baseline = rig.state_root / "refresh.before"
+    corrupt = {"on": "daemon-reload@1", "write": [str(baseline), "disabled\tinactive\textra\nstatic\tinactive\n"]}
 
-    result = rig.run("--install", fail=["daemon-reload@1"])
+    result = rig.run("--install", fail=["daemon-reload@1"], after=[corrupt])
 
     assert result.returncode == 1
     assert result.stdout == ""

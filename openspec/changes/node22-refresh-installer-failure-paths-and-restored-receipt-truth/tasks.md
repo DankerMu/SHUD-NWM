@@ -127,12 +127,14 @@ This section is **not done in this PR** and is not claimed done. #1831 forbids p
 - [ ] 5.1 During the window only: `git status --porcelain` → `git pull --ff-only` on `/scratch/frd_muziyao/NWM`. Only the active interpreter or the checked-in wrappers are used; no `uv`.
 - [ ] 5.2 The D9 sequence:
   1. before-state;
-  2. `--rollback` with read-back;
-  3. `--install` with the baseline kept byte-identical;
-  4. `--enable`;
-  5. `--install` while armed, which must refuse with no mutation;
-  6. after-state, with the lane left **armed**;
-  7. the probe installer: `--rollback` → `--install` → `--enable`.
+  2. pre-flight: the refresh service reads `inactive` (`reset-failed` if it is `failed`);
+  3. `--rollback` with read-back;
+  4. `--install` with the baseline kept byte-identical;
+  5. manual refresh (`scripts/scheduler_file_provider_refresh_once.sh`), then check that `latest.json` `.outcome` is `published`;
+  6. `--enable`; if it fails, go back to step 5 and try again;
+  7. `--install` while armed, which must refuse with no mutation;
+  8. after-state, with the lane left **armed**;
+  9. the probe installer: `--rollback` → `--install` → `--enable`.
 - [ ] 5.3 A receipt at `docs/runbooks/receipts/<date>-issue-2294-installer-drill-node22.md`: each step's stdout, stderr and rc, the before and after `systemctl --user show` of the six units, and `od -c` of `refresh.before` before and after.
 
 ## Evidence Floor

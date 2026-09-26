@@ -122,8 +122,10 @@ def test_systemd_refresh_contract_is_db_free_daily_and_scheduler_independent() -
     assert "stat -c '%a'" in wrapper
     assert "DATABASE_URL PIPELINE_DATABASE_URL PGAPPNAME" in wrapper
     # #2294: what the installer DOES -- its env-file checks, `cmp -s`, the
-    # receipt validation before arming, the status lines, the restore and its
-    # read-backs, and touching only the refresh units -- is asserted by running
+    # receipt validation before arming, the refresh-service entry gate every
+    # action passes before its first mutation (`assert_refresh_service_inactive`),
+    # the status lines, the restore and its read-backs, the malformed-baseline
+    # refusals, and touching only the refresh units -- is asserted by running
     # it against a fake systemctl in tests/test_scheduler_refresh_installer_failure_paths.py
     # and the lifecycle case below, not by source substrings.
     assert "stat -c '%a'" in installer
@@ -302,10 +304,13 @@ def test_installer_enable_lifecycle_and_failure_restore_with_fake_systemctl(tmp_
         "PYTHONPATH": str(root),
     }
     installer = root / "scripts/install_node22_scheduler_file_provider_refresh.sh"
+    # Run under a resolved bash >= 4, never the shebang's first `bash` on PATH:
+    # the installer's main-shell guard reads `$BASHPID`.
+    bash = _require_modern_bash()
 
-    subprocess.run([str(installer), "--install"], env=environment, check=True, capture_output=True, text=True)
+    subprocess.run([bash, str(installer), "--install"], env=environment, check=True, capture_output=True, text=True)
     enabled = subprocess.run(
-        [str(installer), "--enable"], env=environment, check=True, capture_output=True, text=True
+        [bash, str(installer), "--enable"], env=environment, check=True, capture_output=True, text=True
     )
 
     assert json.loads(enabled.stdout)["status"] == "enabled_active"
@@ -316,7 +321,7 @@ def test_installer_enable_lifecycle_and_failure_restore_with_fake_systemctl(tmp_
     invalid_receipt = receipt.read_bytes()
     receipt.write_text('{"outcome":"published","database_free":true}\n')
     failed = subprocess.run(
-        [str(installer), "--enable"], env=environment, check=False, capture_output=True, text=True
+        [bash, str(installer), "--enable"], env=environment, check=False, capture_output=True, text=True
     )
     assert failed.returncode != 0
     state = json.loads(fake_state.read_text())
@@ -324,12 +329,12 @@ def test_installer_enable_lifecycle_and_failure_restore_with_fake_systemctl(tmp_
     receipt.write_bytes(invalid_receipt)
 
     repeated = subprocess.run(
-        [str(installer), "--enable"], env=environment, check=True, capture_output=True, text=True
+        [bash, str(installer), "--enable"], env=environment, check=True, capture_output=True, text=True
     )
     assert json.loads(repeated.stdout)["status"] == "enabled_active"
 
     rolled_back = subprocess.run(
-        [str(installer), "--rollback"], env=environment, check=True, capture_output=True, text=True
+        [bash, str(installer), "--rollback"], env=environment, check=True, capture_output=True, text=True
     )
     assert json.loads(rolled_back.stdout)["status"] == "rolled_back"
     state = json.loads(fake_state.read_text())
@@ -337,13 +342,13 @@ def test_installer_enable_lifecycle_and_failure_restore_with_fake_systemctl(tmp_
     assert state["nhms-compute-scheduler.timer"] == {"enabled": "disabled", "active": "inactive"}
     assert state["nhms-compute-scheduler.service"] == {"enabled": "disabled", "active": "inactive"}
 
-    subprocess.run([str(installer), "--install"], env=environment, check=True, capture_output=True, text=True)
+    subprocess.run([bash, str(installer), "--install"], env=environment, check=True, capture_output=True, text=True)
     fail_environment = {
         **environment,
         "FAKE_FAIL_AFTER": "enable:nhms-scheduler-file-provider-refresh.timer",
     }
     failed_after_enable = subprocess.run(
-        [str(installer), "--enable"], env=fail_environment, check=False, capture_output=True, text=True
+        [bash, str(installer), "--enable"], env=fail_environment, check=False, capture_output=True, text=True
     )
     assert failed_after_enable.returncode != 0
     state = json.loads(fake_state.read_text())
@@ -357,7 +362,7 @@ def test_installer_enable_lifecycle_and_failure_restore_with_fake_systemctl(tmp_
         fake_state.write_text(json.dumps(state))
         fake_trace.write_text("")
         refused = subprocess.run(
-            [str(installer), "--install"], env=environment, check=False, capture_output=True, text=True
+            [bash, str(installer), "--install"], env=environment, check=False, capture_output=True, text=True
         )
         assert refused.returncode != 0
         assert all(
@@ -386,23 +391,26 @@ def _bash_major_version(executable: str) -> int | None:
 
 
 def _require_modern_bash() -> str:
-    """Resolve a bash >= 4 interpreter for wrapper rejection-semantics tests.
+    """Resolve a bash >= 4 interpreter for the wrapper rejection-semantics tests
+    and the installer lifecycle case.
 
     macOS ships bash 3.2 as ``/bin/bash``, where a failing ``[[ ]]`` does not
     abort under ``set -e``. The wrapper's allowlist/parse rejections are bare
-    ``[[ ]]`` asserts, so they only hold on bash >= 4.
+    ``[[ ]]`` asserts, and the refresh installer's main-shell guard reads
+    ``$BASHPID``, so both only hold on bash >= 4. The candidates are the ones
+    ``tests/scheduler_refresh_installer_harness.py`` probes.
     """
     candidates = ["/bin/bash"]
-    path_bash = shutil.which("bash")
-    if path_bash and path_bash not in candidates:
-        candidates.append(path_bash)
+    for candidate in (shutil.which("bash"), "/usr/bin/bash", "/opt/homebrew/bin/bash"):
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
     for candidate in candidates:
         version = _bash_major_version(candidate)
         if version is not None and version >= 4:
             return candidate
     pytest.skip(
-        "requires bash >= 4 (bash 3.2 does not abort on a failing [[ ]] under set -e, "
-        f"so wrapper allowlist semantics are unverifiable); probed: {candidates}"
+        "requires bash >= 4 (bash 3.2 does not abort on a failing [[ ]] under set -e "
+        f"and has no $BASHPID, so these semantics are unverifiable); probed: {candidates}"
     )
 
 

@@ -198,8 +198,9 @@ SHALL fail rather than be interpreted.
 #### Scenario: A failure before any mutation changes nothing
 
 - **WHEN** an action fails before its first mutation: the current receipt does
-  not validate for enable, the install refuses, or the rollback finds its
-  baseline missing or malformed
+  not validate for enable, the install refuses, the install or the rollback
+  finds an existing baseline malformed, or the rollback finds its baseline
+  missing
 - **THEN** the run exits non-zero without a status line, issues no mutating
   systemd call, runs no restore, and changes no unit file or baseline
 

@@ -118,7 +118,7 @@ The status lines keep their `"scheduler_unchanged":true` key (must-preserve).
 
 - **Refusal when armed.** `--install` starts by evaluating `refresh_units_disarmed` for the refresh timer and service. If either is armed, it prints `refusing --install: <unit> is <enabled>/<active>; run --rollback first` to stderr and exits 1. Nothing is mutated: the fake-systemctl trace shows only read-only verbs, and no file under the unit dir or the state root changes.
 - **Baseline is written once.**
-  - When `refresh.before` exists, it is the baseline: it and the unit `.before` files are neither rewritten nor removed.
+  - When `refresh.before` exists, it is the baseline: it and the unit `.before` files are neither rewritten nor removed. `--install` parses it (D5) before its first mutation. A malformed existing baseline makes `--install` fail with no mutation (class (A)), so a host can never be installed over a baseline its `--rollback` would later refuse.
   - When it is absent, the unit `.before` files are captured first. `refresh.before` is then written last, through a temp file in the state root and `mv`, so its presence marks a complete baseline. An interrupted first install leaves no `refresh.before`, and the next install recaptures everything.
   - The legacy 2-line format is the format the strict parser (D5) accepts, so node-22's existing file is read as-is.
 - **Rollback keeps the baseline.** `--rollback` does not delete the baseline, so a repeated rollback is idempotent. The documented reset is: after a successful `--rollback`, delete `refresh.before` and both unit `.before` files. A first `--install` on a host whose timer is armed with no baseline (armed by hand) refuses; the runbook says to disarm it by hand first.
@@ -190,9 +190,10 @@ This changes only `rollback_receipt_if_needed` (`runner.py:118-154`). When `rest
   6. the refusal deleted;
   7. baseline preservation deleted;
   8. the strict parser's field-count check deleted;
-  9. the `--install` success read-back deleted.
+  9. the `--install` success read-back deleted;
+  10. the refresh-service entry gate (`assert_refresh_service_inactive`) deleted (added in review round 1, when its substring pin was removed).
 
-  The sibling gets mutations for its refusal and marker preservation.
+  The sibling gets mutations for its refusal, its marker preservation, and its install trap body replaced by a delete-only body (round 1).
 - **Tests used as-is.** The #2297 tests are plain pytest on the fixture helper.
 - **Placement and budget.**
   - New tests go in new files: `tests/test_scheduler_refresh_installer_failure_paths.py`, `tests/test_scheduler_refresh_installer_mutations.py` and `tests/test_scheduler_refresh_restored_receipt_truth.py`, sharing the fake-systemctl harness through `tests/scheduler_refresh_installer_harness.py`. The sibling's install-twice change is made in place in `tests/test_node22_refresh_timer_health_installer.py`, if it stays ≤ 1000 lines; otherwise it moves to a new partition.
@@ -218,12 +219,14 @@ This changes only `rollback_receipt_if_needed` (`runner.py:118-154`). When `rest
 - **Pending the #1831 window (not faked, not skipped).** The issue's own drill starts with `--install`. Under D4 that now refuses on node-22, whose timer is armed, and run as written it would leave production disarmed. The drill sequence is therefore:
   1. `git status --porcelain` → `git pull --ff-only` (window only).
   2. Record before-state: `od -c` of `refresh.before` and `scheduler.before` (the latter informational only), and `systemctl --user show -p UnitFileState -p ActiveState` for the four units.
-  3. `--rollback`. The refresh units must read back as the baseline (disabled/inactive, static/inactive), and the scheduler must be unchanged.
-  4. `--install`. The baseline is kept (the file is byte-identical to step 2), and the lane is `installed_stopped`.
-  5. `--enable` → `enabled_active`.
-  6. A failure-path drill: re-run `--install` while armed. It must refuse with no mutation.
-  7. The lane is left armed (`--enable` done in step 5), and the after-state is recorded.
-  8. The probe installer: `--rollback`, `--install`, `--enable`, with its state recorded.
+  3. **Pre-flight.** The refresh service must read `is-active` = `inactive`. Outside 02:15-04:15Z no tick is due; a `failed` service is cleared with `systemctl --user reset-failed nhms-scheduler-file-provider-refresh.service`. Every action's entry gate accepts only `inactive`, and that gate is unchanged, pre-existing behaviour.
+  4. `--rollback`. The refresh units must read back as the baseline (disabled/inactive, static/inactive), and the scheduler must be unchanged.
+  5. `--install`. The baseline is kept (the file is byte-identical to step 2), and the lane is `installed_stopped`.
+  6. **Manual refresh** with `scripts/scheduler_file_provider_refresh_once.sh`. `jq -r .outcome` on `latest.json` must print `published`. `--enable`'s `validate_current_receipt` requires a `published` receipt whose provider `after_sha256` values still match disk, and the 5-minute compute copyback moves `index-last.json` after each nightly refresh.
+  7. `--enable` → `enabled_active`. **Recovery:** if it fails, run another manual refresh (step 6), then `--enable` again.
+  8. A failure-path drill: re-run `--install` while armed. It must refuse with no mutation.
+  9. The lane is left armed (`--enable` done in step 7), and the after-state is recorded.
+  10. The probe installer: `--rollback`, `--install`, `--enable`, with its state recorded.
 
   Each step's stdout, stderr and rc, and the before and after `show` output, are written into a receipt under `docs/runbooks/receipts/`. Until then, the PR body and tasks §5 say this evidence is **pending the #1831 window**, and #2294 stays open for that acceptance item.
 

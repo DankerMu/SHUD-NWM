@@ -20,8 +20,9 @@
 #   ever compared; a legacy `scheduler.before` is neither read nor written.
 # * `--install` refuses while the refresh timer or service is armed, and never
 #   rewrites a recorded restore baseline (`refresh.before` plus the unit
-#   `.before` files).  `refresh.before` is written last, through a temp file and
-#   `mv`, so its presence marks a complete baseline.
+#   `.before` files); it parses an existing `refresh.before` before its first
+#   mutation and refuses a malformed one.  `refresh.before` is written last,
+#   through a temp file and `mv`, so its presence marks a complete baseline.
 set -Eeuo pipefail
 
 repo=${NHMS_SCHEDULER_REFRESH_REPO:-/scratch/frd_muziyao/NWM}
@@ -318,6 +319,9 @@ if [[ "$action" == --install ]]; then
     exit 2
   fi
   [[ $(grep -Ec '^NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true$' "$env_file") -eq 1 ]]
+  # An existing baseline is parsed before the first mutation: a malformed one
+  # (one `--rollback` would refuse) fails here with nothing changed.
+  [[ ! -e "$state_root/refresh.before" && ! -L "$state_root/refresh.before" ]] || read_refresh_baseline
   # The restore baseline is captured once and kept: a recorded `refresh.before`
   # and its unit `.before` files are never rewritten by a later install.
   if [[ ! -f "$state_root/refresh.before" ]]; then

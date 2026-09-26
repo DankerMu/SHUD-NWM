@@ -650,6 +650,34 @@ def test_an_interrupted_first_install_is_recaptured_without_temp_residue(tmp_pat
         assert not (tmp_path / "units" / unit).exists()
 
 
+def _failed_reinstall_is_backed_out_to_the_recorded_baseline(
+    tmp_path: Path, installer: Path = INSTALLER
+) -> bool:
+    """A re-install that fails after placing its units runs the install ERR trap,
+    which puts back the FIRST install's recorded unit files (not a delete), so
+    the operator's pre-lane files survive a failed re-install, disarmed."""
+    seeded = _seed_operator_probe_units(tmp_path)
+    assert _run_installer(tmp_path, "--install", installer=installer)[0].returncode == 0
+    assert (tmp_path / "install-state" / "install.baseline").is_file()
+
+    completed, _log = _run_installer(tmp_path, "--install", fail_verb="daemon-reload", installer=installer)
+    on_disk = {
+        unit: (tmp_path / "units" / unit).read_bytes()
+        for unit in PROBE_UNITS
+        if (tmp_path / "units" / unit).exists()
+    }
+    return (
+        completed.returncode != 0
+        and completed.stdout == ""
+        and on_disk == seeded
+        and _probe_timer_state(tmp_path) == ("disabled", "inactive")
+    )
+
+
+def test_a_failed_reinstall_is_backed_out_to_the_recorded_baseline(tmp_path: Path) -> None:
+    assert _failed_reinstall_is_backed_out_to_the_recorded_baseline(tmp_path)
+
+
 SIBLING_MUTATIONS = [
     pytest.param(
         "[[ \"$action\" != --install ]] || probe_units_disarmed || {\n",
@@ -663,6 +691,13 @@ SIBLING_MUTATIONS = [
         _two_installs_then_rollback_restore_the_first_baseline,
         id="marker-preservation-deleted",
     ),
+    pytest.param(
+        "  trap 'remove_probe_units; assert_protected_unchanged' ERR\n",
+        "  trap 'rm -f \"$unit_dir/$service\" \"$unit_dir/$timer\"; "
+        "$systemctl_bin --user daemon-reload || true; assert_protected_unchanged' ERR\n",
+        _failed_reinstall_is_backed_out_to_the_recorded_baseline,
+        id="install-trap-restore-replaced-by-delete",
+    ),
 ]
 
 
@@ -670,9 +705,9 @@ SIBLING_MUTATIONS = [
 def test_each_sibling_mutation_flips_its_scenario(
     tmp_path: Path, anchor: str, replacement: str, scenario
 ) -> None:
-    """#2294 D7: exact-anchor mutation of the probe installer's refusal and
-    baseline-marker preservation; the verdict holds on the real installer and
-    flips on the mutant."""
+    """#2294 D7: exact-anchor mutation of the probe installer's refusal,
+    baseline-marker preservation and install-trap restore; the verdict holds on
+    the real installer and flips on the mutant."""
     source = INSTALLER.read_text()
     assert source.count(anchor) == 1
     mutant = tmp_path / "installer-mutant.sh"

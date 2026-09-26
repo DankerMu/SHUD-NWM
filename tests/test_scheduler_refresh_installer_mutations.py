@@ -4,9 +4,10 @@ Each case copies ``scripts/install_node22_scheduler_file_provider_refresh.sh``,
 applies ONE exact-anchor mutation (the anchor must occur exactly once, so a
 refactor that drops it reds here instead of turning the case into a no-op),
 and runs the scenario that mutation must break. The scenario's verdict holds on
-the real installer and flips on the mutant (design D7, mutations 1-9). The
-probe installer's two sibling mutations live beside its own suite,
-``tests/test_node22_refresh_timer_health_installer.py``.
+the real installer and flips on the mutant (design D7, mutations 1-9, plus
+mutation 10: the refresh-service entry gate every action passes before its
+first read of the compute scheduler). The probe installer's sibling mutations
+live beside its own suite, ``tests/test_node22_refresh_timer_health_installer.py``.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from tests.scheduler_refresh_installer_harness import (
     SCHEDULER_READ_BACK,
     SCHEDULER_SERVICE,
     SCHEDULER_TIMER,
+    SERVICE,
     STATUS,
     TIMER,
     Rig,
@@ -164,6 +166,14 @@ def install_refuses_a_lane_that_reads_back_armed(rig: Rig, installer: Path) -> b
     return _refused_status_and_rc(result, "--install")
 
 
+def rollback_refuses_a_running_refresh_service_before_mutating(rig: Rig, installer: Path) -> bool:
+    """The entry gate: a refresh tick in flight is never raced by a rollback."""
+    installed_and_armed(rig)
+    rig.set_unit(SERVICE, "static", "active")
+    result = rig.run("--rollback", installer=installer)
+    return _refused_status_and_rc(result, "--rollback") and result.mutating() == []
+
+
 GUARD_ANCHOR = 'enable_failure_restore() {\n  [[ $BASHPID == "$$" ]] || exit 1\n'
 CAPTURE_ANCHOR = (
     '  timer_active=$($systemctl_bin --user is-active "$timer" 2>/dev/null || true)\n'
@@ -294,6 +304,11 @@ MUTATIONS: list[tuple[str, tuple[tuple[str, str], ...], Scenario]] = [
         (("  assert_refresh_units_disarmed\n  assert_scheduler_unchanged\n", "  assert_scheduler_unchanged\n"),),
         install_refuses_a_lane_that_reads_back_armed,
     ),
+    (
+        "10-refresh-service-inactive-gate",
+        (("\nassert_refresh_service_inactive\n# Per-invocation", "\n# Per-invocation"),),
+        rollback_refuses_a_running_refresh_service_before_mutating,
+    ),
 ]
 
 
@@ -331,4 +346,4 @@ def test_the_mutation_list_covers_every_named_call_site() -> None:
     assert source.count("  assert_refresh_state_restored ") == 3
     assert sum(name.startswith("2-") for name in names) == 5
     assert sum(name.startswith("3-") for name in names) == 3
-    assert {name.split("-", 1)[0] for name in names} == {str(number) for number in range(1, 10)}
+    assert {name.split("-", 1)[0] for name in names} == {str(number) for number in range(1, 11)}
