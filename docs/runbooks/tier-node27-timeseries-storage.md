@@ -6040,11 +6040,35 @@ E4 receipt，autovacuum 刷新统计后、无 schema 变更）翻为 Bitmap Inde
 
 The frontend river-click `P95 < 2 s` gate (also §4.0 stop-table G7) has a
 shipping browser oracle after #1970: the public `/` map route, a gated
-read-only hook, and a no-mock serial sampler that publishes a schema-1.0
-mode-0600 no-clobber receipt. **This section documents the exact merged
+read-only locate/capture hook, a real browser click per sample, and a no-mock
+serial sampler that publishes a schema-1.1 mode-0600 no-clobber receipt. **This section documents the exact merged
 independent display command; it does not claim live PASS. The display owner
 retains execution/acceptance; #1895 retirement creates no new display project.**
 
+- **Click mechanism (receipt schema 1.1, #1970 batch Q).** The gated global
+  `window.__nhmsRiverClickEvidence` exposes exactly `locateRenderedRiver`,
+  `armPointerCapture` and `takePointerCapture`; it never calls
+  `onOverlayClick` or any product callback. Each attempt (warmup + 20):
+  arm response observation → `armPointerCapture()` →
+  `locateRenderedRiver(input)` (fit / idle / 16-px exactly-one match, then the
+  located viewport point must be the map canvas per
+  `document.elementFromPoint` and the product's own click-target resolution —
+  station cluster → station → overlay river → basin fill — must select that
+  river, else `HOOK_POINT_OCCLUDED`) → `page.mouse.click(clientX, clientY)`
+  exactly once (CDP `Input.dispatchMouseEvent`, trusted input through the
+  product's MapLibre click path) → `takePointerCapture()`; t0 is that trusted
+  pointer-down's `timeStamp` (same time origin as the page's
+  `performance.now()`). A missing, untrusted or duplicated capture, or one more
+  than 2 CSS px from the located point on either axis, is FAIL
+  `CLICK_DISPATCH_INVALID`. A hook rejection is `HOOK_SELECTION_FAILED` with
+  the closed hook code kept in the message (`hook <CODE>`, e.g.
+  `hook HOOK_FEATURE_MISMATCH`). Receipts carry
+  `click_dispatch=trusted_pointer_event`; the retired hook-dispatch schema-1.0
+  receipts (t0 taken right before a direct `onOverlayClick`) are not
+  comparable and the binder refuses them. Another difference: `page.mouse.click`
+  moves the mouse before it presses, so the discharge hover prefetch of the
+  latest product (`handleMapOverlayHover` → `prefetchHydroMetLatestProducts`)
+  fires before the pointer-down; the 1.0 direct dispatch had no such step.
 - **Only five env keys are read.** `PLAYWRIGHT_LIVE_BASE_URL`,
   `PLAYWRIGHT_LIVE_API_BASE_URL` (both bare HTTP(S) origins, root pathname, no
   userinfo/query/fragment), `PLAYWRIGHT_LIVE_RIVER_BASIN_ID`,
@@ -6099,8 +6123,9 @@ retains execution/acceptance; #1895 retirement creates no new display project.**
 - **Schema/readback acceptance.** The independent display lane accepts only a receipt that is
   valid against `schemas/frontend_river_click_live_evidence.schema.json`
   (the semantic validator in `playwright.river-click-evidence.ts` enforces the
-  same closed bounds before write), schema-`1.0` artifacts
-  `nhms-frontend-river-click-live-evidence`, parent
+  same closed bounds before write), schema-`1.1` artifacts
+  `nhms-frontend-river-click-live-evidence` with
+  `click_dispatch=trusted_pointer_event`, parent
   mode 0700, file mode 0600 and link count 1, `status=PASS`,
   `warmup_count=1` (one complete discarded warmup), `accepted_count=20`,
   exactly 20 indexed samples, `percentile_method=nearest-rank`,
@@ -6137,11 +6162,109 @@ retains execution/acceptance; #1895 retirement creates no new display project.**
 
 - **Stop behavior.** Missing/unsafe path → bounded `BLOCKED:` stderr
   diagnostic and no file. Missing/invalid pin, invalid URL/path, product/
-  geometry absence, missing hook, hook rejection, sample/request/network/
+  geometry absence, missing hook, hook rejection, invalid click dispatch
+  (`CLICK_DISPATCH_INVALID`), sample/request/network/
   chart/timing error, per-sample or whole-run timeout, or `p95_ms >= 2000` →
   `FAIL` receipt published before a nonzero exit. Publication failure (target
   exists, parent identity drift, fsync/link/unlink/readback uncertainty) is
   terminal failure and never overwrites an older artifact.
+- **Three pins (D4).** The lane stays single-pin; acceptance runs it once for
+  each of three current product river networks.
+  - **Networks:** from `/api/v1/basins`, keep the basins whose GFS and IFS
+    `/api/v1/mvp/qhh/latest-product?identity_only=true` are both 200; rank
+    their current `river_network_version_id` by
+    `core.river_network_version.segment_count` (display read-only role,
+    `BEGIN READ ONLY`); take the largest, the one nearest the median (among
+    the rest after removing the largest and smallest; ties go to the smaller
+    count) and the smallest. Fewer than three is BLOCKED, never padded.
+  - **Pin:** `${model_id}_shud_riv_000001`, built from the `model_id` of the
+    network's GFS latest-product (`identity_only=true`) payload — today the
+    `<basin_id>_shud_shud_riv_000001` discharge-layer id family the map
+    actually renders, never a `${basin}_shud` concatenation — whose segment
+    detail must return 200 before use. **Never use a `…_shud_reach_…` id:** segment
+    detail answers 200 for both families, so preflight passes, but the rendered
+    discharge feature carries the `shud_riv` id and the hook rejects with
+    `HOOK_FEATURE_MISMATCH` (lane: `HOOK_SELECTION_FAILED`, message
+    `hook HOOK_FEATURE_MISMATCH`).
+  - **Read-only discovery** (evidence stays in the private `PIN_DIR` and is
+    recorded with the receipts; it runs under `set -euo pipefail`, and the
+    BLOCKED branch or a non-200 segment detail for any pin stops it with
+    `exit 1`):
+
+```bash
+set -euo pipefail
+REPO_ROOT="/home/nwm/NWM"
+API="${PLAYWRIGHT_LIVE_API_BASE_URL:?set the bare API origin first}"
+PIN_DIR=$(mktemp -d "$REPO_ROOT/.nhms-issue1970-riverclick-pins-XXXXXX")
+chmod 0700 "$PIN_DIR"
+curl -fsS --max-time 30 "$API/api/v1/basins?limit=500" > "$PIN_DIR/basins.json"
+node -e 'for (const b of JSON.parse(require("fs").readFileSync(0, "utf8")).data) console.log(b.basin_id)' \
+  < "$PIN_DIR/basins.json" > "$PIN_DIR/basin_ids.txt"
+: > "$PIN_DIR/product_networks.tsv"
+while read -r BASIN; do
+  G=$(curl -sS --max-time 30 -o "$PIN_DIR/gfs-$BASIN.json" -w '%{http_code}' \
+    "$API/api/v1/mvp/qhh/latest-product?source=GFS&identity_only=true&basin_id=$BASIN")
+  I=$(curl -sS --max-time 30 -o "$PIN_DIR/ifs-$BASIN.json" -w '%{http_code}' \
+    "$API/api/v1/mvp/qhh/latest-product?source=IFS&identity_only=true&basin_id=$BASIN")
+  if [ "$G" = "200" ] && [ "$I" = "200" ]; then
+    RNV=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(0, "utf8")).data.river_network_version_id)' \
+      < "$PIN_DIR/gfs-$BASIN.json")
+    MODEL=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(0, "utf8")).data.model_id ?? "")' \
+      < "$PIN_DIR/gfs-$BASIN.json")
+    test -n "$MODEL" || { echo "BLOCKED: $BASIN latest-product has no model_id" >&2; exit 1; }
+    printf '%s\t%s\t%s\n' "$BASIN" "$RNV" "$MODEL" >> "$PIN_DIR/product_networks.tsv"
+  fi
+done < "$PIN_DIR/basin_ids.txt"
+RNV_LIST=$(cut -f2 "$PIN_DIR/product_networks.tsv" | sort -u | paste -sd, -)
+# display_readonly runtime role (nhms_display_ro), read-only SELECT; no writer credentials
+( set -a; . "$REPO_ROOT/infra/env/display.env"; set +a
+  psql "$DATABASE_URL" -X -q -At -F "$(printf '\t')" -v ON_ERROR_STOP=1 -v rnvs="$RNV_LIST" <<'SQL'
+BEGIN READ ONLY;
+SELECT river_network_version_id, segment_count
+FROM core.river_network_version
+WHERE river_network_version_id = ANY (string_to_array(:'rnvs', ','));
+COMMIT;
+SQL
+) > "$PIN_DIR/segment_counts.tsv"
+node - "$PIN_DIR" > "$PIN_DIR/pins.tsv" <<'JS' || { echo 'BLOCKED: pin discovery did not produce three pins' >&2; exit 1; }
+const fs = require('fs')
+const dir = process.argv[2]
+const lines = (name) => fs.readFileSync(`${dir}/${name}`, 'utf8').split('\n').filter(Boolean).map((line) => line.split('\t'))
+const counts = new Map(lines('segment_counts.tsv').map(([rnv, count]) => [rnv, Number(count)]))
+const rows = lines('product_networks.tsv')
+  .map(([basin, rnv, model]) => ({ basin, model, count: counts.get(rnv) }))
+  .filter((row) => Number.isInteger(row.count))
+  .sort((a, b) => a.count - b.count || a.basin.localeCompare(b.basin))
+if (rows.length < 3) { console.error('BLOCKED: fewer than three product networks'); process.exit(1) }
+const n = rows.length
+const median = n % 2 ? rows[(n - 1) / 2].count : (rows[n / 2 - 1].count + rows[n / 2].count) / 2
+const mid = rows.slice(1, -1).reduce((best, row) => (Math.abs(row.count - median) < Math.abs(best.count - median) ? row : best))
+for (const [role, row] of [['largest', rows[n - 1]], ['median', mid], ['smallest', rows[0]]]) {
+  // Pin: the latest-product model_id's first discharge-layer segment (<basin_id>_shud_shud_riv_000001 today).
+  console.log([role, row.basin, `${row.model}_shud_riv_000001`, row.count].join('\t'))
+}
+JS
+while IFS="$(printf '\t')" read -r ROLE BASIN SEG COUNT; do
+  BV=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(0, "utf8")).data.basin_version_id)' < "$PIN_DIR/gfs-$BASIN.json")
+  RNV=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(0, "utf8")).data.river_network_version_id)' < "$PIN_DIR/gfs-$BASIN.json")
+  CODE=$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' \
+    "$API/api/v1/basin-versions/$BV/river-segments/$SEG?river_network_version_id=$RNV")
+  echo "$ROLE $BASIN $SEG segment_count=$COUNT detail=$CODE"
+  test "$CODE" = "200" || { echo "FAIL: $ROLE pin $SEG segment detail returned $CODE" >&2; exit 1; }
+done < "$PIN_DIR/pins.tsv"
+```
+
+- **Three-receipt acceptance.** For each row of `pins.tsv`
+  (largest / median / smallest) set `PLAYWRIGHT_LIVE_RIVER_BASIN_ID=<basin>`
+  (column 2) and `PLAYWRIGHT_LIVE_RIVER_SEGMENT_ID=<pin>` (column 3,
+  `${model_id}_shud_riv_000001`), then rerun the
+  current-run binding prelude, the exact merged command and the binder above in
+  a fresh private run root. The gate passes only when **all three** print
+  `BINDER: PASS` (schema 1.1, `click_dispatch=trusted_pointer_event`, one warmup
+  plus 20 samples, `p95_ms < 2000`). Any FAIL/BLOCKED is NO-GO and is recorded as
+  such, never rerun until green. A `THRESHOLD_EXCEEDED` with complete samples
+  is a product finding; `CLICK_DISPATCH_INVALID`, `HOOK_*` or
+  `SERIES_REQUEST_INVALID` is a mechanism defect to fix.
 
 ### 4.10 River narrow expand: fenced window and D12 reverse (#1987)
 

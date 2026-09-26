@@ -78,7 +78,7 @@ producer/binder 成功不代替它，也不代替独立的生产部署证明。
   GFS+IFS 双源）——这三项仍须独立产 live receipt。④⑤ popup
   live 点击证据缺口按 2026-09 状态拆分：**river popup**
   的 framing/命中已由 #1970 门控 hook 交付（详情 geom
-  bbox + 真实渲染要素 + 既有 onOverlayClick 路径），live
+  bbox + 真实渲染要素定位 + 浏览器真实指针点击走产品 MapLibre click 路径），live
   receipt 由独立 C4-river-click 展示 lane 执行（原 #1895
   rollout 归属已撤回）；**station
   popup**（station-MVT 端点/bbox 属 #342 协同）仍由 #389 承接，绘制不变量已由本地单测全覆盖、数据 live 就绪。这不再是整体「#389 唯一承接」的表述。
@@ -417,10 +417,12 @@ click 只能人工截图、无法纳入 C4 自动 receipt：
       bbox**，浏览器无法据此 `map.fitBounds`
       自动定位到要素再点击。定义所需：列表/详情响应附带要素 bbox（或提供按 id 取 bbox 的轻端点），使 e2e 能确定性 framing。**此数据契约属 node-27/display
       API 侧**，与 #342 station-MVT 协同，非本前端 issue 单独可闭合。
-- [x] **WebGL 要素命中 + 河段 framing（river-click 路径，#1970 已交付，2026-09）**：门控的只读
-      `window.__nhmsRiverClickEvidence.selectRenderedRiver`
-      钩子以真实渲染要素沿既有 `onOverlayClick`
-      点击路径完成 fit/命中/弹窗打开；配合
+- [x] **WebGL 要素命中 + 河段 framing（river-click 路径，#1970 已交付，2026-09；batch Q 改为真实点击）**：门控的只读
+      `window.__nhmsRiverClickEvidence`（仅 `locateRenderedRiver` /
+      `armPointerCapture` / `takePointerCapture` 三个方法）只做 fit/命中定位与
+      canvas pointerdown 捕获，**不调用任何产品回调**；弹窗由 Playwright
+      `page.mouse.click` 在定位点发出的真实（trusted）指针事件经产品 MapLibre
+      click 路径打开；配合
       `basin-versions/{id}/river-segments/{segment_id}` 详情响应的 _geom
       bbox_（M11 段详情本就带 geom），河段 river
       popup 的确定性 framing/命中已可自动化（见下方 C4-river-click 节，由独立 display
@@ -454,6 +456,18 @@ click 只能人工截图、无法纳入 C4 自动 receipt：
 > receipt）保持诚实：river 河段点击的 WebGL 钩子与 segment-detail 几何 framing 已由 #1970 交付；station
 > popup 与 basin-bbox 的 live receipt **仍未交付**，属 #389 仍打开的工作。
 
+- **点击机制（receipt schema 1.1，#1970 batch Q）**：每次尝试（warmup + 20）依次为：arm 响应观测 →
+  `armPointerCapture()` → `locateRenderedRiver(input)`（fit/idle/16px 唯一命中，另校验定位点
+  `document.elementFromPoint` 是地图 canvas、产品自身点击目标解析（代站聚合 → 代站 → 叠加河段 →
+  流域面）选中的正是该河段，否则 `HOOK_POINT_OCCLUDED`；钩子**从不**调用 `onOverlayClick`）→
+  `page.mouse.click(clientX, clientY)` 恰一次（CDP `Input.dispatchMouseEvent`，trusted 输入，走产品
+  MapLibre click）→ `takePointerCapture()`，t0 = 该 trusted pointerdown 的 `timeStamp`（与页面
+  `performance.now()` 同一时间原点）。捕获缺失/非 trusted/重复，或捕获点与定位点任一轴相差 > 2 CSS px
+  => `CLICK_DISPATCH_INVALID` FAIL；钩子拒绝以 `HOOK_SELECTION_FAILED` 记录并在 message 中保留闭集码
+  `hook <CODE>`（如 `hook HOOK_FEATURE_MISMATCH`）。receipt 固定 `click_dispatch=trusted_pointer_event`；
+  hook-dispatch 时代的 schema-1.0 receipt（t0 取在直接 `onOverlayClick` 之前）**不可比、binder 拒绑**。
+  另一处不可比：`page.mouse.click` 先 move 再 press，move 在 pointerdown 之前就触发了 discharge 河段的
+  hover latest-product 预取（`handleMapOverlayHover` → `prefetchHydroMetLatestProducts`），1.0 的直接派发没有这一步。
 - **环境（五个键；口径：URL/receipt 缺失 => BLOCKED，pin 缺失/非法 => FAIL）**：
   `PLAYWRIGHT_LIVE_BASE_URL`（27 前端 bare origin，如
   `https://test.nwm.ac.cn`）、`PLAYWRIGHT_LIVE_API_BASE_URL`（27 API bare
@@ -505,8 +519,8 @@ click 只能人工截图、无法纳入 C4 自动 receipt：
   test "$CMD_EXIT" = "0"
   ```
 
-- **判定**：命令 exit 0 且 receipt 是 schema-1.0
-  `nhms-frontend-river-click-live-evidence`、父目录 mode 0700、receipt mode
+- **判定**：命令 exit 0 且 receipt 是 schema-1.1
+  `nhms-frontend-river-click-live-evidence`（`click_dispatch=trusted_pointer_event`）、父目录 mode 0700、receipt mode
   0600、`status=PASS`、`warmup_count=1`、`accepted_count=20`、
   `percentile_method=nearest-rank`、`p95_ms < 2000`、`failure=null`、`started_at <= ended_at == generated_at`。任何 FAIL/BLOCKED
   receipt 或 exit != 0 都是 **NO-GO**（`p95_ms >= 2000` =
@@ -538,6 +552,92 @@ click 只能人工截图、无法纳入 C4 自动 receipt：
     --cmd-start "$CMD_START" --cmd-end "$CMD_END"
   ```
 
+- **三网 pin 规则（D4）**：lane 仍是单 pin；验收要对**三个当前产品河网**各跑一次上面的
+  prelude → 命令 → binder（每次新的私有 RUN_ROOT 与唯一 absent receipt）。
+  - **选网**：`/api/v1/basins` 中 GFS 与 IFS 的
+    `/api/v1/mvp/qhh/latest-product?identity_only=true` **都是 200** 的流域，按其当前
+    `river_network_version_id` 在 `core.river_network_version.segment_count`（display 只读角色，
+    `BEGIN READ ONLY`）排序，取**最大**、**最接近中位数**（在去掉最大/最小后的其余网中取
+    |count − median| 最小，平局取 count 小者）、**最小**三个；不足三个 => BLOCKED，不得凑数。
+  - **pin**：由该网 GFS latest-product（`identity_only=true`）payload 的 `model_id` 构造
+    `${model_id}_shud_riv_000001`（当前即 `<basin_id>_shud_shud_riv_000001`，discharge 图层实际渲染的
+    `…_shud_shud_riv_…` id 族），不要用 `${basin}_shud` 拼接；使用前 segment detail 必须 200。**不要用 `…_shud_reach_…`**：
+    segment detail 对两种 id 都回 200，preflight 能过，但地图 discharge 图层渲染的是
+    `shud_riv` id，钩子会以 `HOOK_FEATURE_MISMATCH` 拒绝（lane 记 `HOOK_SELECTION_FAILED`，message
+    `hook HOOK_FEATURE_MISMATCH`）。
+  - **只读发现命令**（证据落在私有 PIN_DIR，随 receipt 一并记录；`set -euo pipefail`，
+    BLOCKED 分支或任一 pin 的 segment detail 非 200 都会 `exit 1` 停下，不会带着坏 pin 继续）：
+
+```bash
+set -euo pipefail
+REPO_ROOT="/home/nwm/NWM"
+API="${PLAYWRIGHT_LIVE_API_BASE_URL:?set the bare API origin first}"
+PIN_DIR=$(mktemp -d "$REPO_ROOT/.nhms-issue1970-riverclick-pins-XXXXXX")
+chmod 0700 "$PIN_DIR"
+curl -fsS --max-time 30 "$API/api/v1/basins?limit=500" > "$PIN_DIR/basins.json"
+node -e 'for (const b of JSON.parse(require("fs").readFileSync(0, "utf8")).data) console.log(b.basin_id)' \
+  < "$PIN_DIR/basins.json" > "$PIN_DIR/basin_ids.txt"
+: > "$PIN_DIR/product_networks.tsv"
+while read -r BASIN; do
+  G=$(curl -sS --max-time 30 -o "$PIN_DIR/gfs-$BASIN.json" -w '%{http_code}' \
+    "$API/api/v1/mvp/qhh/latest-product?source=GFS&identity_only=true&basin_id=$BASIN")
+  I=$(curl -sS --max-time 30 -o "$PIN_DIR/ifs-$BASIN.json" -w '%{http_code}' \
+    "$API/api/v1/mvp/qhh/latest-product?source=IFS&identity_only=true&basin_id=$BASIN")
+  if [ "$G" = "200" ] && [ "$I" = "200" ]; then
+    RNV=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(0, "utf8")).data.river_network_version_id)' \
+      < "$PIN_DIR/gfs-$BASIN.json")
+    MODEL=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(0, "utf8")).data.model_id ?? "")' \
+      < "$PIN_DIR/gfs-$BASIN.json")
+    test -n "$MODEL" || { echo "BLOCKED: $BASIN latest-product has no model_id" >&2; exit 1; }
+    printf '%s\t%s\t%s\n' "$BASIN" "$RNV" "$MODEL" >> "$PIN_DIR/product_networks.tsv"
+  fi
+done < "$PIN_DIR/basin_ids.txt"
+RNV_LIST=$(cut -f2 "$PIN_DIR/product_networks.tsv" | sort -u | paste -sd, -)
+# display_readonly runtime role (nhms_display_ro), read-only SELECT; no writer credentials
+( set -a; . "$REPO_ROOT/infra/env/display.env"; set +a
+  psql "$DATABASE_URL" -X -q -At -F "$(printf '\t')" -v ON_ERROR_STOP=1 -v rnvs="$RNV_LIST" <<'SQL'
+BEGIN READ ONLY;
+SELECT river_network_version_id, segment_count
+FROM core.river_network_version
+WHERE river_network_version_id = ANY (string_to_array(:'rnvs', ','));
+COMMIT;
+SQL
+) > "$PIN_DIR/segment_counts.tsv"
+node - "$PIN_DIR" > "$PIN_DIR/pins.tsv" <<'JS' || { echo 'BLOCKED: pin discovery did not produce three pins' >&2; exit 1; }
+const fs = require('fs')
+const dir = process.argv[2]
+const lines = (name) => fs.readFileSync(`${dir}/${name}`, 'utf8').split('\n').filter(Boolean).map((line) => line.split('\t'))
+const counts = new Map(lines('segment_counts.tsv').map(([rnv, count]) => [rnv, Number(count)]))
+const rows = lines('product_networks.tsv')
+  .map(([basin, rnv, model]) => ({ basin, model, count: counts.get(rnv) }))
+  .filter((row) => Number.isInteger(row.count))
+  .sort((a, b) => a.count - b.count || a.basin.localeCompare(b.basin))
+if (rows.length < 3) { console.error('BLOCKED: fewer than three product networks'); process.exit(1) }
+const n = rows.length
+const median = n % 2 ? rows[(n - 1) / 2].count : (rows[n / 2 - 1].count + rows[n / 2].count) / 2
+const mid = rows.slice(1, -1).reduce((best, row) => (Math.abs(row.count - median) < Math.abs(best.count - median) ? row : best))
+for (const [role, row] of [['largest', rows[n - 1]], ['median', mid], ['smallest', rows[0]]]) {
+  // Pin: the latest-product model_id's first discharge-layer segment (<basin_id>_shud_shud_riv_000001 today).
+  console.log([role, row.basin, `${row.model}_shud_riv_000001`, row.count].join('\t'))
+}
+JS
+while IFS="$(printf '\t')" read -r ROLE BASIN SEG COUNT; do
+  BV=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(0, "utf8")).data.basin_version_id)' < "$PIN_DIR/gfs-$BASIN.json")
+  RNV=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(0, "utf8")).data.river_network_version_id)' < "$PIN_DIR/gfs-$BASIN.json")
+  CODE=$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' \
+    "$API/api/v1/basin-versions/$BV/river-segments/$SEG?river_network_version_id=$RNV")
+  echo "$ROLE $BASIN $SEG segment_count=$COUNT detail=$CODE"
+  test "$CODE" = "200" || { echo "FAIL: $ROLE pin $SEG segment detail returned $CODE" >&2; exit 1; }
+done < "$PIN_DIR/pins.tsv"
+```
+
+- **三 receipt 验收**：对 `pins.tsv` 的三行（largest / median / smallest）逐行设置
+  `PLAYWRIGHT_LIVE_RIVER_BASIN_ID=<basin>`（第 2 列）、`PLAYWRIGHT_LIVE_RIVER_SEGMENT_ID=<pin>`（第 3 列，即 `${model_id}_shud_riv_000001`），
+  各自重新执行上面的私有运行目录 prelude、exact merged command 与 binder（`set -euo pipefail`）。
+  **三次都必须 `BINDER: PASS`**（schema 1.1、`click_dispatch=trusted_pointer_event`、warmup 1 +
+  20 samples、`p95_ms < 2000`）门才算过；任一 FAIL/BLOCKED 即 NO-GO，如实记录，不得重跑到绿。完整样本下的
+  `THRESHOLD_EXCEEDED` 是产品发现；`CLICK_DISPATCH_INVALID` / `HOOK_*` / `SERIES_REQUEST_INVALID`
+  是机制缺陷，须修复。
 - **边界**：本 lane 只访问 `/`；`/monitoring` 原文案不变，`/ops`
   不在本 metric 内。
 

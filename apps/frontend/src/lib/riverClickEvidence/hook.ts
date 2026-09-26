@@ -12,14 +12,45 @@ import { createRiverClickDeadline, type RiverClickDeadline } from './deadline'
 
 export { HOOK_QUERY_LIMIT, HOOK_QUERY_SIZE_PX, HOOK_READY_TIMEOUT_MS }
 
+/** One canvas pointer-down as the capture listener observes it. */
+export interface RiverClickPointerEventLike {
+  isTrusted: boolean
+  timeStamp: number
+  clientX: number
+  clientY: number
+  target: unknown
+}
+
+/**
+ * Minimal map-canvas surface: the viewport rect (client-coordinate
+ * conversion) and capture-phase pointer-down listener registration. The real
+ * value is the native `<canvas>` element itself, so identity comparison with
+ * `document.elementFromPoint` is exact.
+ */
+export interface RiverClickHookCanvas {
+  getBoundingClientRect(): { left: number; top: number }
+  addEventListener(type: 'pointerdown', listener: (event: RiverClickPointerEventLike) => void, options: { capture: true }): void
+  removeEventListener(type: 'pointerdown', listener: (event: RiverClickPointerEventLike) => void, options: { capture: true }): void
+}
+
 /** Minimal MapLibre map surface consumed by the river-click hook. */
 export interface RiverClickHookMap {
   loaded(): boolean
   isStyleLoaded(): boolean
   fitBounds(bounds: [[number, number], [number, number]], options: { padding: number; duration: number; maxZoom: number }): unknown
   project(coord: [number, number]): { x: number; y: number }
-  queryRenderedFeatures(box: [{ x: number; y: number }, { x: number; y: number }], options: { layers: string[] }): unknown[]
-  getCanvas(): { style: { cursor: string } }
+  /**
+   * Geometry is ALWAYS an array: a canvas point `[x, y]` or box corners
+   * `[[x0, y0], [x1, y1]]`. MapLibre 4.7.1 treats only a `Point` instance or
+   * an array as geometry; any other first argument (e.g. a plain `{x, y}`)
+   * is taken as the options object and the query covers the whole viewport.
+   */
+  queryRenderedFeatures(
+    geometry: [number, number] | [[number, number], [number, number]],
+    options: { layers: string[] },
+  ): unknown[]
+  getLayer(id: string): unknown
+  getCanvas(): RiverClickHookCanvas
   once(event: string, callback: () => void): unknown
   off?(event: string, callback: () => void): unknown
 }
@@ -47,14 +78,35 @@ export interface RiverClickNormalizedFeatureIdentity {
   riverNetworkVersionId: string
 }
 
-export interface RiverClickHookSelectionOutput {
-  feature: RiverClickRenderedFeature
+/** Internal locate result: the matched identity plus the viewport client point. */
+export interface RiverClickHookLocateOutput {
   normalized: RiverClickNormalizedFeatureIdentity
+  clientX: number
+  clientY: number
+  /** The canvas the point was checked against (internal; never exposed on the global). */
+  canvas: RiverClickHookCanvas
 }
 
-export type RiverClickHookSelectionResult =
-  | { ok: true; output: RiverClickHookSelectionOutput }
+export type RiverClickHookLocateResult =
+  | { ok: true; output: RiverClickHookLocateOutput }
   | { ok: false; code: RiverClickHookCode; message: string }
+
+/** What a product map click at a point would act on (the shared resolver's answer). */
+export interface RiverClickProductClickTarget {
+  kind: string
+  feature: RiverClickRenderedFeature
+}
+
+/**
+ * Read-only view of the product click path at a point: the interactive layer
+ * ids the `<Map interactiveLayerIds>` prop currently receives, and the
+ * product's own click-target resolution (the pure walk shared with
+ * `handleM11MapClick`). Both are read through refs kept current each render.
+ */
+export interface RiverClickProductClickContext {
+  getInteractiveLayerIds(): readonly string[]
+  resolveClickTarget(features: RiverClickRenderedFeature[]): RiverClickProductClickTarget | null
+}
 
 export function normalizeRiverClickFeatureIdentity(
   feature: RiverClickRenderedFeature,
@@ -267,30 +319,52 @@ async function waitForMapDischargeReady(
   }
 }
 
+function sameIdentity(a: RiverClickNormalizedFeatureIdentity, input: RiverClickHookSelectionInput): boolean {
+  return (
+    a.basinId === input.basinId &&
+    a.riverSegmentId === input.riverSegmentId &&
+    a.basinVersionId === input.basinVersionId &&
+    a.riverNetworkVersionId === input.riverNetworkVersionId
+  )
+}
+
 /**
- * Pure selection core: require the current renderable discharge overlay and a
+ * Pure locate core: require the current renderable discharge overlay and a
  * loaded map, then fit the bbox (padding 48, duration 0, maxZoom 14), wait at
  * most the ONE shared deadline for the post-fit `idle` event (idle implies
  * rendered/settled) plus loaded/style-loaded, project the anchor, query the
  * 16-by-16 CSS pixel box around it in the registered overlay hit layer only,
  * refuse more than 64 total results, and require exactly one feature whose
  * layer id equals the exact queried hit layer and whose basin/segment/network
- * identities match. Returns the unmodified feature (t0 is recorded by the
- * dispatcher later).
+ * identities match.
+ *
+ * It then proves a REAL click at the anchor reaches that river through the
+ * product path: the viewport client point (canvas rect + projected point,
+ * rounded to whole CSS px) must hit the map canvas itself
+ * (`elementFromPoint`), and the product's own click-target resolution, fed
+ * exactly what react-map-gl would hand a click there
+ * (`queryRenderedFeatures([x, y], {layers: interactive ids that exist})` at
+ * the rounded point in canvas coordinates),
+ * must select the overlay hit-layer feature with the pinned identity. Either
+ * failing is HOOK_POINT_OCCLUDED. It never dispatches anything.
  */
-export async function selectRenderedRiverFeature({
+export async function locateRenderedRiverFeature({
   input,
   map,
   getOverlayHitLayerId,
+  productClick,
+  elementFromPoint,
   now,
   deadlineMs,
 }: {
   input: RiverClickHookSelectionInput
   map: RiverClickHookMap
   getOverlayHitLayerId: () => string | null
+  productClick: RiverClickProductClickContext
+  elementFromPoint: (x: number, y: number) => unknown
   now: () => number
   deadlineMs: number
-}): Promise<RiverClickHookSelectionResult> {
+}): Promise<RiverClickHookLocateResult> {
   const invalid = validateRiverClickSelectionInput(input)
   if (invalid !== null) {
     return { ok: false, code: 'HOOK_INVALID_INPUT', message: `river-click hook input is invalid: ${invalid}` }
@@ -336,9 +410,9 @@ export async function selectRenderedRiverFeature({
     return { ok: false, code: 'HOOK_QUERY_FAILED', message: 'river-click hook anchor projection failed' }
   }
   const half = HOOK_QUERY_SIZE_PX / 2
-  const queryBox: [{ x: number; y: number }, { x: number; y: number }] = [
-    { x: projected.x - half, y: projected.y - half },
-    { x: projected.x + half, y: projected.y + half },
+  const queryBox: [[number, number], [number, number]] = [
+    [projected.x - half, projected.y - half],
+    [projected.x + half, projected.y + half],
   ]
 
   let rawResults: unknown
@@ -363,13 +437,7 @@ export async function selectRenderedRiverFeature({
     // The returned feature MUST have been returned by the exact queried hit layer.
     if ((feature as RiverClickRenderedFeature).layer?.id !== hitLayerId) return false
     const normalized = normalizeRiverClickFeatureIdentity(feature)
-    if (normalized === null) return false
-    return (
-      normalized.basinId === input.basinId &&
-      normalized.riverSegmentId === input.riverSegmentId &&
-      normalized.basinVersionId === input.basinVersionId &&
-      normalized.riverNetworkVersionId === input.riverNetworkVersionId
-    )
+    return normalized !== null && sameIdentity(normalized, input)
   })
   if (matched.length !== 1) {
     return {
@@ -383,7 +451,80 @@ export async function selectRenderedRiverFeature({
   if (normalized === null) {
     return { ok: false, code: 'HOOK_FEATURE_MISMATCH', message: 'river-click hook matched feature identity is unreadable' }
   }
-  return { ok: true, output: { feature: matched[0], normalized } }
+
+  // Viewport client point of the anchor: the canvas rect origin plus the
+  // canvas-relative projected point, rounded to whole CSS px (the pixel a real
+  // pointer at that point hits). The product-hit query below runs at the same
+  // rounded point in canvas coordinates, so the check and the click hit-test
+  // the same pixel.
+  let canvas: RiverClickHookCanvas
+  let clientX: number
+  let clientY: number
+  let canvasX: number
+  let canvasY: number
+  try {
+    canvas = map.getCanvas()
+    const rect = canvas.getBoundingClientRect()
+    clientX = Math.round(rect.left + projected.x)
+    clientY = Math.round(rect.top + projected.y)
+    canvasX = clientX - rect.left
+    canvasY = clientY - rect.top
+  } catch {
+    return { ok: false, code: 'HOOK_QUERY_FAILED', message: 'river-click hook canvas client point is unavailable' }
+  }
+  if (!Number.isFinite(clientX) || !Number.isFinite(clientY) || !Number.isFinite(canvasX) || !Number.isFinite(canvasY)) {
+    return { ok: false, code: 'HOOK_QUERY_FAILED', message: 'river-click hook canvas client point is not finite' }
+  }
+
+  // DOM check: a real click there must land on the map canvas, not on a
+  // control, switcher, marker or status overlay above it.
+  let topElement: unknown
+  try {
+    topElement = elementFromPoint(clientX, clientY)
+  } catch {
+    topElement = null
+  }
+  if (topElement !== canvas) {
+    return { ok: false, code: 'HOOK_POINT_OCCLUDED', message: 'river-click hook located point is covered by another element' }
+  }
+
+  // Product-hit check: exactly what react-map-gl hands the click handler for
+  // this point (interactive ids filtered by map.getLayer, so an absent layer id
+  // never raises a map ErrorEvent), resolved by the product's own walk. The
+  // point MUST be an array: a plain {x, y} is read by MapLibre as options and
+  // queries the whole viewport.
+  let interactiveFeatures: unknown
+  try {
+    const layers = productClick.getInteractiveLayerIds().filter((id) => {
+      try {
+        return Boolean(map.getLayer(id))
+      } catch {
+        return false
+      }
+    })
+    interactiveFeatures = map.queryRenderedFeatures([canvasX, canvasY], { layers })
+  } catch {
+    return { ok: false, code: 'HOOK_QUERY_FAILED', message: 'river-click hook interactive feature query failed' }
+  }
+  if (!Array.isArray(interactiveFeatures)) {
+    return { ok: false, code: 'HOOK_QUERY_FAILED', message: 'river-click hook interactive feature query did not return an array' }
+  }
+  let target: RiverClickProductClickTarget | null
+  try {
+    target = productClick.resolveClickTarget(
+      interactiveFeatures.filter((item): item is RiverClickRenderedFeature => item !== null && typeof item === 'object'),
+    )
+  } catch {
+    target = null
+  }
+  const targetIdentity = target?.kind === 'overlay' && target.feature.layer?.id === hitLayerId
+    ? normalizeRiverClickFeatureIdentity(target.feature)
+    : null
+  if (targetIdentity === null || !sameIdentity(targetIdentity, input)) {
+    return { ok: false, code: 'HOOK_POINT_OCCLUDED', message: 'river-click hook located point resolves to another product click target' }
+  }
+
+  return { ok: true, output: { normalized, clientX, clientY, canvas } }
 }
 
 /** Poll a nullable map ref under ONE absolute deadline; resolves the first
@@ -411,26 +552,29 @@ function waitForMapRef(
 }
 
 /**
- * Default-off read-only browser test hook controller. Exposes exactly one
- * method, selectRenderedRiver(input). It never exposes a map ref, generic
- * query method, or mutation surface. A null map ref is WAITED for under the
- * same ONE 15,000-ms absolute budget that also covers overlay/load readiness,
- * fit, and post-fit idle — never an immediate HOOK_MAP_UNAVAILABLE, never
- * budget-per-fact.
+ * Locate controller. A null map ref is WAITED for under the same ONE
+ * 15,000-ms absolute budget that also covers overlay/load readiness, fit, and
+ * post-fit idle — never an immediate HOOK_MAP_UNAVAILABLE, never
+ * budget-per-fact. It never exposes a map ref, generic query method, or
+ * mutation surface.
  */
 export function createRiverClickHookController({
   getMap,
   getOverlayHitLayerId,
+  productClick,
+  elementFromPoint,
   now,
-  select,
+  locate,
 }: {
   getMap: () => RiverClickHookMap | null
   getOverlayHitLayerId: () => string | null
+  productClick: RiverClickProductClickContext
+  elementFromPoint: (x: number, y: number) => unknown
   now: () => number
-  select: typeof selectRenderedRiverFeature
-}): { selectRenderedRiver: (input: RiverClickHookSelectionInput) => Promise<RiverClickHookSelectionOutput> } {
+  locate: typeof locateRenderedRiverFeature
+}): { locateRenderedRiver: (input: RiverClickHookSelectionInput) => Promise<RiverClickHookLocateOutput> } {
   return {
-    async selectRenderedRiver(input: RiverClickHookSelectionInput): Promise<RiverClickHookSelectionOutput> {
+    async locateRenderedRiver(input: RiverClickHookSelectionInput): Promise<RiverClickHookLocateOutput> {
       const invalid = validateRiverClickSelectionInput(input)
       if (invalid !== null) {
         return Promise.reject({
@@ -451,12 +595,14 @@ export function createRiverClickHookController({
       }
       const paddedBbox = padRiverClickBbox(input.bbox)
       // The map-ref wait already consumed part of the ONE absolute budget; the
-      // selection core must receive the REMAINING budget (never a fresh 15s).
+      // locate core must receive the REMAINING budget (never a fresh 15s).
       const remainingMs = Math.max(0, deadline.remaining())
-      return select({
+      return locate({
         input: { ...input, bbox: paddedBbox },
         map,
         getOverlayHitLayerId,
+        productClick,
+        elementFromPoint,
         now,
         deadlineMs: remainingMs,
       }).then((result) => {
@@ -467,77 +613,167 @@ export function createRiverClickHookController({
   }
 }
 
-export interface RiverClickHookDispatch {
-  layerId: string
-  event: { lngLat: { lng: number; lat: number } }
-  feature: RiverClickRenderedFeature
+/** A trusted pointer-down on the map canvas: the sample's t0 source. */
+export interface RiverClickPointerCapture {
+  timeStamp: number
+  clientX: number
+  clientY: number
+  isTrusted: true
+}
+
+export type RiverClickPointerCaptureResult = RiverClickPointerCapture | { error: RiverClickHookCode }
+
+/** Observation cap: two events already decide "duplicate"; the rest only count. */
+const POINTER_EVENT_RECORD_LIMIT = 8
+
+/**
+ * Pointer-down capture on the map canvas. `arm()` clears any previous capture
+ * and installs ONE capture-phase `pointerdown` listener on the current canvas
+ * (or, when the map/canvas does not exist yet, records the arm so `attach()`
+ * installs it once `locateRenderedRiver` has the canvas). The listener
+ * observes EVERY pointer-down targeting the canvas, trusted or not, keeping
+ * only `isTrusted`, `timeStamp` and the client point. `take()` removes the
+ * listener and classifies: exactly one trusted event -> the capture; none or
+ * never armed -> HOOK_POINTER_MISSING; more than one or any untrusted ->
+ * HOOK_POINTER_INVALID. `dispose()` removes any listener (mount cleanup).
+ */
+export function createRiverClickPointerCapture({
+  getCanvas,
+}: {
+  getCanvas: () => RiverClickHookCanvas | null
+}): {
+  arm: () => void
+  attach: (canvas: RiverClickHookCanvas) => void
+  take: () => RiverClickPointerCaptureResult
+  dispose: () => void
+} {
+  let armed = false
+  let attached: RiverClickHookCanvas | null = null
+  let count = 0
+  let recorded: Array<{ isTrusted: boolean; timeStamp: number; clientX: number; clientY: number }> = []
+  const listener = (event: RiverClickPointerEventLike) => {
+    if (attached === null || event.target !== attached) return
+    count += 1
+    if (recorded.length < POINTER_EVENT_RECORD_LIMIT) {
+      recorded.push({ isTrusted: event.isTrusted === true, timeStamp: event.timeStamp, clientX: event.clientX, clientY: event.clientY })
+    }
+  }
+  const detach = () => {
+    if (attached === null) return
+    const canvas = attached
+    attached = null
+    try {
+      canvas.removeEventListener('pointerdown', listener, { capture: true })
+    } catch {
+      // listener removal must never mask the terminal state
+    }
+  }
+  const attach = (canvas: RiverClickHookCanvas) => {
+    if (!armed || attached === canvas) return
+    detach()
+    try {
+      canvas.addEventListener('pointerdown', listener, { capture: true })
+      attached = canvas
+    } catch {
+      attached = null
+    }
+  }
+  return {
+    arm() {
+      detach()
+      armed = true
+      count = 0
+      recorded = []
+      let canvas: RiverClickHookCanvas | null = null
+      try {
+        canvas = getCanvas()
+      } catch {
+        canvas = null
+      }
+      if (canvas !== null) attach(canvas)
+    },
+    attach,
+    take(): RiverClickPointerCaptureResult {
+      const wasArmed = armed
+      detach()
+      armed = false
+      const events = recorded
+      const total = count
+      recorded = []
+      count = 0
+      if (!wasArmed || total === 0) return { error: 'HOOK_POINTER_MISSING' }
+      if (total > 1 || events.some((event) => !event.isTrusted)) return { error: 'HOOK_POINTER_INVALID' }
+      const [event] = events
+      if (!Number.isFinite(event.timeStamp) || event.timeStamp < 0 || !Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) {
+        return { error: 'HOOK_POINTER_INVALID' }
+      }
+      return { timeStamp: event.timeStamp, clientX: event.clientX, clientY: event.clientY, isTrusted: true }
+    },
+    dispose() {
+      detach()
+      armed = false
+      count = 0
+      recorded = []
+    },
+  }
 }
 
 function isClosedHookCode(value: unknown): value is RiverClickHookCode {
   return typeof value === 'string' && (RIVER_CLICK_HOOK_CODES as readonly string[]).includes(value)
 }
 
+export interface RiverClickResolvedIdentity {
+  basinId: string
+  riverSegmentId: string
+  basinVersionId: string
+  riverNetworkVersionId: string
+  clientX: number
+  clientY: number
+}
+
+/** The exact gated global: three methods, nothing else. */
+export interface RiverClickEvidenceHook {
+  locateRenderedRiver: (input: RiverClickHookSelectionInput) => Promise<RiverClickResolvedIdentity>
+  armPointerCapture: () => void
+  takePointerCapture: () => RiverClickPointerCaptureResult
+}
+
 /**
- * Build the exact gated global: selectRenderedRiver(input) resolves only the
- * four normalized identities plus dispatchNowMs. The browser clock is read
- * IMMEDIATELY BEFORE the actual rendered feature enters the existing
- * onOverlayClick — not inside the selection continuation. The product layer id
- * passed to the callback is always "discharge"; the MapLibre hit-layer id is
- * used only for querying and never passed as the product layer id.
+ * Build the exact gated global `{locateRenderedRiver, armPointerCapture,
+ * takePointerCapture}`. `locateRenderedRiver` resolves only the four
+ * normalized identities plus the finite viewport point; it takes no product
+ * callback and there is no code path from this object into the product click
+ * handler — only the map's own click event, produced by a real pointer at
+ * that point, reaches it.
  *
- * Fail-closed rules: an absent onOverlayClick rejects (never optional-chains to
- * success); every rejection code must be inside RIVER_CLICK_HOOK_CODES or is
- * redacted to HOOK_QUERY_FAILED; rejection messages are fixed/redacted strings.
+ * Fail-closed rules: every rejection code must be inside
+ * RIVER_CLICK_HOOK_CODES or is redacted to HOOK_QUERY_FAILED; rejection
+ * messages are fixed/redacted strings.
  */
 export function createRiverClickEvidenceHook({
-  onOverlayClick,
   controller,
-  now,
+  pointerCapture,
 }: {
-  onOverlayClick?: (dispatch: RiverClickHookDispatch) => void
-  controller: { selectRenderedRiver: (input: RiverClickHookSelectionInput) => Promise<RiverClickHookSelectionOutput> }
-  now?: () => number
-}): { selectRenderedRiver: (input: RiverClickHookSelectionInput) => Promise<RiverClickResolvedIdentity> } {
-  const clock = now ?? (() => performance.now())
-  if (typeof onOverlayClick !== 'function') {
-    // Fail closed: without the real callback the hook can never dispatch an
-    // actual selection, so every call rejects with the closed code.
-    return {
-      selectRenderedRiver(): Promise<RiverClickResolvedIdentity> {
-        return Promise.reject({ code: 'HOOK_QUERY_FAILED', message: 'river-click hook callback dispatch failed' })
-      },
-    }
-  }
+  controller: { locateRenderedRiver: (input: RiverClickHookSelectionInput) => Promise<RiverClickHookLocateOutput> }
+  pointerCapture: ReturnType<typeof createRiverClickPointerCapture>
+}): RiverClickEvidenceHook {
   return {
-    selectRenderedRiver(input: RiverClickHookSelectionInput): Promise<RiverClickResolvedIdentity> {
-      return controller.selectRenderedRiver(input).then(
+    locateRenderedRiver(input: RiverClickHookSelectionInput): Promise<RiverClickResolvedIdentity> {
+      return controller.locateRenderedRiver(input).then(
         (output) => {
-          // t0 recorded immediately before the feature enters the callback.
-          const dispatchNowMs = clock()
-          let dispatched = false
-          try {
-            onOverlayClick({
-              layerId: 'discharge',
-              event: { lngLat: { lng: input.anchor[0], lat: input.anchor[1] } },
-              feature: output.feature,
-            })
-            dispatched = true
-          } catch {
-            // Callback errors are closed into a hook failure; never leak the
-            // raw error object/message.
+          if (!Number.isFinite(output.clientX) || !Number.isFinite(output.clientY)) {
+            return Promise.reject({ code: 'HOOK_QUERY_FAILED', message: 'river-click hook locate failed' })
           }
-          if (!dispatched) {
-            return Promise.reject({
-              code: 'HOOK_QUERY_FAILED',
-              message: 'river-click hook callback dispatch failed',
-            })
-          }
+          // An arm issued before the map/canvas existed attaches now, before
+          // the caller can click the returned point.
+          pointerCapture.attach(output.canvas)
           return {
             basinId: output.normalized.basinId,
             riverSegmentId: output.normalized.riverSegmentId,
             basinVersionId: output.normalized.basinVersionId,
             riverNetworkVersionId: output.normalized.riverNetworkVersionId,
-            dispatchNowMs,
+            clientX: output.clientX,
+            clientY: output.clientY,
           }
         },
         (error: unknown) => {
@@ -548,19 +784,17 @@ export function createRiverClickEvidenceHook({
           )
             ? (error as { code: RiverClickHookCode }).code
             : 'HOOK_QUERY_FAILED'
-          return Promise.reject({ code, message: 'river-click hook selection failed' })
+          return Promise.reject({ code, message: 'river-click hook locate failed' })
         },
       )
     },
+    armPointerCapture(): void {
+      pointerCapture.arm()
+    },
+    takePointerCapture(): RiverClickPointerCaptureResult {
+      return pointerCapture.take()
+    },
   }
-}
-
-export interface RiverClickResolvedIdentity {
-  basinId: string
-  riverSegmentId: string
-  basinVersionId: string
-  riverNetworkVersionId: string
-  dispatchNowMs: number
 }
 
 /**
@@ -585,15 +819,15 @@ export function deleteRiverClickHookIfOwned(
 
 /**
  * Adapter from a native maplibre-gl Map to the narrow RiverClickHookMap the
- * gated river-click hook needs. It binds ONLY the narrow read/fit/query/idle
- * methods and closes over the native map object, so every delegated call keeps
- * the native map's own `this`. Native signatures are normalized explicitly to
- * the RiverClickHookMap contract: `project` returns exactly {x,y}, `queryRenderedFeatures`
- * is treated as an array (the actual rendered features are passed through
- * UNMODIFIED — the hook never synthesizes or mutates them), and listener
- * registration/removal is delegated verbatim. Returns null for a non-object
- * or incomplete native map (a null map ref is a transient readiness state the
- * controller waits on, never an unavailable map).
+ * gated river-click hook needs. It binds ONLY the narrow read/fit/query/idle/
+ * layer-existence/canvas methods and closes over the native map object, so
+ * every delegated call keeps the native map's own `this`. `project` returns
+ * exactly {x,y}; `queryRenderedFeatures` is treated as an array (the actual
+ * rendered features are passed through UNMODIFIED — the hook never
+ * synthesizes or mutates them); `getCanvas` returns the native canvas element
+ * itself (identity matters for the DOM check and the pointer listener).
+ * Returns null for a non-object or incomplete native map (a null map ref is a
+ * transient readiness state the controller waits on, never an unavailable map).
  */
 export function adaptRiverClickHookMap(native: unknown): RiverClickHookMap | null {
   if (native === null || native === undefined || typeof native !== 'object') return null
@@ -603,7 +837,8 @@ export function adaptRiverClickHookMap(native: unknown): RiverClickHookMap | nul
     fitBounds?: (bounds: unknown, options?: unknown) => unknown
     project?: (coord: [number, number]) => { x: number; y: number }
     queryRenderedFeatures?: (...args: unknown[]) => unknown
-    getCanvas?: () => { style: { cursor: string } }
+    getLayer?: (id: string) => unknown
+    getCanvas?: () => RiverClickHookCanvas
     once?: (event: string, callback: () => void) => unknown
     off?: (event: string, callback: () => void) => unknown
   }
@@ -613,6 +848,7 @@ export function adaptRiverClickHookMap(native: unknown): RiverClickHookMap | nul
     typeof map.fitBounds !== 'function' ||
     typeof map.project !== 'function' ||
     typeof map.queryRenderedFeatures !== 'function' ||
+    typeof map.getLayer !== 'function' ||
     typeof map.getCanvas !== 'function' ||
     typeof map.once !== 'function'
   ) {
@@ -623,7 +859,8 @@ export function adaptRiverClickHookMap(native: unknown): RiverClickHookMap | nul
     isStyleLoaded: () => map.isStyleLoaded!(),
     fitBounds: (bounds, options) => map.fitBounds!(bounds, options),
     project: (coord) => map.project!(coord),
-    queryRenderedFeatures: (box, options) => map.queryRenderedFeatures!(box, options) as unknown[],
+    queryRenderedFeatures: (geometry, options) => map.queryRenderedFeatures!(geometry, options) as unknown[],
+    getLayer: (id) => map.getLayer!(id),
     getCanvas: () => map.getCanvas!(),
     once: (event, callback) => map.once!(event, callback),
     off: (event, callback) => map.off?.(event, callback),

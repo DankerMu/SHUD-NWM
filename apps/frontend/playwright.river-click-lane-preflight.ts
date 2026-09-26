@@ -63,13 +63,17 @@ export interface RiverClickLanePageSurface {
   waitForTimeout(ms: number): Promise<unknown>
   evaluate<T>(fn: string | ((...args: unknown[]) => T | Promise<T>), ...args: unknown[]): Promise<T>
   /** Retain a page-side object reference across separate evaluates (JSHandle in
-   *  real Playwright; the attempt uses it to prove the exact pre-dispatch hook
+   *  real Playwright; the attempt uses it to prove the exact pre-click hook
    *  and m11-map-surface node survive through the scoped close and the quiet
    *  interval). Every created handle MUST be disposed by the attempt. */
   evaluateHandle<T>(fn: string | ((...args: unknown[]) => T), ...args: unknown[]): Promise<RiverClickJsHandle>
   on(event: 'request' | 'response' | 'requestfailed', listener: (...args: never[]) => void): unknown
   off(event: 'request' | 'response' | 'requestfailed', listener: (...args: never[]) => void): unknown
   requests(): unknown
+  /** Real browser mouse input (Playwright `page.mouse`: CDP Input.dispatchMouseEvent,
+   *  delivered to the page as trusted pointer/mouse events). The attempt clicks
+   *  exactly once, at the located viewport point. */
+  mouse: { click(x: number, y: number): Promise<unknown> }
 }
 
 export interface RiverClickLaneEnv {
@@ -79,7 +83,7 @@ export interface RiverClickLaneEnv {
 
 export interface RiverClickLaneIdentity {
   requestedFeature: RiverClickFeatureIdentity
-  /** No rendered feature here: provenance begins at the first hook dispatch. */
+  /** No rendered feature here: provenance begins at the first hook locate. */
   gfs: RiverClickProductIdentity
   ifs: RiverClickProductIdentity
   preflightGfs: RiverClickProductRequestIdentity
@@ -388,7 +392,7 @@ export async function resolveRiverClickIdentity(
     ok: true,
     identity: {
       requestedFeature,
-      // No rendered feature here: provenance begins at the first hook dispatch.
+      // No rendered feature here: provenance begins at the first hook locate.
       gfs: productIdentityFromPreflight(gfs.product),
       ifs: productIdentityFromPreflight(ifs.product),
       preflightGfs: {

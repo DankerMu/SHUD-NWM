@@ -12,11 +12,25 @@
  * Close routing is identity-based: only the imported production helper
  * `closeRiverClickPanelInPage` may be diverted to `closeImpl`. Source text and
  * function names are never consulted.
+ *
+ * Real-click seam: `page.mouse.click(x, y)` records the click and runs
+ * `onMouseClick` (the test's stand-in for the product reacting to the click,
+ * e.g. issuing the series requests). While the page-side capture is armed the
+ * click also records one TRUSTED pointer-down at (x, y) stamped
+ * `pointerTimeStamp` — exactly what the browser delivers for real input. The
+ * exact arm/take capture scripts fall back to that page-side stand-in when
+ * `evaluateImpl` returns undefined for them (the hook's classification:
+ * unarmed/none -> HOOK_POINTER_MISSING, more than one -> HOOK_POINTER_INVALID);
+ * a test overrides either by returning a value (or throwing) from evaluateImpl.
  */
 
 import { vi } from 'vitest'
 
-import { closeRiverClickPanelInPage } from '../../playwright.river-click-lane-attempt'
+import {
+  closeRiverClickPanelInPage,
+  RIVER_CLICK_ARM_CAPTURE_SCRIPT,
+  RIVER_CLICK_TAKE_CAPTURE_SCRIPT,
+} from '../../playwright.river-click-lane-attempt'
 import type { RiverClickJsHandle, RiverClickLanePageSurface } from '../../playwright.river-click-lane-preflight'
 
 export interface RiverClickFakePageState {
@@ -39,6 +53,14 @@ export interface RiverClickFakePageState {
   /** When set, each dispose awaits this many ms before counting: proves the
    *  attempt AWAITS disposal completion before settling. */
   deferredDisposeMs?: number
+  /** Every page.mouse.click(x, y) in call order. */
+  mouseClicks?: Array<{ x: number; y: number }>
+  /** Runs after each recorded mouse click (the product's reaction). */
+  onMouseClick?: (x: number, y: number) => void
+  /** timeStamp of the trusted pointer-down a click produces (default 1000). */
+  pointerTimeStamp?: number
+  /** Page-side capture stand-in state (null = not armed). */
+  pointerCapture?: { events: Array<{ timeStamp: number; clientX: number; clientY: number }> } | null
 }
 
 /** Create a fresh fake state with the required defaults. */
@@ -50,7 +72,18 @@ export function makeFakePageState(): RiverClickFakePageState {
     sleepMs: 1,
     handleDisposals: 0,
     handleCaptures: 0,
+    mouseClicks: [],
+    pointerCapture: null,
   }
+}
+
+/** The hook's take classification over the fake page's recorded pointer-downs. */
+function takeFakePointerCapture(state: RiverClickFakePageState): unknown {
+  const armed = state.pointerCapture ?? null
+  state.pointerCapture = null
+  if (armed === null || armed.events.length === 0) return { error: 'HOOK_POINTER_MISSING' }
+  if (armed.events.length > 1) return { error: 'HOOK_POINTER_INVALID' }
+  return { ...armed.events[0], isTrusted: true }
 }
 
 export function makeFakePage(state: RiverClickFakePageState): RiverClickLanePageSurface {
@@ -106,9 +139,25 @@ export function makeFakePage(state: RiverClickFakePageState): RiverClickLanePage
         state.evaluateNames.push(String(value))
         return value
       }
-      state.evaluateNames.push(String(expr))
-      return state.evaluateImpl(String(expr))
+      const script = String(expr)
+      state.evaluateNames.push(script)
+      const value = state.evaluateImpl(script)
+      if (value === undefined && script === RIVER_CLICK_ARM_CAPTURE_SCRIPT) {
+        state.pointerCapture = { events: [] }
+        return undefined
+      }
+      if (value === undefined && script === RIVER_CLICK_TAKE_CAPTURE_SCRIPT) return takeFakePointerCapture(state)
+      return value
     }) as never,
+    mouse: {
+      click: vi.fn(async (x: number, y: number) => {
+        state.evaluateNames.push('mouse-click')
+        if (!state.mouseClicks) state.mouseClicks = []
+        state.mouseClicks.push({ x, y })
+        state.pointerCapture?.events.push({ timeStamp: state.pointerTimeStamp ?? 1000, clientX: x, clientY: y })
+        state.onMouseClick?.(x, y)
+      }),
+    },
     evaluateHandle: vi.fn(async (expr: unknown, ...args: unknown[]) => {
       state.handleCaptures = (state.handleCaptures ?? 0) + 1
       state.evaluateNames.push('handle-capture')
@@ -131,4 +180,29 @@ export function makeFakePage(state: RiverClickFakePageState): RiverClickLanePage
     }) as never,
     requests: vi.fn(() => []) as never,
   }
+}
+
+/** The located identity + viewport point the fake page-side hook resolves by default. */
+export const FAKE_LOCATED = {
+  basinId: 'basins_qhh',
+  riverSegmentId: 'seg-001',
+  basinVersionId: 'bv-001',
+  riverNetworkVersionId: 'rn-001',
+  clientX: 412.5,
+  clientY: 318,
+}
+
+/**
+ * Page-side stand-in for one successful locate (the in-page wrapper outcome
+ * `{ok:true, value}`). The following REAL click (fake page.mouse.click)
+ * records a trusted pointer-down stamped `t0` and runs `onClick` — the product
+ * reacting to the click (e.g. the two series requests).
+ */
+export function fakeLocateThenClick(
+  state: RiverClickFakePageState,
+  options: { t0?: number; onClick?: () => void; identity?: Partial<typeof FAKE_LOCATED> } = {},
+) {
+  state.pointerTimeStamp = options.t0 ?? 1000
+  state.onMouseClick = options.onClick
+  return { ok: true, value: { ...FAKE_LOCATED, ...options.identity } }
 }

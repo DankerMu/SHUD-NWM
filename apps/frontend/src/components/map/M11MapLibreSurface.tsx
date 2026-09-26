@@ -22,6 +22,7 @@ import {
   handleM11MapClick,
   handleM11MapMouseLeave,
   handleM11MapMouseMove,
+  resolveM11ClickTarget,
   type M11MapOverlayInteraction,
 } from '@/components/map/m11MapInteractions'
 import {
@@ -52,9 +53,9 @@ import {
   adaptRiverClickHookMap,
   createRiverClickEvidenceHook,
   createRiverClickHookController,
+  createRiverClickPointerCapture,
   deleteRiverClickHookIfOwned,
-  selectRenderedRiverFeature,
-  type RiverClickHookSelectionInput,
+  locateRenderedRiverFeature,
 } from '@/lib/riverClickEvidence/hook'
 import { type LayerState, type OverviewBasin } from '@/lib/m11/overviewDataContracts'
 import type { M11Layer, M11QueryState } from '@/lib/m11/queryState'
@@ -197,15 +198,17 @@ export function M11MapLibreSurface({
     setOverlayUnavailableReason(null)
   }, [overlay])
 
-  // 仅测试门（exact pre-start boolean）下的只读 river-click 钩子；无该 flag 时绝不暴露全局。
-  // 该钩子 fit/query 当前地图并把匹配的已渲染要素交给既有 onOverlayClick；只暴露
-  // selectRenderedRiver 一个方法，不暴露 map ref / 通用 query / 任何 mutation 面。
+  // 仅测试门（exact pre-start boolean）下的只读 river-click 钩子；无该 flag 时绝不暴露全局、
+  // 也不装任何监听。钩子只做 locate（fit/query/遮挡校验，返回身份与视口点）与 canvas
+  // pointerdown 捕获，不接收也不调用任何产品回调——进入产品点击路径的唯一方式是真实指针
+  // 在该点触发的 MapLibre 自身 click 事件。不暴露 map ref / 通用 query / 任何 mutation 面。
+  // 叠加层、交互图层 id 与代站开关都是渲染期值，经 ref 每次渲染刷新后供钩子读取。
   const overlayRef = useRef(renderableOverlay)
   overlayRef.current = renderableOverlay
-  // onOverlayClick 回调身份可能随父组件渲染变化；用 ref 承载最新回调，使钩子对象
-  // 在本挂载期内保持同一 identity（payload 回调用最新真实回调，cleanup 仍走代次 token）。
-  const onOverlayClickRef = useRef(onOverlayClick)
-  onOverlayClickRef.current = onOverlayClick
+  const interactiveLayerIdsRef = useRef(interactiveLayerIds)
+  interactiveLayerIdsRef.current = interactiveLayerIds
+  const showStationLayerRef = useRef(showStationLayer)
+  showStationLayerRef.current = showStationLayer
   useEffect(() => {
     if ((window as { __NHMS_E2E_HOOKS__?: unknown }).__NHMS_E2E_HOOKS__ !== true) return
     // 单调代次 token：每个挂载 owner 独有一份；riverClickInstalledGeneration 记录
@@ -213,42 +216,39 @@ export function M11MapLibreSurface({
     // 删除全局并清空 token，绝不能删掉更新的实例。
     const generation = riverClickHookGeneration
     riverClickHookGeneration += 1
+    // Adapter: the native maplibre-gl Map is narrowed to the hook's
+    // RiverClickHookMap (bound only to the read/fit/query/idle/layer/canvas
+    // methods). A null/absent map stays null so the controller waits.
+    const getMap = () => {
+      const native = mapRef.current?.getMap?.()
+      return native === undefined || native === null ? null : adaptRiverClickHookMap(native)
+    }
     const controller = createRiverClickHookController({
-      // Adapter: the native maplibre-gl Map is narrowed to the hook's
-      // RiverClickHookMap (bound only to the read/fit/query/idle methods). A
-      // null/absent map stays null so the controller waits, never fails fast.
-      getMap: () => {
-        const native = mapRef.current?.getMap?.()
-        return native === undefined || native === null ? null : adaptRiverClickHookMap(native)
-      },
+      getMap,
       getOverlayHitLayerId: () => {
         const overlay = overlayRef.current
         return overlay?.layerId === 'discharge' ? m11RegisteredOverlayHitLayerId(overlay) : null
       },
-      now: () => performance.now(),
-      select: selectRenderedRiverFeature,
-    })
-    const hook = createRiverClickEvidenceHook({
-      // Fail closed: without a real onOverlayClick the hook must reject, never
-      // dispatch into a no-op success. The LATEST real callback is dispatched
-      // through the ref, so a rerender never replaces the hook object.
-      onOverlayClick: (dispatch) => {
-        const callback = onOverlayClickRef.current
-        if (typeof callback !== 'function') {
-          throw new Error('river-click hook callback dispatch failed')
-        }
-        callback({
-          layerId: dispatch.layerId as M11Layer | 'met-stations' | 'basin-boundaries',
-          event: dispatch.event as MapLayerMouseEvent,
-          feature: dispatch.feature as NonNullable<MapLayerMouseEvent['features']>[number],
-        })
+      productClick: {
+        getInteractiveLayerIds: () => interactiveLayerIdsRef.current,
+        resolveClickTarget: (features) =>
+          resolveM11ClickTarget({
+            features,
+            showStationLayer: showStationLayerRef.current,
+            renderableOverlay: overlayRef.current,
+          }),
       },
-      controller,
+      elementFromPoint: (x, y) => document.elementFromPoint(x, y),
       now: () => performance.now(),
+      locate: locateRenderedRiverFeature,
     })
+    const pointerCapture = createRiverClickPointerCapture({ getCanvas: () => getMap()?.getCanvas() ?? null })
+    const hook = createRiverClickEvidenceHook({ controller, pointerCapture })
     ;(window as unknown as Record<string, unknown>).__nhmsRiverClickEvidence = hook
     riverClickInstalledGeneration = generation
     return () => {
+      // 本挂载装的 pointerdown 监听无条件移除（与全局所有权无关）。
+      pointerCapture.dispose()
       const current = (window as unknown as Record<string, unknown>).__nhmsRiverClickEvidence
       // 只允许「同一对象 + 已安装 token」删除；过期 cleanup 不能删掉更新的实例。
       if (deleteRiverClickHookIfOwned(current, hook, generation, riverClickInstalledGeneration)) {

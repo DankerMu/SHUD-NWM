@@ -380,6 +380,41 @@ describe('river-click receipt binder core (in-process descriptor acceptance)', (
     }
   })
 
+  it('binds only schema 1.1 trusted-pointer receipts: a retired 1.0 hook-dispatch PASS and a missing/wrong click_dispatch are refused with fixed lines', () => {
+    const parent = realpathSync(mkdtempSync(path.join(tmpdir(), 'nhms-binder-schema11-')))
+    try {
+      chmodSync(parent, 0o700)
+      const { doc, cmdStart, cmdEnd, now } = bracketedDoc()
+      expect(doc.schema_version).toBe('1.1')
+      expect(doc.click_dispatch).toBe('trusted_pointer_event')
+      const accepted = writePass(parent, 'nhms-frontend-river-click-live-evidence-v11.json', doc, cmdStart, now)
+      expect(acceptRiverClickReceipt(argsFor(accepted, cmdStart, cmdEnd))).toEqual({ ok: true, p95: doc.p95_ms })
+
+      // A genuine schema-1.0 PASS (the retired hook-dispatch shape: no click_dispatch field).
+      const retired: Record<string, unknown> = { ...doc, schema_version: '1.0' }
+      delete retired.click_dispatch
+      const retiredPath = writePass(parent, 'nhms-frontend-river-click-live-evidence-v10.json', retired, cmdStart, now)
+      expect(refusedMessage(acceptRiverClickReceipt(argsFor(retiredPath, cmdStart, cmdEnd)))).toBe(
+        'schema version 1.0 is a retired hook-dispatch receipt; only 1.1 binds',
+      )
+
+      const missing: Record<string, unknown> = { ...doc }
+      delete missing.click_dispatch
+      const missingPath = writePass(parent, 'nhms-frontend-river-click-live-evidence-nodispatch.json', missing, cmdStart, now)
+      expect(refusedMessage(acceptRiverClickReceipt(argsFor(missingPath, cmdStart, cmdEnd)))).toBe('click_dispatch is not trusted_pointer_event')
+
+      const wrong = { ...doc, click_dispatch: 'hook_dispatch' }
+      const wrongPath = writePass(parent, 'nhms-frontend-river-click-live-evidence-wrongdispatch.json', wrong, cmdStart, now)
+      expect(refusedMessage(acceptRiverClickReceipt(argsFor(wrongPath, cmdStart, cmdEnd)))).toBe('click_dispatch is not trusted_pointer_event')
+
+      const other = { ...doc, schema_version: '2.0' }
+      const otherPath = writePass(parent, 'nhms-frontend-river-click-live-evidence-v20.json', other, cmdStart, now)
+      expect(refusedMessage(acceptRiverClickReceipt(argsFor(otherPath, cmdStart, cmdEnd)))).toBe('schema version differs from 1.1')
+    } finally {
+      rmSync(parent, { recursive: true, force: true })
+    }
+  })
+
   it('exposes the same 262144-byte ceiling the CLI binder uses', () => {
     expect(MAX_RECEIPT_BYTES).toBe(262144)
   })

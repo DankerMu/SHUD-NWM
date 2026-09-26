@@ -72,13 +72,14 @@ function passInput(base: Partial<RiverClickPassInput> = {}): RiverClickPassInput
 }
 
 describe('river-click PASS evidence construction', () => {
-  it('builds a schema-1.0 PASS document from 20 complete warm samples', () => {
+  it('builds a schema-1.1 trusted-pointer PASS document from 20 complete warm samples', () => {
     const result = buildRiverClickPassEvidence(passInput())
     expect(result.ok).toBe(true)
     if (!result.ok) throw new Error('PASS fixture must build')
     const receipt = result.receipt
     expect(receipt.artifact).toBe('nhms-frontend-river-click-live-evidence')
-    expect(receipt.schema_version).toBe('1.0')
+    expect(receipt.schema_version).toBe('1.1')
+    expect(receipt.click_dispatch).toBe('trusted_pointer_event')
     expect(receipt.status).toBe('PASS')
     expect(receipt.threshold_ms).toBe(RIVER_CLICK_THRESHOLD_MS)
     expect(receipt.percentile_method).toBe('nearest-rank')
@@ -501,6 +502,18 @@ describe('closed river-click evidence validator', () => {
     expect(validate({ ...receipt, percentile_method: 'mean' }).ok).toBe(false)
     expect(validate({ ...receipt, schema_version: '2.0' }).ok).toBe(false)
     expect(validate({ ...receipt, artifact: 'other' }).ok).toBe(false)
+  })
+
+  it('rejects a retired schema-1.0 document and a missing or wrong click_dispatch', () => {
+    const retired: Record<string, unknown> = { ...receipt, schema_version: '1.0' }
+    delete retired.click_dispatch
+    expect(validate(retired)).toEqual({ ok: false, reason: 'evidence top-level fields differ from the schema-1.1 contract' })
+    expect(validate({ ...receipt, schema_version: '1.0' })).toEqual({ ok: false, reason: 'schema_version differs' })
+    const missing: Record<string, unknown> = { ...receipt }
+    delete missing.click_dispatch
+    expect(validate(missing).ok).toBe(false)
+    expect(validate({ ...receipt, click_dispatch: 'hook_dispatch' })).toEqual({ ok: false, reason: 'click_dispatch differs' })
+    expect(validate({ ...receipt, click_dispatch: null })).toEqual({ ok: false, reason: 'click_dispatch differs' })
   })
 
   it('rejects Date.parse-valid but calendar-invalid timestamps (e.g. April 31, Feb 30)', () => {

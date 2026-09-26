@@ -41,8 +41,22 @@ export type {
   RiverClickLaneIdentity,
   RiverClickFailureShape,
 } from './playwright.river-click-lane-preflight'
-export type { RiverClickAttemptOptions, RiverClickAttemptResult } from './playwright.river-click-lane-attempt'
-export { runRiverClickAttempt } from './playwright.river-click-lane-attempt'
+export type { RiverClickAttemptOptions, RiverClickAttemptResult, RiverClickLocatedPoint } from './playwright.river-click-lane-attempt'
+export {
+  classifyRiverClickLocateOutcome,
+  classifyRiverClickPointerCapture,
+  riverClickLocateScript,
+  runRiverClickAttempt,
+  RIVER_CLICK_ARM_CAPTURE_SCRIPT,
+  RIVER_CLICK_TAKE_CAPTURE_SCRIPT,
+} from './playwright.river-click-lane-attempt'
+
+/**
+ * Gated-hook readiness probe: the global exists and carries the three
+ * locate/capture methods (never a dispatch method).
+ */
+export const RIVER_CLICK_HOOK_READY_SCRIPT =
+  "Boolean(window.__nhmsRiverClickEvidence && ['locateRenderedRiver', 'armPointerCapture', 'takePointerCapture'].every((name) => typeof window.__nhmsRiverClickEvidence[name] === 'function'))"
 
 export interface RiverClickLaneTerminal {
   failure: RiverClickFailure | null
@@ -198,7 +212,7 @@ export async function runRiverClickLane(
     while (!hookReady) {
       const raw = await withRiverClickDeadline(
         env.page.evaluate<boolean>(
-          `Boolean(window.__nhmsRiverClickEvidence && typeof window.__nhmsRiverClickEvidence.selectRenderedRiver === 'function')`,
+          RIVER_CLICK_HOOK_READY_SCRIPT,
         ),
         hookDeadline,
         () => false,

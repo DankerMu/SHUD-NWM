@@ -79,31 +79,78 @@ export function handleM11MapMouseLeave(
   event.target.getCanvas().style.cursor = ''
 }
 
+/** Minimal rendered-feature shape the click-target resolver reads (only the layer id). */
+export interface M11ClickTargetFeature {
+  layer?: { id?: string } | null
+}
+
+/** The one thing a product map click at a point would act on. */
+export type M11ClickTarget<F extends M11ClickTargetFeature> =
+  | { kind: 'station-cluster'; feature: F }
+  | { kind: 'station'; feature: F }
+  | { kind: 'overlay'; layerId: M11Layer; hitLayerId: string; feature: F }
+  | { kind: 'basin'; feature: F }
+
+/**
+ * Pure product click-target resolution, shared by `handleM11MapClick` and the
+ * gated river-click evidence hook so the two can never drift apart. Priority
+ * walk: station cluster -> station point (both only when stations are shown)
+ * -> the FIRST feature in the renderable overlay's hit layer -> basin fill.
+ * `features` are the rendered features at the point in the current interactive
+ * layers (what react-map-gl hands the click event). `findStationFeature` lets
+ * the product keep its direct station-layer query fallback; by default a
+ * station candidate is the first matching entry of `features`.
+ */
+export function resolveM11ClickTarget<F extends M11ClickTargetFeature>({
+  features,
+  showStationLayer,
+  renderableOverlay,
+  findStationFeature,
+}: {
+  features: readonly F[] | null | undefined
+  showStationLayer: boolean
+  renderableOverlay: M11RegisteredOverlay | null
+  findStationFeature?: (layerId: string) => F | null
+}): M11ClickTarget<F> | null {
+  const firstIn = (layerId: string): F | null => features?.find((feature) => feature?.layer?.id === layerId) ?? null
+  if (showStationLayer) {
+    const station = findStationFeature ?? firstIn
+    const clusterFeature = station(MET_STATION_CLUSTER_LAYER_ID)
+    if (clusterFeature) return { kind: 'station-cluster', feature: clusterFeature }
+    const stationFeature = station(MET_STATION_POINT_LAYER_ID)
+    if (stationFeature) return { kind: 'station', feature: stationFeature }
+  }
+  if (renderableOverlay) {
+    const hitLayerId = m11RegisteredOverlayHitLayerId(renderableOverlay)
+    const overlayFeature = firstIn(hitLayerId)
+    if (overlayFeature) return { kind: 'overlay', layerId: renderableOverlay.layerId, hitLayerId, feature: overlayFeature }
+  }
+  const basinFeature = firstIn(M11_BASIN_FILL_LAYER_ID)
+  if (basinFeature) return { kind: 'basin', feature: basinFeature }
+  return null
+}
+
 export function handleM11MapClick(event: MapLayerMouseEvent, context: M11InteractionContext) {
   const { showStationLayer, renderableOverlay, mapRef, onOverlayClick } = context
-  if (showStationLayer) {
-    const clusterFeature = findRenderedFeature(event, mapRef, MET_STATION_CLUSTER_LAYER_ID)
-    if (clusterFeature) {
-      expandStationCluster(mapRef, clusterFeature)
+  const target = resolveM11ClickTarget({
+    features: event.features,
+    showStationLayer,
+    renderableOverlay,
+    findStationFeature: (layerId) => findRenderedFeature(event, mapRef, layerId),
+  })
+  if (target === null) return
+  switch (target.kind) {
+    case 'station-cluster':
+      expandStationCluster(mapRef, target.feature)
       return
-    }
-
-    const stationFeature = findRenderedFeature(event, mapRef, MET_STATION_POINT_LAYER_ID)
-    if (stationFeature) {
-      onOverlayClick?.({ layerId: 'met-stations', event, feature: stationFeature })
+    case 'station':
+      onOverlayClick?.({ layerId: 'met-stations', event, feature: target.feature })
       return
-    }
-  }
-
-  const overlayFeature = renderableOverlay ? findEventFeature(event, m11RegisteredOverlayHitLayerId(renderableOverlay)) : null
-  if (renderableOverlay && overlayFeature) {
-    onOverlayClick?.({ layerId: renderableOverlay.layerId, event, feature: overlayFeature })
-    return
-  }
-
-  const basinFeature = findEventFeature(event, M11_BASIN_FILL_LAYER_ID)
-  if (basinFeature) {
-    onOverlayClick?.({ layerId: 'basin-boundaries', event, feature: basinFeature })
+    case 'overlay':
+      onOverlayClick?.({ layerId: target.layerId, event, feature: target.feature })
+      return
+    case 'basin':
+      onOverlayClick?.({ layerId: 'basin-boundaries', event, feature: target.feature })
   }
 }
 

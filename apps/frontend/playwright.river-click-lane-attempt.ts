@@ -1,14 +1,17 @@
 /**
  * One-attempt observer half of the browser-side no-mock river-click P95 lane
  * (#1970): arm/classify/disarm the exact Playwright request event listeners,
- * bound one shared per-sample deadline, and drive dispatch -> series -> chart
- * -> close -> quiet. Pure logic with an injected minimal Playwright surface so
+ * bound one shared per-sample deadline, and drive arm capture -> locate ->
+ * real mouse click -> trusted t0 -> series -> chart -> close -> quiet. Pure logic with an injected minimal Playwright surface so
  * it is unit-testable in vitest without a browser.
  */
 
 import {
+  RIVER_CLICK_HOOK_CODES,
   RIVER_CLICK_PER_SAMPLE_DEADLINE_MS,
+  RIVER_CLICK_POINTER_TOLERANCE_PX,
   RIVER_CLICK_WHOLE_RUN_DEADLINE_MS,
+  type RiverClickHookCode,
 } from './src/lib/riverClickEvidence/constants'
 import { createRiverClickDeadline, withRiverClickDeadline, type RiverClickDeadline } from './src/lib/riverClickEvidence/deadline'
 import { matchRiverClickSeriesRequest } from './src/lib/riverClickEvidence/requestMatching'
@@ -114,6 +117,116 @@ export function closeRiverClickPanelInPage(
   })
 }
 
+/** Pointer-down vs located point: largest accepted displacement per axis (CSS px). */
+export { RIVER_CLICK_POINTER_TOLERANCE_PX }
+
+export interface RiverClickLocatedPoint extends RiverClickFeatureIdentity {
+  clientX: number
+  clientY: number
+}
+
+/**
+ * Page script for one locate. The in-page wrapper turns a hook rejection into
+ * a value, because `page.evaluate` does not preserve a thrown plain object
+ * (its closed `code` would be lost); only a bounded string code crosses.
+ */
+export function riverClickLocateScript(identity: RiverClickLaneIdentity): string {
+  const input = JSON.stringify({
+    bbox: identity.bbox,
+    anchor: identity.anchor,
+    basinId: identity.requestedFeature.basinId,
+    riverSegmentId: identity.requestedFeature.riverSegmentId,
+    basinVersionId: identity.requestedFeature.basinVersionId,
+    riverNetworkVersionId: identity.requestedFeature.riverNetworkVersionId,
+  })
+  return `window.__nhmsRiverClickEvidence.locateRenderedRiver(${input}).then(
+    (value) => ({ ok: true, value }),
+    (error) => ({ ok: false, code: error !== null && typeof error === 'object' && typeof error.code === 'string' ? error.code.slice(0, 64) : null }),
+  )`
+}
+
+export const RIVER_CLICK_ARM_CAPTURE_SCRIPT = 'window.__nhmsRiverClickEvidence.armPointerCapture()'
+export const RIVER_CLICK_TAKE_CAPTURE_SCRIPT = 'window.__nhmsRiverClickEvidence.takePointerCapture()'
+
+function isClosedHookCode(value: unknown): value is RiverClickHookCode {
+  return typeof value === 'string' && (RIVER_CLICK_HOOK_CODES as readonly string[]).includes(value)
+}
+
+function nonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0
+}
+
+/**
+ * Classify the page-side locate outcome. A rejection carries its closed hook
+ * code into the failure message as `hook <CODE>`; any other value stays
+ * redacted. A resolution must carry the four identities and a finite point.
+ */
+export function classifyRiverClickLocateOutcome(
+  outcome: unknown,
+): { ok: true; located: RiverClickLocatedPoint } | { ok: false; message: string } {
+  if (outcome === null || typeof outcome !== 'object') return { ok: false, message: 'hook locate returned no outcome' }
+  const record = outcome as { ok?: unknown; code?: unknown; value?: unknown }
+  if (record.ok === false) {
+    return { ok: false, message: isClosedHookCode(record.code) ? `hook ${record.code}` : 'hook rejected with an unclassified code' }
+  }
+  const value = record.ok === true ? (record.value as Record<string, unknown> | null | undefined) : null
+  if (
+    value === null ||
+    value === undefined ||
+    typeof value !== 'object' ||
+    !nonEmptyString(value.basinId) ||
+    !nonEmptyString(value.riverSegmentId) ||
+    !nonEmptyString(value.basinVersionId) ||
+    !nonEmptyString(value.riverNetworkVersionId) ||
+    typeof value.clientX !== 'number' ||
+    !Number.isFinite(value.clientX) ||
+    typeof value.clientY !== 'number' ||
+    !Number.isFinite(value.clientY)
+  ) {
+    return { ok: false, message: 'locateRenderedRiver resolved without identities and a finite client point' }
+  }
+  return {
+    ok: true,
+    located: {
+      basinId: value.basinId,
+      riverSegmentId: value.riverSegmentId,
+      basinVersionId: value.basinVersionId,
+      riverNetworkVersionId: value.riverNetworkVersionId,
+      clientX: value.clientX,
+      clientY: value.clientY,
+    },
+  }
+}
+
+/**
+ * Classify `takePointerCapture()`: exactly one trusted pointer-down within
+ * 2 CSS px (either axis) of the located point yields t0 = its timeStamp; an
+ * error code, an untrusted/malformed record or a displaced point does not.
+ */
+export function classifyRiverClickPointerCapture(
+  raw: unknown,
+  located: { clientX: number; clientY: number },
+): { ok: true; timeStamp: number } | { ok: false; message: string } {
+  if (raw === null || typeof raw !== 'object') return { ok: false, message: 'pointer capture returned no record' }
+  const record = raw as { error?: unknown; isTrusted?: unknown; timeStamp?: unknown; clientX?: unknown; clientY?: unknown }
+  if ('error' in record) {
+    return { ok: false, message: isClosedHookCode(record.error) ? `pointer capture ${record.error}` : 'pointer capture returned an unclassified error' }
+  }
+  if (record.isTrusted !== true) return { ok: false, message: 'pointer capture is not a trusted pointer event' }
+  const { timeStamp, clientX, clientY } = record
+  if (
+    typeof timeStamp !== 'number' || !Number.isFinite(timeStamp) || timeStamp < 0 ||
+    typeof clientX !== 'number' || !Number.isFinite(clientX) ||
+    typeof clientY !== 'number' || !Number.isFinite(clientY)
+  ) {
+    return { ok: false, message: 'pointer capture record is malformed' }
+  }
+  if (Math.abs(clientX - located.clientX) > RIVER_CLICK_POINTER_TOLERANCE_PX || Math.abs(clientY - located.clientY) > RIVER_CLICK_POINTER_TOLERANCE_PX) {
+    return { ok: false, message: 'pointer capture is displaced more than 2 CSS px from the located point' }
+  }
+  return { ok: true, timeStamp }
+}
+
 export interface RiverClickAttemptOptions {
   attemptDeadlineMs?: number
   pollMs?: number
@@ -205,7 +318,7 @@ function classifyRequest(
 }
 
 /**
- * One complete attempt. Observation is armed BEFORE dispatch and stays armed
+ * One complete attempt. Observation is armed BEFORE the click and stays armed
  * through the scoped close/unmount + quiet interval; it is disarmed only after
  * every terminal path. One shared per-sample deadline starts before the hook
  * evaluate and covers hook, both finished responses, chart, close/unmount, and
@@ -233,7 +346,7 @@ export async function runRiverClickAttempt(
   let records: RequestRecord[] = []
   let unexpectedSeriesCount = 0
   let renderedSeen: RiverClickFeatureIdentity | null = null
-  // The pre-dispatch handle pair owned by THIS attempt; both are disposed on
+  // The pre-click handle pair owned by THIS attempt; both are disposed on
   // every terminal (success/hook-rejection/drift/response/chart/close/quiet/
   // timeout) and disposal failure NEVER masks the attempt terminal.
   let ownedHandles: RiverClickJsHandle[] = []
@@ -383,11 +496,11 @@ export async function runRiverClickAttempt(
   try {
     arm()
     // Capture the EXACT hook object and the EXACT m11-map-surface DOM node
-    // immediately BEFORE dispatch, retained as page-side handles (JSHandle in
+    // immediately BEFORE the click, retained as page-side handles (JSHandle in
     // real Playwright; each evaluateHandle represents ONLY that actual object).
     // The scoped close and the post-quiet identity probe compare the SAME
     // objects, and BOTH handles are disposed (awaited) after the terminal is
-    // decided on every path (success/hook-rejection/drift/response/chart/
+    // decided on every path (success/hook-rejection/drift/click/response/chart/
     // close/quiet/timeout).
     let hookHandle: RiverClickJsHandle | null = null
     let mapHandle: RiverClickJsHandle | null = null
@@ -397,50 +510,56 @@ export async function runRiverClickAttempt(
       mapHandle = await page.evaluateHandle<unknown>(`document.querySelector('[data-testid="m11-map-surface"]')`)
       ownedHandles.push(mapHandle)
     } catch {
-      return { ok: false, failure: failureOf('HOOK_SELECTION_FAILED', 'map', 'pre-dispatch hook/map capture failed'), rendered: null }
+      return { ok: false, failure: failureOf('HOOK_SELECTION_FAILED', 'map', 'pre-click hook/map capture failed'), rendered: null }
     }
-    let dispatch: { basinId: string; riverSegmentId: string; basinVersionId: string; riverNetworkVersionId: string; dispatchNowMs: number }
+
+    // Arm the page-side canvas pointer-down capture BEFORE locating, so the
+    // real click below is the only pointer-down it can observe.
     try {
-      const evaluated = await withRiverClickDeadline(
-        page.evaluate<{
-          basinId: string
-          riverSegmentId: string
-          basinVersionId: string
-          riverNetworkVersionId: string
-          dispatchNowMs: number
-        }>(
-          `window.__nhmsRiverClickEvidence.selectRenderedRiver(${JSON.stringify({
-            bbox: identity.bbox,
-            anchor: identity.anchor,
-            basinId: identity.requestedFeature.basinId,
-            riverSegmentId: identity.requestedFeature.riverSegmentId,
-            basinVersionId: identity.requestedFeature.basinVersionId,
-            riverNetworkVersionId: identity.requestedFeature.riverNetworkVersionId,
-          })})`,
-        ),
+      const armed = await withRiverClickDeadline(
+        page.evaluate<unknown>(RIVER_CLICK_ARM_CAPTURE_SCRIPT),
         effectiveDeadline,
         () => timeoutValue(),
       )
-      if ((evaluated as unknown) === TIMEOUT_SENTINEL) {
+      if ((armed as unknown) === TIMEOUT_SENTINEL) {
         return { ok: false, failure: insufficientRawTimeout(), rendered: null }
       }
-      dispatch = evaluated as NonNullable<typeof evaluated>
     } catch {
       if (wholeDeadline.expired()) {
-        return { ok: false, failure: failureOf('WHOLE_RUN_TIMEOUT', 'sample', 'whole-run deadline exceeded before dispatch', null), rendered: null }
+        return { ok: false, failure: failureOf('WHOLE_RUN_TIMEOUT', 'sample', 'whole-run deadline exceeded before the click', null), rendered: null }
       }
-      return { ok: false, failure: failureOf('HOOK_SELECTION_FAILED', 'map', 'hook invocation failed'), rendered: null }
+      return { ok: false, failure: failureOf('CLICK_DISPATCH_INVALID', 'sample', 'pointer capture could not be armed'), rendered: null }
     }
-    if (!dispatch || typeof dispatch.dispatchNowMs !== 'number' || !Number.isFinite(dispatch.dispatchNowMs)) {
-      return { ok: false, failure: failureOf('HOOK_SELECTION_FAILED', 'map', 'selectRenderedRiver resolved without dispatchNowMs'), rendered: null }
+
+    // Locate only (fit/query/occlusion checks): the hook never dispatches. The
+    // locate time is before t0 and is not part of the sample.
+    let located: RiverClickLocatedPoint
+    try {
+      const outcome = await withRiverClickDeadline(
+        page.evaluate<unknown>(riverClickLocateScript(identity)),
+        effectiveDeadline,
+        () => timeoutValue(),
+      )
+      if ((outcome as unknown) === TIMEOUT_SENTINEL) {
+        return { ok: false, failure: insufficientRawTimeout(), rendered: null }
+      }
+      const classified = classifyRiverClickLocateOutcome(outcome)
+      if (!classified.ok) {
+        return { ok: false, failure: failureOf('HOOK_SELECTION_FAILED', 'map', classified.message), rendered: null }
+      }
+      located = classified.located
+    } catch {
+      if (wholeDeadline.expired()) {
+        return { ok: false, failure: failureOf('WHOLE_RUN_TIMEOUT', 'sample', 'whole-run deadline exceeded before the click', null), rendered: null }
+      }
+      return { ok: false, failure: failureOf('HOOK_SELECTION_FAILED', 'map', 'hook locate invocation failed'), rendered: null }
     }
-    const t0 = dispatch.dispatchNowMs
     // Compare ALL FOUR returned feature identities (not a preset equality).
     const rendered: RiverClickFeatureIdentity = {
-      basinId: dispatch.basinId,
-      riverSegmentId: dispatch.riverSegmentId,
-      basinVersionId: dispatch.basinVersionId,
-      riverNetworkVersionId: dispatch.riverNetworkVersionId,
+      basinId: located.basinId,
+      riverSegmentId: located.riverSegmentId,
+      basinVersionId: located.basinVersionId,
+      riverNetworkVersionId: located.riverNetworkVersionId,
     }
     renderedSeen = rendered
     if (
@@ -450,6 +569,49 @@ export async function runRiverClickAttempt(
       rendered.riverNetworkVersionId !== expectedRendered.riverNetworkVersionId
     ) {
       return { ok: false, failure: failureOf('IDENTITY_DRIFT', 'map', 'rendered feature identity drifted from preflight'), rendered }
+    }
+
+    // ONE real browser click at the located viewport point (Playwright input
+    // -> CDP Input.dispatchMouseEvent: move, press, release; trusted). The
+    // product's own MapLibre click path handles it; nothing else can.
+    try {
+      const clicked = await withRiverClickDeadline(
+        page.mouse.click(located.clientX, located.clientY),
+        effectiveDeadline,
+        () => timeoutValue(),
+      )
+      if ((clicked as unknown) === TIMEOUT_SENTINEL) {
+        return { ok: false, failure: insufficientRawTimeout(), rendered }
+      }
+    } catch {
+      if (wholeDeadline.expired()) {
+        return { ok: false, failure: failureOf('WHOLE_RUN_TIMEOUT', 'sample', 'whole-run deadline exceeded during the click', null), rendered }
+      }
+      return { ok: false, failure: failureOf('CLICK_DISPATCH_INVALID', 'sample', 'real mouse click failed'), rendered }
+    }
+
+    // t0 = the captured trusted pointer-down timeStamp (same time origin as the
+    // page's performance.now()).
+    let t0: number
+    try {
+      const raw = await withRiverClickDeadline(
+        page.evaluate<unknown>(RIVER_CLICK_TAKE_CAPTURE_SCRIPT),
+        effectiveDeadline,
+        () => timeoutValue(),
+      )
+      if ((raw as unknown) === TIMEOUT_SENTINEL) {
+        return { ok: false, failure: insufficientRawTimeout(), rendered }
+      }
+      const capture = classifyRiverClickPointerCapture(raw, located)
+      if (!capture.ok) {
+        return { ok: false, failure: failureOf('CLICK_DISPATCH_INVALID', 'sample', capture.message), rendered }
+      }
+      t0 = capture.timeStamp
+    } catch {
+      if (wholeDeadline.expired()) {
+        return { ok: false, failure: failureOf('WHOLE_RUN_TIMEOUT', 'sample', 'whole-run deadline exceeded reading the pointer capture', null), rendered }
+      }
+      return { ok: false, failure: failureOf('CLICK_DISPATCH_INVALID', 'sample', 'pointer capture read failed'), rendered }
     }
 
     // ONE shared deadline: t0 -> both finished 2xx responses -> chart -> close
@@ -569,9 +731,9 @@ export async function runRiverClickAttempt(
       let outcome: { closed: boolean; mapPresent: boolean; mapSame: boolean; hookSame: boolean } | undefined
       try {
         // ONE function evaluate (real Playwright CALLS the function with the
-        // captured JSHandles injected as the actual pre-dispatch objects). The
+        // captured JSHandles injected as the actual pre-click objects). The
         // hook + map compared here are the SAME objects captured BEFORE
-        // dispatch, so a replacement between dispatch and close is a FAIL. No
+        // the click, so a replacement between the click and close is a FAIL. No
         // window global is added: the handles are function arguments.
         outcome = await withRiverClickDeadline(
           page.evaluate<RiverClickPanelCloseOutcome | Promise<RiverClickPanelCloseOutcome>>(
@@ -596,7 +758,7 @@ export async function runRiverClickAttempt(
           failure: failureOf(
             'CHART_INCOMPLETE',
             'sample',
-            'panel did not close/unmount with the exact pre-dispatch hook object and map node preserved',
+            'panel did not close/unmount with the exact pre-click hook object and map node preserved',
           ),
           rendered,
         }
@@ -623,7 +785,7 @@ export async function runRiverClickAttempt(
     }
 
     // After the FULL quiet interval and while the observer is STILL armed, the
-    // exact pre-dispatch hook object and m11-map-surface node must STILL be the
+    // exact pre-click hook object and m11-map-surface node must STILL be the
     // SAME objects: a replacement during quiet would pass the earlier
     // close-time check but silently invalidate every future observation.
     let quietIdentity: { hookSame: boolean; mapSame: boolean } | null = null
@@ -672,7 +834,7 @@ export async function runRiverClickAttempt(
     disarm()
   }
   })()
-  // Dispose BOTH pre-dispatch handles after the terminal is decided, AWAITING
+  // Dispose BOTH pre-click handles after the terminal is decided, AWAITING
   // every disposal promise (real Playwright disposal is async; voiding it would
   // leak the JSHandles past the attempt settle). Promise.allSettled swallows
   // rejections so a disposal failure can NEVER mask the attempt terminal.
