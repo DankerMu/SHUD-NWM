@@ -89,24 +89,12 @@ def _new_forecast_ids(root: Path, before: set[str]) -> list[str]:
     return sorted({str(row["job_id"]) for row in _forecast_rows(root)} - before)
 
 
-#: Top-level keys the db-free cycle chain already writes outside
-#: ``run_manifest.schema.json`` (root ``additionalProperties: false``) before
-#: #2404 -- a pre-existing gap, pinned so this change provably adds none.
-_PRE_EXISTING_UNDECLARED_MANIFEST_KEYS = {
-    "candidate_id",
-    "display",
-    "forecast_horizon_hours",
-    "object_store_prefix",
-    "object_store_root",
-    "quality_states",
-    "residual_blockers",
-    "submission_attempt",
-    "workspace_dir",
-}
-
-
 def _assert_run_manifests_carry_no_floor(tmp_path: Path) -> int:
-    """No emitted run manifest gains a top-level key or carries the floor anywhere."""
+    """No emitted run manifest writes an undeclared top-level key or carries the floor anywhere.
+
+    Before #2539 the chain wrote nine top-level keys the schema did not declare; the
+    schema now declares them, so the undeclared set is empty.
+    """
 
     import json
 
@@ -115,7 +103,7 @@ def _assert_run_manifests_carry_no_floor(tmp_path: Path) -> int:
     manifests = sorted((tmp_path / "rerun-workspaces").glob("*/object-store/runs/*/input/manifest.json"))
     for path in manifests:
         text = path.read_text(encoding="utf-8")
-        assert set(json.loads(text)) - set(schema["properties"]) == _PRE_EXISTING_UNDECLARED_MANIFEST_KEYS
+        assert set(json.loads(text)) - set(schema["properties"]) == set()
         assert "retry_attempt_floor" not in text
     return len(manifests)
 
@@ -174,6 +162,8 @@ def _seed_cohort_budget_journal(
     tmp_path: Path,
     model_ids: tuple[str, ...],
     jobs: list[dict[str, Any]] | None = None,
+    *,
+    retry_limit: int | None = None,
 ) -> tuple[Path, Any]:
     """``_seed_budget_journal`` for several models: every model is a strict CONFLICT candidate.
 
@@ -283,7 +273,7 @@ def _seed_cohort_budget_journal(
                 backfill_enabled=True,
                 max_cycles_per_source=1,
                 lookback_hours=12,
-                retry_limit=_BUDGET_RETRY_LIMIT,
+                retry_limit=_BUDGET_RETRY_LIMIT if retry_limit is None else retry_limit,
             ),
             registry=FakeRegistry(
                 [
@@ -522,16 +512,17 @@ def test_floor_derived_id_already_in_the_journal_keeps_the_minter_advancing(tmp_
     assert (occupied.slurm_job_id, occupied.status) == ("6053", "failed")
 
 
-def test_mixed_floor_cohort_mints_past_every_member_and_charges_the_shared_attempt(
+def test_mixed_floor_cohort_mints_past_every_member_and_charges_each_member_its_own_floor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A cohort shares ONE master id, so it mints past its highest member floor.
+    """A cohort shares ONE master id, so it mints past its highest member floor (#2404).
 
     ``model_b`` spent attempt 1 under its own ``_full_model_b`` prefix,
-    ``model_a`` nothing.  The cohort mints ``_retry_2`` (b's floor + 1), and each
-    member's reconciled row is charged that shared attempt -- ``model_a`` jumps
-    0 -> 2 on one submission.  Intended, conservative over-charge: the budget
-    can only block earlier, never admit a submission past ``retry_limit``.
+    ``model_a`` nothing.  The cohort mints ``_retry_2`` (b's floor + 1); each
+    member's reconciled row is charged its OWN next attempt (#2542): ``model_a``
+    1, ``model_b`` 2.  So at retry_limit 2 the low-floor member keeps its last
+    retry and only the high-floor member is blocked.  (Pre-#2542 both were
+    charged the shared 2 and both blocked.)
     """
 
     from tests.test_production_scheduler import _BUDGET_RETRY_LIMIT, _budget_full_chain_master_row
@@ -556,13 +547,20 @@ def test_mixed_floor_cohort_mints_past_every_member_and_charges_the_shared_attem
     before = {str(row["job_id"]) for row in _forecast_rows(root)}
     _basins, result = _rerun(tmp_path, monkeypatch, root, built, candidates)
     assert result.status == "succeeded"
-    assert [new for new in _new_forecast_ids(root, before) if new.startswith("job_cycle_")] == [
-        f"job_{_cohort_run_id(models)}_forecast_retry_2"
-    ]
+    master_id = f"job_{_cohort_run_id(models)}_forecast_retry_2"
+    assert [new for new in _new_forecast_ids(root, before) if new.startswith("job_cycle_")] == [master_id]
+    charged = {
+        str(row["model_id"]): row["retry_count"]
+        for row in _forecast_rows(root)
+        if str(row["job_id"]) not in before and not str(row["job_id"]).startswith("job_cycle_")
+    }
+    assert charged == {"model_a": 1, "model_b": 2}
 
     _candidates, after = _pass_decisions(scheduler(models))
-    blocked = (_BLOCKED_DECISION, _BUDGET_RETRY_LIMIT)
-    assert after == {"model_a": blocked, "model_b": blocked}
+    assert after == {
+        "model_a": (_RETRY_DECISION, {"stage": "forecast", "attempt": 1}),
+        "model_b": (_BLOCKED_DECISION, _BUDGET_RETRY_LIMIT),
+    }
 
 
 # ---------------------------------------------------------------------------

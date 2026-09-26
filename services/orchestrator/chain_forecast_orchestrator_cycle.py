@@ -83,14 +83,18 @@ from services.orchestrator.forcing_submit_identity import (
     is_forcing_array_stage,
 )
 from services.orchestrator.retry_identity import (
+    RETRY_ATTEMPT_FLOORS_FIELD,
     RETRY_JOB_ID_MARKER,
+    cohort_retry_attempt_floors,
     split_retry_job_identity,
 )
 from services.orchestrator.scheduler_state_types import DOWNSTREAM_STAGE_ALIASES
 
-#: Canonical stages after forecast whose model-less cohort master rows record
-#: their ``cohort_members`` at reservation (#2603 B4).
-_MEMBER_RECORDING_DOWNSTREAM_STAGES = frozenset({"parse", "state_save_qc", "publish"})
+#: Canonical stages whose model-less cohort rows record their ``cohort_members``
+#: at reservation without an accepted-submit master marker: the stages after
+#: forecast (#2603 B4) and ``convert`` (#2546), so a sibling execution cohort's
+#: active convert row is excluded from ``has_active_pipeline`` by its own list.
+_MEMBER_RECORDING_DOWNSTREAM_STAGES = frozenset({"convert", "parse", "state_save_qc", "publish"})
 
 
 class ForecastOrchestratorCycleMixin:
@@ -723,6 +727,19 @@ class ForecastOrchestratorCycleMixin:
                 "expected_slurm_account": expected_account,
                 "native_shud_resubmitted": _chain.chain_stage_execution.is_forecast_cohort_stage(stage),
             }
+            # #2542: the master is minted above its members' largest floor, so
+            # the reconcile needs each member's own floor to charge it.  Same
+            # capture-once reservation shape as the provenance lists above;
+            # written only when some basin carries a forecast floor.  A partial
+            # nested retry narrows ``active_basins`` to the failed subset, so it
+            # inherits the floors of the master it retries.
+            retry_attempt_floors = (
+                context.inherited_retry_attempt_floors
+                if context.inherited_retry_attempt_floors is not None
+                else cohort_retry_attempt_floors(context.active_basins, stage.stage)
+            )
+            if retry_attempt_floors:
+                reservation_evidence[RETRY_ATTEMPT_FLOORS_FIELD] = retry_attempt_floors
         elif (
             getattr(self.repository, "supports_accepted_submit_reconcile", False)
             and is_forcing_array_stage(stage)

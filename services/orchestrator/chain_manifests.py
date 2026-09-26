@@ -117,6 +117,8 @@ __all__ = (
 )
 
 STATE_CHECKPOINT_HOURS_UNREACHABLE = "STATE_CHECKPOINT_HOURS_UNREACHABLE"
+#: Root ``schema_version`` of ``schemas/run_manifest.schema.json`` (#2539).
+RUN_MANIFEST_SCHEMA_VERSION = "1.0"
 
 ANALYSIS_SCENARIO_ID = "analysis_true_field"
 DEFAULT_ERA5_REANALYSIS_LATENCY_MINUTES = 5 * 24 * 60
@@ -473,6 +475,9 @@ def build_forecast_runtime_manifest(
     )
     run_id = str(basin["run_id"])
     manifest = {
+        # #2539: the root ``schema_version`` ``run_manifest.schema.json`` requires.
+        # Additive; the SHUD runtime does not read it.
+        "schema_version": RUN_MANIFEST_SCHEMA_VERSION,
         "run_id": run_id,
         "run_type": "forecast",
         "submission_attempt": max(int(context.retry_attempt or 1), 1),

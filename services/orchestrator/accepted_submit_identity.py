@@ -18,6 +18,7 @@ from .accepted_submit_cohort import (
     is_forecast_cohort_stage_name,
     ordered_cohort_members,
 )
+from .retry_identity import RETRY_ATTEMPT_FLOORS_FIELD, normalize_retry_attempt_floors
 
 MAX_ACCEPTED_SUBMIT_TEXT_LENGTH = 256
 ACCEPTED_SUBMIT_CONTRACT_VERSION = "nhms.accepted_submit.v1"
@@ -323,6 +324,9 @@ ACCEPTED_SUBMIT_MASTER_ORDINARY_UPSERT_FIELDS = (
     # Same capture-once shape (r3-02): a rewritten budget re-entry stamp would
     # move the confirmation pin after the fact.
     BUDGET_REENTRY_PROVENANCE_FIELD,
+    # Same capture-once shape (#2542): the per-member floors the reconcile
+    # charges from; a rewritten list would re-bill members after the fact.
+    RETRY_ATTEMPT_FLOORS_FIELD,
 )
 
 # The derived per-model row's own frozen evidence (#1187). Deliberately
@@ -878,6 +882,9 @@ def normalize_accepted_submit_evidence(row: Mapping[str, Any]) -> dict[str, Any]
     )
     normalized[BUDGET_REENTRY_PROVENANCE_FIELD] = normalize_quarantine_rerun_model_ids(
         normalized.get(BUDGET_REENTRY_PROVENANCE_FIELD)
+    )
+    normalized[RETRY_ATTEMPT_FLOORS_FIELD] = normalize_retry_attempt_floors(
+        normalized.get(RETRY_ATTEMPT_FLOORS_FIELD)
     )
     decision = normalized.get("reconciliation_decision")
     source = normalized.get("reconciliation_source")

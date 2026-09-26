@@ -939,13 +939,23 @@ def test_select_tests_maps_orchestrator_manifest_surface_without_whole_slow_suit
     # services/** is a river-segment write-surface root (#2185) and a
     # path-canonicalisation family-guard root (#1627), so both scans ride along
     # with the redirect targets.
+    # #2539: the runtime-manifest schema contract suite (sub-second, DB-free)
+    # validates this module's real builder output, so it rides the stop rule.
+    manifest_contract = "tests/test_run_manifest_schema_contract.py"
     assert selected == sorted(
-        {*ORCHESTRATOR_MANIFEST_SURFACE_TESTS, WRITE_SURFACE_SCAN_PATH, FAMILY_GUARD_PATH, RESOLVE_SURFACE_GUARD_PATH}
+        {
+            *ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
+            manifest_contract,
+            WRITE_SURFACE_SCAN_PATH,
+            FAMILY_GUARD_PATH,
+            RESOLVE_SURFACE_GUARD_PATH,
+        }
     )
     # The REDIRECT targets are still focused node ids — that is what keeps the
-    # whole slow suites out. The supplemental riders are whole files by
-    # construction and are excluded here by name, not by loosening the check.
-    supplemental = {WRITE_SURFACE_SCAN_PATH, FAMILY_GUARD_PATH, RESOLVE_SURFACE_GUARD_PATH}
+    # whole slow suites out. The supplemental riders (and the small contract
+    # suite) are whole files by construction and are excluded here by name, not
+    # by loosening the check.
+    supplemental = {WRITE_SURFACE_SCAN_PATH, FAMILY_GUARD_PATH, RESOLVE_SURFACE_GUARD_PATH, manifest_contract}
     assert all("::" in test_path for test_path in selected if test_path not in supplemental)
 
 
@@ -1262,8 +1272,10 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
     # suites, ~23s together; #2404 the retry-mint-floor suite, ~3s; #2416 the
     # cross-stage state-residue suite, sub-second; #2385/#2387 the read-blocked
     # sentinel coupling pin, ~1s; #2453 the root-check loop-convergence suite,
-    # 51 tests in ~0.3s, DB-free), the
-    # rule's 84 plus four riders that arrive from OUTSIDE the
+    # 51 tests in ~0.3s, DB-free; #2542/#2546/#2557/#2539 the member-charge,
+    # convert-members, hydro-attempt triage and manifest-contract suites, ~7s
+    # together, DB-free), the
+    # rule's targets plus four riders that arrive from OUTSIDE the
     # rule — `tests/test_select_ci_tests.py` by the same-name route, #2185's
     # river-segment write-surface scan by the services/** supplemental route,
     # and #1627's path-canonicalisation family guard plus #2452's
@@ -1287,7 +1299,15 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_chain_stage_poll_isolation.py",
         "tests/test_cli_cleanup_frontier.py",
         "tests/test_cli_publish_qdown.py",
+        # #2542: the per-member cohort charge suite rides the broad orchestrator
+        # directory rule (its imports are all function-local). ~3s.
+        "tests/test_cohort_member_charge.py",
         "tests/test_cohort_membership_attribution.py",
+        # #2546: the convert-members suite rides the broad orchestrator directory
+        # rule (importer gaps on accepted_submit_identity.py,
+        # forcing_submit_identity.py, scheduler_state_types.py and the package
+        # __init__). ~3s.
+        "tests/test_convert_cohort_members.py",
         "tests/test_e2e_m3.py",
         # #1953: the full-tree budget contract rides the broad orchestrator
         # directory rule — that route closes the importer gaps of
@@ -1306,6 +1326,9 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_forecast_cohort_projection_restart_stage.py",
         "tests/test_gateway_reconcile_binding_provenance.py",
         "tests/test_gateway_reconcile_claimant_exclusivity.py",
+        # #2557: the hydro-attempt triage suite rides the broad orchestrator
+        # directory rule (its imports are all function-local). Sub-second.
+        "tests/test_hydro_run_attempt_triage.py",
         # #1581: the parity lock rides the broad orchestrator directory rule —
         # that route is what closes the importer gaps of
         # `services/orchestrator/__init__.py`, chain_forecast_trigger.py,
@@ -1402,6 +1425,9 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         # rides every source under it — a supplemental rider, not a rule target.
         WRITE_SURFACE_SCAN_PATH,
         "tests/test_run_identity.py",
+        # #2539: the runtime-manifest schema contract suite rides the broad
+        # orchestrator directory rule (its service imports are function-local).
+        "tests/test_run_manifest_schema_contract.py",
         "tests/test_run_tree_copyback.py",
         "tests/test_run_tree_copyback_backup_lifecycle.py",
         "tests/test_scheduler_backfill.py",

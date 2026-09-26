@@ -24,12 +24,12 @@ _RETRY_LIMIT = 2
 _FORECAST_FAILURE = {"fail_stage": "forecast", "array_results_by_stage": {"forecast": ["failed"]}}
 
 
-def _pass(tmp_path: Path, root: Path) -> tuple[Any, Any]:
+def _pass(tmp_path: Path, root: Path, model_ids: tuple[str, ...] = ("model_a",)) -> tuple[Any, Any]:
     from tests.test_operator_reentry_confirmation import breaker_scheduler
     from tests.test_production_scheduler import FakeProductionOrchestrator
 
     orchestrator = FakeProductionOrchestrator()
-    result = breaker_scheduler(tmp_path, root, orchestrator, retry_limit=_RETRY_LIMIT).run_once()
+    result = breaker_scheduler(tmp_path, root, orchestrator, model_ids=model_ids, retry_limit=_RETRY_LIMIT).run_once()
     return result, orchestrator
 
 
@@ -42,7 +42,12 @@ def _decisions(result: Any) -> list[tuple[str, str | None]]:
 
 
 def _drive_failing_reruns(
-    tmp_path: Path, root: Path, passes: int
+    tmp_path: Path,
+    root: Path,
+    passes: int,
+    *,
+    model_ids: tuple[str, ...] = ("model_a",),
+    recorded_tokens: dict[str, str] | None = None,
 ) -> tuple[int, list[list[tuple[str, str | None]]], list[list[str]]]:
     """Run ``passes`` scheduler passes; every dispatched handoff fails at ``forecast``.
 
@@ -66,13 +71,15 @@ def _drive_failing_reruns(
     trace: list[list[tuple[str, str | None]]] = []
     blocked_reasons: list[list[str]] = []
     for _ in range(passes):
-        result, orchestrator = _pass(tmp_path, root)
+        result, orchestrator = _pass(tmp_path, root, model_ids)
         trace.append(_decisions(result))
         blocked_reasons.append([str(item.get("reason")) for item in result.evidence.get("blocked_candidates") or []])
         if not orchestrator.calls:
             continue
         (call,) = orchestrator.calls
-        client = _wallclock_slurm_client(**_FORECAST_FAILURE)
+        client = _wallclock_slurm_client(
+            fail_stage="forecast", array_results_by_stage={"forecast": ["failed"] * len(call["basins"])}
+        )
         retry_service = FileJournalRetryService(
             FileOrchestrationJournalRepository(root),
             RetryConfig(max_retries=_RETRY_LIMIT, backoff_schedule=[0]),
@@ -81,6 +88,7 @@ def _drive_failing_reruns(
             tmp_path,
             root,
             [dict(basin) for basin in call["basins"]],
+            recorded_tokens=recorded_tokens,
             slurm_client=client,
             retry_service=retry_service,
         )
@@ -130,9 +138,54 @@ def test_terminal_run_manifest_missing_stops_refiring_after_a_newer_failure(
     slurm_forecast, trace, blocked = _drive_failing_reruns(tmp_path, root, _RETRY_LIMIT + 3)
 
     assert slurm_forecast == 1 + _RETRY_LIMIT, (slurm_forecast, trace)
-    assert trace[0] == [("candidates", "retry_terminal_run_manifest_missing")], trace
+    # #2555: this fixture's journal token is stale (``seed_breaker_journal``), so the
+    # manifest-missing skip is judged by §8.7 first and the forced rerun is the
+    # stamped quarantine retry, not the unstamped ``retry_terminal_run_manifest_missing``
+    # (whose byte-identical no-judgement legs are pinned in
+    # ``tests/test_quarantine_forecast_restart_guards.py``; its re-fire stop is the
+    # next test).  The recency rule under test is the same either way.
+    assert trace[0] == [("candidates", "retry_journal_predecessor_identity_mismatch")], trace
     assert all(decisions == _BUDGET_EXHAUSTED for decisions in trace[1:]), trace
     assert all(reasons == ["retry_limit_exhausted"] for reasons in blocked[1:]), blocked
+
+
+def test_unjudged_terminal_run_manifest_missing_retry_stops_refiring_after_a_newer_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The unstamped ``retry_terminal_run_manifest_missing`` re-fire stops at the budget.
+
+    model_a re-selects the MATCHING predecessor token (the 6h cadence lead of the
+    breaker geometry), so §8.7 has nothing to judge (#2555:
+    ``_journal_predecessor_identity_quarantine`` returns ``None``) and its forced
+    rerun is the origin manifest-missing retry.  A completed cycle whose every
+    lineage matches scores ``complete`` and is never re-discovered, so a sibling
+    (model_b, stale token) keeps the cycle open, as it does in production.  A
+    newer failure must move model_a onto the failure path's budget, never back
+    into another forced rerun.
+    """
+
+    from tests.test_operator_reentry_confirmation import seed_breaker_journal, stale_token
+
+    models = ("model_a", "model_b")
+    matching = {"model_a": stale_token("model_a", lead_hours=6)}
+    root = seed_breaker_journal(
+        tmp_path, monkeypatch, model_ids=models, breaker_engaged=False, recorded_tokens=matching
+    )
+    (tmp_path / "object-store" / "runs" / "fcst_gfs_2026052100_model_a" / "input" / "manifest.json").unlink()
+
+    slurm_forecast, trace, blocked = _drive_failing_reruns(
+        tmp_path, root, _RETRY_LIMIT + 3, model_ids=models, recorded_tokens=matching
+    )
+
+    # One cohort forced rerun, then ``retry_limit`` inline retries; then both stop.
+    assert slurm_forecast == 1 + _RETRY_LIMIT, (slurm_forecast, trace)
+    assert sorted(trace[0]) == [
+        ("candidates", "retry_journal_predecessor_identity_mismatch"),
+        ("candidates", "retry_terminal_run_manifest_missing"),
+    ], trace
+    assert all(decisions == _BUDGET_EXHAUSTED * 2 for decisions in trace[1:]), trace
+    assert all(reasons == ["retry_limit_exhausted"] * 2 for reasons in blocked[1:]), blocked
 
 
 def test_failing_reruns_without_inline_retry_stay_within_the_forecast_budget(

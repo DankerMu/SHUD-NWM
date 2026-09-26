@@ -265,6 +265,12 @@ class CycleOrchestrationContext:
     #: when no mirror ran.  Read by the chain-exit recovery only.  Never persisted
     #: and never an orchestrator attribute, so concurrent cohort workers cannot race it.
     canonical_precip_mirror_status: str | None = None
+    #: Invocation-local ``retry_attempt_floors`` of the master a partial-array
+    #: nested retry resubmits (#2542).  Set by ``_retry_partial_array_stage`` while
+    #: ``active_basins`` is narrowed to the failed subset, so the nested master
+    #: records the floors its id was minted from instead of the subset's.  ``None``
+    #: (the default) means "recompute from ``active_basins``".  Never persisted.
+    inherited_retry_attempt_floors: list[dict[str, Any]] | None = None
 
 
 @dataclass(frozen=True)

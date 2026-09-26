@@ -1381,6 +1381,10 @@ SCHEDULER_IMPORTER_TESTS: tuple[str, ...] = (
     # facade's `_candidate_execution_cohort_run_id` and reads every decision at
     # its `_candidate_state_decision` seam. DB-free, 15 tests in ~6s.
     "tests/test_cohort_membership_attribution.py",
+    # #2546: the convert-members suite top-level-imports
+    # `services.orchestrator.scheduler` for the facade's execution-unit run ids
+    # and reads decisions at its `_candidate_state_decision` seam. DB-free, ~3s.
+    "tests/test_convert_cohort_members.py",
 )
 
 ORCHESTRATOR_CLI_IMPORTER_TESTS: tuple[str, ...] = (
@@ -1470,6 +1474,15 @@ FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     # ``retry_count``), and its imports are all function-local, so no importer
     # derivation reaches it. DB-free, ~4s, hence a rule not an exclusion.
     "tests/test_retry_mint_floor.py",
+    # #2542 / #2546 / #2557: the per-member cohort charge suite (this module's
+    # reconcile write, closed constructor, reclaim and manual-retry clone), the
+    # convert-members suite (`has_active_pipeline` and `candidate_state`) and the
+    # hydro-attempt triage suite (the three accepted-submit release entrypoints)
+    # all drive this repository.  The charge and triage suites import
+    # function-locally; the convert suite top-level-imports it.  DB-free, ~6s.
+    "tests/test_cohort_member_charge.py",
+    "tests/test_convert_cohort_members.py",
+    "tests/test_hydro_run_attempt_triage.py",
     # #1555/#1768: the operator re-entry confirmation suite seeds REAL file
     # journals through this repository and reads the one-shot confirmation event
     # back through it, so its whole precondition geometry rests on this module's
@@ -2532,8 +2545,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         stop_on_match=True,
     ),
     PathTestRule(
+        # #2539: the runtime-manifest schema contract validates this module's real
+        # builder output against schemas/run_manifest.schema.json.
         ORCHESTRATOR_MANIFEST_SURFACE_PATH_PATTERNS[1],
-        ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
+        (*ORCHESTRATOR_MANIFEST_SURFACE_TESTS, "tests/test_run_manifest_schema_contract.py"),
         stop_on_match=True,
     ),
     PathTestRule(
@@ -3182,6 +3197,22 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # function-local, so no importer derivation can reach it; this
             # directory rule is its route. DB-free, 6 tests in ~3s.
             "tests/test_retry_mint_floor.py",
+            # #2542 / #2557 / #2539: the per-member cohort charge, hydro-attempt
+            # triage and run-manifest schema contract suites drive
+            # chain_forecast_orchestrator_cycle.py (the reservation write),
+            # retry_identity.py (the charge rule), accepted_submit_identity.py
+            # and the real orchestrate_cycle; all their imports are
+            # function-local, so this directory rule is their route. #2546: the
+            # convert-members suite's top-level importer gaps on
+            # accepted_submit_identity.py, chain_types.py,
+            # forcing_submit_identity.py, scheduler_state_types.py and the
+            # package __init__ close here; its scheduler.py and
+            # file_orchestration_journal.py pairs ride their stop-rule tuples.
+            # DB-free, together ~9s.
+            "tests/test_cohort_member_charge.py",
+            "tests/test_convert_cohort_members.py",
+            "tests/test_hydro_run_attempt_triage.py",
+            "tests/test_run_manifest_schema_contract.py",
             # #2393/#1845/#2416/#2394: the cross-stage state-residue suite drives
             # the forecast chain stage loop (chain_forecast_execution.py,
             # chain_forecast_cycle.py, chain_forecast_orchestrator_cycle.py), the

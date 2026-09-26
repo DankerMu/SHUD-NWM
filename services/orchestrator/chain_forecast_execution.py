@@ -29,7 +29,14 @@ from services.orchestrator.pipeline_job_provenance import (
     PipelineJobProvenanceError,
     publish_runs_pipeline_job_provenance,
 )
-from services.orchestrator.retry_identity import effective_retry_attempt, retry_attempt_floor, retry_suffix_attempt
+from services.orchestrator.retry_identity import (
+    RETRY_ATTEMPT_FLOORS_FIELD,
+    cohort_retry_attempt_floors,
+    effective_retry_attempt,
+    normalize_retry_attempt_floors,
+    retry_attempt_floor,
+    retry_suffix_attempt,
+)
 from services.orchestrator.run_tree_copyback import RunTreeCopybackError, copyback_run_trees
 from services.orchestrator.scheduler_timing import (
     current_scheduler_pass_timing,
@@ -875,6 +882,30 @@ def _retry_job_for_stage_result(
     return job
 
 
+def _retried_master_retry_attempt_floors(
+    self, result: StageRunResult, original_basins: list[dict[str, Any]], stage: StageDefinition
+) -> list[dict[str, Any]] | None:
+    """The durable ``retry_attempt_floors`` of the master a partial nested retry resubmits.
+
+    Read from the master's own row (first-write frozen, so a master resumed from
+    an earlier pass keeps what it was minted from); a repository without the row
+    falls back to the basins this call reserved it from.  ``None`` -- no read at
+    all -- outside the accepted-submit forecast cohort reservation, the only
+    consumer, so the forcing and database lanes stay untouched.
+    """
+
+    if not (
+        getattr(self.repository, "supports_accepted_submit_reconcile", False)
+        and _chain.chain_stage_execution.is_forecast_cohort_stage(stage)
+    ):
+        return None
+    get_pipeline_job = getattr(self.repository, "get_pipeline_job", None)
+    record = get_pipeline_job(result.pipeline_job_id) if callable(get_pipeline_job) else None
+    if isinstance(record, Mapping):
+        return normalize_retry_attempt_floors(record.get(RETRY_ATTEMPT_FLOORS_FIELD))
+    return cohort_retry_attempt_floors(original_basins, stage.stage)
+
+
 def _retry_partial_array_stage(
     self,
     stage: StageDefinition,
@@ -906,6 +937,11 @@ def _retry_partial_array_stage(
     pending_task_ids = [task.task_id for task in aggregation.task_results if task.status != "succeeded"]
     latest_result = result
     retry_attempts = 0
+    # #2542: the nested master's members are the failed subset, but its id is
+    # minted from the retried master, so it records that master's floors.
+    context.inherited_retry_attempt_floors = _retried_master_retry_attempt_floors(
+        self, result, original_basins, stage
+    )
 
     try:
         while pending_task_ids:
@@ -986,6 +1022,7 @@ def _retry_partial_array_stage(
             pending_task_ids = next_pending_task_ids
     finally:
         context.active_basins = original_basins
+        context.inherited_retry_attempt_floors = None
 
     final_aggregation = _aggregation_from_task_results(tuple(task_results[task_id] for task_id in sorted(task_results)))
     if final_aggregation.status == "succeeded":

@@ -111,6 +111,7 @@ def seed_breaker_journal(
     *,
     model_ids: tuple[str, ...] = ("model_a",),
     breaker_engaged: bool = True,
+    recorded_tokens: dict[str, str] | None = None,
 ) -> Path:
     """Drive the REAL lifecycle to the §8.7 breaker on an initially empty journal.
 
@@ -120,6 +121,8 @@ def seed_breaker_journal(
     quarantines it and submits the rerun; that rerun (stamped with quarantine
     provenance) re-records the same token, so occurrences == threshold == 1.
     ``breaker_engaged=False`` stops after the fresh run (quarantine armed, breaker not).
+    ``recorded_tokens`` (default: each model's stale token) is what the fresh run
+    re-selects; a matching token leaves nothing for §8.7 to judge.
     """
 
     from tests.test_production_scheduler import FakeProductionOrchestrator, _seed_recorded_forcing_packages
@@ -158,7 +161,7 @@ def seed_breaker_journal(
         (call,) = orchestrator.calls
         return [dict(basin) for basin in call["basins"]]
 
-    assert real_rerun(tmp_path, root, _submitted_basins(None)).status == "complete"
+    assert real_rerun(tmp_path, root, _submitted_basins(None), recorded_tokens=recorded_tokens).status == "complete"
     if breaker_engaged:
         rerun_basins = _submitted_basins("retry_journal_predecessor_identity_mismatch")
         assert real_rerun(tmp_path, root, rerun_basins).status == "complete"

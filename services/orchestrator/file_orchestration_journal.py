@@ -141,8 +141,11 @@ from services.orchestrator.retry import (
     warn_unknown_error_code,
 )
 from services.orchestrator.retry_identity import (
+    RETRY_ATTEMPT_FLOORS_FIELD,
     RETRY_JOB_ID_MARKER,
     effective_retry_attempt,
+    member_charged_retry_attempt,
+    normalize_retry_attempt_floors,
     split_retry_job_identity,
 )
 from services.orchestrator.run_identity import (
@@ -555,6 +558,8 @@ _PIPELINE_JOB_UPSERT_MUTABLE_FIELDS = (
     QUARANTINE_RERUN_PROVENANCE_FIELD,
     # Same for the budget re-entry stamp (r3-02): it is a confirmation pin.
     BUDGET_REENTRY_PROVENANCE_FIELD,
+    # Same for the per-member floors (#2542): the reconcile charges from them.
+    RETRY_ATTEMPT_FLOORS_FIELD,
     "restart_stage",
     "submission_attempt",
     "submission_attempt_started_at",
@@ -5454,12 +5459,17 @@ class FileOrchestrationJournalRepository:
                         ),
                         "restart_stage": projection.get("restart_stage"),
                         "native_shud_resubmitted": False,
-                        # #2404: the member's charged forecast attempt is its
-                        # master's.  The model-less master proves no candidate
-                        # authority (#1586) and this id carries no ``_retry_<n>``
-                        # suffix, so without it a cohort member's stage budget
-                        # never advanced.
-                        "retry_count": effective_retry_attempt(existing.get("job_id"), existing.get("retry_count")),
+                        # #2404: the member's charged forecast attempt.  The
+                        # model-less master proves no candidate authority (#1586)
+                        # and this id carries no ``_retry_<n>`` suffix, so without
+                        # it a cohort member's stage budget never advanced.
+                        # #2542: charged from the member's own recorded floor, not
+                        # the master's (shared) attempt when floors were recorded.
+                        "retry_count": member_charged_retry_attempt(
+                            existing.get(RETRY_ATTEMPT_FLOORS_FIELD),
+                            model_id,
+                            effective_retry_attempt(existing.get("job_id"), existing.get("retry_count")),
+                        ),
                     }
                 )
                 payloads.append(("pipeline_job", candidate_job, model_id))
@@ -9528,6 +9538,8 @@ class FileOrchestrationJournalRepository:
             BUDGET_REENTRY_PROVENANCE_FIELD: normalize_quarantine_rerun_model_ids(
                 record.get(BUDGET_REENTRY_PROVENANCE_FIELD)
             ),
+            # Explicit member for the same reason (#2542): the per-member floors.
+            RETRY_ATTEMPT_FLOORS_FIELD: normalize_retry_attempt_floors(record.get(RETRY_ATTEMPT_FLOORS_FIELD)),
             "restart_stage": record.get("restart_stage"),
             # #1748: the operator-recovery attestation.  Deliberately absent from
             # ``_PIPELINE_JOB_UPSERT_MUTABLE_FIELDS`` so the generic upsert can
@@ -11728,6 +11740,11 @@ class FileJournalRetryService:
             # released predecessor.  The source row keeps its attestation --
             # only the successor field is cleared.
             retry_record[OPERATOR_RECOVERY_ATTESTATION_FIELD] = None
+            # #2542: the per-member floors are the source master's reservation
+            # provenance; the pending clone is no master and must not carry them.
+            # (The automatic-retry clone above copies a non-master row, which never
+            # records floors, and a current master takes the virtual-row path.)
+            retry_record[RETRY_ATTEMPT_FLOORS_FIELD] = []
             try:
                 retry_row = self.repository._pipeline_job_row(retry_record)
             except FileOrchestrationJournalError as error:
