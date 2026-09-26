@@ -130,7 +130,13 @@ def test_terminal_run_manifest_missing_stops_refiring_after_a_newer_failure(
     slurm_forecast, trace, blocked = _drive_failing_reruns(tmp_path, root, _RETRY_LIMIT + 3)
 
     assert slurm_forecast == 1 + _RETRY_LIMIT, (slurm_forecast, trace)
-    assert trace[0] == [("candidates", "retry_terminal_run_manifest_missing")], trace
+    # #2555: this fixture's journal token is stale (``seed_breaker_journal``), so the
+    # manifest-missing skip is judged by §8.7 first and the forced rerun is the
+    # stamped quarantine retry, not the unstamped ``retry_terminal_run_manifest_missing``
+    # (whose byte-identical no-judgement legs are pinned in
+    # ``tests/test_quarantine_forecast_restart_guards.py``).  The recency rule under
+    # test is the same either way.
+    assert trace[0] == [("candidates", "retry_journal_predecessor_identity_mismatch")], trace
     assert all(decisions == _BUDGET_EXHAUSTED for decisions in trace[1:]), trace
     assert all(reasons == ["retry_limit_exhausted"] for reasons in blocked[1:]), blocked
 

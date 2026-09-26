@@ -382,7 +382,15 @@ exact `model_id` 且 `array_task_outcome="succeeded"` 时，才把这次 submiss
 `retry_terminal_run_manifest_missing` / `retry_missing_forecast_output` 这类与
 §8.7 无关的白名单重提交也会重录同一个 token，把它们计进来会在第一次 quarantine
 判定前就预充断路器、直接 fail-stop 掉本该重跑的那一轮。#1157 之前写的旧 journal
-行没有这个字段，一律计 0（断路器保持断开）。断路器随即接管（#1157）：
+行没有这个字段，一律计 0（断路器保持断开）。**manifest 缺失的 terminal skip 先过
+§8.7（#2555）**：None 车道上一条 `terminal_hydro_success` / `terminal_pipeline_success`
+既缺 run manifest initial state、journal token 又是 stale lineage 时，先由 §8.7
+判定——得到的是 `retry_journal_predecessor_identity_mismatch`（带戳、计入断路器）或
+断路器已接管时的 blocked，而不是不带戳的 `retry_terminal_run_manifest_missing`；
+只有 §8.7 不给判定（token 匹配、无记录 id、base key 不同）时才照旧发
+`retry_terminal_run_manifest_missing`。两条路都照旧先查 per-model forcing witness。
+lineage 匹配、manifest 却一直缺失的重跑仍没有自己的 retry budget（残余风险，未修）。
+断路器随即接管（#1157）：
 
 - 候选侧 decision 从 retry 降为
   `blocked_journal_predecessor_identity_quarantine`（进 `blocked_candidates[]`），

@@ -76,6 +76,52 @@
       "type": "string",
       "minLength": 1
     },
+    "submission_attempt": {
+      "description": "Durable accepted-submit attempt of the forecast master that staged this manifest.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "candidate_id": {
+      "description": "Scheduler candidate identifier (source:cycle_time:model_id:scenario_id).",
+      "type": "string",
+      "minLength": 1
+    },
+    "forecast_horizon_hours": {
+      "description": "Forecast horizon in hours from start_time to end_time.",
+      "type": "number"
+    },
+    "workspace_dir": {
+      "description": "Orchestrator workspace root the runtime resolves relative run paths against.",
+      "type": "string",
+      "minLength": 1
+    },
+    "object_store_root": {
+      "description": "Local filesystem root of the object store.",
+      "type": "string",
+      "minLength": 1
+    },
+    "object_store_prefix": {
+      "description": "URI prefix mapped onto object_store_root (for example s3://nhms).",
+      "type": "string"
+    },
+    "display": {
+      "description": "Display contract of the run outputs (tiles, output URI, unavailable products).",
+      "type": "object",
+      "additionalProperties": true
+    },
+    "quality_states": {
+      "description": "Per-surface quality state of the run assembly (display, output river, station forcing).",
+      "type": "object",
+      "additionalProperties": true
+    },
+    "residual_blockers": {
+      "description": "Known residual blockers of the run assembly, one object per blocker.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
     "cycle_time": {
       "description": "Forecast cycle time in ISO 8601 UTC.",
       "type": "string",
@@ -127,10 +173,12 @@
       "additionalProperties": true,
       "properties": {
         "state_id": {
-          "type": "string"
+          "description": "Warm-start state snapshot id; null on a cold start or a packaged initial condition.",
+          "type": ["string", "null"]
         },
         "ic_file_uri": {
-          "type": "string",
+          "description": "Warm-start initial-condition file URI; null on a cold start or a packaged initial condition.",
+          "type": ["string", "null"],
           "format": "uri"
         }
       }
@@ -157,9 +205,9 @@
       "description": "Runtime launch settings.",
       "type": "object",
       "additionalProperties": true,
-      "required": ["executable"],
       "properties": {
         "executable": {
+          "description": "Optional. The SHUD runtime resolves its executable from SHUD_EXECUTABLE, not from the manifest.",
           "type": "string",
           "minLength": 1
         },

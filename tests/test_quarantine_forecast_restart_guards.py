@@ -12,6 +12,8 @@ predicates are that function's contract.
   single-cycle repair authorization (owner decision (b)).
 - #2407: on the strict lane the quarantine literal survives the strict
   warm-start upgrade helper (test only).
+- #2555: on the None lane a manifest-missing terminal skip is judged by the §8.7
+  journal-predecessor quarantine before the manifest-missing retry is emitted.
 """
 
 from __future__ import annotations
@@ -111,6 +113,123 @@ def test_none_lane_terminal_run_manifest_missing_with_own_forcing_is_unchanged(
     assert evidence["restart_stage"] == "forecast"
     assert evidence["restart_from_stage"] == "forecast"
     assert isinstance(evidence.get("forcing_provenance"), Mapping)
+    assert evidence["forcing_provenance"]
+
+
+# ---------------------------------------------------------------------------
+# #2555 — None-lane manifest-missing skip goes through §8.7 first
+# ---------------------------------------------------------------------------
+
+
+def _manifest_missing_build(monkeypatch: Any, tmp_path: Path, **kwargs: Any) -> tuple[Any, ...]:
+    """Wiring A with the run manifest dropped: the ``terminal_run_manifest_missing`` leg's input."""
+    from tests.test_scheduler_generation import _run_wiring_a_build_candidates
+
+    return _run_wiring_a_build_candidates(monkeypatch, tmp_path, write_run_manifest=False, **kwargs)
+
+
+def test_stale_lineage_with_a_missing_manifest_is_quarantined(monkeypatch: Any, tmp_path: Path) -> None:
+    """4.2: the quarantine retry replaces the manifest-missing retry and counts for the breaker."""
+    from services.orchestrator.accepted_submit_identity import canonical_quarantine_rerun_model_ids
+    from tests.test_scheduler_generation import _expected_init_state_id, _wrong_suffix_init_state_id
+
+    stale = _wrong_suffix_init_state_id()
+    candidates, blocked, skipped, _duplicates, _sync = _manifest_missing_build(
+        monkeypatch, tmp_path, recorded_init_state_id=stale
+    )
+
+    assert (blocked, skipped) == ([], [])
+    (candidate,) = candidates
+    evidence = candidate.state_evidence
+    _assert_none_lane(evidence)
+    assert evidence["decision"] == "retry_journal_predecessor_identity_mismatch"
+    assert evidence["reason"] == "journal_predecessor_identity_mismatch"
+    assert evidence["restart_stage"] == "forecast"
+    identity = evidence["journal_predecessor_identity"]
+    assert (identity["recorded_init_state_id"], identity["expected_init_state_id"]) == (
+        stale,
+        _expected_init_state_id(),
+    )
+    assert identity["quarantined_skip_reason"] == "terminal_hydro_success"
+    # The forcing witness was consulted on the way out (the model's own package is seeded).
+    assert evidence["forcing_provenance"]
+    # Reservation-time provenance: this submission is a §8.7 rerun the breaker counts.
+    basin = {"model_id": candidate.model_id, "state_evidence": evidence}
+    assert canonical_quarantine_rerun_model_ids(basins=[basin]) == ("model_a",)
+
+
+def test_stale_lineage_with_a_missing_manifest_and_no_own_forcing_blocks(monkeypatch: Any, tmp_path: Path) -> None:
+    """4.1: the quarantine leg consults the forcing witness exactly like the manifest-present leg."""
+    from tests.test_scheduler_generation import _wrong_suffix_init_state_id
+
+    candidates, blocked, skipped, _duplicates, _sync = _manifest_missing_build(
+        monkeypatch, tmp_path, recorded_init_state_id=_wrong_suffix_init_state_id(), seed_forcing_package=False
+    )
+
+    assert (candidates, skipped) == ([], [])
+    (blocker,) = blocked
+    assert blocker.reason in _MISSING_FORCING_REASONS
+    guard = blocker.state_evidence["artifact_guard"]
+    assert guard["planned_retry_decision"] == "retry_journal_predecessor_identity_mismatch"
+    assert guard["planned_retry_reason"] == "journal_predecessor_identity_mismatch"
+
+
+def test_the_breaker_stops_a_repeating_manifest_missing_rerun(monkeypatch: Any, tmp_path: Path) -> None:
+    """4.2: at the breaker threshold the skip fail-stops instead of rerunning from forecast."""
+    from tests.test_production_scheduler import _dt as _pdt
+    from tests.test_scheduler_generation import _cohort_master_recording, _wrong_suffix_init_state_id
+
+    cycle_time = _pdt("2026-05-21T12:00:00Z")
+    stale = _wrong_suffix_init_state_id()
+    candidates, blocked, skipped, _duplicates, _sync = _manifest_missing_build(
+        monkeypatch,
+        tmp_path,
+        recorded_init_state_id=stale,
+        jobs=[
+            _cohort_master_recording(cycle_time, stale),
+            _cohort_master_recording(cycle_time, stale, job_suffix="_retry_1", quarantine_rerun_model_ids=["model_a"]),
+        ],
+    )
+
+    assert (candidates, skipped) == ([], [])
+    (blocker,) = blocked
+    assert blocker.reason == "journal_predecessor_identity_quarantine_breaker_engaged"
+    evidence = blocker.state_evidence
+    assert evidence["decision"] == "blocked_journal_predecessor_identity_quarantine"
+    assert evidence["journal_predecessor_identity"]["occurrences"] == 1
+    assert evidence["retry_policy"]["automatic_retry_allowed"] is False
+
+
+# The origin decision of the no-judgement legs, captured on origin/master (9facc5b94)
+# with ``_manifest_missing_build``: the manifest-missing retry, forcing-annotated.
+_ORIGIN_MANIFEST_MISSING_FACE = ("retry_terminal_run_manifest_missing", "terminal_run_manifest_missing", "forecast")
+
+
+@pytest.mark.parametrize("leg", ["matching", "no_recorded_id", "different_base_key"])
+def test_manifest_missing_without_a_quarantine_judgement_is_unchanged(
+    monkeypatch: Any, tmp_path: Path, leg: str
+) -> None:
+    """4.2 pin: matching token, no recorded id, or another base key keep the origin retry."""
+    from tests.test_production_scheduler import _dt as _pdt
+    from tests.test_scheduler_generation import _expected_init_state_id, _write_side_init_state_id
+
+    recorded = {
+        "matching": _expected_init_state_id(),
+        "no_recorded_id": None,
+        "different_base_key": _write_side_init_state_id(
+            source_id="gfs", model_id="model_a", valid_time=_pdt("2026-05-21T06:00:00Z"), lead_hours=6
+        ),
+    }[leg]
+    candidates, blocked, skipped, _duplicates, _sync = _manifest_missing_build(
+        monkeypatch, tmp_path, recorded_init_state_id=recorded
+    )
+
+    assert (blocked, skipped) == ([], [])
+    (candidate,) = candidates
+    evidence = candidate.state_evidence
+    _assert_none_lane(evidence)
+    assert (evidence["decision"], evidence["reason"], evidence["restart_stage"]) == _ORIGIN_MANIFEST_MISSING_FACE
+    assert "journal_predecessor_identity" not in evidence
     assert evidence["forcing_provenance"]
 
 

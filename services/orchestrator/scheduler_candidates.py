@@ -623,10 +623,26 @@ def build_candidates(
                     state_decision.reason in _STRICT_WARM_START_TERMINAL_SKIP_REASONS
                     and not _terminal_decision_has_run_manifest(state_decision.evidence)
                 ):
-                    state_decision = CandidateStateDecision(
-                        "retry",
-                        "terminal_run_manifest_missing",
-                        _terminal_run_manifest_retry_evidence(state_decision.evidence),
+                    # #2555: the run manifest and the journal lineage are independent
+                    # sources, so a manifest-missing skip can also carry a stale journal
+                    # token.  The §8.7 quarantine judges the ORIGINAL skip first; a
+                    # positive decision (retry or breaker-blocked) takes over so the
+                    # rerun is stamped and counted by the breaker.  No judgement keeps
+                    # the manifest-missing retry exactly as before.
+                    identity_quarantine = _journal_predecessor_identity_quarantine(
+                        context,
+                        candidate,
+                        cycle,
+                        state_decision,
+                    )
+                    state_decision = (
+                        identity_quarantine
+                        if identity_quarantine is not None
+                        else CandidateStateDecision(
+                            "retry",
+                            "terminal_run_manifest_missing",
+                            _terminal_run_manifest_retry_evidence(state_decision.evidence),
+                        )
                     )
                     # Emitting point for a ``forecast`` restart: consult the
                     # per-model forcing witness before it leaves (#2396, #1843).
