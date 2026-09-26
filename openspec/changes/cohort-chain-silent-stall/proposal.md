@@ -14,7 +14,7 @@ Three defects let a DB-free scheduler cohort chain stall silently or pick the wr
   - An event write failure is counted and does not stop the chain.
   - The stage span records the real `basin_count` on every exit path.
 - **#2603.** Model-less cohort rows are classified before compaction into member / non_member / incomplete / unwitnessed.
-  - A row that records its own `cohort_members` is judged by its own list. Other rows use the #2543 run-level rule (`_complete_cohort_members_by_run`).
+  - A row is judged only by the `cohort_members` it records itself (completeness predicate of the #2543 rule); a row without its own list is `unwitnessed`. A partially ended member array row attributes its failure only to members whose own task failed.
   - Member rows count on both the failure and success sides. Non-member rows are dropped.
   - A permanently failed incomplete row blocks with `cohort_membership_unprovable`.
   - Unwitnessed (historical) rows keep today's semantics.

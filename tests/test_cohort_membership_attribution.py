@@ -248,9 +248,7 @@ def _two_pass_trajectory(tmp_path: Path, member_count: int) -> list[list[tuple[s
 
     candidates = [_candidate(index) for index in range(member_count)]
     repository = FileOrchestrationJournalRepository(tmp_path / "journal")
-    client = _Runtime(
-        fail_stage="state_save_qc", array_results_by_stage={"state_save_qc": ["failed"] * member_count}
-    )
+    client = _Runtime(fail_stage="state_save_qc", array_results_by_stage={"state_save_qc": ["failed"] * member_count})
     trajectory = []
     restart_stage, evidence = "forecast", None
     for _pass in range(2):
@@ -584,8 +582,9 @@ def test_partially_failed_array_row_blocks_only_the_member_whose_task_failed(
     repository = FileOrchestrationJournalRepository(tmp_path / "journal")
     client = _Runtime(
         fail_stage="state_save_qc",
-        array_results_by_stage={"state_save_qc": ["succeeded", "succeeded", "failed"]},
-        task_error_codes={("state_save_qc", 0): task_error_code},
+        # Attempt 0 is the 3-task row; a transient failure's ``_retry_1`` row runs model_2 alone.
+        array_results_by_stage={"state_save_qc": [["succeeded", "succeeded", "failed"], ["failed"]]},
+        task_error_codes={("state_save_qc", 0): task_error_code, ("state_save_qc", 1): task_error_code},
     )
 
     result = _run_pass(tmp_path, repository, client, _cohort_basins(candidates), max_retries=1)
@@ -598,6 +597,14 @@ def test_partially_failed_array_row_blocks_only_the_member_whose_task_failed(
     master = _state_save_rows(repository)[f"job_{_cohort_run_id('forecast', candidates)}_state_save_qc"]
     permanent = task_error_code == "STATE_SAVE_QC_TASK_FAILED"
     assert master["status"] == ("permanently_failed" if permanent else "partially_failed")
+    retry_rows = {job_id: row for job_id, row in _state_save_rows(repository).items() if job_id != master["job_id"]}
+    if permanent:
+        assert retry_rows == {}
+    else:
+        # The retry's own 1-task accounting re-failed (not an array accounting gap).
+        (retry,) = retry_rows.values()
+        assert retry["job_id"] == f"{master['job_id']}_retry_1"
+        assert (retry["status"], retry["error_code"]) == ("permanently_failed", task_error_code)
     for succeeded in candidates[:2]:
         decision = _decision(repository, succeeded)
         # Its own task succeeded: the row's failure is not its failure, and its state_save_qc
@@ -620,16 +627,20 @@ def test_partially_failed_array_row_blocks_only_the_member_whose_task_failed(
     assert failed.evidence["retry_policy"]["automatic_retry_allowed"] is False
 
 
+_PARTIAL_AGGREGATION_EVENT = ("status_change", "running", "partially_failed")
+_PERMANENT_FROM_PARTIAL_EVENT = ("permanently_failed", "partially_failed", "permanently_failed")
+
+
 def _seed_partial_row_without_task_outcomes(
-    tmp_path: Path, *, members: list[dict[str, Any]] | None
+    tmp_path: Path,
+    *,
+    members: list[dict[str, Any]] | None,
+    events: Sequence[tuple[str, str, str]] = (_PARTIAL_AGGREGATION_EVENT, _PERMANENT_FROM_PARTIAL_EVENT),
 ) -> tuple[FileOrchestrationJournalRepository, list[Any], str]:
     repository, candidates, run_id = _seed_historical_cohort(tmp_path, members=members)
     job_id = f"job_{run_id}_state_save_qc"
     # The row ended partially, but its aggregation event carries no per-task outcomes.
-    for event_type, status_from, status_to in (
-        ("status_change", "running", "partially_failed"),
-        ("permanently_failed", "partially_failed", "permanently_failed"),
-    ):
+    for event_type, status_from, status_to in events:
         repository.insert_pipeline_event(
             entity_type="pipeline_job",
             entity_id=job_id,
@@ -641,11 +652,24 @@ def _seed_partial_row_without_task_outcomes(
     return repository, candidates, job_id
 
 
-def test_partial_row_without_per_task_outcomes_is_attributed_to_no_member(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "events",
+    [
+        pytest.param((_PARTIAL_AGGREGATION_EVENT, _PERMANENT_FROM_PARTIAL_EVENT), id="aggregation_and_permanent"),
+        # The aggregation status_change insert failed after the status landed: the only
+        # partial evidence is the adjudicator's permanent mark from ``partially_failed``.
+        pytest.param((_PERMANENT_FROM_PARTIAL_EVENT,), id="permanent_mark_only"),
+    ],
+)
+def test_partial_row_without_per_task_outcomes_is_attributed_to_no_member(
+    tmp_path: Path, events: tuple[tuple[str, str, str], ...]
+) -> None:
     members = _members_with_blank_model([_candidate(index) for index in range(3)])
     members[-1]["model_id"] = "model_2"
-    repository, candidates, job_id = _seed_partial_row_without_task_outcomes(tmp_path / "member", members=members)
-    unwitnessed, _, _ = _seed_partial_row_without_task_outcomes(tmp_path / "unwitnessed", members=None)
+    repository, candidates, job_id = _seed_partial_row_without_task_outcomes(
+        tmp_path / "member", members=members, events=events
+    )
+    unwitnessed, _, _ = _seed_partial_row_without_task_outcomes(tmp_path / "unwitnessed", members=None, events=events)
 
     for candidate in candidates:
         # No member receives the failure: the decision is the one the same row gets

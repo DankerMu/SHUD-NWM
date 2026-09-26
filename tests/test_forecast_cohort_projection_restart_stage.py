@@ -80,6 +80,8 @@ def test_failed_and_missing_forecast_tasks_defer_as_incomplete_accounting_not_id
     assert master["reconciliation_reason_class"] == "coverage_incomplete"
     assert master["error_code"] == "SLURM_TASK_ACCOUNTING_INCOMPLETE"
     assert master["status"] == "reconcile_unverified"
+    # A deferred terminal persists no per-task projection.
+    assert master["candidate_projections"] == []
     forecast = [stage for stage in result.stages if stage.stage == "forecast"]
     assert [(stage.status, stage.error_code) for stage in forecast] == [
         ("reconcile_unverified", "SLURM_TASK_ACCOUNTING_INCOMPLETE")

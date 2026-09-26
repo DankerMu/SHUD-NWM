@@ -26,7 +26,7 @@
 
 ## 2. #2603 — recorded-membership attribution (`file_orchestration_journal.py`, `chain_repository_state.py`, `chain_source_cycle.py`, `scheduler_state_rows.py`, `scheduler_state_identity_filter.py`, downstream cohort row writer)
 
-- [x] 2.1 B1: in file-journal `candidate_state`, classify rows before `_compact_cycle_scope_job` using `_complete_cohort_members_by_run`, the same rule as `has_active_pipeline`. Add the class as a projection key, drop `non_member` rows, and have downstream consumers read the annotation without recomputing it.
+- [x] 2.1 B1: in file-journal `candidate_state`, classify each row before `_compact_cycle_scope_job` by its own recorded `cohort_members`, with the completeness predicate of `_complete_cohort_members_by_run` (the `has_active_pipeline` rule). Add the class as a projection key, drop `non_member` rows, and have downstream consumers read the annotation without recomputing it.
 - [x] 2.2 B2: `member` rows count on the failure side, the identity filter, the attempt floor and decision authority. B2b: a permanently failed `incomplete` row gives `blocked/cohort_membership_unprovable`.
 - [x] 2.3 B3: `member` and `unwitnessed` rows keep crediting success; record the unwitnessed asymmetry as a deviation.
 - [x] 2.4a Row-level classification for rows carrying their own `cohort_members`; rows without their own list are `unwitnessed` (no run-level union borrowing); `has_active_pipeline` unchanged.

@@ -47,13 +47,13 @@ Must add / change:
 
 - **A4 span counters.** The stage span gets the real `basin_count` (`basin_count_at_entry`) on every exit path by being set at stage entry. An exception that still propagates is re-raised unchanged.
 
-- **B1 three-valued membership.** This reuses the existing #2543 rule `_complete_cohort_members_by_run`, the one rule behind `has_active_pipeline`; there is no digest recompute.
-  - Where: in file-journal `candidate_state`, **before** `_compact_cycle_scope_job` (which strips `cohort_members`). Each model-less `cycle_<src>_<stamp>_*` row is classified from the cycle's rows.
+- **B1 three-valued membership.** This reuses the completeness predicate of the existing #2543 rule `_complete_cohort_members_by_run` (the rule behind `has_active_pipeline`), applied per row; there is no digest recompute.
+  - Where: in file-journal `candidate_state`, **before** `_compact_cycle_scope_job` (which strips `cohort_members`). Each model-less `cycle_<src>_<stamp>_*` row is classified from its own recorded list.
   - Row-level first: a row that records its own `cohort_members` (forecast rows, B4 rows) is judged against its own list, with the same completeness checks. Rows without their own list are `unwitnessed` (review round 1: borrowing the run-level union credited a pre-B4 downstream success to a member whose forecast task failed, and blamed a forcing-dropped member for a pre-B4 downstream failure). Partial array failures narrow the failure side to the members whose own task failed (per-task outcomes recorded on the row's aggregation event, read before compaction). This is why partial forcing is correct: a dropped member is `non_member` for the narrowed forecast/state_save_qc rows. `has_active_pipeline` keeps its run-level rule unchanged (must-preserve).
-  - `member`: the applicable complete member list (the row's own, else the run's) contains the candidate's `model_id`.
-  - `non_member`: the run has complete recorded members without the candidate. The row is excluded exactly as `has_active_pipeline` excludes it.
-  - `incomplete`: the run records a truncated, mismatched, cap-sized, or blank-model member list.
-  - `unwitnessed`: no row of the run records members. This covers historical rows and the bare cycle run id.
+  - `member`: the row's own complete member list contains the candidate's `model_id`.
+  - `non_member`: the row's own complete member list does not contain the candidate. The row (and its events) is excluded from the candidate state.
+  - `incomplete`: the row records a truncated, mismatched, cap-sized, or blank-model member list.
+  - `unwitnessed`: the row records no members. This covers historical rows, pre-B4 downstream rows, and the bare cycle run id.
   - Kept rows carry the class in a new projection key (e.g. `cohort_membership`) added to `_CYCLE_SCOPE_JOB_PROJECTION_KEYS`. Downstream consumers read the annotation and never recompute it.
 
 - **B2 failure side.** `member` rows count as the candidate's own in all of these:
@@ -120,10 +120,10 @@ Required evidence (input → expected):
   - A sibling non-member cohort's failure or success → the non-member's decision is unchanged.
   - Forcing partially failed, so the forecast members are a subset → surviving members' rows are attributed and dropped members' are not.
   - An incomplete member record plus a permanent failure → `blocked/cohort_membership_unprovable`.
-  - An unwitnessed historical row (no members anywhere in the run) → decisions identical to origin/master.
+  - An unwitnessed row (it records no members of its own, including a pre-B4 downstream row of a run whose forcing/forecast rows record members) → decisions identical to origin/master.
   - Single-model cohort decisions (the existing `tests/test_state_save_submit_ambiguity.py` cases, #2584) are unchanged.
   - The DB-path decision tests are unchanged.
-- **C.** Basins with `restart_stage` `convert` and `forcing`, one failed and one missing task → the projection is persisted with `restart_stage="forecast"` and the master is not deferred as `identity_mismatch_blocked`. Red before the fix shows the deferral. All-success cohorts are unchanged.
+- **C.** Basins with `restart_stage` `convert` and `forcing`, one failed and one succeeded task → the projection is persisted with `restart_stage="forecast"` for the failed task and the master is not deferred as `identity_mismatch_blocked`; one failed and one missing task → no projection is persisted and the master is deferred as governed `accounting_unavailable`, not `identity_mismatch_blocked`. Red before the fix shows the deferral. All-success cohorts are unchanged.
 
 Non-goals:
 - #2570 groups B/C (shipped).
