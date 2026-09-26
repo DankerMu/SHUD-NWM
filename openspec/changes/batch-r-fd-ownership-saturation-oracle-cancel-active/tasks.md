@@ -63,6 +63,21 @@
 - [x] 4.2 `uv run ruff check .`
 - [x] 4.3 `openspec validate batch-r-fd-ownership-saturation-oracle-cancel-active --strict --no-interactive`
 
+## Recorded evidence (local, 2026-09-26)
+
+- **1.3 red proof.** With both owners restored to the master body: `8 failed, 3 passed`. The four cleanup tests fail for each owner with `helper fd N closed 0 times`, and the fd numbers climb, which is the leak. The two success tests and the getsource test pass. With the fix, the facade-contract file passes 17 tests.
+- **2.2 red proof.** A temporary copy of the test file adds `sleep 5` after `trap` and sets the byte/row timeout to 0.5 s. The `[byte]` and `[row]` legs fail on the reason assertion: `byte leg must fail on its bytes bound, got warnings ['sacct query failed for 17667: sacct query timed out', …]`, and the same for rows. `wall_time` passes.
+- **2.3 load run.**
+  - Load: 28 `yes > /dev/null` burners (`hw.ncpu` = 14), plus 4 whole-file worker loops. Load average peaked at about 137.
+  - Result: `leg=byte consecutive=100 fails=0` and `leg=row consecutive=100 fails=0`. The workers ran the whole file 40, 41, 41 and 41 times, all with exit code 0.
+  - No stop-rule signature appeared.
+  - Afterwards `pgrep -x yes` returned 0.
+  - After the load was removed, the whole file passes: 20 tests.
+- **3.3 red proof.** The new test fails against the old script: `assert 'PASS' == 'BLOCKED'`.
+- **4.1.** The four files pass with 162 tests, using an isolated `TMPDIR` and with the proxy variables unset. With a SOCKS `ALL_PROXY` set, one unrelated httpx adapter test hits an environment-only socksio `ImportError`.
+- **4.2 / 4.3.** `ruff` is clean. `openspec validate --strict` passes.
+- **CI selector.** Both owner modules map to the facade-contract and production tests. `scripts/m24_gateway_proof.py` maps to its own test. The full diff also selects the sacct-bounds test.
+
 ## Evidence Floor
 
 1. #1922: both owners close the fd on every post-open rejection; the error contract is unchanged; the success fd is live; red proof.
