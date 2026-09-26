@@ -51,15 +51,15 @@
 
 ## 6. #2326 m11-popup rebase and archive (implementer C)
 
-- [ ] 6.1 Rebase the four delta specs per D6, with a code-evidence table (file + symbol + current line) for each retained clause.
-- [ ] 6.2 Dry archive in a temporary copy succeeds, then run the real `openspec archive m11-popup-station-overlay-usability -y`.
-- [ ] 6.3 Run the diff-level check in D6 over the four capability specs. Record the `openspec validate --all --strict` failure counts for master and for HEAD; HEAD must not be higher.
+- [x] 6.1 Rebase the four delta specs per D6, with a code-evidence table (file + symbol + current line) for each retained clause.
+- [x] 6.2 Dry archive in a temporary copy succeeds, then run the real `openspec archive m11-popup-station-overlay-usability -y`.
+- [x] 6.3 Run the diff-level check in D6 over the four capability specs. Record the `openspec validate --all --strict` failure counts for master and for HEAD; HEAD must not be higher.
 
 ## 7. Verification (local)
 
-- [ ] 7.1 `uv run pytest -q tests/test_retention_extra_roots.py`, and `uv run ruff check .`.
-- [ ] 7.2 `openspec validate batch-p-doc-anchor-provenance-closure --strict --no-interactive`; `openspec validate --specs` counts as in 6.3.
-- [ ] 7.3 Markdown lint on the changed `docs/**` files (CI lints `docs/**/*.md`).
+- [x] 7.1 `uv run pytest -q tests/test_retention_extra_roots.py`, and `uv run ruff check .`.
+- [x] 7.2 `openspec validate batch-p-doc-anchor-provenance-closure --strict --no-interactive`; `openspec validate --specs` counts as in 6.3.
+- [x] 7.3 Markdown lint on the changed `docs/**` files (CI lints `docs/**/*.md`).
 
 ## Evidence Floor
 

@@ -1,60 +1,35 @@
 ## MODIFIED Requirements
 
-### Requirement: 点击河段要素弹出 q_down 预报曲线 + 重现期三态
+### Requirement: 点击河段要素弹出 q_down 预报曲线
 
-点击地图河段要素 SHALL 打开 M11 draggable curve window，按要素
-`river_segment_id` 经 `loadHydroMetRiverForecast` +
-`validateHydroMetRiverForecastForChart` 拉取并校验 `q_down`
-forecast-series，校验通过则渲染 q_down 曲线（echarts `ForecastChart`）
-与洪水重现期三态（`ReturnPeriodSection` 或等价状态）。身份/契约校验失败
-（`ok:false`）时 window MUST 显示原因空态，MUST NOT 绘制曲线（不画假曲线红线）。
-该河段曲线容器 MUST use the same draggable curve-window contract as other M11
-curve windows, rather than a MapLibre geographic `Popup` container.
+点击地图河段要素 SHALL 打开 M11 可拖拽河段曲线窗，按要素 `river_segment_id` 经 `loadHydroMetRiverForecast` + `validateHydroMetRiverForecastForChart` 拉取并校验 `q_down` forecast-series，校验通过则渲染 q_down 曲线（echarts `ForecastChart`）。身份/契约校验失败（`ok:false`）时 popup MUST 显示原因空态，MUST NOT 绘制曲线（不画假曲线红线）。
+该河段曲线容器 MUST use the same draggable curve-window contract as other M11 curve windows, rather than a MapLibre geographic `Popup` container; "popup" below names that curve window.
 
 #### Scenario: 河段曲线正常渲染
-
-- **WHEN** the user clicks a river segment feature and its forecast-series
-  passes strict identity and chart validation
-- **THEN** the river curve window renders the q_down chart and return-period
-  state
-- **AND** the window is draggable by its header or drag handle.
+- **WHEN** 点击河段要素且其 forecast-series 通过严格身份与 chart 校验
+- **THEN** popup 渲染 q_down 曲线
+- **AND** the window is draggable by its header or drag handle
 
 #### Scenario: 身份不符不画曲线
-
-- **WHEN** river forecast-series lacks any required identity field or fails
-  horizon/point-budget validation (`ok:false`)
-- **THEN** the curve window displays the unavailable reason
-- **AND** it MUST NOT draw any q_down curve.
+- **WHEN** 河段 forecast-series 缺任一身份字段或 horizon/point 预算不符（`ok:false`）
+- **THEN** popup 显示不可用原因空态，不绘制任何 q_down 曲线
 
 ### Requirement: 点击代站弹出当前 station-series forcing 曲线
 
-点击代站点要素 SHALL 打开 M11 draggable curve window，按 `station_id` 经
-`loadHydroMetStationSeries` + `validateHydroMetStationSeriesIdentity` 拉取并校验，
-渲染当前 station-series route 可返回的 echarts 曲线（PRCP/TEMP/RH/wind/Rn）。
-`Press` 不得被当作当前 route 的可用曲线；若 UI 暴露该变量，MUST 显示
-unavailable/omitted 状态。身份不符时 MUST 显示空态而非伪造曲线。
-当前 disk-backed route 的阻断身份字段为 `station_id`、`model_id`、
-`source_id` 和 `cycle_time`；`forcing_version_id` 是 deprecated/non-blocking
-provenance，不得单独作为 popup 身份 mismatch gate。该代站曲线容器 MUST use
-the same draggable curve-window contract as other M11 curve windows, rather than
-a MapLibre geographic `Popup` container.
+点击代站点要素 SHALL 打开 M11 可拖拽代站曲线窗，按 `station_id` 经 `loadHydroMetStationSeries` + `validateHydroMetStationSeriesIdentity` 拉取并校验，渲染当前 station-series route 可返回的 echarts 曲线（PRCP/TEMP/RH/wind/Rn）。
+`Press` 不得被当作当前 route 的可用曲线；若 UI 暴露该变量，MUST 显示 unavailable/omitted 状态。身份不符时 MUST 显示空态而非伪造曲线。
+当前 disk-backed route 的阻断身份字段为 `station_id`、`model_id`、`source_id` 和 `cycle_time`；`forcing_version_id` 是 deprecated/non-blocking provenance，不得单独作为 popup 身份 mismatch gate。
+该代站曲线容器 MUST use the same draggable curve-window contract as other M11 curve windows, rather than a MapLibre geographic `Popup` container; "popup" below names that curve window.
 
 #### Scenario: 代站当前变量曲线渲染
-
-- **WHEN** the user clicks a station point and its station-series passes identity
-  validation
-- **THEN** the station curve window renders chartable PRCP, TEMP, RH, wind, and
-  Rn variables
-- **AND** the window does not render `Press` as available unless a future route
-  explicitly provides that variable
-- **AND** the window is draggable by its header or drag handle.
+- **WHEN** 点击代站点且其 station-series 通过身份校验
+- **THEN** popup 渲染 `PRCP`、`TEMP`、`RH`、`wind`、`Rn` 的 echarts 曲线
+- **AND** popup 不为 `Press` 绘制可用曲线，除非未来 route 明确重新提供该变量
+- **AND** the window is draggable by its header or drag handle
 
 #### Scenario: 代站身份不符空态
-
-- **WHEN** station-series `station_id`, `model_id`, `source_id`, or `cycle_time`
-  does not match the selected product identity
-- **THEN** the curve window displays the identity mismatch state
-- **AND** it MUST NOT draw a forcing curve.
+- **WHEN** station-series 的 station_id/model_id/source_id/cycle_time 与选中产品身份不一致
+- **THEN** popup 显示身份不符空态，不绘制曲线
 
 ## ADDED Requirements
 
@@ -142,15 +117,6 @@ compare river flow and forcing-station variables on the same map.
 - **AND** the user focuses, clicks, or drags one window
 - **THEN** that window MUST render above the other window
 - **AND** the inactive window MUST remain visible and usable.
-
-#### Scenario: Selecting a new feature resets only that window placement
-
-- **WHEN** the user has dragged a river or station curve window
-- **AND** then selects a different feature of the same type
-- **THEN** that window's position MUST reset to its default placement for the new
-  feature identity
-- **AND** the other visible curve window MUST keep its selected feature and
-  position.
 
 #### Scenario: Chart interactions do not start window drag
 
