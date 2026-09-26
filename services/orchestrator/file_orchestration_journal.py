@@ -166,6 +166,8 @@ from services.orchestrator.scheduler_state_manual_retry import (
 )
 from services.orchestrator.scheduler_state_types import (
     ACTIVE_HYDRO_STATUSES,
+    COHORT_MEMBER_ATTRIBUTED_STAGES,
+    DOWNSTREAM_STAGE_ALIASES,
     HYDRO_RUN_CODE_CLEARING_STATUSES,
 )
 from services.slurm_gateway.models import SubmitJobRequest
@@ -1863,6 +1865,12 @@ class FileOrchestrationJournalRepository:
         foreign_model_cycle_scope_job_ids |= {
             job_id for job_id, membership in cohort_membership.items() if membership == COHORT_MEMBERSHIP_NON_MEMBER
         }
+        # A member array row that ended partially is the candidate's failure only
+        # when its OWN task failed; read from the aggregation event's per-task
+        # outcomes before event compaction strips them (#2603 B2).
+        cohort_task_outcomes = _cohort_member_task_outcomes(
+            rows.pipeline_jobs.values(), rows.pipeline_events, cohort_membership, model_id=model_id
+        )
         # The operator exit of a member (or unprovable) cohort row -- its manual
         # retry marker -- must stay readable: completion-stage event compaction
         # below would otherwise drop the marker's ``details`` (#2603 B2/B2b).
@@ -1882,9 +1890,11 @@ class FileOrchestrationJournalRepository:
             pipeline_jobs=[
                 _public_scheduler_row(
                     _compact_cycle_scope_job(
-                        {**job, "cohort_membership": cohort_membership[str(job.get("job_id") or "")]}
-                        if str(job.get("job_id") or "") in cohort_membership
-                        else job
+                        _cohort_member_row_view(
+                            job,
+                            cohort_membership.get(str(job.get("job_id") or "")),
+                            cohort_task_outcomes.get(str(job.get("job_id") or "")),
+                        )
                     )
                     if _is_model_less_cycle_scope_job(
                         job, source_id=canonical_source_id, cycle_time=cycle_time
@@ -14180,6 +14190,10 @@ _CYCLE_SCOPE_JOB_PROJECTION_KEYS = (
     # #2603: the recorded-membership class, computed before compaction strips
     # ``cohort_members``; downstream consumers read it, never recompute it.
     "cohort_membership",
+    # #2603 B2: on a ``member`` row that ended partially, the candidate's own
+    # task outcome, and (when it succeeded) the row's durable status.
+    "cohort_task_outcome",
+    "cohort_row_status",
 )
 
 
@@ -14295,9 +14309,20 @@ def _complete_cohort_members_by_run(
     is the union of the recorded ``model_id`` values.
     """
 
-    members_by_run, incomplete_runs = _recorded_cohort_members_by_run(
-        jobs, source_id=source_id, cycle_time=cycle_time
-    )
+    cycle_run_id = f"cycle_{source_id.lower()}_{format_cycle_time(cycle_time)}"
+    members_by_run: dict[str, set[str]] = {}
+    incomplete_runs: set[str] = set()
+    for job in jobs:
+        run_id = str(job.get("run_id") or "")
+        if job.get("model_id") not in (None, "") or not run_id.startswith(f"{cycle_run_id}_"):
+            continue
+        if job.get("cohort_members") in (None, "", [], ()):
+            continue
+        member_model_ids = _recorded_cohort_member_model_ids(job)
+        if member_model_ids is None:
+            incomplete_runs.add(run_id)
+            continue
+        members_by_run.setdefault(run_id, set()).update(member_model_ids)
     return {
         run_id: frozenset(member_model_ids)
         for run_id, member_model_ids in members_by_run.items()
@@ -14326,28 +14351,6 @@ def _recorded_cohort_member_model_ids(job: Mapping[str, Any]) -> frozenset[str] 
     return member_model_ids
 
 
-def _recorded_cohort_members_by_run(
-    jobs: Iterable[Mapping[str, Any]], *, source_id: str, cycle_time: datetime
-) -> tuple[dict[str, set[str]], set[str]]:
-    """Per suffixed cohort run id: the union of recorded member ids, and the runs with any incomplete list."""
-
-    cycle_run_id = f"cycle_{source_id.lower()}_{format_cycle_time(cycle_time)}"
-    members_by_run: dict[str, set[str]] = {}
-    incomplete_runs: set[str] = set()
-    for job in jobs:
-        run_id = str(job.get("run_id") or "")
-        if job.get("model_id") not in (None, "") or not run_id.startswith(f"{cycle_run_id}_"):
-            continue
-        if job.get("cohort_members") in (None, "", [], ()):
-            continue
-        member_model_ids = _recorded_cohort_member_model_ids(job)
-        if member_model_ids is None:
-            incomplete_runs.add(run_id)
-            continue
-        members_by_run.setdefault(run_id, set()).update(member_model_ids)
-    return members_by_run, incomplete_runs
-
-
 #: Values of the ``cohort_membership`` annotation a model-less cycle-scope row
 #: carries on the candidate-state surface (#2603).
 COHORT_MEMBERSHIP_MEMBER = "member"
@@ -14361,47 +14364,155 @@ def _cycle_scope_cohort_membership(
 ) -> dict[str, str]:
     """Classify each model-less cycle-scope row for one candidate (#2603), keyed by ``job_id``.
 
-    Row-level first: a row recording its own ``cohort_members`` (forcing, forecast,
-    and downstream master rows since #2603 B4) is judged by its own list, so a
-    narrowed forecast/state_save_qc row of a partially failed forcing cohort drops
-    the members forcing lost.  Any other row of a suffixed cohort run id is judged
-    by the run's union, with the same completeness rule as
-    :func:`_complete_cohort_members_by_run` (``has_active_pipeline``).  Rows of a
-    run that records no membership at all -- including the bare
-    ``cycle_<source>_<stamp>`` run id -- are ``unwitnessed``.
+    A row is judged ONLY by the ``cohort_members`` it records itself (forcing,
+    forecast, and downstream master rows since #2603 B4), with the completeness
+    predicate of :func:`_complete_cohort_members_by_run` (``has_active_pipeline``).
+    So a narrowed forecast/state_save_qc row of a partially failed forcing cohort
+    drops the members forcing lost.  A row recording no list -- including every
+    row of the bare ``cycle_<source>_<stamp>`` run id and a pre-B4 downstream row
+    of a run whose forcing/forecast rows do record members -- is ``unwitnessed``:
+    another row's list (or the run's union) does not say which members THIS row
+    ran for.
     """
 
-    job_list = [job for job in jobs if _is_model_less_cycle_scope_job(job, source_id=source_id, cycle_time=cycle_time)]
-    members_by_run, incomplete_runs = _recorded_cohort_members_by_run(
-        job_list, source_id=source_id, cycle_time=cycle_time
-    )
     cycle_run_id = f"cycle_{source_id.lower()}_{format_cycle_time(cycle_time)}"
     classes: dict[str, str] = {}
-    for job in job_list:
+    for job in jobs:
+        if not _is_model_less_cycle_scope_job(job, source_id=source_id, cycle_time=cycle_time):
+            continue
         job_id = str(job.get("job_id") or "")
-        run_id = str(job.get("run_id") or "")
         if not job_id:
             continue
-        if not run_id.startswith(f"{cycle_run_id}_"):
+        if not str(job.get("run_id") or "").startswith(f"{cycle_run_id}_") or job.get("cohort_members") in (
+            None,
+            "",
+            [],
+            (),
+        ):
             classes[job_id] = COHORT_MEMBERSHIP_UNWITNESSED
             continue
-        if job.get("cohort_members") not in (None, "", [], ()):
-            own_members = _recorded_cohort_member_model_ids(job)
-            if own_members is None:
-                classes[job_id] = COHORT_MEMBERSHIP_INCOMPLETE
-            else:
-                classes[job_id] = (
-                    COHORT_MEMBERSHIP_MEMBER if model_id in own_members else COHORT_MEMBERSHIP_NON_MEMBER
-                )
-        elif run_id in incomplete_runs:
+        own_members = _recorded_cohort_member_model_ids(job)
+        if own_members is None:
             classes[job_id] = COHORT_MEMBERSHIP_INCOMPLETE
-        elif run_id in members_by_run:
-            classes[job_id] = (
-                COHORT_MEMBERSHIP_MEMBER if model_id in members_by_run[run_id] else COHORT_MEMBERSHIP_NON_MEMBER
-            )
         else:
-            classes[job_id] = COHORT_MEMBERSHIP_UNWITNESSED
+            classes[job_id] = COHORT_MEMBERSHIP_MEMBER if model_id in own_members else COHORT_MEMBERSHIP_NON_MEMBER
     return classes
+
+
+#: Values of the ``cohort_task_outcome`` projection key (#2603 B2, partial rows):
+#: the candidate's OWN task outcome in a ``member`` array row that ended partially.
+COHORT_TASK_OUTCOME_SUCCEEDED = "succeeded"
+COHORT_TASK_OUTCOME_FAILED = "failed"
+COHORT_TASK_OUTCOME_UNKNOWN = "unknown"
+
+
+def _cohort_row_ended_partially(job: Mapping[str, Any], row_events: Sequence[Mapping[str, Any]]) -> bool:
+    """The row ended with only some tasks failed: ``partially_failed``, or marked permanent from it."""
+
+    status = str(job.get("status") or "")
+    if status == "partially_failed":
+        return True
+    if status != "permanently_failed":
+        return False
+    for event in row_events:
+        if event.get("status_to") == "partially_failed":
+            return True
+        # The retry adjudicator's permanent mark of THIS row (not the ``retry``
+        # event a replacement row carries with its source row's status).
+        if event.get("event_type") == "permanently_failed" and event.get("status_from") == "partially_failed":
+            return True
+    return False
+
+
+def _cohort_member_task_outcome(
+    job: Mapping[str, Any], row_events: Sequence[Mapping[str, Any]], *, model_id: str
+) -> str:
+    """The candidate's own task outcome in a partially ended ``member`` row.
+
+    Read from the row's latest array aggregation event (``status_change`` to
+    ``partially_failed``, written by
+    ``chain_array_accounting.record_cycle_stage_status_override`` with per-task
+    ``task_results`` naming each task's ``model_id``).  A member absent from a
+    well-formed list is unverified, i.e. ``failed``.  ``unknown`` when no such
+    event exists, or its tasks lack/duplicate a model id or name a model outside
+    the row's own recorded members.
+    """
+
+    members = _recorded_cohort_member_model_ids(job) or frozenset()
+    for event in reversed(row_events):
+        details = event.get("details")
+        if event.get("status_to") != "partially_failed" or not isinstance(details, Mapping):
+            continue
+        tasks = details.get("task_results")
+        if not isinstance(tasks, Sequence) or isinstance(tasks, str | bytes) or not tasks:
+            continue
+        statuses: dict[str, str] = {}
+        for task in tasks:
+            task_model_id = str(task.get("model_id") or "") if isinstance(task, Mapping) else ""
+            if not task_model_id or task_model_id in statuses or task_model_id not in members:
+                return COHORT_TASK_OUTCOME_UNKNOWN
+            statuses[task_model_id] = str(task.get("status") or "")
+        if statuses.get(model_id) == "succeeded":
+            return COHORT_TASK_OUTCOME_SUCCEEDED
+        return COHORT_TASK_OUTCOME_FAILED
+    return COHORT_TASK_OUTCOME_UNKNOWN
+
+
+def _cohort_member_task_outcomes(
+    jobs: Iterable[Mapping[str, Any]],
+    events: Iterable[Mapping[str, Any]],
+    cohort_membership: Mapping[str, str],
+    *,
+    model_id: str,
+) -> dict[str, str]:
+    """Per ``member`` row that ended partially: the candidate's own task outcome (#2603 B2).
+
+    Computed before event compaction strips ``task_results``.  Rows of
+    ``forecast`` are skipped: a forecast master is never attributed by membership
+    (its per-member truth is the task projection rows).
+    """
+
+    member_jobs = {
+        str(job.get("job_id") or ""): job
+        for job in jobs
+        if cohort_membership.get(str(job.get("job_id") or "")) == COHORT_MEMBERSHIP_MEMBER
+        and DOWNSTREAM_STAGE_ALIASES.get(str(job.get("stage") or job.get("job_type") or ""))
+        in COHORT_MEMBER_ATTRIBUTED_STAGES
+    }
+    if not member_jobs:
+        return {}
+    events_by_job: dict[str, list[Mapping[str, Any]]] = {}
+    for event in events:
+        entity_id = str(event.get("entity_id") or "")
+        if entity_id in member_jobs and str(event.get("entity_type") or "pipeline_job") == "pipeline_job":
+            events_by_job.setdefault(entity_id, []).append(event)
+    outcomes: dict[str, str] = {}
+    for job_id, job in member_jobs.items():
+        row_events = events_by_job.get(job_id, [])
+        if _cohort_row_ended_partially(job, row_events):
+            outcomes[job_id] = _cohort_member_task_outcome(job, row_events, model_id=model_id)
+    return outcomes
+
+
+def _cohort_member_row_view(job: Mapping[str, Any], membership: str | None, task_outcome: str | None) -> dict[str, Any]:
+    """The candidate's view of a model-less cohort row, before compaction.
+
+    A member whose own task succeeded in a partially ended row sees the row as its
+    success (``status`` ``succeeded``; the durable status stays readable as
+    ``cohort_row_status``), exactly as a per-model row would read.
+    """
+
+    view = dict(job)
+    if membership is not None:
+        view["cohort_membership"] = membership
+    if task_outcome is not None:
+        view["cohort_task_outcome"] = task_outcome
+        if task_outcome == COHORT_TASK_OUTCOME_SUCCEEDED:
+            view["cohort_row_status"] = job.get("status")
+            view["status"] = "succeeded"
+            view["error_code"] = None
+            view["error_message"] = None
+    return view
 
 
 def _job_matches_candidate(job: Mapping[str, Any], *, source_id: str, cycle_time: datetime, model_id: str) -> bool:

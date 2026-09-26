@@ -724,20 +724,31 @@ state_evidence.retry_policy = {automatic_retry_allowed: false, manual_retry_requ
 ## 多成员 cohort 的失败归属与 `cohort_membership_unprovable`（#2603）
 
 多成员 execution cohort（run id `cycle_<src>_<stamp>_<stage>_cohort_<12hex>`）的下游 master 行不带 `model_id`。file
-journal 读候选状态时，先按该 cycle 已记录的 `cohort_members` 给每条这种行打一个 `cohort_membership` 标注，再做压缩；
-标注出现在候选状态 `pipeline_jobs[]` 上，下游判定只读标注、不重算：
+journal 读候选状态时，先按**每条行自己**记录的 `cohort_members` 给这种行打一个 `cohort_membership` 标注，再做压缩；
+不借用同 run 其他行的列表或并集。标注出现在候选状态 `pipeline_jobs[]` 上，下游判定只读标注、不重算：
 
 | `cohort_membership` | 判据 | 对该候选的效果 |
 |---|---|---|
-| `member` | 行自己的 `cohort_members`（forcing / forecast 行，及 #2603 起的 parse / state_save_qc / publish 行）含本模型；行自己没记时按同 run id 的完整成员并集 | forcing / parse / state_save_qc / publish 行当作候选自己的行：失败、permanence、`retry_count`、attempt floor 与成功都算数。forecast master 只打标注、不归属——它的逐成员真相在按模型投影的 task 行上（#2559），再归属一次会改变单模型判定 |
-| `non_member` | 完整成员记录不含本模型（兄弟 cohort，#2543） | 行和它的事件一起从候选状态里去掉，成功与失败都不影响 |
-| `incomplete` | 成员记录被截断、长度不符、到上限或有空 `model_id` | 该行 `permanently_failed` 时判 blocked `cohort_membership_unprovable` |
-| `unwitnessed` | 该 run 没有任何行记录成员（历史行、裸 `cycle_<src>_<stamp>`） | 语义与 #2603 之前完全一致（成功照旧计入，失败照旧不归属） |
+| `member` | 行自己的 `cohort_members`（forcing / forecast 行，及 #2603 起的 parse / state_save_qc / publish 行）含本模型 | forcing / parse / state_save_qc / publish 行当作候选自己的行：失败、permanence、`retry_count`、attempt floor 与成功都算数。forecast master 只打标注、不归属——它的逐成员真相在按模型投影的 task 行上（#2559），再归属一次会改变单模型判定 |
+| `non_member` | 行自己的完整成员记录不含本模型（兄弟 cohort，#2543；partial forcing 后收窄的下游行） | 行和它的事件一起从候选状态里去掉，成功与失败都不影响 |
+| `incomplete` | 行自己的成员记录被截断、长度不符、到上限或有空 `model_id` | 该行 `permanently_failed` 时判 blocked `cohort_membership_unprovable` |
+| `unwitnessed` | 行自己没记成员（历史行、裸 `cycle_<src>_<stamp>`、#2603 之前写下的下游行——即使同 run 的 forcing / forecast 行记了成员） | 语义与 #2603 之前完全一致（成功照旧计入，失败照旧不归属） |
+
+**部分失败的 `member` array 行**（`partially_failed`，或由它标成的 `permanently_failed`）只把失败记给**自己那个 task**
+failed / cancelled / unverified（聚合事件里缺席）的成员。逐 task 结果取自该行聚合 `status_change` 事件（`status_to=partially_failed`）的
+`details.task_results[].model_id/status`，在事件压缩前读取；结果写在同一行的 `cohort_task_outcome`：
+
+| `cohort_task_outcome` | 对该候选的效果 |
+|---|---|
+| `failed` | 行原样（失败侧照常归属） |
+| `succeeded` | 该候选看到的行 `status=succeeded`、`error_code=null`，行的真实状态在 `cohort_row_status`；成功记给它，下一趟不重投 |
+| `unknown` | 聚合事件缺失或 task 列表缺 / 重复 `model_id`、或含该行成员以外的模型：该行不归属给任何成员（等同 `unwitnessed`） |
 
 - **多成员 cohort 的 state_save_qc 重试耗尽**：cohort 行 `permanently_failed` 后，每个成员候选判
   `decision: permanent_failure`、blocked **`permanent_failure_guard`**，`failure.stage=state_save_qc`、
   `retry_policy.automatic_retry_allowed=false`、`attempt` 等于 cohort 行的 `retry_count`——与单模型 cohort 同一口径。只重跑
-  部分成员的 `…_state_save_qc_cohort_<d'>` restart cohort 由它自己记录的成员归属，成功只记给这些成员。
+  部分成员的 `…_state_save_qc_cohort_<d'>` restart cohort 由它自己记录的成员归属，成功只记给这些成员。部分失败行
+  （例如 3 个 task 中 2 成 1 败）只阻塞 task 失败的成员，task 成功的成员记为成功（见上方 `cohort_task_outcome` 表）。
 - **`cohort_membership_unprovable`**（blocked，`decision: blocked_cohort_membership_unprovable`，在 `list-operator-actions` 的待办集合里）：可见的 `permanently_failed` cohort 行成员记录不完整，无法证明它属于谁，按
   fail-closed 阻塞，不自动重试。候选自己在该阶段或之后已有终态成功（带本模型 / 本 run 的行，或 `member` 行）时不受它
   影响。出口同 `permanent_failure_guard`：把 manual-retry marker 打在该 cohort 的 run id 上

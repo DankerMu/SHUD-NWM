@@ -84,8 +84,10 @@ STAGE_RETRY_ATTEMPT_FLOOR_SOURCE_FIELDS = (
     "retry_count",
     "repair_status",
     "active_blocker",
-    # #2603: a member cohort row's floor must re-prove the same membership.
+    # #2603: a member cohort row's floor must re-prove the same membership
+    # (including a partial row's own-task narrowing, ``cohort_task_outcome``).
     "cohort_membership",
+    "cohort_task_outcome",
 )
 #: #2603 B2: derived ``_legacy_identity_values`` key marking a model-less cohort
 #: row the file journal proved a member of the candidate's cohort

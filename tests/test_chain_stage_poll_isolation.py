@@ -19,12 +19,14 @@ runtime is a double, and the repository faults are injected by a delegating prox
 from __future__ import annotations
 
 import time
+from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from services.orchestrator.chain import OrchestratorError
+from services.orchestrator.chain import CycleOrchestrationContext, OrchestratorError
 from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
 from services.orchestrator.scheduler_candidate_quality import RECONCILIATION_PENDING_STATUSES
 from services.orchestrator.scheduler_timing import SchedulerPassTiming, set_current_scheduler_pass_timing
@@ -367,3 +369,123 @@ def test_an_unexpected_stage_exception_still_propagates_with_the_real_span_basin
     spans = {record["stage_name"]: record for record in timing.finalize_evidence(status="failed")["stages"]}
     assert spans["convert"]["basin_count"] == 2
     assert spans["forcing"]["basin_count"] == 2
+
+
+class _RuntimeTransitionFault:
+    """Delegates to a real journal; the poll's ``running`` transition of one job hits a governed fault.
+
+    ``ACCEPTED_SUBMIT_RUNTIME_TRANSITION_CONFLICT`` is the journal's own CAS loss (the
+    transition returns uncommitted); ``..._UNAVAILABLE`` is raised as the governed contract
+    fault it is.
+    """
+
+    def __init__(self, inner: FileOrchestrationJournalRepository, *, job_id: str, error_code: str) -> None:
+        self._inner = inner
+        self._job_id = job_id
+        self._error_code = error_code
+        self.faults = 0
+
+    def __getattr__(self, name: str) -> Any:
+        attribute = getattr(self._inner, name)
+        if name != "transition_pipeline_job_runtime_status":
+            return attribute
+
+        def _transition(pipeline_job_id: str, status: str, *args: Any, **kwargs: Any) -> Any:
+            if pipeline_job_id == self._job_id and status == "running":
+                self.faults += 1
+                if self._error_code == "ACCEPTED_SUBMIT_RUNTIME_TRANSITION_CONFLICT":
+                    return SimpleNamespace(committed=False, row=None)
+                raise OrchestratorError(self._error_code, "forecast cohort runtime transition API is unavailable")
+            return attribute(pipeline_job_id, status, *args, **kwargs)
+
+        return _transition
+
+
+@pytest.mark.parametrize(
+    "error_code", ["ACCEPTED_SUBMIT_RUNTIME_TRANSITION_CONFLICT", "ACCEPTED_SUBMIT_RUNTIME_TRANSITION_UNAVAILABLE"]
+)
+def test_governed_runtime_transition_faults_still_propagate_out_of_the_poll(tmp_path: Path, error_code: str) -> None:
+    journal = FileOrchestrationJournalRepository(tmp_path / "journal")
+    repository = _RuntimeTransitionFault(journal, job_id=_FORECAST_JOB, error_code=error_code)
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    with pytest.raises(OrchestratorError) as raised:
+        orchestrator.orchestrate_cycle("gfs", _CYCLE, _convert_restart_basins())
+
+    # Not absorbed into ``reconcile_unverified`` / ``STAGE_RUNTIME_STATUS_PERSIST_FAILED``.
+    assert raised.value.error_code == error_code
+    assert repository.faults == 1
+    assert [payload["stage"] for payload in client.submissions] == ["convert", "forcing", "forecast"]
+    row = _rows(journal)[_FORECAST_JOB]
+    assert row["status"] == "pending"
+    assert row["error_code"] is None
+
+
+def _bound_pending_convert_row(tmp_path: Path, client: FakeCycleSlurmClient) -> tuple[Any, _FaultyJournal]:
+    """Pass 1: the convert status write fails, leaving the row ``pending`` and bound."""
+
+    journal = FileOrchestrationJournalRepository(tmp_path / "journal")
+    faulty = _FaultyJournal(journal, job_id=_CONVERT_JOB)
+    first = _orchestrator(tmp_path, faulty, client).orchestrate_cycle("gfs", _CYCLE, _convert_restart_basins())
+    assert (first.stages[-1].stage, first.stages[-1].error_code) == ("convert", "STAGE_RUNTIME_STATUS_PERSIST_FAILED")
+    row = _rows(journal)[_CONVERT_JOB]
+    assert (row["status"], row["slurm_job_id"]) == ("pending", "2001")
+    return journal, faulty
+
+
+@pytest.mark.parametrize("fault", ["status_query_outage", "status_persist_failure"])
+def test_resume_of_a_bound_job_ends_on_the_poll_marker_without_writes_or_resubmit(tmp_path: Path, fault: str) -> None:
+    client = _StatusQueryFaults(stage="convert", failures=0)
+    journal, faulty = _bound_pending_convert_row(tmp_path, client)
+    faulty.armed = False
+    submissions_before = [payload["stage"] for payload in client.submissions]
+    polls_before = client.poll_counts["2001"]
+    if fault == "status_query_outage":
+        # The resumed poll's gateway stays down until the deadline.
+        client.remaining_failures = None
+        expected_code = "SLURM_STATUS_QUERY_UNAVAILABLE"
+    else:
+        # The resumed poll's runtime status write fails again.
+        faulty.armed, faulty.tripped = True, False
+        expected_code = "STAGE_RUNTIME_STATUS_PERSIST_FAILED"
+    orchestrator = _orchestrator(tmp_path, faulty, client, job_timeout_seconds=0.2)
+    convert = next(stage for stage in orchestrator.stages if stage.stage == "convert")
+    basins = _convert_restart_basins()
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=datetime(2026, 5, 1, tzinfo=UTC),
+        cycle_id=_CYCLE_ID,
+        run_id=_RUN_ID,
+        all_basins=[dict(basin) for basin in basins],
+        active_basins=[dict(basin) for basin in basins],
+        restart_stage="convert",
+    )
+
+    # The stage loop's resume of the still-bound, non-terminal row (no pass-start
+    # reconcile settled it first).
+    result, aggregation = orchestrator._resume_cycle_stage(convert, context, _rows(journal)[_CONVERT_JOB])
+
+    assert aggregation is None
+    assert (result.stage, result.status, result.error_code, result.slurm_job_id) == (
+        "convert",
+        "reconcile_unverified",
+        expected_code,
+        "2001",
+    )
+    assert [payload["stage"] for payload in client.submissions] == submissions_before
+    assert faulty.writes_after_fault == []
+    if fault == "status_query_outage":
+        assert "2001" not in client.fetch_log_calls
+        assert client.status_query_failures >= 1
+        assert client.poll_counts["2001"] == polls_before
+        assert result.accounting["poll_isolation"]["status_query_failures"] == client.status_query_failures
+    else:
+        assert faulty.tripped is True
+        # One poll saw the terminal status; its log was published BEFORE the failed
+        # write, and nothing touched the gateway after it.
+        assert client.poll_counts["2001"] == polls_before + 1
+        assert client.fetch_log_calls.count("2001") == 1
+    row = _rows(journal)[_CONVERT_JOB]
+    # No terminal write: still ``pending``, still bound, no error recorded.
+    assert (row["status"], row["slurm_job_id"], row["error_code"]) == ("pending", "2001", None)

@@ -565,6 +565,197 @@ def test_unwitnessed_historical_cohort_row_keeps_the_origin_master_decision(tmp_
         )
 
 
+# --- 7b. a partially failed member array row blames only the members whose task failed ----
+
+
+@pytest.mark.parametrize(
+    ("task_error_code", "expected_submissions"),
+    [
+        # Non-transient: the partial row itself is marked permanently_failed.
+        ("STATE_SAVE_QC_TASK_FAILED", [["model_0", "model_1", "model_2"]]),
+        # Transient: only the failed task is retried (the ``_retry_1`` row lists it alone).
+        ("NODE_FAILURE", [["model_0", "model_1", "model_2"], ["model_2"]]),
+    ],
+)
+def test_partially_failed_array_row_blocks_only_the_member_whose_task_failed(
+    tmp_path: Path, task_error_code: str, expected_submissions: list[list[str]]
+) -> None:
+    candidates = [_candidate(index) for index in range(3)]
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = _Runtime(
+        fail_stage="state_save_qc",
+        array_results_by_stage={"state_save_qc": ["succeeded", "succeeded", "failed"]},
+        task_error_codes={("state_save_qc", 0): task_error_code},
+    )
+
+    result = _run_pass(tmp_path, repository, client, _cohort_basins(candidates), max_retries=1)
+
+    assert [(stage.stage, stage.status) for stage in result.stages] == [
+        ("forecast", "succeeded"),
+        ("state_save_qc", "partially_failed"),
+    ]
+    assert client.stage_submissions("state_save_qc") == expected_submissions
+    master = _state_save_rows(repository)[f"job_{_cohort_run_id('forecast', candidates)}_state_save_qc"]
+    permanent = task_error_code == "STATE_SAVE_QC_TASK_FAILED"
+    assert master["status"] == ("permanently_failed" if permanent else "partially_failed")
+    for succeeded in candidates[:2]:
+        decision = _decision(repository, succeeded)
+        # Its own task succeeded: the row's failure is not its failure, and its state_save_qc
+        # is credited, so the next pass submits nothing for it.
+        assert decision.action == "skip"
+        assert decision.reason in {"terminal_pipeline_success", "terminal_hydro_success"}
+        (row,) = [
+            job
+            for job in _state(repository, succeeded, retry_limit=1)["pipeline_jobs"]
+            if job["job_id"] == master["job_id"]
+        ]
+        assert (row["cohort_task_outcome"], row["status"], row["cohort_row_status"]) == (
+            "succeeded",
+            "succeeded",
+            master["status"],
+        )
+    failed = _decision(repository, candidates[2])
+    assert (failed.action, failed.reason) == ("blocked", "permanent_failure_guard")
+    assert failed.evidence["failure"]["stage"] == "state_save_qc"
+    assert failed.evidence["retry_policy"]["automatic_retry_allowed"] is False
+
+
+def _seed_partial_row_without_task_outcomes(
+    tmp_path: Path, *, members: list[dict[str, Any]] | None
+) -> tuple[FileOrchestrationJournalRepository, list[Any], str]:
+    repository, candidates, run_id = _seed_historical_cohort(tmp_path, members=members)
+    job_id = f"job_{run_id}_state_save_qc"
+    # The row ended partially, but its aggregation event carries no per-task outcomes.
+    for event_type, status_from, status_to in (
+        ("status_change", "running", "partially_failed"),
+        ("permanently_failed", "partially_failed", "permanently_failed"),
+    ):
+        repository.insert_pipeline_event(
+            entity_type="pipeline_job",
+            entity_id=job_id,
+            event_type=event_type,
+            status_from=status_from,
+            status_to=status_to,
+            details={"stage": "state_save_qc"},
+        )
+    return repository, candidates, job_id
+
+
+def test_partial_row_without_per_task_outcomes_is_attributed_to_no_member(tmp_path: Path) -> None:
+    members = _members_with_blank_model([_candidate(index) for index in range(3)])
+    members[-1]["model_id"] = "model_2"
+    repository, candidates, job_id = _seed_partial_row_without_task_outcomes(tmp_path / "member", members=members)
+    unwitnessed, _, _ = _seed_partial_row_without_task_outcomes(tmp_path / "unwitnessed", members=None)
+
+    for candidate in candidates:
+        # No member receives the failure: the decision is the one the same row gets
+        # when it records no membership at all (pre-change semantics).
+        decision = _decision(repository, candidate)
+        assert decision.reason != "permanent_failure_guard"
+        assert _face(decision) == _face(_decision(unwitnessed, candidate))
+        (row,) = [
+            job for job in _state(repository, candidate, retry_limit=1)["pipeline_jobs"] if job["job_id"] == job_id
+        ]
+        assert (row["cohort_membership"], row["cohort_task_outcome"], row["status"]) == (
+            "member",
+            "unknown",
+            "permanently_failed",
+        )
+
+
+def _pre_b4_downstream_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Write the journal as pre-#2603 code did: downstream cohort rows record no members.
+
+    ``raising=False`` keeps the helper importable against origin/master, where the
+    B4 stage set does not exist yet (the origin faces below were captured that way).
+    """
+
+    from services.orchestrator import chain_forecast_orchestrator_cycle
+
+    monkeypatch.setattr(
+        chain_forecast_orchestrator_cycle, "_MEMBER_RECORDING_DOWNSTREAM_STAGES", frozenset(), raising=False
+    )
+
+
+def _cohort_row_classes(repository: FileOrchestrationJournalRepository, candidate: Any) -> dict[str, str]:
+    return {
+        str(job["stage"]): str(job.get("cohort_membership"))
+        for job in _state(repository, candidate, retry_limit=1)["pipeline_jobs"]
+        if job.get("model_id") in (None, "")
+    }
+
+
+# Captured on origin/master (d40fd6bc3) with the fixture below: the member whose forecast
+# task failed is not credited the pre-B4 state_save_qc success of the run.
+_PRE_B4_FAILED_FORECAST_ORIGIN_FACE = (
+    "blocked",
+    "forcing_version_row_absent",
+    {"automatic_retry_allowed": False, "manual_retry_required": False, "attempt": 0, "retry_limit": 1},
+)
+
+
+def test_pre_b4_downstream_success_is_not_credited_to_a_member_whose_forecast_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _pre_b4_downstream_rows(monkeypatch)
+    candidates = [_candidate(index) for index in range(3)]
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = _Runtime(array_results_by_stage={"forecast": ["succeeded", "succeeded", "failed"]})
+
+    result = _run_pass(tmp_path, repository, client, _cohort_basins(candidates), max_retries=None)
+
+    assert [(stage.stage, stage.status) for stage in result.stages] == [
+        ("forecast", "partially_failed"),
+        ("state_save_qc", "succeeded"),
+    ]
+    assert client.stage_submissions("state_save_qc") == [["model_0", "model_1"]]
+    (state_save,) = _state_save_rows(repository).values()
+    assert (state_save["status"], state_save.get("cohort_members")) == ("succeeded", [])
+    failed_forecast = candidates[2]
+    assert _face(_decision(repository, failed_forecast)) == _PRE_B4_FAILED_FORECAST_ORIGIN_FACE
+    # The forecast master's list is not the state_save_qc row's list: that row is unwitnessed.
+    assert _cohort_row_classes(repository, failed_forecast) == {"forecast": "member", "state_save_qc": "unwitnessed"}
+
+
+# Captured on origin/master (d40fd6bc3) with the fixture below: the pre-B4 permanently
+# failed state_save_qc row is nobody's, so each surviving member resumes state_save_qc from
+# its own completed forecast.
+_PRE_B4_FAILED_STATE_SAVE_SURVIVOR_ORIGIN_FACE = (
+    "retry",
+    "resume_after_completed_stage",
+    {"automatic_retry_allowed": True, "manual_retry_required": False, "attempt": 0, "retry_limit": 1},
+)
+
+
+def test_pre_b4_downstream_failure_is_not_attributed_through_the_forcing_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _pre_b4_downstream_rows(monkeypatch)
+    candidates = [_candidate(index) for index in range(3)]
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = _Runtime(
+        fail_stage="state_save_qc",
+        array_results_by_stage={"forcing": ["succeeded", "failed", "succeeded"], "state_save_qc": ["failed"] * 2},
+    )
+    _run_pass(tmp_path, repository, client, _cohort_basins(candidates, restart_stage="forcing"), max_retries=None)
+    (state_save_id,) = _state_save_rows(repository)
+    # A later retry adjudication marks the pre-B4 row permanently failed.
+    repository.update_pipeline_job_status(state_save_id, "permanently_failed", error_code="STATE_SAVE_QC_TASK_FAILED")
+
+    for survivor in (candidates[0], candidates[2]):
+        decision = _decision(repository, survivor)
+        assert _face(decision) == _PRE_B4_FAILED_STATE_SAVE_SURVIVOR_ORIGIN_FACE
+        assert decision.evidence["restart_stage"] == "state_save_qc"
+    for candidate in candidates:
+        assert _cohort_row_classes(repository, candidate)["state_save_qc"] == "unwitnessed"
+    # The member forcing lost is judged by its own forcing row (whose own list names it),
+    # never by the pre-B4 state_save_qc row.  (Deliberately NOT the origin decision: origin
+    # attributed its forcing failure to nobody and resumed it at state_save_qc.)
+    dropped = _decision(repository, candidates[1])
+    assert (dropped.action, dropped.reason) == ("retry", "retry_failed_candidate")
+    assert dropped.evidence["failure"]["stage"] == "forcing"
+
+
 # --- 8. B4: the downstream cohort row's member record keeps the plain row contract -------
 
 

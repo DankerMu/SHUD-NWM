@@ -7,7 +7,7 @@ Inside the chain stage poll loop:
 - A Slurm gateway status query failure SHALL be retried until the existing job deadline.
 - If the deadline is reached after at least one query failure, the stage SHALL end, for every stage, with a governed non-resubmitting result `reconcile_unverified` / `SLURM_STATUS_QUERY_UNAVAILABLE`. It SHALL carry the failure count, SHALL write no terminal status, and SHALL leave the Slurm id bound.
 - A deadline reached without query failures SHALL keep the existing timeout behavior.
-- A pipeline-job runtime status write failure, other than the governed accepted-submit conflict, SHALL end that unit's stage with `reconcile_unverified` / `STAGE_RUNTIME_STATUS_PERSIST_FAILED`. The callers SHALL then perform no further repository write or gateway call for that stage and SHALL NOT schedule a resubmission. The unit's members SHALL be recorded as reconciling, and the next pass SHALL resolve the still-bound job.
+- A pipeline-job runtime status write failure, other than the governed accepted-submit runtime-transition conflict or unavailable-API fault (both keep propagating unchanged), SHALL end that unit's stage with `reconcile_unverified` / `STAGE_RUNTIME_STATUS_PERSIST_FAILED`. The callers SHALL then perform no further repository write or gateway call for that stage and SHALL NOT schedule a resubmission. The unit's members SHALL be recorded as reconciling, and the next pass SHALL resolve the still-bound job.
 - A pipeline event write failure SHALL be recorded and SHALL NOT end the chain.
 
 The stage timing span SHALL record the real `basin_count` on every exit path.
@@ -34,14 +34,14 @@ The stage timing span SHALL record the real `basin_count` on every exit path.
 
 ### Requirement: A model-less cohort row SHALL be attributed by recorded cohort membership
 
-Each model-less cycle-scope cohort row visible to a candidate SHALL be classified from the cycle's recorded `cohort_members`, using the same completeness rule as active-pipeline detection. The classification SHALL be made before the candidate state is compacted. A row that records its own `cohort_members` SHALL be judged by its own list, and only other rows by the run's union. It SHALL have four values:
+Each model-less cycle-scope cohort row visible to a candidate SHALL be classified from the `cohort_members` that row itself records, using the same completeness rule as active-pipeline detection. The classification SHALL be made before the candidate state is compacted. A row SHALL NOT borrow another row's list or the run's union: a pre-change downstream row of a run whose forcing or forecast row records members stays `unwitnessed`, because those lists do not describe which members that downstream row ran for. It SHALL have four values:
 
-- `member`: the run's complete recorded membership contains the candidate.
-- `non_member`: the run's complete recorded membership does not contain the candidate.
-- `incomplete`: the run's recorded membership is truncated or invalid.
-- `unwitnessed`: no row of the run records membership.
+- `member`: the row's complete recorded membership contains the candidate.
+- `non_member`: the row's complete recorded membership does not contain the candidate.
+- `incomplete`: the row's recorded membership is truncated or invalid.
+- `unwitnessed`: the row records no membership.
 
-`member` rows SHALL count as the candidate's own on both sides:
+`member` rows of the `forcing`, `parse`, `state_save_qc` and `publish` stages SHALL count as the candidate's own on both sides. A forecast array master is not attributed this way; its per-member truth is the per-model task projection rows. The two sides are:
 
 - the failure side: latest failure, permanence, retry count, identity filtering, attempt floor, and decision authority;
 - the success side.
@@ -50,6 +50,8 @@ Each model-less cycle-scope cohort row visible to a candidate SHALL be classifie
 
 Every model-less cohort master row of a stage downstream of forecast SHALL record its members at creation.
 
+When a `member` array row ended with only some of its tasks failed (`partially_failed`, or `permanently_failed` reached from a partial failure), the failure side SHALL attribute the row only to the members whose own task failed, was cancelled, or is unverified. A member whose own task succeeded SHALL NOT receive that row's failure. When the per-member task outcomes of such a row cannot be determined, the row SHALL NOT be attributed as a failure to any member.
+
 #### Scenario: Multi-member cohort permanent state_save_qc failure blocks members
 
 - **WHEN** a three-member cohort's `state_save_qc` exhausts its retries and is marked `permanently_failed`
@@ -57,8 +59,8 @@ Every model-less cohort master row of a stage downstream of forecast SHALL recor
 
 #### Scenario: Transient cohort failures consume the retry budget across passes
 
-- **WHEN** the same cohort's `state_save_qc` fails transiently in two or more consecutive passes
-- **THEN** each member's attempt increments with the cohort row's retry count, and automatic retry stops when the budget is exhausted
+- **WHEN** the same cohort's `state_save_qc` fails transiently, across two or more passes
+- **THEN** each member's attempt equals the cohort row's `retry_count` and is never stuck at 0, and within a pass automatic retry stops when the aligned budget is exhausted (the restart-cohort run id resetting its retry suffix across passes is pre-existing behavior shared with single-model cohorts, and is out of scope)
 
 #### Scenario: A strict-subset restart cohort is witnessed by its own rows
 
@@ -73,6 +75,13 @@ Every model-less cohort master row of a stage downstream of forecast SHALL recor
 - **THEN** the candidates it is visible to are blocked with `cohort_membership_unprovable`
 - **WHEN** a historical cohort run records no membership at all
 - **THEN** decisions are identical to the pre-change behavior
+- **WHEN** a pre-change downstream row without its own `cohort_members` succeeded in a run whose forecast row records members, and one of those members' forecast task failed
+- **THEN** that member's decision is identical to the pre-change behavior (the downstream success is not credited to it)
+
+#### Scenario: A partially failed array row blocks only the members whose task failed
+
+- **WHEN** a three-member cohort's `state_save_qc` array ends with two tasks succeeded and one failed with a non-transient error
+- **THEN** only the member whose task failed carries the failure; the two members whose tasks succeeded are not blocked by `permanent_failure_guard` and are not resubmitted
 
 ### Requirement: Failed or unverified forecast cohort task projections SHALL restart from forecast
 
@@ -80,5 +89,10 @@ The forecast cohort terminal projection SHALL set `restart_stage` to `forecast` 
 
 #### Scenario: Convert- or forcing-restarted cohort with a failed forecast task
 
-- **WHEN** a file-journal forecast cohort whose basins carry `restart_stage` `convert` or `forcing` ends with one failed and one missing array task
-- **THEN** the per-task projection is persisted with `restart_stage=forecast` and the cohort is not deferred as `identity_mismatch_blocked`
+- **WHEN** a file-journal forecast cohort whose basins carry `restart_stage` `convert` or `forcing` ends with one failed and one succeeded array task
+- **THEN** the per-task projection is persisted with `restart_stage=forecast` for the failed task and `state_save_qc` for the succeeded one, and the cohort is not deferred as `identity_mismatch_blocked`
+
+#### Scenario: Convert- or forcing-restarted cohort with a missing forecast task
+
+- **WHEN** the same cohort ends with one failed and one missing array task
+- **THEN** no projection is persisted, the master is deferred with the governed `accounting_unavailable` decision, and it is not deferred as `identity_mismatch_blocked`

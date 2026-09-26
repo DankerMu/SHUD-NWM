@@ -95,10 +95,14 @@ def cohort_member_row_is_attributed(job: Mapping[str, Any]) -> bool:
     """#2603 B2/B3: a model-less cohort row that counts as the candidate's own.
 
     Reads the file journal's ``cohort_membership == "member"`` annotation (never
-    recomputes it) and gates it to ``COHORT_MEMBER_ATTRIBUTED_STAGES``.
+    recomputes it) and gates it to ``COHORT_MEMBER_ATTRIBUTED_STAGES``.  A member
+    row that ended partially without determinable per-task outcomes
+    (``cohort_task_outcome == "unknown"``) is attributed to no member.
     """
 
     if job.get("cohort_membership") != "member" or job.get("model_id") not in (None, ""):
+        return False
+    if job.get("cohort_task_outcome") == "unknown":
         return False
     stage = DOWNSTREAM_STAGE_ALIASES.get(str(job.get("stage") or job.get("job_type") or ""))
     return stage in COHORT_MEMBER_ATTRIBUTED_STAGES
