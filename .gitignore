@@ -48,6 +48,7 @@ minio-data/
 .nhms-issue*-riverclick-*/
 # Previous frontend bundle kept for rollback by the node-27 D5 dist swap.
 apps/frontend/dist.old*/
+apps/frontend/dist.new/
 
 # Subagent-workflow session-local review artifacts (persistent record lives in docs/review-loop-log.jsonl)
 .workplans/

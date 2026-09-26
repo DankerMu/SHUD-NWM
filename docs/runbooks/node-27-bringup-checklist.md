@@ -446,8 +446,10 @@ click 只能人工截图、无法纳入 C4 自动 receipt：
 #### C4-river-click：`/` 河段点击 GFS+IFS P95 证据（#1970 → #1895）
 
 > #1970 交付了**门控的只读测试钩子 + 无 mock 的 live
-> P95 采集 lane**（代码与本地单测已就绪），本 PR
-> **没有**在 node-27 实机执行、**没有**产 live PASS。原 **#1895**
+> P95 采集 lane**（代码与本地单测已就绪）。首份 live PASS（schema 1.1 真实点击，三网 P95
+> 432.3 / 431.4 / 421.9 ms）见
+> `openspec/changes/archive/2026-09-26-river-click-trusted-pointer-dispatch/evidence/node27-live-receipt.md`；
+> 之后每次运行仍以其自身 receipt 判定。原 **#1895**
 > rollout 执行归属已撤回；下面的独立命令仍由既有 display
 > owner 在批准的当前运行中产证。标题中的 #1895 仅保留历史锚点，不是退役的新 live
 > acceptance gate。
@@ -562,7 +564,7 @@ click 只能人工截图、无法纳入 C4 自动 receipt：
   - **pin**：该网在 `core.river_segment` 中**唯一**一条 `river_segment_id LIKE '%\_shud\_riv\_000001'`
     的河段（当前即 `<basin_id>_shud_shud_riv_000001`，discharge 图层实际渲染的 `…_shud_shud_riv_…` id 族），
     在同一个 `BEGIN READ ONLY` 查询里取出；匹配数 ≠ 1 即 BLOCKED `exit 1`。**不要用 latest-product 的
-    `model_id` 构造 pin**：它是部署组 id（如 `dg_be70a045…`），拼出的 id 会 404（2026-09-26 node-27 实测）；
+    `model_id` 构造 pin**：它是 direct-grid variant 的 `model_id`（如 `dg_be70a045…`，不是河段 id 前缀所用的模型包 id；见 #2644），拼出的 id 会 404（2026-09-26 node-27 实测）；
     也不要用 `${basin}_shud` 拼接。使用前 segment detail 必须 200。**不要用 `…_shud_reach_…`**：
     segment detail 对两种 id 都回 200，preflight 能过，但地图 discharge 图层渲染的是
     `shud_riv` id，钩子会以 `HOOK_FEATURE_MISMATCH` 拒绝（lane 记 `HOOK_SELECTION_FAILED`，message

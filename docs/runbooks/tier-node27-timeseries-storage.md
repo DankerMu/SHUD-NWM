@@ -6186,7 +6186,7 @@ execution/acceptance; #1895 retirement creates no new display project.**
     `BEGIN READ ONLY` query — today `<basin_id>_shud_shud_riv_000001`, the
     discharge-layer id family the map actually renders. A match count other
     than 1 is BLOCKED (`exit 1`). **Never build the pin from the latest-product
-    `model_id`:** it is a deployment-group id (e.g. `dg_be70a045…`) and the
+    `model_id`:** it is a direct-grid variant `model_id` (e.g. `dg_be70a045…`), not the model-package id that prefixes segment ids (see #2644), and the
     built id 404s (measured on node-27, 2026-09-26); never use a `${basin}_shud`
     concatenation either. Its segment detail must return 200 before use.
     **Never use a `…_shud_reach_…` id:** segment

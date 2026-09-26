@@ -14,7 +14,7 @@
 
 The runbook C4 read-only discovery block was run verbatim against the public API. Its read-only SQL ran with `BEGIN READ ONLY` through the display role `nhms_display_ro`. The pins are listed in the verdict table below; each one's segment detail returned 200.
 
-- **First attempt: FAIL, correctly fail-closed.** The block merged in #2643 built the pin from the latest-product `model_id`. On live data that field is a deployment-group id (`dg_be70a045…`), so the pin returned 404 and the block exited 1 before any lane ran. Evidence: `/home/nwm/tmp/q/public/failed-discovery-583PXP`.
+- **First attempt: FAIL, correctly fail-closed.** The block merged in #2643 built the pin from the latest-product `model_id`. On live data that field is a direct-grid variant `model_id` (`dg_be70a045…`), not the model-package id that prefixes segment ids, so the pin returned 404 and the block exited 1 before any lane ran. Evidence: `/home/nwm/tmp/q/public/failed-discovery-583PXP`.
 - **The fix, in this archive PR:** the pin is now the network's single `…_shud_riv_000001` segment in `core.river_segment`, with exactly one match required.
 - **Second attempt: this receipt.** It ran the fixed block, and 48 product networks took part in the ranking.
 
