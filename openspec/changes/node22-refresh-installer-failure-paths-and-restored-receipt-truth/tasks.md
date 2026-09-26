@@ -108,17 +108,27 @@
 
 ## 4. Verification (node-27 oracle + local)
 
-- [ ] 4.1 Local:
+- [x] 4.1 Local:
   - `bash -n` on both installers;
   - `uv run ruff check .`;
   - `openspec validate node22-refresh-installer-failure-paths-and-restored-receipt-truth --strict --no-interactive`;
   - the targeted pytest set, with the whole of `tests/test_select_ci_tests.py`.
-- [ ] 4.2 node-27 on the pushed SHA (`/home/nwm/tmp/node27-pr-runner.sh`, `TMPDIR=/home/nwm/tmp`):
+
+  Result on `fa6f00bca`: clean / clean / valid / **1513 passed** (macOS, Homebrew bash 5.3).
+- [x] 4.2 node-27 on the pushed SHA (`/home/nwm/tmp/node27-pr-runner.sh`, `TMPDIR=/home/nwm/tmp`):
   - the targeted set: all new files, `tests/test_scheduler_refresh_*`, `tests/test_node22_refresh_timer_health_*`, `tests/test_select_ci_tests.py`;
   - then the full suite.
 
   The full-suite failure set must be a subset of master's (#2615).
-- [ ] 4.3 Red proof: the new failure-path, mutation and receipt-truth tests run against master's installers and runner must fail. Record the counts.
+
+  Results:
+  - targeted on `fa9c49cad` (implementation): **1498 passed** (`/home/nwm/tmp/o-fa9c49c/`);
+  - targeted on `fa6f00bca` (after the round-1 fix pass): **1513 passed** (`/home/nwm/tmp/o-fa6f00bca/`);
+  - full suite on `fa9c49cad` (`/home/nwm/tmp/o-full-fa9c49c/`): its result is recorded in the PR body and the archive commit. The fix delta after it touches only the refresh installer, the installer tests and docs, and the targeted run on `fa6f00bca` covers all of it.
+- [x] 4.3 Red proof: the new failure-path, mutation and receipt-truth tests run against master's installers and runner must fail. Record the counts.
+  - Implementation: **67 failed / 13 passed**. The 13 are expected-green must-preserve pins: the env checks, `cmp -s`, the invalid receipt, the compute-scheduler read-only cases ×3, idempotent rollback, node-22's legacy bytes, the unchanged unverified-rollback evidence, and the one mutation site master already asserted.
+  - Probe installer tests against master's probe installer: 5 failed / 57 passed.
+  - Round-1 fixes: the new malformed-install tests against `fa9c49cad`'s installer gave 6 failed. With the service gate deleted and the probe trap replaced by a delete-only body, 7 failed.
 
 ## 5. node-22 live drill: PENDING the #1831 maintenance window
 
@@ -140,7 +150,7 @@ This section is **not done in this PR** and is not claimed done. #1831 forbids p
 ## Evidence Floor
 
 1. **Defects 1+2** (D7 classes):
-   - (A) a pre-mutation failure (`validate_current_receipt`, the refusal, the D5 parser, a missing baseline) gives rc ≠ 0, no status line, no mutating verb and byte-identical file sets;
+   - (A) a pre-mutation failure (the refresh-service entry gate, `validate_current_receipt`, the refusal, the D5 parser in `--install` or `--rollback`, a missing baseline) gives rc ≠ 0, no status line, no mutating verb and byte-identical file sets;
    - (B) a `--rollback` read-back failure gives rc ≠ 0, no status line, and the rollback steps once;
    - (C) a post-mutation failure in `--install`/`--enable` runs exactly one main-shell restore, including through the `is-active` substitution, then both read-backs; rc 1 and no status line;
    - a failure injected into each handler step leaves the later steps and both read-backs in the trace.

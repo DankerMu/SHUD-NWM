@@ -626,7 +626,7 @@ scripts/install_node22_scheduler_file_provider_refresh.sh --rollback
   中途被打断的首装不留下 `refresh.before`，下一次 `--install` 会整套重新记录。`refresh.before`
   已存在时，后续 `--install` 和 `--rollback` 都**不改写、不删除**它和两个 `.before` 文件，所以
   连装两次再回滚恢复的是第一次安装之前的状态，重复 `--rollback` 也是幂等的。`--install` 在第一次
-  mutation 之前就按 `--rollback` 的同一套严格规则解析已存在的 `refresh.before`：格式不对就非零
+  mutation 之前就按 `--rollback` 的同一套严格规则解析已存在的 `refresh.before`：格式不对（或它是符号链接）就非零
   退出、不打印状态行、不做任何 mutation，基线原样留着——不会在一份 `--rollback` 会拒绝的基线上
   装出一条 lane。处置：确认主机状态后按下面的"重置基线"删掉整套基线再装。
   **重置基线**：一次成功的 `--rollback` 之后，删掉 `refresh.before` 和
