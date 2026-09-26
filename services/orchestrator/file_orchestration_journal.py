@@ -1852,6 +1852,25 @@ class FileOrchestrationJournalRepository:
                 job, source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id
             )
         }
+        # #2603: classify every model-less cycle-scope row by recorded cohort
+        # membership BEFORE compaction strips ``cohort_members``.  A provable
+        # non-member row (a sibling execution cohort, #2543) leaves the
+        # candidate's rows -- and, like the foreign-model rows above, its events
+        # leave in the same step.
+        cohort_membership = _cycle_scope_cohort_membership(
+            rows.pipeline_jobs.values(), source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id
+        )
+        foreign_model_cycle_scope_job_ids |= {
+            job_id for job_id, membership in cohort_membership.items() if membership == COHORT_MEMBERSHIP_NON_MEMBER
+        }
+        # The operator exit of a member (or unprovable) cohort row -- its manual
+        # retry marker -- must stay readable: completion-stage event compaction
+        # below would otherwise drop the marker's ``details`` (#2603 B2/B2b).
+        attributed_cycle_scope_job_ids = {
+            job_id
+            for job_id, membership in cohort_membership.items()
+            if membership in {COHORT_MEMBERSHIP_MEMBER, COHORT_MEMBERSHIP_INCOMPLETE}
+        }
         state = chain_repository_state.candidate_state_from_rows(
             source_id=canonical_source_id,
             cycle_time=cycle_time,
@@ -1862,14 +1881,19 @@ class FileOrchestrationJournalRepository:
             hydro_run=rows.hydro_run,
             pipeline_jobs=[
                 _public_scheduler_row(
-                    _compact_cycle_scope_job(job)
+                    _compact_cycle_scope_job(
+                        {**job, "cohort_membership": cohort_membership[str(job.get("job_id") or "")]}
+                        if str(job.get("job_id") or "") in cohort_membership
+                        else job
+                    )
                     if _is_model_less_cycle_scope_job(
                         job, source_id=canonical_source_id, cycle_time=cycle_time
                     )
                     else job
                 )
                 for job in rows.pipeline_jobs.values()
-                if not _is_foreign_model_cycle_scope_job(
+                if str(job.get("job_id") or "") not in foreign_model_cycle_scope_job_ids
+                and not _is_foreign_model_cycle_scope_job(
                     job, source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id
                 )
             ],
@@ -1877,6 +1901,10 @@ class FileOrchestrationJournalRepository:
                 _public_scheduler_row(
                     _compact_cycle_scope_event(event)
                     if str(event.get("entity_id") or "") in cycle_scope_completion_job_ids
+                    and not (
+                        str(event.get("entity_id") or "") in attributed_cycle_scope_job_ids
+                        and _is_manual_retry_marker_event(event)
+                    )
                     else event
                 )
                 for event in rows.pipeline_events
@@ -14149,6 +14177,9 @@ _CYCLE_SCOPE_JOB_PROJECTION_KEYS = (
     "submitted_at",
     "started_at",
     "finished_at",
+    # #2603: the recorded-membership class, computed before compaction strips
+    # ``cohort_members``; downstream consumers read it, never recompute it.
+    "cohort_membership",
 )
 
 
@@ -14187,6 +14218,15 @@ def _is_foreign_model_cycle_scope_job(
 
 
 _CYCLE_SCOPE_COMPLETION_STAGES = frozenset({"parse", "state_save_qc", "publish"})
+
+
+def _is_manual_retry_marker_event(event: Mapping[str, Any]) -> bool:
+    """The manual-retry marker shape (``scheduler_state_manual_retry._manual_retry_marker_shape``)."""
+
+    details = event.get("details")
+    if event.get("event_type") not in {"retry", "manual_retry"} or not isinstance(details, Mapping):
+        return False
+    return details.get("trigger") == "manual" or details.get("manual_retry_marker") is True
 
 
 def _compact_cycle_scope_event(event: Mapping[str, Any]) -> dict[str, Any]:
@@ -14255,6 +14295,42 @@ def _complete_cohort_members_by_run(
     is the union of the recorded ``model_id`` values.
     """
 
+    members_by_run, incomplete_runs = _recorded_cohort_members_by_run(
+        jobs, source_id=source_id, cycle_time=cycle_time
+    )
+    return {
+        run_id: frozenset(member_model_ids)
+        for run_id, member_model_ids in members_by_run.items()
+        if run_id not in incomplete_runs
+    }
+
+
+def _recorded_cohort_member_model_ids(job: Mapping[str, Any]) -> frozenset[str] | None:
+    """A row's OWN complete ``cohort_members`` model ids; ``None`` when absent or incomplete.
+
+    The completeness predicate of :func:`_complete_cohort_members_by_run`, applied to
+    one row.  Callers distinguish absent from incomplete by the raw field.
+    """
+
+    raw_members = job.get("cohort_members")
+    members = ordered_cohort_members(raw_members)
+    member_model_ids = frozenset(str(member.get("model_id") or "") for member in members)
+    if (
+        not members
+        or not isinstance(raw_members, Sequence)
+        or len(members) != len(raw_members)
+        or len(members) >= MAX_FORECAST_COHORT_MEMBERS
+        or "" in member_model_ids
+    ):
+        return None
+    return member_model_ids
+
+
+def _recorded_cohort_members_by_run(
+    jobs: Iterable[Mapping[str, Any]], *, source_id: str, cycle_time: datetime
+) -> tuple[dict[str, set[str]], set[str]]:
+    """Per suffixed cohort run id: the union of recorded member ids, and the runs with any incomplete list."""
+
     cycle_run_id = f"cycle_{source_id.lower()}_{format_cycle_time(cycle_time)}"
     members_by_run: dict[str, set[str]] = {}
     incomplete_runs: set[str] = set()
@@ -14262,26 +14338,70 @@ def _complete_cohort_members_by_run(
         run_id = str(job.get("run_id") or "")
         if job.get("model_id") not in (None, "") or not run_id.startswith(f"{cycle_run_id}_"):
             continue
-        raw_members = job.get("cohort_members")
-        if raw_members in (None, "", [], ()):
+        if job.get("cohort_members") in (None, "", [], ()):
             continue
-        members = ordered_cohort_members(raw_members)
-        member_model_ids = {str(member.get("model_id") or "") for member in members}
-        if (
-            not members
-            or not isinstance(raw_members, Sequence)
-            or len(members) != len(raw_members)
-            or len(members) >= MAX_FORECAST_COHORT_MEMBERS
-            or "" in member_model_ids
-        ):
+        member_model_ids = _recorded_cohort_member_model_ids(job)
+        if member_model_ids is None:
             incomplete_runs.add(run_id)
             continue
         members_by_run.setdefault(run_id, set()).update(member_model_ids)
-    return {
-        run_id: frozenset(member_model_ids)
-        for run_id, member_model_ids in members_by_run.items()
-        if run_id not in incomplete_runs
-    }
+    return members_by_run, incomplete_runs
+
+
+#: Values of the ``cohort_membership`` annotation a model-less cycle-scope row
+#: carries on the candidate-state surface (#2603).
+COHORT_MEMBERSHIP_MEMBER = "member"
+COHORT_MEMBERSHIP_NON_MEMBER = "non_member"
+COHORT_MEMBERSHIP_INCOMPLETE = "incomplete"
+COHORT_MEMBERSHIP_UNWITNESSED = "unwitnessed"
+
+
+def _cycle_scope_cohort_membership(
+    jobs: Iterable[Mapping[str, Any]], *, source_id: str, cycle_time: datetime, model_id: str
+) -> dict[str, str]:
+    """Classify each model-less cycle-scope row for one candidate (#2603), keyed by ``job_id``.
+
+    Row-level first: a row recording its own ``cohort_members`` (forcing, forecast,
+    and downstream master rows since #2603 B4) is judged by its own list, so a
+    narrowed forecast/state_save_qc row of a partially failed forcing cohort drops
+    the members forcing lost.  Any other row of a suffixed cohort run id is judged
+    by the run's union, with the same completeness rule as
+    :func:`_complete_cohort_members_by_run` (``has_active_pipeline``).  Rows of a
+    run that records no membership at all -- including the bare
+    ``cycle_<source>_<stamp>`` run id -- are ``unwitnessed``.
+    """
+
+    job_list = [job for job in jobs if _is_model_less_cycle_scope_job(job, source_id=source_id, cycle_time=cycle_time)]
+    members_by_run, incomplete_runs = _recorded_cohort_members_by_run(
+        job_list, source_id=source_id, cycle_time=cycle_time
+    )
+    cycle_run_id = f"cycle_{source_id.lower()}_{format_cycle_time(cycle_time)}"
+    classes: dict[str, str] = {}
+    for job in job_list:
+        job_id = str(job.get("job_id") or "")
+        run_id = str(job.get("run_id") or "")
+        if not job_id:
+            continue
+        if not run_id.startswith(f"{cycle_run_id}_"):
+            classes[job_id] = COHORT_MEMBERSHIP_UNWITNESSED
+            continue
+        if job.get("cohort_members") not in (None, "", [], ()):
+            own_members = _recorded_cohort_member_model_ids(job)
+            if own_members is None:
+                classes[job_id] = COHORT_MEMBERSHIP_INCOMPLETE
+            else:
+                classes[job_id] = (
+                    COHORT_MEMBERSHIP_MEMBER if model_id in own_members else COHORT_MEMBERSHIP_NON_MEMBER
+                )
+        elif run_id in incomplete_runs:
+            classes[job_id] = COHORT_MEMBERSHIP_INCOMPLETE
+        elif run_id in members_by_run:
+            classes[job_id] = (
+                COHORT_MEMBERSHIP_MEMBER if model_id in members_by_run[run_id] else COHORT_MEMBERSHIP_NON_MEMBER
+            )
+        else:
+            classes[job_id] = COHORT_MEMBERSHIP_UNWITNESSED
+    return classes
 
 
 def _job_matches_candidate(job: Mapping[str, Any], *, source_id: str, cycle_time: datetime, model_id: str) -> bool:

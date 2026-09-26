@@ -130,6 +130,10 @@ exact commands, the evidence-root source and node-22 execution discipline are in
   first check whether the dry-run receipt's live count already moved +1 (the file journal does
   not update the `hydro_run` row on a same-`run_id` rerun, #2397, so even a rerun with the
   correct lineage still shows as breaker-blocked). If it moved, do not confirm again.
+- `blocked_cohort_membership_unprovable` — a `permanently_failed` multi-member cohort row
+  whose recorded `cohort_members` is incomplete, so it can not be attributed (#2603). Fix the
+  cause, then mark the cohort run once with the same manual-retry script; see
+  [`scheduler-dbfree-typed-reasons.md`](scheduler-dbfree-typed-reasons.md).
 - `blocked_strict_warm_start_init_state_mismatch` — the strict warm-start retry budget; see
   the next section (`confirm-operator-reentry --pin <budget_reentry_count>`).
 - `blocked_operator_reentry_restart_stage_refused` — the sink refusal (#1555). The

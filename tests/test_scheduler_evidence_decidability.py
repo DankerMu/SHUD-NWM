@@ -122,7 +122,8 @@ def _writer_blocked_rows() -> dict[str, dict[str, Any]]:
 
     Every ``state_evidence`` here is the producer's own output, not a literal:
     ``scheduler_state_failure`` for the permanent/cancelled legs,
-    ``scheduler_candidates`` for the budget, breaker and sink-refusal legs.
+    ``scheduler_candidates`` for the budget, breaker and sink-refusal legs,
+    ``scheduler_state_decision`` for the #2603 unprovable-membership leg.
     """
 
     from dataclasses import replace
@@ -132,10 +133,30 @@ def _writer_blocked_rows() -> dict[str, dict[str, Any]]:
         _refuse_confirmed_candidates_off_forecast,
         _strict_warm_start_terminal_blocked_evidence,
     )
+    from services.orchestrator.scheduler_state_decision import _cohort_membership_unprovable_evidence
     from services.orchestrator.scheduler_state_failure import (
         _cancelled_state_evidence,
         _permanent_failure_evidence,
     )
+
+    unprovable_evidence = _cohort_membership_unprovable_evidence(
+        _candidate("model_f"),
+        {
+            "pipeline_jobs": [
+                {
+                    "job_id": "job_cycle_gfs_2026052106_state_save_qc_cohort_0123456789ab_state_save_qc",
+                    "run_id": "cycle_gfs_2026052106_state_save_qc_cohort_0123456789ab",
+                    "stage": "state_save_qc",
+                    "model_id": None,
+                    "status": "permanently_failed",
+                    "error_code": "NODE_FAILURE",
+                    "cohort_membership": "incomplete",
+                }
+            ]
+        },
+        {},
+    )
+    assert unprovable_evidence is not None
 
     permanent_state = {
         "pipeline_status": "failed",
@@ -185,6 +206,9 @@ def _writer_blocked_rows() -> dict[str, dict[str, Any]]:
             ),
         ),
         "blocked_operator_reentry_restart_stage_refused": refused[0].to_dict(),
+        "blocked_cohort_membership_unprovable": _blocked_row(
+            "model_f", "cohort_membership_unprovable", unprovable_evidence
+        ),
     }
 
 
@@ -464,6 +488,7 @@ def test_a_summary_tier_submitted_pass_still_passes_the_readiness_reader(tmp_pat
         ("blocked_strict_warm_start_init_state_mismatch", 1),
         (_BREAKER_DECISION, 1),
         ("blocked_operator_reentry_restart_stage_refused", 1),
+        ("blocked_cohort_membership_unprovable", 1),
         ("breaker_released_source_cycle", 1),
         ("no_action", 0),
     ],

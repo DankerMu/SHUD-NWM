@@ -49,11 +49,13 @@ from services.orchestrator.scheduler_state_terminal_recency import (
 from services.orchestrator.scheduler_state_types import (
     ACTIVE_HYDRO_STATUSES,
     ACTIVE_PIPELINE_STATUSES,
+    DOWNSTREAM_RESTART_STAGES,
     DURABLE_HYDRO_SUCCESS_STATUSES,
     FAILED_PIPELINE_STATUSES,
     TERMINAL_PIPELINE_SUCCESS_STATUSES,
     CandidateStateDecision,
     SchedulerCandidateLike,
+    cohort_member_row_is_attributed,
 )
 from workers.data_adapters.base import format_cycle_time
 
@@ -271,6 +273,18 @@ def _candidate_state_decision_evaluated(
             missing_upstream_artifact,
         )
 
+    # #2603 B2b: a permanently failed cohort row whose recorded membership is
+    # truncated/invalid cannot be attributed, so it fails closed for every
+    # candidate it is visible to.  It shares the permanent-failure guard's exits
+    # (a manual-retry marker clears it; the candidate's own terminal success
+    # wins) but is placed before the completed-stage resume, because that resume
+    # is exactly the silent auto-retry the unattributed failure would otherwise
+    # take (the row is not the candidate's, so the state carries no failure).
+    if not manual_retry_requested:
+        unprovable = _cohort_membership_unprovable_evidence(candidate, state, evidence)
+        if unprovable is not None:
+            return CandidateStateDecision("blocked", COHORT_MEMBERSHIP_UNPROVABLE_REASON, unprovable)
+
     if completed_stage_retry is not None:
         return CandidateStateDecision("retry", "resume_after_completed_stage", completed_stage_retry)
 
@@ -428,6 +442,66 @@ def _candidate_state_decision_evaluated(
         )
 
     return None
+
+
+COHORT_MEMBERSHIP_UNPROVABLE_REASON = "cohort_membership_unprovable"
+_COHORT_STAGE_ORDER = {stage: index for index, stage in enumerate(DOWNSTREAM_RESTART_STAGES)}
+
+
+def _cohort_membership_unprovable_evidence(
+    candidate: SchedulerCandidateLike,
+    state: Mapping[str, Any],
+    base_evidence: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Block on a permanently failed ``incomplete`` cohort row (#2603 B2b).
+
+    Reads the journal's ``cohort_membership`` annotation off the candidate's rows
+    (never recomputes it).  The candidate's own terminal success at or past the
+    failed row's stage -- a row naming its model or run, or a ``member`` cohort
+    row per ``cohort_member_row_is_attributed`` -- wins.
+    """
+
+    jobs = _state_jobs(state)
+    failed = [
+        job
+        for job in jobs
+        if job.get("cohort_membership") == "incomplete" and str(job.get("status") or "") == "permanently_failed"
+    ]
+    if not failed:
+        return None
+    failed_job = failed[-1]
+    failed_stage = _canonical_downstream_stage(str(failed_job.get("stage") or failed_job.get("job_type") or ""))
+    failed_order = _COHORT_STAGE_ORDER.get(str(failed_stage or ""), 0)
+    for job in jobs:
+        if str(job.get("status") or "") not in TERMINAL_PIPELINE_SUCCESS_STATUSES:
+            continue
+        own = (
+            cohort_member_row_is_attributed(job)
+            or str(job.get("model_id") or "") == candidate.model_id
+            or str(job.get("run_id") or "") == candidate.run_id
+        )
+        stage = _canonical_downstream_stage(str(job.get("stage") or job.get("job_type") or ""))
+        if own and _COHORT_STAGE_ORDER.get(str(stage or ""), -1) >= failed_order:
+            return None
+    return {
+        **base_evidence,
+        "decision": "blocked_cohort_membership_unprovable",
+        "reason": COHORT_MEMBERSHIP_UNPROVABLE_REASON,
+        "stage": failed_stage,
+        "cohort_run_id": failed_job.get("run_id"),
+        "pipeline_job_id": failed_job.get("job_id"),
+        "prior_failure_reason": failed_job.get("error_code"),
+        "retry_policy": {
+            "automatic_retry_allowed": False,
+            "manual_retry_required": True,
+        },
+        "manual_retry_required": True,
+        "replacement_submitted": False,
+        "identity": {
+            "candidate_id": candidate.candidate_id,
+            "run_id": candidate.run_id,
+        },
+    }
 
 
 def _missing_upstream_artifact_decision(evidence: Mapping[str, Any]) -> CandidateStateDecision:

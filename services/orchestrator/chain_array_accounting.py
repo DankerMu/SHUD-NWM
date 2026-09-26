@@ -410,9 +410,11 @@ def record_cycle_stage_status_override(
                     "array_task_outcome": outcome,
                     "task_slurm_job_id": task.slurm_job_id if task is not None else None,
                     "error_code": task.error_code if task is not None else None,
-                    "restart_stage": (
-                        "state_save_qc" if outcome == "succeeded" else basin.get("restart_stage") or "forecast"
-                    ),
+                    # #2559: a failed/unverified task failed AT forecast, so it
+                    # restarts from forecast -- never the basin's cohort-entry
+                    # restart marker (``convert``/``forcing``), which the
+                    # projection enum (ACCEPTED_RESTART_STAGES) rejects.
+                    "restart_stage": "state_save_qc" if outcome == "succeeded" else "forecast",
                     "native_shud_resubmitted": False,
                 }
             )

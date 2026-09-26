@@ -212,7 +212,7 @@ _LEASE_STALE_TTL_MULTIPLIER = 2
 
 #: Every decision the db-free scheduler writes ``manual_retry_required: True`` on.
 #: Literals rather than an alias -- unlike :data:`SCOPE_COMPLETE_SOURCES` below,
-#: this set has NO single authority to alias: the five decisions are written from
+#: this set has NO single authority to alias: the six decisions are written from
 #: several modules (``scheduler_candidates.py``, ``scheduler_state_failure.py``,
 #: ...), each from its own literal or module constant.  So the closure is enforced
 #: instead by the pin in ``tests/test_operator_action_listing.py``, which reads
@@ -222,12 +222,16 @@ _LEASE_STALE_TTL_MULTIPLIER = 2
 #: is written by ``scheduler_candidates.py`` from its own module constant
 #: ``OPERATOR_REENTRY_SINK_REFUSAL_DECISION`` and is handled by the second step of
 #: ``docs/runbooks/node22-control-plane-manual-recovery.md``.
+#: ``blocked_cohort_membership_unprovable`` (#2603 B2b) is written by
+#: ``scheduler_state_decision.py`` and is cleared by the same manual-retry marker
+#: as ``permanent_failure``.
 OPERATOR_ACTION_DECISIONS = frozenset(
     (
         "permanent_failure",
         "cancelled_manual_retry_required",
         "blocked_strict_warm_start_init_state_mismatch",
         "blocked_operator_reentry_restart_stage_refused",
+        "blocked_cohort_membership_unprovable",
         BREAKER_DECISION,
     )
 )
@@ -259,7 +263,8 @@ LIST_OPERATOR_ACTIONS_HELP = (
     "List candidates waiting on an operator (#1186): permanent_failure, "
     "cancelled_manual_retry_required, blocked_strict_warm_start_init_state_mismatch, "
     "blocked_journal_predecessor_identity_quarantine, "
-    "blocked_operator_reentry_restart_stage_refused. Read-only: scans the newest "
+    "blocked_operator_reentry_restart_stage_refused, "
+    "blocked_cohort_membership_unprovable. Read-only: scans the newest "
     "--passes terminal scheduler pass evidence files under --evidence-root "
     f"(default ${EVIDENCE_ROOT_ENV}). Exit 1 when actions are listed, 0 when none "
     "and at least one scanned pass evaluated candidates over the whole scope, 3 when "
