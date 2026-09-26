@@ -43,6 +43,7 @@ from services.orchestrator.scheduler_state_types import (
     TERMINAL_PIPELINE_COMPLETION_STAGES,
     TERMINAL_PIPELINE_SUCCESS_STATUSES,
     SchedulerCandidateLike,
+    cohort_member_row_is_attributed,
 )
 from workers.data_adapters.base import cycle_id_for, format_cycle_time
 
@@ -940,6 +941,10 @@ def _pipeline_terminal_success_is_candidate_scoped(
         if run_id == candidate.run_id:
             return True
         if str(model_id or "") == candidate.model_id:
+            return True
+        if cohort_member_row_is_attributed(job):
+            # #2603 B3: the journal proved this model-less completion-stage
+            # cohort row names the candidate among its recorded members.
             return True
         if run_id.startswith("cycle_") and model_id in (None, ""):
             return False

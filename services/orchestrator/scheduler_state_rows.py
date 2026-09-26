@@ -30,6 +30,7 @@ from services.orchestrator.scheduler_state_types import (
     FAILED_PIPELINE_STATUSES,
     STATE_CANDIDATE_SCOPED_PROOF_FIELDS,
     STATE_M23_COMPARISON_FIELDS,
+    cohort_member_row_is_attributed,
 )
 from workers.data_adapters.base import format_cycle_time
 
@@ -83,7 +84,13 @@ STAGE_RETRY_ATTEMPT_FLOOR_SOURCE_FIELDS = (
     "retry_count",
     "repair_status",
     "active_blocker",
+    # #2603: a member cohort row's floor must re-prove the same membership.
+    "cohort_membership",
 )
+#: #2603 B2: derived ``_legacy_identity_values`` key marking a model-less cohort
+#: row the file journal proved a member of the candidate's cohort
+#: (``cohort_member_row_is_attributed``).
+COHORT_MEMBER_ATTRIBUTED_VALUE_KEY = "cohort_member_attributed"
 
 
 def _bounded_candidate_state(state: Mapping[str, Any]) -> dict[str, Any]:
@@ -256,7 +263,12 @@ def _shared_stage_cycle_run_matches_candidate(
     exact candidate model id so sibling-model state cannot bleed across rows.
     """
 
-    if run_id in (None, "") or row_values.get("model_id") != expected_values.get("model_id"):
+    if run_id in (None, ""):
+        return False
+    # #2603 B2: a cohort row the journal proved a member of its cohort binds
+    # the model as exactly as a row naming it.
+    recorded_member = row_values.get(COHORT_MEMBER_ATTRIBUTED_VALUE_KEY) == "true"
+    if not recorded_member and row_values.get("model_id") != expected_values.get("model_id"):
         return False
     source = str(expected_values.get("source") or "").lower()
     cycle_time = str(expected_values.get("cycle_time") or "")
@@ -416,6 +428,10 @@ def _legacy_identity_values(payload: Mapping[str, Any]) -> dict[str, str]:
     event_id = payload.get("event_id")
     if "pipeline_event_id" not in values and event_id not in (None, ""):
         values["stage_event_id"] = str(event_id).strip()
+    if cohort_member_row_is_attributed(payload):
+        # #2603 B2: not an identity field; only read by
+        # ``_shared_stage_cycle_run_matches_candidate``.
+        values[COHORT_MEMBER_ATTRIBUTED_VALUE_KEY] = "true"
     return values
 
 def _candidate_state_has_identity_mismatch(evidence: Mapping[str, Any]) -> bool:

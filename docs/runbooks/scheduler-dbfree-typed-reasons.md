@@ -721,6 +721,43 @@ state_evidence.retry_policy = {automatic_retry_allowed: false, manual_retry_requ
   **cohort master id** 上，见 [`node22-control-plane-manual-recovery.md`](node22-control-plane-manual-recovery.md)
   「forecast 已成功、`state_save_qc` 失败」小节。
 
+## 多成员 cohort 的失败归属与 `cohort_membership_unprovable`（#2603）
+
+多成员 execution cohort（run id `cycle_<src>_<stamp>_<stage>_cohort_<12hex>`）的下游 master 行不带 `model_id`。file
+journal 读候选状态时，先按该 cycle 已记录的 `cohort_members` 给每条这种行打一个 `cohort_membership` 标注，再做压缩；
+标注出现在候选状态 `pipeline_jobs[]` 上，下游判定只读标注、不重算：
+
+| `cohort_membership` | 判据 | 对该候选的效果 |
+|---|---|---|
+| `member` | 行自己的 `cohort_members`（forcing / forecast 行，及 #2603 起的 parse / state_save_qc / publish 行）含本模型；行自己没记时按同 run id 的完整成员并集 | forcing / parse / state_save_qc / publish 行当作候选自己的行：失败、permanence、`retry_count`、attempt floor 与成功都算数。forecast master 只打标注、不归属——它的逐成员真相在按模型投影的 task 行上（#2559），再归属一次会改变单模型判定 |
+| `non_member` | 完整成员记录不含本模型（兄弟 cohort，#2543） | 行和它的事件一起从候选状态里去掉，成功与失败都不影响 |
+| `incomplete` | 成员记录被截断、长度不符、到上限或有空 `model_id` | 该行 `permanently_failed` 时判 blocked `cohort_membership_unprovable` |
+| `unwitnessed` | 该 run 没有任何行记录成员（历史行、裸 `cycle_<src>_<stamp>`） | 语义与 #2603 之前完全一致（成功照旧计入，失败照旧不归属） |
+
+- **多成员 cohort 的 state_save_qc 重试耗尽**：cohort 行 `permanently_failed` 后，每个成员候选判
+  `decision: permanent_failure`、blocked **`permanent_failure_guard`**，`failure.stage=state_save_qc`、
+  `retry_policy.automatic_retry_allowed=false`、`attempt` 等于 cohort 行的 `retry_count`——与单模型 cohort 同一口径。只重跑
+  部分成员的 `…_state_save_qc_cohort_<d'>` restart cohort 由它自己记录的成员归属，成功只记给这些成员。
+- **`cohort_membership_unprovable`**（blocked，`decision: blocked_cohort_membership_unprovable`，在 `list-operator-actions` 的待办集合里）：可见的 `permanently_failed` cohort 行成员记录不完整，无法证明它属于谁，按
+  fail-closed 阻塞，不自动重试。候选自己在该阶段或之后已有终态成功（带本模型 / 本 run 的行，或 `member` 行）时不受它
+  影响。出口同 `permanent_failure_guard`：把 manual-retry marker 打在该 cohort 的 run id 上
+  （`FileJournalRetryService.record_manual_repair`，见 manual-recovery runbook），下一趟即解除。
+
+## 错误码 `SLURM_STATUS_QUERY_UNAVAILABLE` / `STAGE_RUNTIME_STATUS_PERSIST_FAILED`（#2570 A）
+
+两者都是 stage 结果 `reconcile_unverified` 的 `error_code`，unit 的成员记为 reconciling（不是 `submission_failed` /
+`PRODUCTION_ORCHESTRATION_FAILED`），**不会重投**：该行保留已绑定的 Slurm id 与失败前的运行态，下一趟 pass 开头的
+restart reconcile（`reconcile_inflight_jobs`，只读 sacct、从不提交）把它推到真实终态，链随后从下游继续。
+
+- `SLURM_STATUS_QUERY_UNAVAILABLE`：轮询里 gateway 状态查询失败会原地重试到作业 deadline；deadline 到时若至少失败过一次，
+  以此码结束，**不写**任何终态（不走 `SLURM_JOB_TIMEOUT`，那是 transient 码，会重投一个只是状态未知的作业）。失败次数与最后的
+  异常类型在 stage 结果 `accounting.poll_isolation`。deadline 到时从未查询失败的，仍走原来的 timeout 路径。
+- `STAGE_RUNTIME_STATUS_PERSIST_FAILED`：轮询中运行态写入（`update_pipeline_job_status` / 运行态 CAS）抛出非冲突异常。之后
+  该阶段不再做任何仓库写或 gateway 调用（聚合、status override、accounting 事件、日志发布、`_after_cycle_stage_terminal`）。
+  `ACCEPTED_SUBMIT_RUNTIME_TRANSITION_CONFLICT` / `…_UNAVAILABLE` 仍按原样抛出，不归入此码。
+- `status_change` 事件写失败只计数（`accounting.poll_isolation.pipeline_event_write_failures`）并告警，链照常继续。
+- 连续出现时先查 journal 所在卷（`df -h /scratch`）与 gateway 隧道，不要手工改行状态。
+
 ## 相关文档
 
 - [`current-production-ops.md`](current-production-ops.md) — 当前生产值守手册。

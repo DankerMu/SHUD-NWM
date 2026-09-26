@@ -1282,8 +1282,12 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         # #2393/#1845/#2416/#2394: the cross-stage state-residue suite rides the
         # broad orchestrator directory rule (named after none of its modules).
         "tests/test_chain_cross_stage_state.py",
+        # #2570 A / #2603 / #2559: the poll-isolation, cohort-membership and
+        # forecast-projection suites ride the broad orchestrator directory rule.
+        "tests/test_chain_stage_poll_isolation.py",
         "tests/test_cli_cleanup_frontier.py",
         "tests/test_cli_publish_qdown.py",
+        "tests/test_cohort_membership_attribution.py",
         "tests/test_e2e_m3.py",
         # #1953: the full-tree budget contract rides the broad orchestrator
         # directory rule — that route closes the importer gaps of
@@ -1299,6 +1303,7 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_file_orchestration_journal_read_cache.py",
         "tests/test_file_orchestration_migration.py",
         "tests/test_forcing_submit_ambiguity.py",
+        "tests/test_forecast_cohort_projection_restart_stage.py",
         "tests/test_gateway_reconcile_binding_provenance.py",
         "tests/test_gateway_reconcile_claimant_exclusivity.py",
         # #1581: the parity lock rides the broad orchestrator directory rule —

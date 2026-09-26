@@ -214,6 +214,12 @@ def _run_cycle_chain_stages(self, context: CycleOrchestrationContext) -> Pipelin
         with _open_stage_timing_span(collector, stage, context) as span:
             with set_current_stage_span(span):
                 basin_count_at_entry = len(context.active_basins)
+                # #2570 A4: recorded at entry so every exit path -- including an
+                # exception that escapes the stage loop -- commits the real
+                # entering basin count; the terminal populate below overwrites
+                # it with the same value plus the outcome counters.
+                if span is not None:
+                    span.set_basin_count(basin_count_at_entry)
                 retry_attempts = 0
                 retry_pipeline_job_id: str | None = None
                 pipeline_result: PipelineResult | None = None
