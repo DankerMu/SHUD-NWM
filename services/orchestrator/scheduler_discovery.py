@@ -639,7 +639,8 @@ def _terminal_init_state_verdict(
         :data:`TERMINAL_INIT_STATE_UNVERIFIABLE_NOT_READY_REASONS`.
     READY but naming no state
         the cold-start generation shapes ``COLD_NEW_MODEL`` /
-        ``COLD_DECLARED_CUTOVER`` (``scheduler_generation_gate.py:349-376``):
+        ``COLD_DECLARED_CUTOVER`` (the two ``TransitionDecision`` branches of
+        ``scheduler_generation_gate.strict_warm_start_evidence``):
         the resolution genuinely resolved, and it resolved to no warm start.
         Unchanged — the verdict path bypasses the shared helper and keeps
         today's gap, which ``conflict`` expresses here.

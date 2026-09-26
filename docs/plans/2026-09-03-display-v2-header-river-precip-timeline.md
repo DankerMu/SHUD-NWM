@@ -13,11 +13,13 @@
 
 ## 前提纠正（用户原始假设 vs 代码事实）
 
+> 本表「证据」列里的 `services/tiles/mvt.py` 坐标是本文定稿时的代码事实，钉在 `98851c0c6`（本文件首次提交）读取；当前代码已按本设计改写，不要按当前行号解读（#2085）。
+
 | 用户假设 | 代码事实 | 证据 |
 |---|---|---|
-| 河段颜色用 lead=0 | 默认渲染的是 100h 滚动窗口的**最后一个**有效时次，且不带起报时次 | `apps/frontend/src/lib/m11/overviewDataContracts.ts:1173` `pickCurrentValidTime` 取末项；`services/tiles/mvt.py:1544-1640` `national_discharge_valid_times` 只返回 `common_end` 前 100 个整点 |
+| 河段颜色用 lead=0 | 默认渲染的是 100h 滚动窗口的**最后一个**有效时次，且不带起报时次 | `apps/frontend/src/lib/m11/overviewDataContracts.ts:1173` `pickCurrentValidTime` 取末项；`services/tiles/mvt.py@98851c0c6:1544-1640` `national_discharge_valid_times` 只返回 `common_end` 前 100 个整点 |
 | 气象代站图层已有降水，渲染即可 | 代站要素只有 `station_id/name/basin_id`，降水值按站逐 CSV 读取，没有格点场 | `apps/frontend/src/pages/m11/useStationLayer.ts:38-56`；`apps/api/routes/data_sources.py:139` 逐站 series |
-| 全国瓦片按当前源渲染 | 全国流量 SQL 不看 source，每个河网按 `cycle_time DESC, run_id DESC` 取一个 run；同一周期 gfs/IFS 各 38 个 run，同图混源 | `services/tiles/mvt.py:654,692` `latest_runs` CTE |
+| 全国瓦片按当前源渲染 | 全国流量 SQL 不看 source，每个河网按 `cycle_time DESC, run_id DESC` 取一个 run；同一周期 gfs/IFS 各 38 个 run，同图混源 | `services/tiles/mvt.py@98851c0c6:692` `latest_runs` CTE 与 `:654` `source_identity_stats_sql` 探针里同形 run 发现子查询的 `ORDER BY` |
 
 ## 实机事实（2026-09-03 核查）
 
@@ -58,7 +60,7 @@
 
 ### B. 静态河网密度
 
-后端 `services/tiles/mvt.py` river-network-national（~350–450）`stream_type` 阈值表：
+后端 `services/tiles/mvt.py` `postgis_tile_sql()` river-network-national `stream_type` 阈值表（本节「现值」取自 `mvt.py@98851c0c6:401-407`）：
 
 | zoom | 现值 | 新值 |
 |---|---|---|

@@ -729,7 +729,8 @@ class TilePublisher:
         """Hold the copyback root's cross-process batch mutex, as a ``PublishError`` lane (#2035).
 
         ``publish_qdown_cycle`` re-raises ``PublishError`` unchanged and only
-        absorbs ``SQLAlchemyError | OSError | ValueError`` (`:207-210`), so a
+        absorbs ``SQLAlchemyError | OSError | ValueError`` (its
+        ``except (SQLAlchemyError, OSError, ValueError)`` arm), so a
         raw ``CopybackLockError`` escaping from here would leave the publish
         entry point with an uncaught foreign exception type. The timeout keeps
         its own code so it is distinguishable from every ordinary copyback

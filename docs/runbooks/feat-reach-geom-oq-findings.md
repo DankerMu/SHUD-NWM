@@ -1,4 +1,25 @@
+---
+status: historical baseline
+current_authority:
+  - path: services/tiles/mvt.py
+    section: layer_metadata / _ensure_tile_layer / _cache_layer_metadata
+    reason: current MVT layer-metadata and tile-cache identity code
+  - path: openspec/specs/mvt-tile-contract/spec.md
+    section: MVT tile contract
+    reason: current MVT tile contract
+status_since: 2026-09-26
+archive_scope: whole-document
+retained_for: dated 2026-06-19 read-only survey evidence behind feat-reach-geom-from-river-shp OQ1/OQ2/OQ3
+---
+
 # feat-reach-geom-from-river-shp — OQ Explorer Findings
+
+> **Historical survey (#2085).** This is a one-off 2026-06-19 read-only survey, kept under `docs/runbooks/**` as
+> dated evidence, not as a current procedure. Its code coordinates are not current and cannot be SHA-pinned:
+> `build_layer_metadata` / `resolve_tile_layer_identity` resolve at no SHA in this repository
+> (`git log --all -S 'def build_layer_metadata' -- '*.py'` and `-S 'def resolve_tile_layer_identity' -- '*.py'` are both empty; the
+> master root commit `af49ced22`, 2026-07-25, and the older tags `v0.0.1` / `v0.0.2` lack both). The
+> `services/tiles/mvt.py` deep links below were therefore replaced by plain text naming the current counterpart symbol.
 
 Read-only exploratory evidence backing
 [openspec change `feat-reach-geom-from-river-shp`](../../openspec/changes/feat-reach-geom-from-river-shp/proposal.md)
@@ -117,8 +138,8 @@ path that currently keys on `river_segment_id`**. Three mitigation paths exist:
 **Active consumers:**
 
 - [`apps/frontend/src/api/types.ts:364`](../../apps/frontend/src/api/types.ts#L364) — generated OpenAPI types declare the route as a typed path
-- [`services/tiles/mvt.py:784`](../../services/tiles/mvt.py#L784) — `build_layer_metadata()` emits `tile_url_template` into the `LayerMetadata` payload returned by `/api/v1/layers`
-- [`services/tiles/mvt.py:1476`](../../services/tiles/mvt.py#L1476) — `resolve_tile_layer_identity()` emits `tile_uri_template`
+- `services/tiles/mvt.py` `build_layer_metadata()` (survey-time name; current counterpart `layer_metadata()`) — emits `tile_url_template` into the `LayerMetadata` payload returned by `/api/v1/layers`
+- `services/tiles/mvt.py` `resolve_tile_layer_identity()` (survey-time name; current counterpart `_ensure_tile_layer()`) — emits `tile_uri_template`
 - [`apps/frontend/src/components/map/M11MapLibreSurface.tsx:620`](../../apps/frontend/src/components/map/M11MapLibreSurface.tsx#L620) — `buildMvtTileUrlTemplate(metadata, replacements)` consumes the metadata to build MapLibre vector source `tiles: [...]`
 - [`apps/frontend/src/lib/mvtLayerMetadata.ts:84-88`](../../apps/frontend/src/lib/mvtLayerMetadata.ts#L84-L88) — `metadataMatchesRun()` checks `source_refs.river_network_version_id` staleness
 - [`services/production_closure/scale_validation.py:56`](../../services/production_closure/scale_validation.py#L56) — `MVT_ENDPOINT_REFERENCES` exercises the route as a live performance check
@@ -126,7 +147,7 @@ path that currently keys on `river_segment_id`**. Three mitigation paths exist:
 
 **Implication for PR scope:** must extend PR 6 (#566) audit scope to:
 
-- [`services/tiles/mvt.py:1473-1480`](../../services/tiles/mvt.py#L1473-L1480) — `tile_cache` source-version identity
+- `services/tiles/mvt.py` `tile_cache` source-version identity (current counterparts `_ensure_tile_layer()` / `_cache_layer_metadata()`)
 - [`apps/api/routes/flood_alerts.py:1434-1487`](../../apps/api/routes/flood_alerts.py#L1434-L1487)
   — `_fetch_river_network_mvt_tile_bytes` SQL must match the new
   `core.river_segment.geom` MultiLineString shape (already MultiLineString

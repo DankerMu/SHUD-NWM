@@ -73,7 +73,7 @@ round 5 的提交前测量关对本文全部坐标做了读回核实，D3/D5 两
 本轮两次算错都是这么来的，其中一条 round-3 的 verifier 还曾标成「已核实正确」。
 上面的事实基线表（SHA 钉住）与任何带 `49cf31316c:` / `53c39b99c:` / `92140f2e1:` / `493a0d83e:`
 前缀的坐标**不在重解范围内**，也正因为同一坐标字符串在本文有多种含义（`:2475` 就有三种），
-这次是逐处按上下文改，没有做全局替换。检测工具与后续清理见 #2423。
+这次是逐处按上下文改，没有做全局替换。已闭环（#2423）：最后一处陈旧坐标 `_event_matches_candidate_rows` 已在合并 SHA `2ee1f53ed` 上逐符号重指并读回；坐标体检脚本按 YAGNI 不做。
 
 ## D1/D2 — 已移出本 change（#1186 列举面）
 
@@ -136,7 +136,7 @@ round 5 的提交前测量关对本文全部坐标做了读回核实，D3/D5 两
 ### 读侧：repository accessor
 
 - `FileOrchestrationJournalRepository.operator_reentry_confirmations(*, source_id, cycle_time, model_id, decision) -> list[dict]`：
-  - **必须用 `_cycle_rows(source_id, cycle_time, model_id=None)`** 读取 `pipeline_events`（记忆化视图），再按 `details.model_id` 过滤。按 model 读时，`_filter_cycle_rows_for_model`（def `:870`）在 forecast_cycle 行为 terminal success 时置 `cycle_terminated`，`_event_matches_candidate_rows`（`:13434-13443`）会丢弃全部 forecast_cycle 事件，而 breaker/预算候选正是这种形状（F3）。不读 bounded `candidate_state`，所以 `event_limit` 截断不会漏读；
+  - **必须用 `_cycle_rows(source_id, cycle_time, model_id=None)`** 读取 `pipeline_events`（记忆化视图），再按 `details.model_id` 过滤。按 model 读时，`_filter_cycle_rows_for_model`（def `:870`）在 forecast_cycle 行为 terminal success 时置 `cycle_terminated`，`_event_matches_candidate_rows`（`2ee1f53ed:services/orchestrator/file_orchestration_journal.py` def `:13706`，`forecast_cycle` 分支 `:13719-13728`）会丢弃全部 forecast_cycle 事件，而 breaker/预算候选正是这种形状（F3）。不读 bounded `candidate_state`，所以 `event_limit` 截断不会漏读；
   - 过滤条件：`entity_type=="forecast_cycle"`、`event_type=="operator_reentry_confirmation"`、`details.model_id` 与 `details.decision` 精确相等；
   - 返回 `details` 列表；任何读失败返回 `[]`，不抛。
 - 调度侧经 `getattr(context.active_repository, "operator_reentry_confirmations", None)` 注入。accessor 缺失时（DB plane、测试替身）一律视为无确认物，行为逐字节不变，与 #1157 D5 同形。

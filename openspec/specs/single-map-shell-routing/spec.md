@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change m26-unified-map-display. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: 展示端为单一全屏地图入口，无顶部导航
 
 展示端 SHALL 以根路由 `/` 渲染单一全屏地图页（`DisplayMapPage`），且 `AppShell` MUST NOT 再渲染顶部 `NavBar`（全国总览/水文气象/气象数据/水文预报/洪水预警/产品监控 等导航链接）。地图区域 SHALL 占满视口高度（去除 `--m11-nav-height` 预留）。
@@ -34,7 +36,8 @@ TBD - created by archiving change m26-unified-map-display. Update Purpose after 
 
 #### Scenario: 深链原始 search 不丢失
 - **WHEN** 用户访问带状态的深链（如 `/meteorology?source=IFS&time=2026-06-05T18:00:00Z`）
-- **THEN** 重定向落点保留原始 `source`/`time` 等参数并附加 `layer=met-stations`；若语义映射键与原始 search 同名，取原始 search 的值
+- **THEN** 重定向落点保留原始 `source`/`time` 等参数并附加 `metStations=1`；若语义映射键与原始 search 同名，取原始 search 的值
+- **AND** 重定向落点 MUST NOT 附加已退役的主图层状态 `layer=met-stations`
 
 #### Scenario: 缺 basin 上下文的 segment 深链 honest 处理
 - **WHEN** 用户访问 `/segments/:segmentId` 但无法从 query 解析出所属 basin
@@ -56,4 +59,3 @@ TBD - created by archiving change m26-unified-map-display. Update Purpose after 
 - **WHEN** viewer 在 runtime config 同时报告 `service_role=display_readonly` 与 `display_readonly=true` 时访问 `/ops`
 - **THEN** 渲染只读诊断面而不重定向到 `/`
 - **AND** runtime config 缺失、冲突或不是 display_readonly 时仍按既有 RBACGate 拒绝
-

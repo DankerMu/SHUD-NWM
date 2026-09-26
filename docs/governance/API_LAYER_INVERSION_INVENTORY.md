@@ -27,6 +27,11 @@ deduplicated audit findings:
 - `services/production_closure/readonly_db_validation.py`: imports
   `apps.api.main` and `apps.api.routes`, counted as two audit findings.
 
+The `Line` column below is that 2026-06-11 pre-cleanup measurement, not a
+current coordinate; read it at `0135f4f58` (tag `v0.0.2`, 2026-06-08, the
+newest pre-cleanup commit in this repository), where all nine rows resolve,
+e.g. `git show 0135f4f58:services/tiles/mvt.py | sed -n 83p` (#2085).
+
 | File | Line | Import statement | Imported module | Owner area | Counted by `apps-api-layer-inversion` | Follow-up |
 |---|---:|---|---|---|---|---|
 | `services/tiles/mvt.py` | 83 | `from apps.api.errors import ApiError` | `apps.api.errors` | Tiles / MVT helper boundary | Yes, deduped into the `services/tiles/mvt.py` `apps.api.errors` finding | #418 |

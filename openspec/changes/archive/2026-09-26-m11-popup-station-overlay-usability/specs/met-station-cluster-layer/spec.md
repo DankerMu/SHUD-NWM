@@ -1,9 +1,4 @@
-# met-station-cluster-layer Specification
-
-## Purpose
-TBD - created by archiving change m26-unified-map-display. Update Purpose after archive.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: 气象代站作为可切换的 clustered-GeoJSON 图层
 
@@ -62,11 +57,3 @@ The station primitive SHALL be controlled by an independent station-overlay togg
 #### Scenario: 全国总览无可用流域版本时开启代站图层的 honest 空态
 - **WHEN** 处于全国总览、没有任何可解析的流域版本上下文，且用户开启"气象代站"图层（如经 `/meteorology`→`/?metStations=1` 进入）
 - **THEN** MUST NOT 以无流域身份误打接口或拉全量，显示"暂无可用流域版本以加载气象代站"类 honest 空态；该判定不依赖任何 `basinId` URL 键（流域详情模式已退役，#2109 裁决 B）
-
-### Requirement: 代站图层为未来 station-MVT 预留切换抽象
-
-代站 primitive SHALL 以 `layerId`/`source` 抽象组织，使未来切换到后端 station-MVT 点图层瓦片端点时无需重写交互/popup 逻辑。本变更 MUST NOT 实现后端 station-MVT 端点（属解耦平行 issue）。
-
-#### Scenario: 抽象预留不实现后端瓦片
-- **WHEN** 审阅本变更代站图层实现
-- **THEN** primitive 通过 `layerId`/`source` 抽象引用数据源，且不包含后端 station-MVT 端点实现（仅 clustered-GeoJSON）

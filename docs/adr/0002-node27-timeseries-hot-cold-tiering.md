@@ -566,8 +566,8 @@ on PR #1377 (2026-08-14)):
   ahead of `variable`/`valid_time`). The in-repo query shapes measured to use
   this index are two reads — the #1338 pre-drop baseline Q1/Q8 shape captures:
   the national-tile `typed_values` ts-access leg
-  (`services/tiles/mvt.py:603-651`) and the source-identity stats probe
-  (`mvt.py:530-553`) — both binding `run_id` + `variable` + `valid_time` +
+  (`services/tiles/mvt.py@af49ced22:603-651`) and the source-identity stats probe
+  (`mvt.py@af49ced22:530-553`) — both binding `run_id` + `variable` + `valid_time` +
   `rnv` with **no** `basin_version_id`, a shape the retained
   `..._mvt_selected_identity_valid_time_discovery_idx` cannot serve (its 2nd
   column is `basin_version_id`); the 5,571 cumulative `idx_scan` are **not**

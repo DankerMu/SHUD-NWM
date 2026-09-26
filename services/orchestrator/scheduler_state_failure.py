@@ -182,7 +182,8 @@ _REMEDY_NON_CAUSAL_CLASSIFIERS = frozenset(
     {
         # OUT_OF_MEMORY: re-running the same ``memory_gb`` reproduces it.
         "resource_configuration",
-        # POLICY_BLOCKED / PERMISSION_DENIED / TEMPLATE_NOT_ALLOWED (retry.py:183).
+        # POLICY_BLOCKED / PERMISSION_DENIED / TEMPLATE_NOT_ALLOWED: the inline
+        # set of the ``"policy_blocked"`` arm of ``retry.failure_classifier``.
         "policy_blocked",
     }
 )

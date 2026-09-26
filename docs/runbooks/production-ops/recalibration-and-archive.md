@@ -191,6 +191,10 @@ manifest——**不是** §3.1.2 的 cutover declaration。
 `added:0 removed:0 package_changed:0 refused:0`——`removed:0` 正是上面那段的实证
 （确实删了四个 model_id，闸却看不到）。
 
+> **M1′ 已被 #1816 接替。** 上面这次写进 manifest 的 Huai-MAIN M1′ id（`dg_281ff8c7…` gfs /
+> `dg_03b3cd97…` ifs）在 2026-08-24 #1816 重发布时被换掉；8 个流域 16 行的 old→new 映射与首趟暖启证据见
+> [`../receipts/2026-08-24-issue-1816-republish-identity.md`](../receipts/2026-08-24-issue-1816-republish-identity.md)。
+
 **触发手动 refresh 的坑**：refresh 的 unit 带
 `ExecCondition=... ! is-active nhms-compute-scheduler.service`，而 scheduler 每 5 分钟
 跑一趟 oneshot。`systemctl --user start` 返回 0 **不代表跑了**（condition 不满足会静默

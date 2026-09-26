@@ -241,20 +241,23 @@ CREATE TABLE core.model_instance (
 > （grep 口径：`grep -rn active_flag packages services workers scripts apps db`，
 > 剔除同名但不同表的列——`core.basin_version` / `met.met_station` /
 > `met.interp_weight`——和纯写入点
-> （INSERT 字面量、schema DDL、API payload 直通），2026-09-02）。列出它们是为了
+> （INSERT 字面量、schema DDL、API payload 直通），2026-09-02；`services/tiles/mvt.py`
+> 条目 2026-09-26 按符号重导，括注行号只是当时的辅助值，#2085）。列出它们是为了
 > 能看清翻这个 flag 的爆炸半径；写这一列的路径除下文的激活闸门外还有
 > `workers/model_registry/qhh_bootstrap_registry.py::_activate_qhh_model`
 > 与 `:1675-1679` 的持久化置 inactive，不在读者清单内：
 >
-> - **展示成员判定**：全国 river-network MVT（`services/tiles/mvt.py:367`，
->   另见 `:442`、`:653`、`:691`、`:1411`）；
-> - **展示 source-version 摘要**：`services/tiles/mvt.py:1426`
->   （`national_river_network_source_version`，方言相关谓词）、`:2044`
->   （`national_discharge_valid_times`，函数头 `:1773`，谓词已下沉到
->   `_national_discharge_coverage_rows`）；
-> - **全国 discharge 交集分母**（#2009）：`services/tiles/mvt.py:2004`
->   （`_national_discharge_coverage_rows` 的 `SELECT DISTINCT
->   mi.river_network_version_id … WHERE mi.active_flag`）。爆炸半径在展示面里最大：
+> - **展示成员判定**：全国 MVT SQL，均在 `services/tiles/mvt.py::postgis_tile_sql()` 内——
+>   river-network-national 的 `network_filter` `EXISTS (… mi.active_flag = true)`（当前 `:764-765`）
+>   与该层的 `source_identity_stats_sql` 存在性探针（当前 `:851`）；hydro-national 的
+>   `source_identity_stats_sql` 探针里内联的 run 发现子查询（当前 `:1028`）与 `latest_runs` CTE（当前 `:1059`）；
+> - **展示 source-version 摘要**：`national_river_network_source_version()`
+>   （当前 def `:1922`，方言相关谓词 `:1932`）、`national_discharge_source_version()`
+>   （当前 def `:1831`，谓词 `:1890`）；`national_discharge_valid_times()`（当前 def `:2019`）
+>   自身不含该谓词，经 `_national_discharge_coverage_rows` 间接读取（调用点当前 `:2075`）；
+> - **全国 discharge 交集分母**（#2009）：`services/tiles/mvt.py::_national_discharge_coverage_rows()`
+>   （当前 def `:2264`；`SELECT DISTINCT mi.river_network_version_id … WHERE mi.active_flag`
+>   当前 `:2434-2436`，同函数 ranked-runs 子查询的过滤当前 `:2416`）。爆炸半径在展示面里最大：
 >   这条 query 是 `/api/v1/layers/discharge/cycles`、per-cycle valid-times 与
 >   `/api/v1/layers` catalog 三者共用的**交集分母**，一个 flag 翻转就会改变分母集合，
 >   而交集是 fail-closed 的——某个 network 被激活却没有对应 cycle 的 display-ready run
@@ -331,7 +334,8 @@ CREATE TABLE core.model_instance (
 > 153 个 `dg_*` 行中 11 个所属 `basin_version` 没有 active 行；`core.model_instance`
 > 共 197 行，baseline/`dg_*` 按 `model_id like 'dg_%'` 二分）。真正危险的动作是为了绕开这两道约束而去
 > 松 `lifecycle_state` 或改约束本身。
-> 另：`services/tiles/mvt.py:367` 的成员谓词里没有 baseline/variant 判别，
+> 另：`services/tiles/mvt.py::postgis_tile_sql()` river-network-national 的 `network_filter`
+> （当前 `:764-765`）这条成员谓词里没有 baseline/variant 判别，
 > 「展示成员只认 baseline 行上的这个 flag」是当前数据状态下的观察
 > （只有 baseline 行是 true），不是查询语义。
 > `core.basin_version.active_flag` 的（无）权威见 [§5.2 `core.basin_version` 的注记](#52-corebasin_version)。

@@ -52,9 +52,10 @@ forecast 运行超 2 小时后由操作员决定取消），暂时退出业务�
 43799 条河网：`core.model_instance` 的 baseline 行 `basins_hhe_shud` 一直是
 `active_flag = t / lifecycle_state = active`（当时只处理了 registry 里的两条 `dg_*` 行）。
 全国 river-network MVT 的成员判据就是这一条
-（[`services/tiles/mvt.py:361`](../../../services/tiles/mvt.py) 的
+（[`services/tiles/mvt.py`](../../../services/tiles/mvt.py) `postgis_tile_sql()` 里 river-network-national
+的 `network_filter`，当前 `:764-765`：
 `EXISTS (... model_instance mi WHERE mi.river_network_version_id = rnv.river_network_version_id AND mi.active_flag = true)`），
-且 `national_river_network_source_version`（同文件 `:1374`）的 digest 也只看 active 集合——
+且 `national_river_network_source_version()`（同文件，当前 def `:1922`、方言谓词 `:1932`）的 digest 也只看 active 集合——
 所以这条行不翻，tile 内容和 ETag 都不会变。
 
 **退役流域时必须做的第 5 步**：把该流域的 baseline `basins_<slug>_shud` 行走
@@ -220,7 +221,8 @@ basins_hys_* 后继」**，所以 #1701 原计划的「换 id + 状态延续」�
 > （`JOIN core.model_instance ... WHERE mi.active_flag = true`），DB 是真值。
 >
 > **tile 字节不变不一定是缓存**。`cache_key` 含 `tile.source_version`
-> （[`services/tiles/mvt.py:139`](../../../services/tiles/mvt.py)），source_version 一变缓存键必变，
+> （[`services/tiles/mvt.py`](../../../services/tiles/mvt.py) `cache_key()`，当前 def `:299`、
+> `"source_version": tile.source_version` 在 `:305`），source_version 一变缓存键必变，
 > 取到的就是新生成的 tile。字节不变要先确认挑的 tile **真的覆盖**该流域——
 > 本次第一轮就是按名字猜到 98°E/34°N，五个 tile 全部不覆盖，白测一遍。
 
