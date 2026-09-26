@@ -4,9 +4,10 @@ The cohort master is minted once above ``max(floors)`` (#2404), so charging ever
 member the master's attempt billed a low-floor member for retries it never
 consumed.  The master now records each floored member's floor at reservation
 (``retry_attempt_floors``, first-write frozen), and reconcile charges each member
-``min(eff, own_base + (eff - (max(floors) + 1)))`` -- ``own_base`` is ``floor + 1``
-for a listed member and 0 for an unlisted one -- or the shared ``eff`` when the
-list is empty or ``eff`` is not above the largest floor.
+``min(eff, floor + 1 + (eff - (max(floors) + 1)))`` for a listed member, or the
+shared ``eff`` for an unlisted member (a forecast restart without a budget floor,
+which may already carry forecast history), when the list is empty, or when ``eff``
+is not above the largest floor.
 
 Seams: the budget scenarios run the REAL scheduler candidate construction over a
 REAL file journal, handed to the REAL ``orchestrate_cycle`` / reservation path
@@ -28,6 +29,8 @@ import pytest
 RETRY_ATTEMPT_FLOORS_FIELD = "retry_attempt_floors"
 _RETRY_DECISION = "retry_strict_warm_start_terminal_init_state_mismatch"
 _BLOCKED_DECISION = "blocked_strict_warm_start_init_state_mismatch"
+#: The strict-lane retry of a member whose last forecast attempt FAILED.
+_FAILED_RETRY_DECISION = "retry_strict_warm_start_retry_run_manifest_mismatch"
 
 
 def _spent_full_chain_rows(model_id: str, suffixes: tuple[str, ...], first_slurm: int) -> list[dict[str, Any]]:
@@ -123,7 +126,11 @@ def test_inline_auto_retry_of_a_mixed_floor_cohort_advances_every_member(
 
     The added ``eff - (max(floors) + 1)`` term is what carries the master's own
     inline attempt to every member: each member's charge moves with each of its
-    submissions, and no member is charged more than the shared attempt.
+    submissions, and no member is charged more than the shared attempt.  Wired as
+    production wires it: scheduler ``retry_limit`` 3 == the inline service's
+    ``max_retries`` (``scheduler_state_types.DEFAULT_RETRY_LIMIT`` /
+    ``SlurmGatewaySettings.max_retries``), so no member's total submissions exceed
+    the limit: next pass A (charged 2) retries at floor 2, B (charged 3) is blocked.
     """
 
     from services.orchestrator.file_orchestration_journal import (
@@ -143,10 +150,14 @@ def test_inline_auto_retry_of_a_mixed_floor_cohort_advances_every_member(
 
     models = ("model_a", "model_b")
     root, scheduler = _seed_cohort_budget_journal(
-        monkeypatch, tmp_path, models, _spent_full_chain_rows("model_b", ("", "_retry_1"), 600)
+        monkeypatch, tmp_path, models, _spent_full_chain_rows("model_b", ("", "_retry_1"), 600), retry_limit=3
     )
     built = scheduler(models)
-    candidates, _decisions = _pass_decisions(built)
+    candidates, decisions = _pass_decisions(built)
+    assert decisions == {
+        "model_a": (_RETRY_DECISION, {"stage": "forecast", "attempt": 0}),
+        "model_b": (_RETRY_DECISION, {"stage": "forecast", "attempt": 1}),
+    }
     client = FakeCycleSlurmClient(fail_stage="forecast", array_results_by_stage={"forecast": ["failed", "failed"]})
     before = {str(row["job_id"]) for row in _forecast_rows(root)}
     _basins, result = _rerun(
@@ -176,6 +187,91 @@ def test_inline_auto_retry_of_a_mixed_floor_cohort_advances_every_member(
     assert {model_id: sorted(values) for model_id, values in charges.items()} == {
         "model_a": [1, 2],
         "model_b": [2, 3],
+    }
+
+    later, after = _pass_decisions(scheduler(models))
+    assert after == {
+        "model_a": (_FAILED_RETRY_DECISION, {"stage": "forecast", "attempt": 2}),
+        "model_b": ("permanent_failure", 3),
+    }
+    assert [candidate.model_id for candidate in later] == ["model_a"]
+
+
+def test_partial_nested_retry_keeps_the_low_floor_members_own_charge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec scenario (review round 1): limit 3, A floor 0, B floor 2, ``_retry_3`` then only A fails.
+
+    The partial-array retry narrows the active basins to A before reserving
+    ``_retry_4``; the nested master still records the floors of the master it
+    retries, so A is charged 2 (not 4) and keeps a retry next pass.
+
+    Deviation from production wiring (reported): the inline service declines at
+    ``retry_count >= max_retries`` (``retry.classify_failure``), so with the
+    scheduler's limit 3 and ``max_retries=3`` ``_retry_3`` is never retried in the
+    same call.  ``max_retries=4`` reaches the geometry the spec names.
+    """
+
+    from services.orchestrator.file_orchestration_journal import (
+        FileJournalRetryService,
+        FileOrchestrationJournalRepository,
+    )
+    from services.orchestrator.retry import RetryConfig
+    from tests.test_orchestration_chain import FakeCycleSlurmClient
+    from tests.test_retry_mint_floor import (
+        _cohort_run_id,
+        _forecast_rows,
+        _new_forecast_ids,
+        _pass_decisions,
+        _rerun,
+        _seed_cohort_budget_journal,
+    )
+
+    models = ("model_a", "model_b")
+    root, scheduler = _seed_cohort_budget_journal(
+        monkeypatch,
+        tmp_path,
+        models,
+        _spent_full_chain_rows("model_b", ("", "_retry_1", "_retry_1_retry_2"), 500),
+        retry_limit=3,
+    )
+    built = scheduler(models)
+    candidates, _decisions = _pass_decisions(built)
+    # ``_retry_3``: A fails, B succeeds; the nested ``_retry_4`` (A only) fails again.
+    client = FakeCycleSlurmClient(array_results_by_stage={"forecast": [["failed", "succeeded"], ["failed"]]})
+    before = {str(row["job_id"]) for row in _forecast_rows(root)}
+    _basins, result = _rerun(
+        tmp_path,
+        monkeypatch,
+        root,
+        built,
+        candidates,
+        slurm_client=client,
+        retry_service=FileJournalRetryService(
+            FileOrchestrationJournalRepository(root), RetryConfig(max_retries=4, backoff_schedule=[0])
+        ),
+    )
+
+    # A partially failed cohort terminal: B's task succeeded, A's did not.
+    assert result.status == "forcing_ready_partial"
+    forecast_tasks = [
+        [task["model_id"] for task in item["tasks"]] for item in client.submissions if item.get("stage") == "forecast"
+    ]
+    assert forecast_tasks == [["model_a", "model_b"], ["model_a"]]
+    base = f"job_{_cohort_run_id(models)}_forecast"
+    masters = [new for new in _new_forecast_ids(root, before) if new.startswith("job_cycle_")]
+    assert masters == [f"{base}_retry_3", f"{base}_retry_4"]
+    for master_id in masters:
+        assert _master(root, master_id)[RETRY_ATTEMPT_FLOORS_FIELD] == [
+            {"model_id": "model_a", "attempt": 0},
+            {"model_id": "model_b", "attempt": 2},
+        ]
+    assert _member_charges(root, before) == {"model_a": [1, 2], "model_b": [3]}
+
+    _candidates, after = _pass_decisions(scheduler(models))
+    assert after == {
+        "model_a": (_FAILED_RETRY_DECISION, {"stage": "forecast", "attempt": 2}),
+        "model_b": (_BLOCKED_DECISION, 3),
     }
 
 
@@ -259,13 +355,14 @@ def test_cohort_without_a_floored_member_keeps_the_shared_charge(
     assert _member_charges(root, before) == {"model_a": [0], "model_b": [0]}
 
 
-def test_unlisted_member_does_not_forget_an_attempt_charged_under_an_older_prefix(
+def test_unlisted_member_with_more_history_is_charged_the_shared_attempt_and_keeps_its_own(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Pin: an unlisted member (base 0) charged 2 under an older row still reads 2 next pass.
+    """An unlisted member (no floor) is charged the master's ``eff``; its older, higher charge still reads.
 
-    The budget reads the maximum over all of a candidate's authoritative rows, so
-    the lower reconciled charge of THIS master never lowers what was charged.
+    model_b was charged 2 under an older row and rides this cohort without a
+    floor; model_a's floor 0 mints ``_retry_1`` (eff 1).  model_b is charged the
+    shared 1, and the budget's max over all rows still reads 2 next pass.
     """
 
     from tests.test_retry_mint_floor import (
@@ -298,10 +395,60 @@ def test_unlisted_member_does_not_forget_an_attempt_charged_under_an_older_prefi
     before = {str(row["job_id"]) for row in _forecast_rows(root)}
     _basins, result = _rerun(tmp_path, monkeypatch, root, built, candidates)
     assert result.status == "succeeded"
-    assert _member_charges(root, before)["model_a"] == [1]
+    assert _member_charges(root, before) == {"model_a": [1], "model_b": [1]}
 
     _candidates, after = _pass_decisions(scheduler(models))
     assert after["model_b"] == (_RETRY_DECISION, {"stage": "forecast", "attempt": 2})
+
+
+def test_unlisted_member_below_the_masters_attempt_is_charged_the_shared_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec scenario: a member without a recorded floor keeps the shared charge (review round 1).
+
+    Retry limit 2.  X (model_a) spent attempt 1 and joins as a forecast restart
+    WITHOUT a floor (the manifest-missing / quarantine / missing-output shape);
+    Y (model_b) floor 1 mints ``_retry_2`` (eff 2).  X is charged 2 and is blocked
+    at the limit next pass.  Charging it base 0 would leave its budget read at 1
+    and buy it one more forecast submission.
+    """
+
+    from tests.test_retry_mint_floor import (
+        _cohort_run_id,
+        _forecast_rows,
+        _new_forecast_ids,
+        _pass_decisions,
+        _rerun,
+        _seed_cohort_budget_journal,
+    )
+
+    models = ("model_a", "model_b")
+    root, scheduler = _seed_cohort_budget_journal(
+        monkeypatch,
+        tmp_path,
+        models,
+        _spent_full_chain_rows("model_a", ("", "_retry_1"), 500)
+        + _spent_full_chain_rows("model_b", ("", "_retry_1"), 600),
+    )
+    built = scheduler(models)
+    candidates, decisions = _pass_decisions(built)
+    assert decisions == {
+        "model_a": (_RETRY_DECISION, {"stage": "forecast", "attempt": 1}),
+        "model_b": (_RETRY_DECISION, {"stage": "forecast", "attempt": 1}),
+    }
+    (x_candidate,) = [candidate for candidate in candidates if candidate.model_id == "model_a"]
+    x_candidate.state_evidence.pop("retry_attempt_floor")
+    before = {str(row["job_id"]) for row in _forecast_rows(root)}
+    _basins, result = _rerun(tmp_path, monkeypatch, root, built, candidates)
+    assert result.status == "succeeded"
+    master_id = f"job_{_cohort_run_id(models)}_forecast_retry_2"
+    assert [new for new in _new_forecast_ids(root, before) if new.startswith("job_cycle_")] == [master_id]
+    assert _master(root, master_id)[RETRY_ATTEMPT_FLOORS_FIELD] == [{"model_id": "model_b", "attempt": 1}]
+    assert _member_charges(root, before) == {"model_a": [2], "model_b": [2]}
+
+    later, after = _pass_decisions(scheduler(models))
+    assert after == {"model_a": (_BLOCKED_DECISION, 2), "model_b": (_BLOCKED_DECISION, 2)}
+    assert later == []
 
 
 def test_one_member_cohort_after_an_occupied_id_skip_keeps_the_masters_attempt(tmp_path: Path) -> None:
@@ -566,8 +713,8 @@ def test_manual_retry_clone_does_not_carry_floors(tmp_path: Path) -> None:
         ([{"model_id": "a", "attempt": 0}, {"model_id": "b", "attempt": 1}], "b", 2, 2),
         ([{"model_id": "a", "attempt": 0}, {"model_id": "b", "attempt": 1}], "a", 3, 2),  # inline retry
         ([{"model_id": "a", "attempt": 0}, {"model_id": "b", "attempt": 1}], "b", 3, 3),
-        ([{"model_id": "b", "attempt": 1}], "c", 2, 0),  # unlisted: base 0
-        ([{"model_id": "b", "attempt": 1}], "c", 4, 2),  # unlisted + two master skips
+        ([{"model_id": "b", "attempt": 1}], "c", 2, 2),  # unlisted: shared (fail-closed)
+        ([{"model_id": "b", "attempt": 1}], "c", 4, 4),  # unlisted + two master skips: shared
         ([{"model_id": "a", "attempt": 1}], "a", 5, 5),  # one-member cohort: always eff
         ([{"model_id": "a", "attempt": 5}], "a", 2, 2),  # eff <= max floor: shared
     ],

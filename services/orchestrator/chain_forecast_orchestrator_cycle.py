@@ -730,8 +730,14 @@ class ForecastOrchestratorCycleMixin:
             # #2542: the master is minted above its members' largest floor, so
             # the reconcile needs each member's own floor to charge it.  Same
             # capture-once reservation shape as the provenance lists above;
-            # written only when some basin carries a forecast floor.
-            retry_attempt_floors = cohort_retry_attempt_floors(context.active_basins, stage.stage)
+            # written only when some basin carries a forecast floor.  A partial
+            # nested retry narrows ``active_basins`` to the failed subset, so it
+            # inherits the floors of the master it retries.
+            retry_attempt_floors = (
+                context.inherited_retry_attempt_floors
+                if context.inherited_retry_attempt_floors is not None
+                else cohort_retry_attempt_floors(context.active_basins, stage.stage)
+            )
             if retry_attempt_floors:
                 reservation_evidence[RETRY_ATTEMPT_FLOORS_FIELD] = retry_attempt_floors
         elif (

@@ -22,7 +22,8 @@
 - [x] 1.2 `_reserve_cycle_stage` writes the floors of the forecast cohort master from each active basin's `retry_attempt_floor`.
 - [x] 1.3 Reconcile sets each member's per-model `retry_count`:
   - floors absent or empty: the shared charge `eff`;
-  - otherwise `min(eff, own_base + (eff - (max(floors)+1)))`, where `own_base` is `own_floor+1` for a listed member and `0` for an unlisted one.
+  - otherwise, for a listed member `min(eff, own_floor + 1 + (eff - (max(floors)+1)))`; an unlisted member is charged `eff` (review round 1);
+  - a nested partial-retry master records the floors of the master it retries (review round 1).
   - if `eff < max(floors)+1`, fall back to the shared charge `eff`.
 - [x] 1.4 Tests:
   - Flip `test_mixed_floor_cohort_mints_past_every_member_and_charges_the_shared_attempt`. The master is still `_retry_2`. A gets `retry_count==1` and a retry decision next pass. B gets `retry_count==2` and is blocked next pass.
@@ -33,7 +34,8 @@
   - A mixed-floor version of the `failure_lane_*_stays_within_the_limit` test passes.
   - A single-model (one-member cohort) charge after an occupied-id skip is unchanged (pin).
   - A post-deploy cohort with no floored member (empty list) keeps the shared charge.
-  - An unlisted member already charged 2 under an older prefix still reads 2 next pass (pin).
+  - An unlisted member (forecast restart without a floor, history N < eff) is charged `eff` and reads ≥ eff next pass (review round 1).
+  - A partial nested retry (limit 3, A floor 0, B floor 2, `_retry_3` then only A fails and `_retry_4`) charges A 2 and A's next decision is a retry (review round 1).
   - The manual-retry clone does not carry floors.
   - A master with floors whose effective attempt is ≤ max(floors) (reused id) keeps the shared charge (pin).
 - [x] 1.5 Update the job-retry-mechanism requirement and scenario (spec delta).

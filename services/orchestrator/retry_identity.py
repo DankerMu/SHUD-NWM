@@ -134,20 +134,22 @@ def member_charged_retry_attempt(floors: Any, model_id: str, effective_attempt: 
     above the largest floor, so each member is charged its own next attempt plus
     every further attempt the master itself consumed (an inline retry of the same
     call, or an occupied id skipped forward):
-    ``min(effective, own_base + (effective - (max(floors) + 1)))`` with
-    ``own_base = own floor + 1`` for a recorded member and ``0`` for an unrecorded
-    one.  A master that is not above its largest floor (an id reused without the
-    floored minter) falls back to the shared attempt, fail-closed.
+    ``min(effective, own floor + 1 + (effective - (max(floors) + 1)))``.  An
+    unrecorded member is a forecast restart without a budget floor (manifest-missing,
+    §8.7 quarantine, missing-output recompute) that may already carry forecast
+    history, so it is charged the shared attempt, fail-closed.  So is every member
+    of a master that is not above its largest floor (an id reused without the
+    floored minter).
     """
 
     recorded = normalize_retry_attempt_floors(floors)
     if not recorded:
         return effective_attempt
     minted_floor = max(entry["attempt"] for entry in recorded) + 1
-    if effective_attempt < minted_floor:
+    own_floor = next((entry["attempt"] for entry in recorded if entry["model_id"] == model_id), None)
+    if own_floor is None or effective_attempt < minted_floor:
         return effective_attempt
-    own_base = next((entry["attempt"] + 1 for entry in recorded if entry["model_id"] == model_id), 0)
-    return min(effective_attempt, own_base + (effective_attempt - minted_floor))
+    return min(effective_attempt, own_floor + 1 + (effective_attempt - minted_floor))
 
 
 def _coerce_attempt(value: Any) -> int:

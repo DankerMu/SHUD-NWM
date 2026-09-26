@@ -1167,6 +1167,9 @@ def test_chain_type_exports_preserve_legacy_identity_and_dataclass_contracts() -
                 # #2076: invocation-local last canonical precipitation mirror
                 # status, read by the chain-exit recovery; additive with a default.
                 ("canonical_precip_mirror_status", None),
+                # #2542: invocation-local floors a partial nested retry
+                # inherits from the master it retries; additive with a default.
+                ("inherited_retry_attempt_floors", None),
             ],
         ),
         "ModelRunAssembly": (

@@ -14,7 +14,7 @@ Five file-journal (db-free) scheduler/chain defects share one theme: the identit
 
 - **#2542:**
   - The cohort master records a per-member floor field `retry_attempt_floors` at reservation.
-  - Reconcile charges each member its own base plus the extra attempts the master consumed: `own_floor+1` for a floored member, `0` for an unlisted one, capped at the shared charge. An empty or absent floor list keeps the shared charge.
+  - Reconcile charges each member its own base plus the extra attempts the master consumed: `own_floor+1` for a floored member, capped at the shared charge; an unlisted member keeps the shared charge. An empty or absent floor list keeps the shared charge.
   - The master id is still minted above `max(floors)`.
   - A master row without the field keeps the shared charge.
 - **#2557:**

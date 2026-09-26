@@ -21,11 +21,17 @@ both ways a same-``run_id`` rerun stages a later attempt:
 
 Scope of the verdict: on these two rerun paths the active-and-stale state is not
 reachable, and the lag exists only on non-active terminal rows.  One path is NOT
-exercised here: a manual retry of a per-model ``fcst_`` run id through
-``FileJournalRetryService`` resets a failed hydro row to ``pending`` at the old
-attempt, and nothing finalizes that row when the manual job ends.  Whether a later
-forced resubmit plus rejection then leaves an active row at a stale attempt is
-unproven either way.  These tests are pins for the two exercised paths only.
+exercised here: ``FileJournalRetryService.attempt_manual_retry`` (via
+``_create_pending_manual_retry_job``) of a per-model ``fcst_`` run id resets a
+failed hydro row to ``pending`` at the old attempt, and nothing finalizes that row
+when the manual job ends.  That entry has no production caller: the API's manual
+retry wires the database ``RetryService`` (``apps/api/routes/pipeline.py:159-163``,
+called at ``:581``), ``scripts/node22_manual_retry_failed_runs.py`` only reads the
+retry source for its preview (``:194``) and writes ``record_manual_repair``
+(``:257``), and the scheduler wires the file service for inline auto-retry only
+(``services/orchestrator/scheduler_core.py:96``).  If that state ever arises, the
+last test pins what the release entrypoints do with it: an active row at another
+attempt is never released.
 """
 
 from __future__ import annotations
@@ -213,3 +219,148 @@ def test_terminal_success_rerun_lags_only_on_a_row_no_release_may_touch(tmp_path
     # ... so the durable attempt lags (1 < 2), but the row is a non-active terminal success:
     # the attempt-2 rejection must leave it alone, and does.
     assert _hydro(root) == {"model_0": ("succeeded", 1), "model_1": ("succeeded", 1)}
+
+
+def _journal_master_at_attempt_two(root: Path) -> tuple[Any, dict[str, Any]]:
+    """Journal API only: a cohort master reclaimed to attempt 2 before any hydro row exists."""
+
+    from services.orchestrator.accepted_submit_identity import (
+        ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        AcceptedSubmitTransition,
+    )
+    from tests.gateway_reconcile_helpers import _versioned_master_reservation_record
+
+    repository = _repository(root)
+    record = _versioned_master_reservation_record(member_count=2)
+    assert repository.reserve_pipeline_job(dict(record)) is not None
+    job_id = str(record["job_id"])
+    repository.transition_pipeline_job_submit_evidence(
+        job_id,
+        AcceptedSubmitTransition.timeout(),
+        accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        expected_submission_attempt=1,
+        expected_statuses=("reserved",),
+        require_unbound=True,
+    )
+    held = repository.get_accepted_submit_pipeline_job(job_id)
+    assert repository.permit_pipeline_job_retry(
+        job_id,
+        accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        expected_submission_attempt=1,
+        expected_submission_attempt_started_at=held["submission_attempt_started_at"],
+    )
+    released = repository.get_accepted_submit_pipeline_job(job_id)
+    assert repository.reclaim_pipeline_job_reservation(
+        {
+            **record,
+            "status": "reserved",
+            "expected_submission_attempt": 1,
+            "expected_submission_attempt_started_at": released["submission_attempt_started_at"],
+            "submission_attempt": 2,
+        }
+    ) is not None
+    master = repository.get_accepted_submit_pipeline_job(job_id)
+    assert (master["status"], master["submission_attempt"]) == ("reserved", 2)
+    return repository, master
+
+
+def _drive_attempt_two_door(repository: Any, master: dict[str, Any], door: str) -> dict[str, Any]:
+    """Drive one release entrypoint at attempt 2 exactly as its production caller does; return the master."""
+
+    from services.orchestrator import reconcile as reconcile_module
+    from services.orchestrator.accepted_submit_identity import (
+        ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        AcceptedSubmitTransition,
+    )
+
+    job_id = str(master["job_id"])
+    if door == "rejected":
+        result = repository.reject_pipeline_job_submit_attempt(
+            str(master["idempotency_key"]),
+            pipeline_job_id=job_id,
+            expected_submission_attempt=2,
+            finished_at=datetime.now(UTC),
+            error_code="SBATCH_SUBMISSION_FAILED",
+            error_message="sbatch rejected the array",
+            stage="forecast",
+            job_type="run_shud_forecast_array",
+        )
+        assert result.committed
+        return repository.get_accepted_submit_pipeline_job(job_id)
+    repository.transition_pipeline_job_submit_evidence(
+        job_id,
+        AcceptedSubmitTransition.timeout(),
+        accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        expected_submission_attempt=2,
+        expected_statuses=("reserved",),
+        require_unbound=True,
+    )
+    if door == "absence_retry_permitted":
+        held = repository.get_accepted_submit_pipeline_job(job_id)
+        assert repository.permit_pipeline_job_retry(
+            job_id,
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=2,
+            expected_submission_attempt_started_at=held["submission_attempt_started_at"],
+        )
+        return repository.get_accepted_submit_pipeline_job(job_id)
+
+    class _NoCommentQuery:
+        def __call__(self, _key: str, **kwargs: Any) -> Any:
+            del kwargs
+            raise reconcile_module.ReconcileQueryUnavailable(
+                "accounting does not store job comments", reason_class="comment_accounting_unproven"
+            )
+
+    now = datetime.now(UTC) + timedelta(hours=1)
+    outcomes = reconcile_module.reconcile_reserved_unbound_jobs(
+        repository, comment_query=_NoCommentQuery(), grace=timedelta(0), now=lambda: now
+    )
+    assert [outcome.action for outcome in outcomes] == ["query_unavailable"]
+    held = repository.get_accepted_submit_pipeline_job(job_id)
+    assert repository.demote_operator_verified_reserved_job(
+        job_id,
+        accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        expected_submission_attempt=2,
+        expected_submission_attempt_started_at=held["submission_attempt_started_at"],
+        checked_by="operator-alice",
+        checked_at=now,
+        verification_note="sacct and squeue show no matching job in the attempt window",
+    ) is not None
+    return repository.get_accepted_submit_pipeline_job(job_id)
+
+
+@pytest.mark.parametrize(
+    ("door", "master_face"),
+    [
+        ("rejected", ("submission_failed", "rejected")),
+        ("absence_retry_permitted", ("reservation_lost", "absence_retry_permitted")),
+        ("operator_verified_absence", ("reservation_lost", "operator_verified_absence")),
+    ],
+)
+def test_another_attempts_active_row_is_never_released(
+    tmp_path: Path, door: str, master_face: tuple[str, str]
+) -> None:
+    """Spec scenario: an ACTIVE hydro row at attempt 1 survives every release door at attempt 2 byte-unchanged."""
+
+    from tests.gateway_reconcile_helpers import _append_cohort_placeholders
+
+    repository, master = _journal_master_at_attempt_two(tmp_path / "journal")
+    written = _append_cohort_placeholders(
+        repository, 2, common_updates={"status": "submitted", "error_code": None, "error_message": None}
+    )
+    before = {run_id: repository._hydro_run_for(run_id) for run_id in written}
+    assert {run_id: (row["status"], row["submission_attempt"]) for run_id, row in before.items()} == {
+        "fcst_gfs_2026071200_model_0": ("submitted", 1),
+        "fcst_gfs_2026071200_model_1": ("submitted", 1),
+    }
+
+    released = _drive_attempt_two_door(repository, master, door)
+
+    # The door really fired on the attempt-2 master ...
+    outcome = released["submit_outcome"] if door == "rejected" else released["reconciliation_decision"]
+    assert (released["status"], outcome) == master_face
+    assert released["submission_attempt"] == 2
+    # ... and left the other attempt's active rows exactly as they were.
+    reopened = _repository(repository.root)
+    assert {run_id: reopened._hydro_run_for(run_id) for run_id in written} == before
