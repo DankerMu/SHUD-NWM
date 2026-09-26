@@ -10442,6 +10442,13 @@ INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
     # would make every orchestrator PR pay for it as well.
     ("services/orchestrator/__init__.py", "tests/test_preserve_final_component_loop_spelling.py"): "edge-consumer",
     ("services/orchestrator/scheduler.py", "tests/test_preserve_final_component_loop_spelling.py"): "edge-consumer",
+    # #2548: the state-index retention suite imports
+    # `services.orchestrator.scheduler_generation` (hence the package
+    # `__init__`) for its prune-never-admits decision test. Its subject is the
+    # retention planner in packages/common/state_manager.py, whose rule selects
+    # it whole (as do the provider_mode_helpers.py, scheduler_limits.py and
+    # scheduler_generation.py rules); the package `__init__` is not a subject.
+    ("services/orchestrator/__init__.py", "tests/test_state_index_retention.py"): "edge-consumer",
     # -- edge-consumer: slurm array-job entry points ------------------------
     # tests/test_slurm_array_contract.py contracts the sbatch array entry
     # points, so it top-level-imports the `cli` module (and package) of five
@@ -10527,6 +10534,10 @@ INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
     # GFS/IFS/ERA5 adapter PR.
     ("workers/data_adapters/base.py", "tests/test_operator_reentry_confirmation.py"): "edge-consumer",
     ("workers/data_adapters/base.py", "tests/test_state_clone.py"): "edge-consumer",
+    # #2548: the state-index retention suite imports `cycle_id_for` to mint the
+    # cycle ids of the index entries it prunes — fixture material, like the
+    # neighbours above. It is selected whole by the state_manager.py rule.
+    ("workers/data_adapters/base.py", "tests/test_state_index_retention.py"): "edge-consumer",
     # -- runtime-budget ----------------------------------------------------
     # Two of the 74 suites do not fit the lane. tests/test_orchestration_chain.py
     # is the extreme one: the capped PR-lane run was killed at 596s having

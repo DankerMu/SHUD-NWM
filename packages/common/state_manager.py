@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import logging
 import os
 import re
 import stat
@@ -34,10 +35,13 @@ from packages.common.safe_fs import (
     stat_no_follow,
     verify_directory_no_follow,
 )
+from packages.common.scheduler_limits import MAX_LOOKBACK_HOURS
 from packages.common.source_identity import normalize_source_id
 from packages.common.state_lineage import STATE_QC_FAILED
 from packages.common.state_qc import MAX_STATE_IC_BYTES, run_state_variable_qc
 from workers.data_adapters.base import cycle_id_for
+
+logger = logging.getLogger(__name__)
 
 
 class StateManagerError(RuntimeError):
@@ -84,7 +88,20 @@ STATE_INDEX_CONTROL_OBJECT_PREFIXES = frozenset({"logs", "manifests", "products"
 _StateIndexStoreCache = dict[tuple[str, str], LocalObjectStore]
 STATE_INDEX_CONTROL_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 STATE_INDEX_CONTROL_ENCODED_FORBIDDEN_RE = re.compile(r"%(?:2e|2f|5c)", re.IGNORECASE)
-STATE_INDEX_REPAIR_OPERATIONS = frozenset({"remove-entry", "recompute-checksum"})
+STATE_INDEX_REPAIR_OPERATIONS = frozenset({"remove-entry", "recompute-checksum", "prune-retention"})
+# #2548 retention prune. The window must exceed the deepest scheduler lookup:
+# ``MAX_LOOKBACK_HOURS`` + the lane's cycle lag + one ``required_lead_hours`` step
+# (<= 24 h with allowed cycles 0/12) + the self-heal producer probe (<= 24 h).
+DEFAULT_STATE_INDEX_RETENTION_DAYS = 21
+STATE_INDEX_RETENTION_STEP_BACK_HOURS = 48
+# Byte budget for one lane's per-group summaries (measured as the indent=2 receipt
+# rendering at its nesting depth). Two lanes stay far below the CLI receipt cap
+# (``MAX_RECEIPT_BYTES`` = 1 MiB); omitted groups are counted, never silently lost.
+MAX_STATE_INDEX_RETENTION_SUMMARY_BYTES = 256 * 1024
+# Upper bound on the leading indentation of one summary line inside the receipt
+# (receipt > lanes > lane > retention > groups > summary: at most 6 levels x 2).
+_RETENTION_SUMMARY_INDENT_BYTES = 12
+STATE_INDEX_CAPACITY_WARNING_THRESHOLD = 0.70
 STATE_INDEX_REPAIR_LANES = ("reference", "destination")
 _STATE_INDEX_REPAIR_POST_CAS_PHASES = frozenset({"replace_uncertain", "postcommit", "release_uncertain"})
 # Exactly the characters for which ``str.isspace()`` is true, i.e. what argument-less
@@ -171,6 +188,10 @@ class _StateIndexSnapshot:
     content: bytes
     entries: dict[tuple[str, str, str, str, str], dict[str, Any]]
     evidence: dict[str, Any]
+    # #2548: exposed by ``state_index_evidence()`` only. ``evidence`` is embedded in
+    # every reader answer and so in scheduler pass evidence (5 MB budget), which
+    # must not grow by one capacity object per nested block.
+    capacity: dict[str, Any] = dataclass_field(default_factory=dict)
 
 
 class StateSnapshotRepository(Protocol):
@@ -1828,7 +1849,8 @@ class FileStateSnapshotIndexRepository:
 
     def state_index_evidence(self) -> dict[str, Any]:
         try:
-            return dict(self._load_index_snapshot(allow_empty=False).evidence)
+            snapshot = self._load_index_snapshot(allow_empty=False)
+            return {**snapshot.evidence, "capacity": dict(snapshot.capacity)}
         except StateManagerError as error:
             return self._blocked_index_evidence(error)
 
@@ -1946,6 +1968,7 @@ class FileStateSnapshotIndexRepository:
             raise _state_index_error("state_snapshot_index_malformed_json", field="index") from error
         if not isinstance(payload, Mapping):
             raise _state_index_error("state_snapshot_index_not_object", field="index")
+        stats: dict[str, int] = {}
         entries_by_key = _validate_state_snapshot_index(
             payload,
             object_store_root=self.object_store_root,
@@ -1955,7 +1978,14 @@ class FileStateSnapshotIndexRepository:
             max_age_hours=self.max_age_hours,
             verify_objects=True,
             enforce_freshness=False,
+            stats=stats,
         )
+        capacity = _state_index_capacity(
+            entry_count=len(entries_by_key),
+            json_nodes=stats["json_nodes"],
+            index_bytes=len(content),
+        )
+        _warn_state_index_capacity(capacity, index=_state_index_uri_evidence(self.index_uri))
         evidence = _state_index_evidence_safe(
             {
                 "status": "ready",
@@ -1966,6 +1996,7 @@ class FileStateSnapshotIndexRepository:
                 "content_checksum_verified": _checksum_matches(payload.get("checksum"), _payload_checksum(payload)),
                 "entry_count": len(entries_by_key),
                 "index_bytes": len(content),
+                "capacity": capacity,
             }
         )
         payload_entries = payload.get("entries")
@@ -1987,6 +2018,7 @@ class FileStateSnapshotIndexRepository:
             return cached
         payload, content = self._read_payload(allow_empty=allow_empty)
         entries: dict[tuple[str, str, str, str, str], dict[str, Any]]
+        stats: dict[str, int] = {"json_nodes": 0}
         if not payload and not content and allow_empty:
             entries = {}
         else:
@@ -1999,7 +2031,14 @@ class FileStateSnapshotIndexRepository:
                 max_age_hours=self.max_age_hours,
                 verify_objects=verify_objects,
                 enforce_freshness=enforce_freshness,
+                stats=stats,
             )
+        capacity = _state_index_capacity(
+            entry_count=len(entries),
+            json_nodes=stats["json_nodes"],
+            index_bytes=len(content),
+        )
+        _warn_state_index_capacity(capacity, index=_state_index_uri_evidence(self.index_uri))
         evidence = _state_index_evidence_safe(
             {
                 "status": "ready",
@@ -2014,7 +2053,13 @@ class FileStateSnapshotIndexRepository:
                 "index_bytes": len(content),
             }
         )
-        snapshot = _StateIndexSnapshot(payload=dict(payload), content=content, entries=entries, evidence=evidence)
+        snapshot = _StateIndexSnapshot(
+            payload=dict(payload),
+            content=content,
+            entries=entries,
+            evidence=evidence,
+            capacity=capacity,
+        )
         if use_cache:
             object.__setattr__(self, "_index_snapshot_cache", snapshot)
         return snapshot
@@ -2125,6 +2170,7 @@ def publish_state_snapshot_index(
             field="index",
             evidence={"index_bytes": len(content), "max_bytes": MAX_STATE_SNAPSHOT_INDEX_BYTES},
         )
+    stats: dict[str, int] = {}
     normalized = _validate_state_snapshot_index(
         payload,
         object_store_root=object_store_root,
@@ -2133,6 +2179,12 @@ def publish_state_snapshot_index(
         now=generated,
         max_age_hours=DEFAULT_STATE_SNAPSHOT_INDEX_MAX_AGE_HOURS,
         verify_objects=verify_objects,
+        stats=stats,
+    )
+    capacity = _state_index_capacity(
+        entry_count=len(normalized),
+        json_nodes=stats["json_nodes"],
+        index_bytes=len(content),
     )
     committed = _write_state_index_bytes(
         str(destination_uri),
@@ -2146,6 +2198,7 @@ def publish_state_snapshot_index(
     )
     if commit_observer is not None:
         commit_observer(committed)
+    _warn_state_index_capacity(capacity, index=_state_index_uri_evidence(destination_uri))
     return _state_index_evidence_safe(
         {
             "status": "published",
@@ -2157,6 +2210,7 @@ def publish_state_snapshot_index(
             "entry_count": len(normalized),
             "index_last": True,
             "atomic_write": True,
+            "capacity": capacity,
         }
     )
 
@@ -2614,16 +2668,30 @@ def repair_state_snapshot_index(
     allow_missing_reference: bool = False,
     allow_missing_destination: bool = False,
     generated_at: datetime | None = None,
+    retention_days: int = DEFAULT_STATE_INDEX_RETENTION_DAYS,
+    cycle_lag_hours: int | None = None,
 ) -> dict[str, Any]:
     """Repair the private/reference and shared/destination state-index topology.
 
     The helper owns topology, selector uniqueness, lock order, archive-before-CAS,
     canonical publication, and production read-back. Callers own argument parsing
     and receipt publication. Dry-run never creates locks, archives, or index writes.
+
+    ``prune-retention`` (#2548) plans each lane independently with the K1-K5
+    retention predicate (``_plan_state_index_retention_lane``). ``retention_days``
+    and ``cycle_lag_hours`` are read only by that operation.
     """
 
     if operation not in STATE_INDEX_REPAIR_OPERATIONS:
         raise _state_index_repair_error("repair_operation_invalid", field="operation")
+    retention: dict[str, Any] | None = None
+    if operation == "prune-retention":
+        if allow_missing_reference or allow_missing_destination:
+            raise _state_index_repair_error("repair_missing_lane_flag_invalid", field="lane")
+        retention = _state_index_retention_window(
+            retention_days=retention_days,
+            cycle_lag_hours=cycle_lag_hours,
+        )
     selector = _state_index_repair_selector(
         operation=operation,
         state_id=state_id,
@@ -2683,6 +2751,7 @@ def repair_state_snapshot_index(
                 selector=selector,
                 allow_missing_reference=allow_missing_reference,
                 allow_missing_destination=allow_missing_destination,
+                retention=retention,
             )
         assert archive_path is not None
         return _state_index_repair_enforce(
@@ -2699,6 +2768,7 @@ def repair_state_snapshot_index(
             allow_missing_reference=allow_missing_reference,
             allow_missing_destination=allow_missing_destination,
             generated_at=generated_at,
+            retention=retention,
         )
     except StateIndexRepairError as error:
         if summary.get("mutation_started"):
@@ -2805,7 +2875,7 @@ def _state_index_repair_selector(
         "valid_time": _optional_repair_text(valid_time),
     }
     present = {key: value for key, value in provided.items() if value is not None}
-    if operation == "recompute-checksum":
+    if operation in {"recompute-checksum", "prune-retention"}:
         if present:
             raise _state_index_repair_error("repair_selector_not_applicable", field="selector")
         return None
@@ -2848,6 +2918,7 @@ def _state_index_repair_dry_run(
     selector: Mapping[str, Any] | None,
     allow_missing_reference: bool,
     allow_missing_destination: bool,
+    retention: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     snapshots = {
         "reference": _read_state_index_repair_snapshot(
@@ -2872,6 +2943,7 @@ def _state_index_repair_dry_run(
         selector=selector,
         allow_missing_reference=allow_missing_reference,
         allow_missing_destination=allow_missing_destination,
+        retention=retention,
     )
     _apply_state_index_repair_plan_preview(summary, snapshots=snapshots, plan=plan)
     summary["status"] = "preview"
@@ -2893,8 +2965,10 @@ def _state_index_repair_enforce(
     allow_missing_reference: bool,
     allow_missing_destination: bool,
     generated_at: datetime | None,
+    retention: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     mutation_started = False
+    generated = _ensure_utc(generated_at or datetime.now(tz=UTC))
     try:
         with provider_destination_lock(reference_index, containment_root=reference_root):
             with provider_destination_lock(destination_index, containment_root=destination_root):
@@ -2921,6 +2995,8 @@ def _state_index_repair_enforce(
                     selector=selector,
                     allow_missing_reference=allow_missing_reference,
                     allow_missing_destination=allow_missing_destination,
+                    retention=retention,
+                    generated_at=generated,
                 )
                 _apply_state_index_repair_plan_preview(summary, snapshots=snapshots, plan=plan)
                 archives = _archive_state_index_repair_preimages(
@@ -2929,7 +3005,6 @@ def _state_index_repair_enforce(
                     archive_root=archive_root,
                     summary=summary,
                 )
-                generated = _ensure_utc(generated_at or datetime.now(tz=UTC))
                 for name in STATE_INDEX_REPAIR_LANES:
                     action = plan[name]["action"]
                     lane_summary = summary["lanes"][name]
@@ -3013,6 +3088,13 @@ def _state_index_repair_enforce(
                     lane_summary["status"] = "repaired"
                     lane_summary["committed"] = True
                     lane_summary["entry_count_after"] = len(readback["raw_entries"])
+                    if isinstance(lane_summary.get("retention"), dict):
+                        lane_summary["retention"]["index_bytes_after"] = len(readback["content"])
+                        lane_summary["retention"]["capacity_after"] = _state_index_capacity(
+                            entry_count=len(readback["raw_entries"]),
+                            json_nodes=int(readback["json_nodes"]),
+                            index_bytes=len(readback["content"]),
+                        )
                     lane_summary["postimage_sha256"] = result.get("content_sha256") or readback["digest"]
                     lane_summary["archive_path"] = archives[name]["path"]
                     lane_summary["archive_sha256"] = archives[name]["sha256"]
@@ -3047,7 +3129,12 @@ def _state_index_repair_enforce(
                 phase="replace_uncertain",
             ) from error
         raise
-    summary["status"] = "repaired"
+    # Every lane skipped (prune-retention with nothing to remove): no CAS ran.
+    summary["status"] = (
+        "repaired"
+        if any(summary["lanes"][name]["committed"] for name in STATE_INDEX_REPAIR_LANES)
+        else "untouched"
+    )
     return summary
 
 
@@ -3090,6 +3177,7 @@ def _read_state_index_repair_snapshot(
         raise _state_index_repair_error("state_snapshot_index_checksum_mismatch", field=field)
     rebuilt = dict(payload)
     rebuilt["checksum"] = expected_checksum
+    stats: dict[str, int] = {}
     try:
         validated = _validate_state_snapshot_index(
             rebuilt,
@@ -3100,6 +3188,7 @@ def _read_state_index_repair_snapshot(
             max_age_hours=DEFAULT_STATE_SNAPSHOT_INDEX_MAX_AGE_HOURS,
             verify_objects=False,
             enforce_freshness=False,
+            stats=stats,
         )
         raw_entries = _copyback_raw_entries(payload, validated)
     except StateManagerError as error:
@@ -3116,6 +3205,7 @@ def _read_state_index_repair_snapshot(
         "validated": validated,
         "raw_entries": [raw_entries[key] for key in validated],
         "raw_by_key": raw_entries,
+        "json_nodes": stats["json_nodes"],
     }
 
 
@@ -3127,7 +3217,16 @@ def _plan_state_index_repair(
     selector: Mapping[str, Any] | None,
     allow_missing_reference: bool,
     allow_missing_destination: bool,
+    retention: Mapping[str, Any] | None = None,
+    generated_at: datetime | None = None,
 ) -> dict[str, dict[str, Any]]:
+    if operation == "prune-retention":
+        assert retention is not None
+        generated = _ensure_utc(generated_at or datetime.now(tz=UTC))
+        return {
+            name: _plan_state_index_retention_lane(snapshots[name], retention=retention, generated_at=generated)
+            for name in STATE_INDEX_REPAIR_LANES
+        }
     if operation == "recompute-checksum":
         assert lane in STATE_INDEX_REPAIR_LANES
         plan: dict[str, dict[str, Any]] = {}
@@ -3219,6 +3318,228 @@ def _plan_state_index_repair(
     return plan
 
 
+def _state_index_retention_window(*, retention_days: Any, cycle_lag_hours: Any) -> dict[str, Any]:
+    """Validate the prune window against the deepest scheduler lookup (#2548).
+
+    Zero-write refusal before any root, lock, archive, or index access.
+    """
+
+    if isinstance(cycle_lag_hours, bool) or not isinstance(cycle_lag_hours, int) or cycle_lag_hours < 0:
+        raise _state_index_repair_error("repair_cycle_lag_unset", field="cycle_lag_hours")
+    if isinstance(retention_days, bool) or not isinstance(retention_days, int):
+        raise _state_index_repair_error("repair_retention_days_invalid", field="retention_days")
+    floor_hours = MAX_LOOKBACK_HOURS + cycle_lag_hours + STATE_INDEX_RETENTION_STEP_BACK_HOURS
+    window = {
+        "retention_days": retention_days,
+        "retention_hours": retention_days * 24,
+        "cycle_lag_hours": cycle_lag_hours,
+        "max_lookback_hours": MAX_LOOKBACK_HOURS,
+        "step_back_hours": STATE_INDEX_RETENTION_STEP_BACK_HOURS,
+        "floor_hours": floor_hours,
+    }
+    if retention_days * 24 <= floor_hours:
+        raise _state_index_repair_error(
+            "repair_retention_window_too_short",
+            field="retention_days",
+            evidence=window,
+        )
+    return window
+
+
+_RETENTION_NO_RUN = object()
+_RETENTION_ANCHOR_REASONS = (
+    "generation_earliest_usable",
+    "generation_latest_usable",
+    "generation_latest_usable_before_window",
+    "generation_run_start",
+    "clone_provenance",
+    "clone_source",
+)
+
+
+def _plan_state_index_retention_lane(
+    snapshot: Mapping[str, Any],
+    *,
+    retention: Mapping[str, Any],
+    generated_at: datetime,
+) -> dict[str, Any]:
+    """Plan one lane's retention prune from its own validated entries (#2548).
+
+    Groups by the validated identity-key prefix ``(model_id, normalized
+    source_id)``; generation is the readers' ``str(model_package_checksum or
+    "")``; order is the readers' ``(valid_time, state_id)``. An entry is kept
+    when any of these holds (design.md K1-K5):
+
+    * K1 ``valid_time >= W_g`` (group's newest ``valid_time`` - retention_days);
+    * K2 per generation: earliest usable, latest usable, latest usable < ``W_g``;
+    * K3 first entry of every maximal same-generation run of the usable
+      subsequence (unusable entries are skipped, only a generation change ends
+      a run), so a second prune with the same window removes nothing;
+    * K4 it carries a non-blank ``cloned_from_model_id``;
+    * K5 its ``state_id`` is the ``cloned_from_state_id`` of a kept entry
+      (closed transitively, any group).
+
+    Retained entries are the lane's raw mappings in their original order.
+    """
+
+    validated_entries = list(snapshot["validated"].items())
+    raw_entries = list(snapshot["raw_entries"])
+    window_delta = timedelta(days=int(retention["retention_days"]))
+    groups: dict[tuple[str, str], list[tuple[datetime, str, int]]] = {}
+    for index, (key, entry) in enumerate(validated_entries):
+        valid_time = _ensure_utc(_parse_state_index_time(entry["valid_time"], field="valid_time"))
+        groups.setdefault((key[0], key[1]), []).append((valid_time, str(entry.get("state_id") or ""), index))
+
+    reasons: dict[int, set[str]] = {}
+    window_starts: dict[tuple[str, str], datetime] = {}
+    for group_key, members in groups.items():
+        members.sort()
+        window_start = members[-1][0] - window_delta
+        window_starts[group_key] = window_start
+        earliest: dict[str, int] = {}
+        latest: dict[str, int] = {}
+        latest_before: dict[str, int] = {}
+        previous_generation: Any = _RETENTION_NO_RUN
+        for valid_time, _state_id, index in members:
+            entry = validated_entries[index][1]
+            if valid_time >= window_start:
+                reasons.setdefault(index, set()).add("in_window")
+            if str(entry.get("cloned_from_model_id") or "").strip():
+                reasons.setdefault(index, set()).add("clone_provenance")
+            if not _require_state_index_bool(entry.get("usable_flag"), field="usable_flag"):
+                # Skipped, not a run break: a run start must not depend on an
+                # unusable row this prune may remove (fixed point, #2548 K3).
+                continue
+            generation = str(entry.get("model_package_checksum") or "")
+            earliest.setdefault(generation, index)
+            latest[generation] = index
+            if valid_time < window_start:
+                latest_before[generation] = index
+            if previous_generation is _RETENTION_NO_RUN or previous_generation != generation:
+                reasons.setdefault(index, set()).add("generation_run_start")
+            previous_generation = generation
+        for label, anchors in (
+            ("generation_earliest_usable", earliest),
+            ("generation_latest_usable", latest),
+            ("generation_latest_usable_before_window", latest_before),
+        ):
+            for index in anchors.values():
+                reasons.setdefault(index, set()).add(label)
+
+    index_by_state_id = {
+        str(entry.get("state_id") or ""): index for index, (_key, entry) in enumerate(validated_entries)
+    }
+    frontier = list(reasons)
+    while frontier:
+        source_state_id = str(validated_entries[frontier.pop()][1].get("cloned_from_state_id") or "")
+        for candidate in {source_state_id, source_state_id.strip()}:
+            source_index = index_by_state_id.get(candidate) if candidate else None
+            if source_index is None:
+                continue
+            if source_index not in reasons:
+                frontier.append(source_index)
+            reasons.setdefault(source_index, set()).add("clone_source")
+
+    removed = [index for index in range(len(validated_entries)) if index not in reasons]
+    retained = [raw_entries[index] for index in range(len(raw_entries)) if index in reasons]
+    removed_state_ids = sorted(str(validated_entries[index][1].get("state_id") or "") for index in removed)
+
+    anchor_counts = dict.fromkeys(_RETENTION_ANCHOR_REASONS, 0)
+    kept_out_of_window = 0
+    for index_reasons in reasons.values():
+        if "in_window" in index_reasons:
+            continue
+        kept_out_of_window += 1
+        for label in index_reasons:
+            anchor_counts[label] += 1
+
+    group_summaries: list[dict[str, Any]] = []
+    removed_by_group: dict[tuple[str, str], list[datetime]] = {}
+    for index in removed:
+        key, entry = validated_entries[index]
+        removed_by_group.setdefault((key[0], key[1]), []).append(
+            _ensure_utc(_parse_state_index_time(entry["valid_time"], field="valid_time"))
+        )
+    for group_key in sorted(removed_by_group):
+        times = removed_by_group[group_key]
+        group_summaries.append(
+            {
+                "model_id": group_key[0],
+                "source_id": group_key[1],
+                "window_start": _format_time(window_starts[group_key]),
+                "removed_count": len(times),
+                "removed_valid_time_min": _format_time(min(times)),
+                "removed_valid_time_max": _format_time(max(times)),
+                "kept_count": len(groups[group_key]) - len(times),
+            }
+        )
+
+    bounded_summaries: list[dict[str, Any]] = []
+    summary_bytes = 0
+    for group_summary in group_summaries:
+        rendered = json.dumps(group_summary, ensure_ascii=False, indent=2, sort_keys=True)
+        cost = len(rendered.encode("utf-8")) + (rendered.count("\n") + 1) * _RETENTION_SUMMARY_INDENT_BYTES + 2
+        if summary_bytes + cost > MAX_STATE_INDEX_RETENTION_SUMMARY_BYTES:
+            break
+        summary_bytes += cost
+        bounded_summaries.append(group_summary)
+
+    nodes_before = int(snapshot["json_nodes"])
+    bytes_before = len(snapshot["content"])
+    if removed:
+        payload: dict[str, Any] = {
+            "schema_version": FILE_STATE_SNAPSHOT_INDEX_SCHEMA_VERSION,
+            "generated_at": _format_time(generated_at),
+            "entries": [dict(entry) for entry in retained],
+        }
+        payload["checksum"] = f"sha256:{_payload_checksum(payload)}"
+        nodes_after = _validate_state_index_json_complexity(payload)
+        bytes_after = len(_canonical_json_bytes(payload, pretty=True))
+    else:
+        nodes_after, bytes_after = nodes_before, bytes_before
+    capacity_before = _state_index_capacity(
+        entry_count=len(raw_entries), json_nodes=nodes_before, index_bytes=bytes_before
+    )
+    capacity_after = _state_index_capacity(
+        entry_count=len(retained), json_nodes=nodes_after, index_bytes=bytes_after
+    )
+    block = {
+        "retention_days": retention["retention_days"],
+        "cycle_lag_hours": retention["cycle_lag_hours"],
+        "max_lookback_hours": retention["max_lookback_hours"],
+        "floor_hours": retention["floor_hours"],
+        "entry_count_before": len(raw_entries),
+        "entry_count_after": len(retained),
+        "json_nodes_before": nodes_before,
+        "json_nodes_after": nodes_after,
+        "index_bytes_before": bytes_before,
+        "index_bytes_after": bytes_after,
+        "utilization_ratio_before": capacity_before["utilization_ratio"],
+        "utilization_ratio_after": capacity_after["utilization_ratio"],
+        "capacity_before": capacity_before,
+        "capacity_after": capacity_after,
+        "removed_count": len(removed),
+        "group_count": len(groups),
+        "groups_with_removals": len(group_summaries),
+        "kept_out_of_window_count": kept_out_of_window,
+        "kept_out_of_window_by_anchor": anchor_counts,
+        "removed_state_ids_sha256": "sha256:"
+        + sha256_bytes(json.dumps(removed_state_ids, separators=(",", ":")).encode("utf-8")),
+        "groups": bounded_summaries,
+        "group_summaries_truncated": len(group_summaries) - len(bounded_summaries),
+    }
+    return {
+        "action": "prune-retention" if removed else "skip",
+        "entries": retained if removed else list(raw_entries),
+        "matches": [],
+        "identity_key": None,
+        "state_id": None,
+        "untouched_reason": None if removed else "nothing_to_prune",
+        "retention": block,
+        "removed_state_ids": removed_state_ids,
+    }
+
+
 def _resolve_state_index_repair_matches(
     snapshot: Mapping[str, Any],
     selector: Mapping[str, Any],
@@ -3288,6 +3609,12 @@ def _apply_state_index_repair_plan_preview(
         lane_summary["untouched_reason"] = lane_plan["untouched_reason"]
         lane_summary["preimage_sha256"] = snapshot["digest"]
         lane_summary["status"] = "preview" if summary["mode"] == "dry_run" else "planned"
+        if "retention" in lane_plan:
+            retention_block = dict(lane_plan["retention"])
+            if summary["mode"] == "dry_run":
+                # Only the preview lists ids; the enforce receipt keeps the digest.
+                retention_block["removed_state_ids"] = list(lane_plan["removed_state_ids"])
+            lane_summary["retention"] = retention_block
 
 
 def _archive_state_index_repair_preimages(
@@ -3507,10 +3834,13 @@ def _validate_state_snapshot_index(
     max_age_hours: int,
     verify_objects: bool = True,
     enforce_freshness: bool = True,
+    stats: dict[str, int] | None = None,
 ) -> dict[tuple[str, str, str, str, str], dict[str, Any]]:
     if payload.get("schema_version") != FILE_STATE_SNAPSHOT_INDEX_SCHEMA_VERSION:
         raise _state_index_error("state_snapshot_index_schema_unsupported", field="schema_version")
-    _validate_state_index_json_complexity(payload)
+    json_nodes = _validate_state_index_json_complexity(payload)
+    if stats is not None:
+        stats["json_nodes"] = json_nodes
     _require_state_index_checksum(payload)
     generated_at = _parse_state_index_generated_at(
         payload.get("generated_at"),
@@ -4525,7 +4855,8 @@ def _first_state_index_blocker_reason(evidence: Mapping[str, Any]) -> str | None
     return None
 
 
-def _validate_state_index_json_complexity(value: Any) -> None:
+def _validate_state_index_json_complexity(value: Any) -> int:
+    """Enforce the node/depth caps and return the node count (capacity evidence)."""
     stack: list[tuple[Any, int]] = [(value, 1)]
     visited = 0
     while stack:
@@ -4547,6 +4878,48 @@ def _validate_state_index_json_complexity(value: Any) -> None:
             stack.extend((child, depth + 1) for child in item.values())
         elif isinstance(item, Sequence) and not isinstance(item, str | bytes | bytearray):
             stack.extend((child, depth + 1) for child in item)
+    return visited
+
+
+def _state_index_capacity(*, entry_count: int, json_nodes: int, index_bytes: int) -> dict[str, Any]:
+    """Utilization of the three publish/read hard caps (#2548). Evidence only.
+
+    Never raises and never refuses: the existing caps stay the only failure
+    points, so this cannot make a reader or publisher fail earlier.
+    """
+    ratio = max(
+        entry_count / MAX_STATE_SNAPSHOT_INDEX_ENTRIES,
+        json_nodes / MAX_STATE_SNAPSHOT_INDEX_JSON_NODES,
+        index_bytes / MAX_STATE_SNAPSHOT_INDEX_BYTES,
+    )
+    return {
+        "entry_count": entry_count,
+        "max_entries": MAX_STATE_SNAPSHOT_INDEX_ENTRIES,
+        "json_nodes": json_nodes,
+        "max_json_nodes": MAX_STATE_SNAPSHOT_INDEX_JSON_NODES,
+        "index_bytes": index_bytes,
+        "max_bytes": MAX_STATE_SNAPSHOT_INDEX_BYTES,
+        "utilization_ratio": round(ratio, 6),
+        "warning_threshold": STATE_INDEX_CAPACITY_WARNING_THRESHOLD,
+        "warning": ratio >= STATE_INDEX_CAPACITY_WARNING_THRESHOLD,
+    }
+
+
+def _warn_state_index_capacity(capacity: Mapping[str, Any], *, index: str) -> None:
+    if capacity.get("warning"):
+        logger.warning(
+            "state snapshot index %s is at %.1f%% of a hard limit "
+            "(entries %s/%s, json_nodes %s/%s, bytes %s/%s); run the prune-retention "
+            "repair (known-issues-state-index 8.12)",
+            index,
+            100.0 * float(capacity["utilization_ratio"]),
+            capacity["entry_count"],
+            capacity["max_entries"],
+            capacity["json_nodes"],
+            capacity["max_json_nodes"],
+            capacity["index_bytes"],
+            capacity["max_bytes"],
+        )
 
 
 def _state_index_error(reason: str, *, field: str, evidence: Mapping[str, Any] | None = None) -> StateManagerError:
