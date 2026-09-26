@@ -117,7 +117,7 @@ No compatibility path is kept for 1.0. The only consumer is the binder recipe in
 
 For each of the three networks, the operator records the discovery evidence in the receipt directory and runs the unchanged single-pin command once:
 - **Networks:** from `/api/v1/basins`, keep the basins whose GFS and IFS `latest-product?identity_only=true` are both 200. Rank them by `core.river_network_version.segment_count`, read-only, and take the largest, the one nearest the median, and the smallest.
-- **Pin:** the network's `${model_id}_shud_riv_000001` (`model_id` from the identity_only latest-product payload; today `<basin>_shud_shud_riv_000001`), the discharge-layer id family. Check that segment detail returns 200. Never use a `…_shud_reach_…` id: it is not the id the discharge layer renders, and it fails with `HOOK_FEATURE_MISMATCH`.
+- **Pin:** the network's single `core.river_segment` row whose `river_segment_id` matches `LIKE '%\_shud\_riv\_000001'` (today `<basin>_shud_shud_riv_000001`), the discharge-layer id family, read in the same read-only query as the segment counts. A match count other than 1 is BLOCKED. The latest-product `model_id` is a direct-grid variant `model_id` (e.g. `dg_be70a045…`), not a segment-id prefix, so it must not be used to build the pin (measured on node-27, 2026-09-26). Check that segment detail returns 200. Never use a `…_shud_reach_…` id: it is not the id the discharge layer renders, and it fails with `HOOK_FEATURE_MISMATCH`.
 - **Acceptance:** three binder-PASS receipts.
 
 ### D5 — Verification

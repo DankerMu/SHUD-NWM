@@ -6042,8 +6042,12 @@ The frontend river-click `P95 < 2 s` gate (also §4.0 stop-table G7) has a
 shipping browser oracle after #1970: the public `/` map route, a gated
 read-only locate/capture hook, a real browser click per sample, and a no-mock
 serial sampler that publishes a schema-1.1 mode-0600 no-clobber receipt. **This section documents the exact merged
-independent display command; it does not claim live PASS. The display owner
-retains execution/acceptance; #1895 retirement creates no new display project.**
+independent display command. Live PASS on 2026-09-26 (#1970 batch Q): three
+public-site receipts (largest / median / smallest product network), P95 432.3 /
+431.4 / 421.9 ms, all `BINDER: PASS`, receipt
+`openspec/changes/archive/2026-09-26-river-click-trusted-pointer-dispatch/evidence/node27-live-receipt.md`.
+A later run is judged on its own receipts. The display owner retains
+execution/acceptance; #1895 retirement creates no new display project.**
 
 - **Click mechanism (receipt schema 1.1, #1970 batch Q).** The gated global
   `window.__nhmsRiverClickEvidence` exposes exactly `locateRenderedRiver`,
@@ -6177,19 +6181,24 @@ retains execution/acceptance; #1895 retirement creates no new display project.**
     `BEGIN READ ONLY`); take the largest, the one nearest the median (among
     the rest after removing the largest and smallest; ties go to the smaller
     count) and the smallest. Fewer than three is BLOCKED, never padded.
-  - **Pin:** `${model_id}_shud_riv_000001`, built from the `model_id` of the
-    network's GFS latest-product (`identity_only=true`) payload — today the
-    `<basin_id>_shud_shud_riv_000001` discharge-layer id family the map
-    actually renders, never a `${basin}_shud` concatenation — whose segment
-    detail must return 200 before use. **Never use a `…_shud_reach_…` id:** segment
+  - **Pin:** the network's **single** `core.river_segment` row with
+    `river_segment_id LIKE '%\_shud\_riv\_000001'`, read in the same
+    `BEGIN READ ONLY` query — today `<basin_id>_shud_shud_riv_000001`, the
+    discharge-layer id family the map actually renders. A match count other
+    than 1 is BLOCKED (`exit 1`). **Never build the pin from the latest-product
+    `model_id`:** it is a direct-grid variant `model_id` (e.g. `dg_be70a045…`), not the model-package id that prefixes segment ids (see #2644), and the
+    built id 404s (measured on node-27, 2026-09-26); never use a `${basin}_shud`
+    concatenation either. Its segment detail must return 200 before use.
+    **Never use a `…_shud_reach_…` id:** segment
     detail answers 200 for both families, so preflight passes, but the rendered
     discharge feature carries the `shud_riv` id and the hook rejects with
     `HOOK_FEATURE_MISMATCH` (lane: `HOOK_SELECTION_FAILED`, message
     `hook HOOK_FEATURE_MISMATCH`).
   - **Read-only discovery** (evidence stays in the private `PIN_DIR` and is
     recorded with the receipts; it runs under `set -euo pipefail`, and the
-    BLOCKED branch or a non-200 segment detail for any pin stops it with
-    `exit 1`):
+    BLOCKED branch (fewer than three networks, or a network whose
+    `_shud_riv_000001` match count is not 1) or a non-200 segment detail for
+    any pin stops it with `exit 1`):
 
 ```bash
 set -euo pipefail
@@ -6209,10 +6218,7 @@ while read -r BASIN; do
   if [ "$G" = "200" ] && [ "$I" = "200" ]; then
     RNV=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(0, "utf8")).data.river_network_version_id)' \
       < "$PIN_DIR/gfs-$BASIN.json")
-    MODEL=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(0, "utf8")).data.model_id ?? "")' \
-      < "$PIN_DIR/gfs-$BASIN.json")
-    test -n "$MODEL" || { echo "BLOCKED: $BASIN latest-product has no model_id" >&2; exit 1; }
-    printf '%s\t%s\t%s\n' "$BASIN" "$RNV" "$MODEL" >> "$PIN_DIR/product_networks.tsv"
+    printf '%s\t%s\n' "$BASIN" "$RNV" >> "$PIN_DIR/product_networks.tsv"
   fi
 done < "$PIN_DIR/basin_ids.txt"
 RNV_LIST=$(cut -f2 "$PIN_DIR/product_networks.tsv" | sort -u | paste -sd, -)
@@ -6220,28 +6226,38 @@ RNV_LIST=$(cut -f2 "$PIN_DIR/product_networks.tsv" | sort -u | paste -sd, -)
 ( set -a; . "$REPO_ROOT/infra/env/display.env"; set +a
   psql "$DATABASE_URL" -X -q -At -F "$(printf '\t')" -v ON_ERROR_STOP=1 -v rnvs="$RNV_LIST" <<'SQL'
 BEGIN READ ONLY;
-SELECT river_network_version_id, segment_count
-FROM core.river_network_version
-WHERE river_network_version_id = ANY (string_to_array(:'rnvs', ','));
+SELECT v.river_network_version_id, v.segment_count,
+  (SELECT min(s.river_segment_id) FROM core.river_segment s
+   WHERE s.river_network_version_id = v.river_network_version_id
+     AND s.river_segment_id LIKE '%\_shud\_riv\_000001'),
+  (SELECT count(*) FROM core.river_segment s
+   WHERE s.river_network_version_id = v.river_network_version_id
+     AND s.river_segment_id LIKE '%\_shud\_riv\_000001')
+FROM core.river_network_version v
+WHERE v.river_network_version_id = ANY (string_to_array(:'rnvs', ','));
 COMMIT;
 SQL
-) > "$PIN_DIR/segment_counts.tsv"
+) > "$PIN_DIR/network_pins.tsv"
 node - "$PIN_DIR" > "$PIN_DIR/pins.tsv" <<'JS' || { echo 'BLOCKED: pin discovery did not produce three pins' >&2; exit 1; }
 const fs = require('fs')
 const dir = process.argv[2]
 const lines = (name) => fs.readFileSync(`${dir}/${name}`, 'utf8').split('\n').filter(Boolean).map((line) => line.split('\t'))
-const counts = new Map(lines('segment_counts.tsv').map(([rnv, count]) => [rnv, Number(count)]))
+const networks = new Map(lines('network_pins.tsv')
+  .map(([rnv, count, pin, matches]) => [rnv, { count: Number(count), pin, matches: Number(matches) }]))
 const rows = lines('product_networks.tsv')
-  .map(([basin, rnv, model]) => ({ basin, model, count: counts.get(rnv) }))
+  .map(([basin, rnv]) => ({ basin, rnv, ...networks.get(rnv) }))
   .filter((row) => Number.isInteger(row.count))
   .sort((a, b) => a.count - b.count || a.basin.localeCompare(b.basin))
+// Pin: the network's single discharge-layer `…_shud_riv_000001` segment in core.river_segment.
+for (const row of rows) {
+  if (row.matches !== 1) { console.error(`BLOCKED: ${row.rnv} has ${row.matches} _shud_riv_000001 segments`); process.exit(1) }
+}
 if (rows.length < 3) { console.error('BLOCKED: fewer than three product networks'); process.exit(1) }
 const n = rows.length
 const median = n % 2 ? rows[(n - 1) / 2].count : (rows[n / 2 - 1].count + rows[n / 2].count) / 2
 const mid = rows.slice(1, -1).reduce((best, row) => (Math.abs(row.count - median) < Math.abs(best.count - median) ? row : best))
 for (const [role, row] of [['largest', rows[n - 1]], ['median', mid], ['smallest', rows[0]]]) {
-  // Pin: the latest-product model_id's first discharge-layer segment (<basin_id>_shud_shud_riv_000001 today).
-  console.log([role, row.basin, `${row.model}_shud_riv_000001`, row.count].join('\t'))
+  console.log([role, row.basin, row.pin, row.count].join('\t'))
 }
 JS
 while IFS="$(printf '\t')" read -r ROLE BASIN SEG COUNT; do
@@ -6256,8 +6272,8 @@ done < "$PIN_DIR/pins.tsv"
 
 - **Three-receipt acceptance.** For each row of `pins.tsv`
   (largest / median / smallest) set `PLAYWRIGHT_LIVE_RIVER_BASIN_ID=<basin>`
-  (column 2) and `PLAYWRIGHT_LIVE_RIVER_SEGMENT_ID=<pin>` (column 3,
-  `${model_id}_shud_riv_000001`), then rerun the
+  (column 2) and `PLAYWRIGHT_LIVE_RIVER_SEGMENT_ID=<pin>` (column 3, the
+  network's single `…_shud_riv_000001`), then rerun the
   current-run binding prelude, the exact merged command and the binder above in
   a fresh private run root. The gate passes only when **all three** print
   `BINDER: PASS` (schema 1.1, `click_dispatch=trusted_pointer_event`, one warmup

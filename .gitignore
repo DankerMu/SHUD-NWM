@@ -43,6 +43,12 @@ minio-data/
 # `git status --porcelain=v1 --untracked-files=normal` and fails closed on ANY
 # untracked entry, so these MUST be ignored for the replay to be executable.
 .nhms-issue*-live/
+# River-click runbook private dirs (C4-river-click / tier §4.9): per-run roots
+# `.nhms-issue1895-riverclick-XXXXXX` and pin discovery `.nhms-issue1970-riverclick-pins-XXXXXX`.
+.nhms-issue*-riverclick-*/
+# Previous frontend bundle kept for rollback by the node-27 D5 dist swap.
+apps/frontend/dist.old*/
+apps/frontend/dist.new/
 
 # Subagent-workflow session-local review artifacts (persistent record lives in docs/review-loop-log.jsonl)
 .workplans/

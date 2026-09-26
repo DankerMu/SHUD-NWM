@@ -534,9 +534,15 @@ describe('river-click runbook contract', () => {
       const discovery = extractBashBlocks(section).find((block) => block.includes('.nhms-issue1970-riverclick-pins-XXXXXX'))
       expect(discovery, 'read-only pin discovery block').toBeDefined()
       expect(discovery).toContain('identity_only=true')
-      // Pin built from the latest-product model_id, never a `${basin}_shud` concatenation.
-      expect(discovery).toContain('.data.model_id')
-      expect(discovery).toContain('${row.model}_shud_riv_000001')
+      // Pin read from core.river_segment (the network's single `…_shud_riv_000001`), inside the
+      // READ ONLY query; never built from the latest-product model_id (a deployment-group id) or
+      // a `${basin}_shud` concatenation. A match count other than 1 stops the block.
+      const readOnlyQuery = discovery?.slice(discovery.indexOf('BEGIN READ ONLY;'), discovery.indexOf('COMMIT;'))
+      expect(readOnlyQuery).toContain('FROM core.river_segment s')
+      expect(readOnlyQuery).toContain("LIKE '%\\_shud\\_riv\\_000001'")
+      expect(readOnlyQuery).toMatch(/count\(\*\) FROM core\.river_segment s/)
+      expect(discovery).toMatch(/row\.matches !== 1\) \{ console\.error\(`BLOCKED: \$\{row\.rnv\} has \$\{row\.matches\} _shud_riv_000001 segments`\); process\.exit\(1\) \}/)
+      expect(discovery).not.toContain('model_id')
       expect(discovery).not.toMatch(/\$\{(row\.basin|BASIN|basin)\}_shud/)
       // BLOCKED and a non-200 segment detail actually stop the block.
       expect(discovery).toMatch(/^set -euo pipefail$/m)
