@@ -68,7 +68,7 @@ The enforce receipt SHALL stay within the receipt size limit.
 
 ### Requirement: State snapshot index evidence SHALL expose capacity against its hard limits
 
-`state_index_evidence()`, the renewal evidence, every publish result, and every repair preview/receipt lane SHALL carry a `capacity` object; per-reader nested evidence blocks embedded into scheduler pass evidence SHALL NOT, to keep the pass evidence byte budget. The object SHALL contain the entry count, the JSON-node count, and the byte size, together with the corresponding hard limits. It SHALL also contain the highest utilization ratio, the `0.70` warning threshold, and a boolean `warning`. A logger warning SHALL be emitted when `warning` is true. Capacity reporting SHALL NOT make any reader or publisher fail earlier than the existing hard limits.
+`state_index_evidence()`, the renewal evidence, and every publish result SHALL carry a `capacity` object, and each `prune-retention` preview/receipt lane's `retention` block SHALL carry `capacity_before` and `capacity_after`; per-reader nested evidence blocks embedded into scheduler pass evidence SHALL NOT, to keep the pass evidence byte budget. The object SHALL contain the entry count, the JSON-node count, and the byte size, together with the corresponding hard limits. It SHALL also contain the highest utilization ratio, the `0.70` warning threshold, and a boolean `warning`. A logger warning SHALL be emitted when `warning` is true. Capacity reporting SHALL NOT make any reader or publisher fail earlier than the existing hard limits.
 
 #### Scenario: Capacity warning at 70 percent
 

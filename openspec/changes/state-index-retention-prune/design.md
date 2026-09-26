@@ -1,6 +1,6 @@
 ## Design
 
-Change surface: `repair_state_snapshot_index` (new operation `prune-retention`), `_plan_state_index_repair` (new planner branch), `scripts/scheduler_state_index_repair.py` (CLI), `_StateIndexSnapshot.evidence` / `publish_state_snapshot_index` result (capacity fields).
+Change surface: `repair_state_snapshot_index` (new operation `prune-retention`), `_plan_state_index_repair` (new planner branch), `scripts/scheduler_state_index_repair.py` (CLI), `_StateIndexSnapshot.capacity` → `state_index_evidence()`, renewal evidence, `publish_state_snapshot_index` result (capacity fields).
 
 Must preserve:
 - Every existing repair operation, flag, receipt field, exit code (0/2/3) and lock order.
