@@ -320,6 +320,8 @@ below); the other four are these two basins.
   which are still the current hetianhe ids. The `republish-1832/` directory holds `baseline-registry.json` and
   `dg-candidate.json` and no `provision-receipt.json` (the `None` line). Why the #1816 ids never ran is not
   established by this evidence.
+  Follow-up evaluation (#2365 AC3): no new issue. Both ids are out of the current manifest and were replaced by the
+  ids the #1832 republish carries, so nothing live consumes them; the only open question is historical.
 - **shj_2shj** (`dg_95b0a3efb58fc525a1401d0c8f2b416f` gfs, `dg_4d2ddab541048593d247d42da317fa3c` ifs): the first
   admitted runs started from their clone rows like the other twelve (59 / 58 runs, first-run status now
   `superseded`). The basin later left the manifest (`current for basin: []`).

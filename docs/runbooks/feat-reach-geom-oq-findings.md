@@ -17,7 +17,7 @@ retained_for: dated 2026-06-19 read-only survey evidence behind feat-reach-geom-
 > **Historical survey (#2085).** This is a one-off 2026-06-19 read-only survey, kept under `docs/runbooks/**` as
 > dated evidence, not as a current procedure. Its code coordinates are not current and cannot be SHA-pinned:
 > `build_layer_metadata` / `resolve_tile_layer_identity` resolve at no SHA in this repository
-> (`git log --all -S 'def build_layer_metadata'` and `-S 'def resolve_tile_layer_identity'` are both empty; the
+> (`git log --all -S 'def build_layer_metadata' -- '*.py'` and `-S 'def resolve_tile_layer_identity' -- '*.py'` are both empty; the
 > master root commit `af49ced22`, 2026-07-25, and the older tags `v0.0.1` / `v0.0.2` lack both). The
 > `services/tiles/mvt.py` deep links below were therefore replaced by plain text naming the current counterpart symbol.
 
