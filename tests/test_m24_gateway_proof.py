@@ -62,6 +62,8 @@ class _FakeClient:
 
     Short job: poll returns ``succeeded`` immediately.
     Long job: first poll ``running``; DELETE returns ``cancelled``.
+    ``long_job_status`` overrides the long job's poll status (e.g. ``pending``
+    for a job that never starts before the bounded wait runs out).
 
     Mutations (POST/DELETE) are authenticated exactly like the real gateway
     after #1888: a missing or mismatched bearer yields 401 ``AUTH_REQUIRED``.
@@ -74,8 +76,10 @@ class _FakeClient:
         healthy: bool = True,
         reachable: bool = True,
         expected_token: str = FAKE_TOKEN,
+        long_job_status: str = "running",
     ) -> None:
         self.healthy = healthy
+        self.long_job_status = long_job_status
         self.reachable = reachable
         self.expected_token = expected_token
         self._next_job = 1000
@@ -101,7 +105,7 @@ class _FakeClient:
             return _Resp(200 if self.healthy else 503, body)
         # job status poll: job_id encodes which job (>=2000 == long job)
         job_id = url.rsplit("/", 1)[-1]
-        status = "running" if int(job_id) >= 2000 else "succeeded"
+        status = self.long_job_status if int(job_id) >= 2000 else "succeeded"
         return _Resp(
             200,
             {
@@ -192,6 +196,40 @@ def test_terminal_and_cancel_are_two_independent_stages() -> None:
     deletes = _calls_by_method(client, "DELETE")
     assert len(posts) == 2
     assert len(deletes) == 1
+
+
+def test_long_job_that_never_runs_is_cancelled_for_cleanup_and_blocks() -> None:
+    # #2476: a cancel-before-start is not a cancel-while-active proof.
+    client = _FakeClient(healthy=True, long_job_status="pending")
+    sleeps: list[float] = []
+    receipt = proof.build_gateway_receipt(
+        "m24_smoke_run",
+        gateway_url="http://gw:8081",
+        client=client,
+        sleep_func=sleeps.append,
+        env=_TOKEN_ENV,
+    )
+
+    validate_receipt(receipt)  # BLOCKED receipts must still validate
+    assert receipt["status"] == "BLOCKED"
+    assert receipt["live_proof_accepted"] is False
+    stages = {s["stage"]: s for s in receipt["stages"]}
+    assert [s["stage"] for s in receipt["stages"]] == ["health", "submit_poll_terminal", "submit_cancel"]
+    assert stages["health"]["status"] == "PASS"
+    assert stages["submit_poll_terminal"]["status"] == "PASS"
+    assert stages["submit_cancel"]["status"] == "BLOCKED"
+    blocker = receipt["dependency_blocker"]
+    assert isinstance(blocker, str)
+    assert "'pending'" in blocker
+    assert "2000" in blocker
+    assert stages["submit_cancel"]["counts"]["error"] == blocker
+
+    # the full bounded wait was spent on the long job, then it was still cancelled.
+    long_job_url = "http://gw:8081/api/v1/slurm/jobs/2000"
+    long_job_polls = [call for call in _calls_by_method(client, "GET") if call[1] == long_job_url]
+    assert len(long_job_polls) == proof.CANCEL_WAIT_MAX_ATTEMPTS
+    assert [call[1] for call in _calls_by_method(client, "DELETE")] == [long_job_url]
+    assert sleeps == [proof.POLL_INTERVAL_SECONDS] * proof.CANCEL_WAIT_MAX_ATTEMPTS
 
 
 def test_unreachable_gateway_blocks_without_fabricated_pass() -> None:

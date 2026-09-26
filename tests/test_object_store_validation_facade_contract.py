@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import errno
 import hashlib
 import inspect
+import os
 import re
 import stat
 import subprocess
 import sys
 import typing
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 import shapefile
@@ -17,6 +20,12 @@ import shapefile
 from packages.common import safe_fs
 from packages.common.object_store import LocalObjectStore, ObjectStoreError
 from services.production_closure import object_store_validation as facade
+from services.production_closure import object_store_validation_path_safety as path_safety_owner
+from services.production_closure import object_store_validation_runtime as runtime_owner
+from services.production_closure.object_store_validation_contracts import (
+    RUNTIME_DIR_FLAGS,
+    ProductionObjectStoreValidationError,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 OWNER_FILENAMES = {
@@ -803,3 +812,232 @@ def test_fixture_stable_text_hashes_and_shapefile_semantics_are_preserved(tmp_pa
             assert [list(shape.parts) for shape in reader.shapes()] == expected["parts"]
         finally:
             reader.close()
+
+
+# --- #1922: _open_runtime_prefix_dir owns its descriptor until it returns it ---
+
+# Both copies are exercised through their own module: the facade re-exports only the
+# runtime copy, so importing through it would leave the path-safety copy untested.
+RUNTIME_PREFIX_DIR_OWNERS = pytest.mark.parametrize(
+    "owner",
+    [runtime_owner, path_safety_owner],
+    ids=["runtime", "path_safety"],
+)
+# Saved before any test patches ``os``: the EBADF oracle must be the real syscall.
+_REAL_FSTAT = os.fstat
+
+
+class _HelperFdProbe:
+    """Record the helper's own directory fd and every ``os.close`` of it.
+
+    ``stat_no_follow`` opens and fstats parent-directory fds of its own, so the probe
+    matches only the ``os.open(path, RUNTIME_DIR_FLAGS)`` call the helper makes (no
+    ``dir_fd``) and injects faults only into that fd's first ``os.fstat``.
+    """
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        first_fstat: typing.Callable[[os.stat_result], os.stat_result] | None = None,
+        close_error: OSError | None = None,
+    ) -> None:
+        self.path = path
+        self.first_fstat = first_fstat
+        # Raised *after* the real close of the helper fd, so the test still leaks nothing.
+        self.close_error = close_error
+        self.helper_fds: list[int] = []
+        self.closed: list[int] = []
+        self._fstat_injected = False
+
+    def install(self, patch: pytest.MonkeyPatch) -> None:
+        real_open = os.open
+        real_close = os.close
+        real_fstat = os.fstat
+
+        def recording_open(file: typing.Any, flags: int, *args: typing.Any, **kwargs: typing.Any) -> int:
+            fd = real_open(file, flags, *args, **kwargs)
+            if kwargs.get("dir_fd") is None and flags == RUNTIME_DIR_FLAGS and os.fspath(file) == os.fspath(self.path):
+                self.helper_fds.append(fd)
+            return fd
+
+        def recording_close(fd: int) -> None:
+            self.closed.append(fd)
+            real_close(fd)
+            if self.close_error is not None and self.helper_fds and fd == self.helper_fds[0]:
+                raise self.close_error
+
+        def scoped_fstat(fd: int) -> os.stat_result:
+            result = real_fstat(fd)
+            if (
+                self.first_fstat is not None
+                and not self._fstat_injected
+                and self.helper_fds
+                and fd == self.helper_fds[0]
+            ):
+                self._fstat_injected = True
+                return self.first_fstat(result)
+            return result
+
+        patch.setattr(os, "open", recording_open)
+        patch.setattr(os, "close", recording_close)
+        patch.setattr(os, "fstat", scoped_fstat)
+
+    @property
+    def helper_fd(self) -> int:
+        assert len(self.helper_fds) == 1, f"helper opened {self.helper_fds!r} on {self.path}"
+        return self.helper_fds[0]
+
+
+def _assert_fd_closed_exactly_once(probe: _HelperFdProbe) -> None:
+    fd = probe.helper_fd
+    assert probe.closed.count(fd) == 1, f"helper fd {fd} closed {probe.closed.count(fd)} times: {probe.closed!r}"
+    with pytest.raises(OSError) as closed:
+        _REAL_FSTAT(fd)
+    assert closed.value.errno == errno.EBADF
+
+
+@RUNTIME_PREFIX_DIR_OWNERS
+def test_runtime_prefix_dir_containment_rejection_closes_the_descriptor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    owner: ModuleType,
+) -> None:
+    prefix = tmp_path / "prefix"
+    prefix.mkdir()
+    outside_root = tmp_path / "elsewhere"
+    outside_root.mkdir()
+    probe = _HelperFdProbe(prefix)
+
+    with monkeypatch.context() as patch:
+        probe.install(patch)
+        with pytest.raises(ProductionObjectStoreValidationError) as error:
+            owner._open_runtime_prefix_dir(prefix, outside_root)
+
+    # The real stat_no_follow() rejected the containment after the helper's open.
+    assert isinstance(error.value.__cause__, safe_fs.SafeFilesystemError)
+    assert "containment root" in str(error.value.__cause__)
+    assert error.value.error_code == "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE"
+    assert error.value.message == (
+        f"Failed to open runtime staging prefix directory {prefix}: {error.value.__cause__}"
+    )
+    _assert_fd_closed_exactly_once(probe)
+
+
+@RUNTIME_PREFIX_DIR_OWNERS
+def test_runtime_prefix_dir_not_a_directory_rejection_closes_the_descriptor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    owner: ModuleType,
+) -> None:
+    prefix = tmp_path / "prefix"
+    prefix.mkdir()
+
+    def as_regular_file(result: os.stat_result) -> os.stat_result:
+        fields = list(result)
+        fields[0] = stat.S_IFREG | stat.S_IMODE(result.st_mode)
+        return os.stat_result(fields)
+
+    probe = _HelperFdProbe(prefix, first_fstat=as_regular_file)
+
+    with monkeypatch.context() as patch:
+        probe.install(patch)
+        with pytest.raises(ProductionObjectStoreValidationError) as error:
+            owner._open_runtime_prefix_dir(prefix, tmp_path)
+
+    # The exact message is only produced by the helper's own S_ISDIR branch.
+    assert error.value.error_code == "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE"
+    assert error.value.message == f"Runtime staging prefix is not a directory: {prefix}"
+    assert str(error.value) == error.value.message
+    assert error.value.__cause__ is None
+    _assert_fd_closed_exactly_once(probe)
+
+
+@RUNTIME_PREFIX_DIR_OWNERS
+def test_runtime_prefix_dir_post_open_fstat_failure_closes_the_descriptor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    owner: ModuleType,
+) -> None:
+    prefix = tmp_path / "prefix"
+    prefix.mkdir()
+    injected = OSError(errno.EIO, "injected fstat failure")
+
+    def failing_fstat(_result: os.stat_result) -> os.stat_result:
+        raise injected
+
+    probe = _HelperFdProbe(prefix, first_fstat=failing_fstat)
+
+    with monkeypatch.context() as patch:
+        probe.install(patch)
+        with pytest.raises(ProductionObjectStoreValidationError) as error:
+            owner._open_runtime_prefix_dir(prefix, tmp_path)
+
+    assert error.value.__cause__ is injected
+    assert error.value.error_code == "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE"
+    assert error.value.message == f"Failed to open runtime staging prefix directory {prefix}: {injected}"
+    _assert_fd_closed_exactly_once(probe)
+
+
+@RUNTIME_PREFIX_DIR_OWNERS
+def test_runtime_prefix_dir_close_failure_never_replaces_the_rejection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    owner: ModuleType,
+) -> None:
+    prefix = tmp_path / "prefix"
+    prefix.mkdir()
+    outside_root = tmp_path / "elsewhere"
+    outside_root.mkdir()
+    close_error = OSError(errno.EIO, "injected close failure")
+    probe = _HelperFdProbe(prefix, close_error=close_error)
+
+    with monkeypatch.context() as patch:
+        probe.install(patch)
+        with pytest.raises(ProductionObjectStoreValidationError) as error:
+            owner._open_runtime_prefix_dir(prefix, outside_root)
+
+    # Still the containment rejection, with the same code and message.
+    assert isinstance(error.value.__cause__, safe_fs.SafeFilesystemError)
+    assert error.value.__cause__ is not close_error
+    assert error.value.error_code == "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE"
+    assert error.value.message == (
+        f"Failed to open runtime staging prefix directory {prefix}: {error.value.__cause__}"
+    )
+    assert "injected close failure" not in error.value.message
+    _assert_fd_closed_exactly_once(probe)
+
+
+@RUNTIME_PREFIX_DIR_OWNERS
+def test_runtime_prefix_dir_success_returns_a_live_descriptor_owned_by_the_caller(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    owner: ModuleType,
+) -> None:
+    prefix = tmp_path / "prefix"
+    prefix.mkdir()
+    probe = _HelperFdProbe(prefix)
+
+    with monkeypatch.context() as patch:
+        probe.install(patch)
+        fd = owner._open_runtime_prefix_dir(prefix, tmp_path)
+    try:
+        assert fd == probe.helper_fd
+        assert fd not in probe.closed
+        opened = _REAL_FSTAT(fd)
+        assert stat.S_ISDIR(opened.st_mode)
+        assert (opened.st_dev, opened.st_ino) == (prefix.stat().st_dev, prefix.stat().st_ino)
+    finally:
+        os.close(fd)
+    with pytest.raises(OSError) as closed:
+        _REAL_FSTAT(fd)
+    assert closed.value.errno == errno.EBADF
+
+
+def test_runtime_prefix_dir_owner_copies_stay_byte_identical() -> None:
+    runtime_copy = runtime_owner._open_runtime_prefix_dir
+    path_safety_copy = path_safety_owner._open_runtime_prefix_dir
+    assert runtime_copy is not path_safety_copy
+    assert runtime_copy.__module__ == runtime_owner.__name__
+    assert path_safety_copy.__module__ == path_safety_owner.__name__
+    assert inspect.getsource(runtime_copy) == inspect.getsource(path_safety_copy)

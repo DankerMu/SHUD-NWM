@@ -367,14 +367,24 @@ def _refuse_symlink_components_to_deepest_existing(path: Path) -> None:
 def _open_runtime_prefix_dir(path: Path, containment_root: Path) -> int:
     try:
         fd = os.open(path, RUNTIME_DIR_FLAGS)
-        opened = os.fstat(fd)
-        stat_no_follow(path, containment_root=containment_root)
-        if not stat.S_ISDIR(opened.st_mode):
-            raise ProductionObjectStoreValidationError(
-                "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
-                f"Runtime staging prefix is not a directory: {path}",
-            )
-        return fd
+        # The fd is owned here until ``return fd`` hands it to the caller: every
+        # post-open rejection closes it exactly once, and a close failure never
+        # replaces the rejection being raised (#1922).
+        try:
+            opened = os.fstat(fd)
+            stat_no_follow(path, containment_root=containment_root)
+            if not stat.S_ISDIR(opened.st_mode):
+                raise ProductionObjectStoreValidationError(
+                    "PRODUCTION_OBJECT_STORE_EVIDENCE_PATH_UNSAFE",
+                    f"Runtime staging prefix is not a directory: {path}",
+                )
+            return fd
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
     except ProductionObjectStoreValidationError:
         raise
     except (OSError, SafeFilesystemError) as error:

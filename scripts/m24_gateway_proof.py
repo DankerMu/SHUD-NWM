@@ -8,8 +8,11 @@ execution_mode=live_proof):
                              executable + healthy from ``GET .../slurm/health``.
 2. ``submit_poll_terminal``  short ``smoke`` job submitted via ``POST .../jobs``;
                              polled via ``GET .../jobs/{id}`` until terminal.
-3. ``submit_cancel``         long ``smoke`` job submitted, allowed to reach
-                             RUNNING, then cancelled via ``DELETE .../jobs/{id}``.
+3. ``submit_cancel``         long ``smoke`` job submitted, must reach RUNNING,
+                             then cancelled via ``DELETE .../jobs/{id}``. A job
+                             that never reaches RUNNING within the bounded wait
+                             is still cancelled for cleanup, but the stage is
+                             ``BLOCKED`` (cancel-while-active not proven).
 
 The terminal-poll and cancel-while-active proofs are deliberately *separate*
 stages on *separate* jobs; they are never collapsed into one step.
@@ -369,6 +372,13 @@ def _run_submit_cancel_stage(
     if cancelled_status != "cancelled":
         raise GatewayProofBlocked(
             f"cancel did not prove CANCELLED state for {job_id} (got {cancelled_status!r})"
+        )
+    # The DELETE above is sent first so a never-started 600 s job does not hold
+    # the partition; only then is the unproven cancel-while-active reported.
+    if not reached_active:
+        raise GatewayProofBlocked(
+            f"long smoke job {job_id} never reached running within {CANCEL_WAIT_MAX_ATTEMPTS} polls "
+            f"(last {last_status!r}); cancelled for cleanup, cancel-while-active not proven"
         )
     return {
         "stage": "submit_cancel",
