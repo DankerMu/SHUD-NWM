@@ -1,12 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "NHMS Frontend River-Click Live Evidence",
-  "description": "Schema-1.0 PASS/FAIL/BLOCKED receipt for the public / river-click GFS+IFS P95 lane (#1970).",
+  "description": "Schema-1.1 PASS/FAIL/BLOCKED receipt for the public / river-click GFS+IFS P95 lane (#1970). click_dispatch=trusted_pointer_event: every sample t0 is a trusted browser pointer-down on the map canvas at the located river point; hook-dispatched schema-1.0 receipts do not validate.",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "artifact",
     "schema_version",
+    "click_dispatch",
     "status",
     "generated_at",
     "started_at",
@@ -27,7 +28,8 @@
   ],
   "properties": {
     "artifact": {"const": "nhms-frontend-river-click-live-evidence"},
-    "schema_version": {"const": "1.0"},
+    "schema_version": {"const": "1.1"},
+    "click_dispatch": {"const": "trusted_pointer_event"},
     "status": {"enum": ["PASS", "FAIL", "BLOCKED"]},
     "generated_at": {"$ref": "#/$defs/utc_rfc3339"},
     "started_at": {"$ref": "#/$defs/utc_rfc3339"},
@@ -284,6 +286,7 @@
               "IDENTITY_MISMATCH",
               "SEGMENT_GEOMETRY_INVALID",
               "HOOK_SELECTION_FAILED",
+              "CLICK_DISPATCH_INVALID",
               "SERIES_REQUEST_INVALID",
               "SERIES_RESPONSE_ERROR",
               "SAMPLE_TIMEOUT",

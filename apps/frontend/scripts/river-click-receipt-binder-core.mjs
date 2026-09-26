@@ -15,7 +15,10 @@ import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, re
 import path from 'node:path'
 
 export const KNOWN_ARTIFACT = 'nhms-frontend-river-click-live-evidence'
-export const KNOWN_SCHEMA_VERSION = '1.0'
+export const KNOWN_SCHEMA_VERSION = '1.1'
+export const KNOWN_CLICK_DISPATCH = 'trusted_pointer_event'
+/** Retired hook-dispatch receipt version: never binds (its t0 was not a real pointer event). */
+export const RETIRED_SCHEMA_VERSION = '1.0'
 export const THRESHOLD_MS = 2000
 export const WARMUP_COUNT = 1
 export const ACCEPTED_COUNT = 20
@@ -237,7 +240,9 @@ function recheckPinnedIdentities(fsOps, receiptPath, parentPath, pinnedParent, p
 
 function validatePassDocument(doc, args, cmdStartMs, cmdEndMs) {
   if (doc.artifact !== KNOWN_ARTIFACT) refuse('artifact identity differs from the known artifact')
-  if (doc.schema_version !== KNOWN_SCHEMA_VERSION) refuse('schema version differs from 1.0')
+  if (doc.schema_version === RETIRED_SCHEMA_VERSION) refuse('schema version 1.0 is a retired hook-dispatch receipt; only 1.1 binds')
+  if (doc.schema_version !== KNOWN_SCHEMA_VERSION) refuse('schema version differs from 1.1')
+  if (doc.click_dispatch !== KNOWN_CLICK_DISPATCH) refuse('click_dispatch is not trusted_pointer_event')
   if (doc.status !== 'PASS') refuse('status must be PASS (got a non-PASS terminal)')
   if (doc.threshold_ms !== THRESHOLD_MS) refuse('threshold_ms is not 2000')
   if (doc.percentile_method !== 'nearest-rank') refuse('percentile_method is not nearest-rank')
@@ -296,7 +301,7 @@ function validatePassDocument(doc, args, cmdStartMs, cmdEndMs) {
 }
 
 /**
- * Accept exactly one schema-1.0 PASS receipt from a bounded no-follow descriptor.
+ * Accept exactly one schema-1.1 PASS receipt from a bounded no-follow descriptor.
  * `hooks.afterPathnameFacts` runs after parent/receipt lstat and before open.
  * `hooks.afterOpen` runs after the identity-checked open and before the read.
  * `hooks.afterRead` runs after the bounded read and before post-read identity

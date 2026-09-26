@@ -2,6 +2,7 @@ import {
   RIVER_CLICK_ACCEPTED_SAMPLES,
   RIVER_CLICK_ARTIFACT,
   RIVER_CLICK_ARRAY_MAX_LENGTH,
+  RIVER_CLICK_DISPATCH,
   RIVER_CLICK_BLOCKED_CODES,
   RIVER_CLICK_EVIDENCE_MAX_BYTES,
   RIVER_CLICK_FAILURE_CODE_MAX_BYTES,
@@ -30,7 +31,7 @@ export {
   RIVER_CLICK_WARMUP,
 } from './constants'
 
-/** Schema-1.0 river-click live evidence document. */
+/** Schema-1.1 river-click live evidence document. */
 export interface RiverClickFeatureIdentity {
   basinId: string
   riverSegmentId: string
@@ -74,6 +75,7 @@ export interface RiverClickFailure {
 export interface RiverClickEvidence {
   artifact: string
   schema_version: string
+  click_dispatch: string
   status: 'PASS' | 'FAIL' | 'BLOCKED'
   generated_at: string
   started_at: string
@@ -258,6 +260,7 @@ function baseDocument(input: {
   return {
     artifact: RIVER_CLICK_ARTIFACT,
     schema_version: RIVER_CLICK_SCHEMA_VERSION,
+    click_dispatch: RIVER_CLICK_DISPATCH,
     status: input.status,
     generated_at: rfc3339UtcNow(),
     started_at: input.startedAt,
@@ -288,7 +291,7 @@ function failureWireCode(failure: RiverClickFailure): string {
 }
 
 /**
- * Build the exact schema-1.0 PASS document: exactly 20 finite non-negative
+ * Build the exact schema-1.1 PASS document: exactly 20 finite non-negative
  * samples, one complete discarded warmup, and P95 recomputed nearest-rank from
  * the actual durations — never an injected value.
  */
@@ -830,16 +833,17 @@ export function validateRiverClickEvidenceDocument(value: unknown): { ok: true }
   }
 
   const topKeys = [
-    'artifact', 'schema_version', 'status', 'generated_at', 'started_at', 'ended_at',
+    'artifact', 'schema_version', 'click_dispatch', 'status', 'generated_at', 'started_at', 'ended_at',
     'threshold_ms', 'percentile_method', 'warmup_count', 'accepted_count', 'origins',
     'requested_feature', 'rendered_feature', 'gfs', 'ifs', 'warmup', 'samples', 'p95_ms', 'failure',
   ]
   if (Object.keys(value).length !== topKeys.length || !topKeys.every((key) => Object.prototype.hasOwnProperty.call(value, key))) {
-    return { ok: false, reason: 'evidence top-level fields differ from the schema-1.0 contract' }
+    return { ok: false, reason: 'evidence top-level fields differ from the schema-1.1 contract' }
   }
 
   if (value.artifact !== RIVER_CLICK_ARTIFACT) return { ok: false, reason: 'artifact identity differs' }
   if (value.schema_version !== RIVER_CLICK_SCHEMA_VERSION) return { ok: false, reason: 'schema_version differs' }
+  if (value.click_dispatch !== RIVER_CLICK_DISPATCH) return { ok: false, reason: 'click_dispatch differs' }
   if (value.status !== 'PASS' && value.status !== 'FAIL' && value.status !== 'BLOCKED') return { ok: false, reason: 'status is not closed' }
   if (value.threshold_ms !== RIVER_CLICK_THRESHOLD_MS) return { ok: false, reason: 'threshold_ms differs' }
   if (value.percentile_method !== RIVER_CLICK_PERCENTILE_METHOD) return { ok: false, reason: 'percentile_method differs' }

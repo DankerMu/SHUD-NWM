@@ -506,4 +506,39 @@ describe('river-click runbook contract', () => {
     expect(core).toMatch(/cmd-start/)
     expect(core).toMatch(/cmd-end/)
   })
+
+  it('both runbooks document the real-click mechanism, schema 1.1, the discharge-layer pin rule, the three-network rule and three-receipt acceptance (#1970 batch Q)', () => {
+    const checklist = sliceSection(readRunbook('docs/runbooks/node-27-bringup-checklist.md'), '#### C4-river-click：', '\n## 上线判定')
+    const tier = sliceSection(readRunbook('docs/runbooks/tier-node27-timeseries-storage.md'), '### 4.9 Frontend', '\n### 4.10')
+    for (const section of [checklist, tier]) {
+      // Real click, trusted t0, no product-callback dispatch.
+      expect(section).toContain('page.mouse.click(clientX, clientY)')
+      expect(section).toContain('takePointerCapture()')
+      expect(section).toContain('CLICK_DISPATCH_INVALID')
+      expect(section).toContain('HOOK_POINT_OCCLUDED')
+      expect(section).toContain('hook HOOK_FEATURE_MISMATCH')
+      // Schema 1.1 only.
+      expect(section).toContain('click_dispatch=trusted_pointer_event')
+      expect(section).toMatch(/schema-?`?1\.1/)
+      expect(section).not.toMatch(/receipt 是 schema-1\.0|schema-`1\.0` artifacts/)
+      // Pin rule: discharge-layer id family; shud_reach fails with HOOK_FEATURE_MISMATCH.
+      expect(section).toContain('_shud_shud_riv_000001')
+      expect(section).toContain('…_shud_reach_…')
+      // Three-network rule with read-only discovery and three binder PASS receipts.
+      expect(section).toContain('core.river_network_version.segment_count')
+      expect(section).toContain('BEGIN READ ONLY')
+      expect(section).toMatch(/largest \/ median \/ smallest/)
+      expect(section).toContain('BINDER: PASS')
+      const discovery = extractBashBlocks(section).find((block) => block.includes('.nhms-issue1970-riverclick-pins-XXXXXX'))
+      expect(discovery, 'read-only pin discovery block').toBeDefined()
+      expect(discovery).toContain('identity_only=true')
+      expect(discovery).toContain('_shud_shud_riv_000001')
+      expect(discovery).not.toMatch(/\b(INSERT|UPDATE|DELETE|ALTER|DROP|TRUNCATE)\b/)
+      bashSyntaxCheck(discovery as string)
+    }
+    // The retired direct-dispatch method name is gone from both sections.
+    for (const section of [checklist, tier]) {
+      expect(section).not.toMatch(new RegExp(['select', 'Rendered', 'River'].join('')))
+    }
+  })
 })

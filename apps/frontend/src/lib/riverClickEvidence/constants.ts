@@ -1,7 +1,11 @@
 /** Closed constants for the river-click live evidence lane (#1970). */
 
 export const RIVER_CLICK_ARTIFACT = 'nhms-frontend-river-click-live-evidence'
-export const RIVER_CLICK_SCHEMA_VERSION = '1.0'
+export const RIVER_CLICK_SCHEMA_VERSION = '1.1'
+/** Required receipt constant: t0 is a trusted browser pointer-down on the map canvas (schema 1.1). */
+export const RIVER_CLICK_DISPATCH = 'trusted_pointer_event'
+/** Largest accepted distance (CSS px, either axis) between the located point and the captured pointer-down. */
+export const RIVER_CLICK_POINTER_TOLERANCE_PX = 2
 export const RIVER_CLICK_WARMUP = 1
 export const RIVER_CLICK_ACCEPTED_SAMPLES = 20
 export const RIVER_CLICK_THRESHOLD_MS = 2000
@@ -60,6 +64,7 @@ export const RIVER_CLICK_FAIL_CODES = [
   'IDENTITY_MISMATCH',
   'SEGMENT_GEOMETRY_INVALID',
   'HOOK_SELECTION_FAILED',
+  'CLICK_DISPATCH_INVALID',
   'SERIES_REQUEST_INVALID',
   'SERIES_RESPONSE_ERROR',
   'SAMPLE_TIMEOUT',
@@ -84,6 +89,9 @@ export const RIVER_CLICK_HOOK_CODES = [
   'HOOK_QUERY_FAILED',
   'HOOK_QUERY_LIMIT',
   'HOOK_FEATURE_MISMATCH',
+  'HOOK_POINT_OCCLUDED',
+  'HOOK_POINTER_MISSING',
+  'HOOK_POINTER_INVALID',
 ] as const
 export type RiverClickHookCode = (typeof RIVER_CLICK_HOOK_CODES)[number]
 

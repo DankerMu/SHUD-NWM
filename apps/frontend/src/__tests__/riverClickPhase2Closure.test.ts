@@ -10,19 +10,31 @@ import {
 } from '../../playwright.river-click-lane-preflight'
 import { runRiverClickAttempt, riverClickChartStateScript, type RiverClickAttemptOptions } from '../../playwright.river-click-lane-attempt'
 import {
+  RIVER_CLICK_HOOK_READY_SCRIPT,
   runRiverClickLane,
   type RiverClickLaneEnv,
   type RiverClickLaneIdentity,
   type RiverClickLanePageSurface,
 } from '../../playwright.river-click-lane'
-import { createRiverClickEvidenceHook, createRiverClickHookController, selectRenderedRiverFeature, type RiverClickHookMap } from '../lib/riverClickEvidence/hook'
+import {
+  createRiverClickEvidenceHook,
+  createRiverClickHookController,
+  createRiverClickPointerCapture,
+  locateRenderedRiverFeature,
+  type RiverClickHookMap,
+} from '../lib/riverClickEvidence/hook'
 import { validateRiverClickEvidenceDocument } from '../lib/riverClickEvidence/receipt'
 import { parseRiverClickConfig } from '../lib/riverClickEvidence/config'
 import { runRiverClickLiveEvidenceOwner } from '../../playwright.river-click-evidence-owner'
 import { publishRiverClickEvidence } from '../../playwright.river-click-evidence'
 import { publishRiverClickTerminal } from '../../playwright.river-click-terminal'
 import { createRiverClickDeadline } from '../lib/riverClickEvidence/deadline'
-import { makeFakePage as pageOf, makeFakePageState as makeState, type RiverClickFakePageState as FakeState } from '../test/riverClickFakePage'
+import {
+  fakeLocateThenClick as locateThenClick,
+  makeFakePage as pageOf,
+  makeFakePageState as makeState,
+  type RiverClickFakePageState as FakeState,
+} from '../test/riverClickFakePage'
 
 const repoRoot = path.resolve(__dirname, '../../../../')
 
@@ -84,19 +96,23 @@ describe('phase2 closure: one absolute whole-run deadline', () => {
     // A lane that would otherwise complete (each attempt records t0=1000,
     // t1=1500 -> duration 500 < 2000) MUST fail with WHOLE_RUN_TIMEOUT when the
     // caller supplies an absolute 100ms deadline on a clock that advances 60ms
-    // per dispatch: the injected deadline is the one object enforced from
+    // per click: the injected deadline is the one object enforced from
     // preflight through receipt construction. If the lane ignored the injected
     // deadline and used its own long budget, this run would reach PASS.
     const state = makeState()
     let elapsed = 0
     let attemptCount = 0
     state.evaluateImpl = (text: string) => {
-      if (text.includes('typeof window.__nhmsRiverClickEvidence.selectRenderedRiver')) return true
-      if (text.includes('selectRenderedRiver')) {
-        attemptCount += 1
-        elapsed += 60
-        emitSeriesPair(state, () => Promise.resolve(null))
-        return { basinId: 'basins_qhh', riverSegmentId: 'seg-001', basinVersionId: 'bv-001', riverNetworkVersionId: 'rn-001', dispatchNowMs: 1000 + attemptCount * 0.5 }
+      if (text === RIVER_CLICK_HOOK_READY_SCRIPT) return true
+      if (text.includes('.locateRenderedRiver(')) {
+        return locateThenClick(state, {
+          t0: 1000 + attemptCount * 0.5,
+          onClick: () => {
+            attemptCount += 1
+            elapsed += 60
+            emitSeriesPair(state, () => Promise.resolve(null))
+          },
+        })
       }
       if (text.includes('m11-river-panel-chart')) {
         if (text.includes('chartVisible')) return { chart: true, chartVisible: true, partial: false, empty: false }
@@ -126,12 +142,9 @@ describe('phase2 closure: one absolute whole-run deadline', () => {
     // A quietMs request larger than the sample budget must fail closed with a
     // timeout, never silently succeed with a clipped quiet.
     const state = makeState()
-    let hookCalls = 0
     state.evaluateImpl = (text: string) => {
-      if (text.includes('selectRenderedRiver')) {
-        hookCalls += 1
-        emitSeriesPair(state, () => Promise.resolve(null))
-        return { basinId: 'basins_qhh', riverSegmentId: 'seg-001', basinVersionId: 'bv-001', riverNetworkVersionId: 'rn-001', dispatchNowMs: 1000 }
+      if (text.includes('.locateRenderedRiver(')) {
+        return locateThenClick(state, { onClick: () => emitSeriesPair(state, () => Promise.resolve(null)) })
       }
       if (text.includes('m11-river-panel-chart')) return { chart: true, chartVisible: true, partial: false, empty: false }
       if (text.includes('performance.now()')) return 1500
@@ -165,7 +178,7 @@ describe('phase2 closure: one absolute whole-run deadline', () => {
     const state = makeState()
     // goto never resolves; the injected 40ms absolute deadline expires first.
     state.evaluateImpl = (text: string) => {
-      if (text.includes('typeof window.__nhmsRiverClickEvidence.selectRenderedRiver')) return false
+      if (text === RIVER_CLICK_HOOK_READY_SCRIPT) return false
       return undefined
     }
     const page = pageOf(state)
@@ -188,12 +201,9 @@ describe('phase2 closure: one absolute whole-run deadline', () => {
 
   it('a throwing waitForTimeout during the quiet interval fails closed as a bounded timeout, never INTERNAL_ERROR', async () => {
     const state = makeState()
-    let hookCalls = 0
     state.evaluateImpl = (text: string) => {
-      if (text.includes('selectRenderedRiver')) {
-        hookCalls += 1
-        emitSeriesPair(state, () => Promise.resolve(null))
-        return { basinId: 'basins_qhh', riverSegmentId: 'seg-001', basinVersionId: 'bv-001', riverNetworkVersionId: 'rn-001', dispatchNowMs: 1000 }
+      if (text.includes('.locateRenderedRiver(')) {
+        return locateThenClick(state, { onClick: () => emitSeriesPair(state, () => Promise.resolve(null)) })
       }
       if (text.includes('m11-river-panel-chart')) return { chart: true, chartVisible: true, partial: false, empty: false }
       if (text.includes('performance.now()')) return 1500
@@ -221,14 +231,11 @@ describe('phase2 closure: one absolute whole-run deadline', () => {
 
   it('a quiet wait whose waitForTimeout overshoots the effective deadline is a timeout, never accepted', async () => {
     const state = makeState()
-    let hookCalls = 0
     let elapsed = 0
     const clock = () => elapsed
     state.evaluateImpl = (text: string) => {
-      if (text.includes('selectRenderedRiver')) {
-        hookCalls += 1
-        emitSeriesPair(state, () => Promise.resolve(null))
-        return { basinId: 'basins_qhh', riverSegmentId: 'seg-001', basinVersionId: 'bv-001', riverNetworkVersionId: 'rn-001', dispatchNowMs: 1000 }
+      if (text.includes('.locateRenderedRiver(')) {
+        return locateThenClick(state, { onClick: () => emitSeriesPair(state, () => Promise.resolve(null)) })
       }
       if (text.includes('m11-river-panel-chart')) return { chart: true, chartVisible: true, partial: false, empty: false }
       if (text.includes('performance.now()')) return 1500
@@ -255,6 +262,11 @@ describe('phase2 closure: one absolute whole-run deadline', () => {
 })
 
 describe('phase2 closure: hook waits inside ONE budget and keeps one stable object', () => {
+  const canvas = {
+    getBoundingClientRect: () => ({ left: 0, top: 0 }),
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+  }
   function collectableMap(): RiverClickHookMap {
     return {
       loaded: () => true,
@@ -262,7 +274,8 @@ describe('phase2 closure: hook waits inside ONE budget and keeps one stable obje
       fitBounds: vi.fn(),
       project: vi.fn(() => ({ x: 100, y: 100 })),
       queryRenderedFeatures: vi.fn(() => [feature()]),
-      getCanvas: () => ({ style: { cursor: '' } }),
+      getLayer: vi.fn((id: string) => ({ id })),
+      getCanvas: () => canvas,
       once: vi.fn((_event: string, callback: () => void) => {
         queueMicrotask(callback)
       }),
@@ -283,8 +296,13 @@ describe('phase2 closure: hook waits inside ONE budget and keeps one stable obje
     }
   }
   const input = { bbox: [[100, 30], [102, 32]] as [[number, number], [number, number]], anchor: [100.5, 30.5] as [number, number], basinId: 'basins_qhh', riverSegmentId: 'seg-001', basinVersionId: 'bv-001', riverNetworkVersionId: 'rn-001' }
+  const productClick = {
+    getInteractiveLayerIds: () => ['m11-discharge-line-hit'],
+    resolveClickTarget: (features: Array<{ layer?: { id?: string } }>) =>
+      features[0] ? { kind: 'overlay', feature: features[0] } : null,
+  }
 
-  it('selection waits for a delayed map/layer inside one total budget instead of failing immediately', async () => {
+  it('locate waits for a delayed map/layer inside one total budget instead of failing immediately', async () => {
     let ready = false
     const map = collectableMap()
     map.loaded = () => ready
@@ -292,51 +310,51 @@ describe('phase2 closure: hook waits inside ONE budget and keeps one stable obje
     const controller = createRiverClickHookController({
       getMap: () => map,
       getOverlayHitLayerId: () => (ready ? 'm11-discharge-line-hit' : null),
+      productClick,
+      elementFromPoint: () => canvas,
       now: () => 0,
-      select: async ({ map: m, getOverlayHitLayerId, deadlineMs }) => {
+      locate: async (args) => {
         // emulate the hook waiting for readiness across the budget calls
         ready = true
-        expect(deadlineMs).toBeGreaterThan(0)
-        return selectRenderedRiverFeature({
-          input,
-          map: m,
-          getOverlayHitLayerId,
-          now: () => 0,
-          deadlineMs,
-        })
+        expect(args.deadlineMs).toBeGreaterThan(0)
+        return locateRenderedRiverFeature({ ...args, input })
       },
     })
-    const hook = createRiverClickEvidenceHook({ onOverlayClick: vi.fn(), controller })
-    const result = await hook.selectRenderedRiver(input)
-    expect(result).toMatchObject({ basinId: 'basins_qhh' })
+    const hook = createRiverClickEvidenceHook({ controller, pointerCapture: createRiverClickPointerCapture({ getCanvas: () => canvas }) })
+    const result = await hook.locateRenderedRiver(input)
+    expect(result).toMatchObject({ basinId: 'basins_qhh', clientX: 100, clientY: 100 })
   })
 
-  it('keeps the exact hook object stable across callback identity changes (no replacement on rerender)', () => {
+  it('keeps the exact hook object stable: the effect installs once per mount and reads render-local values through refs', () => {
     const surface = readFileSync(path.join(repoRoot, 'apps/frontend/src/components/map/M11MapLibreSurface.tsx'), 'utf8')
-    // The effect must not depend on onOverlayClick: a ref-based stable hook.
-    const hookEffect = surface.slice(surface.indexOf('useEffect(() => {\n    if ((window as'))
-    expect(hookEffect).not.toMatch(/}, \[onOverlayClick\]\)/)
-    expect(hookEffect).toMatch(/useRef|useCallback/)
+    const fromEffect = surface.slice(surface.indexOf('useEffect(() => {\n    if ((window as'))
+    // The gated effect runs once per mount (empty deps) and never touches a product callback.
+    const hookEffect = /^useEffect\(\(\) => \{[\s\S]*?\n  \}, \[\]\)/.exec(fromEffect)?.[0] ?? ''
+    expect(hookEffect).toContain('createRiverClickEvidenceHook({ controller, pointerCapture })')
+    expect(hookEffect).not.toMatch(/onOverlayClick/)
+    expect(surface).toMatch(/interactiveLayerIdsRef\.current = interactiveLayerIds/)
+    expect(surface).toMatch(/showStationLayerRef\.current = showStationLayer/)
   })
 })
 
 describe('phase2 closure: attempt observation is request-identity strict', () => {
   it('correlates ONLY by response.request() === armed request; a URL-equal foreign request is not accepted', async () => {
     const state = makeState()
-    let hookCalls = 0
     const url = seriesUrl()
     state.evaluateImpl = (text: string) => {
-      if (text.includes('selectRenderedRiver')) {
-        hookCalls += 1
-        const armed = { method: () => 'GET', url: () => url }
-        emit(state, 'request', armed)
-        // Both sources: GFS is armed but its response carries a DIFFERENT
-        // request object with the same URL; IFS is fully matched so the only
-        // possible outcome is the un-correlated GFS response.
-        const foreign = { method: () => 'GET', url: () => url }
-        emit(state, 'response', { url: () => url, status: () => 200, finished: () => Promise.resolve(null), request: () => foreign })
-        emitSeriesPair(state, () => Promise.resolve(null), 'IFS')
-        return { basinId: 'basins_qhh', riverSegmentId: 'seg-001', basinVersionId: 'bv-001', riverNetworkVersionId: 'rn-001', dispatchNowMs: 1000 }
+      if (text.includes('.locateRenderedRiver(')) {
+        return locateThenClick(state, {
+          onClick: () => {
+            const armed = { method: () => 'GET', url: () => url }
+            emit(state, 'request', armed)
+            // Both sources: GFS is armed but its response carries a DIFFERENT
+            // request object with the same URL; IFS is fully matched so the only
+            // possible outcome is the un-correlated GFS response.
+            const foreign = { method: () => 'GET', url: () => url }
+            emit(state, 'response', { url: () => url, status: () => 200, finished: () => Promise.resolve(null), request: () => foreign })
+            emitSeriesPair(state, () => Promise.resolve(null), 'IFS')
+          },
+        })
       }
       if (text.includes('m11-river-panel-chart')) return { chart: false, partial: false, empty: false }
       return undefined
@@ -353,12 +371,9 @@ describe('phase2 closure: attempt observation is request-identity strict', () =>
 
   it('requires the chart to be actually visible; a DOM-only presence is insufficient', async () => {
     const state = makeState()
-    let hookCalls = 0
     state.evaluateImpl = (text: string) => {
-      if (text.includes('selectRenderedRiver')) {
-        hookCalls += 1
-        emitSeriesPair(state, () => Promise.resolve(null))
-        return { basinId: 'basins_qhh', riverSegmentId: 'seg-001', basinVersionId: 'bv-001', riverNetworkVersionId: 'rn-001', dispatchNowMs: 1000 }
+      if (text.includes('.locateRenderedRiver(')) {
+        return locateThenClick(state, { onClick: () => emitSeriesPair(state, () => Promise.resolve(null)) })
       }
       if (text.includes('m11-river-panel-chart')) {
         // DOM present but NOT visible (rect zero): must not count as complete.
@@ -379,12 +394,9 @@ describe('phase2 closure: attempt observation is request-identity strict', () =>
 
   it('rejects a chart hidden by display:none / visibility:hidden even when the rect is nonzero', async () => {
     const state = makeState()
-    let hookCalls = 0
     state.evaluateImpl = (text: string) => {
-      if (text.includes('selectRenderedRiver')) {
-        hookCalls += 1
-        emitSeriesPair(state, () => Promise.resolve(null))
-        return { basinId: 'basins_qhh', riverSegmentId: 'seg-001', basinVersionId: 'bv-001', riverNetworkVersionId: 'rn-001', dispatchNowMs: 1000 }
+      if (text.includes('.locateRenderedRiver(')) {
+        return locateThenClick(state, { onClick: () => emitSeriesPair(state, () => Promise.resolve(null)) })
       }
       if (text.includes('m11-river-panel-chart')) {
         // Visible rect but display:none: real visibility, not only positive rect.
@@ -463,14 +475,11 @@ describe('phase2 closure: attempt observation is request-identity strict', () =>
     }
   })
 
-  it('close requires the exact pre-dispatch hook object + map node; no extra global is written', async () => {
+  it('close requires the exact pre-click hook object + map node; no extra global is written', async () => {
     const state = makeState()
-    let hookCalls = 0
     state.evaluateImpl = (text: string) => {
-      if (text.includes('selectRenderedRiver')) {
-        hookCalls += 1
-        emitSeriesPair(state, () => Promise.resolve(null))
-        return { basinId: 'basins_qhh', riverSegmentId: 'seg-001', basinVersionId: 'bv-001', riverNetworkVersionId: 'rn-001', dispatchNowMs: 1000 }
+      if (text.includes('.locateRenderedRiver(')) {
+        return locateThenClick(state, { onClick: () => emitSeriesPair(state, () => Promise.resolve(null)) })
       }
       if (text.includes('m11-river-panel-chart')) {
         if (text.includes('chartVisible')) return { chart: true, chartVisible: true, partial: false, empty: false }
@@ -492,19 +501,16 @@ describe('phase2 closure: attempt observation is request-identity strict', () =>
     expect(names).toMatch(/m11-map-surface/)
   })
 
-  it('fails when the hook object is REPLACED between dispatch and close (capture is pre-dispatch)', async () => {
+  it('fails when the hook object is REPLACED between the click and close (capture is pre-click)', async () => {
     const state = makeState()
-    let hookCalls = 0
     const preDispatchHook = { marker: 'original-hook' }
     state.evaluateImpl = (text: string) => {
-      if (text.includes('selectRenderedRiver')) {
-        hookCalls += 1
-        emitSeriesPair(state, () => Promise.resolve(null))
-        return { basinId: 'basins_qhh', riverSegmentId: 'seg-001', basinVersionId: 'bv-001', riverNetworkVersionId: 'rn-001', dispatchNowMs: 1000 }
+      if (text.includes('.locateRenderedRiver(')) {
+        return locateThenClick(state, { onClick: () => emitSeriesPair(state, () => Promise.resolve(null)) })
       }
       if (text.includes('m11-river-panel-chart')) return { chart: true, chartVisible: true, partial: false, empty: false }
       if (text.includes('performance.now()')) {
-        // Replacement happens AFTER dispatch (capture already taken) and BEFORE
+        // Replacement happens AFTER the click (capture already taken) and BEFORE
         // the scoped close: the hook object is no longer the captured one.
         ;(window as unknown as Record<string, unknown>).__nhmsRiverClickEvidence = { marker: 'replaced-hook' }
         return 1500
@@ -514,10 +520,10 @@ describe('phase2 closure: attempt observation is request-identity strict', () =>
     state.closeImpl = (captured) => {
       const c = captured as { hook: { marker: string } }
       const current = (window as unknown as Record<string, unknown>).__nhmsRiverClickEvidence
-      // hookSame = current window hook is STILL the captured pre-dispatch object.
+      // hookSame = current window hook is STILL the captured pre-click object.
       return { closed: true, mapPresent: true, mapSame: true, hookSame: c.hook === current }
     }
-    // Stub the hook the capture must see BEFORE dispatch.
+    // Stub the hook the capture must see BEFORE the click.
     ;(window as unknown as Record<string, unknown>).__nhmsRiverClickEvidence = preDispatchHook
     const attempt = await runRiverClickAttempt(
       { config: config(), page: pageOf(state) },
@@ -527,36 +533,39 @@ describe('phase2 closure: attempt observation is request-identity strict', () =>
     )
     expect(attempt.ok).toBe(false)
     if (!attempt.ok) expect(attempt.failure.code).toBe('CHART_INCOMPLETE')
-    // The capture MUST happen before the dispatch: the handle-capture marker
-    // precedes the selectRenderedRiver dispatch evaluate.
+    // The capture MUST happen before the click: the handle-capture marker
+    // precedes the locate evaluate and the real mouse click.
     const names = state.evaluateNames
     const captureIdx = names.indexOf('handle-capture')
-    const dispatchIdx = names.findIndex((n) => n.includes('selectRenderedRiver'))
+    const locateIdx = names.findIndex((n) => n.includes('.locateRenderedRiver('))
+    const clickIdx = names.indexOf('mouse-click')
     expect(captureIdx).toBeGreaterThanOrEqual(0)
-    expect(dispatchIdx).toBeGreaterThan(captureIdx)
+    expect(locateIdx).toBeGreaterThan(captureIdx)
+    expect(clickIdx).toBeGreaterThan(locateIdx)
     delete (window as unknown as Record<string, unknown>).__nhmsRiverClickEvidence
   })
 
-  it('fails when the m11-map-surface node is REPLACED between dispatch and close', async () => {
+  it('fails when the m11-map-surface node is REPLACED between the click and close', async () => {
     const state = makeState()
-    let hookCalls = 0
     state.closeImpl = (captured) => {
       const c = captured as { map: unknown }
       const current = document.querySelector('[data-testid="m11-map-surface"]')
-      // mapSame = current map node is STILL the captured pre-dispatch node.
+      // mapSame = current map node is STILL the captured pre-click node.
       return { closed: true, mapPresent: true, mapSame: c.map === current, hookSame: true }
     }
-    // A real map node for the capture to hold BEFORE dispatch.
+    // A real map node for the capture to hold BEFORE the click.
     document.body.innerHTML = '<div data-testid="m11-map-surface" id="map-original">map</div>'
     ;(window as unknown as Record<string, unknown>).__nhmsRiverClickEvidence = { marker: 'hook' }
     state.evaluateImpl = (text: string) => {
-      if (text.includes('selectRenderedRiver')) {
-        hookCalls += 1
-        // Replace the map node DURING dispatch (before close): a new node with
-        // the same testid mounts, so the pre-dispatch node is no longer current.
-        document.body.innerHTML = '<div data-testid="m11-map-surface" id="map-replaced">map2</div>'
-        emitSeriesPair(state, () => Promise.resolve(null))
-        return { basinId: 'basins_qhh', riverSegmentId: 'seg-001', basinVersionId: 'bv-001', riverNetworkVersionId: 'rn-001', dispatchNowMs: 1000 }
+      if (text.includes('.locateRenderedRiver(')) {
+        return locateThenClick(state, {
+          onClick: () => {
+            // Replace the map node DURING the click (before close): a new node with
+            // the same testid mounts, so the pre-click node is no longer current.
+            document.body.innerHTML = '<div data-testid="m11-map-surface" id="map-replaced">map2</div>'
+            emitSeriesPair(state, () => Promise.resolve(null))
+          },
+        })
       }
       if (text.includes('m11-river-panel-chart')) return { chart: true, chartVisible: true, partial: false, empty: false }
       if (text.includes('performance.now()')) return 1500
@@ -579,11 +588,14 @@ describe('phase2 closure: attempt observation is request-identity strict', () =>
     let quietReplaced = false
     state.closeImpl = () => ({ closed: true, mapPresent: true, mapSame: true, hookSame: true })
     state.evaluateImpl = (text: string) => {
-      if (text.includes('selectRenderedRiver')) {
-        document.body.innerHTML = '<div data-testid="m11-map-surface" id="map-original">map</div>'
-        ;(window as unknown as Record<string, unknown>).__nhmsRiverClickEvidence = { marker: 'hook-original' }
-        emitSeriesPair(state, () => Promise.resolve(null))
-        return { basinId: 'basins_qhh', riverSegmentId: 'seg-001', basinVersionId: 'bv-001', riverNetworkVersionId: 'rn-001', dispatchNowMs: 1000 }
+      if (text.includes('.locateRenderedRiver(')) {
+        return locateThenClick(state, {
+          onClick: () => {
+            document.body.innerHTML = '<div data-testid="m11-map-surface" id="map-original">map</div>'
+            ;(window as unknown as Record<string, unknown>).__nhmsRiverClickEvidence = { marker: 'hook-original' }
+            emitSeriesPair(state, () => Promise.resolve(null))
+          },
+        })
       }
       if (text.includes('m11-river-panel-chart')) return { chart: true, chartVisible: true, partial: false, empty: false }
       if (text.includes('performance.now()')) return 1500
@@ -611,12 +623,12 @@ describe('phase2 closure: attempt observation is request-identity strict', () =>
     delete (window as unknown as Record<string, unknown>).__nhmsRiverClickEvidence
   })
 
-  it('disposes BOTH pre-dispatch handles on an early hook-rejection/drift failure', async () => {
+  it('disposes BOTH pre-click handles on an early hook-rejection/drift failure', async () => {
     const state = makeState()
     state.evaluateImpl = (text: string) => {
-      // Hook rejection: dispatch never returns; capture already happened.
-      if (text.includes('selectRenderedRiver')) {
-        throw new Error('hook rejected before dispatch')
+      // Hook rejection: locate never resolves a point; capture already happened.
+      if (text.includes('.locateRenderedRiver(')) {
+        throw new Error('hook rejected before the click')
       }
       return undefined
     }
@@ -638,9 +650,8 @@ describe('phase2 closure: attempt observation is request-identity strict', () =>
     // after settle. Awaiting proves the attempt does not leak handles.
     state.deferredDisposeMs = 30
     state.evaluateImpl = (text: string) => {
-      if (text.includes('selectRenderedRiver')) {
-        emitSeriesPair(state, () => Promise.resolve(null))
-        return { basinId: 'basins_qhh', riverSegmentId: 'seg-001', basinVersionId: 'bv-001', riverNetworkVersionId: 'rn-001', dispatchNowMs: 1000 }
+      if (text.includes('.locateRenderedRiver(')) {
+        return locateThenClick(state, { onClick: () => emitSeriesPair(state, () => Promise.resolve(null)) })
       }
       if (text.includes('m11-river-panel-chart')) return { chart: true, chartVisible: true, partial: false, empty: false }
       if (text.includes('performance.now()')) return 1500
@@ -660,12 +671,9 @@ describe('phase2 closure: attempt observation is request-identity strict', () =>
 
   it('panel absence BEFORE the scoped close is a FAIL, not success', async () => {
     const state = makeState()
-    let hookCalls = 0
     state.evaluateImpl = (text: string) => {
-      if (text.includes('selectRenderedRiver')) {
-        hookCalls += 1
-        emitSeriesPair(state, () => Promise.resolve(null))
-        return { basinId: 'basins_qhh', riverSegmentId: 'seg-001', basinVersionId: 'bv-001', riverNetworkVersionId: 'rn-001', dispatchNowMs: 1000 }
+      if (text.includes('.locateRenderedRiver(')) {
+        return locateThenClick(state, { onClick: () => emitSeriesPair(state, () => Promise.resolve(null)) })
       }
       if (text.includes('m11-river-panel-chart')) return { chart: true, chartVisible: true, partial: false, empty: false }
       if (text.includes('performance.now()')) return 1500
@@ -797,11 +805,10 @@ describe('phase2 closure: identity-drift FAIL retains the mismatching rendered i
     const state = makeState()
     let hookCalls = 0
     state.evaluateImpl = (text: string) => {
-      if (text.includes('typeof window.__nhmsRiverClickEvidence.selectRenderedRiver')) return true
-      if (text.includes('selectRenderedRiver')) {
+      if (text === RIVER_CLICK_HOOK_READY_SCRIPT) return true
+      if (text.includes('.locateRenderedRiver(')) {
         hookCalls += 1
-        emitSeriesPair(state, () => Promise.resolve(null))
-        return { basinId: 'basins_qhh', riverSegmentId: 'seg-NEW', basinVersionId: 'bv-001', riverNetworkVersionId: 'rn-001', dispatchNowMs: 1000 }
+        return locateThenClick(state, { identity: { riverSegmentId: 'seg-NEW' }, onClick: () => emitSeriesPair(state, () => Promise.resolve(null)) })
       }
       if (text.includes('m11-river-panel-chart')) return { chart: true, chartVisible: true, partial: false, empty: false }
       if (text.includes('performance.now()')) return 1500
@@ -816,6 +823,8 @@ describe('phase2 closure: identity-drift FAIL retains the mismatching rendered i
     expect(lane.ok).toBe(false)
     if (lane.ok) throw new Error('lane must fail on identity drift')
     expect(hookCalls).toBe(1)
+    // Drift is refused BEFORE any click: a drifted river is never clicked.
+    expect(state.mouseClicks).toEqual([])
     expect(lane.terminal.failure?.code).toBe('IDENTITY_DRIFT')
     expect(lane.terminal.requestedFeature).toEqual({ basinId: 'basins_qhh', riverSegmentId: 'seg-001', basinVersionId: 'bv-001', riverNetworkVersionId: 'rn-001' })
     expect(lane.terminal.renderedFeature?.riverSegmentId).toBe('seg-NEW')

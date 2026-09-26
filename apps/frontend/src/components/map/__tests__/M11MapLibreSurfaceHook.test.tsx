@@ -101,36 +101,102 @@ function ordinaryMapClickEvent() {
   }
 }
 
-function installStubMap() {
+const LOCATE_INPUT = {
+  bbox: [[100, 30], [102, 32]],
+  anchor: [100.5, 30.5],
+  basinId: 'basins_qhh',
+  riverSegmentId: 'seg-001',
+  basinVersionId: 'bv-001',
+  riverNetworkVersionId: 'rn-001',
+}
+
+type Listener = (event: unknown) => void
+
+/** One stable canvas object (identity matters for elementFromPoint and the pointer listener). */
+function makeStubCanvas() {
+  const listeners = new Set<Listener>()
+  const canvas = {
+    style: { cursor: '' },
+    listeners,
+    getBoundingClientRect: () => ({ left: 10, top: 20 }),
+    addEventListener: vi.fn((_type: string, listener: Listener) => {
+      listeners.add(listener)
+    }),
+    removeEventListener: vi.fn((_type: string, listener: Listener) => {
+      listeners.delete(listener)
+    }),
+    firePointerDown(event: Record<string, unknown>) {
+      for (const listener of [...listeners]) listener({ isTrusted: true, target: canvas, ...event })
+    },
+  }
+  return canvas
+}
+
+function installStubMap(options: { pointFeatures?: (layers: string[]) => unknown[] } = {}) {
+  const canvas = makeStubCanvas()
+  const layers = new Set(['m11-discharge-line-hit', 'met-stations-point', 'clusters'])
   const map = {
     loaded: () => true,
     isStyleLoaded: () => true,
     fitBounds: vi.fn(),
     project: vi.fn((coord: [number, number]) => ({ x: 40 + (coord[0] - 100) * 10, y: 40 + (coord[1] - 30) * 10 })),
-    queryRenderedFeatures: vi.fn(() => [ORDINARY_CLICK_FEATURE]),
-    getCanvas: () => ({ style: { cursor: '' } }),
+    queryRenderedFeatures: vi.fn((geometry: unknown, query: { layers: string[] }) => {
+      if (Array.isArray(geometry)) return [ORDINARY_CLICK_FEATURE]
+      return options.pointFeatures ? options.pointFeatures(query.layers) : [ORDINARY_CLICK_FEATURE]
+    }),
+    getLayer: vi.fn((id: string) => (layers.has(id) ? { id } : undefined)),
+    getCanvas: () => canvas,
     once: (_event: string, callback: () => void) => {
       queueMicrotask(callback)
     },
   }
   // react-map-gl MapRef: getMap() returns the underlying maplibre map.
   installMaplibreStubMap({ getMap: () => map })
-  return map
+  // jsdom has no layout: the top element at the located point is the map canvas.
+  ;(document as unknown as { elementFromPoint: (x: number, y: number) => unknown }).elementFromPoint = vi.fn(() => canvas)
+  return { map, canvas }
 }
 
-function renderSurface(onOverlayClick?: (interaction: M11MapOverlayInteraction) => void) {
-  return render(
+type SurfaceProps = Partial<Parameters<typeof M11MapLibreSurface>[0]>
+
+function surface(props: SurfaceProps = {}) {
+  return (
     <M11MapLibreSurface
       state={state}
       layers={[layer]}
       loading={false}
       boundaryLoading={false}
-      onOverlayClick={onOverlayClick}
-    />,
+      {...props}
+    />
   )
 }
 
+function renderSurface(onOverlayClick?: (interaction: M11MapOverlayInteraction) => void, props: SurfaceProps = {}) {
+  return render(surface({ onOverlayClick, ...props }))
+}
+
+function currentHook() {
+  return (window as unknown as Record<string, unknown>).__nhmsRiverClickEvidence as {
+    locateRenderedRiver: (input: unknown) => Promise<Record<string, unknown>>
+    armPointerCapture: () => void
+    takePointerCapture: () => Record<string, unknown>
+  }
+}
+
+const STATIONS = {
+  type: 'FeatureCollection' as const,
+  features: [
+    {
+      type: 'Feature' as const,
+      geometry: { type: 'Point' as const, coordinates: [100.5, 30.5] as [number, number] },
+      properties: { station_id: 'st-1', station_name: null, basin_id: 'basins_qhh' },
+    },
+  ],
+}
+
 describe('M11MapLibreSurface river-click hook', () => {
+  const originalElementFromPoint = (document as unknown as { elementFromPoint?: unknown }).elementFromPoint
+
   beforeEach(() => {
     installStubMap()
   })
@@ -138,119 +204,86 @@ describe('M11MapLibreSurface river-click hook', () => {
   afterEach(() => {
     delete (window as unknown as Record<string, unknown>).__nhmsRiverClickEvidence
     delete (window as unknown as Record<string, unknown>).__NHMS_E2E_HOOKS__
+    ;(document as unknown as { elementFromPoint?: unknown }).elementFromPoint = originalElementFromPoint
   })
 
-  it('leaves the hook global absent when the exact pre-start flag is not set', () => {
+  it('leaves the hook global absent and installs no canvas listener when the exact pre-start flag is not set', () => {
+    const { canvas } = installStubMap()
     renderSurface()
     expect((window as unknown as Record<string, unknown>).__nhmsRiverClickEvidence).toBeUndefined()
+    expect(canvas.addEventListener).not.toHaveBeenCalled()
   })
 
-  it('registers exactly one method selectRenderedRiver when the exact boolean flag is set before startup', async () => {
+  it('registers exactly locateRenderedRiver, armPointerCapture and takePointerCapture when the exact boolean flag is set before startup', () => {
     ;(window as unknown as Record<string, unknown>).__NHMS_E2E_HOOKS__ = true
     renderSurface()
-    const hook = (window as unknown as Record<string, unknown>).__nhmsRiverClickEvidence as
-      | { selectRenderedRiver?: (input: unknown) => Promise<unknown> }
-      | undefined
+    const hook = currentHook()
     expect(hook).toBeDefined()
-    expect(Object.keys(hook as object).sort()).toEqual(['selectRenderedRiver'])
+    expect(Object.keys(hook).sort()).toEqual(['armPointerCapture', 'locateRenderedRiver', 'takePointerCapture'])
   })
 
-  it('keeps the EXACT hook object identity across a parent rerender that supplies a new onOverlayClick closure', async () => {
+  it('keeps the EXACT hook object identity across a parent rerender that supplies a new onOverlayClick closure', () => {
     ;(window as unknown as Record<string, unknown>).__NHMS_E2E_HOOKS__ = true
-    const first = vi.fn()
-    const { rerender } = renderSurface(first)
-    const before = (window as unknown as Record<string, unknown>).__nhmsRiverClickEvidence
+    const { rerender } = renderSurface(vi.fn())
+    const before = currentHook()
     expect(before).toBeDefined()
-    // Parent rerender with a NEW callback identity: the hook object must be the
-    // SAME object (a ref-based stable hook, never replaced by the effect), while
-    // the LATEST callback is what actually dispatches.
-    const second = vi.fn()
-    rerender(
-      <M11MapLibreSurface
-        state={state}
-        layers={[layer]}
-        loading={false}
-        boundaryLoading={false}
-        onOverlayClick={second}
-      />,
-    )
-    const after = (window as unknown as Record<string, unknown>).__nhmsRiverClickEvidence
-    expect(after).toBe(before)
-    const hook = after as { selectRenderedRiver: (input: unknown) => Promise<unknown> }
-    await hook.selectRenderedRiver({
-      bbox: [[100, 30], [102, 32]],
-      anchor: [100.5, 30.5],
-      basinId: 'basins_qhh',
-      riverSegmentId: 'seg-001',
-      basinVersionId: 'bv-001',
-      riverNetworkVersionId: 'rn-001',
-    })
-    expect(first).not.toHaveBeenCalled()
-    expect(second).toHaveBeenCalledTimes(1)
+    rerender(surface({ onOverlayClick: vi.fn() }))
+    expect(currentHook()).toBe(before)
   })
 
-  it('dispatches the actual rendered feature through onOverlayClick with product layer and finite anchor', async () => {
+  it('locates the rendered river (identities + viewport point) without calling onOverlayClick', async () => {
     ;(window as unknown as Record<string, unknown>).__NHMS_E2E_HOOKS__ = true
+    const { map } = installStubMap()
     const onOverlayClick = vi.fn()
     renderSurface(onOverlayClick)
-    const hook = (window as unknown as Record<string, unknown>).__nhmsRiverClickEvidence as {
-      selectRenderedRiver: (input: unknown) => Promise<unknown>
-    }
-    const result = await hook.selectRenderedRiver({
-      bbox: [[100, 30], [102, 32]],
-      anchor: [100.5, 30.5],
+    const result = await currentHook().locateRenderedRiver(LOCATE_INPUT)
+    // project(100.5, 30.5) = (45, 45) in canvas pixels; canvas rect origin (10, 20).
+    expect(result).toEqual({
       basinId: 'basins_qhh',
       riverSegmentId: 'seg-001',
       basinVersionId: 'bv-001',
       riverNetworkVersionId: 'rn-001',
+      clientX: 55,
+      clientY: 65,
     })
-    expect(result).toMatchObject({
-      basinId: 'basins_qhh',
-      riverSegmentId: 'seg-001',
-      basinVersionId: 'bv-001',
-      riverNetworkVersionId: 'rn-001',
-    })
-    expect(onOverlayClick).toHaveBeenCalledTimes(1)
-    const interaction = onOverlayClick.mock.calls[0][0]
-    expect(interaction.layerId).toBe('discharge')
-    expect(interaction.feature.properties.basin_id).toBe('basins_qhh')
-    expect(interaction.event.lngLat).toMatchObject({ lng: 100.5, lat: 30.5 })
-    expect(interaction.feature).not.toHaveProperty('_synthesized')
+    expect(onOverlayClick).not.toHaveBeenCalled()
+    // The product point query uses the current interactive layer ids (read through a ref).
+    expect(map.queryRenderedFeatures).toHaveBeenCalledWith({ x: 45, y: 45 }, { layers: ['m11-discharge-line-hit'] })
+  })
+
+  it('reads the render-local station flag through a ref: with stations shown a station at the point makes the located point occluded', async () => {
+    ;(window as unknown as Record<string, unknown>).__NHMS_E2E_HOOKS__ = true
+    const station = { layer: { id: 'met-stations-point' }, geometry: { type: 'Point', coordinates: [100.5, 30.5] }, properties: {} }
+    installStubMap({ pointFeatures: () => [ORDINARY_CLICK_FEATURE, station] })
+    const { rerender } = renderSurface(vi.fn())
+    const hook = currentHook()
+    await expect(hook.locateRenderedRiver(LOCATE_INPUT)).resolves.toMatchObject({ riverSegmentId: 'seg-001' })
+    rerender(surface({ onOverlayClick: vi.fn(), metStations: true, stationFeatureCollection: STATIONS }))
+    expect(currentHook()).toBe(hook)
+    await expect(hook.locateRenderedRiver(LOCATE_INPUT)).rejects.toMatchObject({ code: 'HOOK_POINT_OCCLUDED' })
   })
 
   it('rejects with a closed hook code when zero features match and dispatches nothing', async () => {
     ;(window as unknown as Record<string, unknown>).__NHMS_E2E_HOOKS__ = true
-    const map = installStubMap()
+    const { map } = installStubMap()
     map.queryRenderedFeatures = vi.fn(() => [])
-    installMaplibreStubMap({ getMap: () => map })
     const onOverlayClick = vi.fn()
     renderSurface(onOverlayClick)
-    const hook = (window as unknown as Record<string, unknown>).__nhmsRiverClickEvidence as {
-      selectRenderedRiver: (input: unknown) => Promise<unknown>
-    }
-    await expect(
-      hook.selectRenderedRiver({
-        bbox: [[100, 30], [102, 32]],
-        anchor: [100.5, 30.5],
-        basinId: 'basins_qhh',
-        riverSegmentId: 'seg-001',
-        basinVersionId: 'bv-001',
-        riverNetworkVersionId: 'rn-001',
-      }),
-    ).rejects.toMatchObject({ code: 'HOOK_FEATURE_MISMATCH' })
+    await expect(currentHook().locateRenderedRiver(LOCATE_INPUT)).rejects.toMatchObject({ code: 'HOOK_FEATURE_MISMATCH' })
     expect(onOverlayClick).not.toHaveBeenCalled()
   })
 
-  it('keeps ordinary pointer-compatible dispatch unchanged when the hook is present', async () => {
+  it('captures a trusted canvas pointer-down as t0 and rejects an absent one', async () => {
     ;(window as unknown as Record<string, unknown>).__NHMS_E2E_HOOKS__ = true
-    const onOverlayClick = vi.fn()
-    renderSurface(onOverlayClick)
-    const hook = (window as unknown as Record<string, unknown>).__nhmsRiverClickEvidence as {
-      selectRenderedRiver: (input: unknown) => Promise<unknown>
-    }
-    expect(hook.selectRenderedRiver).toBeTypeOf('function')
-    expect((window as unknown as Record<string, unknown>).__nhmsRiverClickEvidence).toHaveProperty('selectRenderedRiver')
-    expect(Object.keys(hook).length).toBe(1)
+    const { canvas } = installStubMap()
+    renderSurface(vi.fn())
+    const hook = currentHook()
+    hook.armPointerCapture()
+    const located = await hook.locateRenderedRiver(LOCATE_INPUT)
+    canvas.firePointerDown({ timeStamp: 321.5, clientX: located.clientX, clientY: located.clientY })
+    expect(hook.takePointerCapture()).toEqual({ timeStamp: 321.5, clientX: 55, clientY: 65, isTrusted: true })
+    hook.armPointerCapture()
+    expect(hook.takePointerCapture()).toEqual({ error: 'HOOK_POINTER_MISSING' })
   })
 
   it('dispatches the same ordinary MapLibre click through onOverlayClick with the gate absent and present, without invoking the hook', () => {
@@ -285,35 +318,41 @@ describe('M11MapLibreSurface river-click hook', () => {
     expect(Number.isFinite(withoutGate.mock.calls[0][0].event.lngLat.lat)).toBe(true)
   })
 
-  it('removes the hook global on unmount and cannot delete a newer generation', async () => {
+  it('removes the hook global and its armed listener on unmount and cannot delete a newer generation', () => {
     ;(window as unknown as Record<string, unknown>).__NHMS_E2E_HOOKS__ = true
+    const { canvas } = installStubMap()
     const first = renderSurface()
-    const hookA = (window as unknown as Record<string, unknown>).__nhmsRiverClickEvidence
+    const hookA = currentHook()
     expect(hookA).toBeDefined()
+    hookA.armPointerCapture()
+    expect(canvas.listeners.size).toBe(1)
 
     // A second concurrent surface installs a newer hook, replacing the global.
     const second = renderSurface()
-    const hookB = (window as unknown as Record<string, unknown>).__nhmsRiverClickEvidence
+    const hookB = currentHook()
     expect(hookB).toBeDefined()
     expect(hookB).not.toBe(hookA)
+    hookB.armPointerCapture()
+    expect(canvas.listeners.size).toBe(2)
 
-    // Unmounting the older owner must not delete the newer instance.
+    // Unmounting the older owner removes ITS listener but must not delete the newer instance.
     first.unmount()
-    expect((window as unknown as Record<string, unknown>).__nhmsRiverClickEvidence).toBe(hookB)
+    expect(currentHook()).toBe(hookB)
+    expect(canvas.listeners.size).toBe(1)
 
-    // Unmounting the current owner deletes the global.
+    // Unmounting the current owner deletes the global and its listener.
     second.unmount()
     expect((window as unknown as Record<string, unknown>).__nhmsRiverClickEvidence).toBeUndefined()
+    expect(canvas.listeners.size).toBe(0)
   })
 
-  it('exposes no map ref, generic query method, or mutation surface', async () => {
+  it('exposes no map ref, generic query method, dispatch, or mutation surface', () => {
     ;(window as unknown as Record<string, unknown>).__NHMS_E2E_HOOKS__ = true
     renderSurface()
-    const hook = (window as unknown as Record<string, unknown>).__nhmsRiverClickEvidence as Record<string, unknown>
-    expect(hook).toBeDefined()
-    expect(Object.keys(hook).sort()).toEqual(['selectRenderedRiver'])
-    expect(hook).not.toHaveProperty('map')
-    expect(hook).not.toHaveProperty('query')
-    expect(hook).not.toHaveProperty('mutate')
+    const hook = currentHook() as unknown as Record<string, unknown>
+    expect(Object.keys(hook).sort()).toEqual(['armPointerCapture', 'locateRenderedRiver', 'takePointerCapture'])
+    for (const forbidden of ['map', 'query', 'mutate', 'onOverlayClick', 'dispatch']) {
+      expect(hook).not.toHaveProperty(forbidden)
+    }
   })
 })

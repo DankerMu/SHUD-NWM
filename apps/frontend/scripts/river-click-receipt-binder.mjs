@@ -4,8 +4,9 @@
  *
  * Node-20 stdlib only (no runtime dependency): the node-27 runner and the
  * frontend CI test share this one binder, so a checked-in `.mjs` is simpler
- * than provisioning Python/uv in frontend CI. It accepts EXACTLY the schema-1.0
- * PASS terminal the live spec can publish, and independently recomputes the
+ * than provisioning Python/uv in frontend CI. It accepts EXACTLY the schema-1.1
+ * PASS terminal the live spec can publish (click_dispatch=trusted_pointer_event;
+ * a retired hook-dispatch 1.0 receipt is refused with a fixed line), and independently recomputes the
  * nearest-rank P95 from the actual sample durations.
  *
  * Usage (set -euo pipefail context; the runbook wraps this in the command

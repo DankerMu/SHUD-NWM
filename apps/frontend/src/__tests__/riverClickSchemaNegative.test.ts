@@ -284,4 +284,34 @@ describe('river-click evidence schema branch discrimination (AJV Draft-2020-12)'
     doc.schema_version = '2.0'
     expectInvalid(doc, 'schema_version 2.0', 'PASS')
   })
+
+  it('rejects a retired schema-1.0 version on an otherwise valid 1.1 PASS', () => {
+    const doc = cloneBaseline(PASS_BASE)
+    doc.schema_version = '1.0'
+    expectInvalid(doc, 'schema_version 1.0', 'PASS')
+  })
+
+  it('rejects a missing click_dispatch', () => {
+    const doc = cloneBaseline(PASS_BASE)
+    delete doc.click_dispatch
+    expectInvalid(doc, 'missing click_dispatch', 'PASS')
+  })
+
+  it('rejects a wrong click_dispatch', () => {
+    const doc = cloneBaseline(PASS_BASE)
+    doc.click_dispatch = 'hook_dispatch'
+    expectInvalid(doc, 'click_dispatch hook_dispatch', 'PASS')
+  })
+
+  it('accepts CLICK_DISPATCH_INVALID as an ordinary FAIL code', () => {
+    const doc = cloneBaseline(FAIL_BASE)
+    ;(doc.failure as Record<string, unknown>).code = 'CLICK_DISPATCH_INVALID'
+    expectValid(doc)
+  })
+
+  it('keeps the schema failure-code enum identical to the closed BLOCKED + FAIL constants', () => {
+    const codes = schema.$defs.failure.anyOf[1].properties.code.enum as string[]
+    expect([...codes].sort()).toEqual([...RIVER_CLICK_BLOCKED_CODES, ...RIVER_CLICK_FAIL_CODES].sort())
+    expect(codes).toContain('CLICK_DISPATCH_INVALID')
+  })
 })

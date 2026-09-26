@@ -93,6 +93,9 @@ describe('river-click Node/Playwright typecheck gate (static wiring)', () => {
       'src/lib/riverClickEvidence/__tests__/receipt.test.ts',
       'src/lib/riverClickEvidence/__tests__/deadline.test.ts',
       'src/lib/riverClickEvidence/__tests__/requestMatching.test.ts',
+      'src/__tests__/riverClickRealClick.test.ts',
+      'src/test/riverClickLaneFixtures.ts',
+      'src/components/map/__tests__/m11MapInteractions.test.ts',
     ]
     for (const relative of paths) {
       const full = path.resolve(__dirname, '../../', relative)
@@ -146,6 +149,10 @@ describe('river-click Node/Playwright typecheck gate (static wiring)', () => {
       'src/__tests__/riverClickFakePage.test.ts',
       'src/lib/riverClickEvidence/__tests__/deadline.test.ts',
       'src/lib/riverClickEvidence/__tests__/requestMatching.test.ts',
+      'src/__tests__/riverClickRealClick.test.ts',
+      'src/test/riverClickLaneFixtures.ts',
+      'src/components/map/m11MapInteractions.ts',
+      'src/components/map/__tests__/m11MapInteractions.test.ts',
     ]
     for (const relative of files) {
       const full = path.resolve(__dirname, '../../', relative)

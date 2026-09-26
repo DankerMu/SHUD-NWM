@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import { RIVER_CLICK_WHOLE_RUN_DEADLINE_MS } from '../lib/riverClickEvidence/constants'
-import { parseRiverClickConfig } from '../lib/riverClickEvidence/config'
 import { createRiverClickDeadline } from '../lib/riverClickEvidence/deadline'
 import {
   boundedMessage,
@@ -10,29 +9,28 @@ import {
   runRiverClickAttempt,
   runRiverClickLane,
   laneFailure,
-  type RiverClickLaneBrowserRequest,
-  type RiverClickLaneBrowserResponse,
-  type RiverClickLanePageSurface,
+  RIVER_CLICK_HOOK_READY_SCRIPT,
 } from '../../playwright.river-click-lane'
-import type { RiverClickLaneIdentity } from '../../playwright.river-click-lane'
-import { makeFakePage, makeFakePageState, type RiverClickFakePageState } from '../test/riverClickFakePage'
+import {
+  fakeLocateThenClick,
+  makeFakePage,
+  makeFakePageState,
+  type RiverClickFakePageState,
+} from '../test/riverClickFakePage'
 import { RIVER_CLICK_EXACT_THRESHOLD_DURATIONS } from '../test/riverClickThresholdFixture'
+import {
+  config,
+  emit,
+  emitSeriesPair,
+  freshState,
+  isLocate,
+  makeIdentity,
+  requestOf,
+  responseOf,
+  seriesQuery,
+} from '../test/riverClickLaneFixtures'
 
 type FakePageState = RiverClickFakePageState
-
-const CONFIG = {
-  PLAYWRIGHT_LIVE_BASE_URL: 'https://display.example.test',
-  PLAYWRIGHT_LIVE_API_BASE_URL: 'https://api.example.test',
-  PLAYWRIGHT_LIVE_RIVER_BASIN_ID: 'basins_qhh',
-  PLAYWRIGHT_LIVE_RIVER_SEGMENT_ID: 'seg-001',
-  PLAYWRIGHT_LIVE_RIVER_CLICK_RECEIPT_PATH: '/private/evidence/nhms-frontend-river-click-live-evidence-1.json',
-}
-
-function config() {
-  const parsed = parseRiverClickConfig(CONFIG)
-  if (!parsed.ok) throw new Error('fixture config must parse')
-  return parsed.config
-}
 
 function productPayload(source: 'GFS' | 'IFS') {
   return {
@@ -209,89 +207,15 @@ describe('river-click lane preflight identity resolution', () => {
   })
 })
 
-function makeIdentity(): RiverClickLaneIdentity {
-  return {
-    requestedFeature: { basinId: 'basins_qhh', riverSegmentId: 'seg-001', basinVersionId: 'bv-001', riverNetworkVersionId: 'rn-001' },
-    gfs: {
-      sourceId: 'GFS', basinId: 'basins_qhh', basinVersionId: 'bv-001', riverNetworkVersionId: 'rn-001',
-      runId: 'run-gfs', modelId: 'model-gfs', cycleTime: '2026-09-02T00:00:00Z', scenario: 'forecast_gfs_deterministic',
-    },
-    ifs: {
-      sourceId: 'IFS', basinId: 'basins_qhh', basinVersionId: 'bv-001', riverNetworkVersionId: 'rn-001',
-      runId: 'run-ifs', modelId: 'model-ifs', cycleTime: '2026-09-02T06:00:00Z', scenario: 'forecast_ifs_deterministic',
-    },
-    preflightGfs: {
-      source: 'GFS', scenario: 'forecast_gfs_deterministic', runId: 'run-gfs', modelId: 'model-gfs',
-      issueTime: '2026-09-02T00:00:00Z', riverNetworkVersionId: 'rn-001',
-    },
-    preflightIfs: {
-      source: 'IFS', scenario: 'forecast_ifs_deterministic', runId: 'run-ifs', modelId: 'model-ifs',
-      issueTime: '2026-09-02T06:00:00Z', riverNetworkVersionId: 'rn-001',
-    },
-    bbox: [[100, 30], [102, 32]],
-    anchor: [100.5, 30.5],
-  }
-}
-
-function seriesQuery(source: 'GFS' | 'IFS') {
-  const product = source === 'GFS'
-    ? { run_id: 'run-gfs', model_id: 'model-gfs', issue_time: '2026-09-02T00:00:00Z', scenarios: 'forecast_gfs_deterministic' }
-    : { run_id: 'run-ifs', model_id: 'model-ifs', issue_time: '2026-09-02T06:00:00Z', scenarios: 'forecast_ifs_deterministic' }
-  const params = new URLSearchParams({
-    river_network_version_id: 'rn-001',
-    variables: 'q_down',
-    include_analysis: 'false',
-    ...product,
-  })
-  return `https://api.example.test/api/v1/basin-versions/bv-001/river-segments/seg-001/forecast-series?${params.toString()}`
-}
-
-function emit(state: FakePageState, event: string, arg: unknown) {
-  for (const listener of [...state.listeners[event]]) {
-    ;(listener as (value: unknown) => void)(arg)
-  }
-}
-
-function requestOf(method: string, url: string): RiverClickLaneBrowserRequest {
-  return { method: () => method, url: () => url }
-}
-
-function responseOf(request: RiverClickLaneBrowserRequest, finished: () => Promise<unknown> = () => Promise.resolve(null)): RiverClickLaneBrowserResponse {
-  const url = request.url()
-  return { url: () => url, status: () => 200, finished, request: () => request, method: () => request.method() }
-}
-
-/** Emit one waiting pair: request event then response event sharing the Request object. */
-function emitSeriesPair(state: FakePageState, source: 'GFS' | 'IFS', finished: () => Promise<unknown> = () => Promise.resolve(null)) {
-  const url = seriesQuery(source)
-  const req = requestOf('GET', url)
-  emit(state, 'request', req)
-  emit(state, 'response', responseOf(req, finished))
-}
-
-const HOOK_OK = {
-  basinId: 'basins_qhh',
-  riverSegmentId: 'seg-001',
-  basinVersionId: 'bv-001',
-  riverNetworkVersionId: 'rn-001',
-  dispatchNowMs: 1000,
-}
+const locateThenClick = fakeLocateThenClick
 
 describe('river-click lane attempt observation', () => {
   it('flags only a partial GFS response with a request-without-response as SERIES_RESPONSE_ERROR', async () => {
-    const state: FakePageState = {
-      listeners: { request: [], response: [], requestfailed: [] },
-      handleDisposals: 0,
-      evaluateNames: [],
-      sleepMs: 1,
-      evaluateImpl: (text) => {
-        if (text.includes('selectRenderedRiver')) {
-          emitSeriesPair(state, 'GFS')
-          return HOOK_OK
-        }
-        if (text.includes('m11-river-panel-chart')) return { chart: false, partial: false, empty: false }
-        return undefined
-      },
+    const state = freshState()
+    state.evaluateImpl = (text) => {
+      if (isLocate(text)) return locateThenClick(state, { onClick: () => emitSeriesPair(state, 'GFS') })
+      if (text.includes('m11-river-panel-chart')) return { chart: false, partial: false, empty: false }
+      return undefined
     }
     const attempt = await runRiverClickAttempt(
       { config: config(), page: makeFakePage(state) },
@@ -305,19 +229,8 @@ describe('river-click lane attempt observation', () => {
 
   it('classifies a malformed percent-encoding series URL as SERIES_REQUEST_INVALID at observer boundary', async () => {
     const url = 'https://api.example.test/api/v1/basin-versions/bv-001/river-segments/seg-001/forecast-series?issue_time=%E0%A4%A'
-    const state: FakePageState = {
-      listeners: { request: [], response: [], requestfailed: [] },
-      handleDisposals: 0,
-      evaluateNames: [],
-      sleepMs: 1,
-      evaluateImpl: (text) => {
-        if (text.includes('selectRenderedRiver')) {
-          emit(state, 'request', requestOf('GET', url))
-          return HOOK_OK
-        }
-        return undefined
-      },
-    }
+    const state = freshState()
+    state.evaluateImpl = (text) => (isLocate(text) ? locateThenClick(state, { onClick: () => emit(state, 'request', requestOf('GET', url)) }) : undefined)
     const attempt = await runRiverClickAttempt(
       { config: config(), page: makeFakePage(state) },
       makeIdentity(),
@@ -338,19 +251,8 @@ describe('river-click lane attempt observation', () => {
       scenarios: 'forecast_gfs_deterministic',
       issue_time: '2026-09-02T00%3A00%3A00.000Z',
     }).toString()}`
-    const state: FakePageState = {
-      listeners: { request: [], response: [], requestfailed: [] },
-      handleDisposals: 0,
-      evaluateNames: [],
-      sleepMs: 1,
-      evaluateImpl: (text) => {
-        if (text.includes('selectRenderedRiver')) {
-          emit(state, 'request', requestOf('GET', url))
-          return HOOK_OK
-        }
-        return undefined
-      },
-    }
+    const state = freshState()
+    state.evaluateImpl = (text) => (isLocate(text) ? locateThenClick(state, { onClick: () => emit(state, 'request', requestOf('GET', url)) }) : undefined)
     const attempt = await runRiverClickAttempt(
       { config: config(), page: makeFakePage(state) },
       makeIdentity(),
@@ -362,19 +264,9 @@ describe('river-click lane attempt observation', () => {
   })
 
   it('classifies a wrong-method forecast-series request as SERIES_REQUEST_INVALID at request time', async () => {
-    const state: FakePageState = {
-      listeners: { request: [], response: [], requestfailed: [] },
-      handleDisposals: 0,
-      evaluateNames: [],
-      sleepMs: 1,
-      evaluateImpl: (text) => {
-        if (text.includes('selectRenderedRiver')) {
-          emit(state, 'request', requestOf('POST', seriesQuery('GFS')))
-          return HOOK_OK
-        }
-        return undefined
-      },
-    }
+    const state = freshState()
+    state.evaluateImpl = (text) =>
+      isLocate(text) ? locateThenClick(state, { onClick: () => emit(state, 'request', requestOf('POST', seriesQuery('GFS'))) }) : undefined
     const attempt = await runRiverClickAttempt(
       { config: config(), page: makeFakePage(state) },
       makeIdentity(),
@@ -391,19 +283,8 @@ describe('river-click lane attempt observation', () => {
 
   it('classifies an over-identity series request (wrong run_id) as SERIES_REQUEST_INVALID', async () => {
     const url = seriesQuery('GFS').replace('run_id=run-gfs', 'run_id=run-other')
-    const state: FakePageState = {
-      listeners: { request: [], response: [], requestfailed: [] },
-      handleDisposals: 0,
-      evaluateNames: [],
-      sleepMs: 1,
-      evaluateImpl: (text) => {
-        if (text.includes('selectRenderedRiver')) {
-          emit(state, 'request', requestOf('GET', url))
-          return HOOK_OK
-        }
-        return undefined
-      },
-    }
+    const state = freshState()
+    state.evaluateImpl = (text) => (isLocate(text) ? locateThenClick(state, { onClick: () => emit(state, 'request', requestOf('GET', url)) }) : undefined)
     const attempt = await runRiverClickAttempt(
       { config: config(), page: makeFakePage(state) },
       makeIdentity(),
@@ -415,18 +296,15 @@ describe('river-click lane attempt observation', () => {
   })
 
   it('fails a duplicate GFS request during the quiet interval and does not count the attempt', async () => {
-    const state: FakePageState = {
-      listeners: { request: [], response: [], requestfailed: [] },
-      handleDisposals: 0,
-      evaluateNames: [],
-      sleepMs: 1,
-      evaluateImpl: () => undefined,
-    }
+    const state = freshState()
     state.evaluateImpl = (text) => {
-      if (text.includes('selectRenderedRiver')) {
-        emitSeriesPair(state, 'GFS')
-        emitSeriesPair(state, 'IFS')
-        return HOOK_OK
+      if (isLocate(text)) {
+        return locateThenClick(state, {
+          onClick: () => {
+            emitSeriesPair(state, 'GFS')
+            emitSeriesPair(state, 'IFS')
+          },
+        })
       }
       if (text.includes('m11-river-panel-chart')) return { chart: true, chartVisible: true, partial: false, empty: false }
       if (text.includes('performance.now()')) return 1500
@@ -452,24 +330,21 @@ describe('river-click lane attempt observation', () => {
   })
 
   it('records a synchronous throw from response.url/status/request/finished as fixed codes, never escaping the callback', async () => {
-    const state: FakePageState = {
-      listeners: { request: [], response: [], requestfailed: [] },
-      handleDisposals: 0,
-      evaluateNames: [],
-      sleepMs: 1,
-      evaluateImpl: () => undefined,
-    }
+    const state = freshState()
     state.evaluateImpl = (text) => {
-      if (text.includes('selectRenderedRiver')) {
-        emit(state, 'request', requestOf('GET', seriesQuery('GFS')))
-        emit(state, 'response', {
-          url: () => { throw new Error('url boom') },
-          status: () => { throw new Error('status boom') },
-          finished: () => { throw new Error('finished boom') },
-          request: () => { throw new Error('request boom') },
-        } as never)
-        emitSeriesPair(state, 'IFS')
-        return HOOK_OK
+      if (isLocate(text)) {
+        return locateThenClick(state, {
+          onClick: () => {
+            emit(state, 'request', requestOf('GET', seriesQuery('GFS')))
+            emit(state, 'response', {
+              url: () => { throw new Error('url boom') },
+              status: () => { throw new Error('status boom') },
+              finished: () => { throw new Error('finished boom') },
+              request: () => { throw new Error('request boom') },
+            } as never)
+            emitSeriesPair(state, 'IFS')
+          },
+        })
       }
       return undefined
     }
@@ -487,19 +362,17 @@ describe('river-click lane attempt observation', () => {
   })
 
   it('treats response.finished() resolving an Error as a failure, not success', async () => {
-    const state: FakePageState = {
-      listeners: { request: [], response: [], requestfailed: [] },
-      handleDisposals: 0,
-      evaluateNames: [],
-      sleepMs: 1,
-      evaluateImpl: (text) => {
-        if (text.includes('selectRenderedRiver')) {
-          emitSeriesPair(state, 'GFS', () => Promise.resolve(new Error('stream reset')))
-          emitSeriesPair(state, 'IFS')
-          return HOOK_OK
-        }
-        return undefined
-      },
+    const state = freshState()
+    state.evaluateImpl = (text) => {
+      if (isLocate(text)) {
+        return locateThenClick(state, {
+          onClick: () => {
+            emitSeriesPair(state, 'GFS', () => Promise.resolve(new Error('stream reset')))
+            emitSeriesPair(state, 'IFS')
+          },
+        })
+      }
+      return undefined
     }
     const attempt = await runRiverClickAttempt(
       { config: config(), page: makeFakePage(state) },
@@ -512,16 +385,8 @@ describe('river-click lane attempt observation', () => {
   })
 
   it('cleans up all listeners after a failed attempt (no leak, armed through close/quiet)', async () => {
-    const state: FakePageState = {
-      listeners: { request: [], response: [], requestfailed: [] },
-      handleDisposals: 0,
-      evaluateNames: [],
-      sleepMs: 1,
-      evaluateImpl: (text) => {
-        if (text.includes('selectRenderedRiver')) return HOOK_OK
-        return undefined
-      },
-    }
+    const state = freshState()
+    state.evaluateImpl = (text) => (isLocate(text) ? locateThenClick(state) : undefined)
     const attempt = await runRiverClickAttempt(
       { config: config(), page: makeFakePage(state) },
       makeIdentity(),
@@ -584,13 +449,17 @@ describe('river-click lane orchestrator', () => {
     }
     const activeDuringClose: Array<{ request: number; response: number; requestfailed: number }> = []
     state.evaluateImpl = (text) => {
-      if (text.includes('typeof window.__nhmsRiverClickEvidence.selectRenderedRiver')) return true
-      if (text.includes('selectRenderedRiver')) {
+      if (text === RIVER_CLICK_HOOK_READY_SCRIPT) return true
+      if (isLocate(text)) {
         attemptCount += 1
         const attempt = attemptCount
-        countedSeries('GFS')
-        countedSeries('IFS')
-        return { ...HOOK_OK, dispatchNowMs: 1000 + attempt * 0.5 }
+        return locateThenClick(state, {
+          t0: 1000 + attempt * 0.5,
+          onClick: () => {
+            countedSeries('GFS')
+            countedSeries('IFS')
+          },
+        })
       }
       if (text.includes('m11-river-panel-chart')) return { chart: true, chartVisible: true, partial: false, empty: false }
       if (text.includes('performance.now()')) return 1050 + attemptCount * 0.5
@@ -616,9 +485,14 @@ describe('river-click lane orchestrator', () => {
     expect(terminal.samples).toHaveLength(20)
     expect(terminal.warmup).not.toBeNull()
     expect(terminal.p95Ms).not.toBeNull()
-    // exact counts: 21 hook dispatches (warmup + 20), 42 series requests,
-    // 42 exact-request-correlated completed responses, 21 scoped closes.
+    // exact counts: 21 locates (warmup + 20), 21 real clicks at the located
+    // point, 42 series requests, 42 exact-request-correlated completed
+    // responses, 21 scoped closes.
     expect(attemptCount).toBe(21)
+    expect(state.mouseClicks).toHaveLength(21)
+    expect(new Set(state.mouseClicks!.map((click) => `${click.x},${click.y}`))).toEqual(new Set(['412.5,318']))
+    // Every duration is t1 - (trusted pointer-down timeStamp): 1050 - 1000 = 50.
+    expect(terminal.samples.every((sample) => sample.durationMs === 50)).toBe(true)
     expect(requestEventCount).toBe(42)
     expect(correlatedResponseCount).toBe(42)
     expect(closeCount).toBe(21)
@@ -651,12 +525,16 @@ describe('river-click lane orchestrator', () => {
     }
     let attemptCount = 0
     state.evaluateImpl = (text) => {
-      if (text.includes('typeof window.__nhmsRiverClickEvidence.selectRenderedRiver')) return true
-      if (text.includes('selectRenderedRiver')) {
+      if (text === RIVER_CLICK_HOOK_READY_SCRIPT) return true
+      if (isLocate(text)) {
         attemptCount += 1
-        emitSeriesPair(state, 'GFS')
-        emitSeriesPair(state, 'IFS')
-        return { ...HOOK_OK, dispatchNowMs: 1000 }
+        return locateThenClick(state, {
+          t0: 1000,
+          onClick: () => {
+            emitSeriesPair(state, 'GFS')
+            emitSeriesPair(state, 'IFS')
+          },
+        })
       }
       if (text.includes('m11-river-panel-chart')) return { chart: true, chartVisible: true, partial: false, empty: false }
       if (text.includes('performance.now()')) {
@@ -690,16 +568,20 @@ describe('river-click lane orchestrator', () => {
     }
     let attemptCount = 0
     state.evaluateImpl = (text) => {
-      if (text.includes('typeof window.__nhmsRiverClickEvidence.selectRenderedRiver')) return true
-      if (text.includes('selectRenderedRiver')) {
+      if (text === RIVER_CLICK_HOOK_READY_SCRIPT) return true
+      if (isLocate(text)) {
         attemptCount += 1
         if (attemptCount === 8) {
-          // sample 7 fails: the hook resolves but no series request is emitted.
-          return { ...HOOK_OK, dispatchNowMs: 1000 }
+          // sample 7 fails: the click lands but no series request is emitted.
+          return locateThenClick(state, { t0: 1000 })
         }
-        emitSeriesPair(state, 'GFS')
-        emitSeriesPair(state, 'IFS')
-        return { ...HOOK_OK, dispatchNowMs: 1000 + attemptCount * 0.5 }
+        return locateThenClick(state, {
+          t0: 1000 + attemptCount * 0.5,
+          onClick: () => {
+            emitSeriesPair(state, 'GFS')
+            emitSeriesPair(state, 'IFS')
+          },
+        })
       }
       if (text.includes('m11-river-panel-chart')) return { chart: true, chartVisible: true, partial: false, empty: false }
       if (text.includes('performance.now()')) return 1050 + attemptCount * 0.5
@@ -736,12 +618,11 @@ describe('river-click lane orchestrator', () => {
     let attemptCount = 0
     const expectedRendered = { basinId: 'basins_qhh', riverSegmentId: 'seg-001', basinVersionId: 'bv-001', riverNetworkVersionId: 'rn-001' }
     state.evaluateImpl = (text) => {
-      if (text.includes('typeof window.__nhmsRiverClickEvidence.selectRenderedRiver')) return true
-      if (text.includes('selectRenderedRiver')) {
+      if (text === RIVER_CLICK_HOOK_READY_SCRIPT) return true
+      if (isLocate(text)) {
         attemptCount += 1
-        // Warmup: hook SUCCEEDS, only GFS emits; IFS never arrives -> timeout.
-        emitSeriesPair(state, 'GFS')
-        return { ...expectedRendered, dispatchNowMs: 1000 }
+        // Warmup: locate SUCCEEDS, the click emits only GFS; IFS never arrives -> timeout.
+        return locateThenClick(state, { identity: expectedRendered, onClick: () => emitSeriesPair(state, 'GFS') })
       }
       return undefined
     }
@@ -771,11 +652,11 @@ describe('river-click lane orchestrator', () => {
     }
     let attemptCount = 0
     state.evaluateImpl = (text) => {
-      if (text.includes('typeof window.__nhmsRiverClickEvidence.selectRenderedRiver')) return true
-      if (text.includes('selectRenderedRiver')) {
+      if (text === RIVER_CLICK_HOOK_READY_SCRIPT) return true
+      if (isLocate(text)) {
         attemptCount += 1
-        // Hook REJECTS: no rendered identity is ever produced.
-        throw new Error('hook selection rejected')
+        // Hook REJECTS (in-page wrapper outcome): no rendered identity is ever produced.
+        return { ok: false, code: 'HOOK_FEATURE_MISMATCH' }
       }
       return undefined
     }
@@ -788,6 +669,10 @@ describe('river-click lane orchestrator', () => {
     if (result.ok) throw new Error('warmup must fail')
     expect(result.terminal.failure?.stage).toBe('warmup')
     expect(result.terminal.failure?.sampleIndex).toBe(0)
+    // The closed hook code is visible (not the retired fixed "hook invocation failed").
+    expect(result.terminal.failure?.code).toBe('HOOK_SELECTION_FAILED')
+    expect(result.terminal.failure?.message).toBe('hook HOOK_FEATURE_MISMATCH')
+    expect(state.mouseClicks ?? []).toHaveLength(0)
     // The hook never succeeded, so rendered_feature stays null.
     expect(result.terminal.renderedFeature).toBeNull()
     expect(result.terminal.samples).toEqual([])
@@ -804,12 +689,15 @@ describe('river-click lane orchestrator', () => {
     }
     let attemptCount = 0
     state.evaluateImpl = (text) => {
-      if (text.includes('typeof window.__nhmsRiverClickEvidence.selectRenderedRiver')) return true
-      if (text.includes('selectRenderedRiver')) {
+      if (text === RIVER_CLICK_HOOK_READY_SCRIPT) return true
+      if (isLocate(text)) {
         attemptCount += 1
-        emitSeriesPair(state, 'GFS')
-        emitSeriesPair(state, 'IFS')
-        return { ...HOOK_OK, dispatchNowMs: 1000 }
+        return locateThenClick(state, {
+          onClick: () => {
+            emitSeriesPair(state, 'GFS')
+            emitSeriesPair(state, 'IFS')
+          },
+        })
       }
       return undefined
     }
@@ -834,11 +722,10 @@ describe('river-click lane orchestrator', () => {
     }
     let attemptCount = 0
     state.evaluateImpl = (text) => {
-      if (text.includes('typeof window.__nhmsRiverClickEvidence.selectRenderedRiver')) return true
-      if (text.includes('selectRenderedRiver')) {
+      if (text === RIVER_CLICK_HOOK_READY_SCRIPT) return true
+      if (isLocate(text)) {
         attemptCount += 1
-        emitSeriesPair(state, 'GFS')
-        return { ...HOOK_OK, dispatchNowMs: 1000 }
+        return locateThenClick(state, { onClick: () => emitSeriesPair(state, 'GFS') })
       }
       return undefined
     }
@@ -864,7 +751,7 @@ describe('river-click lane orchestrator', () => {
     }
     let hookChecks = 0
     state.evaluateImpl = (text) => {
-      if (text.includes('typeof window.__nhmsRiverClickEvidence.selectRenderedRiver')) {
+      if (text === RIVER_CLICK_HOOK_READY_SCRIPT) {
         hookChecks += 1
         return false
       }

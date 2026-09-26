@@ -77,7 +77,7 @@
 
 ## 2. Implementation
 
-- [ ] 2.1 **D1 hook** (`src/lib/riverClickEvidence/hook.ts`, wiring in `M11MapLibreSurface.tsx`):
+- [x] 2.1 **D1 hook** (`src/lib/riverClickEvidence/hook.ts`, wiring in `M11MapLibreSurface.tsx`):
   - `locateRenderedRiver`, with the DOM check (`elementFromPoint === canvas`) and the product priority-walk check through the resolver shared with `handleM11MapClick`, extracted from `m11MapInteractions.ts`. Either failing gives `HOOK_POINT_OCCLUDED`. `interactiveLayerIds` and the station flag are read through refs, and the ids are filtered by `map.getLayer`;
   - `armPointerCapture` / `takePointerCapture`: every canvas pointer-down is observed; exactly one trusted event is the result; none or unarmed gives `HOOK_POINTER_MISSING`; more than one or any untrusted gives `HOOK_POINTER_INVALID`;
   - `selectRenderedRiver` and the `onOverlayClick` parameter deleted;
@@ -94,35 +94,35 @@
   - untrusted (a synthetic `dispatchEvent`), duplicate, missing and unarmed captures each give their code;
   - stale-generation cleanup;
   - every existing readiness, limit and mismatch case, carried over.
-- [ ] 2.2 **D2 lane** (`playwright.river-click-lane-attempt.ts` and the lane / terminal modules): the per-attempt sequence arm observation → arm capture → locate → `page.mouse.click` → take capture → t0 = capture `timeStamp`. Displacement over 2 px, or a capture error, gives `CLICK_DISPATCH_INVALID`. Hook rejections carry `hook <CODE>` in the message. Unit tests with the lane's fake page:
+- [x] 2.2 **D2 lane** (`playwright.river-click-lane-attempt.ts` and the lane / terminal modules): the per-attempt sequence arm observation → arm capture → locate → `page.mouse.click` → take capture → t0 = capture `timeStamp`. Displacement over 2 px, or a capture error, gives `CLICK_DISPATCH_INVALID`. Hook rejections carry `hook <CODE>` in the message. Unit tests with the lane's fake page:
   - t0 comes from the capture;
   - a displaced capture FAILs;
   - an untrusted or missing capture FAILs;
   - `page.mouse.click` is called with the located point exactly once per attempt;
   - no code path calls a hook dispatch;
   - the propagated hook code appears in the message.
-- [ ] 2.3 **D3 schema 1.1**: the JSON schema (`click_dispatch` const, `schema_version` "1.1", the new code), the three examples, the Node validator, and the binder (1.1 only; 1.0 gives a fixed `BINDER:` line). Tests:
+- [x] 2.3 **D3 schema 1.1**: the JSON schema (`click_dispatch` const, `schema_version` "1.1", the new code), the three examples, the Node validator, and the binder (1.1 only; 1.0 gives a fixed `BINDER:` line). Tests:
   - the examples validate;
   - a 1.0 document is rejected by the validator and the binder;
   - a missing or wrong `click_dispatch` is rejected;
   - `CLICK_DISPATCH_INVALID` is accepted as a FAIL code.
-- [ ] 2.4 **Live spec** (`e2e/live-display.spec.ts`): it uses the new lane and still passes the static no-mock guard. The Playwright profile, workers, retries and timeout are unchanged.
-- [ ] 2.5 **Mocked and component suites**: any test that relied on `selectRenderedRiver` or on direct dispatch is rewritten to the new API. No mocked spec may emit a live receipt.
-- [ ] 2.6 **Checks**: a repo-wide `grep` for `selectRenderedRiver` and `dispatchNowMs` returns nothing. Exempt: `openspec/changes/archive/**`, the main spec `openspec/specs/frontend-river-click-live-evidence/spec.md` (until the archive folds the delta in), this change's own files, and `docs/review-loop-log.jsonl`.
+- [x] 2.4 **Live spec** (`e2e/live-display.spec.ts`): it uses the new lane and still passes the static no-mock guard. The Playwright profile, workers, retries and timeout are unchanged.
+- [x] 2.5 **Mocked and component suites**: any test that relied on `selectRenderedRiver` or on direct dispatch is rewritten to the new API. No mocked spec may emit a live receipt.
+- [x] 2.6 **Checks**: a repo-wide `grep` for `selectRenderedRiver` and `dispatchNowMs` returns nothing. Exempt: `openspec/changes/archive/**`, the main spec `openspec/specs/frontend-river-click-live-evidence/spec.md` (until the archive folds the delta in), this change's own files, and `docs/review-loop-log.jsonl`.
 - [ ] 2.7 **D4 runbooks**:
   - `docs/runbooks/node-27-bringup-checklist.md` C4 ④⑤ and `docs/runbooks/tier-node27-timeseries-storage.md` §4.9: the real-click mechanism, schema 1.1, the pin rule (the discharge-layer `…_shud_shud_riv_…` id family, with the `HOOK_FEATURE_MISMATCH` symptom of a `shud_reach` id), the three-network selection rule with its read-only commands, and the three-receipt acceptance;
   - the "does not claim live PASS" sentence is updated once §5 lands.
 
 ## 3. Local verification
 
-- [ ] 3.1 In `apps/frontend`:
+- [x] 3.1 In `apps/frontend`:
   - `pnpm test`;
   - `pnpm typecheck`;
   - `pnpm check:types` (the Playwright/Node config);
   - `pnpm build`;
   - `pnpm check:api-types`;
   - `pnpm check:bundle`.
-- [ ] 3.2 Root:
+- [x] 3.2 Root:
   - the schema-example loop, as CI runs it (JSON Schema Validate job);
   - `uv run ruff check .`;
   - `openspec validate river-click-trusted-pointer-dispatch --strict --no-interactive`.

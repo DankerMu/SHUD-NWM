@@ -4,7 +4,9 @@
  */
 
 export const KNOWN_ARTIFACT: 'nhms-frontend-river-click-live-evidence'
-export const KNOWN_SCHEMA_VERSION: '1.0'
+export const KNOWN_SCHEMA_VERSION: '1.1'
+export const KNOWN_CLICK_DISPATCH: 'trusted_pointer_event'
+export const RETIRED_SCHEMA_VERSION: '1.0'
 export const THRESHOLD_MS: 2000
 export const WARMUP_COUNT: 1
 export const ACCEPTED_COUNT: 20
