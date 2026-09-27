@@ -39,13 +39,16 @@ Evaluate the predicate right after the `active_slurm_job` check and before any s
 
 - **Why.** The three skip→forced-retry rewrites (journal-predecessor quarantine, strict warm-start mismatch, `terminal_run_manifest_missing`) only rewrite `terminal_*` skip reasons and explicitly exclude `active_duplicate_pipeline` (`scheduler_candidates.py:79,88-97`). A held candidate that reached a terminal branch could therefore be rewritten into a forced resubmission. The held check has to precede them.
 - **Consumers that change:**
-  - `_cycle_completion_verdict` (`scheduler_discovery.py:320-376`) counts every reason other than the two terminal ones as `gap`, so a cycle with a held row reads `gap` until reconcile binds or releases it. Successor cycles and backfill wait on it, which is the intended freeze.
+  - On the strict warm-start / successor arm, `_cycle_completion_verdict` (`scheduler_discovery.py:320-376`) counts every reason other than the two terminal ones as `gap`, so a cycle with a held row reads `gap` until reconcile binds or releases it. Successor cycles and backfill wait on it, which is the intended freeze. On the compat arm (no warm-start or successor evidence), `has_completed_pipeline` decides and ignores held rows. The planner still skips the candidate, so there is no submit risk on either arm.
   - The retention frontier (`_RETENTION_TERMINAL_SKIP_REASONS`, `scheduler_runtime.py:1920`) treats `active_duplicate_pipeline` as in-flight.
 - **Cost.** While a row is held, a candidate that would otherwise be `permanent_failure` / `missing_upstream_artifact` / `cohort_membership_unprovable` reads as skip. `list-operator-actions` scans blocked literals (`production-scheduler-orchestration` spec:960), so it stops listing that candidate until the reservation resolves. This is acceptable because the operator exit for a held row is reconcile anyway.
 
 ## Risks / Trade-offs
 
-- **Stale reserved rows freeze candidates.** This is intended and matches the #1116/#1565 fail-closed contract. Restart reconcile owns their exit, by binding, demotion (`demote-reserved-job`), or identity-blocked release. Measured footprint: one row in production.
+- **Stale reserved rows freeze candidates.** This is intended and matches the #1116/#1565 fail-closed contract. Restart reconcile owns the exit for most held rows, by binding, demotion (`demote-reserved-job`), or identity-blocked release. Measured footprint: one row in production.
+  - A few rare held shapes have **no** supported exit: `ambiguous_fallback_match` (a `name_window_count` basis, or two masters carrying the same key); a fallback window that has grown past the scan budget; and an unversioned cohort master (`legacy_unversioned_read_only`).
+  - Before this change those shapes already stayed held. Now, even when every member has already succeeded, they also keep the cycle a `gap` and hold the source's single backfill slot.
+  - Follow-up issue: an operator-verified bind CAS, or completion credit for members that are all terminal-success.
 - **Manual retry markers do not override a held reservation.** A marker on a candidate with a live-ambiguous submission would still double-submit. The runbook exit is reconcile, not the marker.
 
 ## Required evidence
