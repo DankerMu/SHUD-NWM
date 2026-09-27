@@ -695,7 +695,8 @@ state_evidence.retry_policy = {automatic_retry_allowed: false, manual_retry_requ
      按哪一个跑。处置不变：同样带外先修输入。
    - 更晚的阶段（`state_save_qc` / `parse` 等）：来自失败态重导出，同样不是本次授权覆盖的范围。
      `state_save_qc` 失败而 forecast 已成功的候选，人工出口是 manual-retry marker 打在 **cohort master id** 上
-     （不是 hydro run id，也不是 `confirm-operator-reentry`），会整 cohort 从 convert 重跑，步骤见
+     （不是 hydro run id，也不是 `confirm-operator-reentry`）；自有 forecast 产出可证明时只从 `state_save_qc`
+     重启，否则整 cohort 从 convert 重跑（#2600），步骤见
      [`node22-control-plane-manual-recovery.md`](node22-control-plane-manual-recovery.md) 的
      「forecast 已成功、`state_save_qc` 失败」小节。
 

@@ -28867,6 +28867,12 @@ _SCHEDULER_STATE_FAILURE_CONSTANT_CONSUMERS: dict[str, frozenset[str]] = {
     ),
     "_FORCING_SIDECAR_MAX_BYTES": frozenset({"_forcing_sidecar_provenance"}),
     "_DOWNSTREAM_PLACEHOLDER_REFUSAL_CLASSIFIERS": frozenset({"_downstream_failure_restartable"}),
+    # #2600: the manual-retry restart point.  Not permanence refusal sources: the
+    # added-stage marker key, the post-forecast stages a marker may restart at, and the
+    # evidence keys a refused added stage drops.
+    "MANUAL_RETRY_RESTART_STAGE_ADDED_FIELD": frozenset({"_manual_retry_state_evidence"}),
+    "_MANUAL_RETRY_POST_FORECAST_RESTART_STAGES": frozenset({"_manual_retry_failed_stage_restart"}),
+    "_MANUAL_RETRY_ADDED_RESTART_KEYS": frozenset({"_drop_manual_retry_added_restart_stage"}),
 }
 
 
@@ -28946,6 +28952,16 @@ _SCHEDULER_STATE_FAILURE_CONSTANT_VALUES: dict[str, Any] = {
     #: consumer.)
     "_DOWNSTREAM_PLACEHOLDER_REFUSAL_CLASSIFIERS": frozenset(
         {"malformed_input", "policy_blocked", "resource_configuration"}
+    ),
+    #: #2600, copied literally from ``scheduler_state_failure.py``.
+    "MANUAL_RETRY_RESTART_STAGE_ADDED_FIELD": "manual_retry_restart_stage_added",
+    "_MANUAL_RETRY_POST_FORECAST_RESTART_STAGES": frozenset({"parse", "state_save_qc", "publish"}),
+    "_MANUAL_RETRY_ADDED_RESTART_KEYS": (
+        "restart_stage",
+        "restart_from_stage",
+        "native_shud_resubmitted",
+        "durable_shud_output_reused",
+        "manual_retry_restart_stage_added",
     ),
 }
 

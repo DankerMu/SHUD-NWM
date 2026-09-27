@@ -130,6 +130,7 @@ from services.orchestrator.retry import (
     _RetrySubmissionJob,
     _runtime_root_contract_from_error,
     _runtime_root_env_candidate,
+    _runtime_root_env_db_free_policy_required,
     _runtime_root_resolution_evidence,
     _runtime_root_resolution_from_error,
     _RuntimeRootCandidate,
@@ -11706,6 +11707,19 @@ class FileJournalRetryService:
             # event, the idempotency key, and the failure payload
             # (#1577 round-1 cand-st-02).
             next_retry_count = effective_retry_attempt(failed_job["job_id"], failed_job.get("retry_count")) + 1
+            # #2566 re-verification of the #2565 claim "the allocator is unreachable
+            # for a blocked read because the selector refuses first": it holds.  The
+            # allocator's by-run read is the SAME scoped read as the selector's, of
+            # the same run, inside this same cycle write lock with no write between
+            # them, so a deterministic refusal (the record budget, an unreadable
+            # record) already raised ``RETRY_EVIDENCE_INVALID`` in the selector
+            # (pinned by ``test_blocked_by_run_read_writes_nothing_and_never_allocates
+            # _a_retry_id``).  Only a transient fault on this second read could reach
+            # here; the blocked row then names no ``_retry_`` id, the allocator falls
+            # back to ``<run>_retry_active``, and the conflict guard below still
+            # refuses an id that already exists.  The runtime-root walk's by-run read is
+            # different: it runs OUTSIDE this lock, which is why it degrades and
+            # counts (``_file_retry_runtime_root_candidates``).
             retry_job_id = _next_file_manual_retry_job_id_for_run(self.repository, run_id)
             retry_record = {
                 **failed_job,
@@ -11939,8 +11953,21 @@ class FileJournalRetryService:
 
     def _resolve_file_retry_runtime_roots(self, retry_job: _RetrySubmissionJob) -> SimpleNamespace | None:
         candidate_batch = self._file_retry_runtime_root_candidates(retry_job)
-        db_free_required = _candidate_batch_db_free_required(candidate_batch)
-        runtime_roots_required = retry_job.job_type == DOWNLOAD_SOURCE_CYCLE_JOB_TYPE or db_free_required
+        # #2567: a blocked provenance read means provenance is UNKNOWN, not absent.
+        # The walk then appends no environment candidate, so the environment's
+        # db-free policy switch (a mode flag, not a root) is re-read on its own,
+        # and roots become required for every job type: they resolve from recorded
+        # provenance or end in the governed ``RETRY_RUNTIME_ROOTS_UNRESOLVED`` --
+        # never in a submission without a root contract, and never in a root read
+        # from the current environment (which also keeps the
+        # ``_file_manual_retry_array_tasks`` ``WORKSPACE_ROOT`` fallback unreached).
+        provenance_blocked = candidate_batch.blocked_reads > 0
+        db_free_required = _candidate_batch_db_free_required(candidate_batch) or (
+            provenance_blocked and _runtime_root_env_db_free_policy_required()
+        )
+        runtime_roots_required = (
+            retry_job.job_type == DOWNLOAD_SOURCE_CYCLE_JOB_TYPE or db_free_required or provenance_blocked
+        )
         rejected: list[dict[str, str]] = []
         rejected_total_count = 0
         best_resolved: dict[str, tuple[str, str]] = {}
@@ -12056,8 +12083,9 @@ class FileJournalRetryService:
         event_rows_total_count = 0
         event_rows_omitted_count = 0
         manual_retry_event_rows_ignored = 0
+        blocked_reads = 0
         if retry_job.previous_job_id:
-            provenance_job_ids = self._file_retry_provenance_job_ids(str(retry_job.previous_job_id))
+            provenance_job_ids, blocked_reads = self._file_retry_provenance_job_ids(str(retry_job.previous_job_id))
         for job_id in provenance_job_ids:
             if len(candidates) >= _RUNTIME_ROOT_EVENT_CANDIDATE_LIMIT:
                 break
@@ -12073,14 +12101,29 @@ class FileJournalRetryService:
             event_rows_total_count += event_batch.event_rows_total_count
             event_rows_omitted_count += event_batch.event_rows_omitted_count
             manual_retry_event_rows_ignored += event_batch.manual_retry_event_rows_ignored
+            blocked_reads += event_batch.blocked_reads
         excluded = set(provenance_job_ids)
         if retry_job.run_id:
+            run_jobs = self.repository.query_pipeline_jobs_by_run(str(retry_job.run_id))
+            blocked_run_job = next((job for job in run_jobs if _is_blocked_query_job(job)), None)
+            if blocked_run_job is not None:
+                # #2566: the blocked row carries no ``job_type``, so the download
+                # filter below used to drop it silently and the evidence read
+                # exactly as "this run has no companion download job".  Same
+                # degrade as the two provenance readers: no companion candidate,
+                # a warning with the journal's own reason/field, and a counted
+                # blocked read so the evidence is never byte-identical to absence.
+                reason, field = _blocked_query_job_fault(blocked_run_job)
+                LOGGER.warning(
+                    "manual retry runtime-root companion read blocked: reason=%s field=%s",
+                    reason,
+                    field,
+                )
+                blocked_reads += 1
+                run_jobs = []
             same_run_jobs = [
                 job
-                for job in sorted(
-                    self.repository.query_pipeline_jobs_by_run(str(retry_job.run_id)),
-                    key=_db_compatible_pipeline_job_order_key,
-                )
+                for job in sorted(run_jobs, key=_db_compatible_pipeline_job_order_key)
                 if str(job.get("job_id") or "")
                 and str(job.get("job_id") or "") not in excluded
                 and str(job.get("job_id") or "") != retry_job.job_id
@@ -12112,7 +12155,10 @@ class FileJournalRetryService:
                 event_rows_total_count += event_batch.event_rows_total_count
                 event_rows_omitted_count += event_batch.event_rows_omitted_count
                 manual_retry_event_rows_ignored += event_batch.manual_retry_event_rows_ignored
-        env_candidate = _runtime_root_env_candidate()
+                blocked_reads += event_batch.blocked_reads
+        # #2567: the environment is current config, not this job's provenance.  After
+        # a blocked read it is neither read nor offered as a candidate.
+        env_candidate = _runtime_root_env_candidate() if blocked_reads == 0 else {}
         if env_candidate:
             candidates.append(_RuntimeRootCandidate("runtime_config:environment", env_candidate))
         return _RuntimeRootCandidateBatch(
@@ -12124,24 +12170,34 @@ class FileJournalRetryService:
             event_rows_total_count=event_rows_total_count,
             event_rows_omitted_count=event_rows_omitted_count,
             manual_retry_event_rows_ignored=manual_retry_event_rows_ignored,
+            blocked_reads=blocked_reads,
         )
 
-    def _file_retry_provenance_job_ids(self, job_id: str) -> list[str]:
+    def _file_retry_provenance_job_ids(self, job_id: str) -> tuple[list[str], int]:
+        """The predecessor chain from ``job_id``, plus how many of its lookups were blocked."""
+
         job_ids: list[str] = []
         seen: set[str] = set()
+        blocked_reads = 0
         current: str | None = job_id
         for _ in range(16):
             if not current or current in seen:
                 break
             seen.add(current)
             job_ids.append(current)
-            current = self._file_retry_previous_job_id(current)
-        return job_ids
+            current, blocked = self._file_retry_previous_job_lookup(current)
+            blocked_reads += int(blocked)
+        return job_ids, blocked_reads
 
     def _file_retry_previous_job_id(self, job_id: str) -> str | None:
+        return self._file_retry_previous_job_lookup(job_id)[0]
+
+    def _file_retry_previous_job_lookup(self, job_id: str) -> tuple[str | None, bool]:
+        """``(previous_job_id, read_was_blocked)`` for ``job_id``'s latest retry event."""
+
         job = self.repository.get_pipeline_job(job_id)
         if job is None:
-            return None
+            return None, False
         if _is_blocked_query_job(job):
             # #2387: degrade like the sibling ``submission_runtime_root_resolution``.
             # Without this branch ``_source_id_from_job`` raises
@@ -12158,7 +12214,7 @@ class FileJournalRetryService:
                 reason,
                 field,
             )
-            return None
+            return None, True
         source_id = _source_id_from_job(job)
         cycle_time = _cycle_time_from_job(job)
         model_id = _optional_safe_identity(job, "model_id")
@@ -12176,8 +12232,8 @@ class FileJournalRetryService:
             details = event.get("details") if isinstance(event.get("details"), Mapping) else {}
             previous_job_id = details.get("previous_job_id")
             if isinstance(previous_job_id, str) and previous_job_id.strip():
-                return previous_job_id.strip()
-        return None
+                return previous_job_id.strip(), False
+        return None, False
 
     def submission_runtime_root_resolution(self, job_id: str) -> dict[str, Any] | None:
         """Runtime-root evidence from ``job_id``'s latest ``submission`` event.
@@ -12298,7 +12354,8 @@ class FileJournalRetryService:
                 reason,
                 field,
             )
-            return _RuntimeRootCandidateBatch(candidates=[])
+            # #2567: counted, so "blocked" never reads as "no submission event".
+            return _RuntimeRootCandidateBatch(candidates=[], blocked_reads=1)
         source_id = _source_id_from_job(job)
         cycle_time = _cycle_time_from_job(job)
         model_id = _optional_safe_identity(job, "model_id")

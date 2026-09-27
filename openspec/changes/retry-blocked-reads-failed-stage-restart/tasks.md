@@ -20,23 +20,23 @@
 
 ## 1. #2566 companion read
 
-- [ ] 1.1 The same-run by-run read in `_file_retry_runtime_root_candidates` detects the blocked marker. On a hit it:
+- [x] 1.1 The same-run by-run read in `_file_retry_runtime_root_candidates` detects the blocked marker. On a hit it:
   - logs a warning with the journal `reason`/`field`;
   - contributes no companion candidate;
   - adds one to `blocked_reads`.
-- [ ] 1.2 Tests. Reuse the `tests/test_file_journal_read_blocked_consumers.py` fixtures (`_refuse_scoped_job_records` / `_refuse_job_id_reads` / `_blocked_fault`). Cover:
+- [x] 1.2 Tests. Reuse the `tests/test_file_journal_read_blocked_consumers.py` fixtures (`_refuse_scoped_job_records` / `_refuse_job_id_reads` / `_blocked_fault`). Cover:
   - A blocked companion read produces evidence that differs from a run that genuinely has no companion download job (`blocked_reads >= 1`).
   - A genuine companion-less run is unchanged (`blocked_reads == 0`). This is a pin.
   - The allocator unreachability claim is re-verified (pin or comment).
 
 ## 2. #2567 blocked-read accounting and environment exclusion
 
-- [ ] 2.1 Add `blocked_reads` to `_RuntimeRootCandidateBatch`. It is carried out of both existing degrade branches and 1.1 (tuple or result object), accumulated across the walk, and emitted in `candidate_counts` only when > 0.
-- [ ] 2.2 When `blocked_reads > 0`, treat runtime roots as required for any job type, and neither append nor read the environment candidate (including the `_file_manual_retry_array_tasks` ~856 env fallback):
+- [x] 2.1 Add `blocked_reads` to `_RuntimeRootCandidateBatch`. It is carried out of both existing degrade branches and 1.1 (tuple or result object), accumulated across the walk, and emitted in `candidate_counts` only when > 0.
+- [x] 2.2 When `blocked_reads > 0`, treat runtime roots as required for any job type, and neither append nor read the environment candidate (including the `_file_manual_retry_array_tasks` ~856 env fallback):
   - resolve from recorded candidates only;
   - otherwise go through the existing governed `RETRY_RUNTIME_ROOTS_UNRESOLVED` path (`submission_failed` row with that error code, API 503 with `details.runtime_root_resolution.candidate_counts.blocked_reads`);
   - make no gateway submit.
-- [ ] 2.3 Tests:
+- [x] 2.3 Tests:
   - (a) A blocked provenance read versus no submission event produces different persisted event details.
   - (b) Recorded candidates are cleared by the blocked read and the environment candidate is complete: no submission, `RETRY_RUNTIME_ROOTS_UNRESOLVED`, and the evidence carries `blocked_reads`. Cover a download job and a non-download, non-db-free job (`run_shud_forecast_array`). The same holds through the API route (503).
   - (b') The flipped test `tests/test_file_journal_read_blocked_consumers.py` ~779 (previously 200 + gateway requests) now asserts `RETRY_RUNTIME_ROOTS_UNRESOLVED`, `blocked_reads >= 1`, and zero gateway requests.
@@ -47,14 +47,14 @@
 
 ## 3. #2600 manual-retry restart stage
 
-- [ ] 3.1 `_manual_retry_state_evidence` sets `restart_stage` according to the criterion:
+- [x] 3.1 `_manual_retry_state_evidence` sets `restart_stage` according to the criterion:
   - the `_failed_stage` axis;
   - an attributable own output, where `incomplete` never counts and the override is not trusted;
   - permanence is ignored;
   - the forecast restart only with a witness.
 
   Wire the emitted stage through the existing restart-stage guards. On a guard failure, drop it and run the full chain (never blocked).
-- [ ] 3.2 Tests through the real scheduler decision and `orchestrate_cycle` in the file journal, using the `tests/test_cohort_membership_attribution.py` harness. Assert on the basin manifest's top-level `restart_stage` and on the stage sequence the fake gateway submitted:
+- [x] 3.2 Tests through the real scheduler decision and `orchestrate_cycle` in the file journal, using the `tests/test_cohort_membership_attribution.py` harness. Assert on the basin manifest's top-level `restart_stage` and on the stage sequence the fake gateway submitted:
   - A single-model `state_save_qc`-only failure plus a marker restarts at `state_save_qc`: no convert/forcing/forecast submission, and the attempt accounting is unchanged.
   - A multi-member cohort with the marker on its model-less cohort master (the incident shape) forms one `state_save_qc` restart cohort, with no forecast resubmission.
   - A `forecast` failure plus a marker restarts at `forecast` when the forcing witness is found. When the witness is missing it runs the full chain and is not blocked.
@@ -64,11 +64,11 @@
   - A downstream failure without its own durable output runs the full chain (pin).
   - A `convert`/`forcing` failure is unchanged (pin).
   - A cold-start quarantined failure is unchanged (pin).
-- [ ] 3.3 The existing manual-retry tests stay green, or any change to them is justified by the spec. They are in `tests/test_production_scheduler.py`, `tests/test_cohort_membership_attribution.py`, `tests/test_scheduler_terminal_recency.py` and `tests/test_operator_reentry_confirmation.py`.
+- [x] 3.3 The existing manual-retry tests stay green, or any change to them is justified by the spec. They are in `tests/test_production_scheduler.py`, `tests/test_cohort_membership_attribution.py`, `tests/test_scheduler_terminal_recency.py` and `tests/test_operator_reentry_confirmation.py`.
 
 ## 4. Docs
 
-- [ ] 4.1 Runbook: add the new `RETRY_RUNTIME_ROOTS_UNRESOLVED` cause (blocked provenance) to the manual-retry / typed-reasons runbook, and describe the manual-retry restart point (the failed stage when its own output is durable).
+- [x] 4.1 Runbook: add the new `RETRY_RUNTIME_ROOTS_UNRESOLVED` cause (blocked provenance) to the manual-retry / typed-reasons runbook, and describe the manual-retry restart point (the failed stage when its own output is durable).
 
 ## Evidence Floor
 

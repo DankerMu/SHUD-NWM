@@ -1381,6 +1381,11 @@ SCHEDULER_IMPORTER_TESTS: tuple[str, ...] = (
     # facade's `_candidate_execution_cohort_run_id` and reads every decision at
     # its `_candidate_state_decision` seam. DB-free, 15 tests in ~6s.
     "tests/test_cohort_membership_attribution.py",
+    # #2600: the manual-retry restart-point suite top-level-imports
+    # `services.orchestrator.scheduler` for the facade's restart-stage reader and
+    # cohort run ids, and reads every decision at its `_candidate_state_decision`
+    # seam. DB-free, ~5s.
+    "tests/test_manual_retry_failed_stage_restart.py",
     # #2546: the convert-members suite top-level-imports
     # `services.orchestrator.scheduler` for the facade's execution-unit run ids
     # and reads decisions at its `_candidate_state_decision` seam. DB-free, ~3s.
@@ -1511,6 +1516,14 @@ FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     # function-local, so no importer derivation reaches it; this stop-rule site
     # is its route for the journal. DB-free, 17 tests in ~1s.
     "tests/test_file_journal_read_blocked_consumers.py",
+    # #2566/#2567: the runtime-root walk's blocked-read accounting and
+    # environment exclusion live in this module (`_file_retry_runtime_root_candidates`,
+    # `_resolve_file_retry_runtime_roots`); the suite imports the service
+    # function-locally, so this stop-rule site is its journal route. #2600: the
+    # manual-retry restart-point suite top-level-imports this repository and
+    # `FileJournalRetryService` (the marker writer). DB-free, together ~6s.
+    "tests/test_retry_runtime_root_blocked_reads.py",
+    "tests/test_manual_retry_failed_stage_restart.py",
     # #2306: the file lane's manual-retry root evidence is rendered ONCE, in
     # this module -- `_manual_retry_submission_failure_details` and
     # `_record_manual_retry_submission_success` -- and its oracles outside the
@@ -3232,6 +3245,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # rule's #1455 note above. Every import is function-local, so no
             # importer derivation can reach it. DB-free, 17 tests in ~1s.
             "tests/test_file_journal_read_blocked_consumers.py",
+            # #2566/#2567/#2600: the runtime-root blocked-read suite (subject:
+            # retry.py's candidate batch + evidence renderer, imported
+            # function-locally) and the manual-retry restart-point suite (subject:
+            # scheduler_state_failure.py / scheduler_state_decision.py /
+            # scheduler_candidates.py; top-level importer gaps on the package
+            # __init__ and scheduler_candidate_manifest.py close here). Their
+            # scheduler.py / file_orchestration_journal.py pairs ride the stop-rule
+            # tuples. DB-free, together ~6s.
+            "tests/test_retry_runtime_root_blocked_reads.py",
+            "tests/test_manual_retry_failed_stage_restart.py",
             # #1186: the operator-action listing suite top-level-imports
             # `services.orchestrator` itself and scheduler_evidence_payload.py
             # (it writes every size-fallback fixture through the REAL
