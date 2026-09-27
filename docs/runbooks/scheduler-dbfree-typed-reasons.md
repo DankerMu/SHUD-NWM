@@ -790,8 +790,8 @@ master 停在 `reserved`、从未走到终态，成员就一直被判在飞）�
   `durable_write_count=0`。
 
 成因：node-22 是明确不存 comment 的集群（`AccountingStoreFlags=(null)`），不明确的 forecast 提交只能靠 #1565
-名字窗口兜底绑定；同一趟里 gfs 与 IFS 相隔几秒提交，两个 array 落进彼此的窗口，只数个数就永远是"歧义"。
-#2655 起兜底额外读 `sacct SubmitLine`，按其中 `--comment=nhms_idem:<idempotency_key>` 精确排除别家的 array，
+名字窗口兜底绑定；同一趟里 gfs 与 IFS 相隔几秒提交，两个 array 落进彼此的窗口，只数个数就永远是"歧义"。自 #2655
+起兜底额外读 `sacct SubmitLine`，按其中 `--comment=nhms_idem:<idempotency_key>` 精确排除别家的 array，
 pass evidence 的 `fallback_match_basis` 标出是按 `submitline_exact` 还是退回 `name_window_count` 判的；forecast
 不明确提交的原因（网关错误码）记在 `submission_ambiguous` 事件 details 的 `origin_error_code` /
 `origin_error_message`，master 行本身**不**记 `error_code`（被 identity-blocked 释放的行会拷贝该行，带上瞬时码就会被
