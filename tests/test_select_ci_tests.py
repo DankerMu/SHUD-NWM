@@ -1425,6 +1425,9 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_retention_frontier.py",
         "tests/test_retention_pipeline_frontier.py",
         "tests/test_retention_root_admission.py",
+        # #2596: the unexpandable-root suite rides the broad orchestrator
+        # directory rule beside the other retention root-admission suites.
+        "tests/test_retention_unexpandable_roots.py",
         "tests/test_retry.py",
         "tests/test_retry_cancel_consistency.py",
         # #2404: the retry-mint-floor suite rides the broad orchestrator
@@ -1449,6 +1452,9 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         # orchestrator directory rule (named after none of its modules, and
         # module-scope-import-free, so no importer derivation reaches it).
         "tests/test_scheduler_evidence_decidability.py",
+        # #2564: the heartbeat-mtime x evidence-retention cross suite, on the
+        # same footing (module-scope-import-free).
+        "tests/test_scheduler_evidence_retention_reservation_mtime.py",
         "tests/test_scheduler_generation.py",
         # #2666: the held-reservation block suite rides the broad orchestrator
         # directory rule (accepted_submit_identity.py, chain_stages.py and
@@ -1463,6 +1469,8 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         # scheduler_config/db_free.py, which no narrow or stop rule owns.
         "tests/test_scheduler_journal_root_authority.py",
         "tests/test_scheduler_journal_scope_census.py",
+        # #2582: the looping-workspace-root refusal suite, module-scope-import-free.
+        "tests/test_scheduler_lease_loop_root.py",
         "tests/test_scheduler_lineage.py",
         # #1101: the fifteen partitions of the deleted refresh monolith. They
         # sort here, between the lineage and timing suites — the literal is

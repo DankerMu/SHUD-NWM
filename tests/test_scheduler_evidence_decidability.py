@@ -752,6 +752,63 @@ def test_a_dropped_or_absent_source_cycle_marker_reads_as_dropped(tmp_path: Path
     assert [item["reason"] for item in receipt["non_evaluating_passes"]] == ["size_fallback_source_cycles_absent"]
 
 
+def test_the_fit_tier_sheds_the_candidate_lists_before_the_breaker_released_projection(tmp_path: Path) -> None:
+    """#2563: clearing ``candidates`` is enough, so the capped projection must survive it.
+
+    The budget is derived from the product itself, never from the drop order: it
+    fits the product with only model discovery and ``candidates`` emptied, and
+    it does NOT fit the product with model discovery and ``source_cycles``
+    emptied -- the old order's stop -- so that order has to shed the projection.
+    """
+
+    import copy
+
+    from services.orchestrator import scheduler_evidence, scheduler_evidence_payload
+    from tests.test_production_scheduler import _incident_scheduler_evidence_payload
+
+    payload = _incident_scheduler_evidence_payload(_PASS_ID)
+    (candidate,) = payload["candidates"]
+    payload["candidates"] = [
+        {**copy.deepcopy(candidate), "candidate_id": f"candidate-{index:03d}", "model_id": f"cand_{index:03d}"}
+        for index in range(60)
+    ]
+    payload["source_cycles"] = [_breaker_released_cycle(index) for index in range(4)]
+    roomy = scheduler_evidence.bounded_evidence_payload(
+        payload, reason="evidence_size_limit_exceeded", max_evidence_bytes=10_000_000
+    )
+
+    def size(**emptied: Any) -> int:
+        trimmed = {**copy.deepcopy(roomy), **emptied}
+        return len(scheduler_evidence_payload._serialize_evidence_json(trimmed, compact=True).encode("utf-8"))
+
+    # ``dropped`` is a longer marker spelling than ``summarized``: leave it room.
+    budget = size(model_discovery={}, candidates=[]) + 16
+    assert size(model_discovery={}, source_cycles=[]) > budget
+
+    bounded = scheduler_evidence.bounded_evidence_payload(
+        payload, reason="evidence_size_limit_exceeded", max_evidence_bytes=budget
+    )
+
+    assert bounded["limit"]["source_cycles"]["status"] == "summarized"
+    assert bounded["source_cycles"] == roomy["source_cycles"]
+    assert len(bounded["source_cycles"]) == 4
+    assert bounded["limit"]["candidate_lists"] == "dropped"
+    assert bounded["candidates"] == []
+    root = tmp_path / "evidence"
+    root.mkdir(parents=True)
+    (root / f"{_PASS_ID}.json").write_text(json.dumps(bounded), encoding="utf-8")
+
+    receipt, exit_code = _listing(root)
+
+    assert exit_code == 1
+    assert [item["reason"] for item in receipt["non_evaluating_passes"]] == [
+        "size_fallback_source_cycles_summarized"
+    ]
+    assert sorted(
+        action["model_id"] for action in receipt["operator_actions"] if action["decision"] == _BREAKER_DECISION
+    ) == [f"model_{index:03d}" for index in range(4)]
+
+
 # ---------------------------------------------------------------------------
 # 4.x -- the executed backfill leg (#2443, design D3, write side)
 # ---------------------------------------------------------------------------

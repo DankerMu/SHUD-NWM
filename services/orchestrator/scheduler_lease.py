@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from packages.common.safe_fs_lock import open_lock_file_no_follow
+
 LOCK_OWNER = "production_scheduler"
 LOCK_SCHEMA_VERSION = 1
 MAX_LOCK_PAYLOAD_BYTES = 16_384
@@ -632,7 +634,19 @@ def _open_lock_parent_directory(lock_parent: Path, workspace_root: Path | None) 
                 raise UnsafeSchedulerLockError("unsafe_lock_parent_directory") from error
             raise
 
-    workspace_root = workspace_root.resolve()
+    # #2582: a looping workspace root is refused with the structured reason on
+    # every interpreter.  3.11's non-strict ``resolve()`` raises an errno-less
+    # ``RuntimeError`` for it; 3.13+ folds the loop and ``mkdir`` below reports
+    # ``EEXIST`` instead.  The ``OSError`` arm is defensive and untested: the
+    # non-strict form raises neither errno on a supported interpreter.
+    try:
+        workspace_root = workspace_root.resolve()
+    except RuntimeError as error:
+        raise UnsafeSchedulerLockError("unsafe_lock_parent_directory") from error
+    except OSError as error:
+        if error.errno in {ELOOP, ENOTDIR}:
+            raise UnsafeSchedulerLockError("unsafe_lock_parent_directory") from error
+        raise
     _ensure_workspace_directory(workspace_root)
     try:
         relative_parent = lock_parent.relative_to(workspace_root)
@@ -677,7 +691,10 @@ def _ensure_workspace_directory(workspace_root: Path) -> None:
     try:
         workspace_root.mkdir(parents=True, exist_ok=True)
     except OSError as error:
-        if error.errno in {ELOOP, ENOTDIR}:
+        # ``EEXIST`` despite ``exist_ok``: an entry exists that ``is_dir()``
+        # rejects (a regular file, or a loop in the last component, #2582) --
+        # exactly the non-directory refused below.
+        if error.errno in {EEXIST, ELOOP, ENOTDIR}:
             raise UnsafeSchedulerLockError("unsafe_lock_parent_directory") from error
         raise
     try:
@@ -689,9 +706,8 @@ def _ensure_workspace_directory(workspace_root: Path) -> None:
 
 
 def _open_regular_guard_file(guard_name: str, *, dir_fd: int) -> int:
-    nofollow = getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(guard_name, os.O_CREAT | os.O_RDWR | nofollow, 0o644, dir_fd=dir_fd)
+        fd = open_lock_file_no_follow(guard_name, dir_fd=dir_fd, mode=0o644)
     except OSError as error:
         if error.errno in {EEXIST, EISDIR, ELOOP, ENOTDIR}:
             raise UnsafeSchedulerLockError("unsafe_lock_guard_not_regular_file") from error

@@ -4,7 +4,7 @@ Fixture level: **standard**. Five small, independent defects in the scheduler's 
 
 ## #2540 shared lock-file opener
 
-- **New primitive.** `packages/common/safe_fs.py`:
+- **New primitive.** `packages/common/safe_fs_lock.py`, a sibling module of `safe_fs.py` (which is at the large-file guard's limit):
 
   ```
   open_lock_file_no_follow(name: str, *, dir_fd: int, mode: int) -> int

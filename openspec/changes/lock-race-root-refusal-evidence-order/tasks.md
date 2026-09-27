@@ -16,13 +16,15 @@
 
 ## 1. #2540 lock-file opener
 
-- [ ] 1.1 Add `safe_fs.open_lock_file_no_follow(name, *, dir_fd, mode)`:
+- [x] 1.1 Add `safe_fs.open_lock_file_no_follow(name, *, dir_fd, mode)`:
   - try `O_EXCL` first;
   - on `EEXIST`, fall back to a plain `O_NOFOLLOW` open;
   - retry a bounded number of times on an `ENOENT` from the fallback;
   - let every other `OSError` propagate unchanged.
-- [ ] 1.2 Use it in the journal cycle lock, the scheduler lease guard file, and the provider destination lock. Keep modes, checks and error mapping. Keep the provider registry, and update its docstring.
-- [ ] 1.3 Tests. The platform-independent primitive tests are:
+
+  Deviation: the opener lives in the new sibling module `packages/common/safe_fs_lock.py`, not in `safe_fs.py`, which is at 990 of the large-file guard's 1000 lines and not excluded.
+- [x] 1.2 Use it in the journal cycle lock, the scheduler lease guard file, and the provider destination lock. Keep modes, checks and error mapping. Keep the provider registry, and update its docstring.
+- [x] 1.3 Tests. The platform-independent primitive tests are:
   - a concurrent winner (`EEXIST` on create) still yields an fd;
   - an `ENOENT` between the create and the plain open is retried;
   - a symlink raises `ELOOP` and is not followed;
@@ -33,45 +35,49 @@
 
 ## 2. #2582 lock parent loop root
 
-- [ ] 2.1 Map the `resolve()` loop failure (`RuntimeError`, or `OSError` with `ELOOP`/`ENOTDIR`) and the `mkdir` `EEXIST` to `UnsafeSchedulerLockError("unsafe_lock_parent_directory")`.
-- [ ] 2.2 Tests on the 3.11 pin, for a two-link loop and a self loop:
+- [x] 2.1 Map the `resolve()` loop failure (`RuntimeError`, or `OSError` with `ELOOP`/`ENOTDIR`) and the `mkdir` `EEXIST` to `UnsafeSchedulerLockError("unsafe_lock_parent_directory")`.
+- [x] 2.2 Tests on the 3.11 pin, for a two-link loop and a self loop:
   - `_open_lock_parent_directory` raises the typed error;
   - `FileSchedulerLease.acquire` returns `acquired=False` with `reason="unsafe_lock_parent_directory"`;
   - `open_evidence_directory` raises `SchedulerEvidenceWriteError("unsafe_evidence_directory")`.
 
   Run the same file once with `uv run --python 3.14`.
-- [ ] 2.3 Pin: a workspace root that is a symlink to a real directory is still accepted.
+- [x] 2.3 Pin: a workspace root that is a symlink to a real directory is still accepted.
 
 ## 3. #2596 retention unexpandable roots
 
-- [ ] 3.1 Add the `reason_unexpandable` parameter and the three tokens. When the published root cannot be expanded, record the typed skip and plan nothing.
-- [ ] 3.2 Tests. Unexpandable roots:
+- [x] 3.1 Add the `reason_unexpandable` parameter and the three tokens. When the published root cannot be expanded, record the typed skip and plan nothing.
+- [x] 3.2 Tests. Unexpandable roots:
   - a `~nosuchuser` primary root gives a typed `primary_root_unexpandable` skip, and there is no exception;
   - a `~nosuchuser` additional root gives an `extra_root_unexpandable` skip, and the valid primary root's plan matches a control run key for key;
   - a `~nosuchuser` published root gives `published_root_unexpandable`, zero planned targets, and zero deletions under a non-dry run. When a `~nosuchuser` extra root is configured as well, its `extra_root_unexpandable` entry is still in the receipt;
   - with the extra-roots gate off, a non-dry run, and a `~nosuchuser` copyback root: no exception, and the primary root's deletions proceed.
-- [ ] 3.3 Tests at the entrypoints:
+- [x] 3.3 Tests at the entrypoints:
   - the click and argparse `cleanup` entrypoints exit without a traceback;
   - the scheduler pass retention block shows `status: completed` with the typed skip, not `status:error`. Use a db-free config with a raw `~nosuchuser` primary root, or a copyback root. Never the published root, which config normalizes.
-- [ ] 3.4 The existing root-admission suites stay green, with their tokens unchanged.
+- [x] 3.4 The existing root-admission suites stay green, with their tokens unchanged.
 
 ## 4. #2563 drop order
 
-- [ ] 4.1 Move `source_cycles` after `skipped_candidates`, and add the constant comment.
-- [ ] 4.2 Regression test: a bounded product with a non-empty breaker-released projection, and candidate lists much larger than it, under a budget that clearing `candidates` is enough to fit. Assert:
+- [x] 4.1 Move `source_cycles` after `skipped_candidates`, and add the constant comment.
+- [x] 4.2 Regression test: a bounded product with a non-empty breaker-released projection, and candidate lists much larger than it, under a budget that clearing `candidates` is enough to fit. Assert:
   - `limit.source_cycles.status == "summarized"`;
   - the projection rows survive;
   - `limit.candidate_lists == "dropped"`;
   - `list_operator_actions` reports `size_fallback_source_cycles_summarized` and lists the released models.
-- [ ] 4.3 The three band tests are unchanged, or any move is explained.
+- [x] 4.3 The three band tests are unchanged, or any move is explained.
+
+  Unchanged: all three pass at their existing budgets (their fixture's `source_cycles` projects to `[]`).
 
 ## 5. #2564 cross tests
 
-- [ ] 5.1 The three cases from the design, each setting mtimes with `os.utime`. Cases 2 and 3 assert the reader exits exactly `3`. Case 2 uses the fixed two-file root and also asserts `orphan_reservations == []`.
+- [x] 5.1 The three cases from the design, each setting mtimes with `os.utime`. Cases 2 and 3 assert the reader exits exactly `3`. Case 2 uses the fixed two-file root and also asserts `orphan_reservations == []`.
 
 ## 6. Docs
 
-- [ ] 6.1 Update `node22-control-plane-manual-recovery.md` under orphan reservations, only if the current text conflicts with the fact that a heartbeat inversion stays fail-closed. Retention skip tokens are not documented anywhere today (`git grep extra_root_not_absolute -- docs` is empty), so no token doc is added.
+- [x] 6.1 Update `node22-control-plane-manual-recovery.md` under orphan reservations, only if the current text conflicts with the fact that a heartbeat inversion stays fail-closed. Retention skip tokens are not documented anywhere today (`git grep extra_root_not_absolute -- docs` is empty), so no token doc is added.
+
+  Checked: the orphan-reservation text makes no claim the inverted order contradicts, so the runbook is unchanged.
 
 ## Evidence Floor
 

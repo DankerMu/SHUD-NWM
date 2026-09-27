@@ -18,6 +18,7 @@ from packages.common.safe_fs import (
     read_bytes_limited_no_follow,
     stat_no_follow,
 )
+from packages.common.safe_fs_lock import open_lock_file_no_follow
 
 SHARED_PROVIDER_MODE = 0o644
 
@@ -153,10 +154,11 @@ def provider_lock_path(path: Path) -> Path:
 def _process_destination_lock(lock_path: Path, *, blocking: bool) -> Iterator[None]:
     """Serialize same-process users before opening the shared flock file.
 
-    macOS can intermittently return ENOENT when several threads concurrently
-    open the same existing O_CREAT|O_NOFOLLOW lock path.  flock remains the
-    cross-process authority; this bounded registry only removes the unsafe
-    same-process open race and preserves nonblocking contender semantics.
+    macOS can return ENOENT to the loser of a concurrent first ``O_CREAT`` open
+    of the same lock path, across threads and processes alike; that open race is
+    now closed in ``safe_fs_lock.open_lock_file_no_follow`` (#2540).  flock
+    remains the cross-process authority; this bounded registry is kept for the
+    nonblocking contender semantics of same-process callers.
     """
 
     key = os.path.abspath(os.fspath(lock_path))
@@ -200,7 +202,6 @@ def _provider_destination_file_lock(
     lock_path = provider_lock_path(path)
     lock_fd: int | None = None
     parent_fd: int | None = None
-    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     acquired = False
     try:
         ensure_directory_no_follow(lock_path.parent, containment_root=containment_root)
@@ -213,7 +214,7 @@ def _provider_destination_file_lock(
         # destinations (and so their locks) out of ACL-shared subtrees instead.
         if parent.st_uid != os.geteuid() or stat.S_IMODE(parent.st_mode) & 0o022:
             raise ProviderAtomicError("provider_lock_parent_unsafe", phase="precommit")
-        lock_fd = os.open(lock_path.name, flags, 0o600, dir_fd=parent_fd)
+        lock_fd = open_lock_file_no_follow(lock_path.name, dir_fd=parent_fd, mode=0o600)
         os.fchmod(lock_fd, 0o600)
         opened = os.fstat(lock_fd)
         if not stat.S_ISREG(opened.st_mode):

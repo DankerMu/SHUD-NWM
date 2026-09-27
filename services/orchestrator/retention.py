@@ -129,6 +129,13 @@ PRIMARY_ROOT_NOT_ABSOLUTE_REASON = "primary_root_not_absolute"
 # accepted winner.
 ROOT_OVERLAP_REASON = "root_overlap"
 
+# Skip reasons for a root whose leading ``~user`` has no home directory (#2596):
+# ``expanduser()`` raises an errno-less ``RuntimeError`` there. The published root
+# guards every deletion, so when IT is unexpandable the pass plans nothing at all.
+PRIMARY_ROOT_UNEXPANDABLE_REASON = "primary_root_unexpandable"
+EXTRA_ROOT_UNEXPANDABLE_REASON = "extra_root_unexpandable"
+PUBLISHED_ROOT_UNEXPANDABLE_REASON = "published_root_unexpandable"
+
 # Total time ONE pass may spend *acquiring* the copyback batch mutex, across
 # every removal on the copyback root (#2238 / design D9). Per-tree acquisition
 # keeps each hold to ONE tree's removal rather than a whole sweep; it does NOT
@@ -490,6 +497,7 @@ def _sanitize_root_candidate(
     *,
     reason_blank: str | None,
     reason_not_absolute: str,
+    reason_unexpandable: str,
 ) -> tuple[str | None, Path | None, str | None]:
     """Shared pre-resolution root hygiene (issues #1616/#1617).
 
@@ -508,6 +516,7 @@ def _sanitize_root_candidate(
     - non-blank but still relative after ``expanduser()`` -> rejected with
       ``reason_not_absolute`` (the ``extra_root_not_absolute`` token for
       additional roots stays stable; the primary lane carries its own token).
+    - ``~user`` with no home directory -> rejected with ``reason_unexpandable``.
     - otherwise -> resolved to an absolute path (``Path(value).expanduser()
       .resolve()``).
     """
@@ -517,7 +526,10 @@ def _sanitize_root_candidate(
         value = value.strip()
         if not value:
             return value, None, reason_blank
-    candidate = Path(value).expanduser()
+    try:
+        candidate = Path(value).expanduser()
+    except RuntimeError:
+        return str(value), None, reason_unexpandable
     # A degenerate ``Path`` (``Path("")`` / whitespace-only) is blank too.
     if isinstance(value, Path) and not str(value).strip():
         return str(value), None, reason_blank
@@ -585,6 +597,7 @@ def _resolve_runs_only_roots(
             # on non-db-free deployments is operational context, not verified here.
             reason_blank=None,
             reason_not_absolute=EXTRA_ROOT_NOT_ABSOLUTE_REASON,
+            reason_unexpandable=EXTRA_ROOT_UNEXPANDABLE_REASON,
         )
         if rejected is not None:
             skipped.append(
@@ -754,6 +767,7 @@ def plan_retention(
         object_store_root,
         reason_blank=PRIMARY_ROOT_BLANK_REASON,
         reason_not_absolute=PRIMARY_ROOT_NOT_ABSOLUTE_REASON,
+        reason_unexpandable=PRIMARY_ROOT_UNEXPANDABLE_REASON,
     )
     extra_roots, extra_root_skipped = _resolve_runs_only_roots(
         runs_only_roots, primary=primary_root
@@ -779,11 +793,14 @@ def plan_retention(
             }
         )
 
-    published_resolved = (
-        Path(published_artifact_root).expanduser().resolve()
-        if published_artifact_root is not None
-        else None
-    )
+    try:
+        published_expanded = None if published_artifact_root is None else Path(published_artifact_root).expanduser()
+    except RuntimeError:
+        raw = str(published_artifact_root)
+        result.skipped.append({"key": "", "root": raw, "reason": PUBLISHED_ROOT_UNEXPANDABLE_REASON})
+        result.skipped.extend(extra_root_skipped)
+        return result
+    published_resolved = published_expanded.resolve() if published_expanded is not None else None
 
     if primary_root is not None and primary_root.is_dir():
         cycle_targets, cycle_skipped = _collect_cycle_targets(primary_root, cutoff, bound)
@@ -975,6 +992,7 @@ def _resolve_copyback_lock_root(
         copyback_root,
         reason_blank=None,
         reason_not_absolute=EXTRA_ROOT_NOT_ABSOLUTE_REASON,
+        reason_unexpandable=EXTRA_ROOT_UNEXPANDABLE_REASON,
     )
     if resolved is None or str(resolved) not in extra_roots:
         return None
