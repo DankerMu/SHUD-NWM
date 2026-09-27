@@ -779,17 +779,19 @@ def _arm_predecessor_refusal_after_mint(
 def test_blocked_predecessor_read_no_longer_poisons_the_recorded_submission(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Task 3.5, against the CORRECTED premise.
+    """Task 3.5, against the CORRECTED premise; outcome flipped by #2567.
 
     The issue's "unclassified 500" is stale: the provenance walk runs inside
     ``attempt_manual_retry``'s ``except Exception``, AFTER the pending retry row
-    is minted.  So today the refusal is caught, ``_retry_submission_error_code``
-    finds no ``.code`` on ``FileOrchestrationJournalError`` and falls back to
-    ``SBATCH_SUBMISSION_FAILED``, and the fresh retry row is persisted as
-    ``submission_failed`` with a fabricated gateway code and a
-    ``file_journal_missing_identity``-derived message -- blaming a gateway that
-    was never called.  After the fix the walk skips the unreadable candidate with
-    a warning and resolves the roots from the environment instead.
+    is minted.  Before #2387 the refusal was caught, ``_retry_submission_error_code``
+    found no ``.code`` on ``FileOrchestrationJournalError`` and fell back to
+    ``SBATCH_SUBMISSION_FAILED`` -- blaming a gateway that was never called.
+    #2387 made the walk skip the unreadable candidate with a warning, which then
+    submitted with the CURRENT environment's roots (200).  #2567 flips that
+    outcome on purpose: a blocked read means provenance is unknown, so the
+    environment is not consulted and the attempt ends with the governed
+    ``RETRY_RUNTIME_ROOTS_UNRESOLVED`` (503, ``submission_failed``) carrying
+    ``blocked_reads`` -- still never the fabricated gateway code.
     """
 
     from fastapi.testclient import TestClient
@@ -806,7 +808,7 @@ def test_blocked_predecessor_read_no_longer_poisons_the_recorded_submission(
     monkeypatch.setenv("WORKSPACE_ROOT", str(workspace_root))
     monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
 
-    gateway = _SuccessGateway()
+    gateway = _UnreachableGateway()
     _arm_predecessor_refusal_after_mint(monkeypatch, repository, service)
     context = pipeline_routes._RetryExecutionContext(
         policy_decision=trusted_internal_policy_decision(
@@ -827,27 +829,30 @@ def test_blocked_predecessor_read_no_longer_poisons_the_recorded_submission(
     finally:
         app.dependency_overrides.pop(pipeline_routes.get_retry_execution_context, None)
 
-    assert response.status_code == 200, response.json()
-    body = response.json()["data"]
-    assert body["status"] == "submitted"
-    assert gateway.requests, "the walk must degrade and let the submission proceed"
+    assert response.status_code == 503, response.json()
+    error = response.json()["error"]
+    assert error["code"] == "RETRY_RUNTIME_ROOTS_UNRESOLVED"
+    resolution = error["details"]["runtime_root_resolution"]
+    assert resolution["candidate_counts"]["blocked_reads"] >= 1
+    assert resolution["resolved"] == {}
+    assert gateway.requests == [], "a blocked provenance read must not submit with the environment's roots"
 
-    # The durable retry row itself, not just the wire: no fabricated gateway
+    # The durable retry row: the governed unresolved code, no fabricated gateway
     # code, no identity-fault message recorded against it.
-    retry_row = repository.get_pipeline_job(str(body["job_id"]))
+    retry_row = repository.get_pipeline_job(str(error["details"]["job_id"]))
     assert retry_row is not None
-    assert retry_row["status"] == "submitted"
-    assert retry_row["error_code"] is None
-    assert retry_row["error_message"] is None
+    assert retry_row["status"] == "submission_failed"
+    assert retry_row["error_code"] == "RETRY_RUNTIME_ROOTS_UNRESOLVED"
 
     submission_events = [
         record
         for record in _journal_records(root, "pipeline_event")
         if str(record.get("event_type") or "") == "submission"
     ]
-    assert submission_events
+    assert len(submission_events) == 1
     for event in submission_events:
-        assert str(event.get("status_to") or "") != "submission_failed"
+        assert event["details"]["error_code"] == "RETRY_RUNTIME_ROOTS_UNRESOLVED"
+        assert event["details"]["runtime_root_resolution"]["candidate_counts"]["blocked_reads"] >= 1
         assert "SBATCH_SUBMISSION_FAILED" not in json.dumps(event)
         assert "file_journal_missing_identity" not in json.dumps(event)
 

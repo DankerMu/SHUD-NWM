@@ -46,6 +46,8 @@ from services.orchestrator.scheduler_state import (
     _state_retry_limit,
 )
 from services.orchestrator.scheduler_state_failure import (
+    MANUAL_RETRY_RESTART_STAGE_ADDED_FIELD,
+    _drop_manual_retry_added_restart_stage,
     _missing_upstream_forecast_artifact_evidence,
 )
 from services.orchestrator.source_cycle_raw_manifest import (
@@ -688,6 +690,7 @@ def build_candidates(
                             }
                         )
                         continue
+            pre_upgrade_decision = state_decision
             state_decision = _upgrade_retry_for_strict_warm_start_manifest(
                 state_decision,
                 strict_warm_start,
@@ -711,6 +714,10 @@ def build_candidates(
                 state_decision = _strict_warm_start_forcing_witness_decision(
                     candidate,
                     raw_candidate_state,
+                    state_decision,
+                )
+                state_decision = _manual_retry_added_restart_strict_fallback(
+                    pre_upgrade_decision,
                     state_decision,
                 )
                 state_decision = _apply_explicit_missing_forcing_repair_policy(
@@ -2549,6 +2556,36 @@ def _strict_warm_start_forcing_witness_decision(
         state_decision.action,
         state_decision.reason,
         {**dict(evidence), "forcing_provenance": dict(provenance)},
+    )
+
+
+def _manual_retry_added_restart_strict_fallback(
+    pre_upgrade_decision: CandidateStateDecision | None,
+    state_decision: CandidateStateDecision | None,
+) -> CandidateStateDecision | None:
+    """Keep a manual retry off the strict lane's witness blocker (#2600).
+
+    The strict warm-start upgrade may rewrite a manual-retry restart stage that #2600
+    ADDED (e.g. ``state_save_qc``) into a ``forecast`` restart, and the witness
+    consultation then blocks it when the per-model forcing package is not witnessed.
+    That blocker exists only because of the added stage, so the manual retry falls
+    back to its pre-upgrade decision without that stage -- the full chain.  Every
+    other decision, including a cold-start quarantined manual retry (its forced
+    ``forecast`` carries no added-stage marker), keeps the strict lane's verdict.
+    """
+
+    if state_decision is None or state_decision.action != "blocked":
+        return state_decision
+    if (
+        pre_upgrade_decision is None
+        or pre_upgrade_decision.action != "retry"
+        or pre_upgrade_decision.evidence.get(MANUAL_RETRY_RESTART_STAGE_ADDED_FIELD) is not True
+    ):
+        return state_decision
+    return CandidateStateDecision(
+        pre_upgrade_decision.action,
+        pre_upgrade_decision.reason,
+        _drop_manual_retry_added_restart_stage(pre_upgrade_decision.evidence, reason=state_decision.reason),
     )
 
 

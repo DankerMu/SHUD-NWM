@@ -413,6 +413,10 @@ class _RuntimeRootCandidateBatch:
     event_rows_total_count: int = 0
     event_rows_omitted_count: int = 0
     manual_retry_event_rows_ignored: int = 0
+    # #2566/#2567: provenance reads of this walk the file journal REFUSED (the
+    # read-blocked row).  Only the file lane can block; the database lane never
+    # sets it, and the evidence renders it only when non-zero.
+    blocked_reads: int = 0
 
 
 class _RetryRuntimeRootResolutionError(RuntimeError):
@@ -1654,6 +1658,18 @@ def _candidate_batch_db_free_required(candidate_batch: _RuntimeRootCandidateBatc
     )
 
 
+def _runtime_root_env_db_free_policy_required() -> bool:
+    """The environment's db-free POLICY switch alone (#2567).
+
+    A mode flag, not a root or selector value: when a provenance read was
+    blocked the environment candidate is not consulted, yet this switch still
+    makes the db-free selectors required -- they then resolve from recorded
+    provenance only.
+    """
+
+    return _truthy_manifest_value(_first_env_value(*dict(_DB_FREE_ENV_SPECS)[_DB_FREE_REQUIRED_FIELD]))
+
+
 def _db_free_selector_allowed_roots(source: str, value: str) -> tuple[tuple[Path, ...], list[dict[str, str]]]:
     roots: list[Path] = []
     rejected: list[dict[str, str]] = []
@@ -1888,6 +1904,21 @@ def _runtime_root_resolution_evidence(
             "value": _bounded_redacted_text(value),
         }
     rejected_omitted_count = max(rejected_total_count - len(rejected), 0)
+    candidate_counts: dict[str, Any] = {
+        "event_candidates_returned": candidate_batch.event_candidate_returned_count,
+        "event_candidates_total": candidate_batch.event_candidate_total_count,
+        "event_candidates_omitted": candidate_batch.event_candidate_omitted_count,
+        "event_candidate_limit": _RUNTIME_ROOT_EVENT_CANDIDATE_LIMIT,
+        "event_rows_scanned": candidate_batch.event_rows_scanned_count,
+        "event_rows_total": candidate_batch.event_rows_total_count,
+        "event_rows_omitted": candidate_batch.event_rows_omitted_count,
+        "event_row_scan_limit": _RUNTIME_ROOT_EVENT_ROW_SCAN_LIMIT,
+        "manual_retry_event_rows_ignored": candidate_batch.manual_retry_event_rows_ignored,
+    }
+    # #2567: only when non-zero, so evidence without a blocked read (the whole
+    # database lane, every unblocked file-lane walk) stays byte-identical.
+    if candidate_batch.blocked_reads:
+        candidate_counts["blocked_reads"] = candidate_batch.blocked_reads
     return _redacted_mapping(
         {
             "job_type": retry_job.job_type,
@@ -1903,17 +1934,7 @@ def _runtime_root_resolution_evidence(
                 "missing": list(db_free_missing or []),
                 "slurm_env": {"NHMS_SHUD_DB_FREE": "true"} if db_free_required else {},
             },
-            "candidate_counts": {
-                "event_candidates_returned": candidate_batch.event_candidate_returned_count,
-                "event_candidates_total": candidate_batch.event_candidate_total_count,
-                "event_candidates_omitted": candidate_batch.event_candidate_omitted_count,
-                "event_candidate_limit": _RUNTIME_ROOT_EVENT_CANDIDATE_LIMIT,
-                "event_rows_scanned": candidate_batch.event_rows_scanned_count,
-                "event_rows_total": candidate_batch.event_rows_total_count,
-                "event_rows_omitted": candidate_batch.event_rows_omitted_count,
-                "event_row_scan_limit": _RUNTIME_ROOT_EVENT_ROW_SCAN_LIMIT,
-                "manual_retry_event_rows_ignored": candidate_batch.manual_retry_event_rows_ignored,
-            },
+            "candidate_counts": candidate_counts,
             "rejected": [
                 {
                     "field": _bounded_redacted_text(item.get("field", "")),

@@ -1345,6 +1345,11 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         # `services/orchestrator/__init__.py` and journal_root_authority.py.
         "tests/test_journal_root_lane_adoption.py",
         "tests/test_live_monitoring.py",
+        # #2600: the manual-retry restart-point suite rides the broad orchestrator
+        # directory rule (package __init__ and scheduler_candidate_manifest.py
+        # importer gaps; its subjects scheduler_state_failure.py /
+        # scheduler_state_decision.py / scheduler_candidates.py). ~5s.
+        "tests/test_manual_retry_failed_stage_restart.py",
         "tests/test_monitoring_api.py",
         "tests/test_node27_connection_attribution.py",
         "tests/test_node27_connection_attribution_delegated.py",
@@ -1425,6 +1430,10 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         # #2404: the retry-mint-floor suite rides the broad orchestrator
         # directory rule (its imports are all function-local). 6 tests in ~3s.
         "tests/test_retry_mint_floor.py",
+        # #2566/#2567: the runtime-root blocked-read suite rides the broad
+        # orchestrator directory rule for retry.py (its service imports are all
+        # function-local). Sub-second.
+        "tests/test_retry_runtime_root_blocked_reads.py",
         # #2185: services/** is a river-segment write-surface root, so the scan
         # rides every source under it — a supplemental rider, not a rule target.
         WRITE_SURFACE_SCAN_PATH,

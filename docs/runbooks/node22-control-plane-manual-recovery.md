@@ -366,8 +366,36 @@ hydro run 已成功时，选择器对 hydro run id 一律拒绝（`no_retryable_
      两个条件的那一行的 `run_id`：状态为失败状态（`permanently_failed`、`failed`、`submission_failed` 等），并且
      `model_id` 等于该候选的模型。失败的 `state_save_qc` 行都没有 `model_id` 时，evidence 证明不了成员关系，
      不要从中挑，改用上一种办法的 `cohort_candidates`。两种办法都证明不了时不要猜，等 journal 读恢复后重新预览取提示。
-2. **看清代价再标**：标记 cohort master 会让**整个 cohort 从 convert 重跑**到 `state_save_qc`，不只是失败的阶段；
-   `member_count` 个模型的 forecast 都会重算。单模型 cohort 约 19 分钟；47 个模型的 cohort 会把 47 个 forecast 全部重跑。
+2. **看清重启点再标**（#2600）：marker 让候选从**失败阶段**重启，不再一律从 convert 重跑。
+   - 失败阶段为 `parse` / `state_save_qc` / `publish`，且该候选自己的 forecast 产出可证明（它自己的 hydro run 为
+     durable success，或有一行写着它的 `model_id` / `run_id` 的 forecast 终态成功行；forecast array master 本身不按
+     记录的成员关系归属，归属靠它按模型投影出的 task 行，成员关系 `incomplete` 的行不算）：只重跑失败阶段及其后阶段。上例 `state_save_qc` 失败时
+     只提交 `state_save_qc`（单模型约 9 秒），47 个成员的 cohort 也只提交一次 `state_save_qc`，不重算 forecast。
+     失败的是否已 `permanently_failed` 不影响，marker 本身就是授权。
+   - 失败阶段为 `forecast`：只有找到该模型自己的 forcing witness（forcing 包的 sidecar/manifest），且记录的失败码
+     不是 forcing 输入类失败时，才从 `forecast` 重启。forcing 输入类失败指 runtime 拒收 forcing 包的错误码：
+     `FORCING_*`（如 `FORCING_PACKAGE_CHECKSUM_MISMATCH`、`FORCING_FILE_CHECKSUM_MISMATCH`、`FORCING_FILE_NOT_STAGED`、
+     `FORCING_EMPTY`）及 `SHUD_FORCING_*` / `DIRECT_GRID_*FORCING_*`。witness 查不出坏包，所以这类失败照旧跑整条链，
+     让 forcing 包重新生成。
+   - 其余情况照旧从 convert 重跑整条链：失败在 `convert` / `forcing`、阶段不可识别、自有 forecast 产出证明不了、
+     或新增的重启阶段没过既有的上游产物守卫（forcing witness 缺失、copyback 源缺失等）。守卫不过时 decision 仍是
+     `manual_retry_requested`，只是不带 `restart_stage`，evidence 里多一项
+     `manual_retry_restart_stage_dropped: {restart_stage, reason}` 说明原因——**不会**因此变成 blocked。
+   - 冷启动隔离（`COLD_START_QUARANTINED`）照旧强制从 `forecast` 重跑 native SHUD。
+   - strict warm-start 车道（db-free 且 scheduler 给出 strict warm-start 证据时；通常是
+     `NHMS_REQUIRE_FORECAST_WARM_START=true`，但该变量为 false 时只有已完成的流水线才跳过 strict 证据，`state_save_qc`
+     失败的流水线未完成，所以仍可能进入本车道，见 `scheduler_core._strict_warm_start_for_candidate`）：
+     决策后的 manifest 升级**只在**该 run 自己的 `runs/<run_id>/input/manifest.json` 记录的 `initial_state` 与 strict
+     选定的 warm-start 状态不一致（或没有该 manifest）时，才把 `state_save_qc` 重启改写成 `forecast` 重启
+     （`strict_warm_start_retry_run_manifest_mismatch`）；一致时保留 `state_save_qc` 重启。改写后 forcing witness 找得到
+     就从 `forecast` 重跑，只有 witness 查验会 blocked 时才退回整条链，同样不会 blocked。
+   - 已知限制：`state_save_qc` 重启前**不**探测 forecast 产物是否还在；产物已丢失时重启的 `state_save_qc` 会按它自己的
+     失败语义失败，再按本节处置。
+   - 自有产出可证明、但 forecast 产物实际已丢失或损坏时，marker 每次仍从失败阶段重启。唯一可用的出路是**先把 forecast
+     产物恢复到原路径**，再标 marker。工具不支持把已成功的 forecast 行改判为失败，也不支持让 marker 强制整条链
+     （`node22_manual_retry_failed_runs.py` 只标失败行，`node22-run-cycle-once.sh` 走同一套决策）；手改 journal 抹掉
+     durable 证据是禁止的。产物无法恢复时停下来上报，不要绕过。
+   - 核对方式：下一趟 pass 的候选 `state_evidence.restart_stage` 与 basin manifest 顶层 `restart_stage`（链的唯一重启来源）。
 3. 用该 cohort master id 预览。先确认预览用的 id 就是第 1 步按提示或 evidence 规则取得的那个 id（不是凭 `would_mark`
    反推出来的），再确认 `decision: would_mark`、`stage: state_save_qc`，然后追加 `--execute`。
 4. 下一趟自然 pass 会重跑该 cohort。若 cycle 已出调度窗口（例如 IFS 的旧 cycle），接着用

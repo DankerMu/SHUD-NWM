@@ -7,10 +7,12 @@ from typing import Any
 from services.orchestrator.scheduler_state_common import _evidence_safe
 from services.orchestrator.scheduler_state_evidence_owner import _candidate_state_evidence
 from services.orchestrator.scheduler_state_failure import (
+    MANUAL_RETRY_RESTART_STAGE_ADDED_FIELD,
     _cancelled_state_evidence,
     _canonical_downstream_stage,
     _completed_upstream_stage_retry_evidence,
     _downstream_retry_evidence,
+    _drop_manual_retry_added_restart_stage,
     _manual_retry_state_evidence,
     _missing_forecast_output_recompute_evidence,
     _missing_raw_manifest_repair_evidence,
@@ -328,11 +330,26 @@ def _candidate_state_decision_evaluated(
         )
 
     if manual_retry_requested:
-        return CandidateStateDecision(
-            "retry",
-            "manual_retry_requested",
-            _manual_retry_state_evidence(candidate, manual_retry_state, evidence),
-        )
+        manual_evidence = _manual_retry_state_evidence(candidate, manual_retry_state, evidence)
+        if manual_evidence.get(MANUAL_RETRY_RESTART_STAGE_ADDED_FIELD) is True:
+            # #2600: the added restart stage passes the same upstream-artifact guards
+            # every other restart stage does (forcing witness for ``forecast``, the
+            # copyback source leg).  A refusal drops the stage -- the marker reruns
+            # the full chain -- and never turns the manual retry into a blocker.
+            manual_blocker, provenance_annotation = _missing_upstream_forecast_artifact_evidence(
+                candidate,
+                decision_state,
+                evidence,
+                manual_evidence,
+            )
+            if manual_blocker is not None:
+                manual_evidence = _drop_manual_retry_added_restart_stage(
+                    manual_evidence,
+                    reason=str(manual_blocker.get("reason") or "missing_upstream_artifact"),
+                )
+            else:
+                _record_forcing_provenance(provenance_annotation)
+        return CandidateStateDecision("retry", "manual_retry_requested", manual_evidence)
 
     downstream_retry = _downstream_retry_evidence(candidate, decision_state, evidence)
     if _forecast_resume_reads_superseded_hydro_truth(decision_state, downstream_retry):

@@ -2270,4 +2270,115 @@ def _manual_retry_state_evidence(
         evidence["restart_from_stage"] = "forecast"
         evidence["native_shud_resubmitted"] = True
         evidence["force_native_shud_rerun"] = True
+        return evidence
+    restart_stage = _manual_retry_failed_stage_restart(candidate, state)
+    if restart_stage is not None:
+        # #2600: restart at the failed stage.  Provisional: the decision's caller runs
+        # the existing restart-stage upstream-artifact guards on it and drops it on any
+        # refusal (``_drop_manual_retry_added_restart_stage``), so the marker never
+        # becomes a blocker because of this stage.
+        evidence["restart_stage"] = restart_stage
+        evidence["restart_from_stage"] = restart_stage
+        if restart_stage == "forecast":
+            evidence["native_shud_resubmitted"] = True
+        else:
+            evidence["native_shud_resubmitted"] = False
+            evidence["durable_shud_output_reused"] = True
+        evidence[MANUAL_RETRY_RESTART_STAGE_ADDED_FIELD] = True
     return evidence
+
+
+#: #2600: the evidence key naming a restart stage the manual-retry lane ADDED (never the
+#: cold-start quarantine's forced ``forecast``).  Only a stage carrying it may be dropped
+#: back to the full chain when a restart-stage guard refuses it.
+MANUAL_RETRY_RESTART_STAGE_ADDED_FIELD = "manual_retry_restart_stage_added"
+_MANUAL_RETRY_POST_FORECAST_RESTART_STAGES = frozenset({"parse", "state_save_qc", "publish"})
+_MANUAL_RETRY_ADDED_RESTART_KEYS = (
+    "restart_stage",
+    "restart_from_stage",
+    "native_shud_resubmitted",
+    "durable_shud_output_reused",
+    MANUAL_RETRY_RESTART_STAGE_ADDED_FIELD,
+)
+
+
+def _manual_retry_failed_stage_restart(candidate: SchedulerCandidateLike, state: Mapping[str, Any]) -> str | None:
+    """The stage a manual-retry marker restarts at, or ``None`` for the full chain (#2600).
+
+    The failed stage is read on the scope-blind axis the restart router uses, so a
+    failure recorded on a model-less cohort master counts (the incident shape).  A
+    stage after ``forecast`` restarts there only when the candidate's OWN forecast
+    output is durable and no native rerun is forced; permanence is ignored, because
+    the marker is the operator's authority.  A failed ``forecast`` restarts at
+    ``forecast`` (the forcing witness is the caller's guard) unless the runtime
+    recorded a forcing-input failure: the witness does not detect a corrupt package,
+    so only the full chain regenerates it.  Everything else -- ``convert``,
+    ``forcing``, an unknown stage, unprovable output -- is ``None``.
+    """
+
+    failed_stage = _canonical_downstream_stage(_failed_stage(state))
+    if failed_stage == "forecast":
+        return None if _forcing_input_failure(state) else failed_stage
+    if failed_stage not in _MANUAL_RETRY_POST_FORECAST_RESTART_STAGES:
+        return None
+    if _force_native_shud_rerun(state) or not _manual_retry_own_forecast_output(candidate, state):
+        return None
+    return failed_stage
+
+
+def _forcing_input_failure(state: Mapping[str, Any]) -> bool:
+    """Whether the recorded failure is the runtime rejecting the forcing package (#2600).
+
+    ``workers/shud_runtime/runtime.py`` raises the ``FORCING_*`` family (checksum,
+    manifest, staging, empty, unit) and its ``SHUD_FORCING_*`` / ``DIRECT_GRID_*FORCING_*``
+    siblings for a package that is corrupt, empty, mismatched or unstaged.  Both the
+    current failure's own code and the broad scan are read: a stale forcing code only
+    costs the full chain, which is the pre-#2600 behavior.
+    """
+
+    for code in (_downstream_recorded_error_code(state), _state_error_code(state)):
+        text = str(code or "").upper()
+        if text.startswith("FORCING_") or "_FORCING_" in text:
+            return True
+    return False
+
+
+def _manual_retry_own_forecast_output(candidate: SchedulerCandidateLike, state: Mapping[str, Any]) -> bool:
+    """Whether the candidate's own forecast output is durable (#2600).
+
+    Its own hydro run in a durable success status, or a native-SHUD terminal-success
+    row naming its model or run.  Recorded membership is never the attribution here:
+    ``forecast`` is outside ``COHORT_MEMBER_ATTRIBUTED_STAGES``, and the forecast array
+    master's per-model task projection rows name the model.  An
+    ``incomplete``-membership row never counts, and the generic
+    ``durable_shud_output_exists`` override is deliberately not trusted here.
+    """
+
+    if _state_status(state, "hydro_status", "hydro_run_status") in DURABLE_HYDRO_SUCCESS_STATUSES:
+        return True
+    for job in _state_jobs(state):
+        if job.get("cohort_membership") == "incomplete":
+            continue
+        if str(job.get("stage") or job.get("job_type") or "") not in NATIVE_SHUD_STAGE_ALIASES:
+            continue
+        if str(job.get("status") or "") not in TERMINAL_PIPELINE_SUCCESS_STATUSES:
+            continue
+        names_model = str(job.get("model_id") or "") == str(candidate.model_id)
+        if names_model or str(job.get("run_id") or "") == str(candidate.run_id):
+            return True
+    return False
+
+
+def _drop_manual_retry_added_restart_stage(evidence: Mapping[str, Any], *, reason: str) -> dict[str, Any]:
+    """The manual-retry evidence without the restart stage #2600 added: the full chain.
+
+    ``reason`` is the guard verdict that refused the stage; it is kept as audit
+    evidence and has no consumer that reads it as a restart point.
+    """
+
+    dropped = {key: value for key, value in evidence.items() if key not in _MANUAL_RETRY_ADDED_RESTART_KEYS}
+    dropped["manual_retry_restart_stage_dropped"] = {
+        "restart_stage": evidence.get("restart_stage"),
+        "reason": reason,
+    }
+    return dropped
