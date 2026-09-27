@@ -88,7 +88,7 @@ The comment-unproven and unsuccessful-fallback outcome family deliberately SHALL
 #### Scenario: an unknown submit-line key keeps count-only semantics
 
 - **WHEN** at least one eligible in-window master has a missing, empty, key-less, internally inconsistent, or multi-valued `SubmitLine`, including a window holding one known-foreign-key master and one unknown-key master
-- **THEN** no master is excluded, classification, durable claimant exclusivity, and the durable held tuple behave exactly as before this change, and pass evidence only gains `fallback_match_basis=name_window_count`, so two eligible masters stay `ambiguous_fallback_match` and an overlapping reserved sibling still blocks the bind
+- **THEN** no master is excluded, classification (except that a missing or unparsable Submit on any owned forecast-family row now yields transient `fallback_submit_unparsable` because every eligible row is read), durable claimant exclusivity, and the durable held tuple behave as before this change, and pass evidence only gains `fallback_match_basis=name_window_count`, so two eligible masters stay `ambiguous_fallback_match` and an overlapping reserved sibling still blocks the bind
 
 #### Scenario: the typed commit refuses a key that is not the reservation's own
 
