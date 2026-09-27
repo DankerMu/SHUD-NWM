@@ -49,7 +49,7 @@ Required evidence:
 - inconsistent master: foreign-key row first, then equal-key or key-less row of the same master -> master key unknown -> count-only.
 - any eligible master with 8-field row / empty / key-less / multi-valued / inconsistent SubmitLine -> pre-change outcome and claimant blocking.
 - commit with foreign key -> refusal, zero journal bytes.
-- bound COMPLETED 0925-shaped cohort with members at `hydro_run=created` -> next inflight pass projects terminal; `has_active_pipeline` False for members, member `hydro_run` leaves `created`, and the scheduler state decision for those models (`scheduler_state_decision` / candidate build) is no longer `skip_active`/`active_duplicate_pipeline`; no sbatch issued.
+- bound COMPLETED 0925-shaped cohort with members at `hydro_run=created` -> next inflight pass projects terminal; `has_active_pipeline` False for members, member `hydro_run` leaves `created`, and the scheduler state decision for those models (`scheduler_state_decision` / candidate build) is no longer `skip_active`/`active_duplicate_pipeline`; no forecast resubmission (`native_shud_resubmitted=False`).
 - comment-storing cluster command/format unchanged.
 - forecast `submit_result_ambiguous` durable row keeps `error_code=None`; the event carries the real gateway code (`SLURM_TIMEOUT`) as `origin_error_code`; the released identity-blocked reservation is not auto-retriable.
 - a classified window whose commit-time scan quarantines (`pipeline-jobs/` residue) still reports `fallback_match_basis`.
@@ -73,7 +73,7 @@ Expected side effect (accepted): ifs 0911 master projects `partially_failed` (2 
 ## Review focus
 
 1. Exclusion happens before the two-master cap and cannot turn a genuine double submission into a bind.
-2. Unknown-key paths keep classification, claimant rule, and the durable held tuple byte-identical to pre-change; pass evidence only gains `fallback_match_basis=name_window_count`.
+2. Unknown-key paths keep the claimant rule and the durable held tuple byte-identical to pre-change and classification identical except the documented malformed-Submit case (no parser early stop); pass evidence only gains `fallback_match_basis=name_window_count`.
 3. The claimant-filter change is gated by a key the journal re-verifies against the committing row.
 4. No durable token/enum change; rollback to the previous checkout still reads bound rows.
 5. Comment-storing lane untouched.
