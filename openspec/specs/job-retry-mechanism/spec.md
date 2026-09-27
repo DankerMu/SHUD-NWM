@@ -3058,9 +3058,9 @@ Every scheduler retry decision whose budget reads the `forecast` stage-scoped at
 
 The file journal's query entrypoints synthesise one row for a refused read, marked by `file_journal.status == "blocked"` and carrying the fault's `reason` and `field`. That row SHALL remain PRESENT and non-terminal so the duplicate-submission and active-cycle guards keep refusing, and its shape — field set, `job_id` defaults, marker keys, reason token, status literal — SHALL NOT change.
 
-Four retry-lane entry consumers SHALL identify that row by the `file_journal.status == "blocked"` marker — never by comparing `job_id`, and never by the status literal where the marker is available — and SHALL take exactly one of two treatments: refuse with the lane's stable classified error carrying the journal's `reason` and `field`, or return the lane's "no evidence" value while logging that `reason` and `field`. None of them SHALL translate the row into a claim about the run or the job — neither "this run has nothing to retry", nor a retry/permanent-failure classification, nor an identity fault.
+Five retry-lane consumers SHALL identify that row by the `file_journal.status == "blocked"` marker — never by comparing `job_id`, and never by the status literal where the marker is available — and SHALL take exactly one of two treatments: refuse with the lane's stable classified error carrying the journal's `reason` and `field`, or return the lane's "no evidence" value while logging that `reason` and `field`. None of them SHALL translate the row into a claim about the run or the job — neither "this run has nothing to retry", nor a retry/permanent-failure classification, nor an identity fault.
 
-The four are: the manual-retry source selector and the chain stage-result retry classifier, which SHALL refuse — the latter with a classified `FILE_JOURNAL_READ_BLOCKED` error rather than by returning no decision — and the two runtime-root provenance readers, which SHALL degrade to their empty result with a warning. Downstream consumers reached only through those entries keep their existing indirect fail-closed behaviour and are out of scope. A consumer reading a mapping that carries no `file_journal` marker SHALL treat it as a normal row. Operator entrypoints built on the manual-retry source selector SHALL report the refusal as a decidable receipt outcome rather than an uncaught error.
+The five are: the manual-retry source selector and the chain stage-result retry classifier, which SHALL refuse — the latter with a classified `FILE_JOURNAL_READ_BLOCKED` error rather than by returning no decision — and the two runtime-root provenance readers and the runtime-root walk's own same-run companion read, which SHALL degrade to their empty result with a warning. Every such degrade SHALL be counted, and the runtime-root resolution evidence SHALL carry `candidate_counts.blocked_reads` whenever the count is non-zero, so a blocked read is never byte-identical to genuinely absent provenance (evidence without a blocked read is unchanged). When any runtime-root provenance read of an attempt was blocked, runtime roots SHALL be required for that attempt whatever its job type, and no root or selector value SHALL be taken from the current environment: roots and db-free selectors SHALL resolve only from recorded provenance, while the environment's db-free policy switch (`NHMS_SCHEDULER_DB_FREE_REQUIRED`), which is a mode flag and not a root value, SHALL still make the db-free selectors required. Otherwise the attempt SHALL end with the classified `RETRY_RUNTIME_ROOTS_UNRESOLVED` outcome carrying `blocked_reads`, never a submission rooted in, or reading roots from, the current environment. Downstream consumers reached only through those entries keep their existing indirect fail-closed behaviour and are out of scope. A consumer reading a mapping that carries no `file_journal` marker SHALL treat it as a normal row. Operator entrypoints built on the manual-retry source selector SHALL report the refusal as a decidable receipt outcome rather than an uncaught error.
 
 #### Scenario: Manual-retry source selection on an unreadable by-run read
 
@@ -3101,6 +3101,26 @@ The four are: the manual-retry source selector and the chain stage-result retry 
 
 - **WHEN** the unchanged blocked row reaches the duplicate-submission guard, the active-job predicate or the auto-retry reuse predicate
 - **THEN** each SHALL return the same verdict it returns today — conflict, active, and not reusable — and the retry-id allocator SHALL be unreachable for a blocked read because the selector refuses first
+
+#### Scenario: A blocked same-run companion read is not "no companion job"
+
+- **WHEN** the runtime-root walk's same-run by-run read returns the blocked row
+- **THEN** the walk logs the journal `reason`/`field`, contributes no companion candidate, and the persisted resolution evidence carries `blocked_reads >= 1`, unlike a run that genuinely has no companion download job
+
+#### Scenario: A blocked provenance read never falls back to the environment root
+
+- **WHEN** a provenance read of a manual retry of any job type (download or not, db-free-required or not) is blocked, no recorded candidate resolves, and the current-environment candidate would be complete
+- **THEN** no submission is made with the environment root, the attempt ends with `RETRY_RUNTIME_ROOTS_UNRESOLVED`, and its evidence carries `blocked_reads >= 1`
+
+#### Scenario: Genuinely absent provenance keeps the environment fallback
+
+- **WHEN** no provenance read was blocked and the job simply has no submission event
+- **THEN** the environment candidate is used exactly as before and the evidence carries no `blocked_reads` key
+
+#### Scenario: The db-free policy still binds under a blocked read
+
+- **WHEN** a provenance read is blocked, the environment requires db-free execution, and the only recorded candidate carries complete roots but no db-free selector
+- **THEN** no submission is made and the attempt ends with `RETRY_RUNTIME_ROOTS_UNRESOLVED` carrying `blocked_reads`
 
 ### Requirement: A held reservation SHALL block the candidate-state retry decision
 
