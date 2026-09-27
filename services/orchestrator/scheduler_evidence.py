@@ -80,15 +80,18 @@ _OPTIONAL_MINIMAL_BOUNDED_EVIDENCE_FIELDS = (
 )
 _DROPPABLE_BOUNDED_EVIDENCE_FIELDS = (
     "model_discovery",
-    "source_cycles",
     "candidates",
     "blocked_candidates",
     "skipped_candidates",
+    # #2563: since #2402 ``source_cycles`` holds only the capped breaker-released
+    # projection -- the ONLY evidence that no other cycle was released -- so it
+    # is shed after the unbounded candidate details, not before them.
+    "source_cycles",
     "restart_reconcile",
     # #2570: APPENDED last on purpose -- no pre-existing field's shed position
     # moves.  The failure-cause projection is the diagnostic floor: the executor
     # writes the crash site only into the artifact, so it is shed after model
-    # discovery, the source cycles, the candidate lists and the reconcile block.
+    # discovery, the candidate lists, the source cycles and the reconcile block.
     "model_run_failures",
 )
 _BOUNDED_CANDIDATE_LIST_FIELDS = (

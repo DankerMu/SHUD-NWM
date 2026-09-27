@@ -34,6 +34,7 @@ from packages.common.safe_fs import (
     unlink_no_follow,
     unlink_no_follow_durable,
 )
+from packages.common.safe_fs_lock import open_lock_file_no_follow
 from packages.common.slurm_env import secret_manifest_value_reason
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator import chain_repository_state
@@ -11053,12 +11054,7 @@ class FileOrchestrationJournalRepository:
                 lock_dir,
                 os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
             )
-            lock_fd = os.open(
-                lock_path.name,
-                os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
-                0o666,
-                dir_fd=parent_fd,
-            )
+            lock_fd = open_lock_file_no_follow(lock_path.name, dir_fd=parent_fd, mode=0o666)
             lock_stat = os.fstat(lock_fd)
             if not stat.S_ISREG(lock_stat.st_mode):
                 raise SafeFilesystemError(f"Cycle lock target must be a regular file: {lock_path}")

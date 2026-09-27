@@ -1402,6 +1402,9 @@ ORCHESTRATOR_CLI_IMPORTER_TESTS: tuple[str, ...] = (
     "tests/test_cli_publish_qdown.py",
     "tests/test_orchestrator_demote_cli_security.py",
     "tests/test_retention_frontier.py",
+    # #2596: drives `cleanup` through both entrypoints for an unexpandable
+    # `OBJECT_STORE_ROOT` (structured result, exit 0, no traceback). ~0.3s.
+    "tests/test_retention_unexpandable_roots.py",
     "tests/test_scheduler_backfill.py",
     # #1943/#1944: both new journal suites top-level-import `cli` and drive it
     # through BOTH entrypoints (`_click_main`/`_argparse_main`) — the root
@@ -2146,6 +2149,8 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_retention_extra_roots.py",
             "tests/test_retention_pipeline_frontier.py",
             "tests/test_retention_root_admission.py",
+            # #2596: a derived importer too (EXTRA_CONFIG/NOW/_pass_scheduler).
+            "tests/test_retention_unexpandable_roots.py",
         ),
     ),
     PathTestRule(
@@ -2624,6 +2629,31 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             *C4_PRODUCTION_ACCEPTANCE_TESTS,
         ),
         stop_on_match=True,
+    ),
+    PathTestRule(
+        # #2540: the shared lock-file opener. Its own contract suite plus the
+        # suites of its three callers -- the journal cycle lock (the macOS
+        # first-creation race reproducer and the journal suite), the provider
+        # destination lock, and the safe_fs layer it belongs to. The lease
+        # guard site is covered by the contract suite's binding pin and Barrier
+        # test. DB-free.
+        "packages/common/safe_fs_lock.py",
+        (
+            "tests/test_safe_fs_lock.py",
+            "tests/test_forcing_submit_ambiguity.py",
+            "tests/test_file_orchestration_journal.py",
+            "tests/test_scheduler_refresh_provider_atomic.py",
+            "tests/test_safe_fs.py",
+        ),
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        # #2540: the scheduler lease guard file opens through the shared
+        # lock-file opener; the contract suite pins that binding and runs the
+        # first-creation Barrier race against this module. Additive (no stop):
+        # the broad orchestrator directory rule still applies. Sub-second.
+        "services/orchestrator/scheduler_lease.py",
+        ("tests/test_safe_fs_lock.py",),
     ),
     # C4 reads pinned evidence through evidence_io's descriptor-bound
     # byte/JSON identity primitives. This exact owner has no same-name suite,
@@ -3313,6 +3343,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # orphan rule); scheduler_runtime.py rides the stop rule above.
             # DB-free, 15 tests in ~1s.
             "tests/test_operator_action_reservation_lease.py",
+            # #2564: the heartbeat-mtime x evidence-retention cross suite, on the
+            # same footing -- module-scope-import-free, so this directory rule is
+            # its route for scheduler_evidence.py (the reservation writer),
+            # scheduler_lease.py (the heartbeat touch) and
+            # operator_action_listing.py (the reader). DB-free, 3 tests in ~0.3s.
+            "tests/test_scheduler_evidence_retention_reservation_mtime.py",
+            # #2582: the looping-workspace-root refusal suite for
+            # scheduler_lease.py / scheduler_evidence.py, module-scope-import-free
+            # for the same reason. DB-free, 8 tests in ~0.3s.
+            "tests/test_scheduler_lease_loop_root.py",
             # #2442: the writer-bound status closure pin. It reads five writer
             # sources as TEXT (it must not import them), so it has no importer
             # derivation at all: this directory rule is its route for
@@ -3374,6 +3414,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_retention_frontier.py",
             "tests/test_retention_pipeline_frontier.py",
             "tests/test_retention_root_admission.py",
+            # #2596: the unexpandable-root suite top-level-imports cli.py,
+            # retention.py and `services.orchestrator` itself; all three importer
+            # pairs close here. DB-free, 9 tests in ~0.3s.
+            "tests/test_retention_unexpandable_roots.py",
             "tests/test_retry.py",
             "tests/test_retry_cancel_consistency.py",
             "tests/test_run_identity.py",
@@ -5827,6 +5871,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_scheduler_journal_retention_planning.py",
             "tests/test_scheduler_journal_retention_archive.py",
+        ),
+    ),
+    PathTestRule(
+        # #2564: the node-22 evidence retention policy has no same-name suite;
+        # route its own suite and the heartbeat-mtime x retention cross suite,
+        # which runs this script's `run_retention` on the reader's root.
+        "scripts/node22_scheduler_evidence_retention.py",
+        (
+            "tests/test_scheduler_evidence_retention.py",
+            "tests/test_scheduler_evidence_retention_reservation_mtime.py",
         ),
     ),
     PathTestRule(
