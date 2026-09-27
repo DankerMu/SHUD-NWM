@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from packages.common.source_identity import normalize_source_id
+from services.orchestrator.persistence import RESERVED_STATUS
 from services.orchestrator.production_contract import (
     PRODUCTION_EVIDENCE_CORRELATION_FIELDS,
     PRODUCTION_IDENTITY_FIELDS,
@@ -847,6 +848,24 @@ def _state_active_jobs(state: Mapping[str, Any]) -> list[dict[str, Any]]:
         if _job_has_real_slurm_binding(job) and status in ACTIVE_PIPELINE_STATUSES:
             active.append(_job_state_evidence(job))
     return active
+
+def _state_held_reservations(state: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Held accepted-submit reservations visible in the candidate state (#2666).
+
+    A row is held when its status is ``reserved`` and it has no real Slurm
+    binding: its ``sbatch`` result is ambiguous and Slurm may already have
+    accepted it.  Attribution is presence in the provider-filtered state (the
+    file journal already drops ``non_member`` cohort rows); every stage and every
+    remaining ``cohort_membership`` annotation counts.  ``_state_jobs`` bounds the
+    scan at the state's job limit.
+    """
+
+    held: list[dict[str, Any]] = []
+    for job in _state_jobs(state):
+        status = str(job.get("status") or job.get("pipeline_status") or job.get("job_status") or "")
+        if status == RESERVED_STATUS and not _job_has_real_slurm_binding(job):
+            held.append(_job_state_evidence(job))
+    return held
 
 def _job_has_real_slurm_binding(job: Mapping[str, Any]) -> bool:
     slurm_job_id = str(job.get("slurm_job_id") or "")

@@ -779,8 +779,9 @@ restart reconcile（`reconcile_inflight_jobs`，只读 sacct、从不提交）�
 
 ## `active_duplicate_pipeline` + reserved-held forecast master + `ambiguous_fallback_match`（#2655）
 
-不是 blocked reason，是 skip reason（`decision: skip_active`，`active_status` 通常是成员 hydro_run 的 `created`：
-master 停在 `reserved`、从未走到终态，成员就一直被判在飞），也**不在** `list-operator-actions` 的待办集合里，所以只能从症状反查：
+不是 blocked reason，是 skip reason（`decision: skip_active`；自 #2666 起 `active_status: reserved` 并带
+`held_reservations`，见下一节。此前 `active_status` 通常是成员 hydro_run 的 `created`：master 停在 `reserved`、从未走到终态，
+成员就一直被判在飞），也**不在** `list-operator-actions` 的待办集合里，所以只能从症状反查：
 
 - 同一 source/cycle 的整批成员每趟都 `skip_active` / `active_duplicate_pipeline`，后一 cycle
   `backfill_deferred_waiting_for_prior_cycle`，常见为 gfs 与 IFS 同时冻结；
@@ -813,6 +814,27 @@ cluster」与 Disposition 第 2 条（completed but unbound）；node-22 上的�
 [`node22-control-plane-manual-recovery.md`](node22-control-plane-manual-recovery.md)「`active_duplicate_pipeline` +
 reserved-held forecast master」。作业已完成或仍在跑时**不要** `demote-reserved-job`（会重投整批 cohort），也不要
 打 manual-retry marker。
+
+## `active_duplicate_pipeline` + `active_status: reserved`：held accepted-submit reservation（#2666）
+
+候选状态里只要有一行 `status=reserved` 且没有真实 Slurm 绑定（`slurm_job_id` 为空或 `local`、无 `array_task_id`），
+候选就判 skip `active_duplicate_pipeline`，evidence 为 `decision: skip_active`、`active_status: reserved`、
+`held_reservations[]`（按 `_job_state_evidence` 投影，最多 `candidate_state_job_limit` 行）、`replacement_submitted: false`。
+含义：这次提交结果不明确（网关超时，或 pass 在 reserve 之后、bind 之前死掉），Slurm 可能已经接收并在跑；再提交就会让同一批
+run 在同一 run 目录里跑两遍（#2666：IFS 0925 12Z 的 57553 / 57637，basin 18 被撞成 `OUTPUT_ROW_COUNT_MISMATCH`）。
+
+- 在所有 resume / retry / terminal / failure / manual-retry 分支之前判定：forcing 已成功、hydro 是 `created`、cycle 里有或没有
+  失败行、`terminal_hydro_success` 形态都一样；不看 held 行的 stage（forecast / state_save_qc / parse …），也不看它的
+  `cohort_membership`（`member` / `unwitnessed` / `incomplete` 都挡；`non_member` 兄弟 cohort 行已被 journal 去掉，不挡），
+  更不看 reconcile 给它的 reason class（瞬时 `query_unavailable`、`comment_accounting_unproven`、`ambiguous_fallback_match`
+  一样挡）。
+- 冻结面：该 cycle 的完成判定读作 `gap`，后一 cycle / backfill 等它；retention frontier 把它当在飞。held 期间本应
+  `permanent_failure_guard` / `missing_upstream_artifact` / `cohort_membership_unprovable` 的候选也读作 skip，
+  `list-operator-actions` 暂不列出。
+- **出口只有 restart reconcile**：绑定（`matched_bound`，之后按 inflight 投影照常续跑，例如 forecast 已成功就从
+  `state_save_qc` 续）、`demote-reserved-job`（仅在按 [`failed-basin-retry.md`](failed-basin-retry.md) Disposition
+  确认作业已死之后）、或 identity-blocked 释放（`reservation_lost` / `identity_mismatch_released`）。**manual-retry marker
+  不是出口**：marker 不会越过 held 行，打了也只是等 reconcile。一趟大约只绑一行（见上一节），多行 held 时逐趟解冻，属预期。
 
 ## 相关文档
 

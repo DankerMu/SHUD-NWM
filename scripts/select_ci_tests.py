@@ -1385,6 +1385,11 @@ SCHEDULER_IMPORTER_TESTS: tuple[str, ...] = (
     # `services.orchestrator.scheduler` for the facade's execution-unit run ids
     # and reads decisions at its `_candidate_state_decision` seam. DB-free, ~3s.
     "tests/test_convert_cohort_members.py",
+    # #2666: the held-reservation block suite top-level-imports
+    # `services.orchestrator.scheduler`, takes candidate and cohort run ids from the
+    # facade and drives `_candidate_state_decision` plus the planner's
+    # `_build_candidates` / `_execute_candidates`. DB-free, 19 tests in ~7s.
+    "tests/test_scheduler_held_reservation_block.py",
 )
 
 ORCHESTRATOR_CLI_IMPORTER_TESTS: tuple[str, ...] = (
@@ -1462,6 +1467,11 @@ FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     "tests/test_chain_stage_poll_isolation.py",
     "tests/test_cohort_membership_attribution.py",
     "tests/test_forecast_cohort_projection_restart_stage.py",
+    # #2666: the held-reservation block suite writes the journal through the real
+    # stage loop and this repository's reserve / accepted-submit / release writers
+    # and reads every decision back through `candidate_state` (the E13b-stripped
+    # held master is only visible there). DB-free, ~7s.
+    "tests/test_scheduler_held_reservation_block.py",
     # #1953: the whole-tree budget contract is ABOUT this module — the read
     # lane its `_RecordBudget` tags, and the synthetic blocked row the five
     # query entrypoints return when the budget refuses. Its static pins read
@@ -3120,6 +3130,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_chain_stage_poll_isolation.py",
             "tests/test_cohort_membership_attribution.py",
             "tests/test_forecast_cohort_projection_restart_stage.py",
+            # #2666: the held-reservation block suite. Its subject is
+            # scheduler_state_decision.py / scheduler_state_rows.py; its top-level
+            # importer gaps on accepted_submit_identity.py, chain_stages.py and
+            # scheduler_state_types.py close on this directory rule. The
+            # scheduler.py / file_orchestration_journal.py pairs ride their
+            # stop-rule tuples. DB-free, 19 tests in ~7s.
+            "tests/test_scheduler_held_reservation_block.py",
             "tests/test_cli_cleanup_frontier.py",
             "tests/test_cli_publish_qdown.py",
             "tests/test_orchestrator_demote_cli_security.py",
