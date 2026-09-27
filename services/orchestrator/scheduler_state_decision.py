@@ -37,6 +37,7 @@ from services.orchestrator.scheduler_state_rows import (
     _state_active_jobs,
     _state_events,
     _state_has_only_unsubmitted_auto_retry_placeholders,
+    _state_held_reservations,
     _state_jobs,
     _state_output_uri,
     _state_status,
@@ -128,6 +129,26 @@ def _candidate_state_decision_evaluated(
                 **evidence,
                 "decision": "skip_active",
                 "active_slurm_jobs": active_jobs,
+                "replacement_submitted": False,
+            },
+        )
+    # #2666: a held reservation (``reserved``, no Slurm binding: the submit was
+    # ambiguous and Slurm may already run it) blocks every resume/retry/failure
+    # branch below, before any of them can null the hydro placeholder standing in
+    # for it.  Read from the provider-filtered ``state``: the ordinary decision
+    # view strips the model-less cohort master rows (E13b), which is exactly
+    # where the held forecast master lives.  Only restart reconcile (bind,
+    # demote, identity-blocked release) clears it.
+    held_reservations = _state_held_reservations(state)
+    if held_reservations:
+        return CandidateStateDecision(
+            "skip",
+            "active_duplicate_pipeline",
+            {
+                **evidence,
+                "decision": "skip_active",
+                "active_status": "reserved",
+                "held_reservations": held_reservations,
                 "replacement_submitted": False,
             },
         )

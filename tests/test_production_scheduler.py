@@ -50241,6 +50241,7 @@ def test_identity_blocked_release_unwedges_pipeline_already_active(
     streaks: list[Any] = []
     pass_statuses: list[str] = []
     wedge_error_codes: list[str] = []
+    held_skips: list[list[tuple[Any, Any, Any]]] = []
     released_outcome: dict[str, Any] | None = None
     for _ in range(3):
         result = scheduler().run_once()
@@ -50259,6 +50260,16 @@ def test_identity_blocked_release_unwedges_pipeline_already_active(
             for item in result.evidence["model_run_evidence"]
             if item.get("status") == "submission_failed"
         )
+        held_skips.append(
+            [
+                (
+                    skip.get("reason"),
+                    (skip.get("state_evidence") or {}).get("active_status"),
+                    [row.get("job_id") for row in (skip.get("state_evidence") or {}).get("held_reservations") or []],
+                )
+                for skip in result.evidence.get("skipped_candidates") or []
+            ]
+        )
 
     assert actions == [
         "identity_mismatch_blocked",
@@ -50274,11 +50285,16 @@ def test_identity_blocked_release_unwedges_pipeline_already_active(
     assert released_outcome["status"] == "reservation_lost"
 
     # Pre-release passes really are wedged; the release pass reconciles first and
-    # the same pass submits.
-    assert pass_statuses[:2] == ["submission_failed", "submission_failed"]
+    # the same pass submits.  #2666: the held reservation now stops the member at
+    # the planner (``active_duplicate_pipeline`` / ``active_status: reserved``), so
+    # the pre-release passes never reach the chain's ``PIPELINE_ALREADY_ACTIVE``
+    # backstop and attempt no submission at all.
+    held_skip = ("active_duplicate_pipeline", "reserved", [str(record["job_id"])])
+    assert held_skips[:2] == [[held_skip], [held_skip]]
+    assert pass_statuses[:2] == ["restart_reconciled", "restart_reconciled"]
+    assert wedge_error_codes == []
+    assert held_skips[2] == []
     assert pass_statuses[2] == "submitted"
-    assert set(wedge_error_codes) == {"PIPELINE_ALREADY_ACTIVE"}
-    assert len(wedge_error_codes) == 2
 
     released = repository.get_pipeline_job(str(record["job_id"]))
     assert released["status"] == "reservation_lost"

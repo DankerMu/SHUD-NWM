@@ -1441,6 +1441,10 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         # module-scope-import-free, so no importer derivation reaches it).
         "tests/test_scheduler_evidence_decidability.py",
         "tests/test_scheduler_generation.py",
+        # #2666: the held-reservation block suite rides the broad orchestrator
+        # directory rule (accepted_submit_identity.py, chain_stages.py and
+        # scheduler_state_types.py importer gaps). ~7s.
+        "tests/test_scheduler_held_reservation_block.py",
         "tests/test_scheduler_journal_retention_archive.py",
         "tests/test_scheduler_journal_retention_planning.py",
         # #1943/#1944: the two journal suites ride the broad orchestrator
