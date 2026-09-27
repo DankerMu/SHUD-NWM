@@ -206,3 +206,75 @@ def test_concurrent_first_openers_of_the_lease_guard_file_both_get_the_same_file
             assert len(identities) == 2 and identities[0] == identities[1]
     finally:
         os.close(dir_fd)
+
+
+# ---------------------------------------------------------------------------
+# Binding pins: each of the three call sites opens its lock through the shared
+# opener with its own mode.  The race itself only shows on macOS, so without
+# these a site reverted to a plain ``os.open(..., O_CREAT)`` stays green on Linux
+# CI.  The recorder delegates to the real opener, so every site still runs its
+# regular-file / identity checks on a real descriptor.
+# ---------------------------------------------------------------------------
+
+
+def _record_lock_opens(monkeypatch: pytest.MonkeyPatch, module: object) -> list[tuple[str, int]]:
+    calls: list[tuple[str, int]] = []
+
+    def recording_open(name: str, *, dir_fd: int, mode: int) -> int:
+        calls.append((name, mode))
+        return open_lock_file_no_follow(name, dir_fd=dir_fd, mode=mode)
+
+    monkeypatch.setattr(module, "open_lock_file_no_follow", recording_open)
+    return calls
+
+
+def test_the_journal_cycle_lock_opens_through_the_shared_opener(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import UTC, datetime
+
+    from services.orchestrator import file_orchestration_journal
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    journal_root = Path(os.path.realpath(tmp_path)) / "journal"
+    journal_root.mkdir()
+    calls = _record_lock_opens(monkeypatch, file_orchestration_journal)
+    repository = FileOrchestrationJournalRepository(str(journal_root))
+
+    with repository._cycle_file_lock_unlocked(
+        source_id="gfs", cycle_time=datetime(2026, 5, 1, 0, tzinfo=UTC)
+    ) as acquired:
+        assert acquired is True
+
+    assert calls == [("2026050100.lock", 0o666)]
+
+
+def test_the_scheduler_lease_guard_opens_through_the_shared_opener(
+    lock_dir: tuple[Path, int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from services.orchestrator import scheduler_lease
+
+    _directory, dir_fd = lock_dir
+    calls = _record_lock_opens(monkeypatch, scheduler_lease)
+
+    fd = scheduler_lease._open_regular_guard_file("production_scheduler.lock.guard", dir_fd=dir_fd)
+    os.close(fd)
+
+    assert calls == [("production_scheduler.lock.guard", 0o644)]
+
+
+def test_the_provider_destination_lock_opens_through_the_shared_opener(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from packages.common import provider_atomic
+
+    root = Path(os.path.realpath(tmp_path)) / "provider"
+    root.mkdir(mode=0o755)
+    os.chmod(root, 0o755)
+    destination = root / "manifest.json"
+    calls = _record_lock_opens(monkeypatch, provider_atomic)
+
+    with provider_atomic._provider_destination_file_lock(destination, containment_root=root):
+        pass
+
+    assert calls == [(".manifest.json.lock", 0o600)]

@@ -23,7 +23,9 @@ The scheduler lease guard file, the provider destination lock, and the file-jour
 - **WHEN** the lock name is a symlink or a directory
 - **THEN** the opener fails with the same errno the callers already map, and it never follows the symlink
 
-#### Scenario: The journal cycle lock is acquired by concurrent first reservers
+#### Scenario: A concurrent first acquisition of the journal cycle lock never fails the write
 
-- **WHEN** two journal instances reserve disjoint work in the same cycle for the first time, concurrently
-- **THEN** both acquire the cycle lock in turn, and neither reports `FILE_JOURNAL_WRITE_FAILED`
+- **GIVEN** a cycle whose lock file does not yet exist
+- **WHEN** two journal instances reserve in that cycle for the first time, concurrently
+- **THEN** each acquires the cycle lock in turn and the reservation outcome is decided by the journal itself (one admitted, one blocked for overlapping keys)
+- **AND** neither reports `FILE_JOURNAL_WRITE_FAILED`

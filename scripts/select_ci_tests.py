@@ -2630,6 +2630,31 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
         stop_on_match=True,
     ),
+    PathTestRule(
+        # #2540: the shared lock-file opener. Its own contract suite plus the
+        # suites of its three callers -- the journal cycle lock (the macOS
+        # first-creation race reproducer and the journal suite), the provider
+        # destination lock, and the safe_fs layer it belongs to. The lease
+        # guard site is covered by the contract suite's binding pin and Barrier
+        # test. DB-free.
+        "packages/common/safe_fs_lock.py",
+        (
+            "tests/test_safe_fs_lock.py",
+            "tests/test_forcing_submit_ambiguity.py",
+            "tests/test_file_orchestration_journal.py",
+            "tests/test_scheduler_refresh_provider_atomic.py",
+            "tests/test_safe_fs.py",
+        ),
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        # #2540: the scheduler lease guard file opens through the shared
+        # lock-file opener; the contract suite pins that binding and runs the
+        # first-creation Barrier race against this module. Additive (no stop):
+        # the broad orchestrator directory rule still applies. Sub-second.
+        "services/orchestrator/scheduler_lease.py",
+        ("tests/test_safe_fs_lock.py",),
+    ),
     # C4 reads pinned evidence through evidence_io's descriptor-bound
     # byte/JSON identity primitives. This exact owner has no same-name suite,
     # so route the surviving C4 acceptance partitions without pulling retired
@@ -5846,6 +5871,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_scheduler_journal_retention_planning.py",
             "tests/test_scheduler_journal_retention_archive.py",
+        ),
+    ),
+    PathTestRule(
+        # #2564: the node-22 evidence retention policy has no same-name suite;
+        # route its own suite and the heartbeat-mtime x retention cross suite,
+        # which runs this script's `run_retention` on the reader's root.
+        "scripts/node22_scheduler_evidence_retention.py",
+        (
+            "tests/test_scheduler_evidence_retention.py",
+            "tests/test_scheduler_evidence_retention_reservation_mtime.py",
         ),
     ),
     PathTestRule(

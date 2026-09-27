@@ -105,6 +105,9 @@ Fixture level: **standard**. Five small, independent defects in the scheduler's 
 ## Must-preserve
 
 - Linux lock acquisition is behaviorally identical: same modes, same refusals for a symlink, a directory, or a non-regular file, same flock semantics.
+  - **Deviation (review round 1), code unchanged: Linux `fs.protected_regular`.** When the lock parent is a sticky, world- or group-writable directory and the existing lock file is owned by another uid, the old `O_CREAT` open failed with `EACCES`; the new `O_EXCL` then plain open succeeds. This is the only departure from "Linux identical", and it is unreachable in practice: the journal `.locks/` directories and the scheduler lock parents are created at `0o755`, and the provider site refuses a parent not owned by the euid or carrying `0o022` bits before it opens the lock.
+  - The lease guard site also gains `O_CLOEXEC` (the other two sites already had it); `subprocess` defaults to `close_fds=True`, so no observable change.
+- **Pre-existing diagnostic (review round 1), code unchanged.** A non-directory workspace root reaches the lease as `unsafe_lock_parent_directory` and surfaces to the pass as `lock_contended` / `file_journal_scheduler_lease_contended`. That stays fail-closed but reads misleadingly. This change widens which inputs reach that path (a looping or regular-file root on every interpreter); it does not create it.
 - Root admission for valid, blank and relative roots is byte-identical: same tokens, same skip shape.
 - A valid symlinked workspace root is still accepted.
 - The bounded evidence markers keep their semantics: `dropped` is never downgraded.

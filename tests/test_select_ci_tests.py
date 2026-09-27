@@ -1197,6 +1197,30 @@ def test_select_tests_routes_scheduler_journal_owner_modules_to_split_contract_s
     assert expected <= set(script_selected)
 
 
+def test_select_tests_routes_the_shared_lock_opener_and_its_callers() -> None:
+    # #2540/#2564: the shared lock-file opener runs its contract suite plus the
+    # suites of its callers; the lease module adds the contract suite (binding
+    # pin + Barrier race); the evidence retention script routes its own suite and
+    # the heartbeat-mtime cross suite.
+    opener = set(select_tests(["packages/common/safe_fs_lock.py"], repo_root=Path(".")))
+    assert {
+        "tests/test_safe_fs_lock.py",
+        "tests/test_forcing_submit_ambiguity.py",
+        "tests/test_file_orchestration_journal.py",
+        "tests/test_scheduler_refresh_provider_atomic.py",
+        "tests/test_safe_fs.py",
+    } <= opener
+    lease = set(select_tests(["services/orchestrator/scheduler_lease.py"], repo_root=Path(".")))
+    assert "tests/test_safe_fs_lock.py" in lease
+    evidence_retention = set(
+        select_tests(["scripts/node22_scheduler_evidence_retention.py"], repo_root=Path("."))
+    )
+    assert {
+        "tests/test_scheduler_evidence_retention.py",
+        "tests/test_scheduler_evidence_retention_reservation_mtime.py",
+    } <= evidence_retention
+
+
 def test_select_tests_maps_known_slow_manifest_test_file_changes_with_surface_changes_to_focused_nodes() -> None:
     selected = select_tests(
         ["services/orchestrator/chain_types.py", "tests/test_orchestration_chain.py"],
