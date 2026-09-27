@@ -2195,6 +2195,9 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             # than riding the closure guard as a rule-gap exclusion.
             "tests/test_gateway_reconcile_binding_provenance.py",
             "tests/test_gateway_reconcile_claimant_exclusivity.py",
+            # #2655: the SubmitLine exact-key fallback-bind suite top-level-imports
+            # this helper the same way; 20 tests in ~1.5s, DB-free.
+            "tests/test_gateway_reconcile_submitline_exact.py",
             # The five ultimate consumers via the demote helper (see above).
             "tests/test_orchestrator_demote_cli_security.py",
             "tests/test_orchestrator_demote_core_cas.py",
@@ -3090,6 +3093,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # sub-second fixtures beside the gateway-reconcile lane they join.
             "tests/test_gateway_reconcile_binding_provenance.py",
             "tests/test_gateway_reconcile_claimant_exclusivity.py",
+            # #2655: the SubmitLine exact-key fallback-bind suite top-level-imports
+            # accepted_submit_identity.py like its claimant-exclusivity sibling.
+            # DB-free, 20 tests in ~1.5s.
+            "tests/test_gateway_reconcile_submitline_exact.py",
             "tests/test_forcing_submit_ambiguity.py",
             # #2584: the ambiguous state_save_qc submit suite. Its subject is the
             # submit-failure branch of chain_stage_execution.py and the
