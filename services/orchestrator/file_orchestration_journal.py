@@ -95,6 +95,7 @@ from services.orchestrator.forcing_submit_identity import (
     overlapping_unresolved_forcing_job,
 )
 from services.orchestrator.public_evidence import _public_evidence, _public_message
+from services.orchestrator.reservation import SLURM_COMMENT_PREFIX
 from services.orchestrator.retry import (
     _DB_FREE_REQUIRED_SELECTOR_FIELDS,
     _DB_FREE_RUNTIME_FIELDS,
@@ -3512,12 +3513,21 @@ class FileOrchestrationJournalRepository:
         error_code: str | None = None,
         error_message: str | None = None,
         log_uri: str | None = None,
+        fallback_submitline_key: str | None = None,
     ) -> AcceptedSubmitCommitResult:
         """Bind and transition exactly one still-current reservation attempt.
 
         The attempt check, reserved-state check, unbound check, Slurm id bind,
         and complete accepted-submit evidence transition all happen under the
         same cycle lock and in one durable journal replacement.
+
+        ``fallback_submitline_key`` (#2655) is the name-window fallback
+        candidate's proven ``SubmitLine`` comment. It is legal only on a
+        name-window ``matched_bound`` transition; a key that is not the
+        committing row's own ``nhms_idem:<idempotency_key>`` comment is
+        refused (``identity_mismatch_blocked``) with zero journal bytes. A
+        verified key narrows durable claimants to same-key reserved siblings;
+        active-owner and same-accounting-incarnation occupancy are unchanged.
         """
 
         if not isinstance(transition, AcceptedSubmitTransition):
@@ -3550,6 +3560,11 @@ class FileOrchestrationJournalRepository:
             and transition.matched_slurm_job_id != requested_id
         ):
             raise ValueError("matched accounting id must equal the bound Slurm job id")
+        if fallback_submitline_key is not None and not (
+            transition.reconciliation_source == "slurm_name_window_unique"
+            and transition.reconciliation_decision == "matched_bound"
+        ):
+            raise ValueError("a submit-line key is only valid for a name-window fallback bind")
         if pipeline_job_id is not None:
             source_id, cycle_time = _accepted_submit_source_cycle_from_job_id(pipeline_job_id)
         else:
@@ -3576,6 +3591,13 @@ class FileOrchestrationJournalRepository:
                 or str(existing.get("idempotency_key") or "") != idempotency_key
             ):
                 return AcceptedSubmitCommitResult("stale", dict(existing))
+            if fallback_submitline_key is not None and fallback_submitline_key != (
+                f"{SLURM_COMMENT_PREFIX}{existing.get('idempotency_key') or ''}"
+            ):
+                # #2655: the proven submit-line key must be this reservation's
+                # own idempotency comment; anything else is another job.
+                # Refused before any mutation -- zero journal bytes.
+                return AcceptedSubmitCommitResult("identity_mismatch_blocked", dict(existing))
             current_id = str(existing.get("slurm_job_id") or "")
             current_attempt = max(int(existing.get("submission_attempt") or 1), 1)
             if current_attempt != max(int(expected_submission_attempt), 1):
@@ -3677,6 +3699,7 @@ class FileOrchestrationJournalRepository:
                     active_slurm_job_id=requested_id,
                     include_job_id=str(existing.get("job_id") or ""),
                     fallback_unique=fallback_unique,
+                    submitline_key=fallback_submitline_key,
                 )
                 if ambiguous:
                     # More than one current reserved-unbound forecast master
@@ -8393,8 +8416,17 @@ class FileOrchestrationJournalRepository:
         active_slurm_job_id: str,
         include_job_id: str | None = None,
         fallback_unique: bool = False,
+        submitline_key: str | None = None,
     ) -> tuple[list[dict[str, Any]], bool]:
         """Scan the reconcile inventory for occupancy and durable-claimant overlap.
+
+        #2655: with a proven ``submitline_key`` (already re-verified against the
+        committing row), a reserved-unbound sibling is a durable claimant only
+        when its own ``nhms_idem:<idempotency_key>`` comment equals the key; an
+        overlapping-window sibling with a different key provably did not submit
+        this candidate. Without a key the window-overlap rule below is
+        unchanged. Active-owner and same-incarnation occupancy never consult
+        the key.
 
         Returns ``(matching, ambiguous)``. For EVERY commit source (Fix A),
         ``matching`` lists every other ACTIVE current accepted-submit forecast
@@ -8548,6 +8580,10 @@ class FileOrchestrationJournalRepository:
             if expected_user and other_user != expected_user:
                 continue
             if expected_account and other_account != expected_account:
+                continue
+            if submitline_key is not None and submitline_key != (
+                f"{SLURM_COMMENT_PREFIX}{canonical.get('idempotency_key') or ''}"
+            ):
                 continue
             claimant_key = (
                 str(canonical.get("source_id") or ""),

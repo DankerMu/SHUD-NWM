@@ -388,13 +388,16 @@ same name-scoped fallback as the identity-blocked triage above (§ `identity_mis
 ```bash
 sacct -a --name nhms_forecast \
   --starttime <submission_attempt_started_at> --endtime now \
-  --format=JobID,JobName,State,User,Account,Submit
+  --format=JobID,JobName,State,User,Account,Submit,SubmitLine
 squeue -a --name nhms_forecast
 ```
 
 Match by submit time inside the reservation's attempt window and by user/account (the row's
 `expected_slurm_user` / `expected_slurm_account`, when `slurm_ownership_required` is set).
 `squeue` covers the still-queued/running half without the accounting propagation lag.
+`SubmitLine` still carries the sbatch argv even though `Comment` is empty: an array-task row
+(`<master>_<task>`) whose `SubmitLine` contains `--comment=nhms_idem:<idempotency_key>` is this
+reservation's own job (#2655); `.batch`/`.extern` step rows have an empty `SubmitLine`.
 
 ### Automatic unique fallback on an explicitly comment-less cluster (#1565)
 
@@ -410,7 +413,10 @@ plus non-empty `expected_slurm_user`/`expected_slurm_account` may enter the
 - One bounded `sacct --name nhms_forecast` query per reservation, from the
   immutable attempt anchor through the querier's frozen `now`, with
   `--user=<expected_slurm_user> --accounts=<expected_slurm_account>` and
-  `--format=JobID,JobName,State,ExitCode,Comment,User,Account,Submit`.
+  `--format=JobID,JobName,State,ExitCode,Comment,User,Account,Submit,SubmitLine`
+  (`SubmitLine` since #2655; parsed as the rejoined remainder of the row, and
+  requested **only** by this fallback query — the exact-comment lane keeps its
+  seven-field format).
 - Both bounds are rendered as host-local wall-clock strings (same rule as the
   exact-comment query). A timezone-less `Submit` value is interpreted in the
   host-local timezone and converted to UTC. Missing/unparsable `Submit` is
@@ -426,10 +432,38 @@ plus non-empty `expected_slurm_user`/`expected_slurm_account` may enter the
   candidate with an **empty** comment may pass both comment gates (the cluster
   never stored it); a present-but-different comment remains fatal.
 
+**SubmitLine exact key (#2655).** The scheduler submits the gfs and IFS
+forecast cohorts seconds apart, so a `now`-ended window routinely contains the
+sibling source's array too; counting masters alone would hold both
+reservations as `ambiguous_fallback_match` forever. Each eligible row's
+**submit-line key** is the single distinct `--comment=<value>` token in its
+`SubmitLine` (missing/empty line, no token, or two distinct values → no key); a
+master's key is known only when all its eligible rows agree. Classification
+then picks one **match basis**:
+
+- `submitline_exact` — every eligible master in the window has a known key.
+  Masters whose key differs from this reservation's `nhms_idem:<idempotency_key>`
+  are provably another submission and are **excluded before** the two-master
+  cap. Exactly one remaining master is the unique candidate; two or more
+  remaining masters are a genuine double submission and stay
+  `ambiguous_fallback_match`. Zero remaining is `fallback_no_match`.
+- `name_window_count` — at least one eligible master has an unknown key
+  (e.g. an older sacct without `SubmitLine`, a key-less or inconsistent line).
+  Nothing is excluded and the pre-#2655 count-only rules apply to every
+  eligible master, so a known-foreign master plus an unknown-key master is
+  still `ambiguous_fallback_match`.
+
+The key is never consulted on comment-storing or unknown-capability clusters.
+
 “Unique” means one durable claimant, not one result in one query. Exactly one durable
 reserved claimant must admit the candidate's Submit instant for that user/account,
 and no other current accepted-submit master may own the same accounting
-incarnation `(bare Slurm id, canonical Submit)`. An active same-id owner always
+incarnation `(bare Slurm id, canonical Submit)`. Under `submitline_exact` the
+durable claimants are only the reserved-unbound attempts whose own idempotency
+comment equals the candidate's key — an overlapping sibling with a different key
+is not a claimant — and the typed commit re-verifies the key against the
+committing row, refusing a foreign key with zero journal bytes (#2655). Under
+`name_window_count` every overlapping reserved attempt is a claimant, as before. An active same-id owner always
 blocks; a settled same-id row blocks only when its canonical Submit is identical,
 while a different Submit proves legitimate numeric-id reuse. Canonical cycle
 journal authority decides this check: stale, damaged, or missing flat projections
@@ -454,16 +488,50 @@ only when reclaim starts a new attempt.
 
 Only that claimant-exclusive, fully validated candidate binds — once, with
 `reconciliation_source=slurm_name_window_unique` and
-`reconciliation_decision=matched_bound`. Every other outcome is fail-closed and
-**never** binds, demotes, retries, or increments the streak:
+`reconciliation_decision=matched_bound` for **either** basis (no new durable
+token, so an older checkout still reads the bound row). Every other outcome is
+fail-closed and **never** binds, demotes, retries, or increments the streak.
+Every fallback outcome that classified at least one remaining master — including
+a successful bind — also carries the pass-evidence-only
+`fallback_match_basis` (`submitline_exact` | `name_window_count`) in
+`restart_reconcile.reserved_unbound.outcomes[]`; it is never persisted:
 
 | Outcome | Pass evidence | Row state |
 |---|---|---|
-| zero eligible masters (including only non-forecast names) | `action=fallback_no_match`, `match_count=0` | reserved/unbound |
-| two or more query masters, or more than one durable claimant | `action=ambiguous_fallback_match`, `match_count=2` | reserved/unbound |
-| one candidate fails identity or same-incarnation occupancy | `action=identity_mismatch_blocked`, `match_count=1` | reserved/unbound |
+| unique claimant-exclusive candidate | `action=bound`, `reconciliation_decision=matched_bound`, `match_count=1`, `fallback_match_basis` | submitted/bound |
+| zero eligible masters (including only non-forecast names, or every master excluded by a foreign key) | `action=fallback_no_match`, `match_count=0` (no basis) | reserved/unbound |
+| two or more remaining masters, or more than one durable claimant | `action=ambiguous_fallback_match`, `match_count=2`, `fallback_match_basis` | reserved/unbound |
+| one candidate fails identity or same-incarnation occupancy | `action=identity_mismatch_blocked`, `match_count=1`, `fallback_match_basis` | reserved/unbound |
 | missing/unparsable `Submit` | `action=query_unavailable`, `reconciliation_reason_class=fallback_submit_unparsable` (pass-only) | reserved/unbound |
 | process/timeout/byte/row failure | `action=query_unavailable`, existing bounded-query reason | reserved/unbound |
+| non-`.json` residue under `<journal>/pipeline-jobs/` hit by the commit-time claimant scan | `action=journal_quarantined`, `quarantine_reason=file_journal_reconcile_inventory_migration_invalid`, `quarantine_field=pipeline_jobs`, `fallback_match_basis` | reserved/unbound |
+
+Operating notes for the fallback (#2655):
+
+- **Bind throughput is about one held row per pass.** The querier's shared
+  whole-query time budget (one deadline per querier session) is consumed by the
+  first bind's journal inventory scan, so the other held rows in the same pass
+  report transient `action=query_unavailable` /
+  `reconciliation_reason_class=process_unavailable` and bind on later passes
+  (four held rows converge over about four passes). This is expected
+  convergence, **never** a reason to demote.
+- **`journal_quarantined` with `file_journal_reconcile_inventory_migration_invalid`
+  / field `pipeline_jobs`** means a non-`.json` file (for example a
+  `*.json.bak-zombie-<date>` backup) sits under `<journal>/pipeline-jobs/`; the
+  commit-time scan refuses it and every bind fails closed with the held tuple
+  intact. Operator rule: no backup/residue files under the scheduler journal
+  root (precedent #1925). Move any such file out of the journal root, keeping a
+  backup; **never** demote for this.
+- **An all-foreign-key window is `fallback_no_match`**, not
+  `ambiguous_fallback_match`: every master in the window provably belongs to
+  another reservation. The node-22 stall probe suppresses only
+  `ambiguous_fallback_match:comment_accounting_unproven`, so this outcome is
+  not suppressed and raises the stall alert; treat it as "no job of this
+  reservation is visible" and route it to the confirmed-dead checks of
+  Disposition case 3 below.
+- **`SubmitLine` roughly doubles the fallback query's bytes**, so a long-held
+  (widening, `now`-ended) window reaches the shared 2 MiB byte budget earlier;
+  past it the query fails closed as `query_unavailable` (held, transient).
 
 Every unsuccessful fallback preserves the durable #1564 held tuple byte-for-byte:
 `status=reserved`, no `slurm_job_id`, `reconciliation_source=slurm_exact_comment`,
@@ -538,9 +606,21 @@ stand in instead of manufacturing a held row.
    submission this gate exists to prevent. With every held row confirmed dead first,
    reconfiguring is safe and doubles as the demotion mechanism: the next pass demotes
    each dead row through the normal absence path and the retry is minted legitimately.
-2. **In flight:** do not touch the row. Let the job reach its terminal state — but be aware
-   reconcile still cannot bind it, because binding needs the comment match that this cluster
-   cannot serve. The row remains held, so it still ends up in case 3.
+2. **In flight or completed but unbound:** do not touch the row. On an explicitly
+   comment-less cluster whose `sacct` returns `SubmitLine`, reconcile binds it
+   automatically once the job is visible (#2655): a later pass (about one held row binds
+   per pass; the others report transient `query_unavailable` meanwhile) reports
+   `action=bound` with `fallback_match_basis=submitline_exact`, and the following inflight reconcile
+   projects the cohort to its terminal status — a `COMPLETED` array is **not**
+   recomputed, its members stop reading as `active_duplicate_pipeline`, and the
+   scheduler resumes after the completed forecast stage. If the row instead keeps
+   reporting `ambiguous_fallback_match` with `fallback_match_basis=name_window_count`,
+   some eligible master in the window has no provable key (check the `SubmitLine`
+   column above); with `submitline_exact` and `match_count=2`, two masters carry this
+   reservation's key — a genuine double submission. There is no supported operator bind
+   command for either case; keep the row held and escalate with the `sacct` evidence.
+   Never demote while a matching job is alive or completed: demotion re-`sbatch`es the
+   cohort. Only a row with **no** matching job (case 3) is demoted.
 3. **Confirmed dead** (no matching job in `sacct`/`squeue` for the attempt window), when
    reconfiguring the cluster is not an option (or any other held row may still be alive,
    making the cluster-wide gate flip unsafe): use the **row-scoped guarded operator
@@ -558,9 +638,11 @@ stand in instead of manufacturing a held row.
    # 1. Independently prove the job dead for THIS attempt window (name/user/account/submit):
    sacct -a --name nhms_forecast \
      --starttime <submission_attempt_started_at> --endtime now \
-     --format=JobID,JobName,State,User,Account,Submit
+     --format=JobID,JobName,State,User,Account,Submit,SubmitLine
    squeue -a --name nhms_forecast
    #    The row is safe to demote only when no matching job survives both queries.
+   #    A row whose SubmitLine carries --comment=nhms_idem:<this row's idempotency_key>
+   #    is this reservation's own job: never demote while it exists (#2655).
 
    # 2. Read the exact persisted attempt and anchor off the HELD master row.
    #    The scheduler pass evidence is NOT authoritative for the pre-state: it is

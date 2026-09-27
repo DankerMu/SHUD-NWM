@@ -126,6 +126,9 @@ _BOUNDED_RESTART_RECONCILE_OUTCOME_KEYS = (
     # additive and never changes an existing key/value.
     "slurm_binding_source",
     "slurm_accounting_submitted_at",
+    # #2655: pass-evidence-only fallback match basis (``submitline_exact`` |
+    # ``name_window_count``); present only on classified fallback outcomes.
+    "fallback_match_basis",
 )
 
 

@@ -535,6 +535,18 @@ def submit_and_wait_cycle_stage(
                     "restart_stage": context.restart_stage or stage.stage,
                     "native_shud_resubmitted": is_forecast_cohort_stage(stage),
                     "forcing_submit_identity": is_forcing_array_stage(stage),
+                    # #2655: the ambiguity cause (gateway timeout, 5xx, unparsable
+                    # response) is operator evidence on the EVENT only. The forecast
+                    # reserved master row deliberately carries no error_code: a
+                    # released identity-blocked row copies the row, and a transient
+                    # code there would make the release automatically retriable
+                    # (file_orchestration_journal release invariant). ``origin_*``
+                    # keys are never read by retry/state-failure classification,
+                    # unlike ``error_code`` (scheduler_state_failure._state_error_code).
+                    "origin_error_code": (
+                        getattr(error, "error_code", None) or "SBATCH_SUBMIT_RESULT_AMBIGUOUS"
+                    ),
+                    "origin_error_message": str(deps.redact_payload(str(error))),
                 },
             )
             if is_forcing_array_stage(stage):

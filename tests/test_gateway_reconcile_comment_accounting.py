@@ -789,14 +789,72 @@ def test_fallback_unique_binds_with_name_window_source_and_empty_comment_gate(
         assert len(commands) == 1
         command = commands[0]
         assert any(item == "--name=nhms_forecast" for item in command)
-        assert any(
-            item.startswith("--format=JobID,JobName,State,ExitCode,Comment,User,Account,Submit")
-            for item in command
-        )
+        # #2655: exactly one --format, SubmitLine appended last (the parser
+        # reads it as the rejoined remainder after Submit).
+        assert [item for item in command if item.startswith("--format=")] == [
+            "--format=JobID,JobName,State,ExitCode,Comment,User,Account,Submit,SubmitLine"
+        ]
         assert any(item == "--user=scheduler" for item in command)
         assert any(item == "--accounts=account" for item in command)
         assert any(item == "--starttime=2026-07-12T00:00:00" for item in command)
         assert any(item == f"--endtime={query_end.strftime('%Y-%m-%dT%H:%M:%S')}" for item in command)
+
+
+@pytest.mark.skipif(not hasattr(__import__("time"), "tzset"), reason="time.tzset() is POSIX-only")
+def test_comment_storing_cluster_exact_comment_lane_never_reads_submitline(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2655: on a comment-storing cluster the exact-comment lane keeps its own
+    seven-field format, never issues the name-window query, and never consults
+    the SubmitLine parser -- even when the reservation binds."""
+    from services.orchestrator import reconcile as reconcile_module
+    from tests.test_real_slurm_gateway import _pinned_local_timezone
+
+    anchor = datetime(2026, 7, 12, tzinfo=UTC)
+    query_end = anchor + timedelta(hours=2)
+    with _pinned_local_timezone("UTC"):
+        repository = _file_cohort_repository(
+            tmp_path,
+            created_at=anchor,
+            member_count=1,
+            expected_user="scheduler",
+            expected_account="account",
+        )
+        comment = "nhms_idem:cycle_gfs_2026071200_forecast_fixture:forecast"
+        row = f"72001|nhms_forecast|RUNNING|0:0|{comment}|scheduler|account\n"
+        commands: list[list[str]] = []
+        monkeypatch.setattr(
+            reconcile_module,
+            "_bounded_sacct_stdout",
+            lambda command: commands.append(list(command)) or row,
+        )
+
+        def _forbidden(*_args: Any, **_kwargs: Any) -> Any:
+            raise AssertionError("comment-storing lane must not parse SubmitLine")
+
+        monkeypatch.setattr(reconcile_module, "_parse_fallback_sacct_rows", _forbidden)
+        outcome = reconcile_module.reconcile_reserved_unbound_jobs(
+            repository,
+            comment_query=reconcile_module.default_comment_sacct_querier(
+                global_visibility_probe=lambda: True,
+                comment_storage_probe=lambda: True,
+                now=lambda: query_end,
+            ),
+            now=lambda: query_end,
+        )[0]
+
+        assert outcome.action == "bound"
+        assert outcome.reconciliation_source == "slurm_exact_comment"
+        assert outcome.fallback_match_basis is None
+        assert commands
+        for command in commands:
+            assert command[1:4] == [
+                "--parsable2",
+                "--noheader",
+                "--format=JobID,JobName,State,ExitCode,Comment,User,Account",
+            ]
+            assert not any("SubmitLine" in item or item.startswith("--name=") for item in command)
 
 
 def test_fallback_present_but_different_comment_stays_fatal_at_both_gates(
@@ -1162,7 +1220,7 @@ def test_parse_fallback_sacct_rows_gates_forecast_family_job_name() -> None:
     base_line = "72001|{job_name}|COMPLETED|0:0||scheduler|account|2026-07-12T01:00:00\n"
     with _pinned_local_timezone("UTC"):
         # Forecast family accepted (dedup to one bare master).
-        records, parsable = reconcile_module._parse_fallback_sacct_rows(
+        records, parsable, _basis = reconcile_module._parse_fallback_sacct_rows(
             base_line.format(job_name="nhms_forecast")
             + base_line.format(job_name="forecast")
             + base_line.format(job_name="run_shud_forecast")
@@ -1187,7 +1245,7 @@ def test_parse_fallback_sacct_rows_gates_forecast_family_job_name() -> None:
             "extern",
             "unrelated",
         ):
-            records, parsable = reconcile_module._parse_fallback_sacct_rows(
+            records, parsable, _basis = reconcile_module._parse_fallback_sacct_rows(
                 base_line.format(job_name=job_name),
                 expected_user="scheduler",
                 expected_account="account",
