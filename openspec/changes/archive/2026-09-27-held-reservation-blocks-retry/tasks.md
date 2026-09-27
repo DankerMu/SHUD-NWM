@@ -17,9 +17,9 @@ Minimal mergeable slice: 1 is the production fix; 2 runbook note rides along.
 ## 3. Verification
 
 - [x] 3.1 Tests for every Required evidence row in design.md. New-behavior tests are red on pre-change source and green after.
-- [ ] 3.2 `uv run ruff check .`; focused `uv run pytest -q` over the scheduler state-decision suites, `tests/test_orchestration_chain.py`, and `tests/test_gateway_reconcile_*.py`; full `uv run pytest -q` on node-27; `openspec validate held-reservation-blocks-retry --strict --no-interactive`.
+- [x] 3.2 `uv run ruff check .`; focused `uv run pytest -q` over the scheduler state-decision suites, `tests/test_orchestration_chain.py`, and `tests/test_gateway_reconcile_*.py`; full `uv run pytest -q` on node-27; `openspec validate held-reservation-blocks-retry --strict --no-interactive`. — node-27 full @7aa8a591: 20904 passed / 365 skipped rc=0; local focused 4171 passed; CI green @d5618e3.
 - [x] 3.3 node-22 scratch-journal rehearsal on the PR head (`7aa8a591`; receipt `docs/runbooks/receipts/2026-09-27-issue2666-held-reservation-rehearsal.md`): the held IFS 0925 12Z row binds to 57553 and no member is selected for forecast resubmission; zero sbatch.
-- [ ] 3.4 After merge (timer stopped since 2026-09-27T08:38:21Z): deploy, run the basin-18 manual retry, start the timer, and record the first live pass receipt: no duplicate forecast sbatch, and the IFS/gfs 0926 cycles are selected.
+- [x] 3.4 After merge (timer stopped since 2026-09-27T08:38:21Z): deploy, run the basin-18 manual retry, start the timer, and record the first live pass receipt: no duplicate forecast sbatch, and the IFS/gfs 0926 cycles are selected. — done 2026-09-27: deploy 56f2f745, first pass bound the held IFS row to 57553 with zero forecast resubmission, basin-18 marker re-ran only that basin, timer restarted 13:26:40Z, IFS/gfs 0926 00Z selected (receipt on #2666).
 
 ## Risk packs considered (core)
 
