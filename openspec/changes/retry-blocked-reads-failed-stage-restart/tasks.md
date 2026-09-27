@@ -64,6 +64,13 @@
   - A downstream failure without its own durable output runs the full chain (pin).
   - A `convert`/`forcing` failure is unchanged (pin).
   - A cold-start quarantined failure is unchanged (pin).
+- [x] 3.2b Review round 1 fix pass:
+  - Forecast failure with a `FORCING_*` error code and an existing witness runs the full chain.
+  - Remove the dead `member` clause of `_manual_retry_own_forecast_output`.
+  - A `_build_candidates`-layer test proves a `state_save_qc` restart survives candidate construction (non-strict or manifest-matching lane).
+  - A restarted `state_save_qc` that fails again is, on the next pass, not a `manual_retry_requested` decision; it goes to the budget or permanent guard.
+  - While only the model-less restart row is running, the next pass is `skip_active`.
+  - The runbook covers the strict-lane upgrade wording and the operator escape.
 - [x] 3.3 The existing manual-retry tests stay green, or any change to them is justified by the spec. They are in `tests/test_production_scheduler.py`, `tests/test_cohort_membership_attribution.py`, `tests/test_scheduler_terminal_recency.py` and `tests/test_operator_reentry_confirmation.py`.
 
 ## 4. Docs

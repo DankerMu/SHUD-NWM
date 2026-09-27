@@ -72,9 +72,10 @@ def _pass_two_basins(candidates: list[Any], decisions: list[Any]) -> tuple[list[
     builder -- never hand-written -- so a later rewrite of the decision would show here.
     """
 
-    evidenced = [replace(candidate, state_evidence=dict(decision.evidence)) for candidate, decision in zip(
-        candidates, decisions, strict=True
-    )]
+    evidenced = [
+        replace(candidate, state_evidence=dict(decision.evidence))
+        for candidate, decision in zip(candidates, decisions, strict=True)
+    ]
     stages = {scheduler_module._candidate_restart_stage(candidate) for candidate in evidenced}
     assert len(stages) == 1, f"the members must form ONE restart cohort: {stages}"
     (stage,) = stages
@@ -138,9 +139,7 @@ def _state_save_failure_pass(tmp_path: Path, member_count: int, *, error_code: s
     [None, "STATE_SAVE_QC_TASK_FAILED"],
     ids=["transient_retries_exhausted", "non_transient_permanent"],
 )
-def test_single_model_state_save_qc_marker_restarts_only_state_save_qc(
-    tmp_path: Path, error_code: str | None
-) -> None:
+def test_single_model_state_save_qc_marker_restarts_only_state_save_qc(tmp_path: Path, error_code: str | None) -> None:
     repository, client, candidates, master = _state_save_failure_pass(tmp_path, 1, error_code=error_code)
     # The failure is permanent either way: the marker is the operator's authority.
     (blocked,) = _decisions(repository, candidates)
@@ -248,6 +247,44 @@ def test_forecast_failure_marker_restarts_at_forecast_only_with_the_forcing_witn
         assert decision.evidence[_DROPPED] == {"restart_stage": "forecast", "reason": "forcing_version_row_absent"}
         assert "restart_stage" not in manifest
         assert _new_stages(client, before)[:3] == ["convert", "forcing", "forecast"]
+
+
+@pytest.mark.parametrize(
+    "error_code",
+    ["FORCING_PACKAGE_CHECKSUM_MISMATCH", "FORCING_FILE_NOT_STAGED", "SHUD_FORCING_CSV_MISSING"],
+)
+def test_forcing_input_forecast_failure_marker_regenerates_forcing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_code: str
+) -> None:
+    """A forecast failure the runtime raised for a bad forcing package keeps the full chain.
+
+    The witness (sidecar + package manifest) exists, so the witness guard would pass and
+    a ``forecast`` restart would re-stage the SAME corrupt package; only the full chain
+    regenerates it (``workers/forcing_producer/producer.py`` atomic package writes).
+    """
+
+    (candidate,) = candidates = [_candidate(0)]
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = _Runtime(
+        fail_stage="forecast",
+        array_results_by_stage={"forecast": [["failed"], ["succeeded"]]},
+        task_error_codes={("forecast", 0): error_code},
+    )
+    _run_pass(tmp_path, repository, client, _cohort_basins(candidates), max_retries=0)
+    _plant_forcing_witness(tmp_path, monkeypatch, candidate)
+    _mark(repository, _cohort_run_id("forecast", candidates))
+
+    (decision,) = _decisions(repository, candidates)
+    assert (decision.action, decision.reason) == ("retry", "manual_retry_requested")
+    assert decision.evidence["failure"]["stage"] == "forecast"
+    for key in ("restart_stage", "restart_from_stage", _ADDED, _DROPPED):
+        assert key not in decision.evidence, key
+    basins, (manifest,) = _pass_two_basins(candidates, [decision])
+    assert "restart_stage" not in manifest
+    before = len(client.submissions)
+    _run_pass(tmp_path, repository, client, basins, max_retries=0)
+
+    assert _new_stages(client, before)[:3] == ["convert", "forcing", "forecast"]
 
 
 # --- 3. fail-closed pins: no provable own output, convert/forcing, cold start ---------------
@@ -472,3 +509,111 @@ def test_strict_lane_cold_start_manual_retry_keeps_its_blocker(tmp_path: Path, m
     (item,) = blocked
     assert item.state_evidence["reason"] == "forcing_version_row_absent"
     assert _DROPPED not in item.state_evidence
+
+
+def test_manifest_matching_candidate_construction_keeps_the_state_save_qc_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The added ``state_save_qc`` restart survives the REAL ``_build_candidates``.
+
+    Strict lane, but the run's own ``runs/<run_id>/input/manifest.json`` records the
+    initial state the strict lineage selects, so the post-decision upgrade leaves the
+    decision alone (``_terminal_decision_run_manifest_matches_strict_warm_start``) and the
+    built candidate -- and the chain manifest built from it -- restart at ``state_save_qc``.
+    (Warm start not required is no separate lane here: with the ``state_save_qc`` terminal
+    the incomplete pipeline still takes the strict evidence, ``scheduler_core`` ~850.)
+    The first pass reads the selected state from the real strict evidence, never by hand.
+    """
+
+    from tests.test_production_scheduler import _budget_pass, _seed_budget_journal
+
+    root, scheduler = _seed_budget_journal(monkeypatch, tmp_path, _strict_rows("STATE_SAVE_QC_TASK_FAILED"))
+    _mark(FileOrchestrationJournalRepository(root), "fcst_gfs_2026052100_model_a")
+    _selected, (mismatched,), _blocked, _skipped = _budget_pass(scheduler())
+    assert mismatched.state_evidence["reason"] == "strict_warm_start_retry_run_manifest_mismatch"
+    selected_state = mismatched.state_evidence["strict_warm_start"]["candidate_state"]
+    run_manifest = Path(os.environ["OBJECT_STORE_ROOT"]) / "runs" / mismatched.run_id / "input" / "manifest.json"
+    run_manifest.parent.mkdir(parents=True)
+    run_manifest.write_text(json.dumps({"initial_state": selected_state}), encoding="utf-8")
+
+    _selected, candidates, blocked, skipped = _budget_pass(scheduler())
+
+    assert (blocked, skipped) == ([], [])
+    (candidate,) = candidates
+    evidence = candidate.state_evidence
+    assert (evidence["decision"], evidence["reason"]) == ("manual_retry", "manual_retry_requested")
+    assert evidence[_ADDED] is True
+    assert evidence["run_manifest_initial_state"]["state_id"] == selected_state["state_id"]
+    assert scheduler_module._candidate_restart_stage(candidate) == "state_save_qc"
+    manifest = manifest_module._candidate_basin_manifest(candidate, output_uri=_OUTPUT_URI)
+    assert manifest["restart_stage"] == "state_save_qc"
+    assert manifest["durable_shud_output_reused"] is True
+
+
+# --- 5. after the restart: a second failure and an in-flight restart ------------------------
+
+
+def _restart_pass_two(
+    tmp_path: Path, member_count: int, *, error_code: str | None
+) -> tuple[Any, Any, list[Any], list[Any]]:
+    repository, client, candidates, master = _state_save_failure_pass(tmp_path, member_count, error_code=error_code)
+    _mark(repository, master)
+    decisions = _decisions(repository, candidates)
+    assert {decision.evidence.get("restart_stage") for decision in decisions} == {"state_save_qc"}
+    basins, _manifests = _pass_two_basins(candidates, decisions)
+    return repository, client, candidates, basins
+
+
+@pytest.mark.parametrize(
+    ("member_count", "error_code"),
+    [(1, None), (1, "STATE_SAVE_QC_TASK_FAILED"), (3, None)],
+    ids=["single_transient", "single_non_transient", "cohort_transient"],
+)
+def test_restarted_state_save_qc_that_fails_again_is_not_a_second_manual_retry(
+    tmp_path: Path, member_count: int, error_code: str | None
+) -> None:
+    """The consumed marker does not re-arm: the new failure meets the ordinary guards."""
+
+    repository, client, candidates, basins = _restart_pass_two(tmp_path, member_count, error_code=error_code)
+    client.failures_before_success_by_stage["state_save_qc"] = 99
+    client.array_results_by_stage["state_save_qc"] = [["failed"] * member_count]
+    if error_code:
+        client.task_error_codes[("state_save_qc", 1)] = error_code
+    before = len(client.submissions)
+    _run_pass(tmp_path, repository, client, basins, max_retries=0)
+    assert _new_stages(client, before) == ["state_save_qc"]
+
+    for decision in _decisions(repository, candidates):
+        assert (decision.action, decision.reason) == ("blocked", "permanent_failure_guard")
+        assert decision.evidence["retry_policy"]["manual_retry_required"] is True
+        assert decision.evidence["retry_policy"].get("manual_retry_marker") is not True
+        for key in ("restart_stage", _ADDED):
+            assert key not in decision.evidence, key
+
+
+class _PassInterrupted(BaseException):
+    """Ends the pass while the restart row is running: the next pass reads that journal."""
+
+
+def test_running_model_less_restart_row_makes_the_next_pass_skip_active(tmp_path: Path) -> None:
+    repository, client, candidates, basins = _restart_pass_two(tmp_path, 3, error_code=None)
+    poll = client.get_job_status
+
+    def interrupt_while_running(job_id: str) -> dict[str, Any]:
+        status = poll(job_id)
+        if status["stage"] == "state_save_qc" and client.poll_counts[job_id] >= 2:
+            raise _PassInterrupted
+        return status
+
+    client.get_job_status = interrupt_while_running
+    before = len(client.submissions)
+    with pytest.raises(_PassInterrupted):
+        _run_pass(tmp_path, repository, client, basins, max_retries=0)
+    assert _new_stages(client, before) == ["state_save_qc"]
+    running = [row for row in repository.query_pipeline_jobs_by_cycle(_CYCLE_ID) if row.get("status") == "running"]
+    assert [(row.get("stage"), row.get("model_id")) for row in running] == [("state_save_qc", None)]
+
+    for decision in _decisions(repository, candidates):
+        assert (decision.action, decision.reason) == ("skip", "active_slurm_job")
+        assert decision.evidence["decision"] == "skip_active"
+        assert decision.evidence["replacement_submitted"] is False

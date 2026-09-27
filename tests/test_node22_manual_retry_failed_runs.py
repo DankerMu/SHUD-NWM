@@ -441,6 +441,16 @@ def _hlj_hydro_run_row() -> dict[str, Any]:
     }
 
 
+def _assert_cohort_restart_warning(warning: str) -> None:
+    """The warning names the whole-cohort blast radius and both #2600 restart points."""
+
+    text = warning.lower()
+    assert "whole cohort" in text
+    assert "restarts at the failed stage" in text
+    assert "forcing-input" in text
+    assert "otherwise it re-runs from convert" in text
+
+
 def _ifs_journal(tmp_path: Path, jobs: list[dict[str, Any]]) -> Path:
     """IFS 12Z journal whose HLJ hydro run SUCCEEDED -- the selector refuses its id."""
 
@@ -510,7 +520,7 @@ def test_refused_hydro_run_lists_its_failed_single_model_cohort_master(tmp_path:
             "member_count": 1,
         }
     ]
-    assert "whole cohort from convert" in preview["warning"].lower()
+    _assert_cohort_restart_warning(preview["warning"])
     assert "cohort_candidates_error" not in preview
     # The hint is a read: not one journal byte moves.
     assert _journal_tree_bytes(root) == before
@@ -826,7 +836,7 @@ def test_later_multi_member_success_supersedes_only_when_its_membership_is_prova
         assert "warning" not in preview
     else:
         assert [(c["run_id"], c["member_count"]) for c in preview["cohort_candidates"]] == [(_HLJ_COHORT_RUN_ID, 1)]
-        assert "whole cohort from convert" in preview["warning"].lower()
+        _assert_cohort_restart_warning(preview["warning"])
     assert "cohort_candidates_error" not in preview
 
 

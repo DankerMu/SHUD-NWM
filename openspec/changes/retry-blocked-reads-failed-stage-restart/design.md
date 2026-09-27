@@ -36,7 +36,7 @@ The criterion also goes in the PR description.
 - **Failed stage.** Use `failed = _canonical_downstream_stage(_failed_stage(state))`, the scope-blind axis the restart router uses (`scheduler_state_failure.py` ~91-98). Do NOT use `_candidate_failed_stage`: it skips model-less cohort rows (~139-141), which is exactly the incident shape (marker on `cycle_ifs_..._convert_dg_...`, failed cycle-scope `state_save_qc` row).
 - **Own durable output**, written `own_output`. It is `True` iff either:
   - the candidate's own hydro run status is in `DURABLE_HYDRO_SUCCESS_STATUSES`; or
-  - a native-SHUD (`forecast` alias) terminal-success row exists in the state that is attributable to the candidate. Attributable means naming its `model_id` or `run_id`, or `cohort_member_row_is_attributed` — the same shape as the `own` test in `_cohort_membership_unprovable_evidence`.
+  - a native-SHUD (`forecast` alias) terminal-success row exists in the state that names the candidate's `model_id` or `run_id`. (Review round 1: `cohort_member_row_is_attributed` never holds for forecast rows, because forecast is excluded from `COHORT_MEMBER_ATTRIBUTED_STAGES`, so that clause is removed. The per-model task projection rows name the model.)
 
   Details:
   - A row with `cohort_membership == "incomplete"` never counts.
@@ -45,7 +45,7 @@ The criterion also goes in the PR description.
 - **Predicate.** Only these parts of `_downstream_retry_evidence` apply: `own_output`, the `_failed_stage` axis, not `_force_native_shud_rerun`, not cold-start-quarantined. Permanence and restartability are ignored, because the marker is the operator's authority. The typical input is `permanently_failed`.
 - **Emission.**
   - `failed ∈ {parse, state_save_qc, publish}` and predicate true: `restart_stage = restart_from_stage = failed`, `native_shud_resubmitted=False`, `durable_shud_output_reused=True`.
-  - `failed == "forecast"` and not cold-start: `restart_stage = "forecast"`, only when the per-model forcing witness is found (reuse `_strict_warm_start_forcing_witness_decision` / the planned-retry guard ~595). If no witness is found, set no restart stage: full chain, **not blocked**.
+  - `failed == "forecast"` and not cold-start and the recorded forecast error code is not in the `FORCING_*` family (review round 1: the runtime raises `FORCING_PACKAGE_CHECKSUM_MISMATCH`, `FORCING_FILE_CHECKSUM_MISMATCH`, `FORCING_FILE_NOT_STAGED`, `FORCING_EMPTY`, … for a bad package that a witness check does not detect, and a full chain regenerates it atomically): `restart_stage = "forecast"`, only when the per-model forcing witness is found (reuse `_strict_warm_start_forcing_witness_decision` / the planned-retry guard ~595). If no witness is found, set no restart stage: full chain, **not blocked**.
   - Cold-start quarantined: the existing forced `forecast` branch (~2268-2272), unchanged, with no new guard.
   - Otherwise, no restart stage: full chain.
 - **Guards.**
@@ -57,6 +57,7 @@ The criterion also goes in the PR description.
   - If the post-upgrade witness consultation returns `blocked`, replace it with the pre-upgrade manual-retry decision with the added restart stage dropped (full chain).
   - Cold-start quarantined manual retries (forced `forecast`, pre-existing) keep today's strict-lane behavior.
   - Report what the upgrade does to a `state_save_qc` manual restart.
+- **Operator escape (review round 1).** When the own output is provable but the forecast artifacts are actually lost or corrupt, the marker keeps restarting at the failed stage. The runbook documents the escape: restore the artifacts, or first mark the forecast row itself as failed, so that the failed stage is `forecast`, or clear the durable output evidence, so that the full chain runs. The implementer verifies which escape the tooling actually supports, and documents only that one.
 - **Known limitation, stated in the PR.** No existence probe checks the forecast artifacts before a `state_save_qc` restart; the copyback guard covers only `copyback`. If the output vanished, the restarted `state_save_qc` fails in its own governed way.
 - **End to end.**
   - Decision evidence can be overwritten later by `raw_manifest_restart` (`scheduler_candidates.py` ~965-975; `restart_stage=convert`). The operator-reentry rewrite (~1621) may also overwrite it; verify that path.

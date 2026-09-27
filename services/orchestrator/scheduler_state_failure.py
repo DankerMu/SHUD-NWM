@@ -63,7 +63,6 @@ from services.orchestrator.scheduler_state_types import (
     TERMINAL_PIPELINE_SUCCESS_STATUSES,
     TRANSIENT_RETRY_REASON_CODES,
     SchedulerCandidateLike,
-    cohort_member_row_is_attributed,
 )
 from workers.data_adapters.base import format_cycle_time
 
@@ -2311,13 +2310,15 @@ def _manual_retry_failed_stage_restart(candidate: SchedulerCandidateLike, state:
     stage after ``forecast`` restarts there only when the candidate's OWN forecast
     output is durable and no native rerun is forced; permanence is ignored, because
     the marker is the operator's authority.  A failed ``forecast`` restarts at
-    ``forecast`` (the forcing witness is the caller's guard).  Everything else --
-    ``convert``, ``forcing``, an unknown stage, unprovable output -- is ``None``.
+    ``forecast`` (the forcing witness is the caller's guard) unless the runtime
+    recorded a forcing-input failure: the witness does not detect a corrupt package,
+    so only the full chain regenerates it.  Everything else -- ``convert``,
+    ``forcing``, an unknown stage, unprovable output -- is ``None``.
     """
 
     failed_stage = _canonical_downstream_stage(_failed_stage(state))
     if failed_stage == "forecast":
-        return failed_stage
+        return None if _forcing_input_failure(state) else failed_stage
     if failed_stage not in _MANUAL_RETRY_POST_FORECAST_RESTART_STAGES:
         return None
     if _force_native_shud_rerun(state) or not _manual_retry_own_forecast_output(candidate, state):
@@ -2325,12 +2326,30 @@ def _manual_retry_failed_stage_restart(candidate: SchedulerCandidateLike, state:
     return failed_stage
 
 
+def _forcing_input_failure(state: Mapping[str, Any]) -> bool:
+    """Whether the recorded failure is the runtime rejecting the forcing package (#2600).
+
+    ``workers/shud_runtime/runtime.py`` raises the ``FORCING_*`` family (checksum,
+    manifest, staging, empty, unit) and its ``SHUD_FORCING_*`` / ``DIRECT_GRID_*FORCING_*``
+    siblings for a package that is corrupt, empty, mismatched or unstaged.  Both the
+    current failure's own code and the broad scan are read: a stale forcing code only
+    costs the full chain, which is the pre-#2600 behavior.
+    """
+
+    for code in (_downstream_recorded_error_code(state), _state_error_code(state)):
+        text = str(code or "").upper()
+        if text.startswith("FORCING_") or "_FORCING_" in text:
+            return True
+    return False
+
+
 def _manual_retry_own_forecast_output(candidate: SchedulerCandidateLike, state: Mapping[str, Any]) -> bool:
     """Whether the candidate's own forecast output is durable (#2600).
 
     Its own hydro run in a durable success status, or a native-SHUD terminal-success
-    row attributable to it -- naming its model or run, or a recorded-membership
-    ``member`` row (the ``own`` test of the #2603 unprovable-membership guard).  An
+    row naming its model or run.  Recorded membership is never the attribution here:
+    ``forecast`` is outside ``COHORT_MEMBER_ATTRIBUTED_STAGES``, and the forecast array
+    master's per-model task projection rows name the model.  An
     ``incomplete``-membership row never counts, and the generic
     ``durable_shud_output_exists`` override is deliberately not trusted here.
     """
@@ -2344,11 +2363,8 @@ def _manual_retry_own_forecast_output(candidate: SchedulerCandidateLike, state: 
             continue
         if str(job.get("status") or "") not in TERMINAL_PIPELINE_SUCCESS_STATUSES:
             continue
-        if (
-            cohort_member_row_is_attributed(job)
-            or str(job.get("model_id") or "") == str(candidate.model_id)
-            or str(job.get("run_id") or "") == str(candidate.run_id)
-        ):
+        names_model = str(job.get("model_id") or "") == str(candidate.model_id)
+        if names_model or str(job.get("run_id") or "") == str(candidate.run_id):
             return True
     return False
 

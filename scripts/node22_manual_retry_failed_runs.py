@@ -19,7 +19,8 @@ cohort's ``state_save_qc`` failed is refused with ``no_retryable_failed_job``: t
 row belongs to the cohort master run, not to the hydro run.  For that refusal the preview
 lists, read-only, the failed cohort masters of the cycle whose recorded membership covers
 the model (``cohort_candidates``), with a warning that marking one re-runs the whole
-cohort from convert.  The tool never substitutes the id itself (#2584).
+cohort: from the failed stage when the scheduler can reuse the durable upstream output
+(#2600), otherwise from convert.  The tool never substitutes the id itself (#2584).
 
 Execution host: node-22 (the DB-free file journal lives on its ``/scratch``).
 """
@@ -59,8 +60,11 @@ from services.orchestrator.scheduler_state_types import DOWNSTREAM_STAGE_ALIASES
 from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time  # noqa: E402
 
 COHORT_RESTART_WARNING = (
-    "Marking a cohort master re-runs the WHOLE cohort from convert, not only the failed "
-    "stage: the forecast of each of its member_count models is recomputed."
+    "Marking a cohort master re-runs the WHOLE cohort (all member_count models). It restarts "
+    "at the failed stage when that stage is after forecast and each model's own forecast "
+    "output is durable, or at forecast when forecast failed with the forcing witness present "
+    "and not a forcing-input (FORCING_*) failure; otherwise it re-runs from convert and "
+    "recomputes every model's forecast."
 )
 
 
