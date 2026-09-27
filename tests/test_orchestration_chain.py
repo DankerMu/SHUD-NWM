@@ -14674,21 +14674,63 @@ def test_round10_forecast_unknown_submit_status_is_ambiguous_and_unbound(
     assert durable["status"] == "reserved"
     assert durable["slurm_job_id"] is None
     assert durable["submit_outcome"] == "submit_result_ambiguous"
-    # #2655: the forecast ambiguity cause is durable, like the forcing branch.
-    assert durable["error_code"] == "SLURM_GATEWAY_INVALID_RESPONSE"
-    assert durable["error_message"] == "Slurm submit response did not contain a recognized status."
+    # #2655: the forecast row stays code-less (released-row auto-retry
+    # invariant); the ambiguity cause is carried by the event only.
+    assert durable["error_code"] is None
+    assert durable["error_message"] is None
+    details = _submission_ambiguous_details(repository, forecast.pipeline_job_id)
+    assert details["origin_error_code"] == "SLURM_GATEWAY_INVALID_RESPONSE"
+    assert details["origin_error_message"] == "Slurm submit response did not contain a recognized status."
+    assert "error_code" not in details
     assert [submission["stage"] for submission in client.submissions] == ["forecast"]
 
 
-def test_forecast_ambiguous_submit_persists_error_code_on_reserved_master(tmp_path: Path) -> None:
-    """#2655: a bare error after the gateway boundary is ambiguous; the held
-    ``reserved`` forecast master records the fallback code and the redacted
-    cause, and the journal row survives a cold reopen (lifecycle validator)."""
+def _submission_ambiguous_details(repository: Any, pipeline_job_id: str) -> dict[str, Any]:
+    source_id, cycle_time = _accepted_submit_source_cycle(pipeline_job_id)
+    (event,) = [
+        event
+        for event in repository._cycle_rows(
+            source_id=source_id, cycle_time=cycle_time, model_id=None
+        ).pipeline_events
+        if event.get("entity_id") == pipeline_job_id and event.get("event_type") == "submission_ambiguous"
+    ]
+    return dict(event["details"])
 
-    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+def _accepted_submit_source_cycle(pipeline_job_id: str) -> tuple[str, datetime]:
+    from services.orchestrator.file_orchestration_journal import (
+        _accepted_submit_source_cycle_from_job_id,
+    )
+
+    return _accepted_submit_source_cycle_from_job_id(pipeline_job_id)
+
+
+class _GatewayTimeoutForecastClient(FakeCycleSlurmClient):
+    """The forecast array submit crosses the gateway boundary and times out."""
+
+    def submit_job_array(self, job_type: str, **kwargs: Any) -> dict[str, Any]:
+        if kwargs.get("stage_name") == "forecast":
+            raise OrchestratorError("SLURM_TIMEOUT", "gateway read timed out token=secret-value")
+        return super().submit_job_array(job_type, **kwargs)
+
+
+def test_forecast_ambiguous_submit_keeps_row_codeless_and_records_cause_on_event(tmp_path: Path) -> None:
+    """#2655: a gateway timeout on the forecast array submit is ambiguous. The
+    held ``reserved`` master row carries NO error code (a released
+    identity-blocked row copies it, and SLURM_TIMEOUT is transient); the real
+    gateway code and the redacted message travel on the ``submission_ambiguous``
+    event as ``origin_error_code`` / ``origin_error_message``, a key no
+    retry/state-failure classifier reads. The released reservation stays out of
+    automatic retry."""
+
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+    from services.orchestrator.file_orchestration_journal import (
+        FileJournalRetryService,
+        FileOrchestrationJournalRepository,
+    )
 
     repository = FileOrchestrationJournalRepository(tmp_path / "journal")
-    client = AttemptScopedArraySubmitFailureClient(submit_fail_stage="forecast", submit_fail_attempt=0)
+    client = _GatewayTimeoutForecastClient()
     result = _orchestrator(tmp_path, repository, client).orchestrate_cycle(
         "gfs", "2026050100", _accepted_submit_forecast_basins()
     )
@@ -14696,14 +14738,36 @@ def test_forecast_ambiguous_submit_persists_error_code_on_reserved_master(tmp_pa
     assert result.status == "reconciling"
     forecast = next(stage for stage in result.stages if stage.stage == "forecast")
     assert forecast.status == "submit_result_ambiguous"
-    assert forecast.error_code == "SBATCH_SUBMIT_RESULT_AMBIGUOUS"
     reopened = FileOrchestrationJournalRepository(repository.root)
     durable = reopened.get_pipeline_job(forecast.pipeline_job_id)
     assert durable["status"] == "reserved"
     assert durable["slurm_job_id"] is None
     assert durable["submit_outcome"] == "submit_result_ambiguous"
-    assert durable["error_code"] == "SBATCH_SUBMIT_RESULT_AMBIGUOUS"
-    assert durable["error_message"] == "forecast submission failed"
+    assert durable["error_code"] is None
+    assert durable["error_message"] is None
+
+    details = _submission_ambiguous_details(reopened, forecast.pipeline_job_id)
+    assert details["origin_error_code"] == "SLURM_TIMEOUT"
+    assert "gateway read timed out" in details["origin_error_message"]
+    assert "secret-value" not in details["origin_error_message"]
+    assert "error_code" not in details
+
+    # The identity-blocked release copies the row: it must stay code-less and
+    # therefore outside automatic retry (no duplicate forecast submission).
+    released = reopened.release_identity_blocked_reservation(
+        forecast.pipeline_job_id,
+        accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        expected_submission_attempt=int(durable["submission_attempt"]),
+        expected_submission_attempt_started_at=_dt(durable["submission_attempt_started_at"]),
+        expected_status="reserved",
+        identity_blocked_streak=3,
+    )
+    assert released == 1
+    released_row = reopened.get_pipeline_job(forecast.pipeline_job_id)
+    assert released_row["status"] == "reservation_lost"
+    assert released_row["reconciliation_decision"] == "identity_mismatch_released"
+    assert released_row["error_code"] is None
+    assert FileJournalRetryService(reopened).should_auto_retry(released_row) is False
 
 
 def test_manual_retry_terminal_stage_submits_new_attempt_identity(tmp_path: Path) -> None:

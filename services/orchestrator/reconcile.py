@@ -518,9 +518,6 @@ class _FallbackMaster:
     # The common submit-line key of every eligible row, or ``None`` (unknown)
     # once any eligible row lacks a key or disagrees.
     key: str | None
-    # At least one eligible row's key equals the reservation comment or is
-    # absent: the master counts toward ambiguity under either basis.
-    counted: bool
 
 
 def _parse_fallback_sacct_rows(
@@ -553,14 +550,14 @@ def _parse_fallback_sacct_rows(
     known: then masters whose key differs from ``reservation_comment`` are
     excluded BEFORE the ``MAX_FALLBACK_MASTERS`` cap. Any unknown key excludes
     nothing and keeps the pre-change count-only classification
-    (``name_window_count``). Parsing stops early only once two distinct masters
-    each have an eligible row whose key equals the reservation comment or is
-    absent (ambiguous under either basis) — for key-less input exactly the
-    pre-change stop point. ``match_basis`` is ``None`` when no master remains.
+    (``name_window_count``). Every row inside the ``MAX_COMMENT_SACCT_ROWS``
+    slice is read (no early stop), so the basis is decided over ALL eligible
+    masters: an unknown-key master late in the output still forces
+    ``name_window_count``. ``MAX_FALLBACK_MASTERS`` caps only the returned
+    records. ``match_basis`` is ``None`` when no master remains.
     """
 
     masters: dict[str, _FallbackMaster] = {}
-    counted_masters = 0
     submit_parsable = True
     for line in stdout.splitlines()[:MAX_COMMENT_SACCT_ROWS]:
         fields = line.strip().split("|")
@@ -597,7 +594,6 @@ def _parse_fallback_sacct_rows(
         if not _fallback_candidate_in_window(submit, anchor=window_start, end=window_end):
             continue
         row_key = _submitline_comment_key("|".join(fields[8:])) if len(fields) > 8 else None
-        row_counts = row_key is None or row_key == reservation_comment
         master = masters.get(master_id)
         if master is None:
             master = _FallbackMaster(
@@ -612,16 +608,10 @@ def _parse_fallback_sacct_rows(
                     submitted_at=submit,
                 ),
                 key=row_key,
-                counted=False,
             )
             masters[master_id] = master
         elif master.key != row_key:
             master.key = None
-        if row_counts and not master.counted:
-            master.counted = True
-            counted_masters += 1
-            if counted_masters >= MAX_FALLBACK_MASTERS:
-                break
     eligible = list(masters.values())
     if eligible and reservation_comment and all(master.key is not None for master in eligible):
         basis = FALLBACK_BASIS_SUBMITLINE_EXACT
@@ -2315,6 +2305,9 @@ def reconcile_reserved_unbound_jobs(
         # offending row with its evidence instead of letting one poisoned
         # cycle abort resolution of every other reserved row and the pass.
         outcome_floor = len(outcomes)
+        # #2655: the match basis of a classified fallback also rides on a
+        # journal quarantine raised after classification (commit-time scan).
+        fallback_basis: str | None = None
         try:
             forcing_submit_reconcile = _forcing_submit_reconcile_job(job)
             if bind_only and not forcing_submit_reconcile:
@@ -2645,6 +2638,7 @@ def reconcile_reserved_unbound_jobs(
             if accepted_submit_reconcile and proof.kind == "fallback_ambiguous":
                 # #1565: two or more distinct owned in-window masters never
                 # bind and never change disposal authority.
+                fallback_basis = proof.fallback_match_basis
                 write_count = _record_file_reconciliation(
                     store,
                     job,
@@ -2663,7 +2657,7 @@ def reconcile_reserved_unbound_jobs(
                         match_count=len(proof.records),
                         durable_write_kind="pipeline_job_reconciliation" if write_count else None,
                         durable_write_count=write_count,
-                        fallback_match_basis=proof.fallback_match_basis,
+                        fallback_match_basis=fallback_basis,
                     )
                 )
                 continue
@@ -3211,6 +3205,7 @@ def reconcile_reserved_unbound_jobs(
                         status=str(job.status),
                         quarantine_reason=error.reason,
                         quarantine_field=error.field,
+                        fallback_match_basis=fallback_basis,
                     )
                 )
             continue

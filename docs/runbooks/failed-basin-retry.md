@@ -504,6 +504,34 @@ a successful bind — also carries the pass-evidence-only
 | one candidate fails identity or same-incarnation occupancy | `action=identity_mismatch_blocked`, `match_count=1`, `fallback_match_basis` | reserved/unbound |
 | missing/unparsable `Submit` | `action=query_unavailable`, `reconciliation_reason_class=fallback_submit_unparsable` (pass-only) | reserved/unbound |
 | process/timeout/byte/row failure | `action=query_unavailable`, existing bounded-query reason | reserved/unbound |
+| non-`.json` residue under `<journal>/pipeline-jobs/` hit by the commit-time claimant scan | `action=journal_quarantined`, `quarantine_reason=file_journal_reconcile_inventory_migration_invalid`, `quarantine_field=pipeline_jobs`, `fallback_match_basis` | reserved/unbound |
+
+Operating notes for the fallback (#2655):
+
+- **Bind throughput is about one held row per pass.** The querier's shared
+  whole-query time budget (one deadline per querier session) is consumed by the
+  first bind's journal inventory scan, so the other held rows in the same pass
+  report transient `action=query_unavailable` /
+  `reconciliation_reason_class=process_unavailable` and bind on later passes
+  (four held rows converge over about four passes). This is expected
+  convergence, **never** a reason to demote.
+- **`journal_quarantined` with `file_journal_reconcile_inventory_migration_invalid`
+  / field `pipeline_jobs`** means a non-`.json` file (for example a
+  `*.json.bak-zombie-<date>` backup) sits under `<journal>/pipeline-jobs/`; the
+  commit-time scan refuses it and every bind fails closed with the held tuple
+  intact. Operator rule: no backup/residue files under the scheduler journal
+  root (precedent #1925). Move any such file out of the journal root, keeping a
+  backup; **never** demote for this.
+- **An all-foreign-key window is `fallback_no_match`**, not
+  `ambiguous_fallback_match`: every master in the window provably belongs to
+  another reservation. The node-22 stall probe suppresses only
+  `ambiguous_fallback_match:comment_accounting_unproven`, so this outcome is
+  not suppressed and raises the stall alert; treat it as "no job of this
+  reservation is visible" and route it to the confirmed-dead checks of
+  Disposition case 3 below.
+- **`SubmitLine` roughly doubles the fallback query's bytes**, so a long-held
+  (widening, `now`-ended) window reaches the shared 2 MiB byte budget earlier;
+  past it the query fails closed as `query_unavailable` (held, transient).
 
 Every unsuccessful fallback preserves the durable #1564 held tuple byte-for-byte:
 `status=reserved`, no `slurm_job_id`, `reconciliation_source=slurm_exact_comment`,
@@ -580,8 +608,9 @@ stand in instead of manufacturing a held row.
    each dead row through the normal absence path and the retry is minted legitimately.
 2. **In flight or completed but unbound:** do not touch the row. On an explicitly
    comment-less cluster whose `sacct` returns `SubmitLine`, reconcile binds it
-   automatically once the job is visible (#2655): the next pass reports `action=bound`
-   with `fallback_match_basis=submitline_exact`, and the following inflight reconcile
+   automatically once the job is visible (#2655): a later pass (about one held row binds
+   per pass; the others report transient `query_unavailable` meanwhile) reports
+   `action=bound` with `fallback_match_basis=submitline_exact`, and the following inflight reconcile
    projects the cohort to its terminal status — a `COMPLETED` array is **not**
    recomputed, its members stop reading as `active_duplicate_pipeline`, and the
    scheduler resumes after the completed forecast stage. If the row instead keeps
@@ -609,9 +638,11 @@ stand in instead of manufacturing a held row.
    # 1. Independently prove the job dead for THIS attempt window (name/user/account/submit):
    sacct -a --name nhms_forecast \
      --starttime <submission_attempt_started_at> --endtime now \
-     --format=JobID,JobName,State,User,Account,Submit
+     --format=JobID,JobName,State,User,Account,Submit,SubmitLine
    squeue -a --name nhms_forecast
    #    The row is safe to demote only when no matching job survives both queries.
+   #    A row whose SubmitLine carries --comment=nhms_idem:<this row's idempotency_key>
+   #    is this reservation's own job: never demote while it exists (#2655).
 
    # 2. Read the exact persisted attempt and anchor off the HELD master row.
    #    The scheduler pass evidence is NOT authoritative for the pre-state: it is

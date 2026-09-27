@@ -208,6 +208,52 @@ def test_parser_resolves_production_0925_rows_by_submitline_key() -> None:
         assert [record.slurm_job_id for record in records] == ["56823"]
 
 
+def test_parser_decides_the_basis_over_every_master_not_the_first_two(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two equal-key masters followed by an unknown-key master: the basis is
+    decided over ALL eligible masters, so the late unknown key forces
+    ``name_window_count`` (no early stop may label the window
+    ``submitline_exact``). Classification stays ambiguous and held."""
+
+    from services.orchestrator import reconcile as reconcile_module
+    from services.orchestrator.reconcile import reconcile_reserved_unbound_jobs
+
+    rows = (
+        _array_rows("56839", submit=GFS_ARRAY_SUBMIT, submit_line=_submit_line(GFS_KEY))
+        + _array_rows("56840", submit="2026-07-12T00:02:40", submit_line=_submit_line(GFS_KEY))
+        + _array_rows("56841", submit="2026-07-12T00:02:50", submit_line=None)
+    )
+    with _pinned_local_timezone("UTC"):
+        records, parsable, basis = reconcile_module._parse_fallback_sacct_rows(
+            rows,
+            expected_user="scheduler",
+            expected_account="account",
+            window_start=GFS_ANCHOR,
+            window_end=QUERY_END,
+            reservation_comment=f"nhms_idem:{GFS_KEY}",
+        )
+        assert parsable is True
+        assert basis == "name_window_count"
+        assert [record.slurm_job_id for record in records] == ["56839", "56840"]
+
+        repository = _file_cohort_repository(
+            tmp_path / "late_unknown",
+            created_at=GFS_ANCHOR,
+            member_count=1,
+            expected_user="scheduler",
+            expected_account="account",
+        )
+        query, _ = _fallback_querier(monkeypatch, rows=rows, query_end=QUERY_END)
+        (outcome,) = reconcile_reserved_unbound_jobs(repository, comment_query=query, now=lambda: QUERY_END)
+
+        assert outcome.action == "ambiguous_fallback_match"
+        assert outcome.match_count == 2
+        assert outcome.fallback_match_basis == "name_window_count"
+        _assert_held(repository, GFS_JOB)
+
+
 # ---------------------------------------------------------------------------
 # Restart reconcile: submitline_exact binds
 # ---------------------------------------------------------------------------
@@ -352,6 +398,60 @@ def test_window_with_only_foreign_keys_is_no_match_and_held(
 # ---------------------------------------------------------------------------
 # Fail-closed cases
 # ---------------------------------------------------------------------------
+
+
+def test_pipeline_jobs_residue_quarantines_a_classified_bind_and_keeps_the_basis(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The node-22 rehearsal shape: a non-``.json`` operator residue under
+    ``pipeline-jobs/`` makes the commit-time claimant scan raise AFTER the
+    window classified ``submitline_exact``. The row is ``journal_quarantined``
+    (fail-closed, held tuple unchanged) and pass evidence still names the
+    basis that was classified."""
+
+    from services.orchestrator.reconcile import reconcile_reserved_unbound_jobs
+    from services.orchestrator.scheduler_runtime import _serialize_reserved_unbound_outcome
+
+    with _pinned_local_timezone("UTC"):
+        repository = _concurrent_pair(tmp_path)
+        rows = _array_rows("56823", submit=IFS_ARRAY_SUBMIT, submit_line=_submit_line(IFS_KEY)) + _array_rows(
+            "56839", submit=GFS_ARRAY_SUBMIT, submit_line=_submit_line(GFS_KEY)
+        )
+        # Establish the durable held tuple first (the production rows already
+        # carry it), then drop the residue into the journal root.
+        double = _array_rows("56840", submit="2026-07-12T00:02:40", submit_line=_submit_line(GFS_KEY)) + _array_rows(
+            "56841", submit="2026-07-12T00:02:41", submit_line=_submit_line(GFS_KEY)
+        )
+        query, _ = _fallback_querier(monkeypatch, rows=double, query_end=QUERY_END)
+        (held,) = reconcile_reserved_unbound_jobs(
+            repository, comment_query=query, now=lambda: QUERY_END, target_job_id=GFS_JOB
+        )
+        assert held.action == "ambiguous_fallback_match"
+        _assert_held(repository, GFS_JOB)
+        residue = (
+            repository.root
+            / "pipeline-jobs"
+            / "job_cycle_gfs_2026072300_convert_cohort_29a594caa8bc_forecast.json.bak-zombie-20260808"
+        )
+        residue.write_text("{}", encoding="utf-8")
+        before = _journal_bytes(repository.root)
+
+        query, _ = _fallback_querier(monkeypatch, rows=rows, query_end=QUERY_END)
+        (outcome,) = reconcile_reserved_unbound_jobs(
+            repository, comment_query=query, now=lambda: QUERY_END, target_job_id=GFS_JOB
+        )
+
+        assert outcome.action == "journal_quarantined"
+        assert outcome.quarantine_reason == "file_journal_reconcile_inventory_migration_invalid"
+        assert outcome.quarantine_field == "pipeline_jobs"
+        assert outcome.fallback_match_basis == "submitline_exact"
+        serialized = _serialize_reserved_unbound_outcome(repository, outcome)
+        assert serialized["action"] == "journal_quarantined"
+        assert serialized["fallback_match_basis"] == "submitline_exact"
+        assert _journal_bytes(repository.root) == before
+        _assert_held(repository, GFS_JOB)
+
 
 
 def test_two_masters_with_the_same_key_stay_ambiguous_with_byte_identical_held_tuple(
@@ -644,8 +744,9 @@ def test_bound_completed_cohort_projects_terminal_and_is_no_longer_active_duplic
     """0925 shape end to end: members at ``hydro_run=created`` behind a held
     reserved master are ``active_duplicate_pipeline``; after the SubmitLine
     bind and one inflight pass over COMPLETED accounting the members are no
-    longer active and the scheduler stops skipping them. Reconcile only reads
-    accounting: every recorded command is ``sacct`` and no sbatch is issued."""
+    longer active and the scheduler stops skipping them. The finished SHUD
+    forecast is not resubmitted: each member resumes after the completed stage
+    (``restart_stage=state_save_qc``, ``native_shud_resubmitted=False``)."""
 
     from services.orchestrator.reconcile import (
         SacctRecord,
@@ -657,21 +758,13 @@ def test_bound_completed_cohort_projects_terminal_and_is_no_longer_active_duplic
     members = 2
     with _pinned_local_timezone("UTC"):
         repository = _concurrent_pair(tmp_path, member_status="created", members=members)
-        # Post-#2655 production shape: the ambiguous forecast submit persisted
-        # its error code on the held reserved master.
+        # Production shape: the ambiguous forecast submit leaves the held
+        # reserved master code-less (the cause lives on the event only).
         for job_id in (GFS_JOB, IFS_JOB):
-            result = repository.transition_pipeline_job_submit_evidence(
-                job_id,
-                AcceptedSubmitTransition.timeout(),
-                accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
-                expected_submission_attempt=1,
-                expected_statuses=("reserved",),
-                require_unbound=True,
-                error_code="SLURM_GATEWAY_UNAVAILABLE",
-                error_message="forecast submit transport timeout",
-            )
-            assert result.committed
-            assert repository.get_pipeline_job(job_id)["error_code"] == "SLURM_GATEWAY_UNAVAILABLE"
+            held = repository.get_pipeline_job(job_id)
+            assert held["status"] == "reserved"
+            assert held["submit_outcome"] == "submit_result_ambiguous"
+            assert held["error_code"] is None
 
         cycle_time = datetime(2026, 7, 12, tzinfo=UTC)
         for source, canonical in (("gfs", "gfs"), ("ifs", "IFS")):
@@ -745,10 +838,11 @@ def test_bound_completed_cohort_projects_terminal_and_is_no_longer_active_duplic
                 assert (decision.action, decision.reason) == ("retry", "resume_after_completed_stage")
                 assert decision.evidence["restart_stage"] == "state_save_qc"
                 assert decision.evidence["native_shud_resubmitted"] is False
-        # Reconcile never submits: the only external commands were sacct reads.
+        # ``commands`` only records what the monkeypatched fallback querier ran
+        # (it is not an sbatch interceptor): the bind pass issued sacct reads
+        # only. The no-resubmission proof is the resume decision above.
         assert commands
         assert all(Path(command[0]).name == "sacct" for command in commands)
-        assert not any("sbatch" == Path(command[0]).name for command in commands)
 
 
 def test_compact_restart_reconcile_evidence_keeps_the_match_basis() -> None:

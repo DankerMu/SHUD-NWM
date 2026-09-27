@@ -793,7 +793,20 @@ master 停在 `reserved`、从未走到终态，成员就一直被判在飞）�
 名字窗口兜底绑定；同一趟里 gfs 与 IFS 相隔几秒提交，两个 array 落进彼此的窗口，只数个数就永远是"歧义"。
 #2655 起兜底额外读 `sacct SubmitLine`，按其中 `--comment=nhms_idem:<idempotency_key>` 精确排除别家的 array，
 pass evidence 的 `fallback_match_basis` 标出是按 `submitline_exact` 还是退回 `name_window_count` 判的；forecast
-不明确提交的 master 行也开始记 `error_code` / `error_message`（与 forcing 一致）。
+不明确提交的原因（网关错误码）记在 `submission_ambiguous` 事件 details 的 `origin_error_code` /
+`origin_error_message`，master 行本身**不**记 `error_code`（被 identity-blocked 释放的行会拷贝该行，带上瞬时码就会被
+自动重试、重复提交）。
+
+绑定后的收敛与异常 outcome：
+
+- 一趟大约只绑一行：querier 共享的整次查询时间预算被第一行绑定的 journal 扫描用完，同趟其余 held 行报瞬时
+  `query_unavailable` / `process_unavailable`，后续 pass 逐行绑定；**不要**因此 demote。
+- `journal_quarantined` + `file_journal_reconcile_inventory_migration_invalid`（field `pipeline_jobs`）：
+  `pipeline-jobs/` 下有非 `.json` 残留。运维规则：scheduler journal 根下不放任何备份/残留文件（先例 #1925），
+  移出 journal 根并保留备份；**不要** demote。
+- 窗口里全是别家 key 的 master：`fallback_no_match`（不被 stall probe 压制，会告警），按 failed-basin-retry.md
+  Disposition 第 3 条做确认已死核对。
+- `SubmitLine` 让兜底查询字节数约翻倍，长期 held 的宽窗口会更早碰到 2 MiB 预算并 fail-closed 为 `query_unavailable`。
 
 处置入口：[`failed-basin-retry.md`](failed-basin-retry.md)「Automatic unique fallback on an explicitly comment-less
 cluster」与 Disposition 第 2 条（completed but unbound）；node-22 上的操作顺序见

@@ -499,13 +499,11 @@ def submit_and_wait_cycle_stage(
                     and _accepts_keyword(transition, "accepted_submit_contract_version")
                 ):
                     transition_kwargs["accepted_submit_contract_version"] = ACCEPTED_SUBMIT_CONTRACT_VERSION
-                # #2655: forecast cohorts persist the ambiguity cause like the
-                # forcing arrays do, so a held reserved master records whether
-                # it was a gateway timeout, a 5xx, or an unparsable response.
-                transition_kwargs["error_code"] = (
-                    getattr(error, "error_code", None) or "SBATCH_SUBMIT_RESULT_AMBIGUOUS"
-                )
-                transition_kwargs["error_message"] = str(deps.redact_payload(str(error)))
+                if is_forcing_array_stage(stage):
+                    transition_kwargs["error_code"] = (
+                        getattr(error, "error_code", None) or "SBATCH_SUBMIT_RESULT_AMBIGUOUS"
+                    )
+                    transition_kwargs["error_message"] = str(deps.redact_payload(str(error)))
                 transition_result = transition(
                     pipeline_job_id,
                     AcceptedSubmitTransition.timeout(),
@@ -537,6 +535,18 @@ def submit_and_wait_cycle_stage(
                     "restart_stage": context.restart_stage or stage.stage,
                     "native_shud_resubmitted": is_forecast_cohort_stage(stage),
                     "forcing_submit_identity": is_forcing_array_stage(stage),
+                    # #2655: the ambiguity cause (gateway timeout, 5xx, unparsable
+                    # response) is operator evidence on the EVENT only. The forecast
+                    # reserved master row deliberately carries no error_code: a
+                    # released identity-blocked row copies the row, and a transient
+                    # code there would make the release automatically retriable
+                    # (file_orchestration_journal release invariant). ``origin_*``
+                    # keys are never read by retry/state-failure classification,
+                    # unlike ``error_code`` (scheduler_state_failure._state_error_code).
+                    "origin_error_code": (
+                        getattr(error, "error_code", None) or "SBATCH_SUBMIT_RESULT_AMBIGUOUS"
+                    ),
+                    "origin_error_message": str(deps.redact_payload(str(error))),
                 },
             )
             if is_forcing_array_stage(stage):

@@ -280,6 +280,8 @@ receipt 字段：`evidence_root`（**实际扫描的** root，按上面那条自
 | `blocked_operator_reentry_restart_stage_refused` | **不要再签一次**；带外修好 forecast 之前的输入，见下面「已知限制」的 sink 拒绝那条 |
 | `blocked_cohort_membership_unprovable` | `scripts/node22_manual_retry_failed_runs.py`（manual-retry marker，打在该 cohort 的 run id 上）；成因见 [`scheduler-dbfree-typed-reasons.md`](scheduler-dbfree-typed-reasons.md)「多成员 cohort 的失败归属」（#2603） |
 | `skip_active` / `active_duplicate_pipeline`，且同 source/cycle 的 forecast master 在 `restart_reconcile.reserved_unbound.outcomes[]` 里反复是 `ambiguous_fallback_match`（**不在** `list-operator-actions` 的六类里） | **不要** manual-retry、**不要**先 demote；走 [`failed-basin-retry.md`](failed-basin-retry.md)「Automatic unique fallback on an explicitly comment-less cluster」（#2655），见下 |
+| 同上症状，但该 master 的 outcome 是 `fallback_no_match`（`match_count=0`；#2655 起窗口里全是别家 key 的 master 也落这里，stall probe **不**压制它，会告警） | 窗口里看不到本行的作业：按 [`failed-basin-retry.md`](failed-basin-retry.md) Disposition 第 3 条做「确认已死」核对（`sacct`/`squeue` + `SubmitLine`），确认后才 `demote-reserved-job` |
+| 同上症状，但 outcome 是 `query_unavailable` / `process_unavailable`，或 `journal_quarantined` + `file_journal_reconcile_inventory_migration_invalid`（field `pipeline_jobs`） | 前者是一趟只绑一行的正常收敛，等后续 pass；后者是 `pipeline-jobs/` 下有非 `.json` 残留，移出 journal 根（留备份）。两者都**不要** demote，见下 |
 
 ### `active_duplicate_pipeline` + reserved-held forecast master（#2655）
 
@@ -297,8 +299,9 @@ receipt 字段：`evidence_root`（**实际扫描的** root，按上面那条自
      `--comment=nhms_idem:<idempotency_key>`，是真的重复提交；保持 held，带 `sacct` 证据升级。
    - `name_window_count`：窗口里至少有一个 master 的 `SubmitLine` 缺失/无 key/不一致，只能按
      名字+窗口计数；用下面的只读 `sacct` 看是哪一个。
-   - 字段**不存在**：node-22 checkout 早于 #2655，`git pull --ff-only` 后下一趟会按 SubmitLine
-     精确 key 自动绑定（绑定用的仍是 `slurm_name_window_unique`，不引入新 token）。
+   - 字段**不存在**：node-22 checkout 早于 #2655，`git pull --ff-only` 后会按 SubmitLine
+     精确 key 自动绑定（绑定用的仍是 `slurm_name_window_unique`，不引入新 token）；多行 held 时
+     一趟大约只绑一行，见下面的注意事项。
 2. 只读核对（不写任何东西）：
 
    ```bash
@@ -309,11 +312,25 @@ receipt 字段：`evidence_root`（**实际扫描的** root，按上面那条自
 
    array-task 行（`<master>_<task>`）的 `SubmitLine` 带 `--comment=nhms_idem:<该行 idempotency_key>`
    就是它自己的作业；`.batch`/`.extern` 行的 `SubmitLine` 为空，不参与判定。
-3. 绑定成功后下一趟 inflight reconcile 按 `sacct` 把 cohort 投影到终态：`COMPLETED` 的
-   array **不重算**，成员不再是 `active_duplicate_pipeline`，scheduler 从 forecast 之后的阶段
-   继续，下一 cycle 进入选择。
+3. 绑定成功（`action=bound`）后，inflight reconcile 按 `sacct` 把 cohort 投影到终态：`COMPLETED`
+   的 array **不重算**，成员不再是 `active_duplicate_pipeline`，scheduler 从 forecast 之后的阶段
+   继续；该 cycle 跑完后续阶段、判为 complete 后，下一 cycle 才进入 backfill 选择。
 4. `demote-reserved-job` 只用于**确认已死**（`sacct`/`squeue` 在该 attempt 窗口内都没有匹配作业）
    的行；对已完成或在跑的作业执行会让整批 cohort 重新 `sbatch`。
+
+注意事项（#2655）：
+
+- **一趟大约只绑一行。** querier 的整次查询时间预算是一个会话共享的，第一行绑定时的 journal
+  inventory 扫描就把它用完，同趟其余 held 行报瞬时的 `query_unavailable` /
+  `process_unavailable`，在后续 pass 里逐行绑定（4 行约 4 趟）。这是正常收敛，**绝不**因此 demote。
+- **`journal_quarantined` + `file_journal_reconcile_inventory_migration_invalid`（field `pipeline_jobs`）**：
+  `<journal>/pipeline-jobs/` 下有非 `.json` 残留（如 `*.json.bak-zombie-<date>`），绑定时的扫描拒绝它，
+  每次绑定都 fail-closed（held 元组不变）。运维规则：scheduler journal 根下不放任何备份/残留文件
+  （先例 #1925）；发现即移出 journal 根并保留备份，**绝不** demote。
+- **全是别家 key 的窗口是 `fallback_no_match`**，不是 `ambiguous_fallback_match`；stall probe 只压制
+  `ambiguous_fallback_match:comment_accounting_unproven`，所以它会告警。按上表走「确认已死」核对。
+- **`SubmitLine` 让兜底查询字节数大约翻倍**：长期 held、`now` 结尾不断变宽的窗口会更早碰到共享的
+  2 MiB 字节预算，超出即 fail-closed 为 `query_unavailable`（held、瞬时）。
 
 ### `permanent_failure` / `cancelled_manual_retry_required`
 

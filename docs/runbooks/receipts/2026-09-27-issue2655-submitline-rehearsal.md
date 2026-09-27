@@ -45,8 +45,9 @@ tuples unchanged (fail-closed). Traceback: `reconcile_reserved_unbound_jobs` ->
 rejects the non-`.json` operator residue
 `pipeline-jobs/job_cycle_gfs_2026072300_convert_cohort_29a594caa8bc_forecast.json.bak-zombie-20260808`
 present in the **production** journal since 2026-08-08. It was latent because no
-fallback bind had ever been reached in production. Tracked separately; the rollout
-moves the residue out of the journal root first (see the PR).
+fallback bind had ever been reached in production. Operator rule (precedent #1925): no
+backup/residue files under the scheduler journal root; the rollout moves the residue out
+of the journal root first, keeping a backup (see the PR).
 
 ## Runs 2-5 — fresh copy, residue moved out of the copy
 
