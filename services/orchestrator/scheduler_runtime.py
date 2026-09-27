@@ -1706,6 +1706,12 @@ def _serialize_reserved_unbound_outcome(store: Any, outcome: Any) -> dict[str, A
             else outcome.quarantine_field
         ),
     }
+    # #2655: additive pass-evidence-only match basis of a classified
+    # name-window fallback outcome; absent (not ``None``) on every other
+    # outcome so pre-existing rows keep their exact key set.
+    fallback_match_basis = getattr(outcome, "fallback_match_basis", None)
+    if fallback_match_basis is not None:
+        serialized["fallback_match_basis"] = fallback_match_basis
     serialized.update(_restart_reconcile_attempt_evidence(store, outcome.job_id))
     _apply_pass_reason_over_durable(serialized, outcome.reconciliation_reason_class)
     return serialized

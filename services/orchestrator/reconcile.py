@@ -25,7 +25,7 @@ import selectors
 import subprocess
 import time
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, Mapping
@@ -73,6 +73,15 @@ COMMENT_SACCT_PAGE_HOURS = 12
 # bare masters are retained.
 FALLBACK_JOB_NAME = "nhms_forecast"
 MAX_FALLBACK_MASTERS = 2
+# #2655: the comment-less fallback additionally reads ``SubmitLine`` (last, so a
+# command line containing ``|`` is the rejoined remainder of the row). Only this
+# fallback query requests it; the visibility probe and exact-comment lane keep
+# their own formats byte-identical.
+FALLBACK_SACCT_FORMAT = "JobID,JobName,State,ExitCode,Comment,User,Account,Submit,SubmitLine"
+_SUBMITLINE_COMMENT_FLAG = "--comment="
+# Pass-evidence-only match basis of a classified name-window fallback outcome.
+FALLBACK_BASIS_SUBMITLINE_EXACT = "submitline_exact"
+FALLBACK_BASIS_NAME_WINDOW_COUNT = "name_window_count"
 # A timezone-less Slurm ``Submit`` value is rendered in host-local wall clock;
 # ``%Y-%m-%dT%H:%M:%S`` is Slurm's own field format for ``Submit``.
 _FALLBACK_SUBMIT_FORMATS = ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S.%f")
@@ -219,6 +228,10 @@ class SacctRecord:
     # window is closed at both endpoints and the candidate is not claimed by a
     # sibling reserved attempt. ``None`` when no Submit was requested/parsed.
     submitted_at: datetime | None = None
+    # #2655: the name-window fallback master's proven ``SubmitLine`` comment
+    # key (``nhms_idem:<idempotency_key>``), known only when every eligible row
+    # of that master carries the same single ``--comment=`` value.
+    submitline_key: str | None = None
 
 
 # A sacct querier maps a slurm_job_id to its accounting record (or None when the
@@ -477,6 +490,39 @@ def _fallback_master_id(raw_job_id: str) -> str | None:
     return master_id
 
 
+def _submitline_comment_key(submit_line: str) -> str | None:
+    """The single distinct ``--comment=`` value in a Slurm ``SubmitLine``.
+
+    Tokens are whitespace-delimited (the gateway passes sbatch an argv list, so
+    ``--comment=nhms_idem:<key>`` is one token and keys never contain
+    whitespace). A missing/empty line, no such token, an empty value, or two or
+    more distinct values yield ``None`` (no key).
+    """
+
+    values = {
+        token[len(_SUBMITLINE_COMMENT_FLAG) :]
+        for token in submit_line.split()
+        if token.startswith(_SUBMITLINE_COMMENT_FLAG)
+    }
+    if len(values) != 1:
+        return None
+    (value,) = values
+    return value or None
+
+
+@dataclass
+class _FallbackMaster:
+    """One eligible bare master seen by the name-window fallback parser."""
+
+    record: SacctRecord
+    # The common submit-line key of every eligible row, or ``None`` (unknown)
+    # once any eligible row lacks a key or disagrees.
+    key: str | None
+    # At least one eligible row's key equals the reservation comment or is
+    # absent: the master counts toward ambiguity under either basis.
+    counted: bool
+
+
 def _parse_fallback_sacct_rows(
     stdout: str,
     *,
@@ -484,25 +530,37 @@ def _parse_fallback_sacct_rows(
     expected_account: str,
     window_start: datetime,
     window_end: datetime,
-) -> tuple[list[SacctRecord], bool]:
+    reservation_comment: str | None = None,
+) -> tuple[list[SacctRecord], bool, str | None]:
     """Classify the name-window fallback output into eligible masters.
 
-    Returns ``(records, submit_parsable)``. A row is eligible only when its
-    normalized bare master id is well-shaped, its submit instant parses and
-    falls inside the closed attempt window, its owner matches exactly, and its
-    job name belongs to the FORECAST family (``nhms_forecast`` or a forecast
-    stage alias; forcing/batch/extern/unrelated names are ineligible). An
-    ineligible row never turns into ``fallback_submit_unparsable``: only an
-    otherwise-eligible forecast/owner row with missing/unparsable Submit
-    triggers the transient denial. ``submit_parsable`` is False when at least
-    one candidate row carried missing/unparsable Submit evidence (transient
-    denial per the pass-evidence contract). Deduplication is by bare master id
-    and at most ``MAX_FALLBACK_MASTERS`` masters are retained
-    (zero/unique/ambiguous is all that is required).
+    Returns ``(records, submit_parsable, match_basis)``. A row is eligible only
+    when its normalized bare master id is well-shaped, its submit instant
+    parses and falls inside the closed attempt window, its owner matches
+    exactly, and its job name belongs to the FORECAST family (``nhms_forecast``
+    or a forecast stage alias; forcing/batch/extern/unrelated names are
+    ineligible). An ineligible row never turns into
+    ``fallback_submit_unparsable``: only an otherwise-eligible forecast/owner
+    row with missing/unparsable Submit triggers the transient denial.
+    ``submit_parsable`` is False when at least one candidate row carried
+    missing/unparsable Submit evidence (transient denial per the pass-evidence
+    contract).
+
+    #2655 submit-line key: each eligible row's ``SubmitLine`` (the rejoined
+    remainder after ``Submit``; an eight-field row has none) yields a key, and
+    a master's key is known only when all its eligible rows agree. Basis
+    ``submitline_exact`` applies only when every eligible master's key is
+    known: then masters whose key differs from ``reservation_comment`` are
+    excluded BEFORE the ``MAX_FALLBACK_MASTERS`` cap. Any unknown key excludes
+    nothing and keeps the pre-change count-only classification
+    (``name_window_count``). Parsing stops early only once two distinct masters
+    each have an eligible row whose key equals the reservation comment or is
+    absent (ambiguous under either basis) — for key-less input exactly the
+    pre-change stop point. ``match_basis`` is ``None`` when no master remains.
     """
 
-    records: list[SacctRecord] = []
-    seen_master_ids: set[str] = set()
+    masters: dict[str, _FallbackMaster] = {}
+    counted_masters = 0
     submit_parsable = True
     for line in stdout.splitlines()[:MAX_COMMENT_SACCT_ROWS]:
         fields = line.strip().split("|")
@@ -538,24 +596,44 @@ def _parse_fallback_sacct_rows(
             continue
         if not _fallback_candidate_in_window(submit, anchor=window_start, end=window_end):
             continue
-        if master_id in seen_master_ids:
-            continue
-        seen_master_ids.add(master_id)
-        records.append(
-            SacctRecord(
-                slurm_job_id=master_id,
-                job_name=job_name,
-                raw_state=fields[2].strip(),
-                exit_code=fields[3].strip() or None,
-                comment=fields[4].strip() or None,
-                user=user or None,
-                account=account or None,
-                submitted_at=submit,
+        row_key = _submitline_comment_key("|".join(fields[8:])) if len(fields) > 8 else None
+        row_counts = row_key is None or row_key == reservation_comment
+        master = masters.get(master_id)
+        if master is None:
+            master = _FallbackMaster(
+                record=SacctRecord(
+                    slurm_job_id=master_id,
+                    job_name=job_name,
+                    raw_state=fields[2].strip(),
+                    exit_code=fields[3].strip() or None,
+                    comment=fields[4].strip() or None,
+                    user=user or None,
+                    account=account or None,
+                    submitted_at=submit,
+                ),
+                key=row_key,
+                counted=False,
             )
-        )
-        if len(records) >= MAX_FALLBACK_MASTERS:
-            break
-    return records, submit_parsable
+            masters[master_id] = master
+        elif master.key != row_key:
+            master.key = None
+        if row_counts and not master.counted:
+            master.counted = True
+            counted_masters += 1
+            if counted_masters >= MAX_FALLBACK_MASTERS:
+                break
+    eligible = list(masters.values())
+    if eligible and reservation_comment and all(master.key is not None for master in eligible):
+        basis = FALLBACK_BASIS_SUBMITLINE_EXACT
+        remaining = [master for master in eligible if master.key == reservation_comment]
+    else:
+        basis = FALLBACK_BASIS_NAME_WINDOW_COUNT
+        remaining = eligible
+    records = [
+        replace(master.record, submitline_key=master.key)
+        for master in remaining[:MAX_FALLBACK_MASTERS]
+    ]
+    return records, submit_parsable, (basis if records else None)
 
 
 def _fallback_eligibility(
@@ -911,6 +989,7 @@ def default_comment_sacct_querier(
                 return _query_name_window_fallback(
                     owner_scope,
                     submission_attempt_started_at=submission_attempt_started_at,
+                    reservation_comment=target_comment,
                 )
             raise ReconcileQueryUnavailable(
                 "accounting does not store job comments",
@@ -983,13 +1062,16 @@ def default_comment_sacct_querier(
         owner_scope: tuple[str, str],
         *,
         submission_attempt_started_at: datetime | None,
+        reservation_comment: str,
     ) -> CommentAccountingResult:
         """One bounded name-scoped query from the frozen attempt anchor to now.
 
         Returns the eligible masters as an ``owner``-scoped result whose
         ``records`` hold at most ``MAX_FALLBACK_MASTERS`` distinct bare master
         ids, carrying ``fallback_submit_unparsable`` as a pass-only reason when
-        an otherwise-eligible row had missing/unparsable Submit evidence.
+        an otherwise-eligible row had missing/unparsable Submit evidence. The
+        reservation's ``nhms_idem:<key>`` comment drives the #2655 SubmitLine
+        exact-key exclusion; the result carries the pass-only match basis.
         """
 
         attempt_anchor = _strict_utc_datetime(submission_attempt_started_at)
@@ -1010,7 +1092,7 @@ def default_comment_sacct_querier(
             sacct,
             "--parsable2",
             "--noheader",
-            "--format=JobID,JobName,State,ExitCode,Comment,User,Account,Submit",
+            f"--format={FALLBACK_SACCT_FORMAT}",
             f"--name={FALLBACK_JOB_NAME}",
             f"--user={owner_scope[0]}",
             f"--accounts={owner_scope[1]}",
@@ -1032,12 +1114,13 @@ def default_comment_sacct_querier(
             raise _ReconcileFallbackQueryUnavailable(
                 str(error), reason_class=error.reason_class
             ) from error
-        records, submit_parsable = _parse_fallback_sacct_rows(
+        records, submit_parsable, match_basis = _parse_fallback_sacct_rows(
             stdout,
             expected_user=owner_scope[0],
             expected_account=owner_scope[1],
             window_start=attempt_anchor,
             window_end=query_end,
+            reservation_comment=reservation_comment,
         )
         return CommentAccountingResult(
             tuple(records),
@@ -1047,6 +1130,7 @@ def default_comment_sacct_querier(
             coverage_complete=submit_parsable,
             fallback_name_window=True,
             fallback_submit_unparsable=not submit_parsable,
+            fallback_match_basis=match_basis,
         )
 
     # #1850 D2: expose the cached tri-state capability verdict as a typed
@@ -2007,6 +2091,9 @@ class CommentAccountingResult(Sequence[SacctRecord]):
     # Controller retention is positive-only evidence: it identifies a unique
     # forcing master but never authorizes absence or a global accounting scan.
     controller_exact_comment: bool = False
+    # #2655: ``submitline_exact`` | ``name_window_count`` when at least one
+    # master remained after classification; pass evidence only.
+    fallback_match_basis: str | None = None
 
     def __getitem__(self, index: int) -> SacctRecord:
         return self.records[index]
@@ -2025,6 +2112,8 @@ class _CommentAccountingProof:
     coverage_complete: bool = False
     coverage_start: datetime | None = None
     coverage_end: datetime | None = None
+    # #2655: name-window fallback match basis (pass evidence only).
+    fallback_match_basis: str | None = None
 
 
 CommentSacctQuerier = Callable[..., "CommentAccountingResult | SacctRecord | Sequence[SacctRecord] | None"]
@@ -2118,6 +2207,11 @@ class ReservationReconcileOutcome:
     # Consecutive identity-mismatch passes recorded on the row, including this
     # one. Only the identity-mismatch outcomes carry it.
     identity_blocked_streak: int | None = None
+    # #2655: pass-evidence-only name-window fallback match basis
+    # (``submitline_exact`` | ``name_window_count``) on every fallback outcome
+    # that classified at least one remaining master, including a bind. Never
+    # persisted on the durable row.
+    fallback_match_basis: str | None = None
 
 
 def reconcile_reserved_unbound_jobs(
@@ -2569,6 +2663,7 @@ def reconcile_reserved_unbound_jobs(
                         match_count=len(proof.records),
                         durable_write_kind="pipeline_job_reconciliation" if write_count else None,
                         durable_write_count=write_count,
+                        fallback_match_basis=proof.fallback_match_basis,
                     )
                 )
                 continue
@@ -2583,6 +2678,7 @@ def reconcile_reserved_unbound_jobs(
                 else None
             )
             fallback_unique = accepted_submit_reconcile and proof.kind == "fallback_unique"
+            fallback_basis = proof.fallback_match_basis if fallback_unique else None
             if (
                 accepted_submit_reconcile
                 and record is not None
@@ -2617,6 +2713,7 @@ def reconcile_reserved_unbound_jobs(
                             match_count=1,
                             durable_write_kind="pipeline_job_reconciliation" if write_count else None,
                             durable_write_count=write_count,
+                            fallback_match_basis=fallback_basis,
                         )
                     )
                     continue
@@ -2903,6 +3000,7 @@ def reconcile_reserved_unbound_jobs(
                         match_count=1,
                         durable_write_kind="pipeline_job_reconciliation" if write_count else None,
                         durable_write_count=write_count,
+                        fallback_match_basis=fallback_basis,
                     )
                 )
                 continue
@@ -2946,6 +3044,17 @@ def reconcile_reserved_unbound_jobs(
                         status="submitted",
                         reconciliation_source="slurm_name_window_unique",
                     )
+                if (
+                    fallback_basis == FALLBACK_BASIS_SUBMITLINE_EXACT
+                    and record.submitline_key
+                    and _callable_accepts_keyword(committer, "fallback_submitline_key")
+                ):
+                    # #2655: the parsed SubmitLine key rides into the typed
+                    # commit, which re-verifies it against the committing row
+                    # and only then narrows durable claimants to same-key
+                    # siblings. A store without the keyword keeps the
+                    # window-overlap claimant rule (fail-closed).
+                    commit_kwargs["fallback_submitline_key"] = record.submitline_key
                 if _callable_accepts_keyword(committer, "pipeline_job_id"):
                     commit_kwargs["pipeline_job_id"] = job.job_id
                 commit_result = committer(str(idempotency_key), **commit_kwargs)
@@ -2992,6 +3101,7 @@ def reconcile_reserved_unbound_jobs(
                                     "pipeline_job_reconciliation" if write_count else None
                                 ),
                                 durable_write_count=write_count,
+                                fallback_match_basis=fallback_basis,
                             )
                         )
                         continue
@@ -3006,6 +3116,7 @@ def reconcile_reserved_unbound_jobs(
                             ),
                             reconciliation_decision=None,
                             match_count=1,
+                            fallback_match_basis=fallback_basis,
                         )
                     )
                     continue
@@ -3081,6 +3192,7 @@ def reconcile_reserved_unbound_jobs(
                         else None
                     ),
                     durable_write_count=write_count,
+                    fallback_match_basis=fallback_basis,
                 )
             )
         except FileOrchestrationJournalError as error:
@@ -3305,18 +3417,23 @@ def _query_comment_accounting_proof(
                 coverage_start=owner_value.coverage_start,
                 coverage_end=owner_value.coverage_end,
             )
+        # A result without a basis (an adapter that never read SubmitLine)
+        # is count-only by construction.
+        match_basis = owner_value.fallback_match_basis or FALLBACK_BASIS_NAME_WINDOW_COUNT
         if len(owner_records) >= MAX_FALLBACK_MASTERS:
             return _CommentAccountingProof(
                 "fallback_ambiguous",
                 owner_records,
                 coverage_start=owner_value.coverage_start,
                 coverage_end=owner_value.coverage_end,
+                fallback_match_basis=match_basis,
             )
         return _CommentAccountingProof(
             "fallback_unique",
             owner_records,
             coverage_start=owner_value.coverage_start,
             coverage_end=owner_value.coverage_end,
+            fallback_match_basis=match_basis,
         )
     owned = _comment_query_records(
         owner_records,

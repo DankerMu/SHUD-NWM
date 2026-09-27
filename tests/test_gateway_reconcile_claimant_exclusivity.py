@@ -36,8 +36,18 @@ def _fallback_row(
     account: str = "account",
     comment: str = "",
     job_name: str = "nhms_forecast",
+    submit_line: str | None = None,
 ) -> str:
-    return f"{master_id}|{job_name}|COMPLETED|0:0|{comment}|{user}|{account}|{submit}\n"
+    """One ``--parsable2`` fallback row.
+
+    ``submit_line=None`` keeps the pre-#2655 eight-field shape (older sacct /
+    no ``SubmitLine`` column); a string appends it as the ninth field.
+    """
+
+    row = f"{master_id}|{job_name}|COMPLETED|0:0|{comment}|{user}|{account}|{submit}"
+    if submit_line is not None:
+        row += f"|{submit_line}"
+    return row + "\n"
 
 
 def _fallback_querier(

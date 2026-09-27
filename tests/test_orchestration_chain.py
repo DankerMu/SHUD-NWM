@@ -14674,7 +14674,36 @@ def test_round10_forecast_unknown_submit_status_is_ambiguous_and_unbound(
     assert durable["status"] == "reserved"
     assert durable["slurm_job_id"] is None
     assert durable["submit_outcome"] == "submit_result_ambiguous"
+    # #2655: the forecast ambiguity cause is durable, like the forcing branch.
+    assert durable["error_code"] == "SLURM_GATEWAY_INVALID_RESPONSE"
+    assert durable["error_message"] == "Slurm submit response did not contain a recognized status."
     assert [submission["stage"] for submission in client.submissions] == ["forecast"]
+
+
+def test_forecast_ambiguous_submit_persists_error_code_on_reserved_master(tmp_path: Path) -> None:
+    """#2655: a bare error after the gateway boundary is ambiguous; the held
+    ``reserved`` forecast master records the fallback code and the redacted
+    cause, and the journal row survives a cold reopen (lifecycle validator)."""
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = AttemptScopedArraySubmitFailureClient(submit_fail_stage="forecast", submit_fail_attempt=0)
+    result = _orchestrator(tmp_path, repository, client).orchestrate_cycle(
+        "gfs", "2026050100", _accepted_submit_forecast_basins()
+    )
+
+    assert result.status == "reconciling"
+    forecast = next(stage for stage in result.stages if stage.stage == "forecast")
+    assert forecast.status == "submit_result_ambiguous"
+    assert forecast.error_code == "SBATCH_SUBMIT_RESULT_AMBIGUOUS"
+    reopened = FileOrchestrationJournalRepository(repository.root)
+    durable = reopened.get_pipeline_job(forecast.pipeline_job_id)
+    assert durable["status"] == "reserved"
+    assert durable["slurm_job_id"] is None
+    assert durable["submit_outcome"] == "submit_result_ambiguous"
+    assert durable["error_code"] == "SBATCH_SUBMIT_RESULT_AMBIGUOUS"
+    assert durable["error_message"] == "forecast submission failed"
 
 
 def test_manual_retry_terminal_stage_submits_new_attempt_identity(tmp_path: Path) -> None:

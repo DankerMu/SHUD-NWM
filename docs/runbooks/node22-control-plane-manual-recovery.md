@@ -279,6 +279,41 @@ receipt 字段：`evidence_root`（**实际扫描的** root，按上面那条自
 | `blocked_strict_warm_start_init_state_mismatch` | `confirm-operator-reentry`（strict warm-start 预算） |
 | `blocked_operator_reentry_restart_stage_refused` | **不要再签一次**；带外修好 forecast 之前的输入，见下面「已知限制」的 sink 拒绝那条 |
 | `blocked_cohort_membership_unprovable` | `scripts/node22_manual_retry_failed_runs.py`（manual-retry marker，打在该 cohort 的 run id 上）；成因见 [`scheduler-dbfree-typed-reasons.md`](scheduler-dbfree-typed-reasons.md)「多成员 cohort 的失败归属」（#2603） |
+| `skip_active` / `active_duplicate_pipeline`，且同 source/cycle 的 forecast master 在 `restart_reconcile.reserved_unbound.outcomes[]` 里反复是 `ambiguous_fallback_match`（**不在** `list-operator-actions` 的六类里） | **不要** manual-retry、**不要**先 demote；走 [`failed-basin-retry.md`](failed-basin-retry.md)「Automatic unique fallback on an explicitly comment-less cluster」（#2655），见下 |
+
+### `active_duplicate_pipeline` + reserved-held forecast master（#2655）
+
+症状：某 cycle 的整批成员每趟都是 `skip_active` / `active_duplicate_pipeline`，后一 cycle
+`backfill_deferred_waiting_for_prior_cycle`，两个 source 一起冻结；而该 cycle 的
+`job_cycle_<source>_<cycle>_..._forecast` master 在 journal 里是 `status=reserved`、
+`slurm_job_id=null`、`reconciliation_reason_class=comment_accounting_unproven`，pass evidence
+的 `restart_reconcile.reserved_unbound.outcomes[]` 每趟都给它 `ambiguous_fallback_match`。
+成员 hydro_run 停在 `created`，master 又不是终态，所以成员一直被判「在飞」。
+
+处置顺序：
+
+1. 先看该 outcome 的 `fallback_match_basis`（#2655 起才有）：
+   - `submitline_exact` 且 `match_count=2`：窗口里有**两个** master 的 `SubmitLine` 都带本行的
+     `--comment=nhms_idem:<idempotency_key>`，是真的重复提交；保持 held，带 `sacct` 证据升级。
+   - `name_window_count`：窗口里至少有一个 master 的 `SubmitLine` 缺失/无 key/不一致，只能按
+     名字+窗口计数；用下面的只读 `sacct` 看是哪一个。
+   - 字段**不存在**：node-22 checkout 早于 #2655，`git pull --ff-only` 后下一趟会按 SubmitLine
+     精确 key 自动绑定（绑定用的仍是 `slurm_name_window_unique`，不引入新 token）。
+2. 只读核对（不写任何东西）：
+
+   ```bash
+   sacct --name nhms_forecast --user <expected_slurm_user> --accounts <expected_slurm_account> \
+     --starttime <submission_attempt_started_at> --endtime now \
+     --format=JobID,JobName,State,Submit,SubmitLine
+   ```
+
+   array-task 行（`<master>_<task>`）的 `SubmitLine` 带 `--comment=nhms_idem:<该行 idempotency_key>`
+   就是它自己的作业；`.batch`/`.extern` 行的 `SubmitLine` 为空，不参与判定。
+3. 绑定成功后下一趟 inflight reconcile 按 `sacct` 把 cohort 投影到终态：`COMPLETED` 的
+   array **不重算**，成员不再是 `active_duplicate_pipeline`，scheduler 从 forecast 之后的阶段
+   继续，下一 cycle 进入选择。
+4. `demote-reserved-job` 只用于**确认已死**（`sacct`/`squeue` 在该 attempt 窗口内都没有匹配作业）
+   的行；对已完成或在跑的作业执行会让整批 cohort 重新 `sbatch`。
 
 ### `permanent_failure` / `cancelled_manual_retry_required`
 

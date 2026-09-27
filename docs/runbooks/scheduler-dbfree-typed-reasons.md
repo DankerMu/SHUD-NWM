@@ -777,6 +777,30 @@ restart reconcile（`reconcile_inflight_jobs`，只读 sacct、从不提交）�
 - `status_change` 事件写失败只计数（`accounting.poll_isolation.pipeline_event_write_failures`）并告警，链照常继续。
 - 连续出现时先查 journal 所在卷（`df -h /scratch`）与 gateway 隧道，不要手工改行状态。
 
+## `active_duplicate_pipeline` + reserved-held forecast master + `ambiguous_fallback_match`（#2655）
+
+不是 blocked reason，是 skip reason（`decision: skip_active`，`active_status` 通常是成员 hydro_run 的 `created`：
+master 停在 `reserved`、从未走到终态，成员就一直被判在飞），也**不在** `list-operator-actions` 的待办集合里，所以只能从症状反查：
+
+- 同一 source/cycle 的整批成员每趟都 `skip_active` / `active_duplicate_pipeline`，后一 cycle
+  `backfill_deferred_waiting_for_prior_cycle`，常见为 gfs 与 IFS 同时冻结；
+- 该 cycle 的 forecast master（`job_cycle_<source>_<cycle>_..._forecast`）在 journal 中是 `status=reserved`、
+  `slurm_job_id=null`、`reconciliation_reason_class=comment_accounting_unproven`；
+- 每趟 `restart_reconcile.reserved_unbound.outcomes[]` 对它给出 `action=ambiguous_fallback_match`、`match_count=2`、
+  `durable_write_count=0`。
+
+成因：node-22 是明确不存 comment 的集群（`AccountingStoreFlags=(null)`），不明确的 forecast 提交只能靠 #1565
+名字窗口兜底绑定；同一趟里 gfs 与 IFS 相隔几秒提交，两个 array 落进彼此的窗口，只数个数就永远是"歧义"。
+#2655 起兜底额外读 `sacct SubmitLine`，按其中 `--comment=nhms_idem:<idempotency_key>` 精确排除别家的 array，
+pass evidence 的 `fallback_match_basis` 标出是按 `submitline_exact` 还是退回 `name_window_count` 判的；forecast
+不明确提交的 master 行也开始记 `error_code` / `error_message`（与 forcing 一致）。
+
+处置入口：[`failed-basin-retry.md`](failed-basin-retry.md)「Automatic unique fallback on an explicitly comment-less
+cluster」与 Disposition 第 2 条（completed but unbound）；node-22 上的操作顺序见
+[`node22-control-plane-manual-recovery.md`](node22-control-plane-manual-recovery.md)「`active_duplicate_pipeline` +
+reserved-held forecast master」。作业已完成或仍在跑时**不要** `demote-reserved-job`（会重投整批 cohort），也不要
+打 manual-retry marker。
+
 ## 相关文档
 
 - [`current-production-ops.md`](current-production-ops.md) — 当前生产值守手册。
