@@ -7,7 +7,7 @@ Writer trace (read-only, master `98a770121`):
 - **No current writer mints (c).** The only writer of fresh forecast cohort reservations is `_reserve_cycle_stage` (`chain_forecast_orchestrator_cycle.py:716`), and it always stamps the contract version.
 - **Auto retry.** For a current master it returns a virtual `pending` namespace. Only a legacy predecessor gets a clone that pops the version, and that clone is written `pending` with a null key.
 - **Manual retry.** The clone is `pending` with key `manual_retry:*`. No current writer can move it to `reserved`.
-- **Auto-retry clone of a legacy master.** The clone keeps `stage`/`cohort_members` with a null key, and a non-versioned reclaim request would write it `reserved`, unversioned. No current caller sends that request.
+- **Auto-retry clone of a legacy master.** The file-lane clone keeps `stage` with a null key but drops `cohort_members` (field whitelist). A non-versioned reclaim request would backfill the members from the request and write it `reserved`, unversioned. No current caller sends that request.
 - **The persistence API does not enforce the invariant.** `reserve_pipeline_job`, `upsert_pipeline_job` (on an existing legacy row) and `append_historical_pipeline_job` accept a (c) row, and `reclaim_pipeline_job_reservation` recycles a dead legacy forecast master back to `reserved` unversioned (`row = dict(existing)`). So (c) is reachable, but only from a pre-existing legacy seed:
   - the historical import `import_historical_scheduler_state`;
   - a dead legacy master that gets reclaimed.

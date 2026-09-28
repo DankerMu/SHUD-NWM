@@ -19,8 +19,8 @@
 ## 4. Verification
 
 - [x] 4.1 `uv run ruff check .`; `openspec validate legacy-unversioned-held-master-guard --strict --no-interactive`; focused suites: new suites, `tests/test_gateway_reconcile_*.py`, `tests/test_orchestrator_demote_*.py`, `tests/test_file_orchestration_migration*.py` (or the import suite), `tests/test_orchestrator_bind_reserved_job_*.py`, `tests/test_operator_action_listing*.py`, `tests/test_scheduler_held_reservation_block.py`, retry and journal suites touched by the guard.
-- [ ] 4.2 node-27 focused run at the PR head, plus the full `uv run pytest -q`.
-- [ ] 4.3 Record the node-22 production (c) count in the PR, with the exact scan script, the journal root and the predicate: design Context gives 0 on both journal segments and direct rows (2026-09-28T05:21Z).
+- [x] 4.2 node-27 focused run at the PR head, plus the full `uv run pytest -q`.
+- [x] 4.3 Record the node-22 production (c) count in the PR, with the exact scan script, the journal root and the predicate: design Context gives 0 on both journal segments and direct rows (2026-09-28T05:21Z).
 
 ## Risk packs considered (core)
 
