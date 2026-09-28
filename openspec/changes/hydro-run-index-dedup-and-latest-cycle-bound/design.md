@@ -11,7 +11,7 @@ Change surface:
 ## D1 去重（#2634）
 
 保留：`hydro_run_qhh_latest_candidate_idx`（`packages/common/forecast_store.py:4459`、`tests/api_contract_helpers.py:308`、`tests/test_forecast_api.py:2033`、`tests/test_forecast_store_routing.py:87`、`tests/test_migrations.py:375` 与 i13 receipts 引用）、
-`hydro_run_display_product_basin_status_idx`（`scripts/node27_autopipeline.py:1426` 说明它是实际路径）。
+`hydro_run_display_product_basin_status_idx`（`scripts/node27_autopipeline.py:1426` docstring 点名的就是它，也是 000031 search-discovery 建的那一份）。两组副本定义字节相同，删除前 planner 选哪一份是任意的：000064 态的 scratch 上 publish UPDATE 选的是 `hydro_run_display_ready_basin_status_idx`（`receipts/2026-09-28-branch/sibling-explain-nhms_scratch_batchdb_d2.out`），000065 态改走保留副本，计划形状不变。
 删除：`hydro_run_qhh_latest_candidate_parsed_idx`、`hydro_run_display_ready_candidate_idx`、`hydro_run_display_ready_basin_status_idx`。
 **测试面（real-DB）**：`tests/test_schema_ledger_convergence_integration.py` 按 000065 之后的期望改写——`fresh_catalog` 的 `hydro_run` 索引集合为保留的 4 个 partial（`latest_ready_run`、`qhh_latest_candidate`、`display_product_basin_status`、新候选索引）+ 非 partial 的 3 个；`broken` 改用保留的索引名（如 `hydro_run_display_product_basin_status_idx`）；重放测试改为按序重放 000062→000065 整段并断言终态等于 fresh（000063 单独重放会把三个重复索引建回，单独断言 no-op 已不成立）；新增"新候选索引 INVALID 残留后重跑 000065"用例。既有 000063 INVALID 重跑用例（`:404-432`）必须同时删掉 `000063` 与 `000065` 的账本行，让 runner 按 000063→000065 顺序重放后再与 fresh 比较（只删 000063 的行会让 runner 单独重放 000063，把三个重复索引建回）；规格场景 "A failed index rebuild is safe to rerun" 按同一口径改写。
 
@@ -67,12 +67,12 @@ CROSS JOIN LATERAL (
 - 上界：`valid_time > end_time` 为 **0 行**（`proof-valid-le-end.*`，73 s）。
 - 因此对现存数据，加界后 EXISTS 的真值与不加界相同，I1 结果不变。
 
-**契约归属：**
-- `workers/output_parser/parser.py::_parse_time_token` 把行时间写成 `start_time + offset`；
-- `scripts/node27_ingest_run.py` 从 manifest 写入 `start_time`/`end_time`（同一 run_id 重写时两者一起更新）；
-- SHUD 运行窗口就是 [start_time, end_time]。
+**契约归属：** `valid_time ∈ [cycle_time, end_time]` 是 node-27 数据上**观察到的性质**（2026-09-28 实测 0 违例，见上），**不是写入方保证**：
+- `workers/output_parser/parser.py::_parse_time_token` 把相对时间行写成 `start_time + offset`，offset 可以为负，不拒绝；
+- 同文件的绝对时间自动识别（`_absolute_time_matches_context`）接受首行落在 `cycle_time - 1 day`（`AUTO_TIME_BASIS_CONTEXT_PADDING_DAYS = 1`）到 `cycle_time + 366 days` 之间，ISO 时间串不做窗口检查；parser 不读 `end_time`；
+- `scripts/node27_ingest_run.py` 从 manifest 写入 `start_time`/`end_time`（同一 run_id 重写时两者一起更新）；SHUD 运行窗口就是 [start_time, end_time]，这是行落在窗口内的来由，但没有任何一层检查它。
 
-DB 层没有跨表 CHECK 能表达这条约束（hydro_run 对 hypertable）。本批不在 parser 加强制检查（范围只含 forecast_store + migration），把"ingest 侧强制 valid_time ∈ [cycle_time, end_time]"作为 follow-up 立单，避免 D1 的依赖无人知晓。
+DB 层没有跨表 CHECK 能表达这条约束（hydro_run 对 hypertable）。本批不在 parser 加强制检查（范围只含 forecast_store + migration）；写入侧强制 `valid_time ∈ [cycle_time, end_time]` 由 #2687 跟踪，避免 D1 的依赖无人知晓。
 失败模式：只有当某个 run 在该 segment 上**所有** `q_down` 行都落在窗口外时才会漏选。行本来从 `start_time = cycle_time` 起写，这是病态数据，不是 retention 能造成的情况（retention 只按 chunk 砍掉较早的行，剩下的尾部仍在窗口内）。
 
 **为什么必须改成 LATERAL：** 实测对照（`nhms_display_ro`，warm 第 3 次；手写 SQL 与代码渲染的 D1 语句同形，段 id 已按代码映射为 `<basin>_shud_shud_riv_000001`；`d1-explain-<pin>-<variant>.*`）：
@@ -88,6 +88,39 @@ DB 层没有跨表 CHECK 能表达这条约束（hydro_run 对 hypertable）。�
 
 两者缺一不可。`LIMIT 1` 的 LATERAL 与 EXISTS 在"是否存在一行"上等价，外层 `ORDER BY o.cycle_time DESC LIMIT 1` 与 `OFFSET 0` 围栏不变。
 
+### F1：未落行候选在最新稀疏 chunk 上的成本
+
+场景是 register→parse 过渡态：最新 cycle 的 run 已写进 `hydro_run`（进入 `cand`），parser 还没写它的 `q_down` 行。它按 `cycle_time DESC` 排在最前，探针先对它跑一次、落空，再轮到下一个有行的候选。它的窗口 `[T, T+7d]`（T 为当天 00Z/12Z）全部落在最新的未压缩 chunk 上。
+
+**机制：** 窗口覆盖 7 个未压缩 chunk（`_hyper_9_213/217/221/225/231/233/237`）。在最新、行数最少的三个 chunk `231/233/237` 上（reltuples 71.2M / 39.6M / 9.2M，213–225 为 103M–199M，`f1-chunk-stats.out`），planner 在 `narrow_pkey` 与 `river_ts_segment_time_key_idx` 之间选了后者：Index Cond 只有 `(river_segment_key, variable_e, valid_time 范围)`，`run_key` 落进 Filter。213–225 仍走 `narrow_pkey`，`run_key` 在 Index Cond 中，每 loop 4 hit。所以一个落空候选在每个热 chunk 上的成本约等于：该 segment 在窗口 ∩ chunk 内**所有 run** 的 `q_down` 行数（每行一次堆访问），再加几页索引。heihe 的 `Rows Removed by Filter` 为 216 / 120 / 24，与同文件末尾按 chunk 的计数 216 / 120 / 24（10 / 6 / 2 个 run）一致。这是 planner 的逐 chunk 选择，本批不控制。
+
+**实测**（node-27 `nhms_display_ro`，`BEGIN READ ONLY`，2026-09-28；VALUES 里的 run_key < 0 即落空候选；段 id 按代码映射为 `<basin>_shud_shud_riv_000001`；`receipts/2026-09-28-branch/f1-*`）：
+
+| basin / 形态 | 落空候选 | 根节点 shared hit | 热 chunk 231 / 233 / 237 | 213–225 各 chunk | 其余 |
+|---|---|---|---|---|---|
+| byh，branch（编排器，`f1-probe.sql` → `f1-byh.out`） | 2（12Z、00Z） | 810 | 442 / 246 / 54 | 8 | `seg` 9 |
+| byh，branch + `ORDER BY` pkey 序（`f1-probe-ord.sql` → `f1-ord-byh.out`） | 2 | 817 | 计划不变 | | |
+| xinan_nujiang，branch（`f1-xinan_nujiang.out`） | 2 | 1134 | 8 / 6 / 6（窗口内几乎无行） | 8 | `seg` 1051（`river_segment_network_stream_type_idx`） |
+| **heihe**，branch，GFS+IFS 00Z | 2 | **810** | 442 / 246 / 54 | 8 | `seg` 9 |
+| heihe，branch，GFS+IFS 12Z | 2 | 807 | 442 / 246 / 54 | 8 | |
+| heihe，branch，GFS+IFS 00Z+12Z | 4 | **1584** | 884 / 492 / 108 | 16 | |
+| qhh，branch，00Z / 12Z / 00Z+12Z | 2 / 2 / 4 | 808 / 805 / 1580 | 440 / 246 / 54；00Z+12Z 为 880 / 492 / 108 | 8 / 8 / 16 | |
+| heihe，master 形态（无界 `EXISTS`，`f1-probe-window-master.sql`），00Z / 00Z+12Z | 2 / 4 | 203 / 397 | 29 个 chunk 各 3–4 hit 的 `run_key` 前缀 seek | | |
+| heihe，branch，**单行** VALUES 00Z（对照） | 1 | 36 | 全部 `narrow_pkey` | | |
+
+- 第三个 basin 按"`hydro_run` forecast run 最多"选：heihe 与 qhh 并列 541（`f1-basin-pick.out`，两者最新已登记 cycle 为 2026-09-27 12Z，全局最新为 2026-09-28 00Z），两个都测了（`f1_third_basin.sh`、`f1-probe-window.sql`，每条语句跑 3 次取第 3 次）。
+- GFS 与 IFS 的 00Z/12Z 窗口在 node-27 上都是 `[cycle, cycle+7d]`（`receipts/2026-09-28-phase0-proof/window-shape.out`），所以每组各放一个 GFS 形与一个 IFS 形候选，两者成本相同。heihe、qhh 与 byh 的数字一致：各活跃 basin 的 run 节奏相同，segment 在未来 chunk 上的行数也相同。
+- 每个落空候选 ≈ 400 shared hit（三个热 chunk ≈ 371，213–225 ≈ 16，其余几 hit）。master 形态每个落空候选 ≈ 100。
+- 单行 VALUES 不能用来复现：planner 把窗口折成常量，在计划期排除 chunk，每个 chunk 都走 `narrow_pkey`，只要 36 hit。真实语句的候选来自 `cand` CTE，只能在运行期排除 chunk。复现必须用多行 VALUES。
+
+**整条语句的成本模型（过渡态）：** `seg`（9；planner 走 `river_segment_network_stream_type_idx` 时 ≈ 1050，master 同样）+ `cand`（生产 apply 前 Seq Scan ≈ 1299；000065 后 125–194，见 D2）+ Σ_scenario（该 scenario 首个命中前的落空候选数 × ≈ 400）+ 命中探针（几十）。
+- GFS、IFS 各有 1 个 cycle 未落行（2 个落空，≈ 800）：apply 前 ≈ 2150，`seg` 走 1051 时 ≈ 3200；apply 后 ≈ 1000–2100。
+- 00Z 与 12Z 两个 cycle 都未落行（4 个落空，≈ 1580）：apply 前 ≈ 2940，`seg` 走 1051 时 ≈ 3980；apply 后 ≈ 1760–2880。
+- master 在同一过渡态下每个落空候选 ≈ 100，比 branch 便宜约 4 倍；但 master 的成本按候选数 × chunk 数增长，空 pin 24491（3.3），branch 为 1308。上面各项都低于 D11 的 5000。
+- 上界：如果 planner 在窗口内 7 个未压缩 chunk 全部改选 `river_ts_segment_time_key_idx`，每个落空候选 ≈ 600+504+408+312+216+120+24 = 2184 行（heihe 00Z 计数），4 个落空 ≈ 8700，超过 5000。当前 213–225 走 `narrow_pkey`。
+
+**处置：** 作为残余风险接受，本批不改 SQL。止损规则：之后任何 receipt（包括 4.3 生产 apply 后的 D1 EXPLAIN）中，latest-cycle 发现整条语句的 shared hit 如果 > 5000，重开本项。
+
 ## 结果（branch，生产 apply 前；`receipts/2026-09-28-branch/`）
 
 - **3.3 440-pin 等价回归**（`equivalence-bounded.*`，`nhms_display_ro`，每 pin 一个 REPEATABLE READ 快照；old = origin/master `aff6201e0` 的 `_per_source_latest_cycles`，new = branch；两侧 `packages/ services/ apps/ workers/` 只差 `forecast_store.py`，harness 开头断言）：64 个网络，440 pin，364 非空 / 76 空，**0 mismatch**。
@@ -99,7 +132,7 @@ DB 层没有跨表 CHECK 能表达这条约束（hydro_run 对 hypertable）。�
 
   非空 max 来自 `basins_shj`：其中 1842 是 `seg` CTE 解析 `river_segment_id` 时 planner 选了 `river_segment_network_stream_type_idx`（master 同样如此，与本批无关），事实探针本身只有几十。
 - **逐 chunk EXPLAIN**（`explain-bounded-{byh,shj,zhaochen_bst}.out`，warm 第 3 次）：非空 pin `byh` GFS+IFS 1318 hit、`Chunks excluded during runtime: 21`，命中在未压缩 chunk `_hyper_9_206` 的 `narrow_pkey`（`run_key` 在 Index Cond 中）；空 pin `zhaochen_bst` GFS+IFS 1308 hit、`Chunks excluded during runtime: 29`。余下约 1299 hit 是 `cand` 在生产上仍然 Seq Scan `hydro_run`（新索引待生产 apply）。
-- **3.4 apply 前 sibling 选择器**（`sibling-explain-*.out`，scratch DB 带 `hydro_run`/`core.basin`/`basin_version`/`river_network_version`/`model_instance`/`met.forcing_version`/`run_display_coverage` 的只读拷贝；SQL 从代码取）：000064 态 vs 000065 态，同一 VM 状态下每条语句的 `hydro_run` 访问只是换到保留的同定义副本，buffers 相同——`display_ready_run` 走 `hydro_run_latest_ready_run_idx`（不变）；QHH latest-product candidate CTE 及其 fast path 由 `hydro_run_display_ready_candidate_idx` 换到 `hydro_run_qhh_latest_candidate_idx`；display-coverage candidate CTE 的 Bitmap Index Scan 由 `hydro_run_display_ready_basin_status_idx` 换到 `hydro_run_display_product_basin_status_idx`；`_eligible_run_ids` 由 Index Only Scan `hydro_run_display_ready_candidate_idx` 换到 `hydro_run_qhh_latest_candidate_idx`（191 hit，相同）；autopipeline publish UPDATE 走 `hydro_run_display_product_basin_status_idx`。注：未 VACUUM 的 000065 scratch 上 `_eligible_run_ids` 改走 `hydro_run_latest_ready_run_idx`（VM 为空时 index-only 无利），这是 VM 状态的差别，不是去重造成的。
+- **3.4 apply 前 sibling 选择器**（`sibling-explain-*.out`，scratch DB 带 `hydro_run`/`core.basin`/`basin_version`/`river_network_version`/`model_instance`/`met.forcing_version`/`run_display_coverage` 的只读拷贝；SQL 从代码取）：000064 态 vs 000065 态，同一 VM 状态下每条语句的 `hydro_run` 访问只是换到保留的同定义副本，buffers 相同——`display_ready_run` 走 `hydro_run_latest_ready_run_idx`（不变）；QHH latest-product candidate CTE 及其 fast path 由 `hydro_run_display_ready_candidate_idx` 换到 `hydro_run_qhh_latest_candidate_idx`；display-coverage candidate CTE 的 Bitmap Index Scan 由 `hydro_run_display_ready_basin_status_idx` 换到 `hydro_run_display_product_basin_status_idx`；`_eligible_run_ids` 由 Index Only Scan `hydro_run_display_ready_candidate_idx` 换到 `hydro_run_qhh_latest_candidate_idx`（191 hit，相同）；autopipeline publish UPDATE（EXPLAIN only）由 `hydro_run_display_ready_basin_status_idx` 换到 `hydro_run_display_product_basin_status_idx`。注：未 VACUUM 的 000065 scratch 上 `_eligible_run_ids` 改走 `hydro_run_latest_ready_run_idx`（VM 为空时 index-only 无利），这是 VM 状态的差别，不是去重造成的。
 - **4.3 生产 apply 后**：待用户确认 apply 后补。
 
 Must preserve:

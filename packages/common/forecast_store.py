@@ -235,13 +235,16 @@ def _segment_rows_source_sql(run_pushdown: str = "") -> str:
 #: #2630: the two `valid_time` conjuncts bound the probe to the candidate's run
 #: window `[o.cycle_time, o.end_time]`, so TimescaleDB excludes every chunk
 #: outside it at runtime instead of seeking each candidate in every chunk. That
-#: rests on a run's fact rows lying inside its window: the output parser writes
-#: `start_time + offset`, the ingest writes `start_time`/`end_time` from the
-#: manifest, and node-27's forecast runs all have `start_time = cycle_time`
-#: (an observed property, not a DB constraint). node-27 held zero rows outside the window on
-#: 2026-09-28 (openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/
-#: receipts/2026-09-28-phase0-proof/); ingest-side enforcement is #2687. The
-#: caller wraps this template in `CROSS JOIN LATERAL (... LIMIT 1)`.
+#: rests on a run's fact rows lying inside its window, which is an OBSERVED
+#: property of node-27's data, not a writer guarantee: node-27 held zero rows
+#: outside the window on 2026-09-28 (openspec/changes/hydro-run-index-dedup-and-
+#: latest-cycle-bound/receipts/2026-09-28-phase0-proof/), and its forecast runs
+#: all have `start_time = cycle_time`. The writers do not enforce it: the output
+#: parser writes relative rows as `start_time + offset` and accepts negative
+#: offsets, its absolute-time auto-detection accepts a first row up to one day
+#: before `cycle_time` (`AUTO_TIME_BASIS_CONTEXT_PADDING_DAYS`), and it never
+#: reads `end_time`; the DB has no constraint either. Enforcement is #2687.
+#: The caller wraps this template in `CROSS JOIN LATERAL (... LIMIT 1)`.
 _LATEST_CYCLE_FACT_PROBE_SQL = """
                     SELECT 1
                     FROM hydro.river_timeseries rt
@@ -1221,10 +1224,12 @@ class PsycopgForecastStore:
         empty pin cost one seek per candidate per chunk (24497 shared buffers on
         node-27's worst pin). ``LIMIT 1`` asks the same "is there a row" question
         ``EXISTS`` did. The window is a semantic premise, not a free filter: a
-        candidate whose only rows lie outside it no longer matches. node-27 had
-        no such row on 2026-09-28 (``openspec/changes/hydro-run-index-dedup-and-
-        latest-cycle-bound/receipts/2026-09-28-phase0-proof/``); ingest-side
-        enforcement is #2687.
+        candidate whose only rows lie outside it no longer matches. The premise
+        is an observed property of node-27's data, not a writer guarantee:
+        node-27 had no such row on 2026-09-28 (``openspec/changes/hydro-run-
+        index-dedup-and-latest-cycle-bound/receipts/2026-09-28-phase0-proof/``),
+        but the output parser accepts negative offsets and an absolute-time
+        first row up to one day before ``cycle_time``. Enforcement is #2687.
         """
         fact_probe_sql = render_river_ts_sql(
             _latest_cycle_fact_probe_template("narrow"),

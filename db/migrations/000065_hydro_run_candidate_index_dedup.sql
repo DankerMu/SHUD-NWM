@@ -13,9 +13,15 @@
 -- Every write to hydro_run maintains each copy; the planner gains nothing from a
 -- second one. Kept: hydro_run_qhh_latest_candidate_idx (named by forecast_store's
 -- QHH latest-product index evidence and its tests) and
--- hydro_run_display_product_basin_status_idx (the path node27_autopipeline's
--- publish transition takes). Dropped: the other three. Their defining migrations
--- and 000063 stay byte-for-byte as applied; this file is the forward step.
+-- hydro_run_display_product_basin_status_idx (the name node27_autopipeline's
+-- publish-transition docstring cites, and the one migration 000031's search
+-- discovery work created). Because each dropped copy is byte-identical to a kept
+-- one, which copy the planner used before this file is arbitrary: on a node-27
+-- scratch copy at the 000064 state the publish UPDATE picked
+-- hydro_run_display_ready_basin_status_idx, and after this file the same plan
+-- uses the kept copy. Dropped: the other three. Their
+-- defining migrations and 000063 stay byte-for-byte as applied; this file is the
+-- forward step.
 --
 -- Status-free forecast candidate index (#2626). The #2424 D1 latest-cycle
 -- discovery reads its candidates with no status predicate (user decision (a)),
