@@ -25,6 +25,7 @@ from services.orchestrator import cli, operator_action_listing, scheduler_eviden
 from services.orchestrator.operator_action_listing_held import (
     HELD_RESERVATION_AGED_LISTED_ACTIONS,
     HELD_RESERVATION_ALWAYS_LISTED_ACTIONS,
+    HELD_RESERVATION_FORCING_BIND_ACTIONS,
     HELD_RESERVATION_NEVER_LISTED_ACTIONS,
     HELD_RESERVATION_OPERATOR_COMMANDS,
 )
@@ -172,6 +173,9 @@ def test_the_held_action_table_is_closed_over_the_reconcile_reserved_unbound_voc
     assert not (never & always) and not (never & aged) and not (always & aged)
     commands = set(HELD_RESERVATION_ALWAYS_LISTED_ACTIONS.values()) | set(HELD_RESERVATION_AGED_LISTED_ACTIONS.values())
     assert commands == set(HELD_RESERVATION_OPERATOR_COMMANDS) == {"bind-reserved-job", "triage", "escalate"}
+    # #2675: the forcing bind actions are listed actions of the same closed vocabulary.
+    assert set(HELD_RESERVATION_FORCING_BIND_ACTIONS) == {"multiple_matches_blocked", "query_unavailable"}
+    assert set(HELD_RESERVATION_FORCING_BIND_ACTIONS) <= always | aged
 
 
 _TABLE = [
@@ -269,44 +273,100 @@ def test_query_unavailable_is_listed_only_once_its_anchor_is_six_hours_old_or_un
         assert _held(payload)[0]["submission_attempt_started_at"] == (_iso(anchor) if anchor else None)
 
 
+# --- #2675: the forcing lane's own mapping ----------------------------------------------------
+
+#: Independent literal of design Decision 4: only these two forcing actions point at the
+#: forcing bind; every other listed forcing action escalates.
+_FORCING_TABLE = [
+    ("bound", None),
+    ("reservation_lost", None),
+    ("absence_retry_permitted", None),
+    ("identity_mismatch_released", None),
+    ("ambiguous_fallback_match", "escalate"),
+    ("legacy_unversioned_read_only", "escalate"),
+    ("multiple_matches_blocked", "bind-reserved-job"),
+    ("query_unavailable", "bind-reserved-job"),
+    ("fallback_no_match", "escalate"),
+    ("absence_unconfirmed", "escalate"),
+    ("identity_mismatch_blocked", "escalate"),
+    ("stale_attempt_blocked", "escalate"),
+    ("journal_quarantined", "escalate"),
+    ("a_future_action_outside_the_table", "escalate"),
+]
+
+
+@pytest.mark.parametrize(("action", "command"), _FORCING_TABLE)
+def test_every_forcing_action_is_listed_by_the_forcing_mapping_without_a_follow_up_issue(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], action: str, command: str | None
+) -> None:
+    _write_held_pass(tmp_path, _PASS_A, mtime=1_000, outcomes=[_outcome(action, job_id=_FORCING_JOB)])
+
+    code, payload, _err = _run(["--evidence-root", str(tmp_path)], capsys)
+
+    if command is None:
+        assert (code, _held(payload)) == (0, [])
+        return
+    assert code == 1
+    assert _held(payload) == [
+        {
+            "decision": "held_reservation_unresolved",
+            "reason": action,
+            "job_id": _FORCING_JOB,
+            "source_id": "gfs",
+            "cycle_time": "2026-07-12T00:00:00Z",
+            "submission_attempt_started_at": "2026-07-12T05:00:00Z",
+            "operator_command": command,
+            "recovery_runbook": _RUNBOOK,
+            "first_seen_pass": _PASS_A,
+            "last_seen_pass": _PASS_A,
+            "seen_in_passes": 1,
+        }
+    ]
+
+
 @pytest.mark.parametrize(
-    ("outcome", "anchor"),
+    ("action", "anchor", "command"),
     [
-        ("query_unavailable", _STARTED - timedelta(hours=7)),
-        ("multiple_matches_blocked", _STARTED - timedelta(minutes=1)),
+        # A real double submission: listed at once, whatever the anchor age.
+        ("multiple_matches_blocked", _STARTED - timedelta(minutes=1), "bind-reserved-job"),
+        ("query_unavailable", _STARTED - timedelta(hours=5, minutes=59), None),
+        ("query_unavailable", _STARTED - timedelta(hours=6), "bind-reserved-job"),
+        ("query_unavailable", None, "bind-reserved-job"),
+        ("identity_mismatch_blocked", _STARTED - timedelta(hours=1), None),
+        ("identity_mismatch_blocked", _STARTED - timedelta(hours=6), "escalate"),
+        ("absence_unconfirmed", _STARTED - timedelta(hours=1), None),
+        ("absence_unconfirmed", _STARTED - timedelta(hours=6), "escalate"),
     ],
 )
-def test_a_held_forcing_row_is_escalated_with_its_follow_up_issue(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], outcome: str, anchor: datetime
+def test_the_forcing_mapping_keeps_the_age_rules(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], action: str, anchor: datetime | None, command: str | None
 ) -> None:
-    """Neither bind nor demote accepts a forcing master; its exit is tracked in #2675."""
-
-    _write_held_pass(tmp_path, _PASS_A, mtime=1_000, outcomes=[_outcome(outcome, job_id=_FORCING_JOB, anchor=anchor)])
+    _write_held_pass(tmp_path, _PASS_A, mtime=1_000, outcomes=[_outcome(action, job_id=_FORCING_JOB, anchor=anchor)])
 
     code, payload, _err = _run(["--evidence-root", str(tmp_path)], capsys)
 
+    assert [row["operator_command"] for row in _held(payload)] == ([command] if command else [])
+    assert code == (1 if command else 0)
+    assert all("follow_up_issue" not in row for row in _held(payload))
+
+
+@pytest.mark.parametrize(
+    "job_id",
+    [
+        "job_cycle_gfs_2026071200_convert_cohort_36e4f7b9bf80_forcing_retry_2",
+        "job_cycle_IFS_2026071212_convert_cohort_ab12_produce_forcing_array",
+        "job_cycle_gfs_2026071200_convert_cohort_ab12_produce_forcing",
+        "job_cycle_gfs_2026071200_convert_cohort_ab12_forcing_package",
+    ],
+)
+def test_every_forcing_stage_alias_suffix_reads_as_a_forcing_master(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], job_id: str
+) -> None:
+    _write_held_pass(tmp_path, _PASS_A, mtime=1_000, outcomes=[_outcome("multiple_matches_blocked", job_id=job_id)])
+    code, payload, _err = _run(["--evidence-root", str(tmp_path)], capsys)
     assert code == 1
     (entry,) = _held(payload)
-    assert (entry["job_id"], entry["reason"], entry["operator_command"], entry["follow_up_issue"]) == (
-        _FORCING_JOB,
-        outcome,
-        "escalate",
-        "#2675",
-    )
-    assert (entry["source_id"], entry["cycle_time"]) == ("gfs", "2026-07-12T00:00:00Z")
-
-
-def test_a_young_forcing_query_unavailable_keeps_the_age_rule(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    _write_held_pass(
-        tmp_path,
-        _PASS_A,
-        mtime=1_000,
-        outcomes=[_outcome("query_unavailable", job_id=_FORCING_JOB, anchor=_STARTED - timedelta(hours=1))],
-    )
-    code, payload, _err = _run(["--evidence-root", str(tmp_path)], capsys)
-    assert (code, _held(payload)) == (0, [])
+    assert (entry["operator_command"], "follow_up_issue" in entry) == ("bind-reserved-job", False)
 
 
 @pytest.mark.parametrize(
@@ -315,6 +375,8 @@ def test_a_young_forcing_query_unavailable_keeps_the_age_rule(
         ("job_cycle_gfs_2026071200_forecast_fixture_forecast_retry_2", "bind-reserved-job"),
         ("job_cycle_IFS_2026071212_convert_cohort_ab12_run_shud_forecast_array", "bind-reserved-job"),
         ("not_a_master_job_id", "escalate"),
+        # Neither a forecast nor a forcing stage suffix: escalate whatever the action.
+        ("job_cycle_gfs_2026071200_convert_cohort_ab12_parse", "escalate"),
     ],
 )
 def test_the_forecast_master_test_reads_the_stage_suffix_and_fails_safe(
@@ -325,7 +387,8 @@ def test_the_forecast_master_test_reads_the_stage_suffix_and_fails_safe(
     assert code == 1
     (entry,) = _held(payload)
     assert entry["operator_command"] == command
-    assert ("follow_up_issue" in entry) is (command == "escalate")
+    # Only a legacy unversioned forecast master carries a follow-up issue (#2675 closed the forcing gap).
+    assert "follow_up_issue" not in entry
 
 
 # --- dedup, resolution, unscanned passes ------------------------------------------------------
@@ -470,6 +533,8 @@ def test_the_help_text_names_the_held_decision_its_commands_and_the_fifth_bounda
         "submission_attempt_started_at",
         "#2674",
         "#2675",
+        "forcing master",
+        *HELD_RESERVATION_FORCING_BIND_ACTIONS,
         *HELD_RESERVATION_OPERATOR_COMMANDS,
         *HELD_RESERVATION_NEVER_LISTED_ACTIONS,
         *HELD_RESERVATION_ALWAYS_LISTED_ACTIONS,
@@ -477,6 +542,7 @@ def test_the_help_text_names_the_held_decision_its_commands_and_the_fifth_bounda
     ):
         assert token in help_text, token
     assert "fifth known boundary of exit 0" in help_text
+    assert "follow_up_issue #2675" not in help_text
 
 
 # --- evidence: the attempt anchor rides the serialized outcome and survives compaction ---------
