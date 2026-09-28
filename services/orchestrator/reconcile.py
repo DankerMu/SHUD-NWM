@@ -321,10 +321,6 @@ def _bounded_visibility_stdout(command: Sequence[str]) -> str:
                 raise ReconcileQueryUnavailable("visibility probe timed out")
             events = selector.select(timeout=min(remaining, 0.25))
             if not events:
-                if process.poll() is not None:
-                    for key in list(selector.get_map().values()):
-                        selector.unregister(key.fileobj)
-                    break
                 continue
             for key, _mask in events:
                 stream = key.fileobj
@@ -1198,8 +1194,6 @@ def _bounded_sacct_stdout(command: Sequence[str], *, budget: _SacctScanBudget | 
                 raise ReconcileQueryUnavailable("sacct query timed out")
             events = selector.select(timeout=min(remaining, 0.25))
             if not events:
-                if process.poll() is not None:
-                    break
                 continue
             chunk = os.read(stdout.fileno(), 64 * 1024)
             if not chunk:

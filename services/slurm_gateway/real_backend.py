@@ -78,7 +78,7 @@ from services.slurm_gateway.models import (
     SlurmLogsResponse,
     SubmitJobRequest,
 )
-from services.slurm_gateway.resource_profiles import load_resource_profiles
+from services.slurm_gateway.resource_profiles import load_resource_profiles, resolve_model_resource_profile
 from services.slurm_gateway.resource_validation import (
     ResourceProfileValidationError,
     validate_directive_path,
@@ -633,29 +633,12 @@ class RealSlurmGateway(SlurmGateway):
         return load_resource_profiles(self.settings.resource_profiles_path)
 
     def resolve_resource_profile(self, model_id: str | None) -> dict[str, Any]:
-        profiles = self.load_resource_profiles()
-        resolved = dict(profiles["default"])
-        overrides = profiles.get("overrides") or {}
-        if model_id and isinstance(overrides.get(model_id), dict):
-            resolved.update(overrides[model_id])
-
-        # Per-deployment partition override: the canonical profile default partition
-        # ("compute") may not exist on a given cluster; SLURM_GATEWAY_PARTITION_OVERRIDE
-        # lets a deployment target its real partition without editing shared config.
-        partition_override = str(getattr(self.settings, "partition_override", "") or "").strip()
-        if partition_override:
-            resolved["partition"] = partition_override
-        exclude_nodes = str(getattr(self.settings, "exclude_nodes", "") or "").strip()
-        if exclude_nodes:
-            resolved["exclude_nodes"] = exclude_nodes
-
-        try:
-            return validate_resource_profile(resolved, model_id=model_id)
-        except ResourceProfileValidationError as exc:
-            raise ConfigurationError(
-                "Resolved resource profile contains invalid Slurm directive values.",
-                exc.details,
-            ) from exc
+        return resolve_model_resource_profile(
+            self.load_resource_profiles(),
+            model_id,
+            partition_override=getattr(self.settings, "partition_override", ""),
+            exclude_nodes=getattr(self.settings, "exclude_nodes", ""),
+        )
 
     def write_manifest_index(
         self,

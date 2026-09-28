@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Any, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
+import yaml
+
 from packages.common.redaction import redact_payload, redact_text
 from packages.common.safe_fs import (
     SafeFilesystemError,
@@ -62,6 +64,7 @@ from services.production_closure.scale_validation import (
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES, SlurmGatewaySettings
 from services.slurm_gateway.gateway import SlurmValidationError
 from services.slurm_gateway.real_backend import RealSlurmGateway, array_log_dir, map_slurm_error_code
+from services.slurm_gateway.resource_profiles import resolve_model_resource_profile
 
 SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 SAFE_SLURM_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
@@ -981,8 +984,10 @@ def _sanitized_object_store_prefix(prefix: str) -> str:
 
 def _render_production_template(config: ProductionSlurmConfig, manifest_index: Path, writer: EvidenceWriter) -> str:
     profile_path = config.lane_dir / "resource_profiles.yaml"
-    writer.write_text(
-        profile_path,
+    # The lane file is evidence only: ``lane_dir`` is keyed by run_id alone and a
+    # concurrent ``--force`` run may overwrite it before this render (#2574).  The
+    # render therefore resolves the exact text written here, never the file.
+    profile_text = redact_text(
         "\n".join(
             [
                 "resource_profiles:",
@@ -998,8 +1003,9 @@ def _render_production_template(config: ProductionSlurmConfig, manifest_index: P
                 "  overrides: {}",
                 "",
             ]
-        ),
+        )
     )
+    writer.write_text(profile_path, profile_text, already_redacted=True)
     gateway = RealSlurmGateway(
         SlurmGatewaySettings(
             backend="slurm",
@@ -1023,7 +1029,13 @@ def _render_production_template(config: ProductionSlurmConfig, manifest_index: P
         "model_package_uri": _safe_template_model_package_uri(config.model_package_uri),
         "controlled_failure_log_marker": CONTROLLED_FAILURE_LOG_MARKER,
     }
-    return gateway.render_template("run_shud_forecast_array", manifest, str(manifest_index))
+    profile = resolve_model_resource_profile(
+        yaml.safe_load(profile_text)["resource_profiles"],
+        config.model_id,
+        partition_override=getattr(gateway.settings, "partition_override", ""),
+        exclude_nodes=getattr(gateway.settings, "exclude_nodes", ""),
+    )
+    return gateway.render_template("run_shud_forecast_array", manifest, str(manifest_index), profile=profile)
 
 
 def _write_rendered_script(
