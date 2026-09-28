@@ -56,11 +56,11 @@
   - explain how to read a failed unit (`systemctl --user status`, `journalctl --user -u`, the receipt `latest.json`);
   - state that an alert means running the existing dry-run → review → enforce flow, except `capacity_warning_unprunable`, which escalates to #2541;
   - record the stage 2 decision with its rationale.
-- [ ] 3.2 Post the stage 2 decision on #2653, as part of the PR (orchestrator).
+- [x] 3.2 Post the stage 2 decision on #2653, as part of the PR (orchestrator).
 
 ## 4. Deploy (orchestrator, operator-confirmed)
 
-- [ ] 4.1 After merge, with operator confirmation, because pulling node-22 also deploys every other undeployed master change:
+- [x] 4.1 After merge, with operator confirmation, because pulling node-22 also deploys every other undeployed master change:
   - `git pull --ff-only` on node-22;
   - re-`grep` the live `compute.scheduler-dbfree.env` for the four keys;
   - create the receipt root with `install -d -m 0700`;
