@@ -2217,19 +2217,28 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         # #2674: the test-only seed for a pre-existing shape (c) row. The guard
-        # suite imports it at file level; the reconcile capability / accounting
-        # suites and the journal suite import it function-locally, and
-        # tests/gateway_reconcile_helpers.py (`_file_cohort_repository`,
-        # `versioned=False`) reaches it for the bind CAS suite's legacy row, a
-        # support-to-support edge. The derived importer scan sees only the
-        # file-level one, so the rule names all five.
+        # suite imports it at file level; the journal suite imports it
+        # function-locally; every other consumer reaches it through
+        # tests/gateway_reconcile_helpers.py `_file_cohort_repository(...,
+        # versioned=False)`, which imports it function-locally (a
+        # support-to-support edge), either directly or via
+        # tests/orchestrator_demote_reserved_job_helpers.py
+        # `_axis_repository(..., "legacy")`. The derived importer scan sees only
+        # the file-level one, so the rule names every suite that calls
+        # `versioned=False` (grep `versioned=False` / `_axis_repository` /
+        # `seed_pre_existing_legacy_row` under tests/).
         "tests/file_journal_legacy_seed_helpers.py",
         (
             "tests/test_file_journal_legacy_unversioned_reserved_guard.py",
-            "tests/test_gateway_reconcile_comment_capability.py",
-            "tests/test_gateway_reconcile_comment_accounting.py",
             "tests/test_file_orchestration_journal.py",
+            "tests/test_gateway_reconcile_comment_accounting.py",
+            "tests/test_gateway_reconcile_comment_capability.py",
+            "tests/test_gateway_reconcile_file_cohort_comment.py",
+            "tests/test_gateway_reconcile_inventory.py",
+            "tests/test_gateway_reconcile_master_transitions.py",
+            "tests/test_gateway_reconcile_writer_receipts.py",
             "tests/test_orchestrator_bind_reserved_job_cas.py",
+            "tests/test_orchestrator_demote_core_cas.py",
         ),
     ),
     PathTestRule(

@@ -207,14 +207,29 @@ def test_e4_reclaim_of_a_dead_legacy_forecast_master_leaves_a_stale_anchor_byte_
     repository, anchor_bytes = _dead_legacy_forecast_master(tmp_path)
     dead = repository.get_pipeline_job(JOB_ID)
     # The stale anchor a contained direct-projection fault leaves behind after a
-    # batch release (the Phase 6h shape): pre-existing bytes the reclaim's
-    # anchor sync would otherwise rewrite before its journal append.
+    # batch release (the Phase 6h shape) stays byte-identical.  Outcome check
+    # only: a rewrite would reproduce these same bytes, so the ordering against
+    # the anchor sync is pinned by the side-effect placement test below.
     anchor = repository.root / "reconcile-inventory" / f"{JOB_ID}.json"
     anchor.write_bytes(anchor_bytes)
 
     _refused(repository, repository.reclaim_pipeline_job_reservation, _legacy_master())
 
     assert anchor.read_bytes() == anchor_bytes
+    assert repository.get_pipeline_job(JOB_ID) == dead
+
+
+def test_e4_a_member_less_reclaim_of_a_dead_legacy_forecast_master_is_refused(tmp_path: Path) -> None:
+    """Refused on the EXISTING row's shape: a request without ``cohort_members``
+    would otherwise backfill ``[]``, clear the members and commit a ``reserved``
+    member-less unversioned forecast master (then routed to the generic lane)."""
+
+    repository, _anchor_bytes = _dead_legacy_forecast_master(tmp_path)
+    dead = repository.get_pipeline_job(JOB_ID)
+    assert dead["cohort_members"] == _members()
+
+    _refused(repository, repository.reclaim_pipeline_job_reservation, _legacy_master(cohort_members=None))
+
     assert repository.get_pipeline_job(JOB_ID) == dead
 
 
@@ -242,6 +257,65 @@ def test_e6_an_empty_stage_falls_back_to_the_forecast_job_type(tmp_path: Path, w
     repository = _repository(tmp_path)
     _refused(repository, getattr(repository, writer), _legacy_master(stage=None, job_type="forecast"))
     assert repository.get_pipeline_job(JOB_ID) is None
+
+
+def _placement_upsert(repository: FileOrchestrationJournalRepository) -> Any:
+    repository.append_historical_pipeline_job(_legacy_master(status="pending", idempotency_key=None))
+    request = {
+        "job_id": JOB_ID,
+        "run_id": RUN_ID,
+        "cycle_id": CYCLE_ID,
+        "job_type": "run_shud_forecast_array",
+        "status": "reserved",
+        "idempotency_key": KEY,
+    }
+    return lambda: repository.upsert_pipeline_job(request)
+
+
+def _placement_historical_append(repository: FileOrchestrationJournalRepository) -> Any:
+    return lambda: repository.append_historical_pipeline_job(_legacy_master())
+
+
+def _placement_clone_reclaim(repository: FileOrchestrationJournalRepository) -> Any:
+    repository.append_historical_pipeline_job(
+        _legacy_master(status="failed", slurm_job_id="4242", error_code="SLURM_NODE_FAIL")
+    )
+    clone = FileJournalRetryService(repository).schedule_auto_retry(repository.get_pipeline_job(JOB_ID))
+    request = _legacy_master(job_id=clone.job_id, idempotency_key=f"{KEY}:retry_1", slurm_comment=None)
+    return lambda: repository.reclaim_pipeline_job_reservation(request)
+
+
+def _placement_in_place_rewrite(repository: FileOrchestrationJournalRepository) -> Any:
+    seed_pre_existing_legacy_row(repository.reserve_pipeline_job, _legacy_master())
+    return lambda: repository.record_pipeline_job_reconciliation(
+        JOB_ID, submit_outcome="submit_result_ambiguous", reconciliation_decision="absence_deferred"
+    )
+
+
+@pytest.mark.parametrize(
+    "arrange",
+    [_placement_upsert, _placement_historical_append, _placement_clone_reclaim, _placement_in_place_rewrite],
+)
+def test_the_refusal_runs_before_any_side_effect_of_the_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, arrange: Any
+) -> None:
+    """Entry placement in ``_write_pipeline_job_unlocked``: the conflict check,
+    the sequence allocation and the reconcile-inventory anchor sync never run
+    for a refused write (the append funnels alone would refuse only after them)."""
+
+    repository = _repository(tmp_path)
+    write = arrange(repository)
+    for name in (
+        "_pipeline_job_conflicts_unlocked",
+        "_next_sequence_unlocked",
+        "_sync_reconcile_inventory_for_row_unlocked",
+    ):
+        monkeypatch.setattr(
+            repository,
+            name,
+            lambda *_args, _name=name, **_kwargs: pytest.fail(f"{_name} ran before the #2674 refusal"),
+        )
+    _refused(repository, write)
 
 
 def test_the_batch_append_funnel_refuses_a_shape_c_record(tmp_path: Path) -> None:
@@ -300,18 +374,64 @@ def test_e7_import_with_a_shape_c_job_creates_no_journal_root(tmp_path: Path) ->
 
 
 def test_e7_import_with_a_shape_c_job_writes_zero_bytes_into_an_existing_root(tmp_path: Path) -> None:
+    """A NEW cycle (another ``cycle_time``, new run and job ids): without the
+    pre-scan the import would append its cycle, run and settled job before the
+    writer refused the (c) row, so the tree would change."""
+
     journal_root = tmp_path / "journal"
     import_historical_scheduler_state(
-        journal_root=journal_root, cutoff_time=CYCLE_TIME + timedelta(hours=1), **_snapshot()
+        journal_root=journal_root, cutoff_time=CYCLE_TIME + timedelta(hours=12), **_snapshot()
     )
     before = _tree(journal_root)
-    snapshot = _snapshot(_legacy_master(stage=None, job_type="forecast"))
-    snapshot["forecast_cycles"][0]["cycle_id"] = "gfs_2026071206"
+    cycle_time = CYCLE_TIME + timedelta(hours=6)
+    cycle_id = "gfs_2026071206"
+    run_id = "cycle_gfs_2026071206_forecast_legacy"
+    key = f"{run_id}:forecast"
+    snapshot = {
+        "forecast_cycles": [
+            {"cycle_id": cycle_id, "source_id": "gfs", "cycle_time": cycle_time, "status": "forecast_running"}
+        ],
+        "hydro_runs": [
+            {
+                "run_id": "fcst_gfs_2026071206_model_0",
+                "run_type": "forecast",
+                "scenario_id": "forecast_gfs_deterministic",
+                "model_id": "model_0",
+                "source_id": "gfs",
+                "cycle_time": cycle_time,
+                "start_time": cycle_time,
+                "end_time": cycle_time,
+                "status": "succeeded",
+            }
+        ],
+        "pipeline_jobs": [
+            {
+                **_benign_row("job_cycle_gfs_2026071206_download"),
+                "run_id": "cycle_gfs_2026071206",
+                "cycle_id": cycle_id,
+                "created_at": cycle_time,
+                "updated_at": cycle_time,
+            },
+            _legacy_master(
+                job_id=f"job_{run_id}_forecast",
+                run_id=run_id,
+                cycle_id=cycle_id,
+                idempotency_key=key,
+                slurm_comment=f"nhms_idem:{key}",
+                stage=None,
+                job_type="forecast",
+                submission_attempt_started_at=cycle_time,
+                created_at=cycle_time,
+                updated_at=cycle_time,
+            ),
+        ],
+        "pipeline_events": [],
+    }
     with pytest.raises(FileOrchestrationJournalError) as error:
         import_historical_scheduler_state(
-            journal_root=journal_root, cutoff_time=CYCLE_TIME + timedelta(hours=1), **snapshot
+            journal_root=journal_root, cutoff_time=CYCLE_TIME + timedelta(hours=12), **snapshot
         )
-    assert error.value.reason == REFUSAL
+    assert (error.value.reason, error.value.field) == (REFUSAL, "accepted_submit_contract_version")
     assert _tree(journal_root) == before
 
 
@@ -337,9 +457,11 @@ def test_e7_import_is_unchanged_for_a_legacy_forecast_master_in_another_status(t
         {"cohort_members": []},
         {"stage": "convert", "job_type": "convert_canonical"},
         {"stage": "download", "job_type": "download_source_cycle", "cohort_members": None},
+        # A forcing-stage legacy reserved row with members (#2675's lane, not (c)).
+        {"stage": "forcing", "job_type": "produce_forcing_array"},
     ],
 )
-@pytest.mark.parametrize("writer", ["reserve_pipeline_job", "append_historical_pipeline_job"])
+@pytest.mark.parametrize("writer", ["reserve_pipeline_job", "upsert_pipeline_job", "append_historical_pipeline_job"])
 def test_e9_a_non_shape_c_legacy_row_is_written_as_before(
     tmp_path: Path, writer: str, overrides: dict[str, Any]
 ) -> None:

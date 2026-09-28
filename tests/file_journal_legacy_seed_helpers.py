@@ -13,7 +13,9 @@ it.  No production seed parameter exists.
 
 Journal writers only: ``file_orchestration_migration`` binds the predicate by
 name at import, so the historical import's pre-scan still refuses (c) inside
-this context.
+this context.  Nor does it lift ``reclaim_pipeline_job_reservation``'s refusal
+on the EXISTING row's shape (``_is_legacy_unversioned_forecast_cohort_master``):
+a reclaim of a legacy unversioned forecast cohort master is refused regardless.
 """
 
 from __future__ import annotations
