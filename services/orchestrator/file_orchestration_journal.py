@@ -5087,8 +5087,9 @@ class FileOrchestrationJournalRepository:
         ``--comment=`` value equals the row's own ``nhms_idem:<key>``; a bare
         canonical decimal Slurm id, compared by master part, that no other row
         of the same cycle (any stage/kind/contract: forcing, legacy, member task
-        ``<id>_<n>``) binds or claims, nor any current accepted-submit master in
-        the reconcile inventory (strict: a recycled incarnation is refused too).
+        ``<id>_<n>``) binds or claims, nor any current accepted-submit forecast
+        master of any other cycle, settled or active (strict: a recycled
+        incarnation is refused too).
 
         Invalid input types raise ``FileOrchestrationJournalError`` before any
         read; every CAS failure returns a named refusal from
@@ -8798,15 +8799,24 @@ class FileOrchestrationJournalRepository:
         bounded cycle-scoped replay of the source/cycle whose lock the caller
         holds -- every row of it regardless of stage, kind, contract version,
         or status (forcing and downstream rows, legacy unversioned rows,
-        member task rows).  The cross-cycle half is the reconcile-inventory
-        scan (current accepted-submit masters that still hold an inventory
-        anchor); a whole-tree replay is deliberately NOT used, because it
-        exceeds the record budget on a production journal and would refuse
-        every bind.  Cross-cycle non-master rows and other-cycle masters whose
-        anchor is gone are therefore not scanned.  The SubmitLine key check
-        rules out a SubmitLine pasted from another lane or row, but not a
-        mistyped ``--slurm-job-id``; that residual is covered procedurally by
-        the runbook's ``sacct --jobs=<id>`` re-read (design Decision 3).
+        member task rows).  The cross-cycle half is the ``fallback_unique``
+        occupancy scan in ``_reconcile_inventory_jobs_matching_unlocked``: the
+        reconcile-inventory anchors, then the flat ``pipeline-jobs/``
+        settled-master scan, so every current accepted-submit forecast master
+        of any cycle, settled or active, is covered.  A whole-tree replay is
+        deliberately NOT used, because it exceeds the record budget on a
+        production journal and would refuse every bind.  Not scanned: non-master
+        rows of other cycles (forcing, downstream, legacy, member task), legacy
+        unversioned forecast masters of other cycles (both cross-cycle scans
+        require the current contract), and ``nhms_forecast`` jobs outside this
+        journal root.  (A current master with neither anchor nor flat direct is
+        excluded by invariant: ``_restore_derived_master_direct_unlocked`` and
+        ``_sync_reconcile_inventory_migration_row_unlocked``.)  The SubmitLine
+        key check rules out a SubmitLine pasted from another lane or row, but
+        not a mistyped ``--slurm-job-id``; landing on a forcing or downstream
+        job fails inflight JobName identity, and the rest is covered
+        procedurally by the runbook's ``sacct --jobs=<id>`` re-read (design
+        Decision 3).
 
         A row claims the id when the master part (leading decimal digits, so
         ``57553_18`` and ``57553.batch`` read as ``57553``) of its

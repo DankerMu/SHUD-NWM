@@ -42,8 +42,8 @@ Minimal mergeable slice: 1-2 (the bind exit) is the fix; 3 (listing) makes it di
 
 - [x] 5.1 Tests for every Required evidence row in design.md. New-behavior tests must be red before the change and green after. The (a)/(b) happy paths must drive the real file journal plus `reconcile_inflight_jobs` plus `_cycle_completion_verdict`.
 - [x] 5.2 Register the new suites in `scripts/select_ci_tests.py` and `tests/test_select_ci_tests.py`.
-- [ ] 5.3 Run `uv run ruff check .` and the focused pytest suites (new suites, `test_operator_action_listing.py`, `test_orchestrator_demote_*.py`, `test_scheduler_held_reservation_block.py`, `test_gateway_reconcile_*.py`). Run the full `uv run pytest -q` on node-27. Run `openspec validate operator-verified-reserved-bind --strict --no-interactive`.
-- [ ] 5.4 node-22 scratch-journal rehearsal (design.md Rollout) with its receipt under `docs/runbooks/receipts/`.
+- [x] 5.3 Run `uv run ruff check .` and the focused pytest suites (new suites, `test_operator_action_listing.py`, `test_orchestrator_demote_*.py`, `test_scheduler_held_reservation_block.py`, `test_gateway_reconcile_*.py`). Run the full `uv run pytest -q` on node-27. Run `openspec validate operator-verified-reserved-bind --strict --no-interactive`.
+- [x] 5.4 node-22 scratch-journal rehearsal (design.md Rollout) with its receipt under `docs/runbooks/receipts/`.
 
 ## Risk packs considered (core)
 

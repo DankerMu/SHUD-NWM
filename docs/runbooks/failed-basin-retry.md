@@ -806,9 +806,10 @@ terminal status as usual.
    exactly one `--comment=nhms_idem:<this row's idempotency_key>`, and show the `Submit` you
    pass. Take `--slurm-job-id`, `--slurm-submit-time` and `--submit-line` from **this**
    output only, never from the step 1 listing or by retyping: the command cannot detect a
-   mistyped id whose job is another cycle's finished forecast master (that master has left
-   the reconcile inventory, and the `SubmitLine` carries no job id), and inflight reconcile
-   would then project that job's terminal state onto this row.
+   mistyped id whose job is a legacy unversioned forecast master of another cycle, a
+   non-master row of another cycle, or an `nhms_forecast` job outside this journal (none of
+   them is checked, and the `SubmitLine` carries no job id), and inflight reconcile would
+   then project that job's terminal state onto this row.
 
    `sacct` prints `Submit` as local naive time: append the cluster's UTC offset
    (`date +%z` on the login node) yourself. The command refuses a timestamp without a
@@ -841,10 +842,14 @@ terminal status as usual.
    | `submit_time_outside_attempt_window` | `--slurm-submit-time` is before the attempt anchor or after `--checked-at` |
    | `submitline_key_mismatch` | the `SubmitLine` has no `--comment=`, two distinct ones, or a key that is not this row's |
    | `slurm_id_invalid` | `--slurm-job-id` is not a canonical bare decimal master id (a leading zero such as `0123`, an array task, or a step suffix) |
-   | `slurm_id_claimed` | a same-cycle row of any kind (forcing, legacy, member task `<id>_<n>`) or an other-cycle forecast master still in the reconcile inventory already claims that master id, even a recycled id with another `Submit` (stricter than #1850) |
+   | `slurm_id_claimed` | a same-cycle row of any kind (forcing, legacy, member task `<id>_<n>`) or a current forecast master of any other cycle (settled or active) already claims that master id, even a recycled id with another `Submit` (stricter than #1850) |
    | `slurm_submit_time_invalid` | `--slurm-submit-time` is not a timezone-aware instant |
    | `legacy_unversioned_unsupported` | shape (c): escalate, #2674 |
    | `not_found` | no such forecast master |
+
+   On the production-sized journal a bind takes about a minute (53 s in the #2668 rehearsal): it holds the
+   cycle lock and the journal-global reconcile-inventory lock while it scans claimants, so scheduler journal
+   writes wait behind it. Do not interrupt it; a refusal returns within seconds.
 
 5. **After the bind.** Exit 0 prints a sorted JSON receipt (`status=bound`, or
    `bound_with_warnings` when a derived direct/latest projection failed after the durable

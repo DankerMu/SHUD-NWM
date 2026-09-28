@@ -459,9 +459,12 @@ def test_a_recycled_slurm_id_settled_on_another_master_is_claimed_even_though_18
 # --- strict exclusivity: every row of the bound row's cycle, by canonical master part --------
 #
 # Same-cycle rows of ANY stage/kind/contract are scanned by the bounded cycle
-# replay; other cycles only through the reconcile inventory (current masters,
-# the two tests above).  A whole-tree replay is never used: on a production
-# journal it exceeds the record budget and would refuse every bind.
+# replay.  Other cycles are scanned only for current accepted-submit forecast
+# masters, settled or active (the reconcile-inventory anchors, then the flat
+# ``pipeline-jobs/`` settled-master scan; the two tests above).  Other-cycle
+# non-master rows and legacy unversioned masters are not scanned (the residual
+# tests below).  A whole-tree replay is never used: on a production journal it
+# exceeds the record budget and would refuse every bind.
 
 CYCLE = datetime(2026, 7, 12, tzinfo=UTC)
 
@@ -679,14 +682,36 @@ def test_an_unrelated_slurm_id_in_the_same_cycle_does_not_block_the_bind(
 def test_a_cross_cycle_non_master_row_is_outside_the_bounded_scan(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Documented residual: a forcing row of ANOTHER cycle is not scanned (no inventory anchor, not a master).
+    """Documented residual: a forcing row of ANOTHER cycle is not scanned (not a current-contract forecast master).
 
-    The SubmitLine key check is what rules out a master pasted from another
-    lane: its SubmitLine carries a different key.
+    A SubmitLine pasted from that lane fails the key check; a mistyped id that
+    lands on it fails inflight JobName identity (``nhms_forcing``).
     """
 
     repository = held_repository(tmp_path, monkeypatch)
     _forcing_master_bound_to(repository, MASTER_ID, source="ifs")
+    assert _bind(repository).refusal is None
+
+
+def test_a_cross_cycle_legacy_unversioned_forecast_master_is_outside_the_bounded_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Documented residual: both cross-cycle scans count only current-contract masters as owners.
+
+    A mistyped id landing here is covered only by the runbook's ``sacct --jobs=<id>`` re-read.
+    """
+
+    repository = held_repository(tmp_path, monkeypatch)
+    _historical_row(
+        repository,
+        job_id="job_cycle_ifs_2026071200_forecast_legacy_forecast",
+        run_id="cycle_ifs_2026071200_forecast_legacy",
+        cycle_id="ifs_2026071200",
+        job_type="run_shud_forecast_array",
+        stage="forecast",
+        idempotency_key="cycle_ifs_2026071200_forecast_legacy:forecast",
+        slurm_job_id=MASTER_ID,
+    )
     assert _bind(repository).refusal is None
 
 
