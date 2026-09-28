@@ -24,8 +24,8 @@
 
 - [x] 4.1 Tests F1-F12 plus F2b and F7b (design Required evidence), red before and green after, in the #2668 suites (`tests/test_orchestrator_bind_reserved_job_{cas,cli,lane}.py`, `tests/test_operator_action_listing_held_reservations.py`) or a new forcing suite registered in `scripts/select_ci_tests.py` / `tests/test_select_ci_tests.py`.
 - [x] 4.2 `uv run ruff check .`; `openspec validate operator-verified-forcing-bind --strict --no-interactive`; the focused suites: the bind suites, listing suites (`tests/test_operator_action_listing.py`, `tests/test_operator_action_listing_held_reservations.py`), `tests/test_forcing_submit_ambiguity.py`, `tests/test_scheduler_held_reservation_block.py`, `tests/test_orchestrator_demote_core_cas.py`, `tests/test_gateway_reconcile_*.py`.
-- [ ] 4.3 node-27 focused at the PR head, plus the full `uv run pytest -q`.
-- [ ] 4.4 node-22 scratch-journal rehearsal (design Rollout) with a receipt under `docs/runbooks/receipts/`.
+- [x] 4.3 node-27 focused at the PR head, plus the full `uv run pytest -q`. (focused at a2972fca6: 2021 passed; full at 989659520: 21291 passed, 365 skipped)
+- [x] 4.4 node-22 scratch-journal rehearsal (design Rollout) with a receipt under `docs/runbooks/receipts/`.
 
 ## Risk packs considered (core)
 
