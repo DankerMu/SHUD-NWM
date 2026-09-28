@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change m7-second-review-remediation. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: Structured real Slurm submit contract
 Orchestrator and RealSlurmGateway SHALL share one explicit structured submit contract for single jobs and array jobs.
 
@@ -238,3 +240,16 @@ pre-change output
 WHEN a caller supplies an explicit start time
 THEN it is passed through byte-for-byte unchanged
 
+### Requirement: Reconcile accounting reads drain every pipe to end-of-file
+
+The reconcile sacct and visibility-probe readers SHALL keep reading until every registered pipe reaches end-of-file or the query deadline expires; process exit alone SHALL NOT end the read. Timeout and saturation errors SHALL be raised as before.
+
+#### Scenario: sacct writes its row and exits during an idle wait
+
+- **WHEN** the sacct child writes its only row and exits after the reader's `select` returned with no events
+- **THEN** the reader MUST return that row and `default_sacct_querier` MUST return a record instead of `None`
+
+#### Scenario: Child never closes its pipes
+
+- **WHEN** the child keeps its pipes open past the query deadline
+- **THEN** the reader MUST raise `ReconcileQueryUnavailable` within the deadline
