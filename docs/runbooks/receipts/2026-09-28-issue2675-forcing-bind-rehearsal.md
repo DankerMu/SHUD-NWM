@@ -107,6 +107,11 @@ Durable post-state:
 
 - The master row is `submitted` / `accepted` / `slurm_exact_comment` / `matched_bound`, with `slurm_job_id` = `matched_slurm_job_id` = 58740. Attempt and anchor are unchanged.
   - `slurm_binding_source` and `slurm_accounting_submitted_at` are both null. The receipt's `slurm_accounting_submitted_at` only echoes the verified submit input.
+- **Head difference (added after merge):** this rehearsal ran at `989659520`. The merged head `a2972fca6` changes three things:
+  - The forcing receipt now reports the durable `slurm_accounting_submitted_at: null` and adds `slurm_submit_time` for the verified input. At `a2972fca6`, the receipt above would show `null` and `"slurm_submit_time": "2026-09-28T04:16:42Z"`.
+  - The window floors the anchor to whole seconds.
+  - Owner values are validated when the command starts.
+  - None of these changes a CAS outcome here. The anchor-to-Submit gap is about 99 s, so the floor has no effect, and `frd_muziyao` / `friends` pass validation. Durable post-state and refusal codes are identical.
 - One `operator_verified_bind` event (sequence 28) carries:
   - `lane: forcing`, the `checked_*` fields and the note;
   - the attempt comment as `submitline_key`, `array_spec`, the Slurm id and submit time;
@@ -165,7 +170,9 @@ The verdict reads `gap` until forecast (and, under production's terminal stage, 
   - The live checkout is still at `bf114590`, with no new changes (its pre-existing untracked `.nhms-work/` is unchanged).
   - The timer is `active`.
 
-## Paths left on node-22 (for cleanup after merge)
+## Paths left on node-22 (removed after merge)
+
+Both paths below were removed on 2026-09-28 after PR #2683 merged. The list is kept as a record of what the run produced.
 
 - Clone: `/scratch/frd_muziyao/nwm-2675-rehearsal` (detached `989659520`, clean).
 - Output: `/scratch/frd_muziyao/nwm-2675-rehearsal-out/` (404 MB), which contains:
