@@ -882,6 +882,12 @@ NODE22_SLURM_GATEWAY_UNIT = "infra/systemd/nhms-slurm-gateway.service"
 NODE22_RETENTION_UNIT = "infra/systemd/nhms-scheduler-evidence-retention.service"
 NODE22_JOURNAL_RETENTION_SERVICE = "infra/systemd/nhms-scheduler-journal-retention.service"
 NODE22_JOURNAL_RETENTION_TIMER = "infra/systemd/nhms-scheduler-journal-retention.timer"
+# #2653: the state-index capacity watch (a prune-retention dry-run wrapper) and
+# its two units. The watch suite drives the wrapper end to end; the node-22
+# invariant owner pins both units' exact fields and scans them.
+NODE22_STATE_INDEX_CAPACITY_SERVICE = "infra/systemd/nhms-scheduler-state-index-capacity.service"
+NODE22_STATE_INDEX_CAPACITY_TIMER = "infra/systemd/nhms-scheduler-state-index-capacity.timer"
+NODE22_STATE_INDEX_CAPACITY_WATCH_TEST = "tests/test_node22_state_index_capacity_watch.py"
 NODE22_REPAIR_SCRIPT = "scripts/ops/node22_repair_placeholder_hydro_uris.py"
 JOURNAL_RETENTION_TESTS = (
     "tests/test_scheduler_journal_retention_planning.py",
@@ -5773,6 +5779,29 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         NODE22_JOURNAL_RETENTION_TIMER,
         (*NODE22_ENTRYPOINT_INVARIANT_TESTS, *JOURNAL_RETENTION_TESTS),
+    ),
+    PathTestRule(
+        # #2653: a unit-only diff would otherwise select nothing (infra/**
+        # non-python) and degrade to the zero-assertion collect-only smoke.
+        NODE22_STATE_INDEX_CAPACITY_SERVICE,
+        (*NODE22_ENTRYPOINT_INVARIANT_TESTS, NODE22_STATE_INDEX_CAPACITY_WATCH_TEST),
+    ),
+    PathTestRule(
+        NODE22_STATE_INDEX_CAPACITY_TIMER,
+        (*NODE22_ENTRYPOINT_INVARIANT_TESTS, NODE22_STATE_INDEX_CAPACITY_WATCH_TEST),
+    ),
+    PathTestRule(
+        # #2653: a PIN, not the only route -- the same-name derivation already
+        # reaches the suite; this row survives a suite rename.
+        "scripts/node22_state_index_capacity_watch.py",
+        (NODE22_STATE_INDEX_CAPACITY_WATCH_TEST,),
+    ),
+    PathTestRule(
+        # #2653 reader edge: the watch calls `repair_state_index`, matches the
+        # error classes and their `reason` strings, and reuses
+        # `_private_directory`. Additive to the same-name repair suite.
+        "scripts/scheduler_state_index_repair.py",
+        (NODE22_STATE_INDEX_CAPACITY_WATCH_TEST,),
     ),
     PathTestRule(
         # #1571: the repair script's usage string is uniquely asserted by the

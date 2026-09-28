@@ -323,7 +323,12 @@ def _receipt_root(*, required: bool) -> Path | None:
 
 
 def _private_root(env: str, *, required: bool, kind: str) -> Path | None:
-    value = os.getenv(env, "").strip()
+    return _private_directory(os.getenv(env, ""), env=env, required=required, kind=kind)
+
+
+def _private_directory(value: str, *, env: str, required: bool, kind: str) -> Path | None:
+    """Validate one existing, owner-private, non-symlink directory (``value`` from ``env`` or a flag)."""
+    value = value.strip()
     if not value:
         if required:
             raise RepairCliError(f"{kind}_root_unset", {"env": env})

@@ -16,8 +16,8 @@
 
 ## 1. Wrapper
 
-- [ ] 1.1 Add `scripts/node22_state_index_capacity_watch.py` as specified in design.md. It has no enforce path.
-- [ ] 1.2 Tests. Cover each case, with the repair call faked where needed:
+- [x] 1.1 Add `scripts/node22_state_index_capacity_watch.py` as specified in design.md. It has no enforce path.
+- [x] 1.2 Tests. Cover each case, with the repair call faked where needed:
   - healthy → exit 0, receipt written;
   - `capacity.warning=true` on either lane → exit 1, receipt written;
   - `checksum_valid=false` → exit 1;
@@ -31,7 +31,7 @@
   - receipt write failure → exit 2, with the verdict JSON still printed on stdout;
   - an unexpected exception → exit 4 with a `refused` receipt;
   - a subprocess smoke test: `sys.executable -m scripts.node22_state_index_capacity_watch --help` from the repo root exits 0, which proves the import chain works.
-- [ ] 1.3 Tests for the dry-run-only guarantee:
+- [x] 1.3 Tests for the dry-run-only guarantee:
   - the repair function is always called with `enforce=False`, and the parser has no `--enforce`;
   - an end-to-end run against real temporary reference and destination index fixtures leaves both index files byte-identical;
   - no file is created under the archive or repair-receipt roots, even when those env vars are set;
@@ -39,14 +39,14 @@
 
 ## 2. Units
 
-- [ ] 2.1 Add `infra/systemd/nhms-scheduler-state-index-capacity.{service,timer}` as specified in design.md.
-- [ ] 2.2 Tests:
+- [x] 2.1 Add `infra/systemd/nhms-scheduler-state-index-capacity.{service,timer}` as specified in design.md.
+- [x] 2.2 Tests:
   - an exact-field pin for both files, including the `-m` ExecStart form;
   - both files are added to the node-22 governed bare-`uv` scan and the substituted-python scan.
 
 ## 3. Docs and decision
 
-- [ ] 3.1 Runbook §8.12:
+- [x] 3.1 Runbook §8.12:
   - replace "定时器是后续工作，当前靠人工节奏" with the timer model;
   - add install and enable steps:
     - `install -d -m 0700` the receipt root;
