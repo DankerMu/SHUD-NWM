@@ -175,3 +175,8 @@ Review focus:
 3. 保留/删除的索引名选择与所有引用面一致（代码、测试、docstring、spec）。
 4. D11 预算：新形态在空/非空 pin 上的 shared hit 证据真实、可复现。
 5. 时间界语义前提的证据与契约归属写清楚。
+
+
+## 生产 apply 结果（4.3，2026-09-28）
+
+000065 于 2026-09-28T23:08:39Z 在 node-27 应用（attempt 1，rc 0）。apply 后：7 个 `hydro_run` 索引全部 valid，新索引 `indexdef` 与迁移一致，三份副本消失；D1 真实代码路径 byh IFS / GFS+IFS 为 131 / 136 shared hit（apply 前 1379 / 1450，L2 基线 1386 / 1464），`cand` 走 `hydro_run_forecast_basin_cycle_idx`；兄弟选择器全部走保留索引；F1 复测 4 未落行候选 2160（热 chunk 填充导致上升，仍 < 5000）。详见 `receipts/2026-09-28-post-apply/README.md`。

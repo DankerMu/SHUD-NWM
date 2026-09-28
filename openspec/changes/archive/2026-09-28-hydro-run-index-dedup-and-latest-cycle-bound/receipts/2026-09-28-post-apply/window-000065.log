@@ -1,0 +1,267 @@
+2026-09-28T23:08:35Z step1 stop timers
+2026-09-28T23:08:35Z services: autopipe=inactive download=inactive
+2026-09-28T23:08:35Z step2 git
+63d23212 Merge pull request #2684 from DankerMu/chore/post-merge-2683-archive
+Updating 63d23212..ba8f3b64
+Fast-forward
+ .review-gate-issues.json                           |  22 +
+ .../000065_hydro_run_candidate_index_dedup.sql     |  54 ++
+ .../.openspec.yaml                                 |   2 +
+ .../README.md                                      |   3 +
+ .../design.md                                      |  55 ++
+ .../proposal.md                                    |  40 ++
+ .../specs/production-slurm-workload/spec.md        |  15 +
+ .../specs/real-slurm-gateway-contract/spec.md      |  15 +
+ .../tasks.md                                       |  42 ++
+ .../.openspec.yaml                                 |   2 +
+ .../README.md                                      |   3 +
+ .../design.md                                      | 177 +++++++
+ .../proposal.md                                    |  36 ++
+ .../receipts/2026-09-28-branch/copy_siblings.sh    |  13 +
+ .../receipts/2026-09-28-branch/d2-compare.out      | 507 ++++++++++++++++++
+ .../receipts/2026-09-28-branch/d2_compare.py       | 137 +++++
+ .../2026-09-28-branch/equivalence-bounded.err      |   0
+ .../2026-09-28-branch/equivalence-bounded.out      | 443 ++++++++++++++++
+ .../2026-09-28-branch/explain-bounded-byh.out      | 228 ++++++++
+ .../2026-09-28-branch/explain-bounded-shj.out      | 228 ++++++++
+ .../explain-bounded-zhaochen_bst.out               | 227 ++++++++
+ .../receipts/2026-09-28-branch/f1-basin-pick.out   |  39 ++
+ .../receipts/2026-09-28-branch/f1-basin-pick.sql   |  10 +
+ .../receipts/2026-09-28-branch/f1-byh.out          | 163 ++++++
+ .../receipts/2026-09-28-branch/f1-chunk-stats.out  |  16 +
+ .../receipts/2026-09-28-branch/f1-chunk-stats.sql  |   7 +
+ .../2026-09-28-branch/f1-heihe-gfs-ifs-00z.out     | 181 +++++++
+ .../2026-09-28-branch/f1-heihe-gfs-ifs-00z12z.out  | 181 +++++++
+ .../2026-09-28-branch/f1-heihe-gfs-ifs-12z.out     | 181 +++++++
+ .../f1-heihe-master-gfs-ifs-00z.out                | 184 +++++++
+ .../f1-heihe-master-gfs-ifs-00z12z.out             | 184 +++++++
+ .../2026-09-28-branch/f1-heihe-single-00z.out      |  75 +++
+ .../receipts/2026-09-28-branch/f1-ord-byh.out      | 167 ++++++
+ .../receipts/2026-09-28-branch/f1-probe-ord.sql    |  30 ++
+ .../2026-09-28-branch/f1-probe-window-master.sql   |  25 +
+ .../receipts/2026-09-28-branch/f1-probe-window.sql |  37 ++
+ .../receipts/2026-09-28-branch/f1-probe.sql        |  29 +
+ .../2026-09-28-branch/f1-qhh-gfs-ifs-00z.out       | 181 +++++++
+ .../2026-09-28-branch/f1-qhh-gfs-ifs-00z12z.out    | 181 +++++++
+ .../2026-09-28-branch/f1-qhh-gfs-ifs-12z.out       | 181 +++++++
+ .../2026-09-28-branch/f1-xinan_nujiang.out         | 160 ++++++
+ .../receipts/2026-09-28-branch/f1_third_basin.sh   |  36 ++
+ .../receipts/2026-09-28-branch/it-branch-1.out     |  15 +
+ .../receipts/2026-09-28-branch/it-branch-2.out     |  21 +
+ .../receipts/2026-09-28-branch/it-pr-03646206b.out |  14 +
+ .../receipts/2026-09-28-branch/it_branch.sh        |  16 +
+ .../receipts/2026-09-28-branch/it_pr.sh            |  29 +
+ .../2026-09-28-branch/probes/_probe_common.py      | 166 ++++++
+ .../probes/equivalence_d1_bounded.py               | 233 ++++++++
+ .../2026-09-28-branch/probes/explain_bounded.py    |  47 ++
+ .../2026-09-28-branch/prod-hydro-run-indexes.out   |  36 ++
+ .../2026-09-28-branch/prod-hydro-run-indexes.sql   |   8 +
+ .../receipts/2026-09-28-branch/red-proof-A.full    | 583 +++++++++++++++++++++
+ .../receipts/2026-09-28-branch/red-proof-B.full    | 191 +++++++
+ .../receipts/2026-09-28-branch/red-proof.out       |  26 +
+ .../receipts/2026-09-28-branch/red_proof.sh        |  26 +
+ .../receipts/2026-09-28-branch/scratch_env.sh      |  11 +
+ .../receipts/2026-09-28-branch/setup-34.out        |  10 +
+ .../receipts/2026-09-28-branch/setup_scratch.sh    |  19 +
+ ...ng-explain-nhms_scratch_batchdb_34-vacuumed.out | 166 ++++++
+ .../sibling-explain-nhms_scratch_batchdb_34.out    | 162 ++++++
+ .../sibling-explain-nhms_scratch_batchdb_d2.out    | 166 ++++++
+ .../receipts/2026-09-28-branch/sibling_explain.py  | 154 ++++++
+ .../2026-09-28-phase0-proof/d1-explain-byh-lat.out | 177 +++++++
+ .../2026-09-28-phase0-proof/d1-explain-byh-lat.sql |  42 ++
+ .../d1-explain-byh-latnb.out                       | 198 +++++++
+ .../d1-explain-byh-latnb.sql                       |  42 ++
+ .../2026-09-28-phase0-proof/d1-explain-byh-new.out | 194 +++++++
+ .../2026-09-28-phase0-proof/d1-explain-byh-new.sql |  41 ++
+ .../2026-09-28-phase0-proof/d1-explain-byh-old.out | 194 +++++++
+ .../2026-09-28-phase0-proof/d1-explain-byh-old.sql |  41 ++
+ .../d1-explain-zhaochen_bst-lat.out                | 176 +++++++
+ .../d1-explain-zhaochen_bst-lat.sql                |  42 ++
+ .../d1-explain-zhaochen_bst-latnb.out              | 205 ++++++++
+ .../d1-explain-zhaochen_bst-latnb.sql              |  42 ++
+ .../d1-explain-zhaochen_bst-new.out                | 201 +++++++
+ .../d1-explain-zhaochen_bst-new.sql                |  41 ++
+ .../d1-explain-zhaochen_bst-old.out                | 201 +++++++
+ .../d1-explain-zhaochen_bst-old.sql                |  41 ++
+ .../proof-valid-ge-cycle.out                       |  12 +
+ .../proof-valid-ge-cycle.sql                       |   8 +
+ .../2026-09-28-phase0-proof/proof-valid-le-end.out |  12 +
+ .../2026-09-28-phase0-proof/proof-valid-le-end.sql |   8 +
+ .../2026-09-28-phase0-proof/window-shape.out       |  16 +
+ .../2026-09-28-phase0-proof/window-shape.sql       |  10 +
+ .../specs/forecast-api/spec.md                     |  57 ++
+ .../specs/schema-ledger-convergence/spec.md        |  40 ++
+ .../tasks.md                                       |  58 ++
+ openspec/specs/production-slurm-workload/spec.md   |  16 +
+ openspec/specs/real-slurm-gateway-contract/spec.md |  15 +
+ packages/common/forecast_store.py                  |  40 +-
+ scripts/node27_autopipeline.py                     |   9 +-
+ scripts/select_ci_tests.py                         |   2 +-
+ services/orchestrator/reconcile.py                 |   6 -
+ services/production_closure/slurm_validation.py    |  20 +-
+ services/slurm_gateway/real_backend.py             |  31 +-
+ services/slurm_gateway/resource_profiles.py        |  47 +-
+ tests/test_gateway_reconcile_comment_capability.py |  51 ++
+ .../test_gateway_reconcile_comment_sacct_bounds.py | 157 ++++++
+ tests/test_latest_cycle_discovery_integration.py   | 125 +++++
+ tests/test_latest_cycle_discovery_shape.py         |  95 +++-
+ tests/test_migrations.py                           |  78 +++
+ tests/test_production_slurm_validation.py          | 165 ++++++
+ tests/test_river_ts_stats_harness_offline.py       |   8 +-
+ .../test_schema_ledger_convergence_integration.py  | 166 +++++-
+ 105 files changed, 9647 insertions(+), 79 deletions(-)
+ create mode 100644 db/migrations/000065_hydro_run_candidate_index_dedup.sql
+ create mode 100644 openspec/changes/archive/2026-09-28-slurm-render-profile-and-reconcile-drain/.openspec.yaml
+ create mode 100644 openspec/changes/archive/2026-09-28-slurm-render-profile-and-reconcile-drain/README.md
+ create mode 100644 openspec/changes/archive/2026-09-28-slurm-render-profile-and-reconcile-drain/design.md
+ create mode 100644 openspec/changes/archive/2026-09-28-slurm-render-profile-and-reconcile-drain/proposal.md
+ create mode 100644 openspec/changes/archive/2026-09-28-slurm-render-profile-and-reconcile-drain/specs/production-slurm-workload/spec.md
+ create mode 100644 openspec/changes/archive/2026-09-28-slurm-render-profile-and-reconcile-drain/specs/real-slurm-gateway-contract/spec.md
+ create mode 100644 openspec/changes/archive/2026-09-28-slurm-render-profile-and-reconcile-drain/tasks.md
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/.openspec.yaml
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/README.md
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/design.md
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/proposal.md
+ create mode 100755 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/copy_siblings.sh
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/d2-compare.out
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/d2_compare.py
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/equivalence-bounded.err
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/equivalence-bounded.out
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/explain-bounded-byh.out
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/explain-bounded-shj.out
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/explain-bounded-zhaochen_bst.out
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/f1-basin-pick.out
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/f1-basin-pick.sql
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/f1-byh.out
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/f1-chunk-stats.out
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/f1-chunk-stats.sql
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/f1-heihe-gfs-ifs-00z.out
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/f1-heihe-gfs-ifs-00z12z.out
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/f1-heihe-gfs-ifs-12z.out
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/f1-heihe-master-gfs-ifs-00z.out
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/f1-heihe-master-gfs-ifs-00z12z.out
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/f1-heihe-single-00z.out
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/f1-ord-byh.out
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/f1-probe-ord.sql
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/f1-probe-window-master.sql
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/f1-probe-window.sql
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/f1-probe.sql
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/f1-qhh-gfs-ifs-00z.out
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/f1-qhh-gfs-ifs-00z12z.out
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/f1-qhh-gfs-ifs-12z.out
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/f1-xinan_nujiang.out
+ create mode 100755 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/f1_third_basin.sh
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/it-branch-1.out
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/it-branch-2.out
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/it-pr-03646206b.out
+ create mode 100755 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/it_branch.sh
+ create mode 100755 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/it_pr.sh
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/probes/_probe_common.py
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/probes/equivalence_d1_bounded.py
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/probes/explain_bounded.py
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/prod-hydro-run-indexes.out
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/prod-hydro-run-indexes.sql
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/red-proof-A.full
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/red-proof-B.full
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/red-proof.out
+ create mode 100755 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/red_proof.sh
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/scratch_env.sh
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/setup-34.out
+ create mode 100755 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/setup_scratch.sh
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/sibling-explain-nhms_scratch_batchdb_34-vacuumed.out
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/sibling-explain-nhms_scratch_batchdb_34.out
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/sibling-explain-nhms_scratch_batchdb_d2.out
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-branch/sibling_explain.py
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-phase0-proof/d1-explain-byh-lat.out
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-phase0-proof/d1-explain-byh-lat.sql
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-phase0-proof/d1-explain-byh-latnb.out
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-phase0-proof/d1-explain-byh-latnb.sql
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-phase0-proof/d1-explain-byh-new.out
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-phase0-proof/d1-explain-byh-new.sql
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-phase0-proof/d1-explain-byh-old.out
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-phase0-proof/d1-explain-byh-old.sql
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-phase0-proof/d1-explain-zhaochen_bst-lat.out
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-phase0-proof/d1-explain-zhaochen_bst-lat.sql
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-phase0-proof/d1-explain-zhaochen_bst-latnb.out
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-phase0-proof/d1-explain-zhaochen_bst-latnb.sql
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-phase0-proof/d1-explain-zhaochen_bst-new.out
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-phase0-proof/d1-explain-zhaochen_bst-new.sql
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-phase0-proof/d1-explain-zhaochen_bst-old.out
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-phase0-proof/d1-explain-zhaochen_bst-old.sql
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-phase0-proof/proof-valid-ge-cycle.out
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-phase0-proof/proof-valid-ge-cycle.sql
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-phase0-proof/proof-valid-le-end.out
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-phase0-proof/proof-valid-le-end.sql
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-phase0-proof/window-shape.out
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/receipts/2026-09-28-phase0-proof/window-shape.sql
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/specs/forecast-api/spec.md
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/specs/schema-ledger-convergence/spec.md
+ create mode 100644 openspec/changes/hydro-run-index-dedup-and-latest-cycle-bound/tasks.md
+ba8f3b64 Merge pull request #2688 from DankerMu/feat/issue-2626-2634-2630-hydro-run-index-and-latest-cycle-bound
+2026-09-28T23:08:38Z step3 migrate
+2026-09-28T23:08:38Z migrate attempt 1
+Migration session lock_timeout=5s (source: session)
+Migration session statement_timeout=0 (source: default)
+Skipped migration: 000001_extensions.sql
+Skipped migration: 000002_schemas.sql
+Skipped migration: 000003_enums.sql
+Skipped migration: 000004_core.sql
+Skipped migration: 000005_met.sql
+Skipped migration: 000006_hydro.sql
+Skipped migration: 000008_map.sql
+Skipped migration: 000009_ops.sql
+Skipped migration: 000010_indexes.sql
+Skipped migration: 000011_pipeline_job_model_id.sql
+Skipped migration: 000012_pipeline_job_array_task.sql
+Skipped migration: 000013_enum_remediation.sql
+Skipped migration: 000014_best_available_lineage.sql
+Skipped migration: 000016_river_segment_pagination_indexes.sql
+Skipped migration: 000018_tile_cache_m16_contract.sql
+Skipped migration: 000019_hydro_mvt_identity_lookup_idx.sql
+Skipped migration: 000021_latest_ready_run_discovery_idx.sql
+Skipped migration: 000022_model_asset_lifecycle.sql
+Skipped migration: 000023_interp_weight_grid_signature.sql
+Skipped migration: 000024_qhh_latest_display_product_indexes.sql
+Skipped migration: 000025_active_manual_retry_guard.sql
+Skipped migration: 000026_ops_strict_identity_indexes.sql
+Skipped migration: 000027_cycle_status_canonical_incomplete.sql
+Skipped migration: 000028_state_lineage.sql
+Skipped migration: 000029_pipeline_reservation.sql
+Skipped migration: 000030_qhh_latest_display_parsed_status_index.sql
+Skipped migration: 000031_search_discovery_performance.sql
+Skipped migration: 000032_source_specific_state_snapshot.sql
+Skipped migration: 000033_station_mvt_active_source_index.sql
+Skipped migration: 000035_qhh_display_coverage_materialization.sql
+Skipped migration: 000037_river_segment_multilinestring.sql
+Skipped migration: 000038_direct_grid_interp_weight_constraints.sql
+Skipped migration: 000039_crosswalk_external_identity.sql
+Skipped migration: 000040_display_ready_succeeded_status_index.sql
+Skipped migration: 000041_drop_redundant_river_qhh_latest_window_idx.sql
+Skipped migration: 000042_drop_redundant_river_selected_identity_lookup_idx.sql
+Skipped migration: 000043_canonical_grid_snapshot.sql
+Skipped migration: 000044_canonical_grid_snapshot_identity_unique.sql
+Skipped migration: 000045_hydro_run_type_hindcast.sql
+Skipped migration: 000046_state_snapshot_clone_provenance.sql
+Skipped migration: 000047_hypertable_compression_settings.sql
+Skipped migration: 000048_river_segment_stream_type.sql
+Skipped migration: 000049_drop_redundant_river_mvt_identity_and_valid_time_discovery_idx.sql
+Skipped migration: 000050_river_identity_normalization.sql
+Skipped migration: 000051_river_ts_surrogate_key_read_index.sql
+Skipped migration: 000052_authority_stats_hygiene_trgm_expression_index.sql
+Skipped migration: 000053_state_snapshot_clone_gate_kind.sql
+Skipped migration: 000054_met_station_trgm_expression_index.sql
+Skipped migration: 000055_ops_ingest_recompute_decline.sql
+Skipped migration: 000056_hydro_run_parsed_at.sql
+Skipped migration: 000057_river_network_version_geometry_generation.sql
+Skipped migration: 000058_hot_timeseries_chunk_interval_3d.sql
+Skipped migration: 000059_river_timeseries_narrow_expand.sql
+Skipped migration: 000060_river_timeseries_contract.sql
+Skipped migration: 000061_forcing_station_timeseries_narrow_expand.sql
+Skipped migration: 000062_hydro_run_status_frequency_done_convergence.sql
+Skipped migration: 000063_hydro_run_partial_index_predicate_convergence.sql
+Skipped migration: 000064_drop_retired_flood_schema.sql
+Applied migration: 000065_hydro_run_candidate_index_dedup.sql
+Migrations complete: 1 applied, 58 skipped, 59 total.
+2026-09-28T23:08:39Z migrate rc=0
+2026-09-28T23:08:39Z step4 restart timers
+2026-09-28T23:08:39Z timers: active active 
