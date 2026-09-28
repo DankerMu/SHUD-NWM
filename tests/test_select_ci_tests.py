@@ -4094,6 +4094,8 @@ def test_state_index_capacity_watch_units_and_wrapper_select_the_watch_suite() -
         "scripts/node22_state_index_capacity_watch.py",
         "scripts/scheduler_state_index_repair.py",
         "tests/test_state_index_retention.py",
+        "packages/common/state_manager.py",
+        "packages/common/provider_atomic.py",
     ):
         assert watch_suite in select_tests([source], repo_root=Path(".")), source
     repair_selected = select_tests(["scripts/scheduler_state_index_repair.py"], repo_root=Path("."))
