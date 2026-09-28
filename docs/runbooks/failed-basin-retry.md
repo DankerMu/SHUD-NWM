@@ -849,14 +849,18 @@ terminal status as usual.
 
    On the production-sized journal a bind takes about a minute (53 s in the #2668 rehearsal): it holds the
    cycle lock and the journal-global reconcile-inventory lock while it scans claimants, so scheduler journal
-   writes wait behind it. Do not interrupt it; a refusal returns within seconds.
+   writes wait behind it. Do not interrupt it. Refusals decided before the claimant scan (`stale_attempt`,
+   `not_held`, `submitline_key_mismatch`, `submit_time_outside_attempt_window`) return within seconds;
+   `slurm_id_claimed` may take as long as a bind.
 
 5. **After the bind.** Exit 0 prints a sorted JSON receipt (`status=bound`, or
    `bound_with_warnings` when a derived direct/latest projection failed after the durable
    append; the bind is committed in both cases, so do not retry it). The next scheduler pass's
-   inflight reconcile projects the cohort from `sacct`. A `COMPLETED` array is not recomputed,
-   its members become terminal, the cycle's verdict turns `complete`, and the next cycle
-   enters backfill selection. The `held_reservation_unresolved` entry drops out of
+   inflight reconcile projects the cohort from `sacct`. A `COMPLETED` array is not recomputed:
+   its members leave the #2667 freeze and resume at the next stage (`state_save_qc` under
+   production's `forecast_state_save_qc` terminal stage). The cycle's verdict stays `gap` until
+   that stage succeeds, which is expected, not a missed bind; then it turns `complete` and the
+   next cycle enters backfill selection. The `held_reservation_unresolved` entry drops out of
    `list-operator-actions` once a newer reconciling pass no longer reports the row. If one
    array task `FAILED`, only that member reads `permanent_failure_guard` and succeeded members
    stay terminal. Its exit is the manual-retry marker on the cohort master
