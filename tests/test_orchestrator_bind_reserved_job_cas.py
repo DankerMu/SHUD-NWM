@@ -321,7 +321,9 @@ def test_a_row_outside_the_exact_held_shape_is_not_held(
     _refused(factory(tmp_path, monkeypatch), "not_held")
 
 
-@pytest.mark.parametrize("slurm_job_id", ["123_4", "abc", "56839.batch", " 56839", "56839_[0-3]", "", "٣٤"])
+@pytest.mark.parametrize(
+    "slurm_job_id", ["123_4", "abc", "56839.batch", " 56839", "56839_[0-3]", "", "٣٤", "0", "0123", f"0{MASTER_ID}"]
+)
 def test_a_slurm_id_that_is_not_a_bare_numeric_master_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, slurm_job_id: str
 ) -> None:
@@ -451,6 +453,188 @@ def test_a_recycled_slurm_id_settled_on_another_master_is_claimed_even_though_18
     assert automatic.outcome == "applied"
 
     _refused(repository, "slurm_id_claimed")
+
+
+# --- strict exclusivity: every row of the bound row's cycle, by canonical master part --------
+#
+# Same-cycle rows of ANY stage/kind/contract are scanned by the bounded cycle
+# replay; other cycles only through the reconcile inventory (current masters,
+# the two tests above).  A whole-tree replay is never used: on a production
+# journal it exceeds the record budget and would refuse every bind.
+
+CYCLE = datetime(2026, 7, 12, tzinfo=UTC)
+
+
+def _forcing_master_bound_to(repository: Any, slurm_job_id: str, *, source: str = "gfs") -> None:
+    """A FORCING master bound to ``slurm_job_id`` through the forcing lane's API (default: the held row's cycle).
+
+    The accepted-submit contract is forecast-only, so a forcing master is
+    never current-contract; it is reserved and bound through the legacy
+    ``reserve_pipeline_job`` / ``bind_pipeline_job_reservation`` pair.
+    """
+
+    key = f"cycle_{source}_2026071200_forcing_fixture:forcing"
+    job_id = f"job_cycle_{source}_2026071200_forcing_fixture_forcing"
+    repository.reserve_pipeline_job(
+        {
+            "job_id": job_id,
+            "run_id": f"cycle_{source}_2026071200_forcing_fixture",
+            "cycle_id": f"{source}_2026071200",
+            "job_type": "produce_forcing_array",
+            "stage": "forcing",
+            "idempotency_key": key,
+            "slurm_comment": f"nhms_forcing_attempt:{key}:a1",
+        }
+    )
+    assert repository.bind_pipeline_job_reservation(key, slurm_job_id=slurm_job_id) is not None
+    forcing = repository.get_pipeline_job(job_id)
+    assert (forcing["stage"], forcing["status"], forcing["slurm_job_id"]) == ("forcing", "submitted", slurm_job_id)
+
+
+def _historical_row(repository: Any, **fields: Any) -> None:
+    """One legacy/unversioned row of the held row's cycle, written as history."""
+
+    row = {
+        "run_id": "fcst_gfs_2026071200_model_5",
+        "cycle_id": "gfs_2026071200",
+        "status": "running",
+        "created_at": CYCLE,
+        "updated_at": CYCLE,
+        **fields,
+    }
+    repository.append_historical_pipeline_job(row)
+    persisted = repository.get_pipeline_job(row["job_id"])
+    assert persisted is not None
+    assert persisted.get("accepted_submit_contract_version") is None
+    for field in ("slurm_job_id", "matched_slurm_job_id"):
+        if field in fields:
+            assert persisted[field] == fields[field]
+
+
+def _legacy_forecast_row(repository: Any, **fields: Any) -> None:
+    _historical_row(
+        repository,
+        job_id="job_cycle_gfs_2026071200_forecast_legacy_forecast",
+        run_id="cycle_gfs_2026071200_forecast_legacy",
+        job_type="run_shud_forecast_array",
+        stage="forecast",
+        idempotency_key="cycle_gfs_2026071200_forecast_legacy:forecast",
+        **fields,
+    )
+
+
+def _member_task_row(repository: Any, slurm_job_id: str) -> None:
+    """A member task row of ANOTHER cohort run in the same cycle."""
+
+    _historical_row(
+        repository,
+        job_id="job_fcst_gfs_2026071200_model_5",
+        job_type="run_shud_forecast_array",
+        stage="forecast",
+        model_id="model_5",
+        candidate_id="gfs:2026-07-12T00:00:00Z:model_5:forecast_gfs_deterministic",
+        array_task_id=5,
+        slurm_job_id=slurm_job_id,
+    )
+
+
+def _bind(repository: Any) -> Any:
+    return repository.bind_operator_verified_reserved_job(JOB_ID, **bind_kwargs(held_row(repository)))
+
+
+def test_a_non_canonical_slurm_id_never_aliases_the_canonical_id_another_row_holds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = held_repository(tmp_path, monkeypatch)
+    _forcing_master_bound_to(repository, MASTER_ID)
+    _refused(repository, "slurm_id_invalid", slurm_job_id=f"0{MASTER_ID}")
+
+
+def test_a_slurm_id_bound_to_a_same_cycle_forcing_master_is_claimed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = held_repository(tmp_path, monkeypatch)
+    _forcing_master_bound_to(repository, MASTER_ID)
+    _refused(repository, "slurm_id_claimed")
+
+
+def test_a_slurm_id_held_by_a_same_cycle_legacy_unversioned_row_is_claimed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = held_repository(tmp_path, monkeypatch)
+    _legacy_forecast_row(repository, slurm_job_id=MASTER_ID)
+    _refused(repository, "slurm_id_claimed")
+
+
+def test_a_same_cycle_member_task_row_of_another_cohort_claims_its_master_part(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = held_repository(tmp_path, monkeypatch)
+    _member_task_row(repository, f"{MASTER_ID}_5")
+    _refused(repository, "slurm_id_claimed")
+
+
+def test_a_matched_slurm_id_alone_on_a_same_cycle_legacy_row_is_claimed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ``matched_slurm_job_id`` arm: only a legacy row can carry it without ``slurm_job_id``."""
+
+    repository = held_repository(tmp_path, monkeypatch)
+    _legacy_forecast_row(repository, status="reserved", slurm_job_id=None, matched_slurm_job_id=MASTER_ID)
+    _refused(repository, "slurm_id_claimed")
+
+
+def test_an_unrelated_slurm_id_in_the_same_cycle_does_not_block_the_bind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The master-part rule is exact: ``<id>0`` / ``1<id>_5`` never alias ``<id>``."""
+
+    repository = held_repository(tmp_path, monkeypatch)
+    _forcing_master_bound_to(repository, f"{MASTER_ID}0")
+    _member_task_row(repository, f"1{MASTER_ID}_5")
+    assert _bind(repository).refusal is None
+    assert held_row(repository)["slurm_job_id"] == MASTER_ID
+
+
+def test_a_cross_cycle_non_master_row_is_outside_the_bounded_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Documented residual: a forcing row of ANOTHER cycle is not scanned (no inventory anchor, not a master).
+
+    The SubmitLine key check is what rules out a master pasted from another
+    lane: its SubmitLine carries a different key.
+    """
+
+    repository = held_repository(tmp_path, monkeypatch)
+    _forcing_master_bound_to(repository, MASTER_ID, source="ifs")
+    assert _bind(repository).refusal is None
+
+
+def test_the_bind_never_depends_on_a_whole_tree_replay(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Production journals exceed the whole-tree record budget (#1953 census); the bind must still commit."""
+
+    repository = held_repository(tmp_path, monkeypatch)
+
+    def _over_budget(*_args: Any, **_kwargs: Any) -> Any:
+        raise FileOrchestrationJournalError("file_journal_record_limit_exceeded", field="pipeline_job_records")
+
+    monkeypatch.setattr(repository, "_replay_all_pipeline_job_records", _over_budget)
+    result = _bind(repository)
+    assert result.refusal is None
+    assert held_row(repository)["slurm_job_id"] == MASTER_ID
+
+
+def test_damaged_authority_of_another_cycle_does_not_block_the_bind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = held_repository(tmp_path, monkeypatch)
+    malformed_latest = repository.root / "latest" / "gfs" / "2025010100" / "bad.json"
+    malformed_latest.parent.mkdir(parents=True, exist_ok=True)
+    malformed_latest.write_text("[]", encoding="utf-8")
+    malformed_journal = repository.root / "journal" / "gfs" / "2025010100.jsonl"
+    malformed_journal.write_text("{not-json\n", encoding="utf-8")
+    assert _bind(repository).refusal is None
+    assert held_row(repository)["slurm_job_id"] == MASTER_ID
 
 
 # --- concurrency, input validation ------------------------------------------------------------

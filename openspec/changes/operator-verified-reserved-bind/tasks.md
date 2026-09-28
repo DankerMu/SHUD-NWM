@@ -36,7 +36,7 @@ Minimal mergeable slice: 1-2 (the bind exit) is the fix; 3 (listing) makes it di
 - [x] 4.1 `failed-basin-retry.md` case 2 (including the genuine double-submission rule: the other master must be terminal or cancelled, and the note records it) ("no supported operator bind command") → the `bind-reserved-job` procedure: sacct query for `JobID,JobName,State,Submit,SubmitLine`, how to choose the master in a genuine double submission, preview of the CAS inputs, and post-bind expectations. Also cover (c) escalation.
 - [x] 4.2 `scheduler-dbfree-typed-reasons.md` #2666 section: exit list gains `bind-reserved-job`; `list-operator-actions` shows `held_reservation_unresolved`. Add the row to the `node22-control-plane-manual-recovery.md` operator-action table.
 
-- [ ] 4.3 PR deviation record for (c). Open follow-up issues for (c) and for the forcing-lane siblings.
+- [x] 4.3 PR deviation record for (c). Open follow-up issues for (c) and for the forcing-lane siblings (#2674 for (c), #2675 for the forcing lane).
 
 ## 5. Verification
 

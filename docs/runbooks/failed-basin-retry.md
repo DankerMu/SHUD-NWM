@@ -720,15 +720,29 @@ Verified by:
 Since #2667 a held forecast master skips every member `active_duplicate_pipeline`, so the
 cycle's completion verdict reads `gap` and the source's single backfill slot stays on it:
 the whole forward lane of that source is frozen until the row is bound, demoted, or
-released. Automatic reconcile cannot bind three held shapes, and each one is now listed by
-`list-operator-actions` as decision `held_reservation_unresolved`:
+released. Automatic reconcile cannot bind three held shapes. Those, and every other held
+action restart reconcile could not resolve, are now listed by `list-operator-actions` as
+decision `held_reservation_unresolved`:
 
 | reconcile outcome | listed | `operator_command` | exit |
 |---|---|---|---|
 | `ambiguous_fallback_match` (either `fallback_match_basis`) | every pass | `bind-reserved-job` | this section |
 | `query_unavailable` / `fallback_no_match` / `absence_unconfirmed` | once the attempt anchor is at least 6h old (or unknown) | `triage` | this section if `sacct` shows the job; Disposition case 3 if it is confirmed dead |
+| `multiple_matches_blocked` | every pass | `escalate` | none: its durable decision is not the held tuple, so both the bind and the demote refuse it (`not_held`); escalate to the scheduler owner and never hand-edit the journal |
+| `identity_mismatch_blocked` / `stale_attempt_blocked` | once the attempt anchor is at least 6h old (or unknown) | `escalate` | none: no operator command resolves them; escalate to the scheduler owner |
+| `journal_quarantined` | once the attempt anchor is at least 6h old (or unknown) | `escalate` | the residue-file fix below when `quarantine_reason` is `file_journal_reconcile_inventory_migration_invalid`; any other reason: escalate |
 | `legacy_unversioned_read_only` (shape (c)) | every pass | `escalate` | none yet: the bind refuses it (`legacy_unversioned_unsupported`); tracked in #2674 |
 | any held row that is not a forecast cohort master (the forcing lane) | as tabled | `escalate` | none yet: neither bind nor demote accepts it; tracked in #2675 |
+| any other action (outside this table) | every pass, whatever the anchor age | `escalate` | none: a new reconcile action the listing does not know; escalate |
+
+For `journal_quarantined`, read the outcome's `quarantine_reason` / `quarantine_field` in the
+pass evidence. `file_journal_reconcile_inventory_migration_invalid` with field `pipeline_jobs`
+means a non-`.json` residue (for example `*.json.bak-zombie-<date>`) sits under
+`<journal>/pipeline-jobs/` and every bind scan fails closed on it. Move it out of the journal
+root and keep a backup, as in
+[node22-control-plane-manual-recovery.md](node22-control-plane-manual-recovery.md) (section
+"`active_duplicate_pipeline` + reserved-held forecast master (#2655)"), then wait for the next
+pass. Never demote such a row.
 
 `bind-reserved-job` binds **one** held current-contract forecast cohort master to the Slurm
 master the operator matched in `sacct`. It writes exactly the durable tuple that the
@@ -812,8 +826,8 @@ terminal status as usual.
    | `stale_attempt` | `--expected-attempt` / `--expected-attempt-started-at` differ from the durable row |
    | `submit_time_outside_attempt_window` | `--slurm-submit-time` is before the attempt anchor or after `--checked-at` |
    | `submitline_key_mismatch` | the `SubmitLine` has no `--comment=`, two distinct ones, or a key that is not this row's |
-   | `slurm_id_invalid` | `--slurm-job-id` is not a bare numeric master id |
-   | `slurm_id_claimed` | another current row already binds or claims that id, including a recycled id bound elsewhere with a different `Submit` (stricter than the automatic #1850 rule) |
+   | `slurm_id_invalid` | `--slurm-job-id` is not a canonical bare decimal master id (a leading zero such as `0123`, an array task, or a step suffix) |
+   | `slurm_id_claimed` | a same-cycle row of any kind (forcing, legacy, member task `<id>_<n>`) or a current forecast master of any cycle already binds or claims that master id, even a recycled id with a different `Submit` (stricter than #1850) |
    | `slurm_submit_time_invalid` | `--slurm-submit-time` is not a timezone-aware instant |
    | `legacy_unversioned_unsupported` | shape (c): escalate, #2674 |
    | `not_found` | no such forecast master |

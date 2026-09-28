@@ -13,11 +13,11 @@ The file-journal scheduler SHALL expose a row-scoped operator CLI, `bind-reserve
 - a timezone-aware check time;
 - a bounded, non-empty verification note.
 
-The `SubmitLine` SHALL carry exactly one distinct `--comment=` value, and that value SHALL equal the row's own `nhms_idem:<idempotency_key>`. The Slurm id SHALL NOT be bound to or claimed by any other row.
+The `SubmitLine` SHALL carry exactly one distinct `--comment=` value, and that value SHALL equal the row's own `nhms_idem:<idempotency_key>`. The Slurm id SHALL be a canonical bare decimal master id (no leading zero, array task, or step suffix). It SHALL NOT be bound or claimed by any other row of the same cycle (any stage, kind, contract version, or status: forecast or forcing, current or legacy, master or member task), nor by any current accepted-submit master in the reconcile inventory. A row's `slurm_job_id` or `matched_slurm_job_id` is compared by its master part (`123_5` claims `123`). The check SHALL NOT depend on a whole-journal replay.
 
 Under the cycle lock the command SHALL write the same durable bind tuple as the automatic name-window fallback bind (`matched_bound`, `submit_outcome=accepted`, `status=submitted`, `reconciliation_source=slurm_name_window_unique`, the matched id, and the accounting submit time), and SHALL append one audit event carrying the redacted operator evidence in the same durable append. It SHALL introduce no new durable binding token.
 
-Every refusal SHALL be named and SHALL leave the journal byte-identical. The named refusals include a legacy unversioned master, a stale attempt or anchor, a row that is not held (the held tuple is exactly `slurm_exact_comment` / `accounting_unavailable` / `comment_accounting_unproven`), a submit time outside the attempt window, a key mismatch, a claimed Slurm id (including a recycled id bound elsewhere), and a malformed Slurm id. The command SHALL behave identically through the click and argparse entrypoints. Terminal projection of the bound master SHALL remain the job of the next pass's inflight reconcile.
+Every refusal SHALL be named and SHALL leave the journal byte-identical. The named refusals include a legacy unversioned master, a stale attempt or anchor, a row that is not held (the held tuple is exactly `slurm_exact_comment` / `accounting_unavailable` / `comment_accounting_unproven`), a submit time outside the attempt window, a key mismatch, a claimed Slurm id (including a recycled id bound elsewhere), and a malformed or non-canonical Slurm id (such as `0123`). The command SHALL behave identically through the click and argparse entrypoints. Terminal projection of the bound master SHALL remain the job of the next pass's inflight reconcile.
 
 #### Scenario: A verified held master is bound and the lane resumes
 - **WHEN** a held forecast master whose automatic reconcile reports `ambiguous_fallback_match` or a persistent `query_unavailable` is bound with a SubmitLine carrying its own key, a matching attempt and anchor, and full operator evidence
@@ -29,8 +29,12 @@ Every refusal SHALL be named and SHALL leave the journal byte-identical. The nam
 - **THEN** the command SHALL exit non-zero with the named refusal and the journal SHALL be byte-identical
 
 #### Scenario: A claimed Slurm id cannot be bound twice
-- **WHEN** the supplied Slurm id is already bound to or claimed by another row
+- **WHEN** the supplied Slurm id is already bound to or claimed by another row of the same cycle (including a forcing row, a legacy unversioned row, or a member task row `<id>_<n>` of another cohort), or by a current accepted-submit master of any cycle
 - **THEN** the command SHALL refuse with `slurm_id_claimed` and write nothing
+
+#### Scenario: A non-canonical Slurm id is malformed
+- **WHEN** the supplied Slurm id carries a leading zero (`0123`), an array task, or a step suffix
+- **THEN** the command SHALL refuse with `slurm_id_invalid` and write nothing, even when another row holds the canonical id
 
 #### Scenario: A prior attempt's master cannot be bound
 - **WHEN** the supplied Slurm submit time is earlier than the row's attempt anchor or later than the check time
@@ -46,7 +50,7 @@ Every refusal SHALL be named and SHALL leave the journal byte-identical. The nam
 
 - `bind-reserved-job` for `ambiguous_fallback_match`;
 - `triage` for `query_unavailable`, `fallback_no_match`, and `absence_unconfirmed`;
-- `escalate` for `legacy_unversioned_read_only`, `multiple_matches_blocked`, `identity_mismatch_blocked`, `stale_attempt_blocked`, `journal_quarantined`, and any action outside this mapping (which SHALL still be listed).
+- `escalate` for `legacy_unversioned_read_only`, `multiple_matches_blocked`, `identity_mismatch_blocked`, `stale_attempt_blocked`, `journal_quarantined`, and any action outside this mapping (which SHALL always be listed, regardless of its attempt anchor age).
 
 An entry whose job id does not name a forecast cohort master stage (a forcing-lane row, or an id the stage-suffix rule cannot read) SHALL use `escalate` regardless of its action and SHALL carry `follow_up_issue` `#2675`; a legacy unversioned entry SHALL carry `follow_up_issue` `#2674`.
 

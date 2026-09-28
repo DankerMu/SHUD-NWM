@@ -1133,7 +1133,11 @@ OPERATOR_BIND_REFUSALS = frozenset(
     )
 )
 OPERATOR_VERIFIED_BIND_EVENT_TYPE = "operator_verified_bind"
-_OPERATOR_BIND_SLURM_ID_RE = re.compile(r"[0-9]+")
+#: A canonical bare decimal MASTER id: no leading zero (``0123`` is refused, so
+#: it can never alias ``123``), no array task, step, or non-ASCII digit.
+_OPERATOR_BIND_SLURM_ID_RE = re.compile(r"[1-9][0-9]*")
+#: The master part of any durable Slurm id (``57553_18`` / ``57553.batch`` -> ``57553``).
+_SLURM_MASTER_PART_RE = re.compile(r"[0-9]+")
 #: Typed-commit outcome -> named refusal (design Decision 3).  ``applied`` is
 #: the only success; ``file_journal_submit_instant_required`` is raised, not
 #: returned, and is mapped at the call site.
@@ -3853,6 +3857,21 @@ class FileOrchestrationJournalRepository:
                 return AcceptedSubmitCommitResult(
                     "active_slurm_id_occupied", dict(existing)
                 )
+            if operator_bind is not None and self._operator_bind_slurm_id_claimed_in_cycle_unlocked(
+                requested_id,
+                include_job_id=str(existing.get("job_id") or ""),
+                source_id=source_id,
+                cycle_time=cycle_time,
+            ):
+                # #2668 strict exclusivity, same cycle: ANY other row of this
+                # source/cycle -- any stage or kind, forcing, legacy/
+                # unversioned, downstream, member task, settled or active --
+                # whose Slurm id has the requested master part claims it.
+                # Other cycles are covered by the inventory scan above
+                # (current accepted-submit masters only).
+                return AcceptedSubmitCommitResult(
+                    "active_slurm_id_occupied", dict(existing)
+                )
             # The bind write happens INSIDE the journal-global inventory
             # lock, so no concurrent source/cycle writer (normal stage
             # submit, exact-comment commit, fallback commit) can enter the
@@ -5066,8 +5085,10 @@ class FileOrchestrationJournalRepository:
         ``comment_accounting_unproven``; the expected attempt and anchor;
         ``anchor <= slurm_submit_time <= checked_at``; the SubmitLine's single
         ``--comment=`` value equals the row's own ``nhms_idem:<key>``; a bare
-        numeric Slurm id no other current row binds or claims (strict: a
-        recycled incarnation elsewhere is refused too).
+        canonical decimal Slurm id, compared by master part, that no other row
+        of the same cycle (any stage/kind/contract: forcing, legacy, member task
+        ``<id>_<n>``) binds or claims, nor any current accepted-submit master in
+        the reconcile inventory (strict: a recycled incarnation is refused too).
 
         Invalid input types raise ``FileOrchestrationJournalError`` before any
         read; every CAS failure returns a named refusal from
@@ -5095,8 +5116,9 @@ class FileOrchestrationJournalRepository:
         expected_anchor = _accepted_submit_attempt_anchor(expected_submission_attempt_started_at)
         requested_id = slurm_job_id if isinstance(slurm_job_id, str) else ""
         if not _OPERATOR_BIND_SLURM_ID_RE.fullmatch(requested_id):
-            # A bare numeric MASTER id only: an array task (``123_4``), a step
-            # (``123.batch``), or anything else is refused by name.
+            # A canonical bare decimal MASTER id only: a leading zero
+            # (``0123``), an array task (``123_4``), a step (``123.batch``),
+            # or anything else is refused by name.
             return OperatorBindResult("slurm_id_invalid")
         canonical_submit = normalize_slurm_accounting_submitted_at(slurm_submit_time)
         if canonical_submit is None:
@@ -8762,6 +8784,47 @@ class FileOrchestrationJournalRepository:
             )
         return canonical
 
+    def _operator_bind_slurm_id_claimed_in_cycle_unlocked(
+        self,
+        requested_id: str,
+        *,
+        include_job_id: str,
+        source_id: str,
+        cycle_time: datetime,
+    ) -> bool:
+        """#2668: whether any row of the bound row's cycle other than ``include_job_id`` claims ``requested_id``.
+
+        The same-cycle half of the operator bind's strict exclusivity: the
+        bounded cycle-scoped replay of the source/cycle whose lock the caller
+        holds -- every row of it regardless of stage, kind, contract version,
+        or status (forcing and downstream rows, legacy unversioned rows,
+        member task rows).  The cross-cycle half is the reconcile-inventory
+        scan (current accepted-submit masters only); a whole-tree replay is
+        deliberately NOT used, because it exceeds the record budget on a
+        production journal and would refuse every bind.  Cross-cycle
+        non-master rows are therefore not scanned; the SubmitLine key check
+        (the key must be this row's own ``nhms_idem`` comment) is what rules
+        out a master pasted from another lane or row.
+
+        A row claims the id when the master part (leading decimal digits, so
+        ``57553_18`` and ``57553.batch`` read as ``57553``) of its
+        ``slurm_job_id`` or ``matched_slurm_job_id`` equals it as an integer.
+        The ``matched_slurm_job_id`` arm is defensive for current-contract
+        rows (their validator forces it equal to ``slurm_job_id`` or null); a
+        legacy row can carry it alone.  A replay failure raises -- never read
+        as "unclaimed".
+        """
+
+        requested = int(requested_id)
+        for job in self._iter_pipeline_job_records_for_cycle(source_id=source_id, cycle_time=cycle_time):
+            if str(job.get("job_id") or "") == include_job_id:
+                continue
+            for id_field in ("slurm_job_id", "matched_slurm_job_id"):
+                master_part = _SLURM_MASTER_PART_RE.match(str(job.get(id_field) or ""))
+                if master_part is not None and int(master_part.group(0)) == requested:
+                    return True
+        return False
+
     def _reconcile_inventory_jobs_matching_unlocked(
         self,
         entry_names: Sequence[str],
@@ -8817,7 +8880,10 @@ class FileOrchestrationJournalRepository:
         ``matched_slurm_job_id``, and a SETTLED same-id master blocks even when
         its canonical Submit proves a recycled incarnation -- the operator path
         accepts no recycle ambiguity. Every other caller passes ``False`` and
-        keeps the rules above unchanged.
+        keeps the rules above unchanged.  This is the cross-cycle half of the operator bind's
+        exclusivity; every row of the bound row's own cycle (any stage, kind,
+        or contract) is checked by
+        :meth:`_operator_bind_slurm_id_claimed_in_cycle_unlocked`.
 
         Reads only reconcile-inventory anchors and each anchor's exact
         canonical row; never enumerates the whole tree (#1850 D3). The caller

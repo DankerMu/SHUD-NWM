@@ -34,7 +34,7 @@ Held reservations reach an exit only through restart reconcile: an automatic bin
    - **Attempt window:** `anchor <= --slurm-submit-time <= --checked-at`. Otherwise the refusal is `submit_time_outside_attempt_window`. `slurm_comment_for` depends only on the key, and `absence_retry_permitted` re-reserves under the same key, so without the window a prior attempt's master would pass the key check. This mirrors the automatic fallback's window rule (`reconcile.py:594`).
 3. **Key, claimant, and typed-commit refusal map.**
    - The key is `reconcile._submitline_comment_key(--submit-line)`, reused rather than reimplemented. It must be non-null and equal to `nhms_idem:<existing.idempotency_key>`; otherwise `submitline_key_mismatch`.
-   - `--slurm-job-id` must be a bare numeric master; otherwise `slurm_id_invalid`.
+   - `--slurm-job-id` must be a canonical bare decimal master (`[1-9][0-9]*`: no leading zero, so `0123` can never alias `123`); otherwise `slurm_id_invalid`.
    - Refusal map for typed-commit outcomes (`file_orchestration_journal.py:3575-3722`); every one of them writes zero bytes:
 
      | typed-commit outcome | named refusal |
@@ -45,6 +45,9 @@ Held reservations reach an exit only through restart reconcile: an automatic bin
      | raised `file_journal_submit_instant_required` | `slurm_submit_time_invalid` |
 
    - **Deliberately stricter than #1850:** a Slurm id already present as `slurm_job_id` / `matched_slurm_job_id` on any other current row is refused, even when that id is a recycled one with a different Submit incarnation, which `_settled_incarnation_matches_candidate` would accept. The operator path accepts no recycle ambiguity.
+   - **Scope: the bound row's cycle, plus current masters everywhere.** The id must not be bound or claimed by any other row of the same cycle, nor by any current accepted-submit master in the reconcile inventory. The same-cycle half is the bounded cycle-scoped replay that the held cycle lock already covers: every row of that source/cycle, of any stage, kind, contract version, or status (forcing and downstream rows, legacy unversioned rows, member task rows). The cross-cycle half is the existing reconcile-inventory anchor/flat scan with the strict branches (current forecast masters, `slurm_job_id` or `matched_slurm_job_id`, settled or active). A row's id is compared by its master part (leading decimal digits, so `57553_18` claims `57553`). A replay failure in the scanned scope raises and writes nothing; it is never read as unclaimed. The automatic commit paths are unchanged.
+   - **No whole-journal replay.** On node-22 the whole-tree replay exceeds its record budget by design (#1953 census; `tests/test_file_journal_full_tree_budget_contract.py`), so a whole-tree claimant scan would refuse every production bind. Damaged authority in another cycle therefore does not block a bind.
+   - **Residual (deviation):** non-master rows of other cycles (a forcing, downstream, legacy, or member task row elsewhere) are not scanned. This is mitigated by the SubmitLine key check: a SubmitLine pasted from another lane or row carries a different `--comment` key and is refused as `submitline_key_mismatch`.
    - **Genuine double submission** (`submitline_exact`, `match_count=2`): the command binds only the master it is given. The runbook requires the operator to confirm in sacct that the other master is terminal or cancelled before binding; otherwise binding lets the next stage start while that master still writes the same run outputs. The verification note must record the other master's id and state. The command does not query sacct.
 4. **CLI.**
    - Click and argparse share one callable in `operator_reserved_bind.py`, mirroring `operator_reserved_demotion.py`, because `cli.py` is under the large-file guard.
@@ -70,7 +73,7 @@ Held reservations reach an exit only through restart reconcile: an automatic bin
      | `query_unavailable`, `fallback_no_match`, `absence_unconfirmed` | anchor ≥ 6h before pass start, or anchor unknown | `triage` (runbook: bind if sacct shows the job, demote if confirmed dead) |
      | `identity_mismatch_blocked`, `stale_attempt_blocked`, `journal_quarantined` | anchor ≥ 6h or unknown | `escalate` |
 
-     Any action outside the table is listed with `escalate`, so it fails visible.
+     Any action outside the table is always listed with `escalate`, regardless of its anchor age, so it fails visible.
    - **Non-forecast held rows.** `reserved_unbound.outcomes[]` also carries forcing rows, which have no supported bind or demote exit. Any held entry whose `job_id` stage suffix does not name a forecast cohort master stage (for example `_forcing`; an id the suffix rule cannot read counts as non-forecast) SHALL use `operator_command` `escalate` (never `bind-reserved-job` or `triage`) and carry `follow_up_issue: "#2675"`. The listing and age rules are otherwise unchanged.
    - **Resolution drops the entry.** An entry is dropped when a newer scanned pass whose restart-reconcile lane ran either lacks that `job_id` in its `reserved_unbound.outcomes[]` or reports it with a never-list action. A bound, demoted, or released row stops being reserved-unbound, so later passes emit nothing for it.
    - **Exit-code boundary (a documented fifth exit-0 boundary; no new exit-3 trigger):**
@@ -90,17 +93,20 @@ Held reservations reach an exit only through restart reconcile: an automatic bin
 | Submit time before the anchor, or after `--checked-at` | `submit_time_outside_attempt_window`, zero bytes |
 | SubmitLine key differs, is absent, or is ambiguous | `submitline_key_mismatch`, zero bytes |
 | Attempt or anchor mismatch; row not `reserved`; already bound; outcome not ambiguous; exact-comment held reason (`coverage_incomplete`) | `stale_attempt` / `not_held`, zero bytes |
-| Slurm id bound or claimed elsewhere (including a recycled id); id malformed (`123_4`, `abc`) | `slurm_id_claimed` / `slurm_id_invalid`, zero bytes |
+| Slurm id bound or claimed by a current master of any cycle (including a recycled id), or by any row of the same cycle (a forcing row, a legacy unversioned row, a member task `<id>_<n>` of another cohort, or a legacy `matched_slurm_job_id`); id malformed or non-canonical (`123_4`, `abc`, `0123`, even while another row holds `123`) | `slurm_id_claimed` / `slurm_id_invalid`, zero bytes |
+| Whole-tree replay over its record budget, or damaged authority in another cycle | the bind still commits (the claimant scan never replays the whole journal) |
+| A forcing row of another cycle holding the id (the documented residual) | not scanned; the bind commits |
 | Legacy unversioned master | `legacy_unversioned_unsupported`, zero bytes |
 | Missing `--confirm`, blank evidence, or naive timestamps | both entrypoints exit non-zero before the repository is built |
 | Concurrent reconcile bind before the lock is taken | the locked re-read refuses, zero bytes |
 | Secret-looking token in the evidence | redacted in both the receipt and the event |
 | Post-commit projection failure | committed with a warning; a retried request is `not_held` |
 | Listing: every row of the action table, including an action outside the table | as tabled. Closure pin over the reconcile action vocabulary |
+| Listing: an action outside the table whose anchor is 5 minutes old | listed with `escalate` |
 | Listing: a forcing `query_unavailable` held ≥ 6h, and a forcing `multiple_matches_blocked` | both listed with `escalate` and `follow_up_issue: "#2675"` |
 | Listing: `query_unavailable` with anchor < 6h / ≥ 6h / unknown | not listed / listed / listed |
 | Listing: a job held in pass N (listed), then bound before pass N+1 (absent there, or `bound`) | not listed; exit follows the remaining entries |
-| Listing: a pass that skipped restart reconcile or has `reserved_unbound_error` | reported in `restart_reconcile_unscanned_passes`; exit code otherwise unchanged |
+| Listing: a pass that skipped restart reconcile, has `reserved_unbound_error`, has no `restart_reconcile`, or has no `reserved_unbound.outcomes` | reported in `restart_reconcile_unscanned_passes` (`restart_reconcile_skipped` / `reserved_unbound_error` / `restart_reconcile_absent` / `reserved_unbound_outcomes_absent`); exit code otherwise unchanged |
 | Evidence: `submission_attempt_started_at` in serialized outcomes and survives compaction | present |
 | #2667 pins | `tests/test_scheduler_held_reservation_block.py` unchanged and green |
 

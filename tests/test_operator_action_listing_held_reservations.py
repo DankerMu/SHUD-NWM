@@ -225,10 +225,17 @@ def test_every_action_of_the_table_is_listed_as_tabled(
 
 
 @pytest.mark.parametrize(
-    "action", ["ambiguous_fallback_match", "legacy_unversioned_read_only", "multiple_matches_blocked"]
+    ("action", "command"),
+    [
+        ("ambiguous_fallback_match", "bind-reserved-job"),
+        ("legacy_unversioned_read_only", "escalate"),
+        ("multiple_matches_blocked", "escalate"),
+        # An action outside the table fails visible whatever its anchor age.
+        ("a_future_action_outside_the_table", "escalate"),
+    ],
 )
 def test_always_listed_actions_ignore_the_anchor_age(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], action: str
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], action: str, command: str
 ) -> None:
     _write_held_pass(
         tmp_path, _PASS_A, mtime=1_000, outcomes=[_outcome(action, anchor=_STARTED - timedelta(minutes=5))]
@@ -237,7 +244,7 @@ def test_always_listed_actions_ignore_the_anchor_age(
     code, payload, _err = _run(["--evidence-root", str(tmp_path)], capsys)
 
     assert code == 1
-    assert [row["reason"] for row in _held(payload)] == [action]
+    assert [(row["reason"], row["operator_command"]) for row in _held(payload)] == [(action, command)]
 
 
 @pytest.mark.parametrize(
@@ -392,6 +399,14 @@ def test_dropping_a_resolved_hold_leaves_other_actions_to_decide_the_exit(
             "reserved_unbound_error",
         ),
         (None, "restart_reconcile_absent"),
+        (
+            {"status": "completed", "inflight": {"count": 0, "outcomes": []}},
+            "reserved_unbound_outcomes_absent",
+        ),
+        (
+            {"status": "completed", "reserved_unbound": {"count": 0}, "inflight": {"count": 0, "outcomes": []}},
+            "reserved_unbound_outcomes_absent",
+        ),
     ],
 )
 def test_a_pass_whose_reserved_lane_did_not_run_is_unscanned_and_changes_no_exit_code(
