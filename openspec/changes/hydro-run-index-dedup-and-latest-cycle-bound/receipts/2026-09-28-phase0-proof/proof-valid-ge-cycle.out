@@ -1,0 +1,12 @@
+Pager usage is off.
+SET
+SET
+SET
+SET
+SET
+Timing is on.
+ run_key | run_id | cycle_time 
+---------+--------+------------
+(0 rows)
+
+Time: 74684.668 ms (01:14.685)

@@ -1,0 +1,507 @@
+{"database": "nhms_scratch_batchdb_d2"}
+{"state": "analyze-only", "candidate": "none (seq scan)", "relpages": 864, "relallvisible": 0, "pin": {"basin": "basins_zhaochen_bst_vbasins", "scenarios": ["GFS", "IFS"], "model_filter": null}, "shared_hit": 864, "shared_read": 0, "scan": "Seq Scan on hydro_run h (actual time=0.019..2.536 rows=239 loops=1)", "heap_fetches": null, "rows": 239}
+Seq Scan on hydro_run h (actual time=0.019..2.536 rows=239 loops=1)
+  Filter: ((cycle_time IS NOT NULL) AND (run_type = 'forecast'::hydro.run_type) AND (basin_version_id = 'basins_zhaochen_bst_vbasins'::text) AND ((lower(source_id) = ANY ('{gfs,ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_gfs_deterministic,forecast_ifs_deterministic,gfs,ifs}'::text[]))))
+  Rows Removed by Filter: 10484
+  Buffers: shared hit=864
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.189 ms
+Execution Time: 2.560 ms
+{"state": "analyze-only", "candidate": "none (seq scan)", "relpages": 864, "relallvisible": 0, "pin": {"basin": "basins_byh_vbasins", "scenarios": ["GFS", "IFS"], "model_filter": null}, "shared_hit": 864, "shared_read": 0, "scan": "Seq Scan on hydro_run h (actual time=1.293..2.450 rows=128 loops=1)", "heap_fetches": null, "rows": 128}
+Seq Scan on hydro_run h (actual time=1.293..2.450 rows=128 loops=1)
+  Filter: ((cycle_time IS NOT NULL) AND (run_type = 'forecast'::hydro.run_type) AND (basin_version_id = 'basins_byh_vbasins'::text) AND ((lower(source_id) = ANY ('{gfs,ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_gfs_deterministic,forecast_ifs_deterministic,gfs,ifs}'::text[]))))
+  Rows Removed by Filter: 10595
+  Buffers: shared hit=864
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.187 ms
+Execution Time: 2.467 ms
+{"state": "analyze-only", "candidate": "none (seq scan)", "relpages": 864, "relallvisible": 0, "pin": {"basin": "basins_byh_vbasins", "scenarios": ["IFS"], "model_filter": null}, "shared_hit": 864, "shared_read": 0, "scan": "Seq Scan on hydro_run h (actual time=1.298..2.475 rows=64 loops=1)", "heap_fetches": null, "rows": 64}
+Seq Scan on hydro_run h (actual time=1.298..2.475 rows=64 loops=1)
+  Filter: ((cycle_time IS NOT NULL) AND (run_type = 'forecast'::hydro.run_type) AND (basin_version_id = 'basins_byh_vbasins'::text) AND ((lower(source_id) = ANY ('{ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_ifs_deterministic,ifs}'::text[]))))
+  Rows Removed by Filter: 10659
+  Buffers: shared hit=864
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.181 ms
+Execution Time: 2.488 ms
+{"state": "analyze-only", "candidate": "none (seq scan)", "relpages": 864, "relallvisible": 0, "pin": {"basin": "basins_byh_vbasins", "scenarios": ["GFS", "IFS"], "model_filter": "dg_33f721d9ff702a1b45b7257e91804ac1"}, "shared_hit": 317, "shared_read": 0, "scan": "Index Scan using hydro_run_ops_strict_identity_candidates_idx on hydro_run h (actual time=0.756..1.073 rows=64 loops=1)", "heap_fetches": null, "rows": 64}
+Index Scan using hydro_run_ops_strict_identity_candidates_idx on hydro_run h (actual time=0.756..1.073 rows=64 loops=1)
+  Index Cond: ((cycle_time IS NOT NULL) AND (model_id = 'dg_33f721d9ff702a1b45b7257e91804ac1'::text))
+  Filter: ((run_type = 'forecast'::hydro.run_type) AND (basin_version_id = 'basins_byh_vbasins'::text) AND ((lower(source_id) = ANY ('{gfs,ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_gfs_deterministic,forecast_ifs_deterministic,gfs,ifs}'::text[]))))
+  Buffers: shared hit=317
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.213 ms
+Execution Time: 1.089 ms
+{"state": "analyze-only", "candidate": "A (basin_version_id, cycle_time DESC)", "relpages": 864, "relallvisible": 0, "pin": {"basin": "basins_zhaochen_bst_vbasins", "scenarios": ["GFS", "IFS"], "model_filter": null}, "shared_hit": 194, "shared_read": 0, "scan": "Bitmap Heap Scan on hydro_run h (actual time=0.116..0.606 rows=239 loops=1)", "heap_fetches": null, "rows": 239}
+Bitmap Heap Scan on hydro_run h (actual time=0.116..0.606 rows=239 loops=1)
+  Recheck Cond: ((basin_version_id = 'basins_zhaochen_bst_vbasins'::text) AND (run_type = 'forecast'::hydro.run_type) AND (cycle_time IS NOT NULL))
+  Filter: ((lower(source_id) = ANY ('{gfs,ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_gfs_deterministic,forecast_ifs_deterministic,gfs,ifs}'::text[])))
+  Heap Blocks: exact=191
+  Buffers: shared hit=194
+  ->  Bitmap Index Scan on d2_candidate_0 (actual time=0.041..0.041 rows=239 loops=1)
+        Index Cond: (basin_version_id = 'basins_zhaochen_bst_vbasins'::text)
+        Buffers: shared hit=3
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.393 ms
+Execution Time: 0.649 ms
+{"state": "analyze-only", "candidate": "A (basin_version_id, cycle_time DESC)", "relpages": 864, "relallvisible": 0, "pin": {"basin": "basins_byh_vbasins", "scenarios": ["GFS", "IFS"], "model_filter": null}, "shared_hit": 125, "shared_read": 0, "scan": "Bitmap Heap Scan on hydro_run h (actual time=0.047..0.263 rows=128 loops=1)", "heap_fetches": null, "rows": 128}
+Bitmap Heap Scan on hydro_run h (actual time=0.047..0.263 rows=128 loops=1)
+  Recheck Cond: ((basin_version_id = 'basins_byh_vbasins'::text) AND (run_type = 'forecast'::hydro.run_type) AND (cycle_time IS NOT NULL))
+  Filter: ((lower(source_id) = ANY ('{gfs,ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_gfs_deterministic,forecast_ifs_deterministic,gfs,ifs}'::text[])))
+  Heap Blocks: exact=123
+  Buffers: shared hit=125
+  ->  Bitmap Index Scan on d2_candidate_0 (actual time=0.017..0.018 rows=128 loops=1)
+        Index Cond: (basin_version_id = 'basins_byh_vbasins'::text)
+        Buffers: shared hit=2
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.279 ms
+Execution Time: 0.289 ms
+{"state": "analyze-only", "candidate": "A (basin_version_id, cycle_time DESC)", "relpages": 864, "relallvisible": 0, "pin": {"basin": "basins_byh_vbasins", "scenarios": ["IFS"], "model_filter": null}, "shared_hit": 125, "shared_read": 0, "scan": "Bitmap Heap Scan on hydro_run h (actual time=0.073..0.437 rows=64 loops=1)", "heap_fetches": null, "rows": 64}
+Bitmap Heap Scan on hydro_run h (actual time=0.073..0.437 rows=64 loops=1)
+  Recheck Cond: ((basin_version_id = 'basins_byh_vbasins'::text) AND (run_type = 'forecast'::hydro.run_type) AND (cycle_time IS NOT NULL))
+  Filter: ((lower(source_id) = ANY ('{ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_ifs_deterministic,ifs}'::text[])))
+  Rows Removed by Filter: 64
+  Heap Blocks: exact=123
+  Buffers: shared hit=125
+  ->  Bitmap Index Scan on d2_candidate_0 (actual time=0.026..0.026 rows=128 loops=1)
+        Index Cond: (basin_version_id = 'basins_byh_vbasins'::text)
+        Buffers: shared hit=2
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.375 ms
+Execution Time: 0.467 ms
+{"state": "analyze-only", "candidate": "A (basin_version_id, cycle_time DESC)", "relpages": 864, "relallvisible": 0, "pin": {"basin": "basins_byh_vbasins", "scenarios": ["GFS", "IFS"], "model_filter": "dg_33f721d9ff702a1b45b7257e91804ac1"}, "shared_hit": 125, "shared_read": 0, "scan": "Bitmap Heap Scan on hydro_run h (actual time=0.066..0.313 rows=64 loops=1)", "heap_fetches": null, "rows": 64}
+Bitmap Heap Scan on hydro_run h (actual time=0.066..0.313 rows=64 loops=1)
+  Recheck Cond: ((basin_version_id = 'basins_byh_vbasins'::text) AND (run_type = 'forecast'::hydro.run_type) AND (cycle_time IS NOT NULL))
+  Filter: ((model_id = 'dg_33f721d9ff702a1b45b7257e91804ac1'::text) AND ((lower(source_id) = ANY ('{gfs,ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_gfs_deterministic,forecast_ifs_deterministic,gfs,ifs}'::text[]))))
+  Rows Removed by Filter: 64
+  Heap Blocks: exact=123
+  Buffers: shared hit=125
+  ->  Bitmap Index Scan on d2_candidate_0 (actual time=0.025..0.025 rows=128 loops=1)
+        Index Cond: (basin_version_id = 'basins_byh_vbasins'::text)
+        Buffers: shared hit=2
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.439 ms
+Execution Time: 0.344 ms
+{"state": "analyze-only", "candidate": "B (basin_version_id, cycle_time DESC) INCLUDE (run_key, scenario_id, source_id, end_time)", "relpages": 864, "relallvisible": 0, "pin": {"basin": "basins_zhaochen_bst_vbasins", "scenarios": ["GFS", "IFS"], "model_filter": null}, "shared_hit": 197, "shared_read": 0, "scan": "Bitmap Heap Scan on hydro_run h (actual time=0.094..0.557 rows=239 loops=1)", "heap_fetches": null, "rows": 239}
+Bitmap Heap Scan on hydro_run h (actual time=0.094..0.557 rows=239 loops=1)
+  Recheck Cond: ((basin_version_id = 'basins_zhaochen_bst_vbasins'::text) AND (run_type = 'forecast'::hydro.run_type) AND (cycle_time IS NOT NULL))
+  Filter: ((lower(source_id) = ANY ('{gfs,ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_gfs_deterministic,forecast_ifs_deterministic,gfs,ifs}'::text[])))
+  Heap Blocks: exact=191
+  Buffers: shared hit=197
+  ->  Bitmap Index Scan on d2_candidate_0 (actual time=0.046..0.046 rows=239 loops=1)
+        Index Cond: (basin_version_id = 'basins_zhaochen_bst_vbasins'::text)
+        Buffers: shared hit=6
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.378 ms
+Execution Time: 0.600 ms
+{"state": "analyze-only", "candidate": "B (basin_version_id, cycle_time DESC) INCLUDE (run_key, scenario_id, source_id, end_time)", "relpages": 864, "relallvisible": 0, "pin": {"basin": "basins_byh_vbasins", "scenarios": ["GFS", "IFS"], "model_filter": null}, "shared_hit": 127, "shared_read": 0, "scan": "Bitmap Heap Scan on hydro_run h (actual time=0.055..0.284 rows=128 loops=1)", "heap_fetches": null, "rows": 128}
+Bitmap Heap Scan on hydro_run h (actual time=0.055..0.284 rows=128 loops=1)
+  Recheck Cond: ((basin_version_id = 'basins_byh_vbasins'::text) AND (run_type = 'forecast'::hydro.run_type) AND (cycle_time IS NOT NULL))
+  Filter: ((lower(source_id) = ANY ('{gfs,ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_gfs_deterministic,forecast_ifs_deterministic,gfs,ifs}'::text[])))
+  Heap Blocks: exact=123
+  Buffers: shared hit=127
+  ->  Bitmap Index Scan on d2_candidate_0 (actual time=0.024..0.024 rows=128 loops=1)
+        Index Cond: (basin_version_id = 'basins_byh_vbasins'::text)
+        Buffers: shared hit=4
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.367 ms
+Execution Time: 0.313 ms
+{"state": "analyze-only", "candidate": "B (basin_version_id, cycle_time DESC) INCLUDE (run_key, scenario_id, source_id, end_time)", "relpages": 864, "relallvisible": 0, "pin": {"basin": "basins_byh_vbasins", "scenarios": ["IFS"], "model_filter": null}, "shared_hit": 127, "shared_read": 0, "scan": "Bitmap Heap Scan on hydro_run h (actual time=0.068..0.367 rows=64 loops=1)", "heap_fetches": null, "rows": 64}
+Bitmap Heap Scan on hydro_run h (actual time=0.068..0.367 rows=64 loops=1)
+  Recheck Cond: ((basin_version_id = 'basins_byh_vbasins'::text) AND (run_type = 'forecast'::hydro.run_type) AND (cycle_time IS NOT NULL))
+  Filter: ((lower(source_id) = ANY ('{ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_ifs_deterministic,ifs}'::text[])))
+  Rows Removed by Filter: 64
+  Heap Blocks: exact=123
+  Buffers: shared hit=127
+  ->  Bitmap Index Scan on d2_candidate_0 (actual time=0.027..0.028 rows=128 loops=1)
+        Index Cond: (basin_version_id = 'basins_byh_vbasins'::text)
+        Buffers: shared hit=4
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.324 ms
+Execution Time: 0.393 ms
+{"state": "analyze-only", "candidate": "B (basin_version_id, cycle_time DESC) INCLUDE (run_key, scenario_id, source_id, end_time)", "relpages": 864, "relallvisible": 0, "pin": {"basin": "basins_byh_vbasins", "scenarios": ["GFS", "IFS"], "model_filter": "dg_33f721d9ff702a1b45b7257e91804ac1"}, "shared_hit": 127, "shared_read": 0, "scan": "Bitmap Heap Scan on hydro_run h (actual time=0.063..0.275 rows=64 loops=1)", "heap_fetches": null, "rows": 64}
+Bitmap Heap Scan on hydro_run h (actual time=0.063..0.275 rows=64 loops=1)
+  Recheck Cond: ((basin_version_id = 'basins_byh_vbasins'::text) AND (run_type = 'forecast'::hydro.run_type) AND (cycle_time IS NOT NULL))
+  Filter: ((model_id = 'dg_33f721d9ff702a1b45b7257e91804ac1'::text) AND ((lower(source_id) = ANY ('{gfs,ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_gfs_deterministic,forecast_ifs_deterministic,gfs,ifs}'::text[]))))
+  Rows Removed by Filter: 64
+  Heap Blocks: exact=123
+  Buffers: shared hit=127
+  ->  Bitmap Index Scan on d2_candidate_0 (actual time=0.027..0.028 rows=128 loops=1)
+        Index Cond: (basin_version_id = 'basins_byh_vbasins'::text)
+        Buffers: shared hit=4
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.363 ms
+Execution Time: 0.302 ms
+{"state": "analyze-only", "candidate": "C (basin_version_id, scenario_id, cycle_time DESC)", "relpages": 864, "relallvisible": 0, "pin": {"basin": "basins_zhaochen_bst_vbasins", "scenarios": ["GFS", "IFS"], "model_filter": null}, "shared_hit": 197, "shared_read": 0, "scan": "Bitmap Heap Scan on hydro_run h (actual time=0.059..0.361 rows=239 loops=1)", "heap_fetches": null, "rows": 239}
+Bitmap Heap Scan on hydro_run h (actual time=0.059..0.361 rows=239 loops=1)
+  Recheck Cond: ((basin_version_id = 'basins_zhaochen_bst_vbasins'::text) AND (run_type = 'forecast'::hydro.run_type) AND (cycle_time IS NOT NULL))
+  Filter: ((lower(source_id) = ANY ('{gfs,ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_gfs_deterministic,forecast_ifs_deterministic,gfs,ifs}'::text[])))
+  Heap Blocks: exact=191
+  Buffers: shared hit=197
+  ->  Bitmap Index Scan on d2_candidate_0 (actual time=0.029..0.029 rows=239 loops=1)
+        Index Cond: (basin_version_id = 'basins_zhaochen_bst_vbasins'::text)
+        Buffers: shared hit=6
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.220 ms
+Execution Time: 0.388 ms
+{"state": "analyze-only", "candidate": "C (basin_version_id, scenario_id, cycle_time DESC)", "relpages": 864, "relallvisible": 0, "pin": {"basin": "basins_byh_vbasins", "scenarios": ["GFS", "IFS"], "model_filter": null}, "shared_hit": 127, "shared_read": 0, "scan": "Bitmap Heap Scan on hydro_run h (actual time=0.039..0.208 rows=128 loops=1)", "heap_fetches": null, "rows": 128}
+Bitmap Heap Scan on hydro_run h (actual time=0.039..0.208 rows=128 loops=1)
+  Recheck Cond: ((basin_version_id = 'basins_byh_vbasins'::text) AND (run_type = 'forecast'::hydro.run_type) AND (cycle_time IS NOT NULL))
+  Filter: ((lower(source_id) = ANY ('{gfs,ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_gfs_deterministic,forecast_ifs_deterministic,gfs,ifs}'::text[])))
+  Heap Blocks: exact=123
+  Buffers: shared hit=127
+  ->  Bitmap Index Scan on d2_candidate_0 (actual time=0.017..0.018 rows=128 loops=1)
+        Index Cond: (basin_version_id = 'basins_byh_vbasins'::text)
+        Buffers: shared hit=4
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.218 ms
+Execution Time: 0.229 ms
+{"state": "analyze-only", "candidate": "C (basin_version_id, scenario_id, cycle_time DESC)", "relpages": 864, "relallvisible": 0, "pin": {"basin": "basins_byh_vbasins", "scenarios": ["IFS"], "model_filter": null}, "shared_hit": 127, "shared_read": 0, "scan": "Bitmap Heap Scan on hydro_run h (actual time=0.044..0.238 rows=64 loops=1)", "heap_fetches": null, "rows": 64}
+Bitmap Heap Scan on hydro_run h (actual time=0.044..0.238 rows=64 loops=1)
+  Recheck Cond: ((basin_version_id = 'basins_byh_vbasins'::text) AND (run_type = 'forecast'::hydro.run_type) AND (cycle_time IS NOT NULL))
+  Filter: ((lower(source_id) = ANY ('{ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_ifs_deterministic,ifs}'::text[])))
+  Rows Removed by Filter: 64
+  Heap Blocks: exact=123
+  Buffers: shared hit=127
+  ->  Bitmap Index Scan on d2_candidate_0 (actual time=0.017..0.018 rows=128 loops=1)
+        Index Cond: (basin_version_id = 'basins_byh_vbasins'::text)
+        Buffers: shared hit=4
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.208 ms
+Execution Time: 0.255 ms
+{"state": "analyze-only", "candidate": "C (basin_version_id, scenario_id, cycle_time DESC)", "relpages": 864, "relallvisible": 0, "pin": {"basin": "basins_byh_vbasins", "scenarios": ["GFS", "IFS"], "model_filter": "dg_33f721d9ff702a1b45b7257e91804ac1"}, "shared_hit": 127, "shared_read": 0, "scan": "Bitmap Heap Scan on hydro_run h (actual time=0.041..0.180 rows=64 loops=1)", "heap_fetches": null, "rows": 64}
+Bitmap Heap Scan on hydro_run h (actual time=0.041..0.180 rows=64 loops=1)
+  Recheck Cond: ((basin_version_id = 'basins_byh_vbasins'::text) AND (run_type = 'forecast'::hydro.run_type) AND (cycle_time IS NOT NULL))
+  Filter: ((model_id = 'dg_33f721d9ff702a1b45b7257e91804ac1'::text) AND ((lower(source_id) = ANY ('{gfs,ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_gfs_deterministic,forecast_ifs_deterministic,gfs,ifs}'::text[]))))
+  Rows Removed by Filter: 64
+  Heap Blocks: exact=123
+  Buffers: shared hit=127
+  ->  Bitmap Index Scan on d2_candidate_0 (actual time=0.017..0.018 rows=128 loops=1)
+        Index Cond: (basin_version_id = 'basins_byh_vbasins'::text)
+        Buffers: shared hit=4
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.245 ms
+Execution Time: 0.198 ms
+{"state": "analyze-only", "candidate": "D (basin_version_id)", "relpages": 864, "relallvisible": 0, "pin": {"basin": "basins_zhaochen_bst_vbasins", "scenarios": ["GFS", "IFS"], "model_filter": null}, "shared_hit": 194, "shared_read": 0, "scan": "Bitmap Heap Scan on hydro_run h (actual time=0.062..0.447 rows=239 loops=1)", "heap_fetches": null, "rows": 239}
+Bitmap Heap Scan on hydro_run h (actual time=0.062..0.447 rows=239 loops=1)
+  Recheck Cond: ((basin_version_id = 'basins_zhaochen_bst_vbasins'::text) AND (run_type = 'forecast'::hydro.run_type) AND (cycle_time IS NOT NULL))
+  Filter: ((lower(source_id) = ANY ('{gfs,ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_gfs_deterministic,forecast_ifs_deterministic,gfs,ifs}'::text[])))
+  Heap Blocks: exact=191
+  Buffers: shared hit=194
+  ->  Bitmap Index Scan on d2_candidate_0 (actual time=0.023..0.023 rows=239 loops=1)
+        Index Cond: (basin_version_id = 'basins_zhaochen_bst_vbasins'::text)
+        Buffers: shared hit=3
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.277 ms
+Execution Time: 0.482 ms
+{"state": "analyze-only", "candidate": "D (basin_version_id)", "relpages": 864, "relallvisible": 0, "pin": {"basin": "basins_byh_vbasins", "scenarios": ["GFS", "IFS"], "model_filter": null}, "shared_hit": 125, "shared_read": 0, "scan": "Bitmap Heap Scan on hydro_run h (actual time=0.051..0.311 rows=128 loops=1)", "heap_fetches": null, "rows": 128}
+Bitmap Heap Scan on hydro_run h (actual time=0.051..0.311 rows=128 loops=1)
+  Recheck Cond: ((basin_version_id = 'basins_byh_vbasins'::text) AND (run_type = 'forecast'::hydro.run_type) AND (cycle_time IS NOT NULL))
+  Filter: ((lower(source_id) = ANY ('{gfs,ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_gfs_deterministic,forecast_ifs_deterministic,gfs,ifs}'::text[])))
+  Heap Blocks: exact=123
+  Buffers: shared hit=125
+  ->  Bitmap Index Scan on d2_candidate_0 (actual time=0.016..0.016 rows=128 loops=1)
+        Index Cond: (basin_version_id = 'basins_byh_vbasins'::text)
+        Buffers: shared hit=2
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.336 ms
+Execution Time: 0.343 ms
+{"state": "analyze-only", "candidate": "D (basin_version_id)", "relpages": 864, "relallvisible": 0, "pin": {"basin": "basins_byh_vbasins", "scenarios": ["IFS"], "model_filter": null}, "shared_hit": 125, "shared_read": 0, "scan": "Bitmap Heap Scan on hydro_run h (actual time=0.057..0.357 rows=64 loops=1)", "heap_fetches": null, "rows": 64}
+Bitmap Heap Scan on hydro_run h (actual time=0.057..0.357 rows=64 loops=1)
+  Recheck Cond: ((basin_version_id = 'basins_byh_vbasins'::text) AND (run_type = 'forecast'::hydro.run_type) AND (cycle_time IS NOT NULL))
+  Filter: ((lower(source_id) = ANY ('{ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_ifs_deterministic,ifs}'::text[])))
+  Rows Removed by Filter: 64
+  Heap Blocks: exact=123
+  Buffers: shared hit=125
+  ->  Bitmap Index Scan on d2_candidate_0 (actual time=0.016..0.017 rows=128 loops=1)
+        Index Cond: (basin_version_id = 'basins_byh_vbasins'::text)
+        Buffers: shared hit=2
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.323 ms
+Execution Time: 0.383 ms
+{"state": "analyze-only", "candidate": "D (basin_version_id)", "relpages": 864, "relallvisible": 0, "pin": {"basin": "basins_byh_vbasins", "scenarios": ["GFS", "IFS"], "model_filter": "dg_33f721d9ff702a1b45b7257e91804ac1"}, "shared_hit": 125, "shared_read": 0, "scan": "Bitmap Heap Scan on hydro_run h (actual time=0.052..0.270 rows=64 loops=1)", "heap_fetches": null, "rows": 64}
+Bitmap Heap Scan on hydro_run h (actual time=0.052..0.270 rows=64 loops=1)
+  Recheck Cond: ((basin_version_id = 'basins_byh_vbasins'::text) AND (run_type = 'forecast'::hydro.run_type) AND (cycle_time IS NOT NULL))
+  Filter: ((model_id = 'dg_33f721d9ff702a1b45b7257e91804ac1'::text) AND ((lower(source_id) = ANY ('{gfs,ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_gfs_deterministic,forecast_ifs_deterministic,gfs,ifs}'::text[]))))
+  Rows Removed by Filter: 64
+  Heap Blocks: exact=123
+  Buffers: shared hit=125
+  ->  Bitmap Index Scan on d2_candidate_0 (actual time=0.016..0.017 rows=128 loops=1)
+        Index Cond: (basin_version_id = 'basins_byh_vbasins'::text)
+        Buffers: shared hit=2
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.364 ms
+Execution Time: 0.297 ms
+{"state": "vacuumed", "candidate": "none (seq scan)", "relpages": 864, "relallvisible": 864, "pin": {"basin": "basins_zhaochen_bst_vbasins", "scenarios": ["GFS", "IFS"], "model_filter": null}, "shared_hit": 864, "shared_read": 0, "scan": "Seq Scan on hydro_run h (actual time=0.018..2.415 rows=239 loops=1)", "heap_fetches": null, "rows": 239}
+Seq Scan on hydro_run h (actual time=0.018..2.415 rows=239 loops=1)
+  Filter: ((cycle_time IS NOT NULL) AND (run_type = 'forecast'::hydro.run_type) AND (basin_version_id = 'basins_zhaochen_bst_vbasins'::text) AND ((lower(source_id) = ANY ('{gfs,ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_gfs_deterministic,forecast_ifs_deterministic,gfs,ifs}'::text[]))))
+  Rows Removed by Filter: 10484
+  Buffers: shared hit=864
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.188 ms
+Execution Time: 2.439 ms
+{"state": "vacuumed", "candidate": "none (seq scan)", "relpages": 864, "relallvisible": 864, "pin": {"basin": "basins_byh_vbasins", "scenarios": ["GFS", "IFS"], "model_filter": null}, "shared_hit": 864, "shared_read": 0, "scan": "Seq Scan on hydro_run h (actual time=1.248..2.357 rows=128 loops=1)", "heap_fetches": null, "rows": 128}
+Seq Scan on hydro_run h (actual time=1.248..2.357 rows=128 loops=1)
+  Filter: ((cycle_time IS NOT NULL) AND (run_type = 'forecast'::hydro.run_type) AND (basin_version_id = 'basins_byh_vbasins'::text) AND ((lower(source_id) = ANY ('{gfs,ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_gfs_deterministic,forecast_ifs_deterministic,gfs,ifs}'::text[]))))
+  Rows Removed by Filter: 10595
+  Buffers: shared hit=864
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.188 ms
+Execution Time: 2.374 ms
+{"state": "vacuumed", "candidate": "none (seq scan)", "relpages": 864, "relallvisible": 864, "pin": {"basin": "basins_byh_vbasins", "scenarios": ["IFS"], "model_filter": null}, "shared_hit": 864, "shared_read": 0, "scan": "Seq Scan on hydro_run h (actual time=1.246..2.382 rows=64 loops=1)", "heap_fetches": null, "rows": 64}
+Seq Scan on hydro_run h (actual time=1.246..2.382 rows=64 loops=1)
+  Filter: ((cycle_time IS NOT NULL) AND (run_type = 'forecast'::hydro.run_type) AND (basin_version_id = 'basins_byh_vbasins'::text) AND ((lower(source_id) = ANY ('{ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_ifs_deterministic,ifs}'::text[]))))
+  Rows Removed by Filter: 10659
+  Buffers: shared hit=864
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.181 ms
+Execution Time: 2.396 ms
+{"state": "vacuumed", "candidate": "none (seq scan)", "relpages": 864, "relallvisible": 864, "pin": {"basin": "basins_byh_vbasins", "scenarios": ["GFS", "IFS"], "model_filter": "dg_33f721d9ff702a1b45b7257e91804ac1"}, "shared_hit": 317, "shared_read": 0, "scan": "Index Scan using hydro_run_ops_strict_identity_candidates_idx on hydro_run h (actual time=0.748..1.064 rows=64 loops=1)", "heap_fetches": null, "rows": 64}
+Index Scan using hydro_run_ops_strict_identity_candidates_idx on hydro_run h (actual time=0.748..1.064 rows=64 loops=1)
+  Index Cond: ((cycle_time IS NOT NULL) AND (model_id = 'dg_33f721d9ff702a1b45b7257e91804ac1'::text))
+  Filter: ((run_type = 'forecast'::hydro.run_type) AND (basin_version_id = 'basins_byh_vbasins'::text) AND ((lower(source_id) = ANY ('{gfs,ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_gfs_deterministic,forecast_ifs_deterministic,gfs,ifs}'::text[]))))
+  Buffers: shared hit=317
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.210 ms
+Execution Time: 1.080 ms
+{"state": "vacuumed", "candidate": "A (basin_version_id, cycle_time DESC)", "relpages": 864, "relallvisible": 864, "pin": {"basin": "basins_zhaochen_bst_vbasins", "scenarios": ["GFS", "IFS"], "model_filter": null}, "shared_hit": 194, "shared_read": 0, "scan": "Bitmap Heap Scan on hydro_run h (actual time=0.054..0.358 rows=239 loops=1)", "heap_fetches": null, "rows": 239}
+Bitmap Heap Scan on hydro_run h (actual time=0.054..0.358 rows=239 loops=1)
+  Recheck Cond: ((basin_version_id = 'basins_zhaochen_bst_vbasins'::text) AND (run_type = 'forecast'::hydro.run_type) AND (cycle_time IS NOT NULL))
+  Filter: ((lower(source_id) = ANY ('{gfs,ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_gfs_deterministic,forecast_ifs_deterministic,gfs,ifs}'::text[])))
+  Heap Blocks: exact=191
+  Buffers: shared hit=194
+  ->  Bitmap Index Scan on d2_candidate_0 (actual time=0.023..0.023 rows=239 loops=1)
+        Index Cond: (basin_version_id = 'basins_zhaochen_bst_vbasins'::text)
+        Buffers: shared hit=3
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.221 ms
+Execution Time: 0.386 ms
+{"state": "vacuumed", "candidate": "A (basin_version_id, cycle_time DESC)", "relpages": 864, "relallvisible": 864, "pin": {"basin": "basins_byh_vbasins", "scenarios": ["GFS", "IFS"], "model_filter": null}, "shared_hit": 125, "shared_read": 0, "scan": "Bitmap Heap Scan on hydro_run h (actual time=0.058..0.318 rows=128 loops=1)", "heap_fetches": null, "rows": 128}
+Bitmap Heap Scan on hydro_run h (actual time=0.058..0.318 rows=128 loops=1)
+  Recheck Cond: ((basin_version_id = 'basins_byh_vbasins'::text) AND (run_type = 'forecast'::hydro.run_type) AND (cycle_time IS NOT NULL))
+  Filter: ((lower(source_id) = ANY ('{gfs,ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_gfs_deterministic,forecast_ifs_deterministic,gfs,ifs}'::text[])))
+  Heap Blocks: exact=123
+  Buffers: shared hit=125
+  ->  Bitmap Index Scan on d2_candidate_0 (actual time=0.023..0.023 rows=128 loops=1)
+        Index Cond: (basin_version_id = 'basins_byh_vbasins'::text)
+        Buffers: shared hit=2
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.338 ms
+Execution Time: 0.350 ms
+{"state": "vacuumed", "candidate": "A (basin_version_id, cycle_time DESC)", "relpages": 864, "relallvisible": 864, "pin": {"basin": "basins_byh_vbasins", "scenarios": ["IFS"], "model_filter": null}, "shared_hit": 125, "shared_read": 0, "scan": "Bitmap Heap Scan on hydro_run h (actual time=0.067..0.361 rows=64 loops=1)", "heap_fetches": null, "rows": 64}
+Bitmap Heap Scan on hydro_run h (actual time=0.067..0.361 rows=64 loops=1)
+  Recheck Cond: ((basin_version_id = 'basins_byh_vbasins'::text) AND (run_type = 'forecast'::hydro.run_type) AND (cycle_time IS NOT NULL))
+  Filter: ((lower(source_id) = ANY ('{ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_ifs_deterministic,ifs}'::text[])))
+  Rows Removed by Filter: 64
+  Heap Blocks: exact=123
+  Buffers: shared hit=125
+  ->  Bitmap Index Scan on d2_candidate_0 (actual time=0.031..0.032 rows=128 loops=1)
+        Index Cond: (basin_version_id = 'basins_byh_vbasins'::text)
+        Buffers: shared hit=2
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.284 ms
+Execution Time: 0.384 ms
+{"state": "vacuumed", "candidate": "A (basin_version_id, cycle_time DESC)", "relpages": 864, "relallvisible": 864, "pin": {"basin": "basins_byh_vbasins", "scenarios": ["GFS", "IFS"], "model_filter": "dg_33f721d9ff702a1b45b7257e91804ac1"}, "shared_hit": 125, "shared_read": 0, "scan": "Bitmap Heap Scan on hydro_run h (actual time=0.052..0.249 rows=64 loops=1)", "heap_fetches": null, "rows": 64}
+Bitmap Heap Scan on hydro_run h (actual time=0.052..0.249 rows=64 loops=1)
+  Recheck Cond: ((basin_version_id = 'basins_byh_vbasins'::text) AND (run_type = 'forecast'::hydro.run_type) AND (cycle_time IS NOT NULL))
+  Filter: ((model_id = 'dg_33f721d9ff702a1b45b7257e91804ac1'::text) AND ((lower(source_id) = ANY ('{gfs,ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_gfs_deterministic,forecast_ifs_deterministic,gfs,ifs}'::text[]))))
+  Rows Removed by Filter: 64
+  Heap Blocks: exact=123
+  Buffers: shared hit=125
+  ->  Bitmap Index Scan on d2_candidate_0 (actual time=0.020..0.020 rows=128 loops=1)
+        Index Cond: (basin_version_id = 'basins_byh_vbasins'::text)
+        Buffers: shared hit=2
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.340 ms
+Execution Time: 0.275 ms
+{"state": "vacuumed", "candidate": "B (basin_version_id, cycle_time DESC) INCLUDE (run_key, scenario_id, source_id, end_time)", "relpages": 864, "relallvisible": 864, "pin": {"basin": "basins_zhaochen_bst_vbasins", "scenarios": ["GFS", "IFS"], "model_filter": null}, "shared_hit": 7, "shared_read": 0, "scan": "Index Only Scan using d2_candidate_0 on hydro_run h (actual time=0.028..0.167 rows=239 loops=1)", "heap_fetches": 0, "rows": 239}
+Index Only Scan using d2_candidate_0 on hydro_run h (actual time=0.028..0.167 rows=239 loops=1)
+  Index Cond: (basin_version_id = 'basins_zhaochen_bst_vbasins'::text)
+  Filter: ((lower(source_id) = ANY ('{gfs,ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_gfs_deterministic,forecast_ifs_deterministic,gfs,ifs}'::text[])))
+  Heap Fetches: 0
+  Buffers: shared hit=7
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.211 ms
+Execution Time: 0.192 ms
+{"state": "vacuumed", "candidate": "B (basin_version_id, cycle_time DESC) INCLUDE (run_key, scenario_id, source_id, end_time)", "relpages": 864, "relallvisible": 864, "pin": {"basin": "basins_byh_vbasins", "scenarios": ["GFS", "IFS"], "model_filter": null}, "shared_hit": 5, "shared_read": 0, "scan": "Index Only Scan using d2_candidate_0 on hydro_run h (actual time=0.020..0.113 rows=128 loops=1)", "heap_fetches": 0, "rows": 128}
+Index Only Scan using d2_candidate_0 on hydro_run h (actual time=0.020..0.113 rows=128 loops=1)
+  Index Cond: (basin_version_id = 'basins_byh_vbasins'::text)
+  Filter: ((lower(source_id) = ANY ('{gfs,ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_gfs_deterministic,forecast_ifs_deterministic,gfs,ifs}'::text[])))
+  Heap Fetches: 0
+  Buffers: shared hit=5
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.269 ms
+Execution Time: 0.135 ms
+{"state": "vacuumed", "candidate": "B (basin_version_id, cycle_time DESC) INCLUDE (run_key, scenario_id, source_id, end_time)", "relpages": 864, "relallvisible": 864, "pin": {"basin": "basins_byh_vbasins", "scenarios": ["IFS"], "model_filter": null}, "shared_hit": 5, "shared_read": 0, "scan": "Index Only Scan using d2_candidate_0 on hydro_run h (actual time=0.022..0.157 rows=64 loops=1)", "heap_fetches": 0, "rows": 64}
+Index Only Scan using d2_candidate_0 on hydro_run h (actual time=0.022..0.157 rows=64 loops=1)
+  Index Cond: (basin_version_id = 'basins_byh_vbasins'::text)
+  Filter: ((lower(source_id) = ANY ('{ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_ifs_deterministic,ifs}'::text[])))
+  Rows Removed by Filter: 64
+  Heap Fetches: 0
+  Buffers: shared hit=5
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.258 ms
+Execution Time: 0.176 ms
+{"state": "vacuumed", "candidate": "B (basin_version_id, cycle_time DESC) INCLUDE (run_key, scenario_id, source_id, end_time)", "relpages": 864, "relallvisible": 864, "pin": {"basin": "basins_byh_vbasins", "scenarios": ["GFS", "IFS"], "model_filter": "dg_33f721d9ff702a1b45b7257e91804ac1"}, "shared_hit": 127, "shared_read": 0, "scan": "Bitmap Heap Scan on hydro_run h (actual time=0.053..0.228 rows=64 loops=1)", "heap_fetches": null, "rows": 64}
+Bitmap Heap Scan on hydro_run h (actual time=0.053..0.228 rows=64 loops=1)
+  Recheck Cond: ((basin_version_id = 'basins_byh_vbasins'::text) AND (run_type = 'forecast'::hydro.run_type) AND (cycle_time IS NOT NULL))
+  Filter: ((model_id = 'dg_33f721d9ff702a1b45b7257e91804ac1'::text) AND ((lower(source_id) = ANY ('{gfs,ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_gfs_deterministic,forecast_ifs_deterministic,gfs,ifs}'::text[]))))
+  Rows Removed by Filter: 64
+  Heap Blocks: exact=123
+  Buffers: shared hit=127
+  ->  Bitmap Index Scan on d2_candidate_0 (actual time=0.023..0.023 rows=128 loops=1)
+        Index Cond: (basin_version_id = 'basins_byh_vbasins'::text)
+        Buffers: shared hit=4
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.314 ms
+Execution Time: 0.251 ms
+{"state": "vacuumed", "candidate": "C (basin_version_id, scenario_id, cycle_time DESC)", "relpages": 864, "relallvisible": 864, "pin": {"basin": "basins_zhaochen_bst_vbasins", "scenarios": ["GFS", "IFS"], "model_filter": null}, "shared_hit": 197, "shared_read": 0, "scan": "Bitmap Heap Scan on hydro_run h (actual time=0.095..0.439 rows=239 loops=1)", "heap_fetches": null, "rows": 239}
+Bitmap Heap Scan on hydro_run h (actual time=0.095..0.439 rows=239 loops=1)
+  Recheck Cond: ((basin_version_id = 'basins_zhaochen_bst_vbasins'::text) AND (run_type = 'forecast'::hydro.run_type) AND (cycle_time IS NOT NULL))
+  Filter: ((lower(source_id) = ANY ('{gfs,ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_gfs_deterministic,forecast_ifs_deterministic,gfs,ifs}'::text[])))
+  Heap Blocks: exact=191
+  Buffers: shared hit=197
+  ->  Bitmap Index Scan on d2_candidate_0 (actual time=0.060..0.060 rows=239 loops=1)
+        Index Cond: (basin_version_id = 'basins_zhaochen_bst_vbasins'::text)
+        Buffers: shared hit=6
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.359 ms
+Execution Time: 0.475 ms
+{"state": "vacuumed", "candidate": "C (basin_version_id, scenario_id, cycle_time DESC)", "relpages": 864, "relallvisible": 864, "pin": {"basin": "basins_byh_vbasins", "scenarios": ["GFS", "IFS"], "model_filter": null}, "shared_hit": 127, "shared_read": 0, "scan": "Bitmap Heap Scan on hydro_run h (actual time=0.046..0.240 rows=128 loops=1)", "heap_fetches": null, "rows": 128}
+Bitmap Heap Scan on hydro_run h (actual time=0.046..0.240 rows=128 loops=1)
+  Recheck Cond: ((basin_version_id = 'basins_byh_vbasins'::text) AND (run_type = 'forecast'::hydro.run_type) AND (cycle_time IS NOT NULL))
+  Filter: ((lower(source_id) = ANY ('{gfs,ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_gfs_deterministic,forecast_ifs_deterministic,gfs,ifs}'::text[])))
+  Heap Blocks: exact=123
+  Buffers: shared hit=127
+  ->  Bitmap Index Scan on d2_candidate_0 (actual time=0.020..0.020 rows=128 loops=1)
+        Index Cond: (basin_version_id = 'basins_byh_vbasins'::text)
+        Buffers: shared hit=4
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.250 ms
+Execution Time: 0.264 ms
+{"state": "vacuumed", "candidate": "C (basin_version_id, scenario_id, cycle_time DESC)", "relpages": 864, "relallvisible": 864, "pin": {"basin": "basins_byh_vbasins", "scenarios": ["IFS"], "model_filter": null}, "shared_hit": 127, "shared_read": 0, "scan": "Bitmap Heap Scan on hydro_run h (actual time=0.050..0.272 rows=64 loops=1)", "heap_fetches": null, "rows": 64}
+Bitmap Heap Scan on hydro_run h (actual time=0.050..0.272 rows=64 loops=1)
+  Recheck Cond: ((basin_version_id = 'basins_byh_vbasins'::text) AND (run_type = 'forecast'::hydro.run_type) AND (cycle_time IS NOT NULL))
+  Filter: ((lower(source_id) = ANY ('{ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_ifs_deterministic,ifs}'::text[])))
+  Rows Removed by Filter: 64
+  Heap Blocks: exact=123
+  Buffers: shared hit=127
+  ->  Bitmap Index Scan on d2_candidate_0 (actual time=0.020..0.021 rows=128 loops=1)
+        Index Cond: (basin_version_id = 'basins_byh_vbasins'::text)
+        Buffers: shared hit=4
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.242 ms
+Execution Time: 0.292 ms
+{"state": "vacuumed", "candidate": "C (basin_version_id, scenario_id, cycle_time DESC)", "relpages": 864, "relallvisible": 864, "pin": {"basin": "basins_byh_vbasins", "scenarios": ["GFS", "IFS"], "model_filter": "dg_33f721d9ff702a1b45b7257e91804ac1"}, "shared_hit": 127, "shared_read": 0, "scan": "Bitmap Heap Scan on hydro_run h (actual time=0.059..0.257 rows=64 loops=1)", "heap_fetches": null, "rows": 64}
+Bitmap Heap Scan on hydro_run h (actual time=0.059..0.257 rows=64 loops=1)
+  Recheck Cond: ((basin_version_id = 'basins_byh_vbasins'::text) AND (run_type = 'forecast'::hydro.run_type) AND (cycle_time IS NOT NULL))
+  Filter: ((model_id = 'dg_33f721d9ff702a1b45b7257e91804ac1'::text) AND ((lower(source_id) = ANY ('{gfs,ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_gfs_deterministic,forecast_ifs_deterministic,gfs,ifs}'::text[]))))
+  Rows Removed by Filter: 64
+  Heap Blocks: exact=123
+  Buffers: shared hit=127
+  ->  Bitmap Index Scan on d2_candidate_0 (actual time=0.026..0.026 rows=128 loops=1)
+        Index Cond: (basin_version_id = 'basins_byh_vbasins'::text)
+        Buffers: shared hit=4
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.341 ms
+Execution Time: 0.282 ms
+{"state": "vacuumed", "candidate": "D (basin_version_id)", "relpages": 864, "relallvisible": 864, "pin": {"basin": "basins_zhaochen_bst_vbasins", "scenarios": ["GFS", "IFS"], "model_filter": null}, "shared_hit": 194, "shared_read": 0, "scan": "Bitmap Heap Scan on hydro_run h (actual time=0.048..0.387 rows=239 loops=1)", "heap_fetches": null, "rows": 239}
+Bitmap Heap Scan on hydro_run h (actual time=0.048..0.387 rows=239 loops=1)
+  Recheck Cond: ((basin_version_id = 'basins_zhaochen_bst_vbasins'::text) AND (run_type = 'forecast'::hydro.run_type) AND (cycle_time IS NOT NULL))
+  Filter: ((lower(source_id) = ANY ('{gfs,ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_gfs_deterministic,forecast_ifs_deterministic,gfs,ifs}'::text[])))
+  Heap Blocks: exact=191
+  Buffers: shared hit=194
+  ->  Bitmap Index Scan on d2_candidate_0 (actual time=0.018..0.018 rows=239 loops=1)
+        Index Cond: (basin_version_id = 'basins_zhaochen_bst_vbasins'::text)
+        Buffers: shared hit=3
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.220 ms
+Execution Time: 0.416 ms
+{"state": "vacuumed", "candidate": "D (basin_version_id)", "relpages": 864, "relallvisible": 864, "pin": {"basin": "basins_byh_vbasins", "scenarios": ["GFS", "IFS"], "model_filter": null}, "shared_hit": 125, "shared_read": 0, "scan": "Bitmap Heap Scan on hydro_run h (actual time=0.049..0.292 rows=128 loops=1)", "heap_fetches": null, "rows": 128}
+Bitmap Heap Scan on hydro_run h (actual time=0.049..0.292 rows=128 loops=1)
+  Recheck Cond: ((basin_version_id = 'basins_byh_vbasins'::text) AND (run_type = 'forecast'::hydro.run_type) AND (cycle_time IS NOT NULL))
+  Filter: ((lower(source_id) = ANY ('{gfs,ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_gfs_deterministic,forecast_ifs_deterministic,gfs,ifs}'::text[])))
+  Heap Blocks: exact=123
+  Buffers: shared hit=125
+  ->  Bitmap Index Scan on d2_candidate_0 (actual time=0.016..0.016 rows=128 loops=1)
+        Index Cond: (basin_version_id = 'basins_byh_vbasins'::text)
+        Buffers: shared hit=2
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.328 ms
+Execution Time: 0.322 ms
+{"state": "vacuumed", "candidate": "D (basin_version_id)", "relpages": 864, "relallvisible": 864, "pin": {"basin": "basins_byh_vbasins", "scenarios": ["IFS"], "model_filter": null}, "shared_hit": 125, "shared_read": 0, "scan": "Bitmap Heap Scan on hydro_run h (actual time=0.061..0.399 rows=64 loops=1)", "heap_fetches": null, "rows": 64}
+Bitmap Heap Scan on hydro_run h (actual time=0.061..0.399 rows=64 loops=1)
+  Recheck Cond: ((basin_version_id = 'basins_byh_vbasins'::text) AND (run_type = 'forecast'::hydro.run_type) AND (cycle_time IS NOT NULL))
+  Filter: ((lower(source_id) = ANY ('{ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_ifs_deterministic,ifs}'::text[])))
+  Rows Removed by Filter: 64
+  Heap Blocks: exact=123
+  Buffers: shared hit=125
+  ->  Bitmap Index Scan on d2_candidate_0 (actual time=0.017..0.018 rows=128 loops=1)
+        Index Cond: (basin_version_id = 'basins_byh_vbasins'::text)
+        Buffers: shared hit=2
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.347 ms
+Execution Time: 0.428 ms
+{"state": "vacuumed", "candidate": "D (basin_version_id)", "relpages": 864, "relallvisible": 864, "pin": {"basin": "basins_byh_vbasins", "scenarios": ["GFS", "IFS"], "model_filter": "dg_33f721d9ff702a1b45b7257e91804ac1"}, "shared_hit": 125, "shared_read": 0, "scan": "Bitmap Heap Scan on hydro_run h (actual time=0.055..0.283 rows=64 loops=1)", "heap_fetches": null, "rows": 64}
+Bitmap Heap Scan on hydro_run h (actual time=0.055..0.283 rows=64 loops=1)
+  Recheck Cond: ((basin_version_id = 'basins_byh_vbasins'::text) AND (run_type = 'forecast'::hydro.run_type) AND (cycle_time IS NOT NULL))
+  Filter: ((model_id = 'dg_33f721d9ff702a1b45b7257e91804ac1'::text) AND ((lower(source_id) = ANY ('{gfs,ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_gfs_deterministic,forecast_ifs_deterministic,gfs,ifs}'::text[]))))
+  Rows Removed by Filter: 64
+  Heap Blocks: exact=123
+  Buffers: shared hit=125
+  ->  Bitmap Index Scan on d2_candidate_0 (actual time=0.017..0.018 rows=128 loops=1)
+        Index Cond: (basin_version_id = 'basins_byh_vbasins'::text)
+        Buffers: shared hit=2
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.387 ms
+Execution Time: 0.312 ms
+SUMMARY state | candidate | zhaochen:GFS+IFS | byh:GFS+IFS | byh:IFS | byh:GFS+IFS+model
+SUMMARY analyze-only | none (seq scan) | 864 | 864 | 864 | 317
+SUMMARY analyze-only | A (basin_version_id, cycle_time DESC) | 194 | 125 | 125 | 125
+SUMMARY analyze-only | B (basin_version_id, cycle_time DESC) INCLUDE (run_key, scenario_id, source_id, end_time) | 197 | 127 | 127 | 127
+SUMMARY analyze-only | C (basin_version_id, scenario_id, cycle_time DESC) | 197 | 127 | 127 | 127
+SUMMARY analyze-only | D (basin_version_id) | 194 | 125 | 125 | 125
+SUMMARY vacuumed | none (seq scan) | 864 | 864 | 864 | 317
+SUMMARY vacuumed | A (basin_version_id, cycle_time DESC) | 194 | 125 | 125 | 125
+SUMMARY vacuumed | B (basin_version_id, cycle_time DESC) INCLUDE (run_key, scenario_id, source_id, end_time) | 7 | 5 | 5 | 127
+SUMMARY vacuumed | C (basin_version_id, scenario_id, cycle_time DESC) | 197 | 127 | 127 | 127
+SUMMARY vacuumed | D (basin_version_id) | 194 | 125 | 125 | 125

@@ -307,8 +307,9 @@ def test_the_run_bound_shape_captures_the_bound_run_pushdown_statement() -> None
 def test_the_latest_shape_has_two_fact_statements_and_picks_the_cycle_window_one() -> None:
     """tasks.md 1.1: ``_per_source_latest_cycles`` and the cycle-window segment
     read both name ``hydro.river_timeseries`` (the discovery only inside its
-    membership ``EXISTS`` since #2424 D1). Selecting "the only one" would raise;
-    selecting the first would measure the wrong statement."""
+    membership probe since #2424 D1; a bounded ``CROSS JOIN LATERAL (... LIMIT
+    1)`` since #2630). Selecting "the only one" would raise; selecting the first
+    would measure the wrong statement."""
     statement, companions, _, _ = _capture("latest")
     assert "%(pushdown_run_keys)s" in statement["sql"]
     assert "pushdown_window_start" in statement["sql"]
@@ -316,7 +317,8 @@ def test_the_latest_shape_has_two_fact_statements_and_picks_the_cycle_window_one
     # #2424 D1: the companion is the hydro_run-driven discovery, whose only fact
     # read is the correlated membership probe.
     assert "cand AS MATERIALIZED" in companions[0]["sql"]
-    assert "WHERE EXISTS (" in companions[0]["sql"]
+    assert "CROSS JOIN LATERAL (" in companions[0]["sql"]
+    assert "EXISTS" not in companions[0]["sql"]
     assert "MAX(h.cycle_time)" not in companions[0]["sql"]
     assert "pushdown_run_keys" not in companions[0]["sql"]
 

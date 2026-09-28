@@ -1425,11 +1425,10 @@ def _publish_display_runs(database_url: str) -> int:
     ``EXPLAIN (ANALYZE, BUFFERS)``): a Bitmap Heap Scan on ``hydro_run`` driven
     by the partial index ``hydro_run_display_product_basin_status_idx`` with
     ``Index Cond: status = 'parsed'``, the extra conjunct applied as
-    ``Filter: parsed_at IS NOT NULL``.
-    ``hydro_run_display_ready_basin_status_idx`` is NOT the path taken: both
-    partial indexes lead on ``basin_version_id``, which this predicate does not
-    constrain, so the planner bitmaps the status column of the equivalent
-    ``..._display_product_...`` index instead.
+    ``Filter: parsed_at IS NOT NULL``. The index leads on ``basin_version_id``,
+    which this predicate does not constrain, so the planner bitmaps its status
+    column. It is the only ``(basin_version_id, status)`` partial index left:
+    migration 000065 dropped its byte-identical copy (#2634).
     A parsed run whose parser wrote zero river rows is published like any
     other parsed run -- that is the #1789 owner decision, and it is the one
     behaviour change against the old probe. Idempotent: already-``published``

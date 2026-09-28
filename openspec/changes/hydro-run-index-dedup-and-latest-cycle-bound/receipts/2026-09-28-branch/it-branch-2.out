@@ -1,0 +1,21 @@
+head=aff6201e06fbdc83e803b29f1788078c3394d85b status:
+ M packages/common/forecast_store.py
+ M scripts/node27_autopipeline.py
+ M scripts/select_ci_tests.py
+ M tests/test_latest_cycle_discovery_integration.py
+ M tests/test_latest_cycle_discovery_shape.py
+ M tests/test_migrations.py
+ M tests/test_river_ts_stats_harness_offline.py
+ M tests/test_schema_ledger_convergence_integration.py
+?? db/migrations/000065_hydro_run_candidate_index_dedup.sql
+........................................................................ [ 76%]
+......................                                                   [100%]
+=============================== warnings summary ===============================
+tests/test_ifs_forecast_integration.py::test_ifs_forcing_uses_surface_pressure_shortwave_and_precip_conversion
+  /home/nwm/NWM/.venv/lib/python3.11/site-packages/xarray/backends/plugins.py:109: RuntimeWarning: Engine 'cfgrib' loading failed:
+  Cannot find the ecCodes library
+    external_backend_entrypoints = backends_dict_from_pkg(entrypoints_unique)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+94 passed, 1 warning in 881.03s (0:14:41)
+pytest_rc=0

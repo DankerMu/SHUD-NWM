@@ -1,0 +1,191 @@
+head=aff6201e06fbdc83e803b29f1788078c3394d85b status:
+ M packages/common/forecast_store.py
+ M scripts/node27_autopipeline.py
+ M scripts/select_ci_tests.py
+ M tests/test_latest_cycle_discovery_integration.py
+ M tests/test_latest_cycle_discovery_shape.py
+ M tests/test_migrations.py
+ M tests/test_river_ts_stats_harness_offline.py
+ M tests/test_schema_ledger_convergence_integration.py
+F...............F.........................E....EEF..                     [100%]
+==================================== ERRORS ====================================
+_____ ERROR at setup of test_runner_converges_a_production_shaped_database _____
+
+integration_database_url = 'postgresql://nhms:***@127.0.0.1:55432/nhms_it_49f9a0c39843417c9655933f712770a9'
+
+    @pytest.fixture()
+    def fresh_catalog(integration_database_url: str) -> dict[str, object]:
+        """The converged answer: what a database built from db/migrations holds."""
+        apply_migrations_from_zero(integration_database_url)
+>       _assert_converged_index_set(_hydro_run_indexes(integration_database_url))
+
+tests/test_schema_ledger_convergence_integration.py:360: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+indexes = {'hydro_run_display_product_basin_status_idx': ("CREATE INDEX hydro_run_display_product_basin_status_idx ON hydro.hydr... = ANY (ARRAY['succeeded'::hydro.run_status, 'parsed'::hydro.run_status, 'published'::hydro.run_status]))", True), ...}
+
+    def _assert_converged_index_set(indexes: dict[str, tuple[str, bool]]) -> None:
+        """000065's end state: the seven expected names, all valid, no definition twice."""
+>       assert set(indexes) == _CONVERGED_HYDRO_RUN_INDEXES, sorted(indexes)
+E       AssertionError: ['hydro_run_display_product_basin_status_idx', 'hydro_run_display_ready_basin_status_idx', 'hydro_run_display_ready_candidate_idx', 'hydro_run_latest_ready_run_idx', 'hydro_run_ops_strict_identity_candidates_idx', 'hydro_run_pkey', ...]
+E       assert {'hydro_run_d...un_pkey', ...} == frozenset({'h...te_idx', ...})
+E         
+E         Extra items in the left set:
+E         'hydro_run_display_ready_candidate_idx'
+E         'hydro_run_qhh_latest_candidate_parsed_idx'
+E         'hydro_run_display_ready_basin_status_idx'
+E         Extra items in the right set:
+E         'hydro_run_forecast_basin_cycle_idx'
+E         Use -v to get more diff
+
+tests/test_schema_ledger_convergence_integration.py:251: AssertionError
+_ ERROR at setup of test_rerun_after_a_failed_concurrent_build_replaces_the_invalid_index _
+
+integration_database_url = 'postgresql://nhms:***@127.0.0.1:55432/nhms_it_49f9a0c39843417c9655933f712770a9'
+
+    @pytest.fixture()
+    def fresh_catalog(integration_database_url: str) -> dict[str, object]:
+        """The converged answer: what a database built from db/migrations holds."""
+        apply_migrations_from_zero(integration_database_url)
+>       _assert_converged_index_set(_hydro_run_indexes(integration_database_url))
+
+tests/test_schema_ledger_convergence_integration.py:360: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+indexes = {'hydro_run_display_product_basin_status_idx': ("CREATE INDEX hydro_run_display_product_basin_status_idx ON hydro.hydr... = ANY (ARRAY['succeeded'::hydro.run_status, 'parsed'::hydro.run_status, 'published'::hydro.run_status]))", True), ...}
+
+    def _assert_converged_index_set(indexes: dict[str, tuple[str, bool]]) -> None:
+        """000065's end state: the seven expected names, all valid, no definition twice."""
+>       assert set(indexes) == _CONVERGED_HYDRO_RUN_INDEXES, sorted(indexes)
+E       AssertionError: ['hydro_run_display_product_basin_status_idx', 'hydro_run_display_ready_basin_status_idx', 'hydro_run_display_ready_candidate_idx', 'hydro_run_latest_ready_run_idx', 'hydro_run_ops_strict_identity_candidates_idx', 'hydro_run_pkey', ...]
+E       assert {'hydro_run_d...un_pkey', ...} == frozenset({'h...te_idx', ...})
+E         
+E         Extra items in the left set:
+E         'hydro_run_display_ready_candidate_idx'
+E         'hydro_run_qhh_latest_candidate_parsed_idx'
+E         'hydro_run_display_ready_basin_status_idx'
+E         Extra items in the right set:
+E         'hydro_run_forecast_basin_cycle_idx'
+E         Use -v to get more diff
+
+tests/test_schema_ledger_convergence_integration.py:251: AssertionError
+_ ERROR at setup of test_rerun_after_a_failed_candidate_index_build_replaces_the_invalid_leftover _
+
+integration_database_url = 'postgresql://nhms:***@127.0.0.1:55432/nhms_it_49f9a0c39843417c9655933f712770a9'
+
+    @pytest.fixture()
+    def fresh_catalog(integration_database_url: str) -> dict[str, object]:
+        """The converged answer: what a database built from db/migrations holds."""
+        apply_migrations_from_zero(integration_database_url)
+>       _assert_converged_index_set(_hydro_run_indexes(integration_database_url))
+
+tests/test_schema_ledger_convergence_integration.py:360: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+indexes = {'hydro_run_display_product_basin_status_idx': ("CREATE INDEX hydro_run_display_product_basin_status_idx ON hydro.hydr... = ANY (ARRAY['succeeded'::hydro.run_status, 'parsed'::hydro.run_status, 'published'::hydro.run_status]))", True), ...}
+
+    def _assert_converged_index_set(indexes: dict[str, tuple[str, bool]]) -> None:
+        """000065's end state: the seven expected names, all valid, no definition twice."""
+>       assert set(indexes) == _CONVERGED_HYDRO_RUN_INDEXES, sorted(indexes)
+E       AssertionError: ['hydro_run_display_product_basin_status_idx', 'hydro_run_display_ready_basin_status_idx', 'hydro_run_display_ready_candidate_idx', 'hydro_run_latest_ready_run_idx', 'hydro_run_ops_strict_identity_candidates_idx', 'hydro_run_pkey', ...]
+E       assert {'hydro_run_d...un_pkey', ...} == frozenset({'h...te_idx', ...})
+E         
+E         Extra items in the left set:
+E         'hydro_run_display_ready_candidate_idx'
+E         'hydro_run_qhh_latest_candidate_parsed_idx'
+E         'hydro_run_display_ready_basin_status_idx'
+E         Extra items in the right set:
+E         'hydro_run_forecast_basin_cycle_idx'
+E         Use -v to get more diff
+
+tests/test_schema_ledger_convergence_integration.py:251: AssertionError
+=================================== FAILURES ===================================
+______________ test_all_migration_files_exist_with_expected_names ______________
+
+    def test_all_migration_files_exist_with_expected_names() -> None:
+        migration_names = [path.name for path in sorted(MIGRATIONS_DIR.glob("*.sql"))]
+    
+>       assert migration_names == list(EXPECTED_MIGRATIONS)
+E       AssertionError: assert ['000001_exte...dro.sql', ...] == ['000001_exte...dro.sql', ...]
+E         
+E         Right contains one more item: '000065_hydro_run_candidate_index_dedup.sql'
+E         Use -v to get more diff
+
+tests/test_migrations.py:144: AssertionError
+_ test_index_dedup_migration_drops_exact_duplicates_and_builds_a_status_free_candidate_index _
+
+    def test_index_dedup_migration_drops_exact_duplicates_and_builds_a_status_free_candidate_index() -> None:
+        """000065: three idempotent concurrent DROPs, then DROP-before-CREATE of the new index.
+    
+        The duplicate claim is checked against 000063's own copies rather than taken
+        on trust: each dropped index's column list and predicate must equal a kept
+        index's, so nothing the planner could use disappears with it.
+        """
+        migrations = dict(_migration_sql())
+>       statements = _statements_without_comments(migrations[_INDEX_DEDUP_MIGRATION])
+                                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       KeyError: '000065_hydro_run_candidate_index_dedup.sql'
+
+tests/test_migrations.py:477: KeyError
+_ test_fresh_database_applies_the_convergence_migrations_and_an_ordered_replay_converges_again _
+
+throwaway_database_url = 'postgresql://nhms:***@127.0.0.1:55432/nhms_it_ac8618d116344e3c87e398bd5b16cdba'
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fb819b12250>
+capsys = <_pytest.capture.CaptureFixture object at 0x7fb819b58590>
+
+    def test_fresh_database_applies_the_convergence_migrations_and_an_ordered_replay_converges_again(
+        throwaway_database_url: str,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """000062->000065 replayed in order is a no-op on a converged catalog.
+    
+        Not each file alone: 000063 by itself rebuilds the three duplicates 000065
+        drops, so only the ordered replay has a fixed point.
+        """
+        url = throwaway_database_url
+        apply_migrations_from_zero(url, through="000064")
+        # Between 000063 and 000065 all six partial indexes carry 000063's predicate.
+        before_dedup = _hydro_run_indexes(url)
+        assert set(_STALE_HYDRO_RUN_INDEXES) <= set(before_dedup)
+        assert _FORECAST_CANDIDATE_INDEX not in before_dedup
+        for name in _STALE_HYDRO_RUN_INDEXES:
+            definition, valid = before_dedup[name]
+            assert valid, name
+            assert "'succeeded'::hydro.run_status, 'parsed'::hydro.run_status, 'published'::hydro.run_status" in (
+                definition
+            ), name
+            assert "frequency_done" not in definition, name
+        apply_migrations_from_zero(url)
+    
+        def _catalog() -> tuple[object, ...]:
+            return (_hydro_run_indexes(url), _run_status_labels(url), _flood_schema_exists(url))
+    
+        converged = _catalog()
+        assert converged[1] == _PRODUCTION_RUN_STATUS_LABELS
+        assert converged[2] is False
+>       _assert_converged_index_set(converged[0])  # type: ignore[arg-type]
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/test_schema_ledger_convergence_integration.py:585: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+indexes = {'hydro_run_display_product_basin_status_idx': ("CREATE INDEX hydro_run_display_product_basin_status_idx ON hydro.hydr... = ANY (ARRAY['succeeded'::hydro.run_status, 'parsed'::hydro.run_status, 'published'::hydro.run_status]))", True), ...}
+
+    def _assert_converged_index_set(indexes: dict[str, tuple[str, bool]]) -> None:
+        """000065's end state: the seven expected names, all valid, no definition twice."""
+>       assert set(indexes) == _CONVERGED_HYDRO_RUN_INDEXES, sorted(indexes)
+E       AssertionError: ['hydro_run_display_product_basin_status_idx', 'hydro_run_display_ready_basin_status_idx', 'hydro_run_display_ready_candidate_idx', 'hydro_run_latest_ready_run_idx', 'hydro_run_ops_strict_identity_candidates_idx', 'hydro_run_pkey', ...]
+E       assert {'hydro_run_d...un_pkey', ...} == frozenset({'h...te_idx', ...})
+E         
+E         Extra items in the left set:
+E         'hydro_run_display_ready_candidate_idx'
+E         'hydro_run_qhh_latest_candidate_parsed_idx'
+E         'hydro_run_display_ready_basin_status_idx'
+E         Extra items in the right set:
+E         'hydro_run_forecast_basin_cycle_idx'
+E         Use -v to get more diff
+
+tests/test_schema_ledger_convergence_integration.py:251: AssertionError
+3 failed, 46 passed, 3 errors in 149.77s (0:02:29)
+pytest_rc=1

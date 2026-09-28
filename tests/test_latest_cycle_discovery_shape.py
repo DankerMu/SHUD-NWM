@@ -4,11 +4,16 @@ A SQL-shape double: the capture cursor records the statement the real
 ``_per_source_latest_cycles`` executes and answers with rows chosen here. What a
 text oracle can own is the SHAPE the design commits to (design.md D1, tasks.md
 2.1): ``hydro.hydro_run`` drives the statement and is read once, the fact table
-is touched only inside the correlated membership ``EXISTS``, the #2451 key
-spelling survives there, the sort fence and the outer ``ORDER BY`` before
-``LIMIT 1`` are both present, and nothing filters on ``status``. Whether the
-statement SELECTS the same cycles as before is a database question; that is
-``tests/test_latest_cycle_discovery_integration.py`` and the node-27 regression.
+is touched only inside the correlated membership probe, the #2451 key spelling
+survives there, the sort fence and the outer ``ORDER BY`` before ``LIMIT 1`` are
+both present, and nothing filters on ``status``. #2630 (change
+``hydro-run-index-dedup-and-latest-cycle-bound`` design D3) made that probe a
+``CROSS JOIN LATERAL (... LIMIT 1)`` bounded to the candidate's run window
+``[o.cycle_time, o.end_time]``, which ``cand`` now carries; both halves are
+pinned here, because either one alone leaves TimescaleDB unable to exclude
+chunks at runtime. Whether the statement SELECTS the same cycles as before is a
+database question; that is ``tests/test_latest_cycle_discovery_integration.py``
+and the node-27 regression.
 """
 
 from __future__ import annotations
@@ -31,7 +36,7 @@ NO_FILTER = forecast_store._ScenarioFilter("", {})
 
 #: The fact-side conjuncts of the membership probe, in design.md D1's spelling.
 #: The basin/network pair is #2451 C1's guarded non-sargable form; segment and
-#: variable keep `=`.
+#: variable keep `=`. The last two are #2630's run-window bound.
 FACT_PROBE_CONJUNCTS = (
     "rt.run_key = o.run_key",
     "rt.river_segment_key = seg.river_segment_key",
@@ -40,7 +45,13 @@ FACT_PROBE_CONJUNCTS = (
     "rt.river_network_version_key IS NOT NULL",
     "rt.river_network_version_key IS NOT DISTINCT FROM seg.river_network_version_key",
     "rt.variable_e = 'q_down'::hydro.river_variable",
+    "rt.valid_time >= o.cycle_time",
+    "rt.valid_time <= o.end_time",
 )
+RUN_WINDOW_CONJUNCTS = FACT_PROBE_CONJUNCTS[-2:]
+
+#: The candidate fence, then the lateral probe it feeds (#2630).
+PROBE_FENCE = "ORDER BY c.cycle_time DESC OFFSET 0 ) o CROSS JOIN LATERAL ("
 
 #: sha256 of the statement master ``64f47adee`` executed. Recomputed from master's
 #: bytes, not from this tree: load ``git show 64f47adee:packages/common/forecast_store.py``
@@ -76,9 +87,17 @@ def candidate_cte(sql: str) -> str:
     return _balanced(flat, flat.index("cand AS MATERIALIZED (") + len("cand AS MATERIALIZED "))
 
 
-def fact_probe(sql: str) -> str:
+def lateral_probe(sql: str) -> str:
+    """The whole body of the per-candidate ``CROSS JOIN LATERAL``, ``LIMIT 1`` included."""
     flat = _flat(sql)
-    return _balanced(flat, flat.index("WHERE EXISTS (") + len("WHERE EXISTS ")).strip()
+    return _balanced(flat, flat.index(PROBE_FENCE) + len(PROBE_FENCE) - 1).strip()
+
+
+def fact_probe(sql: str) -> str:
+    """The registered template's part of the lateral body: everything before its ``LIMIT 1``."""
+    body = lateral_probe(sql)
+    assert body.endswith(" LIMIT 1"), body
+    return body[: -len(" LIMIT 1")]
 
 
 def assert_latest_cycle_discovery(sql: str, params: Mapping) -> None:
@@ -88,13 +107,20 @@ def assert_latest_cycle_discovery(sql: str, params: Mapping) -> None:
     # hydro_run drives, and is read exactly once — in the MATERIALIZED candidates.
     assert flat.count("hydro.hydro_run") == 1
     candidates = candidate_cte(sql)
+    # #2630: the candidates carry the run window the probe is bounded by.
+    assert candidates.strip().startswith(
+        "SELECT h.run_key, h.scenario_id, h.cycle_time, h.end_time FROM hydro.hydro_run h"
+    )
     assert "FROM hydro.hydro_run h" in candidates
     assert "h.run_type = 'forecast'" in candidates
     assert "h.cycle_time IS NOT NULL" in candidates
     assert "h.basin_version_id = %(basin_version_id)s" in candidates
     # User decision (a): no status predicate anywhere, in any spelling.
     assert "status" not in flat.lower()
-    # The fact table is touched once, and only inside the correlated EXISTS.
+    # The fact table is touched once, and only inside the correlated lateral
+    # probe. No EXISTS anywhere: the planner turns an EXISTS into a semi join
+    # whose chunk append excludes no chunk at runtime (#2630).
+    assert "EXISTS" not in flat
     probe = fact_probe(sql)
     assert flat.count("hydro.river_timeseries") == 1
     assert "FROM hydro.river_timeseries rt" in probe
@@ -110,12 +136,16 @@ def assert_latest_cycle_discovery(sql: str, params: Mapping) -> None:
     assert "MAX(" not in flat
     assert "GROUP BY" not in flat
     # Sort first behind the fence, probe lazily, and keep the pick correct under
-    # any plan with the outer ORDER BY before LIMIT 1.
-    fence = "ORDER BY c.cycle_time DESC OFFSET 0 ) o WHERE EXISTS ("
-    assert flat.count(fence) == 1
-    assert flat.index("FROM cand c WHERE c.scenario_id = scen.scenario_id") < flat.index(fence)
-    tail = flat[flat.index(fence) + len(fence) :]
-    assert tail.count("ORDER BY o.cycle_time DESC LIMIT 1 ) pick") == 1
+    # any plan with the outer ORDER BY before LIMIT 1. The fenced subquery passes
+    # the window through, and the probe stops at its first row.
+    assert flat.count(PROBE_FENCE) == 1
+    assert (
+        flat.count("SELECT c.run_key, c.cycle_time, c.end_time FROM cand c WHERE c.scenario_id = scen.scenario_id") == 1
+    )
+    assert flat.index("FROM cand c WHERE c.scenario_id = scen.scenario_id") < flat.index(PROBE_FENCE)
+    tail = flat[flat.index(PROBE_FENCE) + len(PROBE_FENCE) :]
+    assert tail.count("LIMIT 1 ) hit ORDER BY o.cycle_time DESC LIMIT 1 ) pick") == 1
+    assert flat.count("LIMIT 1") == 2
     assert flat.endswith("ORDER BY scen.scenario_id")
 
 
@@ -201,14 +231,47 @@ def test_no_candidates_mean_no_cycles():
 
 
 def test_the_fact_probe_is_a_registered_narrow_template():
-    """The EXISTS body is owned by the renderer and the registry, like every read."""
+    """The lateral body, bar its ``LIMIT 1``, is owned by the renderer and the registry, like every read.
+
+    The run-window conjuncts are part of that template (design D3 "探针拆分"),
+    not of the caller's wrapper.
+    """
     entry = entry_by_key("forecast_store:latest_cycle_fact_probe")
     template = entry.source("narrow")
     assert render_river_ts_sql(template, "narrow").sql == template
     sql, _params, _ = _capture(NO_FILTER, NO_FILTER)
     assert _flat(template) == fact_probe(sql)
+    for conjunct in RUN_WINDOW_CONJUNCTS:
+        assert conjunct in _flat(template), conjunct
+    assert "LIMIT" not in template
     with pytest.raises(ValueError, match="Invalid river timeseries store"):
         forecast_store._latest_cycle_fact_probe_template("legacy")
+
+
+@pytest.mark.parametrize(
+    ("label", "old", "new"),
+    [
+        # Back to #2424's EXISTS: unbounded chunk search on an empty pin.
+        (
+            "exists_probe",
+            "CROSS JOIN LATERAL (\n                    SELECT 1",
+            "WHERE EXISTS (\n                    SELECT 1",
+        ),
+        ("no_limit", "LIMIT 1\n                ) hit", ") hit"),
+        ("no_lower_bound", "AND rt.valid_time >= o.cycle_time", ""),
+        ("no_upper_bound", "AND rt.valid_time <= o.end_time", ""),
+        ("window_not_carried", "h.cycle_time, h.end_time", "h.cycle_time"),
+        ("window_not_passed_through", "c.cycle_time, c.end_time", "c.cycle_time"),
+    ],
+)
+def test_the_bounded_probe_pin_bites_on_each_half_of_2630(label, old, new):
+    """Each of #2630's commitments is load-bearing in the pin: undoing any one is red."""
+    sql, params, _ = _capture(NO_FILTER, NO_FILTER)
+    assert_latest_cycle_discovery(sql, params)
+    mutated = sql.replace(old, new)
+    assert mutated != sql, label
+    with pytest.raises((AssertionError, ValueError)):
+        assert_latest_cycle_discovery(mutated, params)
 
 
 def test_the_frozen_oracle_is_byte_for_byte_the_statement_master_ran():

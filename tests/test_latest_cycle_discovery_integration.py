@@ -9,6 +9,11 @@ per-scenario dicts, and the dicts must equal the cycles worked out by hand below
 (an independent expectation, so two statements agreeing on a wrong answer is red
 too).
 
+The one deliberate exception is #2630's run-window bound (the last test): a
+candidate whose rows all lie outside ``[cycle_time, end_time]`` no longer
+matches, which the unbounded oracle cannot express, so that test asserts the
+divergence instead of equality.
+
 Run on node-27's disposable database (never production):
 
     mkdir -p /home/nwm/tmp && export TMPDIR=/home/nwm/tmp
@@ -375,6 +380,126 @@ def test_old_and_new_latest_cycle_discovery_select_the_same_cycles_on_every_seed
         scenarios=["GFS", "IFS"],
     )
     assert response["issue_time"] == "2026-05-03T12:00:00Z"
+    assert {series["scenario_id"]: series["cycle_time"] for series in response["series"]} == {
+        GFS: "2026-05-03T12:00:00Z",
+        IFS: "2026-05-03T06:00:00Z",
+    }
+
+
+#: #2630 (change hydro-run-index-dedup-and-latest-cycle-bound, design D3): the
+#: probe is bounded to each candidate's run window [cycle_time, end_time]. Every
+#: run below is newer than the seed's GFS run (cycle +0) and has q_down rows on
+#: SEG_INSIDE; only where those rows lie differs. (run_id, scenario, source,
+#: cycle offset h, end offset h from cycle, row offsets h from cycle.)
+WINDOW_RUNS: tuple[tuple[str, str, str, int, int, tuple[int, ...]], ...] = (
+    # Rows inside the window: a hit.
+    (f"{ISSUE_126_PREFIX}_gfs_window_inside", GFS, "gfs", 12, 168, (1, 2)),
+    # Newer, but every row lies BEFORE its cycle_time: no hit.
+    (f"{ISSUE_126_PREFIX}_gfs_rows_before_cycle", GFS, "gfs", 24, 168, (-2, -1)),
+    # Newest, but every row lies AFTER its end_time: no hit.
+    (f"{ISSUE_126_PREFIX}_gfs_rows_after_end", GFS, "gfs", 36, 168, (169, 170)),
+    # Rows exactly ON both bounds: the window is closed, so a hit.
+    (f"{ISSUE_126_PREFIX}_ifs_rows_on_the_bounds", IFS, "ifs", 6, 144, (0, 144)),
+    # Newer IFS run one hour past its end only: no hit.
+    (f"{ISSUE_126_PREFIX}_ifs_rows_just_after_end", IFS, "ifs", 18, 144, (145,)),
+)
+
+
+def _seed_window_runs(database_url: str) -> None:
+    connection = _connect(database_url)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO met.data_source (source_id, source_name, source_type, status, native_format, adapter_name)
+                VALUES ('ifs', 'IFS Integration', 'forecast', 'mock', 'grib2', 'ifs')
+                ON CONFLICT (source_id) DO NOTHING
+                """
+            )
+            execute_values(
+                cursor,
+                """
+                INSERT INTO hydro.hydro_run (
+                    run_id, run_type, scenario_id, model_id, basin_version_id, source_id,
+                    cycle_time, start_time, end_time, status, run_manifest_uri
+                )
+                VALUES %s
+                """,
+                [
+                    (
+                        run_id,
+                        "forecast",
+                        scenario,
+                        MODEL_ID,
+                        BASIN_VERSION_ID,
+                        source,
+                        _cycle(offset),
+                        _cycle(offset),
+                        _cycle(offset + end_offset),
+                        "published",
+                        f"s3://nhms/runs/{run_id}/manifest.json",
+                    )
+                    for run_id, scenario, source, offset, end_offset, _rows in WINDOW_RUNS
+                ],
+            )
+            insert_river_timeseries_dual_written(
+                cursor,
+                [
+                    (
+                        run_id,
+                        BASIN_VERSION_ID,
+                        RIVER_NETWORK_VERSION_ID,
+                        SEG_INSIDE,
+                        _cycle(offset + row),
+                        row,
+                        "q_down",
+                        float(row),
+                        "m3/s",
+                        "ok",
+                    )
+                    for run_id, _scenario, _source, offset, _end, rows in WINDOW_RUNS
+                    for row in rows
+                ],
+            )
+    finally:
+        connection.close()
+
+
+def test_the_probe_only_counts_fact_rows_inside_the_candidate_run_window(throwaway_database_url: str) -> None:
+    """tasks.md 2.3: rows inside [cycle_time, end_time] match; rows outside it do not.
+
+    The pre-#2424 oracle has no window, so on this seed it DIVERGES from the
+    shipping statement by design (spec scenario "fact rows outside the run
+    window"): it picks the newest run with any row. Asserting that divergence
+    keeps the seed honest — without it the out-of-window runs could be inert.
+    node-27 held zero out-of-window rows on 2026-09-28; ingest-side enforcement
+    is #2687.
+    """
+    apply_migrations_from_zero(throwaway_database_url)
+    seed_issue_126_data(throwaway_database_url)
+    _seed_window_runs(throwaway_database_url)
+
+    old, new = _both(throwaway_database_url, scenarios=["GFS", "IFS"])
+
+    assert new == {GFS: _cycle(12), IFS: _cycle(6)}
+    assert old == {GFS: _cycle(36), IFS: _cycle(18)}
+
+    # Pinned to one out-of-window run, nothing matches; pinned to the on-the-bounds run, it does.
+    for run_id in (f"{ISSUE_126_PREFIX}_gfs_rows_before_cycle", f"{ISSUE_126_PREFIX}_gfs_rows_after_end"):
+        assert _both(throwaway_database_url, scenarios=["GFS"], run_id=run_id)[1] == {}, run_id
+    assert _both(throwaway_database_url, scenarios=["IFS"], run_id=f"{ISSUE_126_PREFIX}_ifs_rows_on_the_bounds")[1] == {
+        IFS: _cycle(6)
+    }
+
+    # End to end on the public method: `issue_time=latest` follows the bounded pick.
+    response = PsycopgForecastStore(throwaway_database_url).forecast_series(
+        basin_version_id=BASIN_VERSION_ID,
+        segment_id=SEG_INSIDE,
+        river_network_version_id=RIVER_NETWORK_VERSION_ID,
+        issue_time="latest",
+        variables=["q_down"],
+        scenarios=["GFS", "IFS"],
+    )
     assert {series["scenario_id"]: series["cycle_time"] for series in response["series"]} == {
         GFS: "2026-05-03T12:00:00Z",
         IFS: "2026-05-03T06:00:00Z",
