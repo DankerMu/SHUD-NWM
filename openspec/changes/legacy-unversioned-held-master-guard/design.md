@@ -56,7 +56,7 @@ Today, then, (c) is reachable only from a legacy seed: the historical import, a 
 2. **Reclaim of a dead legacy forecast master is refused.**
    - The recycle door closes with the same error.
    - The check is on the **existing** row's shape, not only on the row about to be written: `reclaim_pipeline_job_reservation` raises when the persisted row is an unversioned forecast cohort master with non-empty `cohort_members` in any status (`_is_legacy_unversioned_forecast_cohort_master`, the status-free part of the predicate), once every `None`-returning gate has passed, before the row is built. The write-entry check alone would miss a non-versioned request without `cohort_members`: the backfill writes `[]`, clears the members and commits a `reserved` member-less unversioned forecast master, which reconcile routes to the generic exact-comment lane.
-   - No current caller reclaims a legacy forecast master: the only forecast reclaim request comes from `_reserve_cycle_stage`, which is versioned, and a versioned request against a non-current-master existing row is already refused.
+   - No current caller reclaims a legacy forecast master: the only forecast reclaim request comes from `_reserve_cycle_stage`, which is versioned, and a versioned request against a non-current-master existing row already returns `None` (no error) at the versioned gates, which run before the existing-row check (E4b).
    - The guard therefore changes no production behavior. It makes the invariant structural.
    - A stamping upgrade of the legacy row is deliberately not done: it would mint accepted-submit authority for a row whose identity was never proven (the #1805 concern).
 3. **The historical import fails closed before writing anything.**
@@ -103,11 +103,12 @@ Today, then, (c) is reachable only from a legacy seed: the historical import, a 
 | id | scenario | expected |
 |---|---|---|
 | E1 | `reserve_pipeline_job` with a (c) record | named error, zero bytes: the journal tree hash is unchanged, including `reconcile-inventory/` (no anchor written) |
-| E1b | A refused write through upsert, historical append, clone reclaim and an in-place rewrite, with the conflict check, sequence allocation and anchor sync patched to fail | named error; none of them runs (entry placement) |
+| E1b | A refused write through upsert, historical append, clone reclaim and an in-place rewrite, with the conflict check, sequence allocation and anchor sync patched to fail | named error; none of them runs (entry placement). Clone reclaim is an entry-placement case: the clone is member-less, so the reclaim's existing-row shape check passes and only the write-entry check refuses the backfilled row. The existing-row check is pinned by E4's member-less request instead |
 | E2 | `upsert_pipeline_job` moving an existing legacy forecast master to `reserved` | named error, zero bytes |
 | E3 | `append_historical_pipeline_job` with a (c) row | named error, zero bytes |
 | E4 | `reclaim_pipeline_job_reservation` on a dead legacy forecast master (seeded through `permit_pipeline_job_retry`'s legacy branch or the helper), with and without `cohort_members` in the request | named error, zero bytes; a pre-existing reconcile-inventory anchor is byte-identical (not rewritten) |
-| E5 | Non-versioned `reclaim_pipeline_job_reservation` on the auto-retry clone of a legacy forecast master (`schedule_auto_retry` legacy branch: `pending`, null key, `cohort_members` kept) | named error, zero bytes |
+| E4b | A versioned `reclaim_pipeline_job_reservation` request (current marker, `expected_submission_attempt`, `expected_submission_attempt_started_at`) on the same dead legacy forecast master, directly and through `_reserve_cycle_stage` -> `reserve_candidate` | `None` / `created=False`, no error, zero bytes. The versioned gates run before the existing-row shape check; moving that check above the first `None` gate fails both |
+| E5 | Non-versioned `reclaim_pipeline_job_reservation` on the auto-retry clone of a legacy forecast master (`schedule_auto_retry` legacy branch: `pending`, null key, `cohort_members` empty, backfilled from the request) | named error, zero bytes |
 | E6 | A (c) row whose `stage` is empty and whose `job_type` is `forecast`, through any guarded writer | named error, zero bytes |
 | E7 | `import_historical_scheduler_state` over a snapshot containing a (c) row among valid cycles, runs and jobs | named error; no journal root created (or, for an existing root, zero bytes); nothing imported |
 | E8 | Bypass appenders (`reject_pipeline_job_submit_attempt`, `mark_pipeline_job_permanently_failed`, `permit_pipeline_job_retry`, `demote`, `project_forecast_cohort_tasks`, operator bind) | behavior unchanged; covered by the existing suites staying green |

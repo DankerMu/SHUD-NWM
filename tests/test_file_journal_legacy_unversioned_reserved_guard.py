@@ -23,6 +23,10 @@ from services.orchestrator import file_orchestration_journal as journal_module
 from services.orchestrator.accepted_submit_identity import (
     ACCEPTED_SUBMIT_CONTRACT_VERSION,
     FORECAST_COHORT_STAGE_ALIASES,
+    accepted_submit_contract_is_current,
+    accepted_submit_row_kind,
+    canonical_forecast_cohort_members,
+    forecast_cohort_digest,
 )
 from services.orchestrator.file_orchestration_journal import (
     FileJournalRetryService,
@@ -233,6 +237,63 @@ def test_e4_a_member_less_reclaim_of_a_dead_legacy_forecast_master_is_refused(tm
     assert repository.get_pipeline_job(JOB_ID) == dead
 
 
+def test_e4_a_versioned_reclaim_over_a_dead_legacy_forecast_master_still_returns_none(tmp_path: Path) -> None:
+    """The only production forecast reclaim request is versioned; over a legacy
+    row it must keep losing quietly (``None``) at the versioned gates, which sit
+    before the existing-row shape refusal -- it must not start raising."""
+
+    repository, _anchor_bytes = _dead_legacy_forecast_master(tmp_path)
+    dead = repository.get_pipeline_job(JOB_ID)
+    # The scheduler's stamped request for the same job id and key: canonical
+    # members (the versioned evidence boundary validates them) and a digest.
+    request = _legacy_master(
+        accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        cohort_members=list(
+            canonical_forecast_cohort_members(
+                source_id="gfs",
+                cycle_time=CYCLE_TIME,
+                basins=[{"model_id": member["model_id"], "basin_id": member["basin_id"]} for member in _members()],
+            )
+        ),
+        slurm_ownership_required=False,
+        expected_slurm_user=None,
+        expected_slurm_account=None,
+    )
+    request["cohort_digest"] = forecast_cohort_digest({"source_id": "gfs", **request})
+    # What ``reserve_candidate`` adds from the exact accepted-submit read.
+    request["expected_submission_attempt"] = dead["submission_attempt"]
+    request["expected_submission_attempt_started_at"] = dead["submission_attempt_started_at"]
+    request_row = repository._pipeline_job_row(request)
+    assert accepted_submit_contract_is_current(request_row)
+    assert accepted_submit_row_kind(request_row) == "master"
+    before = _tree(repository.root)
+
+    assert repository.reclaim_pipeline_job_reservation(request) is None
+
+    assert _tree(repository.root) == before
+    assert repository.get_pipeline_job(JOB_ID) == dead
+
+
+def test_e4_the_scheduler_reservation_over_a_dead_legacy_forecast_master_is_not_created(tmp_path: Path) -> None:
+    """``_reserve_cycle_stage`` -> ``reserve_candidate`` for the very cycle run
+    whose job id and key the legacy row holds: the stamped insert loses, the
+    versioned reclaim returns ``None``, so the pass reports ``created=False``
+    (no sbatch) and writes nothing."""
+
+    repository, _anchor_bytes = _dead_legacy_forecast_master(tmp_path)
+    dead = repository.get_pipeline_job(JOB_ID)
+    before = _tree(repository.root)
+
+    reservation, job_id = _reserve_cycle_stage(
+        repository, stage="forecast", job_type="run_shud_forecast_array", canonical="forecast", run_id=RUN_ID
+    )
+
+    assert job_id == JOB_ID
+    assert (reservation.job_id, reservation.status, reservation.created) == (JOB_ID, "reservation_lost", False)
+    assert _tree(repository.root) == before
+    assert repository.get_pipeline_job(JOB_ID) == dead
+
+
 def test_e5_non_versioned_reclaim_of_a_legacy_masters_auto_retry_clone_is_refused(tmp_path: Path) -> None:
     repository = _repository(tmp_path)
     repository.append_historical_pipeline_job(
@@ -246,6 +307,9 @@ def test_e5_non_versioned_reclaim_of_a_legacy_masters_auto_retry_clone_is_refuse
     # reclaimed row would be (c).
     assert (stored["status"], stored["idempotency_key"], stored["slurm_job_id"]) == ("pending", None, None)
     assert (stored["stage"], stored.get("accepted_submit_contract_version")) == ("forecast", None)
+    # Member-less, so the reclaim's existing-row check passes; the write-entry
+    # check is what refuses the backfilled row.
+    assert stored["cohort_members"] == []
 
     request = _legacy_master(job_id=clone.job_id, idempotency_key=f"{KEY}:retry_1", slurm_comment=None)
     _refused(repository, repository.reclaim_pipeline_job_reservation, request)
@@ -295,13 +359,19 @@ def _placement_in_place_rewrite(repository: FileOrchestrationJournalRepository) 
 @pytest.mark.parametrize(
     "arrange",
     [_placement_upsert, _placement_historical_append, _placement_clone_reclaim, _placement_in_place_rewrite],
+    ids=["upsert", "historical_append", "memberless_clone_reclaim", "in_place_rewrite"],
 )
 def test_the_refusal_runs_before_any_side_effect_of_the_write(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, arrange: Any
 ) -> None:
     """Entry placement in ``_write_pipeline_job_unlocked``: the conflict check,
     the sequence allocation and the reconcile-inventory anchor sync never run
-    for a refused write (the append funnels alone would refuse only after them)."""
+    for a refused write (the append funnels alone would refuse only after them).
+
+    Every case is refused by the write-entry check alone.  The auto-retry
+    clone is stored member-less, so the reclaim's existing-row shape check
+    passes and the entry check refuses the row the reclaim backfilled; the
+    existing-row check is pinned by the E4 member-less request instead."""
 
     repository = _repository(tmp_path)
     write = arrange(repository)
@@ -515,19 +585,25 @@ def test_e9_a_pre_existing_shape_c_row_cannot_be_rewritten_in_place(tmp_path: Pa
 # --- E10: the only production minter stamps the contract ------------------------------------------
 
 
-def _reserve_through_the_cycle_stage(
-    tmp_path: Path, *, stage: str, job_type: str, canonical: str, basins: int = 2
-) -> Any:
+def _reserve_cycle_stage(
+    repository: FileOrchestrationJournalRepository,
+    *,
+    stage: str,
+    job_type: str,
+    canonical: str,
+    run_id: str = "cycle_gfs_2026071200",
+    basins: int = 2,
+) -> tuple[Any, str]:
     """Drive the production reservation minter with a real journal (#2674 caller pin).
 
     ``canonical`` is the stage name the chain derives the job id and key from
-    (every forecast alias canonicalizes to ``forecast``).
+    (every forecast alias canonicalizes to ``forecast``); ``run_id`` is the
+    cycle run the job id and key are derived from, exactly as the chain does.
     """
 
     from services.orchestrator.chain import ForecastOrchestrator
     from services.orchestrator.chain_types import StageDefinition
 
-    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
     orchestrator = object.__new__(ForecastOrchestrator)
     orchestrator.repository = repository
     orchestrator.config = SimpleNamespace(reconcile_slurm_user="scheduler", reconcile_slurm_account="account")
@@ -536,7 +612,7 @@ def _reserve_through_the_cycle_stage(
         source_id="gfs",
         cycle_time=CYCLE_TIME,
         cycle_id=CYCLE_ID,
-        run_id="cycle_gfs_2026071200",
+        run_id=run_id,
         all_basins=active,
         active_basins=active,
         retry_attempt=None,
@@ -550,10 +626,15 @@ def _reserve_through_the_cycle_stage(
         failure_cycle_status="unused",
         is_array=True,
     )
-    job_id = f"job_cycle_gfs_2026071200_{canonical}"
-    reservation = orchestrator._reserve_cycle_stage(
-        stage_definition, context, job_id, f"cycle_gfs_2026071200:{canonical}"
-    )
+    job_id = f"job_{run_id}_{canonical}"
+    return orchestrator._reserve_cycle_stage(stage_definition, context, job_id, f"{run_id}:{canonical}"), job_id
+
+
+def _reserve_through_the_cycle_stage(
+    tmp_path: Path, *, stage: str, job_type: str, canonical: str
+) -> tuple[FileOrchestrationJournalRepository, str]:
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    reservation, job_id = _reserve_cycle_stage(repository, stage=stage, job_type=job_type, canonical=canonical)
     assert reservation is not None and reservation.created
     return repository, job_id
 
