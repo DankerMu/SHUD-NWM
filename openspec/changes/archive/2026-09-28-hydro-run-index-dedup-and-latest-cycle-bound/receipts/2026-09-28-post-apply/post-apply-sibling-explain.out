@@ -1,0 +1,154 @@
+{"db": "nhms", "ledger": "000065_hydro_run_candidate_index_dedup.sql"}
+{"hydro_run_indexes": ["hydro_run_display_product_basin_status_idx", "hydro_run_forecast_basin_cycle_idx", "hydro_run_latest_ready_run_idx", "hydro_run_ops_strict_identity_candidates_idx", "hydro_run_pkey", "hydro_run_qhh_latest_candidate_idx", "hydro_run_run_key_key"]}
+{"pin": {"basin_id": "basins_sw_ylzb", "source_id": "IFS"}}
+{"statement": "display_ready_run (services/tiles/mvt.py)", "hydro_run_access": [["Index Scan", "hydro_run_latest_ready_run_idx"]]}
+Limit (actual time=0.029..0.030 rows=1 loops=1)
+  Buffers: shared hit=8
+  ->  Nested Loop Left Join (actual time=0.028..0.029 rows=1 loops=1)
+        Buffers: shared hit=8
+        ->  Nested Loop Left Join (actual time=0.016..0.017 rows=1 loops=1)
+              Buffers: shared hit=6
+              ->  Index Scan using hydro_run_latest_ready_run_idx on hydro_run h (actual time=0.007..0.007 rows=1 loops=1)
+                    Buffers: shared hit=3
+              ->  Memoize (actual time=0.007..0.008 rows=1 loops=1)
+                    Cache Key: h.model_id
+                    Cache Mode: logical
+                    Hits: 0  Misses: 1  Evictions: 0  Overflows: 0  Memory Usage: 1kB
+                    Buffers: shared hit=3
+                    ->  Index Scan using model_instance_pkey on model_instance mi (actual time=0.005..0.005 rows=1 loops=1)
+                          Index Cond: (model_id = h.model_id)
+                          Buffers: shared hit=3
+        ->  Memoize (actual time=0.010..0.011 rows=1 loops=1)
+              Cache Key: mi.river_network_version_id
+              Cache Mode: logical
+              Hits: 0  Misses: 1  Evictions: 0  Overflows: 0  Memory Usage: 1kB
+              Buffers: shared hit=2
+              ->  Index Scan using river_network_version_pkey on river_network_version rnv (actual time=0.009..0.009 rows=1 loops=1)
+                    Index Cond: (river_network_version_id = mi.river_network_version_id)
+                    Buffers: shared hit=2
+Planning:
+  Buffers: shared hit=14
+Planning Time: 0.480 ms
+Execution Time: 0.078 ms
+{"statement": "qhh_latest candidate_runs (forecast_store._qhh_latest_candidate_runs_sql)", "hydro_run_access": [["Index Scan", "hydro_run_qhh_latest_candidate_idx"]]}
+Limit (actual time=1.112..1.115 rows=1 loops=1)
+  Buffers: shared hit=247
+  ->  Result (actual time=1.111..1.113 rows=1 loops=1)
+        Buffers: shared hit=247
+        ->  Sort (actual time=0.372..0.374 rows=1 loops=1)
+              Sort Key: h.cycle_time DESC, h.run_id DESC
+              Sort Method: top-N heapsort  Memory: 26kB
+              Buffers: shared hit=229
+              ->  Nested Loop Left Join (actual time=0.055..0.341 rows=22 loops=1)
+                    Buffers: shared hit=229
+                    ->  Nested Loop Left Join (actual time=0.046..0.204 rows=22 loops=1)
+                          Buffers: shared hit=141
+                          ->  Nested Loop Left Join (actual time=0.039..0.152 rows=22 loops=1)
+                                Buffers: shared hit=97
+                                ->  Nested Loop (actual time=0.033..0.092 rows=22 loops=1)
+                                      Buffers: shared hit=31
+                                      ->  Index Scan using basin_version_qhh_latest_lookup_idx on basin_version bv (actual time=0.010..0.010 rows=1 loops=1)
+                                            Index Cond: (basin_id = 'basins_sw_ylzb'::text)
+                                            Buffers: shared hit=2
+                                      ->  Index Scan using hydro_run_qhh_latest_candidate_idx on hydro_run h (actual time=0.019..0.072 rows=22 loops=1)
+                                            Index Cond: ((lower(source_id) = 'ifs'::text) AND (run_type = 'forecast'::hydro.run_type) AND (basin_version_id = bv.basin_version_id))
+                                            Buffers: shared hit=29
+                                ->  Index Scan using model_instance_pkey on model_instance mi (actual time=0.002..0.002 rows=1 loops=22)
+                                      Index Cond: (model_id = h.model_id)
+                                      Buffers: shared hit=66
+                          ->  Index Scan using river_network_version_pkey on river_network_version rnv (actual time=0.002..0.002 rows=1 loops=22)
+                                Index Cond: (river_network_version_id = mi.river_network_version_id)
+                                Buffers: shared hit=44
+                    ->  Index Scan using forcing_version_pkey on forcing_version fv (actual time=0.005..0.005 rows=1 loops=22)
+                          Index Cond: (forcing_version_id = h.forcing_version_id)
+                          Buffers: shared hit=88
+Planning:
+  Buffers: shared hit=30
+Planning Time: 1.802 ms
+Execution Time: 1.256 ms
+{"statement": "display_coverage candidate_runs (display_coverage._CANDIDATE_RUNS_SQL)", "hydro_run_access": [["Bitmap Heap Scan", ""]]}
+Nested Loop Left Join (actual time=0.533..18.805 rows=44 loops=1)
+  Buffers: shared hit=1114
+  ->  Hash Left Join (actual time=0.079..0.409 rows=44 loops=1)
+        Hash Cond: (mi.river_network_version_id = rnv.river_network_version_id)
+        Buffers: shared hit=186
+        ->  Nested Loop Left Join (actual time=0.037..0.335 rows=44 loops=1)
+              Buffers: shared hit=183
+              ->  Nested Loop (actual time=0.031..0.151 rows=44 loops=1)
+                    Buffers: shared hit=51
+                    ->  Index Scan using basin_version_qhh_latest_lookup_idx on basin_version bv (actual time=0.006..0.007 rows=1 loops=1)
+                          Index Cond: (basin_id = 'basins_sw_ylzb'::text)
+                          Buffers: shared hit=2
+                    ->  Bitmap Heap Scan on hydro_run h (actual time=0.021..0.127 rows=44 loops=1)
+                          Recheck Cond: ((basin_version_id = bv.basin_version_id) AND (status = ANY ('{succeeded,parsed,published}'::hydro.run_status[])))
+                          Filter: ((cycle_time IS NOT NULL) AND (run_type = 'forecast'::hydro.run_type))
+                          Heap Blocks: exact=42
+                          Buffers: shared hit=49
+                          ->  Bitmap Index Scan on hydro_run_display_product_basin_status_idx (actual time=0.010..0.010 rows=72 loops=1)
+                                Index Cond: (basin_version_id = bv.basin_version_id)
+                                Buffers: shared hit=2
+              ->  Index Scan using model_instance_pkey on model_instance mi (actual time=0.003..0.003 rows=1 loops=44)
+                    Index Cond: (model_id = h.model_id)
+                    Buffers: shared hit=132
+        ->  Hash (actual time=0.038..0.039 rows=64 loops=1)
+              Buckets: 1024  Batches: 1  Memory Usage: 13kB
+              Buffers: shared hit=3
+              ->  Seq Scan on river_network_version rnv (actual time=0.004..0.019 rows=64 loops=1)
+                    Buffers: shared hit=3
+  ->  Index Scan using forcing_version_pkey on forcing_version fv (actual time=0.005..0.005 rows=1 loops=44)
+        Index Cond: (forcing_version_id = h.forcing_version_id)
+        Buffers: shared hit=178
+Planning:
+  Buffers: shared hit=30
+Planning Time: 1.091 ms
+Execution Time: 18.867 ms
+{"statement": "display_coverage _eligible_run_ids", "hydro_run_access": [["Index Scan", "hydro_run_latest_ready_run_idx"]]}
+Index Scan using hydro_run_latest_ready_run_idx on hydro_run h (actual time=0.012..7.268 rows=8520 loops=1)
+  Index Cond: (cycle_time IS NOT NULL)
+  Filter: (run_type = 'forecast'::hydro.run_type)
+  Buffers: shared hit=8230
+Planning:
+  Buffers: shared hit=2
+Planning Time: 0.232 ms
+Execution Time: 7.857 ms
+{"statement": "qhh_latest fast path (positional twin)", "hydro_run_access": [["Index Scan", "hydro_run_qhh_latest_candidate_idx"]]}
+Nested Loop Left Join (actual time=0.948..0.951 rows=1 loops=1)
+  Buffers: shared hit=251
+  ->  Limit (actual time=0.938..0.940 rows=1 loops=1)
+        Buffers: shared hit=247
+        ->  Result (actual time=0.937..0.939 rows=1 loops=1)
+              Buffers: shared hit=247
+              ->  Sort (actual time=0.276..0.277 rows=1 loops=1)
+                    Sort Key: h.cycle_time DESC, h.run_id DESC
+                    Sort Method: top-N heapsort  Memory: 26kB
+                    Buffers: shared hit=229
+                    ->  Nested Loop Left Join (actual time=0.037..0.251 rows=22 loops=1)
+                          Buffers: shared hit=229
+                          ->  Nested Loop Left Join (actual time=0.030..0.157 rows=22 loops=1)
+                                Buffers: shared hit=141
+                                ->  Nested Loop Left Join (actual time=0.026..0.109 rows=22 loops=1)
+                                      Buffers: shared hit=97
+                                      ->  Nested Loop (actual time=0.021..0.052 rows=22 loops=1)
+                                            Buffers: shared hit=31
+                                            ->  Index Scan using basin_version_qhh_latest_lookup_idx on basin_version bv (actual time=0.005..0.006 rows=1 loops=1)
+                                                  Index Cond: (basin_id = 'basins_sw_ylzb'::text)
+                                                  Buffers: shared hit=2
+                                            ->  Index Scan using hydro_run_qhh_latest_candidate_idx on hydro_run h (actual time=0.012..0.038 rows=22 loops=1)
+                                                  Index Cond: ((lower(source_id) = 'ifs'::text) AND (run_type = 'forecast'::hydro.run_type) AND (basin_version_id = bv.basin_version_id))
+                                                  Buffers: shared hit=29
+                                      ->  Index Scan using model_instance_pkey on model_instance mi (actual time=0.002..0.002 rows=1 loops=22)
+                                            Index Cond: (model_id = h.model_id)
+                                            Buffers: shared hit=66
+                                ->  Index Scan using river_network_version_pkey on river_network_version rnv (actual time=0.001..0.001 rows=1 loops=22)
+                                      Index Cond: (river_network_version_id = mi.river_network_version_id)
+                                      Buffers: shared hit=44
+                          ->  Index Scan using forcing_version_pkey on forcing_version fv (actual time=0.003..0.003 rows=1 loops=22)
+                                Index Cond: (forcing_version_id = h.forcing_version_id)
+                                Buffers: shared hit=88
+  ->  Index Scan using run_display_coverage_pkey on run_display_coverage cov (actual time=0.005..0.005 rows=1 loops=1)
+        Index Cond: (run_id = h.run_id)
+        Buffers: shared hit=4
+Planning:
+  Buffers: shared hit=41
+Planning Time: 2.030 ms
+Execution Time: 1.064 ms

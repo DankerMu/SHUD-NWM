@@ -322,11 +322,13 @@ find each requested scenario's latest cycle from `hydro.hydro_run`.
 Candidate forecast runs of the requested basin that satisfy the request's
 scenario and identity filters SHALL be taken in `cycle_time` descending order.
 The scenario's cycle SHALL be that of the first candidate with at least one
-`q_down` fact row for the requested basin, river network and segment. The store
-SHALL NOT scan the segment's fact rows to compute the maximum. The per-scenario
-result SHALL equal the maximum `cycle_time` over forecast runs that have such
-rows. The discovery SHALL NOT add a run `status` predicate: a run with fact rows
-is eligible whatever its status.
+`q_down` fact row for the requested basin, river network and segment inside the
+candidate's run window `[cycle_time, end_time]`. The membership probe SHALL be a
+per-candidate lateral lookup limited to one row, so the time dimension can be
+pruned at runtime. The store SHALL NOT scan the segment's fact rows to compute
+the maximum. The per-scenario result SHALL equal the maximum `cycle_time` over
+forecast runs that have such rows. The discovery SHALL NOT add a run `status`
+predicate: a run with fact rows is eligible whatever its status.
 
 #### Scenario: the newest run of the basin has no rows for the segment
 
@@ -358,6 +360,13 @@ is eligible whatever its status.
 #### Scenario: a segment has no retained fact rows
 
 - **WHEN** no candidate run of the basin has retained fact rows for the segment
-- **THEN** every candidate is probed once and the result is empty. The cost is
-  bounded by the number of candidates times the number of chunks, and it is not
-  covered by the 5000-buffer gate.
+- **THEN** the result is empty, every chunk outside a candidate's run window is
+  excluded at runtime, and the warm discovery statement on node-27 touches at
+  most 5000 shared buffers.
+
+#### Scenario: fact rows outside the run window
+
+- **WHEN** a candidate run's only `q_down` rows for the segment lie before its
+  `cycle_time` or after its `end_time`
+- **THEN** that candidate does not match; node-27 production held zero such rows
+  on 2026-09-28, and ingest-side enforcement is tracked separately (#2687).

@@ -1,0 +1,17 @@
+                    index                     | indisvalid | indisready |                                                                                                                                                  pg_get_indexdef                                                                                                                                                  
+----------------------------------------------+------------+------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ hydro_run_display_product_basin_status_idx   | t          | t          | CREATE INDEX hydro_run_display_product_basin_status_idx ON hydro.hydro_run USING btree (basin_version_id, status) WHERE (status = ANY (ARRAY['succeeded'::hydro.run_status, 'parsed'::hydro.run_status, 'published'::hydro.run_status]))
+ hydro_run_forecast_basin_cycle_idx           | t          | t          | CREATE INDEX hydro_run_forecast_basin_cycle_idx ON hydro.hydro_run USING btree (basin_version_id, cycle_time DESC) WHERE ((run_type = 'forecast'::hydro.run_type) AND (cycle_time IS NOT NULL))
+ hydro_run_latest_ready_run_idx               | t          | t          | CREATE INDEX hydro_run_latest_ready_run_idx ON hydro.hydro_run USING btree (cycle_time DESC, run_id DESC) WHERE (status = ANY (ARRAY['succeeded'::hydro.run_status, 'parsed'::hydro.run_status, 'published'::hydro.run_status]))
+ hydro_run_ops_strict_identity_candidates_idx | t          | t          | CREATE INDEX hydro_run_ops_strict_identity_candidates_idx ON hydro.hydro_run USING btree (source_id, cycle_time, run_id, model_id)
+ hydro_run_pkey                               | t          | t          | CREATE UNIQUE INDEX hydro_run_pkey ON hydro.hydro_run USING btree (run_id)
+ hydro_run_qhh_latest_candidate_idx           | t          | t          | CREATE INDEX hydro_run_qhh_latest_candidate_idx ON hydro.hydro_run USING btree (lower(source_id), run_type, basin_version_id, cycle_time DESC, run_id DESC) WHERE ((cycle_time IS NOT NULL) AND (status = ANY (ARRAY['succeeded'::hydro.run_status, 'parsed'::hydro.run_status, 'published'::hydro.run_status])))
+ hydro_run_run_key_key                        | t          | t          | CREATE UNIQUE INDEX hydro_run_run_key_key ON hydro.hydro_run USING btree (run_key)
+(7 rows)
+
+                  version                   
+--------------------------------------------
+ 000065_hydro_run_candidate_index_dedup.sql
+ 000064_drop_retired_flood_schema.sql
+(2 rows)
+

@@ -34,17 +34,17 @@
 - [x] 3.1 disposable DB pytest（同集群 scratch DB，禁止生产 `nhms`）：`tests/test_migrations.py`、相关 integration 文件、`tests/test_real_database_integration.py`；先 `mkdir -p /home/nwm/tmp && export TMPDIR=/home/nwm/tmp`。
 - [x] 3.2 000065 重跑安全在 real DB 上实测（1.3 的 integration 用例在 node-27 通过）。
 - [x] 3.3 440-pin 等价回归（另附一份非空 pin 的有界 LATERAL `EXPLAIN (ANALYZE, BUFFERS)`，记录每个 chunk 的索引与 buffers）（生产只读 `nhms_display_ro`，master checkout 对 branch worktree）：0 mismatch；空结果 pin shared hit max ≤ 5000；非空 pin max/p95 ≤ 3301/2530。harness 与输出进 `receipts/`。
-- [ ] 3.4 `display_ready_run`、QHH latest-product、display-coverage 选择器在删除重复索引后仍走索引：apply 前在 node-27 scratch DB（从零迁移含 000065）上 EXPLAIN 确认走保留索引（生产上不得 DROP/ROLLBACK 取证，会拿 ACCESS EXCLUSIVE 锁）；apply 后在生产只读复核。
+- [x] 3.4 `display_ready_run`、QHH latest-product、display-coverage 选择器在删除重复索引后仍走索引：apply 前在 node-27 scratch DB（从零迁移含 000065）上 EXPLAIN 确认走保留索引（生产上不得 DROP/ROLLBACK 取证，会拿 ACCESS EXCLUSIVE 锁）；apply 后在生产只读复核。
 
 ## 4. CI 与生产 apply
 
-- [ ] 4.1 CI 绿，含 SQL Migration Dry Run（非 draft PR）。
-- [ ] 4.2 **停：向用户呈报** 000065 SQL、删除/保留依据、预计耗时、重跑/回退方案，取得生产 apply 确认。
-- [ ] 4.3 生产 apply 后 receipt：`pg_indexes`（新索引 `indexdef` 与迁移一致、3 个重复索引消失、`indisvalid`）；D1 语句 IFS pin 与 GFS+IFS pin `EXPLAIN (ANALYZE, BUFFERS)`：`cand` 走新索引，shared hit 相对 1386/1464 不回退；3.4 复核。
+- [x] 4.1 CI 绿，含 SQL Migration Dry Run（非 draft PR）。
+- [x] 4.2 **停：向用户呈报** 000065 SQL、删除/保留依据、预计耗时、重跑/回退方案，取得生产 apply 确认。→ 用户 2026-09-28 授权「现在执行窗口」；23:08:39Z 应用成功（`receipts/2026-09-28-post-apply/`）。
+- [x] 4.3 生产 apply 后 receipt：`pg_indexes`（新索引 `indexdef` 与迁移一致、3 个重复索引消失、`indisvalid`）；D1 语句 IFS pin 与 GFS+IFS pin `EXPLAIN (ANALYZE, BUFFERS)`：`cand` 走新索引，shared hit 相对 1386/1464 不回退；3.4 复核。
 
 ## 5. 文档与 follow-up
 
-- [ ] 5.1 design.md 记录 1.2 对比表与 4.3 结果。
+- [x] 5.1 design.md 记录 1.2 对比表与 4.3 结果。
 - [x] 5.2 follow-up issue：ingest 侧强制 `valid_time ∈ [cycle_time, end_time]`（D1 有界探针依赖）→ #2687（另注：parser 的绝对时间自动识别允许首行早于 cycle_time 至多 1 天，当前数据实测 0 违例）。
 
 ## Evidence Floor
@@ -54,5 +54,5 @@
 - [x] `openspec validate hydro-run-index-dedup-and-latest-cycle-bound --strict --no-interactive`
 - [x] node-27 disposable DB pytest（3.1/3.2）
 - [x] node-27 440-pin 等价回归 + D11 预算（3.3）
-- [ ] CI SQL Migration Dry Run 绿（4.1）
-- [ ] 生产 `pg_indexes` + EXPLAIN receipt（4.3，用户确认 apply 之后）
+- [x] CI SQL Migration Dry Run 绿（4.1）：PR #2688 @5e1fd911 SQL Migration Dry Run pass、Unit Tests pass
+- [x] 生产 `pg_indexes` + EXPLAIN receipt（4.3，用户确认 apply 之后）：`receipts/2026-09-28-post-apply/README.md`
