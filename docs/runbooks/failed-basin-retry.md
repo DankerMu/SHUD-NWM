@@ -617,8 +617,12 @@ stand in instead of manufacturing a held row.
    reporting `ambiguous_fallback_match` with `fallback_match_basis=name_window_count`,
    some eligible master in the window has no provable key (check the `SubmitLine`
    column above); with `submitline_exact` and `match_count=2`, two masters carry this
-   reservation's key — a genuine double submission. There is no supported operator bind
-   command for either case; keep the row held and escalate with the `sacct` evidence.
+   reservation's key — a genuine double submission. A row whose fallback window has grown
+   past the scan budget reports `query_unavailable` on every pass instead (its
+   `reconciliation_reason_class` in pass evidence is `bounded_output_*`). For all three the
+   supported exit is the guarded operator bind `nhms-pipeline bind-reserved-job` (#2668),
+   see § "Disposition — completed or running but unbound: the guarded operator bind"
+   below; `list-operator-actions` lists such a row as `held_reservation_unresolved`.
    Never demote while a matching job is alive or completed: demotion re-`sbatch`es the
    cohort. Only a row with **no** matching job (case 3) is demoted.
 3. **Confirmed dead** (no matching job in `sacct`/`squeue` for the attempt window), when
@@ -710,6 +714,160 @@ Verified by:
   — typed CAS demotion, byte-identical
   refusals, atomic master/member/event append, cycle retry shortcut, reclaim chain, and
   both CLI entrypoints.
+
+### Disposition — completed or running but unbound: the guarded operator bind (#2668)
+
+Since #2667 a held forecast master skips every member `active_duplicate_pipeline`, so the
+cycle's completion verdict reads `gap` and the source's single backfill slot stays on it:
+the whole forward lane of that source is frozen until the row is bound, demoted, or
+released. Automatic reconcile cannot bind three held shapes. Those, and every other held
+action restart reconcile could not resolve, are now listed by `list-operator-actions` as
+decision `held_reservation_unresolved`:
+
+| reconcile outcome | listed | `operator_command` | exit |
+|---|---|---|---|
+| `ambiguous_fallback_match` (either `fallback_match_basis`) | every pass | `bind-reserved-job` | this section |
+| `query_unavailable` / `fallback_no_match` / `absence_unconfirmed` | once the attempt anchor is at least 6h old (or unknown) | `triage` | this section if `sacct` shows the job; Disposition case 3 if it is confirmed dead |
+| `multiple_matches_blocked` | every pass | `escalate` | none: its durable decision is not the held tuple, so both the bind and the demote refuse it (`not_held`); escalate to the scheduler owner and never hand-edit the journal |
+| `identity_mismatch_blocked` / `stale_attempt_blocked` | once the attempt anchor is at least 6h old (or unknown) | `escalate` | none: no operator command resolves them; escalate to the scheduler owner |
+| `journal_quarantined` | once the attempt anchor is at least 6h old (or unknown) | `escalate` | the residue-file fix below when `quarantine_reason` is `file_journal_reconcile_inventory_migration_invalid`; any other reason: escalate |
+| `legacy_unversioned_read_only` (shape (c)) | every pass | `escalate` | none yet: the bind refuses it (`legacy_unversioned_unsupported`); tracked in #2674 |
+| any held row that is not a forecast cohort master (the forcing lane) | as tabled | `escalate` | none yet: neither bind nor demote accepts it; tracked in #2675 |
+| any other action (outside this table) | every pass, whatever the anchor age | `escalate` | none: a new reconcile action the listing does not know; escalate |
+
+For `journal_quarantined`, read the outcome's `quarantine_reason` / `quarantine_field` in the
+pass evidence. `file_journal_reconcile_inventory_migration_invalid` with field `pipeline_jobs`
+means a non-`.json` residue (for example `*.json.bak-zombie-<date>`) sits under
+`<journal>/pipeline-jobs/` and every bind scan fails closed on it. Move it out of the journal
+root and keep a backup, as in
+[node22-control-plane-manual-recovery.md](node22-control-plane-manual-recovery.md) (section
+"`active_duplicate_pipeline` + reserved-held forecast master (#2655)"), then wait for the next
+pass. Never demote such a row.
+
+`bind-reserved-job` binds **one** held current-contract forecast cohort master to the Slurm
+master the operator matched in `sacct`. It writes exactly the durable tuple that the
+automatic #2655 name-window bind writes (`status=submitted`, `submit_outcome=accepted`,
+`reconciliation_source=slurm_name_window_unique`, `reconciliation_decision=matched_bound`,
+`matched_slurm_job_id`, `slurm_accounting_submitted_at`) plus one `operator_verified_bind`
+audit event in the same durable append. It introduces no new durable token, so rolling the
+code back leaves a row every older checkout already reads. It never queries `sacct` and
+never `sbatch`es. The next pass's inflight reconcile projects the bound master to its
+terminal status as usual.
+
+1. **Find the master in `sacct`** (read-only). Use the row's own owner and attempt anchor.
+   For a `query_unavailable` row whose window saturated the scan budget, narrow `--endtime`
+   to shortly after the anchor. The forecast array is accepted within minutes of the
+   reservation.
+
+   ```bash
+   sacct --name nhms_forecast --user <expected_slurm_user> --accounts <expected_slurm_account> \
+     --starttime <submission_attempt_started_at> --endtime <anchor + 1h, or now> \
+     --format=JobID,JobName,State,Submit,End,SubmitLine
+   squeue -a --name nhms_forecast
+   ```
+
+   This row's master is the bare numeric id (`56839`, never `56839_0` or `56839.batch`)
+   whose array-task rows carry a `SubmitLine` with exactly one
+   `--comment=nhms_idem:<this row's idempotency_key>`, and whose `Submit` falls inside
+   `[submission_attempt_started_at, now]`. A master submitted before the anchor belongs to
+   an earlier attempt of the same key: never bind it (the command refuses it with
+   `submit_time_outside_attempt_window`). If no row matches, this is not a bind case: go to
+   Disposition case 3.
+2. **Genuine double submission** (`fallback_match_basis=submitline_exact`, `match_count=2`):
+   both masters ran the same runs in the same run directories. Before binding, confirm in
+   `sacct`/`squeue` that the **other** master is terminal or cancelled. If it is still
+   pending or running, do not bind yet: binding lets the next stage start while that master
+   still writes the same run outputs. Wait for it, or escalate. Bind the master whose writes
+   are on disk, which is the one that finished **last** (`End`). Record the other master's
+   id and final `State` in `--verification-note`.
+3. **Preview the CAS inputs** from the journal replay, never from pass evidence or the flat
+   `pipeline-jobs/<job_id>.json` (a derived projection). The row must read
+   `status=reserved`, `slurm_job_id=null`, `submit_outcome=submit_result_ambiguous`,
+   `reconciliation_source=slurm_exact_comment`,
+   `reconciliation_decision=accounting_unavailable`,
+   `reconciliation_reason_class=comment_accounting_unproven`:
+
+   ```bash
+   /scratch/frd_muziyao/NWM/.venv/bin/python -c 'import json, sys
+   from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+   row = FileOrchestrationJournalRepository(sys.argv[1]).get_accepted_submit_pipeline_job(sys.argv[2])
+   keys = ("status", "slurm_job_id", "submit_outcome", "reconciliation_source", "reconciliation_decision",
+           "reconciliation_reason_class", "idempotency_key", "submission_attempt", "submission_attempt_started_at")
+   print(json.dumps({key: row.get(key) for key in keys}, sort_keys=True))' <journal-root> <job_id>
+   ```
+
+4. **Bind.** First re-read the exact master id you are about to pass (mandatory):
+
+   ```bash
+   sacct --jobs=<bare master id> --parsable2 --format=JobID,JobName,State,Submit,End,SubmitLine
+   ```
+
+   Its `<master>_<task>` rows must read `JobName=nhms_forecast`, carry a `SubmitLine` with
+   exactly one `--comment=nhms_idem:<this row's idempotency_key>`, and show the `Submit` you
+   pass. Take `--slurm-job-id`, `--slurm-submit-time` and `--submit-line` from **this**
+   output only, never from the step 1 listing or by retyping: the command cannot detect a
+   mistyped id whose job is a legacy unversioned forecast master of another cycle, a
+   non-master row of another cycle, or an `nhms_forecast` job outside this journal (none of
+   them is checked, and the `SubmitLine` carries no job id), and inflight reconcile would
+   then project that job's terminal state onto this row.
+
+   `sacct` prints `Submit` as local naive time: append the cluster's UTC offset
+   (`date +%z` on the login node) yourself. The command refuses a timestamp without a
+   timezone. Pass one array-task row's `SubmitLine` verbatim; only its `--comment=` value is
+   used and recorded, never the script path.
+
+   ```bash
+   /scratch/frd_muziyao/NWM/.venv/bin/python -m services.orchestrator.cli bind-reserved-job \
+     --journal-root <journal-root> \
+     --job-id job_cycle_<source>_<cycle>_..._forecast \
+     --slurm-job-id <bare master id> \
+     --slurm-submit-time <sacct Submit with offset, e.g. 2026-09-25T20:42:57+08:00> \
+     --submit-line "<SubmitLine of one <master>_<task> row>" \
+     --expected-attempt <submission_attempt> \
+     --expected-attempt-started-at <submission_attempt_started_at> \
+     --checked-by <operator> \
+     --checked-at <now, timezone-aware> \
+     --verification-note "<sacct query and what matched; for a double submission: other master <id> <State>>" \
+     --confirm
+   ```
+
+   Missing `--confirm`, blank evidence, or a timestamp without a timezone exit 2 before the
+   journal is opened. Every compare-and-swap refusal exits 2 with
+   `bind-reserved-job: refused: <token>; no journal bytes were written`:
+
+   | token | meaning |
+   |---|---|
+   | `not_held` | not the exact held shape (already bound, not `reserved`, outcome not ambiguous, an exact-comment reason such as `coverage_incomplete`, `multiple_matches_blocked`); a repeated request after a successful bind also lands here |
+   | `stale_attempt` | `--expected-attempt` / `--expected-attempt-started-at` differ from the durable row |
+   | `submit_time_outside_attempt_window` | `--slurm-submit-time` is before the attempt anchor or after `--checked-at` |
+   | `submitline_key_mismatch` | the `SubmitLine` has no `--comment=`, two distinct ones, or a key that is not this row's |
+   | `slurm_id_invalid` | `--slurm-job-id` is not a canonical bare decimal master id (a leading zero such as `0123`, an array task, or a step suffix) |
+   | `slurm_id_claimed` | a same-cycle row of any kind (forcing, legacy, member task `<id>_<n>`) or a current forecast master of any other cycle (settled or active) already claims that master id, even a recycled id with another `Submit` (stricter than #1850) |
+   | `slurm_submit_time_invalid` | `--slurm-submit-time` is not a timezone-aware instant |
+   | `legacy_unversioned_unsupported` | shape (c): escalate, #2674 |
+   | `not_found` | no such forecast master |
+
+   On the production-sized journal a bind takes about a minute (53 s in the #2668 rehearsal): it holds the
+   cycle lock and the journal-global reconcile-inventory lock while it scans claimants, so scheduler journal
+   writes wait behind it. Do not interrupt it; a refusal returns within seconds.
+
+5. **After the bind.** Exit 0 prints a sorted JSON receipt (`status=bound`, or
+   `bound_with_warnings` when a derived direct/latest projection failed after the durable
+   append; the bind is committed in both cases, so do not retry it). The next scheduler pass's
+   inflight reconcile projects the cohort from `sacct`. A `COMPLETED` array is not recomputed,
+   its members become terminal, the cycle's verdict turns `complete`, and the next cycle
+   enters backfill selection. The `held_reservation_unresolved` entry drops out of
+   `list-operator-actions` once a newer reconciling pass no longer reports the row. If one
+   array task `FAILED`, only that member reads `permanent_failure_guard` and succeeded members
+   stay terminal. Its exit is the manual-retry marker on the cohort master
+   (`scripts/node22_manual_retry_failed_runs.py --run-id <cohort master run id>` previews
+   `would_mark`), which re-runs only that member.
+
+Verified by `tests/test_orchestrator_bind_reserved_job_cas.py`,
+`tests/test_orchestrator_bind_reserved_job_cli.py`,
+`tests/test_orchestrator_bind_reserved_job_lane.py` (real journal → bind → inflight
+reconcile → completion verdict, and the one-failed-task marker path) and
+`tests/test_operator_action_listing_held_reservations.py`.
 
 ## Missing accounting vs wrong accounting (缺账 vs 错账)
 

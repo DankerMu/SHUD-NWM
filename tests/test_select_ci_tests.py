@@ -1057,6 +1057,10 @@ def test_select_tests_maps_file_journal_read_state_without_whole_legacy_suites()
             # pin READS this module's `run_once` with `ast` (it must not import
             # it), so a pass-status literal added or moved here has to run it.
             "tests/test_operator_action_status_closure.py",
+            # #2668's at-site addition to the same stop rule: this module
+            # serializes the reserved-unbound outcome rows (with the attempt
+            # anchor) the held-reservation listing suite ages and pins.
+            "tests/test_operator_action_listing_held_reservations.py",
             # #2316's at-site addition to the same stop rule: the extra-root
             # wiring oracle for the `runs_only_roots` tuple this module builds.
             "tests/test_retention_extra_roots.py",
@@ -1383,6 +1387,11 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         # and is the only route that reaches it for a PR touching its own subject
         # module, operator_action_listing.py.
         "tests/test_operator_action_listing.py",
+        # #2668: the held-reservation listing suite rides the broad orchestrator
+        # directory rule (package __init__, operator_action_listing.py,
+        # operator_action_listing_held.py and scheduler_evidence_payload.py
+        # importer gaps). ~4s.
+        "tests/test_operator_action_listing_held_reservations.py",
         # #2405: the reservation-lease suite rides the broad orchestrator
         # directory rule for scheduler_lease.py, scheduler_evidence.py and its
         # reader subject operator_action_listing.py; scheduler_runtime.py is
@@ -1403,6 +1412,12 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_operator_reentry_confirmation.py",
         "tests/test_orchestration_chain.py",
         "tests/test_orchestrator.py",
+        # #2668: the three bind-reserved-job suites ride the broad orchestrator
+        # directory rule (package __init__, accepted_submit_identity.py,
+        # chain_types.py and operator_reserved_bind.py importer gaps). ~12s.
+        "tests/test_orchestrator_bind_reserved_job_cas.py",
+        "tests/test_orchestrator_bind_reserved_job_cli.py",
+        "tests/test_orchestrator_bind_reserved_job_lane.py",
         "tests/test_orchestrator_demote_cli_security.py",
         "tests/test_orchestrator_demote_core_cas.py",
         "tests/test_orchestrator_demote_projection_faults.py",
@@ -10704,6 +10719,12 @@ INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
     # suite the chain rules already carry would be, and is left to whoever owns
     # that pair of sets next.
     ("services/orchestrator/chain_types.py", "tests/test_file_journal_full_tree_budget_contract.py"): "edge-consumer",
+    # #2668: the fourth instance of the #1943 shape. The bind CLI suite imports
+    # `OrchestratorError` from chain_types only to inject a projection fault; its
+    # subject is the bind-reserved-job entrypoint, selected from the cli.py rule
+    # and the broad orchestrator directory rule instead of the focused-node
+    # chain_types stop rule.
+    ("services/orchestrator/chain_types.py", "tests/test_orchestrator_bind_reserved_job_cli.py"): "edge-consumer",
     ("services/orchestrator/chain.py", "tests/test_qhh_scripts_static.py"): "edge-consumer",
     ("services/orchestrator/chain.py", "tests/test_real_slurm_gateway.py"): "edge-consumer",
     ("services/orchestrator/chain.py", "tests/test_source_identity.py"): "edge-consumer",
@@ -11841,6 +11862,8 @@ STOP_RULE_AT_SITE_EXTENSIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
             *RETENTION_COPYBACK_MUTEX_TESTS,
             "tests/test_production_scheduler.py::test_every_dimension_a_real_pass_publishes_has_a_scope_disposition",
             "tests/test_retention_extra_roots.py",
+            # #2668: the held-reservation listing suite (serialized anchor key).
+            "tests/test_operator_action_listing_held_reservations.py",
         ),
     ),
 )
@@ -11969,6 +11992,8 @@ def test_scheduler_runtime_selects_the_copyback_mutex_suite() -> None:
     assert select_tests(["services/orchestrator/scheduler_runtime.py"], repo_root=Path(".")) == [
         "tests/test_file_orchestration_journal.py",
         "tests/test_file_orchestration_migration.py",
+        # #2668: the held-reservation listing suite joins the stop rule at site.
+        "tests/test_operator_action_listing_held_reservations.py",
         "tests/test_operator_action_reservation_lease.py",
         "tests/test_operator_action_status_closure.py",
         "tests/test_orchestration_chain.py::test_psycopg_active_slurm_jobs_includes_cycle_run_array_job_for_filtered_model",
@@ -12213,6 +12238,11 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
     (
         "tests/orchestrator_demote_reserved_job_helpers.py",
         "tests/test_orchestrator_demote_core_cas.py",
+    ),
+    # The #2668 bind-reserved-job suites' shared fixture module.
+    (
+        "tests/orchestrator_bind_reserved_job_helpers.py",
+        "tests/test_orchestrator_bind_reserved_job_cas.py",
     ),
     # The #1809 gateway-reconcile split's two shared fixture modules.
     ("tests/gateway_reconcile_helpers.py", "tests/test_gateway_reconcile_file_cohort_comment.py"),
@@ -15480,9 +15510,9 @@ def test_demote_helper_rule_selects_public_chain_consumer_exactly() -> None:
     # above only checks the `required` table's members are PRESENT in the
     # selection, so deleting the explicit chain entry there would stay green while
     # a helper-only PR silently stopped running the public operator-recovery
-    # regression. This exact-set anchor makes the five-consumer contract
+    # regression. This exact-set anchor makes the consumer contract
     # load-bearing: it must equal the four split suites + the public chain suite
-    # + the meta-guard, nothing more and nothing less.
+    # + the #2668 bind CLI suite + the meta-guard, nothing more and nothing less.
     selected = set(select_tests(["tests/orchestrator_demote_reserved_job_helpers.py"], repo_root=Path(".")))
     assert selected == {
         "tests/test_orchestrator_demote_cli_security.py",
@@ -15490,6 +15520,21 @@ def test_demote_helper_rule_selects_public_chain_consumer_exactly() -> None:
         "tests/test_orchestrator_demote_projection_faults.py",
         "tests/test_orchestrator_demote_reclaim_lifecycle.py",
         "tests/test_orchestration_chain.py",
+        # #2668: the bind CLI suite reuses the demote secret literals at file level.
+        "tests/test_orchestrator_bind_reserved_job_cli.py",
+        SELECTOR_META_GUARD_TEST,
+    }
+
+
+def test_bind_helper_rule_selects_its_three_consumers_exactly() -> None:
+    # #2668: the held-listing suite imports the bind fixture module
+    # function-locally, which the derived importer scan cannot see, so the rule
+    # names it; this exact-set anchor keeps that consumer load-bearing.
+    selected = set(select_tests(["tests/orchestrator_bind_reserved_job_helpers.py"], repo_root=Path(".")))
+    assert selected == {
+        "tests/test_orchestrator_bind_reserved_job_cas.py",
+        "tests/test_orchestrator_bind_reserved_job_cli.py",
+        "tests/test_operator_action_listing_held_reservations.py",
         SELECTOR_META_GUARD_TEST,
     }
 
@@ -15557,6 +15602,12 @@ def test_gateway_reconcile_helper_rules_select_their_partitions_exactly() -> Non
         "tests/test_orchestrator_demote_projection_faults.py",
         "tests/test_orchestrator_demote_reclaim_lifecycle.py",
         "tests/test_orchestration_chain.py",
+    } | {
+        # #2668: the bind CAS suite imports the helper at file level; the CLI and
+        # held-listing suites reach it through the bind helper module.
+        "tests/test_orchestrator_bind_reserved_job_cas.py",
+        "tests/test_orchestrator_bind_reserved_job_cli.py",
+        "tests/test_operator_action_listing_held_reservations.py",
     } | {SELECTOR_META_GUARD_TEST}
 
     selected_writer = set(select_tests(["tests/gateway_reconcile_writer_helpers.py"], repo_root=Path(".")))

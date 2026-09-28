@@ -65,6 +65,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .operator_action_listing_held import (
+    HELD_RESERVATION_HELP,
+    _pass_held_reservations,
+    _restart_reconcile_reserved_outcomes,
+)
 from .scheduler import DEFAULT_ALLOWED_CYCLE_HOURS_UTC, DEFAULT_PRODUCTION_SOURCES
 from .scheduler_evidence import MAX_EVIDENCE_BYTES, is_scheduler_pass_evidence_filename
 
@@ -349,7 +354,8 @@ LIST_OPERATOR_ACTIONS_HELP = (
     "it is reported). Such reservations are listed under orphan_reservations with "
     f"reason {ORPHAN_REASON_LEASE_STALE} or {ORPHAN_REASON_LEASE_ABSENT}; an "
     "in-flight pass's reservation is fresh and changes nothing. "
-    "Exit 2 when the root is missing or unreadable, or --passes is not an integer "
+    + HELD_RESERVATION_HELP
+    + "Exit 2 when the root is missing or unreadable, or --passes is not an integer "
     ">= 1. Runbook: docs/runbooks/node22-control-plane-manual-recovery.md"
 )
 
@@ -378,6 +384,12 @@ def list_operator_actions(*, evidence_root: str | None, passes: int = DEFAULT_PA
     # reservation's mtime, so mtimes no longer say when it was reserved.
     newest_evaluating_started_at: str | None = None
     actions: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    # #2668: held reservations, keyed ``(job_id, decision)`` -- a master and its
+    # ``_retry_<n>`` sibling share source/cycle and carry no model id, so the
+    # candidate key above would collide them.  Rebuilt from every pass whose
+    # restart-reconcile lane ran (the newest such pass is authoritative).
+    held: dict[tuple[str, str], dict[str, Any]] = {}
+    unscanned: list[dict[str, Any]] = []
     # r3-01/r4-02: a pass that is neither decidable nor transparent seen after
     # (newer than) the newest decidable pass.  Transparent passes leave it as is.
     hidden_after_decidable = False
@@ -432,8 +444,25 @@ def list_operator_actions(*, evidence_root: str | None, passes: int = DEFAULT_PA
                 "last_seen_pass": name,
                 "seen_in_passes": existing["seen_in_passes"] + 1,
             }
+        outcomes, unscanned_reason = _restart_reconcile_reserved_outcomes(payload)
+        if outcomes is None:
+            unscanned.append({"pass": name, "reason": unscanned_reason})
+            continue
+        # Resolution drops the entry: only what THIS lane-ran pass still lists
+        # survives; ``first_seen_pass`` and the count carry over.
+        current: dict[tuple[str, str], dict[str, Any]] = {}
+        for entry in _pass_held_reservations(outcomes, payload):
+            key = (entry["job_id"], entry["decision"])
+            prior = held.get(key)
+            current[key] = {
+                **entry,
+                "first_seen_pass": prior["first_seen_pass"] if prior is not None else name,
+                "last_seen_pass": name,
+                "seen_in_passes": (prior["seen_in_passes"] + 1) if prior is not None else 1,
+            }
+        held = current
 
-    listed = [actions[key] for key in sorted(actions)]
+    listed = [actions[key] for key in sorted(actions)] + [held[key] for key in sorted(held)]
     orphans = _orphan_reservations(root, newest_evaluating_started_at)
     receipt = {
         "schema_version": LIST_OPERATOR_ACTIONS_SCHEMA_VERSION,
@@ -449,6 +478,7 @@ def list_operator_actions(*, evidence_root: str | None, passes: int = DEFAULT_PA
         "candidate_lists_dropped_passes": sorted(dropped),
         "non_evaluating_passes": sorted(non_evaluating, key=lambda item: item["pass"]),
         "orphan_reservations": orphans,
+        "restart_reconcile_unscanned_passes": sorted(unscanned, key=lambda item: item["pass"]),
     }
     evaluating_count = len(selected) - len(unreadable) - len(non_evaluating)
     if listed:

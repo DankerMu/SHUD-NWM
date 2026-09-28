@@ -1117,6 +1117,86 @@ class OperatorDemoteReceipt:
     warnings: tuple[ProjectionWarning, ...] = ()
 
 
+#: #2668 named refusals of :meth:`FileOrchestrationJournalRepository.bind_operator_verified_reserved_job`.
+#: Every one of them leaves the journal byte-identical.
+OPERATOR_BIND_REFUSALS = frozenset(
+    (
+        "not_found",
+        "legacy_unversioned_unsupported",
+        "not_held",
+        "stale_attempt",
+        "submit_time_outside_attempt_window",
+        "submitline_key_mismatch",
+        "slurm_id_invalid",
+        "slurm_id_claimed",
+        "slurm_submit_time_invalid",
+    )
+)
+OPERATOR_VERIFIED_BIND_EVENT_TYPE = "operator_verified_bind"
+#: A canonical bare decimal MASTER id: no leading zero (``0123`` is refused, so
+#: it can never alias ``123``), no array task, step, or non-ASCII digit.
+_OPERATOR_BIND_SLURM_ID_RE = re.compile(r"[1-9][0-9]*")
+#: The master part of any durable Slurm id (``57553_18`` / ``57553.batch`` -> ``57553``).
+_SLURM_MASTER_PART_RE = re.compile(r"[0-9]+")
+#: Typed-commit outcome -> named refusal (design Decision 3).  ``applied`` is
+#: the only success; ``file_journal_submit_instant_required`` is raised, not
+#: returned, and is mapped at the call site.
+_OPERATOR_BIND_COMMIT_REFUSALS = {
+    "missing": "not_found",
+    "stale": "not_held",
+    "collision": "not_held",
+    "idempotent": "not_held",
+    "ambiguous_fallback_match": "slurm_id_claimed",
+    "active_slurm_id_occupied": "slurm_id_claimed",
+    "identity_mismatch_blocked": "slurm_id_claimed",
+}
+
+
+@dataclass(frozen=True)
+class OperatorBindReceipt:
+    """Typed success receipt for one #2668 operator-verified bind.
+
+    The operator strings are exactly the normalized, secret-redacted values the
+    durable ``operator_verified_bind`` event recorded, so a CLI prints the
+    receipt, never its raw arguments.  ``warnings`` is non-empty only when the
+    authority append committed and a derived projection failed afterwards.
+    """
+
+    job_id: str
+    journal_root: str
+    status_from: str
+    status_to: str
+    reconciliation_source: str
+    reconciliation_decision: str
+    matched_slurm_job_id: str
+    slurm_accounting_submitted_at: str
+    submitline_key: str
+    submission_attempt: int
+    submission_attempt_started_at: str
+    checked_by: str
+    checked_at: str
+    verification_note: str
+    written_record_count: int
+    warnings: tuple[ProjectionWarning, ...] = ()
+
+
+@dataclass(frozen=True)
+class OperatorBindResult:
+    """``refusal`` is ``None`` exactly when ``receipt`` is set (the bind committed)."""
+
+    refusal: str | None
+    receipt: OperatorBindReceipt | None = None
+
+
+@dataclass
+class _OperatorBindAudit:
+    """The audit event body the locked commit appends beside the bind row (#2668)."""
+
+    details: dict[str, Any]
+    warnings: list[ProjectionWarning] = field(default_factory=list)
+    written_record_count: int = 0
+
+
 @dataclass
 class _RecordBudget:
     """One aggregate record budget, tagged with the read lane it bounds (#1953).
@@ -3585,215 +3665,298 @@ class FileOrchestrationJournalRepository:
                 if pipeline_job_id is not None
                 else self._candidate_job_for_idempotency_unlocked(idempotency_key)
             )
-            if existing is None:
-                return AcceptedSubmitCommitResult("missing")
-            if pipeline_job_id is not None and (
-                not accepted_submit_contract_is_current(existing)
-                or accepted_submit_row_kind(existing) != "master"
-                or str(existing.get("idempotency_key") or "") != idempotency_key
-            ):
-                return AcceptedSubmitCommitResult("stale", dict(existing))
-            if fallback_submitline_key is not None and fallback_submitline_key != (
-                f"{SLURM_COMMENT_PREFIX}{existing.get('idempotency_key') or ''}"
-            ):
-                # #2655: the proven submit-line key must be this reservation's
-                # own idempotency comment; anything else is another job.
-                # Refused before any mutation -- zero journal bytes.
-                return AcceptedSubmitCommitResult("identity_mismatch_blocked", dict(existing))
-            current_id = str(existing.get("slurm_job_id") or "")
-            current_attempt = max(int(existing.get("submission_attempt") or 1), 1)
-            if current_attempt != max(int(expected_submission_attempt), 1):
-                return AcceptedSubmitCommitResult("stale", dict(existing))
-            # #1850 round 3 (Fix A): canonical normalization and derived bind
-            # provenance are computed BEFORE the idempotent early-return. A
-            # replay is idempotent ONLY when the full bind shape it WOULD write
-            # -- the transition bind lane, the attempt-scoped derived binding
-            # source, and (for the fallback) the canonical accounting Submit --
-            # matches the durable bind exactly. A different canonical Submit on
-            # the same tuple is a conflicting replay: non-committed, zero-write,
-            # never reported as ``idempotent``/``bound``.
-            fallback_unique = (
-                transition.reconciliation_source == "slurm_name_window_unique"
-                and transition.reconciliation_decision == "matched_bound"
+            return self._commit_pipeline_job_submit_attempt_locked(
+                existing,
+                idempotency_key=idempotency_key,
+                pipeline_job_id=pipeline_job_id,
+                source_id=source_id,
+                cycle_time=cycle_time,
+                expected_submission_attempt=expected_submission_attempt,
+                requested_id=requested_id,
+                transition=transition,
+                array_task_id=array_task_id,
+                submitted_at=submitted_at,
+                slurm_accounting_submitted_at=slurm_accounting_submitted_at,
+                started_at=started_at,
+                finished_at=finished_at,
+                exit_code=exit_code,
+                error_code=error_code,
+                error_message=error_message,
+                log_uri=log_uri,
+                fallback_submitline_key=fallback_submitline_key,
             )
-            # Canonical sacct ``Submit`` is the ONE authority for the fallback.
-            # The candidate instant that drives the claimant/occupancy scan
-            # comes ONLY from the explicit canonical accounting input, never
-            # from the legacy gateway/commit ``submitted_at`` (which remains
-            # acceptance/commit time and is never incarnation or window proof).
-            # The fallback bind REQUIRES a strict canonical instant; every
-            # non-fallback lane may not carry one.
-            canonical_accounting_submit = normalize_slurm_accounting_submitted_at(
-                slurm_accounting_submitted_at
+
+    def _commit_pipeline_job_submit_attempt_locked(
+        self,
+        existing: dict[str, Any] | None,
+        *,
+        idempotency_key: str,
+        pipeline_job_id: str | None,
+        source_id: str,
+        cycle_time: datetime,
+        expected_submission_attempt: int,
+        requested_id: str,
+        transition: AcceptedSubmitTransition,
+        array_task_id: int | None,
+        submitted_at: datetime | None,
+        slurm_accounting_submitted_at: datetime | str | None,
+        started_at: datetime | None,
+        finished_at: datetime | None,
+        exit_code: int | None,
+        error_code: str | None,
+        error_message: str | None,
+        log_uri: str | None,
+        fallback_submitline_key: str | None,
+        operator_bind: _OperatorBindAudit | None = None,
+    ) -> AcceptedSubmitCommitResult:
+        """The typed submit-attempt commit body; caller holds the cycle lock.
+
+        Moved verbatim out of :meth:`commit_pipeline_job_submit_attempt` so the
+        #2668 operator-verified bind runs the exact same claimant/occupancy
+        scan and bind-row construction under the ONE cycle lock it already
+        holds (the cycle lock is not reentrant).  ``operator_bind`` is
+        ``None`` on every automatic path, which keeps their behaviour
+        byte-for-byte; when set, the Slurm-id exclusivity is strict (a
+        recycled id bound elsewhere is refused) and the write point appends
+        the bind row and its audit event together.
+        """
+
+        if existing is None:
+            return AcceptedSubmitCommitResult("missing")
+        if pipeline_job_id is not None and (
+            not accepted_submit_contract_is_current(existing)
+            or accepted_submit_row_kind(existing) != "master"
+            or str(existing.get("idempotency_key") or "") != idempotency_key
+        ):
+            return AcceptedSubmitCommitResult("stale", dict(existing))
+        if fallback_submitline_key is not None and fallback_submitline_key != (
+            f"{SLURM_COMMENT_PREFIX}{existing.get('idempotency_key') or ''}"
+        ):
+            # #2655: the proven submit-line key must be this reservation's
+            # own idempotency comment; anything else is another job.
+            # Refused before any mutation -- zero journal bytes.
+            return AcceptedSubmitCommitResult("identity_mismatch_blocked", dict(existing))
+        current_id = str(existing.get("slurm_job_id") or "")
+        current_attempt = max(int(existing.get("submission_attempt") or 1), 1)
+        if current_attempt != max(int(expected_submission_attempt), 1):
+            return AcceptedSubmitCommitResult("stale", dict(existing))
+        # #1850 round 3 (Fix A): canonical normalization and derived bind
+        # provenance are computed BEFORE the idempotent early-return. A
+        # replay is idempotent ONLY when the full bind shape it WOULD write
+        # -- the transition bind lane, the attempt-scoped derived binding
+        # source, and (for the fallback) the canonical accounting Submit --
+        # matches the durable bind exactly. A different canonical Submit on
+        # the same tuple is a conflicting replay: non-committed, zero-write,
+        # never reported as ``idempotent``/``bound``.
+        fallback_unique = (
+            transition.reconciliation_source == "slurm_name_window_unique"
+            and transition.reconciliation_decision == "matched_bound"
+        )
+        # Canonical sacct ``Submit`` is the ONE authority for the fallback.
+        # The candidate instant that drives the claimant/occupancy scan
+        # comes ONLY from the explicit canonical accounting input, never
+        # from the legacy gateway/commit ``submitted_at`` (which remains
+        # acceptance/commit time and is never incarnation or window proof).
+        # The fallback bind REQUIRES a strict canonical instant; every
+        # non-fallback lane may not carry one.
+        canonical_accounting_submit = normalize_slurm_accounting_submitted_at(
+            slurm_accounting_submitted_at
+        )
+        if fallback_unique and canonical_accounting_submit is None:
+            raise FileOrchestrationJournalError(
+                "file_journal_submit_instant_required",
+                field=SLURM_ACCOUNTING_SUBMITTED_AT_FIELD,
             )
-            if fallback_unique and canonical_accounting_submit is None:
-                raise FileOrchestrationJournalError(
-                    "file_journal_submit_instant_required",
-                    field=SLURM_ACCOUNTING_SUBMITTED_AT_FIELD,
+        if not fallback_unique and slurm_accounting_submitted_at not in (None, ""):
+            raise FileOrchestrationJournalError(
+                "file_journal_evidence_invariant_invalid",
+                field=SLURM_ACCOUNTING_SUBMITTED_AT_FIELD,
+            )
+        candidate_submit = _strict_utc_datetime(canonical_accounting_submit)
+        if fallback_unique and candidate_submit is None:
+            raise FileOrchestrationJournalError(
+                "file_journal_submit_instant_required",
+                field=SLURM_ACCOUNTING_SUBMITTED_AT_FIELD,
+            )
+        # The bind provenance this commit WOULD persist, derived centrally
+        # from the transition shape (never from caller-forgeable fields).
+        derived_binding_source = binding_source_for_transition(
+            submit_outcome=str(transition.submit_outcome or ""),
+            reconciliation_decision=transition.reconciliation_decision,
+            reconciliation_source=str(transition.reconciliation_source or ""),
+        )
+        if derived_binding_source is None:
+            # #1850 round 4 (Fix A): the typed commit accepts ONLY the three
+            # legal bind shapes (ordinary accepted -> gateway_submit,
+            # exact-comment matched -> slurm_exact_comment, name-window
+            # matched -> slurm_name_window_unique). A transition that mints
+            # no binding provenance (accepted + a held/defer/blocked
+            # accounting decision, rejected, timeout, pre-outcome) is not a
+            # bind and is refused with a stable error BEFORE any mutation or
+            # occupancy scan -- otherwise a closed-world bind could be
+            # forged with ``binding_source=None``.
+            raise FileOrchestrationJournalError(
+                "file_journal_authority_transition_requires_typed_api",
+                field="transition",
+            )
+        if current_id:
+            if current_id != requested_id:
+                return AcceptedSubmitCommitResult("collision", dict(existing))
+            same_lane = (
+                existing.get("submit_outcome") == transition.submit_outcome
+                and existing.get("reconciliation_source") == transition.reconciliation_source
+                and existing.get("reconciliation_decision") == transition.reconciliation_decision
+                and existing.get("matched_slurm_job_id") == transition.matched_slurm_job_id
+            )
+            # #1850 round 4 (Fix C): replay-equality is decided by ONE
+            # centralized helper.  It keeps the pre-change v1 read
+            # compatibility (a legacy row missing BOTH additive provenance
+            # fields stays idempotent for an ordinary/exact-comment same-lane
+            # replay, zero-write, never backfilled), while every new
+            # provenance-carrying row still requires the exact derived
+            # binding source and canonical accounting Submit.  Partial,
+            # contradictory, or name-window-on-missing-fields shapes are
+            # never idempotent and fall through to ``stale``.
+            if bind_replay_is_idempotent(
+                existing,
+                derived_binding_source=derived_binding_source,
+                canonical_accounting_submit=canonical_accounting_submit,
+                same_lane=same_lane,
+            ):
+                return AcceptedSubmitCommitResult("idempotent", dict(existing))
+            return AcceptedSubmitCommitResult("stale", dict(existing))
+        if str(existing.get("status") or "") != "reserved":
+            return AcceptedSubmitCommitResult("stale", dict(existing))
+        with self._reconcile_inventory_file_lock_unlocked():
+            entry_names = self._reconcile_inventory_entry_names_unlocked()
+            other_masters, ambiguous = self._reconcile_inventory_jobs_matching_unlocked(
+                entry_names,
+                expected_user=str(existing.get("expected_slurm_user") or ""),
+                expected_account=str(existing.get("expected_slurm_account") or ""),
+                candidate_submit=candidate_submit,
+                active_slurm_job_id=requested_id,
+                include_job_id=str(existing.get("job_id") or ""),
+                fallback_unique=fallback_unique,
+                submitline_key=fallback_submitline_key,
+                strict_slurm_id_exclusivity=operator_bind is not None,
+            )
+            if ambiguous:
+                # More than one current reserved-unbound forecast master
+                # claims this candidate window for the same owner: no
+                # claimant may bind, regardless of reconcile iteration
+                # order or concurrent source/cycle writers.
+                return AcceptedSubmitCommitResult(
+                    "ambiguous_fallback_match", dict(existing)
                 )
-            if not fallback_unique and slurm_accounting_submitted_at not in (None, ""):
-                raise FileOrchestrationJournalError(
-                    "file_journal_evidence_invariant_invalid",
-                    field=SLURM_ACCOUNTING_SUBMITTED_AT_FIELD,
+            if any(
+                str(master.get("slurm_job_id") or "") == requested_id
+                for master in other_masters
+            ):
+                # The requested id is already bound to another active
+                # current accepted-submit master in any source/cycle.
+                return AcceptedSubmitCommitResult(
+                    "active_slurm_id_occupied", dict(existing)
                 )
-            candidate_submit = _strict_utc_datetime(canonical_accounting_submit)
-            if fallback_unique and candidate_submit is None:
-                raise FileOrchestrationJournalError(
-                    "file_journal_submit_instant_required",
-                    field=SLURM_ACCOUNTING_SUBMITTED_AT_FIELD,
+            if operator_bind is not None and self._operator_bind_slurm_id_claimed_in_cycle_unlocked(
+                requested_id,
+                include_job_id=str(existing.get("job_id") or ""),
+                source_id=source_id,
+                cycle_time=cycle_time,
+            ):
+                # #2668 strict exclusivity, same cycle: ANY other row of this
+                # source/cycle -- any stage or kind, forcing, legacy/
+                # unversioned, downstream, member task, settled or active --
+                # whose Slurm id has the requested master part claims it.
+                # Other cycles are covered by the inventory scan above
+                # (current accepted-submit masters only).
+                return AcceptedSubmitCommitResult(
+                    "active_slurm_id_occupied", dict(existing)
                 )
-            # The bind provenance this commit WOULD persist, derived centrally
-            # from the transition shape (never from caller-forgeable fields).
+            # The bind write happens INSIDE the journal-global inventory
+            # lock, so no concurrent source/cycle writer (normal stage
+            # submit, exact-comment commit, fallback commit) can enter the
+            # scan-bind window or bind this id between the scan and the
+            # commit point (cycle lock -> inventory lock order).
+            row = apply_accepted_submit_transition(existing, transition)
+            # #1850 Fix A (round 2): every successful typed bind records its
+            # attempt-scoped binding provenance exactly once, derived
+            # centrally from the transition SHAPE -- never from
+            # caller-forgeable transition fields (removed) and never from
+            # the legacy ``submitted_at``. The name-window fallback
+            # persists the single canonical accounting Submit keyword; the
+            # ordinary gateway submit and exact-comment matched recovery
+            # persist no canonical evidence. ``binding_source_for_transition``
+            # returns ``None`` for every non-bind shape, so a held/defer/
+            # release/reject/timeout transition never mints provenance.
             derived_binding_source = binding_source_for_transition(
                 submit_outcome=str(transition.submit_outcome or ""),
                 reconciliation_decision=transition.reconciliation_decision,
                 reconciliation_source=str(transition.reconciliation_source or ""),
             )
-            if derived_binding_source is None:
-                # #1850 round 4 (Fix A): the typed commit accepts ONLY the three
-                # legal bind shapes (ordinary accepted -> gateway_submit,
-                # exact-comment matched -> slurm_exact_comment, name-window
-                # matched -> slurm_name_window_unique). A transition that mints
-                # no binding provenance (accepted + a held/defer/blocked
-                # accounting decision, rejected, timeout, pre-outcome) is not a
-                # bind and is refused with a stable error BEFORE any mutation or
-                # occupancy scan -- otherwise a closed-world bind could be
-                # forged with ``binding_source=None``.
-                raise FileOrchestrationJournalError(
-                    "file_journal_authority_transition_requires_typed_api",
-                    field="transition",
+            if derived_binding_source is not None:
+                row[SLURM_BINDING_SOURCE_FIELD] = derived_binding_source
+                row[SLURM_ACCOUNTING_SUBMITTED_AT_FIELD] = (
+                    canonical_accounting_submit
+                    if derived_binding_source == "slurm_name_window_unique"
+                    else None
                 )
-            if current_id:
-                if current_id != requested_id:
-                    return AcceptedSubmitCommitResult("collision", dict(existing))
-                same_lane = (
-                    existing.get("submit_outcome") == transition.submit_outcome
-                    and existing.get("reconciliation_source") == transition.reconciliation_source
-                    and existing.get("reconciliation_decision") == transition.reconciliation_decision
-                    and existing.get("matched_slurm_job_id") == transition.matched_slurm_job_id
-                )
-                # #1850 round 4 (Fix C): replay-equality is decided by ONE
-                # centralized helper.  It keeps the pre-change v1 read
-                # compatibility (a legacy row missing BOTH additive provenance
-                # fields stays idempotent for an ordinary/exact-comment same-lane
-                # replay, zero-write, never backfilled), while every new
-                # provenance-carrying row still requires the exact derived
-                # binding source and canonical accounting Submit.  Partial,
-                # contradictory, or name-window-on-missing-fields shapes are
-                # never idempotent and fall through to ``stale``.
-                if bind_replay_is_idempotent(
+            # #1589 (design D3): unconditional writes of caller evidence,
+            # so withheld resolves against the persisted row rather than
+            # erasing it.  These ``durable=`` arguments are LOAD BEARING,
+            # not uniformity: a ``reserved`` row is not necessarily
+            # evidence-free.  ``reserve`` nulls the whole family, but
+            # ``reclaim_pipeline_job_reservation`` nulls
+            # ``exit_code``/``error_code``/``error_message`` and NOT
+            # ``log_uri``, so a reclaimed reservation carries the
+            # previous attempt's URI into this leg; and an unbound
+            # submit-evidence transition writes evidence onto a row that
+            # stays ``reserved``.  Neutralizing the ``log_uri``
+            # resolution below turns exactly the
+            # ``commit_pipeline_job_submit_attempt`` arm of the J20
+            # replay table red -- do not "simplify" these away.
+            row.update(
+                {
+                    "slurm_job_id": requested_id,
+                    "submitted_at": _format_utc(submitted_at or _utcnow()),
+                    "started_at": (
+                        _format_utc(started_at) if started_at is not None else None
+                    ),
+                    "finished_at": (
+                        _format_utc(finished_at) if finished_at is not None else None
+                    ),
+                    "exit_code": _resolved_caller_evidence(
+                        exit_code, durable=existing.get("exit_code")
+                    ),
+                    "error_code": _resolved_caller_evidence(
+                        error_code, durable=existing.get("error_code")
+                    ),
+                    "error_message": _resolved_caller_evidence(
+                        error_message, durable=existing.get("error_message")
+                    ),
+                    "log_uri": _resolved_caller_evidence(
+                        log_uri, durable=existing.get("log_uri")
+                    ),
+                    "updated_at": _format_utc(_utcnow()),
+                }
+            )
+            if array_task_id is not None:
+                row["array_task_id"] = array_task_id
+            model_id = _optional_safe_identity(row, "model_id")
+            if operator_bind is not None:
+                # #2668: the operator-verified bind writes the SAME row plus
+                # its audit event in one durable append (same inventory lock).
+                return self._write_operator_bind_unlocked(
+                    row,
                     existing,
-                    derived_binding_source=derived_binding_source,
-                    canonical_accounting_submit=canonical_accounting_submit,
-                    same_lane=same_lane,
-                ):
-                    return AcceptedSubmitCommitResult("idempotent", dict(existing))
-                return AcceptedSubmitCommitResult("stale", dict(existing))
-            if str(existing.get("status") or "") != "reserved":
-                return AcceptedSubmitCommitResult("stale", dict(existing))
-            with self._reconcile_inventory_file_lock_unlocked():
-                entry_names = self._reconcile_inventory_entry_names_unlocked()
-                other_masters, ambiguous = self._reconcile_inventory_jobs_matching_unlocked(
-                    entry_names,
-                    expected_user=str(existing.get("expected_slurm_user") or ""),
-                    expected_account=str(existing.get("expected_slurm_account") or ""),
-                    candidate_submit=candidate_submit,
-                    active_slurm_job_id=requested_id,
-                    include_job_id=str(existing.get("job_id") or ""),
-                    fallback_unique=fallback_unique,
-                    submitline_key=fallback_submitline_key,
+                    operator_bind,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    model_id=model_id,
                 )
-                if ambiguous:
-                    # More than one current reserved-unbound forecast master
-                    # claims this candidate window for the same owner: no
-                    # claimant may bind, regardless of reconcile iteration
-                    # order or concurrent source/cycle writers.
-                    return AcceptedSubmitCommitResult(
-                        "ambiguous_fallback_match", dict(existing)
-                    )
-                if any(
-                    str(master.get("slurm_job_id") or "") == requested_id
-                    for master in other_masters
-                ):
-                    # The requested id is already bound to another active
-                    # current accepted-submit master in any source/cycle.
-                    return AcceptedSubmitCommitResult(
-                        "active_slurm_id_occupied", dict(existing)
-                    )
-                # The bind write happens INSIDE the journal-global inventory
-                # lock, so no concurrent source/cycle writer (normal stage
-                # submit, exact-comment commit, fallback commit) can enter the
-                # scan-bind window or bind this id between the scan and the
-                # commit point (cycle lock -> inventory lock order).
-                row = apply_accepted_submit_transition(existing, transition)
-                # #1850 Fix A (round 2): every successful typed bind records its
-                # attempt-scoped binding provenance exactly once, derived
-                # centrally from the transition SHAPE -- never from
-                # caller-forgeable transition fields (removed) and never from
-                # the legacy ``submitted_at``. The name-window fallback
-                # persists the single canonical accounting Submit keyword; the
-                # ordinary gateway submit and exact-comment matched recovery
-                # persist no canonical evidence. ``binding_source_for_transition``
-                # returns ``None`` for every non-bind shape, so a held/defer/
-                # release/reject/timeout transition never mints provenance.
-                derived_binding_source = binding_source_for_transition(
-                    submit_outcome=str(transition.submit_outcome or ""),
-                    reconciliation_decision=transition.reconciliation_decision,
-                    reconciliation_source=str(transition.reconciliation_source or ""),
-                )
-                if derived_binding_source is not None:
-                    row[SLURM_BINDING_SOURCE_FIELD] = derived_binding_source
-                    row[SLURM_ACCOUNTING_SUBMITTED_AT_FIELD] = (
-                        canonical_accounting_submit
-                        if derived_binding_source == "slurm_name_window_unique"
-                        else None
-                    )
-                # #1589 (design D3): unconditional writes of caller evidence,
-                # so withheld resolves against the persisted row rather than
-                # erasing it.  These ``durable=`` arguments are LOAD BEARING,
-                # not uniformity: a ``reserved`` row is not necessarily
-                # evidence-free.  ``reserve`` nulls the whole family, but
-                # ``reclaim_pipeline_job_reservation`` nulls
-                # ``exit_code``/``error_code``/``error_message`` and NOT
-                # ``log_uri``, so a reclaimed reservation carries the
-                # previous attempt's URI into this leg; and an unbound
-                # submit-evidence transition writes evidence onto a row that
-                # stays ``reserved``.  Neutralizing the ``log_uri``
-                # resolution below turns exactly the
-                # ``commit_pipeline_job_submit_attempt`` arm of the J20
-                # replay table red -- do not "simplify" these away.
-                row.update(
-                    {
-                        "slurm_job_id": requested_id,
-                        "submitted_at": _format_utc(submitted_at or _utcnow()),
-                        "started_at": (
-                            _format_utc(started_at) if started_at is not None else None
-                        ),
-                        "finished_at": (
-                            _format_utc(finished_at) if finished_at is not None else None
-                        ),
-                        "exit_code": _resolved_caller_evidence(
-                            exit_code, durable=existing.get("exit_code")
-                        ),
-                        "error_code": _resolved_caller_evidence(
-                            error_code, durable=existing.get("error_code")
-                        ),
-                        "error_message": _resolved_caller_evidence(
-                            error_message, durable=existing.get("error_message")
-                        ),
-                        "log_uri": _resolved_caller_evidence(
-                            log_uri, durable=existing.get("log_uri")
-                        ),
-                        "updated_at": _format_utc(_utcnow()),
-                    }
-                )
-                if array_task_id is not None:
-                    row["array_task_id"] = array_task_id
-                model_id = _optional_safe_identity(row, "model_id")
-                written = self._write_pipeline_job_unlocked(
-                    row, exclusive_direct=False, model_id=model_id
-                )
-                return AcceptedSubmitCommitResult("applied", written)
+            written = self._write_pipeline_job_unlocked(
+                row, exclusive_direct=False, model_id=model_id
+            )
+            return AcceptedSubmitCommitResult("applied", written)
 
     def transition_pipeline_job_submit_evidence(
         self,
@@ -4884,6 +5047,220 @@ class FileOrchestrationJournalRepository:
                 verification_note=verification_note_text,
                 written_record_count=len(records),
                 warnings=tuple(warnings),
+            )
+
+    def bind_operator_verified_reserved_job(
+        self,
+        job_id: str,
+        *,
+        accepted_submit_contract_version: str | None,
+        expected_submission_attempt: int,
+        expected_submission_attempt_started_at: datetime | str,
+        slurm_job_id: str,
+        slurm_submit_time: datetime | str,
+        submit_line: str,
+        checked_by: str,
+        checked_at: datetime | str,
+        verification_note: str,
+    ) -> OperatorBindResult:
+        """Atomically bind one held forecast master to an operator-verified Slurm master (#2668).
+
+        File-journal-only sibling of :meth:`demote_operator_verified_reserved_job`
+        for a held row whose job DID run: the comment-less name-window fallback
+        left it ``ambiguous_fallback_match`` or permanently
+        ``query_unavailable``, and the operator matched its master in sacct.
+
+        The post-state is exactly the #2655 automatic name-window bind tuple
+        (``submitted`` / ``accepted`` / ``slurm_name_window_unique`` /
+        ``matched_bound`` + the matched id and the canonical accounting
+        Submit), written by the same typed-commit body under the same cycle
+        lock, so no new durable token exists and a rollback stays safe.  The
+        ``operator_verified_bind`` audit event lands in the same durable
+        append.  Terminal projection stays with the next inflight reconcile.
+
+        CAS, re-read under the cycle lock (design Decisions 2-3): current
+        contract forecast cohort master; ``reserved``, unbound,
+        ``submit_result_ambiguous`` with the exact held tuple
+        ``slurm_exact_comment`` / ``accounting_unavailable`` /
+        ``comment_accounting_unproven``; the expected attempt and anchor;
+        ``anchor <= slurm_submit_time <= checked_at``; the SubmitLine's single
+        ``--comment=`` value equals the row's own ``nhms_idem:<key>``; a bare
+        canonical decimal Slurm id, compared by master part, that no other row
+        of the same cycle (any stage/kind/contract: forcing, legacy, member task
+        ``<id>_<n>``) binds or claims, nor any current accepted-submit forecast
+        master of any other cycle, settled or active (strict: a recycled
+        incarnation is refused too).
+
+        Invalid input types raise ``FileOrchestrationJournalError`` before any
+        read; every CAS failure returns a named refusal from
+        :data:`OPERATOR_BIND_REFUSALS` and writes zero bytes.
+        """
+
+        if accepted_submit_contract_version != ACCEPTED_SUBMIT_CONTRACT_VERSION:
+            raise FileOrchestrationJournalError(
+                "file_journal_evidence_enum_invalid",
+                field=ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD,
+            )
+        if type(expected_submission_attempt) is not int or expected_submission_attempt < 1:
+            raise FileOrchestrationJournalError(
+                "file_journal_evidence_type_invalid", field="expected_submission_attempt"
+            )
+        if expected_submission_attempt_started_at is None:
+            raise FileOrchestrationJournalError(
+                "file_journal_evidence_required", field="expected_submission_attempt_started_at"
+            )
+        if not isinstance(submit_line, str):
+            raise FileOrchestrationJournalError("file_journal_evidence_type_invalid", field="submit_line")
+        normalized_checked_at = _accepted_submit_attempt_anchor(checked_at)
+        checked_by_text = _operator_evidence_text(checked_by, field="checked_by")
+        verification_note_text = _operator_evidence_text(verification_note, field="verification_note")
+        expected_anchor = _accepted_submit_attempt_anchor(expected_submission_attempt_started_at)
+        requested_id = slurm_job_id if isinstance(slurm_job_id, str) else ""
+        if not _OPERATOR_BIND_SLURM_ID_RE.fullmatch(requested_id):
+            # A canonical bare decimal MASTER id only: a leading zero
+            # (``0123``), an array task (``123_4``), a step (``123.batch``),
+            # or anything else is refused by name.
+            return OperatorBindResult("slurm_id_invalid")
+        canonical_submit = normalize_slurm_accounting_submitted_at(slurm_submit_time)
+        if canonical_submit is None:
+            return OperatorBindResult("slurm_submit_time_invalid")
+        # The ONE SubmitLine key authority the automatic #2655 fallback uses.
+        # Lazy import: ``reconcile`` imports this module at load time.
+        from services.orchestrator.reconcile import _submitline_comment_key
+
+        submitline_key = _submitline_comment_key(submit_line)
+        try:
+            source_id, cycle_time = _accepted_submit_source_cycle_from_job_id(job_id)
+        except FileOrchestrationJournalError:
+            return OperatorBindResult("not_found")
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            existing = self._accepted_submit_job_for_id_unlocked(
+                job_id,
+                source_id=source_id,
+                cycle_time=cycle_time,
+            )
+            if existing is None:
+                return OperatorBindResult("not_found")
+            forecast_cohort = is_forecast_cohort_stage_name(
+                str(existing.get("stage") or ""), str(existing.get("job_type") or "")
+            )
+            if not accepted_submit_contract_is_current(existing):
+                # Shape (c): the typed commit handles current-contract rows
+                # only, so a legacy unversioned master is refused by name
+                # (follow-up #2674), never bound through the legacy store path.
+                if forecast_cohort and _bounded_cohort_members(existing.get("cohort_members")):
+                    return OperatorBindResult("legacy_unversioned_unsupported")
+                return OperatorBindResult("not_held")
+            if accepted_submit_row_kind(existing) != "master" or not forecast_cohort:
+                return OperatorBindResult("not_held")
+            # Held shape first, so a repeated request after a successful bind is
+            # ``not_held`` and a reclaimed-and-re-held row is ``stale_attempt``.
+            if (
+                str(existing.get("status") or "") != "reserved"
+                or existing.get("slurm_job_id") not in (None, "")
+                or existing.get("matched_slurm_job_id") not in (None, "")
+                or existing.get("submit_outcome") != "submit_result_ambiguous"
+                or existing.get("reconciliation_source") != "slurm_exact_comment"
+                or existing.get("reconciliation_decision") != "accounting_unavailable"
+                or existing.get("reconciliation_reason_class") != "comment_accounting_unproven"
+            ):
+                return OperatorBindResult("not_held")
+            try:
+                current_anchor = _accepted_submit_attempt_anchor(existing.get("submission_attempt_started_at"))
+            except FileOrchestrationJournalError:
+                return OperatorBindResult("stale_attempt")
+            if existing.get("submission_attempt") != expected_submission_attempt or current_anchor != expected_anchor:
+                return OperatorBindResult("stale_attempt")
+            # The attempt window (design Decision 2): the key alone cannot tell
+            # this attempt's master from a prior attempt's, because a released
+            # attempt re-reserves under the same key.  Datetimes, never strings.
+            anchor_instant = _strict_utc_datetime(current_anchor)
+            submit_instant = _strict_utc_datetime(canonical_submit)
+            checked_instant = _strict_utc_datetime(normalized_checked_at)
+            if (
+                anchor_instant is None
+                or submit_instant is None
+                or checked_instant is None
+                or not anchor_instant <= submit_instant <= checked_instant
+            ):
+                return OperatorBindResult("submit_time_outside_attempt_window")
+            own_key = f"{SLURM_COMMENT_PREFIX}{existing.get('idempotency_key') or ''}"
+            if submitline_key is None or submitline_key != own_key:
+                return OperatorBindResult("submitline_key_mismatch")
+            audit = _OperatorBindAudit(
+                details={
+                    "checked_by": checked_by_text,
+                    "checked_at": normalized_checked_at,
+                    "verification_note": verification_note_text,
+                    "submitline_key": submitline_key,
+                    "slurm_job_id": requested_id,
+                    "slurm_accounting_submitted_at": canonical_submit,
+                    "expected_submission_attempt": expected_submission_attempt,
+                    "expected_submission_attempt_started_at": expected_anchor,
+                    "prior_status": str(existing.get("status") or ""),
+                    "prior_submit_outcome": str(existing.get("submit_outcome") or ""),
+                    "prior_reconciliation_source": str(existing.get("reconciliation_source") or ""),
+                    "prior_reconciliation_decision": str(existing.get("reconciliation_decision") or ""),
+                    "prior_reconciliation_reason_class": str(
+                        existing.get("reconciliation_reason_class") or ""
+                    ),
+                }
+            )
+            try:
+                result = self._commit_pipeline_job_submit_attempt_locked(
+                    existing,
+                    idempotency_key=str(existing.get("idempotency_key") or ""),
+                    pipeline_job_id=job_id,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    expected_submission_attempt=expected_submission_attempt,
+                    requested_id=requested_id,
+                    transition=AcceptedSubmitTransition.accounting(
+                        "matched_bound",
+                        submit_outcome="accepted",
+                        matched_slurm_job_id=requested_id,
+                        status="submitted",
+                        reconciliation_source="slurm_name_window_unique",
+                    ),
+                    array_task_id=None,
+                    submitted_at=None,
+                    slurm_accounting_submitted_at=canonical_submit,
+                    started_at=None,
+                    finished_at=None,
+                    exit_code=None,
+                    error_code=None,
+                    error_message=None,
+                    log_uri=None,
+                    fallback_submitline_key=submitline_key,
+                    operator_bind=audit,
+                )
+            except FileOrchestrationJournalError as error:
+                if error.reason == "file_journal_submit_instant_required":
+                    return OperatorBindResult("slurm_submit_time_invalid")
+                raise
+            if result.outcome != "applied" or result.row is None:
+                return OperatorBindResult(_OPERATOR_BIND_COMMIT_REFUSALS.get(result.outcome, "not_held"))
+            bound = result.row
+            return OperatorBindResult(
+                None,
+                OperatorBindReceipt(
+                    job_id=str(bound.get("job_id") or job_id),
+                    journal_root=str(self.root),
+                    status_from=str(existing.get("status") or ""),
+                    status_to=str(bound.get("status") or ""),
+                    reconciliation_source=str(bound.get("reconciliation_source") or ""),
+                    reconciliation_decision=str(bound.get("reconciliation_decision") or ""),
+                    matched_slurm_job_id=str(bound.get("matched_slurm_job_id") or ""),
+                    slurm_accounting_submitted_at=canonical_submit,
+                    submitline_key=submitline_key,
+                    submission_attempt=expected_submission_attempt,
+                    submission_attempt_started_at=current_anchor,
+                    checked_by=checked_by_text,
+                    checked_at=normalized_checked_at,
+                    verification_note=verification_note_text,
+                    written_record_count=audit.written_record_count,
+                    warnings=tuple(audit.warnings),
+                ),
             )
 
     def release_identity_blocked_reservation(
@@ -8408,6 +8785,58 @@ class FileOrchestrationJournalRepository:
             )
         return canonical
 
+    def _operator_bind_slurm_id_claimed_in_cycle_unlocked(
+        self,
+        requested_id: str,
+        *,
+        include_job_id: str,
+        source_id: str,
+        cycle_time: datetime,
+    ) -> bool:
+        """#2668: whether any row of the bound row's cycle other than ``include_job_id`` claims ``requested_id``.
+
+        The same-cycle half of the operator bind's strict exclusivity: the
+        bounded cycle-scoped replay of the source/cycle whose lock the caller
+        holds -- every row of it regardless of stage, kind, contract version,
+        or status (forcing and downstream rows, legacy unversioned rows,
+        member task rows).  The cross-cycle half is the ``fallback_unique``
+        occupancy scan in ``_reconcile_inventory_jobs_matching_unlocked``: the
+        reconcile-inventory anchors, then the flat ``pipeline-jobs/``
+        settled-master scan, so every current accepted-submit forecast master
+        of any cycle, settled or active, is covered.  A whole-tree replay is
+        deliberately NOT used, because it exceeds the record budget on a
+        production journal and would refuse every bind.  Not scanned: non-master
+        rows of other cycles (forcing, downstream, legacy, member task), legacy
+        unversioned forecast masters of other cycles (both cross-cycle scans
+        require the current contract), and ``nhms_forecast`` jobs outside this
+        journal root.  (A current master with neither anchor nor flat direct is
+        excluded by invariant: ``_restore_derived_master_direct_unlocked`` and
+        ``_sync_reconcile_inventory_migration_row_unlocked``.)  The SubmitLine
+        key check rules out a SubmitLine pasted from another lane or row, but
+        not a mistyped ``--slurm-job-id``; landing on a forcing or downstream
+        job fails inflight JobName identity, and the rest is covered
+        procedurally by the runbook's ``sacct --jobs=<id>`` re-read (design
+        Decision 3).
+
+        A row claims the id when the master part (leading decimal digits, so
+        ``57553_18`` and ``57553.batch`` read as ``57553``) of its
+        ``slurm_job_id`` or ``matched_slurm_job_id`` equals it as an integer.
+        The ``matched_slurm_job_id`` arm is defensive for current-contract
+        rows (their validator forces it equal to ``slurm_job_id`` or null); a
+        legacy row can carry it alone.  A replay failure raises -- never read
+        as "unclaimed".
+        """
+
+        requested = int(requested_id)
+        for job in self._iter_pipeline_job_records_for_cycle(source_id=source_id, cycle_time=cycle_time):
+            if str(job.get("job_id") or "") == include_job_id:
+                continue
+            for id_field in ("slurm_job_id", "matched_slurm_job_id"):
+                master_part = _SLURM_MASTER_PART_RE.match(str(job.get(id_field) or ""))
+                if master_part is not None and int(master_part.group(0)) == requested:
+                    return True
+        return False
+
     def _reconcile_inventory_jobs_matching_unlocked(
         self,
         entry_names: Sequence[str],
@@ -8419,6 +8848,7 @@ class FileOrchestrationJournalRepository:
         include_job_id: str | None = None,
         fallback_unique: bool = False,
         submitline_key: str | None = None,
+        strict_slurm_id_exclusivity: bool = False,
     ) -> tuple[list[dict[str, Any]], bool]:
         """Scan the reconcile inventory for occupancy and durable-claimant overlap.
 
@@ -8455,6 +8885,17 @@ class FileOrchestrationJournalRepository:
         ``_job_blocks_rollback_quiescence`` is false (settled history) is
         ignored, exactly as occupancy must never be claimed from settled
         terminal history.
+
+        #2668 ``strict_slurm_id_exclusivity`` (operator-verified bind only,
+        always with ``fallback_unique``): a same-id current forecast master is
+        an occupant whether the id sits in its ``slurm_job_id`` or its
+        ``matched_slurm_job_id``, and a SETTLED same-id master blocks even when
+        its canonical Submit proves a recycled incarnation -- the operator path
+        accepts no recycle ambiguity. Every other caller passes ``False`` and
+        keeps the rules above unchanged.  This is the cross-cycle half of the operator bind's
+        exclusivity; every row of the bound row's own cycle (any stage, kind,
+        or contract) is checked by
+        :meth:`_operator_bind_slurm_id_claimed_in_cycle_unlocked`.
 
         Reads only reconcile-inventory anchors and each anchor's exact
         canonical row; never enumerates the whole tree (#1850 D3). The caller
@@ -8518,9 +8959,13 @@ class FileOrchestrationJournalRepository:
             # never blocks them.
             row_kind = _reconcile_inventory_row_kind(canonical)
             other_owner = str(canonical.get("slurm_job_id") or "")
+            claims_active_id = other_owner == active_slurm_job_id or (
+                strict_slurm_id_exclusivity
+                and str(canonical.get("matched_slurm_job_id") or "") == active_slurm_job_id
+            )
             if (
                 fallback_unique
-                and other_owner == active_slurm_job_id
+                and claims_active_id
                 and row_kind == "current_master"
                 and is_forecast_cohort_stage_name(
                     str(canonical.get("stage") or ""),
@@ -8536,11 +8981,13 @@ class FileOrchestrationJournalRepository:
                 # block fail-closed even when the legacy ``submitted_at``
                 # differs; the gateway acceptance/commit timestamp is never
                 # incarnation proof.
-                if _settled_incarnation_matches_candidate(canonical, candidate_submit):
+                if strict_slurm_id_exclusivity or _settled_incarnation_matches_candidate(
+                    canonical, candidate_submit
+                ):
                     # Same accounting incarnation (or unprovable recycle): the
                     # exact accounting row the fallback query returned, settled
                     # or not. The stale anchor must not let the fallback reuse
-                    # it.
+                    # it. (#2668 strict: any settled same-id master blocks.)
                     matching.append(canonical)
                 continue
             if not _job_blocks_rollback_quiescence(canonical):
@@ -8555,7 +9002,7 @@ class FileOrchestrationJournalRepository:
                 str(canonical.get("job_type") or ""),
             ):
                 continue
-            if other_owner and other_owner == active_slurm_job_id:
+            if claims_active_id and (other_owner or strict_slurm_id_exclusivity):
                 # Fix A: another active master already owns this id in any
                 # source/cycle — every commit source refuses the bind.
                 matching.append(canonical)
@@ -8645,6 +9092,10 @@ class FileOrchestrationJournalRepository:
         # candidate rows and legacy rows are never owners.
         if fallback_unique and active_slurm_job_id and not any(
             str(master.get("slurm_job_id") or "") == active_slurm_job_id
+            or (
+                strict_slurm_id_exclusivity
+                and str(master.get("matched_slurm_job_id") or "") == active_slurm_job_id
+            )
             for master in matching
         ):
             # Group master-looking flat identities by (source_id, cycle_time)
@@ -8766,7 +9217,10 @@ class FileOrchestrationJournalRepository:
                         continue
                     if str(canonical.get("job_id") or "") == include_job_id:
                         continue
-                    if str(canonical.get("slurm_job_id") or "") != active_slurm_job_id:
+                    if str(canonical.get("slurm_job_id") or "") != active_slurm_job_id and not (
+                        strict_slurm_id_exclusivity
+                        and str(canonical.get("matched_slurm_job_id") or "") == active_slurm_job_id
+                    ):
                         # Stale projection (either direction): the canonical
                         # authority holds a different id — no same-id
                         # occupancy from this cycle.
@@ -8776,7 +9230,11 @@ class FileOrchestrationJournalRepository:
                         # adjudication as the anchor surface, so the two can
                         # never drift. Missing/malformed canonical Submit and
                         # every non-name-window provenance block fail-closed.
-                        if _settled_incarnation_matches_candidate(canonical, candidate_submit):
+                        # #2668 strict: the operator bind refuses any settled
+                        # same-id master, recycled incarnation or not.
+                        if strict_slurm_id_exclusivity or _settled_incarnation_matches_candidate(
+                            canonical, candidate_submit
+                        ):
                             # Same accounting incarnation (or unprovable
                             # recycle): the exact accounting row the fallback
                             # query returned, settled or not.
@@ -9819,6 +10277,115 @@ class FileOrchestrationJournalRepository:
         # caller that round-trips this value back into a write is caught by the
         # strip at the write boundary, so it cannot become persistent pollution.
         return _public_scheduler_row(row)
+
+    def _write_operator_bind_unlocked(
+        self,
+        row: Mapping[str, Any],
+        existing: Mapping[str, Any],
+        audit: _OperatorBindAudit,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        model_id: str | None,
+    ) -> AcceptedSubmitCommitResult:
+        """Append the #2668 bind row and its audit event in ONE durable batch.
+
+        Same commit section as :meth:`_write_current_master_unlocked` (caller
+        holds the cycle lock and the global inventory lock), with the audit
+        event riding in the same append: the batch append is the commit point.
+        Direct/latest files are derived projections; a failure after the
+        append is contained to a bounded :class:`ProjectionWarning` exactly as
+        on the #1564 demotion, and journal replay stays authoritative.
+        """
+
+        row = _redact_durable_error_message_fields("pipeline_job", row)
+        row = {**row, "source_id": source_id}
+        sequence = self._next_sequence_unlocked(source_id=source_id, cycle_time=cycle_time)
+        job_record = _journal_record_for_write(
+            "pipeline_job",
+            row,
+            source_id=source_id,
+            cycle_time=cycle_time,
+            model_id=model_id,
+            sequence=sequence,
+        )
+        self._validate_outgoing_record(
+            job_record,
+            source_id=source_id,
+            cycle_time=cycle_time,
+            record_type="pipeline_job",
+            model_id=model_id,
+        )
+        event = {
+            "event_id": self._next_accepted_submit_event_id_unlocked(
+                source_id=source_id,
+                cycle_time=cycle_time,
+            ),
+            "entity_type": "pipeline_job",
+            "entity_id": str(row["job_id"]),
+            "event_type": OPERATOR_VERIFIED_BIND_EVENT_TYPE,
+            "status_from": str(existing.get("status") or ""),
+            "status_to": str(row.get("status") or ""),
+            "message": "Operator verified the held reservation's Slurm master and bound it.",
+            "details": dict(audit.details),
+            "created_at": _format_utc(_utcnow()),
+        }
+        event_record = _journal_record_for_write(
+            "pipeline_event",
+            event,
+            source_id=source_id,
+            cycle_time=cycle_time,
+            model_id=None,
+            sequence=sequence + 1,
+        )
+        self._validate_outgoing_record(
+            event_record,
+            source_id=source_id,
+            cycle_time=cycle_time,
+            record_type="pipeline_event",
+            model_id=None,
+        )
+        with self._reconcile_inventory_file_lock_unlocked():
+            anchor_path = self.root / _RECONCILE_INVENTORY_DIRECTORY / f"{_required_safe_identity(row, 'job_id')}.json"
+            anchor_preexisting = self._reconcile_inventory_anchor_exists_unlocked(anchor_path)
+            anchor_published = False
+            if _reconcile_inventory_row_kind(row) is not None and _job_needs_restart_reconcile(row):
+                anchor_published = self._sync_reconcile_inventory_for_row_unlocked(row)
+            try:
+                self._append_journal_records_unlocked(
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    records=[job_record, event_record],
+                )
+            except Exception:
+                if anchor_published and not anchor_preexisting:
+                    self._remove_reconcile_inventory_anchor_unlocked(str(row["job_id"]))
+                raise
+        audit.written_record_count = 2
+        try:
+            self._write_pipeline_job_direct_unlocked(row, job_record)
+        except Exception as error:
+            audit.warnings.append(
+                ProjectionWarning(
+                    projection="pipeline_job_direct",
+                    model_id=None,
+                    error_type=_projection_error_type(error),
+                    reason=_projection_error_reason(error),
+                )
+            )
+        if model_id is not None:
+            try:
+                self._materialize_latest_unlocked(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+            except Exception as error:
+                audit.warnings.append(
+                    ProjectionWarning(
+                        projection="latest",
+                        model_id=model_id,
+                        error_type=_projection_error_type(error),
+                        reason=_projection_error_reason(error),
+                    )
+                )
+        return AcceptedSubmitCommitResult("applied", _public_scheduler_row(row))
 
     def _write_current_master_unlocked(
         self,

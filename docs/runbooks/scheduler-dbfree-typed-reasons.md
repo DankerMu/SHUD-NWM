@@ -782,7 +782,8 @@ restart reconcile（`reconcile_inflight_jobs`，只读 sacct、从不提交）�
 
 不是 blocked reason，是 skip reason（`decision: skip_active`；自 #2666 起 `active_status: reserved` 并带
 `held_reservations`，见下一节。此前 `active_status` 通常是成员 hydro_run 的 `created`：master 停在 `reserved`、从未走到终态，
-成员就一直被判在飞），也**不在** `list-operator-actions` 的待办集合里，所以只能从症状反查：
+成员就一直被判在飞）。它不在 `blocked_candidates` 里；自 #2668 起 `list-operator-actions` 从
+`restart_reconcile.reserved_unbound.outcomes[]` 把它列成 `held_reservation_unresolved`（见下一节），此前只能从症状反查：
 
 - 同一 source/cycle 的整批成员每趟都 `skip_active` / `active_duplicate_pipeline`，后一 cycle
   `backfill_deferred_waiting_for_prior_cycle`，常见为 gfs 与 IFS 同时冻结；
@@ -811,7 +812,9 @@ pass evidence 的 `fallback_match_basis` 标出是按 `submitline_exact` 还是�
 - `SubmitLine` 让兜底查询字节数约翻倍，长期 held 的宽窗口会更早碰到 2 MiB 预算并 fail-closed 为 `query_unavailable`。
 
 处置入口：[`failed-basin-retry.md`](failed-basin-retry.md)「Automatic unique fallback on an explicitly comment-less
-cluster」与 Disposition 第 2 条（completed but unbound）；node-22 上的操作顺序见
+cluster」与 Disposition 第 2 条（completed but unbound）；自动兜底永远判不出来的行（`ambiguous_fallback_match`、
+窗口饱和的 `query_unavailable`）走 `bind-reserved-job`（#2668），见 failed-basin-retry.md「Disposition — completed or
+running but unbound: the guarded operator bind」；node-22 上的操作顺序见
 [`node22-control-plane-manual-recovery.md`](node22-control-plane-manual-recovery.md)「`active_duplicate_pipeline` +
 reserved-held forecast master」。作业已完成或仍在跑时**不要** `demote-reserved-job`（会重投整批 cohort），也不要
 打 manual-retry marker。
@@ -831,11 +834,24 @@ run 在同一 run 目录里跑两遍（#2666：IFS 0925 12Z 的 57553 / 57637，
   一样挡）。
 - 冻结面：该 cycle 的完成判定读作 `gap`，后一 cycle / backfill 等它；retention frontier 把它当在飞。held 期间本应
   `permanent_failure_guard` / `missing_upstream_artifact` / `cohort_membership_unprovable` 的候选也读作 skip，
-  `list-operator-actions` 暂不列出。
-- **出口只有 restart reconcile**：绑定（`matched_bound`，之后按 inflight 投影照常续跑，例如 forecast 已成功就从
-  `state_save_qc` 续）、`demote-reserved-job`（仅在按 [`failed-basin-retry.md`](failed-basin-retry.md) Disposition
-  确认作业已死之后）、或 identity-blocked 释放（`reservation_lost` / `identity_mismatch_released`）。**manual-retry marker
-  不是出口**：marker 不会越过 held 行，打了也只是等 reconcile。一趟大约只绑一行（见上一节），多行 held 时逐趟解冻，属预期。
+  不会以这些 decision 出现在 `list-operator-actions` 里。
+- **可见面（#2668）**：restart reconcile 解不开的 held 行由 `list-operator-actions` 列成 decision
+  `held_reservation_unresolved`（按 `job_id` 去重，`reason` 是 reconcile action，带 `operator_command`、
+  `submission_attempt_started_at`、`recovery_runbook`）：`ambiguous_fallback_match` 每趟都列（`bind-reserved-job`）；
+  `legacy_unversioned_read_only` / `multiple_matches_blocked` 每趟都列（`escalate`）；`query_unavailable` /
+  `fallback_no_match` / `absence_unconfirmed`（`triage`）与 `identity_mismatch_blocked` / `stale_attempt_blocked` /
+  `journal_quarantined`（`escalate`）在 attempt anchor 距 pass 开始 ≥ 6h（或未知）后才列；不是 forecast cohort master 的
+  held 行（forcing 车道）一律 `escalate` 并带 `follow_up_issue: "#2675"`，legacy 未版本化 master 带 `"#2674"`。
+  下一趟跑过 reconcile 的 pass 不再报该行时条目消失。restart reconcile 被跳过或 `reserved_unbound_error` 的 pass
+  记在 `restart_reconcile_unscanned_passes`，不改退出码（exit 0 不为只在这些 pass 里出现的 held 行背书）。
+- **出口**：restart reconcile 的自动绑定（`matched_bound`，之后按 inflight 投影照常续跑，例如 forecast 已成功就从
+  `state_save_qc` 续）；`bind-reserved-job`（#2668，运维用 `sacct` 核实本行 master 后绑定，写的是与自动兜底绑定完全
+  相同的持久元组外加一条 `operator_verified_bind` 审计事件，见 [`failed-basin-retry.md`](failed-basin-retry.md)
+  「Disposition — completed or running but unbound: the guarded operator bind」）；`demote-reserved-job`（仅在按
+  Disposition 确认作业已死之后）；或 identity-blocked 释放（`reservation_lost` / `identity_mismatch_released`）。
+  legacy 未版本化 master（`legacy_unversioned_read_only`）与 forcing 车道的 held 行暂无出口，分别由 #2674 / #2675 跟踪，
+  升级处理。**manual-retry marker 不是出口**：marker 不会越过 held 行，打了也只是等 reconcile。一趟大约只绑一行（见上一节），
+  多行 held 时逐趟解冻，属预期。
 
 ## 相关文档
 
