@@ -225,12 +225,26 @@ def _segment_rows_source_sql(run_pushdown: str = "") -> str:
 
 #: #2424 D1: the latest-cycle discovery's ONLY fact-table read, a membership
 #: probe correlated to one candidate run (`o`) and the scalar identity keys
-#: resolved once in the statement's `seg` CTE. Its fact-side predicates are
+#: resolved once in the statement's `seg` CTE. Its identity predicates are
 #: exactly `_SEGMENT_ROWS_SOURCE_SQL`'s, including the #2451 C1 spelling: the
 #: basin and network keys are the guarded non-sargable pair so
 #: `river_ts_run_discovery_key_idx` stays confined to its `run_key` prefix,
 #: while the segment key and the variable keep their `=`. A NULL `seg` key
 #: (unknown basin, network or segment) matches nothing, as the old join did.
+#:
+#: #2630: the two `valid_time` conjuncts bound the probe to the candidate's run
+#: window `[o.cycle_time, o.end_time]`, so TimescaleDB excludes every chunk
+#: outside it at runtime instead of seeking each candidate in every chunk. That
+#: rests on a run's fact rows lying inside its window, which is an OBSERVED
+#: property of node-27's data, not a writer guarantee: node-27 held zero rows
+#: outside the window on 2026-09-28 (openspec/changes/hydro-run-index-dedup-and-
+#: latest-cycle-bound/receipts/2026-09-28-phase0-proof/), and its forecast runs
+#: all have `start_time = cycle_time`. The writers do not enforce it: the output
+#: parser writes relative rows as `start_time + offset` and accepts negative
+#: offsets, its absolute-time auto-detection accepts a first row up to one day
+#: before `cycle_time` (`AUTO_TIME_BASIS_CONTEXT_PADDING_DAYS`), and it never
+#: reads `end_time`; the DB has no constraint either. Enforcement is #2687.
+#: The caller wraps this template in `CROSS JOIN LATERAL (... LIMIT 1)`.
 _LATEST_CYCLE_FACT_PROBE_SQL = """
                     SELECT 1
                     FROM hydro.river_timeseries rt
@@ -241,6 +255,8 @@ _LATEST_CYCLE_FACT_PROBE_SQL = """
                       AND rt.river_network_version_key IS NOT NULL
                       AND rt.river_network_version_key IS NOT DISTINCT FROM seg.river_network_version_key
                       AND rt.variable_e = 'q_down'::hydro.river_variable
+                      AND rt.valid_time >= o.cycle_time
+                      AND rt.valid_time <= o.end_time
 """
 
 
@@ -1199,6 +1215,21 @@ class PsycopgForecastStore:
         whatever its status, as before. ``h.basin_version_id`` narrows the
         candidates (user decision (b)); that rests on a run's basin being the
         basin of its fact rows, which node-27's per-run check confirmed.
+
+        #2630: the probe is a ``CROSS JOIN LATERAL (... LIMIT 1)`` bounded to the
+        candidate's run window ``[cycle_time, end_time]`` (``cand`` carries
+        ``h.end_time``). Both halves are needed: with ``EXISTS`` the planner
+        rewrites the probe into a semi join and the chunk append excludes no
+        chunk at runtime, and without the window every chunk is searched, so an
+        empty pin cost one seek per candidate per chunk (24497 shared buffers on
+        node-27's worst pin). ``LIMIT 1`` asks the same "is there a row" question
+        ``EXISTS`` did. The window is a semantic premise, not a free filter: a
+        candidate whose only rows lie outside it no longer matches. The premise
+        is an observed property of node-27's data, not a writer guarantee:
+        node-27 had no such row on 2026-09-28 (``openspec/changes/hydro-run-
+        index-dedup-and-latest-cycle-bound/receipts/2026-09-28-phase0-proof/``),
+        but the output parser accepts negative offsets and an absolute-time
+        first row up to one day before ``cycle_time``. Enforcement is #2687.
         """
         fact_probe_sql = render_river_ts_sql(
             _latest_cycle_fact_probe_template("narrow"),
@@ -1219,7 +1250,7 @@ class PsycopgForecastStore:
                      WHERE river_network_version_id = %(river_network_version_id)s) AS river_network_version_key
             ),
             cand AS MATERIALIZED (
-                SELECT h.run_key, h.scenario_id, h.cycle_time
+                SELECT h.run_key, h.scenario_id, h.cycle_time, h.end_time
                 FROM hydro.hydro_run h
                 WHERE h.run_type = 'forecast'
                   AND h.cycle_time IS NOT NULL
@@ -1236,13 +1267,14 @@ class PsycopgForecastStore:
             CROSS JOIN LATERAL (
                 SELECT o.cycle_time
                 FROM (
-                    SELECT c.run_key, c.cycle_time
+                    SELECT c.run_key, c.cycle_time, c.end_time
                     FROM cand c
                     WHERE c.scenario_id = scen.scenario_id
                     ORDER BY c.cycle_time DESC
                     OFFSET 0
                 ) o
-                WHERE EXISTS ({fact_probe_sql}                )
+                CROSS JOIN LATERAL ({fact_probe_sql}                    LIMIT 1
+                ) hit
                 ORDER BY o.cycle_time DESC
                 LIMIT 1
             ) pick

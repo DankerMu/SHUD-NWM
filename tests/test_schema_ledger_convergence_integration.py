@@ -1,4 +1,4 @@
-"""Real-PostgreSQL falsifier for the #2048 schema-ledger convergence (000062-000064 + the runner's ledger check).
+"""Real-PostgreSQL falsifier for the #2048 schema-ledger convergence (000062-000065 + the runner's ledger check).
 
     NHMS_RUN_INTEGRATION=1 NHMS_INTEGRATION_DATABASE_URL=... uv run pytest -q \
         tests/test_schema_ledger_convergence_integration.py
@@ -12,10 +12,16 @@ throwaway database: a populated-shape `flood` schema with its hypertable, the si
 seven retired ledger rows. Then the REAL runner, `packages.common.migrate.main()`,
 is pointed at it. The oracle for "converged" is a database built from
 db/migrations (the session database), not a hand-written expectation.
+
+000065 (#2634, #2626) is part of the replay: it drops three of the six partial
+indexes 000063 rebuilds (byte-identical copies of two kept ones) and builds the
+status-free forecast candidate index, so every converged catalog below is the
+one after 000065, and every rerun replays the pending files IN ORDER.
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -38,9 +44,11 @@ _CONVERGENCE_MIGRATIONS = (
     "000062_hydro_run_status_frequency_done_convergence.sql",
     "000063_hydro_run_partial_index_predicate_convergence.sql",
     "000064_drop_retired_flood_schema.sql",
+    "000065_hydro_run_candidate_index_dedup.sql",
 )
 _FLOOD_DROP_MIGRATION = _CONVERGENCE_MIGRATIONS[2]
 _INDEX_REBUILD_MIGRATION = _CONVERGENCE_MIGRATIONS[1]
+_INDEX_DEDUP_MIGRATION = _CONVERGENCE_MIGRATIONS[3]
 
 # node-27's `enum_range(NULL::hydro.run_status)`, measured 2026-09-25.
 _PRODUCTION_RUN_STATUS_LABELS = (
@@ -82,6 +90,28 @@ _STALE_HYDRO_RUN_INDEXES = {
         "(basin_version_id, status) WHERE status IN ('succeeded', 'parsed', 'frequency_done', 'published')"
     ),
 }
+
+# 000065: the three duplicates it drops, the status-free candidate index it builds,
+# and the whole converged index set of hydro.hydro_run (4 partial + 3 plain).
+_DEDUP_DROPPED_INDEXES = frozenset(
+    {
+        "hydro_run_qhh_latest_candidate_parsed_idx",
+        "hydro_run_display_ready_candidate_idx",
+        "hydro_run_display_ready_basin_status_idx",
+    }
+)
+_FORECAST_CANDIDATE_INDEX = "hydro_run_forecast_basin_cycle_idx"
+_CONVERGED_HYDRO_RUN_INDEXES = frozenset(
+    {
+        "hydro_run_latest_ready_run_idx",
+        "hydro_run_qhh_latest_candidate_idx",
+        "hydro_run_display_product_basin_status_idx",
+        _FORECAST_CANDIDATE_INDEX,
+        "hydro_run_pkey",
+        "hydro_run_run_key_key",
+        "hydro_run_ops_strict_identity_candidates_idx",
+    }
+)
 
 # A faithful minimal shape of the retired flood schema (git show b97c16e2^ of
 # 000007 / 000034 / 000036): the three tables, the hypertable, the foreign keys
@@ -195,18 +225,40 @@ def _fetchall(database_url: str, sql: str, params: tuple[object, ...] | None = N
 
 
 def _hydro_run_indexes(database_url: str) -> dict[str, tuple[str, bool]]:
+    """Every index on hydro.hydro_run, by name: (pg_get_indexdef, indisvalid)."""
     rows = _fetchall(
         database_url,
         """
         SELECT c.relname, pg_get_indexdef(c.oid), i.indisvalid
         FROM pg_index i
         JOIN pg_class c ON c.oid = i.indexrelid
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE n.nspname = 'hydro' AND c.relname = ANY(%s)
+        WHERE i.indrelid = 'hydro.hydro_run'::regclass
         """,
-        (list(_STALE_HYDRO_RUN_INDEXES),),
     )
     return {str(name): (str(definition), bool(valid)) for name, definition, valid in rows}
+
+
+def _nameless_definitions(indexes: dict[str, tuple[str, bool]]) -> list[str]:
+    """Each index's definition with its own name removed, so two copies compare equal."""
+    return sorted(
+        re.sub(rf"\bINDEX {re.escape(name)} ON\b", "INDEX ON", definition)
+        for name, (definition, _valid) in indexes.items()
+    )
+
+
+def _assert_converged_index_set(indexes: dict[str, tuple[str, bool]]) -> None:
+    """000065's end state: the seven expected names, all valid, no definition twice."""
+    assert set(indexes) == _CONVERGED_HYDRO_RUN_INDEXES, sorted(indexes)
+    assert all(valid for _definition, valid in indexes.values()), indexes
+    definitions = _nameless_definitions(indexes)
+    assert len(definitions) == len(set(definitions)), definitions
+    candidate = indexes[_FORECAST_CANDIDATE_INDEX][0]
+    assert candidate == (
+        f"CREATE INDEX {_FORECAST_CANDIDATE_INDEX} ON hydro.hydro_run USING btree "
+        "(basin_version_id, cycle_time DESC) "
+        "WHERE ((run_type = 'forecast'::hydro.run_type) AND (cycle_time IS NOT NULL))"
+    )
+    assert "status" not in candidate
 
 
 def _run_status_labels(database_url: str) -> tuple[str, ...]:
@@ -305,6 +357,7 @@ def _run_runner(
 def fresh_catalog(integration_database_url: str) -> dict[str, object]:
     """The converged answer: what a database built from db/migrations holds."""
     apply_migrations_from_zero(integration_database_url)
+    _assert_converged_index_set(_hydro_run_indexes(integration_database_url))
     return {
         "indexes": _hydro_run_indexes(integration_database_url),
         "labels": _run_status_labels(integration_database_url),
@@ -320,10 +373,18 @@ def test_runner_converges_a_production_shaped_database(
     url = throwaway_database_url
     _build_production_drift(url)
     fresh_indexes = fresh_catalog["indexes"]
-    assert isinstance(fresh_indexes, dict) and len(fresh_indexes) == 6
+    assert isinstance(fresh_indexes, dict) and len(fresh_indexes) == 7
     # Premise: the drift is real, or the convergence assertions below prove nothing.
+    # All six stale predicates are in place (each still names `frequency_done`),
+    # the three kept ones differ from their converged definitions, and the
+    # candidate index 000065 builds does not exist yet.
     stale = _hydro_run_indexes(url)
-    assert all(stale[name][0] != fresh_indexes[name][0] for name in _STALE_HYDRO_RUN_INDEXES), stale
+    assert set(_STALE_HYDRO_RUN_INDEXES) <= set(stale), sorted(stale)
+    assert all("frequency_done" in stale[name][0] for name in _STALE_HYDRO_RUN_INDEXES), stale
+    assert all(
+        stale[name][0] != fresh_indexes[name][0] for name in set(_STALE_HYDRO_RUN_INDEXES) & set(fresh_indexes)
+    ), stale
+    assert _FORECAST_CANDIDATE_INDEX not in stale
     assert _flood_relations(url) == set(_FLOOD_TABLES)
     assert _fetchall(url, _FLOOD_DEFAULT_ACL_COUNT_SQL) == [(1,)]
     assert _fetchall(
@@ -341,8 +402,10 @@ def test_runner_converges_a_production_shaped_database(
     assert f"Applied migration: {_CONVERGENCE_MIGRATIONS[0]}" in out
     assert f"Applied migration: {_INDEX_REBUILD_MIGRATION}" in out
     assert f"Applied migration: {_FLOOD_DROP_MIGRATION}" in out
+    assert f"Applied migration: {_INDEX_DEDUP_MIGRATION}" in out
     assert _hydro_run_indexes(url) == fresh_indexes
-    assert all(valid for _definition, valid in fresh_indexes.values())
+    _assert_converged_index_set(_hydro_run_indexes(url))
+    assert not _DEDUP_DROPPED_INDEXES & set(_hydro_run_indexes(url))
     assert not _flood_schema_exists(url)
     # The default ACL row went with the namespace, not left dangling.
     assert _fetchall(url, _ORPHAN_DEFAULT_ACL_COUNT_SQL) == [(0,)]
@@ -407,7 +470,14 @@ def test_rerun_after_a_failed_concurrent_build_replaces_the_invalid_index(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """D2: a CREATE INDEX CONCURRENTLY that fails leaves an INVALID index and no ledger row; the rerun heals it."""
+    """D2: a CREATE INDEX CONCURRENTLY of 000063 that fails leaves an INVALID index and no ledger row.
+
+    Every later file (000064, 000065) is then still pending too, so both 000063's
+    and 000065's ledger rows are deleted and the runner replays them IN ORDER:
+    000063 rebuilds all six (including the three duplicates) and 000065 drops the
+    duplicates again. Deleting only 000063's row would replay it alone and leave
+    the duplicates behind, which is not a state the ledger can reach.
+    """
     url = throwaway_database_url
     _build_production_drift(url)
     code, out = _run_runner(url, monkeypatch, capsys)
@@ -415,29 +485,95 @@ def test_rerun_after_a_failed_concurrent_build_replaces_the_invalid_index(
 
     # A real failed concurrent build: the two seeded runs share a basin version,
     # so a UNIQUE build over it fails after the catalog entry exists.
-    broken = "hydro_run_display_ready_basin_status_idx"
-    assert _fetchall(url, "SELECT count(*) FROM hydro.hydro_run WHERE basin_version_id = %s", (BASIN_VERSION_ID,))[
-        0
-    ][0] >= 2
+    broken = "hydro_run_display_product_basin_status_idx"
+    _assert_two_runs_share_the_seed_basin(url)
     _execute(url, f"DROP INDEX CONCURRENTLY hydro.{broken}")
     with pytest.raises(psycopg2.errors.UniqueViolation):
         _execute(url, f"CREATE UNIQUE INDEX CONCURRENTLY {broken} ON hydro.hydro_run (basin_version_id)")
     assert _hydro_run_indexes(url)[broken][1] is False
-    _execute(url, ("DELETE FROM public.schema_migrations WHERE version = %s", (_INDEX_REBUILD_MIGRATION,)))
+    _execute(
+        url,
+        (
+            "DELETE FROM public.schema_migrations WHERE version = ANY(%s)",
+            ([_INDEX_REBUILD_MIGRATION, _INDEX_DEDUP_MIGRATION],),
+        ),
+    )
 
     code, out = _run_runner(url, monkeypatch, capsys)
 
     assert code == 0, out
     assert f"Applied migration: {_INDEX_REBUILD_MIGRATION}" in out
+    assert f"Applied migration: {_INDEX_DEDUP_MIGRATION}" in out
+    assert out.index(f"Applied migration: {_INDEX_REBUILD_MIGRATION}") < out.index(
+        f"Applied migration: {_INDEX_DEDUP_MIGRATION}"
+    )
     assert _hydro_run_indexes(url) == fresh_catalog["indexes"]
 
 
-def test_fresh_database_applies_the_convergence_migrations_and_reapplies_them_as_no_ops(
+def test_rerun_after_a_failed_candidate_index_build_replaces_the_invalid_leftover(
+    throwaway_database_url: str,
+    fresh_catalog: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """000065's own CREATE INDEX CONCURRENTLY fails: the INVALID copy is dropped and rebuilt on rerun.
+
+    A bare ``IF NOT EXISTS`` would see the INVALID leftover's name and keep it
+    (#2048); the file drops the name first, so the rerun ends where a clean run
+    does, with the index valid and defined as the migration says.
+    """
+    url = throwaway_database_url
+    apply_migrations_from_zero(url)
+    seed_issue_126_data(url)
+    _assert_two_runs_share_the_seed_basin(url)
+
+    _execute(url, f"DROP INDEX CONCURRENTLY hydro.{_FORECAST_CANDIDATE_INDEX}")
+    with pytest.raises(psycopg2.errors.UniqueViolation):
+        _execute(
+            url,
+            f"CREATE UNIQUE INDEX CONCURRENTLY {_FORECAST_CANDIDATE_INDEX} ON hydro.hydro_run (basin_version_id)",
+        )
+    assert _hydro_run_indexes(url)[_FORECAST_CANDIDATE_INDEX][1] is False
+    _execute(url, ("DELETE FROM public.schema_migrations WHERE version = %s", (_INDEX_DEDUP_MIGRATION,)))
+
+    code, out = _run_runner(url, monkeypatch, capsys)
+
+    assert code == 0, out
+    assert f"Applied migration: {_INDEX_DEDUP_MIGRATION}" in out
+    assert "1 applied" in out
+    assert _hydro_run_indexes(url) == fresh_catalog["indexes"]
+    _assert_converged_index_set(_hydro_run_indexes(url))
+    assert _INDEX_DEDUP_MIGRATION in _ledger(url)
+
+
+def _assert_two_runs_share_the_seed_basin(url: str) -> None:
+    count = _fetchall(url, "SELECT count(*) FROM hydro.hydro_run WHERE basin_version_id = %s", (BASIN_VERSION_ID,))
+    assert count[0][0] >= 2, "a UNIQUE build over basin_version_id would not fail; the INVALID leftover is vacuous"
+
+
+def test_fresh_database_applies_the_convergence_migrations_and_an_ordered_replay_converges_again(
     throwaway_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    """000062->000065 replayed in order is a no-op on a converged catalog.
+
+    Not each file alone: 000063 by itself rebuilds the three duplicates 000065
+    drops, so only the ordered replay has a fixed point.
+    """
     url = throwaway_database_url
+    apply_migrations_from_zero(url, through="000064")
+    # Between 000063 and 000065 all six partial indexes carry 000063's predicate.
+    before_dedup = _hydro_run_indexes(url)
+    assert set(_STALE_HYDRO_RUN_INDEXES) <= set(before_dedup)
+    assert _FORECAST_CANDIDATE_INDEX not in before_dedup
+    for name in _STALE_HYDRO_RUN_INDEXES:
+        definition, valid = before_dedup[name]
+        assert valid, name
+        assert "'succeeded'::hydro.run_status, 'parsed'::hydro.run_status, 'published'::hydro.run_status" in (
+            definition
+        ), name
+        assert "frequency_done" not in definition, name
     apply_migrations_from_zero(url)
 
     def _catalog() -> tuple[object, ...]:
@@ -446,7 +582,7 @@ def test_fresh_database_applies_the_convergence_migrations_and_reapplies_them_as
     converged = _catalog()
     assert converged[1] == _PRODUCTION_RUN_STATUS_LABELS
     assert converged[2] is False
-    assert all(valid for _definition, valid in converged[0].values())  # type: ignore[union-attr]
+    _assert_converged_index_set(converged[0])  # type: ignore[arg-type]
 
     connection = psycopg2.connect(url)
     connection.autocommit = True

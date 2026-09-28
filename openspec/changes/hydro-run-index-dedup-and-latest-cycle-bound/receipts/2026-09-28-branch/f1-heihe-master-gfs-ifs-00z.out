@@ -1,0 +1,184 @@
+# f1-probe-window-master.sql basin=basins_heihe tag=gfs-ifs-00z run=3/3 (kept: 3, warm) at 2026-09-28T17:34:16Z
+# cands=(-1, timestamptz '2026-09-28 00:00+00', timestamptz '2026-10-05 00:00+00'), (-3, timestamptz '2026-09-28 00:00+00', timestamptz '2026-10-05 00:00+00')
+Pager usage is off.
+BEGIN
+SET
+                                                                                                                                              QUERY PLAN                                                                                                                                              
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop Semi Join (actual time=1.680..1.688 rows=0 loops=1)
+   Buffers: shared hit=203
+   InitPlan 1 (returns $0)
+     ->  Index Scan using river_segment_pkey on river_segment (actual time=0.118..0.118 rows=1 loops=1)
+           Index Cond: ((river_segment_id = 'basins_heihe_shud_shud_riv_000001'::text) AND (river_network_version_id = 'basins_heihe_rivnet_vbasins'::text))
+           Buffers: shared hit=5
+   InitPlan 2 (returns $1)
+     ->  Index Scan using basin_version_pkey on basin_version (actual time=0.036..0.036 rows=1 loops=1)
+           Index Cond: (basin_version_id = 'basins_heihe_vbasins'::text)
+           Buffers: shared hit=2
+   InitPlan 3 (returns $2)
+     ->  Index Scan using river_network_version_pkey on river_network_version (actual time=0.020..0.020 rows=1 loops=1)
+           Index Cond: (river_network_version_id = 'basins_heihe_rivnet_vbasins'::text)
+           Buffers: shared hit=2
+   ->  Values Scan on "*VALUES*" (actual time=0.002..0.003 rows=2 loops=1)
+   ->  Custom Scan (ChunkAppend) on river_timeseries rt (actual time=0.766..0.769 rows=0 loops=2)
+         Hypertables excluded during runtime: 0
+         Buffers: shared hit=198
+         ->  Custom Scan (DecompressChunk) on _hyper_9_130_chunk rt_1 (actual time=0.022..0.022 rows=0 loops=2)
+               Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $1)) AND (NOT (river_network_version_key IS DISTINCT FROM $2)) AND (variable_e = 'q_down'::hydro.river_variable) AND ("*VALUES*".column1 = run_key))
+               Buffers: shared hit=6
+               ->  Index Scan using compress_hyper_10_185_chunk__compressed_hypertable_10_run_key_r on compress_hyper_10_185_chunk (actual time=0.021..0.021 rows=0 loops=2)
+                     Index Cond: ((run_key = "*VALUES*".column1) AND (river_segment_key = $0))
+                     Buffers: shared hit=6
+         ->  Custom Scan (DecompressChunk) on _hyper_9_131_chunk rt_2 (actual time=0.018..0.018 rows=0 loops=2)
+               Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $1)) AND (NOT (river_network_version_key IS DISTINCT FROM $2)) AND (variable_e = 'q_down'::hydro.river_variable) AND ("*VALUES*".column1 = run_key))
+               Buffers: shared hit=6
+               ->  Index Scan using compress_hyper_10_200_chunk__compressed_hypertable_10_run_key_r on compress_hyper_10_200_chunk (actual time=0.017..0.017 rows=0 loops=2)
+                     Index Cond: ((run_key = "*VALUES*".column1) AND (river_segment_key = $0))
+                     Buffers: shared hit=6
+         ->  Custom Scan (DecompressChunk) on _hyper_9_132_chunk rt_3 (actual time=0.022..0.022 rows=0 loops=2)
+               Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $1)) AND (NOT (river_network_version_key IS DISTINCT FROM $2)) AND (variable_e = 'q_down'::hydro.river_variable) AND ("*VALUES*".column1 = run_key))
+               Buffers: shared hit=6
+               ->  Index Scan using compress_hyper_10_204_chunk__compressed_hypertable_10_run_key_r on compress_hyper_10_204_chunk (actual time=0.021..0.021 rows=0 loops=2)
+                     Index Cond: ((run_key = "*VALUES*".column1) AND (river_segment_key = $0))
+                     Buffers: shared hit=6
+         ->  Custom Scan (DecompressChunk) on _hyper_9_133_chunk rt_4 (actual time=0.016..0.016 rows=0 loops=2)
+               Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $1)) AND (NOT (river_network_version_key IS DISTINCT FROM $2)) AND (variable_e = 'q_down'::hydro.river_variable) AND ("*VALUES*".column1 = run_key))
+               Buffers: shared hit=6
+               ->  Index Scan using compress_hyper_10_212_chunk__compressed_hypertable_10_run_key_r on compress_hyper_10_212_chunk (actual time=0.016..0.016 rows=0 loops=2)
+                     Index Cond: ((run_key = "*VALUES*".column1) AND (river_segment_key = $0))
+                     Buffers: shared hit=6
+         ->  Custom Scan (DecompressChunk) on _hyper_9_134_chunk rt_5 (actual time=0.018..0.018 rows=0 loops=2)
+               Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $1)) AND (NOT (river_network_version_key IS DISTINCT FROM $2)) AND (variable_e = 'q_down'::hydro.river_variable) AND ("*VALUES*".column1 = run_key))
+               Buffers: shared hit=6
+               ->  Index Scan using compress_hyper_10_215_chunk__compressed_hypertable_10_run_key_r on compress_hyper_10_215_chunk (actual time=0.018..0.018 rows=0 loops=2)
+                     Index Cond: ((run_key = "*VALUES*".column1) AND (river_segment_key = $0))
+                     Buffers: shared hit=6
+         ->  Custom Scan (DecompressChunk) on _hyper_9_135_chunk rt_6 (actual time=0.019..0.020 rows=0 loops=2)
+               Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $1)) AND (NOT (river_network_version_key IS DISTINCT FROM $2)) AND (variable_e = 'q_down'::hydro.river_variable) AND ("*VALUES*".column1 = run_key))
+               Buffers: shared hit=6
+               ->  Index Scan using compress_hyper_10_219_chunk__compressed_hypertable_10_run_key_r on compress_hyper_10_219_chunk (actual time=0.019..0.019 rows=0 loops=2)
+                     Index Cond: ((run_key = "*VALUES*".column1) AND (river_segment_key = $0))
+                     Buffers: shared hit=6
+         ->  Custom Scan (DecompressChunk) on _hyper_9_136_chunk rt_7 (actual time=0.021..0.021 rows=0 loops=2)
+               Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $1)) AND (NOT (river_network_version_key IS DISTINCT FROM $2)) AND (variable_e = 'q_down'::hydro.river_variable) AND ("*VALUES*".column1 = run_key))
+               Buffers: shared hit=6
+               ->  Index Scan using compress_hyper_10_223_chunk__compressed_hypertable_10_run_key_r on compress_hyper_10_223_chunk (actual time=0.021..0.021 rows=0 loops=2)
+                     Index Cond: ((run_key = "*VALUES*".column1) AND (river_segment_key = $0))
+                     Buffers: shared hit=6
+         ->  Custom Scan (DecompressChunk) on _hyper_9_141_chunk rt_8 (actual time=0.019..0.019 rows=0 loops=2)
+               Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $1)) AND (NOT (river_network_version_key IS DISTINCT FROM $2)) AND (variable_e = 'q_down'::hydro.river_variable) AND ("*VALUES*".column1 = run_key))
+               Buffers: shared hit=6
+               ->  Index Scan using compress_hyper_10_187_chunk__compressed_hypertable_10_run_key_r on compress_hyper_10_187_chunk (actual time=0.019..0.019 rows=0 loops=2)
+                     Index Cond: ((run_key = "*VALUES*".column1) AND (river_segment_key = $0))
+                     Buffers: shared hit=6
+         ->  Custom Scan (DecompressChunk) on _hyper_9_142_chunk rt_9 (actual time=0.023..0.023 rows=0 loops=2)
+               Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $1)) AND (NOT (river_network_version_key IS DISTINCT FROM $2)) AND (variable_e = 'q_down'::hydro.river_variable) AND ("*VALUES*".column1 = run_key))
+               Buffers: shared hit=6
+               ->  Index Scan using compress_hyper_10_227_chunk__compressed_hypertable_10_run_key_r on compress_hyper_10_227_chunk (actual time=0.023..0.023 rows=0 loops=2)
+                     Index Cond: ((run_key = "*VALUES*".column1) AND (river_segment_key = $0))
+                     Buffers: shared hit=6
+         ->  Custom Scan (DecompressChunk) on _hyper_9_143_chunk rt_10 (actual time=0.025..0.025 rows=0 loops=2)
+               Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $1)) AND (NOT (river_network_version_key IS DISTINCT FROM $2)) AND (variable_e = 'q_down'::hydro.river_variable) AND ("*VALUES*".column1 = run_key))
+               Buffers: shared hit=6
+               ->  Index Scan using compress_hyper_10_188_chunk__compressed_hypertable_10_run_key_r on compress_hyper_10_188_chunk (actual time=0.025..0.025 rows=0 loops=2)
+                     Index Cond: ((run_key = "*VALUES*".column1) AND (river_segment_key = $0))
+                     Buffers: shared hit=6
+         ->  Custom Scan (DecompressChunk) on _hyper_9_160_chunk rt_11 (actual time=0.024..0.024 rows=0 loops=2)
+               Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $1)) AND (NOT (river_network_version_key IS DISTINCT FROM $2)) AND (variable_e = 'q_down'::hydro.river_variable) AND ("*VALUES*".column1 = run_key))
+               Buffers: shared hit=6
+               ->  Index Scan using compress_hyper_10_216_chunk__compressed_hypertable_10_run_key_r on compress_hyper_10_216_chunk (actual time=0.023..0.023 rows=0 loops=2)
+                     Index Cond: ((run_key = "*VALUES*".column1) AND (river_segment_key = $0))
+                     Buffers: shared hit=6
+         ->  Custom Scan (DecompressChunk) on _hyper_9_161_chunk rt_12 (actual time=0.025..0.025 rows=0 loops=2)
+               Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $1)) AND (NOT (river_network_version_key IS DISTINCT FROM $2)) AND (variable_e = 'q_down'::hydro.river_variable) AND ("*VALUES*".column1 = run_key))
+               Buffers: shared hit=6
+               ->  Index Scan using compress_hyper_10_211_chunk__compressed_hypertable_10_run_key_r on compress_hyper_10_211_chunk (actual time=0.025..0.025 rows=0 loops=2)
+                     Index Cond: ((run_key = "*VALUES*".column1) AND (river_segment_key = $0))
+                     Buffers: shared hit=6
+         ->  Custom Scan (DecompressChunk) on _hyper_9_162_chunk rt_13 (actual time=0.021..0.021 rows=0 loops=2)
+               Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $1)) AND (NOT (river_network_version_key IS DISTINCT FROM $2)) AND (variable_e = 'q_down'::hydro.river_variable) AND ("*VALUES*".column1 = run_key))
+               Buffers: shared hit=6
+               ->  Index Scan using compress_hyper_10_205_chunk__compressed_hypertable_10_run_key_r on compress_hyper_10_205_chunk (actual time=0.020..0.020 rows=0 loops=2)
+                     Index Cond: ((run_key = "*VALUES*".column1) AND (river_segment_key = $0))
+                     Buffers: shared hit=6
+         ->  Custom Scan (DecompressChunk) on _hyper_9_163_chunk rt_14 (actual time=0.021..0.021 rows=0 loops=2)
+               Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $1)) AND (NOT (river_network_version_key IS DISTINCT FROM $2)) AND (variable_e = 'q_down'::hydro.river_variable) AND ("*VALUES*".column1 = run_key))
+               Buffers: shared hit=6
+               ->  Index Scan using compress_hyper_10_201_chunk__compressed_hypertable_10_run_key_r on compress_hyper_10_201_chunk (actual time=0.021..0.021 rows=0 loops=2)
+                     Index Cond: ((run_key = "*VALUES*".column1) AND (river_segment_key = $0))
+                     Buffers: shared hit=6
+         ->  Custom Scan (DecompressChunk) on _hyper_9_164_chunk rt_15 (actual time=0.021..0.021 rows=0 loops=2)
+               Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $1)) AND (NOT (river_network_version_key IS DISTINCT FROM $2)) AND (variable_e = 'q_down'::hydro.river_variable) AND ("*VALUES*".column1 = run_key))
+               Buffers: shared hit=6
+               ->  Index Scan using compress_hyper_10_190_chunk__compressed_hypertable_10_run_key_r on compress_hyper_10_190_chunk (actual time=0.020..0.020 rows=0 loops=2)
+                     Index Cond: ((run_key = "*VALUES*".column1) AND (river_segment_key = $0))
+                     Buffers: shared hit=6
+         ->  Custom Scan (DecompressChunk) on _hyper_9_165_chunk rt_16 (actual time=0.023..0.023 rows=0 loops=2)
+               Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $1)) AND (NOT (river_network_version_key IS DISTINCT FROM $2)) AND (variable_e = 'q_down'::hydro.river_variable) AND ("*VALUES*".column1 = run_key))
+               Buffers: shared hit=6
+               ->  Index Scan using compress_hyper_10_189_chunk__compressed_hypertable_10_run_key_r on compress_hyper_10_189_chunk (actual time=0.023..0.023 rows=0 loops=2)
+                     Index Cond: ((run_key = "*VALUES*".column1) AND (river_segment_key = $0))
+                     Buffers: shared hit=6
+         ->  Custom Scan (DecompressChunk) on _hyper_9_170_chunk rt_17 (actual time=0.022..0.022 rows=0 loops=2)
+               Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $1)) AND (NOT (river_network_version_key IS DISTINCT FROM $2)) AND (variable_e = 'q_down'::hydro.river_variable) AND ("*VALUES*".column1 = run_key))
+               Buffers: shared hit=6
+               ->  Index Scan using compress_hyper_10_236_chunk__compressed_hypertable_10_run_key_r on compress_hyper_10_236_chunk (actual time=0.022..0.022 rows=0 loops=2)
+                     Index Cond: ((run_key = "*VALUES*".column1) AND (river_segment_key = $0))
+                     Buffers: shared hit=6
+         ->  Custom Scan (DecompressChunk) on _hyper_9_175_chunk rt_18 (actual time=0.019..0.020 rows=0 loops=2)
+               Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $1)) AND (NOT (river_network_version_key IS DISTINCT FROM $2)) AND (variable_e = 'q_down'::hydro.river_variable) AND ("*VALUES*".column1 = run_key))
+               Buffers: shared hit=6
+               ->  Index Scan using compress_hyper_10_235_chunk__compressed_hypertable_10_run_key_r on compress_hyper_10_235_chunk (actual time=0.019..0.019 rows=0 loops=2)
+                     Index Cond: ((run_key = "*VALUES*".column1) AND (river_segment_key = $0))
+                     Buffers: shared hit=6
+         ->  Index Scan using "181_421_river_timeseries_narrow_pkey" on _hyper_9_181_chunk rt_19 (actual time=0.034..0.034 rows=0 loops=2)
+               Index Cond: ((run_key = "*VALUES*".column1) AND (river_segment_key = $0) AND (variable_e = 'q_down'::hydro.river_variable))
+               Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $1)) AND (NOT (river_network_version_key IS DISTINCT FROM $2)))
+               Buffers: shared hit=8
+         ->  Index Scan using "191_443_river_timeseries_narrow_pkey" on _hyper_9_191_chunk rt_20 (actual time=0.027..0.027 rows=0 loops=2)
+               Index Cond: ((run_key = "*VALUES*".column1) AND (river_segment_key = $0) AND (variable_e = 'q_down'::hydro.river_variable))
+               Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $1)) AND (NOT (river_network_version_key IS DISTINCT FROM $2)))
+               Buffers: shared hit=8
+         ->  Index Scan using "202_474_river_timeseries_narrow_pkey" on _hyper_9_202_chunk rt_21 (actual time=0.031..0.031 rows=0 loops=2)
+               Index Cond: ((run_key = "*VALUES*".column1) AND (river_segment_key = $0) AND (variable_e = 'q_down'::hydro.river_variable))
+               Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $1)) AND (NOT (river_network_version_key IS DISTINCT FROM $2)))
+               Buffers: shared hit=8
+         ->  Index Scan using "206_484_river_timeseries_narrow_pkey" on _hyper_9_206_chunk rt_22 (actual time=0.037..0.037 rows=0 loops=2)
+               Index Cond: ((run_key = "*VALUES*".column1) AND (river_segment_key = $0) AND (variable_e = 'q_down'::hydro.river_variable))
+               Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $1)) AND (NOT (river_network_version_key IS DISTINCT FROM $2)))
+               Buffers: shared hit=8
+         ->  Index Scan using "213_504_river_timeseries_narrow_pkey" on _hyper_9_213_chunk rt_23 (actual time=0.032..0.032 rows=0 loops=2)
+               Index Cond: ((run_key = "*VALUES*".column1) AND (river_segment_key = $0) AND (variable_e = 'q_down'::hydro.river_variable))
+               Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $1)) AND (NOT (river_network_version_key IS DISTINCT FROM $2)))
+               Buffers: shared hit=8
+         ->  Index Scan using "217_514_river_timeseries_narrow_pkey" on _hyper_9_217_chunk rt_24 (actual time=0.026..0.026 rows=0 loops=2)
+               Index Cond: ((run_key = "*VALUES*".column1) AND (river_segment_key = $0) AND (variable_e = 'q_down'::hydro.river_variable))
+               Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $1)) AND (NOT (river_network_version_key IS DISTINCT FROM $2)))
+               Buffers: shared hit=8
+         ->  Index Scan using "221_524_river_timeseries_narrow_pkey" on _hyper_9_221_chunk rt_25 (actual time=0.030..0.031 rows=0 loops=2)
+               Index Cond: ((run_key = "*VALUES*".column1) AND (river_segment_key = $0) AND (variable_e = 'q_down'::hydro.river_variable))
+               Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $1)) AND (NOT (river_network_version_key IS DISTINCT FROM $2)))
+               Buffers: shared hit=8
+         ->  Index Scan using "225_534_river_timeseries_narrow_pkey" on _hyper_9_225_chunk rt_26 (actual time=0.025..0.025 rows=0 loops=2)
+               Index Cond: ((run_key = "*VALUES*".column1) AND (river_segment_key = $0) AND (variable_e = 'q_down'::hydro.river_variable))
+               Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $1)) AND (NOT (river_network_version_key IS DISTINCT FROM $2)))
+               Buffers: shared hit=8
+         ->  Index Scan using "231_548_river_timeseries_narrow_pkey" on _hyper_9_231_chunk rt_27 (actual time=0.043..0.043 rows=0 loops=2)
+               Index Cond: ((run_key = "*VALUES*".column1) AND (river_segment_key = $0) AND (variable_e = 'q_down'::hydro.river_variable))
+               Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $1)) AND (NOT (river_network_version_key IS DISTINCT FROM $2)))
+               Buffers: shared hit=8
+         ->  Index Scan using "233_554_river_timeseries_narrow_pkey" on _hyper_9_233_chunk rt_28 (actual time=0.036..0.036 rows=0 loops=2)
+               Index Cond: ((run_key = "*VALUES*".column1) AND (river_segment_key = $0) AND (variable_e = 'q_down'::hydro.river_variable))
+               Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $1)) AND (NOT (river_network_version_key IS DISTINCT FROM $2)))
+               Buffers: shared hit=8
+         ->  Index Scan using "237_564_river_timeseries_narrow_pkey" on _hyper_9_237_chunk rt_29 (actual time=0.017..0.017 rows=0 loops=2)
+               Index Cond: ((run_key = "*VALUES*".column1) AND (river_segment_key = $0) AND (variable_e = 'q_down'::hydro.river_variable))
+               Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $1)) AND (NOT (river_network_version_key IS DISTINCT FROM $2)))
+               Buffers: shared hit=6
+ Planning:
+   Buffers: shared hit=8886
+ Planning Time: 30.316 ms
+ Execution Time: 2.872 ms
+(174 rows)
+
+ROLLBACK

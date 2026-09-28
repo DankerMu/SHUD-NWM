@@ -1,0 +1,16 @@
+ forecast_runs | start_ne_cycle | null_bounds | end_le_cycle 
+---------------+----------------+-------------+--------------
+         10723 |              0 |           0 |            0
+(1 row)
+
+ window | count 
+--------+-------
+ 6 days |    64
+ 7 days | 10659
+(2 rows)
+
+ all_runs 
+----------
+    10723
+(1 row)
+

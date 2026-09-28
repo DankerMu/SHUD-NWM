@@ -4338,7 +4338,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_forecast_api.py",
             "tests/test_forecast_store_routing.py",
             # #2424 D1: `_per_source_latest_cycles` lives here; its hydro_run-driven
-            # shape (fence, outer ORDER BY, no status, EXISTS-only fact read) is
+            # shape (fence, outer ORDER BY, no status, bounded LATERAL fact read) is
             # pinned only by this suite.
             "tests/test_latest_cycle_discovery_shape.py",
             # #2516 D3: the narrow latest-product station leg's membership-EXISTS

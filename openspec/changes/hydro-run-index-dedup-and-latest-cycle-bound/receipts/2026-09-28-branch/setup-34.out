@@ -1,0 +1,10 @@
+NOTICE:  database "nhms_scratch_batchdb_34" does not exist, skipping
+columns: run_id,run_type,scenario_id,model_id,basin_version_id,forcing_version_id,init_state_id,source_id,cycle_time,start_time,end_time,status,slurm_job_id,run_manifest_uri,output_uri,log_uri,error_code,error_message,created_at,updated_at,run_key,parsed_at
+ANALYZE
+rows|pages
+10723|864
+(1 row)
+version
+000065_hydro_run_candidate_index_dedup.sql
+000064_drop_retired_flood_schema.sql
+(2 rows)

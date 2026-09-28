@@ -1,0 +1,26 @@
+=== RUN A: packages/common/forecast_store.py = origin/master
+            ("window_not_passed_through", "c.cycle_time, c.end_time", "c.cycle_time"),
+            ("window_not_passed_through", "c.cycle_time, c.end_time", "c.cycle_time"),
+            ("window_not_passed_through", "c.cycle_time, c.end_time", "c.cycle_time"),
+            ("window_not_passed_through", "c.cycle_time, c.end_time", "c.cycle_time"),
+            ("window_not_passed_through", "c.cycle_time, c.end_time", "c.cycle_time"),
+_ test_the_bounded_probe_pin_bites_on_each_half_of_2630[window_not_passed_through-c.cycle_time, c.end_time-c.cycle_time] _
+label = 'window_not_passed_through', old = 'c.cycle_time, c.end_time'
+            ("window_not_passed_through", "c.cycle_time, c.end_time", "c.cycle_time"),
+14 failed, 88 passed in 48.37s
+pytest_rc=1
+=== RUN B: db/migrations/000065 absent (origin/master ledger)
+_ ERROR at setup of test_rerun_after_a_failed_concurrent_build_replaces_the_invalid_index _
+_ ERROR at setup of test_rerun_after_a_failed_candidate_index_build_replaces_the_invalid_leftover _
+3 failed, 46 passed, 3 errors in 149.77s (0:02:29)
+pytest_rc=1
+RESTORED: tree equals the branch patch
+ M packages/common/forecast_store.py
+ M scripts/node27_autopipeline.py
+ M scripts/select_ci_tests.py
+ M tests/test_latest_cycle_discovery_integration.py
+ M tests/test_latest_cycle_discovery_shape.py
+ M tests/test_migrations.py
+ M tests/test_river_ts_stats_harness_offline.py
+ M tests/test_schema_ledger_convergence_integration.py
+?? db/migrations/000065_hydro_run_candidate_index_dedup.sql

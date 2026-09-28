@@ -80,6 +80,7 @@ EXPECTED_MIGRATIONS: tuple[str, ...] = (
     "000062_hydro_run_status_frequency_done_convergence.sql",
     "000063_hydro_run_partial_index_predicate_convergence.sql",
     "000064_drop_retired_flood_schema.sql",
+    "000065_hydro_run_candidate_index_dedup.sql",
 )
 
 EXPECTED_SCHEMAS = {"core", "met", "hydro", "map", "ops"}
@@ -432,6 +433,83 @@ def test_partial_index_convergence_rebuilds_each_index_exactly_as_defined() -> N
         assert _status_list(definition) == ("succeeded", "parsed", "published"), defining_file
 
     assert statements == expected_statements
+
+
+# 000065 (#2634, #2626). The three dropped names are byte-identical copies of the
+# two kept ones (node-27 pg_indexes, 2026-09-28); the kept names are the ones the
+# code, tests and receipts cite.
+_INDEX_DEDUP_MIGRATION = "000065_hydro_run_candidate_index_dedup.sql"
+_DEDUP_DROPPED_TO_KEPT = {
+    "hydro_run_qhh_latest_candidate_parsed_idx": "hydro_run_qhh_latest_candidate_idx",
+    "hydro_run_display_ready_candidate_idx": "hydro_run_qhh_latest_candidate_idx",
+    "hydro_run_display_ready_basin_status_idx": "hydro_run_display_product_basin_status_idx",
+}
+_FORECAST_CANDIDATE_INDEX = "hydro_run_forecast_basin_cycle_idx"
+
+#: sha256 over every migration file on origin/master aff6201e0 (000001-000064, 58
+#: files), each framed as ``name NUL bytes NUL`` in name order. Computed from git
+#: (``git show origin/master:<file>``), not from this tree. These are applied on
+#: node-27; a forward change is a new file, never an edit (#2634).
+_APPLIED_MIGRATIONS_THROUGH_000064_SHA256 = "08cd71df53ceda3b28a935a5d61dec98c567417877685e6e629908836b34c77c"
+
+
+def test_applied_migrations_through_000064_are_byte_for_byte_unchanged() -> None:
+    import hashlib
+
+    applied = [path for path in sorted(MIGRATIONS_DIR.glob("*.sql")) if path.name[:6] <= "000064"]
+    assert len(applied) == 58
+    digest = hashlib.sha256()
+    for path in applied:
+        digest.update(path.name.encode() + b"\0" + path.read_bytes() + b"\0")
+    assert digest.hexdigest() == _APPLIED_MIGRATIONS_THROUGH_000064_SHA256, (
+        "an applied migration changed; add a forward migration instead (git diff origin/master -- db/migrations)"
+    )
+
+
+def test_index_dedup_migration_drops_exact_duplicates_and_builds_a_status_free_candidate_index() -> None:
+    """000065: three idempotent concurrent DROPs, then DROP-before-CREATE of the new index.
+
+    The duplicate claim is checked against 000063's own copies rather than taken
+    on trust: each dropped index's column list and predicate must equal a kept
+    index's, so nothing the planner could use disappears with it.
+    """
+    migrations = dict(_migration_sql())
+    statements = _statements_without_comments(migrations[_INDEX_DEDUP_MIGRATION])
+
+    assert statements == [
+        *(f"DROP INDEX CONCURRENTLY IF EXISTS hydro.{name};" for name in _DEDUP_DROPPED_TO_KEPT),
+        f"DROP INDEX CONCURRENTLY IF EXISTS hydro.{_FORECAST_CANDIDATE_INDEX};",
+        f"CREATE INDEX CONCURRENTLY {_FORECAST_CANDIDATE_INDEX} ON hydro.hydro_run (basin_version_id, cycle_time DESC)"
+        " WHERE run_type = 'forecast' AND cycle_time IS NOT NULL;",
+    ]
+    # Every statement is online; the runner autocommits each one.
+    assert all("CONCURRENTLY" in statement for statement in statements)
+    # A rerun after a failed build must replace an INVALID leftover, which a bare
+    # IF NOT EXISTS would silently keep (#2048).
+    create = statements[-1]
+    assert "IF NOT EXISTS" not in create
+    assert statements.index(f"DROP INDEX CONCURRENTLY IF EXISTS hydro.{_FORECAST_CANDIDATE_INDEX};") == len(
+        statements
+    ) - 2
+    # #2626: the D1 candidates carry no status predicate, so the index may not either.
+    assert "status" not in create.lower()
+
+    rebuild = migrations[_PARTIAL_INDEX_CONVERGENCE_MIGRATION]
+
+    def tail(name: str) -> str:
+        statement = _index_statement(rebuild, name)
+        head = re.match(rf"CREATE INDEX CONCURRENTLY IF NOT EXISTS {name} ", statement)
+        assert head is not None
+        return statement[head.end() :]
+
+    for dropped, kept in _DEDUP_DROPPED_TO_KEPT.items():
+        assert tail(dropped) == tail(kept), dropped
+    kept_names = set(_DEDUP_DROPPED_TO_KEPT.values())
+    assert not any(f"hydro.{kept};" in statement for statement in statements for kept in kept_names)
+    # The name is new: no earlier migration creates or drops it.
+    assert not any(
+        _FORECAST_CANDIDATE_INDEX in sql for name, sql in migrations.items() if name != _INDEX_DEDUP_MIGRATION
+    )
 
 
 def test_river_segment_stream_type_is_generated_and_indexed() -> None:

@@ -1,0 +1,583 @@
+head=aff6201e06fbdc83e803b29f1788078c3394d85b status:
+ M scripts/node27_autopipeline.py
+ M scripts/select_ci_tests.py
+ M tests/test_latest_cycle_discovery_integration.py
+ M tests/test_latest_cycle_discovery_shape.py
+ M tests/test_migrations.py
+ M tests/test_river_ts_stats_harness_offline.py
+ M tests/test_schema_ledger_convergence_integration.py
+?? db/migrations/000065_hydro_run_candidate_index_dedup.sql
+FFFF...FFFFFFF...................F..........................F........... [ 70%]
+.............................F                                           [100%]
+=================================== FAILURES ===================================
+_______ test_unfiltered_latest_cycle_discovery_is_driven_from_hydro_run ________
+
+    def test_unfiltered_latest_cycle_discovery_is_driven_from_hydro_run():
+        sql, params = FORECAST_STORE_EXECUTIONS["per_source_latest_cycles"]()
+>       assert_latest_cycle_discovery(sql, params)
+
+tests/test_latest_cycle_discovery_shape.py:164: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+sql = '\n            WITH seg AS (\n                SELECT\n                    (SELECT basin_version_key FROM core.basin_ve...BY o.cycle_time DESC\n                LIMIT 1\n            ) pick\n            ORDER BY scen.scenario_id\n            '
+params = {'basin_version_id': 'basin_v1', 'river_network_version_id': 'rivnet_v1', 'river_segment_id': 'seg_001'}
+
+    def assert_latest_cycle_discovery(sql: str, params: Mapping) -> None:
+        """Every shape commitment of design.md D1, on one executed statement."""
+        flat = _flat(sql)
+        assert set(re.findall(r"%\((\w+)\)s", sql)) == set(params)
+        # hydro_run drives, and is read exactly once — in the MATERIALIZED candidates.
+        assert flat.count("hydro.hydro_run") == 1
+        candidates = candidate_cte(sql)
+        # #2630: the candidates carry the run window the probe is bounded by.
+>       assert candidates.strip().startswith(
+            "SELECT h.run_key, h.scenario_id, h.cycle_time, h.end_time FROM hydro.hydro_run h"
+        )
+E       assert False
+E        +  where False = <built-in method startswith of str object at 0x7fe8c3f4b2f0>('SELECT h.run_key, h.scenario_id, h.cycle_time, h.end_time FROM hydro.hydro_run h')
+E        +    where <built-in method startswith of str object at 0x7fe8c3f4b2f0> = "SELECT h.run_key, h.scenario_id, h.cycle_time FROM hydro.hydro_run h WHERE h.run_type = 'forecast' AND h.cycle_time IS NOT NULL AND h.basin_version_id = %(basin_version_id)s".startswith
+E        +      where "SELECT h.run_key, h.scenario_id, h.cycle_time FROM hydro.hydro_run h WHERE h.run_type = 'forecast' AND h.cycle_time IS NOT NULL AND h.basin_version_id = %(basin_version_id)s" = <built-in method strip of str object at 0x7fe8c3f4ab10>()
+E        +        where <built-in method strip of str object at 0x7fe8c3f4ab10> = " SELECT h.run_key, h.scenario_id, h.cycle_time FROM hydro.hydro_run h WHERE h.run_type = 'forecast' AND h.cycle_time IS NOT NULL AND h.basin_version_id = %(basin_version_id)s ".strip
+
+tests/test_latest_cycle_discovery_shape.py:111: AssertionError
+_ test_scenario_and_identity_filters_are_rendered_once_inside_the_candidates[scenarios0-None-None] _
+
+scenarios = ['GFS'], run_id = None, model_id = None
+
+    @pytest.mark.parametrize(
+        ("scenarios", "run_id", "model_id"),
+        [(["GFS"], None, None), (["GFS", "IFS"], None, "model_a"), (["IFS"], "run_a", "model_a")],
+    )
+    def test_scenario_and_identity_filters_are_rendered_once_inside_the_candidates(scenarios, run_id, model_id):
+        scenario_filter = forecast_store._scenario_filter(scenarios)
+        identity_filter = forecast_store._run_identity_filter(run_id=run_id, model_id=model_id)
+        sql, params, _ = _capture(scenario_filter, identity_filter)
+>       assert_latest_cycle_discovery(sql, params)
+
+tests/test_latest_cycle_discovery_shape.py:180: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+sql = '\n            WITH seg AS (\n                SELECT\n                    (SELECT basin_version_key FROM core.basin_ve...BY o.cycle_time DESC\n                LIMIT 1\n            ) pick\n            ORDER BY scen.scenario_id\n            '
+params = {'basin_version_id': 'basin_v1', 'river_network_version_id': 'rivnet_v1', 'river_segment_id': 'seg_001', 'scenario_ids': ['forecast_gfs_deterministic', 'gfs'], ...}
+
+    def assert_latest_cycle_discovery(sql: str, params: Mapping) -> None:
+        """Every shape commitment of design.md D1, on one executed statement."""
+        flat = _flat(sql)
+        assert set(re.findall(r"%\((\w+)\)s", sql)) == set(params)
+        # hydro_run drives, and is read exactly once — in the MATERIALIZED candidates.
+        assert flat.count("hydro.hydro_run") == 1
+        candidates = candidate_cte(sql)
+        # #2630: the candidates carry the run window the probe is bounded by.
+>       assert candidates.strip().startswith(
+            "SELECT h.run_key, h.scenario_id, h.cycle_time, h.end_time FROM hydro.hydro_run h"
+        )
+E       assert False
+E        +  where False = <built-in method startswith of str object at 0x7fe8c3f763a0>('SELECT h.run_key, h.scenario_id, h.cycle_time, h.end_time FROM hydro.hydro_run h')
+E        +    where <built-in method startswith of str object at 0x7fe8c3f763a0> = "SELECT h.run_key, h.scenario_id, h.cycle_time FROM hydro.hydro_run h WHERE h.run_type = 'forecast' AND h.cycle_time I...basin_version_id)s AND (LOWER(h.source_id) = ANY(%(scenario_tokens)s) OR LOWER(h.scenario_id) = ANY(%(scenario_ids)s))".startswith
+E        +      where "SELECT h.run_key, h.scenario_id, h.cycle_time FROM hydro.hydro_run h WHERE h.run_type = 'forecast' AND h.cycle_time I...basin_version_id)s AND (LOWER(h.source_id) = ANY(%(scenario_tokens)s) OR LOWER(h.scenario_id) = ANY(%(scenario_ids)s))" = <built-in method strip of str object at 0x7fe8c3f75fb0>()
+E        +        where <built-in method strip of str object at 0x7fe8c3f75fb0> = " SELECT h.run_key, h.scenario_id, h.cycle_time FROM hydro.hydro_run h WHERE h.run_type = 'forecast' AND h.cycle_time ...asin_version_id)s AND (LOWER(h.source_id) = ANY(%(scenario_tokens)s) OR LOWER(h.scenario_id) = ANY(%(scenario_ids)s)) ".strip
+
+tests/test_latest_cycle_discovery_shape.py:111: AssertionError
+_ test_scenario_and_identity_filters_are_rendered_once_inside_the_candidates[scenarios1-None-model_a] _
+
+scenarios = ['GFS', 'IFS'], run_id = None, model_id = 'model_a'
+
+    @pytest.mark.parametrize(
+        ("scenarios", "run_id", "model_id"),
+        [(["GFS"], None, None), (["GFS", "IFS"], None, "model_a"), (["IFS"], "run_a", "model_a")],
+    )
+    def test_scenario_and_identity_filters_are_rendered_once_inside_the_candidates(scenarios, run_id, model_id):
+        scenario_filter = forecast_store._scenario_filter(scenarios)
+        identity_filter = forecast_store._run_identity_filter(run_id=run_id, model_id=model_id)
+        sql, params, _ = _capture(scenario_filter, identity_filter)
+>       assert_latest_cycle_discovery(sql, params)
+
+tests/test_latest_cycle_discovery_shape.py:180: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+sql = '\n            WITH seg AS (\n                SELECT\n                    (SELECT basin_version_key FROM core.basin_ve...BY o.cycle_time DESC\n                LIMIT 1\n            ) pick\n            ORDER BY scen.scenario_id\n            '
+params = {'basin_version_id': 'basin_v1', 'model_id': 'model_a', 'river_network_version_id': 'rivnet_v1', 'river_segment_id': 'seg_001', ...}
+
+    def assert_latest_cycle_discovery(sql: str, params: Mapping) -> None:
+        """Every shape commitment of design.md D1, on one executed statement."""
+        flat = _flat(sql)
+        assert set(re.findall(r"%\((\w+)\)s", sql)) == set(params)
+        # hydro_run drives, and is read exactly once — in the MATERIALIZED candidates.
+        assert flat.count("hydro.hydro_run") == 1
+        candidates = candidate_cte(sql)
+        # #2630: the candidates carry the run window the probe is bounded by.
+>       assert candidates.strip().startswith(
+            "SELECT h.run_key, h.scenario_id, h.cycle_time, h.end_time FROM hydro.hydro_run h"
+        )
+E       assert False
+E        +  where False = <built-in method startswith of str object at 0x7fe8c40f2550>('SELECT h.run_key, h.scenario_id, h.cycle_time, h.end_time FROM hydro.hydro_run h')
+E        +    where <built-in method startswith of str object at 0x7fe8c40f2550> = "SELECT h.run_key, h.scenario_id, h.cycle_time FROM hydro.hydro_run h WHERE h.run_type = 'forecast' AND h.cycle_time I...h.source_id) = ANY(%(scenario_tokens)s) OR LOWER(h.scenario_id) = ANY(%(scenario_ids)s)) AND h.model_id = %(model_id)s".startswith
+E        +      where "SELECT h.run_key, h.scenario_id, h.cycle_time FROM hydro.hydro_run h WHERE h.run_type = 'forecast' AND h.cycle_time I...h.source_id) = ANY(%(scenario_tokens)s) OR LOWER(h.scenario_id) = ANY(%(scenario_ids)s)) AND h.model_id = %(model_id)s" = <built-in method strip of str object at 0x7fe8c3f36420>()
+E        +        where <built-in method strip of str object at 0x7fe8c3f36420> = " SELECT h.run_key, h.scenario_id, h.cycle_time FROM hydro.hydro_run h WHERE h.run_type = 'forecast' AND h.cycle_time ....source_id) = ANY(%(scenario_tokens)s) OR LOWER(h.scenario_id) = ANY(%(scenario_ids)s)) AND h.model_id = %(model_id)s ".strip
+
+tests/test_latest_cycle_discovery_shape.py:111: AssertionError
+_ test_scenario_and_identity_filters_are_rendered_once_inside_the_candidates[scenarios2-run_a-model_a] _
+
+scenarios = ['IFS'], run_id = 'run_a', model_id = 'model_a'
+
+    @pytest.mark.parametrize(
+        ("scenarios", "run_id", "model_id"),
+        [(["GFS"], None, None), (["GFS", "IFS"], None, "model_a"), (["IFS"], "run_a", "model_a")],
+    )
+    def test_scenario_and_identity_filters_are_rendered_once_inside_the_candidates(scenarios, run_id, model_id):
+        scenario_filter = forecast_store._scenario_filter(scenarios)
+        identity_filter = forecast_store._run_identity_filter(run_id=run_id, model_id=model_id)
+        sql, params, _ = _capture(scenario_filter, identity_filter)
+>       assert_latest_cycle_discovery(sql, params)
+
+tests/test_latest_cycle_discovery_shape.py:180: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+sql = '\n            WITH seg AS (\n                SELECT\n                    (SELECT basin_version_key FROM core.basin_ve...BY o.cycle_time DESC\n                LIMIT 1\n            ) pick\n            ORDER BY scen.scenario_id\n            '
+params = {'basin_version_id': 'basin_v1', 'model_id': 'model_a', 'river_network_version_id': 'rivnet_v1', 'river_segment_id': 'seg_001', ...}
+
+    def assert_latest_cycle_discovery(sql: str, params: Mapping) -> None:
+        """Every shape commitment of design.md D1, on one executed statement."""
+        flat = _flat(sql)
+        assert set(re.findall(r"%\((\w+)\)s", sql)) == set(params)
+        # hydro_run drives, and is read exactly once — in the MATERIALIZED candidates.
+        assert flat.count("hydro.hydro_run") == 1
+        candidates = candidate_cte(sql)
+        # #2630: the candidates carry the run window the probe is bounded by.
+>       assert candidates.strip().startswith(
+            "SELECT h.run_key, h.scenario_id, h.cycle_time, h.end_time FROM hydro.hydro_run h"
+        )
+E       assert False
+E        +  where False = <built-in method startswith of str object at 0x7fe8c3cb4030>('SELECT h.run_key, h.scenario_id, h.cycle_time, h.end_time FROM hydro.hydro_run h')
+E        +    where <built-in method startswith of str object at 0x7fe8c3cb4030> = "SELECT h.run_key, h.scenario_id, h.cycle_time FROM hydro.hydro_run h WHERE h.run_type = 'forecast' AND h.cycle_time I...rio_tokens)s) OR LOWER(h.scenario_id) = ANY(%(scenario_ids)s)) AND h.run_id = %(run_id)s AND h.model_id = %(model_id)s".startswith
+E        +      where "SELECT h.run_key, h.scenario_id, h.cycle_time FROM hydro.hydro_run h WHERE h.run_type = 'forecast' AND h.cycle_time I...rio_tokens)s) OR LOWER(h.scenario_id) = ANY(%(scenario_ids)s)) AND h.run_id = %(run_id)s AND h.model_id = %(model_id)s" = <built-in method strip of str object at 0x7fe8c4133930>()
+E        +        where <built-in method strip of str object at 0x7fe8c4133930> = " SELECT h.run_key, h.scenario_id, h.cycle_time FROM hydro.hydro_run h WHERE h.run_type = 'forecast' AND h.cycle_time ...io_tokens)s) OR LOWER(h.scenario_id) = ANY(%(scenario_ids)s)) AND h.run_id = %(run_id)s AND h.model_id = %(model_id)s ".strip
+
+tests/test_latest_cycle_discovery_shape.py:111: AssertionError
+_____________ test_the_fact_probe_is_a_registered_narrow_template ______________
+
+    def test_the_fact_probe_is_a_registered_narrow_template():
+        """The lateral body, bar its ``LIMIT 1``, is owned by the renderer and the registry, like every read.
+    
+        The run-window conjuncts are part of that template (design D3 "探针拆分"),
+        not of the caller's wrapper.
+        """
+        entry = entry_by_key("forecast_store:latest_cycle_fact_probe")
+        template = entry.source("narrow")
+        assert render_river_ts_sql(template, "narrow").sql == template
+        sql, _params, _ = _capture(NO_FILTER, NO_FILTER)
+>       assert _flat(template) == fact_probe(sql)
+                                  ^^^^^^^^^^^^^^^
+
+tests/test_latest_cycle_discovery_shape.py:243: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/test_latest_cycle_discovery_shape.py:98: in fact_probe
+    body = lateral_probe(sql)
+           ^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+sql = '\n            WITH seg AS (\n                SELECT\n                    (SELECT basin_version_key FROM core.basin_ve...BY o.cycle_time DESC\n                LIMIT 1\n            ) pick\n            ORDER BY scen.scenario_id\n            '
+
+    def lateral_probe(sql: str) -> str:
+        """The whole body of the per-candidate ``CROSS JOIN LATERAL``, ``LIMIT 1`` included."""
+        flat = _flat(sql)
+>       return _balanced(flat, flat.index(PROBE_FENCE) + len(PROBE_FENCE) - 1).strip()
+                               ^^^^^^^^^^^^^^^^^^^^^^^
+E       ValueError: substring not found
+
+tests/test_latest_cycle_discovery_shape.py:93: ValueError
+_ test_the_bounded_probe_pin_bites_on_each_half_of_2630[exists_probe-CROSS JOIN LATERAL (\n                    SELECT 1-WHERE EXISTS (\n                    SELECT 1] _
+
+label = 'exists_probe'
+old = 'CROSS JOIN LATERAL (\n                    SELECT 1'
+new = 'WHERE EXISTS (\n                    SELECT 1'
+
+    @pytest.mark.parametrize(
+        ("label", "old", "new"),
+        [
+            # Back to #2424's EXISTS: unbounded chunk search on an empty pin.
+            (
+                "exists_probe",
+                "CROSS JOIN LATERAL (\n                    SELECT 1",
+                "WHERE EXISTS (\n                    SELECT 1",
+            ),
+            ("no_limit", "LIMIT 1\n                ) hit", ") hit"),
+            ("no_lower_bound", "AND rt.valid_time >= o.cycle_time", ""),
+            ("no_upper_bound", "AND rt.valid_time <= o.end_time", ""),
+            ("window_not_carried", "h.cycle_time, h.end_time", "h.cycle_time"),
+            ("window_not_passed_through", "c.cycle_time, c.end_time", "c.cycle_time"),
+        ],
+    )
+    def test_the_bounded_probe_pin_bites_on_each_half_of_2630(label, old, new):
+        """Each of #2630's commitments is load-bearing in the pin: undoing any one is red."""
+        sql, params, _ = _capture(NO_FILTER, NO_FILTER)
+>       assert_latest_cycle_discovery(sql, params)
+
+tests/test_latest_cycle_discovery_shape.py:270: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+sql = '\n            WITH seg AS (\n                SELECT\n                    (SELECT basin_version_key FROM core.basin_ve...BY o.cycle_time DESC\n                LIMIT 1\n            ) pick\n            ORDER BY scen.scenario_id\n            '
+params = {'basin_version_id': 'basin_v1', 'river_network_version_id': 'rivnet_v1', 'river_segment_id': 'seg_001'}
+
+    def assert_latest_cycle_discovery(sql: str, params: Mapping) -> None:
+        """Every shape commitment of design.md D1, on one executed statement."""
+        flat = _flat(sql)
+        assert set(re.findall(r"%\((\w+)\)s", sql)) == set(params)
+        # hydro_run drives, and is read exactly once — in the MATERIALIZED candidates.
+        assert flat.count("hydro.hydro_run") == 1
+        candidates = candidate_cte(sql)
+        # #2630: the candidates carry the run window the probe is bounded by.
+>       assert candidates.strip().startswith(
+            "SELECT h.run_key, h.scenario_id, h.cycle_time, h.end_time FROM hydro.hydro_run h"
+        )
+E       assert False
+E        +  where False = <built-in method startswith of str object at 0x7fe8c3f49b50>('SELECT h.run_key, h.scenario_id, h.cycle_time, h.end_time FROM hydro.hydro_run h')
+E        +    where <built-in method startswith of str object at 0x7fe8c3f49b50> = "SELECT h.run_key, h.scenario_id, h.cycle_time FROM hydro.hydro_run h WHERE h.run_type = 'forecast' AND h.cycle_time IS NOT NULL AND h.basin_version_id = %(basin_version_id)s".startswith
+E        +      where "SELECT h.run_key, h.scenario_id, h.cycle_time FROM hydro.hydro_run h WHERE h.run_type = 'forecast' AND h.cycle_time IS NOT NULL AND h.basin_version_id = %(basin_version_id)s" = <built-in method strip of str object at 0x7fe8c3f49fb0>()
+E        +        where <built-in method strip of str object at 0x7fe8c3f49fb0> = " SELECT h.run_key, h.scenario_id, h.cycle_time FROM hydro.hydro_run h WHERE h.run_type = 'forecast' AND h.cycle_time IS NOT NULL AND h.basin_version_id = %(basin_version_id)s ".strip
+
+tests/test_latest_cycle_discovery_shape.py:111: AssertionError
+_ test_the_bounded_probe_pin_bites_on_each_half_of_2630[no_limit-LIMIT 1\n                ) hit-) hit] _
+
+label = 'no_limit', old = 'LIMIT 1\n                ) hit', new = ') hit'
+
+    @pytest.mark.parametrize(
+        ("label", "old", "new"),
+        [
+            # Back to #2424's EXISTS: unbounded chunk search on an empty pin.
+            (
+                "exists_probe",
+                "CROSS JOIN LATERAL (\n                    SELECT 1",
+                "WHERE EXISTS (\n                    SELECT 1",
+            ),
+            ("no_limit", "LIMIT 1\n                ) hit", ") hit"),
+            ("no_lower_bound", "AND rt.valid_time >= o.cycle_time", ""),
+            ("no_upper_bound", "AND rt.valid_time <= o.end_time", ""),
+            ("window_not_carried", "h.cycle_time, h.end_time", "h.cycle_time"),
+            ("window_not_passed_through", "c.cycle_time, c.end_time", "c.cycle_time"),
+        ],
+    )
+    def test_the_bounded_probe_pin_bites_on_each_half_of_2630(label, old, new):
+        """Each of #2630's commitments is load-bearing in the pin: undoing any one is red."""
+        sql, params, _ = _capture(NO_FILTER, NO_FILTER)
+>       assert_latest_cycle_discovery(sql, params)
+
+tests/test_latest_cycle_discovery_shape.py:270: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+sql = '\n            WITH seg AS (\n                SELECT\n                    (SELECT basin_version_key FROM core.basin_ve...BY o.cycle_time DESC\n                LIMIT 1\n            ) pick\n            ORDER BY scen.scenario_id\n            '
+params = {'basin_version_id': 'basin_v1', 'river_network_version_id': 'rivnet_v1', 'river_segment_id': 'seg_001'}
+
+    def assert_latest_cycle_discovery(sql: str, params: Mapping) -> None:
+        """Every shape commitment of design.md D1, on one executed statement."""
+        flat = _flat(sql)
+        assert set(re.findall(r"%\((\w+)\)s", sql)) == set(params)
+        # hydro_run drives, and is read exactly once — in the MATERIALIZED candidates.
+        assert flat.count("hydro.hydro_run") == 1
+        candidates = candidate_cte(sql)
+        # #2630: the candidates carry the run window the probe is bounded by.
+>       assert candidates.strip().startswith(
+            "SELECT h.run_key, h.scenario_id, h.cycle_time, h.end_time FROM hydro.hydro_run h"
+        )
+E       assert False
+E        +  where False = <built-in method startswith of str object at 0x7fe8c3c909d0>('SELECT h.run_key, h.scenario_id, h.cycle_time, h.end_time FROM hydro.hydro_run h')
+E        +    where <built-in method startswith of str object at 0x7fe8c3c909d0> = "SELECT h.run_key, h.scenario_id, h.cycle_time FROM hydro.hydro_run h WHERE h.run_type = 'forecast' AND h.cycle_time IS NOT NULL AND h.basin_version_id = %(basin_version_id)s".startswith
+E        +      where "SELECT h.run_key, h.scenario_id, h.cycle_time FROM hydro.hydro_run h WHERE h.run_type = 'forecast' AND h.cycle_time IS NOT NULL AND h.basin_version_id = %(basin_version_id)s" = <built-in method strip of str object at 0x7fe8c3c908f0>()
+E        +        where <built-in method strip of str object at 0x7fe8c3c908f0> = " SELECT h.run_key, h.scenario_id, h.cycle_time FROM hydro.hydro_run h WHERE h.run_type = 'forecast' AND h.cycle_time IS NOT NULL AND h.basin_version_id = %(basin_version_id)s ".strip
+
+tests/test_latest_cycle_discovery_shape.py:111: AssertionError
+_ test_the_bounded_probe_pin_bites_on_each_half_of_2630[no_lower_bound-AND rt.valid_time >= o.cycle_time-] _
+
+label = 'no_lower_bound', old = 'AND rt.valid_time >= o.cycle_time', new = ''
+
+    @pytest.mark.parametrize(
+        ("label", "old", "new"),
+        [
+            # Back to #2424's EXISTS: unbounded chunk search on an empty pin.
+            (
+                "exists_probe",
+                "CROSS JOIN LATERAL (\n                    SELECT 1",
+                "WHERE EXISTS (\n                    SELECT 1",
+            ),
+            ("no_limit", "LIMIT 1\n                ) hit", ") hit"),
+            ("no_lower_bound", "AND rt.valid_time >= o.cycle_time", ""),
+            ("no_upper_bound", "AND rt.valid_time <= o.end_time", ""),
+            ("window_not_carried", "h.cycle_time, h.end_time", "h.cycle_time"),
+            ("window_not_passed_through", "c.cycle_time, c.end_time", "c.cycle_time"),
+        ],
+    )
+    def test_the_bounded_probe_pin_bites_on_each_half_of_2630(label, old, new):
+        """Each of #2630's commitments is load-bearing in the pin: undoing any one is red."""
+        sql, params, _ = _capture(NO_FILTER, NO_FILTER)
+>       assert_latest_cycle_discovery(sql, params)
+
+tests/test_latest_cycle_discovery_shape.py:270: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+sql = '\n            WITH seg AS (\n                SELECT\n                    (SELECT basin_version_key FROM core.basin_ve...BY o.cycle_time DESC\n                LIMIT 1\n            ) pick\n            ORDER BY scen.scenario_id\n            '
+params = {'basin_version_id': 'basin_v1', 'river_network_version_id': 'rivnet_v1', 'river_segment_id': 'seg_001'}
+
+    def assert_latest_cycle_discovery(sql: str, params: Mapping) -> None:
+        """Every shape commitment of design.md D1, on one executed statement."""
+        flat = _flat(sql)
+        assert set(re.findall(r"%\((\w+)\)s", sql)) == set(params)
+        # hydro_run drives, and is read exactly once — in the MATERIALIZED candidates.
+        assert flat.count("hydro.hydro_run") == 1
+        candidates = candidate_cte(sql)
+        # #2630: the candidates carry the run window the probe is bounded by.
+>       assert candidates.strip().startswith(
+            "SELECT h.run_key, h.scenario_id, h.cycle_time, h.end_time FROM hydro.hydro_run h"
+        )
+E       assert False
+E        +  where False = <built-in method startswith of str object at 0x7fe8c3c91b50>('SELECT h.run_key, h.scenario_id, h.cycle_time, h.end_time FROM hydro.hydro_run h')
+E        +    where <built-in method startswith of str object at 0x7fe8c3c91b50> = "SELECT h.run_key, h.scenario_id, h.cycle_time FROM hydro.hydro_run h WHERE h.run_type = 'forecast' AND h.cycle_time IS NOT NULL AND h.basin_version_id = %(basin_version_id)s".startswith
+E        +      where "SELECT h.run_key, h.scenario_id, h.cycle_time FROM hydro.hydro_run h WHERE h.run_type = 'forecast' AND h.cycle_time IS NOT NULL AND h.basin_version_id = %(basin_version_id)s" = <built-in method strip of str object at 0x7fe8c3c91c30>()
+E        +        where <built-in method strip of str object at 0x7fe8c3c91c30> = " SELECT h.run_key, h.scenario_id, h.cycle_time FROM hydro.hydro_run h WHERE h.run_type = 'forecast' AND h.cycle_time IS NOT NULL AND h.basin_version_id = %(basin_version_id)s ".strip
+
+tests/test_latest_cycle_discovery_shape.py:111: AssertionError
+_ test_the_bounded_probe_pin_bites_on_each_half_of_2630[no_upper_bound-AND rt.valid_time <= o.end_time-] _
+
+label = 'no_upper_bound', old = 'AND rt.valid_time <= o.end_time', new = ''
+
+    @pytest.mark.parametrize(
+        ("label", "old", "new"),
+        [
+            # Back to #2424's EXISTS: unbounded chunk search on an empty pin.
+            (
+                "exists_probe",
+                "CROSS JOIN LATERAL (\n                    SELECT 1",
+                "WHERE EXISTS (\n                    SELECT 1",
+            ),
+            ("no_limit", "LIMIT 1\n                ) hit", ") hit"),
+            ("no_lower_bound", "AND rt.valid_time >= o.cycle_time", ""),
+            ("no_upper_bound", "AND rt.valid_time <= o.end_time", ""),
+            ("window_not_carried", "h.cycle_time, h.end_time", "h.cycle_time"),
+            ("window_not_passed_through", "c.cycle_time, c.end_time", "c.cycle_time"),
+        ],
+    )
+    def test_the_bounded_probe_pin_bites_on_each_half_of_2630(label, old, new):
+        """Each of #2630's commitments is load-bearing in the pin: undoing any one is red."""
+        sql, params, _ = _capture(NO_FILTER, NO_FILTER)
+>       assert_latest_cycle_discovery(sql, params)
+
+tests/test_latest_cycle_discovery_shape.py:270: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+sql = '\n            WITH seg AS (\n                SELECT\n                    (SELECT basin_version_key FROM core.basin_ve...BY o.cycle_time DESC\n                LIMIT 1\n            ) pick\n            ORDER BY scen.scenario_id\n            '
+params = {'basin_version_id': 'basin_v1', 'river_network_version_id': 'rivnet_v1', 'river_segment_id': 'seg_001'}
+
+    def assert_latest_cycle_discovery(sql: str, params: Mapping) -> None:
+        """Every shape commitment of design.md D1, on one executed statement."""
+        flat = _flat(sql)
+        assert set(re.findall(r"%\((\w+)\)s", sql)) == set(params)
+        # hydro_run drives, and is read exactly once — in the MATERIALIZED candidates.
+        assert flat.count("hydro.hydro_run") == 1
+        candidates = candidate_cte(sql)
+        # #2630: the candidates carry the run window the probe is bounded by.
+>       assert candidates.strip().startswith(
+            "SELECT h.run_key, h.scenario_id, h.cycle_time, h.end_time FROM hydro.hydro_run h"
+        )
+E       assert False
+E        +  where False = <built-in method startswith of str object at 0x7fe8c3c92090>('SELECT h.run_key, h.scenario_id, h.cycle_time, h.end_time FROM hydro.hydro_run h')
+E        +    where <built-in method startswith of str object at 0x7fe8c3c92090> = "SELECT h.run_key, h.scenario_id, h.cycle_time FROM hydro.hydro_run h WHERE h.run_type = 'forecast' AND h.cycle_time IS NOT NULL AND h.basin_version_id = %(basin_version_id)s".startswith
+E        +      where "SELECT h.run_key, h.scenario_id, h.cycle_time FROM hydro.hydro_run h WHERE h.run_type = 'forecast' AND h.cycle_time IS NOT NULL AND h.basin_version_id = %(basin_version_id)s" = <built-in method strip of str object at 0x7fe8c3c92250>()
+E        +        where <built-in method strip of str object at 0x7fe8c3c92250> = " SELECT h.run_key, h.scenario_id, h.cycle_time FROM hydro.hydro_run h WHERE h.run_type = 'forecast' AND h.cycle_time IS NOT NULL AND h.basin_version_id = %(basin_version_id)s ".strip
+
+tests/test_latest_cycle_discovery_shape.py:111: AssertionError
+_ test_the_bounded_probe_pin_bites_on_each_half_of_2630[window_not_carried-h.cycle_time, h.end_time-h.cycle_time] _
+
+label = 'window_not_carried', old = 'h.cycle_time, h.end_time'
+new = 'h.cycle_time'
+
+    @pytest.mark.parametrize(
+        ("label", "old", "new"),
+        [
+            # Back to #2424's EXISTS: unbounded chunk search on an empty pin.
+            (
+                "exists_probe",
+                "CROSS JOIN LATERAL (\n                    SELECT 1",
+                "WHERE EXISTS (\n                    SELECT 1",
+            ),
+            ("no_limit", "LIMIT 1\n                ) hit", ") hit"),
+            ("no_lower_bound", "AND rt.valid_time >= o.cycle_time", ""),
+            ("no_upper_bound", "AND rt.valid_time <= o.end_time", ""),
+            ("window_not_carried", "h.cycle_time, h.end_time", "h.cycle_time"),
+            ("window_not_passed_through", "c.cycle_time, c.end_time", "c.cycle_time"),
+        ],
+    )
+    def test_the_bounded_probe_pin_bites_on_each_half_of_2630(label, old, new):
+        """Each of #2630's commitments is load-bearing in the pin: undoing any one is red."""
+        sql, params, _ = _capture(NO_FILTER, NO_FILTER)
+>       assert_latest_cycle_discovery(sql, params)
+
+tests/test_latest_cycle_discovery_shape.py:270: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+sql = '\n            WITH seg AS (\n                SELECT\n                    (SELECT basin_version_key FROM core.basin_ve...BY o.cycle_time DESC\n                LIMIT 1\n            ) pick\n            ORDER BY scen.scenario_id\n            '
+params = {'basin_version_id': 'basin_v1', 'river_network_version_id': 'rivnet_v1', 'river_segment_id': 'seg_001'}
+
+    def assert_latest_cycle_discovery(sql: str, params: Mapping) -> None:
+        """Every shape commitment of design.md D1, on one executed statement."""
+        flat = _flat(sql)
+        assert set(re.findall(r"%\((\w+)\)s", sql)) == set(params)
+        # hydro_run drives, and is read exactly once — in the MATERIALIZED candidates.
+        assert flat.count("hydro.hydro_run") == 1
+        candidates = candidate_cte(sql)
+        # #2630: the candidates carry the run window the probe is bounded by.
+>       assert candidates.strip().startswith(
+            "SELECT h.run_key, h.scenario_id, h.cycle_time, h.end_time FROM hydro.hydro_run h"
+        )
+E       assert False
+E        +  where False = <built-in method startswith of str object at 0x7fe8c3f49fb0>('SELECT h.run_key, h.scenario_id, h.cycle_time, h.end_time FROM hydro.hydro_run h')
+E        +    where <built-in method startswith of str object at 0x7fe8c3f49fb0> = "SELECT h.run_key, h.scenario_id, h.cycle_time FROM hydro.hydro_run h WHERE h.run_type = 'forecast' AND h.cycle_time IS NOT NULL AND h.basin_version_id = %(basin_version_id)s".startswith
+E        +      where "SELECT h.run_key, h.scenario_id, h.cycle_time FROM hydro.hydro_run h WHERE h.run_type = 'forecast' AND h.cycle_time IS NOT NULL AND h.basin_version_id = %(basin_version_id)s" = <built-in method strip of str object at 0x7fe8c3f49b50>()
+E        +        where <built-in method strip of str object at 0x7fe8c3f49b50> = " SELECT h.run_key, h.scenario_id, h.cycle_time FROM hydro.hydro_run h WHERE h.run_type = 'forecast' AND h.cycle_time IS NOT NULL AND h.basin_version_id = %(basin_version_id)s ".strip
+
+tests/test_latest_cycle_discovery_shape.py:111: AssertionError
+_ test_the_bounded_probe_pin_bites_on_each_half_of_2630[window_not_passed_through-c.cycle_time, c.end_time-c.cycle_time] _
+
+label = 'window_not_passed_through', old = 'c.cycle_time, c.end_time'
+new = 'c.cycle_time'
+
+    @pytest.mark.parametrize(
+        ("label", "old", "new"),
+        [
+            # Back to #2424's EXISTS: unbounded chunk search on an empty pin.
+            (
+                "exists_probe",
+                "CROSS JOIN LATERAL (\n                    SELECT 1",
+                "WHERE EXISTS (\n                    SELECT 1",
+            ),
+            ("no_limit", "LIMIT 1\n                ) hit", ") hit"),
+            ("no_lower_bound", "AND rt.valid_time >= o.cycle_time", ""),
+            ("no_upper_bound", "AND rt.valid_time <= o.end_time", ""),
+            ("window_not_carried", "h.cycle_time, h.end_time", "h.cycle_time"),
+            ("window_not_passed_through", "c.cycle_time, c.end_time", "c.cycle_time"),
+        ],
+    )
+    def test_the_bounded_probe_pin_bites_on_each_half_of_2630(label, old, new):
+        """Each of #2630's commitments is load-bearing in the pin: undoing any one is red."""
+        sql, params, _ = _capture(NO_FILTER, NO_FILTER)
+>       assert_latest_cycle_discovery(sql, params)
+
+tests/test_latest_cycle_discovery_shape.py:270: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+sql = '\n            WITH seg AS (\n                SELECT\n                    (SELECT basin_version_key FROM core.basin_ve...BY o.cycle_time DESC\n                LIMIT 1\n            ) pick\n            ORDER BY scen.scenario_id\n            '
+params = {'basin_version_id': 'basin_v1', 'river_network_version_id': 'rivnet_v1', 'river_segment_id': 'seg_001'}
+
+    def assert_latest_cycle_discovery(sql: str, params: Mapping) -> None:
+        """Every shape commitment of design.md D1, on one executed statement."""
+        flat = _flat(sql)
+        assert set(re.findall(r"%\((\w+)\)s", sql)) == set(params)
+        # hydro_run drives, and is read exactly once — in the MATERIALIZED candidates.
+        assert flat.count("hydro.hydro_run") == 1
+        candidates = candidate_cte(sql)
+        # #2630: the candidates carry the run window the probe is bounded by.
+>       assert candidates.strip().startswith(
+            "SELECT h.run_key, h.scenario_id, h.cycle_time, h.end_time FROM hydro.hydro_run h"
+        )
+E       assert False
+E        +  where False = <built-in method startswith of str object at 0x7fe8c3c91d10>('SELECT h.run_key, h.scenario_id, h.cycle_time, h.end_time FROM hydro.hydro_run h')
+E        +    where <built-in method startswith of str object at 0x7fe8c3c91d10> = "SELECT h.run_key, h.scenario_id, h.cycle_time FROM hydro.hydro_run h WHERE h.run_type = 'forecast' AND h.cycle_time IS NOT NULL AND h.basin_version_id = %(basin_version_id)s".startswith
+E        +      where "SELECT h.run_key, h.scenario_id, h.cycle_time FROM hydro.hydro_run h WHERE h.run_type = 'forecast' AND h.cycle_time IS NOT NULL AND h.basin_version_id = %(basin_version_id)s" = <built-in method strip of str object at 0x7fe8c3c91450>()
+E        +        where <built-in method strip of str object at 0x7fe8c3c91450> = " SELECT h.run_key, h.scenario_id, h.cycle_time FROM hydro.hydro_run h WHERE h.run_type = 'forecast' AND h.cycle_time IS NOT NULL AND h.basin_version_id = %(basin_version_id)s ".strip
+
+tests/test_latest_cycle_discovery_shape.py:111: AssertionError
+_ test_the_latest_shape_has_two_fact_statements_and_picks_the_cycle_window_one _
+
+    def test_the_latest_shape_has_two_fact_statements_and_picks_the_cycle_window_one() -> None:
+        """tasks.md 1.1: ``_per_source_latest_cycles`` and the cycle-window segment
+        read both name ``hydro.river_timeseries`` (the discovery only inside its
+        membership probe since #2424 D1; a bounded ``CROSS JOIN LATERAL (... LIMIT
+        1)`` since #2630). Selecting "the only one" would raise; selecting the first
+        would measure the wrong statement."""
+        statement, companions, _, _ = _capture("latest")
+        assert "%(pushdown_run_keys)s" in statement["sql"]
+        assert "pushdown_window_start" in statement["sql"]
+        assert len(companions) == 1
+        # #2424 D1: the companion is the hydro_run-driven discovery, whose only fact
+        # read is the correlated membership probe.
+        assert "cand AS MATERIALIZED" in companions[0]["sql"]
+        assert "CROSS JOIN LATERAL (" in companions[0]["sql"]
+>       assert "EXISTS" not in companions[0]["sql"]
+E       AssertionError: assert 'EXISTS' not in '\n         ...            '
+E         
+E         'EXISTS' is contained here:
+E               WHERE EXISTS (
+E         ?           ++++++
+E                               SELECT 1
+E                               FROM hydro.river_timeseries rt
+E                               WHERE rt.run_key = o.run_key...
+E         
+E         ...Full output truncated (12 lines hidden), use '-vv' to show
+
+tests/test_river_ts_stats_harness_offline.py:321: AssertionError
+_ test_forecast_store_segment_blocks_resolve_identity_through_the_authority_tables _
+
+    def test_forecast_store_segment_blocks_resolve_identity_through_the_authority_tables() -> None:
+        """Non-vacuity: every block really predicates on the four keys and the enum."""
+        from tests.test_latest_cycle_discovery_shape import assert_latest_cycle_discovery
+    
+        rendered = _source_row_block_statements()
+        assert len(rendered) == 7
+        for label, sql in rendered.items():
+            _assert_segment_block_identity_predicates(sql, label)
+        discovery, parameters = _segment_block_executions()[LATEST_CYCLE_DISCOVERY_BLOCK]
+>       assert_latest_cycle_discovery(discovery, parameters)
+
+tests/test_river_ts_text_identity_cleanup.py:931: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+sql = '\n            WITH seg AS (\n                SELECT\n                    (SELECT basin_version_key FROM core.basin_ve...BY o.cycle_time DESC\n                LIMIT 1\n            ) pick\n            ORDER BY scen.scenario_id\n            '
+params = {'basin_version_id': 'basin_v1', 'river_network_version_id': 'rivnet_v1', 'river_segment_id': 'seg_001'}
+
+    def assert_latest_cycle_discovery(sql: str, params: Mapping) -> None:
+        """Every shape commitment of design.md D1, on one executed statement."""
+        flat = _flat(sql)
+        assert set(re.findall(r"%\((\w+)\)s", sql)) == set(params)
+        # hydro_run drives, and is read exactly once — in the MATERIALIZED candidates.
+        assert flat.count("hydro.hydro_run") == 1
+        candidates = candidate_cte(sql)
+        # #2630: the candidates carry the run window the probe is bounded by.
+>       assert candidates.strip().startswith(
+            "SELECT h.run_key, h.scenario_id, h.cycle_time, h.end_time FROM hydro.hydro_run h"
+        )
+E       assert False
+E        +  where False = <built-in method startswith of str object at 0x7fe8c654e5d0>('SELECT h.run_key, h.scenario_id, h.cycle_time, h.end_time FROM hydro.hydro_run h')
+E        +    where <built-in method startswith of str object at 0x7fe8c654e5d0> = "SELECT h.run_key, h.scenario_id, h.cycle_time FROM hydro.hydro_run h WHERE h.run_type = 'forecast' AND h.cycle_time IS NOT NULL AND h.basin_version_id = %(basin_version_id)s".startswith
+E        +      where "SELECT h.run_key, h.scenario_id, h.cycle_time FROM hydro.hydro_run h WHERE h.run_type = 'forecast' AND h.cycle_time IS NOT NULL AND h.basin_version_id = %(basin_version_id)s" = <built-in method strip of str object at 0x7fe8c3d4adb0>()
+E        +        where <built-in method strip of str object at 0x7fe8c3d4adb0> = " SELECT h.run_key, h.scenario_id, h.cycle_time FROM hydro.hydro_run h WHERE h.run_type = 'forecast' AND h.cycle_time IS NOT NULL AND h.basin_version_id = %(basin_version_id)s ".strip
+
+tests/test_latest_cycle_discovery_shape.py:111: AssertionError
+_____ test_the_probe_only_counts_fact_rows_inside_the_candidate_run_window _____
+
+throwaway_database_url = 'postgresql://nhms:***@127.0.0.1:55432/nhms_it_8f795b5d19824da99de8c97822336b7e'
+
+    def test_the_probe_only_counts_fact_rows_inside_the_candidate_run_window(throwaway_database_url: str) -> None:
+        """tasks.md 2.3: rows inside [cycle_time, end_time] match; rows outside it do not.
+    
+        The pre-#2424 oracle has no window, so on this seed it DIVERGES from the
+        shipping statement by design (spec scenario "fact rows outside the run
+        window"): it picks the newest run with any row. Asserting that divergence
+        keeps the seed honest — without it the out-of-window runs could be inert.
+        node-27 held zero out-of-window rows on 2026-09-28; ingest-side enforcement
+        is #2687.
+        """
+        apply_migrations_from_zero(throwaway_database_url)
+        seed_issue_126_data(throwaway_database_url)
+        _seed_window_runs(throwaway_database_url)
+    
+        old, new = _both(throwaway_database_url, scenarios=["GFS", "IFS"])
+    
+>       assert new == {GFS: _cycle(12), IFS: _cycle(6)}
+E       AssertionError: assert {'forecast_gf...timezone.utc)} == {'forecast_gf...timezone.utc)}
+E         
+E         Differing items:
+E         {'forecast_gfs_deterministic': datetime.datetime(2026, 5, 4, 12, 0, tzinfo=datetime.timezone.utc)} != {'forecast_gfs_deterministic': datetime.datetime(2026, 5, 3, 12, 0, tzinfo=datetime.timezone.utc)}
+E         {'forecast_ifs_deterministic': datetime.datetime(2026, 5, 3, 18, 0, tzinfo=datetime.timezone.utc)} != {'forecast_ifs_deterministic': datetime.datetime(2026, 5, 3, 6, 0, tzinfo=datetime.timezone.utc)}
+E         Use -v to get more diff
+
+tests/test_latest_cycle_discovery_integration.py:484: AssertionError
+14 failed, 88 passed in 48.37s
+pytest_rc=1

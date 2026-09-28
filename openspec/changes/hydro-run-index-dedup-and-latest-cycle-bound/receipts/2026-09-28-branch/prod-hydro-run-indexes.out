@@ -1,0 +1,36 @@
+Pager usage is off.
+BEGIN
+          measured_at          |  current_user   | current_database 
+-------------------------------+-----------------+------------------
+ 2026-09-28 16:22:56.349463+00 | nhms_display_ro | nhms
+(1 row)
+
+                  indexname                   |                                                                                                                                                         indexdef                                                                                                                                                         
+----------------------------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ hydro_run_display_product_basin_status_idx   | CREATE INDEX hydro_run_display_product_basin_status_idx ON hydro.hydro_run USING btree (basin_version_id, status) WHERE (status = ANY (ARRAY['succeeded'::hydro.run_status, 'parsed'::hydro.run_status, 'published'::hydro.run_status]))
+ hydro_run_display_ready_basin_status_idx     | CREATE INDEX hydro_run_display_ready_basin_status_idx ON hydro.hydro_run USING btree (basin_version_id, status) WHERE (status = ANY (ARRAY['succeeded'::hydro.run_status, 'parsed'::hydro.run_status, 'published'::hydro.run_status]))
+ hydro_run_display_ready_candidate_idx        | CREATE INDEX hydro_run_display_ready_candidate_idx ON hydro.hydro_run USING btree (lower(source_id), run_type, basin_version_id, cycle_time DESC, run_id DESC) WHERE ((cycle_time IS NOT NULL) AND (status = ANY (ARRAY['succeeded'::hydro.run_status, 'parsed'::hydro.run_status, 'published'::hydro.run_status])))
+ hydro_run_latest_ready_run_idx               | CREATE INDEX hydro_run_latest_ready_run_idx ON hydro.hydro_run USING btree (cycle_time DESC, run_id DESC) WHERE (status = ANY (ARRAY['succeeded'::hydro.run_status, 'parsed'::hydro.run_status, 'published'::hydro.run_status]))
+ hydro_run_ops_strict_identity_candidates_idx | CREATE INDEX hydro_run_ops_strict_identity_candidates_idx ON hydro.hydro_run USING btree (source_id, cycle_time, run_id, model_id)
+ hydro_run_pkey                               | CREATE UNIQUE INDEX hydro_run_pkey ON hydro.hydro_run USING btree (run_id)
+ hydro_run_qhh_latest_candidate_idx           | CREATE INDEX hydro_run_qhh_latest_candidate_idx ON hydro.hydro_run USING btree (lower(source_id), run_type, basin_version_id, cycle_time DESC, run_id DESC) WHERE ((cycle_time IS NOT NULL) AND (status = ANY (ARRAY['succeeded'::hydro.run_status, 'parsed'::hydro.run_status, 'published'::hydro.run_status])))
+ hydro_run_qhh_latest_candidate_parsed_idx    | CREATE INDEX hydro_run_qhh_latest_candidate_parsed_idx ON hydro.hydro_run USING btree (lower(source_id), run_type, basin_version_id, cycle_time DESC, run_id DESC) WHERE ((cycle_time IS NOT NULL) AND (status = ANY (ARRAY['succeeded'::hydro.run_status, 'parsed'::hydro.run_status, 'published'::hydro.run_status])))
+ hydro_run_run_key_key                        | CREATE UNIQUE INDEX hydro_run_run_key_key ON hydro.hydro_run USING btree (run_key)
+(9 rows)
+
+ new_name_exists 
+-----------------
+               0
+(1 row)
+
+ relpages | relallvisible | reltuples 
+----------+---------------+-----------
+     1299 |            47 |     10147
+(1 row)
+
+ n_live_tup | n_dead_tup |        last_autovacuum        |       last_autoanalyze        
+------------+------------+-------------------------------+-------------------------------
+      10723 |       7941 | 2026-09-15 15:30:43.871157+00 | 2026-09-15 18:54:03.137368+00
+(1 row)
+
+ROLLBACK

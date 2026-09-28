@@ -1,0 +1,228 @@
+{"pin": {"bv": "basins_byh_vbasins", "reach": "basins_byh_shud_reach_000001", "net": "basins_byh_rivnet_vbasins"}, "segment_id": "basins_byh_shud_shud_riv_000001", "result": {"forecast_gfs_deterministic": "2026-09-27T12:00:00+00:00", "forecast_ifs_deterministic": "2026-09-27T12:00:00+00:00"}}
+
+            WITH seg AS (
+                SELECT
+                    (SELECT basin_version_key FROM core.basin_version
+                     WHERE basin_version_id = %(basin_version_id)s) AS basin_version_key,
+                    (SELECT river_segment_key FROM core.river_segment
+                     WHERE river_segment_id = %(river_segment_id)s
+                       AND river_network_version_id = %(river_network_version_id)s) AS river_segment_key,
+                    (SELECT river_network_version_key FROM core.river_network_version
+                     WHERE river_network_version_id = %(river_network_version_id)s) AS river_network_version_key
+            ),
+            cand AS MATERIALIZED (
+                SELECT h.run_key, h.scenario_id, h.cycle_time, h.end_time
+                FROM hydro.hydro_run h
+                WHERE h.run_type = 'forecast'
+                  AND h.cycle_time IS NOT NULL
+                  AND h.basin_version_id = %(basin_version_id)s
+                  AND (LOWER(h.source_id) = ANY(%(scenario_tokens)s) OR LOWER(h.scenario_id) = ANY(%(scenario_ids)s))
+                  
+            ),
+            scen AS (
+                SELECT DISTINCT scenario_id FROM cand
+            )
+            SELECT scen.scenario_id, pick.cycle_time
+            FROM scen
+            CROSS JOIN seg
+            CROSS JOIN LATERAL (
+                SELECT o.cycle_time
+                FROM (
+                    SELECT c.run_key, c.cycle_time, c.end_time
+                    FROM cand c
+                    WHERE c.scenario_id = scen.scenario_id
+                    ORDER BY c.cycle_time DESC
+                    OFFSET 0
+                ) o
+                CROSS JOIN LATERAL (
+                    SELECT 1
+                    FROM hydro.river_timeseries rt
+                    WHERE rt.run_key = o.run_key
+                      AND rt.river_segment_key = seg.river_segment_key
+                      AND rt.basin_version_key IS NOT NULL
+                      AND rt.basin_version_key IS NOT DISTINCT FROM seg.basin_version_key
+                      AND rt.river_network_version_key IS NOT NULL
+                      AND rt.river_network_version_key IS NOT DISTINCT FROM seg.river_network_version_key
+                      AND rt.variable_e = 'q_down'::hydro.river_variable
+                      AND rt.valid_time >= o.cycle_time
+                      AND rt.valid_time <= o.end_time
+                    LIMIT 1
+                ) hit
+                ORDER BY o.cycle_time DESC
+                LIMIT 1
+            ) pick
+            ORDER BY scen.scenario_id
+            
+{"basin_version_id": "basins_byh_vbasins", "river_segment_id": "basins_byh_shud_shud_riv_000001", "river_network_version_id": "basins_byh_rivnet_vbasins", "scenario_tokens": ["gfs", "ifs"], "scenario_ids": ["forecast_gfs_deterministic", "forecast_ifs_deterministic", "gfs", "ifs"]}
+Nested Loop  (cost=1595.78..1631.36 rows=3 width=40) (actual time=3.513..3.832 rows=2 loops=1)
+  Buffers: shared hit=1318
+  CTE cand
+    ->  Seq Scan on hydro_run h  (cost=0.00..1578.04 rows=3 width=47) (actual time=0.057..3.052 rows=128 loops=1)
+          Filter: ((cycle_time IS NOT NULL) AND (run_type = 'forecast'::hydro.run_type) AND (basin_version_id = 'basins_byh_vbasins'::text) AND ((lower(source_id) = ANY ('{gfs,ifs}'::text[])) OR (lower(scenario_id) = ANY ('{forecast_gfs_deterministic,forecast_ifs_deterministic,gfs,ifs}'::text[]))))
+          Rows Removed by Filter: 10595
+          Buffers: shared hit=1299
+  ->  Unique  (cost=0.08..0.10 rows=3 width=32) (actual time=3.167..3.194 rows=2 loops=1)
+        Buffers: shared hit=1299
+        ->  Sort  (cost=0.08..0.09 rows=3 width=32) (actual time=3.166..3.176 rows=128 loops=1)
+              Sort Key: cand.scenario_id
+              Sort Method: quicksort  Memory: 34kB
+              Buffers: shared hit=1299
+              ->  CTE Scan on cand  (cost=0.00..0.06 rows=3 width=32) (actual time=0.059..3.121 rows=128 loops=1)
+                    Buffers: shared hit=1299
+  ->  Limit  (cost=17.65..17.71 rows=1 width=8) (actual time=0.315..0.317 rows=1 loops=2)
+        Buffers: shared hit=19
+        ->  Nested Loop  (cost=17.65..17.71 rows=1 width=8) (actual time=0.314..0.316 rows=1 loops=2)
+              Buffers: shared hit=19
+              ->  Sort  (cost=0.08..0.08 rows=1 width=20) (actual time=0.050..0.050 rows=1 loops=2)
+                    Sort Key: c.cycle_time DESC
+                    Sort Method: quicksort  Memory: 29kB
+                    ->  CTE Scan on cand c  (cost=0.00..0.07 rows=1 width=20) (actual time=0.002..0.028 rows=64 loops=2)
+                          Filter: (scenario_id = cand.scenario_id)
+                          Rows Removed by Filter: 64
+              ->  Limit  (cost=17.58..17.60 rows=1 width=4) (actual time=0.262..0.264 rows=1 loops=2)
+                    Buffers: shared hit=19
+                    InitPlan 2 (returns $2)
+                      ->  Index Scan using river_segment_pkey on river_segment  (cost=0.55..2.77 rows=1 width=4) (actual time=0.013..0.014 rows=1 loops=1)
+                            Index Cond: ((river_segment_id = 'basins_byh_shud_shud_riv_000001'::text) AND (river_network_version_id = 'basins_byh_rivnet_vbasins'::text))
+                            Buffers: shared hit=5
+                    InitPlan 3 (returns $3)
+                      ->  Index Scan using basin_version_pkey on basin_version  (cost=0.14..2.36 rows=1 width=4) (actual time=0.009..0.009 rows=1 loops=1)
+                            Index Cond: (basin_version_id = 'basins_byh_vbasins'::text)
+                            Buffers: shared hit=2
+                    InitPlan 4 (returns $4)
+                      ->  Index Scan using river_network_version_pkey on river_network_version  (cost=0.14..2.36 rows=1 width=4) (actual time=0.003..0.003 rows=1 loops=1)
+                            Index Cond: (river_network_version_id = 'basins_byh_rivnet_vbasins'::text)
+                            Buffers: shared hit=2
+                    ->  Result  (cost=10.09..7640.76 rows=378011 width=4) (actual time=0.262..0.263 rows=1 loops=2)
+                          Buffers: shared hit=19
+                          ->  Custom Scan (ChunkAppend) on river_timeseries rt  (cost=10.09..3860.65 rows=378011 width=0) (actual time=0.244..0.245 rows=1 loops=2)
+                                Chunks excluded during runtime: 21
+                                Buffers: shared hit=14
+                                ->  Custom Scan (DecompressChunk) on _hyper_9_130_chunk rt_1  (cost=10.09..191.66 rows=19000 width=0) (never executed)
+                                      Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $3)) AND (NOT (river_network_version_key IS DISTINCT FROM $4)) AND (valid_time >= c.cycle_time) AND (valid_time <= c.end_time) AND (variable_e = 'q_down'::hydro.river_variable))
+                                      ->  Index Scan using compress_hyper_10_185_chunk__compressed_hypertable_10_run_key_r on compress_hyper_10_185_chunk  (cost=0.43..191.66 rows=19 width=164) (never executed)
+                                            Index Cond: ((run_key = c.run_key) AND (river_segment_key = $2))
+                                            Filter: ((_ts_meta_max_2 >= c.cycle_time) AND (_ts_meta_min_2 <= c.end_time))
+                                ->  Custom Scan (DecompressChunk) on _hyper_9_131_chunk rt_2  (cost=10.09..191.66 rows=19000 width=0) (never executed)
+                                      Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $3)) AND (NOT (river_network_version_key IS DISTINCT FROM $4)) AND (valid_time >= c.cycle_time) AND (valid_time <= c.end_time) AND (variable_e = 'q_down'::hydro.river_variable))
+                                      ->  Index Scan using compress_hyper_10_200_chunk__compressed_hypertable_10_run_key_r on compress_hyper_10_200_chunk  (cost=0.43..191.66 rows=19 width=164) (never executed)
+                                            Index Cond: ((run_key = c.run_key) AND (river_segment_key = $2))
+                                            Filter: ((_ts_meta_max_2 >= c.cycle_time) AND (_ts_meta_min_2 <= c.end_time))
+                                ->  Custom Scan (DecompressChunk) on _hyper_9_132_chunk rt_3  (cost=10.09..191.66 rows=19000 width=0) (never executed)
+                                      Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $3)) AND (NOT (river_network_version_key IS DISTINCT FROM $4)) AND (valid_time >= c.cycle_time) AND (valid_time <= c.end_time) AND (variable_e = 'q_down'::hydro.river_variable))
+                                      ->  Index Scan using compress_hyper_10_204_chunk__compressed_hypertable_10_run_key_r on compress_hyper_10_204_chunk  (cost=0.43..191.66 rows=19 width=164) (never executed)
+                                            Index Cond: ((run_key = c.run_key) AND (river_segment_key = $2))
+                                            Filter: ((_ts_meta_max_2 >= c.cycle_time) AND (_ts_meta_min_2 <= c.end_time))
+                                ->  Custom Scan (DecompressChunk) on _hyper_9_133_chunk rt_4  (cost=10.15..202.91 rows=20000 width=0) (never executed)
+                                      Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $3)) AND (NOT (river_network_version_key IS DISTINCT FROM $4)) AND (valid_time >= c.cycle_time) AND (valid_time <= c.end_time) AND (variable_e = 'q_down'::hydro.river_variable))
+                                      ->  Index Scan using compress_hyper_10_212_chunk__compressed_hypertable_10_run_key_r on compress_hyper_10_212_chunk  (cost=0.43..202.91 rows=20 width=164) (never executed)
+                                            Index Cond: ((run_key = c.run_key) AND (river_segment_key = $2))
+                                            Filter: ((_ts_meta_max_2 >= c.cycle_time) AND (_ts_meta_min_2 <= c.end_time))
+                                ->  Custom Scan (DecompressChunk) on _hyper_9_134_chunk rt_5  (cost=10.36..217.53 rows=21000 width=0) (never executed)
+                                      Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $3)) AND (NOT (river_network_version_key IS DISTINCT FROM $4)) AND (valid_time >= c.cycle_time) AND (valid_time <= c.end_time) AND (variable_e = 'q_down'::hydro.river_variable))
+                                      ->  Index Scan using compress_hyper_10_215_chunk__compressed_hypertable_10_run_key_r on compress_hyper_10_215_chunk  (cost=0.43..217.53 rows=21 width=164) (never executed)
+                                            Index Cond: ((run_key = c.run_key) AND (river_segment_key = $2))
+                                            Filter: ((_ts_meta_max_2 >= c.cycle_time) AND (_ts_meta_min_2 <= c.end_time))
+                                ->  Custom Scan (DecompressChunk) on _hyper_9_135_chunk rt_6  (cost=10.14..233.28 rows=23000 width=0) (never executed)
+                                      Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $3)) AND (NOT (river_network_version_key IS DISTINCT FROM $4)) AND (valid_time >= c.cycle_time) AND (valid_time <= c.end_time) AND (variable_e = 'q_down'::hydro.river_variable))
+                                      ->  Index Scan using compress_hyper_10_219_chunk__compressed_hypertable_10_run_key_r on compress_hyper_10_219_chunk  (cost=0.43..233.28 rows=23 width=164) (never executed)
+                                            Index Cond: ((run_key = c.run_key) AND (river_segment_key = $2))
+                                            Filter: ((_ts_meta_max_2 >= c.cycle_time) AND (_ts_meta_min_2 <= c.end_time))
+                                ->  Custom Scan (DecompressChunk) on _hyper_9_136_chunk rt_7  (cost=10.33..247.91 rows=24000 width=0) (never executed)
+                                      Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $3)) AND (NOT (river_network_version_key IS DISTINCT FROM $4)) AND (valid_time >= c.cycle_time) AND (valid_time <= c.end_time) AND (variable_e = 'q_down'::hydro.river_variable))
+                                      ->  Index Scan using compress_hyper_10_223_chunk__compressed_hypertable_10_run_key_r on compress_hyper_10_223_chunk  (cost=0.43..247.91 rows=24 width=164) (never executed)
+                                            Index Cond: ((run_key = c.run_key) AND (river_segment_key = $2))
+                                            Filter: ((_ts_meta_max_2 >= c.cycle_time) AND (_ts_meta_min_2 <= c.end_time))
+                                ->  Custom Scan (DecompressChunk) on _hyper_9_141_chunk rt_8  (cost=10.09..191.66 rows=19000 width=0) (never executed)
+                                      Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $3)) AND (NOT (river_network_version_key IS DISTINCT FROM $4)) AND (valid_time >= c.cycle_time) AND (valid_time <= c.end_time) AND (variable_e = 'q_down'::hydro.river_variable))
+                                      ->  Index Scan using compress_hyper_10_187_chunk__compressed_hypertable_10_run_key_r on compress_hyper_10_187_chunk  (cost=0.43..191.66 rows=19 width=164) (never executed)
+                                            Index Cond: ((run_key = c.run_key) AND (river_segment_key = $2))
+                                            Filter: ((_ts_meta_max_2 >= c.cycle_time) AND (_ts_meta_min_2 <= c.end_time))
+                                ->  Custom Scan (DecompressChunk) on _hyper_9_142_chunk rt_9  (cost=10.05..261.41 rows=26000 width=0) (never executed)
+                                      Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $3)) AND (NOT (river_network_version_key IS DISTINCT FROM $4)) AND (valid_time >= c.cycle_time) AND (valid_time <= c.end_time) AND (variable_e = 'q_down'::hydro.river_variable))
+                                      ->  Index Scan using compress_hyper_10_227_chunk__compressed_hypertable_10_run_key_r on compress_hyper_10_227_chunk  (cost=0.43..261.41 rows=26 width=164) (never executed)
+                                            Index Cond: ((run_key = c.run_key) AND (river_segment_key = $2))
+                                            Filter: ((_ts_meta_max_2 >= c.cycle_time) AND (_ts_meta_min_2 <= c.end_time))
+                                ->  Custom Scan (DecompressChunk) on _hyper_9_143_chunk rt_10  (cost=10.09..191.66 rows=19000 width=0) (never executed)
+                                      Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $3)) AND (NOT (river_network_version_key IS DISTINCT FROM $4)) AND (valid_time >= c.cycle_time) AND (valid_time <= c.end_time) AND (variable_e = 'q_down'::hydro.river_variable))
+                                      ->  Index Scan using compress_hyper_10_188_chunk__compressed_hypertable_10_run_key_r on compress_hyper_10_188_chunk  (cost=0.43..191.66 rows=19 width=164) (never executed)
+                                            Index Cond: ((run_key = c.run_key) AND (river_segment_key = $2))
+                                            Filter: ((_ts_meta_max_2 >= c.cycle_time) AND (_ts_meta_min_2 <= c.end_time))
+                                ->  Custom Scan (DecompressChunk) on _hyper_9_160_chunk rt_11  (cost=10.09..191.66 rows=19000 width=0) (never executed)
+                                      Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $3)) AND (NOT (river_network_version_key IS DISTINCT FROM $4)) AND (valid_time >= c.cycle_time) AND (valid_time <= c.end_time) AND (variable_e = 'q_down'::hydro.river_variable))
+                                      ->  Index Scan using compress_hyper_10_216_chunk__compressed_hypertable_10_run_key_r on compress_hyper_10_216_chunk  (cost=0.43..191.66 rows=19 width=164) (never executed)
+                                            Index Cond: ((run_key = c.run_key) AND (river_segment_key = $2))
+                                            Filter: ((_ts_meta_max_2 >= c.cycle_time) AND (_ts_meta_min_2 <= c.end_time))
+                                ->  Custom Scan (DecompressChunk) on _hyper_9_161_chunk rt_12  (cost=10.09..191.66 rows=19000 width=0) (never executed)
+                                      Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $3)) AND (NOT (river_network_version_key IS DISTINCT FROM $4)) AND (valid_time >= c.cycle_time) AND (valid_time <= c.end_time) AND (variable_e = 'q_down'::hydro.river_variable))
+                                      ->  Index Scan using compress_hyper_10_211_chunk__compressed_hypertable_10_run_key_r on compress_hyper_10_211_chunk  (cost=0.43..191.66 rows=19 width=164) (never executed)
+                                            Index Cond: ((run_key = c.run_key) AND (river_segment_key = $2))
+                                            Filter: ((_ts_meta_max_2 >= c.cycle_time) AND (_ts_meta_min_2 <= c.end_time))
+                                ->  Custom Scan (DecompressChunk) on _hyper_9_162_chunk rt_13  (cost=10.09..191.66 rows=19000 width=0) (never executed)
+                                      Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $3)) AND (NOT (river_network_version_key IS DISTINCT FROM $4)) AND (valid_time >= c.cycle_time) AND (valid_time <= c.end_time) AND (variable_e = 'q_down'::hydro.river_variable))
+                                      ->  Index Scan using compress_hyper_10_205_chunk__compressed_hypertable_10_run_key_r on compress_hyper_10_205_chunk  (cost=0.43..191.66 rows=19 width=164) (never executed)
+                                            Index Cond: ((run_key = c.run_key) AND (river_segment_key = $2))
+                                            Filter: ((_ts_meta_max_2 >= c.cycle_time) AND (_ts_meta_min_2 <= c.end_time))
+                                ->  Custom Scan (DecompressChunk) on _hyper_9_163_chunk rt_14  (cost=10.09..191.66 rows=19000 width=0) (never executed)
+                                      Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $3)) AND (NOT (river_network_version_key IS DISTINCT FROM $4)) AND (valid_time >= c.cycle_time) AND (valid_time <= c.end_time) AND (variable_e = 'q_down'::hydro.river_variable))
+                                      ->  Index Scan using compress_hyper_10_201_chunk__compressed_hypertable_10_run_key_r on compress_hyper_10_201_chunk  (cost=0.43..191.66 rows=19 width=164) (never executed)
+                                            Index Cond: ((run_key = c.run_key) AND (river_segment_key = $2))
+                                            Filter: ((_ts_meta_max_2 >= c.cycle_time) AND (_ts_meta_min_2 <= c.end_time))
+                                ->  Custom Scan (DecompressChunk) on _hyper_9_164_chunk rt_15  (cost=10.09..191.66 rows=19000 width=0) (never executed)
+                                      Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $3)) AND (NOT (river_network_version_key IS DISTINCT FROM $4)) AND (valid_time >= c.cycle_time) AND (valid_time <= c.end_time) AND (variable_e = 'q_down'::hydro.river_variable))
+                                      ->  Index Scan using compress_hyper_10_190_chunk__compressed_hypertable_10_run_key_r on compress_hyper_10_190_chunk  (cost=0.43..191.66 rows=19 width=164) (never executed)
+                                            Index Cond: ((run_key = c.run_key) AND (river_segment_key = $2))
+                                            Filter: ((_ts_meta_max_2 >= c.cycle_time) AND (_ts_meta_min_2 <= c.end_time))
+                                ->  Custom Scan (DecompressChunk) on _hyper_9_165_chunk rt_16  (cost=10.09..191.66 rows=19000 width=0) (never executed)
+                                      Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $3)) AND (NOT (river_network_version_key IS DISTINCT FROM $4)) AND (valid_time >= c.cycle_time) AND (valid_time <= c.end_time) AND (variable_e = 'q_down'::hydro.river_variable))
+                                      ->  Index Scan using compress_hyper_10_189_chunk__compressed_hypertable_10_run_key_r on compress_hyper_10_189_chunk  (cost=0.43..191.66 rows=19 width=164) (never executed)
+                                            Index Cond: ((run_key = c.run_key) AND (river_segment_key = $2))
+                                            Filter: ((_ts_meta_max_2 >= c.cycle_time) AND (_ts_meta_min_2 <= c.end_time))
+                                ->  Custom Scan (DecompressChunk) on _hyper_9_170_chunk rt_17  (cost=10.14..273.79 rows=27000 width=0) (never executed)
+                                      Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $3)) AND (NOT (river_network_version_key IS DISTINCT FROM $4)) AND (valid_time >= c.cycle_time) AND (valid_time <= c.end_time) AND (variable_e = 'q_down'::hydro.river_variable))
+                                      ->  Index Scan using compress_hyper_10_236_chunk__compressed_hypertable_10_run_key_r on compress_hyper_10_236_chunk  (cost=0.43..273.79 rows=27 width=164) (never executed)
+                                            Index Cond: ((run_key = c.run_key) AND (river_segment_key = $2))
+                                            Filter: ((_ts_meta_max_2 >= c.cycle_time) AND (_ts_meta_min_2 <= c.end_time))
+                                ->  Custom Scan (DecompressChunk) on _hyper_9_175_chunk rt_18  (cost=10.18..285.04 rows=28000 width=0) (never executed)
+                                      Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $3)) AND (NOT (river_network_version_key IS DISTINCT FROM $4)) AND (valid_time >= c.cycle_time) AND (valid_time <= c.end_time) AND (variable_e = 'q_down'::hydro.river_variable))
+                                      ->  Index Scan using compress_hyper_10_235_chunk__compressed_hypertable_10_run_key_r on compress_hyper_10_235_chunk  (cost=0.43..285.04 rows=28 width=164) (never executed)
+                                            Index Cond: ((run_key = c.run_key) AND (river_segment_key = $2))
+                                            Filter: ((_ts_meta_max_2 >= c.cycle_time) AND (_ts_meta_min_2 <= c.end_time))
+                                ->  Index Scan using "181_421_river_timeseries_narrow_pkey" on _hyper_9_181_chunk rt_19  (cost=0.57..2.80 rows=1 width=0) (never executed)
+                                      Index Cond: ((run_key = c.run_key) AND (river_segment_key = $2) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= c.cycle_time) AND (valid_time <= c.end_time))
+                                      Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $3)) AND (NOT (river_network_version_key IS DISTINCT FROM $4)))
+                                ->  Index Scan using "191_443_river_timeseries_narrow_pkey" on _hyper_9_191_chunk rt_20  (cost=0.57..2.80 rows=1 width=0) (never executed)
+                                      Index Cond: ((run_key = c.run_key) AND (river_segment_key = $2) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= c.cycle_time) AND (valid_time <= c.end_time))
+                                      Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $3)) AND (NOT (river_network_version_key IS DISTINCT FROM $4)))
+                                ->  Index Scan using "202_474_river_timeseries_narrow_pkey" on _hyper_9_202_chunk rt_21  (cost=0.57..2.80 rows=1 width=0) (never executed)
+                                      Index Cond: ((run_key = c.run_key) AND (river_segment_key = $2) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= c.cycle_time) AND (valid_time <= c.end_time))
+                                      Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $3)) AND (NOT (river_network_version_key IS DISTINCT FROM $4)))
+                                ->  Index Scan using "206_484_river_timeseries_narrow_pkey" on _hyper_9_206_chunk rt_22  (cost=0.57..2.80 rows=1 width=0) (actual time=0.010..0.010 rows=1 loops=2)
+                                      Index Cond: ((run_key = c.run_key) AND (river_segment_key = $2) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= c.cycle_time) AND (valid_time <= c.end_time))
+                                      Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $3)) AND (NOT (river_network_version_key IS DISTINCT FROM $4)))
+                                      Buffers: shared hit=10
+                                ->  Index Scan using "213_504_river_timeseries_narrow_pkey" on _hyper_9_213_chunk rt_23  (cost=0.57..2.80 rows=1 width=0) (never executed)
+                                      Index Cond: ((run_key = c.run_key) AND (river_segment_key = $2) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= c.cycle_time) AND (valid_time <= c.end_time))
+                                      Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $3)) AND (NOT (river_network_version_key IS DISTINCT FROM $4)))
+                                ->  Index Scan using "217_514_river_timeseries_narrow_pkey" on _hyper_9_217_chunk rt_24  (cost=0.57..2.80 rows=1 width=0) (never executed)
+                                      Index Cond: ((run_key = c.run_key) AND (river_segment_key = $2) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= c.cycle_time) AND (valid_time <= c.end_time))
+                                      Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $3)) AND (NOT (river_network_version_key IS DISTINCT FROM $4)))
+                                ->  Index Scan using "221_524_river_timeseries_narrow_pkey" on _hyper_9_221_chunk rt_25  (cost=0.57..2.80 rows=1 width=0) (never executed)
+                                      Index Cond: ((run_key = c.run_key) AND (river_segment_key = $2) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= c.cycle_time) AND (valid_time <= c.end_time))
+                                      Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $3)) AND (NOT (river_network_version_key IS DISTINCT FROM $4)))
+                                ->  Index Scan using "225_534_river_timeseries_narrow_pkey" on _hyper_9_225_chunk rt_26  (cost=0.57..2.80 rows=1 width=0) (never executed)
+                                      Index Cond: ((run_key = c.run_key) AND (river_segment_key = $2) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= c.cycle_time) AND (valid_time <= c.end_time))
+                                      Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $3)) AND (NOT (river_network_version_key IS DISTINCT FROM $4)))
+                                ->  Index Scan using _hyper_9_231_chunk_river_ts_segment_time_key_idx on _hyper_9_231_chunk rt_27  (cost=0.57..2.80 rows=1 width=0) (never executed)
+                                      Index Cond: ((river_segment_key = $2) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= c.cycle_time) AND (valid_time <= c.end_time))
+                                      Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $3)) AND (NOT (river_network_version_key IS DISTINCT FROM $4)) AND (run_key = c.run_key))
+                                ->  Index Scan using _hyper_9_233_chunk_river_ts_segment_time_key_idx on _hyper_9_233_chunk rt_28  (cost=0.44..2.67 rows=1 width=0) (never executed)
+                                      Index Cond: ((river_segment_key = $2) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= c.cycle_time) AND (valid_time <= c.end_time))
+                                      Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $3)) AND (NOT (river_network_version_key IS DISTINCT FROM $4)) AND (run_key = c.run_key))
+                                ->  Index Scan using _hyper_9_237_chunk_river_ts_segment_time_key_idx on _hyper_9_237_chunk rt_29  (cost=0.43..2.67 rows=1 width=0) (never executed)
+                                      Index Cond: ((river_segment_key = $2) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= c.cycle_time) AND (valid_time <= c.end_time))
+                                      Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $3)) AND (NOT (river_network_version_key IS DISTINCT FROM $4)) AND (run_key = c.run_key))
+Planning:
+  Buffers: shared hit=978
+Planning Time: 5.160 ms
+Execution Time: 4.445 ms

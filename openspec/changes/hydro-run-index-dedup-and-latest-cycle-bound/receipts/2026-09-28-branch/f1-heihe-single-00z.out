@@ -1,0 +1,75 @@
+# f1-probe-window.sql basin=basins_heihe tag=single-00z run=3/3 (kept: 3, warm) at 2026-09-28T17:35:55Z
+# ONE VALUES row: planner folds the window into constants (plan-time chunk exclusion) -- NOT the shape of the real statement
+# cands=(-1, timestamptz '2026-09-28 00:00+00', timestamptz '2026-10-05 00:00+00')
+Pager usage is off.
+BEGIN
+SET
+                                                                                                                                           QUERY PLAN                                                                                                                                           
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Subquery Scan on hit (actual time=0.691..0.694 rows=0 loops=1)
+   Buffers: shared hit=36
+   ->  Limit (actual time=0.690..0.693 rows=0 loops=1)
+         Buffers: shared hit=36
+         InitPlan 1 (returns $0)
+           ->  Index Scan using river_segment_pkey on river_segment (actual time=0.119..0.120 rows=1 loops=1)
+                 Index Cond: ((river_segment_id = 'basins_heihe_shud_shud_riv_000001'::text) AND (river_network_version_id = 'basins_heihe_rivnet_vbasins'::text))
+                 Buffers: shared hit=5
+         InitPlan 2 (returns $1)
+           ->  Index Scan using basin_version_pkey on basin_version (actual time=0.029..0.029 rows=1 loops=1)
+                 Index Cond: (basin_version_id = 'basins_heihe_vbasins'::text)
+                 Buffers: shared hit=2
+         InitPlan 3 (returns $2)
+           ->  Index Scan using river_network_version_pkey on river_network_version (actual time=0.023..0.023 rows=1 loops=1)
+                 Index Cond: (river_network_version_id = 'basins_heihe_rivnet_vbasins'::text)
+                 Buffers: shared hit=2
+         ->  Result (actual time=0.689..0.691 rows=0 loops=1)
+               Buffers: shared hit=36
+               ->  Custom Scan (ChunkAppend) on river_timeseries rt (actual time=0.563..0.565 rows=0 loops=1)
+                     Hypertables excluded during runtime: 0
+                     Buffers: shared hit=31
+                     ->  Index Scan using "213_504_river_timeseries_narrow_pkey" on _hyper_9_213_chunk rt_1 (actual time=0.096..0.096 rows=0 loops=1)
+                           Index Cond: ((run_key = '-1'::integer) AND (river_segment_key = $0) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= '2026-09-28 00:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-10-05 00:00:00+00'::timestamp with time zone))
+                           Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $1)) AND (NOT (river_network_version_key IS DISTINCT FROM $2)))
+                           Buffers: shared hit=4
+                     ->  Index Scan using "217_514_river_timeseries_narrow_pkey" on _hyper_9_217_chunk rt_2 (actual time=0.063..0.063 rows=0 loops=1)
+                           Index Cond: ((run_key = '-1'::integer) AND (river_segment_key = $0) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= '2026-09-28 00:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-10-05 00:00:00+00'::timestamp with time zone))
+                           Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $1)) AND (NOT (river_network_version_key IS DISTINCT FROM $2)))
+                           Buffers: shared hit=4
+                     ->  Index Scan using "221_524_river_timeseries_narrow_pkey" on _hyper_9_221_chunk rt_3 (actual time=0.064..0.064 rows=0 loops=1)
+                           Index Cond: ((run_key = '-1'::integer) AND (river_segment_key = $0) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= '2026-09-28 00:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-10-05 00:00:00+00'::timestamp with time zone))
+                           Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $1)) AND (NOT (river_network_version_key IS DISTINCT FROM $2)))
+                           Buffers: shared hit=4
+                     ->  Index Scan using "225_534_river_timeseries_narrow_pkey" on _hyper_9_225_chunk rt_4 (actual time=0.068..0.068 rows=0 loops=1)
+                           Index Cond: ((run_key = '-1'::integer) AND (river_segment_key = $0) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= '2026-09-28 00:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-10-05 00:00:00+00'::timestamp with time zone))
+                           Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $1)) AND (NOT (river_network_version_key IS DISTINCT FROM $2)))
+                           Buffers: shared hit=4
+                     ->  Index Scan using "231_548_river_timeseries_narrow_pkey" on _hyper_9_231_chunk rt_5 (actual time=0.085..0.085 rows=0 loops=1)
+                           Index Cond: ((run_key = '-1'::integer) AND (river_segment_key = $0) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= '2026-09-28 00:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-10-05 00:00:00+00'::timestamp with time zone))
+                           Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $1)) AND (NOT (river_network_version_key IS DISTINCT FROM $2)))
+                           Buffers: shared hit=4
+                     ->  Index Scan using "233_554_river_timeseries_narrow_pkey" on _hyper_9_233_chunk rt_6 (actual time=0.072..0.072 rows=0 loops=1)
+                           Index Cond: ((run_key = '-1'::integer) AND (river_segment_key = $0) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= '2026-09-28 00:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-10-05 00:00:00+00'::timestamp with time zone))
+                           Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $1)) AND (NOT (river_network_version_key IS DISTINCT FROM $2)))
+                           Buffers: shared hit=4
+                     ->  Index Scan using "237_564_river_timeseries_narrow_pkey" on _hyper_9_237_chunk rt_7 (actual time=0.041..0.041 rows=0 loops=1)
+                           Index Cond: ((run_key = '-1'::integer) AND (river_segment_key = $0) AND (variable_e = 'q_down'::hydro.river_variable) AND (valid_time >= '2026-09-28 00:00:00+00'::timestamp with time zone) AND (valid_time <= '2026-10-05 00:00:00+00'::timestamp with time zone))
+                           Filter: ((basin_version_key IS NOT NULL) AND (river_network_version_key IS NOT NULL) AND (NOT (basin_version_key IS DISTINCT FROM $1)) AND (NOT (river_network_version_key IS DISTINCT FROM $2)))
+                           Buffers: shared hit=3
+ Planning:
+   Buffers: shared hit=1874
+ Planning Time: 9.211 ms
+ Execution Time: 0.904 ms
+(53 rows)
+
+                  chunk                   | seg_q_down_rows | runs 
+------------------------------------------+-----------------+------
+ _timescaledb_internal._hyper_9_213_chunk |             600 |   26
+ _timescaledb_internal._hyper_9_217_chunk |             504 |   22
+ _timescaledb_internal._hyper_9_221_chunk |             408 |   18
+ _timescaledb_internal._hyper_9_225_chunk |             312 |   14
+ _timescaledb_internal._hyper_9_231_chunk |             216 |   10
+ _timescaledb_internal._hyper_9_233_chunk |             120 |    6
+ _timescaledb_internal._hyper_9_237_chunk |              24 |    2
+(7 rows)
+
+ROLLBACK

@@ -1,0 +1,39 @@
+# f1-basin-pick.sql (nhms_display_ro, read-only) at 2026-09-28T17:33:16Z
+Pager usage is off.
+BEGIN
+SET
+          basin_version_id          | forecast_runs | sources |       max_cycle        
+------------------------------------+---------------+---------+------------------------
+ basins_heihe_vbasins               |           541 |       2 | 2026-09-27 12:00:00+00
+ basins_qhh_vbasins                 |           541 |       2 | 2026-09-27 12:00:00+00
+ basins_keliya_vbasins              |           375 |       2 | 2026-09-27 12:00:00+00
+ basins_kashigeer_vbasins           |           375 |       2 | 2026-09-27 12:00:00+00
+ basins_tailanhe_vbasins            |           375 |       2 | 2026-09-27 12:00:00+00
+ basins_weiganhe_vbasins            |           375 |       2 | 2026-09-27 12:00:00+00
+ basins_qinyijiang_vbasins          |           375 |       2 | 2026-09-27 12:00:00+00
+ basins_hetianhe_vbasins            |           375 |       2 | 2026-09-27 12:00:00+00
+ basins_xinanjiang_upstream_vbasins |           349 |       2 | 2026-09-21 00:00:00+00
+ basins_jialingjiang_vbasins        |           340 |       2 | 2026-09-27 12:00:00+00
+ basins_dth_zj_vbasins              |           340 |       2 | 2026-09-27 12:00:00+00
+ basins_huai_main_vbasins           |           340 |       2 | 2026-09-27 12:00:00+00
+(12 rows)
+
+ src | hh |  win   | count 
+-----+----+--------+-------
+ gfs |  0 | 7 days |  2651
+ gfs |  6 | 7 days |    32
+ gfs | 12 | 7 days |  2641
+ gfs | 18 | 7 days |    32
+ ifs |  0 | 7 days |  2651
+ ifs |  6 | 6 days |    32
+ ifs | 12 | 7 days |  2654
+ ifs | 18 | 6 days |    32
+(8 rows)
+
+ src |          max           
+-----+------------------------
+ ifs | 2026-09-28 00:00:00+00
+ gfs | 2026-09-28 00:00:00+00
+(2 rows)
+
+ROLLBACK
