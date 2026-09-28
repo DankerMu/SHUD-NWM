@@ -86,7 +86,18 @@ receipt 字段：`evidence_root`（**实际扫描的** root，按上面那条自
 `recorded_init_state_id`、`first_seen_pass` / `last_seen_pass` / `seen_in_passes`）、
 `unreadable_passes`、`candidate_lists_dropped_passes`、`non_evaluating_passes`（每条带
 `pass` / `status` / `reason`）、`orphan_reservations`（#2405，每条带 `reservation` / `pass_id` /
-`reserved_at` / `reason`，见下面 `3` 的最后一条）。
+`reserved_at` / `reason`，见下面 `3` 的最后一条）、`restart_reconcile_unscanned_passes`（#2668，每条带
+`pass` / `reason`：`restart_reconcile_absent` / `restart_reconcile_skipped` / `reserved_unbound_error` /
+`reserved_unbound_outcomes_absent`）。
+
+- **held reservation（#2668）**：restart reconcile 解不开的 held forecast master 不在 `blocked_candidates` 里（#2667 把
+  成员判成 `skip` / `active_duplicate_pipeline`），本命令从各趟 `restart_reconcile.reserved_unbound.outcomes[]` 把它列成
+  decision `held_reservation_unresolved`。这类条目的字段不同：`job_id`、`source_id`、`cycle_time`、`reason`（reconcile
+  action）、`submission_attempt_started_at`、`operator_command`（`bind-reserved-job` / `triage` / `escalate`）、
+  `recovery_runbook`、`first_seen_pass` / `last_seen_pass` / `seen_in_passes`，无出口时另带 `follow_up_issue`。它和其他
+  待办一样让命令 exit `1`；下一趟跑过 reconcile 的 pass 不再报该 job 时条目消失。只有 reconcile 车道真正跑过的 pass
+  才提供这类条目，其余 pass 记进 `restart_reconcile_unscanned_passes`、不改退出码——这是 exit `0` 的第五条已知边界：
+  它不为只出现在这些 pass 里的 held 行背书（held 行会持续存在，下一趟跑过 reconcile 的 pass 会列出）。
 
 - **合并了多趟的条目，值来自哪一趟**：同一候选在窗口里出现多趟时只列一条，除
   `first_seen_pass` / `seen_in_passes` 外**所有值字段都取 `last_seen_pass` 那一趟**（`candidate_id`
@@ -279,7 +290,8 @@ receipt 字段：`evidence_root`（**实际扫描的** root，按上面那条自
 | `blocked_strict_warm_start_init_state_mismatch` | `confirm-operator-reentry`（strict warm-start 预算） |
 | `blocked_operator_reentry_restart_stage_refused` | **不要再签一次**；带外修好 forecast 之前的输入，见下面「已知限制」的 sink 拒绝那条 |
 | `blocked_cohort_membership_unprovable` | `scripts/node22_manual_retry_failed_runs.py`（manual-retry marker，打在该 cohort 的 run id 上）；成因见 [`scheduler-dbfree-typed-reasons.md`](scheduler-dbfree-typed-reasons.md)「多成员 cohort 的失败归属」（#2603） |
-| `skip_active` / `active_duplicate_pipeline`，且同 source/cycle 的 forecast master 在 `restart_reconcile.reserved_unbound.outcomes[]` 里反复是 `ambiguous_fallback_match`（**不在** `list-operator-actions` 的六类里） | **不要** manual-retry、**不要**先 demote；走 [`failed-basin-retry.md`](failed-basin-retry.md)「Automatic unique fallback on an explicitly comment-less cluster」（#2655），见下 |
+| `held_reservation_unresolved`（#2668；按 `operator_command` 分流） | `bind-reserved-job`：`sacct` 核实本行 master 后用 `nhms-pipeline bind-reserved-job` 绑定；`triage`：`sacct` 看得到本行作业就 bind，确认已死才 `demote-reserved-job`；`escalate`：带 `sacct` 证据升级，`follow_up_issue` 为 `#2674`（legacy 未版本化 master）或 `#2675`（forcing 车道）时暂无受支持出口。步骤见 [`failed-basin-retry.md`](failed-basin-retry.md)「Disposition — completed or running but unbound: the guarded operator bind」 |
+| `skip_active` / `active_duplicate_pipeline`，且同 source/cycle 的 forecast master 在 `restart_reconcile.reserved_unbound.outcomes[]` 里反复是 `ambiguous_fallback_match`（自 #2668 起列为上一行的 `held_reservation_unresolved`） | **不要** manual-retry、**不要**先 demote；先走 [`failed-basin-retry.md`](failed-basin-retry.md)「Automatic unique fallback on an explicitly comment-less cluster」（#2655），自动绑定不了就 `bind-reserved-job`，见下 |
 | 同上症状，但该 master 的 outcome 是 `fallback_no_match`（`match_count=0`；#2655 起窗口里全是别家 key 的 master 也落这里，stall probe **不**压制它，会告警） | 窗口里看不到本行的作业：按 [`failed-basin-retry.md`](failed-basin-retry.md) Disposition 第 3 条做「确认已死」核对（`sacct`/`squeue` + `SubmitLine`），确认后才 `demote-reserved-job` |
 | 同上症状，但 outcome 是 `query_unavailable` / `process_unavailable`，或 `journal_quarantined` + `file_journal_reconcile_inventory_migration_invalid`（field `pipeline_jobs`） | 前者是一趟只绑一行的正常收敛，等后续 pass；后者是 `pipeline-jobs/` 下有非 `.json` 残留，移出 journal 根（留备份）。两者都**不要** demote，见下 |
 
@@ -296,7 +308,9 @@ receipt 字段：`evidence_root`（**实际扫描的** root，按上面那条自
 
 1. 先看该 outcome 的 `fallback_match_basis`（#2655 起才有）：
    - `submitline_exact` 且 `match_count=2`：窗口里有**两个** master 的 `SubmitLine` 都带本行的
-     `--comment=nhms_idem:<idempotency_key>`，是真的重复提交；保持 held，带 `sacct` 证据升级。
+     `--comment=nhms_idem:<idempotency_key>`，是真的重复提交；先在 `sacct`/`squeue` 确认另一个 master
+     已终态或已取消，再用 `bind-reserved-job` 绑定最后结束的那个 master（#2668），note 里记下另一个 master 的
+     id 与 `State`；另一个还在跑就先等或升级。
    - `name_window_count`：窗口里至少有一个 master 的 `SubmitLine` 缺失/无 key/不一致，只能按
      名字+窗口计数；用下面的只读 `sacct` 看是哪一个。
    - 字段**不存在**：node-22 checkout 早于 #2655，`git pull --ff-only` 后会按 SubmitLine
@@ -317,6 +331,10 @@ receipt 字段：`evidence_root`（**实际扫描的** root，按上面那条自
    继续；该 cycle 跑完后续阶段、判为 complete 后，下一 cycle 才进入 backfill 选择。
 4. `demote-reserved-job` 只用于**确认已死**（`sacct`/`squeue` 在该 attempt 窗口内都没有匹配作业）
    的行；对已完成或在跑的作业执行会让整批 cohort 重新 `sbatch`。
+5. 自动兜底永远判不出来的行（`ambiguous_fallback_match`，或窗口饱和、每趟都 `query_unavailable`）：
+   `sacct` 核实本行 master 后用 `bind-reserved-job`（#2668）绑定，之后按第 3 步收敛。步骤与拒绝码见
+   [`failed-basin-retry.md`](failed-basin-retry.md)「Disposition — completed or running but unbound: the guarded
+   operator bind」。
 
 注意事项（#2655）：
 

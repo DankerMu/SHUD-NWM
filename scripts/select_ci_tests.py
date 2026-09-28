@@ -1395,6 +1395,11 @@ SCHEDULER_IMPORTER_TESTS: tuple[str, ...] = (
     # facade and drives `_candidate_state_decision` plus the planner's
     # `_build_candidates` / `_execute_candidates`. DB-free, 19 tests in ~7s.
     "tests/test_scheduler_held_reservation_block.py",
+    # #2668: the bind-reserved-job lane suite top-level-imports
+    # `services.orchestrator.scheduler` and judges the bound cohort at the facade's
+    # `_candidate_state_decision` and `_cycle_completion_status` seams. DB-free,
+    # 3 tests in ~4s.
+    "tests/test_orchestrator_bind_reserved_job_lane.py",
 )
 
 ORCHESTRATOR_CLI_IMPORTER_TESTS: tuple[str, ...] = (
@@ -1414,6 +1419,13 @@ ORCHESTRATOR_CLI_IMPORTER_TESTS: tuple[str, ...] = (
     # are 50 tests in 1.50s.
     "tests/test_scheduler_journal_root_authority.py",
     "tests/test_scheduler_journal_scope_census.py",
+    # #2668: `bind-reserved-job` is registered in cli.py for both entrypoints;
+    # the CLI suite drives `_click_main`/`_argparse_main`, the lane suite binds
+    # through `cli.main`, and the held-listing suite drives
+    # `list-operator-actions` through both legs. DB-free, ~80 tests in ~8s.
+    "tests/test_orchestrator_bind_reserved_job_cli.py",
+    "tests/test_orchestrator_bind_reserved_job_lane.py",
+    "tests/test_operator_action_listing_held_reservations.py",
 )
 
 # #1748 recovery-CLI helper extraction: the shared
@@ -1480,6 +1492,12 @@ FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     # and reads every decision back through `candidate_state` (the E13b-stripped
     # held master is only visible there). DB-free, ~7s.
     "tests/test_scheduler_held_reservation_block.py",
+    # #2668: the bind CAS suite's subject is this module's
+    # `bind_operator_verified_reserved_job` and the shared locked commit body it
+    # reuses; the lane suite drives the real journal through the stage loop,
+    # reconcile, the bind and inflight projection. DB-free, ~43 tests in ~6s.
+    "tests/test_orchestrator_bind_reserved_job_cas.py",
+    "tests/test_orchestrator_bind_reserved_job_lane.py",
     # #1953: the whole-tree budget contract is ABOUT this module — the read
     # lane its `_RecordBudget` tags, and the synthetic blocked row the five
     # query entrypoints return when the budget refuses. Its static pins read
@@ -2167,7 +2185,8 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         # suites import it at file level, and the public operator-recovery cycle
         # tests import it through a local (function-scope) import, which the
         # derived importer scan does not see — so the rule names all five
-        # consumers explicitly.
+        # consumers explicitly. #2668 adds the bind CLI suite as a sixth, file-level
+        # consumer (it reuses the secret literals).
         "tests/orchestrator_demote_reserved_job_helpers.py",
         (
             "tests/test_orchestrator_demote_cli_security.py",
@@ -2175,6 +2194,21 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_orchestrator_demote_projection_faults.py",
             "tests/test_orchestrator_demote_reclaim_lifecycle.py",
             "tests/test_orchestration_chain.py",
+            # #2668: the bind CLI suite imports the demote secret literals at
+            # file level.
+            "tests/test_orchestrator_bind_reserved_job_cli.py",
+        ),
+    ),
+    PathTestRule(
+        # #2668: the bind-reserved-job suites' shared fixture module. The CAS and
+        # CLI suites import it at file level; the held-listing suite imports it
+        # function-locally (its serialized-anchor test), which the derived
+        # importer scan does not see, so the rule names all three.
+        "tests/orchestrator_bind_reserved_job_helpers.py",
+        (
+            "tests/test_orchestrator_bind_reserved_job_cas.py",
+            "tests/test_orchestrator_bind_reserved_job_cli.py",
+            "tests/test_operator_action_listing_held_reservations.py",
         ),
     ),
     PathTestRule(
@@ -2232,6 +2266,13 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_orchestrator_demote_projection_faults.py",
             "tests/test_orchestrator_demote_reclaim_lifecycle.py",
             "tests/test_orchestration_chain.py",
+            # #2668: the bind CAS suite imports this helper at file level; the
+            # CLI and held-listing suites reach it through
+            # tests/orchestrator_bind_reserved_job_helpers.py (file level /
+            # function-local respectively), a support-to-support edge.
+            "tests/test_orchestrator_bind_reserved_job_cas.py",
+            "tests/test_orchestrator_bind_reserved_job_cli.py",
+            "tests/test_operator_action_listing_held_reservations.py",
         ),
     ),
     PathTestRule(
@@ -2871,6 +2912,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # stop rule is its only route for this module. DB-free, 4 tests in
             # ~0.3s.
             "tests/test_operator_action_status_closure.py",
+            # #2668 adds the sixth at-site target: this module serializes the
+            # reserved-unbound outcome rows (now with the attempt anchor) that
+            # the held-reservation listing ages, and that suite pins the
+            # serialized key. DB-free, 41 tests in ~4s.
+            "tests/test_operator_action_listing_held_reservations.py",
             # #2316: the extra-root wiring oracle (rationale above).
             "tests/test_retention_extra_roots.py",
         ),
@@ -3180,6 +3226,18 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # scheduler.py / file_orchestration_journal.py pairs ride their
             # stop-rule tuples. DB-free, 19 tests in ~7s.
             "tests/test_scheduler_held_reservation_block.py",
+            # #2668: the four bind-reserved-job / held-listing suites. Their
+            # importer gaps on `services.orchestrator` itself,
+            # accepted_submit_identity.py, chain_types.py,
+            # operator_reserved_bind.py, operator_action_listing.py,
+            # operator_action_listing_held.py and scheduler_evidence_payload.py
+            # close on this directory rule; the cli.py / scheduler.py /
+            # scheduler_runtime.py / file_orchestration_journal.py pairs ride
+            # their stop-rule tuples. DB-free, together ~20s.
+            "tests/test_orchestrator_bind_reserved_job_cas.py",
+            "tests/test_orchestrator_bind_reserved_job_cli.py",
+            "tests/test_orchestrator_bind_reserved_job_lane.py",
+            "tests/test_operator_action_listing_held_reservations.py",
             "tests/test_cli_cleanup_frontier.py",
             "tests/test_cli_publish_qdown.py",
             "tests/test_orchestrator_demote_cli_security.py",

@@ -1712,13 +1712,20 @@ def _serialize_reserved_unbound_outcome(store: Any, outcome: Any) -> dict[str, A
     fallback_match_basis = getattr(outcome, "fallback_match_basis", None)
     if fallback_match_basis is not None:
         serialized["fallback_match_basis"] = fallback_match_basis
-    serialized.update(_restart_reconcile_attempt_evidence(store, outcome.job_id))
+    serialized.update(_restart_reconcile_attempt_evidence(store, outcome.job_id, include_attempt_anchor=True))
     _apply_pass_reason_over_durable(serialized, outcome.reconciliation_reason_class)
     return serialized
 
 
-def _restart_reconcile_attempt_evidence(store: Any, job_id: str) -> dict[str, Any]:
-    """Return the bounded public accepted-submit identity/evidence projection."""
+def _restart_reconcile_attempt_evidence(
+    store: Any, job_id: str, *, include_attempt_anchor: bool = False
+) -> dict[str, Any]:
+    """Return the bounded public accepted-submit identity/evidence projection.
+
+    ``include_attempt_anchor`` (#2668, reserved-unbound outcomes only) adds the
+    durable ``submission_attempt_started_at`` so ``list-operator-actions`` can
+    age a held reservation; inflight outcomes keep their exact key set.
+    """
 
     getter = getattr(store, "get_pipeline_job", None) or getattr(store, "get_job", None)
     if not callable(getter):
@@ -1766,7 +1773,7 @@ def _restart_reconcile_attempt_evidence(store: Any, job_id: str) -> dict[str, An
         for member in members[:256]
         if isinstance(member, Mapping)
     ]
-    return {
+    evidence: dict[str, Any] = {
         "submission_attempt": max(int(values.get("submission_attempt") or 1), 1),
         "submit_outcome": values.get("submit_outcome"),
         "reconciliation_source": values.get("reconciliation_source"),
@@ -1782,6 +1789,12 @@ def _restart_reconcile_attempt_evidence(store: Any, job_id: str) -> dict[str, An
         "candidate_summary": candidate_summary,
         "candidate_summary_count": len(candidate_summary),
     }
+    if include_attempt_anchor:
+        anchor = values.get("submission_attempt_started_at")
+        if isinstance(anchor, datetime):
+            anchor = anchor.isoformat().replace("+00:00", "Z") if anchor.tzinfo is not None else None
+        evidence["submission_attempt_started_at"] = anchor if isinstance(anchor, str) and anchor else None
+    return evidence
 
 
 def _restart_reconcile_error_message(error: Exception) -> str:

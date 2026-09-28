@@ -52,6 +52,7 @@ from .operator_released_reservation_recovery import (
 from .operator_released_reservation_recovery import (
     _recover_released_identity_blocked_reservation as _recover_released_identity_blocked_reservation,
 )
+from .operator_reserved_bind import add_argparse_bind_subparser, register_click_bind_command, run_argparse_bind_command
 from .operator_reserved_demotion import (
     _demote_reserved_job as _demote_reserved_job,
 )
@@ -702,6 +703,7 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
 
     register_click_recovery_command(cli)
     register_click_demote_command(cli)
+    register_click_bind_command(cli)
     register_click_census_command(cli)
     register_click_list_operator_actions_command(cli)
     register_click_confirm_reentry_command(cli)
@@ -847,6 +849,7 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     rollforward_parser.add_argument("--lock-ttl-seconds", default=60, type=int)
     add_argparse_recovery_subparser(subparsers)
     add_argparse_demote_subparser(subparsers)
+    add_argparse_bind_subparser(subparsers)
     add_argparse_census_subparser(subparsers)
     add_argparse_list_operator_actions_subparser(subparsers)
     add_argparse_confirm_reentry_subparser(subparsers)
@@ -983,6 +986,8 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
         return run_argparse_recovery_command(args)
     if args.command == "demote-reserved-job":
         return run_argparse_demote_command(args)
+    if args.command == "bind-reserved-job":
+        return run_argparse_bind_command(args)
     if args.command == CENSUS_JOB_ID_SCOPE_COMMAND:
         return run_argparse_census_command(args)
     if args.command == LIST_OPERATOR_ACTIONS_COMMAND:

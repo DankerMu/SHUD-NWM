@@ -129,6 +129,10 @@ _BOUNDED_RESTART_RECONCILE_OUTCOME_KEYS = (
     # #2655: pass-evidence-only fallback match basis (``submitline_exact`` |
     # ``name_window_count``); present only on classified fallback outcomes.
     "fallback_match_basis",
+    # #2668: the held reservation's attempt anchor (reserved-unbound outcomes
+    # only), so ``list-operator-actions`` ages a compacted pass exactly like a
+    # full one.
+    "submission_attempt_started_at",
 )
 
 
