@@ -796,7 +796,21 @@ terminal status as usual.
    print(json.dumps({key: row.get(key) for key in keys}, sort_keys=True))' <journal-root> <job_id>
    ```
 
-4. **Bind.** `sacct` prints `Submit` as local naive time: append the cluster's UTC offset
+4. **Bind.** First re-read the exact master id you are about to pass (mandatory):
+
+   ```bash
+   sacct --jobs=<bare master id> --parsable2 --format=JobID,JobName,State,Submit,End,SubmitLine
+   ```
+
+   Its `<master>_<task>` rows must read `JobName=nhms_forecast`, carry a `SubmitLine` with
+   exactly one `--comment=nhms_idem:<this row's idempotency_key>`, and show the `Submit` you
+   pass. Take `--slurm-job-id`, `--slurm-submit-time` and `--submit-line` from **this**
+   output only, never from the step 1 listing or by retyping: the command cannot detect a
+   mistyped id whose job is another cycle's finished forecast master (that master has left
+   the reconcile inventory, and the `SubmitLine` carries no job id), and inflight reconcile
+   would then project that job's terminal state onto this row.
+
+   `sacct` prints `Submit` as local naive time: append the cluster's UTC offset
    (`date +%z` on the login node) yourself. The command refuses a timestamp without a
    timezone. Pass one array-task row's `SubmitLine` verbatim; only its `--comment=` value is
    used and recorded, never the script path.
@@ -827,7 +841,7 @@ terminal status as usual.
    | `submit_time_outside_attempt_window` | `--slurm-submit-time` is before the attempt anchor or after `--checked-at` |
    | `submitline_key_mismatch` | the `SubmitLine` has no `--comment=`, two distinct ones, or a key that is not this row's |
    | `slurm_id_invalid` | `--slurm-job-id` is not a canonical bare decimal master id (a leading zero such as `0123`, an array task, or a step suffix) |
-   | `slurm_id_claimed` | a same-cycle row of any kind (forcing, legacy, member task `<id>_<n>`) or a current forecast master of any cycle already binds or claims that master id, even a recycled id with a different `Submit` (stricter than #1850) |
+   | `slurm_id_claimed` | a same-cycle row of any kind (forcing, legacy, member task `<id>_<n>`) or an other-cycle forecast master still in the reconcile inventory already claims that master id, even a recycled id with another `Submit` (stricter than #1850) |
    | `slurm_submit_time_invalid` | `--slurm-submit-time` is not a timezone-aware instant |
    | `legacy_unversioned_unsupported` | shape (c): escalate, #2674 |
    | `not_found` | no such forecast master |

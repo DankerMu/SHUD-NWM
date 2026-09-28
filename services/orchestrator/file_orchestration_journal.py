@@ -8799,12 +8799,14 @@ class FileOrchestrationJournalRepository:
         holds -- every row of it regardless of stage, kind, contract version,
         or status (forcing and downstream rows, legacy unversioned rows,
         member task rows).  The cross-cycle half is the reconcile-inventory
-        scan (current accepted-submit masters only); a whole-tree replay is
-        deliberately NOT used, because it exceeds the record budget on a
-        production journal and would refuse every bind.  Cross-cycle
-        non-master rows are therefore not scanned; the SubmitLine key check
-        (the key must be this row's own ``nhms_idem`` comment) is what rules
-        out a master pasted from another lane or row.
+        scan (current accepted-submit masters that still hold an inventory
+        anchor); a whole-tree replay is deliberately NOT used, because it
+        exceeds the record budget on a production journal and would refuse
+        every bind.  Cross-cycle non-master rows and other-cycle masters whose
+        anchor is gone are therefore not scanned.  The SubmitLine key check
+        rules out a SubmitLine pasted from another lane or row, but not a
+        mistyped ``--slurm-job-id``; that residual is covered procedurally by
+        the runbook's ``sacct --jobs=<id>`` re-read (design Decision 3).
 
         A row claims the id when the master part (leading decimal digits, so
         ``57553_18`` and ``57553.batch`` read as ``57553``) of its

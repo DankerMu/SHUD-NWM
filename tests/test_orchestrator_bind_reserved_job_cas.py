@@ -14,6 +14,7 @@ refusal is named and leaves every durable byte identical.
 
 from __future__ import annotations
 
+import json
 import shutil
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -574,6 +575,85 @@ def test_a_same_cycle_member_task_row_of_another_cohort_claims_its_master_part(
     _refused(repository, "slurm_id_claimed")
 
 
+def _projected_member_row(tmp_path: Path, slurm_job_id: str, *, task: int = 5) -> dict[str, Any]:
+    """The durable member row the REAL inflight projection writes for task ``task`` of master ``slurm_job_id``.
+
+    A sibling journal of the same gfs 2026071200 cycle holds a cohort of
+    ``task + 1`` members bound to ``slurm_job_id``; ``reconcile_inflight_jobs``
+    projects a COMPLETED array, which writes one current-contract member row
+    ``job_<member run>_forecast_reconciled_<master>_<task>`` per task
+    (``file_orchestration_journal.py`` accepted-submit array projection).  The
+    durable payload is read from the direct record the projection wrote,
+    never from the public view.
+    """
+
+    from services.orchestrator.reconcile import SacctRecord, reconcile_inflight_jobs
+    from tests.gateway_reconcile_helpers import _bind_current_file_cohort
+
+    sibling = _file_cohort_repository(
+        tmp_path / "projected",
+        created_at=ANCHOR,
+        member_count=task + 1,
+        expected_user="scheduler",
+        expected_account="account",
+    )
+    _bind_current_file_cohort(sibling, KEY, slurm_job_id=slurm_job_id)
+    tasks = tuple(
+        SacctRecord(
+            f"{slurm_job_id}_{index}",
+            "COMPLETED",
+            "nhms_forecast",
+            exit_code="0:0",
+            user="scheduler",
+            account="account",
+            array_task_id=index,
+        )
+        for index in range(task + 1)
+    )
+    master = SacctRecord(
+        slurm_job_id=slurm_job_id,
+        raw_state="COMPLETED",
+        job_name="nhms_forecast",
+        exit_code="0:0",
+        user="scheduler",
+        account="account",
+        array_member_job_ids=tuple(record.slurm_job_id for record in tasks),
+        array_task_records=tasks,
+    )
+    (outcome,) = reconcile_inflight_jobs(
+        sibling, sacct_query=lambda job_id: master if str(job_id) == slurm_job_id else None
+    )
+    assert outcome.status == "succeeded"
+    member_job_id = f"job_fcst_gfs_2026071200_model_{task}_forecast_reconciled_{slurm_job_id}_{task}"
+    (written,) = sibling.root.rglob(f"{member_job_id}.json")
+    return json.loads(written.read_text(encoding="utf-8"))["payload"]
+
+
+def test_a_same_cycle_projected_member_task_row_claims_its_master_part(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Production shape: the member row inflight reconcile writes for ``<X>_5`` of another cohort claims ``X``.
+
+    The row is minted by the real projection in a sibling journal and
+    transplanted into the held row's cycle, because in situ the projected
+    cohort master itself still holds ``X`` and would mask the member arm.
+    """
+
+    member = _projected_member_row(tmp_path, MASTER_ID)
+    repository = held_repository(tmp_path, monkeypatch)
+    repository.append_historical_pipeline_job(member)
+    persisted = repository.get_pipeline_job(member["job_id"])
+    assert persisted["job_id"].endswith(f"_forecast_reconciled_{MASTER_ID}_5")
+    assert (
+        persisted["slurm_job_id"],
+        persisted["array_task_id"],
+        persisted["stage"],
+        persisted["status"],
+        persisted["accepted_submit_contract_version"],
+    ) == (f"{MASTER_ID}_5", 5, "forecast", "succeeded", ACCEPTED_SUBMIT_CONTRACT_VERSION)
+    _refused(repository, "slurm_id_claimed")
+
+
 def test_a_matched_slurm_id_alone_on_a_same_cycle_legacy_row_is_claimed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -622,6 +702,40 @@ def test_the_bind_never_depends_on_a_whole_tree_replay(tmp_path: Path, monkeypat
     result = _bind(repository)
     assert result.refusal is None
     assert held_row(repository)["slurm_job_id"] == MASTER_ID
+
+
+@pytest.mark.parametrize(
+    ("damaged", "content"),
+    [
+        # A same-cycle flat direct record that is not JSON.
+        ("pipeline-jobs/job_cycle_gfs_2026071200_forcing_broken_forcing.json", "{not-json"),
+        # A journal segment residue the cycle replay keeps in scope (its name
+        # does not disclaim this cycle) and cannot attribute.
+        ("journal/gfs/2026071200-zz.jsonl", "{not-json\n"),
+    ],
+)
+def test_damaged_authority_of_the_bound_rows_cycle_fails_closed_with_zero_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damaged: str, content: str
+) -> None:
+    """The same-cycle claimant replay never reads damaged authority as "unclaimed".
+
+    Both damages leave the held row's own CAS read and the write path's
+    sequence read intact, so the raise comes from the same-cycle claimant scan
+    itself.  (A damaged same-cycle ``latest/`` view or a malformed record in
+    the cycle's own segment is not used: the held row's read or the append's
+    sequence read raises on it first.)
+    """
+
+    repository = held_repository(tmp_path, monkeypatch)
+    kwargs = bind_kwargs(held_row(repository))
+    path = repository.root / damaged
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    before = journal_bytes(repository.root)
+    with pytest.raises(FileOrchestrationJournalError) as error:
+        repository.bind_operator_verified_reserved_job(JOB_ID, **kwargs)
+    assert error.value.field == damaged
+    assert journal_bytes(repository.root) == before
 
 
 def test_damaged_authority_of_another_cycle_does_not_block_the_bind(

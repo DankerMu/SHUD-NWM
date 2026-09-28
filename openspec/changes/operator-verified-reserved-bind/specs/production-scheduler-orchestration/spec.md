@@ -13,7 +13,7 @@ The file-journal scheduler SHALL expose a row-scoped operator CLI, `bind-reserve
 - a timezone-aware check time;
 - a bounded, non-empty verification note.
 
-The `SubmitLine` SHALL carry exactly one distinct `--comment=` value, and that value SHALL equal the row's own `nhms_idem:<idempotency_key>`. The Slurm id SHALL be a canonical bare decimal master id (no leading zero, array task, or step suffix). It SHALL NOT be bound or claimed by any other row of the same cycle (any stage, kind, contract version, or status: forecast or forcing, current or legacy, master or member task), nor by any current accepted-submit master in the reconcile inventory. A row's `slurm_job_id` or `matched_slurm_job_id` is compared by its master part (`123_5` claims `123`). The check SHALL NOT depend on a whole-journal replay.
+The `SubmitLine` SHALL carry exactly one distinct `--comment=` value, and that value SHALL equal the row's own `nhms_idem:<idempotency_key>`. The Slurm id SHALL be a canonical bare decimal master id (no leading zero, array task, or step suffix). It SHALL NOT be bound or claimed by any other row of the same cycle (any stage, kind, contract version, or status: forecast or forcing, current or legacy, master or member task), nor by any current accepted-submit master in the reconcile inventory. A row's `slurm_job_id` or `matched_slurm_job_id` is compared by its master part (`123_5` claims `123`). The check SHALL NOT depend on a whole-journal replay. Rows of other cycles outside the reconcile inventory (non-master rows, and terminal forecast masters whose inventory anchor is gone) are not scanned; the operator procedure re-reads `sacct` for the exact supplied id to cover a mistyped id.
 
 Under the cycle lock the command SHALL write the same durable bind tuple as the automatic name-window fallback bind (`matched_bound`, `submit_outcome=accepted`, `status=submitted`, `reconciliation_source=slurm_name_window_unique`, the matched id, and the accounting submit time), and SHALL append one audit event carrying the redacted operator evidence in the same durable append. It SHALL introduce no new durable binding token.
 
@@ -29,7 +29,7 @@ Every refusal SHALL be named and SHALL leave the journal byte-identical. The nam
 - **THEN** the command SHALL exit non-zero with the named refusal and the journal SHALL be byte-identical
 
 #### Scenario: A claimed Slurm id cannot be bound twice
-- **WHEN** the supplied Slurm id is already bound to or claimed by another row of the same cycle (including a forcing row, a legacy unversioned row, or a member task row `<id>_<n>` of another cohort), or by a current accepted-submit master of any cycle
+- **WHEN** the supplied Slurm id is already bound to or claimed by another row of the same cycle (including a forcing row, a legacy unversioned row, or a member task row `<id>_<n>` of another cohort), or by a current accepted-submit forecast master of another cycle that is still in the reconcile inventory
 - **THEN** the command SHALL refuse with `slurm_id_claimed` and write nothing
 
 #### Scenario: A non-canonical Slurm id is malformed
