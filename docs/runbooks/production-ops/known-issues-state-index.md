@@ -481,7 +481,84 @@ pass evidence 已是 4,526,683 / 5,000,000 B、含 384 个这种块）。字段�
 `warning` 为 true 时 `packages.common.state_manager` 每次加载打一条 WARNING
 （`... run the prune-retention repair (known-issues-state-index 8.12)`）。这只是
 证据，不会让任何 reader / publisher 比原有硬上限更早失败。**`warning` 出现就跑本节
-流程**；定时器是后续工作，当前靠人工节奏。
+流程**；每日由下面的"定时 capacity watch"做只读 dry-run，告警即 unit 失败。
+
+**定时 capacity watch（#2653）**：node-22 user 级
+`nhms-scheduler-state-index-capacity.timer`（每日 05:30 UTC，`RandomizedDelaySec=15m`，
+`Persistent=true`）触发 oneshot `nhms-scheduler-state-index-capacity.service`；其 ExecStart 是精确解释器
+的 `-m scripts.node22_state_index_capacity_watch` 模块形式（`scripts/` 不是包，脚本路径
+形式导不进 repair 模块）。它在进程内调用本节的 `prune-retention` **dry-run**（字面量 `enforce=False`，没有
+`--enforce` 开关），环境只来自 `compute.scheduler-dbfree.env`（`OBJECT_STORE_ROOT`、
+`OBJECT_STORE_PREFIX`、`NHMS_OBJECT_STORE_COPYBACK_ROOT`、`NHMS_SCHEDULER_CYCLE_LAG_HOURS`
+四个键都在这份文件里）。dry-run 不加锁，也从不解析 repair archive / repair receipt 根，
+所以不写 index、不写 archive、不写 repair receipt；唯一的写入是 watch 自己的 receipt：
+`/scratch/frd_muziyao/nhms-prod/workspace/state-index-repair/capacity-watch/`
+下的 `<UTC 时间戳>.json`（保留最新 30 份）与 `latest.json`，目录 0700、文件 0600。
+receipt 每 lane 记 `checksum_valid`、`entry_count_before`、`removed_count`、
+`removed_state_ids_sha256`、`retention_days`、`cycle_lag_hours` 与完整
+`capacity_before/after`，**不含** `removed_state_ids` 与 `groups`。同一份 JSON 先打到
+stdout（进 journal）再落盘，所以落盘失败也不丢结论。
+
+退出码（非 0 即 unit failed，这是 node-22 唯一的告警面）：
+
+| 码 | 含义 |
+|---|---|
+| 0 | healthy，receipt 已写 |
+| 1 | 至少一条 alert，receipt 已写：`capacity_warning`、`capacity_warning_unprunable`、`checksum_invalid`、`lane_empty`、`lane_summary_missing` |
+| 2 | dry-run 拒绝（如 `repair_cycle_lag_unset`、`root_unavailable`）、receipt 根未设/不安全、或 receipt 写失败 |
+| 3 | repair incomplete（dry-run 不会发生，防御性映射） |
+| 4 | watch 自身意外异常（`status=refused` + `error_type`，不会伪装成 alert） |
+
+`provider_preimage_changed`（dry-run 两次 preimage 读取之间撞上 writer 的原子替换）
+最多共试 3 次、间隔 5 s，次数记在 receipt 的 `attempts`；其他拒绝不重试。
+
+安装 / 启用（node-22，`frd_muziyao`，需先 `git pull --ff-only` 到含本 unit 的
+commit——那会连带部署 master 上所有未部署的改动，先与运维确认）：
+
+```bash
+ssh -p 32099 frd_muziyao@210.77.77.22
+cd /scratch/frd_muziyao/NWM
+grep -E '^(OBJECT_STORE_ROOT|OBJECT_STORE_PREFIX|NHMS_OBJECT_STORE_COPYBACK_ROOT|NHMS_SCHEDULER_CYCLE_LAG_HOURS)=' \
+  infra/env/compute.scheduler-dbfree.env    # 四个键都要在
+install -d -m 0700 /scratch/frd_muziyao/nhms-prod/workspace/state-index-repair/capacity-watch
+install -m 0644 infra/systemd/nhms-scheduler-state-index-capacity.service \
+  infra/systemd/nhms-scheduler-state-index-capacity.timer ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now nhms-scheduler-state-index-capacity.timer
+systemctl --user start nhms-scheduler-state-index-capacity.service   # 首跑一次取 receipt
+```
+
+watch 从不创建 receipt 根：根不存在、不是真目录、不属当前 uid 或带 group/other 位，
+都是 exit 2（`receipt_root_missing` / `receipt_root_invalid` / `receipt_root_not_private`）。
+
+读失败的 unit：
+
+```bash
+systemctl --user status nhms-scheduler-state-index-capacity.service
+journalctl --user -u nhms-scheduler-state-index-capacity.service -n 50 --no-pager
+cat /scratch/frd_muziyao/nhms-prod/workspace/state-index-repair/capacity-watch/latest.json
+```
+
+看 `status`、`exit_code`、`alerts[]`（每条 `lane` + `alert`）与 `error`。处置：
+
+- `capacity_warning`：按下面的"流程"跑人工 dry-run → 审核 → 冻结 writer → enforce；
+- `capacity_warning_unprunable`：剪完仍在 0.70 以上，说明 21 天窗口内的稳态已经顶到
+  阈值——这是容量设计问题，**升级到 #2541**，不要反复 enforce；
+- `checksum_invalid`：走 8.9，修好前不要 prune；
+- `lane_empty` / `root_unavailable` / `provider_destination_missing`：根写错或 NFS 没挂，
+  先查挂载与 env，别 enforce；
+- exit 2 的 `repair_cycle_lag_unset`：`compute.scheduler-dbfree.env` 缺 lag，补齐后
+  `systemctl --user start` 重跑；exit 4：看 journal 里的 `error_type`，按代码缺陷处理。
+
+**Stage 2 决策：enforce 保持人工**（#2653）。0.70 告警到节点上限约 90k JSON 节点，
+按约 20.5 节点/条是约 4,400 条；两次 prune 间实测约 20 h 长 384 条，首次 prune 推算的
+窗口内速率约 275 条/天，即告警后约 **10-15 天**提前量。无人值守的 enforce 必须在 unit
+里停/启 `nhms-compute-scheduler.timer`（node-22 的 probe 与 timer 按 D4 先例只读，不做
+这件事），还要绕过 #2548 的人工审核门，并且要能在 exit 3 部分提交后自动恢复调度器
+timer。人工 enforce 实测约 5 分钟调度暂停（2026-09-28）。有约 10 天提前量、每天都会
+失败一次的 unit，自动化的风险收益不划算。窗口内稳态到 0.70 时触发的是
+`capacity_warning_unprunable`，那是 #2541 的容量设计问题，自动 enforce 也解决不了。
+当 stage 1 receipt 显示人工节奏变得繁重时再重新评估。
 
 **剪什么、留什么**（每 lane 各自按自己的 entry 规划，两份 index 不是镜像）：按
 已校验 identity key 的 `(model_id, 规范化 source_id)` 分组（`gfs` / `GFS` 同组），

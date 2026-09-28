@@ -1,0 +1,11 @@
+[Unit]
+Description=Run NHMS node-22 state-index capacity watch daily
+
+[Timer]
+OnCalendar=*-*-* 05:30:00 UTC
+RandomizedDelaySec=15m
+Persistent=true
+Unit=nhms-scheduler-state-index-capacity.service
+
+[Install]
+WantedBy=default.target

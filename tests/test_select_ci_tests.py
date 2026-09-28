@@ -4092,6 +4092,31 @@ def test_journal_retention_systemd_units_select_invariant_and_retention_contract
         assert expected <= set(select_tests([unit], repo_root=Path("."))), unit
 
 
+def test_state_index_capacity_watch_units_and_wrapper_select_the_watch_suite() -> None:
+    # #2653 frozen pins: each unit selects exactly the invariant owners plus the
+    # watch suite; the wrapper and the repair CLI it consumes both reach it.
+    watch_suite = "tests/test_node22_state_index_capacity_watch.py"
+    for unit in (
+        "infra/systemd/nhms-scheduler-state-index-capacity.service",
+        "infra/systemd/nhms-scheduler-state-index-capacity.timer",
+    ):
+        assert select_tests([unit], repo_root=Path(".")) == [
+            "tests/test_node22_entrypoint_invariant.py",
+            "tests/test_node22_entrypoint_invariant_python_scan.py",
+            watch_suite,
+        ], unit
+    for source in (
+        "scripts/node22_state_index_capacity_watch.py",
+        "scripts/scheduler_state_index_repair.py",
+        "tests/test_state_index_retention.py",
+        "packages/common/state_manager.py",
+        "packages/common/provider_atomic.py",
+    ):
+        assert watch_suite in select_tests([source], repo_root=Path(".")), source
+    repair_selected = select_tests(["scripts/scheduler_state_index_repair.py"], repo_root=Path("."))
+    assert "tests/test_scheduler_state_index_repair.py" in repair_selected
+
+
 def test_node22_systemd_units_select_the_owner_without_collect_only() -> None:
     # #1571 local-repair: before the exact rules the two systemd units matched
     # no PATH_TEST_RULES entry and (being infra/** non-python) selected nothing

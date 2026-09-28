@@ -59,6 +59,30 @@ def test_scheduler_journal_retention_units_pin_the_active_runtime_and_schedule()
     assert re.search(r"(?<![./])python3?(?:\s|$)", service.replace(NODE22_VENV_PY, "python3"))
 
 
+def test_state_index_capacity_watch_units_pin_the_module_entrypoint_and_schedule() -> None:
+    # #2653: `-m` form, not a script path -- `scripts/` is not a package on the
+    # editable-install path, so only WorkingDirectory-on-sys.path imports
+    # `scripts.scheduler_state_index_repair`. No enforce anywhere in the unit.
+    service = _read("infra/systemd/nhms-scheduler-state-index-capacity.service")
+    timer = _read("infra/systemd/nhms-scheduler-state-index-capacity.timer")
+    execstart = [line.strip() for line in service.splitlines() if line.strip().startswith("ExecStart=")]
+    assert execstart == [f"ExecStart={NODE22_VENV_PY} -m scripts.node22_state_index_capacity_watch"]
+    fields = (
+        "Type=oneshot", f"WorkingDirectory={NODE22_ACTIVE}",
+        f"EnvironmentFile={NODE22_ACTIVE}/infra/env/compute.scheduler-dbfree.env",
+        "Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin",
+        "Environment=NHMS_STATE_INDEX_CAPACITY_WATCH_RECEIPT_ROOT="
+        "/scratch/frd_muziyao/nhms-prod/workspace/state-index-repair/capacity-watch",
+        "TimeoutStartSec=900", "OnCalendar=*-*-* 05:30:00 UTC",
+        "RandomizedDelaySec=15m", "Persistent=true",
+        "Unit=nhms-scheduler-state-index-capacity.service", "WantedBy=default.target",
+    )
+    joined = f"{service}\n{timer}"
+    assert all(field in joined and field not in joined.replace(field, "", 1) for field in fields)
+    assert service.count("EnvironmentFile=") == 1 and "enforce" not in joined.lower()
+    assert "uv" not in service.lower() and re.search(r"(?<![./])python3?(?:\s|$)", service) is None
+
+
 def test_slurm_gateway_unit_uses_exact_interpreter() -> None:
     unit = _read("infra/systemd/nhms-slurm-gateway.service")
     execstart = [line.strip() for line in unit.splitlines() if line.strip().startswith("ExecStart=")]
@@ -451,6 +475,8 @@ def test_sibling_scan_no_new_bare_uv_on_governed_node22_surfaces() -> None:
         "infra/systemd/nhms-scheduler-evidence-retention.service",
         "infra/systemd/nhms-scheduler-journal-retention.service",
         "infra/systemd/nhms-scheduler-journal-retention.timer",
+        "infra/systemd/nhms-scheduler-state-index-capacity.service",
+        "infra/systemd/nhms-scheduler-state-index-capacity.timer",
         "infra/systemd/nhms-slurm-gateway.service",
         # #1103: the index page plus every `production-ops/` sub-runbook, so a
         # bare `uv` added to a sub-runbook still reddens this scan.
