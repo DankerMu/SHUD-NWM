@@ -1421,6 +1421,11 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         # chain_types.py and operator_reserved_bind.py importer gaps). ~12s.
         "tests/test_orchestrator_bind_reserved_job_cas.py",
         "tests/test_orchestrator_bind_reserved_job_cli.py",
+        # #2675: the two forcing-lane bind suites ride the same directory rule
+        # (reconcile.py, operator_reserved_bind.py and
+        # operator_action_listing_held.py importer gaps). ~6s.
+        "tests/test_orchestrator_bind_reserved_job_forcing.py",
+        "tests/test_orchestrator_bind_reserved_job_forcing_lane.py",
         "tests/test_orchestrator_bind_reserved_job_lane.py",
         "tests/test_orchestrator_demote_cli_security.py",
         "tests/test_orchestrator_demote_core_cas.py",
@@ -15560,7 +15565,7 @@ def test_demote_helper_rule_selects_public_chain_consumer_exactly() -> None:
     }
 
 
-def test_bind_helper_rule_selects_its_three_consumers_exactly() -> None:
+def test_bind_helper_rule_selects_its_consumers_exactly() -> None:
     # #2668: the held-listing suite imports the bind fixture module
     # function-locally, which the derived importer scan cannot see, so the rule
     # names it; this exact-set anchor keeps that consumer load-bearing.
@@ -15569,6 +15574,8 @@ def test_bind_helper_rule_selects_its_three_consumers_exactly() -> None:
         "tests/test_orchestrator_bind_reserved_job_cas.py",
         "tests/test_orchestrator_bind_reserved_job_cli.py",
         "tests/test_operator_action_listing_held_reservations.py",
+        # #2675: the forcing bind suite imports the held-forcing builder.
+        "tests/test_orchestrator_bind_reserved_job_forcing.py",
         SELECTOR_META_GUARD_TEST,
     }
 
@@ -15642,6 +15649,8 @@ def test_gateway_reconcile_helper_rules_select_their_partitions_exactly() -> Non
         "tests/test_orchestrator_bind_reserved_job_cas.py",
         "tests/test_orchestrator_bind_reserved_job_cli.py",
         "tests/test_operator_action_listing_held_reservations.py",
+        # #2675: the forcing bind suite reaches it through the bind helper module.
+        "tests/test_orchestrator_bind_reserved_job_forcing.py",
     } | {SELECTOR_META_GUARD_TEST}
 
     selected_writer = set(select_tests(["tests/gateway_reconcile_writer_helpers.py"], repo_root=Path(".")))

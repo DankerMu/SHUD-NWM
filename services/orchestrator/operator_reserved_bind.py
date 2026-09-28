@@ -3,7 +3,12 @@
 ``bind-reserved-job`` is the sibling of the #1564 ``demote-reserved-job``: it
 binds one held forecast cohort master whose job DID run (the comment-less
 name-window fallback left it ``ambiguous_fallback_match`` or persistently
-``query_unavailable``) to the Slurm master the operator matched in sacct.  The
+``query_unavailable``) to the Slurm master the operator matched in sacct.
+Since #2675 it also binds a held FORCING master (``reserved`` /
+``submit_result_ambiguous`` with a complete forcing submit identity) whose
+``SubmitLine`` carries its own attempt comment and ``--array=0-<n-1>[%k]``;
+the optional ``--slurm-user`` / ``--slurm-account`` (sacct ``User`` /
+``Account``) are the forcing lane's owner evidence.  The
 callable, its ISO-8601 parser, and both entrypoints' registration/dispatch
 helpers live here so ``cli.py`` only registers them.  ``--confirm`` and every
 input check run before the repository is constructed; the typed journal CAS
@@ -55,10 +60,13 @@ def _bind_reserved_job(
     checked_by: str,
     checked_at: str,
     verification_note: str,
+    slurm_user: str | None = None,
+    slurm_account: str | None = None,
 ) -> dict[str, object]:
-    """One operator-verified bind of a held forecast cohort master (#2668).
+    """One operator-verified bind of a held forecast cohort master (#2668) or forcing master (#2675).
 
-    Shared by both CLI entrypoints.  Every value is validated here before the
+    Shared by both CLI entrypoints.  ``slurm_user`` / ``slurm_account`` are read
+    only for a forcing row (its owner evidence); a forecast row ignores them.  Every value is validated here before the
     journal root is resolved or the repository constructed, and re-validated by
     the typed journal CAS before any write.  A named refusal raises
     ``ValueError`` (exit 2) and leaves the journal byte-identical.
@@ -94,6 +102,8 @@ def _bind_reserved_job(
         checked_by=checked_by,
         checked_at=checked_at_value,
         verification_note=verification_note,
+        slurm_user=slurm_user,
+        slurm_account=slurm_account,
     )
     receipt = result.receipt
     if result.refusal is not None or receipt is None:
@@ -111,7 +121,7 @@ def _bind_reserved_job(
         }
         for warning in sorted(receipt.warnings, key=lambda item: (item.projection, item.model_id or ""))
     ]
-    return {
+    payload: dict[str, object] = {
         "command": BIND_RESERVED_JOB_COMMAND,
         "status": "bound_with_warnings" if warnings else "bound",
         "committed": True,
@@ -135,6 +145,16 @@ def _bind_reserved_job(
         "written_record_count": receipt.written_record_count,
         "warnings": warnings,
     }
+    if receipt.lane != "forecast":
+        # #2675: only a forcing receipt names its lane, the verified array spec
+        # and the operator-verified submit time (``slurm_submit_time``, the
+        # audit event's key), so the forecast receipt keeps its exact
+        # pre-change key set.  Its ``slurm_accounting_submitted_at`` stays the
+        # durable row's value: null, as the forcing row never persists it.
+        payload["lane"] = receipt.lane
+        payload["array_spec"] = receipt.array_spec
+        payload["slurm_submit_time"] = receipt.slurm_submit_time
+    return payload
 
 
 def register_click_bind_command(cli: Any) -> None:
@@ -157,6 +177,8 @@ def register_click_bind_command(cli: Any) -> None:
     @click.option("--checked-by", required=True)
     @click.option("--checked-at", required=True)
     @click.option("--verification-note", required=True)
+    @click.option("--slurm-user", default=None, help="Forcing rows: the master's sacct User.")
+    @click.option("--slurm-account", default=None, help="Forcing rows: the master's sacct Account.")
     @click.option("--confirm", is_flag=True, required=True)
     def bind_reserved_job(
         journal_root: str,
@@ -169,6 +191,8 @@ def register_click_bind_command(cli: Any) -> None:
         checked_by: str,
         checked_at: str,
         verification_note: str,
+        slurm_user: str | None,
+        slurm_account: str | None,
         confirm: bool,
     ) -> None:
         del confirm  # required + is_flag enforces presence before this body runs.
@@ -184,6 +208,8 @@ def register_click_bind_command(cli: Any) -> None:
                 checked_by=checked_by,
                 checked_at=checked_at,
                 verification_note=verification_note,
+                slurm_user=slurm_user,
+                slurm_account=slurm_account,
             )
             click.echo(json.dumps(receipt, sort_keys=True))
         except (FileOrchestrationJournalError, ValueError) as error:
@@ -211,6 +237,9 @@ def add_argparse_bind_subparser(subparsers: Any) -> None:
     ):
         parser.add_argument(option, required=True)
     parser.add_argument("--expected-attempt", required=True, type=int)
+    # #2675: the forcing lane's owner evidence (sacct User / Account).
+    parser.add_argument("--slurm-user", default=None)
+    parser.add_argument("--slurm-account", default=None)
     parser.add_argument("--confirm", action="store_true")
 
 
@@ -236,6 +265,8 @@ def run_argparse_bind_command(args: Any) -> int:
                     checked_by=args.checked_by,
                     checked_at=args.checked_at,
                     verification_note=args.verification_note,
+                    slurm_user=args.slurm_user,
+                    slurm_account=args.slurm_account,
                 ),
                 sort_keys=True,
             )

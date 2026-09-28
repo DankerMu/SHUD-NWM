@@ -732,7 +732,8 @@ decision `held_reservation_unresolved`:
 | `identity_mismatch_blocked` / `stale_attempt_blocked` | once the attempt anchor is at least 6h old (or unknown) | `escalate` | none: no operator command resolves them; escalate to the scheduler owner |
 | `journal_quarantined` | once the attempt anchor is at least 6h old (or unknown) | `escalate` | the residue-file fix below when `quarantine_reason` is `file_journal_reconcile_inventory_migration_invalid`; any other reason: escalate |
 | `legacy_unversioned_read_only` (shape (c)) | every pass | `escalate` | none: since #2674 no current writer produces the shape (every journal writer refuses it, and the historical import fails closed on it before creating the journal root), so a listed row predates that change; the bind refuses it (`legacy_unversioned_unsupported`); escalate to the scheduler owner and never hand-edit the journal. The node-22 journal held 0 such rows on 2026-09-28 |
-| any held row that is not a forecast cohort master (the forcing lane) | as tabled | `escalate` | none yet: neither bind nor demote accepts it; tracked in #2675 |
+| a held forcing master (job id ends in a forcing stage) | `multiple_matches_blocked` every pass; the rest as tabled | `bind-reserved-job` for `multiple_matches_blocked` / `query_unavailable`, otherwise `escalate` | the forcing disposition below (#2675) |
+| any other held row that is not a forecast cohort master | as tabled | `escalate` | none: escalate to the scheduler owner |
 | any other action (outside this table) | every pass, whatever the anchor age | `escalate` | none: a new reconcile action the listing does not know; escalate |
 
 For `journal_quarantined`, read the outcome's `quarantine_reason` / `quarantine_field` in the
@@ -745,7 +746,7 @@ root and keep a backup, as in
 pass. Never demote such a row.
 
 `bind-reserved-job` binds **one** held current-contract forecast cohort master to the Slurm
-master the operator matched in `sacct`. It writes exactly the durable tuple that the
+master the operator matched in `sacct` (a held forcing master: the next section). It writes exactly the durable tuple that the
 automatic #2655 name-window bind writes (`status=submitted`, `submit_outcome=accepted`,
 `reconciliation_source=slurm_name_window_unique`, `reconciliation_decision=matched_bound`,
 `matched_slurm_job_id`, `slurm_accounting_submitted_at`) plus one `operator_verified_bind`
@@ -872,6 +873,67 @@ Verified by `tests/test_orchestrator_bind_reserved_job_cas.py`,
 `tests/test_orchestrator_bind_reserved_job_lane.py` (real journal → bind → inflight
 reconcile → completion verdict, and the one-failed-task marker path) and
 `tests/test_operator_action_listing_held_reservations.py`.
+
+### Disposition — held forcing master: the forcing bind (#2675)
+
+A held forcing master is `reserved`, unbound, `submit_result_ambiguous`, with no
+`reconciliation_decision` and a complete forcing identity: `slurm_comment` is the attempt
+comment `nhms_forcing_attempt:<idempotency_key>:a<submission_attempt>`, `cohort_members`
+covers tasks `0..n-1`, and the owner is recorded when `slurm_ownership_required` is set. It
+freezes its members like a held forecast master. `bind-reserved-job` binds it and writes
+exactly the automatic forcing bind tuple (`status=submitted`, `submit_outcome=accepted`,
+`reconciliation_source=slurm_exact_comment`, `reconciliation_decision=matched_bound`, the id
+as `slurm_job_id` and `matched_slurm_job_id`; no `slurm_binding_source`) plus one
+`operator_verified_bind` event (`lane=forcing`). Forcing entries carry no `follow_up_issue`:
+
+| forcing outcome | listed | `operator_command` |
+|---|---|---|
+| `multiple_matches_blocked` | every pass | `bind-reserved-job`: a real double submission, step 2 |
+| `query_unavailable` | anchor at least 6h old (or unknown) | `bind-reserved-job`; no master with this attempt's comment in `sacct`: escalate, the dead-job exit is #2682 |
+| `identity_mismatch_blocked`, `absence_unconfirmed`, any other | as tabled above | `escalate`: a foreign owner or comment collision needs owner judgement; absence is #2682 |
+
+1. **Find the master** (read-only). It is the bare id whose task rows carry exactly one
+   `--comment=` equal to the row's `slurm_comment`, one `--array=0-<n-1>` (optionally
+   `%<k>`) for its `n` members, and a `Submit` inside `[submission_attempt_started_at, now]`.
+   A comment ending in another `:a<m>` belongs to another attempt of the same key.
+
+   ```bash
+   sacct --name nhms_forcing --user <expected_slurm_user> --accounts <expected_slurm_account> \
+     --starttime <submission_attempt_started_at> --endtime now \
+     --format=JobID,JobName,State,User,Account,Submit,SubmitLine
+   ```
+
+2. **Double submission** (`multiple_matches_blocked`): both masters wrote the same forcing
+   products. Bind only once the **other** master is terminal or cancelled in `sacct`/`squeue`;
+   bind the one that finished last and put the other's id and `State` in `--verification-note`.
+3. **Preview** as in the forecast step 3, but read `get_pipeline_job(<job_id>)` and also print
+   `slurm_comment`, `cohort_members` (count), `expected_slurm_user`, `expected_slurm_account`
+   and `slurm_ownership_required`.
+4. **Bind.** Re-read the exact id first (mandatory):
+   `sacct --jobs=<id> --parsable2 -o JobID,JobName,User,Account,Submit,SubmitLine`. Its rows
+   must read `nhms_forcing` with this attempt's comment and array spec. Take `--slurm-job-id`,
+   `--slurm-submit-time` (append the UTC offset), `--submit-line`, `--slurm-user` and
+   `--slurm-account` from **this** output only. Inflight reconcile does not catch a mistyped
+   forcing id: it matches forcing accounting without an exact comment, so another cycle's
+   `nhms_forcing` job of the same owner would be projected onto this row. Run the forecast
+   step 4 command with the forcing `--job-id` plus `--slurm-user <User> --slurm-account
+   <Account>`; the receipt adds `lane`, `array_spec` and `slurm_submit_time` (the verified
+   `--slurm-submit-time`), and its `slurm_accounting_submitted_at` is null (the durable forcing
+   row never stores it, as in the automatic forcing bind). Forcing-specific refusals (exit 2,
+   zero bytes; the rest as in the forecast table):
+
+   | token | meaning |
+   |---|---|
+   | `not_held` | not the held forcing shape (identity incomplete, bound, not `reserved`, outcome not ambiguous, a reconciliation decision present); a repeated bind lands here |
+   | `submitline_key_mismatch` | the `--comment=` is not this attempt's `slurm_comment` (another `:a<m>`, another key, a forecast `nhms_idem:` comment, none or two) |
+   | `array_spec_mismatch` | no `--array=`, more than one array option, or a value other than `0-<n-1>[%k]` for the row's `n` members |
+   | `slurm_owner_mismatch` | ownership required and `--slurm-user`/`--slurm-account` missing, or either differs from a recorded owner (the inflight owner rule); a wrongly recorded owner stays `escalate` |
+   | `slurm_id_claimed` | a same-cycle row of any kind or a current forecast master of any cycle holds the id; forcing and other non-master rows of other cycles are not scanned, hence the re-read |
+
+5. **After the bind** the next inflight reconcile projects the array. A `COMPLETED` array
+   releases the members, which resume at the forecast stage without a new forcing `sbatch`.
+   Verified by `tests/test_orchestrator_bind_reserved_job_forcing.py` and
+   `tests/test_orchestrator_bind_reserved_job_forcing_lane.py`.
 
 ## Missing accounting vs wrong accounting (缺账 vs 错账)
 

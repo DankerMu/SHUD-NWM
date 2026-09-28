@@ -1432,6 +1432,11 @@ ORCHESTRATOR_CLI_IMPORTER_TESTS: tuple[str, ...] = (
     "tests/test_orchestrator_bind_reserved_job_cli.py",
     "tests/test_orchestrator_bind_reserved_job_lane.py",
     "tests/test_operator_action_listing_held_reservations.py",
+    # #2675: the forcing-lane bind suites top-level-import `cli`; the CAS suite
+    # drives `_click_main`/`_argparse_main` for its forcing CLI cases and the
+    # lane suite binds through `cli.main`. DB-free, together ~70 tests in ~6s.
+    "tests/test_orchestrator_bind_reserved_job_forcing.py",
+    "tests/test_orchestrator_bind_reserved_job_forcing_lane.py",
 )
 
 # #1748 recovery-CLI helper extraction: the shared
@@ -1504,6 +1509,12 @@ FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     # reconcile, the bind and inflight projection. DB-free, ~43 tests in ~6s.
     "tests/test_orchestrator_bind_reserved_job_cas.py",
     "tests/test_orchestrator_bind_reserved_job_lane.py",
+    # #2675: the forcing bind suites' subject is this module's forcing branch of
+    # `bind_operator_verified_reserved_job` (its own locked writer and claimant
+    # scan); the lane suite drives the real journal through the stage loop,
+    # restart reconcile, the bind and inflight projection. DB-free, ~6s.
+    "tests/test_orchestrator_bind_reserved_job_forcing.py",
+    "tests/test_orchestrator_bind_reserved_job_forcing_lane.py",
     # #2674: the shape (c) writer-guard suite's subject is this module's
     # `_write_pipeline_job_unlocked` entry refusal and its record-level append
     # funnels, driven through every public writer. DB-free, ~46 tests in ~1s.
@@ -2219,6 +2230,9 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_orchestrator_bind_reserved_job_cas.py",
             "tests/test_orchestrator_bind_reserved_job_cli.py",
             "tests/test_operator_action_listing_held_reservations.py",
+            # #2675: the forcing bind suite imports the held-forcing builder at
+            # file level.
+            "tests/test_orchestrator_bind_reserved_job_forcing.py",
         ),
     ),
     PathTestRule(
@@ -2309,6 +2323,9 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_orchestrator_bind_reserved_job_cas.py",
             "tests/test_orchestrator_bind_reserved_job_cli.py",
             "tests/test_operator_action_listing_held_reservations.py",
+            # #2675: the forcing bind suite reaches it the same way (file-level
+            # bind helper import) and calls it function-locally.
+            "tests/test_orchestrator_bind_reserved_job_forcing.py",
         ),
     ),
     PathTestRule(
@@ -3278,6 +3295,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_orchestrator_bind_reserved_job_cli.py",
             "tests/test_orchestrator_bind_reserved_job_lane.py",
             "tests/test_operator_action_listing_held_reservations.py",
+            # #2675: the forcing-lane bind suites. Their importer gaps on
+            # `services.orchestrator` itself, accepted_submit_identity.py,
+            # chain_types.py, reconcile.py, operator_reserved_bind.py and
+            # operator_action_listing_held.py close on this directory rule; the
+            # cli.py / file_orchestration_journal.py pairs ride their stop-rule
+            # tuples. DB-free, together ~6s.
+            "tests/test_orchestrator_bind_reserved_job_forcing.py",
+            "tests/test_orchestrator_bind_reserved_job_forcing_lane.py",
             # #2674: the shape (c) guard suite. Its importer gaps on
             # `services.orchestrator` itself and accepted_submit_identity.py close
             # on this directory rule; the file_orchestration_journal.py /
@@ -3653,6 +3678,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_orchestrator_demote_core_cas.py",
             "tests/test_orchestrator_demote_projection_faults.py",
             "tests/test_orchestrator_demote_reclaim_lifecycle.py",
+            # #2675: the forcing bind lane suite is a one-hop member the same
+            # way (it top-level-imports services/orchestrator/reconcile.py for
+            # restart reconcile and inflight projection). DB-free, ~1s.
+            "tests/test_orchestrator_bind_reserved_job_forcing_lane.py",
         ),
     ),
     PathTestRule(

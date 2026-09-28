@@ -93,6 +93,7 @@ from services.orchestrator.forcing_submit_identity import (
     forcing_member_identity_is_complete,
     forcing_member_model_ids,
     forcing_submit_identity_is_complete,
+    is_forcing_stage_name,
     overlapping_unresolved_forcing_job,
 )
 from services.orchestrator.public_evidence import _public_evidence, _public_message
@@ -1130,9 +1131,16 @@ OPERATOR_BIND_REFUSALS = frozenset(
         "slurm_id_invalid",
         "slurm_id_claimed",
         "slurm_submit_time_invalid",
+        # #2675 forcing lane only.
+        "array_spec_mismatch",
+        "slurm_owner_mismatch",
     )
 )
 OPERATOR_VERIFIED_BIND_EVENT_TYPE = "operator_verified_bind"
+#: #2675: the one ``--array=`` value the gateway renders for a forcing array of
+#: ``n`` members (``0-<n-1>``, optionally throttled ``%<k>``).  ASCII digits, no
+#: leading zero, so ``0-01`` never aliases ``0-1``.
+_OPERATOR_BIND_FORCING_ARRAY_SPEC_RE = re.compile(r"0-(0|[1-9][0-9]*)(%[1-9][0-9]*)?")
 #: A canonical bare decimal MASTER id: no leading zero (``0123`` is refused, so
 #: it can never alias ``123``), no array task, step, or non-ASCII digit.
 _OPERATOR_BIND_SLURM_ID_RE = re.compile(r"[1-9][0-9]*")
@@ -1169,7 +1177,7 @@ class OperatorBindReceipt:
     reconciliation_source: str
     reconciliation_decision: str
     matched_slurm_job_id: str
-    slurm_accounting_submitted_at: str
+    slurm_accounting_submitted_at: str | None
     submitline_key: str
     submission_attempt: int
     submission_attempt_started_at: str
@@ -1178,6 +1186,14 @@ class OperatorBindReceipt:
     verification_note: str
     written_record_count: int
     warnings: tuple[ProjectionWarning, ...] = ()
+    #: #2675: ``forcing`` for a held forcing master; its receipt also carries
+    #: the verified ``--array=`` value and, as ``slurm_submit_time`` (the audit
+    #: event's key), the operator-verified submit instant.  Its
+    #: ``slurm_accounting_submitted_at`` is the durable row's value, ``None``:
+    #: the forcing row never persists it, exactly like the automatic forcing bind.
+    lane: str = "forecast"
+    array_spec: str | None = None
+    slurm_submit_time: str | None = None
 
 
 @dataclass(frozen=True)
@@ -5074,6 +5090,8 @@ class FileOrchestrationJournalRepository:
         checked_by: str,
         checked_at: datetime | str,
         verification_note: str,
+        slurm_user: str | None = None,
+        slurm_account: str | None = None,
     ) -> OperatorBindResult:
         """Atomically bind one held forecast master to an operator-verified Slurm master (#2668).
 
@@ -5103,6 +5121,15 @@ class FileOrchestrationJournalRepository:
         master of any other cycle, settled or active (strict: a recycled
         incarnation is refused too).
 
+        #2675: a held FORCING master (``is_forcing_stage_name``) is dispatched
+        under the same cycle lock BEFORE the contract / row-kind checks, because
+        forcing reservations carry no accepted-submit contract version; see
+        :meth:`_bind_operator_verified_forcing_locked`.  ``slurm_user`` /
+        ``slurm_account`` (the sacct ``User`` / ``Account``) are read only by
+        that branch; the forecast path ignores them.  Both lanes validate them
+        at entry (:func:`_operator_owner_evidence_text`: bounded, sanitizer-clean,
+        blank allowed), so an oversized or unsafe value raises before any read.
+
         Invalid input types raise ``FileOrchestrationJournalError`` before any
         read; every CAS failure returns a named refusal from
         :data:`OPERATOR_BIND_REFUSALS` and writes zero bytes.
@@ -5123,9 +5150,14 @@ class FileOrchestrationJournalRepository:
             )
         if not isinstance(submit_line, str):
             raise FileOrchestrationJournalError("file_journal_evidence_type_invalid", field="submit_line")
+        for owner_field, owner_value in (("slurm_user", slurm_user), ("slurm_account", slurm_account)):
+            if owner_value is not None and not isinstance(owner_value, str):
+                raise FileOrchestrationJournalError("file_journal_evidence_type_invalid", field=owner_field)
         normalized_checked_at = _accepted_submit_attempt_anchor(checked_at)
         checked_by_text = _operator_evidence_text(checked_by, field="checked_by")
         verification_note_text = _operator_evidence_text(verification_note, field="verification_note")
+        slurm_user_text = _operator_owner_evidence_text(slurm_user, field="slurm_user")
+        slurm_account_text = _operator_owner_evidence_text(slurm_account, field="slurm_account")
         expected_anchor = _accepted_submit_attempt_anchor(expected_submission_attempt_started_at)
         requested_id = slurm_job_id if isinstance(slurm_job_id, str) else ""
         if not _OPERATOR_BIND_SLURM_ID_RE.fullmatch(requested_id):
@@ -5153,6 +5185,26 @@ class FileOrchestrationJournalRepository:
             )
             if existing is None:
                 return OperatorBindResult("not_found")
+            if is_forcing_stage_name(existing.get("stage"), existing.get("job_type")):
+                # #2675: forcing rows carry no accepted-submit contract version,
+                # so they branch BEFORE the contract / row-kind checks below.
+                return self._bind_operator_verified_forcing_locked(
+                    existing,
+                    job_id=job_id,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    expected_submission_attempt=expected_submission_attempt,
+                    expected_anchor=expected_anchor,
+                    requested_id=requested_id,
+                    canonical_submit=canonical_submit,
+                    submitline_key=submitline_key,
+                    submit_line=submit_line,
+                    slurm_user=slurm_user_text,
+                    slurm_account=slurm_account_text,
+                    checked_by_text=checked_by_text,
+                    normalized_checked_at=normalized_checked_at,
+                    verification_note_text=verification_note_text,
+                )
             forecast_cohort = is_forecast_cohort_stage_name(
                 str(existing.get("stage") or ""), str(existing.get("job_type") or "")
             )
@@ -5274,6 +5326,199 @@ class FileOrchestrationJournalRepository:
                     warnings=tuple(audit.warnings),
                 ),
             )
+
+    def _bind_operator_verified_forcing_locked(
+        self,
+        existing: dict[str, Any],
+        *,
+        job_id: str,
+        source_id: str,
+        cycle_time: datetime,
+        expected_submission_attempt: int,
+        expected_anchor: str,
+        requested_id: str,
+        canonical_submit: str,
+        submitline_key: str | None,
+        submit_line: str,
+        slurm_user: str,
+        slurm_account: str,
+        checked_by_text: str,
+        normalized_checked_at: str,
+        verification_note_text: str,
+    ) -> OperatorBindResult:
+        """#2675: the forcing branch of the operator bind; caller holds the cycle lock.
+
+        CAS (design Decision 2), every failure a named refusal with zero bytes:
+        complete forcing submit identity and the held shape (``reserved``, no
+        bound or matched id, ``submit_result_ambiguous``, no reconciliation
+        decision) else ``not_held``; the expected attempt and anchor else
+        ``stale_attempt``; ``floor(anchor) <= submit <= checked_at`` (the anchor
+        floored to whole seconds: sacct ``Submit`` has whole-second precision)
+        else ``submit_time_outside_attempt_window``; the SubmitLine's single
+        ``--comment=`` value equals the durable attempt comment
+        (``slurm_comment``) else ``submitline_key_mismatch``; exactly one
+        ``--array=0-<n-1>[%k]`` token for the ``n`` cohort members else
+        ``array_spec_mismatch``; the owner rule of inflight
+        ``reconcile._forcing_accounting_identity_matches`` else
+        ``slurm_owner_mismatch``; then, under the journal-global inventory
+        lock, the #2668 bounded claimant exclusivity keyed by the forcing
+        attempt comment (so no held forecast master is a window claimant)
+        plus the same-cycle scan, else ``slurm_id_claimed``.
+
+        Post-state: exactly the ``bind_forcing_submit_attempt`` tuple (no
+        ``slurm_binding_source``, no ``slurm_accounting_submitted_at``) plus one
+        ``operator_verified_bind`` event, in one durable append.  Never the
+        accepted-submit typed commit: that path is forecast-master only and
+        writes provenance the automatic forcing bind never writes.
+        """
+
+        if not forcing_submit_identity_is_complete(existing):
+            return OperatorBindResult("not_held")
+        if (
+            str(existing.get("status") or "") != "reserved"
+            or existing.get("slurm_job_id") not in (None, "")
+            or existing.get("matched_slurm_job_id") not in (None, "")
+            or existing.get("submit_outcome") != "submit_result_ambiguous"
+            or existing.get("reconciliation_decision") not in (None, "")
+        ):
+            return OperatorBindResult("not_held")
+        try:
+            current_anchor = _accepted_submit_attempt_anchor(existing.get("submission_attempt_started_at"))
+        except FileOrchestrationJournalError:
+            return OperatorBindResult("stale_attempt")
+        if existing.get("submission_attempt") != expected_submission_attempt or current_anchor != expected_anchor:
+            return OperatorBindResult("stale_attempt")
+        anchor_instant = _strict_utc_datetime(current_anchor)
+        submit_instant = _strict_utc_datetime(canonical_submit)
+        checked_instant = _strict_utc_datetime(normalized_checked_at)
+        # sacct ``Submit`` is whole-second while the durable anchor keeps
+        # microseconds, so a same-second submit must not fall before it; the
+        # attempt-comment check below still excludes every earlier attempt.
+        if (
+            anchor_instant is None
+            or submit_instant is None
+            or checked_instant is None
+            or not anchor_instant.replace(microsecond=0) <= submit_instant <= checked_instant
+        ):
+            return OperatorBindResult("submit_time_outside_attempt_window")
+        # ``forcing_submit_identity_is_complete`` already proved the durable
+        # comment is this attempt's ``forcing_attempt_comment_for(key, attempt)``.
+        attempt_comment = str(existing.get("slurm_comment") or "")
+        if submitline_key is None or submitline_key != attempt_comment:
+            return OperatorBindResult("submitline_key_mismatch")
+        array_spec = _forcing_submitline_array_spec(submit_line)
+        # Identity completeness proved ``cohort_members`` is a sequence whose
+        # task ids are exactly ``0..n-1`` (unbounded: no 256-row display cap).
+        member_count = len(existing["cohort_members"])
+        array_match = (
+            _OPERATOR_BIND_FORCING_ARRAY_SPEC_RE.fullmatch(array_spec) if array_spec is not None else None
+        )
+        if array_match is None or int(array_match.group(1)) + 1 != member_count:
+            return OperatorBindResult("array_spec_mismatch")
+        # The owner rule of inflight ``_forcing_accounting_identity_matches``,
+        # verbatim, with the operator's sacct ``User`` / ``Account`` as the record.
+        expected_user = str(existing.get("expected_slurm_user") or "")
+        expected_account = str(existing.get("expected_slurm_account") or "")
+        if bool(existing.get("slurm_ownership_required", False)) and (
+            not expected_user or not expected_account or not slurm_user or not slurm_account
+        ):
+            return OperatorBindResult("slurm_owner_mismatch")
+        if expected_user and slurm_user != expected_user:
+            return OperatorBindResult("slurm_owner_mismatch")
+        if expected_account and slurm_account != expected_account:
+            return OperatorBindResult("slurm_owner_mismatch")
+        audit = _OperatorBindAudit(
+            details={
+                "lane": "forcing",
+                "checked_by": checked_by_text,
+                "checked_at": normalized_checked_at,
+                "verification_note": verification_note_text,
+                "submitline_key": attempt_comment,
+                "array_spec": array_spec,
+                "slurm_job_id": requested_id,
+                "slurm_submit_time": canonical_submit,
+                "slurm_user": slurm_user,
+                "slurm_account": slurm_account,
+                "expected_submission_attempt": expected_submission_attempt,
+                "expected_submission_attempt_started_at": expected_anchor,
+                "prior_status": str(existing.get("status") or ""),
+                "prior_submit_outcome": str(existing.get("submit_outcome") or ""),
+                "prior_reconciliation_source": str(existing.get("reconciliation_source") or ""),
+                "prior_reconciliation_decision": str(existing.get("reconciliation_decision") or ""),
+                "prior_reconciliation_reason_class": str(existing.get("reconciliation_reason_class") or ""),
+            }
+        )
+        with self._reconcile_inventory_file_lock_unlocked():
+            # Cycle lock -> inventory lock, held through the write, so no
+            # concurrent writer can bind this id between the scan and the append.
+            entry_names = self._reconcile_inventory_entry_names_unlocked()
+            other_masters, ambiguous = self._reconcile_inventory_jobs_matching_unlocked(
+                entry_names,
+                expected_user=expected_user,
+                expected_account=expected_account,
+                candidate_submit=submit_instant,
+                active_slurm_job_id=requested_id,
+                include_job_id=str(existing.get("job_id") or job_id),
+                fallback_unique=True,
+                submitline_key=attempt_comment,
+                strict_slurm_id_exclusivity=True,
+            )
+            if ambiguous or other_masters:
+                return OperatorBindResult("slurm_id_claimed")
+            if self._operator_bind_slurm_id_claimed_in_cycle_unlocked(
+                requested_id,
+                include_job_id=str(existing.get("job_id") or job_id),
+                source_id=source_id,
+                cycle_time=cycle_time,
+            ):
+                return OperatorBindResult("slurm_id_claimed")
+            # Exactly the ``bind_forcing_submit_attempt`` post-state.
+            row = apply_accepted_submit_transition(existing, AcceptedSubmitTransition.accepted(status="submitted"))
+            row.update(
+                {
+                    "slurm_job_id": requested_id,
+                    "submitted_at": existing.get("submitted_at") or _format_utc(_utcnow()),
+                    "submit_outcome": "accepted",
+                    "reconciliation_source": "slurm_exact_comment",
+                    "reconciliation_decision": "matched_bound",
+                    "matched_slurm_job_id": requested_id,
+                    "reconciliation_reason_class": None,
+                    "updated_at": _format_utc(_utcnow()),
+                }
+            )
+            result = self._write_operator_bind_unlocked(
+                row,
+                existing,
+                audit,
+                source_id=source_id,
+                cycle_time=cycle_time,
+                model_id=_optional_safe_identity(row, "model_id"),
+            )
+        bound = result.row or row
+        return OperatorBindResult(
+            None,
+            OperatorBindReceipt(
+                job_id=str(bound.get("job_id") or job_id),
+                journal_root=str(self.root),
+                status_from=str(existing.get("status") or ""),
+                status_to=str(bound.get("status") or ""),
+                reconciliation_source=str(bound.get("reconciliation_source") or ""),
+                reconciliation_decision=str(bound.get("reconciliation_decision") or ""),
+                matched_slurm_job_id=str(bound.get("matched_slurm_job_id") or ""),
+                slurm_accounting_submitted_at=bound.get("slurm_accounting_submitted_at"),
+                submitline_key=attempt_comment,
+                submission_attempt=expected_submission_attempt,
+                submission_attempt_started_at=current_anchor,
+                checked_by=checked_by_text,
+                checked_at=normalized_checked_at,
+                verification_note=verification_note_text,
+                written_record_count=audit.written_record_count,
+                warnings=tuple(audit.warnings),
+                lane="forcing",
+                array_spec=array_spec,
+                slurm_submit_time=canonical_submit,
+            ),
+        )
 
     def release_identity_blocked_reservation(
         self,
@@ -13540,6 +13785,28 @@ def _operator_evidence_text(value: Any, *, field: str) -> str:
     return sanitized
 
 
+def _operator_owner_evidence_text(value: str | None, *, field: str) -> str:
+    """#2675: the operator's sacct ``User`` / ``Account`` as bounded, sanitizer-clean evidence.
+
+    The ``_operator_evidence_text`` bound (``checked_by``'s, raising
+    ``file_journal_evidence_limit_exceeded``) and its sanitizer, except that
+    absent or blank is allowed and yields ``""``, and a value the sanitizer
+    would alter (a secret, path or URI) raises ``file_journal_unsafe_identity``
+    instead of being redacted.  The value is the owner-rule comparison input as
+    well as the audit text, and the journal may already hold a recorded owner
+    in redacted form, so a redacted input could collide with it; refusing keeps
+    the comparison exact.  The caller has already rejected non-string values.
+    """
+
+    if value is None or not value.strip():
+        return ""
+    if len(value) > MAX_OPERATOR_CHECKED_BY_LENGTH:
+        raise FileOrchestrationJournalError("file_journal_evidence_limit_exceeded", field=field)
+    if _public_message(_safe_error_message(value)) != value:
+        raise FileOrchestrationJournalError("file_journal_unsafe_identity", field=field)
+    return value
+
+
 def _redact_durable_error_message_fields(record_type: str, payload: Mapping[str, Any]) -> dict[str, Any]:
     row = dict(payload)
     if record_type in {"pipeline_job", "hydro_run", "forecast_cycle"} and "error_message" in row:
@@ -14232,6 +14499,27 @@ def _source_cycle_from_cycle_id(cycle_id: str) -> tuple[str, datetime]:
             evidence={"expected": expected, "actual": cycle_id[:80]},
         )
     return source_id, cycle_time
+
+
+def _forcing_submitline_array_spec(submit_line: str) -> str | None:
+    """#2675: the one ``--array=`` value of a forcing ``SubmitLine``, or ``None``.
+
+    Whitespace-delimited like ``reconcile._submitline_comment_key`` (the gateway
+    passes sbatch an argv list).  Every array option spelling counts as an
+    occurrence (``--array=<v>``, ``--array <v>``, ``-a<v>``, ``-a <v>``); anything
+    but exactly one occurrence, which must be the ``--array=<v>`` form the
+    gateway renders, yields ``None`` -- a missing, duplicated (even identical)
+    or other-shaped value is never guessed at.
+    """
+
+    occurrences = [
+        token
+        for token in submit_line.split()
+        if token == "--array" or token.startswith("--array=") or token.startswith("-a")
+    ]
+    if len(occurrences) != 1 or not occurrences[0].startswith("--array="):
+        return None
+    return occurrences[0][len("--array=") :] or None
 
 
 def _accepted_submit_source_cycle_from_job_id(pipeline_job_id: str) -> tuple[str, datetime]:

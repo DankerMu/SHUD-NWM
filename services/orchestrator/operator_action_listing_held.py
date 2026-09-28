@@ -22,6 +22,7 @@ from typing import Any
 
 from .accepted_submit_cohort import FORECAST_COHORT_STAGE_ALIASES
 from .file_orchestration_journal import FileOrchestrationJournalError, _accepted_submit_source_cycle_from_job_id
+from .forcing_submit_identity import FORCING_STAGE_ALIASES
 
 HELD_RESERVATION_DECISION = "held_reservation_unresolved"
 HELD_RESERVATION_RUNBOOK = "docs/runbooks/failed-basin-retry.md"
@@ -52,12 +53,15 @@ HELD_RESERVATION_AGED_LISTED_ACTIONS: Mapping[str, str] = {
     "stale_attempt_blocked": "escalate",
     "journal_quarantined": "escalate",
 }
-#: The follow-up issues an operator is pointed at when no supported exit exists:
-#: the legacy unversioned master (shape (c)) and every held row that is not a
-#: forecast cohort master (the forcing lane), which neither ``bind-reserved-job``
-#: nor ``demote-reserved-job`` accepts.
+#: #2675: the forcing lane's own mapping.  ``bind-reserved-job`` binds a held
+#: forcing master on operator-verified sacct evidence, so the two held actions
+#: whose job may well have run point at it; every other forcing action (a
+#: foreign owner or comment collision, or the absence case of #2682) is
+#: ``escalate``.  The age rules are the tables above, unchanged.
+HELD_RESERVATION_FORCING_BIND_ACTIONS = frozenset(("multiple_matches_blocked", "query_unavailable"))
+#: The follow-up issue an operator is pointed at when no supported exit exists:
+#: the legacy unversioned master (shape (c)).
 HELD_RESERVATION_LEGACY_FOLLOW_UP = "#2674"
-HELD_RESERVATION_NON_FORECAST_FOLLOW_UP = "#2675"
 #: The held-reservation paragraph of ``LIST_OPERATOR_ACTIONS_HELP`` (the listing's
 #: only online index), rendered from the constants above.
 HELD_RESERVATION_HELP = (
@@ -73,9 +77,11 @@ HELD_RESERVATION_HELP = (
     "submission_attempt_started_at is at least 6h older than the pass started_at or is "
     "unknown; bound, reservation_lost, absence_retry_permitted and "
     "identity_mismatch_released are never listed; any other action is listed with "
-    "escalate. A job that is not a forecast cohort master (the forcing lane) always "
-    f"gets escalate and follow_up_issue {HELD_RESERVATION_NON_FORECAST_FOLLOW_UP}; a "
-    f"legacy unversioned master carries follow_up_issue {HELD_RESERVATION_LEGACY_FOLLOW_UP}. "
+    "escalate. A forcing master (#2675, job id ending in a forcing stage) gets "
+    f"bind-reserved-job for {' and '.join(sorted(HELD_RESERVATION_FORCING_BIND_ACTIONS))} "
+    "(same age rules) and escalate for every other action; a job that is neither a "
+    "forecast cohort master nor a forcing master always gets escalate. Only a legacy "
+    f"unversioned master carries a follow_up_issue ({HELD_RESERVATION_LEGACY_FOLLOW_UP}). "
     "An entry is dropped once a newer pass whose restart-reconcile lane ran no longer "
     "reports that job held. (5) The fifth known boundary of exit 0: held entries come "
     "only from passes whose restart-reconcile lane ran; a pass whose lane was skipped, "
@@ -136,6 +142,10 @@ def _pass_held_reservations(outcomes: Sequence[Any], payload: Mapping[str, Any])
             # Always-listed actions, and any action outside the table: it fails visible.
             command = HELD_RESERVATION_ALWAYS_LISTED_ACTIONS.get(action, "escalate")
         forecast_master = _held_job_is_forecast_master(job_id)
+        if not forecast_master:
+            # The forcing lane's own mapping (#2675); any other non-forecast id escalates.
+            forcing_bind = _held_job_is_forcing_master(job_id) and action in HELD_RESERVATION_FORCING_BIND_ACTIONS
+            command = "bind-reserved-job" if forcing_bind else "escalate"
         source_id, cycle_time = _held_job_source_cycle(job_id)
         entry: dict[str, Any] = {
             "decision": HELD_RESERVATION_DECISION,
@@ -144,12 +154,10 @@ def _pass_held_reservations(outcomes: Sequence[Any], payload: Mapping[str, Any])
             "source_id": source_id,
             "cycle_time": cycle_time,
             "submission_attempt_started_at": anchor_text,
-            "operator_command": command if forecast_master else "escalate",
+            "operator_command": command,
             "recovery_runbook": HELD_RESERVATION_RUNBOOK,
         }
-        if not forecast_master:
-            entry["follow_up_issue"] = HELD_RESERVATION_NON_FORECAST_FOLLOW_UP
-        elif action == "legacy_unversioned_read_only":
+        if forecast_master and action == "legacy_unversioned_read_only":
             entry["follow_up_issue"] = HELD_RESERVATION_LEGACY_FOLLOW_UP
         found.append(entry)
     return found
@@ -158,14 +166,27 @@ def _pass_held_reservations(outcomes: Sequence[Any], payload: Mapping[str, Any])
 def _held_job_is_forecast_master(job_id: str) -> bool:
     """Whether the job id names a forecast cohort master (``job_<run>_<forecast stage>[_retry_<n>]``).
 
-    Only a forecast cohort master has a supported bind/demote exit; anything
-    else -- the forcing lane, or an id this can not read -- is non-forecast.
+    Only a forecast cohort master takes the per-action table as is; anything
+    else -- the forcing lane (:func:`_held_job_is_forcing_master`), or an id this
+    can not read -- is non-forecast.
     """
+
+    return _held_job_stage_suffix_in(job_id, FORECAST_COHORT_STAGE_ALIASES)
+
+
+def _held_job_is_forcing_master(job_id: str) -> bool:
+    """#2675: whether the job id names a forcing master (``job_<run>_<forcing stage>[_retry_<n>]``)."""
+
+    return _held_job_stage_suffix_in(job_id, FORCING_STAGE_ALIASES)
+
+
+def _held_job_stage_suffix_in(job_id: str, aliases: frozenset[str]) -> bool:
+    """The stage-suffix rule, shared by both lanes: a readable master id ending in ``_<alias>``."""
 
     if _held_job_source_cycle(job_id) == (None, None):
         return False
     base = _HELD_RETRY_SUFFIX_RE.sub("", job_id)
-    return any(base.endswith(f"_{alias}") for alias in FORECAST_COHORT_STAGE_ALIASES)
+    return any(base.endswith(f"_{alias}") for alias in aliases)
 
 
 def _held_job_source_cycle(job_id: str) -> tuple[str | None, str | None]:

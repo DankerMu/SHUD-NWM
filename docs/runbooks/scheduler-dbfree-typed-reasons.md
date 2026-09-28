@@ -840,8 +840,9 @@ run 在同一 run 目录里跑两遍（#2666：IFS 0925 12Z 的 57553 / 57637，
   `submission_attempt_started_at`、`recovery_runbook`）：`ambiguous_fallback_match` 每趟都列（`bind-reserved-job`）；
   `legacy_unversioned_read_only` / `multiple_matches_blocked` 每趟都列（`escalate`）；`query_unavailable` /
   `fallback_no_match` / `absence_unconfirmed`（`triage`）与 `identity_mismatch_blocked` / `stale_attempt_blocked` /
-  `journal_quarantined`（`escalate`）在 attempt anchor 距 pass 开始 ≥ 6h（或未知）后才列；不是 forecast cohort master 的
-  held 行（forcing 车道）一律 `escalate` 并带 `follow_up_issue: "#2675"`，legacy 未版本化 master 带 `"#2674"`。
+  `journal_quarantined`（`escalate`）在 attempt anchor 距 pass 开始 ≥ 6h（或未知）后才列；forcing master（job id 以
+  forcing stage 结尾，#2675）按同样的列出规则，但 `multiple_matches_blocked` / `query_unavailable` 给 `bind-reserved-job`、
+  其余一律 `escalate`，且不带 `follow_up_issue`；其他非 forecast 行一律 `escalate`；只有 legacy 未版本化 master 带 `"#2674"`。
   下一趟跑过 reconcile 的 pass 不再报该行时条目消失。restart reconcile 被跳过或 `reserved_unbound_error` 的 pass
   记在 `restart_reconcile_unscanned_passes`，不改退出码（exit 0 不为只在这些 pass 里出现的 held 行背书）。
 - **出口**：restart reconcile 的自动绑定（`matched_bound`，之后按 inflight 投影照常续跑，例如 forecast 已成功就从
@@ -849,7 +850,10 @@ run 在同一 run 目录里跑两遍（#2666：IFS 0925 12Z 的 57553 / 57637，
   相同的持久元组外加一条 `operator_verified_bind` 审计事件，见 [`failed-basin-retry.md`](failed-basin-retry.md)
   「Disposition — completed or running but unbound: the guarded operator bind」）；`demote-reserved-job`（仅在按
   Disposition 确认作业已死之后）；或 identity-blocked 释放（`reservation_lost` / `identity_mismatch_released`）。
-  forcing 车道的 held 行暂无出口，由 #2675 跟踪，升级处理。legacy 未版本化 master（`legacy_unversioned_read_only`，形态
+  forcing 车道的 held master 也走 `bind-reserved-job`（#2675）：`SubmitLine` 须带本 attempt 的 comment 与
+  `--array=0-<n-1>[%k]`，加 `--slurm-user` / `--slurm-account`，写与自动 forcing 绑定完全相同的元组外加一条
+  `operator_verified_bind`（`lane=forcing`），见 [`failed-basin-retry.md`](failed-basin-retry.md)「Disposition — held
+  forcing master: the forcing bind」；作业已死（绝对缺席）的出口不在此，由 #2682 跟踪，升级处理。legacy 未版本化 master（`legacy_unversioned_read_only`，形态
   (c)）自 #2674 起当前 writer 不再产生：每个 journal writer 都以 `file_journal_legacy_unversioned_reserved_forecast_master`
   拒写（零字节），历史导入在建 journal root 之前预扫并整体拒绝；列出来的只能是 #2674 之前写下的行，一律升级给
   scheduler owner，绝不手改 journal（2026-09-28 node-22 生产 journal 中此类行为 0）。
