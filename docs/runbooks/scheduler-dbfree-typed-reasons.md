@@ -849,8 +849,11 @@ run 在同一 run 目录里跑两遍（#2666：IFS 0925 12Z 的 57553 / 57637，
   相同的持久元组外加一条 `operator_verified_bind` 审计事件，见 [`failed-basin-retry.md`](failed-basin-retry.md)
   「Disposition — completed or running but unbound: the guarded operator bind」）；`demote-reserved-job`（仅在按
   Disposition 确认作业已死之后）；或 identity-blocked 释放（`reservation_lost` / `identity_mismatch_released`）。
-  legacy 未版本化 master（`legacy_unversioned_read_only`）与 forcing 车道的 held 行暂无出口，分别由 #2674 / #2675 跟踪，
-  升级处理。**manual-retry marker 不是出口**：marker 不会越过 held 行，打了也只是等 reconcile。一趟大约只绑一行（见上一节），
+  forcing 车道的 held 行暂无出口，由 #2675 跟踪，升级处理。legacy 未版本化 master（`legacy_unversioned_read_only`，形态
+  (c)）自 #2674 起当前 writer 不再产生：每个 journal writer 都以 `file_journal_legacy_unversioned_reserved_forecast_master`
+  拒写（零字节），历史导入在建 journal root 之前预扫并整体拒绝；列出来的只能是 #2674 之前写下的行，一律升级给
+  scheduler owner，绝不手改 journal（2026-09-28 node-22 生产 journal 中此类行为 0）。
+  **manual-retry marker 不是出口**：marker 不会越过 held 行，打了也只是等 reconcile。一趟大约只绑一行（见上一节），
   多行 held 时逐趟解冻，属预期。
 
 ## 相关文档

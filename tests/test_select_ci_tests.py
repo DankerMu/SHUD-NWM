@@ -1341,6 +1341,10 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         # directory rule — that route closes the importer gaps of
         # `services/orchestrator/__init__.py` and chain_runtime_utils.py.
         "tests/test_file_journal_full_tree_budget_contract.py",
+        # #2674: the shape (c) guard suite rides the broad orchestrator
+        # directory rule (package __init__ and accepted_submit_identity.py
+        # importer gaps). ~1s.
+        "tests/test_file_journal_legacy_unversioned_reserved_guard.py",
         # #2385/#2387: the read-blocked sentinel's coupling pin rides the broad
         # orchestrator directory rule for its chain consumer end
         # (chain_forecast_execution.py / chain_forecast_orchestrator_cycle.py),
@@ -12268,6 +12272,11 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
     (
         "tests/orchestrator_bind_reserved_job_helpers.py",
         "tests/test_orchestrator_bind_reserved_job_cas.py",
+    ),
+    # The #2674 pre-existing shape (c) seed.
+    (
+        "tests/file_journal_legacy_seed_helpers.py",
+        "tests/test_file_journal_legacy_unversioned_reserved_guard.py",
     ),
     # The #1809 gateway-reconcile split's two shared fixture modules.
     ("tests/gateway_reconcile_helpers.py", "tests/test_gateway_reconcile_file_cohort_comment.py"),

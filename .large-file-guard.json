@@ -109,6 +109,8 @@
     "tests/test_file_orchestration_migration.py",
     "tests/fixtures/station_series_baseline_heihe_ifs_2026060100.json",
     "tests/test_model_registration.py",
-    "services/orchestrator/cli.py"
+    "services/orchestrator/cli.py",
+    "tests/test_gateway_reconcile_comment_accounting.py",
+    "tests/test_orchestrator_demote_core_cas.py"
   ]
 }

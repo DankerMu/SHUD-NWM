@@ -1504,6 +1504,10 @@ FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     # reconcile, the bind and inflight projection. DB-free, ~43 tests in ~6s.
     "tests/test_orchestrator_bind_reserved_job_cas.py",
     "tests/test_orchestrator_bind_reserved_job_lane.py",
+    # #2674: the shape (c) writer-guard suite's subject is this module's
+    # `_write_pipeline_job_unlocked` entry refusal and its record-level append
+    # funnels, driven through every public writer. DB-free, ~46 tests in ~1s.
+    "tests/test_file_journal_legacy_unversioned_reserved_guard.py",
     # #1953: the whole-tree budget contract is ABOUT this module — the read
     # lane its `_RecordBudget` tags, and the synthetic blocked row the five
     # query entrypoints return when the budget refuses. Its static pins read
@@ -2218,6 +2222,32 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
+        # #2674: the test-only seed for a pre-existing shape (c) row. The guard
+        # suite imports it at file level; the journal suite imports it
+        # function-locally; every other consumer reaches it through
+        # tests/gateway_reconcile_helpers.py `_file_cohort_repository(...,
+        # versioned=False)`, which imports it function-locally (a
+        # support-to-support edge), either directly or via
+        # tests/orchestrator_demote_reserved_job_helpers.py
+        # `_axis_repository(..., "legacy")`. The derived importer scan sees only
+        # the file-level one, so the rule names every suite that calls
+        # `versioned=False` (grep `versioned=False` / `_axis_repository` /
+        # `seed_pre_existing_legacy_row` under tests/).
+        "tests/file_journal_legacy_seed_helpers.py",
+        (
+            "tests/test_file_journal_legacy_unversioned_reserved_guard.py",
+            "tests/test_file_orchestration_journal.py",
+            "tests/test_gateway_reconcile_comment_accounting.py",
+            "tests/test_gateway_reconcile_comment_capability.py",
+            "tests/test_gateway_reconcile_file_cohort_comment.py",
+            "tests/test_gateway_reconcile_inventory.py",
+            "tests/test_gateway_reconcile_master_transitions.py",
+            "tests/test_gateway_reconcile_writer_receipts.py",
+            "tests/test_orchestrator_bind_reserved_job_cas.py",
+            "tests/test_orchestrator_demote_core_cas.py",
+        ),
+    ),
+    PathTestRule(
         # #1809: the shared store/cohort/identity fixtures extracted from the
         # gateway-reconcile monolith. The 22 file-level importing partitions are
         # named exactly (derived-set members, all sub-second to import);
@@ -2757,6 +2787,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_gateway_reconcile_writer_rollforward.py",
             "tests/test_gateway_reconcile_writer_receipts.py",
             "tests/test_gateway_reconcile_writer_quiescence.py",
+            # #2674: the shape (c) guard suite top-level-imports this module; its
+            # E7 cases pin the import pre-scan that fails closed before the
+            # journal root is created. DB-free, ~1s.
+            "tests/test_file_journal_legacy_unversioned_reserved_guard.py",
         ),
         stop_on_match=True,
     ),
@@ -3244,6 +3278,12 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_orchestrator_bind_reserved_job_cli.py",
             "tests/test_orchestrator_bind_reserved_job_lane.py",
             "tests/test_operator_action_listing_held_reservations.py",
+            # #2674: the shape (c) guard suite. Its importer gaps on
+            # `services.orchestrator` itself and accepted_submit_identity.py close
+            # on this directory rule; the file_orchestration_journal.py /
+            # file_orchestration_migration.py pairs ride their stop-rule tuples.
+            # DB-free, ~1s.
+            "tests/test_file_journal_legacy_unversioned_reserved_guard.py",
             "tests/test_cli_cleanup_frontier.py",
             "tests/test_cli_publish_qdown.py",
             "tests/test_orchestrator_demote_cli_security.py",

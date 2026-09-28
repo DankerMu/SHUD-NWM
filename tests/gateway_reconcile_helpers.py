@@ -244,7 +244,15 @@ def _file_cohort_repository(
         source_id=source_id,
         init_state_identities=init_state_identities,
     )
-    repository.reserve_pipeline_job(record)
+    if versioned:
+        repository.reserve_pipeline_job(record)
+    else:
+        # #2674: a marker-free reserved forecast cohort master is held shape
+        # (c), which no current writer persists; it exists only as data
+        # written before that change, so it is seeded as such.
+        from tests.file_journal_legacy_seed_helpers import seed_pre_existing_legacy_row
+
+        seed_pre_existing_legacy_row(repository.reserve_pipeline_job, record)
     if versioned and submit_outcome == "submit_result_ambiguous":
         from services.orchestrator.accepted_submit_identity import AcceptedSubmitTransition
 

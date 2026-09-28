@@ -422,7 +422,10 @@ def test_valid_custom_coverage_permits_exactly_one_retry_and_marker_free_is_unch
     marker_row = marker_template.get_pipeline_job(pipeline_job_id)
     marker_row.pop("submission_attempt_started_at")
     marker_free = FileOrchestrationJournalRepository(tmp_path / "marker-free")
-    assert marker_free.reserve_pipeline_job(marker_row) is not None
+    # #2674: held shape (c) is pre-change data only; seed it as such.
+    from tests.file_journal_legacy_seed_helpers import seed_pre_existing_legacy_row
+
+    assert seed_pre_existing_legacy_row(marker_free.reserve_pipeline_job, marker_row) is not None
     legacy = reconcile_reserved_unbound_jobs(marker_free, comment_query=lambda _key: None)
     assert [outcome.action for outcome in legacy] == ["legacy_unversioned_read_only"]
 

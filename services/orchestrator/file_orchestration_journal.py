@@ -3260,6 +3260,18 @@ class FileOrchestrationJournalRepository:
                     )
                 ):
                     return None
+            # #2674: every reclaim that reaches this point writes ``reserved``.
+            # Refuse on the EXISTING row's shape, not only on the row about to
+            # be written: a request without ``cohort_members`` would backfill
+            # ``[]`` below and commit a member-less ``reserved`` unversioned
+            # forecast master, which reconcile would route to the generic
+            # exact-comment lane.  No current caller reaches this (the only
+            # forecast reclaim request is versioned).
+            if _is_legacy_unversioned_forecast_cohort_master(existing):
+                raise FileOrchestrationJournalError(
+                    "file_journal_legacy_unversioned_reserved_forecast_master",
+                    field="accepted_submit_contract_version",
+                )
             # The new attempt's row is derived from the PERSISTED row, so the
             # init-state identity mapping it carries is the one captured at the
             # first reservation. That is the adjudicated semantics (#1188):
@@ -10202,6 +10214,13 @@ class FileOrchestrationJournalRepository:
         model_id: str | None,
         _committed_projection_containment: bool = False,
     ) -> dict[str, Any] | None:
+        # #2674: refuse held shape (c) before any side effect of the write --
+        # the conflict check, the sequence allocation and, above all, the
+        # reconcile-inventory anchor sync below, which runs BEFORE the journal
+        # append and would otherwise publish or rewrite an anchor for a write
+        # that never commits.  The record-level append funnels repeat the
+        # check for the batch appenders that bypass this helper.
+        _refuse_legacy_unversioned_reserved_forecast_master(row)
         row = _redact_durable_error_message_fields("pipeline_job", row)
         source_id = _source_id_from_job(row)
         cycle_time = _cycle_time_from_job(row)
@@ -11063,6 +11082,7 @@ class FileOrchestrationJournalRepository:
         cycle_time: datetime,
         record: Mapping[str, Any],
     ) -> None:
+        _refuse_legacy_unversioned_reserved_forecast_master_record(record)
         self._append_journal_bytes_unlocked(
             source_id=source_id,
             cycle_time=cycle_time,
@@ -11081,6 +11101,10 @@ class FileOrchestrationJournalRepository:
         """Append a validated record batch with one bounded journal rewrite."""
         if not records:
             return
+        # #2674: the whole batch is refused before any byte when one of its
+        # pipeline_job records is held shape (c).
+        for record in records:
+            _refuse_legacy_unversioned_reserved_forecast_master_record(record)
         self._append_journal_bytes_unlocked(
             source_id=source_id,
             cycle_time=cycle_time,
@@ -13759,6 +13783,51 @@ def _accepted_submit_attempt_anchor(value: Any) -> str:
 def _file_journal_real_slurm_job_id(value: Any) -> bool:
     text = str(value or "")
     return bool(text and text.lower() != "local")
+
+
+def _is_legacy_unversioned_forecast_cohort_master(row: Mapping[str, Any]) -> bool:
+    """Return whether ``row`` is an unversioned forecast cohort master, in any status (#2674).
+
+    A forecast cohort row (``stage``, or ``job_type`` when ``stage`` is empty,
+    is a forecast alias) with non-empty ``cohort_members`` and no current
+    accepted-submit contract marker.  The properties are tested cheap-first; a
+    malformed marker still raises from ``accepted_submit_contract_is_current``
+    (corruption fails closed).
+    """
+
+    if not is_forecast_cohort_stage_name(row.get("stage"), row.get("job_type")):
+        return False
+    members = row.get("cohort_members")
+    if not isinstance(members, Sequence) or isinstance(members, str | bytes) or not members:
+        return False
+    return not accepted_submit_contract_is_current(row)
+
+
+def _is_legacy_unversioned_reserved_forecast_master(row: Mapping[str, Any]) -> bool:
+    """Return whether ``row`` is held shape (c) (#2674).
+
+    A ``reserved`` unversioned forecast cohort master.  Restart reconcile can
+    only report such a row ``legacy_unversioned_read_only`` and the operator
+    bind refuses it, so no writer may persist one.
+    """
+
+    return str(row.get("status") or "") == "reserved" and _is_legacy_unversioned_forecast_cohort_master(row)
+
+
+def _refuse_legacy_unversioned_reserved_forecast_master(row: Mapping[str, Any]) -> None:
+    if _is_legacy_unversioned_reserved_forecast_master(row):
+        raise FileOrchestrationJournalError(
+            "file_journal_legacy_unversioned_reserved_forecast_master",
+            field="accepted_submit_contract_version",
+        )
+
+
+def _refuse_legacy_unversioned_reserved_forecast_master_record(record: Mapping[str, Any]) -> None:
+    """Record-level backstop at the journal append funnels (#2674)."""
+
+    payload = record.get("payload")
+    if record.get("record_type") == "pipeline_job" and isinstance(payload, Mapping):
+        _refuse_legacy_unversioned_reserved_forecast_master(payload)
 
 
 def _reconcile_inventory_row_kind(job: Mapping[str, Any]) -> str | None:
