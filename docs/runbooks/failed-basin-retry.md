@@ -731,7 +731,7 @@ decision `held_reservation_unresolved`:
 | `multiple_matches_blocked` | every pass | `escalate` | none: its durable decision is not the held tuple, so both the bind and the demote refuse it (`not_held`); escalate to the scheduler owner and never hand-edit the journal |
 | `identity_mismatch_blocked` / `stale_attempt_blocked` | once the attempt anchor is at least 6h old (or unknown) | `escalate` | none: no operator command resolves them; escalate to the scheduler owner |
 | `journal_quarantined` | once the attempt anchor is at least 6h old (or unknown) | `escalate` | the residue-file fix below when `quarantine_reason` is `file_journal_reconcile_inventory_migration_invalid`; any other reason: escalate |
-| `legacy_unversioned_read_only` (shape (c)) | every pass | `escalate` | none yet: the bind refuses it (`legacy_unversioned_unsupported`); tracked in #2674 |
+| `legacy_unversioned_read_only` (shape (c)) | every pass | `escalate` | none: since #2674 no current writer produces the shape (every journal writer refuses it, and the historical import fails closed on it before creating the journal root), so a listed row predates that change; the bind refuses it (`legacy_unversioned_unsupported`); escalate to the scheduler owner and never hand-edit the journal. The node-22 journal held 0 such rows on 2026-09-28 |
 | any held row that is not a forecast cohort master (the forcing lane) | as tabled | `escalate` | none yet: neither bind nor demote accepts it; tracked in #2675 |
 | any other action (outside this table) | every pass, whatever the anchor age | `escalate` | none: a new reconcile action the listing does not know; escalate |
 
@@ -844,7 +844,7 @@ terminal status as usual.
    | `slurm_id_invalid` | `--slurm-job-id` is not a canonical bare decimal master id (a leading zero such as `0123`, an array task, or a step suffix) |
    | `slurm_id_claimed` | a same-cycle row of any kind (forcing, legacy, member task `<id>_<n>`) or a current forecast master of any other cycle (settled or active) already claims that master id, even a recycled id with another `Submit` (stricter than #1850) |
    | `slurm_submit_time_invalid` | `--slurm-submit-time` is not a timezone-aware instant |
-   | `legacy_unversioned_unsupported` | shape (c): escalate, #2674 |
+   | `legacy_unversioned_unsupported` | shape (c), a row that predates #2674 (no current writer produces it): escalate, never hand-edit the journal |
    | `not_found` | no such forecast master |
 
    On the production-sized journal a bind takes about a minute (53 s in the #2668 rehearsal): it holds the

@@ -818,7 +818,10 @@ def test_capability_probe_not_called_with_unversioned_only_rows(
         member_count=1,
         versioned=False,
     )
-    repository.reserve_pipeline_job(record)
+    # #2674: held shape (c) is pre-change data only; seed it as such.
+    from tests.file_journal_legacy_seed_helpers import seed_pre_existing_legacy_row
+
+    seed_pre_existing_legacy_row(repository.reserve_pipeline_job, record)
     assert len(repository.query_reserved_unbound_jobs()) == 1
     probes: list[int] = [0]
     query = reconcile_module.default_comment_sacct_querier(

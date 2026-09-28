@@ -19607,11 +19607,15 @@ def _mint_batch_lane_cohort(root: Path) -> FileOrchestrationJournalRepository:
     """Mint a legal July cohort master whose one member is an ACTIVE hydro row.
 
     Everything here goes through public writers, so the tree is exactly what
-    production would have written before the gate existed.
+    production would have written before the gate existed.  The master is a
+    marker-free reserved forecast cohort master, held shape (c), which no
+    writer persists since #2674, so it is seeded as pre-change data.
     """
 
+    from tests.file_journal_legacy_seed_helpers import seed_pre_existing_legacy_row
+
     repository = FileOrchestrationJournalRepository(root)
-    repository.reserve_pipeline_job(_batch_lane_cohort_master())
+    seed_pre_existing_legacy_row(repository.reserve_pipeline_job, _batch_lane_cohort_master())
     repository.append_historical_hydro_run(_batch_lane_member_hydro_run())
     repository.update_hydro_run_status(_BATCH_LANE_RUN_ID, "running")
     return repository

@@ -639,7 +639,10 @@ def test_reclaimed_reservation_keeps_the_first_attempts_init_state_mapping(
 def test_legacy_file_cohort_reconciliation_recorder_contract(tmp_path: Any, decision: str) -> None:
     from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
 
-    repository = _file_cohort_repository(tmp_path / decision, member_count=2, versioned=False)
+    # #2674: member-less, because the recorder leaves the row ``reserved`` and a
+    # reserved marker-free forecast master WITH members is held shape (c), which
+    # no writer may persist any more.  The four-field round trip is unchanged.
+    repository = _file_cohort_repository(tmp_path / decision, member_count=0, versioned=False)
     job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
     matched = "17667" if decision == "matched_bound" else None
 

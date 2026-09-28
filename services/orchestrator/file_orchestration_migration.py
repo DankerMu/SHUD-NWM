@@ -32,6 +32,7 @@ from services.orchestrator.chain_types import OrchestratorError
 from services.orchestrator.file_orchestration_journal import (
     FileOrchestrationJournalError,
     FileOrchestrationJournalRepository,
+    _is_legacy_unversioned_reserved_forecast_master,
     _public_evidence,
     _validated_git_writer_generation,
 )
@@ -1327,6 +1328,18 @@ def import_historical_scheduler_state(
     runs = _normalized_rows_limited("hydro_runs", hydro_runs)
     jobs = _normalized_rows_limited("pipeline_jobs", pipeline_jobs)
     events = _normalized_rows_limited("pipeline_events", pipeline_events)
+    # #2674, same placement as the row-limit gate: the import appends cycles,
+    # runs and jobs one row at a time, so a held shape (c) job refused by the
+    # journal writer part-way through would leave a partial import behind.  It
+    # fails the whole import here instead -- no journal root, zero bytes.  Not
+    # a skip reason: skipping a held row drops the only evidence that its
+    # Slurm job may still be running.
+    for row in jobs:
+        if _unsupported_job_reason(row) is None and _is_legacy_unversioned_reserved_forecast_master(row):
+            raise FileOrchestrationJournalError(
+                "file_journal_legacy_unversioned_reserved_forecast_master",
+                field="accepted_submit_contract_version",
+            )
     # #1955 D2, deliberately AFTER the row-limit gate rather than at the lane's
     # first statement: this is the one create-capable lane, and the over-limit
     # refusal is pinned to leave no journal root behind at all.  It is still

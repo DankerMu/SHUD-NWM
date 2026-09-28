@@ -1076,9 +1076,15 @@ def test_legacy_compatibility_writers_still_apply_legal_decisions(
     API and an ``absence_deferred`` decision through the legacy reconciliation
     recorder must still apply durably.  This is the positive counterpart of the
     two negative tests above.
+
+    #2674: both writes leave the row ``reserved``, and a reserved marker-free
+    forecast master WITH members is held shape (c), which no writer may
+    persist any more, so the controls run on a member-less legacy master.
     """
-    transition_repository = _legacy_marker_free_master_repository(tmp_path / "transition")
-    record_repository = _legacy_marker_free_master_repository(tmp_path / "record")
+    from tests.gateway_reconcile_helpers import _file_cohort_repository
+
+    transition_repository = _file_cohort_repository(tmp_path / "transition", member_count=0, versioned=False)
+    record_repository = _file_cohort_repository(tmp_path / "record", member_count=0, versioned=False)
     job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
     monkeypatch.setattr(journal_module, "_utcnow", lambda: STARTED_AT + timedelta(hours=3))
 
