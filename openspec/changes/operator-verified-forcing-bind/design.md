@@ -46,18 +46,19 @@ An operator bind writes only the durable tuple that the lane's automatic bind al
      - forecast cohort master: the #2668 path, byte-for-byte unchanged;
      - forcing master (`is_forcing_stage_name(stage, job_type)`): the forcing branch below;
      - anything else: `not_held`, as today.
-   - The CLI (`operator_reserved_bind.py`) keeps both entrypoints and the forecast inputs, and adds optional `--slurm-user` / `--slurm-account`, which the forcing CAS reads. `--submit-line` is the evidence for both lanes.
+   - The CLI (`operator_reserved_bind.py`) keeps both entrypoints and the forecast inputs, and adds optional `--slurm-user` / `--slurm-account`, which the forcing CAS reads. `--submit-line` is the evidence for both lanes. The forcing receipt adds `lane`, `array_spec` and `slurm_submit_time` (the verified `--slurm-submit-time`, the audit event's key); its `slurm_accounting_submitted_at` reports the durable row's value, null. The forecast receipt keys are unchanged.
 2. **Forcing CAS**, re-read under the cycle lock. Every failure is a named refusal with zero bytes written.
    - `forcing_submit_identity_is_complete(row)`. Otherwise `not_held`.
    - `status == reserved`, no bound or matched Slurm id, `submit_outcome == submit_result_ambiguous`, `reconciliation_decision` empty. Otherwise `not_held`.
    - Expected attempt and anchor equal the durable values. Otherwise `stale_attempt`.
-   - `anchor <= --slurm-submit-time <= --checked-at`. Otherwise `submit_time_outside_attempt_window`.
+   - `floor(anchor) <= --slurm-submit-time <= --checked-at`. Otherwise `submit_time_outside_attempt_window`. The anchor is floored to whole seconds because sacct `Submit` has whole-second precision while the durable anchor keeps microseconds; flooring cannot admit an earlier attempt, because the attempt-comment check below excludes it. Latent today: node-22 measured a forcing anchor-to-Submit gap of 19.99-141.19 s over 40 bound masters (2026-09-28).
    - The SubmitLine's single `--comment=` value (`reconcile._submitline_comment_key`) equals the durable `slurm_comment` (the attempt comment). Otherwise `submitline_key_mismatch`.
    - The SubmitLine's single `--array=` value matches `^0-(\d+)(%\d+)?$` with `\1 + 1 == len(cohort_members)`. Otherwise the new refusal `array_spec_mismatch`. A missing, duplicated or other-shaped value also refuses.
    - Owner, the same rule as inflight `_forcing_accounting_identity_matches`. The operator passes `--slurm-user` / `--slurm-account`, the sacct `User` / `Account` of that master.
      - When `slurm_ownership_required` is set, both expected values and both supplied values must be non-empty.
      - Any non-empty expected user or account must equal the supplied value, even when the flag is off.
      - Otherwise the new refusal is `slurm_owner_mismatch`.
+     - Both values are checked at entry, before any read: at most 256 characters (else `file_journal_evidence_limit_exceeded`); a value the operator-evidence sanitizer would alter (secret, path, URI) raises `file_journal_unsafe_identity` rather than being redacted, because the journal may hold a recorded owner in redacted form and a redacted input could collide with it; blank is allowed as empty. The checked value is both the audit text and the comparison input.
      - A row with no expected owner and no ownership requirement ignores the arguments. The next inflight pass's `_forcing_accounting_identity_matches` requires the same equality, so this check refuses up front what inflight would otherwise leave `reconcile_unverified`.
    - Canonical Slurm id `[1-9][0-9]*`. Otherwise `slurm_id_invalid`.
    - Claimant exclusivity, through the forcing branch's **own locked writer**. It cannot use `_commit_pipeline_job_submit_attempt_locked`: that path returns `stale` for non-master rows, refuses a submit instant off the fallback path, and writes a `slurm_binding_source` that the automatic forcing bind never writes. The writer takes the cycle lock, then the inventory lock, and calls:
@@ -93,7 +94,7 @@ An operator bind writes only the durable tuple that the lane's automatic bind al
 | F2 | Happy path: held forcing master + a SubmitLine with the exact attempt comment and `--array=0-<n-1>%k` + matching owner + a window-valid submit time + a canonical unclaimed id | bound; the durable row equals an identical held row bound through `bind_forcing_submit_attempt` (same fields, no `slurm_accounting_submitted_at`, no `slurm_binding_source`) apart from the audit event; then inflight reconcile over a COMPLETED array projects it terminal, and the members' concrete candidate decision is no longer a skip and names forecast as the next stage; zero gateway submit calls (real journal + `reconcile_inflight_jobs` + candidate-state decision) |
 | F2b | Owner: (a) ownership required and a supplied value missing or different; (b) ownership not required but a non-empty expected user or account differs from the supplied value | `slurm_owner_mismatch`, zero bytes; a row with no expected owner and no requirement ignores the arguments |
 | F3 | Stale attempt or anchor | `stale_attempt`, zero bytes |
-| F4 | Submit time before the anchor or after checked-at | `submit_time_outside_attempt_window`, zero bytes |
+| F4 | Submit time before the (whole-second floored) anchor or after checked-at; a same-second submit against a microsecond anchor binds | `submit_time_outside_attempt_window`, zero bytes |
 | F5 | SubmitLine comment of another attempt (`:a<n-1>`), of another key, a forecast `nhms_idem:` comment, none, or two distinct values | `submitline_key_mismatch`, zero bytes |
 | F6 | `--array=` missing, of the wrong size, a list form, or duplicated | `array_spec_mismatch`, zero bytes |
 | F7 | Id claimed by a same-cycle row of any kind or by a current forecast master; non-canonical id | `slurm_id_claimed` / `slurm_id_invalid`, zero bytes |

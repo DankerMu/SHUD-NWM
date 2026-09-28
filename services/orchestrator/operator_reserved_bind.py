@@ -146,10 +146,14 @@ def _bind_reserved_job(
         "warnings": warnings,
     }
     if receipt.lane != "forecast":
-        # #2675: only a forcing receipt names its lane and the verified array
-        # spec, so the forecast receipt keeps its exact pre-change key set.
+        # #2675: only a forcing receipt names its lane, the verified array spec
+        # and the operator-verified submit time (``slurm_submit_time``, the
+        # audit event's key), so the forecast receipt keeps its exact
+        # pre-change key set.  Its ``slurm_accounting_submitted_at`` stays the
+        # durable row's value: null, as the forcing row never persists it.
         payload["lane"] = receipt.lane
         payload["array_spec"] = receipt.array_spec
+        payload["slurm_submit_time"] = receipt.slurm_submit_time
     return payload
 
 

@@ -7,7 +7,7 @@
 - the operator-supplied sacct `SubmitLine` carries exactly one distinct `--comment=` value, equal to the row's own forcing attempt comment;
 - the `SubmitLine` carries exactly one `--array=` value of the form `0-<n-1>` (optionally `%<k>`), where `n` is the row's cohort member count (refusal `array_spec_mismatch`);
 - when the row requires Slurm ownership, the operator-supplied Slurm user and account equal the row's expected owner (refusal `slurm_owner_mismatch`);
-- the supplied Slurm submit time falls within `[attempt anchor, check time]`;
+- the supplied Slurm submit time falls within `[attempt anchor floored to whole seconds, check time]` (sacct `Submit` is whole-second);
 - the expected attempt and anchor equal the durable values;
 - the Slurm id is canonical and unclaimed under the same bounded claimant exclusivity as the forecast bind.
 

@@ -917,7 +917,9 @@ as `slurm_job_id` and `matched_slurm_job_id`; no `slurm_binding_source`) plus on
    forcing id: it matches forcing accounting without an exact comment, so another cycle's
    `nhms_forcing` job of the same owner would be projected onto this row. Run the forecast
    step 4 command with the forcing `--job-id` plus `--slurm-user <User> --slurm-account
-   <Account>`; the receipt adds `lane` and `array_spec`. Forcing-specific refusals (exit 2,
+   <Account>`; the receipt adds `lane`, `array_spec` and `slurm_submit_time` (the verified
+   `--slurm-submit-time`), and its `slurm_accounting_submitted_at` is null (the durable forcing
+   row never stores it, as in the automatic forcing bind). Forcing-specific refusals (exit 2,
    zero bytes; the rest as in the forecast table):
 
    | token | meaning |

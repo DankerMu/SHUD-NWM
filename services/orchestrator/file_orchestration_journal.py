@@ -1177,7 +1177,7 @@ class OperatorBindReceipt:
     reconciliation_source: str
     reconciliation_decision: str
     matched_slurm_job_id: str
-    slurm_accounting_submitted_at: str
+    slurm_accounting_submitted_at: str | None
     submitline_key: str
     submission_attempt: int
     submission_attempt_started_at: str
@@ -1187,11 +1187,13 @@ class OperatorBindReceipt:
     written_record_count: int
     warnings: tuple[ProjectionWarning, ...] = ()
     #: #2675: ``forcing`` for a held forcing master; its receipt also carries
-    #: the verified ``--array=`` value.  ``slurm_accounting_submitted_at`` is
-    #: then the operator-verified submit instant only (the forcing row never
-    #: persists it, exactly like the automatic forcing bind).
+    #: the verified ``--array=`` value and, as ``slurm_submit_time`` (the audit
+    #: event's key), the operator-verified submit instant.  Its
+    #: ``slurm_accounting_submitted_at`` is the durable row's value, ``None``:
+    #: the forcing row never persists it, exactly like the automatic forcing bind.
     lane: str = "forecast"
     array_spec: str | None = None
+    slurm_submit_time: str | None = None
 
 
 @dataclass(frozen=True)
@@ -5124,7 +5126,9 @@ class FileOrchestrationJournalRepository:
         forcing reservations carry no accepted-submit contract version; see
         :meth:`_bind_operator_verified_forcing_locked`.  ``slurm_user`` /
         ``slurm_account`` (the sacct ``User`` / ``Account``) are read only by
-        that branch; the forecast path ignores them.
+        that branch; the forecast path ignores them.  Both lanes validate them
+        at entry (:func:`_operator_owner_evidence_text`: bounded, sanitizer-clean,
+        blank allowed), so an oversized or unsafe value raises before any read.
 
         Invalid input types raise ``FileOrchestrationJournalError`` before any
         read; every CAS failure returns a named refusal from
@@ -5152,6 +5156,8 @@ class FileOrchestrationJournalRepository:
         normalized_checked_at = _accepted_submit_attempt_anchor(checked_at)
         checked_by_text = _operator_evidence_text(checked_by, field="checked_by")
         verification_note_text = _operator_evidence_text(verification_note, field="verification_note")
+        slurm_user_text = _operator_owner_evidence_text(slurm_user, field="slurm_user")
+        slurm_account_text = _operator_owner_evidence_text(slurm_account, field="slurm_account")
         expected_anchor = _accepted_submit_attempt_anchor(expected_submission_attempt_started_at)
         requested_id = slurm_job_id if isinstance(slurm_job_id, str) else ""
         if not _OPERATOR_BIND_SLURM_ID_RE.fullmatch(requested_id):
@@ -5193,8 +5199,8 @@ class FileOrchestrationJournalRepository:
                     canonical_submit=canonical_submit,
                     submitline_key=submitline_key,
                     submit_line=submit_line,
-                    slurm_user=slurm_user or "",
-                    slurm_account=slurm_account or "",
+                    slurm_user=slurm_user_text,
+                    slurm_account=slurm_account_text,
                     checked_by_text=checked_by_text,
                     normalized_checked_at=normalized_checked_at,
                     verification_note_text=verification_note_text,
@@ -5346,8 +5352,9 @@ class FileOrchestrationJournalRepository:
         complete forcing submit identity and the held shape (``reserved``, no
         bound or matched id, ``submit_result_ambiguous``, no reconciliation
         decision) else ``not_held``; the expected attempt and anchor else
-        ``stale_attempt``; ``anchor <= submit <= checked_at`` else
-        ``submit_time_outside_attempt_window``; the SubmitLine's single
+        ``stale_attempt``; ``floor(anchor) <= submit <= checked_at`` (the anchor
+        floored to whole seconds: sacct ``Submit`` has whole-second precision)
+        else ``submit_time_outside_attempt_window``; the SubmitLine's single
         ``--comment=`` value equals the durable attempt comment
         (``slurm_comment``) else ``submitline_key_mismatch``; exactly one
         ``--array=0-<n-1>[%k]`` token for the ``n`` cohort members else
@@ -5384,11 +5391,14 @@ class FileOrchestrationJournalRepository:
         anchor_instant = _strict_utc_datetime(current_anchor)
         submit_instant = _strict_utc_datetime(canonical_submit)
         checked_instant = _strict_utc_datetime(normalized_checked_at)
+        # sacct ``Submit`` is whole-second while the durable anchor keeps
+        # microseconds, so a same-second submit must not fall before it; the
+        # attempt-comment check below still excludes every earlier attempt.
         if (
             anchor_instant is None
             or submit_instant is None
             or checked_instant is None
-            or not anchor_instant <= submit_instant <= checked_instant
+            or not anchor_instant.replace(microsecond=0) <= submit_instant <= checked_instant
         ):
             return OperatorBindResult("submit_time_outside_attempt_window")
         # ``forcing_submit_identity_is_complete`` already proved the durable
@@ -5495,7 +5505,7 @@ class FileOrchestrationJournalRepository:
                 reconciliation_source=str(bound.get("reconciliation_source") or ""),
                 reconciliation_decision=str(bound.get("reconciliation_decision") or ""),
                 matched_slurm_job_id=str(bound.get("matched_slurm_job_id") or ""),
-                slurm_accounting_submitted_at=canonical_submit,
+                slurm_accounting_submitted_at=bound.get("slurm_accounting_submitted_at"),
                 submitline_key=attempt_comment,
                 submission_attempt=expected_submission_attempt,
                 submission_attempt_started_at=current_anchor,
@@ -5506,6 +5516,7 @@ class FileOrchestrationJournalRepository:
                 warnings=tuple(audit.warnings),
                 lane="forcing",
                 array_spec=array_spec,
+                slurm_submit_time=canonical_submit,
             ),
         )
 
@@ -13772,6 +13783,28 @@ def _operator_evidence_text(value: Any, *, field: str) -> str:
     if not isinstance(sanitized, str) or not sanitized.strip():
         raise FileOrchestrationJournalError("file_journal_evidence_required", field=field)
     return sanitized
+
+
+def _operator_owner_evidence_text(value: str | None, *, field: str) -> str:
+    """#2675: the operator's sacct ``User`` / ``Account`` as bounded, sanitizer-clean evidence.
+
+    The ``_operator_evidence_text`` bound (``checked_by``'s, raising
+    ``file_journal_evidence_limit_exceeded``) and its sanitizer, except that
+    absent or blank is allowed and yields ``""``, and a value the sanitizer
+    would alter (a secret, path or URI) raises ``file_journal_unsafe_identity``
+    instead of being redacted.  The value is the owner-rule comparison input as
+    well as the audit text, and the journal may already hold a recorded owner
+    in redacted form, so a redacted input could collide with it; refusing keeps
+    the comparison exact.  The caller has already rejected non-string values.
+    """
+
+    if value is None or not value.strip():
+        return ""
+    if len(value) > MAX_OPERATOR_CHECKED_BY_LENGTH:
+        raise FileOrchestrationJournalError("file_journal_evidence_limit_exceeded", field=field)
+    if _public_message(_safe_error_message(value)) != value:
+        raise FileOrchestrationJournalError("file_journal_unsafe_identity", field=field)
+    return value
 
 
 def _redact_durable_error_message_fields(record_type: str, payload: Mapping[str, Any]) -> dict[str, Any]:

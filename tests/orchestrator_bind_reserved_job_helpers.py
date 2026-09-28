@@ -275,19 +275,19 @@ def forcing_held_repository(
     members: int = FORCING_MEMBERS,
     owner: tuple[str | None, str | None, bool] = ("scheduler", "account", True),
     attempt: int = 1,
+    anchor: datetime = FORCING_ANCHOR,
 ) -> Any:
     """One held forcing master written by the real forcing writers (design Decision 5).
 
     ``reserve_candidate`` with the forcing reservation evidence, then the
     reconcile producer's ambiguity transition.  ``attempt=2`` releases attempt 1
     through the absence exit (``permit_forcing_submit_retry``) and re-reserves
-    the same key, as a real retry does.
+    the same key, as a real retry does.  ``anchor`` is attempt 1's durable anchor.
     """
 
     from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
 
     repository = repository if repository is not None else FileOrchestrationJournalRepository(root / "journal")
-    anchor = FORCING_ANCHOR
     for current in range(1, attempt + 1):
         if current > 1:
             released = repository.permit_forcing_submit_retry(

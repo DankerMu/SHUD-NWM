@@ -169,6 +169,9 @@ def test_bind_writes_exactly_the_automatic_forcing_bind_row_and_one_audit_event_
         (),
     )
     assert (receipt.reconciliation_source, receipt.submitline_key) == ("slurm_exact_comment", FORCING_COMMENT)
+    # The receipt reports the durable accounting instant (never persisted on a
+    # forcing row) and the operator-verified submit time under its own name.
+    assert (receipt.slurm_accounting_submitted_at, receipt.slurm_submit_time) == (None, FORCING_SUBMIT)
     # The automatic writer wrote no event; the operator bind wrote exactly one.
     assert bind_events(oracle_repository.root) == []
     # A fresh reader replays the same row (the append is the authority).
@@ -251,6 +254,69 @@ def test_a_non_string_owner_raises_typed_before_any_read(tmp_path: Path) -> None
     assert journal_bytes(repository.root) == before
 
 
+@pytest.mark.parametrize("field", ["slurm_user", "slurm_account"])
+def test_an_oversized_owner_raises_the_evidence_limit_before_any_read(tmp_path: Path, field: str) -> None:
+    repository = forcing_held_repository(tmp_path)
+    before = journal_bytes(repository.root)
+    with pytest.raises(FileOrchestrationJournalError) as error:
+        repository.bind_operator_verified_reserved_job(
+            FORCING_JOB_ID, **forcing_bind_kwargs(forcing_row(repository), **{field: "u" * 257})
+        )
+    assert (error.value.reason, error.value.field) == ("file_journal_evidence_limit_exceeded", field)
+    assert journal_bytes(repository.root) == before
+
+
+def test_an_owner_at_the_evidence_limit_is_accepted(tmp_path: Path) -> None:
+    repository = forcing_held_repository(tmp_path, owner=(None, None, False))
+    _bind(repository, slurm_user="u" * 256)
+    (event,) = bind_events(repository.root)
+    assert event["details"]["slurm_user"] == "u" * 256
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("slurm_user", "/home/nwm/secret-user"), ("slurm_account", "s3://bucket/key"), ("slurm_user", "password=x")],
+    ids=["path-user", "uri-account", "secret-user"],
+)
+def test_an_unsafe_owner_raises_before_any_read(tmp_path: Path, field: str, value: str) -> None:
+    """No expected owner, so only the sanitizer stands between the raw value and the durable event."""
+
+    repository = forcing_held_repository(tmp_path, owner=(None, None, False))
+    before = journal_bytes(repository.root)
+    with pytest.raises(FileOrchestrationJournalError) as error:
+        repository.bind_operator_verified_reserved_job(
+            FORCING_JOB_ID, **forcing_bind_kwargs(forcing_row(repository), **{field: value})
+        )
+    assert (error.value.reason, error.value.field) == ("file_journal_unsafe_identity", field)
+    assert journal_bytes(repository.root) == before
+
+
+def test_an_unsafe_owner_cannot_collide_with_a_redacted_recorded_owner(tmp_path: Path) -> None:
+    """The journal stores a path-shaped expected owner redacted; a redacted input would equal it.
+
+    Any path-shaped input redacts to the same ``[local-path]`` token, so the
+    owner rule must never compare redacted text: the input is refused instead.
+    """
+
+    repository = forcing_held_repository(tmp_path, owner=("/home/nwm/x", None, False))
+    assert forcing_row(repository)["expected_slurm_user"] == "[local-path]"
+    before = journal_bytes(repository.root)
+    with pytest.raises(FileOrchestrationJournalError) as error:
+        repository.bind_operator_verified_reserved_job(
+            FORCING_JOB_ID, **forcing_bind_kwargs(forcing_row(repository), slurm_user="/srv/other/path")
+        )
+    assert (error.value.reason, error.value.field) == ("file_journal_unsafe_identity", "slurm_user")
+    assert journal_bytes(repository.root) == before
+    assert bind_events(repository.root) == []
+
+
+def test_a_blank_owner_is_empty(tmp_path: Path) -> None:
+    repository = forcing_held_repository(tmp_path, owner=(None, None, False))
+    _bind(repository, slurm_user="   ", slurm_account="")
+    (event,) = bind_events(repository.root)
+    assert (event["details"]["slurm_user"], event["details"]["slurm_account"]) == ("", "")
+
+
 # --- F3 / F4: attempt, anchor, window -----------------------------------------------------
 
 
@@ -273,6 +339,27 @@ def test_attempt_or_anchor_mismatch_is_stale_attempt(tmp_path: Path, overrides: 
 )
 def test_submit_time_outside_the_attempt_window_is_refused(tmp_path: Path, submit: str) -> None:
     _refused(forcing_held_repository(tmp_path), "submit_time_outside_attempt_window", slurm_submit_time=submit)
+
+
+#: A durable anchor with sub-second precision (the forcing writer keeps microseconds);
+#: sacct ``Submit`` is whole-second, so the window floors the anchor (design Decision 2).
+_MICROSECOND_ANCHOR = FORCING_ANCHOR.replace(microsecond=674913)
+
+
+def test_a_same_second_submit_binds_against_a_microsecond_anchor(tmp_path: Path) -> None:
+    repository = forcing_held_repository(tmp_path, anchor=_MICROSECOND_ANCHOR)
+    assert forcing_row(repository)["submission_attempt_started_at"] == "2026-07-12T00:00:05.674913Z"
+    result = _bind(repository, slurm_submit_time="2026-07-12T00:00:05Z")
+    assert result.receipt.submission_attempt_started_at == "2026-07-12T00:00:05.674913Z"
+    assert forcing_row(repository)["status"] == "submitted"
+
+
+def test_a_submit_before_the_floored_microsecond_anchor_is_refused(tmp_path: Path) -> None:
+    _refused(
+        forcing_held_repository(tmp_path, anchor=_MICROSECOND_ANCHOR),
+        "submit_time_outside_attempt_window",
+        slurm_submit_time="2026-07-12T00:00:04Z",
+    )
 
 
 # --- F5: the SubmitLine comment is this attempt's own ----------------------------------------
@@ -468,6 +555,12 @@ def test_a_held_forecast_master_whose_window_contains_the_submit_time_does_not_r
         "scheduler",
     )
     assert forecast["submission_attempt_started_at"] <= FORCING_SUBMIT
+    # The premise: the held forecast master IS on the bounded claimant scan's
+    # input (its reconcile-inventory anchor), so only the comment keying keeps
+    # it from claiming the forcing master's id.
+    anchor_path = repository.root / journal_module._RECONCILE_INVENTORY_DIRECTORY / f"{JOB_ID}.json"
+    assert anchor_path.is_file()
+    assert json.loads(anchor_path.read_text(encoding="utf-8"))["job_id"] == JOB_ID
     forcing_held_repository(tmp_path, repository=repository)
 
     assert _bind(repository).receipt.status_to == "submitted"
@@ -501,22 +594,16 @@ def _released(tmp_path: Path) -> Any:
 
 
 def _identity_incomplete(tmp_path: Path) -> Any:
-    """A forcing reservation without the member map (a sparse historical row shape)."""
+    """The complete held shape, but ownership required with no recorded ``expected_slurm_user``.
 
-    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
-    repository.reserve_pipeline_job(
-        {
-            "job_id": FORCING_JOB_ID,
-            "run_id": "cycle_gfs_2026071200_convert_cohort_36e4f7b9bf80",
-            "cycle_id": "gfs_2026071200",
-            "job_type": "produce_forcing_array",
-            "stage": "forcing",
-            "idempotency_key": FORCING_KEY,
-            "slurm_comment": FORCING_COMMENT,
-            "submission_attempt": 1,
-            "submission_attempt_started_at": FORCING_ANCHOR,
-        }
-    )
+    Written by the real forcing writers (``reserve_candidate`` plus the reconcile
+    producer's ambiguity transition), so only ``forcing_submit_identity_is_complete``
+    tells it apart from a bindable held master.
+    """
+
+    repository = forcing_held_repository(tmp_path, owner=(None, "account", True))
+    row = forcing_row(repository)
+    assert (row["slurm_ownership_required"], row["expected_slurm_user"]) == (True, None)
     return repository
 
 
@@ -686,6 +773,13 @@ def test_both_entrypoints_bind_a_held_forcing_master(
         "array_spec": "0-2%15",
     }
     assert (payload["matched_slurm_job_id"], payload["submitline_key"]) == (FORCING_MASTER_ID, FORCING_COMMENT)
+    # ``slurm_accounting_submitted_at`` is the durable row's value (null on a
+    # forcing row); the operator's ``--slurm-submit-time`` is ``slurm_submit_time``,
+    # the audit event's key.
+    assert (payload["slurm_accounting_submitted_at"], payload["slurm_submit_time"]) == (None, FORCING_SUBMIT)
+    assert payload["slurm_accounting_submitted_at"] == forcing_row(repository)["slurm_accounting_submitted_at"]
+    (event,) = bind_events(repository.root)
+    assert event["details"]["slurm_submit_time"] == payload["slurm_submit_time"]
     assert FORCING_SUBMIT_LINE not in json.dumps(payload)
     assert {key: forcing_row(repository)[key] for key in FORCING_BIND_TUPLE} == FORCING_BIND_TUPLE
     assert len(bind_events(repository.root)) == 1
@@ -716,4 +810,20 @@ def test_a_forcing_refusal_exits_2_on_stderr_with_zero_bytes(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err.strip() == f"bind-reserved-job: refused: {refusal}; no journal bytes were written"
+    assert journal_bytes(repository.root) == before
+
+
+@pytest.mark.parametrize("entrypoint", ["click", "argparse"])
+def test_an_oversized_owner_exits_2_with_the_evidence_limit_and_zero_bytes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], entrypoint: str
+) -> None:
+    repository = forcing_held_repository(tmp_path)
+    before = journal_bytes(repository.root)
+
+    args = _forcing_cli_args(repository.root, forcing_row(repository), **{"--slurm-account": "a" * 257})
+    assert _invoke(entrypoint, args) == 2
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.strip() == "file_journal_evidence_limit_exceeded"
     assert journal_bytes(repository.root) == before
