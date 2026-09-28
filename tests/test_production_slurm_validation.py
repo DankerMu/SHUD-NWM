@@ -1040,6 +1040,171 @@ def test_interleaved_live_submissions_submit_their_own_rendered_script(
     assert (lane_dir / "rendered_run_shud_forecast_array.sbatch").read_text(encoding="utf-8") == content_b
 
 
+def _pin_submission_resources(monkeypatch, **env: str) -> None:
+    """Pin one submission's resource env and clear any deployment overlay the host shell carries."""
+
+    for name in ("SHUD_THREADS", "SLURM_GATEWAY_PARTITION_OVERRIDE", "SLURM_GATEWAY_EXCLUDE_NODES"):
+        monkeypatch.delenv(name, raising=False)
+    for name in ("NODES", "NTASKS", "CPUS_PER_TASK", "MEMORY_GB", "WALLTIME", "MAX_CONCURRENT", "SHUD_THREADS"):
+        monkeypatch.delenv(f"NHMS_PRODUCTION_SLURM_{name}", raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(f"NHMS_PRODUCTION_SLURM_{name}", value)
+
+
+# What a concurrent `--force` run B with other resource env leaves in the shared lane file.
+_LANE_PROFILE_OF_B = (
+    "resource_profiles:\n"
+    "  default:\n"
+    '    partition: "bpart"\n'
+    "    nodes: 1\n"
+    "    ntasks: 1\n"
+    "    cpus_per_task: 6\n"
+    "    memory_gb: 24\n"
+    '    walltime: "02:00:00"\n'
+    "    max_concurrent: 2\n"
+    "    shud_threads: 6\n"
+    "  overrides: {}\n"
+)
+
+
+def test_forced_live_submit_renders_its_own_resources_after_the_lane_profile_is_overwritten(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    """#2574: ``lane_dir`` is keyed by run_id alone and ``--force`` skips the
+    evidence writer's existence guard, so B can overwrite
+    ``lane_dir/resource_profiles.yaml`` after A wrote it and before A renders.
+    A's submitted script must still carry every one of A's own resource values."""
+
+    evidence_root = tmp_path / "artifacts"
+    workspace_root = tmp_path / "shared-workspace"
+    run_id = "profilerace"
+    lane_profile = evidence_root / run_id / "slurm" / "resource_profiles.yaml"
+    _live_submit_env(monkeypatch, workspace_root)
+    _pin_submission_resources(
+        monkeypatch,
+        PARTITION="CPU",
+        CPUS_PER_TASK="3",
+        MEMORY_GB="12",
+        WALLTIME="00:45:00",
+        SHUD_THREADS="3",
+    )
+
+    class _LaneProfileOverwrittenBeforeRender(slurm_validation.RealSlurmGateway):
+        def render_template(self, *args, **kwargs):
+            lane_profile.write_text(_LANE_PROFILE_OF_B, encoding="utf-8")
+            return super().render_template(*args, **kwargs)
+
+    monkeypatch.setattr(slurm_validation, "RealSlurmGateway", _LaneProfileOverwrittenBeforeRender)
+
+    submitted: list[str] = []
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        program = Path(command[0]).name
+        if program == "sbatch":
+            submitted.append(Path(command[-1]).read_text(encoding="utf-8"))
+            return subprocess.CompletedProcess(command, 0, stdout="4242\n", stderr="")
+        if program == "sacct":
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout=f"{program} ok\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert slurm_validation.main(_live_submit_argv(evidence_root=evidence_root, run_id=run_id, force=True)) == 0
+    capsys.readouterr()
+
+    # The overwrite really landed between A's write and A's render.
+    assert lane_profile.read_text(encoding="utf-8") == _LANE_PROFILE_OF_B
+    assert len(submitted) == 1
+    script = submitted[0]
+    for own in (
+        "#SBATCH --partition=CPU\n",
+        "#SBATCH --cpus-per-task=3\n",
+        "#SBATCH --mem=12G\n",
+        "#SBATCH --time=00:45:00\n",
+        "export SHUD_THREADS=3\n",
+        "export OMP_NUM_THREADS=3\n",
+    ):
+        assert own in script
+    for foreign in ("bpart", "--cpus-per-task=6", "--mem=24G", "--time=02:00:00", "THREADS=6"):
+        assert foreign not in script
+
+
+def test_live_submit_render_keeps_the_deployment_partition_and_exclude_overrides(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    """#2574: rendering from memory must not drop the gateway's per-deployment overlay."""
+
+    evidence_root = tmp_path / "artifacts"
+    workspace_root = tmp_path / "shared-workspace"
+    _pin_submission_resources(monkeypatch, PARTITION="CPU")
+    monkeypatch.setenv("SLURM_GATEWAY_PARTITION_OVERRIDE", "CPU2")
+    monkeypatch.setenv("SLURM_GATEWAY_EXCLUDE_NODES", "cn24,cn25")
+
+    exit_code = _live_submit(
+        monkeypatch, evidence_root=evidence_root, workspace_root=workspace_root, run_id="overlay", force=True
+    )
+    assert exit_code == 0
+    capsys.readouterr()
+
+    lane_dir = evidence_root / "overlay" / "slurm"
+    rendered = (lane_dir / "rendered_run_shud_forecast_array.sbatch").read_text(encoding="utf-8")
+    assert "#SBATCH --partition=CPU2\n" in rendered
+    assert "#SBATCH --partition=CPU\n" not in rendered
+    assert "#SBATCH --exclude=cn24,cn25\n" in rendered
+    # The overlay is a render-time deployment fact, never written into the evidence profile.
+    assert '    partition: "CPU"\n' in (lane_dir / "resource_profiles.yaml").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("lane", ["fake", "dry_run"])
+def test_lane_resource_profile_evidence_bytes_are_unchanged(tmp_path: Path, monkeypatch, capsys, lane: str) -> None:
+    """#2574: the lane profile stays byte-identical evidence (name and content as on master)."""
+
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_CLUSTER", "shudhpc")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_ACCOUNT", "friends")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_MODEL_PACKAGE_URI", "s3://bucket/models/qhh/package")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_WORKSPACE_ROOT", str(tmp_path / "shared-workspace"))
+    _pin_submission_resources(
+        monkeypatch,
+        PARTITION="CPU",
+        NODES="1",
+        NTASKS="1",
+        CPUS_PER_TASK="4",
+        MEMORY_GB="16",
+        WALLTIME="01:15:00",
+        MAX_CONCURRENT="3",
+        SHUD_THREADS="4",
+    )
+    argv = ["validate-slurm", "--evidence-root", str(tmp_path / "artifacts"), "--run-id", "profilebytes"]
+    if lane == "fake":
+        argv.append("--fake-slurm")
+
+    assert slurm_validation.main(argv) == 0
+    capsys.readouterr()
+
+    lane_dir = tmp_path / "artifacts" / "profilebytes" / "slurm"
+    assert (lane_dir / "resource_profiles.yaml").read_bytes() == (
+        b"resource_profiles:\n"
+        b"  default:\n"
+        b'    partition: "CPU"\n'
+        b"    nodes: 1\n"
+        b"    ntasks: 1\n"
+        b"    cpus_per_task: 4\n"
+        b"    memory_gb: 16\n"
+        b'    walltime: "01:15:00"\n'
+        b"    max_concurrent: 3\n"
+        b"    shud_threads: 4\n"
+        b"  overrides: {}\n"
+    )
+    rendered = (lane_dir / "rendered_run_shud_forecast_array.sbatch").read_text(encoding="utf-8")
+    assert "#SBATCH --mem=16G\n" in rendered
+    assert "export SHUD_THREADS=4\n" in rendered
+
+
 def test_failed_second_submission_cleanup_leaves_the_first_submission_intact(
     tmp_path: Path,
     monkeypatch,

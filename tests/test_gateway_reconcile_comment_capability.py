@@ -21,6 +21,11 @@ from tests.gateway_reconcile_helpers import (
     _file_cohort_repository,
     _versioned_master_reservation_record,
 )
+from tests.test_gateway_reconcile_comment_sacct_bounds import (
+    _output_written_during_idle_wait,
+    _pipes_never_closed,
+    _popen_returning,
+)
 from tests.test_real_slurm_gateway import _pinned_local_timezone
 
 
@@ -569,6 +574,52 @@ def test_global_accounting_visibility_process_timeout_is_bounded(
         reconcile_module._bounded_visibility_stdout(
             [sys.executable, "-c", "import time; time.sleep(10)"],
         )
+
+
+def test_visibility_probe_keeps_output_written_during_idle_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    from services.orchestrator import reconcile as reconcile_module
+
+    # Shape A of #2587 over both pipes: scontrol prints its config and exits while select idles.
+    payloads = [b"AccountingStoreFlags=job_comment\nPrivateData=none\n", b"scontrol: warning\n"]
+    with _output_written_during_idle_wait(payloads) as child:
+        _popen_returning(monkeypatch, child)
+        stdout = reconcile_module._bounded_visibility_stdout(["scontrol", "show", "config"])
+
+    assert stdout == "AccountingStoreFlags=job_comment\nPrivateData=none\n"
+
+
+def test_comment_storage_probe_proves_storage_from_output_written_during_idle_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.orchestrator import reconcile as reconcile_module
+
+    payloads = [b"AccountingStoreFlags=job_comment\n", b""]
+    with _output_written_during_idle_wait(payloads) as child:
+        commands = _popen_returning(monkeypatch, child)
+        verdict = reconcile_module.default_comment_storage_probe("/opt/slurm/bin")()
+
+    # A dropped read classifies "" as unknown (None) and refuses every scope this pass.
+    assert verdict is True
+    assert commands == [["/opt/slurm/bin/scontrol", "show", "config"]]
+
+
+@pytest.mark.parametrize("returncode", [None, 0], ids=["running", "exited_pipes_held_open"])
+def test_visibility_probe_times_out_when_pipes_never_close(
+    monkeypatch: pytest.MonkeyPatch,
+    returncode: int | None,
+) -> None:
+    from services.orchestrator import reconcile as reconcile_module
+
+    monkeypatch.setattr(reconcile_module, "COMMENT_SACCT_VISIBILITY_TIMEOUT_SECONDS", 0.5)
+    with _pipes_never_closed(2, returncode=returncode) as child:
+        _popen_returning(monkeypatch, child)
+        started = time.monotonic()
+        with pytest.raises(reconcile_module.ReconcileQueryUnavailable, match="visibility probe timed out"):
+            reconcile_module._bounded_visibility_stdout(["scontrol", "show", "config"])
+        elapsed = time.monotonic() - started
+
+    assert elapsed < 3
+    assert child.terminated is (returncode is None)
 
 
 @pytest.mark.parametrize("boundary", ["bytes", "rows", "timeout"])

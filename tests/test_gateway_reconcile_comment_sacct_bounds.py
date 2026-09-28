@@ -7,7 +7,10 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import threading
 import time
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from datetime import (
     UTC,
     datetime,
@@ -377,6 +380,160 @@ esac
         assert child.returncode is not None
     with pytest.raises(ChildProcessError):
         os.waitpid(child.pid, os.WNOHANG)
+
+
+class _ReconcileChildOverPipes:
+    """Popen stand-in over real pipe read ends (#2587, after #2585's ``_ExitedProcessOverPipes``).
+
+    ``poll()`` runs ``on_poll`` first and then reports ``returncode``: ``0`` is a child
+    that already exited, ``None`` one that is still running.
+    """
+
+    def __init__(
+        self, read_fds: Sequence[int], *, returncode: int | None = 0, on_poll: Callable[[], None] | None = None
+    ) -> None:
+        self.args = ["stand-in"]
+        self.returncode = returncode
+        self._streams = [os.fdopen(fd, "rb") for fd in read_fds]
+        self.stdout = self._streams[0]
+        self.stderr = self._streams[1] if len(self._streams) > 1 else None
+        self._on_poll = on_poll
+        self.terminated = False
+
+    def poll(self) -> int | None:
+        if self._on_poll is not None:
+            self._on_poll()
+        return self.returncode
+
+    def wait(self, timeout: float | None = None) -> int:
+        del timeout
+        return 0 if self.returncode is None else self.returncode
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self.returncode = -15
+
+    def kill(self) -> None:
+        self.terminate()
+
+    def close(self) -> None:
+        for stream in self._streams:
+            stream.close()
+
+
+def _popen_returning(monkeypatch: pytest.MonkeyPatch, child: _ReconcileChildOverPipes) -> list[list[str]]:
+    from services.orchestrator import reconcile as reconcile_module
+
+    commands: list[list[str]] = []
+
+    def popen(command: Any, *args: Any, **kwargs: Any) -> _ReconcileChildOverPipes:
+        del args, kwargs
+        commands.append(list(command))
+        return child
+
+    monkeypatch.setattr(reconcile_module.subprocess, "Popen", popen)
+    return commands
+
+
+@contextmanager
+def _output_written_during_idle_wait(payloads: Sequence[bytes]) -> Iterator[_ReconcileChildOverPipes]:
+    """Shape A of #2587: the child writes everything and exits while ``select`` idles.
+
+    The first ``select`` sees empty pipes with open write ends.  ``poll()`` delivers
+    every payload and closes the write ends before reporting exit, reproducing the
+    pre-fix window; the fixed reader never polls before EOF, so a Timer longer than
+    the 0.25 s idle ``select`` delivers instead.  Whichever runs first, the other is
+    a no-op, so the outcome does not depend on their order.
+    """
+
+    pipes = [os.pipe() for _ in payloads]
+    lock = threading.Lock()
+    done = False
+
+    def write_and_close() -> None:
+        nonlocal done
+        with lock:
+            if done:
+                return
+            done = True
+            for (_read_fd, write_fd), payload in zip(pipes, payloads, strict=True):
+                assert os.write(write_fd, payload) == len(payload)
+                os.close(write_fd)
+
+    child = _ReconcileChildOverPipes([read_fd for read_fd, _write_fd in pipes], on_poll=write_and_close)
+    timer = threading.Timer(1.0, write_and_close)
+    timer.start()
+    try:
+        yield child
+    finally:
+        timer.cancel()
+        timer.join()
+        write_and_close()
+        child.close()
+
+
+@contextmanager
+def _pipes_never_closed(count: int, *, returncode: int | None) -> Iterator[_ReconcileChildOverPipes]:
+    pipes = [os.pipe() for _ in range(count)]
+    child = _ReconcileChildOverPipes([read_fd for read_fd, _write_fd in pipes], returncode=returncode)
+    try:
+        yield child
+    finally:
+        for _read_fd, write_fd in pipes:
+            os.close(write_fd)
+        child.close()
+
+
+_SHAPE_A_SACCT_ROW = b"17667|nhms_forecast|RUNNING|0:0||scheduler|account\n"
+
+
+def test_bounded_sacct_keeps_row_written_during_idle_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    from services.orchestrator import reconcile as reconcile_module
+
+    with _output_written_during_idle_wait([_SHAPE_A_SACCT_ROW]) as child:
+        _popen_returning(monkeypatch, child)
+        stdout = reconcile_module._bounded_sacct_stdout(["sacct", "--jobs=17667"])
+
+    assert stdout == _SHAPE_A_SACCT_ROW.decode()
+
+
+def test_default_sacct_querier_returns_record_written_during_idle_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.orchestrator import reconcile as reconcile_module
+
+    with _output_written_during_idle_wait([_SHAPE_A_SACCT_ROW]) as child:
+        commands = _popen_returning(monkeypatch, child)
+        record = reconcile_module.default_sacct_querier("/opt/slurm/bin")("17667")
+
+    # A dropped read would parse "" to None: confirmed-absent, and a live job
+    # would be written reconcile_unverified.
+    assert isinstance(record, SacctRecord)
+    assert record.slurm_job_id == "17667"
+    assert record.raw_state == "RUNNING"
+    assert len(commands) == 1
+    assert commands[0][0] == "/opt/slurm/bin/sacct"
+    assert "--jobs=17667" in commands[0]
+
+
+@pytest.mark.parametrize("returncode", [None, 0], ids=["running", "exited_pipe_held_open"])
+def test_bounded_sacct_times_out_when_pipe_never_closes(
+    monkeypatch: pytest.MonkeyPatch,
+    returncode: int | None,
+) -> None:
+    from services.orchestrator import reconcile as reconcile_module
+
+    with _pipes_never_closed(1, returncode=returncode) as child:
+        _popen_returning(monkeypatch, child)
+        started = time.monotonic()
+        budget = reconcile_module._SacctScanBudget(deadline=started + 0.5)
+        with pytest.raises(reconcile_module.ReconcileQueryUnavailable, match="sacct query timed out"):
+            reconcile_module._bounded_sacct_stdout(["sacct"], budget=budget)
+        elapsed = time.monotonic() - started
+
+    assert elapsed < 3
+    # A still-running child is terminated and reaped; an exited one is only reaped.
+    assert child.terminated is (returncode is None)
 
 
 def test_parse_master_sacct_row_returns_exact_array_task_row() -> None:
