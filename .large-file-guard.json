@@ -111,6 +111,7 @@
     "tests/test_model_registration.py",
     "services/orchestrator/cli.py",
     "tests/test_gateway_reconcile_comment_accounting.py",
-    "tests/test_orchestrator_demote_core_cas.py"
+    "tests/test_orchestrator_demote_core_cas.py",
+    "tests/test_two_node_docker_runtime.py"
   ]
 }

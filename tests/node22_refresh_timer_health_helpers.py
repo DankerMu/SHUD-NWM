@@ -264,7 +264,9 @@ def _installer_fake_systemctl(tmp_path: Path) -> tuple[Path, Path]:
     * ``NHMS_FAKE_PROBE_AFTER_RELOAD``, when non-empty, holds those literal
       answers back until this invocation has issued a ``daemon-reload`` -- a
       disarmed probe that reads back armed only once the install placed its
-      units, which is how the install read-back is reached past the refusal.
+      units, which is how the install read-back is reached past the refusal;
+    * ``NHMS_FAKE_IS_ACTIVE_STRICT_RC``, when non-empty, makes ``is-active``
+      exit 3 for any answer but ``active``, as a real user manager does (#2640).
     """
     log = tmp_path / "installer-systemctl.log"
     state = tmp_path / "fake-state"
@@ -277,6 +279,15 @@ def _installer_fake_systemctl(tmp_path: Path) -> tuple[Path, Path]:
         "shift\n"  # drop --user
         "verb=$1\n"
         "shift\n"
+        # Real systemd exits 3 from `is-active` for any answer but `active`;
+        # the default fake always exits 0 (kept so existing cases are unchanged).
+        "answer() {\n"
+        '  printf "%s\\n" "$1"\n'
+        '  if [ "$verb" = is-active ] && [ -n "${NHMS_FAKE_IS_ACTIVE_STRICT_RC:-}" ] && [ "$1" != active ]; then\n'
+        "    exit 3\n"
+        "  fi\n"
+        "  exit 0\n"
+        "}\n"
         '[ "$verb" = "${NHMS_FAKE_FAIL_VERB:-}" ] && exit 1\n'
         "now=no\n"
         "unit=\n"
@@ -310,12 +321,11 @@ def _installer_fake_systemctl(tmp_path: Path) -> tuple[Path, Path]:
     if [ -n "${NHMS_FAKE_PROBE_AFTER_RELOAD:-}" ] && [ ! -e "$state/reloaded" ]; then held=yes; fi
     for name in "NHMS_FAKE_PROBE_${kind}_${query}" "NHMS_FAKE_PROBE_${query}"; do
       eval "isset=\${$name+set}"
-      if [ "$held" = no ] && [ -n "$isset" ]; then eval "printf '%s\n' \"\$$name\""; exit 0; fi
+      if [ "$held" = no ] && [ -n "$isset" ]; then eval "answer \"\$$name\""; fi
     done
 """
-        '    if [ "$verb" = is-enabled ]; then printf "%s\\n" "$enabled"; '
-        'else printf "%s\\n" "$active"; fi\n'
-        "    exit 0 ;;\n"
+        '    if [ "$verb" = is-enabled ]; then answer "$enabled"; '
+        'else answer "$active"; fi ;;\n'
         "esac\n"
         'value=enabled\n'
         '[ "$verb" = is-active ] && value=active\n'
@@ -326,8 +336,7 @@ def _installer_fake_systemctl(tmp_path: Path) -> tuple[Path, Path]:
         'if [ "$unit.$verb" = "${NHMS_FAKE_DIVERGE:-}" ] && [ "$count" -ge 2 ]; then\n'
         '  value=${NHMS_FAKE_DIVERGE_VALUE:-}\n'
         "fi\n"
-        'printf "%s\\n" "$value"\n'
-        "exit 0\n"
+        'answer "$value"\n'
     )
     script.chmod(0o755)
     return script, log
@@ -344,6 +353,7 @@ def _run_installer(
     timer_answers: dict[str, str] | None = None,
     service_answers: dict[str, str] | None = None,
     answers_after_reload: bool = False,
+    strict_is_active_rc: bool = False,
     installer: Path = INSTALLER,
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
     script, log = _installer_fake_systemctl(tmp_path)
@@ -365,6 +375,7 @@ def _run_installer(
             "NHMS_FAKE_DIVERGE_VALUE": diverge_value,
             "NHMS_FAKE_FAIL_VERB": fail_verb,
             "NHMS_FAKE_PROBE_AFTER_RELOAD": "1" if answers_after_reload else "",
+            "NHMS_FAKE_IS_ACTIVE_STRICT_RC": "1" if strict_is_active_rc else "",
         }
     )
     for scope in ("", "TIMER_", "SERVICE_"):

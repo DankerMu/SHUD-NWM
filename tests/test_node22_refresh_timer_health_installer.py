@@ -692,8 +692,8 @@ SIBLING_MUTATIONS = [
         id="marker-preservation-deleted",
     ),
     pytest.param(
-        "  trap 'remove_probe_units; assert_protected_unchanged' ERR\n",
-        "  trap 'rm -f \"$unit_dir/$service\" \"$unit_dir/$timer\"; "
+        "  trap '[[ $BASHPID == \"$$\" ]] || exit 1; remove_probe_units; assert_protected_unchanged' ERR\n",
+        "  trap '[[ $BASHPID == \"$$\" ]] || exit 1; rm -f \"$unit_dir/$service\" \"$unit_dir/$timer\"; "
         "$systemctl_bin --user daemon-reload || true; assert_protected_unchanged' ERR\n",
         _failed_reinstall_is_backed_out_to_the_recorded_baseline,
         id="install-trap-restore-replaced-by-delete",

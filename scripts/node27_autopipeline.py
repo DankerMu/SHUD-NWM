@@ -2071,6 +2071,56 @@ def _refresh_coverage_script() -> Path | None:
     return path if path.is_file() else None
 
 
+# #2590: an already-`published` run whose rewritten product fails to parse keeps
+# `published` (#1789) and so never reaches the residency lane's `failed` source.
+# A DETERMINISTIC parse failure is recorded as a decline instead, which both
+# stops the pointless retry of that evidence and is what the lane watches.
+REASON_PUBLISHED_REPARSE_FAILED = "PUBLISHED_REPARSE_FAILED"
+_PARSE_ERROR_LINE_RE = re.compile(r"^([A-Z][A-Z0-9_]+): ", re.MULTILINE)
+_TRACEBACK_MARKER = "Traceback (most recent call last):"
+
+
+def _deterministic_parse_error_code(stderr: str) -> str | None:
+    """The parser's code when it names a permanent failure, else `None`.
+
+    The CLI's handled arms print `<ERROR_CODE>: <message>` (argparse and click
+    alike); the first such line is the code, whatever warnings precede it.
+    `None` -- keep failing, keep retrying -- for:
+
+    - any traceback: `OUTPUT_PARSE_OS_ERROR` / `_RUNTIME_ERROR` are written to
+      the DB and re-raised, so stderr then ends in `OSError: ...` or a psycopg
+      error with libpq `DETAIL:` lines, none of which is a parser code;
+    - every `OUTPUT_PARSE_*` code: DB errors, the compressed-chunk guard and
+      its block, identity-key lookups -- all possibly transient (#1781 keeps
+      that class retrying);
+    - no code line at all.
+    """
+    if _TRACEBACK_MARKER in stderr:
+        return None
+    match = _PARSE_ERROR_LINE_RE.search(stderr)
+    if match is None or match.group(1).startswith("OUTPUT_PARSE_"):
+        return None
+    return match.group(1)
+
+
+def _run_status(database_url: str, run_id: str) -> str | None:
+    """`hydro_run.status`, or `None` when it cannot be read (then: no decline)."""
+    try:
+        conn = _connect(database_url)
+    except psycopg2.Error:
+        return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT status FROM hydro.hydro_run WHERE run_id = %s", (run_id,))
+            row = cur.fetchone()
+        conn.rollback()
+        return str(row[0]) if row else None
+    except psycopg2.Error:
+        return None
+    finally:
+        conn.close()
+
+
 def _decline_blocked_recompute(
     run_id: str,
     *,
@@ -2196,7 +2246,7 @@ def _process_run(
     parse = [PY, "-m", "workers.output_parser.cli", "parse", "--run-id", run_id]
     rc, out, err = _run(parse, env)
     if rc != 0:
-        return {
+        result = {
             "run_id": run_id,
             "outcome": "failed",
             "stage": "parse",
@@ -2204,6 +2254,20 @@ def _process_run(
             "error": redact_text((err or out)[-500:]),
             "forcing_stage": forcing_stage,
         }
+        code = _deterministic_parse_error_code(err or "")
+        if code is not None and _run_status(database_url, run_id) == "published":
+            # The code is prefixed AFTER redaction, so no redaction rule can
+            # eat it; the residency lane reads it back as `split_part(detail, ':', 1)`.
+            result["outcome"] = _decline_blocked_recompute(
+                run_id,
+                object_store_root=object_store_root,
+                database_url=database_url,
+                detail=f"{code}: {redact_text(err.strip()[-500:])}",
+                reason_code=REASON_PUBLISHED_REPARSE_FAILED,
+            )
+            if result["outcome"] == "declined":
+                result["reason_code"] = REASON_PUBLISHED_REPARSE_FAILED
+        return result
     parse_payload = _last_json(out) or {}
 
     refresh_status = "skipped_no_script"

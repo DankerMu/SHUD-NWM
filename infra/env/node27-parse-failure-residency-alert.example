@@ -16,7 +16,10 @@
 # Residency threshold, hours (>= 0). A watched run (status='failed', any error
 # code -- on node-27 the output parser is the only writer of 'failed') present
 # in every observation for at least this long is resident. 0 = every watched
-# run is resident at once (live-receipt setting only).
+# run is resident at once (live-receipt setting only). Must be shorter than the
+# retry liveness below (exit 2 otherwise): a published-reparse decline (#2590)
+# is never renewed, so threshold + the 30 min lane cadence has to fit inside
+# the liveness bound for it to alert at all.
 # NHMS_PARSE_RESIDENCY_THRESHOLD_HOURS=2
 #
 # Re-alert interval, hours (> 0): a resident run mails again at most this often.

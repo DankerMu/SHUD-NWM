@@ -19,13 +19,13 @@
 
 set -euo pipefail
 
-# -- repo root resolution (works from any cwd on node-27) ----------------------
-if command -v git >/dev/null 2>&1 && git_root=$(git rev-parse --show-toplevel 2>/dev/null); then
-    REPO_ROOT="$git_root"
-else
-    script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)
-    REPO_ROOT=$(cd "$script_dir/../.." && pwd)
-fi
+# -- repo root resolution (issue #2638) ------------------------------------------
+# The root is the checkout this script lives in (scripts/ops/ -> ../..), never the
+# caller's cwd: resolving through `git rev-parse` from cwd picked up whatever
+# repository the operator stood in, and then sourced that tree's display.env,
+# installed that tree's unit and swept that tree's uvicorn.
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(cd -- "$script_dir/../.." && pwd)
 readonly REPO_ROOT
 
 ENV_FILE="${REPO_ROOT}/infra/env/display.env"

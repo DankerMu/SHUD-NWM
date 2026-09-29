@@ -134,7 +134,11 @@ restore_probe_timer() {
   fi
 }
 
+# Both ERR handlers run in the main shell only (#2640, the #2294 convention):
+# `-E` also hands the trap to command substitutions and subshells, where a
+# restore would act on systemd before the main shell even knows it failed.
 enable_failure_restore() {
+  [[ $BASHPID == "$$" ]] || exit 1
   restore_probe_timer || printf 'probe restore: skipped, the recorded timer state is malformed\n' >&2
   assert_protected_unchanged
 }
@@ -249,7 +253,7 @@ if [[ "$action" == --install ]]; then
     printf 'complete\n' > "$state_root/install.baseline.tmp"
     mv -f "$state_root/install.baseline.tmp" "$state_root/install.baseline"
   fi
-  trap 'remove_probe_units; assert_protected_unchanged' ERR
+  trap '[[ $BASHPID == "$$" ]] || exit 1; remove_probe_units; assert_protected_unchanged' ERR
   for unit in "$service" "$timer"; do
     [[ -f "$repo/infra/systemd/$unit" && ! -L "$repo/infra/systemd/$unit" ]]
     install -m 0644 "$repo/infra/systemd/$unit" "$unit_dir/$unit"
@@ -275,7 +279,10 @@ elif [[ "$action" == --enable ]]; then
   invocation_timer_state=$(probe_timer_state)
   trap enable_failure_restore ERR
   $systemctl_bin --user enable --now "$timer"
-  [[ "$($systemctl_bin --user is-active "$timer")" == active ]]
+  # Captured, then compared: a non-active timer makes `is-active` exit 3, and
+  # inside the substitution that would fire the ERR trap in the subshell too.
+  probe_active=$($systemctl_bin --user is-active "$timer" 2>/dev/null || true)
+  [[ "$probe_active" == active ]]
   assert_protected_unchanged
   trap - ERR
   printf '{"status":"enabled_active","protected_unchanged":true}\n'
