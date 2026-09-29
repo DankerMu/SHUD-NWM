@@ -79,6 +79,36 @@ export function handleM11MapMouseLeave(
   event.target.getCanvas().style.cursor = ''
 }
 
+/**
+ * 悬停高亮的河段 id（#2628，fixture D2）：只认 discharge overlay 上的 discharge 命中要素，
+ * 取 `river_segment_id ?? segment_id`（非空字符串）；站点、流域面、空白、无 interaction 一律 null。
+ */
+export function resolveM11HoveredSegmentId(
+  interaction: M11MapOverlayInteraction | null,
+  renderableOverlay: M11RegisteredOverlay | null,
+): string | null {
+  if (interaction?.layerId !== 'discharge' || renderableOverlay?.layerId !== 'discharge') return null
+  return (
+    mapFeatureStringProperty(interaction.feature, 'river_segment_id') ??
+    mapFeatureStringProperty(interaction.feature, 'segment_id')
+  )
+}
+
+/**
+ * 按 id 去重的悬停状态跟踪器：`update(id)` 只在 id 变化时回调 `onChange`。
+ * 置 null 也必须经过 `update(null)`——否则记住的旧 id 不清，切回图层后再悬停同一河段不会高亮。
+ */
+export function createM11HoverSegmentTracker(onChange: (segmentId: string | null) => void) {
+  let current: string | null = null
+  return {
+    update(segmentId: string | null) {
+      if (segmentId === current) return
+      current = segmentId
+      onChange(segmentId)
+    },
+  }
+}
+
 /** Minimal rendered-feature shape the click-target resolver reads (only the layer id). */
 export interface M11ClickTargetFeature {
   layer?: { id?: string } | null

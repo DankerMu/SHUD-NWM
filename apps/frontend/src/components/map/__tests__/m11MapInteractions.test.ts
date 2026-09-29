@@ -1,7 +1,13 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { MapLayerMouseEvent, MapRef } from 'react-map-gl/maplibre'
 
-import { handleM11MapClick, resolveM11ClickTarget } from '@/components/map/m11MapInteractions'
+import {
+  createM11HoverSegmentTracker,
+  handleM11MapClick,
+  resolveM11ClickTarget,
+  resolveM11HoveredSegmentId,
+  type M11MapOverlayInteraction,
+} from '@/components/map/m11MapInteractions'
 import type { M11RegisteredOverlay } from '@/components/map/m11MapBuilders'
 import {
   M11_BASIN_FILL_LAYER_ID,
@@ -151,5 +157,46 @@ describe('resolveM11ClickTarget (the pure walk shared with the river-click hook)
     expect(resolve([basin])).toEqual({ kind: 'basin', feature: basin })
     expect(resolve([])).toBeNull()
     expect(resolveM11ClickTarget({ features: undefined, showStationLayer: true, renderableOverlay: OVERLAY })).toBeNull()
+  })
+})
+
+describe('resolveM11HoveredSegmentId', () => {
+  const event = clickEvent([])
+  function interaction(layerId: M11MapOverlayInteraction['layerId'], properties: Record<string, unknown>): M11MapOverlayInteraction {
+    return { layerId, event, feature: feature(OVERLAY_HIT, { properties }) as unknown as M11MapOverlayInteraction['feature'] }
+  }
+
+  it('reads river_segment_id, falling back to segment_id, from a discharge hit', () => {
+    expect(resolveM11HoveredSegmentId(interaction('discharge', { river_segment_id: 'seg-A', segment_id: 'other' }), OVERLAY)).toBe('seg-A')
+    expect(resolveM11HoveredSegmentId(interaction('discharge', { segment_id: 'seg-B' }), OVERLAY)).toBe('seg-B')
+    expect(resolveM11HoveredSegmentId(interaction('discharge', { river_segment_id: '', segment_id: 'seg-C' }), OVERLAY)).toBe('seg-C')
+  })
+
+  it('returns null for no interaction, missing ids, stations, basins and non-discharge overlays', () => {
+    expect(resolveM11HoveredSegmentId(null, OVERLAY)).toBeNull()
+    expect(resolveM11HoveredSegmentId(interaction('discharge', { river_segment_id: 42 }), OVERLAY)).toBeNull()
+    expect(resolveM11HoveredSegmentId(interaction('discharge', {}), OVERLAY)).toBeNull()
+    expect(resolveM11HoveredSegmentId(interaction('met-stations', { segment_id: 'seg-A' }), OVERLAY)).toBeNull()
+    expect(resolveM11HoveredSegmentId(interaction('basin-boundaries', { segment_id: 'seg-A' }), OVERLAY)).toBeNull()
+    expect(resolveM11HoveredSegmentId(interaction('discharge', { segment_id: 'seg-A' }), null)).toBeNull()
+    const nonDischarge = { ...OVERLAY, layerId: 'water-level' } as unknown as M11RegisteredOverlay
+    expect(resolveM11HoveredSegmentId(interaction('discharge', { segment_id: 'seg-A' }), nonDischarge)).toBeNull()
+  })
+})
+
+describe('createM11HoverSegmentTracker', () => {
+  it('reports only id changes, including a reset to null', () => {
+    const onChange = vi.fn()
+    const tracker = createM11HoverSegmentTracker(onChange)
+    tracker.update(null)
+    expect(onChange).not.toHaveBeenCalled()
+    tracker.update('seg-A')
+    tracker.update('seg-A')
+    tracker.update('seg-A')
+    tracker.update('seg-B')
+    tracker.update(null)
+    tracker.update(null)
+    tracker.update('seg-A')
+    expect(onChange.mock.calls).toEqual([['seg-A'], ['seg-B'], [null], ['seg-A']])
   })
 })

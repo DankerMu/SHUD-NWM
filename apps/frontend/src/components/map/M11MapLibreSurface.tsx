@@ -4,6 +4,7 @@ import Map, {
   ScaleControl,
   type MapLayerMouseEvent,
   type MapRef,
+  type MapStyleDataEvent,
 } from 'react-map-gl/maplibre'
 import type { FeatureCollection } from 'geojson'
 import 'maplibre-gl/dist/maplibre-gl.css'
@@ -19,10 +20,12 @@ import {
 } from '@/components/map/m11MapBuilders'
 import {
   buildM11InteractiveLayerIds,
+  createM11HoverSegmentTracker,
   handleM11MapClick,
   handleM11MapMouseLeave,
   handleM11MapMouseMove,
   resolveM11ClickTarget,
+  resolveM11HoveredSegmentId,
   type M11MapOverlayInteraction,
 } from '@/components/map/m11MapInteractions'
 import {
@@ -33,6 +36,7 @@ import {
   M11PrecipOverlayPrimitive,
   M11StationClusterPrimitive,
   M11_NATIONAL_RIVER_LINE_LAYER_ID,
+  ensureM11StationLayersOnTop,
   m11RegisteredOverlayHitLayerId,
   type M11StationFeatureCollection,
 } from '@/components/map/m11MapPrimitives'
@@ -198,6 +202,25 @@ export function M11MapLibreSurface({
     setOverlayUnavailableReason(null)
   }, [overlay])
 
+  // 悬停河段（#2628）：tracker 按 id 去重，只在变化时 setState。overlay 的 layerId / sourceId 变化
+  // （切图层、overlay 变 null）时经 tracker 置空；sourceKey 随时间轴变化不算，悬停保留。
+  const [hoveredSegmentId, setHoveredSegmentId] = useState<string | null>(null)
+  const [hoverTracker] = useState(() => createM11HoverSegmentTracker(setHoveredSegmentId))
+  const renderableOverlayLayerId = renderableOverlay?.layerId
+  const renderableOverlaySourceId = renderableOverlay?.sourceId
+  useEffect(() => {
+    hoverTracker.update(null)
+  }, [hoverTracker, renderableOverlayLayerId, renderableOverlaySourceId])
+
+  // 包一层 onOverlayHover：先照旧交给调用方（预取等），再更新悬停河段。
+  const handleOverlayHover = useCallback(
+    (interaction: M11MapOverlayInteraction | null) => {
+      onOverlayHover?.(interaction)
+      hoverTracker.update(resolveM11HoveredSegmentId(interaction, renderableOverlay))
+    },
+    [hoverTracker, onOverlayHover, renderableOverlay],
+  )
+
   // 仅测试门（exact pre-start boolean）下的只读 river-click 钩子；无该 flag 时绝不暴露全局、
   // 也不装任何监听。钩子只做 locate（fit/query/遮挡校验，返回身份与视口点）与 canvas
   // pointerdown 捕获，不接收也不调用任何产品回调——进入产品点击路径的唯一方式是真实指针
@@ -264,18 +287,23 @@ export function M11MapLibreSurface({
         showStationLayer,
         renderableOverlay,
         mapRef: mapRef.current,
-        onOverlayHover,
+        onOverlayHover: handleOverlayHover,
       })
     },
-    [onOverlayHover, renderableOverlay, showStationLayer],
+    [handleOverlayHover, renderableOverlay, showStationLayer],
   )
 
   const handleMouseLeave = useCallback(
     (event: MapLayerMouseEvent) => {
-      handleM11MapMouseLeave(event, { onOverlayHover })
+      handleM11MapMouseLeave(event, { onOverlayHover: handleOverlayHover })
     },
-    [onOverlayHover],
+    [handleOverlayHover],
   )
+
+  // 代站层保持在栈顶（#2650）：每次 style 变化后纠偏；已在栈顶时零次 moveLayer。
+  const handleStyleData = useCallback((event: MapStyleDataEvent) => {
+    ensureM11StationLayersOnTop(event.target)
+  }, [])
 
   const handleClick = useCallback(
     (event: MapLayerMouseEvent) => {
@@ -299,6 +327,7 @@ export function M11MapLibreSurface({
       data-basin-feature-count={basinFeatureCollection.features.length}
       data-visible-basin-ids={basinFeatureCollection.features.map((feature) => feature.properties.basin_id).join(',')}
       {...m11SelectionDataAttributes({ selectedSegmentId, selectedSegmentMapState, selectedStationId })}
+      data-hovered-segment-id={hoveredSegmentId ?? ''}
       data-overlay-source-type={renderableOverlay?.source.type ?? ''}
       data-overlay-source-layer={renderableOverlay?.source.type === 'vector' ? renderableOverlay.source.sourceLayer : ''}
       data-met-station-feature-count={showStationLayer ? stationFeatureCollection?.features.length ?? 0 : 0}
@@ -319,6 +348,7 @@ export function M11MapLibreSurface({
         onMouseMove={handleMouseMove}
         onMouseLeave={handleMouseLeave}
         onClick={handleClick}
+        onStyleData={handleStyleData}
         onError={handleMapError}
         attributionControl
       >
@@ -351,7 +381,14 @@ export function M11MapLibreSurface({
             <M11BasinLabelMarkers collection={basinFeatureCollection} />
           </>
         ) : null}
-        {renderableOverlay ? <M11OverlayPrimitive overlay={renderableOverlay} data={overlayData} selectedSegmentId={selectedSegmentId} /> : null}
+        {renderableOverlay ? (
+          <M11OverlayPrimitive
+            overlay={renderableOverlay}
+            data={overlayData}
+            selectedSegmentId={selectedSegmentId}
+            hoveredSegmentId={hoveredSegmentId}
+          />
+        ) : null}
         {showStationLayer && stationFeatureCollection ? (
           <M11StationClusterPrimitive collection={stationFeatureCollection} selectedStationId={selectedStationId} />
         ) : null}
