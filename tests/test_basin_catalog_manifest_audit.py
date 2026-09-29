@@ -14,9 +14,11 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+import psycopg2
 import pytest
 from psycopg2.extensions import parse_dsn
 
+from packages.common.model_registry_contracts import ModelRegistryError
 from scripts.basin_catalog_manifest_audit import (
     EXIT_CONFIG_ERROR,
     EXIT_PASS,
@@ -232,3 +234,64 @@ def test_the_dsn_is_forced_read_only_and_keeps_existing_options() -> None:
 
     bare = parse_dsn(read_only_dsn("host=127.0.0.1 dbname=nhms user=nhms_display_ro"))
     assert bare["options"] == "-c default_transaction_read_only=on"
+
+
+class _FailingCatalog:
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    def list_basins(self, *, limit: int, offset: int, has_display_product: bool = False) -> list[dict[str, Any]]:
+        raise self._error
+
+
+def _raise_on_connect(database_url: str) -> Any:
+    raise psycopg2.OperationalError('connection to server at "127.0.0.1", port 1 failed: Connection refused\n')
+
+
+def _catalog_raising_on_query(database_url: str) -> Any:
+    error = ModelRegistryError("Model registry database operation failed: relation core.basin does not exist\nLINE 1")
+    return _FailingCatalog(error), _active({})
+
+
+@pytest.mark.parametrize(
+    ("connect", "expected"),
+    [(_raise_on_connect, "OperationalError"), (_catalog_raising_on_query, "ModelRegistryError")],
+    ids=["connect-fails", "query-fails"],
+)
+def test_a_database_error_exits_2_with_one_stderr_line_and_no_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    connect: Any,
+    expected: str,
+) -> None:
+    import scripts.basin_catalog_manifest_audit as audit
+
+    dsn = "postgresql://audit_user:s3cr3t-pw@127.0.0.1:1/none"
+    monkeypatch.setenv("DATABASE_URL", dsn)
+    monkeypatch.setattr(audit, "_connect_catalog", connect)
+
+    assert main(["--manifest", str(_manifest(tmp_path, ["b_a"]))]) == EXIT_CONFIG_ERROR
+
+    captured = capsys.readouterr()
+    assert captured.out == ""  # no receipt: nothing was judged
+    error_line = captured.err.strip()
+    assert error_line and "\n" not in error_line
+    assert expected in error_line
+    assert dsn not in captured.err and "s3cr3t-pw" not in captured.err
+
+
+def test_a_malformed_database_url_exits_2_without_echoing_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The real _connect_catalog: libpq rejects the URI while parsing it and quotes it
+    # whole in the error, password included. No database is reached.
+    dsn = "postgresql://audit_user:s3cr3t-pw@[::1/nhms"
+    monkeypatch.setenv("DATABASE_URL", dsn)
+
+    assert main(["--manifest", str(_manifest(tmp_path, ["b_a"]))]) == EXIT_CONFIG_ERROR
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "ProgrammingError" in captured.err and "\n" not in captured.err.strip()
+    assert "s3cr3t-pw" not in captured.err and dsn not in captured.err

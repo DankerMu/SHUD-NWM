@@ -10,11 +10,14 @@ audit cannot drift from what the API serves. It passes only when
 * every basin in the default catalog but not in the manifest has zero active
   ``core.model_instance`` rows (a retired basin or a rename leftover).
 
-Exit codes: 0 pass, 1 violation, 2 configuration error (manifest missing,
-unparseable or without basin ids; no database URL). A JSON receipt goes to
-stdout in every case; the DSN is never printed. During a basin onboarding
-window the display set can lag the manifest: that is reported as exit 1 with
-both difference sets, not suppressed.
+Exit codes: 0 pass, 1 violation, 2 configuration or operational error
+(manifest missing, unparseable or without basin ids; no database URL; a
+database connection or query failure). A JSON receipt goes to stdout for every
+verdict and every configuration error; a database failure judged nothing, so it
+writes one stderr line (the error type and its first line) and no receipt. The
+DSN is never printed. During a basin onboarding window the display set can lag
+the manifest: that is reported as exit 1 with both difference sets, not
+suppressed.
 
 Every connection is forced read-only (``-c default_transaction_read_only=on``
 merged into the DSN's ``options``), and ``list_basins`` opens one connection
@@ -186,8 +189,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ConfigError as error:
         _print({"verdict": "config_error", "error": str(error), "manifest_path": str(args.manifest)})
         return EXIT_CONFIG_ERROR
-    catalog, count_active_models = _connect_catalog(database_url)
-    receipt = run_audit(catalog, count_active_models, manifest_path=args.manifest, page_size=args.page_size)
+    import psycopg2
+
+    from packages.common.model_registry_contracts import ModelRegistryError
+
+    try:
+        catalog, count_active_models = _connect_catalog(database_url)
+        receipt = run_audit(catalog, count_active_models, manifest_path=args.manifest, page_size=args.page_size)
+    except (psycopg2.Error, ModelRegistryError) as error:
+        # Connect and DSN-parse errors surface as psycopg2.Error; list_basins maps query
+        # errors to ModelRegistryError. libpq echoes a malformed URI verbatim (password
+        # included), so the URL is redacted; only the first line is printed.
+        first_line = str(error).strip().split("\n", 1)[0].replace(database_url, "<database url>")
+        print(f"basin_catalog_manifest_audit: database error: {type(error).__name__}: {first_line}", file=sys.stderr)
+        return EXIT_CONFIG_ERROR
     _print(receipt)
     return EXIT_PASS if receipt["verdict"] == "pass" else EXIT_VIOLATION
 

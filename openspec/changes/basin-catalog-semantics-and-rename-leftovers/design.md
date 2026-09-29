@@ -16,7 +16,7 @@
 
 - `scripts/basin_catalog_manifest_audit.py` 通过 `PsycopgModelRegistryStore(...).list_basins(limit, offset, has_display_product=…)` 分页取全默认集合和 display 集合。
 - 活跃判据用一条只读 SQL：`EXISTS core.model_instance mi JOIN core.basin_version bv … WHERE mi.active_flag`。
-- manifest 只取 `models[].basin_id` 的集合；manifest 缺失、不可解析或为空，都 exit 2（配置错误），不 exit 0。
+- manifest 只取 `models[].basin_id` 的集合。以下情况都 exit 2，不 exit 0：manifest 缺失、不可解析或为空（配置错误）；连库或查询失败（运行错误）。运行错误时 stderr 只打一行，不含 DSN，也不输出 receipt。
 - receipt JSON 包含：`default_count`、`display_count`、`manifest_count`、`display_minus_manifest`、`manifest_minus_display`、`catalog_extras[]`（每项带 `active_models`）、`violations[]`、`verdict`。
 - 连接通过 `--database-url` 或环境变量 `DATABASE_URL` 传入，推荐使用 `nhms_display_ro`（已确认对所需各表和 `hydro.run_status` 都有权限）。
 - 只读的实现方式：`_PsycopgTransaction` 每次调用都新开连接，所以 audit 在 DSN 上追加 `options=-c default_transaction_read_only=on`（与已有 options 合并）。每一页是一个独立快照，receipt 会写明这一点。

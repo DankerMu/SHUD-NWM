@@ -76,19 +76,19 @@ Fixture level：expanded。风险包：
 
 ## 4. 文档
 
-- [ ] 4.1 `docs/runbooks/production-ops/operating-scope.md` §7：
+- [x] 4.1 `docs/runbooks/production-ops/operating-scope.md` §7：
   - 默认 `/basins` 口径与判据（引用 audit 脚本）；
   - 「退役行保留」与「改名残影可按门禁删除」的区分；
   - 补登 §7.x：2026-08-25 `neiliuqu` 退役；2026-09-22 onboarding-19（SHJ 三子流域并入 `basins_shj`、`xinanjiang_upstream` 退出，published run 已 superseded，`AUTOPIPE_EXCLUDE_BASINS`、`Basins-retired/onboarding19-20260922`、manifest `.pre-onboarding-19-*` 备份）；2026-09-29 改名残影删除记录。
-- [ ] 4.2 `docs/runbooks/production-ops/service-bringup.md:650-690` 的 baseline 清单标为历史快照。
+- [x] 4.2 `docs/runbooks/production-ops/service-bringup.md:650-690` 的 baseline 清单标为历史快照。
 - [ ] 4.3 #1729 追加评论：第 3 条验收项的口径统一。
-- [ ] 4.4 #2644：`openspec/glossary.md` 新增 `model_id` 词条，内容包括：
+- [x] 4.4 #2644：`openspec/glossary.md` 新增 `model_id` 词条，内容包括：
   - 基础包 id `<basin>_shud`，来源 `workers/model_registry/basins_registry_rows.py:473` 的 `_shud_riv_` 拼接（行号依 #2644 原文，另附符号名）；
   - direct-grid variant `dg_<32hex>`，来源 `workers/model_registry/direct_grid_variant_registration.py::_mint_model_id`；
   - river_segment_id 前缀只来自前者；latest-product / hydro_run 的 `model_id` 可能是 variant。
 
   另外，两条 reach/output row 词条中的 `<model_id>` 指向该词条。
-- [ ] 4.5 #2644：runbook「部署组 id」检查（`grep -rn 部署组 docs` 为空，已由 #2643 archive 修正）。
+- [x] 4.5 #2644：runbook「部署组 id」检查（`grep -rn 部署组 docs` 为空，已由 #2643 archive 修正）。
 
 ## 5. 验证
 
