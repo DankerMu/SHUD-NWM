@@ -23,6 +23,7 @@ from scripts.basin_catalog_manifest_audit import (
     EXIT_CONFIG_ERROR,
     EXIT_PASS,
     EXIT_VIOLATION,
+    load_manifest_basin_ids,
     main,
     read_only_dsn,
     run_audit,
@@ -76,10 +77,16 @@ def _manifest(tmp_path: Path, basin_ids: Sequence[str], *, rows_per_basin: int =
     return path
 
 
+def _manifest_args(tmp_path: Path, basin_ids: Sequence[str]) -> dict[str, Any]:
+    """``run_audit``'s manifest arguments: the basin ids as ``main`` reads them once, and their path."""
+    path = _manifest(tmp_path, basin_ids)
+    return {"manifest": load_manifest_basin_ids(path), "manifest_path": path}
+
+
 def test_retired_catalog_extras_without_active_models_pass(tmp_path: Path) -> None:
     catalog = _Catalog(default=["b_a", "b_b", "b_retired", "b_old"], display=["b_a", "b_b"])
     receipt = run_audit(
-        catalog, _active({"b_a": 2, "b_b": 1}), manifest_path=_manifest(tmp_path, ["b_a", "b_b"]), page_size=500
+        catalog, _active({"b_a": 2, "b_b": 1}), **_manifest_args(tmp_path, ["b_a", "b_b"]), page_size=500
     )
 
     assert receipt["verdict"] == "pass"
@@ -94,9 +101,7 @@ def test_retired_catalog_extras_without_active_models_pass(tmp_path: Path) -> No
 
 def test_an_active_basin_absent_from_the_manifest_is_a_violation(tmp_path: Path) -> None:
     catalog = _Catalog(default=["b_a", "b_live", "b_retired"], display=["b_a"])
-    receipt = run_audit(
-        catalog, _active({"b_a": 1, "b_live": 3}), manifest_path=_manifest(tmp_path, ["b_a"]), page_size=500
-    )
+    receipt = run_audit(catalog, _active({"b_a": 1, "b_live": 3}), **_manifest_args(tmp_path, ["b_a"]), page_size=500)
 
     assert receipt["verdict"] == "violation"
     assert receipt["catalog_extras"] == [
@@ -111,7 +116,7 @@ def test_display_and_manifest_drift_is_reported_in_both_directions(tmp_path: Pat
     # display product but has left the manifest.
     catalog = _Catalog(default=["b_a", "b_gone", "b_new"], display=["b_a", "b_gone"])
     receipt = run_audit(
-        catalog, _active({"b_a": 1, "b_new": 1}), manifest_path=_manifest(tmp_path, ["b_a", "b_new"]), page_size=500
+        catalog, _active({"b_a": 1, "b_new": 1}), **_manifest_args(tmp_path, ["b_a", "b_new"]), page_size=500
     )
 
     assert receipt["verdict"] == "violation"
@@ -126,7 +131,7 @@ def test_display_and_manifest_drift_is_reported_in_both_directions(tmp_path: Pat
 def test_both_catalog_sets_are_read_to_the_last_page(tmp_path: Path) -> None:
     default = [f"b_{index:02d}" for index in range(7)]
     catalog = _Catalog(default=default, display=default[:5])
-    receipt = run_audit(catalog, _active({}), manifest_path=_manifest(tmp_path, default[:5]), page_size=3)
+    receipt = run_audit(catalog, _active({}), **_manifest_args(tmp_path, default[:5]), page_size=3)
 
     assert (receipt["default_count"], receipt["display_count"]) == (7, 5)
     assert [basin["basin_id"] for basin in receipt["catalog_extras"]] == ["b_05", "b_06"]
@@ -142,14 +147,16 @@ def test_both_catalog_sets_are_read_to_the_last_page(tmp_path: Path) -> None:
 
 def test_an_exactly_full_last_page_is_followed_by_an_empty_one(tmp_path: Path) -> None:
     catalog = _Catalog(default=["b_1", "b_2", "b_3", "b_4"], display=["b_1", "b_2"])
-    run_audit(catalog, _active({}), manifest_path=_manifest(tmp_path, ["b_1", "b_2"]), page_size=2)
+    run_audit(catalog, _active({}), **_manifest_args(tmp_path, ["b_1", "b_2"]), page_size=2)
 
     assert catalog.calls == [(2, 0, False), (2, 2, False), (2, 4, False), (2, 0, True), (2, 2, True)]
 
 
 def test_the_receipt_carries_every_field_and_the_per_page_snapshot_note(tmp_path: Path) -> None:
     manifest = _manifest(tmp_path, ["b_a"])
-    receipt = run_audit(_Catalog(["b_a"], ["b_a"]), _active({"b_a": 1}), manifest_path=manifest, page_size=10)
+    receipt = run_audit(
+        _Catalog(["b_a"], ["b_a"]), _active({"b_a": 1}), manifest={"b_a"}, manifest_path=manifest, page_size=10
+    )
 
     assert set(receipt) == RECEIPT_FIELDS
     assert receipt["manifest_path"] == str(manifest)
@@ -295,3 +302,25 @@ def test_a_malformed_database_url_exits_2_without_echoing_it(
     assert captured.out == ""
     assert "ProgrammingError" in captured.err and "\n" not in captured.err.strip()
     assert "s3cr3t-pw" not in captured.err and dsn not in captured.err
+
+
+def test_the_manifest_is_read_once_so_a_rewrite_while_connecting_cannot_crash_the_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The scheduler may rewrite manifest-last.json between the pre-connect check and the audit."""
+    import scripts.basin_catalog_manifest_audit as audit
+
+    manifest = _manifest(tmp_path, ["b_a"])
+
+    def connect_while_the_manifest_is_rewritten(database_url: str) -> Any:
+        manifest.write_text("{half-written", encoding="utf-8")
+        return _Catalog(["b_a", "b_retired"], ["b_a"]), _active({"b_a": 1})
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@127.0.0.1:1/none")
+    monkeypatch.setattr(audit, "_connect_catalog", connect_while_the_manifest_is_rewritten)
+
+    assert main(["--manifest", str(manifest)]) == EXIT_PASS
+
+    receipt = json.loads(capsys.readouterr().out)
+    assert (receipt["verdict"], receipt["manifest_count"]) == ("pass", 1)
+    assert receipt["catalog_extras"] == [{"basin_id": "b_retired", "active_models": 0}]

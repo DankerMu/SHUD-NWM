@@ -159,8 +159,9 @@ basinId 查表回填，而 basinId 来自 `has_display_product=true`；river 那
     [`scripts/ops/node27_2621_delete_rename_leftovers.sql`](../../../scripts/ops/node27_2621_delete_rename_leftovers.sql)
     经 [`scripts/ops/node27_oneshot_sql.py`](../../../scripts/ops/node27_oneshot_sql.py) 执行——
     默认 dry-run（结束即回滚），每次运行用一个新的 `--copy-dir`，
-    `--set nhms.manifest_basins=<manifest 的 basin_id 逗号串>`；dry-run 与 apply 都要先暂停
-    node-27 的压缩与保留作业、跑完恢复（前后状态记 receipt）；`--apply` 只在 owner 确认
+    `--set nhms.manifest_basins=<manifest 的 basin_id 逗号串>`；dry-run 与 apply 都要先停
+    node-27 的 compression / timeseries-retention / autopipe 三个 user timer、跑完再启动
+    （`systemctl --user list-timers` 前后记 receipt，步骤见 §7.5）；`--apply` 只在 owner 确认
     dry-run receipt 之后；恢复用 `node27_2621_delete_rename_leftovers_rollback.sql`，
     `--copy-dir` 指向 apply 那次的目录。脚本把 7 个 id、后继和各表计数写死，**不是通用删除工具**；
     再出现残影要新盘点、新裁决、新脚本。本次记录见 §7.5。
@@ -362,34 +363,69 @@ forcing_version、interp_weight、state_snapshot、run_display_coverage 都是 0
 （`hydro.river_timeseries`、`met.forcing_station_timeseries{,_legacy}`）的零引用**不在盘点里**，
 由脚本 Gate A2 在锁定之后逐个探测证明，结果见下面的 dry-run receipt；旁证是写入路径的不变量——
 目标模型没有任何 hydro_run，`river_timeseries` 经 `run_key` 挂不到这些河段上。
-`ops.audit_log`、`ops.pipeline_job` 等只登记不删，清单见 SQL 头注释。
+目标站点的 `grid_snapshot_id` 只指向两个 `met.canonical_grid_snapshot`：`2f00657d-…`（gfs）与
+`bcd58449-…`（IFS），各 1145 站——这是八张表唯一一条指向表外的外键，删除脚本把它写死成门禁，
+回滚脚本在 COPY 之前断言这两个父行仍在（以及八张表的外键出边集合未变）。
+**阻断门禁**（命中即 RAISE、一行不删）：上面各项零依赖，再加 `ops.pipeline_job.model_id` 与
+`hydro.state_snapshot.cloned_from_model_id`。**只登记不删的只有两张**：`ops.audit_log`（entity_id
+等值计数）与 `met.best_available_selection`（无外键，只有 text `forcing_version_id`，目标名下没有
+forcing_version）。
 
-**删之前已确认、删之后要记的**：
+**删之前已确认、删之后要记的（2026-09-29 node-27 只读实测）**：
 
-- `/home/ghdc/nwm/Basins` 下已没有 `DNZH-*` / `xinan*` 源目录（2026-09-29 `ls` 实测），
-  这些旧 id 本来就复活不了。
-- `AUTOPIPE_EXCLUDE_BASINS` 里的 `dnzh_{mdzh,mj,mnzh,qtj},xinan_{dulongjiang,lancangjiang,nujiang}`
-  （改名时追加，改前备份 `infra/env/node27-ingest.env.bak-onboarding19-rename-20260922`）删除后成为
-  死配置，照 #1732 的做法保留不动，只在这里注明。
+- `/home/ghdc/nwm/Basins` 下已没有 `DNZH-*` / `xinan*` 源目录，seed 这一路不会再生出这 7 个 id。
+- **但 run 目录还在**：`/home/ghdc/nwm/object-store/runs/` 下有 **14 个**
+  `fcst_{gfs,ifs}_2026091700_dg_<目标 dg 模型>`（7 个 gfs + 7 个 ifs，14 个 dg 模型各一个），
+  `input/manifest.json` 的 `identity.basin_id` 就是目标流域、没有 `basin_slug`。autopipe 的
+  `_discover_runs` / `_basin_identity`（[`scripts/node27_autopipeline.py`](../../../scripts/node27_autopipeline.py)）
+  由此推出 `basin_key`（如 `dnzh_mdzh`），不被排除就会进入 seed 阶段、按 run manifest 身份重新
+  入库。`scheduler/state-index/index-last.json` 里也还有这 14 个 dg 模型各 1 条
+  `usable_flag=true` 的状态（`valid_time` 2026-09-17T12Z）。
+- 所以**删除后 `AUTOPIPE_EXCLUDE_BASINS` 里的
+  `dnzh_{mdzh,mj,mnzh,qtj},xinan_{dulongjiang,lancangjiang,nujiang}` 必须保留**，不是死配置：
+  这 7 个 id 挡住的正是上面 14 个 run 目录。复活路径靠「排除清单 + seed 目录缺席」两道一起关着，
+  不是只靠 seed 目录缺席。只要这些 run 目录还在，就不能从排除清单里去掉它们（清理 run 目录与
+  state-index 条目另起跟进，#2621 不动 object-store）。当前那一行与改名前备份
+  `infra/env/node27-ingest.env.bak-onboarding19-rename-20260922` 的差异恰好是追加的这 7 个 id。
 
-**执行方式**（步骤全文以 SQL 头注释为准）：
+**执行方式**（步骤全文以 SQL 头注释为准）。node-27 **没有** TimescaleDB 的压缩/保留策略作业
+（`timescaledb_information.jobs` 只有 Telemetry Reporter 与 Error Log Retention Policy，
+2026-09-29 实测）；压缩、保留与注册表/ingest 写入都是 user systemd timer，dry-run 与 apply
+前各停一次、跑完各启动一次：
 
 ```bash
 cd /home/nwm/NWM && export TMPDIR=/home/nwm/tmp
+T="nhms-node27-timeseries-compression nhms-node27-timeseries-retention nhms-node27-autopipe"
+systemctl --user list-timers --all --no-pager            # 落 receipt：停之前
+systemctl --user stop $(printf '%s.timer ' $T)
+systemctl --user is-active $(printf '%s.service ' $T)    # 三个都必须是 inactive；在跑就等它跑完，不要 kill
 # owner DSN 只放在 source 进来的私有 env 变量里，不进 argv
 MANIFEST_BASINS="$(jq -r '[.models[].basin_id] | unique | join(",")' \
   /home/ghdc/nwm/object-store/scheduler/registry/manifest-last.json)"
-# 先暂停压缩与保留作业并记录状态；dry-run（默认回滚），copy 目录只给这一次用
+# dry-run（默认回滚），copy 目录只给这一次用
 .venv/bin/python scripts/ops/node27_oneshot_sql.py scripts/ops/node27_2621_delete_rename_leftovers.sql \
   --dsn-env <持有 owner DSN 的变量名> --copy-dir /home/nwm/tmp/2621-delete-dry-<ts>/ \
   --set nhms.manifest_basins="$MANIFEST_BASINS"
-# 恢复作业 → owner 过目 dry-run receipt → 再暂停作业，用新的 copy 目录 --apply，
-# 并 --set nhms.probe_timeout_s=<dry-run 最大探测耗时 ×2，60..3600> → 恢复作业 → copy 目录复制一份离开 node-27
+systemctl --user start $(printf '%s.timer ' $T)
+systemctl --user list-timers --all --no-pager            # 落 receipt：启动之后
+# owner 过目 dry-run receipt → 再按上面停三个 timer 并确认 inactive → 用新的 copy 目录 --apply，
+# 并 --set nhms.probe_timeout_s=<dry-run 最大探测耗时 ×2，60..3600> → 启动 timer、记 list-timers
+# → copy 目录复制一份离开 node-27
 ```
 
+`download`、`raw-retention`、`mvt-cache-retention` 等 timer 只动文件、不写这些表，不停。
 探测超时就停下报 owner，不要自己加大超时重跑。回滚：
-`scripts/ops/node27_2621_delete_rename_leftovers_rollback.sql`，`--copy-dir` 指向 apply 那次的目录。
-删完跑一次 §7.1.1 末段的 audit，预期 exit 0。
+`scripts/ops/node27_2621_delete_rename_leftovers_rollback.sql`，`--copy-dir` 指向 apply 那次的目录；
+它在 COPY 之前拒绝三种情况：目标行仍在、八张表外键出边集合漂移、两个 grid snapshot 父行缺失。
+
+**删后 receipt 要记**：§7.1.1 末段的 audit（预期 exit 0，9 个 extra）；公网 `/api/v1/basins`
+默认 57、display 48、manifest 48——display API 的目录缓存（`apps/api/display_cache.py`）TTL 60 s、
+stale 最长 600 s、每 45 s 预热回放，所以隔 ≥ 60 s 读两次、直到读到 57 再记；
+`/api/v1/basins/<删除项>/versions` 返回 404；`GET /api/v1/layers` 里 `river-network` / `discharge`
+的 `metadata.source_generation`（即 `national_river_network_source_version` /
+`national_discharge_source_version`，只摘要 active 模型）与 `cache_version` 删前删后不变；
+目标 run 目录数（14）、state-index 目标条目数（14）删前删后不变；`AUTOPIPE_EXCLUDE_BASINS`
+与 `.bak-onboarding19-rename-20260922` 的 diff 删前删后一致（恰好 7 个 id）。
 
 **执行结果：见 receipt（待填）**——dry-run / apply 的 receipt 路径、各步与各探测耗时、
-作业暂停前后状态、删除后 audit 结果，在生产执行完成后填入。
+三个 timer 停启前后的 `list-timers`、上面的删后各项，在生产执行完成后填入。

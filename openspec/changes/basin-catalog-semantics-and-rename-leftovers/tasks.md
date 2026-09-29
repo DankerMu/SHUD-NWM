@@ -44,13 +44,14 @@ Fixture level：expanded。风险包：
 - [x] 2.2 新增 `scripts/ops/node27_2621_delete_rename_leftovers_rollback.sql`：
   - 父到子的顺序执行 `@copy-in`；
   - 保留 identity 列的原值；
-  - 目标行仍存在时拒绝恢复。
+  - 目标行仍存在时拒绝恢复；
+  - 外键出边集合漂移、或表外父行（`met.canonical_grid_snapshot`）缺失时，在任何 COPY 之前拒绝恢复。
 - [x] 2.3 disposable-DB 集成测试（`NHMS_RUN_INTEGRATION=1`，仿照 `tests/test_node27_1729_evidence_basin_delete_integration.py`）。按真实 id 和真实计数种子，river_segment、crosswalk、met_station 用 `generate_series` 生成，不允许任何覆盖计数的路径。覆盖以下情况：
   - apply 之后 rollback，恢复结果逐字节相等；
   - 没有 copy-dir 时拒绝执行；dry-run 的 copy-dir 不能复用；
-  - 以下每种情况各一例，都应拒绝且不删任何行：计数漂移、存在 hydro_run、存在 active 模型、在 manifest 中、successor 缺失、存在 hypertable 引用、FK 集合漂移；
+  - 以下每种情况各一例，都应拒绝且不删任何行：计数漂移、存在 hydro_run、存在 interp_weight（按目标站点、按目标模型各一例）、存在 forcing_version、目标站点 grid snapshot 分布漂移、存在 active 模型、在 manifest 中、successor 缺失、存在 hypertable 引用、FK 集合漂移；
   - 无法设置 replica 时直接失败，不退回慢路径；
-  - rollback 拒绝覆盖仍然存在的行。
+  - rollback 拒绝覆盖仍然存在的行；grid snapshot 父行缺失或外键出边集合漂移时，在任何 COPY 之前拒绝，不做部分恢复。
 - [x] 2.4 `tests/test_node27_oneshot_sql.py`：两个新脚本的列集合守卫必须逐字节一致。selector 路由也要补上。
 
 ## 3. 生产执行（node-27）
@@ -59,20 +60,27 @@ Fixture level：expanded。风险包：
   - audit（预期 exit 0，16 个 extra，active 均为 0）；
   - 公网默认、display、manifest 三方集合落盘；
   - 只读 `grep` node-22 本地注册表副本，看补登的 5 个流域是否仍在其中（不写 node-22）。
-- [ ] 3.2 暂停压缩和保留作业后，通过 runner 跑删除 dry-run（新的 `--copy-dir`，`--set nhms.manifest_basins=…`）。NOTICE、各步耗时和 hypertable 探测耗时都作为 receipt 落盘，然后恢复作业。
+- [ ] 3.2 停写入 timer（node-27 没有 TimescaleDB 压缩/保留策略作业，只有 user systemd timer）：
+  1. `systemctl --user list-timers --all --no-pager` 落 receipt；
+  2. `systemctl --user stop nhms-node27-timeseries-compression.timer nhms-node27-timeseries-retention.timer nhms-node27-autopipe.timer`；
+  3. `systemctl --user is-active` 对应三个 `.service` 都是 `inactive`（在跑就等，不 kill）；
+  4. 通过 runner 跑删除 dry-run（新的 `--copy-dir`，`--set nhms.manifest_basins=…`），NOTICE、各步耗时和 hypertable 探测耗时都作为 receipt 落盘；
+  5. `systemctl --user start` 这三个 timer，再记一次 `list-timers`。
 - [ ] 3.3 **停下来请 owner 确认** dry-run receipt。确认后按顺序执行：
-  1. 暂停压缩和保留作业；
+  1. 同 3.2 的 1–3：记 `list-timers`、停三个 timer、确认三个 service `inactive`；
   2. 用新的 `--copy-dir` 执行 `--apply`，`--set nhms.probe_timeout_s` 取 dry-run 实测最大值 ×2；
-  3. 恢复作业；
-  4. 作业状态记入 receipt；
+  3. `systemctl --user start` 三个 timer；
+  4. 启动后的 `list-timers` 记入 receipt；
   5. 把 copy 目录复制一份离开 node-27。
 - 如果 dry-run 的探测超时，停下报告 owner，不自行放宽。
-- [ ] 3.4 处置后 receipt：
+- [ ] 3.4 处置后 receipt（删前也记一份同口径的，逐项对比）：
   - audit（预期 exit 0，9 个 extra）；
-  - 公网默认 57、display 48、manifest 48；
+  - 公网默认 57、display 48、manifest 48；默认 57 要在 display API 目录缓存（`apps/api/display_cache.py`，TTL 60 s、stale 最长 600 s）过期后读：隔 ≥ 60 s 读两次，读到 57 再记；
   - `/api/v1/basins/<删除项>/versions` 返回 404；
+  - `GET /api/v1/layers` 中 `river-network` / `discharge` 的 `metadata.source_generation`（`national_river_network_source_version` / `national_discharge_source_version`）与 `cache_version` 删前删后不变；
   - seed 源目录中没有 `DNZH-*`/`xinan*`；
-  - `AUTOPIPE_EXCLUDE_BASINS` 中的死 id 记入 receipt。
+  - `object-store/runs/` 下目标 run 目录数（2026-09-29 实测 14 个 `fcst_{gfs,ifs}_2026091700_dg_<目标 dg 模型>`）与 `scheduler/state-index/index-last.json` 中目标模型条目数（实测 14 条，均 usable）删前删后不变；
+  - `AUTOPIPE_EXCLUDE_BASINS` 未改动：与 `infra/env/node27-ingest.env.bak-onboarding19-rename-20260922` 的 diff 删前删后一致，恰好是追加的 7 个 id（它们挡住上面的 run 目录，必须保留，不是死配置）。
 
 ## 4. 文档
 

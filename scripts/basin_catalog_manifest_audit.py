@@ -36,6 +36,7 @@ import json
 import os
 import sys
 from collections.abc import Callable, Sequence
+from collections.abc import Set as AbstractSet
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -117,9 +118,14 @@ def collect_basin_ids(catalog: BasinCatalog, *, has_display_product: bool, page_
 
 
 def run_audit(
-    catalog: BasinCatalog, count_active_models: ActiveModelCounter, *, manifest_path: Path, page_size: int
+    catalog: BasinCatalog,
+    count_active_models: ActiveModelCounter,
+    *,
+    manifest: AbstractSet[str],
+    manifest_path: Path,
+    page_size: int,
 ) -> dict[str, Any]:
-    manifest = load_manifest_basin_ids(manifest_path)
+    """Judge the catalog against ``manifest`` (the basin ids read once from ``manifest_path``)."""
     default = collect_basin_ids(catalog, has_display_product=False, page_size=page_size)
     display = collect_basin_ids(catalog, has_display_product=True, page_size=page_size)
     extras = sorted(default - manifest)
@@ -182,7 +188,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.page_size < 1:
         parser.error("--page-size must be at least 1")
     try:
-        load_manifest_basin_ids(args.manifest)  # judged before any connection
+        manifest = load_manifest_basin_ids(args.manifest)  # read once, judged before any connection
         database_url = (args.database_url or os.environ.get("DATABASE_URL", "")).strip()
         if not database_url:
             raise ConfigError("no database URL: pass --database-url or set DATABASE_URL")
@@ -195,7 +201,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         catalog, count_active_models = _connect_catalog(database_url)
-        receipt = run_audit(catalog, count_active_models, manifest_path=args.manifest, page_size=args.page_size)
+        receipt = run_audit(
+            catalog, count_active_models, manifest=manifest, manifest_path=args.manifest, page_size=args.page_size
+        )
     except (psycopg2.Error, ModelRegistryError) as error:
         # Connect and DSN-parse errors surface as psycopg2.Error; list_basins maps query
         # errors to ModelRegistryError. libpq echoes a malformed URI verbatim (password

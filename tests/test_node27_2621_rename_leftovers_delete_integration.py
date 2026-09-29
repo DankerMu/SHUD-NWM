@@ -11,7 +11,8 @@ counts -- there is no count-override path to test against a smaller seed:
   river_network_version / mesh_version and three inactive model_instance rows
   each (21 real model ids), and per basin the inventoried river_segment /
   river_segment_crosswalk / met_station counts (85196 / 85471 / 2290 in total),
-  generated with ``generate_series``;
+  generated with ``generate_series``; the target stations reference the two
+  real ``met.canonical_grid_snapshot`` ids, 1145 each;
 * the seven successors (``basins_se_*`` / ``basins_sw_*``), each with one active
   model, and a control basin that owns a hydro run, a forcing version and rows
   in all three hypertables -- inside COMPRESSED chunks, so the zero-reference
@@ -102,8 +103,38 @@ def test_the_pinned_inventory_adds_up() -> None:
     assert sum(len(row[2]) for row in TARGETS) == 21
 
 
+# The canonical grid snapshots the 2290 target stations reference, 1145 each (node-27, 2026-09-29):
+# met.met_station.grid_snapshot_id is the one FK out of the eight restored tables to a table outside them.
+GRID_SNAPSHOTS = (
+    ("2f00657d-07a2-4ae3-b08e-8e670721033e", "gfs", "gfs_0p25"),
+    ("bcd58449-a0b5-4c8a-b2f8-36a2f996a268", "IFS", "ifs_0p25"),
+)
+
+
+def _seed_grid_snapshots(cursor: Any) -> None:
+    cursor.execute(
+        "INSERT INTO met.data_source (source_id, source_name, source_type, status, native_format, adapter_name) "
+        "VALUES ('gfs', 'GFS Integration', 'forecast', 'mock', 'netcdf', 'gfs'), "
+        "('IFS', 'IFS Integration', 'forecast', 'mock', 'grib2', 'ifs')"
+    )
+    for snapshot_id, source_id, grid_id in GRID_SNAPSHOTS:
+        cursor.execute(
+            """
+            INSERT INTO met.canonical_grid_snapshot (
+                grid_snapshot_id, canonical_grid_key, source_id, grid_id, grid_signature, grid_definition_uri,
+                grid_definition_checksum, longitude_convention, latitude_order, flatten_order, native_resolution,
+                bbox_south, bbox_north, bbox_west, bbox_east, converter_version, valid_from, applicable_source_ids
+            )
+            VALUES (%s, 'it2621-grid', %s, %s, 'sig-' || %s, 's3://nhms/grids/' || %s, 'sha256:cd', '[-180,180)',
+                    'descending', 'y_major_lat_then_lon', 0.25, 8.0, 64.0, 63.0, 145.0, 'converter-v1',
+                    '2026-01-01T00:00:00Z', ARRAY[%s]::text[])
+            """,
+            (snapshot_id, source_id, grid_id, grid_id, grid_id, source_id),
+        )
+
+
 def _seed_basin(cursor: Any, basin_id: str, models: tuple[tuple[str, bool], ...], segments: int, crosswalk: int,
-                stations: int, station_prefix: str) -> None:  # fmt: skip
+                stations: int, station_prefix: str, *, grid_snapshots: bool = False) -> None:  # fmt: skip
     bv, rnv, mesh = _ids(basin_id)
     cursor.execute(
         "INSERT INTO core.basin (basin_id, basin_name, basin_group, description) VALUES (%s, %s, 'Basins', %s)",
@@ -170,30 +201,31 @@ def _seed_basin(cursor: Any, basin_id: str, models: tuple[tuple[str, bool], ...]
     cursor.execute(
         """
         INSERT INTO met.met_station (station_id, basin_version_id, station_name, geom, elevation_m, station_role,
-                                     active_flag, properties_json)
+                                     active_flag, properties_json, grid_snapshot_id)
         SELECT format('%%s::cell:%%s', %(prefix)s::text, 47930 + i), %(bv)s, NULL,
                ST_SetSRID(ST_MakePoint(98 + i / 3.0, 25 + i / 7.0), 4490), 1234.5678901234567 + i,
-               'direct_grid_cache', false, jsonb_build_object('cell', i)
+               'direct_grid_cache', false, jsonb_build_object('cell', i),
+               CASE WHEN %(snapshots)s THEN (%(snapshot_ids)s::uuid[])[1 + i %% 2] END
         FROM generate_series(1, %(n)s) AS i
         """,
-        {"prefix": station_prefix, "bv": bv, "n": stations},
-    )
+        {
+            "prefix": station_prefix, "bv": bv, "n": stations, "snapshots": grid_snapshots,
+            "snapshot_ids": [snapshot_id for snapshot_id, _, _ in GRID_SNAPSHOTS],
+        },
+    )  # fmt: skip
 
 
 def _seed(database_url: str) -> dict[str, int]:
     """Seed the inventory; return the control run / forcing keys the hypertable rows hang off."""
     apply_migrations_from_zero(database_url)
     with psycopg_connection(database_url) as connection, connection.cursor() as cursor:
+        _seed_grid_snapshots(cursor)
         # The control basin first, so no target identity key is 1.
         _seed_basin(cursor, CONTROL, ((f"{CONTROL}_shud", True),), 5, 5, 3, "control")
         for index, (basin_id, successor, models, segments, crosswalk, stations) in enumerate(TARGETS):
             _seed_basin(cursor, successor, ((f"{successor}_shud", True),), 3, 3, 2, f"successor-{index}")
             _seed_basin(cursor, basin_id, tuple((model, False) for model in models), segments, crosswalk, stations,
-                        f"dg-gfs-{index:02d}")  # fmt: skip
-        cursor.execute(
-            "INSERT INTO met.data_source (source_id, source_name, source_type, status, native_format, adapter_name) "
-            "VALUES ('gfs', 'GFS Integration', 'forecast', 'mock', 'netcdf', 'gfs')"
-        )
+                        f"dg-gfs-{index:02d}", grid_snapshots=True)  # fmt: skip
         cursor.execute(
             """
             INSERT INTO hydro.hydro_run (run_id, run_type, scenario_id, model_id, basin_version_id,
@@ -399,6 +431,19 @@ def test_a_dry_run_copy_dir_cannot_be_reused_for_the_apply(throwaway_database_ur
 
 _TARGET_BV = _ids("basins_xinan_nujiang")[0]
 _TARGET_RNV = _ids("basins_xinan_nujiang")[1]
+# basins_xinan_nujiang is TARGETS[6]: its stations are dg-gfs-06::cell:<47931..>.
+_TARGET_STATION = "dg-gfs-06::cell:47931"
+_TARGET_DG_MODEL = "dg_ba0a40ec23bd1171345eb8f3e597a9e3"
+_SUCCESSOR_MODEL = "basins_sw_nujiang_shud"
+_SUCCESSOR_STATION = "successor-6::cell:47931"
+
+
+def _interp_weight(model_id: str, station_id: str) -> str:
+    """A met.interp_weight row in the production shape (a model's weight on one station cell)."""
+    return (
+        "INSERT INTO met.interp_weight (source_id, grid_id, model_id, station_id, variable, grid_cell_id, weight, "
+        f"method) VALUES ('gfs', 'gfs_0p25', '{model_id}', '{station_id}', 'PRCP', '47931', 0.5, 'idw')"
+    )
 
 
 @pytest.mark.parametrize(
@@ -422,6 +467,30 @@ _TARGET_RNV = _ids("basins_xinan_nujiang")[1]
             f"'basins_xinan_nujiang_shud', '{_TARGET_BV}', '2026-09-22', '2026-09-22', '2026-09-23', 'parsed', 'x')",
             SETTINGS,
             r"hydro\.hydro_run has 1 row\(s\) by basin_version_id",
+        ),
+        (
+            # The replica-mode met_station DELETE skips this FK: the step-3 gate is what refuses.
+            _interp_weight(_SUCCESSOR_MODEL, _TARGET_STATION),
+            SETTINGS,
+            r"met\.interp_weight has 1 row\(s\) by station_id",
+        ),
+        (
+            _interp_weight(_TARGET_DG_MODEL, _SUCCESSOR_STATION),
+            SETTINGS,
+            r"met\.interp_weight has 1 row\(s\) by model_id",
+        ),
+        (
+            "INSERT INTO met.forcing_version (forcing_version_id, model_id, source_id, start_time, end_time, "
+            f"station_count, forcing_package_uri) VALUES ('it2621_target_forcing', '{_TARGET_DG_MODEL}', 'gfs', "
+            "'2026-09-17', '2026-09-18', 632, 'integration://forcing')",
+            SETTINGS,
+            r"met\.forcing_version has 1 row\(s\)",
+        ),
+        (
+            # The backup may only hold the two snapshot ids the rollback asserts before restoring.
+            f"UPDATE met.met_station SET grid_snapshot_id = NULL WHERE station_id = '{_TARGET_STATION}'",
+            SETTINGS,
+            rf"target met_station grid_snapshot_id counts .*NULL=1.*{GRID_SNAPSHOTS[1][0]}=1144",
         ),
         (
             "UPDATE core.model_instance SET active_flag = true, lifecycle_state = 'active' "
@@ -467,6 +536,10 @@ _TARGET_RNV = _ids("basins_xinan_nujiang")[1]
         "station-count-drift",
         "crosswalk-count-drift",
         "hydro-run",
+        "interp-weight-on-a-target-station",
+        "interp-weight-of-a-target-model",
+        "forcing-version-of-a-target-model",
+        "station-grid-snapshot-drift",
         "active-model",
         "model-set-union",
         "successor-without-active-model",
@@ -633,3 +706,36 @@ def test_rollback_refuses_to_restore_over_rows_that_still_exist(throwaway_databa
 
     assert raised.value.pgcode == "P0001"
     assert _digest(url, targets=True) == before
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            # met.met_station.grid_snapshot_id is the one FK out of the eight restored tables.
+            f"DELETE FROM met.canonical_grid_snapshot WHERE grid_snapshot_id = '{GRID_SNAPSHOTS[1][0]}'",
+            rf"#2621 rollback: parent met\.canonical_grid_snapshot row\(s\) \{{{GRID_SNAPSHOTS[1][0]}\}} are gone",
+        ),
+        (
+            "ALTER TABLE core.model_instance ADD CONSTRAINT it2621_mesh_fkey FOREIGN KEY (mesh_version_id) "
+            "REFERENCES core.mesh_version (mesh_version_id)",
+            r"#2621 rollback: outbound FK set of the restored tables differs; "
+            r"unexpected=\{\"core\.model_instance\|core\.mesh_version\|",
+        ),
+    ],
+    ids=["missing-grid-snapshot-parent", "outbound-fk-set-drift"],
+)
+def test_rollback_refuses_before_any_restore_when_a_restored_row_could_miss_its_parent(
+    throwaway_database_url: str, tmp_path: Path, mutation: str, message: str
+) -> None:
+    url = throwaway_database_url
+    _seed(url)
+    run_sql_file(DELETE_SQL, database_url=url, copy_dir=tmp_path, settings=SETTINGS, apply=True)
+    with psycopg_connection(url) as connection, connection.cursor() as cursor:
+        cursor.execute(mutation)
+
+    with pytest.raises(ScriptFailedError, match=message) as raised:
+        run_sql_file(ROLLBACK_SQL, database_url=url, copy_dir=tmp_path, apply=True)
+
+    assert raised.value.pgcode == "P0001", raised.value
+    assert _counts(_digest(url, targets=True)) == (0,) * len(_TABLES), "no partial restore"

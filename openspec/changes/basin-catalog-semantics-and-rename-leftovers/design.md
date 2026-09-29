@@ -8,6 +8,7 @@
   - `river_segment → {river_segment_crosswalk, hydro.river_timeseries (hypertable, river_segment_key)}`
   - `met_station → {interp_weight, met.forcing_station_timeseries (hypertable, station_key), met.forcing_station_timeseries_legacy (hypertable, station_id)}`
   - `model_instance → {hydro_run, state_snapshot, forcing_version, interp_weight}`
+  - 反方向（所删八张表的外键出边）：除了八张表之间的父子关系，唯一指向表外的是 `met.met_station.grid_snapshot_id → met.canonical_grid_snapshot`。
 - 非 FK 的文本引用：对所有非 hypertable 表中 `basin_id` / `basin_version_id` / `model_id` / `river_network_version_id` / `mesh_version_id` 的 text 列逐列计数，命中的只有上面这些注册表本身。
 
 ## Decisions
@@ -43,7 +44,8 @@
 2. **FK 清单**：live FK 集合必须与盘点到的非 chunk FK 集合完全相等（父表属于删除所触及或级联到的表，不含 `_timescaledb_internal`）；所删各表上不得有用户 trigger。
 3. **ID 集合**：
    - model 集合取 `basin_version_id ∈ 目标 OR river_network_version_id ∈ 目标 OR mesh_version_id ∈ 目标` 的并集，结果必须恰好等于目标下的 21 个 inactive 模型，且没有 active 模型；
-   - 以下各项全部为 0：hydro_run（按 basin_version 和 model 两个口径）、forcing_version、interp_weight（按 model_id 和 station_id 两个口径）、state_snapshot（含 `cloned_from_model_id`）、run_display_coverage、`ops.pipeline_job.model_id`。
+   - 以下各项全部为 0，任一命中即 RAISE（都是阻断门禁，不是只登记）：hydro_run（按 basin_version 和 model 两个口径）、forcing_version、interp_weight（按 model_id 和 station_id 两个口径）、state_snapshot（含 `cloned_from_model_id`）、run_display_coverage、`ops.pipeline_job.model_id`。
+   - 目标 met_station 的 `grid_snapshot_id` 分布恰好是写死的两个 `met.canonical_grid_snapshot`（`2f00657d-07a2-4ae3-b08e-8e670721033e` gfs、`bcd58449-a0b5-4c8a-b2f8-36a2f996a268` IFS，各 1145，node-27 实测）。这是八张表唯一一条指向表外的外键；写死之后备份里只可能出现这两个父行，rollback 才能在 COPY 之前断言它们存在。
 4. **锁定**：按父到子的顺序对待删行加 `FOR UPDATE`（basin → basin_version → river_network_version → mesh_version → model_instance → met_station → river_segment），每次加锁都断言行数。加锁之后，并发写入这些父行的 FK 子行会被阻塞，所以删除后只需要对普通表做孤儿检查，不必重扫 hypertable。
 5. **hypertable 零引用**（Gate A2）：
    - 前提：已锁定；
@@ -63,11 +65,11 @@
    - 如果权限不足，**直接 RAISE**，不退回逐行 RI 的慢路径：#1732 删 8394 行时就卡了 4 分 44 秒，本次要删 85196 行。
    - 每一步都断言删除行数，并输出耗时。
 8. **Gate B**：对普通表做孤儿检查：crosswalk、interp_weight、hydro_run、model_instance、met_station、river_segment 对已删父行的引用，全部必须为 0。
-9. **不删、只登记**：`ops.audit_log`（只做等值计数）、`ops.pipeline_job`、`hydro.state_snapshot.cloned_from_model_id`、`met.best_available_selection`。最后一张表与注册表之间没有 FK，只有 text 列 `forcing_version_id`，而目标下没有 forcing_version。
+9. **不删、只登记（只有两张）**：`ops.audit_log`（只做等值计数）、`met.best_available_selection`（与注册表之间没有 FK，只有 text 列 `forcing_version_id`，而目标下没有 forcing_version）。`ops.pipeline_job.model_id` 与 `hydro.state_snapshot.cloned_from_model_id` 是第 3 项的阻断门禁，不在这里。
 
-**执行期间**：dry-run 和 apply 两次运行都要先暂停 node-27 的压缩和保留作业，跑完再恢复（与 #1729 头注释的要求一致）。作业暂停前后的状态都记进 receipt。
+**执行期间**：node-27 没有 TimescaleDB 压缩/保留策略作业（`timescaledb_information.jobs` 只有 Telemetry Reporter 与 Error Log Retention Policy，2026-09-29 实测）；压缩、保留和注册表/ingest 写入都是 user systemd timer。dry-run 和 apply 两次运行前都 `systemctl --user stop nhms-node27-timeseries-compression.timer nhms-node27-timeseries-retention.timer nhms-node27-autopipe.timer`，并确认对应三个 `.service` 都是 `inactive`（停 timer 不会停掉正在跑的实例，在跑就等它结束）；跑完 `systemctl --user start` 这三个 timer。停之前、启动之后各记一次 `systemctl --user list-timers --all`。`download`、`raw-retention`、`mvt-cache-retention` 只动文件，不停。
 
-**rollback 脚本**：按父到子的顺序执行 `@copy-in`，恢复时保留 identity 列 `river_segment_key` / `station_key` 的原值（`OVERRIDING SYSTEM VALUE` 或等效写法）。如果目标行仍然存在，就拒绝恢复。
+**rollback 脚本**：按父到子的顺序执行 `@copy-in`，恢复时保留 identity 列 `river_segment_key` / `station_key` 的原值（`OVERRIDING SYSTEM VALUE` 或等效写法）。在任何 COPY 之前，以下情况拒绝恢复：目标行仍然存在；八张表的外键出边集合与 node-27 盘点（9 条，表外父表只有 `met.canonical_grid_snapshot`）不等；第 3 项写死的两个 grid snapshot 父行有缺失。
 
 ### D3 文档口径
 
@@ -78,7 +80,7 @@
 
 - `basins_xinanjiang_upstream` 退役后仍留在 `apps/frontend/public/geo/national-basin-{domain,river}.geojson` 中（1 个面要素、216 个河段要素）。owner 裁决 3 只要求补文档，所以 §7 记录里把它列为遗留项，并注明后续需按 §7.1 过滤；本批不改前端资产。
 - node-22 本地注册表副本 `/scratch/frd_muziyao/nhms-prod`：只做只读 `grep` 核查，确认补登的 5 个流域是否已经从中移除，结果写进记录；不写 node-22。
-- 删除后，node-27 `node27-ingest.env` 的 `AUTOPIPE_EXCLUDE_BASINS` 里这 7 个 id 会变成死配置，照 #1732 的做法只在记录里注明。seed 源目录里已经没有 `DNZH-*`/`xinan*`，复活路径是关着的，receipt 里记一行。
+- 删除后，node-27 `node27-ingest.env` 的 `AUTOPIPE_EXCLUDE_BASINS` 里这 7 个 id **必须保留，不是死配置**：object-store 里还有 14 个 `runs/fcst_{gfs,ifs}_2026091700_dg_<目标 dg 模型>` 目录，其 `input/manifest.json` 的 `identity.basin_id` 就是目标流域，`scripts/node27_autopipeline.py` 的 `_discover_runs` / `_basin_identity` 会据此推出 `basin_key` 并进入 seed；`scheduler/state-index/index-last.json` 里这 14 个 dg 模型也各有 1 条 usable 状态（2026-09-29 只读实测）。seed 源目录里已经没有 `DNZH-*`/`xinan*`，复活路径靠「排除清单 + seed 目录缺席」两道一起关着；只要这些 run 目录还在，排除清单就不能去掉这 7 项。run 目录与 state-index 的清理不在本批。
 
 - 删除操作可以恢复但代价高：有 copy 备份（fsync）和 rollback 脚本，并由往返测试钉住。dry-run receipt 交给 owner 过目后才会 `--apply`。
 - `session_replication_role=replica` 会关闭所有 trigger，包括 RI。它只覆盖两条 DELETE 语句，每条之后立即切回 `origin` 并断言；前面由已锁定状态下的 Gate A2 精确零引用检查兜底，后面由 Gate B 兜底。

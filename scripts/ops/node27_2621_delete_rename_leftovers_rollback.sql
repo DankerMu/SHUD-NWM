@@ -19,8 +19,11 @@
 -- from properties_json. Proven byte-exact by
 -- tests/test_node27_2621_rename_leftovers_delete_integration.py.
 --
--- Refuses to restore over rows that still (or again) exist: the precheck below
--- RAISEs before any COPY, and a primary key would fail the COPY anyway.
+-- Refuses, before any COPY: to restore over rows that still (or again) exist
+-- (a primary key would fail the COPY anyway); when the outbound FK set of the
+-- eight tables drifted from the pinned inventory; and when a parent outside
+-- them -- the two met.canonical_grid_snapshot rows the backed-up met_station
+-- rows reference, pinned by the delete -- is gone.
 
 SET LOCAL lock_timeout = '10s';
 SET LOCAL statement_timeout = '300s';
@@ -60,6 +63,58 @@ BEGIN
     IF v_n <> 0 THEN v_found := v_found || ' core.river_segment_crosswalk=' || v_n; END IF;
     IF v_found <> '' THEN
         RAISE EXCEPTION '#2621 rollback: target rows still exist (%); refusing to restore over them', btrim(v_found);
+    END IF;
+END
+$$;
+
+-- Parents the restore cannot bring back: the outbound FK set of the eight
+-- tables equals the node-27 inventory (2026-09-29), in which the only parent
+-- outside them is met.canonical_grid_snapshot (met_station.grid_snapshot_id);
+-- the delete pinned the backed-up stations to exactly these two snapshots.
+DO $$
+DECLARE
+    -- child | parent | pg_get_constraintdef, sorted (node-27, 2026-09-29).
+    c_expected_fks constant text[] := ARRAY[
+        'core.basin_version|core.basin|FOREIGN KEY (basin_id) REFERENCES core.basin(basin_id)',
+        'core.mesh_version|core.basin_version|FOREIGN KEY (basin_version_id) REFERENCES core.basin_version(basin_version_id)',
+        'core.model_instance|core.basin_version|FOREIGN KEY (basin_version_id) REFERENCES core.basin_version(basin_version_id)',
+        'core.model_instance|core.river_network_version|FOREIGN KEY (river_network_version_id) REFERENCES core.river_network_version(river_network_version_id)',
+        'core.river_network_version|core.basin_version|FOREIGN KEY (basin_version_id) REFERENCES core.basin_version(basin_version_id)',
+        'core.river_segment_crosswalk|core.river_segment|FOREIGN KEY (river_segment_id, river_network_version_id) REFERENCES core.river_segment(river_segment_id, river_network_version_id)',
+        'core.river_segment|core.river_network_version|FOREIGN KEY (river_network_version_id) REFERENCES core.river_network_version(river_network_version_id)',
+        'met.met_station|core.basin_version|FOREIGN KEY (basin_version_id) REFERENCES core.basin_version(basin_version_id)',
+        'met.met_station|met.canonical_grid_snapshot|FOREIGN KEY (grid_snapshot_id) REFERENCES met.canonical_grid_snapshot(grid_snapshot_id)'
+    ];
+    c_snapshots constant text[] := ARRAY[
+        '2f00657d-07a2-4ae3-b08e-8e670721033e', 'bcd58449-a0b5-4c8a-b2f8-36a2f996a268'
+    ];
+    v_fks     text[];
+    v_missing text[];
+BEGIN
+    SELECT coalesce(array_agg(fk ORDER BY fk COLLATE "C"), '{}') INTO v_fks
+    FROM (
+        SELECT c.conrelid::regclass::text || '|' || c.confrelid::regclass::text || '|' || pg_get_constraintdef(c.oid) AS fk
+        FROM pg_constraint c
+        WHERE c.contype = 'f'
+          AND c.conrelid IN (
+              'core.basin'::regclass, 'core.basin_version'::regclass, 'core.river_network_version'::regclass,
+              'core.mesh_version'::regclass, 'core.model_instance'::regclass, 'met.met_station'::regclass,
+              'core.river_segment'::regclass, 'core.river_segment_crosswalk'::regclass
+          )
+    ) live;
+    IF v_fks IS DISTINCT FROM (SELECT array_agg(fk ORDER BY fk COLLATE "C") FROM unnest(c_expected_fks) fk) THEN
+        RAISE EXCEPTION '#2621 rollback: outbound FK set of the restored tables differs; unexpected=% missing=%',
+            ARRAY(SELECT unnest(v_fks) EXCEPT SELECT unnest(c_expected_fks)),
+            ARRAY(SELECT unnest(c_expected_fks) EXCEPT SELECT unnest(v_fks));
+    END IF;
+    v_missing := ARRAY(
+        SELECT s FROM unnest(c_snapshots) s
+        WHERE NOT EXISTS (SELECT 1 FROM met.canonical_grid_snapshot g WHERE g.grid_snapshot_id = s::uuid)
+        ORDER BY s COLLATE "C"
+    );
+    IF cardinality(v_missing) <> 0 THEN
+        RAISE EXCEPTION '#2621 rollback: parent met.canonical_grid_snapshot row(s) % are gone; the backed-up '
+            'met_station rows reference them, refusing to restore', v_missing;
     END IF;
 END
 $$;

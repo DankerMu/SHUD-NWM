@@ -13,20 +13,34 @@
 -- manifest-last.json, comma separated>. The runner refuses every other --set
 -- key (@settings above). Operator steps (openspec change
 -- basin-catalog-semantics-and-rename-leftovers, tasks 3.2-3.3):
---   0. pause the node-27 compression and retention jobs; record their state;
+--   0. pause the writers. node-27 has NO TimescaleDB compression/retention
+--      policy jobs (timescaledb_information.jobs holds only the Telemetry
+--      Reporter and the Error Log Retention Policy, 2026-09-29); compression,
+--      retention and registry/ingest writes are user systemd timers:
+--        systemctl --user list-timers --all --no-pager     # record: before
+--        systemctl --user stop nhms-node27-timeseries-compression.timer \
+--          nhms-node27-timeseries-retention.timer nhms-node27-autopipe.timer
+--        systemctl --user is-active nhms-node27-timeseries-compression.service \
+--          nhms-node27-timeseries-retention.service nhms-node27-autopipe.service
+--      Stopping a timer does not stop a running service instance: every one
+--      of the three must print `inactive` before going on (wait, never kill).
+--      The file-level timers (download, raw-retention, mvt-cache-retention)
+--      keep running;
 --   1. dry-run (the runner default: rolled back; NOTICEs carry every gate,
 --      count, per-step and per-probe timing) with
 --      --copy-dir /home/nwm/tmp/2621-delete-dry-<ts>/ -- that directory is the
---      dry-run's alone, NEVER reuse it for step 3; resume the jobs;
+--      dry-run's alone, NEVER reuse it for step 3; then
+--        systemctl --user start <the three timers>
+--        systemctl --user list-timers --all --no-pager     # record: after
 --   2. STOP: the owner reviews the dry-run receipt. A probe that hit its
 --      statement_timeout is reported to the owner, not retried with a larger
 --      one;
---   3. only after the owner confirmed: pause the jobs again, --apply with a new
+--   3. only after the owner confirmed: step 0 again, --apply with a new
 --      --copy-dir /home/nwm/tmp/2621-delete-apply-<ts>/ and
 --      --set nhms.probe_timeout_s=<2 x the largest dry-run probe, 60..3600>;
 --      the eight NAME.copy files it writes are the backup of exactly the rows
---      it deleted, fsynced before COMMIT. Resume the jobs, record their state,
---      and copy that directory off node-27;
+--      it deleted, fsynced before COMMIT. Start the three timers, record
+--      list-timers after, and copy that directory off node-27;
 --   4. restore, if ever needed: node27_2621_delete_rename_leftovers_rollback.sql
 --      with --copy-dir pointing at the step-3 directory.
 -- Disk: each run (the dry-run too) writes the eight copy files, on the order
@@ -49,11 +63,15 @@
 --     trigger on the eight tables deleted from;
 --   * per target: exactly its one basin_version / river_network_version /
 --     mesh_version and the inventoried river_segment / crosswalk / met_station
---     counts; the model union (basin_version OR river network OR mesh under a
+--     counts; the target stations reference exactly the two pinned
+--     canonical_grid_snapshot ids, 1145 each (met_station.grid_snapshot_id is
+--     the one FK out of the eight tables; the rollback asserts both parents);
+--     the model union (basin_version OR river network OR mesh under a
 --     target) is exactly the 21 pinned models, none active; zero hydro_run
 --     (by basin_version and by model), forcing_version, interp_weight (by
 --     model and by station), state_snapshot (model_id and
---     cloned_from_model_id), run_display_coverage and ops.pipeline_job rows;
+--     cloned_from_model_id), run_display_coverage and ops.pipeline_job rows --
+--     each of these RAISEs, none is report-only;
 --   * every row to delete is locked, parents first (basin -> basin_version ->
 --     river_network_version -> mesh_version -> model_instance -> met_station ->
 --     river_segment -> river_segment_crosswalk), each lock asserting the count.
@@ -74,10 +92,9 @@
 --     after each, asserted. Gate A2 before and Gate B after stand in for the
 --     skipped RI checks. Every other DELETE keeps its RI checks;
 --   * Gate B: no plain-table row references a deleted parent.
--- Retained, reported only: ops.audit_log (entity_id equality),
--- ops.pipeline_job, hydro.state_snapshot.cloned_from_model_id and
--- met.best_available_selection (no FK; text forcing_version_id only, and the
--- targets own no forcing_version).
+-- Retained, reported only (the only two): ops.audit_log (entity_id equality)
+-- and met.best_available_selection (no FK; text forcing_version_id only, and
+-- the targets own no forcing_version).
 
 SET LOCAL lock_timeout = '10s';
 SET LOCAL statement_timeout = '300s';
@@ -338,6 +355,20 @@ BEGIN
             RAISE EXCEPTION '#2621: %: met_station=% (want %)', r.basin_id, v_n, r.stations;
         END IF;
     END LOOP;
+
+    -- met_station.grid_snapshot_id is the one FK out of the eight tables: the backup
+    -- may reference only the two pinned snapshots, whose existence the rollback asserts.
+    SELECT coalesce(array_agg(g ORDER BY g COLLATE "C"), '{}') INTO v_ids
+    FROM (
+        SELECT coalesce(grid_snapshot_id::text, 'NULL') || '=' || count(*) AS g
+        FROM met.met_station WHERE basin_version_id IN (SELECT bv FROM pg_temp.n2621_target)
+        GROUP BY grid_snapshot_id
+    ) snapshots;
+    IF v_ids IS DISTINCT FROM ARRAY['2f00657d-07a2-4ae3-b08e-8e670721033e=1145',
+                                    'bcd58449-a0b5-4c8a-b2f8-36a2f996a268=1145'] THEN
+        RAISE EXCEPTION '#2621: target met_station grid_snapshot_id counts % (want '
+            '{2f00657d-07a2-4ae3-b08e-8e670721033e=1145,bcd58449-a0b5-4c8a-b2f8-36a2f996a268=1145})', v_ids;
+    END IF;
 
     -- The model union reaches exactly the 21 pinned models, each under its own target, none active.
     SELECT coalesce(array_agg(model_id ORDER BY model_id COLLATE "C"), '{}') INTO v_ids
