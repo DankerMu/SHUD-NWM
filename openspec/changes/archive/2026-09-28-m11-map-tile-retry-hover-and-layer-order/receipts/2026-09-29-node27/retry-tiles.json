@@ -1,0 +1,250 @@
+[
+ {
+  "t": 1790647676510,
+  "status": 200,
+  "url": "/api/v1/tiles/hydro-national/gfs/2026-09-28T00%3A00%3A00Z/q_down/2026-09-28T00%3A00%3A00Z/3/5/3.pbf?_mvt_cache_version=bd916134d067aef15ee3b4490f73e7c30bbfb6de9756830db0ae5f40db4082b4",
+  "retryAfter": null,
+  "code": null,
+  "worker": false
+ },
+ {
+  "t": 1790647676573,
+  "status": 200,
+  "url": "/api/v1/tiles/hydro-national/gfs/2026-09-28T00%3A00%3A00Z/q_down/2026-09-28T00%3A00%3A00Z/3/6/2.pbf?_mvt_cache_version=bd916134d067aef15ee3b4490f73e7c30bbfb6de9756830db0ae5f40db4082b4",
+  "retryAfter": null,
+  "code": null,
+  "worker": false
+ },
+ {
+  "t": 1790647676574,
+  "status": 200,
+  "url": "/api/v1/tiles/hydro-national/gfs/2026-09-28T00%3A00%3A00Z/q_down/2026-09-28T00%3A00%3A00Z/3/7/2.pbf?_mvt_cache_version=bd916134d067aef15ee3b4490f73e7c30bbfb6de9756830db0ae5f40db4082b4",
+  "retryAfter": null,
+  "code": null,
+  "worker": false
+ },
+ {
+  "t": 1790647676575,
+  "status": 200,
+  "url": "/api/v1/tiles/hydro-national/gfs/2026-09-28T00%3A00%3A00Z/q_down/2026-09-28T00%3A00%3A00Z/3/7/3.pbf?_mvt_cache_version=bd916134d067aef15ee3b4490f73e7c30bbfb6de9756830db0ae5f40db4082b4",
+  "retryAfter": null,
+  "code": null,
+  "worker": false
+ },
+ {
+  "t": 1790647676745,
+  "status": 200,
+  "url": "/api/v1/tiles/hydro-national/gfs/2026-09-28T00%3A00%3A00Z/q_down/2026-09-28T00%3A00%3A00Z/3/6/3.pbf?_mvt_cache_version=bd916134d067aef15ee3b4490f73e7c30bbfb6de9756830db0ae5f40db4082b4",
+  "retryAfter": null,
+  "code": null,
+  "worker": false
+ },
+ {
+  "t": 1790647676845,
+  "status": 200,
+  "url": "/api/v1/tiles/hydro-national/gfs/2026-09-28T00%3A00%3A00Z/q_down/2026-09-28T00%3A00%3A00Z/3/5/2.pbf?_mvt_cache_version=bd916134d067aef15ee3b4490f73e7c30bbfb6de9756830db0ae5f40db4082b4",
+  "retryAfter": null,
+  "code": null,
+  "worker": false
+ },
+ {
+  "t": 1790647682789,
+  "status": 200,
+  "url": "/api/v1/tiles/hydro-national/gfs/2026-09-28T00%3A00%3A00Z/q_down/2026-09-28T03%3A00%3A00Z/3/5/2.pbf?_mvt_cache_version=bd916134d067aef15ee3b4490f73e7c30bbfb6de9756830db0ae5f40db4082b4",
+  "retryAfter": null,
+  "code": null,
+  "worker": false
+ },
+ {
+  "t": 1790647682790,
+  "status": 200,
+  "url": "/api/v1/tiles/hydro-national/gfs/2026-09-28T00%3A00%3A00Z/q_down/2026-09-28T03%3A00%3A00Z/3/7/3.pbf?_mvt_cache_version=bd916134d067aef15ee3b4490f73e7c30bbfb6de9756830db0ae5f40db4082b4",
+  "retryAfter": null,
+  "code": null,
+  "worker": false
+ },
+ {
+  "t": 1790647682790,
+  "status": 200,
+  "url": "/api/v1/tiles/hydro-national/gfs/2026-09-28T00%3A00%3A00Z/q_down/2026-09-28T03%3A00%3A00Z/3/5/3.pbf?_mvt_cache_version=bd916134d067aef15ee3b4490f73e7c30bbfb6de9756830db0ae5f40db4082b4",
+  "retryAfter": null,
+  "code": null,
+  "worker": false
+ },
+ {
+  "t": 1790647682790,
+  "status": 200,
+  "url": "/api/v1/tiles/hydro-national/gfs/2026-09-28T00%3A00%3A00Z/q_down/2026-09-28T03%3A00%3A00Z/3/6/2.pbf?_mvt_cache_version=bd916134d067aef15ee3b4490f73e7c30bbfb6de9756830db0ae5f40db4082b4",
+  "retryAfter": null,
+  "code": null,
+  "worker": false
+ },
+ {
+  "t": 1790647683043,
+  "status": 200,
+  "url": "/api/v1/tiles/hydro-national/gfs/2026-09-28T00%3A00%3A00Z/q_down/2026-09-28T03%3A00%3A00Z/3/6/3.pbf?_mvt_cache_version=bd916134d067aef15ee3b4490f73e7c30bbfb6de9756830db0ae5f40db4082b4",
+  "retryAfter": null,
+  "code": null,
+  "worker": false
+ },
+ {
+  "t": 1790647683044,
+  "status": 200,
+  "url": "/api/v1/tiles/hydro-national/gfs/2026-09-28T00%3A00%3A00Z/q_down/2026-09-28T03%3A00%3A00Z/3/7/2.pbf?_mvt_cache_version=bd916134d067aef15ee3b4490f73e7c30bbfb6de9756830db0ae5f40db4082b4",
+  "retryAfter": null,
+  "code": null,
+  "worker": false
+ },
+ {
+  "t": 1790647694855,
+  "status": 200,
+  "url": "/api/v1/tiles/hydro-national/gfs/2026-09-28T00%3A00%3A00Z/q_down/2026-09-28T06%3A00%3A00Z/3/5/2.pbf?_mvt_cache_version=bd916134d067aef15ee3b4490f73e7c30bbfb6de9756830db0ae5f40db4082b4",
+  "retryAfter": null,
+  "code": null,
+  "worker": false
+ },
+ {
+  "t": 1790647694856,
+  "status": 200,
+  "url": "/api/v1/tiles/hydro-national/gfs/2026-09-28T00%3A00%3A00Z/q_down/2026-09-28T06%3A00%3A00Z/3/5/3.pbf?_mvt_cache_version=bd916134d067aef15ee3b4490f73e7c30bbfb6de9756830db0ae5f40db4082b4",
+  "retryAfter": null,
+  "code": null,
+  "worker": false
+ },
+ {
+  "t": 1790647694980,
+  "status": 200,
+  "url": "/api/v1/tiles/hydro-national/gfs/2026-09-28T00%3A00%3A00Z/q_down/2026-09-28T06%3A00%3A00Z/3/6/2.pbf?_mvt_cache_version=bd916134d067aef15ee3b4490f73e7c30bbfb6de9756830db0ae5f40db4082b4",
+  "retryAfter": null,
+  "code": null,
+  "worker": false
+ },
+ {
+  "t": 1790647695114,
+  "status": 200,
+  "url": "/api/v1/tiles/hydro-national/gfs/2026-09-28T00%3A00%3A00Z/q_down/2026-09-28T06%3A00%3A00Z/3/6/3.pbf?_mvt_cache_version=bd916134d067aef15ee3b4490f73e7c30bbfb6de9756830db0ae5f40db4082b4",
+  "retryAfter": null,
+  "code": null,
+  "worker": false
+ },
+ {
+  "t": 1790647695650,
+  "status": 200,
+  "url": "/api/v1/tiles/hydro-national/gfs/2026-09-28T00%3A00%3A00Z/q_down/2026-09-28T06%3A00%3A00Z/3/7/3.pbf?_mvt_cache_version=bd916134d067aef15ee3b4490f73e7c30bbfb6de9756830db0ae5f40db4082b4",
+  "retryAfter": null,
+  "code": null,
+  "worker": false
+ },
+ {
+  "t": 1790647695776,
+  "status": 200,
+  "url": "/api/v1/tiles/hydro-national/gfs/2026-09-28T00%3A00%3A00Z/q_down/2026-09-28T06%3A00%3A00Z/3/7/2.pbf?_mvt_cache_version=bd916134d067aef15ee3b4490f73e7c30bbfb6de9756830db0ae5f40db4082b4",
+  "retryAfter": null,
+  "code": null,
+  "worker": false
+ },
+ {
+  "t": 1790647706894,
+  "status": 200,
+  "url": "/api/v1/tiles/hydro-national/gfs/2026-09-28T00%3A00%3A00Z/q_down/2026-09-28T09%3A00%3A00Z/3/5/2.pbf?_mvt_cache_version=bd916134d067aef15ee3b4490f73e7c30bbfb6de9756830db0ae5f40db4082b4",
+  "retryAfter": null,
+  "code": null,
+  "worker": false
+ },
+ {
+  "t": 1790647706894,
+  "status": 200,
+  "url": "/api/v1/tiles/hydro-national/gfs/2026-09-28T00%3A00%3A00Z/q_down/2026-09-28T09%3A00%3A00Z/3/5/3.pbf?_mvt_cache_version=bd916134d067aef15ee3b4490f73e7c30bbfb6de9756830db0ae5f40db4082b4",
+  "retryAfter": null,
+  "code": null,
+  "worker": false
+ },
+ {
+  "t": 1790647707020,
+  "status": 200,
+  "url": "/api/v1/tiles/hydro-national/gfs/2026-09-28T00%3A00%3A00Z/q_down/2026-09-28T09%3A00%3A00Z/3/6/2.pbf?_mvt_cache_version=bd916134d067aef15ee3b4490f73e7c30bbfb6de9756830db0ae5f40db4082b4",
+  "retryAfter": null,
+  "code": null,
+  "worker": false
+ },
+ {
+  "t": 1790647707185,
+  "status": 200,
+  "url": "/api/v1/tiles/hydro-national/gfs/2026-09-28T00%3A00%3A00Z/q_down/2026-09-28T09%3A00%3A00Z/3/6/3.pbf?_mvt_cache_version=bd916134d067aef15ee3b4490f73e7c30bbfb6de9756830db0ae5f40db4082b4",
+  "retryAfter": null,
+  "code": null,
+  "worker": false
+ },
+ {
+  "t": 1790647707608,
+  "status": 200,
+  "url": "/api/v1/tiles/hydro-national/gfs/2026-09-28T00%3A00%3A00Z/q_down/2026-09-28T09%3A00%3A00Z/3/7/3.pbf?_mvt_cache_version=bd916134d067aef15ee3b4490f73e7c30bbfb6de9756830db0ae5f40db4082b4",
+  "retryAfter": null,
+  "code": null,
+  "worker": false
+ },
+ {
+  "t": 1790647707737,
+  "status": 200,
+  "url": "/api/v1/tiles/hydro-national/gfs/2026-09-28T00%3A00%3A00Z/q_down/2026-09-28T09%3A00%3A00Z/3/7/2.pbf?_mvt_cache_version=bd916134d067aef15ee3b4490f73e7c30bbfb6de9756830db0ae5f40db4082b4",
+  "retryAfter": null,
+  "code": null,
+  "worker": false
+ },
+ {
+  "t": 1790647718910,
+  "status": 200,
+  "url": "/api/v1/tiles/hydro-national/gfs/2026-09-28T00%3A00%3A00Z/q_down/2026-09-28T12%3A00%3A00Z/3/5/2.pbf?_mvt_cache_version=bd916134d067aef15ee3b4490f73e7c30bbfb6de9756830db0ae5f40db4082b4",
+  "retryAfter": null,
+  "code": null,
+  "worker": false
+ },
+ {
+  "t": 1790647718913,
+  "status": 200,
+  "url": "/api/v1/tiles/hydro-national/gfs/2026-09-28T00%3A00%3A00Z/q_down/2026-09-28T12%3A00%3A00Z/3/5/3.pbf?_mvt_cache_version=bd916134d067aef15ee3b4490f73e7c30bbfb6de9756830db0ae5f40db4082b4",
+  "retryAfter": null,
+  "code": null,
+  "worker": false
+ },
+ {
+  "t": 1790647718913,
+  "status": 200,
+  "url": "/api/v1/tiles/hydro-national/gfs/2026-09-28T00%3A00%3A00Z/q_down/2026-09-28T12%3A00%3A00Z/3/6/2.pbf?_mvt_cache_version=bd916134d067aef15ee3b4490f73e7c30bbfb6de9756830db0ae5f40db4082b4",
+  "retryAfter": null,
+  "code": null,
+  "worker": false
+ },
+ {
+  "t": 1790647719031,
+  "status": 503,
+  "url": "/api/v1/tiles/hydro-national/gfs/2026-09-28T00%3A00%3A00Z/q_down/2026-09-28T12%3A00%3A00Z/3/7/3.pbf?_mvt_cache_version=bd916134d067aef15ee3b4490f73e7c30bbfb6de9756830db0ae5f40db4082b4",
+  "retryAfter": "1",
+  "code": "MVT_COLD_GENERATION_BUSY",
+  "worker": false
+ },
+ {
+  "t": 1790647719186,
+  "status": 200,
+  "url": "/api/v1/tiles/hydro-national/gfs/2026-09-28T00%3A00%3A00Z/q_down/2026-09-28T12%3A00%3A00Z/3/6/3.pbf?_mvt_cache_version=bd916134d067aef15ee3b4490f73e7c30bbfb6de9756830db0ae5f40db4082b4",
+  "retryAfter": null,
+  "code": null,
+  "worker": false
+ },
+ {
+  "t": 1790647719712,
+  "status": 200,
+  "url": "/api/v1/tiles/hydro-national/gfs/2026-09-28T00%3A00%3A00Z/q_down/2026-09-28T12%3A00%3A00Z/3/7/2.pbf?_mvt_cache_version=bd916134d067aef15ee3b4490f73e7c30bbfb6de9756830db0ae5f40db4082b4",
+  "retryAfter": null,
+  "code": null,
+  "worker": false
+ },
+ {
+  "t": 1790647720958,
+  "status": 200,
+  "url": "/api/v1/tiles/hydro-national/gfs/2026-09-28T00%3A00%3A00Z/q_down/2026-09-28T12%3A00%3A00Z/3/7/3.pbf?_mvt_cache_version=bd916134d067aef15ee3b4490f73e7c30bbfb6de9756830db0ae5f40db4082b4",
+  "retryAfter": null,
+  "code": null,
+  "worker": false
+ }
+]

@@ -1,0 +1,13 @@
+step1_validTime=2026-09-28T03:00:00.000Z
+step2_validTime=2026-09-28T06:00:00.000Z
+step3_validTime=2026-09-28T09:00:00.000Z
+step4_validTime=2026-09-28T12:00:00.000Z
+main_thread_hydro_tile_resource_entries=31
+hydro_tile_statuses={"200":30,"503":1}
+busy_503_count=1
+busy_codes=["MVT_COLD_GENERATION_BUSY|retry-after=1"]
+busy_urls=1
+busy_urls_recovered=1
+busy_url_detail=[{"url":"/api/v1/tiles/hydro-national/gfs/2026-09-28T00%3A00%3A00Z/q_down/2026-09-28T12%3A00%3A00Z/3/7/3.pbf?_mvt_cache_version=b","seq":[503,200],"recovered_after_ms":1927}]
+source_error_banner=none
+non_resource_console_errors=[]
