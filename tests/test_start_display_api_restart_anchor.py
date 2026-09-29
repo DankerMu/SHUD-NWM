@@ -327,3 +327,24 @@ def test_the_display_unit_writes_group_writable_files() -> None:
     """#2627: the basemap cache is shared with yd-viewer through group nwm."""
     unit = (REPO_ROOT / "infra/systemd/nhms-display-api.service").read_text(encoding="utf-8")
     assert "\nUMask=0002\n" in unit
+
+
+def test_a_relative_invocation_with_cdpath_exported_resolves_the_same_checkout(tmp_path: Path) -> None:
+    """The runbook's `cd /home/nwm/NWM && bash scripts/ops/start-display-api.sh`, with CDPATH set."""
+    temp_repo = tmp_path / "repo"
+    script = temp_repo / "scripts" / "ops" / "start-display-api.sh"
+    script.parent.mkdir(parents=True)
+    script.write_text((REPO_ROOT / "scripts/ops/start-display-api.sh").read_text(encoding="utf-8"))
+
+    completed = subprocess.run(
+        ["bash", "scripts/ops/start-display-api.sh"],
+        cwd=temp_repo,
+        env={"PATH": "/usr/bin:/bin", "HOME": str(temp_repo), "CDPATH": "."},
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    # No display.env in the temp checkout: the preflight names the path it resolved.
+    assert completed.returncode == 2, completed.stdout + completed.stderr
+    assert f"env file missing: {temp_repo}/infra/env/display.env" in completed.stderr

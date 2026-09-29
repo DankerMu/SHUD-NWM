@@ -24,8 +24,10 @@ set -euo pipefail
 # caller's cwd: resolving through `git rev-parse` from cwd picked up whatever
 # repository the operator stood in, and then sourced that tree's display.env,
 # installed that tree's unit and swept that tree's uvicorn.
-script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-REPO_ROOT=$(cd -- "$script_dir/../.." && pwd)
+# `CDPATH=`: with CDPATH exported, `cd` to a relative dirname prints the target
+# and the capture would hold two lines.
+script_dir=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(CDPATH='' cd -- "$script_dir/../.." && pwd)
 readonly REPO_ROOT
 
 ENV_FILE="${REPO_ROOT}/infra/env/display.env"

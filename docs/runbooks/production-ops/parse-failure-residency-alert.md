@@ -54,7 +54,12 @@ statement timeout），**全程无人知道**：autopipe unit 没挂 `OnFailure=
     `declined_at` 在存活界内、且晚于该 run 的 `parsed_at`。`declined_at` 充当 `updated_at`，报告里的
     `first_error_code` 取 detail 开头的码。run 的状态保持 `published`（#1789 不降级）。
     `declined_at` 不会被续期，所以**只告警一次**：阈值加车道周期（30 min）必须小于存活界，
-    `阈值 >= 存活界` 视为配置错误，退 2。
+    `阈值 >= 存活界` 视为配置错误，退 2。周期写在 timer 里，脚本读不到，因此只校验
+    `阈值 < 存活界`。
+  - 只读角色需要对 `met.forcing_version` 和 `ops.ingest_recompute_decline` 有 SELECT 权限。仓库的
+    migration 不授予这两项，部署时要核对：
+    `SELECT has_table_privilege('nhms_display_ro','met.forcing_version','SELECT'), has_table_privilege('nhms_display_ro','ops.ingest_recompute_decline','SELECT');`
+    若缺失，本车道会每个 tick 退 2（`OBSERVATION_FAILED`）。
   - `source=legacy_store_refused`：`failed` 的 run，其 `forcing_version.timeseries_store='legacy'`。
     autopipe 拒绝 legacy forcing 的 apply，但按 #1991 **不写** decline，register 每个 tick 都会续期它。
     这类 run 首次越过阈值时照常告警，之后只要还在集合里就**不再重告**。即使分类错了，也只会少发重复告警，

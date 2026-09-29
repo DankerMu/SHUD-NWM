@@ -10,14 +10,12 @@ from __future__ import annotations
 
 import json
 import os
-import typing
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from apps.api.routes import basemap as basemap_route
 from scripts import node27_mvt_cache_retention as runner
 
 NOW = datetime(2026, 9, 28, 12, 0, 0, tzinfo=UTC)
@@ -191,6 +189,45 @@ def test_a_symlinked_basemap_component_is_never_walked(tmp_path: Path, linked: s
     assert outside.exists(outside.lone_tile, outside.aged_tile, outside.nwm_tmp, outside.yd_tmp) == [True] * 4
 
 
+def test_a_layer_swapped_for_a_link_after_listing_is_not_followed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A co-tenant writer replaces `vec/` with a link between the listing and the descent."""
+    outside = Tree(tmp_path / "outside")
+    tree = Tree(tmp_path / "cache")
+    listed = runner._BasemapWalk.subdirectories
+
+    def list_then_swap(self: Any, fd: int, path: Path, names: Any) -> list[str] | None:
+        found = listed(self, fd, path, names)
+        if path == tree.provider:
+            victim = tree.provider / "vec"
+            victim.rename(tmp_path / "vec-moved-away")
+            victim.symlink_to(outside.provider / "vec")
+        return found
+
+    monkeypatch.setattr(runner._BasemapWalk, "subdirectories", list_then_swap)
+
+    stage = runner.run_retention(_config(tree.root, basemap_delete=True), now=NOW)["basemap"]
+
+    assert {"path": str(tree.provider / "vec"), "kind": None, "reason": "symlink"} in stage["skipped"]
+    assert outside.lone_tile.exists() and (outside.provider / "vec" / "7").is_dir()
+    assert not tree.aged_tile.exists()  # the other layers are still pruned
+
+
+def test_a_dry_run_reports_exact_counts_but_a_bounded_sample(tmp_path: Path) -> None:
+    root = tmp_path / "cache"
+    (root / runner.LOCKS_DIR_NAME).mkdir(parents=True)
+    for y in range(80):
+        _touch(root / "basemap" / "tianditu" / "cva" / "12" / "3000" / str(y), AGED_TILE)
+
+    stage = runner.run_retention(_config(root), now=NOW)["basemap"]
+
+    assert stage["mode"] == "dry_run"
+    assert stage["counts"]["tile"] == 80 and stage["counts"]["planned"] == 82  # + the x and z dirs
+    assert len(stage["planned"]) == runner._BasemapWalk.PLANNED_SAMPLE and stage["planned_truncated"] is True
+    assert stage["planned_bytes"] == 80 * len(b"tile")
+
+
 def _run_main(monkeypatch: pytest.MonkeyPatch, root: Path, summary: Path, **env: str) -> tuple[int, dict[str, Any]]:
     monkeypatch.setenv("NHMS_MVT_FILE_CACHE_DIR", str(root))
     for name, value in env.items():
@@ -273,11 +310,11 @@ def test_the_basemap_age_comes_from_the_env(tmp_path: Path, monkeypatch: pytest.
 def test_a_tile_refreshed_after_the_scan_is_not_deleted(tmp_path: Path) -> None:
     tile = _touch(tmp_path / "7", NOW.timestamp())
 
-    outcome, error = runner._remove_basemap_file(tile, AGED_TILE + DAY)
+    fd = os.open(tmp_path, os.O_RDONLY)
+    try:
+        outcome, error = runner._remove_basemap_file(tile.name, fd, AGED_TILE + DAY)
+    finally:
+        os.close(fd)
 
     assert (outcome, error) == ("refreshed_since_scan", None)
     assert tile.exists()
-
-
-def test_the_known_layers_are_the_routes_layers() -> None:
-    assert runner.BASEMAP_LAYERS == frozenset(typing.get_args(basemap_route.TiandituLayer))

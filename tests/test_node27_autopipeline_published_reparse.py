@@ -80,25 +80,34 @@ def test_only_a_bare_parser_code_is_deterministic(stderr: str, expected: str | N
 
 
 class _Harness:
+    """Fakes the subprocess boundary, the status read and the decline row write.
+
+    `_decline_blocked_recompute` itself runs for real; `keys` are the decline
+    keys `_decline_key` returns on successive calls (before parse, at decline).
+    """
+
     def __init__(self, monkeypatch: pytest.MonkeyPatch, *, parse_stderr: str, status: str | None) -> None:
         self.declines: list[dict[str, Any]] = []
-        self.decline_outcome = "declined"
+        self.write_fails = False
+        self.keys: list[tuple[str, float] | None] = [("", 100.0), ("", 100.0)]
 
         def fake_run(argv: list[str], env: dict[str, str]) -> tuple[int, str, str]:
             if "workers.output_parser.cli" in argv:
                 return 1, "", parse_stderr
             return 0, "", ""
 
-        def fake_decline(run_id: str, **kwargs: Any) -> str:
-            self.declines.append({"run_id": run_id, **kwargs})
-            return self.decline_outcome
+        def fake_record(database_url: str, **kwargs: Any) -> None:
+            if self.write_fails:
+                raise RuntimeError("decline write refused")
+            self.declines.append(kwargs)
 
         monkeypatch.setattr(autopipe, "_run", fake_run)
         monkeypatch.setattr(
             autopipe, "_process_forcing_stage", lambda **_kwargs: {"outcome": "degraded", "forcing_stage": {}}
         )
         monkeypatch.setattr(autopipe, "_run_status", lambda _database_url, _run_id: status)
-        monkeypatch.setattr(autopipe, "_decline_blocked_recompute", fake_decline)
+        monkeypatch.setattr(autopipe, "_decline_key", lambda _root, _run_id: self.keys.pop(0))
+        monkeypatch.setattr(autopipe, "_record_recompute_decline", fake_record)
 
     def process(self, tmp_path: Path) -> dict[str, Any]:
         return autopipe._process_run(
@@ -143,9 +152,20 @@ def test_only_a_published_run_is_declined(tmp_path: Path, monkeypatch: pytest.Mo
     assert harness.declines == []
 
 
+def test_a_product_promoted_during_the_parse_is_not_declined(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The failure belongs to the evidence parsed; newer evidence must not be suppressed unparsed."""
+    harness = _Harness(monkeypatch, parse_stderr=MALFORMED, status="published")
+    harness.keys = [("", 100.0), ("", 160.0)]
+
+    result = harness.process(tmp_path)
+
+    assert result["outcome"] == "failed"
+    assert harness.declines == []
+
+
 def test_a_decline_that_does_not_commit_keeps_the_run_failing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     harness = _Harness(monkeypatch, parse_stderr=MALFORMED, status="published")
-    harness.decline_outcome = "failed"
+    harness.write_fails = True
 
     result = harness.process(tmp_path)
 

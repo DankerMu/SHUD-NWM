@@ -5025,6 +5025,8 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             *FORCING_SQL_SHAPE_ORACLE_TESTS,
             "tests/test_node27_autopipeline_preflight.py",
             "tests/test_node27_autopipeline_handoff.py",
+            # #2590: the published re-parse decline and its lane round trip.
+            "tests/test_node27_autopipeline_published_reparse.py",
             # #1647: the `_connect` bounds and the stats-guard flag parser live
             # in their own suite, which the same-name fallback cannot find.
             "tests/test_node27_autopipeline_connection_bounds.py",
@@ -5818,6 +5820,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # exports no PYTHONPATH (its runner imports nothing from the repo).
         "scripts/node27_mvt_cache_retention_once.sh",
         ("tests/test_node27_mvt_cache_retention.py",),
+    ),
+    PathTestRule(
+        # #2627: the basemap stage's suite is a sibling partition the same-name
+        # derivation cannot find; both are unioned with it.
+        "scripts/node27_mvt_cache_retention.py",
+        (
+            "tests/test_node27_mvt_cache_retention.py",
+            "tests/test_node27_mvt_cache_retention_basemap.py",
+        ),
     ),
     PathTestRule(
         "scripts/node27_frontier_stall_alert_once.sh",

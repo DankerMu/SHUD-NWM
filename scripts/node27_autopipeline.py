@@ -2132,6 +2132,7 @@ def _decline_blocked_recompute(
     database_url: str,
     detail: str | None,
     reason_code: str = REASON_APPLY_COMPRESSED_CHUNK_BLOCKED,
+    expected_key: tuple[str, float] | None = None,
 ) -> str:
     """Terminate a compressed-chunk-blocked recompute, or keep failing (#1781).
 
@@ -2146,7 +2147,10 @@ def _decline_blocked_recompute(
     unreadable ``product_mtime`` and a failing write remain fail-closed.
     """
     key = _decline_key(object_store_root, run_id)
-    if key is None:
+    if key is None or (expected_key is not None and key != expected_key):
+        # `expected_key` (#2590): the evidence the failure was produced from. A
+        # product promoted meanwhile is new evidence; recording it would
+        # suppress a product nobody has parsed yet.
         return "failed"
     init_state_id, product_mtime = key
     try:
@@ -2248,6 +2252,7 @@ def _process_run(
         return result
 
     parse = [PY, "-m", "workers.output_parser.cli", "parse", "--run-id", run_id]
+    evidence = _decline_key(object_store_root, run_id)
     rc, out, err = _run(parse, env)
     if rc != 0:
         result = {
@@ -2259,15 +2264,16 @@ def _process_run(
             "forcing_stage": forcing_stage,
         }
         code = _deterministic_parse_error_code(err or "")
-        if code is not None and _run_status(database_url, run_id) == "published":
-            # The code is prefixed AFTER redaction, so no redaction rule can
-            # eat it; the residency lane reads it back as `split_part(detail, ':', 1)`.
+        if code is not None and evidence is not None and _run_status(database_url, run_id) == "published":
+            # The residency lane reads the code back as `split_part(detail, ':', 1)`;
+            # redaction leaves an upper-case underscore code intact.
             result["outcome"] = _decline_blocked_recompute(
                 run_id,
                 object_store_root=object_store_root,
                 database_url=database_url,
                 detail=f"{code}: {redact_text(err.strip()[-500:])}",
                 reason_code=REASON_PUBLISHED_REPARSE_FAILED,
+                expected_key=evidence,
             )
             if result["outcome"] == "declined":
                 result["reason_code"] = REASON_PUBLISHED_REPARSE_FAILED

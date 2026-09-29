@@ -448,6 +448,8 @@ retention runner 的 basemap 阶段（`.pbf` lane 结构上进不去 `basemap/`�
 | 清理后变空的 `<x>`、`<z>` 目录 | `basemap_dir` | 不删 layer 目录和 `tianditu` 根目录 |
 
 - 其他名字一律保留，symlink 跳过并计数（`counts.symlinks_skipped`）。
+- 遍历以目录 fd 为锚：每一层都相对父目录 fd 以 `O_NOFOLLOW` 打开，stat、unlink、rmdir 都相对所在目录的 fd 执行。
+  这样即使 yd-viewer（另一个 uid）在遍历中途把某层目录换成 symlink，也只会被拒绝、记为 `symlink`，不会被跟随。
 - 删除前重新 `lstat` 一次：扫描之后被命中刷新过的瓦片记 `skipped[refreshed_since_scan]`。
 - `rmdir` 时如果写入方刚好又放进了文件，记 `skipped[not_empty]`。
 - 子树不存在时记 `skipped[subtree_absent]`，不影响 `.pbf` lane。
@@ -457,7 +459,11 @@ retention runner 的 basemap 阶段（`.pbf` lane 结构上进不去 `basemap/`�
 其他值或未设置时 `.basemap.mode == "dry_run"`，只做计数。`ENABLED=false`（mode `disabled`）
 与 `PLAN_ONLY=true`（mode `dry_run`）的优先级高于该开关。生产启用流程：
 
-1. 部署后先跑一次 dry-run，记录 `jq '.basemap | {mode, counts, freed_bytes}'`；
+1. 部署后先跑一次 dry-run，记录 `jq '.basemap | {mode, counts, planned_bytes, planned_truncated}'`。
+   dry-run 只列前 50 条样本，计数是精确的。同时核对权限：
+   `find <root>/basemap/tianditu ! -perm -g+w -printf '%u:%g %m %p\n' | head`。
+   其中 `UMask=0002` 生效前写下的文件或目录，删除或回写时会报 EACCES。
+   dry-run 不会实际 unlink，所以看不到这类错误，要在这一步先归一化权限（属组 nwm、目录 2775、文件 664）；
 2. 由负责人确认计数合理（这个目录与 yd-viewer 共用）；
 3. 在 node-local `infra/env/node27-mvt-cache-retention.env` 设
    `NODE27_MVT_CACHE_RETENTION_BASEMAP_DELETE=1`，手动 `systemctl --user start nhms-node27-mvt-cache-retention.service` 跑一次；

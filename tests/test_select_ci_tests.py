@@ -2042,6 +2042,8 @@ def test_select_tests_maps_autopipeline_script_without_core_smoke_fallback() -> 
         "tests/test_node27_autopipeline_connection_bounds.py",
         "tests/test_node27_autopipeline_handoff.py",
         "tests/test_node27_autopipeline_preflight.py",
+        # #2590: the published re-parse decline suite, same rule.
+        "tests/test_node27_autopipeline_published_reparse.py",
         "tests/test_node27_connection_attribution.py",
         "tests/test_node27_connection_attribution_delegated.py",
         # #1774: the autopipe stats guard's two ANALYZE legs are what force the
