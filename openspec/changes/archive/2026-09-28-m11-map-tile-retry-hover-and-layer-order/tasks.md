@@ -54,7 +54,7 @@ Fixture level：standard。Risk packs：frontend-map-interaction；external-cont
 
 - [x] 4.1 `cd apps/frontend && pnpm test`（全量）、`pnpm typecheck`、`pnpm build`（只跑 vite，不含 tsc，所以 typecheck 单独执行）、`pnpm check:api-types`（仓库没有 lint 脚本）。
 - [x] 4.2 `openspec validate m11-map-tile-retry-hover-and-layer-order --strict --no-interactive`。
-- [ ] 4.3 node-27 部署后，用真实浏览器在 `https://test.nwm.ac.cn` 做 Playwright receipt，结果写入文件：
+- [x] 4.3（部分，见 `receipts/2026-09-29-node27/README.md`）node-27 部署后，用真实浏览器在 `https://test.nwm.ac.cn` 做 Playwright receipt，结果写入文件：
   - 重试：记录网络日志，同一瓦片 URL 出现 503（`MVT_COLD_GENERATION_BUSY`）后接 200，且没有 mapSourceError 横幅或 AJAXError 控制台错误。如自然流量复现不出来，在 display.env 临时把 `NHMS_DISPLAY_MVT_COLD_LIMIT` 调小（事后恢复，并记录前后值）。
   - 悬停：鼠标移到 discharge 河段后，`data-hovered-segment-id` 等于该河段 id，截图可见青线；移开后置空；点击后打开河段曲线窗，截图可见橙线压在青线之上。与 yd（`nwm.ac.cn/yd/`）的观感对照截图。
   - 层序：开启代站并走 3 步时间轴，每一步截图，代站点和聚合簇始终压在河段线之上（生产环境没有 map 读取面，层序由 3.2 的单测保证，这里用截图作为 live 证据）。
@@ -63,4 +63,4 @@ Fixture level：standard。Risk packs：frontend-map-interaction；external-cont
 
 - [x] `cd apps/frontend && pnpm test && pnpm typecheck && pnpm build`
 - [x] `openspec validate m11-map-tile-retry-hover-and-layer-order --strict --no-interactive`
-- [ ] node-27 浏览器 receipt（4.3）
+- [x] node-27 浏览器 receipt（4.3）：重试 503→200 与主线程协议路径已实证；悬停与选中叠放已实证；代站层序的线上画面被 #2694 阻塞（oracle-blocked），由单测里的有状态 stub 保证；未做与 yd 的并排观感对照

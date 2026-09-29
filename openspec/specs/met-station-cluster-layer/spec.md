@@ -7,7 +7,7 @@ TBD - created by archiving change m26-unified-map-display. Update Purpose after 
 
 ### Requirement: 气象代站作为可切换的 clustered-GeoJSON 图层
 
-`M11MapLibreSurface` SHALL 提供气象代站 primitive，使用 MapLibre clustered-GeoJSON source（`cluster` 开启，含 `clusters` / `cluster-count` / `met-stations-point` 三层），并由 `LayerGroupControls` 暴露为可切换图层。`interactiveLayerIds` MUST 纳入 `met-stations-point` 与 `clusters`。
+`M11MapLibreSurface` SHALL 提供气象代站 primitive，使用 MapLibre clustered-GeoJSON source（`cluster` 按 `m11StationClusterPolicy` 条件开启：站点数 ≤24 时关闭聚合，三层照常注册，`clusters`/`cluster-count` 的 `point_count` 过滤此时不命中；含 `clusters` / `cluster-count` / `met-stations-point` 三层），并由 `LayerGroupControls` 暴露为可切换图层。`interactiveLayerIds` MUST 纳入 `met-stations-point` 与 `clusters`。
 The station primitive SHALL be controlled by an independent station-overlay toggle (`metStations`) rather than by an exclusive `M11Layer` value, and station layers SHALL render above active hydrology layers while those hydrology layers remain visible and clickable. `interactiveLayerIds` MUST include `met-stations-point` and `clusters` whenever the station overlay is enabled and has renderable features.
 
 #### Scenario: 切换代站图层注册 source/layer
@@ -38,6 +38,13 @@ The station primitive SHALL be controlled by an independent station-overlay togg
 - **WHEN** the station overlay is enabled
 - **AND** the user clicks an exposed hydrology river line pixel not covered by a station point or cluster
 - **THEN** the map MUST dispatch the river overlay click and open the river forecast workflow
+
+#### Scenario: 河段 overlay 重新挂载后代站仍在上方
+- **WHEN** the station overlay is enabled
+- **AND** the discharge overlay source remounts because its `sourceKey` changed (timeline step) or because the overlay became renderable again after being null
+- **THEN** after the resulting style update every discharge overlay layer (casing, main, hit, hover, selected) MUST sit below the station cluster/point layers
+- **AND** the map MUST NOT reference a layer id that is not yet registered in the map style when restoring this order
+- **AND** the restoration MUST be a no-op when the station layers already sit at the top of the style stack
 
 ### Requirement: 代站数据按选中流域严格身份取数，分页至 client cap 且诚实标注 truncation
 
