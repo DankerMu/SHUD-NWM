@@ -1,0 +1,49 @@
+{
+  "basemap": {
+    "counts": {
+      "deleted": 0,
+      "dir": 0,
+      "failed": 0,
+      "planned": 0,
+      "skipped": 0,
+      "symlinks_skipped": 0,
+      "tile": 0,
+      "tmp": 0
+    },
+    "deleted": [],
+    "failed": [],
+    "freed_bytes": 0,
+    "mode": "dry_run",
+    "planned": [],
+    "planned_bytes": 0,
+    "planned_truncated": false,
+    "retention_days": 30,
+    "root": "/home/nwm/.cache/nhms/mvt/basemap/tianditu",
+    "skipped": [],
+    "tile_cutoff": "2026-08-30T01:04:28Z",
+    "tmp_cutoff": "2026-09-28T01:04:28Z"
+  },
+  "cache_root": "/home/nwm/.cache/nhms/mvt",
+  "counts": {
+    "deleted": 1047,
+    "failed": 0,
+    "planned": 1047,
+    "skipped": 0
+  },
+  "cutoff": "2026-09-15T01:04:28Z",
+  "deleted": "<1047 .pbf lane paths elided>",
+  "enabled": true,
+  "execution_mode": "production_execute",
+  "failed": [],
+  "finished_at": "2026-09-29T01:04:29Z",
+  "freed_bytes": 272097845,
+  "plan_only": false,
+  "planned": "<1047 .pbf lane paths elided>",
+  "precip_root_untouched": "/home/nwm/.cache/nhms/mvt/precip",
+  "reference_time": "2026-09-29T01:04:28Z",
+  "retention_days": 14,
+  "schema_version": "nhms.node27_mvt_cache_retention.production.v1",
+  "skipped": [],
+  "started_at": "2026-09-29T01:04:28Z",
+  "status": "completed"
+}

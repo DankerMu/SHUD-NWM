@@ -1,0 +1,23 @@
+receipt_start=2026-09-29T01:04:11Z head=f2657ed4e1480f12f07cfb501ebe7d6e3ea5ca32
+decoy_pid_before=249132 decoy_body=decoy-8081
+decoy_cmdline=/home/nwm/tmp/yd-NWM-decoy/.venv/bin/python -m uvicorn apps.api.main:app --host 127.0.0.1 --port 8081 
+display_main_pid_before=2032539
+--- restart (cwd=/home/nwm/tmp/yd-NWM-decoy, a foreign git repo) ---
+[start-display-api] repo_root=/home/nwm/NWM
+[start-display-api] env_file=/home/nwm/NWM/infra/env/display.env
+[start-display-api] DATABASE_URL=postgresql://<redacted>@127.0.0.1:55432/nhms
+[start-display-api] NHMS_ENABLE_LIVE_POSTGIS_MVT=true
+[start-display-api] OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store
+[start-display-api] NHMS_MVT_FILE_CACHE_DIR=/home/nwm//.cache/nhms/mvt
+[start-display-api] target=127.0.0.1:8080  log=/tmp/display-api.log workers=2
+[start-display-api] no prior uvicorn process found
+[start-display-api] systemd relaunched main_pid=249177 (log: /tmp/display-api.log)
+[start-display-api] OK systemd_main_pid=249177 workers=2 basin_id=basins_sw_ylzb (smoke check passed)
+restart_rc=0
+display_main_pid_after=249177
+display_umask=Umask:	0002
+health_8080=200
+decoy_pid_after=249132 decoy_body=decoy-8081
+DECOY_SURVIVED=yes
+decoy_cleanup=none ss_8081=0
+receipt_end=2026-09-29T01:04:16Z
