@@ -21,10 +21,15 @@ This route turns visitor traffic into per-TILE upstream traffic:
   `img`/`cia`/`ter`/`cta` served 200), so one layer's cooldown must never
   block the others.
 
-The `basemap/` subtree is outside the MVT retention runner's reach by
-construction (`scripts/node27_mvt_cache_retention.py` only enumerates
-two-hex-character directories). It is not pruned: the tile set is bounded by
-what people actually browse, and basemap tiles do not change with model runs.
+The `basemap/tianditu/` subtree is SHARED with yd-viewer, which bind-mounts it
+read-write (uid 10001, supplementary group nwm, umask 002) and writes the same
+`<layer>/<z>/<x>/<y>` layout with `tmp-<hex32>` intermediates. Both writers
+refresh a tile's mtime on a hit older than a day, so mtime means "last served",
+and the MVT retention runner's basemap stage prunes tiles by that age (default
+30 days; deletion only with `NODE27_MVT_CACHE_RETENTION_BASEMAP_DELETE=1`). The
+display unit runs with `UMask=0002` so files stay group-writable for yd-viewer.
+Change the path, layout or permissions only together with yd-viewer's
+`docs/agent-ops.md` (convention: docs/runbooks/display-readonly-live-mvt.md).
 """
 
 from __future__ import annotations
@@ -58,6 +63,8 @@ TIANDITU_MAX_ZOOM = 18
 BASEMAP_CACHE_CONTROL = "public, max-age=604800"
 UPSTREAM_TIMEOUT_SECONDS = 10.0
 THROTTLE_COOLDOWN_SECONDS = 60.0
+# A hit refreshes the tile's mtime at most once a day (the same rule as yd-viewer).
+CACHE_HIT_REFRESH_SECONDS = 86400.0
 # The key's permission type is "browser": a non-browser User-Agent gets 403
 # `301012 权限类型错误` (or a CloudWAF 418), and a Referer outside the key's
 # domain whitelist gets 403 `301007 域名不匹配`. A browser UA with NO Referer is
@@ -237,7 +244,23 @@ def _read_cached_tile(path: Path) -> bytes | None:
         data = path.read_bytes()
     except OSError:
         return None
-    return data if _image_media_type(data) is not None else None
+    if _image_media_type(data) is None:
+        return None
+    _refresh_cached_tile_mtime(path)
+    return data
+
+
+def _refresh_cached_tile_mtime(path: Path) -> None:
+    """Mark a served tile as recently used, so age-based retention keeps it.
+
+    Best effort: a file yd-viewer wrote may not be ours to touch, and a failed
+    refresh must never turn a hit into a miss.
+    """
+    try:
+        if time.time() - path.stat().st_mtime > CACHE_HIT_REFRESH_SECONDS:
+            os.utime(path)
+    except OSError:
+        pass
 
 
 def _write_cached_tile(path: Path, data: bytes) -> None:

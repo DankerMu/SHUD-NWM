@@ -58,6 +58,27 @@ Criterion — RESIDENCY, not a tick's rc:
 - A second instance holding the lock exits 0 with one line (a skipped tick is
   not an alert).
 
+Two more sources join the set (#2590):
+
+- **published re-parse**: an already-``published`` run whose rewritten product
+  fails to parse never becomes ``failed`` (``mark_run_failed`` excludes
+  ``published``, #1789 forbids demoting it), so the first source cannot see it.
+  When the parse error is deterministic (a bare ``OutputParsingError`` code),
+  the autopipe records a ``PUBLISHED_REPARSE_FAILED`` row in
+  ``ops.ingest_recompute_decline`` and stops retrying that evidence. The lane
+  watches the latest such row per run while it is inside the liveness bound and
+  newer than the run's last successful parse; ``declined_at`` plays the part of
+  ``updated_at`` and the detail's leading ``<ERROR_CODE>`` is the reported code.
+  Nothing renews ``declined_at``, so the run alerts ONCE — which holds only
+  while ``threshold`` plus the lane cadence (30 min) stays under the liveness
+  bound; ``threshold >= liveness`` is refused as a configuration error.
+- **legacy_store_refused**: a ``failed`` run whose recorded forcing version is
+  routed to the legacy timeseries store. The autopipe refuses that forcing
+  apply without a decline row (#1991), so the register keeps renewing the run;
+  it alerts on first crossing the threshold and is never re-alerted while it
+  stays watched. Classifying a run here wrongly can only drop repeat mails,
+  never the first one.
+
 Delivery: the unit carries ``OnFailure=nhms-node27-unit-failure-alert@%n.service``
 and keeps stdout/stderr on the JOURNAL; the handler mails ``journalctl -n 30``,
 so this report is the mail body. It is compact on purpose: one summary line,
@@ -65,7 +86,8 @@ at most ``--report-runs`` (default 10) resident lines, then ``... and K more``
 — 12 lines plus systemd's own five framing lines fit the 30-line tail.
 
 The DSN is the read-only ``nhms_display_ro`` role (``SELECT`` on
-``hydro.hydro_run``), shared with the frontier / coverage-freshness lanes.
+``hydro.hydro_run``, ``met.forcing_version`` and ``ops.ingest_recompute_decline``),
+shared with the frontier / coverage-freshness lanes.
 
 Injection seams: ``main(argv, now=..., observe=..., env=...)``;
 ``observe(config, liveness_floor)`` returns ``FailingRun`` rows.
@@ -120,12 +142,33 @@ RUNBOOK_REFERENCE = "docs/runbooks/production-ops/parse-failure-residency-alert.
 # the parser is the only `failed` writer, and its bare OutputParsingError codes
 # are the permanent shape). The liveness floor is bound from the tick's own
 # clock, so the SQL bound and the in-process re-check are the same instant.
+CLASS_FAILED = "failed"
+CLASS_PUBLISHED_REPARSE = "published_reparse"
+CLASS_LEGACY_STORE_REFUSED = "legacy_store_refused"
+PUBLISHED_REPARSE_REASON = "PUBLISHED_REPARSE_FAILED"
+
+# Source 2 keeps only each run's LATEST published-reparse decline, and only
+# while it is newer than the run's last successful parse (a repaired product
+# re-parses, stamps `parsed_at` and drops the run).
 OBSERVATION_QUERY = """
-SELECT run_id, run_key, error_code, updated_at
-FROM hydro.hydro_run
-WHERE status = 'failed'
-  AND updated_at > %(liveness_floor)s
-ORDER BY run_id
+SELECT h.run_id, h.run_key, h.error_code, h.updated_at,
+       CASE WHEN f.timeseries_store = 'legacy' THEN 'legacy_store_refused' ELSE 'failed' END
+FROM hydro.hydro_run h
+LEFT JOIN met.forcing_version f ON f.forcing_version_id = h.forcing_version_id
+WHERE h.status = 'failed'
+  AND h.updated_at > %(liveness_floor)s
+UNION ALL
+SELECT d.run_id, h.run_key, NULLIF(split_part(d.detail, ':', 1), ''), d.declined_at, 'published_reparse'
+FROM (
+    SELECT DISTINCT ON (run_id) run_id, detail, declined_at
+    FROM ops.ingest_recompute_decline
+    WHERE reason_code = %(published_reparse_reason)s
+    ORDER BY run_id, declined_at DESC
+) d
+JOIN hydro.hydro_run h ON h.run_id = d.run_id
+WHERE d.declined_at > %(liveness_floor)s
+  AND (h.parsed_at IS NULL OR h.parsed_at < d.declined_at)
+ORDER BY 1
 """
 
 
@@ -159,6 +202,9 @@ class FailingRun:
     # already-failed row, so later retries' errors are only in autopipe.log.
     first_error_code: str
     updated_at: datetime
+    # Which source saw it: `failed`, `published_reparse` (the decline stands in
+    # for the failure; its code is the re-parse's) or `legacy_store_refused`.
+    classification: str = CLASS_FAILED
 
 
 @dataclass(frozen=True)
@@ -226,7 +272,7 @@ def config_from_env(
     database_url = (env.get("DATABASE_URL") or "").strip()
     if not database_url:
         raise ResidencyConfigError("DATABASE_URL must be set (the read-only nhms_display_ro DSN)")
-    return ResidencyConfig(
+    config = ResidencyConfig(
         database_url=database_url,
         threshold=_hours(
             pick("threshold_hours", ENV_THRESHOLD),
@@ -249,6 +295,14 @@ def config_from_env(
         report_runs=_report_runs(pick("report_runs", ENV_REPORT_RUNS)),
         state_path=_state_path(pick("state_path", ENV_STATE_PATH)),
     )
+    if config.threshold >= config.retry_liveness:
+        # A published-reparse decline is never renewed: past the liveness bound
+        # it leaves the set before it could ever become resident.
+        raise ResidencyConfigError(
+            f"{ENV_THRESHOLD} ({_format_hours(config.threshold)}) must be shorter than "
+            f"{ENV_RETRY_LIVENESS} ({_format_hours(config.retry_liveness)})"
+        )
+    return config
 
 
 # ---------------------------------------------------------------------------
@@ -299,20 +353,35 @@ def default_observe(config: ResidencyConfig, liveness_floor: datetime) -> list[F
         connection.set_session(readonly=True, autocommit=False)
         with connection.cursor() as cursor:
             cursor.execute("SET LOCAL statement_timeout = %s", (QUERY_TIMEOUT_MS,))
-            cursor.execute(OBSERVATION_QUERY, {"liveness_floor": liveness_floor})
+            cursor.execute(
+                OBSERVATION_QUERY,
+                {"liveness_floor": liveness_floor, "published_reparse_reason": PUBLISHED_REPARSE_REASON},
+            )
             rows = cursor.fetchall()
         connection.rollback()
     finally:
         connection.close()
-    return [
+    return merge_sources(
         FailingRun(
             run_id=str(run_id),
             run_key=int(run_key),
             first_error_code="" if code is None else str(code),
             updated_at=_utc(updated_at),
+            classification=str(classification),
         )
-        for run_id, run_key, code, updated_at in rows
-    ]
+        for run_id, run_key, code, updated_at, classification in rows
+    )
+
+
+def merge_sources(runs: Iterable[FailingRun]) -> list[FailingRun]:
+    """One row per run; a `failed` row wins over a published-reparse decline."""
+
+    merged: dict[str, FailingRun] = {}
+    for run in runs:
+        held = merged.get(run.run_id)
+        if held is None or held.classification == CLASS_PUBLISHED_REPARSE:
+            merged[run.run_id] = run
+    return [merged[run_id] for run_id in sorted(merged)]
 
 
 # ---------------------------------------------------------------------------
@@ -462,7 +531,12 @@ def evaluate(
         last = prior.last_alerted_at if prior else None
         due = False
         if now - first >= config.threshold:
-            due = last is None or now - last >= config.realert
+            if last is None:
+                due = True
+            else:
+                # A legacy-store refusal has no remedy the autopipe will ever
+                # record; one mail says it, repeats would be unending noise.
+                due = run.classification != CLASS_LEGACY_STORE_REFUSED and now - last >= config.realert
             if due:
                 last = now
             residents.append(Resident(run=run, first_observed=first, due=due))
@@ -487,6 +561,7 @@ def build_report(residents: list[Resident], *, watched: int, now: datetime, conf
         residency = (now - item.first_observed).total_seconds() / 3600
         lines.append(
             f"resident run_id={item.run.run_id} first_error_code={item.run.first_error_code} "
+            f"source={item.run.classification} "
             f"first_observed={_iso(item.first_observed)} residency_h={residency:.1f} "
             f"alert={'due' if item.due else 'within-realert'}"
         )

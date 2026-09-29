@@ -249,3 +249,102 @@ def test_the_repo_root_escape_covers_every_ere_metacharacter(tmp_path: Path, pat
     ).stdout.splitlines()
 
     assert matched == [f"{root}/.venv"]
+
+
+# --- #2638: the checkout is the script's own location, never the caller's cwd ----
+
+
+def _git_init(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", str(path)], check=True, capture_output=True)
+
+
+def _foreign_checkout(tmp_path: Path) -> Path:
+    """A complete second checkout (own display.env, venv and unit) that must stay untouched."""
+    foreign = tmp_path / "yd-NWM"
+    _prepare_start_display_api_harness(
+        foreign,
+        display_env=[
+            "DATABASE_URL=postgresql://foreign:secret@foreign.example:5432/foreign_db",
+            "NHMS_ENABLE_LIVE_POSTGIS_MVT=true",
+            f"OBJECT_STORE_ROOT={foreign / 'object-store'}",
+        ],
+        object_store_root=foreign / "object-store",
+    )
+    unit = foreign / "infra" / "systemd" / "nhms-display-api.service"
+    unit.parent.mkdir(parents=True)
+    unit.write_text("[Unit]\nDescription=FOREIGN CHECKOUT UNIT\n", encoding="utf-8")
+    _git_init(foreign)
+    return foreign
+
+
+@pytest.mark.parametrize("cwd_kind", ["another_git_repo", "not_a_repo", "this_repo"])
+def test_the_checkout_is_anchored_to_the_script_location_whatever_the_cwd(tmp_path: Path, cwd_kind: str) -> None:
+    temp_repo = tmp_path / "repo"
+    fake_bin, record_dir = _harness(temp_repo)
+    _git_init(temp_repo)
+    _write_executable(fake_bin / "systemctl", FAKE_SYSTEMCTL)
+    unit_source = temp_repo / "infra" / "systemd" / "nhms-display-api.service"
+    unit_source.parent.mkdir(parents=True)
+    unit_source.write_text((REPO_ROOT / "infra/systemd/nhms-display-api.service").read_text(encoding="utf-8"))
+    foreign = _foreign_checkout(tmp_path)
+    cwd = {"another_git_repo": foreign, "not_a_repo": tmp_path / "plain", "this_repo": temp_repo}[cwd_kind]
+    cwd.mkdir(exist_ok=True)
+    config_home = tmp_path / "xdg-config"
+    table = tmp_path / "processes.tsv"
+
+    with _sleepers(2) as (own, foreign_uvicorn):
+        _write_process_table(
+            table,
+            [
+                (own, f"{temp_repo}/.venv/bin/python {UVICORN_ARGS}"),
+                (foreign_uvicorn, f"{foreign}/.venv/bin/python -m uvicorn apps.api.main:app --port 8081"),
+            ],
+        )
+        completed = _run_start_display_api_harness(
+            temp_repo,
+            fake_bin,
+            record_dir,
+            cwd=cwd,
+            extra_env={
+                "HARNESS_PROCESS_TABLE": str(table),
+                "HARNESS_SYSTEMD_MAIN_PID": "424242",
+                "XDG_CONFIG_HOME": str(config_home),
+            },
+        )
+
+        _assert_restart_spared_the_foreign_checkout(completed, own, [foreign_uvicorn], record_dir)
+        assert f"[start-display-api] repo_root={temp_repo}\n" in completed.stdout
+        assert f"[start-display-api] env_file={temp_repo}/infra/env/display.env\n" in completed.stdout
+        assert "foreign.example" not in completed.stdout
+        installed = config_home / "systemd" / "user" / "nhms-display-api.service"
+        assert installed.read_text(encoding="utf-8") == unit_source.read_text(encoding="utf-8")
+        pattern = (record_dir / "pgrep.argv").read_text(encoding="utf-8").splitlines()[2]
+        assert pattern.startswith(f"^{temp_repo}/")
+
+
+def test_the_display_unit_writes_group_writable_files() -> None:
+    """#2627: the basemap cache is shared with yd-viewer through group nwm."""
+    unit = (REPO_ROOT / "infra/systemd/nhms-display-api.service").read_text(encoding="utf-8")
+    assert "\nUMask=0002\n" in unit
+
+
+def test_a_relative_invocation_with_cdpath_exported_resolves_the_same_checkout(tmp_path: Path) -> None:
+    """The runbook's `cd /home/nwm/NWM && bash scripts/ops/start-display-api.sh`, with CDPATH set."""
+    temp_repo = tmp_path / "repo"
+    script = temp_repo / "scripts" / "ops" / "start-display-api.sh"
+    script.parent.mkdir(parents=True)
+    script.write_text((REPO_ROOT / "scripts/ops/start-display-api.sh").read_text(encoding="utf-8"))
+
+    completed = subprocess.run(
+        ["bash", "scripts/ops/start-display-api.sh"],
+        cwd=temp_repo,
+        env={"PATH": "/usr/bin:/bin", "HOME": str(temp_repo), "CDPATH": "."},
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    # No display.env in the temp checkout: the preflight names the path it resolved.
+    assert completed.returncode == 2, completed.stdout + completed.stderr
+    assert f"env file missing: {temp_repo}/infra/env/display.env" in completed.stderr

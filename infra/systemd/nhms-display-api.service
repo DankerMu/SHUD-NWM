@@ -14,6 +14,9 @@ TimeoutStopSec=30
 StandardOutput=append:/tmp/display-api.log
 StandardError=append:/tmp/display-api.log
 LimitNOFILE=65536
+# Group-writable files: the Tianditu basemap cache under NHMS_MVT_FILE_CACHE_DIR/basemap
+# is shared with yd-viewer (group nwm, setgid dirs); see docs/runbooks (#2627).
+UMask=0002
 
 [Install]
 WantedBy=default.target

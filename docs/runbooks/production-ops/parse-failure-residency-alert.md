@@ -45,6 +45,27 @@ statement timeout），**全程无人知道**：autopipe unit 没挂 `OnFailure=
   放宽后今天不多一封信。`OUTPUT_PARSE_DB_ERROR` 把 57014 / 锁类 / 永久 schema 错误折叠成一个码，
   但重试路径不读 `error_code`，拆码不改变任何行为，本车道也不需要拆。
 
+- **另外两个来源（#2590）**：
+  - `source=published_reparse`：已 `published` 的 run 产物被重写后，重解析以**确定性**码失败
+    （裸 `OutputParsingError` 码；stderr 里有 traceback、码以 `OUTPUT_PARSE_*` 开头或取不到码，都算
+    可能瞬时，照旧 `failed` 并重试）。autopipe 这时写一行
+    `ops.ingest_recompute_decline(reason_code='PUBLISHED_REPARSE_FAILED', detail='<CODE>: …')`，
+    同一份证据（`init_state_id` + `product_mtime`）不再重试。车道取每个 run **最新**一条这样的 decline：
+    `declined_at` 在存活界内、且晚于该 run 的 `parsed_at`。`declined_at` 充当 `updated_at`，报告里的
+    `first_error_code` 取 detail 开头的码。run 的状态保持 `published`（#1789 不降级）。
+    `declined_at` 不会被续期，所以**只告警一次**：阈值加车道周期（30 min）必须小于存活界，
+    `阈值 >= 存活界` 视为配置错误，退 2。周期写在 timer 里，脚本读不到，因此只校验
+    `阈值 < 存活界`。
+  - 只读角色需要对 `met.forcing_version` 和 `ops.ingest_recompute_decline` 有 SELECT 权限。仓库的
+    migration 不授予这两项，部署时要核对：
+    `SELECT has_table_privilege('nhms_display_ro','met.forcing_version','SELECT'), has_table_privilege('nhms_display_ro','ops.ingest_recompute_decline','SELECT');`
+    若缺失，本车道会每个 tick 退 2（`OBSERVATION_FAILED`）。
+  - `source=legacy_store_refused`：`failed` 的 run，其 `forcing_version.timeseries_store='legacy'`。
+    autopipe 拒绝 legacy forcing 的 apply，但按 #1991 **不写** decline，register 每个 tick 都会续期它。
+    这类 run 首次越过阈值时照常告警，之后只要还在集合里就**不再重告**。即使分类错了，也只会少发重复告警，
+    首封一定会发出。
+  - 同一个 run 在两个来源里同时出现时，按 `failed` 那一行算。
+
 ### 13.2 邮件怎么读
 
 告警就是非零退出：unit 挂 `OnFailure=nhms-node27-unit-failure-alert@%n.service`，handler 邮寄
@@ -52,7 +73,7 @@ statement timeout），**全程无人知道**：autopipe unit 没挂 `OnFailure=
 
 ```text
 parse-failure-residency now=… watched=<N> resident=<R> newly_alerted=<A> already_alerted=<K> threshold=2h realert=24h liveness=6h runbook=…
-resident run_id=<run> first_error_code=<第一次失败的码> first_observed=<UTC> residency_h=<h> alert=due
+resident run_id=<run> first_error_code=<第一次失败的码> source=<failed|published_reparse|legacy_store_refused> first_observed=<UTC> residency_h=<h> alert=due
 … 至多 10 行 resident …
 ... and <M> more
 ```
@@ -101,6 +122,30 @@ resident run_id=<run> first_error_code=<第一次失败的码> first_observed=<U
    `journalctl --user -u nhms-node27-timeseries-retention.service -u nhms-node27-timeseries-compression.service --since '<UTC 起点>' --no-pager`。
 4. **不要以调大 `statement_timeout` 结案**——那是掩盖，不是修复（#2529 非目标）。
 
+`source=published_reparse`（#2590）：run 仍是 `published`，前端照常显示旧数据，只是新产物解析不了。
+
+```sql
+SELECT d.run_id, d.reason_code, d.detail, d.declined_at, d.init_state_id, d.product_mtime,
+       h.status, h.parsed_at
+FROM ops.ingest_recompute_decline d
+JOIN hydro.hydro_run h USING (run_id)
+WHERE d.reason_code = 'PUBLISHED_REPARSE_FAILED'
+ORDER BY d.declined_at DESC;
+```
+
+处置二选一：
+
+- **修产物**：重新产出 / 修复 `output/*.rivqdown*`。`product_mtime` 一变，decline 就不再匹配，下一 tick 自动重投；
+- **强制重试同一份证据**：先确认失败原因已消除（例如解析器已修复），再删掉该行：
+  `DELETE FROM ops.ingest_recompute_decline WHERE run_id = '<run_id>' AND reason_code = 'PUBLISHED_REPARSE_FAILED';`
+  这一步要用写角色执行，只读 DSN 没有写权限。
+
+`source=legacy_store_refused`：forcing 被路由到 legacy store，按 #1991 属预期拒绝，这封信只发一次。
+处置归 legacy 表下线（task 8.2）那条线，不在本车道。
+
+`OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED` 下的 published 重解析仍然是永久 rc=1 且本车道看不见。本 PR 不裁决，
+残留由 follow-up 跟踪。
+
 退 2：`CONFIG_INVALID` → 修 env（见 `infra/env/node27-parse-failure-residency-alert.example`）；
 `OBSERVATION_FAILED` → 只读 DSN / 库本身；`STATE_CORRUPT` → 状态文件**不会自动重建**（重建会把所有
 驻留计时清零、把一个永久失败再藏一个阈值），先看内容，确认后删掉
@@ -125,11 +170,9 @@ run 的处置决定重新产出 / 重新解析，或按业务口径将其 supers
 没有 decline 记录却不再被触碰的 run，按 §13.3 第 1–2 步查原因。
 
 **认领的盲区**：一趟 tick 挂住超过存活界（6 h）时，它的失败会老出被观察集——那个形状归 §10 的 4 h
-前沿停摆车道。其二是重算路径：已 `published` 的 run 产物被同 run_id 重写后，每趟 tick 重新登记并
-重新解析；若重新解析确定性失败，`mark_run_failed` 对 `published` 不生效（`FAILABLE_RUN_STATUSES`
-不含 `published`），`parsed_at` 不前进，tick 永久 rc=1 而状态从不变为 `failed`，本车道（只看
-`status='failed'`）与 §10 前沿车道（该 cycle 已覆盖）都看不见；排查看 `autopipe.log` 中该 run 的反复
-解析错误；由后续 issue 跟踪。
+前沿停摆车道。其二是重算路径：已 `published` 的 run 产物被同 run_id 重写后，若重新解析失败，
+`mark_run_failed` 对 `published` 不生效。确定性码的情况自 #2590 起由 `published_reparse` 来源覆盖。
+可能瞬时的码仍然是重试加 rc=1，其中 `OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED` 的持久形态见上文残留。
 
 ### 13.4 阈值旋钮
 
@@ -138,7 +181,7 @@ run 的处置决定重新产出 / 重新解析，或按业务口径将其 supers
 
 | env | CLI | 默认 | 约束 |
 |---|---|---|---|
-| `NHMS_PARSE_RESIDENCY_THRESHOLD_HOURS` | `--threshold-hours` | 2 | ≥ 0；0 = 每个被观察 run 立即驻留（仅 live receipt 用） |
+| `NHMS_PARSE_RESIDENCY_THRESHOLD_HOURS` | `--threshold-hours` | 2 | ≥ 0 且 < 存活界；0 = 每个被观察 run 立即驻留（仅 live receipt 用） |
 | `NHMS_PARSE_RESIDENCY_REALERT_HOURS` | `--realert-hours` | 24 | > 0 |
 | `NHMS_PARSE_RESIDENCY_RETRY_LIVENESS_HOURS` | `--retry-liveness-hours` | 6 | > 0 |
 | `NHMS_PARSE_RESIDENCY_REPORT_RUNS` | `--report-runs` | 10 | 1..20（邮件正文要装进 30 行 journal 尾巴） |

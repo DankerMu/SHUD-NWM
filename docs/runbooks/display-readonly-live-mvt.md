@@ -384,8 +384,8 @@ wrapper `scripts/node27_mvt_cache_retention_once.sh`，user 级 unit
 `Persistent=true`），env 模板 `infra/env/node27-mvt-cache-retention.example`（装到
 `infra/env/node27-mvt-cache-retention.env`，**0600**）。
 
-只剪**三种精确形状**，按墙钟 `mtime` 早于 `reference_time − NODE27_MVT_CACHE_RETENTION_DAYS`
-（默认 14）：
+`.pbf` lane 只剪**三种精确形状**，按墙钟 `mtime` 早于 `reference_time − NODE27_MVT_CACHE_RETENTION_DAYS`
+（默认 14）。另有一个独立的 basemap 阶段，只处理 `basemap/tianditu/`，见下文"天地图底图缓存"：
 
 | 形状 | 生产者 | `kind` |
 |---|---|---|
@@ -422,8 +422,54 @@ jq -e '
   (.execution_mode == "production_execute")
   and ((.finished_at | fromdateiso8601) > (now - 26*3600))
   and (.failed | length == 0)
+  and ((.basemap.failed // []) | length == 0)
 ' "$(ls -t /home/nwm/node27-mvt-cache-retention-logs/mvt-cache-retention-*.json | head -1)"
 ```
+
+### 天地图底图缓存（issue #2627，与 yd-viewer 共用）
+
+`<root>/basemap/tianditu/<layer>/<z>/<x>/<y>` 由两个写入方共用：本仓 display API
+（`apps/api/routes/basemap.py`，中间文件 `.<y>.<pid>.<tid>.<hex32>.tmp`）和 yd-viewer
+（中间文件 `tmp-<hex32>`）。约定如下，改路径、布局或权限前要同步 yd-viewer 仓的
+`docs/agent-ops.md`：
+
+- yd-viewer 以 bind 挂载方式读写该子树，uid 10001，附加组 `nwm`(1005)，umask 002；
+- 目录 setgid、属组 `nwm`，文件 664；display unit 以 `UMask=0002` 运行
+  （`infra/systemd/nhms-display-api.service`，经 `scripts/ops/start-display-api.sh` 安装并重启后生效，
+  用 `grep Umask /proc/<MainPID>/status` 验证）；
+- 两个写入方在命中且文件 mtime 早于 1 天时都会刷新 mtime，因此 mtime 表示"最近一次被访问"。
+
+retention runner 的 basemap 阶段（`.pbf` lane 结构上进不去 `basemap/`，两者没有交集）：
+
+| 形状 | `kind` | 条件 |
+|---|---|---|
+| `<layer>/<z>/<x>/<y>`（layer 属于 6 个已知图层，z/x/y 都是十进制） | `basemap_tile` | mtime 早于 `NODE27_MVT_CACHE_RETENTION_BASEMAP_DAYS` 天（默认 30） |
+| `.<y>.<pid>.<tid>.<hex32>.tmp` / `tmp-<hex32>` | `basemap_tmp` | mtime 早于 1 天 |
+| 清理后变空的 `<x>`、`<z>` 目录 | `basemap_dir` | 不删 layer 目录和 `tianditu` 根目录 |
+
+- 其他名字一律保留，symlink 跳过并计数（`counts.symlinks_skipped`）。
+- 遍历以目录 fd 为锚：每一层都相对父目录 fd 以 `O_NOFOLLOW` 打开，stat、unlink、rmdir 都相对所在目录的 fd 执行。
+  这样即使 yd-viewer（另一个 uid）在遍历中途把某层目录换成 symlink，也只会被拒绝、记为 `symlink`，不会被跟随。
+- 删除前重新 `lstat` 一次：扫描之后被命中刷新过的瓦片记 `skipped[refreshed_since_scan]`。
+- `rmdir` 时如果写入方刚好又放进了文件，记 `skipped[not_empty]`。
+- 子树不存在时记 `skipped[subtree_absent]`，不影响 `.pbf` lane。
+- 该阶段的任何 IO 失败进入 `.basemap.failed[]` 并使 rc 为 1，例如 yd 写入的目录权限不对。处理方式是修权限，不要手工清盘。
+
+**删除开关与启用顺序**：`NODE27_MVT_CACHE_RETENTION_BASEMAP_DELETE` 必须**恰好**等于 `1` 才会删除，
+其他值或未设置时 `.basemap.mode == "dry_run"`，只做计数。`ENABLED=false`（mode `disabled`）
+与 `PLAN_ONLY=true`（mode `dry_run`）的优先级高于该开关。生产启用流程：
+
+1. 部署后先跑一次 dry-run，记录 `jq '.basemap | {mode, counts, planned_bytes, planned_truncated}'`。
+   dry-run 只列前 50 条样本，计数是精确的。同时核对权限：
+   `find <root>/basemap/tianditu ! -perm -g+w -printf '%u:%g %m %p\n' | head`。
+   其中 `UMask=0002` 生效前写下的文件或目录，删除或回写时会报 EACCES。
+   dry-run 不会实际 unlink，所以看不到这类错误，要在这一步先归一化权限（属组 nwm、目录 2775、文件 664）；
+2. 由负责人确认计数合理（这个目录与 yd-viewer 共用）；
+3. 在 node-local `infra/env/node27-mvt-cache-retention.env` 设
+   `NODE27_MVT_CACHE_RETENTION_BASEMAP_DELETE=1`，手动 `systemctl --user start nhms-node27-mvt-cache-retention.service` 跑一次；
+4. 核对删除计数与 dry-run 一致（两次运行之间的自然漂移要写明），并确认 `/api/v1/basemap/tianditu/...` 前后都返回 200。
+
+回滚：删掉这一行或改成其他值，下一次运行就回到 dry-run。
 
 **首次安装 / 回滚**：装 env（0600）+ unit + timer → 先跑
 `NODE27_MVT_CACHE_RETENTION_PLAN_ONLY=true` 看 `planned[]`（确认无任何 `precip/` 路径）→

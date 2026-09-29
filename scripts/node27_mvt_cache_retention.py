@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """Retention cleanup for the node-27 MVT tile FILE cache (issue #2032).
 
-This runner prunes exactly three path shapes under `NHMS_MVT_FILE_CACHE_DIR`,
-on ONE wall-clock cutoff, in ONE run:
+The `.pbf` lane prunes exactly three path shapes under `NHMS_MVT_FILE_CACHE_DIR`,
+on ONE wall-clock cutoff, in ONE run (the basemap stage below is separate):
 
     <root>/<hh>/<sha256>.pbf                      the cached tile body
     <root>/<hh>/.<sha256>.pbf.<pid>.tmp           a crashed write intermediate
@@ -28,6 +28,19 @@ execute-only behaviour: ``NODE27_MVT_CACHE_RETENTION_ENABLED`` (default true)
 and ``NODE27_MVT_CACHE_RETENTION_PLAN_ONLY`` (default false). Neither is named
 ``*_DRY_RUN`` -- that name defaulted to true, so a leftover line in a live
 config would silently return production to zero deletions (issue #1407).
+
+A separate BASEMAP stage (issue #2627) prunes the Tianditu tile cache that the
+display API and yd-viewer share under `<root>/basemap/tianditu/` -- a subtree
+the `.pbf` lane cannot reach (`basemap` is not two hex characters):
+
+    <root>/basemap/tianditu/<layer>/<z>/<x>/<y>                  a tile, by age
+    <root>/basemap/tianditu/<layer>/<z>/<x>/.<y>.<pid>.<tid>.<hex>.tmp   NWM write
+    <root>/basemap/tianditu/<layer>/<z>/<x>/tmp-<hex32>          yd-viewer write
+
+plus emptied `<z>`/`<x>` directories. Both writers refresh mtime on a hit, so
+mtime is "last served". yd-viewer shares the subtree, so deleting needs its own
+``NODE27_MVT_CACHE_RETENTION_BASEMAP_DELETE=1`` (else `mode: dry_run` counts);
+``ENABLED=false`` and ``PLAN_ONLY=true`` win over it.
 """
 
 from __future__ import annotations
@@ -68,6 +81,20 @@ KIND_PBF = "pbf"
 KIND_TMP = "tmp"
 KIND_LOCK = "lock"
 
+BASEMAP_DIR_NAME = "basemap"
+BASEMAP_PROVIDER_DIR_NAME = "tianditu"
+DEFAULT_BASEMAP_RETENTION_DAYS = 30
+BASEMAP_TMP_MAX_AGE = timedelta(days=1)
+# `TiandituLayer` in apps/api/routes/basemap.py (this runner stays stdlib-only;
+# tests pin the two sets equal).
+BASEMAP_LAYERS = frozenset({"vec", "cva", "img", "cia", "ter", "cta"})
+DECIMAL_PATTERN = re.compile(r"^[0-9]+$")
+BASEMAP_NWM_TMP_PATTERN = re.compile(r"^\.[0-9]+\.[0-9]+\.[0-9]+\.[0-9a-f]{32}\.tmp$")
+BASEMAP_YD_TMP_PATTERN = re.compile(r"^tmp-[0-9a-f]{32}$")
+KIND_BASEMAP_TILE = "basemap_tile"
+KIND_BASEMAP_TMP = "basemap_tmp"
+KIND_BASEMAP_DIR = "basemap_dir"
+
 _TILE_LANE_PATTERNS = ((PBF_PATTERN, KIND_PBF), (TMP_PATTERN, KIND_TMP))
 _LOCK_LANE_PATTERNS = ((LOCK_PATTERN, KIND_LOCK),)
 
@@ -82,6 +109,9 @@ class MvtCacheRetentionConfig:
     plan_only: bool = False
     # An explicit `--reference-time`; `None` means "the wall clock at start".
     reference_time: datetime | None = None
+    # Basemap stage (#2627): tile age limit, and the explicit deletion switch.
+    basemap_retention_days: int = DEFAULT_BASEMAP_RETENTION_DAYS
+    basemap_delete: bool = False
 
 
 @dataclass(frozen=True)
@@ -175,6 +205,21 @@ def _resolve_retention_days(args: argparse.Namespace) -> tuple[int | None, dict[
     return parsed, None
 
 
+def _resolve_basemap_retention_days() -> tuple[int | None, dict[str, Any] | None]:
+    """Strict integer >= 1 from the env, else 30; a malformed value blocks preflight."""
+    field = "NODE27_MVT_CACHE_RETENTION_BASEMAP_DAYS"
+    raw = os.getenv(field)
+    if raw is None or raw.strip() == "":
+        return DEFAULT_BASEMAP_RETENTION_DAYS, None
+    try:
+        parsed = int(raw.strip())
+    except ValueError:
+        return None, {"field": field, "reason": "not_an_integer", "value": raw}
+    if parsed < 1:
+        return None, {"field": field, "reason": "must_be_at_least_one", "value": parsed}
+    return parsed, None
+
+
 def _summary_sink(args: argparse.Namespace) -> Path | None:
     """Where the receipt goes: `--summary-path`, or `None` for stdout only.
 
@@ -213,6 +258,9 @@ def config_from_env(
     retention_days, days_blocker = _resolve_retention_days(args)
     if days_blocker is not None:
         blockers.append(days_blocker)
+    basemap_retention_days, basemap_days_blocker = _resolve_basemap_retention_days()
+    if basemap_days_blocker is not None:
+        blockers.append(basemap_days_blocker)
 
     reference_time: datetime | None = None
     if args.reference_time is not None:
@@ -225,7 +273,7 @@ def config_from_env(
 
     summary_path = _summary_sink(args)
 
-    if blockers or cache_root is None or retention_days is None:
+    if blockers or cache_root is None or retention_days is None or basemap_retention_days is None:
         return None, blockers
     return (
         MvtCacheRetentionConfig(
@@ -235,6 +283,9 @@ def config_from_env(
             enabled=_env_flag("NODE27_MVT_CACHE_RETENTION_ENABLED", default=True),
             plan_only=_env_flag("NODE27_MVT_CACHE_RETENTION_PLAN_ONLY", default=False),
             reference_time=reference_time,
+            basemap_retention_days=basemap_retention_days,
+            # Exactly `1`: shared with yd-viewer, so no truthy spelling enables it.
+            basemap_delete=os.getenv("NODE27_MVT_CACHE_RETENTION_BASEMAP_DELETE") == "1",
         ),
         [],
     )
@@ -530,6 +581,278 @@ def _target_payload(target: CacheTarget) -> dict[str, Any]:
     }
 
 
+def _basemap_entry_failure(path: Path, kind: str | None, error: OSError, **extra: Any) -> dict[str, Any]:
+    return {"path": str(path), "kind": kind, "error": str(error), "error_type": type(error).__name__, **extra}
+
+
+def _basemap_enumeration_failure(directory: Path, error: OSError) -> dict[str, Any]:
+    """Like the `.pbf` lane: an unreadable directory is a failure, not a skip."""
+    return _basemap_entry_failure(directory, KIND_BASEMAP_DIR, error, reason="enumeration_unavailable")
+
+
+def _basemap_candidate_kind(name: str) -> str | None:
+    if DECIMAL_PATTERN.fullmatch(name):
+        return KIND_BASEMAP_TILE
+    if BASEMAP_NWM_TMP_PATTERN.fullmatch(name) or BASEMAP_YD_TMP_PATTERN.fullmatch(name):
+        return KIND_BASEMAP_TMP
+    return None
+
+
+def _remove_basemap_file(name: str, dir_fd: int, cutoff: float) -> tuple[str, OSError | None]:
+    """Unlink, relative to the `<x>` descriptor, unless a hit refreshed it since the scan."""
+    try:
+        info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        if not stat.S_ISREG(info.st_mode):
+            return "not_regular_file", None
+        if info.st_mtime >= cutoff:
+            return "refreshed_since_scan", None
+        os.unlink(name, dir_fd=dir_fd)
+    except FileNotFoundError:
+        return "already_gone", None
+    except OSError as error:
+        return "failed", error
+    return "deleted", None
+
+
+class _BasemapWalk:
+    """The basemap walk, anchored on directory descriptors (#2627).
+
+    yd-viewer (another uid) writes here, so a directory checked when listed may be
+    a link when used: each level is opened `O_NOFOLLOW` relative to its parent's
+    fd and every stat / unlink / rmdir is relative to the holding directory's fd.
+    """
+
+    PLANNED_SAMPLE = 50
+
+    def __init__(self, summary: dict[str, Any], *, tile_cutoff: float, tmp_cutoff: float) -> None:
+        self.summary = summary
+        self.delete = summary["mode"] == "delete"
+        self.cutoff = {KIND_BASEMAP_TILE: tile_cutoff, KIND_BASEMAP_TMP: tmp_cutoff}
+        self.counts = {KIND_BASEMAP_TILE: 0, KIND_BASEMAP_TMP: 0, KIND_BASEMAP_DIR: 0}
+        self.planned_bytes = 0
+
+    def plan(self, payload: dict[str, Any]) -> None:
+        # Exact counts, bounded sample: a dry run re-plans the same tiles daily.
+        self.counts[payload["kind"]] += 1
+        self.planned_bytes += int(payload["size_bytes"])
+        if len(self.summary["planned"]) < self.PLANNED_SAMPLE:
+            self.summary["planned"].append(payload)
+
+    def skip(self, path: Path | str, kind: str | None, reason: str) -> None:
+        self.summary["skipped"].append({"path": str(path), "kind": kind, "reason": reason})
+
+    def open_dir(self, name: str, parent_fd: int | None, path: Path, *, absent_reason: str | None = None) -> int | None:
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        try:
+            return os.open(name if parent_fd is not None else path, flags, dir_fd=parent_fd)
+        except FileNotFoundError:
+            if absent_reason is not None:
+                self.skip(path, None, absent_reason)
+            return None
+        except OSError as error:
+            if error.errno in (errno.ELOOP, errno.ENOTDIR):  # which one a link gives is platform-dependent
+                try:
+                    link = stat.S_ISLNK(os.stat(name, dir_fd=parent_fd, follow_symlinks=False).st_mode)
+                except OSError:
+                    link = False
+                self.skip(path, None, "symlink" if link else "not_directory")
+            else:
+                self.summary["failed"].append(_basemap_enumeration_failure(path, error))
+            return None
+
+    def entries(self, fd: int, path: Path) -> list[os.DirEntry[str]] | None:
+        try:
+            with os.scandir(fd) as scanned:
+                return sorted(scanned, key=lambda entry: entry.name)
+        except OSError as error:
+            self.summary["failed"].append(_basemap_enumeration_failure(path, error))
+            return None
+
+    def subdirectories(self, fd: int, path: Path, names: Any) -> list[str] | None:
+        found = self.entries(fd, path)
+        if found is None:
+            return None
+        chosen = []
+        for entry in found:
+            if not names(entry.name):
+                continue
+            try:
+                if entry.is_symlink():
+                    self.skip(path / entry.name, None, "symlink")
+                elif entry.is_dir(follow_symlinks=False):
+                    chosen.append(entry.name)
+            except OSError as error:
+                self.summary["failed"].append(_basemap_enumeration_failure(path / entry.name, error))
+        return chosen
+
+    def remove_dir(self, name: str, parent_fd: int, path: Path) -> bool:
+        payload = {"path": str(path), "kind": KIND_BASEMAP_DIR, "size_bytes": 0, "mtime": None}
+        self.plan(payload)
+        if not self.delete:
+            return True
+        try:
+            os.rmdir(name, dir_fd=parent_fd)
+        except FileNotFoundError:
+            self.skip(path, KIND_BASEMAP_DIR, "already_gone")
+            return True
+        except OSError as error:
+            if error.errno in (errno.ENOTEMPTY, errno.EEXIST):
+                self.skip(path, KIND_BASEMAP_DIR, "not_empty")  # a writer refilled it
+            elif error.errno == errno.ENOTDIR:
+                self.skip(path, KIND_BASEMAP_DIR, "not_directory")  # swapped for a link
+            else:
+                self.summary["failed"].append(_basemap_entry_failure(path, KIND_BASEMAP_DIR, error))
+            return False
+        self.summary["deleted"].append(payload)
+        return True
+
+    def prune_x(self, x_fd: int, x_path: Path) -> int:
+        """Plan (and in delete mode remove) aged files; return how many entries remain (-1 unknown)."""
+        entries = self.entries(x_fd, x_path)
+        if entries is None:
+            return -1
+        remaining = len(entries)
+        for entry in entries:
+            path = x_path / entry.name
+            kind = _basemap_candidate_kind(entry.name)
+            try:
+                if entry.is_symlink():
+                    self.skip(path, None, "symlink")
+                    continue
+                if kind is None:
+                    continue
+                info = entry.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                remaining -= 1
+                continue
+            except OSError as error:
+                self.summary["failed"].append(_basemap_entry_failure(path, kind, error))
+                continue
+            if not stat.S_ISREG(info.st_mode) or info.st_mtime >= self.cutoff[kind]:
+                continue
+            payload = {
+                "path": str(path),
+                "kind": kind,
+                "size_bytes": int(info.st_size),
+                "mtime": _rfc3339(datetime.fromtimestamp(info.st_mtime, UTC)),
+            }
+            self.plan(payload)
+            if not self.delete:
+                remaining -= 1  # a dry run reports the directories this deletion would empty
+                continue
+            outcome, error = _remove_basemap_file(entry.name, x_fd, self.cutoff[kind])
+            if outcome == "deleted":
+                self.summary["deleted"].append(payload)
+                self.summary["freed_bytes"] += payload["size_bytes"]
+                remaining -= 1
+            elif outcome == "failed" and error is not None:
+                self.summary["failed"].append(_basemap_entry_failure(path, kind, error))
+            else:
+                self.skip(path, kind, outcome)
+                if outcome == "already_gone":
+                    remaining -= 1
+        return remaining
+
+    def run(self, cache_root: Path) -> None:
+        opened: list[int] = []
+
+        def descend(name: str, parent_fd: int | None, path: Path, **kwargs: Any) -> int | None:
+            fd = self.open_dir(name, parent_fd, path, **kwargs)
+            if fd is not None:
+                opened.append(fd)
+            return fd
+
+        def close(fd: int) -> None:
+            opened.remove(fd)
+            os.close(fd)
+
+        try:
+            # The cache root itself passed `_cache_root_blocker` (no symlink).
+            root_fd = descend(str(cache_root), None, cache_root)
+            basemap_path = cache_root / BASEMAP_DIR_NAME
+            provider_path = basemap_path / BASEMAP_PROVIDER_DIR_NAME
+            basemap_fd = root_fd and descend(BASEMAP_DIR_NAME, root_fd, basemap_path, absent_reason="subtree_absent")
+            provider_fd = basemap_fd and descend(
+                BASEMAP_PROVIDER_DIR_NAME, basemap_fd, provider_path, absent_reason="subtree_absent"
+            )
+            if provider_fd is None:
+                return
+            for layer in self.subdirectories(provider_fd, provider_path, lambda name: name in BASEMAP_LAYERS) or []:
+                layer_path = provider_path / layer
+                layer_fd = descend(layer, provider_fd, layer_path)
+                if layer_fd is None:
+                    continue
+                for z in self.subdirectories(layer_fd, layer_path, DECIMAL_PATTERN.fullmatch) or []:
+                    z_path = layer_path / z
+                    z_fd = descend(z, layer_fd, z_path)
+                    if z_fd is None:
+                        continue
+                    z_entries = self.entries(z_fd, z_path)
+                    z_left = -1 if z_entries is None else len(z_entries)
+                    for x in self.subdirectories(z_fd, z_path, DECIMAL_PATTERN.fullmatch) or []:
+                        x_path = z_path / x
+                        x_fd = descend(x, z_fd, x_path)
+                        if x_fd is None:
+                            continue
+                        x_left = self.prune_x(x_fd, x_path)
+                        close(x_fd)
+                        if x_left == 0 and self.remove_dir(x, z_fd, x_path) and z_left > 0:
+                            z_left -= 1
+                    close(z_fd)
+                    if z_left == 0:
+                        self.remove_dir(z, layer_fd, z_path)
+                close(layer_fd)
+        finally:
+            for fd in opened:
+                os.close(fd)
+
+
+def run_basemap_stage(config: MvtCacheRetentionConfig, *, reference_time: datetime) -> dict[str, Any]:
+    """Prune `<root>/basemap/tianditu/<known layer>/<decimal z>/<decimal x>/`.
+
+    Anything else at any level, symlinks included, is left alone; only `<x>` and
+    `<z>` directories this run empties are removed (never a layer or the root).
+    """
+    root = config.cache_root / BASEMAP_DIR_NAME / BASEMAP_PROVIDER_DIR_NAME
+    tile_cutoff_at = reference_time - timedelta(days=config.basemap_retention_days)
+    tmp_cutoff_at = reference_time - BASEMAP_TMP_MAX_AGE
+    if not config.enabled:
+        mode = "disabled"
+    elif config.plan_only or not config.basemap_delete:
+        mode = "dry_run"
+    else:
+        mode = "delete"
+    summary: dict[str, Any] = {
+        "mode": mode,
+        "root": str(root),
+        "retention_days": config.basemap_retention_days,
+        "tile_cutoff": _rfc3339(tile_cutoff_at),
+        "tmp_cutoff": _rfc3339(tmp_cutoff_at),
+        "planned": [],
+        "deleted": [],
+        "skipped": [],
+        "failed": [],
+        "freed_bytes": 0,
+    }
+    walk = _BasemapWalk(summary, tile_cutoff=tile_cutoff_at.timestamp(), tmp_cutoff=tmp_cutoff_at.timestamp())
+    if mode != "disabled":
+        walk.run(config.cache_root)
+    planned = sum(walk.counts.values())
+    summary["planned_truncated"] = planned > len(summary["planned"])
+    summary["planned_bytes"] = walk.planned_bytes
+    summary["counts"] = {
+        "tile": walk.counts[KIND_BASEMAP_TILE],
+        "tmp": walk.counts[KIND_BASEMAP_TMP],
+        "dir": walk.counts[KIND_BASEMAP_DIR],
+        "planned": planned,
+        "deleted": len(summary["deleted"]),
+        "skipped": len(summary["skipped"]),
+        "symlinks_skipped": sum(1 for entry in summary["skipped"] if entry["reason"] == "symlink"),
+        "failed": len(summary["failed"]),
+    }
+    return summary
+
+
 def run_retention(config: MvtCacheRetentionConfig, *, now: datetime) -> dict[str, Any]:
     started_at = now.astimezone(UTC)
     reference_time = (config.reference_time or started_at).astimezone(UTC)
@@ -560,6 +883,7 @@ def run_retention(config: MvtCacheRetentionConfig, *, now: datetime) -> dict[str
             "skipped": [],
             "failed": [],
             "freed_bytes": 0,
+            "basemap": run_basemap_stage(config, reference_time=reference_time),
         }
 
     # `failed` starts NON-EMPTY when a directory could not be enumerated: those
@@ -591,6 +915,8 @@ def run_retention(config: MvtCacheRetentionConfig, *, now: datetime) -> dict[str
             # concurrent display worker doing its job is not a retention
             # failure, and neither is a lock somebody currently holds.
             skipped.append({"path": payload["path"], "kind": payload["kind"], "reason": outcome})
+    # After the `.pbf` lane, and whatever it did: the two lanes never share a path.
+    basemap = run_basemap_stage(config, reference_time=reference_time)
     finished_at = datetime.now(UTC)
     return {
         **base,
@@ -608,6 +934,7 @@ def run_retention(config: MvtCacheRetentionConfig, *, now: datetime) -> dict[str
         "skipped": skipped,
         "failed": failed,
         "freed_bytes": freed_bytes,
+        "basemap": basemap,
     }
 
 
@@ -664,7 +991,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     payload = run_retention(config, now=datetime.now(UTC))
     _emit(payload, config.summary_path)
-    return 1 if payload["counts"]["failed"] else 0
+    # A basemap failure turns the unit red too: the shared cache is otherwise unwatched.
+    return 1 if payload["counts"]["failed"] or payload["basemap"]["failed"] else 0
 
 
 if __name__ == "__main__":

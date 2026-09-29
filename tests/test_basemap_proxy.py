@@ -7,6 +7,8 @@ the client receives and how many times Tianditu would have been asked.
 from __future__ import annotations
 
 import os
+import time
+import typing
 from pathlib import Path
 from typing import Any
 
@@ -260,3 +262,70 @@ def test_mvt_retention_prunes_beside_the_basemap_cache_without_touching_it(tmp_p
     assert [entry["path"] for entry in payload["deleted"]] == [str(aged_mvt_tile)]
     assert payload["counts"] == {"planned": 1, "deleted": 1, "skipped": 0, "failed": 0}
     assert basemap_tile.exists() and basemap_tmp.exists()
+
+
+# #2627: a hit marks the tile as recently served. The subtree is pruned by age
+# and yd-viewer (which shares it) refreshes on hit; the display API must too, or
+# a tile served every day would still age out.
+
+
+def _cached(cache_root: Path, age_seconds: float) -> tuple[Path, float]:
+    tile = cache_root / "basemap" / "tianditu" / "vec" / "3" / "5" / "2"
+    tile.parent.mkdir(parents=True)
+    tile.write_bytes(PNG_TILE)
+    stamp = time.time() - age_seconds
+    os.utime(tile, (stamp, stamp))
+    return tile, stamp
+
+
+def test_a_hit_on_a_tile_older_than_a_day_refreshes_its_mtime(
+    client: TestClient, upstream: Any, cache_root: Path
+) -> None:
+    fake = upstream()
+    tile, _stamp = _cached(cache_root, 3 * 86400)
+    before = time.time()
+
+    response = client.get(TILE_PATH)
+
+    assert response.headers["x-tile-cache"] == "hit"
+    assert fake.calls == []
+    assert tile.stat().st_mtime >= before - 1
+
+
+def test_a_hit_on_a_tile_younger_than_a_day_leaves_its_mtime(
+    client: TestClient, upstream: Any, cache_root: Path
+) -> None:
+    upstream()
+    tile, stamp = _cached(cache_root, 3600)
+
+    response = client.get(TILE_PATH)
+
+    assert response.headers["x-tile-cache"] == "hit"
+    assert tile.stat().st_mtime == pytest.approx(stamp, abs=1e-3)
+
+
+def test_a_refresh_the_filesystem_refuses_still_serves_the_hit(
+    client: TestClient, upstream: Any, cache_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tile yd-viewer wrote may not be ours to touch; the hit must survive that."""
+    upstream()
+    tile, stamp = _cached(cache_root, 3 * 86400)
+
+    def refuse(path: object, *args: object, **kwargs: object) -> None:
+        raise PermissionError(1, "Operation not permitted", str(path))
+
+    monkeypatch.setattr(basemap.os, "utime", refuse)
+
+    response = client.get(TILE_PATH)
+
+    assert response.status_code == 200
+    assert response.content == PNG_TILE
+    assert response.headers["x-tile-cache"] == "hit"
+    assert tile.stat().st_mtime == pytest.approx(stamp, abs=1e-3)
+
+
+def test_the_retention_runners_basemap_layers_are_the_routes_layers() -> None:
+    """The stdlib-only retention runner keeps its own copy of the layer set (#2627)."""
+    from scripts import node27_mvt_cache_retention as retention
+
+    assert retention.BASEMAP_LAYERS == frozenset(typing.get_args(basemap.TiandituLayer))

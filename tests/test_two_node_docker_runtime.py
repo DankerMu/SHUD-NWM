@@ -5141,20 +5141,6 @@ def _prepare_start_display_api_harness(
 
 def _write_start_display_api_fake_bin(fake_bin: Path) -> None:
     _write_executable(
-        fake_bin / "git",
-        "\n".join(
-            [
-                "#!/bin/sh",
-                "if [ \"${1:-}\" = \"rev-parse\" ] && [ \"${2:-}\" = \"--show-toplevel\" ]; then",
-                "  printf '%s\\n' \"$HARNESS_REPO_ROOT\"",
-                "  exit 0",
-                "fi",
-                "exit 1",
-            ]
-        )
-        + "\n",
-    )
-    _write_executable(
         fake_bin / "pgrep",
         "\n".join(
             [
@@ -5230,7 +5216,14 @@ def _run_start_display_api_harness(
     record_dir: Path,
     *,
     extra_env: dict[str, str] | None = None,
+    cwd: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    # The script resolves its checkout from its own location (#2638), so it runs as
+    # a copy inside temp_repo: it can never reach the real checkout's display.env,
+    # .venv or unit, even when pytest itself runs inside the node-27 checkout.
+    script = temp_repo / "scripts" / "ops" / "start-display-api.sh"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(REPO_ROOT / "scripts/ops/start-display-api.sh", script)
     path_parts = [str(fake_bin)]
     if os.environ.get("PATH"):
         path_parts.append(os.environ["PATH"])
@@ -5238,7 +5231,6 @@ def _run_start_display_api_harness(
     temp_dir.mkdir()
     clean_env = {
         "HARNESS_RECORD_DIR": str(record_dir),
-        "HARNESS_REPO_ROOT": str(temp_repo),
         "HOME": str(temp_repo),
         "PATH": os.pathsep.join(path_parts),
         "TMPDIR": str(temp_dir),
@@ -5246,8 +5238,8 @@ def _run_start_display_api_harness(
     if extra_env:
         clean_env.update(extra_env)
     return subprocess.run(
-        ["bash", str(REPO_ROOT / "scripts/ops/start-display-api.sh")],
-        cwd=temp_repo,
+        ["bash", str(script)],
+        cwd=temp_repo if cwd is None else cwd,
         env=clean_env,
         check=False,
         capture_output=True,
