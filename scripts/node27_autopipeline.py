@@ -2076,7 +2076,9 @@ def _refresh_coverage_script() -> Path | None:
 # A DETERMINISTIC parse failure is recorded as a decline instead, which both
 # stops the pointless retry of that evidence and is what the lane watches.
 REASON_PUBLISHED_REPARSE_FAILED = "PUBLISHED_REPARSE_FAILED"
-_PARSE_ERROR_LINE_RE = re.compile(r"^([A-Z][A-Z0-9_]+): ", re.MULTILINE)
+# Every parser code has an underscore (`RIVQDOWN_EMPTY`, `MANIFEST_INDEX_INVALID`,
+# ...); requiring one keeps `WARNING:` / `DETAIL:` / `HINT:` lines from posing as codes.
+_PARSE_ERROR_LINE_RE = re.compile(r"^([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+): ", re.MULTILINE)
 _TRACEBACK_MARKER = "Traceback (most recent call last):"
 
 
@@ -2084,7 +2086,9 @@ def _deterministic_parse_error_code(stderr: str) -> str | None:
     """The parser's code when it names a permanent failure, else `None`.
 
     The CLI's handled arms print `<ERROR_CODE>: <message>` (argparse and click
-    alike); the first such line is the code, whatever warnings precede it.
+    alike); the first such line is the code, whatever warnings precede it. The
+    first, not the last: a message can itself span lines (a psycopg error's
+    `DETAIL:`), so only the leading code line is the CLI's.
     `None` -- keep failing, keep retrying -- for:
 
     - any traceback: `OUTPUT_PARSE_OS_ERROR` / `_RUNTIME_ERROR` are written to

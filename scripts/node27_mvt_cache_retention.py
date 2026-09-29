@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """Retention cleanup for the node-27 MVT tile FILE cache (issue #2032).
 
-This runner prunes exactly three path shapes under `NHMS_MVT_FILE_CACHE_DIR`,
-on ONE wall-clock cutoff, in ONE run:
+The `.pbf` lane prunes exactly three path shapes under `NHMS_MVT_FILE_CACHE_DIR`,
+on ONE wall-clock cutoff, in ONE run (the basemap stage below is separate):
 
     <root>/<hh>/<sha256>.pbf                      the cached tile body
     <root>/<hh>/.<sha256>.pbf.<pid>.tmp           a crashed write intermediate
@@ -667,18 +667,22 @@ def run_basemap_stage(config: MvtCacheRetentionConfig, *, reference_time: dateti
 
 def _walk_basemap(root: Path, summary: dict[str, Any], *, tile_cutoff: float, tmp_cutoff: float) -> None:
     delete = summary["mode"] == "delete"
-    try:
-        root_info = os.lstat(root)
-    except FileNotFoundError:
-        summary["skipped"].append({"path": str(root), "kind": None, "reason": "subtree_absent"})
-        return
-    except OSError as error:
-        summary["failed"].append(_basemap_enumeration_failure(root, error))
-        return
-    if stat.S_ISLNK(root_info.st_mode) or not stat.S_ISDIR(root_info.st_mode):
-        reason = "symlink" if stat.S_ISLNK(root_info.st_mode) else "not_directory"
-        summary["skipped"].append({"path": str(root), "kind": None, "reason": reason})
-        return
+    # `lstat` refuses only a symlink in the LAST component, so `basemap/` and
+    # `basemap/tianditu/` are each checked: a link at either would carry the
+    # walk, and its deletions, outside the cache root.
+    for component in (root.parent, root):
+        try:
+            info = os.lstat(component)
+        except FileNotFoundError:
+            summary["skipped"].append({"path": str(component), "kind": None, "reason": "subtree_absent"})
+            return
+        except OSError as error:
+            summary["failed"].append(_basemap_enumeration_failure(component, error))
+            return
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            reason = "symlink" if stat.S_ISLNK(info.st_mode) else "not_directory"
+            summary["skipped"].append({"path": str(component), "kind": None, "reason": reason})
+            return
 
     def directories(parent: Path, *, names: Any) -> list[Path]:
         try:

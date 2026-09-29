@@ -384,8 +384,8 @@ wrapper `scripts/node27_mvt_cache_retention_once.sh`，user 级 unit
 `Persistent=true`），env 模板 `infra/env/node27-mvt-cache-retention.example`（装到
 `infra/env/node27-mvt-cache-retention.env`，**0600**）。
 
-只剪**三种精确形状**，按墙钟 `mtime` 早于 `reference_time − NODE27_MVT_CACHE_RETENTION_DAYS`
-（默认 14）：
+`.pbf` lane 只剪**三种精确形状**，按墙钟 `mtime` 早于 `reference_time − NODE27_MVT_CACHE_RETENTION_DAYS`
+（默认 14）。另有一个独立的 basemap 阶段，只处理 `basemap/tianditu/`，见下文"天地图底图缓存"：
 
 | 形状 | 生产者 | `kind` |
 |---|---|---|

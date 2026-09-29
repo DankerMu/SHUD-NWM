@@ -159,13 +159,14 @@ def test_the_observation_query_reads_both_new_sources(throwaway_database_url: st
                 "VALUES ('m-2590', 'bv-2590', 'rnv-2590', 'mesh', 'cal', '1.0', 's3://nhms/m', true, 'active')"
             )
             cursor.execute(
-                "INSERT INTO met.data_source (source_id, source_name) VALUES ('gfs', 'GFS') ON CONFLICT DO NOTHING"
+                "INSERT INTO met.data_source (source_id, source_name, source_type, status, adapter_name) "
+                "VALUES ('src-2590', 'GFS', 'forecast', 'mock', 'gfs')"
             )
             for forcing_id, store in (("fv-legacy", "legacy"), ("fv-narrow", "narrow")):
                 cursor.execute(
                     "INSERT INTO met.forcing_version (forcing_version_id, model_id, source_id, start_time, end_time, "
                     "station_count, forcing_package_uri, timeseries_store) "
-                    "VALUES (%s, 'm-2590', 'gfs', now(), now(), 1, 's3://f', %s)",
+                    "VALUES (%s, 'm-2590', 'src-2590', now(), now(), 1, 's3://f', %s)",
                     (forcing_id, store),
                 )
             for run_id, status, code, forcing_id, parsed_ago in (

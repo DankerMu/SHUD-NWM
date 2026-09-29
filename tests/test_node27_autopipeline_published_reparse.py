@@ -53,6 +53,10 @@ PSYCOPG_TRACEBACK = (
         (PSYCOPG_TRACEBACK, None),
         ("", None),
         ("something went wrong: lower case\n", None),
+        ("WARNING: Ignoring invalid distribution ~umpy\nOUTPUT_PARSE_DB_ERROR: timeout\n", None),
+        ("WARNING: Ignoring invalid distribution ~umpy\n" + MALFORMED, "MODEL_RIVER_FILE_MALFORMED"),
+        ("DETAIL:  Key (run_key)=(7) is not present\nHINT:  retry\n", None),
+        ("MANIFEST_INDEX_INVALID: Unable to safely read manifest index\n", "MANIFEST_INDEX_INVALID"),
     ],
     ids=[
         "bare-code",
@@ -65,6 +69,10 @@ PSYCOPG_TRACEBACK = (
         "psycopg-traceback-with-detail",
         "empty",
         "no-code",
+        "uppercase-warning-then-transient",
+        "uppercase-warning-then-deterministic",
+        "libpq-detail-hint",
+        "manifest-index",
     ],
 )
 def test_only_a_bare_parser_code_is_deterministic(stderr: str, expected: str | None) -> None:

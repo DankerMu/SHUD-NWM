@@ -169,9 +169,26 @@ def test_an_absent_basemap_subtree_is_a_skip_not_a_blocker(tmp_path: Path) -> No
     assert payload["status"] == "completed"
     assert _paths(payload["deleted"]) == {str(pbf)}
     assert payload["basemap"]["skipped"] == [
-        {"path": str(root / "basemap" / "tianditu"), "kind": None, "reason": "subtree_absent"}
+        {"path": str(root / "basemap"), "kind": None, "reason": "subtree_absent"}
     ]
     assert payload["basemap"]["failed"] == []
+
+
+@pytest.mark.parametrize("linked", ["basemap", "basemap/tianditu"])
+def test_a_symlinked_basemap_component_is_never_walked(tmp_path: Path, linked: str) -> None:
+    """A link at `basemap/` or `basemap/tianditu/` would carry deletions outside the cache root."""
+    outside = Tree(tmp_path / "outside")
+    root = tmp_path / "cache"
+    (root / runner.LOCKS_DIR_NAME).mkdir(parents=True)
+    link = root / linked
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(outside.root / linked)
+
+    stage = runner.run_retention(_config(root, basemap_delete=True), now=NOW)["basemap"]
+
+    assert stage["planned"] == [] and stage["deleted"] == []
+    assert stage["skipped"] == [{"path": str(link), "kind": None, "reason": "symlink"}]
+    assert outside.exists(outside.lone_tile, outside.aged_tile, outside.nwm_tmp, outside.yd_tmp) == [True] * 4
 
 
 def _run_main(monkeypatch: pytest.MonkeyPatch, root: Path, summary: Path, **env: str) -> tuple[int, dict[str, Any]]:
