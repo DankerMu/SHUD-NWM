@@ -6,9 +6,18 @@ import {
   type StylePropertySpecification,
 } from '@maplibre/maplibre-gl-style-spec'
 import type { LineLayerSpecification } from 'maplibre-gl'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
-import { m11NationalRiverPaint, m11StationClusterPolicy } from '@/components/map/m11MapPrimitives'
+import {
+  M11_BASIN_FILL_LAYER_ID,
+  M11_BASIN_OUTLINE_LAYER_ID,
+  M11_NATIONAL_RIVER_LINE_LAYER_ID,
+  M11_PRECIP_RASTER_LAYER_ID,
+  M11_STATION_LAYER_ORDER,
+  ensureM11StationLayersOnTop,
+  m11NationalRiverPaint,
+  m11StationClusterPolicy,
+} from '@/components/map/m11MapPrimitives'
 
 describe('m11StationClusterPolicy', () => {
   it('renders small direct-grid station sets without clustering', () => {
@@ -249,5 +258,174 @@ describe('m11NationalRiverPaint line-opacity', () => {
     expect(evaluateAt(dimmed, 6, 5)).toBeCloseTo(0.92 * 0.42, 6)
     expect(evaluateAt(dimmed, 7, 1)).toBeCloseTo(0.35 * 0.42, 6)
     expect(evaluateAt(dimmed, 9, 5)).toBeCloseTo(0.88 * 0.42, 6)
+  })
+})
+
+/**
+ * 有状态 map stub（fixture D3 / tasks 3.2）：只实现 `ensureM11StationLayersOnTop` 允许用的三个读写面
+ * （getLayersOrder / getLayer / moveLayer）外加模拟 react-map-gl 挂载用的 addLayer / removeLayer。
+ * `moveLayer` 语义照搬 maplibre-gl 4.7.1 `Style#moveLayer`：不带 beforeId ⇒ 移到栈顶。
+ */
+function statefulMap(initial: string[] = []) {
+  const order = [...initial]
+  const map = {
+    getLayersOrder: vi.fn(() => [...order]),
+    getLayer: vi.fn((id: string) => (order.includes(id) ? { id } : undefined)),
+    moveLayer: vi.fn((id: string, beforeId?: string) => {
+      const from = order.indexOf(id)
+      if (from === -1) throw new Error(`moveLayer on unregistered layer ${id}`)
+      order.splice(from, 1)
+      const to = beforeId ? order.indexOf(beforeId) : order.length
+      if (beforeId && to === -1) throw new Error(`beforeId ${beforeId} is not registered`)
+      order.splice(to, 0, id)
+    }),
+    addLayer: vi.fn((layer: { id: string }, beforeId?: string) => {
+      if (order.includes(layer.id)) throw new Error(`duplicate layer ${layer.id}`)
+      const to = beforeId ? order.indexOf(beforeId) : order.length
+      order.splice(to === -1 ? order.length : to, 0, layer.id)
+    }),
+    removeLayer: vi.fn((id: string) => {
+      const index = order.indexOf(id)
+      if (index !== -1) order.splice(index, 1)
+    }),
+    order,
+  }
+  return map
+}
+
+// 规范顺序按 spec（met-station-cluster-layer）逐字写死，不从被测模块回读。
+const STATION_LAYERS = ['clusters', 'cluster-count', 'met-stations-point', 'met-stations-selected-halo', 'met-stations-selected-point']
+const OVERLAY_LAYERS = [
+  'm11-discharge-line-casing',
+  'm11-discharge-line',
+  'm11-discharge-line-hit',
+  'm11-discharge-line-hover-halo',
+  'm11-discharge-line-hover-line',
+  'm11-discharge-line-selected-halo',
+  'm11-discharge-line-selected-line',
+]
+const BASEMAP_LAYERS = ['background', 'water', 'road']
+const HYDRO_CONTEXT = [M11_PRECIP_RASTER_LAYER_ID, M11_NATIONAL_RIVER_LINE_LAYER_ID, M11_BASIN_FILL_LAYER_ID, M11_BASIN_OUTLINE_LAYER_ID]
+
+function addAll(map: ReturnType<typeof statefulMap>, ids: string[]) {
+  for (const id of ids) map.addLayer({ id })
+}
+
+/** 模拟 overlay Source 重挂载（sourceKey 变化 / 从 null 恢复）：旧层卸载，新层 addLayer 追加到栈顶。 */
+function remountOverlay(map: ReturnType<typeof statefulMap>) {
+  for (const id of OVERLAY_LAYERS) map.removeLayer(id)
+  addAll(map, OVERLAY_LAYERS)
+}
+
+function withoutStations(order: string[]) {
+  return order.filter((id) => !STATION_LAYERS.includes(id))
+}
+
+describe('ensureM11StationLayersOnTop', () => {
+  it('pins the canonical station order to the spec layer ids', () => {
+    expect([...M11_STATION_LAYER_ORDER]).toEqual(STATION_LAYERS)
+  })
+
+  it.each([
+    ['sourceKey timeline remount', (map: ReturnType<typeof statefulMap>) => remountOverlay(map)],
+    [
+      'overlay restored after being null',
+      (map: ReturnType<typeof statefulMap>) => {
+        for (const id of OVERLAY_LAYERS) map.removeLayer(id)
+        // overlay 为 null 期间 styledata 照常触发：代站本就在顶，纠偏必须是 no-op。
+        ensureM11StationLayersOnTop(map)
+        expect(map.moveLayer).not.toHaveBeenCalled()
+        addAll(map, OVERLAY_LAYERS)
+      },
+    ],
+  ])('moves stations back above the discharge overlay after a %s', (_label, remount) => {
+    const map = statefulMap([...BASEMAP_LAYERS, ...HYDRO_CONTEXT, ...OVERLAY_LAYERS, ...STATION_LAYERS])
+    remount(map)
+    // 前置：overlay 追加到栈顶，压住代站（#2650 的现象）。
+    expect(map.order.slice(-OVERLAY_LAYERS.length)).toEqual(OVERLAY_LAYERS)
+    const nonStationBefore = withoutStations(map.order)
+
+    ensureM11StationLayersOnTop(map)
+
+    expect(map.order.slice(-STATION_LAYERS.length)).toEqual(STATION_LAYERS)
+    // overlay 与 basin/national/precip/底图的相对顺序不变。
+    expect(withoutStations(map.order)).toEqual(nonStationBefore)
+    expect(map.moveLayer.mock.calls).toEqual(STATION_LAYERS.map((id) => [id]))
+    // 不引用任何未注册的层：每次 moveLayer 都不带 beforeId。
+    for (const call of map.moveLayer.mock.calls) expect(call).toHaveLength(1)
+  })
+
+  it('is a no-op when the station layers already sit on top in canonical order (no styledata loop)', () => {
+    const map = statefulMap([...BASEMAP_LAYERS, ...HYDRO_CONTEXT, ...OVERLAY_LAYERS, ...STATION_LAYERS])
+    ensureM11StationLayersOnTop(map)
+    expect(map.moveLayer).not.toHaveBeenCalled()
+
+    remountOverlay(map)
+    ensureM11StationLayersOnTop(map)
+    expect(map.moveLayer).toHaveBeenCalledTimes(STATION_LAYERS.length)
+    // 纠偏触发的下一次 styledata：必须收敛为 no-op。
+    ensureM11StationLayersOnTop(map)
+    expect(map.moveLayer).toHaveBeenCalledTimes(STATION_LAYERS.length)
+  })
+
+  it('reorders stations that are on top but out of canonical order', () => {
+    const map = statefulMap([...OVERLAY_LAYERS, 'cluster-count', 'clusters', 'met-stations-point', 'met-stations-selected-halo', 'met-stations-selected-point'])
+    ensureM11StationLayersOnTop(map)
+    expect(map.order.slice(-STATION_LAYERS.length)).toEqual(STATION_LAYERS)
+  })
+
+  it('does nothing at all when no station layer is registered', () => {
+    const map = statefulMap([...BASEMAP_LAYERS, ...HYDRO_CONTEXT, ...OVERLAY_LAYERS])
+    ensureM11StationLayersOnTop(map)
+    expect(map.moveLayer).not.toHaveBeenCalled()
+    expect(map.order).toEqual([...BASEMAP_LAYERS, ...HYDRO_CONTEXT, ...OVERLAY_LAYERS])
+  })
+
+  it('moves only the station layers that are registered', () => {
+    const partial = ['clusters', 'met-stations-point']
+    const map = statefulMap([...BASEMAP_LAYERS, ...partial, ...OVERLAY_LAYERS])
+    ensureM11StationLayersOnTop(map)
+    expect(map.moveLayer.mock.calls).toEqual([['clusters'], ['met-stations-point']])
+    expect(map.order).toEqual([...BASEMAP_LAYERS, ...OVERLAY_LAYERS, ...partial])
+    ensureM11StationLayersOnTop(map)
+    expect(map.moveLayer).toHaveBeenCalledTimes(2)
+  })
+
+  it('restores stations on top after a basemap swap rebuilds every layer with stations added first', () => {
+    const map = statefulMap([...BASEMAP_LAYERS, ...HYDRO_CONTEXT, ...OVERLAY_LAYERS, ...STATION_LAYERS])
+    // setStyle：旧层全清，新底图层先到；非 Source 子层（无）之后，各 Source 子层按 setTimeout(0) / 数据到达先后补回。
+    for (const id of [...map.order]) map.removeLayer(id)
+    addAll(map, ['satellite'])
+    addAll(map, STATION_LAYERS)
+    ensureM11StationLayersOnTop(map)
+    expect(map.moveLayer).not.toHaveBeenCalled()
+    addAll(map, OVERLAY_LAYERS)
+    ensureM11StationLayersOnTop(map)
+    addAll(map, [M11_BASIN_FILL_LAYER_ID, M11_BASIN_OUTLINE_LAYER_ID])
+    ensureM11StationLayersOnTop(map)
+    expect(map.order).toEqual(['satellite', ...OVERLAY_LAYERS, M11_BASIN_FILL_LAYER_ID, M11_BASIN_OUTLINE_LAYER_ID, ...STATION_LAYERS])
+  })
+
+  it.each([
+    ['basin boundaries', [M11_BASIN_FILL_LAYER_ID, M11_BASIN_OUTLINE_LAYER_ID]],
+    ['national river network', [M11_NATIONAL_RIVER_LINE_LAYER_ID]],
+  ])('moves stations back on top when %s arrive after them', (_label, late) => {
+    const map = statefulMap([...BASEMAP_LAYERS, ...OVERLAY_LAYERS, ...STATION_LAYERS])
+    addAll(map, late)
+    const nonStationBefore = withoutStations(map.order)
+    ensureM11StationLayersOnTop(map)
+    expect(map.order.slice(-STATION_LAYERS.length)).toEqual(STATION_LAYERS)
+    expect(withoutStations(map.order)).toEqual(nonStationBefore)
+  })
+
+  it('reads the style only through getLayersOrder / getLayer / moveLayer', () => {
+    const map = statefulMap([...OVERLAY_LAYERS, ...STATION_LAYERS])
+    remountOverlay(map)
+    map.addLayer.mockClear()
+    map.removeLayer.mockClear()
+    ensureM11StationLayersOnTop(map)
+    expect(map.addLayer).not.toHaveBeenCalled()
+    expect(map.removeLayer).not.toHaveBeenCalled()
+    expect(map.getLayersOrder).toHaveBeenCalled()
   })
 })

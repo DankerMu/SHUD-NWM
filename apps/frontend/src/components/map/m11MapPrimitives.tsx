@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import type { FeatureCollection } from 'geojson'
 import type { FilterSpecification } from 'maplibre-gl'
 import { Layer, Marker, Source } from 'react-map-gl/maplibre'
@@ -10,12 +11,24 @@ import {
   type M11LineLayerProps,
   type M11RegisteredOverlay,
 } from '@/components/map/m11MapBuilders'
+import { withM11MvtRetryProtocol } from '@/components/map/m11MvtRetryProtocol'
 import type { M11PrecipOverlayModel } from '@/components/map/m11PrecipOverlay'
 
 export const MET_STATION_SOURCE_ID = 'm11-met-stations-source'
 export const MET_STATION_CLUSTER_LAYER_ID = 'clusters'
 export const MET_STATION_CLUSTER_COUNT_LAYER_ID = 'cluster-count'
 export const MET_STATION_POINT_LAYER_ID = 'met-stations-point'
+export const MET_STATION_SELECTED_HALO_LAYER_ID = 'met-stations-selected-halo'
+export const MET_STATION_SELECTED_POINT_LAYER_ID = 'met-stations-selected-point'
+
+/** 代站层的规范栈序（自下而上），与 `M11StationClusterPrimitive` 的 JSX 顺序一致。 */
+export const M11_STATION_LAYER_ORDER = [
+  MET_STATION_CLUSTER_LAYER_ID,
+  MET_STATION_CLUSTER_COUNT_LAYER_ID,
+  MET_STATION_POINT_LAYER_ID,
+  MET_STATION_SELECTED_HALO_LAYER_ID,
+  MET_STATION_SELECTED_POINT_LAYER_ID,
+] as const
 
 export const M11_NATIONAL_RIVER_SOURCE_ID = 'm11-national-river-source'
 export const M11_NATIONAL_RIVER_LINE_LAYER_ID = 'm11-national-river-line'
@@ -30,6 +43,18 @@ const M11_OVERLAY_HIT_PAINT: M11LineLayerProps['paint'] = {
   'line-color': '#000000',
   'line-opacity': 0,
   'line-width': 16,
+}
+
+// 悬停高亮样式照搬 yd-viewer：白色光晕 + 青线；选中两层（白 10 / 橙 6）叠在其上。
+const M11_OVERLAY_HOVER_HALO_PAINT: M11LineLayerProps['paint'] = {
+  'line-color': '#FFFFFF',
+  'line-width': 8,
+  'line-opacity': 0.55,
+}
+const M11_OVERLAY_HOVER_LINE_PAINT: M11LineLayerProps['paint'] = {
+  'line-color': '#22d3ee',
+  'line-width': 4.5,
+  'line-opacity': 1,
 }
 
 export interface M11StationFeatureCollection {
@@ -65,11 +90,16 @@ export function M11OverlayPrimitive({
   overlay,
   data,
   selectedSegmentId,
+  hoveredSegmentId,
 }: {
   overlay: M11RegisteredOverlay
   data: FeatureCollection | null
   selectedSegmentId?: string | null
+  /** 悬停河段 id；null 时 `segmentFilter(null)` 匹配空串，不命中任何要素。 */
+  hoveredSegmentId?: string | null
 }) {
+  // `nhms-mvt://` 前缀只在这里加：builder 输出的 `source.tiles` 保持普通 https（fixture D1）。
+  const tiles = useMemo(() => overlay.source.tiles.map(withM11MvtRetryProtocol), [overlay.source.tiles])
   const isLine = overlay.layer.type === 'line'
   const sourceLayerProp = overlay.layer['source-layer'] ? { 'source-layer': overlay.layer['source-layer'] } : {}
   const casingLayer = isLine
@@ -93,6 +123,28 @@ export function M11OverlayPrimitive({
       }
     : null
   const mainLayer = isLine ? { ...overlay.layer, layout: M11_ROUND_LINE_LAYOUT } : overlay.layer
+  const hoverHaloLayer = isLine
+    ? {
+        id: `${overlay.layer.id}-hover-halo`,
+        type: 'line' as const,
+        source: overlay.sourceId,
+        ...sourceLayerProp,
+        layout: M11_ROUND_LINE_LAYOUT,
+        filter: segmentFilter(hoveredSegmentId),
+        paint: M11_OVERLAY_HOVER_HALO_PAINT,
+      }
+    : null
+  const hoverLineLayer = isLine
+    ? {
+        id: `${overlay.layer.id}-hover-line`,
+        type: 'line' as const,
+        source: overlay.sourceId,
+        ...sourceLayerProp,
+        layout: M11_ROUND_LINE_LAYOUT,
+        filter: segmentFilter(hoveredSegmentId),
+        paint: M11_OVERLAY_HOVER_LINE_PAINT,
+      }
+    : null
   const selectedHaloLayer = isLine
     ? {
         id: `${overlay.layer.id}-selected-halo`,
@@ -129,7 +181,7 @@ export function M11OverlayPrimitive({
         key={overlay.sourceKey}
         id={overlay.sourceId}
         type="vector"
-        tiles={overlay.source.tiles}
+        tiles={tiles}
         minzoom={overlay.source.minzoom}
         maxzoom={overlay.source.maxzoom}
         promoteId="feature_id"
@@ -137,6 +189,8 @@ export function M11OverlayPrimitive({
         {casingLayer ? <Layer {...casingLayer} /> : null}
         <Layer {...mainLayer} />
         {hitLayer ? <Layer {...hitLayer} /> : null}
+        {hoverHaloLayer ? <Layer {...hoverHaloLayer} /> : null}
+        {hoverLineLayer ? <Layer {...hoverLineLayer} /> : null}
         {selectedHaloLayer ? <Layer {...selectedHaloLayer} /> : null}
         {selectedLineLayer ? <Layer {...selectedLineLayer} /> : null}
       </Source>
@@ -148,6 +202,8 @@ export function M11OverlayPrimitive({
       {casingLayer ? <Layer {...casingLayer} /> : null}
       <Layer {...mainLayer} />
       {hitLayer ? <Layer {...hitLayer} /> : null}
+      {hoverHaloLayer ? <Layer {...hoverHaloLayer} /> : null}
+      {hoverLineLayer ? <Layer {...hoverLineLayer} /> : null}
       {selectedHaloLayer ? <Layer {...selectedHaloLayer} /> : null}
       {selectedLineLayer ? <Layer {...selectedLineLayer} /> : null}
     </Source>
@@ -221,11 +277,13 @@ export function M11NationalRiverPrimitive({
   dimmed: boolean
   satellite: boolean
 }) {
+  // 同 overlay：重试协议前缀只加在交给 MapLibre 的 tiles 上，调用方数据保持普通 https。
+  const retryTiles = useMemo(() => tiles.map(withM11MvtRetryProtocol), [tiles])
   return (
     <Source
       id={M11_NATIONAL_RIVER_SOURCE_ID}
       type="vector"
-      tiles={tiles}
+      tiles={retryTiles}
       minzoom={minzoom}
       maxzoom={maxzoom}
       promoteId="segment_id"
@@ -375,7 +433,7 @@ export function M11StationClusterPrimitive({
         }}
       />
       <Layer
-        id="met-stations-selected-halo"
+        id={MET_STATION_SELECTED_HALO_LAYER_ID}
         type="circle"
         source={MET_STATION_SOURCE_ID}
         filter={stationFilter(selectedStationId)}
@@ -388,7 +446,7 @@ export function M11StationClusterPrimitive({
         }}
       />
       <Layer
-        id="met-stations-selected-point"
+        id={MET_STATION_SELECTED_POINT_LAYER_ID}
         type="circle"
         source={MET_STATION_SOURCE_ID}
         filter={stationFilter(selectedStationId)}
@@ -402,6 +460,30 @@ export function M11StationClusterPrimitive({
       />
     </Source>
   )
+}
+
+/** `ensureM11StationLayersOnTop` 只依赖的三个 map 方法；maplibre-gl 的 `Map` 结构上满足。 */
+export interface M11StationLayerOrderMap {
+  getLayersOrder(): string[]
+  getLayer(id: string): unknown
+  moveLayer(id: string): unknown
+}
+
+/**
+ * 代站层保持在 style 栈顶（#2650，fixture D3）：由 surface 的 `<Map onStyleData>` 在每次 style 变化后调用。
+ *
+ * overlay Source 重挂载（sourceKey 随时间轴变化、从 null 恢复）、换底图、流域面 / 全国河网晚到时，
+ * react-map-gl 都会把这些层 `addLayer` 追加到栈顶，压住代站。这里不用 beforeId 锚点（Source 子层要到
+ * `setTimeout(0)` 之后才补上，锚点层的实际位置不可控），而是把已注册的代站层按规范顺序逐个 `moveLayer`
+ * 到栈顶。栈顶已是规范顺序时零次 moveLayer，纠偏引发的下一次 styledata 因此收敛，不会循环。
+ * 只用 getLayersOrder / getLayer / moveLayer；代站层存在即意味着 style 已加载（addLayer 同样要求）。
+ */
+export function ensureM11StationLayersOnTop(map: M11StationLayerOrderMap): void {
+  const registered = M11_STATION_LAYER_ORDER.filter((id) => Boolean(map.getLayer(id)))
+  if (registered.length === 0) return
+  const top = map.getLayersOrder().slice(-registered.length)
+  if (top.length === registered.length && top.every((id, index) => id === registered[index])) return
+  for (const id of registered) map.moveLayer(id)
 }
 
 function m11OverlayCasingPaint(): M11LineLayerProps['paint'] {

@@ -16,7 +16,17 @@ export function installMaplibreStubMap(map: unknown) {
 type MaplibreMapStubProps = {
   children?: React.ReactNode
   onClick?: (event: unknown) => void
+  onMouseMove?: (event: unknown) => void
+  onMouseLeave?: (event: unknown) => void
+  onStyleData?: (event: unknown) => void
 }
+
+/**
+ * 最近一次渲染时 `Map` 收到的事件 prop（mousemove / mouseleave / styledata）。
+ * 测试经 `act(() => maplibreMapStubProps.current?.onMouseMove?.(event))` 直接驱动生产回调，
+ * 断言落在 surface 的 DOM 观测面上；不改既有 click 按钮的行为。
+ */
+export const maplibreMapStubProps: { current: MaplibreMapStubProps | null } = { current: null }
 
 /**
  * Faithful ordinary-click seam: expose the production `onClick` so a test can
@@ -26,6 +36,7 @@ type MaplibreMapStubProps = {
  */
 export const MaplibreMapStub = forwardRef<unknown, MaplibreMapStubProps>(function MaplibreMapStub(props, ref) {
   useImperativeHandle(ref, () => maplibreStubState.current)
+  maplibreMapStubProps.current = props
   return (
     <div data-testid="mock-maplibre-map">
       <button
@@ -54,21 +65,29 @@ export function MaplibreControlStub() {
  * 除多包一层 `div` 外仍是纯透传桩，不影响只查 `m11-map-surface` 属性的既有用例。
  */
 export function MaplibreSourceStub({
+  id,
   type,
   url,
+  tiles,
   coordinates,
   children,
 }: {
+  id?: string
   type?: string
   url?: string
+  tiles?: string[]
   coordinates?: unknown
   children?: React.ReactNode
 }) {
   return (
     <div
       data-testid="maplibre-source"
+      data-source-id={id}
       data-source-type={type}
       data-source-url={url ?? undefined}
+      // vector source 的 `tiles`：`nhms-mvt://` 重试前缀只在 primitive 渲染 `<Source tiles>` 时加，
+      // 不透出就无法区分「builder 输出（普通 https）」与「真正交给 MapLibre 的 URL」。
+      data-source-tiles={tiles ? JSON.stringify(tiles) : undefined}
       // `image` source 的四角：spec 要求栅格贴在 index 的 bbox 上，而「从模型推出四角」与
       // 「把四角真的传给 Source」是两件事——后者没有观测面时，硬编码 bbox 的漂移抓不到。
       data-source-coordinates={coordinates ? JSON.stringify(coordinates) : undefined}
@@ -88,10 +107,12 @@ export function MaplibreLayerStub({
   id,
   beforeId,
   paint,
+  filter,
 }: {
   id?: string
   beforeId?: string
   paint?: unknown
+  filter?: unknown
 }) {
   return (
     <div
@@ -99,6 +120,8 @@ export function MaplibreLayerStub({
       data-layer-id={id}
       data-layer-before-id={beforeId ?? undefined}
       data-layer-paint={paint ? JSON.stringify(paint) : undefined}
+      // 悬停 / 选中高亮的 oracle 是 `filter`（segmentFilter(id)），不透出就只能断言层存在。
+      data-layer-filter={filter ? JSON.stringify(filter) : undefined}
     />
   )
 }
