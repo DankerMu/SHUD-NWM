@@ -11372,6 +11372,17 @@ def test_directory_rule_disposition_selects_the_audit_floor(module_path: str, re
             "scripts/ops/node27_1480_backfill_seed_station_provenance_rollback.sql",
             "tests/test_node27_1480_seed_provenance_backfill_integration.py",
         ),
+        # #2621: the rename-leftover pair, the runner that executes it, and the audit.
+        ("scripts/ops/node27_oneshot_sql.py", "tests/test_node27_2621_rename_leftovers_delete_integration.py"),
+        (
+            "scripts/ops/node27_2621_delete_rename_leftovers.sql",
+            "tests/test_node27_2621_rename_leftovers_delete_integration.py",
+        ),
+        (
+            "scripts/ops/node27_2621_delete_rename_leftovers_rollback.sql",
+            "tests/test_node27_2621_rename_leftovers_delete_integration.py",
+        ),
+        ("scripts/basin_catalog_manifest_audit.py", "tests/test_basin_catalog_manifest_audit_integration.py"),
     ),
 )
 def test_river_expand_sources_open_the_database_lane(module_path: str, suite: str) -> None:

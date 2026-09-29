@@ -5969,13 +5969,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ("tests/test_production_scheduler.py",),
     ),
     PathTestRule(
-        # #1729 / #1480: the runner is the executor both disposable-DB suites
-        # drive; the grammar suite is its same-name owner.
+        # #1729 / #1480 / #2621: the runner is the executor the disposable-DB
+        # suites drive; the grammar suite is its same-name owner.
         "scripts/ops/node27_oneshot_sql.py",
         (
             "tests/test_node27_oneshot_sql.py",
             "tests/test_node27_1729_evidence_basin_delete_integration.py",
             "tests/test_node27_1480_seed_provenance_backfill_integration.py",
+            "tests/test_node27_2621_rename_leftovers_delete_integration.py",
         ),
     ),
     PathTestRule(
@@ -5989,6 +5990,20 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # #1480: same shape as the #1729 trio for the backfill / rollback pair.
         "scripts/ops/node27_1480_backfill_seed_station_provenance*.sql",
         ("tests/test_node27_oneshot_sql.py", "tests/test_node27_1480_seed_provenance_backfill_integration.py"),
+    ),
+    PathTestRule(
+        # #2621: the rename-leftover delete / rollback pair, same shape as #1729:
+        # the grammar suite pins its markers, column guard and replica windows,
+        # the disposable-DB suite executes both files (ci.yml's `database:` lane).
+        "scripts/ops/node27_2621_delete_rename_leftovers*.sql",
+        ("tests/test_node27_oneshot_sql.py", "tests/test_node27_2621_rename_leftovers_delete_integration.py"),
+    ),
+    PathTestRule(
+        # #2621: the catalog/manifest audit. Its same-name unit suite still
+        # derives; the real-PG suite drives the production `list_basins` it
+        # reuses, so it rides the database lane too.
+        "scripts/basin_catalog_manifest_audit.py",
+        ("tests/test_basin_catalog_manifest_audit_integration.py",),
     ),
     PathTestRule(
         # #1823: the display-API wrapper's entropy reach is now the fifteen

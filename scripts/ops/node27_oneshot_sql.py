@@ -13,7 +13,16 @@ The file is plain SQL plus two marker comments, each applying to the ONE
     -- @copy-out NAME   COPY (...) TO STDOUT  -> <copy-dir>/NAME.copy (never overwritten)
     -- @copy-in NAME    COPY ... FROM STDIN   <- <copy-dir>/NAME.copy (must exist)
 
-A file with any marker is refused without ``--copy-dir``. Every copy-out file
+A third marker, at most once per file, declares the ``--set`` keys the file
+reads (none after the marker = it reads none)::
+
+    -- @settings nhms.a nhms.b
+
+A file that declares refuses any other ``--set`` key before connecting (a
+placeholder setting is invisible to ``pg_settings`` on PostgreSQL 15, so the
+file itself cannot see an undeclared one); a file without the marker accepts
+any well-formed key, as before. A file with any copy marker is refused without
+``--copy-dir``. Every copy-out file
 is flushed and fsynced (and so is the directory) before the transaction ends,
 so a committed delete never outlives its backup on disk. Everything between
 markers runs as one ``execute``. ``--set key=value`` binds custom settings
@@ -44,6 +53,7 @@ from pathlib import Path
 _APPLICATION_NAME = "nhms-oneshot-sql"
 _MARKER = re.compile(r"^-- @(copy-out|copy-in) ([a-z0-9_.]+)\s*$")
 _SETTING = re.compile(r"^[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*$")
+_SETTINGS_MARKER = re.compile(r"^-- @settings\b(.*)$")
 
 
 @dataclass(frozen=True)
@@ -106,6 +116,22 @@ def parse_segments(text: str) -> list[Segment]:
     return segments
 
 
+def declared_settings(text: str) -> frozenset[str] | None:
+    """The ``--set`` keys a script declares with ``-- @settings``; None when it declares nothing."""
+    declared: frozenset[str] | None = None
+    for line in text.splitlines():
+        marker = _SETTINGS_MARKER.match(line.rstrip())
+        if marker is None:
+            continue
+        if declared is not None:
+            raise ValueError("@settings: more than one declaration")
+        names = marker.group(1).split()
+        if not all(_SETTING.fullmatch(name) for name in names):
+            raise ValueError(f"@settings: malformed declaration {line.strip()!r}")
+        declared = frozenset(names)
+    return declared
+
+
 def _code_lines(sql: str) -> list[str]:
     return [line.strip() for line in sql.splitlines() if line.strip() and not line.strip().startswith("--")]
 
@@ -127,12 +153,17 @@ def run_sql_file(
     """Execute ``sql_path`` in one transaction; commit only when ``apply``."""
     import psycopg2
 
-    segments = parse_segments(Path(sql_path).read_text(encoding="utf-8"))
+    text = Path(sql_path).read_text(encoding="utf-8")
+    segments = parse_segments(text)
+    declared = declared_settings(text)
     if any(segment.copy for segment in segments) and copy_dir is None:
         raise ValueError(f"{sql_path} has @copy markers; a copy directory is required")
     for key in settings or {}:
         if not _SETTING.fullmatch(key):
             raise ValueError(f"--set {key}: only custom `prefix.name` settings are accepted")
+        if declared is not None and key not in declared:
+            listed = " ".join(sorted(declared)) or "-"
+            raise ValueError(f"--set {key}: not declared by {sql_path} (@settings {listed})")
     report = RunReport(committed=False)
     connection = psycopg2.connect(database_url, fallback_application_name=_APPLICATION_NAME)
     connection.autocommit = False
