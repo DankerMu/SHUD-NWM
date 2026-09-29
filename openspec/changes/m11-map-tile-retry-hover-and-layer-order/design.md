@@ -41,7 +41,7 @@
 - 生效范围：只包装 M11 surface 注册的 MVT vector source，即 `M11OverlayPrimitive` vector 分支的 `tiles` 和 `M11NationalRiverPrimitive` 的 `tiles`。`buildMvtTileUrlTemplate` 与 `sourceKey` 都不改，所以 URL 身份、缓存版本参数和 e2e 路由拦截（主线程 `fetch`）都不受影响。
 - **包装位置写死**：`nhms-mvt://` 前缀**只**在 primitive 渲染 `<Source tiles>` 时加。`buildMvtTileUrlTemplate`、`buildM11RegisteredOverlay(...).source.tiles` 和全国河网的 `tiles` 数据都保持普通 `https` URL，因为 `M11Shell.test.tsx` 等处用 `new URL(tiles[0])` 解析它们。
 - 必须抛 maplibre 导出的 `AJAXError`：它已注册跨线程序列化，`status` 能回到 worker。自定义 Error 经 structured clone 会丢掉 status，404 就会变成 error 事件。
-- 注册时机：`M11MapLibreSurface` 模块加载时调用一次（幂等）。
+- 注册时机：`m11MapPrimitives.tsx` 模块加载时调用一次（幂等）——它是唯一给 `<Source tiles>` 加 `nhms-mvt://` 前缀的模块，注册与加前缀同处一处，前缀不可能脱离处理器被使用。
 - 备选方案：`transformRequest` 做不了重试；在 source 的 `error` 事件里重载整个 source 会冲掉所有瓦片。两者都否决。
 
 ### D2 悬停状态留在 surface 内，按 id 去重

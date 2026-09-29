@@ -40,7 +40,6 @@ import {
   m11RegisteredOverlayHitLayerId,
   type M11StationFeatureCollection,
 } from '@/components/map/m11MapPrimitives'
-import { registerM11MvtRetryProtocol } from '@/components/map/m11MvtRetryProtocol'
 import type { M11PrecipOverlayModel } from '@/components/map/m11PrecipOverlay'
 import { m11SelectionDataAttributes, resolveM11SelectedSegmentMapState } from '@/components/map/m11MapSelection'
 import {
@@ -84,10 +83,6 @@ export {
 export type { M11MapOverlayInteraction } from '@/components/map/m11MapInteractions'
 export { m11MapStyleUrls, type M11MapCameraFit, type M11MapCameraFlyTo } from '@/components/map/m11MapRuntime'
 export { m11NationalRiverPaint, type M11StationFeatureCollection } from '@/components/map/m11MapPrimitives'
-
-// MVT 冷生成繁忙重试协议（#2537）：模块加载时注册一次（幂等），surface 的 vector source 经
-// `nhms-mvt://` 前缀走它。
-registerM11MvtRetryProtocol()
 
 // Monotonic token source and the token of the currently installed hook.
 // Cleanup deletes only when both object identity and the installed token match.

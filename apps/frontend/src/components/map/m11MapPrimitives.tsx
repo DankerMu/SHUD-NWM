@@ -11,8 +11,12 @@ import {
   type M11LineLayerProps,
   type M11RegisteredOverlay,
 } from '@/components/map/m11MapBuilders'
-import { withM11MvtRetryProtocol } from '@/components/map/m11MvtRetryProtocol'
+import { registerM11MvtRetryProtocol, withM11MvtRetryProtocol } from '@/components/map/m11MvtRetryProtocol'
 import type { M11PrecipOverlayModel } from '@/components/map/m11PrecipOverlay'
+
+// MVT 冷生成繁忙重试协议（#2537）：模块加载时注册一次（幂等）。与加 `nhms-mvt://` 前缀的 primitive 同处
+// 一个模块，保证前缀绝不会脱离处理器被使用。
+registerM11MvtRetryProtocol()
 
 export const MET_STATION_SOURCE_ID = 'm11-met-stations-source'
 export const MET_STATION_CLUSTER_LAYER_ID = 'clusters'
