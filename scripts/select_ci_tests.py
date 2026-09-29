@@ -5828,6 +5828,8 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_node27_mvt_cache_retention.py",
             "tests/test_node27_mvt_cache_retention_basemap.py",
+            # BASEMAP_LAYERS is pinned to the route's TiandituLayer there.
+            "tests/test_basemap_proxy.py",
         ),
     ),
     PathTestRule(
