@@ -145,6 +145,7 @@ def _prepare_autopipe(
     basins_root = tmp_path / "Basins"
     work_root = tmp_path / "autopipe-work"
     log_root = tmp_path / "autopipe-logs"
+    object_store_root.mkdir()
     basins_root.mkdir()
     work_root.mkdir()
     log_root.mkdir()
