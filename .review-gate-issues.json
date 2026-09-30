@@ -3752,6 +3752,11 @@
           "pr": 2613,
           "outcome": "merged",
           "rounds": 1
+        },
+        {
+          "pr": 2698,
+          "outcome": "merged",
+          "rounds": 2
         }
       ]
     },
@@ -4467,6 +4472,39 @@
       "closed": [
         {
           "pr": 2693,
+          "outcome": "merged",
+          "rounds": 2
+        }
+      ]
+    },
+    "2594": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 2698,
+          "outcome": "merged",
+          "rounds": 2
+        }
+      ]
+    },
+    "2595": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 2698,
+          "outcome": "merged",
+          "rounds": 2
+        }
+      ]
+    },
+    "2615": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 2698,
           "outcome": "merged",
           "rounds": 2
         }
