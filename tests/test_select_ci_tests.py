@@ -1524,6 +1524,7 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         # sort here, between the lineage and timing suites — the literal is
         # compared against `select_tests`'s sorted output, so placement matters.
         *SCHEDULER_REFRESH_TESTS,
+        "tests/test_scheduler_registry_capacity.py",
         # #2453: the root-check loop-convergence suite rides the broad
         # orchestrator directory rule — that route closes the importer gaps of
         # `services/orchestrator/__init__.py` and scheduler_runtime_roots.py.
