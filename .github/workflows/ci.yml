@@ -127,6 +127,11 @@ jobs:
               - 'scripts/ops/node27_1729_delete_evidence_basin_rollback.sql'
               - 'scripts/ops/node27_1480_backfill_seed_station_provenance.sql'
               - 'scripts/ops/node27_1480_backfill_seed_station_provenance_rollback.sql'
+              # #2621: the rename-leftover delete / rollback pair and the catalog /
+              # manifest audit (production `list_basins` over a real catalog).
+              - 'scripts/ops/node27_2621_delete_rename_leftovers.sql'
+              - 'scripts/ops/node27_2621_delete_rename_leftovers_rollback.sql'
+              - 'scripts/basin_catalog_manifest_audit.py'
 
               - '.github/workflows/ci.yml'
               - 'pyproject.toml'
