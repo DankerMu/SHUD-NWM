@@ -24,7 +24,7 @@ Fixture level: standard. Risk packs:
 
 - [x] 2.1 Add `latest_complete_cycle` in `tests/object_store_forcing_real_disk_support.py` (D2), use it through a lazy module-scoped fixture, and derive every time from it; no hardcoded real date remains in the source.
 - [x] 2.2 Add local unit tests in `tests/test_object_store_forcing_real_disk_support.py`: newest common cycle wins, incomplete cycle skipped, a too-fresh file excluded, empty intersection fails with the diagnostic.
-- [ ] 2.3 On node-27, run the suite read-only as `nhms_display_ro`, with `DATABASE_URL`, `OBJECT_STORE_ROOT`, `NHMS_RUN_E2E=1` and `NHMS_RUN_REAL_DISK=1` set: the result must be **4 passed, 0 skipped**, and the receipt records the chosen cycle.
+- [ ] 2.3 On node-27, run the suite read-only as `nhms_display_ro`, with `DATABASE_URL`, `OBJECT_STORE_ROOT`, `NHMS_RUN_E2E=1` and `NHMS_RUN_REAL_DISK=1` set, with `-rA` (`-q` drops the fixture's print): the result must be **4 passed, 0 skipped**, and the receipt records the chosen cycle.
 
 ## 3. #2594 GRIB lane
 
@@ -35,7 +35,7 @@ Fixture level: standard. Risk packs:
 ## 4. #2615 worktree lane
 
 - [x] 4.1 Write the runbook recipe: PATH, PYTHONPATH, TMPDIR, the `packages.__file__` assertion, and why PYTHONPATH must stay.
-- [x] 4.2 Decouple tests A and B from the environment.
+- [x] 4.2 Decouple tests A and B from the environment. A exports `PYTHONPATH` itself so dropping the stripping goes red; B has `_validator()` unit tests for the PATH hit, the beside-interpreter fallback, no `.resolve()`, and the not-found message.
 - [ ] 4.3 On node-27, run the two files with the recipe and all pass. A passes with `PYTHONPATH` exported; B passes with no `.venv/bin` on `PATH`. The local `uv run pytest` also passes.
 
 ## 5. Closing

@@ -61,7 +61,7 @@
 ## D4 #2615: detached-worktree lane
 
 - **Runbook recipe.** Place it after the node-27 lane fence.
-  1. `git worktree add --detach <wt> <sha>`, then `cd <wt>`.
+  1. Canonicalise `<wt>` with `realpath -m` (node-27's `HOME` has a trailing slash, and Python drops the resulting `//` from `packages.__file__`), then `git worktree add --detach <wt> <sha>` and `cd <wt>`.
   2. Set `PATH=<active checkout>/.venv/bin:$PATH` (write it as `$HOME/NWM/.venv/bin`), `PYTHONPATH=<wt>` and `TMPDIR=/home/nwm/tmp`.
   3. Before pytest, assert `python -P -c 'import packages; assert packages.__file__.startswith("<wt>/"), packages.__file__'`. The `-P` is required: without it `-c` puts the cwd first on `sys.path`, and the check passes vacuously.
   4. Explain why `PYTHONPATH` must stay: the active venv's editable finder maps `packages` to the active checkout, so without it any subprocess started by path would silently import that checkout's code.

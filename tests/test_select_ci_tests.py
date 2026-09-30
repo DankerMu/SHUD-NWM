@@ -3994,7 +3994,7 @@ def test_raw_retention_env_template_selects_exactly_its_readers_and_glob_suites(
     `test_documented_operator_check_goes_red_on_an_unsafe_skip` runs it with real `jq`
     against a real summary, so the operator criterion is asserted from this path and
     nowhere else;
-    `tests/test_node27_mvt_cache_retention.py::test_the_raw_retention_env_example_points_at_this_runner`
+    `tests/test_node27_mvt_cache_retention_wrapper.py::test_the_raw_retention_env_example_points_at_this_runner`
     `read_text`s the same path and pins the sibling-runner cross-reference in it.
     Before the path-exact row this template matched only `infra/env/node27-*.example`
     (-> `tests/test_node27_write_roles.py`, which scans every `infra/env/*.example` for

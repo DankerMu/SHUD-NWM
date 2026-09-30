@@ -111,6 +111,25 @@ before any test runs. If that fails, pytest stops with a single usage error
 (exit code 4) that names the missing ecCodes runtime and points here. It never
 skips: an opted-in lane that skips would look green.
 
+### real_disk cycle receipt (#2595)
+
+`tests/test_object_store_forcing_real_disk.py` (markers `e2e` + `real_disk`)
+also needs `NHMS_RUN_REAL_DISK=1`, `OBJECT_STORE_ROOT` and a read-only
+`DATABASE_URL` (`nhms_display_ro`). It picks the newest cycle that all four
+station/source combinations have in the store and prints it once per module
+(`real_disk cycle: ...`). pytest captures that print, so `-q` and `-v` drop it
+from the log. Run this suite with `-rA` (or `-s`) so the chosen cycle lands in
+the receipt:
+
+```bash
+NHMS_RUN_E2E=1 NHMS_RUN_REAL_DISK=1 uv run --no-sync pytest -rA \
+  tests/test_object_store_forcing_real_disk.py | tee artifacts/ci-routing/real-disk-$(date +%F).log
+```
+
+With `-rA` the line appears in the `PASSES` section, under the captured stdout
+of the first test's setup. The receipt must read 4 passed, 0 skipped, plus that
+line.
+
 ## node-27 detached-worktree lane (#2615)
 
 Use this to test a commit on node-27 without moving the active checkout
@@ -122,11 +141,11 @@ ssh -p 32099 nwm@210.77.77.27
 set -euo pipefail
 cd $HOME/NWM
 git fetch origin
-WT=$HOME/wt-<sha>
-git worktree add --detach $WT <sha>
-cd $WT
+WT=$(realpath -m "$HOME/wt-<sha>")
+git worktree add --detach "$WT" <sha>
+cd "$WT"
 export PATH=$HOME/NWM/.venv/bin:$PATH
-export PYTHONPATH=$WT
+export PYTHONPATH="$WT"
 mkdir -p /home/nwm/tmp
 export TMPDIR=/home/nwm/tmp
 python -P -c "import packages; assert packages.__file__.startswith('$WT/'), packages.__file__"
@@ -138,6 +157,11 @@ before pytest.
 
 Why each line is there:
 
+- `WT=$(realpath -m ...)` canonicalises the path. node-27's `HOME` is
+  `/home/nwm/` (trailing slash), so a bare `$HOME/wt-<sha>` becomes
+  `/home/nwm//wt-<sha>`; Python normalises the double slash out of
+  `packages.__file__`, and the `startswith('$WT/')` assertion below would then
+  fail even though the right code is loaded.
 - `PATH` puts the active venv's `bin` first, so `python` is the venv
   interpreter and console scripts the tests call by name (for example
   `check-jsonschema`) resolve. Without it those tests fail as false reds.

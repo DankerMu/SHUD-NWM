@@ -5777,7 +5777,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # EXTRACTS the documented `jq` program out of this file and runs it
         # against a real summary, so a typo in the program reds there and
         # nowhere else, and
-        # `tests/test_node27_mvt_cache_retention.py::test_the_raw_retention_env_example_points_at_this_runner`
+        # `tests/test_node27_mvt_cache_retention_wrapper.py::test_the_raw_retention_env_example_points_at_this_runner`
         # pins the sibling-runner cross-reference in it. Additive: the glob rows
         # still match and every target set is unioned.
         "infra/env/node27-raw-retention.example",
