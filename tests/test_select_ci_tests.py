@@ -1150,18 +1150,29 @@ def test_select_tests_routes_the_cancel_route_to_its_rendered_versus_raw_oracle(
     `tests/test_retry_cancel_consistency.py` is the sole suite that drives
     `POST /runs/{run_id}/cancel` through TestClient and asserts BOTH shapes of
     one gateway error -- the rendered response body and the raw persisted
-    `slurm_cancellation_gap` / `cancel_failed` event. Nothing derives it from
-    this route: the importer index is queried only for a changed path that is
-    itself a suite, never for a production module, and no closure guard forces a
-    derived importer set onto this rule -- `apps/api/routes/pipeline.py` is in
-    neither `GUARDED_MODULE_CLOSURES` nor `DIRECTORY_RULE_AUDIT_PATHS`. Neither
-    the broad `apps/api/**` rule nor same-name derivation names it either;
-    without this rule a diff that re-shared the two payloads reached CI green.
+    `slurm_cancellation_gap` / `cancel_failed` event. The selector never derives
+    it at selection time: the importer index is queried only for a changed path
+    that is itself a suite, never for a production module. Since #2576
+    `apps/api/routes/pipeline.py` is in `GUARDED_MODULE_CLOSURES` (direct-only
+    mode, with this suite as its anchor), so dropping it from the rule reds the
+    closure guard as well as this pin. Neither the broad `apps/api/**` rule nor
+    same-name derivation names it; without this rule a diff that re-shared the
+    two payloads reached CI green.
     """
 
     selected = select_tests(["apps/api/routes/pipeline.py"], repo_root=Path("."))
 
     assert "tests/test_retry_cancel_consistency.py" in selected
+
+
+def test_select_tests_routes_the_pipeline_route_to_the_retry_http_oracle() -> None:
+    """#2568: `tests/test_retry.py` is the only HTTP-level oracle for
+    `POST /runs/{run_id}/retry`, so a route-only diff selects the whole file
+    (not the six journal-render node ids the journal owner selects)."""
+
+    selected = select_tests(["apps/api/routes/pipeline.py"], repo_root=Path("."))
+
+    assert "tests/test_retry.py" in selected
 
 
 def test_select_tests_routes_every_read_blocked_sentinel_source_to_its_coupling_pin() -> None:
@@ -1315,7 +1326,9 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
     # sentinel coupling pin, ~1s; #2453 the root-check loop-convergence suite,
     # 51 tests in ~0.3s, DB-free; #2542/#2546/#2557/#2539 the member-charge,
     # convert-members, hydro-attempt triage and manifest-contract suites, ~7s
-    # together, DB-free), the
+    # together, DB-free; #2624 the two response-model preservation halves,
+    # 25 tests in 1.12s (1.96s wall with interpreter start-up), measured
+    # locally with `uv run pytest -q`, DB-free — retry.py grows 120 -> 122), the
     # rule's targets plus four riders that arrive from OUTSIDE the
     # rule — `tests/test_select_ci_tests.py` by the same-name route, #2185's
     # river-segment write-surface scan by the services/** supplemental route,
@@ -1469,6 +1482,10 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_reconcile_sacct_parse.py",
         "tests/test_replay_lineage.py",
         RESOLVE_SURFACE_GUARD_PATH,
+        # #2624: the preservation oracle drives persistence.py, public_evidence.py
+        # and retry.py un-faked through apps/api/routes/pipeline.py.
+        "tests/test_response_model_preservation.py",
+        "tests/test_response_model_preservation_pipeline.py",
         "tests/test_retention.py",
         # #1872 (+#2238 EF-16, `services/orchestrator/__init__.py` leg): the five
         # retention partitions ride the broad orchestrator directory rule
@@ -1652,6 +1669,9 @@ def test_select_tests_maps_forecast_store_without_core_smoke_fallback() -> None:
             "tests/test_river_ts_render_reference_lexer.py",
             "tests/test_river_ts_template_golden.py",
             "tests/test_sql_shape_helpers.py",
+            # selector-route-gaps-batch-ci1 D5: a non-gated module-scope importer
+            # that drives the store's stats read paths offline.
+            "tests/test_river_ts_stats_harness_offline.py",
             # I11 #1990 task 7.2: five of the nine registered FORCING read
             # templates live in this file, and it is the only wired reader file
             # still in the forcing census (its two index/catalog metadata
@@ -2478,6 +2498,37 @@ def test_precip_composition_owner_rules_carry_neither_selection_flag() -> None:
         assert not matching[0].only_when_any_changed, pattern
 
 
+_PRECIP_LEAK_PEERS = (
+    "apps/api/routes/best_available.py",
+    "apps/api/routes/data_sources.py",
+    "apps/api/routes/models.py",
+    "apps/api/routes/pipeline.py",
+    "apps/api/routes/state_snapshots.py",
+)
+
+
+def _precip_direct_importer_exemptions() -> dict[str, set[str]]:
+    """Per peer, the precip-only suites that import that peer at module level."""
+    exemptions: dict[str, set[str]] = {}
+    for peer in _PRECIP_LEAK_PEERS:
+        own = set(_PRECIP_ONLY_VIA_OWNER_RULE) & _non_gated_top_level_importer_tests(_dotted_module_name(peer))
+        if own:
+            exemptions[peer] = own
+    return exemptions
+
+
+def _precip_leak_offenders() -> list[str]:
+    """Peers that select a precip-only suite they do not import-own."""
+    exemptions = _precip_direct_importer_exemptions()
+    offenders: list[str] = []
+    for peer in _PRECIP_LEAK_PEERS:
+        selected = set(select_tests([peer], repo_root=Path(".")))
+        leaked = (set(_PRECIP_ONLY_VIA_OWNER_RULE) & selected) - exemptions.get(peer, set())
+        if leaked:
+            offenders.append(f"{peer}: inherited precip suites {sorted(leaked)}")
+    return offenders
+
+
 def test_connection_attribution_tuple_peers_are_untouched_by_the_registry_split() -> None:
     """#2098 — the MERGE-not-DROP guard for the shared attribution tuple.
 
@@ -2492,30 +2543,60 @@ def test_connection_attribution_tuple_peers_are_untouched_by_the_registry_split(
     Membership rather than exact equality: same-name derivation adds a suite to some of
     these paths (`apps/api/routes/best_available.py` picks up
     `tests/test_best_available.py`), which is not what this guard is about.
+
+    #2576 narrowed the leak check: a precip suite the peer reaches because it imports
+    that peer at module level is the peer's own direct importer, not an inherited
+    rider. `tests/test_openapi_31_contract.py` imports `apps.api.routes.pipeline`, so
+    the pipeline rule carries it for the closure guard. The exemption is derived per
+    peer and pinned literally below so it cannot grow into a blanket waiver, and
+    `..._leak_check_still_reds_when_the_shared_tuple_widens` proves the check bites.
     """
-    peers = (
-        "apps/api/routes/best_available.py",
-        "apps/api/routes/data_sources.py",
-        "apps/api/routes/models.py",
-        "apps/api/routes/pipeline.py",
-        "apps/api/routes/state_snapshots.py",
-    )
     attribution_suites = {
         "tests/test_node27_connection_attribution.py",
         "tests/test_node27_connection_attribution_delegated.py",
     }
-    for peer in peers:
+    for peer in _PRECIP_LEAK_PEERS:
         assert Path(peer).exists()
         selected = set(select_tests([peer], repo_root=Path(".")))
         assert attribution_suites <= selected, f"{peer}: lost an attribution suite (got {sorted(selected)})"
-        leaked = set(_PRECIP_ONLY_VIA_OWNER_RULE) & selected
-        assert not leaked, f"{peer}: inherited precip suites {sorted(leaked)}"
+    assert _precip_direct_importer_exemptions() == {
+        "apps/api/routes/pipeline.py": {"tests/test_openapi_31_contract.py"},
+    }
+    offenders = _precip_leak_offenders()
+    assert not offenders, "; ".join(offenders)
 
     registry_selected = set(select_tests(["apps/api/route_registry.py"], repo_root=Path(".")))
     assert attribution_suites <= registry_selected, (
         "the registry's own rule dropped the attribution suites instead of merging them "
         f"(got {sorted(registry_selected)})"
     )
+
+
+def test_connection_attribution_peer_leak_check_still_reds_when_the_shared_tuple_widens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2576 mutation: the narrowed leak check still catches the shared-tuple widening.
+
+    The tuples are expanded into `PATH_TEST_RULES` at import, so the mutant rebuilds the
+    rule table: every CONNECTION_ATTRIBUTION peer rule (the tuple-expanded route members
+    and the pipeline route's own rule) gains the precip suites. Every peer must be named,
+    pipeline included, because `tests/test_precip_overlay.py` is nobody's direct importer.
+    """
+    from dataclasses import replace
+
+    def widen(rule: PathTestRule) -> PathTestRule:
+        if rule.pattern not in _PRECIP_LEAK_PEERS:
+            return rule
+        return replace(rule, tests=(*rule.tests, *_PRECIP_ONLY_VIA_OWNER_RULE))
+
+    assert _precip_leak_offenders() == []
+    monkeypatch.setattr(_prod_module, "PATH_TEST_RULES", tuple(widen(rule) for rule in PATH_TEST_RULES))
+
+    offenders = _precip_leak_offenders()
+    assert [line.split(":", 1)[0] for line in offenders] == list(_PRECIP_LEAK_PEERS)
+    assert all("tests/test_precip_overlay.py" in line for line in offenders)
+    pipeline_line = next(line for line in offenders if line.startswith("apps/api/routes/pipeline.py:"))
+    assert "tests/test_openapi_31_contract.py" not in pipeline_line
 
 
 def test_select_tests_maps_sh_only_wrapper_change_to_its_guard_suite() -> None:
@@ -5328,8 +5409,9 @@ GUARDED_MODULE_CLOSURES: tuple[tuple[str, str, str], ...] = (
     # #2074 partitioned tests/test_hydro_display_mvt_scaling.py into nine files
     # but kept the base path as one of them, so this anti-vacuity anchor still
     # names a real direct importer of services.tiles.mvt (the base partition
-    # holds the postgis_tile_sql shape and #2030 budget cases). The registry
-    # membership is unchanged at 6 — the partitions are TEST files, not guarded
+    # holds the postgis_tile_sql shape and #2030 budget cases). #2074 left the
+    # registry membership unchanged (then 6, now 9 after #2576/#2612) — the
+    # partitions are TEST files, not guarded
     # modules, and they are routed by the services/tiles/mvt.py and
     # apps/api/routes/hydro_display*.py rules in scripts/select_ci_tests.py plus
     # the tests/hydro_display_mvt_helpers.py support-module rule.
@@ -5371,7 +5453,49 @@ GUARDED_MODULE_CLOSURES: tuple[tuple[str, str, str], ...] = (
         "apps.api.routes.hydro_display_catalog",
         "tests/test_api_contract.py",
     ),
+    # #2576: the pipeline ops route. Direct-only mode (DIRECT_ONLY_GUARDED_MODULES).
+    # The anchor is the #2308 cancel-side oracle, a module-scope importer.
+    (
+        "apps/api/routes/pipeline.py",
+        "apps.api.routes.pipeline",
+        "tests/test_retry_cancel_consistency.py",
+    ),
+    # #2612: the station-flag flip hook. FULL mode: its one-hop adds no suite.
+    (
+        "packages/common/station_set_flip.py",
+        "packages.common.station_set_flip",
+        "tests/test_direct_grid_display_cutover_history.py",
+    ),
+    # #2612: the model registry facade. Direct-only mode.
+    (
+        "packages/common/model_registry.py",
+        "packages.common.model_registry",
+        "tests/test_variant_activation_cutover.py",
+    ),
 )
+
+# D0 closure-guard mode. A module listed here is guarded on its DIRECT non-gated
+# importer set only; every other GUARDED_MODULE_CLOSURES member keeps
+# direct UNION one hop. Decision rule: direct-only when the one-hop adds >= 10
+# suites that are not direct importers, because the hop then mostly reaches
+# unrelated consumers through incidental helper imports rather than the module's
+# behaviour. Measured one-hop additions on 86e6a17d5:
+#   * apps.api.routes.pipeline       21 (the whole hydro_display closure, through
+#     apps/api/routes/hydro_display.py / route_registry.py / precip.py importing
+#     `_ok`-style helpers and the router);
+#   * packages.common.model_registry 25 (mostly scheduler suites, through
+#     services/orchestrator/scheduler.py).
+# packages.common.station_set_flip adds 0 (its one one-hop module is an openspec
+# evidence script with no importer suite), so it stays in full mode.
+# test_direct_only_guarded_modules_meet_the_one_hop_decision_rule keeps this set
+# honest against the tree.
+DIRECT_ONLY_GUARDED_MODULES: frozenset[str] = frozenset(
+    {
+        "apps.api.routes.pipeline",
+        "packages.common.model_registry",
+    }
+)
+DIRECT_ONLY_ONE_HOP_THRESHOLD = 10
 
 DISPLAY_COVERAGE_GATED_IMPORTER = "tests/test_display_coverage_residual_debt_integration.py"
 
@@ -5568,21 +5692,117 @@ def test_guarded_module_rules_cover_their_non_gated_importer_closure() -> None:
     # For display_coverage the hop contributes nothing today (its single one-hop
     # module, scripts/node27_refresh_coverage.py, has no non-gated top-level
     # importer suite), so the union is derived rather than asserted per module.
+    # D0 (selector-route-gaps-batch-ci1): a DIRECT_ONLY_GUARDED_MODULES member is
+    # required to cover its direct set only — see that constant for the rule.
+    offenders = _guarded_module_closure_offenders()
+    assert not offenders, "guarded-module importer closure incomplete: " + "; ".join(offenders)
+
+
+def _guarded_module_closure_offenders(
+    *,
+    closures: Sequence[tuple[str, str, str]] = GUARDED_MODULE_CLOSURES,
+    direct_only: frozenset[str] = DIRECT_ONLY_GUARDED_MODULES,
+    direct_importers: Callable[[str], set[str]] = _non_gated_top_level_importer_tests,
+    one_hop_importers: Callable[[str], set[str]] = _one_hop_importer_tests,
+    select: Callable[[str], set[str]] = lambda source: set(select_tests([source], repo_root=Path("."))),
+) -> list[str]:
+    """One offender line per guarded module whose rule misses a required suite.
+
+    Every seam defaults to the live derivation, so the guard above calls it bare;
+    the mutation pins below replace ONE seam each (the mode set, the derived
+    direct map, or the rule table behind ``select``) on the tracked tree.
+    """
     offenders: list[str] = []
-    for source_path, module, known_member in GUARDED_MODULE_CLOSURES:
+    for source_path, module, known_member in closures:
         assert Path(source_path).is_file(), f"guarded module source missing: {source_path}"
-        direct = _non_gated_top_level_importer_tests(module)
+        direct = direct_importers(module)
         assert direct, f"{module}: derived no non-gated top-level importer suites"
         assert known_member in direct, (
             f"{module}: expected {known_member} among derived importers, got {sorted(direct)}"
         )
-        required = direct | _one_hop_importer_tests(module)
+        required = set(direct) if module in direct_only else direct | one_hop_importers(module)
 
-        selected = set(select_tests([source_path], repo_root=Path(".")))
-        missing = sorted(required - selected)
+        missing = sorted(required - select(source_path))
         if missing:
             offenders.append(f"{source_path}: rule misses {module} importer suites {missing}")
-    assert not offenders, "guarded-module importer closure incomplete: " + "; ".join(offenders)
+    return offenders
+
+
+def _guarded_closure_entry(source_path: str) -> tuple[str, str, str]:
+    (entry,) = [entry for entry in GUARDED_MODULE_CLOSURES if entry[0] == source_path]
+    return entry
+
+
+def test_direct_only_guarded_modules_meet_the_one_hop_decision_rule() -> None:
+    # D0: the mode is a measured decision, not a waiver. Every direct-only member
+    # is a guarded module whose one-hop really adds >= the threshold of non-direct
+    # suites; a full-mode member under the threshold would be the right call for
+    # station_set_flip, so it is pinned there explicitly.
+    guarded_modules = {module for _, module, _ in GUARDED_MODULE_CLOSURES}
+    assert DIRECT_ONLY_GUARDED_MODULES <= guarded_modules
+    for module in sorted(DIRECT_ONLY_GUARDED_MODULES):
+        added = _one_hop_importer_tests(module) - _non_gated_top_level_importer_tests(module)
+        assert len(added) >= DIRECT_ONLY_ONE_HOP_THRESHOLD, (module, len(added), sorted(added))
+    flip = "packages.common.station_set_flip"
+    assert flip in guarded_modules
+    assert flip not in DIRECT_ONLY_GUARDED_MODULES
+    flip_added = _one_hop_importer_tests(flip) - _non_gated_top_level_importer_tests(flip)
+    assert len(flip_added) < DIRECT_ONLY_ONE_HOP_THRESHOLD, sorted(flip_added)
+
+
+def test_guarded_closure_reds_when_a_direct_only_module_leaves_the_mode() -> None:
+    # D0 mode, mutation: taking pipeline.py out of the direct-only set makes the
+    # guard demand its one-hop suites, which the rule deliberately does not carry.
+    entry = _guarded_closure_entry("apps/api/routes/pipeline.py")
+
+    assert _guarded_module_closure_offenders(closures=[entry]) == []
+    offenders = _guarded_module_closure_offenders(closures=[entry], direct_only=frozenset())
+
+    assert len(offenders) == 1
+    assert offenders[0].startswith("apps/api/routes/pipeline.py: rule misses apps.api.routes.pipeline importer suites")
+    assert "tests/test_precip_overlay.py" in offenders[0]
+
+
+def test_guarded_closure_reds_when_a_direct_importer_leaves_a_direct_only_rule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # D0 mode, mutation: a direct-only rule still has to carry every direct
+    # importer. Stripping #2568's tests/test_retry.py from the pipeline rule reds
+    # the guard naming it.
+    from dataclasses import replace
+
+    def strip(rule: PathTestRule) -> PathTestRule:
+        if rule.pattern != "apps/api/routes/pipeline.py":
+            return rule
+        assert "tests/test_retry.py" in rule.tests
+        return replace(rule, tests=tuple(test for test in rule.tests if test != "tests/test_retry.py"))
+
+    monkeypatch.setattr(_prod_module, "PATH_TEST_RULES", tuple(strip(rule) for rule in PATH_TEST_RULES))
+    entry = _guarded_closure_entry("apps/api/routes/pipeline.py")
+
+    assert _guarded_module_closure_offenders(closures=[entry]) == [
+        "apps/api/routes/pipeline.py: rule misses apps.api.routes.pipeline importer suites ['tests/test_retry.py']"
+    ]
+
+
+@pytest.mark.parametrize(
+    "source_path",
+    ["packages/common/station_set_flip.py", "packages/common/model_registry.py", "apps/api/routes/pipeline.py"],
+)
+def test_guarded_closure_reds_on_a_new_importer_without_a_rule_change(source_path: str) -> None:
+    # Spec scenario "New importer without a rule": a synthetic non-gated suite
+    # joins the derived direct set of a newly guarded module and the rule is not
+    # updated -> the guard names the newcomer. Constructed derivation, tracked
+    # tree untouched.
+    entry = _guarded_closure_entry(source_path)
+    newcomer = "tests/test_guarded_newcomer_probe.py"
+
+    offenders = _guarded_module_closure_offenders(
+        closures=[entry],
+        direct_importers=lambda module: _non_gated_top_level_importer_tests(module) | {newcomer},
+    )
+
+    assert offenders == [f"{source_path}: rule misses {entry[1]} importer suites ['{newcomer}']"]
 
 
 def test_gated_display_coverage_importer_is_excluded_from_the_guarded_closure() -> None:
@@ -10469,9 +10689,12 @@ def test_every_pinned_node_id_resolves_to_an_existing_test_function() -> None:
 # with a reason token.
 #
 # DOMAIN SPLIT vs test_guarded_module_rules_cover_their_non_gated_importer_closure
-# above: that guard owns the four GUARDED_MODULE_CLOSURES modules (#1672 added
-# apps/api/routes/hydro_display.py) and derives direct importers UNION a ONE-HOP
-# module extension. This guard owns every tracked module under the TEN audited
+# above: that guard owns the nine GUARDED_MODULE_CLOSURES modules (#1672 added
+# apps/api/routes/hydro_display.py, #2026 its two owner modules, #2576/#2612
+# pipeline.py, station_set_flip.py and model_registry.py) and derives direct
+# importers UNION a ONE-HOP module extension — or direct importers only for a
+# DIRECT_ONLY_GUARDED_MODULES member (pipeline.py, model_registry.py). This
+# guard owns every tracked module under the TEN audited
 # directory paths (workers/mapping_builder joined in #1711) and derives DIRECT
 # importers only — those directories hold ~150 modules, so one-hop here would
 # grow the PR lane without a bound anyone chose. The two domains overlap on
@@ -12184,6 +12407,7 @@ def test_copyback_mutex_routing_keeps_the_mutex_suite(module_path: str) -> None:
 #     (test_directory_rule_importer_gaps_are_dispositioned), direct importers
 #     only, dispositioned through INTENTIONAL_RULE_GAP_EXCLUSIONS
 #   * the #1486 guard      -> GUARDED_MODULE_CLOSURES, direct UNION one hop
+#     (direct only for a DIRECT_ONLY_GUARDED_MODULES member)
 # Each keeps its own derivation and its own exemption vocabulary on purpose.
 # --------------------------------------------------------------------------
 
@@ -14247,7 +14471,7 @@ def test_mapping_builder_joins_the_directory_audit_without_new_gaps() -> None:
     assert not offenders, "directory-rule importer gaps undispositioned:\n  " + "\n  ".join(offenders)
 
 
-def test_four_guarded_closures_is_now_six_with_the_hydro_display_owner_modules() -> None:
+def test_guarded_module_closures_registry_has_nine_members() -> None:
     # #1672: hydro_display joins GUARDED_MODULE_CLOSURES. The existing guard
     # test derives the required importer set from the tree, so this asserts the
     # membership directly (the guard body in
@@ -14258,11 +14482,16 @@ def test_four_guarded_closures_is_now_six_with_the_hydro_display_owner_modules()
     # them at file level, so the closure guard could only be vacuous on them;
     # the selector glob covers them. Pinning 6 rather than "the split happened"
     # is what makes a silently dropped owner-module entry red.
+    # #2576/#2612 added pipeline.py, station_set_flip.py and model_registry.py:
+    # 6 -> 9.
     guarded_sources = {source_path for source_path, _, _ in GUARDED_MODULE_CLOSURES}
     assert "apps/api/routes/hydro_display.py" in guarded_sources
     assert "apps/api/routes/hydro_display_postgis.py" in guarded_sources
     assert "apps/api/routes/hydro_display_catalog.py" in guarded_sources
-    assert len(GUARDED_MODULE_CLOSURES) == 6
+    assert "apps/api/routes/pipeline.py" in guarded_sources
+    assert "packages/common/station_set_flip.py" in guarded_sources
+    assert "packages/common/model_registry.py" in guarded_sources
+    assert len(GUARDED_MODULE_CLOSURES) == 9
 
 
 def test_hydro_display_rule_covers_its_derived_importer_closure() -> None:
@@ -14417,6 +14646,137 @@ def test_model_registry_owner_modules_route_like_the_facade() -> None:
         assert set(select_tests([owner], repo_root=Path("."))) == expected, owner
         assert owner in INTEGRATION_TRIGGER_SOURCES, f"{owner} missing from INTEGRATION_TRIGGER_SOURCES"
         assert any(fnmatch.fnmatch(owner, pattern) for pattern in patterns), f"{owner} opens no real-DB lane"
+
+
+_CUTOVER_FLIP_PARTS = (
+    "tests/test_direct_grid_display_cutover_flip_atomic.py",
+    "tests/test_direct_grid_display_cutover_flip_mvt_set.py",
+)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "packages/common/model_registry.py",
+        "packages/common/model_registry_public.py",
+        "packages/common/station_set_flip.py",
+    ],
+)
+def test_cutover_flip_parts_ride_the_registry_and_station_flip_owners(source: str) -> None:
+    # #2612 AC 2: both flip partitions for the facade, one owner, and the flip
+    # hook. The `_mvt_set` edge runs only through
+    # tests/direct_grid_display_cutover_flip_helpers.py (a `tests/` helper outside
+    # the guard's one-hop domain), so no derivation can re-supply it: this literal
+    # is its only pin. Literal paths, not DIRECT_GRID_DISPLAY_CUTOVER_FLIP_TESTS,
+    # so production and expectation cannot move together.
+    helpers = _parse_tracked("tests/direct_grid_display_cutover_flip_helpers.py")
+    helper_imports = _top_level_imported_module_names("tests/direct_grid_display_cutover_flip_helpers.py", helpers)
+    assert {"packages.common.model_registry", "packages.common.station_set_flip"} <= helper_imports
+    mvt_set = "tests/test_direct_grid_display_cutover_flip_mvt_set.py"
+    assert "tests.direct_grid_display_cutover_flip_helpers" in _top_level_imported_module_names(
+        mvt_set, _parse_tracked(mvt_set)
+    )
+
+    selected = set(select_tests([source], repo_root=Path(".")))
+
+    assert set(_CUTOVER_FLIP_PARTS) <= selected, sorted(selected)
+
+
+def test_station_set_flip_selects_its_importers_and_keeps_its_prior_picks() -> None:
+    # #2612: the hook's direct importers (incl. the cutover history suite) plus
+    # both flip partitions; the #1744 core-smoke baseline and the supplemental
+    # scans it already had are untouched.
+    selected = select_tests(["packages/common/station_set_flip.py"], repo_root=Path("."))
+
+    assert selected == sorted(
+        {
+            *CORE_SMOKE_TESTS,
+            *_CUTOVER_FLIP_PARTS,
+            "tests/test_direct_grid_display_cutover_history.py",
+            INVARIANT_SUITE_PATH,
+            WRITE_SURFACE_SCAN_PATH,
+            FAMILY_GUARD_PATH,
+            RESOLVE_SURFACE_GUARD_PATH,
+        }
+    )
+
+
+def test_model_registry_facade_selects_its_direct_importers_and_keeps_its_prior_picks() -> None:
+    # #2612: 13 of the facade's 14 direct non-gated importers were missed. The
+    # literal set is the tracked-tree derivation measured on 86e6a17d5 (the
+    # closure guard re-derives it live); CONN and both preservation halves stay.
+    selected = set(select_tests(["packages/common/model_registry.py"], repo_root=Path(".")))
+
+    assert {
+        "tests/test_basins_registry_import_db.py",
+        "tests/test_basins_registry_import_qhh.py",
+        "tests/test_legacy_reactivation_guard.py",
+        "tests/test_list_search_contract.py",
+        "tests/test_model_registration.py",
+        "tests/test_model_registry_basin_versions.py",
+        "tests/test_model_registry_evidence_only_boundary.py",
+        "tests/test_model_registry_list_basins.py",
+        "tests/test_qhh_production_bootstrap_scheduler.py",
+        "tests/test_replay_lineage.py",
+        "tests/test_state_clone_cutover_hook.py",
+        "tests/test_state_clone_index_publish.py",
+        "tests/test_variant_activation_cutover.py",
+        "tests/test_node27_connection_attribution.py",
+        "tests/test_node27_connection_attribution_delegated.py",
+        "tests/test_response_model_preservation.py",
+        "tests/test_response_model_preservation_pipeline.py",
+    } <= selected
+
+
+INFRA_SBATCH_TEMPLATE_READERS = frozenset(
+    {
+        "tests/test_analysis_pipeline.py",
+        "tests/test_job_array.py",
+        "tests/test_m24_gateway_proof.py",
+        "tests/test_object_store_roots.py",
+        "tests/test_orchestrator.py",
+        "tests/test_production_slurm_validation.py",
+        "tests/test_real_slurm_gateway.py",
+        "tests/test_slurm_array_contract.py",
+        "tests/test_slurm_route_contract.py",
+        "tests/test_slurm_route_security_contract.py",
+    }
+)
+
+
+def _infra_sbatch_templates() -> list[str]:
+    return sorted(path.as_posix() for path in Path("infra/sbatch").glob("*.sbatch") if path.is_file())
+
+
+def test_every_infra_sbatch_template_selects_the_suites_that_load_it() -> None:
+    # #2575: a template-only diff used to select nothing, so CI degraded to the
+    # zero-assertion collect-only smoke. Derived over the tracked tree, so a new
+    # template is covered the moment it lands; the README is prose and stays out.
+    templates = _infra_sbatch_templates()
+    assert len(templates) >= 14, templates
+    for template in templates:
+        selected = set(select_tests([template], repo_root=Path(".")))
+        assert selected == INFRA_SBATCH_TEMPLATE_READERS, (template, sorted(selected))
+    assert select_tests(["infra/sbatch/README.md"], repo_root=Path(".")) == []
+
+
+def test_sbatch_rule_removal_reds_the_template_pin(monkeypatch: pytest.MonkeyPatch) -> None:
+    # #2575 mutation: without the glob rule every template collapses back to zero.
+    mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern != "infra/sbatch/*.sbatch")
+    assert len(mutant) == len(PATH_TEST_RULES) - 1
+    monkeypatch.setattr(_prod_module, "PATH_TEST_RULES", mutant)
+
+    assert select_tests(["infra/sbatch/smoke.sbatch"], repo_root=Path(".")) == []
+
+
+def test_sbatch_rule_leaves_the_qhh_cycle_wrapper_and_autopipe_timer_alone() -> None:
+    # #2575: the new glob is anchored at infra/sbatch/, so the QHH cycle wrapper
+    # (scripts/, its own rule) and the autopipe timer keep their exact selections.
+    assert select_tests([QHH_CYCLE_SBATCH], repo_root=Path(".")) == ["tests/test_qhh_scripts_static.py"]
+    assert select_tests(["infra/systemd/nhms-node27-autopipe.timer"], repo_root=Path(".")) == [
+        "tests/test_node27_autopipeline_preflight.py",
+        "tests/test_node27_mvt_prewarm.py",
+    ]
 
 
 def test_database_filter_mutation_reds_and_names_forecast_store() -> None:
@@ -21149,11 +21509,32 @@ REGISTRY_ROUTE_SANITIZERS = frozenset(
 # envelopes `ok()` never samples, and catalog / lifecycle / lifecycle_support /
 # preflight_rules / river_segments hold store mixins the samples replace with
 # fakes. They still route to the oracle via the #2617 facade-parity pin.
-RESPONSE_MODEL_ORACLE_INDIRECT_BUILDERS = ("packages/common/object_store_forcing.py", *REGISTRY_PAYLOAD_OWNERS)
+# #2624: the five modules the pipeline route runs un-faked on its sampled paths
+# (apps/api/routes/pipeline.py:32-49): `redact_payload`, `normalize_source_id`,
+# persistence.py's `PipelineStore`, public_evidence.py's `_public_evidence` /
+# `_public_message` and retry.py's retry assembly. The pipeline half reaches them
+# only through the route and the suites it borrows fixtures from, so the import
+# walk cannot see them either.
+PIPELINE_ROUTE_PAYLOAD_BUILDERS = (
+    "packages/common/redaction.py",
+    "packages/common/source_identity.py",
+    "services/orchestrator/persistence.py",
+    "services/orchestrator/public_evidence.py",
+    "services/orchestrator/retry.py",
+)
+RESPONSE_MODEL_ORACLE_INDIRECT_BUILDERS = (
+    "packages/common/object_store_forcing.py",
+    *REGISTRY_PAYLOAD_OWNERS,
+    *PIPELINE_ROUTE_PAYLOAD_BUILDERS,
+)
 
 
 def _response_model_oracle_imports() -> set[str]:
-    """Tracked `packages/**` / `workers/**` modules the oracle imports at top level.
+    """The oracle files' own top-level `packages/**` / `workers/**` imports, plus
+    the named RESPONSE_MODEL_ORACLE_INDIRECT_BUILDERS.
+
+    Not a transitive walk: a builder reached through a route or a borrowed suite is
+    in the set only because it is named.
 
     `from packages.common import X` needs no special case:
     `_module_names_from_nodes` yields the joined `packages.common.X`, which the
@@ -21164,18 +21545,13 @@ def _response_model_oracle_imports() -> set[str]:
     for importer in RESPONSE_MODEL_ORACLE_IMPORTERS:
         tree = ast.parse(Path(importer).read_text(encoding="utf-8"))
         for module in _top_level_imported_module_names(importer, tree):
-            # Recorded decision (#2348): `services/**` is NOT walked. The
-            # pipeline half reaches services/orchestrator/{persistence,retry,
-            # public_evidence}.py only through the suites it borrows fixtures
-            # from (tests/test_response_model_preservation_pipeline.py:21-22),
-            # and those modules already select both of those suites. They are
-            # un-faked production code on sampled pipeline paths
-            # (apps/api/routes/pipeline.py:40-42), so this is a known residual
-            # gap, left open because routing them grows the size-frozen
-            # `services/orchestrator/**` selection
-            # (test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_changes
-            # pins retry.py's exact list and demands a recorded lane wall-clock
-            # for any growth) -- a lane-budget decision, not this guard's.
+            # `services/**` is not walked: the oracle files import no services
+            # module at top level. The services builders the pipeline half
+            # drives (services/orchestrator/{persistence,retry,public_evidence}.py)
+            # are reached through apps/api/routes/pipeline.py, so #2624 NAMES
+            # them in PIPELINE_ROUTE_PAYLOAD_BUILDERS instead; the broad
+            # `services/orchestrator/**` rule carries the oracle and the
+            # size-frozen pin records the growth and its measured wall time.
             if module.split(".", 1)[0] not in {"packages", "workers"}:
                 continue
             path = Path(*module.split(".")).with_suffix(".py")
@@ -21211,9 +21587,15 @@ def _preservation_gaps() -> dict[str, list[str]]:
 
 
 def test_every_builder_the_preservation_oracle_drives_selects_both_halves() -> None:
-    # #2348: a store-only diff that changes a payload must run the oracle on
-    # ITS PR. Derived from the oracle's own imports, so a new builder import
-    # that no rule routes reds here.
+    """#2348: every NAMED-OR-DIRECTLY-IMPORTED builder selects both oracle halves.
+
+    Its traversal is exactly `_response_model_oracle_builder_owners()`: the oracle
+    files' own top-level `packages/**` / `workers/**` imports plus the named
+    RESPONSE_MODEL_ORACLE_INDIRECT_BUILDERS, minus the ledger's fixture edges. A
+    new top-level builder import that no rule routes reds here; a builder reached
+    only transitively (through a route or a borrowed suite) is covered only once
+    it is named.
+    """
     owners = _response_model_oracle_builder_owners()
     assert {
         "packages/common/best_available.py",
@@ -21232,23 +21614,42 @@ def test_every_builder_the_preservation_oracle_drives_selects_both_halves() -> N
     assert REGISTRY_ROUTE_SANITIZERS <= defined, sorted(defined)
     # The ledger exclusion is live, not vacuous: the import is really there.
     assert "workers/data_adapters/base.py" in _response_model_oracle_imports() - owners
+    # #2624: the named pipeline builders are live, not vacuous: the route
+    # imports each one at module level.
+    pipeline_tree = _parse_tracked("apps/api/routes/pipeline.py")
+    pipeline_imports = _top_level_imported_module_names("apps/api/routes/pipeline.py", pipeline_tree)
+    for builder in PIPELINE_ROUTE_PAYLOAD_BUILDERS:
+        assert builder in owners, builder
+        assert _dotted_module_name(builder) in pipeline_imports, builder
     assert _preservation_gaps() == {}
 
 
 @pytest.mark.parametrize(
-    ("pattern", "builder"),
+    ("pattern", "builders"),
     [
-        ("packages/common/state_manager.py", "packages/common/state_manager.py"),
-        ("packages/common/model_registry.py", "packages/common/model_registry.py"),
+        ("packages/common/state_manager.py", {"packages/common/state_manager.py"}),
+        ("packages/common/model_registry.py", {"packages/common/model_registry.py"}),
         # The glob leg is the only one carrying the oracle to the public module.
-        ("packages/common/model_registry_*.py", "packages/common/model_registry_public.py"),
+        ("packages/common/model_registry_*.py", {"packages/common/model_registry_public.py"}),
+        # #2624: the three new legs. The broad orchestrator leg is the only route
+        # for all three services builders, so removing it exposes them together.
+        ("packages/common/redaction.py", {"packages/common/redaction.py"}),
+        ("packages/common/source_identity.py", {"packages/common/source_identity.py"}),
+        (
+            "services/orchestrator/**",
+            {
+                "services/orchestrator/persistence.py",
+                "services/orchestrator/public_evidence.py",
+                "services/orchestrator/retry.py",
+            },
+        ),
     ],
 )
 def test_preservation_builder_guard_reds_when_one_rule_leg_is_removed(
-    monkeypatch: pytest.MonkeyPatch, pattern: str, builder: str
+    monkeypatch: pytest.MonkeyPatch, pattern: str, builders: set[str]
 ) -> None:
     # Constructed rule table, tracked tree untouched: dropping the oracle from
-    # ONE builder's rule must surface exactly that builder.
+    # ONE rule must surface exactly the builders that rule alone routes.
     from dataclasses import replace
 
     from scripts import select_ci_tests
@@ -21261,4 +21662,4 @@ def test_preservation_builder_guard_reds_when_one_rule_leg_is_removed(
         return replace(rule, tests=kept)
 
     monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", tuple(strip(rule) for rule in PATH_TEST_RULES))
-    assert _preservation_gaps() == {builder: sorted(RESPONSE_MODEL_PRESERVATION)}
+    assert _preservation_gaps() == {builder: sorted(RESPONSE_MODEL_PRESERVATION) for builder in builders}

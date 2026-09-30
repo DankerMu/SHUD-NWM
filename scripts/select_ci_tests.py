@@ -2679,9 +2679,40 @@ CONNECTION_ATTRIBUTION_ROUTE_PATHS: tuple[str, ...] = (
 # best_available.py: it needs the response-model preservation oracle too, so it
 # has an exact rule (next to the route members' rules in PATH_TEST_RULES) that
 # MERGES CONNECTION_ATTRIBUTION_TESTS.
+# #2612: the rule built from this tuple also carries MODEL_REGISTRY_IMPORTER_TESTS
+# (right below), for the same facade-parity reason.
 CONNECTION_ATTRIBUTION_STORE_PATHS: tuple[str, ...] = (
     "packages/common/model_registry.py",
     "packages/common/model_registry_*.py",
+)
+# #2612: the model registry facade's DIRECT non-gated importer suites (the
+# selector suite's GUARDED_MODULE_CLOSURES derives this set from the tracked tree
+# in direct-only mode and reds on a new importer). Merged into the rule the
+# CONNECTION_ATTRIBUTION_STORE_PATHS tuple expands to, so the facade and every
+# `model_registry_*.py` owner select it: the owners carry the store method bodies
+# these suites exercise, and #2617 pins every owner to the facade's selection.
+# tests/test_basins_registry_import_db.py is included although all 5 of its tests
+# are function-level `integration` (the guard filters file-level marks only);
+# that costs 5 skips, not a new exemption ledger.
+# The two cutover-flip partitions are listed on top of the derived set: they
+# reach this module only through tests/direct_grid_display_cutover_flip_helpers.py,
+# a `tests/` helper the guard's one-hop domain cannot see, and #2612 requires them.
+MODEL_REGISTRY_IMPORTER_TESTS: tuple[str, ...] = (
+    "tests/test_basins_registry_import_db.py",
+    "tests/test_basins_registry_import_qhh.py",
+    "tests/test_legacy_reactivation_guard.py",
+    "tests/test_list_search_contract.py",
+    "tests/test_model_registration.py",
+    "tests/test_model_registry_basin_versions.py",
+    "tests/test_model_registry_evidence_only_boundary.py",
+    "tests/test_model_registry_list_basins.py",
+    "tests/test_node27_connection_attribution.py",
+    "tests/test_qhh_production_bootstrap_scheduler.py",
+    "tests/test_replay_lineage.py",
+    "tests/test_state_clone_cutover_hook.py",
+    "tests/test_state_clone_index_publish.py",
+    "tests/test_variant_activation_cutover.py",
+    *DIRECT_GRID_DISPLAY_CUTOVER_FLIP_TESTS,
 )
 # #1704: the only suite that asserts the error-response log line exists, is
 # redacted, is bounded, and that the request-id is not client-forgeable. Both
@@ -3316,6 +3347,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # and file_orchestration_journal.py pairs ride CHAIN_IMPORTER_TESTS and
             # FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS. DB-free, sub-second.
             "tests/test_state_save_submit_ambiguity.py",
+            # #2624: the #2348 response-model preservation oracle. Its pipeline
+            # half drives apps/api/routes/pipeline.py, which runs persistence.py's
+            # `PipelineStore`, public_evidence.py's `_public_evidence` /
+            # `_public_message` and retry.py's retry assembly un-faked on the
+            # sampled paths (pipeline.py:40-49), so an edit to any of them that
+            # changes a wire value reds it. Both halves ride together (the
+            # pipeline half imports the core). DB-free, 25 tests in ~1.1s.
+            *RESPONSE_MODEL_PRESERVATION_TESTS,
             # #2570 A / #2603 / #2559: the poll-isolation, cohort-membership and
             # forecast-projection suites. Their subjects are chain_stage_execution.py,
             # chain_forecast_execution.py, chain_types.py, chain_array_accounting.py,
@@ -4445,6 +4484,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # selector's own duplicate-pattern guard forbids a second
             # PATH_TEST_RULES entry for an already-owned module.)
             *SQL_SHAPE_ORACLE_TESTS,
+            # selector-route-gaps-batch-ci1: a non-gated suite that imports this
+            # module at file level and drives `PsycopgForecastStore`'s river/station
+            # stats read paths offline over a fake connection.
+            "tests/test_river_ts_stats_harness_offline.py",
         ),
     ),
     PathTestRule(
@@ -4592,7 +4635,21 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         "packages/common/redaction.py",
-        ("tests/test_redaction.py",),
+        (
+            "tests/test_redaction.py",
+            # #2624: apps/api/routes/pipeline.py:32 runs `redact_payload` over the
+            # sampled pipeline bodies the #2348 preservation oracle compares with
+            # master, un-faked, so a redaction edit that changes a wire value reds
+            # it. Both halves ride together (the pipeline half imports the core).
+            *RESPONSE_MODEL_PRESERVATION_TESTS,
+        ),
+    ),
+    PathTestRule(
+        # #2624: apps/api/routes/pipeline.py:33 runs `normalize_source_id` on the
+        # sampled pipeline paths, un-faked -- same reason as redaction.py above.
+        # The same-name tests/test_source_identity.py still arrives by derivation.
+        "packages/common/source_identity.py",
+        RESPONSE_MODEL_PRESERVATION_TESTS,
     ),
     PathTestRule(
         "packages/common/node27_container_contract.py",
@@ -4912,6 +4969,30 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "infra/env/**",
         ("tests/test_two_node_docker_runtime.py",),
+    ),
+    PathTestRule(
+        # #2575: a template-only diff used to select nothing, so the PR lane
+        # degraded to the zero-assertion collect-only smoke. These are the suites
+        # that read or render the REAL templates on disk -- by the literal
+        # `infra/sbatch` path, or through the production default `template_dir`
+        # (services/production_closure/slurm_validation.py for the production
+        # validation suite, SlurmGatewaySettings() for the m24 proof). Suites that
+        # only name the directory in an env string (test_runtime_mode,
+        # test_two_node_docker_runtime) are deliberately absent, and the prose
+        # infra/sbatch/README.md stays unrouted.
+        "infra/sbatch/*.sbatch",
+        (
+            "tests/test_analysis_pipeline.py",
+            "tests/test_job_array.py",
+            "tests/test_m24_gateway_proof.py",
+            "tests/test_object_store_roots.py",
+            "tests/test_orchestrator.py",
+            "tests/test_production_slurm_validation.py",
+            "tests/test_real_slurm_gateway.py",
+            "tests/test_slurm_array_contract.py",
+            "tests/test_slurm_route_contract.py",
+            "tests/test_slurm_route_security_contract.py",
+        ),
     ),
     # #1684 EVID-05/F: the rollout producers must select the static deployment
     # contract suite. The runbook is `docs/**` (no backend lane by default) and
@@ -6372,11 +6453,24 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # the gateway error rendered on the response body and left raw in the
             # persisted `slurm_cancellation_gap` / `cancel_failed` event, asserted
             # in one test. The broad `apps/api/**` rule buys the three generic API
-            # suites, none of which call `cancel_run`, and nothing derives the rest:
-            # the importer index is queried only for a CHANGED path that is itself
-            # a suite, never for a production module, and no closure guard forces a
-            # derived importer set onto this rule.
+            # suites, none of which call `cancel_run`.
             "tests/test_retry_cancel_consistency.py",
+            # #2568: the ONLY HTTP-level oracle for `POST /runs/{run_id}/retry`
+            # (whole file: the route's 409/503 bodies, the file-lane render and the
+            # recorded submission event are all driven through TestClient here).
+            "tests/test_retry.py",
+            # #2576: this module is in the selector suite's GUARDED_MODULE_CLOSURES
+            # (direct-only mode), so the rule carries its whole DIRECT non-gated
+            # importer set, derived from the tracked tree. The two direct importers
+            # not named here (tests/test_api_contract_pipeline_ops.py,
+            # tests/test_monitoring_api.py) arrive through the broad `apps/api/**`
+            # rule. tests/test_openapi_31_contract.py imports this module at file
+            # level, so it is a direct importer in its own right, not a precip
+            # rider leaking into a CONNECTION_ATTRIBUTION peer.
+            "tests/test_e2e_m3.py",
+            "tests/test_openapi_31_contract.py",
+            "tests/test_pipeline_logs_artifacts.py",
+            SLURM_OPENAPI_SECURITY_TEST,
         ),
     ),
     PathTestRule(
@@ -6403,8 +6497,24 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         for path in CONNECTION_ATTRIBUTION_ROUTE_PATHS
     ),
     *(
-        PathTestRule(path, (*CONNECTION_ATTRIBUTION_TESTS, *RESPONSE_MODEL_PRESERVATION_TESTS))
+        PathTestRule(
+            path,
+            (*CONNECTION_ATTRIBUTION_TESTS, *RESPONSE_MODEL_PRESERVATION_TESTS, *MODEL_REGISTRY_IMPORTER_TESTS),
+        )
         for path in CONNECTION_ATTRIBUTION_STORE_PATHS
+    ),
+    PathTestRule(
+        # #2612: the station-flag flip hook. Its direct non-gated importer suites
+        # (the `_atomic` flip partition and the cutover history suite; the
+        # selector suite's GUARDED_MODULE_CLOSURES derives them, one-hop adds
+        # none) plus the `_mvt_set` partition, which reaches this module only
+        # through tests/direct_grid_display_cutover_flip_helpers.py -- an edge the
+        # guard cannot derive, so it is pinned by name there.
+        "packages/common/station_set_flip.py",
+        (
+            *DIRECT_GRID_DISPLAY_CUTOVER_FLIP_TESTS,
+            "tests/test_direct_grid_display_cutover_history.py",
+        ),
     ),
     PathTestRule(
         # A #1728 connection-attribution store (see CONNECTION_ATTRIBUTION_STORE_PATHS)
