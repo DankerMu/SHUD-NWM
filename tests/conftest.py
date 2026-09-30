@@ -117,6 +117,37 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             item.add_marker(skip_grib)
 
 
+def pytest_collection_finish(session: pytest.Session) -> None:
+    """#2594: an opted-in grib run must fail loudly when ecCodes cannot load.
+
+    Runs after `-m`/`-k` deselection, so it looks only at what will actually run:
+    nothing happens unless `NHMS_RUN_GRIB=1` AND a remaining item carries `grib`.
+    A missing runtime used to surface as one bare `Cannot find the ecCodes library`
+    RuntimeError per test; it is now one session-level usage error pointing at the
+    lane recipe. Never a skip: an opted-in lane that skips looks green.
+    """
+    if not _env_flag("NHMS_RUN_GRIB"):
+        return
+    if not any("grib" in item.keywords for item in session.items):
+        return
+    try:
+        _probe_eccodes_runtime()
+    except Exception as error:  # ImportError, RuntimeError, OSError: all mean "cannot load"
+        raise pytest.UsageError(
+            "NHMS_RUN_GRIB=1 selected grib tests, but the ecCodes runtime cannot be loaded "
+            f"({type(error).__name__}: {error}). Export the GRIB runtime (LD_LIBRARY_PATH, "
+            "ECCODES_DIR, ECCODES_DEFINITION_PATH) as in the node-27 lane of "
+            "docs/runbooks/ci-test-routing.md before running grib tests."
+        ) from error
+
+
+def _probe_eccodes_runtime() -> str:
+    """Load ecCodes the way the grib tests will; module-level so tests can replace it."""
+    import eccodes
+
+    return eccodes.codes_get_api_version()
+
+
 def pytest_unconfigure(config: pytest.Config) -> None:
     """Release the selector meta-guard suite's parse cache before shutdown.
 

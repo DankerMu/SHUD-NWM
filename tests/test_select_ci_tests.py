@@ -67,6 +67,8 @@ from scripts.select_ci_tests import (
     NODE22_REFRESH_TIMER_HEALTH_OWNER_PATH,
     NODE22_REFRESH_TIMER_HEALTH_RUNBOOK_TESTS,
     NODE22_REFRESH_TIMER_HEALTH_TESTS,
+    NODE27_MVT_CACHE_RETENTION_HELPERS_PATH,
+    NODE27_MVT_CACHE_RETENTION_TESTS,
     NODE27_PGDATA_WORKLOAD_TESTS,
     ORCHESTRATOR_CLI_IMPORTER_TESTS,
     ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
@@ -114,6 +116,15 @@ from scripts.select_ci_tests import (
     is_test_suite_path,
     main,
     select_tests,
+)
+
+# #2490: the #1596 national identity probe is three file-level `integration`-gated
+# partitions. None is selected by any rule (the #1447 ruling), so the selector has
+# no tuple for them; the exclusion pins below name every partition.
+MVT_NATIONAL_IDENTITY_PROBE_INTEGRATION_TESTS: tuple[str, ...] = (
+    "tests/test_mvt_national_identity_probe_integration.py",
+    "tests/test_mvt_national_identity_probe_cycles_integration.py",
+    "tests/test_mvt_national_identity_probe_digest_integration.py",
 )
 
 # #2323: the production-topology hard-gate node the supplemental scan-input
@@ -250,7 +261,9 @@ def test_node27_mvt_cache_retention_unit_selects_the_sibling_lane_pin() -> None:
     # master's full run reds -- exactly what #2032 did. Both suites, never empty.
     selected = set(select_tests(["infra/systemd/nhms-node27-mvt-cache-retention.service"], repo_root=Path(".")))
 
-    assert "tests/test_node27_mvt_cache_retention.py" in selected, "the unit lost its own suite"
+    # #2490: the suite is three partitions; the unit must keep all of them.
+    missing = set(NODE27_MVT_CACHE_RETENTION_TESTS) - selected
+    assert not missing, f"the unit lost its own suite partitions {sorted(missing)}"
     assert "tests/test_node27_timeseries_retention.py" in selected, "the unit does not select the sibling lane pin"
     assert selected, "the unit selected an empty test set (collect-only)"
 
@@ -1738,8 +1751,11 @@ def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
         # apps/api/routes/hydro_display.py.
         "tests/test_node27_connection_attribution.py",
         "tests/test_node27_connection_attribution_delegated.py",
-        # #2032: the second of the two entries described above.
+        # #2032: the second of the two entries described above. #2490 split it
+        # into three partitions and the rule carries all of them.
         "tests/test_node27_mvt_cache_retention.py",
+        "tests/test_node27_mvt_cache_retention_enumeration.py",
+        "tests/test_node27_mvt_cache_retention_wrapper.py",
         # #2013: guard-derived entry, synced from the selector's own output per
         # the procedure above — the prewarm envelope assertion imports
         # NATIONAL_DISCHARGE_VALID_TIME_STRIDE_HOURS from services.tiles.mvt at
@@ -1862,7 +1878,7 @@ def test_select_tests_routes_the_template_registry_to_its_unit_owners() -> None:
         "tests/test_display_coverage_refresh.py",
         "tests/test_river_ts_template_golden.py",
     } <= selected
-    assert "tests/test_mvt_national_identity_probe_integration.py" not in selected
+    assert not set(MVT_NATIONAL_IDENTITY_PROBE_INTEGRATION_TESTS) & selected
 
 
 def test_template_registry_database_edge_deletion_is_unrescued() -> None:
@@ -3978,7 +3994,7 @@ def test_raw_retention_env_template_selects_exactly_its_readers_and_glob_suites(
     `test_documented_operator_check_goes_red_on_an_unsafe_skip` runs it with real `jq`
     against a real summary, so the operator criterion is asserted from this path and
     nowhere else;
-    `tests/test_node27_mvt_cache_retention.py::test_the_raw_retention_env_example_points_at_this_runner`
+    `tests/test_node27_mvt_cache_retention_wrapper.py::test_the_raw_retention_env_example_points_at_this_runner`
     `read_text`s the same path and pins the sibling-runner cross-reference in it.
     Before the path-exact row this template matched only `infra/env/node27-*.example`
     (-> `tests/test_node27_write_roles.py`, which scans every `infra/env/*.example` for
@@ -3994,7 +4010,8 @@ def test_raw_retention_env_template_selects_exactly_its_readers_and_glob_suites(
     assert Path(RAW_RETENTION_ENV_TEMPLATE).exists()
 
     assert set(select_tests([RAW_RETENTION_ENV_TEMPLATE], repo_root=Path("."))) == {
-        "tests/test_node27_mvt_cache_retention.py",
+        # #2490: the sibling reader is one partition of three; the row carries all.
+        *NODE27_MVT_CACHE_RETENTION_TESTS,
         "tests/test_node27_raw_retention.py",
         "tests/test_node27_write_roles.py",
         "tests/test_two_node_docker_runtime.py",
@@ -4022,7 +4039,7 @@ def test_raw_retention_env_template_rule_red_when_removed(monkeypatch: pytest.Mo
     assert "tests/test_node27_raw_retention.py" not in selected, (
         "mutant table without the raw-retention template rule still selects the jq-executing suite"
     )
-    assert "tests/test_node27_mvt_cache_retention.py" not in selected, (
+    assert not set(NODE27_MVT_CACHE_RETENTION_TESTS) & selected, (
         "mutant table without the raw-retention template rule still selects the sibling reader"
     )
     assert selected, "the mutant selection is empty, so this leg would red for the wrong reason"
@@ -11344,10 +11361,19 @@ def test_directory_rule_disposition_selects_the_audit_floor(module_path: str, re
 @pytest.mark.parametrize(
     ("module_path", "suite"),
     (
+        # #2490: the #1341 proof is two partitions; each must open the lane.
         ("services/tile_publisher/publisher.py", "tests/test_river_ts_read_path_surrogate_keys_integration.py"),
+        (
+            "services/tile_publisher/publisher.py",
+            "tests/test_river_ts_read_path_surrogate_keys_coverage_integration.py",
+        ),
         (
             "services/tile_publisher/forcing_copyback_backfill.py",
             "tests/test_river_ts_read_path_surrogate_keys_integration.py",
+        ),
+        (
+            "services/tile_publisher/forcing_copyback_backfill.py",
+            "tests/test_river_ts_read_path_surrogate_keys_coverage_integration.py",
         ),
         ("db/seeds/seed_demo.py", "tests/test_river_ts_dual_write_integration.py"),
         # #1729 / #1480: the one-shot node-27 data scripts and their runner.
@@ -12335,6 +12361,13 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
     # #2424 D1: master's frozen latest-cycle statement; the shape suite (which pins
     # its sha256) is its only non-gated importer (the integration suite is gated).
     ("tests/latest_cycle_discovery_oracle.py", "tests/test_latest_cycle_discovery_shape.py"),
+    # #2490: the retention helper. The retained base path anchors it because
+    # ci-contract-baseline pins that literal; an anchor that stops deriving here
+    # means the base partition stopped importing the shared `_clean_env`.
+    (NODE27_MVT_CACHE_RETENTION_HELPERS_PATH, "tests/test_node27_mvt_cache_retention.py"),
+    # #2595: the real-disk cycle selection. The real-disk suite is `e2e`-gated and
+    # does not count; the local proof is its one non-gated importer.
+    ("tests/object_store_forcing_real_disk_support.py", "tests/test_object_store_forcing_real_disk_support.py"),
 )
 
 # At least this many support modules must derive a non-empty consumer set (10 of
@@ -14256,7 +14289,7 @@ def test_hydro_display_rule_covers_its_derived_importer_closure() -> None:
 
     # The integration-marked importers stay out per the #1447 ruling.
     assert "tests/test_display_coverage_residual_debt_integration.py" not in selected
-    assert "tests/test_mvt_national_identity_probe_integration.py" not in selected
+    assert not set(MVT_NATIONAL_IDENTITY_PROBE_INTEGRATION_TESTS) & selected
 
 
 # --------------------------------------------------------------------------

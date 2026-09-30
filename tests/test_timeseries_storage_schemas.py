@@ -1,7 +1,9 @@
 import copy
 import json
+import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -14,9 +16,82 @@ SCHEMA_BASES = ("timeseries_retention_receipt",)
 
 def _validator() -> str:
     validator = shutil.which("check-jsonschema")
-    if validator is None:
-        raise RuntimeError("check-jsonschema is required; run `uv sync --all-extras --dev`")
-    return validator
+    if validator is not None:
+        return validator
+    # #2615: the venv interpreter run by path (node-27 worktree lane) does not put
+    # its own bin on PATH. No `.resolve()`: that would follow the venv's python
+    # symlink into the uv-managed base interpreter's bin.
+    beside_interpreter = Path(sys.executable).parent / "check-jsonschema"
+    if beside_interpreter.is_file() and os.access(beside_interpreter, os.X_OK):
+        return str(beside_interpreter)
+    raise RuntimeError(
+        f"check-jsonschema is required; looked on PATH and at {beside_interpreter}; run `uv sync --all-extras --dev`"
+    )
+
+
+# #2615: `_validator()` itself. The node-27 worktree lane runs the venv's python
+# by path, so its `bin` may be missing from PATH; these pin the fallback.
+def _executable(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+def _off_path(monkeypatch: pytest.MonkeyPatch, interpreter: Path) -> None:
+    monkeypatch.setattr(shutil, "which", lambda *args, **kwargs: None)
+    monkeypatch.setattr(sys, "executable", str(interpreter))
+
+
+def test_validator_prefers_path_hit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    on_path = _executable(tmp_path / "path-bin" / "check-jsonschema")
+    _executable(tmp_path / "bin" / "check-jsonschema")
+    monkeypatch.setattr(
+        shutil, "which", lambda name, *args, **kwargs: str(on_path) if name == "check-jsonschema" else None
+    )
+    monkeypatch.setattr(sys, "executable", str(_executable(tmp_path / "bin" / "python")))
+
+    assert _validator() == str(on_path)
+
+
+def test_validator_falls_back_beside_interpreter(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    beside = _executable(tmp_path / "bin" / "check-jsonschema")
+    _off_path(monkeypatch, _executable(tmp_path / "bin" / "python"))
+
+    assert _validator() == str(beside)
+
+
+def test_validator_fallback_does_not_follow_the_interpreter_symlink(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A uv venv's python is a symlink into the managed base interpreter, whose
+    # bin has no check-jsonschema; the fallback must stay in the venv's bin.
+    base_python = _executable(tmp_path / "base" / "bin" / "python")
+    venv_python = tmp_path / "venv" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.symlink_to(base_python)
+    beside = _executable(tmp_path / "venv" / "bin" / "check-jsonschema")
+    _off_path(monkeypatch, venv_python)
+
+    assert _validator() == str(beside)
+
+
+@pytest.mark.parametrize("state", ["missing", "not_executable"])
+def test_validator_not_found_names_both_locations(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, state: str
+) -> None:
+    beside = tmp_path / "bin" / "check-jsonschema"
+    _off_path(monkeypatch, _executable(tmp_path / "bin" / "python"))
+    if state == "not_executable":
+        beside.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        beside.chmod(0o644)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        _validator()
+
+    message = str(excinfo.value)
+    assert "PATH" in message
+    assert str(beside) in message
 
 
 def _document(base: str) -> dict[str, Any]:
