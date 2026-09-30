@@ -62,6 +62,11 @@ DEFAULT_MAX_MANIFEST_AGE_HOURS = 168
 REQUIRE_DIRECT_GRID_ENV = "NHMS_SCHEDULER_REQUIRE_DIRECT_GRID"
 MAX_FILE_PROVIDER_JSON_DEPTH = 64
 MAX_FILE_PROVIDER_JSON_NODES = 300_000
+# Registry rows inline direct-grid station bindings.  The 132-model onboarding
+# generation fits the 16 MiB byte bound but contains 329,431 JSON value nodes.
+# Keep this larger budget specific to registry manifests; readiness/catalog
+# providers retain their existing bound.
+MAX_REGISTRY_MANIFEST_JSON_NODES = 400_000
 MAX_CANONICAL_CATALOG_CYCLE_DIRS = 4096
 READINESS_DERIVATION_SOURCES = ("gfs", "IFS")
 _COMPACT_CYCLE_RE = re.compile(r"^[0-9]{10}$")
@@ -203,6 +208,7 @@ class FileSchedulerModelRegistry:
                 self.manifest_uri,
                 roots=self._roots,
                 max_bytes=MAX_REGISTRY_MANIFEST_BYTES,
+                max_nodes=MAX_REGISTRY_MANIFEST_JSON_NODES,
             )
             self._models, self._model_by_id, self._evidence = _validate_registry_manifest(
                 payload,
@@ -596,11 +602,21 @@ def publish_scheduler_registry_manifest(
         "schema_version": REGISTRY_MANIFEST_SCHEMA_VERSION,
         "generated_at": _format_utc(generated_at or _now(roots)),
         "models": [dict(model) for model in models],
+        "checksum": "",
     }
-    content_without_checksum = _canonical_json_bytes(payload)
-    checksum = _sha256_label(content_without_checksum)
+    # Count the final payload shape (including checksum) before serialization
+    # or any commit.  Publication must never report success for a manifest the
+    # registry reader would reject for its JSON node/depth budget.
+    _validate_json_complexity(payload, max_nodes=MAX_REGISTRY_MANIFEST_JSON_NODES)
+    checksum = f"sha256:{_payload_checksum(payload)}"
     payload["checksum"] = checksum
     content = _canonical_json_bytes(payload, pretty=True)
+    if len(content) > MAX_REGISTRY_MANIFEST_BYTES:
+        raise SchedulerFileProviderError(
+            "file_manifest_size_limit_exceeded",
+            field="manifest",
+            evidence={"max_bytes": MAX_REGISTRY_MANIFEST_BYTES},
+        )
     # #1097: validate the audit block BEFORE anything is committed, so a
     # malformed block fails the publish outright instead of leaving committed
     # manifest bytes behind a half-assembled receipt.  `None` keeps meaning
@@ -1680,7 +1696,13 @@ def _normalize_product_row(
     }
 
 
-def _read_json_mapping(uri: str, *, roots: _ProviderRoots, max_bytes: int) -> tuple[dict[str, Any], bytes]:
+def _read_json_mapping(
+    uri: str,
+    *,
+    roots: _ProviderRoots,
+    max_bytes: int,
+    max_nodes: int = MAX_FILE_PROVIDER_JSON_NODES,
+) -> tuple[dict[str, Any], bytes]:
     try:
         exists = _uri_exists(uri, roots=roots)
     except (OSError, SafeFilesystemError, ObjectStoreError, ValueError) as error:
@@ -1717,7 +1739,7 @@ def _read_json_mapping(uri: str, *, roots: _ProviderRoots, max_bytes: int) -> tu
         ) from error
     if not isinstance(payload, Mapping):
         raise SchedulerFileProviderError("file_manifest_not_object", field="manifest")
-    _validate_json_complexity(payload)
+    _validate_json_complexity(payload, max_nodes=max_nodes)
     return dict(payload), content
 
 
@@ -1970,17 +1992,17 @@ def _uri_exists(uri: str, *, roots: _ProviderRoots) -> bool:
     return True
 
 
-def _validate_json_complexity(value: Any) -> None:
+def _validate_json_complexity(value: Any, *, max_nodes: int = MAX_FILE_PROVIDER_JSON_NODES) -> None:
     stack: list[tuple[Any, int]] = [(value, 1)]
     visited = 0
     while stack:
         item, depth = stack.pop()
         visited += 1
-        if visited > MAX_FILE_PROVIDER_JSON_NODES:
+        if visited > max_nodes:
             raise SchedulerFileProviderError(
                 "file_manifest_json_node_limit_exceeded",
                 field="manifest",
-                evidence={"max_nodes": MAX_FILE_PROVIDER_JSON_NODES},
+                evidence={"max_nodes": max_nodes},
             )
         if depth > MAX_FILE_PROVIDER_JSON_DEPTH:
             raise SchedulerFileProviderError(
