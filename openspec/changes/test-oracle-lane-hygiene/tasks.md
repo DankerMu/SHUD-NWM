@@ -24,24 +24,24 @@ Fixture level: standard. Risk packs:
 
 - [x] 2.1 Add `latest_complete_cycle` in `tests/object_store_forcing_real_disk_support.py` (D2), use it through a lazy module-scoped fixture, and derive every time from it; no hardcoded real date remains in the source.
 - [x] 2.2 Add local unit tests in `tests/test_object_store_forcing_real_disk_support.py`: newest common cycle wins, incomplete cycle skipped, a too-fresh file excluded, empty intersection fails with the diagnostic.
-- [ ] 2.3 On node-27, run the suite read-only as `nhms_display_ro`, with `DATABASE_URL`, `OBJECT_STORE_ROOT`, `NHMS_RUN_E2E=1` and `NHMS_RUN_REAL_DISK=1` set, with `-rA` (`-q` drops the fixture's print): the result must be **4 passed, 0 skipped**, and the receipt records the chosen cycle.
+- [ ] 2.3 (**deferred to #2699**: on node-27 on 2026-09-30 the suite failed loudly as designed with `real store has no cycle where all 4 combos are present`, because every retained cycle only holds direct-grid `dg_*` model dirs and the suite's legacy `basins_*_shud` COMBOS no longer exist; #2595 stays open) On node-27, run the suite read-only as `nhms_display_ro`, with `DATABASE_URL`, `OBJECT_STORE_ROOT`, `NHMS_RUN_E2E=1` and `NHMS_RUN_REAL_DISK=1` set, with `-rA` (`-q` drops the fixture's print): the result must be **4 passed, 0 skipped**, and the receipt records the chosen cycle.
 
 ## 3. #2594 GRIB lane
 
 - [x] 3.1 Add the GRIB runtime injection to the runbook lane and record the version-match fact.
 - [x] 3.2 Add the conftest preflight and a test for the missing-library diagnostic.
-- [ ] 3.3 On node-27, run `-m grib` using the lane: all 8 grib tests run with no `Cannot find the ecCodes library`. Write a receipt.
+- [x] 3.3 (2026-09-30: all 8 run with ecCodes loaded, no load error; they then fail for pre-existing fixture/producer defects tracked in #2700. The negative preflight exits 4 with the single diagnostic.) On node-27, run `-m grib` using the lane: all 8 grib tests run with no `Cannot find the ecCodes library`. Write a receipt.
 
 ## 4. #2615 worktree lane
 
 - [x] 4.1 Write the runbook recipe: PATH, PYTHONPATH, TMPDIR, the `packages.__file__` assertion, and why PYTHONPATH must stay.
 - [x] 4.2 Decouple tests A and B from the environment. A exports `PYTHONPATH` itself so dropping the stripping goes red; B has `_validator()` unit tests for the PATH hit, the beside-interpreter fallback, no `.resolve()`, and the not-found message.
-- [ ] 4.3 On node-27, run the two files with the recipe and all pass. A passes with `PYTHONPATH` exported; B passes with no `.venv/bin` on `PATH`. The local `uv run pytest` also passes.
+- [x] 4.3 (2026-09-30 at 339aca6, literal recipe with `HOME=/home/nwm/`: tree assertion OK; A+B 69 passed; B with PATH=/usr/bin:/bin 17 passed) On node-27, run the two files with the recipe and all pass. A passes with `PYTHONPATH` exported; B passes with no `.venv/bin` on `PATH`. The local `uv run pytest` also passes.
 
 ## 5. Closing
 
-- [ ] 5.1 On node-27, run the full set of touched and split files with the worktree recipe (including `-m integration` against a throwaway DB).
-- [ ] 5.2 Write back measured results as comments on the #1632 receipt issue: the 8 grib tests and the 4 real_disk tests.
+- [x] 5.1 (2026-09-30: `-m integration` master old files 46 passed = branch parts 46 passed; all touched files via recipe 1116 passed / 46 skipped) On node-27, run the full set of touched and split files with the worktree recipe (including `-m integration` against a throwaway DB).
+- [x] 5.2 (#1632 comment 2026-09-30) Write back measured results as comments on the #1632 receipt issue: the 8 grib tests and the 4 real_disk tests.
 
 ## Evidence Floor
 
