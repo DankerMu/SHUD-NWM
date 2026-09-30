@@ -216,7 +216,9 @@ def install_chain_runtime_compat() -> dict[str, object]:
         from sqlalchemy import create_engine
         from sqlalchemy.orm import Session
 
-        engine = create_engine(database_url, future=True)
+        from packages.common.sqlalchemy_url import sqlalchemy_url
+
+        engine = create_engine(sqlalchemy_url(database_url), future=True)
         session = Session(engine)
         store = _chain.PipelineStore(session)
         return _chain.RetryService(store, _chain.RetryConfig.from_settings(_chain.SlurmGatewaySettings()))

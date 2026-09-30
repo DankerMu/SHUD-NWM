@@ -1084,6 +1084,9 @@ def test_select_tests_maps_file_journal_read_state_without_whole_legacy_suites()
             WRITE_SURFACE_SCAN_PATH,
             FAMILY_GUARD_PATH,
             RESOLVE_SURFACE_GUARD_PATH,
+            # #2632: scheduler_runtime.py calls create_engine, so the driver
+            # guard's content sniff adds it (supplemental, set union only).
+            _prod_module.SQLALCHEMY_DRIVER_GUARD_TEST,
         }
     )
     assert "tests/test_orchestration_chain.py" in selected
@@ -12330,6 +12333,9 @@ def test_scheduler_runtime_selects_the_copyback_mutex_suite() -> None:
         "tests/test_scheduler_journal_retention_archive.py",
         "tests/test_scheduler_journal_retention_planning.py",
         "tests/test_source_cycle_raw_manifest.py",
+        # 31 -> 32 (#2632): this module calls create_engine, so the SQLAlchemy
+        # driver guard's content sniff adds it as a supplemental rider.
+        "tests/test_sqlalchemy_driver_explicit.py",
     ]
 
 
@@ -21663,3 +21669,95 @@ def test_preservation_builder_guard_reds_when_one_rule_leg_is_removed(
 
     monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", tuple(strip(rule) for rule in PATH_TEST_RULES))
     assert _preservation_gaps() == {builder: sorted(RESPONSE_MODEL_PRESERVATION) for builder in builders}
+
+
+# ---------------------------------------------------------------------------
+# #2632: create_engine call sites / the URL helper -> the SQLAlchemy driver guard.
+# ---------------------------------------------------------------------------
+# One synthetic module per guard root, covering both callee spellings the guard
+# recognises. Value = module source.
+_SQLALCHEMY_DRIVER_SNIFF_PROBES: tuple[tuple[str, str], ...] = (
+    ("apps/api/routes/new_engine.py", "from sqlalchemy import create_engine\nENGINE = create_engine(URL)\n"),
+    ("packages/common/new_engine.py", "import sqlalchemy\nENGINE = sqlalchemy.create_engine(URL)\n"),
+    ("services/new_svc/engine.py", "from sqlalchemy import create_engine\n\ndef e(u):\n    return create_engine(u)\n"),
+    ("workers/new_worker/engine.py", "import sqlalchemy as sa\nENGINE = sa.create_engine(URL)\n"),
+    ("scripts/new_engine_probe.py", "from sqlalchemy import create_engine\nENGINE = create_engine(URL)\n"),
+)
+
+
+def _sqlalchemy_driver_sniff_repo(tmp_path: Path) -> Path:
+    # `_test_target_exists` drops targets missing under `repo_root`; stub only
+    # the guard so it is the one target this route can make survive.
+    stub = tmp_path / _prod_module.SQLALCHEMY_DRIVER_GUARD_TEST
+    stub.parent.mkdir(parents=True, exist_ok=True)
+    stub.write_text("", encoding="utf-8")
+    return tmp_path
+
+
+def test_sqlalchemy_driver_sniff_roots_equal_the_guard_scan_roots() -> None:
+    from tests import test_sqlalchemy_driver_explicit as guard
+
+    assert _prod_module.SQLALCHEMY_DRIVER_GUARD_ROOTS == guard.SCAN_ROOTS
+    assert _prod_module.SQLALCHEMY_DRIVER_GUARD_PRUNED_DIRECTORIES == guard.PRUNED_DIRECTORIES
+    assert _prod_module.SQLALCHEMY_DRIVER_GUARD_TEST == "tests/test_sqlalchemy_driver_explicit.py"
+    assert _prod_module.SQLALCHEMY_URL_HELPER_PATH == "packages/common/sqlalchemy_url.py"
+    # Every root has a probe below, so a sixth root without one reds here.
+    assert {path.split("/", 1)[0] for path, _ in _SQLALCHEMY_DRIVER_SNIFF_PROBES} == set(guard.SCAN_ROOTS)
+
+
+@pytest.mark.parametrize(
+    ("path", "source"), _SQLALCHEMY_DRIVER_SNIFF_PROBES, ids=[path for path, _ in _SQLALCHEMY_DRIVER_SNIFF_PROBES]
+)
+def test_a_module_calling_create_engine_selects_the_driver_guard(tmp_path: Path, path: str, source: str) -> None:
+    root = _sqlalchemy_driver_sniff_repo(tmp_path)
+    _write_module(root, path, source)
+
+    assert _prod_module.SQLALCHEMY_DRIVER_GUARD_TEST in select_tests([path], repo_root=root)
+
+
+@pytest.mark.parametrize("path", [path for path, _ in _SQLALCHEMY_DRIVER_SNIFF_PROBES])
+def test_the_same_module_without_create_engine_selects_no_driver_guard(tmp_path: Path, path: str) -> None:
+    # Negative control on the IDENTICAL paths: the call is what the positive
+    # case proves, not the path. A mention in a string is not a call.
+    root = _sqlalchemy_driver_sniff_repo(tmp_path)
+    _write_module(root, path, 'from sqlalchemy import text\nDOC = "create_engine(url)"\n')
+
+    assert _prod_module.SQLALCHEMY_DRIVER_GUARD_TEST not in select_tests([path], repo_root=root)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "apps/frontend/node_modules/pkg/engine.py",  # pruned vendored tree
+        "tests/new_engine_helper.py",  # outside the guard roots
+        "services/deleted_engine.py",  # deleted: cannot introduce a bypass
+    ],
+)
+def test_driver_guard_sniff_ignores_paths_the_guard_does_not_scan(tmp_path: Path, path: str) -> None:
+    root = _sqlalchemy_driver_sniff_repo(tmp_path)
+    if path != "services/deleted_engine.py":
+        _write_module(root, path, "from sqlalchemy import create_engine\nENGINE = create_engine(URL)\n")
+
+    assert _prod_module.SQLALCHEMY_DRIVER_GUARD_TEST not in select_tests([path], repo_root=root)
+
+
+def test_real_engine_factories_and_the_helper_select_the_driver_guard() -> None:
+    factories = [
+        "apps/api/routes/hydro_display.py",
+        "apps/api/routes/pipeline.py",
+        "services/tile_publisher/publisher.py",
+        "services/orchestrator/scheduler_runtime.py",
+        "scripts/node27_coverage_freshness_alert.py",
+    ]
+    for path in factories:
+        assert _prod_module.SQLALCHEMY_DRIVER_GUARD_TEST in select_tests([path], repo_root=Path(".")), path
+
+    helper = select_tests([_prod_module.SQLALCHEMY_URL_HELPER_PATH], repo_root=Path("."))
+    assert _prod_module.SQLALCHEMY_DRIVER_GUARD_TEST in helper
+    assert _prod_module.SQLALCHEMY_URL_HELPER_TEST in helper
+
+
+@pytest.mark.parametrize("changed_path", ["pyproject.toml", "uv.lock"])
+def test_dependency_change_selects_the_sqlalchemy_url_helper_suite(changed_path: str) -> None:
+    # A dependency bump can move SQLAlchemy's default PostgreSQL DBAPI (2.1 did).
+    assert _prod_module.SQLALCHEMY_URL_HELPER_TEST in select_tests([changed_path], repo_root=Path("."))

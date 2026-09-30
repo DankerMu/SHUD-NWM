@@ -99,6 +99,7 @@ from apps.api.routes.hydro_display_postgis import _fetch_postgis_tile_bytes as _
 from apps.api.routes.hydro_display_postgis import _postgis_tile_params as _postgis_tile_params
 from apps.api.routes.pipeline import _ok
 from packages.common.source_identity import DisplaySourceId
+from packages.common.sqlalchemy_url import sqlalchemy_url
 from services.tiles.mvt import (
     MVT_MAX_ZOOM,
     MVT_MEDIA_TYPE,
@@ -145,7 +146,7 @@ MVT_COLD_BUSY_HEADERS = {"Retry-After": "1", "Cache-Control": "no-store"}
 def _engine(database_url: str) -> Engine:
     pool_size, max_overflow = _display_pool_configuration()
     return create_engine(
-        database_url,
+        sqlalchemy_url(database_url),
         future=True,
         connect_args={"fallback_application_name": _APPLICATION_NAME},
         pool_pre_ping=True,

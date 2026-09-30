@@ -40,6 +40,7 @@ from packages.common.safe_fs import (
     verify_directory_no_follow,
 )
 from packages.common.source_identity import normalize_source_id
+from packages.common.sqlalchemy_url import sqlalchemy_url
 from workers.data_adapters.base import cycle_id_for, format_cycle_time
 
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
@@ -213,7 +214,7 @@ class TilePublisher:
                 {"cycle_id": cycle_id},
             )
         try:
-            engine = create_engine(self.database_url, future=True)
+            engine = create_engine(sqlalchemy_url(self.database_url), future=True)
             with Session(engine) as session:
                 return self._publish_qdown_from_database(session, cycle_id)
         except PublishError:

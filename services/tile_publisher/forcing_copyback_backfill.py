@@ -28,6 +28,7 @@ from packages.common.safe_fs import (
     directory_identity_no_follow,
     verify_directory_no_follow,
 )
+from packages.common.sqlalchemy_url import sqlalchemy_url
 from services.tile_publisher.publisher import (
     PublishError,
     TilePublisher,
@@ -169,7 +170,7 @@ def run_backfill(config: BackfillConfig) -> dict[str, Any]:
     )
 
     try:
-        engine = create_engine(config.database_url, future=True)
+        engine = create_engine(sqlalchemy_url(config.database_url), future=True)
         with Session(engine) as session:
             _attach_sqlite_main_as_schemas(session)
             runs = discover_backfill_runs(session)

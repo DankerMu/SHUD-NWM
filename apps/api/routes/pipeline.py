@@ -31,6 +31,7 @@ from apps.api.response_models.pipeline import (
 )
 from packages.common.redaction import redact_payload
 from packages.common.source_identity import normalize_source_id
+from packages.common.sqlalchemy_url import sqlalchemy_url
 from services.artifacts import (
     ArtifactLogError,
     ArtifactReader,
@@ -138,7 +139,7 @@ class _StrictPipelineIdentity:
 @lru_cache
 def _engine(database_url: str) -> Engine:
     return create_engine(
-        database_url,
+        sqlalchemy_url(database_url),
         future=True,
         connect_args={"fallback_application_name": _APPLICATION_NAME},
     )

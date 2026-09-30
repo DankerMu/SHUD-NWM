@@ -25,6 +25,7 @@ from typing import Any
 
 import pytest
 
+from packages.common.sqlalchemy_url import sqlalchemy_url
 from scripts import node27_coverage_freshness_alert as alerter
 
 DSN_PASSWORD = "s3cr3t"
@@ -842,7 +843,7 @@ def test_evidence_20_covered_frontier_comes_from_national_discharge_cycles(
         def dispose(self) -> None:
             disposed.append(True)
 
-    def _fake_create_engine(url: str, **kwargs: Any) -> _FakeEngine:
+    def _fake_create_engine(url: Any, **kwargs: Any) -> _FakeEngine:
         engine_calls["url"] = url
         engine_calls.update(kwargs)
         return _FakeEngine()
@@ -866,7 +867,9 @@ def test_evidence_20_covered_frontier_comes_from_national_discharge_cycles(
     observation = alerter.default_observe(config)
 
     # Engine bounds (design D6).
-    assert engine_calls["url"] == DSN
+    # #2632: the engine gets the driver-explicit URL, never SQLAlchemy's default.
+    assert engine_calls["url"] == sqlalchemy_url(DSN)
+    assert engine_calls["url"].drivername == "postgresql+psycopg2"
     assert engine_calls["connect_args"] == {"connect_timeout": alerter.CONNECT_TIMEOUT_SEC}
     assert 0 < alerter.CONNECT_TIMEOUT_SEC <= 60
     assert any(f"SET statement_timeout = {alerter.QUERY_TIMEOUT_MS}" in stmt for stmt in session.executed)
