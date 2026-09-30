@@ -1,7 +1,9 @@
 import copy
 import json
+import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -14,9 +16,17 @@ SCHEMA_BASES = ("timeseries_retention_receipt",)
 
 def _validator() -> str:
     validator = shutil.which("check-jsonschema")
-    if validator is None:
-        raise RuntimeError("check-jsonschema is required; run `uv sync --all-extras --dev`")
-    return validator
+    if validator is not None:
+        return validator
+    # #2615: the venv interpreter run by path (node-27 worktree lane) does not put
+    # its own bin on PATH. No `.resolve()`: that would follow the venv's python
+    # symlink into the uv-managed base interpreter's bin.
+    beside_interpreter = Path(sys.executable).parent / "check-jsonschema"
+    if beside_interpreter.is_file() and os.access(beside_interpreter, os.X_OK):
+        return str(beside_interpreter)
+    raise RuntimeError(
+        f"check-jsonschema is required; looked on PATH and at {beside_interpreter}; run `uv sync --all-extras --dev`"
+    )
 
 
 def _document(base: str) -> dict[str, Any]:

@@ -1362,14 +1362,18 @@ def test_backfill_module_launch_outside_the_repo_root_fails_with_no_summary(tmp_
         str(copyback_root),
     ]
 
-    outside = subprocess.run(argv, cwd=tmp_path, capture_output=True, text=True, check=False)
+    # #2615: an operator-exported PYTHONPATH (the node-27 worktree lane exports
+    # one) would make `scripts` importable from ANY cwd; strip it here, once, for
+    # both runs, so the cwd really is the only difference.
+    env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+    outside = subprocess.run(argv, cwd=tmp_path, env=env, capture_output=True, text=True, check=False)
 
     assert outside.returncode == 1
     assert outside.stdout == ""
     assert "ModuleNotFoundError" in outside.stderr
     assert list(copyback_root.rglob("*")) == []
     # Same command, repo root as cwd: the difference is the cwd and nothing else.
-    from_root = subprocess.run(argv, cwd=REPO_ROOT, capture_output=True, text=True, check=False)
+    from_root = subprocess.run(argv, cwd=REPO_ROOT, env=env, capture_output=True, text=True, check=False)
     assert from_root.returncode == 0, from_root.stderr
     assert json.loads(from_root.stdout)["totals"] == {"copied": 14, "skipped": 0, "failed": 0}
 

@@ -1791,6 +1791,36 @@ DIRECT_GRID_DISPLAY_CUTOVER_FLIP_TESTS: tuple[str, ...] = (
     "tests/test_direct_grid_display_cutover_flip_mvt_set.py",
 )
 
+# #2490 partitioned three oversized suites with no behaviour change. Each
+# original path stays one partition (openspec/specs/ci-contract-baseline/spec.md
+# pins the retention base path), and every rule that selected an original path
+# selects ALL of its partitions, so an owner path runs exactly the cases it ran
+# before the split.
+#
+# The MVT cache-retention suite: three collectible partitions plus the
+# non-collectible tests/node27_mvt_cache_retention_helpers.py (routed below in
+# SUPPORT_MODULE_TEST_RULES; all three partitions import it, `_clean_env` autouse
+# included).
+NODE27_MVT_CACHE_RETENTION_HELPERS_PATH = "tests/node27_mvt_cache_retention_helpers.py"
+NODE27_MVT_CACHE_RETENTION_TESTS: tuple[str, ...] = (
+    "tests/test_node27_mvt_cache_retention.py",
+    "tests/test_node27_mvt_cache_retention_enumeration.py",
+    "tests/test_node27_mvt_cache_retention_wrapper.py",
+)
+# The #1341 read-path surrogate-key proof: two file-level `integration`-gated
+# partitions. Their shared helper
+# (tests/river_ts_read_path_surrogate_keys_integration_helpers.py) and the
+# national identity probe's (tests/mvt_national_identity_probe_integration_helpers.py)
+# deliberately get NO SUPPORT_MODULE_TEST_RULES entry: the closure guard's
+# importer derivation skips file-level integration-gated importers, so their
+# derived set is empty and a rule would red it. A helper-only diff collapses to
+# the meta-guard in the PR lane, and the `integration` in both helper names keeps
+# them inside ci.yml's `database` filter glob `tests/*integration*.py`.
+RIVER_TS_READ_PATH_SURROGATE_KEYS_INTEGRATION_TESTS: tuple[str, ...] = (
+    "tests/test_river_ts_read_path_surrogate_keys_integration.py",
+    "tests/test_river_ts_read_path_surrogate_keys_coverage_integration.py",
+)
+
 
 # #1895 R1.6 C4 production-acceptance corpus. The public freeze/bind/verify
 # suite and the boundary-parameter/identity/closed-stdout partition are ONE
@@ -1914,6 +1944,9 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         # recorded and pinned elsewhere; this routing is additive to it.
         "tests/conftest.py",
         (
+            # #2594: the grib opt-in preflight's pin imports this module to
+            # drive `pytest_collection_finish` with a replaced ecCodes probe.
+            "tests/test_conftest_grib_preflight.py",
             "tests/test_grid_stability_verification.py",
             "tests/test_integration_gate.py",
             "tests/test_node27_docker_collection_gate.py",
@@ -2134,6 +2167,8 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         # them. Measured 454 passed in 40.18 s locally — inside the lane budget.
         "tests/__init__.py",
         (
+            # #2594: `from tests import conftest`, the same edge as the gate suite.
+            "tests/test_conftest_grib_preflight.py",
             "tests/test_integration_gate.py",
             "tests/test_node27_docker_collection_gate.py",
             "tests/test_node27_timeseries_compression_capture.py",
@@ -2542,6 +2577,24 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         # to the meta-guard and the pin never runs.
         "tests/latest_cycle_discovery_oracle.py",
         ("tests/test_latest_cycle_discovery_shape.py",),
+    ),
+    PathTestRule(
+        # #2490: the shared builders and the autouse `_clean_env` of the three
+        # MVT cache-retention partitions. All three import it at module scope,
+        # so the routed set IS the derived closure; without this row a
+        # helper-only diff would collapse to the meta-guard and a broken
+        # `_clean_env` would let the display-process env leak into every case.
+        NODE27_MVT_CACHE_RETENTION_HELPERS_PATH,
+        NODE27_MVT_CACHE_RETENTION_TESTS,
+    ),
+    PathTestRule(
+        # #2595: the real-disk suite's run-time cycle selection. The real-disk
+        # suite itself is file-level `e2e`-gated, so it is not a derived
+        # importer and is deliberately absent (it would only skip in the PR
+        # lane); the local proof with temporary stores is the one non-gated
+        # importer, and it is what a selection change must run.
+        "tests/object_store_forcing_real_disk_support.py",
+        ("tests/test_object_store_forcing_real_disk_support.py",),
     ),
 )
 
@@ -3711,7 +3764,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # selector's own duplicate-pattern guard forbids a second
             # PATH_TEST_RULES entry for an already-owned module.)
             *SQL_SHAPE_ORACLE_TESTS,
-            "tests/test_river_ts_read_path_surrogate_keys_integration.py",
+            *RIVER_TS_READ_PATH_SURROGATE_KEYS_INTEGRATION_TESTS,
         ),
     ),
     PathTestRule(
@@ -3746,6 +3799,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # `integration`-marked importers stay out per the #1447 ruling:
             # they auto-skip without NHMS_RUN_INTEGRATION (tests/conftest.py),
             # so requiring them buys constant skips and zero assertions.
+            # #2490: the national identity probe is now three partitions
+            # (`test_mvt_national_identity_probe{,_cycles,_digest}_integration.py`),
+            # each with the module-level `integration` mark, so all three stay
+            # out under the same ruling.
             # #2527: the flip suite is two partitions; the row carries both
             # (see DIRECT_GRID_DISPLAY_CUTOVER_FLIP_TESTS for why both).
             *DIRECT_GRID_DISPLAY_CUTOVER_FLIP_TESTS,
@@ -3769,9 +3826,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # _file_cache_path / _file_cache_lock_path / _write_file_cache, so
             # a layout change here must red there rather than after merge.
             # Neither suite imports apps.api.routes.hydro_display, so that
-            # rule is deliberately left alone.
+            # rule is deliberately left alone. #2490: the retention suite is
+            # three partitions and the row carries all of them.
             "tests/test_mvt_tile_generation_lock.py",
-            "tests/test_node27_mvt_cache_retention.py",
+            *NODE27_MVT_CACHE_RETENTION_TESTS,
             # #2550: guard-derived — the basemap proxy suite imports
             # apps.api.routes.basemap, which takes MVT_FILE_CACHE_DIR_ENV from
             # this module: both caches share one root, so renaming the env here
@@ -3849,7 +3907,8 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # runtime-mode suites are the one-hop contributions via
         # apps/api/openapi_patching.py and apps/api/route_registry.py. The two
         # `integration`-marked importers (test_display_coverage_residual_debt_
-        # integration.py, test_mvt_national_identity_probe_integration.py) stay
+        # integration.py, test_mvt_national_identity_probe_integration.py and,
+        # since #2490, its `_cycles_` / `_digest_` partitions) stay
         # out per the #1447 ruling — they auto-skip in the PR lane. The #1341
         # read-path shape pin rides along as an exact at-site entry.
         # #2026: the pattern is a glob over the whole `hydro_display*` family.
@@ -5453,7 +5512,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # constructively skip the pin -- it only reds on master's full run.
         "infra/systemd/nhms-node27-mvt-cache-retention.service",
         (
-            "tests/test_node27_mvt_cache_retention.py",
+            *NODE27_MVT_CACHE_RETENTION_TESTS,
             "tests/test_node27_timeseries_retention.py",
         ),
     ),
@@ -5630,7 +5689,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # `Persistent=true` out of the timer, so the schedule is assertable at
         # PR time rather than at `systemctl --user list-timers`.
         "infra/systemd/nhms-node27-mvt-cache-retention.timer",
-        ("tests/test_node27_mvt_cache_retention.py",),
+        NODE27_MVT_CACHE_RETENTION_TESTS,
     ),
     PathTestRule(
         # #2180: same shape as the mvt-cache-retention `.timer` row above and
@@ -5704,7 +5763,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # criterion and the two rollback gates assertable at PR time. Additive:
         # the glob row still matches and both target sets are unioned.
         "infra/env/node27-mvt-cache-retention.example",
-        ("tests/test_node27_mvt_cache_retention.py",),
+        NODE27_MVT_CACHE_RETENTION_TESTS,
     ),
     PathTestRule(
         # #2104, same ground as the #2032 row above: the two globs that match
@@ -5724,7 +5783,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "infra/env/node27-raw-retention.example",
         (
             "tests/test_node27_raw_retention.py",
-            "tests/test_node27_mvt_cache_retention.py",
+            *NODE27_MVT_CACHE_RETENTION_TESTS,
         ),
     ),
     PathTestRule(
@@ -5819,14 +5878,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # routed to tests/test_node27_wrapper_pythonpath.py: this wrapper
         # exports no PYTHONPATH (its runner imports nothing from the repo).
         "scripts/node27_mvt_cache_retention_once.sh",
-        ("tests/test_node27_mvt_cache_retention.py",),
+        NODE27_MVT_CACHE_RETENTION_TESTS,
     ),
     PathTestRule(
         # #2627: the basemap stage's suite is a sibling partition the same-name
         # derivation cannot find; both are unioned with it.
         "scripts/node27_mvt_cache_retention.py",
         (
-            "tests/test_node27_mvt_cache_retention.py",
+            *NODE27_MVT_CACHE_RETENTION_TESTS,
             "tests/test_node27_mvt_cache_retention_basemap.py",
             # BASEMAP_LAYERS is pinned to the route's TiandituLayer there.
             "tests/test_basemap_proxy.py",
