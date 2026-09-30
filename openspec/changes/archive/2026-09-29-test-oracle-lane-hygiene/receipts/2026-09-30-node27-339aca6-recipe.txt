@@ -1,0 +1,8 @@
+node-27, 2026-09-30, literal docs/runbooks/ci-test-routing.md worktree recipe at 339aca6e8 (HOME=/home/nwm/, trailing slash)
+tree assertion OK: WT=/home/nwm/wt-339aca6e8348e607ecfda6e38f58b4948c07f68e
+A+B (PYTHONPATH exported by recipe): 69 passed in 8.61s
+B with PATH=/usr/bin:/bin: 17 passed in 4.01s
+preflight negative (NHMS_RUN_GRIB=1, no runtime): rc=4
+  ERROR: NHMS_RUN_GRIB=1 selected grib tests, but the ecCodes runtime cannot be loaded (RuntimeError: Cannot find the ecCodes library). Export the GRIB runtime (LD_LIBRARY_PATH, ECCODES_DIR, ECCODES_DEFINITION_PATH) as in the node-27 lane of docs/runbooks/ci-test-routing.md before running grib tests.
+real_disk -rA (nhms_display_ro): 4 errors -- Failed: real store has no cycle where all 4 combos are present (root=/home/ghdc/nwm/object-store, per-combo counts all 0) -> #2699 (legacy basins_*_shud dirs absent from all 102 retained cycles; only dg_* variants)
+grib lane (fc12ef8ca log): 8 tests ran with ecCodes loaded (eccodes-2.47.0-ha1d8304_0); 8 failed on pre-existing fixture/producer defects -> #2700

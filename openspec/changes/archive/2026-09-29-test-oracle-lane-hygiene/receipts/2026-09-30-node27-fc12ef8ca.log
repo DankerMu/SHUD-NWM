@@ -1,0 +1,51 @@
+== head=fc12ef8caedbbb4eb1e9dcaa0ec443c45111b856 master=72a1c76a3e0a208c313b8a79541ea6e6da6053ba
+NEW=tests/test_mvt_national_identity_probe_integration.py tests/test_river_ts_read_path_surrogate_keys_integration.py tests/test_node27_mvt_cache_retention.py tests/test_mvt_national_identity_probe_cycles_integration.py tests/test_mvt_national_identity_probe_digest_integration.py tests/test_node27_mvt_cache_retention_basemap.py tests/test_node27_mvt_cache_retention_enumeration.py tests/test_node27_mvt_cache_retention_wrapper.py tests/test_river_ts_read_path_surrogate_keys_coverage_integration.py 
+== [5.1a] -m integration master old files
+..............................................                           [100%]
+46 passed, 85 deselected in 601.23s (0:10:01)
+== [5.1b] -m integration branch parts
+..............................................                           [100%]
+46 passed, 105 deselected in 539.88s (0:08:59)
+== [2.3] real_disk as nhms_display_ro
+    def latest_complete_cycle(
+        """Return the newest cycle (ISO ``Z``) where every ``(station, source, model)`` combo is settled.
+        sources. A cycle qualifies only when all combos resolve to an existing file
+        whose mtime is at least ``MIN_SETTLED_AGE_SECONDS`` old. No qualifying cycle
+        is a hard failure naming the root and, per combo, how many cycles it is
+                    if child.is_dir() and _CYCLE_DIR_RE.fullmatch(child.name) and _cycle_time(child.name) is not None
+        for cycle in sorted(candidates, reverse=True):
+                    _resolve_disk_path(root, source, cycle, basin_version_id, model_id, forcing_filename),
+                newest = cycle
+                f"real store has no cycle where all {len(resolved)} combos are present "
+E           Failed: real store has no cycle where all 4 combos are present (root=/home/ghdc/nwm/object-store, per-combo counts={'heihe_forc_001/IFS/basins_heihe_shud': 0, 'heihe_forc_001/gfs/basins_heihe_shud': 0, 'qhh_forc_001/IFS/basins_qhh_shud': 0, 'qhh_forc_001/gfs/basins_qhh_shud': 0})
+ERROR tests/test_object_store_forcing_real_disk.py::test_real_disk_latest_cycle_serves_all_currently_409_combinations
+== [3.3] grib lane
+ERROR    cfgrib.messages:messages.py:286 skipping corrupted Message
+ERROR    cfgrib.messages:messages.py:286 skipping corrupted Message
+ERROR    cfgrib.messages:messages.py:286 skipping corrupted Message
+ERROR    cfgrib.messages:messages.py:286 skipping corrupted Message
+ERROR    cfgrib.messages:messages.py:286 skipping corrupted Message
+FAILED tests/test_e2e_ifs.py::test_ifs_adapter_canonical_forcing_run_parse_e2e
+FAILED tests/test_e2e_ifs.py::test_ifs_06z_144h_manifest_context_and_forcing_limit
+FAILED tests/test_production_met_validation.py::test_validate_met_default_lane_writes_required_evidence_and_redacts
+FAILED tests/test_production_met_validation.py::test_validate_met_manifest_bound_counts_actual_deterministic_sources
+FAILED tests/test_production_met_validation.py::test_validate_met_same_run_requires_force_and_force_replaces_bundle
+FAILED tests/test_production_met_validation.py::test_validate_met_disabled_sources_record_skipped_without_success
+FAILED tests/test_production_met_validation.py::test_validate_met_cached_only_policy_uses_cached_fixture
+FAILED tests/test_production_met_validation.py::test_argparse_validate_met_fallback
+====================== 8 failed, 34 deselected in 13.18s =======================
+== [3.3-neg] grib opt-in without runtime
+
+
+2 deselected in 1.32s
+rc=4
+== [4.3] A+B via recipe (PYTHONPATH exported)
+................................................................         [100%]
+64 passed in 8.24s
+== [4.3] B with PATH lacking venv bin
+............                                                             [100%]
+12 passed in 3.79s
+== [5.1c] all touched files via recipe (default gates)
+..........                                                               [100%]
+1116 passed, 46 skipped in 295.15s (0:04:55)
+DONE
