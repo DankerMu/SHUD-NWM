@@ -32,6 +32,11 @@ Object-store / DB env (same contract as the per-run scripts)::
     OBJECT_STORE_PREFIX=s3://nhms
     DATABASE_URL=postgresql://nhms:nhms_dev@127.0.0.1:55432/nhms
     BASINS_ROOT=/home/ghdc/nwm/Basins        # geometry source for registry seed
+
+``AUTOPIPE_EXCLUDE_MODEL_IDS`` (or ``--exclude-model-ids``) retires exact model
+versions from both run ingest and inventory seeding while allowing replacement
+models for the same basin. Include the retired baseline and every direct-grid
+variant; model ids are case-sensitive and are not basin slugs or patterns.
 """
 
 # ruff: noqa: E402
@@ -876,6 +881,48 @@ def _basin_key_set(value: str | None) -> set[str]:
         for item in str(value or "").split(",")
         if item.strip()
     }
+
+
+def _model_id_set(value: str | None) -> set[str]:
+    """Parse exact, case-sensitive ids without the basin slug normalization."""
+    return {item.strip() for item in str(value or "").split(",") if item.strip()}
+
+
+def _exclude_model_runs(
+    object_store_root: Path,
+    runs: list[dict[str, str]],
+    excluded_model_ids: set[str],
+) -> tuple[list[dict[str, str]], list[str], list[dict[str, Any]]]:
+    """Filter before a run can override inventory identity or activate a model.
+
+    With a version exclusion policy, unidentified runs must fail closed rather
+    than falling back to an inventory model and bypassing that policy. Keep the
+    failure isolated so other basins and the replacement version can proceed.
+    An empty policy preserves the existing discovery/identity failure behavior.
+    """
+    if not excluded_model_ids:
+        return runs, [], []
+    admitted: list[dict[str, str]] = []
+    excluded: list[str] = []
+    failures: list[dict[str, Any]] = []
+    for run in runs:
+        try:
+            identity = _basin_identity(object_store_root, run["run_id"])
+        except Exception as exc:  # noqa: BLE001 - isolate unidentified runs, fail closed
+            failures.append(
+                {
+                    "run_id": run["run_id"],
+                    "outcome": "failed",
+                    "stage": "identity",
+                    "error": redact_text(str(exc)),
+                }
+            )
+            continue
+        if identity["model_id"] in excluded_model_ids:
+            excluded.append(run["run_id"])
+        else:
+            admitted.append(run)
+    return admitted, excluded, failures
 
 
 # --------------------------------------------------------------------------- #
@@ -2413,6 +2460,11 @@ def main(argv: list[str] | None = None) -> int:
         default=os.environ.get("AUTOPIPE_EXCLUDE_BASINS", ""),
         help="Comma-separated retired basin slugs/ids excluded from seeding and ingest.",
     )
+    parser.add_argument(
+        "--exclude-model-ids",
+        default=os.environ.get("AUTOPIPE_EXCLUDE_MODEL_IDS", ""),
+        help="Comma-separated exact, case-sensitive retired model ids excluded from seeding and ingest.",
+    )
     parser.add_argument("--progress", action="store_true", help="Per-step progress to stderr.")
     args = parser.parse_args(raw_argv)
 
@@ -2421,6 +2473,7 @@ def main(argv: list[str] | None = None) -> int:
 
     sources = tuple(s.strip().lower() for s in args.sources.split(",") if s.strip())
     excluded_basins = _basin_key_set(args.exclude_basins)
+    excluded_model_ids = _model_id_set(args.exclude_model_ids)
 
     database_config = _database_url_config(args.database_url_file, env)
     preflight = _preflight_ingest_config(
@@ -2471,6 +2524,9 @@ def main(argv: list[str] | None = None) -> int:
         only_basin_key = _slug_id(args.only_basin)
         runs = [r for r in runs if r["basin"] == only_basin_key]
     runs = [r for r in runs if r["basin"] not in excluded_basins]
+    runs, excluded_model_runs, model_identity_failures = _exclude_model_runs(
+        object_store_root, runs, excluded_model_ids,
+    )
 
     # ---- phase 1: seed any unseeded basin -------------------------------
     # Seed candidates come from BASINS_ROOT first so node-27 display metadata is
@@ -2486,7 +2542,7 @@ def main(argv: list[str] | None = None) -> int:
     seed_identities = {
         basin_key: identity
         for basin_key, identity in seed_identities.items()
-        if basin_key not in excluded_basins
+        if basin_key not in excluded_basins and identity["model_id"] not in excluded_model_ids
     }
     for basin_key in sorted({r["basin"] for r in runs}):
         first_run = next(r["run_id"] for r in runs if r["basin"] == basin_key)
@@ -2643,6 +2699,8 @@ def main(argv: list[str] | None = None) -> int:
                     flush=True,
                 )
 
+    run_results = model_identity_failures + run_results
+
     # ---- phase 3: advance fully-ingested runs to 'published' so the layer ----
     # catalog (discharge / q_down overlay) actually surfaces them. Idempotent;
     # also back-fills runs parsed by earlier ticks before this step existed.
@@ -2761,6 +2819,8 @@ def main(argv: list[str] | None = None) -> int:
         "basins_root": str(basins_root),
         "sources": list(sources),
         "excluded_basins": sorted(excluded_basins),
+        "excluded_model_ids": sorted(excluded_model_ids),
+        "excluded_model_runs": excluded_model_runs,
         "discovered_runs": len(runs),
         "basins": basins,
         "basin_slugs": [seed_identities[basin].get("basin_slug") for basin in basins],

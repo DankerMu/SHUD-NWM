@@ -186,6 +186,20 @@ basins_hys_* 后继」**，所以 #1701 原计划的「换 id + 状态延续」�
    验收必须**跨至少一轮完整 autopipe** 再读数（本次 19:58:40 那轮跑完后
    zhaochen active = 0、active 总数 28，才算数）。
 
+   同一流域更换网格、保留新版本上线时，使用
+   `AUTOPIPE_EXCLUDE_MODEL_IDS`（CLI 为 `--exclude-model-ids`），不要把整个
+   流域加到 `AUTOPIPE_EXCLUDE_BASINS`。按**旧的完整 `basin_version_id`** 查询
+   `core.model_instance`，把旧 baseline 和全部 `dg_*` 的完整 `model_id` 以
+   逗号分隔写入；保留既有排除项，空项与重复项会忽略。匹配区分大小写，
+   不支持前缀、通配符或流域名替代。该规则同时过滤历史运行和 Basins 清单的
+   默认模型身份，避免旧运行先覆盖新版本身份、再重新激活旧网格。
+   新 `model_id` 仍可为相同 `basin_id` 登记、入库与发布。版本排除配置生效后，
+   无法读取完整模型身份的运行会报告 `identity` 阶段失败并隔离，不会借用
+   清单身份绕过排除；其他运行继续。CLI 参数会覆盖对应环境变量。
+   先停用自动入库 timer，等待正在执行的 service 自然结束，再保存配置和
+   停用旧模型；完成后恢复 timer，并跨一轮完整自动入库核对旧版本仍无 active
+   模型、新版本正常入库。历史运行的 `superseded` 处理及其他退役步骤仍须执行。
+
 **不需要做的**（都核实过，别顺手做）：
 
 - **不需要 retirement declaration**。`NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true` 让刷新走

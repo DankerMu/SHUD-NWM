@@ -203,7 +203,8 @@ PHASE_START=$(date +%s)
   --basins-root "${BASINS_ROOT:-}" \
   --direct-grid-only \
   --workers "${AUTOPIPE_RUN_WORKERS:-1}" \
-  --exclude-basins "${AUTOPIPE_EXCLUDE_BASINS:-}" >> "$LOG" 2>&1
+  --exclude-basins "${AUTOPIPE_EXCLUDE_BASINS:-}" \
+  --exclude-model-ids "${AUTOPIPE_EXCLUDE_MODEL_IDS:-}" >> "$LOG" 2>&1
 RC=$?
 PHASE_END=$(date +%s)
 echo "[$(ts)] autopipe: phase=ingest elapsed_sec=$((PHASE_END - PHASE_START))" >> "$LOG"

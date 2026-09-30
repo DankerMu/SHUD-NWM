@@ -358,6 +358,221 @@ def test_excluded_basin_is_not_seeded_or_ingested(
     assert published_calls == []
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, set()),
+        ("", set()),
+        (" , , ", set()),
+        (" dg_abc , dg_abc,,basins_QHH_shud ", {"dg_abc", "basins_QHH_shud"}),
+        ("dg_abc,dg_abcd,DG_abc,dg_*", {"dg_abc", "dg_abcd", "DG_abc", "dg_*"}),
+    ],
+)
+def test_model_exclusion_ids_preserve_exact_case_and_ignore_empty_duplicates(
+    value: str | None, expected: set[str],
+) -> None:
+    assert autopipe._model_id_set(value) == expected
+
+
+def _replace_run_model(object_store_root: Path, run_id: str, model_id: str) -> None:
+    path = object_store_root / "runs" / run_id / "input" / "manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest["identity"]["model_id"] = model_id
+    manifest["identity"]["model_package_uri"] = f"s3://nhms/models/{model_id}/vnew/package/"
+    path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+
+
+def _capture_scope_calls(monkeypatch: pytest.MonkeyPatch) -> tuple[list[str], list[str]]:
+    activated: list[str] = []
+    eligible_runs: list[str] = []
+
+    def display_ready(_database_url: str, model_id: str) -> dict[str, Any]:
+        activated.append(model_id)
+        return {"model_id": model_id, "model_activated_rows": 1}
+
+    def already_ingested(_database_url: str, run_ids: list[str], **_kwargs: Any) -> set[str]:
+        eligible_runs.extend(run_ids)
+        return set()
+
+    monkeypatch.setattr(autopipe, "_ensure_seeded_basin_display_ready", display_ready)
+    monkeypatch.setattr(autopipe, "_already_ingested_runs", already_ingested)
+    monkeypatch.setattr(
+        autopipe, "import_discovered_pipeline_job_provenance",
+        lambda **_kwargs: {"imported": 0, "unavailable": 0, "failed": 0, "runs": []},
+    )
+    return activated, eligible_runs
+
+
+def _seed_inventory(basin: str, model_id: str) -> dict[str, Any]:
+    return {
+        "basin_slug": basin,
+        "model_id": model_id,
+        "status": "valid",
+        "default_publish_eligible": True,
+        "suggested_ids": {"basin_id": f"basins_{basin}"},
+    }
+
+
+@pytest.mark.parametrize("already_seeded", [True, False], ids=["existing-basin", "unseeded-basin"])
+@pytest.mark.parametrize("retired_run", [DIRECT_GRID_RUN, RUN_A], ids=["retired-direct-grid", "retired-legacy"])
+def test_retired_model_cannot_override_replacement_identity_for_same_basin(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    already_seeded: bool, retired_run: str,
+) -> None:
+    new_run = "fcst_gfs_2026070600_dg_0123456789abcdef01"
+    old_model = "dg_0123456789abcdef"
+    new_model = "dg_0123456789abcdef01"
+    old_baseline = "basins_qhh_shud"
+    root, calls, published_calls = _prepare_autopipe(
+        monkeypatch, tmp_path, runs={retired_run: True, new_run: True},
+    )
+    _replace_run_model(root, retired_run, old_model)
+    _replace_run_model(root, new_run, new_model)
+    monkeypatch.setattr(
+        autopipe, "discover_basins_inventory",
+        lambda _root: {"models": [_seed_inventory("qhh", old_baseline)]},
+    )
+    monkeypatch.setattr(autopipe, "_basin_seeded", lambda *_args: already_seeded)
+    activated, eligible_runs = _capture_scope_calls(monkeypatch)
+    seeded: list[dict[str, str]] = []
+
+    def seed(**kwargs: Any) -> dict[str, Any]:
+        seeded.append(kwargs["identity"])
+        return {"outcome": "seeded", "model_id": kwargs["identity"]["model_id"]}
+
+    monkeypatch.setattr(autopipe, "_seed_basin", seed)
+    rc, summary = _run_main(
+        capsys, root, "--exclude-model-ids", f" {old_baseline},{old_model},{old_model},, ",
+    )
+
+    assert rc == 0
+    assert summary["excluded_model_ids"] == sorted([old_baseline, old_model])
+    assert summary["excluded_model_runs"] == [retired_run]
+    assert summary["basins"] == ["qhh"]
+    assert summary["discovered_runs"] == 1
+    assert summary["seed"]["details"][0]["model_id"] == new_model
+    assert summary["seed"]["details"][0]["identity_source"] == "run_manifest"
+    assert activated == ([new_model] if already_seeded else [])
+    assert [identity["model_id"] for identity in seeded] == ([] if already_seeded else [new_model])
+    assert eligible_runs == [new_run]
+    assert summary["runs"]["ingested"] == 1
+    assert summary["runs"]["details"][0]["run_id"] == new_run
+    assert _command_kinds(calls) == ["register", "parse", "coverage"]
+    assert published_calls == [NODE27_DATABASE_URL]
+
+
+@pytest.mark.parametrize("seed_only", [False, True], ids=["ingest-tick", "seed-only-tick"])
+@pytest.mark.parametrize("run_present", [False, True], ids=["inventory-only", "historical-run"])
+def test_all_runs_and_inventory_models_excluded_never_reactivate_old_version(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], seed_only: bool,
+    run_present: bool,
+) -> None:
+    root, calls, published_calls = _prepare_autopipe(
+        monkeypatch, tmp_path, runs={DIRECT_GRID_RUN: True} if run_present else {},
+    )
+    monkeypatch.setattr(
+        autopipe, "discover_basins_inventory",
+        lambda _root: {"models": [_seed_inventory("qhh", "basins_qhh_shud")]},
+    )
+    activated, eligible_runs = _capture_scope_calls(monkeypatch)
+    extra = ["--seed-only"] if seed_only else []
+    rc, summary = _run_main(capsys, root, "--exclude-model-ids", "basins_qhh_shud", *extra)
+
+    assert rc == 0
+    assert summary["excluded_model_runs"] == ([DIRECT_GRID_RUN] if run_present else [])
+    assert summary["basins"] == []
+    assert summary["seed"]["details"] == []
+    assert summary["discovered_runs"] == 0
+    assert summary["runs"]["processed"] == 0
+    assert activated == eligible_runs == calls == published_calls == []
+
+
+@pytest.mark.parametrize("excluded", ["", " , , ", "BASINS_qhh_shud", "basins_qhh_shud*", "basins_qhh"])
+def test_empty_or_nonexact_model_exclusions_leave_matching_run_eligible(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], excluded: str,
+) -> None:
+    root, calls, _published_calls = _prepare_autopipe(monkeypatch, tmp_path, runs={DIRECT_GRID_RUN: True})
+    # An explicitly empty CLI list must also override a nonempty environment list.
+    monkeypatch.setenv("AUTOPIPE_EXCLUDE_MODEL_IDS", "basins_qhh_shud")
+    activated, eligible_runs = _capture_scope_calls(monkeypatch)
+    rc, summary = _run_main(capsys, root, "--exclude-model-ids", excluded)
+
+    assert rc == 0
+    assert summary["excluded_model_runs"] == []
+    assert activated == ["basins_qhh_shud"]
+    assert eligible_runs == [DIRECT_GRID_RUN]
+    assert summary["runs"]["ingested"] == 1
+    assert _command_kinds(calls) == ["register", "parse", "coverage"]
+
+
+def test_basin_and_model_exclusions_combine_without_changing_other_43_basins(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    retained_runs = [f"fcst_gfs_2026070600_basins_retained_{index:02d}_shud" for index in range(43)]
+    runs = {run_id: True for run_id in [RUN_A, RUN_HEIHE, *retained_runs]}
+    root, calls, published_calls = _prepare_autopipe(monkeypatch, tmp_path, runs=runs)
+    models = [_seed_inventory("qhh", "basins_qhh_shud"), _seed_inventory("heihe", "basins_heihe_shud")]
+    models.extend(_seed_inventory(f"retained_{index:02d}", f"basins_retained_{index:02d}_shud") for index in range(43))
+    monkeypatch.setattr(autopipe, "discover_basins_inventory", lambda _root: {"models": models})
+    monkeypatch.setenv("AUTOPIPE_EXCLUDE_MODEL_IDS", "basins_qhh_shud")
+    activated, eligible_runs = _capture_scope_calls(monkeypatch)
+    rc, summary = _run_main(capsys, root, "--exclude-basins", "basins_heihe")
+
+    assert rc == 0
+    assert summary["excluded_basins"] == ["heihe"]
+    assert summary["excluded_model_ids"] == ["basins_qhh_shud"]
+    assert summary["excluded_model_runs"] == [RUN_A]
+    assert summary["discovered_runs"] == summary["runs"]["ingested"] == 43
+    assert activated == [f"basins_retained_{index:02d}_shud" for index in range(43)]
+    assert eligible_runs == retained_runs
+    assert [detail["run_id"] for detail in summary["runs"]["details"]] == retained_runs
+    assert _command_kinds(calls) == ["register", "parse", "coverage"] * 43
+    assert published_calls == [NODE27_DATABASE_URL]
+
+
+@pytest.mark.parametrize(
+    "manifest_text", ["{broken", "{}", "[]", None, "permission-denied"],
+    ids=["invalid-json", "missing-identity", "invalid-shape", "missing-file", "permission-denied"],
+)
+def test_model_exclusion_identity_failure_cannot_fallback_and_isolates_healthy_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], manifest_text: str | None,
+) -> None:
+    root, calls, published_calls = _prepare_autopipe(monkeypatch, tmp_path, runs={RUN_A: True, RUN_HEIHE: True})
+    manifest_path = root / "runs" / RUN_A / "input" / "manifest.json"
+    if manifest_text == "permission-denied":
+        original_read = autopipe._read_manifest
+
+        def read_manifest(root: Path, run_id: str) -> dict[str, Any]:
+            if run_id == RUN_A:
+                raise PermissionError('permission denied {"password":"identity-secret"}')
+            return original_read(root, run_id)
+
+        monkeypatch.setattr(autopipe, "_read_manifest", read_manifest)
+    elif manifest_text is None:
+        manifest_path.unlink()
+    else:
+        manifest_path.write_text(manifest_text, encoding="utf-8")
+    monkeypatch.setattr(
+        autopipe, "discover_basins_inventory",
+        lambda _root: {"models": [_seed_inventory("qhh", "basins_qhh_shud")]},
+    )
+    activated, eligible_runs = _capture_scope_calls(monkeypatch)
+    rc, summary = _run_main(capsys, root, "--exclude-model-ids", "basins_qhh_shud")
+
+    assert rc == 1
+    assert summary["status"] == "completed_with_failures"
+    assert summary["seed"]["failed"] == []
+    assert summary["runs"]["failed"] == summary["runs"]["ingested"] == 1
+    assert summary["runs"]["failed_runs"][0]["run_id"] == RUN_A
+    assert summary["runs"]["failed_runs"][0]["stage"] == "identity"
+    assert summary["runs"]["failed_runs"][0]["error"]
+    assert "identity-secret" not in json.dumps(summary)
+    assert activated == ["basins_heihe_shud"]
+    assert eligible_runs == [RUN_HEIHE]
+    assert _command_kinds(calls) == ["register", "parse", "coverage"]
+    assert published_calls == [NODE27_DATABASE_URL]
+
+
 def test_parallel_workers_preserve_deterministic_result_order_and_final_publish(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
