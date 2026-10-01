@@ -55,6 +55,11 @@ AUTOPIPE_MVT_PREWARM_WORKERS=8
 # Starlette decodes header values as latin-1. Not validated at runtime.
 # NHMS_DISPLAY_CACHE_WARM_TOKEN=
 AUTOPIPE_EXCLUDE_BASINS=zhaochen_hhy
+# Retire individual model versions while keeping replacement models for the
+# same basin eligible. Exact, case-sensitive model ids separated by commas;
+# list the old baseline AND all its direct-grid variants from the retired
+# basin_version_id. Empty preserves the existing scope. Set before deactivation.
+AUTOPIPE_EXCLUDE_MODEL_IDS=
 OUTPUT_PARSER_BATCH_SIZE=10000
 AUTOPIPE_LOG_FILE=/home/nwm/autopipe-logs/autopipe.log
 AUTOPIPE_LOCK_PATH=/tmp/autopipe.cron.lock

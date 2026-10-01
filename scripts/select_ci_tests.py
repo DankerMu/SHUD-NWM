@@ -2073,6 +2073,7 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         "tests/provider_mode_helpers.py",
         (
             "tests/test_production_scheduler.py",
+            "tests/test_scheduler_registry_capacity.py",
             # #1943: the journal-root authority suite builds its symlinked and
             # mode-sensitive journal roots through
             # `make_directory_with_explicit_mode`, so a helper change moves what
@@ -3606,6 +3607,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # reach the same providers through `registry_script`, and the rule
             # carried the undivided monolith before the split.
             *PUBLISH_SCHEDULER_REGISTRY_TESTS,
+            "tests/test_scheduler_registry_capacity.py",
             "tests/test_reconcile_sacct_parse.py",
             "tests/test_replay_lineage.py",
             "tests/test_retention.py",

@@ -1048,6 +1048,7 @@ def test_wrapper_contract_has_ingest_env_without_writer_default_or_display_env_s
     assert "--direct-grid-only" in script
     assert 'AUTOPIPE_RUN_WORKERS:-1' in script
     assert 'AUTOPIPE_EXCLUDE_BASINS:-' in script
+    assert '--exclude-model-ids "${AUTOPIPE_EXCLUDE_MODEL_IDS:-}"' in script
     for required_key in (
         "DATABASE_URL",
         "NHMS_NODE27_INGEST_ROLE",
@@ -1522,7 +1523,10 @@ def test_wrapper_rejects_log_root_symlink_to_filesystem_root(tmp_path: Path) -> 
     assert "AUTOPIPE_LOG_ROOT_UNSAFE" in proc.stderr
 
 
-def test_wrapper_keeps_writer_database_url_out_of_child_argv(tmp_path: Path) -> None:
+@pytest.mark.parametrize("model_exclusions", ["", " dg_old , DG_old ,, dg_old "])
+def test_wrapper_keeps_writer_database_url_out_of_child_argv_and_passes_model_exclusions(
+    tmp_path: Path, model_exclusions: str,
+) -> None:
     fake_repo = tmp_path / "repo"
     scripts = fake_repo / "scripts"
     python_bin = fake_repo / ".venv" / "bin" / "python"
@@ -1561,6 +1565,7 @@ def test_wrapper_keeps_writer_database_url_out_of_child_argv(tmp_path: Path) -> 
                 f"AUTOPIPE_LOG_ROOT={log_root}",
                 f"AUTOPIPE_LOG_FILE={log_root / 'autopipe.log'}",
                 f"AUTOPIPE_LOCK_PATH={tmp_path / 'autopipe.lock'}",
+                f"AUTOPIPE_EXCLUDE_MODEL_IDS={model_exclusions!r}",
             ]
         )
         + "\n",
@@ -1589,6 +1594,8 @@ def test_wrapper_keeps_writer_database_url_out_of_child_argv(tmp_path: Path) -> 
     assert "--database-url" not in argv_text
     assert "writer-secret" not in argv_text
     assert "postgresql://" not in argv_text
+    argv = argv_text.splitlines()
+    assert argv[argv.index("--exclude-model-ids") + 1] == model_exclusions
     assert env_capture.read_text(encoding="utf-8").strip() == (
         "postgresql://node27_writer:writer-secret@db.example/nhms"
     )
