@@ -97,6 +97,19 @@ def test_reference_within_the_baseline_count_passes_and_one_above_it_fails(tmp_p
     report, findings = _hard_gate_line_reference_findings(tmp_path)
     assert [(finding["evidence_path"], finding["line"]) for finding in findings] == [("services/mod.py", 4)]
     assert audit_repo_entropy._exit_code_for_report(report) == 1
+    # The text-keyed baseline cannot tell which occurrence is new, so the
+    # finding names every occurrence line rather than pointing only at the last.
+    assert "3 occurrences on lines 1, 3, 4" in findings[0]["description"]
+
+
+def test_reference_new_to_the_file_does_not_list_occurrences(tmp_path: Path) -> None:
+    _setup_clean_hard_gate_fixture(tmp_path)
+    _write_baseline(tmp_path, {})
+    _write(tmp_path / "services/mod.py", f"# {REF}\n")
+
+    _, findings = _hard_gate_line_reference_findings(tmp_path)
+    assert [finding["line"] for finding in findings] == [1]
+    assert "occurrences" not in findings[0]["description"]
 
 
 def test_deleting_or_moving_a_baseline_reference_passes(tmp_path: Path) -> None:

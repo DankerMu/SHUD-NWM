@@ -52,12 +52,24 @@ def _check_line_references(root: Path) -> list[FindingSpec]:
         for line, text in references:
             by_text.setdefault(text, []).append(line)
         for text, lines in sorted(by_text.items()):
-            for line in lines[allowed.get(text, 0) :]:
-                findings.append(_line_reference_finding(root, path, line, text))
+            frozen = allowed.get(text, 0)
+            # A text-keyed baseline cannot tell which occurrence is the new
+            # one, so an over-count names every occurrence line.
+            occurrences = tuple(lines) if frozen else ()
+            for line in lines[frozen:]:
+                findings.append(_line_reference_finding(root, path, line, text, occurrences))
     return findings
 
 
-def _line_reference_finding(root: Path, path: str, line: int, text: str) -> FindingSpec:
+def _line_reference_finding(
+    root: Path, path: str, line: int, text: str, occurrences: tuple[int, ...] = ()
+) -> FindingSpec:
+    where = ""
+    if occurrences:
+        where = (
+            f" ({len(occurrences)} occurrences on lines {', '.join(map(str, occurrences))}; "
+            "the baseline freezes fewer, and any of them may be the new one)"
+        )
     return FindingSpec(
         check_id=LINE_REFERENCE_CHECK_ID,
         title="New hard line-number reference in a comment or docstring",
@@ -71,7 +83,7 @@ def _line_reference_finding(root: Path, path: str, line: int, text: str) -> Find
         owner_area="code-comments",
         module=_module_for_path(root, root / path),
         description=(
-            f"new hard line reference {text} in {path}; replace it with a symbol reference "
+            f"new hard line reference {text} in {path}{where}; replace it with a symbol reference "
             "(function/class/constant name)"
         ),
         recommendation="Name the function, class or constant that owns the behaviour instead of a line number.",
