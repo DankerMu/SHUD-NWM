@@ -144,9 +144,11 @@ manifest——**不是** §3.1.2 的 cutover declaration。
 
 倒过来做的后果**比这段原文写的更重**（原文早于 #1164）：manifest 先落地时，`M1′`
 在任何 generation 都没有 state 行，走的是 first-cycle 分支
-（`services/orchestrator/scheduler_generation.py:1057`）；而生产 registry 行带
+（`services/orchestrator/scheduler_generation.py` 的 `evaluate_transition_decision`
+里 `not history.exists_any_generation` 那支）；而生产 registry 行带
 `manifest_uri`，会产出一个**合格**的 packaged-IC 信号，于是该 run 被
-**放行**为 `PACKAGED_IC_BOOTSTRAP`（`scheduler_generation.py:1057-1078`），
+**放行**为 `PACKAGED_IC_BOOTSTRAP`（同一分支内 `packaged_initial_condition.qualified`
+为真的返回），
 **不是 block**。也就是说代价不是"白停一个 cycle"，而是发出一份从包内 IC 起步、
 而非承接 warm state 的预报——生产水文过程线断一刀。
 只有 packaged IC 不可读或不合格时才落到

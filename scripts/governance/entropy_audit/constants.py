@@ -34,6 +34,7 @@ CHECK_FAMILIES = (
     "apps-api-layer-inversion",
     "compatibility-facade-growth",
     "scoped-agent-context",
+    "hard-line-reference",
 )
 
 
@@ -51,6 +52,7 @@ HARD_GATE_CHECK_IDS = (
     "agent-artifact-ignore-policy",
     "agent-artifact-ownership-policy",
     "broad-e2e-api-mock",
+    "hard-line-reference",
     "makefile-toolchain-discipline",
     "openapi-frontend-types-presence",
     "paused-workflow-condition",

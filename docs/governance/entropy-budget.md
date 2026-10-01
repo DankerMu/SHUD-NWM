@@ -186,6 +186,10 @@ Prepared gated check IDs:
 - `agent-artifact-ownership-policy`
 - `agent-artifact-ignore-policy`
 - `tracked-generated-artifact`
+- `hard-line-reference` (#2648: a new `file.py:N` or backtick-colon-digits
+  reference in a shipped Python comment or docstring beyond the frozen
+  `scripts/governance/entropy_audit/line_reference_baseline.json`, keyed by
+  path and reference text)
 
 The prepared check list is only an eligibility boundary. Allowlisted,
 historical, archived, false-positive, delegated, or report-only accepted
@@ -195,9 +199,12 @@ counts only the budget-counted findings whose individual policy also marks them
 gate-eligible.
 
 `openapi-frontend-types-delegated` and `openapi-frontend-types-signal` remain
-report-only signals. The Governance Audit workflow must not pass
-`--mode hard-gate` until a later enablement change explicitly makes the gate a
-required CI status.
+report-only signals. The Governance Audit workflow's `Entropy Audit (report-only)`
+job stays report-only and never passes `--mode hard-gate`. Since #2602 the same
+workflow runs a separate `Production Topology Hard Gate` job on every pull
+request and master push, with no path filter; it runs `--mode hard-gate` and its
+exit code decides that job, so docs-, openspec- and instructions-only changes
+are gated too.
 
 Future hard-gate candidates after zero baseline:
 

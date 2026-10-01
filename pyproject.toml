@@ -11,8 +11,9 @@ dependencies = [
     # Cap <0.137: 0.137.0 changed include_router to wrap children in a single
     # _IncludedRouter route instead of flattening copies into app.routes, which
     # breaks every app.routes-introspection site (slurm gateway _drop_route,
-    # role-boundary route inventory). CI installs from pyproject (not uv.lock),
-    # so an uncapped range silently drifts onto the breaking release.
+    # role-boundary route inventory). CI installs from uv.lock since #2573, but
+    # any fresh resolve (`uv lock --upgrade`, a plain pip install) reads this
+    # range, so an uncapped one silently drifts onto the breaking release.
     "fastapi>=0.110.0,<0.137",
     "uvicorn[standard]>=0.29.0",
     # No <2.1 cap (#2632): 2.1.0 made psycopg (v3) the default driver for

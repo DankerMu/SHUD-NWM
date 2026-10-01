@@ -939,13 +939,13 @@ PUBLISH_SCHEDULER_REGISTRY_TESTS: tuple[str, ...] = (
 PUBLISH_SCHEDULER_REGISTRY_HELPERS_PATH = "tests/publish_registry_helpers.py"
 
 
-# #1823: the entropy-audit corpus is fifteen collectible partitions plus one
+# #1823: the entropy-audit corpus is sixteen collectible partitions plus one
 # non-collectible helper. The deleted 9860-line monolith was the ONLY target of
 # the three governance rules below and it had no same-name source pair to fall
 # back on, so every route has to name the partitions. Explicit sorted tuple,
 # never a `tests/test_entropy_audit_*.py` glob resolved at import time (same
 # reason as QHH_PRODUCTION_BOOTSTRAP_TESTS / PUBLISH_SCHEDULER_REGISTRY_TESTS):
-# a glob silently adopts a sixteenth partition nobody reviewed, while an
+# a glob silently adopts a seventeenth partition nobody reviewed, while an
 # unlisted partition reddens the tracked-tree guard in
 # tests/test_select_ci_tests.py instead of dropping out of the PR lane.
 ENTROPY_AUDIT_TESTS: tuple[str, ...] = (
@@ -954,6 +954,8 @@ ENTROPY_AUDIT_TESTS: tuple[str, ...] = (
     "tests/test_entropy_audit_facade_guard_aliases.py",
     "tests/test_entropy_audit_facade_guard_forwarders.py",
     "tests/test_entropy_audit_instruction_inventory.py",
+    # #2648: the `hard-line-reference` family and its frozen baseline.
+    "tests/test_entropy_audit_line_references.py",
     "tests/test_entropy_audit_report_contract.py",
     "tests/test_entropy_audit_retired_paths.py",
     "tests/test_entropy_audit_route_authority_caching.py",
@@ -967,7 +969,7 @@ ENTROPY_AUDIT_TESTS: tuple[str, ...] = (
 )
 # The helper owns the monolith's module prefix (the repository/baseline path
 # constants and the memoized `build_report` accessor) and its whole private
-# helper tail, so ALL fifteen partitions import it at module scope and the
+# helper tail, so ALL sixteen partitions import it at module scope and the
 # routed set IS the derived importer closure. Not collectible: the filename is
 # deliberately not `test_*`, so `is_test_suite_path` rejects it and it reaches
 # SUPPORT_MODULE_TEST_RULES.
@@ -979,19 +981,21 @@ ENTROPY_AUDIT_HELPERS_PATH = "tests/entropy_audit_helpers.py"
 # of this tuple. Each module gets an explicit row rather than a
 # `scripts/governance/entropy_audit/**` glob, for the reason #1099 recorded for
 # `scripts/scheduler_refresh/` and #1100 for `scripts/publish_registry/`: a glob
-# routes a twenty-second module nobody reviewed, while an unlisted module
+# routes a twenty-third module nobody reviewed, while an unlisted module
 # reddens the tracked-tree guard in tests/test_select_ci_tests.py instead of
 # silently dropping out of the PR lane. None of these basenames has a
 # `tests/test_<basename>.py`, so there is no same-name derivation to fall back
 # on -- measured before the rows landed, each of the twenty-one selected only
 # the five generic core-smoke riders plus the two `scripts/**` supplemental-scan
 # suites and ZERO entropy partitions. Every module carries the whole
-# fifteen-partition corpus for the same reason the owner row does: every
+# sixteen-partition corpus for the same reason the owner row does: every
 # partition drives `build_report` or the CLI through all of them.
 ENTROPY_AUDIT_OWNER_PATH = "scripts/governance/audit_repo_entropy.py"
 ENTROPY_AUDIT_PACKAGE_MODULES: tuple[str, ...] = (
     "scripts/governance/entropy_audit/archive_status.py",
     "scripts/governance/entropy_audit/check_env_and_tokens.py",
+    # #2648: the twenty-second module, the `hard-line-reference` family.
+    "scripts/governance/entropy_audit/check_line_references.py",
     "scripts/governance/entropy_audit/check_paths_and_api.py",
     "scripts/governance/entropy_audit/check_stale_routes.py",
     "scripts/governance/entropy_audit/check_topology.py",
@@ -1084,6 +1088,31 @@ REVIEW_GATE_ISSUE_MEMORY_CONSUMER_TESTS: tuple[str, ...] = (
 LOOP_LOG_AUDIT_PATH = "scripts/governance/loop_log_audit.py"
 LOOP_LOG_PATH = "docs/review-loop-log.jsonl"
 LOOP_LOG_AUDIT_TEST = "tests/test_loop_log_audit_attribution.py"
+
+# #2648: the frozen `hard-line-reference` baseline is a JSON data file with no
+# import closure; its only assertion-level consumer is the family's own
+# partition (cap and fixed-group pins), so the route is explicit.
+LINE_REFERENCE_BASELINE_PATH = "scripts/governance/entropy_audit/line_reference_baseline.json"
+LINE_REFERENCE_TEST = "tests/test_entropy_audit_line_references.py"
+
+# #2573: the CI install contract (every pytest job installs from uv.lock with
+# `uv sync --locked`, PATH only via $GITHUB_PATH) and the eccodes-then-pyproj
+# single-PROJ regression it exists for. Both re-prove on a ci.yml or
+# dependency change; the isolation test also on pyproject.toml / uv.lock.
+CI_LOCKED_INSTALL_TEST = "tests/test_ci_workflow_locked_install.py"
+NATIVE_PROJ_ISOLATION_TEST = "tests/test_native_proj_isolation.py"
+
+# #2044: the master full-regression watcher. Its suite reads ci.yml's top-level
+# name, the `unit-test` job name and its timeout-minutes, so a ci.yml change
+# re-proves the wiring too.
+FULL_REGRESSION_WATCH_WORKFLOW_PATH = ".github/workflows/full-regression-watch.yml"
+FULL_REGRESSION_WATCH_SCRIPT_PATH = "scripts/ci/full_regression_watch.py"
+FULL_REGRESSION_WATCH_TEST = "tests/test_full_regression_watch.py"
+
+# #2602: the governance workflow's separate hard-gate job and the untouched
+# report-only job are pinned by this meta-test.
+GOVERNANCE_WORKFLOW_PATH = ".github/workflows/governance.yml"
+GOVERNANCE_HARD_GATE_WORKFLOW_TEST = "tests/test_governance_workflow_hard_gate.py"
 
 # #1912/#1903: the Basins package publication corpus has six frozen baseline
 # partitions plus one additive river/segment mapping owner, all below the 1,000-line
@@ -6170,7 +6199,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ("tests/test_basin_catalog_manifest_audit_integration.py",),
     ),
     PathTestRule(
-        # #1823: the display-API wrapper's entropy reach is now the fifteen
+        # #1823: the display-API wrapper's entropy reach is now the sixteen
         # partitions, spliced in rather than globbed so the routed set is the
         # reviewed tuple.
         "scripts/ops/start-display-api.sh",
@@ -6192,9 +6221,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     # #1842: one row per owner module -- see ENTROPY_AUDIT_PACKAGE_MODULES for
     # why these are enumerated rather than globbed, and why each carries the
-    # whole fifteen-partition corpus.
+    # whole sixteen-partition corpus.
     PathTestRule("scripts/governance/entropy_audit/archive_status.py", ENTROPY_AUDIT_TESTS),
     PathTestRule("scripts/governance/entropy_audit/check_env_and_tokens.py", ENTROPY_AUDIT_TESTS),
+    PathTestRule("scripts/governance/entropy_audit/check_line_references.py", ENTROPY_AUDIT_TESTS),
     PathTestRule("scripts/governance/entropy_audit/check_paths_and_api.py", ENTROPY_AUDIT_TESTS),
     PathTestRule("scripts/governance/entropy_audit/check_stale_routes.py", ENTROPY_AUDIT_TESTS),
     PathTestRule("scripts/governance/entropy_audit/check_topology.py", ENTROPY_AUDIT_TESTS),
@@ -6253,7 +6283,35 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # legs together make a workflow-only PR run these assertions.
     PathTestRule(
         ".github/workflows/ci.yml",
-        (SELECTOR_META_GUARD_TEST,),
+        (
+            SELECTOR_META_GUARD_TEST,
+            # #2573: the locked-install guard and the native-PROJ regression.
+            CI_LOCKED_INSTALL_TEST,
+            NATIVE_PROJ_ISOLATION_TEST,
+            # #2044: the watcher's wiring meta-test reads ci.yml's name, the
+            # `unit-test` job name and its timeout-minutes.
+            FULL_REGRESSION_WATCH_TEST,
+        ),
+    ),
+    PathTestRule(
+        # #2044: the watcher workflow and its script. The exact ci.yml backend
+        # literal starts the targeted gate for a workflow-only PR.
+        FULL_REGRESSION_WATCH_WORKFLOW_PATH,
+        (FULL_REGRESSION_WATCH_TEST,),
+    ),
+    PathTestRule(
+        FULL_REGRESSION_WATCH_SCRIPT_PATH,
+        (FULL_REGRESSION_WATCH_TEST,),
+    ),
+    PathTestRule(
+        # #2602: the hard-gate job meta-test. Exact ci.yml backend literal.
+        GOVERNANCE_WORKFLOW_PATH,
+        (GOVERNANCE_HARD_GATE_WORKFLOW_TEST,),
+    ),
+    PathTestRule(
+        # #2648: the frozen line-reference baseline. Exact ci.yml backend literal.
+        LINE_REFERENCE_BASELINE_PATH,
+        (LINE_REFERENCE_TEST,),
     ),
     PathTestRule(
         # #1860: the calibration declaration's assertion-level consumers. The
@@ -6305,6 +6363,8 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # #2632: a dependency change can move SQLAlchemy's default
             # PostgreSQL DBAPI; the helper suite re-proves the engine driver.
             SQLALCHEMY_URL_HELPER_TEST,
+            # #2573: a dependency change can bring a second bundled PROJ back.
+            NATIVE_PROJ_ISOLATION_TEST,
         ),
     ),
     PathTestRule(
@@ -6312,8 +6372,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # rule must also run the policy suite (which asserts no such package is
         # resolved) alongside core smoke and the selector meta-guard.
         # #2632: and the SQLAlchemy driver helper suite, as for pyproject.toml.
+        # #2573: and the native-PROJ isolation regression, as for pyproject.toml.
         "uv.lock",
-        (*CORE_SMOKE_TESTS, *THREAD_EXCEPTION_POLICY_TESTS, SELECTOR_META_GUARD_TEST, SQLALCHEMY_URL_HELPER_TEST),
+        (
+            *CORE_SMOKE_TESTS,
+            *THREAD_EXCEPTION_POLICY_TESTS,
+            SELECTOR_META_GUARD_TEST,
+            SQLALCHEMY_URL_HELPER_TEST,
+            NATIVE_PROJ_ISOLATION_TEST,
+        ),
     ),
     # #1562 structural split owners.  Additive (non-stop) on purpose: the broad
     # `services/orchestrator/**` rule below the stop rules already carries the

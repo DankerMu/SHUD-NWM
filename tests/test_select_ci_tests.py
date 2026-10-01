@@ -1622,13 +1622,23 @@ def test_select_tests_maps_ci_workflow_change_to_the_meta_guard_suite() -> None:
     # #1650 self-routing: a PR that changes ci.yml must open the targeted gate
     # (backend filter leg) AND select the selector's own contract suite — the
     # only suite that asserts the concurrency/paths-filter contract on the very
-    # PR that rewrites them. Exact single-target selection; the core-smoke
-    # fallback must not arm.
+    # PR that rewrites them. Exact selection; the core-smoke fallback must not
+    # arm. #2573 adds the locked-install guard and the native-PROJ regression
+    # (the install it pins lives here); #2044 adds the watcher suite, whose
+    # wiring meta-test reads ci.yml's name, the full job name and its timeout.
     assert Path(CI_WORKFLOW_PATH).is_file()
 
     selected = select_tests([CI_WORKFLOW_PATH], repo_root=Path("."))
 
-    assert selected == [SELECTOR_META_GUARD_TEST]
+    assert selected == sorted(
+        [
+            SELECTOR_META_GUARD_TEST,
+            "tests/test_ci_workflow_locked_install.py",
+            "tests/test_native_proj_isolation.py",
+            "tests/test_full_regression_watch.py",
+        ]
+    )
+    assert all(Path(path).is_file() for path in selected)
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 
 
@@ -3082,10 +3092,11 @@ def test_publish_registry_package_tracked_tree_is_exactly_nine_modules() -> None
         assert expected <= selected, f"{pattern} lost part of the lane: {sorted(expected - selected)}"
 
 
-def test_entropy_audit_package_tracked_tree_is_exactly_twenty_one_modules() -> None:
+def test_entropy_audit_package_tracked_tree_is_exactly_twenty_two_modules() -> None:
     # #1842 replaced the 9000-line audit enforcer with twenty-one owner modules
-    # behind the attribute-broadcast facade kept at the historical path.
-    # Twenty-one is a floor, not a preference: a twenty-second module, a stray
+    # behind the attribute-broadcast facade kept at the historical path; #2648
+    # added the twenty-second, the `hard-line-reference` family.
+    # Twenty-two is a floor, not a preference: a twenty-third module, a stray
     # `__init__.py` (scripts/ is a PEP 420 namespace tree -- neither
     # scripts/governance/ nor scripts/publish_registry/ has one), the facade
     # reduced to a deleted module or a two-line shim, or a module deleted out
@@ -3103,7 +3114,7 @@ def test_entropy_audit_package_tracked_tree_is_exactly_twenty_one_modules() -> N
     modules = set(ENTROPY_AUDIT_PACKAGE_MODULES)
     tracked = set(_tracked_python_files("scripts/governance/entropy_audit"))
 
-    assert len(modules) == 21, sorted(modules)
+    assert len(modules) == 22, sorted(modules)
     assert tracked == modules, sorted(tracked ^ modules)
     assert ENTROPY_AUDIT_OWNER_PATH in set(_tracked_python_files("scripts/governance")), (
         "the historical path must stay an executable entrypoint and attribute facade"
@@ -3124,7 +3135,7 @@ def test_entropy_audit_package_tracked_tree_is_exactly_twenty_one_modules() -> N
     # Exact equality for one owner module, mirroring the owner-path assertion in
     # test_select_tests_maps_governance_entropy_scripts_without_core_smoke_fallback:
     # `scripts/**` is a root of both supplemental scans, so those two suites join
-    # the fifteen partitions and nothing else does. A rule that quietly narrows to
+    # the sixteen partitions and nothing else does. A rule that quietly narrows to
     # one partition -- or a core-smoke fallback creeping back in -- reds here.
     assert select_tests(
         ["scripts/governance/entropy_audit/report.py"], repo_root=Path(".")
@@ -3134,9 +3145,10 @@ def test_entropy_audit_package_tracked_tree_is_exactly_twenty_one_modules() -> N
     )
 
 
-def test_entropy_audit_partition_tracked_tree_is_exactly_fifteen_suites_and_one_helper() -> None:
-    # #1823: fifteen collectible partitions plus one non-collectible helper is a
-    # floor, not a preference. A sixteenth partition, a leftover compatibility
+def test_entropy_audit_partition_tracked_tree_is_exactly_sixteen_suites_and_one_helper() -> None:
+    # #1823: fifteen collectible partitions plus one non-collectible helper; #2648
+    # added the sixteenth (`hard-line-reference`). The count is a floor, not a
+    # preference. A seventeenth partition, a leftover compatibility
     # shim for the deleted 9860-line monolith, or the helper renamed into a
     # `test_*.py` suite all redden here. Expected membership is the selector's own
     # tuple, never a glob result -- the glob is the MUTANT side.
@@ -3147,7 +3159,7 @@ def test_entropy_audit_partition_tracked_tree_is_exactly_fifteen_suites_and_one_
     helper = ENTROPY_AUDIT_HELPERS_PATH
     tracked = set(_tracked_python_files("tests"))
 
-    assert len(partitions) == 15, sorted(partitions)
+    assert len(partitions) == 16, sorted(partitions)
     assert partitions <= tracked, sorted(partitions - tracked)
     assert helper in tracked
     assert not Path("tests/test_entropy_audit_script.py").exists(), (
@@ -3164,7 +3176,7 @@ def test_entropy_audit_partition_tracked_tree_is_exactly_fifteen_suites_and_one_
     assert not is_test_suite_path(helper)
 
     # Every route that used to carry the 410-case monolith must still carry all
-    # fifteen, or the split silently narrowed CI's reach. The helper row is the
+    # sixteen, or the split silently narrowed CI's reach. The helper row is the
     # fourth: it is not same-name derivable and does not reach the `tests/**`
     # branch, so without it a helper-only diff collapses to the meta-guard.
     carriers = {
@@ -10470,8 +10482,9 @@ def test_ci_changed_files_authority_is_a_single_workflow_contract() -> None:
     assert "all_files: ${{ steps.filter.outputs.all_files }}" in changes_job
 
     # targeted selection: env-passed JSON (never shell interpolation), safe
-    # JSON-to-newline conversion via the runner-provided jq (the job has no
-    # setup-uv, so `uv run` would fail here), selector via --changed-file, and
+    # JSON-to-newline conversion via the runner-provided jq (never through uv:
+    # since #2573 the locked venv is already on PATH via $GITHUB_PATH, and a uv
+    # invocation would re-sync it), selector via --changed-file, and
     # NO --base-ref.
     assert "CHANGED_FILES_JSON: ${{ needs.changes.outputs.all_files }}" in selection
     assert "jq -r '.[]'" in selection
@@ -21762,3 +21775,62 @@ def test_real_engine_factories_and_the_helper_select_the_driver_guard() -> None:
 def test_dependency_change_selects_the_sqlalchemy_url_helper_suite(changed_path: str) -> None:
     # A dependency bump can move SQLAlchemy's default PostgreSQL DBAPI (2.1 did).
     assert _prod_module.SQLALCHEMY_URL_HELPER_TEST in select_tests([changed_path], repo_root=Path("."))
+
+
+@pytest.mark.parametrize("changed_path", ["pyproject.toml", "uv.lock"])
+def test_dependency_change_selects_the_native_proj_isolation_suite(changed_path: str) -> None:
+    # #2573: a dependency change can bring a second bundled PROJ back into the
+    # resolved set (eckitlib via eccodes); the subprocess regression re-proves it.
+    assert Path(_prod_module.NATIVE_PROJ_ISOLATION_TEST).is_file()
+    assert _prod_module.NATIVE_PROJ_ISOLATION_TEST in select_tests([changed_path], repo_root=Path("."))
+
+
+@pytest.mark.parametrize(
+    "literal_path",
+    [
+        ".github/workflows/full-regression-watch.yml",
+        ".github/workflows/governance.yml",
+        "scripts/governance/entropy_audit/line_reference_baseline.json",
+    ],
+)
+def test_ci_gates_batch_backend_filter_literals_are_exact_and_block_scoped(literal_path: str) -> None:
+    # #2044 / #2602 / #2648: each path matched no backend pattern, so a diff
+    # confined to it started no targeted Unit Tests job and its meta-test never
+    # ran. Exact literal inside the `backend:` block, the file exists, and no
+    # broader backend glob covers it (#1571 precedent).
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    literal = f"              - '{literal_path}'\n"
+    assert Path(literal_path).is_file(), literal_path
+    assert literal in _backend_filter_block(workflow)
+    entries = _filter_entries(_backend_filter_block(workflow))
+    assert not any(fnmatch.fnmatch(literal_path, pattern) and pattern != literal_path for pattern in entries)
+
+    deleted = workflow.replace(literal, "")
+    assert literal not in _backend_filter_block(deleted)
+
+
+@pytest.mark.parametrize(
+    ("changed_path", "expected"),
+    [
+        (".github/workflows/full-regression-watch.yml", ["tests/test_full_regression_watch.py"]),
+        (".github/workflows/governance.yml", ["tests/test_governance_workflow_hard_gate.py"]),
+    ],
+)
+def test_ci_gates_batch_workflow_routes_are_exact(changed_path: str, expected: list[str]) -> None:
+    assert all(Path(path).is_file() for path in expected)
+    assert select_tests([changed_path], repo_root=Path(".")) == expected
+
+
+@pytest.mark.parametrize(
+    ("changed_path", "required"),
+    [
+        ("scripts/ci/full_regression_watch.py", "tests/test_full_regression_watch.py"),
+        (
+            "scripts/governance/entropy_audit/line_reference_baseline.json",
+            "tests/test_entropy_audit_line_references.py",
+        ),
+    ],
+)
+def test_ci_gates_batch_script_and_baseline_routes_reach_their_suite(changed_path: str, required: str) -> None:
+    assert Path(changed_path).is_file() and Path(required).is_file()
+    assert required in select_tests([changed_path], repo_root=Path("."))

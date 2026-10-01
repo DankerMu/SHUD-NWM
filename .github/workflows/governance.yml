@@ -98,3 +98,50 @@ jobs:
             artifacts/governance/entropy-report.md
           if-no-files-found: error
           retention-days: 14
+
+  # #2602: the production-topology hard gate on EVERY pull request and master
+  # push. The report-only job above stays untouched; this separate job's exit
+  # code is the gate. No path filter (this workflow has none), so docs-,
+  # openspec- and instructions-only changes are gated too: the job is the
+  # docs-only backstop, while the pytest node
+  # test_entropy_audit_current_repo_hard_gate_has_zero_production_topology_findings
+  # remains the backend-lane check. No --structural-base-ref: structural checks
+  # are not hard-gate ids. The workflow-level concurrency (cancel-in-progress)
+  # can cancel an older master push run; the newer run still gates the tree at
+  # its own SHA, so a red result is attributed to the newer SHA. Accepted.
+  production-topology-hard-gate:
+    name: Production Topology Hard Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Run the entropy hard gate
+        run: |
+          set -u
+          mkdir -p artifacts/governance
+          rc=0
+          uv run python scripts/governance/audit_repo_entropy.py --mode hard-gate --format json \
+            > artifacts/governance/hard-gate.json || rc=$?
+          uv run python - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = json.loads(Path("artifacts/governance/hard-gate.json").read_text())
+          metadata = report["metadata"]
+          print(f"hard_gate_status={metadata['hard_gate_status']} failing={metadata['hard_gate_failing_count']}")
+          for finding in report["findings"]:
+              if finding["gate_eligible"]:
+                  path, line = finding["evidence_path"], finding["line"]
+                  print(f"::error file={path},line={line or 1},title={finding['check_id']}::{finding['description']}")
+          PY
+          exit $rc

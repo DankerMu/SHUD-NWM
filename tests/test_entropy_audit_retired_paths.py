@@ -668,6 +668,7 @@ def test_entropy_audit_required_families_emit_positive_signals(
             ),
         ),
         ("tracked-generated-artifact", lambda root: _track_generated_artifact(root)),
+        ("hard-line-reference", lambda root: _write(root / "apps/api/mod.py", "# see foo.py" + ":123\n")),
     ],
 )
 def test_entropy_audit_hard_gate_fails_for_each_gated_check_id(
