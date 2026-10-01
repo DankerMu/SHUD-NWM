@@ -1791,6 +1791,36 @@ DIRECT_GRID_DISPLAY_CUTOVER_FLIP_TESTS: tuple[str, ...] = (
     "tests/test_direct_grid_display_cutover_flip_mvt_set.py",
 )
 
+# #2490 partitioned three oversized suites with no behaviour change. Each
+# original path stays one partition (openspec/specs/ci-contract-baseline/spec.md
+# pins the retention base path), and every rule that selected an original path
+# selects ALL of its partitions, so an owner path runs exactly the cases it ran
+# before the split.
+#
+# The MVT cache-retention suite: three collectible partitions plus the
+# non-collectible tests/node27_mvt_cache_retention_helpers.py (routed below in
+# SUPPORT_MODULE_TEST_RULES; all three partitions import it, `_clean_env` autouse
+# included).
+NODE27_MVT_CACHE_RETENTION_HELPERS_PATH = "tests/node27_mvt_cache_retention_helpers.py"
+NODE27_MVT_CACHE_RETENTION_TESTS: tuple[str, ...] = (
+    "tests/test_node27_mvt_cache_retention.py",
+    "tests/test_node27_mvt_cache_retention_enumeration.py",
+    "tests/test_node27_mvt_cache_retention_wrapper.py",
+)
+# The #1341 read-path surrogate-key proof: two file-level `integration`-gated
+# partitions. Their shared helper
+# (tests/river_ts_read_path_surrogate_keys_integration_helpers.py) and the
+# national identity probe's (tests/mvt_national_identity_probe_integration_helpers.py)
+# deliberately get NO SUPPORT_MODULE_TEST_RULES entry: the closure guard's
+# importer derivation skips file-level integration-gated importers, so their
+# derived set is empty and a rule would red it. A helper-only diff collapses to
+# the meta-guard in the PR lane, and the `integration` in both helper names keeps
+# them inside ci.yml's `database` filter glob `tests/*integration*.py`.
+RIVER_TS_READ_PATH_SURROGATE_KEYS_INTEGRATION_TESTS: tuple[str, ...] = (
+    "tests/test_river_ts_read_path_surrogate_keys_integration.py",
+    "tests/test_river_ts_read_path_surrogate_keys_coverage_integration.py",
+)
+
 
 # #1895 R1.6 C4 production-acceptance corpus. The public freeze/bind/verify
 # suite and the boundary-parameter/identity/closed-stdout partition are ONE
@@ -1914,6 +1944,9 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         # recorded and pinned elsewhere; this routing is additive to it.
         "tests/conftest.py",
         (
+            # #2594: the grib opt-in preflight's pin imports this module to
+            # drive `pytest_collection_finish` with a replaced ecCodes probe.
+            "tests/test_conftest_grib_preflight.py",
             "tests/test_grid_stability_verification.py",
             "tests/test_integration_gate.py",
             "tests/test_node27_docker_collection_gate.py",
@@ -2135,6 +2168,8 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         # them. Measured 454 passed in 40.18 s locally — inside the lane budget.
         "tests/__init__.py",
         (
+            # #2594: `from tests import conftest`, the same edge as the gate suite.
+            "tests/test_conftest_grib_preflight.py",
             "tests/test_integration_gate.py",
             "tests/test_node27_docker_collection_gate.py",
             "tests/test_node27_timeseries_compression_capture.py",
@@ -2544,6 +2579,24 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         "tests/latest_cycle_discovery_oracle.py",
         ("tests/test_latest_cycle_discovery_shape.py",),
     ),
+    PathTestRule(
+        # #2490: the shared builders and the autouse `_clean_env` of the three
+        # MVT cache-retention partitions. All three import it at module scope,
+        # so the routed set IS the derived closure; without this row a
+        # helper-only diff would collapse to the meta-guard and a broken
+        # `_clean_env` would let the display-process env leak into every case.
+        NODE27_MVT_CACHE_RETENTION_HELPERS_PATH,
+        NODE27_MVT_CACHE_RETENTION_TESTS,
+    ),
+    PathTestRule(
+        # #2595: the real-disk suite's run-time cycle selection. The real-disk
+        # suite itself is file-level `e2e`-gated, so it is not a derived
+        # importer and is deliberately absent (it would only skip in the PR
+        # lane); the local proof with temporary stores is the one non-gated
+        # importer, and it is what a selection change must run.
+        "tests/object_store_forcing_real_disk_support.py",
+        ("tests/test_object_store_forcing_real_disk_support.py",),
+    ),
 )
 
 
@@ -2627,9 +2680,40 @@ CONNECTION_ATTRIBUTION_ROUTE_PATHS: tuple[str, ...] = (
 # best_available.py: it needs the response-model preservation oracle too, so it
 # has an exact rule (next to the route members' rules in PATH_TEST_RULES) that
 # MERGES CONNECTION_ATTRIBUTION_TESTS.
+# #2612: the rule built from this tuple also carries MODEL_REGISTRY_IMPORTER_TESTS
+# (right below), for the same facade-parity reason.
 CONNECTION_ATTRIBUTION_STORE_PATHS: tuple[str, ...] = (
     "packages/common/model_registry.py",
     "packages/common/model_registry_*.py",
+)
+# #2612: the model registry facade's DIRECT non-gated importer suites (the
+# selector suite's GUARDED_MODULE_CLOSURES derives this set from the tracked tree
+# in direct-only mode and reds on a new importer). Merged into the rule the
+# CONNECTION_ATTRIBUTION_STORE_PATHS tuple expands to, so the facade and every
+# `model_registry_*.py` owner select it: the owners carry the store method bodies
+# these suites exercise, and #2617 pins every owner to the facade's selection.
+# tests/test_basins_registry_import_db.py is included although all 5 of its tests
+# are function-level `integration` (the guard filters file-level marks only);
+# that costs 5 skips, not a new exemption ledger.
+# The two cutover-flip partitions are listed on top of the derived set: they
+# reach this module only through tests/direct_grid_display_cutover_flip_helpers.py,
+# a `tests/` helper the guard's one-hop domain cannot see, and #2612 requires them.
+MODEL_REGISTRY_IMPORTER_TESTS: tuple[str, ...] = (
+    "tests/test_basins_registry_import_db.py",
+    "tests/test_basins_registry_import_qhh.py",
+    "tests/test_legacy_reactivation_guard.py",
+    "tests/test_list_search_contract.py",
+    "tests/test_model_registration.py",
+    "tests/test_model_registry_basin_versions.py",
+    "tests/test_model_registry_evidence_only_boundary.py",
+    "tests/test_model_registry_list_basins.py",
+    "tests/test_node27_connection_attribution.py",
+    "tests/test_qhh_production_bootstrap_scheduler.py",
+    "tests/test_replay_lineage.py",
+    "tests/test_state_clone_cutover_hook.py",
+    "tests/test_state_clone_index_publish.py",
+    "tests/test_variant_activation_cutover.py",
+    *DIRECT_GRID_DISPLAY_CUTOVER_FLIP_TESTS,
 )
 # #1704: the only suite that asserts the error-response log line exists, is
 # redacted, is bounded, and that the request-id is not client-forgeable. Both
@@ -3264,6 +3348,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # and file_orchestration_journal.py pairs ride CHAIN_IMPORTER_TESTS and
             # FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS. DB-free, sub-second.
             "tests/test_state_save_submit_ambiguity.py",
+            # #2624: the #2348 response-model preservation oracle. Its pipeline
+            # half drives apps/api/routes/pipeline.py, which runs persistence.py's
+            # `PipelineStore`, public_evidence.py's `_public_evidence` /
+            # `_public_message` and retry.py's retry assembly un-faked on the
+            # sampled paths (pipeline.py:40-49), so an edit to any of them that
+            # changes a wire value reds it. Both halves ride together (the
+            # pipeline half imports the core). DB-free, 25 tests in ~1.1s.
+            *RESPONSE_MODEL_PRESERVATION_TESTS,
             # #2570 A / #2603 / #2559: the poll-isolation, cohort-membership and
             # forecast-projection suites. Their subjects are chain_stage_execution.py,
             # chain_forecast_execution.py, chain_types.py, chain_array_accounting.py,
@@ -3713,7 +3805,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # selector's own duplicate-pattern guard forbids a second
             # PATH_TEST_RULES entry for an already-owned module.)
             *SQL_SHAPE_ORACLE_TESTS,
-            "tests/test_river_ts_read_path_surrogate_keys_integration.py",
+            *RIVER_TS_READ_PATH_SURROGATE_KEYS_INTEGRATION_TESTS,
         ),
     ),
     PathTestRule(
@@ -3748,6 +3840,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # `integration`-marked importers stay out per the #1447 ruling:
             # they auto-skip without NHMS_RUN_INTEGRATION (tests/conftest.py),
             # so requiring them buys constant skips and zero assertions.
+            # #2490: the national identity probe is now three partitions
+            # (`test_mvt_national_identity_probe{,_cycles,_digest}_integration.py`),
+            # each with the module-level `integration` mark, so all three stay
+            # out under the same ruling.
             # #2527: the flip suite is two partitions; the row carries both
             # (see DIRECT_GRID_DISPLAY_CUTOVER_FLIP_TESTS for why both).
             *DIRECT_GRID_DISPLAY_CUTOVER_FLIP_TESTS,
@@ -3771,9 +3867,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # _file_cache_path / _file_cache_lock_path / _write_file_cache, so
             # a layout change here must red there rather than after merge.
             # Neither suite imports apps.api.routes.hydro_display, so that
-            # rule is deliberately left alone.
+            # rule is deliberately left alone. #2490: the retention suite is
+            # three partitions and the row carries all of them.
             "tests/test_mvt_tile_generation_lock.py",
-            "tests/test_node27_mvt_cache_retention.py",
+            *NODE27_MVT_CACHE_RETENTION_TESTS,
             # #2550: guard-derived — the basemap proxy suite imports
             # apps.api.routes.basemap, which takes MVT_FILE_CACHE_DIR_ENV from
             # this module: both caches share one root, so renaming the env here
@@ -3851,7 +3948,8 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # runtime-mode suites are the one-hop contributions via
         # apps/api/openapi_patching.py and apps/api/route_registry.py. The two
         # `integration`-marked importers (test_display_coverage_residual_debt_
-        # integration.py, test_mvt_national_identity_probe_integration.py) stay
+        # integration.py, test_mvt_national_identity_probe_integration.py and,
+        # since #2490, its `_cycles_` / `_digest_` partitions) stay
         # out per the #1447 ruling — they auto-skip in the PR lane. The #1341
         # read-path shape pin rides along as an exact at-site entry.
         # #2026: the pattern is a glob over the whole `hydro_display*` family.
@@ -4388,6 +4486,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # selector's own duplicate-pattern guard forbids a second
             # PATH_TEST_RULES entry for an already-owned module.)
             *SQL_SHAPE_ORACLE_TESTS,
+            # selector-route-gaps-batch-ci1: a non-gated suite that imports this
+            # module at file level and drives `PsycopgForecastStore`'s river/station
+            # stats read paths offline over a fake connection.
+            "tests/test_river_ts_stats_harness_offline.py",
         ),
     ),
     PathTestRule(
@@ -4535,7 +4637,21 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         "packages/common/redaction.py",
-        ("tests/test_redaction.py",),
+        (
+            "tests/test_redaction.py",
+            # #2624: apps/api/routes/pipeline.py:32 runs `redact_payload` over the
+            # sampled pipeline bodies the #2348 preservation oracle compares with
+            # master, un-faked, so a redaction edit that changes a wire value reds
+            # it. Both halves ride together (the pipeline half imports the core).
+            *RESPONSE_MODEL_PRESERVATION_TESTS,
+        ),
+    ),
+    PathTestRule(
+        # #2624: apps/api/routes/pipeline.py:33 runs `normalize_source_id` on the
+        # sampled pipeline paths, un-faked -- same reason as redaction.py above.
+        # The same-name tests/test_source_identity.py still arrives by derivation.
+        "packages/common/source_identity.py",
+        RESPONSE_MODEL_PRESERVATION_TESTS,
     ),
     PathTestRule(
         "packages/common/node27_container_contract.py",
@@ -4855,6 +4971,30 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "infra/env/**",
         ("tests/test_two_node_docker_runtime.py",),
+    ),
+    PathTestRule(
+        # #2575: a template-only diff used to select nothing, so the PR lane
+        # degraded to the zero-assertion collect-only smoke. These are the suites
+        # that read or render the REAL templates on disk -- by the literal
+        # `infra/sbatch` path, or through the production default `template_dir`
+        # (services/production_closure/slurm_validation.py for the production
+        # validation suite, SlurmGatewaySettings() for the m24 proof). Suites that
+        # only name the directory in an env string (test_runtime_mode,
+        # test_two_node_docker_runtime) are deliberately absent, and the prose
+        # infra/sbatch/README.md stays unrouted.
+        "infra/sbatch/*.sbatch",
+        (
+            "tests/test_analysis_pipeline.py",
+            "tests/test_job_array.py",
+            "tests/test_m24_gateway_proof.py",
+            "tests/test_object_store_roots.py",
+            "tests/test_orchestrator.py",
+            "tests/test_production_slurm_validation.py",
+            "tests/test_real_slurm_gateway.py",
+            "tests/test_slurm_array_contract.py",
+            "tests/test_slurm_route_contract.py",
+            "tests/test_slurm_route_security_contract.py",
+        ),
     ),
     # #1684 EVID-05/F: the rollout producers must select the static deployment
     # contract suite. The runbook is `docs/**` (no backend lane by default) and
@@ -5455,7 +5595,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # constructively skip the pin -- it only reds on master's full run.
         "infra/systemd/nhms-node27-mvt-cache-retention.service",
         (
-            "tests/test_node27_mvt_cache_retention.py",
+            *NODE27_MVT_CACHE_RETENTION_TESTS,
             "tests/test_node27_timeseries_retention.py",
         ),
     ),
@@ -5632,7 +5772,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # `Persistent=true` out of the timer, so the schedule is assertable at
         # PR time rather than at `systemctl --user list-timers`.
         "infra/systemd/nhms-node27-mvt-cache-retention.timer",
-        ("tests/test_node27_mvt_cache_retention.py",),
+        NODE27_MVT_CACHE_RETENTION_TESTS,
     ),
     PathTestRule(
         # #2180: same shape as the mvt-cache-retention `.timer` row above and
@@ -5706,7 +5846,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # criterion and the two rollback gates assertable at PR time. Additive:
         # the glob row still matches and both target sets are unioned.
         "infra/env/node27-mvt-cache-retention.example",
-        ("tests/test_node27_mvt_cache_retention.py",),
+        NODE27_MVT_CACHE_RETENTION_TESTS,
     ),
     PathTestRule(
         # #2104, same ground as the #2032 row above: the two globs that match
@@ -5720,13 +5860,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # EXTRACTS the documented `jq` program out of this file and runs it
         # against a real summary, so a typo in the program reds there and
         # nowhere else, and
-        # `tests/test_node27_mvt_cache_retention.py::test_the_raw_retention_env_example_points_at_this_runner`
+        # `tests/test_node27_mvt_cache_retention_wrapper.py::test_the_raw_retention_env_example_points_at_this_runner`
         # pins the sibling-runner cross-reference in it. Additive: the glob rows
         # still match and every target set is unioned.
         "infra/env/node27-raw-retention.example",
         (
             "tests/test_node27_raw_retention.py",
-            "tests/test_node27_mvt_cache_retention.py",
+            *NODE27_MVT_CACHE_RETENTION_TESTS,
         ),
     ),
     PathTestRule(
@@ -5821,14 +5961,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # routed to tests/test_node27_wrapper_pythonpath.py: this wrapper
         # exports no PYTHONPATH (its runner imports nothing from the repo).
         "scripts/node27_mvt_cache_retention_once.sh",
-        ("tests/test_node27_mvt_cache_retention.py",),
+        NODE27_MVT_CACHE_RETENTION_TESTS,
     ),
     PathTestRule(
         # #2627: the basemap stage's suite is a sibling partition the same-name
         # derivation cannot find; both are unioned with it.
         "scripts/node27_mvt_cache_retention.py",
         (
-            "tests/test_node27_mvt_cache_retention.py",
+            *NODE27_MVT_CACHE_RETENTION_TESTS,
             "tests/test_node27_mvt_cache_retention_basemap.py",
             # BASEMAP_LAYERS is pinned to the route's TiandituLayer there.
             "tests/test_basemap_proxy.py",
@@ -5971,13 +6111,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ("tests/test_production_scheduler.py",),
     ),
     PathTestRule(
-        # #1729 / #1480: the runner is the executor both disposable-DB suites
-        # drive; the grammar suite is its same-name owner.
+        # #1729 / #1480 / #2621: the runner is the executor the disposable-DB
+        # suites drive; the grammar suite is its same-name owner.
         "scripts/ops/node27_oneshot_sql.py",
         (
             "tests/test_node27_oneshot_sql.py",
             "tests/test_node27_1729_evidence_basin_delete_integration.py",
             "tests/test_node27_1480_seed_provenance_backfill_integration.py",
+            "tests/test_node27_2621_rename_leftovers_delete_integration.py",
         ),
     ),
     PathTestRule(
@@ -5991,6 +6132,20 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # #1480: same shape as the #1729 trio for the backfill / rollback pair.
         "scripts/ops/node27_1480_backfill_seed_station_provenance*.sql",
         ("tests/test_node27_oneshot_sql.py", "tests/test_node27_1480_seed_provenance_backfill_integration.py"),
+    ),
+    PathTestRule(
+        # #2621: the rename-leftover delete / rollback pair, same shape as #1729:
+        # the grammar suite pins its markers, column guard and replica windows,
+        # the disposable-DB suite executes both files (ci.yml's `database:` lane).
+        "scripts/ops/node27_2621_delete_rename_leftovers*.sql",
+        ("tests/test_node27_oneshot_sql.py", "tests/test_node27_2621_rename_leftovers_delete_integration.py"),
+    ),
+    PathTestRule(
+        # #2621: the catalog/manifest audit. Its same-name unit suite still
+        # derives; the real-PG suite drives the production `list_basins` it
+        # reuses, so it rides the database lane too.
+        "scripts/basin_catalog_manifest_audit.py",
+        ("tests/test_basin_catalog_manifest_audit_integration.py",),
     ),
     PathTestRule(
         # #1823: the display-API wrapper's entropy reach is now the fifteen
@@ -6300,11 +6455,24 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # the gateway error rendered on the response body and left raw in the
             # persisted `slurm_cancellation_gap` / `cancel_failed` event, asserted
             # in one test. The broad `apps/api/**` rule buys the three generic API
-            # suites, none of which call `cancel_run`, and nothing derives the rest:
-            # the importer index is queried only for a CHANGED path that is itself
-            # a suite, never for a production module, and no closure guard forces a
-            # derived importer set onto this rule.
+            # suites, none of which call `cancel_run`.
             "tests/test_retry_cancel_consistency.py",
+            # #2568: the ONLY HTTP-level oracle for `POST /runs/{run_id}/retry`
+            # (whole file: the route's 409/503 bodies, the file-lane render and the
+            # recorded submission event are all driven through TestClient here).
+            "tests/test_retry.py",
+            # #2576: this module is in the selector suite's GUARDED_MODULE_CLOSURES
+            # (direct-only mode), so the rule carries its whole DIRECT non-gated
+            # importer set, derived from the tracked tree. The two direct importers
+            # not named here (tests/test_api_contract_pipeline_ops.py,
+            # tests/test_monitoring_api.py) arrive through the broad `apps/api/**`
+            # rule. tests/test_openapi_31_contract.py imports this module at file
+            # level, so it is a direct importer in its own right, not a precip
+            # rider leaking into a CONNECTION_ATTRIBUTION peer.
+            "tests/test_e2e_m3.py",
+            "tests/test_openapi_31_contract.py",
+            "tests/test_pipeline_logs_artifacts.py",
+            SLURM_OPENAPI_SECURITY_TEST,
         ),
     ),
     PathTestRule(
@@ -6331,8 +6499,24 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         for path in CONNECTION_ATTRIBUTION_ROUTE_PATHS
     ),
     *(
-        PathTestRule(path, (*CONNECTION_ATTRIBUTION_TESTS, *RESPONSE_MODEL_PRESERVATION_TESTS))
+        PathTestRule(
+            path,
+            (*CONNECTION_ATTRIBUTION_TESTS, *RESPONSE_MODEL_PRESERVATION_TESTS, *MODEL_REGISTRY_IMPORTER_TESTS),
+        )
         for path in CONNECTION_ATTRIBUTION_STORE_PATHS
+    ),
+    PathTestRule(
+        # #2612: the station-flag flip hook. Its direct non-gated importer suites
+        # (the `_atomic` flip partition and the cutover history suite; the
+        # selector suite's GUARDED_MODULE_CLOSURES derives them, one-hop adds
+        # none) plus the `_mvt_set` partition, which reaches this module only
+        # through tests/direct_grid_display_cutover_flip_helpers.py -- an edge the
+        # guard cannot derive, so it is pinned by name there.
+        "packages/common/station_set_flip.py",
+        (
+            *DIRECT_GRID_DISPLAY_CUTOVER_FLIP_TESTS,
+            "tests/test_direct_grid_display_cutover_history.py",
+        ),
     ),
     PathTestRule(
         # A #1728 connection-attribution store (see CONNECTION_ATTRIBUTION_STORE_PATHS)

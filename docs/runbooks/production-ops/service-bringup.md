@@ -656,7 +656,15 @@ staging 目录 `repaired-basins`）：它补的是缺失文件，不改任何标
 `if output_path is not None` 那支；#1100 把它从 `publish_scheduler_file_registry.py` 搬出来了），
 否则只打到 stdout。查 repair 溯源要找 receipt，不要翻 manifest。
 
-**当前 authority（2026-08-22 node-22 实测 canonical manifest）**：共 24 个业务流域，
+> **下面的清单与数字是 2026-08-22 的历史快照，不是当前业务集**（2026-09-29 标注，#2621）。
+> 当前成员以 `manifest-last.json` 实测为准（`jq '[.models[].basin_id]|unique|length'`，
+> 2026-09-29 为 48 流域 / 96 行），增减记录见
+> [`operating-scope.md` §7](operating-scope.md#7-当前运行口径)。清单里已有 5 个 baseline
+> 退出调度：`basins_zhaochen_{bst,mc,wem}_shud`（2026-08-25，§7.2）、
+> `basins_shj_2shj_shud`（2026-09-22 并入 `basins_shj`，§7.4）、
+> `basins_xinanjiang_upstream_shud`（2026-09-22 退出，§7.4），已在行尾标注。
+
+**2026-08-22 authority（node-22 实测 canonical manifest，历史快照）**：共 24 个业务流域，
 口径为 17 个既有流域加 #1699 上线的 7 个；每个流域有 GFS、IFS 两个 source-scoped
 direct-grid model variant，所以 scheduler registry 是 **48 行**，不是下面 baseline ID 的 24 行。
 （此前文档写的「18 流域 / 36 行」在 2026-08-22 前就已 stale：`basins_hhe_shud`
@@ -681,16 +689,16 @@ basins_lh_lxyh_shud
 basins_lh_ylj_shud
 basins_qhh_shud
 basins_qinyijiang_shud
-basins_shj_2shj_shud
+basins_shj_2shj_shud                # 已退出：2026-09-22 并入 basins_shj（operating-scope §7.4）
 basins_tailanhe_shud
 basins_weiganhe_shud
-basins_xinanjiang_upstream_shud
-basins_zhaochen_bst_shud
-basins_zhaochen_mc_shud
-basins_zhaochen_wem_shud
+basins_xinanjiang_upstream_shud     # 已退出：2026-09-22（operating-scope §7.4）
+basins_zhaochen_bst_shud            # 已退出：2026-08-25（operating-scope §7.2）
+basins_zhaochen_mc_shud             # 已退出：2026-08-25（operating-scope §7.2）
+basins_zhaochen_wem_shud            # 已退出：2026-08-25（operating-scope §7.2）
 ```
 
-因此 GFS/IFS 各有 24 个 source-model candidate，共 48 个候选执行单元。
+因此（按 2026-08-22 快照）GFS/IFS 各有 24 个 source-model candidate，共 48 个候选执行单元。
 调度器在 candidate 构造前按 direct-grid contract 的 `applicable_source_ids` 投影模型；
 不得把 36 个 variant 与两个 source 做 72 行笛卡尔积，也不得把预期的异源不适配记成
 pass-blocking failure。合同缺失或损坏仍须 fail closed。

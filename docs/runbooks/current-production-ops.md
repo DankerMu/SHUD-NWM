@@ -204,6 +204,18 @@
 
 完整内容见 [`production-ops/operating-scope.md`](production-ops/operating-scope.md#72-2026-08-25zhaochen-系列退出业务化1701owner-裁定不建后继)。
 
+### 7.3 2026-08-25：`basins_neiliuqu` 退出调度（补登，#2621）
+
+完整内容见 [`production-ops/operating-scope.md`](production-ops/operating-scope.md#73-2026-08-25basins_neiliuqu-退出调度补登2621)。
+
+### 7.4 2026-09-22：onboarding-19，SHJ 三子流域并入 `basins_shj`、`basins_xinanjiang_upstream` 退出（补登，#2621）
+
+完整内容见 [`production-ops/operating-scope.md`](production-ops/operating-scope.md#74-2026-09-22onboarding-19shj-三子流域并入-basins_shjbasins_xinanjiang_upstream-退出补登2621)。
+
+### 7.5 2026-09-29：同日改名残影删除（#2621 owner 裁决 2）
+
+完整内容见 [`production-ops/operating-scope.md`](production-ops/operating-scope.md#75-2026-09-29同日改名残影删除2621-owner-裁决-2)。
+
 ## 8. 当前已知卡点
 
 完整内容见 [`production-ops/known-issues-pipeline.md`](production-ops/known-issues-pipeline.md#8-当前已知卡点)。

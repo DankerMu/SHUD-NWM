@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -16,11 +16,16 @@ from packages.common.object_store_forcing import (
     _normalize_source_id,
     _resolve_disk_path,
 )
+from tests.object_store_forcing_real_disk_support import latest_complete_cycle
 
 pytestmark = [pytest.mark.e2e, pytest.mark.real_disk]
 
+# Shape-only baseline: `_assert_station_series_shape` compares key order and JSON
+# kinds, never values, so the date in the file name is not the cycle under test
+# and the file cannot carry this note itself (an extra key breaks the key-list
+# equality).
 BASELINE_FIXTURE = Path(__file__).parent / "fixtures" / "station_series_baseline_heihe_ifs_2026060100.json"
-LATEST_CYCLE = "2026-06-20T12:00:00Z"
+# Negative case: a cycle no retention window will ever hold again.
 MISSING_CYCLE = "2020-01-01T00:00:00Z"
 COMBOS = [
     ("heihe_forc_001", "IFS", "basins_heihe_shud"),
@@ -28,14 +33,32 @@ COMBOS = [
     ("qhh_forc_001", "IFS", "basins_qhh_shud"),
     ("qhh_forc_001", "gfs", "basins_qhh_shud"),
 ]
+_FORCING_STEP_SECONDS = 3 * 3600
+_PLUS_EIGHT = timezone(timedelta(hours=8))
 
 
-def test_real_disk_latest_cycle_serves_all_currently_409_combinations() -> None:
+@pytest.fixture(scope="module")
+def latest_cycle() -> str:
+    """#2595: the newest cycle where all four combos are settled in the real store.
+
+    Chosen at run time, once per module, AFTER the real-disk skip gate: node-27
+    retention keeps a rolling window, so any pinned cycle eventually 404s every
+    case. Import time computes nothing -- the CI `--collect-only` smoke imports
+    this module without `OBJECT_STORE_ROOT`. Printed so the receipt (`-s`/`-rA`)
+    records which cycle the four cases read.
+    """
+    root = _real_object_store_root()
+    cycle = latest_complete_cycle(root, COMBOS, PsycopgStationLookup.from_env())
+    print(f"real_disk cycle: {cycle} (newest cycle with all {len(COMBOS)} combos settled under {root})")
+    return cycle
+
+
+def test_real_disk_latest_cycle_serves_all_currently_409_combinations(latest_cycle: str) -> None:
     with _client() as client:
         for station_id, source_id, model_id in COMBOS:
             response = client.get(
                 f"/api/v1/met/stations/{station_id}/series",
-                params={"model_id": model_id, "source_id": source_id, "cycle_time": LATEST_CYCLE},
+                params={"model_id": model_id, "source_id": source_id, "cycle_time": latest_cycle},
             )
 
             assert response.status_code == 200, response.text
@@ -45,6 +68,7 @@ def test_real_disk_latest_cycle_serves_all_currently_409_combinations() -> None:
                 station_id=station_id,
                 source_id=source_id,
                 model_id=model_id,
+                cycle=latest_cycle,
             )
             assert data["station_id"] == station_id
             assert [series["variable"] for series in data["series"]] == ["PRCP", "TEMP", "RH", "wind", "Rn"]
@@ -61,7 +85,21 @@ def test_real_disk_latest_cycle_serves_all_currently_409_combinations() -> None:
                 assert series["truncated"] is False
 
 
-def test_real_disk_error_and_filter_scenarios() -> None:
+def test_real_disk_error_and_filter_scenarios(latest_cycle: str) -> None:
+    cycle_time = _dt(latest_cycle)
+    # The window below expects exactly the two points at cycle+3h and cycle+6h,
+    # which holds only on the producer's 3-hour grid: assert the grid, do not
+    # assume it.
+    window_profile = _csv_profile(
+        root=_real_object_store_root(),
+        station_id="heihe_forc_001",
+        source_id="IFS",
+        model_id="basins_heihe_shud",
+        cycle=latest_cycle,
+    )
+    assert window_profile["step_seconds"] == _FORCING_STEP_SECONDS
+    window_from = _format_time(cycle_time + timedelta(hours=3))
+    window_to = _format_time(cycle_time + timedelta(hours=6))
     with _client() as client:
         missing_cycle = client.get(
             "/api/v1/met/stations/heihe_forc_001/series",
@@ -69,14 +107,14 @@ def test_real_disk_error_and_filter_scenarios() -> None:
         )
         missing_station = client.get(
             "/api/v1/met/stations/bogus_forc_999/series",
-            params={"model_id": "basins_heihe_shud", "source_id": "IFS", "cycle_time": LATEST_CYCLE},
+            params={"model_id": "basins_heihe_shud", "source_id": "IFS", "cycle_time": latest_cycle},
         )
         variables = client.get(
             "/api/v1/met/stations/heihe_forc_001/series",
             params={
                 "model_id": "basins_heihe_shud",
                 "source_id": "IFS",
-                "cycle_time": LATEST_CYCLE,
+                "cycle_time": latest_cycle,
                 "variables": "PRCP,TEMP",
             },
         )
@@ -85,9 +123,9 @@ def test_real_disk_error_and_filter_scenarios() -> None:
             params={
                 "model_id": "basins_heihe_shud",
                 "source_id": "IFS",
-                "cycle_time": LATEST_CYCLE,
-                "from": "2026-06-20T15:00:00Z",
-                "to": "2026-06-20T18:00:00Z",
+                "cycle_time": latest_cycle,
+                "from": window_from,
+                "to": window_to,
                 "variables": "PRCP",
             },
         )
@@ -96,7 +134,7 @@ def test_real_disk_error_and_filter_scenarios() -> None:
             params={
                 "model_id": "basins_heihe_shud",
                 "source_id": "IFS",
-                "cycle_time": LATEST_CYCLE,
+                "cycle_time": latest_cycle,
                 "variables": "PRCP",
             },
         )
@@ -105,7 +143,7 @@ def test_real_disk_error_and_filter_scenarios() -> None:
             params={
                 "model_id": "basins_heihe_shud",
                 "source_id": "IFS",
-                "cycle_time": "2026-06-20T20:00:00+08:00",
+                "cycle_time": cycle_time.astimezone(_PLUS_EIGHT).isoformat(),
                 "variables": "PRCP",
             },
         )
@@ -114,7 +152,7 @@ def test_real_disk_error_and_filter_scenarios() -> None:
             params={
                 "model_id": "basins_heihe_shud",
                 "source_id": "IFS",
-                "cycle_time": LATEST_CYCLE,
+                "cycle_time": latest_cycle,
                 "variables": "Press",
             },
         )
@@ -123,7 +161,7 @@ def test_real_disk_error_and_filter_scenarios() -> None:
             params={
                 "model_id": "basins_heihe_shud",
                 "source_id": "IFS",
-                "cycle_time": LATEST_CYCLE,
+                "cycle_time": latest_cycle,
                 "variables": "PRCP,Press",
             },
         )
@@ -139,8 +177,8 @@ def test_real_disk_error_and_filter_scenarios() -> None:
     assert [series["variable"] for series in variables.json()["data"]["series"]] == ["PRCP", "TEMP"]
     assert window.status_code == 200
     assert [point["valid_time"] for point in window.json()["data"]["series"][0]["points"]] == [
-        "2026-06-20T15:00:00Z",
-        "2026-06-20T18:00:00Z",
+        window_from,
+        window_to,
     ]
     assert zulu.status_code == 200
     assert plus_eight.status_code == 200
@@ -151,13 +189,13 @@ def test_real_disk_error_and_filter_scenarios() -> None:
     assert [series["variable"] for series in prcp_press.json()["data"]["series"]] == ["PRCP"]
 
 
-def test_real_disk_station_series_read_is_side_effect_free() -> None:
+def test_real_disk_station_series_read_is_side_effect_free(latest_cycle: str) -> None:
     root = _real_object_store_root()
     station = PsycopgStationLookup.from_env().lookup("heihe_forc_001")
     expected_path = _resolve_disk_path(
         root,
         _normalize_source_id("IFS"),
-        _compute_cycle_compact(_dt(LATEST_CYCLE)),
+        _compute_cycle_compact(_dt(latest_cycle)),
         station.basin_version_id,
         "basins_heihe_shud",
         station.forcing_filename or "",
@@ -168,7 +206,7 @@ def test_real_disk_station_series_read_is_side_effect_free() -> None:
         responses = [
             client.get(
                 "/api/v1/met/stations/heihe_forc_001/series",
-                params={"model_id": "basins_heihe_shud", "source_id": "IFS", "cycle_time": LATEST_CYCLE},
+                params={"model_id": "basins_heihe_shud", "source_id": "IFS", "cycle_time": latest_cycle},
             )
             for _ in range(3)
         ]
@@ -178,13 +216,13 @@ def test_real_disk_station_series_read_is_side_effect_free() -> None:
     assert expected_path.stat().st_mtime_ns == before
 
 
-def test_real_disk_station_series_response_shape_matches_baseline_fixture() -> None:
+def test_real_disk_station_series_response_shape_matches_baseline_fixture(latest_cycle: str) -> None:
     baseline = json.loads(BASELINE_FIXTURE.read_text(encoding="utf-8"))
 
     with _client() as client:
         response = client.get(
             "/api/v1/met/stations/heihe_forc_001/series",
-            params={"model_id": "basins_heihe_shud", "source_id": "IFS", "cycle_time": LATEST_CYCLE},
+            params={"model_id": "basins_heihe_shud", "source_id": "IFS", "cycle_time": latest_cycle},
         )
 
     assert response.status_code == 200, response.text
@@ -218,8 +256,6 @@ def _real_object_store_root() -> Path:
 
 
 def _dt(value: str) -> Any:
-    from datetime import UTC, datetime
-
     return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
 
 
@@ -227,12 +263,12 @@ def _format_time(value: Any) -> str:
     return value.isoformat().replace("+00:00", "Z")
 
 
-def _csv_profile(*, root: Path, station_id: str, source_id: str, model_id: str) -> dict[str, Any]:
+def _csv_profile(*, root: Path, station_id: str, source_id: str, model_id: str, cycle: str) -> dict[str, Any]:
     station = PsycopgStationLookup.from_env().lookup(station_id)
     path = _resolve_disk_path(
         root,
         _normalize_source_id(source_id),
-        _compute_cycle_compact(_dt(LATEST_CYCLE)),
+        _compute_cycle_compact(_dt(cycle)),
         station.basin_version_id,
         model_id,
         station.forcing_filename or "",
@@ -242,9 +278,10 @@ def _csv_profile(*, root: Path, station_id: str, source_id: str, model_id: str) 
     rows = lines[2 : 2 + nrow]
     assert len(rows) == nrow
     time_days = [float(row.split()[0]) for row in rows]
-    cycle_time = _dt(LATEST_CYCLE)
+    cycle_time = _dt(cycle)
     return {
         "nrow": nrow,
+        "step_seconds": int(round((time_days[1] - time_days[0]) * 86400)) if nrow > 1 else None,
         "valid_time_start": _format_time(cycle_time + timedelta(seconds=int(round(time_days[0] * 86400)))),
         "valid_time_end": _format_time(cycle_time + timedelta(seconds=int(round(time_days[-1] * 86400)))),
     }
