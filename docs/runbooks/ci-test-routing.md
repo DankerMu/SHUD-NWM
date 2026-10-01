@@ -3,9 +3,10 @@
 ## Why
 
 The pure-CI `unit-test` job (`.github/workflows/ci.yml`) runs the backend pytest
-suite on a plain GitHub runner installed via `pip install -e ".[dev]"`. That
-environment has **no real PostgreSQL/Slurm/SHUD, no cwd `.venv`, and no
-eccodes-version-matched GRIB fixtures**. A handful of tests are coupled to those
+suite on a plain GitHub runner whose dependencies are installed from `uv.lock`
+(a `--locked` install since #2573; the job puts the resulting cwd `.venv/bin`
+on `PATH`). That environment has **no real PostgreSQL/Slurm/SHUD and
+no eccodes-version-matched GRIB fixtures**. A handful of tests are coupled to those
 environment facts and cannot pass in pure CI; they belong on the current
 **node-27** oracle, whose active environment is already Python 3.11.
 

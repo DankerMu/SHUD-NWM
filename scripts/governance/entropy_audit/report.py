@@ -20,6 +20,7 @@ from scripts.governance.entropy_audit.check_env_and_tokens import (
     _check_paused_workflows,
     _check_qhh_diagnostic_tokens,
 )
+from scripts.governance.entropy_audit.check_line_references import _check_line_references
 from scripts.governance.entropy_audit.check_paths_and_api import (
     _check_agent_artifact_ownership,
     _check_apps_api_layer_inversion,
@@ -328,4 +329,5 @@ def _collect_findings(root: Path) -> list[FindingSpec]:
     findings.extend(_check_slurm_gateway_route_leakage(root))
     findings.extend(_check_agent_artifact_ownership(root))
     findings.extend(_check_apps_api_layer_inversion(root))
+    findings.extend(_check_line_references(root))
     return findings

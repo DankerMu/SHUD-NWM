@@ -46,7 +46,8 @@ def _null_union(schema: dict) -> dict:
 
 
 def _basin_schema() -> dict:
-    """:source: ``PsycopgModelRegistryStore.list_basins`` (model_registry.py:824)."""
+    """:source: ``PsycopgModelRegistryStore.list_basins``
+    (``_RegistryCatalogMixin.list_basins`` in ``model_registry_catalog``)."""
     return {
         "type": "object",
         "required": ["basin_id", "basin_name", "created_at"],
@@ -79,8 +80,9 @@ def _geojson_multi_polygon_schema() -> dict:
 
 def _basin_version_schema() -> dict:
     """:source: ``PsycopgModelRegistryStore.list_basin_versions``
-    (model_registry.py:869-893) through ``_basin_version_public_projection``
-    (model_registry.py:3625), which redacts ``source_uri``/``checksum`` to null.
+    (``_RegistryCatalogMixin.list_basin_versions`` in ``model_registry_catalog``)
+    through ``model_registry_public._basin_version_public_projection``, which
+    redacts ``source_uri``/``checksum`` to null.
     """
     return {
         "type": "object",
@@ -113,7 +115,8 @@ def _basin_version_schema() -> dict:
 
 def _geojson_line_string_schema() -> dict:
     """:source: ``ST_LineSubstring`` output on the Path C segment-slice branch
-    (model_registry.py:1313)."""
+    (``_RiverSegmentReadMixin._list_river_segments_segment_slice`` in
+    ``model_registry_river_segments``)."""
     position = {"type": "array", "minItems": 2, "maxItems": 3, "items": {"type": "number"}}
     return {
         "type": "object",
@@ -160,8 +163,9 @@ def _river_segment_geometry_schema() -> dict:
 
 def _river_segment_schema() -> dict:
     """:source: ``PsycopgModelRegistryStore.get_river_segment``
-    (model_registry.py:1749-1813) through ``_river_segment_detail``
-    (model_registry.py:3580)."""
+    (``_RiverSegmentReadMixin.get_river_segment`` in
+    ``model_registry_river_segments``) through
+    ``model_registry_public._river_segment_detail``."""
     return {
         "type": "object",
         "required": ["river_segment_id", "river_network_version_id", "geom", "properties_json", "created_at"],
@@ -180,8 +184,9 @@ def _river_segment_schema() -> dict:
 
 def _river_segment_feature_schema() -> dict:
     """:source: ``PsycopgModelRegistryStore.list_river_segments``
-    (reach path model_registry.py:1179-1209, Path C slice path
-    model_registry.py:1603-1626).
+    (reach path: the body of ``_RiverSegmentReadMixin.list_river_segments``;
+    Path C slice path: ``_RiverSegmentReadMixin._list_river_segments_segment_slice``,
+    both in ``model_registry_river_segments``).
 
     ``id`` is emitted only by the Path C slice branch; ``downstream_segment_id``
     only by the reach branch, and the slice branch adds ``iRiv``/``iEle``/
@@ -228,7 +233,9 @@ def _river_segment_feature_schema() -> dict:
 
 def _river_segment_feature_collection_schema() -> dict:
     """:source: ``PsycopgModelRegistryStore.list_river_segments``
-    (model_registry.py:1211-1218 / :1654-1661)."""
+    (the ``FeatureCollection`` envelope each branch returns: the reach path in
+    ``_RiverSegmentReadMixin.list_river_segments`` and the Path C slice path in
+    ``_RiverSegmentReadMixin._list_river_segments_segment_slice``)."""
     return {
         "type": "object",
         "required": ["type", "features", "total", "feature_total", "limit", "offset"],
@@ -268,15 +275,16 @@ def _river_segment_feature_collection_schema() -> dict:
 def _model_instance_schema() -> dict:
     """:source: three producers, whose union this schema documents.
 
-    1. ``_model_public_projection`` (model_registry.py:3601) over ``list_models``
-       rows (model_registry.py:2426 ``SELECT mi.*, b.basin_id, b.basin_name``).
-    2. ``_model_asset_detail`` (model_registry.py:3542) over
-       ``get_model_internal`` rows (model_registry.py:2450-2468).
+    1. ``model_registry_public._model_public_projection`` over
+       ``_RegistryCatalogMixin.list_models`` rows (its
+       ``SELECT mi.*, b.basin_id, b.basin_name`` page query).
+    2. ``model_registry_public._model_asset_detail`` over
+       ``_RegistryCatalogMixin.get_model_internal`` rows.
     3. ``_model_public_projection`` again, over the lifecycle rows behind
        ``POST /api/v1/models/{model_id}/lifecycle``
-       (``_fetch_model_lifecycle_row`` model_registry.py:2634-2662,
-       ``_fetch_active_model_for_scope`` :2666-2700,
-       ``_update_model_lifecycle_state`` :3143-3190), which reach the client
+       (``_LifecycleSupportMixin._fetch_model_lifecycle_row``,
+       ``_LifecycleSupportMixin._fetch_active_model_for_scope``,
+       ``_ModelLifecycleMixin._update_model_lifecycle_state``), which reach the client
        unsanitized as ``data.model``/``data.previous_model``
        (apps/api/routes/models.py:629-640).
 
@@ -367,9 +375,10 @@ def _model_instance_schema() -> dict:
 
 
 def _model_instance_page_schema() -> dict:
-    """:source: ``PsycopgModelRegistryStore.list_models`` (model_registry.py:2437)
-    through ``sanitize_model_list_payload`` (model_registry.py:3427), which
-    replaces ``items`` and passes ``total``/``limit``/``offset`` through."""
+    """:source: ``PsycopgModelRegistryStore.list_models``
+    (``_RegistryCatalogMixin.list_models`` in ``model_registry_catalog``) through
+    ``model_registry_public.sanitize_model_list_payload``, which replaces
+    ``items`` and passes ``total``/``limit``/``offset`` through."""
     return {
         "type": "object",
         "required": ["items", "total", "limit", "offset"],
@@ -383,9 +392,10 @@ def _model_instance_page_schema() -> dict:
 
 
 def _model_operation_preflight_schema() -> dict:
-    """:source: ``_build_model_operation_preflight`` (model_registry.py:3034-3091),
-    optionally rewritten by ``_apply_idempotent_rollback_preflight``
-    (model_registry.py:3784), which only replaces existing keys."""
+    """:source: ``_ModelLifecycleMixin._build_model_operation_preflight`` (in
+    ``model_registry_lifecycle``), optionally rewritten by
+    ``model_registry_preflight_rules._apply_idempotent_rollback_preflight``,
+    which only replaces existing keys."""
 
     def evidence_list() -> dict:
         # A fresh dict per call: PyYAML emits anchors/aliases for shared object
@@ -426,10 +436,13 @@ def _model_operation_preflight_schema() -> dict:
 
 def _model_lifecycle_result_schema() -> dict:
     """:source: ``PsycopgModelRegistryStore.model_lifecycle_operation``
-    (model_registry.py:2189-2195 idempotent-rollback, :2222-2228 blocked,
-    :2318-2327 committed); ``previous_model`` is absent on the blocked branch.
-    ``status`` values are the three ``_apply_model_lifecycle_transition``
-    outcomes (model_registry.py:3106/3112/3140) plus ``blocked``.
+    (``_ModelLifecycleMixin.model_lifecycle_operation`` in
+    ``model_registry_lifecycle``: its idempotent-rollback ``already_current``
+    return, its preflight-``blocked`` return and its committed-transition
+    return); ``previous_model`` is absent on the blocked branch.
+    ``status`` values are the three
+    ``_ModelLifecycleMixin._apply_model_lifecycle_transition`` outcomes
+    (``allowed``/``already_current``/``rollback``) plus ``blocked``.
     """
     return {
         "type": "object",

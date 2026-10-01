@@ -85,7 +85,7 @@
 
 ### CI 门控要点
 
-规则以 `.github/workflows/ci.yml`（+ `governance.yml` 的 report-only 审计）为准；下面只是读结果时必须知道的四条：
+规则以 `.github/workflows/ci.yml`（+ `governance.yml`：report-only 审计 job，外加不按路径 scope、每个 PR / master push 都跑的 `Production Topology Hard Gate` job）为准；下面只是读结果时必须知道的四条：
 
 - **按路径 scope**：`changes` job 先判改动区，纯前端/纯 docs PR 不跑后端 pytest；`real-db-integration`（显示名 "SQL Migration Dry Run"）有独立且窄得多的 `database` filter，且 PR 上还要求非 draft。
 - **PR 上后端只跑定向测试**：`unit-test-targeted`（显示名 "Unit Tests"）按本 PR diff 由 `scripts/select_ci_tests.py` 选文件；选不出时降级为 `--collect-only` 冒烟（**零断言执行**，step summary 会标注）。全量 `unit-test`（"Unit Tests (full)"）只在 push master 或手动 `workflow_dispatch` 跑。

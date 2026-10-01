@@ -39,6 +39,7 @@ if str(Path(__file__).resolve().parents[2]) not in sys.path:
 
 from scripts.governance.entropy_audit import archive_status as _mod_archive_status
 from scripts.governance.entropy_audit import check_env_and_tokens as _mod_check_env_and_tokens
+from scripts.governance.entropy_audit import check_line_references as _mod_check_line_references
 from scripts.governance.entropy_audit import check_paths_and_api as _mod_check_paths_and_api
 from scripts.governance.entropy_audit import check_stale_routes as _mod_check_stale_routes
 from scripts.governance.entropy_audit import check_topology as _mod_check_topology
@@ -91,6 +92,7 @@ from scripts.governance.entropy_audit.check_env_and_tokens import (
     _path_is_frontend_generated_artifact,
     _yaml_service_looks_display_facing,
 )
+from scripts.governance.entropy_audit.check_line_references import _check_line_references
 from scripts.governance.entropy_audit.check_paths_and_api import (
     _call_is_route_decorator,
     _call_name,
@@ -669,7 +671,8 @@ __all__ = [
     "_archive_status_section_block_fields", "_archive_status_section_end_line", "_artifact_fingerprint_pair_reason",
     "_boolean_count_by", "_bounded_artifact_sha256", "_broad_e2e_mock_line_numbers", "_call_is_route_decorator",
     "_call_name", "_check_agent_artifact_ownership", "_check_apps_api_layer_inversion", "_check_broad_e2e_mocks",
-    "_check_display_env_boundaries", "_check_makefile_toolchain", "_check_openapi_frontend_type_drift",
+    "_check_display_env_boundaries", "_check_line_references", "_check_makefile_toolchain",
+    "_check_openapi_frontend_type_drift",
     "_check_paused_workflows", "_check_placeholder_paths", "_check_production_topology_drift",
     "_check_qhh_diagnostic_tokens", "_check_slurm_gateway_route_leakage", "_check_stale_route_tokens",
     "_check_tracked_retired_paths", "_classify_broad_e2e_mock_path", "_clause_has_per_mention_redirect_syntax",
@@ -856,6 +859,7 @@ _ENTROPY_AUDIT_PACKAGE_MODULES: tuple[ModuleType, ...] = (
     _mod_check_topology,
     _mod_check_env_and_tokens,
     _mod_check_paths_and_api,
+    _mod_check_line_references,
     _mod_structural_sources,
     _mod_structural_surface,
     _mod_structural_growth,

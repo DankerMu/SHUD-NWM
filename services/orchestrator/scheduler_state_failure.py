@@ -311,8 +311,11 @@ def _state_error_code(state: Mapping[str, Any]) -> str | None:
 
 #: The three keys that carry a failure's OWN recorded code.  ``last_error`` /
 #: ``previous_error`` are deliberately absent: every real writer of those two is
-#: a retry-history event detail (retry.py:448/:485/:582,
-#: file_orchestration_journal.py:6917/:6963/:6995/:7061/:7190), and
+#: a retry-history event detail (``RetryService.schedule_auto_retry`` /
+#: ``mark_permanently_failed`` / ``attempt_manual_retry`` in retry.py, and
+#: ``FileJournalRetryService.schedule_auto_retry`` / ``mark_permanently_failed``
+#: / ``_mark_master_permanently_failed`` / ``record_manual_repair`` /
+#: ``_create_pending_manual_retry_job`` in file_orchestration_journal.py), and
 #: ``previous_error`` means, by definition, the error of the PREVIOUS attempt.
 _RECORDED_FAILURE_CODE_KEYS = ("error_code", "reason_code", "failure_reason")
 #: The ``hydro_run`` statuses whose journal write CLEARS the row's error code.

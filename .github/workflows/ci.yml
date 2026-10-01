@@ -93,6 +93,15 @@ jobs:
               # guard in the attribution suite never started the targeted
               # gate. Exact literal only; no `docs/**` or `*.jsonl` glob.
               - 'docs/review-loop-log.jsonl'
+              # #2044 / #2602: the two other workflows' meta-tests (the
+              # full-regression watcher wiring and the governance hard-gate job)
+              # live in the backend lane, but a workflow-only diff matched no
+              # backend pattern. Exact literals only; no `.github/**` glob.
+              - '.github/workflows/full-regression-watch.yml'
+              - '.github/workflows/governance.yml'
+              # #2648: the frozen hard-line-reference baseline. A JSON data file
+              # under scripts/ matched no backend pattern. Exact literal only.
+              - 'scripts/governance/entropy_audit/line_reference_baseline.json'
             database:
               - 'db/**'
               - 'packages/common/migrate.py'
@@ -297,8 +306,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - uses: astral-sh/setup-uv@v5
+      # #2573: install the locked set, never a floating resolve. A floating
+      # `pip install -e ".[dev]"` pulled eccodes 2.49 + eckitlib, whose bundled
+      # PROJ (loaded RTLD_GLOBAL) collided with pyproj's and crashed pytest at
+      # interpreter exit. `--locked` also fails if uv.lock is stale.
       - name: Install dependencies
-        run: pip install -e ".[dev]"
+        run: uv sync --locked --all-extras --dev
+      # The bare `pytest`/`python` below must resolve to the locked venv.
+      # $GITHUB_PATH is the only PATH change: job/workflow `env` is pinned.
+      - name: Put the locked venv on PATH
+        run: echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
       - name: Run real database integration tests
         # #1688: `-vv -rs` only — node-level pass/skip reasons in the run log
         # so the seven residual-debt tests appear as PASSED rather than skips.
@@ -327,8 +345,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - uses: astral-sh/setup-uv@v5
+      # #2573: install the locked set, never a floating resolve. A floating
+      # `pip install -e ".[dev]"` pulled eccodes 2.49 + eckitlib, whose bundled
+      # PROJ (loaded RTLD_GLOBAL) collided with pyproj's and crashed pytest at
+      # interpreter exit. `--locked` also fails if uv.lock is stale.
       - name: Install dependencies
-        run: pip install -e ".[dev]"
+        run: uv sync --locked --all-extras --dev
+      # The bare `pytest`/`python` below must resolve to the locked venv.
+      # $GITHUB_PATH is the only PATH change: job/workflow `env` is pinned.
+      - name: Put the locked venv on PATH
+        run: echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
       - name: Prepare scratch evidence root
         run: |
           sudo mkdir -p /scratch/frd_muziyao
@@ -362,8 +389,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - uses: astral-sh/setup-uv@v5
+      # #2573: install the locked set, never a floating resolve. A floating
+      # `pip install -e ".[dev]"` pulled eccodes 2.49 + eckitlib, whose bundled
+      # PROJ (loaded RTLD_GLOBAL) collided with pyproj's and crashed pytest at
+      # interpreter exit. `--locked` also fails if uv.lock is stale.
       - name: Install dependencies
-        run: pip install -e ".[dev]"
+        run: uv sync --locked --all-extras --dev
+      # The bare `pytest`/`python` below must resolve to the locked venv.
+      # $GITHUB_PATH is the only PATH change: job/workflow `env` is pinned.
+      - name: Put the locked venv on PATH
+        run: echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
       - name: Prepare scratch evidence root
         run: |
           sudo mkdir -p /scratch/frd_muziyao
@@ -376,10 +412,11 @@ jobs:
         run: |
           # Consume the paths-filter PR changed-file set (single authority, #1650
           # D3). JSON is passed via env, never shell-interpolated/split, and
-          # converted with the runner-provided jq — this job has no setup-uv, so
-          # uv is not available here. Empty JSON writes an empty changed-file
-          # list, which makes the selector select nothing and the count==0
-          # branch below report collect-only smoke. GitHub path values never
+          # converted with the runner-provided jq, never through uv: the locked
+          # venv is already on PATH, and a uv invocation would re-sync it.
+          # Empty JSON writes an empty changed-file list, which makes the
+          # selector select nothing and the count==0 branch below report
+          # collect-only smoke. GitHub path values never
           # contain newlines, so the newline-separated selector seam is exact.
           jq -r '.[]' <<< "$CHANGED_FILES_JSON" > .ci-changed-files.txt
           python scripts/select_ci_tests.py --changed-file .ci-changed-files.txt --github-output "$GITHUB_OUTPUT"

@@ -1,0 +1,51 @@
+name: Full Regression Watch
+
+# #2044: `Unit Tests (full)` runs only on master pushes, after the PR checks
+# were already green, so a wall-killed or failed full run turned nothing red.
+# This workflow inspects that job each time CI completes on master and fails
+# with the SHA and the run when it was cancelled or failed; the margin step
+# warns when the P95 of recent successful runs nears the job's timeout.
+# `workflow_run` fires only from the default branch's copy of this file.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "CI run id to check (empty = newest completed master push run)"
+        required: false
+        default: ""
+
+permissions:
+  actions: read
+  checks: read
+  contents: read
+
+jobs:
+  watch:
+    name: Full Regression Watch
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v5
+      - name: Install dependencies
+        run: uv sync --locked --all-extras --dev
+      - name: Check the full regression job
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.run_id || github.event.workflow_run.id }}
+        run: uv run --no-sync python scripts/ci/full_regression_watch.py check-run --run-id "$RUN_ID"
+      - name: Check the full regression time margin
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: uv run --no-sync python scripts/ci/full_regression_watch.py margin

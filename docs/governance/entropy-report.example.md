@@ -18,16 +18,18 @@ uv run --no-sync python scripts/governance/audit_repo_entropy.py --mode hard-gat
 
 Report-only generation must not create or update
 `.entropy-baseline/latest.json`. Explicit hard-gate generation also must not
-create or update `.entropy-baseline/latest.json`. The Governance Audit workflow
-remains report-only and must not pass `--mode hard-gate` unless a later
-maintainer-approved enablement change does so explicitly.
+create or update `.entropy-baseline/latest.json`. The Governance Audit
+workflow's `Entropy Audit (report-only)` job remains report-only and does not
+pass `--mode hard-gate`; the separate `Production Topology Hard Gate` job in the
+same workflow (#2602) runs `--mode hard-gate` on every pull request and master
+push, and its exit code decides that job.
 
 `apps-api-layer-inversion` is included in `executed_check_families` so the
 audit continues to detect non-API runtime imports from `apps.api.*`. After
 cleanup in #418/#419, the live repository is expected to report zero findings
 for that check. It is a future hard-gate candidate only after the zero baseline
-is maintained by tests; it is not part of the current prepared gated check list
-and the Governance Audit CI job remains report-only.
+is maintained by tests; it is not part of the current prepared gated check list,
+so neither Governance Audit job fails on it.
 
 ## Report-Only JSON Shape
 
