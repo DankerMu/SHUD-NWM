@@ -1875,16 +1875,18 @@ def _restart_reconcile_store(self) -> Any | None:
     from sqlalchemy import create_engine
     from sqlalchemy.orm import Session
 
+    from packages.common.sqlalchemy_url import sqlalchemy_url
     from services.orchestrator.persistence import PipelineStore
 
     # Best-effort: a malformed/unbuildable database_url must never abort the
     # pass. make_url() raises synchronously inside create_engine for a bad
-    # DSN, so wrap the whole build. ZERO-LEAK: record only the exception
+    # DSN (sqlalchemy_url() parses with the same make_url, inside this try), so
+    # wrap the whole build. ZERO-LEAK: record only the exception
     # class name (provably secret-free); the raw message embeds the DSN
     # incl. password. The submit-path DB-host preflight still runs.
     try:
         engine = create_engine(
-            database_url,
+            sqlalchemy_url(database_url),
             future=True,
             connect_args={
                 "connect_timeout": RECONCILE_DB_CONNECT_TIMEOUT_SECONDS,

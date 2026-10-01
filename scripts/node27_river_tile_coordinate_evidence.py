@@ -221,7 +221,9 @@ def _build_session(database_url: str) -> Any:
     from sqlalchemy import create_engine
     from sqlalchemy.orm import Session
 
-    engine = create_engine(database_url, future=True)
+    from packages.common.sqlalchemy_url import sqlalchemy_url
+
+    engine = create_engine(sqlalchemy_url(database_url), future=True)
     return Session(engine, future=True)
 
 

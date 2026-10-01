@@ -425,10 +425,11 @@ def default_observe(config: CoverageAlertConfig) -> Observation:
     import sqlalchemy
     import sqlalchemy.orm
 
+    from packages.common.sqlalchemy_url import sqlalchemy_url
     from services.tiles import mvt
 
     engine = sqlalchemy.create_engine(
-        config.database_url,
+        sqlalchemy_url(config.database_url),
         future=True,
         connect_args={"connect_timeout": CONNECT_TIMEOUT_SEC},
     )

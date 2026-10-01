@@ -41,6 +41,7 @@ import psycopg2.extensions
 import psycopg2.extras
 import pytest
 from psycopg2.extras import RealDictCursor
+from sqlalchemy.engine import URL
 
 from apps.api.routes import (
     best_available,
@@ -56,6 +57,7 @@ from packages.common.best_available import BestAvailableManager
 from packages.common.forecast_store import PsycopgForecastStore
 from packages.common.model_registry import PsycopgModelRegistryStore
 from packages.common.object_store_forcing import PsycopgStationLookup
+from packages.common.sqlalchemy_url import sqlalchemy_url
 from packages.common.state_manager import StateManager
 from scripts import (
     node27_autopipeline,
@@ -260,7 +262,7 @@ def test_display_api_engine_adds_identity_and_leaves_pool_parameters_intact(
 ) -> None:
     captured: dict[str, Any] = {}
 
-    def _fake_create_engine(url: str, **kwargs: Any) -> str:
+    def _fake_create_engine(url: str | URL, **kwargs: Any) -> str:
         captured["url"] = url
         captured["kwargs"] = kwargs
         return "engine"
@@ -275,7 +277,9 @@ def test_display_api_engine_adds_identity_and_leaves_pool_parameters_intact(
     # __wrapped__ bypasses the lru_cache so the probe never pollutes it.
     assert hydro_display._engine.__wrapped__(DSN) == "engine"
 
-    assert captured["url"] == DSN
+    # #2632: the engine gets the driver-explicit URL, never SQLAlchemy's default.
+    assert captured["url"] == sqlalchemy_url(DSN)
+    assert captured["url"].drivername == "postgresql+psycopg2"
     assert captured["kwargs"] == {
         "future": True,
         "connect_args": {"fallback_application_name": "nhms-display-api"},
@@ -291,9 +295,9 @@ def test_display_api_engine_cache_key_stays_database_url_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The identity is a constant, so it must not widen the lru_cache key."""
-    calls: list[str] = []
+    calls: list[str | URL] = []
 
-    def _fake_create_engine(url: str, **kwargs: Any) -> str:
+    def _fake_create_engine(url: str | URL, **kwargs: Any) -> str:
         calls.append(url)
         return f"engine:{len(calls)}"
 
@@ -309,7 +313,8 @@ def test_display_api_engine_cache_key_stays_database_url_only(
 
     assert first is second
     assert other != first
-    assert calls == [DSN, DSN_WITH_OVERRIDE]
+    # The cache key stays the raw DSN; only the engine argument is normalised (#2632).
+    assert calls == [sqlalchemy_url(DSN), sqlalchemy_url(DSN_WITH_OVERRIDE)]
 
 
 # --------------------------------------------------------------------------- #
@@ -1519,7 +1524,7 @@ def test_pipeline_engine_adds_its_identity_and_leaves_other_parameters_intact(
 ) -> None:
     captured: dict[str, Any] = {}
 
-    def _fake_create_engine(url: str, **kwargs: Any) -> str:
+    def _fake_create_engine(url: str | URL, **kwargs: Any) -> str:
         captured["url"] = url
         captured["kwargs"] = kwargs
         return "engine"
@@ -1529,7 +1534,9 @@ def test_pipeline_engine_adds_its_identity_and_leaves_other_parameters_intact(
     # __wrapped__ bypasses the lru_cache so the probe never pollutes it.
     assert pipeline._engine.__wrapped__(DSN) == "engine"
 
-    assert captured["url"] == DSN
+    # #2632: the engine gets the driver-explicit URL, never SQLAlchemy's default.
+    assert captured["url"] == sqlalchemy_url(DSN)
+    assert captured["url"].drivername == "postgresql+psycopg2"
     assert captured["kwargs"] == {
         "future": True,
         "connect_args": {"fallback_application_name": "nhms-api-pipeline"},

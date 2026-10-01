@@ -20,6 +20,7 @@ from packages.common.migrate import (
     ensure_schema_migrations_table,
     migration_has_been_applied,
 )
+from packages.common.sqlalchemy_url import sqlalchemy_url
 
 ISSUE_126_PREFIX = "it126"
 BASIN_ID = f"{ISSUE_126_PREFIX}_basin"
@@ -201,7 +202,7 @@ def post_expand_forecast_database(
 
 
 def sqlalchemy_engine(database_url: str) -> Engine:
-    return create_engine(database_url, future=True)
+    return create_engine(sqlalchemy_url(database_url), future=True)
 
 
 

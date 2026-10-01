@@ -465,6 +465,28 @@ FORCING_TEMPLATE_PRUNED_DIRECTORIES: frozenset[str] = frozenset(
 )
 FORCING_TEMPLATE_RENDER_MODULE = "packages.common.forcing_ts_render"
 
+# #2632: the SQLAlchemy driver guard. It AST-scans every `.py` under the five
+# roots below (plus tests/integration_helpers.py) and fails, naming `path:line`,
+# on a `create_engine` call whose URL is not `sqlalchemy_url(...)` or a literal
+# sqlite URL — the drift that would let SQLAlchemy 2.1 pick psycopg (v3) for a
+# plain `postgresql://` URL. Routed SUPPLEMENTALLY by a content sniff, in the
+# #2498 shape: a changed `.py` under these roots whose AST calls `create_engine`
+# (the only files that can introduce a bypass) adds the guard; a helper change
+# adds it too, because the guard keys on the helper's name. A root-wide rider
+# would add the guard to every backend diff for no signal. The roots and pruned
+# directories mirror the guard's own SCAN_ROOTS / PRUNED_DIRECTORIES bindings; a
+# selector meta-test asserts equality, so a root added to the scan without
+# wiring it here reddens by name. Known limit: `tests/integration_helpers.py`
+# stays on its #1487 carve-out collapse (meta-guard only), so a diff to it runs
+# the guard on master, not in the PR lane.
+SQLALCHEMY_DRIVER_GUARD_TEST = "tests/test_sqlalchemy_driver_explicit.py"
+SQLALCHEMY_URL_HELPER_PATH = "packages/common/sqlalchemy_url.py"
+SQLALCHEMY_URL_HELPER_TEST = "tests/test_sqlalchemy_url.py"
+SQLALCHEMY_DRIVER_GUARD_ROOTS: tuple[str, ...] = ("apps", "packages", "services", "workers", "scripts")
+SQLALCHEMY_DRIVER_GUARD_PRUNED_DIRECTORIES: frozenset[str] = frozenset(
+    {"__pycache__", ".git", ".venv", "node_modules", "dist", "build", ".mypy_cache"}
+)
+
 # #2074: the API-contract corpus, physically partitioned out of the 2,132-line
 # `tests/test_api_contract.py` monolith (38 cases). The retained base path keeps
 # the cases that read the CONTRACT ARTEFACTS — the committed
@@ -6280,14 +6302,18 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # asserted here (parsed key + the running session's resolved ini).
             PYTHON_ENVIRONMENT_TRUTH_TEST,
             SELECTOR_META_GUARD_TEST,
+            # #2632: a dependency change can move SQLAlchemy's default
+            # PostgreSQL DBAPI; the helper suite re-proves the engine driver.
+            SQLALCHEMY_URL_HELPER_TEST,
         ),
     ),
     PathTestRule(
         # #1646: a dependency-lock change could add pytest-timeout, so the lock
         # rule must also run the policy suite (which asserts no such package is
         # resolved) alongside core smoke and the selector meta-guard.
+        # #2632: and the SQLAlchemy driver helper suite, as for pyproject.toml.
         "uv.lock",
-        (*CORE_SMOKE_TESTS, *THREAD_EXCEPTION_POLICY_TESTS, SELECTOR_META_GUARD_TEST),
+        (*CORE_SMOKE_TESTS, *THREAD_EXCEPTION_POLICY_TESTS, SELECTOR_META_GUARD_TEST, SQLALCHEMY_URL_HELPER_TEST),
     ),
     # #1562 structural split owners.  Additive (non-stop) on purpose: the broad
     # `services/orchestrator/**` rule below the stop rules already carries the
@@ -6787,6 +6813,13 @@ def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -
         if _imports_forcing_template_renderer(path, repo_root=repo_root):
             selected.update(FORCING_SQL_SHAPE_ORACLE_TESTS)
 
+    # #2632: supplemental SQLAlchemy driver-guard sniff, same additive shape as
+    # the #2498 sniff above (no `matched`, no stop-rule participation, no effect
+    # on the unknown-backend fallback). See `_calls_create_engine`.
+    for path in changed:
+        if path == SQLALCHEMY_URL_HELPER_PATH or _calls_create_engine(path, repo_root=repo_root):
+            selected.add(SQLALCHEMY_DRIVER_GUARD_TEST)
+
     # #2323: supplemental production-topology reader route. Every changed path
     # the scanner mirror accepts (existing or deleted) adds the ONE hard-gate
     # node, additively: no `matched`, no stop-rule participation, no effect on
@@ -6986,6 +7019,40 @@ def _imports_forcing_template_renderer(path: str, *, repo_root: Path) -> bool:
     except (OSError, UnicodeDecodeError, SyntaxError, ValueError):
         return False
     return FORCING_TEMPLATE_RENDER_MODULE in _top_level_imported_module_names(path, tree)
+
+
+def _calls_create_engine(path: str, *, repo_root: Path) -> bool:
+    """True iff changed ``path`` is a #2632 driver-guard candidate.
+
+    A `.py` under SQLALCHEMY_DRIVER_GUARD_ROOTS with no pruned directory part
+    whose AST holds a `create_engine(...)` / `<x>.create_engine(...)` call —
+    the guard's own callee predicate. A deleted, unreadable or unparsable file
+    is False, never an error (the guard owns the fail-closed parse), and a
+    deletion cannot introduce an engine that bypasses the helper.
+    """
+    if not path.endswith(".py"):
+        return False
+    parts = PurePosixPath(path).parts
+    if len(parts) < 2 or parts[0] not in SQLALCHEMY_DRIVER_GUARD_ROOTS:
+        return False
+    if any(part in SQLALCHEMY_DRIVER_GUARD_PRUNED_DIRECTORIES for part in parts[:-1]):
+        return False
+    source_path = repo_root / path
+    try:
+        if not source_path.is_file():
+            return False
+        tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=path)
+    except (OSError, UnicodeDecodeError, SyntaxError, ValueError):
+        return False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if (isinstance(func, ast.Name) and func.id == "create_engine") or (
+            isinstance(func, ast.Attribute) and func.attr == "create_engine"
+        ):
+            return True
+    return False
 
 
 def _test_target_exists(target: str, *, repo_root: Path) -> bool:
