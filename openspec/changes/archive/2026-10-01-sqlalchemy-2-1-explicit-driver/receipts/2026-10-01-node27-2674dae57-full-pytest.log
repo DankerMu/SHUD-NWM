@@ -1,0 +1,18 @@
+active_before=2.0.49
+head=2674dae57053e7709f1cb4e5f8ffd4f004a9a721
+Downloading sqlalchemy (4.4MiB)
+ Downloaded sqlalchemy
+ + sqlalchemy==2.1.1
+wt_env=/home/nwm/tmp/sqla-wt/.venv 2.1.1
+== full (default gates)
+full_rc=0 secs=5062
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+21497 passed, 401 skipped, 1 warning in 5049.09s (1:24:09)
+== -m integration (throwaway DBs)
+it_rc=0 secs=3064
+........................................................................ [ 99%]
+...                                                                      [100%]
+339 passed, 24 skipped, 21535 deselected in 3057.83s (0:50:57)
+active_after=2.0.49
+DONE

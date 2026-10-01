@@ -28,7 +28,7 @@ Fixture level: standard. Risk packs: dependency-upgrade, runtime-config (DB driv
 ## 3. Verification
 - [x] 3.1 Local: `uv sync --all-extras --dev`, `uv run ruff check .`, and the full `uv run pytest -q` on 2.1.x.
   - macOS, SQLAlchemy 2.1.1: ruff clean. Full suite `12 failed, 21483 passed, 403 skipped`. Two were selector exact-set pins for `scheduler_runtime.py` gaining the new guard rider (updated; `tests/test_select_ci_tests.py` then `949 passed`). The other ten (setgid-mode `test_tile_publisher.py` / `test_canonical_precip_copyback_backfill.py`, device-label `test_node27_working_set.py`) fail identically on the base commit with SQLAlchemy 2.0.49: pre-existing macOS-only. No SQLAlchemy 2.1 incompatibility surfaced.
-- [ ] 3.2 node-27 full pytest in an isolated worktree venv:
+- [x] 3.2 (2026-10-01, receipt `receipts/2026-10-01-node27-2674dae57-full-pytest.log`: worktree venv 2.1.1; full 21497 passed / 401 skipped; `-m integration` 339 passed / 24 skipped; active venv 2.0.49 before and after) node-27 full pytest in an isolated worktree venv:
   - **Get the code.** `git fetch origin <branch>`, then `git worktree add --detach $WT FETCH_HEAD`. Never pull the shared checkout.
   - **Isolate uv.** Every uv call runs as `env -u VIRTUAL_ENV UV_PROJECT_ENVIRONMENT="$WT/.venv" uv ...`, with `TMPDIR=/home/nwm/tmp`.
   - **Build and run.** Run `uv sync --all-extras --dev`, then `uv run pytest -q` over the whole suite. Run it twice:
@@ -38,10 +38,10 @@ Fixture level: standard. Risk packs: dependency-upgrade, runtime-config (DB driv
     - The worktree's `sys.prefix` and SQLAlchemy version: the prefix must be under `$WT`, and the version must be 2.1.x.
     - `/home/nwm/NWM/.venv/bin/python -c 'import sqlalchemy;print(sqlalchemy.__version__)'` before and after the run: both must print 2.0.49.
     - `git worktree remove` at the end.
-- [ ] 3.3 CI: SQL Migration Dry Run (the pip-install path) is green on the PR.
+- [x] 3.3 (PR #2704: SQL Migration Dry Run pass) CI: SQL Migration Dry Run (the pip-install path) is green on the PR.
 
 ## 4. Post-merge deploy (after the owner confirms; not part of this PR)
-- [ ] 4.1 On node-27, in `/home/nwm/NWM`: run `git pull --ff-only`, then `uv sync --all-extras --dev`, then restart the display API with `scripts/ops/start-display-api.sh`, leaving yd-web alone. Check `/api/v1/basins` returns 200 and that the active venv now reports SQLAlchemy 2.1.x. Write a receipt.
+- [ ] 4.1 (awaiting owner confirmation; not done at archive time) On node-27, in `/home/nwm/NWM`: run `git pull --ff-only`, then `uv sync --all-extras --dev`, then restart the display API with `scripts/ops/start-display-api.sh`, leaving yd-web alone. Check `/api/v1/basins` returns 200 and that the active venv now reports SQLAlchemy 2.1.x. Write a receipt.
 
 ## Evidence Floor
 - The `<2.1` cap is removed. `uv.lock` pins 2.1.x.
