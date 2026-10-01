@@ -13,13 +13,13 @@ Fixture level: expanded. Risk packs: ci-gate, dependency-environment, governance
 - [x] 2.1 Add `scripts/ci/full_regression_watch.py`, and `tests/test_full_regression_watch.py` with unit tests and the wiring meta-test.
 - [x] 2.2 Add `.github/workflows/full-regression-watch.yml`. Add backend-filter exact literals and selector routing.
 - [x] 2.3 Live script runs: 35759146799 exits 1 with wall-timeout; a success exits 0; a skipped-full run exits 0; `margin` P95 is recorded.
-- [ ] 2.4 Post-merge: record the first `workflow_run` fire on master (archive PR).
+- [x] 2.4 Post-merge: record the first `workflow_run` fire on master (archive PR).
 
 ## 3. #2602
 - [x] 3.1 Add the governance hard-gate job. The report-only job stays byte-identical. Add the meta-test.
 - [x] 3.2 Update the authority text: entropy-budget.md, entropy-report.example.md, and instructions/agents/shared.md, then regenerate CLAUDE.md/AGENTS.md.
 - [x] 3.3 AC1: a stacked draft PR containing only the plant shows the hard gate red and Unit Tests skipped. Record the URLs, then close the PR.
-- [ ] 3.4 AC2: record the hard-gate job on the archive PR's master push.
+- [x] 3.4 AC2: record the hard-gate job on the archive PR's master push.
 
 ## 4. #2648
 - [x] 4.1 Fix the 20 references in openapi_restored_schemas.py, plus the scheduler_state_failure.py and recalibration-and-archive.md §5.7.1 groups. Grep readback.
@@ -55,3 +55,10 @@ Fixture level: expanded. Risk packs: ci-gate, dependency-environment, governance
   - `Production Topology Hard Gate` failed (run 36910056698, job 110530187730), with annotation `openspec/changes/ci-gates-batch-ci2/planted-topology-finding.md:3 production-topology-node22-db-writer`;
   - `Unit Tests` was skipped.
 - 5.3: follow-ups #2709 (scheduled floating-resolve lane) and #2710 (full-suite wall).
+
+## Post-merge receipts (PR #2707 → 886d01747)
+- 2.4: the first `workflow_run` fire is [Full Regression Watch run 36926710568](https://github.com/DankerMu/SHUD-NWM/actions/runs/36926710568) (job 110585722463), conclusion success.
+  - It classified master CI run 36921792429 (sha 886d01747): `Unit Tests (full)` success, the first master full run on the lock install, 40m38s.
+  - `margin` emitted `P95=58.7min > 80% of 60min (n=20)` (#2710).
+- 3.4: `Production Topology Hard Gate` ran on the 886d01747 master push: [job 110569375625](https://github.com/DankerMu/SHUD-NWM/actions/runs/36921792461/job/110569375625), success.
+  - That push is not docs-only. AC2's no-path-gate property is proven by `tests/test_governance_workflow_hard_gate.py` together with this master-push execution. Archive pushes write the backend literal `.review-gate-issues.json`, so they are not docs-only either.
