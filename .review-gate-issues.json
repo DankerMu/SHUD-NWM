@@ -4564,6 +4564,17 @@
           "rounds": 1
         }
       ]
+    },
+    "2632": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 2704,
+          "outcome": "merged",
+          "rounds": 1
+        }
+      ]
     }
   }
 }
