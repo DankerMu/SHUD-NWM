@@ -145,6 +145,16 @@ _LIFECYCLE_OWNER_EDGES: tuple[tuple[str, str], ...] = (
     ("schemas/examples/timeseries_compression_receipt.example.json", "tests/test_node27_lifecycle_contract.py"),
     ("schemas/timeseries_retention_receipt.schema.json", "tests/test_node27_lifecycle_contract.py"),
     ("scripts/node27_timeseries_compression_capture.py", "tests/test_node27_timeseries_discovery.py"),
+    # #2713: the env example carries the FENCE_WAIT_MS default literal the fence
+    # suite pins; the discovery tuples define the fence's lifecycle set, family
+    # keys and the writers' fence names.
+    ("infra/env/node27-timeseries-compression.example", "tests/test_timeseries_compression_fence.py"),
+    ("packages/common/node27_timeseries_discovery.py", "tests/test_timeseries_compression_fence.py"),
+    (
+        "packages/common/node27_timeseries_discovery.py",
+        "tests/test_timeseries_compression_fence_wire_site_invariant.py",
+    ),
+    ("packages/common/node27_timeseries_discovery.py", "tests/test_timeseries_compression_fence_writers.py"),
 )
 
 

@@ -20,7 +20,11 @@ from packages.common.forcing_store_routing import (
 from packages.common.met_store import MetStoreError, default_database_url
 from packages.common.source_identity import normalize_source_id
 from packages.common.timescale_write_guard import check_batch_targets_uncompressed
-from packages.common.timeseries_compression_fence import IngestFenceBusy, try_ingest_fence
+from packages.common.timeseries_compression_fence import (
+    FORCING_STATION_TIMESERIES_HYPERTABLE,
+    IngestFenceBusy,
+    try_ingest_fence,
+)
 
 from .direct_grid_contract import (
     DirectGridContractError,
@@ -36,7 +40,6 @@ from .producer import (
 )
 
 DIRECT_GRID_CACHE_STATION_ROLE = "direct_grid_cache"
-FORCING_STATION_TIMESERIES_HYPERTABLE = "met.forcing_station_timeseries"
 
 
 

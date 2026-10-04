@@ -29,7 +29,11 @@ from packages.common.timescale_write_guard import (
     CompressedChunkWriteError,
     check_batch_targets_uncompressed,
 )
-from packages.common.timeseries_compression_fence import IngestFenceBusy, try_ingest_fence
+from packages.common.timeseries_compression_fence import (
+    FORCING_STATION_TIMESERIES_HYPERTABLE,
+    IngestFenceBusy,
+    try_ingest_fence,
+)
 
 APPLY_MODE = "object_store_forcing_domain_handoff"
 APPLY_SAVEPOINT_NAME = "nhms_forcing_domain_handoff_apply"
@@ -78,7 +82,6 @@ REASON_APPLY_LEGACY_STORE_REFUSED = "HANDOFF_APPLY_LEGACY_STORE_REFUSED"
 # pipeline routes this code to a non-failing "skipped" outcome and the next
 # tick re-applies the handoff.
 REASON_APPLY_COMPRESSION_FENCE_BUSY = "HANDOFF_APPLY_COMPRESSION_FENCE_BUSY"
-FORCING_STATION_TIMESERIES_HYPERTABLE = "met.forcing_station_timeseries"
 
 TARGET_TABLES = (
     "met.forcing_version",

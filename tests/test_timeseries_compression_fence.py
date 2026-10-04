@@ -586,6 +586,148 @@ def test_main_exit_code_separates_contention_from_failure(
 
 
 # ---------------------------------------------------------------------------
+# Compression runner: tick-deadline guard
+# ---------------------------------------------------------------------------
+
+
+class _TickClock:
+    """Scripted ``compression._monotonic``; records how often it was read."""
+
+    def __init__(self, *readings: float) -> None:
+        self._readings = list(readings)
+        self.reads = 0
+
+    def __call__(self) -> float:
+        self.reads += 1
+        return self._readings.pop(0)
+
+
+# Defaults: wrapper wall 3900 s, fence wait 900 s, cleanup margin 300 s, so a
+# chunk may still start its fence at elapsed <= 2700 s (3900 - 900 - 300).
+_LAST_FENCE_START_S = 3900 - 900 - 300
+
+
+@pytest.mark.parametrize(
+    ("second_check_s", "second_deferred"),
+    [(_LAST_FENCE_START_S, False), (_LAST_FENCE_START_S + 0.001, True)],
+    ids=["exactly-fits", "one-ms-over"],
+)
+def test_the_tick_deadline_guard_defers_the_rest_of_the_tick_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, second_check_s: float, second_deferred: bool
+) -> None:
+    config = compression.config_from_args(
+        _args(enforce=True), _env(tmp_path, NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND="3")
+    )
+    assert (config.wrapper_wall_seconds, config.fence_wait_ms) == (3900, 900_000)
+    # Tick started at 100.0; chunk 1 is checked at +10 s and chunk 2 at
+    # +second_check_s. Chunk 3 is checked at +3000 s if chunk 2 did not trip.
+    clock = _TickClock(100.0 + 10, 100.0 + second_check_s, 100.0 + 3000)
+    monkeypatch.setattr(compression, "_monotonic", clock)
+    attempted: list[str] = []
+
+    def compress(_dsn: str, chunk: Any) -> int:
+        attempted.append(chunk.chunk_name)
+        return 5
+
+    receipt = compression.build_receipt(
+        config,
+        now_utc=_NOW,
+        fetch_chunks=lambda _dsn: [_chunk("c1", age_days=4), _chunk("c2", age_days=5), _chunk("c3", age_days=6)],
+        measure_chunk_bytes=lambda _dsn, _chunk, *, after=False: 400 if after else 1000,
+        compress_chunk=compress,
+        reconcile_chunk_state=lambda _dsn, _chunk: False,
+        head_sha="b" * 40,
+        tick_started_monotonic=100.0,
+    )
+
+    c1, c2, c3 = receipt["selected"]
+    assert c1["mutation_state"] == "committed"
+    # c3 is always past the deadline (+3000 s), and once tripped the guard
+    # stops reading the clock: the rest of the tick is deferred, not re-tried.
+    assert c3["mutation_state"] == "deferred_contended"
+    if second_deferred:
+        assert attempted == ["c1"]
+        assert clock.reads == 2
+        assert c2["mutation_state"] == "deferred_contended"
+        assert receipt["deferred_contended_count"] == 2
+    else:
+        assert attempted == ["c1", "c2"]
+        assert clock.reads == 3
+        assert c2["mutation_state"] == "committed"
+        assert receipt["deferred_contended_count"] == 1
+    # A guard deferral carries no fence wait: that is what tells it apart from
+    # an expired fence wait. Nothing it deferred counts toward the totals.
+    assert "fence_wait_elapsed_ms" not in c3
+    assert c3["before_bytes"] == 1000 and c3["after_bytes"] is None
+    assert receipt["per_table_totals"]["hydro.river_timeseries"]["chunks_compressed"] == len(attempted)
+    assert receipt["outcome"] == "deferred"
+    jsonschema.validate(receipt, _load_schema())
+
+
+def test_the_guard_charges_a_smaller_fence_wait(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # With a 60 s fence wait the same +3000 s check still fits (3000 + 60 + 300 <= 3900).
+    env = _env(tmp_path, **{_FENCE_WAIT_KEY: "60000"})
+    config = compression.config_from_args(_args(enforce=True), env)
+    monkeypatch.setattr(compression, "_monotonic", _TickClock(3000.0))
+    receipt = compression.build_receipt(
+        config,
+        now_utc=_NOW,
+        fetch_chunks=lambda _dsn: [_chunk("c1", age_days=4)],
+        measure_chunk_bytes=lambda _dsn, _chunk, *, after=False: 400 if after else 1000,
+        compress_chunk=lambda _dsn, _chunk: 5,
+        reconcile_chunk_state=lambda _dsn, _chunk: False,
+        head_sha="b" * 40,
+        tick_started_monotonic=0.0,
+    )
+    assert receipt["selected"][0]["mutation_state"] == "committed"
+    assert receipt["outcome"] == "clean"
+
+
+def test_dry_run_never_reads_the_tick_clock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = compression.config_from_args(_args(), _env(tmp_path))
+    clock = _TickClock(0.0)
+    monkeypatch.setattr(compression, "_monotonic", clock)
+    receipt = compression.build_receipt(
+        config,
+        now_utc=_NOW,
+        fetch_chunks=lambda _dsn: [_chunk("c1", age_days=4)],
+        measure_chunk_bytes=lambda _dsn, _chunk, *, after=False: 1000,
+        compress_chunk=lambda _dsn, _chunk: pytest.fail("dry-run must not compress"),
+        head_sha="b" * 40,
+    )
+    assert clock.reads == 1  # only the default tick-start anchor
+    assert receipt["outcome"] == "clean"
+
+
+def test_main_anchors_the_tick_deadline_at_process_entry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # main reads the clock once on entry (0.0); the only chunk is checked at
+    # +3000 s. Had build_receipt re-anchored at its own start, elapsed would
+    # read ~0 and the chunk would be attempted.
+    for key, value in _env(tmp_path).items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(compression, "_current_head_sha", lambda **_kwargs: "c" * 40)
+    monkeypatch.setattr(compression, "acquire_timeseries_lifecycle_lock", lambda: 99)
+    monkeypatch.setattr(compression, "release_timeseries_lifecycle_lock", lambda _fd: None)
+    clock = _TickClock(0.0, 3000.0)
+    monkeypatch.setattr(compression, "_monotonic", clock)
+
+    rc = compression.main(
+        ["--enforce"],
+        now_utc=_NOW,
+        fetch_chunks=lambda _dsn: [_chunk("late", age_days=4)],
+        measure_chunk_bytes=lambda _dsn, _chunk, **_kwargs: 10,
+        compress_chunk=lambda _dsn, _chunk: pytest.fail("past the tick deadline: must not compress"),
+        reconcile_chunk_state=lambda _dsn, _chunk: False,
+    )
+
+    receipt = json.loads((tmp_path / "receipt.json").read_text(encoding="utf-8"))
+    assert (rc, receipt["outcome"], receipt["deferred_contended_count"]) == (0, "deferred", 1)
+    assert receipt["selected"][0]["mutation_state"] == "deferred_contended"
+    assert clock.reads == 2
+    jsonschema.validate(receipt, _load_schema())
+
+
+# ---------------------------------------------------------------------------
 # Receipt schema 2.2
 # ---------------------------------------------------------------------------
 

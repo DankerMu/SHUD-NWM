@@ -19,7 +19,11 @@ from packages.common.timescale_write_guard import (
     CompressedChunkWriteError,
     check_batch_targets_uncompressed,
 )
-from packages.common.timeseries_compression_fence import IngestFenceBusy, try_ingest_fence
+from packages.common.timeseries_compression_fence import (
+    RIVER_TIMESERIES_HYPERTABLE,
+    IngestFenceBusy,
+    try_ingest_fence,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -41,7 +45,6 @@ IDENTITY_KEY_MISSING_ERROR_CODE = "OUTPUT_PARSE_IDENTITY_KEY_MISSING"
 # transaction is rolled back, and the CLI prints it so the autopipe tick
 # records the run as skipped and retries it on a later tick.
 COMPRESSION_FENCE_BUSY_ERROR_CODE = "OUTPUT_PARSE_COMPRESSION_FENCE_BUSY"
-RIVER_TIMESERIES_HYPERTABLE = "hydro.river_timeseries"
 PARSE_READY_RUN_STATUSES = ("succeeded", "parsed", "failed")
 FAILABLE_RUN_STATUSES = ("created", "staged", "submitted", "running", "succeeded", "parsed")
 

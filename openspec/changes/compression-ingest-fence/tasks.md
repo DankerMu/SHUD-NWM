@@ -2,7 +2,7 @@
 
 Fixture level: expanded. Risk packs: db-concurrency, production-ops. design.md is authoritative.
 
-- [ ] 1 D0 facts: confirm targets and writers, whether store.py runs on node-27, and the caller-managed path. The orchestrator measures D0.4 (FK lock snapshot) and D0.5 (longest parser transaction) on node-27. Record all of them in the PR.
+- [x] 1 D0 facts: confirm targets and writers, whether store.py runs on node-27, and the caller-managed path. The orchestrator measures D0.4 (FK lock snapshot) and D0.5 (longest parser transaction) on node-27. Record all of them in the PR.
 - [x] 2 Add the fence module, using the two-int4 keyspace, with unit tests.
 - [x] 3 Runner:
   - the fence-wait knob, validated fail-closed and bound keyword-only;

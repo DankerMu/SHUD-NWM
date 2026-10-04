@@ -334,12 +334,11 @@ def test_river_red_unfenced_probe_compress_delete_deadlocks(
     victims = [side for side, code in codes.items() if code == _DEADLOCK]
     record_property("river_red_pg_locks_at_upgrade_wait", repr(snapshot))
     record_property("river_red_outcome", repr(codes))
-    if not victims:
-        pytest.skip(
-            "river red: the interleaving was reached (compress waited for AccessExclusiveLock) but "
-            f"no 40P01 followed on this TimescaleDB; outcome={codes!r}; pg_locks={snapshot!r}"
-        )
-    assert len(victims) == 1, codes
+    # Once the interleaving is reached (compress waits for AccessExclusiveLock
+    # behind the probe), the unfenced DELETE MUST close the cycle: exactly one
+    # side is the 40P01 victim. Anything else means the red no longer proves
+    # the #2713 deadlock, so it fails rather than skips.
+    assert len(victims) == 1, f"outcome={codes!r}; pg_locks={snapshot!r}"
     record_property("deadlock_victim", victims[0])
 
 

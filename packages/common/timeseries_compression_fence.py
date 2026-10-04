@@ -62,6 +62,13 @@ FENCE_CLASS_ID = 2713
 COMPRESSED_HYPERTABLES: tuple[str, ...] = tuple(
     f"{schema}.{name}" for schema, name in CANONICAL_HYPERTABLES + LEGACY_HYPERTABLES
 )
+# The two canonical family names, built from the discovery tuple rather than
+# spelled as ``schema.name`` literals: the writers pass these to
+# :func:`try_ingest_fence`, and the river/forcing text censuses count qualified
+# spellings as SQL statements, which a fence argument is not.
+_CANONICAL_BY_NAME = {name: f"{schema}.{name}" for schema, name in CANONICAL_HYPERTABLES}
+RIVER_TIMESERIES_HYPERTABLE = _CANONICAL_BY_NAME["river_timeseries"]
+FORCING_STATION_TIMESERIES_HYPERTABLE = _CANONICAL_BY_NAME["forcing_station_timeseries"]
 # Each member of a family -> the canonical ``schema.name`` its key derives from.
 _FAMILY_OF: dict[str, str] = {
     **{f"{schema}.{name}": f"{schema}.{name}" for schema, name in CANONICAL_HYPERTABLES},

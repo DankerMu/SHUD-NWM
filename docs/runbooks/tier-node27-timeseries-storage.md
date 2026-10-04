@@ -3558,10 +3558,14 @@ Measured inputs (node-27):
 
 The two constraints:
 
-1. **Wall.** `Σ(selected GB) × 55 s/GB ≤ 3900 s` (wrapper wall; the whole tick,
-   not one chunk). `2 × 21 GB × 55 ≈ 2310 s` leaves ~1590 s for growth and the
-   non-compress residual; `4 × 20 GB × 55 ≈ 4400 s` does not fit — exactly the
-   2026-09-18 `rc=124`.
+1. **Wall.** `Σ(selected GB) × 55 s/GB + Σ fence_wait ≤ 3900 s` (wrapper wall;
+   the whole tick, not one chunk). `Σ fence_wait` is the time actually spent
+   waiting for the #2713 compression/ingest fence, at most
+   `FENCE_WAIT_MS` per chunk; it is ~0 on a quiet database, and the §4.11
+   tick-deadline guard defers the rest of the tick instead of starting a
+   fence wait that no longer fits. `2 × 21 GB × 55 ≈ 2310 s` leaves ~1590 s for
+   growth, the non-compress residual and fence waits; `4 × 20 GB × 55 ≈ 4400 s`
+   does not fit — exactly the 2026-09-18 `rc=124`.
 2. **Throughput.** `bound × 1 tick/day ≥` arrival. River takes both slots
    while it has ≥ 2 eligible chunks: 2/day compressed from the young end,
    1/day arriving, 1/day dropped by retention from the old end, so a river
@@ -6818,11 +6822,25 @@ status; the next tick re-registers, re-applies and re-parses it.
 **Compression knob and budget.** `NODE27_TIMESERIES_COMPRESSION_FENCE_WAIT_MS`
 (compression env, default 900000) bounds the fence wait. It is charged against
 `COMPRESS_TIMEOUT_MS`: `compress_chunk` runs with `statement_timeout =
-COMPRESS_TIMEOUT_MS - measured fence wait`, so leg 1 (`ceil(compress/1000) +
-300 <= wrapper wall`) and every wall above are unchanged. The runner refuses,
-before any DB connection, a value that is not strictly below
+COMPRESS_TIMEOUT_MS - measured fence wait`, so the per-chunk legs (leg 1
+`ceil(compress/1000) + 300 <= wrapper wall`, leg 2) are unchanged. The runner
+refuses, before any DB connection, a value that is not strictly below
 `COMPRESS_TIMEOUT_MS` — including the trap of lowering `COMPRESS_TIMEOUT_MS` to
 900000 or below without also setting the knob.
+
+**Tick-deadline guard.** The per-chunk legs do not bound a whole tick: with
+`bound` chunks the fence waits add up to `bound × FENCE_WAIT_MS` on top of the
+compress time (§4 "Per-tick capacity", Wall constraint). So before taking the
+fence for each chunk the runner checks, on a monotonic clock started at process
+entry, `elapsed + FENCE_WAIT_MS/1000 + 300 > wrapper wall`; once true, that
+chunk and every later selected chunk are recorded `deferred_contended` without
+being attempted, and the tick ends `deferred` (exit 0) instead of being `TERM`ed
+by the wrapper `timeout` during a fence wait. With the defaults the last chunk
+may start its fence at `3900 - 900 - 300 = 2700 s` into the tick. A guard
+deferral carries **no** `fence_wait_elapsed_ms` (an expired fence wait always
+does), which is how to tell the two apart in a receipt. The guard bounds the
+fence-wait share only: compress time after the fence is still governed by the
+Wall constraint.
 
 Derivation of the default (D0.5, node-27, 2026-10-04, during catch-up): 5-6
 output-parser write transactions run concurrently, each open for at least
@@ -6843,8 +6861,9 @@ the §8.6 item 7 escalation rule counts it like any other refused tick.
 
 **Receipt (schema 2.2).** A chunk whose fence wait expired is
 `selected[].mutation_state = "deferred_contended"` with its
-`fence_wait_elapsed_ms`; nothing was copied and it stays eligible.
-`deferred_contended_count` counts them, and `budget.fence_wait_ms` records the
+`fence_wait_elapsed_ms`; nothing was copied and it stays eligible. A chunk the
+tick-deadline guard deferred has the same `mutation_state` and no
+`fence_wait_elapsed_ms`. `deferred_contended_count` counts both, and `budget.fence_wait_ms` records the
 effective knob. Outcome `deferred` (no failure, at least one deferral) exits 0;
 any real failure still makes the tick `partial` and exit 1. A committed chunk
 also carries the `fence_wait_elapsed_ms` it was charged.

@@ -12,7 +12,10 @@ The rule, per write site (a ``DELETE FROM`` / ``INSERT INTO`` / ``UPDATE`` /
 
 * its innermost enclosing function is FENCED when, among the database calls in
   that function's subtree taken in source order, the first one is
-  ``try_ingest_fence(<cursor>, <that hypertable>)``. A database call is an
+  ``try_ingest_fence(<cursor>, <a hypertable of the same fence family>)`` (a
+  ``_legacy`` sibling shares its canonical table's key). The table argument
+  resolves from a literal, a module-level string binding, or a name imported
+  from the fence module. A database call is an
   ``execute``-family / repository statement helper call, or any call handed a
   cursor. Nested definitions count, so a ``pre_write_cursor_hook`` that opens
   with the fence fences its writer;
@@ -33,7 +36,8 @@ from pathlib import Path
 
 import pytest
 
-from packages.common.timeseries_compression_fence import COMPRESSED_HYPERTABLES
+from packages.common import timeseries_compression_fence
+from packages.common.timeseries_compression_fence import COMPRESSED_HYPERTABLES, fence_key
 from tests.test_timescale_write_guard_wire_site_invariant import (
     _INTENTIONALLY_UNWIRED_MODULES,
     _iter_call_argument_strings,
@@ -88,14 +92,30 @@ def _call_name(call: ast.Call) -> str | None:
 
 
 def _module_strings(tree: ast.Module) -> dict[str, str]:
-    """Module-level ``NAME = "literal"`` bindings, to resolve the fence's table argument."""
+    """Names that resolve the fence's table argument.
+
+    Module-level ``NAME = "literal"`` bindings, plus string constants imported
+    from the fence module (read off the real module, so the writers can pass
+    its canonical names instead of spelling a census-counted literal).
+    """
     bindings: dict[str, str] = {}
     for node in tree.body:
         if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
             for target in node.targets:
                 if isinstance(target, ast.Name):
                     bindings[target.id] = node.value.value
+        elif isinstance(node, ast.ImportFrom) and node.module == _FENCE_MODULE:
+            for alias in node.names:
+                value = getattr(timeseries_compression_fence, alias.name, None)
+                if isinstance(value, str):
+                    bindings[alias.asname or alias.name] = value
     return bindings
+
+
+def _same_fence_family(target: str | None, hypertables: set[str]) -> bool:
+    if target not in COMPRESSED_HYPERTABLES:
+        return False
+    return fence_key(target) in {fence_key(hypertable) for hypertable in hypertables}
 
 
 def _fence_target(call: ast.Call, bindings: dict[str, str]) -> str | None:
@@ -125,7 +145,7 @@ def _fence_position(function: ast.AST, hypertables: set[str], bindings: dict[str
     for call in _calls_in_source_order(function):
         if not _is_db_call(call) and _call_name(call) != _FENCE_CALL:
             continue
-        if _call_name(call) == _FENCE_CALL and _fence_target(call, bindings) in hypertables:
+        if _call_name(call) == _FENCE_CALL and _same_fence_family(_fence_target(call, bindings), hypertables):
             return (call.lineno, call.col_offset)
         return None
     return None
@@ -308,14 +328,48 @@ def write(cursor):
         ["write (writes hydro.river_timeseries)"],
     ),
     (
-        "legacy-sibling-needs-its-own-fence",
+        "legacy-write-is-covered-by-its-family-fence",
         _HEADER
         + '''
 def write(cursor):
     try_ingest_fence(cursor, RIVER)
     cursor.execute("DELETE FROM hydro.river_timeseries_legacy WHERE run_id = 'x'")
 ''',
+        [],
+    ),
+    (
+        "legacy-write-under-the-other-familys-fence",
+        _HEADER
+        + '''
+def write(cursor):
+    try_ingest_fence(cursor, "met.forcing_station_timeseries")
+    cursor.execute("DELETE FROM hydro.river_timeseries_legacy WHERE run_id = 'x'")
+''',
         ["write (writes hydro.river_timeseries_legacy)"],
+    ),
+    (
+        "fence-name-imported-from-the-fence-module",
+        '''
+from packages.common.timeseries_compression_fence import RIVER_TIMESERIES_HYPERTABLE, try_ingest_fence
+
+def write(cursor):
+    if not try_ingest_fence(cursor, RIVER_TIMESERIES_HYPERTABLE):
+        raise RuntimeError
+    cursor.execute("DELETE FROM hydro.river_timeseries WHERE run_key = 1")
+''',
+        [],
+    ),
+    (
+        "unresolvable-fence-argument",
+        '''
+from packages.common.timeseries_compression_fence import try_ingest_fence
+from elsewhere import RIVER
+
+def write(cursor):
+    try_ingest_fence(cursor, RIVER)
+    cursor.execute("DELETE FROM hydro.river_timeseries WHERE run_key = 1")
+''',
+        ["write (writes hydro.river_timeseries)"],
     ),
     (
         "helper-reached-only-after-the-callers-fence",

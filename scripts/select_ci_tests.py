@@ -5603,6 +5603,12 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_timeseries_compression.py",
             "tests/test_node27_timeseries_compression_supervisor.py",
             "tests/test_node27_timeseries_retention.py",
+            # #2713: the fence's lifecycle set, family keys and the writers'
+            # canonical fence names all derive from these tuples, and the
+            # wire-site invariant scans for writes to exactly that set.
+            "tests/test_timeseries_compression_fence.py",
+            "tests/test_timeseries_compression_fence_wire_site_invariant.py",
+            "tests/test_timeseries_compression_fence_writers.py",
         ),
     ),
     PathTestRule(
@@ -5975,6 +5981,8 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "infra/env/node27-timeseries-compression.example",
         (
             "tests/test_node27_timeseries_compression.py",
+            # #2713: pins the FENCE_WAIT_MS default literal in this file.
+            "tests/test_timeseries_compression_fence.py",
             "tests/test_node27_timeseries_compression_budget.py",
             "tests/test_node27_timeseries_compression_runner_config.py",
             "tests/test_node27_timeseries_compression_wrappers.py",

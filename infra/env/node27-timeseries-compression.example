@@ -72,8 +72,11 @@ NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS=3600000
 # waits for the in-flight ones to drain (new ones defer to a later tick) and
 # copies nothing until it holds the fence. The wait is CHARGED against
 # COMPRESS_TIMEOUT_MS -- compress_chunk runs with the remainder as its
-# statement_timeout -- so no wall above moves. Must be strictly less than
-# COMPRESS_TIMEOUT_MS; the runner refuses otherwise before any DB connection.
+# statement_timeout -- so no per-chunk budget leg moves. Must be strictly less
+# than COMPRESS_TIMEOUT_MS; the runner refuses otherwise before any DB
+# connection. Per TICK the waits add up (bound x this), so before each chunk's
+# fence the runner defers the rest of the tick untouched once elapsed + this
+# wait + the 300 s cleanup margin would pass the wrapper wall.
 # A wait that expires records the chunk as `deferred_contended` (receipt
 # outcome `deferred`, exit 0), not as a failure.
 # Default 900000 = 15 min: measured on node-27 2026-10-04 during catch-up,

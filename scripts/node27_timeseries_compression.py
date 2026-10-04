@@ -21,6 +21,7 @@ import argparse
 import fcntl
 import functools
 import json
+import math
 import os
 import re
 import stat
@@ -167,6 +168,9 @@ _MAX_CATALOG_ROWS = 50_000
 # requires setting this knob explicitly.
 FENCE_WAIT_KEY = "NODE27_TIMESERIES_COMPRESSION_FENCE_WAIT_MS"
 _DEFAULT_FENCE_WAIT_MS = 900_000
+# Tick clock of the #2713 tick-deadline guard (``build_receipt``); tests
+# replace this module attribute, never ``time`` itself.
+_monotonic = time.monotonic
 _MAX_CATALOG_BYTES = 16 * 1024**2
 _MAX_CANDIDATES = 10_000
 
@@ -825,6 +829,12 @@ def _budget(config: CompressionConfig) -> dict[str, int]:
     }
 
 
+def _tick_deadline_reached(config: CompressionConfig, *, elapsed_ms: int) -> bool:
+    """True when a full fence wait plus the cleanup margin no longer fits the wrapper wall."""
+
+    return elapsed_ms + config.fence_wait_ms + _CLEANUP_MARGIN_SECONDS * 1000 > config.wrapper_wall_seconds * 1000
+
+
 def build_receipt(
     config: CompressionConfig,
     *,
@@ -834,8 +844,16 @@ def build_receipt(
     compress_chunk: CompressChunk,
     reconcile_chunk_state: ReconcileChunkState = _default_reconcile_chunk_state,
     head_sha: str | None = None,
+    tick_started_monotonic: float | None = None,
 ) -> dict[str, Any]:
-    """Perform the selection + (optionally) compression and return the receipt."""
+    """Perform the selection + (optionally) compression and return the receipt.
+
+    ``tick_started_monotonic`` is the ``_monotonic()`` reading at tick start
+    (``main`` takes it on entry); it anchors the #2713 tick-deadline guard and
+    defaults to this call's own start.
+    """
+    if tick_started_monotonic is None:
+        tick_started_monotonic = _monotonic()
     frozen_head_sha = head_sha or _current_head_sha()
     if re.fullmatch(r"[0-9a-f]{40}", frozen_head_sha) is None:
         raise CompressionConfigError("receipt head_sha must be a lowercase 40-hex Git SHA")
@@ -874,6 +892,19 @@ def build_receipt(
     # copied, the chunk stays eligible for the next tick, and it neither
     # poisons after_bytes nor contributes to any total.
     deferred_contended_count = 0
+    # #2713 tick-deadline guard. Fence waits add up to per_tick_bound x
+    # fence_wait_ms to a tick, which the per-chunk budget chain does not
+    # bound. Before chunk N's fence, if the elapsed tick time plus a full fence
+    # wait plus the cleanup margin no longer fits the wrapper wall, chunk N and
+    # every later selected chunk are deferred untouched (``deferred_contended``
+    # with NO ``fence_wait_elapsed_ms``, which is what tells them apart from an
+    # expired fence wait), so the runner never starts a fence wait that the
+    # wrapper's TERM could cut short. Once reached it stays reached for the
+    # tick. It
+    # bounds the fence-wait share only: a chunk's compress time is still bounded
+    # per chunk by leg 1 and per tick by the runbook section 4 "Per-tick
+    # capacity" Wall constraint.
+    tick_deadline_reached = False
     for chunk in selected_rows:
         # Symmetrical per-chunk isolation. Any failure on this chunk is
         # recorded in the descriptor, poisons the table's after_bytes, and the
@@ -896,6 +927,16 @@ def build_receipt(
         if not config.enforce:
             descriptor = _descriptor(chunk, before=before, after=None)
         else:
+            if not tick_deadline_reached:
+                tick_deadline_reached = _tick_deadline_reached(
+                    config, elapsed_ms=max(0, math.ceil((_monotonic() - tick_started_monotonic) * 1000))
+                )
+            if tick_deadline_reached:
+                descriptor = _descriptor(chunk, before=before, after=None)
+                descriptor["mutation_state"] = "deferred_contended"
+                deferred_contended_count += 1
+                selected_descriptors.append(descriptor)
+                continue
             try:
                 fence_wait_elapsed_ms = compress_chunk(config.database_url, chunk)
             except FenceContended as contended:
@@ -1272,6 +1313,9 @@ def main(
     compress_chunk: CompressChunk | None = None,
     reconcile_chunk_state: ReconcileChunkState | None = None,
 ) -> int:
+    # #2713: the tick-deadline guard measures from here, the earliest point in
+    # the process the wrapper's ``timeout`` is already counting.
+    tick_started_monotonic = _monotonic()
     wall_time = datetime.now(UTC)
     now = now_utc or wall_time
     try:
@@ -1395,6 +1439,7 @@ def main(
                 ),
                 reconcile_chunk_state=reconcile_chunk_state or _default_reconcile_chunk_state,
                 head_sha=frozen_head_sha,
+                tick_started_monotonic=tick_started_monotonic,
             )
         except CompressionConfigError as error:
             _replace_stale_with_failure(
