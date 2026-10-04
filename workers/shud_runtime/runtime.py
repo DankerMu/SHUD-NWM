@@ -18,7 +18,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
 
-from packages.common.object_store import LocalObjectStore, sha256_bytes
+from packages.common.object_store import LocalObjectStore, ObjectStoreReadLimitExceededError, sha256_bytes
 from packages.common.redaction import redact_text
 from packages.common.safe_fs import (
     SafeFilesystemError,
@@ -2270,11 +2270,10 @@ class SHUDRuntime:
         limit = _direct_grid_sensitive_member_limit(tsd_relative_path)
         if limit is None:
             return [tsd_entry]
-        # Identity probe before the capped read. The blanket ``except`` below
-        # cannot tell "absent" from "over the cap", so a manifest that declares
-        # one accepted identity while the object tree carries only the other
-        # would otherwise surface as a bogus size-limit failure. A probe that
-        # itself errors is left to the read path's existing classification.
+        # Identity probe before the capped read, so a manifest that declares one
+        # accepted identity while the object tree carries only the other names the
+        # declared member. A probe that itself errors is left to the read path,
+        # which reports the size-limit code only for a real over-limit read (#2670).
         try:
             declared_member_present = self.object_store.exists(tsd_uri)
         except Exception:
@@ -2287,10 +2286,15 @@ class SHUDRuntime:
             )
         try:
             content = self.object_store.read_bytes_limited(tsd_uri, max_bytes=limit.max_bytes)
-        except Exception as error:
+        except ObjectStoreReadLimitExceededError as error:
             raise SHUDRuntimeError(
                 limit.error_code,
                 f"{limit.message}: {tsd_uri}",
+            ) from error
+        except Exception as error:
+            raise SHUDRuntimeError(
+                "FORCING_CHECKSUM_READ_FAILED",
+                f"Failed to read forcing artifact {tsd_uri}: {error}",
             ) from error
         if len(content) > limit.max_bytes:
             raise SHUDRuntimeError(
@@ -2476,12 +2480,19 @@ class SHUDRuntime:
         # No identity probe here (unlike the station-index read): station CSV
         # names are derived from the index content, so a manifest/object-tree
         # identity mismatch cannot arise for them.
+        # Only a real over-limit read is a size-limit failure; a missing or
+        # unreadable member is a read failure, like ``_object_checksum`` (#2670).
         try:
             return self.object_store.checksum_limited(uri_or_key, max_bytes=limit.max_bytes)
-        except Exception as error:
+        except ObjectStoreReadLimitExceededError as error:
             raise SHUDRuntimeError(
                 limit.error_code,
                 f"{limit.message}: {uri_or_key}",
+            ) from error
+        except Exception as error:
+            raise SHUDRuntimeError(
+                "FORCING_CHECKSUM_READ_FAILED",
+                f"Failed to read forcing artifact checksum for {uri_or_key}: {error}",
             ) from error
 
     def _upload_directory(self, directory: Path, key_prefix: str) -> None:

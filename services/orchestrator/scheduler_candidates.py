@@ -46,6 +46,7 @@ from services.orchestrator.scheduler_state import (
     _state_retry_limit,
 )
 from services.orchestrator.scheduler_state_failure import (
+    MANUAL_RETRY_FORCING_INPUT_FAILURE_FIELD,
     MANUAL_RETRY_RESTART_STAGE_ADDED_FIELD,
     _drop_manual_retry_added_restart_stage,
     _missing_upstream_forecast_artifact_evidence,
@@ -696,6 +697,12 @@ def build_candidates(
                 strict_warm_start,
             )
             if strict_warm_start is not None:
+                # #2670: before the witness consultation, so the restored stage-less
+                # retry is never judged as the ``forecast`` restart the upgrade made.
+                state_decision = _manual_retry_forcing_input_strict_recovery(
+                    pre_upgrade_decision,
+                    state_decision,
+                )
                 # The upgrade REWRITES the decision, so the guard must run again on
                 # the rewritten one even when a leg above already consulted it: the
                 # pre-upgrade decision may have carried a different ``restart_stage``
@@ -2587,6 +2594,31 @@ def _manual_retry_added_restart_strict_fallback(
         pre_upgrade_decision.reason,
         _drop_manual_retry_added_restart_stage(pre_upgrade_decision.evidence, reason=state_decision.reason),
     )
+
+
+def _manual_retry_forcing_input_strict_recovery(
+    pre_upgrade_decision: CandidateStateDecision | None,
+    state_decision: CandidateStateDecision | None,
+) -> CandidateStateDecision | None:
+    """Keep a forcing-input full-chain manual retry off the strict lane's rewrite (#2670).
+
+    A manual retry with no restart stage and the forcing-input failure marker reruns
+    the full chain BECAUSE the forcing package was rejected.  The runtime rejects it
+    before the run manifest reaches the object store, so the strict warm-start upgrade
+    sees a manifest mismatch and rewrites the retry into a ``forecast`` restart that
+    re-stages the same package.  The full chain regenerates forcing and writes a new
+    run manifest, so the manifest proof does not apply: the pre-upgrade decision
+    stands.  Every other decision keeps the upgrade's result.
+    """
+
+    if pre_upgrade_decision is None or pre_upgrade_decision.action != "retry":
+        return state_decision
+    evidence = pre_upgrade_decision.evidence
+    if evidence.get(MANUAL_RETRY_FORCING_INPUT_FAILURE_FIELD) is not True:
+        return state_decision
+    if evidence.get("restart_stage") not in (None, "") or evidence.get("restart_from_stage") not in (None, ""):
+        return state_decision
+    return pre_upgrade_decision
 
 
 def _upgrade_retry_for_strict_warm_start_manifest(

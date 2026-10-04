@@ -36,6 +36,14 @@ class ObjectStoreError(RuntimeError):
     """Raised when an object-store operation fails."""
 
 
+class ObjectStoreReadLimitExceededError(ObjectStoreError):
+    """Raised by a limited read when the object is larger than the limit.
+
+    A subclass, so ``except ObjectStoreError`` callers are unaffected; it lets a caller
+    tell "over the limit" from "missing or unreadable" without reading the message.
+    """
+
+
 def sha256_bytes(content: bytes) -> str:
     """Return the SHA-256 hex digest for bytes."""
     return hashlib.sha256(content).hexdigest()
@@ -195,7 +203,7 @@ class LocalObjectStore:
         try:
             content = read_bytes_limited_no_follow(path, max_bytes=max_bytes, containment_root=self.root)
             if len(content) > max_bytes:
-                raise ObjectStoreError(
+                raise ObjectStoreReadLimitExceededError(
                     f"Object {key_or_uri} exceeds read limit: observed more than {max_bytes} bytes"
                 )
             return content

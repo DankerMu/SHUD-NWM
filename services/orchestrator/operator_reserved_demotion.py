@@ -6,6 +6,11 @@ entrypoints' registration/dispatch helpers live here so the CLI module stays
 under the large-file guard while keeping the one shared public seam
 ``_demote_reserved_job`` re-exported from :mod:`services.orchestrator.cli`
 for the existing tests.
+
+Since #2682 the same command is also the operator-verified absence exit for a
+held FORCING master whose attempt comment matches no job in sacct/squeue.  The
+journal picks the lane from the row it re-reads under the cycle lock (never
+from the pre-lock read here); a forcing refusal is printed by name.
 """
 
 from __future__ import annotations
@@ -17,7 +22,11 @@ from typing import Any
 
 from .accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
 from .chain_types import OrchestratorError
-from .file_orchestration_journal import FileOrchestrationJournalError, FileOrchestrationJournalRepository
+from .file_orchestration_journal import (
+    FileOrchestrationJournalError,
+    FileOrchestrationJournalRepository,
+    OperatorDemoteResult,
+)
 from .journal_root_authority import verify_journal_root_authority
 
 
@@ -52,6 +61,11 @@ def _demote_reserved_job(
     enforced by the entrypoints (missing confirmation fails before this
     function constructs the repository), and every value is re-validated by the
     typed journal CAS before any write.
+
+    #2682: a held forcing master takes the journal's forcing branch.  Its named
+    refusal raises ``ValueError`` (exit 2) and leaves the journal
+    byte-identical; its receipt carries ``lane=forcing`` and
+    ``reconciliation_decision=absence_retry_permitted``.
     """
 
     if type(expected_attempt) is not int or expected_attempt < 1:
@@ -78,7 +92,7 @@ def _demote_reserved_job(
     repository = FileOrchestrationJournalRepository(display_journal_root)
     if repository.get_pipeline_job(job_id) is None:
         raise ValueError(f"demote-reserved-job: pipeline job not found: {job_id}")
-    receipt = repository.demote_operator_verified_reserved_job(
+    outcome = repository.demote_operator_verified_reserved_job(
         job_id,
         accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
         expected_submission_attempt=expected_attempt,
@@ -87,6 +101,15 @@ def _demote_reserved_job(
         checked_at=checked_at_value,
         verification_note=verification_note,
     )
+    if isinstance(outcome, OperatorDemoteResult):
+        # #2682: the forcing branch names its refusal.
+        if outcome.refusal is not None or outcome.receipt is None:
+            raise ValueError(
+                f"demote-reserved-job: refused: {outcome.refusal or 'not_held'}; no journal bytes were written"
+            )
+        receipt = outcome.receipt
+    else:
+        receipt = outcome
     if receipt is None:
         raise ValueError(
             "demote-reserved-job: compare-and-swap refused (stale or mismatched durable state); "
@@ -103,7 +126,7 @@ def _demote_reserved_job(
         }
         for warning in sorted(receipt.warnings, key=lambda item: (item.projection, item.model_id or ""))
     ]
-    return {
+    payload: dict[str, object] = {
         "command": "demote-reserved-job",
         "status": "demoted_with_warnings" if warnings else "demoted",
         "committed": True,
@@ -123,6 +146,10 @@ def _demote_reserved_job(
         "written_record_count": receipt.written_record_count,
         "warnings": warnings,
     }
+    if isinstance(outcome, OperatorDemoteResult):
+        # Forecast receipts keep their exact pre-#2682 key set.
+        payload["lane"] = receipt.lane
+    return payload
 
 
 def register_click_demote_command(cli: Any) -> None:

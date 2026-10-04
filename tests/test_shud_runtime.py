@@ -15,7 +15,12 @@ from typing import Any
 import pytest
 
 from packages.common import safe_fs
-from packages.common.object_store import LocalObjectStore, ObjectStoreError, sha256_bytes
+from packages.common.object_store import (
+    LocalObjectStore,
+    ObjectStoreError,
+    ObjectStoreReadLimitExceededError,
+    sha256_bytes,
+)
 from packages.common.safe_fs import SafeFilesystemError
 from packages.common.shud_forcing_contract import (
     CANONICAL_SHUD_FORCING_INDEX_BASENAME,
@@ -30,6 +35,7 @@ from workers.shud_runtime.runtime import (
     SHUDRuntime,
     SHUDRuntimeConfig,
     SHUDRuntimeError,
+    _direct_grid_sensitive_member_limit,
     _state_checkpoint_poll_seconds,
     _StateCheckpointTracker,
     _validate_direct_grid_station_filename_target,
@@ -1657,6 +1663,135 @@ def test_runtime_direct_grid_manifest_declared_member_absent_from_object_tree_fa
     assert exc_info.value.error_code == "FORCING_CHECKSUM_READ_FAILED"
     assert declared_member in exc_info.value.message
     assert not (input_dir / "alias-a" / "alias-a.tsd.forc").exists()
+
+
+# --- #2670: a limited read reports the size-limit code only for a real over-limit read -----
+
+_LIMITED_FORCING_MEMBERS = {
+    CANONICAL_SHUD_FORCING_INDEX_MEMBER: "DIRECT_GRID_TSD_FORC_TOO_LARGE",
+    "shud/forcing.csv": "DIRECT_GRID_FORCING_CSV_TOO_LARGE",
+}
+
+
+def test_object_store_limited_read_tells_over_limit_from_missing(tmp_path: Path) -> None:
+    """The discriminator itself: a subclass for over-limit, the plain error for a missing object."""
+
+    store = LocalObjectStore(tmp_path / "object-store", "s3://nhms")
+    member = "forcing/gfs/2026050100/basin_v01/demo_model/member.bin"
+    absent = "forcing/gfs/2026050100/basin_v01/demo_model/absent.bin"
+    store.write_bytes_atomic(member, b"123456789")
+
+    assert store.read_bytes_limited(member, max_bytes=9) == b"123456789"
+    for limited_read in (store.read_bytes_limited, store.checksum_limited, store.size_and_checksum_limited):
+        with pytest.raises(ObjectStoreReadLimitExceededError, match="exceeds read limit"):
+            limited_read(member, max_bytes=8)
+        with pytest.raises(ObjectStoreError) as missing:
+            limited_read(absent, max_bytes=8)
+        assert not isinstance(missing.value, ObjectStoreReadLimitExceededError)
+
+
+@pytest.mark.parametrize("relative_path", sorted(_LIMITED_FORCING_MEMBERS))
+def test_runtime_limited_forcing_checksum_of_a_missing_member_is_a_read_failure(
+    tmp_path: Path, relative_path: str
+) -> None:
+    """A missing direct-grid member is not a size-limit failure (pre-#2670: ``*_TOO_LARGE``)."""
+
+    runtime = _runtime(tmp_path, FakeHydroRunRepository())
+    limit = _direct_grid_sensitive_member_limit(relative_path)
+    assert limit is not None and limit.error_code == _LIMITED_FORCING_MEMBERS[relative_path]
+    uri = f"s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/{relative_path}"
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime._object_checksum_limited(uri, limit=limit)
+
+    assert exc_info.value.error_code == "FORCING_CHECKSUM_READ_FAILED"
+    assert uri in exc_info.value.message
+
+
+@pytest.mark.parametrize("relative_path", sorted(_LIMITED_FORCING_MEMBERS))
+def test_runtime_limited_forcing_checksum_of_an_over_limit_member_keeps_the_limit_code(
+    tmp_path: Path, relative_path: str
+) -> None:
+    runtime = _runtime(tmp_path, FakeHydroRunRepository())
+    limit = _direct_grid_sensitive_member_limit(relative_path)
+    assert limit is not None
+    key = f"forcing/gfs/2026050100/basin_v01/demo_model/{relative_path}"
+    runtime.object_store.write_bytes_atomic(key, b"x" * (limit.max_bytes + 1))
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime._object_checksum_limited(f"s3://nhms/{key}", limit=limit)
+
+    assert exc_info.value.error_code == _LIMITED_FORCING_MEMBERS[relative_path]
+
+
+def test_runtime_direct_grid_missing_station_csv_fails_with_read_error_not_size_limit(tmp_path: Path) -> None:
+    """End to end: a station CSV the index names is absent from the object tree."""
+
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(
+        object_root, lineage={"forcing_mapping_mode": "direct_grid"}, station_ids=(1,)
+    )
+    (_forcing_shud_object_dir(object_root) / "forcing.csv").unlink()
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _drop_runtime_forcing_files(_shud_project_manifest_with_forcing_checksums(checksums))
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    assert exc_info.value.error_code == "FORCING_CHECKSUM_READ_FAILED"
+    assert "shud/forcing.csv" in exc_info.value.message
+
+
+class _ExistsProbeFailingObjectStore:
+    """Delegating object store whose ``exists`` probe errors, so the read path classifies."""
+
+    def __init__(self, inner: LocalObjectStore) -> None:
+        self._inner = inner
+
+    def exists(self, key_or_uri: str) -> bool:
+        raise ObjectStoreError(f"Failed to check object existence for {key_or_uri}")
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+@pytest.mark.parametrize("oversized", [False, True], ids=["missing", "over_limit"])
+def test_runtime_direct_grid_tsd_forc_read_without_probe_tells_missing_from_over_limit(
+    tmp_path: Path, oversized: bool
+) -> None:
+    """End to end on the ``.tsd.forc`` read itself, with the identity probe out of the way.
+
+    Missing member: ``FORCING_CHECKSUM_READ_FAILED`` (pre-#2670 the blanket ``except``
+    reported ``DIRECT_GRID_TSD_FORC_TOO_LARGE``).  A genuinely over-limit member keeps
+    ``DIRECT_GRID_TSD_FORC_TOO_LARGE``.
+    """
+
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(
+        object_root, lineage={"forcing_mapping_mode": "direct_grid"}, station_ids=(1,)
+    )
+    tsd_path = _forcing_shud_object_dir(object_root) / CANONICAL_SHUD_FORCING_INDEX_BASENAME
+    if oversized:
+        tsd_path.write_bytes(b"x" * (runtime_module.MAX_DIRECT_GRID_TSD_FORC_BYTES + 1))
+    else:
+        tsd_path.unlink()
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    runtime.object_store = _ExistsProbeFailingObjectStore(runtime.object_store)
+    manifest = _drop_runtime_forcing_files(_shud_project_manifest_with_forcing_checksums(checksums))
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    expected = "DIRECT_GRID_TSD_FORC_TOO_LARGE" if oversized else "FORCING_CHECKSUM_READ_FAILED"
+    assert exc_info.value.error_code == expected
 
 
 def _write_single_station_direct_grid_sp_att(object_root: Path) -> None:

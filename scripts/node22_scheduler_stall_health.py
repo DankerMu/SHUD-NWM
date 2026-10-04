@@ -120,6 +120,40 @@ TRACKER_FILENAME = "no-progress-tracker.json"
 TRACKER_SCHEMA_VERSION = "nhms.scheduler.no_progress_tracker.v1"
 MAX_TRACKER_BYTES = 4 * 1024 * 1024
 
+# Duplicated on purpose a third time (D4, issue #2662): the skip reasons that
+# prove a skipped candidate's work is FINISHED.  The single authority is
+# `services.orchestrator.scheduler_runtime._RETENTION_TERMINAL_SKIP_REASONS`,
+# the set the scheduler itself uses to decide whether its frontier may move
+# past a skipped candidate; every reason outside it -- `active_duplicate_pipeline`
+# and anything added after this list was written -- is in-flight.  The probe
+# claims to watch "is the frontier advancing", so its predicate must be the
+# scheduler's own and not a second opinion.  A parity test pins this literal to
+# that set and `scripts/select_ci_tests.py` routes `scheduler_runtime.py` to
+# it, so drift reds on the diff that causes it.
+TERMINAL_SKIP_REASONS = frozenset(
+    {
+        "completed_duplicate_pipeline",
+        "terminal_hydro_success",
+        "terminal_completed_cycle",
+        "terminal_pipeline_success",
+        "duplicate_candidate_identity",
+    }
+)
+# The second way a skipped row proves nothing is in flight: the row's own
+# `status`.  The scheduler writes its PERMANENT exclusions into
+# `skipped_candidates` with `"status": "excluded"` -- the duplicate identity
+# above and, since #1735, `lineage_scoped_out_pre_cutover` (a model whose
+# state-lineage cutover is later than the cycle did not exist yet;
+# `services/orchestrator/scheduler_candidates.py`).  That reason is NOT in the
+# scheduler's terminal set, so by reason alone every pass after a
+# recalibration cutover read as in-flight-held and a healthy lane graded
+# `submission_stalled` once the time gate elapsed.  An excluded row is
+# therefore not in-flight whatever its reason; the literal above stays equal
+# to the scheduler's set.  Both `status` and `reason` survive the writer's
+# summary tier (`scheduler_evidence_payload._BOUNDED_CANDIDATE_SUMMARY_KEYS`),
+# and a parity test pins that together with the row the writer produces.
+EXCLUDED_SKIP_STATUS = "excluded"
+
 DEFAULT_TIMER_UNIT = "nhms-compute-scheduler.timer"
 DEFAULT_SERVICE_UNIT = "nhms-compute-scheduler.service"
 DEFAULT_SYSTEMCTL = "/usr/bin/systemctl"
@@ -157,6 +191,36 @@ MIN_NO_SUBMISSION_PASSES = 2
 # probe alerts, and the two thresholds are decoupled on purpose.
 DEFAULT_CIRCUIT_PASSES = 20
 MIN_CIRCUIT_PASSES = 1
+# The in-flight time gate (issue #2662): minutes a run of zero-submission
+# passes that are all blocked or in-flight-held may span, measured from the
+# `started_at` of the last progress pass to the `started_at` of the newest
+# pass of the run, before it is a stall.  A TIME, not a pass count, because candidates skipped
+# as `active_duplicate_pipeline` are the ordinary shape of a healthy forecast
+# in flight and passes are anything from 8 to 193 minutes apart.
+#
+# Lower side (no false alarm on a healthy lane), from the numbers recorded in
+# this repository: the span starts at the progress pass's `started_at`, so it
+# contains that pass's own duration -- longest measured adjacent `started_at`
+# interval 193.9 minutes (p99 160.4) -- plus the forecast it submitted, which
+# #1736 measured at 65-79 minutes.  Stacking the two maxima gives 273 minutes
+# for the longest healthy run; 360 is ~1.3x that, and deliberately the same
+# figure as the two age bounds above (~1.9x the longest observed gap).
+#
+# Upper side (the gate must be REACHABLE): when the last progress pass has
+# left the scan window the span can only be measured across the passes that
+# were read, so it tops out at `(streak_window - 1)` inter-pass intervals.
+# The scheduler timer is `OnUnitActiveSec=5min`, so two passes begin no
+# closer than `MIN_INTER_PASS_MINUTES` apart, and `load_config` refuses a gate above
+# `(scan_limit - HOUR_BUCKET_MARGIN - 1) * MIN_INTER_PASS_MINUTES`: a larger
+# one could be met by no evidence the probe is able to read, which is a
+# verdict that silently never fires.  The #2655 freeze ran at 6.1 minutes per
+# pass (340 passes in 34.5 hours).
+DEFAULT_IN_FLIGHT_MINUTES = 360
+# Two timer intervals.  A floor, not a calibration: it is the largest gate the
+# smallest scan the streak rule admits (15 names, a prefix of 3) can span, so
+# every scan that rule accepts still has a legal gate.
+MIN_IN_FLIGHT_MINUTES = 10
+MIN_INTER_PASS_MINUTES = 5
 # The lexical candidate scan is sound only with room above the largest hour
 # bucket: bucket order is chronological because the bucket and `started_at`
 # share the cycle hour, so disorder is confined inside a bucket.  The largest
@@ -168,7 +232,12 @@ MIN_CIRCUIT_PASSES = 1
 # longer than the threshold caps the streak below it, the failure a
 # threshold-sized window had.
 HOUR_BUCKET_MARGIN = 12
-DEFAULT_SCAN_LIMIT = 64
+# 96, not the 64 the streak thresholds alone would need: the in-flight time
+# gate above has to be reachable across the ordering-safe prefix at the
+# timer's minimum cadence, and (96 - 12 - 1) * 5 = 415 >= 360 while
+# (64 - 12 - 1) * 5 = 255 is not.  At the freeze's measured 6.1 minutes per
+# pass the prefix spans 505 minutes.
+DEFAULT_SCAN_LIMIT = 96
 # The evidence root held 309 entries when measured and grows.  Reaching this
 # bound is a REPORTED FACT, never a silent truncation: `os.scandir` returns
 # filesystem order, so a truncated listing makes "the lexically greatest names
@@ -186,6 +255,14 @@ DEFAULT_MAX_ENTRIES_SCANNED = 4096
 # train operators to ignore it.  Suppression is stateless configuration with a
 # checked-in default; it applies to the no-progress verdict ALONE and every
 # suppressed entry is still written to the receipt.  See runbook section 6.2.
+#
+# Suppression is for entries the lane has LEFT BEHIND.  An entry whose
+# `<source>_<YYYYMMDDHH>` cycle is on the frontier -- among the candidates of
+# the newest non-neutral pass -- is the production stall itself, not chronic
+# noise: during the #2655 freeze the two frontier entries (338 consecutive
+# passes) were silenced by the same rule as the two old-cycle ones (2200 /
+# 2098) and the probe reported `ok` for more than 30 hours.  Such an entry is
+# graded as if unsuppressed; see `partition_tracker_entries`.
 DEFAULT_SUPPRESSED_REASONS = "ambiguous_fallback_match:comment_accounting_unproven"
 
 ENV_TIMER_UNIT = "NHMS_SCHEDULER_STALL_TIMER_UNIT"
@@ -199,6 +276,7 @@ ENV_LIMIT_LOOKBACK_MINUTES = "NHMS_SCHEDULER_STALL_LIMIT_LOOKBACK_MINUTES"
 ENV_LOCK_PASSES = "NHMS_SCHEDULER_STALL_LOCK_PASSES"
 ENV_NO_SUBMISSION_PASSES = "NHMS_SCHEDULER_STALL_NO_SUBMISSION_PASSES"
 ENV_CIRCUIT_PASSES = "NHMS_SCHEDULER_STALL_CIRCUIT_PASSES"
+ENV_IN_FLIGHT_MINUTES = "NHMS_SCHEDULER_STALL_IN_FLIGHT_MINUTES"
 ENV_SUPPRESSED_REASONS = "NHMS_SCHEDULER_STALL_SUPPRESSED_REASONS"
 ENV_SCAN_LIMIT = "NHMS_SCHEDULER_STALL_SCAN_LIMIT"
 ENV_MAX_ENTRIES_SCANNED = "NHMS_SCHEDULER_STALL_MAX_ENTRIES_SCANNED"
@@ -279,7 +357,14 @@ RUNBOOK_ANCHORS = {
 SHAPE_PROGRESS = "progress"
 SHAPE_BLOCKED = "blocked"
 SHAPE_IDLE = "idle"
+SHAPE_IN_FLIGHT_HELD = "in_flight_held"
 SHAPE_NEUTRAL = "neutral"
+
+# How the in-flight run ended, newest-first: at the last progress pass, at an
+# idle pass, or at the end of the ordering-safe prefix with neither in sight.
+RUN_END_PROGRESS = "progress_pass"
+RUN_END_IDLE = "idle_pass"
+RUN_END_SCAN_WINDOW = "scan_window"
 
 STATUS_RESOURCE_LIMIT_BLOCKED = "resource_limit_blocked"
 STATUS_LOCK_CONTENDED = "lock_contended"
@@ -315,6 +400,7 @@ class Config:
         "lock_passes",
         "no_submission_passes",
         "circuit_passes",
+        "in_flight_minutes",
         "suppressed_reasons",
         "scan_limit",
         "max_entries_scanned",
@@ -334,6 +420,7 @@ class Config:
         lock_passes: int,
         no_submission_passes: int,
         circuit_passes: int,
+        in_flight_minutes: int,
         suppressed_reasons: frozenset[str],
         scan_limit: int,
         max_entries_scanned: int,
@@ -349,6 +436,7 @@ class Config:
         self.lock_passes = lock_passes
         self.no_submission_passes = no_submission_passes
         self.circuit_passes = circuit_passes
+        self.in_flight_minutes = in_flight_minutes
         self.suppressed_reasons = suppressed_reasons
         self.scan_limit = scan_limit
         self.max_entries_scanned = max_entries_scanned
@@ -401,7 +489,8 @@ def load_config(env: dict[str, str] | None = None) -> Config:
     """Resolve and validate every input, refusing before any evidence is read.
 
     A value outside its range, a candidate scan that does not exceed the
-    longest graded streak by MORE than one hour bucket of margin, an evidence
+    longest graded streak by MORE than one hour bucket of margin, an in-flight
+    time gate the scan window cannot span, an evidence
     root that is not a directory, or a receipt root inside the evidence root,
     are all configuration refusals (exit 2) rather than verdicts.  The receipt-root
     rule is structural, not stylistic: the probe's own output inside the
@@ -448,6 +537,11 @@ def load_config(env: dict[str, str] | None = None) -> Config:
     circuit_passes = _int_at_least(
         ENV_CIRCUIT_PASSES, get(ENV_CIRCUIT_PASSES, str(DEFAULT_CIRCUIT_PASSES)), MIN_CIRCUIT_PASSES
     )
+    in_flight_minutes = _int_at_least(
+        ENV_IN_FLIGHT_MINUTES,
+        get(ENV_IN_FLIGHT_MINUTES, str(DEFAULT_IN_FLIGHT_MINUTES)),
+        MIN_IN_FLIGHT_MINUTES,
+    )
     scan_limit = _int_at_least(ENV_SCAN_LIMIT, get(ENV_SCAN_LIMIT, str(DEFAULT_SCAN_LIMIT)), 1)
     max_entries_scanned = _int_at_least(
         ENV_MAX_ENTRIES_SCANNED,
@@ -465,6 +559,23 @@ def load_config(env: dict[str, str] | None = None) -> Config:
             f"or neutral passes inside it make the verdict unreachable; the "
             f"{HOUR_BUCKET_MARGIN} extra names keep the arbitrary ordering inside the boundary "
             f"hour bucket from displacing a pass that belongs in the window"
+        )
+    # The time gate's reachability, checked the way the streak thresholds are
+    # checked just above.  With the last progress pass outside the scan the
+    # span is measured across the ordering-safe prefix alone, and that prefix
+    # covers at least `(prefix - 1)` timer intervals; a gate above that could
+    # stay unmet through an arbitrarily long freeze.
+    reachable_minutes = (scan_limit - HOUR_BUCKET_MARGIN - 1) * MIN_INTER_PASS_MINUTES
+    if in_flight_minutes > reachable_minutes:
+        raise ConfigError(
+            f"{ENV_IN_FLIGHT_MINUTES}={in_flight_minutes} must be at most {reachable_minutes}: "
+            f"with the last progress pass outside the scan the in-flight run is measured "
+            f"across the ordering-safe prefix {ENV_SCAN_LIMIT} - {HOUR_BUCKET_MARGIN} = "
+            f"{scan_limit - HOUR_BUCKET_MARGIN} passes, which is only guaranteed to span "
+            f"({scan_limit - HOUR_BUCKET_MARGIN} - 1) x {MIN_INTER_PASS_MINUTES} minutes; "
+            f"raise {ENV_SCAN_LIMIT} to at least "
+            f"{-(-in_flight_minutes // MIN_INTER_PASS_MINUTES) + HOUR_BUCKET_MARGIN + 1} "
+            f"or lower the gate, or the verdict is unreachable"
         )
     if max_entries_scanned < scan_limit:
         raise ConfigError(
@@ -502,6 +613,7 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         lock_passes=lock_passes,
         no_submission_passes=no_submission_passes,
         circuit_passes=circuit_passes,
+        in_flight_minutes=in_flight_minutes,
         suppressed_reasons=_parse_suppressed_reasons(raw_suppressed_reasons),
         scan_limit=scan_limit,
         max_entries_scanned=max_entries_scanned,
@@ -696,7 +808,15 @@ def candidate_pass_names(root: Path, *, scan_limit: int, max_entries_scanned: in
 class PassRecord:
     """One successfully parsed terminal pass artifact."""
 
-    __slots__ = ("name", "started_at", "status", "shape", "submitted_count", "blocked_candidate_count")
+    __slots__ = (
+        "name",
+        "started_at",
+        "status",
+        "shape",
+        "submitted_count",
+        "blocked_candidate_count",
+        "cycle_keys",
+    )
 
     def __init__(
         self,
@@ -707,6 +827,7 @@ class PassRecord:
         shape: str,
         submitted_count: int | None,
         blocked_candidate_count: int | None,
+        cycle_keys: frozenset[str] = frozenset(),
     ) -> None:
         self.name = name
         self.started_at = started_at
@@ -714,6 +835,7 @@ class PassRecord:
         self.shape = shape
         self.submitted_count = submitted_count
         self.blocked_candidate_count = blocked_candidate_count
+        self.cycle_keys = cycle_keys
 
 
 def _count_or_none(counts: Any, key: str) -> int | None:
@@ -763,6 +885,17 @@ def classify_pass(payload: dict[str, Any]) -> tuple[str, int | None, int | None]
     clears".  The measured fallbacks all lacked the guard, so the first two
     rules sufficed on the data; this one closes the shape the writer can
     still produce.
+
+    In-flight-held (issue #2662) splits what used to be idle.  A pass that
+    submitted nothing and blocked nothing but SKIPPED a candidate for a
+    non-terminal reason has not cleared anything: the scheduler that wrote
+    the artifact counts that candidate as in-flight
+    (``scheduler_runtime._RETENTION_TERMINAL_SKIP_REASONS``), and skipped
+    candidates are disjoint from blocked ones, so they never reach
+    ``blocked_candidate_count``.  Reading such a pass as idle is what let 340
+    consecutive zero-submission passes of the #2655 freeze reset the streak
+    one by one.  See ``has_in_flight_skip`` for the fail-safe rules, and for
+    the one row that is never in-flight: a permanent exclusion.
     """
 
     counts = payload.get("counts")
@@ -779,10 +912,91 @@ def classify_pass(payload: dict[str, Any]) -> tuple[str, int | None, int | None]
         return SHAPE_PROGRESS, submitted, blocked
     if blocked > 0:
         return SHAPE_BLOCKED, submitted, blocked
+    if has_in_flight_skip(payload):
+        return SHAPE_IN_FLIGHT_HELD, submitted, blocked
     # Blocked candidates that have disappeared are no longer blocked, so an
     # idle pass BREAKS the streak.  Early-return passes never reach this
     # branch: the guard rule above has already taken them.
     return SHAPE_IDLE, submitted, blocked
+
+
+def has_in_flight_skip(payload: dict[str, Any]) -> bool:
+    """Return whether the pass skipped at least one candidate still in flight.
+
+    Fail-safe in the scheduler's own direction --- unknown protects:
+
+    * a row whose ``reason`` is not in ``TERMINAL_SKIP_REASONS`` is in-flight,
+      and that includes a reason added to the scheduler after this file was
+      written, a row with no reason at all, and a row that is not an object;
+    * except a row whose ``status`` is ``EXCLUDED_SKIP_STATUS``: a permanent
+      exclusion has nothing running behind it, whatever its reason;
+    * ``skipped_candidate_count > 0`` with the list absent, not a list, or
+      shorter than the count is in-flight.  The writer's size ladder
+      summarises rows in place (``reason``, ``source`` and ``cycle_time``
+      survive and so does the length) and only under further pressure empties
+      the list while the count stays, so "fewer rows than the count" means
+      rows the probe cannot see, never rows that were terminal;
+    * no skipped candidate at all --- no rows and no count --- is idle, as
+      before.  The writer's compact counts drop zero-valued keys, so an
+      absent count is zero.
+    """
+
+    rows = payload.get("skipped_candidates")
+    count = _count_or_none(payload.get("counts"), "skipped_candidate_count") or 0
+    if rows is None:
+        return count != 0
+    if not isinstance(rows, list):
+        return True
+    for row in rows:
+        if not isinstance(row, dict):
+            return True
+        if row.get("status") == EXCLUDED_SKIP_STATUS:
+            continue
+        reason = row.get("reason")
+        if not isinstance(reason, str) or reason not in TERMINAL_SKIP_REASONS:
+            return True
+    return count > len(rows)
+
+
+#: The three candidate lists of a pass artifact.  Together they are the
+#: (source, cycle) pairs the pass worked on, which is what "the frontier"
+#: means for the suppression bypass.
+CANDIDATE_LIST_FIELDS = ("candidates", "blocked_candidates", "skipped_candidates")
+
+
+def cycle_key(source: str, cycle: datetime) -> str:
+    """``<source>_<YYYYMMDDHH>``, lower-cased, as a tracker subject id spells it."""
+
+    return f"{source.strip().lower()}_{cycle.astimezone(UTC):%Y%m%d%H}"
+
+
+def pass_cycle_keys(payload: dict[str, Any]) -> frozenset[str]:
+    """Return the ``<source>_<YYYYMMDDHH>`` key of every candidate row.
+
+    Rows come from ``SchedulerCandidate.to_dict`` (``source_id`` / ``source``
+    and ``cycle_time`` / ``cycle_time_utc``, the latter two the same ``...Z``
+    string), and the writer's summary rows keep all four.  A row the probe
+    cannot read contributes nothing: this set only ever WIDENS what is
+    graded, so an unreadable row costs a bypass, never a false alarm.
+    """
+
+    keys: set[str] = set()
+    for field in CANDIDATE_LIST_FIELDS:
+        rows = payload.get(field)
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            source = row.get("source_id") or row.get("source")
+            raw_cycle = row.get("cycle_time") or row.get("cycle_time_utc")
+            if not isinstance(source, str) or not isinstance(raw_cycle, str):
+                continue
+            try:
+                keys.add(cycle_key(source, parse_iso8601(raw_cycle)))
+            except ValueError:
+                continue
+    return frozenset(keys)
 
 
 def read_pass_record(path: Path) -> PassRecord:
@@ -816,6 +1030,7 @@ def read_pass_record(path: Path) -> PassRecord:
         shape=shape,
         submitted_count=submitted,
         blocked_candidate_count=blocked,
+        cycle_keys=pass_cycle_keys(payload),
     )
 
 
@@ -941,7 +1156,12 @@ def blocked_streak(records: list[PassRecord], *, window: int) -> tuple[int, int]
     The streak counts consecutive newest-first passes that submitted nothing
     while blocked.  Neutral passes are SKIPPED: they neither extend nor break
     the run, and ``neutral_skipped`` counts the ones the search walked past so
-    the receipt can show them.  A progress or idle pass halts the search.
+    the receipt can show them.  An in-flight-held pass is walked past as well
+    and is counted by neither number: it is not blocked work, so it does not
+    extend the COUNT, and it has cleared nothing, so it does not break it ---
+    how long such passes may go on is the time gate's question
+    (``in_flight_run``), not this one's.  A progress or idle pass halts the
+    search.
 
     ``window`` must be the ordering-safe prefix (``Config.streak_window``),
     never the alert threshold: a skipped neutral pass still occupies a
@@ -955,10 +1175,117 @@ def blocked_streak(records: list[PassRecord], *, window: int) -> tuple[int, int]
         if record.shape == SHAPE_NEUTRAL:
             neutral_skipped += 1
             continue
+        if record.shape == SHAPE_IN_FLIGHT_HELD:
+            continue
         if record.shape != SHAPE_BLOCKED:
             break
         streak += 1
     return streak, neutral_skipped
+
+
+class InFlightRun:
+    """The newest run of blocked / in-flight-held passes and where it began."""
+
+    __slots__ = ("passes", "in_flight_held", "started_at", "newest_started_at", "ended_by")
+
+    def __init__(self) -> None:
+        self.passes = 0
+        self.in_flight_held = 0
+        self.started_at: datetime | None = None
+        self.newest_started_at: datetime | None = None
+        self.ended_by: str | None = None
+
+    @property
+    def start_is_lower_bound(self) -> bool:
+        """Whether the real run began BEFORE ``started_at``.
+
+        True only when the walk ran off the end of the scan window: the last
+        progress pass is older than anything the probe read, so the span is a
+        lower bound of the real duration and the receipt says so.
+        """
+
+        return self.ended_by == RUN_END_SCAN_WINDOW
+
+    @property
+    def span_minutes(self) -> float | None:
+        if self.started_at is None or self.newest_started_at is None:
+            return None
+        return _age_minutes(self.newest_started_at, self.started_at)
+
+
+def in_flight_run(records: list[PassRecord], *, window: int) -> InFlightRun:
+    """Measure the newest contiguous run of blocked / in-flight-held passes.
+
+    Walked newest-first over the ordering-safe prefix, neutral passes skipped
+    exactly as the count streak skips them.  The run is every pass up to the
+    first progress or idle pass, and it is dated from:
+
+    * the ``started_at`` of that progress pass --- nothing has been submitted
+      since;
+    * the oldest pass of the run when an idle pass ended it --- the hold
+      began after the lane was last seen clear;
+    * the oldest pass of the run when the window ended first, flagged as a
+      lower bound: the last progress pass has left the scan, so the real run
+      is at least this long.
+
+    The span runs to the ``started_at`` of the newest pass of the run, not to
+    the clock.  A span that kept growing with ``now`` would age through a healthy
+    193-minute pass in flight on no new evidence at all; whether artifacts
+    have stopped arriving is the stale-evidence verdict's question.
+    """
+
+    run = InFlightRun()
+    oldest: datetime | None = None
+    for record in records[:window]:
+        if record.shape == SHAPE_NEUTRAL:
+            continue
+        if record.shape in (SHAPE_BLOCKED, SHAPE_IN_FLIGHT_HELD):
+            if run.newest_started_at is None:
+                run.newest_started_at = record.started_at
+            run.passes += 1
+            run.in_flight_held += record.shape == SHAPE_IN_FLIGHT_HELD
+            oldest = record.started_at
+            continue
+        if run.passes:
+            if record.shape == SHAPE_PROGRESS:
+                run.started_at, run.ended_by = record.started_at, RUN_END_PROGRESS
+            else:
+                run.started_at, run.ended_by = oldest, RUN_END_IDLE
+        return run
+    if run.passes:
+        run.started_at, run.ended_by = oldest, RUN_END_SCAN_WINDOW
+    return run
+
+
+def frontier_pass(records: list[PassRecord], *, window: int) -> PassRecord | None:
+    """Return the newest NON-NEUTRAL pass, or ``None`` when there is none.
+
+    Non-neutral on purpose: a lock-contended or resource-limit pass carries
+    no candidate lists, so taking the newest pass outright would make the
+    suppression bypass flicker off every time one of them happened to be the
+    newest.
+    """
+
+    for record in records[:window]:
+        if record.shape != SHAPE_NEUTRAL:
+            return record
+    return None
+
+
+def subject_on_frontier(subject_id: str, cycle_keys: frozenset[str]) -> bool:
+    """Whether a tracker subject id names a ``<source>_<YYYYMMDDHH>`` on the frontier.
+
+    Source-inclusive and case-insensitive: the job id spells the source in
+    lower case (``job_cycle_ifs_2026092500_...``) while the candidate rows
+    carry the configured id (``IFS``), and a bare cycle match would let one
+    source's frontier un-suppress another source's old entry.  The key must
+    sit between underscores, so ``gfs_...`` never matches inside ``xgfs_...``.
+    A candidate-kind subject (``gfs:2026-09-23T00:00:00+00:00``) does not
+    spell its cycle this way and never matches.
+    """
+
+    padded = f"_{subject_id.lower()}_"
+    return any(f"_{key}_" in padded for key in cycle_keys)
 
 
 def lock_contended_streak(records: list[PassRecord], *, window: int) -> int:
@@ -1001,23 +1328,39 @@ def resource_limit_passes_in_window(
 
 
 def partition_tracker_entries(
-    entries: list[TrackerEntry], *, threshold: int, suppressed_reasons: frozenset[str]
-) -> tuple[list[TrackerEntry], list[TrackerEntry]]:
-    """Split the at-or-above-threshold entries into ``(open, suppressed)``.
+    entries: list[TrackerEntry],
+    *,
+    threshold: int,
+    suppressed_reasons: frozenset[str],
+    frontier_cycle_keys: frozenset[str] = frozenset(),
+) -> tuple[list[TrackerEntry], list[TrackerEntry], list[TrackerEntry]]:
+    """Split the at-or-above-threshold entries into ``(open, suppressed, bypassed)``.
 
-    Suppression matches the reason EXACTLY and touches this signal alone.
+    Suppression matches the reason EXACTLY and touches this signal alone.  It
+    does not reach an entry on the frontier (``subject_on_frontier``): that
+    entry is graded as if unsuppressed.  ``bypassed`` is the subset of
+    ``open`` that is open for that reason alone, so the receipt can mark it.
     """
 
     open_entries: list[TrackerEntry] = []
     suppressed: list[TrackerEntry] = []
+    bypassed: list[TrackerEntry] = []
     for entry in entries:
         if entry.consecutive_passes < threshold:
             continue
-        if entry.reason in suppressed_reasons:
-            suppressed.append(entry)
-        else:
+        if entry.reason not in suppressed_reasons:
             open_entries.append(entry)
-    return open_entries, suppressed
+        elif subject_on_frontier(entry.subject_id, frontier_cycle_keys):
+            open_entries.append(entry)
+            bypassed.append(entry)
+        else:
+            suppressed.append(entry)
+    return open_entries, suppressed, bypassed
+
+
+def frontier_cycle_keys(records: list[PassRecord], *, window: int) -> frozenset[str]:
+    frontier = frontier_pass(records, window=window)
+    return frontier.cycle_keys if frontier is not None else frozenset()
 
 
 # ---------------------------------------------------------------------------
@@ -1138,17 +1481,25 @@ def grade(*, now: datetime, config: Config, observations: Observations) -> str:
     if lock_contended_streak(observations.records, window=config.streak_window) >= config.lock_passes:
         return VERDICT_LOCK_CONTENDED_PERSISTENT
 
-    # 10. Sustained blocked work with nothing submitted.
+    # 10. Sustained blocked work with nothing submitted: by COUNT for blocked
+    #     passes, or by TIME for a run of blocked / in-flight-held passes since
+    #     the last progress pass.  Same verdict, because the operator's first
+    #     move is the same; the receipt says which signal fired.
     streak, _neutral_skipped = blocked_streak(observations.records, window=config.streak_window)
     if streak >= config.no_submission_passes:
         return VERDICT_SUBMISSION_STALLED
+    span_minutes = in_flight_run(observations.records, window=config.streak_window).span_minutes
+    if span_minutes is not None and span_minutes >= config.in_flight_minutes:
+        return VERDICT_SUBMISSION_STALLED
 
     # 11. An unsuppressed tracker subject at or above the alert threshold.
-    #     Suppression reaches this verdict and nothing above it.
-    open_entries, _suppressed = partition_tracker_entries(
+    #     Suppression reaches this verdict and nothing above it, and it does
+    #     not reach an entry on the frontier.
+    open_entries, _suppressed, _bypassed = partition_tracker_entries(
         observations.tracker_entries,
         threshold=config.circuit_passes,
         suppressed_reasons=config.suppressed_reasons,
+        frontier_cycle_keys=frontier_cycle_keys(observations.records, window=config.streak_window),
     )
     if open_entries:
         return VERDICT_NO_PROGRESS_CIRCUIT_OPEN
@@ -1171,6 +1522,12 @@ def _clip_list(values: list[Any]) -> tuple[list[Any], int]:
     return values[:MAX_RECEIPT_LIST_ENTRIES], len(values) - MAX_RECEIPT_LIST_ENTRIES
 
 
+def _iso_or_none(moment: datetime | None) -> str | None:
+    if moment is None:
+        return None
+    return moment.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
 def runbook_pointer(verdict: str) -> str:
     return f"{RUNBOOK_PATH}#{RUNBOOK_ANCHORS[verdict]}"
 
@@ -1188,19 +1545,35 @@ def build_receipt(
     resource-limit verdict reads a time window over every artifact that
     parsed, and conflating them would make the receipt unable to explain
     either.  The resource-limit passes are named, bounded, so the operator can
-    open the exact artifacts the verdict was graded on.  Paths are not recorded --- unit names, filenames and counters
+    open the exact artifacts the verdict was graded on.  The in-flight run is
+    reported with its origin, its newest pass, how it ended and its span
+    beside the gate, and every open tracker row says whether it is open only because
+    the frontier bypassed its suppression.  Paths are not recorded --- unit names, filenames and counters
     only --- so an ops receipt never becomes a configuration leak.
     """
 
     records = observations.records
-    shapes = {shape: 0 for shape in (SHAPE_PROGRESS, SHAPE_BLOCKED, SHAPE_IDLE, SHAPE_NEUTRAL)}
+    shapes = {
+        shape: 0
+        for shape in (
+            SHAPE_PROGRESS,
+            SHAPE_BLOCKED,
+            SHAPE_IDLE,
+            SHAPE_IN_FLIGHT_HELD,
+            SHAPE_NEUTRAL,
+        )
+    }
     for record in records:
         shapes[record.shape] += 1
-    open_entries, suppressed_entries = partition_tracker_entries(
+    frontier = frontier_pass(records, window=config.streak_window)
+    open_entries, suppressed_entries, bypassed_entries = partition_tracker_entries(
         observations.tracker_entries,
         threshold=config.circuit_passes,
         suppressed_reasons=config.suppressed_reasons,
+        frontier_cycle_keys=frontier.cycle_keys if frontier is not None else frozenset(),
     )
+    bypassed_ids = {id(entry) for entry in bypassed_entries}
+    run = in_flight_run(records, window=config.streak_window)
     limit_window = resource_limit_passes_in_window(
         records, now=now, lookback_minutes=config.limit_lookback_minutes
     )
@@ -1225,9 +1598,15 @@ def build_receipt(
                 "subject_id": _clip(entry.subject_id),
                 "reason": _clip(entry.reason),
                 "consecutive_passes": entry.consecutive_passes,
+                # True for an entry whose reason IS suppressed but whose cycle
+                # is on the frontier: open for that reason alone.
+                "suppression_bypassed_frontier": id(entry) in bypassed_ids,
             }
             for entry in sorted(open_entries, key=lambda item: -item.consecutive_passes)
         ]
+    )
+    frontier_cycle_rows, frontier_cycles_truncated = _clip_list(
+        [_clip(key) for key in sorted(frontier.cycle_keys)] if frontier is not None else []
     )
     unreadable_rows, unreadable_truncated = _clip_list([_clip(item) for item in observations.unreadable])
     error_rows, error_truncated = _clip_list([_clip(item) for item in observations.evidence_errors])
@@ -1290,6 +1669,7 @@ def build_receipt(
             "progress_count": shapes[SHAPE_PROGRESS],
             "blocked_count": shapes[SHAPE_BLOCKED],
             "idle_count": shapes[SHAPE_IDLE],
+            "in_flight_held_count": shapes[SHAPE_IN_FLIGHT_HELD],
             "neutral_count": shapes[SHAPE_NEUTRAL],
         },
         "signals": {
@@ -1302,10 +1682,34 @@ def build_receipt(
             "no_submission_streak": no_submission_streak,
             "no_submission_neutral_skipped": neutral_skipped,
             "no_submission_passes": config.no_submission_passes,
+            # The time gate, re-derivable from these alone: the verdict fires
+            # when `in_flight_run_span_minutes >= in_flight_minutes`, the span
+            # being newest minus `..._started_at`.  `..._ended_by` says where
+            # that origin came from and `..._start_is_lower_bound` that the last progress
+            # pass is older than the scan, so the real run is at least this
+            # long.
+            "in_flight_run_passes": run.passes,
+            "in_flight_run_in_flight_held_passes": run.in_flight_held,
+            "in_flight_run_started_at": _iso_or_none(run.started_at),
+            "in_flight_run_newest_started_at": _iso_or_none(run.newest_started_at),
+            "in_flight_run_ended_by": run.ended_by,
+            "in_flight_run_start_is_lower_bound": run.start_is_lower_bound,
+            "in_flight_run_span_minutes": run.span_minutes,
+            "in_flight_minutes": config.in_flight_minutes,
             "circuit_open_entries": len(open_entries),
+            "circuit_bypassed_frontier_entries": len(bypassed_entries),
             "circuit_passes": config.circuit_passes,
             "tracker_present": observations.tracker_present,
             "tracker_entries": len(observations.tracker_entries),
+        },
+        # The pass the suppression bypass was graded against and the
+        # `<source>_<YYYYMMDDHH>` cycles it worked on.  An empty list with a
+        # pass named means its candidate lists were unreadable or emptied by
+        # the writer's size ladder, so no entry could be bypassed this tick.
+        "frontier": {
+            "pass": _clip(frontier.name) if frontier is not None else None,
+            "cycles": frontier_cycle_rows,
+            "cycles_truncated": frontier_cycles_truncated,
         },
         "open": open_rows,
         "open_truncated": open_truncated,

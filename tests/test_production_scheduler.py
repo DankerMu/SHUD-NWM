@@ -28871,6 +28871,8 @@ _SCHEDULER_STATE_FAILURE_CONSTANT_CONSUMERS: dict[str, frozenset[str]] = {
     # added-stage marker key, the post-forecast stages a marker may restart at, and the
     # evidence keys a refused added stage drops.
     "MANUAL_RETRY_RESTART_STAGE_ADDED_FIELD": frozenset({"_manual_retry_state_evidence"}),
+    # #2670: the forcing-input full-chain marker key; not a permanence refusal source either.
+    "MANUAL_RETRY_FORCING_INPUT_FAILURE_FIELD": frozenset({"_manual_retry_state_evidence"}),
     "_MANUAL_RETRY_POST_FORECAST_RESTART_STAGES": frozenset({"_manual_retry_failed_stage_restart"}),
     "_MANUAL_RETRY_ADDED_RESTART_KEYS": frozenset({"_drop_manual_retry_added_restart_stage"}),
 }
@@ -28955,6 +28957,8 @@ _SCHEDULER_STATE_FAILURE_CONSTANT_VALUES: dict[str, Any] = {
     ),
     #: #2600, copied literally from ``scheduler_state_failure.py``.
     "MANUAL_RETRY_RESTART_STAGE_ADDED_FIELD": "manual_retry_restart_stage_added",
+    #: #2670, copied literally from ``scheduler_state_failure.py``.
+    "MANUAL_RETRY_FORCING_INPUT_FAILURE_FIELD": "manual_retry_forcing_input_failure",
     "_MANUAL_RETRY_POST_FORECAST_RESTART_STAGES": frozenset({"parse", "state_save_qc", "publish"}),
     "_MANUAL_RETRY_ADDED_RESTART_KEYS": (
         "restart_stage",

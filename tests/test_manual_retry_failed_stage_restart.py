@@ -34,7 +34,11 @@ import pytest
 from packages.common.object_store import LocalObjectStore
 from services.orchestrator import scheduler as scheduler_module
 from services.orchestrator import scheduler_candidate_manifest as manifest_module
+from services.orchestrator import scheduler_candidates as scheduler_candidates_module
 from services.orchestrator.file_orchestration_journal import FileJournalRetryService, FileOrchestrationJournalRepository
+from services.orchestrator.retry import RetryConfig
+from services.orchestrator.scheduler_state_failure import _forcing_input_failure
+from services.orchestrator.scheduler_state_types import CandidateStateDecision
 from tests.test_cohort_membership_attribution import (
     _CYCLE,
     _CYCLE_ID,
@@ -51,6 +55,8 @@ from tests.test_cohort_membership_attribution import (
 _OUTPUT_URI = "s3://nhms/runs/out.nc"
 _ADDED = "manual_retry_restart_stage_added"
 _DROPPED = "manual_retry_restart_stage_dropped"
+_FORCING_INPUT = "manual_retry_forcing_input_failure"
+_UPGRADED = "strict_warm_start_retry_run_manifest_mismatch"
 _RESTART_KEYS = ("restart_stage", "restart_from_stage", "durable_shud_output_reused", _ADDED, _DROPPED)
 
 
@@ -249,10 +255,17 @@ def test_forecast_failure_marker_restarts_at_forecast_only_with_the_forcing_witn
         assert _new_stages(client, before)[:3] == ["convert", "forcing", "forecast"]
 
 
-@pytest.mark.parametrize(
-    "error_code",
-    ["FORCING_PACKAGE_CHECKSUM_MISMATCH", "FORCING_FILE_NOT_STAGED", "SHUD_FORCING_CSV_MISSING"],
-)
+# #2670: ``FORCING_CHECKSUM_READ_FAILED`` is what the runtime reports for a direct-grid
+# package whose declared member (``.tsd.forc``, a station CSV) is missing or unreadable.
+_FORCING_INPUT_CODES = [
+    "FORCING_PACKAGE_CHECKSUM_MISMATCH",
+    "FORCING_FILE_NOT_STAGED",
+    "SHUD_FORCING_CSV_MISSING",
+    "FORCING_CHECKSUM_READ_FAILED",
+]
+
+
+@pytest.mark.parametrize("error_code", _FORCING_INPUT_CODES)
 def test_forcing_input_forecast_failure_marker_regenerates_forcing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_code: str
 ) -> None:
@@ -279,6 +292,7 @@ def test_forcing_input_forecast_failure_marker_regenerates_forcing(
     assert decision.evidence["failure"]["stage"] == "forecast"
     for key in ("restart_stage", "restart_from_stage", _ADDED, _DROPPED):
         assert key not in decision.evidence, key
+    assert decision.evidence[_FORCING_INPUT] is True
     basins, (manifest,) = _pass_two_basins(candidates, [decision])
     assert "restart_stage" not in manifest
     before = len(client.submissions)
@@ -548,6 +562,229 @@ def test_manifest_matching_candidate_construction_keeps_the_state_save_qc_restar
     manifest = manifest_module._candidate_basin_manifest(candidate, output_uri=_OUTPUT_URI)
     assert manifest["restart_stage"] == "state_save_qc"
     assert manifest["durable_shud_output_reused"] is True
+
+
+# --- 4b. the strict lane keeps a forcing-input full-chain manual retry (#2670) --------------
+
+
+def _strict_forecast_failure_rows(error_code: str) -> list[dict[str, Any]]:
+    """The candidate's forecast failed for good with ``error_code``; nothing ran after it."""
+
+    (forecast, _state_save_qc) = _strict_rows(error_code)
+    return [{**forecast, "status": "permanently_failed", "error_code": error_code}]
+
+
+def _strict_forecast_failure_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, error_code: str) -> Any:
+    """Production shape of #2670: strict lane, the run manifest never reached the object store.
+
+    The runtime rejects the forcing package before ``_persist_manifest``, so
+    ``runs/<run_id>/input/manifest.json`` exists in the workspace only, and the workspace
+    root is not the object-store root.  The forcing witness IS present (the package
+    exists, its content is bad), so nothing but the decision itself keeps the full chain.
+    """
+
+    from tests.test_production_scheduler import _budget_pass, _seed_budget_journal
+
+    root, scheduler = _seed_budget_journal(monkeypatch, tmp_path, _strict_forecast_failure_rows(error_code))
+    assert os.environ["NHMS_REQUIRE_FORECAST_WARM_START"] == "true"
+    object_root = Path(os.environ["OBJECT_STORE_ROOT"])
+    assert Path(os.environ["WORKSPACE_ROOT"]) != object_root
+    assert not (object_root / "runs" / "fcst_gfs_2026052100_model_a" / "input" / "manifest.json").exists()
+    assert list(object_root.rglob("forcing_version_record.json")), "the forcing witness must be present"
+    repository = FileOrchestrationJournalRepository(root)
+    _mark(repository, "fcst_gfs_2026052100_model_a")
+    _selected, candidates, blocked, skipped = _budget_pass(scheduler())
+    assert (blocked, skipped) == ([], [])
+    (candidate,) = candidates
+    return repository, candidate
+
+
+def _strict_next_pass_stages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, repository: FileOrchestrationJournalRepository, candidate: Any
+) -> tuple[dict[str, Any], list[str]]:
+    """The chain pass the scheduler would run for this built candidate: (manifest, submitted stages).
+
+    The basin is the REAL candidate manifest under the scheduler's own cohort run id.  The
+    copyback root is unset because the Slurm double writes no run tree to copy back; that
+    step runs after the forecast and decides nothing about which stages are submitted.
+    """
+
+    from tests.test_orchestration_chain import _orchestrator
+
+    stage = scheduler_module._candidate_restart_stage(candidate)
+    run_id = scheduler_module._candidate_execution_cohort_run_id_for_candidate(
+        "gfs", candidate.cycle_time_utc, scheduler_module._candidate_restart_cohort_key(stage), candidate
+    )
+    manifest = manifest_module._candidate_basin_manifest(
+        candidate, output_uri=f"s3://nhms/runs/{candidate.run_id}/output/", orchestration_run_id=run_id
+    )
+    monkeypatch.delenv("NHMS_OBJECT_STORE_COPYBACK_ROOT")
+    client = _Runtime()
+    orchestrator = _orchestrator(
+        tmp_path,
+        repository,
+        client,
+        terminal_stage="state_save_qc",
+        retry_service=FileJournalRetryService(repository, RetryConfig(max_retries=0, backoff_schedule=[0])),
+    )
+    orchestrator.orchestrate_cycle("gfs", "2026052100", [dict(manifest)])
+    return manifest, _new_stages(client, 0)
+
+
+@pytest.mark.parametrize("error_code", _FORCING_INPUT_CODES)
+def test_strict_lane_keeps_a_forcing_input_manual_retry_full_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_code: str
+) -> None:
+    """The strict upgrade must not turn the forcing-input full chain into a ``forecast`` restart.
+
+    Pre-#2670 the upgrade saw no run manifest, rewrote the stage-less retry to
+    ``strict_warm_start_retry_run_manifest_mismatch`` / ``forecast``, the witness passed
+    (the package exists) and the same bad package was re-staged.
+    """
+
+    repository, candidate = _strict_forecast_failure_pass(tmp_path, monkeypatch, error_code=error_code)
+
+    evidence = candidate.state_evidence
+    assert (evidence["decision"], evidence["reason"]) == ("manual_retry", "manual_retry_requested")
+    assert evidence["reason"] != _UPGRADED
+    assert evidence["failure"]["stage"] == "forecast"
+    assert evidence[_FORCING_INPUT] is True
+    for key in ("restart_stage", "restart_from_stage", _ADDED, _DROPPED):
+        assert key not in evidence, key
+    assert scheduler_module._candidate_restart_stage(candidate) is None
+
+    manifest, stages = _strict_next_pass_stages(tmp_path, monkeypatch, repository, candidate)
+    assert "restart_stage" not in manifest
+    assert stages[:3] == ["convert", "forcing", "forecast"]
+
+
+def test_strict_lane_non_forcing_input_forecast_failure_keeps_its_forecast_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pin: a forecast failure that is not a forcing-input failure is not rescued (#2670).
+
+    Its #2600 ``forecast`` restart passes the upgrade and the witness as before, carries
+    no forcing-input marker, and the next pass starts at ``forecast``.
+    """
+
+    repository, candidate = _strict_forecast_failure_pass(tmp_path, monkeypatch, error_code="SHUD_FAILED")
+
+    evidence = candidate.state_evidence
+    assert (evidence["decision"], evidence["reason"]) == ("manual_retry", "manual_retry_requested")
+    assert evidence["restart_stage"] == "forecast"
+    assert evidence["native_shud_resubmitted"] is True
+    assert evidence[_ADDED] is True
+    assert _FORCING_INPUT not in evidence
+
+    manifest, stages = _strict_next_pass_stages(tmp_path, monkeypatch, repository, candidate)
+    assert manifest["restart_stage"] == "forecast"
+    assert stages[0] == "forecast"
+    assert "convert" not in stages and "forcing" not in stages
+
+
+def test_strict_lane_stage_added_manual_retry_carries_no_forcing_input_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pin: the #2600 added ``state_save_qc`` restart is still upgraded to ``forecast`` (#2670)."""
+
+    candidates, blocked = _strict_pass(tmp_path, monkeypatch, error_code="STATE_SAVE_QC_TASK_FAILED", witness=True)
+
+    assert blocked == []
+    (candidate,) = candidates
+    assert candidate.state_evidence["reason"] == _UPGRADED
+    assert candidate.state_evidence["restart_stage"] == "forecast"
+    assert _FORCING_INPUT not in candidate.state_evidence
+
+
+_UPGRADED_DECISION = CandidateStateDecision("retry", _UPGRADED, {"restart_stage": "forecast"})
+
+
+@pytest.mark.parametrize(
+    "pre_upgrade",
+    [
+        None,
+        CandidateStateDecision("retry", "manual_retry_requested", {}),
+        CandidateStateDecision("retry", "manual_retry_requested", {_FORCING_INPUT: "true"}),
+        CandidateStateDecision("retry", "manual_retry_requested", {_FORCING_INPUT: True, "restart_stage": "forecast"}),
+        CandidateStateDecision(
+            "retry", "manual_retry_requested", {_FORCING_INPUT: True, "restart_from_stage": "download"}
+        ),
+        CandidateStateDecision("blocked", "permanent_failure_guard", {_FORCING_INPUT: True}),
+    ],
+    ids=["none", "no_marker", "marker_not_true", "restart_stage", "restart_from_stage", "not_a_retry"],
+)
+def test_forcing_input_strict_recovery_leaves_every_other_decision_to_the_upgrade(pre_upgrade: Any) -> None:
+    """Only a stage-less ``retry`` carrying the marker is restored (#2670 review focus 3)."""
+
+    recovered = scheduler_candidates_module._manual_retry_forcing_input_strict_recovery(pre_upgrade, _UPGRADED_DECISION)
+
+    assert recovered is _UPGRADED_DECISION
+
+
+def test_forcing_input_strict_recovery_restores_the_marked_stage_less_retry() -> None:
+    pre_upgrade = CandidateStateDecision("retry", "manual_retry_requested", {_FORCING_INPUT: True})
+
+    recovered = scheduler_candidates_module._manual_retry_forcing_input_strict_recovery(pre_upgrade, _UPGRADED_DECISION)
+
+    assert recovered is pre_upgrade
+
+
+@pytest.mark.parametrize(
+    ("error_code", "expected"),
+    [
+        ("FORCING_CHECKSUM_READ_FAILED", True),
+        ("DIRECT_GRID_FORCING_CSV_TOO_LARGE", True),
+        ("DIRECT_GRID_TSD_FORC_TOO_LARGE", False),
+        ("DIRECT_GRID_TSD_FORC_TOO_MANY_LINES", False),
+        ("DIRECT_GRID_TSD_FORC_LINE_TOO_LONG", False),
+        ("SHUD_FAILED", False),
+    ],
+)
+def test_forcing_input_matcher_covers_what_its_docstring_names(error_code: str, expected: bool) -> None:
+    """The missing-member code matches; the real ``.tsd.forc`` size limits do not (#2670)."""
+
+    assert _forcing_input_failure({"error_code": error_code}) is expected
+
+
+@pytest.mark.parametrize("strict", [False, True], ids=["none_lane", "strict_lane"])
+def test_automatic_lane_never_retries_a_forcing_input_forecast_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, strict: bool
+) -> None:
+    """Audit pin (#2670): without a marker the failure is permanent on both lanes.
+
+    No forcing-input code is transient (``retry.TRANSIENT_ERROR_CODES``), so the ladder
+    stops at the permanent-failure guard before ``retry_failed_candidate`` could pick its
+    ``forecast`` restart: the automatic lane emits no retry for the upgrade to rewrite.
+    """
+
+    error_code = "FORCING_PACKAGE_CHECKSUM_MISMATCH"
+    if strict:
+        from tests.test_production_scheduler import _budget_pass, _seed_budget_journal
+
+        _root, scheduler = _seed_budget_journal(monkeypatch, tmp_path, _strict_forecast_failure_rows(error_code))
+        _selected, candidates, blocked, _skipped = _budget_pass(scheduler())
+        assert candidates == []
+        (item,) = blocked
+        evidence = item.state_evidence
+    else:
+        candidates = [_candidate(0)]
+        repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+        client = _Runtime(
+            fail_stage="forecast",
+            array_results_by_stage={"forecast": [["failed"]]},
+            task_error_codes={("forecast", 0): error_code},
+        )
+        _run_pass(tmp_path, repository, client, _cohort_basins(candidates), max_retries=0)
+        _plant_forcing_witness(tmp_path, monkeypatch, candidates[0])
+        (decision,) = _decisions(repository, candidates)
+        assert decision.action == "blocked"
+        evidence = decision.evidence
+
+    assert evidence["reason"] == "permanent_failure_guard"
+    assert evidence["failure"]["reason_code"] == error_code
+    assert evidence["retry_policy"]["automatic_retry_allowed"] is False
+    assert evidence["retry_policy"]["manual_retry_required"] is True
+    assert "restart_stage" not in evidence
 
 
 # --- 5. after the restart: a second failure and an in-flight restart ------------------------

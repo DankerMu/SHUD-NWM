@@ -2288,6 +2288,10 @@ def _manual_retry_state_evidence(
             evidence["native_shud_resubmitted"] = False
             evidence["durable_shud_output_reused"] = True
         evidence[MANUAL_RETRY_RESTART_STAGE_ADDED_FIELD] = True
+    elif _canonical_downstream_stage(_failed_stage(state)) == "forecast" and _forcing_input_failure(state):
+        # #2670: the full chain here is deliberate -- the forcing package itself was
+        # rejected -- so the strict warm-start lane must not rewrite it to ``forecast``.
+        evidence[MANUAL_RETRY_FORCING_INPUT_FAILURE_FIELD] = True
     return evidence
 
 
@@ -2295,6 +2299,9 @@ def _manual_retry_state_evidence(
 #: cold-start quarantine's forced ``forecast``).  Only a stage carrying it may be dropped
 #: back to the full chain when a restart-stage guard refuses it.
 MANUAL_RETRY_RESTART_STAGE_ADDED_FIELD = "manual_retry_restart_stage_added"
+#: #2670: the evidence key of a stage-less manual retry whose failed ``forecast`` recorded
+#: a forcing-input failure.  The strict warm-start call site keeps such a retry full-chain.
+MANUAL_RETRY_FORCING_INPUT_FAILURE_FIELD = "manual_retry_forcing_input_failure"
 _MANUAL_RETRY_POST_FORECAST_RESTART_STAGES = frozenset({"parse", "state_save_qc", "publish"})
 _MANUAL_RETRY_ADDED_RESTART_KEYS = (
     "restart_stage",
@@ -2334,9 +2341,13 @@ def _forcing_input_failure(state: Mapping[str, Any]) -> bool:
 
     ``workers/shud_runtime/runtime.py`` raises the ``FORCING_*`` family (checksum,
     manifest, staging, empty, unit) and its ``SHUD_FORCING_*`` / ``DIRECT_GRID_*FORCING_*``
-    siblings for a package that is corrupt, empty, mismatched or unstaged.  Both the
-    current failure's own code and the broad scan are read: a stale forcing code only
-    costs the full chain, which is the pre-#2600 behavior.
+    siblings for a package that is corrupt, empty, mismatched or unstaged; a declared
+    member that is missing or unreadable is ``FORCING_CHECKSUM_READ_FAILED`` (#2670).
+    Not matched, by spelling: the direct-grid station-index size limits
+    ``DIRECT_GRID_TSD_FORC_TOO_LARGE`` / ``_TOO_MANY_LINES`` / ``_LINE_TOO_LONG``
+    (``_FORC_``, not ``_FORCING_``), which the runtime raises only for a real limit
+    violation.  Both the current failure's own code and the broad scan are read: a
+    stale forcing code only costs the full chain, which is the pre-#2600 behavior.
     """
 
     for code in (_downstream_recorded_error_code(state), _state_error_code(state)):

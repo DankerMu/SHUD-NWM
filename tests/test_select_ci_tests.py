@@ -582,6 +582,30 @@ NODE22_STALL_READER_EDGES: tuple[str, ...] = (
 NODE22_STALL_DERIVED_EDGES = frozenset({"scripts/node22_scheduler_stall_health.py"})
 
 
+# The #2662 excluded-row contract: the writer of the row, the owner of its
+# reason, and the summary tier that must keep `status`. The probe suite imports
+# them only inside the pin's body, so these rows are the pin's only route.
+NODE22_STALL_EXCLUSION_PIN = (
+    "tests/test_node22_scheduler_stall_health.py::test_e6_the_lineage_exclusion_fixture_row_is_the_row_the_scheduler_writes"
+)
+NODE22_STALL_EXCLUSION_EDGES: tuple[str, ...] = (
+    "services/orchestrator/scheduler_candidates.py",
+    "services/orchestrator/scheduler_lineage.py",
+    "services/orchestrator/scheduler_evidence_payload.py",
+)
+
+
+@pytest.mark.parametrize(
+    "source",
+    NODE22_STALL_EXCLUSION_EDGES,
+    ids=[PurePosixPath(source).name for source in NODE22_STALL_EXCLUSION_EDGES],
+)
+def test_node22_stall_exclusion_edges_select_the_exclusion_pin(source: str) -> None:
+    assert Path(source).is_file()
+
+    assert NODE22_STALL_EXCLUSION_PIN in select_tests([source], repo_root=Path("."))
+
+
 @pytest.mark.parametrize(
     "source",
     NODE22_STALL_READER_EDGES,
@@ -1084,6 +1108,9 @@ def test_select_tests_maps_file_journal_read_state_without_whole_legacy_suites()
             # serializes the reserved-unbound outcome rows (with the attempt
             # anchor) the held-reservation listing suite ages and pins.
             "tests/test_operator_action_listing_held_reservations.py",
+            # #2662's at-site addition to the same stop rule: the node-22
+            # stall probe's terminal skip-reason parity pin (one node id).
+            "tests/test_node22_scheduler_stall_health.py::test_e5_the_terminal_skip_reasons_equal_the_schedulers_own",
             # #2316's at-site addition to the same stop rule: the extra-root
             # wiring oracle for the `runs_only_roots` tuple this module builds.
             "tests/test_retention_extra_roots.py",
@@ -1470,6 +1497,10 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_orchestrator_demote_core_cas.py",
         "tests/test_orchestrator_demote_projection_faults.py",
         "tests/test_orchestrator_demote_reclaim_lifecycle.py",
+        # #2682: the forcing absence-exit suite rides the same directory rule
+        # (reconcile.py, reservation.py and forcing_submit_identity.py importer
+        # gaps). ~3s.
+        "tests/test_orchestrator_demote_reserved_job_forcing.py",
         # #1627: services/** is a path-canonicalisation family-guard root, so the
         # guard rides every source under it — a supplemental rider, not a rule
         # target. It sorts here, between the demote and pipeline suites.
@@ -12195,6 +12226,8 @@ STOP_RULE_AT_SITE_EXTENSIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "tests/test_retention_extra_roots.py",
             # #2668: the held-reservation listing suite (serialized anchor key).
             "tests/test_operator_action_listing_held_reservations.py",
+            # #2662: the node-22 stall probe's terminal skip-reason parity pin.
+            "tests/test_node22_scheduler_stall_health.py::test_e5_the_terminal_skip_reasons_equal_the_schedulers_own",
         ),
     ),
 )
@@ -12323,6 +12356,9 @@ def test_scheduler_runtime_selects_the_copyback_mutex_suite() -> None:
     assert select_tests(["services/orchestrator/scheduler_runtime.py"], repo_root=Path(".")) == [
         "tests/test_file_orchestration_journal.py",
         "tests/test_file_orchestration_migration.py",
+        # #2662: the stall probe's literal copy of this module's
+        # `_RETENTION_TERMINAL_SKIP_REASONS` is pinned by one node id.
+        "tests/test_node22_scheduler_stall_health.py::test_e5_the_terminal_skip_reasons_equal_the_schedulers_own",
         # #2668: the held-reservation listing suite joins the stop rule at site.
         "tests/test_operator_action_listing_held_reservations.py",
         "tests/test_operator_action_reservation_lease.py",
@@ -14222,6 +14258,18 @@ SHARED_LIBRARY_SOURCES: tuple[tuple[str, str], ...] = (
 )
 
 
+def test_object_store_routes_the_read_limit_discriminator_test() -> None:
+    # #2670: `ObjectStoreReadLimitExceededError` is defined in object_store.py
+    # and its only assertion lives in the SHUD runtime suite, which nothing
+    # derives from this path. One node id, not the whole suite.
+    assert Path("packages/common/object_store.py").is_file()
+
+    assert (
+        "tests/test_shud_runtime.py::test_object_store_limited_read_tells_over_limit_from_missing"
+        in select_tests(["packages/common/object_store.py"], repo_root=Path("."))
+    )
+
+
 # The INDEPENDENT current core-smoke contract set for the shared-baseline
 # oracle. NOT derived from the (possibly monkeypatched) production
 # CORE_SMOKE_TESTS: the positive helper's expected set must be an independent
@@ -16020,6 +16068,8 @@ def test_bind_helper_rule_selects_its_consumers_exactly() -> None:
         "tests/test_operator_action_listing_held_reservations.py",
         # #2675: the forcing bind suite imports the held-forcing builder.
         "tests/test_orchestrator_bind_reserved_job_forcing.py",
+        # #2682: so does the forcing absence-exit suite.
+        "tests/test_orchestrator_demote_reserved_job_forcing.py",
         SELECTOR_META_GUARD_TEST,
     }
 
@@ -16095,6 +16145,8 @@ def test_gateway_reconcile_helper_rules_select_their_partitions_exactly() -> Non
         "tests/test_operator_action_listing_held_reservations.py",
         # #2675: the forcing bind suite reaches it through the bind helper module.
         "tests/test_orchestrator_bind_reserved_job_forcing.py",
+        # #2682: so does the forcing absence-exit suite.
+        "tests/test_orchestrator_demote_reserved_job_forcing.py",
     } | {SELECTOR_META_GUARD_TEST}
 
     selected_writer = set(select_tests(["tests/gateway_reconcile_writer_helpers.py"], repo_root=Path(".")))

@@ -1488,6 +1488,9 @@ ORCHESTRATOR_CLI_IMPORTER_TESTS: tuple[str, ...] = (
     # lane suite binds through `cli.main`. DB-free, together ~70 tests in ~6s.
     "tests/test_orchestrator_bind_reserved_job_forcing.py",
     "tests/test_orchestrator_bind_reserved_job_forcing_lane.py",
+    # #2682: the forcing absence-exit suite top-level-imports `cli` and drives
+    # `demote-reserved-job` through both entrypoints. DB-free, ~57 tests in ~3s.
+    "tests/test_orchestrator_demote_reserved_job_forcing.py",
 )
 
 # #1748 recovery-CLI helper extraction: the shared
@@ -1566,6 +1569,10 @@ FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     # restart reconcile, the bind and inflight projection. DB-free, ~6s.
     "tests/test_orchestrator_bind_reserved_job_forcing.py",
     "tests/test_orchestrator_bind_reserved_job_forcing_lane.py",
+    # #2682: the forcing absence-exit suite's subject is this module's forcing
+    # branch of `demote_operator_verified_reserved_job` (CAS, named refusals,
+    # the row + audit-event append). DB-free, ~3s.
+    "tests/test_orchestrator_demote_reserved_job_forcing.py",
     # #2674: the shape (c) writer-guard suite's subject is this module's
     # `_write_pipeline_job_unlocked` entry refusal and its record-level append
     # funnels, driven through every public writer. DB-free, ~46 tests in ~1s.
@@ -2320,6 +2327,8 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             # #2675: the forcing bind suite imports the held-forcing builder at
             # file level.
             "tests/test_orchestrator_bind_reserved_job_forcing.py",
+            # #2682: so does the forcing absence-exit suite.
+            "tests/test_orchestrator_demote_reserved_job_forcing.py",
         ),
     ),
     PathTestRule(
@@ -2413,6 +2422,9 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             # #2675: the forcing bind suite reaches it the same way (file-level
             # bind helper import) and calls it function-locally.
             "tests/test_orchestrator_bind_reserved_job_forcing.py",
+            # #2682: the forcing absence-exit suite reaches it through the same
+            # file-level bind helper import.
+            "tests/test_orchestrator_demote_reserved_job_forcing.py",
         ),
     ),
     PathTestRule(
@@ -3110,6 +3122,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # the held-reservation listing ages, and that suite pins the
             # serialized key. DB-free, 41 tests in ~4s.
             "tests/test_operator_action_listing_held_reservations.py",
+            # #2662 adds the seventh at-site target, a D4 parity edge like the
+            # scheduler_evidence.py / scheduler_no_progress.py rows further
+            # down. The node-22 stall probe is stdlib-only, so it carries a
+            # literal copy of this module's `_RETENTION_TERMINAL_SKIP_REASONS`
+            # (a skip reason outside it is in-flight and must not clear the
+            # probe's stall streak). The parity test imports this module inside
+            # its function body, so no importer derivation reaches it and this
+            # stop rule is its only route. One node id, not the ~170-test probe
+            # suite: the rest of that suite reads nothing from this module.
+            "tests/test_node22_scheduler_stall_health.py::test_e5_the_terminal_skip_reasons_equal_the_schedulers_own",
             # #2316: the extra-root wiring oracle (rationale above).
             "tests/test_retention_extra_roots.py",
         ),
@@ -3458,6 +3480,12 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # tuples. DB-free, together ~6s.
             "tests/test_orchestrator_bind_reserved_job_forcing.py",
             "tests/test_orchestrator_bind_reserved_job_forcing_lane.py",
+            # #2682: the forcing absence-exit suite. Its importer gaps on
+            # `services.orchestrator` itself, accepted_submit_identity.py,
+            # forcing_submit_identity.py, reconcile.py and reservation.py
+            # close on this directory rule; the cli.py /
+            # file_orchestration_journal.py pairs ride their stop-rule tuples.
+            "tests/test_orchestrator_demote_reserved_job_forcing.py",
             # #2674: the shape (c) guard suite. Its importer gaps on
             # `services.orchestrator` itself and accepted_submit_identity.py close
             # on this directory rule; the file_orchestration_journal.py /
@@ -3838,6 +3866,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # way (it top-level-imports services/orchestrator/reconcile.py for
             # restart reconcile and inflight projection). DB-free, ~1s.
             "tests/test_orchestrator_bind_reserved_job_forcing_lane.py",
+            # #2682: the forcing absence-exit suite is a one-hop member the same
+            # way (top-level reconcile.py import for the absence grace).
+            "tests/test_orchestrator_demote_reserved_job_forcing.py",
         ),
     ),
     PathTestRule(
@@ -4270,6 +4301,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_object_store_roots.py",
             "tests/test_storage.py",
+            # #2670: `ObjectStoreReadLimitExceededError` (the over-limit vs
+            # missing discriminator) is defined here, and its only assertion
+            # sits in the SHUD runtime suite, which no import derivation
+            # reaches from this path. One node id, not the whole suite.
+            "tests/test_shud_runtime.py::test_object_store_limited_read_tells_over_limit_from_missing",
         ),
     ),
     PathTestRule(
@@ -5560,6 +5596,24 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "services/orchestrator/scheduler_no_progress.py",
         ("tests/test_node22_scheduler_stall_health.py",),
+    ),
+    # The third D4 parity edge (#2662 fix pass). The probe reads a skipped row
+    # with `status == "excluded"` as a permanent exclusion, never in-flight.
+    # Three modules own that contract and none is imported at module scope by
+    # the probe suite: scheduler_candidates.py writes the row, scheduler_lineage.py
+    # owns its reason, scheduler_evidence_payload.py decides whether `status`
+    # survives the summary tier. One node id each, additive like the rows above.
+    PathTestRule(
+        "services/orchestrator/scheduler_candidates.py",
+        ("tests/test_node22_scheduler_stall_health.py::test_e6_the_lineage_exclusion_fixture_row_is_the_row_the_scheduler_writes",),
+    ),
+    PathTestRule(
+        "services/orchestrator/scheduler_lineage.py",
+        ("tests/test_node22_scheduler_stall_health.py::test_e6_the_lineage_exclusion_fixture_row_is_the_row_the_scheduler_writes",),
+    ),
+    PathTestRule(
+        "services/orchestrator/scheduler_evidence_payload.py",
+        ("tests/test_node22_scheduler_stall_health.py::test_e6_the_lineage_exclusion_fixture_row_is_the_row_the_scheduler_writes",),
     ),
     PathTestRule(
         "scripts/node27_download_once.sh",

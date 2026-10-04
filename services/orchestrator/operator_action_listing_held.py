@@ -26,6 +26,8 @@ from .forcing_submit_identity import FORCING_STAGE_ALIASES
 
 HELD_RESERVATION_DECISION = "held_reservation_unresolved"
 HELD_RESERVATION_RUNBOOK = "docs/runbooks/failed-basin-retry.md"
+#: #2682: the operator-verified absence exit for a held forcing master.
+HELD_FORCING_ABSENCE_RUNBOOK = "docs/runbooks/held-forcing-absence-exit.md"
 #: The operator commands a held entry can name.  ``triage`` means "bind if sacct
 #: shows the job, demote if it is confirmed dead" (runbook case 2).
 HELD_RESERVATION_OPERATOR_COMMANDS = frozenset(("bind-reserved-job", "triage", "escalate"))
@@ -56,8 +58,10 @@ HELD_RESERVATION_AGED_LISTED_ACTIONS: Mapping[str, str] = {
 #: #2675: the forcing lane's own mapping.  ``bind-reserved-job`` binds a held
 #: forcing master on operator-verified sacct evidence, so the two held actions
 #: whose job may well have run point at it; every other forcing action (a
-#: foreign owner or comment collision, or the absence case of #2682) is
-#: ``escalate``.  The age rules are the tables above, unchanged.
+#: foreign owner or comment collision) is ``escalate``.  The age rules are the
+#: tables above, unchanged.  "No job found" is not a listing dimension (#2682):
+#: the mapping and the command set stay as they are, and the help text and the
+#: runbook route that branch to ``demote-reserved-job``.
 HELD_RESERVATION_FORCING_BIND_ACTIONS = frozenset(("multiple_matches_blocked", "query_unavailable"))
 #: The follow-up issue an operator is pointed at when no supported exit exists:
 #: the legacy unversioned master (shape (c)).
@@ -79,7 +83,10 @@ HELD_RESERVATION_HELP = (
     "identity_mismatch_released are never listed; any other action is listed with "
     "escalate. A forcing master (#2675, job id ending in a forcing stage) gets "
     f"bind-reserved-job for {' and '.join(sorted(HELD_RESERVATION_FORCING_BIND_ACTIONS))} "
-    "(same age rules) and escalate for every other action; a job that is neither a "
+    "(same age rules) and escalate for every other action; for a held forcing master, "
+    "whatever the listed command, if sacct and squeue show no master carrying its attempt "
+    "comment, the exit is demote-reserved-job (#2682), see "
+    f"{HELD_FORCING_ABSENCE_RUNBOOK}; a job that is neither a "
     "forecast cohort master nor a forcing master always gets escalate. Only a legacy "
     f"unversioned master carries a follow_up_issue ({HELD_RESERVATION_LEGACY_FOLLOW_UP}). "
     "An entry is dropped once a newer pass whose restart-reconcile lane ran no longer "

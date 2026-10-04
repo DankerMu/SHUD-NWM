@@ -763,3 +763,51 @@ def test_round16_launcher_requires_target_checkout_executable_runtime(
                 writer_args=("plan-production", "--submit"),
             )
         assert starts == []
+
+
+@pytest.mark.parametrize("fence_sidecar", ["present", "absent_old_receipt"])
+def test_issue2660_rollforward_removes_fence_sidecar_with_receipt(
+    tmp_path: Any,
+    fence_sidecar: str,
+) -> None:
+    """The fence sidecar dies with the receipt; an old receipt has none."""
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from services.orchestrator.file_orchestration_migration import (
+        complete_file_journal_rollforward,
+        prepare_file_journal_rollback,
+    )
+
+    root = tmp_path / "journal"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    assert FileOrchestrationJournalRepository(root).query_inflight_jobs() == []
+    receipt = prepare_file_journal_rollback(
+        journal_root=root,
+        workspace_root=workspace,
+        scheduler_state="stopped",
+        active_scheduler_processes=0,
+        checked_at=datetime.now(UTC),
+        checked_by="issue-2660-rollforward-operator",
+        target_writer_generation="a" * 40,
+    )
+    _round20_write_execution_binding(
+        workspace=workspace,
+        receipt=receipt,
+        generation="a" * 40,
+    )
+    sidecar = root / "reconcile-inventory-rollback-fence-v1"
+    assert sidecar.is_file()
+    if fence_sidecar == "absent_old_receipt":
+        sidecar.unlink()
+
+    completed = complete_file_journal_rollforward(
+        journal_root=root,
+        workspace_root=workspace,
+        preparation_receipt_id=receipt["receipt_id"],
+    )
+
+    assert completed["rollback_execution_binding_status"] == "completed"
+    assert not (root / "reconcile-inventory-rollback-preparation-v2.json").exists()
+    assert not sidecar.exists()
+    # Ensure-migrated on a fresh repository accepts the consumed root.
+    assert FileOrchestrationJournalRepository(root).query_inflight_jobs() == []
