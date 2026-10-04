@@ -3933,6 +3933,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # three partitions and the row carries all of them.
             "tests/test_mvt_tile_generation_lock.py",
             *NODE27_MVT_CACHE_RETENTION_TESTS,
+            # #2716: guard-derived — the DB tile-cache write-privilege suite
+            # imports services.tiles.mvt at file level and drives
+            # build_raw_tile_response / build_tile_response through a recording
+            # PostgreSQL-dialect session, so a change to the write gate here
+            # must red there in the PR lane. It imports no
+            # apps.api.routes.hydro_display module, so that rule is left alone.
+            "tests/test_mvt_db_cache_write_privilege.py",
             # #2550: guard-derived — the basemap proxy suite imports
             # apps.api.routes.basemap, which takes MVT_FILE_CACHE_DIR_ENV from
             # this module: both caches share one root, so renaming the env here

@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import threading
 from collections.abc import Generator
@@ -48,10 +49,11 @@ from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import Response
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from apps.api.display_cache import display_catalog_cached
-from apps.api.errors import ApiError
+from apps.api.errors import PG_QUERY_CANCELED_SQLSTATE, ApiError, is_pg_query_canceled
 from apps.api.routes import hydro_display_postgis
 from apps.api.routes.hydro_display_catalog import _default_layer_catalog, _empty_valid_times
 from apps.api.routes.hydro_display_constants import (
@@ -122,6 +124,8 @@ from services.tiles.mvt import read_cached_tile_response as _read_cached_tile_re
 from services.tiles.mvt import simplification_tolerance_m as simplification_tolerance_m
 from services.tiles.mvt import validate_identifier as _validate_tile_identifier
 from services.tiles.mvt import validate_xyz as _validate_tile_xyz
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["hydro-display"])
 
@@ -738,6 +742,27 @@ def _cached_or_generated_mvt_response(
             if cached is not None:
                 return _mvt_response(cached)
             return _mvt_response(build_raw_tile_response(session, tile_input, producer()))
+    except OperationalError as exc:
+        # #2712: a cold build cancelled by the display role's statement_timeout
+        # is transient (the same tile builds on retry), so it takes the busy
+        # contract the frontend already retries. ONLY SQLSTATE 57014: an
+        # unreachable database raises this same class and must stay a 500, or
+        # an outage would be reported as "busy, retry in 1 s" forever.
+        if not is_pg_query_canceled(exc):
+            raise
+        # The one thing that tells this 503 from gate saturation, which logs
+        # nothing here.
+        logger.warning(
+            "MVT cold generation cancelled by statement timeout (SQLSTATE %s); responding 503 %s "
+            "layer_id=%s z=%s x=%s y=%s",
+            PG_QUERY_CANCELED_SQLSTATE,
+            MVT_COLD_BUSY_CODE,
+            tile_input.layer_id,
+            tile_input.z,
+            tile_input.x,
+            tile_input.y,
+        )
+        raise _mvt_cold_generation_busy() from exc
     finally:
         try:
             _release_session_checkout(session)

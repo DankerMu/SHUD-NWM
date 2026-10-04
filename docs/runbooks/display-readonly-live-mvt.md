@@ -42,7 +42,9 @@ M26 初验时 node-27 实测：`/api/v1/layers` 返回 `[]`、river-network 瓦�
 - 不引入离线预生成 tile 发布层；live 查询必须走热路径缓存。若 DB role 有
   `map.tile_layer`/`map.tile_cache` 写权限则写 DB cache，否则用
   `NHMS_MVT_FILE_CACHE_DIR` 本地 PBF 文件缓存兜底。业务性能优先于把 display
-  角色机械地维持为全表只读。
+  角色机械地维持为全表只读。走哪一种由 display API **每进程（每 engine）一次**的
+  权限探测决定，不靠"发 INSERT 让 PG 报错"判断，细则见下文
+  "[MVT DB 缓存写入模式判定](#mvt-db-缓存写入模式判定issue-2716)"。
 
 ## 当前启用配置
 
@@ -118,6 +120,20 @@ hold no DB checkout. Excess distinct cold keys return typed 503
 Cache hits do not consume a cold permit. Identity/cache-read transactions are
 released before admission and single-flight waits; admitted generation
 releases its checkout before releasing the permit.
+
+An admitted cold build that the role `statement_timeout` cancels (SQLSTATE
+`57014`) answers with the **same** 503 `MVT_COLD_GENERATION_BUSY` and headers
+(#2712), so the frontend retry protocol covers it; the permit and checkout are
+released and nothing is cached. The two causes are told apart in the display
+API log, not in the response: a timeout writes one WARNING
+`MVT cold generation cancelled by statement timeout (SQLSTATE 57014) ...
+layer_id=... z=... x=... y=...` (logger `apps.api.routes.hydro_display`), gate
+saturation writes none. Any other database error inside the gate — an
+unreachable database is the same SQLAlchemy `OperationalError` class with
+SQLSTATE `08006` or none — still surfaces as 500. A tile that times out on
+every retry holds one cold permit and one pooled connection for the full
+timeout each time: repeated WARNINGs for the same tile are a slow-query signal
+to investigate, not noise, and raising `statement_timeout` is not the fix.
 
 Prewarm knobs stay at the measured receipt values: `--workers` 8,
 `--timeout` 30 s, `--deadline-seconds` 540. Do not claim latency
@@ -378,6 +394,43 @@ deadline 到达后剩余请求**不再发起**（不是取消在途请求），�
 [`docs/runbooks/receipts/2026-09-08-issue-2032-mvt-cache-measurement-node27.md`](receipts/2026-09-08-issue-2032-mvt-cache-measurement-node27.md)）。
 DB 侧 `map.tile_cache` 为 0 行（display 角色只有 SELECT），所以增长全部落在文件侧。
 
+### MVT DB 缓存写入模式判定（issue #2716）
+
+display API 是否向 `map.tile_layer` / `map.tile_cache` 写缓存，由
+`services/tiles/mvt.py` 的一次只读探测决定，**不再**靠每次冷 miss 发一条注定被拒的
+`INSERT`（旧行为在只读角色下每次 miss 产生一条 PG `ERROR: permission denied for table
+tile_layer` 加整段 SQL）：
+
+- **探测内容**：`has_table_privilege` 判当前角色对两张表是否同时有 `INSERT` 与 `UPDATE`
+  （写入语句是 `INSERT ... ON CONFLICT DO UPDATE`），用 `to_regclass` / `to_regnamespace`
+  兜住表或 schema 不存在的情况，探测本身不会产生 PG ERROR。`map.tile_cache` 不存在 → 不写
+  DB；`map.tile_layer` 不存在 → 不阻止写入（与探测引入前一致）。仅 PostgreSQL；sqlite 不探测。
+- **探测频率**：每个进程里每个 engine **一次**，结果缓存到进程退出；不是每请求一次。
+  2 个 uvicorn worker 即 2 次（并发的首批冷请求可能各探一次，只读、幂等）。
+- **不可写**：冷 miss 不向这两张表发任何 `INSERT`/`UPDATE`，只写
+  `NHMS_MVT_FILE_CACHE_DIR`，`cache_status` 仍为 `miss`。日志有一条 INFO
+  `MVT DB tile cache writes are off for this engine ...`（logger `services.tiles.mvt`），
+  这是生产的正常模式，不是告警。
+- **授权变更需要重启**：给 display 角色 `GRANT`（或 `REVOKE`）这两张表的写权限后，
+  已运行的进程仍沿用旧判定；必须按上文 same-window restart 重启 display API 才生效。
+  `REVOKE` 后未重启的进程会继续尝试写入并被 PG 拒绝（回退文件缓存，功能不受影响，
+  但 PG 日志重新出现 permission denied）。
+- **探测失败**：探测抛错、无行或返回非布尔值时按"不可写"处理，降级到文件缓存，并记
+  **一条** WARNING `MVT DB tile cache write-privilege probe failed ...` /
+  `... returned ... instead of a boolean`；同样缓存到进程重启。看到这条 WARNING 应排查
+  DB 连接或 catalog，而不是忽略。
+- **读路径不变**：`map.tile_cache` 的 SELECT 不受探测影响，只读角色读取其它角色写入的
+  DB 缓存仍是合法模式。
+
+验收（部署并重启 display API 之后，只读、低 IO）：
+
+```bash
+docker logs --since 1h nhms-db 2>&1 | grep -c "permission denied for table tile_layer"   # 期望 0
+find /home/nwm/.cache/nhms/mvt -name '*.pbf' -newermt "<cutover UTC>" | wc -l             # 期望 > 0，证明确有冷构建
+docker exec -i nhms-db psql -U nhms -d nhms -X -At -c \
+  "select has_table_privilege('nhms_display_ro','map.tile_layer','INSERT'), has_table_privilege('nhms_display_ro','map.tile_cache','INSERT');"   # 期望 f|f，权限未变
+```
+
 **回收 runner**：`scripts/node27_mvt_cache_retention.py`（仅 stdlib，**不连 DB**）。
 wrapper `scripts/node27_mvt_cache_retention_once.sh`，user 级 unit
 `infra/systemd/nhms-node27-mvt-cache-retention.{service,timer}`（`OnCalendar=*-*-* 04:05:00 UTC`、
@@ -540,6 +593,8 @@ river-network/<bv> z6/49/24           http=413  353 bytes      (低 zoom 整流�
 - **只读边界**：display 侧控制面/业务数据写入仍应拒绝；MVT tile cache 是性能例外，可授予
   `map.tile_layer` / `map.tile_cache` 最小写权限，或保持 DB 只读并依赖
   `NHMS_MVT_FILE_CACHE_DIR` 文件缓存。denied-write live 验证只应用于非缓存控制/业务写。
+  当前进程处于哪种模式由启动后首个冷 miss 的权限探测决定，改授权后必须重启 display API
+  （见 "[MVT DB 缓存写入模式判定](#mvt-db-缓存写入模式判定issue-2716)"）。
 - **station-MVT**：#342 仍是独立 open backend issue，不属于 #343 的 live MVT closure。
 
 ## 相关
