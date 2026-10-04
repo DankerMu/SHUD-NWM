@@ -10,7 +10,8 @@ is report-only: it never gates a merge and never writes to the repository.
 one ``name: old -> new`` line per package.
 
 ``report`` turns the job's step outcomes into one of four failure kinds and
-keeps ONE tracking issue, found by its fixed title among the open issues:
+keeps ONE tracking issue, found by its fixed title among the open issues that
+carry the labels this script creates it with:
 
 * ``injected`` - the ``inject_failure`` input failed the run on purpose;
 * ``resolve``  - ``uv lock --upgrade`` or the unlocked ``uv sync`` failed;
@@ -21,6 +22,9 @@ A failure comments on the open tracking issue, or creates it when there is
 none. A success creates nothing; an open tracking issue gets a "passing again"
 comment and is left open for a human to close. A run that failed outside those
 steps (checkout, setup, a cancelled job) is neither: a warning, no issue.
+
+A GitHub API error while reporting a passing run is a warning and exit 0 (the
+lane itself passed); while reporting a failure it is an error and exit 1.
 
 Standard library only, so it runs before (and without) the project environment.
 The token comes from ``GITHUB_TOKEN`` and the repository from ``--repo`` or
@@ -34,6 +38,7 @@ import json
 import os
 import sys
 import tomllib
+import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
@@ -124,12 +129,15 @@ def failure_kind(
 
 
 def find_tracking_issue(request: Request, repo: str) -> int | None:
-    """The number of the oldest OPEN issue whose title is exactly ``TRACKING_TITLE``."""
+    """The number of the oldest OPEN issue whose title is exactly ``TRACKING_TITLE``.
 
-    query = urllib.parse.urlencode(
-        {"q": f'repo:{repo} is:issue is:open in:title "{TRACKING_TITLE}"', "per_page": 100}
-    )
-    items = request("GET", f"/search/issues?{query}", None).get("items", [])
+    Uses the issue list endpoint, not ``/search/issues``: the search index lags,
+    so two failing runs close together would each see no issue and open two.
+    The list also returns pull requests, which are skipped.
+    """
+
+    query = urllib.parse.urlencode({"state": "open", "labels": ",".join(TRACKING_LABELS), "per_page": 100})
+    items = request("GET", f"/repos/{repo}/issues?{query}", None)
     numbers = [
         int(item["number"])
         for item in items
@@ -217,7 +225,16 @@ def main(argv: Sequence[str] | None = None, request: Request | None = None) -> i
             parser.error("GITHUB_TOKEN is required")
         request = github_request(token)
     diff_text = args.diff_file.read_text(encoding="utf-8") if args.diff_file and args.diff_file.is_file() else ""
-    print(f"floating resolve report: {report(request, args.repo, kind, args.run_url, diff_text)}")
+    try:
+        done = report(request, args.repo, kind, args.run_url, diff_text)
+    except urllib.error.URLError as error:  # HTTPError is a subclass
+        if kind is None:
+            # The lane passed; a GitHub API hiccup must not turn it red.
+            print(f"::warning title=Floating resolve report::passing run, but the GitHub API call failed: {error}")
+            return 0
+        print(f"::error title=Floating resolve report::kind={kind}, and the GitHub API call failed: {error}")
+        return 1
+    print(f"floating resolve report: {done}")
     return 0
 
 

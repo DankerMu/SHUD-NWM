@@ -9,6 +9,7 @@ a fake that records every request.
 
 from __future__ import annotations
 
+import urllib.error
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -37,11 +38,12 @@ class FakeGitHub:
 
     def __call__(self, method: str, path: str, body: Any = None) -> Any:
         self.calls.append((method, path, body))
-        if method == "GET" and path.startswith("/search/issues?"):
-            query = parse_qs(urlsplit(path).query)["q"][0]
-            assert f"repo:{REPO}" in query and "is:issue" in query and "is:open" in query
-            # The search API matches loosely: return every open item, like a fuzzy hit list.
-            return {"items": [issue for issue in self.issues if issue["state"] == "open"]}
+        if method == "GET" and path.startswith(f"/repos/{REPO}/issues?"):
+            query = parse_qs(urlsplit(path).query)
+            assert query == {"state": ["open"], "labels": ["tech-debt,needs-followup"], "per_page": ["100"]}
+            # The list endpoint returns a bare array of open issues AND pull requests,
+            # whatever their title. (The fake does not filter by label.)
+            return [issue for issue in self.issues if issue["state"] == "open"]
         if method == "POST" and path == f"/repos/{REPO}/issues":
             issue = {"number": 9000 + len(self.issues), "state": "open", **body}
             self.issues.append(issue)
@@ -136,6 +138,17 @@ def test_tracking_issue_match_is_the_exact_title_of_an_open_issue_not_a_pull_req
     assert report.find_tracking_issue(api, REPO) == 11  # the oldest one, deterministically
 
 
+def test_tracking_issue_lookup_uses_the_consistent_list_endpoint_never_the_search_index() -> None:
+    api = FakeGitHub([_issue(41, TITLE)])
+
+    assert report.find_tracking_issue(api, REPO) == 41
+
+    ((method, path, body),) = api.calls
+    assert method == "GET" and body is None
+    assert path.startswith(f"/repos/{REPO}/issues?")
+    assert "/search/issues" not in path
+
+
 def test_injected_failure_says_so() -> None:
     api = FakeGitHub()
 
@@ -218,6 +231,26 @@ def test_report_command_writes_nothing_for_an_unclassified_failure(capsys: pytes
 
     assert api.calls == []
     assert capsys.readouterr().out.startswith("::warning ")
+
+
+def _api_down(method: str, path: str, body: Any = None) -> Any:
+    raise urllib.error.HTTPError(path, 502, "Bad Gateway", None, None)  # type: ignore[arg-type]
+
+
+def test_report_command_on_a_passing_run_only_warns_when_the_api_fails(capsys: pytest.CaptureFixture[str]) -> None:
+    assert report.main(_report_argv(), request=_api_down) == 0
+
+    out = capsys.readouterr().out
+    assert out.startswith("::warning ") and "502" in out
+
+
+def test_report_command_on_a_failing_run_exits_non_zero_when_the_api_fails(capsys: pytest.CaptureFixture[str]) -> None:
+    argv = [*_report_argv(tests="failure"), "--proj-rc", "0", "--tests-rc", "1"]
+
+    assert report.main(argv, request=_api_down) == 1
+
+    out = capsys.readouterr().out
+    assert out.startswith("::error ") and "kind=tests" in out
 
 
 def test_report_command_tolerates_a_missing_diff_file(tmp_path: Path) -> None:

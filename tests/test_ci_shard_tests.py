@@ -276,6 +276,11 @@ def _runs(job: dict[str, Any]) -> list[str]:
     return [str(step.get("run", "")) for step in job["steps"]]
 
 
+def _step_run(name: str) -> str:
+    (step,) = [step for step in _unit_test_job()["steps"] if step.get("name") == name]
+    return str(step["run"])
+
+
 def test_full_job_is_a_single_dimension_matrix_of_four_shards_that_do_not_cancel_each_other() -> None:
     strategy = _unit_test_job()["strategy"]
 
@@ -303,6 +308,9 @@ def test_shard_total_comes_from_the_matrix_and_the_list_is_written_by_its_own_co
         " > shard-files.txt"
     ) in lister
     assert "pytest" not in lister  # a failing lister fails its own step, before pytest starts
+    assert lister == _step_run("List this shard's test files")
+    # An empty list must fail here: pytest given no path would run all of `testpaths`.
+    assert "test -s shard-files.txt" in lister.splitlines()
     assert runs.index(lister) < next(index for index, run in enumerate(runs) if "pytest" in run)
 
 
@@ -320,6 +328,12 @@ def test_shard_pytest_step_reads_the_file_and_keeps_the_flags_and_marker_express
     assert "pytest tests/" not in pytest_run  # never the whole testpath in a shard
     for flag in ("-q", "--tb=short", "--durations=25", MARKER_EXPRESSION):
         assert flag in pytest_run
+    assert pytest_run == _step_run("Run full unit test suite")
+    # No command substitution at all in this step: the list comes from the file.
+    assert "$(" not in pytest_run
+    assert "`" not in pytest_run
+    assert "mapfile -t shard_files < shard-files.txt" in pytest_run
+    assert '"${shard_files[@]}"' in pytest_run
 
 
 def test_full_job_keeps_its_gate_and_prerequisite_steps() -> None:
