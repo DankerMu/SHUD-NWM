@@ -1666,7 +1666,9 @@ def test_select_tests_maps_ci_workflow_change_to_the_meta_guard_suite() -> None:
     # PR that rewrites them. Exact selection; the core-smoke fallback must not
     # arm. #2573 adds the locked-install guard and the native-PROJ regression
     # (the install it pins lives here); #2044 adds the watcher suite, whose
-    # wiring meta-test reads ci.yml's name, the full job name and its timeout.
+    # wiring meta-test reads ci.yml's name, the full job name and its timeout;
+    # #2710 adds the shard suite (matrix wiring + real-tree partition guard) and
+    # #2709 the floating-lane suite (ci.yml keeps its three locked installs).
     assert Path(CI_WORKFLOW_PATH).is_file()
 
     selected = select_tests([CI_WORKFLOW_PATH], repo_root=Path("."))
@@ -1677,6 +1679,8 @@ def test_select_tests_maps_ci_workflow_change_to_the_meta_guard_suite() -> None:
             "tests/test_ci_workflow_locked_install.py",
             "tests/test_native_proj_isolation.py",
             "tests/test_full_regression_watch.py",
+            "tests/test_ci_shard_tests.py",
+            "tests/test_floating_resolve_report.py",
         ]
     )
     assert all(Path(path).is_file() for path in selected)
@@ -21861,10 +21865,12 @@ def test_dependency_change_selects_the_native_proj_isolation_suite(changed_path:
         ".github/workflows/full-regression-watch.yml",
         ".github/workflows/governance.yml",
         "scripts/governance/entropy_audit/line_reference_baseline.json",
+        ".github/workflows/floating-resolve-report.yml",
+        "scripts/ci/full_test_durations.json",
     ],
 )
 def test_ci_gates_batch_backend_filter_literals_are_exact_and_block_scoped(literal_path: str) -> None:
-    # #2044 / #2602 / #2648: each path matched no backend pattern, so a diff
+    # #2044 / #2602 / #2648 / #2709 / #2710: each path matched no backend pattern, so a diff
     # confined to it started no targeted Unit Tests job and its meta-test never
     # ran. Exact literal inside the `backend:` block, the file exists, and no
     # broader backend glob covers it (#1571 precedent).
@@ -21884,6 +21890,7 @@ def test_ci_gates_batch_backend_filter_literals_are_exact_and_block_scoped(liter
     [
         (".github/workflows/full-regression-watch.yml", ["tests/test_full_regression_watch.py"]),
         (".github/workflows/governance.yml", ["tests/test_governance_workflow_hard_gate.py"]),
+        (".github/workflows/floating-resolve-report.yml", ["tests/test_floating_resolve_report.py"]),
     ],
 )
 def test_ci_gates_batch_workflow_routes_are_exact(changed_path: str, expected: list[str]) -> None:
@@ -21895,6 +21902,10 @@ def test_ci_gates_batch_workflow_routes_are_exact(changed_path: str, expected: l
     ("changed_path", "required"),
     [
         ("scripts/ci/full_regression_watch.py", "tests/test_full_regression_watch.py"),
+        ("scripts/ci/shard_tests.py", "tests/test_ci_shard_tests.py"),
+        ("scripts/ci/floating_resolve_report.py", "tests/test_floating_resolve_report.py"),
+        # A scripts/ path also carries the entropy hard-gate node, so `in`, not `==`.
+        ("scripts/ci/full_test_durations.json", "tests/test_ci_shard_tests.py"),
         (
             "scripts/governance/entropy_audit/line_reference_baseline.json",
             "tests/test_entropy_audit_line_references.py",

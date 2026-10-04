@@ -102,6 +102,12 @@ jobs:
               # #2648: the frozen hard-line-reference baseline. A JSON data file
               # under scripts/ matched no backend pattern. Exact literal only.
               - 'scripts/governance/entropy_audit/line_reference_baseline.json'
+              # #2709 / #2710: the floating-resolve report workflow's meta-test
+              # and the full-regression shard duration table's partition tests
+              # live in the backend lane; a workflow-only or JSON-only diff
+              # matched no backend pattern. Exact literals only.
+              - '.github/workflows/floating-resolve-report.yml'
+              - 'scripts/ci/full_test_durations.json'
             database:
               - 'db/**'
               - 'packages/common/migrate.py'
@@ -331,13 +337,27 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       (needs.changes.outputs.backend == 'true' && github.event_name == 'push')
     runs-on: ubuntu-latest
-    # 60: the suite reached a 43-min median against the old 45-min cap and was
-    # killed at 45:14 on two consecutive backend merges (#2025, #2040) with zero
-    # failures, at 99% progress. Reproduced locally at 44:32 on the same commit,
-    # so this is the suite's real length, not runner noise. Same remedy as the
-    # 20 -> 35 raise on unit-test-targeted below. --durations makes the next
-    # increment visible before it hits the wall again; see #2044.
-    timeout-minutes: 60
+    # #2710: the single job ran 39-59 min against a 60-min wall and was killed
+    # at it twice (2026-09-22, 2026-10-01). It is now a matrix: every shard runs
+    # the test files scripts/ci/shard_tests.py assigns to it, balanced by the
+    # per-file seconds in scripts/ci/full_test_durations.json. The shards are
+    # disjoint and together cover every test file pytest collects, so the test
+    # set is the one the single job ran. The shard list below is the only place
+    # the shard count is written: the step passes `strategy.job-total`, and the
+    # watcher (scripts/ci/full_regression_watch.py) derives the job names
+    # `Unit Tests (full) (<shard>)` from this matrix. Keep `name` static and the
+    # matrix one-dimensional, or those names change.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    # 30 per shard; the old 60 was NOT raised. Measured 2026-10-04 on one full
+    # local run (41.7 min as a single process, the same scale as the 39-59 min
+    # hosted runs): 2484 s of test time, 621 s (10.4 min) per shard. Projected
+    # 10-15 min per shard on a hosted runner, i.e. about half of this and far
+    # from the watcher's 80% line (24 min), which now applies to each shard.
+    # --durations=25 still names the slowest tests of every shard.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -361,12 +381,22 @@ jobs:
           sudo mkdir -p /scratch/frd_muziyao
           sudo chown "$USER:$(id -gn)" /scratch/frd_muziyao
           chmod u+rwx /scratch/frd_muziyao
+      - name: List this shard's test files
+        # Its own command writing a file, never a command substitution in
+        # pytest's arguments: a failing lister must fail this step. pytest
+        # given no path would run all of `testpaths` in every shard.
+        run: |
+          python scripts/ci/shard_tests.py --shard ${{ matrix.shard }} --total ${{ strategy.job-total }} > shard-files.txt
+          test -s shard-files.txt
+          echo "shard ${{ matrix.shard }} of ${{ strategy.job-total }}: $(wc -l < shard-files.txt) test files"
       - name: Run full unit test suite
         # -q, not -v: nothing downstream parses this log, unit-test-targeted
-        # already uses -q, and -v prints a line per test across ~16.5k tests.
+        # already uses -q, and -v prints a line per test across ~22k tests.
         # --durations=25 is the instrument: it names the slowest tests in every
         # run, so a future slowdown is attributable instead of guessed at.
-        run: pytest tests/ -q --tb=short --durations=25 -m "not e2e and not grib and not integration"
+        run: |
+          mapfile -t shard_files < shard-files.txt
+          pytest "${shard_files[@]}" -q --tb=short --durations=25 -m "not e2e and not grib and not integration"
 
   # PR merge gate: run a focused suite derived from changed files. The selector maps runtime
   # modules/config surfaces to their owning tests and falls back to core smoke tests for unknown

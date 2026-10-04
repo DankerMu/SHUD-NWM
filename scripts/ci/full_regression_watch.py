@@ -1,26 +1,36 @@
 #!/usr/bin/env python3
-"""Watch the master ``Unit Tests (full)`` job of the CI workflow (#2044).
+"""Watch the master ``Unit Tests (full)`` shards of the CI workflow (#2044, #2710).
 
 The full suite runs only after merge, on master pushes. When it is cancelled at
 the wall, or fails, nothing else turns red: PR checks were already green. This
 watcher is run by ``.github/workflows/full-regression-watch.yml`` whenever CI
 completes on master and has two subcommands.
 
-``check-run`` classifies one CI run's ``Unit Tests (full)`` job (latest attempt):
+The full regression is a matrix. "The full job" here means every shard job the
+``unit-test`` matrix of ci.yml declares: the names ``Unit Tests (full) (<shard>)``
+are derived from that matrix and compared exactly, never by prefix.
 
-* success -> exit 0;
+``check-run`` classifies one CI run's shard jobs (latest attempt):
+
+* every shard success -> exit 0;
 * skipped -> exit 0 only when the same run's ``Detect changed areas`` job
   succeeded (the path filter skipped it); any other skip comes from an upstream
-  failure -> exit 1;
-* cancelled / failure / timed_out -> exit 1 with an ``::error::`` annotation
-  carrying the SHA, the run, the job and a reason (``wall-timeout`` when the job's
-  check-run annotations say the maximum execution time was exceeded);
-* job absent -> exit 1: it was renamed and the watcher wiring is broken.
+  failure -> exit 1. The job-level ``if`` is evaluated before the matrix
+  expands, so a skip shows up either as ONE job named ``Unit Tests (full)`` or
+  as one skipped job per shard; both shapes are accepted;
+* a shard cancelled / failure / timed_out -> exit 1 with one ``::error::``
+  annotation per such shard carrying the SHA, the run, the shard job and a
+  reason (``wall-timeout`` when the job's check-run annotations say the maximum
+  execution time was exceeded);
+* a declared shard absent, or a shard job the matrix does not declare -> exit 1
+  naming it: a shard did not run, or the job was renamed and the watcher wiring
+  is broken.
 
-``margin`` reads the last successful full runs on master (at most
-``MARGIN_SAMPLE`` within ``MARGIN_WINDOW_DAYS``), takes the nearest-rank P95 of
-their durations and warns when it exceeds ``MARGIN_THRESHOLD`` of the job's
-``timeout-minutes`` in ci.yml. It always exits 0.
+``margin`` reads the last successful full runs on master that carry the shard
+jobs (at most ``MARGIN_SAMPLE`` within ``MARGIN_WINDOW_DAYS``; runs of the old
+single job are not samples), takes the nearest-rank P95 of each shard's
+durations and warns, naming the shard, when it exceeds ``MARGIN_THRESHOLD`` of
+the job's ``timeout-minutes`` in ci.yml. It always exits 0.
 
 Every invocation makes at most ``API_CALL_CAP`` GitHub API calls. Standard
 library plus PyYAML only; the token comes from ``GITHUB_TOKEN`` and the
@@ -112,43 +122,87 @@ def failure_reason(conclusion: str, annotations: Sequence[Mapping[str, Any]]) ->
     return "cancelled" if conclusion == "cancelled" else "failed"
 
 
+def _skip_verdict(jobs: Sequence[Mapping[str, Any]], sha: str, run_url: str) -> tuple[int, str]:
+    changes = _job_named(jobs, CHANGES_JOB_NAME)
+    if changes is not None and changes.get("conclusion") == "success":
+        return 0, f"::notice title={JOB_NAME} skipped by the path filter::sha={sha} run={run_url}"
+    changes_conclusion = changes.get("conclusion") if changes is not None else "absent"
+    return 1, (
+        f"::error title={JOB_NAME} skipped upstream::sha={sha} run={run_url} "
+        f"reason={CHANGES_JOB_NAME} concluded {changes_conclusion}"
+    )
+
+
+def _job_error(
+    name: str,
+    job: Mapping[str, Any],
+    sha: str,
+    run_url: str,
+    annotations_for: Callable[[Mapping[str, Any]], Sequence[Mapping[str, Any]]],
+) -> str:
+    conclusion = str(job.get("conclusion"))
+    if conclusion in FAILED_CONCLUSIONS:
+        reason = failure_reason(conclusion, annotations_for(job))
+        return (
+            f"::error title={name} {conclusion}::sha={sha} run={run_url} "
+            f"job={job.get('html_url', '?')} reason={reason}"
+        )
+    return f"::error title={name} {conclusion}::sha={sha} run={run_url} reason=unexpected-conclusion"
+
+
 def classify_run(
     run: Mapping[str, Any],
     jobs: Sequence[Mapping[str, Any]],
     annotations_for: Callable[[Mapping[str, Any]], Sequence[Mapping[str, Any]]],
+    shard_names: Sequence[str] | None = None,
 ) -> tuple[int, str]:
-    """(exit code, workflow-command line) for one CI run's full job."""
+    """(exit code, workflow-command lines) for one CI run's full-regression shards."""
 
+    expected = tuple(shard_names) if shard_names is not None else full_job_shard_names()
     sha = run.get("head_sha", "?")
     run_url = run.get("html_url", "?")
-    job = _job_named(jobs, JOB_NAME)
-    if job is None:
-        return 1, (
+    by_name = {str(job.get("name")): job for job in jobs}
+    shards = {name: by_name[name] for name in expected if name in by_name}
+    missing = [name for name in expected if name not in by_name]
+    undeclared = sorted(name for name in by_name if name.startswith(f"{JOB_NAME} (") and name not in expected)
+
+    unexpanded = by_name.get(JOB_NAME)
+    if unexpanded is not None and not shards and not undeclared:
+        # The matrix never expanded. Skipped is the path-filter shape; a failed
+        # or unknown conclusion is reported as such. A lone success falls
+        # through: one green job is not the declared shards.
+        conclusion = str(unexpanded.get("conclusion"))
+        if conclusion == "skipped":
+            return _skip_verdict(jobs, sha, run_url)
+        if conclusion != "success":
+            return 1, _job_error(JOB_NAME, unexpanded, sha, run_url, annotations_for)
+    if not missing and not undeclared and all(job.get("conclusion") == "skipped" for job in shards.values()):
+        return _skip_verdict(jobs, sha, run_url)
+
+    errors: list[str] = []
+    if missing:
+        errors.append(
             f"::error title={JOB_NAME} not found::job not found — renamed? watcher wiring broken "
-            f"(sha={sha} run={run_url})"
+            f"(sha={sha} run={run_url}) missing={', '.join(missing)}"
         )
-    conclusion = str(job.get("conclusion"))
-    if conclusion == "success":
-        return 0, f"::notice title={JOB_NAME} success::sha={sha} run={run_url}"
-    if conclusion == "skipped":
-        changes = _job_named(jobs, CHANGES_JOB_NAME)
-        if changes is not None and changes.get("conclusion") == "success":
-            return 0, f"::notice title={JOB_NAME} skipped by the path filter::sha={sha} run={run_url}"
-        changes_conclusion = changes.get("conclusion") if changes is not None else "absent"
-        return 1, (
-            f"::error title={JOB_NAME} skipped upstream::sha={sha} run={run_url} "
-            f"reason={CHANGES_JOB_NAME} concluded {changes_conclusion}"
+    if undeclared:
+        errors.append(
+            f"::error title={JOB_NAME} undeclared shard::job is not in the ci.yml matrix "
+            f"(sha={sha} run={run_url}) unexpected={', '.join(undeclared)}"
         )
-    if conclusion in FAILED_CONCLUSIONS:
-        reason = failure_reason(conclusion, annotations_for(job))
-        return 1, (
-            f"::error title={JOB_NAME} {conclusion}::sha={sha} run={run_url} "
-            f"job={job.get('html_url', '?')} reason={reason}"
-        )
-    return 1, f"::error title={JOB_NAME} {conclusion}::sha={sha} run={run_url} reason=unexpected-conclusion"
+    errors.extend(
+        _job_error(name, job, sha, run_url, annotations_for)
+        for name, job in shards.items()
+        if job.get("conclusion") != "success"
+    )
+    if errors:
+        return 1, "\n".join(errors)
+    return 0, f"::notice title={JOB_NAME} success::sha={sha} run={run_url} shards={len(expected)}"
 
 
-def check_run(fetch: Fetch, repo: str, run_id: int | None) -> tuple[int, str]:
+def check_run(
+    fetch: Fetch, repo: str, run_id: int | None, shard_names: Sequence[str] | None = None
+) -> tuple[int, str]:
     if run_id is None:
         query = urllib.parse.urlencode({"branch": "master", "event": "push", "status": "completed", "per_page": 1})
         runs = fetch(f"/repos/{repo}/actions/workflows/{CI_WORKFLOW_FILE}/runs?{query}").get("workflow_runs", [])
@@ -161,7 +215,7 @@ def check_run(fetch: Fetch, repo: str, run_id: int | None) -> tuple[int, str]:
     def annotations_for(job: Mapping[str, Any]) -> Sequence[Mapping[str, Any]]:
         return list(fetch(f"{job['check_run_url']}/annotations"))
 
-    return classify_run(run, jobs, annotations_for)
+    return classify_run(run, jobs, annotations_for, shard_names)
 
 
 def p95_nearest_rank(values: Sequence[float]) -> float:
@@ -174,35 +228,71 @@ def full_job_timeout_minutes(path: Path = CI_WORKFLOW_PATH) -> int:
     return int(workflow["jobs"][FULL_JOB_KEY]["timeout-minutes"])
 
 
+def full_job_shard_names(path: Path = CI_WORKFLOW_PATH) -> tuple[str, ...]:
+    """The job names GitHub gives the full-regression matrix: ``<name> (<shard>)``.
+
+    Read from ci.yml so the shard count lives in one place. Anything that would
+    make the names unpredictable (a templated name, a second matrix dimension,
+    ``include``/``exclude``, a computed shard list) is refused.
+    """
+
+    job = yaml.safe_load(path.read_text(encoding="utf-8"))["jobs"][FULL_JOB_KEY]
+    if job.get("name") != JOB_NAME:
+        raise ValueError(f"jobs.{FULL_JOB_KEY}.name must be the static string {JOB_NAME!r}, got {job.get('name')!r}")
+    matrix = (job.get("strategy") or {}).get("matrix")
+    if not isinstance(matrix, dict) or list(matrix) != ["shard"]:
+        raise ValueError(f"jobs.{FULL_JOB_KEY}.strategy.matrix must have exactly one dimension, `shard`")
+    values = matrix["shard"]
+    if not isinstance(values, list) or not values or not all(type(value) in (int, str) for value in values):
+        raise ValueError(f"jobs.{FULL_JOB_KEY}.strategy.matrix.shard must be a non-empty literal list")
+    return tuple(f"{JOB_NAME} ({value})" for value in values)
+
+
 def _minutes(job: Mapping[str, Any]) -> float:
     started = datetime.fromisoformat(str(job["started_at"]).replace("Z", "+00:00"))
     completed = datetime.fromisoformat(str(job["completed_at"]).replace("Z", "+00:00"))
     return (completed - started).total_seconds() / 60
 
 
-def margin_line(durations: Sequence[float], timeout_minutes: int, note: str = "") -> str:
+def margin_line(durations: Sequence[float], timeout_minutes: int, note: str = "", name: str = JOB_NAME) -> str:
     suffix = f"; {note}" if note else ""
     if not durations:
-        return f"::notice title={JOB_NAME} margin::no successful runs found (n=0){suffix}"
+        return f"::notice title={name} margin::no successful runs found (n=0){suffix}"
     p95 = p95_nearest_rank(durations)
     shape = f"P95={p95:.1f}min"
     if p95 > MARGIN_THRESHOLD * timeout_minutes:
         return (
-            f"::warning title={JOB_NAME} margin::{shape} > {MARGIN_THRESHOLD:.0%} of {timeout_minutes}min "
+            f"::warning title={name} margin::{shape} > {MARGIN_THRESHOLD:.0%} of {timeout_minutes}min "
             f"(n={len(durations)}){suffix}"
         )
     return (
-        f"::notice title={JOB_NAME} margin::{shape} <= {MARGIN_THRESHOLD:.0%} of {timeout_minutes}min "
+        f"::notice title={name} margin::{shape} <= {MARGIN_THRESHOLD:.0%} of {timeout_minutes}min "
         f"(n={len(durations)}){suffix}"
     )
 
 
-def successful_full_durations(fetch: Fetch, repo: str, now: datetime) -> tuple[list[float], str]:
-    """Durations of the newest successful full jobs, and a note if the scan was cut short."""
+def margin_lines(per_shard: Mapping[str, Sequence[float]], timeout_minutes: int, note: str = "") -> list[str]:
+    """One margin line per shard; a single n=0 notice when no sharded run was found."""
 
+    if not any(per_shard.values()):
+        return [margin_line([], timeout_minutes, note)]
+    return [margin_line(durations, timeout_minutes, note, name) for name, durations in per_shard.items()]
+
+
+def successful_shard_durations(
+    fetch: Fetch, repo: str, now: datetime, shard_names: Sequence[str] | None = None
+) -> tuple[dict[str, list[float]], str]:
+    """Per-shard durations of the newest successful sharded runs, and a note if the scan was cut short.
+
+    A run is a sample only when it carries every declared shard job and all of
+    them succeeded; a run of the old single job is ignored.
+    """
+
+    expected = tuple(shard_names) if shard_names is not None else full_job_shard_names()
     since = (now - timedelta(days=MARGIN_WINDOW_DAYS)).date().isoformat()
     runs: list[Mapping[str, Any]] = []
-    durations: list[float] = []
+    per_shard: dict[str, list[float]] = {name: [] for name in expected}
+    samples = 0
     note = ""
     try:
         page = 1
@@ -223,19 +313,24 @@ def successful_full_durations(fetch: Fetch, repo: str, now: datetime) -> tuple[l
                 break
             page += 1
         for run in sorted(runs, key=lambda item: str(item["created_at"]), reverse=True):
-            if len(durations) >= MARGIN_SAMPLE:
+            if samples >= MARGIN_SAMPLE:
                 break
-            job = _job_named(_jobs(fetch, repo, int(run["id"])), JOB_NAME)
-            if job is not None and job.get("conclusion") == "success":
-                durations.append(_minutes(job))
+            jobs = _jobs(fetch, repo, int(run["id"]))
+            shards = [job for name in expected if (job := _job_named(jobs, name)) is not None]
+            if len(shards) == len(expected) and all(job.get("conclusion") == "success" for job in shards):
+                samples += 1
+                for name, job in zip(expected, shards, strict=True):
+                    per_shard[name].append(_minutes(job))
     except ApiCallCapReached as exc:
         note = str(exc)
-    return durations, note
+    return per_shard, note
 
 
-def margin(fetch: Fetch, repo: str, timeout_minutes: int, now: datetime) -> str:
-    durations, note = successful_full_durations(fetch, repo, now)
-    return margin_line(durations, timeout_minutes, note)
+def margin(
+    fetch: Fetch, repo: str, timeout_minutes: int, now: datetime, shard_names: Sequence[str] | None = None
+) -> str:
+    per_shard, note = successful_shard_durations(fetch, repo, now, shard_names)
+    return "\n".join(margin_lines(per_shard, timeout_minutes, note))
 
 
 def _parse_run_id(value: str) -> int | None:
@@ -251,9 +346,9 @@ def main(argv: Sequence[str] | None = None, fetch: Fetch | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY", ""))
     commands = parser.add_subparsers(dest="command", required=True)
-    check = commands.add_parser("check-run", help="classify one CI run's full job")
+    check = commands.add_parser("check-run", help="classify one CI run's full-regression shards")
     check.add_argument("--run-id", default="", help="CI run id; empty = newest completed master push run")
-    commands.add_parser("margin", help="warn when the full job's P95 nears its timeout")
+    commands.add_parser("margin", help="warn when a shard's P95 nears the job timeout")
     args = parser.parse_args(argv)
     if not args.repo:
         parser.error("--repo or GITHUB_REPOSITORY is required")

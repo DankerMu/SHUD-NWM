@@ -1102,12 +1102,27 @@ LINE_REFERENCE_TEST = "tests/test_entropy_audit_line_references.py"
 CI_LOCKED_INSTALL_TEST = "tests/test_ci_workflow_locked_install.py"
 NATIVE_PROJ_ISOLATION_TEST = "tests/test_native_proj_isolation.py"
 
-# #2044: the master full-regression watcher. Its suite reads ci.yml's top-level
-# name, the `unit-test` job name and its timeout-minutes, so a ci.yml change
-# re-proves the wiring too.
+# #2044 / #2710: the master full-regression watcher. Its suite reads ci.yml's
+# top-level name, the `unit-test` job name, its shard matrix (the watcher derives
+# the shard job names `Unit Tests (full) (<shard>)` from it) and the per-shard
+# timeout-minutes, so a ci.yml change re-proves the wiring too.
 FULL_REGRESSION_WATCH_WORKFLOW_PATH = ".github/workflows/full-regression-watch.yml"
 FULL_REGRESSION_WATCH_SCRIPT_PATH = "scripts/ci/full_regression_watch.py"
 FULL_REGRESSION_WATCH_TEST = "tests/test_full_regression_watch.py"
+
+# #2710: the full regression runs as shards. The partition script, its checked-in
+# duration table (a JSON data file with no import closure) and the ci.yml matrix
+# wiring are proven by one suite, which also asserts on the real tree that the
+# shards are disjoint and cover every collected test file.
+FULL_REGRESSION_SHARD_SCRIPT_PATH = "scripts/ci/shard_tests.py"
+FULL_REGRESSION_SHARD_DURATIONS_PATH = "scripts/ci/full_test_durations.json"
+FULL_REGRESSION_SHARD_TEST = "tests/test_ci_shard_tests.py"
+
+# #2709: the weekly floating-resolve report lane (schedule + manual dispatch
+# only, never a merge gate). Its workflow and its report script share one suite.
+FLOATING_RESOLVE_WORKFLOW_PATH = ".github/workflows/floating-resolve-report.yml"
+FLOATING_RESOLVE_SCRIPT_PATH = "scripts/ci/floating_resolve_report.py"
+FLOATING_RESOLVE_TEST = "tests/test_floating_resolve_report.py"
 
 # #2602: the governance workflow's separate hard-gate job and the untouched
 # report-only job are pinned by this meta-test.
@@ -6408,9 +6423,17 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # #2573: the locked-install guard and the native-PROJ regression.
             CI_LOCKED_INSTALL_TEST,
             NATIVE_PROJ_ISOLATION_TEST,
-            # #2044: the watcher's wiring meta-test reads ci.yml's name, the
-            # `unit-test` job name and its timeout-minutes.
+            # #2044 / #2710: the watcher's wiring meta-test reads ci.yml's name,
+            # the `unit-test` job name, its shard matrix and the per-shard
+            # timeout-minutes.
             FULL_REGRESSION_WATCH_TEST,
+            # #2710: the shard matrix wiring (static name, `strategy.job-total`,
+            # no command substitution into pytest) and the real-tree partition
+            # completeness guard.
+            FULL_REGRESSION_SHARD_TEST,
+            # #2709: the floating lane's suite pins that ci.yml keeps its three
+            # locked installs and never calls the floating resolve.
+            FLOATING_RESOLVE_TEST,
         ),
     ),
     PathTestRule(
@@ -6422,6 +6445,26 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         FULL_REGRESSION_WATCH_SCRIPT_PATH,
         (FULL_REGRESSION_WATCH_TEST,),
+    ),
+    PathTestRule(
+        # #2710: the shard partition script.
+        FULL_REGRESSION_SHARD_SCRIPT_PATH,
+        (FULL_REGRESSION_SHARD_TEST,),
+    ),
+    PathTestRule(
+        # #2710: the shard duration table. Exact ci.yml backend literal.
+        FULL_REGRESSION_SHARD_DURATIONS_PATH,
+        (FULL_REGRESSION_SHARD_TEST,),
+    ),
+    PathTestRule(
+        # #2709: the floating-resolve workflow (exact ci.yml backend literal)
+        # and its report script.
+        FLOATING_RESOLVE_WORKFLOW_PATH,
+        (FLOATING_RESOLVE_TEST,),
+    ),
+    PathTestRule(
+        FLOATING_RESOLVE_SCRIPT_PATH,
+        (FLOATING_RESOLVE_TEST,),
     ),
     PathTestRule(
         # #2602: the hard-gate job meta-test. Exact ci.yml backend literal.
