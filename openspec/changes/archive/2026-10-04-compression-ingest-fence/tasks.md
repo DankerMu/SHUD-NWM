@@ -18,7 +18,9 @@ Fixture level: expanded. Risk packs: db-concurrency, production-ops. design.md i
 - [x] 7 Runbook section, lifecycle-lock docstring, selector `PATH_TEST_RULES`.
 - [x] 8 `uv run ruff check .`, the touched unit suites, `tests/test_select_ci_tests.py`, the hard-gate CLI exits 0, and `openspec validate --strict`.
 - [x] 9 Orchestrator, on node-27: real-DB pytest (`-m "integration and timescaledb_210"` for the new tests, plus the touched DB suites) in an isolated worktree.
-- [ ] 10 Orchestrator, after merge: node-27 `git pull --ff-only`. Run a manual compression tick while ingest is live, re-compress `_hyper_9_213_chunk` and `_hyper_9_206_chunk`, confirm there is no `deadlock detected` in the PG log, and record the receipt.
+- [x] 10 Orchestrator, after merge: node-27 `git pull --ff-only`. Run a manual compression tick while ingest is live, re-compress `_hyper_9_213_chunk` and `_hyper_9_206_chunk`, confirm there is no `deadlock detected` in the PG log, and record the receipt.
+  - Receipt (node-27 at dbf936fc4, 2026-10-04, schema 2.2, bound 2, fence_wait_ms 900000): tick 1 (finished 17:54 CST) committed `_hyper_9_217_chunk` and `_hyper_9_213_chunk`, each with fence wait 1 ms; outcome clean. Tick 2 (17:54:49 to 18:37:12 CST) committed `_hyper_9_206_chunk` with fence wait 224955 ms, because it waited for live parser INSERT transactions holding the shared river fence. It also committed `_hyper_9_202_chunk` (fence 1 ms). Outcome clean, deferred 0, systemd Result=success.
+  - `pg_stat_database.deadlocks` for `nhms` stayed at 3, the pre-tick value from the 14:36 incidents. `deadlock detected` appears 0 times in the nhms-db log after 17:50 CST. `COMPRESSION_FENCE_BUSY` appears 0 times in the autopipe log, and there were no parser run failures.
 
 ## Evidence Floor
 - Real-DB red/green on node-27, or documented red attempts.
