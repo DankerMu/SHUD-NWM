@@ -47,9 +47,9 @@
 - [x] 4.1 `uv run ruff check .`
 - [x] 4.2 `uv run pytest -q tests/ -k "tile or mvt"` and `uv run pytest -q tests/test_list_search_contract.py
       tests/test_display_mvt_cold_admission.py tests/test_select_ci_tests.py tests/test_forecast_api.py` + new test files.
-- [ ] 4.5 CI `real-db-integration` ("SQL Migration Dry Run") PASSED (not skipped) on the non-draft PR head.
+- [x] 4.5 CI `real-db-integration` ("SQL Migration Dry Run") PASSED (not skipped) on the non-draft PR head.
 - [x] 4.3 `openspec validate harden-display-read-path-statement-timeouts --strict --no-interactive`
-- [ ] 4.4 CI green.
+- [x] 4.4 CI green.
 
 ## Evidence Floor deviation: node-27 real-DB receipt 待链路恢复后补
 

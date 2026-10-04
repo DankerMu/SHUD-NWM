@@ -2,7 +2,9 @@
 
 ## Purpose
 Preserve display connection capacity for cached tiles and catalog requests by bounding cold MVT generation, releasing checkouts during waits, and binding the joint configuration cutover to live acceptance evidence and exact rollback state.
+
 ## Requirements
+
 ### Requirement: Cold generation preserves fast-request capacity
 Every MVT route SHALL use a process-wide bounded cold admission gate with effective limit strictly less than its display pool connection ceiling. A rejected request and a request waiting for same-key generation SHALL NOT retain a checked-out DB connection. An admitted request SHALL release its DB transaction before returning its permit. Cache hits SHALL not consume a cold permit. Existing identity, cache, permission and business-error contracts SHALL remain unchanged.
 
@@ -33,3 +35,14 @@ The A and #2346 step-two configuration/code cutover SHALL be a single deployment
 - **WHEN** the candidate is deployed
 - **THEN** pool 8+8 and 2 workers are capacity-admitted, cold limit 8 and role timeout=30s/parallel ceiling=2 take effect together, display write denial and disabled Slurm remain enforced, and recorded prior code/env/role settings can be restored together.
 
+### Requirement: Cold generation statement timeout is a retryable busy response
+
+When a statement executed inside the cold generation gate is cancelled with SQLSTATE `57014`, the MVT route SHALL respond 503 `MVT_COLD_GENERATION_BUSY` with the same `Retry-After` and `Cache-Control: no-store` headers as a saturated gate, SHALL release its permit and DB checkout, SHALL NOT write any cache entry, and SHALL log a WARNING that distinguishes the timeout from gate saturation. Any other exception, including an `OperationalError` with a different or absent SQLSTATE, SHALL propagate unchanged.
+
+#### Scenario: Producer cancelled by statement timeout
+- **WHEN** the tile producer raises `sqlalchemy.exc.OperationalError` whose `orig.pgcode` is `57014`
+- **THEN** the response is 503 `MVT_COLD_GENERATION_BUSY` with `Retry-After: 1`, the permit is available to the next request, and no cache write happened
+
+#### Scenario: Database unreachable
+- **WHEN** the tile producer raises `sqlalchemy.exc.OperationalError` whose `orig.pgcode` is `08006` or absent
+- **THEN** the same `OperationalError` propagates and no 503 busy response is produced
