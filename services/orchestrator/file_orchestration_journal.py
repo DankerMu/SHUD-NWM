@@ -494,6 +494,12 @@ _RECONCILE_INVENTORY_ROLLBACK_PREP_SCHEMA_VERSION = (
     "nhms.scheduler.reconcile_inventory_rollback_preparation.v2"
 )
 _RECONCILE_INVENTORY_ROLLBACK_PREP_RECEIPT = "reconcile-inventory-rollback-preparation-v2.json"
+# #2660: the receipt is rewritten on status transitions and its key set is
+# exact, so the quiescence fence instant lives in this sidecar's st_mtime_ns —
+# the same filesystem clock the compared journal mtimes come from.  Not
+# dot-prefixed: the migration temp-residue sweep rejects unknown dot entries
+# under the receipt prefixes (on older code too).
+_RECONCILE_INVENTORY_ROLLBACK_FENCE_SIDECAR = "reconcile-inventory-rollback-fence-v1"
 _RECONCILE_INVENTORY_ROLLFORWARD_SCHEMA_VERSION = (
     "nhms.scheduler.reconcile_inventory_rollforward.v1"
 )
@@ -2504,6 +2510,21 @@ class FileOrchestrationJournalRepository:
             )
         prepared = self._validated_reconcile_inventory_rollback_receipt(fence)
         prepared_at = _coerce_datetime(prepared["prepared_at"], field="prepared_at").timestamp()
+        # #2660: compare filesystem clock with filesystem clock.  No sidecar
+        # (receipt prepared by older code) keeps the wall-clock comparison.
+        fence_mtime_ns: int | None
+        try:
+            fence_mtime_ns = stat_no_follow(
+                self.root / _RECONCILE_INVENTORY_ROLLBACK_FENCE_SIDECAR,
+                containment_root=self.root,
+            ).st_mtime_ns
+        except FileNotFoundError:
+            fence_mtime_ns = None
+        except (OSError, SafeFilesystemError) as error:
+            raise FileOrchestrationJournalError(
+                "file_journal_quiescence_authority_changed",
+                field="reconcile_inventory_rollback_fence",
+            ) from error
         budget = _RecordBudget(max(self.max_records, 1), "rollback_scope_records")
         records: dict[str, dict[str, Any]] = {}
         selected_signatures: dict[Path, Any] = {}
@@ -2522,7 +2543,10 @@ class FileOrchestrationJournalRepository:
                     "file_journal_quiescence_authority_changed",
                     field=str(_relative_evidence(path, self.root)),
                 )
-            changed = metadata.st_mtime >= prepared_at
+            if fence_mtime_ns is not None:
+                changed = metadata.st_mtime_ns >= fence_mtime_ns
+            else:
+                changed = metadata.st_mtime >= prepared_at
             if changed:
                 selected_signatures[path] = before
             return changed
@@ -8511,6 +8535,14 @@ class FileOrchestrationJournalRepository:
                             "file_journal_rollback_preparation_unavailable",
                             field="reconcile_inventory_rollforward_receipt",
                         ) from error
+                # #2660: only this fresh path takes a fence.  Replace any orphan
+                # sidecar (it would pin the fence at an old instant) immediately
+                # before the wall-clock instant, so the fence never trails it.
+                self._require_scheduler_lease_guard(scheduler_lease_guard)
+                self._atomic_write_bytes_unlocked(
+                    self.root / _RECONCILE_INVENTORY_ROLLBACK_FENCE_SIDECAR,
+                    b"",
+                )
                 prepared_at = _format_utc(_utcnow())
                 preflight = {
                     "scheduler_state": scheduler_state,
@@ -8724,6 +8756,12 @@ class FileOrchestrationJournalRepository:
                 self._require_scheduler_lease_guard(scheduler_lease_guard)
                 try:
                     unlink_no_follow(fence_path, containment_root=self.root)
+                    # Receipts prepared by older code have no sidecar.
+                    unlink_no_follow(
+                        self.root / _RECONCILE_INVENTORY_ROLLBACK_FENCE_SIDECAR,
+                        containment_root=self.root,
+                        missing_ok=True,
+                    )
                 except (FileNotFoundError, OSError, SafeFilesystemError) as error:
                     raise FileOrchestrationJournalError(
                         "file_journal_rollforward_fence_consume_failed",

@@ -10746,6 +10746,184 @@ def test_file_journal_rollback_scope_iteration_tolerates_continuation_segments(
     assert [job.job_id for job in repository.query_rollback_unsettled_jobs()] == ["job_continuation"]
 
 
+_ROLLBACK_FENCE_SIDECAR = "reconcile-inventory-rollback-fence-v1"
+_ROLLBACK_PREP_RECEIPT = "reconcile-inventory-rollback-preparation-v2.json"
+
+
+def _prepare_rollback_fence(journal_root: Path, workspace: Path) -> dict[str, Any]:
+    from services.orchestrator.file_orchestration_migration import prepare_file_journal_rollback
+
+    workspace.mkdir(exist_ok=True)
+    return prepare_file_journal_rollback(
+        journal_root=journal_root,
+        workspace_root=workspace,
+        scheduler_state="stopped",
+        active_scheduler_processes=0,
+        checked_at=datetime.now(UTC),
+        checked_by="issue-2660-rollback-fence",
+        target_writer_generation="a" * 40,
+    )
+
+
+def _prepared_at_ns(receipt: Mapping[str, Any]) -> int:
+    prepared_at = _dt(receipt["prepared_at"])
+    return int(prepared_at.replace(microsecond=0).timestamp()) * 10**9 + (
+        prepared_at.microsecond * 1000
+    )
+
+
+def _write_rollback_scope_segments(
+    journal_root: Path,
+    *,
+    older_mtime_ns: int,
+    newer_mtime_ns: int,
+) -> None:
+    """Two unsettled rows: ``job_older`` in the base segment, ``job_newer`` in ``.1``."""
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    cycle_segment = format_cycle_time(cycle_time)
+    for name, job_id, mtime_ns, sequence in (
+        (f"{cycle_segment}.jsonl", "job_older", older_mtime_ns, 1),
+        (f"{cycle_segment}.1.jsonl", "job_newer", newer_mtime_ns, 2),
+    ):
+        path = journal_root / "journal" / "gfs" / name
+        _write_jsonl(
+            path,
+            [
+                _segment_job_record(
+                    cycle_time,
+                    job_id=job_id,
+                    sequence=sequence,
+                    status="reserved",
+                    slurm_job_id=None,
+                    idempotency_key=f"gfs:gfs_2026062800:model_a:{job_id}",
+                )
+            ],
+        )
+        os.utime(path, ns=(mtime_ns, mtime_ns))
+
+
+def test_file_journal_rollback_fence_compares_filesystem_clock_on_coarse_mtime(
+    tmp_path: Path,
+) -> None:
+    """#2660 — the fence and the compared mtimes share the filesystem clock.
+
+    Coarse-mtime shape: the fence was taken at T on the filesystem clock while
+    wall-clock ``prepared_at`` reads T + 5 ms, and an old writer appends a
+    continuation segment stamped T + 1 ms. Counterfactual: the wall-clock
+    comparison drops that segment as history and its reserved job escapes
+    quiescence. A file at T - 60 s stays excluded.
+    """
+    journal_root = tmp_path / "journal"
+    assert FileOrchestrationJournalRepository(journal_root).query_inflight_jobs() == []
+    receipt = _prepare_rollback_fence(journal_root, tmp_path / "workspace")
+    fence_ns = _prepared_at_ns(receipt) - 5_000_000
+    sidecar = journal_root / _ROLLBACK_FENCE_SIDECAR
+    sidecar.touch()
+    os.utime(sidecar, ns=(fence_ns, fence_ns))
+    _write_rollback_scope_segments(
+        journal_root,
+        older_mtime_ns=fence_ns - 60 * 10**9,
+        newer_mtime_ns=fence_ns + 1_000_000,
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    assert [job.job_id for job in repository.query_rollback_unsettled_jobs()] == ["job_newer"]
+
+
+def test_file_journal_rollback_receipt_without_fence_sidecar_keeps_wall_clock(
+    tmp_path: Path,
+) -> None:
+    """#2660 — a receipt prepared by older code has no sidecar and still works."""
+    journal_root = tmp_path / "journal"
+    assert FileOrchestrationJournalRepository(journal_root).query_inflight_jobs() == []
+    receipt = _prepare_rollback_fence(journal_root, tmp_path / "workspace")
+    (journal_root / _ROLLBACK_FENCE_SIDECAR).unlink(missing_ok=True)
+    prepared_ns = _prepared_at_ns(receipt)
+    _write_rollback_scope_segments(
+        journal_root,
+        older_mtime_ns=prepared_ns - 1_000_000,
+        newer_mtime_ns=prepared_ns + 1_000_000,
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    assert set(receipt) == {
+        "schema_version",
+        "receipt_id",
+        "status",
+        "prepared_at",
+        "preflight",
+        "invalidated_marker",
+        "journal_root_identity",
+        "scheduler_lease_identity",
+    }
+    assert repository.current_generation_scheduler_rollback_blocker() == {
+        "reason": "file_journal_rollback_fence_prepared",
+        "receipt_id": receipt["receipt_id"],
+    }
+    assert [job.job_id for job in repository.query_rollback_unsettled_jobs()] == ["job_newer"]
+
+
+@pytest.mark.parametrize("resume_path", ["prepared_receipt", "preparing_receipt_with_marker"])
+def test_file_journal_rollback_resume_does_not_move_fence_sidecar(
+    tmp_path: Path,
+    resume_path: str,
+) -> None:
+    """#2660 — only a fresh prepare takes a fence; both resume paths keep it."""
+    journal_root = tmp_path / "journal"
+    workspace = tmp_path / "workspace"
+    assert FileOrchestrationJournalRepository(journal_root).query_inflight_jobs() == []
+    receipt = _prepare_rollback_fence(journal_root, workspace)
+    sidecar = journal_root / _ROLLBACK_FENCE_SIDECAR
+    assert sidecar.is_file()
+    pinned_ns = _prepared_at_ns(receipt) - 3600 * 10**9
+    os.utime(sidecar, ns=(pinned_ns, pinned_ns))
+    if resume_path == "preparing_receipt_with_marker":
+        # Crash after the preparing receipt became durable, before the
+        # migration marker was consumed (``status`` is outside the signed hash).
+        (journal_root / _ROLLBACK_PREP_RECEIPT).write_text(
+            json.dumps({**receipt, "status": "preparing"}), encoding="utf-8"
+        )
+        (journal_root / "reconcile-inventory-migration-v1.json").write_text(
+            json.dumps(receipt["invalidated_marker"]), encoding="utf-8"
+        )
+
+    resumed = _prepare_rollback_fence(journal_root, workspace)
+
+    assert resumed["receipt_id"] == receipt["receipt_id"]
+    assert resumed["status"] == "prepared"
+    assert sidecar.stat().st_mtime_ns == pinned_ns
+
+
+def test_file_journal_rollback_fresh_prepare_replaces_orphan_fence_sidecar(
+    tmp_path: Path,
+) -> None:
+    """#2660 — an orphan sidecar must not pin the fence at an old instant.
+
+    The orphan is present before the first ensure-migrated pass too, so this
+    also covers ensure-migrated and prepare tolerating the root entry.
+    """
+    journal_root = tmp_path / "journal"
+    journal_root.mkdir()
+    sidecar = journal_root / _ROLLBACK_FENCE_SIDECAR
+    sidecar.write_bytes(b"orphan")
+    orphan_ns = (int(time.time()) - 3600) * 10**9
+    os.utime(sidecar, ns=(orphan_ns, orphan_ns))
+    assert FileOrchestrationJournalRepository(journal_root).query_inflight_jobs() == []
+
+    _prepare_rollback_fence(journal_root, tmp_path / "workspace")
+
+    fence_ns = sidecar.stat().st_mtime_ns
+    assert fence_ns > orphan_ns + 3000 * 10**9
+    # History between the orphan instant and the new fence stays excluded.
+    _write_rollback_scope_segments(
+        journal_root,
+        older_mtime_ns=orphan_ns + 1_000_000,
+        newer_mtime_ns=fence_ns,
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+    assert [job.job_id for job in repository.query_rollback_unsettled_jobs()] == ["job_newer"]
+
+
 def test_file_journal_backfill_replays_segments_in_segment_order(tmp_path: Path) -> None:
     """2.13 — the reconcile inventory follows segment order, not path order.
 
