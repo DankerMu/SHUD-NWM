@@ -408,9 +408,12 @@ tile_layer` 加整段 SQL）：
 - **探测频率**：每个进程里每个 engine **一次**，结果缓存到进程退出；不是每请求一次。
   2 个 uvicorn worker 即 2 次（并发的首批冷请求可能各探一次，只读、幂等）。
 - **不可写**：冷 miss 不向这两张表发任何 `INSERT`/`UPDATE`，只写
-  `NHMS_MVT_FILE_CACHE_DIR`，`cache_status` 仍为 `miss`。日志有一条 INFO
-  `MVT DB tile cache writes are off for this engine ...`（logger `services.tiles.mvt`），
-  这是生产的正常模式，不是告警。
+  `NHMS_MVT_FILE_CACHE_DIR`，`cache_status` 仍为 `miss`。这是生产的正常模式，不是告警。
+  代码在此发一条 INFO `MVT DB tile cache writes are off for this engine ...`，但生产上
+  **不会**写进 `/tmp/display-api.log`：`apps/api/main.py::_install_api_log_handler` 只给
+  `apps.api` logger 树挂 handler，`services.tiles.mvt` 不在其下，INFO 被丢弃。只读模式以下方
+  验收为准（PG 日志 `permission denied for table tile_layer` 计数为 0 且新增 `.pbf` > 0），
+  不要去 API 日志里找这条 INFO。
 - **授权变更需要重启**：给 display 角色 `GRANT`（或 `REVOKE`）这两张表的写权限后，
   已运行的进程仍沿用旧判定；必须按上文 same-window restart 重启 display API 才生效。
   `REVOKE` 后未重启的进程会继续尝试写入并被 PG 拒绝（回退文件缓存，功能不受影响，
@@ -418,7 +421,10 @@ tile_layer` 加整段 SQL）：
 - **探测失败**：探测抛错、无行或返回非布尔值时按"不可写"处理，降级到文件缓存，并记
   **一条** WARNING `MVT DB tile cache write-privilege probe failed ...` /
   `... returned ... instead of a boolean`；同样缓存到进程重启。看到这条 WARNING 应排查
-  DB 连接或 catalog，而不是忽略。
+  DB 连接或 catalog，而不是忽略。同样因为 `services.tiles.mvt` 不在 `apps.api` logger 树下，
+  它经 `logging.lastResort` 落到 stderr（即 `/tmp/display-api.log`），是**不带时间戳和
+  logger 名的裸消息行**：按消息文本检索（`grep "write-privilege probe" /tmp/display-api.log`），
+  不要按 logger 名。
 - **读路径不变**：`map.tile_cache` 的 SELECT 不受探测影响，只读角色读取其它角色写入的
   DB 缓存仍是合法模式。
 
