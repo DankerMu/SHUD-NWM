@@ -75,7 +75,7 @@
       `uv run pytest -q tests/test_file_orchestration_journal.py -k rollback`, `uv run pytest -q tests/test_shud_runtime.py -k "checksum or tsd_forc or forcing"`,
       plus every test file added by 1-4.
 - [x] 5.3 `openspec validate scheduler-held-exits-and-stall-probe --strict --no-interactive`
-- [ ] 5.4 CI green.
+- [x] 5.4 CI green.
 
 ## Evidence Floor deviation
 
