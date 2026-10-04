@@ -1473,6 +1473,10 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_orchestrator_demote_core_cas.py",
         "tests/test_orchestrator_demote_projection_faults.py",
         "tests/test_orchestrator_demote_reclaim_lifecycle.py",
+        # #2682: the forcing absence-exit suite rides the same directory rule
+        # (reconcile.py, reservation.py and forcing_submit_identity.py importer
+        # gaps). ~3s.
+        "tests/test_orchestrator_demote_reserved_job_forcing.py",
         # #1627: services/** is a path-canonicalisation family-guard root, so the
         # guard rides every source under it — a supplemental rider, not a rule
         # target. It sorts here, between the demote and pipeline suites.
@@ -16028,6 +16032,8 @@ def test_bind_helper_rule_selects_its_consumers_exactly() -> None:
         "tests/test_operator_action_listing_held_reservations.py",
         # #2675: the forcing bind suite imports the held-forcing builder.
         "tests/test_orchestrator_bind_reserved_job_forcing.py",
+        # #2682: so does the forcing absence-exit suite.
+        "tests/test_orchestrator_demote_reserved_job_forcing.py",
         SELECTOR_META_GUARD_TEST,
     }
 
@@ -16103,6 +16109,8 @@ def test_gateway_reconcile_helper_rules_select_their_partitions_exactly() -> Non
         "tests/test_operator_action_listing_held_reservations.py",
         # #2675: the forcing bind suite reaches it through the bind helper module.
         "tests/test_orchestrator_bind_reserved_job_forcing.py",
+        # #2682: so does the forcing absence-exit suite.
+        "tests/test_orchestrator_demote_reserved_job_forcing.py",
     } | {SELECTOR_META_GUARD_TEST}
 
     selected_writer = set(select_tests(["tests/gateway_reconcile_writer_helpers.py"], repo_root=Path(".")))

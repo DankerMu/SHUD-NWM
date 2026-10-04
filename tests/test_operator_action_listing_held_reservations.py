@@ -579,3 +579,15 @@ def test_the_serialized_reserved_unbound_outcome_carries_the_durable_attempt_anc
     assert "submission_attempt_started_at" not in scheduler_runtime._restart_reconcile_attempt_evidence(
         repository, JOB_ID
     )
+
+
+def test_the_help_text_routes_a_forcing_master_with_no_job_to_the_demote_command() -> None:
+    # #2682: "no job found" is not a listing dimension, so the mapping and the
+    # command set stay as they are and only the guidance names the exit.
+    help_text = operator_action_listing.LIST_OPERATOR_ACTIONS_HELP
+    assert (
+        "if sacct and squeue show no master carrying its attempt comment, the exit is "
+        "demote-reserved-job (#2682)" in help_text
+    )
+    assert "demote-reserved-job" not in HELD_RESERVATION_OPERATOR_COMMANDS
+    assert HELD_RESERVATION_OPERATOR_COMMANDS == frozenset(("bind-reserved-job", "triage", "escalate"))

@@ -1488,6 +1488,9 @@ ORCHESTRATOR_CLI_IMPORTER_TESTS: tuple[str, ...] = (
     # lane suite binds through `cli.main`. DB-free, together ~70 tests in ~6s.
     "tests/test_orchestrator_bind_reserved_job_forcing.py",
     "tests/test_orchestrator_bind_reserved_job_forcing_lane.py",
+    # #2682: the forcing absence-exit suite top-level-imports `cli` and drives
+    # `demote-reserved-job` through both entrypoints. DB-free, ~57 tests in ~3s.
+    "tests/test_orchestrator_demote_reserved_job_forcing.py",
 )
 
 # #1748 recovery-CLI helper extraction: the shared
@@ -1566,6 +1569,10 @@ FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     # restart reconcile, the bind and inflight projection. DB-free, ~6s.
     "tests/test_orchestrator_bind_reserved_job_forcing.py",
     "tests/test_orchestrator_bind_reserved_job_forcing_lane.py",
+    # #2682: the forcing absence-exit suite's subject is this module's forcing
+    # branch of `demote_operator_verified_reserved_job` (CAS, named refusals,
+    # the row + audit-event append). DB-free, ~3s.
+    "tests/test_orchestrator_demote_reserved_job_forcing.py",
     # #2674: the shape (c) writer-guard suite's subject is this module's
     # `_write_pipeline_job_unlocked` entry refusal and its record-level append
     # funnels, driven through every public writer. DB-free, ~46 tests in ~1s.
@@ -2320,6 +2327,8 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             # #2675: the forcing bind suite imports the held-forcing builder at
             # file level.
             "tests/test_orchestrator_bind_reserved_job_forcing.py",
+            # #2682: so does the forcing absence-exit suite.
+            "tests/test_orchestrator_demote_reserved_job_forcing.py",
         ),
     ),
     PathTestRule(
@@ -2413,6 +2422,9 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             # #2675: the forcing bind suite reaches it the same way (file-level
             # bind helper import) and calls it function-locally.
             "tests/test_orchestrator_bind_reserved_job_forcing.py",
+            # #2682: the forcing absence-exit suite reaches it through the same
+            # file-level bind helper import.
+            "tests/test_orchestrator_demote_reserved_job_forcing.py",
         ),
     ),
     PathTestRule(
@@ -3468,6 +3480,12 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # tuples. DB-free, together ~6s.
             "tests/test_orchestrator_bind_reserved_job_forcing.py",
             "tests/test_orchestrator_bind_reserved_job_forcing_lane.py",
+            # #2682: the forcing absence-exit suite. Its importer gaps on
+            # `services.orchestrator` itself, accepted_submit_identity.py,
+            # forcing_submit_identity.py, reconcile.py and reservation.py
+            # close on this directory rule; the cli.py /
+            # file_orchestration_journal.py pairs ride their stop-rule tuples.
+            "tests/test_orchestrator_demote_reserved_job_forcing.py",
             # #2674: the shape (c) guard suite. Its importer gaps on
             # `services.orchestrator` itself and accepted_submit_identity.py close
             # on this directory rule; the file_orchestration_journal.py /
@@ -3848,6 +3866,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # way (it top-level-imports services/orchestrator/reconcile.py for
             # restart reconcile and inflight projection). DB-free, ~1s.
             "tests/test_orchestrator_bind_reserved_job_forcing_lane.py",
+            # #2682: the forcing absence-exit suite is a one-hop member the same
+            # way (top-level reconcile.py import for the absence grace).
+            "tests/test_orchestrator_demote_reserved_job_forcing.py",
         ),
     ),
     PathTestRule(

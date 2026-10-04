@@ -104,7 +104,8 @@ Governing invariants:
   miss and the CLI prints the generic refusal.
 - CAS for the forcing branch (the held tuple `_bind_operator_verified_forcing_locked` uses), each miss
   a named refusal, zero bytes written:
-  1. row exists (`not_found`);
+  1. row exists - an unknown job id keeps the existing contract (method returns `None`, CLI prints
+     `pipeline job not found`): without a row the lane is unknown;
   2. `forcing_submit_identity_is_complete(row)` (`identity_incomplete`);
   3. `status == "reserved"`, `slurm_job_id` and `matched_slurm_job_id` both empty,
      `submit_outcome == "submit_result_ambiguous"`, `reconciliation_decision in (None, "")` (`not_held`);
@@ -113,11 +114,16 @@ Governing invariants:
   6. `checked_at` is RFC3339, not in the future, and `checked_at >= submission_attempt_started_at +`
      `reconcile.RESERVATION_ABSENCE_GRACE` - the grace the forcing `credible_absence` branch of
      reconcile uses, not `restart_reconcile_absence_seconds` (`verification_before_grace`).
-  Result type mirrors `OperatorBindResult` (`refusal: str | None` + receipt); the CLI exits non-zero and
-  prints the refusal name.
-- Attestation is mandatory and validated before any read-modify-write: `--checked-by` and
-  `--verification-note` non-blank after strip (`attestation_missing`). No default, no "unknown". The
-  note is the operator's sacct/squeue evidence (command and result).
+  Result type `OperatorDemoteResult` mirrors `OperatorBindResult` (`refusal: str | None` + receipt) and
+  is returned only for forcing rows by the same method (the CLI and its tests bind to that method
+  name); the CLI exits non-zero and prints the refusal name.
+- Attestation is mandatory: `--checked-by` and `--verification-note` non-blank after strip. No default,
+  no "unknown". The note is the operator's sacct/squeue evidence (command and result). The CLI rejects
+  a blank value or a malformed `--checked-at` in its option validation, before the journal is opened.
+  At the journal-method level the lane is only known from the locked read, so an invalid attestation
+  costs one locked READ and zero writes: a forcing row answers `attestation_missing` (or
+  `verification_before_grace` for an unreadable `checked_at`), any other row re-raises the existing
+  typed error (the forecast contract pinned by `tests/test_orchestrator_demote_core_cas.py`).
 - Write, one locked append using the event-carrying writer the forecast demote uses:
   the row goes to `status = reservation_lost` with `reconciliation_decision = absence_retry_permitted`
   - exactly what `permit_forcing_submit_retry` writes, because forcing reclaim honours only that
@@ -126,9 +132,11 @@ Governing invariants:
   pipeline_event with `event_type = "operator_verified_absence"`, never on the row, so reclaim cannot
   carry a stale attestation into attempt+1.
 - Why members unfreeze: `reservation_lost` is terminal, so `is_unresolved_forcing_attempt` is false and
-  the scheduler's held-skip predicate stops matching; the next reserve reclaims the master as
-  attempt+1. Tests assert through the real reclaim/reserve path and the scheduler's own predicate, not
-  by status alone.
+  the scheduler's held-skip predicate stops matching: the members' decision becomes a retry with
+  `restart_stage=forcing`, and the same-key reserve of that submit reclaims the master as attempt+1.
+  Tests assert through the real reserve/reclaim path and the scheduler's own predicate, not by status
+  alone. (Re-running `orchestrate_cycle` on the released run does not reclaim by itself - identical to
+  the automatic `permit_forcing_submit_retry`, i.e. pre-existing lane behaviour.)
 - Double-write risk (accepted, same class as the forecast demote): if the job did run, the retry is a
   second writer over forcing artifacts keyed by source/cycle/basin, not attempt. Code-side mitigations:
   the grace gate above, the full held tuple, zero sbatch / zero scancel. The rest is the operator's
@@ -137,7 +145,8 @@ Governing invariants:
 - Listing: the action->command mapping and the pinned command set
   (`{bind-reserved-job, triage, escalate}`) are unchanged; "no job found" is not a listing dimension.
   The listing's forcing guidance text and the runbook route the "no job found" branch to
-  `demote-reserved-job`.
+  `demote-reserved-job`. The disposal procedure lives in `docs/runbooks/held-forcing-absence-exit.md`
+  (`failed-basin-retry.md` is at the large-file guard limit).
 
 ## #2660 details
 

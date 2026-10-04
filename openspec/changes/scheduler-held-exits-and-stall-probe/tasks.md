@@ -49,24 +49,24 @@
 
 ## 4. #2682 forcing operator-verified absence exit
 
-- [ ] 4.1 Design, CAS and audit fields published in the PR description BEFORE the code commit.
-- [ ] 4.2 Journal method + CLI branch; reproduction test: held forcing row -> retryable, members no longer
+- [x] 4.1 Design, CAS and audit fields published in the PR description BEFORE the code commit.
+- [x] 4.2 Journal method + CLI branch; reproduction test: held forcing row -> retryable, members no longer
       held-skipped, zero sbatch.
-- [ ] 4.3 Negative tests, each a named refusal with the journal byte-identical: attempt mismatch, anchor
+- [x] 4.3 Negative tests, each a named refusal with the journal byte-identical: attempt mismatch, anchor
       mismatch, not held (each of: status, bound `slurm_job_id`, `matched_slurm_job_id`, submit outcome,
       existing reconciliation decision), identity incomplete, blank `checked_by`, blank `verification_note`,
       future / malformed `checked_at`, `checked_at` before anchor + grace. Forecast rows keep the `None`
       contract. Both CLI entries (click, argparse) covered; `--confirm` preserved.
-- [ ] 4.4 Listing guidance text routes the forcing "no job found" branch to `demote-reserved-job`; the
+- [x] 4.4 Listing guidance text routes the forcing "no job found" branch to `demote-reserved-job`; the
       action->command mapping and the pinned command set are unchanged.
-- [ ] 4.6 Audit fields live only in the `operator_verified_absence` pipeline_event; after reclaim the
+- [x] 4.6 Audit fields live only in the `operator_verified_absence` pipeline_event; after reclaim the
       attempt+1 row carries none of them.
-- [ ] 4.5 Runbook: precondition (sacct/squeue proof), double-write risk, command.
+- [x] 4.5 Runbook: precondition (sacct/squeue proof), double-write risk, command.
 
 ## 5. Verification
 
-- [ ] 5.1 `uv run ruff check .`
-- [ ] 5.2 `uv run pytest -q tests/test_node22_scheduler_stall_health.py tests/test_manual_retry_failed_stage_restart.py
+- [x] 5.1 `uv run ruff check .`
+- [x] 5.2 `uv run pytest -q tests/test_node22_scheduler_stall_health.py tests/test_manual_retry_failed_stage_restart.py
       tests/test_operator_action_listing_held_reservations.py tests/test_orchestrator_demote_cli_security.py
       tests/test_orchestrator_demote_core_cas.py tests/test_orchestrator_demote_reclaim_lifecycle.py
       tests/test_orchestrator_demote_projection_faults.py tests/test_scheduler_held_reservation_block.py
@@ -74,7 +74,7 @@
       tests/test_gateway_reconcile_writer_rollforward.py tests/test_select_ci_tests.py`,
       `uv run pytest -q tests/test_file_orchestration_journal.py -k rollback`, `uv run pytest -q tests/test_shud_runtime.py -k "checksum or tsd_forc or forcing"`,
       plus every test file added by 1-4.
-- [ ] 5.3 `openspec validate scheduler-held-exits-and-stall-probe --strict --no-interactive`
+- [x] 5.3 `openspec validate scheduler-held-exits-and-stall-probe --strict --no-interactive`
 - [ ] 5.4 CI green.
 
 ## Evidence Floor deviation

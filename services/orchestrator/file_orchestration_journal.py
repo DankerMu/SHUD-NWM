@@ -1122,6 +1122,32 @@ class OperatorDemoteReceipt:
     verification_note: str
     written_record_count: int
     warnings: tuple[ProjectionWarning, ...] = ()
+    #: #2682: ``forcing`` for a held forcing master released by the
+    #: operator-verified absence exit (``reconciliation_decision`` is then
+    #: ``absence_retry_permitted``).
+    lane: str = "forecast"
+
+
+#: #2682 named refusals of the forcing branch of
+#: :meth:`FileOrchestrationJournalRepository.demote_operator_verified_reserved_job`.
+#: Every one of them leaves the journal byte-identical.
+OPERATOR_DEMOTE_REFUSALS = frozenset(
+    (
+        "identity_incomplete",
+        "not_held",
+        "stale_attempt",
+        "verification_before_grace",
+        "attestation_missing",
+    )
+)
+
+
+@dataclass(frozen=True)
+class OperatorDemoteResult:
+    """#2682 forcing-lane outcome: ``refusal`` is ``None`` exactly when ``receipt`` is set."""
+
+    refusal: str | None
+    receipt: OperatorDemoteReceipt | None = None
 
 
 #: #2668 named refusals of :meth:`FileOrchestrationJournalRepository.bind_operator_verified_reserved_job`.
@@ -4878,7 +4904,7 @@ class FileOrchestrationJournalRepository:
         checked_by: str,
         checked_at: datetime,
         verification_note: str,
-    ) -> OperatorDemoteReceipt | None:
+    ) -> OperatorDemoteReceipt | OperatorDemoteResult | None:
         """Atomically demote one operator-verified dead comment-unobservable reservation.
 
         File-journal-only (#1564).  The cluster does not store job comments
@@ -4904,6 +4930,16 @@ class FileOrchestrationJournalRepository:
         re-deriving (or leaking) the raw inputs.  ``written_record_count`` is
         the number of durable records appended (master + audit event + any
         active hydro projections).
+
+        #2682: a held FORCING master (``is_forcing_stage_name`` on the row
+        re-read under the cycle lock) is dispatched BEFORE the contract /
+        row-kind checks, because forcing reservations carry no accepted-submit
+        contract version; see :meth:`_demote_operator_verified_forcing_locked`.
+        Only that branch returns an :class:`OperatorDemoteResult`, whose
+        ``refusal`` is one of :data:`OPERATOR_DEMOTE_REFUSALS`; a forcing row
+        also turns a blank attestation or an unreadable ``checked_at`` into a
+        named refusal instead of the typed error.  Forecast rows and unknown
+        job ids keep the contract above.
         """
 
         if accepted_submit_contract_version != ACCEPTED_SUBMIT_CONTRACT_VERSION:
@@ -4919,10 +4955,23 @@ class FileOrchestrationJournalRepository:
             raise FileOrchestrationJournalError(
                 "file_journal_evidence_required", field="expected_submission_attempt_started_at"
             )
-        normalized_checked_at = _accepted_submit_attempt_anchor(checked_at)
-        checked_by_text = _operator_evidence_text(checked_by, field="checked_by")
-        verification_note_text = _operator_evidence_text(verification_note, field="verification_note")
-        expected_anchor = _accepted_submit_attempt_anchor(expected_submission_attempt_started_at)
+        try:
+            normalized_checked_at = _accepted_submit_attempt_anchor(checked_at)
+            checked_by_text = _operator_evidence_text(checked_by, field="checked_by")
+            verification_note_text = _operator_evidence_text(verification_note, field="verification_note")
+            expected_anchor = _accepted_submit_attempt_anchor(expected_submission_attempt_started_at)
+        except FileOrchestrationJournalError:
+            # #2682: only a forcing row names these; the lane is known only
+            # from the locked read, and everything else keeps the typed error.
+            refusal = self._forcing_demote_input_refusal(
+                job_id,
+                checked_by=checked_by,
+                checked_at=checked_at,
+                verification_note=verification_note,
+            )
+            if refusal is None:
+                raise
+            return OperatorDemoteResult(refusal)
         source_id, cycle_time = _accepted_submit_source_cycle_from_job_id(job_id)
         with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
             existing = self._accepted_submit_job_for_id_unlocked(
@@ -4932,6 +4981,20 @@ class FileOrchestrationJournalRepository:
             )
             if existing is None:
                 return None
+            if is_forcing_stage_name(existing.get("stage"), existing.get("job_type")):
+                # #2682: forcing rows carry no accepted-submit contract version,
+                # so they branch BEFORE the contract / row-kind checks below.
+                return self._demote_operator_verified_forcing_locked(
+                    existing,
+                    job_id=job_id,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    expected_submission_attempt=expected_submission_attempt,
+                    expected_anchor=expected_anchor,
+                    checked_by_text=checked_by_text,
+                    normalized_checked_at=normalized_checked_at,
+                    verification_note_text=verification_note_text,
+                )
             if (
                 not accepted_submit_contract_is_current(existing)
                 or accepted_submit_row_kind(existing) != "master"
@@ -5100,6 +5163,219 @@ class FileOrchestrationJournalRepository:
                 written_record_count=len(records),
                 warnings=tuple(warnings),
             )
+
+    def _forcing_demote_input_refusal(
+        self,
+        job_id: str,
+        *,
+        checked_by: Any,
+        checked_at: Any,
+        verification_note: Any,
+    ) -> str | None:
+        """#2682: the named refusal a FORCING row gives an invalid attestation, else ``None``.
+
+        Called only after the entry validation of
+        :meth:`demote_operator_verified_reserved_job` failed.  The row is read
+        under the cycle lock solely to learn the lane; nothing is written.
+        ``None`` (no readable forcing row, or an input error this branch does
+        not name, such as an oversized note) makes the caller re-raise its
+        typed error, which is the forecast contract.
+        """
+
+        try:
+            source_id, cycle_time = _accepted_submit_source_cycle_from_job_id(job_id)
+            with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+                existing = self._accepted_submit_job_for_id_unlocked(
+                    job_id,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                )
+        except FileOrchestrationJournalError:
+            return None
+        if existing is None or not is_forcing_stage_name(existing.get("stage"), existing.get("job_type")):
+            return None
+        if any(not isinstance(value, str) or not value.strip() for value in (checked_by, verification_note)):
+            return "attestation_missing"
+        if _strict_utc_datetime(checked_at) is None:
+            return "verification_before_grace"
+        return None
+
+    def _demote_operator_verified_forcing_locked(
+        self,
+        existing: dict[str, Any],
+        *,
+        job_id: str,
+        source_id: str,
+        cycle_time: datetime,
+        expected_submission_attempt: int,
+        expected_anchor: str,
+        checked_by_text: str,
+        normalized_checked_at: str,
+        verification_note_text: str,
+    ) -> OperatorDemoteResult:
+        """#2682: the forcing branch of the operator demotion; caller holds the cycle lock.
+
+        The operator-verified absence exit for a held forcing master that no
+        reconcile pass can release: ``query_unavailable`` is a reconcile
+        answer, not a row field, so the operator's sacct/squeue verification
+        replaces the reconcile-computed ``credible_absence``.
+
+        CAS, every failure a named refusal with zero bytes: a complete forcing
+        submit identity else ``identity_incomplete``; the held tuple of
+        :meth:`_bind_operator_verified_forcing_locked` (``reserved``, no bound
+        or matched id, ``submit_result_ambiguous``, no reconciliation decision)
+        else ``not_held``; the expected attempt and anchor else
+        ``stale_attempt``; ``checked_at`` not in the future and at least
+        ``reconcile.RESERVATION_ABSENCE_GRACE`` after the anchor (the grace of
+        reconcile's forcing ``credible_absence`` branch) else
+        ``verification_before_grace``.
+
+        Post-state: exactly the ``permit_forcing_submit_retry`` row
+        (``reservation_lost`` / ``absence_retry_permitted``, the only decision
+        forcing reclaim honours) plus one ``operator_verified_absence`` event,
+        in one durable append.  The attestation lives only in that event, so
+        reclaim cannot carry it into attempt+1.  Never an sbatch or scancel.
+        """
+
+        if not forcing_submit_identity_is_complete(existing):
+            return OperatorDemoteResult("identity_incomplete")
+        if (
+            str(existing.get("status") or "") != "reserved"
+            or existing.get("slurm_job_id") not in (None, "")
+            or existing.get("matched_slurm_job_id") not in (None, "")
+            or existing.get("submit_outcome") != "submit_result_ambiguous"
+            or existing.get("reconciliation_decision") not in (None, "")
+        ):
+            return OperatorDemoteResult("not_held")
+        try:
+            current_anchor = _accepted_submit_attempt_anchor(existing.get("submission_attempt_started_at"))
+        except FileOrchestrationJournalError:
+            return OperatorDemoteResult("stale_attempt")
+        if existing.get("submission_attempt") != expected_submission_attempt or current_anchor != expected_anchor:
+            return OperatorDemoteResult("stale_attempt")
+        # Lazy import: ``reconcile`` imports this module at load time.
+        from services.orchestrator import reconcile
+
+        anchor_instant = _strict_utc_datetime(current_anchor)
+        checked_instant = _strict_utc_datetime(normalized_checked_at)
+        # Datetimes, never strings.  Before the grace an absent job may merely
+        # be slurmdbd propagation lag; a verification dated in the future
+        # proves nothing about now.
+        if (
+            anchor_instant is None
+            or checked_instant is None
+            or checked_instant > _utcnow()
+            or checked_instant < anchor_instant + reconcile.RESERVATION_ABSENCE_GRACE
+        ):
+            return OperatorDemoteResult("verification_before_grace")
+        # Exactly the ``permit_forcing_submit_retry`` post-state.
+        row = dict(existing)
+        row.update(
+            {
+                "status": "reservation_lost",
+                "reconciliation_source": "slurm_exact_comment",
+                "reconciliation_decision": "absence_retry_permitted",
+                "reconciliation_reason_class": None,
+                "matched_slurm_job_id": None,
+                "updated_at": _format_utc(_utcnow()),
+            }
+        )
+        row = {**_redact_durable_error_message_fields("pipeline_job", row), "source_id": source_id}
+        model_id = _optional_safe_identity(row, "model_id")
+        event = {
+            "event_id": self._next_accepted_submit_event_id_unlocked(
+                source_id=source_id,
+                cycle_time=cycle_time,
+            ),
+            "entity_type": "pipeline_job",
+            "entity_id": str(row["job_id"]),
+            "event_type": "operator_verified_absence",
+            "status_from": "reserved",
+            "status_to": "reservation_lost",
+            "message": "Operator verified that no Slurm job carries the held forcing attempt's comment.",
+            "details": {
+                "lane": "forcing",
+                "checked_by": checked_by_text,
+                "checked_at": normalized_checked_at,
+                "verification_note": verification_note_text,
+                "expected_submission_attempt": expected_submission_attempt,
+                "expected_submission_attempt_started_at": expected_anchor,
+                "slurm_comment": str(existing.get("slurm_comment") or ""),
+                "prior_submit_outcome": str(existing.get("submit_outcome") or ""),
+            },
+            "created_at": _format_utc(_utcnow()),
+        }
+        next_sequence = self._next_sequence_unlocked(source_id=source_id, cycle_time=cycle_time)
+        records: list[dict[str, Any]] = []
+        for offset, (record_type, payload, record_model_id) in enumerate(
+            (("pipeline_job", row, model_id), ("pipeline_event", event, None))
+        ):
+            record = _journal_record_for_write(
+                record_type,
+                payload,
+                source_id=source_id,
+                cycle_time=cycle_time,
+                model_id=record_model_id,
+                sequence=next_sequence + offset,
+            )
+            self._validate_outgoing_record(
+                record,
+                source_id=source_id,
+                cycle_time=cycle_time,
+                record_type=record_type,
+                model_id=record_model_id,
+            )
+            records.append(record)
+        self._append_journal_records_unlocked(
+            source_id=source_id,
+            cycle_time=cycle_time,
+            records=records,
+        )
+        # The append above is the authority commit point; a derived
+        # direct/latest projection failure is contained to a warning exactly
+        # as on the forecast demotion, and journal replay stays authoritative.
+        warnings: list[ProjectionWarning] = []
+        try:
+            self._write_pipeline_job_direct_unlocked(row, records[0])
+        except Exception as error:
+            warnings.append(
+                ProjectionWarning(
+                    projection="pipeline_job_direct",
+                    model_id=None,
+                    error_type=_projection_error_type(error),
+                    reason=_projection_error_reason(error),
+                )
+            )
+        if model_id is not None:
+            try:
+                self._materialize_latest_unlocked(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+            except Exception as error:
+                warnings.append(
+                    ProjectionWarning(
+                        projection="latest",
+                        model_id=model_id,
+                        error_type=_projection_error_type(error),
+                        reason=_projection_error_reason(error),
+                    )
+                )
+        return OperatorDemoteResult(
+            None,
+            OperatorDemoteReceipt(
+                job_id=str(row.get("job_id") or job_id),
+                journal_root=str(self.root),
+                status_from=str(existing.get("status") or ""),
+                status_to=str(row.get("status") or ""),
+                reconciliation_decision=str(row.get("reconciliation_decision") or ""),
+                submission_attempt=expected_submission_attempt,
+                submission_attempt_started_at=current_anchor,
+                checked_by=checked_by_text,
+                checked_at=normalized_checked_at,
+                verification_note=verification_note_text,
+                written_record_count=len(records),
+                warnings=tuple(warnings),
+                lane="forcing",
+            ),
+        )
 
     def bind_operator_verified_reserved_job(
         self,
@@ -13549,7 +13825,12 @@ def _journal_record_for_write(
     #     (``checked_by`` / ``verification_note``) are pre-sanitized at the
     #     single operator-evidence authority (``_operator_evidence_text``) so
     #     they are bounded, secret-redacted, and local/object-path sanitized
-    #     before this loop; the remaining detail fields are fixed/typed values.
+    #     before this loop; the remaining detail fields are fixed/typed values;
+    #   * its forcing branch ``_demote_operator_verified_forcing_locked``
+    #     (#2682) -- ONE ``operator_verified_absence`` event with the same
+    #     pre-sanitized ``checked_by`` / ``verification_note``; its other
+    #     details are a literal lane, typed attempt/anchor values, the prior
+    #     submit outcome and the row's own validated attempt comment.
     #
     # The four that do emit events are safe only because their ``details`` carry
     # no URI-bearing field, audited field by field in design D1 and re-audited

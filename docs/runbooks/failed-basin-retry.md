@@ -889,8 +889,8 @@ as `slurm_job_id` and `matched_slurm_job_id`; no `slurm_binding_source`) plus on
 | forcing outcome | listed | `operator_command` |
 |---|---|---|
 | `multiple_matches_blocked` | every pass | `bind-reserved-job`: a real double submission, step 2 |
-| `query_unavailable` | anchor at least 6h old (or unknown) | `bind-reserved-job`; no master with this attempt's comment in `sacct`: escalate, the dead-job exit is #2682 |
-| `identity_mismatch_blocked`, `absence_unconfirmed`, any other | as tabled above | `escalate`: a foreign owner or comment collision needs owner judgement; absence is #2682 |
+| `query_unavailable` | anchor at least 6h old (or unknown) | `bind-reserved-job`; no master with this attempt's comment in `sacct`/`squeue`: `demote-reserved-job` (#2682), see [held-forcing-absence-exit.md](held-forcing-absence-exit.md) |
+| `identity_mismatch_blocked`, `absence_unconfirmed`, any other | as tabled above | `escalate`: a foreign owner or comment collision needs owner judgement; a proven absence is [held-forcing-absence-exit.md](held-forcing-absence-exit.md) (#2682) |
 
 1. **Find the master** (read-only). It is the bare id whose task rows carry exactly one
    `--comment=` equal to the row's `slurm_comment`, one `--array=0-<n-1>` (optionally
