@@ -15,6 +15,24 @@ allowlist for neutral, ``ActiveState == "active"`` as the liveness test).
 
 Test anchors are the task numbers of
 ``openspec/changes/node22-scheduler-stall-probe/tasks.md``.
+
+Issue #2662 adds the ``i``-series at the end of the module (OpenSpec change
+``scheduler-held-exits-and-stall-probe``, tasks 3.1-3.4): the in-flight-held
+pass shape, the in-flight time gate and the frontier suppression bypass.  Its
+freeze fixture is a RECONSTRUCTION, not a replay.  The real pass artifacts of
+the #2655 freeze (2026-09-25T16:45Z onwards) and the tracker of that moment
+were deleted by evidence retention before this change was written, so the
+fixture is rebuilt from the values measured on node-22 and recorded in the
+issue body: 96 candidates per pass, 94 skipped as ``active_duplicate_pipeline``
+and 2 as ``terminal_hydro_success``, all at cycle 2026-09-25T00Z for sources
+``gfs`` and ``IFS``, zero blocked, zero submitted, ``status=planned`` with a
+progress guard; the last submitting pass ``scheduler_2026092516_1436f9714b94``
+started 2026-09-25T16:45:42Z; 340 zero-submission passes followed until the
+probe receipt of 2026-09-27T03:18:31Z; and the four tracker entries with their
+measured counts.  The row shape is the one the real writer produces
+(``{**SchedulerCandidate.to_dict(), "reason": ...}``), reduced to the keys the
+writer's own summary tier keeps.  Individual pass start times between the two
+measured instants are evenly spaced, which is an assumption.
 """
 
 from __future__ import annotations
@@ -100,6 +118,10 @@ PG_ENVIRONMENT_VARIABLES = (
     "PGUSER",
 )
 
+# Spelled as a literal rather than read from the probe: the name is part of
+# the operator contract (a drop-in spells it), so a rename must red here.
+ENV_IN_FLIGHT_MINUTES = "NHMS_SCHEDULER_STALL_IN_FLIGHT_MINUTES"
+
 # Small thresholds keep the fixtures readable.  `SCAN_LIMIT` obeys the probe's
 # own config rule, `SCAN_LIMIT - HOUR_BUCKET_MARGIN > max(no_submission, lock)`:
 # 16 - 12 = 4 > 3, the smallest scan the rule admits for these thresholds.
@@ -111,6 +133,11 @@ BASE_CONFIG = {
     probe.ENV_LIMIT_LOOKBACK_MINUTES: "120",
     probe.ENV_MAX_TRIGGER_AGE_MINUTES: "360",
     probe.ENV_MAX_PASS_AGE_MINUTES: "360",
+    # #2662: the in-flight time gate.  It is bounded by the scan window ---
+    # (16 - 12 - 1) x 5 = 15 minutes is the largest gate this scan admits ---
+    # and the pre-#2662 fixtures in this module space their passes ten
+    # minutes apart in runs short enough to stay under it.
+    ENV_IN_FLIGHT_MINUTES: "15",
 }
 
 ALL_ENV_NAMES = (
@@ -125,6 +152,7 @@ ALL_ENV_NAMES = (
     probe.ENV_LOCK_PASSES,
     probe.ENV_NO_SUBMISSION_PASSES,
     probe.ENV_CIRCUIT_PASSES,
+    ENV_IN_FLIGHT_MINUTES,
     probe.ENV_SUPPRESSED_REASONS,
     probe.ENV_SCAN_LIMIT,
     probe.ENV_MAX_ENTRIES_SCANNED,
@@ -247,8 +275,14 @@ def _pass_payload(
     guard: bool = True,
     counts: bool = True,
     pass_id: str = "scheduler_2026092312_000000000000",
+    skipped: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
-    """Build a terminal pass artifact with the shape the writer produces."""
+    """Build a terminal pass artifact with the shape the writer produces.
+
+    ``skipped`` are ``skipped_candidates`` rows (see ``_skip_row``); they are
+    disjoint from the blocked candidates and counted in ``candidate_count``,
+    exactly as ``scheduler_runtime`` totals the three lists.
+    """
 
     payload: dict[str, object] = {
         "schema_version": "nhms.production_scheduler.pass_evidence.v1",
@@ -258,10 +292,10 @@ def _pass_payload(
     }
     if counts:
         payload["counts"] = {
-            "candidate_count": submitted + blocked,
+            "candidate_count": submitted + blocked + len(skipped or []),
             "blocked_candidate_count": blocked,
             "submitted_count": submitted,
-            "skipped_candidate_count": 0,
+            "skipped_candidate_count": len(skipped or []),
         }
     else:
         # The measured degraded shape: the `counts` block exists but the two
@@ -269,7 +303,34 @@ def _pass_payload(
         payload["counts"] = {"candidate_count": 0}
     if guard:
         payload["progress_guard"] = {"status": "passed", "max_no_progress_steps": 256}
+    if skipped is not None:
+        payload["candidates"] = []
+        payload["blocked_candidates"] = []
+        payload["skipped_candidates"] = skipped
     return payload
+
+
+def _skip_row(reason: str, source: str, cycle: datetime, *, basin: str = "basins_qhh") -> dict[str, object]:
+    """One ``skipped_candidates`` row: ``{**SchedulerCandidate.to_dict(), "reason": reason}``.
+
+    Reduced to the keys the writer's summary tier keeps
+    (``scheduler_evidence_payload._BOUNDED_CANDIDATE_SUMMARY_KEYS``), which is
+    also every key the probe reads.  ``source`` and ``source_id`` are the same
+    configured id and both cycle keys carry the same ``...Z`` string.
+    """
+
+    cycle_text = cycle.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    return {
+        "candidate_id": f"{source}:{cycle_text}:{basin}",
+        "source": source,
+        "source_id": source,
+        "cycle_time": cycle_text,
+        "cycle_time_utc": cycle_text,
+        "basin_id": basin,
+        "model_id": f"{basin}_shud",
+        "status": "skipped",
+        "reason": reason,
+    }
 
 
 def _pass_name(minutes_ago: int, suffix: str, *, pre_execution: bool = False) -> str:
@@ -872,7 +933,12 @@ def test_o1_recency_comes_from_started_at_not_from_the_filename(
         tmp_path,
         monkeypatch,
         evidence_root=root,
-        config={probe.ENV_NO_SUBMISSION_PASSES: "2", probe.ENV_SCAN_LIMIT: "15"},
+        config={
+            probe.ENV_NO_SUBMISSION_PASSES: "2",
+            probe.ENV_SCAN_LIMIT: "15",
+            # #2662: a scan of 15 spans (15 - 12 - 1) x 5 = 10 minutes.
+            ENV_IN_FLIGHT_MINUTES: "10",
+        },
     )
     receipt = _receipt(receipts)
 
@@ -887,7 +953,12 @@ def test_o2_rewriting_a_modification_time_changes_no_verdict(
 ) -> None:
     root = _evidence_root(tmp_path)
     _reversed_order_evidence(root)
-    config = {probe.ENV_NO_SUBMISSION_PASSES: "2", probe.ENV_SCAN_LIMIT: "15"}
+    config = {
+        probe.ENV_NO_SUBMISSION_PASSES: "2",
+        probe.ENV_SCAN_LIMIT: "15",
+        # #2662: a scan of 15 spans (15 - 12 - 1) x 5 = 10 minutes.
+        ENV_IN_FLIGHT_MINUTES: "10",
+    }
 
     before_status, before_receipts, _log = _run(
         tmp_path, monkeypatch, evidence_root=root, config=config
@@ -942,6 +1013,8 @@ def test_o3_a_pre_execution_snapshot_does_not_displace_its_terminal_artifact(
             probe.ENV_NO_SUBMISSION_PASSES: "2",
             probe.ENV_LOCK_PASSES: "2",
             probe.ENV_SCAN_LIMIT: "15",
+            # #2662: a scan of 15 spans (15 - 12 - 1) x 5 = 10 minutes.
+            ENV_IN_FLIGHT_MINUTES: "10",
         },
     )
     receipt = _receipt(receipts)
@@ -1211,8 +1284,9 @@ def test_s8_a_neutral_pass_does_not_cost_the_streak_a_position_at_the_shipped_de
     shipped = {
         probe.ENV_NO_SUBMISSION_PASSES: "20",
         probe.ENV_LOCK_PASSES: "5",
-        probe.ENV_SCAN_LIMIT: "64",
+        probe.ENV_SCAN_LIMIT: "96",
         probe.ENV_CIRCUIT_PASSES: "20",
+        ENV_IN_FLIGHT_MINUTES: "360",
     }
     # The literals ARE the shipped defaults; if a default moves, this test must
     # be re-derived rather than silently exercising some other geometry.
@@ -1221,7 +1295,11 @@ def test_s8_a_neutral_pass_does_not_cost_the_streak_a_position_at_the_shipped_de
         probe.DEFAULT_LOCK_PASSES,
         probe.DEFAULT_SCAN_LIMIT,
         probe.DEFAULT_CIRCUIT_PASSES,
-    ) == (20, 5, 64, 20)
+    ) == (20, 5, 96, 20)
+    # Re-derived for #2662, which moved the scan default 64 -> 96 so the
+    # in-flight time gate is reachable.  Both shapes are unchanged by it: the
+    # search still walks 23 / 26 passes, well inside either prefix, and the
+    # longest run here spans 200 minutes, under the 360-minute gate.
 
     root = _evidence_root(tmp_path)
     for index, shape in enumerate(shapes):
@@ -1245,7 +1323,7 @@ def test_s8_a_neutral_pass_does_not_cost_the_streak_a_position_at_the_shipped_de
     assert receipt["signals"]["no_submission_neutral_skipped"] == 1
     assert receipt["signals"]["no_submission_passes"] == 20
     # The search bound is the ordering-safe prefix, not the threshold.
-    assert receipt["evidence"]["streak_window"] == 64 - probe.HOUR_BUCKET_MARGIN
+    assert receipt["evidence"]["streak_window"] == 96 - probe.HOUR_BUCKET_MARGIN
 
 
 def test_s9_a_guarded_resource_limit_pass_with_zero_counts_does_not_break_the_streak(
@@ -1825,6 +1903,10 @@ def test_f12_a_never_triggered_timer_with_an_idle_service_is_not_graded_healthy(
         {probe.ENV_SCAN_LIMIT: "14"},
         {probe.ENV_MAX_ENTRIES_SCANNED: "3"},
         {probe.ENV_MAX_PASS_AGE_MINUTES: "not-a-number"},
+        # #2662: below the two-timer-interval floor, and above what the scan
+        # window can span ((16 - 12 - 1) x 5 = 15 minutes at BASE_CONFIG).
+        {ENV_IN_FLIGHT_MINUTES: "9"},
+        {ENV_IN_FLIGHT_MINUTES: "16"},
     ],
 )
 def test_c1_an_out_of_range_threshold_is_refused_before_any_evidence_is_read(
@@ -1895,6 +1977,12 @@ def test_c4_the_shipped_defaults_satisfy_the_probes_own_range_rules(
     assert config.streak_window == config.scan_limit - probe.HOUR_BUCKET_MARGIN
     assert config.streak_window > config.no_submission_passes
     assert config.max_entries_scanned >= config.scan_limit
+    # #2662: the shipped gate is reachable across the shipped safe prefix at
+    # the timer's minimum cadence, and clears the longest healthy run the
+    # repository records (193.9-minute pass + 79-minute forecast).
+    assert config.in_flight_minutes == 360
+    assert config.in_flight_minutes <= (config.streak_window - 1) * probe.MIN_INTER_PASS_MINUTES
+    assert config.in_flight_minutes > 193.9 + 79
     assert config.suppressed_reasons == frozenset({SUPPRESSED_REASON})
     assert config.timer_unit == "nhms-compute-scheduler.timer"
     assert config.service_unit == "nhms-compute-scheduler.service"
@@ -2162,6 +2250,24 @@ def test_e3_the_tracker_schema_version_matches_the_circuits_own() -> None:
     assert probe.is_pass_evidence_filename(probe.TRACKER_FILENAME) is False
 
 
+def test_e5_the_terminal_skip_reasons_equal_the_schedulers_own() -> None:
+    """#2662: the probe's "is this candidate finished" predicate IS the scheduler's.
+
+    The probe cannot import the set (D4), so it carries a literal; this is the
+    pin that keeps the literal from drifting, and `scripts/select_ci_tests.py`
+    routes `scheduler_runtime.py` here so it runs on the diff that would drift
+    it.  A reason added to the scheduler's set but not here would make the
+    probe read finished work as in-flight (a false alarm after the gate); one
+    removed there but kept here would read in-flight work as finished, which
+    is the #2655 blind spot again.
+    """
+
+    from services.orchestrator import scheduler_runtime
+
+    assert probe.TERMINAL_SKIP_REASONS == scheduler_runtime._RETENTION_TERMINAL_SKIP_REASONS
+    assert "active_duplicate_pipeline" not in probe.TERMINAL_SKIP_REASONS
+
+
 def test_e4_only_terminal_artifacts_enter_the_graded_window() -> None:
     assert probe.is_terminal_pass_filename("scheduler_2026092312_7e6955b406ba.json") is True
     assert (
@@ -2211,8 +2317,11 @@ def test_r1_the_receipt_pairs_every_graded_signal_with_its_threshold(
         "progress_count",
         "blocked_count",
         "idle_count",
+        "in_flight_held_count",
         "neutral_count",
     }
+    assert "in_flight_run_span_minutes" in receipt["signals"]
+    assert "in_flight_minutes" in receipt["signals"]
     assert receipt["suppressed"][0]["matched_rule"] == SUPPRESSED_REASON
     # Private, bounded, and outside the evidence root.
     assert receipts.stat().st_mode & 0o777 == 0o700
@@ -2413,3 +2522,711 @@ def test_u4_the_runbook_documents_the_drop_in_and_the_dropped_installer_guarante
     assert "install_node22_refresh_timer_health.sh" in text
     assert "nhms-scheduler-file-provider-refresh" in text
     assert SUPPRESSED_REASON in text
+
+
+# ---------------------------------------------------------------------------
+# Issue #2662 -- in-flight-held passes, the time gate, the frontier bypass
+# ---------------------------------------------------------------------------
+
+FREEZE_CYCLE = datetime(2026, 9, 25, 0, 0, tzinfo=UTC)
+FREEZE_PROGRESS_STARTED_AT = datetime(2026, 9, 25, 16, 45, 42, tzinfo=UTC)
+FREEZE_PROGRESS_NAME = "scheduler_2026092516_1436f9714b94.json"
+FREEZE_NEWEST_STARTED_AT = datetime(2026, 9, 27, 3, 17, 11, tzinfo=UTC)
+FREEZE_NOW = datetime(2026, 9, 27, 3, 18, 31, tzinfo=UTC)
+FREEZE_PASSES = 340
+#: 34.5 hours over 340 passes: 6.09 minutes from one pass start to the next.
+FREEZE_INTERVAL = (FREEZE_NEWEST_STARTED_AT - FREEZE_PROGRESS_STARTED_AT) / FREEZE_PASSES
+
+
+def _freeze_started_at(index: int) -> datetime:
+    """Start of the ``index``-th zero-submission pass; exact at both measured ends."""
+
+    span = FREEZE_NEWEST_STARTED_AT - FREEZE_PROGRESS_STARTED_AT
+    return FREEZE_PROGRESS_STARTED_AT + span * index / FREEZE_PASSES
+
+OLD_IFS_SUBJECT = "job_cycle_ifs_2026091100_convert_cohort_58980881757c_forecast"
+OLD_GFS_SUBJECT = "job_cycle_gfs_2026091212_convert_cohort_6ae61a5780d2_forecast"
+FRONTIER_IFS_SUBJECT = "job_cycle_ifs_2026092500_convert_cohort_34e13d82a8a5_forecast"
+FRONTIER_GFS_SUBJECT = "job_cycle_gfs_2026092500_convert_cohort_caaad82942af_forecast"
+
+# The shipped node-22 values, spelled as literals for the same reason s8 spells
+# them: if a default moves these tests must be re-derived, not silently moved.
+SHIPPED_CONFIG = {
+    probe.ENV_NO_SUBMISSION_PASSES: "20",
+    probe.ENV_LOCK_PASSES: "5",
+    probe.ENV_CIRCUIT_PASSES: "20",
+    probe.ENV_SCAN_LIMIT: "96",
+    ENV_IN_FLIGHT_MINUTES: "360",
+}
+
+
+def _freeze_skipped_rows() -> list[dict[str, object]]:
+    """The measured skip breakdown: 94 in-flight duplicates and 2 finished."""
+
+    rows = [
+        _skip_row("active_duplicate_pipeline", source, FREEZE_CYCLE, basin=f"basin_{index:02d}")
+        for source in ("gfs", "IFS")
+        for index in range(47)
+    ]
+    rows += [
+        _skip_row("terminal_hydro_success", source, FREEZE_CYCLE, basin="basin_47")
+        for source in ("gfs", "IFS")
+    ]
+    assert len(rows) == 96
+    return rows
+
+
+def _freeze_pass_name(started_at: datetime, index: int) -> str:
+    return f"scheduler_{started_at:%Y%m%d%H}_{index:012x}.json"
+
+
+def _write_freeze(
+    root: Path, *, passes_after_progress: int, on_disk: int | None = None
+) -> tuple[datetime, datetime]:
+    """Write the freeze as it stood ``passes_after_progress`` passes in.
+
+    Returns ``(newest pass started_at, the instant the probe runs)``.  The
+    progress pass is written only while it would still be on disk next to the
+    ``on_disk`` newest zero-submission passes; evidence retention is why the
+    late-freeze fixture does not contain it.
+    """
+
+    rows = _freeze_skipped_rows()
+    kept = passes_after_progress if on_disk is None else min(on_disk, passes_after_progress)
+    for index in range(passes_after_progress - kept + 1, passes_after_progress + 1):
+        started_at = _freeze_started_at(index)
+        _write_pass(
+            root,
+            _freeze_pass_name(started_at, index),
+            _pass_payload(started_at=started_at, status="planned", skipped=rows),
+        )
+    if kept == passes_after_progress:
+        _write_pass(
+            root,
+            FREEZE_PROGRESS_NAME,
+            _pass_payload(
+                started_at=FREEZE_PROGRESS_STARTED_AT, status="submitted", submitted=94
+            ),
+        )
+    newest = _freeze_started_at(passes_after_progress)
+    return newest, newest + timedelta(seconds=80)
+
+
+def _freeze_tracker(
+    *, frontier_passes: int | None, old_passes: tuple[int, int] = (2200, 2098)
+) -> list[dict[str, object]]:
+    entries = [
+        _tracker_entry(
+            reason=SUPPRESSED_REASON,
+            consecutive_passes=old_passes[0],
+            subject_kind="job",
+            subject_id=OLD_IFS_SUBJECT,
+        ),
+        _tracker_entry(
+            reason=SUPPRESSED_REASON,
+            consecutive_passes=old_passes[1],
+            subject_kind="job",
+            subject_id=OLD_GFS_SUBJECT,
+        ),
+    ]
+    if frontier_passes is not None:
+        entries += [
+            _tracker_entry(
+                reason=SUPPRESSED_REASON,
+                consecutive_passes=frontier_passes,
+                subject_kind="job",
+                subject_id=subject,
+            )
+            for subject in (FRONTIER_IFS_SUBJECT, FRONTIER_GFS_SUBJECT)
+        ]
+    return entries
+
+
+def _run_at(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    root: Path,
+    now: datetime,
+    config: dict[str, str],
+) -> tuple[int, dict]:
+    """Run the probe at ``now`` on a lane whose units look healthy at ``now``."""
+
+    status, receipts, _log = _run(
+        tmp_path,
+        monkeypatch,
+        evidence_root=root,
+        now=now,
+        timer_properties=_timer_properties(
+            last_trigger=_systemd_timestamp(now - timedelta(minutes=2))
+        ),
+        config=config,
+    )
+    return status, _receipt(receipts)
+
+
+def test_i0_the_shipped_literals_are_the_shipped_defaults() -> None:
+    assert (
+        probe.DEFAULT_NO_SUBMISSION_PASSES,
+        probe.DEFAULT_LOCK_PASSES,
+        probe.DEFAULT_CIRCUIT_PASSES,
+        probe.DEFAULT_SCAN_LIMIT,
+        probe.DEFAULT_IN_FLIGHT_MINUTES,
+    ) == (20, 5, 20, 96, 360)
+    assert probe.ENV_IN_FLIGHT_MINUTES == ENV_IN_FLIGHT_MINUTES
+
+
+def test_i1_the_reconstructed_freeze_is_not_ok_with_both_fixes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The receipt of 2026-09-27T03:18:31Z said `ok`.  It must not.
+
+    Shipped defaults, the full measured tracker.  Both fixes are live: the
+    time gate fires verdict 10, and the two frontier entries are open with
+    the bypass mark while the two old-cycle ones stay suppressed.
+    """
+
+    root = _evidence_root(tmp_path)
+    newest, _ = _write_freeze(root, passes_after_progress=FREEZE_PASSES, on_disk=130)
+    assert newest == FREEZE_NEWEST_STARTED_AT
+    _write_tracker(root, _freeze_tracker(frontier_passes=338))
+
+    status, receipt = _run_at(tmp_path, monkeypatch, root=root, now=FREEZE_NOW, config=SHIPPED_CONFIG)
+
+    assert status == 1
+    assert receipt["verdict"] == "submission_stalled"
+    assert receipt["passes"] == {
+        "progress_count": 0,
+        "blocked_count": 0,
+        "idle_count": 0,
+        "in_flight_held_count": 96,
+        "neutral_count": 0,
+    }
+    signals = receipt["signals"]
+    assert signals["no_submission_streak"] == 0
+    assert signals["in_flight_run_passes"] == 84
+    assert signals["in_flight_run_in_flight_held_passes"] == 84
+    assert signals["in_flight_run_ended_by"] == "scan_window"
+    assert signals["in_flight_run_start_is_lower_bound"] is True
+    assert signals["in_flight_minutes"] == 360
+    # 83 intervals of 6.09 minutes across the ordering-safe prefix.
+    assert signals["in_flight_run_span_minutes"] == pytest.approx(83 * 6.0926, abs=0.1)
+    assert signals["in_flight_run_span_minutes"] >= signals["in_flight_minutes"]
+    assert signals["in_flight_run_newest_started_at"] == "2026-09-27T03:17:11Z"
+    assert signals["circuit_open_entries"] == 2
+    assert signals["circuit_bypassed_frontier_entries"] == 2
+    assert receipt["frontier"]["cycles"] == ["gfs_2026092500", "ifs_2026092500"]
+    assert {row["subject_id"]: row["suppression_bypassed_frontier"] for row in receipt["open"]} == {
+        FRONTIER_IFS_SUBJECT: True,
+        FRONTIER_GFS_SUBJECT: True,
+    }
+    assert [row["subject_id"] for row in receipt["suppressed"]] == [OLD_IFS_SUBJECT, OLD_GFS_SUBJECT]
+
+
+def test_i2_fix_a_alone_alerts_three_hours_in_through_the_bypassed_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The time gate cannot have fired yet; the frontier bypass alone alerts.
+
+    The freeze 25 passes in (152 minutes after the last submission, well
+    under the 360-minute gate), with the progress pass still inside the scan.
+    The frontier entries have been counted 25 times --- the reconstruction
+    walks the measured 338 back to this instant --- which is over the
+    20-pass circuit threshold.  This is the "about three hours after the last
+    submission" the issue says an unsuppressed verdict 11 would have given.
+    """
+
+    root = _evidence_root(tmp_path)
+    _newest, now = _write_freeze(root, passes_after_progress=25)
+    _write_tracker(
+        root, _freeze_tracker(frontier_passes=25, old_passes=(2200 - 313, 2098 - 313))
+    )
+
+    status, receipt = _run_at(tmp_path, monkeypatch, root=root, now=now, config=SHIPPED_CONFIG)
+
+    assert status == 1
+    assert receipt["verdict"] == "no_progress_circuit_open"
+    signals = receipt["signals"]
+    assert signals["in_flight_run_ended_by"] == "progress_pass"
+    assert signals["in_flight_run_start_is_lower_bound"] is False
+    assert signals["in_flight_run_started_at"] == "2026-09-25T16:45:42Z"
+    assert signals["in_flight_run_span_minutes"] == pytest.approx(25 * 6.0926, abs=0.1)
+    assert signals["in_flight_run_span_minutes"] < signals["in_flight_minutes"]
+    assert signals["circuit_bypassed_frontier_entries"] == 2
+    assert sorted(row["subject_id"] for row in receipt["open"]) == sorted(
+        [FRONTIER_IFS_SUBJECT, FRONTIER_GFS_SUBJECT]
+    )
+    assert all(row["suppression_bypassed_frontier"] is True for row in receipt["open"])
+    assert [row["subject_id"] for row in receipt["suppressed"]] == [OLD_IFS_SUBJECT, OLD_GFS_SUBJECT]
+
+
+def test_i3_fix_b_alone_alerts_through_the_time_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No frontier entry in the tracker at all: nothing for the bypass to open.
+
+    The full freeze with only the two old-cycle entries.  They stay
+    suppressed and listed; the verdict comes from the in-flight time gate
+    alone, measured as a lower bound because the last progress pass left the
+    scan window 256 passes ago.
+    """
+
+    root = _evidence_root(tmp_path)
+    _write_freeze(root, passes_after_progress=FREEZE_PASSES, on_disk=130)
+    _write_tracker(root, _freeze_tracker(frontier_passes=None))
+
+    status, receipt = _run_at(tmp_path, monkeypatch, root=root, now=FREEZE_NOW, config=SHIPPED_CONFIG)
+
+    assert status == 1
+    assert receipt["verdict"] == "submission_stalled"
+    assert receipt["open"] == []
+    assert receipt["signals"]["circuit_bypassed_frontier_entries"] == 0
+    assert receipt["signals"]["in_flight_run_start_is_lower_bound"] is True
+    assert [row["subject_id"] for row in receipt["suppressed"]] == [OLD_IFS_SUBJECT, OLD_GFS_SUBJECT]
+
+
+def test_i4_a_healthy_forecast_in_flight_with_old_cycle_entries_stays_ok(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Must-preserve: `active_duplicate_pipeline` below the gate is health.
+
+    Thirteen passes after a submitting pass: 79 minutes, the longest forecast
+    #1736 measured.  The tracker holds only the two old-cycle entries, which
+    are not on the frontier, stay suppressed and stay listed.
+    """
+
+    root = _evidence_root(tmp_path)
+    _newest, now = _write_freeze(root, passes_after_progress=13)
+    _write_tracker(root, _freeze_tracker(frontier_passes=None))
+
+    status, receipt = _run_at(tmp_path, monkeypatch, root=root, now=now, config=SHIPPED_CONFIG)
+
+    assert status == 0
+    assert receipt["verdict"] == "ok"
+    assert receipt["passes"]["in_flight_held_count"] == 13
+    assert receipt["passes"]["idle_count"] == 0
+    assert receipt["signals"]["in_flight_run_span_minutes"] == pytest.approx(79.2, abs=0.1)
+    assert receipt["open"] == []
+    assert [row["subject_id"] for row in receipt["suppressed"]] == [OLD_IFS_SUBJECT, OLD_GFS_SUBJECT]
+    assert all(row["matched_rule"] == SUPPRESSED_REASON for row in receipt["suppressed"])
+
+
+def test_i5_a_progress_pass_inside_the_scan_gives_an_exact_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sixty passes in: 365 minutes since the last submission, measured exactly."""
+
+    root = _evidence_root(tmp_path)
+    _newest, now = _write_freeze(root, passes_after_progress=60)
+    _write_tracker(root, _freeze_tracker(frontier_passes=None))
+
+    status, receipt = _run_at(tmp_path, monkeypatch, root=root, now=now, config=SHIPPED_CONFIG)
+
+    assert status == 1
+    assert receipt["verdict"] == "submission_stalled"
+    signals = receipt["signals"]
+    assert signals["in_flight_run_passes"] == 60
+    assert signals["in_flight_run_started_at"] == "2026-09-25T16:45:42Z"
+    assert signals["in_flight_run_ended_by"] == "progress_pass"
+    assert signals["in_flight_run_start_is_lower_bound"] is False
+    assert signals["in_flight_run_span_minutes"] == pytest.approx(365.56, abs=0.1)
+
+
+def test_i5b_one_pass_short_of_the_gate_is_still_ok(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fifty-nine passes in: 359.5 minutes, under the gate by one interval."""
+
+    root = _evidence_root(tmp_path)
+    _newest, now = _write_freeze(root, passes_after_progress=59)
+
+    status, receipt = _run_at(tmp_path, monkeypatch, root=root, now=now, config=SHIPPED_CONFIG)
+
+    assert status == 0
+    assert receipt["verdict"] == "ok"
+    assert receipt["signals"]["in_flight_run_span_minutes"] == pytest.approx(359.46, abs=0.1)
+
+
+def test_i6_a_neutral_newest_pass_does_not_switch_the_bypass_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The frontier is the newest NON-NEUTRAL pass.
+
+    A lock-contended pass carries no candidate lists.  Were the newest pass
+    taken outright, the two frontier entries would fall back under their
+    suppression on every tick where such a pass happened to be newest.
+    """
+
+    root = _evidence_root(tmp_path)
+    newest, _ = _write_freeze(root, passes_after_progress=25)
+    neutral_started_at = newest + FREEZE_INTERVAL
+    _write_pass(
+        root,
+        _freeze_pass_name(neutral_started_at, 26),
+        _pass_payload(
+            started_at=neutral_started_at, status="lock_contended", guard=False, counts=False
+        ),
+    )
+    _write_tracker(root, _freeze_tracker(frontier_passes=25))
+
+    status, receipt = _run_at(
+        tmp_path,
+        monkeypatch,
+        root=root,
+        now=neutral_started_at + timedelta(seconds=80),
+        config=SHIPPED_CONFIG,
+    )
+
+    assert status == 1
+    assert receipt["verdict"] == "no_progress_circuit_open"
+    assert receipt["passes"]["neutral_count"] == 1
+    assert receipt["frontier"]["pass"] == _freeze_pass_name(newest, 25)
+    assert receipt["frontier"]["cycles"] == ["gfs_2026092500", "ifs_2026092500"]
+    assert receipt["signals"]["circuit_bypassed_frontier_entries"] == 2
+
+
+def test_i7_the_bypass_is_source_inclusive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same cycle, other source: not on the frontier, still suppressed."""
+
+    root = _evidence_root(tmp_path)
+    started_at = NOW - timedelta(minutes=5)
+    _write_pass(
+        root,
+        _pass_name(5, "0" * 12),
+        _pass_payload(
+            started_at=started_at,
+            skipped=[_skip_row("active_duplicate_pipeline", "gfs", FREEZE_CYCLE)],
+        ),
+    )
+    _write_tracker(
+        root,
+        [
+            _tracker_entry(
+                reason=SUPPRESSED_REASON,
+                consecutive_passes=30,
+                subject_kind="job",
+                subject_id=FRONTIER_IFS_SUBJECT,
+            )
+        ],
+    )
+
+    status, receipts, _log = _run(tmp_path, monkeypatch, evidence_root=root)
+    receipt = _receipt(receipts)
+
+    assert status == 0
+    assert receipt["verdict"] == "ok"
+    assert receipt["frontier"]["cycles"] == ["gfs_2026092500"]
+    assert [row["subject_id"] for row in receipt["suppressed"]] == [FRONTIER_IFS_SUBJECT]
+
+
+@pytest.mark.parametrize(
+    ("subject_id", "keys", "expected"),
+    [
+        (FRONTIER_IFS_SUBJECT, {"ifs_2026092500"}, True),
+        (FRONTIER_IFS_SUBJECT, {"gfs_2026092500"}, False),
+        (OLD_IFS_SUBJECT, {"ifs_2026092500", "gfs_2026092500"}, False),
+        ("job_cycle_xgfs_2026092500_convert", {"gfs_2026092500"}, False),
+        ("JOB_CYCLE_IFS_2026092500_CONVERT", {"ifs_2026092500"}, True),
+        ("gfs:2026-09-25T00:00:00+00:00", {"gfs_2026092500"}, False),
+        (FRONTIER_IFS_SUBJECT, set(), False),
+    ],
+)
+def test_i8_a_subject_is_on_the_frontier_by_source_and_cycle(
+    subject_id: str, keys: set[str], expected: bool
+) -> None:
+    assert probe.subject_on_frontier(subject_id, frozenset(keys)) is expected
+
+
+def test_i9_the_frontier_keys_fold_the_source_case_and_read_every_candidate_list() -> None:
+    cycle = "2026-09-25T00:00:00Z"
+    payload = {
+        "candidates": [{"source_id": "IFS", "cycle_time": cycle}],
+        "blocked_candidates": [{"source": "gfs", "cycle_time_utc": "2026-09-25T12:00:00Z"}],
+        "skipped_candidates": [
+            {"source_id": "ECMWF_AIFS", "cycle_time": "2026-09-24T12:00:00+00:00"},
+            {"source_id": "gfs", "cycle_time": "not-a-time"},
+            {"cycle_time": cycle},
+            "not-a-row",
+        ],
+    }
+
+    assert probe.pass_cycle_keys(payload) == frozenset(
+        {"ifs_2026092500", "gfs_2026092512", "ecmwf_aifs_2026092412"}
+    )
+
+
+def _zero_zero_payload(**extra: object) -> dict[str, object]:
+    payload = _pass_payload(started_at=NOW)
+    payload.update(extra)
+    return payload
+
+
+IN_FLIGHT_SHAPES = {
+    "active_duplicate": _zero_zero_payload(
+        skipped_candidates=[_skip_row("active_duplicate_pipeline", "gfs", FREEZE_CYCLE)]
+    ),
+    "one_in_flight_among_terminal": _zero_zero_payload(
+        skipped_candidates=[
+            _skip_row("terminal_hydro_success", "gfs", FREEZE_CYCLE),
+            _skip_row("active_slurm_job", "gfs", FREEZE_CYCLE),
+        ]
+    ),
+    "unknown_reason": _zero_zero_payload(
+        skipped_candidates=[_skip_row("a_reason_added_next_year", "gfs", FREEZE_CYCLE)]
+    ),
+    "row_without_a_reason": _zero_zero_payload(skipped_candidates=[{"source_id": "gfs"}]),
+    "row_that_is_not_an_object": _zero_zero_payload(skipped_candidates=["summary lost"]),
+    "list_that_is_not_a_list": _zero_zero_payload(skipped_candidates="dropped"),
+    "count_with_no_list": _zero_zero_payload(
+        counts={"submitted_count": 0, "blocked_candidate_count": 0, "skipped_candidate_count": 96}
+    ),
+    "count_with_an_emptied_list": _zero_zero_payload(
+        counts={"submitted_count": 0, "blocked_candidate_count": 0, "skipped_candidate_count": 96},
+        skipped_candidates=[],
+    ),
+    "count_above_the_terminal_rows_present": _zero_zero_payload(
+        counts={"submitted_count": 0, "blocked_candidate_count": 0, "skipped_candidate_count": 2},
+        skipped_candidates=[_skip_row("terminal_hydro_success", "gfs", FREEZE_CYCLE)],
+    ),
+}
+
+IDLE_SHAPES = {
+    "no_skipped_candidate_at_all": _zero_zero_payload(),
+    "an_empty_list_and_a_zero_count": _zero_zero_payload(skipped_candidates=[]),
+    "every_row_terminal": _zero_zero_payload(
+        counts={"submitted_count": 0, "blocked_candidate_count": 0, "skipped_candidate_count": 5},
+        skipped_candidates=[
+            _skip_row(reason, "gfs", FREEZE_CYCLE)
+            for reason in (
+                "completed_duplicate_pipeline",
+                "terminal_hydro_success",
+                "terminal_completed_cycle",
+                "terminal_pipeline_success",
+                "duplicate_candidate_identity",
+            )
+        ],
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(IN_FLIGHT_SHAPES))
+def test_i10_a_non_terminal_or_unreadable_skip_is_in_flight_held(case: str) -> None:
+    shape, submitted, blocked = probe.classify_pass(IN_FLIGHT_SHAPES[case])
+
+    assert (shape, submitted, blocked) == ("in_flight_held", 0, 0)
+
+
+@pytest.mark.parametrize("case", sorted(IDLE_SHAPES))
+def test_i11_a_pass_with_nothing_in_flight_is_still_idle(case: str) -> None:
+    shape, _submitted, _blocked = probe.classify_pass(IDLE_SHAPES[case])
+
+    assert shape == "idle"
+
+
+@pytest.mark.parametrize(
+    ("extra", "expected"),
+    [
+        ({"submitted": 2}, "progress"),
+        ({"blocked": 3}, "blocked"),
+        ({"guard": False}, "neutral"),
+        ({"status": "resource_limit_blocked"}, "neutral"),
+    ],
+)
+def test_i12_in_flight_skips_do_not_outrank_the_existing_shapes(
+    extra: dict[str, object], expected: str
+) -> None:
+    payload = _pass_payload(
+        started_at=NOW,
+        skipped=[_skip_row("active_duplicate_pipeline", "gfs", FREEZE_CYCLE)],
+        **extra,
+    )
+
+    assert probe.classify_pass(payload)[0] == expected
+
+
+def _shape_run(root: Path, shapes: list[str], *, spacing_minutes: int = 2) -> None:
+    """Write newest-first ``shapes`` two minutes apart, newest five minutes ago."""
+
+    for index, shape in enumerate(shapes):
+        minutes = 5 + index * spacing_minutes
+        _write_pass(
+            root,
+            _pass_name(minutes, f"{index:012x}"),
+            _pass_payload(
+                started_at=NOW - timedelta(minutes=minutes),
+                blocked=4 if shape == "blocked" else 0,
+                submitted=1 if shape == "progress" else 0,
+                skipped=(
+                    [_skip_row("active_duplicate_pipeline", "gfs", FREEZE_CYCLE)]
+                    if shape == "held"
+                    else None
+                ),
+            ),
+        )
+
+
+def test_i13_an_in_flight_held_pass_does_not_clear_the_count_streak(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Three blocked passes around one in-flight-held pass reach the threshold of 3.
+
+    Read as idle, the held pass halts the search at a streak of 1.
+    """
+
+    root = _evidence_root(tmp_path)
+    _shape_run(root, ["blocked", "held", "blocked", "blocked"])
+
+    status, receipts, _log = _run(tmp_path, monkeypatch, evidence_root=root)
+    receipt = _receipt(receipts)
+
+    assert status == 1
+    assert receipt["verdict"] == "submission_stalled"
+    assert receipt["signals"]["no_submission_streak"] == 3
+    assert receipt["signals"]["no_submission_neutral_skipped"] == 0
+    assert receipt["passes"]["in_flight_held_count"] == 1
+
+
+def test_i14_an_in_flight_held_pass_does_not_extend_the_count_streak(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two blocked and two held is a streak of 2, under the threshold of 3."""
+
+    root = _evidence_root(tmp_path)
+    _shape_run(root, ["blocked", "held", "held", "blocked"])
+
+    status, receipts, _log = _run(tmp_path, monkeypatch, evidence_root=root)
+    receipt = _receipt(receipts)
+
+    assert status == 0
+    assert receipt["verdict"] == "ok"
+    assert receipt["signals"]["no_submission_streak"] == 2
+    assert receipt["signals"]["in_flight_run_passes"] == 4
+    assert receipt["signals"]["in_flight_run_span_minutes"] == 6.0
+    assert receipt["signals"]["in_flight_run_start_is_lower_bound"] is True
+
+
+def _record(minutes_ago: int, shape: str) -> probe.PassRecord:
+    return probe.PassRecord(
+        name=f"scheduler_{minutes_ago}.json",
+        started_at=NOW - timedelta(minutes=minutes_ago),
+        status="planned",
+        shape=shape,
+        submitted_count=0,
+        blocked_candidate_count=0,
+    )
+
+
+@pytest.mark.parametrize(
+    ("shapes", "window", "passes", "start_minutes_ago", "ended_by", "lower_bound", "span"),
+    [
+        # Ended by the last progress pass: the start is that pass's start.
+        (["in_flight_held", "blocked", "in_flight_held", "progress"], 10, 3, 40, "progress_pass", False, 30.0),
+        # Ended by an idle pass: the start is the oldest pass of the run.
+        (["in_flight_held", "in_flight_held", "idle", "progress"], 10, 2, 20, "idle_pass", False, 10.0),
+        # Ended by the window: the same oldest pass, but a lower bound.
+        (["in_flight_held", "in_flight_held", "in_flight_held"], 10, 3, 30, "scan_window", True, 20.0),
+        (["in_flight_held", "in_flight_held", "progress"], 2, 2, 20, "scan_window", True, 10.0),
+        # Neutral passes are walked past and cost nothing.
+        (["neutral", "in_flight_held", "neutral", "progress"], 10, 1, 40, "progress_pass", False, 20.0),
+        # No run at all: the newest non-neutral pass cleared or submitted.
+        (["progress", "in_flight_held"], 10, 0, None, None, False, None),
+        (["idle", "blocked"], 10, 0, None, None, False, None),
+        (["neutral"], 10, 0, None, None, False, None),
+        ([], 10, 0, None, None, False, None),
+    ],
+)
+def test_i15_the_run_start_and_span_follow_how_the_run_ended(
+    shapes: list[str],
+    window: int,
+    passes: int,
+    start_minutes_ago: int | None,
+    ended_by: str | None,
+    lower_bound: bool,
+    span: float | None,
+) -> None:
+    records = [_record(10 * (index + 1), shape) for index, shape in enumerate(shapes)]
+
+    run = probe.in_flight_run(records, window=window)
+
+    assert run.passes == passes
+    assert run.ended_by == ended_by
+    assert run.start_is_lower_bound is lower_bound
+    assert run.span_minutes == span
+    assert run.started_at == (
+        None if start_minutes_ago is None else NOW - timedelta(minutes=start_minutes_ago)
+    )
+
+
+def test_i16_the_time_gate_is_measured_between_passes_not_to_the_clock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A long pass in flight ages nothing: the span ends at the newest artifact.
+
+    One in-flight-held pass 8 minutes after a submitting pass, then a pass
+    that has been running for three hours.  Measured to the clock the run
+    would be 188 minutes; measured between artifacts it is 8.
+    """
+
+    root = _evidence_root(tmp_path)
+    _shape_run(root, ["held", "progress"], spacing_minutes=8)
+
+    status, receipts, _log = _run(
+        tmp_path,
+        monkeypatch,
+        evidence_root=root,
+        now=NOW + timedelta(minutes=175),
+        service_properties=_in_flight_service_properties(),
+        timer_properties=_timer_properties(last_trigger=_systemd_timestamp(NOW + timedelta(minutes=2))),
+    )
+    receipt = _receipt(receipts)
+
+    assert status == 0
+    assert receipt["verdict"] == "ok"
+    assert receipt["signals"]["in_flight_run_span_minutes"] == 8.0
+
+
+@pytest.mark.parametrize(("scan_limit", "gate", "refused"), [(96, 415, False), (96, 416, True), (64, 360, True)])
+def test_i17_a_gate_the_scan_window_cannot_span_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    scan_limit: int,
+    gate: int,
+    refused: bool,
+) -> None:
+    """`gate <= (scan_limit - 12 - 1) x 5`, refused before any evidence is read.
+
+    The third case is the pre-#2662 shipped scan of 64 kept by a drop-in: it
+    spans only 255 guaranteed minutes, so the shipped 360-minute gate could
+    stay unmet through a freeze of any length.
+    """
+
+    root = _evidence_root(tmp_path)
+    _healthy_passes(root)
+
+    status, receipts, log = _run(
+        tmp_path,
+        monkeypatch,
+        evidence_root=root,
+        config={**SHIPPED_CONFIG, probe.ENV_SCAN_LIMIT: str(scan_limit), ENV_IN_FLIGHT_MINUTES: str(gate)},
+    )
+    stderr = capsys.readouterr().err
+
+    if not refused:
+        assert status == 0
+        assert _receipt(receipts)["signals"]["in_flight_minutes"] == gate
+        return
+    assert status == 2
+    assert not log.exists(), "systemctl was invoked before the configuration was validated"
+    assert not (receipts / "latest.json").exists()
+    assert f"{ENV_IN_FLIGHT_MINUTES}={gate} must be at most {(scan_limit - 13) * 5}" in stderr
+    assert "or the verdict is unreachable" in stderr
+
+
+def test_i18_the_runbook_documents_the_new_shape_the_gate_and_the_bypass() -> None:
+    text = RUNBOOK.read_text()
+
+    assert "in_flight_held" in text
+    assert ENV_IN_FLIGHT_MINUTES in text
+    assert "suppression_bypassed_frontier" in text
+    assert "in_flight_run_start_is_lower_bound" in text

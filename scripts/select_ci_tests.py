@@ -3110,6 +3110,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # the held-reservation listing ages, and that suite pins the
             # serialized key. DB-free, 41 tests in ~4s.
             "tests/test_operator_action_listing_held_reservations.py",
+            # #2662 adds the seventh at-site target, a D4 parity edge like the
+            # scheduler_evidence.py / scheduler_no_progress.py rows further
+            # down. The node-22 stall probe is stdlib-only, so it carries a
+            # literal copy of this module's `_RETENTION_TERMINAL_SKIP_REASONS`
+            # (a skip reason outside it is in-flight and must not clear the
+            # probe's stall streak). The parity test imports this module inside
+            # its function body, so no importer derivation reaches it and this
+            # stop rule is its only route. One node id, not the ~170-test probe
+            # suite: the rest of that suite reads nothing from this module.
+            "tests/test_node22_scheduler_stall_health.py::test_e5_the_terminal_skip_reasons_equal_the_schedulers_own",
             # #2316: the extra-root wiring oracle (rationale above).
             "tests/test_retention_extra_roots.py",
         ),

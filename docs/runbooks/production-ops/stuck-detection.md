@@ -162,6 +162,27 @@ ssh -p 32099 frd_muziyao@210.77.77.22 \
      /scratch/frd_muziyao/NWM/scripts/node22_scheduler_stall_health.py --json'
 ```
 
+上面这条会**覆盖生产 receipt**（`latest.json` 无条件写，没有跳过开关）。对任意证据目录
+做**不留痕回放**（验证新规则、复盘历史产物）时把 receipt 根指到 scratch：
+
+```bash
+NHMS_SCHEDULER_STALL_EVIDENCE_ROOT=/path/to/evidence-copy \
+NHMS_SCHEDULER_STALL_RECEIPT_ROOT=/tmp/stall-replay-receipts \
+  /scratch/frd_muziyao/NWM/.venv/bin/python \
+    /scratch/frd_muziyao/NWM/scripts/node22_scheduler_stall_health.py \
+    --json --now 2026-09-27T03:18:31Z
+```
+
+- tracker 没有单独的路径变量：固定读 `<证据根>/no-progress-tracker.json`，缺失按
+  「无 tracker」处理、不报错。
+- receipt 根**不得**在证据根之内（退出码 2），只会新建 `latest.json`（0600，目录 0700）。
+- 回放历史产物必须带 `--now`（取产物时代的时刻）：否则第 7 档 `evidence_stale` 先命中，
+  第 8–11 档看不到。`--now` 只有 CLI、没有环境变量。
+- systemd 侧只有两条 `systemctl --user show`（只读），**跳不过**：不改
+  `NHMS_SCHEDULER_STALL_SYSTEMCTL` 时第 2–5、7 档反映的是**此刻活着的**调度器单元，
+  与被回放的产物无关；配了 `--now` 的历史回放里 `LastTriggerUSec` 相对 `--now` 的 age
+  为负，不会触发第 5 档。要彻底隔离，把该变量指向一个只回显健康属性的桩脚本。
+
 #### 6.2.1 十一档 verdict 的处置
 
 下面每档的五级标题就是探针 receipt/stderr 里 `runbook=` 指针的锚点，标题文本即锚点
@@ -264,16 +285,53 @@ lane 现在不会再触发。合取项是**保守**写法，不是「timer 在�
 
 ##### stall-submission-stalled
 
-**10. `submission_stalled`** —— 连续 ≥
-`NHMS_SCHEDULER_STALL_NO_SUBMISSION_PASSES`（默认 20）趟「零提交且有阻塞候选」。
-四类口径（每趟终态产物恰好落一类）：
+**10. `submission_stalled`** —— 两个信号任一成立（receipt 里各自带观测值与阈值，
+看哪一对越界就知道是谁报的）：
 
-| 类 | 判据 | 对 streak 的作用 |
-|---|---|---|
-| progress | `counts.submitted_count > 0` | **打断** |
-| blocked | `submitted_count == 0` 且 `blocked_candidate_count > 0` | **延长** |
-| idle | `submitted_count == 0` 且 `blocked_candidate_count == 0` | **打断**（阻塞候选消失即阻塞已解除） |
-| neutral | 产物**无 `progress_guard` 键**，**或** 两个 count 任一缺失，**或** `status == "resource_limit_blocked"` | **跳过**（既不延长也不打断） |
+- **计数**：连续 ≥ `NHMS_SCHEDULER_STALL_NO_SUBMISSION_PASSES`（默认 20）趟
+  「零提交且有阻塞候选」；
+- **时间闸门**（#2662）：自上一趟 progress 以来的每一趟非中性 pass 都是 blocked 或
+  `in_flight_held`，且这段 run 的跨度 ≥ `NHMS_SCHEDULER_STALL_IN_FLIGHT_MINUTES`
+  （默认 360 分钟）。
+
+五类口径（每趟终态产物恰好落一类）：
+
+| 类 | 判据 | 对计数 streak 的作用 | 对时间闸门 run 的作用 |
+|---|---|---|---|
+| progress | `counts.submitted_count > 0` | **打断** | **终止**，run 从这趟的 `started_at` 起算 |
+| blocked | `submitted_count == 0` 且 `blocked_candidate_count > 0` | **延长** | **计入** |
+| in_flight_held | 两个 count 都是 0，且 `skipped_candidates` 里至少一行的 `reason` 不在调度器的终态 skip 集合内 | **跳过**（不延长、**不打断**） | **计入** |
+| idle | 两个 count 都是 0，且没有任何在飞的 skip | **打断**（阻塞候选消失即阻塞已解除） | **终止**，run 从它之后最老的一趟起算 |
+| neutral | 产物**无 `progress_guard` 键**，**或** 两个 count 任一缺失，**或** `status == "resource_limit_blocked"` | **跳过**（既不延长也不打断） | **跳过** |
+
+`in_flight_held` 是 #2662 从 idle 里拆出来的。#2655 冻结期间每趟 96 个候选里 94 个被
+skip 成 `active_duplicate_pipeline`、0 提交、0 阻塞，旧口径把它们全读成 idle，340 趟
+零提交逐趟把 streak 清零，探针报了三十多小时 `ok`。skip 掉一个**还在飞**的候选不等于
+阻塞解除。终态 skip 集合是调度器自己判断 frontier 能否越过一个 skip 的那个集合
+（`scheduler_runtime._RETENTION_TERMINAL_SKIP_REASONS`：`completed_duplicate_pipeline` /
+`terminal_hydro_success` / `terminal_completed_cycle` / `terminal_pipeline_success` /
+`duplicate_candidate_identity`）；探针是 stdlib-only，带的是字面量拷贝，由 parity 用例
+钉死、并由 `scripts/select_ci_tests.py` 在改 `scheduler_runtime.py` 的 PR 上选中。
+判定与调度器同向 fail-safe（**未知即在飞**）：集合外的任何 reason（含以后新增的）、
+没有 `reason` 的行、不是对象的行、`skipped_candidates` 不是列表、
+`skipped_candidate_count > 0` 而列表缺失或行数少于 count，全部算在飞；
+一行 skip 都没有（无列表且 count 为 0）仍是 idle。
+
+时间闸门的量法：
+
+- 跨度 = run 里**最新一趟**的 `started_at` − run 的起点，**不量到时钟**。量到时钟的话
+  一趟实测 193 分钟的健康长 pass 在飞期间会凭空把跨度推过闸门；产物断流是第 7 档的事。
+- 起点：上一趟 progress 还在扫描前缀内时取它的 `started_at`（`in_flight_run_ended_by:
+  "progress_pass"`）；被一趟 idle 截断时取 run 里最老一趟（`"idle_pass"`）；前缀走完
+  还没见到 progress / idle 时也取 run 里最老一趟（`"scan_window"`），此时
+  `in_flight_run_start_is_lower_bound: true` —— 上一趟 progress 已经在扫描窗口之外，
+  真实时长**不短于**这个数。#2655 冻结末期就是这个形状。
+- 健康的在飞 forecast 不会触发：`active_duplicate_pipeline` 低于闸门时仍是 `ok`。
+
+receipt 字段（足够独立重推）：`passes.in_flight_held_count`；
+`signals.in_flight_run_passes` / `in_flight_run_in_flight_held_passes` /
+`in_flight_run_started_at` / `in_flight_run_newest_started_at` / `in_flight_run_ended_by` /
+`in_flight_run_start_is_lower_bound` / `in_flight_run_span_minutes` 对 `in_flight_minutes`。
 
 中性**不是 status 允许表**。调度器自己的口径是「early-exit / pre-lock /
 lock-contended / resource-limit-aborted」**四类早退写入点**，不是四个 status 字符
@@ -286,13 +344,18 @@ lock-contended / resource-limit-aborted」**四类早退写入点**，不是四�
 resource-limit 路径写 `counts` 两个键都为 0，且 `error.details` 带 guard 时会附上
 `progress_guard`，前两条漏掉它就会落进 idle 去**打断** streak。
 
-streak 的遍历范围是**排序余量担保的前缀** `SCAN_LIMIT - 12`（默认 52 趟），**不是**
+streak 与时间闸门 run 的遍历范围都是**排序余量担保的前缀** `SCAN_LIMIT - 12`（默认 84 趟），**不是**
 阈值本身：中性趟被跳过但在任何按位置切的窗口里仍占一个名额，窗口若等于阈值 20，
 里面只要有一趟中性（实测约 1/16 趟），streak 上限就是 19、这档永远不报。
 receipt 的 `evidence.streak_window` 记这个前缀长度，
 `signals.no_submission_neutral_skipped` 记本次遍历跳过的中性趟数。
 处置：读 receipt 的 `passes` 计数与最新几趟产物的 `blocked_candidates`，转
 [`../scheduler-dbfree-typed-reasons.md`](../scheduler-dbfree-typed-reasons.md)。
+时间闸门报的（`in_flight_run_span_minutes >= in_flight_minutes` 而计数 streak 不够）
+改读最新几趟产物的 `skipped_candidates[].reason`：全是 `active_duplicate_pipeline` 说明
+有 pipeline 六小时没走完，先 `squeue` / `sacct` 核对对应作业是否真的在跑；held 的
+forcing / forecast reservation 走
+[`../failed-basin-retry.md`](../failed-basin-retry.md) 的有保护运维动作。
 
 ##### stall-no-progress-circuit-open
 
@@ -300,7 +363,9 @@ receipt 的 `evidence.streak_window` 记这个前缀长度，
 的**条目 `consecutive_passes >= NHMS_SCHEDULER_STALL_CIRCUIT_PASSES`（默认 20）。
 该阈值**刻意高于**调度器自身的 observe 阈值
 `NHMS_SCHEDULER_NO_PROGRESS_CIRCUIT_PASSES=3`：circuit 负责观测，探针负责告警，
-两者解耦。抑制见 6.2.4。
+两者解耦。抑制见 6.2.4；**抑制管不到 frontier 上的条目**（#2662）：`open[]` 里
+`suppression_bypassed_frontier: true` 的行，其 reason 在白名单内，但它的 cycle 正是
+调度器当前在做的那个。
 处置：按 §6.1 的 reason 三类表定位下游 runbook。
 
 ##### stall-ok
@@ -333,11 +398,30 @@ drop-in 写 `Environment=NHMS_SCHEDULER_STALL_SUPPRESSED_REASONS=`（等号后�
 `LIMIT_LOOKBACK_MINUTES` ≥ 30（须覆盖探针周期 15 + `RandomizedDelaySec=60` +
 余量）；`LOCK_PASSES` / `NO_SUBMISSION_PASSES` ≥ 2；`CIRCUIT_PASSES` ≥ 1；
 `SCAN_LIMIT > max(NO_SUBMISSION_PASSES, LOCK_PASSES) + 12`（**严格大于**；12 是单小时桶
-余量，实测单桶最多 8 趟）；`MAX_ENTRIES_SCANNED >= SCAN_LIMIT`。
+余量，实测单桶最多 8 趟）；`MAX_ENTRIES_SCANNED >= SCAN_LIMIT`；
+`10 <= IN_FLIGHT_MINUTES <= (SCAN_LIMIT - 12 - 1) * 5`（默认 `SCAN_LIMIT=96` 时上限 415）。
 严格大于是因为 streak 只在前缀 `SCAN_LIMIT - 12` 里找：前缀必须比阈值长，否则前缀里
 一趟中性就把 streak 封顶在阈值减一、这档永远不报。**调高任一 streak 阈值时同步调高
-`SCAN_LIMIT`**：例如 `NO_SUBMISSION_PASSES=52` 需要 `SCAN_LIMIT >= 65`，只改前者而留着
-默认 64 会被拒绝（退出码 2）。
+`SCAN_LIMIT`**：例如 `NO_SUBMISSION_PASSES=84` 需要 `SCAN_LIMIT >= 97`，只改前者而留着
+默认 96 会被拒绝（退出码 2）。
+
+`NHMS_SCHEDULER_STALL_IN_FLIGHT_MINUTES`（#2662，默认 360）的标定与上下界：
+
+- **下侧（健康 lane 不误报）**：run 从 progress 那趟的 `started_at` 起算，所以跨度里含
+  那趟 pass 自己的时长 —— 实测相邻 `started_at` 间隔最大 193.9 分钟（p99 160.4）——
+  再加它提交的 forecast，#1736 实测 65–79 分钟。两个最大值叠加 273 分钟是仓库里记录
+  过的最长健康 run；360 约为其 1.3 倍，并与两个 age 阈值同值。
+- **上侧（闸门必须够得着）**：上一趟 progress 滑出扫描窗口后，跨度只能在读到的前缀里
+  量，上限是 `前缀 - 1` 个 pass 间隔。调度器 timer 是 `OnUnitActiveSec=5min`，两趟最密
+  相隔 5 分钟，所以配置校验拒绝 `IN_FLIGHT_MINUTES > (SCAN_LIMIT - 13) * 5`：比这更大
+  的闸门没有任何可读证据能满足，等于一个永远不报的 verdict。这也是 `SCAN_LIMIT` 默认从
+  64 抬到 96 的原因：`(64 - 13) * 5 = 255 < 360`，`(96 - 13) * 5 = 415`。#2655 冻结
+  实测 6.1 分钟一趟，84 趟前缀跨 505 分钟。
+- **升级注意**：已有 drop-in 把 `SCAN_LIMIT` 钉在低于 85（含旧默认 64）而没同时调低
+  `IN_FLIGHT_MINUTES` 的，升级后探针每个 tick 退出码 2。删掉该行或抬到 ≥ 85；
+  调高闸门时按 `SCAN_LIMIT >= IN_FLIGHT_MINUTES / 5 + 13` 同步调高扫描量。
+- 调低闸门前先看 `in_flight_run_span_minutes` 的历史分布：低于 273 就会在实测出现过的
+  健康形状上误报。
 **改完必须把 drop-in 记在本节** —— 一个没人看得见的阈值就是没人能审计的阈值。
 
 #### 6.2.3 安装步骤与装前装后对拍
@@ -409,17 +493,41 @@ absence/release 出口」，处置是有保护的 `nhms-pipeline demote-reserved
 
 纪律：
 
-- 匹配是 **reason 精确串**，不是前缀、不是 `subject_id`（后者带 cycle，每个新
-  cycle 都要改配置，必然腐烂）。
+- **配置**匹配的是 **reason 精确串**，不是前缀、不是 `subject_id`（后者带 cycle，
+  每个新 cycle 都要改配置，必然腐烂）。
+- **抑制只对 lane 已经甩在身后的条目生效，管不到 frontier**（#2662）。frontier = 最新
+  一趟**非中性** pass（lock-contended / resource-limit 的中性趟没有候选列表，取它会让
+  bypass 一闪一闪）在 `candidates` / `blocked_candidates` / `skipped_candidates` 里出现
+  过的全部 `(source, cycle_time)`。条目 `subject_id` 里的 `<source>_<YYYYMMDDHH>`
+  （例：`job_cycle_ifs_2026092500_...`）等于其中之一即在 frontier 上：**source 一并
+  比较**（同 cycle 的另一个 source 不算）、**大小写不敏感**（`subject_id` 里是 `ifs`，
+  候选行里是配置的 `IFS`），且必须夹在下划线之间。这样的条目**按未抑制判级**，进
+  `open[]` 并带 `suppression_bypassed_frontier: true`，`signals.
+  circuit_bypassed_frontier_entries` 是条数；receipt 的 `frontier.pass` /
+  `frontier.cycles` 记着本次比对用的那趟产物和它的 cycle 集合。这一步由探针从产物里
+  推导，**不需要改配置**。出处：#2655 冻结时 tracker 里四条同 reason 的条目，两条是老
+  cycle 的慢性噪声（2200 / 2098 趟），两条正是冻结本身（338 趟），被同一条规则一起
+  压掉。
 - **抑制只作用于 verdict 11**，对 verdict 1–10 任何一条都没有影响。
 - 被抑制的条目照样写进 receipt 的 `suppressed[]`
   （`subject_kind`/`subject_id`/`reason`/`consecutive_passes`/`matched_rule`），
   可审计性由 receipt 承担，不靠人记。
 - `suppressed[]` 里的条目**应走人工处置流程**（上面 `failed-basin-retry.md` 的有保护
   运维动作），**不是可以无视**：抑制只是不让它每 15 分钟重复告警，不是宣布它无害。
-- 残余风险（明写、不消除）：若某个真实新 stall 复用了被抑制的 reason，探针不报。
-  接受，因为该 reason 已判定为不能自动收敛、且按上条走人工处置；换 reason 类的 stall
-  仍会报。
+- 残余风险（明写、不消除），#2662 之后收窄为三条：
+  1. 复用被抑制 reason、且 cycle **不在** frontier 上的真实新 stall，verdict 11 不报
+     （例如调度器已经越过去的老 cycle 上新挂住的 held 行）。接受，因为该 reason 已判定
+     为不能自动收敛、且按上条走人工处置。
+  2. frontier 那趟产物的候选行读不出 `source` / `cycle_time` 时 `frontier.cycles` 为空，
+     本 tick 没有条目能被 bypass（receipt 里 `frontier.pass` 有名而 `cycles` 为 `[]`）。
+     writer 尺寸回退把候选列表清空的那种产物 `status` 是 `resource_limit_blocked`，属
+     中性、不会被取作 frontier；前缀里若**全是**中性趟，frontier 与时间闸门的 run 都
+     为空，这两条规则都不报，由第 8 档 `pass_limit_blocked` 覆盖。
+  3. `subject_id` 不带 `<source>_<YYYYMMDDHH>` 的条目（candidate 类
+     `gfs:2026-09-23T00:00:00+00:00`）永远不匹配 frontier，继续被抑制。
+
+  换 reason 类的 stall 仍会报；frontier 整体不动的冻结由 verdict 10 的时间闸门独立
+  覆盖，不依赖 tracker。
 
 #### 6.2.5 巡检行：探针自己还活着吗
 

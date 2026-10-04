@@ -1084,6 +1084,9 @@ def test_select_tests_maps_file_journal_read_state_without_whole_legacy_suites()
             # serializes the reserved-unbound outcome rows (with the attempt
             # anchor) the held-reservation listing suite ages and pins.
             "tests/test_operator_action_listing_held_reservations.py",
+            # #2662's at-site addition to the same stop rule: the node-22
+            # stall probe's terminal skip-reason parity pin (one node id).
+            "tests/test_node22_scheduler_stall_health.py::test_e5_the_terminal_skip_reasons_equal_the_schedulers_own",
             # #2316's at-site addition to the same stop rule: the extra-root
             # wiring oracle for the `runs_only_roots` tuple this module builds.
             "tests/test_retention_extra_roots.py",
@@ -12195,6 +12198,8 @@ STOP_RULE_AT_SITE_EXTENSIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "tests/test_retention_extra_roots.py",
             # #2668: the held-reservation listing suite (serialized anchor key).
             "tests/test_operator_action_listing_held_reservations.py",
+            # #2662: the node-22 stall probe's terminal skip-reason parity pin.
+            "tests/test_node22_scheduler_stall_health.py::test_e5_the_terminal_skip_reasons_equal_the_schedulers_own",
         ),
     ),
 )
@@ -12323,6 +12328,9 @@ def test_scheduler_runtime_selects_the_copyback_mutex_suite() -> None:
     assert select_tests(["services/orchestrator/scheduler_runtime.py"], repo_root=Path(".")) == [
         "tests/test_file_orchestration_journal.py",
         "tests/test_file_orchestration_migration.py",
+        # #2662: the stall probe's literal copy of this module's
+        # `_RETENTION_TERMINAL_SKIP_REASONS` is pinned by one node id.
+        "tests/test_node22_scheduler_stall_health.py::test_e5_the_terminal_skip_reasons_equal_the_schedulers_own",
         # #2668: the held-reservation listing suite joins the stop rule at site.
         "tests/test_operator_action_listing_held_reservations.py",
         "tests/test_operator_action_reservation_lease.py",
