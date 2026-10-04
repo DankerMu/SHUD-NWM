@@ -2711,7 +2711,108 @@ def _safe_read_file_cache(key: str) -> tuple[bytes, str, str] | None:
         return None
 
 
+# #2716: asks PostgreSQL whether the current role may write the DB tile cache,
+# instead of finding out from a rejected INSERT on every cold miss. The write is
+# `INSERT ... ON CONFLICT DO UPDATE`, so both privileges are required. It cannot
+# raise in any catalog state: `to_regnamespace` / `to_regclass` return NULL for
+# a missing schema / table and `has_*_privilege` returns NULL for a NULL oid;
+# the CASE keeps `to_regclass` (which checks schema USAGE) from running for a
+# role without it. An absent table keeps what `_write_cache` /
+# `_ensure_tile_layer` do for it: no `map.tile_cache` -> no DB write, no
+# `map.tile_layer` -> allowed.
+_DB_TILE_CACHE_WRITABLE_SQL = """
+SELECT CASE
+    WHEN NOT COALESCE(has_schema_privilege(to_regnamespace('map'), 'USAGE'), false) THEN false
+    ELSE COALESCE(
+            has_table_privilege(to_regclass('map.tile_cache'), 'INSERT')
+            AND has_table_privilege(to_regclass('map.tile_cache'), 'UPDATE'),
+            false
+        )
+        AND COALESCE(
+            has_table_privilege(to_regclass('map.tile_layer'), 'INSERT')
+            AND has_table_privilege(to_regclass('map.tile_layer'), 'UPDATE'),
+            true
+        )
+END AS writable
+"""
+
+# One verdict per engine, keyed by `id(bind)` and dropped when the engine is
+# collected (so a recycled id never inherits it). The lock guards dict access
+# only -- the probe runs outside it, so concurrent first requests may each
+# probe once (read-only, idempotent). Re-entrant because the finalizer can run
+# on a thread that is inside one of the locked sections.
+_DB_TILE_CACHE_WRITABLE: dict[int, bool] = {}
+_DB_TILE_CACHE_WRITABLE_LOCK = threading.RLock()
+
+
+def reset_db_tile_cache_write_probe() -> None:
+    """Forget every cached privilege verdict (tests)."""
+    with _DB_TILE_CACHE_WRITABLE_LOCK:
+        _DB_TILE_CACHE_WRITABLE.clear()
+
+
+def _forget_db_tile_cache_writable(bind_id: int) -> None:
+    with _DB_TILE_CACHE_WRITABLE_LOCK:
+        _DB_TILE_CACHE_WRITABLE.pop(bind_id, None)
+
+
+def _probe_db_tile_cache_writable(session: Session) -> bool:
+    """True only for a real boolean true; anything else disables DB cache writes."""
+    try:
+        row = session.execute(text(_DB_TILE_CACHE_WRITABLE_SQL)).mappings().first()
+    except SQLAlchemyError as error:
+        try:
+            session.rollback()
+        except SQLAlchemyError:
+            pass
+        logger.warning(
+            "MVT DB tile cache write-privilege probe failed (%s); DB tile cache writes are off for this "
+            "engine until the process restarts, the file cache still applies",
+            type(error).__name__,
+        )
+        return False
+    value = row.get("writable") if row is not None else None
+    if value is True:
+        return True
+    if value is False:
+        logger.info(
+            "MVT DB tile cache writes are off for this engine: the current role lacks INSERT/UPDATE on "
+            "map.tile_cache / map.tile_layer (or map.tile_cache is absent); the file cache still applies"
+        )
+        return False
+    logger.warning(
+        "MVT DB tile cache write-privilege probe returned %r instead of a boolean; DB tile cache writes "
+        "are off for this engine until the process restarts, the file cache still applies",
+        value,
+    )
+    return False
+
+
+def _db_tile_cache_writable(session: Session) -> bool:
+    bind = session.get_bind()
+    if bind.dialect.name != "postgresql":
+        return True
+    bind_id = id(bind)
+    with _DB_TILE_CACHE_WRITABLE_LOCK:
+        cached = _DB_TILE_CACHE_WRITABLE.get(bind_id)
+    if cached is not None:
+        return cached
+    writable = _probe_db_tile_cache_writable(session)
+    with _DB_TILE_CACHE_WRITABLE_LOCK:
+        if bind_id not in _DB_TILE_CACHE_WRITABLE:
+            try:
+                weakref.finalize(bind, _forget_db_tile_cache_writable, bind_id)
+            except TypeError:
+                # Not weak-referenceable (a test double): nothing could drop the
+                # entry, so this bind is probed on every call instead.
+                return writable
+            _DB_TILE_CACHE_WRITABLE[bind_id] = writable
+    return writable
+
+
 def _write_cache(session: Session, tile: TileInput, key: str, data: bytes, checksum: str, etag: str) -> bool:
+    if not _db_tile_cache_writable(session):
+        return False
     if not _table_exists(session, "tile_cache", "map"):
         return False
     if not _ensure_tile_layer(session, tile):

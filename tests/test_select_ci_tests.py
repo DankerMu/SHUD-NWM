@@ -1776,6 +1776,11 @@ def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
         "tests/test_hydro_display_mvt_scaling_national_routes.py",
         "tests/test_hydro_display_mvt_scaling_national_sql.py",
         "tests/test_migrations.py",
+        # #2716: guard-derived entry, synced from the selector's own output per
+        # the procedure above — the DB tile-cache write-privilege suite imports
+        # services.tiles.mvt at file level, so the closure guard puts it on
+        # this rule as a DIRECT importer.
+        "tests/test_mvt_db_cache_write_privilege.py",
         # #2156 (D-2): guard-derived entry, synced from the selector's own
         # output per the procedure above — the geometry-identity suite imports
         # TileInput / cache_key / display_ready_run from services.tiles.mvt at

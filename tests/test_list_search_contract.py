@@ -338,3 +338,114 @@ def test_met_station_invalid_variable_rejected(monkeypatch: pytest.MonkeyPatch) 
             offset=0,
         )
     assert excinfo.value.status_code == 422
+
+
+# --------------------------------------------------------------------------- #
+# Met stations: the model_id branch never joins met.interp_weight (#2694)
+# --------------------------------------------------------------------------- #
+
+# The spec'd predicate, verbatim: an uncorrelated scalar-array subquery the
+# planner evaluates once (InitPlan), so the statement's cost does not depend on
+# the row estimates of met.met_station x met.interp_weight.
+_MODEL_STATION_FILTER = (
+    "ms.station_id = ANY((SELECT array_agg(DISTINCT station_id) "
+    "FROM met.interp_weight WHERE model_id = %s)::text[])"
+)
+_VARIABLE_COVERAGE_FILTER = (
+    "ms.station_id = ANY((SELECT array_agg(station_id) FROM ("
+    "SELECT station_id FROM met.interp_weight "
+    "WHERE model_id = %s AND variable = ANY(%s) "
+    "GROUP BY station_id "
+    "HAVING COUNT(DISTINCT variable) = %s) AS covered)::text[])"
+)
+
+
+def _one_line(statement: str) -> str:
+    return " ".join(statement.split())
+
+
+def _where_clause(statement: str) -> str:
+    return _one_line(statement).split(" WHERE ", 1)[1].split(" ORDER BY ", 1)[0]
+
+
+def test_met_station_model_filter_is_an_uncorrelated_array_not_a_join(monkeypatch: pytest.MonkeyPatch) -> None:
+    cursor = _RecordingCursor([{"total_count": 3}, []])
+    store = _forecast_store(monkeypatch, cursor)
+
+    result = store.list_met_stations(
+        basin_version_id="basin_v01",
+        model_id="model_v01",
+        limit=500,
+        offset=20,
+    )
+
+    count_statement, page_statement = (_one_line(statement) for statement in cursor.statements)
+    for statement in (count_statement, page_statement):
+        assert "JOIN" not in statement
+        assert " iw" not in statement
+        assert _MODEL_STATION_FILTER in statement
+        # station_id is met.met_station's primary key: one row per station
+        # without DISTINCT on the outer query.
+        assert "SELECT DISTINCT" not in statement
+        assert "COUNT(DISTINCT ms.station_id)" not in statement
+        assert "ms.active_flag" not in statement
+    assert count_statement.startswith("SELECT COUNT(ms.station_id) AS total_count FROM met.met_station ms WHERE ")
+    assert page_statement.endswith("ORDER BY ms.station_id LIMIT %s OFFSET %s")
+    # COUNT and page share one WHERE, and the binds follow the placeholders.
+    assert _where_clause(count_statement) == _where_clause(page_statement)
+    assert _where_clause(count_statement) == f"{_MODEL_STATION_FILTER} AND ms.basin_version_id = %s"
+    assert cursor.parameters[0] == ("model_v01", "basin_v01")
+    assert cursor.parameters[1] == ("model_v01", "basin_v01", 500, 20)
+    assert result["total_count"] == 3
+    assert result["limit"] == 500
+    assert result["offset"] == 20
+
+
+def test_met_station_model_filter_without_basin_scopes_by_model_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    # `services/production_closure/readonly_db_route_smoke.py` calls the route
+    # exactly like this (model_id, no basin, limit=1) in the deploy receipt.
+    cursor = _RecordingCursor([{"total_count": 7}, []])
+    store = _forecast_store(monkeypatch, cursor)
+
+    store.list_met_stations(basin_version_id=None, model_id="model_v01", limit=1, offset=0)
+
+    count_statement, page_statement = (_one_line(statement) for statement in cursor.statements)
+    assert _where_clause(count_statement) == _MODEL_STATION_FILTER
+    assert _where_clause(page_statement) == _MODEL_STATION_FILTER
+    assert "JOIN" not in count_statement
+    assert "JOIN" not in page_statement
+    assert cursor.parameters[0] == ("model_v01",)
+    assert cursor.parameters[1] == ("model_v01", 1, 0)
+
+
+def test_met_station_model_search_and_variable_binds_follow_the_placeholders(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cursor = _RecordingCursor([{"total_count": 1}, []])
+    store = _forecast_store(monkeypatch, cursor)
+
+    result = store.list_met_stations(
+        basin_version_id="basin_v01",
+        model_id="model_v01",
+        search="prox",
+        variables="PRCP,TEMP",
+        limit=10,
+        offset=30,
+    )
+
+    count_statement, page_statement = (_one_line(statement) for statement in cursor.statements)
+    search_clause = "(ms.station_id ILIKE %s ESCAPE '\\' OR COALESCE(ms.station_name, '') ILIKE %s ESCAPE '\\')"
+    expected_where = " AND ".join(
+        (_MODEL_STATION_FILTER, "ms.basin_version_id = %s", search_clause, _VARIABLE_COVERAGE_FILTER)
+    )
+    assert _where_clause(count_statement) == expected_where
+    assert _where_clause(page_statement) == expected_where
+    # The coverage filter is the same InitPlan-array shape, no longer `IN (...)`.
+    assert "ms.station_id IN (" not in count_statement
+    assert "JOIN" not in count_statement
+    binds = ("model_v01", "basin_v01", "%prox%", "%prox%", "model_v01", ["PRCP", "TEMP"], 2)
+    assert cursor.parameters[0] == binds
+    assert cursor.parameters[1] == (*binds, 10, 30)
+    assert count_statement.count("%s") == len(cursor.parameters[0])
+    assert page_statement.count("%s") == len(cursor.parameters[1])
+    assert result["filters"]["applied"] == {"search": "prox", "variables": ["PRCP", "TEMP"]}

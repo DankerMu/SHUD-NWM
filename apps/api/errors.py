@@ -116,6 +116,22 @@ class ApiError(RuntimeError):
         self.headers = dict(headers) if headers is not None else None
 
 
+# PostgreSQL `query_canceled`: what a statement cancelled by `statement_timeout`
+# carries (a `pg_cancel_backend()` cancel shares it).
+PG_QUERY_CANCELED_SQLSTATE = "57014"
+
+
+def is_pg_query_canceled(exc: BaseException) -> bool:
+    """True only when the driver error under `exc` carries SQLSTATE 57014.
+
+    The discriminator is the SQLSTATE on `exc.orig` (psycopg2's `pgcode`), never
+    the exception class: `sqlalchemy.exc.OperationalError` is ALSO what a
+    refused or dropped connection raises, with `pgcode` `08006` or no `pgcode`
+    at all, and those must not be read as "the statement was cancelled".
+    """
+    return getattr(getattr(exc, "orig", None), "pgcode", None) == PG_QUERY_CANCELED_SQLSTATE
+
+
 def register_error_handlers(app: FastAPI) -> None:
     @app.middleware("http")
     async def add_request_id(request: Request, call_next: Any) -> Any:

@@ -8,6 +8,7 @@ and cleanup are observed as HTTP/pool behaviour rather than helper echoes.
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -17,6 +18,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import QueuePool
 
@@ -382,6 +384,183 @@ def test_producer_exception_releases_permit_and_checkout(
         monkeypatch.setattr(hydro_display, "build_raw_tile_response", fake_build_ok)
         recovered = _occupy(engine, _tile("recovered"), lambda: b"recovered")
         assert recovered.body == b"recovered"
+    finally:
+        engine.dispose()
+
+
+
+# --------------------------------------------------------------------------- #
+# #2712: a cold build cancelled by the role statement_timeout is "busy", a
+# database that cannot be reached is not.
+# --------------------------------------------------------------------------- #
+
+_TILE_ROUTE_LOGGER = "apps.api.routes.hydro_display"
+
+
+class _DriverError(Exception):
+    """Stands in for the psycopg2 error SQLAlchemy wraps as `.orig`.
+
+    A hand-built `psycopg2.errors.QueryCanceled()` has `pgcode is None` -- the
+    driver sets it from the server's error response -- so the SQLSTATE the
+    route discriminates on is set here explicitly.
+    """
+
+    def __init__(self, message: str, pgcode: str | None) -> None:
+        super().__init__(message)
+        self.pgcode = pgcode
+
+
+def _statement_timeout() -> OperationalError:
+    return OperationalError(
+        "SELECT ST_AsMVT(...)", {}, _DriverError("canceling statement due to statement timeout", "57014")
+    )
+
+
+def _timeout_warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [
+        record
+        for record in caplog.records
+        if record.name == _TILE_ROUTE_LOGGER and "statement timeout" in record.getMessage()
+    ]
+
+
+@pytest.mark.parametrize("raise_in", ("producer", "under-lock-cache-read"))
+def test_statement_timeout_inside_the_cold_gate_is_503_busy_and_releases_permit_and_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+    isolate_gate: None,
+    caplog: pytest.LogCaptureFixture,
+    raise_in: str,
+) -> None:
+    monkeypatch.setenv("NHMS_MVT_FILE_CACHE_DIR", str(tmp_path))
+    # One permit: the recovery request below is admitted only if the timed-out
+    # build returned it.
+    monkeypatch.setenv("NHMS_DISPLAY_MVT_COLD_LIMIT", "1")
+    caplog.set_level(logging.WARNING, logger=_TILE_ROUTE_LOGGER)
+    engine = _sqlite_engine(pool_size=3, max_overflow=0)
+    tracker = _attach_checkout_tracker(engine)
+    timeout = _statement_timeout()
+    state = {"reads": 0, "armed": True}
+
+    def fake_read(session: Session, tile: TileInput) -> TileResponse | None:
+        session.execute(text("SELECT 1"))
+        state["reads"] += 1
+        if state["armed"] and raise_in == "under-lock-cache-read" and state["reads"] == 2:
+            raise timeout
+        return None
+
+    def fake_build(session: Session, tile: TileInput, data: bytes) -> TileResponse:
+        raise AssertionError("a timed-out cold build must not reach the cache write")
+
+    def producer() -> bytes:
+        if raise_in == "producer":
+            raise timeout
+        raise AssertionError("the under-lock cache read was expected to raise first")
+
+    monkeypatch.setattr(hydro_display, "read_cached_tile_response", fake_read)
+    monkeypatch.setattr(hydro_display, "build_raw_tile_response", fake_build)
+    tile = _tile("timeout")
+    try:
+        # Session kept open while the pool is observed, as in the cases above.
+        with Session(engine) as failed_session:
+            with pytest.raises(ApiError) as excinfo:
+                hydro_display._cached_or_generated_mvt_response(failed_session, tile, producer)
+            assert tracker.snapshot()[2] == 0
+        assert excinfo.value.status_code == 503
+        assert excinfo.value.code == _BUSY_CODE
+        assert excinfo.value.headers == {"Retry-After": "1", "Cache-Control": "no-store"}
+        assert excinfo.value.__cause__ is timeout
+        assert list(tmp_path.rglob("*.pbf")) == []
+
+        # Distinguishable from gate saturation in the log: one WARNING naming
+        # the statement timeout, the layer and the tile.
+        (warning,) = _timeout_warnings(caplog)
+        assert warning.levelno == logging.WARNING
+        message = warning.getMessage()
+        assert "57014" in message
+        assert f"layer_id={tile.layer_id}" in message
+        assert f"z={tile.z} x={tile.x} y={tile.y}" in message
+
+        state["armed"] = False
+
+        def fake_build_ok(session: Session, tile: TileInput, data: bytes) -> TileResponse:
+            session.execute(text("SELECT 1"))
+            return _tile_response(tile, data)
+
+        monkeypatch.setattr(hydro_display, "build_raw_tile_response", fake_build_ok)
+        recovered = _occupy(engine, _tile("recovered-after-timeout"), lambda: b"recovered")
+        assert recovered.body == b"recovered"
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "orig",
+    (
+        _DriverError("connection to server failed: Connection refused", "08006"),
+        _DriverError("server closed the connection unexpectedly", None),
+        RuntimeError("driver error without a pgcode attribute"),
+        # Same class as the timeout, different SQLSTATE: lock_timeout.
+        _DriverError("canceling statement due to lock timeout", "55P03"),
+    ),
+    ids=("pgcode-08006", "pgcode-none", "no-pgcode-attribute", "pgcode-55P03"),
+)
+def test_operational_error_other_than_statement_timeout_propagates_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+    isolate_gate: None,
+    caplog: pytest.LogCaptureFixture,
+    orig: Exception,
+) -> None:
+    monkeypatch.setenv("NHMS_MVT_FILE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("NHMS_DISPLAY_MVT_COLD_LIMIT", "1")
+    caplog.set_level(logging.WARNING, logger=_TILE_ROUTE_LOGGER)
+    engine = _sqlite_engine(pool_size=3, max_overflow=0)
+    tracker = _attach_checkout_tracker(engine)
+    unreachable = OperationalError("SELECT ST_AsMVT(...)", {}, orig)
+
+    def fake_read(session: Session, tile: TileInput) -> TileResponse | None:
+        session.execute(text("SELECT 1"))
+        return None
+
+    def fake_build(session: Session, tile: TileInput, data: bytes) -> TileResponse:
+        raise AssertionError("producer failure must not reach cache write")
+
+    def producer() -> bytes:
+        raise unreachable
+
+    monkeypatch.setattr(hydro_display, "read_cached_tile_response", fake_read)
+    monkeypatch.setattr(hydro_display, "build_raw_tile_response", fake_build)
+    try:
+        with Session(engine) as failed_session:
+            with pytest.raises(OperationalError) as excinfo:
+                hydro_display._cached_or_generated_mvt_response(failed_session, _tile("unreachable"), producer)
+            assert tracker.snapshot()[2] == 0
+        # The very same exception object: not wrapped, not re-labelled as busy.
+        assert excinfo.value is unreachable
+        assert _timeout_warnings(caplog) == []
+    finally:
+        engine.dispose()
+
+
+def test_gate_saturation_does_not_log_the_statement_timeout_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+    isolate_gate: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("NHMS_MVT_FILE_CACHE_DIR", str(tmp_path))
+    # No cold permits at all: every cold request is refused at the gate.
+    monkeypatch.setenv("NHMS_DISPLAY_MVT_COLD_LIMIT", "0")
+    caplog.set_level(logging.WARNING, logger=_TILE_ROUTE_LOGGER)
+    engine = _sqlite_engine(pool_size=3, max_overflow=0)
+    monkeypatch.setattr(hydro_display, "read_cached_tile_response", lambda session, tile: None)
+    try:
+        with pytest.raises(ApiError) as excinfo:
+            _occupy(engine, _tile("saturated"), lambda: b"unused")
+        assert excinfo.value.status_code == 503
+        assert excinfo.value.code == _BUSY_CODE
+        assert _timeout_warnings(caplog) == []
     finally:
         engine.dispose()
 

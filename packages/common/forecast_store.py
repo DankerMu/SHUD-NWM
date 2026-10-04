@@ -1733,8 +1733,8 @@ class PsycopgForecastStore:
                 details={"required": ["basin_version_id", "model_id"]},
             )
 
-        # Variable coverage lands only when the interp_weight join is present, which
-        # requires model_id. Without it, coverage isn't reachable from the inventory
+        # Variable coverage is read from met.interp_weight, which is scoped by
+        # model_id. Without it, coverage isn't reachable from the inventory
         # query, so we degrade gracefully (annotate unavailable, no error, no filter).
         coverage_filter = _station_variable_filter_tokens(variables)
         variable_filter_available = model_id is not None
@@ -1745,26 +1745,31 @@ class PsycopgForecastStore:
         filters_applied: dict[str, Any] = {}
 
         if model_id is not None:
-            from_sql = """
-                FROM met.met_station ms
-                JOIN met.interp_weight iw ON iw.station_id = ms.station_id
-            """
             # An explicit run/model identity is authoritative for immutable
             # direct-grid station membership.  Direct-grid variants remain
             # inactive while the basin's legacy model stays active, so the
             # basin-wide active flag must not hide stations selected through
             # this exact interp_weight scope.
-            clauses = ["iw.model_id = %s"]
+            #
+            # #2694: membership is an uncorrelated scalar-array subquery, NOT a
+            # JOIN (and not EXISTS / IN, which the planner may turn back into
+            # one). PostgreSQL evaluates it once as an InitPlan, so the cost no
+            # longer depends on the row estimates of the two tables: with stale
+            # statistics the JOIN degraded to an unparameterised Nested Loop
+            # (84 s on node-27, role timeout 30 s). station_id is this table's
+            # primary key, so the outer query needs no DISTINCT. A model with
+            # no weights yields array_agg -> NULL -> no rows.
+            clauses = [
+                "ms.station_id = ANY((SELECT array_agg(DISTINCT station_id) "
+                "FROM met.interp_weight WHERE model_id = %s)::text[])"
+            ]
             params: list[Any] = [model_id]
             if basin_version_id is not None:
                 clauses.append("ms.basin_version_id = %s")
                 params.append(basin_version_id)
-            distinct = "DISTINCT"
         else:
-            from_sql = "FROM met.met_station ms"
             clauses = ["ms.basin_version_id = %s", "ms.active_flag = true"]
             params = [basin_version_id]
-            distinct = ""
 
         normalized_search = search.strip() if search is not None else ""
         if normalized_search:
@@ -1775,12 +1780,13 @@ class PsycopgForecastStore:
 
         if coverage_filter and variable_filter_available:
             # Require the station to carry every requested variable in interp_weight.
+            # Same InitPlan-array shape as the model filter above (#2694).
             clauses.append(
-                "ms.station_id IN ("
+                "ms.station_id = ANY((SELECT array_agg(station_id) FROM ("
                 "SELECT station_id FROM met.interp_weight "
                 "WHERE model_id = %s AND variable = ANY(%s) "
                 "GROUP BY station_id "
-                "HAVING COUNT(DISTINCT variable) = %s)"
+                "HAVING COUNT(DISTINCT variable) = %s) AS covered)::text[])"
             )
             params.extend([model_id, coverage_filter, len(coverage_filter)])
             filters_applied["variables"] = coverage_filter
@@ -1788,14 +1794,14 @@ class PsycopgForecastStore:
         where = f"WHERE {' AND '.join(clauses)}"
         with self._transaction() as cursor:
             cursor.execute(
-                f"SELECT COUNT({distinct} ms.station_id) AS total_count {from_sql} {where}",
+                f"SELECT COUNT(ms.station_id) AS total_count FROM met.met_station ms {where}",
                 tuple(params),
             )
             total_count = int(cursor.fetchone()["total_count"])
             rows = self._fetch_all(
                 cursor,
                 f"""
-                SELECT {distinct}
+                SELECT
                     ms.station_id,
                     ms.basin_version_id,
                     ms.station_name,
@@ -1805,7 +1811,7 @@ class PsycopgForecastStore:
                     ms.station_role,
                     ms.properties_json,
                     ms.created_at
-                {from_sql}
+                FROM met.met_station ms
                 {where}
                 ORDER BY ms.station_id
                 LIMIT %s OFFSET %s
