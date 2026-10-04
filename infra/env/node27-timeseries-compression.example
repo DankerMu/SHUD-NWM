@@ -66,6 +66,22 @@ NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=2
 # steady-state chunk.
 NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS=3600000
 #
+# Bounded wait, in milliseconds, for the compression/ingest advisory fence
+# taken before each compress_chunk (#2713). Ingest writers on the same
+# hypertable hold the fence shared for one write transaction; compression
+# waits for the in-flight ones to drain (new ones defer to a later tick) and
+# copies nothing until it holds the fence. The wait is CHARGED against
+# COMPRESS_TIMEOUT_MS -- compress_chunk runs with the remainder as its
+# statement_timeout -- so no wall above moves. Must be strictly less than
+# COMPRESS_TIMEOUT_MS; the runner refuses otherwise before any DB connection.
+# A wait that expires records the chunk as `deferred_contended` (receipt
+# outcome `deferred`, exit 0), not as a failure.
+# Default 900000 = 15 min: measured on node-27 2026-10-04 during catch-up,
+# 5-6 parser write transactions run concurrently, each open >= 300 s; against
+# the 3600000 default this leaves >= 2700 s for a ~1100 s narrow chunk.
+# Derivation: runbook section 4.11, docs/runbooks/tier-node27-timeseries-storage.md.
+NODE27_TIMESERIES_COMPRESSION_FENCE_WAIT_MS=900000
+#
 # Wall passed to `timeout --signal=TERM --kill-after=30s` by
 # scripts/node27_timeseries_compression_once.sh. Default 3900.
 NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS=3900

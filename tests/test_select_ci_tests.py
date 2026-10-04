@@ -2112,6 +2112,9 @@ def test_select_tests_maps_autopipeline_script_without_core_smoke_fallback() -> 
         "tests/test_river_ts_text_identity_cleanup.py",
         # #1656: scripts/** is a scanned invariant root.
         INVARIANT_SUITE_PATH,
+        # #2713: the fence-busy skip classification of `_process_run` is pinned
+        # by the writer suite's CLI-level autopipe ticks.
+        "tests/test_timeseries_compression_fence_writers.py",
     ]
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 

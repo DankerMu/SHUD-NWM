@@ -2,7 +2,14 @@
 
 One fixed flock serializes recurring compression, retention, and manual
 decompression/replay. Autopipe stays outside this mutex: it cannot write an
-eligible compressed group and is fenced by transactional revalidation.
+eligible compressed group and is fenced by transactional revalidation. That
+argument covers correctness only, not lock liveness: ``compress_chunk`` and
+``drop_chunks`` also lock every chunk an ingest transaction touches and the
+FK-referenced tables, which deadlocked against the output parser (#2713). So
+autopipe's writers are ordered against compression and retention by the DB
+advisory fence in ``packages.common.timeseries_compression_fence`` instead:
+ingest tries it shared as the first statement of each write transaction, and
+chunk DDL takes it exclusive, bounded, before touching a chunk.
 """
 
 from __future__ import annotations

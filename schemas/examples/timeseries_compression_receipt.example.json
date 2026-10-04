@@ -1,5 +1,5 @@
 {
-  "schema_version": "2.1",
+  "schema_version": "2.2",
   "head_sha": "0123456789abcdef0123456789abcdef01234567",
   "generated_at": "2026-07-15T12:00:00Z",
   "now_utc": "2026-07-15T12:00:00Z",
@@ -9,10 +9,12 @@
     "compress_timeout_ms": 3600000,
     "wrapper_wall_seconds": 3900,
     "systemd_wall_seconds": 3941,
-    "cleanup_margin_seconds": 300
+    "cleanup_margin_seconds": 300,
+    "fence_wait_ms": 900000
   },
   "mode": "enforce",
   "outcome": "refused_lock",
+  "deferred_contended_count": 0,
   "selected": [],
   "deferred": [],
   "skipped": [],

@@ -88,6 +88,10 @@ from packages.common.storage import (
     RETENTION_WINDOW_ENV,
     configured_retention_window_days,
 )
+from packages.common.timeseries_compression_fence import (
+    acquire_compression_fence,
+    release_compression_fence,
+)
 
 # 1.1 (#1369): every receipt gained the required ``archive_gate`` object.
 # Historical 1.0 receipts are NEVER rewritten — see the receipts README for
@@ -862,16 +866,30 @@ def _default_drop_chunk(config: RetentionConfig, chunk: ChunkRow) -> None:
     lock bound, and it does not prevent ``40P01`` — the deadlock detector
     aborts a cycle regardless. The enumeration and measurement sessions get
     no lock bound (their 60 s ``_QUERY_TIMEOUT_MS`` is unchanged).
+
+    #2713 (design D2b): ``40P01`` is what the 2026-10-04 14:36 tick hit —
+    ``drop_chunks`` waited for ``AccessExclusiveLock`` on the FK-referenced
+    ``hydro.hydro_run`` while an output-parser transaction waited on the drop.
+    So the drop first takes the same exclusive per-family fence as
+    compression, in this session, holding no other lock, bounded by the same
+    ``lock_timeout_ms``. Every ingest writer tries that fence as its first
+    statement, so a parser transaction either finishes before the drop starts
+    or defers. A fence wait that expires raises ``FenceContended``, whose
+    ``pgcode`` is ``55P03``, so ``run_retention`` renders it through the
+    existing #1664 ``lock-contention(55P03)`` segment: no receipt change.
     """
     import psycopg2  # type: ignore[import-untyped]
 
     connection = psycopg2.connect(
         config.database_url, fallback_application_name=_APPLICATION_NAME
     )
+    fence_held = False
     try:
         with connection:
             with connection.cursor() as cursor:
                 cursor.execute(f"SET statement_timeout = {_DROP_TIMEOUT_MS}")
+                acquire_compression_fence(cursor, chunk.hypertable_key, config.lock_timeout_ms)
+                fence_held = True
                 cursor.execute(f"SET lock_timeout = {config.lock_timeout_ms}")
                 cursor.execute(
                     "SELECT drop_chunks("
@@ -896,6 +914,15 @@ def _default_drop_chunk(config: RetentionConfig, chunk: ChunkRow) -> None:
                         f"{chunk.qualified_name}; expected exact selected chunk"
                     )
     finally:
+        # After ``with connection`` committed or rolled back. A failed unlock
+        # never masks the drop's own error; closing the session releases the
+        # session-level fence anyway.
+        if fence_held:
+            try:
+                with connection.cursor() as cursor:
+                    release_compression_fence(cursor, chunk.hypertable_key)
+            except Exception:
+                pass
         connection.close()
 
 

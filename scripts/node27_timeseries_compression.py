@@ -43,8 +43,10 @@ from packages.common.evidence_io import (
 )
 from packages.common.node27_timeseries_compression_budget import (
     COMPRESSION_CLEANUP_MARGIN_SECONDS,
+    COMPRESSION_STATEMENT_TIMEOUT_KEY,
     CompressionBudgetError,
     compression_service_budget,
+    parse_positive_int_env,
     resolve_runner_budget,
 )
 from packages.common.node27_timeseries_discovery import (
@@ -64,8 +66,13 @@ from packages.common.safe_fs import (
     open_directory_no_follow,
     verify_directory_no_follow,
 )
+from packages.common.timeseries_compression_fence import (
+    FenceContended,
+    acquire_compression_fence,
+    release_compression_fence,
+)
 
-SCHEMA_VERSION = "2.1"
+SCHEMA_VERSION = "2.2"
 TOOL_VERSION = "node27-timeseries-compression/2"
 PUBLISH_LOCK_TIMEOUT_SECONDS = 5.0
 
@@ -142,6 +149,24 @@ _CONNECT_TIMEOUT_SECONDS = 10
 # explicit ?application_name=... in DATABASE_URL still wins.
 _APPLICATION_NAME = "nhms-ts-compression"
 _MAX_CATALOG_ROWS = 50_000
+# #2713: the bounded wait for the per-hypertable compression/ingest fence
+# (``packages.common.timeseries_compression_fence``) before each
+# ``compress_chunk``. The wait is CHARGED against that chunk's
+# ``compress_timeout_ms`` (the session ``statement_timeout`` becomes the
+# remainder), so leg 1 of the budget chain above is unchanged and no wrapper
+# or systemd wall moves. ``config_from_args`` refuses a value that is not
+# strictly below the compress timeout, before any DB connection.
+#
+# Default 900000 ms (15 min), sized from the D0.5 measurement on node-27
+# (2026-10-04): during catch-up 5-6 output-parser write transactions run
+# concurrently, each open for at least 300 s, and compression's queued
+# exclusive request only has to outlast the ones already in flight (new ones
+# are refused by the lock queue). Charged against the 3600000 ms default it
+# still leaves >= 2700 s of compress budget against ~1100 s measured per
+# narrow chunk. Lowering COMPRESS_TIMEOUT_MS to 900000 or below therefore
+# requires setting this knob explicitly.
+FENCE_WAIT_KEY = "NODE27_TIMESERIES_COMPRESSION_FENCE_WAIT_MS"
+_DEFAULT_FENCE_WAIT_MS = 900_000
 _MAX_CATALOG_BYTES = 16 * 1024**2
 _MAX_CANDIDATES = 10_000
 
@@ -196,6 +221,8 @@ class CompressionConfig:
     compress_timeout_ms: int
     wrapper_wall_seconds: int
     systemd_wall_seconds: int
+    # #2713 fence wait, charged against ``compress_timeout_ms``.
+    fence_wait_ms: int
 
 
 # #1647: no statement in this module interpolates a chunk name — every chunk
@@ -343,6 +370,17 @@ def config_from_args(args: argparse.Namespace, env: Mapping[str, str] | None = N
     compress_timeout_ms = resolved_budget.compression_statement_timeout_ms
     wrapper_wall_seconds = resolved_budget.budget.wrapper_wall_seconds
     systemd_wall_seconds = resolved_budget.budget.service_wall_seconds
+    try:
+        declared_fence_wait_ms = parse_positive_int_env(env.get(FENCE_WAIT_KEY), name=FENCE_WAIT_KEY)
+    except CompressionBudgetError as error:
+        raise CompressionConfigError(str(error)) from error
+    fence_wait_ms = _DEFAULT_FENCE_WAIT_MS if declared_fence_wait_ms is None else declared_fence_wait_ms
+    if fence_wait_ms >= compress_timeout_ms:
+        raise CompressionConfigError(
+            f"{FENCE_WAIT_KEY} must be strictly less than {COMPRESSION_STATEMENT_TIMEOUT_KEY}: "
+            f"got {fence_wait_ms} >= {compress_timeout_ms}; the fence wait is charged against "
+            "the per-chunk compress timeout"
+        )
     database_url = env.get("DATABASE_URL")
     if not database_url or not database_url.strip():
         raise CompressionConfigError("DATABASE_URL must be set")
@@ -356,6 +394,7 @@ def config_from_args(args: argparse.Namespace, env: Mapping[str, str] | None = N
         compress_timeout_ms=compress_timeout_ms,
         wrapper_wall_seconds=wrapper_wall_seconds,
         systemd_wall_seconds=systemd_wall_seconds,
+        fence_wait_ms=fence_wait_ms,
     )
 
 
@@ -478,9 +517,13 @@ def _iso(value: datetime) -> str:
 # origin chunk after compression would report ~0 bytes because the origin
 # is truncated when its rows are moved to the compressed sibling — that is
 # the semantic bug cand-A hardens against.
+#
+# ``CompressChunk`` returns the fence wait in ms it was charged (#2713), or
+# ``None`` when an injected implementation takes no fence; it raises
+# ``FenceContended`` when the bounded fence wait expired before any copy.
 FetchChunks = Callable[[str], list[ChunkRow]]
 MeasureChunkBytes = Callable[..., int]
-CompressChunk = Callable[[str, ChunkRow], None]
+CompressChunk = Callable[[str, ChunkRow], int | None]
 ReconcileChunkState = Callable[[str, ChunkRow], bool]
 
 
@@ -596,13 +639,24 @@ def _default_measure_chunk_bytes(database_url: str, chunk: ChunkRow, *, after: b
         connection.close()
 
 
-def _default_compress_chunk(database_url: str, chunk: ChunkRow, *, compress_timeout_ms: int) -> None:
-    # ``compress_timeout_ms`` is keyword-only with NO default: the assembly
-    # point in ``main()`` binds it with ``functools.partial`` from the parsed
-    # config, and forgetting to do so must raise TypeError rather than
-    # silently fall back to any hardcoded ceiling. The value is a
-    # ``_parse_positive_int`` product (an int), so the interpolation below has
-    # no injection surface. ``CompressChunk`` stays a two-argument protocol.
+def _default_compress_chunk(
+    database_url: str, chunk: ChunkRow, *, compress_timeout_ms: int, fence_wait_ms: int
+) -> int:
+    # ``compress_timeout_ms`` and ``fence_wait_ms`` are keyword-only with NO
+    # default: the assembly point in ``main()`` binds both with
+    # ``functools.partial`` from the parsed config, and forgetting to do so
+    # must raise TypeError rather than silently fall back to any hardcoded
+    # ceiling. Both values are validated ints, so the interpolations below
+    # have no injection surface. ``CompressChunk`` stays a two-argument
+    # protocol.
+    #
+    # #2713: the exclusive compression/ingest fence is taken FIRST, in this
+    # fresh session, holding no other lock, so any wait happens before the
+    # copy instead of ending it in a 40P01 at the AccessExclusive upgrade.
+    # The statement_timeout set before the fence keeps an inherited role or
+    # server default from cutting the fence wait short (validation guarantees
+    # fence_wait_ms < compress_timeout_ms); the wait is then charged against
+    # the chunk's budget. FenceContended propagates with nothing copied.
     import psycopg2  # type: ignore[import-untyped]
 
     connection = psycopg2.connect(
@@ -610,16 +664,31 @@ def _default_compress_chunk(database_url: str, chunk: ChunkRow, *, compress_time
         connect_timeout=_CONNECT_TIMEOUT_SECONDS,
         fallback_application_name=_APPLICATION_NAME,
     )
+    fence_held = False
     try:
         with connection:
             with connection.cursor() as cursor:
                 cursor.execute(f"SET statement_timeout = {compress_timeout_ms}")
+                fence_wait_elapsed_ms = acquire_compression_fence(cursor, chunk.hypertable_key, fence_wait_ms)
+                fence_held = True
+                cursor.execute(f"SET statement_timeout = {max(1, compress_timeout_ms - fence_wait_elapsed_ms)}")
                 cursor.execute(
                     "SELECT compress_chunk(%s::regclass)",
                     (f"{chunk.chunk_schema}.{chunk.chunk_name}",),
                 )
                 cursor.fetchone()
+        return fence_wait_elapsed_ms
     finally:
+        # ``with connection`` has already committed or rolled back, so the
+        # unlock runs outside the compress transaction. A failed unlock must
+        # never mask the original error; closing the session releases a
+        # session-level advisory lock anyway.
+        if fence_held:
+            try:
+                with connection.cursor() as cursor:
+                    release_compression_fence(cursor, chunk.hypertable_key)
+            except Exception:
+                pass
         connection.close()
 
 
@@ -751,6 +820,8 @@ def _budget(config: CompressionConfig) -> dict[str, int]:
         "wrapper_wall_seconds": config.wrapper_wall_seconds,
         "systemd_wall_seconds": config.systemd_wall_seconds,
         "cleanup_margin_seconds": _CLEANUP_MARGIN_SECONDS,
+        # #2713 (schema 2.2): the fence wait charged against compress_timeout_ms.
+        "fence_wait_ms": config.fence_wait_ms,
     }
 
 
@@ -799,6 +870,10 @@ def build_receipt(
     after_poisoned = {key: False for key in totals}
     selected_descriptors: list[dict[str, Any]] = []
     any_errors = False
+    # #2713: chunks whose bounded fence wait expired. Not an error: nothing was
+    # copied, the chunk stays eligible for the next tick, and it neither
+    # poisons after_bytes nor contributes to any total.
+    deferred_contended_count = 0
     for chunk in selected_rows:
         # Symmetrical per-chunk isolation. Any failure on this chunk is
         # recorded in the descriptor, poisons the table's after_bytes, and the
@@ -822,7 +897,16 @@ def build_receipt(
             descriptor = _descriptor(chunk, before=before, after=None)
         else:
             try:
-                compress_chunk(config.database_url, chunk)
+                fence_wait_elapsed_ms = compress_chunk(config.database_url, chunk)
+            except FenceContended as contended:
+                # Before the generic arm: no reconcile (no copy started), no
+                # error, no poison.
+                descriptor = _descriptor(chunk, before=before, after=None)
+                descriptor["mutation_state"] = "deferred_contended"
+                descriptor["fence_wait_elapsed_ms"] = contended.elapsed_ms
+                deferred_contended_count += 1
+                selected_descriptors.append(descriptor)
+                continue
             except Exception as error:  # per-chunk isolation per issue spec
                 try:
                     reconciled_compressed = reconcile_chunk_state(config.database_url, chunk)
@@ -871,6 +955,8 @@ def build_receipt(
                 descriptor = _descriptor(chunk, before=before, after=None)
                 descriptor["mutation_state"] = "committed"
                 descriptor["error"] = _safe_failure("measure_chunk_bytes(after)", error)
+                if isinstance(fence_wait_elapsed_ms, int):
+                    descriptor["fence_wait_elapsed_ms"] = fence_wait_elapsed_ms
                 any_errors = True
                 # The compression itself did succeed, so the chunk reached the
                 # compressed state — record chunks_compressed + before_bytes.
@@ -883,6 +969,8 @@ def build_receipt(
                 continue
             descriptor = _descriptor(chunk, before=before, after=after)
             descriptor["mutation_state"] = "committed"
+            if isinstance(fence_wait_elapsed_ms, int):
+                descriptor["fence_wait_elapsed_ms"] = fence_wait_elapsed_ms
             key = chunk.hypertable_key
             totals[key]["chunks_compressed"] += 1
             totals[key]["before_bytes"] += before
@@ -904,7 +992,13 @@ def build_receipt(
             totals[key]["after_bytes"] = None
 
     if config.enforce:
-        outcome = "partial" if any_errors else "clean"
+        # A real failure dominates; contention alone is ``deferred`` (exit 0).
+        if any_errors:
+            outcome = "partial"
+        elif deferred_contended_count:
+            outcome = "deferred"
+        else:
+            outcome = "clean"
     else:
         outcome = "clean"
 
@@ -936,6 +1030,7 @@ def build_receipt(
         "budget": _budget(config),
         "mode": "enforce" if config.enforce else "dry-run",
         "outcome": outcome,
+        "deferred_contended_count": deferred_contended_count,
         "selected": selected_descriptors,
         "deferred": deferred_descriptors,
         "skipped": skipped_descriptors,
@@ -971,6 +1066,7 @@ def build_refused_lock_receipt(
         "budget": _budget(config),
         "mode": "enforce" if config.enforce else "dry-run",
         "outcome": "refused_lock",
+        "deferred_contended_count": 0,
         "selected": [],
         "deferred": [],
         "skipped": [],
@@ -996,7 +1092,7 @@ def build_failed_receipt(
     """Build a non-secret terminal failure that replaces any stale success."""
 
     receipt: dict[str, Any] = {
-        "schema_version": "2.1",
+        "schema_version": SCHEMA_VERSION,
         "provenance_state": "bound" if head_sha is not None else "unavailable",
         "generated_at": _iso(datetime.now(UTC)),
         "now_utc": _iso(now_utc),
@@ -1097,7 +1193,7 @@ def _replace_early_stale_with_failure(
     """
 
     payload = {
-        "schema_version": "2.1",
+        "schema_version": SCHEMA_VERSION,
         "generated_at": _iso(datetime.now(UTC)),
         "now_utc": _iso(now_utc),
         "mode": "enforce" if enforce else "dry-run",
@@ -1295,6 +1391,7 @@ def main(
                 or functools.partial(
                     _default_compress_chunk,
                     compress_timeout_ms=config.compress_timeout_ms,
+                    fence_wait_ms=config.fence_wait_ms,
                 ),
                 reconcile_chunk_state=reconcile_chunk_state or _default_reconcile_chunk_state,
                 head_sha=frozen_head_sha,
@@ -1343,7 +1440,9 @@ def main(
             )
             _emit_stderr_diagnostic("failed", f"receipt publication error: {error}", dsn=config.database_url)
             return 1
-        return 0 if receipt["outcome"] == "clean" else 1
+        # #2713: ``deferred`` (fence contention only, nothing failed) is a
+        # successful tick; ``partial`` stays exit 1.
+        return 0 if receipt["outcome"] in ("clean", "deferred") else 1
     finally:
         if lock_fd is not None:
             try:

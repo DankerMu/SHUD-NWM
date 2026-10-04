@@ -86,7 +86,7 @@ def test_canonical_compression_receipt_example_matches_the_default_budget() -> N
         )
     )
 
-    assert example["schema_version"] == "2.1"
+    assert example["schema_version"] == "2.2"
     assert example["budget"]["cleanup_margin_seconds"] == budget.COMPRESSION_CLEANUP_MARGIN_SECONDS
     assert example["budget"]["systemd_wall_seconds"] == 3941
     assert resolved.budget == budget.CompressionServiceBudget(3900, 3941, 40)
@@ -97,9 +97,14 @@ def test_canonical_compression_receipt_example_matches_the_default_budget() -> N
 def test_compression_receipt_schema_keeps_2_1_budgets_without_cleanup_margin() -> None:
     example = json.loads(_COMPRESSION_RECEIPT_EXAMPLE.read_text(encoding="utf-8"))
     schema = json.loads(_COMPRESSION_RECEIPT_SCHEMA.read_text(encoding="utf-8"))
-    assert example["schema_version"] == "2.1"
+    assert example["schema_version"] == "2.2"
     example["budget"].pop("cleanup_margin_seconds")
-
+    jsonschema.validate(example, schema)
+    # The committed example is 2.2 since #2713; its 2.1 shape drops the two
+    # fence fields and must still validate without the cleanup margin.
+    example["schema_version"] = "2.1"
+    example.pop("deferred_contended_count")
+    example["budget"].pop("fence_wait_ms")
     jsonschema.validate(example, schema)
 
 

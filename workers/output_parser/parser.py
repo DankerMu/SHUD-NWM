@@ -19,6 +19,7 @@ from packages.common.timescale_write_guard import (
     CompressedChunkWriteError,
     check_batch_targets_uncompressed,
 )
+from packages.common.timeseries_compression_fence import IngestFenceBusy, try_ingest_fence
 
 LOGGER = logging.getLogger(__name__)
 
@@ -35,6 +36,12 @@ _APPLICATION_NAME = "nhms-output-parser"
 DEFAULT_DB_CONNECT_TIMEOUT_SECONDS = 10
 DEFAULT_DB_STATEMENT_TIMEOUT_MS = 60_000
 IDENTITY_KEY_MISSING_ERROR_CODE = "OUTPUT_PARSE_IDENTITY_KEY_MISSING"
+# #2713: the compression/ingest fence was busy (chunk DDL queued for or
+# holding it). NOT a failure: never written to hydro_run.error_code, the write
+# transaction is rolled back, and the CLI prints it so the autopipe tick
+# records the run as skipped and retries it on a later tick.
+COMPRESSION_FENCE_BUSY_ERROR_CODE = "OUTPUT_PARSE_COMPRESSION_FENCE_BUSY"
+RIVER_TIMESERIES_HYPERTABLE = "hydro.river_timeseries"
 PARSE_READY_RUN_STATUSES = ("succeeded", "parsed", "failed")
 FAILABLE_RUN_STATUSES = ("created", "staged", "submitted", "running", "succeeded", "parsed")
 
@@ -263,6 +270,13 @@ class OutputParser:
                 qc_passed=qc_record.passed,
                 max_value_m3s=qc_record.checks_json["range_check"].get("max_value"),
             )
+        except IngestFenceBusy:
+            # #2713, FIRST arm: chunk DDL holds or is queued for the
+            # compression/ingest fence. The write transaction has already
+            # rolled back; the run keeps its status (no mark_run_failed) so the
+            # next ingest tick picks it up again. Re-raised unwrapped so the
+            # CLI can print COMPRESSION_FENCE_BUSY_ERROR_CODE.
+            raise
         except OutputParsingError as error:
             self._mark_run_failed_preserving_error(context.run_id, error.error_code, error.message)
             raise
@@ -861,6 +875,13 @@ class PsycopgOutputParserRepository:
                 )
             return
         with self._connection.cursor() as cursor:
+            # #2713: the compression/ingest fence is the FIRST statement of this
+            # write transaction -- before the hydro_run row lock below and
+            # before the probe that takes AccessShare on every chunk. Taken any
+            # later, those locks re-create the cycle with compress_chunk /
+            # drop_chunks. Try-only: a busy fence rolls the whole replace back.
+            if not try_ingest_fence(cursor, RIVER_TIMESERIES_HYPERTABLE):
+                raise IngestFenceBusy(RIVER_TIMESERIES_HYPERTABLE)
             # Locks the authority row for the replacement-window computation
             # below (same transaction, the lock fences the replace chain) AND
             # detects a missing run row. #1342's contract (task 6.3) removed the

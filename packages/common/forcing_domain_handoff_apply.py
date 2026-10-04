@@ -29,6 +29,7 @@ from packages.common.timescale_write_guard import (
     CompressedChunkWriteError,
     check_batch_targets_uncompressed,
 )
+from packages.common.timeseries_compression_fence import IngestFenceBusy, try_ingest_fence
 
 APPLY_MODE = "object_store_forcing_domain_handoff"
 APPLY_SAVEPOINT_NAME = "nhms_forcing_domain_handoff_apply"
@@ -65,11 +66,19 @@ REASON_APPLY_COMPRESSED_CHUNK_GUARD_FAILED = "HANDOFF_APPLY_COMPRESSED_CHUNK_GUA
 #
 # "Distinguishable" is an ORDERING property, not just a spelling one. This code
 # only actually reaches the pipeline because `_refuse_legacy_routed_forcing_version`
-# runs as the first statement of `_apply_with_cursor`. Moved below
+# runs as the first statement of `_apply_with_cursor` after the #2713 ingest
+# fence (which reads nothing and writes nothing). Moved below
 # `_upsert_forcing_version`, a regenerated package for a legacy version reports
 # REASON_APPLY_FORCING_VERSION_CONFLICT instead — a code the skip branch does not
 # recognise — and the non-failing outcome silently stops happening.
 REASON_APPLY_LEGACY_STORE_REFUSED = "HANDOFF_APPLY_LEGACY_STORE_REFUSED"
+# #2713: the compression/ingest fence on met.forcing_station_timeseries was
+# busy (chunk DDL queued for or holding it), so the whole apply rolled back
+# before any statement touched a table. NOT a fault: the node-27 ingest
+# pipeline routes this code to a non-failing "skipped" outcome and the next
+# tick re-applies the handoff.
+REASON_APPLY_COMPRESSION_FENCE_BUSY = "HANDOFF_APPLY_COMPRESSION_FENCE_BUSY"
+FORCING_STATION_TIMESERIES_HYPERTABLE = "met.forcing_station_timeseries"
 
 TARGET_TABLES = (
     "met.forcing_version",
@@ -159,6 +168,15 @@ def apply_forcing_domain_handoff(
 
     Passing ``connection`` lets this helper own commit/rollback. Passing
     ``cursor`` means the caller owns the surrounding transaction.
+
+    #2713: only the ``connection=`` path can guarantee that the
+    compression/ingest fence is the first statement of the write transaction.
+    On the caller-managed ``cursor=`` path the fence is still tried first
+    inside this helper's savepoint, but anything the caller already ran in
+    the surrounding transaction precedes it; a caller holding locks on the
+    FK-referenced tables there can re-create the #2713 cycle. The only
+    production caller, the node-27 ingest pipeline, passes a fresh
+    ``connection=``.
     """
 
     if not isinstance(parser_envelope, Mapping):
@@ -208,6 +226,27 @@ def apply_forcing_domain_handoff(
         report = _apply_with_cursor(cursor, prepared, parser_envelope, owns_transaction=False)
         _release_apply_savepoint(cursor)
         return report
+    except IngestFenceBusy as error:
+        # #2713, first arm: nothing was read or written (the fence is the first
+        # statement). Same owns_transaction / savepoint rollback discipline as
+        # the arms below; the caller sees a non-failing busy code.
+        if owns_transaction:
+            connection.rollback()
+        else:
+            _rollback_apply_savepoint(cursor)
+        return _unavailable_report(
+            status="failed",
+            reasons=[
+                _reason(
+                    REASON_APPLY_COMPRESSION_FENCE_BUSY,
+                    detail=redact_text(str(error)),
+                    exception_type=type(error).__name__,
+                )
+            ],
+            parser_envelope=parser_envelope,
+            identity=prepared["identity"],
+            writes_performed=False,
+        )
     except ForcingDomainHandoffApplyError as error:
         if owns_transaction:
             connection.rollback()
@@ -319,7 +358,16 @@ def _apply_with_cursor(
     interp_weights = prepared["interp_weights"]
     identity = prepared["identity"]
 
-    # ROUTING REFUSAL FIRST, above `_upsert_forcing_version` and not only inside
+    # #2713: the compression/ingest fence is the FIRST statement of the write
+    # transaction, ahead even of the routing read below. `_upsert_met_stations`
+    # and `_upsert_forcing_version` lock the tables
+    # `met.forcing_station_timeseries` references by FK, and chunk DDL locks
+    # those too; trying the fence after them would re-create the cycle. On the
+    # caller-managed path this is first only within the savepoint (see
+    # `apply_forcing_domain_handoff`).
+    if not try_ingest_fence(cursor, FORCING_STATION_TIMESERIES_HYPERTABLE):
+        raise IngestFenceBusy(FORCING_STATION_TIMESERIES_HYPERTABLE)
+    # ROUTING REFUSAL FIRST after the fence, above `_upsert_forcing_version` and not only inside
     # `_replace_forcing_station_timeseries` (#1991, M5). That upsert's
     # `ON CONFLICT ... WHERE (checksum IS NULL OR checksum = EXCLUDED.checksum)`
     # returns no row when the checksum changes and raises

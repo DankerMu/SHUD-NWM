@@ -20,6 +20,7 @@ from packages.common.forcing_store_routing import (
 from packages.common.met_store import MetStoreError, default_database_url
 from packages.common.source_identity import normalize_source_id
 from packages.common.timescale_write_guard import check_batch_targets_uncompressed
+from packages.common.timeseries_compression_fence import IngestFenceBusy, try_ingest_fence
 
 from .direct_grid_contract import (
     DirectGridContractError,
@@ -35,6 +36,7 @@ from .producer import (
 )
 
 DIRECT_GRID_CACHE_STATION_ROLE = "direct_grid_cache"
+FORCING_STATION_TIMESERIES_HYPERTABLE = "met.forcing_station_timeseries"
 
 
 
@@ -788,7 +790,13 @@ class PsycopgForcingRepository:
         delete_parameters_cell: list[tuple[Any, ...] | None] = [None]
 
         def _guard(cursor: Any) -> None:
-            # ROUTING REFUSAL FIRST, before the existence probe, before the
+            # #2713: the compression/ingest fence is the FIRST statement of the
+            # write transaction. `_replace_values` runs this hook before any
+            # other statement on its fresh connection, so trying the fence here
+            # precedes every read and lock below. Try-only: busy rolls back.
+            if not try_ingest_fence(cursor, FORCING_STATION_TIMESERIES_HYPERTABLE):
+                raise IngestFenceBusy(FORCING_STATION_TIMESERIES_HYPERTABLE)
+            # ROUTING REFUSAL FIRST after the fence, before the existence probe, before the
             # compressed-chunk guard and — the property that matters — before
             # the DELETE (spec `forcing-narrow-store` :21, :29; must-preserve
             # M3). This replace window is DELETE-then-INSERT, so a store check
@@ -1091,7 +1099,9 @@ class PsycopgForcingRepository:
                         message = conflict_error or "Forcing database write affected an unexpected row count."
                         raise MetStoreError(message)
             connection.commit()
-        except MetStoreError:
+        except (MetStoreError, IngestFenceBusy):
+            # IngestFenceBusy (#2713) propagates unwrapped: the producer and its
+            # CLI report it as deferred, not as a forcing failure.
             if connection is not None:
                 connection.rollback()
             raise

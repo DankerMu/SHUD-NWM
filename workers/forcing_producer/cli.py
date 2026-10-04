@@ -11,8 +11,12 @@ from packages.common.timescale_write_guard import (
     CompressedChunkGuardError,
     CompressedChunkWriteError,
 )
+from packages.common.timeseries_compression_fence import IngestFenceBusy
 
 from .producer import ForcingProducer
+
+# #2713: the compression/ingest fence was busy; deferred, not failed.
+COMPRESSION_FENCE_BUSY_ERROR_CODE = "FORCING_PRODUCE_COMPRESSION_FENCE_BUSY"
 
 
 def _produce(source_id: str, cycle_time: str, model_id: str, max_lead_hours: int | None = None) -> dict[str, object]:
@@ -114,6 +118,9 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
             # batch; nothing to decompress.
             click.echo(f"FORCING_PRODUCE_COMPRESSED_CHUNK_GUARD_FAILED: {error}", err=True)
             raise SystemExit(1) from error
+        except IngestFenceBusy as error:
+            click.echo(f"{COMPRESSION_FENCE_BUSY_ERROR_CODE}: {error}", err=True)
+            raise SystemExit(1) from error
 
     cli.main(args=list(argv) if argv is not None else None, standalone_mode=True)
     return 0
@@ -156,6 +163,9 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
             # Base-class arm SECOND: the guard itself could not certify the
             # batch; nothing to decompress.
             print(f"FORCING_PRODUCE_COMPRESSED_CHUNK_GUARD_FAILED: {error}", file=sys.stderr)
+            return 1
+        except IngestFenceBusy as error:
+            print(f"{COMPRESSION_FENCE_BUSY_ERROR_CODE}: {error}", file=sys.stderr)
             return 1
         return 0
     parser.error(f"Unsupported command: {args.command}")

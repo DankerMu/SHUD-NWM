@@ -3184,6 +3184,12 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_e2e.py",
             "tests/test_e2e_ifs.py",
             "tests/test_ifs_forecast_integration.py",
+            # #2713: store.py's timeseries replace opens with the
+            # compression/ingest fence and the producer + CLI report a busy
+            # fence as deferred; those arms and the fence-first wire site are
+            # asserted in these two suites.
+            "tests/test_timeseries_compression_fence_writers.py",
+            "tests/test_timeseries_compression_fence_wire_site_invariant.py",
         ),
     ),
     PathTestRule(
@@ -3325,6 +3331,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # that drops or renames it would otherwise reach CI green.
             "tests/test_node27_connection_attribution.py",
             "tests/test_node27_connection_attribution_delegated.py",
+            # #2713: the river replace opens with the compression/ingest fence
+            # and both CLI legs print the busy code the autopipe tick keys on;
+            # asserted, end to end through the tick, in these two suites.
+            "tests/test_timeseries_compression_fence_writers.py",
+            "tests/test_timeseries_compression_fence_wire_site_invariant.py",
         ),
     ),
     PathTestRule(
@@ -4356,6 +4367,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # Its own same-name suite covers the apply report; the ordering does
             # not live in it.
             "tests/test_timescale_write_guard_wired.py",
+            # #2713: the compression/ingest fence opens `_apply_with_cursor`
+            # and its busy report is what the autopipe tick skips on.
+            "tests/test_timeseries_compression_fence_writers.py",
+            "tests/test_timeseries_compression_fence_wire_site_invariant.py",
         ),
     ),
     PathTestRule(
@@ -5001,7 +5016,12 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # SILENTLY under the new non-superuser role.
     PathTestRule(
         "scripts/node27_timeseries_retention.py",
-        ("tests/test_node27_write_roles.py",),
+        (
+            "tests/test_node27_write_roles.py",
+            # #2713 (D2b): the drop takes the compression/ingest fence first and
+            # renders its contention as lock-contention(55P03).
+            "tests/test_timeseries_compression_fence.py",
+        ),
     ),
     PathTestRule(
         "scripts/node27_download_cycles.py",
@@ -5211,6 +5231,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # none of its own suites run.
         "scripts/node27_autopipeline.py",
         (
+            # #2713: the busy-fence codes from the parser CLI and the forcing
+            # apply are classified as skipped, asserted through full ticks.
+            "tests/test_timeseries_compression_fence_writers.py",
             # #1990 task 7.2: this path is in the forcing discovery-set
             # census (or holds a registered forcing read template), so a new
             # met.forcing_station_timeseries mention here must redden the
@@ -5550,6 +5573,29 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
+        # #2713: the compression/ingest advisory fence. Its keys, try/acquire/
+        # release semantics and every consumer seam: the compression and
+        # retention runners (exclusive side) and the three ingest writers plus
+        # the autopipe skip classification (shared side), with the wire-site
+        # invariant that fails on a new unfenced writer.
+        "packages/common/timeseries_compression_fence.py",
+        (
+            "tests/test_timeseries_compression_fence.py",
+            "tests/test_timeseries_compression_fence_writers.py",
+            "tests/test_timeseries_compression_fence_wire_site_invariant.py",
+            "tests/test_node27_timeseries_compression.py",
+            "tests/test_node27_timeseries_retention.py",
+            "tests/test_output_parser.py",
+            "tests/test_output_parser_cli.py",
+            "tests/test_output_parser_dual_write.py",
+            "tests/test_forcing_domain_handoff_apply.py",
+            "tests/test_forcing_producer.py",
+            "tests/test_forcing_producer_cli.py",
+            "tests/test_timescale_write_guard_wired.py",
+            "tests/test_node27_autopipeline_handoff.py",
+        ),
+    ),
+    PathTestRule(
         "packages/common/node27_timeseries_discovery.py",
         (
             "tests/test_node27_timeseries_discovery.py",
@@ -5563,6 +5609,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "scripts/node27_timeseries_compression.py",
         (
             "tests/test_node27_timeseries_compression.py",
+            # #2713: the fence-wait knob, the fence-first compress session and
+            # the deferred_contended / deferred receipt semantics.
+            "tests/test_timeseries_compression_fence.py",
             "tests/test_node27_timeseries_compression_budget.py",
             "tests/test_node27_timeseries_compression_runner_config.py",
             "tests/test_node27_timeseries_compression_wrappers.py",
@@ -5876,6 +5925,8 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_timeseries_compression.py",
             "tests/test_node27_timeseries_compression_live_evidence.py",
             "tests/test_node27_lifecycle_contract.py",
+            # #2713: the schema 2.2 deferral fields and their version gates.
+            "tests/test_timeseries_compression_fence.py",
         ),
     ),
     PathTestRule(

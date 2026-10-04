@@ -10,8 +10,10 @@ from packages.common.timescale_write_guard import (
     CompressedChunkGuardError,
     CompressedChunkWriteError,
 )
+from packages.common.timeseries_compression_fence import IngestFenceBusy
 
 from .parser import (
+    COMPRESSION_FENCE_BUSY_ERROR_CODE,
     OutputParser,
     OutputParsingError,
 )
@@ -57,6 +59,10 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
     def shud_output(run_id: str | None, manifest_index: str | None, task_id: int | None) -> None:
         try:
             click.echo(json.dumps(_parse(_resolve_run_id(run_id, manifest_index, task_id)), sort_keys=True))
+        except IngestFenceBusy as error:
+            # #2713: deferred, not failed -- the autopipe tick keys on this code.
+            click.echo(f"{COMPRESSION_FENCE_BUSY_ERROR_CODE}: {error}", err=True)
+            raise SystemExit(1) from error
         except (ManifestValidationError, OutputParsingError) as error:
             click.echo(f"{error.error_code}: {error.message}", err=True)
             raise SystemExit(1) from error
@@ -77,6 +83,10 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
     def parse(run_id: str | None, manifest_index: str | None, task_id: int | None) -> None:
         try:
             click.echo(json.dumps(_parse(_resolve_run_id(run_id, manifest_index, task_id)), sort_keys=True))
+        except IngestFenceBusy as error:
+            # #2713: deferred, not failed -- the autopipe tick keys on this code.
+            click.echo(f"{COMPRESSION_FENCE_BUSY_ERROR_CODE}: {error}", err=True)
+            raise SystemExit(1) from error
         except (ManifestValidationError, OutputParsingError) as error:
             click.echo(f"{error.error_code}: {error.message}", err=True)
             raise SystemExit(1) from error
@@ -110,6 +120,10 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     if args.command == "shud-output":
         try:
             print(json.dumps(_parse(_resolve_run_id(args.run_id, args.manifest_index, args.task_id)), sort_keys=True))
+        except IngestFenceBusy as error:
+            # #2713: deferred, not failed -- the autopipe tick keys on this code.
+            print(f"{COMPRESSION_FENCE_BUSY_ERROR_CODE}: {error}", file=sys.stderr)
+            return 1
         except (ManifestValidationError, OutputParsingError) as error:
             print(f"{error.error_code}: {error.message}", file=sys.stderr)
             return 1
@@ -126,6 +140,10 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     if args.command == "parse":
         try:
             print(json.dumps(_parse(_resolve_run_id(args.run_id, args.manifest_index, args.task_id)), sort_keys=True))
+        except IngestFenceBusy as error:
+            # #2713: deferred, not failed -- the autopipe tick keys on this code.
+            print(f"{COMPRESSION_FENCE_BUSY_ERROR_CODE}: {error}", file=sys.stderr)
+            return 1
         except (ManifestValidationError, OutputParsingError) as error:
             print(f"{error.error_code}: {error.message}", file=sys.stderr)
             return 1
