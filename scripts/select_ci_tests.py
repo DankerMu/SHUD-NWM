@@ -4301,6 +4301,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_object_store_roots.py",
             "tests/test_storage.py",
+            # #2670: `ObjectStoreReadLimitExceededError` (the over-limit vs
+            # missing discriminator) is defined here, and its only assertion
+            # sits in the SHUD runtime suite, which no import derivation
+            # reaches from this path. One node id, not the whole suite.
+            "tests/test_shud_runtime.py::test_object_store_limited_read_tells_over_limit_from_missing",
         ),
     ),
     PathTestRule(
@@ -5591,6 +5596,24 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "services/orchestrator/scheduler_no_progress.py",
         ("tests/test_node22_scheduler_stall_health.py",),
+    ),
+    # The third D4 parity edge (#2662 fix pass). The probe reads a skipped row
+    # with `status == "excluded"` as a permanent exclusion, never in-flight.
+    # Three modules own that contract and none is imported at module scope by
+    # the probe suite: scheduler_candidates.py writes the row, scheduler_lineage.py
+    # owns its reason, scheduler_evidence_payload.py decides whether `status`
+    # survives the summary tier. One node id each, additive like the rows above.
+    PathTestRule(
+        "services/orchestrator/scheduler_candidates.py",
+        ("tests/test_node22_scheduler_stall_health.py::test_e6_the_lineage_exclusion_fixture_row_is_the_row_the_scheduler_writes",),
+    ),
+    PathTestRule(
+        "services/orchestrator/scheduler_lineage.py",
+        ("tests/test_node22_scheduler_stall_health.py::test_e6_the_lineage_exclusion_fixture_row_is_the_row_the_scheduler_writes",),
+    ),
+    PathTestRule(
+        "services/orchestrator/scheduler_evidence_payload.py",
+        ("tests/test_node22_scheduler_stall_health.py::test_e6_the_lineage_exclusion_fixture_row_is_the_row_the_scheduler_writes",),
     ),
     PathTestRule(
         "scripts/node27_download_once.sh",

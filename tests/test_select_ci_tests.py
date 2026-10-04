@@ -582,6 +582,30 @@ NODE22_STALL_READER_EDGES: tuple[str, ...] = (
 NODE22_STALL_DERIVED_EDGES = frozenset({"scripts/node22_scheduler_stall_health.py"})
 
 
+# The #2662 excluded-row contract: the writer of the row, the owner of its
+# reason, and the summary tier that must keep `status`. The probe suite imports
+# them only inside the pin's body, so these rows are the pin's only route.
+NODE22_STALL_EXCLUSION_PIN = (
+    "tests/test_node22_scheduler_stall_health.py::test_e6_the_lineage_exclusion_fixture_row_is_the_row_the_scheduler_writes"
+)
+NODE22_STALL_EXCLUSION_EDGES: tuple[str, ...] = (
+    "services/orchestrator/scheduler_candidates.py",
+    "services/orchestrator/scheduler_lineage.py",
+    "services/orchestrator/scheduler_evidence_payload.py",
+)
+
+
+@pytest.mark.parametrize(
+    "source",
+    NODE22_STALL_EXCLUSION_EDGES,
+    ids=[PurePosixPath(source).name for source in NODE22_STALL_EXCLUSION_EDGES],
+)
+def test_node22_stall_exclusion_edges_select_the_exclusion_pin(source: str) -> None:
+    assert Path(source).is_file()
+
+    assert NODE22_STALL_EXCLUSION_PIN in select_tests([source], repo_root=Path("."))
+
+
 @pytest.mark.parametrize(
     "source",
     NODE22_STALL_READER_EDGES,
@@ -14232,6 +14256,18 @@ SHARED_LIBRARY_SOURCES: tuple[tuple[str, str], ...] = (
     ("packages/common/timescale_write_guard.py", "tests/test_timescale_write_guard.py"),
     ("packages/common/object_store.py", "tests/test_object_store_roots.py"),
 )
+
+
+def test_object_store_routes_the_read_limit_discriminator_test() -> None:
+    # #2670: `ObjectStoreReadLimitExceededError` is defined in object_store.py
+    # and its only assertion lives in the SHUD runtime suite, which nothing
+    # derives from this path. One node id, not the whole suite.
+    assert Path("packages/common/object_store.py").is_file()
+
+    assert (
+        "tests/test_shud_runtime.py::test_object_store_limited_read_tells_over_limit_from_missing"
+        in select_tests(["packages/common/object_store.py"], repo_root=Path("."))
+    )
 
 
 # The INDEPENDENT current core-smoke contract set for the shared-baseline

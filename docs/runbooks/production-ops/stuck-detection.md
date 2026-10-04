@@ -300,7 +300,7 @@ lane 现在不会再触发。合取项是**保守**写法，不是「timer 在�
 |---|---|---|---|
 | progress | `counts.submitted_count > 0` | **打断** | **终止**，run 从这趟的 `started_at` 起算 |
 | blocked | `submitted_count == 0` 且 `blocked_candidate_count > 0` | **延长** | **计入** |
-| in_flight_held | 两个 count 都是 0，且 `skipped_candidates` 里至少一行的 `reason` 不在调度器的终态 skip 集合内 | **跳过**（不延长、**不打断**） | **计入** |
+| in_flight_held | 两个 count 都是 0，且 `skipped_candidates` 里至少一行 `status` 不是 `excluded`、同时 `reason` 不在调度器的终态 skip 集合内 | **跳过**（不延长、**不打断**） | **计入** |
 | idle | 两个 count 都是 0，且没有任何在飞的 skip | **打断**（阻塞候选消失即阻塞已解除） | **终止**，run 从它之后最老的一趟起算 |
 | neutral | 产物**无 `progress_guard` 键**，**或** 两个 count 任一缺失，**或** `status == "resource_limit_blocked"` | **跳过**（既不延长也不打断） | **跳过** |
 
@@ -316,6 +316,12 @@ skip 成 `active_duplicate_pipeline`、0 提交、0 阻塞，旧口径把它们�
 没有 `reason` 的行、不是对象的行、`skipped_candidates` 不是列表、
 `skipped_candidate_count > 0` 而列表缺失或行数少于 count，全部算在飞；
 一行 skip 都没有（无列表且 count 为 0）仍是 idle。
+唯一的例外是 **`status == "excluded"` 的行不算在飞，不看 `reason`**：调度器把永久排除
+也写进 `skipped_candidates`，例如 recalibration cutover 之后每趟都带的
+`lineage_scoped_out_pre_cutover`（该模型在这个 cycle 还不存在，#1735），它不在终态
+集合里，但背后没有任何东西在跑。只看 reason 的话 cutover 后回看窗口内每趟零提交都被读成
+`in_flight_held`，健康 lane 过了 360 分钟就误报本档。`status` 与 `reason` 在 writer 的
+summary 档都会保留；非 `excluded` 行上的未知 reason 仍按在飞处理。
 
 时间闸门的量法：
 
@@ -498,7 +504,8 @@ absence/release 出口」，处置是有保护的 `nhms-pipeline demote-reserved
 - **抑制只对 lane 已经甩在身后的条目生效，管不到 frontier**（#2662）。frontier = 最新
   一趟**非中性** pass（lock-contended / resource-limit 的中性趟没有候选列表，取它会让
   bypass 一闪一闪）在 `candidates` / `blocked_candidates` / `skipped_candidates` 里出现
-  过的全部 `(source, cycle_time)`。条目 `subject_id` 里的 `<source>_<YYYYMMDDHH>`
+  过的全部 `(source, cycle_time)`。也就是说 frontier 是那一趟的**每一个** cycle ——
+  整个 discovery 窗口，而不只是最新的那个 cycle。条目 `subject_id` 里的 `<source>_<YYYYMMDDHH>`
   （例：`job_cycle_ifs_2026092500_...`）等于其中之一即在 frontier 上：**source 一并
   比较**（同 cycle 的另一个 source 不算）、**大小写不敏感**（`subject_id` 里是 `ifs`，
   候选行里是配置的 `IFS`），且必须夹在下划线之间。这样的条目**按未抑制判级**，进

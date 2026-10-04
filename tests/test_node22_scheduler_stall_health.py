@@ -310,8 +310,19 @@ def _pass_payload(
     return payload
 
 
-def _skip_row(reason: str, source: str, cycle: datetime, *, basin: str = "basins_qhh") -> dict[str, object]:
+def _skip_row(
+    reason: str,
+    source: str,
+    cycle: datetime,
+    *,
+    basin: str = "basins_qhh",
+    status: str = "skipped",
+) -> dict[str, object]:
     """One ``skipped_candidates`` row: ``{**SchedulerCandidate.to_dict(), "reason": reason}``.
+
+    ``status`` is the candidate's own status for an ordinary skip; the two
+    permanent-exclusion writers overwrite it with ``"excluded"`` (see
+    ``_lineage_exclusion_row``).
 
     Reduced to the keys the writer's summary tier keeps
     (``scheduler_evidence_payload._BOUNDED_CANDIDATE_SUMMARY_KEYS``), which is
@@ -328,9 +339,20 @@ def _skip_row(reason: str, source: str, cycle: datetime, *, basin: str = "basins
         "cycle_time_utc": cycle_text,
         "basin_id": basin,
         "model_id": f"{basin}_shud",
-        "status": "skipped",
+        "status": status,
         "reason": reason,
     }
+
+
+#: What `scheduler_candidates` writes for a model whose state-lineage cutover
+#: is later than the cycle (#1735): a PERMANENT exclusion, nothing is running.
+#: Both literals are pinned to the writer by the e6 parity test.
+LINEAGE_EXCLUSION_REASON = "lineage_scoped_out_pre_cutover"
+EXCLUDED_STATUS = "excluded"
+
+
+def _lineage_exclusion_row(source: str, cycle: datetime, *, basin: str = "basins_new") -> dict[str, object]:
+    return _skip_row(LINEAGE_EXCLUSION_REASON, source, cycle, basin=basin, status=EXCLUDED_STATUS)
 
 
 def _pass_name(minutes_ago: int, suffix: str, *, pre_execution: bool = False) -> str:
@@ -2268,6 +2290,47 @@ def test_e5_the_terminal_skip_reasons_equal_the_schedulers_own() -> None:
     assert "active_duplicate_pipeline" not in probe.TERMINAL_SKIP_REASONS
 
 
+def test_e6_the_lineage_exclusion_fixture_row_is_the_row_the_scheduler_writes() -> None:
+    """The probe clears a skip on ``status == "excluded"``; the writer must say so.
+
+    `lineage_scoped_out_pre_cutover` is deliberately NOT a terminal reason (e5
+    keeps the literal equal to the scheduler's set), so the row's ``status`` is
+    the only thing that tells the probe nothing is in flight.  Pinned here:
+    the reason literal, the field names and value the writer puts on that row,
+    and that the writer's summary tier keeps both fields --- if ``status`` were
+    dropped under size pressure the exclusion would read in-flight again on
+    exactly the passes that overflow.
+    """
+
+    from services.orchestrator import (
+        scheduler_candidates,
+        scheduler_evidence_payload,
+        scheduler_lineage,
+    )
+
+    assert scheduler_lineage.LINEAGE_SCOPED_OUT_REASON == LINEAGE_EXCLUSION_REASON
+    assert probe.EXCLUDED_SKIP_STATUS == EXCLUDED_STATUS
+    assert LINEAGE_EXCLUSION_REASON not in probe.TERMINAL_SKIP_REASONS
+    assert {"status", "reason"} <= set(scheduler_evidence_payload._BOUNDED_CANDIDATE_SUMMARY_KEYS)
+
+    row = _lineage_exclusion_row("gfs", FREEZE_CYCLE)
+    assert (row["status"], row["reason"]) == (EXCLUDED_STATUS, LINEAGE_EXCLUSION_REASON)
+
+    # The writer's row is a dict literal; read it rather than drive a pass.
+    tree = ast.parse(Path(scheduler_candidates.__file__).read_text())
+    lineage_rows = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        fields = {key.value: value for key, value in zip(node.keys, node.values) if isinstance(key, ast.Constant)}
+        reason = fields.get("reason")
+        if isinstance(reason, ast.Attribute) and reason.attr == "LINEAGE_SCOPED_OUT_REASON":
+            lineage_rows.append(fields)
+    assert len(lineage_rows) == 1, "expected exactly one lineage exclusion row writer"
+    status = lineage_rows[0].get("status")
+    assert isinstance(status, ast.Constant) and status.value == EXCLUDED_STATUS
+
+
 def test_e4_only_terminal_artifacts_enter_the_graded_window() -> None:
     assert probe.is_terminal_pass_filename("scheduler_2026092312_7e6955b406ba.json") is True
     assert (
@@ -2988,6 +3051,20 @@ IN_FLIGHT_SHAPES = {
         counts={"submitted_count": 0, "blocked_candidate_count": 0, "skipped_candidate_count": 2},
         skipped_candidates=[_skip_row("terminal_hydro_success", "gfs", FREEZE_CYCLE)],
     ),
+    # It is the row's `status` that clears an exclusion, never its reason.
+    "the_lineage_reason_without_the_excluded_status": _zero_zero_payload(
+        skipped_candidates=[_skip_row(LINEAGE_EXCLUSION_REASON, "gfs", FREEZE_CYCLE)]
+    ),
+    "an_exclusion_beside_an_active_duplicate": _zero_zero_payload(
+        skipped_candidates=[
+            _lineage_exclusion_row("gfs", FREEZE_CYCLE),
+            _skip_row("active_duplicate_pipeline", "gfs", FREEZE_CYCLE),
+        ]
+    ),
+    "count_above_the_excluded_rows_present": _zero_zero_payload(
+        counts={"submitted_count": 0, "blocked_candidate_count": 0, "skipped_candidate_count": 2},
+        skipped_candidates=[_lineage_exclusion_row("gfs", FREEZE_CYCLE)],
+    ),
 }
 
 IDLE_SHAPES = {
@@ -3005,6 +3082,17 @@ IDLE_SHAPES = {
                 "duplicate_candidate_identity",
             )
         ],
+    ),
+    "a_lineage_exclusion_among_terminal_rows": _zero_zero_payload(
+        skipped_candidates=[
+            _skip_row("terminal_hydro_success", "gfs", FREEZE_CYCLE),
+            _lineage_exclusion_row("gfs", FREEZE_CYCLE),
+        ]
+    ),
+    "an_excluded_row_with_an_unknown_reason": _zero_zero_payload(
+        skipped_candidates=[
+            _skip_row("an_exclusion_added_next_year", "gfs", FREEZE_CYCLE, status=EXCLUDED_STATUS)
+        ]
     ),
 }
 
@@ -3103,6 +3191,80 @@ def test_i14_an_in_flight_held_pass_does_not_extend_the_count_streak(
     assert receipt["signals"]["in_flight_run_passes"] == 4
     assert receipt["signals"]["in_flight_run_span_minutes"] == 6.0
     assert receipt["signals"]["in_flight_run_start_is_lower_bound"] is True
+
+
+def _write_post_cutover_lane(root: Path, *, extra_rows: list[dict[str, object]]) -> None:
+    """A submitting pass, then 40 zero-submission passes ten minutes apart.
+
+    Every later pass skips two finished candidates and the one model that a
+    recalibration cutover scoped out of this cycle --- the row a healthy lane
+    carries on every pass of the lookback window after such a cutover.  The
+    progress pass started 405 minutes ago and the newest pass 5 minutes ago:
+    400 minutes, past the shipped 360-minute gate.
+    """
+
+    rows = [
+        _skip_row("terminal_hydro_success", "gfs", FREEZE_CYCLE, basin="basin_00"),
+        _skip_row("completed_duplicate_pipeline", "gfs", FREEZE_CYCLE, basin="basin_01"),
+        _lineage_exclusion_row("gfs", FREEZE_CYCLE),
+        *extra_rows,
+    ]
+    for index in range(40):
+        minutes = 5 + index * 10
+        _write_pass(
+            root,
+            _pass_name(minutes, f"{index:012x}"),
+            _pass_payload(started_at=NOW - timedelta(minutes=minutes), skipped=rows),
+        )
+    _write_pass(
+        root,
+        _pass_name(405, "progress0000"),
+        _pass_payload(started_at=NOW - timedelta(minutes=405), status="submitted", submitted=3),
+    )
+
+
+def test_i14b_a_permanent_lineage_exclusion_does_not_hold_a_healthy_lane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After a cutover every pass carries an excluded row; nothing is in flight.
+
+    Read as in-flight, 400 minutes of such passes grade `submission_stalled`
+    on a lane that has simply finished its work.
+    """
+
+    root = _evidence_root(tmp_path)
+    _write_post_cutover_lane(root, extra_rows=[])
+
+    status, receipts, _log = _run(tmp_path, monkeypatch, evidence_root=root, config=SHIPPED_CONFIG)
+    receipt = _receipt(receipts)
+
+    assert status == 0
+    assert receipt["verdict"] == "ok"
+    assert receipt["passes"]["idle_count"] == 40
+    assert receipt["passes"]["in_flight_held_count"] == 0
+    assert receipt["signals"]["in_flight_run_passes"] == 0
+
+
+def test_i14c_the_same_lane_with_one_active_duplicate_is_still_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exclusion clears only its own row: one candidate in flight holds the pass."""
+
+    root = _evidence_root(tmp_path)
+    _write_post_cutover_lane(
+        root,
+        extra_rows=[_skip_row("active_duplicate_pipeline", "gfs", FREEZE_CYCLE, basin="basin_02")],
+    )
+
+    status, receipts, _log = _run(tmp_path, monkeypatch, evidence_root=root, config=SHIPPED_CONFIG)
+    receipt = _receipt(receipts)
+
+    assert status == 1
+    assert receipt["verdict"] == "submission_stalled"
+    assert receipt["passes"]["in_flight_held_count"] == 40
+    assert receipt["passes"]["idle_count"] == 0
+    assert receipt["signals"]["in_flight_run_ended_by"] == "progress_pass"
+    assert receipt["signals"]["in_flight_run_span_minutes"] == 400.0
 
 
 def _record(minutes_ago: int, shape: str) -> probe.PassRecord:

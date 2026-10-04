@@ -43,7 +43,9 @@ Governing invariants:
   counts. Fail-safe like the scheduler: an unknown reason is in-flight; `skipped_candidate_count > 0`
   with the list missing or malformed is in-flight; no skipped candidates at all stays idle.
 - New shape `in_flight_held`: `submitted_count == 0`, `blocked_candidate_count == 0`, at least one
-  non-terminal skip. It neither counts as progress nor clears.
+  non-terminal skip. It neither counts as progress nor clears. A skipped row with `status == "excluded"`
+  (permanent exclusion such as `lineage_scoped_out_pre_cutover`) is never in-flight: nothing is running
+  for it, and counting it would alert on a healthy lane for the whole lookback window after a cutover.
 - Time gate `NHMS_SCHEDULER_STALL_IN_FLIGHT_MINUTES`: let the run be the newest contiguous non-neutral
   passes that are all blocked or in-flight-held. Its start is the last progress pass's start when that
   pass is inside the scan window, otherwise the oldest scanned pass of the run (a lower bound of the

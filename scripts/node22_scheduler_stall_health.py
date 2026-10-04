@@ -139,6 +139,20 @@ TERMINAL_SKIP_REASONS = frozenset(
         "duplicate_candidate_identity",
     }
 )
+# The second way a skipped row proves nothing is in flight: the row's own
+# `status`.  The scheduler writes its PERMANENT exclusions into
+# `skipped_candidates` with `"status": "excluded"` -- the duplicate identity
+# above and, since #1735, `lineage_scoped_out_pre_cutover` (a model whose
+# state-lineage cutover is later than the cycle did not exist yet;
+# `services/orchestrator/scheduler_candidates.py`).  That reason is NOT in the
+# scheduler's terminal set, so by reason alone every pass after a
+# recalibration cutover read as in-flight-held and a healthy lane graded
+# `submission_stalled` once the time gate elapsed.  An excluded row is
+# therefore not in-flight whatever its reason; the literal above stays equal
+# to the scheduler's set.  Both `status` and `reason` survive the writer's
+# summary tier (`scheduler_evidence_payload._BOUNDED_CANDIDATE_SUMMARY_KEYS`),
+# and a parity test pins that together with the row the writer produces.
+EXCLUDED_SKIP_STATUS = "excluded"
 
 DEFAULT_TIMER_UNIT = "nhms-compute-scheduler.timer"
 DEFAULT_SERVICE_UNIT = "nhms-compute-scheduler.service"
@@ -880,7 +894,8 @@ def classify_pass(payload: dict[str, Any]) -> tuple[str, int | None, int | None]
     candidates are disjoint from blocked ones, so they never reach
     ``blocked_candidate_count``.  Reading such a pass as idle is what let 340
     consecutive zero-submission passes of the #2655 freeze reset the streak
-    one by one.  See ``has_in_flight_skip`` for the fail-safe rules.
+    one by one.  See ``has_in_flight_skip`` for the fail-safe rules, and for
+    the one row that is never in-flight: a permanent exclusion.
     """
 
     counts = payload.get("counts")
@@ -913,6 +928,8 @@ def has_in_flight_skip(payload: dict[str, Any]) -> bool:
     * a row whose ``reason`` is not in ``TERMINAL_SKIP_REASONS`` is in-flight,
       and that includes a reason added to the scheduler after this file was
       written, a row with no reason at all, and a row that is not an object;
+    * except a row whose ``status`` is ``EXCLUDED_SKIP_STATUS``: a permanent
+      exclusion has nothing running behind it, whatever its reason;
     * ``skipped_candidate_count > 0`` with the list absent, not a list, or
       shorter than the count is in-flight.  The writer's size ladder
       summarises rows in place (``reason``, ``source`` and ``cycle_time``
@@ -931,7 +948,11 @@ def has_in_flight_skip(payload: dict[str, Any]) -> bool:
     if not isinstance(rows, list):
         return True
     for row in rows:
-        reason = row.get("reason") if isinstance(row, dict) else None
+        if not isinstance(row, dict):
+            return True
+        if row.get("status") == EXCLUDED_SKIP_STATUS:
+            continue
+        reason = row.get("reason")
         if not isinstance(reason, str) or reason not in TERMINAL_SKIP_REASONS:
             return True
     return count > len(rows)

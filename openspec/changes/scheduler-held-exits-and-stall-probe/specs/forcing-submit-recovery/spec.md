@@ -9,5 +9,9 @@ The file journal SHALL provide an operator-verified absence exit for a forcing m
 - **THEN** the row becomes retryable, its members are no longer held-skipped, the audit fields are recorded and nothing is submitted
 
 #### Scenario: Rejected exit
-- **WHEN** the attempt or anchor does not match, the row is not held, is already bound, is not a forcing row, or the verifier or evidence is blank
+- **WHEN** the attempt or anchor does not match, the forcing row is not held, is already bound, its identity is incomplete, the verification is dated before the grace, or the verifier or evidence is blank
 - **THEN** the command fails naming the reason and the journal is byte-identical
+
+#### Scenario: Non-forcing row
+- **WHEN** the same command targets a forecast master or an unknown job id
+- **THEN** the existing forecast demotion contract applies unchanged and no forcing refusal name is produced
