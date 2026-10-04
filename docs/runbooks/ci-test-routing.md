@@ -31,15 +31,35 @@ default-skip, run only when the matching env flag is set.
 
 ## CI exclusion
 
-The `unit-test` job runs:
+The `unit-test` job (`Unit Tests (full)`) is a matrix of shards, not one pytest
+process. The shard count is the length of the `matrix.shard` list in
+`.github/workflows/ci.yml`. Each shard lists its own test files and runs only
+those:
 
 ```
-pytest tests/ -v --tb=short -m "not e2e and not grib and not integration"
+python scripts/ci/shard_tests.py --shard N --total <shard count> > shard-files.txt
+test -s shard-files.txt
+mapfile -t shard_files < shard-files.txt
+pytest "${shard_files[@]}" -q --tb=short --durations=25 -m "not e2e and not grib and not integration"
 ```
 
-So pure CI never collects e2e/grib/integration tests. The generic GitHub
-`real-db-integration` (`SQL Migration Dry Run`) lane runs its TimescaleDB service
-with:
+So pure CI never collects e2e/grib/integration tests. The shards are disjoint
+and together cover every test file pytest collects, so the full lane is green
+only when **every** shard is green.
+
+To reproduce one shard locally, run the commands below (4 is the shard count in
+`ci.yml` today; `mapfile` needs bash 4 or newer, so not the stock macOS
+`/bin/bash`). `--no-sync` runs the environment that is already installed and never rebuilds
+it, like the node-27 lane below:
+
+```bash
+uv run --no-sync python scripts/ci/shard_tests.py --shard N --total 4 > shard-files.txt
+mapfile -t shard_files < shard-files.txt
+uv run --no-sync pytest "${shard_files[@]}" -q --tb=short --durations=25 -m "not e2e and not grib and not integration"
+```
+
+The generic GitHub `real-db-integration` (`SQL Migration Dry Run`) lane runs its
+TimescaleDB service with:
 
 ```
 pytest -vv -rs -m "integration and not timescaledb_210"
@@ -49,6 +69,24 @@ This is the generic SQL lane: ordinary `integration` items run, while
 `timescaledb_210` stays out because its PostgreSQL 15.2 / TimescaleDB 2.10.2
 oracle is node-27. A Docker socket, `/.dockerenv`, or a runnable Docker daemon
 is not authorization to run that marker.
+
+### Refreshing the shard duration table
+
+`scripts/ci/full_test_durations.json` holds seconds per test file and only
+balances the shards. Rebuild it from the junit XML of one full run with the
+same marker expression:
+
+```bash
+uv run --no-sync pytest tests/ -q -m "not e2e and not grib and not integration" --junitxml=full-junit.xml
+uv run --no-sync python scripts/ci/shard_tests.py durations --junit full-junit.xml
+```
+
+The second command overwrites the checked-in table (`--output` to write
+elsewhere). A stale table breaks nothing: a file the table does not know gets
+the median weight, and the shards stay disjoint and complete. The only drift
+signal is the per-shard P95 margin line of the watcher
+(`scripts/ci/full_regression_watch.py margin`), which turns from a notice into
+a warning when a shard's P95 nears the job timeout.
 
 ## Retired selective-cold Docker probe
 

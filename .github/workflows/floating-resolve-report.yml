@@ -1,0 +1,124 @@
+name: Floating Resolve Report
+
+# #2709: every CI job installs uv.lock (#2573), so upstream breakage stays
+# invisible until someone upgrades the lock. Once a week this lane resolves the
+# dependencies WITHOUT the lock, publishes the version differences against the
+# checked-in uv.lock, runs the tests on that set and keeps ONE tracking issue.
+#
+# Report-only. The triggers are `schedule` and `workflow_dispatch` and must stay
+# exactly those: on `push` / `pull_request` this lane would bring the floating
+# resolve's nondeterminism back to the merge gate. Nothing here commits, pushes
+# or opens a pull request, and ci.yml's locked installs are not touched.
+on:
+  schedule:
+    # Mondays 03:17 UTC.
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      inject_failure:
+        description: "Fail on purpose before the resolve (receipt of the failure path)"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: floating-resolve-report
+  cancel-in-progress: false
+
+jobs:
+  floating-resolve:
+    name: Floating Resolve Report
+    runs-on: ubuntu-latest
+    # Above the sum of the two pytest step timeouts below, so a suite killed at
+    # its step timeout still leaves time for the report step.
+    timeout-minutes: 120
+    steps:
+      # Same prerequisites as ci.yml's `unit-test` job (full history, the venv
+      # on PATH, the scratch evidence root): without them tests fail for reasons
+      # that are not upstream, and the lane would open a false tracking issue.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v5
+      - name: Inject a failure
+        id: inject
+        if: ${{ inputs.inject_failure }}
+        run: |
+          echo "inject_failure was set: failing before the resolve"
+          exit 1
+      - name: Resolve without the lock
+        id: lock
+        run: |
+          cp uv.lock uv.lock.locked
+          uv lock --upgrade
+      - name: Publish the version differences
+        run: |
+          python scripts/ci/floating_resolve_report.py diff uv.lock.locked uv.lock > lock-diff.txt
+          {
+            echo "## Floating resolve against uv.lock"
+            echo ""
+            echo '```text'
+            cat lock-diff.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: floating-resolve-lock
+          path: |
+            uv.lock.locked
+            uv.lock
+            lock-diff.txt
+          if-no-files-found: error
+      - name: Install the floating set
+        id: sync
+        run: uv sync --all-extras --dev
+      - name: Put the floating venv on PATH
+        run: echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+      - name: Prepare scratch evidence root
+        run: |
+          sudo mkdir -p /scratch/frd_muziyao
+          sudo chown "$USER:$(id -gn)" /scratch/frd_muziyao
+          chmod u+rwx /scratch/frd_muziyao
+      # Each pytest step records pytest's exit code as an output. A step killed
+      # at its own timeout leaves none, which is how the report tells `timeout`
+      # from `tests`.
+      - name: Run the native PROJ isolation regression first
+        id: proj
+        timeout-minutes: 10
+        run: |
+          rc=0
+          pytest -q tests/test_native_proj_isolation.py || rc=$?
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          exit "$rc"
+      - name: Run the unit test suite on the floating set
+        id: tests
+        timeout-minutes: 90
+        run: |
+          rc=0
+          pytest tests/ -q --tb=short --durations=25 -m "not e2e and not grib and not integration" || rc=$?
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          exit "$rc"
+      - name: Report
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        # The stock interpreter, not the venv: after a failed resolve there is none.
+        run: >-
+          python scripts/ci/floating_resolve_report.py report
+          --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          --diff-file lock-diff.txt
+          --job-cancelled ${{ job.status == 'cancelled' }}
+          --inject "${{ steps.inject.outcome }}"
+          --lock "${{ steps.lock.outcome }}"
+          --sync "${{ steps.sync.outcome }}"
+          --proj "${{ steps.proj.outcome }}"
+          --tests "${{ steps.tests.outcome }}"
+          --proj-rc "${{ steps.proj.outputs.rc }}"
+          --tests-rc "${{ steps.tests.outputs.rc }}"
