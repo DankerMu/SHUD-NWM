@@ -10,7 +10,7 @@
     "outcome"
   ],
   "properties": {
-    "schema_version": {"enum": ["1.0", "2.0", "2.1"]},
+    "schema_version": {"enum": ["1.0", "2.0", "2.1", "2.2"]},
     "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "mutation_head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "provenance_state": {"enum": ["bound", "unavailable"]},
@@ -20,7 +20,8 @@
     "per_tick_bound": {"type": "integer", "minimum": 1},
     "budget": {"$ref": "#/$defs/budget"},
     "mode": {"enum": ["dry-run", "enforce"]},
-    "outcome": {"enum": ["clean", "partial", "refused_lock", "refused_config", "failed"]},
+    "outcome": {"enum": ["clean", "partial", "deferred", "refused_lock", "refused_config", "failed"]},
+    "deferred_contended_count": {"type": "integer", "minimum": 0},
     "selected": {
       "type": "array",
       "maxItems": 100000,
@@ -101,7 +102,7 @@
     },
     {
       "if": {
-        "properties": {"schema_version": {"const": "2.1"}},
+        "properties": {"schema_version": {"enum": ["2.1", "2.2"]}},
         "required": ["schema_version"]
       },
       "then": {
@@ -126,9 +127,56 @@
     },
     {
       "if": {
+        "properties": {"schema_version": {"enum": ["1.0", "2.0", "2.1"]}},
+        "required": ["schema_version"]
+      },
+      "then": {
         "properties": {
-          "schema_version": {"enum": ["2.0", "2.1"]},
-          "outcome": {"enum": ["clean", "partial", "refused_lock", "refused_config"]}
+          "outcome": {"not": {"const": "deferred"}},
+          "budget": {"not": {"required": ["fence_wait_ms"]}},
+          "selected": {
+            "items": {
+              "not": {
+                "anyOf": [
+                  {"required": ["fence_wait_elapsed_ms"]},
+                  {"properties": {"mutation_state": {"const": "deferred_contended"}}, "required": ["mutation_state"]}
+                ]
+              }
+            }
+          }
+        },
+        "not": {"required": ["deferred_contended_count"]}
+      }
+    },
+    {
+      "if": {
+        "properties": {"schema_version": {"const": "2.2"}},
+        "required": ["schema_version"]
+      },
+      "then": {
+        "properties": {"budget": {"required": ["fence_wait_ms"]}},
+        "if": {"properties": {"outcome": {"const": "failed"}}, "required": ["outcome"]},
+        "then": {"not": {"required": ["deferred_contended_count"]}},
+        "else": {"required": ["deferred_contended_count"]}
+      }
+    },
+    {
+      "if": {
+        "properties": {"outcome": {"const": "deferred"}},
+        "required": ["outcome"]
+      },
+      "then": {
+        "properties": {
+          "mode": {"const": "enforce"},
+          "deferred_contended_count": {"minimum": 1}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "schema_version": {"enum": ["2.0", "2.1", "2.2"]},
+          "outcome": {"enum": ["clean", "partial", "deferred", "refused_lock", "refused_config"]}
         },
         "required": ["schema_version", "outcome"]
       },
@@ -138,7 +186,7 @@
       "if": {"properties": {"outcome": {"const": "failed"}}, "required": ["outcome"]},
       "then": {
         "required": ["failure", "provenance_state"],
-        "properties": {"schema_version": {"enum": ["2.0", "2.1"]}},
+        "properties": {"schema_version": {"enum": ["2.0", "2.1", "2.2"]}},
         "allOf": [
           {
             "if": {
@@ -168,7 +216,8 @@
         "compress_timeout_ms": {"type": "integer", "minimum": 1000},
         "wrapper_wall_seconds": {"type": "integer", "minimum": 1},
         "systemd_wall_seconds": {"type": "integer", "minimum": 1},
-        "cleanup_margin_seconds": {"type": "integer", "minimum": 1}
+        "cleanup_margin_seconds": {"type": "integer", "minimum": 1},
+        "fence_wait_ms": {"type": "integer", "minimum": 1}
       }
     },
     "selected_descriptor": {
@@ -195,8 +244,9 @@
         "after_bytes": {"type": ["integer", "null"], "minimum": 0},
         "error": {"type": "string", "minLength": 1},
         "mutation_state": {
-          "enum": ["not_applicable", "failed_before_mutation", "committed", "indeterminate"]
-        }
+          "enum": ["not_applicable", "failed_before_mutation", "committed", "indeterminate", "deferred_contended"]
+        },
+        "fence_wait_elapsed_ms": {"type": "integer", "minimum": 0}
       }
     },
     "deferred_descriptor": {

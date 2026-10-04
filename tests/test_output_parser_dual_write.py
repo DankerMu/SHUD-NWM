@@ -141,6 +141,10 @@ class _FakeConnection:
         # row exist" and "is it locked". The default answer is "it exists".
         if normalized.startswith("select 1 from hydro.hydro_run"):
             return ["?column?"], [(1,)]
+        # #2713: the replace chain's FIRST statement, the shared
+        # compression/ingest fence try. The default answer is "free".
+        if normalized.startswith("select pg_try_advisory_xact_lock_shared"):
+            return ["pg_try_advisory_xact_lock_shared"], [(True,)]
         return None, []
 
     def cursor(self) -> _FakeCursor:
@@ -284,9 +288,11 @@ def test_a_missing_run_row_is_refused_before_mutation(monkeypatch: pytest.Monkey
     assert excinfo.value.error_code == "DATABASE_ROW_MISSING"
     assert calls == []
     assert not any("DELETE" in sql for sql, _ in connection.executions)
-    # And the statement that asked really was the locking probe.
+    # And the statement that asked really was the locking probe, right after
+    # the #2713 fence try that opens every replace transaction.
     assert [sql for sql, _ in connection.executions] == [
-        "SELECT 1 FROM hydro.hydro_run WHERE run_key = %s FOR UPDATE"
+        "SELECT pg_try_advisory_xact_lock_shared(%s, %s)",
+        "SELECT 1 FROM hydro.hydro_run WHERE run_key = %s FOR UPDATE",
     ]
 
 

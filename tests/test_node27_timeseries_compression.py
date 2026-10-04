@@ -20,6 +20,7 @@ from pathlib import Path
 import jsonschema
 import pytest
 
+from packages.common import timeseries_compression_fence as fence
 from packages.common.migrate import split_sql_statements
 from scripts import node27_timeseries_compression as compression
 
@@ -267,7 +268,11 @@ def test_main_enforce_propagates_the_configured_compress_timeout_to_the_session(
     Deliberately runs ``--enforce`` with NO injected ``compress_chunk``: the
     dry-run path never reaches the compression hook, and injecting a fake hook
     would step over the very assembly point (``functools.partial`` binding
-    ``config.compress_timeout_ms``) this pins.
+    ``config.compress_timeout_ms`` and ``config.fence_wait_ms``) this pins.
+
+    #2713: the fence comes first in the session, its 250 ms (faked clock)
+    wait is charged against the override, and the fence is released after
+    the compress transaction.
     """
     env = _base_env(
         tmp_path,
@@ -283,6 +288,8 @@ def test_main_enforce_propagates_the_configured_compress_timeout_to_the_session(
     connect_calls, statements = _install_fake_psycopg2(monkeypatch)
     monkeypatch.setattr(compression, "fetch_display_watermark", lambda _dsn, **_kwargs: _NOW)
     monkeypatch.setattr(compression, "_current_head_sha", lambda **_kwargs: "a" * 40)
+    clock = iter([100.0, 100.25])
+    monkeypatch.setattr(fence, "_monotonic", lambda: next(clock))
     chunk = _chunk("hydro", "river_timeseries", "oversized", delta_days=9)
 
     code = compression.main(
@@ -293,9 +300,14 @@ def test_main_enforce_propagates_the_configured_compress_timeout_to_the_session(
     )
 
     assert code == 0
-    assert [sql for sql, _params in statements] == [
-        "SET statement_timeout = 1800000",
-        "SELECT compress_chunk(%s::regclass)",
+    assert statements == [
+        ("SET statement_timeout = 1800000", None),
+        ("SET lock_timeout = 900000", None),
+        ("SELECT pg_advisory_lock(%s, %s)", (2713, -1964848284)),
+        ("RESET lock_timeout", None),
+        ("SET statement_timeout = 1799750", None),
+        ("SELECT compress_chunk(%s::regclass)", ("_timescaledb_internal.oversized",)),
+        ("SELECT pg_advisory_unlock(%s, %s)", (2713, -1964848284)),
     ]
     assert len(connect_calls) == 1
     receipt = json.loads(Path(env["NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH"]).read_text())
@@ -468,7 +480,7 @@ def test_invalid_config_replaces_disjoint_known_safe_receipt(tmp_path: Path, mon
 
     assert compression.main([]) == 1
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-    assert receipt["schema_version"] == "2.1"
+    assert receipt["schema_version"] == "2.2"
     assert receipt["outcome"] == "failed"
     assert receipt["failure"] == {
         "stage": "config",
@@ -1320,7 +1332,7 @@ def test_receipt_validates_against_schema(tmp_path: Path, monkeypatch: pytest.Mo
         compress_chunk=fake_compress,
     )
     jsonschema.validate(receipt, _load_schema())
-    assert receipt["schema_version"] == "2.1"
+    assert receipt["schema_version"] == "2.2"
     assert receipt["head_sha"] == compression._current_head_sha()
     assert len(receipt["selected"]) == 5
     assert len(receipt["deferred"]) == 1
@@ -1387,10 +1399,12 @@ def test_schema_keeps_v1_read_compatibility_but_v2_requires_head_sha() -> None:
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(receipt, _load_schema())
     receipt["schema_version"] = "1.0"
-    # ``budget`` arrived with "2.1" (issue #1351) and is forbidden on a 1.0
-    # receipt, so the downgrade drops it. The compatibility claim under test —
-    # 1.0 receipts stay readable without ``head_sha`` — is unchanged.
+    # ``budget`` arrived with "2.1" (issue #1351) and ``deferred_contended_count``
+    # with "2.2" (#2713); both are forbidden on a 1.0 receipt, so the downgrade
+    # drops them. The compatibility claim under test — 1.0 receipts stay
+    # readable without ``head_sha`` — is unchanged.
     receipt.pop("budget")
+    receipt.pop("deferred_contended_count")
     jsonschema.validate(receipt, _load_schema())
 
 
@@ -1506,15 +1520,22 @@ _NON_DEFAULT_BUDGET = {
     "systemd_wall_seconds": 3_941,
     "cleanup_margin_seconds": 300,
 }
+# #2713: schema 2.2 receipts additionally record the effective fence wait. The
+# two 2.1-shaped literals above stay for the 2.1 schema-branch tests below.
+_DEFAULT_BUDGET_V22 = {**_DEFAULT_BUDGET, "fence_wait_ms": 900_000}
+_NON_DEFAULT_BUDGET_V22 = {**_NON_DEFAULT_BUDGET, "fence_wait_ms": 600_000}
 
 
 def _budget_env_override(budget: dict[str, int], *, per_tick_bound: str) -> dict[str, str]:
-    return {
+    override = {
         "NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS": str(budget["compress_timeout_ms"]),
         "NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS": str(budget["wrapper_wall_seconds"]),
         "NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS": str(budget["systemd_wall_seconds"]),
         "NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND": per_tick_bound,
     }
+    if "fence_wait_ms" in budget:
+        override["NODE27_TIMESERIES_COMPRESSION_FENCE_WAIT_MS"] = str(budget["fence_wait_ms"])
+    return override
 
 
 def _three_config_receipts(monkeypatch: pytest.MonkeyPatch, env: dict[str, str]) -> list[dict]:
@@ -1543,13 +1564,13 @@ def test_receipts_record_the_non_default_budget_actually_in_force(
     """(a) A tick run on operator-set budgets is byte-distinguishable from a
     default-budget tick, at every construction point that has a config."""
 
-    env = _base_env(tmp_path, override=_budget_env_override(_NON_DEFAULT_BUDGET, per_tick_bound="1"))
+    env = _base_env(tmp_path, override=_budget_env_override(_NON_DEFAULT_BUDGET_V22, per_tick_bound="1"))
     receipts = _three_config_receipts(monkeypatch, env)
     assert len(receipts) == 3
     for receipt in receipts:
-        assert receipt["schema_version"] == "2.1"
-        assert receipt["budget"] == _NON_DEFAULT_BUDGET
-        assert receipt["budget"] != _DEFAULT_BUDGET
+        assert receipt["schema_version"] == "2.2"
+        assert receipt["budget"] == _NON_DEFAULT_BUDGET_V22
+        assert receipt["budget"] != _DEFAULT_BUDGET_V22
         jsonschema.validate(receipt, _load_schema())
 
 
@@ -1561,8 +1582,8 @@ def test_receipts_record_the_default_budget_when_nothing_is_overridden(
     env = _base_env(tmp_path)
     receipts = _three_config_receipts(monkeypatch, env)
     for receipt in receipts:
-        assert receipt["schema_version"] == "2.1"
-        assert receipt["budget"] == _DEFAULT_BUDGET
+        assert receipt["schema_version"] == "2.2"
+        assert receipt["budget"] == _DEFAULT_BUDGET_V22
         jsonschema.validate(receipt, _load_schema())
 
 
@@ -1580,7 +1601,7 @@ def test_config_tombstone_carries_no_budget_and_still_validates(
     assert compression.main([]) == 1
 
     tombstone = json.loads(receipt_path.read_text(encoding="utf-8"))
-    assert tombstone["schema_version"] == "2.1"
+    assert tombstone["schema_version"] == "2.2"
     assert tombstone["outcome"] == "failed"
     assert tombstone["failure"]["stage"] == "config"
     assert "budget" not in tombstone
@@ -1606,6 +1627,11 @@ def test_config_stage_label_belongs_to_the_tombstone_call_site_only() -> None:
 
 def _budget_receipt(**overrides: object) -> dict:
     receipt = _example_receipt()
+    if overrides.get("schema_version") in ("1.0", "2.0", "2.1"):
+        # Downgrading the 2.2 example: strip the #2713 fields first, so the
+        # assertions below see only the prohibition they are about.
+        receipt.pop("deferred_contended_count")
+        receipt["budget"].pop("fence_wait_ms")
     receipt.update(overrides)
     return receipt
 

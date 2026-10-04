@@ -153,7 +153,7 @@ def _invoke_compression_fetch_chunks(dsn: str, tmp_path: Path) -> None:
 
 
 def _invoke_compression_compress_chunk(dsn: str, tmp_path: Path) -> None:
-    node27_timeseries_compression._default_compress_chunk(dsn, None, compress_timeout_ms=1000)
+    node27_timeseries_compression._default_compress_chunk(dsn, None, compress_timeout_ms=1000, fence_wait_ms=500)
 
 # (case id, invoker, expected identity, expected OTHER connect kwargs).
 # The fourth element is the invariant lock: introducing the attribution kwarg

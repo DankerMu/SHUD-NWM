@@ -3558,10 +3558,14 @@ Measured inputs (node-27):
 
 The two constraints:
 
-1. **Wall.** `Σ(selected GB) × 55 s/GB ≤ 3900 s` (wrapper wall; the whole tick,
-   not one chunk). `2 × 21 GB × 55 ≈ 2310 s` leaves ~1590 s for growth and the
-   non-compress residual; `4 × 20 GB × 55 ≈ 4400 s` does not fit — exactly the
-   2026-09-18 `rc=124`.
+1. **Wall.** `Σ(selected GB) × 55 s/GB + Σ fence_wait ≤ 3900 s` (wrapper wall;
+   the whole tick, not one chunk). `Σ fence_wait` is the time actually spent
+   waiting for the #2713 compression/ingest fence, at most
+   `FENCE_WAIT_MS` per chunk; it is ~0 on a quiet database, and the §4.11
+   tick-deadline guard defers the rest of the tick instead of starting a
+   fence wait that no longer fits. `2 × 21 GB × 55 ≈ 2310 s` leaves ~1590 s for
+   growth, the non-compress residual and fence waits; `4 × 20 GB × 55 ≈ 4400 s`
+   does not fit — exactly the 2026-09-18 `rc=124`.
 2. **Throughput.** `bound × 1 tick/day ≥` arrival. River takes both slots
    while it has ≥ 2 eligible chunks: 2/day compressed from the young end,
    1/day arriving, 1/day dropped by retention from the old end, so a river
@@ -6759,6 +6763,134 @@ pass a DSN in argv. `plan` and `verify` also run under the display read-only rol
 5. After the unit ends, confirm that the next compression tick compresses the
    backlog, and run the governance receipt. A read-only count of legacy routes
    with `end_time > now() - window` must be 0 before #1988 opens.
+
+### 4.11 Compression/ingest advisory fence (`#2713`)
+
+**Why it exists.** On 2026-10-04 the periodic compression lost two `40P01`
+deadlocks to output-parser write transactions, after 35 and 20 minutes of
+copying, and made zero progress that tick. The same day at 14:36 the retention
+`drop_chunks` lost a `40P01` to a parser transaction on the FK-referenced
+`hydro.hydro_run`. A parser write is one transaction: its probe takes
+AccessShare on every chunk and its DELETE requests RowExclusive on every chunk,
+even when planning prunes the DELETE to a few chunks. `compress_chunk` holds a
+lock that conflicts with RowExclusive while it copies and then upgrades to
+AccessExclusive; `drop_chunks` takes AccessExclusive on the FK-referenced
+tables. The lifecycle flock (`node27_timeseries_lifecycle_lock`) leaves autopipe
+out on correctness grounds, which says nothing about lock liveness.
+
+**Semantics** (`packages/common/timeseries_compression_fence.py`). One advisory
+key per canonical hypertable **family**, in the two-int4 keyspace
+`(2713, crc32(canonical name))`: `hydro.river_timeseries_legacy` shares the key
+of `hydro.river_timeseries`, and `met.forcing_station_timeseries_legacy` that
+of `met.forcing_station_timeseries`. Ingest writes only the canonical table, but
+the legacy sibling references the same FK tables (`core.river_segment`,
+`hydro.hydro_run`, `met.met_station`, `met.forcing_version`), so compressing or
+dropping a legacy chunk locks the relations a canonical writer holds; a separate
+legacy key would leave that cycle open (node-27 still carries
+`met.forcing_station_timeseries_legacy` chunks that both lanes reach).
+
+- every production ingest write transaction on `hydro.river_timeseries` or
+  `met.forcing_station_timeseries` tries the fence **shared, transaction-scoped,
+  non-blocking** (`pg_try_advisory_xact_lock_shared`) as the **first statement
+  of the write transaction** — before `hydro_run ... FOR UPDATE`, before any
+  `met_station` / `forcing_version` write, before any probe. Taken later, the
+  locks already held re-create the cycle. The writers are
+  `workers/output_parser/parser.py::upsert_river_timeseries`,
+  `packages/common/forcing_domain_handoff_apply.py::_apply_with_cursor` and
+  `workers/forcing_producer/store.py::replace_forcing_timeseries`;
+  `tests/test_timeseries_compression_fence_wire_site_invariant.py` fails on any
+  new unfenced write site;
+- compression (before each `compress_chunk`) and retention (before each
+  `drop_chunks`) take the fence **exclusive, session-scoped, with a bounded
+  `lock_timeout` wait**, in a fresh session holding no other lock. The wait
+  therefore happens before any copy or drop. Once that exclusive request is
+  queued, PostgreSQL refuses every new shared try, so in-flight writers drain
+  and no new one starts.
+
+**Operational effect: a daily quiet window.** While one chunk compresses
+(about 20-35 min per narrow chunk, at most the per-tick bound, 2 a day) or one
+chunk is dropped, ingest writes on that family defer to later autopipe
+ticks instead of failing. A deferred run is not marked failed and keeps its
+status; the next tick re-registers, re-applies and re-parses it.
+
+| Code (literal string) | Where produced | What it means / where to see it |
+|---|---|---|
+| `OUTPUT_PARSE_COMPRESSION_FENCE_BUSY` | parser CLI stderr (both subcommands, click and argparse legs) | The parse rolled back before any statement; `hydro_run.error_code` is NOT written. The autopipe tick records the run as `outcome="skipped"`, `reason` = this code, `stage="parse"`; it does not count toward the tick rc. |
+| `HANDOFF_APPLY_COMPRESSION_FENCE_BUSY` | forcing apply report `unavailable_reasons[].code` | The handoff apply rolled back untouched. Tick: `outcome="skipped"`, no decline row. |
+| `FORCING_PRODUCE_COMPRESSION_FENCE_BUSY` | forcing producer CLI stderr | The timeseries replace rolled back; `met.forecast_cycle` is NOT marked failed. Node-22 is DB-free, so this only appears on a DB-backed producer. |
+
+**Compression knob and budget.** `NODE27_TIMESERIES_COMPRESSION_FENCE_WAIT_MS`
+(compression env, default 900000) bounds the fence wait. It is charged against
+`COMPRESS_TIMEOUT_MS`: `compress_chunk` runs with `statement_timeout =
+COMPRESS_TIMEOUT_MS - measured fence wait`, so the per-chunk legs (leg 1
+`ceil(compress/1000) + 300 <= wrapper wall`, leg 2) are unchanged. The runner
+refuses, before any DB connection, a value that is not strictly below
+`COMPRESS_TIMEOUT_MS` — including the trap of lowering `COMPRESS_TIMEOUT_MS` to
+900000 or below without also setting the knob.
+
+**Tick-deadline guard.** The per-chunk legs do not bound a whole tick: with
+`bound` chunks the fence waits add up to `bound × FENCE_WAIT_MS` on top of the
+compress time (§4 "Per-tick capacity", Wall constraint). So before taking the
+fence for each chunk the runner checks, on a monotonic clock started at process
+entry, `elapsed + FENCE_WAIT_MS/1000 + 300 > wrapper wall`; once true, that
+chunk and every later selected chunk are recorded `deferred_contended` without
+being attempted, and the tick ends `deferred` (exit 0) instead of being `TERM`ed
+by the wrapper `timeout` during a fence wait. With the defaults the last chunk
+may start its fence at `3900 - 900 - 300 = 2700 s` into the tick. A guard
+deferral carries **no** `fence_wait_elapsed_ms` (an expired fence wait always
+does), which is how to tell the two apart in a receipt. The guard bounds the
+fence-wait share only: compress time after the fence is still governed by the
+Wall constraint.
+
+Derivation of the default (D0.5, node-27, 2026-10-04, during catch-up): 5-6
+output-parser write transactions run concurrently, each open for at least
+300 s; a fuller sample was still in progress when this was written. The queued
+exclusive request only has to outlast the transactions already in flight (new
+ones are refused), so 15 min covers that sample with margin. Charged against
+the 3600000 ms default it still leaves at least 2700 s for `compress_chunk`,
+against about 1100 s measured per narrow chunk. Re-derive it if the longest
+parser transaction during catch-up approaches 900 s, or if
+`COMPRESS_TIMEOUT_MS` is lowered.
+
+**Retention.** The drop takes the same exclusive fence, bounded by the
+existing `NODE27_TIMESERIES_RETENTION_LOCK_TIMEOUT_MS`. A fence wait that
+expires is a `55P03` and renders through the existing #1664 segment —
+`RETENTION_DROP_FAILED:<schema>.<chunk>: lock-contention(55P03): compression
+fence on ... not acquired within the bounded wait` — with no receipt change, so
+the §8.6 item 7 escalation rule counts it like any other refused tick.
+
+**Receipt (schema 2.2).** A chunk whose fence wait expired is
+`selected[].mutation_state = "deferred_contended"` with its
+`fence_wait_elapsed_ms`; nothing was copied and it stays eligible. A chunk the
+tick-deadline guard deferred has the same `mutation_state` and no
+`fence_wait_elapsed_ms`. `deferred_contended_count` counts both, and `budget.fence_wait_ms` records the
+effective knob. Outcome `deferred` (no failure, at least one deferral) exits 0;
+any real failure still makes the tick `partial` and exit 1. A committed chunk
+also carries the `fence_wait_elapsed_ms` it was charged.
+
+**Starvation: when to escalate.** One `deferred` tick needs no action: the
+chunk is retried by the next daily tick. Escalate on the pattern, mirroring the
+retention rule in §8.6 item 7: three or more CONSECUTIVE days with outcome
+`deferred`, or four or more `deferred` ticks within one week.
+
+First tell the two kinds of deferral apart in the receipt:
+
+- A deferred chunk **with** `fence_wait_elapsed_ms` timed out on the fence.
+  Ingest never drained within the fence wait. Check the longest parser
+  transaction (`pg_stat_activity` where
+  `application_name = 'nhms-output-parser'`) and the uncompressed backlog
+  before raising the knob.
+- A deferred chunk **without** `fence_wait_elapsed_ms` was skipped by the
+  tick-deadline guard: the earlier chunks used up the wrapper wall. Handle it
+  under the §4 Wall constraint and the per-tick bound. Do not raise
+  `FENCE_WAIT_MS` for this case: a larger fence wait trips the guard earlier.
+
+
+**Manual ops SQL is not fenced.** `scripts/ops/node27_1729_*.sql` and
+`scripts/ops/node27_2621_*.sql` write these hypertables without the fence. Run
+them only while holding the lifecycle flock
+(`/tmp/nhms-node27-timeseries-lifecycle.lock`, e.g. `flock -n` around the
+`psql` call) or with the compression and retention timers stopped.
 
 ## 8. Gated DB retention (`timeseries-db-retention`)
 

@@ -300,7 +300,10 @@ def test_legacy_routed_forcing_version_is_refused_before_the_parent_upsert(regen
     assert not any("insert into met.forcing_version" in statement for statement in statements)
     assert not any("insert into met.met_station" in statement for statement in statements)
     assert not any("delete from met.forcing_station_timeseries" in statement for statement in statements)
-    assert "timeseries_store" in statements[0], "the routing read is the transaction's first statement"
+    # #2713: the compression/ingest fence try reads and writes nothing, and is
+    # the one statement allowed ahead of the routing read.
+    assert statements[0].startswith("select pg_try_advisory_xact_lock_shared"), "the fence opens the transaction"
+    assert "timeseries_store" in statements[1], "the routing read is the first statement after the fence"
     assert connection.tables["met.forcing_version"][0]["checksum"] == checksum_before
     assert connection.tables["met.forcing_station_timeseries"] == []
     assert connection.rollbacks == 1
@@ -884,7 +887,11 @@ class _FakeConnection:
         fail_after_stage: str | None = None,
         failure_message: str = "simulated SQL failure",
         force_station_upsert_conflict_after_select: bool = False,
+        ingest_fence_free: bool = True,
     ) -> None:
+        # #2713: the answer to the writer's first statement, the shared
+        # compression/ingest fence try. False models chunk DDL holding it.
+        self.ingest_fence_free = ingest_fence_free
         self.tables: dict[str, list[dict[str, Any]]] = {
             "met.forcing_version": [],
             "met.met_station": [],
@@ -991,6 +998,9 @@ class _FakeCursor:
         if normalized.startswith("release savepoint "):
             name = normalized.split()[2]
             self.connection._savepoints.pop(name, None)
+            return
+        if normalized.startswith("select pg_try_advisory_xact_lock_shared"):
+            self._fetchone = {"pg_try_advisory_xact_lock_shared": self.connection.ingest_fence_free}
             return
         if normalized.startswith("select pg_advisory_xact_lock"):
             self._fetchone = {"pg_advisory_xact_lock": None}

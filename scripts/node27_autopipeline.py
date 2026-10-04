@@ -70,6 +70,7 @@ from packages.common.forcing_domain_handoff_apply import (
 )
 from packages.common.forcing_domain_handoff_apply import (
     REASON_APPLY_COMPRESSED_CHUNK_BLOCKED,
+    REASON_APPLY_COMPRESSION_FENCE_BUSY,
     REASON_APPLY_LEGACY_STORE_REFUSED,
     apply_forcing_domain_handoff_path,
 )
@@ -2127,6 +2128,23 @@ REASON_PUBLISHED_REPARSE_FAILED = "PUBLISHED_REPARSE_FAILED"
 # ...); requiring one keeps `WARNING:` / `DETAIL:` / `HINT:` lines from posing as codes.
 _PARSE_ERROR_LINE_RE = re.compile(r"^([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+): ", re.MULTILINE)
 _TRACEBACK_MARKER = "Traceback (most recent call last):"
+# #2713: the parser CLI's stderr code when the compression/ingest fence was
+# busy. Byte-equal to `workers/output_parser/parser.py`'s
+# COMPRESSION_FENCE_BUSY_ERROR_CODE (pinned by a test); a literal here keeps the
+# parser out of this script's import surface -- it runs as a subprocess.
+REASON_PARSE_COMPRESSION_FENCE_BUSY = "OUTPUT_PARSE_COMPRESSION_FENCE_BUSY"
+
+
+def _parse_fence_busy(stderr: str) -> bool:
+    """True iff the parser CLI's handled arm reported a busy compression fence.
+
+    Same reading as `_deterministic_parse_error_code`: the first code line is
+    the CLI's, and a traceback means some other, unhandled failure.
+    """
+    if _TRACEBACK_MARKER in stderr:
+        return False
+    match = _PARSE_ERROR_LINE_RE.search(stderr)
+    return match is not None and match.group(1) == REASON_PARSE_COMPRESSION_FENCE_BUSY
 
 
 def _deterministic_parse_error_code(stderr: str) -> str | None:
@@ -2283,6 +2301,15 @@ def _process_run(
             result["outcome"] = "skipped"
             result["reason"] = REASON_APPLY_LEGACY_STORE_REFUSED
             return result
+        # #2713: chunk DDL (compression or retention) held or was queued for the
+        # compression/ingest fence on met.forcing_station_timeseries, so the
+        # apply rolled back untouched. Contention, not a fault: "skipped" keeps
+        # it out of the tick rc, and the run is not ingested, so the next tick
+        # re-applies it. No decline row -- nothing about the run is permanent.
+        if REASON_APPLY_COMPRESSION_FENCE_BUSY in (forcing_reasons.get("reason_codes") or []):
+            result["outcome"] = "skipped"
+            result["reason"] = REASON_APPLY_COMPRESSION_FENCE_BUSY
+            return result
         if REASON_APPLY_COMPRESSED_CHUNK_BLOCKED in (forcing_reasons.get("reason_codes") or []):
             result["outcome"] = _decline_blocked_recompute(
                 run_id,
@@ -2310,6 +2337,14 @@ def _process_run(
             "error": redact_text((err or out)[-500:]),
             "forcing_stage": forcing_stage,
         }
+        if _parse_fence_busy(err or ""):
+            # #2713: the parser rolled its write back without marking the run
+            # failed; the run keeps its status, so the next tick parses it
+            # again. Answered BEFORE the decline logic: contention is never a
+            # deterministic parse failure.
+            result["outcome"] = "skipped"
+            result["reason"] = REASON_PARSE_COMPRESSION_FENCE_BUSY
+            return result
         code = _deterministic_parse_error_code(err or "")
         if code is not None and evidence is not None and _run_status(database_url, run_id) == "published":
             # The residency lane reads the code back as `split_part(detail, ':', 1)`;

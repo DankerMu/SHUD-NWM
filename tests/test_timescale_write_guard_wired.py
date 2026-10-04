@@ -89,6 +89,9 @@ class _RecordingCursor:
     def execute(self, statement: str, parameters: tuple[Any, ...] = ()) -> None:
         self.connection.executions.append((statement, tuple(parameters)))
         normalized = statement.lower().strip()
+        if normalized.startswith("select pg_try_advisory_xact_lock_shared"):
+            self._last_fetchone = (self.connection.ingest_fence_free,)
+            return
         if "select 1 from hydro.hydro_run" in " ".join(normalized.split()):
             # The replace chain's opening lock/existence probe. It projected
             # `timeseries_store` until #1342's contract (task 6.3) dropped the
@@ -207,7 +210,11 @@ class _RecordingConnection:
         forcing_version_key: int | None = FORCING_VERSION_KEY,
         forcing_timeseries_store: str = "narrow",
         stations_without_keys: frozenset[str] = frozenset(),
+        ingest_fence_free: bool = True,
     ) -> None:
+        # #2713: the answer to every writer's first statement, the shared
+        # compression/ingest fence try. False models chunk DDL holding it.
+        self.ingest_fence_free = ingest_fence_free
         self.executions: list[tuple[str, tuple[Any, ...]]] = []
         self.execute_values_calls: list[tuple[str, list[tuple[Any, ...]]]] = []
         self.compressed_chunk_row = compressed_chunk_row
@@ -865,13 +872,14 @@ def test_forcing_producer_refuses_a_legacy_routed_version_before_any_delete(
     assert connection.commits == 0
     assert connection.rollbacks >= 1, "the write transaction MUST roll back"
 
-    # The refusal is the FIRST statement: nothing else — not the existence probe,
-    # not the compressed-chunk guard, not the station-key resolution — runs before
-    # the routing read, so no work at all is done on a version that cannot be
-    # written.
-    assert len(connection.executions) == 1
-    assert "timeseries_store" in connection.executions[0][0]
-    assert connection.executions[0][1] == ("fv_a",)
+    # The refusal is the FIRST statement after the #2713 fence try (which reads
+    # and writes nothing): not the existence probe, not the compressed-chunk
+    # guard, not the station-key resolution runs before the routing read, so no
+    # work at all is done on a version that cannot be written.
+    assert len(connection.executions) == 2
+    assert connection.executions[0][0].startswith("SELECT pg_try_advisory_xact_lock_shared")
+    assert "timeseries_store" in connection.executions[1][0]
+    assert connection.executions[1][1] == ("fv_a",)
 
 
 def test_forcing_producer_refusal_is_distinct_from_both_guard_codes() -> None:

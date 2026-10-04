@@ -46,6 +46,7 @@ from packages.common.timescale_write_guard import (
     CompressedChunkGuardError,
     CompressedChunkWriteError,
 )
+from packages.common.timeseries_compression_fence import IngestFenceBusy
 from workers.canonical_converter.converter import canonical_product_is_forcing_usable
 from workers.data_adapters.region import GeoBBox
 from workers.forcing_producer.direct_grid_contract import (
@@ -875,6 +876,14 @@ class ForcingProducer:
             # It still propagates: the caller decides. On the autopipeline side
             # that decision is `scripts/node27_autopipeline.py`'s non-failing
             # outcome, so a legacy version in scope does not redden every tick.
+            raise
+        except IngestFenceBusy:
+            # #2713, also above the generic arm: the compression/ingest fence
+            # on met.forcing_station_timeseries was busy and the timeseries
+            # replace rolled back. Contention is not a failure, so no
+            # `_mark_failed` (that would stamp met.forecast_cycle failed); the
+            # CLI reports FORCING_PRODUCE_COMPRESSION_FENCE_BUSY and a later
+            # run retries.
             raise
         except Exception as error:
             self._mark_failed(resolved_source_id, parsed_cycle_time, error)
