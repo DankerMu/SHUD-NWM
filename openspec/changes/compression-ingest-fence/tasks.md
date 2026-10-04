@@ -17,10 +17,19 @@ Fixture level: expanded. Risk packs: db-concurrency, production-ops. design.md i
 - [x] 6 Real-DB tests, marked integration and timescaledb_210: river red (or documented attempts), river green, forcing-shape regression.
 - [x] 7 Runbook section, lifecycle-lock docstring, selector `PATH_TEST_RULES`.
 - [x] 8 `uv run ruff check .`, the touched unit suites, `tests/test_select_ci_tests.py`, the hard-gate CLI exits 0, and `openspec validate --strict`.
-- [ ] 9 Orchestrator, on node-27: real-DB pytest (`-m "integration and timescaledb_210"` for the new tests, plus the touched DB suites) in an isolated worktree.
+- [x] 9 Orchestrator, on node-27: real-DB pytest (`-m "integration and timescaledb_210"` for the new tests, plus the touched DB suites) in an isolated worktree.
 - [ ] 10 Orchestrator, after merge: node-27 `git pull --ff-only`. Run a manual compression tick while ingest is live, re-compress `_hyper_9_213_chunk` and `_hyper_9_206_chunk`, confirm there is no `deadlock detected` in the PG log, and record the receipt.
 
 ## Evidence Floor
 - Real-DB red/green on node-27, or documented red attempts.
 - Unit and structural suites green; ruff clean; hard gate rc 0.
 - The post-merge node-27 receipt: both chunks compressed, no 40P01, and ingest runs deferred, not failed, during the window.
+
+## Receipts (node-27, 2026-10-04)
+- **D0.4/D0.5.**
+  - Catch-up parser transactions sampled with `pg_stat_activity`: 5–6 run concurrently, each open for at least 300 s. That is why the default fence wait is 900000 ms.
+  - The forcing-shape integration case (an FK-referenced write taken before the fence) reached its interleave point and passed on TimescaleDB 2.10.2, which confirms that chunk DDL contends on FK-referenced tables.
+  - Production showed the same: the 14:36 retention `drop_chunks` deadlocked with a parser on `hydro.hydro_run`.
+- **Task 9.**
+  - `tests/test_timeseries_compression_fence_integration.py` on node-27, from an isolated worktree against throwaway DBs: **8 passed** at ffa37ef68, and **8 passed** at 0609713f2 with the strict red assertion. The river red case reproduces the #2713 deadlock unfenced (exactly one 40P01 victim); green, forcing and retention give no 40P01.
+  - Adjacent real-DB suites at 0609713f2 (forcing narrow store, hydro_run parsed_at, retention, river dual-write): **32 passed**.

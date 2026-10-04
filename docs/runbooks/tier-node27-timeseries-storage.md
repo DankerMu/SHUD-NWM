@@ -6871,10 +6871,20 @@ also carries the `fence_wait_elapsed_ms` it was charged.
 **Starvation: when to escalate.** One `deferred` tick needs no action: the
 chunk is retried by the next daily tick. Escalate on the pattern, mirroring the
 retention rule in §8.6 item 7: three or more CONSECUTIVE days with outcome
-`deferred`, or four or more `deferred` ticks within one week. It means ingest
-never drains within the fence wait; check the longest parser transaction
-(`pg_stat_activity` where `application_name = 'nhms-output-parser'`) and the
-uncompressed backlog before raising the knob.
+`deferred`, or four or more `deferred` ticks within one week.
+
+First tell the two kinds of deferral apart in the receipt:
+
+- A deferred chunk **with** `fence_wait_elapsed_ms` timed out on the fence.
+  Ingest never drained within the fence wait. Check the longest parser
+  transaction (`pg_stat_activity` where
+  `application_name = 'nhms-output-parser'`) and the uncompressed backlog
+  before raising the knob.
+- A deferred chunk **without** `fence_wait_elapsed_ms` was skipped by the
+  tick-deadline guard: the earlier chunks used up the wrapper wall. Handle it
+  under the §4 Wall constraint and the per-tick bound. Do not raise
+  `FENCE_WAIT_MS` for this case: a larger fence wait trips the guard earlier.
+
 
 **Manual ops SQL is not fenced.** `scripts/ops/node27_1729_*.sql` and
 `scripts/ops/node27_2621_*.sql` write these hypertables without the fence. Run
