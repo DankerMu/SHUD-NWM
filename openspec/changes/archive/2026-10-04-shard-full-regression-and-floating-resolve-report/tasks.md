@@ -20,7 +20,7 @@
       non-zero, each shard printed in ascending path order; ci.yml static: no `pytest $(`, `--total` from
       `strategy.job-total`, static job name, single matrix dimension, literal timeout.
 - [x] 1.3 `ci.yml`: matrix N=4, `fail-fast: false`, per-shard timeout <= 60 with clear headroom, same pytest flags.
-- [ ] 1.4 Dispatch run on the branch head: all shards green, wall times recorded; shard test counts sum to the
+- [x] 1.4 Dispatch run on the branch head: all shards green, wall times recorded; shard test counts sum to the
       same-SHA `--collect-only` count; `check-run` on the dispatch run rc 0 and on the PR's CI run rc 0 (skipped).
 - [x] 1.5 Attribution note from the measured per-file durations (what dominates the suite).
 
@@ -38,7 +38,7 @@
       timeout; report kinds resolve / tests / timeout / injected.
 - [x] 3.2 `scripts/ci/floating_resolve_report.py` + tests (create once, comment after, nothing on success).
 - [x] 3.3 Static test: triggers exactly schedule + workflow_dispatch; `ci.yml` three locked installs unchanged.
-- [ ] 3.4 Dispatch receipt (after merge if the workflow cannot be dispatched from a branch): run URL.
+- [x] 3.4 Dispatch receipt (after merge if the workflow cannot be dispatched from a branch): run URL.
 
 ## 4. Wiring and verification
 
@@ -47,7 +47,7 @@
 - [x] 4.2 `instructions/agents/shared.md` + regenerated AGENTS.md / CLAUDE.md; spec delta.
 - [x] 4.3 `uv run ruff check .`; `uv run pytest -q tests/test_full_regression_watch.py tests/test_ci_workflow_locked_install.py
       tests/test_governance_workflow_hard_gate.py tests/test_select_ci_tests.py` + new test files.
-- [ ] 4.4 `openspec validate shard-full-regression-and-floating-resolve-report --strict --no-interactive`; CI green.
+- [x] 4.4 `openspec validate shard-full-regression-and-floating-resolve-report --strict --no-interactive`; CI green.
 
 ## Evidence Floor deviation
 
