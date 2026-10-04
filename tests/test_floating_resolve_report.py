@@ -9,6 +9,7 @@ a fake that records every request.
 
 from __future__ import annotations
 
+import re
 import urllib.error
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ FLOATING_WORKFLOW = Path(".github/workflows/floating-resolve-report.yml")
 CI_WORKFLOW = Path(".github/workflows/ci.yml")
 LOCKED_SYNC = "uv sync --locked --all-extras --dev"
 MARKER_EXPRESSION = '-m "not e2e and not grib and not integration"'
+STATUS_FUNCTION_CALL = re.compile(r"\b(?:cancelled|always|failure|success)\s*\(")
 
 
 class FakeGitHub:
@@ -444,9 +446,42 @@ def test_report_step_always_runs_last_with_every_outcome_and_the_stock_interpret
         assert f'--{step_id} "${{{{ steps.{step_id}.outcome }}}}"' in run
     for step_id in ("proj", "tests"):
         assert f'--{step_id}-rc "${{{{ steps.{step_id}.outputs.rc }}}}"' in run
-    assert "--job-cancelled ${{ cancelled() }}" in run
+    # `job.status`, not `cancelled()`: status functions are only valid in `if:`.
+    assert "--job-cancelled ${{ job.status == 'cancelled' }}" in run
     assert "--diff-file lock-diff.txt" in run
     assert "--run-url" in run and "${{ github.run_id }}" in run
+
+
+def _status_function_misuses(node: Any, trail: str = "") -> list[str]:
+    """Strings calling a status function anywhere but under an `if` key."""
+    if isinstance(node, dict):
+        return [
+            misuse
+            for key, value in node.items()
+            if key != "if"
+            for misuse in _status_function_misuses(value, f"{trail}/{key}")
+        ]
+    if isinstance(node, list):
+        return [
+            misuse
+            for position, value in enumerate(node)
+            for misuse in _status_function_misuses(value, f"{trail}[{position}]")
+        ]
+    if isinstance(node, str):
+        return [f"{trail}: {call}" for call in STATUS_FUNCTION_CALL.findall(node)]
+    return []
+
+
+def test_status_functions_appear_only_in_if_conditions() -> None:
+    # GitHub rejects the WHOLE workflow file ("Unrecognized function: 'cancelled'")
+    # when a status function is used outside an `if:`; yaml.safe_load does not.
+    workflow = _workflow()
+
+    assert _status_function_misuses(workflow) == []
+    # Anti-vacuity: the walk reaches a step's `run` text and skips only `if`.
+    assert _status_function_misuses({"steps": [{"if": "always()", "run": "x ${{ cancelled() }}"}]}) == [
+        "/steps[0]/run: cancelled("
+    ]
 
 
 def test_workflow_never_writes_to_the_repository() -> None:

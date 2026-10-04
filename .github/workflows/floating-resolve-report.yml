@@ -114,7 +114,7 @@ jobs:
           python scripts/ci/floating_resolve_report.py report
           --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           --diff-file lock-diff.txt
-          --job-cancelled ${{ cancelled() }}
+          --job-cancelled ${{ job.status == 'cancelled' }}
           --inject "${{ steps.inject.outcome }}"
           --lock "${{ steps.lock.outcome }}"
           --sync "${{ steps.sync.outcome }}"

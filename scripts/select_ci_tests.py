@@ -2017,6 +2017,9 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         # recorded and pinned elsewhere; this routing is additive to it.
         "tests/conftest.py",
         (
+            # #2710: a literal-path consumer — it asserts the shard collector
+            # never lists this file as a test file.
+            FULL_REGRESSION_SHARD_TEST,
             # #2594: the grib opt-in preflight's pin imports this module to
             # drive `pytest_collection_finish` with a replaced ecCodes probe.
             "tests/test_conftest_grib_preflight.py",
