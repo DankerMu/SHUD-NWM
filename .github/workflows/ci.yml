@@ -118,6 +118,9 @@ jobs:
               - 'packages/common/model_registry.py'
               - 'packages/common/model_registry_*.py'
               - 'packages/common/grid_registry_store.py'
+              # #2300: the handoff apply's station upsert is proven only on a real
+              # heap (ctid / xmin); its suite is matched by `tests/*integration*.py`.
+              - 'packages/common/forcing_domain_handoff_apply.py'
               - 'services/tiles/mvt.py'
               - 'services/tile_publisher/publisher.py'
               - 'services/tile_publisher/forcing_copyback_backfill.py'

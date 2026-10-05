@@ -4432,6 +4432,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # and its busy report is what the autopipe tick skips on.
             "tests/test_timeseries_compression_fence_writers.py",
             "tests/test_timeseries_compression_fence_wire_site_invariant.py",
+            # #2300: `_upsert_met_stations` must not rewrite a compatible row;
+            # only the real-PG suite can see that (ci.yml's `database:` lane).
+            "tests/test_forcing_domain_handoff_apply_station_upsert_integration.py",
         ),
     ),
     PathTestRule(

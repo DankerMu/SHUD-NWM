@@ -11702,6 +11702,11 @@ def test_directory_rule_disposition_selects_the_audit_floor(module_path: str, re
             "tests/test_node27_2621_rename_leftovers_delete_integration.py",
         ),
         ("scripts/basin_catalog_manifest_audit.py", "tests/test_basin_catalog_manifest_audit_integration.py"),
+        # #2300: the handoff apply's station upsert and its real-heap suite.
+        (
+            "packages/common/forcing_domain_handoff_apply.py",
+            "tests/test_forcing_domain_handoff_apply_station_upsert_integration.py",
+        ),
     ),
 )
 def test_river_expand_sources_open_the_database_lane(module_path: str, suite: str) -> None:
@@ -14651,6 +14656,9 @@ INTEGRATION_TRIGGER_SOURCES: tuple[str, ...] = (
     "packages/common/model_registry_public.py",
     "packages/common/model_registry_river_segments.py",
     "packages/common/grid_registry_store.py",
+    # #2300: `_upsert_met_stations`' no-rewrite property is a heap fact
+    # (ctid / xmin) that only the real-DB lane observes.
+    "packages/common/forcing_domain_handoff_apply.py",
 )
 
 INTEGRATION_TRIGGER_ROOT_GLOBS: tuple[str, ...] = (
