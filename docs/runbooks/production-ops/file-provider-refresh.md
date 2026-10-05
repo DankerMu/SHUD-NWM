@@ -637,10 +637,10 @@ scripts/install_node22_scheduler_file_provider_refresh.sh --rollback
   `disabled\tinactive\nstatic\tinactive\n`），是一次**重装快照**：当时 unit 已经存在且已解除。
   对它 `--rollback` 恢复的是 7 月的 unit 文件、disabled 状态，而不是"没有这条 lane"。那是解除态，
   所以安全。
-- **维护窗口内的演练顺序**（#1831 窗口前不得在 node-22 active checkout 上 pull）：timer 现在是
+- **演练顺序**（node-22 按 #1831 决定长期保持 3.12.7，演练不再等待任何切换窗口）：timer 现在是
   armed。issue 原文的演练从 `--install` 开始：在 D4 下它会被拒绝，照原文跑完还会让生产停在
   解除态。所以演练顺序是：
-  1. `git status --porcelain` → `git pull --ff-only`（仅窗口内）。
+  1. `git status --porcelain` → `git pull --ff-only`。
   2. 记录 before-state：`od -c` `install-state/refresh.before` 和 `scheduler.before`（后者仅供参考，
      installer 不读它），四个 unit 的 `systemctl --user show -p UnitFileState -p ActiveState`。
   3. **Pre-flight**：`systemctl --user is-active nhms-scheduler-file-provider-refresh.service` 必须是

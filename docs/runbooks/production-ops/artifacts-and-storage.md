@@ -488,7 +488,7 @@ preflight-blocked 的 tick 一次都不取、也不建锁文件。summary schema
 
 **身份：canonical 车道拆到系统 unit，以 copyback root 属主运行（#2360，2026-09-18）**。
 锁文件 `0600`、属主是 copyback root 属主 `frd_muziyao`(1103)；锁身份契约**不放宽**（组共享
-`0660` 会被 node-22 在 #1831 前的现网代码拒掉，打断所有写者），锁文件的模式/属主本次也不动。
+`0660` 会被 node-22 的现网代码拒掉，打断所有写者），锁文件的模式/属主本次也不动。
 所以 retention 按车道拆成两个 unit，靠 `NODE27_RAW_RETENTION_LANES` 选车道：
 
 | unit | 作用域 / 身份 | `NODE27_RAW_RETENTION_LANES` | env | summary 目录 | 失败告警 |

@@ -460,10 +460,15 @@ def test_instruction_roots_contain_command_contract() -> None:
             "uv run --no-sync",
             "--active",
             "系统 Python",
-            "维护窗口",
+            "3.12.7",
+            "长期保持",
             "#1831",
         ):
             assert term in line, f"{relative}: missing '{term}'"
+        # #1831 decision (2026-10-05): node-22 stays on 3.12.7 for good. The
+        # line must not describe a pending maintenance-window switch any more.
+        for stale in ("维护窗口", "切换仅在", "窗口前", "断言 `uv run python -V` 为 3.11.x"):
+            assert stale not in line, f"{relative}: stale pending-switch wording '{stale}'"
         assert "openspec/changes/" not in line, f"{relative}: active-change link"
 
 

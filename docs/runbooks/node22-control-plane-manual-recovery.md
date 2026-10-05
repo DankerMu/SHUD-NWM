@@ -8,7 +8,7 @@ display API 在 `display_readonly` 模式下对控制面动作返回 409，paylo
 
 ## 执行纪律（node-22）
 
-- 维护窗口前 node-22 活动 checkout 仍是 Python 3.12.7：**禁止** `uv sync` 与裸
+- node-22 活动 checkout 按 #1831 决定长期保持 Python 3.12.7：**禁止** `uv sync` 与裸
   `uv run`（会按 3.11 pin 重建共享 `.venv`），系统 Python 也不是替代。一律用活动
   解释器 + `-m`：
 

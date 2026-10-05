@@ -51,6 +51,7 @@ object-store root 与 copyback root 同一，走 same-root skip，不取锁）�
 
 **node-22 不需要跟着部署。** node-22 现网 `flock` 写者已经与 node-27 `posix` 互斥；node-22
 的 checkout 在 #1831 维护窗口前冻结，这个决策不要求它动。
+（2026-10-05 注：#1831 的切换窗口已取消，node-22 长期保持 Python 3.12.7；本条结论不变。）
 
 **不放宽锁身份契约。** node-27 retention unit 以 `nwm`(1005) 运行，打不开 `0600`、属主 1103
 的锁文件。改成组共享 `0660` 会被 node-22 冻结的现网代码当作不安全锁拒绝、打断所有写者。

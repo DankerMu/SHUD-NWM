@@ -182,11 +182,11 @@ DOCKER_HOST
 
 > **Python 解释器约定（所有 repo Python 命令）**：本 runbook 中执行 repository Python
 > script/module 的命令一律直接使用当前 checkout 的精确解释器
-> `"$CHECKOUT_ROOT/.venv/bin/python"`（在 `cd "$CHECKOUT_ROOT"` 之后）。node-22 维护窗口前不会触发
-> `uv` 环境更新；missing interpreter 时这些命令自然 fail closed，cutover 由 #1831 跟踪。**禁止**
+> `"$CHECKOUT_ROOT/.venv/bin/python"`（在 `cd "$CHECKOUT_ROOT"` 之后）。这样在 node-22 上不会触发
+> `uv` 环境更新；missing interpreter 时这些命令自然 fail closed。node-22 按 #1831 决定长期保持 3.12.7。**禁止**
 > `uv run` / `uv sync` / bare `python` / `python3` 作为 repo Python 入口，包括此处之外任何拷贝/装饰。
 
-1. 在 22 和 27 分别 checkout 同一 commit，并重建本机依赖。node-27 和 node-22 的非活动/非 canonical checkout 可以重建 host 依赖（Linux 迁移时不要复用 macOS `.venv` 或 `node_modules`）；**node-22 的 canonical active checkout（`/scratch/frd_muziyao/NWM`）在 #1831 的 approved maintenance window 之前不得重建或 `uv sync` 其共享 `.venv`**（该环境是 3.12.7 且被在线服务占用）。
+1. 在 22 和 27 分别 checkout 同一 commit，并重建本机依赖。node-27 和 node-22 的非活动/非 canonical checkout 可以重建 host 依赖（Linux 迁移时不要复用 macOS `.venv` 或 `node_modules`）；**node-22 的 canonical active checkout（`/scratch/frd_muziyao/NWM`）不得重建或 `uv sync` 其共享 `.venv`**（该环境被在线服务占用，按 #1831 的运维决定长期保持 3.12.7、原计划的 3.11 切换已取消；更换其解释器或重建该 `.venv` 须有新的、明确的运维决定并单独立 issue）。
 2. 构建或拉取同一个 `nhms-app:<git-sha>` 镜像，记录 image digest 和 git sha。
 3. 在 22 准备 `infra/env/compute.env`，确认 writer DB、workspace、Basins/model assets、published artifact host root 都可访问。
 4. 在 27 准备 `infra/env/display.env`，确认 DB 是 readonly 账号，published artifact mount/credentials 是 readonly。

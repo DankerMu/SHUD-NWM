@@ -5,8 +5,8 @@
 适用范围：node-27 active DB + ingest + display，node-22 Slurm/SHUD compute，
 以及两者共享的 NFS object-store/published 数据面。
 
-> **node-22 维护窗口前执行说明**：node-22 活动 checkout 的共享 `.venv` 在
-> 运维批准的维护窗口前保持 Python 3.12.7，**禁止**在其中运行裸 `uv run` /
+> **node-22 执行说明**：node-22 活动 checkout 的共享 `.venv` 按 #1831 的运维决定
+> 长期保持 Python 3.12.7（原计划的 3.11 切换已取消），**禁止**在其中运行裸 `uv run` /
 > `uv sync`（会在 3.11 pin 下重建环境，已实测会打断成半拆状态）。本文中所有
 > node-22 活动操作一律使用精确活动解释器
 > `/scratch/frd_muziyao/NWM/.venv/bin/python`（控制台入口用 `-m services.orchestrator.cli`）；

@@ -6,7 +6,8 @@ at the diagnostic README Run Boundary, never at the historical bring-up baseline
 retained evidence; routing an operator there as "the documented bring-up
 invocation" lets the active-root
 ``uv run python scripts/run_qhh_continuous.py`` recipe escape the detached
-exact-interpreter boundary before #1831.
+exact-interpreter boundary (node-22 stays on Python 3.12.7 long-term by the
+#1831 decision, so that boundary is permanent).
 
 This dedicated file keeps ``tests/test_qhh_scripts_static.py`` under the
 repository 1000-line threshold while preserving the authority seam (one green
