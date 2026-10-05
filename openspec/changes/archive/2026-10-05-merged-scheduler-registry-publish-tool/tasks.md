@@ -19,7 +19,10 @@
       `tests/test_select_ci_tests.py`, `tests/test_node22_entrypoint_invariant.py`,
       `tests/test_node22_entrypoint_invariant_python_scan.py`,
       `tests/test_entropy_audit_line_references.py`.
-- [ ] 2.2 CI green on the PR.
-- [ ] 2.3 node-22 after merge and pull: one real dry-run against the production manifests with the exact
+- [x] 2.2 CI green on the PR.
+- [x] 2.3 node-22 after merge and pull: one real dry-run against the production manifests with the exact
       interpreter and a throwaway `--receipt-root`, remove-only for one basin's two rows (needs no provision
       receipt); both manifests keep their sha256 and mtime, no backup appears. No `--apply`.
+
+Status 2026-10-05: 2.3 ran on node-22 as a remove-only dry-run (evidence/2026-10-05-node22-dry-run.txt). Replace, add,
+any `--apply` and the restore paths have no production evidence.
