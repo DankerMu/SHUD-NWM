@@ -73,7 +73,7 @@ curl -s http://127.0.0.1:8080/health
 ## 3. 回填（node-22，需要一个静默窗口）
 
 回填脚本 `scripts/canonical_precip_copyback_backfill.py` 只用 `shutil`/`pathlib`，不引依赖。
-node-22 的共享 `.venv` 在维护窗口前是 3.12.7，**禁止** `uv sync` 与任何会重建环境的 `uv run` 变体：
+node-22 的共享 `.venv` 按 #1831 决定长期保持 3.12.7，**禁止** `uv sync` 与任何会重建环境的 `uv run` 变体：
 用钉住的解释器 `/scratch/frd_muziyao/NWM/.venv/bin/python -m scripts.canonical_precip_copyback_backfill`。
 
 调度器 timer 的周期（5 min）短于单 pass（约 7.5 min），passes 背靠背，**自然空窗不存在**，必须停 timer：

@@ -6,8 +6,8 @@ Docker-compose operations. Every executable command that runs a repository
 Python script/module must invoke the exact interpreter of the same checkout
 (``"$CHECKOUT_ROOT/.venv/bin/python"``) after ``cd "$CHECKOUT_ROOT"``. A bare
 ``uv run``/``uv sync`` would let ``uv`` see the new ``.python-version == 3.11``
-pin and rebuild the shared node-22 active 3.12.7 ``.venv`` before the
-operator-approved cutover (#1831); a bare ``python``/``python3`` or a
+pin and rebuild the shared node-22 active ``.venv``, which stays on 3.12.7
+long-term by the #1831 operator decision; a bare ``python``/``python3`` or a
 ``.venv/bin/python`` at any other root would resolve to whatever interpreter
 the operator has on PATH.
 
@@ -286,7 +286,8 @@ def test_runbook_has_no_bare_or_environment_updating_python_in_executable_fences
 # phase62/round-1 (#1856): step 1 is the natural first deployment action and
 # instructs BOTH nodes to rebuild host dependencies. It must qualify that the
 # node-22 canonical active checkout (`/scratch/frd_muziyao/NWM`) must NOT rebuild
-# or `uv sync` its shared `.venv` before #1831, while node-27 and non-active
+# or `uv sync` its shared `.venv` (it stays on 3.12.7 long-term by the #1831
+# decision; no cutover window is coming), while node-27 and non-active
 # checkouts may. The fence-only scanner cannot see this numbered prose, so this
 # prose-level seam is required.
 
@@ -301,14 +302,19 @@ def _numbered_deployment_step_one(text: str) -> str:
 
 def _assert_numbered_step_one_active_root_qualifier(step_one: str) -> None:
     """Step 1 must say the node-27/non-active checkouts may rebuild, and the
-    node-22 canonical active checkout must not rebuild/sync `.venv` before #1831."""
+    node-22 canonical active checkout must not rebuild/sync `.venv` -- a
+    standing prohibition by the #1831 decision, not a wait for a window."""
     assert "node-27" in step_one, "step 1 must mention node-27"
     assert "重建本机依赖" in step_one, "step 1 must keep the rebuild instruction"
     assert "canonical active checkout" in step_one, "step 1 must name the canonical active checkout"
     assert "/scratch/frd_muziyao/NWM" in step_one, "step 1 must name the active-root path"
-    assert "不得" in step_one, "step 1 must forbid active-root rebuild/sync before #1831"
+    assert "不得" in step_one, "step 1 must forbid active-root rebuild/sync (#1831 decision)"
     assert "uv sync" in step_one, "step 1 must name `uv sync` as forbidden on the active root"
-    assert "#1831" in step_one, "step 1 must defer the active-root rebuild to #1831"
+    assert "#1831" in step_one, "step 1 must name #1831 as the decision behind the prohibition"
+    assert "3.12.7" in step_one, "step 1 must name the active-root interpreter version"
+    assert "长期保持" in step_one, "step 1 must state the 3.12.7 environment is permanent"
+    for stale in ("maintenance window", "维护窗口", "之前不得"):
+        assert stale not in step_one, f"step 1 still describes a pending #1831 window: {stale!r}"
 
 
 def test_runbook_numbered_step_one_qualifies_active_root_rebuild_boundary() -> None:
