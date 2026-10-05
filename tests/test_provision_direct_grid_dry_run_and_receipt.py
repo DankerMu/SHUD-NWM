@@ -13,8 +13,11 @@ import dataclasses
 import json
 import os
 import shutil
+import stat
 import struct
 import tempfile
+import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +37,9 @@ BASIN_VERSION_ID = "basin-version-keliya-v1"
 SOURCE_ID = "IFS"
 GRID_ID = "grid_test_v1"
 STATION_COUNT = 8  # the keliya mesh uses 8 cells of the 6x6 test grid
+# A second source on its own grid: the same extent shifted by half a cell.
+SECOND_SOURCE_ID = "gfs"
+SECOND_GRID_ID = "grid_test_v2"
 SELECTS = ("snapshot", "cells", "baseline", "resolve", "lookup")
 
 _STATEMENT_KINDS = (
@@ -52,14 +58,28 @@ class FakeDatabase:
     """Committed rows shared by every connection of one test."""
 
     def __init__(self) -> None:
-        cells = make_regular_grid_cells(lon0=100.0, lat0=36.0, lon_step=0.1, lat_step=0.1, lon_count=6, lat_count=6)
-        snapshot = make_snapshot(source_id=SOURCE_ID, grid_id=GRID_ID, cells=cells, bbox_pad=0.5)
-        self.snapshot_row = dataclasses.asdict(snapshot)
-        self.cell_rows = [dataclasses.asdict(cell) for cell in cells]
+        # (source_id, grid_id) -> (active snapshot row, its cell rows)
+        self.grids: dict[tuple[str, str], tuple[dict[str, Any], list[dict[str, Any]]]] = {}
+        self._add_grid(SOURCE_ID, GRID_ID, origin=(100.0, 36.0), snapshot_id=1)
+        self._add_grid(SECOND_SOURCE_ID, SECOND_GRID_ID, origin=(100.05, 36.05), snapshot_id=2)
+        self.snapshot_row = self.grids[(SOURCE_ID, GRID_ID)][0]
         self.variants: dict[tuple[str, ...], str] = {}
-        # A row registered by someone else between a dry-run and its apply.
-        self.concurrent_model_id: str | None = None
+        # canonical_grid_key -> model_id of a row registered on that grid by
+        # someone else between a dry-run and its apply.
+        self.concurrent_model_ids: dict[str, str] = {}
         self.connections: list[RecordingConnection] = []
+
+    def _add_grid(self, source_id: str, grid_id: str, *, origin: tuple[float, float], snapshot_id: int) -> None:
+        cells = make_regular_grid_cells(
+            lon0=origin[0], lat0=origin[1], lon_step=0.1, lat_step=0.1, lon_count=6, lat_count=6
+        )
+        snapshot = make_snapshot(source_id=source_id, grid_id=grid_id, cells=cells, bbox_pad=0.5)
+        row = {**dataclasses.asdict(snapshot), "grid_snapshot_id": uuid.UUID(int=snapshot_id)}
+        self.grids[(source_id, grid_id)] = (row, [dataclasses.asdict(cell) for cell in cells])
+
+    def grid_of_snapshot(self, grid_snapshot_id: Any) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        (grid,) = [grid for grid in self.grids.values() if str(grid[0]["grid_snapshot_id"]) == str(grid_snapshot_id)]
+        return grid
 
     def connect(self, _database_url: str) -> RecordingConnection:
         connection = RecordingConnection(self)
@@ -126,9 +146,9 @@ class RecordingCursor:
         database = self.connection.database
         self.rowcount = 1
         if kind == "snapshot":
-            self._rows = [database.snapshot_row] if params == (SOURCE_ID, GRID_ID) else []
+            self._rows = [database.grids[params][0]] if params in database.grids else []
         elif kind == "cells":
-            self._rows = database.cell_rows
+            self._rows = database.grid_of_snapshot(params[0])[1]
         elif kind == "baseline":
             self._rows = [
                 {
@@ -139,11 +159,11 @@ class RecordingCursor:
                 }
             ]
         elif kind == "resolve":
-            row = database.snapshot_row
+            row = database.grid_of_snapshot(params[0])[0]
             self._rows = [{key: row[key] for key in ("grid_snapshot_id", "canonical_grid_key")}]
         elif kind == "lookup":
             known = {**database.variants, **self.connection.pending}
-            model_id = database.concurrent_model_id or known.get(tuple(str(value) for value in params))
+            model_id = database.concurrent_model_ids.get(params[1]) or known.get(tuple(str(value) for value in params))
             self._rows = [{"model_id": model_id}] if model_id else []
         elif kind == "insert_variant":
             profile = params[7].adapted
@@ -647,7 +667,8 @@ def test_apply_with_a_different_source_grid_snapshot_is_refused(workspace: Works
 def test_apply_whose_variant_differs_from_the_prediction_rolls_back(workspace: Workspace) -> None:
     provision.main(workspace.argv("--succession-id", "s-1"))
     (plan,) = workspace.receipt("s-1", "dry-run")["models"]
-    workspace.database.concurrent_model_id = "dg_registered_by_someone_else"
+    grid_key = workspace.database.snapshot_row["canonical_grid_key"]
+    workspace.database.concurrent_model_ids[grid_key] = "dg_registered_by_someone_else"
 
     message = _refused(workspace, "--succession-id", "s-1", "--apply")
 
@@ -662,6 +683,35 @@ def test_apply_whose_variant_differs_from_the_prediction_rolls_back(workspace: W
     assert not (workspace.receipt_dir / "s-1" / "provision-apply.json").exists()
     # The package this run built before the mismatch was detected stays.
     assert (workspace.store_root / plan["package_key"] / "direct_grid_build_receipt.json").is_file()
+
+
+def test_apply_whose_second_variant_differs_rolls_back_the_first_variant_too(workspace: Workspace) -> None:
+    """Two sources for one baseline: the mismatch surfaces after the first variant was inserted."""
+
+    flags = ("--source-grid", f"GFS={SECOND_GRID_ID}", "--succession-id", "s-1")
+    assert provision.main(workspace.argv(*flags)) == 0
+    first, second = workspace.receipt("s-1", "dry-run")["models"]
+    assert (first["source_id"], second["source_id"]) == (SOURCE_ID, SECOND_SOURCE_ID)
+    assert first["baseline_model_id"] == second["baseline_model_id"] == BASELINE_MODEL_ID
+    second_grid_key = workspace.database.grids[(SECOND_SOURCE_ID, SECOND_GRID_ID)][0]["canonical_grid_key"]
+    assert second_grid_key != workspace.database.snapshot_row["canonical_grid_key"]
+    workspace.database.concurrent_model_ids[second_grid_key] = "dg_registered_by_someone_else"
+
+    message = _refused(workspace, *flags, "--apply")
+
+    assert f"source_id={SECOND_SOURCE_ID!r}" in message
+    assert second["model_id"] in message and "dg_registered_by_someone_else" in message
+    assert "rolled back" in message and "stays in place" in message
+    connection = workspace.last
+    # The first variant went all the way through before the second one was compared.
+    inserted_ids = [params[0] for kind, params in connection.statements if kind == "insert_variant"]
+    assert inserted_ids == [first["model_id"]]
+    assert connection.kinds.count("update_variant") == 1
+    assert connection.kinds[-1] == "lookup"
+    assert connection.events == ["rollback", "close"]
+    assert workspace.database.variants == {}
+    assert not workspace.output_registry.exists()
+    assert not (workspace.receipt_dir / "s-1" / "provision-apply.json").exists()
 
 
 # --- receipt ----------------------------------------------------------------
@@ -701,6 +751,40 @@ def test_write_receipt_never_replaces_an_existing_file(tmp_path: Path) -> None:
         succession.write_receipt(target, {"second": True})
 
     assert json.loads(target.read_text(encoding="utf-8")) == {"first": True}
+
+
+@pytest.fixture
+def restrictive_umask() -> Iterator[None]:
+    previous = os.umask(0o077)
+    try:
+        yield
+    finally:
+        os.umask(previous)
+
+
+def test_receipts_stay_readable_by_other_users_under_a_restrictive_umask(
+    workspace: Workspace,
+    restrictive_umask: None,
+) -> None:
+    """Written by ``nwm`` on node-27, read by another user on node-22 over NFS."""
+
+    existing = workspace.receipt_dir / "s-old"
+    existing.mkdir(parents=True)
+    root_mode = workspace.receipt_dir.stat().st_mode
+    assert stat.S_IMODE(root_mode) == stat.S_IMODE(existing.stat().st_mode) == 0o700
+
+    assert provision.main(workspace.argv("--succession-id", "s-1")) == 0
+    assert provision.main(workspace.argv("--succession-id", "s-1", "--apply")) == 0
+    assert provision.main(workspace.argv("--succession-id", "s-old")) == 0
+
+    created = workspace.receipt_dir / "s-1"
+    assert stat.S_IMODE(created.stat().st_mode) & 0o055 == 0o055
+    for receipt_file in (created / "provision-dry-run.json", created / "provision-apply.json"):
+        assert stat.S_IMODE(receipt_file.stat().st_mode) == 0o644
+    assert stat.S_IMODE((existing / "provision-dry-run.json").stat().st_mode) == 0o644
+    # Neither the receipt root nor a directory that was already there is changed.
+    assert workspace.receipt_dir.stat().st_mode == root_mode
+    assert stat.S_IMODE(existing.stat().st_mode) == 0o700
 
 
 def _unwritable_root(tmp_path: Path, kind: str) -> Path:

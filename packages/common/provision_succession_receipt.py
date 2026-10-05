@@ -17,6 +17,7 @@ import json
 import os
 import re
 import socket
+import stat
 import subprocess
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
@@ -160,8 +161,11 @@ def prepare_receipt_target(path: Path, *, receipt_root: str | Path) -> None:
 
     Called before any build or database statement.  The directory is created
     here so that "can be created" is proven on the real filesystem (an NFS
-    export answers ``os.access`` for the client, not for the server); the tool
-    never changes permissions on the receipt root.
+    export answers ``os.access`` for the client, not for the server).  A
+    succession directory this run creates is made readable and traversable by
+    group and other whatever the umask, because the other node reads it as a
+    different user; the tool never changes permissions on the receipt root or
+    on a directory that was already there.
     """
 
     if os.path.lexists(path):
@@ -170,7 +174,13 @@ def prepare_receipt_target(path: Path, *, receipt_root: str | Path) -> None:
         )
     directory = path.parent
     try:
-        directory.mkdir(parents=True, exist_ok=True)
+        try:
+            directory.mkdir(parents=True)
+        except FileExistsError:
+            pass
+        else:
+            # Only adds bits: a setgid bit inherited from the receipt root stays.
+            os.chmod(directory, stat.S_IMODE(directory.stat().st_mode) | 0o055)
         writable = os.access(directory, os.W_OK | os.X_OK)
         reason = "permission denied"
     except OSError as error:
@@ -201,6 +211,8 @@ def write_receipt(path: Path, receipt: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     with os.fdopen(os.open(path, flags, 0o644), "w", encoding="utf-8") as handle:
+        # 0644 whatever the umask: the other node reads the receipt as a different user.
+        os.fchmod(handle.fileno(), 0o644)
         json.dump(receipt, handle, ensure_ascii=False, indent=2, sort_keys=True)
         handle.write("\n")
 

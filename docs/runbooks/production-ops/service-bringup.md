@@ -381,7 +381,7 @@ mkdir -p /home/nwm/tmp && export TMPDIR=/home/nwm/tmp   # dry-run 的临时构�
 # DATABASE_URL / OBJECT_STORE_ROOT / OBJECT_STORE_PREFIX 必须已在环境里，缺一个脚本直接拒跑
 SUCCESSION_ID=<succession-id>
 PROVISION_ARGS=(
-  --baseline-registry "$OBJECT_STORE_ROOT/scheduler/baseline-registry/manifest-last.json"
+  --baseline-registry "<本次上线 hop 1 的 --registry-manifest 写出的 baseline registry>"   # 不是固定的 manifest-last.json
   --output-registry "<本次 workspace>/direct-grid-registry.json"
   --operator-id "<operator>"
   --model-id "<baseline_model_id>"   # 每个新增 baseline 重复一次
