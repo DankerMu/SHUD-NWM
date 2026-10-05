@@ -152,6 +152,21 @@ def test_current_production_ops_node22_active_uses_exact_venv() -> None:
     assert f"{NODE22_VENV_PY} -m services.orchestrator.cli census-job-id-scope" in text
 
 
+def test_merged_registry_publish_commands_run_the_in_repo_interpreter_from_the_active_checkout() -> None:
+    # #2738: the `uv` scanner above never sees these lines, and the relative
+    # `.venv/bin/python` is the active interpreter only after the `cd` on the
+    # same line. Every command naming the publish tool must have exactly that
+    # shape, and the three runbooks that used to carry a prose recipe must
+    # each carry the dry-run and the apply.
+    module = "scripts.node22_publish_merged_scheduler_registry"
+    prefix = f"cd {NODE22_ACTIVE} && .venv/bin/python -m {module} "
+    for relative in ("recalibration-and-archive.md", "service-bringup.md", "operating-scope.md"):
+        commands = [line for line in _read(f"docs/runbooks/production-ops/{relative}").splitlines() if module in line]
+        assert len(commands) == 2, f"{relative}: expected a dry-run and an apply command, got {commands}"
+        assert all(line.startswith(prefix) for line in commands), f"{relative}: {commands}"
+        assert [line.endswith(" --apply") for line in commands] == [False, True], f"{relative}: {commands}"
+
+
 # --- 3. failed-basin demotion and placeholder repair use exact venv ---------
 
 

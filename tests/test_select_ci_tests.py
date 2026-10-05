@@ -58,6 +58,10 @@ from scripts.select_ci_tests import (
     LOOP_LOG_AUDIT_PATH,
     LOOP_LOG_AUDIT_TEST,
     LOOP_LOG_PATH,
+    MERGED_REGISTRY_PUBLISH_HELPERS_PATH,
+    MERGED_REGISTRY_PUBLISH_OWNER_PATH,
+    MERGED_REGISTRY_PUBLISH_PACKAGE_MODULES,
+    MERGED_REGISTRY_PUBLISH_TESTS,
     NODE22_ENTRYPOINT_HELPERS_PATH,
     NODE22_ENTRYPOINT_INVARIANT_PYTHON_SCAN_TEST,
     NODE22_ENTRYPOINT_INVARIANT_TEST,
@@ -988,11 +992,14 @@ def test_select_tests_maps_orchestrator_manifest_surface_without_whole_slow_suit
     # with the redirect targets.
     # #2539: the runtime-manifest schema contract suite (sub-second, DB-free)
     # validates this module's real builder output, so it rides the stop rule.
+    # #2744: the registry capacity suite fails if the canonical/mirror
+    # comparison stops bounding its reads by the shared registry bound.
     manifest_contract = "tests/test_run_manifest_schema_contract.py"
     assert selected == sorted(
         {
             *ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
             manifest_contract,
+            "tests/test_scheduler_registry_capacity.py",
             WRITE_SURFACE_SCAN_PATH,
             FAMILY_GUARD_PATH,
             RESOLVE_SURFACE_GUARD_PATH,
@@ -1002,7 +1009,13 @@ def test_select_tests_maps_orchestrator_manifest_surface_without_whole_slow_suit
     # whole slow suites out. The supplemental riders (and the small contract
     # suite) are whole files by construction and are excluded here by name, not
     # by loosening the check.
-    supplemental = {WRITE_SURFACE_SCAN_PATH, FAMILY_GUARD_PATH, RESOLVE_SURFACE_GUARD_PATH, manifest_contract}
+    supplemental = {
+        WRITE_SURFACE_SCAN_PATH,
+        FAMILY_GUARD_PATH,
+        RESOLVE_SURFACE_GUARD_PATH,
+        manifest_contract,
+        "tests/test_scheduler_registry_capacity.py",
+    }
     assert all("::" in test_path for test_path in selected if test_path not in supplemental)
 
 
@@ -10890,6 +10903,14 @@ INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
     # it whole (as do the provider_mode_helpers.py, scheduler_limits.py and
     # scheduler_generation.py rules); the package `__init__` is not a subject.
     ("services/orchestrator/__init__.py", "tests/test_state_index_retention.py"): "edge-consumer",
+    # #2738: the one merged-registry publish partition that names the package
+    # does so only to reach `scheduler_file_providers` (it patches the registry
+    # bounds there), whose own row selects every partition, as do the tool's
+    # script and modules and the succession receipt helpers.
+    (
+        "services/orchestrator/__init__.py",
+        "tests/test_node22_publish_merged_scheduler_registry_plan_and_checks.py",
+    ): "edge-consumer",
     # -- edge-consumer: slurm array-job entry points ------------------------
     # tests/test_slurm_array_contract.py contracts the sbatch array entry
     # points, so it top-level-imports the `cli` module (and package) of five
@@ -12567,6 +12588,12 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
     # `_run` / `_verdict`, so it cannot stop importing the shared fakes without
     # the partition itself being gutted.
     (NODE22_REFRESH_TIMER_HEALTH_HELPERS_PATH, "tests/test_node22_refresh_timer_health_verdicts.py"),
+    # #2738: every merged-registry publish partition takes the `workspace`
+    # fixture; the plan-and-checks partition names the most of the builders.
+    (
+        MERGED_REGISTRY_PUBLISH_HELPERS_PATH,
+        "tests/test_node22_publish_merged_scheduler_registry_plan_and_checks.py",
+    ),
     # #1102: the shared fixture surface of the seven publisher partitions. The
     # calibration-overrides partition anchors it because it is the one that names
     # the most of that surface (the declaration builders, both published-bytes
@@ -14524,6 +14551,60 @@ def test_provision_script_and_registration_module_select_the_dry_run_suite() -> 
     assert suite in select_tests(["packages/common/provision_succession_receipt.py"], repo_root=Path("."))
     # The specific rule must not leak onto the rest of the package.
     assert suite not in select_tests(["workers/model_registry/basins_reingest.py"], repo_root=Path("."))
+
+
+def test_merged_registry_publish_tool_and_shared_receipt_helpers_select_their_suites() -> None:
+    # #2738: no path derives a partition name of the publish suite, so every
+    # route is explicit; the receipt helpers both succession steps share must
+    # reach the provision suite AND every publish partition.
+    publish = set(MERGED_REGISTRY_PUBLISH_TESTS)
+    provision = "tests/test_provision_direct_grid_dry_run_and_receipt.py"
+
+    def selected(path: str) -> set[str]:
+        return set(select_tests([path], repo_root=Path(".")))
+
+    assert len(publish) == 3 and all(Path(suite).exists() for suite in publish), sorted(publish)
+    for path in (MERGED_REGISTRY_PUBLISH_OWNER_PATH, *MERGED_REGISTRY_PUBLISH_PACKAGE_MODULES):
+        assert publish <= selected(path), path
+    # The partitions' shared fixtures and builders.
+    assert publish <= selected(MERGED_REGISTRY_PUBLISH_HELPERS_PATH)
+
+    shared = selected("packages/common/succession_receipt.py")
+    assert publish <= shared and provision in shared
+    # The provision module re-exports the shared helpers, which the publish suite pins.
+    reexporting = selected("packages/common/provision_succession_receipt.py")
+    assert publish <= reexporting and provision in reexporting
+    # The tool drives the real publisher end to end.
+    assert publish <= selected("services/orchestrator/scheduler_file_providers.py")
+    # The publish partitions pre-create their lock parents through the mode helpers.
+    assert publish <= selected("tests/provider_mode_helpers.py")
+    # Neither route leaks onto the provision script, which the publish tool never imports.
+    assert not publish & selected("scripts/provision_direct_grid_scheduler_registry.py")
+
+
+def test_merged_registry_publish_tracked_tree_is_four_modules_three_suites_and_one_helper() -> None:
+    # #2738: the tool is an entry script over four modules, each with its own
+    # row. A fifth module, a stray `__init__.py` (scripts/ is a PEP 420
+    # namespace tree) or a fourth partition has no route until it is listed,
+    # and reddens here instead of dropping out of the PR lane in silence.
+    modules = set(MERGED_REGISTRY_PUBLISH_PACKAGE_MODULES)
+    assert set(_tracked_python_files("scripts/merged_registry_publish")) == modules
+    assert len(modules) == 4 and MERGED_REGISTRY_PUBLISH_OWNER_PATH not in modules
+    assert Path(MERGED_REGISTRY_PUBLISH_OWNER_PATH).exists()
+    assert not Path("scripts/merged_registry_publish/__init__.py").exists()
+
+    expected = set(MERGED_REGISTRY_PUBLISH_TESTS)
+    for pattern in (MERGED_REGISTRY_PUBLISH_OWNER_PATH, *sorted(modules)):
+        (rule,) = [rule for rule in PATH_TEST_RULES if rule.pattern == pattern]
+        assert set(rule.tests) == expected, pattern
+
+    tracked = _tracked_python_files("tests")
+    assert {
+        path for path in tracked if PurePosixPath(path).name.startswith("test_node22_publish_merged_scheduler_registry")
+    } == expected
+    assert {path for path in tracked if PurePosixPath(path).name.startswith("merged_registry_publish")} == {
+        MERGED_REGISTRY_PUBLISH_HELPERS_PATH
+    }
 
 
 def test_state_clone_shared_fixtures_select_all_their_consumers() -> None:

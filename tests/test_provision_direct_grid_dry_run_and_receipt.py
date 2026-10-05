@@ -762,11 +762,11 @@ def restrictive_umask() -> Iterator[None]:
         os.umask(previous)
 
 
-def test_receipts_stay_readable_by_other_users_under_a_restrictive_umask(
+def test_receipts_stay_usable_by_the_other_node_under_a_restrictive_umask(
     workspace: Workspace,
     restrictive_umask: None,
 ) -> None:
-    """Written by ``nwm`` on node-27, read by another user on node-22 over NFS."""
+    """Written by ``nwm`` on node-27; node-22 reads it and adds its own receipt as another group member."""
 
     existing = workspace.receipt_dir / "s-old"
     existing.mkdir(parents=True)
@@ -778,7 +778,7 @@ def test_receipts_stay_readable_by_other_users_under_a_restrictive_umask(
     assert provision.main(workspace.argv("--succession-id", "s-old")) == 0
 
     created = workspace.receipt_dir / "s-1"
-    assert stat.S_IMODE(created.stat().st_mode) & 0o055 == 0o055
+    assert stat.S_IMODE(created.stat().st_mode) & 0o075 == 0o075
     for receipt_file in (created / "provision-dry-run.json", created / "provision-apply.json"):
         assert stat.S_IMODE(receipt_file.stat().st_mode) == 0o644
     assert stat.S_IMODE((existing / "provision-dry-run.json").stat().st_mode) == 0o644
