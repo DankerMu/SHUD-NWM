@@ -503,7 +503,7 @@ class OrchestratorRepository(Protocol):
 
 
 class HttpSlurmGatewayClient(chain_slurm_client.HttpSlurmGatewayClient):
-    def __init__(self, base_url: str, *, timeout: float = 30.0) -> None:
+    def __init__(self, base_url: str, *, timeout: float = chain_slurm_client.DEFAULT_GATEWAY_TIMEOUT_SECONDS) -> None:
         super().__init__(
             base_url,
             timeout=timeout,
