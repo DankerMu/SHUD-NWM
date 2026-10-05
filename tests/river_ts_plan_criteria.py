@@ -11,19 +11,12 @@ of an ``EXPLAIN (FORMAT JSON)`` plan dict and proven to BITE offline in
 ``tests/test_river_ts_plan_criteria.py`` — no PostgreSQL, no TimescaleDB, no
 skip.
 
-Criterion 1 is judged PER BRANCH. On a narrow node the segment identity is
-``river_segment_key``; on a legacy node it is ``river_segment_id``, because
-``render_river_ts_sql(..., "legacy")`` keeps the text aid conjuncts and the
-legacy compression segmentby is text-based
-(``db/migrations/000047_*.sql``: ``run_id, river_network_version_id,
-river_segment_id``). Requiring ``river_segment_key`` on a legacy node would be a
-permanent false red — verified against
-``openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-17-i8-explain-gate/explain-1987.json``
-case ``shj_nj/legacy``, where ``compress_hyper_7_104_chunk`` binds
-``river_segment_id`` in its ``Index Cond`` while ``_hyper_3_62_chunk`` carries
-``river_segment_key`` only as a ``Filter``. ``river_segment_key`` is ALSO
-accepted on a legacy node: a plan that legitimately binds the key there is a
-good plan, and rejecting it would be the same false red with the sign flipped.
+Criterion 1 is judged PER BRANCH, and ``narrow`` is the only branch: its segment
+identity is ``river_segment_key``. The legacy branch (text identity
+``river_segment_id``) left with the legacy store -- ``render_river_ts_sql``
+refuses every store but ``narrow`` (``RiverTemplateError``), so no reader can
+reach a legacy-routed run's facts and that half of the axis is untestable
+(#1988 task 6.3 / PR #2500; cleaned up here by #2501).
 """
 
 from __future__ import annotations
@@ -38,10 +31,9 @@ from typing import Any
 COMPRESSED_RELATION_PREFIX = "compress_hyper_"
 
 #: Criterion 1's accepted identity columns, per branch. See the module docstring
-#: for why legacy accepts two and narrow accepts one.
+#: for why ``narrow`` is the only one.
 BRANCH_IDENTITY_COLUMNS: Mapping[str, tuple[str, ...]] = {
     "narrow": ("river_segment_key",),
-    "legacy": ("river_segment_id", "river_segment_key"),
 }
 
 #: Criterion 3's RELATIVE bound: a node may read at most this multiple of the
@@ -152,8 +144,7 @@ def extract_cell_nodes(
     """Every node that reads ``chunk_relation``, plus its compressed children.
 
     Attribution is by relation name against the chunk resolved from
-    ``timescaledb_information.chunks``, never by index name: the other branch of
-    the same ``UNION ALL`` reads the other hypertable and must not be mixed in.
+    ``timescaledb_information.chunks``, never by index name.
 
     ``compress_hyper_*`` relations are mapped to the measured chunk STRUCTURALLY
     — as descendants of the matched node — rather than through a catalog lookup,
@@ -163,9 +154,10 @@ def extract_cell_nodes(
     chunk allowlist does not contain.
 
     A ``DecompressChunk`` parent INHERITS criterion 1 from its compressed
-    children: in the 2026-09-17 receipt the parent ``_hyper_3_62_chunk`` carries
-    every key predicate in its ``Filter`` while the child
-    ``compress_hyper_7_104_chunk`` is the node that actually pruned.
+    children: in the 2026-09-17 receipt (``explain-1987.json``, case
+    ``shj_nj/narrow_compressed``) the parent ``_hyper_9_126_chunk`` does not
+    mention ``river_segment_key`` at all while the child
+    ``compress_hyper_10_174_chunk`` is the node that actually pruned.
     """
     if branch not in BRANCH_IDENTITY_COLUMNS:
         raise ValueError(f"unknown branch {branch!r} (expected one of {sorted(BRANCH_IDENTITY_COLUMNS)})")

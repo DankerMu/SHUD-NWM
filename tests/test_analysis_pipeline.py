@@ -477,6 +477,7 @@ def test_analysis_output_parser_uses_null_lead_time(tmp_path: Path) -> None:
         cycle_id="era5_2026050100",
         cycle_time=_dt("2026-05-01T00:00:00Z"),
         start_time=_dt("2026-05-01T00:00:00Z"),
+        end_time=None,
         run_type="analysis",
         scenario_id=ANALYSIS_SCENARIO_ID,
     )

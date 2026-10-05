@@ -606,6 +606,19 @@ def test_the_report_names_the_source_and_the_reparse_code(tmp_path: Path, capsys
     ), lines
 
 
+def test_a_published_compressed_chunk_block_decline_is_reported_with_its_code(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#2690: the autopipe declines this code for a published run; the lane names it like any other."""
+    code = "OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED"
+    row = [_sourced_run("run-pub", classification=alert.CLASS_PUBLISHED_REPARSE, touched=S0, code=code)]
+
+    rc, lines = _sourced_tick(tmp_path, capsys, S0, row, NHMS_PARSE_RESIDENCY_THRESHOLD_HOURS="0")
+
+    assert rc == 1
+    assert any(f"run_id=run-pub first_error_code={code} source=published_reparse " in line for line in lines), lines
+
+
 def test_a_legacy_store_refused_run_alerts_once_and_is_never_re_alerted(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

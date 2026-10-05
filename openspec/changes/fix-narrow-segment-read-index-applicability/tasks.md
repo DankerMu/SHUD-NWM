@@ -38,12 +38,20 @@ gap below is a way a wrong implementation would go green.
   narrow-chunk-name restriction so
   legacy nodes are measured rather than silently excluded. Verify: the legacy branch's nodes are
   present in the extract for both shapes; record whether the failure reproduces there (design.md Q4).
+  **Superseded, 2026-10-05 (#2501):** done as written on 2026-09-18, then withdrawn by #1988 task 6.3
+  (PR #2500, commit `67fe44d5d`), which removed the river legacy rendering and per-run routing; no
+  reader reaches a legacy-routed run, so the branch axis is `narrow` only (design.md, "How the selection
+  is made", revision note). Every legacy cell or legacy node named later in this file is the record of
+  the two-valued matrix as measured; the receipts and their numbers are unchanged.
 - [x] 1.4 Add the **compressed-chunk** condition. Seed a second chunk and `SELECT compress_chunk(...)`;
   000059 already configures the compression settings. The extractor must map `compress_hyper_*_chunk`
   relations to the measured chunk, or the new condition runs empty and passes for nothing. The current
   test asserts the measured chunk is **not** compressed (`:376-379`); that assertion belongs to the
   uncompressed condition only. Verify: the compressed condition yields a node with
   `Index Cond ((run_key = …) AND (river_segment_key = …))` and reddens if that pruning is lost.
+  **Revision, 2026-10-05 (#2501):** the legacy half of this condition (the `compress_hyper_7_*` child
+  of a legacy `DecompressChunk`) is superseded together with 1.3; the compressed condition runs on the
+  narrow branch only.
 - [x] 1.5 Add the third pass criterion: **node `Shared Hit Blocks` within a fixed multiple of the
   post-`ANALYZE` primary-key baseline**. Criteria 1 and 2 alone are satisfiable by a bad plan
   (design.md, "How the selection is made"); the field is already collected at `:587`, it just has

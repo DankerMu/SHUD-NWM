@@ -2128,6 +2128,9 @@ REASON_PUBLISHED_REPARSE_FAILED = "PUBLISHED_REPARSE_FAILED"
 # ...); requiring one keeps `WARNING:` / `DETAIL:` / `HINT:` lines from posing as codes.
 _PARSE_ERROR_LINE_RE = re.compile(r"^([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+): ", re.MULTILINE)
 _TRACEBACK_MARKER = "Traceback (most recent call last):"
+# #2690: the parser CLI's stderr code for a write that really hit a compressed
+# chunk (`workers/output_parser/cli.py`), as opposed to its guard failing.
+PARSE_COMPRESSED_CHUNK_BLOCKED_CODE = "OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED"
 # #2713: the parser CLI's stderr code when the compression/ingest fence was
 # busy. Byte-equal to `workers/output_parser/parser.py`'s
 # COMPRESSION_FENCE_BUSY_ERROR_CODE (pinned by a test); a literal here keeps the
@@ -2148,7 +2151,7 @@ def _parse_fence_busy(stderr: str) -> bool:
 
 
 def _deterministic_parse_error_code(stderr: str) -> str | None:
-    """The parser's code when it names a permanent failure, else `None`.
+    """The parser's code when it names a failure retrying cannot clear, else `None`.
 
     The CLI's handled arms print `<ERROR_CODE>: <message>` (argparse and click
     alike); the first such line is the code, whatever warnings precede it. The
@@ -2159,17 +2162,24 @@ def _deterministic_parse_error_code(stderr: str) -> str | None:
     - any traceback: `OUTPUT_PARSE_OS_ERROR` / `_RUNTIME_ERROR` are written to
       the DB and re-raised, so stderr then ends in `OSError: ...` or a psycopg
       error with libpq `DETAIL:` lines, none of which is a parser code;
-    - every `OUTPUT_PARSE_*` code: DB errors, the compressed-chunk guard and
-      its block, identity-key lookups -- all possibly transient (#1781 keeps
+    - every other `OUTPUT_PARSE_*` code: DB errors, the compressed-chunk guard's
+      own failure, identity-key lookups -- all possibly transient (#1781 keeps
       that class retrying);
     - no code line at all.
+
+    `OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED` is the one `OUTPUT_PARSE_*` code
+    returned (#2690): a compressed chunk was really detected and stays
+    compressed until an operator decompresses it, so every retry fails alike.
     """
     if _TRACEBACK_MARKER in stderr:
         return None
     match = _PARSE_ERROR_LINE_RE.search(stderr)
-    if match is None or match.group(1).startswith("OUTPUT_PARSE_"):
+    if match is None:
         return None
-    return match.group(1)
+    code = match.group(1)
+    if code.startswith("OUTPUT_PARSE_") and code != PARSE_COMPRESSED_CHUNK_BLOCKED_CODE:
+        return None
+    return code
 
 
 def _run_status(database_url: str, run_id: str) -> str | None:

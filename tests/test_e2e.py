@@ -268,6 +268,7 @@ class E2ERepository:
             cycle_id=f"{run['source_id']}_{run['cycle_time'].strftime('%Y%m%d%H')}",
             cycle_time=run["cycle_time"],
             start_time=run["start_time"],
+            end_time=run["end_time"],
             output_uri=run["output_uri"],
             run_type=run["run_type"],
             scenario_id=run["scenario_id"],
