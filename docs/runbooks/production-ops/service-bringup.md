@@ -473,21 +473,27 @@ PYTHONPATH=/scratch/frd_muziyao/NWM /scratch/frd_muziyao/NWM/.venv/bin/python sc
 每流域恰好一条 gfs 一条 IFS、每行都带 `shud_input_name` 与 `model_package_uri`。
 备份 stamp 每次换新，否则脚本会因备份已存在而拒跑。
 
-**registry manifest 有字节和 JSON 复杂度上限，行数增长会撞。** `MAX_REGISTRY_MANIFEST_BYTES`
-（`services/orchestrator/scheduler_file_providers.py`）同时管**写入后回读**和
-**所有消费者的读取**。2026-08-25 合并到 62 行时实测 4,250,534 B，超过当时的 4 MiB
-上限 56,230 B：原子写入器写完、回读时 `capture_provider_preimage` 报
-`provider_destination_size_limit_exceeded`，于是**回滚并抛 `provider_restored_previous`**
-（canonical 完好无损，这是闸门在正常工作，不是数据损坏）。已提到 16 MiB（约 160 行）。
-再撞时的处置顺序是死的：**改常量 → CI → merge → 22 与 27 都 `git pull --ff-only` → 才能发布**。
-先发布后升级 = 旧代码的调度器读不动新 manifest，等于全量停摆。
-覆盖坪估算：大流域一行约 100 KB（`direct_grid_forcing.station_bindings` 内联就占 ~60 KB）。
+**registry manifest 有字节和 JSON 复杂度上限，行数增长会撞。** `MAX_REGISTRY_MANIFEST_BYTES` 与
+`MAX_REGISTRY_MANIFEST_JSON_NODES`（定义在 `packages/scheduler/registry_limits.py`，
+`services/orchestrator/scheduler_file_providers.py` 再导出）同时管**写入后回读**和
+**所有消费者的读取**：发布器、`FileSchedulerModelRegistry`、refresh 的 preimage / 回滚 / 应急回执重建、
+canonical 与 worker mirror 的逐字节比对、首轮初始状态审计，全部引用这一对常量，没有私有数字。
+现值 **32 MiB / 800,000 节点**（#2744）。2026-10-05 生产实测：132 行、13,353,454 B（13.35 MB）、
+329,431 个 JSON 值节点，即每行约 101 KB、约 2,500 节点；旧上限 16 MiB / 400,000 节点下
+节点先撞，只剩约 14 个流域的余量。新上限下仍是节点先撞，约 320 行。
 
-注册表另有 `MAX_REGISTRY_MANIFEST_JSON_NODES = 400_000` 的 JSON 值节点上限；键名不计为节点，
-映射、数组及其中每个值均计入。内联站点绑定可能先撞节点上限，即使字节数仍小于 16 MiB。
-注册表发布器和 `FileSchedulerModelRegistry` 使用同一预算：发布前检查最终清单的节点数、
-深度、字节数与模型数，超限直接拒绝且不写目标文件。深度 64、模型数 500、字节数 16 MiB
-的限制不变；readiness、catalog 与 state index 仍保留各自 300,000 节点预算。
+节点口径：键名不计为节点，映射、数组及其中每个值均计入；内联站点绑定使节点数先于字节数触顶。
+发布前检查最终清单的节点数、深度、字节数与模型数，超限直接拒绝且不写目标文件。
+深度 64、模型数 500 的限制不变；readiness、catalog 与 state index 仍保留各自的
+16 MiB / 300,000 节点预算。
+
+历史：2026-08-25 合并到 62 行时实测 4,250,534 B，超过当时的 4 MiB 上限 56,230 B：
+原子写入器写完、回读时 `capture_provider_preimage` 报 `provider_destination_size_limit_exceeded`，
+于是**回滚并抛 `provider_restored_previous`**（canonical 完好无损，这是闸门在正常工作，不是数据损坏）。
+
+**读写两端必须先跑同一份代码，才能发布超过旧上限的 manifest。** 处置顺序是死的：
+**改常量 → CI → merge → 22 与 27 都 `git pull --ff-only` 并重启读这份 manifest 的常驻进程 → 才能发布**。
+先发布后升级 = 旧代码的调度器读不动新 manifest（超过 16 MiB 或 400,000 节点即被拒），等于全量停摆。
 refresh 的 canonical 与 worker mirror 均走同一注册表发布器；两端升级后再发布并回读验证。
 
 **发布后必须手动跑一趟 refresh 重建 readiness。** readiness 索引条目与 registry identity

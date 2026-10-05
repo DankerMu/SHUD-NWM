@@ -74,7 +74,13 @@ def test_primary_and_emergency_receipt_failure_is_replace_uncertain(
     assert error_info.value.reason == "receipt_channels_failed"
 
 
-def test_emergency_reconstruction_validates_committed_digests_without_republish(tmp_path: Path) -> None:
+@pytest.mark.parametrize("registry_bytes", [8, 20_000_000], ids=["small", "above-readiness-bound"])
+def test_emergency_reconstruction_validates_committed_digests_without_republish(
+    tmp_path: Path, registry_bytes: int
+) -> None:
+    # A registry manifest may be larger than the readiness index bound; the
+    # reconstruction must re-read each provider under its own bound.
+    assert registry_bytes == 8 or refresh.MAX_READINESS_INDEX_BYTES < registry_bytes
     config = _config(tmp_path)
     providers = []
     for name, uri in (
@@ -83,8 +89,8 @@ def test_emergency_reconstruction_validates_committed_digests_without_republish(
         ("state", config.state_uri),
     ):
         path = Path(uri)
-        path.write_text(name)
-        preimage = capture_scheduler_provider_preimage(uri)
+        path.write_text("r" * registry_bytes if name == "registry" else name)
+        preimage = capture_scheduler_provider_preimage(uri, max_bytes=refresh.MAX_REGISTRY_MANIFEST_BYTES)
         providers.append(
             {
                 "name": name,

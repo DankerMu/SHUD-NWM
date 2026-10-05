@@ -3362,6 +3362,12 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         NODE22_CLONE_CUTOVER_STATES_TESTS,
     ),
     PathTestRule(
+        # #2744: the registry byte / node bounds are pinned, with their
+        # boundary cases, only in the capacity suite.
+        "packages/scheduler/registry_limits.py",
+        ("tests/test_scheduler_registry_capacity.py",),
+    ),
+    PathTestRule(
         # #2737: the provision script's dry-run / apply / receipt suite and its
         # IC-header gate suite. Explicit irregular mapping.
         "scripts/provision_direct_grid_scheduler_registry.py",
