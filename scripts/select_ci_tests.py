@@ -2046,6 +2046,7 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_mapping_builder_cli.py",
             "tests/test_mapping_builder_evidence.py",
             "tests/test_mapping_builder_integration.py",
+            PROVISION_DIRECT_GRID_DRY_RUN_TEST,
         ),
     ),
     PathTestRule(
