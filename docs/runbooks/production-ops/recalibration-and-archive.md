@@ -142,6 +142,36 @@ direct-grid 生产上 model set 变更的通道就是这三步：`M1′` 行由
 `scripts/provision_direct_grid_scheduler_registry.py` 产出，再由下面的直接发布落到
 manifest——**不是** §3.1.2 的 cutover declaration。
 
+**provision 这一步先 dry-run 再 `--apply`**（#2737）。不带 `--apply` 时脚本什么都不写
+（不写库、不在 object store 上建包或 chmod、不写 `--output-registry`），只预测每个变体的
+`model_id` 并落一份回执；三步共用同一个 `--succession-id`：
+
+```bash
+# node-27，/home/nwm/NWM；DATABASE_URL / OBJECT_STORE_ROOT / OBJECT_STORE_PREFIX 已在环境里
+mkdir -p /home/nwm/tmp && export TMPDIR=/home/nwm/tmp
+SUCCESSION_ID=<succession-id>          # [A-Za-z0-9._-]{1,80}，一次率定切换一个
+PROVISION_ARGS=(
+  --baseline-registry "<含新率定 baseline 行的 registry>"
+  --output-registry "<本次 workspace>/direct-grid-registry.json"   # 绝不指向生产 canonical manifest
+  --operator-id "<operator>"
+  --model-id "<baseline_model_id>"
+  --succession-id "$SUCCESSION_ID"
+)
+PYTHONPATH=/home/nwm/NWM uv run python scripts/provision_direct_grid_scheduler_registry.py "${PROVISION_ARGS[@]}"
+cat "$OBJECT_STORE_ROOT/scheduler/succession/$SUCCESSION_ID/provision-dry-run.json"
+PYTHONPATH=/home/nwm/NWM uv run python scripts/provision_direct_grid_scheduler_registry.py "${PROVISION_ARGS[@]}" --apply
+```
+
+读回执时核对 `models[]`：新率定的 `M1′` 应是 `inserted=true` 且 `model_id` 与旧 `M1` 不同
+（包校验和变了，身份随之变）；`inserted=false` 说明这个身份已经登记过，但 apply 仍会更新该行的
+`model_package_uri` / `resource_profile` 并逐站 upsert `met.met_station`。`--apply` 只认同 id 的
+dry-run 回执，输入或预测集合有任何出入就拒绝并回滚；回执 `provision-dry-run.json` /
+`provision-apply.json` 落在 `<OBJECT_STORE_ROOT>/scheduler/succession/<succession-id>/`
+（两节点共享的 NFS，从不覆盖）。回执只记录 baseline -> 变体，不记录前驱 -> 后继；
+克隆与发布所需的前驱 `M1` 仍按 `(basin_version_id, source_id)` 从 canonical manifest 取。
+各选项的细节与回执根的一次性放权见
+[`service-bringup.md`](service-bringup.md) 3.1.1 的 hop 3。
+
 倒过来做的后果**比这段原文写的更重**（原文早于 #1164）：manifest 先落地时，`M1′`
 在任何 generation 都没有 state 行，走的是 first-cycle 分支
 （`services/orchestrator/scheduler_generation.py` 的 `evaluate_transition_decision`

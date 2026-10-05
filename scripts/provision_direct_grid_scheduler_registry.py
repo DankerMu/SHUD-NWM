@@ -5,6 +5,12 @@ The input registry contains one release-frozen hydrologic baseline per basin.
 The output contains one source-scoped direct-grid variant per basin/source.
 No legacy/IDW row is copied into the output.  Publication is atomic and only
 occurs after every package build and database registration succeeds.
+
+The run is a dry-run unless ``--apply`` is given: it reads, validates and
+predicts each variant's ``model_id`` and writes nothing but its own receipt
+under ``--receipt-root`` (when ``--succession-id`` is given).  ``--apply``
+requires the dry-run receipt of the same succession id and refuses unless that
+receipt predicted exactly the variants it is about to register.
 """
 
 from __future__ import annotations
@@ -15,12 +21,16 @@ import hashlib
 import json
 import math
 import os
+import shutil
+import sys
+import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from packages.common import provision_succession_receipt as succession
 from packages.common.grid_registry_store import CanonicalGridCell, CanonicalGridSnapshot
 from packages.common.object_store import LocalObjectStore, sha256_bytes
 from packages.common.source_identity import normalize_source_id
@@ -42,6 +52,7 @@ from workers.mapping_builder.evidence import (
 from workers.model_registry.direct_grid_variant_registration import (
     DirectGridBaselineModelInputs,
     DirectGridVariantRegistrationInput,
+    plan_direct_grid_variant,
     register_direct_grid_variant,
 )
 
@@ -75,14 +86,19 @@ class LoadedGridSnapshot:
         return self.snapshot, list(self.cells)
 
 
-def _read_json(path: str | Path) -> dict[str, Any]:
+def _read_json_with_sha256(path: str | Path) -> tuple[dict[str, Any], str]:
     try:
-        payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+        content = Path(path).read_bytes()
+        payload = json.loads(content.decode("utf-8"))
+    except (OSError, ValueError) as error:
         raise DirectGridProvisionError(f"Cannot read JSON object at {path}: {error}") from error
     if not isinstance(payload, dict):
         raise DirectGridProvisionError(f"JSON payload at {path} must be an object.")
-    return payload
+    return payload, sha256_bytes(content)
+
+
+def _read_json(path: str | Path) -> dict[str, Any]:
+    return _read_json_with_sha256(path)[0]
 
 
 def _source_grids(values: Sequence[str]) -> tuple[tuple[str, str], ...]:
@@ -344,6 +360,240 @@ def _baseline_db_inputs(cursor: Any, model_id: str, variant_uri: str) -> DirectG
     )
 
 
+@dataclass(frozen=True)
+class _VariantLayout:
+    """Where one baseline/source variant lives on the object store."""
+
+    identity: str
+    package_key: str
+    variant_root: Path
+    variant_uri: str
+
+
+def _variant_layout(
+    store: LocalObjectStore,
+    model: Mapping[str, Any],
+    source_id: str,
+    snapshot: CanonicalGridSnapshot,
+) -> _VariantLayout:
+    identity = _package_identity(model, source_id, snapshot)
+    package_key = (
+        f"models/direct_grid_variants/{model['model_id']}/"
+        f"dg-{source_id.lower()}-{identity}/package"
+    )
+    return _VariantLayout(
+        identity=identity,
+        package_key=package_key,
+        variant_root=store.resolve_path(package_key),
+        variant_uri=store.uri_for_key(package_key) + "/",
+    )
+
+
+def _build_package(
+    *,
+    baseline_root: Path,
+    variant_root: Path,
+    layout: _VariantLayout,
+    model: Mapping[str, Any],
+    source_id: str,
+    loaded: LoadedGridSnapshot,
+    operator_id: str,
+) -> None:
+    """Build the variant package at ``variant_root``.
+
+    Only ``variant_root`` differs between the published build and a dry-run's
+    temporary one: every identity the manifest records (binding URI, input
+    package id, mapping asset identity) comes from ``layout``, so both builds
+    produce the same ``manifest.json`` bytes.
+    """
+
+    ownerships = nearest_cell_barycenter_geodesic_v1(
+        baseline_root,
+        source_id,
+        loaded.snapshot.grid_id,
+        loaded,
+    )
+    used_cells = derive_used_cell_subset(ownerships, loaded.cells)
+    used_count = len(used_cells)
+    small_approval = (
+        SmallBasinApproval(approver_id=operator_id, used_cell_count=used_count)
+        if used_count < 4
+        else None
+    )
+    sp_att = _required_single(baseline_root, "*.sp.att")
+    approvals = Approvals(
+        builder_approver_id=operator_id,
+        reviewer_approver_id=operator_id,
+        small_basin_override_approver_id=(operator_id if small_approval else None),
+    )
+    result = build_direct_grid_variant(
+        baseline_root=baseline_root,
+        variant_root=variant_root,
+        source_id=source_id,
+        grid_id=loaded.snapshot.grid_id,
+        grid_snapshot_loader=loaded,
+        snapshot_cells=loaded.cells,
+        grid_snapshot_reference=GridSnapshotReference(
+            snapshot_id=str(loaded.snapshot.grid_snapshot_id),
+            grid_signature=loaded.snapshot.grid_signature,
+            snapshot_checksum=loaded.snapshot.grid_definition_checksum,
+        ),
+        mapping_asset_identity=f"dg-{source_id.lower()}-{layout.identity}",
+        model_input_package_id=f"dg-input-{layout.identity}",
+        binding_uri=f"{layout.variant_uri}direct_grid_binding.json",
+        sp_att_manifest_path=str(sp_att.relative_to(baseline_root)),
+        category_files=_category_files(baseline_root),
+        state_schema_bytes=_validated_state_schema_bytes(baseline_root),
+        solver_config_bytes=_required_single(baseline_root, "*.cfg.para").read_bytes(),
+        domain_shp_path=_required_single(baseline_root, "domain.shp"),
+        proj_crs_database_version="pyproj-runtime-pinned-by-lockfile",
+        approvals=approvals,
+        rollback_target=RollbackTarget(
+            previous_mapping_asset_checksum=str(model["package_checksum"]),
+            previous_mapping_asset_label=str(model["model_id"]),
+        ),
+        distance_qa=_distance_qa(ownerships, loaded.snapshot),
+        capacity_report=_capacity_report(
+            station_count=used_count,
+            before_station_count=_legacy_station_count(baseline_root),
+        ),
+        applicable_source_ids=(source_id,),
+        small_basin_approval=small_approval,
+    )
+    receipt = {
+        "schema_version": SCHEMA_VERSION,
+        "baseline_model_id": model["model_id"],
+        "source_id": source_id,
+        "grid_snapshot_id": str(loaded.snapshot.grid_snapshot_id),
+        "grid_id": loaded.snapshot.grid_id,
+        "grid_signature": loaded.snapshot.grid_signature,
+        "station_count": len(result.manifest.station_bindings),
+        "evidence_checksum": result.evidence_package.evidence_checksum,
+        "small_basin_override": dataclasses.asdict(small_approval) if small_approval else None,
+        "operator_id": operator_id,
+    }
+    (variant_root / "direct_grid_build_receipt.json").write_text(
+        json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _read_package_contract(package_root: Path) -> tuple[Mapping[str, Any], str]:
+    """Return ``(direct_grid_forcing contract, sha256 of manifest.json)`` of a built package."""
+
+    manifest_path = package_root / "manifest.json"
+    contract = _read_json(manifest_path).get("direct_grid_forcing")
+    if not isinstance(contract, Mapping):
+        raise DirectGridProvisionError(
+            f"Built manifest {manifest_path} is missing the direct_grid_forcing object."
+        )
+    return contract, sha256_bytes(manifest_path.read_bytes())
+
+
+def _temporary_build_contract(*, build_tmp_dir: Path, **build: Any) -> tuple[Mapping[str, Any], str]:
+    """Build one variant outside the object store, read its contract, delete the build."""
+
+    scratch = Path(tempfile.mkdtemp(prefix="nhms-provision-dry-run-", dir=build_tmp_dir))
+    try:
+        _build_package(variant_root=scratch / "package", **build)
+        return _read_package_contract(scratch / "package")
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _registration_input(
+    cursor: Any,
+    model: Mapping[str, Any],
+    layout: _VariantLayout,
+    contract: Mapping[str, Any],
+    loaded: LoadedGridSnapshot,
+) -> DirectGridVariantRegistrationInput:
+    return DirectGridVariantRegistrationInput(
+        basin_version_id=str(model["basin_version_id"]),
+        direct_grid_forcing=contract,
+        baseline=_baseline_db_inputs(cursor, str(model["model_id"]), layout.variant_uri),
+        grid_snapshot_id=str(loaded.snapshot.grid_snapshot_id),
+    )
+
+
+def _variant_record(
+    *,
+    model: Mapping[str, Any],
+    source_id: str,
+    loaded: LoadedGridSnapshot,
+    layout: _VariantLayout,
+    model_id: str,
+    inserted: bool,
+    package_checksum: str,
+    package_prebuilt: bool,
+    station_count: int,
+) -> dict[str, Any]:
+    """Return one ``models[]`` row of the succession receipt."""
+
+    return {
+        "baseline_model_id": model["model_id"],
+        "model_id": model_id,
+        "source_id": source_id,
+        "grid_id": loaded.snapshot.grid_id,
+        "basin_version_id": str(model["basin_version_id"]),
+        "package_key": layout.package_key,
+        "model_package_uri": layout.variant_uri,
+        "manifest_uri": f"{layout.variant_uri}manifest.json",
+        "package_checksum": package_checksum,
+        "inserted": inserted,
+        "package_prebuilt": package_prebuilt,
+        "station_count": station_count,
+    }
+
+
+def _plan_one(
+    *,
+    cursor: Any,
+    store: LocalObjectStore,
+    model: Mapping[str, Any],
+    source_id: str,
+    loaded: LoadedGridSnapshot,
+    operator_id: str,
+    build_tmp_dir: Path,
+) -> dict[str, Any]:
+    """Predict one variant without writing the database or the object store.
+
+    ``model_id`` derives from the ``binding_checksum`` of a built package, so a
+    package that is not on the object store yet is built into a temporary
+    directory and discarded.  A package that is there is read as it is: no
+    chmod, unlike the apply path's ``_make_package_readable``.
+    """
+
+    layout = _variant_layout(store, model, source_id, loaded.snapshot)
+    prebuilt = (layout.variant_root / "manifest.json").is_file()
+    if prebuilt:
+        contract, manifest_checksum = _read_package_contract(layout.variant_root)
+    else:
+        contract, manifest_checksum = _temporary_build_contract(
+            build_tmp_dir=build_tmp_dir,
+            baseline_root=store.resolve_path(str(model["model_package_uri"])),
+            layout=layout,
+            model=model,
+            source_id=source_id,
+            loaded=loaded,
+            operator_id=operator_id,
+        )
+    plan = plan_direct_grid_variant(cursor, _registration_input(cursor, model, layout, contract, loaded))
+    stations = contract.get("station_bindings", contract.get("stations"))
+    return _variant_record(
+        model=model,
+        source_id=source_id,
+        loaded=loaded,
+        layout=layout,
+        model_id=plan.model_id,
+        inserted=plan.would_insert,
+        package_checksum=manifest_checksum,
+        package_prebuilt=prebuilt,
+        # One met.met_station upsert per station on the insert and the reuse path alike.
+        station_count=len(stations),
+    )
+
+
 def _build_one(
     *,
     cursor: Any,
@@ -352,109 +602,38 @@ def _build_one(
     source_id: str,
     loaded: LoadedGridSnapshot,
     operator_id: str,
+    dry_run_receipt: Mapping[str, Any],
+    dry_run_receipt_path: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    baseline_root = store.resolve_path(str(model["model_package_uri"]))
-    identity = _package_identity(model, source_id, loaded.snapshot)
-    package_key = (
-        f"models/direct_grid_variants/{model['model_id']}/"
-        f"dg-{source_id.lower()}-{identity}/package"
-    )
-    variant_root = store.resolve_path(package_key)
-    variant_uri = store.uri_for_key(package_key) + "/"
-    binding_uri = f"{variant_uri}direct_grid_binding.json"
-    model_input_package_id = f"dg-input-{identity}"
-    manifest_path = variant_root / "manifest.json"
+    layout = _variant_layout(store, model, source_id, loaded.snapshot)
+    variant_root = layout.variant_root
+    variant_uri = layout.variant_uri
+    prebuilt = (variant_root / "manifest.json").is_file()
 
-    if not manifest_path.is_file():
-        ownerships = nearest_cell_barycenter_geodesic_v1(
-            baseline_root,
-            source_id,
-            loaded.snapshot.grid_id,
-            loaded,
-        )
-        used_cells = derive_used_cell_subset(ownerships, loaded.cells)
-        used_count = len(used_cells)
-        small_approval = (
-            SmallBasinApproval(approver_id=operator_id, used_cell_count=used_count)
-            if used_count < 4
-            else None
-        )
-        sp_att = _required_single(baseline_root, "*.sp.att")
-        approvals = Approvals(
-            builder_approver_id=operator_id,
-            reviewer_approver_id=operator_id,
-            small_basin_override_approver_id=(operator_id if small_approval else None),
-        )
-        result = build_direct_grid_variant(
-            baseline_root=baseline_root,
+    if not prebuilt:
+        _build_package(
+            baseline_root=store.resolve_path(str(model["model_package_uri"])),
             variant_root=variant_root,
+            layout=layout,
+            model=model,
             source_id=source_id,
-            grid_id=loaded.snapshot.grid_id,
-            grid_snapshot_loader=loaded,
-            snapshot_cells=loaded.cells,
-            grid_snapshot_reference=GridSnapshotReference(
-                snapshot_id=str(loaded.snapshot.grid_snapshot_id),
-                grid_signature=loaded.snapshot.grid_signature,
-                snapshot_checksum=loaded.snapshot.grid_definition_checksum,
-            ),
-            mapping_asset_identity=f"dg-{source_id.lower()}-{identity}",
-            model_input_package_id=model_input_package_id,
-            binding_uri=binding_uri,
-            sp_att_manifest_path=str(sp_att.relative_to(baseline_root)),
-            category_files=_category_files(baseline_root),
-            state_schema_bytes=_validated_state_schema_bytes(baseline_root),
-            solver_config_bytes=_required_single(baseline_root, "*.cfg.para").read_bytes(),
-            domain_shp_path=_required_single(baseline_root, "domain.shp"),
-            proj_crs_database_version="pyproj-runtime-pinned-by-lockfile",
-            approvals=approvals,
-            rollback_target=RollbackTarget(
-                previous_mapping_asset_checksum=str(model["package_checksum"]),
-                previous_mapping_asset_label=str(model["model_id"]),
-            ),
-            distance_qa=_distance_qa(ownerships, loaded.snapshot),
-            capacity_report=_capacity_report(
-                station_count=used_count,
-                before_station_count=_legacy_station_count(baseline_root),
-            ),
-            applicable_source_ids=(source_id,),
-            small_basin_approval=small_approval,
-        )
-        receipt = {
-            "schema_version": SCHEMA_VERSION,
-            "baseline_model_id": model["model_id"],
-            "source_id": source_id,
-            "grid_snapshot_id": str(loaded.snapshot.grid_snapshot_id),
-            "grid_id": loaded.snapshot.grid_id,
-            "grid_signature": loaded.snapshot.grid_signature,
-            "station_count": len(result.manifest.station_bindings),
-            "evidence_checksum": result.evidence_package.evidence_checksum,
-            "small_basin_override": dataclasses.asdict(small_approval) if small_approval else None,
-            "operator_id": operator_id,
-        }
-        (variant_root / "direct_grid_build_receipt.json").write_text(
-            json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
+            loaded=loaded,
+            operator_id=operator_id,
         )
 
     _make_package_readable(variant_root)
 
-    manifest_document = _read_json(manifest_path)
-    contract = manifest_document.get("direct_grid_forcing")
-    if not isinstance(contract, Mapping):
-        raise DirectGridProvisionError(
-            f"Built manifest {manifest_path} is missing the direct_grid_forcing object."
-        )
-    baseline_inputs = _baseline_db_inputs(cursor, str(model["model_id"]), variant_uri)
-    registration = register_direct_grid_variant(
-        cursor,
-        DirectGridVariantRegistrationInput(
-            basin_version_id=str(model["basin_version_id"]),
-            direct_grid_forcing=contract,
-            baseline=baseline_inputs,
-            grid_snapshot_id=str(loaded.snapshot.grid_snapshot_id),
-        ),
+    contract, manifest_checksum = _read_package_contract(variant_root)
+    registration_input = _registration_input(cursor, model, layout, contract, loaded)
+    # Apply requires its dry-run: the id this run is about to register must be
+    # the one the dry-run receipt predicted, checked before the first write.
+    plan = plan_direct_grid_variant(cursor, registration_input)
+    succession.require_predicted_variant(
+        dry_run_receipt,
+        dry_run_receipt_path,
+        {"baseline_model_id": model["model_id"], "source_id": source_id, "model_id": plan.model_id},
     )
-    manifest_checksum = sha256_bytes(manifest_path.read_bytes())
+    registration = register_direct_grid_variant(cursor, registration_input)
     profile = {
         **dict(model["resource_profile"]),
         "lineage": "direct_grid_variant_registration",
@@ -491,28 +670,26 @@ def _build_one(
         "lifecycle_state": "active",
         "resource_profile": profile,
     }
-    return registry_row, {
-        "baseline_model_id": model["model_id"],
-        "model_id": registration.model_id,
-        "source_id": source_id,
-        "grid_id": loaded.snapshot.grid_id,
-        "inserted": registration.inserted,
-        "station_count": registration.mirror_stations_written,
-    }
+    return registry_row, _variant_record(
+        model=model,
+        source_id=source_id,
+        loaded=loaded,
+        layout=layout,
+        model_id=registration.model_id,
+        inserted=registration.inserted,
+        package_checksum=manifest_checksum,
+        package_prebuilt=prebuilt,
+        station_count=registration.mirror_stations_written,
+    )
 
 
-def provision_direct_grid_registry(
-    *,
+def _selected_baseline_models(
     baseline_registry: str | Path,
-    output_registry: str | Path,
-    database_url: str,
-    object_store_root: str | Path,
-    object_store_prefix: str,
-    source_grids: Sequence[tuple[str, str]],
-    operator_id: str,
-    model_ids: Sequence[str] = (),
-) -> dict[str, Any]:
-    payload = _read_json(baseline_registry)
+    model_ids: Sequence[str],
+) -> tuple[list[dict[str, Any]], str]:
+    """Return ``(selected baseline rows sorted by model_id, sha256 of the registry file)``."""
+
+    payload, registry_sha256 = _read_json_with_sha256(baseline_registry)
     raw_models = payload.get("models")
     if not isinstance(raw_models, list) or not raw_models:
         raise DirectGridProvisionError("Baseline registry must contain a non-empty models list.")
@@ -526,53 +703,196 @@ def provision_direct_grid_registry(
     for model in selected:
         if (model.get("resource_profile") or {}).get("direct_grid_forcing"):
             raise DirectGridProvisionError("Input registry must contain baseline rows, not direct-grid variants.")
+    return sorted(selected, key=lambda item: str(item["model_id"])), registry_sha256
+
+
+def _build_tmp_dir(value: str | Path | None, object_store_root: Path) -> Path:
+    """Return the directory temporary builds go under, refusing one inside the object store."""
+
+    directory = Path(value) if value else Path(tempfile.gettempdir())
+    if not directory.is_dir():
+        raise DirectGridProvisionError(f"--build-tmp-dir {directory} is not an existing directory.")
+    if directory.resolve().is_relative_to(object_store_root.resolve()):
+        raise DirectGridProvisionError(
+            f"--build-tmp-dir {directory} resolves inside the object-store root {object_store_root}; "
+            "a dry-run must not create files there. Point --build-tmp-dir (or TMPDIR) elsewhere."
+        )
+    return directory
+
+
+def _summary_model(variant: Mapping[str, Any]) -> dict[str, Any]:
+    fields = ("baseline_model_id", "model_id", "source_id", "grid_id", "inserted", "station_count")
+    return {field: variant[field] for field in fields}
+
+
+def _provision_variants(
+    cursor: Any,
+    *,
+    store: LocalObjectStore,
+    selected: Sequence[Mapping[str, Any]],
+    source_grids: Sequence[tuple[str, str]],
+    operator_id: str,
+    build_tmp_dir: Path | None,
+    dry_run_receipt: Mapping[str, Any] | None,
+    dry_run_receipt_path: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return ``(source grid records, registry rows, variant records)``.
+
+    ``build_tmp_dir`` selects the mode: set for a dry-run (no registry rows are
+    produced), None for an apply (``dry_run_receipt`` is then required).
+    """
+
+    snapshots = {
+        (source_id, grid_id): _load_snapshot(cursor, source_id=source_id, grid_id=grid_id)
+        for source_id, grid_id in source_grids
+    }
+    grids = [succession.source_grid_record(snapshots[key].snapshot) for key in source_grids]
+    if dry_run_receipt is not None:
+        succession.require_same_source_grids(dry_run_receipt, dry_run_receipt_path, grids)
+    output_models: list[dict[str, Any]] = []
+    variants: list[dict[str, Any]] = []
+    for model in selected:
+        for source_id, grid_id in source_grids:
+            common: dict[str, Any] = {
+                "cursor": cursor,
+                "store": store,
+                "model": model,
+                "source_id": source_id,
+                "loaded": snapshots[(source_id, grid_id)],
+                "operator_id": operator_id,
+            }
+            if build_tmp_dir is not None:
+                variants.append(_plan_one(build_tmp_dir=build_tmp_dir, **common))
+                continue
+            row, variant = _build_one(
+                dry_run_receipt=dry_run_receipt or {},
+                dry_run_receipt_path=dry_run_receipt_path,
+                **common,
+            )
+            output_models.append(row)
+            variants.append(variant)
+    if dry_run_receipt is not None:
+        succession.require_same_variant_set(dry_run_receipt, dry_run_receipt_path, variants)
+    return grids, output_models, variants
+
+
+def provision_direct_grid_registry(
+    *,
+    baseline_registry: str | Path,
+    output_registry: str | Path,
+    database_url: str,
+    object_store_root: str | Path,
+    object_store_prefix: str,
+    source_grids: Sequence[tuple[str, str]],
+    operator_id: str,
+    model_ids: Sequence[str] = (),
+    apply: bool = False,
+    succession_id: str | None = None,
+    receipt_root: str | Path | None = None,
+    build_tmp_dir: str | Path | None = None,
+) -> dict[str, Any]:
+    """Plan (default) or apply the provisioning.
+
+    Without ``apply`` nothing is written to the database, the object store or
+    ``output_registry``: the connection is read-only and rolled back, and a
+    variant that is not built yet is built under ``build_tmp_dir`` and
+    discarded.  With ``apply`` the dry-run receipt of the same succession must
+    have predicted exactly the variants this run registers.
+    """
+
+    selected, registry_sha256 = _selected_baseline_models(baseline_registry, model_ids)
+    if succession_id is not None:
+        succession.validate_succession_id(succession_id)
+    elif apply:
+        raise DirectGridProvisionError("--apply requires --succession-id (and the dry-run receipt of that id).")
+    store = LocalObjectStore(object_store_root, object_store_prefix=object_store_prefix)
+    store_root = Path(store.root)
+    receipt_root = Path(receipt_root) if receipt_root else succession.default_receipt_root(store_root)
+    header = succession.receipt_header(
+        succession_id=succession_id,
+        apply=apply,
+        operator_id=operator_id,
+        object_store_root=store_root,
+        object_store_prefix=object_store_prefix,
+        selected_model_ids=[str(model["model_id"]) for model in selected],
+        baseline_registry=baseline_registry,
+        baseline_registry_sha256=registry_sha256,
+        output_registry=output_registry,
+    )
+    # Everything below up to the connection is a refusal that has done nothing.
+    scratch_root = None if apply else _build_tmp_dir(build_tmp_dir, store_root)
+    dry_run_receipt: dict[str, Any] | None = None
+    dry_run_record: dict[str, Any] = {"path": ""}
+    if apply:
+        dry_run_receipt, dry_run_record = succession.load_dry_run_receipt(
+            receipt_root, str(succession_id), object_store_root=store_root
+        )
+        succession.require_same_inputs(dry_run_receipt, dry_run_record["path"], header)
+    receipt_target = (
+        succession.receipt_path(receipt_root, succession_id, apply=apply) if succession_id is not None else None
+    )
+    if receipt_target is not None:
+        succession.prepare_receipt_target(receipt_target, receipt_root=receipt_root)
 
     try:
         import psycopg2
         from psycopg2.extras import RealDictCursor
     except ImportError as error:
         raise DirectGridProvisionError("psycopg2 is required for direct-grid provisioning.") from error
-    store = LocalObjectStore(object_store_root, object_store_prefix=object_store_prefix)
-    output_models: list[dict[str, Any]] = []
-    results: list[dict[str, Any]] = []
+    provision: dict[str, Any] = {
+        "store": store,
+        "selected": selected,
+        "source_grids": source_grids,
+        "operator_id": operator_id,
+        "build_tmp_dir": scratch_root,
+        "dry_run_receipt": dry_run_receipt,
+        "dry_run_receipt_path": dry_run_record["path"],
+    }
+    registry: dict[str, Any] | None = None
     connection = psycopg2.connect(database_url)
     try:
-        with connection:
-            with connection.cursor(cursor_factory=RealDictCursor) as cursor:
-                snapshots = {
-                    (source_id, grid_id): _load_snapshot(cursor, source_id=source_id, grid_id=grid_id)
-                    for source_id, grid_id in source_grids
-                }
-                for model in sorted(selected, key=lambda item: str(item["model_id"])):
-                    for source_id, grid_id in source_grids:
-                        row, result = _build_one(
-                            cursor=cursor,
-                            store=store,
-                            model=model,
-                            source_id=source_id,
-                            loaded=snapshots[(source_id, grid_id)],
-                            operator_id=operator_id,
-                        )
-                        output_models.append(row)
-                        results.append(result)
-        receipt = publish_scheduler_registry_manifest(
-            output_models,
-            output_registry,
-            object_store_root=object_store_root,
-            object_store_prefix=object_store_prefix,
-            generated_at=datetime.now(UTC),
-        )
+        if apply:
+            with connection:
+                with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+                    grids, output_models, variants = _provision_variants(cursor, **provision)
+            registry = publish_scheduler_registry_manifest(
+                output_models,
+                output_registry,
+                object_store_root=object_store_root,
+                object_store_prefix=object_store_prefix,
+                generated_at=datetime.now(UTC),
+            )
+        else:
+            # Never ``with connection:`` here: psycopg2 commits on a clean exit.
+            connection.set_session(readonly=True)
+            try:
+                with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+                    grids, output_models, variants = _provision_variants(cursor, **provision)
+            finally:
+                connection.rollback()
     finally:
         connection.close()
-    return {
+
+    receipt = {**header, "source_grids": grids, "models": variants}
+    if registry is not None:
+        receipt["output_registry"] = {**header["output_registry"], "sha256": registry.get("content_sha256")}
+        receipt["dry_run_receipt"] = dry_run_record
+    if receipt_target is not None:
+        succession.write_run_receipt(receipt_target, receipt)
+        print(f"Provision receipt written: {receipt_target}", file=sys.stderr)
+    summary = {
         "schema_version": SCHEMA_VERSION,
-        "status": "published",
+        "status": "published" if apply else "planned",
         "baseline_model_count": len(selected),
-        "direct_grid_model_count": len(output_models),
+        "direct_grid_model_count": len(variants),
         "source_grids": [{"source_id": source, "grid_id": grid} for source, grid in source_grids],
-        "models": results,
-        "registry": receipt,
+        "models": [_summary_model(variant) for variant in variants],
+        "registry": registry,
     }
+    if not apply:
+        summary["plan"] = receipt
+        summary["receipt"] = str(receipt_target) if receipt_target is not None else None
+    return summary
 
 
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -586,6 +906,27 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--operator-id", required=True)
     parser.add_argument("--model-id", action="append", default=[])
     parser.add_argument("--output")
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Write the database, the variant packages and --output-registry. Without it the run is a "
+        "dry-run. Requires --succession-id and that id's dry-run receipt.",
+    )
+    parser.add_argument(
+        "--succession-id",
+        help="Succession this run belongs to ([A-Za-z0-9._-]{1,80}). The run writes one receipt, never "
+        "overwritten, to <receipt-root>/<succession-id>/provision-dry-run.json or provision-apply.json.",
+    )
+    parser.add_argument(
+        "--receipt-root",
+        help="Directory holding succession receipts (default: <object-store-root>/scheduler/succession).",
+    )
+    parser.add_argument(
+        "--build-tmp-dir",
+        help="Where a dry-run builds a variant package that is not on the object store yet, before "
+        "discarding it (default: the system temporary directory, i.e. TMPDIR). Must be outside the "
+        "object-store root.",
+    )
     return parser.parse_args(argv)
 
 
@@ -593,6 +934,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     if not args.database_url or not args.object_store_root or not args.object_store_prefix:
         raise DirectGridProvisionError("DATABASE_URL, OBJECT_STORE_ROOT and OBJECT_STORE_PREFIX are required.")
+    if not args.apply:
+        print(succession.DRY_RUN_NOTICE, flush=True)
     summary = provision_direct_grid_registry(
         baseline_registry=args.baseline_registry,
         output_registry=args.output_registry,
@@ -602,6 +945,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         source_grids=_source_grids(args.source_grid or DEFAULT_SOURCE_GRIDS),
         operator_id=args.operator_id,
         model_ids=args.model_id,
+        apply=args.apply,
+        succession_id=args.succession_id,
+        receipt_root=args.receipt_root,
+        build_tmp_dir=args.build_tmp_dir,
     )
     rendered = json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     if args.output:

@@ -368,7 +368,62 @@ calibration_version_id / shud_code_version`，不读 `model_package_uri`。
 **hop 3 — provision dg 变体（node-27）。** `--source-grid` 用默认
 `GFS=gfs_0p25 / IFS=ifs_0p25` 即可：`normalize_source_id` 走 `_STORAGE_SOURCE_IDS[upper()]`，
 产出生产在用的 `gfs`（小写）与 `IFS`（大写）——这个不对称是规范化结果，别去"修正"。
-两个坑：
+
+**不带 `--apply` 就是 dry-run，什么都不写**（#2737）：不写库、不在 object store 上建包或 chmod、
+不写 `--output-registry`，只落自己的回执。先 dry-run、读回执、再 `--apply`，三步共用同一个
+`--succession-id`（`[A-Za-z0-9._-]{1,80}`，一次 succession 一个，例如 `20260822-add-7-basins`）：
+
+```bash
+ssh -p 32099 nwm@210.77.77.27
+cd /home/nwm/NWM
+export PATH=$HOME/.local/bin:$PATH
+mkdir -p /home/nwm/tmp && export TMPDIR=/home/nwm/tmp   # dry-run 的临时构建落这里，不落 object store
+# DATABASE_URL / OBJECT_STORE_ROOT / OBJECT_STORE_PREFIX 必须已在环境里，缺一个脚本直接拒跑
+SUCCESSION_ID=<succession-id>
+PROVISION_ARGS=(
+  --baseline-registry "$OBJECT_STORE_ROOT/scheduler/baseline-registry/manifest-last.json"
+  --output-registry "<本次 workspace>/direct-grid-registry.json"
+  --operator-id "<operator>"
+  --model-id "<baseline_model_id>"   # 每个新增 baseline 重复一次
+  --succession-id "$SUCCESSION_ID"
+)
+
+# 1. dry-run：预测每个变体的 model_id / inserted
+PYTHONPATH=/home/nwm/NWM uv run python scripts/provision_direct_grid_scheduler_registry.py "${PROVISION_ARGS[@]}"
+
+# 2. 读回执：逐行核对 models[] 的 baseline_model_id / source_id / model_id / inserted / package_prebuilt
+cat "$OBJECT_STORE_ROOT/scheduler/succession/$SUCCESSION_ID/provision-dry-run.json"
+
+# 3. apply：参数与第 1 步逐字相同，只多一个 --apply
+PYTHONPATH=/home/nwm/NWM uv run python scripts/provision_direct_grid_scheduler_registry.py "${PROVISION_ARGS[@]}" --apply
+```
+
+- 回执落在 `<receipt-root>/<succession-id>/provision-dry-run.json` 与 `provision-apply.json`，
+  `--receipt-root` 默认 `<OBJECT_STORE_ROOT>/scheduler/succession`（两节点共享的 NFS）。回执用
+  `O_EXCL` 创建、**从不覆盖**：同一个 id 同一种模式再跑一次，会在碰库、构建之前直接拒绝。
+- `--apply` 要求同 id 的 dry-run 回执存在，且 baseline registry 的 sha256、source grid 快照、
+  `OBJECT_STORE_PREFIX`、`--output-registry` 路径、所选 `model_id` 与它预测的
+  `(baseline_model_id, source_id, model_id)` 集合全部一致；任一不符即非零退出，事务回滚、
+  不发布 registry、不写 apply 回执（此前已在 object store 上建好的变体包会留下）。
+  dry-run 之后改过任何输入，就换一个新 id 重新 dry-run。
+- **`inserted=false` 不等于 apply 什么都不写。** apply 对每个变体恒定执行：更新该行的
+  `model_package_uri` / `resource_profile`，并按 `station_count` 逐站 upsert `met.met_station`，
+  insert 路径与复用路径都一样。dry-run 不预测镜像行冲突
+  （`DIRECT_GRID_VARIANT_MIRROR_COLLISION`），它仍可能让 apply 失败并整体回滚。
+- 变体包还没建时，dry-run 会在 `--build-tmp-dir`（默认 `TMPDIR`）里临时构建一份来算
+  `model_id`，算完即删；该目录不能落在 object store 根内，否则拒跑。
+- apply 的回执写在 registry 发布**之后**。若只有回执写失败，退出码非零，报错会写明
+  "库与 registry 已写、回执未写"；此时 provision 本身已完成，重跑需要新 id 加自己的 dry-run，
+  其回执会是 `inserted=false`。
+- `--output` 的报告在 dry-run 下 `status` 为 `planned`，`--apply` 下不变（仍会被覆盖写）；
+  长期留存的凭据是回执，不是它。
+
+几个坑：
+
+- **回执根要先在 node-22 建好并放权**（一次性）：`scheduler/` 属 `frd_muziyao`，node-27 的 `nwm`
+  建不了子目录。在 node-22 以 `frd_muziyao` 执行
+  `mkdir -p /ghdc/data/nwm/object-store/scheduler/succession && chgrp nwmuser <该目录> && chmod 2775 <该目录>`。
+  没建时脚本在做任何事之前就拒绝，并在报错里给出这条命令；脚本自己从不改回执根的权限。
 
 - `direct_grid_variants/<baseline_model_id>/` 的父目录属 `frd_muziyao:huser` 且带 sticky，
   node-27 的 `nwm` 建不了子目录 → `PermissionError`。**先在 node-22 侧建好并放权**：
@@ -376,8 +431,9 @@ calibration_version_id / shud_code_version`，不读 `model_package_uri`。
 - `--output-registry` 的**父目录不能组可写**，否则 `provider_lock_parent_unsafe`
   （`provider_atomic.py` 要求 `st_uid == geteuid()` 且 `mode & 0o022 == 0`）。`chmod 755` 即可。
 - **`--output-registry` 绝不能指向生产 canonical manifest。** 与 hop 1 的坑不同形：
-  这里 `--output-registry` 是 `required=True`（`scripts/provision_direct_grid_scheduler_registry.py:581`），
-  没有默认值、忘不了；危险的是**主动指过去**。该脚本在 `:558` 调
+  这里 `--output-registry` 是 `required=True`（`scripts/provision_direct_grid_scheduler_registry.py`
+  的 `_parse_args`），没有默认值、忘不了；危险的是**主动指过去**。该脚本的
+  `provision_direct_grid_registry` 在 `--apply` 下调
   `publish_scheduler_registry_manifest(output_models, output_registry, ...)`，而后者把传入的
   `output_models` 当作**完整 `models` 列表**整体写出（`scheduler_file_providers.py:586-594`），
   **不与目标已有内容做任何合并**。指向生产 canonical 的后果是：生产 manifest 的 models 被本次

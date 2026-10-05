@@ -14507,6 +14507,25 @@ def test_state_clone_hook_and_node22_script_select_their_irregular_suites() -> N
     assert "tests/test_state_clone.py" not in script
 
 
+def test_provision_script_and_registration_module_select_the_dry_run_suite() -> None:
+    # #2737: neither path derives the suite name, so each route is explicit.
+    suite = "tests/test_provision_direct_grid_dry_run_and_receipt.py"
+    script = select_tests(["scripts/provision_direct_grid_scheduler_registry.py"], repo_root=Path("."))
+    assert suite in script
+    assert "tests/test_provision_direct_grid_ic_header_gate.py" in script
+
+    registration = select_tests(
+        ["workers/model_registry/direct_grid_variant_registration.py"], repo_root=Path(".")
+    )
+    assert suite in registration
+    # Additive: the broad model-registry rule's own suite is still selected.
+    assert "tests/test_direct_grid_variant_registration.py" in registration
+
+    assert suite in select_tests(["packages/common/provision_succession_receipt.py"], repo_root=Path("."))
+    # The specific rule must not leak onto the rest of the package.
+    assert suite not in select_tests(["workers/model_registry/basins_reingest.py"], repo_root=Path("."))
+
+
 def test_state_clone_shared_fixtures_select_all_their_consumers() -> None:
     # #1697 package fixtures + #1713 CLI-helper split: a change to either shared
     # fixture module must run every suite that consumes it. The package fixtures

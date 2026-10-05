@@ -52,7 +52,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NamedTuple
 
 from workers.forcing_producer.direct_grid_contract import (
     DirectGridContractError,
@@ -146,6 +146,13 @@ class DirectGridVariantRegistrationResult:
     mirror_stations_written: int = 0
 
 
+class DirectGridVariantPlan(NamedTuple):
+    """What a registration of the same input would do: ``(model_id, would_insert)``."""
+
+    model_id: str
+    would_insert: bool
+
+
 def register_direct_grid_variant(
     cursor: Any,
     registration_input: DirectGridVariantRegistrationInput,
@@ -236,6 +243,37 @@ def register_direct_grid_variant(
         grid_snapshot_id=grid_snapshot_id,
         mirror_stations_written=mirror_rows_written,
     )
+
+
+def plan_direct_grid_variant(
+    cursor: Any,
+    registration_input: DirectGridVariantRegistrationInput,
+) -> DirectGridVariantPlan:
+    """Predict what :func:`register_direct_grid_variant` would do, writing nothing.
+
+    Runs the same validation, snapshot resolution, idempotency lookup and id
+    derivation as the registration and stops before its first write, so the
+    only statements issued are the snapshot SELECT and the lookup SELECT.
+
+    Not predicted: a mirror collision (`DIRECT_GRID_VARIANT_MIRROR_COLLISION`)
+    is only discovered by the registration's own conditional upsert.
+    """
+
+    _validate_baseline(registration_input.baseline)
+    contract_payload, _contract = _validate_contract_payload(
+        registration_input.direct_grid_forcing
+    )
+    canonical_grid_key, _grid_snapshot_id = _resolve_snapshot(cursor, registration_input)
+    identity = {
+        "basin_version_id": registration_input.basin_version_id,
+        "canonical_grid_key": canonical_grid_key,
+        "model_input_package_id": contract_payload["model_input_package_id"],
+        "binding_checksum": contract_payload["binding_checksum"],
+    }
+    existing_model_id = _lookup_existing_variant(cursor, **identity)
+    if existing_model_id is not None:
+        return DirectGridVariantPlan(model_id=existing_model_id, would_insert=False)
+    return DirectGridVariantPlan(model_id=_mint_model_id(**identity), would_insert=True)
 
 
 # --- validation ------------------------------------------------------------
