@@ -37,4 +37,4 @@ Risk packs:
 
 - [x] 2.1 `uv run ruff check .`; targeted pytest for the touched test files plus `tests/test_production_scheduler.py -k "model_package"`.
 - [x] 2.2 `scripts/select_ci_tests.py` routes any new test file; `openspec validate refresh-retry-refuses-forcing-input-forecast-failure --strict --no-interactive`.
-- [ ] 2.3 node-27: targeted pytest of the touched test files (no database; `TMPDIR=/home/nwm/tmp`).
+- [x] 2.3 node-27: targeted pytest of the touched test files (no database; `TMPDIR=/home/nwm/tmp`).

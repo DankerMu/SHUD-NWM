@@ -25,7 +25,7 @@ code; the first task turns it into an executable reproduction.
 ## What changes
 
 - `_model_package_refresh_retry_evidence` returns `None` when `_failed_stage(state) in NATIVE_SHUD_STAGE_ALIASES`
-  (the exact condition under which this channel emits a `forecast` restart, line 2048 — not the manual lane's
+  (the exact condition under which this channel emits a `forecast` restart — not the manual lane's
   `_canonical_downstream_stage`, whose alias set differs) and `_forcing_input_failure(state)` is true. The candidate then reaches the permanent-failure guard and is `blocked`,
   exactly as it is today when the model package has not changed.
 - `_CHANGED_MODEL_PACKAGE_NON_CAUSAL_CLASSIFIERS` / `_CHANGED_MODEL_PACKAGE_NON_CAUSAL_CODES` are not edited (the
