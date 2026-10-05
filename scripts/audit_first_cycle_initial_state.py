@@ -97,6 +97,7 @@ from packages.common.safe_fs import (
 )
 from packages.common.source_identity import normalize_source_id
 from packages.common.state_qc import cfg_ic_header_shape
+from packages.scheduler.registry_limits import MAX_REGISTRY_MANIFEST_BYTES
 from services.orchestrator.scheduler_generation import (
     MAX_PACKAGED_IC_PROBE_BYTES,
     PACKAGED_IC_HEADER_SHAPE_INVALID_DETAIL,
@@ -135,7 +136,6 @@ PACKAGED_IC_SOURCE_INVENTORY_CONTENT_PROBE = "inventory_content_probe"
 #: ``inventory_tier_package_objects_rehashed=false`` claim true.
 MAX_IC_HEADER_SHAPE_PROBE_BYTES = 4 * 1024
 
-MAX_REGISTRY_MANIFEST_BYTES = 8 * 1024 * 1024
 MAX_PACKAGE_MANIFEST_BYTES = 16 * 1024 * 1024
 MAX_RUN_MANIFEST_BYTES = 8 * 1024 * 1024
 #: Bound on ``runs/`` fan-out per lane.  Production carries 18 models x 2 sources

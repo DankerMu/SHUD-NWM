@@ -28,6 +28,7 @@ from packages.common.safe_fs import (
 )
 from packages.common.source_identity import normalize_source_id
 from packages.scheduler.registry_audit import normalize_cutover_gate_audit
+from packages.scheduler.registry_limits import MAX_REGISTRY_MANIFEST_BYTES, MAX_REGISTRY_MANIFEST_JSON_NODES
 from services.orchestrator import source_cycle_raw_manifest
 from services.orchestrator.scheduler_state import _ensure_utc, _evidence_safe, _format_utc
 from workers.canonical_converter.converter import evaluate_canonical_readiness
@@ -40,16 +41,10 @@ from workers.forcing_producer.direct_grid_contract import (
 REGISTRY_MANIFEST_SCHEMA_VERSION = "nhms.scheduler.file_model_registry.v1"
 CANONICAL_READINESS_INDEX_SCHEMA_VERSION = "nhms.scheduler.canonical_readiness_index.v1"
 CANONICAL_PRODUCT_CATALOG_SCHEMA_VERSION = "nhms.canonical.product_catalog.v1"
-# 2026-08-25: 4 MiB was ~40 rows of headroom at ~100 KB/row (a large-coverage
-# basin's inlined ``direct_grid_forcing.station_bindings`` alone is ~60 KB).
-# Onboarding the 7 Yellow-River sub-basins took the canonical manifest to 62
-# rows / 4,250,534 B -- 56,230 B over the old cap, which the atomic writer
-# caught on post-read and rolled back (``provider_restored_previous``). Raised
-# to the 16 MiB tier already used by the readiness index and product catalog
-# (~160 rows). ``MAX_REGISTRY_MODELS = 500`` stays the row-count bound; at
-# ~100 KB/row the byte cap is what binds first, by design -- the reader holds
-# the whole manifest in memory.
-MAX_REGISTRY_MANIFEST_BYTES = 16 * 1024 * 1024
+# ``MAX_REGISTRY_MANIFEST_BYTES`` and ``MAX_REGISTRY_MANIFEST_JSON_NODES`` are
+# defined in ``packages.scheduler.registry_limits`` (a leaf module, so light
+# readers share them without importing this provider stack) and stay
+# importable from here.
 MAX_MODEL_PACKAGE_MANIFEST_BYTES = 4 * 1024 * 1024
 MAX_READINESS_INDEX_BYTES = 16 * 1024 * 1024
 MAX_CANONICAL_PRODUCT_CATALOG_BYTES = 16 * 1024 * 1024
@@ -62,11 +57,6 @@ DEFAULT_MAX_MANIFEST_AGE_HOURS = 168
 REQUIRE_DIRECT_GRID_ENV = "NHMS_SCHEDULER_REQUIRE_DIRECT_GRID"
 MAX_FILE_PROVIDER_JSON_DEPTH = 64
 MAX_FILE_PROVIDER_JSON_NODES = 300_000
-# Registry rows inline direct-grid station bindings.  The 132-model onboarding
-# generation fits the 16 MiB byte bound but contains 329,431 JSON value nodes.
-# Keep this larger budget specific to registry manifests; readiness/catalog
-# providers retain their existing bound.
-MAX_REGISTRY_MANIFEST_JSON_NODES = 400_000
 MAX_CANONICAL_CATALOG_CYCLE_DIRS = 4096
 READINESS_DERIVATION_SOURCES = ("gfs", "IFS")
 _COMPACT_CYCLE_RE = re.compile(r"^[0-9]{10}$")

@@ -10,6 +10,7 @@ from packages.common.manifest_index import ManifestValidationError, serialize_ma
 from packages.common.object_store import LocalObjectStore
 from packages.common.safe_fs import SafeFilesystemError, read_bytes_limited_no_follow
 from packages.common.source_identity import normalize_source_id
+from packages.scheduler.registry_limits import MAX_REGISTRY_MANIFEST_BYTES
 from services.orchestrator.chain_manifest_contracts import (
     _assembly_from_entry,
     _assembly_payload_from_runtime_manifest,
@@ -299,8 +300,8 @@ def _slurm_runtime_scheduler_path(
     worker = str(os.getenv(slurm_env_key) or control)
     if require_generation_match and control and worker != control:
         try:
-            control_bytes = read_bytes_limited_no_follow(Path(control), max_bytes=16 * 1024 * 1024)
-            worker_bytes = read_bytes_limited_no_follow(Path(worker), max_bytes=16 * 1024 * 1024)
+            control_bytes = read_bytes_limited_no_follow(Path(control), max_bytes=MAX_REGISTRY_MANIFEST_BYTES)
+            worker_bytes = read_bytes_limited_no_follow(Path(worker), max_bytes=MAX_REGISTRY_MANIFEST_BYTES)
         except (OSError, SafeFilesystemError) as error:
             raise OrchestratorError(
                 "SCHEDULER_REGISTRY_MIRROR_MISMATCH",

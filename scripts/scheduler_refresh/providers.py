@@ -125,27 +125,30 @@ def reconstruct_primary_receipt(config: RefreshConfig, emergency_path: Path) -> 
         raise RefreshError("emergency_record_invalid") from error
     if receipt.get("outcome") != "published_receipt_failed":
         raise RefreshError("emergency_record_invalid")
+    # Each provider is re-read under its own byte bound: a registry manifest may
+    # legitimately be larger than the readiness index bound.
     provider_uris = {
-        "registry": (config.registry_uri, config.provider_store_root),
-        "readiness": (config.readiness_uri, config.provider_store_root),
-        "state": (config.state_uri, config.provider_store_root),
+        "registry": (config.registry_uri, config.provider_store_root, MAX_REGISTRY_MANIFEST_BYTES),
+        "readiness": (config.readiness_uri, config.provider_store_root, MAX_READINESS_INDEX_BYTES),
+        "state": (config.state_uri, config.provider_store_root, MAX_READINESS_INDEX_BYTES),
     }
     if config.worker_registry_uri is not None:
         provider_uris["registry_worker_mirror"] = (
             config.worker_registry_uri,
             config.object_store_root,
+            MAX_REGISTRY_MANIFEST_BYTES,
         )
     for provider in receipt.get("providers", []):
         binding = provider_uris.get(provider.get("name"))
         expected = provider.get("after_sha256")
         if binding is None or not expected:
             raise RefreshError("emergency_record_invalid")
-        uri, containment_root = binding
+        uri, containment_root, max_bytes = binding
         current = capture_scheduler_provider_preimage(
             uri,
             object_store_root=containment_root,
             object_store_prefix=config.object_store_prefix,
-            max_bytes=MAX_READINESS_INDEX_BYTES,
+            max_bytes=max_bytes,
         )
         if current.sha256 != expected:
             raise RefreshError("emergency_record_invalid")
