@@ -1,0 +1,19 @@
+node-27 read-only dry-run, 2026-10-05T12:52:33Z..12:52:36Z, checkout 7d5190ea1 (merge of PR #2742)
+
+command (env from infra/env/node27-ingest.env, TMPDIR=/home/nwm/tmp):
+  uv run --no-sync python scripts/provision_direct_grid_scheduler_registry.py
+    --baseline-registry /home/ghdc/nwm/object-store/scheduler/baseline-registry/tlm-params-20260930T140319Z.json
+    --output-registry /home/nwm/tmp/succ-2737/out-registry.json --operator-id claude-2737-verify
+    --model-id basins_kashigeer_shud --succession-id verify-2737 --receipt-root /home/nwm/tmp/succ-2737
+
+rc=0, status "planned", receipt /home/nwm/tmp/succ-2737/verify-2737/provision-dry-run.json
+  gfs: model_id dg_b6983d7601455718fd9b1ee9930502c7 inserted=false package_prebuilt=true station_count=160
+  IFS: model_id dg_fcbd5b5baddb25699af4336c10e4d719 inserted=false package_prebuilt=true station_count=160
+both ids are present in the production scheduler/registry/manifest-last.json
+
+unchanged: mode+mtime listing of models/direct_grid_variants/basins_kashigeer_shud (depth 2) before/after;
+  --output-registry not created; git status clean; no nhms-provision-dry-run-* left in TMPDIR;
+  /proc/mdstat md0 [UU] before and after.
+
+not covered: the temporary-build path (both packages were prebuilt); any --apply; database row
+  comparison before/after (the session was read-only, not separately measured).
