@@ -1784,6 +1784,11 @@ def _missing_raw_manifest_repair_evidence(
     # it when the package genuinely changed.
     if failure["permanent"] and not _remedy_permits_permanent_failure(failure, remedy="raw_input_reingestion"):
         return None
+    # Re-ingesting raw input cannot repair a forcing package the runtime rejected, and
+    # the retry regenerates nothing (#2727).  A separate statement on purpose: the
+    # refusal table above stays the #1161 / #1313 lists.
+    if failure["permanent"] and _failed_stage(state) in NATIVE_SHUD_STAGE_ALIASES and _forcing_input_failure(state):
+        return None
     failure = {
         **failure,
         "retryable": True,
@@ -1856,6 +1861,10 @@ def _repaired_raw_manifest_downstream_retry_evidence(
     # #1313 D3: same shared judgement, same remedy category as the repair channel
     # above -- consulted after the structural gates, before the overwrite.
     if failure["permanent"] and not _remedy_permits_permanent_failure(failure, remedy="raw_input_reingestion"):
+        return None
+    # #2727: same refusal as the repair channel above -- a rejected forcing package is
+    # not repaired by re-ingested raw input.
+    if failure["permanent"] and _failed_stage(state) in NATIVE_SHUD_STAGE_ALIASES and _forcing_input_failure(state):
         return None
     failure = {
         **failure,
