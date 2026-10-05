@@ -143,8 +143,11 @@ ORDER BY d.declined_at DESC;
 `source=legacy_store_refused`：forcing 被路由到 legacy store，按 #1991 属预期拒绝，这封信只发一次。
 处置归 legacy 表下线（task 8.2）那条线，不在本车道。
 
-`OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED` 下的 published 重解析仍然是永久 rc=1 且本车道看不见。本 PR 不裁决，
-残留由 follow-up 跟踪。
+`first_error_code=OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED`：自 #2690 起，published run 的重解析撞上已压缩 chunk
+时同样写 `PUBLISHED_REPARSE_FAILED` decline，由 `published_reparse` 来源覆盖，tick 不再因它 rc=1。处置：
+先解压目标 chunk，再用 `--force` 重跑或删掉该 decline 行；decline 以 `(init_state_id, product_mtime)` 为键，
+只解压不会让下一 tick 自动重投。解压步骤见 `docs/runbooks/tier-node27-timeseries-storage.md` §4.3.1。
+`OUTPUT_PARSE_COMPRESSED_CHUNK_GUARD_FAILED`（守卫自身失败）仍按瞬时码重试。
 
 退 2：`CONFIG_INVALID` → 修 env（见 `infra/env/node27-parse-failure-residency-alert.example`）；
 `OBSERVATION_FAILED` → 只读 DSN / 库本身；`STATE_CORRUPT` → 状态文件**不会自动重建**（重建会把所有
@@ -172,7 +175,7 @@ run 的处置决定重新产出 / 重新解析，或按业务口径将其 supers
 **认领的盲区**：一趟 tick 挂住超过存活界（6 h）时，它的失败会老出被观察集——那个形状归 §10 的 4 h
 前沿停摆车道。其二是重算路径：已 `published` 的 run 产物被同 run_id 重写后，若重新解析失败，
 `mark_run_failed` 对 `published` 不生效。确定性码的情况自 #2590 起由 `published_reparse` 来源覆盖。
-可能瞬时的码仍然是重试加 rc=1，其中 `OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED` 的持久形态见上文残留。
+可能瞬时的码仍然是重试加 rc=1；`OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED` 自 #2690 起按确定性码处理，见上文。
 
 ### 13.4 阈值旋钮
 

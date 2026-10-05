@@ -31,7 +31,7 @@ Withdrawn from this change; see proposal.md "Removed from this change".
       (`test_only_a_bare_parser_code_is_deterministic`, `BLOCKED -> None`) flips; the `GUARD_FAILED -> None` pin stays.
 - [x] 3.2 Green: a `PUBLISHED_REPARSE_FAILED` decline whose detail starts with the code; the run stays
       `published`; the tick does not return rc=1 for it; the residency observer reports it.
-- [x] 3.4 Runbook: one line in `docs/runbooks/tier-node27-timeseries-storage.md` (the compressed-chunk decline
+- [x] 3.4 Runbook: `docs/runbooks/production-ops/parse-failure-residency-alert.md` updated to the new behavior, and one line in `docs/runbooks/tier-node27-timeseries-storage.md` (the compressed-chunk decline
       paragraph) covering the parse-side code and its exit (`--force` or deleting the decline row); the
       `_deterministic_parse_error_code` docstring corrected.
 - [x] 3.3 Preserve: `OUTPUT_PARSE_COMPRESSED_CHUNK_GUARD_FAILED` and the other transient shapes still retry;
