@@ -27003,6 +27003,126 @@ def test_invalid_manifest_failure_with_changed_model_package_keeps_refresh_retry
     assert decision.evidence["retry_policy"]["manual_retry_required"] is False
 
 
+# --- #2719: the refresh retry refuses a forcing-input forecast failure ----------------------
+
+
+def _changed_model_package_failure_state(*, failed_stage: str, error_code: str) -> dict[str, Any]:
+    return {
+        **_out_of_memory_failure_state(failed_stage=failed_stage, durable_shud_output_exists=False),
+        "error_code": error_code,
+        "run_manifest_model_package": _changed_model_package_prior(),
+    }
+
+
+def _assert_model_package_refresh_retry(decision: Any, *, restart_stage: str) -> None:
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("retry", "retry_after_model_package_refresh")
+    assert decision.evidence["decision"] == "retry_after_model_package_refresh"
+    assert decision.evidence["restart_stage"] == restart_stage
+    assert decision.evidence["retry_policy"]["override_reason"] == "model_package_refresh"
+    assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is True
+
+
+@pytest.mark.usefixtures("recorded_forcing_package_present")
+@pytest.mark.parametrize(
+    ("failed_stage", "error_code"),
+    [
+        ("forecast", "FORCING_PACKAGE_CHECKSUM_MISMATCH"),
+        ("forecast", "FORCING_CHECKSUM_READ_FAILED"),
+        ("forecast", "SHUD_FORCING_CSV_MISSING"),
+        ("forecast", "FORCING_FAILED"),
+        ("run_shud_forecast", "FORCING_PACKAGE_CHECKSUM_MISMATCH"),
+        ("forecast_run", "FORCING_PACKAGE_CHECKSUM_MISMATCH"),
+        ("analysis_run", "FORCING_PACKAGE_CHECKSUM_MISMATCH"),
+    ],
+)
+def test_forcing_input_forecast_failure_with_changed_model_package_blocks_refresh_retry(
+    failed_stage: str, error_code: str
+) -> None:
+    """A changed model package cannot repair a rejected forcing package (#2719).
+
+    The forcing package is witnessed present, so only the decision itself keeps the
+    candidate from a ``forecast`` restart that re-stages the same package.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    state = _changed_model_package_failure_state(failed_stage=failed_stage, error_code=error_code)
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("blocked", "permanent_failure_guard")
+    assert decision.evidence["decision"] == "permanent_failure"
+    assert decision.evidence["failure"]["reason_code"] == error_code
+    assert decision.evidence["failure"]["permanent"] is True
+    assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is False
+    assert decision.evidence["retry_policy"]["manual_retry_required"] is True
+    assert "restart_stage" not in decision.evidence
+    assert "model_package_refresh" not in decision.evidence
+
+
+@pytest.mark.usefixtures("recorded_forcing_package_present")
+@pytest.mark.parametrize(
+    "error_code",
+    ["SHUD_FAILED", "INVALID_MANIFEST", "DIRECT_GRID_TSD_FORC_TOO_LARGE"],
+)
+def test_non_forcing_input_forecast_failure_with_changed_model_package_keeps_refresh_retry(error_code: str) -> None:
+    """Pin (#2719): the ``.tsd.forc`` size limit is not a forcing-input code (``_FORC_``)."""
+
+    candidate = _scheduler_candidate_fixture()
+    state = _changed_model_package_failure_state(failed_stage="forecast", error_code=error_code)
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    _assert_model_package_refresh_retry(decision, restart_stage="forecast")
+    assert decision.evidence["prior_failure_reason"] == error_code
+
+
+@pytest.mark.usefixtures("recorded_forcing_package_present")
+def test_forcing_stage_failure_with_changed_model_package_keeps_refresh_retry_at_forcing() -> None:
+    """Pin (#2719): a restart at ``forcing`` regenerates the package, so the retry stands."""
+
+    candidate = _scheduler_candidate_fixture()
+    state = _changed_model_package_failure_state(failed_stage="forcing", error_code="FORCING_FAILED")
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    _assert_model_package_refresh_retry(decision, restart_stage="forcing")
+
+
+@pytest.mark.usefixtures("recorded_forcing_package_present")
+def test_stale_forcing_code_does_not_refuse_refresh_retry_of_a_non_forcing_forecast_failure() -> None:
+    """Pin (#2719): the failure's own top-level code wins over a stale retry-history code."""
+
+    candidate = _scheduler_candidate_fixture()
+    state = {
+        **_changed_model_package_failure_state(failed_stage="forecast", error_code="INVALID_MANIFEST"),
+        "pipeline_events": [
+            {
+                "event_type": "retry",
+                "entity_type": "pipeline_job",
+                "details": {"previous_error": "FORCING_PACKAGE_CHECKSUM_MISMATCH"},
+            }
+        ],
+    }
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    _assert_model_package_refresh_retry(decision, restart_stage="forecast")
+    assert decision.evidence["prior_failure_reason"] == "INVALID_MANIFEST"
+
+
+def test_changed_model_package_refusal_sets_are_the_1161_lists_verbatim() -> None:
+    """#1313 D2 acceptance line: the #2719 check is a separate statement, not a table row."""
+
+    from services.orchestrator import scheduler_state_failure
+
+    assert scheduler_state_failure._CHANGED_MODEL_PACKAGE_NON_CAUSAL_CLASSIFIERS == frozenset(
+        {"resource_configuration"}
+    )
+    assert scheduler_state_failure._CHANGED_MODEL_PACKAGE_NON_CAUSAL_CODES == frozenset({"OUT_OF_MEMORY"})
+
+
 @pytest.mark.usefixtures("recorded_forcing_package_present")
 def test_cold_start_quarantined_failure_recomputes_from_forecast(tmp_path: Path) -> None:
     config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)

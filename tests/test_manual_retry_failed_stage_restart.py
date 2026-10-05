@@ -787,6 +787,127 @@ def test_automatic_lane_never_retries_a_forcing_input_forecast_failure(
     assert "restart_stage" not in evidence
 
 
+# --- 4c. the model-package refresh retry refuses a forcing-input forecast failure (#2719) ---
+
+_STRICT_RUN_ID = "fcst_gfs_2026052100_model_a"
+_REFRESH_RETRY_FORCING_INPUT_CODES = [
+    "FORCING_PACKAGE_CHECKSUM_MISMATCH",
+    "FORCING_CHECKSUM_READ_FAILED",
+    "SHUD_FORCING_CSV_MISSING",
+    "FORCING_FAILED",
+]
+
+
+def _strict_changed_model_package_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, error_code: str
+) -> tuple[list[Any], list[Any]]:
+    """Strict lane, no marker: the failed forecast's run manifest names an OLD model package.
+
+    The journal derives ``run_manifest_model_package`` only by reading the run manifest at
+    ``hydro_run.run_manifest_uri`` from the object store, so the row records that URI and a
+    manifest carrying the previous package URI is stored there.  The forcing witness is
+    present (the package exists, its content is bad).  Returns (candidates, blocked).
+    """
+
+    from tests.test_production_scheduler import _budget_pass, _seed_budget_journal
+
+    root, scheduler = _seed_budget_journal(monkeypatch, tmp_path, _strict_forecast_failure_rows(error_code))
+    assert os.environ["NHMS_REQUIRE_FORECAST_WARM_START"] == "true"
+    object_root = Path(os.environ["OBJECT_STORE_ROOT"])
+    assert list(object_root.rglob("forcing_version_record.json")), "the forcing witness must be present"
+    manifest_key = f"runs/{_STRICT_RUN_ID}/input/manifest.json"
+    latest_path = root / "latest" / "gfs" / "2026052100" / "model_a.json"
+    latest = json.loads(latest_path.read_text(encoding="utf-8"))
+    latest["hydro_run"]["run_manifest_uri"] = f"s3://nhms/{manifest_key}"
+    latest_path.write_text(json.dumps(latest), encoding="utf-8")
+    LocalObjectStore(object_root, "s3://nhms").write_bytes_atomic(
+        manifest_key,
+        json.dumps({"model": {"model_package_uri": "s3://nhms/models/model_a/old-package/package/"}}).encode("utf-8"),
+    )
+    _selected, candidates, blocked, skipped = _budget_pass(scheduler())
+    assert skipped == []
+    return candidates, blocked
+
+
+@pytest.mark.parametrize("error_code", _REFRESH_RETRY_FORCING_INPUT_CODES)
+def test_strict_lane_changed_model_package_never_retries_a_forcing_input_forecast_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_code: str
+) -> None:
+    """A changed model package cannot repair a rejected forcing package (#2719).
+
+    Pre-#2719 the refresh retry answered before the permanent-failure guard and the
+    candidate was resubmitted at ``forecast``, re-staging the same package.
+    """
+
+    candidates, blocked = _strict_changed_model_package_pass(tmp_path, monkeypatch, error_code=error_code)
+
+    assert [(item.state_evidence.get("reason"), item.state_evidence.get("restart_stage")) for item in candidates] == []
+    (item,) = blocked
+    evidence = item.state_evidence
+    assert evidence["reason"] == "permanent_failure_guard"
+    assert evidence["failure"]["reason_code"] == error_code
+    assert evidence["retry_policy"]["automatic_retry_allowed"] is False
+    assert evidence["retry_policy"]["manual_retry_required"] is True
+    assert "restart_stage" not in evidence
+    assert "model_package_refresh" not in evidence
+
+
+@pytest.mark.parametrize("error_code", ["SHUD_FAILED", "INVALID_MANIFEST"])
+def test_strict_lane_changed_model_package_keeps_the_retry_of_a_non_forcing_input_forecast_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_code: str
+) -> None:
+    """Pin (#2719): every other forecast failure keeps its refresh retry at ``forecast``.
+
+    The reason is not asserted: the strict warm-start upgrade may rewrite it.
+    """
+
+    candidates, blocked = _strict_changed_model_package_pass(tmp_path, monkeypatch, error_code=error_code)
+
+    assert blocked == []
+    (candidate,) = candidates
+    evidence = candidate.state_evidence
+    assert evidence["restart_stage"] == "forecast"
+    assert evidence["retry_policy"]["automatic_retry_allowed"] is True
+    assert evidence["model_package_refresh"]["changed_fields"] == ["model_package_uri"]
+    assert scheduler_module._candidate_restart_stage(candidate) == "forecast"
+
+
+@pytest.mark.parametrize(
+    ("error_code", "expected"),
+    [
+        ("FORCING_PACKAGE_CHECKSUM_MISMATCH", ("blocked", "permanent_failure_guard", None)),
+        ("SHUD_FAILED", ("retry", "retry_after_model_package_refresh", "forecast")),
+    ],
+)
+def test_run_manifest_written_by_the_chain_arms_the_refresh_retry_only_for_non_forcing_input_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_code: str, expected: tuple[str, str, str | None]
+) -> None:
+    """None lane, nothing seeded by hand: the chain's own run manifest is the prior package (#2719).
+
+    The chain stores the run manifest before it submits ``forecast``, so a forecast the
+    runtime failed leaves a readable one behind.  When the registry then serves another
+    package, a forcing-input failure stays blocked; ``SHUD_FAILED`` keeps its retry (pin).
+    """
+
+    (candidate,) = candidates = [_candidate(0)]
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = _Runtime(
+        fail_stage="forecast",
+        array_results_by_stage={"forecast": [["failed"]]},
+        task_error_codes={("forecast", 0): error_code},
+    )
+    _run_pass(tmp_path, repository, client, _cohort_basins(candidates), max_retries=0)
+    _plant_forcing_witness(tmp_path, monkeypatch, candidate)
+    assert (tmp_path / "object-store" / "runs" / candidate.run_id / "input" / "manifest.json").is_file()
+    refreshed = replace(candidate, model_package_uri="s3://nhms/models/model_0_refreshed.tar")
+
+    decision = _decision(repository, refreshed)
+
+    assert (decision.action, decision.reason, decision.evidence.get("restart_stage")) == expected
+    assert decision.evidence["failure"]["reason_code"] == error_code
+    assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is (expected[0] == "retry")
+
+
 # --- 5. after the restart: a second failure and an in-flight restart ------------------------
 
 

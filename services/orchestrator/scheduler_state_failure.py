@@ -2039,6 +2039,11 @@ def _model_package_refresh_retry_evidence(
     # raw-input row refuses.
     if not _remedy_permits_permanent_failure(failure, remedy="changed_model_package"):
         return None
+    # A changed model package cannot repair a forcing package the runtime rejected,
+    # and the ``forecast`` restart below re-stages that same package (#2719).  A
+    # separate statement on purpose: the refusal table above stays the #1161 lists.
+    if _failed_stage(state) in NATIVE_SHUD_STAGE_ALIASES and _forcing_input_failure(state):
+        return None
     prior = state.get("run_manifest_model_package")
     if not isinstance(prior, Mapping):
         return None
