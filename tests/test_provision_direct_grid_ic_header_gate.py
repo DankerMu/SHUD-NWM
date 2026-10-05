@@ -1,6 +1,7 @@
 """Direct-grid provision gate for malformed IC headers (#1197).
 
-``scripts/provision_direct_grid_scheduler_registry.py:354`` is the ONLY point in
+``_validated_state_schema_bytes`` in
+``scripts/provision_direct_grid_scheduler_registry.py`` is the ONLY point in
 the direct-grid flow that reads baseline ``*.cfg.ic`` bytes into a published
 package (``workers/model_registry/direct_grid_variant_registration.py`` is pure DB
 row insertion and never touches IC bytes).  Whatever it hands to

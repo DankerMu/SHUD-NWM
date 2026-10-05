@@ -819,6 +819,15 @@ NODE22_CLONE_CUTOVER_STATES_TESTS: tuple[str, ...] = (
     "tests/test_state_clone_recalibration_cli_validation.py",
     "tests/test_state_clone_baseline_cutover_cli.py",
 )
+# #2737: the provision script and the registration module's read-only planning
+# function are exercised end to end by one suite whose name neither path
+# derives; the script also owns the IC-header gate suite that imports it. The
+# receipt module is same-subject with the script (its only caller).
+PROVISION_DIRECT_GRID_DRY_RUN_TEST = "tests/test_provision_direct_grid_dry_run_and_receipt.py"
+PROVISION_DIRECT_GRID_SCRIPT_TESTS: tuple[str, ...] = (
+    PROVISION_DIRECT_GRID_DRY_RUN_TEST,
+    "tests/test_provision_direct_grid_ic_header_gate.py",
+)
 # The CLI environment helpers shared by BOTH recalibration CLI modules. A change
 # to this support module must run both consumers; its suite names are not
 # same-name derivable (no tests/state_clone_recalibration_cli_fixtures.py), so
@@ -2037,6 +2046,7 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_mapping_builder_cli.py",
             "tests/test_mapping_builder_evidence.py",
             "tests/test_mapping_builder_integration.py",
+            PROVISION_DIRECT_GRID_DRY_RUN_TEST,
         ),
     ),
     PathTestRule(
@@ -3350,6 +3360,25 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # derivable. Explicit irregular mapping.
         "scripts/node22_clone_direct_grid_cutover_states.py",
         NODE22_CLONE_CUTOVER_STATES_TESTS,
+    ),
+    PathTestRule(
+        # #2737: the provision script's dry-run / apply / receipt suite and its
+        # IC-header gate suite. Explicit irregular mapping.
+        "scripts/provision_direct_grid_scheduler_registry.py",
+        PROVISION_DIRECT_GRID_SCRIPT_TESTS,
+    ),
+    PathTestRule(
+        # #2737: the succession receipt helpers have no suite of their own;
+        # they are asserted through the provision script's suite.
+        "packages/common/provision_succession_receipt.py",
+        (PROVISION_DIRECT_GRID_DRY_RUN_TEST,),
+    ),
+    PathTestRule(
+        # #2737: `plan_direct_grid_variant` is pinned against what
+        # `register_direct_grid_variant` then registers only in the provision
+        # suite. Additive to the broad `workers/model_registry/**` rule.
+        "workers/model_registry/direct_grid_variant_registration.py",
+        (PROVISION_DIRECT_GRID_DRY_RUN_TEST,),
     ),
     PathTestRule(
         # #1455: `tests/test_output_parser.py` was the only target, so the cli
