@@ -1,0 +1,22 @@
+node-22 dry-run against the production manifests, 2026-10-05T16:08:44Z..16:08:47Z,
+checkout a06d030da (merge of PR #2746), /scratch/frd_muziyao/NWM/.venv/bin/python (Python 3.12.7),
+environment from infra/env/compute.scheduler-provider-refresh.env, TMPDIR=/scratch/frd_muziyao/nhms-prod/tmp
+
+command:
+  .venv/bin/python -m scripts.node22_publish_merged_scheduler_registry
+    --remove dg_b6983d7601455718fd9b1ee9930502c7 --remove dg_fcbd5b5baddb25699af4336c10e4d719
+    --operator-id claude-2738-verify --succession-id verify-2738
+    --receipt-root /scratch/frd_muziyao/nhms-prod/tmp/succ-2738-160844
+
+rc=0, outcome planned, receipt <receipt-root>/verify-2738/publish-dry-run.json
+  row_count 132 -> 130, removed the two basins_kashigeer rows, introduced none
+  predicted manifest 13,204,198 bytes of 33,554,432; 325,747 JSON nodes of 800,000
+  canonical and mirror sha256 as read: 57487b5b9b93f3f3e76c418a934a95494ef5eaf46bd0ba8b7aa6ee189953bea6 (equal)
+
+unchanged before/after: sha256, mtime and size of both manifests; `ls -la` of both manifest directories
+  (no backup, no lock file, no temporary file); scheduler timer, gateway and compute-api active.
+
+what this shows beyond the unit tests: all 132 production rows pass the tool's source/contract checks and the
+  publisher's validation under OBJECT_STORE_ROOT; the split modules import and run on Python 3.12.7.
+
+not covered: replace / add (need a provision apply receipt), any --apply, the restore paths, the refresh lock.
