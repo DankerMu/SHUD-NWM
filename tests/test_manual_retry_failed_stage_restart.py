@@ -908,6 +908,217 @@ def test_run_manifest_written_by_the_chain_arms_the_refresh_retry_only_for_non_f
     assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is (expected[0] == "retry")
 
 
+# --- 4d. the raw-manifest repair retries refuse a forcing-input forecast failure (#2727) -----
+
+_RAW_REPAIR_CHANNELS = ["repair_missing_raw_manifest", "retry_downstream_after_raw_repair"]
+_RAW_MANIFEST_KEY = "raw/gfs/2026052100/manifest.json"
+
+
+def _raw_repair_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, channel: str, rows: list[dict[str, Any]]
+) -> tuple[list[Any], list[Any]]:
+    """Strict lane: a failed candidate in the geometry of one raw-manifest repair channel.
+
+    Both channels need a succeeded source-cycle ``download`` (a model-less cycle row);
+    it finishes after the failure, which the after-repair channel requires.  The raw
+    manifest is absent for ``repair_missing_raw_manifest`` and present for
+    ``retry_downstream_after_raw_repair``.  The journal's cycle writers
+    (``ensure_forecast_cycle``, ``update_forecast_cycle_status``) record no
+    ``forecast_cycle.manifest_uri``; the hand-written seed does, and the journal read
+    redacts a recorded one to a placeholder both channels abstain on, so it is dropped
+    and the channels probe the default raw manifest key.
+    The run manifest is the one the chain stored before it submitted ``forecast``: its
+    ``initial_state`` is the recorded lead-12h token, the strict selection is lead 6h,
+    so a retry that reaches the strict upgrade is rewritten to a ``forecast`` restart.
+    The forcing witness is present and warm start is ready (the candidate is built).
+    Returns (candidates, blocked).
+    """
+
+    from tests.test_production_scheduler import _budget_pass, _seed_budget_journal
+    from tests.test_scheduler_backfill import _init_state_id_for
+
+    download = {
+        "run_id": "cycle_gfs_2026052100",
+        "cycle_id": "gfs_2026052100",
+        "model_id": None,
+        "job_id": "job_cycle_gfs_2026052100_download_retry_1",
+        "stage": "download",
+        "job_type": "download_source_cycle",
+        "status": "succeeded",
+        "finished_at": "2026-05-21T03:00:00Z",
+    }
+    root, scheduler = _seed_budget_journal(monkeypatch, tmp_path, [*rows, download])
+    assert os.environ["NHMS_REQUIRE_FORECAST_WARM_START"] == "true"
+    latest_path = root / "latest" / "gfs" / "2026052100" / "model_a.json"
+    latest = json.loads(latest_path.read_text(encoding="utf-8"))
+    del latest["forecast_cycle"]["manifest_uri"]
+    latest_path.write_text(json.dumps(latest), encoding="utf-8")
+    object_root = Path(os.environ["OBJECT_STORE_ROOT"])
+    assert list(object_root.rglob("forcing_version_record.json")), "the forcing witness must be present"
+    store = LocalObjectStore(object_root, "s3://nhms")
+    recorded_state_id = _init_state_id_for("2026-05-21T00:00:00Z", lead_hours=12)
+    store.write_bytes_atomic(
+        f"runs/{_STRICT_RUN_ID}/input/manifest.json",
+        json.dumps({"initial_state": {"state_id": recorded_state_id, "quality": "warm_start"}}).encode("utf-8"),
+    )
+    if channel == "retry_downstream_after_raw_repair":
+        store.write_bytes_atomic(_RAW_MANIFEST_KEY, b'{"source_id": "gfs"}')
+    else:
+        assert not (object_root / _RAW_MANIFEST_KEY).exists()
+    _selected, candidates, blocked, skipped = _budget_pass(scheduler())
+    assert skipped == []
+    return candidates, blocked
+
+
+def _assert_blocked_for_an_operator(evidence: Any, error_code: str) -> None:
+    assert evidence["reason"] == "permanent_failure_guard"
+    assert evidence["failure"]["reason_code"] == error_code
+    assert evidence["retry_policy"]["automatic_retry_allowed"] is False
+    assert evidence["retry_policy"]["manual_retry_required"] is True
+    assert "restart_stage" not in evidence
+    assert "raw_manifest_repair" not in evidence
+
+
+@pytest.mark.parametrize("error_code", _REFRESH_RETRY_FORCING_INPUT_CODES)
+@pytest.mark.parametrize("channel", _RAW_REPAIR_CHANNELS)
+def test_strict_lane_raw_repair_never_retries_a_forcing_input_forecast_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, channel: str, error_code: str
+) -> None:
+    """Re-ingesting raw input cannot repair a rejected forcing package (#2727).
+
+    Pre-#2727 both channels answered before the permanent-failure guard and the strict
+    upgrade rewrote the retry to a ``forecast`` restart: the after-repair channel
+    re-staged the same package, the repair channel ran the full chain under evidence
+    that said ``forecast``.
+    """
+
+    candidates, blocked = _raw_repair_pass(
+        tmp_path, monkeypatch, channel=channel, rows=_strict_forecast_failure_rows(error_code)
+    )
+
+    assert [
+        (
+            item.state_evidence.get("reason"),
+            item.state_evidence.get("raw_manifest_repair", {}).get("manifest_exists"),
+            scheduler_module._candidate_restart_stage(item),
+        )
+        for item in candidates
+    ] == []
+    (item,) = blocked
+    _assert_blocked_for_an_operator(item.state_evidence, error_code)
+
+
+@pytest.mark.parametrize(
+    ("failed_stage", "error_code"),
+    [("forecast", "SHUD_FAILED"), ("state_save_qc", "STATE_SAVE_QC_TASK_FAILED")],
+)
+@pytest.mark.parametrize("channel", _RAW_REPAIR_CHANNELS)
+def test_strict_lane_raw_repair_keeps_the_retry_of_every_other_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, channel: str, failed_stage: str, error_code: str
+) -> None:
+    """Pin (#2727): a non-forcing-input forecast failure and a post-forecast failure keep the retry.
+
+    The reason and the restart stage are not asserted: the strict warm-start upgrade
+    may rewrite them (it is not touched by #2727).
+    """
+
+    rows = _strict_forecast_failure_rows(error_code) if failed_stage == "forecast" else _strict_rows(error_code)
+    candidates, blocked = _raw_repair_pass(tmp_path, monkeypatch, channel=channel, rows=rows)
+
+    assert blocked == []
+    (candidate,) = candidates
+    evidence = candidate.state_evidence
+    assert evidence["failure"]["stage"] == failed_stage
+    assert evidence["raw_manifest_repair"]["manifest_exists"] is (channel == "retry_downstream_after_raw_repair")
+    assert evidence["retry_policy"]["automatic_retry_allowed"] is True
+
+
+def _record_repair_download(tmp_path: Path, repository: FileOrchestrationJournalRepository, channel: str) -> None:
+    """None lane: the succeeded source-cycle download (later than any failure) and the raw manifest."""
+
+    repository.upsert_pipeline_job(
+        {
+            "run_id": f"cycle_gfs_{_CYCLE}",
+            "cycle_id": _CYCLE_ID,
+            "source_id": "gfs",
+            "model_id": None,
+            "job_id": f"job_cycle_gfs_{_CYCLE}_download_retry_1",
+            "stage": "download",
+            "job_type": "download_source_cycle",
+            "status": "succeeded",
+            "finished_at": "2099-01-01T00:00:00Z",
+        }
+    )
+    if channel == "retry_downstream_after_raw_repair":
+        LocalObjectStore(tmp_path / "object-store", "s3://nhms").write_bytes_atomic(
+            f"raw/gfs/{_CYCLE}/manifest.json", b'{"source_id": "gfs"}'
+        )
+
+
+def _none_lane_raw_repair_decision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, channel: str, failed_stage: str, error_code: str
+) -> Any:
+    """None lane, the chain's own journal: ``failed_stage`` fails for good, then the raw-repair geometry."""
+
+    (candidate,) = candidates = [_candidate(0)]
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = _Runtime(
+        fail_stage=failed_stage,
+        failures_before_success_by_stage={failed_stage: 1},
+        array_results_by_stage={failed_stage: [["failed"]]},
+        task_error_codes={(failed_stage, 0): error_code},
+    )
+    _run_pass(tmp_path, repository, client, _cohort_basins(candidates), max_retries=0)
+    _plant_forcing_witness(tmp_path, monkeypatch, candidate)
+    _record_repair_download(tmp_path, repository, channel)
+    (decision,) = _decisions(repository, candidates)
+    assert "strict_warm_start" not in decision.evidence
+    return decision
+
+
+@pytest.mark.parametrize("error_code", _REFRESH_RETRY_FORCING_INPUT_CODES)
+@pytest.mark.parametrize("channel", _RAW_REPAIR_CHANNELS)
+def test_none_lane_raw_repair_never_retries_a_forcing_input_forecast_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, channel: str, error_code: str
+) -> None:
+    """Without the strict lane the retry was the full chain under the same run id (#2727).
+
+    That retry adopts the succeeded convert / forcing rows and regenerates nothing, so
+    the candidate is blocked for an operator here too.
+    """
+
+    decision = _none_lane_raw_repair_decision(
+        tmp_path, monkeypatch, channel=channel, failed_stage="forecast", error_code=error_code
+    )
+
+    assert (decision.action, decision.reason) == ("blocked", "permanent_failure_guard")
+    _assert_blocked_for_an_operator(decision.evidence, error_code)
+
+
+@pytest.mark.parametrize(
+    ("failed_stage", "error_code"),
+    [("forecast", "SHUD_FAILED"), ("state_save_qc", "STATE_SAVE_QC_TASK_FAILED")],
+)
+@pytest.mark.parametrize("channel", _RAW_REPAIR_CHANNELS)
+def test_none_lane_raw_repair_keeps_the_retry_of_every_other_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, channel: str, failed_stage: str, error_code: str
+) -> None:
+    """Pin (#2727): the raw-repair decision of every other failure is unchanged."""
+
+    decision = _none_lane_raw_repair_decision(
+        tmp_path, monkeypatch, channel=channel, failed_stage=failed_stage, error_code=error_code
+    )
+
+    assert (decision.action, decision.reason) == ("retry", channel)
+    assert decision.evidence["stage"] == failed_stage
+    assert decision.evidence["failure"]["reason_code"] == error_code
+    assert decision.evidence["restart_stage"] is None
+    assert decision.evidence["restart_from_stage"] == "download"
+    assert decision.evidence["raw_manifest_repair"]["manifest_exists"] is (
+        channel == "retry_downstream_after_raw_repair"
+    )
+
+
 # --- 5. after the restart: a second failure and an in-flight restart ------------------------
 
 
