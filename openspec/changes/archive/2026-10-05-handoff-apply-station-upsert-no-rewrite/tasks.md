@@ -19,9 +19,12 @@
 
 - [x] 2.1 Local: `uv run ruff check .`; `uv run pytest -q tests/test_forcing_domain_handoff_apply.py
       tests/test_direct_grid_variant_registration.py` and the selector / CI-contract tests touched by 1.4.
-- [ ] 2.2 CI: `SQL Migration Dry Run` runs and the new integration tests pass there (not skipped). The PR is
+- [x] 2.2 CI: `SQL Migration Dry Run` runs and the new integration tests pass there (not skipped). The PR is
       non-draft at the last push.
 - [x] 2.3 Red-before: the "second apply leaves ctid/xmin unchanged" test fails on the unmodified function.
 - [ ] 2.4 node-27, after merge: pull at a tick boundary; `n_tup_upd` delta on `met.met_station` across one
       full ingest tick compared with the pre-deploy figure (about 830 per minute during ingest; 268,328 in 31 h).
       No scratch database and no migration on node-27.
+
+Status at archive (2026-10-05): 2.4 is not done. node-27 was pulled to `29060db1` at 2026-10-05T10:29Z, but no new
+cycle had been ingested when #2300 was closed by the owner; `n_tup_upd` stood at 274,868.
