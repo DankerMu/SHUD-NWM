@@ -988,11 +988,14 @@ def test_select_tests_maps_orchestrator_manifest_surface_without_whole_slow_suit
     # with the redirect targets.
     # #2539: the runtime-manifest schema contract suite (sub-second, DB-free)
     # validates this module's real builder output, so it rides the stop rule.
+    # #2744: the registry capacity suite fails if the canonical/mirror
+    # comparison stops bounding its reads by the shared registry bound.
     manifest_contract = "tests/test_run_manifest_schema_contract.py"
     assert selected == sorted(
         {
             *ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
             manifest_contract,
+            "tests/test_scheduler_registry_capacity.py",
             WRITE_SURFACE_SCAN_PATH,
             FAMILY_GUARD_PATH,
             RESOLVE_SURFACE_GUARD_PATH,
@@ -1002,7 +1005,13 @@ def test_select_tests_maps_orchestrator_manifest_surface_without_whole_slow_suit
     # whole slow suites out. The supplemental riders (and the small contract
     # suite) are whole files by construction and are excluded here by name, not
     # by loosening the check.
-    supplemental = {WRITE_SURFACE_SCAN_PATH, FAMILY_GUARD_PATH, RESOLVE_SURFACE_GUARD_PATH, manifest_contract}
+    supplemental = {
+        WRITE_SURFACE_SCAN_PATH,
+        FAMILY_GUARD_PATH,
+        RESOLVE_SURFACE_GUARD_PATH,
+        manifest_contract,
+        "tests/test_scheduler_registry_capacity.py",
+    }
     assert all("::" in test_path for test_path in selected if test_path not in supplemental)
 
 
@@ -14524,6 +14533,25 @@ def test_provision_script_and_registration_module_select_the_dry_run_suite() -> 
     assert suite in select_tests(["packages/common/provision_succession_receipt.py"], repo_root=Path("."))
     # The specific rule must not leak onto the rest of the package.
     assert suite not in select_tests(["workers/model_registry/basins_reingest.py"], repo_root=Path("."))
+
+
+def test_merged_registry_publish_tool_and_shared_receipt_helpers_select_their_suites() -> None:
+    # #2738: the tool's suite is same-name derivable; the receipt helpers both
+    # succession steps share derive no suite name, so their route is explicit
+    # and must reach the provision suite AND the publish suite.
+    publish = "tests/test_node22_publish_merged_scheduler_registry.py"
+    provision = "tests/test_provision_direct_grid_dry_run_and_receipt.py"
+    assert publish in select_tests(["scripts/node22_publish_merged_scheduler_registry.py"], repo_root=Path("."))
+
+    shared = select_tests(["packages/common/succession_receipt.py"], repo_root=Path("."))
+    assert publish in shared and provision in shared
+    # The provision module re-exports the shared helpers, which the publish suite pins.
+    reexporting = select_tests(["packages/common/provision_succession_receipt.py"], repo_root=Path("."))
+    assert publish in reexporting and provision in reexporting
+    # The publish suite pre-creates its lock parents through the mode helpers.
+    assert publish in select_tests(["tests/provider_mode_helpers.py"], repo_root=Path("."))
+    # Neither route leaks onto the provision script, which the publish tool never imports.
+    assert publish not in select_tests(["scripts/provision_direct_grid_scheduler_registry.py"], repo_root=Path("."))
 
 
 def test_state_clone_shared_fixtures_select_all_their_consumers() -> None:

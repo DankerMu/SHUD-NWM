@@ -178,12 +178,11 @@ basins_hys_* 后继」**，所以 #1701 原计划的「换 id + 状态延续」�
 
 **本次五步全做了**（§7.1 的 hhe 退役漏了第 5 步，见 §7.1.1）：
 
-1. **注册表两份**（NFS + `/scratch/frd_muziyao/nhms-prod` 本地）各移除 6 条
-   `dg_*`（3 流域 × gfs/ifs），62 → 56。checksum **复用仓库自己的
-   `scheduler_file_provider_refresh._prospective_registry_content`** 重算，
-   不要手写 canonical 序列化；写入后立刻用 `_load_previous_canonical_registry`
-   原地回读校验（sha 相符 + 56 行）才算成功。备份
-   `manifest-last.json.bak-zhaochen-retire-20260825`。
+1. **注册表两份**（NFS canonical + `/scratch/frd_muziyao/nhms-prod` 本地 mirror）各移除 6 条
+   `dg_*`（3 流域 × gfs/ifs），62 → 56，备份 `manifest-last.json.bak-zhaochen-retire-20260825`。
+   当时是手工脚本；**现在同样的事用 `scripts/node22_publish_merged_scheduler_registry.py` 做**（#2738，
+   见本节末尾「退役流域的 manifest 发布」）：每条要退的 `dg_*` 一个 `--remove`，同一流域的各 source
+   必须一起移除，不需要 provision 回执。
 2. **node-27 `hydro.hydro_run`**：552 条 published（184 × 3）翻 `superseded`，
    行级备份 `/home/nwm/zhaochen-published-runs-backup-20260825.csv`。
 3. **`infra/env/node27-ingest.env`**：`AUTOPIPE_EXCLUDE_BASINS` 追加
@@ -283,6 +282,41 @@ basins_hys_* 后继」**，所以 #1701 原计划的「换 id + 状态延续」�
 `Basins-retired/issue-1701-20260825/` 移回＋ 27 侧 `--force` 注册（会把
 `superseded` 翻回 active）＋ `AUTOPIPE_EXCLUDE_BASINS` 去掉三项＋ baseline
 `core.model_instance` 三行 `activate` 回来（少这一步 = 底图上没有河网）。
+
+**退役流域的 manifest 发布（现行做法，#2738）。** 上面第 1 步现在用工具做；机制、回执与失败结局见
+[`recalibration-and-archive.md`](recalibration-and-archive.md) 的 5.7.1。退役没有前置的 provision 与克隆，
+顺序约束退化为「先确认 `squeue` 里没有这些 `dg_*` 在飞，再发布」；apply 期间调度器 timer 应处于停止状态，
+两份 manifest 不一致时 worker 会拒绝 submit。
+
+```bash
+# node-22，frd_muziyao
+cd /scratch/frd_muziyao/NWM
+set -a
+. infra/env/compute.scheduler-provider-refresh.env   # 两份 manifest 路径、两个根、prefix、refresh 锁；不含 DB 变量
+set +a
+SUCCESSION_ID=<succession-id>                        # [A-Za-z0-9._-]{1,80}，一次退役一个
+PUBLISH_ARGS=(
+  --remove "<dg_* model_id>"                         # 每条要退的行一个；同一流域的 gfs 与 IFS 必须都写
+  --operator-id "<operator>"
+  --succession-id "$SUCCESSION_ID"
+)
+
+# 1) dry-run：不写 manifest、不备份、不取锁
+cd /scratch/frd_muziyao/NWM && .venv/bin/python -m scripts.node22_publish_merged_scheduler_registry "${PUBLISH_ARGS[@]}"
+
+# 2) 读回执：removed_model_ids 就是要退的全部行，row_count_after = row_count_before − 行数
+cat "$NHMS_SCHEDULER_PROVIDER_STORE_ROOT/scheduler/succession/$SUCCESSION_ID/publish-dry-run.json"
+
+# 3) 调度器 timer 先停（systemctl --user stop nhms-compute-scheduler.timer），确认 service 不在跑，再 apply；
+#    参数与第 1 步逐字相同，只多一个 --apply。发布并跑完 refresh 之后再把 timer 恢复原状态
+systemctl --user is-active nhms-compute-scheduler.timer nhms-compute-scheduler.service || true
+cd /scratch/frd_muziyao/NWM && .venv/bin/python -m scripts.node22_publish_merged_scheduler_registry "${PUBLISH_ARGS[@]}" --apply
+```
+
+要退的 `model_id` 按 `basin_id` 从 canonical manifest 取（`dg_*` 是哈希、不含流域名，见上文第 1 个坑的
+同一条教训）。发布后照旧手动跑一趟 refresh 重建 readiness（判据见 5.7.1 的「触发手动 refresh 的坑」）；
+2026-10-05 生产 manifest 实测 132 行、13,353,454 B、329,431 个 JSON 值节点，上限 32 MiB / 800,000 节点，
+移除只会让它变小。
 
 ### 7.3 2026-08-25：`basins_neiliuqu` 退出调度（补登，#2621）
 

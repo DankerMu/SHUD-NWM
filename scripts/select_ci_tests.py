@@ -828,6 +828,14 @@ PROVISION_DIRECT_GRID_SCRIPT_TESTS: tuple[str, ...] = (
     PROVISION_DIRECT_GRID_DRY_RUN_TEST,
     "tests/test_provision_direct_grid_ic_header_gate.py",
 )
+# #2738: the merged-registry publish tool's suite is same-name derivable from
+# the script; the constant exists for the receipt helpers both succession steps
+# share, which no suite name derives.
+MERGED_REGISTRY_PUBLISH_TEST = "tests/test_node22_publish_merged_scheduler_registry.py"
+SUCCESSION_RECEIPT_TESTS: tuple[str, ...] = (
+    PROVISION_DIRECT_GRID_DRY_RUN_TEST,
+    MERGED_REGISTRY_PUBLISH_TEST,
+)
 # The CLI environment helpers shared by BOTH recalibration CLI modules. A change
 # to this support module must run both consumers; its suite names are not
 # same-name derivable (no tests/state_clone_recalibration_cli_fixtures.py), so
@@ -2192,6 +2200,10 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             # gated surface, so listing them would be routing noise.
             "tests/test_publish_registry_manifest_audit.py",
             "tests/test_publish_registry_manual_cli.py",
+            # #2738: the merged-registry publish suite builds both manifest
+            # directories and the refresh-lock parent through
+            # `make_directory_with_explicit_mode`.
+            MERGED_REGISTRY_PUBLISH_TEST,
             # #2614 / #2548: both pre-create the state-index lock parent through
             # `make_directory_with_explicit_mode`.
             "tests/test_state_index_upsert_cost.py",
@@ -2849,7 +2861,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # #2539: the runtime-manifest schema contract validates this module's real
         # builder output against schemas/run_manifest.schema.json.
         ORCHESTRATOR_MANIFEST_SURFACE_PATH_PATTERNS[1],
-        (*ORCHESTRATOR_MANIFEST_SURFACE_TESTS, "tests/test_run_manifest_schema_contract.py"),
+        (
+            *ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
+            "tests/test_run_manifest_schema_contract.py",
+            # #2744: the canonical/mirror comparison bounds its reads by the
+            # shared registry bound; the capacity suite fails if it stops.
+            "tests/test_scheduler_registry_capacity.py",
+        ),
         stop_on_match=True,
     ),
     PathTestRule(
@@ -3368,6 +3386,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ("tests/test_scheduler_registry_capacity.py",),
     ),
     PathTestRule(
+        # #2744: this reader once carried a private registry byte bound; the
+        # capacity suite is what fails if one reappears (chain_manifests.py
+        # gets the same suite through its manifest-surface rule).
+        "scripts/audit_first_cycle_initial_state.py",
+        ("tests/test_scheduler_registry_capacity.py", "tests/test_first_cycle_initial_state_audit.py"),
+    ),
+    PathTestRule(
         # #2737: the provision script's dry-run / apply / receipt suite and its
         # IC-header gate suite. Explicit irregular mapping.
         "scripts/provision_direct_grid_scheduler_registry.py",
@@ -3375,9 +3400,17 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         # #2737: the succession receipt helpers have no suite of their own;
-        # they are asserted through the provision script's suite.
+        # they are asserted through the provision script's suite. #2738: the
+        # publish suite pins that this module still exports the shared helpers.
         "packages/common/provision_succession_receipt.py",
-        (PROVISION_DIRECT_GRID_DRY_RUN_TEST,),
+        SUCCESSION_RECEIPT_TESTS,
+    ),
+    PathTestRule(
+        # #2738: the step-independent receipt helpers (succession id, receipt
+        # directory, exclusive-create write) are used by the provision step and
+        # by the merged-registry publish step; a change must run both suites.
+        "packages/common/succession_receipt.py",
+        SUCCESSION_RECEIPT_TESTS,
     ),
     PathTestRule(
         # #2737: `plan_direct_grid_variant` is pinned against what

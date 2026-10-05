@@ -467,11 +467,44 @@ PYTHONPATH=/scratch/frd_muziyao/NWM /scratch/frd_muziyao/NWM/.venv/bin/python sc
 > 写在各自 workspace 里，因为共享目录的组可写属性会触发 `provider_lock_parent_unsafe`。
 > 它不是遗留垃圾、也不参与任何自动流程，保留即可；候选放哪儿由 `--output-registry` 决定。
 
-**hop 4 — 合并发布。** 机制与 5.7.1 相同（直接调 `publish_scheduler_registry_manifest`、
-两份共用同一 `generated_at`、CAS）。新流域上线是 **add-only**，发布前断言：
-行数 = 旧 + 2×新流域数、无重复 `model_id`、新 slug 与既有 slug 不相交、全部 `direct_grid`、
-每流域恰好一条 gfs 一条 IFS、每行都带 `shud_input_name` 与 `model_package_uri`。
-备份 stamp 每次换新，否则脚本会因备份已存在而拒跑。
+**hop 4 — 合并发布。** 用 `scripts/node22_publish_merged_scheduler_registry.py`（#2738），机制、回执、
+失败结局与 [`recalibration-and-archive.md`](recalibration-and-archive.md) 的 5.7.1 相同（先备份、canonical 走
+CAS、两份共用同一 `generated_at`、失败时恢复本次提交过的那份）。新流域上线是 **add-only**：hop 3 的
+`provision-apply.json` 里每个 `models[].model_id` 各写一个 `--add`，同一流域的 gfs 与 IFS 两行必须一起加。
+顺序仍是 provision（hop 3）→ 回拷（hop 3b）→ 发布；apply 期间调度器 timer 应处于停止状态，
+两份 manifest 不一致时 worker 会拒绝 submit。
+
+```bash
+# node-22，frd_muziyao
+cd /scratch/frd_muziyao/NWM
+set -a
+. infra/env/compute.scheduler-provider-refresh.env   # 两份 manifest 路径、两个根、prefix、refresh 锁；不含 DB 变量
+set +a
+SUCCESSION_ID=<succession-id>                        # 与 hop 3 相同
+PUBLISH_ARGS=(
+  --add "<新流域的 gfs model_id>" --add "<新流域的 IFS model_id>"   # 每个新流域两行，重复写
+  --operator-id "<operator>"
+  --succession-id "$SUCCESSION_ID"
+)
+
+# 1) dry-run：不写 manifest、不备份、不取锁
+cd /scratch/frd_muziyao/NWM && .venv/bin/python -m scripts.node22_publish_merged_scheduler_registry "${PUBLISH_ARGS[@]}"
+
+# 2) 读回执
+cat "$NHMS_SCHEDULER_PROVIDER_STORE_ROOT/scheduler/succession/$SUCCESSION_ID/publish-dry-run.json"
+
+# 3) 调度器 timer 先停（systemctl --user stop nhms-compute-scheduler.timer），确认 service 不在跑，再 apply；
+#    参数与第 1 步逐字相同，只多一个 --apply。发布并跑完 refresh 之后再把 timer 恢复原状态
+systemctl --user is-active nhms-compute-scheduler.timer nhms-compute-scheduler.service || true
+cd /scratch/frd_muziyao/NWM && .venv/bin/python -m scripts.node22_publish_merged_scheduler_registry "${PUBLISH_ARGS[@]}" --apply
+```
+
+读 dry-run 回执：`row_count_after = row_count_before + 2×新流域数`、`introduced_model_ids` 就是本次全部新行、
+`removed_model_ids` 为空、`manifest_bytes_remaining` 与 `manifest_json_nodes_remaining` 为正。
+以前靠人工断言的几条现在由工具在写入前拒绝：重复 `model_id`、非 `direct_grid` 行、某流域不是每个 source
+恰好一行（新 `basin_id` 与既有的撞了也落在这一条）、新包在 scratch 根或 NFS 根下缺失或校验和不符（回拷漏了
+在这里被拒）、缺 `model_package_uri` 等 publisher 必填字段。**工具不检查 `shud_input_name`**——它由上面的
+packaged-IC 探针覆盖，探针必须先过。备份名带 UTC 时间戳，每次 apply 尝试自动换新。
 
 **registry manifest 有字节和 JSON 复杂度上限，行数增长会撞。** `MAX_REGISTRY_MANIFEST_BYTES` 与
 `MAX_REGISTRY_MANIFEST_JSON_NODES`（定义在 `packages/scheduler/registry_limits.py`，

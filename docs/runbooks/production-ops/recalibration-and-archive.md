@@ -207,16 +207,72 @@ dry-run 回执，输入或预测集合有任何出入就拒绝并回滚；回执
 > 「retire declaration 恢复顺序」只适用于非 direct-grid 拓扑（见该节的拓扑围栏），
 > 不适用于这里。
 
-做法是直接调 `publish_scheduler_registry_manifest`，两份目标**共用同一个 `generated_at`**
-（这样两份字节相同是结构性的，不依赖事后比对），canonical 侧带 `expected_preimage` 做 CAS：
+做法是跑 `scripts/node22_publish_merged_scheduler_registry.py`（#2738）。它在 node-22 上、不连库，
+以两份 manifest 的属主 `frd_muziyao` 身份运行：把「当前 canonical 全量 − 旧 M1 行 + provision 输出的
+M1′ 行」合并（没被点名的行原样、原序保留，被替换的行原位换成 provision registry 里的那一行），
+先各备份一份，再发 canonical（对读到的那份字节做 CAS），然后用**同一个 `generated_at`** 发 scratch
+mirror（两份字节相同是结构性的，不依赖事后比对），最后回读两份并要求 sha 相同。
+不带 `--apply` 就是 dry-run：全部校验照做、预测合并后 manifest 的大小，但不写任何一份 manifest、
+不备份、不取锁，只落一份回执。与 provision 共用同一个 `--succession-id`：
 
-```text
-合并集合 = 当前 canonical 全量 − 旧 M1 行 + provision 输出的 M1′ 行
-发布前校验：行数不变、无重复 model_id、全部 direct_grid、每流域行数不变
-发布顺序：先备份两份 manifest -> canonical（CAS）-> scratch mirror
-发布后再手动跑一趟 refresh：renewal 重建 canonical readiness 并留下
-  outcome=published / refused=[] 的 receipt
+```bash
+# node-22，frd_muziyao
+cd /scratch/frd_muziyao/NWM
+set -a
+. infra/env/compute.scheduler-provider-refresh.env   # 两份 manifest 路径、两个根、prefix、refresh 锁；不含 DB 变量
+set +a
+SUCCESSION_ID=<succession-id>                        # 与 provision 那一步相同
+PUBLISH_ARGS=(
+  --replace "<旧 M1 的 model_id>:<M1′ 的 model_id>"   # 每个 (流域, source) 一对，重复写
+  --operator-id "<operator>"
+  --succession-id "$SUCCESSION_ID"
+)
+
+# 1) dry-run
+cd /scratch/frd_muziyao/NWM && .venv/bin/python -m scripts.node22_publish_merged_scheduler_registry "${PUBLISH_ARGS[@]}"
+
+# 2) 读回执，逐项核对后再继续
+cat "$NHMS_SCHEDULER_PROVIDER_STORE_ROOT/scheduler/succession/$SUCCESSION_ID/publish-dry-run.json"
+
+# 3) 调度器 timer 先停（systemctl --user stop nhms-compute-scheduler.timer），确认 service 不在跑，再 apply；
+#    参数与第 1 步逐字相同，只多一个 --apply。发布并跑完 refresh 之后再把 timer 恢复原状态
+systemctl --user is-active nhms-compute-scheduler.timer nhms-compute-scheduler.service || true
+cd /scratch/frd_muziyao/NWM && .venv/bin/python -m scripts.node22_publish_merged_scheduler_registry "${PUBLISH_ARGS[@]}" --apply
 ```
+
+- **`--replace` 的两个 id 从哪来**：M1′ 取 `provision-apply.json` 的 `models[].model_id`；旧 M1 按
+  `(basin_version_id, source_id)` 从 canonical manifest 取。新行只能来自 provision 的输出 registry：
+  工具要求同 id 的 `provision-apply.json`、核对该 registry 文件的 sha256 与回执一致，并拒绝
+  「回执里有、但既没被本次操作引入也不在 canonical 里」的 `model_id`。provision 的输出 registry 在
+  object store 之外时用 `--new-rows-registry <路径>` 指明；发布计划变了就换一个新的 `--succession-id`，
+  用 `--provision-succession-id` 指回没变的那次 provision。
+- **读 dry-run 回执看什么**：`introduced_model_ids` / `removed_model_ids` 与预期一致、
+  `row_count_before == row_count_after`、`replaced[]` 每对的 `basin_id` / `source_id` 以及新旧
+  `basin_version_id`、`canonical.sha256_before == mirror.sha256_before`、
+  `manifest_bytes_remaining` 与 `manifest_json_nodes_remaining` 为正。2026-10-05 生产实测
+  132 行、13,353,454 B、329,431 个 JSON 值节点，上限 32 MiB / 800,000 节点（节点先撞，口径见
+  [`service-bringup.md`](service-bringup.md) 的 hop 4）。
+- **发布前工具自己拒绝的情形**（都在任何写入之前，报错里点名 `model_id`）：两份 manifest 字节不同
+  （先跑一趟 refresh 让两份对齐）、id 不在 / 已在 canonical、同一个 id 出现在两个操作里、行缺
+  `resource_profile.direct_grid_source_id` 或它不在该行 contract 的 `applicable_source_ids` 里、
+  replace 换了流域或 source、合并后某流域不是「每个 source 恰好一行」、新包在 `OBJECT_STORE_ROOT`
+  （scratch，回拷没做就是这里拒）或 `NHMS_SCHEDULER_PROVIDER_STORE_ROOT` 下缺失或校验和不符、
+  合并结果过不了 publisher 自己的校验 / 字节上限 / 节点上限。
+- **apply 期间调度器 timer 应处于停止状态**（整段 rollout 已按上文 disabled 的话保持即可；工具自己不停、
+  不启任何 timer 或 service，也不跑 refresh）。两份 manifest 不一致时 **worker 会拒绝 submit**，所以工具
+  保证不留下这种状态：apply 全程不阻塞地持有 provider refresh 锁（refresh 正在跑就直接拒绝），任何一步失败
+  都把**本次提交过的**那份按提交时的 preimage 恢复成读到的字节。
+- **apply 的三种失败结局**（都非零退出，各留一份 `publish-apply-failed-<UTC 时间戳>.json`，与本次备份
+  同一个时间戳）：`refused`＝两份都没被本次改动；`rolled_back`＝改过的已恢复，两份回到原字节；
+  这两种直接用同一个 `--succession-id` 重跑 apply。`inconsistent`＝恢复失败，或某份被别的写者改了（工具
+  不会覆盖别人的字节）：报错给出两份当前 sha256、两个备份路径和两条出路——用备份恢复两份，或跑一趟
+  refresh 把 canonical 的行重发到两份。成功只写 `publish-apply.json`（`outcome=published`），它存在后同一个
+  id 不能再 apply。若两份都已发布、回读一致但回执写不出，工具**不回滚**，非零退出并打印 sha256、两个备份
+  路径与 `manifest_generated_at`，按「已发布、未留回执」手工记录后继续。
+- 备份是 `<manifest>.bak-<succession-id>-<UTC yyyymmddThhmmssZ>`，每次 apply 尝试各一对，从不覆盖。
+
+**发布后再手动跑一趟 refresh**：renewal 重建 canonical readiness 并留下
+`outcome=published` / `refused=[]` 的 receipt（触发方式与判据见下文「触发手动 refresh 的坑」）。
 
 2026-08-22 实测（Huai-MAIN + jialingjiang，各 gfs/IFS 两行，`t*`=2026-08-22T00:00:00Z）：
 34 行进、34 行出；旧四行消失、新四行到位；两份 sha 相同；随后 renewal receipt
