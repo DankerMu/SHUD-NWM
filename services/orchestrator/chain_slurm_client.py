@@ -72,6 +72,9 @@ _POLICY_DENIAL_CODES = frozenset(
         "POLICY_CONFIG_ERROR",
     }
 )
+# 60 s, not 30: a 65-task state_save_qc array submit takes 28-38 s at the gateway,
+# and a client that gives up first re-submits an accepted job (#2733).
+DEFAULT_GATEWAY_TIMEOUT_SECONDS = 60.0
 _SUBMIT_JOB_ID_RE = re.compile(r"^(?:\d+|mock_\d+)$")
 _SUBMIT_RESPONSE_STATUSES = frozenset(status.value for status in SlurmJobStatus)
 
@@ -81,7 +84,7 @@ class HttpSlurmGatewayClient:
         self,
         base_url: str,
         *,
-        timeout: float = 30.0,
+        timeout: float = DEFAULT_GATEWAY_TIMEOUT_SECONDS,
         error_cls: type[Exception] = OrchestratorError,
         coerce_mapping: Callable[[Any], dict[str, Any]] = _coerce_mapping,
         response_json_or_text: Callable[[httpx.Response], dict[str, Any] | str] = _response_json_or_text,

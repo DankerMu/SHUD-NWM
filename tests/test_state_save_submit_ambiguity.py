@@ -529,3 +529,10 @@ def test_exhausted_ambiguous_row_left_unmarked_blocks_as_retry_limit_exhausted(
     assert (decision.action, decision.reason) == ("blocked", "retry_limit_exhausted")
     assert decision.evidence["decision"] == "permanent_failure"
     assert decision.evidence["failure"]["reason_code"] == "STATE_SAVE_SUBMIT_AMBIGUOUS"
+
+
+def test_gateway_client_default_timeout_outlasts_an_array_submit() -> None:
+    """#2733: the gateway took ~38 s to accept a 65-task state_save_qc array."""
+    from services.orchestrator.chain import HttpSlurmGatewayClient
+
+    assert HttpSlurmGatewayClient("http://127.0.0.1:8090").timeout == 60.0
