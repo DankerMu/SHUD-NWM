@@ -19,8 +19,11 @@
       `tests/test_direct_grid_variant_registration.py`, `tests/test_provision_direct_grid_ic_header_gate.py`,
       `tests/test_basins_package.py`, `tests/test_state_clone_baseline_cutover_cli.py`,
       `tests/test_select_ci_tests.py`.
-- [ ] 2.2 CI green on the PR.
-- [ ] 2.3 node-27 after merge: one real dry-run for an already-provisioned model, receipt root in a
+- [x] 2.2 CI green on the PR.
+- [x] 2.3 node-27 after merge: one real dry-run for an already-provisioned model, receipt root in a
       throwaway directory under `/home/nwm/tmp`, `export TMPDIR=/home/nwm/tmp`; it predicts the existing
       `model_id`, `inserted = false`, and `git status` / the object store / the database are untouched. No
       `--apply`.
+
+Status 2026-10-05: 2.3 ran on node-27 for `basins_kashigeer_shud` (evidence/2026-10-05-node27-dry-run.txt). It covered
+the prebuilt-package path only; the temporary-build path and any `--apply` have no real-database evidence.
