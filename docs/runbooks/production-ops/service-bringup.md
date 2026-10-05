@@ -369,9 +369,8 @@ calibration_version_id / shud_code_version`，不读 `model_package_uri`。
 `GFS=gfs_0p25 / IFS=ifs_0p25` 即可：`normalize_source_id` 走 `_STORAGE_SOURCE_IDS[upper()]`，
 产出生产在用的 `gfs`（小写）与 `IFS`（大写）——这个不对称是规范化结果，别去"修正"。
 
-**不带 `--apply` 就是 dry-run，什么都不写**（#2737）：不写库、不在 object store 上建包或 chmod、
-不写 `--output-registry`，只落自己的回执。先 dry-run、读回执、再 `--apply`，三步共用同一个
-`--succession-id`（`[A-Za-z0-9._-]{1,80}`，一次 succession 一个，例如 `20260822-add-7-basins`）：
+**不带 `--apply` 就是 dry-run，什么都不写**（#2737）：不写库、不在 object store 上建包或 chmod、不写 `--output-registry`，只落自己的回执。
+先 dry-run、读回执、再 `--apply`，三步共用同一个 `--succession-id`（`[A-Za-z0-9._-]{1,80}`，一次 succession 一个，例如 `20260822-add-7-basins`）：
 
 ```bash
 ssh -p 32099 nwm@210.77.77.27
@@ -382,7 +381,8 @@ mkdir -p /home/nwm/tmp && export TMPDIR=/home/nwm/tmp   # dry-run 的临时构�
 SUCCESSION_ID=<succession-id>
 PROVISION_ARGS=(
   --baseline-registry "<本次上线 hop 1 的 --registry-manifest 写出的 baseline registry>"   # 不是固定的 manifest-last.json
-  --output-registry "<本次 workspace>/direct-grid-registry.json"
+  # 写到两节点都读得到的共享 NFS 上（node-27 的 /home/ghdc/nwm/... 即 node-22 的 /ghdc/data/nwm/...）
+  --output-registry "<共享 NFS 上的本次 workspace>/direct-grid-registry.json"
   --operator-id "<operator>"
   --model-id "<baseline_model_id>"   # 每个新增 baseline 重复一次
   --succession-id "$SUCCESSION_ID"
@@ -398,36 +398,30 @@ cat "$OBJECT_STORE_ROOT/scheduler/succession/$SUCCESSION_ID/provision-dry-run.js
 PYTHONPATH=/home/nwm/NWM uv run python scripts/provision_direct_grid_scheduler_registry.py "${PROVISION_ARGS[@]}" --apply
 ```
 
-- 回执落在 `<receipt-root>/<succession-id>/provision-dry-run.json` 与 `provision-apply.json`，
-  `--receipt-root` 默认 `<OBJECT_STORE_ROOT>/scheduler/succession`（两节点共享的 NFS）。回执用
-  `O_EXCL` 创建、**从不覆盖**：同一个 id 同一种模式再跑一次，会在碰库、构建之前直接拒绝。
-- `--apply` 要求同 id 的 dry-run 回执存在，且 baseline registry 的 sha256、source grid 快照、
-  `OBJECT_STORE_PREFIX`、`--output-registry` 路径、所选 `model_id` 与它预测的
-  `(baseline_model_id, source_id, model_id)` 集合全部一致；任一不符即非零退出，事务回滚、
-  不发布 registry、不写 apply 回执（此前已在 object store 上建好的变体包会留下）。
+- 回执落在 `<receipt-root>/<succession-id>/provision-dry-run.json` 与 `provision-apply.json`，`--receipt-root` 默认 `<OBJECT_STORE_ROOT>/scheduler/succession`（两节点共享的 NFS）。
+  回执用 `O_EXCL` 创建、**从不覆盖**：同一个 id 同一种模式再跑一次，会在碰库、构建之前直接拒绝。
+- `--apply` 要求同 id 的 dry-run 回执存在，且 baseline registry 的 sha256、source grid 快照、`OBJECT_STORE_PREFIX`、`--output-registry` 路径、所选 `model_id` 与它预测的
+  `(baseline_model_id, source_id, model_id)` 集合全部一致；任一不符即非零退出，事务回滚、不发布 registry、不写 apply 回执（此前已在 object store 上建好的变体包会留下）。
   dry-run 之后改过任何输入，就换一个新 id 重新 dry-run。
-- **`inserted=false` 不等于 apply 什么都不写。** apply 对每个变体恒定执行：更新该行的
-  `model_package_uri` / `resource_profile`，并按 `station_count` 逐站 upsert `met.met_station`，
-  insert 路径与复用路径都一样。dry-run 不预测镜像行冲突
-  （`DIRECT_GRID_VARIANT_MIRROR_COLLISION`），它仍可能让 apply 失败并整体回滚。
-- 变体包还没建时，dry-run 会在 `--build-tmp-dir`（默认 `TMPDIR`）里临时构建一份来算
-  `model_id`，算完即删；该目录不能落在 object store 根内，否则拒跑。
-- apply 的回执写在 registry 发布**之后**。若只有回执写失败，退出码非零，报错会写明
-  "库与 registry 已写、回执未写"；此时 provision 本身已完成，重跑需要新 id 加自己的 dry-run，
-  其回执会是 `inserted=false`。
-- `--output` 的报告在 dry-run 下 `status` 为 `planned`，`--apply` 下不变（仍会被覆盖写）；
-  长期留存的凭据是回执，不是它。
+- **`inserted=false` 不等于 apply 什么都不写。** apply 对每个变体恒定执行：更新该行的 `model_package_uri` / `resource_profile`，
+  并按 `station_count` 逐站 upsert `met.met_station`，insert 路径与复用路径都一样。
+  dry-run 不预测镜像行冲突（`DIRECT_GRID_VARIANT_MIRROR_COLLISION`），它仍可能让 apply 失败并整体回滚。
+- 变体包还没建时，dry-run 会在 `--build-tmp-dir`（默认 `TMPDIR`）里临时构建一份来算 `model_id`，算完即删；该目录不能落在 object store 根内，否则拒跑。
+- apply 的回执写在 registry 发布**之后**。若只有回执写失败，退出码非零，报错会写明 "库与 registry 已写、回执未写"；
+  此时 provision 本身已完成，重跑需要新 id 加自己的 dry-run，其回执会是 `inserted=false`。
+- `--output` 的报告在 dry-run 下 `status` 为 `planned`，`--apply` 下不变（仍会被覆盖写）；长期留存的凭据是回执，不是它。
 
 几个坑：
 
-- **回执根要先在 node-22 建好并放权**（一次性）：`scheduler/` 属 `frd_muziyao`，node-27 的 `nwm`
-  建不了子目录。在 node-22 以 `frd_muziyao` 执行
+- **回执根要先在 node-22 建好并放权**（一次性）：`scheduler/` 属 `frd_muziyao`，node-27 的 `nwm` 建不了子目录。在 node-22 以 `frd_muziyao` 执行
   `mkdir -p /ghdc/data/nwm/object-store/scheduler/succession && chgrp nwmuser <该目录> && chmod 2775 <该目录>`。
   没建时脚本在做任何事之前就拒绝，并在报错里给出这条命令；脚本自己从不改回执根的权限。
 
 - `direct_grid_variants/<baseline_model_id>/` 的父目录属 `frd_muziyao:huser` 且带 sticky，
   node-27 的 `nwm` 建不了子目录 → `PermissionError`。**先在 node-22 侧建好并放权**：
   `mkdir -p <dir> && chgrp nwmuser <dir> && chmod 2775 <dir>`（两个账号共有组 `nwmuser`/1107）。
+- `--output-registry` 必须写在**两节点都读得到**的地方：hop 4 在 node-22 上读这份文件。放共享 NFS（node-27 写 `/home/ghdc/nwm/...`，
+  node-22 看到的是同一挂载的 `/ghdc/data/nwm/...`），并且仍须满足下一条的「父目录不能组可写」。
 - `--output-registry` 的**父目录不能组可写**，否则 `provider_lock_parent_unsafe`
   （`provider_atomic.py` 要求 `st_uid == geteuid()` 且 `mode & 0o022 == 0`）。`chmod 755` 即可。
 - **`--output-registry` 绝不能指向生产 canonical manifest。** 与 hop 1 的坑不同形：
@@ -435,7 +429,7 @@ PYTHONPATH=/home/nwm/NWM uv run python scripts/provision_direct_grid_scheduler_r
   的 `_parse_args`），没有默认值、忘不了；危险的是**主动指过去**。该脚本的
   `provision_direct_grid_registry` 在 `--apply` 下调
   `publish_scheduler_registry_manifest(output_models, output_registry, ...)`，而后者把传入的
-  `output_models` 当作**完整 `models` 列表**整体写出（`scheduler_file_providers.py:586-594`），
+  `output_models` 当作**完整 `models` 列表**整体写出（`scheduler_file_providers.py` 的 `publish_scheduler_registry_manifest`），
   **不与目标已有内容做任何合并**。指向生产 canonical 的后果是：生产 manifest 的 models 被本次
   产出的 dg 变体行**整体替换**，其余所有流域的行当场消失。且此处未传 `expected_preimage`，
   **没有 CAS 保护**兜底。正确姿势始终是：输出到本次 workspace 下的独立路径，再在 hop 4 合并发布。
@@ -467,12 +461,10 @@ PYTHONPATH=/scratch/frd_muziyao/NWM /scratch/frd_muziyao/NWM/.venv/bin/python sc
 > 写在各自 workspace 里，因为共享目录的组可写属性会触发 `provider_lock_parent_unsafe`。
 > 它不是遗留垃圾、也不参与任何自动流程，保留即可；候选放哪儿由 `--output-registry` 决定。
 
-**hop 4 — 合并发布。** 用 `scripts/node22_publish_merged_scheduler_registry.py`（#2738），机制、回执、
-失败结局与 [`recalibration-and-archive.md`](recalibration-and-archive.md) 的 5.7.1 相同（先备份、canonical 走
-CAS、两份共用同一 `generated_at`、失败时恢复本次提交过的那份）。新流域上线是 **add-only**：hop 3 的
-`provision-apply.json` 里每个 `models[].model_id` 各写一个 `--add`，同一流域的 gfs 与 IFS 两行必须一起加。
-顺序仍是 provision（hop 3）→ 回拷（hop 3b）→ 发布；apply 期间调度器 timer 应处于停止状态，
-两份 manifest 不一致时 worker 会拒绝 submit。
+**hop 4 — 合并发布。** 用 `scripts/node22_publish_merged_scheduler_registry.py`（#2738），机制、回执、失败结局与
+[`recalibration-and-archive.md`](recalibration-and-archive.md) 的 5.7.1 相同（先备份、canonical 走 CAS、两份共用同一 `generated_at`、失败时恢复本次提交过的那份）。
+新流域上线是 **add-only**：hop 3 的 `provision-apply.json` 里每个 `models[].model_id` 各写一个 `--add`，同一流域的 gfs 与 IFS 两行必须一起加。
+顺序仍是 provision（hop 3）→ 回拷（hop 3b）→ 发布；apply 期间调度器 timer 应处于停止状态，两份 manifest 不一致时 worker 会拒绝 submit。
 
 ```bash
 # node-22，frd_muziyao
@@ -483,6 +475,8 @@ set +a
 SUCCESSION_ID=<succession-id>                        # 与 hop 3 相同
 PUBLISH_ARGS=(
   --add "<新流域的 gfs model_id>" --add "<新流域的 IFS model_id>"   # 每个新流域两行，重复写
+  # hop 3 的 --output-registry 在 node-22 上的路径；它在 object store 之外时回执不记 object_store_key，必须给
+  --new-rows-registry "<node-22 视角的路径>"            # /home/ghdc/nwm/... 在这里写成 /ghdc/data/nwm/...
   --operator-id "<operator>"
   --succession-id "$SUCCESSION_ID"
 )
@@ -499,12 +493,13 @@ systemctl --user is-active nhms-compute-scheduler.timer nhms-compute-scheduler.s
 cd /scratch/frd_muziyao/NWM && .venv/bin/python -m scripts.node22_publish_merged_scheduler_registry "${PUBLISH_ARGS[@]}" --apply
 ```
 
-读 dry-run 回执：`row_count_after = row_count_before + 2×新流域数`、`introduced_model_ids` 就是本次全部新行、
-`removed_model_ids` 为空、`manifest_bytes_remaining` 与 `manifest_json_nodes_remaining` 为正。
-以前靠人工断言的几条现在由工具在写入前拒绝：重复 `model_id`、非 `direct_grid` 行、某流域不是每个 source
-恰好一行（新 `basin_id` 与既有的撞了也落在这一条）、新包在 scratch 根或 NFS 根下缺失或校验和不符（回拷漏了
-在这里被拒）、缺 `model_package_uri` 等 publisher 必填字段。**工具不检查 `shud_input_name`**——它由上面的
-packaged-IC 探针覆盖，探针必须先过。备份名带 UTC 时间戳，每次 apply 尝试自动换新。
+读 dry-run 回执：`row_count_after = row_count_before + 2×新流域数`、`introduced_model_ids` 就是本次全部新行、`removed_model_ids` 为空、
+`manifest_bytes_remaining` 与 `manifest_json_nodes_remaining` 为正。以前靠人工断言的几条现在由工具在写入前拒绝：重复 `model_id`、非 `direct_grid` 行、
+某流域不是每个 source 恰好一行（新 `basin_id` 与既有的撞了也落在这一条）、新包在 scratch 根或 NFS 根下缺失或校验和不符（回拷漏了在这里被拒）、
+缺 `model_package_uri` 等 publisher 必填字段。**工具不检查 `shud_input_name`**——它由上面的 packaged-IC 探针覆盖，探针必须先过。
+备份名带 UTC 时间戳，每次 apply 尝试自动换新。
+
+**`--apply` 没有任何输出就死了**（被 `kill -9`、节点掉电等，来不及恢复也来不及写回执）：比对两份 manifest 的 sha256，不同就把两份都从本次的 `.bak-<succession-id>-<stamp>` 备份恢复。
 
 **registry manifest 有字节和 JSON 复杂度上限，行数增长会撞。** `MAX_REGISTRY_MANIFEST_BYTES` 与
 `MAX_REGISTRY_MANIFEST_JSON_NODES`（定义在 `packages/scheduler/registry_limits.py`，

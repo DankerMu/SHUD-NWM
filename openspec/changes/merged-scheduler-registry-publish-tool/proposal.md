@@ -87,7 +87,8 @@ registry bounds (`MAX_REGISTRY_MANIFEST_BYTES`, `MAX_REGISTRY_MANIFEST_JSON_NODE
    `publish-dry-run.json`.
 
 7. `--apply` requires `--succession-id` and that id's `publish-dry-run.json`, and refuses unless the dry-run
-   recorded the same operations, the same sha256 of the canonical `models` array (canonical JSON of the array;
+   recorded the same operations, the same provision succession and provision apply receipt (path and
+   sha256), the same sha256 of the canonical `models` array (canonical JSON of the array;
    a pure renewal that only changes `generated_at` does not invalidate the dry-run) and the same merged
    `model_id` list. For the whole apply it holds the provider refresh lock (the one
    `scripts/scheduler_refresh/runner.py` takes) without blocking; a held lock is a refusal. Then, in order:
@@ -97,6 +98,8 @@ registry bounds (`MAX_REGISTRY_MANIFEST_BYTES`, `MAX_REGISTRY_MANIFEST_JSON_NODE
       (registry preimages are captured with the registry byte cap, not the function's default);
    3. publish the mirror with the same rows, the same `generated_at` and its own `expected_preimage`;
    4. read both back and require one sha256.
+   SIGTERM and SIGHUP during the apply are handled like an interrupt (step 8); a SIGHUP that is ignored on
+   entry stays ignored. The refresh lock path must be absolute.
    The tool does not stop or start any timer or service and does not run the provider refresh.
 
 8. Failure from step 2 onward. Each publish passes `commit_observer` and keeps the committed

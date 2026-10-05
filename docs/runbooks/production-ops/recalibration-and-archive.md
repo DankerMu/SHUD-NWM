@@ -144,7 +144,9 @@ manifest——**不是** §3.1.2 的 cutover declaration。
 
 **provision 这一步先 dry-run 再 `--apply`**（#2737）。不带 `--apply` 时脚本什么都不写
 （不写库、不在 object store 上建包或 chmod、不写 `--output-registry`），只预测每个变体的
-`model_id` 并落一份回执；三步共用同一个 `--succession-id`：
+`model_id` 并落一份回执；三步共用同一个 `--succession-id`。`--output-registry` 必须写在**两节点都读得到**
+的地方——发布那一步在 node-22 上读它：放共享 NFS（node-27 写 `/home/ghdc/nwm/...`，node-22 看到的是
+同一挂载的 `/ghdc/data/nwm/...`），且父目录仍须满足「不能组可写」那条（见 [`service-bringup.md`](service-bringup.md) hop 3 的坑）：
 
 ```bash
 # node-27，/home/nwm/NWM；DATABASE_URL / OBJECT_STORE_ROOT / OBJECT_STORE_PREFIX 已在环境里
@@ -152,7 +154,8 @@ mkdir -p /home/nwm/tmp && export TMPDIR=/home/nwm/tmp
 SUCCESSION_ID=<succession-id>          # [A-Za-z0-9._-]{1,80}，一次率定切换一个
 PROVISION_ARGS=(
   --baseline-registry "<含新率定 baseline 行的 registry>"
-  --output-registry "<本次 workspace>/direct-grid-registry.json"   # 绝不指向生产 canonical manifest
+  # 写到两节点都读得到的共享 NFS 上（node-27 的 /home/ghdc/nwm/... 即 node-22 的 /ghdc/data/nwm/...），绝不指向生产 canonical manifest
+  --output-registry "<共享 NFS 上的本次 workspace>/direct-grid-registry.json"
   --operator-id "<operator>"
   --model-id "<baseline_model_id>"
   --succession-id "$SUCCESSION_ID"
@@ -224,6 +227,8 @@ set +a
 SUCCESSION_ID=<succession-id>                        # 与 provision 那一步相同
 PUBLISH_ARGS=(
   --replace "<旧 M1 的 model_id>:<M1′ 的 model_id>"   # 每个 (流域, source) 一对，重复写
+  # provision 的 --output-registry 在 node-22 上的路径；它在 object store 之外时回执不记 object_store_key，必须给
+  --new-rows-registry "<node-22 视角的路径>"            # /home/ghdc/nwm/... 在这里写成 /ghdc/data/nwm/...
   --operator-id "<operator>"
   --succession-id "$SUCCESSION_ID"
 )
@@ -270,6 +275,8 @@ cd /scratch/frd_muziyao/NWM && .venv/bin/python -m scripts.node22_publish_merged
   id 不能再 apply。若两份都已发布、回读一致但回执写不出，工具**不回滚**，非零退出并打印 sha256、两个备份
   路径与 `manifest_generated_at`，按「已发布、未留回执」手工记录后继续。
 - 备份是 `<manifest>.bak-<succession-id>-<UTC yyyymmddThhmmssZ>`，每次 apply 尝试各一对，从不覆盖。
+- **`--apply` 没有任何输出就死了**（被 `kill -9`、节点掉电等，来不及恢复也来不及写回执）：比对两份 manifest 的
+  sha256，不同就把两份都从本次的 `.bak-<succession-id>-<stamp>` 备份恢复。
 
 **发布后再手动跑一趟 refresh**：renewal 重建 canonical readiness 并留下
 `outcome=published` / `refused=[]` 的 receipt（触发方式与判据见下文「触发手动 refresh 的坑」）。

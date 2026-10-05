@@ -318,6 +318,9 @@ cd /scratch/frd_muziyao/NWM && .venv/bin/python -m scripts.node22_publish_merged
 2026-10-05 生产 manifest 实测 132 行、13,353,454 B、329,431 个 JSON 值节点，上限 32 MiB / 800,000 节点，
 移除只会让它变小。
 
+**`--apply` 没有任何输出就死了**（被 `kill -9`、节点掉电等，来不及恢复也来不及写回执）：比对两份 manifest 的
+sha256，不同就把两份都从本次的 `.bak-<succession-id>-<stamp>` 备份恢复。
+
 ### 7.3 2026-08-25：`basins_neiliuqu` 退出调度（补登，#2621）
 
 **当时没有 issue 或 runbook 记录**，本条是 2026-09-29 按 node-27 只读核查补登的；
