@@ -102,6 +102,9 @@ class HydroRunContext:
     output_uri: str | None = None
     run_type: str = "forecast"
     scenario_id: str | None = None
+    # Upper bound of the forecast run window (#2687): required for a forecast
+    # run, unused for an analysis run.
+    end_time: datetime | None = None
     # Surrogate identity keys (migration 000050), resolved by the same query
     # that loads the run context. ``None`` on the DB-free path, which never
     # reaches the dual-writing INSERT.
@@ -372,6 +375,10 @@ class FileOutputParserRepository:
         cycle_time = _parse_time(cycle_time_value) if cycle_time_value not in (None, "") else None
         if cycle_time is None and run_type != "analysis":
             raise OutputParsingError("CYCLE_TIME_MISSING", f"hydro_run {run_id} has no cycle_time.")
+        end_time_value = manifest.get("end_time") or identity.get("end_time")
+        end_time = _parse_time(end_time_value) if end_time_value not in (None, "") else None
+        if end_time is None and run_type != "analysis":
+            raise OutputParsingError("END_TIME_MISSING", f"hydro_run {run_id} has no end_time.")
         context = HydroRunContext(
             run_id=str(manifest.get("run_id") or identity.get("run_id") or run_id),
             model_id=str(model.get("model_id") or identity.get("model_id") or ""),
@@ -386,6 +393,7 @@ class FileOutputParserRepository:
             output_uri=outputs.get("output_uri") or manifest.get("output_uri"),
             run_type=run_type,
             scenario_id=manifest.get("scenario_id") or identity.get("scenario_id"),
+            end_time=end_time,
         )
         for field_name, value in (
             ("model_id", context.model_id),
@@ -578,6 +586,8 @@ def parse_rivqdown_file(
                 numeric_unit="absolute_unix_minutes",
             )
         lead_time_hours = None if context.run_type == "analysis" else _lead_time_hours(valid_time, context.cycle_time)
+        if context.run_type != "analysis":
+            _require_valid_time_in_run_window(valid_time, context, line_number)
         for segment, value_token in zip(segments, tokens[1:], strict=True):
             try:
                 value_m3d = float(value_token)
@@ -770,6 +780,7 @@ class PsycopgOutputParserRepository:
                 h.source_id,
                 h.cycle_time,
                 h.start_time,
+                h.end_time,
                 h.output_uri,
                 h.run_type,
                 h.scenario_id,
@@ -801,6 +812,9 @@ class PsycopgOutputParserRepository:
         run_type = str(row.get("run_type") or "forecast")
         if cycle_time is None and run_type != "analysis":
             raise OutputParsingError("CYCLE_TIME_MISSING", f"hydro_run {run_id} has no cycle_time.")
+        end_time = row.get("end_time")
+        if end_time is None and run_type != "analysis":
+            raise OutputParsingError("END_TIME_MISSING", f"hydro_run {run_id} has no end_time.")
         return HydroRunContext(
             run_id=str(row["run_id"]),
             model_id=str(row["model_id"]),
@@ -813,6 +827,7 @@ class PsycopgOutputParserRepository:
             output_uri=row.get("output_uri"),
             run_type=run_type,
             scenario_id=row.get("scenario_id"),
+            end_time=_ensure_utc(end_time) if end_time is not None else None,
             run_key=row.get("run_key"),
             basin_version_key=row.get("basin_version_key"),
             river_network_version_key=row.get("river_network_version_key"),
@@ -1394,6 +1409,27 @@ def _parse_time_token(token: str, start_time: datetime, *, numeric_unit: str = "
     except ValueError as error:
         raise OutputParsingError("INVALID_TIME_VALUE", f"Invalid time value: {token!r}") from error
     return _ensure_utc(parsed)
+
+
+def _require_valid_time_in_run_window(valid_time: datetime, context: HydroRunContext, line_number: int) -> None:
+    """Refuse a forecast row outside ``[cycle_time, end_time]``, both bounds inclusive (#2687).
+
+    Latest-cycle discovery probes facts with ``valid_time BETWEEN cycle_time AND
+    end_time``; a run written outside that window would be skipped silently.
+    """
+
+    if context.cycle_time is None:
+        raise OutputParsingError("CYCLE_TIME_MISSING", "cycle_time is required for the forecast run window.")
+    if context.end_time is None:
+        raise OutputParsingError("END_TIME_MISSING", "end_time is required for the forecast run window.")
+    cycle_time = _ensure_utc(context.cycle_time)
+    end_time = _ensure_utc(context.end_time)
+    if not cycle_time <= _ensure_utc(valid_time) <= end_time:
+        raise OutputParsingError(
+            "VALID_TIME_OUTSIDE_RUN_WINDOW",
+            f"Row {line_number} has valid_time {_format_time(valid_time)} outside the run window "
+            f"[{_format_time(cycle_time)}, {_format_time(end_time)}]",
+        )
 
 
 def _lead_time_hours(valid_time: datetime, cycle_time: datetime | None) -> int:

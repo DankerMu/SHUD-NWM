@@ -47,8 +47,8 @@ predicate shape x statistics state x store branch x chunk compression state.
 * chunk — uncompressed and compressed.
 
 Criterion 1 is judged PER BRANCH — ``river_segment_key`` on a narrow node. See
-``tests/river_ts_plan_criteria`` for why the judgement is branch-scoped (its
-legacy entry is now unreachable from here), and ``tests/test_river_ts_plan_criteria``
+``tests/river_ts_plan_criteria`` for why ``narrow`` is the only branch, and
+``tests/test_river_ts_plan_criteria``
 for the offline proof that all three criteria bite (including the synthetic
 "segment key late in the Index Cond" plan of ``tasks.md`` 1.5, which passes
 criteria 1 and 2).
@@ -233,7 +233,7 @@ _ROW_IDENTITY_PREFIX = "ROW IDENTITY"
 #: that returned the wrong number of rows measured the wrong thing, and "the plan
 #: is known-bad here" is not a reason to stop checking that.
 #:
-#: EMPTY EXTRACT (``tests/river_ts_plan_criteria.py:255-258``) for a third reason,
+#: EMPTY EXTRACT (``tests/river_ts_plan_criteria.evaluate_cell``) for a third reason,
 #: and it is the one that made the allowlist unsafe before it was listed here: an
 #: empty extract is not a bad plan, it is NO plan node for this chunk, so
 #: criteria 1 and 2 go False having judged nothing while row identity and

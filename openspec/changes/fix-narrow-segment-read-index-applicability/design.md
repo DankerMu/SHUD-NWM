@@ -298,8 +298,17 @@ Conditions (the cross product is the gate):
 - predicate shape: run-bound **and** `issue_time=latest` — F8 shows they flip different chunks;
 - statistics state: absent **and**, if §1.2 shows it reproduces, stale-in-the-F9b-sense;
 - branch: narrow **and** legacy — F1b/F1c, each judged against its own branch's segment
-  identity column (see criterion 1);
+  identity column (see criterion 1) — *as designed; no longer the executed axis, see the revision note
+  below*;
 - chunk state: uncompressed **and** compressed.
+
+**Revision, 2026-10-05 (#2501) — the branch axis is `narrow` only.** #1988 task 6.3 (PR #2500, commit
+`67fe44d5d`) removed the river legacy rendering and the per-run store routing. No reader can reach a
+legacy-routed run's facts any more, so the legacy half of the cross product is untestable, not failing,
+and it is no longer a required condition: the gate that runs is the product above with the single
+branch value `narrow` (`tests/river_ts_stats_matrix_seed.BRANCHES`). The legacy cells named in the
+measurements and receipts below are the record of the two-valued matrix as it ran on 2026-09-18; they
+are history and are not edited.
 
 Pass criteria, per fact-reading node (three, not two — the third closes the hole the review found):
 
@@ -307,13 +316,21 @@ Pass criteria, per fact-reading node (three, not two — the third closes the ho
    `river_segment_id` on a legacy node, including the `compress_hyper_7_*` child of a legacy
    `DecompressChunk`. **The two branches are not the same predicate and requiring the key on legacy
    would be a permanent false red**: `render_river_ts_sql(..., "legacy")` retains the text aid conjuncts
-   (`packages/common/river_ts_render.py:2634-2637`, which does not call the key-predicate assertion at
-   all) and the legacy compression segmentby is text-based, so in every measured legacy plan the text
+   (`render_river_ts_sql` in `packages/common/river_ts_render.py`, whose legacy arm did not call the
+   key-predicate assertion at all) and the legacy compression segmentby is text-based, so in every
+   measured legacy plan the text
    primary key or text segmentby index wins and `river_segment_key` sits in the `Filter`. Verified in
    `receipts/2026-09-17-i8-explain-gate/explain-1987.json`, case `shj_nj/legacy`:
    `compress_hyper_7_104_chunk` binds `river_segment_id` in its `Index Cond` while
    `_hyper_3_62_chunk` carries `river_segment_key` only as a filter. Forcing legacy onto the key index
    would be exactly the regression must-preserve #4 forbids;
+
+   **Revision, 2026-10-05 (#2501):** the legacy half of this criterion is superseded by the upstream
+   contract (#1988 task 6.3 / PR #2500 / `67fe44d5d`). `render_river_ts_sql` now accepts the `narrow`
+   store only and raises `RiverTemplateError` for any other, so the legacy arm cited above no longer
+   exists and `render_river_ts_sql(..., "legacy")` raises. Criterion 1 as executed is
+   `river_segment_key` bound in the `Index Cond` of every narrow fact node, including the
+   `compress_hyper_*` child of a `DecompressChunk`;
 2. the node's `Rows Removed by Filter / Actual Rows` is within `filter_ratio_limit`, read off
    `evaluate_explain_json_plan`'s signature so the test reddens if D11 moves the bound;
 3. the node's `Shared Hit Blocks` is within a fixed multiple of the post-`ANALYZE` primary-key baseline

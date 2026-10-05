@@ -4639,7 +4639,11 @@ is leaving the tick to rediscover the block every 10 minutes. To take the
 decompress route on a run already declined, decompress the chunk and re-run
 with `--force` (which bypasses the exclusion entirely), or delete the run's
 rows from `ops.ingest_recompute_decline`; a decompress alone does not reopen
-the decision, because nothing about the products changed.
+the decision, because nothing about the products changed. The same exit
+applies on the parse side (`#2690`): a `published` run whose re-parse hits
+`OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED` is declined as `PUBLISHED_REPARSE_FAILED`
+with that code leading `detail`; `OUTPUT_PARSE_COMPRESSED_CHUNK_GUARD_FAILED` is
+never declined.
 
 #### 4.3.2 Manual decompress steps
 

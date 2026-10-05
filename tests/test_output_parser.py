@@ -162,7 +162,7 @@ def test_parse_qhh_time_min_header_is_relative_to_run_start(tmp_path: Path) -> N
 
 
 def test_parse_dat_long_relative_minutes_stay_relative_to_run_start(tmp_path: Path) -> None:
-    store, parser, repository = _build_parser(tmp_path)
+    store, parser, repository = _build_parser(tmp_path, end_time="2027-05-03T00:00:00Z")
     minutes = 367 * 24 * 60
     store.write_bytes_atomic(
         "runs/run_001/output/demo.rivqdown",
@@ -286,10 +286,15 @@ def test_output_parser_from_env_requires_database_url_without_db_free(monkeypatc
     assert exc_info.value.error_code == "DATABASE_URL_MISSING"
 
 
-def test_output_parser_db_free_writes_object_store_artifacts(
+def _seed_db_free_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
+    *,
+    rivqdown: str = "time,seg_a,seg_b\n2026-05-01T00:00:00Z,86400,172800\n",
+    **manifest_overrides: Any,
+) -> Path:
+    """A DB-free run in the object store; a ``None`` override removes that manifest key."""
+
     object_root = tmp_path / "object-store"
     workspace_root = tmp_path / "workspace"
     monkeypatch.delenv("DATABASE_URL", raising=False)
@@ -312,16 +317,14 @@ def test_output_parser_db_free_writes_object_store_artifacts(
     )
     output_dir = object_root / "runs" / "run_001" / "output"
     output_dir.mkdir(parents=True)
-    (output_dir / "demo.rivqdown").write_text(
-        "time,seg_a,seg_b\n2026-05-01T00:00:00Z,86400,172800\n",
-        encoding="utf-8",
-    )
+    (output_dir / "demo.rivqdown").write_text(rivqdown, encoding="utf-8")
     manifest = {
         "run_id": "run_001",
         "run_type": "forecast",
         "source_id": "gfs",
         "cycle_time": "2026-05-01T00:00:00Z",
         "start_time": "2026-05-01T00:00:00Z",
+        "end_time": "2026-05-02T00:00:00Z",
         "model": {
             "model_id": "model_001",
             "basin_version_id": "basin_v1",
@@ -333,10 +336,20 @@ def test_output_parser_db_free_writes_object_store_artifacts(
             "output_uri": "s3://nhms/runs/run_001/output/",
         },
         "identity": {"cycle_id": "gfs_2026050100"},
+        **manifest_overrides,
     }
+    manifest = {key: value for key, value in manifest.items() if value is not None}
     manifest_path = object_root / "runs" / "run_001" / "input" / "manifest.json"
     manifest_path.parent.mkdir(parents=True)
     manifest_path.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+    return object_root
+
+
+def test_output_parser_db_free_writes_object_store_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    object_root = _seed_db_free_run(tmp_path, monkeypatch)
 
     parser = OutputParser.from_env()
     result = parser.parse_run("run_001")
@@ -356,6 +369,207 @@ def test_output_parser_db_free_writes_object_store_artifacts(
     )
     assert parse_result["status"] == "parsed"
     assert parse_result["rows_written"] == 2
+
+
+# --- forecast rows lie inside [cycle_time, end_time] (#2687) -------------------------------
+
+_WINDOW = "[2026-05-01T00:00:00Z, 2026-05-02T00:00:00Z]"
+_UNIX_MINUTES_12H_BEFORE_CYCLE = int(datetime(2026, 4, 30, 12, tzinfo=UTC).timestamp() / 60)
+
+
+@pytest.mark.parametrize(
+    ("rivqdown", "row", "valid_time"),
+    [
+        ("time,seg_a,seg_b\n2026-04-30T23:00:00Z,86400,172800\n", 1, "2026-04-30T23:00:00Z"),
+        (
+            "time,seg_a,seg_b\n2026-05-02T00:00:00Z,86400,172800\n2026-05-02T01:00:00Z,86400,172800\n",
+            2,
+            "2026-05-02T01:00:00Z",
+        ),
+        ("0 86400 172800\n1441 86400 172800\n", 2, "2026-05-02T00:01:00Z"),
+        ("-60 86400 172800\n0 86400 172800\n", 1, "2026-04-30T23:00:00Z"),
+        (f"{_UNIX_MINUTES_12H_BEFORE_CYCLE} 86400 172800\n", 1, "2026-04-30T12:00:00Z"),
+    ],
+    ids=[
+        "before_cycle_time",
+        "after_end_time",
+        "relative_minutes_after_end_time",
+        "negative_relative_minutes",
+        "absolute_unix_minutes_less_than_a_day_before_cycle_time",
+    ],
+)
+def test_forecast_row_outside_the_run_window_fails_the_run_without_writing_rows(
+    tmp_path: Path, rivqdown: str, row: int, valid_time: str
+) -> None:
+    store, parser, repository = _build_parser(tmp_path)
+    store.write_bytes_atomic("runs/run_001/output/demo.rivqdown", rivqdown.encode("utf-8"))
+
+    with pytest.raises(OutputParsingError) as exc_info:
+        parser.parse_run("run_001")
+
+    assert exc_info.value.error_code == "VALID_TIME_OUTSIDE_RUN_WINDOW"
+    assert repository.rows == {}
+    assert repository.qc_results == []
+    assert repository.statuses == ["failed"]
+    assert repository.failures == [
+        (
+            "VALID_TIME_OUTSIDE_RUN_WINDOW",
+            f"Row {row} has valid_time {valid_time} outside the run window {_WINDOW}",
+        )
+    ]
+
+
+def test_negative_relative_days_token_is_outside_the_run_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No file reaches the ``days`` basis today (the detector never returns it); the check covers it anyway."""
+
+    from workers.output_parser import parser as parser_module
+
+    monkeypatch.setattr(parser_module, "_rivqdown_time_basis", lambda *_args, **_kwargs: "days")
+    store, parser, repository = _build_parser(tmp_path)
+    store.write_bytes_atomic("runs/run_001/output/demo.rivqdown", b"-0.5 86400 172800\n")
+
+    with pytest.raises(OutputParsingError) as exc_info:
+        parser.parse_run("run_001")
+
+    assert exc_info.value.error_code == "VALID_TIME_OUTSIDE_RUN_WINDOW"
+    assert repository.rows == {}
+    assert repository.statuses == ["failed"]
+    assert repository.failures[0][1] == f"Row 1 has valid_time 2026-04-30T12:00:00Z outside the run window {_WINDOW}"
+
+
+def test_forecast_rows_on_both_run_window_bounds_are_written(tmp_path: Path) -> None:
+    store, parser, repository = _build_parser(tmp_path)
+    store.write_bytes_atomic(
+        "runs/run_001/output/demo.rivqdown",
+        b"time,seg_a,seg_b\n2026-05-01T00:00:00Z,86400,172800\n2026-05-02T00:00:00Z,0,43200\n",
+    )
+
+    result = parser.parse_run("run_001")
+
+    assert result.rows_written == 4
+    assert repository.statuses == ["parsed"]
+    assert repository.rows[_row_key("seg_a", "2026-05-01T00:00:00Z")].lead_time_hours == 0
+    assert repository.rows[_row_key("seg_a", "2026-05-02T00:00:00Z")].lead_time_hours == 24
+
+
+def test_run_window_lower_bound_is_cycle_time_not_start_time(tmp_path: Path) -> None:
+    """A row at ``start_time`` is refused when ``start_time`` is earlier than ``cycle_time``."""
+
+    store, parser, repository = _build_parser(tmp_path)
+    repository.context = HydroRunContext(
+        **{**repository.context.__dict__, "start_time": _dt("2026-04-30T18:00:00Z")}
+    )
+    store.write_bytes_atomic("runs/run_001/output/demo.rivqdown", b"0 86400 172800\n360 86400 172800\n")
+
+    with pytest.raises(OutputParsingError) as exc_info:
+        parser.parse_run("run_001")
+
+    assert exc_info.value.error_code == "VALID_TIME_OUTSIDE_RUN_WINDOW"
+    assert repository.rows == {}
+    assert repository.failures[0][1] == f"Row 1 has valid_time 2026-04-30T18:00:00Z outside the run window {_WINDOW}"
+
+
+def test_forecast_context_without_end_time_fails_the_run(tmp_path: Path) -> None:
+    store, parser, repository = _build_parser(tmp_path)
+    repository.context = HydroRunContext(**{**repository.context.__dict__, "end_time": None})
+    store.write_bytes_atomic(
+        "runs/run_001/output/demo.rivqdown", b"time,seg_a,seg_b\n2026-05-01T00:00:00Z,86400,172800\n"
+    )
+
+    with pytest.raises(OutputParsingError) as exc_info:
+        parser.parse_run("run_001")
+
+    assert exc_info.value.error_code == "END_TIME_MISSING"
+    assert repository.rows == {}
+    assert repository.statuses == ["failed"]
+
+
+@pytest.mark.parametrize("end_time", [None, "2026-05-01T00:00:00Z"], ids=["no_end_time", "end_time_before_rows"])
+def test_analysis_rows_are_not_bound_to_a_run_window(tmp_path: Path, end_time: str | None) -> None:
+    store, parser, repository = _build_parser(tmp_path)
+    repository.context = HydroRunContext(
+        **{
+            **repository.context.__dict__,
+            "run_type": "analysis",
+            "end_time": _dt(end_time) if end_time else None,
+        }
+    )
+    store.write_bytes_atomic(
+        "runs/run_001/output/demo.rivqdown",
+        b"time,seg_a,seg_b\n2026-04-30T23:00:00Z,86400,172800\n2026-05-03T00:00:00Z,0,43200\n",
+    )
+
+    result = parser.parse_run("run_001")
+
+    assert result.rows_written == 4
+    assert repository.statuses == ["parsed"]
+    assert {row.lead_time_hours for row in repository.rows.values()} == {None}
+
+
+def _db_free_parsed_dir(object_root: Path) -> Path:
+    return object_root / "runs" / "run_001" / "output" / "parsed"
+
+
+@pytest.mark.parametrize(
+    ("valid_time", "manifest_overrides"),
+    [
+        ("2026-04-30T23:00:00Z", {}),
+        ("2026-05-02T01:00:00Z", {}),
+        ("2026-05-02T01:00:00Z", {"end_time": None, "identity": {"end_time": "2026-05-02T00:00:00Z"}}),
+    ],
+    ids=["before_cycle_time", "after_end_time", "end_time_from_identity"],
+)
+def test_db_free_forecast_row_outside_the_run_window_fails_the_run_without_writing_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, valid_time: str, manifest_overrides: dict[str, Any]
+) -> None:
+    object_root = _seed_db_free_run(
+        tmp_path, monkeypatch, rivqdown=f"time,seg_a,seg_b\n{valid_time},86400,172800\n", **manifest_overrides
+    )
+
+    with pytest.raises(OutputParsingError) as exc_info:
+        OutputParser.from_env().parse_run("run_001")
+
+    assert exc_info.value.error_code == "VALID_TIME_OUTSIDE_RUN_WINDOW"
+    assert exc_info.value.message == f"Row 1 has valid_time {valid_time} outside the run window {_WINDOW}"
+    parsed_dir = _db_free_parsed_dir(object_root)
+    assert not (parsed_dir / "q_down.jsonl").exists()
+    parse_result = json.loads((parsed_dir / "parse_result.json").read_text(encoding="utf-8"))
+    assert (parse_result["status"], parse_result["error_code"]) == ("failed", "VALID_TIME_OUTSIDE_RUN_WINDOW")
+
+
+def test_db_free_forecast_manifest_without_end_time_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    object_root = _seed_db_free_run(tmp_path, monkeypatch, end_time=None)
+
+    with pytest.raises(OutputParsingError) as exc_info:
+        OutputParser.from_env().parse_run("run_001")
+
+    assert exc_info.value.error_code == "END_TIME_MISSING"
+    assert not (_db_free_parsed_dir(object_root) / "q_down.jsonl").exists()
+
+
+def test_db_free_analysis_manifest_without_end_time_keeps_parsing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    object_root = _seed_db_free_run(
+        tmp_path,
+        monkeypatch,
+        rivqdown="time,seg_a,seg_b\n2026-04-30T23:00:00Z,86400,172800\n",
+        run_type="analysis",
+        end_time=None,
+    )
+
+    result = OutputParser.from_env().parse_run("run_001")
+
+    assert (result.status, result.rows_written) == ("parsed", 2)
+    payloads = [
+        json.loads(line)
+        for line in (_db_free_parsed_dir(object_root) / "q_down.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert {row["lead_time_hours"] for row in payloads} == {None}
 
 
 def test_compressed_chunk_write_error_sets_blocked_error_code(tmp_path: Path) -> None:
@@ -480,6 +694,7 @@ def _build_parser(
         RiverSegmentOrder("seg_a", "rivnet_v1", 1, SEGMENT_KEYS["seg_a"]),
         RiverSegmentOrder("seg_b", "rivnet_v1", 2, SEGMENT_KEYS["seg_b"]),
     ),
+    end_time: str = "2026-05-02T00:00:00Z",
 ) -> tuple[LocalObjectStore, OutputParser, FakeOutputRepository]:
     object_root = tmp_path / "object-store"
     store = LocalObjectStore(object_root, object_store_prefix)
@@ -492,6 +707,7 @@ def _build_parser(
         cycle_id="gfs_2026050100",
         cycle_time=_dt("2026-05-01T00:00:00Z"),
         start_time=_dt("2026-05-01T00:00:00Z"),
+        end_time=_dt(end_time),
         output_uri=f"{object_store_prefix.rstrip('/')}/runs/run_001/output/",
         run_key=RUN_KEY,
         basin_version_key=BASIN_VERSION_KEY,

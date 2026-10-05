@@ -349,6 +349,7 @@ def _run_context_response() -> tuple[str, list[str], list[tuple[Any, ...]]]:
         "source_id",
         "cycle_time",
         "start_time",
+        "end_time",
         "output_uri",
         "run_type",
         "scenario_id",
@@ -365,6 +366,7 @@ def _run_context_response() -> tuple[str, list[str], list[tuple[Any, ...]]]:
         "gfs",
         _t(0),
         _t(0),
+        _t(6),
         None,
         "forecast",
         None,
@@ -398,6 +400,30 @@ def test_load_run_context_resolves_the_three_run_level_keys_in_one_query() -> No
     assert "JOIN core.river_network_version rnv ON rnv.river_network_version_id = mi.river_network_version_id" in (
         statement
     )
+
+
+def test_load_run_context_reads_the_run_window_end_time_from_the_same_query() -> None:
+    """#2687: the forecast run window's upper bound rides the existing query."""
+    connection = _FakeConnection([_run_context_response()])
+    context = _repository(connection).load_run_context("run_a")
+
+    assert (context.cycle_time, context.end_time) == (_t(0), _t(6))
+    assert len(connection.executions) == 1
+    assert "h.end_time" in " ".join(connection.executions[0][0].split())
+
+
+@pytest.mark.parametrize(("run_type", "error_code"), [("forecast", "END_TIME_MISSING"), ("analysis", None)])
+def test_load_run_context_requires_end_time_for_a_forecast_run_only(run_type: str, error_code: str | None) -> None:
+    statement, columns, (row,) = _run_context_response()
+    values = dict(zip(columns, row, strict=True)) | {"end_time": None, "run_type": run_type}
+    connection = _FakeConnection([(statement, columns, [tuple(values[column] for column in columns)])])
+
+    if error_code is None:
+        assert _repository(connection).load_run_context("run_a").end_time is None
+        return
+    with pytest.raises(OutputParsingError) as exc_info:
+        _repository(connection).load_run_context("run_a")
+    assert exc_info.value.error_code == error_code
 
 
 def test_load_run_context_still_raises_hydro_run_not_found_when_the_join_yields_nothing() -> None:

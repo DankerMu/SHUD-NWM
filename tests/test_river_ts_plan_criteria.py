@@ -13,8 +13,8 @@ the bad narrow plan from
 ``.../receipts/2026-09-17-i8-explain-gate/stats-proof-2451.json`` (discovery
 index, ``river_segment_key`` in ``Filter``, 71976 removed / 24 returned, 1581
 shared hits), the good one from the same file (primary key, 27 shared hits), and
-the legacy ``DecompressChunk`` pair from ``explain-1987.json`` case
-``shj_nj/legacy``.
+the ``DecompressChunk`` pair from ``explain-1987.json`` case
+``shj_nj/narrow_compressed``.
 """
 
 from __future__ import annotations
@@ -33,8 +33,6 @@ from tests.river_ts_plan_criteria import (
 )
 
 _NARROW_CHUNK = "_hyper_6_2_chunk"
-_LEGACY_CHUNK = "_hyper_3_62_chunk"
-_LEGACY_COMPRESSED_CHILD = "compress_hyper_7_104_chunk"
 _FILTER_RATIO_LIMIT = 10
 #: The post-ANALYZE primary-key measurement the throwaway fixture recorded.
 _BASELINE = 27
@@ -403,70 +401,8 @@ def test_a_seq_scan_on_the_chunk_fails_criterion_1() -> None:
 
 
 # ---------------------------------------------------------------------------
-# tasks.md 1.3 / 1.4 — the legacy branch and the compressed chunk
+# tasks.md 1.4 — the compressed chunk
 # ---------------------------------------------------------------------------
-
-
-def _legacy_decompress_plan(*, child_index_cond: str, parent_hits: int = 42, child_hits: int = 6) -> dict[str, Any]:
-    """The 2026-09-17 receipt's ``shj_nj/legacy`` shape, transcribed."""
-    return _root(
-        _scan(
-            relation=_LEGACY_CHUNK,
-            node_type="Custom Scan",
-            filter_text=(
-                "((valid_time >= '2026-08-18 00:00:00+00'::timestamp with time zone) "
-                "AND (run_key = $3) AND (basin_version_key = $0) AND (river_segment_key = $1) "
-                "AND (river_network_version_key = $2) AND (variable = 'q_down'::text))"
-            ),
-            removed=0,
-            actual=120,
-            hits=parent_hits,
-            children=[
-                _scan(
-                    relation=_LEGACY_COMPRESSED_CHILD,
-                    index="compress_hyper_7_104_chunk__compressed_hypertable_7_run_id_rive",
-                    index_cond=child_index_cond,
-                    filter_text="((_ts_meta_max_2 >= '2026-08-18 00:00:00+00'::timestamp with time zone))",
-                    removed=0,
-                    actual=1,
-                    hits=child_hits,
-                )
-            ],
-        )
-    )
-
-
-def _legacy(plan: dict[str, Any], baseline: int | None = 49) -> dict[str, Any]:
-    return evaluate_cell(
-        plan,
-        chunk_relation=_LEGACY_CHUNK,
-        branch="legacy",
-        filter_ratio_limit=_FILTER_RATIO_LIMIT,
-        shared_hit_baseline=baseline,
-    )
-
-
-def test_a_legacy_decompress_parent_inherits_criterion_1_from_its_compressed_child() -> None:
-    """The compressed relation is mapped to the measured chunk STRUCTURALLY.
-
-    Without that mapping the extract is empty and "the compressed condition
-    passes for nothing" (tasks.md 1.4). The parent carries every key predicate
-    in its ``Filter`` and prunes nothing itself; the child is the node that did.
-    """
-    cell = _legacy(
-        _legacy_decompress_plan(
-            child_index_cond=(
-                "((run_id = 'fcst_gfs_2026081800'::text) "
-                "AND (river_network_version_id = 'basins_shj_nj_rivnet_vbasins'::text) "
-                "AND (river_segment_id = 'basins_shj_nj_shud_shud_riv_000001'::text))"
-            )
-        )
-    )
-    assert cell["node_count"] == 2
-    assert [node["role"] for node in cell["nodes"]] == ["chunk", "compressed_child"]
-    assert cell["nodes"][0]["criterion_1_inherited"] is True
-    assert cell["criterion_1_segment_identity_bound"] is True
-    assert cell["passed"] is True
 
 
 def test_the_measured_narrow_compressed_shape_passes_and_is_not_extracted_empty() -> None:
@@ -514,45 +450,9 @@ def test_the_measured_narrow_compressed_shape_passes_and_is_not_extracted_empty(
     assert cell["passed"] is True
 
 
-def test_a_legacy_plan_that_loses_the_segment_id_pruning_reddens() -> None:
-    """tasks.md 1.4's "reddens if that pruning is lost", on the legacy shape."""
-    cell = _legacy(
-        _legacy_decompress_plan(
-            child_index_cond="((run_id = 'fcst_gfs_2026081800'::text))",
-            parent_hits=3000,
-            child_hits=900,
-        )
-    )
-    assert cell["criterion_1_segment_identity_bound"] is False
-    assert cell["passed"] is False
-
-
-def test_river_segment_key_on_a_legacy_node_is_not_a_false_red() -> None:
-    """design.md criterion 1: the two branches are not the same predicate.
-
-    ``river_segment_id`` is what legacy binds today, but a plan that binds
-    ``river_segment_key`` there is a GOOD plan, and rejecting it would be the
-    same false red with the sign flipped.
-    """
-    assert BRANCH_IDENTITY_COLUMNS["legacy"] == ("river_segment_id", "river_segment_key")
-    cell = _legacy(
-        _root(
-            _scan(
-                relation=_LEGACY_CHUNK,
-                index="river_ts_segment_time_key_idx",
-                index_cond="((river_segment_key = $1) AND (variable_e = 'q_down'::hydro.river_variable))",
-                removed=0,
-                actual=120,
-                hits=49,
-            )
-        )
-    )
-    assert cell["criterion_1_segment_identity_bound"] is True
-
-
 def test_requiring_the_narrow_identity_column_on_a_narrow_node_is_strict() -> None:
-    """The legacy relaxation must not leak into the narrow branch."""
-    assert BRANCH_IDENTITY_COLUMNS["narrow"] == ("river_segment_key",)
+    """``narrow`` is the only branch and it accepts the key alone (#2501)."""
+    assert BRANCH_IDENTITY_COLUMNS == {"narrow": ("river_segment_key",)}
     cell = _narrow(
         _root(
             _scan(
