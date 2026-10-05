@@ -28,4 +28,4 @@ Risk packs:
 
 - [x] 2.1 `uv run ruff check .`; `uv run pytest -q tests/test_production_scheduler.py tests/test_manual_retry_failed_stage_restart.py`
 - [x] 2.2 `openspec validate raw-repair-refuses-forcing-input-forecast-failure --strict --no-interactive`
-- [ ] 2.3 node-27, no database: the two test files of 2.1 (`TMPDIR=/home/nwm/tmp`, `uv run --no-sync`).
+- [x] 2.3 node-27, no database: the two test files of 2.1 (`TMPDIR=/home/nwm/tmp`, `uv run --no-sync`).

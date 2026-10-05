@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change m1-gfs-forecast-loop. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: File parsing of .rivqdown format
 
 The parser MUST read `.rivqdown` files produced by SHUD. The file format is a CSV/DAT text file where the first column is a time index and subsequent columns correspond to river segments in order. The parser MUST extract all data columns and associate each column with the correct `river_segment_id` based on the segment ordering defined in the `river_network_version`.
@@ -140,3 +142,21 @@ The CLI `nhms-parse shud-output --run-id <run_id>` MUST be safely re-executable.
 - **THEN** the upsert semantics MUST ensure no primary key violations
 - **THEN** the final data MUST be consistent (last writer wins on conflict)
 
+### Requirement: Forecast fact rows lie inside the run window
+
+The output parser SHALL refuse a forecast run in which any row's `valid_time` is earlier than the run's `cycle_time` or later than the run's `end_time`. The refusal SHALL use the error code `VALID_TIME_OUTSIDE_RUN_WINDOW`, mark the run failed, and write no row. Both bounds are inclusive. Analysis runs are not subject to this check.
+
+#### Scenario: A row before the cycle time is refused
+
+- **WHEN** a forecast product contains a row whose `valid_time` is earlier than `cycle_time`
+- **THEN** parsing fails with `VALID_TIME_OUTSIDE_RUN_WINDOW`, the run is marked failed, and no row is written to `hydro.river_timeseries`
+
+#### Scenario: A row after the end time is refused
+
+- **WHEN** a forecast product contains a row whose `valid_time` is later than `end_time`
+- **THEN** parsing fails with `VALID_TIME_OUTSIDE_RUN_WINDOW`, the run is marked failed, and no row is written
+
+#### Scenario: Rows on the bounds are accepted
+
+- **WHEN** a forecast product's first row is at `cycle_time` and its last row is at `end_time`
+- **THEN** the product parses and its rows are written
