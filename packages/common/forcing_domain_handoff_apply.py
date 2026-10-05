@@ -777,9 +777,9 @@ def _upsert_forcing_version(cursor: Any, row: Mapping[str, Any], parser_envelope
 def _upsert_met_stations(cursor: Any, stations: Sequence[Mapping[str, Any]]) -> None:
     # §D2 flag ownership: `active_flag` is intentionally OMITTED from the row tuple.
     # The INSERT template lands a literal `false` (fresh mirror rows land inactive) and
-    # the ON CONFLICT DO UPDATE keeps the sentinel no-op SET, so an existing row's
-    # `active_flag` is preserved — registration owns `false`, Change 8's cutover owns
-    # the flip to `true`.
+    # the ON CONFLICT DO UPDATE never assigns it, so an existing row's `active_flag`
+    # is preserved — registration owns `false`, Change 8's cutover owns the flip to
+    # `true`.
     rows = [
         (
             station["station_id"],
@@ -800,10 +800,20 @@ def _upsert_met_stations(cursor: Any, stations: Sequence[Mapping[str, Any]]) -> 
     # cutover owns the flip to `true`. The ingest apply MUST land fresh rows inactive
     # (literal `false` in the VALUES template) and MUST NOT treat `active_flag` as an
     # identity conflict on DO UPDATE — otherwise a post-cutover reingest whose payload
-    # still carries `false` would collide with a legitimate `true` in the DB. The
-    # DO UPDATE SET remains a no-op sentinel (`station_id = met.met_station.station_id`)
-    # so no existing column value drifts; every other identity predicate term stays
-    # unchanged so legacy `forcing_proxy` handoffs continue to fail closed on real drift.
+    # still carries `false` would collide with a legitimate `true` in the DB. Every
+    # other identity predicate term stays unchanged so legacy `forcing_proxy` handoffs
+    # continue to fail closed on real drift.
+    #
+    # #2300: the DO UPDATE fires only for an existing row the identity predicate does
+    # NOT accept (`(<predicate>) IS NOT TRUE`). A compatible existing row is locked by
+    # ON CONFLICT but neither updated nor returned, so a re-apply writes no new tuple
+    # version of it. `IS NOT TRUE`, never a bare `NOT`: a NULL predicate (a
+    # `direct_grid_cache` row without a `direct_grid` key, an empty-point geometry) is
+    # a conflict. The SET is still the no-op sentinel
+    # (`station_id = met.met_station.station_id`); it exists only so a rejected row
+    # comes back through RETURNING with `inserted = false` (`xmax = 0` holds for a
+    # freshly inserted tuple and for no updated one). Any such row fails the apply,
+    # and the rollback discards the sentinel write.
     returned = execute_values(
         cursor,
         f"""
@@ -820,29 +830,31 @@ def _upsert_met_stations(cursor: Any, stations: Sequence[Mapping[str, Any]]) -> 
         VALUES %s
         ON CONFLICT (station_id) DO UPDATE SET
             station_id = met.met_station.station_id
-        WHERE met.met_station.basin_version_id = EXCLUDED.basin_version_id
-          AND ABS(ST_X(met.met_station.geom) - ST_X(EXCLUDED.geom)) <= {tolerance_sql}
-          AND ABS(ST_Y(met.met_station.geom) - ST_Y(EXCLUDED.geom)) <= {tolerance_sql}
-          AND met.met_station.elevation_m IS NOT DISTINCT FROM EXCLUDED.elevation_m
-          AND (
-              (
-                  met.met_station.station_name IS NOT DISTINCT FROM EXCLUDED.station_name
-                  AND met.met_station.station_role = EXCLUDED.station_role
-              )
-              OR (
-                  met.met_station.station_role = 'direct_grid_cache'
-                  AND EXCLUDED.station_role = 'forcing_grid'
-                  AND met.met_station.station_id LIKE 'dg-%%::cell:%%'
-                  AND met.met_station.properties_json ->> 'direct_grid' = 'true'
-                  AND EXCLUDED.properties_json ? 'forcing_filename'
-                  AND EXCLUDED.properties_json ? 'shud_forcing_index'
-                  AND met.met_station.properties_json ->> 'forcing_filename'
-                      IS NOT DISTINCT FROM EXCLUDED.properties_json ->> 'forcing_filename'
-                  AND met.met_station.properties_json ->> 'shud_forcing_index'
-                      IS NOT DISTINCT FROM EXCLUDED.properties_json ->> 'shud_forcing_index'
-              )
-          )
-        RETURNING station_id
+        WHERE (
+            met.met_station.basin_version_id = EXCLUDED.basin_version_id
+            AND ABS(ST_X(met.met_station.geom) - ST_X(EXCLUDED.geom)) <= {tolerance_sql}
+            AND ABS(ST_Y(met.met_station.geom) - ST_Y(EXCLUDED.geom)) <= {tolerance_sql}
+            AND met.met_station.elevation_m IS NOT DISTINCT FROM EXCLUDED.elevation_m
+            AND (
+                (
+                    met.met_station.station_name IS NOT DISTINCT FROM EXCLUDED.station_name
+                    AND met.met_station.station_role = EXCLUDED.station_role
+                )
+                OR (
+                    met.met_station.station_role = 'direct_grid_cache'
+                    AND EXCLUDED.station_role = 'forcing_grid'
+                    AND met.met_station.station_id LIKE 'dg-%%::cell:%%'
+                    AND met.met_station.properties_json ->> 'direct_grid' = 'true'
+                    AND EXCLUDED.properties_json ? 'forcing_filename'
+                    AND EXCLUDED.properties_json ? 'shud_forcing_index'
+                    AND met.met_station.properties_json ->> 'forcing_filename'
+                        IS NOT DISTINCT FROM EXCLUDED.properties_json ->> 'forcing_filename'
+                    AND met.met_station.properties_json ->> 'shud_forcing_index'
+                        IS NOT DISTINCT FROM EXCLUDED.properties_json ->> 'shud_forcing_index'
+                )
+            )
+        ) IS NOT TRUE
+        RETURNING station_id, (xmax = 0) AS inserted
         """,
         rows,
         template=(
@@ -851,13 +863,18 @@ def _upsert_met_stations(cursor: Any, stations: Sequence[Mapping[str, Any]]) -> 
         page_size=5000,
         fetch=True,
     )
-    if returned is not None and len(returned) != len(rows):
+    conflicting = sorted(
+        str(_row_value(row, "station_id", 0))
+        for row in returned or ()
+        if _row_value(row, "inserted", 1) is not True
+    )
+    if conflicting:
         raise ForcingDomainHandoffApplyError(
             _reason(
                 REASON_APPLY_STATION_CONFLICT,
                 table="met.met_station",
-                expected=len(rows),
-                actual=len(returned),
+                station_id=conflicting[0],
+                conflicting_stations=len(conflicting),
             )
         )
 

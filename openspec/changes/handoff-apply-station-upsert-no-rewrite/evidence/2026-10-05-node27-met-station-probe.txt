@@ -1,0 +1,44 @@
+node-27 production `nhms`, read-only (`docker exec -i nhms-db psql -U nhms -d nhms`), 2026-10-05.
+Only SELECTs on pg_stat_* / catalog views and two aggregate SELECTs on met.met_station / met.forcing_version.
+
+-- 09:13:07Z
+now | pg_postmaster_start_time | pg_stat_database.stats_reset
+2026-10-05 09:13:07.712914+00 | 2026-10-04 02:15:48.508736+00 | (null)
+
+pg_extension where extname in (pg_stat_statements, pg_repack, pgstattuple): 0 rows
+shared_preload_libraries: timescaledb
+
+met.met_station counters (pg_stat_user_tables):
+n_live_tup | n_dead_tup | n_tup_ins | n_tup_upd | n_tup_hot_upd | n_tup_del | autovacuum_count | vacuum_count
+78326 | 3930 | 0 | 266285 | 80620 | 0 | 13 | 0
+
+size: heap 624 MB | indexes 31 MB | reltuples 78326 | relpages 79912 | reloptions (null)
+
+select count(*), count(*) filter (where active_flag), count(distinct basin_version_id),
+       round(avg(pg_column_size(m.*))), round(avg(pg_column_size(properties_json))) from met.met_station m;
+63407 | 4870 | 87 | 1211 | 1004
+
+indexes (name | size | idx_scan):
+met.met_station_pkey | 5656 kB | 4397340
+met.met_station_geom_gix | 18 MB | 0
+met.met_station_basin_idx | 1680 kB | 933
+met.met_station_name_trgm_idx | 2496 kB | 0
+met.met_station_active_basin_station_idx | 424 kB | 1
+met.met_station_station_key_key | 2456 kB | 123745596
+
+-- update counter over time (n_tup_upd | n_tup_hot_upd)
+09:11:10Z  265488 | 80502
+09:13:07Z  266285 | 80620
+09:13:31Z  266764 | 80818
+09:15:18Z  268245 | 80852      (+1481 in 107 s while the autopipe ingest phase was running)
+09:15:48Z  268328 | 80882
+
+autopipe log at that time: tick started 2026-10-05T09:05:59Z (previous tick done rc=0 elapsed_sec=1073).
+
+150 samples of pg_stat_activity at 0.6 s intervals for non-SELECT statements mentioning met_station: 0 rows
+(the statement was not caught; attribution is by count and time).
+
+-- forcing versions created since the postmaster start
+select count(*), sum(station_count), min(created_at), max(created_at)
+  from met.forcing_version where created_at >= '2026-10-04 02:15:48+00';
+1023 | 222240 | 2026-10-04 02:22:22.353461+00 | 2026-10-05 09:15:34.488469+00

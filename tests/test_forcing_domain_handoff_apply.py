@@ -574,8 +574,8 @@ def test_apply_preserves_existing_active_flag_true_when_payload_carries_false() 
     `station_inventory.json` row. Post-Change 8 cutover, the DB row for the same
     station identity has `active_flag=true`. The ingest apply MUST (a) succeed
     (NOT raise `REASON_APPLY_STATION_CONFLICT`), and (b) leave the existing DB
-    row's `active_flag` untouched — the ON CONFLICT DO UPDATE sentinel
-    `station_id = met.met_station.station_id` is a no-op, and `active_flag` is
+    row's `active_flag` untouched — the ON CONFLICT DO UPDATE never assigns it
+    (#2300: it does not even fire for a compatible row), and `active_flag` is
     intentionally EXCLUDED from the identity predicate so preserve applies
     uniformly across both existing-True and existing-False rows.
 
@@ -621,7 +621,7 @@ def test_apply_preserves_existing_active_flag_true_when_payload_carries_false() 
     assert len(connection.tables["met.met_station"]) == 2
 
     stored = {row["station_id"]: row for row in connection.tables["met.met_station"]}
-    # (b) Preserve-on-update sentinel: existing True stays True even though the
+    # (b) Preserve on re-apply: existing True stays True even though the
     # payload carries False (the primary regression: no `false`->`false` overwrite
     # of a legitimately-flipped row).
     assert stored["qhh_forc_001"]["active_flag"] is True
@@ -1190,7 +1190,7 @@ def _fake_execute_values(
     statement: str,
     rows: list[tuple[Any, ...]],
     **kwargs: Any,
-) -> list[tuple[str]] | None:
+) -> list[tuple[str, bool]] | None:
     row_list = list(rows)
     recorded_statement = f"{statement}\n{kwargs.get('template', '')}"
     cursor.connection.executions.append(("execute_values", recorded_statement, tuple(row_list)))
@@ -1224,13 +1224,17 @@ def _next_station_key(table: list[dict[str, Any]]) -> int:
     return STATION_KEY_BASE + len(table)
 
 
-def _upsert_fake_stations(table: list[dict[str, Any]], rows: list[tuple[Any, ...]]) -> list[tuple[str]]:
-    returned: list[tuple[str]] = []
+def _upsert_fake_stations(table: list[dict[str, Any]], rows: list[tuple[Any, ...]]) -> list[tuple[str, bool]]:
+    # #2300: the statement's RETURNING is `station_id, (xmax = 0) AS inserted`, and
+    # its DO UPDATE fires only for a row the identity predicate rejects. So a fresh
+    # row comes back `(id, True)`, an incompatible existing row `(id, False)`, and a
+    # compatible existing row is neither written nor returned.
+    returned: list[tuple[str, bool]] = []
     # §D2 flag ownership (§1.4): the production INSERT template now lands `active_flag`
     # as a literal `false` and drops the field from the row tuple entirely. The fake
     # models the same shape — 8 keys — and stamps `active_flag=False` on the fresh
     # record after the zip so existing test assertions on stored `active_flag` still
-    # see the SQL literal, while a DO UPDATE preserves the existing row's flag.
+    # see the SQL literal, while an existing row keeps its flag.
     keys = (
         "station_id",
         "basin_version_id",
@@ -1255,10 +1259,10 @@ def _upsert_fake_stations(table: list[dict[str, Any]], rows: list[tuple[Any, ...
             # #1991 (task 7.3): 000061's IDENTITY key on met.met_station.
             record["station_key"] = _next_station_key(table)
             table.append(record)
-            returned.append((record["station_id"],))
+            returned.append((record["station_id"], True))
             continue
-        if _fake_station_compatible(existing, record):
-            returned.append((record["station_id"],))
+        if not _fake_station_compatible(existing, record):
+            returned.append((record["station_id"], False))
     return returned
 
 
