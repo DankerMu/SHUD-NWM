@@ -3,7 +3,7 @@
 ### Requirement: Layer valid_times are consumed from `metadata.valid_times` first
 The frontend SHALL consume `apiLayer.metadata.valid_times` returned by `GET /api/v1/layers` as the valid-time list for the **default** `(default_source, default_cycle)` of the `discharge` layer, and SHALL fetch `GET /api/v1/layers/discharge/valid-times?source=&cycle=` whenever the active `(source, cycle)` differs from the metadata defaults. `buildM11RegisteredOverlay` SHALL validate the requested `validTime` against the list held in the store for the active `(source, cycle)`, never solely against `metadata.valid_times`, and SHALL substitute `{source}` and `{cycle}` placeholders in the national template.
 
-#### Scenario: Metadata carries valid_times for the default cycle
+#### Scenario: Metadata carries valid_times
 - **WHEN** `/api/v1/layers` returns `discharge` with non-empty `metadata.valid_times` and the active `(source, cycle)` equals `(default_source, default_cycle)`
 - **THEN** `normalizeLayerStates` MUST use that array directly
 - **AND** the frontend MUST NOT issue a separate `/api/v1/layers/discharge/valid-times` request during the same overview load

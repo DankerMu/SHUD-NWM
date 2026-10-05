@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change m11-overview-basin-drilldown. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: National overview is the default operational entry
 
 The system SHALL render a national overview page as the default operator entry with global navigation, left control panel, central national map, right summary panel, and bottom timeline.
@@ -19,7 +21,7 @@ The system SHALL render a national overview page as the default operator entry w
 - **AND** the left panel MUST contain basin and layer controls
 - **AND** the right panel MUST contain basemap, legend, forecast run, and warning summaries
 - **AND** the bottom timeline MUST remain visible without covering map popups or primary controls
-- **AND** the layout MUST follow the effect-image-1 structure and the UI spec's 56px top navigation, approximately 280px left panel, 320-360px right panel, and 64px bottom timeline where viewport size permits
+- **AND** the layout MUST follow the effect-image-1 structure and the UI spec's 84px top header (V2.0 brand header, replacing the former 56px navigation), approximately 280px left panel, 320-360px right panel, and 64px bottom control bar (`m11VisualTokens.timelineHeight`) where viewport size permits
 
 #### Scenario: Overview responsive behavior follows UI spec
 - **WHEN** the overview page is rendered at 1920px or wider
@@ -105,3 +107,15 @@ The system SHALL render useful degraded states when backend data is missing or p
 - **THEN** the affected layer MUST show an inline map or panel error with retry affordance when possible
 - **AND** other successful layers and controls MUST remain usable
 
+### Requirement: Header brand identity for V2.0
+The site header SHALL display the title `全国水文模拟系统（V2.0）` (full-width parentheses) in bold at a larger size than the V1 header, and SHALL display the sponsor logo strip at a larger size; the header height MAY increase to accommodate both.
+
+#### Scenario: Title text and weight
+- **WHEN** the application shell renders
+- **THEN** the header title text equals `全国水文模拟系统（V2.0）` exactly (full-width `（` and `）`)
+- **AND** the title uses a bold weight and a font size of at least 28px
+
+#### Scenario: Sponsor strip enlarged
+- **WHEN** the header renders on a `lg` viewport
+- **THEN** the sponsor image renders at a height of at least 56px with `object-contain`
+- **AND** the header height is exactly 84px (the V2.0 value that replaces the former 56px navigation in `map-first-layout-conformance`) so the title and sponsor strip do not clip
