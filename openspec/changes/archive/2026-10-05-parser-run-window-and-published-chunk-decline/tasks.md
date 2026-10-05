@@ -54,7 +54,7 @@ Withdrawn from this change; see proposal.md "Removed from this change".
 - [x] 5.5 `uv run pytest -q tests/test_river_ts_plan_criteria.py tests/test_river_ts_stats_harness_offline.py`
 - [x] 5.6 `openspec validate parser-run-window-and-published-chunk-decline --strict --no-interactive` and
       `openspec validate fix-narrow-segment-read-index-applicability --strict --no-interactive`
-- [ ] 5.7 node-27, no database: the test files of 5.3-5.5 (`TMPDIR=/home/nwm/tmp`, `uv run --no-sync`).
+- [x] 5.7 node-27, no database: the test files of 5.3-5.5 (`TMPDIR=/home/nwm/tmp`, `uv run --no-sync`).
 
 ## Evidence Floor deviation
 
