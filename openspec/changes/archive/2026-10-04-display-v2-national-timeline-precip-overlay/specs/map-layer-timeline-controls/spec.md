@@ -32,6 +32,14 @@ The system SHALL support explicit GFS/IFS source selection for the national over
 - **AND** the URL query MUST preserve the selected source/scenario where shareable
 - **AND** a restored URL with `source=best` at national scale MUST resolve to `gfs`
 
+#### Scenario: Best Available exposes provenance
+- **WHEN** historical evidence or a pre-V2.0 change mentions Best Available provenance display
+- **THEN** the current national overview does not offer Best Available and has no provenance surface for it; the scenario is kept as retired context (basin-detail lane retired, #2109 decision B)
+
+#### Scenario: GFS and IFS comparison is available
+- **WHEN** historical evidence or a pre-V2.0 change mentions the GFS + IFS 对比 segment comparison
+- **THEN** the current national overview does not offer GFS + IFS 对比; the scenario is kept as retired context (basin-detail lane retired, #2109 decision B)
+
 ### Requirement: Timeline is driven by valid times
 
 The system SHALL drive time selection from `/api/v1/layers/discharge/cycles` and `/api/v1/layers/{layer_id}/valid-times?source=&cycle=` as the layer-time contract for the national overview. The bottom control bar SHALL contain a cycle (起报时次) selector, the GFS/IFS segmented control, and the timeline, and SHALL default to the newest cycle at lead 0.
@@ -80,3 +88,7 @@ The control bar exists only on the national overview; the basin-detail control b
 #### Scenario: Floating controls clear the control bar
 - **WHEN** the bottom control bar is mounted
 - **THEN** the legend and status notices MUST be offset above the bar so nothing overlaps it
+
+#### Scenario: Non-layer detail payload derives valid times
+- **WHEN** historical evidence or a pre-V2.0 change mentions a timeline derived from a selected segment forecast payload
+- **THEN** the current national overview timeline is driven only by the layer valid-time contract above; the scenario is kept as retired context (basin-detail control bar retired, #2109 decision B)

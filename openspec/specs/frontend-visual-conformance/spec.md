@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change m11-overview-basin-drilldown. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: M11 pages conform to GIS effect-image intent
 
 The system SHALL treat `docs/spec/06_frontend_gis_design.md` and `docs/spec/06B_frontend_ui_design_spec.md` as normative visual acceptance references for M11 pages.
@@ -17,8 +19,8 @@ The system SHALL treat `docs/spec/06_frontend_gis_design.md` and `docs/spec/06B_
 The system SHALL implement the documented visual tokens and component proportions or map them explicitly to existing project tokens.
 
 #### Scenario: Layout tokens are applied
-- **WHEN** overview or basin detail is rendered at supported desktop viewports
-- **THEN** the top navigation MUST be 56px high
+- **WHEN** overview is rendered at supported desktop viewports
+- **THEN** the top navigation (the `SiteHeader` brand header) MUST be 84px high
 - **AND** side panels MUST use the documented 280px left and 320-360px right proportions where viewport size permits
 - **AND** the bottom timeline MUST use the documented 64px height
 
@@ -55,4 +57,3 @@ The system SHALL include automated or reviewable evidence that M11 pages remain 
 #### Scenario: Visual drift is blocked
 - **WHEN** screenshot or layout assertions show major drift from the effect-image layout or UI design spec
 - **THEN** the related implementation issue MUST remain incomplete until the drift is fixed or explicitly documented as an approved design deviation
-
