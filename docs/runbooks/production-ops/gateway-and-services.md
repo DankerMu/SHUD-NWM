@@ -159,6 +159,10 @@ squeue -u "$USER" -o "%.18i %.20j %.2t %.10M %.10l %.6D %R"
 
 #### 3.2.2 协调 rollout / rollback（先 runtime ConditionPathExists 围栏，再备份，再配，再启用）
 
+> 这里的 drop-in 围栏只用于本节的 gateway 维护。model succession 期间停 / 启调度器 timer 走
+> `scripts/node22_model_succession.py`（普通 `stop` + 每个写入步骤前复查无人启动），见
+> [`recalibration-and-archive.md`](recalibration-and-archive.md) 的 5.7.1。
+
 先用可逆的 runtime `ConditionPathExists` drop-in 围住调度器（2026-08-28 现场观察到
 `systemctl --user stop nhms-compute-scheduler.timer` 被另一个并发同用户维护会话
 显式启动 timer 两次撤销；而运行中的 scheduler pass 必须自然跑完，不能 kill；

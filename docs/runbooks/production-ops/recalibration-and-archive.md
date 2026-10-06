@@ -175,6 +175,71 @@ dry-run 回执，输入或预测集合有任何出入就拒绝并回滚；回执
 各选项的细节与回执根的一次性放权见
 [`service-bringup.md`](service-bringup.md) 3.1.1 的 hop 3。
 
+**node-22 这一侧用一条命令（#2739）。** provision `--apply` 之后，回拷、克隆、发布、refresh 以及调度器 timer 的停与启，
+由 `scripts/node22_model_succession.py` 按固定顺序做完，不连库、不跨机 ssh：
+
+```text
+copyback（新包从共享根拷到 scratch 根） -> preflight（克隆工具与发布工具各自的 dry-run）
+  -> begin（记下 timer 原状态、停 timer、等在跑的 pass 自己结束） -> clone -> publish -> refresh
+  -> finish（两份 manifest 逐字节相同且已换成新 id，timer 原来是 active 才启动）
+```
+
+前两步在调度器照常运行时做，timer 只为 clone / publish / refresh 停。每步完成写一份
+`<回执根>/<succession-id>/step-<步名>.json`；已有回执的步骤直接跳过，所以**同一条命令重跑就是续跑**；
+上一步回执缺失时本步拒绝并点名缺的路径（先发布、后克隆因此做不出来）。克隆与发布两个工具各自的回执
+（`clone-dry-run.json` / `clone-apply.json` / `publish-dry-run.json` / `publish-apply.json`）原样落在同一目录。
+
+```bash
+# node-22，frd_muziyao
+cd /scratch/frd_muziyao/NWM
+set -a
+. infra/env/compute.scheduler-provider-refresh.env   # 两个根、prefix、两份 manifest、state index、refresh 锁与回执根；不含 DB 变量
+set +a
+SUCCESSION_ID=<succession-id>                        # 与 provision 那一步相同
+SUCCESSION_ARGS=(
+  --succession-id "$SUCCESSION_ID"
+  --kind recalibration
+  --pair "<旧 M1 的 model_id>:<M1′ 的 model_id>"      # 每个 (流域, source) 一对，重复写
+  --cutover-time <YYYYMMDDHH>                        # 克隆行的 valid_time，选法见下文「t* 怎么选」
+  --new-rows-registry "<node-22 视角的路径>"            # provision 的 --output-registry；回执记了 object_store_key 时可省
+  --operator-id "<operator>"
+)
+LOG=/scratch/frd_muziyao/nhms-prod/workspace/succession-$SUCCESSION_ID.log
+
+# 1) dry-run：不改任何文件、不写回执、只发 is-active 查询；读它打印的 JSON
+cd /scratch/frd_muziyao/NWM && .venv/bin/python -m scripts.node22_model_succession "${SUCCESSION_ARGS[@]}"
+
+# 2) 报告无误后 detached 执行（等一趟在跑的 pass 可能要三个多小时）；看 $LOG 与回执目录
+cd /scratch/frd_muziyao/NWM && { setsid nohup .venv/bin/python -m scripts.node22_model_succession "${SUCCESSION_ARGS[@]}" --apply > "$LOG" 2>&1 < /dev/null & }
+```
+
+- **读 dry-run 报告看什么**：`would_be_refused` 为空；`steps.copyback.packages[]` 每个包是 `would_copy` 还是
+  `already_present`（`differs` 即 scratch 上已有一份不同的包，apply 会拒绝且不覆盖）；包已在 scratch 上时
+  `steps.preflight` 给出两个工具 dry-run 的结论，否则是 `needs copyback`（apply 会在 preflight 里跑，仍在停 timer 之前）；
+  `unit_states_now` 是 timer 与 service 此刻的状态。refresh 与 finish 不做预测。
+- **timer 由工具自己停、自己启。** `begin` 把 timer 当时是否 active 记进 `timer-before-stop.json`（只写一次，续跑时
+  读它、不重新推断），发一次普通的 `stop`，然后轮询等 `nhms-compute-scheduler.service` 自己结束
+  （`--pass-wait-seconds`，默认 14400；超时算失败，同一条命令续等）。它**从不** stop / kill service，不 enable /
+  disable / mask 任何 unit，不装 drop-in 围栏；取而代之的是 clone / publish / refresh / finish 每步动手前都复查
+  timer 与 service 均未在跑，发现有人中途启动了调度器就拒绝、该步什么都不写。
+  这是第一个会停、启调度器 timer 的工具；`scripts/install_node22_scheduler_file_provider_refresh.sh` 仍把该 timer
+  当受保护对象（那个安装器只断言自己没改动它）。succession 持有 timer 期间 stall probe 报 `timer_stopped` 属预期。
+- **任何一步失败，工具都不启动 timer。** 非零退出，并写 `succession-failed-<UTC 时间戳>.json`：失败的步骤与原因、
+  已有哪些回执、**当时实测**的 timer / service 状态、timer 是否由本工具停的，以及出路。copyback / preflight 失败发生在
+  碰 timer 之前，回执里写明。出路两条：排除原因后**原样重跑同一条命令**；或放弃（见下条）。被 kill 的运行不留失败
+  回执，同样重跑即可。命令行与首次 apply 写下的 `plan.json`（pairs 及其顺序、cutover time、provision id、provision
+  回执与 registry 的 sha256）不一致时拒绝；计划变了就换一个 `--succession-id`。
+- **hard stop（不要重跑，转下面的手工步骤）**：`clone-apply.json` 是 `aborted`（已有克隆行写入，工具不重试克隆，
+  按 5.7 的 receipt 判读处理）；存在 `outcome=inconsistent` 的 `publish-apply-failed-*.json`；发布成功但回执没写出。
+  发布工具的 `refused` / `rolled_back` 是普通失败，重跑会重试。
+- **放弃**：把上面命令的 `--apply` 换成 `--abort --confirm-timer-start`。timer 原来是 active 就启动它，写
+  `abort-<UTC 时间戳>.json`，此后该 `--succession-id` 的任何运行都拒绝；只给 `--abort` 则只打印报告、什么都不做。
+  publish 之前放弃：调度器继续跑旧 model；**已写入的克隆行留在两份 state index 里**，而调度器取某 model 最早的克隆行
+  作为它的 cutover time——以后对同一个新 id 用更晚的 cutover time 再做一次 succession，生效时刻仍是这一次的。
+  publish 之后放弃：新 model 已经生效，余下的 refresh 与核对必须按下面的手工步骤做完。
+
+**下面是逐步的手工做法**——succession 命令被 hard stop 之后的回退路径，也是每一步在做什么的说明。
+
 倒过来做的后果**比这段原文写的更重**（原文早于 #1164）：manifest 先落地时，`M1′`
 在任何 generation 都没有 state 行，走的是 first-cycle 分支
 （`services/orchestrator/scheduler_generation.py` 的 `evaluate_transition_decision`
@@ -210,7 +275,7 @@ dry-run 回执，输入或预测集合有任何出入就拒绝并回滚；回执
 > 「retire declaration 恢复顺序」只适用于非 direct-grid 拓扑（见该节的拓扑围栏），
 > 不适用于这里。
 
-做法是跑 `scripts/node22_publish_merged_scheduler_registry.py`（#2738）。它在 node-22 上、不连库，
+手工发布跑 `scripts/node22_publish_merged_scheduler_registry.py`（#2738）。它在 node-22 上、不连库，
 以两份 manifest 的属主 `frd_muziyao` 身份运行：把「当前 canonical 全量 − 旧 M1 行 + provision 输出的
 M1′ 行」合并（没被点名的行原样、原序保留，被替换的行原位换成 provision registry 里的那一行），
 先各备份一份，再发 canonical（对读到的那份字节做 CAS），然后用**同一个 `generated_at`** 发 scratch

@@ -853,6 +853,35 @@ SUCCESSION_RECEIPT_TESTS: tuple[str, ...] = (
     PROVISION_DIRECT_GRID_DRY_RUN_TEST,
     *MERGED_REGISTRY_PUBLISH_TESTS,
 )
+# #2739: the model succession tool is an entry script (argparse, `main`) over
+# the seven modules of `scripts/model_succession/`, and its suite is three
+# partitions sharing one tests/ support module. No path derives a partition
+# name, so every route is explicit, one row per module, for the reason recorded
+# at PUBLISH_REGISTRY_PACKAGE_MODULES. Every partition drives `main` or
+# `run_step` through all seven modules, so each module carries all three.
+MODEL_SUCCESSION_OWNER_PATH = "scripts/node22_model_succession.py"
+MODEL_SUCCESSION_PACKAGE_MODULES: tuple[str, ...] = (
+    "scripts/model_succession/copyback.py",
+    "scripts/model_succession/model.py",
+    "scripts/model_succession/plan.py",
+    "scripts/model_succession/run.py",
+    "scripts/model_succession/scheduler.py",
+    "scripts/model_succession/systemd.py",
+    "scripts/model_succession/tools.py",
+)
+MODEL_SUCCESSION_HELPERS_PATH = "tests/model_succession_helpers.py"
+MODEL_SUCCESSION_TESTS: tuple[str, ...] = (
+    "tests/test_node22_model_succession_apply_and_resume.py",
+    "tests/test_node22_model_succession_copyback_and_dry_run.py",
+    "tests/test_node22_model_succession_timer_and_refresh.py",
+)
+# #2739: the succession tool calls the clone tool and the merged-registry
+# publish tool in-process, real code against fake packages, and decides from
+# their receipts and errors; a change to either tool must run its partitions.
+MERGED_REGISTRY_PUBLISH_TOOL_TESTS: tuple[str, ...] = (
+    *MERGED_REGISTRY_PUBLISH_TESTS,
+    *MODEL_SUCCESSION_TESTS,
+)
 # The CLI environment helpers shared by BOTH recalibration CLI modules. A change
 # to this support module must run both consumers; its suite names are not
 # same-name derivable (no tests/state_clone_recalibration_cli_fixtures.py), so
@@ -2099,6 +2128,9 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_state_clone_recalibration_cli.py",
             "tests/test_state_clone_recalibration_cli_validation.py",
             "tests/test_state_clone_baseline_cutover_cli.py",
+            # #2739: the model succession support module writes its old and new
+            # packages with `_write_package` and the calibration constants.
+            *MODEL_SUCCESSION_TESTS,
         ),
     ),
     PathTestRule(
@@ -2222,6 +2254,9 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             # `make_directory_with_explicit_mode`, in the `workspace` fixture
             # of their shared support module.
             *MERGED_REGISTRY_PUBLISH_TESTS,
+            # #2739: the model succession `space` fixture pre-creates the
+            # manifest, state-index and refresh-lock parents the same way.
+            *MODEL_SUCCESSION_TESTS,
             # #2614 / #2548: both pre-create the state-index lock parent through
             # `make_directory_with_explicit_mode`.
             "tests/test_state_index_upsert_cost.py",
@@ -2241,8 +2276,18 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         # #2738: the `workspace` fixture, the autouse no-database fixture and
         # the row / operation builders of the merged-registry publish suite.
         # All three partitions import it at module scope.
+        # #2739: the model succession support module builds its two stores on
+        # this module's `Workspace` (rows, seed, provision receipt), so the
+        # succession partitions are in its importer closure.
         MERGED_REGISTRY_PUBLISH_HELPERS_PATH,
-        MERGED_REGISTRY_PUBLISH_TESTS,
+        MERGED_REGISTRY_PUBLISH_TOOL_TESTS,
+    ),
+    PathTestRule(
+        # #2739: the `space` fixture (both stores, packages, state rows), the
+        # fake `systemctl` with its refresh unit, and the tree comparisons of
+        # the model succession suite. All three partitions import it.
+        MODEL_SUCCESSION_HELPERS_PATH,
+        MODEL_SUCCESSION_TESTS,
     ),
     PathTestRule(
         # #2532: the node-22 refresh-timer probe suite's shared fakes (the fake
@@ -3401,8 +3446,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # core, the recalibration CLI end-to-end, the recalibration CLI
         # validation split, and the baseline-cutover CLI suite, not same-name
         # derivable. Explicit irregular mapping.
+        # #2739: the model succession partitions call its `build_parser` /
+        # `enforce_mode_flags` / `dispatch` for real and read its receipts.
         "scripts/node22_clone_direct_grid_cutover_states.py",
-        NODE22_CLONE_CUTOVER_STATES_TESTS,
+        (*NODE22_CLONE_CUTOVER_STATES_TESTS, *MODEL_SUCCESSION_TESTS),
     ),
     PathTestRule(
         # #2744: the registry byte / node bounds are pinned, with their
@@ -3434,16 +3481,30 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # #2738: the step-independent receipt helpers (succession id, receipt
         # directory, exclusive-create write) are used by the provision step and
         # by the merged-registry publish step; a change must run both suites.
+        # #2739: the model succession tool writes its plan, step, failure and
+        # abort receipts through the same helpers.
         "packages/common/succession_receipt.py",
-        SUCCESSION_RECEIPT_TESTS,
+        (*SUCCESSION_RECEIPT_TESTS, *MODEL_SUCCESSION_TESTS),
     ),
     # #2738: the publish tool's entry script and one row per package module --
     # see MERGED_REGISTRY_PUBLISH_PACKAGE_MODULES.
-    PathTestRule(MERGED_REGISTRY_PUBLISH_OWNER_PATH, MERGED_REGISTRY_PUBLISH_TESTS),
-    PathTestRule("scripts/merged_registry_publish/apply.py", MERGED_REGISTRY_PUBLISH_TESTS),
-    PathTestRule("scripts/merged_registry_publish/model.py", MERGED_REGISTRY_PUBLISH_TESTS),
-    PathTestRule("scripts/merged_registry_publish/planning.py", MERGED_REGISTRY_PUBLISH_TESTS),
-    PathTestRule("scripts/merged_registry_publish/receipts.py", MERGED_REGISTRY_PUBLISH_TESTS),
+    # #2739: each row also carries the model succession partitions, which run
+    # the publish tool's dry-run and apply for real.
+    PathTestRule(MERGED_REGISTRY_PUBLISH_OWNER_PATH, MERGED_REGISTRY_PUBLISH_TOOL_TESTS),
+    PathTestRule("scripts/merged_registry_publish/apply.py", MERGED_REGISTRY_PUBLISH_TOOL_TESTS),
+    PathTestRule("scripts/merged_registry_publish/model.py", MERGED_REGISTRY_PUBLISH_TOOL_TESTS),
+    PathTestRule("scripts/merged_registry_publish/planning.py", MERGED_REGISTRY_PUBLISH_TOOL_TESTS),
+    PathTestRule("scripts/merged_registry_publish/receipts.py", MERGED_REGISTRY_PUBLISH_TOOL_TESTS),
+    # #2739: the succession tool's entry script and one row per package module --
+    # see MODEL_SUCCESSION_PACKAGE_MODULES.
+    PathTestRule(MODEL_SUCCESSION_OWNER_PATH, MODEL_SUCCESSION_TESTS),
+    PathTestRule("scripts/model_succession/copyback.py", MODEL_SUCCESSION_TESTS),
+    PathTestRule("scripts/model_succession/model.py", MODEL_SUCCESSION_TESTS),
+    PathTestRule("scripts/model_succession/plan.py", MODEL_SUCCESSION_TESTS),
+    PathTestRule("scripts/model_succession/run.py", MODEL_SUCCESSION_TESTS),
+    PathTestRule("scripts/model_succession/scheduler.py", MODEL_SUCCESSION_TESTS),
+    PathTestRule("scripts/model_succession/systemd.py", MODEL_SUCCESSION_TESTS),
+    PathTestRule("scripts/model_succession/tools.py", MODEL_SUCCESSION_TESTS),
     PathTestRule(
         # #2737: `plan_direct_grid_variant` is pinned against what
         # `register_direct_grid_variant` then registers only in the provision
@@ -5566,7 +5627,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # compare-and-swap, validation) end to end; its partitions ride this row.
     PathTestRule(
         "services/orchestrator/scheduler_file_providers.py",
-        (*NODE22_REFRESH_TIMER_HEALTH_TESTS, *MERGED_REGISTRY_PUBLISH_TESTS),
+        (*NODE22_REFRESH_TIMER_HEALTH_TESTS, *MERGED_REGISTRY_PUBLISH_TOOL_TESTS),
     ),
     # #1627 / ADR 0009: the loop-spelling measurement is the backing the
     # array-runner spec names for admitting path_modes.py's db-free

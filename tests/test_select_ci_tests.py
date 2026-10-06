@@ -62,6 +62,10 @@ from scripts.select_ci_tests import (
     MERGED_REGISTRY_PUBLISH_OWNER_PATH,
     MERGED_REGISTRY_PUBLISH_PACKAGE_MODULES,
     MERGED_REGISTRY_PUBLISH_TESTS,
+    MODEL_SUCCESSION_HELPERS_PATH,
+    MODEL_SUCCESSION_OWNER_PATH,
+    MODEL_SUCCESSION_PACKAGE_MODULES,
+    MODEL_SUCCESSION_TESTS,
     NODE22_ENTRYPOINT_HELPERS_PATH,
     NODE22_ENTRYPOINT_INVARIANT_PYTHON_SCAN_TEST,
     NODE22_ENTRYPOINT_INVARIANT_TEST,
@@ -12594,6 +12598,9 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
         MERGED_REGISTRY_PUBLISH_HELPERS_PATH,
         "tests/test_node22_publish_merged_scheduler_registry_plan_and_checks.py",
     ),
+    # #2739: every model succession partition takes the `space` fixture and the
+    # fake `systemctl`; the apply-and-resume partition is the full-chain one.
+    (MODEL_SUCCESSION_HELPERS_PATH, "tests/test_node22_model_succession_apply_and_resume.py"),
     # #1102: the shared fixture surface of the seven publisher partitions. The
     # calibration-overrides partition anchors it because it is the one that names
     # the most of that surface (the declaration builders, both published-bytes
@@ -14594,9 +14601,11 @@ def test_merged_registry_publish_tracked_tree_is_four_modules_three_suites_and_o
     assert not Path("scripts/merged_registry_publish/__init__.py").exists()
 
     expected = set(MERGED_REGISTRY_PUBLISH_TESTS)
+    # #2739: each row also carries the model succession partitions, which run the tool for real.
+    routed = expected | set(MODEL_SUCCESSION_TESTS)
     for pattern in (MERGED_REGISTRY_PUBLISH_OWNER_PATH, *sorted(modules)):
         (rule,) = [rule for rule in PATH_TEST_RULES if rule.pattern == pattern]
-        assert set(rule.tests) == expected, pattern
+        assert set(rule.tests) == routed, pattern
 
     tracked = _tracked_python_files("tests")
     assert {
@@ -14604,6 +14613,60 @@ def test_merged_registry_publish_tracked_tree_is_four_modules_three_suites_and_o
     } == expected
     assert {path for path in tracked if PurePosixPath(path).name.startswith("merged_registry_publish")} == {
         MERGED_REGISTRY_PUBLISH_HELPERS_PATH
+    }
+
+
+def test_model_succession_tool_selects_its_suites_and_rides_the_tools_it_drives() -> None:
+    # #2739: no path derives a partition name of the succession suite, so every
+    # route is explicit; and the tool decides from the clone tool's and the
+    # publish tool's real behaviour, so a change to either must run it.
+    succession = set(MODEL_SUCCESSION_TESTS)
+
+    def selected(path: str) -> set[str]:
+        return set(select_tests([path], repo_root=Path(".")))
+
+    assert len(succession) == 3 and all(Path(suite).exists() for suite in succession), sorted(succession)
+    for path in (MODEL_SUCCESSION_OWNER_PATH, *MODEL_SUCCESSION_PACKAGE_MODULES, MODEL_SUCCESSION_HELPERS_PATH):
+        assert succession <= selected(path), path
+    for path in (
+        "scripts/node22_clone_direct_grid_cutover_states.py",
+        MERGED_REGISTRY_PUBLISH_OWNER_PATH,
+        *MERGED_REGISTRY_PUBLISH_PACKAGE_MODULES,
+        "packages/common/succession_receipt.py",
+        "services/orchestrator/scheduler_file_providers.py",
+        # The support modules its own support module is built on.
+        MERGED_REGISTRY_PUBLISH_HELPERS_PATH,
+        "tests/state_clone_recalibration_fixtures.py",
+        "tests/provider_mode_helpers.py",
+    ):
+        assert succession <= selected(path), path
+    # The succession tool is not imported by the tools it drives: its own rows select no suite of theirs.
+    assert not set(MERGED_REGISTRY_PUBLISH_TESTS) & selected(MODEL_SUCCESSION_OWNER_PATH)
+    assert "tests/test_state_clone_recalibration_cli.py" not in selected("scripts/model_succession/tools.py")
+
+
+def test_model_succession_tracked_tree_is_seven_modules_three_suites_and_one_helper() -> None:
+    # #2739: the tool is an entry script over seven modules, each with its own
+    # row. An eighth module, a stray `__init__.py` (scripts/ is a PEP 420
+    # namespace tree) or a fourth partition has no route until it is listed,
+    # and reddens here instead of dropping out of the PR lane in silence.
+    modules = set(MODEL_SUCCESSION_PACKAGE_MODULES)
+    assert set(_tracked_python_files("scripts/model_succession")) == modules
+    assert len(modules) == 7 and MODEL_SUCCESSION_OWNER_PATH not in modules
+    assert Path(MODEL_SUCCESSION_OWNER_PATH).exists()
+    assert not Path("scripts/model_succession/__init__.py").exists()
+
+    expected = set(MODEL_SUCCESSION_TESTS)
+    for pattern in (MODEL_SUCCESSION_OWNER_PATH, *sorted(modules), MODEL_SUCCESSION_HELPERS_PATH):
+        (rule,) = [rule for rule in (*PATH_TEST_RULES, *SUPPORT_MODULE_TEST_RULES) if rule.pattern == pattern]
+        assert set(rule.tests) == expected, pattern
+
+    tracked = _tracked_python_files("tests")
+    assert {
+        path for path in tracked if PurePosixPath(path).name.startswith("test_node22_model_succession")
+    } == expected
+    assert {path for path in tracked if PurePosixPath(path).name.startswith("model_succession")} == {
+        MODEL_SUCCESSION_HELPERS_PATH
     }
 
 

@@ -167,6 +167,25 @@ def test_merged_registry_publish_commands_run_the_in_repo_interpreter_from_the_a
         assert [line.endswith(" --apply") for line in commands] == [False, True], f"{relative}: {commands}"
 
 
+def test_model_succession_commands_run_the_in_repo_interpreter_from_the_active_checkout() -> None:
+    # #2739: same shape as the publish tool's guard above. The command that stops and starts the
+    # production scheduler timer appears on exactly two lines of the 5.7.1 runbook -- the dry-run, and the
+    # apply, which is detached -- both from the active checkout with the in-repo interpreter; the two
+    # runbooks that only point to it carry no command line of it.
+    module = "scripts.node22_model_succession"
+    invocation = f'.venv/bin/python -m {module} "${{SUCCESSION_ARGS[@]}}"'
+    text = _read("docs/runbooks/production-ops/recalibration-and-archive.md")
+    commands = [line for line in text.splitlines() if module in line]
+    assert commands == [
+        f"cd {NODE22_ACTIVE} && {invocation}",
+        f'cd {NODE22_ACTIVE} && {{ setsid nohup {invocation} --apply > "$LOG" 2>&1 < /dev/null & }}',
+    ], commands
+    for relative in ("service-bringup.md", "gateway-and-services.md"):
+        pointer = _read(f"docs/runbooks/production-ops/{relative}")
+        assert module not in pointer, f"{relative}: a pointer names the script by path, not a command line"
+        assert "scripts/node22_model_succession.py" in pointer, relative
+
+
 # --- 3. failed-basin demotion and placeholder repair use exact venv ---------
 
 
