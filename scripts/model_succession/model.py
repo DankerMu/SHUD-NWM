@@ -76,6 +76,26 @@ ABORT_BEFORE_NEW_ID = (
     "--confirm-timer-start instead of --apply. Only that starts the timer again; a new id is refused while this "
     "one holds the timer."
 )
+# Said wherever a timer record cannot be read: what a record cut off while it was written means, and the way on.
+TIMER_RECORD_CUT_OFF = (
+    "If the record was cut off while it was written (a kill, a full disk), the timer had not been touched yet; it "
+    "blocks this and every other succession until an operator checks the state of the timer and moves that file "
+    "away."
+)
+# The ``publish_state`` of an abort when the two manifests are not the same bytes, or one cannot be read.
+PUBLISH_STATE_MANIFESTS_DIFFER = "manifests_differ"
+
+
+def manifests_differ_text(settings: Settings) -> str:
+    """What differing manifests mean and the publish tool's own way out of them, for a refusal and for an abort."""
+
+    return (
+        f"The two registry manifests differ, or one of them cannot be read: the canonical manifest "
+        f"{settings.canonical_manifest} and the worker mirror {settings.mirror_manifest}. A publish that was "
+        "killed between its two writes leaves them so, without a receipt. Workers refuse to submit while the "
+        "manifests differ. Compare the sha256 of both and restore both from the backups of the publish apply "
+        f"(<manifest>.bak-<succession-id>-<stamp>), as the runbook describes for the publish tool ({RUNBOOK})."
+    )
 
 
 class ModelSuccessionRefusal(RuntimeError):

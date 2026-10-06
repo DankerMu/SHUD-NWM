@@ -231,6 +231,11 @@ cd /scratch/frd_muziyao/NWM && { setsid nohup .venv/bin/python -m scripts.node22
   `timer_was_active=true`）却既没 finish 也没 abort 时，别的 `--succession-id` 的 apply 一律拒绝并点名它，dry-run 把
   同一条写进 `would_be_refused`——否则后来者会把 timer 记成「本来就没在跑」，finish 时让调度器一直停着。先续跑它，
   或先放弃它（见下文「放弃」）。回执根下别人的 `timer-before-stop.json` 读不出来同样拒绝并点名路径，不会跳过。
+  这项检查在任何步骤之前做一次，`begin` 记 timer 状态之前再做一次（copyback / preflight 期间可能有别的 succession
+  先停了 timer；此时 `begin` 失败，不碰 timer、不写自己的 `timer-before-stop.json`）。
+  检查只扫**同一个回执根**：换一个 `--receipt-root` 就绕过了它，生产只用默认回执根，不要给这个选项。
+  写 `timer-before-stop.json` 时被 kill 或磁盘写满会留下半截文件（那一刻 timer 还没被碰过）：它会挡住本次和
+  其他所有 succession，直到操作员先核对 timer 的实际状态、再把这个文件移走。
 - **任何一步失败，工具都不启动 timer。** 非零退出，并写 `succession-failed-<UTC 时间戳>.json`：失败的步骤与原因、
   已有哪些回执、**当时实测**的 timer / service 状态、timer 是否由本工具停的，以及出路。copyback / preflight 失败发生在
   碰 timer 之前，回执里写明。出路两条：排除原因后**原样重跑同一条命令**；或放弃（见下条）。被 kill 的运行不留失败
@@ -250,8 +255,14 @@ cd /scratch/frd_muziyao/NWM && { setsid nohup .venv/bin/python -m scripts.node22
   publish 之前放弃：调度器继续跑旧 model；**已写入的克隆行留在两份 state index 里**，而调度器取某 model 最早的克隆行
   作为它的 cutover time——以后对同一个新 id 用更晚的 cutover time 再做一次 succession，生效时刻仍是这一次的。
   publish 之后放弃：新 model 已经生效，余下的 refresh 与核对必须按下面的手工步骤做完。报告与回执的 `publish_state`
-  是 `not_published` / `published` / `published_without_receipt`（两份 manifest 已是新 id 但 `publish-apply.json`
-  没写出，同样按「已生效」处理）；`timer_was_active_at_begin=false` 时 timer 在 succession 开始前就是停的，放弃不会启动它。
+  是 `not_published` / `published` / `published_without_receipt`（本次已过 clone、两份 manifest 已是新 id 但
+  `publish-apply.json` 没写出，同样按「已生效」处理）/ `manifests_differ`；`timer_was_active_at_begin=false` 时
+  timer 在 succession 开始前就是停的，放弃不会启动它。
+- **`manifests_differ`（两份 manifest 不一致或读不出来）**：最先判定，典型来源是发布在两次写入之间被 `kill -9`，
+  不留回执。已过 clone 的 succession 此时 dry-run / `--apply` 在任何步骤之前拒绝；`--abort --confirm-timer-start`
+  照常写放弃回执并关掉这个 id，但**不启动 timer**（worker 在两份不一致时拒绝 submit，启动调度器只会产出失败），
+  报告与回执里写明。按下文发布工具的做法比对两份的 sha256、从本次的 `.bak-<succession-id>-<stamp>` 备份恢复两份，
+  恢复后重跑同一条命令，或放弃后手工启动 timer。
 
 **下面是逐步的手工做法**——succession 命令被 hard stop 之后的回退路径，也是每一步在做什么的说明。
 

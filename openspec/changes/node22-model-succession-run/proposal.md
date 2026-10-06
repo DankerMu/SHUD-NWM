@@ -52,7 +52,9 @@ started it (no systemd drop-in fence).
    the new-rows registry's sha256 is not the one the provision receipt recorded; another succession under
    the same receipt root holds the timer (its `timer-before-stop.json` says the timer was active and it has
    neither `step-finish.json` nor an abort receipt; an unreadable one is a refusal naming it) - abort or
-   resume that one first. The comparison with
+   resume that one first (`begin` repeats this check just before it records and stops the timer); for a
+   succession that already has `step-clone.json`, the two registry manifests differ or cannot be read. The
+   comparison with
    `plan.json` comes first, so a mistyped command line is reported as that. Once `publish-apply.json`
    exists, the two canonical-manifest checks (old id present, new id absent) are skipped: `finish` checks
    the opposite. These refusals, a database variable and an aborted succession exit non-zero without
@@ -103,8 +105,8 @@ started it (no systemd drop-in fence).
       and sha256 of `publish-apply.json`. A successful `publish-apply.json` without the step receipt is
       validated against the plan (`operations`, `succession_id`) and adopted the same way. Hard stops,
       pointing to the runbook: a `publish-apply-failed-*.json` with `outcome = inconsistent`, and a publish
-      that is in effect without its receipt (both manifests equal, all new ids present, no old id, no
-      `publish-apply.json`). `refused` and `rolled_back` are ordinary failures
+      that is in effect without its receipt (this succession has `step-clone.json`, both manifests are
+      equal, all new ids present, no old id, no `publish-apply.json`). `refused` and `rolled_back` are ordinary failures
       and are retried on resume.
    6. `refresh`: requires `step-publish.json`. Runs `systemctl --user start
       nhms-scheduler-file-provider-refresh.service` blocking, with a timeout of 7500 s (the unit's
@@ -139,7 +141,9 @@ started it (no systemd drop-in fence).
    later succession of the same new id with a later cutover time would still take effect at this one; after
    `publish` the new models are live and the remaining steps must be finished by hand from the runbook). A
    succession that has an abort receipt is closed: any later run with that id refuses. `--abort` without
-   the confirmation flag only reports.
+   the confirmation flag only reports. The abort report and receipt carry `publish_state` (`not_published`
+   / `published` / `published_without_receipt` / `manifests_differ`); while the two manifests differ a
+   confirmed abort closes the succession but does not start the timer, and says so.
 
 8. Dry-run (no `--apply`): changes no file, writes no receipt, leaves no temporary file behind, and issues
    only `is-active` queries. It runs the checks of 3 and reports, per step, what the apply would do: per

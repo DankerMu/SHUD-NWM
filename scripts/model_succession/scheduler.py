@@ -22,11 +22,13 @@ from scripts.model_succession.model import (
     SERVICE_UNIT,
     STEPS,
     TIMER_LEFT_STOPPED,
+    TIMER_RECORD_CUT_OFF,
     TIMER_RECORD_NAME,
     TIMER_RECORD_SCHEMA_VERSION,
     TIMER_STARTED,
     TIMER_UNIT,
     Inputs,
+    ModelSuccessionRefusal,
     Settings,
     StepFailure,
     TimerNotStopped,
@@ -35,7 +37,7 @@ from scripts.model_succession.model import (
     utc_now,
     utc_text,
 )
-from scripts.model_succession.plan import manifest_model_ids
+from scripts.model_succession.plan import manifest_model_ids, refuse_other_timer_holder
 
 POLL_SECONDS = 15.0
 REFRESH_TOTALS = ("refused", "added", "removed", "package_changed")
@@ -53,15 +55,25 @@ def read_timer_record(settings: Settings) -> dict[str, Any] | None:
     try:
         record = read_json(path)
     except (OSError, ValueError) as error:
-        raise StepFailure(f"{path} exists but cannot be read ({error}); the timer was not touched.") from error
+        raise StepFailure(
+            f"{path} exists but cannot be read ({error}); the timer was not touched. {TIMER_RECORD_CUT_OFF}"
+        ) from error
     if not isinstance(record.get("timer_was_active"), bool):
-        raise StepFailure(f"{path} does not record timer_was_active; the timer was not touched.")
+        raise StepFailure(f"{path} does not record timer_was_active; the timer was not touched. {TIMER_RECORD_CUT_OFF}")
     return record
 
 
 def begin(settings: Settings, _inputs: Inputs) -> dict[str, Any]:
     record = read_timer_record(settings)
     if record is None:
+        # Again, minutes after the check before any step: another succession may have taken the timer during
+        # this one's copyback and preflight, and this one would then record the timer it stopped as inactive.
+        try:
+            refuse_other_timer_holder(
+                settings, wrote="The begin step did not touch the timer and wrote no timer record."
+            )
+        except ModelSuccessionRefusal as error:
+            raise StepFailure(str(error)) from error
         # Read once and never re-derived: after the stop below the timer is inactive whatever it was.
         state = systemd.unit_state(TIMER_UNIT)
         record = {

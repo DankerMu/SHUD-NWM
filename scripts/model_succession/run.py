@@ -19,6 +19,7 @@ from scripts.model_succession.model import (
     CLONE_APPLY_NAME,
     FAILURE_SCHEMA_VERSION,
     PLAN_NAME,
+    PUBLISH_STATE_MANIFESTS_DIFFER,
     RUNBOOK,
     SERVICE_UNIT,
     STEP_RECEIPT_SCHEMA_VERSION,
@@ -35,6 +36,7 @@ from scripts.model_succession.model import (
     TimerNotStopped,
     completed_steps,
     existing_receipts,
+    manifests_differ_text,
     read_json,
     receipt_header,
     write_stamped_receipt,
@@ -229,6 +231,9 @@ def dry_run(settings: Settings) -> tuple[int, dict[str, Any]]:
 
 
 def _publish_state(settings: Settings) -> str:
+    # First: neither "published" nor "not published" can be said of two manifests that differ.
+    if planning.manifests_differ(settings):
+        return PUBLISH_STATE_MANIFESTS_DIFFER
     if os.path.lexists(settings.directory / PUBLISH_APPLY_NAME):
         return "published"
     return "published_without_receipt" if planning.published_without_receipt(settings) else "not_published"
@@ -245,6 +250,15 @@ def _abort_meaning(settings: Settings, publish_state: str, timer_was_active: boo
         "The remaining steps (the provider refresh and the final checks) must be finished by hand from the "
         f"runbook ({RUNBOOK})."
     )
+    if publish_state == PUBLISH_STATE_MANIFESTS_DIFFER:
+        meaning = [manifests_differ_text(settings), *timer]
+        if timer_was_active:
+            meaning.append(
+                f"{TIMER_UNIT} was active when the succession began and is NOT started by this abort: started now, "
+                "the scheduler would only produce failures. Start it by hand once both manifests are the same "
+                "bytes again."
+            )
+        return meaning
     if publish_state == "published":
         return [f"The publish completed: the new models are live in both manifests. {by_hand}", *timer]
     if publish_state == "published_without_receipt":
@@ -290,14 +304,20 @@ def abort(settings: Settings, *, confirm_timer_start: bool) -> tuple[int, dict[s
         record = scheduler.read_timer_record(settings)
     except StepFailure as error:
         raise ModelSuccessionRefusal(str(error)) from error
-    if record is None:
-        action = "none: the begin step never recorded or stopped the timer"
-    elif record["timer_was_active"]:
-        action = f"start {TIMER_UNIT}: it was active when the succession began"
-    else:
-        action = "none: the timer was not active when the succession began"
     timer_was_active = record["timer_was_active"] if record else None
     publish_state = _publish_state(settings)
+    start_timer = bool(timer_was_active) and publish_state != PUBLISH_STATE_MANIFESTS_DIFFER
+    if record is None:
+        action = "none: the begin step never recorded or stopped the timer"
+    elif start_timer:
+        action = f"start {TIMER_UNIT}: it was active when the succession began"
+    elif timer_was_active:
+        action = (
+            f"none: {TIMER_UNIT} was active when the succession began and is NOT started while the two registry "
+            "manifests differ; start it by hand once they are the same bytes again"
+        )
+    else:
+        action = "none: the timer was not active when the succession began"
     report: dict[str, Any] = {
         "succession_id": settings.plan.succession_id,
         "completed_steps": done,
@@ -311,7 +331,7 @@ def abort(settings: Settings, *, confirm_timer_start: bool) -> tuple[int, dict[s
         note = "Report only: --abort without --confirm-timer-start changes nothing."
         report.update(aborted=False, timer_action_on_confirm=action, unit_states_now=states, note=note)
         return 0, report
-    if record is not None and record["timer_was_active"]:
+    if start_timer:
         try:
             systemd.run_checked("start", TIMER_UNIT)
         except StepFailure as error:

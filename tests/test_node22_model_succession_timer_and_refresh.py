@@ -9,6 +9,7 @@ checks before any step and the dry-run in
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -267,6 +268,8 @@ def test_an_unreadable_timer_record_of_another_succession_is_a_refusal(
     error = capsys.readouterr().err
     assert str(record) in error and "Nothing was written" in error
     assert space.main() == 1
+    # What to do about a record that was cut off while it was written.
+    assert "had not been touched" in error and "moves that file away" in error
     assert any(str(record) in refusal for refusal in report(capsys)["would_be_refused"])
     assert changed(before, tree(space.ws.root)) == set()
     assert "plan.json" not in space.names() and space.systemctl.mutating() == []
@@ -288,6 +291,108 @@ def test_a_closed_succession_or_one_whose_timer_was_inactive_does_not_hold_the_t
 
     assert space.main("--apply") == 0
     assert space.systemctl.state(TIMER) == "active"
+
+
+def _failures_of(directory: Path) -> list[dict[str, Any]]:
+    return [json.loads(path.read_text(encoding="utf-8")) for path in sorted(directory.glob("succession-failed-*"))]
+
+
+def test_a_succession_that_took_the_timer_after_the_opening_check_refuses_the_begin_of_another(
+    space: Space, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts.model_succession import run as succession_run
+    from scripts.model_succession import scheduler
+
+    other = space.ws.receipt_root / OTHER_ID
+    earlier = space.directory / "timer-before-stop.json"
+    real_begin = scheduler.begin
+
+    def begin(settings: Any, inputs: Any) -> dict[str, Any]:
+        # The earlier succession was still in its copyback when this one passed the opening check; by now
+        # it has recorded the timer as active and stopped it.
+        if not earlier.exists():
+            earlier.write_text(json.dumps({"timer_was_active": True}), encoding="utf-8")
+            space.systemctl.set_units(timer="inactive")
+        return real_begin(settings, inputs)
+
+    monkeypatch.setitem(succession_run.STEP_FUNCTIONS, "begin", begin)
+
+    assert space.main_as(OTHER_ID, "--apply") == 1
+
+    (failure,) = _failures_of(other)
+    assert failure["step"] == "begin" and failure["hard_stop"] is False
+    assert failure["completed_steps"] == ["copyback", "preflight"]
+    assert repr(SUCCESSION_ID) in failure["reason"] and "--abort --confirm-timer-start" in failure["reason"]
+    # Said of the begin step, which wrote nothing; the steps before it did write.
+    assert "wrote no timer record" in failure["reason"] and "Nothing was written" not in failure["reason"]
+    assert failure["timer_stopped_by_this_tool"] is False and failure["timer_started_by_this_tool"] is False
+    # Not one stop or start, and no record that the timer was inactive.
+    assert space.systemctl.mutating() == []
+    assert not (other / "timer-before-stop.json").exists() and not (other / "step-begin.json").exists()
+    capsys.readouterr()
+
+    # The earlier succession is given up, which starts the timer; the same command then resumes and at its
+    # finish starts the timer it found active.
+    (space.directory / "abort-20261005T130000Z.json").write_text("{}", encoding="utf-8")
+    space.systemctl.set_units(timer="active")
+    assert space.main_as(OTHER_ID, "--apply") == 0
+    result = report(capsys)
+    assert result["steps"]["preflight"] == "skipped" and result["steps"]["begin"] == "completed"
+    assert result["timer_action"] == "started"
+    assert json.loads((other / "timer-before-stop.json").read_text(encoding="utf-8"))["timer_was_active"] is True
+    assert space.systemctl.mutating() == [STOP, START_REFRESH, START_TIMER]
+    assert space.systemctl.state(TIMER) == "active"
+
+
+def test_a_cut_off_timer_record_of_this_succession_stops_begin_and_says_what_to_do(space: Space) -> None:
+    space.run_steps("copyback", "preflight")
+    record = space.directory / "timer-before-stop.json"
+    record.write_text('{"timer_was_ac', encoding="utf-8")
+    space.systemctl.clear()
+
+    assert space.main("--apply") == 1
+
+    (failure,) = space.failures()
+    assert failure["step"] == "begin" and str(record) in failure["reason"]
+    assert "had not been touched" in failure["reason"] and "moves that file away" in failure["reason"]
+    assert space.systemctl.mutating() == [] and space.systemctl.state(TIMER) == "active"
+
+
+def test_what_is_not_a_succession_with_a_timer_record_does_not_hold_the_timer(
+    space: Space, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = space.ws.receipt_root
+    # A regular file directly under the receipt root, and a succession that was provisioned and never begun.
+    (root / "README.txt").write_text("notes of an operator\n", encoding="utf-8")
+    (root / "timer-before-stop.json").write_text("{not json", encoding="utf-8")
+    provisioned = root / "recal-provisioned-only"
+    provisioned.mkdir()
+    (provisioned / "provision-apply.json").write_text("{}", encoding="utf-8")
+    (provisioned / "plan.json").write_text("{}", encoding="utf-8")
+
+    assert space.main() == 0
+    assert report(capsys)["would_be_refused"] == []
+    assert space.main("--apply") == 0
+    assert report(capsys)["timer_action"] == "started"
+    assert space.systemctl.mutating() == [STOP, START_REFRESH, START_TIMER]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root enters a directory of mode 000")
+def test_a_directory_that_cannot_be_entered_does_not_hold_the_timer(
+    space: Space, capsys: pytest.CaptureFixture[str]
+) -> None:
+    closed = space.ws.receipt_root / "recal-of-another-user"
+    closed.mkdir()
+    (closed / "timer-before-stop.json").write_text(json.dumps({"timer_was_active": True}), encoding="utf-8")
+    closed.chmod(0o000)
+    try:
+        assert space.main() == 0
+        assert report(capsys)["would_be_refused"] == []
+        assert space.main("--apply") == 0
+        assert report(capsys)["timer_action"] == "started"
+    finally:
+        closed.chmod(0o700)
+    assert space.systemctl.mutating() == [STOP, START_REFRESH, START_TIMER]
 
 
 # --- refresh ----------------------------------------------------------------------------
@@ -615,3 +720,97 @@ def test_abort_refuses_a_succession_that_never_started_or_has_finished(
     assert space.main("--abort", "--confirm-timer-start") == 1
     assert "has finished" in capsys.readouterr().err
     assert space.systemctl.calls() == [] and not list(space.directory.glob("abort-*.json"))
+
+
+# --- the two manifests differ: a publish killed between its two writes ---------------------
+
+
+def _manifests_differ_after_clone(space: Space, how: str) -> None:
+    space.run_steps("copyback", "preflight", "begin", "clone")
+    if how == "canonical_new_mirror_old":
+        # What a publish killed between its two writes leaves: the canonical manifest published, the mirror not.
+        rows = [*space.new_rows, space.ws.rows[2]]
+        space.ws.canonical.write_text(json.dumps({"models": rows}), encoding="utf-8")
+    else:
+        {"mirror_unreadable": space.ws.mirror, "canonical_unreadable": space.ws.canonical}[how].unlink()
+    assert "publish-apply.json" not in space.names()
+    space.systemctl.clear()
+
+
+DIFFERING = pytest.mark.parametrize("how", ["canonical_new_mirror_old", "mirror_unreadable", "canonical_unreadable"])
+
+
+def _says_the_manifests_differ(text: str, space: Space) -> None:
+    assert "manifests differ" in text and str(space.ws.canonical) in text and str(space.ws.mirror) in text
+    # The publish tool's own procedure in the runbook: compare the sha256, restore both from its backups.
+    assert "sha256" in text and ".bak-" in text and "recalibration-and-archive.md" in text
+    assert "refuse to submit" in text
+    assert "keeps running the old models" not in text and "new models are live" not in text
+
+
+@DIFFERING
+def test_an_abort_while_the_manifests_differ_reports_that_and_would_not_start_the_timer(
+    space: Space, capsys: pytest.CaptureFixture[str], how: str
+) -> None:
+    _manifests_differ_after_clone(space, how)
+    before = tree(space.ws.root)
+
+    assert space.main("--abort") == 0
+
+    result = report(capsys)
+    assert result["aborted"] is False and result["publish_state"] == "manifests_differ"
+    _says_the_manifests_differ(" ".join(result["what_this_state_means"]), space)
+    assert result["timer_was_active_at_begin"] is True
+    assert result["timer_action_on_confirm"].startswith("none:")
+    assert "NOT started" in result["timer_action_on_confirm"]
+    assert changed(before, tree(space.ws.root)) == set() and space.systemctl.mutating() == []
+
+
+@DIFFERING
+def test_a_confirmed_abort_while_the_manifests_differ_closes_the_succession_without_starting_the_timer(
+    space: Space, capsys: pytest.CaptureFixture[str], how: str
+) -> None:
+    _manifests_differ_after_clone(space, how)
+    before = {path: path.read_bytes() for path in (space.ws.canonical, space.ws.mirror) if path.exists()}
+
+    assert space.main("--abort", "--confirm-timer-start") == 0
+
+    result = report(capsys)
+    (path,) = sorted(space.directory.glob("abort-*.json"))
+    receipt = json.loads(path.read_text(encoding="utf-8"))
+    assert result["abort_receipt"] == str(path) and receipt["aborted"] is True
+    assert receipt["publish_state"] == "manifests_differ" and receipt["timer_was_active_at_begin"] is True
+    meaning = " ".join(receipt["what_this_state_means"])
+    _says_the_manifests_differ(meaning, space)
+    # The timer was active at begin and is nevertheless left stopped, and the receipt says so and why.
+    assert receipt["timer_action"].startswith("none:") and "NOT started" in receipt["timer_action"]
+    assert "only produce failures" in meaning and "by hand" in meaning
+    assert START_TIMER not in space.systemctl.calls() and space.systemctl.mutating() == []
+    assert space.systemctl.state(TIMER) == "inactive"
+    assert receipt["unit_states_now"][TIMER] == "inactive"
+    assert {path: path.read_bytes() for path in before} == before
+    # Closed like every aborted succession.
+    capsys.readouterr()
+    assert space.main("--apply") == 1
+    assert "was aborted" in capsys.readouterr().err
+
+
+@DIFFERING
+@pytest.mark.parametrize("mode", [(), ("--apply",)], ids=["dry_run", "apply"])
+def test_a_succession_past_its_clone_is_refused_while_the_manifests_differ(
+    space: Space, capsys: pytest.CaptureFixture[str], how: str, mode: tuple[str, ...]
+) -> None:
+    _manifests_differ_after_clone(space, how)
+    before = tree(space.ws.root)
+    capsys.readouterr()
+
+    assert space.main(*mode) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == "" and "Nothing was written" in captured.err
+    _says_the_manifests_differ(captured.err, space)
+    # Not the advice for a publish that is in effect, and not a step that failed: nothing ran.
+    refusal = captured.err[captured.err.index("Refused:") :]
+    assert "is in effect" not in refusal and "provider refresh" not in refusal
+    assert changed(before, tree(space.ws.root)) == set() and space.failures() == []
+    assert space.systemctl.mutating() == []

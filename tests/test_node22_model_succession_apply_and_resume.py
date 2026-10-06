@@ -267,6 +267,45 @@ def test_resume_reuses_the_clone_dry_run_receipt(space: Space, monkeypatch: pyte
     assert space.receipt("step-preflight.json")["clone_dry_run"]["reused"] is True
 
 
+def test_resume_reuses_the_publish_dry_run_receipt_the_publish_tool_wrote(
+    space: Space, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The run is killed in preflight, after the real publish tool wrote its dry-run receipt and before the
+    # step receipt.
+    write = succession_receipt.write_receipt
+
+    def killed(path: Path, receipt: Any) -> None:
+        if path.name == "step-preflight.json":
+            raise KeyboardInterrupt
+        write(path, receipt)
+
+    monkeypatch.setattr(succession_receipt, "write_receipt", killed)
+    with pytest.raises(KeyboardInterrupt):
+        space.main("--apply")
+    monkeypatch.setattr(succession_receipt, "write_receipt", write)
+    assert "publish-dry-run.json" in space.names() and "step-preflight.json" not in space.names()
+    assert space.failures() == [] and space.systemctl.mutating() == []
+    dry_run = (space.directory / "publish-dry-run.json").read_bytes()
+    capsys.readouterr()
+
+    calls: list[bool] = []
+    publish = publish_tool.publish_merged_scheduler_registry
+    monkeypatch.setattr(
+        publish_tool,
+        "publish_merged_scheduler_registry",
+        lambda **kwargs: (calls.append(kwargs["apply"]), publish(**kwargs))[1],
+    )
+
+    assert space.main("--apply") == 0
+
+    # The receipt of the real tool is the plan's: the publish tool ran once more, for the apply only.
+    assert calls == [True]
+    assert report(capsys)["steps"] == {"copyback": "skipped", **dict.fromkeys(STEPS[1:], "completed")}
+    assert space.receipt("step-preflight.json")["publish_dry_run"]["reused"] is True
+    assert (space.directory / "publish-dry-run.json").read_bytes() == dry_run
+    assert space.receipt("publish-apply.json")["outcome"] == "published"
+
+
 def test_a_clone_dry_run_receipt_of_another_plan_is_refused(space: Space) -> None:
     space.run_steps("copyback")
     target = space.directory / "clone-dry-run.json"

@@ -313,6 +313,31 @@ def test_an_unsupported_plan_is_refused_before_anything_and_nothing_is_written(
     assert space.systemctl.calls() == []
 
 
+@pytest.mark.parametrize("mode", [(), ("--apply",)], ids=["dry_run", "apply"])
+def test_a_new_id_over_pairs_an_earlier_succession_published_gets_the_ordinary_refusal(
+    space: Space, capsys: pytest.CaptureFixture[str], mode: tuple[str, ...]
+) -> None:
+    # The earlier succession published these pairs normally, with its receipt; nothing of it was lost.
+    assert space.main("--apply") == 0
+    capsys.readouterr()
+    space.systemctl.clear()
+    other = space.ws.receipt_root / "recal-2026100512-b"
+    before = tree(space.ws.root)
+
+    assert space.main_as(other.name, *mode) == 1
+
+    captured = capsys.readouterr()
+    assert "new model_id is already in the canonical manifest" in captured.err
+    assert "Nothing was written" in captured.err and captured.out == ""
+    # Not the state of a publish that lost its receipt: no advice to carry on by hand and start the timer.
+    # (The notice of a dry-run names the refresh and the timer as steps of an apply; the refusal is what follows it.)
+    refusal = captured.err[captured.err.index("Refused:") :]
+    for untrue in ("in effect", "without the receipt", "provider refresh", "start the timer", "by hand"):
+        assert untrue not in refusal
+    assert not other.exists() and changed(before, tree(space.ws.root)) == set()
+    assert space.systemctl.calls() == []
+
+
 def test_the_new_rows_registry_can_be_named_and_must_be_the_provisioned_one(
     space: Space, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
