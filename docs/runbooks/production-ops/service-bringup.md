@@ -465,6 +465,7 @@ PYTHONPATH=/scratch/frd_muziyao/NWM /scratch/frd_muziyao/NWM/.venv/bin/python sc
 [`recalibration-and-archive.md`](recalibration-and-archive.md) 的 5.7.1 相同（先备份、canonical 走 CAS、两份共用同一 `generated_at`、失败时恢复本次提交过的那份）。
 新流域上线是 **add-only**：hop 3 的 `provision-apply.json` 里每个 `models[].model_id` 各写一个 `--add`，同一流域的 gfs 与 IFS 两行必须一起加。
 顺序仍是 provision（hop 3）→ 回拷（hop 3b）→ 发布；apply 期间调度器 timer 应处于停止状态，两份 manifest 不一致时 worker 会拒绝 submit。
+率定切换（replace）的回拷、克隆、发布、refresh 与 timer 停启由 `scripts/node22_model_succession.py` 一条命令完成，见同一节；add-only 上线仍按本节手工做。
 
 ```bash
 # node-22，frd_muziyao
