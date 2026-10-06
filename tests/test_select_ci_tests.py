@@ -14625,7 +14625,7 @@ def test_model_succession_tool_selects_its_suites_and_rides_the_tools_it_drives(
     def selected(path: str) -> set[str]:
         return set(select_tests([path], repo_root=Path(".")))
 
-    assert len(succession) == 3 and all(Path(suite).exists() for suite in succession), sorted(succession)
+    assert len(succession) == 4 and all(Path(suite).exists() for suite in succession), sorted(succession)
     for path in (MODEL_SUCCESSION_OWNER_PATH, *MODEL_SUCCESSION_PACKAGE_MODULES, MODEL_SUCCESSION_HELPERS_PATH):
         assert succession <= selected(path), path
     for path in (
@@ -14645,11 +14645,12 @@ def test_model_succession_tool_selects_its_suites_and_rides_the_tools_it_drives(
     assert "tests/test_state_clone_recalibration_cli.py" not in selected("scripts/model_succession/tools.py")
 
 
-def test_model_succession_tracked_tree_is_seven_modules_three_suites_and_one_helper() -> None:
+def test_model_succession_tracked_tree_is_seven_modules_four_suites_and_one_helper() -> None:
     # #2739: the tool is an entry script over seven modules, each with its own
     # row. An eighth module, a stray `__init__.py` (scripts/ is a PEP 420
-    # namespace tree) or a fourth partition has no route until it is listed,
+    # namespace tree) or a fifth partition has no route until it is listed,
     # and reddens here instead of dropping out of the PR lane in silence.
+    # #2740 added the cold-start partition, the fourth.
     modules = set(MODEL_SUCCESSION_PACKAGE_MODULES)
     assert set(_tracked_python_files("scripts/model_succession")) == modules
     assert len(modules) == 7 and MODEL_SUCCESSION_OWNER_PATH not in modules

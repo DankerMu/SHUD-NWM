@@ -9,11 +9,20 @@ around the last three.  This command runs them as seven steps:
 
 ``copyback`` -> ``preflight`` -> ``begin`` -> ``clone`` -> ``publish`` -> ``refresh`` -> ``finish``
 
-``copyback`` and ``preflight`` (the dry-runs of the clone tool and of the
-publish tool) run while the scheduler is running.  ``begin`` records whether
-the scheduler timer was active, stops it and waits for a running pass to end
-by itself; ``finish`` starts the timer again when it was active.  Each
-completed step leaves ``step-<name>.json`` under
+``--kind cold_start`` is the succession of a structural change (mesh, river
+network, any other state-compatibility surface, or a new ``cfg.ic``): the
+state of the old models cannot be carried, so there is no ``clone`` step and
+no state index is read or written.  Each new model starts from the calibrated
+initial condition in its package, which ``preflight`` audits (``ic-audit.json``)
+and ``publish`` requires; the plan, the receipts and the reports say in
+``continuity`` that the hydrograph is not continuous.  ``preflight`` of either
+kind refuses a pair whose packages say it is the other kind.
+
+``copyback`` and ``preflight`` (the kind check, then the dry-runs of the clone
+tool and of the publish tool) run while the scheduler is running.  ``begin``
+records whether the scheduler timer was active, stops it and waits for a
+running pass to end by itself; ``finish`` starts the timer again when it was
+active.  Each completed step leaves ``step-<name>.json`` under
 ``<receipt-root>/<succession-id>/``; a step whose receipt exists is skipped, so
 running the same command again resumes, and a step refuses when the receipt of
 the step before it is missing.  The clone and publish tools write their own
@@ -56,6 +65,7 @@ from scripts.model_succession import run
 from scripts.model_succession.model import (
     CANONICAL_MANIFEST_ENV,
     DEFAULT_PASS_WAIT_SECONDS,
+    KIND_COLD_START,
     KIND_RECALIBRATION,
     MIRROR_MANIFEST_ENV,
     MIRROR_STATE_INDEX_KEY,
@@ -66,6 +76,7 @@ from scripts.model_succession.model import (
     REFRESH_RECEIPT_ROOT_ENV,
     REQUIRED_ENVIRONMENT,
     STATE_INDEX_ENV,
+    STEPS_BY_KIND,
     SYSTEMCTL_ENV,
     HardStop,
     ModelSuccessionRefusal,
@@ -91,6 +102,12 @@ DRY_RUN_NOTICE = (
     " An --apply copies the new packages, runs both tools' dry-runs, stops the scheduler timer, clones,"
     " publishes, runs the provider refresh and starts the timer again."
 )
+COLD_START_DRY_RUN_NOTICE = (
+    "DRY-RUN (no --apply): no file is changed, no receipt is written and no unit is started or stopped."
+    " An --apply copies the new packages, audits their packaged initial conditions, runs the publish tool's"
+    " dry-run, stops the scheduler timer, publishes, runs the provider refresh and starts the timer again."
+    " No state is carried from the old models: the hydrograph of these basins is not continuous."
+)
 
 
 def _pair(value: str) -> tuple[str, str]:
@@ -112,7 +129,14 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--provision-succession-id",
         help="Succession whose provision-apply.json produced the new rows (default: --succession-id).",
     )
-    parser.add_argument("--kind", required=True, choices=(KIND_RECALIBRATION,), help="The kind of succession.")
+    parser.add_argument(
+        "--kind",
+        required=True,
+        choices=tuple(STEPS_BY_KIND),
+        help=f"The kind of succession: {KIND_RECALIBRATION} carries the state of the old models through clone "
+        f"rows; {KIND_COLD_START} carries none and starts each new model from the initial condition in its "
+        "package. preflight refuses a pair whose packages say it is the other kind.",
+    )
     parser.add_argument(
         "--pair",
         action="append",
@@ -121,7 +145,13 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         metavar="OLD_MODEL_ID:NEW_MODEL_ID",
         help="A model replaced by its successor; one per source of each basin. Repeatable; the order is kept.",
     )
-    parser.add_argument("--cutover-time", required=True, metavar="YYYYMMDDHH", help="valid_time of the clone rows.")
+    parser.add_argument(
+        "--cutover-time",
+        required=True,
+        metavar="YYYYMMDDHH",
+        help=f"{KIND_RECALIBRATION}: valid_time of the clone rows. {KIND_COLD_START}: the cutover time the "
+        "operator declares; it is recorded in continuity and not enforced.",
+    )
     parser.add_argument("--operator-id", required=True)
     parser.add_argument(
         "--new-rows-registry",
@@ -210,7 +240,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.apply:
             status, report = run.apply(settings)
         else:
-            print(DRY_RUN_NOTICE, file=sys.stderr, flush=True)
+            notice = COLD_START_DRY_RUN_NOTICE if settings.plan.kind == KIND_COLD_START else DRY_RUN_NOTICE
+            print(notice, file=sys.stderr, flush=True)
             status, report = run.dry_run(settings)
     except (ModelSuccessionRefusal, StepFailure) as error:
         # A refusal before any step, or a unit whose state cannot be read outside a step: nothing was written.

@@ -854,11 +854,12 @@ SUCCESSION_RECEIPT_TESTS: tuple[str, ...] = (
     *MERGED_REGISTRY_PUBLISH_TESTS,
 )
 # #2739: the model succession tool is an entry script (argparse, `main`) over
-# the seven modules of `scripts/model_succession/`, and its suite is three
-# partitions sharing one tests/ support module. No path derives a partition
-# name, so every route is explicit, one row per module, for the reason recorded
-# at PUBLISH_REGISTRY_PACKAGE_MODULES. Every partition drives `main` or
-# `run_step` through all seven modules, so each module carries all three.
+# the seven modules of `scripts/model_succession/`, and its suite is four
+# partitions sharing one tests/ support module (#2740 added the cold-start
+# partition). No path derives a partition name, so every route is explicit, one
+# row per module, for the reason recorded at PUBLISH_REGISTRY_PACKAGE_MODULES.
+# Every partition drives `main` or `run_step` through all seven modules, so
+# each module carries all four.
 MODEL_SUCCESSION_OWNER_PATH = "scripts/node22_model_succession.py"
 MODEL_SUCCESSION_PACKAGE_MODULES: tuple[str, ...] = (
     "scripts/model_succession/copyback.py",
@@ -872,6 +873,7 @@ MODEL_SUCCESSION_PACKAGE_MODULES: tuple[str, ...] = (
 MODEL_SUCCESSION_HELPERS_PATH = "tests/model_succession_helpers.py"
 MODEL_SUCCESSION_TESTS: tuple[str, ...] = (
     "tests/test_node22_model_succession_apply_and_resume.py",
+    "tests/test_node22_model_succession_cold_start.py",
     "tests/test_node22_model_succession_copyback_and_dry_run.py",
     "tests/test_node22_model_succession_timer_and_refresh.py",
 )
@@ -3448,6 +3450,8 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # derivable. Explicit irregular mapping.
         # #2739: the model succession partitions call its `build_parser` /
         # `enforce_mode_flags` / `dispatch` for real and read its receipts.
+        # #2740: the succession tool's kind check compares the packages of a
+        # pair with this script's `state_compatibility_gate_inputs`.
         "scripts/node22_clone_direct_grid_cutover_states.py",
         (*NODE22_CLONE_CUTOVER_STATES_TESTS, *MODEL_SUCCESSION_TESTS),
     ),
@@ -3461,8 +3465,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # #2744: this reader once carried a private registry byte bound; the
         # capacity suite is what fails if one reappears (chain_manifests.py
         # gets the same suite through its manifest-surface rule).
+        # #2740: a cold-start succession gates on this script's `build_receipt`,
+        # called in-process on real package files by the cold-start partition.
         "scripts/audit_first_cycle_initial_state.py",
-        ("tests/test_scheduler_registry_capacity.py", "tests/test_first_cycle_initial_state_audit.py"),
+        (
+            "tests/test_scheduler_registry_capacity.py",
+            "tests/test_first_cycle_initial_state_audit.py",
+            "tests/test_node22_model_succession_cold_start.py",
+        ),
     ),
     PathTestRule(
         # #2737: the provision script's dry-run / apply / receipt suite and its

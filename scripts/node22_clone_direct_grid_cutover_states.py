@@ -41,6 +41,7 @@ DB-free, so the recalibration mode is file-index-only and takes no DB handle.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import os
 from collections.abc import Mapping, Sequence
@@ -220,6 +221,47 @@ def _state_compatibility_category_files(m0_root: Path, m1_root: Path) -> dict[st
             union = {str(_required_single(m1_root, "*.sp.mesh").relative_to(m1_root))}
         category_files[category] = tuple(sorted(union))
     return category_files
+
+
+@dataclasses.dataclass(frozen=True)
+class StateCompatibilityGateInputs:
+    """What the eight-surface gate reads from the two packages of one pair, each side from its own root."""
+
+    source_sp_att: Path
+    target_sp_att: Path
+    category_files: dict[str, tuple[str, ...]]
+    source_state_schema_bytes: bytes
+    target_state_schema_bytes: bytes
+    source_solver_config_bytes: bytes
+    target_solver_config_bytes: bytes
+
+
+def state_compatibility_gate_inputs(source_root: Path, target_root: Path) -> StateCompatibilityGateInputs:
+    """Build the per-side inputs of the eight-surface state-compatibility gate from two package roots.
+
+    Used by the recalibration pair loop below and by the model succession tool's
+    kind check, so that both compare exactly the same bytes.  Raises when a
+    package holds zero or several ``*.sp.att`` / ``*.cfg.ic`` / ``*.cfg.para``,
+    or no file of a required category under either root: the comparison cannot
+    be made then, which is not the same as "unequal".
+    """
+
+    source_sp_att = _required_single(source_root, "*.sp.att")
+    target_sp_att = _required_single(target_root, "*.sp.att")
+    category_files = _state_compatibility_category_files(source_root, target_root)
+    # Per-side gate bytes: M1's own cfg.ic/cfg.para against M1's own. Feeding
+    # one side's bytes to both sides would make the state_schema surface
+    # compare equal even when M1' ships a new cfg.ic -- the exact false pass
+    # this mode must not ship.
+    return StateCompatibilityGateInputs(
+        source_sp_att=source_sp_att,
+        target_sp_att=target_sp_att,
+        category_files=category_files,
+        source_state_schema_bytes=_required_single(source_root, "*.cfg.ic").read_bytes(),
+        target_state_schema_bytes=_required_single(target_root, "*.cfg.ic").read_bytes(),
+        source_solver_config_bytes=_required_single(source_root, "*.cfg.para").read_bytes(),
+        target_solver_config_bytes=_required_single(target_root, "*.cfg.para").read_bytes(),
+    )
 
 
 def _classify_direct_grid(root: Path, *, model_id: str) -> Mapping[str, Any]:
@@ -454,17 +496,8 @@ def run_recalibration(args: argparse.Namespace) -> dict[str, Any]:
                     "runs once per pair for one source"
                 )
 
-            source_sp_att = _required_single(source_root, "*.sp.att")
-            target_sp_att = _required_single(target_root, "*.sp.att")
-            category_files = _state_compatibility_category_files(source_root, target_root)
-            # Per-side gate bytes: M1's own cfg.ic/cfg.para against M1's own. Feeding
-            # one side's bytes to both sides would make the state_schema surface
-            # compare equal even when M1' ships a new cfg.ic -- the exact false pass
-            # this mode must not ship.
-            source_state_schema_bytes = _required_single(source_root, "*.cfg.ic").read_bytes()
-            target_state_schema_bytes = _required_single(target_root, "*.cfg.ic").read_bytes()
-            source_solver_config_bytes = _required_single(source_root, "*.cfg.para").read_bytes()
-            target_solver_config_bytes = _required_single(target_root, "*.cfg.para").read_bytes()
+            gate_inputs = state_compatibility_gate_inputs(source_root, target_root)
+            category_files = gate_inputs.category_files
 
             recorder = _RefusalRecorder()
             gate_repo: Any = canonical_repo if args.apply else _DryRunStateIndexRepository(canonical_repo)
@@ -477,8 +510,8 @@ def run_recalibration(args: argparse.Namespace) -> dict[str, Any]:
                 cutover_valid_time=cutover_time,
                 m0_package_root=source_root,
                 m1_package_root=target_root,
-                m0_sp_att_path=source_sp_att,
-                m1_sp_att_path=target_sp_att,
+                m0_sp_att_path=gate_inputs.source_sp_att,
+                m1_sp_att_path=gate_inputs.target_sp_att,
                 m1_category_files=category_files,
                 # D5: the direct-grid provisioning script records no
                 # hydrologic_core_fingerprint anywhere, so there is no independent
@@ -486,10 +519,10 @@ def run_recalibration(args: argparse.Namespace) -> dict[str, Any]:
                 # recorded in this receipt rather than satisfied vacuously by
                 # handing the gate back the value it just computed.
                 m1_recorded_hydrologic_core_fingerprint=None,
-                state_schema_bytes=target_state_schema_bytes,
-                solver_config_bytes=target_solver_config_bytes,
-                m0_state_schema_bytes=source_state_schema_bytes,
-                m0_solver_config_bytes=source_solver_config_bytes,
+                state_schema_bytes=gate_inputs.target_state_schema_bytes,
+                solver_config_bytes=gate_inputs.target_solver_config_bytes,
+                m0_state_schema_bytes=gate_inputs.source_state_schema_bytes,
+                m0_solver_config_bytes=gate_inputs.source_solver_config_bytes,
                 m1_forcing_mapping_manifest=target_manifest_section,
                 repository=gate_repo,
                 audit_recorder=recorder,

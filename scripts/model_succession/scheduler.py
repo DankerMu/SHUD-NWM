@@ -20,7 +20,6 @@ from scripts.model_succession.model import (
     REFRESH_START_TIMEOUT_SECONDS,
     REFRESH_UNIT,
     SERVICE_UNIT,
-    STEPS,
     TIMER_LEFT_STOPPED,
     TIMER_RECORD_CUT_OFF,
     TIMER_RECORD_NAME,
@@ -167,7 +166,7 @@ def refresh(settings: Settings, _inputs: Inputs) -> dict[str, Any]:
 
 
 def finish(settings: Settings, _inputs: Inputs) -> dict[str, Any]:
-    receipts = [settings.step_receipt(step) for step in STEPS[:-1]]
+    receipts = [settings.step_receipt(step) for step in settings.plan.steps[:-1]]
     missing = [str(path) for path in receipts if not os.path.lexists(path)]
     if missing:
         raise StepFailure(f"Refused: finish requires every step receipt; missing: {missing}.")
@@ -201,4 +200,5 @@ def finish(settings: Settings, _inputs: Inputs) -> dict[str, Any]:
         "timer_action": action,
         "timer_state": systemd.observed_state(TIMER_UNIT),
         "manifest_sha256": succession.file_sha256(settings.canonical_manifest),
+        **settings.plan.continuity(),
     }

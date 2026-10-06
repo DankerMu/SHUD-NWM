@@ -22,12 +22,11 @@ from scripts.merged_registry_publish.model import (
 from scripts.model_succession.model import (
     _NOTHING_WRITTEN,
     ABORT_BEFORE_NEW_ID,
-    KIND_RECALIBRATION,
+    FINAL_STEP,
     PLAN_NAME,
     PLAN_SCHEMA_VERSION,
     PROVIDER_STORE_ROOT_ENV,
-    RUNBOOK,
-    STEPS,
+    STEPS_BY_KIND,
     TIMER_RECORD_CUT_OFF,
     TIMER_RECORD_NAME,
     Inputs,
@@ -65,8 +64,10 @@ def build_plan(
             succession.validate_succession_id(provision_succession_id)
     except succession.SuccessionReceiptError as error:
         raise ModelSuccessionRefusal(str(error)) from error
-    if kind != KIND_RECALIBRATION:
-        raise ModelSuccessionRefusal(f"Refused: --kind {kind!r} is not supported; only {KIND_RECALIBRATION!r} is.")
+    if kind not in STEPS_BY_KIND:
+        raise ModelSuccessionRefusal(
+            f"Refused: --kind {kind!r} is not supported; the kinds are {', '.join(map(repr, STEPS_BY_KIND))}."
+        )
     if not pairs:
         raise ModelSuccessionRefusal("Refused: at least one --pair <old_model_id>:<new_model_id> is required.")
     named = [model_id for pair in pairs for model_id in pair]
@@ -110,7 +111,7 @@ def refuse_other_timer_holder(settings: Settings, *, wrote: str = _NOTHING_WRITT
             continue
         try:
             was_active = read_json(record).get("timer_was_active")
-            closed = os.path.lexists(directory / f"step-{STEPS[-1]}.json") or bool(_abort_receipts(directory))
+            closed = os.path.lexists(directory / f"step-{FINAL_STEP}.json") or bool(_abort_receipts(directory))
         except (OSError, ValueError) as error:
             raise ModelSuccessionRefusal(
                 f"Refused: {record} of succession {directory.name!r} cannot be read ({error}), so whether that "
@@ -144,11 +145,12 @@ def published_without_receipt(settings: Settings) -> bool:
     """This succession reached its publish step and left no ``publish-apply.json``, yet both manifests are equal
     and hold every new id and no old id.
 
-    Without ``step-clone.json`` the publish step of this succession never ran: the manifests then hold what
-    another succession published, with its own receipt.
+    Without the receipt of the step before ``publish`` in the list of its kind (``step-clone.json``, or
+    ``step-begin.json`` of a cold start) the publish step of this succession never ran: the manifests then
+    hold what another succession published, with its own receipt.
     """
 
-    if not os.path.lexists(settings.step_receipt("clone")):
+    if not os.path.lexists(settings.step_receipt(settings.plan.step_before_publish)):
         return False
     if os.path.lexists(settings.directory / PUBLISH_APPLY_NAME):
         return False
@@ -214,8 +216,9 @@ def check_inputs(settings: Settings) -> Inputs:
             f"Refused: new model_id is not in models[] of {receipt_path}: {unprovisioned}. {_NOTHING_WRITTEN}"
         )
 
-    # Past its clone this succession is at, or after, its publish: manifests that differ there are not retried.
-    if os.path.lexists(settings.step_receipt("clone")) and manifests_differ(settings):
+    # Past the step before its publish (its clone; the begin of a cold start) this succession is at, or after,
+    # its publish: manifests that differ there are not retried.
+    if os.path.lexists(settings.step_receipt(plan.step_before_publish)) and manifests_differ(settings):
         raise ModelSuccessionRefusal(
             f"Refused: {manifests_differ_text(settings)} Once both are the same bytes again, run the same command "
             f"or give the succession up with --abort --confirm-timer-start. {_NOTHING_WRITTEN}"
@@ -236,7 +239,7 @@ def check_inputs(settings: Settings) -> Inputs:
             f"Refused: both manifests already hold every new model_id of this plan and no old one, and "
             f"{settings.directory / PUBLISH_APPLY_NAME} does not exist: a publish of this plan is in effect, "
             "without the receipt of this succession. Do not undo it and do not run this command again; continue "
-            f"by hand with the provider refresh and then start the timer, from the runbook ({RUNBOOK}). "
+            f"by hand with the provider refresh and then start the timer, from the runbook ({plan.runbook}). "
             f"{_NOTHING_WRITTEN}"
         )
     if not os.path.lexists(settings.directory / PUBLISH_APPLY_NAME):
@@ -354,6 +357,7 @@ def write_plan(settings: Settings, inputs: Inputs) -> None:
             {
                 **receipt_header(settings, PLAN_SCHEMA_VERSION),
                 **_plan_record(settings, inputs),
+                **settings.plan.continuity(),
                 "provision_apply_receipt": inputs.provision_receipt,
                 "new_rows_registry": inputs.new_rows_registry,
             },

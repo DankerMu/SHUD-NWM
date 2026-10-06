@@ -48,11 +48,15 @@ REFRESH_START_TIMEOUT_SECONDS = 7500
 DEFAULT_PASS_WAIT_SECONDS = 14400
 
 KIND_RECALIBRATION = "recalibration"
-STEPS = ("copyback", "preflight", "begin", "clone", "publish", "refresh", "finish")
-# The steps that run while the scheduler is still running: a failure there happened before the timer was touched.
-STEPS_BEFORE_TIMER = ("copyback", "preflight")
-# The steps that change what the scheduler reads, or start it again: the scheduler must be stopped for them.
-STEPS_NEEDING_STOPPED_SCHEDULER = ("clone", "publish", "refresh", "finish")
+KIND_COLD_START = "cold_start"
+# The steps of each kind, in their fixed order.  A cold start carries no state: it has no clone step.
+STEPS_BY_KIND = {
+    KIND_RECALIBRATION: ("copyback", "preflight", "begin", "clone", "publish", "refresh", "finish"),
+    KIND_COLD_START: ("copyback", "preflight", "begin", "publish", "refresh", "finish"),
+}
+# The step that stops the timer and the last step are the same in every kind.
+BEGIN_STEP = "begin"
+FINAL_STEP = "finish"
 
 PLAN_SCHEMA_VERSION = "nhms.model_succession.plan.v1"
 STEP_RECEIPT_SCHEMA_VERSION = "nhms.model_succession.step_receipt.v1"
@@ -63,8 +67,20 @@ PLAN_NAME = "plan.json"
 TIMER_RECORD_NAME = "timer-before-stop.json"
 CLONE_DRY_RUN_NAME = "clone-dry-run.json"
 CLONE_APPLY_NAME = "clone-apply.json"
+IC_AUDIT_NAME = "ic-audit.json"
 
-RUNBOOK = "docs/runbooks/production-ops/recalibration-and-archive.md, section 5.7.1"
+_RUNBOOK_FILE = "docs/runbooks/production-ops/recalibration-and-archive.md"
+RUNBOOK_BY_KIND = {
+    KIND_RECALIBRATION: f"{_RUNBOOK_FILE}, section 5.7.1",
+    KIND_COLD_START: f"{_RUNBOOK_FILE}, section 5.7.2",
+}
+# What ``continuity.notice`` says in the plan, the receipts and the reports of a cold start.
+COLD_START_NOTICE = (
+    "Cold start: no state is carried from the old models. Each new model starts from the calibrated initial "
+    "condition in its package at the first cycle the scheduler plans after the timer is started, and the "
+    "hydrograph of these basins is discontinuous there. The cutover time is recorded as the operator declared "
+    "it; this tool does not enforce it."
+)
 _NOTHING_WRITTEN = "Nothing was written."
 # What ``step-finish.json`` and the report of an apply say was done to the timer.
 TIMER_STARTED = "started"
@@ -94,7 +110,8 @@ def manifests_differ_text(settings: Settings) -> str:
         f"{settings.canonical_manifest} and the worker mirror {settings.mirror_manifest}. A publish that was "
         "killed between its two writes leaves them so, without a receipt. Workers refuse to submit while the "
         "manifests differ. Compare the sha256 of both and restore both from the backups of the publish apply "
-        f"(<manifest>.bak-<succession-id>-<stamp>), as the runbook describes for the publish tool ({RUNBOOK})."
+        "(<manifest>.bak-<succession-id>-<stamp>), as the runbook describes for the publish tool "
+        f"({settings.plan.runbook})."
     )
 
 
@@ -134,12 +151,55 @@ class Plan:
     def new_ids(self) -> list[str]:
         return [new for _old, new in self.pairs]
 
+    @property
+    def steps(self) -> tuple[str, ...]:
+        return STEPS_BY_KIND[self.kind]
+
+    @property
+    def steps_before_timer(self) -> tuple[str, ...]:
+        """The steps that run while the scheduler is still running: a failure there is before the timer was touched."""
+
+        return self.steps[: self.steps.index(BEGIN_STEP)]
+
+    @property
+    def steps_needing_stopped_scheduler(self) -> tuple[str, ...]:
+        """The steps that change what the scheduler reads, or start it again: the scheduler must be stopped for them."""
+
+        return self.steps[self.steps.index(BEGIN_STEP) + 1 :]
+
+    @property
+    def step_before_publish(self) -> str:
+        """The step whose receipt says this succession has reached its publish step."""
+
+        return self.steps[self.steps.index("publish") - 1]
+
+    @property
+    def runbook(self) -> str:
+        return RUNBOOK_BY_KIND[self.kind]
+
     def record(self) -> dict[str, Any]:
         return {
             "kind": self.kind,
             "pairs": [{"old_model_id": old, "new_model_id": new} for old, new in self.pairs],
             "cutover_time": self.cutover_time,
             "provision_succession_id": self.provision_succession_id,
+        }
+
+    def continuity(self) -> dict[str, Any]:
+        """``{"continuity": ...}`` of a cold start, for a receipt or a report; empty for every other kind.
+
+        Written beside ``record()``, never inside it: a resume compares the record, not the notice text.
+        """
+
+        if self.kind != KIND_COLD_START:
+            return {}
+        return {
+            "continuity": {
+                "mode": KIND_COLD_START,
+                "state_carried": False,
+                "declared_cutover_time": self.cutover_time,
+                "notice": COLD_START_NOTICE,
+            }
         }
 
 
@@ -223,7 +283,7 @@ def write_stamped_receipt(settings: Settings, prefix: str, receipt: Mapping[str,
 
 
 def completed_steps(settings: Settings) -> list[str]:
-    return [step for step in STEPS if os.path.lexists(settings.step_receipt(step))]
+    return [step for step in settings.plan.steps if os.path.lexists(settings.step_receipt(step))]
 
 
 def existing_receipts(settings: Settings) -> list[str]:

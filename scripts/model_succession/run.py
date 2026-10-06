@@ -18,14 +18,12 @@ from scripts.model_succession.model import (
     ABORT_SCHEMA_VERSION,
     CLONE_APPLY_NAME,
     FAILURE_SCHEMA_VERSION,
+    FINAL_STEP,
+    KIND_COLD_START,
     PLAN_NAME,
     PUBLISH_STATE_MANIFESTS_DIFFER,
-    RUNBOOK,
     SERVICE_UNIT,
     STEP_RECEIPT_SCHEMA_VERSION,
-    STEPS,
-    STEPS_BEFORE_TIMER,
-    STEPS_NEEDING_STOPPED_SCHEDULER,
     TIMER_LEFT_STOPPED,
     TIMER_UNIT,
     HardStop,
@@ -42,6 +40,7 @@ from scripts.model_succession.model import (
     write_stamped_receipt,
 )
 
+# Every step of every kind; which of them a succession runs, and in what order, is ``Plan.steps``.
 STEP_FUNCTIONS: dict[str, Callable[[Settings, Inputs], dict[str, Any]]] = {
     "copyback": copyback.run,
     "preflight": tools.preflight,
@@ -56,23 +55,25 @@ STEP_FUNCTIONS: dict[str, Callable[[Settings, Inputs], dict[str, Any]]] = {
 def run_step(settings: Settings, inputs: Inputs, step: str) -> str:
     """Run one step unless its receipt exists; ``skipped`` or ``completed``.
 
-    A step is refused when the receipt of the step before it is missing, and,
-    for the steps that change what the scheduler reads, when the scheduler
-    timer or service is running.  Both are checked before the step does anything.
+    A step is refused when the receipt of the step before it in the list of
+    the succession's kind is missing, and, for the steps that change what the
+    scheduler reads, when the scheduler timer or service is running.  Both are
+    checked before the step does anything.
     """
 
     target = settings.step_receipt(step)
     if os.path.lexists(target):
         return "skipped"
-    index = STEPS.index(step)
+    steps = settings.plan.steps
+    index = steps.index(step)
     if index:
-        previous = settings.step_receipt(STEPS[index - 1])
+        previous = settings.step_receipt(steps[index - 1])
         if not os.path.lexists(previous):
             raise StepFailure(
-                f"Refused: the {step} step requires the receipt of the {STEPS[index - 1]} step, which is missing: "
+                f"Refused: the {step} step requires the receipt of the {steps[index - 1]} step, which is missing: "
                 f"{previous}. The {step} step wrote nothing."
             )
-    if step in STEPS_NEEDING_STOPPED_SCHEDULER:
+    if step in settings.plan.steps_needing_stopped_scheduler:
         systemd.require_scheduler_stopped(step)
     facts = STEP_FUNCTIONS[step](settings, inputs)
     header = receipt_header(settings, STEP_RECEIPT_SCHEMA_VERSION)
@@ -106,9 +107,11 @@ def _record_failure(settings: Settings, step: str, error: Exception) -> dict[str
     hard_stop = isinstance(error, HardStop)
     known = isinstance(error, StepFailure | ModelSuccessionRefusal)
     reason = str(error) if known else f"{type(error).__name__}: {error}"
-    before_timer = step in STEPS_BEFORE_TIMER
+    before_timer = step in settings.plan.steps_before_timer
     if hard_stop:
-        ways_on = [f"Hard stop: do not run this command again; continue by hand from the runbook ({RUNBOOK})."]
+        ways_on = [
+            f"Hard stop: do not run this command again; continue by hand from the runbook ({settings.plan.runbook})."
+        ]
     else:
         ways_on = [
             "Remove the cause and run the same command again: completed steps are skipped.",
@@ -156,21 +159,23 @@ def apply(settings: Settings) -> tuple[int, dict[str, Any]]:
     if not planned:
         planning.write_plan(settings, inputs)
     steps: dict[str, str] = {}
-    for step in STEPS:
+    for step in settings.plan.steps:
         try:
             steps[step] = run_step(settings, inputs, step)
         except Exception as error:  # noqa: BLE001 - every failure of a step is recorded; a kill is not caught
-            return 1, {"outcome": "failed", "steps": steps, "failure": _record_failure(settings, step, error)}
+            failure = _record_failure(settings, step, error)
+            return 1, {"outcome": "failed", "steps": steps, "failure": failure, **settings.plan.continuity()}
     try:
-        timer_action = read_json(settings.step_receipt(STEPS[-1])).get("timer_action")
+        timer_action = read_json(settings.step_receipt(FINAL_STEP)).get("timer_action")
     except (OSError, ValueError) as error:
-        timer_action = f"unknown ({settings.step_receipt(STEPS[-1])} cannot be read: {error})"
+        timer_action = f"unknown ({settings.step_receipt(FINAL_STEP)} cannot be read: {error})"
     report: dict[str, Any] = {
         "succession_id": settings.plan.succession_id,
         "outcome": "completed",
         "steps": steps,
         "timer_action": timer_action,
         "receipt_directory": str(settings.directory),
+        **settings.plan.continuity(),
     }
     if timer_action == TIMER_LEFT_STOPPED:
         report["timer_note"] = (
@@ -185,6 +190,7 @@ def dry_run(settings: Settings) -> tuple[int, dict[str, Any]]:
     """Report what an apply would do.  Writes nothing and issues only ``is-active`` queries."""
 
     inputs, planned = _checked(settings)
+    cold_start = settings.plan.kind == KIND_COLD_START
     done = completed_steps(settings)
     steps: dict[str, Any] = {step: {"status": "completed"} for step in done}
     packages, refusals = copyback.report(settings, inputs)
@@ -201,7 +207,10 @@ def dry_run(settings: Settings) -> tuple[int, dict[str, Any]]:
         else:
             steps["preflight"] = {
                 "status": "needs copyback",
-                "note": "The clone gate and the publisher's package checks need the packages on the compute "
+                "note": "The kind check, the initial-condition audit and the publisher's package checks need the "
+                "packages on the compute store; the apply runs them in preflight, before the timer is stopped."
+                if cold_start
+                else "The clone gate and the publisher's package checks need the packages on the compute "
                 "store; the apply runs both dry-runs in preflight, before the timer is stopped.",
             }
     states = {unit: systemd.observed_state(unit) for unit in (TIMER_UNIT, SERVICE_UNIT)}
@@ -213,18 +222,20 @@ def dry_run(settings: Settings) -> tuple[int, dict[str, Any]]:
             f"for {SERVICE_UNIT} to end by itself",
         }
     for step, would in (("clone", "run the clone apply"), ("publish", "run the publish apply")):
-        steps.setdefault(step, {"would": would})
+        if step in settings.plan.steps:
+            steps.setdefault(step, {"would": would})
     for step in ("refresh", "finish"):
         steps.setdefault(step, {"status": "not predicted"})
     report = {
         "succession_id": settings.plan.succession_id,
         "dry_run": True,
         "plan": settings.plan.record(),
+        **settings.plan.continuity(),
         "plan_json": "present and equal to this command line" if planned else "absent: the first --apply writes it",
         "provision_apply_receipt": inputs.provision_receipt,
         "new_rows_registry": inputs.new_rows_registry,
         "unit_states_now": states,
-        "steps": {step: steps[step] for step in STEPS},
+        "steps": {step: steps[step] for step in settings.plan.steps},
         "would_be_refused": refusals,
     }
     return (1 if refusals else 0), report
@@ -248,7 +259,7 @@ def _abort_meaning(settings: Settings, publish_state: str, timer_was_active: boo
     )
     by_hand = (
         "The remaining steps (the provider refresh and the final checks) must be finished by hand from the "
-        f"runbook ({RUNBOOK})."
+        f"runbook ({settings.plan.runbook})."
     )
     if publish_state == PUBLISH_STATE_MANIFESTS_DIFFER:
         meaning = [manifests_differ_text(settings), *timer]
@@ -274,7 +285,7 @@ def _abort_meaning(settings: Settings, publish_state: str, timer_was_active: boo
     if any(directory.glob("publish-apply-failed-*.json")):
         meaning.append(
             "A publish attempt failed: compare the sha256 of both manifests before trusting that, as the runbook "
-            f"describes ({RUNBOOK})."
+            f"describes ({settings.plan.runbook})."
         )
     if os.path.lexists(directory / CLONE_APPLY_NAME):
         meaning.append(
@@ -296,9 +307,9 @@ def abort(settings: Settings, *, confirm_timer_start: bool) -> tuple[int, dict[s
             f"{settings.plan.succession_id!r} ever started, so there is nothing to abort."
         )
     done = completed_steps(settings)
-    if "finish" in done:
+    if FINAL_STEP in done:
         raise ModelSuccessionRefusal(
-            f"Refused: succession {settings.plan.succession_id!r} has finished ({settings.step_receipt('finish')})."
+            f"Refused: succession {settings.plan.succession_id!r} has finished ({settings.step_receipt(FINAL_STEP)})."
         )
     try:
         record = scheduler.read_timer_record(settings)
