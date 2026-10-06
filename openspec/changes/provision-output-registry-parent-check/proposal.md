@@ -43,8 +43,13 @@ unchanged: the baseline version is derived from the content, so publishing the s
    ways on: for a directory of the operator's own, `chmod 755` and the same command; otherwise a directory
    of their own (`mkdir -m 755`) and, because an apply must name the path of its dry-run, a new
    `--succession-id` with its own dry-run.
-   An `--output-registry` that is a URI (`s3://`, `published://`) is resolved by the publisher under the
-   object store root; it is not checked here and behaves as today.
+   An `--output-registry` that is an `s3://` or `published://` URI is resolved by the publisher under the
+   object store root; it is not checked here and behaves as today. Any other scheme (as `urlparse` sees it,
+   which includes a relative path whose first component contains a colon) is one the publisher refuses with
+   `provider_destination_unsupported` after the commit: it is refused here, in the same place, saying to
+   name a plain path.
+   For an existing directory the function of item 1 also requires that the effective user may write and
+   search it, as it does for the ancestor of a missing one.
 
 3. Runbooks: `docs/runbooks/production-ops/recalibration-and-archive.md` 5.7.1 says how to publish an
    unchanged package as a new generation (hop 1 with `--package-version-template` and a suffix, a dedicated
@@ -84,5 +89,10 @@ that no succession directory was created).
 - parent missing under an ancestor that is not writable (skipped when run as root, as the suite already
   does elsewhere): refused.
 - unit test of the predicate with a stat result of a foreign uid: unsafe.
+- `--output-registry a:b/registry.json` and `file:///x/registry.json`: refused before the database, nothing
+  done; an `s3://` output registry is not refused by this check.
+- the function of item 1 called directly: `None` for a 0755 directory of the user, a problem for 0775, for
+  0555 (skipped as root), and for a symlinked component; for each existing-directory case the destination
+  lock on a file in that directory agrees (succeeds exactly where the function returned `None`).
 - `_provider_destination_file_lock` still raises `provider_lock_parent_unsafe` for a group-writable parent
   (existing test, unchanged).

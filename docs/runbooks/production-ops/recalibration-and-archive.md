@@ -149,9 +149,12 @@ manifest——**不是** §3.1.2 的 cutover declaration。
 同一挂载的 `/ghdc/data/nwm/...`），且父目录须属执行账号本人、不能组/他人可写（见 [`service-bringup.md`](service-bringup.md) hop 3 的坑）。
 这一条 dry-run 与 `--apply` 都在最开头检查（#2753）：不合格就拒绝，不连库、不落回执，报错里点名目录、属主 uid 与 mode。
 自己的目录 `chmod 755` 后原命令重跑；别人的目录（例如组可写的共享候选目录）改不了，就把 `--output-registry` 换到自建目录
-（`mkdir -m 755`）——`--apply` 必须与它的 dry-run 写同一路径，所以已有 dry-run 回执时还要换一个新的 `--succession-id` 重做 dry-run。
-父目录尚不存在时只要求最近的已存在祖先对本人可写，apply 会自己按 0755 建出来。URI 形式（`s3://` / `published://`）不在此检查之内：
+（`mkdir -m 755`）；`--apply` 必须与它的 dry-run 写同一路径，所以只有当本 id 已有一份写着旧路径的 dry-run 回执时，才需要换一个新的
+`--succession-id` 重做 dry-run（被拒绝的 dry-run 没落回执，原 id 换个路径照用）。父目录尚不存在时只要求最近的已存在祖先对本人可写，
+apply 会自己按 0755 建出来；已存在的父目录还须对本人可写。`s3://` / `published://` 形式的 URI 不做这项目录检查，
+其他 scheme（含首段带冒号的相对路径）发布器不支持，同样在开头就拒绝，改写成普通路径即可。
 
+provision 的 dry-run 与 `--apply` 命令如下：
 
 ```bash
 # node-27，/home/nwm/NWM；DATABASE_URL / OBJECT_STORE_ROOT / OBJECT_STORE_PREFIX 已在环境里

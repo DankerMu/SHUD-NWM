@@ -164,11 +164,11 @@ def provider_destination_parent_problem(directory: Path) -> str | None:
 
     Reaches the directory the way ``_provider_destination_file_lock`` does and
     applies the same predicate, but creates nothing, so a caller can refuse
-    before it has done anything.  When the directory does not exist yet, the
-    nearest existing ancestor only has to be writable and searchable by the
-    effective user: the lock creates the missing components itself with mode
-    0755 and they then pass the predicate.  That branch is best-effort (on NFS
-    the answer is the client's).
+    before it has done anything.  The directory must also be writable and
+    searchable by the effective user.  When it does not exist yet, only that
+    is required, of the nearest existing ancestor: the lock creates the missing
+    components itself with mode 0755 and they then pass the predicate.  The
+    access answer is best-effort (on NFS it is the client's).
     """
 
     target = directory if directory.is_absolute() else Path.cwd() / directory
@@ -188,17 +188,25 @@ def provider_destination_parent_problem(directory: Path) -> str | None:
             fd, reached = opened, ancestor
         if fd is None or reached is None:
             return f"no existing ancestor of {target} could be opened"
-        if reached == target:
+        exists = reached == target
+        if exists:
             metadata = os.fstat(fd)
-            if provider_parent_is_safe(metadata):
-                return None
-            return (
-                f"{target} is owned by uid {metadata.st_uid} with mode "
-                f"{stat.S_IMODE(metadata.st_mode):04o} (effective uid {os.geteuid()})"
-            )
+            if not provider_parent_is_safe(metadata):
+                return (
+                    f"{target} is owned by uid {metadata.st_uid} with mode "
+                    f"{stat.S_IMODE(metadata.st_mode):04o} (effective uid {os.geteuid()})"
+                )
+        # The lock file is created in the directory itself, so an existing one
+        # must be usable too, not only the ancestor of a missing one.
         effective_ids = os.access in os.supports_effective_ids
-        if os.access(".", os.W_OK | os.X_OK, dir_fd=fd, effective_ids=effective_ids):
+        if os.access in os.supports_dir_fd:
+            usable = os.access(".", os.W_OK | os.X_OK, dir_fd=fd, effective_ids=effective_ids)
+        else:
+            usable = os.access(reached, os.W_OK | os.X_OK, effective_ids=effective_ids)
+        if usable:
             return None
+        if exists:
+            return f"{target} is not writable and searchable by effective uid {os.geteuid()}"
         return (
             f"{target} does not exist and its nearest existing ancestor {reached} is not writable "
             f"and searchable by effective uid {os.geteuid()}, so it cannot be created"

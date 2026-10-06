@@ -781,19 +781,26 @@ def _provision_variants(
 def _require_publishable_output_registry_parent(output_registry: str | Path) -> None:
     """Refuse now what the registry publisher would refuse after the apply's commit."""
 
-    if urlparse(str(output_registry)).scheme:
-        return  # A URI: the publisher resolves it under the object-store root.
+    scheme = urlparse(str(output_registry)).scheme
+    if scheme in {"s3", "published"}:
+        return  # Resolved by the publisher under the object-store root; not checked here.
+    if scheme:
+        raise DirectGridProvisionError(
+            f"Refusing --output-registry {output_registry}: the registry publisher does not support the scheme "
+            f"{scheme!r} and would refuse it only after the apply's database commit. Name a plain path. Nothing "
+            "was written and the database was not opened."
+        )
     directory = Path(output_registry).expanduser().parent
     problem = provider_destination_parent_problem(directory)
     if problem is not None:
         raise DirectGridProvisionError(
             f"Refusing --output-registry {output_registry}: {problem}. The registry publisher requires its "
-            f"directory to be owned by the effective user (uid {os.geteuid()}) and not group- or "
-            "other-writable, and an apply would hit that only after its database commit. Nothing was "
-            f"written and the database was not opened. If {directory} is yours: `chmod 755 {directory}` and "
+            f"directory to be owned and writable by the effective user (uid {os.geteuid()}) and not group- or "
+            "other-writable, and an apply would hit that only after its database commit. Nothing was written "
+            f"and the database was not opened. If {directory} exists and is yours: `chmod 755 {directory}` and "
             "rerun the same command. Otherwise name an --output-registry in a directory of your own "
-            "(`mkdir -m 755 <dir>`); an apply must name the path of its dry-run, so that also needs a new "
-            "--succession-id with its own dry-run."
+            "(`mkdir -m 755 <dir>`); that needs a new --succession-id with its own dry-run only if a dry-run "
+            "receipt of this id already names the old path (a refused dry-run wrote none)."
         )
 
 
