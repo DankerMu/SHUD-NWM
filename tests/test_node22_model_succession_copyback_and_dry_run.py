@@ -180,6 +180,50 @@ def test_a_copy_interrupted_half_way_leaves_no_partial_destination(
     assert space.main("--apply") == 0
 
 
+unprivileged = pytest.mark.skipif(os.geteuid() == 0, reason="root reads through a mode of 000")
+
+
+@unprivileged
+@pytest.mark.parametrize("side", ["source", "destination"])
+def test_an_unreadable_subdirectory_is_a_failure_that_names_it(space: Space, side: str) -> None:
+    row = space.new_rows[0]
+    source, destination = space.package(row, space.ws.shared), space.package(row, space.ws.store)
+    if side == "destination":
+        shutil.copytree(source, destination)
+    locked = (source if side == "source" else destination) / "CALIB"
+    locked.chmod(0)
+    try:
+        assert space.main("--apply") == 1
+        failure = _copyback_failure(space)
+    finally:
+        locked.chmod(0o755)
+
+    # Not a comparison that passes, or differs, over the part of the tree that could be listed.
+    assert str(locked) in failure["reason"] and "cannot be read" in failure["reason"]
+    if side == "source":
+        assert not destination.exists() and not list(destination.parent.glob(".*"))
+
+
+@unprivileged
+@pytest.mark.parametrize("name", ["CALIB", "huai.cfg.para"], ids=["subdirectory", "file"])
+def test_a_dry_run_reports_an_unreadable_source_as_a_predicted_refusal(
+    space: Space, capsys: pytest.CaptureFixture[str], name: str
+) -> None:
+    locked = space.package(space.new_rows[0], space.ws.shared) / name
+    mode = stat.S_IMODE(locked.stat().st_mode)
+    locked.chmod(0)
+    try:
+        assert space.main() == 1
+        result = report(capsys)
+    finally:
+        locked.chmod(mode)
+
+    package = result["steps"]["copyback"]["packages"][0]
+    assert package["outcome"] == "refused" and str(locked) in package["reason"]
+    assert any(str(locked) in refusal for refusal in result["would_be_refused"])
+    assert set(space.systemctl.calls()) <= IS_ACTIVE
+
+
 # --- the checks before any step ----------------------------------------------------------
 
 

@@ -21,10 +21,14 @@ from scripts.merged_registry_publish.model import (
 )
 from scripts.model_succession.model import (
     _NOTHING_WRITTEN,
+    ABORT_BEFORE_NEW_ID,
     KIND_RECALIBRATION,
     PLAN_NAME,
     PLAN_SCHEMA_VERSION,
     PROVIDER_STORE_ROOT_ENV,
+    RUNBOOK,
+    STEPS,
+    TIMER_RECORD_NAME,
     Inputs,
     ModelSuccessionRefusal,
     Plan,
@@ -78,11 +82,72 @@ def build_plan(
     )
 
 
+def _abort_receipts(directory: Path) -> list[Path]:
+    return sorted(directory.glob("abort-*.json"))
+
+
+def refuse_other_timer_holder(settings: Settings) -> None:
+    """Refuse while another succession holds the scheduler timer: it stopped it and neither finished nor was aborted.
+
+    A succession begun then would find the timer inactive, record that, and leave the scheduler stopped at its
+    own finish.  A sibling's timer record that cannot be read is a refusal too, not a succession to skip.
+    """
+
+    root = settings.receipt_root
+    try:
+        siblings = sorted(entry for entry in root.iterdir() if entry.name != settings.plan.succession_id)
+    except OSError as error:
+        raise ModelSuccessionRefusal(
+            f"Refused: cannot list the receipt root {root} ({error}), so whether another succession holds the "
+            f"scheduler timer is unknown. {_NOTHING_WRITTEN}"
+        ) from error
+    for directory in siblings:
+        record = directory / TIMER_RECORD_NAME
+        if not os.path.lexists(record):
+            continue
+        try:
+            was_active = read_json(record).get("timer_was_active")
+            closed = os.path.lexists(directory / f"step-{STEPS[-1]}.json") or bool(_abort_receipts(directory))
+        except (OSError, ValueError) as error:
+            raise ModelSuccessionRefusal(
+                f"Refused: {record} of succession {directory.name!r} cannot be read ({error}), so whether that "
+                f"succession holds the scheduler timer is unknown. {_NOTHING_WRITTEN}"
+            ) from error
+        if not isinstance(was_active, bool):
+            raise ModelSuccessionRefusal(
+                f"Refused: {record} of succession {directory.name!r} does not record timer_was_active, so whether "
+                f"that succession holds the scheduler timer is unknown. {_NOTHING_WRITTEN}"
+            )
+        if was_active and not closed:
+            raise ModelSuccessionRefusal(
+                f"Refused: succession {directory.name!r} stopped the scheduler timer ({record} records "
+                "timer_was_active true) and has neither finished nor been aborted. A succession begun now would "
+                "record the timer as inactive and leave the scheduler stopped at its finish. Resume "
+                f"{directory.name!r} with its own command, or give it up first: its command line (--succession-id "
+                f"{directory.name}) with --abort --confirm-timer-start instead of --apply. {_NOTHING_WRITTEN}"
+            )
+
+
+def published_without_receipt(settings: Settings) -> bool:
+    """No ``publish-apply.json``, yet both manifests are equal and hold every new id and no old id."""
+
+    if os.path.lexists(settings.directory / PUBLISH_APPLY_NAME):
+        return False
+    try:
+        canonical = settings.canonical_manifest.read_bytes()
+        if canonical != settings.mirror_manifest.read_bytes():
+            return False
+        ids = {str(row.get("model_id")) for row in read_json(settings.canonical_manifest).get("models") or []}
+    except (OSError, ValueError, AttributeError):
+        return False
+    return set(settings.plan.new_ids) <= ids and not set(settings.plan.old_ids) & ids
+
+
 def refuse_closed(settings: Settings) -> None:
     """A succession that has an abort receipt is closed for every later run."""
 
     try:
-        aborts = sorted(settings.directory.glob("abort-*.json"))
+        aborts = _abort_receipts(settings.directory)
     except OSError:
         aborts = []
     if aborts:
@@ -141,6 +206,14 @@ def check_inputs(settings: Settings) -> Inputs:
         )
     # Once this succession's publish has happened the canonical manifest holds the new ids instead of the
     # old ones; the finish step checks exactly that, so a resumed run is not refused for it here.
+    if published_without_receipt(settings):
+        raise ModelSuccessionRefusal(
+            f"Refused: both manifests already hold every new model_id of this plan and no old one, and "
+            f"{settings.directory / PUBLISH_APPLY_NAME} does not exist: a publish of this plan is in effect, "
+            "without the receipt of this succession. Do not undo it and do not run this command again; continue "
+            f"by hand with the provider refresh and then start the timer, from the runbook ({RUNBOOK}). "
+            f"{_NOTHING_WRITTEN}"
+        )
     if not os.path.lexists(settings.directory / PUBLISH_APPLY_NAME):
         absent = [model_id for model_id in plan.old_ids if model_id not in canonical_ids]
         if absent:
@@ -152,8 +225,7 @@ def check_inputs(settings: Settings) -> Inputs:
         if present:
             raise ModelSuccessionRefusal(
                 f"Refused: new model_id is already in the canonical manifest {settings.canonical_manifest}: "
-                f"{present}. If a publish of this succession was killed before it wrote its receipt, restore both "
-                f"manifests from its backups as the runbook describes. {_NOTHING_WRITTEN}"
+                f"{present}. {_NOTHING_WRITTEN}"
             )
 
     registry_path, registry_sha256, rows = _new_rows(settings, receipt, receipt_path)
@@ -240,7 +312,7 @@ def compare_with_plan(settings: Settings, inputs: Inputs | None) -> bool:
         raise ModelSuccessionRefusal(
             f"Refused: this command line differs from {path}, which succession {settings.plan.succession_id!r} "
             f"was first applied with: {different}. Run the same command, or use a new --succession-id for a "
-            f"changed plan. {_NOTHING_WRITTEN}"
+            f"changed plan. {ABORT_BEFORE_NEW_ID} {_NOTHING_WRITTEN}"
         )
     return True
 

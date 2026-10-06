@@ -14,8 +14,9 @@ import hashlib
 import os
 import shutil
 import stat
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from packages.common.object_store import normalize_object_key
 from scripts.model_succession.model import Inputs, Settings, StepFailure
@@ -41,18 +42,33 @@ def _tree(root: Path, *, what: str) -> dict[str, tuple[int, str]]:
     if root.is_symlink() or not root.is_dir():
         raise StepFailure(f"Refused: {what} {root} is not a directory (or is a symlink).")
     files: dict[str, tuple[int, str]] = {}
-    for directory, names, filenames in os.walk(root, followlinks=False):
+    for directory, names, filenames in os.walk(root, followlinks=False, onerror=_unreadable(what, root)):
         for name in (*names, *filenames):
             path = Path(directory) / name
-            mode = path.lstat().st_mode
+            try:
+                mode = path.lstat().st_mode
+                if stat.S_ISREG(mode):
+                    files[path.relative_to(root).as_posix()] = (path.stat().st_size, _file_sha256(path))
+            except OSError as error:
+                _unreadable(what, root)(error, path)
             if stat.S_ISLNK(mode) or not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
                 raise StepFailure(
                     f"Refused: {what} {root} holds a symlink or a non-regular file: {path}. Nothing was copied "
                     "for this package."
                 )
-            if stat.S_ISREG(mode):
-                files[path.relative_to(root).as_posix()] = (path.stat().st_size, _file_sha256(path))
     return files
+
+
+def _unreadable(what: str, root: Path) -> Callable[..., NoReturn]:
+    """What ``os.walk`` calls for a directory it cannot list: a failure, where the default is to leave it out."""
+
+    def refuse(error: OSError, path: Path | None = None) -> NoReturn:
+        raise StepFailure(
+            f"Refused: {what} {root} holds an entry that cannot be read: {path or error.filename} ({error}). "
+            "A tree that cannot be read completely is not compared or copied."
+        ) from error
+
+    return refuse
 
 
 def _difference(source: dict[str, tuple[int, str]], destination: dict[str, tuple[int, str]]) -> list[str]:
@@ -98,7 +114,9 @@ def classify(settings: Settings, row: dict[str, Any]) -> dict[str, Any]:
 
 def _copy(source: Path, temporary: Path) -> None:
     temporary.mkdir()
-    for directory, names, filenames in os.walk(source, followlinks=False):
+    for directory, names, filenames in os.walk(
+        source, followlinks=False, onerror=_unreadable("the package source", source)
+    ):
         target = temporary / Path(directory).relative_to(source)
         for name in names:
             (target / name).mkdir()

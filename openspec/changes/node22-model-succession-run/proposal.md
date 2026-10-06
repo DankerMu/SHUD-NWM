@@ -49,7 +49,10 @@ started it (no systemd drop-in fence).
    when: `provision-apply.json` of the provision succession is missing or not `outcome = applied`; a new id
    of the plan is not one of its `models[].model_id`; one of its `models[].model_id` is neither a new id of
    the plan nor in the canonical manifest; an old id is not in the canonical manifest; a new id already is;
-   the new-rows registry's sha256 is not the one the provision receipt recorded. The comparison with
+   the new-rows registry's sha256 is not the one the provision receipt recorded; another succession under
+   the same receipt root holds the timer (its `timer-before-stop.json` says the timer was active and it has
+   neither `step-finish.json` nor an abort receipt; an unreadable one is a refusal naming it) - abort or
+   resume that one first. The comparison with
    `plan.json` comes first, so a mistyped command line is reported as that. Once `publish-apply.json`
    exists, the two canonical-manifest checks (old id present, new id absent) are skipped: `finish` checks
    the opposite. These refusals, a database variable and an aborted succession exit non-zero without
@@ -80,7 +83,8 @@ started it (no systemd drop-in fence).
         skipped when `clone-dry-run.json` exists with `dry_run = true`, `invocation_outcome = complete` and
         the plan's pairs and cutover time (an existing one that is anything else is a refusal).
       - Publish: `publish_merged_scheduler_registry` with one replace per pair and the succession id, which
-        writes `publish-dry-run.json`; skipped when that file exists.
+        writes `publish-dry-run.json`; an existing one is reused only when its `operations`, succession ids,
+        `dry_run = true` and `outcome = planned` match the plan, otherwise refusal.
    3. `begin`: exclusive-creates `timer-before-stop.json` recording whether
       `nhms-compute-scheduler.timer` was active (a file that exists is read, never re-derived), stops the
       timer (a resumed `begin` issues the `stop` again, which is harmless), then waits until
@@ -111,7 +115,8 @@ started it (no systemd drop-in fence).
       condition can skip the run silently, so a zero exit of the start alone is not success.
    7. `finish`: requires all step receipts; requires the canonical manifest and the mirror to be
       byte-identical, to contain every new id and none of the old ids; then starts the timer if
-      `timer-before-stop.json` says it was active (otherwise leaves it and says so).
+      `timer-before-stop.json` says it was active (otherwise leaves it and says so). The step receipt and the
+      final report carry `timer_action` (`started` / `left_stopped_was_inactive_at_begin`).
 
 5. Unit state. A unit is "not running" when `systemctl --user is-active <unit>` prints `inactive` or
    `failed`; `active`, `activating`, `deactivating`, `reloading` are running; any other output or no output

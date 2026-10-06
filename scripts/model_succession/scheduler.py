@@ -21,12 +21,15 @@ from scripts.model_succession.model import (
     REFRESH_UNIT,
     SERVICE_UNIT,
     STEPS,
+    TIMER_LEFT_STOPPED,
     TIMER_RECORD_NAME,
     TIMER_RECORD_SCHEMA_VERSION,
+    TIMER_STARTED,
     TIMER_UNIT,
     Inputs,
     Settings,
     StepFailure,
+    TimerNotStopped,
     read_json,
     receipt_header,
     utc_now,
@@ -68,10 +71,13 @@ def begin(settings: Settings, _inputs: Inputs) -> dict[str, Any]:
             "timer_was_active": systemd.is_running(state),
         }
         succession.write_receipt(settings.directory / TIMER_RECORD_NAME, record)
-    systemd.run_checked("stop", TIMER_UNIT)
+    try:
+        systemd.run_checked("stop", TIMER_UNIT)
+    except StepFailure as error:
+        raise TimerNotStopped(str(error)) from error
     timer_state = systemd.unit_state(TIMER_UNIT)
     if systemd.is_running(timer_state):
-        raise StepFailure(f"{TIMER_UNIT} is {timer_state} after systemctl --user stop returned zero.")
+        raise TimerNotStopped(f"{TIMER_UNIT} is {timer_state} after systemctl --user stop returned zero.")
 
     started = monotonic()
     deadline = started + settings.pass_wait_seconds
@@ -117,8 +123,10 @@ def refresh(settings: Settings, _inputs: Inputs) -> dict[str, Any]:
     if receipt_started is None or receipt_started <= step_started:
         raise StepFailure(
             f"systemctl --user start {REFRESH_UNIT} returned zero, but {latest} is not newer than this step "
-            f"(started_at {receipt.get('started_at')!r}, step started {utc_text(step_started)}). The unit's start "
-            f"condition skips the run without an error while {SERVICE_UNIT} is active; the refresh did not run."
+            f"(started_at {receipt.get('started_at')!r}, step started {utc_text(step_started)}): the start "
+            "returned without a new latest.json, so no refresh of this step is counted. Possible causes: the "
+            f"unit's start condition (it checks {SERVICE_UNIT}) skipped the run, or a refresh was already running "
+            "and the start returned with that one."
         )
     if receipt.get("outcome") != "published":
         raise StepFailure(
@@ -173,9 +181,9 @@ def finish(settings: Settings, _inputs: Inputs) -> dict[str, Any]:
         raise StepFailure(f"{settings.directory / TIMER_RECORD_NAME} is missing; the timer was not started.")
     if record["timer_was_active"]:
         systemd.run_checked("start", TIMER_UNIT)
-        action = "started"
+        action = TIMER_STARTED
     else:
-        action = "left_stopped: the timer was not active when the succession began"
+        action = TIMER_LEFT_STOPPED
     return {
         "timer_was_active": record["timer_was_active"],
         "timer_action": action,

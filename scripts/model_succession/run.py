@@ -25,14 +25,17 @@ from scripts.model_succession.model import (
     STEPS,
     STEPS_BEFORE_TIMER,
     STEPS_NEEDING_STOPPED_SCHEDULER,
+    TIMER_LEFT_STOPPED,
     TIMER_UNIT,
     HardStop,
     Inputs,
     ModelSuccessionRefusal,
     Settings,
     StepFailure,
+    TimerNotStopped,
     completed_steps,
     existing_receipts,
+    read_json,
     receipt_header,
     write_stamped_receipt,
 )
@@ -87,7 +90,9 @@ def _checked(settings: Settings) -> tuple[Inputs, bool]:
     return inputs, planning.compare_with_plan(settings, inputs)
 
 
-def _timer_stopped_by_this_tool(settings: Settings) -> bool | None:
+def _timer_stopped_by_this_tool(settings: Settings, error: Exception) -> bool | None:
+    if isinstance(error, TimerNotStopped):
+        return False
     try:
         record = scheduler.read_timer_record(settings)
     except StepFailure:
@@ -121,7 +126,7 @@ def _record_failure(settings: Settings, step: str, error: Exception) -> dict[str
             SERVICE_UNIT: systemd.observed_state(SERVICE_UNIT),
         },
         "timer_touched_by_this_tool": not before_timer,
-        "timer_stopped_by_this_tool": False if before_timer else _timer_stopped_by_this_tool(settings),
+        "timer_stopped_by_this_tool": False if before_timer else _timer_stopped_by_this_tool(settings, error),
         "timer_started_by_this_tool": False,
         "timer_note": (
             f"The {step} step runs before the timer is touched: this tool did not stop or start it."
@@ -145,6 +150,7 @@ def _record_failure(settings: Settings, step: str, error: Exception) -> dict[str
 
 def apply(settings: Settings) -> tuple[int, dict[str, Any]]:
     inputs, planned = _checked(settings)
+    planning.refuse_other_timer_holder(settings)
     if not planned:
         planning.write_plan(settings, inputs)
     steps: dict[str, str] = {}
@@ -153,12 +159,24 @@ def apply(settings: Settings) -> tuple[int, dict[str, Any]]:
             steps[step] = run_step(settings, inputs, step)
         except Exception as error:  # noqa: BLE001 - every failure of a step is recorded; a kill is not caught
             return 1, {"outcome": "failed", "steps": steps, "failure": _record_failure(settings, step, error)}
-    return 0, {
+    try:
+        timer_action = read_json(settings.step_receipt(STEPS[-1])).get("timer_action")
+    except (OSError, ValueError) as error:
+        timer_action = f"unknown ({settings.step_receipt(STEPS[-1])} cannot be read: {error})"
+    report: dict[str, Any] = {
         "succession_id": settings.plan.succession_id,
         "outcome": "completed",
         "steps": steps,
+        "timer_action": timer_action,
         "receipt_directory": str(settings.directory),
     }
+    if timer_action == TIMER_LEFT_STOPPED:
+        report["timer_note"] = (
+            f"{TIMER_UNIT} was left stopped: it was not active when this succession began, so the finish step did "
+            "not start it. Start it by hand if the scheduler is meant to run."
+        )
+        print(f"Model succession {settings.plan.succession_id!r} completed. {report['timer_note']}", file=sys.stderr)
+    return 0, report
 
 
 def dry_run(settings: Settings) -> tuple[int, dict[str, Any]]:
@@ -168,6 +186,10 @@ def dry_run(settings: Settings) -> tuple[int, dict[str, Any]]:
     done = completed_steps(settings)
     steps: dict[str, Any] = {step: {"status": "completed"} for step in done}
     packages, refusals = copyback.report(settings, inputs)
+    try:
+        planning.refuse_other_timer_holder(settings)
+    except ModelSuccessionRefusal as error:
+        refusals.insert(0, str(error))
     if "copyback" not in done:
         steps["copyback"] = {"packages": packages}
     if "preflight" not in done:
@@ -206,14 +228,35 @@ def dry_run(settings: Settings) -> tuple[int, dict[str, Any]]:
     return (1 if refusals else 0), report
 
 
-def _abort_meaning(settings: Settings) -> list[str]:
+def _publish_state(settings: Settings) -> str:
+    if os.path.lexists(settings.directory / PUBLISH_APPLY_NAME):
+        return "published"
+    return "published_without_receipt" if planning.published_without_receipt(settings) else "not_published"
+
+
+def _abort_meaning(settings: Settings, publish_state: str, timer_was_active: bool | None) -> list[str]:
     directory = settings.directory
-    if os.path.lexists(directory / PUBLISH_APPLY_NAME):
+    timer = (
+        ["The scheduler timer was not active when the succession began and is left as it is: nothing starts it."]
+        if timer_was_active is False
+        else []
+    )
+    by_hand = (
+        "The remaining steps (the provider refresh and the final checks) must be finished by hand from the "
+        f"runbook ({RUNBOOK})."
+    )
+    if publish_state == "published":
+        return [f"The publish completed: the new models are live in both manifests. {by_hand}", *timer]
+    if publish_state == "published_without_receipt":
         return [
-            "The publish completed: the new models are live in both manifests. The remaining steps (the provider "
-            f"refresh and the final checks) must be finished by hand from the runbook ({RUNBOOK})."
+            f"The publish is in effect although its receipt {directory / PUBLISH_APPLY_NAME} was not written: the "
+            f"new models are live in both manifests. {by_hand}",
+            *timer,
         ]
-    meaning = ["The publish did not complete: the scheduler keeps running the old models."]
+    if timer_was_active is False:
+        meaning = ["The publish did not complete.", *timer]
+    else:
+        meaning = ["The publish did not complete: the scheduler keeps running the old models."]
     if any(directory.glob("publish-apply-failed-*.json")):
         meaning.append(
             "A publish attempt failed: compare the sha256 of both manifests before trusting that, as the runbook "
@@ -253,12 +296,15 @@ def abort(settings: Settings, *, confirm_timer_start: bool) -> tuple[int, dict[s
         action = f"start {TIMER_UNIT}: it was active when the succession began"
     else:
         action = "none: the timer was not active when the succession began"
+    timer_was_active = record["timer_was_active"] if record else None
+    publish_state = _publish_state(settings)
     report: dict[str, Any] = {
         "succession_id": settings.plan.succession_id,
         "completed_steps": done,
         "receipts": existing_receipts(settings),
-        "timer_was_active_at_begin": record["timer_was_active"] if record else None,
-        "what_this_state_means": _abort_meaning(settings),
+        "timer_was_active_at_begin": timer_was_active,
+        "publish_state": publish_state,
+        "what_this_state_means": _abort_meaning(settings, publish_state, timer_was_active),
     }
     if not confirm_timer_start:
         states = {unit: systemd.observed_state(unit) for unit in (TIMER_UNIT, SERVICE_UNIT)}

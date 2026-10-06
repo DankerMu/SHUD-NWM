@@ -27,7 +27,9 @@ When a step of an ``--apply`` fails, the tool does NOT start the timer.  It
 exits non-zero and leaves ``succession-failed-<stamp>.json`` saying what
 failed, the unit states it observed and the ways on: fix the cause and run the
 same command, or give up with ``--abort --confirm-timer-start``, which starts
-the timer when it was active and closes the succession id.
+the timer when it was active and closes the succession id.  While a succession
+that stopped the timer is neither finished nor aborted, every other succession
+id is refused: it would record the timer as inactive and leave it stopped.
 
 The tool is DB-free: it refuses when a database variable is set and never
 opens a connection.  It never stops or kills the scheduler service, never

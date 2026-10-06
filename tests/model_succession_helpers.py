@@ -258,6 +258,12 @@ class Space:
     def main(self, *extra: str, **overrides: Any) -> int:
         return tool.main(self.argv(*extra, **overrides))
 
+    def main_as(self, succession_id: str, *extra: str) -> int:
+        """The command of another succession id over the same pairs, provisioned by this space's succession."""
+
+        arguments = [succession_id if value == SUCCESSION_ID else value for value in self.argv(*extra)]
+        return tool.main([*arguments, "--provision-succession-id", SUCCESSION_ID])
+
     def settings(self, *extra: str) -> Settings:
         return tool.settings_from_arguments(tool._parse_args(self.argv(*extra)))
 

@@ -215,6 +215,8 @@ def test_a_command_line_that_differs_from_the_plan_is_refused(
 
     error = capsys.readouterr().err
     assert "differs from" in error and str(space.directory / "plan.json") in error
+    # A new id is not the whole advice: this one may hold the timer, and only its abort starts it again.
+    assert "new --succession-id" in error and "--abort --confirm-timer-start" in error
     assert changed(before, tree(space.ws.root)) == set()
     assert space.systemctl.mutating() == []
 
@@ -276,7 +278,50 @@ def test_a_clone_dry_run_receipt_of_another_plan_is_refused(space: Space) -> Non
     assert space.main("--apply") == 1
     (failure,) = space.failures()
     assert failure["step"] == "preflight" and "cutover_time" in failure["reason"]
+    assert "new --succession-id" in failure["reason"] and "--abort --confirm-timer-start" in failure["reason"]
     assert space.systemctl.mutating() == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("operations", "first pair only"),
+        ("provision_succession_id", "another-provision"),
+        ("succession_id", "another-succession"),
+        ("dry_run", False),
+        ("outcome", "refused"),
+    ],
+)
+def test_a_publish_dry_run_receipt_of_another_plan_is_refused_in_preflight(
+    space: Space, field: str, value: Any
+) -> None:
+    space.run_steps("copyback")
+
+    def operations(pairs: list[tuple[str, str]]) -> dict[str, Any]:
+        replace = [{"old_model_id": old, "new_model_id": new} for old, new in pairs]
+        return {"replace": replace, "add": [], "remove": []}
+
+    receipt = {
+        "dry_run": True,
+        "outcome": "planned",
+        "succession_id": SUCCESSION_ID,
+        "provision_succession_id": SUCCESSION_ID,
+        "operations": operations(space.pairs),
+    }
+    receipt[field] = operations(space.pairs[:1]) if field == "operations" else value
+    target = space.directory / "publish-dry-run.json"
+    target.write_text(json.dumps(receipt), encoding="utf-8")
+
+    assert space.main("--apply") == 1
+
+    (failure,) = space.failures()
+    assert failure["step"] == "preflight" and failure["hard_stop"] is False
+    assert str(target) in failure["reason"] and f"{field}=" in failure["reason"]
+    assert "new --succession-id" in failure["reason"] and "--abort --confirm-timer-start" in failure["reason"]
+    # Before the timer was touched; the foreign receipt was not replaced.
+    assert space.systemctl.mutating() == [] and space.systemctl.state(TIMER) == "active"
+    assert json.loads(target.read_text(encoding="utf-8")) == receipt
+    assert "step-preflight.json" not in space.names() and "timer-before-stop.json" not in space.names()
 
 
 @pytest.mark.parametrize("step", ["clone", "publish"])
@@ -404,7 +449,7 @@ def test_a_publish_that_ends_inconsistent_is_a_hard_stop(space: Space, monkeypat
     assert "DIFFER" in _hard_stop(space, "publish")["reason"]
 
 
-def test_a_publish_without_its_receipt_is_a_hard_stop(space: Space, monkeypatch: pytest.MonkeyPatch) -> None:
+def _publish_without_its_receipt(space: Space, monkeypatch: pytest.MonkeyPatch) -> None:
     space.run_steps("copyback", "preflight", "begin", "clone")
     write = succession_receipt.write_receipt
 
@@ -415,12 +460,48 @@ def test_a_publish_without_its_receipt_is_a_hard_stop(space: Space, monkeypatch:
 
     monkeypatch.setattr(succession_receipt, "write_receipt", unwritable)
     assert space.main("--apply") == 1
+    monkeypatch.setattr(succession_receipt, "write_receipt", write)
+
+
+def test_a_publish_without_its_receipt_is_a_hard_stop(
+    space: Space, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _publish_without_its_receipt(space, monkeypatch)
 
     failure = _hard_stop(space, "publish")
     assert "complete but has no receipt" in failure["reason"] and "unreceipted" in failure["reason"]
     # The real publish tool did publish both manifests.
     assert space.ws.canonical.read_bytes() == space.ws.mirror.read_bytes()
     assert set(row["model_id"] for row in space.new_rows) <= set(space.model_ids(space.ws.canonical))
+    # As the publish tool itself says: the publish is in effect and is continued, not undone.
+    assert "is in effect" in failure["reason"] and "restore" not in failure["reason"].lower()
+    assert "provider refresh" in failure["reason"] and "start the timer" in failure["reason"]
+
+    # Running the command again says the same, before any step and without touching the timer.
+    before = stores(space)
+    space.systemctl.clear()
+    capsys.readouterr()
+    assert space.main("--apply") == 1
+    error = capsys.readouterr().err
+    assert "is in effect" in error and "provider refresh" in error and "start the timer" in error
+    assert "restore" not in error.lower() and "recalibration-and-archive.md" in error
+    assert stores(space) == before and space.systemctl.mutating() == [] and len(space.failures()) == 1
+
+
+def test_an_abort_after_a_publish_without_its_receipt_says_the_new_models_are_live(
+    space: Space, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _publish_without_its_receipt(space, monkeypatch)
+    assert "publish-apply.json" not in space.names()
+    capsys.readouterr()
+
+    assert space.main("--abort") == 0
+
+    result = report(capsys)
+    assert result["publish_state"] == "published_without_receipt"
+    meaning = " ".join(result["what_this_state_means"])
+    assert "new models are live" in meaning and "old models" not in meaning
+    assert "finished by hand from the runbook" in meaning
 
 
 def test_hard_stop_is_a_step_failure() -> None:

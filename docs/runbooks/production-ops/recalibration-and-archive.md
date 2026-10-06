@@ -224,19 +224,34 @@ cd /scratch/frd_muziyao/NWM && { setsid nohup .venv/bin/python -m scripts.node22
   timer 与 service 均未在跑，发现有人中途启动了调度器就拒绝、该步什么都不写。
   这是第一个会停、启调度器 timer 的工具；`scripts/install_node22_scheduler_file_provider_refresh.sh` 仍把该 timer
   当受保护对象（那个安装器只断言自己没改动它）。succession 持有 timer 期间 stall probe 报 `timer_stopped` 属预期。
+  `finish` 对 timer 做了什么写在 `step-finish.json` 与 apply 报告的 `timer_action` 里：`started`，或
+  `left_stopped_was_inactive_at_begin`（`begin` 时 timer 本来就没在跑，工具不启动它；此时报告的 `timer_note` 与
+  stderr 都会明说 timer 仍是停的，调度器该跑就手工启动）。
+- **一次只能有一个 succession 持有 timer。** 某个 succession 停了 timer（它的 `timer-before-stop.json` 里
+  `timer_was_active=true`）却既没 finish 也没 abort 时，别的 `--succession-id` 的 apply 一律拒绝并点名它，dry-run 把
+  同一条写进 `would_be_refused`——否则后来者会把 timer 记成「本来就没在跑」，finish 时让调度器一直停着。先续跑它，
+  或先放弃它（见下文「放弃」）。回执根下别人的 `timer-before-stop.json` 读不出来同样拒绝并点名路径，不会跳过。
 - **任何一步失败，工具都不启动 timer。** 非零退出，并写 `succession-failed-<UTC 时间戳>.json`：失败的步骤与原因、
   已有哪些回执、**当时实测**的 timer / service 状态、timer 是否由本工具停的，以及出路。copyback / preflight 失败发生在
   碰 timer 之前，回执里写明。出路两条：排除原因后**原样重跑同一条命令**；或放弃（见下条）。被 kill 的运行不留失败
   回执，同样重跑即可。命令行与首次 apply 写下的 `plan.json`（pairs 及其顺序、cutover time、provision id、provision
-  回执与 registry 的 sha256）不一致时拒绝；计划变了就换一个 `--succession-id`。
+  回执与 registry 的 sha256）不一致时拒绝；计划变了就换一个 `--succession-id`——但本次若已经停过 timer，
+  **先用首次 apply 的那条命令行加 `--abort --confirm-timer-start` 放弃它**：只有它能把 timer 启回来，它还持有 timer 时
+  新 id 会被拒绝。已有的 `clone-dry-run.json` / `publish-dry-run.json` 与计划不符时同样在 preflight（停 timer 之前）拒绝，
+  出路相同。
 - **hard stop（不要重跑，转下面的手工步骤）**：`clone-apply.json` 是 `aborted`（已有克隆行写入，工具不重试克隆，
-  按 5.7 的 receipt 判读处理）；存在 `outcome=inconsistent` 的 `publish-apply-failed-*.json`；发布成功但回执没写出。
+  按 5.7 的 receipt 判读处理）；存在 `outcome=inconsistent` 的 `publish-apply-failed-*.json`；发布成功但回执没写出
+  （发布**已经生效**：不要从备份恢复、不要再跑 `--apply`，接着手工做 provider refresh；timer 则用首次 apply 的那条
+  命令行加 `--abort --confirm-timer-start` 启动——它在 timer 原来是 active 时启动 timer，并把这个 id 关掉，否则它一直
+  算作持有 timer，之后的 succession 都会被拒绝）。
   发布工具的 `refused` / `rolled_back` 是普通失败，重跑会重试。
 - **放弃**：把上面命令的 `--apply` 换成 `--abort --confirm-timer-start`。timer 原来是 active 就启动它，写
   `abort-<UTC 时间戳>.json`，此后该 `--succession-id` 的任何运行都拒绝；只给 `--abort` 则只打印报告、什么都不做。
   publish 之前放弃：调度器继续跑旧 model；**已写入的克隆行留在两份 state index 里**，而调度器取某 model 最早的克隆行
   作为它的 cutover time——以后对同一个新 id 用更晚的 cutover time 再做一次 succession，生效时刻仍是这一次的。
-  publish 之后放弃：新 model 已经生效，余下的 refresh 与核对必须按下面的手工步骤做完。
+  publish 之后放弃：新 model 已经生效，余下的 refresh 与核对必须按下面的手工步骤做完。报告与回执的 `publish_state`
+  是 `not_published` / `published` / `published_without_receipt`（两份 manifest 已是新 id 但 `publish-apply.json`
+  没写出，同样按「已生效」处理）；`timer_was_active_at_begin=false` 时 timer 在 succession 开始前就是停的，放弃不会启动它。
 
 **下面是逐步的手工做法**——succession 命令被 hard stop 之后的回退路径，也是每一步在做什么的说明。
 

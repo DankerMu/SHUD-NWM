@@ -21,6 +21,7 @@ from tests.model_succession_helpers import (  # noqa: F401 - fixtures
     REFRESH,
     SERVICE,
     STEPS,
+    SUCCESSION_ID,
     TIMER,
     Space,
     changed,
@@ -70,30 +71,33 @@ def test_begin_times_out_while_the_service_runs_and_the_same_command_resumes(
 
 
 def test_begin_waits_for_a_running_pass_to_end_by_itself(space: Space) -> None:
-    space.systemctl.script(SERVICE, ["active", "deactivating", "inactive"])
+    # ``activating`` is what is-active prints for the oneshot scheduler service while a pass runs.
+    space.systemctl.script(SERVICE, ["activating", "activating", "deactivating", "inactive"])
 
     assert space.main("--apply") == 0
 
     calls = space.systemctl.calls()
     first_stop = calls.index(STOP)
     # After the stop: the timer is read back, then the service is polled until it is not running.
-    assert calls[first_stop + 1 : first_stop + 5] == [
-        f"--user is-active {TIMER}",
-        f"--user is-active {SERVICE}",
-        f"--user is-active {SERVICE}",
-        f"--user is-active {SERVICE}",
-    ]
+    assert calls[first_stop + 1 : first_stop + 6] == [f"--user is-active {TIMER}", *[f"--user is-active {SERVICE}"] * 4]
     assert space.receipt("step-begin.json")["service_state"] == "inactive"
     assert space.systemctl.mutating() == [STOP, START_REFRESH, START_TIMER]
 
 
-def test_a_timer_that_was_inactive_at_begin_is_not_started_by_finish(space: Space) -> None:
+def test_a_timer_that_was_inactive_at_begin_is_not_started_by_finish(
+    space: Space, capsys: pytest.CaptureFixture[str]
+) -> None:
     space.systemctl.set_units(timer="inactive")
 
     assert space.main("--apply") == 0
 
+    out = capsys.readouterr()
     assert space.receipt("timer-before-stop.json")["timer_was_active"] is False
-    assert space.receipt("step-finish.json")["timer_action"].startswith("left_stopped")
+    assert space.receipt("step-finish.json")["timer_action"] == "left_stopped_was_inactive_at_begin"
+    # The report and the summary say what was done to the timer, not only the receipt.
+    result = json.loads(out.out)
+    assert result["timer_action"] == "left_stopped_was_inactive_at_begin"
+    assert "left stopped" in result["timer_note"] and "left stopped" in out.err
     assert START_TIMER not in space.systemctl.calls()
     assert space.systemctl.state(TIMER) == "inactive"
 
@@ -104,6 +108,47 @@ def test_a_failed_service_counts_as_not_running(space: Space) -> None:
     assert space.main("--apply") == 0
     assert space.receipt("step-begin.json")["service_state"] == "failed"
     assert space.systemctl.state(TIMER) == "active"
+
+
+def test_a_failed_timer_stop_is_not_recorded_as_a_stop(space: Space) -> None:
+    space.systemctl.configure(fail=[f"stop {TIMER}"])
+
+    assert space.main("--apply") == 1
+
+    (failure,) = space.failures()
+    assert failure["step"] == "begin" and "exited 1" in failure["reason"]
+    # The record says what the timer was; the failure receipt says the stop did not happen.
+    assert space.receipt("timer-before-stop.json")["timer_was_active"] is True
+    assert failure["timer_touched_by_this_tool"] is True and failure["timer_stopped_by_this_tool"] is False
+    assert failure["observed_unit_states"][TIMER] == "active"
+
+
+@pytest.mark.parametrize(
+    ("printed", "running"),
+    [
+        ("inactive", False),
+        ("failed", False),
+        ("active", True),
+        ("activating", True),
+        ("deactivating", True),
+        ("reloading", True),
+        ("maintenance", None),
+        ("", None),
+    ],
+)
+def test_what_is_active_prints_is_running_not_running_or_unknown(
+    space: Space, printed: str, running: bool | None
+) -> None:
+    from scripts.model_succession import systemd
+
+    space.systemctl.configure(print={SERVICE: printed})
+    if running is None:
+        with pytest.raises(systemd.UnitStateError, match="is unknown"):
+            systemd.unit_state(SERVICE)
+        assert systemd.observed_state(SERVICE).startswith("unknown")
+    else:
+        assert systemd.unit_state(SERVICE) == printed
+        assert systemd.is_running(printed) is running
 
 
 @pytest.mark.parametrize("output", ["maintenance", ""])
@@ -130,11 +175,14 @@ def test_an_unknown_timer_state_at_begin_stops_nothing(space: Space) -> None:
 # --- somebody started the scheduler during the succession ---------------------------------
 
 
+@pytest.mark.parametrize("state", ["active", "activating"])
 @pytest.mark.parametrize("unit", ["timer", "service"])
 @pytest.mark.parametrize("step", ["clone", "publish", "refresh", "finish"])
-def test_a_running_scheduler_refuses_the_step_which_writes_nothing(space: Space, step: str, unit: str) -> None:
+def test_a_running_scheduler_refuses_the_step_which_writes_nothing(
+    space: Space, step: str, unit: str, state: str
+) -> None:
     space.run_steps(*STEPS[: STEPS.index(step)])
-    space.systemctl.set_units(**{unit: "active"})
+    space.systemctl.set_units(**{unit: state})
     space.systemctl.clear()
     before, names = stores(space), space.names()
 
@@ -143,12 +191,103 @@ def test_a_running_scheduler_refuses_the_step_which_writes_nothing(space: Space,
     (failure,) = space.failures()
     name = TIMER if unit == "timer" else SERVICE
     assert failure["step"] == step and "Somebody started the scheduler" in failure["reason"]
-    assert failure["observed_unit_states"][name] == "active"
+    assert failure["observed_unit_states"][name] == state
     assert stores(space) == before
     assert [entry for entry in space.names() if not entry.startswith("succession-failed-")] == names
     # Only queries: the refresh was not started and the scheduler was left as it was found.
     assert space.systemctl.mutating() == []
-    assert space.systemctl.state(name) == "active"
+    assert space.systemctl.state(name) == state
+
+
+# --- another succession holds the timer ---------------------------------------------------
+
+OTHER_ID = "recal-2026100512-b"
+
+
+def _stop_at_a_failed_clone(space: Space, capsys: pytest.CaptureFixture[str]) -> None:
+    space.run_steps("copyback", "preflight")
+    parked = space.ws.root / "index-parked.json"
+    space.canonical_index.rename(parked)
+    assert space.main("--apply") == 1
+    assert space.failures()[-1]["step"] == "clone"
+    parked.rename(space.canonical_index)
+    assert space.receipt("timer-before-stop.json")["timer_was_active"] is True
+    assert space.systemctl.state(TIMER) == "inactive"
+    space.systemctl.clear()
+    capsys.readouterr()
+
+
+def test_a_second_succession_is_refused_while_an_earlier_one_holds_the_timer(
+    space: Space, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _stop_at_a_failed_clone(space, capsys)
+    other = space.ws.receipt_root / OTHER_ID
+    before = tree(space.ws.root)
+
+    # The apply is refused before it writes anything: recording the timer as inactive would lose that it ran.
+    assert space.main_as(OTHER_ID, "--apply") == 1
+    captured = capsys.readouterr()
+    assert captured.out == "" and repr(SUCCESSION_ID) in captured.err
+    assert "--abort --confirm-timer-start" in captured.err and "Nothing was written" in captured.err
+    assert not other.exists() and changed(before, tree(space.ws.root)) == set()
+    assert space.systemctl.mutating() == []
+
+    # The dry-run predicts the same refusal.
+    assert space.main_as(OTHER_ID) == 1
+    (predicted,) = report(capsys)["would_be_refused"]
+    assert repr(SUCCESSION_ID) in predicted and "--abort --confirm-timer-start" in predicted
+    assert not other.exists() and space.systemctl.mutating() == []
+
+    # The first succession is aborted, which starts the timer; the second one then finds it active and
+    # starts it again at its own finish.
+    assert space.main("--abort", "--confirm-timer-start") == 0
+    assert space.systemctl.state(TIMER) == "active"
+    capsys.readouterr()
+    space.systemctl.clear()
+
+    assert space.main_as(OTHER_ID, "--apply") == 0
+    result = report(capsys)
+    assert result["timer_action"] == "started" and "timer_note" not in result
+    assert json.loads((other / "timer-before-stop.json").read_text(encoding="utf-8"))["timer_was_active"] is True
+    assert json.loads((other / "step-finish.json").read_text(encoding="utf-8"))["timer_action"] == "started"
+    assert space.systemctl.mutating() == [STOP, START_REFRESH, START_TIMER]
+    assert space.systemctl.state(TIMER) == "active"
+
+
+@pytest.mark.parametrize("content", ["{not json", '{"timer_was_active": "yes"}'])
+def test_an_unreadable_timer_record_of_another_succession_is_a_refusal(
+    space: Space, capsys: pytest.CaptureFixture[str], content: str
+) -> None:
+    record = space.ws.receipt_root / "recal-earlier" / "timer-before-stop.json"
+    record.parent.mkdir()
+    record.write_text(content, encoding="utf-8")
+    before = tree(space.ws.root)
+
+    assert space.main("--apply") == 1
+    error = capsys.readouterr().err
+    assert str(record) in error and "Nothing was written" in error
+    assert space.main() == 1
+    assert any(str(record) in refusal for refusal in report(capsys)["would_be_refused"])
+    assert changed(before, tree(space.ws.root)) == set()
+    assert "plan.json" not in space.names() and space.systemctl.mutating() == []
+
+
+def test_a_closed_succession_or_one_whose_timer_was_inactive_does_not_hold_the_timer(space: Space) -> None:
+    for name, was_active, closing in (
+        ("recal-finished", True, "step-finish.json"),
+        ("recal-aborted", True, "abort-20261001T000000Z.json"),
+        ("recal-timer-was-inactive", False, None),
+        ("recal-provisioned-only", None, None),
+    ):
+        directory = space.ws.receipt_root / name
+        directory.mkdir()
+        if was_active is not None:
+            (directory / "timer-before-stop.json").write_text(json.dumps({"timer_was_active": was_active}))
+        if closing:
+            (directory / closing).write_text("{}", encoding="utf-8")
+
+    assert space.main("--apply") == 0
+    assert space.systemctl.state(TIMER) == "active"
 
 
 # --- refresh ----------------------------------------------------------------------------
@@ -194,6 +333,10 @@ def test_a_refresh_that_did_not_publish_a_renewal_is_a_failure(
     (failure,) = space.failures()
     assert failure["step"] == "refresh" and failure["hard_stop"] is False
     assert expected in failure["reason"], failure["reason"]
+    if expected == "is not newer than this step":
+        # Why the start returned without a new receipt is not known to this tool: it lists the causes.
+        assert "Possible causes" in failure["reason"] and "was already running" in failure["reason"]
+        assert "skips the run without an error while" not in failure["reason"]
     assert "step-refresh.json" not in space.names()
     assert space.systemctl.mutating() == [START_REFRESH]
     assert space.systemctl.state(TIMER) == "inactive"
@@ -396,6 +539,7 @@ def test_a_confirmed_abort_starts_the_timer_and_closes_the_succession(
     assert receipt["schema_version"] == "nhms.model_succession.abort_receipt.v1"
     assert receipt["completed_steps"] == ["copyback", "preflight", "begin", "clone"]
     assert receipt["timer_action"].startswith(f"start {TIMER}")
+    assert receipt["publish_state"] == "not_published" and receipt["timer_was_active_at_begin"] is True
     meaning = " ".join(receipt["what_this_state_means"])
     assert "keeps running the old models" in meaning
     assert "stay in both state indexes" in meaning and "earliest clone row" in meaning
@@ -429,14 +573,22 @@ def test_an_abort_leaves_a_timer_that_was_inactive_at_begin(space: Space, capsys
     space.run_steps("copyback", "preflight", "begin")
     space.systemctl.clear()
     assert space.main("--abort", "--confirm-timer-start") == 0
-    assert report(capsys)["timer_action"].startswith("none: the timer was not active")
+    result = report(capsys)
+    assert result["timer_action"].startswith("none: the timer was not active")
+    assert result["publish_state"] == "not_published" and result["timer_was_active_at_begin"] is False
+    # Nothing here says the scheduler runs: its timer was stopped before this succession and stays so.
+    meaning = " ".join(result["what_this_state_means"])
+    assert "keeps running" not in meaning
+    assert "was not active when the succession began" in meaning and "left as it is" in meaning
     assert space.systemctl.mutating() == [] and space.systemctl.state(TIMER) == "inactive"
 
 
 def test_an_abort_after_publish_says_the_new_models_are_live(space: Space, capsys: pytest.CaptureFixture[str]) -> None:
     space.run_steps("copyback", "preflight", "begin", "clone", "publish")
     assert space.main("--abort", "--confirm-timer-start") == 0
-    meaning = " ".join(report(capsys)["what_this_state_means"])
+    result = report(capsys)
+    assert result["publish_state"] == "published"
+    meaning = " ".join(result["what_this_state_means"])
     assert "new models are live" in meaning and "finished by hand from the runbook" in meaning
     assert space.systemctl.state(TIMER) == "active"
 

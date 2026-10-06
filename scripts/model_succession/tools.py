@@ -17,7 +17,9 @@ from typing import Any
 import scripts.node22_clone_direct_grid_cutover_states as clone_tool
 import scripts.node22_publish_merged_scheduler_registry as publish_tool
 from packages.common import succession_receipt as succession
+from scripts.model_succession import plan as planning
 from scripts.model_succession.model import (
+    ABORT_BEFORE_NEW_ID,
     CLONE_APPLY_NAME,
     CLONE_DRY_RUN_NAME,
     RUNBOOK,
@@ -125,7 +127,7 @@ def _clone_dry_run(settings: Settings, inputs: Inputs) -> dict[str, Any]:
         if wrong:
             raise StepFailure(
                 f"Refused: {target} exists and is not the complete clone dry-run of this plan: {'; '.join(wrong)}. "
-                "A receipt is never overwritten; a changed plan needs a new --succession-id."
+                f"A receipt is never overwritten; a changed plan needs a new --succession-id. {ABORT_BEFORE_NEW_ID}"
             )
         return {**_record(target), "reused": True}
     receipt = _call_clone(settings, inputs, target, apply=False)
@@ -169,7 +171,22 @@ def preflight(settings: Settings, inputs: Inputs) -> dict[str, Any]:
     clone_record = _clone_dry_run(settings, inputs)
     target = settings.directory / publish_tool.DRY_RUN_RECEIPT_NAME
     reused = os.path.lexists(target)
-    if not reused:
+    if reused:
+        # The publish apply reads this receipt after the timer is stopped: it is held to the plan here, before.
+        expected = {
+            "dry_run": True,
+            "outcome": "planned",
+            "succession_id": settings.plan.succession_id,
+            "provision_succession_id": settings.plan.provision_succession_id,
+            "operations": _operations(settings).record(),
+        }
+        wrong = _mismatches(_read_receipt(target), expected)
+        if wrong:
+            raise StepFailure(
+                f"Refused: {target} exists and is not the publish dry-run of this plan: {'; '.join(wrong)}. "
+                f"A receipt is never overwritten; a changed plan needs a new --succession-id. {ABORT_BEFORE_NEW_ID}"
+            )
+    else:
         try:
             _call_publish(settings, inputs, apply=False, succession_id=settings.plan.succession_id)
         except _PUBLISH_ERRORS as error:
@@ -200,19 +217,6 @@ def clone(settings: Settings, inputs: Inputs) -> dict[str, Any]:
     return {"clone_apply": _record(target), "adopted_existing_receipt": adopted}
 
 
-def _published_unreceipted(settings: Settings) -> bool:
-    """Both manifests are equal and hold every new id and no old id, as after a complete publish."""
-
-    try:
-        canonical = settings.canonical_manifest.read_bytes()
-        if canonical != settings.mirror_manifest.read_bytes():
-            return False
-        ids = {str(row.get("model_id")) for row in read_json(settings.canonical_manifest).get("models") or []}
-    except (OSError, ValueError, AttributeError):
-        return False
-    return set(settings.plan.new_ids) <= ids and not set(settings.plan.old_ids) & ids
-
-
 def publish(settings: Settings, inputs: Inputs) -> dict[str, Any]:
     target = settings.directory / publish_tool.APPLY_RECEIPT_NAME
     adopted = os.path.lexists(target)
@@ -228,8 +232,12 @@ def publish(settings: Settings, inputs: Inputs) -> dict[str, Any]:
             failed_receipt = getattr(error, "receipt", None) or {}
             if failed_receipt.get("outcome") == "inconsistent":
                 raise HardStop(f"The publish apply ended inconsistent: {error} {_MANUAL}") from error
-            if not os.path.lexists(target) and _published_unreceipted(settings):
-                raise HardStop(f"The publish is complete but has no receipt: {error} {_MANUAL}") from error
+            if planning.published_without_receipt(settings):
+                raise HardStop(
+                    f"The publish is complete but has no receipt: {error} The publish is in effect: do not undo it "
+                    "and do not run this command again. Continue by hand with the provider refresh and then start "
+                    f"the timer, from the runbook ({RUNBOOK})."
+                ) from error
             raise StepFailure(f"The publish apply did not publish: {error}") from error
     receipt = _read_receipt(target)
     expected = {

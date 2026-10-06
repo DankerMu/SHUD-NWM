@@ -66,6 +66,16 @@ CLONE_APPLY_NAME = "clone-apply.json"
 
 RUNBOOK = "docs/runbooks/production-ops/recalibration-and-archive.md, section 5.7.1"
 _NOTHING_WRITTEN = "Nothing was written."
+# What ``step-finish.json`` and the report of an apply say was done to the timer.
+TIMER_STARTED = "started"
+TIMER_LEFT_STOPPED = "left_stopped_was_inactive_at_begin"
+# Said wherever a new --succession-id is advised: the id that stopped the timer is the one that starts it.
+ABORT_BEFORE_NEW_ID = (
+    "If this succession has already stopped the scheduler timer (its timer-before-stop.json records "
+    "timer_was_active true), give it up first: the command line it was first applied with and --abort "
+    "--confirm-timer-start instead of --apply. Only that starts the timer again; a new id is refused while this "
+    "one holds the timer."
+)
 
 
 class ModelSuccessionRefusal(RuntimeError):
@@ -76,6 +86,10 @@ class StepFailure(RuntimeError):
     """A step did not complete.  The same command resumes after the cause is removed."""
 
     hard_stop = False
+
+
+class TimerNotStopped(StepFailure):
+    """The ``stop`` of the scheduler timer failed, or the timer was still running after it."""
 
 
 class HardStop(StepFailure):
