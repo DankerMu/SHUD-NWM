@@ -1,0 +1,29 @@
+node-27 (/home/nwm/NWM), uv run --no-sync, after fast-forward to 692c8a9a. Read-only provision dry-run with --output-registry under
+scheduler/direct-grid-candidates/ (owned by another user, mode 1777). Expected: refusal before the database is opened, no receipt.
+Followed by direct calls of provider_destination_parent_problem for the compliant NFS directory used in the 2026-10-06 rehearsal.
+
+HEAD 692c8a9a Python 3.11.15
+drwxrwxrwt 3 frd_muziyao nfsdata 4096 Oct  6 12:48 /home/ghdc/nwm/object-store/scheduler/direct-grid-candidates
+2026-10-06T09:37:33Z
+      15625745408 blocks super 1.2 [2/2] [UU]
+DRY-RUN (no --apply): nothing is written to the database, the object store or --output-registry (only this run's receipt, when --succession-id is given). An --apply always writes: it updates each variant row's model_package_uri/resource_profile and upserts one met.met_station row per station, also where the plan says inserted=false.
+Traceback (most recent call last):
+  File "/home/nwm/NWM/scripts/provision_direct_grid_scheduler_registry.py", line 992, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "/home/nwm/NWM/scripts/provision_direct_grid_scheduler_registry.py", line 968, in main
+    summary = provision_direct_grid_registry(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nwm/NWM/scripts/provision_direct_grid_scheduler_registry.py", line 851, in provision_direct_grid_registry
+    _require_publishable_output_registry_parent(output_registry)
+  File "/home/nwm/NWM/scripts/provision_direct_grid_scheduler_registry.py", line 796, in _require_publishable_output_registry_parent
+    raise DirectGridProvisionError(
+DirectGridProvisionError: Refusing --output-registry /home/ghdc/nwm/object-store/scheduler/direct-grid-candidates/verify-2753.json: /home/ghdc/nwm/object-store/scheduler/direct-grid-candidates is owned by uid 1103 with mode 1777 (effective uid 1005). The registry publisher requires its directory to be owned and writable by the effective user (uid 1005) and not group- or other-writable, and an apply would hit that only after its database commit. Nothing was written and the database was not opened. If /home/ghdc/nwm/object-store/scheduler/direct-grid-candidates exists and is yours: `chmod 755 /home/ghdc/nwm/object-store/scheduler/direct-grid-candidates` and rerun the same command. Otherwise name an --output-registry in a directory of your own (`mkdir -m 755 <dir>`); that needs a new --succession-id with its own dry-run only if a dry-run receipt of this id already names the old path (a refused dry-run wrote none).
+rc=1
+2026-10-06T09:37:35Z
+succession root unchanged: 20261006-rehearsal-tailanhe 20261006-rehearsal-tailanhe-b 
+direct-grid-candidates listing unchanged
+own 755 NFS dir: None
+missing under own dir: None
+missing under sticky foreign dir: None
+5.15.0-194-generic
