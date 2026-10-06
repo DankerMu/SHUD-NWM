@@ -823,9 +823,13 @@ NODE22_CLONE_CUTOVER_STATES_TESTS: tuple[str, ...] = (
 # function are exercised end to end by one suite whose name neither path
 # derives; the script also owns the IC-header gate suite that imports it. The
 # receipt module is same-subject with the script (its only caller).
+# #2753: the output-registry destination checks sit in a second file that
+# imports the first one's workspace fixture.
 PROVISION_DIRECT_GRID_DRY_RUN_TEST = "tests/test_provision_direct_grid_dry_run_and_receipt.py"
+PROVISION_OUTPUT_REGISTRY_PARENT_TEST = "tests/test_provision_output_registry_parent.py"
 PROVISION_DIRECT_GRID_SCRIPT_TESTS: tuple[str, ...] = (
     PROVISION_DIRECT_GRID_DRY_RUN_TEST,
+    PROVISION_OUTPUT_REGISTRY_PARENT_TEST,
     "tests/test_provision_direct_grid_ic_header_gate.py",
 )
 # #2738: the merged-registry publish tool is an entry script (argparse, `main`,
@@ -6458,9 +6462,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         # #2653 reader edge: the watch retries only this module's
         # `provider_preimage_changed` reason. Additive: this module has no other
-        # PATH_TEST_RULES row, its same-name suite still derives.
+        # PATH_TEST_RULES row, its same-name suite still derives. #2753: the
+        # provision step's output-registry check is this module's directory
+        # check, held against the destination lock in that suite.
         "packages/common/provider_atomic.py",
-        (NODE22_STATE_INDEX_CAPACITY_WATCH_TEST,),
+        (NODE22_STATE_INDEX_CAPACITY_WATCH_TEST, PROVISION_OUTPUT_REGISTRY_PARENT_TEST),
     ),
     PathTestRule(
         # #1571: the repair script's usage string is uniquely asserted by the

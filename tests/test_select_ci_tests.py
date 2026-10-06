@@ -14547,6 +14547,11 @@ def test_provision_script_and_registration_module_select_the_dry_run_suite() -> 
     script = select_tests(["scripts/provision_direct_grid_scheduler_registry.py"], repo_root=Path("."))
     assert suite in script
     assert "tests/test_provision_direct_grid_ic_header_gate.py" in script
+    # #2753: the output-registry checks live in a second file, which also holds
+    # the provider_atomic directory check against the destination lock.
+    parent_suite = "tests/test_provision_output_registry_parent.py"
+    assert parent_suite in script
+    assert parent_suite in select_tests(["packages/common/provider_atomic.py"], repo_root=Path("."))
 
     registration = select_tests(
         ["workers/model_registry/direct_grid_variant_registration.py"], repo_root=Path(".")

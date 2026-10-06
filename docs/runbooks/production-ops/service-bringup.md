@@ -421,9 +421,9 @@ PYTHONPATH=/home/nwm/NWM uv run python scripts/provision_direct_grid_scheduler_r
   node-27 的 `nwm` 建不了子目录 → `PermissionError`。**先在 node-22 侧建好并放权**：
   `mkdir -p <dir> && chgrp nwmuser <dir> && chmod 2775 <dir>`（两个账号共有组 `nwmuser`/1107）。
 - `--output-registry` 必须写在**两节点都读得到**的地方：hop 4 在 node-22 上读这份文件。放共享 NFS（node-27 写 `/home/ghdc/nwm/...`，
-  node-22 看到的是同一挂载的 `/ghdc/data/nwm/...`），并且仍须满足下一条的「父目录不能组可写」。
-- `--output-registry` 的**父目录不能组可写**，否则 `provider_lock_parent_unsafe`
-  （`provider_atomic.py` 要求 `st_uid == geteuid()` 且 `mode & 0o022 == 0`）。`chmod 755` 即可。
+  node-22 看到的是同一挂载的 `/ghdc/data/nwm/...`），并且仍须满足下一条的「父目录须属本人、且不能组/他人可写」。
+- `--output-registry` 的**父目录须属执行账号本人、且不能组/他人可写**（发布时 `provider_lock_parent_unsafe` 那条）。#2753 起 dry-run 与 `--apply`
+  一开头就查，不合格即拒绝、不连库不落回执：自己的目录 `chmod 755` 后原命令重跑；否则换到自建目录（`mkdir -m 755`），仅当本 id 已有写着旧路径的 dry-run 回执时才须换新 `--succession-id` 重做 dry-run。
 - **`--output-registry` 绝不能指向生产 canonical manifest。** 与 hop 1 的坑不同形：
   这里 `--output-registry` 是 `required=True`（`scripts/provision_direct_grid_scheduler_registry.py`
   的 `_parse_args`），没有默认值、忘不了；危险的是**主动指过去**。该脚本的

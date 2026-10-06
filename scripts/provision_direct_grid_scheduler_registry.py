@@ -29,10 +29,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from packages.common import provision_succession_receipt as succession
 from packages.common.grid_registry_store import CanonicalGridCell, CanonicalGridSnapshot
 from packages.common.object_store import LocalObjectStore, sha256_bytes
+from packages.common.provider_atomic import provider_destination_parent_problem
 from packages.common.source_identity import normalize_source_id
 from packages.common.state_qc import cfg_ic_header_shape
 from services.orchestrator.scheduler_file_providers import publish_scheduler_registry_manifest
@@ -776,6 +778,32 @@ def _provision_variants(
     return grids, output_models, variants
 
 
+def _require_publishable_output_registry_parent(output_registry: str | Path) -> None:
+    """Refuse now what the registry publisher would refuse after the apply's commit."""
+
+    scheme = urlparse(str(output_registry)).scheme
+    if scheme in {"s3", "published"}:
+        return  # Resolved by the publisher under the object-store root; not checked here.
+    if scheme:
+        raise DirectGridProvisionError(
+            f"Refusing --output-registry {output_registry}: the registry publisher does not support the scheme "
+            f"{scheme!r} and would refuse it only after the apply's database commit. Name a plain path. Nothing "
+            "was written and the database was not opened."
+        )
+    directory = Path(output_registry).expanduser().parent
+    problem = provider_destination_parent_problem(directory)
+    if problem is not None:
+        raise DirectGridProvisionError(
+            f"Refusing --output-registry {output_registry}: {problem}. The registry publisher requires its "
+            f"directory to be owned and writable by the effective user (uid {os.geteuid()}) and not group- or "
+            "other-writable, and an apply would hit that only after its database commit. Nothing was written "
+            f"and the database was not opened. If {directory} exists and is yours: `chmod 755 {directory}` and "
+            "rerun the same command. Otherwise name an --output-registry in a directory of your own "
+            "(`mkdir -m 755 <dir>`); that needs a new --succession-id with its own dry-run only if a dry-run "
+            "receipt of this id already names the old path (a refused dry-run wrote none)."
+        )
+
+
 def provision_direct_grid_registry(
     *,
     baseline_registry: str | Path,
@@ -820,6 +848,7 @@ def provision_direct_grid_registry(
         output_registry=output_registry,
     )
     # Everything below up to the connection is a refusal that has done nothing.
+    _require_publishable_output_registry_parent(output_registry)
     scratch_root = None if apply else _build_tmp_dir(build_tmp_dir, store_root)
     dry_run_receipt: dict[str, Any] | None = None
     dry_run_record: dict[str, Any] = {"path": ""}

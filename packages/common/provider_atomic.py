@@ -150,6 +150,74 @@ def provider_lock_path(path: Path) -> Path:
     return path.with_name(f".{path.name}.lock")
 
 
+def provider_parent_is_safe(metadata: os.stat_result) -> bool:
+    """Whether a directory with this metadata may hold a provider destination and its lock.
+
+    The owner is the effective user and neither group nor other may write.
+    """
+
+    return metadata.st_uid == os.geteuid() and not stat.S_IMODE(metadata.st_mode) & 0o022
+
+
+def provider_destination_parent_problem(directory: Path) -> str | None:
+    """Say what the destination lock would refuse about ``directory``, or ``None``.
+
+    Reaches the directory the way ``_provider_destination_file_lock`` does and
+    applies the same predicate, but creates nothing, so a caller can refuse
+    before it has done anything.  The directory must also be writable and
+    searchable by the effective user.  When it does not exist yet, only that
+    is required, of the nearest existing ancestor: the lock creates the missing
+    components itself with mode 0755 and they then pass the predicate.  The
+    access answer is best-effort (on NFS it is the client's).
+    """
+
+    target = directory if directory.is_absolute() else Path.cwd() / directory
+    reached: Path | None = None
+    fd: int | None = None
+    try:
+        # From the root downward, so that the component that cannot be opened is named.
+        for ancestor in (*reversed(target.parents), target):
+            try:
+                opened = open_directory_no_follow(ancestor)
+            except FileNotFoundError:
+                break
+            except (OSError, SafeFilesystemError) as error:
+                return f"{ancestor} cannot be opened as a directory without following symlinks ({error})"
+            if fd is not None:
+                os.close(fd)
+            fd, reached = opened, ancestor
+        if fd is None or reached is None:
+            return f"no existing ancestor of {target} could be opened"
+        exists = reached == target
+        if exists:
+            metadata = os.fstat(fd)
+            if not provider_parent_is_safe(metadata):
+                return (
+                    f"{target} is owned by uid {metadata.st_uid} with mode "
+                    f"{stat.S_IMODE(metadata.st_mode):04o} (effective uid {os.geteuid()})"
+                )
+        # The lock file is created in the directory itself, so an existing one
+        # must be usable too, not only the ancestor of a missing one.
+        effective_ids = os.access in os.supports_effective_ids
+        if os.access in os.supports_dir_fd:
+            usable = os.access(".", os.W_OK | os.X_OK, dir_fd=fd, effective_ids=effective_ids)
+        else:
+            usable = os.access(reached, os.W_OK | os.X_OK, effective_ids=effective_ids)
+        if usable:
+            return None
+        if exists:
+            return f"{target} is not writable and searchable by effective uid {os.geteuid()}"
+        return (
+            f"{target} does not exist and its nearest existing ancestor {reached} is not writable "
+            f"and searchable by effective uid {os.geteuid()}, so it cannot be created"
+        )
+    except OSError as error:
+        return f"{reached or target} cannot be inspected ({error})"
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
 @contextmanager
 def _process_destination_lock(lock_path: Path, *, blocking: bool) -> Iterator[None]:
     """Serialize same-process users before opening the shared flock file.
@@ -212,7 +280,7 @@ def _provider_destination_file_lock(
         # through a default-ACL mask, whose mask IS the group bits.  Keep it
         # fail-closed; when that tension is triggered, keep provider
         # destinations (and so their locks) out of ACL-shared subtrees instead.
-        if parent.st_uid != os.geteuid() or stat.S_IMODE(parent.st_mode) & 0o022:
+        if not provider_parent_is_safe(parent):
             raise ProviderAtomicError("provider_lock_parent_unsafe", phase="precommit")
         lock_fd = open_lock_file_no_follow(lock_path.name, dir_fd=parent_fd, mode=0o600)
         os.fchmod(lock_fd, 0o600)
