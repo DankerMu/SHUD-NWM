@@ -202,10 +202,17 @@ def _run_ic_audit(settings: Settings, inputs: Inputs) -> dict[str, Any]:
             sources=_audit_sources(inputs),
             generated_at=utc_now(),
         )
+    except StepFailure:
+        raise
     except ic_audit_tool.AuditBlocked as error:
         raise StepFailure(
             f"The initial-condition audit of {inputs.new_rows_registry['path']} was blocked ({error.reason}): "
             f"{error}. No {IC_AUDIT_NAME} was written."
+        ) from error
+    except Exception as error:  # noqa: BLE001 - whatever stops the audit stops the step, and a dry-run reports it
+        raise StepFailure(
+            f"The initial-condition audit of {inputs.new_rows_registry['path']} could not run: "
+            f"{type(error).__name__}: {error}. No {IC_AUDIT_NAME} was written."
         ) from error
 
 
@@ -218,6 +225,43 @@ def _ic_statuses(settings: Settings, receipt: Mapping[str, Any]) -> dict[str, li
         if isinstance(row, Mapping) and row.get("model_id") in statuses:
             statuses[str(row["model_id"])].append(str(row.get("ic_status")))
     return statuses
+
+
+def _ic_findings(settings: Settings, receipt: Mapping[str, Any]) -> dict[str, list[tuple[str, str]]]:
+    """``(source, ic_status, ic_sha256)`` of every audit row of each new model of the plan, as sorted text."""
+
+    rows = receipt.get("rows")
+    findings: dict[str, list[tuple[str, str]]] = {model_id: [] for model_id in settings.plan.new_ids}
+    for row in rows if isinstance(rows, list) else []:
+        if isinstance(row, Mapping) and row.get("model_id") in findings:
+            found = f"ic_status {row.get('ic_status')}, ic_sha256 {row.get('ic_sha256')}"
+            findings[str(row["model_id"])].append((str(row.get("source")), found))
+    return {model_id: sorted(found) for model_id, found in findings.items()}
+
+
+def _refuse_changed_since_audit(settings: Settings, inputs: Inputs, target: Path, receipt: Mapping[str, Any]) -> None:
+    """On a resume: the packages in the compute store must still be what ``ic-audit.json`` recorded.
+
+    The audit runs again, read-only.  The receipt is never rewritten, so a package that changed after it was
+    written cannot be audited again under this succession id.
+    """
+
+    recorded = _ic_findings(settings, receipt)
+    found = _ic_findings(settings, _run_ic_audit(settings, inputs))
+    changed = [
+        f"{model_id}: recorded {[text for _source, text in recorded[model_id]]}, "
+        f"now {[text for _source, text in found[model_id]]}"
+        for model_id in settings.plan.new_ids
+        if recorded[model_id] != found[model_id]
+    ]
+    if changed:
+        plan = settings.plan
+        raise StepFailure(
+            f"Refused: the package in the compute store changed after {target} was written: {'; '.join(changed)}. "
+            "The audit receipt no longer describes the initial condition the runs would start from, and a receipt "
+            "is never rewritten. Check what changed the package, then run the plan under a new --succession-id "
+            f"with --provision-succession-id {plan.provision_succession_id}, which audits it again."
+        )
 
 
 def _ic_gate_failures(statuses: Mapping[str, list[str]]) -> list[str]:
@@ -242,7 +286,11 @@ def _ic_refusal(failures: list[str]) -> str:
 
 
 def _ic_audit(settings: Settings, inputs: Inputs) -> dict[str, Any]:
-    """Audit once and write ``ic-audit.json`` only when the gate passes; a resume reads it and holds it to the gate."""
+    """Audit once and write ``ic-audit.json`` only when the gate passes.
+
+    A resume reads the receipt, holds it to the same gate and audits again, read-only, to see that the
+    packages are still the ones it recorded.
+    """
 
     target = settings.directory / IC_AUDIT_NAME
     reused = os.path.lexists(target)
@@ -264,7 +312,9 @@ def _ic_audit(settings: Settings, inputs: Inputs) -> dict[str, Any]:
             f"Refused: {_ic_refusal(failures)} {left}; repair the package (its manifest reference, its "
             "<shud_input_name>.cfg.ic and the header line of that file) and run the same command."
         )
-    if not reused:
+    if reused:
+        _refuse_changed_since_audit(settings, inputs, target, receipt)
+    else:
         succession.write_receipt(target, receipt)
     return {**_record(target), "reused": reused, "models": statuses}
 

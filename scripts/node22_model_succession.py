@@ -5,14 +5,15 @@ After the provision step on node-27, a recalibration succession needs, on
 node-22: the new packages copied from the shared store to the compute store,
 the state rows cloned from the old models to the new ones, the merged registry
 manifest published, one provider refresh, and the scheduler timer stopped
-around the last three.  This command runs them as seven steps:
+around the last three.  This command runs them as the seven steps of
+``--kind recalibration``:
 
 ``copyback`` -> ``preflight`` -> ``begin`` -> ``clone`` -> ``publish`` -> ``refresh`` -> ``finish``
 
 ``--kind cold_start`` is the succession of a structural change (mesh, river
 network, any other state-compatibility surface, or a new ``cfg.ic``): the
-state of the old models cannot be carried, so there is no ``clone`` step and
-no state index is read or written.  Each new model starts from the calibrated
+state of the old models cannot be carried, so its six steps have no ``clone``
+and no state index is read or written.  Each new model starts from the calibrated
 initial condition in its package, which ``preflight`` audits (``ic-audit.json``)
 and ``publish`` requires; the plan, the receipts and the reports say in
 ``continuity`` that the hydrograph is not continuous.  ``preflight`` of either
@@ -99,13 +100,14 @@ __all__ = [
 
 DRY_RUN_NOTICE = (
     "DRY-RUN (no --apply): no file is changed, no receipt is written and no unit is started or stopped."
-    " An --apply copies the new packages, runs both tools' dry-runs, stops the scheduler timer, clones,"
-    " publishes, runs the provider refresh and starts the timer again."
+    " An --apply copies the new packages, checks that every pair is a recalibration, runs both tools' dry-runs,"
+    " stops the scheduler timer, clones, publishes, runs the provider refresh and starts the timer again."
 )
 COLD_START_DRY_RUN_NOTICE = (
     "DRY-RUN (no --apply): no file is changed, no receipt is written and no unit is started or stopped."
-    " An --apply copies the new packages, audits their packaged initial conditions, runs the publish tool's"
-    " dry-run, stops the scheduler timer, publishes, runs the provider refresh and starts the timer again."
+    " An --apply copies the new packages, checks that every pair is a structural change, audits their packaged"
+    " initial conditions, runs the publish tool's dry-run, stops the scheduler timer, publishes, runs the"
+    " provider refresh and starts the timer again."
     " No state is carried from the old models: the hydrograph of these basins is not continuous."
 )
 

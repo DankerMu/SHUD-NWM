@@ -215,7 +215,9 @@ cd /scratch/frd_muziyao/NWM && { setsid nohup .venv/bin/python -m scripts.node22
 
 - **读 dry-run 报告看什么**：`would_be_refused` 为空；`steps.copyback.packages[]` 每个包是 `would_copy` 还是
   `already_present`（`differs` 即 scratch 上已有一份不同的包，apply 会拒绝且不覆盖）；包已在 scratch 上时
-  `steps.preflight` 给出两个工具 dry-run 的结论，否则是 `needs copyback`（apply 会在 preflight 里跑，仍在停 timer 之前）；
+  `steps.preflight` 给出 `kind_check`（每一对在八个 state-compatibility 面上是否相等；有结构变更的一对就拒绝，并在
+  `would_be_refused` 里多一条，出路见 5.7.2）与两个工具 dry-run 的结论，否则是 `needs copyback`
+  （apply 会在 preflight 里跑，仍在停 timer 之前）；
   `unit_states_now` 是 timer 与 service 此刻的状态。refresh 与 finish 不做预测。
 - **timer 由工具自己停、自己启。** `begin` 把 timer 当时是否 active 记进 `timer-before-stop.json`（只写一次，续跑时
   读它、不重新推断），发一次普通的 `stop`，然后轮询等 `nhms-compute-scheduler.service` 自己结束
@@ -484,12 +486,14 @@ dry-run 同样不改任何文件、不写回执（包括 `ic-audit.json`）、�
   - **包内 IC 不合格**（仅 `cold_start`）。工具进程内调用 `scripts/audit_first_cycle_initial_state.py`，对象是
     provision 的 registry（发布要用的那些行）、object store 根取 scratch 根（run 实际读的包）。计划里每个新
     model 至少要有一条审计行，且每条的 `ic_status` 都是 `qualified`；`unqualified`（没有规范位置的
-    `<shud_input_name>.cfg.ic`、文件为空、首行不是 3 或 4 个数值 token）、`unreadable`（包 manifest 读不出）、
+    `<shud_input_name>.cfg.ic`、文件为空、首行不是 3 或 4 个数值 token）、`unreadable`（包 manifest 读不出，或规范位置的 IC 对象探测不了）、
     `absent`（registry 行没有 `manifest_uri`）或审计被 block 都拒绝，消息逐个列出 model 与它的 `ic_status`。
     该 registry 里不属于本计划的行会出现在审计回执里，但不参与判定。
 - **`ic-audit.json`**：审计通过时写一次（审计工具自己的回执格式，写在 succession 目录，从不覆盖），
   `step-preflight.json` 记它的路径与 sha256；审计不通过不留文件，修好之后原样重跑即可。续跑时已有的
-  `ic-audit.json` 只读不重写，并按同一条件再判一次。`publish` 调发布工具之前再读它一遍：文件缺失、sha256 与
+  `ic-audit.json` 只读不重写，并按同一条件再判一次；同时只读地重审一遍，计划里每个新 model 的 `ic_status` 与
+  `ic_sha256` 必须与回执里记的相同——scratch 上的包在审计之后被改过就是步骤失败，回执不会重写，出路是换一个
+  `--succession-id`（用 `--provision-succession-id` 指回原来的 provision）。`publish` 调发布工具之前再读它一遍：文件缺失、sha256 与
   `step-preflight.json` 记的不一致、或内容不再满足条件，都是步骤失败、什么都不发布——此时 timer 已停，
   把文件恢复原样后重跑，或按 5.7.1 的「放弃」处理。
 - **不连续声明（`continuity`）**：`plan.json`、`step-publish.json`、`step-finish.json`、dry-run 报告与 apply

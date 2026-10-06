@@ -88,7 +88,10 @@ only `cfg.para` is state-compatible and belongs to `recalibration`.
    `ic-audit.json` is written only when the gate passes, once, in the succession directory with the shared
    receipt writer (`O_EXCL`, never overwritten); a failing audit leaves no file, its per-model result goes
    into the failure message and the failure receipt, and the same command can be run again after the cause is
-   removed. On a resume an existing `ic-audit.json` is read and held to the same gate, not rewritten. `step-preflight.json` records its path and sha256.
+   removed. On a resume an existing `ic-audit.json` is read and held to the same gate, not rewritten. The audit
+   is also run again, read-only, and for every new model the `ic_status` and `ic_sha256` it finds must equal
+   those in the receipt (a package changed in the compute store after the audit is a step failure; the
+   receipt is never rewritten, so the way on is a new `--succession-id`). `step-preflight.json` records its path and sha256.
 
 5. `publish` of `cold_start` requires the audit receipt: before the publish apply is called (not when an
    existing `publish-apply.json` is adopted) it reads
@@ -143,6 +146,10 @@ fingerprint and the audit actually run:
   `preflight`, timer never stopped, nothing published.
 - `publish` with `ic-audit.json` removed, and with it altered: refused, manifests unchanged.
 - Resume after a failure in `publish`: `ic-audit.json` is not rewritten, the run completes.
+- Resume of `preflight` after the IC in the compute store was changed since `ic-audit.json` was written:
+  refused, nothing published.
+- A pair that differs only in `cfg.ic` bytes, and a pair that differs only in a core surface file: each is
+  structural under both kinds.
 - Dry-run: no `ic-audit.json`, no file changed at all, the report lists no clone step and carries
   the audit result and `continuity`.
 - Abort after `begin`: timer started with the confirmation flag, text without clone rows.

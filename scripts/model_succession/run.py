@@ -210,8 +210,8 @@ def dry_run(settings: Settings) -> tuple[int, dict[str, Any]]:
                 "note": "The kind check, the initial-condition audit and the publisher's package checks need the "
                 "packages on the compute store; the apply runs them in preflight, before the timer is stopped."
                 if cold_start
-                else "The clone gate and the publisher's package checks need the packages on the compute "
-                "store; the apply runs both dry-runs in preflight, before the timer is stopped.",
+                else "The kind check, the clone gate and the publisher's package checks need the packages on the "
+                "compute store; the apply runs them in preflight, before the timer is stopped.",
             }
     states = {unit: systemd.observed_state(unit) for unit in (TIMER_UNIT, SERVICE_UNIT)}
     refusals.extend(f"{unit}: {state}" for unit, state in states.items() if state.startswith("unknown"))

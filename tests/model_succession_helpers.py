@@ -408,8 +408,10 @@ def build_space(
     *,
     kind: str = "recalibration",
     new_packages: tuple[dict[str, Any], dict[str, Any]] = ({}, {}),
+    old_ic: bytes = _IC_V1,
 ) -> Space:
-    """The production layout with two pairs; ``new_packages`` are the ``_row`` options of the two new models."""
+    """The production layout with two pairs; ``new_packages`` are the ``_row`` options of the two new models
+    and ``old_ic`` is the ``cfg.ic`` of the two old packages."""
 
     store, shared = tmp_path / "compute-store", tmp_path / "shared-store"
     canonical = shared / "scheduler" / "registry" / "manifest-last.json"
@@ -431,7 +433,7 @@ def build_space(
         clock=Clock(),
     )
     both = (store, shared)
-    old_rows = [_row(ws, "a", "v1", roots=both), _row(ws, "b", "v1", roots=both)]
+    old_rows = [_row(ws, "a", "v1", roots=both, ic=old_ic), _row(ws, "b", "v1", roots=both, ic=old_ic)]
     ws.seed([*old_rows, _row(ws, "c", "v1", roots=both)])
     # The provision step leaves the new packages on the shared store only; the copyback step brings them over.
     new_rows = [

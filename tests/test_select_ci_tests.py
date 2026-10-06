@@ -14640,6 +14640,8 @@ def test_model_succession_tool_selects_its_suites_and_rides_the_tools_it_drives(
         "tests/provider_mode_helpers.py",
     ):
         assert succession <= selected(path), path
+    # #2740: a cold-start succession gates on the audit's `build_receipt`, run for real by its partition.
+    assert "tests/test_node22_model_succession_cold_start.py" in selected("scripts/audit_first_cycle_initial_state.py")
     # The succession tool is not imported by the tools it drives: its own rows select no suite of theirs.
     assert not set(MERGED_REGISTRY_PUBLISH_TESTS) & selected(MODEL_SUCCESSION_OWNER_PATH)
     assert "tests/test_state_clone_recalibration_cli.py" not in selected("scripts/model_succession/tools.py")

@@ -51,6 +51,18 @@ STRUCTURAL = (COLD_START_PACKAGE, COLD_START_PACKAGE)
 QUALIFIED = "qualified"
 # A header line of two numeric tokens: the shape the audit refuses.
 UNQUALIFIED_IC = b"4\t6\n0.1\t0.2\n"
+# Qualified like ``QUALIFIED_IC``, other bytes.
+OTHER_QUALIFIED_IC = b"4\t1\t27000060.000000\n0.5\t0.6\n0.7\t0.8\n"
+# New packages that differ from the old ones on exactly one state-compatibility surface, with the IC of the
+# old packages: ``cfg.ic`` (the old packages keep the recalibration fixtures' IC), or one core file (both
+# sides ship ``QUALIFIED_IC``).
+ONE_SURFACE: dict[str, tuple[bytes | None, dict[str, Any]]] = {
+    "cfg_ic_only": (None, {"ic": QUALIFIED_IC, "shud_input_name": "huai"}),
+    "core_file_only": (
+        QUALIFIED_IC,
+        {"ic": QUALIFIED_IC, "core_overrides": {"huai.para.soil": b"soil-para-v2\n"}, "shud_input_name": "huai"},
+    ),
+}
 IC_AUDIT = "ic-audit.json"
 
 
@@ -233,6 +245,45 @@ def test_a_recalibration_of_structurally_different_packages_is_refused_in_prefli
     assert "clone-dry-run.json" not in space.names() and "state clone refused" not in reason
 
 
+@pytest.mark.parametrize("kind", ["recalibration", "cold_start"])
+@pytest.mark.parametrize("surface", sorted(ONE_SURFACE))
+def test_a_pair_that_differs_on_one_surface_only_is_structural_under_both_kinds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, surface: str, kind: str
+) -> None:
+    old_ic, package = ONE_SURFACE[surface]
+    options = {} if old_ic is None else {"old_ic": old_ic}
+    space = build_space(tmp_path, monkeypatch, kind=kind, new_packages=(package, package), **options)
+
+    if kind == "cold_start":
+        assert space.main("--apply") == 0
+        pairs = space.receipt("step-preflight.json")["kind_check"]["pairs"]
+        assert [pair["state_compatible"] for pair in pairs] == [False, False]
+    else:
+        reason = _refused_in_preflight(space, stores(space))
+        assert "--kind cold_start" in reason and all(pair in reason for pair in _pair_names(space))
+
+
+def test_a_recalibration_dry_run_names_the_one_pair_whose_new_package_declares_another_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The scenario of the clone-gate dry-run test of the copyback suite: only the second new cfg.ic differs.
+    space = build_space(tmp_path, monkeypatch)
+    (space.package(space.new_rows[1], space.ws.shared) / "huai.cfg.ic").write_bytes(b"cfg.ic\nanother start\n")
+    _copy_to_compute_store(space)
+    before = tree(space.ws.root)
+
+    assert space.main() == 1
+
+    result = report(capsys)
+    kind = result["steps"]["preflight"]["kind_check"]
+    assert kind["outcome"] == "refused" and "--kind cold_start" in kind["reason"]
+    assert _pair_names(space)[1] in kind["reason"] and _pair_names(space)[0] not in kind["reason"]
+    assert "split it into two successions" in kind["reason"]
+    assert result["steps"]["preflight"]["clone_dry_run"]["outcome"] == "refused"
+    assert result["would_be_refused"][0] == kind["reason"] and len(result["would_be_refused"]) == 2
+    assert changed(before, tree(space.ws.root)) == set()
+
+
 def _package_root_missing(space: Space) -> None:
     shutil.rmtree(space.package(space.old_rows[0], space.ws.store))
 
@@ -297,15 +348,13 @@ def _unqualified(space: Space) -> None:
     (space.package(space.new_rows[1], space.ws.shared) / "huai.cfg.ic").write_bytes(UNQUALIFIED_IC)
 
 
-def _absent(space: Space) -> None:
-    """The second new row publishes no package manifest reference; the publisher would not write such a
-    registry, so it is written by hand, with its sha256 in the provision apply receipt."""
+def _rewrite_registry(space: Space, edit: Any) -> None:
+    """A new-rows registry the publisher would not write, written by hand: ``edit`` changes its models list in
+    place, and the provision apply receipt gets the sha256 of the result."""
 
     registry = json.loads(space.registry.read_text(encoding="utf-8"))
-    row = registry["models"][1]
-    assert row["model_id"] == space.new_rows[1]["model_id"]
-    row.pop("manifest_uri", None)
-    row["resource_profile"].pop("manifest_uri", None)
+    assert [row["model_id"] for row in registry["models"]] == _new_ids(space)
+    edit(registry["models"])
     space.registry.write_text(json.dumps(registry), encoding="utf-8")
     receipt_path = space.directory / "provision-apply.json"
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
@@ -313,8 +362,27 @@ def _absent(space: Space) -> None:
     receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
 
 
+def _absent(space: Space) -> None:
+    """The second new row publishes no package manifest reference."""
+
+    def edit(models: list[dict[str, Any]]) -> None:
+        models[1].pop("manifest_uri", None)
+        models[1]["resource_profile"].pop("manifest_uri", None)
+
+    _rewrite_registry(space, edit)
+
+
+def _unreadable(space: Space) -> None:
+    """The registry references a package manifest that is not in the compute store."""
+
+    space.run_steps("copyback")
+    (space.package(space.new_rows[1], space.ws.store) / "manifest.json").unlink()
+
+
 @pytest.mark.parametrize(
-    ("arrange", "status"), [(_unqualified, "unqualified"), (_absent, "absent")], ids=["unqualified", "absent"]
+    ("arrange", "status"),
+    [(_unqualified, "unqualified"), (_absent, "absent"), (_unreadable, "unreadable")],
+    ids=["unqualified", "absent", "unreadable"],
 )
 def test_a_new_model_without_a_qualified_initial_condition_is_refused_in_preflight(
     cold: Space, arrange: Any, status: str
@@ -390,6 +458,85 @@ def test_an_existing_audit_receipt_that_fails_the_gate_refuses_preflight_and_is_
     assert failure["step"] == "preflight" and f"{_new_ids(cold)[1]}: no audit row" in failure["reason"]
     assert "never overwritten" in failure["reason"] and target.read_bytes() == planted
     assert cold.systemctl.mutating() == []
+
+
+@pytest.mark.parametrize("changed_ic", [UNQUALIFIED_IC, OTHER_QUALIFIED_IC], ids=["unqualified", "other_qualified"])
+def test_a_resumed_preflight_refuses_a_package_that_changed_since_the_audit(
+    cold: Space, monkeypatch: pytest.MonkeyPatch, changed_ic: bytes
+) -> None:
+    real = publish_tool.publish_merged_scheduler_registry
+
+    def refuse(**_arguments: Any) -> dict[str, Any]:
+        raise publish_tool.MergedRegistryPublishError("refused: injected")
+
+    # The audit passes and writes its receipt; the publish dry-run after it refuses.
+    monkeypatch.setattr(publish_tool, "publish_merged_scheduler_registry", refuse)
+    before = stores(cold)
+    _refused_in_preflight(cold, before)
+    monkeypatch.setattr(publish_tool, "publish_merged_scheduler_registry", real)
+    target = cold.directory / IC_AUDIT
+    written = target.read_bytes()
+    good, bad = _new_ids(cold)
+    (cold.package(cold.new_rows[1], cold.ws.store) / "huai.cfg.ic").write_bytes(changed_ic)
+
+    assert cold.main("--apply") == 1
+
+    # Two failure receipts now; within one second their names do not sort by time.
+    (failure,) = [failure for failure in cold.failures() if "injected" not in failure["reason"]]
+    reason = failure["reason"]
+    assert failure["step"] == "preflight" and failure["timer_touched_by_this_tool"] is False
+    assert "changed after" in reason and str(target) in reason and bad in reason and good not in reason
+    assert sha256_bytes(QUALIFIED_IC) in reason
+    assert "new --succession-id" in reason and f"--provision-succession-id {SUCCESSION_ID}" in reason
+    assert target.read_bytes() == written and stores(cold) == before
+    assert cold.systemctl.mutating() == [] and "timer-before-stop.json" not in cold.names()
+    assert not {"step-preflight.json", "publish-dry-run.json"} & set(cold.names())
+
+
+@pytest.mark.parametrize("unqualified_on", ["shared", "compute"])
+def test_the_audit_reads_the_packages_of_the_compute_store(cold: Space, unqualified_on: str) -> None:
+    cold.run_steps("copyback")
+    root = cold.ws.shared if unqualified_on == "shared" else cold.ws.store
+    (cold.package(cold.new_rows[1], root) / "huai.cfg.ic").write_bytes(UNQUALIFIED_IC)
+
+    if unqualified_on == "shared":
+        # What the runs will read is qualified; the provisioned copy is not what the audit is about.
+        assert cold.main("--apply") == 0
+        assert cold.receipt("step-preflight.json")["ic_audit"]["models"][_new_ids(cold)[1]] == [QUALIFIED]
+    else:
+        assert f"{_new_ids(cold)[1]}: ic_status unqualified" in _refused_in_preflight(cold, stores(cold))
+
+
+def test_a_row_of_a_model_outside_the_plan_is_in_the_audit_receipt_and_is_not_gated(cold: Space) -> None:
+    # The provisioned registry also holds the row of basin c, whose packaged IC the audit does not qualify.
+    other = cold.ws.rows[2]
+    cold.registry.unlink()
+    assert cold.ws.provision(SUCCESSION_ID, [*cold.new_rows, other]) == cold.registry
+
+    assert cold.main("--apply") == 0
+
+    statuses = {row["model_id"]: row["ic_status"] for row in cold.receipt(IC_AUDIT)["rows"]}
+    assert statuses[other["model_id"]] != QUALIFIED and len(statuses) == 3
+    assert sorted(cold.receipt("step-preflight.json")["ic_audit"]["models"]) == sorted(_new_ids(cold))
+
+
+def test_a_dry_run_reports_an_audit_that_cannot_run_instead_of_a_traceback(
+    cold: Space, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def edit(models: list[dict[str, Any]]) -> None:
+        models[1]["resource_profile"]["direct_grid_source_id"] = "no-such-source"
+
+    _rewrite_registry(cold, edit)
+    _copy_to_compute_store(cold)
+    before = tree(cold.ws.root)
+
+    assert cold.main() == 1
+
+    result = report(capsys)
+    audit = result["steps"]["preflight"]["ic_audit"]
+    assert audit["outcome"] == "refused" and "could not run: ValueError" in audit["reason"]
+    assert "no-such-source" in audit["reason"] and audit["reason"] in result["would_be_refused"]
+    assert changed(before, tree(cold.ws.root)) == set()
 
 
 # --- publish requires the audit receipt -------------------------------------------------------
