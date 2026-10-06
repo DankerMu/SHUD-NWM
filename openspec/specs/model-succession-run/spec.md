@@ -1,7 +1,11 @@
 # model-succession-run Specification
 
 ## Purpose
-TBD - created by archiving change node22-model-succession-run. Update Purpose after archive.
+
+The node-22 command that carries a model succession through its compute-side steps after the node-27
+provision step: copying the new packages to the compute store, stopping the scheduler timer, carrying or
+deliberately not carrying state, publishing the merged scheduler registry, refreshing the providers and
+starting the timer again, each step gated on the receipt of the one before it.
 
 ## Requirements
 
