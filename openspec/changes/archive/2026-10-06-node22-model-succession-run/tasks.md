@@ -18,9 +18,13 @@
 - [x] 2.1 Local: `uv run ruff check .`; the new suites; the publish-tool suites; the clone tool's suites;
       `tests/test_select_ci_tests.py` (after staging); `tests/test_node22_entrypoint_invariant.py`,
       `tests/test_node22_entrypoint_invariant_python_scan.py`, `tests/test_entropy_audit_line_references.py`.
-- [ ] 2.2 CI green on the PR.
-- [ ] 2.3 node-22 after merge and pull: one dry-run with the exact interpreter and a throwaway
+- [x] 2.2 CI green on the PR.
+- [x] 2.3 node-22 after merge and pull: one dry-run with the exact interpreter and a throwaway
       `--receipt-root`. No provision apply receipt exists in production yet, so the expected result is the
       refusal naming the missing `provision-apply.json`, with the timer and every file untouched. The
       full-chain dry-run and the first `--apply` happen at the first real succession; their receipts go to
       the issue then.
+
+Status 2026-10-06: 2.3 ran on node-22 and ended in the expected refusal (evidence/2026-10-06-node22-dry-run.txt).
+No step of the chain has run against production; issue #2739 stays open until the first full-chain dry-run
+and apply.

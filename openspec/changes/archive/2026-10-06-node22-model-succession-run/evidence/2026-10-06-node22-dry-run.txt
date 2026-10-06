@@ -1,0 +1,23 @@
+node-22 dry-run, 2026-10-06T04:26:58Z..04:26:59Z, checkout ab464ac74 (merge of PR #2748),
+/scratch/frd_muziyao/NWM/.venv/bin/python (Python 3.12.7), environment from
+infra/env/compute.scheduler-provider-refresh.env
+
+command:
+  .venv/bin/python -m scripts.node22_model_succession --succession-id verify-2739 --kind recalibration
+    --pair dg_b6983d7601455718fd9b1ee9930502c7:dg_verify2739_gfs
+    --pair dg_fcbd5b5baddb25699af4336c10e4d719:dg_verify2739_ifs
+    --cutover-time 2026100600 --operator-id claude-2739-verify
+    --receipt-root /scratch/frd_muziyao/nhms-prod/tmp/succ-2739-042658
+
+rc=1 (expected): "Refused: the provision apply receipt of succession 'verify-2739' is missing or unreadable
+  at <receipt-root>/verify-2739/provision-apply.json ... Nothing was written."
+No provision apply receipt exists in production yet, so the dry-run cannot go further.
+
+unchanged before/after: sha256, mtime, size of both registry manifests; `ls -la` of both manifest
+  directories and of the state-index directory; ActiveState and ActiveEnterTimestamp of
+  nhms-compute-scheduler.timer (active throughout). The receipt root held only this check's own files.
+
+what this shows: the tool imports and runs on node-22's Python 3.12.7 and refuses without touching anything.
+not covered: every step of the chain, any systemctl call other than none at all (the refusal comes before
+  the first is-active query), any --apply. First full-chain dry-run and apply: at the first real succession
+  or rehearsal; receipts go to issue #2739.
