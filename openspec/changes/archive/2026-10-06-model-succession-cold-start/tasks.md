@@ -15,16 +15,19 @@
 
 ## 2. Evidence Floor
 
-- [ ] 2.1 Local: `uv run ruff check .`; the new suite; the three existing succession suites; the clone
+- [x] 2.1 Local: `uv run ruff check .`; the new suite; the three existing succession suites; the clone
       tool's suites; the audit's suites; `tests/test_select_ci_tests.py` (after staging);
       `tests/test_node22_entrypoint_invariant.py`, `tests/test_node22_entrypoint_invariant_python_scan.py`,
       `tests/test_entropy_audit_line_references.py`; `openspec validate model-succession-cold-start --strict
       --no-interactive`.
-- [ ] 2.1b `grep -n '5.7.2' docs/runbooks/production-ops/recalibration-and-archive.md` shows the new section.
-- [ ] 2.2 CI green on the PR.
-- [ ] 2.3 node-22 after merge and pull: one `--kind cold_start` dry-run with the exact interpreter and a
+- [x] 2.1b `grep -n '5.7.2' docs/runbooks/production-ops/recalibration-and-archive.md` shows the new section.
+- [x] 2.2 CI green on the PR.
+- [x] 2.3 node-22 after merge and pull: one `--kind cold_start` dry-run with the exact interpreter and a
       throwaway `--receipt-root`. No provision apply receipt exists in production, so the expected result is
       the refusal naming the missing `provision-apply.json`, with the timer and every file untouched.
 
 Deviation: node-27 is not involved (the tool is DB-free and runs on node-22 only); no node-27 real-DB receipt
 applies to this change.
+
+Status 2026-10-06: 2.3 ran on node-22 and ended in the expected refusal
+(evidence/2026-10-06-node22-cold-start-dry-run.txt). No cold-start step has run against production.

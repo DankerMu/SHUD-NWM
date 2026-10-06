@@ -1,0 +1,28 @@
+node-22 (/scratch/frd_muziyao/NWM), exact interpreter, throwaway --receipt-root, --kind cold_start dry-run after fast-forward to 3a598521.
+Expected result: refusal naming the missing provision-apply.json; manifests, their directories, the state-index directory and the timer unchanged.
+
+1
+ create mode 100644 tests/test_node22_model_succession_cold_start.py
+HEAD 3a598521 Python 3.12.7
+2026-10-06T06:16:05Z
+rc=1
+2026-10-06T06:16:06Z
+manifests, their directories, state-index directory and timer unchanged
+--stdout
+
+--stderr
+DRY-RUN (no --apply): no file is changed, no receipt is written and no unit is started or stopped. An --apply copies the new packages, checks that every pair is a structural change, audits their packaged initial conditions, runs the publish tool's dry-run, stops the scheduler timer, publishes, runs the provider refresh and starts the timer again. No state is carried from the old models: the hydrograph of these basins is not continuous.
+Refused: the provision apply receipt of succession 'verify-2740' is missing or unreadable at /scratch/frd_muziyao/nhms-prod/tmp/succ-2740-061605/verify-2740/provision-apply.json ([Errno 2] No such file or directory: '/scratch/frd_muziyao/nhms-prod/tmp/succ-2740-061605/verify-2740/provision-apply.json'). Run the provision step with --apply on node-27 first, or name its succession with --provision-succession-id. Nothing was written.
+
+total 23
+drwxr-xr-x  2 frd_muziyao huser   6 Oct  6 14:16 .
+drwxr-xr-x 12 frd_muziyao huser  67 Oct  6 14:16 ..
+-rw-r--r--  1 frd_muziyao huser 178 Oct  6 14:16 after.txt
+-rw-r--r--  1 frd_muziyao huser 178 Oct  6 14:16 before.txt
+-rw-r--r--  1 frd_muziyao huser 875 Oct  6 14:16 stderr.txt
+-rw-r--r--  1 frd_muziyao huser   0 Oct  6 14:16 stdout.txt
+usage: node22_model_succession.py [-h] --succession-id SUCCESSION_ID
+                                  [--provision-succession-id PROVISION_SUCCESSION_ID]
+                                  --kind {recalibration,cold_start}
+                                  [--pair OLD_MODEL_ID:NEW_MODEL_ID]
+active active active 
