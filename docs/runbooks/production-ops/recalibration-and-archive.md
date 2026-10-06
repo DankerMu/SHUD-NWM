@@ -215,7 +215,9 @@ cd /scratch/frd_muziyao/NWM && { setsid nohup .venv/bin/python -m scripts.node22
 
 - **读 dry-run 报告看什么**：`would_be_refused` 为空；`steps.copyback.packages[]` 每个包是 `would_copy` 还是
   `already_present`（`differs` 即 scratch 上已有一份不同的包，apply 会拒绝且不覆盖）；包已在 scratch 上时
-  `steps.preflight` 给出两个工具 dry-run 的结论，否则是 `needs copyback`（apply 会在 preflight 里跑，仍在停 timer 之前）；
+  `steps.preflight` 给出 `kind_check`（每一对在八个 state-compatibility 面上是否相等；有结构变更的一对就拒绝，并在
+  `would_be_refused` 里多一条，出路见 5.7.2）与两个工具 dry-run 的结论，否则是 `needs copyback`
+  （apply 会在 preflight 里跑，仍在停 timer 之前）；
   `unit_states_now` 是 timer 与 service 此刻的状态。refresh 与 finish 不做预测。
 - **timer 由工具自己停、自己启。** `begin` 把 timer 当时是否 active 记进 `timer-before-stop.json`（只写一次，续跑时
   读它、不重新推断），发一次普通的 `stop`，然后轮询等 `nhms-compute-scheduler.service` 自己结束
@@ -424,6 +426,84 @@ jialingjiang，而这两个流域各已有 73 条 published run。
 > 2026-08-22 的 #1699 上线即走此路；见上文「新流域上线四跳」hop 1b/hop 2。
 （另注意 node-22 的 `BASINS_ROOT=/volume/nwm/Basins` 在本地 175T 盘上，
 与 NFS `/ghdc/data` 不是同一个文件系统。）
+
+#### 5.7.2 结构变更的 cold-start succession（#2740）
+
+5.7.1 的 `--kind recalibration` 靠克隆行让新 model 接过旧 model 的 state。**结构变更**做不到这一点：新旧两个包在
+八个 state-compatibility 面（`workers/mapping_builder/rewrite.py` 的 `STATE_COMPATIBILITY_SURFACES`，即十个
+水文核心面去掉 `calibration` 与 `solver_config`）上只要有一面不等——mesh、河网、lake、soil / geol / land、
+`.sp.att` 的非 `FORC` 列，或 `cfg.ic` 的字节——旧 state 就不可用，克隆门以 `state_compatibility_unequal` 拒绝。
+这时用 `--kind cold_start`：不克隆、不读写任何 state index，新 model 从包内率定好的初始条件起步。
+
+**哪种变更算结构变更，以门的比较结果为准，不靠人读 diff。** 只改 `cfg.calib` 或只改 `cfg.para` 是 state-compatible，
+属于 5.7.1 的 recalibration——把它当 cold start 做会白白丢掉可用的 state。两种 kind 的 `preflight` 都先对每一对
+`--pair` 做这同一项八面比较（见下文「preflight 拒绝什么」），kind 给错了在停 timer 之前就被点名。
+
+调度器这一侧**不需要任何批准产物**：一个在所有 generation 都没有 state 历史的 `model_id` 走
+`services/orchestrator/scheduler_generation.py` 的 first-cycle 分支——包内 IC 合格时放行为
+`packaged_ic_bootstrap`，不合格或读不出时 block 为 `first_cycle_initial_state_undecided`。cold-start succession
+做的是在发布之前**证明**包内 IC 合格，并在回执里写明过程线不连续。
+
+步骤比 recalibration 少一个 `clone`，其余（timer 的停与启、续跑、失败回执、`--abort`）与 5.7.1 相同：
+
+```text
+copyback -> preflight（kind 检查、包内 IC 审计、发布工具的 dry-run）
+  -> begin（记下 timer 原状态、停 timer、等在跑的 pass 自己结束） -> publish -> refresh -> finish
+```
+
+每步仍然只认它在本 kind 步骤表里前一步的回执：`publish` 要 `step-begin.json`。provision 那一步与 5.7.1 相同
+（node-27 上先 dry-run 再 `--apply`，同一个 `--succession-id`）。
+
+命令就是 5.7.1 那个代码块：环境、`LOG`、dry-run 与 detached `--apply` 两行**逐字相同**，只有 `SUCCESSION_ARGS`
+换成下面这样（差别是 `--kind`，以及 `--cutover-time` 的含义）：
+
+```bash
+SUCCESSION_ARGS=(
+  --succession-id "$SUCCESSION_ID"
+  --kind cold_start
+  --pair "<旧 model_id>:<新 model_id>"                # 每个 (流域, source) 一对，重复写
+  --cutover-time <YYYYMMDDHH>                        # 操作员声明的切换时刻：只记录，工具不强制
+  --new-rows-registry "<node-22 视角的路径>"            # provision 的 --output-registry；回执记了 object_store_key 时可省
+  --operator-id "<operator>"
+)
+```
+
+dry-run 同样不改任何文件、不写回执（包括 `ic-audit.json`）、只发 `is-active` 查询。
+
+- **读 dry-run 报告看什么**：`steps` 里没有 `clone`；新包已在 scratch 上时 `steps.preflight` 给出 `kind_check`、
+  `ic_audit`（`outcome` 以及每个新 model 的 `ic_status`）与 `publish_dry_run`，否则是 `needs copyback`；
+  `would_be_refused` 为空；`continuity` 就是下文那份不连续声明。
+- **preflight 拒绝什么（都在停 timer 之前，什么都没发布）**：
+  - **kind 与包不符。** `cold_start` 的某一对八面相等：点名这一对，要求改用 `--kind recalibration`；
+    `recalibration` 的某一对八面不等（包括某个面的文件只在一侧存在）：点名这一对，要求改用 `--kind cold_start`。
+    `plan.json` 记了 kind，所以改 kind 要换一个 `--succession-id`，并用 `--provision-succession-id` 指回原来的
+    provision。一次 succession 里两种对都有时同样拒绝：拆成两次 succession，各用各的 kind。
+    `recalibration` 的这项检查排在克隆 dry-run 之前——克隆门先看源 state，结构变更的一对若在 cutover time 没有
+    合格的源 state，原本只会因为那个原因被拒，看不出是 kind 错了。
+  - **比较做不成。** model 行找不到（旧行取自 canonical manifest，新行取自 provision 的 registry）、包目录不在
+    scratch 根上、`*.sp.att` / `*.cfg.ic` / `*.cfg.para` 不是恰好一个、文件解析不了：这是步骤失败，**不算**
+    「不等」，工具不会据此建议换 kind。修好包或行之后原样重跑。
+  - **包内 IC 不合格**（仅 `cold_start`）。工具进程内调用 `scripts/audit_first_cycle_initial_state.py`，对象是
+    provision 的 registry（发布要用的那些行）、object store 根取 scratch 根（run 实际读的包）。计划里每个新
+    model 至少要有一条审计行，且每条的 `ic_status` 都是 `qualified`；`unqualified`（没有规范位置的
+    `<shud_input_name>.cfg.ic`、文件为空、首行不是 3 或 4 个数值 token）、`unreadable`（包 manifest 读不出，或规范位置的 IC 对象探测不了）、
+    `absent`（registry 行没有 `manifest_uri`）或审计被 block 都拒绝，消息逐个列出 model 与它的 `ic_status`。
+    该 registry 里不属于本计划的行会出现在审计回执里，但不参与判定。
+- **`ic-audit.json`**：审计通过时写一次（审计工具自己的回执格式，写在 succession 目录，从不覆盖），
+  `step-preflight.json` 记它的路径与 sha256；审计不通过不留文件，修好之后原样重跑即可。续跑时已有的
+  `ic-audit.json` 只读不重写，并按同一条件再判一次；同时只读地重审一遍，计划里每个新 model 的 `ic_status` 与
+  `ic_sha256` 必须与回执里记的相同——scratch 上的包在审计之后被改过就是步骤失败，回执不会重写，出路是换一个
+  `--succession-id`（用 `--provision-succession-id` 指回原来的 provision）。`publish` 调发布工具之前再读它一遍：文件缺失、sha256 与
+  `step-preflight.json` 记的不一致、或内容不再满足条件，都是步骤失败、什么都不发布——此时 timer 已停，
+  把文件恢复原样后重跑，或按 5.7.1 的「放弃」处理。
+- **不连续声明（`continuity`）**：`plan.json`、`step-publish.json`、`step-finish.json`、dry-run 报告与 apply
+  报告都带 `continuity`：`mode=cold_start`、`state_carried=false`、`declared_cutover_time`（即
+  `--cutover-time`，按操作员声明记录，工具不强制）以及一段 `notice`——旧 model 的 state 不承接；每个新 model 在
+  timer 启动后调度器规划的第一个 cycle 从包内率定 IC 起步；这些流域的水文过程线在该处**断开**。对外通告时引用它。
+- **失败、hard stop 与放弃**：规则与 5.7.1 相同，失败消息里的 runbook 指向本节。`published_without_receipt` 与
+  `manifests_differ` 在 cold start 里以 `step-begin.json` 存在为「本次已到发布」的判据（recalibration 是
+  `step-clone.json`）。hard stop 之后的手工做法（比对两份 manifest、从备份恢复、provider refresh、启动 timer）
+  就是 5.7.1 里发布与 refresh 那两段，克隆那段不适用。放弃时没有克隆行需要交代。
 
 ### 5.8 node-22 file-journal cycle cold archive（已启用，#2119）
 

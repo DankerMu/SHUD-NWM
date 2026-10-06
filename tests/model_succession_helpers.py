@@ -1,4 +1,4 @@
-"""Fixtures, a fake ``systemctl`` and builders shared by the model succession suites (#2739).
+"""Fixtures, a fake ``systemctl`` and builders shared by the model succession suites (#2739, #2740).
 
 The production layout in ``tmp_path``: a compute store (the worker mirror, the
 compute-side state index, the state objects and the packages the scheduler
@@ -7,7 +7,9 @@ the receipts and the provisioned packages).  The clone tool and the publish
 tool are the real ones; the packages are the recalibration clone suites' fake
 packages with the manifest inside the package directory, as the provision step
 writes them.  A suite that uses the ``space`` fixture imports it and the
-autouse ``no_database`` fixture from here.
+autouse ``no_database`` fixture from here.  ``build_space`` takes the kind and
+what the new packages hold, for the cold-start suite; its defaults are the
+recalibration space.
 
 The fake ``systemctl`` is a script: it appends every call, ``--user`` included,
 to a trace, keeps unit states in a file and, for a start of the provider
@@ -66,6 +68,15 @@ CUTOVER = "2026100512"
 CUTOVER_TIME = datetime(2026, 10, 5, 12, tzinfo=UTC)
 SOURCE = "gfs"
 STEPS = ("copyback", "preflight", "begin", "clone", "publish", "refresh", "finish")
+COLD_START_STEPS = ("copyback", "preflight", "begin", "publish", "refresh", "finish")
+# A packaged initial condition the first-cycle audit qualifies: the header line has three numeric tokens.
+QUALIFIED_IC = b"4\t1\t27000000.000000\n0.1\t0.2\n0.3\t0.4\n"
+# What the new packages of a cold start hold: another mesh, a qualified IC, and the row names the SHUD input.
+COLD_START_PACKAGE: dict[str, Any] = {
+    "ic": QUALIFIED_IC,
+    "core_overrides": {"huai.sp.mesh": b"mesh-topology-v2\n"},
+    "shud_input_name": "huai",
+}
 
 _FAKE_SYSTEMCTL = r'''
 import json, os, sys
@@ -240,6 +251,7 @@ class Space:
     old_rows: list[dict[str, Any]]
     new_rows: list[dict[str, Any]]
     registry: Path
+    kind: str = "recalibration"
 
     @property
     def directory(self) -> Path:
@@ -250,7 +262,7 @@ class Space:
         return [(old["model_id"], new["model_id"]) for old, new in zip(self.old_rows, self.new_rows, strict=True)]
 
     def argv(self, *extra: str, pairs: list[tuple[str, str]] | None = None, cutover: str = CUTOVER) -> list[str]:
-        arguments = ["--succession-id", SUCCESSION_ID, "--kind", "recalibration", "--operator-id", "operator-1"]
+        arguments = ["--succession-id", SUCCESSION_ID, "--kind", self.kind, "--operator-id", "operator-1"]
         for old, new in self.pairs if pairs is None else pairs:
             arguments += ["--pair", f"{old}:{new}"]
         return [*arguments, "--cutover-time", cutover, "--pass-wait-seconds", "30", *extra]
@@ -319,10 +331,23 @@ class Space:
         return target
 
 
-def _row(ws: Workspace, basin: str, version: str, *, roots: tuple[Path, ...]) -> dict[str, Any]:
-    """A direct-grid registry row whose package, manifest inside, is present under ``roots``."""
+def _row(
+    ws: Workspace,
+    basin: str,
+    version: str,
+    *,
+    roots: tuple[Path, ...],
+    ic: bytes = _IC_V1,
+    core_overrides: dict[str, bytes] | None = None,
+    **profile: Any,
+) -> dict[str, Any]:
+    """A direct-grid registry row whose package, manifest inside, is present under ``roots``.
 
-    row = ws.row(basin, SOURCE, version)
+    ``ic`` and ``core_overrides`` are the package's ``cfg.ic`` and the core files that differ from the
+    recalibration fixtures; ``profile`` goes into the row's ``resource_profile``.
+    """
+
+    row = ws.row(basin, SOURCE, version, **profile)
     model_id = str(row["model_id"])
     new = version != "v1"
     for root in roots:
@@ -332,7 +357,8 @@ def _row(ws: Workspace, basin: str, version: str, *, roots: tuple[Path, ...]) ->
             calib=_CALIB_V2 if new else _CALIB_V1,
             calib_table=_CALIB_TABLE_V2 if new else _CALIB_TABLE_V1,
             para=_PARA_V2 if new else _PARA_V1,
-            ic=_IC_V1,
+            ic=ic,
+            core_overrides=core_overrides,
         )
     for root in (ws.store, ws.shared):
         # ``Workspace.row`` wrote a manifest beside the package under both roots; the provision step writes it inside.
@@ -373,6 +399,20 @@ def _state_entry(store: LocalObjectStore, row: dict[str, Any]) -> dict[str, Any]
 
 @pytest.fixture(name="space")
 def space_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Space:
+    return build_space(tmp_path, monkeypatch)
+
+
+def build_space(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    kind: str = "recalibration",
+    new_packages: tuple[dict[str, Any], dict[str, Any]] = ({}, {}),
+    old_ic: bytes = _IC_V1,
+) -> Space:
+    """The production layout with two pairs; ``new_packages`` are the ``_row`` options of the two new models
+    and ``old_ic`` is the ``cfg.ic`` of the two old packages."""
+
     store, shared = tmp_path / "compute-store", tmp_path / "shared-store"
     canonical = shared / "scheduler" / "registry" / "manifest-last.json"
     mirror = store / "scheduler" / "registry" / "manifest-last.json"
@@ -393,10 +433,13 @@ def space_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Space:
         clock=Clock(),
     )
     both = (store, shared)
-    old_rows = [_row(ws, "a", "v1", roots=both), _row(ws, "b", "v1", roots=both)]
+    old_rows = [_row(ws, "a", "v1", roots=both, ic=old_ic), _row(ws, "b", "v1", roots=both, ic=old_ic)]
     ws.seed([*old_rows, _row(ws, "c", "v1", roots=both)])
     # The provision step leaves the new packages on the shared store only; the copyback step brings them over.
-    new_rows = [_row(ws, "a", "v2", roots=(shared,)), _row(ws, "b", "v2", roots=(shared,))]
+    new_rows = [
+        _row(ws, basin, "v2", roots=(shared,), **options)
+        for basin, options in zip(("a", "b"), new_packages, strict=True)
+    ]
     registry = ws.provision(SUCCESSION_ID, new_rows)
 
     entries = [_state_entry(LocalObjectStore(store, PREFIX), row) for row in old_rows]
@@ -443,6 +486,7 @@ def space_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Space:
         old_rows=old_rows,
         new_rows=new_rows,
         registry=registry,
+        kind=kind,
     )
 
 
