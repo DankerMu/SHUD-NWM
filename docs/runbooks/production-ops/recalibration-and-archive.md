@@ -146,7 +146,12 @@ manifest——**不是** §3.1.2 的 cutover declaration。
 （不写库、不在 object store 上建包或 chmod、不写 `--output-registry`），只预测每个变体的
 `model_id` 并落一份回执；三步共用同一个 `--succession-id`。`--output-registry` 必须写在**两节点都读得到**
 的地方——发布那一步在 node-22 上读它：放共享 NFS（node-27 写 `/home/ghdc/nwm/...`，node-22 看到的是
-同一挂载的 `/ghdc/data/nwm/...`），且父目录仍须满足「不能组可写」那条（见 [`service-bringup.md`](service-bringup.md) hop 3 的坑）：
+同一挂载的 `/ghdc/data/nwm/...`），且父目录须属执行账号本人、不能组/他人可写（见 [`service-bringup.md`](service-bringup.md) hop 3 的坑）。
+这一条 dry-run 与 `--apply` 都在最开头检查（#2753）：不合格就拒绝，不连库、不落回执，报错里点名目录、属主 uid 与 mode。
+自己的目录 `chmod 755` 后原命令重跑；别人的目录（例如组可写的共享候选目录）改不了，就把 `--output-registry` 换到自建目录
+（`mkdir -m 755`）——`--apply` 必须与它的 dry-run 写同一路径，所以已有 dry-run 回执时还要换一个新的 `--succession-id` 重做 dry-run。
+父目录尚不存在时只要求最近的已存在祖先对本人可写，apply 会自己按 0755 建出来。URI 形式（`s3://` / `published://`）不在此检查之内：
+
 
 ```bash
 # node-27，/home/nwm/NWM；DATABASE_URL / OBJECT_STORE_ROOT / OBJECT_STORE_PREFIX 已在环境里
@@ -174,6 +179,13 @@ dry-run 回执，输入或预测集合有任何出入就拒绝并回滚；回执
 克隆与发布所需的前驱 `M1` 仍按 `(basin_version_id, source_id)` 从 canonical manifest 取。
 各选项的细节与回执根的一次性放权见
 [`service-bringup.md`](service-bringup.md) 3.1.1 的 hop 3。
+
+**包内容没变、但要一个新 generation 时**（例如只为换一代 `model_id` 而重新发布同一棵流域树）：baseline 包的版本号由内容派生，
+原样再跑 hop 1 的结果是 `already_done`，`package_checksum` 不变，provision 预测出的变体 `model_id` 也就与旧的相同——
+没有后继可言，这条通道无事可做。要得到新的一代，hop 1 的 baseline 发布须带 `--package-version-template` 并在默认模板
+`vbasins-{slug_id}-{content_hash}-{source_hash}` 之后加一个本次专属后缀（例如 `...-{source_hash}-g2`），同时把
+`--registry-manifest` 指向本次专属文件（理由见 [`service-bringup.md`](service-bringup.md) hop 1 的坑）；版本号变了，
+`package_checksum` 与变体 `model_id` 随之变，再把这份 registry 交给上面的 `--baseline-registry` 走 dry-run 与 `--apply`。
 
 **node-22 这一侧用一条命令（#2739）。** provision `--apply` 之后，回拷、克隆、发布、refresh 以及调度器 timer 的停与启，
 由 `scripts/node22_model_succession.py` 按固定顺序做完，不连库、不跨机 ssh：

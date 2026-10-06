@@ -27,6 +27,7 @@ import pytest
 import scripts.provision_direct_grid_scheduler_registry as provision
 from packages.common import provision_succession_receipt as succession
 from packages.common.object_store import sha256_bytes
+from packages.common.provider_atomic import provider_parent_is_safe
 from tests.fixtures.mapping_builder.in_memory_grid_snapshot import make_regular_grid_cells, make_snapshot
 
 KELIYA_FIXTURE_DIR = Path(__file__).parent / "fixtures" / "mapping_builder" / "keliya"
@@ -260,7 +261,9 @@ def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Workspace:
     monkeypatch.setattr(tempfile, "tempdir", str(build_tmp))
     database = FakeDatabase()
     monkeypatch.setattr(psycopg2, "connect", database.connect)
+    # Pinned: a bare ``mkdir`` is 0775 under umask 002, which the provider lock refuses.
     (tmp_path / "out").mkdir()
+    (tmp_path / "out").chmod(0o755)
     return Workspace(
         root=tmp_path,
         store_root=store_root,
@@ -846,6 +849,122 @@ def test_an_apply_whose_receipt_cannot_be_written_says_what_was_written(
     assert "could NOT be written" in message and "new --succession-id" in message
     assert workspace.last.events == ["commit", "close"]
     assert workspace.output_registry.is_file()
+
+
+# --- the output registry's directory ----------------------------------------
+
+
+def _refused_having_done_nothing(workspace: Workspace, *extra: str) -> str:
+    """Refused before the database was opened, with nothing changed anywhere under the test root."""
+
+    connections = len(workspace.database.connections)
+    before = _tree(workspace.root)
+    message = _refused(workspace, *extra)
+    assert len(workspace.database.connections) == connections
+    assert _changed(before, _tree(workspace.root)) == set()
+    return message
+
+
+@pytest.mark.parametrize("mode", [0o775, 0o757], ids=["group-writable", "other-writable"])
+def test_dry_run_into_a_group_or_other_writable_directory_is_refused(workspace: Workspace, mode: int) -> None:
+    out = workspace.output_registry.parent
+    out.chmod(mode)
+
+    message = _refused_having_done_nothing(workspace, "--succession-id", "s-1")
+
+    assert str(out) in message and f"mode {mode:04o}" in message and f"uid {os.geteuid()}" in message
+    # Both ways on: the operator's own directory, or another one under a new succession.
+    assert f"chmod 755 {out}" in message and "mkdir -m 755" in message and "new --succession-id" in message
+    assert workspace.database.connections == []
+    assert not workspace.receipt_dir.exists()
+
+
+def test_apply_into_a_group_writable_directory_is_refused_before_its_dry_run_receipt_is_read(
+    workspace: Workspace,
+) -> None:
+    out = workspace.output_registry.parent
+    out.chmod(0o775)
+
+    message = _refused_having_done_nothing(workspace, "--succession-id", "s-1", "--apply")
+
+    assert f"chmod 755 {out}" in message and "provision-dry-run.json" not in message
+    assert workspace.database.connections == []
+
+
+def test_apply_is_refused_when_the_directory_became_group_writable_after_its_dry_run(workspace: Workspace) -> None:
+    assert provision.main(workspace.argv("--succession-id", "s-1")) == 0
+    workspace.output_registry.parent.chmod(0o775)
+
+    message = _refused_having_done_nothing(workspace, "--succession-id", "s-1", "--apply")
+
+    assert "mode 0775" in message and len(workspace.database.connections) == 1
+    assert not workspace.output_registry.exists()
+    assert not (workspace.receipt_dir / "s-1" / "provision-apply.json").exists()
+
+
+@pytest.mark.parametrize("registry", ["link/registry.json", "link/sub/registry.json"])
+@pytest.mark.parametrize("flags", [(), ("--apply",)])
+def test_a_symlink_as_or_above_the_output_directory_is_refused(
+    workspace: Workspace,
+    registry: str,
+    flags: tuple[str, ...],
+) -> None:
+    (workspace.output_registry.parent / "sub").mkdir(mode=0o755)
+    (workspace.root / "link").symlink_to(workspace.output_registry.parent, target_is_directory=True)
+
+    message = _refused_having_done_nothing(
+        workspace, "--succession-id", "s-1", *flags, "--output-registry", str(workspace.root / registry)
+    )
+
+    assert str(workspace.root / "link") in message and "symlink" in message
+    assert workspace.database.connections == []
+
+
+@pytest.mark.parametrize("registry", ["out/registry.json", "new/deeper/registry.json"])
+def test_a_compliant_or_not_yet_existing_output_directory_proceeds(workspace: Workspace, registry: str) -> None:
+    target = workspace.root / registry
+    flags = ("--succession-id", "s-1", "--output-registry", str(target))
+    existed = target.parent.is_dir()
+
+    assert provision.main(workspace.argv(*flags)) == 0
+    # The dry-run check creates nothing.
+    assert target.parent.is_dir() == existed and not (workspace.root / "new").exists()
+    assert provision.main(workspace.argv(*flags, "--apply")) == 0
+
+    assert workspace.receipt("s-1", "apply")["output_registry"]["sha256"] == sha256_bytes(target.read_bytes())
+    assert provider_parent_is_safe(target.parent.stat())
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores modes")
+@pytest.mark.parametrize("flags", [(), ("--apply",)])
+def test_a_missing_output_directory_under_an_unwritable_ancestor_is_refused(
+    workspace: Workspace,
+    flags: tuple[str, ...],
+) -> None:
+    locked = workspace.output_registry.parent / "locked"
+    locked.mkdir()
+    locked.chmod(0o500)
+
+    message = _refused_having_done_nothing(
+        workspace, "--succession-id", "s-1", *flags, "--output-registry", str(locked / "new" / "registry.json")
+    )
+
+    assert str(locked / "new") in message and f"ancestor {locked} is not writable" in message
+    assert workspace.database.connections == []
+
+
+def test_provider_parent_predicate_requires_the_effective_owner_and_no_group_or_other_write(tmp_path: Path) -> None:
+    tmp_path.chmod(0o755)
+    own = tmp_path.stat()
+    fields = list(own)[:10]  # mode, ino, dev, nlink, uid, gid, size, atime, mtime, ctime
+
+    def with_field(index: int, value: int) -> os.stat_result:
+        return os.stat_result((*fields[:index], value, *fields[index + 1 :]))
+
+    assert provider_parent_is_safe(own)
+    assert not provider_parent_is_safe(with_field(4, own.st_uid + 1))  # a foreign owner
+    assert not provider_parent_is_safe(with_field(0, stat.S_IFDIR | 0o775))
+    assert not provider_parent_is_safe(with_field(0, stat.S_IFDIR | 0o757))
 
 
 # --- preserved refusals -----------------------------------------------------
