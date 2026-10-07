@@ -49,11 +49,17 @@ DEFAULT_PASS_WAIT_SECONDS = 14400
 
 KIND_RECALIBRATION = "recalibration"
 KIND_COLD_START = "cold_start"
-# The steps of each kind, in their fixed order.  A cold start carries no state: it has no clone step.
+KIND_ADD_BASIN = "add_basin"
+# The steps of each kind, in their fixed order.  A cold start carries no state and a new basin has none: neither
+# has a clone step.
 STEPS_BY_KIND = {
     KIND_RECALIBRATION: ("copyback", "preflight", "begin", "clone", "publish", "refresh", "finish"),
     KIND_COLD_START: ("copyback", "preflight", "begin", "publish", "refresh", "finish"),
+    KIND_ADD_BASIN: ("copyback", "preflight", "begin", "publish", "refresh", "finish"),
 }
+# The kinds whose new models start from the initial condition in their package: ``preflight`` audits it and
+# ``publish`` requires the audit receipt.
+KINDS_STARTING_FROM_PACKAGED_IC = (KIND_COLD_START, KIND_ADD_BASIN)
 # The step that stops the timer and the last step are the same in every kind.
 BEGIN_STEP = "begin"
 FINAL_STEP = "finish"
@@ -73,6 +79,7 @@ _RUNBOOK_FILE = "docs/runbooks/production-ops/recalibration-and-archive.md"
 RUNBOOK_BY_KIND = {
     KIND_RECALIBRATION: f"{_RUNBOOK_FILE}, section 5.7.1",
     KIND_COLD_START: f"{_RUNBOOK_FILE}, section 5.7.2",
+    KIND_ADD_BASIN: f"{_RUNBOOK_FILE}, section 5.7.3",
 }
 # What ``continuity.notice`` says in the plan, the receipts and the reports of a cold start.
 COLD_START_NOTICE = (
@@ -80,6 +87,13 @@ COLD_START_NOTICE = (
     "condition in its package at the first cycle the scheduler plans after the timer is started, and the "
     "hydrograph of these basins is discontinuous there. The cutover time is recorded as the operator declared "
     "it; this tool does not enforce it."
+)
+# What ``continuity.notice`` says in the plan, the receipts and the reports of an added basin.
+NEW_BASIN_NOTICE = (
+    "New basin: there are no earlier forecasts of it and no state to carry. Each model starts from the calibrated "
+    "initial condition in its package at the first cycle the scheduler plans for it after the timer is started. "
+    "That is the earliest cycle of the scheduler's lookback window, not the current one: the basin then catches "
+    "up cycle by cycle."
 )
 _NOTHING_WRITTEN = "Nothing was written."
 # What ``step-finish.json`` and the report of an apply say was done to the timer.
@@ -141,7 +155,8 @@ class Plan:
     provision_succession_id: str
     kind: str
     pairs: tuple[tuple[str, str], ...]  # (old_model_id, new_model_id), in command-line order
-    cutover_time: str  # YYYYMMDDHH
+    cutover_time: str | None  # YYYYMMDDHH; None for an added basin, which has no cutover
+    adds: tuple[str, ...] = ()  # the new model ids of an added basin, in command-line order
 
     @property
     def old_ids(self) -> list[str]:
@@ -149,7 +164,7 @@ class Plan:
 
     @property
     def new_ids(self) -> list[str]:
-        return [new for _old, new in self.pairs]
+        return [new for _old, new in self.pairs] + list(self.adds)
 
     @property
     def steps(self) -> tuple[str, ...]:
@@ -178,6 +193,12 @@ class Plan:
         return RUNBOOK_BY_KIND[self.kind]
 
     def record(self) -> dict[str, Any]:
+        if self.kind == KIND_ADD_BASIN:
+            return {
+                "kind": self.kind,
+                "adds": list(self.adds),
+                "provision_succession_id": self.provision_succession_id,
+            }
         return {
             "kind": self.kind,
             "pairs": [{"old_model_id": old, "new_model_id": new} for old, new in self.pairs],
@@ -186,11 +207,14 @@ class Plan:
         }
 
     def continuity(self) -> dict[str, Any]:
-        """``{"continuity": ...}`` of a cold start, for a receipt or a report; empty for every other kind.
+        """``{"continuity": ...}`` of a cold start or an added basin, for a receipt or a report; empty for a
+        recalibration.
 
         Written beside ``record()``, never inside it: a resume compares the record, not the notice text.
         """
 
+        if self.kind == KIND_ADD_BASIN:
+            return {"continuity": {"mode": "new_basin", "state_carried": False, "notice": NEW_BASIN_NOTICE}}
         if self.kind != KIND_COLD_START:
             return {}
         return {

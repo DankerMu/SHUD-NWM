@@ -19,6 +19,14 @@ and ``publish`` requires; the plan, the receipts and the reports say in
 ``continuity`` that the hydrograph is not continuous.  ``preflight`` of either
 kind refuses a pair whose packages say it is the other kind.
 
+``--kind add_basin`` brings the models of a new basin into the scheduler
+(``--add <new_model_id>``, one per source of each new basin; no ``--pair`` and
+no ``--cutover-time``).  There is no old model, so there is no kind check and
+no clone: its six steps are those of a cold start, with the same audit of the
+packaged initial conditions, and the publish adds rows and replaces none.
+``continuity`` says that the basin has no earlier forecasts and catches up from
+the earliest cycle of the scheduler's lookback window.
+
 ``copyback`` and ``preflight`` (the kind check, then the dry-runs of the clone
 tool and of the publish tool) run while the scheduler is running.  ``begin``
 records whether the scheduler timer was active, stops it and waits for a
@@ -66,6 +74,7 @@ from scripts.model_succession import run
 from scripts.model_succession.model import (
     CANONICAL_MANIFEST_ENV,
     DEFAULT_PASS_WAIT_SECONDS,
+    KIND_ADD_BASIN,
     KIND_COLD_START,
     KIND_RECALIBRATION,
     MIRROR_MANIFEST_ENV,
@@ -110,6 +119,17 @@ COLD_START_DRY_RUN_NOTICE = (
     " provider refresh and starts the timer again."
     " No state is carried from the old models: the hydrograph of these basins is not continuous."
 )
+ADD_BASIN_DRY_RUN_NOTICE = (
+    "DRY-RUN (no --apply): no file is changed, no receipt is written and no unit is started or stopped."
+    " An --apply copies the new packages, audits their packaged initial conditions, runs the publish tool's"
+    " dry-run, stops the scheduler timer, publishes the added rows, runs the provider refresh and starts the timer"
+    " again. The new basin has no earlier forecasts: it catches up from the earliest cycle of the lookback window."
+)
+DRY_RUN_NOTICE_BY_KIND = {
+    KIND_RECALIBRATION: DRY_RUN_NOTICE,
+    KIND_COLD_START: COLD_START_DRY_RUN_NOTICE,
+    KIND_ADD_BASIN: ADD_BASIN_DRY_RUN_NOTICE,
+}
 
 
 def _pair(value: str) -> tuple[str, str]:
@@ -137,7 +157,9 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         choices=tuple(STEPS_BY_KIND),
         help=f"The kind of succession: {KIND_RECALIBRATION} carries the state of the old models through clone "
         f"rows; {KIND_COLD_START} carries none and starts each new model from the initial condition in its "
-        "package. preflight refuses a pair whose packages say it is the other kind.",
+        f"package. preflight refuses a pair whose packages say it is the other kind. {KIND_ADD_BASIN} adds the "
+        "models of a new basin (--add), which have no old model, and starts each from the initial condition in "
+        "its package.",
     )
     parser.add_argument(
         "--pair",
@@ -145,14 +167,23 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=[],
         type=_pair,
         metavar="OLD_MODEL_ID:NEW_MODEL_ID",
-        help="A model replaced by its successor; one per source of each basin. Repeatable; the order is kept.",
+        help=f"{KIND_RECALIBRATION} and {KIND_COLD_START}: a model replaced by its successor; one per source of "
+        f"each basin. Repeatable; the order is kept. Refused with {KIND_ADD_BASIN}.",
+    )
+    parser.add_argument(
+        "--add",
+        action="append",
+        default=[],
+        metavar="NEW_MODEL_ID",
+        help=f"{KIND_ADD_BASIN}: a model of a new basin; one per source of each new basin, all sources of a basin "
+        "together. Repeatable; the order is kept. Refused with the other kinds.",
     )
     parser.add_argument(
         "--cutover-time",
-        required=True,
         metavar="YYYYMMDDHH",
         help=f"{KIND_RECALIBRATION}: valid_time of the clone rows. {KIND_COLD_START}: the cutover time the "
-        "operator declares; it is recorded in continuity and not enforced.",
+        f"operator declares; it is recorded in continuity and not enforced. Required with both; refused with "
+        f"{KIND_ADD_BASIN}, which has no cutover.",
     )
     parser.add_argument("--operator-id", required=True)
     parser.add_argument(
@@ -212,6 +243,7 @@ def settings_from_arguments(args: argparse.Namespace) -> Settings:
         kind=args.kind,
         pairs=args.pair,
         cutover_time=args.cutover_time,
+        adds=args.add,
     )
     store_root, provider_root = paths[OBJECT_STORE_ROOT_ENV], paths[PROVIDER_STORE_ROOT_ENV]
     return Settings(
@@ -242,8 +274,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.apply:
             status, report = run.apply(settings)
         else:
-            notice = COLD_START_DRY_RUN_NOTICE if settings.plan.kind == KIND_COLD_START else DRY_RUN_NOTICE
-            print(notice, file=sys.stderr, flush=True)
+            print(DRY_RUN_NOTICE_BY_KIND[settings.plan.kind], file=sys.stderr, flush=True)
             status, report = run.dry_run(settings)
     except (ModelSuccessionRefusal, StepFailure) as error:
         # A refusal before any step, or a unit whose state cannot be read outside a step: nothing was written.
