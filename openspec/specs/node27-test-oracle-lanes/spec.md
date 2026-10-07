@@ -17,7 +17,7 @@ The three test files `tests/test_mvt_national_identity_probe_integration.py`, `t
 - **THEN** the CI test selector selects every file split from it, and the PR-lane exclusion of the national identity probe applies to every part
 
 ### Requirement: Real-disk forcing suite derives its cycle from the live store
-`tests/test_object_store_forcing_real_disk.py` SHALL select, at run time, the newest cycle for which all four station/source combinations are present in `OBJECT_STORE_ROOT`. Every time the suite asserts SHALL be derived from that cycle. When no such cycle exists, the suite SHALL fail with an explicit diagnostic rather than skip.
+`tests/test_object_store_forcing_real_disk.py` SHALL select, at run time, the newest cycle for which all four basin/source combinations are present in `OBJECT_STORE_ROOT`. A combination SHALL be resolved per cycle from the store and the database, not named in the suite: its model is the single `dg_*` directory of that basin version and source in the cycle, and its station is one that `met.interp_weight` holds for that model and whose forcing file exists in the cycle. Every time the suite asserts SHALL be derived from that cycle. When no such cycle exists, the suite SHALL fail with an explicit diagnostic rather than skip.
 
 #### Scenario: Newest complete cycle is chosen
 - **WHEN** the store holds cycles where the newest is missing one combination
@@ -25,7 +25,11 @@ The three test files `tests/test_mvt_national_identity_probe_integration.py`, `t
 
 #### Scenario: No complete cycle
 - **WHEN** no cycle has all four combinations
-- **THEN** the suite fails with a message naming the store root and the per-combination counts
+- **THEN** the suite fails with a message naming the store root, the per-combination counts and why each combination was absent
+
+#### Scenario: A combination that cannot be resolved without guessing
+- **WHEN** a cycle holds no `dg_*` directory, or more than one, for a basin version and source
+- **THEN** that combination is absent for that cycle and the suite does not pick one of the directories
 
 ### Requirement: GRIB opt-in fails loudly when ecCodes cannot load
 When `NHMS_RUN_GRIB=1` and grib tests are collected, the test session SHALL verify that the ecCodes runtime loads. If it does not, the session SHALL stop with a diagnostic that names the missing ecCodes runtime. It SHALL NOT skip the tests.
