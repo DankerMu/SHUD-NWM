@@ -1,0 +1,21 @@
+HEAD c6c603e6 Python 3.12.7 2026-10-07T01:44:54Z
+f3cf939f8a08a3ec f3cf939f8a08a3ec active 20261006-rehearsal-tailanhe 20261006-rehearsal-tailanhe-b 
+--- --succession-id 20261006-e1-dryrun --kind add_basin --add dg_36015263b05274ab5012efbb611006a6 --add dg_8427e85f909727c7f4fe6c2daa2f9a9f --receipt-root /scratch/frd_muziyao/nhms-prod/tmp/add-basin-dry.YTyMzw
+DRY-RUN (no --apply): no file is changed, no receipt is written and no unit is started or stopped. An --apply copies the new packages, audits their packaged initial conditions, runs the publish tool's dry-run, stops the scheduler timer, publishes the added rows, runs the provider refresh and starts the timer again. The new basin has no earlier forecasts: it catches up from the earliest cycle of the lookback window.
+Refused: the provision apply receipt of succession '20261006-e1-dryrun' is missing or unreadable at /scratch/frd_muziyao/nhms-prod/tmp/add-basin-dry.YTyMzw/20261006-e1-dryrun/provision-apply.json ([Errno 2] No such file or directory: '/scratch/frd_muziyao/nhms-prod/tmp/add-basin-dry.YTyMzw/20261006-e1-dryrun/provision-apply.json'). Run the provision step with --apply on node-27 first, or name its succession with --provision-succession-id. Nothing was written.
+rc=1
+--- --succession-id 20261006-e1-dryrun --provision-succession-id 20261006-rehearsal-tailanhe-b --kind add_basin --add dg_36015263b05274ab5012efbb611006a6 --add dg_8427e85f909727c7f4fe6c2daa2f9a9f
+DRY-RUN (no --apply): no file is changed, no receipt is written and no unit is started or stopped. An --apply copies the new packages, audits their packaged initial conditions, runs the publish tool's dry-run, stops the scheduler timer, publishes the added rows, runs the provider refresh and starts the timer again. The new basin has no earlier forecasts: it catches up from the earliest cycle of the lookback window.
+Refused: new model_id is already in the canonical manifest /ghdc/data/nwm/object-store/scheduler/registry/manifest-last.json: ['dg_36015263b05274ab5012efbb611006a6', 'dg_8427e85f909727c7f4fe6c2daa2f9a9f']. Nothing was written.
+rc=1
+--- --succession-id 20261006-e1-dryrun --kind add_basin --add dg_36015263b05274ab5012efbb611006a6 --add dg_8427e85f909727c7f4fe6c2daa2f9a9f --cutover-time 2026100600 --receipt-root /scratch/frd_muziyao/nhms-prod/tmp/add-basin-dry.YTyMzw
+Refused: --cutover-time is not valid with --kind add_basin: a new basin has no history and so no cutover. Leave the option out.
+rc=1
+--- --succession-id 20261006-e1-dryrun --kind add_basin --pair dg_510fbd39433e9cd2ee948980efd523e1:dg_36015263b05274ab5012efbb611006a6 --receipt-root /scratch/frd_muziyao/nhms-prod/tmp/add-basin-dry.YTyMzw
+Refused: --pair is not valid with --kind add_basin: a new basin has no old model to replace. Name each of its models with --add <new_model_id>, or run the replacement under its own kind and --succession-id.
+rc=1
+--- --succession-id 20261006-e1-dryrun --kind cold_start --add dg_36015263b05274ab5012efbb611006a6 --add dg_8427e85f909727c7f4fe6c2daa2f9a9f --receipt-root /scratch/frd_muziyao/nhms-prod/tmp/add-basin-dry.YTyMzw
+Refused: --add is not valid with --kind cold_start, which replaces models: name each replaced model and its successor with --pair, or add the models of a new basin with --kind add_basin.
+rc=1
+throwaway root: 0 entries
+f3cf939f8a08a3ec f3cf939f8a08a3ec active 20261006-rehearsal-tailanhe 20261006-rehearsal-tailanhe-b 
