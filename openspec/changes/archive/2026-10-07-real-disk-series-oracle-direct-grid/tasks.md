@@ -11,11 +11,11 @@
 
 ## 2. Evidence Floor
 
-- [ ] 2.1 Local: `uv run ruff check .`; `uv run pytest -q tests/test_object_store_forcing_real_disk_support.py
+- [x] 2.1 Local: `uv run ruff check .`; `uv run pytest -q tests/test_object_store_forcing_real_disk_support.py
       tests/test_object_store_forcing_real_disk.py` (the second skips locally); `tests/test_select_ci_tests.py`
       after staging; `openspec validate real-disk-series-oracle-direct-grid --strict --no-interactive`.
-- [ ] 2.2 CI green on the PR.
-- [ ] 2.3 node-27 after merge, read-only as `nhms_display_ro`:
+- [x] 2.2 CI green on the PR.
+- [x] 2.3 node-27 after merge, read-only as `nhms_display_ro`:
       `NHMS_RUN_E2E=1 NHMS_RUN_REAL_DISK=1 uv run --no-sync pytest tests/test_object_store_forcing_real_disk.py -rA -s`
       passes; the output with the four chosen combos is the receipt (also closes #2595).
 

@@ -1,0 +1,39 @@
+# node-27, master 9a0ba4f0, 2026-10-07, read-only as nhms_display_ro (DATABASE_URL from infra/env/display.env, OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store)
+# NHMS_RUN_E2E=1 NHMS_RUN_REAL_DISK=1 uv run --no-sync pytest tests/test_object_store_forcing_real_disk.py -rA -s -p no:cacheprovider
+============================= test session starts ==============================
+platform linux -- Python 3.11.15, pytest-9.0.3, pluggy-1.6.0
+rootdir: /home/nwm/NWM
+configfile: pyproject.toml
+plugins: anyio-4.13.0, zarr-3.1.6, asyncio-1.3.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 5 items
+
+tests/test_object_store_forcing_real_disk.py real_disk cycle: 2026-10-06T12:00:00Z (newest cycle with all 4 combos settled under /home/ghdc/nwm/object-store)
+real_disk selection: cycle=2026-10-06T12:00:00Z basin_version=basins_heihe_vbasins source=IFS model=dg_8543132517bba75279944a5960badcb7 station=dg-ifs-dfde4c1b7744d4a00b7b::cell:28107
+real_disk selection: cycle=2026-10-06T12:00:00Z basin_version=basins_heihe_vbasins source=gfs model=dg_f6175cdb0f3825bec4807c386b5cbf38 station=dg-gfs-30fffff33ad6d8dd4591::cell:28107
+real_disk selection: cycle=2026-10-06T12:00:00Z basin_version=basins_qhh_vbasins source=IFS model=dg_9ccb261a39d51c24f4de9173fb4461b6 station=dg-ifs-1c63f7aba4ba22acce7a::cell:34027
+real_disk selection: cycle=2026-10-06T12:00:00Z basin_version=basins_qhh_vbasins source=gfs model=dg_0883c7e9c1006c6fd347df500315e9df station=dg-gfs-f7751638e3b5ef6811b6::cell:34027
+.2026-10-07 21:28:00,955 WARNING apps.api.errors api_error request_id=6026b553-44de-40a0-af63-96575e49c897 code=STATION_FORCING_FILE_NOT_FOUND status=404 path=/api/v1/met/stations/dg-ifs-dfde4c1b7744d4a00b7b%3A%3Acell%3A28107/series details={'station_id': 'dg-ifs-dfde4c1b7744d4a00b7b::cell:28107'}
+2026-10-07 21:28:00,989 WARNING apps.api.errors api_error request_id=40031589-48c9-41d4-a265-a0482ffc7332 code=STATION_NOT_FOUND status=404 path=/api/v1/met/stations/bogus_forc_999/series details={'station_id': 'bogus_forc_999'}
+real_disk selection: cycle=2026-10-06T12:00:00Z basin_version=basins_heihe_vbasins source=IFS model=dg_8543132517bba75279944a5960badcb7 station=dg-ifs-dfde4c1b7744d4a00b7b::cell:28107
+.2026-10-07 21:28:01,420 WARNING apps.api.errors api_error request_id=3aff6fdd-72f5-4a62-95af-a479c9ec8f58 code=STATION_FORCING_FILE_NOT_FOUND status=404 path=/api/v1/met/stations/dg-ifs-dfde4c1b7744d4a00b7b%3A%3Acell%3A28107/series details={'station_id': 'dg-ifs-dfde4c1b7744d4a00b7b::cell:28107'}
+real_disk selection: cycle=2026-10-06T12:00:00Z basin_version=basins_heihe_vbasins source=IFS model=dg_8543132517bba75279944a5960badcb7 station=dg-ifs-dfde4c1b7744d4a00b7b::cell:28107
+.real_disk selection: cycle=2026-10-06T12:00:00Z basin_version=basins_heihe_vbasins source=IFS model=dg_8543132517bba75279944a5960badcb7 station=dg-ifs-dfde4c1b7744d4a00b7b::cell:28107
+.real_disk selection: cycle=2026-10-06T12:00:00Z basin_version=basins_heihe_vbasins source=IFS model=dg_8543132517bba75279944a5960badcb7 station=dg-ifs-dfde4c1b7744d4a00b7b::cell:28107
+.
+
+==================================== PASSES ====================================
+__________________ test_real_disk_error_and_filter_scenarios ___________________
+------------------------------ Captured log call -------------------------------
+WARNING  apps.api.errors:errors.py:353 api_error request_id=6026b553-44de-40a0-af63-96575e49c897 code=STATION_FORCING_FILE_NOT_FOUND status=404 path=/api/v1/met/stations/dg-ifs-dfde4c1b7744d4a00b7b%3A%3Acell%3A28107/series details={'station_id': 'dg-ifs-dfde4c1b7744d4a00b7b::cell:28107'}
+WARNING  apps.api.errors:errors.py:353 api_error request_id=40031589-48c9-41d4-a265-a0482ffc7332 code=STATION_NOT_FOUND status=404 path=/api/v1/met/stations/bogus_forc_999/series details={'station_id': 'bogus_forc_999'}
+___ test_real_disk_legacy_model_id_is_404_while_the_direct_grid_model_serves ___
+------------------------------ Captured log call -------------------------------
+WARNING  apps.api.errors:errors.py:353 api_error request_id=3aff6fdd-72f5-4a62-95af-a479c9ec8f58 code=STATION_FORCING_FILE_NOT_FOUND status=404 path=/api/v1/met/stations/dg-ifs-dfde4c1b7744d4a00b7b%3A%3Acell%3A28107/series details={'station_id': 'dg-ifs-dfde4c1b7744d4a00b7b::cell:28107'}
+=========================== short test summary info ============================
+PASSED tests/test_object_store_forcing_real_disk.py::test_real_disk_latest_cycle_serves_all_currently_409_combinations
+PASSED tests/test_object_store_forcing_real_disk.py::test_real_disk_error_and_filter_scenarios
+PASSED tests/test_object_store_forcing_real_disk.py::test_real_disk_legacy_model_id_is_404_while_the_direct_grid_model_serves
+PASSED tests/test_object_store_forcing_real_disk.py::test_real_disk_station_series_read_is_side_effect_free
+PASSED tests/test_object_store_forcing_real_disk.py::test_real_disk_station_series_response_shape_matches_baseline_fixture
+============================== 5 passed in 2.77s ===============================
