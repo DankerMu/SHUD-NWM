@@ -1,0 +1,12 @@
+# node-27, master 592679cd, 2026-10-07; display API restarted 22:16 CST (systemctl --user restart nhms-display-api.service, owner-approved); read-only curls against http://127.0.0.1:8080
+# GET /api/v1/met/stations?basin_version_id=<bv>&limit=1 ; before the change (active_flag rule, same day): heihe 1709, qhh 386, hlj 0, keliya 32, zhaochen_bst 626
+basins_heihe_vbasins "station_id":"dg-ifs-dfde4c1b7744d4a00b7b::cell:28107" "total_count":287  HTTP 200 0.054527s 
+basins_qhh_vbasins "station_id":"dg-ifs-1c63f7aba4ba22acce7a::cell:34027" "total_count":71  HTTP 200 0.047940s 
+basins_hlj_vbasins "station_id":"dg-ifs-e732301c829c105c77e0::cell:10774" "total_count":1314  HTTP 200 0.058428s 
+basins_keliya_vbasins "total_count":0  HTTP 200 0.045601s 
+basins_zhaochen_bst_vbasins "total_count":0  HTTP 200 0.044995s 
+series listed-station=dg-ifs-dfde4c1b7744d4a00b7b::cell:28107 model=dg_f6175cdb0f3825bec4807c386b5cbf38 src=gfs HTTP 200
+series listed-station=dg-ifs-dfde4c1b7744d4a00b7b::cell:28107 model=dg_8543132517bba75279944a5960badcb7 src=IFS HTTP 200
+public 200
+# CI real-DB lane (run 37632755884, job 112831112818): tests/test_met_station_model_filter_integration.py 9 PASSED incl. [basin-only] plan shape
+# node-27 EXPLAIN (no ANALYZE) of the COUNT statement, heihe, as nhms_display_ro: cost 172; InitPlan 1 Index Scan hydro_run_forecast_basin_cycle_idx; InitPlan 2 Index Only Scan interp_weight_qhh_latest_membership_idx; outer Index Scan met_station_pkey

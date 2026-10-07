@@ -11,12 +11,12 @@
 
 ## 2. Evidence Floor
 
-- [ ] 2.1 Local: `uv run ruff check .`; `uv run pytest -q tests/test_list_search_contract.py
+- [x] 2.1 Local: `uv run ruff check .`; `uv run pytest -q tests/test_list_search_contract.py
       tests/test_forecast_api.py tests/test_api_contract_resources.py`; `tests/test_select_ci_tests.py` after
       staging; `openspec validate station-list-current-generation --strict --no-interactive`.
-- [ ] 2.2 CI green on the PR, including the real-database lane that runs
+- [x] 2.2 CI green on the PR, including the real-database lane that runs
       `tests/test_met_station_model_filter_integration.py`.
-- [ ] 2.3 node-27 after merge and display redeploy, read-only: `total_count` for heihe (287), qhh (71), one
+- [x] 2.3 node-27 after merge and display redeploy, read-only: `total_count` for heihe (287), qhh (71), one
       basin listing 0 today, one retired basin (0).
 
 Deviation: node-27 real-DB pytest receipt is deferred until the RAID link is repaired (no test database may
