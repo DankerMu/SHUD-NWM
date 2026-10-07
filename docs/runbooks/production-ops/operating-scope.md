@@ -657,7 +657,8 @@ owner 裁定（2026-10-07）：只保留最新可展示的那一代，被取代�
 cd /home/nwm/NWM && export PATH=$HOME/.local/bin:$PATH TMPDIR=/home/nwm/tmp
 export DATABASE_URL="$(grep '^DATABASE_URL=' infra/env/node27-ingest.env | cut -d= -f2-)"
 export OBJECT_STORE_ROOT="$(grep '^OBJECT_STORE_ROOT=' infra/env/node27-ingest.env | cut -d= -f2-)"
-PURGE_ARGS=(--operator-id "<operator>" --reason "<原因，写进回执>")
+# 默认回执根在 <OBJECT_STORE_ROOT>/scheduler/ 下，node-27 的 nwm 无写权限（2026-10-07 实测被拒）；用 nwm 自有的 NFS 目录
+PURGE_ARGS=(--operator-id "<operator>" --reason "<原因，写进回执>" --receipt-root /home/ghdc/nwm/archive/weight-purge)
 LOG=/home/nwm/tmp/weight-purge-$(date -u +%Y%m%dT%H%M%SZ).log
 
 # 1) dry-run：只读连接，不建任何文件或目录，不发任何写语句；stdout 的 JSON 就是交给 owner 的回执

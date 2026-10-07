@@ -1,0 +1,22 @@
+node-27, master 13d0bd35, production database (PG 15.2), owner-approved apply ("2699 apply", 2026-10-07).
+
+1. First attempt with the default receipt root refused before any write:
+   "the run directory /home/ghdc/nwm/object-store/scheduler/weight-purge/purge-20261007T225340Z cannot be
+   created ([Errno 13] Permission denied …). Nothing was written."  `nwm` cannot write under
+   `<OBJECT_STORE_ROOT>/scheduler/` (owned by the node-22 user). Both applies below used
+   `--receipt-root /home/ghdc/nwm/archive/weight-purge` (nwm-owned, NFS).
+2. Probe, `--max-models 1 --apply`, run directory purge-20261007T225356Z: outcome completed,
+   1 model purged (basins_dth_ls_shud, 10,908 rows, backup sha256 65a86fe6…b4c09c), 0 skipped.
+   purge-receipt.json sha256 36f35cc9bbc105ba9b2428dc93461896da0606b796ea2bef210e1c5ed90963d7
+3. Remaining models, `--apply` (detached), run directory purge-20261007T225406Z: outcome completed,
+   61 models purged, 0 skipped, 594,216 rows.
+   purge-receipt.json sha256 3e396efffe2ecbd64991b27422e3e5f6920bb52241f2d334dddcc3a1fd3332e5
+   Total: 62 models, 605,124 rows — equal to the pre-apply dry-run (2026-10-07-node27-dry-run.json).
+   Backups: 62 CSV files, 114 MB in total, under the two run directories. No DSN in either log.
+4. Post-apply read-only dry-run (2026-10-07-node27-post-apply-dry-run.json): current 132 models / 173,556
+   rows; recent_run 25 / 27,432; purgeable 0 / 0.
+5. After the apply: /proc/mdstat md0 [2/2] [UU] before, between and after; display API /health 200;
+   station list heihe 287, qhh 71; station series 200; autopipe unit running its next round, last exit 0.
+
+Not done: the 25 recent_run models (rerun after their runs age out); met.met_station rows (deferred);
+no VACUUM/ANALYZE was issued.
