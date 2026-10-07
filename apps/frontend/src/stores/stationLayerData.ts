@@ -82,6 +82,8 @@ let activeRequestKey: string | null = null
 
 /**
  * 地图点位分页：代站位置本身来自 basin_version_id 站点清单，不依赖 latest-product ready。
+ * 该清单（#2699）只列该流域版本最新可展示 forecast run 所用模型的代站，与 active_flag 无关；
+ * 没有可展示 run 的流域版本返回空清单（total_count 0），图层上就没有点。
  * 曲线弹窗仍用 latest-product 做 GFS/IFS 严格身份校验；地图图层只负责把可见流域的点画出来。
  */
 async function fetchAllStations(request: StationLayerRequest): Promise<StationLayerData> {

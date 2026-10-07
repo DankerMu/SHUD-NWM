@@ -266,8 +266,16 @@ def test_met_station_variable_filter_degrades_without_model_id(monkeypatch: pyte
         offset=0,
     )
 
-    # No interp_weight join reachable -> filter not applied, reported unavailable.
-    assert "met.interp_weight" not in cursor.statements[0]
+    # #2699: the basin-only statements do read met.interp_weight now -- for the
+    # membership of the latest displayable run's model, never for coverage: no
+    # JOIN, no active_flag, and the variable filter is still not applied and
+    # reported unavailable.
+    for statement in cursor.statements:
+        assert _BASIN_LATEST_RUN_FILTER in _one_line(statement)
+        assert "active_flag" not in statement
+        assert "JOIN met.interp_weight" not in statement
+        assert "variable = ANY(%s)" not in statement
+    assert ["PRCP"] not in cursor.parameters[0]
     assert result["filters"]["available"]["variables"] is False
     assert "variables" not in result["filters"]["applied"]
 
@@ -318,9 +326,13 @@ def test_met_station_search_escapes_wildcards(monkeypatch: pytest.MonkeyPatch) -
     # widening). Pinned positionally on BOTH arms rather than with `any(...)`:
     # the id arm and the name arm each get their own bind, and a version that
     # escaped only one of them would satisfy an `any` check (issue #1669).
+    # They sit at [2] and [3]: the basin id is bound twice ahead of them, once
+    # for the station scope and once for the latest-run lookup (#2699).
     escaped = "%x\\%\\_'; DROP TABLE met.met\\_station;--%"
-    assert count_params[1] == escaped, count_params
+    assert count_params[:2] == ("basin_v01", "basin_v01"), count_params
     assert count_params[2] == escaped, count_params
+    assert count_params[3] == escaped, count_params
+    assert len(count_params) == 4, count_params
 
 
 def test_met_station_invalid_variable_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -351,6 +363,21 @@ _MODEL_STATION_FILTER = (
     "ms.station_id = ANY((SELECT array_agg(DISTINCT station_id) "
     "FROM met.interp_weight WHERE model_id = %s)::text[])"
 )
+# #2699, the basin-only branch: the stations of the model used by the basin
+# version's latest displayable forecast run. Same uncorrelated shape, two
+# InitPlans (the run lookup, then that model's stations).
+_BASIN_LATEST_RUN_FILTER = (
+    "ms.station_id = ANY((SELECT array_agg(DISTINCT station_id) "
+    "FROM met.interp_weight WHERE model_id = ("
+    "SELECT h.model_id FROM hydro.hydro_run h "
+    "WHERE h.basin_version_id = %s AND h.run_type = 'forecast' "
+    "AND h.status IN ('succeeded', 'parsed', 'published') AND h.cycle_time IS NOT NULL "
+    "ORDER BY h.cycle_time DESC, h.run_id DESC LIMIT 1))::text[])"
+)
+_BASIN_LATEST_RUN_WHERE = f"ms.basin_version_id = %s AND {_BASIN_LATEST_RUN_FILTER}"
+_SEARCH_CLAUSE = "(ms.station_id ILIKE %s ESCAPE '\\' OR COALESCE(ms.station_name, '') ILIKE %s ESCAPE '\\')"
+_COUNT_PREFIX = "SELECT COUNT(ms.station_id) AS total_count FROM met.met_station ms WHERE "
+_PAGE_SUFFIX = " ORDER BY ms.station_id LIMIT %s OFFSET %s"
 _VARIABLE_COVERAGE_FILTER = (
     "ms.station_id = ANY((SELECT array_agg(station_id) FROM ("
     "SELECT station_id FROM met.interp_weight "
@@ -449,3 +476,72 @@ def test_met_station_model_search_and_variable_binds_follow_the_placeholders(
     assert count_statement.count("%s") == len(cursor.parameters[0])
     assert page_statement.count("%s") == len(cursor.parameters[1])
     assert result["filters"]["applied"] == {"search": "prox", "variables": ["PRCP", "TEMP"]}
+
+
+def _basin_only_where_clauses(statements: list[str]) -> tuple[str, str]:
+    """The WHERE text of the COUNT and the page statement.
+
+    Not ``_where_clause``: the basin-only predicate carries its own ORDER BY
+    (the latest-run lookup), so the page statement is cut at its fixed tail.
+    """
+    count_statement, page_statement = (_one_line(statement) for statement in statements)
+    assert count_statement.startswith(_COUNT_PREFIX), count_statement
+    assert page_statement.endswith(_PAGE_SUFFIX), page_statement
+    page_where = page_statement.removesuffix(_PAGE_SUFFIX).split(" FROM met.met_station ms WHERE ", 1)[1]
+    return count_statement.removeprefix(_COUNT_PREFIX), page_where
+
+
+def test_met_station_basin_list_follows_the_latest_displayable_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    cursor = _RecordingCursor([{"total_count": 3}, []])
+    store = _forecast_store(monkeypatch, cursor)
+
+    result = store.list_met_stations(basin_version_id="basin_v01", model_id=None, limit=500, offset=20)
+
+    assert len(cursor.statements) == 2
+    for statement in (_one_line(statement) for statement in cursor.statements):
+        # active_flag is not consulted in either branch any more (#2699).
+        assert "active_flag" not in statement
+        # Membership is a scalar array, never a join; the only FROM items are
+        # the station table and the two subqueries' own tables.
+        assert "JOIN" not in statement
+        assert " iw" not in statement
+        assert "SELECT DISTINCT" not in statement
+        assert "COUNT(DISTINCT ms.station_id)" not in statement
+        # No source predicate: the latest run of any source decides.
+        assert "source_id" not in statement
+    # COUNT and page share one WHERE, and the binds follow the placeholders.
+    count_where, page_where = _basin_only_where_clauses(cursor.statements)
+    assert count_where == _BASIN_LATEST_RUN_WHERE
+    assert page_where == _BASIN_LATEST_RUN_WHERE
+    assert cursor.parameters[0] == ("basin_v01", "basin_v01")
+    assert cursor.parameters[1] == ("basin_v01", "basin_v01", 500, 20)
+    assert result["total_count"] == 3
+    assert result["limit"] == 500
+    assert result["offset"] == 20
+    assert result["filters"]["applied"] == {}
+    assert result["filters"]["available"]["variables"] is False
+
+
+def test_met_station_basin_list_search_binds_follow_the_placeholders(monkeypatch: pytest.MonkeyPatch) -> None:
+    cursor = _RecordingCursor([{"total_count": 1}, []])
+    store = _forecast_store(monkeypatch, cursor)
+
+    result = store.list_met_stations(
+        basin_version_id="basin_v01",
+        model_id=None,
+        search="prox",
+        variables="PRCP",
+        limit=10,
+        offset=30,
+    )
+
+    count_where, page_where = _basin_only_where_clauses(cursor.statements)
+    expected_where = f"{_BASIN_LATEST_RUN_WHERE} AND {_SEARCH_CLAUSE}"
+    assert count_where == expected_where
+    assert page_where == expected_where
+    binds = ("basin_v01", "basin_v01", "%prox%", "%prox%")
+    assert cursor.parameters[0] == binds
+    assert cursor.parameters[1] == (*binds, 10, 30)
+    assert cursor.statements[0].count("%s") == len(cursor.parameters[0])
+    assert cursor.statements[1].count("%s") == len(cursor.parameters[1])
+    assert result["filters"]["applied"] == {"search": "prox"}
