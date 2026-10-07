@@ -150,6 +150,9 @@ jobs:
               - 'scripts/ops/node27_2621_delete_rename_leftovers.sql'
               - 'scripts/ops/node27_2621_delete_rename_leftovers_rollback.sql'
               - 'scripts/basin_catalog_manifest_audit.py'
+              # #2699: the weight purge tool's rule and its COPY (DELETE ... RETURNING)
+              # run only in the real-PG suite. Exact literal.
+              - 'scripts/node27_purge_superseded_weights.py'
 
               - '.github/workflows/ci.yml'
               - 'pyproject.toml'

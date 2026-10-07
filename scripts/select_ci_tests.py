@@ -3534,8 +3534,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # abort receipts through the same helpers.
         # #2757: so does the node-27 basin retirement tool (receipt directory,
         # exclusive-create write, the succession id).
+        # #2699: and the node-27 weight purge tool (exclusive-create write, file
+        # sha256, the checkout commit).
         "packages/common/succession_receipt.py",
-        (*SUCCESSION_RECEIPT_TESTS, *MODEL_SUCCESSION_TESTS, *BASIN_RETIREMENT_TESTS),
+        (
+            *SUCCESSION_RECEIPT_TESTS,
+            *MODEL_SUCCESSION_TESTS,
+            *BASIN_RETIREMENT_TESTS,
+            "tests/test_node27_purge_superseded_weights.py",
+        ),
     ),
     # #2738: the publish tool's entry script and one row per package module --
     # see MERGED_REGISTRY_PUBLISH_PACKAGE_MODULES.
@@ -4656,6 +4663,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # #2300: `_upsert_met_stations` must not rewrite a compatible row;
             # only the real-PG suite can see that (ci.yml's `database:` lane).
             "tests/test_forcing_domain_handoff_apply_station_upsert_integration.py",
+            # #2699: the weight purge tool takes `_lock_interp_weight_scope`'s
+            # advisory lock by spelling the same key; its suite compares the two.
+            "tests/test_node27_purge_superseded_weights.py",
         ),
     ),
     PathTestRule(
@@ -4663,6 +4673,8 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             *FORCING_SQL_SHAPE_ORACLE_TESTS,
             "tests/test_forcing_producer.py",
+            # #2699: likewise for the lock `upsert_interp_weights` takes.
+            "tests/test_node27_purge_superseded_weights.py",
         ),
     ),
     PathTestRule(
@@ -6568,6 +6580,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # reuses, so it rides the database lane too.
         "scripts/basin_catalog_manifest_audit.py",
         ("tests/test_basin_catalog_manifest_audit_integration.py",),
+    ),
+    PathTestRule(
+        # #2699: the weight purge tool. Its same-name fake-database suite still
+        # derives; the classification rule and the COPY (DELETE ... RETURNING)
+        # are executed only by the real-PG suite, so it rides the database lane.
+        "scripts/node27_purge_superseded_weights.py",
+        ("tests/test_node27_purge_superseded_weights_integration.py",),
     ),
     PathTestRule(
         # #1823: the display-API wrapper's entropy reach is now the sixteen

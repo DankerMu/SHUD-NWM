@@ -11749,6 +11749,11 @@ def test_directory_rule_disposition_selects_the_audit_floor(module_path: str, re
             "packages/common/forcing_domain_handoff_apply.py",
             "tests/test_forcing_domain_handoff_apply_station_upsert_integration.py",
         ),
+        # #2699: the weight purge tool and its real-PG suite.
+        (
+            "scripts/node27_purge_superseded_weights.py",
+            "tests/test_node27_purge_superseded_weights_integration.py",
+        ),
     ),
 )
 def test_river_expand_sources_open_the_database_lane(module_path: str, suite: str) -> None:
