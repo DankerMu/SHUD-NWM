@@ -629,3 +629,95 @@ CSV 里的行已是 `superseded` 而候选 run 是别的 `run_id` = 提交之后
    仍然不动 `updated_at`），在一个事务里做，改的行数与 CSV 行数相同再提交。
 4. 最后才从 `AUTOPIPE_EXCLUDE_BASINS` 去掉该 key：对照 `.bak-<succession-id>-<basin_version_id>` 只改那一行
    （**不要整份还原备份**——其后别的退役追加的 key 会一起丢），然后跨一轮完整 autopipe 再读数。
+
+### 7.7 清理被取代 model 的插值权重（#2699）
+
+每一代 Direct Grid 都注册自己的 `core.model_instance`、`met.met_station` 与 `met.interp_weight` 行，上一代的没人删。
+owner 裁定（2026-10-07）：只保留最新可展示的那一代，被取代的各代与旧的 `basins_*_shud` 的权重删掉、不是停用。
+[`scripts/node27_purge_superseded_weights.py`](../../../scripts/node27_purge_superseded_weights.py) 只删
+`met.interp_weight`，默认 dry-run。
+
+**一个 model 的权重只有同时满足下面六条才会被删**（在 SQL 里用服务器时钟判定，窗口是
+`now() - make_interval(days => --min-idle-days)`，默认 30 天；NULL 时间戳不算「窗口内」）。报告里的类别按这个顺序取第一个命中的：
+
+| 类别 | 含义（命中即保护） |
+|---|---|
+| `current` | 是某个 `(basin_version_id, lower(source_id))` 最新可展示 forecast run（`succeeded` / `parsed` / `published`，`cycle_time` 非空；先比 `cycle_time` 再比 `run_id`）所用的 model |
+| `in_manifest` | `model_id` 在 canonical manifest `<OBJECT_STORE_ROOT>/scheduler/registry/manifest-last.json` 里 |
+| `recent_run` | 它有 `hydro.hydro_run` 行（任何类型、任何状态）的 `cycle_time` / `start_time` / `created_at` / `updated_at` 在窗口内 |
+| `recent_forcing` | 它有 `met.forcing_version` 行的 `created_at` 在窗口内（forcing 与权重先于 run 行落库） |
+| `recent_weights` | 它有权重行的 `created_at` 在窗口内（刚重建过） |
+| `recently_created` | 它的 `core.model_instance.created_at` 在窗口内（或查不到该行） |
+| `purgeable` | 以上都不命中 |
+
+规则**不看** id 前缀、`active_flag`、`lifecycle_state`：旧 baseline 行按设计仍是 `active` 却什么都不产出。
+
+```bash
+# node-27，nwm；环境装法同 §7.6（DATABASE_URL 必须与 env 文件里那一行逐字相同，否则拒绝）
+cd /home/nwm/NWM && export PATH=$HOME/.local/bin:$PATH TMPDIR=/home/nwm/tmp
+export DATABASE_URL="$(grep '^DATABASE_URL=' infra/env/node27-ingest.env | cut -d= -f2-)"
+export OBJECT_STORE_ROOT="$(grep '^OBJECT_STORE_ROOT=' infra/env/node27-ingest.env | cut -d= -f2-)"
+PURGE_ARGS=(--operator-id "<operator>" --reason "<原因，写进回执>")
+LOG=/home/nwm/tmp/weight-purge-$(date -u +%Y%m%dT%H%M%SZ).log
+
+# 1) dry-run：只读连接，不建任何文件或目录，不发任何写语句；stdout 的 JSON 就是交给 owner 的回执
+cd /home/nwm/NWM && uv run --no-sync python -m scripts.node27_purge_superseded_weights "${PURGE_ARGS[@]}"
+
+# 2) owner 对 dry-run 的数字明确批准之后才 apply；detached，看 $LOG 与回执目录
+cd /home/nwm/NWM && { setsid nohup uv run --no-sync python -m scripts.node27_purge_superseded_weights "${PURGE_ARGS[@]}" --apply > "$LOG" 2>&1 < /dev/null & }
+```
+
+参数：`--env-file`（默认本 checkout 的 `infra/env/node27-ingest.env`）、`--receipt-root`（默认
+`<OBJECT_STORE_ROOT>/scheduler/weight-purge`）、`--min-idle-days`（默认 30；低于 21 即生产 forcing 保留期，拒绝）、
+`--pause-seconds`（model 之间的停顿，默认 2.0）、`--max-models`（本次最多处理几个 model，先小批试跑时用）。
+
+- **连库之前就拒绝的**：`--operator-id` / `--reason` 为空；`--min-idle-days` 低于 21；进程的 `DATABASE_URL` 不是 env 文件里
+  那唯一一行不带引号的 `DATABASE_URL=<值>`；manifest 不存在、读不了、没有 `models` 列表（或列表为空）、有哪一行没有非空的
+  `model_id`；`--apply` 时已有另一个实例（独占锁 `<env 文件>.weight-purge-lock`，dry-run 不取锁）。
+- **读 dry-run 报告看什么**：`server_version`；`classes` 每一类的 `models` / `rows`（`current` 的 model 数应当等于 manifest
+  里 `dg_*` 的个数）；`purgeable_models` 逐个 model 的行数；`total_rows` 与 `largest_model` 就是一次 apply 的写入量
+  （最大的那个 model 是单个事务的大小）；`model_ids_an_apply_cannot_render` 必须是 `[]`（id 不符合
+  `^[A-Za-z0-9_.-]{1,128}$` 的 model，apply 会在它那里失败停下）。
+- **apply 对每个 purgeable model 做什么**（按 `model_id` 排序，每个 model 一个 READ COMMITTED 事务）：`lock_timeout` 10 秒；
+  对该 model 每个 `(source_id, grid_id)` 取权重写入方（forcing producer、forcing domain handoff）用的同一把 advisory 锁；
+  在锁内重新判定一次（此前先重读 manifest——node-22 会改写它；已受保护的记为 `skipped`，继续下一个）；
+  **备份与删除是同一条语句** `COPY (DELETE ... RETURNING ...) TO STDOUT`，写进 `weights-<model_id>.csv`（0600）；
+  该 model 必须一行不剩、CSV 至少一行，fsync 之后才提交。任何数据库错误（含等锁超时）或校验失败都**停下整次运行**：
+  之前的 model 保持已删，之后的没动。
+- **工具从不写** `met.met_station`、`core.model_instance`、`hydro.*`、`met.forcing_version`、任何 timeseries 表；
+  不发 `VACUUM` / `ANALYZE` / `TRUNCATE`（空间由 autovacuum 按自己的节奏回收）。
+
+**读回执**（`<回执根>/purge-<UTC 时间戳>/`，全部独占创建、从不改写；重跑是新目录，已删的 model 不再是候选）：
+
+| 文件 | 看什么 |
+|---|---|
+| `model-<nnnn>.json` | 每个处理过的 model 一份：`status`（`purged` / `skipped`）、`rows`、`backup`、`sha256`、`class`（`skipped` 时是保护它的类别；`no_weight_rows` = 轮到它时已经没有权重行） |
+| `weights-<model_id>.csv` | 被删的行原样（`COPY ... WITH CSV HEADER`，含 `weight_id`），恢复时用 |
+| `purge-receipt.json` | 正常结束：operator、reason、`thresholds`、`manifest_at_start.sha256`、`classes_at_start`、`totals`、`models`、`models_not_reached`（被 `--max-models` 挡下的） |
+| `purge-failed.json` | 失败停下：`failed_model`（`model_id`、`error`、`outcome`、`backup_kept`）、已完成的 `models`、`models_not_attempted` |
+
+两份终态回执只会有一份。`failed_model.outcome`：`rolled_back` = 该 model 一行没删、备份已移除；`unknown` = COMMIT 调用本身
+没返回，**删没删不知道**，备份留着——再跑一次 dry-run，该 model 不在任何类别里（没有权重行了）就是删了；`committed` = 删了、
+备份留着，只是其后的回执或校验没写成。
+
+**恢复一个 model 的权重**。先把该 model 现有的行删掉（producer 可能已经重建了一部分，唯一键会拒绝整个 copy），再用
+**客户端** `\copy`（服务器端 `COPY FROM '<file>'` 在容器里看不到 NFS 路径）；`weight_id` 是 BIGSERIAL，写回原 id 没问题：
+
+```sql
+begin;
+delete from met.interp_weight where model_id = '<model_id>';
+\copy met.interp_weight (weight_id, source_id, grid_id, model_id, station_id, variable, grid_cell_id, weight, method, created_at, grid_signature, active_flag, superseded_at, grid_snapshot_id) from '<回执目录>/weights-<model_id>.csv' with csv header
+select count(*) from met.interp_weight where model_id = '<model_id>';  -- 与 model-<nnnn>.json 的 rows 相同再提交
+commit;
+```
+
+forcing producer 为某个 model 产出时也会重建它的权重（delete + insert），所以仍在产出的 model 不需要手工恢复。
+
+**这次没做的**：
+
+- **`met.met_station` 行不删**（owner 同日裁定）。`met.forcing_station_timeseries` 与 `…_legacy` 引用
+  `met.met_station` 而没有以 station 列打头的索引，每删一行 station 都要把两张表各扫一遍；等 legacy 表下线（#1993）、
+  RAID 链路修好之后再做。`met.interp_weight` 没有入向外键，按 `model_id` 走索引删。
+- **`core.model_instance`、run、forcing version 都不删**；工具不排程，每次由人执行。
+- **全量 display-coverage 刷新**之后，被清掉权重的 model 的旧 run 会显示 station 覆盖为零——这些 run 的序列本来就已被保留期
+  清掉了，不是新问题。

@@ -4656,6 +4656,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # #2300: `_upsert_met_stations` must not rewrite a compatible row;
             # only the real-PG suite can see that (ci.yml's `database:` lane).
             "tests/test_forcing_domain_handoff_apply_station_upsert_integration.py",
+            # #2699: the weight purge tool takes `_lock_interp_weight_scope`'s
+            # advisory lock by spelling the same key; its suite compares the two.
+            "tests/test_node27_purge_superseded_weights.py",
         ),
     ),
     PathTestRule(
@@ -4663,6 +4666,8 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             *FORCING_SQL_SHAPE_ORACLE_TESTS,
             "tests/test_forcing_producer.py",
+            # #2699: likewise for the lock `upsert_interp_weights` takes.
+            "tests/test_node27_purge_superseded_weights.py",
         ),
     ),
     PathTestRule(
