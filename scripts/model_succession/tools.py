@@ -5,7 +5,8 @@ are called in-process through their own entry functions, with their own
 receipts; this module adds no option to either and decides only what their
 outcome means for the succession.  ``preflight`` also holds the kind of the
 succession to what changed between the packages of each pair and, for a cold
-start, audits the packaged initial condition of every new model.
+start and for an added basin, audits the packaged initial condition of every
+new model.  An added basin has no pair: its kind is not checked.
 """
 
 from __future__ import annotations
@@ -29,8 +30,10 @@ from scripts.model_succession.model import (
     CLONE_APPLY_NAME,
     CLONE_DRY_RUN_NAME,
     IC_AUDIT_NAME,
+    KIND_ADD_BASIN,
     KIND_COLD_START,
     KIND_RECALIBRATION,
+    KINDS_STARTING_FROM_PACKAGED_IC,
     HardStop,
     Inputs,
     Settings,
@@ -171,7 +174,10 @@ def _kind_check(settings: Settings, inputs: Inputs) -> dict[str, Any]:
     )
 
 
-# --- the initial-condition audit of a cold start ------------------------------------
+# --- the initial-condition audit of a cold start and of an added basin ---------------
+
+# What the audit refusals call the succession, by kind.
+_AUDITED_KIND_NAMES = {KIND_COLD_START: "cold start", KIND_ADD_BASIN: "new basin"}
 
 
 def _audit_sources(inputs: Inputs) -> tuple[str, ...]:
@@ -276,12 +282,12 @@ def _ic_gate_failures(statuses: Mapping[str, list[str]]) -> list[str]:
     return failures
 
 
-def _ic_refusal(failures: list[str]) -> str:
+def _ic_refusal(settings: Settings, failures: list[str]) -> str:
     return (
         "the packaged initial condition is not qualified for every new model of the plan (required: at least one "
         f"audit row per model, each with ic_status {ic_audit_tool.PACKAGED_IC_QUALIFIED!r}): {'; '.join(failures)}. "
-        "A cold start begins from the calibrated initial condition in the package, so the scheduler would block "
-        "or cold-start these models."
+        f"A {_AUDITED_KIND_NAMES[settings.plan.kind]} begins from the calibrated initial condition in the package, "
+        "so the scheduler would block or cold-start these models."
     )
 
 
@@ -309,7 +315,7 @@ def _ic_audit(settings: Settings, inputs: Inputs) -> dict[str, Any]:
     if failures:
         left = f"{target} is left as it is and never overwritten" if reused else f"No {IC_AUDIT_NAME} was written"
         raise StepFailure(
-            f"Refused: {_ic_refusal(failures)} {left}; repair the package (its manifest reference, its "
+            f"Refused: {_ic_refusal(settings, failures)} {left}; repair the package (its manifest reference, its "
             "<shud_input_name>.cfg.ic and the header line of that file) and run the same command."
         )
     if reused:
@@ -320,7 +326,8 @@ def _ic_audit(settings: Settings, inputs: Inputs) -> dict[str, Any]:
 
 
 def _require_ic_audit(settings: Settings) -> None:
-    """Before the publish apply of a cold start: the audit receipt of ``preflight``, unchanged and still passing."""
+    """Before the publish apply of a cold start or an added basin: the audit receipt of ``preflight``, unchanged
+    and still passing."""
 
     target = settings.directory / IC_AUDIT_NAME
     preflight = settings.step_receipt("preflight")
@@ -332,8 +339,9 @@ def _require_ic_audit(settings: Settings) -> None:
         receipt = read_json(target)
     except (OSError, ValueError) as error:
         raise StepFailure(
-            f"Refused: the publish of a cold start requires the initial-condition audit receipt {target} as "
-            f"{preflight} recorded it, and one of them is missing or cannot be read ({error}). {nothing} "
+            f"Refused: the publish of a {_AUDITED_KIND_NAMES[settings.plan.kind]} requires the initial-condition "
+            f"audit receipt {target} as {preflight} recorded it, and one of them is missing or cannot be read "
+            f"({error}). {nothing} "
             f"{ABORT_BEFORE_NEW_ID}"
         ) from error
     if not recorded_sha256 or sha256 != recorded_sha256:
@@ -343,7 +351,9 @@ def _require_ic_audit(settings: Settings) -> None:
         )
     failures = _ic_gate_failures(_ic_statuses(settings, receipt))
     if failures:
-        raise StepFailure(f"Refused: per {target}, {_ic_refusal(failures)} {nothing} {ABORT_BEFORE_NEW_ID}")
+        raise StepFailure(
+            f"Refused: per {target}, {_ic_refusal(settings, failures)} {nothing} {ABORT_BEFORE_NEW_ID}"
+        )
 
 
 # --- the clone tool --------------------------------------------------------------
@@ -441,6 +451,8 @@ def _clone_dry_run(settings: Settings, inputs: Inputs) -> dict[str, Any]:
 
 
 def _operations(settings: Settings) -> publish_tool.Operations:
+    if settings.plan.kind == KIND_ADD_BASIN:
+        return publish_tool.Operations(add=settings.plan.adds)
     return publish_tool.Operations(replace=settings.plan.pairs)
 
 
@@ -471,10 +483,14 @@ def preflight(settings: Settings, inputs: Inputs) -> dict[str, Any]:
     A recalibration runs the clone dry-run; a cold start, which clones nothing, audits the packaged initial
     condition of its new models instead.  The kind check comes first in both: the clone gate looks at the
     source state before the surfaces, and would refuse a structural pair for a reason that names no way on.
+    An added basin has no pair to compare and nothing to clone: its new models are audited like those of a
+    cold start, and that is all before the publish dry-run.
     """
 
-    facts: dict[str, Any] = {"kind_check": _kind_check(settings, inputs)}
-    if settings.plan.kind == KIND_COLD_START:
+    facts: dict[str, Any] = {}
+    if settings.plan.kind != KIND_ADD_BASIN:
+        facts["kind_check"] = _kind_check(settings, inputs)
+    if settings.plan.kind in KINDS_STARTING_FROM_PACKAGED_IC:
         facts["ic_audit"] = _ic_audit(settings, inputs)
     else:
         facts["clone_dry_run"] = _clone_dry_run(settings, inputs)
@@ -535,7 +551,7 @@ def publish(settings: Settings, inputs: Inputs) -> dict[str, Any]:
                 raise HardStop(
                     f"{failed} records an inconsistent publish: the two manifests may differ. {_manual(settings)}"
                 )
-        if settings.plan.kind == KIND_COLD_START:
+        if settings.plan.kind in KINDS_STARTING_FROM_PACKAGED_IC:
             _require_ic_audit(settings)
         try:
             _call_publish(settings, inputs, apply=True, succession_id=settings.plan.succession_id)
@@ -574,6 +590,10 @@ _PUBLISH_PREVIEW_FIELDS = (
     "manifest_bytes_remaining",
     "manifest_json_nodes_remaining",
 )
+# An added basin replaces no row: its preview names the ids the publish would introduce instead.
+_ADD_BASIN_PUBLISH_PREVIEW_FIELDS = tuple(
+    "introduced_model_ids" if field == "replaced" else field for field in _PUBLISH_PREVIEW_FIELDS
+)
 
 
 def _preview_ic_audit(settings: Settings, inputs: Inputs) -> dict[str, Any]:
@@ -582,7 +602,7 @@ def _preview_ic_audit(settings: Settings, inputs: Inputs) -> dict[str, Any]:
     statuses = _ic_statuses(settings, _run_ic_audit(settings, inputs))
     failures = _ic_gate_failures(statuses)
     if failures:
-        raise StepFailure(f"Refused: {_ic_refusal(failures)}")
+        raise StepFailure(f"Refused: {_ic_refusal(settings, failures)}")
     return {"outcome": "qualified", "models": statuses}
 
 
@@ -610,8 +630,9 @@ def preview(settings: Settings, inputs: Inputs) -> tuple[dict[str, Any], list[st
 
     report: dict[str, Any] = {}
     refusals: list[str] = []
-    checks = {"kind_check": _kind_check}
-    if settings.plan.kind == KIND_COLD_START:
+    add_basin = settings.plan.kind == KIND_ADD_BASIN
+    checks = {} if add_basin else {"kind_check": _kind_check}
+    if settings.plan.kind in KINDS_STARTING_FROM_PACKAGED_IC:
         checks["ic_audit"] = _preview_ic_audit
     else:
         checks["clone_dry_run"] = _preview_clone
@@ -625,7 +646,10 @@ def preview(settings: Settings, inputs: Inputs) -> tuple[dict[str, Any], list[st
         planned = _call_publish(settings, inputs, apply=False, succession_id=None)
         report["publish_dry_run"] = {
             "outcome": "would_publish",
-            **{key: planned.get(key) for key in _PUBLISH_PREVIEW_FIELDS},
+            **{
+                key: planned.get(key)
+                for key in (_ADD_BASIN_PUBLISH_PREVIEW_FIELDS if add_basin else _PUBLISH_PREVIEW_FIELDS)
+            },
         }
     except _PUBLISH_ERRORS as error:
         report["publish_dry_run"] = {"outcome": "refused", "reason": str(error)}

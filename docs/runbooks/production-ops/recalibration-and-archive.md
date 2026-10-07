@@ -520,6 +520,75 @@ dry-run 同样不改任何文件、不写回执（包括 `ic-audit.json`）、�
   `step-clone.json`）。hard stop 之后的手工做法（比对两份 manifest、从备份恢复、provider refresh、启动 timer）
   就是 5.7.1 里发布与 refresh 那两段，克隆那段不适用。放弃时没有克隆行需要交代。
 
+#### 5.7.3 新流域上线的 add-basin succession（#2756）
+
+5.7.1 与 5.7.2 都是**换** model（`--pair 旧:新`）。把一个调度器里还没有的**新流域**接进来没有旧 model 可言：
+它的 dg 变体只需要回拷到 scratch 根、证明包内 IC 合格、加进合并 manifest、再被一趟 provider refresh 接住，发布前后
+调度器停着。这就是 [`service-bringup.md`](service-bringup.md) 3.1.1「新流域上线四跳」的 hop 3b 到 hop 4，
+用 `--kind add_basin` 一条命令做完，顺序陷阱（先发布后回拷、timer 没停就发布、发布后忘了 refresh）与另外两种
+kind 一样由工具关掉。
+
+**这条命令之前的几跳仍然手工做，命令不变**（都在 `service-bringup.md` 3.1.1）：hop 1 baseline 发布（node-22）、
+hop 1b 把 staged 树拷进 NFS Basins、hop 2 node-27 登记 baseline（seed）、hop 3 node-27 provision dg 变体
+（先 dry-run 再 `--apply`，`--succession-id` 与本节相同）。工具**从不碰任何 Basins 目录**，也不做 seed 与 provision；
+它的输入只有 hop 3 留下的 `provision-apply.json` 与 `--output-registry`。
+
+步骤与 cold start 相同，只是 `preflight` 没有 kind 检查——没有成对的新旧包可比：
+
+```text
+copyback（新包从共享根拷到 scratch 根） -> preflight（包内 IC 审计、发布工具的 dry-run）
+  -> begin（记下 timer 原状态、停 timer、等在跑的 pass 自己结束） -> publish -> refresh -> finish
+```
+
+timer 的停与启、每步的回执与续跑、失败回执、`--abort`、hard stop 都与 5.7.1 相同；`publish` 要 `step-begin.json`，
+不读写任何 state index。
+
+命令就是 5.7.1 那个代码块：环境、`LOG`、dry-run 与 detached `--apply` 两行**逐字相同**，只有 `SUCCESSION_ARGS`
+换成下面这样（没有 `--pair`，也没有 `--cutover-time`——新流域没有历史，谈不上切换时刻）：
+
+```bash
+SUCCESSION_ARGS=(
+  --succession-id "$SUCCESSION_ID"                   # 与 hop 3 的 provision 相同
+  --kind add_basin
+  --add "<新流域的 gfs model_id>" --add "<新流域的 IFS model_id>"   # 每个新流域每个 source 一个，重复写
+  --new-rows-registry "<node-22 视角的路径>"            # provision 的 --output-registry；回执记了 object_store_key 时可省
+  --operator-id "<operator>"
+)
+```
+
+- **参数按 kind 检查，写任何文件之前就拒绝**：`add_basin` 至少要一个 `--add`，给了 `--pair` 或 `--cutover-time`
+  都拒绝；`recalibration` / `cold_start` 给了 `--add` 拒绝，并且仍然必须有 `--pair` 与 `--cutover-time`；同一个
+  `model_id` 写了两次也拒绝。一次 succession 只做一种事：既要换 model 又要加流域，就拆成两次，各用各的 provision 与 `--succession-id`。
+- **任何步骤之前就拒绝的计划**：`--add` 的 id 已经在 canonical manifest 里（已经在调度，无事可加）；`--add` 的 id
+  不在 `provision-apply.json` 的 `models[]` 里；`provision-apply.json` 列了一个既没有用 `--add` 写出、也不在
+  canonical manifest 里的 id（provision 出来的行不能被无意漏掉——hop 3 的每个 `models[].model_id` 各写一个 `--add`）。
+- **读 dry-run 报告看什么**：`steps` 是上面六步，没有 `clone`；新包已在 scratch 上时 `steps.preflight` 给出
+  `ic_audit`（`outcome` 以及每个新 model 的 `ic_status`）与 `publish_dry_run`（`introduced_model_ids` 就是本次
+  全部新行，`row_count_after = row_count_before + --add 的个数`），其中**没有** `kind_check`；否则是
+  `needs copyback`；`would_be_refused` 为空；`continuity` 就是下文那份声明。
+- **preflight 拒绝什么（都在停 timer 之前，什么都没发布）**：
+  - **包内 IC 不合格。** 与 5.7.2 是同一项审计、同一个判据（每个新 model 至少一条审计行，且每条 `ic_status` 都是
+    `qualified`），`ic-audit.json` 的写入、续跑时的只读重审、`publish` 之前的再读一遍也都相同。它取代了 hop 3b
+    后面那段手工跑 `scripts/audit_first_cycle_initial_state.py` 的硬闸。审计按计划里出现的每个 source 各审一遍，
+    所以两个 source 的新流域每个 model 有两条审计行。
+  - **发布工具的 dry-run 拒绝。** 发布工具自己的检查原样生效，工具不重复实现：某个流域不是 canonical manifest 的
+    每个 source 恰好一行（只加了 gfs、没加 IFS 就落在这一条——同一流域的各 source 必须一起加）、新包在 scratch 根
+    或 NFS 根下缺失或校验和不符、非 `direct_grid` 行、manifest 的字节或 JSON 节点上限。失败消息以
+    `The publish dry-run refused` 开头，后面是发布工具的原话。
+- **`continuity`**：`plan.json`、`step-publish.json`、`step-finish.json`、dry-run 报告与 apply 报告都带
+  `continuity`：`mode=new_basin`、`state_carried=false` 与一段 `notice`，没有 `declared_cutover_time`。
+- **发布之后：不需要 forcing 回补，新流域自己逐 cycle 追赶。** 纯新增流域没有改过 `model_id`，不触发
+  `service-bringup.md` 3.1.1 的 hop 5（forcing 回补是换代场景专有的）。timer 启动后，调度器为每个新 model 规划的
+  第一个 cycle **不是当前 cycle，而是 lookback 窗口里最早的那个**：model 在那里从包内率定 IC 起步，然后一个
+  cycle 一个 cycle 追到当前。追赶期间 `service-bringup.md` 3.1.1 末尾的两条 lookback 约束照样适用：
+  回填深度（`NHMS_SCHEDULER_LOOKBACK_HOURS + NHMS_SCHEDULER_CYCLE_LAG_HOURS`）必须落在 node-27 压缩截止之内，
+  否则旧 cycle 的河段时序落进已压缩 chunk 被拒写；**追赶没完成之前不得收窄 lookback**，否则下一个未完成 cycle
+  落到窗外，model 永久阻塞并占住该 source 的回填槽。全国径流图层在新河网追平之前的表现也见那一段。
+- **失败、hard stop 与放弃**：规则与 5.7.1 相同，失败消息里的 runbook 指向本节。「本次已到发布」的判据与 cold start
+  一样是 `step-begin.json`。hard stop 之后的手工做法就是 5.7.1 里发布与 refresh 那两段（发布工具的参数是每个新
+  model 一个 `--add`，见 `service-bringup.md` 3.1.1 的 hop 4），克隆那段不适用。发布之前放弃时，调度器照常运行，
+  只是没有新流域的 model；已经回拷到 scratch 根的包留在原处。
+
 ### 5.8 node-22 file-journal cycle cold archive（已启用，#2119）
 
 自 2026-09-08 起，生产 `nhms-scheduler-journal-retention.timer` 已启用；激活审计证据见

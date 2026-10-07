@@ -858,12 +858,12 @@ SUCCESSION_RECEIPT_TESTS: tuple[str, ...] = (
     *MERGED_REGISTRY_PUBLISH_TESTS,
 )
 # #2739: the model succession tool is an entry script (argparse, `main`) over
-# the seven modules of `scripts/model_succession/`, and its suite is four
+# the seven modules of `scripts/model_succession/`, and its suite is five
 # partitions sharing one tests/ support module (#2740 added the cold-start
-# partition). No path derives a partition name, so every route is explicit, one
-# row per module, for the reason recorded at PUBLISH_REGISTRY_PACKAGE_MODULES.
-# Every partition drives `main` or `run_step` through all seven modules, so
-# each module carries all four.
+# partition, #2756 the add-basin one). No path derives a partition name, so
+# every route is explicit, one row per module, for the reason recorded at
+# PUBLISH_REGISTRY_PACKAGE_MODULES. Every partition drives `main` or `run_step`
+# through all seven modules, so each module carries all five.
 MODEL_SUCCESSION_OWNER_PATH = "scripts/node22_model_succession.py"
 MODEL_SUCCESSION_PACKAGE_MODULES: tuple[str, ...] = (
     "scripts/model_succession/copyback.py",
@@ -876,6 +876,7 @@ MODEL_SUCCESSION_PACKAGE_MODULES: tuple[str, ...] = (
 )
 MODEL_SUCCESSION_HELPERS_PATH = "tests/model_succession_helpers.py"
 MODEL_SUCCESSION_TESTS: tuple[str, ...] = (
+    "tests/test_node22_model_succession_add_basin.py",
     "tests/test_node22_model_succession_apply_and_resume.py",
     "tests/test_node22_model_succession_cold_start.py",
     "tests/test_node22_model_succession_copyback_and_dry_run.py",
@@ -3471,10 +3472,12 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # gets the same suite through its manifest-surface rule).
         # #2740: a cold-start succession gates on this script's `build_receipt`,
         # called in-process on real package files by the cold-start partition.
+        # #2756: an add-basin succession gates on it the same way.
         "scripts/audit_first_cycle_initial_state.py",
         (
             "tests/test_scheduler_registry_capacity.py",
             "tests/test_first_cycle_initial_state_audit.py",
+            "tests/test_node22_model_succession_add_basin.py",
             "tests/test_node22_model_succession_cold_start.py",
         ),
     ),

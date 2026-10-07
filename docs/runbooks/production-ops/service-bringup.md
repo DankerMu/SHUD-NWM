@@ -434,7 +434,7 @@ PYTHONPATH=/home/nwm/NWM uv run python scripts/provision_direct_grid_scheduler_r
   产出的 dg 变体行**整体替换**，其余所有流域的行当场消失。且此处未传 `expected_preimage`，
   **没有 CAS 保护**兜底。正确姿势始终是：输出到本次 workspace 下的独立路径，再在 hop 4 合并发布。
 
-**hop 3b — 变体包回拷 node-22 scratch。** 用 `cp -r`，**不要 `cp -a`**：
+**hop 3b — 变体包回拷 node-22 scratch。** 首选 hop 4 提到的 succession 命令；手工回拷用 `cp -r`，**不要 `cp -a`**：
 flash `/scratch` 不支持保留权限位，`cp -a` 每个文件都报
 `preserving permissions ... Operation not supported` 并以非零码退出，配 `set -e` 会中途断掉
 （数据其实已拷完，容易误判）。拷完 `diff -rq` 对齐。
@@ -465,7 +465,7 @@ PYTHONPATH=/scratch/frd_muziyao/NWM /scratch/frd_muziyao/NWM/.venv/bin/python sc
 [`recalibration-and-archive.md`](recalibration-and-archive.md) 的 5.7.1 相同（先备份、canonical 走 CAS、两份共用同一 `generated_at`、失败时恢复本次提交过的那份）。
 新流域上线是 **add-only**：hop 3 的 `provision-apply.json` 里每个 `models[].model_id` 各写一个 `--add`，同一流域的 gfs 与 IFS 两行必须一起加。
 顺序仍是 provision（hop 3）→ 回拷（hop 3b）→ 发布；apply 期间调度器 timer 应处于停止状态，两份 manifest 不一致时 worker 会拒绝 submit。
-率定切换（replace）的回拷、克隆、发布、refresh 与 timer 停启由 `scripts/node22_model_succession.py` 一条命令完成，见同一节；add-only 上线仍按本节手工做。
+hop 3b 到 hop 4（回拷、packaged-IC 审计、发布、refresh 与 timer 停启）现在由 `scripts/node22_model_succession.py` 的 `--kind add_basin` 一条命令完成，见 `recalibration-and-archive.md` 的 5.7.3（率定切换见 5.7.1）；下面的手工做法是它 hard stop 之后的回退路径。
 
 ```bash
 # node-22，frd_muziyao

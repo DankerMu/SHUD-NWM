@@ -19,7 +19,9 @@ from scripts.model_succession.model import (
     CLONE_APPLY_NAME,
     FAILURE_SCHEMA_VERSION,
     FINAL_STEP,
+    KIND_ADD_BASIN,
     KIND_COLD_START,
+    KIND_RECALIBRATION,
     PLAN_NAME,
     PUBLISH_STATE_MANIFESTS_DIFFER,
     SERVICE_UNIT,
@@ -39,6 +41,13 @@ from scripts.model_succession.model import (
     receipt_header,
     write_stamped_receipt,
 )
+
+# What the ``preflight`` of each kind checks on the packages, as the dry-run says it while they are not copied yet.
+_PREFLIGHT_CHECKS_BY_KIND = {
+    KIND_RECALIBRATION: "The kind check, the clone gate and the publisher's package checks",
+    KIND_COLD_START: "The kind check, the initial-condition audit and the publisher's package checks",
+    KIND_ADD_BASIN: "The initial-condition audit and the publisher's package checks",
+}
 
 # Every step of every kind; which of them a succession runs, and in what order, is ``Plan.steps``.
 STEP_FUNCTIONS: dict[str, Callable[[Settings, Inputs], dict[str, Any]]] = {
@@ -190,7 +199,6 @@ def dry_run(settings: Settings) -> tuple[int, dict[str, Any]]:
     """Report what an apply would do.  Writes nothing and issues only ``is-active`` queries."""
 
     inputs, planned = _checked(settings)
-    cold_start = settings.plan.kind == KIND_COLD_START
     done = completed_steps(settings)
     steps: dict[str, Any] = {step: {"status": "completed"} for step in done}
     packages, refusals = copyback.report(settings, inputs)
@@ -207,11 +215,8 @@ def dry_run(settings: Settings) -> tuple[int, dict[str, Any]]:
         else:
             steps["preflight"] = {
                 "status": "needs copyback",
-                "note": "The kind check, the initial-condition audit and the publisher's package checks need the "
-                "packages on the compute store; the apply runs them in preflight, before the timer is stopped."
-                if cold_start
-                else "The kind check, the clone gate and the publisher's package checks need the packages on the "
-                "compute store; the apply runs them in preflight, before the timer is stopped.",
+                "note": f"{_PREFLIGHT_CHECKS_BY_KIND[settings.plan.kind]} need the packages on the compute "
+                "store; the apply runs them in preflight, before the timer is stopped.",
             }
     states = {unit: systemd.observed_state(unit) for unit in (TIMER_UNIT, SERVICE_UNIT)}
     refusals.extend(f"{unit}: {state}" for unit, state in states.items() if state.startswith("unknown"))
@@ -280,6 +285,8 @@ def _abort_meaning(settings: Settings, publish_state: str, timer_was_active: boo
         ]
     if timer_was_active is False:
         meaning = ["The publish did not complete.", *timer]
+    elif settings.plan.kind == KIND_ADD_BASIN:
+        meaning = ["The publish did not complete: the scheduler keeps running without the models of the new basin."]
     else:
         meaning = ["The publish did not complete: the scheduler keeps running the old models."]
     if any(directory.glob("publish-apply-failed-*.json")):

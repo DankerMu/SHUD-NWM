@@ -1,4 +1,4 @@
-"""Fixtures, a fake ``systemctl`` and builders shared by the model succession suites (#2739, #2740).
+"""Fixtures, a fake ``systemctl`` and builders shared by the model succession suites (#2739, #2740, #2756).
 
 The production layout in ``tmp_path``: a compute store (the worker mirror, the
 compute-side state index, the state objects and the packages the scheduler
@@ -8,8 +8,9 @@ tool are the real ones; the packages are the recalibration clone suites' fake
 packages with the manifest inside the package directory, as the provision step
 writes them.  A suite that uses the ``space`` fixture imports it and the
 autouse ``no_database`` fixture from here.  ``build_space`` takes the kind and
-what the new packages hold, for the cold-start suite; its defaults are the
-recalibration space.
+what the new packages hold, for the cold-start suite, and the sources of the
+canonical manifest and a basin to add, for the add-basin suite; its defaults
+are the recalibration space.
 
 The fake ``systemctl`` is a script: it appends every call, ``--user`` included,
 to a trace, keeps unit states in a file and, for a start of the provider
@@ -77,6 +78,8 @@ COLD_START_PACKAGE: dict[str, Any] = {
     "core_overrides": {"huai.sp.mesh": b"mesh-topology-v2\n"},
     "shud_input_name": "huai",
 }
+# What the packages of an added basin hold: a qualified IC, and the row names the SHUD input.
+ADD_BASIN_PACKAGE: dict[str, Any] = {"ic": QUALIFIED_IC, "shud_input_name": "huai"}
 
 _FAKE_SYSTEMCTL = r'''
 import json, os, sys
@@ -261,11 +264,29 @@ class Space:
     def pairs(self) -> list[tuple[str, str]]:
         return [(old["model_id"], new["model_id"]) for old, new in zip(self.old_rows, self.new_rows, strict=True)]
 
-    def argv(self, *extra: str, pairs: list[tuple[str, str]] | None = None, cutover: str = CUTOVER) -> list[str]:
+    def argv(
+        self,
+        *extra: str,
+        pairs: list[tuple[str, str]] | None = None,
+        cutover: str | None = CUTOVER,
+        adds: list[str] | None = None,
+    ) -> list[str]:
+        """The command line of this space's kind; ``cutover=None`` leaves ``--cutover-time`` out.
+
+        An ``add_basin`` space names its new rows with ``--add`` and gives neither ``--pair`` nor
+        ``--cutover-time``; ``adds`` replaces the ids it names.
+        """
+
         arguments = ["--succession-id", SUCCESSION_ID, "--kind", self.kind, "--operator-id", "operator-1"]
+        if self.kind == "add_basin":
+            for model_id in [str(row["model_id"]) for row in self.new_rows] if adds is None else adds:
+                arguments += ["--add", model_id]
+            return [*arguments, "--pass-wait-seconds", "30", *extra]
         for old, new in self.pairs if pairs is None else pairs:
             arguments += ["--pair", f"{old}:{new}"]
-        return [*arguments, "--cutover-time", cutover, "--pass-wait-seconds", "30", *extra]
+        if cutover is not None:
+            arguments += ["--cutover-time", cutover]
+        return [*arguments, "--pass-wait-seconds", "30", *extra]
 
     def main(self, *extra: str, **overrides: Any) -> int:
         return tool.main(self.argv(*extra, **overrides))
@@ -339,15 +360,17 @@ def _row(
     roots: tuple[Path, ...],
     ic: bytes = _IC_V1,
     core_overrides: dict[str, bytes] | None = None,
+    source: str = SOURCE,
     **profile: Any,
 ) -> dict[str, Any]:
     """A direct-grid registry row whose package, manifest inside, is present under ``roots``.
 
     ``ic`` and ``core_overrides`` are the package's ``cfg.ic`` and the core files that differ from the
-    recalibration fixtures; ``profile`` goes into the row's ``resource_profile``.
+    recalibration fixtures; ``source`` is the forcing source of the row; ``profile`` goes into the row's
+    ``resource_profile``.
     """
 
-    row = ws.row(basin, SOURCE, version, **profile)
+    row = ws.row(basin, source, version, **profile)
     model_id = str(row["model_id"])
     new = version != "v1"
     for root in roots:
@@ -409,9 +432,16 @@ def build_space(
     kind: str = "recalibration",
     new_packages: tuple[dict[str, Any], dict[str, Any]] = ({}, {}),
     old_ic: bytes = _IC_V1,
+    sources: tuple[str, ...] = (SOURCE,),
+    added_basin: str | None = None,
 ) -> Space:
     """The production layout with two pairs; ``new_packages`` are the ``_row`` options of the two new models
-    and ``old_ic`` is the ``cfg.ic`` of the two old packages."""
+    and ``old_ic`` is the ``cfg.ic`` of the two old packages.
+
+    ``sources`` are the sources of the canonical manifest: every basin gets one row per source, and the pairs
+    stay those of the first.  With ``added_basin`` the new models are not successors: they are the rows of that
+    basin, one per source, each with its ``new_packages`` options.
+    """
 
     store, shared = tmp_path / "compute-store", tmp_path / "shared-store"
     canonical = shared / "scheduler" / "registry" / "manifest-last.json"
@@ -434,12 +464,19 @@ def build_space(
     )
     both = (store, shared)
     old_rows = [_row(ws, "a", "v1", roots=both, ic=old_ic), _row(ws, "b", "v1", roots=both, ic=old_ic)]
-    ws.seed([*old_rows, _row(ws, "c", "v1", roots=both)])
+    other_sources = [_row(ws, basin, "v1", roots=both, source=source) for source in sources[1:] for basin in "abc"]
+    ws.seed([*old_rows, _row(ws, "c", "v1", roots=both), *other_sources])
     # The provision step leaves the new packages on the shared store only; the copyback step brings them over.
-    new_rows = [
-        _row(ws, basin, "v2", roots=(shared,), **options)
-        for basin, options in zip(("a", "b"), new_packages, strict=True)
-    ]
+    if added_basin is None:
+        new_rows = [
+            _row(ws, basin, "v2", roots=(shared,), **options)
+            for basin, options in zip(("a", "b"), new_packages, strict=True)
+        ]
+    else:
+        new_rows = [
+            _row(ws, added_basin, "v1", roots=(shared,), source=source, **options)
+            for source, options in zip(sources, new_packages, strict=True)
+        ]
     registry = ws.provision(SUCCESSION_ID, new_rows)
 
     entries = [_state_entry(LocalObjectStore(store, PREFIX), row) for row in old_rows]

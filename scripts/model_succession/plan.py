@@ -23,6 +23,7 @@ from scripts.model_succession.model import (
     _NOTHING_WRITTEN,
     ABORT_BEFORE_NEW_ID,
     FINAL_STEP,
+    KIND_ADD_BASIN,
     PLAN_NAME,
     PLAN_SCHEMA_VERSION,
     PROVIDER_STORE_ROOT_ENV,
@@ -56,7 +57,8 @@ def build_plan(
     provision_succession_id: str | None,
     kind: str,
     pairs: Sequence[tuple[str, str]],
-    cutover_time: str,
+    cutover_time: str | None,
+    adds: Sequence[str] = (),
 ) -> Plan:
     try:
         succession.validate_succession_id(succession_id)
@@ -68,21 +70,59 @@ def build_plan(
         raise ModelSuccessionRefusal(
             f"Refused: --kind {kind!r} is not supported; the kinds are {', '.join(map(repr, STEPS_BY_KIND))}."
         )
-    if not pairs:
-        raise ModelSuccessionRefusal("Refused: at least one --pair <old_model_id>:<new_model_id> is required.")
-    named = [model_id for pair in pairs for model_id in pair]
+    named = [model_id for pair in pairs for model_id in pair] + list(adds)
     repeated = sorted({model_id for model_id in named if named.count(model_id) > 1})
-    if repeated:
-        raise ModelSuccessionRefusal(f"Refused: a model_id may be named in one --pair only, and once: {repeated}.")
-    if not _CUTOVER_TIME.fullmatch(cutover_time):
-        raise ModelSuccessionRefusal(f"Refused: --cutover-time {cutover_time!r} is not YYYYMMDDHH.")
+    if kind == KIND_ADD_BASIN:
+        _check_add_basin_arguments(pairs, cutover_time, adds, repeated)
+    else:
+        if adds:
+            raise ModelSuccessionRefusal(
+                f"Refused: --add is not valid with --kind {kind}, which replaces models: name each replaced model "
+                f"and its successor with --pair, or add the models of a new basin with --kind {KIND_ADD_BASIN}."
+            )
+        if not pairs:
+            raise ModelSuccessionRefusal("Refused: at least one --pair <old_model_id>:<new_model_id> is required.")
+        if repeated:
+            raise ModelSuccessionRefusal(
+                f"Refused: a model_id may be named in one --pair only, and once: {repeated}."
+            )
+        if cutover_time is None:
+            raise ModelSuccessionRefusal(f"Refused: --cutover-time <YYYYMMDDHH> is required with --kind {kind}.")
+        if not _CUTOVER_TIME.fullmatch(cutover_time):
+            raise ModelSuccessionRefusal(f"Refused: --cutover-time {cutover_time!r} is not YYYYMMDDHH.")
     return Plan(
         succession_id=succession_id,
         provision_succession_id=provision_succession_id or succession_id,
         kind=kind,
         pairs=tuple((old, new) for old, new in pairs),
         cutover_time=cutover_time,
+        adds=tuple(adds),
     )
+
+
+def _check_add_basin_arguments(
+    pairs: Sequence[tuple[str, str]], cutover_time: str | None, adds: Sequence[str], repeated: Sequence[str]
+) -> None:
+    """The arguments of an added basin: its new models, and neither a predecessor nor a cutover."""
+
+    if pairs:
+        raise ModelSuccessionRefusal(
+            f"Refused: --pair is not valid with --kind {KIND_ADD_BASIN}: a new basin has no old model to replace. "
+            "Name each of its models with --add <new_model_id>, or run the replacement under its own kind and "
+            "--succession-id."
+        )
+    if cutover_time is not None:
+        raise ModelSuccessionRefusal(
+            f"Refused: --cutover-time is not valid with --kind {KIND_ADD_BASIN}: a new basin has no history and "
+            "so no cutover. Leave the option out."
+        )
+    if not adds:
+        raise ModelSuccessionRefusal(
+            f"Refused: at least one --add <new_model_id> is required with --kind {KIND_ADD_BASIN}: one per source "
+            "of each new basin."
+        )
+    if repeated:
+        raise ModelSuccessionRefusal(f"Refused: a model_id may be named with --add once only: {list(repeated)}.")
 
 
 def _abort_receipts(directory: Path) -> list[Path]:
@@ -146,8 +186,8 @@ def published_without_receipt(settings: Settings) -> bool:
     and hold every new id and no old id.
 
     Without the receipt of the step before ``publish`` in the list of its kind (``step-clone.json``, or
-    ``step-begin.json`` of a cold start) the publish step of this succession never ran: the manifests then
-    hold what another succession published, with its own receipt.
+    ``step-begin.json`` of a cold start or an added basin) the publish step of this succession never ran: the
+    manifests then hold what another succession published, with its own receipt.
     """
 
     if not os.path.lexists(settings.step_receipt(settings.plan.step_before_publish)):
@@ -216,8 +256,8 @@ def check_inputs(settings: Settings) -> Inputs:
             f"Refused: new model_id is not in models[] of {receipt_path}: {unprovisioned}. {_NOTHING_WRITTEN}"
         )
 
-    # Past the step before its publish (its clone; the begin of a cold start) this succession is at, or after,
-    # its publish: manifests that differ there are not retried.
+    # Past the step before its publish (its clone; the begin of a cold start or an added basin) this succession
+    # is at, or after, its publish: manifests that differ there are not retried.
     if os.path.lexists(settings.step_receipt(plan.step_before_publish)) and manifests_differ(settings):
         raise ModelSuccessionRefusal(
             f"Refused: {manifests_differ_text(settings)} Once both are the same bytes again, run the same command "
@@ -228,8 +268,9 @@ def check_inputs(settings: Settings) -> Inputs:
         model_id for model_id in provisioned if model_id not in plan.new_ids and model_id not in canonical_ids
     ]
     if unaccounted:
+        named = "named with --add" if plan.kind == KIND_ADD_BASIN else "a new id of a --pair"
         raise ModelSuccessionRefusal(
-            f"Refused: {receipt_path} lists model_id that is neither a new id of a --pair nor in the canonical "
+            f"Refused: {receipt_path} lists model_id that is neither {named} nor in the canonical "
             f"manifest: {unaccounted}. A provisioned row must not be left out by accident. {_NOTHING_WRITTEN}"
         )
     # Once this succession's publish has happened the canonical manifest holds the new ids instead of the
