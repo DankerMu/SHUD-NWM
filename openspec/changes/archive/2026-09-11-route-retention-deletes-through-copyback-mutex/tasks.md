@@ -235,7 +235,7 @@ at `4fe059f7` and the covering mutants are recorded there.
       reds **five** tests, all of them the disposition-audit family, and a
       single `runtime-budget` token restores all five to green with the route
       still gone — which is precisely why EF-16 asserts routing directly.
-- [ ] **EF-17 — node-22 deployment receipt (post-merge, known limit).** Two
+- [x] **EF-17 — node-22 deployment receipt (post-merge, known limit).** Two
       halves, because the first alone proves nothing about this change:
       1. *Non-regression, labelled as such.* After master is deployed to
          `/scratch/frd_muziyao/NWM`, one scheduler pass whose `deleted[]`
@@ -261,6 +261,14 @@ at `4fe059f7` and the covering mutants are recorded there.
       `uv sync`, no bare `uv run`), and `packages/common/copyback_guard.py` does
       not exist there yet, so neither half can be produced from this branch and
       EF-17 is not a merge clause. Routed at Phase 8.
+      **Closed 2026-10-07 (#2258)**, receipt `evidence/2026-10-07-node22-ef17-receipt.txt`, node-22
+      at `83220d46`. Half 1 (regression guard only): pass `scheduler_2026100700_120ba6186db1`,
+      `retention.status=completed`, 76 copyback-root entries in `deleted[]`. Half 2 (the probe): a second
+      process held the batch lock 11:43:30Z-12:14:39Z; pass `scheduler_2026100712_9851dbeaf8d4` put all 76
+      copyback-root entries in `failed[]` (1 `lock_timeout`, 75 `lock_budget_exhausted`) while 102
+      primary-root and 78 workspace-root entries stayed in `deleted[]`; neither record compacted. The pass
+      after the release removed the 76. Run in an idle window (no Slurm job, passes `no_work`). Both
+      processes are clients on node-22: this says nothing about node-27's server-side lock (#2252).
 
 ## Known limits
 
