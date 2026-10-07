@@ -13,12 +13,12 @@
 
 ## 2. Evidence Floor
 
-- [ ] 2.1 Local: `uv run ruff check .`; the new suite; the four existing succession suites; the publish
+- [x] 2.1 Local: `uv run ruff check .`; the new suite; the four existing succession suites; the publish
       tool's suites; `tests/test_select_ci_tests.py` (after staging); the two entrypoint invariant suites;
       `tests/test_entropy_audit_line_references.py`; `openspec validate model-succession-add-basin --strict
       --no-interactive`; `grep -n '5.7.3' docs/runbooks/production-ops/recalibration-and-archive.md`.
-- [ ] 2.2 CI green on the PR.
-- [ ] 2.3 node-22 after merge and pull: one `--kind add_basin` dry-run with the exact interpreter and a
+- [x] 2.2 CI green on the PR.
+- [x] 2.3 node-22 after merge and pull: one `--kind add_basin` dry-run with the exact interpreter and a
       throwaway `--receipt-root`. Expected: the refusal naming the missing `provision-apply.json`, with the
       timer and every file untouched.
 
