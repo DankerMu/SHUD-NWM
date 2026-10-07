@@ -1,0 +1,103 @@
+HEAD 99816115 Python 3.11.15 2026-10-07T11:28:52Z basin_version_id=basins_tailanhe_vbasins
+b58ec975b7fac6fc
+600 nwm 1967 1790793129
+7
+node27-ingest.env
+node27-ingest.env.bak-hhe-retire-20260807
+node27-ingest.env.bak-neiliuqu-retire-20260825T232709
+node27-ingest.env.bak-onboarding19-rename-20260922
+node27-ingest.env.bak-onboarding19-retire-20260922
+node27-ingest.env.bak-zhaochen-retire-20260825
+node27-ingest.env.pre-1774
+      15625745408 blocks super 1.2 [2/2] [UU]
+DRY-RUN (no --apply): no file is changed, no receipt is written, no write transaction is committed and no unit is started or stopped. An --apply adds the basin to AUTOPIPE_EXCLUDE_BASINS, waits for an autopipe round, supersedes the runs of the basin version, deactivates its model rows, waits for one more round and verifies.
+{
+  "autopipe_unit_now": {
+    "active_state": "inactive",
+    "exit_code": 1,
+    "exit_monotonic_us": 457421370862,
+    "exit_status": 0,
+    "load_state": "loaded",
+    "start_monotonic_us": 457176580543
+  },
+  "basin_id": "basins_tailanhe",
+  "basin_key": "tailanhe",
+  "basin_version_id": "basins_tailanhe_vbasins",
+  "dry_run": true,
+  "not_done_by_this_tool": [
+    "The Basins directory of the basin is not moved: move it to Basins-retired/ by hand, on both trees.",
+    "The static geojson of the frontend is not filtered: the basin's features stay in it until it is rebuilt.",
+    "The AUTOPIPE_EXCLUDE_BASINS entry must stay for as long as run directories of the basin exist in the object store: without it the next autopipe round registers the basin again."
+  ],
+  "preconditions": {
+    "basin_id": "basins_tailanhe",
+    "basin_key": "tailanhe",
+    "manifest": {
+      "manifest": "/home/ghdc/nwm/object-store/scheduler/registry/manifest-last.json",
+      "row_count": 132,
+      "rows_of_other_versions_of_the_basin": [],
+      "rows_of_this_basin_version": [
+        "dg_36015263b05274ab5012efbb611006a6",
+        "dg_8427e85f909727c7f4fe6c2daa2f9a9f"
+      ]
+    },
+    "model_row_count": 7,
+    "node22_removes": null,
+    "removed_model_rows": []
+  },
+  "receipt_directory": "/home/nwm/tmp/retire-dry.fRgRDm/20261007-e2-retire-dryrun/retire-basins_tailanhe_vbasins",
+  "steps": {
+    "deactivate": {
+      "active_model_rows": [
+        {
+          "model_id": "basins_tailanhe_shud",
+          "preflight_blockers": [],
+          "preflight_ready": true,
+          "preflight_status": "ready",
+          "preflight_warnings": [
+            {
+              "code": "COPIED_ROOT_EVIDENCE_MISSING",
+              "message": "Copied-root evidence is not available."
+            }
+          ]
+        }
+      ],
+      "would": "deactivate these rows one by one through the model lifecycle operation"
+    },
+    "exclude": {
+      "autopipe_lock_path": "/tmp/autopipe.cron.lock",
+      "basin_key": "tailanhe",
+      "env_file": "/home/nwm/NWM/infra/env/node27-ingest.env",
+      "env_file_checks": "passed",
+      "key_in_exclusion_list": false,
+      "sha256_now": "b58ec975b7fac6fc8312dea9bb1fd55304458dd3f98ff43c7e38a6ea415d2e89",
+      "would": "write the backup /home/nwm/NWM/infra/env/node27-ingest.env.bak-20261007-e2-retire-dryrun-basins_tailanhe_vbasins and append the key to the one AUTOPIPE_EXCLUDE_BASINS line, then wait up to 1800 s for an autopipe round that started after it"
+    },
+    "supersede": {
+      "note": "The supersede statements are run (and rolled back) only when no precondition is refused.",
+      "status": "not run"
+    },
+    "verify": {
+      "would": "wait up to 1800 s for one more autopipe round, then check that no model row of the basin version is active, no run of it is in succeeded / parsed / published and the key is still in the exclusion list"
+    }
+  },
+  "succession_id": "20261007-e2-retire-dryrun",
+  "would_be_refused": [
+    "precondition: the node-22 finish receipt /home/nwm/tmp/retire-dry.fRgRDm/20261007-e2-retire-dryrun/step-finish.json cannot be read ([Errno 2] No such file or directory: '/home/nwm/tmp/retire-dry.fRgRDm/20261007-e2-retire-dryrun/step-finish.json'): succession '20261007-e2-retire-dryrun' has not finished on node-22. A removal that was finished by hand after a node-22 hard stop has no such receipt: the node-27 steps are then manual too (docs/runbooks/production-ops/operating-scope.md, section 7.6).",
+    "precondition: the canonical manifest /home/ghdc/nwm/object-store/scheduler/registry/manifest-last.json still holds rows of basin version basins_tailanhe_vbasins: ['dg_36015263b05274ab5012efbb611006a6', 'dg_8427e85f909727c7f4fe6c2daa2f9a9f']. The scheduler still plans it."
+  ]
+}
+rc=1 2026-10-07T11:28:53Z
+throwaway root entries: 0
+b58ec975b7fac6fc
+600 nwm 1967 1790793129
+8
+node27-ingest.env
+node27-ingest.env.bak-hhe-retire-20260807
+node27-ingest.env.bak-neiliuqu-retire-20260825T232709
+node27-ingest.env.bak-onboarding19-rename-20260922
+node27-ingest.env.bak-onboarding19-retire-20260922
+node27-ingest.env.bak-zhaochen-retire-20260825
+node27-ingest.env.pre-1774
+node27-ingest.env.retire-lock
+      15625745408 blocks super 1.2 [2/2] [UU]
