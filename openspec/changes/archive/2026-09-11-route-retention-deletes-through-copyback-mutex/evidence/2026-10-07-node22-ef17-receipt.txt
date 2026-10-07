@@ -1,0 +1,29 @@
+node-22 83220d46 2026-10-07T12:22:39Z uid 1103 lock 600 1103 1
+ACQUIRING 2026-10-07T11:43:30Z pid 556391
+HELD 2026-10-07T11:43:30Z
+RELEASING 2026-10-07T12:14:39Z sentinel_present False
+RELEASED 2026-10-07T12:14:39Z
+== HALF 1 (non-regression guard, NOT evidence of acquisition): scheduler_2026100700_120ba6186db1.json  written 2026-10-07T00:15:46Z  bytes 3344368
+retention.status: completed | dry_run: False | counts: {'deleted': 257, 'failed': 0, 'planned': 257, 'skipped': 15254}
+copyback_lock_failures: {'lock_budget_exhausted': 0, 'lock_timeout': 0, 'lock_unsafe': 0} | evidence_compaction: None
+deleted by root: {'/scratch/frd_muziyao/nhms-prod/object-store': 102, '/scratch/frd_muziyao/nhms-prod/workspace': 79, '/ghdc/data/nwm/object-store': 76}
+failed by root: {}
+copyback-root cycles: ['2026-09-07T00:00:00Z']
+no_work_safe_state_only: True | submitted_count: 0 | candidate_count: 0
+== HALF 2 (discriminating probe: lock held by pid 556391 from 2026-10-07T11:43:30Z to 12:14:39Z): scheduler_2026100712_9851dbeaf8d4.json  written 2026-10-07T12:14:34Z  bytes 3395344
+retention.status: completed | dry_run: False | counts: {'deleted': 180, 'failed': 76, 'planned': 256, 'skipped': 15404}
+copyback_lock_failures: {'lock_budget_exhausted': 75, 'lock_timeout': 1, 'lock_unsafe': 0} | evidence_compaction: None
+deleted by root: {'/scratch/frd_muziyao/nhms-prod/object-store': 102, '/scratch/frd_muziyao/nhms-prod/workspace': 78}
+failed by root: {'/ghdc/data/nwm/object-store': 76}
+copyback-root cycles: ['2026-09-07T12:00:00Z']
+failed sample: {"cycle_time": "2026-09-07T12:00:00Z", "error": "copyback batch lock /ghdc/data/nwm/object-store/.nhms-copyback-batch.lock was still held after the configured deadline", "error_type": "CopybackLockTimeout", "key": "runs/fcst_gfs_2026090712_dg_0883c7e9c1006c6fd347df500315e9df", "lock_failure": "lock_timeout", "path": "/ghdc/data/nwm/object-store/runs/fcst_gfs_2026090712_dg_0883c7e9c1006c6fd347df500315e9df", "reason": "run_cycle_aged_out", "root": "/ghdc/data/nwm/object-store", "size_bytes": 6593602}
+failed sample: {"cycle_time": "2026-09-07T12:00:00Z", "error": "copyback batch lock wait budget of 300.0s is exhausted for this retention pass; /ghdc/data/nwm/object-store/runs/fcst_gfs_2026090712_dg_0a50ecb006879e7336361fc0b6191766 was not removed", "error_type": "CopybackLockBudgetExhausted", "key": "runs/fcst_gfs_2026090712_dg_0a50ecb006879e7336361fc0b6191766", "lock_failure": "lock_budget_exhausted", "path": "/ghdc/data/nwm/object-store/runs/fcst_gfs_2026090712_dg_0a50ecb006879e7336361fc0b6191766", "reason": "run_cycle_aged_out", "root": "/ghdc/data/nwm/object-store", "size_bytes": 1612139}
+no_work_safe_state_only: True | submitted_count: 0 | candidate_count: 0
+== FOLLOW-UP pass after release: scheduler_2026100712_8ae7e019f8e3.json  written 2026-10-07T12:22:17Z  bytes 3229954
+retention.status: completed | dry_run: False | counts: {'deleted': 76, 'failed': 0, 'planned': 76, 'skipped': 15404}
+copyback_lock_failures: {'lock_budget_exhausted': 0, 'lock_timeout': 0, 'lock_unsafe': 0} | evidence_compaction: None
+deleted by root: {'/ghdc/data/nwm/object-store': 76}
+failed by root: {}
+copyback-root cycles: ['2026-09-07T12:00:00Z']
+no_work_safe_state_only: True | submitted_count: 0 | candidate_count: 0
+squeue jobs: 0; remaining 2026090712 run dirs on copyback root: 0
