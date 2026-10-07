@@ -10,12 +10,12 @@
 
 ## 2. Evidence Floor
 
-- [ ] 2.1 Local: `uv run ruff check .`; `uv run pytest -q tests/test_node27_purge_superseded_weights.py`
+- [x] 2.1 Local: `uv run ruff check .`; `uv run pytest -q tests/test_node27_purge_superseded_weights.py`
       (the integration file skips without a disposable database);
       `tests/test_select_ci_tests.py` and the entropy/line guards after staging;
       `openspec validate superseded-weight-purge --strict --no-interactive`.
-- [ ] 2.2 CI green on the PR; the real-DB lane log shows the integration file PASSED, not skipped.
-- [ ] 2.3 node-27 after merge: dry-run output (read-only) recorded as evidence.
+- [x] 2.2 CI green on the PR; the real-DB lane log shows the integration file PASSED, not skipped.
+- [x] 2.3 node-27 after merge: dry-run output (read-only) recorded as evidence.
 
 Deviation: no scratch-database apply on node-27 while the RAID link is degraded (no test database may be
 created there); the apply path is proved by the fake-database suite and the CI real-database lane. node-27 real-DB receipt pending:
