@@ -1734,8 +1734,8 @@ class PsycopgForecastStore:
             )
 
         # Variable coverage is read from met.interp_weight, which is scoped by
-        # model_id. Without it, coverage isn't reachable from the inventory
-        # query, so we degrade gracefully (annotate unavailable, no error, no filter).
+        # model_id. Without an explicit one the filter stays unavailable, so we
+        # degrade gracefully (annotate unavailable, no error, no filter).
         coverage_filter = _station_variable_filter_tokens(variables)
         variable_filter_available = model_id is not None
         # quality_flag does not exist on met.met_station or met.interp_weight; it lives
@@ -1768,8 +1768,29 @@ class PsycopgForecastStore:
                 clauses.append("ms.basin_version_id = %s")
                 params.append(basin_version_id)
         else:
-            clauses = ["ms.basin_version_id = %s", "ms.active_flag = true"]
-            params = [basin_version_id]
+            # #2699: the basin list is the stations of the model used by the
+            # basin version's latest displayable forecast run (newest
+            # cycle_time, then highest run_id, any source), NOT active_flag.
+            # The flag still points at the legacy generation -- no direct-grid
+            # station was ever activated -- so it listed stations that can no
+            # longer serve a series and hid the ones that can. A basin version
+            # with no displayable run yields NULL -> no rows.
+            #
+            # Same shape as the model filter above (#2694): both subqueries are
+            # uncorrelated, so PostgreSQL evaluates each once as an InitPlan
+            # (the run lookup, then that model's stations); no JOIN, no
+            # DISTINCT on the outer query. The run predicate is spelled like
+            # the partial indexes on hydro.hydro_run, so one of them serves it.
+            clauses = [
+                "ms.basin_version_id = %s",
+                "ms.station_id = ANY((SELECT array_agg(DISTINCT station_id) "
+                "FROM met.interp_weight WHERE model_id = ("
+                "SELECT h.model_id FROM hydro.hydro_run h "
+                "WHERE h.basin_version_id = %s AND h.run_type = 'forecast' "
+                "AND h.status IN ('succeeded', 'parsed', 'published') AND h.cycle_time IS NOT NULL "
+                "ORDER BY h.cycle_time DESC, h.run_id DESC LIMIT 1))::text[])",
+            ]
+            params = [basin_version_id, basin_version_id]
 
         normalized_search = search.strip() if search is not None else ""
         if normalized_search:
