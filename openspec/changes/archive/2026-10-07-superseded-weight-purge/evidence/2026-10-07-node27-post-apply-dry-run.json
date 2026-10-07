@@ -1,0 +1,49 @@
+{
+  "classes": {
+    "current": {
+      "models": 132,
+      "rows": 173556
+    },
+    "in_manifest": {
+      "models": 0,
+      "rows": 0
+    },
+    "purgeable": {
+      "models": 0,
+      "rows": 0
+    },
+    "recent_forcing": {
+      "models": 0,
+      "rows": 0
+    },
+    "recent_run": {
+      "models": 25,
+      "rows": 27432
+    },
+    "recent_weights": {
+      "models": 0,
+      "rows": 0
+    },
+    "recently_created": {
+      "models": 0,
+      "rows": 0
+    }
+  },
+  "dry_run": true,
+  "largest_model": null,
+  "manifest": {
+    "model_count": 132,
+    "path": "/home/ghdc/nwm/object-store/scheduler/registry/manifest-last.json",
+    "sha256": "de56d8264ae7d6d3a5e40e68f59510cfd0b2ca8960c00c98e2111798b6b31929"
+  },
+  "model_ids_an_apply_cannot_render": [],
+  "purgeable_models": [],
+  "receipt_root": "/home/ghdc/nwm/object-store/scheduler/weight-purge",
+  "server_version": "15.2 (Ubuntu 15.2-1.pgdg22.04+1)",
+  "thresholds": {
+    "max_models": null,
+    "min_idle_days": 30,
+    "pause_seconds": 2.0
+  },
+  "total_rows": 0
+}
