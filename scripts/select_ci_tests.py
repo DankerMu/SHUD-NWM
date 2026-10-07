@@ -858,12 +858,13 @@ SUCCESSION_RECEIPT_TESTS: tuple[str, ...] = (
     *MERGED_REGISTRY_PUBLISH_TESTS,
 )
 # #2739: the model succession tool is an entry script (argparse, `main`) over
-# the seven modules of `scripts/model_succession/`, and its suite is five
+# the seven modules of `scripts/model_succession/`, and its suite is six
 # partitions sharing one tests/ support module (#2740 added the cold-start
-# partition, #2756 the add-basin one). No path derives a partition name, so
-# every route is explicit, one row per module, for the reason recorded at
-# PUBLISH_REGISTRY_PACKAGE_MODULES. Every partition drives `main` or `run_step`
-# through all seven modules, so each module carries all five.
+# partition, #2756 the add-basin one, #2757 the remove-basin one). No path
+# derives a partition name, so every route is explicit, one row per module, for
+# the reason recorded at PUBLISH_REGISTRY_PACKAGE_MODULES. Every partition
+# drives `main` or `run_step` through all seven modules, so each module carries
+# all six.
 MODEL_SUCCESSION_OWNER_PATH = "scripts/node22_model_succession.py"
 MODEL_SUCCESSION_PACKAGE_MODULES: tuple[str, ...] = (
     "scripts/model_succession/copyback.py",
@@ -880,6 +881,7 @@ MODEL_SUCCESSION_TESTS: tuple[str, ...] = (
     "tests/test_node22_model_succession_apply_and_resume.py",
     "tests/test_node22_model_succession_cold_start.py",
     "tests/test_node22_model_succession_copyback_and_dry_run.py",
+    "tests/test_node22_model_succession_remove_basin.py",
     "tests/test_node22_model_succession_timer_and_refresh.py",
 )
 # #2739: the succession tool calls the clone tool and the merged-registry

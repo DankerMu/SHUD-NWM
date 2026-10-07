@@ -589,6 +589,67 @@ SUCCESSION_ARGS=(
   model 一个 `--add`，见 `service-bringup.md` 3.1.1 的 hop 4），克隆那段不适用。发布之前放弃时，调度器照常运行，
   只是没有新流域的 model；已经回拷到 scratch 根的包留在原处。
 
+#### 5.7.4 流域退役的 remove-basin succession（#2757）
+
+5.7.1 到 5.7.3 都会让调度器多出或换上 model。**退役一个流域**正相反：把它的 `dg_*` 行从两份 manifest 里拿掉，
+调度器从此不再为它规划 run（[`operating-scope.md`](operating-scope.md) 7.2 五步里的第 1 步）。这一步用
+`--kind remove_basin` 一条命令做完：timer 的停与启、回执、发布、refresh、续跑与 `--abort` 都由工具管，
+不再手工停 timer、手工跑发布工具。
+
+**这只是退役的 node-22 一半。** 工具**从不碰任何 Basins 目录**，不动 node-27 上的 run、`AUTOPIPE_EXCLUDE_BASINS`
+与 `core.model_instance`；那些是 `operating-scope.md` 7.2 的第 2 步起，由 node-27 的退役工具（另一项变更）接手，
+它用**同一个 `--succession-id`**，并且在本节的 succession 跑完之前拒绝运行。
+
+没有新包、没有 provision，所以没有 `copyback`，也没有 kind 检查、IC 审计与克隆，五步：
+
+```text
+preflight（发布工具对这次移除的 dry-run）
+  -> begin（记下 timer 原状态、停 timer、等在跑的 pass 自己结束） -> publish -> refresh -> finish
+```
+
+timer 的停与启、每步的回执与续跑、失败回执、`--abort`、hard stop 都与 5.7.1 相同；`publish` 要 `step-begin.json`，
+不读写任何 state index，回执根下也不需要任何 `provision-apply.json`。
+
+命令就是 5.7.1 那个代码块：环境、`LOG`、dry-run 与 detached `--apply` 两行**逐字相同**，只有 `SUCCESSION_ARGS`
+换成下面这样：
+
+```bash
+SUCCESSION_ARGS=(
+  --succession-id "$SUCCESSION_ID"                   # 一次退役一个；node-27 的退役工具之后用同一个
+  --kind remove_basin
+  --remove "<该流域的 gfs model_id>" --remove "<该流域的 IFS model_id>"   # 每个要退的流域每个 source 一个，重复写
+  --operator-id "<operator>"
+)
+```
+
+要退的 `model_id` 按 `basin_id` 从 canonical manifest 取（`dg_*` 是哈希、不含流域名）。
+
+- **参数按 kind 检查，写任何文件之前就拒绝**：`remove_basin` 至少要一个 `--remove`，给了 `--pair`、`--add`、
+  `--cutover-time`、`--provision-succession-id`、`--new-rows-registry` 任何一个都拒绝；另外三种 kind 给了
+  `--remove` 拒绝；同一个 `model_id` 写了两次也拒绝。既要退流域又要换或加 model，就拆成几次，各用各的 `--succession-id`。
+- **任何步骤之前就拒绝的计划**：`--remove` 的 id 不在 canonical manifest 里（消息是
+  `old model_id is not in the canonical manifest`）；回执根目录不存在（没有 provision 回执可读，最先撞上的是
+  「别的 succession 是否占着 timer」那项检查，消息以 `cannot list the receipt root` 开头——生产回执根一直存在，
+  自己指定 `--receipt-root` 做演练时先建好目录）。
+- **读 dry-run 报告看什么**：`steps` 是上面五步，没有 `copyback` 与 `clone`；`steps.preflight` 只有
+  `publish_dry_run`，其中 `removed_model_ids` 就是本次要退的全部行、`row_count_after = row_count_before − --remove 的个数`；
+  `would_be_refused` 为空；报告里没有 `provision_apply_receipt` 与 `new_rows_registry`（`plan.json` 里同样没有这些键）。
+- **preflight 拒绝什么（在停 timer 之前，什么都没发布）**：发布工具的 dry-run 拒绝，原话照搬，工具不重复实现——
+  最常见的是只退了一个流域的部分 source（只写了 gfs、没写 IFS：合并后的 manifest 里每个流域必须是每个 source
+  恰好一行，同一流域的各 source 必须一起退）。失败消息以 `The publish dry-run refused` 开头。
+- **不查批处理队列**：各流域的 Slurm job name 相同，`squeue` 分不出哪些 job 属于要退的 model。`begin` 会等在跑的
+  那趟 pass 自己结束；此前已经提交的 run 之后仍可能跑完并入库，这由 node-27 那一半处理（先加排除名单，再翻
+  `superseded`）。
+- **`continuity`**：`plan.json`、`step-publish.json`、`step-finish.json`、dry-run 报告与 apply 报告都带
+  `continuity`：`mode=basin_removed`、`state_carried=false` 与一段 `notice`——发布之后调度器不再规划该流域、
+  已提交的 run 仍可能跑完入库、下一步是 node-27 的退役工具并用同一个 `--succession-id`。
+- **失败、hard stop 与放弃**：规则与 5.7.1 相同，失败消息里的 runbook 指向本节。「本次已到发布」的判据是
+  `step-begin.json`：有了它而两份 manifest 里已经没有任何要退的 id、又没有 `publish-apply.json`，就是「发布已生效
+  但没有回执」的 hard stop——不要撤销、不要重跑，手工做完 provider refresh 再启动 timer（5.7.1 里 refresh 那一段）。
+  `begin` 之前同样的情形只是上面那条「不在 canonical manifest 里」的普通拒绝。发布之前用
+  `--abort --confirm-timer-start` 放弃时 timer 恢复，该流域照常继续被调度。工具之外的手工回退办法仍是
+  `operating-scope.md` 7.2 末尾那段直接跑发布工具的命令。
+
 ### 5.8 node-22 file-journal cycle cold archive（已启用，#2119）
 
 自 2026-09-08 起，生产 `nhms-scheduler-journal-retention.timer` 已启用；激活审计证据见

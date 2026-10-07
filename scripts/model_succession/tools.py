@@ -6,7 +6,9 @@ receipts; this module adds no option to either and decides only what their
 outcome means for the succession.  ``preflight`` also holds the kind of the
 succession to what changed between the packages of each pair and, for a cold
 start and for an added basin, audits the packaged initial condition of every
-new model.  An added basin has no pair: its kind is not checked.
+new model.  An added basin has no pair: its kind is not checked.  A removed
+basin has neither a pair nor a new model: its ``preflight`` is the publish
+tool's dry-run alone.
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ from scripts.model_succession.model import (
     KIND_ADD_BASIN,
     KIND_COLD_START,
     KIND_RECALIBRATION,
+    KIND_REMOVE_BASIN,
     KINDS_STARTING_FROM_PACKAGED_IC,
     HardStop,
     Inputs,
@@ -451,6 +454,8 @@ def _clone_dry_run(settings: Settings, inputs: Inputs) -> dict[str, Any]:
 
 
 def _operations(settings: Settings) -> publish_tool.Operations:
+    if settings.plan.kind == KIND_REMOVE_BASIN:
+        return publish_tool.Operations(remove=settings.plan.removes)
     if settings.plan.kind == KIND_ADD_BASIN:
         return publish_tool.Operations(add=settings.plan.adds)
     return publish_tool.Operations(replace=settings.plan.pairs)
@@ -469,7 +474,8 @@ def _call_publish(settings: Settings, inputs: Inputs, *, apply: bool, succession
         succession_id=succession_id,
         provision_succession_id=settings.plan.provision_succession_id,
         receipt_root=settings.receipt_root,
-        new_rows_registry=inputs.new_rows_registry["path"],
+        # A removed basin introduces no row: the publish tool reads no registry for it.
+        new_rows_registry=None if inputs.new_rows_registry is None else inputs.new_rows_registry["path"],
         refresh_lock=settings.refresh_lock,
     )
 
@@ -484,15 +490,17 @@ def preflight(settings: Settings, inputs: Inputs) -> dict[str, Any]:
     condition of its new models instead.  The kind check comes first in both: the clone gate looks at the
     source state before the surfaces, and would refuse a structural pair for a reason that names no way on.
     An added basin has no pair to compare and nothing to clone: its new models are audited like those of a
-    cold start, and that is all before the publish dry-run.
+    cold start, and that is all before the publish dry-run.  A removed basin has no new model at all: the
+    publish dry-run, which refuses a basin left with only some of its sources, is its whole preflight.
     """
 
     facts: dict[str, Any] = {}
-    if settings.plan.kind != KIND_ADD_BASIN:
+    kind = settings.plan.kind
+    if kind not in (KIND_ADD_BASIN, KIND_REMOVE_BASIN):
         facts["kind_check"] = _kind_check(settings, inputs)
-    if settings.plan.kind in KINDS_STARTING_FROM_PACKAGED_IC:
+    if kind in KINDS_STARTING_FROM_PACKAGED_IC:
         facts["ic_audit"] = _ic_audit(settings, inputs)
-    else:
+    elif kind != KIND_REMOVE_BASIN:
         facts["clone_dry_run"] = _clone_dry_run(settings, inputs)
     target = settings.directory / publish_tool.DRY_RUN_RECEIPT_NAME
     reused = os.path.lexists(target)
@@ -594,6 +602,16 @@ _PUBLISH_PREVIEW_FIELDS = (
 _ADD_BASIN_PUBLISH_PREVIEW_FIELDS = tuple(
     "introduced_model_ids" if field == "replaced" else field for field in _PUBLISH_PREVIEW_FIELDS
 )
+# Nor does a removed basin: its preview names the ids the publish would remove, under the publish receipt's key.
+_REMOVE_BASIN_PUBLISH_PREVIEW_FIELDS = tuple(
+    "removed_model_ids" if field == "replaced" else field for field in _PUBLISH_PREVIEW_FIELDS
+)
+_PUBLISH_PREVIEW_FIELDS_BY_KIND = {
+    KIND_RECALIBRATION: _PUBLISH_PREVIEW_FIELDS,
+    KIND_COLD_START: _PUBLISH_PREVIEW_FIELDS,
+    KIND_ADD_BASIN: _ADD_BASIN_PUBLISH_PREVIEW_FIELDS,
+    KIND_REMOVE_BASIN: _REMOVE_BASIN_PUBLISH_PREVIEW_FIELDS,
+}
 
 
 def _preview_ic_audit(settings: Settings, inputs: Inputs) -> dict[str, Any]:
@@ -630,11 +648,12 @@ def preview(settings: Settings, inputs: Inputs) -> tuple[dict[str, Any], list[st
 
     report: dict[str, Any] = {}
     refusals: list[str] = []
-    add_basin = settings.plan.kind == KIND_ADD_BASIN
-    checks = {} if add_basin else {"kind_check": _kind_check}
-    if settings.plan.kind in KINDS_STARTING_FROM_PACKAGED_IC:
+    kind = settings.plan.kind
+    # A removed basin has no pair and no new model: only the publish dry-run below.
+    checks = {} if kind in (KIND_ADD_BASIN, KIND_REMOVE_BASIN) else {"kind_check": _kind_check}
+    if kind in KINDS_STARTING_FROM_PACKAGED_IC:
         checks["ic_audit"] = _preview_ic_audit
-    else:
+    elif kind != KIND_REMOVE_BASIN:
         checks["clone_dry_run"] = _preview_clone
     for name, check in checks.items():
         try:
@@ -646,10 +665,7 @@ def preview(settings: Settings, inputs: Inputs) -> tuple[dict[str, Any], list[st
         planned = _call_publish(settings, inputs, apply=False, succession_id=None)
         report["publish_dry_run"] = {
             "outcome": "would_publish",
-            **{
-                key: planned.get(key)
-                for key in (_ADD_BASIN_PUBLISH_PREVIEW_FIELDS if add_basin else _PUBLISH_PREVIEW_FIELDS)
-            },
+            **{key: planned.get(key) for key in _PUBLISH_PREVIEW_FIELDS_BY_KIND[kind]},
         }
     except _PUBLISH_ERRORS as error:
         report["publish_dry_run"] = {"outcome": "refused", "reason": str(error)}

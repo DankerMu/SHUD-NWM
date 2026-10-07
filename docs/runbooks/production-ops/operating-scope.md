@@ -180,7 +180,7 @@ basins_hys_* 后继」**，所以 #1701 原计划的「换 id + 状态延续」�
 
 1. **注册表两份**（NFS canonical + `/scratch/frd_muziyao/nhms-prod` 本地 mirror）各移除 6 条
    `dg_*`（3 流域 × gfs/ifs），62 → 56，备份 `manifest-last.json.bak-zhaochen-retire-20260825`。
-   当时是手工脚本；**现在同样的事用 `scripts/node22_publish_merged_scheduler_registry.py` 做**（#2738，
+   当时是手工脚本；**现在同样的事用 `scripts/node22_model_succession.py` 的 `--kind remove_basin` 做**（#2757，
    见本节末尾「退役流域的 manifest 发布」）：每条要退的 `dg_*` 一个 `--remove`，同一流域的各 source
    必须一起移除，不需要 provision 回执。
 2. **node-27 `hydro.hydro_run`**：552 条 published（184 × 3）翻 `superseded`，
@@ -248,9 +248,9 @@ basins_hys_* 后继」**，所以 #1701 原计划的「换 id + 状态延续」�
   `enforced` 门不会 refuse。`declared_retirements` 机制是给非 replay 路径用的。
 - **不需要 geo 重建**。前端 geojson 刻意不 fetch（§7.1.1 末尾），成员判据在 DB 侧，
   正是第 5 步翻的那一行。
-- **不需要维护窗口**。删行只停未来调度；已发布的包仍在 object store。动手前确认
-  `squeue` 里没有这 6 个 `dg_*` 在飞即可（本次在跑的是 `dg_3264c89a`/gfs 与
-  `dg_30a94855`/ifs，无交集）。
+- **不需要维护窗口**。删行只停未来调度；已发布的包仍在 object store。当时（2026-08-25）的做法是动手前
+  确认没有这 6 个 `dg_*` 在飞（那次在跑的是 `dg_3264c89a`/gfs 与 `dg_30a94855`/ifs，无交集）；
+  现行工具不靠这一条把关，原因见本节末尾。
 
 **验收 receipt（2026-08-25 实测）**：
 
@@ -283,10 +283,16 @@ basins_hys_* 后继」**，所以 #1701 原计划的「换 id + 状态延续」�
 `superseded` 翻回 active）＋ `AUTOPIPE_EXCLUDE_BASINS` 去掉三项＋ baseline
 `core.model_instance` 三行 `activate` 回来（少这一步 = 底图上没有河网）。
 
-**退役流域的 manifest 发布（现行做法，#2738）。** 上面第 1 步现在用工具做；机制、回执与失败结局见
-[`recalibration-and-archive.md`](recalibration-and-archive.md) 的 5.7.1。退役没有前置的 provision 与克隆，
-顺序约束退化为「先确认 `squeue` 里没有这些 `dg_*` 在飞，再发布」；apply 期间调度器 timer 应处于停止状态，
-两份 manifest 不一致时 worker 会拒绝 submit。
+**退役流域的 manifest 发布（现行做法，#2757）。** 上面第 1 步现在由 `scripts/node22_model_succession.py` 的
+`--kind remove_basin` 一条命令做完：停 timer、等在跑的 pass 结束、发布、refresh、再启动 timer，每步有回执、
+可续跑、可 `--abort`。命令与读法见 [`recalibration-and-archive.md`](recalibration-and-archive.md) 的 5.7.4。
+它只做 manifest 这一步：不碰 Basins 目录，也不做本节第 2 步起 node-27 上的事（run、排除名单、model 行）。
+各流域的 Slurm job name 相同，`squeue` 分不出要退的 `dg_*`，所以不靠「先确认队列里没有它们在飞」把关：
+发布前已提交的 run 之后仍可能跑完入库，由 node-27 那一半处理（先加排除名单，再翻 `superseded`）。
+
+**手工回退办法（#2738）：直接跑发布工具。** succession 工具用不了时（例如 hard stop 之后按 runbook 手工收尾），
+同一件事可以直接用发布工具做；机制、回执与失败结局见 `recalibration-and-archive.md` 的 5.7.1。这时 timer 要
+自己停、自己恢复：apply 期间调度器 timer 应处于停止状态，两份 manifest 不一致时 worker 会拒绝 submit。
 
 ```bash
 # node-22，frd_muziyao
