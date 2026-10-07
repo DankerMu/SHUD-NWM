@@ -1,0 +1,120 @@
+HEAD 83220d46 Python 3.12.7 2026-10-07T02:53:03Z REQUIRE_DIRECT_GRID=true
+de56d8264ae7d6d3 de56d8264ae7d6d3 active 20261006-rehearsal-tailanhe 20261006-rehearsal-tailanhe-b 
+--- --succession-id 20261007-e2-dryrun --kind remove_basin --remove dg_36015263b05274ab5012efbb611006a6 --remove dg_8427e85f909727c7f4fe6c2daa2f9a9f
+DRY-RUN (no --apply): no file is changed, no receipt is written and no unit is started or stopped. An --apply runs the publish tool's dry-run of the removal, stops the scheduler timer, publishes both manifests without the removed rows, runs the provider refresh and starts the timer again. The scheduler then no longer plans the removed basin; its runs on node-27 are retired by a separate tool.
+{
+  "continuity": {
+    "mode": "basin_removed",
+    "notice": "Removed basin: once this succession has published, the scheduler no longer plans runs for the removed models. Runs that were already submitted may still finish and be ingested on node-27. This succession ends on node-22 with the manifests: the next step is the node-27 retirement tool, which takes the same --succession-id 20261007-e2-dryrun and refuses to run before this succession has finished.",
+    "state_carried": false
+  },
+  "dry_run": true,
+  "plan": {
+    "kind": "remove_basin",
+    "removes": [
+      "dg_36015263b05274ab5012efbb611006a6",
+      "dg_8427e85f909727c7f4fe6c2daa2f9a9f"
+    ]
+  },
+  "plan_json": "absent: the first --apply writes it",
+  "steps": {
+    "begin": {
+      "unit_states_now": {
+        "nhms-compute-scheduler.service": "activating",
+        "nhms-compute-scheduler.timer": "active"
+      },
+      "would": "record the timer state, stop nhms-compute-scheduler.timer, wait up to 14400 s for nhms-compute-scheduler.service to end by itself"
+    },
+    "finish": {
+      "status": "not predicted"
+    },
+    "preflight": {
+      "publish_dry_run": {
+        "manifest_bytes_remaining": 20215490,
+        "manifest_json_nodes_remaining": 470887,
+        "outcome": "would_publish",
+        "removed_model_ids": [
+          "dg_36015263b05274ab5012efbb611006a6",
+          "dg_8427e85f909727c7f4fe6c2daa2f9a9f"
+        ],
+        "row_count_after": 130,
+        "row_count_before": 132
+      }
+    },
+    "publish": {
+      "would": "run the publish apply"
+    },
+    "refresh": {
+      "status": "not predicted"
+    }
+  },
+  "succession_id": "20261007-e2-dryrun",
+  "unit_states_now": {
+    "nhms-compute-scheduler.service": "activating",
+    "nhms-compute-scheduler.timer": "active"
+  },
+  "would_be_refused": []
+}
+rc=0
+--- --succession-id 20261007-e2-dryrun --kind remove_basin --remove dg_36015263b05274ab5012efbb611006a6
+DRY-RUN (no --apply): no file is changed, no receipt is written and no unit is started or stopped. An --apply runs the publish tool's dry-run of the removal, stops the scheduler timer, publishes both manifests without the removed rows, runs the provider refresh and starts the timer again. The scheduler then no longer plans the removed basin; its runs on node-27 are retired by a separate tool.
+{
+  "continuity": {
+    "mode": "basin_removed",
+    "notice": "Removed basin: once this succession has published, the scheduler no longer plans runs for the removed models. Runs that were already submitted may still finish and be ingested on node-27. This succession ends on node-22 with the manifests: the next step is the node-27 retirement tool, which takes the same --succession-id 20261007-e2-dryrun and refuses to run before this succession has finished.",
+    "state_carried": false
+  },
+  "dry_run": true,
+  "plan": {
+    "kind": "remove_basin",
+    "removes": [
+      "dg_36015263b05274ab5012efbb611006a6"
+    ]
+  },
+  "plan_json": "absent: the first --apply writes it",
+  "steps": {
+    "begin": {
+      "unit_states_now": {
+        "nhms-compute-scheduler.service": "activating",
+        "nhms-compute-scheduler.timer": "active"
+      },
+      "would": "record the timer state, stop nhms-compute-scheduler.timer, wait up to 14400 s for nhms-compute-scheduler.service to end by itself"
+    },
+    "finish": {
+      "status": "not predicted"
+    },
+    "preflight": {
+      "publish_dry_run": {
+        "outcome": "refused",
+        "reason": "Refused: in the merged manifest every basin_id must have exactly one row for each of the sources ['IFS', 'gfs'] of the canonical manifest: basins_tailanhe has ['IFS']. Add or remove every source of a basin together. Nothing was written."
+      }
+    },
+    "publish": {
+      "would": "run the publish apply"
+    },
+    "refresh": {
+      "status": "not predicted"
+    }
+  },
+  "succession_id": "20261007-e2-dryrun",
+  "unit_states_now": {
+    "nhms-compute-scheduler.service": "activating",
+    "nhms-compute-scheduler.timer": "active"
+  },
+  "would_be_refused": [
+    "Refused: in the merged manifest every basin_id must have exactly one row for each of the sources ['IFS', 'gfs'] of the canonical manifest: basins_tailanhe has ['IFS']. Add or remove every source of a basin together. Nothing was written."
+  ]
+}
+rc=1
+--- --succession-id 20261007-e2-dryrun --kind remove_basin --remove dg_00000000000000000000000000000000
+DRY-RUN (no --apply): no file is changed, no receipt is written and no unit is started or stopped. An --apply runs the publish tool's dry-run of the removal, stops the scheduler timer, publishes both manifests without the removed rows, runs the provider refresh and starts the timer again. The scheduler then no longer plans the removed basin; its runs on node-27 are retired by a separate tool.
+Refused: old model_id is not in the canonical manifest /ghdc/data/nwm/object-store/scheduler/registry/manifest-last.json: ['dg_00000000000000000000000000000000']. Nothing was written.
+rc=1
+--- --succession-id 20261007-e2-dryrun --kind remove_basin --remove dg_36015263b05274ab5012efbb611006a6 --remove dg_8427e85f909727c7f4fe6c2daa2f9a9f --cutover-time 2026100700
+Refused: --cutover-time is not valid with --kind remove_basin: a removal has no successor, no added model, no cutover and no provision. Name each model of the removed basin with --remove <model_id> and leave the option out.
+rc=1
+--- --succession-id 20261007-e2-dryrun --kind add_basin --remove dg_36015263b05274ab5012efbb611006a6
+Refused: --remove is not valid with --kind add_basin: only --kind remove_basin removes the models of a basin from the manifests. Run the removal under its own --succession-id.
+rc=1
+throwaway root: 0 entries
+de56d8264ae7d6d3 de56d8264ae7d6d3 active 20261006-rehearsal-tailanhe 20261006-rehearsal-tailanhe-b 
