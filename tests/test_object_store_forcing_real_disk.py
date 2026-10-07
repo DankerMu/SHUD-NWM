@@ -5,72 +5,88 @@ import os
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import pytest
 from fastapi.testclient import TestClient
 
 from apps.api.main import create_app
-from packages.common.object_store_forcing import (
-    PsycopgStationLookup,
-    _compute_cycle_compact,
-    _normalize_source_id,
-    _resolve_disk_path,
-)
-from tests.object_store_forcing_real_disk_support import latest_complete_cycle
+from packages.common.object_store_forcing import PsycopgStationLookup
+from tests.object_store_forcing_real_disk_support import ResolvedCombo, Selection, latest_complete_cycle
 
 pytestmark = [pytest.mark.e2e, pytest.mark.real_disk]
 
 # Shape-only baseline: `_assert_station_series_shape` compares key order and JSON
-# kinds, never values, so the date in the file name is not the cycle under test
-# and the file cannot carry this note itself (an extra key breaks the key-list
-# equality).
-BASELINE_FIXTURE = Path(__file__).parent / "fixtures" / "station_series_baseline_heihe_ifs_2026060100.json"
+# kinds, never values, so the cycle, model and station recorded in it are not
+# the ones under test, and the file cannot carry this note itself (an extra key
+# breaks the key-list equality). #2699: recorded from a Direct Grid station as
+# the API served it (heihe, IFS), kept on one line.
+BASELINE_FIXTURE = Path(__file__).parent / "fixtures" / "station_series_baseline_direct_grid.json"
 # Negative case: a cycle no retention window will ever hold again.
 MISSING_CYCLE = "2020-01-01T00:00:00Z"
-COMBOS = [
-    ("heihe_forc_001", "IFS", "basins_heihe_shud"),
-    ("heihe_forc_001", "gfs", "basins_heihe_shud"),
-    ("qhh_forc_001", "IFS", "basins_qhh_shud"),
-    ("qhh_forc_001", "gfs", "basins_qhh_shud"),
+# #2699: what the suite covers. The model and the station of each combination
+# are resolved per cycle from the store and `met.interp_weight`, never named
+# here -- the store holds only `dg_*` model directories and their names change
+# with every Direct Grid generation.
+BASIN_SOURCE_COMBOS = [
+    ("basins_heihe_vbasins", "IFS"),
+    ("basins_heihe_vbasins", "gfs"),
+    ("basins_qhh_vbasins", "IFS"),
+    ("basins_qhh_vbasins", "gfs"),
 ]
+# The combination the baseline was recorded from; the point count of another
+# source or basin is not known.
+SHAPE_COMBO = ("basins_heihe_vbasins", "IFS")
+# Owner decision (#2699): a legacy model id whose artifacts have left the store
+# answers 404 and is never mapped to a Direct Grid variant.
+LEGACY_MODEL_ID = "basins_heihe_shud"
 _FORCING_STEP_SECONDS = 3 * 3600
 _PLUS_EIGHT = timezone(timedelta(hours=8))
 
 
 @pytest.fixture(scope="module")
-def latest_cycle() -> str:
-    """#2595: the newest cycle where all four combos are settled in the real store.
+def selection() -> Selection:
+    """#2595/#2699: the newest cycle where all four combos resolve in the real store.
 
     Chosen at run time, once per module, AFTER the real-disk skip gate: node-27
     retention keeps a rolling window, so any pinned cycle eventually 404s every
     case. Import time computes nothing -- the CI `--collect-only` smoke imports
-    this module without `OBJECT_STORE_ROOT`. Printed so the receipt (`-s`/`-rA`)
-    records which cycle the four cases read.
+    this module without `OBJECT_STORE_ROOT`. The station of a model is asked of
+    `met.interp_weight` by `model_id` only, as the production list path does, on
+    one read-only connection of this fixture's own; station metadata keeps going
+    through `PsycopgStationLookup.from_env()`, which needs its dict-row cursor.
     """
     root = _real_object_store_root()
-    cycle = latest_complete_cycle(root, COMBOS, PsycopgStationLookup.from_env())
-    print(f"real_disk cycle: {cycle} (newest cycle with all {len(COMBOS)} combos settled under {root})")
-    return cycle
+    import psycopg2
+
+    connection = psycopg2.connect(os.environ["DATABASE_URL"].strip())
+    try:
+        connection.set_session(readonly=True, autocommit=True)
+
+        def station_for_model(model_id: str) -> str | None:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT min(station_id) FROM met.interp_weight WHERE model_id = %s", (model_id,))
+                row = cursor.fetchone()
+            return row[0] if row else None
+
+        chosen = latest_complete_cycle(root, BASIN_SOURCE_COMBOS, station_for_model, PsycopgStationLookup.from_env())
+    finally:
+        connection.close()
+    print(f"real_disk cycle: {chosen.cycle} (newest cycle with all {len(chosen.combos)} combos settled under {root})")
+    return chosen
 
 
-def test_real_disk_latest_cycle_serves_all_currently_409_combinations(latest_cycle: str) -> None:
+def test_real_disk_latest_cycle_serves_all_currently_409_combinations(selection: Selection) -> None:
     with _client() as client:
-        for station_id, source_id, model_id in COMBOS:
-            response = client.get(
-                f"/api/v1/met/stations/{station_id}/series",
-                params={"model_id": model_id, "source_id": source_id, "cycle_time": latest_cycle},
-            )
+        for combo in selection.combos:
+            _report(selection, combo)
+            response = _get_series(client, combo, cycle_time=selection.cycle)
 
             assert response.status_code == 200, response.text
             data = response.json()["data"]
-            profile = _csv_profile(
-                root=_real_object_store_root(),
-                station_id=station_id,
-                source_id=source_id,
-                model_id=model_id,
-                cycle=latest_cycle,
-            )
-            assert data["station_id"] == station_id
+            profile = _csv_profile(combo.path, selection.cycle)
+            assert data["station_id"] == combo.station_id
+            assert data["model_id"] == combo.model_id
             assert [series["variable"] for series in data["series"]] == ["PRCP", "TEMP", "RH", "wind", "Rn"]
             assert {series["unit"] for series in data["series"]} == {"mm/day", "degC", "0-1", "m/s", "W/m^2"}
             assert sum(len(series["points"]) for series in data["series"]) == 5 * profile["nrow"]
@@ -85,91 +101,44 @@ def test_real_disk_latest_cycle_serves_all_currently_409_combinations(latest_cyc
                 assert series["truncated"] is False
 
 
-def test_real_disk_error_and_filter_scenarios(latest_cycle: str) -> None:
-    cycle_time = _dt(latest_cycle)
+def test_real_disk_error_and_filter_scenarios(selection: Selection) -> None:
+    combo = selection.combos[0]
+    _report(selection, combo)
+    cycle_time = _dt(selection.cycle)
     # The window below expects exactly the two points at cycle+3h and cycle+6h,
     # which holds only on the producer's 3-hour grid: assert the grid, do not
     # assume it.
-    window_profile = _csv_profile(
-        root=_real_object_store_root(),
-        station_id="heihe_forc_001",
-        source_id="IFS",
-        model_id="basins_heihe_shud",
-        cycle=latest_cycle,
-    )
+    window_profile = _csv_profile(combo.path, selection.cycle)
     assert window_profile["step_seconds"] == _FORCING_STEP_SECONDS
     window_from = _format_time(cycle_time + timedelta(hours=3))
     window_to = _format_time(cycle_time + timedelta(hours=6))
     with _client() as client:
-        missing_cycle = client.get(
-            "/api/v1/met/stations/heihe_forc_001/series",
-            params={"model_id": "basins_heihe_shud", "source_id": "IFS", "cycle_time": MISSING_CYCLE},
+        missing_cycle = _get_series(client, combo, cycle_time=MISSING_CYCLE)
+        missing_station = _get_series(client, combo, station_id="bogus_forc_999", cycle_time=selection.cycle)
+        variables = _get_series(client, combo, cycle_time=selection.cycle, variables="PRCP,TEMP")
+        window = _get_series(
+            client,
+            combo,
+            cycle_time=selection.cycle,
+            **{"from": window_from, "to": window_to, "variables": "PRCP"},
         )
-        missing_station = client.get(
-            "/api/v1/met/stations/bogus_forc_999/series",
-            params={"model_id": "basins_heihe_shud", "source_id": "IFS", "cycle_time": latest_cycle},
+        zulu = _get_series(client, combo, cycle_time=selection.cycle, variables="PRCP")
+        plus_eight = _get_series(
+            client, combo, cycle_time=cycle_time.astimezone(_PLUS_EIGHT).isoformat(), variables="PRCP"
         )
-        variables = client.get(
-            "/api/v1/met/stations/heihe_forc_001/series",
-            params={
-                "model_id": "basins_heihe_shud",
-                "source_id": "IFS",
-                "cycle_time": latest_cycle,
-                "variables": "PRCP,TEMP",
-            },
-        )
-        window = client.get(
-            "/api/v1/met/stations/heihe_forc_001/series",
-            params={
-                "model_id": "basins_heihe_shud",
-                "source_id": "IFS",
-                "cycle_time": latest_cycle,
-                "from": window_from,
-                "to": window_to,
-                "variables": "PRCP",
-            },
-        )
-        zulu = client.get(
-            "/api/v1/met/stations/heihe_forc_001/series",
-            params={
-                "model_id": "basins_heihe_shud",
-                "source_id": "IFS",
-                "cycle_time": latest_cycle,
-                "variables": "PRCP",
-            },
-        )
-        plus_eight = client.get(
-            "/api/v1/met/stations/heihe_forc_001/series",
-            params={
-                "model_id": "basins_heihe_shud",
-                "source_id": "IFS",
-                "cycle_time": cycle_time.astimezone(_PLUS_EIGHT).isoformat(),
-                "variables": "PRCP",
-            },
-        )
-        press_only = client.get(
-            "/api/v1/met/stations/heihe_forc_001/series",
-            params={
-                "model_id": "basins_heihe_shud",
-                "source_id": "IFS",
-                "cycle_time": latest_cycle,
-                "variables": "Press",
-            },
-        )
-        prcp_press = client.get(
-            "/api/v1/met/stations/heihe_forc_001/series",
-            params={
-                "model_id": "basins_heihe_shud",
-                "source_id": "IFS",
-                "cycle_time": latest_cycle,
-                "variables": "PRCP,Press",
-            },
-        )
+        press_only = _get_series(client, combo, cycle_time=selection.cycle, variables="Press")
+        prcp_press = _get_series(client, combo, cycle_time=selection.cycle, variables="PRCP,Press")
 
     assert missing_cycle.status_code == 404
     assert missing_cycle.json()["error"]["code"] == "STATION_FORCING_FILE_NOT_FOUND"
     missing_details = missing_cycle.json()["error"]["details"]
-    assert missing_details["expected_path"].startswith("forcing/ifs/2020010100/")
+    if combo.active_flag is False:
+        # An inactive station (every Direct Grid station today) gets the
+        # desensitized miss of `StationForcingFileNotFoundError`: the station
+        # id and nothing that names a storage key.
+        assert missing_details == {"station_id": combo.station_id}
+    else:
+        assert missing_details["expected_path"].startswith(f"forcing/{combo.source_id.lower()}/2020010100/")
     assert str(_real_object_store_root()) not in missing_cycle.text
     assert missing_station.status_code == 404
     assert missing_station.json()["error"]["code"] == "STATION_NOT_FOUND"
@@ -189,44 +158,86 @@ def test_real_disk_error_and_filter_scenarios(latest_cycle: str) -> None:
     assert [series["variable"] for series in prcp_press.json()["data"]["series"]] == ["PRCP"]
 
 
-def test_real_disk_station_series_read_is_side_effect_free(latest_cycle: str) -> None:
-    root = _real_object_store_root()
-    station = PsycopgStationLookup.from_env().lookup("heihe_forc_001")
-    expected_path = _resolve_disk_path(
-        root,
-        _normalize_source_id("IFS"),
-        _compute_cycle_compact(_dt(latest_cycle)),
-        station.basin_version_id,
-        "basins_heihe_shud",
-        station.forcing_filename or "",
-    )
-    before = expected_path.stat().st_mtime_ns
+def test_real_disk_legacy_model_id_is_404_while_the_direct_grid_model_serves(selection: Selection) -> None:
+    combo = _combo(selection, *SHAPE_COMBO)
+    _report(selection, combo)
+    # <cycle>/<basin_version>/<model>/shud/<file>: the basin directory of the
+    # chosen cycle must hold no legacy model directory, or the 404 below would
+    # not be the "artifacts have left the store" case.
+    legacy_dir = combo.path.parents[2] / LEGACY_MODEL_ID
+    assert not legacy_dir.exists(), f"legacy model directory is back in the store: {legacy_dir}"
 
     with _client() as client:
-        responses = [
-            client.get(
-                "/api/v1/met/stations/heihe_forc_001/series",
-                params={"model_id": "basins_heihe_shud", "source_id": "IFS", "cycle_time": latest_cycle},
-            )
-            for _ in range(3)
-        ]
+        direct_grid = _get_series(client, combo, cycle_time=selection.cycle)
+        legacy = _get_series(client, combo, model_id=LEGACY_MODEL_ID, cycle_time=selection.cycle)
+
+    # Same station, cycle and source: the model id alone decides. Status and
+    # code only -- the details of an inactive station carry no model id.
+    assert direct_grid.status_code == 200, direct_grid.text
+    assert legacy.status_code == 404, legacy.text
+    assert legacy.json()["error"]["code"] == "STATION_FORCING_FILE_NOT_FOUND"
+
+
+def test_real_disk_station_series_read_is_side_effect_free(selection: Selection) -> None:
+    combo = selection.combos[0]
+    _report(selection, combo)
+    before = combo.path.stat().st_mtime_ns
+
+    with _client() as client:
+        responses = [_get_series(client, combo, cycle_time=selection.cycle) for _ in range(3)]
 
     assert [response.status_code for response in responses] == [200, 200, 200]
     assert responses[0].json()["data"] == responses[1].json()["data"] == responses[2].json()["data"]
-    assert expected_path.stat().st_mtime_ns == before
+    assert combo.path.stat().st_mtime_ns == before
 
 
-def test_real_disk_station_series_response_shape_matches_baseline_fixture(latest_cycle: str) -> None:
+def test_real_disk_station_series_response_shape_matches_baseline_fixture(selection: Selection) -> None:
     baseline = json.loads(BASELINE_FIXTURE.read_text(encoding="utf-8"))
+    combo = _combo(selection, *SHAPE_COMBO)
+    _report(selection, combo)
 
     with _client() as client:
-        response = client.get(
-            "/api/v1/met/stations/heihe_forc_001/series",
-            params={"model_id": "basins_heihe_shud", "source_id": "IFS", "cycle_time": latest_cycle},
-        )
+        response = _get_series(client, combo, cycle_time=selection.cycle)
 
     assert response.status_code == 200, response.text
     _assert_station_series_shape(response.json(), baseline)
+
+
+def _combo(selection: Selection, basin_version_id: str, source_id: str) -> ResolvedCombo:
+    return next(
+        combo
+        for combo in selection.combos
+        if (combo.basin_version_id, combo.source_id) == (basin_version_id, source_id)
+    )
+
+
+def _report(selection: Selection, combo: ResolvedCombo) -> None:
+    # The node-27 receipt (`-s`/`-rA`) must record what each case measured.
+    print(
+        f"real_disk selection: cycle={selection.cycle} basin_version={combo.basin_version_id} "
+        f"source={combo.source_id} model={combo.model_id} station={combo.station_id}"
+    )
+
+
+def _get_series(
+    client: TestClient,
+    combo: ResolvedCombo,
+    *,
+    cycle_time: str,
+    station_id: str | None = None,
+    model_id: str | None = None,
+    **filters: str,
+) -> Any:
+    # Direct Grid station ids hold `:` (`dg-ifs-<hash>::cell:<n>`), hence the quoting.
+    return client.get(
+        f"/api/v1/met/stations/{quote(station_id or combo.station_id, safe='')}/series",
+        params={
+            "model_id": model_id or combo.model_id,
+            "source_id": combo.source_id,
+            "cycle_time": cycle_time,
+            **filters,
+        },
+    )
 
 
 def _client() -> TestClient:
@@ -263,16 +274,7 @@ def _format_time(value: Any) -> str:
     return value.isoformat().replace("+00:00", "Z")
 
 
-def _csv_profile(*, root: Path, station_id: str, source_id: str, model_id: str, cycle: str) -> dict[str, Any]:
-    station = PsycopgStationLookup.from_env().lookup(station_id)
-    path = _resolve_disk_path(
-        root,
-        _normalize_source_id(source_id),
-        _compute_cycle_compact(_dt(cycle)),
-        station.basin_version_id,
-        model_id,
-        station.forcing_filename or "",
-    )
+def _csv_profile(path: Path, cycle: str) -> dict[str, Any]:
     lines = path.read_text(encoding="utf-8").splitlines()
     nrow = int(lines[0].split()[0])
     rows = lines[2 : 2 + nrow]
