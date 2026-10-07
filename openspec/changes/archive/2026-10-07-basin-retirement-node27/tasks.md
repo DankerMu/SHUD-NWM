@@ -18,7 +18,7 @@
       from; `tests/test_entropy_audit_line_references.py`; `tests/test_select_ci_tests.py` (after staging,
       last); `openspec validate basin-retirement-node27 --strict --no-interactive`.
 - [x] 2.2 CI green on the PR.
-- [ ] 2.3 node-27 after merge and pull: the tool's dry-run for one live basin version with a throwaway
+- [x] 2.3 node-27 after merge and pull: the tool's dry-run for one live basin version with a throwaway
       `--receipt-root`. Expected: `would_be_refused` for the missing node-22 finish receipt; the env-file
       checks and the autopipe unit query run against the real file and unit; no file changes. This run opens
       the production database read-only for the precondition queries only if the owner agrees; the supersede
