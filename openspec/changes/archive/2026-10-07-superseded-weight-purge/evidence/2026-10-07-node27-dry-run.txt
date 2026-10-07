@@ -1,0 +1,7 @@
+node-27, master 13d0bd35, 2026-10-07, read-only dry-run (no --apply), DATABASE_URL/OBJECT_STORE_ROOT from infra/env/node27-ingest.env:
+  uv run --no-sync python -m scripts.node27_purge_superseded_weights --operator-id danker --reason '#2699 superseded generations and legacy models: dry-run'
+exit 0; stdout = 2026-10-07-node27-dry-run.json; no DSN in stdout/stderr; receipt root and lock file not created.
+classes: current 132 models / 173,556 rows; recent_run 25 / 27,432; purgeable 62 / 605,124 (legacy basins_*_shud 17 / 547,572; dg_* 45 / 57,552); others 0.
+largest model basins_lh_gl_shud 124,572 rows; server_version 15.2.
+CI real-DB lane on the merged head: tests/test_node27_purge_superseded_weights_integration.py 4 PASSED.
+No production --apply has been run.

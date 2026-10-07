@@ -1,0 +1,301 @@
+{
+  "classes": {
+    "current": {
+      "models": 132,
+      "rows": 173556
+    },
+    "in_manifest": {
+      "models": 0,
+      "rows": 0
+    },
+    "purgeable": {
+      "models": 62,
+      "rows": 605124
+    },
+    "recent_forcing": {
+      "models": 0,
+      "rows": 0
+    },
+    "recent_run": {
+      "models": 25,
+      "rows": 27432
+    },
+    "recent_weights": {
+      "models": 0,
+      "rows": 0
+    },
+    "recently_created": {
+      "models": 0,
+      "rows": 0
+    }
+  },
+  "dry_run": true,
+  "largest_model": {
+    "model_id": "basins_lh_gl_shud",
+    "rows": 124572
+  },
+  "manifest": {
+    "model_count": 132,
+    "path": "/home/ghdc/nwm/object-store/scheduler/registry/manifest-last.json",
+    "sha256": "de56d8264ae7d6d3a5e40e68f59510cfd0b2ca8960c00c98e2111798b6b31929"
+  },
+  "model_ids_an_apply_cannot_render": [],
+  "purgeable_models": [
+    {
+      "model_id": "basins_dth_ls_shud",
+      "rows": 10908
+    },
+    {
+      "model_id": "basins_dth_zj_shud",
+      "rows": 15612
+    },
+    {
+      "model_id": "basins_heihe_shud",
+      "rows": 82032
+    },
+    {
+      "model_id": "basins_hetianhe_shud",
+      "rows": 27024
+    },
+    {
+      "model_id": "basins_huai_main_shud",
+      "rows": 83640
+    },
+    {
+      "model_id": "basins_jialingjiang_shud",
+      "rows": 83040
+    },
+    {
+      "model_id": "basins_kashigeer_shud",
+      "rows": 43800
+    },
+    {
+      "model_id": "basins_keliya_shud",
+      "rows": 1536
+    },
+    {
+      "model_id": "basins_lh_gl_shud",
+      "rows": 124572
+    },
+    {
+      "model_id": "basins_qhh_shud",
+      "rows": 18528
+    },
+    {
+      "model_id": "basins_qinyijiang_shud",
+      "rows": 4320
+    },
+    {
+      "model_id": "basins_tailanhe_shud",
+      "rows": 1776
+    },
+    {
+      "model_id": "basins_weiganhe_shud",
+      "rows": 18636
+    },
+    {
+      "model_id": "basins_xinanjiang_upstream_shud",
+      "rows": 2328
+    },
+    {
+      "model_id": "basins_zhaochen_bst_shud",
+      "rows": 29148
+    },
+    {
+      "model_id": "basins_zhaochen_mc_shud",
+      "rows": 432
+    },
+    {
+      "model_id": "basins_zhaochen_wem_shud",
+      "rows": 240
+    },
+    {
+      "model_id": "dg_00ef7fe3f514339af5d117abb3e2be55",
+      "rows": 504
+    },
+    {
+      "model_id": "dg_03b3cd97dec0e4847ed207347bc251a4",
+      "rows": 1764
+    },
+    {
+      "model_id": "dg_04405f8ced65fec0aae4d56d3d31a850",
+      "rows": 42
+    },
+    {
+      "model_id": "dg_0ed1f41a81c5bab778bb2ce1648ddc17",
+      "rows": 1764
+    },
+    {
+      "model_id": "dg_19f770dd13ff2a2d25bf1a14747620fd",
+      "rows": 2064
+    },
+    {
+      "model_id": "dg_281ff8c7ccd761239bd39dc44977138f",
+      "rows": 1764
+    },
+    {
+      "model_id": "dg_2a26a183d131ce80987dbff37d994839",
+      "rows": 984
+    },
+    {
+      "model_id": "dg_2c13fd987309852ab81d3e18bc944cde",
+      "rows": 8316
+    },
+    {
+      "model_id": "dg_43d4c6f26bbc14d5708179a5bdbc3b23",
+      "rows": 1092
+    },
+    {
+      "model_id": "dg_4a3c03155c9e467ba667fbd69efb18be",
+      "rows": 426
+    },
+    {
+      "model_id": "dg_541087e422a6e967c0dee5141d3c81ce",
+      "rows": 2250
+    },
+    {
+      "model_id": "dg_541e1549296a5dae86cae0e0fb727136",
+      "rows": 2250
+    },
+    {
+      "model_id": "dg_5b6d9f6a10a34f2e703a36f0312dccb9",
+      "rows": 984
+    },
+    {
+      "model_id": "dg_622a6ef8657e2be00f63cfa0fe1d2812",
+      "rows": 348
+    },
+    {
+      "model_id": "dg_6396d77756e693a12277c682f6cd22ee",
+      "rows": 828
+    },
+    {
+      "model_id": "dg_640f67ff752b70a1dc649c8ba0228e1c",
+      "rows": 582
+    },
+    {
+      "model_id": "dg_688c7bb90fd97da9befaee33cc428ff3",
+      "rows": 654
+    },
+    {
+      "model_id": "dg_6e8f81cdfdfb019ebce0fcb0a77408eb",
+      "rows": 1566
+    },
+    {
+      "model_id": "dg_6fcf91c52c4bcd11d063775bf748b4ed",
+      "rows": 642
+    },
+    {
+      "model_id": "dg_77fcfc0eebcf60f4799d137246708c9c",
+      "rows": 1092
+    },
+    {
+      "model_id": "dg_88d3989e38758ebcec51e2578bd6bde9",
+      "rows": 12
+    },
+    {
+      "model_id": "dg_895924c260a1b05288a86f4eeb455849",
+      "rows": 1764
+    },
+    {
+      "model_id": "dg_899ee04265450afdd7cc3ef211e8db9e",
+      "rows": 2064
+    },
+    {
+      "model_id": "dg_98d20f5c16f05bbe7e1f9f72234742fd",
+      "rows": 108
+    },
+    {
+      "model_id": "dg_9b922dfb661de228edd9ebdf17a6ee38",
+      "rows": 1302
+    },
+    {
+      "model_id": "dg_9d318f475991068cb3d72d0f3dea4ba5",
+      "rows": 426
+    },
+    {
+      "model_id": "dg_9fef74d512718b3fe1e9ed7d5e1f8533",
+      "rows": 1764
+    },
+    {
+      "model_id": "dg_a0c12cffed2c2ae2fab0a09c471d3133",
+      "rows": 24
+    },
+    {
+      "model_id": "dg_a1562a782aeeb21cafe217e0953482a9",
+      "rows": 1764
+    },
+    {
+      "model_id": "dg_a9ec352ed3a850645dd9fe965bc8dd7e",
+      "rows": 432
+    },
+    {
+      "model_id": "dg_acbb4c97a88b91db811c82e57e350ae4",
+      "rows": 24
+    },
+    {
+      "model_id": "dg_ad5782499a12615eea1bd515489668d0",
+      "rows": 582
+    },
+    {
+      "model_id": "dg_af93a48636397f87722bdbd11ceb99a3",
+      "rows": 1722
+    },
+    {
+      "model_id": "dg_c2fdb712b41e71dcf4709d2fa6709674",
+      "rows": 1302
+    },
+    {
+      "model_id": "dg_cdab38c99bf9fd1fdb6fa9e95466b5ac",
+      "rows": 108
+    },
+    {
+      "model_id": "dg_d3da0d68ab5bb27b525f8d9e030b898d",
+      "rows": 1722
+    },
+    {
+      "model_id": "dg_e404644e4705102949d42b5331ee6086",
+      "rows": 654
+    },
+    {
+      "model_id": "dg_e5344485e0e71079165927cda2046233",
+      "rows": 432
+    },
+    {
+      "model_id": "dg_e8ced3a568f7cb6af7cd4becc5d7660c",
+      "rows": 642
+    },
+    {
+      "model_id": "dg_ed38b99949c39573a1eb34bdcc69251a",
+      "rows": 504
+    },
+    {
+      "model_id": "dg_edd58a2fe2ea0edfc81d237a5c1ec35e",
+      "rows": 8316
+    },
+    {
+      "model_id": "dg_ee384fb01c41a608fa58c61ee036dfad",
+      "rows": 12
+    },
+    {
+      "model_id": "dg_f14b54044d10944d60d66a0acca4d409",
+      "rows": 42
+    },
+    {
+      "model_id": "dg_f6fdca99452f8097e89aa99706434f40",
+      "rows": 1566
+    },
+    {
+      "model_id": "dg_fb3242d8537bd729d7a00a2984624e89",
+      "rows": 348
+    }
+  ],
+  "receipt_root": "/home/ghdc/nwm/object-store/scheduler/weight-purge",
+  "server_version": "15.2 (Ubuntu 15.2-1.pgdg22.04+1)",
+  "thresholds": {
+    "max_models": null,
+    "min_idle_days": 30,
+    "pause_seconds": 2.0
+  },
+  "total_rows": 605124
+}
