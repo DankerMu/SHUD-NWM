@@ -31,12 +31,13 @@ With ``--apply``, per purgeable model in ``model_id`` order, one READ COMMITTED
 transaction: ``lock_timeout`` 10 s; the advisory lock the weight writers take
 (``upsert_interp_weights`` of the forcing producer store and
 ``_lock_interp_weight_scope`` of the forcing domain handoff) for every
-``(source_id, grid_id)`` of the model; the rule again, now under the locks (a
-model that is protected by now is skipped); backup and delete in ONE statement
+``(source_id, grid_id)`` of the model; the manifest read again and the rule
+again, both under the locks (a model that is protected by now is skipped); backup and delete in ONE statement
 (``COPY (DELETE ... RETURNING ...) TO STDOUT``) into ``weights-<model_id>.csv``
 (exclusive create, 0600); no row of the model may be left and the CSV must hold
-a row; file and directory fsynced; commit.  The backup is removed only when the
-commit call was never reached.  Any failure stops the run: earlier models stay
+exactly the rows the server reports deleted, at least one; file and directory
+fsynced; commit.  The backup is removed only when the commit call was never
+reached.  Any failure stops the run: earlier models stay
 purged, later ones are untouched.
 
 Receipts, never rewritten, in ``<receipt-root>/purge-<utc stamp>/``:
@@ -569,9 +570,7 @@ def _backup_data_rows(path: Path) -> int:
         return sum(1 for _row in reader)
 
 
-def purge_model(
-    connection: Any, settings: Settings, manifest: Manifest, run_directory: Path, model_id: str
-) -> dict[str, Any]:
+def purge_model(connection: Any, settings: Settings, run_directory: Path, model_id: str) -> dict[str, Any]:
     """Purge one model in one transaction, or skip it; the record of its ``model-<nnnn>.json``.
 
     Raises ``PurgeFailure``; nothing of the model is deleted unless its ``outcome`` says otherwise.
@@ -592,6 +591,12 @@ def purge_model(
             pairs = sorted((str(row[0]), str(row[1])) for row in cursor.fetchall())
             for source_id, grid_id in pairs:
                 cursor.execute(ADVISORY_LOCK_SQL, (lock_key(source_id, grid_id, model_id),))
+            try:
+                # Read under the locks, not before them: node-22 rewrites the manifest, and what protects a
+                # model is what the manifest says once the wait for its scopes is over.
+                manifest = read_manifest(settings.manifest)
+            except ValueError as error:
+                raise PurgeFailure(f"Stopped at {model_id}: {error}. Its rows were not touched.") from error
             # The rule again, under the locks: no writer can replace a locked scope from here to the commit.
             found = classify(cursor, settings, manifest, model_id=model_id)
             current = found[0] if found else {"rows": 0, "class": NO_WEIGHT_ROWS}
@@ -612,6 +617,8 @@ def purge_model(
                 os.fchmod(handle.fileno(), BACKUP_MODE)
                 # Backup and delete in one statement: the file is exactly the rows that were deleted.
                 cursor.copy_expert(_purge_statement(model_id, pairs), handle)
+                # What the server says the DELETE ... RETURNING produced.
+                deleted = cursor.rowcount
                 handle.flush()
                 os.fsync(handle.fileno())
             cursor.execute(REMAINING_SQL, (model_id,))
@@ -622,9 +629,11 @@ def purge_model(
                     "scope after the locks were taken. The transaction was rolled back and the backup removed."
                 )
             rows = _backup_data_rows(backup)
-            if rows < 1:
+            if rows < 1 or rows != deleted:
                 raise PurgeFailure(
-                    f"The backup of {model_id} holds no row. The transaction was rolled back and the backup removed."
+                    f"The backup of {model_id} holds {rows} rows and the server reports {deleted} deleted: the "
+                    "backup must hold every deleted row, and at least one. The transaction was rolled back and "
+                    "the backup removed."
                 )
             fsync_directory(run_directory)
         # From here on nothing may conclude "not committed".
@@ -736,12 +745,7 @@ def apply(
             try:
                 if index > 1:
                     sleep(settings.pause_seconds)
-                try:
-                    # node-22 rewrites the manifest: what protects a model is what it says now.
-                    latest = read_manifest(settings.manifest)
-                except ValueError as error:
-                    raise PurgeFailure(f"Stopped before {model_id}: {error}. Its rows were not touched.") from error
-                record = purge_model(connection, settings, latest, run_directory, model_id)
+                record = purge_model(connection, settings, run_directory, model_id)
                 try:
                     succession.write_receipt(run_directory / f"model-{index:04d}.json", record)
                 except OSError as error:

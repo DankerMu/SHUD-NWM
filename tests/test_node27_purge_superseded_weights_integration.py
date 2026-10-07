@@ -338,6 +338,8 @@ def test_apply_deletes_only_the_purgeable_models_and_the_backup_restores_them(
         assert tuple(rows[0]) == tool.WEIGHT_COLUMNS and len(rows) - 1 == ROWS[model_id]
         receipt = json.loads((directory / f"model-{index:04d}.json").read_text(encoding="utf-8"))
         assert (receipt["model_id"], receipt["status"], receipt["rows"]) == (model_id, "purged", ROWS[model_id])
+        # The server's count of deleted rows, the rows of the file and the rows that were there are one number.
+        assert receipt["rows"] == len(purged_before[model_id])
         assert receipt["sha256"] == tool.succession.file_sha256(backup)
 
     # The runbook's restore: the model has no rows, so the copy alone brings back exactly what was deleted.

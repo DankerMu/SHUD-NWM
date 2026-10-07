@@ -132,6 +132,7 @@ class FakeDatabase:
         self.after_copy: Callable[[str], None] | None = None
         self.commit_error: BaseException | None = None
         self.connect_error: BaseException | None = None
+        self.copy_loses_a_row_of: str | None = None  # the model whose CSV comes out one row short
         self.next_weight_id = 1000
 
     def connect(self, dsn: str, **_options: Any) -> FakeConnection:
@@ -258,6 +259,7 @@ class FakeCursor:
         self.connection = connection
         self.database = connection.database
         self.result: list[tuple[Any, ...]] = []
+        self.rowcount = -1
 
     def __enter__(self) -> FakeCursor:
         return self
@@ -322,7 +324,9 @@ class FakeCursor:
             if row["model_id"] == match["model"] and (row["source_id"], row["grid_id"]) in pairs
         ]  # fmt: skip
         self.connection.deleted |= {row["weight_id"] for row in doomed}
-        file.write(csv_bytes(doomed))
+        # As psycopg2 after a COPY: the number of rows the statement produced.
+        self.rowcount = len(doomed)
+        file.write(csv_bytes(doomed[1:] if self.database.copy_loses_a_row_of == match["model"] else doomed))
         if self.database.after_copy is not None:
             self.database.after_copy(match["model"])
 
@@ -506,10 +510,15 @@ def test_class_of_one_model(space: Space, change: Callable[[FakeDatabase], None]
     change(database)
     assert space.run() == 0
     report = space.report()
-    assert report["classes"][expected]["models"] >= 1
+    # The class of `m` itself: every case fixes the class of `other` too (it owns the newest gfs run in the two
+    # cases that give it one and has nothing at all in the rest), so the exact counts leave `m` one place to be.
+    other = "current" if any(run["model_id"] == "other" for run in database.runs) else "purgeable"
+    counts = {name: {"models": 0, "rows": 0} for name in tool.CLASSES}
+    for name, rows in ((expected, len(database.rows_of("m"))), (other, 1)):
+        counts[name]["models"] += 1
+        counts[name]["rows"] += rows
+    assert report["classes"] == counts
     assert ("m" in [model["model_id"] for model in report["purgeable_models"]]) is (expected == "purgeable")
-    # Classes are exclusive: exactly the two seeded models are counted.
-    assert sum(counts["models"] for counts in report["classes"].values()) == 2
     if expected != "purgeable":
         assert space.run("--apply") == 0
         assert len(database.rows_of("m")) >= 2 and "copy:m" not in database.events
@@ -671,26 +680,66 @@ def test_a_model_that_gains_a_run_before_its_transaction_is_skipped(space: Space
     }  # fmt: skip
 
 
-def test_a_model_the_manifest_gains_before_its_transaction_is_skipped(space: Space) -> None:
-    # node-22 rewrites the manifest during the first pause.
-    space.on_sleep = lambda: space.write_manifest(["dg_current", "dg_manifest", OLD_A])
+def test_a_model_the_manifest_gains_while_the_tool_takes_its_locks_is_skipped(space: Space) -> None:
+    database = space.database
+
+    def rewritten(key: str) -> None:
+        # node-22 rewrites the manifest while the tool waits for the scope lock of the model: a manifest read
+        # before the transaction would still be the old one.
+        if key.endswith(OLD_A):
+            space.write_manifest(["dg_current", "dg_manifest", OLD_A])
+
+    database.on_lock = rewritten
     assert space.run("--apply") == 0
-    assert space.receipt("model-0002.json")["class"] == "in_manifest"
-    assert space.receipt("model-0002.json")["status"] == "skipped"
-    assert len(space.database.rows_of(OLD_A)) == 2 and space.database.rows_of(OLD_B) == []
-    recheck = [p for s, p in space.database.statements if _flat(s) == _flat(CLASSIFY_SQL) and p[1] == OLD_A]
+    assert space.receipt("model-0002.json") == {
+        "model_id": OLD_A, "status": "skipped", "rows": 2, "backup": None, "sha256": None, "class": "in_manifest",
+    }  # fmt: skip
+    assert len(database.rows_of(OLD_A)) == 2 and database.rows_of(OLD_B) == []
+    assert f"copy:{OLD_A}" not in database.events
+    recheck = [p for s, p in database.statements if _flat(s) == _flat(CLASSIFY_SQL) and p[1] == OLD_A]
     assert recheck == [(30, OLD_A, OLD_A, ["dg_current", "dg_manifest", OLD_A])]
+    # The summary still records the manifest the run started from.
+    assert space.receipt("purge-receipt.json")["manifest_at_start"]["model_count"] == 2
 
 
-def test_a_manifest_that_turns_malformed_stops_the_run_before_the_next_model(space: Space) -> None:
-    space.on_sleep = lambda: space.manifest.write_text('{"models": [{"basin_id": "x"}]}', encoding="utf-8")
+def test_a_manifest_that_turns_malformed_under_the_locks_stops_the_run(space: Space) -> None:
+    database = space.database
+
+    def broken(key: str) -> None:
+        if key.endswith(OLD_A):
+            space.manifest.write_text('{"models": [{"basin_id": "x"}]}', encoding="utf-8")
+
+    database.on_lock = broken
     assert space.run("--apply") == 1
     failed = space.receipt("purge-failed.json")
     assert failed["failed_model"]["model_id"] == OLD_A and "without a model_id" in failed["failed_model"]["error"]
+    assert failed["failed_model"]["outcome"] == "rolled_back"
     assert [model["model_id"] for model in failed["models"]] == [LEGACY]
     assert failed["models_not_attempted"] == [OLD_B]
-    assert len(space.database.rows_of(OLD_A)) == 2 and len(space.database.rows_of(OLD_B)) == 4
-    assert "lock_timeout" not in space.database.events[space.database.events.index("commit") + 1 :]
+    assert len(database.rows_of(OLD_A)) == 2 and len(database.rows_of(OLD_B)) == 4
+    # The model's transaction was rolled back (after the classification's and before the close's), nothing of
+    # it was classified or deleted, and the next model was not started.
+    assert database.connections[0].rollbacks == 3
+    after = database.events[database.events.index("commit") + 1 :]
+    assert after == ["lock_timeout", f"lock:met.interp_weight:gfs\x1fgfs_0p25\x1f{OLD_A}"]
+
+
+def test_a_backup_shorter_than_the_server_count_rolls_the_model_back_and_stops_the_run(space: Space) -> None:
+    database = space.database
+    database.copy_loses_a_row_of = OLD_A  # the server reports 2 deleted rows, the file holds 1
+    assert space.run("--apply") == 1
+    directory = space.run_directory()
+    failed = space.receipt("purge-failed.json")
+    assert failed["failed_model"]["model_id"] == OLD_A
+    assert failed["failed_model"]["outcome"] == "rolled_back" and failed["failed_model"]["backup_kept"] is None
+    assert "holds 1 rows and the server reports 2 deleted" in failed["failed_model"]["error"]
+    assert [model["model_id"] for model in failed["models"]] == [LEGACY]
+    assert failed["models_not_attempted"] == [OLD_B]
+    assert len(database.rows_of(OLD_A)) == 2 and len(database.rows_of(OLD_B)) == 4
+    assert not (directory / f"weights-{OLD_A}.csv").exists() and not (directory / "model-0002.json").exists()
+    assert not (directory / "purge-receipt.json").exists()
+    assert f"classify:{OLD_B}" not in database.events
+    assert database.events.count("commit") == 1
 
 
 def test_rows_left_after_the_delete_roll_the_model_back_and_stop_the_run(space: Space) -> None:

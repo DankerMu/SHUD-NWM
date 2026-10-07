@@ -712,6 +712,10 @@ commit;
 ```
 
 forcing producer 为某个 model 产出时也会重建它的权重（delete + insert），所以仍在产出的 model 不需要手工恢复。
+恢复回来的行带着原来的 `created_at`：该 model 若此后没有变成受保护的（进 manifest、有窗口内的 run / forcing 等），下一次 `--apply` 会把它再删一遍。
+
+[`scripts/register_grid_snapshot_drift.py`](../../../scripts/register_grid_snapshot_drift.py) 更新权重行时**不取**上面那把 advisory 锁：
+它在跑时工具等的是行锁，等到 `lock_timeout`（10 秒）就在那个 model 停下——两者不要同时跑。
 
 **这次没做的**：
 

@@ -48,7 +48,8 @@ is deleted by `model_id` through `interp_weight (model_id, station_id, variable,
      of any `(basin_version_id, lower(source_id))`;
    - it is not a `model_id` of the canonical manifest
      `<OBJECT_STORE_ROOT>/scheduler/registry/manifest-last.json` (`models[*].model_id`). The manifest is read
-     before classification and re-read before every model's transaction (node-22 rewrites it). Missing,
+     before classification and re-read for every model inside its transaction, after the advisory locks
+     and before the re-check (node-22 rewrites it). Missing,
      unreadable, no `models` list, or any row without a non-empty string `model_id` → refused (whole run, or
      stop before that model);
    - no `hydro.hydro_run` row of it (any type, any status) has `cycle_time`, `start_time`, `created_at` or
@@ -81,7 +82,8 @@ is deleted by `model_id` through `interp_weight (model_id, station_id, variable,
       `COPY` takes no bind parameters: `model_id` must match `^[A-Za-z0-9_.-]{1,128}$` (else the model is a
       failure, nothing sent) and is rendered with `psycopg2.sql.Literal`. The column list is a constant of the
       tool, in table order;
-   5. `SELECT count(*) … WHERE model_id = %s` must be 0 and the CSV must hold at least one data row,
+   5. `SELECT count(*) … WHERE model_id = %s` must be 0 and the CSV's data rows must equal the row count the
+      COPY reported (and be at least one),
       otherwise rollback and failure; file and directory fsynced; then commit. The backup is removed only
       when the commit call was never reached; a commit that raises leaves the backup and reports the outcome
       as unknown.
