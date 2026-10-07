@@ -29,6 +29,10 @@ from _pytest.mark.expression import Expression, Scanner, TokenType
 import scripts.select_ci_tests as _prod_module
 from scripts.select_ci_tests import (
     BACKEND_PYTHON_SOURCE_PREFIXES,
+    BASIN_RETIREMENT_HELPERS_PATH,
+    BASIN_RETIREMENT_OWNER_PATH,
+    BASIN_RETIREMENT_PACKAGE_MODULES,
+    BASIN_RETIREMENT_TESTS,
     BASINS_PACKAGE_HELPERS_CONSUMER_TESTS,
     BASINS_PACKAGE_HELPERS_PATH,
     BASINS_PACKAGE_PUBLICATION_TESTS,
@@ -2163,6 +2167,14 @@ def test_select_tests_maps_autopipeline_script_without_core_smoke_fallback() -> 
         "tests/test_node27_autopipeline_published_reparse.py",
         "tests/test_node27_connection_attribution.py",
         "tests/test_node27_connection_attribution_delegated.py",
+        # #2757: the basin retirement tool imports `_basin_key_set` from this
+        # script for the key it writes to AUTOPIPE_EXCLUDE_BASINS; all five of
+        # its partitions drive that derivation through `main`.
+        "tests/test_node27_retire_basin_apply.py",
+        "tests/test_node27_retire_basin_dry_run.py",
+        "tests/test_node27_retire_basin_exclude_and_wait.py",
+        "tests/test_node27_retire_basin_refusals.py",
+        "tests/test_node27_retire_basin_steps.py",
         # #1774: the autopipe stats guard's two ANALYZE legs are what force the
         # writer role to OWN the relations, so the write-role guards must run
         # when this script changes.
@@ -7403,13 +7415,16 @@ def test_selector_state_matrix_rows_6_7_no_suite_fallback_and_missing_targets(
     # #1744 path B + #1656 + #2185 + #1627: packages/common/** retains the
     # core-smoke baseline BY POLICY and routes all three supplemental scans — no
     # meta-guard rider (D6 unchanged). #1684 EVID-01: the shared policy owner now
-    # also selects its dedicated focused matrix suite.
+    # also selects its dedicated focused matrix suite. #2757: and the five basin
+    # retirement partitions, which assert the explicit deactivate decision the
+    # tool builds with `trusted_internal_policy_decision`.
     assert sorted(no_suite) == sorted(
         {
             *CORE_SMOKE_TESTS,
             INVARIANT_SUITE_PATH,
             WRITE_SURFACE_SCAN_PATH,
             AUTH_POLICY_TEST,
+            *BASIN_RETIREMENT_TESTS,
             FAMILY_GUARD_PATH,
             RESOLVE_SURFACE_GUARD_PATH,
         }
@@ -7466,6 +7481,7 @@ def test_selector_state_matrix_row_11_multiple_changed_paths_accumulate() -> Non
     # and both paths sit under #2185 write-surface roots, which adds the scan,
     # and under #1627 family-guard roots, which adds the guard.
     # #1684 EVID-01: auth_policy's focused matrix suite joins the accumulation.
+    # #2757: so do the basin retirement partitions on the same rule.
     assert (
         sorted(
             set(CORE_SMOKE_TESTS)
@@ -7475,6 +7491,7 @@ def test_selector_state_matrix_row_11_multiple_changed_paths_accumulate() -> Non
                 INVARIANT_SUITE_PATH,
                 WRITE_SURFACE_SCAN_PATH,
                 AUTH_POLICY_TEST,
+                *BASIN_RETIREMENT_TESTS,
                 FAMILY_GUARD_PATH,
                 RESOLVE_SURFACE_GUARD_PATH,
             }
@@ -12601,6 +12618,10 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
     # #2739: every model succession partition takes the `space` fixture and the
     # fake `systemctl`; the apply-and-resume partition is the full-chain one.
     (MODEL_SUCCESSION_HELPERS_PATH, "tests/test_node22_model_succession_apply_and_resume.py"),
+    # #2757: every basin retirement partition takes the `space` fixture (the
+    # strict fake database, the fake registry store, the fake `systemctl`); the
+    # apply partition is the full-chain one.
+    (BASIN_RETIREMENT_HELPERS_PATH, "tests/test_node27_retire_basin_apply.py"),
     # #1102: the shared fixture surface of the seven publisher partitions. The
     # calibration-overrides partition anchors it because it is the one that names
     # the most of that surface (the declaration builders, both published-bytes
@@ -14683,6 +14704,62 @@ def test_model_succession_tracked_tree_is_seven_modules_six_suites_and_one_helpe
     } == expected
     assert {path for path in tracked if PurePosixPath(path).name.startswith("model_succession")} == {
         MODEL_SUCCESSION_HELPERS_PATH
+    }
+
+
+def test_basin_retirement_tool_selects_its_suites_and_rides_the_modules_it_imports_from() -> None:
+    # #2757: no path derives a partition name of the basin retirement suite, so
+    # every route is explicit; and the tool decides from code it imports -- the
+    # autopipeline's key normalisation, the shared receipt writer, the policy
+    # decision and the lifecycle operation's returned shape -- so a change to
+    # any of those must run it.
+    retirement = set(BASIN_RETIREMENT_TESTS)
+
+    def selected(path: str) -> set[str]:
+        return set(select_tests([path], repo_root=Path(".")))
+
+    assert len(retirement) == 5 and all(Path(suite).exists() for suite in retirement), sorted(retirement)
+    for path in (BASIN_RETIREMENT_OWNER_PATH, *BASIN_RETIREMENT_PACKAGE_MODULES, BASIN_RETIREMENT_HELPERS_PATH):
+        assert retirement <= selected(path), path
+    for path in (
+        "scripts/node27_autopipeline.py",
+        "packages/common/succession_receipt.py",
+        "packages/common/auth_policy.py",
+        "packages/common/model_registry.py",
+        "packages/common/model_registry_lifecycle.py",
+        "packages/common/model_registry_preflight_rules.py",
+    ):
+        assert retirement <= selected(path), path
+    # The tool is imported by nothing it imports from: its own rows select no suite of theirs.
+    assert "tests/test_node27_autopipeline_preflight.py" not in selected(BASIN_RETIREMENT_OWNER_PATH)
+    assert not set(MODEL_SUCCESSION_TESTS) & selected("scripts/basin_retirement/steps.py")
+    # The node-22 half does not import the node-27 half: its rows do not select these partitions.
+    assert not retirement & selected(MODEL_SUCCESSION_OWNER_PATH)
+
+
+def test_basin_retirement_tracked_tree_is_six_modules_five_suites_and_one_helper() -> None:
+    # #2757: the tool is an entry script over six modules, each with its own
+    # row. A seventh module, a stray `__init__.py` (scripts/ is a PEP 420
+    # namespace tree) or a sixth partition has no route until it is listed, and
+    # reddens here instead of dropping out of the PR lane in silence.
+    modules = set(BASIN_RETIREMENT_PACKAGE_MODULES)
+    assert set(_tracked_python_files("scripts/basin_retirement")) == modules
+    assert len(modules) == 6 and BASIN_RETIREMENT_OWNER_PATH not in modules
+    assert Path(BASIN_RETIREMENT_OWNER_PATH).exists()
+    assert not Path("scripts/basin_retirement/__init__.py").exists()
+
+    expected = set(BASIN_RETIREMENT_TESTS)
+    assert len(expected) == 5
+    for pattern in (BASIN_RETIREMENT_OWNER_PATH, *sorted(modules), BASIN_RETIREMENT_HELPERS_PATH):
+        (rule,) = [rule for rule in (*PATH_TEST_RULES, *SUPPORT_MODULE_TEST_RULES) if rule.pattern == pattern]
+        assert set(rule.tests) == expected, pattern
+
+    tracked = _tracked_python_files("tests")
+    assert {
+        path for path in tracked if PurePosixPath(path).name.startswith("test_node27_retire_basin")
+    } == expected
+    assert {path for path in tracked if PurePosixPath(path).name.startswith("node27_retire_basin")} == {
+        BASIN_RETIREMENT_HELPERS_PATH
     }
 
 

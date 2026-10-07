@@ -597,8 +597,9 @@ SUCCESSION_ARGS=(
 不再手工停 timer、手工跑发布工具。
 
 **这只是退役的 node-22 一半。** 工具**从不碰任何 Basins 目录**，不动 node-27 上的 run、`AUTOPIPE_EXCLUDE_BASINS`
-与 `core.model_instance`；那些是 `operating-scope.md` 7.2 的第 2 步起，由 node-27 的退役工具（另一项变更）接手，
-它用**同一个 `--succession-id`**，并且在本节的 succession 跑完之前拒绝运行。
+与 `core.model_instance`；那些是 `operating-scope.md` 7.2 的第 2 步起，由 node-27 的退役工具
+`scripts/node27_retire_basin.py` 接手（命令、回执与手工复活见 [`operating-scope.md`](operating-scope.md) 7.6），
+它用**同一个 `--succession-id`**，每个 basin version 跑一次，并且在本节的 succession 跑完（`step-finish.json`）之前拒绝运行。
 
 没有新包、没有 provision，所以没有 `copyback`，也没有 kind 检查、IC 审计与克隆，五步：
 
