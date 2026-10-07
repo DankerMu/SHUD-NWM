@@ -286,7 +286,8 @@ basins_hys_* 后继」**，所以 #1701 原计划的「换 id + 状态延续」�
 **退役流域的 manifest 发布（现行做法，#2757）。** 上面第 1 步现在由 `scripts/node22_model_succession.py` 的
 `--kind remove_basin` 一条命令做完：停 timer、等在跑的 pass 结束、发布、refresh、再启动 timer，每步有回执、
 可续跑、可 `--abort`。命令与读法见 [`recalibration-and-archive.md`](recalibration-and-archive.md) 的 5.7.4。
-它只做 manifest 这一步：不碰 Basins 目录，也不做本节第 2 步起 node-27 上的事（run、排除名单、model 行）。
+它只做 manifest 这一步：不碰 Basins 目录，也不做本节第 2 步起 node-27 上的事（run、排除名单、model 行）——
+后者由 node-27 的退役工具用同一个 `--succession-id` 接着做，见 §7.6（第 4 步移目录仍然手工）。
 各流域的 Slurm job name 相同，`squeue` 分不出要退的 `dg_*`，所以不靠「先确认队列里没有它们在飞」把关：
 发布前已提交的 run 之后仍可能跑完入库，由 node-27 那一半处理（先加排除名单，再翻 `superseded`）。
 
@@ -486,3 +487,132 @@ stale 最长 600 s、每 45 s 预热回放，所以隔 ≥ 60 s 读两次、直�
 
 **执行结果：见 receipt（待填）**——dry-run / apply 的 receipt 路径、各步与各探测耗时、
 三个 timer 停启前后的 `list-timers`、上面的删后各项，在生产执行完成后填入。
+
+### 7.6 node-27 的流域退役工具（#2757）
+
+§7.2 五步里的第 2、3、5 步（run 翻 `superseded`、加排除名单、deactivate model 行）现在由
+[`scripts/node27_retire_basin.py`](../../../scripts/node27_retire_basin.py) 一条命令按固定顺序做完，
+每步有回执、可续跑。第 1 步仍是 node-22 的 `--kind remove_basin`
+（[`recalibration-and-archive.md`](recalibration-and-archive.md) 5.7.4），第 4 步（移走 Basins 目录）
+**工具不做**，见下文「仍然手工的」。
+
+**顺序：先 node-22，后 node-27，用同一个 `--succession-id`。** 工具在任何步骤之前检查
+`<回执根>/<succession-id>/step-finish.json` 的 `outcome` 是 `completed`、`plan.json` 的 `kind` 是
+`remove_basin`、plan 的 `removes` 里至少有一个 id 是这个 basin version 名下的 `core.model_instance` 行，
+并且 canonical manifest 里**已经没有这个流域的任何行**（本 basin version 的行，以及同一 `basin_id` 其它
+version 的行——排除名单按流域生效，流域还有 version 在调度时不能退；同一流域换网格不是退役，走 §7.2 坑 2
+末尾的 `AUTOPIPE_EXCLUDE_MODEL_IDS`）。任何一项不满足就拒绝，什么都不写。
+node-22 那一半因 hard stop 而手工收尾的 succession 没有 `step-finish.json`：node-27 这几步也照 §7.2 手工做。
+
+工具的四步：
+
+```text
+exclude（把流域 key 追加进 AUTOPIPE_EXCLUDE_BASINS，等一轮在这之后才开始的 autopipe）
+  -> supersede（succeeded / parsed / published 的 run 行备份成 CSV 并翻 superseded，同一个事务）
+  -> deactivate（该 basin version 全部 active 的 model 行：先全部 preflight，再逐行走 lifecycle）
+  -> verify（再等一轮完整的 autopipe，回读：没有 active 行、没有候选 run、key 还在名单里）
+```
+
+```bash
+# node-27，nwm
+cd /home/nwm/NWM && export PATH=$HOME/.local/bin:$PATH TMPDIR=/home/nwm/tmp
+# 环境两种装法，任选其一。工具要求进程里的 DATABASE_URL 与 env 文件里那一行逐字相同，否则拒绝
+# (a) source ingest env 文件
+set -a; . infra/env/node27-ingest.env; set +a
+# (b) 只取需要的两行
+export DATABASE_URL="$(grep '^DATABASE_URL=' infra/env/node27-ingest.env | cut -d= -f2-)"
+export OBJECT_STORE_ROOT="$(grep '^OBJECT_STORE_ROOT=' infra/env/node27-ingest.env | cut -d= -f2-)"
+
+SUCCESSION_ID=<succession-id>                        # 与 node-22 的 remove_basin 相同
+RETIRE_ARGS=(
+  --succession-id "$SUCCESSION_ID"
+  --basin-version-id "<完整的 basin_version_id>"       # 一次一个，精确匹配，不是流域名也不是前缀
+  --operator-id "<operator>"
+  --reason "<退役原因，写进回执与审计日志>"
+)
+LOG=/home/nwm/tmp/retire-$SUCCESSION_ID.log
+
+# 1) dry-run：不改任何文件、不写回执、不提交任何写事务；读它打印的 JSON
+cd /home/nwm/NWM && env -u NHMS_AUTH_MODE -u AUTH_BACKEND uv run --no-sync python -m scripts.node27_retire_basin "${RETIRE_ARGS[@]}"
+
+# 2) 报告无误、owner 过目后 detached 执行（两次等 autopipe，各最多 30 分钟）；看 $LOG 与回执目录
+cd /home/nwm/NWM && { setsid nohup env -u NHMS_AUTH_MODE -u AUTH_BACKEND uv run --no-sync python -m scripts.node27_retire_basin "${RETIRE_ARGS[@]}" --apply > "$LOG" 2>&1 < /dev/null & }
+```
+
+`basin_version_id` 从 `core.basin_version` 按 `basin_id` 查出来再抄，不要手拼。`--env-file` 默认是本 checkout 的
+`infra/env/node27-ingest.env`，`--receipt-root` 默认 `<OBJECT_STORE_ROOT>/scheduler/succession`，
+`--autopipe-wait-seconds` 默认 1800。
+
+- **开始之前就拒绝的（两种模式都一样，此时还没连库）**：进程环境里有 `NHMS_AUTH_MODE` 或 `AUTH_BACKEND`
+  （lifecycle 调用只能带 ingest 环境，所以上面两条命令都套了 `env -u`）；进程的 `DATABASE_URL` 与 env 文件里的
+  不是同一个值（env 文件必须恰好有一行不带引号、不带 `export` 的 `DATABASE_URL=<值>`——这把「写哪个库」和
+  「改哪份排除名单」绑在一起，演练库配不上生产 env 文件）；已有另一个实例在跑（独占锁 `<env 文件>.retire-lock`）。
+- **读 dry-run 报告看什么**：`would_be_refused` 为空；`preconditions` 里的 `basin_id`、`basin_key`、
+  `removed_model_rows` 是要退的那个流域；`steps.exclude.would` 说要不要改 env 文件；`steps.supersede` 的
+  `row_count` / `status_counts` 是真实语句跑出来又回滚的结果（有前置条件被拒时这一步是 `not run`，不向库发写语句）；
+  `steps.deactivate.active_model_rows` 每行 `preflight_blockers` 都是 `[]`；`autopipe_unit_now` 是 unit 的一次读数，
+  dry-run 不等。
+- **一个 succession 退几个流域**：node-22 的 `remove_basin` 可以一次移除几个流域的 model；node-27 这边**每个
+  basin version 跑一次**，同一个 `--succession-id`、不同的 `--basin-version-id`，一个跑完再跑下一个（锁会拒绝并行）。
+  各自的回执与备份互不相干，都在自己的 `retire-<basin_version_id>/` 目录里。
+- **exclude 只改一行**：env 文件必须是普通文件（不是符号链接）、权限恰好 0600、属主是当前用户，并且恰好有一行
+  `AUTOPIPE_EXCLUDE_BASINS=<逗号串>`（不带引号、行尾没有注释、没有 `export`、没有 `+=`、没有第二处赋值），否则这一步
+  失败、文件不动。key 是 `basin_id` 经 autopipe 自己的规范化得到的（`basins_huai` -> `huai`），名单里已有同一个 key
+  的任何写法时不写文件。改之前先写备份 `<env 文件>.bak-<succession-id>-<basin_version_id>`（0600，里面有
+  `DATABASE_URL`，所以放在 env 文件旁边而不是回执根）；同名备份已存在时内容与 env 文件相同就沿用，不同就失败，从不覆盖。
+- **等 autopipe 等的是什么**：工具不停、不启动任何 unit，只读 `nhms-node27-autopipe.service` 的状态。算数的一轮必须
+  在改完 env 文件**之后**才开始、已经结束、是自己退出的，退出码是 0 或 1（1 = 有流域的 run 或 seed 失败，名单照样读全了；
+  2 = bootstrap / preflight 被拦，不算；被信号杀掉的不算）。一轮结束时 autopipe 的锁文件还被占着（有人在 systemd 之外
+  手工跑着一轮）也不算，接着等下一轮。等不到就超时失败：同一条命令重跑会重新等，不会再改 env 文件、不会写第二份备份。
+- **失败与续跑**：某步失败时退出码非零，目录里多一份 `retire-failed-<stamp>.json`（`step`、`reason`、
+  `completed_steps`；deactivate 失败时还有 `rows_done` 与每行的 preflight / 返回状态）。排除原因后**同一条命令重跑**，
+  有回执的步骤跳过。工具不回退任何一步。
+
+**读回执**（`<回执根>/<succession-id>/retire-<basin_version_id>/`）：
+
+| 文件 | 看什么 |
+|---|---|
+| `retire-exclude.json` | `basin_key`、`file_changed`、`env_backup`、`sha256_before` / `sha256_after`、`autopipe_round`（起止的 monotonic 微秒、`exit_code` 1、`exit_status` 0 或 1、探测的锁路径、因锁被占而跳过的轮次） |
+| `hydro-run-backup.csv` | 被翻转的 run 行翻转之前的整行（`COPY ... WITH CSV HEADER`），复活时用 |
+| `retire-supersede.json` | `row_count` = `updated_row_count`、`status_counts`、CSV 的 `run_backup_sha256`；`recovered_from_existing_backup` 为 `true` 表示这份回执是续跑时按已有 CSV 补写的 |
+| `retire-deactivate.json` | `model_rows[]` 每行的 `preflight_warnings`、`status`（`allowed` 或 `already_current`）与 `audit_log_id` |
+| `retire-verify.json` | `active_model_row_count` 0、`candidate_run_count` 0、`key_in_exclusion_list` true，以及第二轮 autopipe |
+
+> 翻 `superseded` 的 UPDATE 只改 `status`，不动 `updated_at`（同 §7.4 的提醒）：翻转时间看 `retire-supersede.json`
+> 的 `generated_at`，不要看 run 行。
+
+**「备份 CSV 已经在、候选 run 还有」**。supersede 重跑时发现 `hydro-run-backup.csv` 已存在：名下已没有
+`succeeded` / `parsed` / `published` 的 run，就是上次事务提交了、回执没写成，工具按这份 CSV 补写回执，什么都不改。
+还有候选 run 时工具失败并把两件事都报出来，由人判断——要么上次在提交之前被杀（CSV 是孤儿，一行都没翻），要么提交之后
+又有 run 入库（排除名单没生效，先查这个）。处置：把 CSV 的 `run_id` 与表里对一遍，
+
+```sql
+select status, count(*) from hydro.hydro_run where basin_version_id = '<basin_version_id>' group by status;
+```
+
+CSV 里的 `run_id` 在表里仍是原状态 = 上次没提交，把 CSV 改名挪开（不要删），重跑同一条命令，工具会重新备份并翻转；
+CSV 里的行已是 `superseded` 而候选 run 是别的 `run_id` = 提交之后新入库的，先确认 key 在排除名单里、等一轮 autopipe，
+再把 CSV 改名挪开后重跑（新的 CSV 只含新行，两份都留着）。
+
+**verify 失败（被翻回去了）**。失败消息会点名是哪一项：model 行又 active、有 run 回到候选状态、或 key 不在名单里。
+原因只有三种：读了旧名单的那一轮 autopipe、key 不在名单时跑的一轮、有人手工强制入库。先把排除项补回去，再重跑同一条命令；
+已经完成的三步不会重做，需要重新 supersede / deactivate 时把对应的 `retire-<步名>.json`（以及 supersede 的 CSV）改名挪开。
+
+**仍然手工的**（工具跑完会把这三条打在 stderr 上）：
+
+- **Basins 目录**：照 §7.2 第 4 步 `mv` 到 `<root>/Basins-retired/<标签>/`，两棵树都移，不删。
+- **前端静态 geojson**：仍带着该流域的要素，不渲染但要过滤一次（§7.1.1「静态 geojson 的残留」）。
+- **排除项不能删**：只要 object store 里还有该流域的 run 目录，`AUTOPIPE_EXCLUDE_BASINS` 里的 key 就必须留着（§7.5 的同一条理由）。
+
+工具**从不写** `core.basin`、`core.basin_version`、run 的 `updated_at`，不移任何 Basins 目录，不改任何 unit 的状态。
+
+**手工复活（工具不做）**。顺序与退役相反，都从本次的备份出发，做之前 owner 先裁定：
+
+1. node-22：把流域的 `dg_*` 行重新发布进两份 manifest（重新 provision 后走 5.7.3 的 `add_basin`，或恢复 `remove_basin`
+   那次的 manifest 备份）；Basins 目录从 `Basins-retired/` 移回。
+2. `core.model_instance`：`retire-deactivate.json` 的 `rows_done` 就是当时 active 的行，逐行走 §7.1.1 的 lifecycle 通道
+   `activate` 回来（baseline 那一行少了 = 底图上没有河网）。
+3. `hydro.hydro_run`：按 `hydro-run-backup.csv` 里每行的 `run_id` 与 `status` 把状态改回去（只改 `status`，
+   仍然不动 `updated_at`），在一个事务里做，改的行数与 CSV 行数相同再提交。
+4. 最后才从 `AUTOPIPE_EXCLUDE_BASINS` 去掉该 key：对照 `.bak-<succession-id>-<basin_version_id>` 只改那一行
+   （**不要整份还原备份**——其后别的退役追加的 key 会一起丢），然后跨一轮完整 autopipe 再读数。

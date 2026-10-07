@@ -884,6 +884,29 @@ MODEL_SUCCESSION_TESTS: tuple[str, ...] = (
     "tests/test_node22_model_succession_remove_basin.py",
     "tests/test_node22_model_succession_timer_and_refresh.py",
 )
+# #2757: the node-27 basin retirement tool is an entry script (argparse, `main`)
+# over the six modules of `scripts/basin_retirement/`, and its suite is five
+# partitions sharing one tests/ support module. No path derives a partition
+# name, so every route is explicit, one row per module, as for the model
+# succession tool above. Every partition drives `main` (or `run_step`) through
+# all six modules, so each module carries all five.
+BASIN_RETIREMENT_OWNER_PATH = "scripts/node27_retire_basin.py"
+BASIN_RETIREMENT_PACKAGE_MODULES: tuple[str, ...] = (
+    "scripts/basin_retirement/autopipe.py",
+    "scripts/basin_retirement/database.py",
+    "scripts/basin_retirement/envfile.py",
+    "scripts/basin_retirement/model.py",
+    "scripts/basin_retirement/run.py",
+    "scripts/basin_retirement/steps.py",
+)
+BASIN_RETIREMENT_HELPERS_PATH = "tests/node27_retire_basin_helpers.py"
+BASIN_RETIREMENT_TESTS: tuple[str, ...] = (
+    "tests/test_node27_retire_basin_apply.py",
+    "tests/test_node27_retire_basin_dry_run.py",
+    "tests/test_node27_retire_basin_exclude_and_wait.py",
+    "tests/test_node27_retire_basin_refusals.py",
+    "tests/test_node27_retire_basin_steps.py",
+)
 # #2739: the succession tool calls the clone tool and the merged-registry
 # publish tool in-process, real code against fake packages, and decides from
 # their receipts and errors; a change to either tool must run its partitions.
@@ -2299,6 +2322,13 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         MODEL_SUCCESSION_TESTS,
     ),
     PathTestRule(
+        # #2757: the `space` fixture, the strict fake database, the fake
+        # registry store and the fake `systemctl` of the basin retirement
+        # suite. All five partitions import it at module scope.
+        BASIN_RETIREMENT_HELPERS_PATH,
+        BASIN_RETIREMENT_TESTS,
+    ),
+    PathTestRule(
         # #2532: the node-22 refresh-timer probe suite's shared fakes (the fake
         # `systemctl`, receipt builders, `_run` / `_verdict`), installer harness
         # and runbook section reader. All five partitions import it at module
@@ -3502,8 +3532,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # by the merged-registry publish step; a change must run both suites.
         # #2739: the model succession tool writes its plan, step, failure and
         # abort receipts through the same helpers.
+        # #2757: so does the node-27 basin retirement tool (receipt directory,
+        # exclusive-create write, the succession id).
         "packages/common/succession_receipt.py",
-        (*SUCCESSION_RECEIPT_TESTS, *MODEL_SUCCESSION_TESTS),
+        (*SUCCESSION_RECEIPT_TESTS, *MODEL_SUCCESSION_TESTS, *BASIN_RETIREMENT_TESTS),
     ),
     # #2738: the publish tool's entry script and one row per package module --
     # see MERGED_REGISTRY_PUBLISH_PACKAGE_MODULES.
@@ -3524,6 +3556,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule("scripts/model_succession/scheduler.py", MODEL_SUCCESSION_TESTS),
     PathTestRule("scripts/model_succession/systemd.py", MODEL_SUCCESSION_TESTS),
     PathTestRule("scripts/model_succession/tools.py", MODEL_SUCCESSION_TESTS),
+    # #2757: the basin retirement tool's entry script and one row per package
+    # module -- see BASIN_RETIREMENT_PACKAGE_MODULES.
+    PathTestRule(BASIN_RETIREMENT_OWNER_PATH, BASIN_RETIREMENT_TESTS),
+    PathTestRule("scripts/basin_retirement/autopipe.py", BASIN_RETIREMENT_TESTS),
+    PathTestRule("scripts/basin_retirement/database.py", BASIN_RETIREMENT_TESTS),
+    PathTestRule("scripts/basin_retirement/envfile.py", BASIN_RETIREMENT_TESTS),
+    PathTestRule("scripts/basin_retirement/model.py", BASIN_RETIREMENT_TESTS),
+    PathTestRule("scripts/basin_retirement/run.py", BASIN_RETIREMENT_TESTS),
+    PathTestRule("scripts/basin_retirement/steps.py", BASIN_RETIREMENT_TESTS),
     PathTestRule(
         # #2737: `plan_direct_grid_variant` is pinned against what
         # `register_direct_grid_variant` then registers only in the provision
@@ -5509,6 +5550,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # #1774: the stats-guard ANALYZE legs are what force the writer
             # role to OWN the relations, so the write-role guards must run.
             "tests/test_node27_write_roles.py",
+            # #2757: the basin retirement tool imports `_basin_key_set` from this
+            # script: the key it writes to AUTOPIPE_EXCLUDE_BASINS, and compares
+            # the list and the manifest with, is the one derived here.
+            *BASIN_RETIREMENT_TESTS,
         ),
     ),
     PathTestRule(
@@ -6755,8 +6800,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # core-smoke baseline and the #1656 timescale rider; these rows only attach
     # the focused contracts an owner-only PR previously could not reach.
     PathTestRule(
+        # #2757: the basin retirement tool builds its explicit deactivate
+        # decision with `trusted_internal_policy_decision`; its partitions
+        # assert the decision the store receives.
         "packages/common/auth_policy.py",
-        (AUTH_POLICY_TEST,),
+        (AUTH_POLICY_TEST, *BASIN_RETIREMENT_TESTS),
     ),
     PathTestRule(
         "packages/common/request_auth.py",
@@ -6948,7 +6996,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     *(
         PathTestRule(
             path,
-            (*CONNECTION_ATTRIBUTION_TESTS, *RESPONSE_MODEL_PRESERVATION_TESTS, *MODEL_REGISTRY_IMPORTER_TESTS),
+            # #2757: the basin retirement tool deactivates through the store's
+            # lifecycle operation and decides from the shape it returns; its fake
+            # store mirrors that shape, so a change to the facade or an owner
+            # (the lifecycle owner above all) must run its partitions.
+            (
+                *CONNECTION_ATTRIBUTION_TESTS,
+                *RESPONSE_MODEL_PRESERVATION_TESTS,
+                *MODEL_REGISTRY_IMPORTER_TESTS,
+                *BASIN_RETIREMENT_TESTS,
+            ),
         )
         for path in CONNECTION_ATTRIBUTION_STORE_PATHS
     ),
