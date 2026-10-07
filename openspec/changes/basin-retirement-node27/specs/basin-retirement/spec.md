@@ -55,6 +55,12 @@ or stop any unit.
   held by another round
 - **THEN** that run does not satisfy the wait
 
+#### Scenario: Rounds back to back
+
+- **WHEN** the unit is running on every poll and a round that started after the reference is followed by a
+  round with a later start
+- **THEN** the earlier of the two satisfies the wait
+
 #### Scenario: A round in which another basin failed
 
 - **WHEN** a run started after the reference and exited with the status autopipe uses for failed runs
@@ -108,16 +114,22 @@ is running.
 
 The tool SHALL back up the rows of `hydro.hydro_run` of the basin version in `succeeded`, `parsed` or
 `published` to a file and set their status to `superseded` in one transaction, changing no other column, and
-MUST roll back when the updated count differs from the backed-up count. It SHALL deactivate every active
+MUST roll back when the updated rows are not exactly the backed-up rows. Once the commit has been attempted
+the backup MUST be kept, whatever happens next. It SHALL deactivate every active
 `core.model_instance` row of the basin version, selected by exact `basin_version_id`, through the model
 lifecycle operation with an explicit policy decision, after a preflight of all rows found no blocker, and
 MUST treat any returned status other than a completed transition as a failure. It MUST NOT write
 `core.basin`, `core.basin_version` or any Basins directory.
 
-#### Scenario: Counts differ
+#### Scenario: Updated rows differ from the backup
 
-- **WHEN** the update affects a different number of rows than the backup holds
+- **WHEN** the update affects rows other than exactly those the backup holds
 - **THEN** the transaction is rolled back and no receipt is written
+
+#### Scenario: The commit outcome is not known
+
+- **WHEN** the commit call raises or the run is interrupted after it
+- **THEN** the backup is kept and no receipt is written
 
 #### Scenario: The backup is already there
 

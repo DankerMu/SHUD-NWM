@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 
+import psycopg2
 import pytest
 
 from scripts.basin_retirement import run
@@ -297,3 +298,14 @@ def test_a_step_without_the_receipt_it_requires_is_refused_and_changes_nothing(
     assert space.everything() == before
     assert space.database.connections == [] and space.systemctl_calls() == []
     assert space.store.preflights == [] and space.store.operations == []
+
+
+def test_a_database_that_cannot_be_read_is_refused_before_any_write(space: Space) -> None:  # noqa: F811
+    space.database.read_error = psycopg2.OperationalError("could not connect to server: Connection refused")
+
+    message = _refused(space)
+
+    assert "Refused before any step" in message
+    assert "the database could not be read: The database refused: OperationalError: could not connect" in message
+    assert not space.directory().exists() and not space.env_backup().exists()
+    assert "s3cret-pw" not in message

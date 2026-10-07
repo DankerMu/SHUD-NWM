@@ -86,6 +86,7 @@ def _recovered_from_backup(settings: Settings) -> dict[str, Any]:
             "the same command."
         )
     facts = database.backup_facts(backup)
+    facts.pop("run_ids")
     return {
         **facts,
         "run_backup": str(backup),
@@ -105,24 +106,29 @@ def supersede(settings: Settings, _basin: Basin) -> dict[str, Any]:
         descriptor = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, RUN_BACKUP_MODE)
     except OSError as error:
         raise StepFailure(f"The run backup {backup} cannot be created ({error}). No run was changed.") from error
+    # The one fact that decides whether the backup this run created may be removed.  Nothing after the commit
+    # call removes it, here or in the receipt write that follows this step: the rerun finds it and decides
+    # from the table.
+    commit = database.CommitMarker()
     try:
         with os.fdopen(descriptor, "wb") as handle:
             os.fchmod(handle.fileno(), RUN_BACKUP_MODE)
             facts = database.backup_and_supersede(
-                settings.database_url, settings.basin_version_id, backup=handle, backup_path=backup, commit=True
+                settings.database_url, settings.basin_version_id, backup=handle, backup_path=backup, commit=commit
             )
-    except database.CommitOutcomeUnknown:
-        raise
-    except BaseException:
-        # Nothing was committed: a backup left behind would make the rerun stop at "backup exists".
-        backup.unlink(missing_ok=True)
-        raise
-    return {
-        **facts,
-        "run_backup": str(backup),
-        "run_backup_sha256": succession.file_sha256(backup),
-        "recovered_from_existing_backup": False,
-    }
+        sha256 = succession.file_sha256(backup)
+    except BaseException as error:
+        if not commit.reached:
+            # Nothing was committed: a backup left behind would make the rerun stop at "backup exists".
+            backup.unlink(missing_ok=True)
+            raise
+        if isinstance(error, database.CommitOutcomeUnknown) or not isinstance(error, Exception):
+            raise
+        raise StepFailure(
+            f"The supersede step failed after its commit call ({type(error).__name__}: {error}). The backup "
+            f"{backup} was kept: run the same command, which writes the receipt from it."
+        ) from error
+    return {**facts, "run_backup": str(backup), "run_backup_sha256": sha256, "recovered_from_existing_backup": False}
 
 
 def _lifecycle_arguments(settings: Settings, model_id: str) -> dict[str, Any]:
@@ -325,7 +331,7 @@ def preview_supersede(settings: Settings, *, preconditions_hold: bool) -> tuple[
                     settings.basin_version_id,
                     backup=handle,
                     backup_path=temporary,
-                    commit=False,
+                    commit=None,
                 )
         finally:
             temporary.unlink(missing_ok=True)

@@ -66,8 +66,9 @@ CANDIDATE_COUNT_SQL = (
 )
 SUPERSEDE_SQL = (
     "UPDATE hydro.hydro_run SET status = 'superseded' WHERE basin_version_id = %s "
-    "AND status IN ('succeeded','parsed','published')"
+    "AND status IN ('succeeded','parsed','published') RETURNING run_id"
 )
+LOCK_TIMEOUT_SQL = "SET LOCAL lock_timeout = '10s'"
 COPY_PREFIX = "COPY (SELECT * FROM hydro.hydro_run WHERE basin_version_id = "
 COPY_SUFFIX = " AND status IN ('succeeded','parsed','published') ORDER BY run_id) TO STDOUT WITH CSV HEADER"
 CANDIDATES = ("succeeded", "parsed", "published")
@@ -107,13 +108,28 @@ if "raw" in answer:
     sys.stdout.write(answer["raw"])
     sys.exit(0)
 now = time.clock_gettime_ns(time.CLOCK_MONOTONIC) // 1000
-start = now if answer["start"] == "now" else int(answer["start"])
+marks_path = os.path.join(here, "marks.json")
+marks = {}
+if os.path.exists(marks_path):
+    with open(marks_path, encoding="utf-8") as handle:
+        marks = json.load(handle)
+start = answer["start"]
+if start == "now":
+    start = now
+elif isinstance(start, str) and start.startswith("@"):
+    start = marks[start[1:]]
+if answer.get("mark"):
+    marks[answer["mark"]] = int(start)
+    with open(marks_path, "w", encoding="utf-8") as handle:
+        json.dump(marks, handle)
+start = int(start)
 end = answer["exit"]
 if end == "now":
     end = now
 elif isinstance(end, str) and end.startswith("+"):
     end = start + int(end[1:])
 values = {
+    "LoadState": answer.get("load", "loaded"),
     "ActiveState": answer["state"],
     "ExecMainStartTimestampMonotonic": start,
     "ExecMainExitTimestampMonotonic": int(end),
@@ -145,10 +161,15 @@ def round_answer(
     return {"state": state, "start": start, "exit": end, "code": code, "status": status}
 
 
-def running_answer(start: Any = "now") -> dict[str, Any]:
-    """A round in flight: the oneshot unit is ``activating`` and has no exit timestamp yet."""
+def running_answer(start: Any = "now", *, mark: str | None = None) -> dict[str, Any]:
+    """A round in flight: the oneshot unit is ``activating`` and has no exit timestamp yet.
 
-    return round_answer(state="activating", start=start, end=0, code=0, status=0)
+    ``mark`` names the start this answer was stamped with; a later answer reads it back with
+    ``start="@<mark>"``, which is how the same round is shown on several polls.
+    """
+
+    answer = round_answer(state="activating", start=start, end=0, code=0, status=0)
+    return {**answer, "mark": mark} if mark else answer
 
 
 @contextlib.contextmanager
@@ -206,6 +227,14 @@ class FakeDatabase:
         self.audit_log: list[dict[str, Any]] = []
         # Called between the COPY and the UPDATE of a supersede transaction: a concurrent writer.
         self.before_update: Any = None
+        # Failure injection, each a psycopg2 error instance (or, for the hooks, a callable).
+        self.read_error: Exception | None = None  # raised by every SELECT
+        self.update_error: Exception | None = None  # raised by the UPDATE
+        self.commit_error: Exception | None = None  # raised by commit()
+        self.commit_lands_before_error = False  # whether the server committed before the client lost it
+        self.after_commit: Any = None  # called at the end of a commit() that returns
+        self.on_writer_close: Any = None  # called by close() of a connection that committed
+        self.last_copy_handle: Any = None
 
     def add_basin_version(self, basin_version_id: str, basin_id: str) -> None:
         self.basin_versions[basin_version_id] = basin_id
@@ -289,10 +318,17 @@ class FakeConnection:
 
     def commit(self) -> None:
         assert not self.closed
+        error = self.database.commit_error
+        if error is not None and not self.database.commit_lands_before_error:
+            raise error
         self.commits += 1
         if self._working is not None:
             self.database.runs = self._working
             self._working = None
+        if error is not None:
+            raise error
+        if self.database.after_commit is not None:
+            self.database.after_commit()
 
     def rollback(self) -> None:
         self.rollbacks += 1
@@ -301,6 +337,8 @@ class FakeConnection:
     def close(self) -> None:
         self._working = None
         self.closed = True
+        if self.commits and self.database.on_writer_close is not None:
+            self.database.on_writer_close()
 
 
 class FakeCursor:
@@ -332,6 +370,7 @@ class FakeCursor:
         assert isinstance(sql, str), "copy_expert was given something that is not the rendered statement"
         self.connection.statements.append(sql)
         self.connection.copies.append(sql)
+        self.connection.database.last_copy_handle = handle
         # copy_expert binds nothing: a placeholder left in the statement would reach the server as text.
         assert "%s" not in sql and "%(" not in sql, sql
         assert sql.startswith(COPY_PREFIX + "'") and sql.endswith("'" + COPY_SUFFIX), sql
@@ -348,9 +387,18 @@ class FakeCursor:
 
     def execute(self, sql: str, params: Any = None) -> None:
         self.connection.statements.append(sql)
+        database_ = self.connection.database
+        if sql == LOCK_TIMEOUT_SQL:
+            # Only as the first statement of a writable transaction, and with nothing bound.
+            assert params is None and not self.connection.readonly, (sql, params)
+            assert self.connection.statements == [sql], self.connection.statements
+            self.connection.lock_timeout = "10s"
+            self._rows = []
+            return
         assert isinstance(params, tuple) and len(params) == 1 and isinstance(params[0], str), (sql, params)
         (basin_version_id,) = params
-        database_ = self.connection.database
+        if sql != SUPERSEDE_SQL and database_.read_error is not None:
+            raise database_.read_error
         if sql == BASIN_ID_SQL:
             found = database_.basin_versions.get(basin_version_id)
             self._rows = [(found,)] if found is not None else []
@@ -366,19 +414,22 @@ class FakeCursor:
         elif sql == SUPERSEDE_SQL:
             if self.connection.readonly:
                 raise psycopg2.errors.ReadOnlySqlTransaction("cannot execute UPDATE in a read-only transaction")
+            assert getattr(self.connection, "lock_timeout", None) == "10s", "the update ran without a lock timeout"
+            if database_.update_error is not None:
+                raise database_.update_error
             if database_.before_update is not None:
                 database_.before_update()
             runs = self.connection.writable_runs()
             # A concurrent writer's committed rows are visible to the statement that follows them.
             for run_id, run in database_.runs.items():
                 runs.setdefault(run_id, copy.deepcopy(run))
-            changed = 0
+            returned: list[tuple[Any, ...]] = []
             for run in runs.values():
                 if run["basin_version_id"] == basin_version_id and run["status"] in CANDIDATES:
                     run["status"] = "superseded"  # the one column the statement sets
-                    changed += 1
-            self.rowcount = changed
-            self._rows = []
+                    returned.append((run["run_id"],))
+            self.rowcount = len(returned)
+            self._rows = returned  # RETURNING run_id
         else:
             raise AssertionError(f"the tool sent a statement the fake database does not know: {sql}")
 
@@ -398,6 +449,7 @@ class FakeRegistryStore:
         self.preflights: list[dict[str, Any]] = []
         self.operations: list[dict[str, Any]] = []
         self.preflight_blockers: dict[str, list[dict[str, str]]] = {}
+        self.preflight_raises: dict[str, Exception] = {}
         # model_id -> "blocked" | "audit_failure" | "already_current" | "raise"; anything else transitions.
         self.operation_outcomes: dict[str, str] = {}
 
@@ -447,6 +499,8 @@ class FakeRegistryStore:
             "reason": reason,
         }
         self.preflights.append(call)
+        if model_id in self.preflight_raises:
+            raise self.preflight_raises[model_id]
         return self._preflight(model_id, call, self.preflight_blockers.get(model_id, []))
 
     def model_lifecycle_operation(

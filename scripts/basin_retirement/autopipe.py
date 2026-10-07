@@ -7,16 +7,32 @@ call: it starts, stops, enables and disables nothing.
 A round in flight when the exclusion list was edited has read the old list and
 re-activates the rows of the basin; only a round that started after the edit
 is known to honour it.  ``nhms-node27-autopipe.service`` is a oneshot unit,
-``activating`` while it runs.  A round qualifies when it started after the
-reference, has ended, exited by itself (``ExecMainCode`` 1, systemd's numeric
-``CLD_EXITED``) and with status 0 or 1: status 1 is a round in which some
-basin's run or seed failed, which read the list in full; status 2 is a round
-blocked at its bootstrap or preflight and proves nothing, and so does a round
-ended by a signal.
+``activating`` while it runs.
 
-A qualifying round that only skipped (another round, started outside systemd,
-held the autopipe lock) proves nothing either, so the lock is probed after it;
-when it is held the wait goes on for the next round.
+Production rounds take longer than the timer period (measured 2026-10-07:
+about 13 minutes against 10, back to back for hours), so the next round starts
+in the second the previous one ends: the unit is then never seen at rest and
+the exit status of a finished round is overwritten at once.  The wait
+therefore follows rounds by their start timestamp.  A round is the candidate
+once its start is later than the reference, and it has ended, and qualifies,
+in one of two ways:
+
+* seen at rest -- the start is still the candidate's, the unit is not
+  ``activating``, it exited by itself (``ExecMainCode`` 1, systemd's numeric
+  ``CLD_EXITED``) with status 0 or 1.  Status 1 is a round in which some
+  basin's run or seed failed, which read the list in full.  Status 2 (blocked
+  at its bootstrap or preflight) and a round ended by a signal prove nothing:
+  that candidate is dropped and the wait goes on with the next round.
+* followed -- a later poll shows a later start and the candidate was never
+  seen at rest.  A oneshot unit does not overlap itself, so the candidate has
+  ended; its exit status is not known and is recorded as such.  (Residual: a
+  blocked round followed by a new start inside one poll interval is accepted.)
+
+A candidate seen at rest that only skipped (another round, started outside
+systemd, held the autopipe lock) proves nothing either, so the lock is probed
+after it; when it is held the wait goes on with the next round.  After a
+followed candidate the lock is held by the round that followed it, and the
+probe is skipped.
 """
 
 from __future__ import annotations
@@ -34,18 +50,25 @@ UNIT = "nhms-node27-autopipe.service"
 SYSTEMCTL_ENV = "NHMS_BASIN_RETIREMENT_SYSTEMCTL"
 DEFAULT_SYSTEMCTL = "/usr/bin/systemctl"
 PROPERTIES = (
+    "LoadState",
     "ActiveState",
     "ExecMainStartTimestampMonotonic",
     "ExecMainExitTimestampMonotonic",
     "ExecMainCode",
     "ExecMainStatus",
 )
+NUMERIC_PROPERTIES = PROPERTIES[2:]
 QUERY_TIMEOUT_SECONDS = 60
 POLL_SECONDS = 15.0
+LOADED_STATE = "loaded"
 RUNNING_STATE = "activating"
 CLD_EXITED = 1
 # 0: a clean round; 1: a round in which some basin's run or seed failed.  Both read the exclusion list in full.
 QUALIFYING_EXIT_STATUSES = (0, 1)
+# How a qualifying round is known to have ended, as the receipt says it.
+ENDED_AT_REST = "seen_at_rest"
+ENDED_FOLLOWED = "followed"
+UNKNOWN = "unknown"
 
 # Indirections for tests.
 sleep = time.sleep
@@ -61,6 +84,7 @@ def monotonic_us() -> int:
 class Round:
     """What the unit says about its last, or its running, main process."""
 
+    load_state: str
     active_state: str
     start_us: int
     exit_us: int
@@ -69,6 +93,7 @@ class Round:
 
     def record(self) -> dict[str, Any]:
         return {
+            "load_state": self.load_state,
             "active_state": self.active_state,
             "start_monotonic_us": self.start_us,
             "exit_monotonic_us": self.exit_us,
@@ -76,11 +101,16 @@ class Round:
             "exit_status": self.exit_status,
         }
 
-    def qualifies(self, reference_us: int) -> bool:
+    @property
+    def at_rest(self) -> bool:
+        return self.active_state != RUNNING_STATE
+
+    @property
+    def ended_by_itself_past_its_preflight(self) -> bool:
+        """Of a round at rest: it exited by itself with a status that means it read the exclusion list in full."""
+
         return (
-            self.start_us > reference_us
-            and self.exit_us >= self.start_us
-            and self.active_state != RUNNING_STATE
+            self.exit_us >= self.start_us
             and self.exit_code == CLD_EXITED
             and self.exit_status in QUALIFYING_EXIT_STATUSES
         )
@@ -117,13 +147,20 @@ def read_unit() -> Round:
     if missing:
         raise StepFailure(f"{text} did not print {missing}; got {completed.stdout!r}. Nothing was assumed.")
     numbers: dict[str, int] = {}
-    for name in PROPERTIES[1:]:
+    for name in NUMERIC_PROPERTIES:
         if not values[name].isascii() or not values[name].isdigit():
             raise StepFailure(f"{text} printed {name}={values[name]!r}, which is not a number. Nothing was assumed.")
         numbers[name] = int(values[name])
     if not values["ActiveState"]:
         raise StepFailure(f"{text} printed an empty ActiveState. Nothing was assumed.")
+    # A unit that is not loaded (not-found, masked, error) never runs a round: waiting for one would only time out.
+    if values["LoadState"] != LOADED_STATE:
+        raise StepFailure(
+            f"{text} printed LoadState={values['LoadState']!r}, not {LOADED_STATE!r}: the autopipe unit is not "
+            "installed for this user, so no round will run. Nothing was assumed."
+        )
     return Round(
+        load_state=values["LoadState"],
         active_state=values["ActiveState"],
         start_us=numbers["ExecMainStartTimestampMonotonic"],
         exit_us=numbers["ExecMainExitTimestampMonotonic"],
@@ -162,7 +199,7 @@ def lock_held(path: str) -> bool:
 
 
 def wait_for_round(reference_us: int, *, timeout_seconds: float, lock_path: str) -> dict[str, Any]:
-    """Poll until a round qualifies and the autopipe lock is free; a ``StepFailure`` on timeout.
+    """Poll until a round that started after the reference has ended in a way that counts; a ``StepFailure`` on timeout.
 
     Returns what the receipt records about the round.  The same command waits
     again after a timeout, with a new reference.
@@ -170,33 +207,69 @@ def wait_for_round(reference_us: int, *, timeout_seconds: float, lock_path: str)
 
     started_us = monotonic_us()
     deadline_us = started_us + int(timeout_seconds * 1_000_000)
+    # The next candidate is the first round whose start is later than this.
     after_us = reference_us
+    candidate_us: int | None = None
+    dropped: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     polls = 0
+
+    def result(facts: dict[str, Any]) -> dict[str, Any]:
+        return {
+            **facts,
+            "unit": UNIT,
+            "reference_monotonic_us": reference_us,
+            "lock_path_probed": lock_path,
+            "candidates_dropped": dropped,
+            "rounds_skipped_while_lock_held": skipped,
+            "polls": polls,
+            "waited_seconds": round((monotonic_us() - started_us) / 1_000_000, 3),
+        }
+
     while True:
         observed = read_unit()
         polls += 1
-        if observed.qualifies(after_us):
-            if not lock_held(lock_path):
-                return {
-                    **observed.record(),
-                    "unit": UNIT,
-                    "reference_monotonic_us": reference_us,
-                    "lock_path_probed": lock_path,
-                    "lock_held": False,
-                    "rounds_skipped_while_lock_held": skipped,
-                    "polls": polls,
-                    "waited_seconds": round((monotonic_us() - started_us) / 1_000_000, 3),
+        if candidate_us is not None and observed.start_us > candidate_us:
+            # Never seen at rest, and a oneshot unit does not overlap itself: the candidate ran until this start.
+            return result(
+                {
+                    "start_monotonic_us": candidate_us,
+                    "ended": ENDED_FOLLOWED,
+                    "followed_by_start_monotonic_us": observed.start_us,
+                    "exit_monotonic_us": UNKNOWN,
+                    "exit_code": UNKNOWN,
+                    "exit_status": UNKNOWN,
+                    "active_state": observed.active_state,
+                    # The round that followed holds the lock: a probe would say nothing about the candidate.
+                    "lock_probe": "skipped: the round that followed the candidate holds the lock",
+                    "lock_held": UNKNOWN,
                 }
-            # A round outside systemd is still running with the list it read earlier; this one only skipped.
-            skipped.append(observed.record())
-            after_us = observed.start_us
+            )
+        if candidate_us is None and observed.start_us > after_us:
+            candidate_us = observed.start_us
+        if candidate_us is not None and observed.start_us == candidate_us and observed.at_rest:
+            if not observed.ended_by_itself_past_its_preflight:
+                # Blocked at its bootstrap or preflight, or ended by a signal: it proves nothing.
+                dropped.append(observed.record())
+            elif lock_held(lock_path):
+                # A round outside systemd is still running with the list it read earlier; this one only skipped.
+                skipped.append(observed.record())
+            else:
+                facts = {**observed.record(), "ended": ENDED_AT_REST, "lock_probe": "free", "lock_held": False}
+                return result(facts)
+            after_us, candidate_us = candidate_us, None
         remaining_us = deadline_us - monotonic_us()
         if remaining_us <= 0:
+            following = (
+                f"it was following the round that started at {candidate_us} (monotonic microseconds), which was "
+                "still running at the last reading"
+                if candidate_us is not None
+                else f"no round had started after {after_us} (monotonic microseconds) yet"
+            )
             raise StepFailure(
-                f"No autopipe round that started after the reference ended within {timeout_seconds:.0f} s "
-                f"({polls} readings of {UNIT}; the last: {observed.record()}; rounds that ended while the autopipe "
-                f"lock {lock_path} was held: {len(skipped)}). This tool starts and stops nothing. Run the same "
-                "command: it waits again, from a new reference."
+                f"No autopipe round that started after the reference ended within {timeout_seconds:.0f} s: "
+                f"{following} ({polls} readings of {UNIT}; the last: {observed.record()}; candidates dropped: "
+                f"{len(dropped)}; rounds that ended while the autopipe lock {lock_path} was held: {len(skipped)}). "
+                "This tool starts and stops nothing. Run the same command: it waits again, from a new reference."
             )
         sleep(min(POLL_SECONDS, remaining_us / 1_000_000))

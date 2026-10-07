@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
+import psycopg2
 import pytest
 
 from scripts.basin_retirement import autopipe
@@ -80,8 +81,9 @@ def test_a_dry_run_runs_the_real_statements_and_keeps_nothing(space: Space) -> N
     assert (supersede["row_count"], supersede["updated_row_count"]) == (4, 4)
     assert supersede["status_counts"] == {"succeeded": 1, "parsed": 1, "published": 2}
     (writer,) = [connection for connection in space.database.connections if not connection.readonly]
-    assert writer.statements[0].startswith(COPY_PREFIX) and writer.statements[1] == SUPERSEDE_SQL
-    assert len(writer.statements) == 3 and (writer.commits, writer.closed) == (0, True) and writer.rollbacks >= 1
+    assert writer.statements[0] == "SET LOCAL lock_timeout = '10s'"
+    assert writer.statements[1].startswith(COPY_PREFIX) and writer.statements[2] == SUPERSEDE_SQL
+    assert len(writer.statements) == 4 and (writer.commits, writer.closed) == (0, True) and writer.rollbacks >= 1
     assert space.database.statuses(HUAI)["huai-03"] == "published"
 
     # deactivate: the preflight of every active row, and its result.
@@ -185,7 +187,8 @@ def test_a_dry_run_of_a_count_mismatch_reports_it_and_keeps_nothing(space: Space
 
     assert status == 1
     (refused,) = report["would_be_refused"]
-    assert refused.startswith("supersede: The update changed 5 rows") and "the backup holds 4" in refused
+    assert refused.startswith("supersede: The rows the update changed are not the rows of the backup")
+    assert "the update returned 5 rows and the backup holds 4" in refused
     assert space.everything()["tree"] == before_tree
     assert space.database.commits == 0 and list((space.root / "tmp").iterdir()) == []
 
@@ -256,3 +259,41 @@ def test_a_dry_run_of_a_completed_retirement_reports_four_completed_steps(space:
     # Only the precondition reads.
     later = space.database.statements[statements:]
     assert later and all(statement.startswith("SELECT") for statement in later)
+
+
+def test_a_dry_run_reports_a_preflight_that_raises(space: Space) -> None:  # noqa: F811
+    space.store.preflight_raises["dg_huai_gfs"] = RuntimeError("model_id not found: dg_huai_gfs")
+
+    status, report = _dry_run(space)
+
+    assert status == 1
+    (refused,) = report["would_be_refused"]
+    assert refused.startswith("deactivate: The deactivate preflight of dg_huai_gfs failed (RuntimeError")
+    assert report["steps"]["deactivate"] == {"status": "would fail"}
+    assert space.database.active(HUAI) == ACTIVE
+
+
+def test_a_dry_run_reports_a_database_that_cannot_be_read(space: Space) -> None:  # noqa: F811
+    space.database.read_error = psycopg2.OperationalError("could not connect to server")
+
+    status, report = _dry_run(space)
+
+    assert status == 1
+    assert any(
+        entry.startswith("precondition: the database could not be read: The database refused: OperationalError")
+        for entry in report["would_be_refused"]
+    )
+    # No basin is known, so nothing that writes was sent.
+    assert report["basin_id"] is None and report["steps"]["supersede"]["status"] == "not run"
+    assert SUPERSEDE_SQL not in space.database.statements
+
+
+def test_a_dry_run_reports_a_unit_that_is_not_loaded(space: Space) -> None:  # noqa: F811
+    space.set_answers({**round_answer(), "load": "not-found"})
+
+    status, report = _dry_run(space)
+
+    assert status == 1
+    (refused,) = report["would_be_refused"]
+    assert refused.startswith("autopipe unit: ") and "LoadState='not-found', not 'loaded'" in refused
+    assert len(space.systemctl_calls()) == 1

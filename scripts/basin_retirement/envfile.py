@@ -190,15 +190,24 @@ def load(path: Path) -> EnvFile:
     """Read the env file; a ``StepFailure`` when it is not a file this tool may rely on or edit."""
 
     content = _read_checked(path)
-    plain, assignments = _plain_lines(content, EXCLUDE_NAME, _EXCLUDE_LINE)
-    if len(plain) != 1 or assignments != 1:
+    plain, _assignments = _plain_lines(content, EXCLUDE_NAME, _EXCLUDE_LINE)
+    # Anywhere else in the file -- a comment, an export, a declare, an unset, a second assignment on a line --
+    # the name is something this tool cannot tell from a second assignment.
+    occurrences = content.count(EXCLUDE_NAME.encode("ascii"))
+    if len(plain) != 1 or occurrences != 1:
         raise StepFailure(
             f"The env file {path} must hold exactly one line {EXCLUDE_NAME}=<list> with nothing but "
-            f"[A-Za-z0-9_,.-] after the '=' (no quotes, no comment, no export, no +=) and no other assignment "
-            f"of it; it has {len(plain)} such lines and {assignments} lines assigning {EXCLUDE_NAME} in any form. "
-            "bash would read something other than what this tool writes. The file was not changed."
+            f"[A-Za-z0-9_,.-] after the '=' (no quotes, no comment, no export, no +=), and the name must occur "
+            f"nowhere else in the file, not even in a comment; it has {len(plain)} such lines and the name occurs "
+            f"{occurrences} times. bash would read something other than what this tool writes. The file was not "
+            "changed."
         )
     index, value = plain[0]
+    if index and content.split(b"\n")[index - 1].endswith(b"\\"):
+        raise StepFailure(
+            f"The line before the {EXCLUDE_NAME} line of {path} ends with a backslash: bash joins the two, so the "
+            "assignment is not one. The file was not changed."
+        )
     return EnvFile(path=path, content=content, line_index=index, value=value.decode("ascii"))
 
 

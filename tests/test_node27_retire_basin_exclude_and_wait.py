@@ -6,9 +6,12 @@ Partition of the ``scripts/node27_retire_basin.py`` suite; the fakes and the
 
 from __future__ import annotations
 
+import errno
+import json
 import os
 import stat
 import subprocess
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -100,17 +103,39 @@ def _quoted_lock_path(space: Space) -> None:  # noqa: F811
     space.write_env(space.env_text().replace(f"AUTOPIPE_LOCK_PATH={path}", f'AUTOPIPE_LOCK_PATH="{path}"'))
 
 
+def _name_in_a_comment(space: Space) -> None:  # noqa: F811
+    # Not an assignment by the old rule; the name must occur exactly once all the same.
+    space.write_env(space.env_text().replace("# Retired basins;", "# AUTOPIPE_EXCLUDE_BASINS: retired basins;"))
+
+
+def _name_in_an_unset(space: Space) -> None:  # noqa: F811
+    space.write_env(space.env_text() + "unset AUTOPIPE_EXCLUDE_BASINS\n")
+
+
+def _second_assignment_on_the_line_before(space: Space) -> None:  # noqa: F811
+    space.write_env(space.env_text().replace("AUTOPIPE_RUN_WORKERS=2", "X=1 AUTOPIPE_EXCLUDE_BASINS=neiliuqu true"))
+
+
+def _preceding_line_ends_with_a_backslash(space: Space) -> None:  # noqa: F811
+    # bash joins the two lines: the assignment becomes the tail of a comment-free line above it.
+    space.write_env(space.env_text().replace("comma separated.\n", "comma separated.\nNOTE=retired \\\n"))
+
+
 UNEXPECTED_ENV_FILES: list[tuple[Callable[[Space], None], str]] = [
     (_symlink, "is a symlink"),
     (_mode_0644, "has mode 0644; it must be exactly 0600"),
-    (_two_assignment_lines, "it has 2 such lines and 2 lines assigning AUTOPIPE_EXCLUDE_BASINS in any form"),
-    (_quoted_value, "it has 0 such lines and 1 lines assigning AUTOPIPE_EXCLUDE_BASINS in any form"),
-    (_trailing_comment, "it has 0 such lines and 1 lines assigning AUTOPIPE_EXCLUDE_BASINS in any form"),
-    (_extra_export_line, "it has 1 such lines and 2 lines assigning AUTOPIPE_EXCLUDE_BASINS in any form"),
-    (_extra_append_line, "it has 1 such lines and 2 lines assigning AUTOPIPE_EXCLUDE_BASINS in any form"),
-    (_no_assignment_line, "it has 0 such lines and 0 lines assigning AUTOPIPE_EXCLUDE_BASINS in any form"),
-    (_carriage_returns, "it has 0 such lines and 1 lines assigning AUTOPIPE_EXCLUDE_BASINS in any form"),
+    (_two_assignment_lines, "it has 2 such lines and the name occurs 2 times"),
+    (_quoted_value, "it has 0 such lines and the name occurs 1 times"),
+    (_trailing_comment, "it has 0 such lines and the name occurs 1 times"),
+    (_extra_export_line, "it has 1 such lines and the name occurs 2 times"),
+    (_extra_append_line, "it has 1 such lines and the name occurs 2 times"),
+    (_no_assignment_line, "it has 0 such lines and the name occurs 0 times"),
+    (_carriage_returns, "it has 0 such lines and the name occurs 1 times"),
     (_quoted_lock_path, "Which lock file the autopipe holds cannot be told"),
+    (_name_in_a_comment, "it has 1 such lines and the name occurs 2 times"),
+    (_name_in_an_unset, "it has 1 such lines and the name occurs 2 times"),
+    (_second_assignment_on_the_line_before, "it has 1 such lines and the name occurs 2 times"),
+    (_preceding_line_ends_with_a_backslash, "ends with a backslash: bash joins the two"),
 ]
 
 
@@ -262,6 +287,10 @@ def test_a_blocked_or_signalled_round_does_not_count(space: Space, proves_nothin
 
     waited = space.receipt("exclude")["autopipe_round"]
     assert (waited["polls"], waited["exit_code"], waited["exit_status"]) == (2, 1, 0)
+    assert waited["ended"] == "seen_at_rest"
+    (dropped,) = waited["candidates_dropped"]
+    assert (dropped["exit_code"], dropped["exit_status"]) == (proves_nothing["code"], proves_nothing["status"])
+    assert waited["start_monotonic_us"] > dropped["start_monotonic_us"]
 
 
 def test_a_round_that_ended_while_the_autopipe_lock_was_held_does_not_count_and_the_next_does(
@@ -343,19 +372,20 @@ def test_without_a_line_in_the_env_file_the_lock_path_is_the_process_environment
 
 UNRELIABLE_ANSWERS: list[tuple[dict[str, Any], str]] = [
     (
-        {"raw": "ActiveState=inactive\nExecMainStartTimestampMonotonic=soon\nExecMainExitTimestampMonotonic=0\n"
-                "ExecMainCode=1\nExecMainStatus=0\n"},
+        {"raw": "LoadState=loaded\nActiveState=inactive\nExecMainStartTimestampMonotonic=soon\n"
+                "ExecMainExitTimestampMonotonic=0\nExecMainCode=1\nExecMainStatus=0\n"},
         "ExecMainStartTimestampMonotonic='soon', which is not a number",
     ),  # fmt: skip
     (
-        {"raw": "ActiveState=inactive\nExecMainStartTimestampMonotonic=5\nExecMainExitTimestampMonotonic=6\n"},
+        {"raw": "LoadState=loaded\nActiveState=inactive\nExecMainStartTimestampMonotonic=5\n"
+                "ExecMainExitTimestampMonotonic=6\n"},
         "did not print ['ExecMainCode', 'ExecMainStatus']",
     ),
     ({"raw": "Failed to connect to bus: No medium found\n"}, "printed a line this tool does not know"),
     ({"raw": ""}, "did not print"),
     (
-        {"raw": "ActiveState=inactive\nExecMainStartTimestampMonotonic=5\nExecMainExitTimestampMonotonic=6\n"
-                "ExecMainCode=exited\nExecMainStatus=0\n"},
+        {"raw": "LoadState=loaded\nActiveState=inactive\nExecMainStartTimestampMonotonic=5\n"
+                "ExecMainExitTimestampMonotonic=6\nExecMainCode=exited\nExecMainStatus=0\n"},
         "ExecMainCode='exited', which is not a number",
     ),  # fmt: skip
     ({"rc": 1}, "exited 1"),
@@ -386,11 +416,15 @@ def test_a_systemctl_that_cannot_be_run_fails_the_step(space: Space) -> None:  #
 
 def test_a_timeout_fails_the_step_and_the_rerun_waits_again_without_a_second_backup(space: Space) -> None:  # noqa: F811
     env_before = space.env_file.read_bytes()
-    space.set_answers(running_answer())
+    # One round, started after the edit, still running on every poll: neither at rest nor followed.
+    space.set_answers(running_answer(mark="slow"), running_answer(start="@slow"))
 
     failure = _exclude_failed(space, wait=1.5)
 
     assert "No autopipe round that started after the reference ended within" in failure["reason"]
+    # It says which round it was following.
+    slow = json.loads((space.systemctl_directory / "marks.json").read_text(encoding="utf-8"))["slow"]
+    assert f"it was following the round that started at {slow} (monotonic microseconds)" in failure["reason"]
     assert "it waits again, from a new reference" in failure["reason"]
     # The key is in the env file, the backup is written, and there is no receipt of the step.
     assert space.excluded() == "zhaochen_hhy,hhe,huai"
@@ -435,8 +469,131 @@ def test_the_tool_only_ever_shows_the_unit(space: Space) -> None:  # noqa: F811
         assert command[1:4] == ["--user", "show", "nhms-node27-autopipe.service"]
         assert command[4:] == [
             "-p",
-            "ActiveState,ExecMainStartTimestampMonotonic,ExecMainExitTimestampMonotonic,ExecMainCode,ExecMainStatus",
+            "LoadState,ActiveState,ExecMainStartTimestampMonotonic,ExecMainExitTimestampMonotonic,"
+            "ExecMainCode,ExecMainStatus",
         ]
     # Nothing else is started by the tool but git, for the commit in the receipts.
     assert {command[0] for command in recorded if command not in systemctl} <= {"git"}
     assert stat.S_IMODE(space.env_file.stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize("load_state", ["not-found", "masked", "error"])
+def test_a_unit_that_is_not_loaded_fails_at_once(space: Space, load_state: str) -> None:  # noqa: F811
+    # Everything else about the answer would qualify.
+    space.set_answers({**round_answer(), "load": load_state})
+
+    failure = _exclude_failed(space)
+
+    assert f"printed LoadState={load_state!r}, not 'loaded'" in failure["reason"]
+    # At once: one reading, no waiting out the timeout.
+    assert len(space.systemctl_calls()) == 1
+
+
+def test_back_to_back_rounds_qualify_the_candidate_when_a_third_start_appears(space: Space) -> None:  # noqa: F811
+    # Production on 2026-10-07: 13-minute rounds against a 10-minute timer. The unit is `activating` on every
+    # poll, and the exit status of a finished round is never there to read.
+    in_flight_since = monotonic_us()
+    space.set_answers(
+        running_answer(start=in_flight_since),  # the round in flight at the reference
+        running_answer(start=in_flight_since),
+        running_answer(mark="second"),  # the next round: the candidate
+        running_answer(start="@second"),
+        running_answer(mark="third"),  # a third start: the candidate has ended
+    )
+    marks = space.systemctl_directory / "marks.json"
+
+    # The round that followed holds the autopipe lock, as it does in production: the probe is skipped.
+    with held_flock(space.autopipe_lock):
+        status, _report = space.run()
+
+    assert status == 0, space.last_stderr
+    stamped = json.loads(marks.read_text(encoding="utf-8"))
+    waited = space.receipt("exclude")["autopipe_round"]
+    assert waited["polls"] == 5
+    assert waited["reference_monotonic_us"] > in_flight_since
+    assert waited["start_monotonic_us"] == stamped["second"] > waited["reference_monotonic_us"]
+    assert waited["followed_by_start_monotonic_us"] > stamped["second"]
+    assert waited["ended"] == "followed"
+    assert (waited["exit_code"], waited["exit_status"], waited["exit_monotonic_us"]) == ("unknown",) * 3
+    assert waited["lock_probe"].startswith("skipped") and waited["lock_held"] == "unknown"
+    assert waited["candidates_dropped"] == [] and waited["rounds_skipped_while_lock_held"] == []
+    # verify's own wait went the same way, with rounds that started after exclude's had been followed.
+    verified = space.receipt("verify")["autopipe_round"]
+    assert verified["ended"] == "followed" and verified["exit_status"] == "unknown"
+    assert verified["start_monotonic_us"] > waited["followed_by_start_monotonic_us"]
+
+
+def test_a_candidate_seen_at_rest_with_status_2_is_dropped_and_the_following_round_qualifies(space: Space) -> None:  # noqa: F811
+    space.set_answers(
+        running_answer(mark="blocked"),
+        round_answer(state="failed", start="@blocked", status=2),  # seen at rest: blocked at its preflight
+        running_answer(mark="next"),  # a later start does not make the dropped round count ...
+        running_answer(start="@next"),
+        running_answer(mark="after"),  # ... the round after it is the one that qualifies, once it is followed
+    )
+
+    status, _report = space.run()
+
+    assert status == 0, space.last_stderr
+    stamped = json.loads((space.systemctl_directory / "marks.json").read_text(encoding="utf-8"))
+    waited = space.receipt("exclude")["autopipe_round"]
+    assert waited["polls"] == 5 and waited["ended"] == "followed"
+    assert waited["start_monotonic_us"] == stamped["next"]
+    (dropped,) = waited["candidates_dropped"]
+    assert (dropped["start_monotonic_us"], dropped["exit_status"]) == (stamped["blocked"], 2)
+
+
+def test_a_failed_rename_leaves_the_env_file_its_backup_and_no_temporary_file(space: Space) -> None:  # noqa: F811
+    env_before = space.env_file.read_bytes()
+    replaced: list[tuple[str, str]] = []
+
+    def failing_replace(source: Any, target: Any) -> None:
+        replaced.append((str(source), str(target)))
+        raise OSError(errno.EIO, "Input/output error")
+
+    space.monkeypatch.setattr(os, "replace", failing_replace)
+
+    failure = _exclude_failed(space)
+
+    assert "could not be replaced" in failure["reason"] and "Input/output error" in failure["reason"]
+    # The rename was the one way the env file is written, and the backup was there before it.
+    ((source, target),) = replaced
+    assert target == str(space.env_file) and Path(source).parent == space.env_file.parent
+    assert space.env_file.read_bytes() == env_before
+    assert stat.S_IMODE(space.env_file.stat().st_mode) == 0o600
+    assert space.env_backup().read_bytes() == env_before
+    assert sorted(path.name for path in space.env_file.parent.iterdir()) == [
+        "node27-ingest.env",
+        space.env_backup().name,
+        "node27-ingest.env.retire-lock",
+    ]
+    assert space.systemctl_calls() == []
+
+
+def test_an_env_file_edited_between_the_read_and_the_rename_is_not_replaced(space: Space) -> None:  # noqa: F811
+    real_mkstemp = tempfile.mkstemp
+    replaced: list[Any] = []
+    real_replace = os.replace
+
+    def an_editor_saves_meanwhile(*args: Any, **kwargs: Any) -> tuple[int, str]:
+        made = real_mkstemp(*args, **kwargs)
+        with space.env_file.open("ab") as handle:
+            handle.write(b"AUTOPIPE_COVERAGE_WORKERS=2\n")
+        return made
+
+    def recording_replace(source: Any, target: Any) -> None:
+        replaced.append(target)
+        real_replace(source, target)
+
+    space.monkeypatch.setattr(tempfile, "mkstemp", an_editor_saves_meanwhile)
+    space.monkeypatch.setattr(os, "replace", recording_replace)
+
+    failure = _exclude_failed(space)
+
+    assert "changed while it was being edited. It was not replaced." in failure["reason"]
+    assert replaced == []
+    # The editor's bytes stand: the key was not added, and no temporary file is left.
+    assert space.env_file.read_bytes().endswith(b"AUTOPIPE_RUN_WORKERS=2\nAUTOPIPE_COVERAGE_WORKERS=2\n")
+    assert space.excluded() == "zhaochen_hhy,hhe"
+    assert not list(space.env_file.parent.glob(".*.tmp"))
+    assert space.systemctl_calls() == []

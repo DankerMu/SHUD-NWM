@@ -23,6 +23,10 @@
 - One instance at a time (a lock beside the env file): the env edit is read-modify-rename, and two
   retirements waiting in parallel would lose one of the keys.
 
+- The wait follows start timestamps instead of waiting for the unit to be at rest: on 2026-10-07 the
+  production rounds ran about 13 minutes against a 10 minute timer, back to back for hours, so "at rest"
+  was never observable and a wait for it would time out after the env file was already edited.
+
 ## Failure and recovery
 
 | Failure | State left | Way on |

@@ -46,12 +46,26 @@ BACKUP_COPY_SQL = (
 )
 SUPERSEDE_SQL = (
     "UPDATE hydro.hydro_run SET status = 'superseded' WHERE basin_version_id = %s "
-    "AND status IN ('succeeded','parsed','published')"
+    "AND status IN ('succeeded','parsed','published') RETURNING run_id"
 )
+# First in the supersede transaction: an ingest holding a row lock fails the step instead of hanging it.
+LOCK_TIMEOUT_SQL = "SET LOCAL lock_timeout = '10s'"
 
 
 class CommitOutcomeUnknown(StepFailure):
-    """The ``COMMIT`` itself failed: whether the runs were superseded is not known, so the backup is kept."""
+    """The commit call did not return: whether the runs were superseded is not known."""
+
+
+class CommitMarker:
+    """Whether the commit call of a supersede transaction was reached.
+
+    The one fact that decides whether the run backup may be removed: set
+    before the call, so a commit that returned, raised or was interrupted, and
+    everything after it, all count as reached.
+    """
+
+    def __init__(self) -> None:
+        self.reached = False
 
 
 def registry_store(database_url: str) -> Any:
@@ -119,57 +133,83 @@ def candidate_run_count(database_url: str, basin_version_id: str) -> int:
 
 
 def backup_facts(path: Path) -> dict[str, Any]:
-    """Row count and per-status counts of a run backup, read back from the file itself."""
+    """Row count, per-status counts and the ``run_id`` of every row of a run backup, read back from the file."""
 
     try:
         with path.open(encoding="utf-8", newline="") as handle:
             rows = list(csv.reader(handle))
     except (OSError, UnicodeDecodeError, csv.Error) as error:
         raise StepFailure(f"The run backup {path} cannot be read back ({error}).") from error
-    if not rows or "status" not in rows[0]:
-        raise StepFailure(f"The run backup {path} has no CSV header with a status column.")
-    column = rows[0].index("status")
+    if not rows or "status" not in rows[0] or "run_id" not in rows[0]:
+        raise StepFailure(f"The run backup {path} has no CSV header with a run_id and a status column.")
+    status_column, id_column = rows[0].index("status"), rows[0].index("run_id")
     try:
-        statuses = Counter(row[column] for row in rows[1:])
+        statuses = Counter(row[status_column] for row in rows[1:])
+        run_ids = [row[id_column] for row in rows[1:]]
     except IndexError as error:
         raise StepFailure(f"The run backup {path} has a row shorter than its header.") from error
     unexpected = sorted(set(statuses) - set(CANDIDATE_STATUSES))
     if unexpected:
         raise StepFailure(f"The run backup {path} holds rows in {unexpected}, which this tool does not supersede.")
+    if len(set(run_ids)) != len(run_ids):
+        raise StepFailure(f"The run backup {path} holds a run_id more than once.")
     return {
         "row_count": len(rows) - 1,
         "status_counts": {status: statuses.get(status, 0) for status in CANDIDATE_STATUSES},
+        "run_ids": run_ids,
     }
 
 
+def _differing_ids(backed_up: set[str], updated: list[str]) -> str | None:
+    """What differs between the rows of the backup and the rows the update returned, or None."""
+
+    changed = set(updated)
+    if changed == backed_up and len(updated) == len(backed_up):
+        return None
+    only_backup, only_update = sorted(backed_up - changed), sorted(changed - backed_up)
+    return (
+        f"the update returned {len(updated)} rows and the backup holds {len(backed_up)}; in the backup only: "
+        f"{only_backup[:10]} ({len(only_backup)}), updated only: {only_update[:10]} ({len(only_update)})"
+    )
+
+
 def backup_and_supersede(
-    database_url: str, basin_version_id: str, *, backup: BinaryIO, backup_path: Path, commit: bool
+    database_url: str,
+    basin_version_id: str,
+    *,
+    backup: BinaryIO,
+    backup_path: Path,
+    commit: CommitMarker | None,
 ) -> dict[str, Any]:
     """Back the candidate runs up to ``backup`` and set them ``superseded``, in one transaction.
 
     The backup is flushed and fsynced, and so is its directory, before the
-    update; the transaction is committed only when ``commit``, and otherwise
-    rolled back after the same statements.  Any failure before the commit
-    rolls back; removing the backup file is the caller's part.
+    update.  The rows the update returns must be exactly the rows of the
+    backup: the two statements see separate snapshots, so equal counts are not
+    enough.  With a ``commit`` marker the transaction is committed, the marker
+    being set before the commit call; without one the same statements are
+    rolled back.  Removing the backup file is the caller's part, and it
+    depends on the marker alone.
     """
 
-    commit_attempted = False
     try:
         with _connection(database_url, readonly=False) as connection:
             with connection.cursor() as cursor:
+                cursor.execute(LOCK_TIMEOUT_SQL)
                 statement = cursor.mogrify(BACKUP_COPY_SQL, (basin_version_id,))
                 cursor.copy_expert(statement.decode("utf-8") if isinstance(statement, bytes) else statement, backup)
                 backup.flush()
                 os.fsync(backup.fileno())
                 fsync_directory(backup_path.parent)
                 facts = backup_facts(backup_path)
+                run_ids = facts.pop("run_ids")
                 cursor.execute(SUPERSEDE_SQL, (basin_version_id,))
-                updated = int(cursor.rowcount)
-                if updated != facts["row_count"]:
+                updated = [str(row[0]) for row in cursor.fetchall()]
+                differing = _differing_ids(set(run_ids), updated)
+                if differing:
                     raise StepFailure(
-                        f"The update changed {updated} rows of hydro.hydro_run but the backup holds "
-                        f"{facts['row_count']}: a run changed status between the two statements. The transaction "
-                        "was rolled back."
+                        f"The rows the update changed are not the rows of the backup: {differing}. A run changed "
+                        "status between the two statements. The transaction was rolled back."
                     )
                 cursor.execute(CANDIDATE_COUNT_SQL, (basin_version_id,))
                 left = int(cursor.fetchone()[0])
@@ -178,18 +218,17 @@ def backup_and_supersede(
                         f"{left} runs of {basin_version_id} are still in {list(CANDIDATE_STATUSES)} after the "
                         "update. The transaction was rolled back."
                     )
-            if commit:
-                # From here on nothing may conclude "not committed": an interrupt counts as unknown too.
-                commit_attempted = True
-                connection.commit()
-    except BaseException as error:
-        if commit_attempted:
-            raise CommitOutcomeUnknown(
-                f"The COMMIT of the supersede transaction did not return ({type(error).__name__}: "
-                f"{str(error).strip()}); whether the runs were superseded is not known, so the backup "
-                f"{backup_path} was kept."
-            ) from error
-        if isinstance(error, psycopg2.Error):
-            raise _database_failure(error) from error
-        raise
-    return {**facts, "updated_row_count": updated, "committed": commit}
+            if commit is not None:
+                # From here on nothing may conclude "not committed".
+                commit.reached = True
+                try:
+                    connection.commit()
+                except BaseException as error:  # an interrupt inside the call leaves the outcome unknown too
+                    raise CommitOutcomeUnknown(
+                        f"The COMMIT of the supersede transaction did not return ({type(error).__name__}: "
+                        f"{str(error).strip()}); whether the runs were superseded is not known. The backup "
+                        f"{backup_path} was kept: run the same command, which decides from the table."
+                    ) from error
+    except psycopg2.Error as error:
+        raise _database_failure(error) from error
+    return {**facts, "updated_row_count": len(updated), "committed": commit is not None}

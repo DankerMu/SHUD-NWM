@@ -6,20 +6,25 @@ Partition of the ``scripts/node27_retire_basin.py`` suite; the fakes and the
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import psycopg2
 import pytest
 
+from packages.common import succession_receipt
 from tests.node27_retire_basin_helpers import (
     HUAI,
     STEPS,
     SUPERSEDE_SQL,
     Space,
     round_answer,
+    running_answer,
     space,  # noqa: F401 - the fixture
     tree,
 )
@@ -72,7 +77,8 @@ def test_an_update_count_that_differs_from_the_backup_rolls_back_and_removes_the
 
     failure = _failed_in(space, "supersede")
 
-    assert "The update changed 5 rows of hydro.hydro_run but the backup holds 4" in failure["reason"]
+    assert "the update returned 5 rows and the backup holds 4" in failure["reason"]
+    assert "updated only: ['huai-99'] (1)" in failure["reason"]
     assert "rolled back" in failure["reason"]
     # Rolled back: no run changed, the late one included; no receipt; the backup this run created is gone.
     assert _candidate_statuses(space) == CANDIDATE_RUNS
@@ -305,3 +311,216 @@ def test_verify_completes_once_the_cause_is_put_right(space: Space) -> None:  # 
     assert report["steps"] == {"exclude": "skipped", "supersede": "skipped", "deactivate": "skipped",
                                "verify": "completed"}  # fmt: skip
     assert len(space.failures()) == 2
+
+
+def _supersede_left_only_its_backup(space: Space) -> Path:  # noqa: F811
+    """After a supersede that reached its commit call and did not finish: the backup is there, the receipt is not."""
+
+    backup = space.directory() / "hydro-run-backup.csv"
+    assert backup.exists(), "the backup was removed although the commit call had been reached"
+    assert backup.read_text(encoding="utf-8").count("model-of-huai-0") == 4
+    assert space.receipts_present() == ["exclude"]
+    assert space.store.preflights == [] and space.store.operations == []
+    return backup
+
+
+def test_returned_ids_that_are_not_the_backups_roll_back_although_the_counts_are_equal(space: Space) -> None:  # noqa: F811
+    def another_run_took_its_place() -> None:
+        # Between the two statements one backed-up run left the candidate statuses and another entered them.
+        space.database.runs["huai-04"]["status"] = "failed"
+        space.database.add_run("huai-99", HUAI, "published")
+
+    space.database.before_update = another_run_took_its_place
+
+    failure = _failed_in(space, "supersede")
+
+    assert "The rows the update changed are not the rows of the backup" in failure["reason"]
+    assert "the update returned 4 rows and the backup holds 4" in failure["reason"]
+    assert "in the backup only: ['huai-04'] (1), updated only: ['huai-99'] (1)" in failure["reason"]
+    # Rolled back, no receipt, and the backup this run created is gone.
+    assert space.database.statuses(HUAI)["huai-99"] == "published"
+    assert space.database.statuses(HUAI)["huai-01"] == "succeeded"
+    assert not (space.directory() / "hydro-run-backup.csv").exists()
+    assert space.database.commits == 0
+
+
+def test_a_database_error_on_the_update_rolls_back_and_removes_the_backup(space: Space) -> None:  # noqa: F811
+    # An ingest holds a row lock for longer than the lock timeout.
+    space.database.update_error = psycopg2.errors.LockNotAvailable("canceling statement due to lock timeout")
+
+    failure = _failed_in(space, "supersede")
+
+    assert "The database refused: LockNotAvailable: canceling statement due to lock timeout" in failure["reason"]
+    assert _candidate_statuses(space) == CANDIDATE_RUNS
+    assert not (space.directory() / "hydro-run-backup.csv").exists()
+    (writer,) = [connection for connection in space.database.connections if not connection.readonly]
+    assert (writer.commits, writer.closed) == (0, True) and writer.rollbacks >= 1
+    assert space.store.preflights == [] and space.store.operations == []
+
+    space.database.update_error = None
+    assert space.run()[0] == 0, space.last_stderr
+
+
+@pytest.mark.parametrize("landed", [False, True])
+def test_a_commit_call_that_raises_keeps_the_backup_and_the_rerun_decides_from_the_table(
+    space: Space,  # noqa: F811
+    landed: bool,
+) -> None:
+    space.database.commit_error = psycopg2.OperationalError("server closed the connection unexpectedly")
+    space.database.commit_lands_before_error = landed
+
+    failure = _failed_in(space, "supersede")
+
+    # The failure names the unknown outcome; nothing concluded "not committed".
+    assert "The COMMIT of the supersede transaction did not return (OperationalError" in failure["reason"]
+    assert "whether the runs were superseded is not known" in failure["reason"]
+    backup = _supersede_left_only_its_backup(space)
+    backup_before = (backup.stat().st_ino, backup.read_bytes())
+
+    space.database.commit_error = None
+    status, _report = space.run()
+
+    # The "backup present" branch, either way: no second backup is taken.
+    assert (backup.stat().st_ino, backup.read_bytes()) == backup_before
+    if landed:
+        assert status == 0, space.last_stderr
+        assert space.receipt("supersede")["recovered_from_existing_backup"] is True
+        assert space.receipt("supersede")["row_count"] == 4
+    else:
+        assert status == 1
+        assert any("of an earlier attempt exists, and 4 runs" in failure["reason"] for failure in space.failures())
+        assert _candidate_statuses(space) == CANDIDATE_RUNS
+
+
+def _closing_the_backup_fails(space: Space) -> None:  # noqa: F811
+    # The descriptor is gone when the tool closes the file after its commit returned: a real EBADF.
+    space.database.after_commit = lambda: os.close(space.database.last_copy_handle.fileno())
+
+
+def _the_receipt_cannot_be_written(space: Space) -> None:  # noqa: F811
+    real_write = succession_receipt.write_receipt
+
+    def full_disk(path: Path, receipt: Any) -> None:
+        if path.name == "retire-supersede.json":
+            raise OSError(errno.ENOSPC, "No space left on device", str(path))
+        real_write(path, receipt)
+
+    space.monkeypatch.setattr(succession_receipt, "write_receipt", full_disk)
+
+
+@pytest.mark.parametrize(
+    ("arrange", "said"),
+    [
+        (_closing_the_backup_fails, "The supersede step failed after its commit call (OSError"),
+        (_the_receipt_cannot_be_written, "No space left on device"),
+    ],
+)
+def test_an_error_after_the_commit_returned_keeps_the_backup(
+    space: Space,  # noqa: F811
+    arrange: Callable[[Space], None],
+    said: str,
+) -> None:
+    arrange(space)
+
+    failure = _failed_in(space, "supersede")
+
+    assert said in failure["reason"]
+    # Committed: the runs are superseded, so the backup is the only record of what they were.
+    assert set(_candidate_statuses(space).values()) == {"superseded"}
+    backup = _supersede_left_only_its_backup(space)
+    backup_before = (backup.stat().st_ino, backup.read_bytes())
+
+    # The rerun, with the same fault still there for the receipt case, never takes a second backup.
+    space.database.after_commit = None
+    status, _report = space.run()
+    assert (backup.stat().st_ino, backup.read_bytes()) == backup_before
+    if arrange is _closing_the_backup_fails:
+        assert status == 0, space.last_stderr
+        assert space.receipt("supersede")["recovered_from_existing_backup"] is True
+    else:
+        assert status == 1 and "No space left on device" in space.last_stderr
+
+
+def test_an_interrupt_after_the_commit_returned_keeps_the_backup_and_the_rerun_writes_the_receipt(
+    space: Space,  # noqa: F811
+) -> None:
+    def interrupted() -> None:
+        raise KeyboardInterrupt
+
+    space.database.on_writer_close = interrupted
+
+    with pytest.raises(KeyboardInterrupt):
+        space.run()
+
+    assert set(_candidate_statuses(space).values()) == {"superseded"}
+    backup = _supersede_left_only_its_backup(space)
+    backup_before = (backup.stat().st_ino, backup.read_bytes())
+
+    space.database.on_writer_close = None
+    status, report = space.run()
+
+    assert status == 0, space.last_stderr
+    assert report["steps"]["supersede"] == "completed"
+    assert space.receipt("supersede")["recovered_from_existing_backup"] is True
+    assert (backup.stat().st_ino, backup.read_bytes()) == backup_before
+
+
+def test_an_interrupt_before_the_commit_call_removes_the_backup(space: Space) -> None:  # noqa: F811
+    def interrupted() -> None:
+        raise KeyboardInterrupt
+
+    space.database.before_update = interrupted
+
+    with pytest.raises(KeyboardInterrupt):
+        space.run()
+
+    assert _candidate_statuses(space) == CANDIDATE_RUNS and space.database.commits == 0
+    assert not (space.directory() / "hydro-run-backup.csv").exists()
+
+
+def test_a_preflight_that_raises_fails_the_step_with_no_row_changed(space: Space) -> None:  # noqa: F811
+    space.store.preflight_raises["dg_huai_gfs"] = RuntimeError("model_id not found: dg_huai_gfs")
+
+    failure = _failed_in(space, "deactivate")
+
+    assert "The deactivate preflight of dg_huai_gfs failed (RuntimeError: model_id not found" in failure["reason"]
+    assert "No row was changed." in failure["reason"]
+    assert space.store.operations == [] and space.database.audit_log == []
+    assert space.database.active(HUAI) == ACTIVE
+
+
+def test_a_database_that_cannot_be_read_in_a_step_fails_the_step(space: Space) -> None:  # noqa: F811
+    # The connection is lost right after the supersede commit: deactivate cannot read the active rows.
+    def lost() -> None:
+        space.database.read_error = psycopg2.OperationalError("could not connect to server")
+
+    space.database.after_commit = lost
+
+    failure = _failed_in(space, "deactivate")
+
+    assert "The database refused: OperationalError: could not connect to server" in failure["reason"]
+    assert space.store.preflights == [] and space.store.operations == []
+    assert space.database.active(HUAI) == ACTIVE
+
+
+def test_verify_times_out_when_no_round_ends_and_the_rerun_does_not_repeat_the_exclude_wait(space: Space) -> None:  # noqa: F811
+    # exclude's round ends; the round verify follows is still running on every later poll.
+    space.set_answers(round_answer(), running_answer(mark="slow"), running_answer(start="@slow"))
+    space.wait_seconds = 1.5
+
+    failure = _failed_in(space, "verify")
+
+    assert "No autopipe round that started after the reference ended within" in failure["reason"]
+    assert "it was following the round that started at" in failure["reason"]
+    assert space.database.active(HUAI) == [] and not (space.directory() / "retire-verify.json").exists()
+    exclude_before = (space.directory() / "retire-exclude.json").read_bytes()
+    calls = len(space.systemctl_calls())
+
+    space.set_answers(round_answer())
+    status, report = space.run()
+
+    assert status == 0, space.last_stderr
+    assert report["steps"]["exclude"] == "skipped" and report["steps"]["verify"] == "completed"
+    # One reading: verify's own wait. The exclude wait is not repeated.
+    assert len(space.systemctl_calls()) == calls + 1
+    assert (space.directory() / "retire-exclude.json").read_bytes() == exclude_before

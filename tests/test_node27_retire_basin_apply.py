@@ -18,6 +18,7 @@ from tests.node27_retire_basin_helpers import (
     COPY_SUFFIX,
     DATABASE_URL,
     HUAI,
+    LOCK_TIMEOUT_SQL,
     STEPS,
     SUCCESSION_ID,
     SUPERSEDE_SQL,
@@ -76,6 +77,7 @@ def test_full_apply_retires_the_basin_version_and_nothing_else(space: Space) -> 
     assert exclude["sha256_after"] == hashlib.sha256(env_after).hexdigest()
     waited = exclude["autopipe_round"]
     assert (waited["exit_code"], waited["exit_status"], waited["active_state"]) == (1, 0, "inactive")
+    assert (waited["ended"], waited["lock_probe"], waited["load_state"]) == ("seen_at_rest", "free", "loaded")
     assert waited["start_monotonic_us"] > waited["reference_monotonic_us"]
     assert waited["exit_monotonic_us"] >= waited["start_monotonic_us"]
     assert waited["lock_path_probed"] == str(space.autopipe_lock) and waited["lock_held"] is False
@@ -148,7 +150,10 @@ def test_full_apply_retires_the_basin_version_and_nothing_else(space: Space) -> 
     # core.basin and core.basin_version are never written: the one write statement is the status update.
     statements = space.database.statements
     writes = [statement for statement in statements if not statement.lstrip().upper().startswith(("SELECT", "COPY"))]
-    assert writes == [SUPERSEDE_SQL]
+    # The lock timeout is the first statement of the supersede transaction.
+    assert writes == [LOCK_TIMEOUT_SQL, SUPERSEDE_SQL]
+    (writer,) = [connection for connection in space.database.connections if not connection.readonly]
+    assert writer.statements[0] == LOCK_TIMEOUT_SQL and writer.statements[2] == SUPERSEDE_SQL
     assert not any("core.basin " in statement or "core.basin\n" in statement for statement in statements)
     assert [s for s in statements if "core.basin_version" in s] == [
         "SELECT basin_id FROM core.basin_version WHERE basin_version_id = %s"
@@ -156,7 +161,7 @@ def test_full_apply_retires_the_basin_version_and_nothing_else(space: Space) -> 
     assert space.database.commits == 1
 
     # The unit was only ever shown: nothing started, stopped, enabled or disabled.
-    show = f"--user show {UNIT} -p ActiveState,ExecMainStartTimestampMonotonic,ExecMainExitTimestampMonotonic"
+    show = f"--user show {UNIT} -p LoadState,ActiveState,ExecMainStartTimestampMonotonic,ExecMainExitTimestampMonotonic"
     calls = space.systemctl_calls()
     assert len(calls) == 2 and all(call == f"{show},ExecMainCode,ExecMainStatus" for call in calls)
 
