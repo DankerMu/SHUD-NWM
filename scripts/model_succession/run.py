@@ -22,6 +22,7 @@ from scripts.model_succession.model import (
     KIND_ADD_BASIN,
     KIND_COLD_START,
     KIND_RECALIBRATION,
+    KIND_REMOVE_BASIN,
     PLAN_NAME,
     PUBLISH_STATE_MANIFESTS_DIFFER,
     SERVICE_UNIT,
@@ -43,10 +44,12 @@ from scripts.model_succession.model import (
 )
 
 # What the ``preflight`` of each kind checks on the packages, as the dry-run says it while they are not copied yet.
+# A removed basin has no copyback, so its dry-run never waits for one.
 _PREFLIGHT_CHECKS_BY_KIND = {
     KIND_RECALIBRATION: "The kind check, the clone gate and the publisher's package checks",
     KIND_COLD_START: "The kind check, the initial-condition audit and the publisher's package checks",
     KIND_ADD_BASIN: "The initial-condition audit and the publisher's package checks",
+    KIND_REMOVE_BASIN: "The publisher's checks of the manifest without the removed rows",
 }
 
 # Every step of every kind; which of them a succession runs, and in what order, is ``Plan.steps``.
@@ -201,12 +204,14 @@ def dry_run(settings: Settings) -> tuple[int, dict[str, Any]]:
     inputs, planned = _checked(settings)
     done = completed_steps(settings)
     steps: dict[str, Any] = {step: {"status": "completed"} for step in done}
-    packages, refusals = copyback.report(settings, inputs)
+    # A removed basin copies no package: its dry-run goes straight to the preview.
+    copies = "copyback" in settings.plan.steps
+    packages, refusals = copyback.report(settings, inputs) if copies else ([], [])
     try:
         planning.refuse_other_timer_holder(settings)
     except ModelSuccessionRefusal as error:
         refusals.insert(0, str(error))
-    if "copyback" not in done:
+    if copies and "copyback" not in done:
         steps["copyback"] = {"packages": packages}
     if "preflight" not in done:
         if all(package["outcome"] == copyback.ALREADY_PRESENT for package in packages):
@@ -231,14 +236,15 @@ def dry_run(settings: Settings) -> tuple[int, dict[str, Any]]:
             steps.setdefault(step, {"would": would})
     for step in ("refresh", "finish"):
         steps.setdefault(step, {"status": "not predicted"})
+    # Left out for a removed basin, which has neither, as in its ``plan.json``.
+    provisioned = {"provision_apply_receipt": inputs.provision_receipt, "new_rows_registry": inputs.new_rows_registry}
     report = {
         "succession_id": settings.plan.succession_id,
         "dry_run": True,
         "plan": settings.plan.record(),
         **settings.plan.continuity(),
         "plan_json": "present and equal to this command line" if planned else "absent: the first --apply writes it",
-        "provision_apply_receipt": inputs.provision_receipt,
-        "new_rows_registry": inputs.new_rows_registry,
+        **({} if settings.plan.kind == KIND_REMOVE_BASIN else provisioned),
         "unit_states_now": states,
         "steps": {step: steps[step] for step in settings.plan.steps},
         "would_be_refused": refusals,
@@ -275,16 +281,23 @@ def _abort_meaning(settings: Settings, publish_state: str, timer_was_active: boo
                 "bytes again."
             )
         return meaning
+    # A removed basin has no new model: what its publish leaves is that the removed ones are gone.
+    if settings.plan.kind == KIND_REMOVE_BASIN:
+        in_effect = "the removed models are out of both manifests"
+    else:
+        in_effect = "the new models are live in both manifests"
     if publish_state == "published":
-        return [f"The publish completed: the new models are live in both manifests. {by_hand}", *timer]
+        return [f"The publish completed: {in_effect}. {by_hand}", *timer]
     if publish_state == "published_without_receipt":
         return [
-            f"The publish is in effect although its receipt {directory / PUBLISH_APPLY_NAME} was not written: the "
-            f"new models are live in both manifests. {by_hand}",
+            f"The publish is in effect although its receipt {directory / PUBLISH_APPLY_NAME} was not written: "
+            f"{in_effect}. {by_hand}",
             *timer,
         ]
     if timer_was_active is False:
         meaning = ["The publish did not complete.", *timer]
+    elif settings.plan.kind == KIND_REMOVE_BASIN:
+        meaning = ["The publish did not complete: the basin of the removed models keeps being scheduled."]
     elif settings.plan.kind == KIND_ADD_BASIN:
         meaning = ["The publish did not complete: the scheduler keeps running without the models of the new basin."]
     else:

@@ -14630,7 +14630,7 @@ def test_model_succession_tool_selects_its_suites_and_rides_the_tools_it_drives(
     def selected(path: str) -> set[str]:
         return set(select_tests([path], repo_root=Path(".")))
 
-    assert len(succession) == 5 and all(Path(suite).exists() for suite in succession), sorted(succession)
+    assert len(succession) == 6 and all(Path(suite).exists() for suite in succession), sorted(succession)
     for path in (MODEL_SUCCESSION_OWNER_PATH, *MODEL_SUCCESSION_PACKAGE_MODULES, MODEL_SUCCESSION_HELPERS_PATH):
         assert succession <= selected(path), path
     for path in (
@@ -14649,18 +14649,22 @@ def test_model_succession_tool_selects_its_suites_and_rides_the_tools_it_drives(
     assert "tests/test_node22_model_succession_cold_start.py" in selected("scripts/audit_first_cycle_initial_state.py")
     # #2756: so does an add-basin succession.
     assert "tests/test_node22_model_succession_add_basin.py" in selected("scripts/audit_first_cycle_initial_state.py")
+    # #2757: a remove-basin succession audits nothing, so the audit script does not select its partition.
+    assert "tests/test_node22_model_succession_remove_basin.py" not in selected(
+        "scripts/audit_first_cycle_initial_state.py"
+    )
     # The succession tool is not imported by the tools it drives: its own rows select no suite of theirs.
     assert not set(MERGED_REGISTRY_PUBLISH_TESTS) & selected(MODEL_SUCCESSION_OWNER_PATH)
     assert "tests/test_state_clone_recalibration_cli.py" not in selected("scripts/model_succession/tools.py")
 
 
-def test_model_succession_tracked_tree_is_seven_modules_five_suites_and_one_helper() -> None:
+def test_model_succession_tracked_tree_is_seven_modules_six_suites_and_one_helper() -> None:
     # #2739: the tool is an entry script over seven modules, each with its own
     # row. An eighth module, a stray `__init__.py` (scripts/ is a PEP 420
-    # namespace tree) or a sixth partition has no route until it is listed,
+    # namespace tree) or a seventh partition has no route until it is listed,
     # and reddens here instead of dropping out of the PR lane in silence.
     # #2740 added the cold-start partition, the fourth; #2756 the add-basin
-    # one, the fifth.
+    # one, the fifth; #2757 the remove-basin one, the sixth.
     modules = set(MODEL_SUCCESSION_PACKAGE_MODULES)
     assert set(_tracked_python_files("scripts/model_succession")) == modules
     assert len(modules) == 7 and MODEL_SUCCESSION_OWNER_PATH not in modules
@@ -14668,6 +14672,7 @@ def test_model_succession_tracked_tree_is_seven_modules_five_suites_and_one_help
     assert not Path("scripts/model_succession/__init__.py").exists()
 
     expected = set(MODEL_SUCCESSION_TESTS)
+    assert len(expected) == 6
     for pattern in (MODEL_SUCCESSION_OWNER_PATH, *sorted(modules), MODEL_SUCCESSION_HELPERS_PATH):
         (rule,) = [rule for rule in (*PATH_TEST_RULES, *SUPPORT_MODULE_TEST_RULES) if rule.pattern == pattern]
         assert set(rule.tests) == expected, pattern

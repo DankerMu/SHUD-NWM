@@ -50,12 +50,14 @@ DEFAULT_PASS_WAIT_SECONDS = 14400
 KIND_RECALIBRATION = "recalibration"
 KIND_COLD_START = "cold_start"
 KIND_ADD_BASIN = "add_basin"
+KIND_REMOVE_BASIN = "remove_basin"
 # The steps of each kind, in their fixed order.  A cold start carries no state and a new basin has none: neither
-# has a clone step.
+# has a clone step.  A removed basin has no new package either: nothing is copied back.
 STEPS_BY_KIND = {
     KIND_RECALIBRATION: ("copyback", "preflight", "begin", "clone", "publish", "refresh", "finish"),
     KIND_COLD_START: ("copyback", "preflight", "begin", "publish", "refresh", "finish"),
     KIND_ADD_BASIN: ("copyback", "preflight", "begin", "publish", "refresh", "finish"),
+    KIND_REMOVE_BASIN: ("preflight", "begin", "publish", "refresh", "finish"),
 }
 # The kinds whose new models start from the initial condition in their package: ``preflight`` audits it and
 # ``publish`` requires the audit receipt.
@@ -80,6 +82,7 @@ RUNBOOK_BY_KIND = {
     KIND_RECALIBRATION: f"{_RUNBOOK_FILE}, section 5.7.1",
     KIND_COLD_START: f"{_RUNBOOK_FILE}, section 5.7.2",
     KIND_ADD_BASIN: f"{_RUNBOOK_FILE}, section 5.7.3",
+    KIND_REMOVE_BASIN: f"{_RUNBOOK_FILE}, section 5.7.4",
 }
 # What ``continuity.notice`` says in the plan, the receipts and the reports of a cold start.
 COLD_START_NOTICE = (
@@ -94,6 +97,14 @@ NEW_BASIN_NOTICE = (
     "initial condition in its package at the first cycle the scheduler plans for it after the timer is started. "
     "That is the earliest cycle of the scheduler's lookback window, not the current one: the basin then catches "
     "up cycle by cycle."
+)
+# What ``continuity.notice`` says in the plan, the receipts and the reports of a removed basin; the succession id
+# is filled in.
+REMOVED_BASIN_NOTICE = (
+    "Removed basin: once this succession has published, the scheduler no longer plans runs for the removed "
+    "models. Runs that were already submitted may still finish and be ingested on node-27. This succession ends "
+    "on node-22 with the manifests: the next step is the node-27 retirement tool, which takes the same "
+    "--succession-id {succession_id} and refuses to run before this succession has finished."
 )
 _NOTHING_WRITTEN = "Nothing was written."
 # What ``step-finish.json`` and the report of an apply say was done to the timer.
@@ -157,10 +168,11 @@ class Plan:
     pairs: tuple[tuple[str, str], ...]  # (old_model_id, new_model_id), in command-line order
     cutover_time: str | None  # YYYYMMDDHH; None for an added basin, which has no cutover
     adds: tuple[str, ...] = ()  # the new model ids of an added basin, in command-line order
+    removes: tuple[str, ...] = ()  # the model ids of a removed basin, in command-line order
 
     @property
     def old_ids(self) -> list[str]:
-        return [old for old, _new in self.pairs]
+        return [old for old, _new in self.pairs] + list(self.removes)
 
     @property
     def new_ids(self) -> list[str]:
@@ -193,6 +205,9 @@ class Plan:
         return RUNBOOK_BY_KIND[self.kind]
 
     def record(self) -> dict[str, Any]:
+        if self.kind == KIND_REMOVE_BASIN:
+            # Nothing is provisioned for a removal: the record names no provision succession.
+            return {"kind": self.kind, "removes": list(self.removes)}
         if self.kind == KIND_ADD_BASIN:
             return {
                 "kind": self.kind,
@@ -207,12 +222,15 @@ class Plan:
         }
 
     def continuity(self) -> dict[str, Any]:
-        """``{"continuity": ...}`` of a cold start or an added basin, for a receipt or a report; empty for a
-        recalibration.
+        """``{"continuity": ...}`` of a cold start, an added basin or a removed basin, for a receipt or a report;
+        empty for a recalibration.
 
         Written beside ``record()``, never inside it: a resume compares the record, not the notice text.
         """
 
+        if self.kind == KIND_REMOVE_BASIN:
+            notice = REMOVED_BASIN_NOTICE.format(succession_id=self.succession_id)
+            return {"continuity": {"mode": "basin_removed", "state_carried": False, "notice": notice}}
         if self.kind == KIND_ADD_BASIN:
             return {"continuity": {"mode": "new_basin", "state_carried": False, "notice": NEW_BASIN_NOTICE}}
         if self.kind != KIND_COLD_START:
@@ -254,10 +272,13 @@ class Settings:
 
 @dataclass(frozen=True)
 class Inputs:
-    """What the checks before any step established."""
+    """What the checks before any step established.
 
-    provision_receipt: dict[str, Any]  # {"path", "sha256"}
-    new_rows_registry: dict[str, Any]  # {"path", "sha256"}
+    A removed basin has no provision: both records are ``None`` and there are no new rows.
+    """
+
+    provision_receipt: dict[str, Any] | None  # {"path", "sha256"}
+    new_rows_registry: dict[str, Any] | None  # {"path", "sha256"}
     new_rows: dict[str, dict[str, Any]]  # the plan's new rows, by model_id
 
 

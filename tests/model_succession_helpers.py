@@ -1,4 +1,4 @@
-"""Fixtures, a fake ``systemctl`` and builders shared by the model succession suites (#2739, #2740, #2756).
+"""Fixtures, a fake ``systemctl`` and builders shared by the model succession suites (#2739, #2740, #2756, #2757).
 
 The production layout in ``tmp_path``: a compute store (the worker mirror, the
 compute-side state index, the state objects and the packages the scheduler
@@ -9,8 +9,8 @@ packages with the manifest inside the package directory, as the provision step
 writes them.  A suite that uses the ``space`` fixture imports it and the
 autouse ``no_database`` fixture from here.  ``build_space`` takes the kind and
 what the new packages hold, for the cold-start suite, and the sources of the
-canonical manifest and a basin to add, for the add-basin suite; its defaults
-are the recalibration space.
+canonical manifest and a basin to add, for the add-basin suite, and a basin to
+remove, for the remove-basin suite; its defaults are the recalibration space.
 
 The fake ``systemctl`` is a script: it appends every call, ``--user`` included,
 to a trace, keeps unit states in a file and, for a start of the provider
@@ -253,8 +253,9 @@ class Space:
     refresh_receipt_root: Path
     old_rows: list[dict[str, Any]]
     new_rows: list[dict[str, Any]]
-    registry: Path
+    registry: Path | None  # None when nothing was provisioned: a remove-basin space
     kind: str = "recalibration"
+    removes: list[str] = dataclasses.field(default_factory=list)  # the ids a remove-basin space names
 
     @property
     def directory(self) -> Path:
@@ -262,6 +263,8 @@ class Space:
 
     @property
     def pairs(self) -> list[tuple[str, str]]:
+        if not self.new_rows:
+            return []
         return [(old["model_id"], new["model_id"]) for old, new in zip(self.old_rows, self.new_rows, strict=True)]
 
     def argv(
@@ -270,14 +273,21 @@ class Space:
         pairs: list[tuple[str, str]] | None = None,
         cutover: str | None = CUTOVER,
         adds: list[str] | None = None,
+        removes: list[str] | None = None,
     ) -> list[str]:
         """The command line of this space's kind; ``cutover=None`` leaves ``--cutover-time`` out.
 
         An ``add_basin`` space names its new rows with ``--add`` and gives neither ``--pair`` nor
-        ``--cutover-time``; ``adds`` replaces the ids it names.
+        ``--cutover-time``; ``adds`` replaces the ids it names.  A ``remove_basin`` space names the rows of
+        its removed basin with ``--remove`` and gives none of ``--pair``, ``--add`` and ``--cutover-time``;
+        ``removes`` replaces the ids it names.
         """
 
         arguments = ["--succession-id", SUCCESSION_ID, "--kind", self.kind, "--operator-id", "operator-1"]
+        if self.kind == "remove_basin":
+            for model_id in self.removes if removes is None else removes:
+                arguments += ["--remove", model_id]
+            return [*arguments, "--pass-wait-seconds", "30", *extra]
         if self.kind == "add_basin":
             for model_id in [str(row["model_id"]) for row in self.new_rows] if adds is None else adds:
                 arguments += ["--add", model_id]
@@ -291,10 +301,15 @@ class Space:
     def main(self, *extra: str, **overrides: Any) -> int:
         return tool.main(self.argv(*extra, **overrides))
 
-    def main_as(self, succession_id: str, *extra: str) -> int:
-        """The command of another succession id over the same pairs, provisioned by this space's succession."""
+    def main_as(self, succession_id: str, *extra: str, provisioned: bool = True) -> int:
+        """The command of another succession id over the same pairs, provisioned by this space's succession.
+
+        ``provisioned=False`` leaves ``--provision-succession-id`` out: a removal has no provision.
+        """
 
         arguments = [succession_id if value == SUCCESSION_ID else value for value in self.argv(*extra)]
+        if not provisioned:
+            return tool.main(arguments)
         return tool.main([*arguments, "--provision-succession-id", SUCCESSION_ID])
 
     def settings(self, *extra: str) -> Settings:
@@ -434,13 +449,16 @@ def build_space(
     old_ic: bytes = _IC_V1,
     sources: tuple[str, ...] = (SOURCE,),
     added_basin: str | None = None,
+    removed_basin: str | None = None,
 ) -> Space:
     """The production layout with two pairs; ``new_packages`` are the ``_row`` options of the two new models
     and ``old_ic`` is the ``cfg.ic`` of the two old packages.
 
     ``sources`` are the sources of the canonical manifest: every basin gets one row per source, and the pairs
     stay those of the first.  With ``added_basin`` the new models are not successors: they are the rows of that
-    basin, one per source, each with its ``new_packages`` options.
+    basin, one per source, each with its ``new_packages`` options.  With ``removed_basin`` there are no new
+    models and no provision: the receipt root is left empty, ``registry`` is ``None`` and the space
+    names the rows of that basin, one per source, with ``--remove``.
     """
 
     store, shared = tmp_path / "compute-store", tmp_path / "shared-store"
@@ -467,7 +485,10 @@ def build_space(
     other_sources = [_row(ws, basin, "v1", roots=both, source=source) for source in sources[1:] for basin in "abc"]
     ws.seed([*old_rows, _row(ws, "c", "v1", roots=both), *other_sources])
     # The provision step leaves the new packages on the shared store only; the copyback step brings them over.
-    if added_basin is None:
+    registry: Path | None = None
+    if removed_basin is not None:
+        new_rows = []
+    elif added_basin is None:
         new_rows = [
             _row(ws, basin, "v2", roots=(shared,), **options)
             for basin, options in zip(("a", "b"), new_packages, strict=True)
@@ -477,7 +498,11 @@ def build_space(
             _row(ws, added_basin, "v1", roots=(shared,), source=source, **options)
             for source, options in zip(sources, new_packages, strict=True)
         ]
-    registry = ws.provision(SUCCESSION_ID, new_rows)
+    if removed_basin is None:
+        registry = ws.provision(SUCCESSION_ID, new_rows)
+    else:
+        # The receipt root of production holds earlier successions; here it is there and empty.
+        ws.receipt_root.mkdir(parents=True)
 
     entries = [_state_entry(LocalObjectStore(store, PREFIX), row) for row in old_rows]
     for index, root in ((canonical_index, shared), (mirror_index, store)):
@@ -524,6 +549,7 @@ def build_space(
         new_rows=new_rows,
         registry=registry,
         kind=kind,
+        removes=[str(row["model_id"]) for row in ws.rows if row["basin_id"] == f"basins_{removed_basin}"],
     )
 
 

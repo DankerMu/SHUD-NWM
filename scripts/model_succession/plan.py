@@ -24,6 +24,7 @@ from scripts.model_succession.model import (
     ABORT_BEFORE_NEW_ID,
     FINAL_STEP,
     KIND_ADD_BASIN,
+    KIND_REMOVE_BASIN,
     PLAN_NAME,
     PLAN_SCHEMA_VERSION,
     PROVIDER_STORE_ROOT_ENV,
@@ -59,7 +60,11 @@ def build_plan(
     pairs: Sequence[tuple[str, str]],
     cutover_time: str | None,
     adds: Sequence[str] = (),
+    removes: Sequence[str] = (),
+    new_rows_registry: str | None = None,
 ) -> Plan:
+    """The plan of the command line; ``new_rows_registry`` is the option as given, only held to the kind here."""
+
     try:
         succession.validate_succession_id(succession_id)
         if provision_succession_id is not None:
@@ -70,9 +75,23 @@ def build_plan(
         raise ModelSuccessionRefusal(
             f"Refused: --kind {kind!r} is not supported; the kinds are {', '.join(map(repr, STEPS_BY_KIND))}."
         )
-    named = [model_id for pair in pairs for model_id in pair] + list(adds)
+    named = [model_id for pair in pairs for model_id in pair] + list(adds) + list(removes)
     repeated = sorted({model_id for model_id in named if named.count(model_id) > 1})
-    if kind == KIND_ADD_BASIN:
+    if kind == KIND_REMOVE_BASIN:
+        given = {
+            "--pair": bool(pairs),
+            "--add": bool(adds),
+            "--cutover-time": cutover_time is not None,
+            "--provision-succession-id": provision_succession_id is not None,
+            "--new-rows-registry": new_rows_registry is not None,
+        }
+        _check_remove_basin_arguments([option for option, is_given in given.items() if is_given], removes, repeated)
+    elif removes:
+        raise ModelSuccessionRefusal(
+            f"Refused: --remove is not valid with --kind {kind}: only --kind {KIND_REMOVE_BASIN} removes the "
+            "models of a basin from the manifests. Run the removal under its own --succession-id."
+        )
+    elif kind == KIND_ADD_BASIN:
         _check_add_basin_arguments(pairs, cutover_time, adds, repeated)
     else:
         if adds:
@@ -97,6 +116,7 @@ def build_plan(
         pairs=tuple((old, new) for old, new in pairs),
         cutover_time=cutover_time,
         adds=tuple(adds),
+        removes=tuple(removes),
     )
 
 
@@ -123,6 +143,24 @@ def _check_add_basin_arguments(
         )
     if repeated:
         raise ModelSuccessionRefusal(f"Refused: a model_id may be named with --add once only: {list(repeated)}.")
+
+
+def _check_remove_basin_arguments(misfits: Sequence[str], removes: Sequence[str], repeated: Sequence[str]) -> None:
+    """The arguments of a removed basin: its models, and nothing of a replacement, an addition or a provision."""
+
+    if misfits:
+        raise ModelSuccessionRefusal(
+            f"Refused: {', '.join(misfits)} is not valid with --kind {KIND_REMOVE_BASIN}: a removal has no "
+            "successor, no added model, no cutover and no provision. Name each model of the removed basin with "
+            "--remove <model_id> and leave the option out."
+        )
+    if not removes:
+        raise ModelSuccessionRefusal(
+            f"Refused: at least one --remove <model_id> is required with --kind {KIND_REMOVE_BASIN}: one per "
+            "source of each removed basin."
+        )
+    if repeated:
+        raise ModelSuccessionRefusal(f"Refused: a model_id may be named with --remove once only: {list(repeated)}.")
 
 
 def _abort_receipts(directory: Path) -> list[Path]:
@@ -186,8 +224,9 @@ def published_without_receipt(settings: Settings) -> bool:
     and hold every new id and no old id.
 
     Without the receipt of the step before ``publish`` in the list of its kind (``step-clone.json``, or
-    ``step-begin.json`` of a cold start or an added basin) the publish step of this succession never ran: the
-    manifests then hold what another succession published, with its own receipt.
+    ``step-begin.json`` of a cold start, an added basin or a removed basin) the publish step of this succession
+    never ran: the manifests then hold what another succession published, with its own receipt.  A removed
+    basin has no new id: its removed ids are the old ones, and none of them is left.
     """
 
     if not os.path.lexists(settings.step_receipt(settings.plan.step_before_publish)):
@@ -230,10 +269,63 @@ def manifest_model_ids(path: Path, *, what: str) -> list[str]:
     return [str(row["model_id"]) for row in models]
 
 
+def _refuse_manifests_that_differ_at_publish(settings: Settings) -> None:
+    # Past the step before its publish (its clone; the begin of a cold start, an added basin or a removed basin)
+    # this succession is at, or after, its publish: manifests that differ there are not retried.
+    if os.path.lexists(settings.step_receipt(settings.plan.step_before_publish)) and manifests_differ(settings):
+        raise ModelSuccessionRefusal(
+            f"Refused: {manifests_differ_text(settings)} Once both are the same bytes again, run the same command "
+            f"or give the succession up with --abort --confirm-timer-start. {_NOTHING_WRITTEN}"
+        )
+
+
+def _refuse_published_without_receipt(settings: Settings) -> None:
+    if not published_without_receipt(settings):
+        return
+    if settings.plan.kind == KIND_REMOVE_BASIN:
+        found = "neither manifest holds any model_id this plan removes any more"
+    else:
+        found = "both manifests already hold every new model_id of this plan and no old one"
+    raise ModelSuccessionRefusal(
+        f"Refused: {found}, and "
+        f"{settings.directory / PUBLISH_APPLY_NAME} does not exist: a publish of this plan is in effect, "
+        "without the receipt of this succession. Do not undo it and do not run this command again; continue "
+        f"by hand with the provider refresh and then start the timer, from the runbook ({settings.plan.runbook}). "
+        f"{_NOTHING_WRITTEN}"
+    )
+
+
+def _refuse_absent_old_ids(settings: Settings, canonical_ids: Sequence[str]) -> None:
+    absent = [model_id for model_id in settings.plan.old_ids if model_id not in canonical_ids]
+    if absent:
+        raise ModelSuccessionRefusal(
+            f"Refused: old model_id is not in the canonical manifest {settings.canonical_manifest}: {absent}. "
+            f"{_NOTHING_WRITTEN}"
+        )
+
+
+def _check_remove_basin_inputs(settings: Settings) -> Inputs:
+    """The checks of ``check_inputs`` that read the two manifests, in its order; nothing else is read."""
+
+    _refuse_manifests_that_differ_at_publish(settings)
+    canonical_ids = manifest_model_ids(settings.canonical_manifest, what="the canonical manifest")
+    # Before ``begin`` this is never true: a removed id that is not in the manifest is refused as absent below.
+    _refuse_published_without_receipt(settings)
+    if not os.path.lexists(settings.directory / PUBLISH_APPLY_NAME):
+        _refuse_absent_old_ids(settings, canonical_ids)
+    return Inputs(provision_receipt=None, new_rows_registry=None, new_rows={})
+
+
 def check_inputs(settings: Settings) -> Inputs:
-    """Refuse a plan that the provision receipt, its registry or the canonical manifest does not support."""
+    """Refuse a plan that the provision receipt, its registry or the canonical manifest does not support.
+
+    A removed basin has neither a provision receipt nor a new-rows registry: only the checks of the two
+    manifests apply to it, in the same order.
+    """
 
     plan = settings.plan
+    if plan.kind == KIND_REMOVE_BASIN:
+        return _check_remove_basin_inputs(settings)
     receipt_path = settings.receipt_root / plan.provision_succession_id / PROVISION_APPLY_RECEIPT_NAME
     try:
         receipt = read_json(receipt_path)
@@ -256,13 +348,7 @@ def check_inputs(settings: Settings) -> Inputs:
             f"Refused: new model_id is not in models[] of {receipt_path}: {unprovisioned}. {_NOTHING_WRITTEN}"
         )
 
-    # Past the step before its publish (its clone; the begin of a cold start or an added basin) this succession
-    # is at, or after, its publish: manifests that differ there are not retried.
-    if os.path.lexists(settings.step_receipt(plan.step_before_publish)) and manifests_differ(settings):
-        raise ModelSuccessionRefusal(
-            f"Refused: {manifests_differ_text(settings)} Once both are the same bytes again, run the same command "
-            f"or give the succession up with --abort --confirm-timer-start. {_NOTHING_WRITTEN}"
-        )
+    _refuse_manifests_that_differ_at_publish(settings)
     canonical_ids = manifest_model_ids(settings.canonical_manifest, what="the canonical manifest")
     unaccounted = [
         model_id for model_id in provisioned if model_id not in plan.new_ids and model_id not in canonical_ids
@@ -275,14 +361,7 @@ def check_inputs(settings: Settings) -> Inputs:
         )
     # Once this succession's publish has happened the canonical manifest holds the new ids instead of the
     # old ones; the finish step checks exactly that, so a resumed run is not refused for it here.
-    if published_without_receipt(settings):
-        raise ModelSuccessionRefusal(
-            f"Refused: both manifests already hold every new model_id of this plan and no old one, and "
-            f"{settings.directory / PUBLISH_APPLY_NAME} does not exist: a publish of this plan is in effect, "
-            "without the receipt of this succession. Do not undo it and do not run this command again; continue "
-            f"by hand with the provider refresh and then start the timer, from the runbook ({plan.runbook}). "
-            f"{_NOTHING_WRITTEN}"
-        )
+    _refuse_published_without_receipt(settings)
     if not os.path.lexists(settings.directory / PUBLISH_APPLY_NAME):
         # The new ids first: pairs that another succession already published are named as that.
         present = [model_id for model_id in plan.new_ids if model_id in canonical_ids]
@@ -291,12 +370,7 @@ def check_inputs(settings: Settings) -> Inputs:
                 f"Refused: new model_id is already in the canonical manifest {settings.canonical_manifest}: "
                 f"{present}. {_NOTHING_WRITTEN}"
             )
-        absent = [model_id for model_id in plan.old_ids if model_id not in canonical_ids]
-        if absent:
-            raise ModelSuccessionRefusal(
-                f"Refused: old model_id is not in the canonical manifest {settings.canonical_manifest}: {absent}. "
-                f"{_NOTHING_WRITTEN}"
-            )
+        _refuse_absent_old_ids(settings, canonical_ids)
 
     registry_path, registry_sha256, rows = _new_rows(settings, receipt, receipt_path)
     missing_rows = [model_id for model_id in plan.new_ids if model_id not in rows]
@@ -349,7 +423,8 @@ def _new_rows(
 
 
 def _plan_record(settings: Settings, inputs: Inputs | None) -> dict[str, Any]:
-    if inputs is None:
+    # A removed basin has no provision receipt and no new-rows registry: its record is the command line alone.
+    if inputs is None or settings.plan.kind == KIND_REMOVE_BASIN:
         return settings.plan.record()
     return {
         **settings.plan.record(),
@@ -388,9 +463,14 @@ def compare_with_plan(settings: Settings, inputs: Inputs | None) -> bool:
 
 
 def write_plan(settings: Settings, inputs: Inputs) -> None:
-    """Exclusive-create ``plan.json``; the first apply of a succession id."""
+    """Exclusive-create ``plan.json``; the first apply of a succession id.
+
+    The plan of a removed basin has no ``provision_apply_receipt`` and no ``new_rows_registry``: the keys are
+    left out, not written as null.
+    """
 
     path = settings.directory / PLAN_NAME
+    provisioned = {"provision_apply_receipt": inputs.provision_receipt, "new_rows_registry": inputs.new_rows_registry}
     try:
         succession.prepare_receipt_target(path, receipt_root=settings.receipt_root)
         succession.write_receipt(
@@ -399,8 +479,7 @@ def write_plan(settings: Settings, inputs: Inputs) -> None:
                 **receipt_header(settings, PLAN_SCHEMA_VERSION),
                 **_plan_record(settings, inputs),
                 **settings.plan.continuity(),
-                "provision_apply_receipt": inputs.provision_receipt,
-                "new_rows_registry": inputs.new_rows_registry,
+                **({} if settings.plan.kind == KIND_REMOVE_BASIN else provisioned),
             },
         )
     except (OSError, succession.SuccessionReceiptError) as error:

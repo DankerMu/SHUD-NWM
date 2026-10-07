@@ -27,6 +27,16 @@ packaged initial conditions, and the publish adds rows and replaces none.
 ``continuity`` says that the basin has no earlier forecasts and catches up from
 the earliest cycle of the scheduler's lookback window.
 
+``--kind remove_basin`` takes the models of a retired basin out of both
+manifests (``--remove <model_id>``, every source of each removed basin; none of
+``--pair``, ``--add``, ``--cutover-time``, ``--provision-succession-id`` and
+``--new-rows-registry``).  Nothing is provisioned and no package is copied, so
+its five steps start at ``preflight``, which is the publish tool's dry-run
+alone: ``preflight`` -> ``begin`` -> ``publish`` -> ``refresh`` -> ``finish``.
+It touches no Basins directory and no run: ``continuity`` says that the
+scheduler no longer plans the basin and that the node-27 retirement tool, with
+the same ``--succession-id``, is the next step.
+
 ``copyback`` and ``preflight`` (the kind check, then the dry-runs of the clone
 tool and of the publish tool) run while the scheduler is running.  ``begin``
 records whether the scheduler timer was active, stops it and waits for a
@@ -77,6 +87,7 @@ from scripts.model_succession.model import (
     KIND_ADD_BASIN,
     KIND_COLD_START,
     KIND_RECALIBRATION,
+    KIND_REMOVE_BASIN,
     MIRROR_MANIFEST_ENV,
     MIRROR_STATE_INDEX_KEY,
     OBJECT_STORE_PREFIX_ENV,
@@ -125,10 +136,17 @@ ADD_BASIN_DRY_RUN_NOTICE = (
     " dry-run, stops the scheduler timer, publishes the added rows, runs the provider refresh and starts the timer"
     " again. The new basin has no earlier forecasts: it catches up from the earliest cycle of the lookback window."
 )
+REMOVE_BASIN_DRY_RUN_NOTICE = (
+    "DRY-RUN (no --apply): no file is changed, no receipt is written and no unit is started or stopped."
+    " An --apply runs the publish tool's dry-run of the removal, stops the scheduler timer, publishes both"
+    " manifests without the removed rows, runs the provider refresh and starts the timer again."
+    " The scheduler then no longer plans the removed basin; its runs on node-27 are retired by a separate tool."
+)
 DRY_RUN_NOTICE_BY_KIND = {
     KIND_RECALIBRATION: DRY_RUN_NOTICE,
     KIND_COLD_START: COLD_START_DRY_RUN_NOTICE,
     KIND_ADD_BASIN: ADD_BASIN_DRY_RUN_NOTICE,
+    KIND_REMOVE_BASIN: REMOVE_BASIN_DRY_RUN_NOTICE,
 }
 
 
@@ -149,7 +167,8 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--provision-succession-id",
-        help="Succession whose provision-apply.json produced the new rows (default: --succession-id).",
+        help="Succession whose provision-apply.json produced the new rows (default: --succession-id). "
+        f"Refused with {KIND_REMOVE_BASIN}, which has no provision.",
     )
     parser.add_argument(
         "--kind",
@@ -159,7 +178,8 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         f"rows; {KIND_COLD_START} carries none and starts each new model from the initial condition in its "
         f"package. preflight refuses a pair whose packages say it is the other kind. {KIND_ADD_BASIN} adds the "
         "models of a new basin (--add), which have no old model, and starts each from the initial condition in "
-        "its package.",
+        f"its package. {KIND_REMOVE_BASIN} takes the models of a retired basin (--remove) out of both manifests; "
+        "it has no new model, no provision and no copyback.",
     )
     parser.add_argument(
         "--pair",
@@ -168,7 +188,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=_pair,
         metavar="OLD_MODEL_ID:NEW_MODEL_ID",
         help=f"{KIND_RECALIBRATION} and {KIND_COLD_START}: a model replaced by its successor; one per source of "
-        f"each basin. Repeatable; the order is kept. Refused with {KIND_ADD_BASIN}.",
+        f"each basin. Repeatable; the order is kept. Refused with {KIND_ADD_BASIN} and {KIND_REMOVE_BASIN}.",
     )
     parser.add_argument(
         "--add",
@@ -179,17 +199,26 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "together. Repeatable; the order is kept. Refused with the other kinds.",
     )
     parser.add_argument(
+        "--remove",
+        action="append",
+        default=[],
+        metavar="MODEL_ID",
+        help=f"{KIND_REMOVE_BASIN}: a model of a removed basin; one per source of each removed basin, all sources "
+        "of a basin together. Repeatable; the order is kept. Refused with the other kinds.",
+    )
+    parser.add_argument(
         "--cutover-time",
         metavar="YYYYMMDDHH",
         help=f"{KIND_RECALIBRATION}: valid_time of the clone rows. {KIND_COLD_START}: the cutover time the "
         f"operator declares; it is recorded in continuity and not enforced. Required with both; refused with "
-        f"{KIND_ADD_BASIN}, which has no cutover.",
+        f"{KIND_ADD_BASIN} and {KIND_REMOVE_BASIN}, which have no cutover.",
     )
     parser.add_argument("--operator-id", required=True)
     parser.add_argument(
         "--new-rows-registry",
         help="Registry file written by the provision --apply, as node-22 sees it. Optional when the provision "
-        f"apply receipt records an object_store_key for it (resolved under {PROVIDER_STORE_ROOT_ENV}).",
+        f"apply receipt records an object_store_key for it (resolved under {PROVIDER_STORE_ROOT_ENV}). Refused "
+        f"with {KIND_REMOVE_BASIN}, which introduces no row.",
     )
     parser.add_argument(
         "--receipt-root",
@@ -244,6 +273,8 @@ def settings_from_arguments(args: argparse.Namespace) -> Settings:
         pairs=args.pair,
         cutover_time=args.cutover_time,
         adds=args.add,
+        removes=args.remove,
+        new_rows_registry=args.new_rows_registry,
     )
     store_root, provider_root = paths[OBJECT_STORE_ROOT_ENV], paths[PROVIDER_STORE_ROOT_ENV]
     return Settings(
