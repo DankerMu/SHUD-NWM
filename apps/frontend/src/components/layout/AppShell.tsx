@@ -65,12 +65,32 @@ export function AppShell({ children }: AppShellProps) {
         <SiteHeader />
         <main className="relative min-h-0 w-full flex-1 overflow-hidden">
           {isRoleOverrideEnabled ? (
-            <div className="absolute right-4 top-4 z-30">
+            // 移动形态（design.md D5 末段）：收成贴 main 左缘、垂直居中的紧凑触发器，层级在地图浮层
+            // （最高 z-[130]）之上、Radix 弹层（--z-popover: 300）之下。角色显示名留在 DOM 里只做视觉截断，
+            // 测试靠 getByLabel('Role') 的文本判定当前角色。桌面形态的类名逐字保留。
+            <div
+              className={
+                viewportForm.mobile
+                  ? 'absolute left-0 top-1/2 z-[200] -translate-y-1/2'
+                  : 'absolute right-4 top-4 z-30'
+              }
+            >
               <Select value={role} onValueChange={(value) => setRole(value as AuthRole)}>
-                <SelectTrigger className="w-36" aria-label="Role">
+                <SelectTrigger
+                  className={
+                    viewportForm.mobile
+                      ? 'w-14 gap-0 px-[var(--space-1)] [&>span]:min-w-0 [&>span]:truncate [&>svg]:shrink-0'
+                      : 'w-36'
+                  }
+                  aria-label="Role"
+                >
                   <SelectValue />
                 </SelectTrigger>
-                <SelectContent align="end">
+                {/* 移动形态弹层开在触发器右侧：矮视口横屏下触发器下方放不下五个选项。 */}
+                <SelectContent
+                  align={viewportForm.mobile ? 'center' : 'end'}
+                  side={viewportForm.mobile ? 'right' : 'bottom'}
+                >
                   {roleOptions.map((option) => (
                     <SelectItem key={option.value} value={option.value}>
                       {option.label}
