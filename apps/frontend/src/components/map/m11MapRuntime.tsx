@@ -176,7 +176,21 @@ export function M11MapStatusOverlays({
   mapSourceError: string | null
 }) {
   return (
-    <>
+    // 桌面形态 `contents`：容器不产生盒子，四条状态条仍各按自己的 absolute 定位。
+    // 移动形态（mobile-responsive-display design.md D8）：四条状态条是这个纵向 flex 容器的在流子项，
+    // 自上而下排在地图区顶部条带里——
+    //   top 58px + 上内边距 8px：浮动提示（M11FloatingNotice，top 8px、两行时高 50px）占的第一槽之下，
+    //     恒定预留、不随提示是否出现而变；
+    //   right 52px + 右内边距 8px：让出启动器列（44px 列宽 + 8px 右边距）和 8px 间隙；
+    //   bottom 104px：控制条顶边（底边距 40px + 条高 64px）；overflow-hidden 保证放不下的状态条
+    //     被裁掉而不是伸进控制条（矮视口横屏下两条及以上两行状态条同时出现时，后面的会被裁）。
+    //     控制条的移动几何（task 3.7 / 3.8）改动后须复核这个界限。
+    //   四周 8px 内边距同时给状态条的阴影留出不被裁的余地。
+    // 容器自身不拦指针（空容器、状态条下方的区域都要能操作地图），状态条本身照常。
+    <div
+      className="contents mobile:pointer-events-none mobile:absolute mobile:bottom-[6.5rem] mobile:left-0 mobile:right-[3.25rem] mobile:top-[3.625rem] mobile:z-[90] mobile:flex mobile:flex-col mobile:items-start mobile:gap-2 mobile:overflow-hidden mobile:p-2"
+      data-testid="m11-map-status-overlays"
+    >
       {basinBoundaryOverlayEnabled && !loading && !boundaryLoading && basinCount > 0 && basinFeatureCount === 0 ? (
         <M11MapStatusNotice testId="m11-basin-layer-unavailable" topClassName="top-20">
           {skippedBasinGeometryCount > 0
@@ -202,7 +216,7 @@ export function M11MapStatusOverlays({
           {mapSourceError}
         </M11MapStatusNotice>
       ) : null}
-    </>
+    </div>
   )
 }
 
@@ -217,11 +231,12 @@ function M11MapStatusNotice({
 }) {
   return (
     <div
-      className={`absolute left-1/2 -translate-x-1/2 ${topClassName} z-[90] max-w-[min(28rem,calc(100%-2.5rem))] rounded-md border border-warning/40 bg-white/95 px-3 py-2 text-sm text-neutral-800 shadow-md`}
+      className={`absolute left-1/2 -translate-x-1/2 ${topClassName} z-[90] max-w-[min(28rem,calc(100%-2.5rem))] rounded-md border border-warning/40 bg-white/95 px-3 py-2 text-sm text-neutral-800 shadow-md mobile:pointer-events-auto mobile:static mobile:max-w-full mobile:shrink-0 mobile:translate-x-0`}
       role="status"
       data-testid={testId}
     >
-      {children}
+      {/* 截断放在内层：直接截带内边距的外层，第三行会从下内边距里露出半行。桌面形态下它只是个普通块。 */}
+      <div className="mobile:line-clamp-2">{children}</div>
     </div>
   )
 }
