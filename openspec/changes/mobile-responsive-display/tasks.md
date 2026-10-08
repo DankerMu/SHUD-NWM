@@ -192,7 +192,7 @@
 
   **Minimal mergeable slice:** atomic - 一个组件的一组移动样式，头部高度与标题单行互相决定，无可独立交付的子集。
 
-- [ ] 2.5 开发用角色切换器的移动位置：role override 开启时，移动形态下把 `AppShell` 的角色切换器收成宽不超过 56px 的紧凑触发器，移到 `main` 左边缘、垂直居中，层级高于地图浮层，保持可见可操作；桌面形态位置不变；未开启 role override 时两种形态都不渲染。在 `e2e/support/` 提供 `setRole(page, role)` 助手。新增 `e2e/m11-role-selector.mobile.mocked.spec.ts`。
+- [x] 2.5 开发用角色切换器的移动位置：role override 开启时，移动形态下把 `AppShell` 的角色切换器收成宽不超过 56px 的紧凑触发器，移到 `main` 左边缘、垂直居中，层级高于地图浮层，保持可见可操作；桌面形态位置不变；未开启 role override 时两种形态都不渲染。在 `e2e/support/` 提供 `setRole(page, role)` 助手。新增 `e2e/m11-role-selector.mobile.mocked.spec.ts`。
 
   Depends on: 1.1, 2.1
 
@@ -201,6 +201,18 @@
   **Suggested fixture level:** compact - 一个仅开发构建存在的控件的移动定位。
 
   **Minimal mergeable slice:** atomic - 一个元素的定位分支加一个测试助手。
+
+  Triage（#2793）：Issue type: feature（仅开发 / 测试构建可见的控件）｜ Fixture level: compact（与上游建议一致；设计见 design.md D5 末段。虽选了 Public API、Auth、Legacy compatibility 三个 pack，但该控件只在开发 / 测试构建渲染、生产构建零渲染，桌面形态的计算几何与行为不变，设计已在共用的 design.md，不触发 expanded）｜ Blast radius: mocked 车道——后续所有需要 operator 角色的移动 spec 都靠这个切换器与 `setRole` 助手；定位写错会让它在移动形态下被头部 / 控制条盖住而点不到。生产构建不渲染它，线上无影响。
+  - Risk pack「Public API / entry」selected：`AppShell` 内的共享控件 -> 新 spec `e2e/m11-role-selector.mobile.mocked.spec.ts`（三个移动 project）：在 `/` 上切换器触发器包围盒在视口内、宽 ≤ 56px、与头部（`SiteHeader`）和底部控制条的包围盒不相交；`elementFromPoint` 在其中心命中的是触发器自身或其后代（未被地图浮层盖住）。移动形态下切换器的 z-index 须大于 130（现有地图浮层最高为浮动提示的 `z-[130]`，图层面板 `z-[120]`）且小于 `--z-popover`（300，Radix 弹层）；spec 断言计算后的 z-index 落在该区间。
+  - Risk pack「Legacy compatibility」selected：既有消费者按可访问名找它 -> 触发器的 `aria-label="Role"` 不变；桌面形态下的位置（`main` 的 `right-4 top-4`）、宽度（`w-36`）与显示文本不变——`e2e/monitoring.mocked.spec.ts`（`getByLabel('Role')` 可见、可点、`toHaveText('Viewer')`）零 diff 且通过；`src/components/layout/__tests__/AppShell.test.tsx` 零 diff 且通过；`src/test/c4DisplayFakePage.ts` 不改。
+  - Risk pack「Auth / permissions」selected：角色覆盖只在开发 / 测试构建存在 -> vitest：`isRoleOverrideEnabled` 为 false 时两种形态都不渲染切换器（新测试文件里用可控 `matchMedia` 桩覆盖移动形态；桌面形态已有既有断言）；`src/stores/auth.ts` 零 diff。
+  - Risk pack「Error handling」selected：助手不得假成功 -> `setRole(page, role)` 通过真实 UI 操作切换：对触发器与选项用 `locator.click()`，不带 `force`、不用 `tap()`（既有 `monitoring.mocked.spec.ts` 里的私有 `selectRole` 用 `click({ force: true })`，会跳过可操作性检查，不得照抄）；成功判据是 `getByLabel('Role')` 的 `toHaveText(<该角色的显示名>)`——为此移动形态的紧凑触发器须把当前角色的显示名保留在 DOM 里（`SelectValue` 文本不移除，只做视觉截断 / 隐藏溢出），使该断言在两种形态下都成立；找不到切换器或选项时抛带原因的错误。
+  - 未选：File IO、Schema、Concurrency、Resource limits、Release、Documentation、Config。
+  - “角色生效”的 oracle：输入为 `/ops`，且新 spec 自带 `/api/v1/runtime/config` 的 mock 返回 `display_readonly: false`（`/ops` 的 `RBACGate` 带 `allowDisplayReadonly`：不 mock 时 viewer 先等 runtime config，若为只读部署则 viewer 直接放行，oracle 落空；`monitoring.mocked.spec.ts` 里的同类 mock 是它私有的，不改它）。期望：`getByText('权限不足')` 可见 -> `setRole(page, 'operator')` -> 该文本计数为 0 且 heading「内部诊断」可见；三个移动 project 下都成立。
+  - Must preserve：桌面形态下切换器的计算几何（`main` 内 `right: 16px; top: 16px`、宽 144px）、`aria-label` 与行为不变（移动形态用 `mobile:` 变体或 `useMobileForm()` 分支追加）；2.1–2.3 的三个外壳 spec 与 `m11-overlay-collision` 四个桌面宽度不改期望通过；`setRole` 助手是新文件，不改 `monitoring.mocked.spec.ts` 里它自带的切角色代码。
+  - 显式 non-goal：切换器与启动器列、顶部提示条带不相交（3.3 / 3.4 时那些元素才存在）；3.3 之前的过渡期里，切换器在两个横屏 project 下会盖住仍未收纳的图层面板的一小块（图层面板占着 `main` 左缘并盖到垂直中点）——接受，不为此改图层面板；44px / 16px 审计（design 明示豁免）；抽屉打开时被盖住（允许）。
+  - 实现须知：移动形态的三个视口里头部此时仍是 84px（2.4 尚未做），750×342 下 `main` 只有 258px 高、控制条占底部 64px——“左边缘垂直居中”须在这个高度下仍不与头部、控制条相交；Radix Select 的弹层走 portal，展开后的选项须在三个移动视口内可点。
+  - Evidence floor：约定的本地验证命令 + `check:types` + 治理门测试全绿；新移动 spec 在三个移动 project 各非零 passed；新 spec 先红后绿（改动前切换器在 `right-4 top-4`、宽 144px，宽度断言为红）；改展示端运行时代码，合并前出 node-27 live receipt（PR 的生产构建对 live API：切换器不渲染——`getByLabel('Role')` 计数为 0，桌面布局 oracle 不回归）。
 
 ## 3. 地图浮层（`/`）
 
