@@ -3561,7 +3561,12 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule("scripts/model_succession/plan.py", MODEL_SUCCESSION_TESTS),
     PathTestRule("scripts/model_succession/run.py", MODEL_SUCCESSION_TESTS),
     PathTestRule("scripts/model_succession/scheduler.py", MODEL_SUCCESSION_TESTS),
-    PathTestRule("scripts/model_succession/systemd.py", MODEL_SUCCESSION_TESTS),
+    # #2779: the gateway deployment contract parametrises the runbook's pass
+    # guard over this module's NOT_RUNNING_STATES / RUNNING_STATES.
+    PathTestRule(
+        "scripts/model_succession/systemd.py",
+        (*MODEL_SUCCESSION_TESTS, SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST),
+    ),
     PathTestRule("scripts/model_succession/tools.py", MODEL_SUCCESSION_TESTS),
     # #2757: the basin retirement tool's entry script and one row per package
     # module -- see BASIN_RETIREMENT_PACKAGE_MODULES.
