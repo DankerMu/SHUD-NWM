@@ -275,9 +275,11 @@ function M11FullscreenMap({
       {mobile ? (
         // 启动器列：地图区右上角竖排（缩放按钮在移动形态隐藏后腾出的位置），自上而下为
         // 图层 / 底图 / 图例 / 运维入口。三个展开的面板共用同一个锚点（列左侧、顶边对齐列顶）。
+        // 矮视口横屏把顶距收到 4px、间距收到 2px：四个 44px 的项才放得进列顶到控制条顶之间
+        // （750×342 下可用 182px，8 / 4 的几何要 188px）。
         <div
           ref={launcherColumnRef}
-          className="absolute right-2 top-2 z-[120] flex flex-col items-end gap-1"
+          className="absolute right-2 top-2 z-[120] flex flex-col items-end gap-1 mobile-landscape:top-1 mobile-landscape:gap-0.5"
           data-testid="m11-launcher-column"
         >
           {mapControlsRegion}

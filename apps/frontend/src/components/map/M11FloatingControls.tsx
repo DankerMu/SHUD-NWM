@@ -526,15 +526,31 @@ function M11LegendContent({
 /**
  * 低调运维直链（operator+ 可见）。桌面形态浮在地图右上角缩放控件下方；移动形态（`mobile`）下
  * 它是启动器列里的在流子项，用 `order-last` 排在图例启动器之下（列的视觉顺序：图层 / 底图 /
- * 图例 / 运维入口）。它比启动器宽，会把列撑宽，展开面板的锚点（列左缘）随之左移。
+ * 图例 / 运维入口），与三个启动器同形：44×44 的图标链接，宽度正好等于列宽（宽了会撑宽列、
+ * 把展开面板的锚点往左推）。文字「运维」留在 `sr-only` 子节点里，仍是它的可访问名。
  */
 export function M11OpsLink({ visible, mobile = false }: { visible: boolean; mobile?: boolean }) {
   if (!visible) return null
+  if (mobile) {
+    return (
+      <Link
+        to="/ops"
+        className={cn(
+          'order-last flex h-11 w-11 shrink-0 items-center justify-center text-neutral-700 transition-colors hover:bg-white/70',
+          GLASS_PANEL,
+        )}
+        data-testid="m11-ops-link"
+      >
+        <Wrench className="h-5 w-5" aria-hidden="true" />
+        <span className="sr-only">运维</span>
+      </Link>
+    )
+  }
   return (
     <Link
       to="/ops"
       className={cn(
-        mobile ? 'order-last shrink-0' : 'absolute right-4 top-28 z-[120]',
+        'absolute right-4 top-28 z-[120]',
         'flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-neutral-700 transition-colors hover:bg-white/70',
         GLASS_PANEL,
       )}
