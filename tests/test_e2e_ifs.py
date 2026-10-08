@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -11,16 +12,19 @@ from apps.api.main import app
 from apps.api.routes.forecast import get_forecast_store
 from packages.common.forecast_store import _forecast_response_from_rows, _spliced_response_from_rows
 from packages.common.object_store import LocalObjectStore
-from packages.common.test_netcdf4 import encode_test_netcdf4
 from services.orchestrator.chain import ForcingContext, ForecastOrchestrator, ModelContext, OrchestratorConfig
-from tests.test_e2e import E2ERepository, _run_output_parser, _run_shud_runtime, _write_grid_definition
+from tests.test_e2e import E2ERepository, _run_output_parser, _run_shud_runtime
 from workers.canonical_converter.converter import IFSCanonicalConverter, IFSCanonicalConverterConfig
 from workers.data_adapters.ifs_adapter import IFSAdapter, IFSAdapterConfig
 from workers.forcing_producer import ForcingProducer, ForcingProducerConfig
 
+CONVERTER_LOGGER = "workers.canonical_converter.converter"
+# The IFS open-data bundle of one forecast hour, in manifest order.
+IFS_BUNDLE_SHORT_NAMES = ["2t", "2d", "10u", "10v", "tp", "sp", "ssr", "str"]
+
 
 @pytest.mark.grib
-def test_ifs_adapter_canonical_forcing_run_parse_e2e(tmp_path: Path) -> None:
+def test_ifs_adapter_canonical_forcing_run_parse_e2e(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     repository = E2ERepository()
     object_root = tmp_path / "object-store"
     workspace = tmp_path / "workspace"
@@ -28,8 +32,10 @@ def test_ifs_adapter_canonical_forcing_run_parse_e2e(tmp_path: Path) -> None:
     cycle_time = _dt("2026-05-01T00:00:00Z")
 
     manifest = _run_ifs_adapter(repository, store, object_root, cycle_time, forecast_hours=[0, 3])
-    grid_definition_uri = _write_grid_definition(store, "canonical/IFS/2026050100/grid/ifs_0p25.json")
-    _run_ifs_canonical_converter(repository, store, object_root, manifest, grid_definition_uri)
+    grid_definition_uri = store.uri_for_key("canonical/IFS/2026050100/grid/ifs_0p25.json")
+    with caplog.at_level(logging.WARNING, logger=CONVERTER_LOGGER):
+        _run_ifs_canonical_converter(repository, store, object_root, manifest, grid_definition_uri)
+    _assert_decoded_with_cfgrib(caplog)
     forcing = _run_ifs_forcing_producer(repository, store, object_root, cycle_time, max_lead_hours=168)
 
     assert repository.data_sources["IFS"]["adapter_name"] == "ifs_adapter"
@@ -73,7 +79,7 @@ def test_ifs_adapter_canonical_forcing_run_parse_e2e(tmp_path: Path) -> None:
 
 
 @pytest.mark.grib
-def test_ifs_06z_144h_manifest_context_and_forcing_limit(tmp_path: Path) -> None:
+def test_ifs_06z_144h_manifest_context_and_forcing_limit(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     repository = E2ERepository()
     object_root = tmp_path / "object-store"
     store = LocalObjectStore(object_root, "s3://nhms")
@@ -91,8 +97,10 @@ def test_ifs_06z_144h_manifest_context_and_forcing_limit(tmp_path: Path) -> None
         cycle_time,
         forecast_hours=[0, 3, 144],
     )
-    grid_definition_uri = _write_grid_definition(store, "canonical/IFS/2026050106/grid/ifs_0p25.json")
-    _run_ifs_canonical_converter(repository, store, object_root, manifest, grid_definition_uri)
+    grid_definition_uri = store.uri_for_key("canonical/IFS/2026050106/grid/ifs_0p25.json")
+    with caplog.at_level(logging.WARNING, logger=CONVERTER_LOGGER):
+        _run_ifs_canonical_converter(repository, store, object_root, manifest, grid_definition_uri)
+    _assert_decoded_with_cfgrib(caplog)
     forcing = _run_ifs_forcing_producer(repository, store, object_root, cycle_time, max_lead_hours=144)
 
     valid_times = {
@@ -276,20 +284,44 @@ def _run_ifs_adapter(
     assert result.status == "raw_complete"
     assert manifest.metadata["max_lead_hours"] == (144 if cycle_time.hour in {6, 18} else 168)
 
+    _write_ifs_grib2_bundles(store, manifest, cycle_time)
+    return manifest
+
+
+def _write_ifs_grib2_bundles(store: LocalObjectStore, manifest: Any, cycle_time: datetime) -> None:
+    # Imported here, not at module level: pure CI has no ecCodes library (#2700).
+    from tests.grib2_fixture_support import eccodes_version, encode_grib2_bundle, grib2_short_names
+
+    print(f"ecCodes {eccodes_version()}")
+    # The manifest has one entry per variable, all of a forecast hour sharing one
+    # bundle key: every bundle is written once, holding all of its variables.
+    variables_by_bundle: dict[tuple[str, int], list[str]] = {}
     for entry in manifest.entries:
+        variables_by_bundle.setdefault((entry.local_key, entry.forecast_hour), []).append(entry.variable)
+    assert len(variables_by_bundle) == len({entry.forecast_hour for entry in manifest.entries})
+    for (local_key, forecast_hour), variables in variables_by_bundle.items():
         store.write_bytes_atomic(
-            entry.local_key,
-            encode_test_netcdf4(
-                entry.variable,
-                entry.forecast_hour,
-                values=[_ifs_raw_value(entry.variable, entry.forecast_hour)],
+            local_key,
+            encode_grib2_bundle(
+                {variable: _ifs_raw_value(variable, forecast_hour) for variable in variables},
                 cycle_time=cycle_time,
-                source="IFS",
-                longitudes=[110.0],
-                latitudes=[30.0],
+                forecast_hour=forecast_hour,
+                centre="ecmf",
+                longitude=110.0,
+                latitude=30.0,
             ),
         )
-    return manifest
+        assert grib2_short_names(store.resolve_path(local_key)) == IFS_BUNDLE_SHORT_NAMES, local_key
+
+
+def _assert_decoded_with_cfgrib(caplog: pytest.LogCaptureFixture) -> None:
+    # The converter has no positive engine indicator; it logs the netcdf4 fallback
+    # (and nothing else on these fixtures) at WARNING.
+    assert [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == CONVERTER_LOGGER and record.levelno >= logging.WARNING
+    ] == []
 
 
 def _run_ifs_canonical_converter(

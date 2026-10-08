@@ -3578,7 +3578,7 @@ def _expected_forcing_valid_times(
     )
     if not interval_times:
         return valid_times
-    interval_row_times = _gfs_interval_row_times(interval_times, cycle_time=cycle_time)
+    interval_row_times = gfs_interval_row_times(interval_times, cycle_time=cycle_time)
     point_times = set(products_by_variable.get("air_temperature_2m", {}))
     return tuple(valid_time for valid_time in interval_row_times if valid_time in point_times)
 
@@ -3604,7 +3604,7 @@ def _forcing_product_time_plan(
     )
     if not interval_times:
         return plan
-    row_by_interval_end = dict(zip(interval_times, _gfs_interval_row_times(interval_times, cycle_time=cycle_time)))
+    row_by_interval_end = dict(zip(interval_times, gfs_interval_row_times(interval_times, cycle_time=cycle_time)))
     for variable in ("prcp_rate_or_amount", "shortwave_down"):
         plan[variable] = {
             row_time: interval_end
@@ -3614,13 +3614,22 @@ def _forcing_product_time_plan(
     return plan
 
 
-def _gfs_interval_row_times(interval_times: Sequence[datetime], *, cycle_time: datetime) -> tuple[datetime, ...]:
-    ordered = tuple(sorted(interval_times))
+def gfs_interval_row_times(interval_end_times: Sequence[datetime], *, cycle_time: datetime) -> tuple[datetime, ...]:
+    """Row time of each GFS interval product: the interval's start (the previous end, first the cycle time)."""
+    ordered = tuple(sorted(interval_end_times))
     if not ordered:
         return ()
     row_times: list[datetime] = []
     previous_end = cycle_time
     for interval_end in ordered:
+        if _ensure_utc(interval_end) <= _ensure_utc(previous_end):
+            # An interval that does not end after the previous one has no start of its
+            # own; planning it would silently duplicate the previous row time.
+            raise ForcingProductionError(
+                f"GFS interval product valid_time {interval_end.isoformat()} is not after the previous "
+                f"interval end {previous_end.isoformat()} (cycle_time {cycle_time.isoformat()}); "
+                "interval products must end strictly after the cycle time and after each other."
+            )
         row_times.append(previous_end)
         previous_end = interval_end
     return tuple(row_times)

@@ -2,17 +2,19 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from packages.common import safe_fs
-from services.production_closure import slurm_validation
+from services.production_closure import met_validation, slurm_validation
 from services.production_closure.met_validation import (
     REQUIRED_FORCING_VARIABLES,
     EvidenceWriter,
     ProductionMetConfig,
     ProductionMetValidationError,
     _forcing_qc_payload,
+    _gfs_expected_row_times,
     package_manifest_unit,
     validate_met,
 )
@@ -42,7 +44,6 @@ def test_output_units_keyset_equals_required_forcing_variables() -> None:
         assert isinstance(unit, str) and unit.strip(), variable
 
 
-@pytest.mark.grib
 def test_validate_met_default_lane_writes_required_evidence_and_redacts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -99,10 +100,10 @@ def test_validate_met_default_lane_writes_required_evidence_and_redacts(
 
     raw = _read_json(lane_dir / "raw_cycle_manifest.json")
     assert raw["status"] == "ready"
-    assert raw["total_file_count"] == 15
+    assert raw["total_file_count"] == 13
     gfs = next(source for source in raw["sources"] if source["source"] == "GFS")
     assert gfs["status"] == "available"
-    assert gfs["file_count"] == 15
+    assert gfs["file_count"] == 13
     assert gfs["selected_forecast_hours"] == [0, 3]
     assert gfs["retry_count"] == 0
     assert gfs["object_uri"].startswith("s3://nhms-prod/met/runs/m10_149/met/raw/gfs/")
@@ -115,7 +116,7 @@ def test_validate_met_default_lane_writes_required_evidence_and_redacts(
 
     canonical = _read_json(lane_dir / "canonical_products.json")
     assert canonical["status"] == "ready"
-    assert canonical["product_count"] == 14
+    assert canonical["product_count"] == 12
     assert {
         source["source"]: source["conversion_status"] for source in canonical["source_statuses"]
     } == {
@@ -139,7 +140,15 @@ def test_validate_met_default_lane_writes_required_evidence_and_redacts(
     assert qc["status"] == "pass"
     assert qc["required_variables"]["missing"] == []
     assert qc["continuity"]["status"] == "pass"
-    assert qc["continuity"]["expected_valid_times"] == ["2026-05-07T00:00:00Z", "2026-05-07T03:00:00Z"]
+    # GFS forcing rows sit at interval starts: hours {0, 3} are one row at the cycle time.
+    assert qc["continuity"]["expected_valid_times"] == ["2026-05-07T00:00:00Z"]
+    assert qc["continuity"]["observed_valid_times"] == ["2026-05-07T00:00:00Z"]
+    # #2700: like production GFS, the deterministic fixture has no interval variables at f000.
+    gfs_manifest = _read_json(lane_dir / "local-object-store" / "raw" / "gfs" / "2026050700" / "manifest.json")
+    entry_keys = {(entry["forecast_hour"], entry["variable"]) for entry in gfs_manifest["entries"]}
+    assert len(gfs_manifest["entries"]) == 12
+    assert not {(0, "apcp"), (0, "dswrf")} & entry_keys
+    assert {(3, "apcp"), (3, "dswrf"), (0, "tmp2m")} <= entry_keys
     assert qc["package_uri"].startswith("s3://nhms-prod/met/runs/m10_149/met/forcing/gfs/")
     assert qc["package_manifest_uri"].endswith("/forcing_package.json")
     assert all(check["status"] == "pass" for check in qc["range_checks"])
@@ -261,7 +270,6 @@ def test_validate_met_bounds_block_before_unbounded_work(
     assert not (tmp_path / "artifacts" / "bounded" / "met" / "local-object-store").exists()
 
 
-@pytest.mark.grib
 def test_validate_met_manifest_bound_counts_actual_deterministic_sources(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -273,8 +281,28 @@ def test_validate_met_manifest_bound_counts_actual_deterministic_sources(
     lane_dir = tmp_path / "artifacts" / "actualbound" / "met"
     assert summary["status"] == "ready"
     raw = _read_json(lane_dir / "raw_cycle_manifest.json")
-    assert raw["total_file_count"] == 15
+    assert raw["total_file_count"] == 13
     assert raw["bounds"]["max_manifest_entries"] == 16
+
+
+@pytest.mark.parametrize(("max_entries", "fits"), [("13", True), ("12", False)])
+def test_validate_met_manifest_bound_is_the_exact_deterministic_entry_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    max_entries: str,
+    fits: bool,
+) -> None:
+    # Default lane: 7 GFS variables x hours {0, 3} minus apcp/dswrf at f000 = 12 raw
+    # files, plus the source manifest = 13 (`total_file_count`).
+    monkeypatch.setenv("NHMS_PRODUCTION_MET_MAX_MANIFEST_ENTRIES", max_entries)
+    config = ProductionMetConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="exactbound")
+
+    if fits:
+        assert validate_met(config)["status"] == "ready"
+        return
+    with pytest.raises(ProductionMetValidationError) as exc_info:
+        validate_met(config)
+    assert exc_info.value.error_code == "PRODUCTION_MET_MANIFEST_ENTRY_LIMIT_EXCEEDED"
 
 
 def test_validate_met_rejects_path_escape_before_writing(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -369,7 +397,6 @@ def test_validate_met_rejects_undeterminable_home_with_structured_code(
     assert not list(tmp_path.glob("*~*"))
 
 
-@pytest.mark.grib
 def test_validate_met_same_run_requires_force_and_force_replaces_bundle(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -455,7 +482,6 @@ def test_validate_met_force_refuses_object_bundle_parent_symlink_swap_without_ex
     assert sentinel.read_text(encoding="utf-8") == "external must remain\n"
 
 
-@pytest.mark.grib
 def test_validate_met_disabled_sources_record_skipped_without_success(tmp_path: Path) -> None:
     summary = validate_met(
         ProductionMetConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="gfsonly", sources="GFS")
@@ -470,6 +496,23 @@ def test_validate_met_disabled_sources_record_skipped_without_success(tmp_path: 
     assert modes["ERA5"] == "skipped"
     assert modes["CLDAS"] == "restricted"
     assert next(source for source in raw["sources"] if source["source"] == "IFS")["file_count"] == 0
+
+
+def test_validate_met_rejects_forecast_hours_without_an_hour_above_zero(tmp_path: Path) -> None:
+    config = ProductionMetConfig.from_env(
+        evidence_root=tmp_path / "artifacts",
+        run_id="houronly0",
+        cycle_end="2026-05-07T00:00:00Z",
+        forecast_hours="0",
+    )
+
+    with pytest.raises(ProductionMetValidationError) as exc_info:
+        validate_met(config)
+
+    assert exc_info.value.error_code == "PRODUCTION_MET_FORECAST_HOURS_INVALID"
+    assert "at least one hour above 0" in str(exc_info.value)
+    assert "f000" in str(exc_info.value)
+    assert not (tmp_path / "artifacts").exists()
 
 
 def test_validate_met_rejects_cycle_window_missing_endpoint(tmp_path: Path) -> None:
@@ -536,6 +579,90 @@ def test_validate_met_qc_fails_missing_expected_endpoint_and_intermediate(tmp_pa
     assert qc["continuity"]["missing_valid_times"] == ["2026-05-07T03:00:00Z", "2026-05-07T06:00:00Z"]
 
 
+def test_validate_met_continuity_expects_rows_of_configured_hours_even_when_products_are_absent(
+    tmp_path: Path,
+) -> None:
+    config = ProductionMetConfig.from_env(
+        evidence_root=tmp_path / "artifacts",
+        run_id="qcconfiguredhours",
+        cycle_end="2026-05-07T06:00:00Z",
+        forecast_hours="0,3,6",
+    )
+
+    expected = _gfs_expected_row_times(config.forecast_hours, cycle_start=config.cycle_start)
+
+    # Interval-start rows of hours {3, 6}; the hour-6 products play no part in the expectation.
+    assert [time.isoformat() for time in expected] == ["2026-05-07T00:00:00+00:00", "2026-05-07T03:00:00+00:00"]
+    assert _gfs_expected_row_times((0, 3), cycle_start=config.cycle_start) == (config.cycle_start,)
+    assert _gfs_expected_row_times((0,), cycle_start=config.cycle_start) == ()
+
+    # Hour-6 canonical products went missing: the producer plans the cycle-time row only.
+    rows = [
+        ForcingTimeseriesRow(
+            forcing_version_id="qc_fixture",
+            basin_version_id="basin_v1",
+            station_id="station_1",
+            valid_time=config.cycle_start,
+            source_id="gfs",
+            variable=variable,
+            value=1.0 if variable != "Press" else 101325.0,
+            unit="fixture",
+            native_resolution="3h",
+        )
+        for variable in ("PRCP", "TEMP", "RH", "wind", "Rn", "Press")
+    ]
+    qc = _forcing_qc_payload(
+        rows,
+        {"lineage": {}},
+        expected_valid_times=expected,
+        package_uri="fixture://package",
+        package_manifest_uri="fixture://package/forcing_package.json",
+    )
+
+    assert qc["status"] == "fail"
+    assert qc["continuity"]["status"] == "fail"
+    assert qc["continuity"]["missing_valid_times"] == ["2026-05-07T03:00:00Z"]
+
+
+def test_validate_met_lane_fails_continuity_when_canonical_products_of_a_configured_hour_are_absent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Whole lane, hours {0, 3, 6}: the hour-6 canonical products vanish between the
+    # canonical and the forcing stage, so the producer plans the cycle-time row only.
+    write_forcing_evidence = met_validation._write_forcing_evidence
+    removed: list[str] = []
+
+    def without_hour_6_products(config: ProductionMetConfig, store: Any, repository: Any) -> dict[str, Any]:
+        for product_id, record in list(repository.products.items()):
+            if int(record["lead_time_hours"]) == 6:
+                removed.append(product_id)
+                del repository.products[product_id]
+        return write_forcing_evidence(config, store, repository)
+
+    monkeypatch.setattr(met_validation, "_write_forcing_evidence", without_hour_6_products)
+    config = ProductionMetConfig.from_env(
+        evidence_root=tmp_path / "artifacts",
+        run_id="hour6absent",
+        cycle_end="2026-05-07T06:00:00Z",
+        forecast_hours="0,3,6",
+    )
+
+    summary = validate_met(config)
+
+    assert len(removed) == 7
+    lane_dir = tmp_path / "artifacts" / "hour6absent" / "met"
+    # The producer itself succeeds on what is left; only the expectation can tell.
+    assert _read_json(lane_dir / "forcing_manifest.json")["status"] == "forcing_ready"
+    qc = _read_json(lane_dir / "forcing_qc.json")
+    assert qc["continuity"]["observed_valid_times"] == ["2026-05-07T00:00:00Z"]
+    assert qc["continuity"]["expected_valid_times"] == ["2026-05-07T00:00:00Z", "2026-05-07T03:00:00Z"]
+    assert qc["continuity"]["missing_valid_times"] == ["2026-05-07T03:00:00Z"]
+    assert qc["continuity"]["status"] == "fail"
+    assert qc["status"] == "fail"
+    assert summary["status"] == "blocked"
+
+
 def test_validate_met_disabled_fallback_policy_blocks_without_fixture(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -556,7 +683,6 @@ def test_validate_met_disabled_fallback_policy_blocks_without_fixture(
     assert gfs["file_count"] == 0
 
 
-@pytest.mark.grib
 def test_validate_met_cached_only_policy_uses_cached_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NHMS_PRODUCTION_MET_CACHED_FALLBACK_POLICY", "cached_only")
 
@@ -592,7 +718,6 @@ def test_validate_met_raw_manifest_uses_redacted_configured_endpoint(
     assert "token=secret" not in evidence_text
 
 
-@pytest.mark.grib
 def test_argparse_validate_met_fallback(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     exit_code = slurm_validation._argparse_main(
         ["validate-met", "--evidence-root", str(tmp_path / "artifacts"), "--run-id", "argparse"]
