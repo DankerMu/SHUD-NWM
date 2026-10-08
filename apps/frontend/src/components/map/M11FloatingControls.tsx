@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { CloudRain, Droplets, Layers, Map as MapIcon, MapPin, Mountain, Satellite, Wrench, type LucideIcon } from 'lucide-react'
+import { CloudRain, Droplets, Layers, Map as MapIcon, MapPin, Mountain, Palette, Satellite, Wrench, type LucideIcon } from 'lucide-react'
 import { Link } from 'react-router-dom'
 
 import type { components } from '@/api/types'
@@ -237,13 +237,62 @@ export function M11FloatingLegend({
   layer,
   layers,
   precipLegend,
+  mobile = false,
+  expanded = false,
+  onToggle,
+  panelMaxHeight = null,
 }: {
   layer: M11Layer
   layers: LayerState[]
   precipLegend?: PrecipLegendEntry[] | null
+  /**
+   * 移动形态（openspec mobile-responsive-display D5）：图例收成启动器，`expanded` 时才渲染面板。
+   * 不传 = 桌面形态的常驻面板；下面三个 prop 只在移动形态被读取。
+   */
+  mobile?: boolean
+  expanded?: boolean
+  onToggle?: () => void
+  /** 展开面板的高度上限（px），由地图外壳按地图区与控制条的实际几何量出；null = 不设上限。 */
+  panelMaxHeight?: number | null
 }) {
-  const entries = resolveM11FloatingLegend(layer, layers)
-  const precipEntries = precipLegend?.length ? precipLegend : null
+  if (mobile) {
+    return (
+      <>
+        <button
+          type="button"
+          className={cn(
+            'flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center',
+            expanded ? 'text-primary-700' : 'text-neutral-700',
+            GLASS_PANEL,
+          )}
+          aria-label="图例"
+          aria-expanded={expanded}
+          data-testid="m11-launcher-legend"
+          onClick={onToggle}
+        >
+          <Palette className="h-5 w-5" aria-hidden="true" />
+        </button>
+        {expanded ? (
+          // 面板锚在启动器列左侧、顶边与列顶对齐（定位祖先是启动器列）。宽度规则同桌面
+          // （`w-max max-w-56`），再按视口收一道上限，保证不伸出地图区左缘。
+          // 面板自身只限高、不滚动；滚动容器是里层的 `m11-floating-legend-scroll`。
+          <section
+            className={cn(
+              'absolute right-full top-0 mr-2 flex w-max max-w-[min(14rem,calc(100vw-5rem))] flex-col overflow-hidden',
+              GLASS_PANEL,
+            )}
+            style={panelMaxHeight === null ? undefined : { maxHeight: panelMaxHeight }}
+            aria-label="地图图例"
+            data-testid="m11-floating-legend"
+          >
+            <div className="min-h-0 overflow-y-auto overscroll-contain p-3" data-testid="m11-floating-legend-scroll">
+              <M11LegendContent layer={layer} layers={layers} precipLegend={precipLegend} />
+            </div>
+          </section>
+        ) : null}
+      </>
+    )
+  }
 
   return (
     <section
@@ -261,6 +310,29 @@ export function M11FloatingLegend({
       aria-label="地图图例"
       data-testid="m11-floating-legend"
     >
+      <M11LegendContent layer={layer} layers={layers} precipLegend={precipLegend} />
+    </section>
+  )
+}
+
+/**
+ * 图例内容（流量段 + 可选的降水段）。桌面的常驻面板与移动形态的展开面板共用这一份，
+ * 不另写第二份图例。返回 fragment：不给桌面面板多加任何包裹元素。
+ */
+function M11LegendContent({
+  layer,
+  layers,
+  precipLegend,
+}: {
+  layer: M11Layer
+  layers: LayerState[]
+  precipLegend?: PrecipLegendEntry[] | null
+}) {
+  const entries = resolveM11FloatingLegend(layer, layers)
+  const precipEntries = precipLegend?.length ? precipLegend : null
+
+  return (
+    <>
       <div className="flex items-center gap-2 pb-2 text-xs font-semibold text-neutral-900">
         <Layers className="h-4 w-4 text-primary-600" aria-hidden="true" />
         {legendTitle(layer)}
@@ -310,7 +382,7 @@ export function M11FloatingLegend({
           </div>
         </div>
       ) : null}
-    </section>
+    </>
   )
 }
 

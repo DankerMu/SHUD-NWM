@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 
 import { RegionErrorBoundary } from '@/components/layout/RegionErrorBoundary'
@@ -22,6 +22,7 @@ import { resolveM11PrecipOverlay, type M11PrecipOverlayModel } from '@/component
 import { bboxToMapFit } from '@/components/map/m11MapRuntime'
 import { M11RiverForecastPanel, type M11RiverPopupSegment } from '@/components/map/M11RiverForecastPanel'
 import { M11StationForcingPopup, type M11StationPopupStation } from '@/components/map/M11StationForcingPopup'
+import { useMobileForm } from '@/hooks/useMobileForm'
 import type { HydroMetSource } from '@/lib/hydroMet/queryState'
 import { mergeLayerStates, type LayerState, type OverviewBasin } from '@/lib/m11/overviewDataContracts'
 import {
@@ -40,6 +41,7 @@ import {
   type M11ControlBarInput,
 } from '@/pages/m11/M11BottomControlBar'
 import { resolveM11NationalValidTimeCorrection } from '@/pages/m11/M11Controls'
+import { useM11MobilePanelMaxHeight, useM11OverlayExpansion } from '@/pages/m11/useM11OverlayExpansion'
 import { useNationalBasinGeo } from '@/pages/m11/useNationalBasinGeo'
 import { useMetStationLayer } from '@/pages/m11/useStationLayer'
 import { useAuthStore } from '@/stores/auth'
@@ -51,6 +53,10 @@ import {
 } from '@/stores/overviewData'
 
 const OPERATOR_ROLES = ['operator', 'model_admin', 'sys_admin']
+/** 展开面板的底边以它为界；这里只读它的几何，不改它（控制条的移动布局归控制条自己）。 */
+const CONTROL_BAR_SELECTOR = '[data-testid="m11-bottom-control-bar"]'
+/** 图例区域兜底在桌面形态的定位（与桌面图例同位）。 */
+const LEGEND_REGION_DESKTOP_CLASS = 'absolute bottom-[7.5rem] right-4 z-[120]'
 
 /**
  * 单页全屏地图展示端（M26）：整个展示端 = 一张铺满视口的地图 + 玻璃质感浮层。
@@ -156,6 +162,39 @@ function M11FullscreenMap({
 }) {
   const role = useAuthStore((store) => store.role)
   const opsVisible = OPERATOR_ROLES.includes(role)
+  // 移动形态（openspec mobile-responsive-display D5）：浮层收成右上角的启动器列，同一时刻至多展开一个。
+  // 桌面形态不读展开值，渲染路径与改动前相同。
+  const { mobile } = useMobileForm()
+  const { expanded, toggle, collapse } = useM11OverlayExpansion(mobile)
+  const mapRegionRef = useRef<HTMLElement | null>(null)
+  const launcherColumnRef = useRef<HTMLDivElement | null>(null)
+  const panelMaxHeight = useM11MobilePanelMaxHeight({
+    active: expanded !== null,
+    regionRef: mapRegionRef,
+    columnRef: launcherColumnRef,
+    floorSelector: CONTROL_BAR_SELECTOR,
+  })
+  const toggleLegend = useCallback(() => toggle('legend'), [toggle])
+  // `state.layer` 恒为 'discharge'，拿它当 key 永远不会复位，故只靠「重试」。
+  const legendRegion = (
+    <RegionErrorBoundary
+      region="图例"
+      testId="region-error-legend"
+      resetKeys={[]}
+      // 移动形态下边界在启动器列内，兜底就地落在列里（专门的移动定位归 3.6）。
+      className={mobile ? undefined : LEGEND_REGION_DESKTOP_CLASS}
+    >
+      <M11FloatingLegend
+        layer={state.layer}
+        layers={layers}
+        precipLegend={precipLegend}
+        mobile={mobile}
+        expanded={expanded === 'legend'}
+        onToggle={toggleLegend}
+        panelMaxHeight={panelMaxHeight}
+      />
+    </RegionErrorBoundary>
+  )
 
   return (
     <div className="flex h-full min-h-0 w-full flex-col overflow-hidden bg-[#d7e7ef]">
@@ -163,6 +202,7 @@ function M11FullscreenMap({
         className="relative w-full flex-1 overflow-hidden"
         aria-label={mapLabel}
         data-testid="m11-fullscreen-map"
+        ref={mapRegionRef}
       >
       <RegionErrorBoundary region="地图" testId="region-error-map" resetKeys={[]} className="absolute inset-0 justify-center">
         <M11MapLibreSurface
@@ -181,6 +221,7 @@ function M11FullscreenMap({
           fitTo={fitTo}
           onOverlayHover={onOverlayHover}
           onOverlayClick={onOverlayClick}
+          onMapClick={collapse}
         />
       </RegionErrorBoundary>
       <RegionErrorBoundary
@@ -211,10 +252,18 @@ function M11FullscreenMap({
           <M11BottomControlBarRegion input={controlBarInput} onQueryChange={onQueryChange} />
         </RegionErrorBoundary>
       ) : null}
-      {/* `state.layer` 恒为 'discharge'，拿它当 key 永远不会复位，故只靠「重试」。 */}
-      <RegionErrorBoundary region="图例" testId="region-error-legend" resetKeys={[]} className="absolute bottom-[7.5rem] right-4 z-[120]">
-        <M11FloatingLegend layer={state.layer} layers={layers} precipLegend={precipLegend} />
-      </RegionErrorBoundary>
+      {mobile ? (
+        // 启动器列：地图区右上角竖排（缩放按钮在移动形态隐藏后腾出的位置）。展开的面板锚在它左侧。
+        <div
+          ref={launcherColumnRef}
+          className="absolute right-2 top-2 z-[120] flex flex-col items-end gap-1"
+          data-testid="m11-launcher-column"
+        >
+          {legendRegion}
+        </div>
+      ) : (
+        legendRegion
+      )}
       </section>
     </div>
   )

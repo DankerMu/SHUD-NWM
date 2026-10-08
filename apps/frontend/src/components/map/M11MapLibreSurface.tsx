@@ -119,6 +119,8 @@ interface M11MapLibreSurfaceProps {
   flyTo?: M11MapCameraFlyTo | null
   onOverlayHover?: (interaction: M11MapOverlayInteraction | null) => void
   onOverlayClick?: (interaction: M11MapOverlayInteraction) => void
+  /** 地图上的每一次点击（命中或未命中要素）都通知一次；与 `onOverlayClick` 独立。 */
+  onMapClick?: () => void
 }
 
 export function M11MapLibreSurface({
@@ -139,6 +141,7 @@ export function M11MapLibreSurface({
   flyTo,
   onOverlayHover,
   onOverlayClick,
+  onMapClick,
 }: M11MapLibreSurfaceProps) {
   const mapRef = useRef<MapRef | null>(null)
   const initialViewState = useM11MapCamera({ fitTo, flyTo, mapRef })
@@ -342,9 +345,10 @@ export function M11MapLibreSurface({
         renderableOverlay,
         mapRef: mapRef.current,
         onOverlayClick,
+        onMapClick,
       })
     },
-    [onOverlayClick, renderableOverlay, showStationLayer],
+    [onMapClick, onOverlayClick, renderableOverlay, showStationLayer],
   )
 
   // 移动形态不渲染缩放 / 指北控件（openspec mobile-responsive-display D7）；手势配置不动。
