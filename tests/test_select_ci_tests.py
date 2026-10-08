@@ -14701,7 +14701,9 @@ def test_model_succession_tracked_tree_is_seven_modules_six_suites_and_one_helpe
     assert len(expected) == 6
     for pattern in (MODEL_SUCCESSION_OWNER_PATH, *sorted(modules), MODEL_SUCCESSION_HELPERS_PATH):
         (rule,) = [rule for rule in (*PATH_TEST_RULES, *SUPPORT_MODULE_TEST_RULES) if rule.pattern == pattern]
-        assert set(rule.tests) == expected, pattern
+        # #2779: the gateway deployment contract imports the state constants of systemd.py, and of no other module.
+        extra = {SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST} if pattern == "scripts/model_succession/systemd.py" else set()
+        assert set(rule.tests) == expected | extra, pattern
 
     tracked = _tracked_python_files("tests")
     assert {

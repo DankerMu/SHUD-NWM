@@ -55,8 +55,12 @@ while its body is treated as executable.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
+import pytest
+
+from scripts.model_succession.systemd import NOT_RUNNING_STATES, RUNNING_STATES
 from tests.production_ops_runbook import surfaces as production_ops_surfaces
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -522,7 +526,7 @@ DROPIN_OPENERS = (
     SERVICE_DROPIN_OPENER,
 )
 LIVE_PASS_FAILCLOSED = (
-    "if systemctl --user is-active --quiet nhms-compute-scheduler.service; then"
+    'SCHEDULER_STATE="$(systemctl --user is-active nhms-compute-scheduler.service || true)"'
 )
 SKIP_VERIFY = (
     'is-active nhms-compute-scheduler.timer)" = inactive',
@@ -644,9 +648,11 @@ def test_rollout_loads_probes_and_verifies_fence_before_backup() -> None:
         assert ordered.index(needle) < backup_idx, (
             "fence load/probe/verify must precede backup/overwrite"
         )
+    assert ordered.index(LIVE_PASS_FAILCLOSED) < ordered.index(f"systemctl --user start {SCHEDULER_SERVICE}")
     assert "sleep" not in ordered, "no sleep loops in the fence"
     # The probe start on the SERVICE must never be a real run: service stays
-    # inactive (condition skipped); no `--quiet` swallowing, no `|| true`.
+    # inactive (condition skipped). The pass guard reads the PRINTED state (its
+    # capture carries the block's only `|| true`); an exit code never decides.
     _assert_no_service_stop_kill(ordered, "rollout")
 
 
@@ -752,7 +758,8 @@ def test_rollback_reasserts_condition_fence_and_never_removes_or_starts() -> Non
         )
     assert "systemctl --user daemon-reload" in ordered
     assert f"systemctl --user stop {SCHEDULER_TIMER}" in ordered
-    assert LIVE_PASS_FAILCLOSED in ordered
+    assert ordered.index(LIVE_PASS_FAILCLOSED) < ordered.index(f"systemctl --user start {SCHEDULER_SERVICE}")
+    assert ordered.index(LIVE_PASS_FAILCLOSED) < ordered.index("BACKUP_POINTER=")
     assert "let it finish naturally" in ordered
     assert "exit 1" in ordered
     for probe in DROPIN_PATHS_PROBE:
@@ -799,6 +806,45 @@ def test_rollback_reasserts_condition_fence_and_never_removes_or_starts() -> Non
     assert "systemctl --user daemon-reload" in runbook
     assert "verify DropInPaths no longer list the fence" in runbook
     assert TIMER_START_LINE in runbook  # manual recovery mentions start
+
+
+def _pass_guard(blocks: list[str]) -> str:
+    """The scheduler-pass guard: capture line through its ``esac`` (raises if either is missing)."""
+    lines = _join_executable(blocks).splitlines()
+    if LIVE_PASS_FAILCLOSED not in lines or "esac" not in lines[lines.index(LIVE_PASS_FAILCLOSED) :]:
+        raise AssertionError(f"pass guard anchor missing: {LIVE_PASS_FAILCLOSED} ... esac")
+    start = lines.index(LIVE_PASS_FAILCLOSED)
+    return "\n".join(lines[start : lines.index("esac", start) + 1])
+
+
+@pytest.mark.parametrize("state", [*sorted(NOT_RUNNING_STATES | RUNNING_STATES), "", "maintenance"])
+@pytest.mark.parametrize("step", ["rollout", "rollback"])
+def test_pass_guard_classifies_the_printed_state(step: str, state: str, tmp_path: Path) -> None:
+    """#2779: the scheduler is ``Type=oneshot``; a running pass is ``activating`` and
+    ``is-active`` exits 3, so the guard must classify what is PRINTED. The fake
+    ``systemctl`` exits 0 only for ``active`` (else 3), as the real one does."""
+    blocks = _rollout_only_blocks() if step == "rollout" else _rollback_blocks()
+    assert "is-active --quiet" not in _join_executable(blocks)
+    fake = tmp_path / "systemctl"
+    fake.write_text(
+        f'#!/bin/sh\n[ "$*" = "--user is-active {SCHEDULER_SERVICE}" ] || exit 64\n'
+        f"printf '%s\\n' '{state}'\n[ '{state}' = active ] || exit 3\n"
+    )
+    fake.chmod(0o755)
+    script = f"set -euo pipefail\n{_pass_guard(blocks)}\necho fell-through\n"
+    run = subprocess.run(["/bin/bash", "-c", script], env={"PATH": f"{tmp_path}:/usr/bin:/bin"},
+                         capture_output=True, text=True, timeout=30, check=False)
+    got = (run.returncode, run.stdout)
+    if state in NOT_RUNNING_STATES:
+        assert got == (0, "fell-through\n"), run.stderr
+        hint = f"systemctl --user reset-failed {SCHEDULER_SERVICE}"
+        assert (hint in run.stderr and "inactive" in run.stderr) if state == "failed" else run.stderr == ""
+    elif state in RUNNING_STATES:
+        assert got == (1, ""), run.stderr
+        assert f"({state}); let it finish naturally" in run.stderr
+        assert f"re-run this {step} step once {SCHEDULER_SERVICE} is inactive" in run.stderr
+    else:
+        assert got == (1, "") and f"'{state}'" in run.stderr and "unknown" in run.stderr, run.stderr
 
 
 # ---------------------------------------------------------------------------
