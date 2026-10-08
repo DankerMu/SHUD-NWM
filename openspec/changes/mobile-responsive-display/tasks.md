@@ -336,7 +336,7 @@
   - Review focus：(1) 桌面类逐字保留、只做追加，`display: contents` 包裹不改变桌面定位上下文；(2) 互斥链与出现条件零改动；(3) 每个场景的触发是真实产品路径（请求失败 / 挂起），不是往 DOM 里塞假节点（截断用例加长文本除外，须写明）；(4) 两行上限断言非恒真；(5) 三个移动 project 都跑、无跳过。
   - Evidence floor：约定的本地验证命令 + `check:types` + 治理门测试全绿；新 spec 与助手的 strict `tsc --noEmit` exit 0；新 spec 先红后绿（红：对 `origin/master` 的 `src/`，点名红的用例与原因），三个移动 project 各非零 passed，`--repeat-each=5` 无 flaky；改展示端运行时代码，合并前出 node-27 live receipt（PR 的生产构建对 live API，编排者的仓库外探针：390×664 / 750×342 / 844×390 下开代站图层后若出现状态提示则其在地图区内、不压启动器与控制条——live 下无提示可出时如实记录“未出现”并改用拦截一个瓦片请求触发状态条来量；1280×900 下提示 / 状态条位置与 master 相同；既有脚本默认视口的桌面布局 oracle 不回归）。
 
-- [ ] 3.5 运维入口并入启动器列：移动形态下 `M11OpsLink` 为启动器列末位（图例启动器之下），≥ 44×44，仅对有权限角色渲染。新增 `e2e/m11-ops-entry.mobile.mocked.spec.ts`。
+- [x] 3.5 运维入口并入启动器列：移动形态下 `M11OpsLink` 为启动器列末位（图例启动器之下），≥ 44×44，仅对有权限角色渲染。新增 `e2e/m11-ops-entry.mobile.mocked.spec.ts`。
 
   Depends on: 3.3
 
@@ -345,6 +345,21 @@
   **Suggested fixture level:** compact - 一个链接的移动定位与尺寸。
 
   **Minimal mergeable slice:** atomic - 一个元素。
+
+  Triage（#2798）：Issue type: feature ｜ Fixture level: compact（与上游建议一致；一个链接的移动尺寸与列内收纳，落点已由 3.3 给出；设计见 design.md D8 第二条，规格见 `specs/mobile-map-overlay-layout` 的「The ops entry joins the launcher column」）｜ Blast radius: `/` 的启动器列——入口尺寸决定列宽，列宽决定三个展开面板的锚点、面板宽度上限（`100vw - 5rem` 按 44px 列估算）与 3.4 提示条带的右边界（距地图区右 60px）；矮视口横屏下列高再多一项会压到控制条。
+  - Change surface：`src/components/map/M11FloatingControls.tsx` 的 `M11OpsLink` 移动分支、`src/pages/OverviewPage.tsx` 启动器列容器的 className（仅矮视口横屏的间距 / 顶距）、新 spec `e2e/m11-ops-entry.mobile.mocked.spec.ts`（需要的 mock 复用 `e2e/support/` 既有助手，必要时新增含独立 `mocked` token 的助手）、对应 vitest。
+  - 入口形态（裁定）：移动形态下运维入口是与三个启动器同形的 44×44 图标按钮（`h-11 w-11`、扳手图标），仍是指向 `/ops` 的链接，文字「运维」视觉上不可见但保留为文本节点：放进链接内的子 `span` 并加 `sr-only`（不能用纯 `aria-label` 替代，也不能把 `sr-only` 加在链接自身——既有 vitest 在移动分支断言 `toHaveTextContent('运维')`）；保持 3.3 的 `order-last` 在流末项。宽度必须正好 44px——宽于 44px 会撑宽列、推左面板锚点并侵入提示条带。桌面形态（`absolute right-4 top-28`、图标 + 文字）逐字不变。
+  - 矮视口横屏放进列高（裁定）：750×342（头部 48px）下列顶 y=56、控制条顶 y=238，可用 182px；四个 44px 加三个 4px 间距 = 188px，超 6px。处理：仅在矮视口横屏把列的顶距收到 4px、间距收到 2px（用 `src/index.css` 已有的矮视口横屏变体，不新造变体），四项占 4 + 176 + 6 = 186px，底边 y=234，距控制条顶 4px。竖屏的列几何（顶距 8px、间距 4px）不变。副作用（须实测并写进报告）：矮视口横屏下三个启动器的 y 由 56 / 104 / 152 变为 52 / 98 / 144，展开面板顶边上移 4px、限高增加 4px（844×390 下图层面板“必须先溢出”的前置余量由 18px 降到约 14px：内容 240 对可用 222 -> 约 226；750×342 为 172 -> 约 178）。覆盖边界：竖屏几何放下四项需视口高 ≥ 348，矮视口横屏新几何需 ≥ 338（头部 48、控制条高 64、底边距 40）；本 change 的验收视口（390×664、320×480、600×400、750×342、844×390）全部满足，520×480 走矮视口横屏变体且放得下。
+  - Must preserve：viewer 角色下任何形态都没有运维入口（权限判定 `OPERATOR_ROLES` 零 diff）；桌面形态入口的 className、文案、`href` 不变（`M11FloatingControls.test.tsx`、`OverviewPageLayerBasemapLaunchers.test.tsx` 的桌面 token 钉值）；移动分支的既有钉值同样保留——`M11FloatingLayerBasemapMobile.test.tsx` 断言移动链接自身不含 `absolute` / `right-4` / `top-28` / `z-[120]`、含 `order-last`、`href=/ops`、`toHaveTextContent('运维')`，`OverviewPageLayerBasemapLaunchers.test.tsx` 断言入口是启动器列的直接子项；全部既有 vitest 文件与全部既有 e2e spec 零 diff 且通过——尤其是 3.2 / 3.3 / 3.4 / 2.4 的四个移动 spec 在矮视口横屏列几何变化后仍原样通过（3.3 的 operator 用例：入口在图例启动器之下、与三个启动器和三个面板都不相交、面板在地图区内；两处“必须先溢出”前置）。若某条既有断言因此变红，停下报告确证的原因与实测数字，不改那个 spec。碰撞 spec 五个宽度零改动通过。
+  - Risk pack「Public API / entry」selected：入口的可见性与导航 -> 移动 spec（三个移动 project，无按 project 跳过）：(1) viewer 角色下 `m11-ops-link` 计数为 0；(2) `setRole` 切到 operator 后入口可见、包围盒 ≥ 44×44 且宽 ≤ 44.5、在 `m11-launcher-column` 内、顶边 ≥ 图例启动器底边、是列内视觉上的最后一项、`elementFromPoint`（入口中心）命中入口自身、可访问名为「运维」；(3) 触屏 tap 入口后 `location.pathname` 为 `/ops`，且授权后的页面标题「内部诊断」可见、「权限不足」计数为 0、角色触发器仍显示 Operator（角色在同一会话的客户端导航里保持）。Mock：runtime config 必须钉 `display_readonly: false`（同 `e2e/support/siteHeader.mocked.ts` 的做法——只读配置下 `/ops` 的 `RBACGate` 会直接放行 viewer，用例就空过了）；`page.route` 后注册者优先、两个宽 `**/api/v1/**` 助手叠加不会合并，所以用**一个**同时覆盖 `/` 的启动器与 `/ops` 页面的助手。
+  - Risk pack「Resource limits / 溢出」selected：列高与列宽 -> 同一 spec 在 operator 角色下断言：四项（三个启动器 + 入口）两两不相交、都在 `m11-fullscreen-map` 内、入口底边 ≤ `m11-bottom-control-bar` 顶边（三个 project 都断言，750×342 是咬合点）；启动器列包围盒宽 ≤ 44.5（列没有被撑宽）；operator 角色下展开图层面板，面板在地图区内且不与入口相交。
+  - 列几何的形态归属 oracle（否则“只在矮视口横屏生效”无人看守）：同一 spec 断言 390×664 下列顶 − 地图区顶 = 8、相邻启动器间距 = 4；750×342 与 844×390 下为 4 与 2（±0.5）。
+  - Risk pack「Auth / permissions」selected：只动呈现、不动权限判定 -> (1) 的 viewer 用例 + 既有 vitest（`visible=false` 不渲染）零 diff；新增 vitest 钉移动分支的类与可访问名、桌面分支 token 不变。
+  - Risk pack「Legacy compatibility」selected -> Must preserve；PR 描述贴出 `git diff --stat --diff-filter=MDR origin/master -- apps/frontend/e2e 'apps/frontend/src/**/__tests__/**'`（期望为空）。
+  - 未选：Concurrency、File IO、Schema、Release、Documentation、Config、Error handling（区域兜底归 3.6）。
+  - Non-goals：视口高 < 338 的横屏（如 568×320）下四项放进列高；`/ops` 页面自身的移动布局（6.x）；控制条的移动几何（3.7 / 3.8——它们改条高后须复核本 task 的列高算术，已留言 #2800）；区域错误兜底在列内的定位（3.6）；桌面入口的任何变化。
+  - Review focus：(1) 桌面入口逐字不变；(2) 权限判定零 diff；(3) 列宽回到 44px、面板锚点与提示条带右边界重新成立；(4) 矮视口横屏的列几何只经矮视口横屏变体生效，竖屏不变；(5) 既有四个移动 spec 零 diff 通过；(6) 三个移动 project 都断言、无跳过。
+  - Evidence floor：约定的本地验证命令 + `check:types` + 治理门测试全绿；新 spec 的 strict `tsc --noEmit` exit 0；新 spec 先红后绿（红：对 `origin/master` 的 `src/`，点名红的用例与原因——viewer 用例改动前本就成立，可先绿），三个移动 project 各非零 passed，`--repeat-each=5` 无 flaky；改展示端运行时代码，合并前出 node-27 live receipt（生产构建没有角色切换器、默认角色看不到入口：探针断言三个移动视口下 `m11-ops-link` 计数为 0、三个启动器仍在地图区内且在控制条之上、矮视口横屏的列顶距 / 间距按新值生效，1280×900 下桌面面板偏移不变；operator 角色的入口几何由 mocked 车道承担，如实写进 receipt 的限制；既有脚本默认视口的桌面布局 oracle 不回归）。
 
 - [ ] 3.6 区域错误兜底的移动位置：（a）新增测试门控的区域崩溃开关：仅当 `window.__NHMS_E2E_HOOKS__ === true` 时，地图控件、图例、控制条、曲线四个区域边界内各有一个探针，读取 `window.__NHMS_E2E_CRASH_REGION__`（`map-controls` / `legend` / `control-bar` / `curve`）并在渲染期抛错；无门控时探针不渲染、不读取任何全局。（b）移动形态下地图控件、图例、控制条三个区域的 `RegionErrorBoundary` 兜底块位于地图区内，不与仍在渲染的控制条、启动器和 attribution 相交；桌面形态的兜底位置不变。曲线区域的兜底行为在 4.6。新增 `e2e/m11-region-fallbacks.mobile.mocked.spec.ts`。
 
