@@ -69,7 +69,7 @@
 
 ## 2. 移动形态基座
 
-- [ ] 2.1 移动形态判据：`src/index.css` 用块写法（含 `@slot`）声明 `mobile` 与 `mobile-landscape` 两个自定义变体，禁止单行简写；新增导出两条媒体查询字符串的模块与 `useMobileForm()` hook；`AppShell` 根节点输出 `data-viewport-form`、`data-viewport-short-landscape`，并经 `mobile:` 变体设置自定义属性 `--nhms-viewport-form`（桌面为 `desktop`）。零视觉变化。新增 `e2e/m11-viewport-form.mocked.spec.ts`（桌面 project，`setViewportSize`）。
+- [x] 2.1 移动形态判据：`src/index.css` 用块写法（含 `@slot`）声明 `mobile` 与 `mobile-landscape` 两个自定义变体，禁止单行简写；新增导出两条媒体查询字符串的模块与 `useMobileForm()` hook；`AppShell` 根节点输出 `data-viewport-form`、`data-viewport-short-landscape`，并经 `mobile:` 变体设置自定义属性 `--nhms-viewport-form`（桌面为 `desktop`）。零视觉变化。新增 `e2e/m11-viewport-form.mocked.spec.ts`（桌面 project，`setViewportSize`）。
 
   Depends on: 无
 
@@ -78,6 +78,23 @@
   **Suggested fixture level:** expanded - 在所有路由共享的 `AppShell` 根节点上加属性与类名。
 
   **Minimal mergeable slice:** atomic - CSS 变体、hook 与根节点上的两侧可观测标记必须同 PR 落地，“CSS 与 JS 一致”的断言才成立；拆开后任一半都没有可验证行为。
+
+  Triage（#2790）：Issue type: feature ｜ Fixture level: expanded（与上游建议一致；设计见 design.md D1）｜ Blast radius: `AppShell` 包住每个路由——判据或订阅写错会让后续所有移动 task 建在错误的形态信号上；根节点 className 写错会改变全站布局。
+  - Change surface：`src/index.css`（两个 `@custom-variant`）、新的查询字符串模块与 `useMobileForm()` hook、`src/components/layout/AppShell.tsx` 根节点（两个 data 属性 + 一个 CSS 自定义属性）。
+  - Governing invariant：任一视口下，CSS 变体 `mobile` 是否命中、`useMobileForm().mobile`、根节点 `data-viewport-form` 三者结论相同，且都等于“宽 < 768px 或高 < 500px”；`mobile-landscape`、`.landscape`、`data-viewport-short-landscape` 同理等于“高 < 500px 且横屏”。
+  - Sibling surfaces：CSS 侧（`index.css` 变体）、JS 侧（hook 与查询常量）、可观测面（`AppShell` 两个 data 属性与 `--nhms-viewport-form`）、测试侧镜像（`e2e/support/viewportForm.ts`，1.1 已落地，数值须一致）。除 `AppShell` 外本 task 不接入任何组件——“none：消费者在后续 task”。
+  - Must preserve（测试环境）：`apps/frontend/src/test/setup.ts` 的全局 `matchMedia` 桩恒 `matches: false`，本 task 不改它；经它渲染的既有 `AppShell.test.tsx` / `AppFrame.test.tsx` 须得到 `data-viewport-form="desktop"`、`data-viewport-short-landscape="false"`。hook 用例的“可控桩”在用例内覆盖 `window.matchMedia` 并在用例后还原。
+  - 取值表补充：1280×900 -> `desktop` / `false` / 计算后的 `--nhms-viewport-form` 为 `desktop`。
+  - Must preserve：零视觉变化——`AppShell` 根节点既有 className（`h-screen w-screen` 等）逐字保留，只追加；既有 `AppShell.test.tsx`、`AppFrame.test.tsx` 不改期望通过；`m11-overlay-collision` 四个桌面宽度不改期望通过；不引入新依赖。
+  - Risk pack「Config / project setup」selected：Tailwind v4 自定义变体写法 -> e2e 在 844×390（只靠高度臂）断言计算后的 `--nhms-viewport-form` 为 `mobile`，证明块写法下高度臂没有被丢。另加一条 vitest：读 `src/index.css` 原文，断言 `mobile` 与 `mobile-landscape` 两个 `@custom-variant` 块各自含查询模块导出的那条查询字符串且含 `@slot`（`mobile-landscape` 在本 task 没有 CSS 消费者，这条是它 CSS 侧的唯一证据，同时把“查询字符串单一来源”变成测试）。
+  - Risk pack「Concurrency / shared state / ordering」selected：`matchMedia` 订阅与清理 -> vitest 用可控桩验证初值、change 事件后更新、卸载后移除监听；e2e 验证 390×664 → 750×342 不刷新即更新。
+  - Risk pack「Public API / entry」selected：共享外壳根节点新增属性 -> e2e 七个视口的属性取值表（767×900 / 768×900、900×499 / 900×500、390×664、320×480、600×400）。
+  - Risk pack「Error handling」selected：`window.matchMedia` 不存在或抛错的环境（旧 jsdom 桩）-> hook 回落到桌面形态且不抛，vitest 覆盖。
+  - 未选：File IO、Schema、Auth、Resource limits、Legacy compatibility、Release、Documentation——无数据、无接口、无依赖变化；文档在 1.2 已更新。
+  - Seams under test：浏览器里的 `AppShell` 根节点（data 属性 + 计算样式）；`useMobileForm()` 的返回值。
+  - Non-goals：dvh / 安全区（2.2 / 2.3）、任何组件消费该 hook 或变体、任何可见样式。
+  - Review focus：(1) 两个变体确为块写法且含 `@slot`；(2) 查询字符串单一来源，CSS 与 JS 的阈值一致（767.98 / 499.98）；(3) hook 的监听在卸载时移除、两条查询都订阅；(4) 根节点既有 className 未被改动；(5) e2e 断言读的是真实计算样式而不是 data 属性自证。
+  - Evidence floor：约定的本地验证命令全绿 + 新 e2e spec 与新 vitest 用例先红后绿；本 task 改展示端运行时代码，合并前在 node-27 出 live receipt（部署后桌面布局 oracle 不回归）。
 
 - [ ] 2.2 外壳动态视口：`AppShell` 根容器由 `h-screen w-screen` 改为 `h-dvh w-full`。新增 `e2e/m11-shell-viewport.mocked.spec.ts`。
 

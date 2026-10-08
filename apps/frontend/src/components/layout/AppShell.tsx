@@ -18,6 +18,7 @@ import {
 import { cn } from '@/lib/cn'
 import { isRoleOverrideEnabled, type AuthRole, useAuthStore } from '@/stores/auth'
 import { useMonitoringStore } from '@/stores/monitoring'
+import { useMobileForm } from '@/hooks/useMobileForm'
 import { useToast } from '@/hooks/useToast'
 
 import { SiteHeader } from './SiteHeader'
@@ -40,6 +41,7 @@ export function AppShell({ children }: AppShellProps) {
   const role = useAuthStore((state) => state.role)
   const setRole = useAuthStore((state) => state.setRole)
   const { toasts, dismiss } = useToast()
+  const viewportForm = useMobileForm()
 
   // runtime config 全局唯一加载点（去 NavBar 后迁到此处）：
   // 加载到既有 store，display_readonly 检测的唯一来源，不新造 fetch。
@@ -54,7 +56,12 @@ export function AppShell({ children }: AppShellProps) {
 
   return (
     <ToastProvider duration={toastDuration}>
-      <div className="relative flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
+      {/* data-* 来自 useMobileForm（JS 侧），--nhms-viewport-form 经 `mobile:` 变体设置（CSS 侧）；二者不可见，供浏览器测试核对两侧结论一致。 */}
+      <div
+        className="relative flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground [--nhms-viewport-form:desktop] mobile:[--nhms-viewport-form:mobile]"
+        data-viewport-form={viewportForm.mobile ? 'mobile' : 'desktop'}
+        data-viewport-short-landscape={viewportForm.landscape ? 'true' : 'false'}
+      >
         <SiteHeader />
         <main className="relative min-h-0 w-full flex-1 overflow-hidden">
           {isRoleOverrideEnabled ? (
