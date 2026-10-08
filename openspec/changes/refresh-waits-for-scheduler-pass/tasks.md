@@ -15,7 +15,11 @@
 - [x] 2.1 Local: `uv run ruff check .`; the wrapper/contract tests; the model succession suites; selector
       meta-guards after staging; `openspec validate refresh-waits-for-scheduler-pass --strict --no-interactive`.
 - [ ] 2.2 CI green on the PR.
-- [ ] 2.3 node-22, after the owner's go-ahead: `git status --porcelain`, `git pull --ff-only`; then one
+- [ ] 2.3 node-22, after the owner's go-ahead. Before the pull, prove that `systemctl --user is-active` answers
+      from inside a user unit (the old guard treated a failed call as "not active", so its history proves
+      nothing): `systemd-run --user --wait --pipe --collect /usr/bin/systemctl --user is-active
+      nhms-compute-scheduler.service` must print one of the six known states. Then `git status --porcelain`,
+      `git pull --ff-only`; then one
       timer-fired refresh read from `journalctl --user -u nhms-scheduler-file-provider-refresh.service` and
       `-u nhms-compute-scheduler.service` showing wait, pass end, refresh, next pass; `latest.json` outcome
       `published`. During the wait: `systemctl --user list-jobs` and `is-active` of the scheduler service

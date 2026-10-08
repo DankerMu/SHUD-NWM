@@ -407,7 +407,7 @@ unit 不再带 `ExecCondition`，不存在「静默 skip」这条路。所以 `s
 会**一直阻塞**到在跑的 pass 结束、refresh 也跑完才返回；等待期间 unit 的 `Before=` 把下一趟
 pass 排在 refresh 后面，refresh 最多等一趟。等满 5400 秒 pass 仍未结束，或状态读不出来
 （`systemctl` 缺失、无输出、未知状态），wrapper 以 exit 3 拒绝、不做任何刷新，`start` 返回
-非零、unit 进 `failed`（再次触发或跑 installer 前先 `reset-failed`）。因为会阻塞，`start`
+非零、unit 进 `failed`（可以直接再次 `start`；跑 installer 前要先 `reset-failed`）。因为会阻塞，`start`
 同样要 detached 跑。判据仍然只有一个：`latest.json` 的 `started_at` 变新（`start` 返回 0
 而 `started_at` 没变，说明当时已有一趟 refresh 在跑，这次 `start` 只是跟着它返回）。**不要**用
 「receipt 文件数增加」判成功——`latest.json` 是原地覆写的，计数不变，照此写循环会无限重试、

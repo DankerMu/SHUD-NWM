@@ -610,7 +610,8 @@ scripts/install_node22_scheduler_file_provider_refresh.sh --rollback
    #2749 的成因），不影响新行为。
 2. 替换已安装的 unit 文件要走 installer 的 `--rollback` → `--install` → `--enable`
    （顺序与前置条件见下面的演练顺序，含紧挨着 `--enable` 的 manual refresh），且必须在
-   02:15-04:15Z 窗口之外。行为不依赖这一步，但运维依赖：pull 之后已安装的 unit 与仓库里的
+   refresh 可能在跑的时段之外（timer 02:15Z 加至多 30 分钟抖动，再加 `TimeoutStartSec=7200`，
+   最晚约 04:45Z）。行为不依赖这一步，但运维依赖：pull 之后已安装的 unit 与仓库里的
    不再相同，而 `--enable` 会逐个 `cmp -s` 两者，不一致就拒绝，直到重新 `--install`。lane
    现在是 armed、并保持 armed；**此后第一次任何 installer 动作都必须从这一轮
    `--rollback` → `--install` → `--enable` 开始**。做完读回确认已安装的 unit 里没有
