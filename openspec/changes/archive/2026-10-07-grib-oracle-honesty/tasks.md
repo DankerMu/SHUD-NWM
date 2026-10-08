@@ -19,9 +19,9 @@
 - [x] 2.1 Local (ecCodes installed): ruff; the grib lane command; `tests/test_production_met_validation.py`
       in full; the producer unit test; touched modules import with eccodes/cfgrib blocked; selector
       meta-guards after staging; `openspec validate grib-oracle-honesty --strict --no-interactive`.
-- [ ] 2.2 CI green on the PR; the Unit Tests job log shows the six validate-met tests executed.
+- [x] 2.2 CI green on the PR; the Unit Tests job log shows the six validate-met tests executed.
 - [x] 2.3a node-27 before merge: encode + cfgrib decode probe on ecCodes 2.47.0 (done 2026-10-08, see proposal).
-- [ ] 2.3 node-27 after merge: grib lane `-m grib -rA` all passed (files only, no database); the log shows
+- [x] 2.3 node-27 after merge: grib lane `-m grib -rA` all passed (files only, no database); the log shows
       the ecCodes version.
 
 Deviation: no node-27 real-DB receipt applies (no database path is touched by the tests; the producer guard
