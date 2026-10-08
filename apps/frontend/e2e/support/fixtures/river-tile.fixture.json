@@ -1,0 +1,20 @@
+{
+  "tile": { "z": 10, "x": 797, "y": 398, "extent": 4096, "sourceLayer": "hydro" },
+  "identity": {
+    "basinId": "e2e-basin",
+    "basinVersionId": "e2e-basin-v1",
+    "riverNetworkVersionId": "e2e-rivnet-v1",
+    "riverSegmentId": "e2e-seg-0001"
+  },
+  "segmentName": "E2E River",
+  "value": 42.5,
+  "anchor": [100.371094, 37.020098],
+  "bbox": [
+    [100.361094, 37.018098],
+    [100.381094, 37.022098]
+  ],
+  "line": [
+    [100.361094, 37.020098],
+    [100.381094, 37.020098]
+  ]
+}

@@ -47,7 +47,7 @@
 
   **Minimal mergeable slice:** atomic - 一节文档的两张表，互相引用同一判据。
 
-- [ ] 1.3 河段窗测试夹具：让 mocked 车道能打开河段窗。内容：`e2e/support/` 提供一组 mock——非空流域、带真实有效时刻与瓦片模板的图层、径流瓦片（checked-in 的最小矢量瓦片夹具及其生成脚本，至少含一条带完整身份属性的河段）、气象站点列表、站点序列、河段 forecast-series；导出 `openRiverWindow(page)`：开 `__NHMS_E2E_HOOKS__` 门控、等地图就绪、用既有只读钩子 `window.__nhmsRiverClickEvidence.locateRenderedRiver` 定位河段（bbox、anchor 与四个身份字段取自夹具自身）、在返回的视口点做真实点击（桌面）或 `touchscreen.tap`（触屏）。不改产品代码。夹具只负责“从无窗状态打开一个窗”；不要求抽屉打开后再点其他要素（钩子会把要素移到地图区中央，那里在竖屏抽屉之下）。新增 `e2e/m11-river-open.mocked.spec.ts`（桌面 project）。`openRiverWindow` 须同时支持点击与触摸，但移动 project 下的首次开窗在 4.2——竖屏下未收纳的图例正盖住钩子定位到的地图区中央。
+- [x] 1.3 河段窗测试夹具：让 mocked 车道能打开河段窗。内容：`e2e/support/` 提供一组 mock——非空流域、带真实有效时刻与瓦片模板的图层、径流瓦片（checked-in 的最小矢量瓦片夹具及其生成脚本，至少含一条带完整身份属性的河段）、气象站点列表、站点序列、河段 forecast-series；导出 `openRiverWindow(page)`：开 `__NHMS_E2E_HOOKS__` 门控、等地图就绪、用既有只读钩子 `window.__nhmsRiverClickEvidence.locateRenderedRiver` 定位河段（bbox、anchor 与四个身份字段取自夹具自身）、在返回的视口点做真实点击（桌面）或 `touchscreen.tap`（触屏）。不改产品代码。夹具只负责“从无窗状态打开一个窗”；不要求抽屉打开后再点其他要素（钩子会把要素移到地图区中央，那里在竖屏抽屉之下）。新增 `e2e/m11-river-open.mocked.spec.ts`（桌面 project）。`openRiverWindow` 须同时支持点击与触摸，但移动 project 下的首次开窗在 4.2——竖屏下未收纳的图例正盖住钩子定位到的地图区中央。
 
   Depends on: 1.1
 
@@ -56,6 +56,22 @@
   **Suggested fixture level:** compact - 只新增测试支撑代码与一个二进制测试夹具，不改产品代码。
 
   **Minimal mergeable slice:** atomic - mock 组、瓦片夹具与 `openRiverWindow` 缺一则河段窗打不开，没有可验证的中间态。
+
+  Triage（#2788）：Issue type: test ｜ Fixture level: compact（与上游建议一致；虽选了 File IO 与 Legacy compatibility 两个 pack，但只涉及离线生成的测试二进制、`src/` 零 diff、无运行时或车道配置变化，不触发 expanded）｜ Blast radius: 后续所有曲线窗 task（1.4、3.7、4.x、7.1）的 e2e 都建在这套夹具上——夹具打开的不是真实产品点击路径，或 mock 形状与真实 API 不符，会让下游断言建在假象上。
+  - Risk pack「File IO / 二进制夹具」selected：checked-in 的最小矢量瓦片 + 生成脚本 -> 生成脚本可重复执行且输出与入库文件逐字节相同（在 PR 描述记录一次重跑的 `cmp` 结果）；瓦片内至少一条河段带完整身份属性，`openRiverWindow` 用到的 bbox / anchor / 四个身份字段取自夹具自身的单一导出，不在 spec 里另写一份。
+  - Risk pack「Schema / field names」selected：mock 响应的形状须与 `src/api/types.ts` 的生成类型一致（图层、流域、站点列表、站点序列、河段 forecast-series）-> mock 数据用这些类型标注（`satisfies` 或显式类型），类型错误由下条的 tsc 命令暴露。
+  - Risk pack「Release / dependency compatibility」selected：生成瓦片需要编码库 -> 只用 lockfile 里已有的包；若必须新增，只能是 devDependency 并在偏离记录里说明。`pnpm typecheck` / `check:types` 都不覆盖 `e2e/`，所以实现者须对新增的 `e2e/support/**` 与新 spec 另跑一次 strict `tsc --noEmit` 并报告结果。
+  - Risk pack「Legacy compatibility」selected：既有只读钩子契约 -> `window.__nhmsRiverClickEvidence` 仍恰为三个方法，`src/` 零 diff（`git diff --stat origin/master -- apps/frontend/src` 为空）；既有 `riverClick*` 单测与 live 车道配置不受影响（`corepack pnpm test` 全绿、`check:types` exit 0）。
+  - Risk pack「Error handling」selected：夹具静默失效 -> `openRiverWindow` 在钩子缺失、定位失败或窗未出现时抛出带原因的错误，不返回假成功；spec 断言曲线为“已加载”状态（有数据点的图表），不是只断言窗口节点存在。
+  - 必备 mock（任务正文列出的之外，缺一则窗开不了或曲线到不了已加载）：(a) 全国径流周期目录 `/api/v1/layers/discharge/cycles?source=`，返回非空 `cycles` 与非 null `default_cycle`，否则全国径流层 fail-closed 置灰；图层 metadata 带 `url_template`、`maplibre_source_layer`、`min_zoom` / `max_zoom`、`default_source`、`default_cycle`、`valid_times`，形状参照 `src/test/overviewDataFixture.ts`。(b) `/api/v1/mvp/qhh/latest-product?identity_only=true`（GFS 与 IFS 各一次），河段面板先取它再取 forecast-series。(c) 夹具瓦片之外的径流瓦片与 `/api/v1/basemap/tianditu/*` 底图瓦片快速返回空或 204，否则地图等不到 `idle`。
+  - 跨 mock 身份一致性：latest-product 的 run 身份、`cycle_time`、有效时段与 forecast-series 响应一致，能通过 `validateHydroMetRiverForecastForChart`；瓦片要素的 `basin_id` 等于流域 mock 的流域。
+  - 瓦片要素属性名：`basin_id`、`basin_version_id`、`river_network_version_id`、`river_segment_id`；若同时带 `segment_id` 必须与 `river_segment_id` 相等（否则钩子拒绝）。
+  - 瓦片坐标：夹具模块导出瓦片的 `(z, x, y)` 与 source-layer 名；所给 bbox 经钩子的 `fitBounds`（padding 48、maxZoom 14）并受图层 `max_zoom` 钳制后，1280×900 下请求须恰好落在该瓦片（spec 里断言该瓦片 URL 确被请求过）。
+  - “曲线已加载”的 oracle：`m11-river-panel-chart` 可见，且 `m11-river-panel-empty`、`m11-river-panel-loading`、`m11-river-panel-pending` 均不存在；GFS 与 IFS 两个源都 mock 成功，`m11-river-panel-partial` 不存在。
+  - 未选：Public API、Auth、Concurrency、Resource limits、Documentation——不改产品代码、不改车道配置。
+  - Must preserve：既有 33 条桌面用例与期望值、三个移动 project 的基线、`playwright.config.ts` 不改；新 spec 文件名不含 `.mobile.`（移动 project 下的首次开窗在 4.2）。
+  - 显式 non-goal：气象代站开窗（1.4）；移动 project 下开窗；抽屉打开后再点其他要素。站点列表与站点序列的 mock 在本 task 落地但不被本 task 的 spec 断言（由 1.4 消费）。
+  - Evidence floor：约定的本地验证命令全绿 + 新 spec 在点击被跳过时为红（证明窗口确由点击打开）+ 重跑生成脚本（报告其路径与命令）后 `cmp <再生成文件> <入库文件>` exit 0 + 对 `e2e/support/**` 与新 spec 的 strict `tsc --noEmit`（用仓库外的临时 tsconfig，报告确切命令）exit 0。不得把 `e2e/support/**` 加进 `tsconfig.node-playwright.json`：它的 include 清单被 `src/__tests__/riverClickTypecheck.test.ts` 钉住。无运行时代码变化，不需要 node-27 live receipt。
 
 - [ ] 1.4 气象代站窗测试夹具：新增独立的门控全局 `window.__nhmsStationLocateEvidence`，恰有一个方法 `locateRenderedStation({ stationId, lngLat })`（把相机移到该点、确认该点渲染着这个 `station_id` 的 `met-stations` 要素且未被遮挡、返回视口点与身份；只读、不调用产品回调、无门控不暴露）；既有 `window.__nhmsRiverClickEvidence` 不改，仍恰为三个方法。`e2e/support/` 导出 `openStationWindow(page)`（入参取自 1.3 的站点 mock）。新增 `e2e/m11-station-open.mocked.spec.ts`（桌面 project）；移动 project 下的首次开窗同样在 4.2。
 
