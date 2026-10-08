@@ -58,7 +58,7 @@ export function AppShell({ children }: AppShellProps) {
     <ToastProvider duration={toastDuration}>
       {/* data-* 来自 useMobileForm（JS 侧），--nhms-viewport-form 经 `mobile:` 变体设置（CSS 侧）；二者不可见，供浏览器测试核对两侧结论一致。 */}
       <div
-        className="relative flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground [--nhms-viewport-form:desktop] mobile:[--nhms-viewport-form:mobile]"
+        className="relative flex h-dvh w-full flex-col overflow-hidden bg-background text-foreground [--nhms-viewport-form:desktop] mobile:[--nhms-viewport-form:mobile]"
         data-viewport-form={viewportForm.mobile ? 'mobile' : 'desktop'}
         data-viewport-short-landscape={viewportForm.landscape ? 'true' : 'false'}
       >

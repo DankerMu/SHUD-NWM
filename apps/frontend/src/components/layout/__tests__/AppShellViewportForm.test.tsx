@@ -54,7 +54,7 @@ describe('AppShell viewport-form markers', () => {
     expect(root).toHaveAttribute('data-viewport-short-landscape', 'false')
     // 根节点就是外壳最外层容器（既有布局类逐字保留，只追加）。
     expect(root).toBe(container.firstElementChild)
-    expect(root.className.startsWith('relative flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground')).toBe(true)
+    expect(root.className.startsWith('relative flex h-dvh w-full flex-col overflow-hidden bg-background text-foreground')).toBe(true)
   })
 
   it('reflects the hook result on the root when the queries match', () => {
