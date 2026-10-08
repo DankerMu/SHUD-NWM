@@ -15,8 +15,8 @@
       `tests/test_node22_model_succession*.py`; `tests/test_node22_refresh_timer_health*.py`;
       `tests/test_scheduler_refresh_installer*.py`; selector meta-guards after staging;
       `openspec validate refresh-wait-bound-four-hours --strict --no-interactive`.
-- [ ] 2.2 CI green on the PR.
-- [ ] 2.3 node-22, one session outside 02:15Z - 08:45Z, not left between the pull and `--install`:
+- [x] 2.2 CI green on the PR.
+- [x] 2.3 node-22, one session outside 02:15Z - 08:45Z, not left between the pull and `--install`:
       `git status --porcelain`, `git pull --ff-only`; installer `--rollback`, `--install`; a
       refresh started through the unit ends `published`; `--enable`; read back the four units,
       `TimeoutStartUSec`, the next elapse, the probe verdict after `--enable` (non-`ok` verdicts while the
@@ -25,3 +25,7 @@
 
 Deviation: no node-27 path is touched. A wait longer than 5400 s is not expected to be observed at 2.3; it
 is covered locally on the real bound with a fake `sleep` and a fake `systemctl`.
+
+Deviation at 2.3 (2026-10-08): the session ran 07:49Z - 08:02Z, inside the stated 02:15Z - 08:45Z span. Before
+it started the refresh service was `inactive` and the timer's next elapse was 2026-10-09 10:35:19 CST, so no
+refresh was or could be in flight.
