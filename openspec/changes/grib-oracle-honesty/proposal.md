@@ -83,6 +83,16 @@ and the converter falls back to its netcdf4 reader. Diagnosis (read-only, script
 5. Marker text: `pyproject.toml:111`, `tests/conftest.py:80` and `docs/runbooks/ci-test-routing.md:19,141-145` say what the lane now is:
    GRIB2 encoded at test time with the runtime's ecCodes and decoded through cfgrib; no checked-in GRIB files.
 
+6. `forecast_hours` without any hour above 0 is refused by `_validate_config` with
+   `PRODUCTION_MET_FORECAST_HOURS_INVALID` and a message naming the reason (the GFS deterministic lane has no
+   interval product at f000, so it cannot produce a forcing row). Before this change that configuration ended
+   `ready` on the strength of the fake f000 interval products; without the refusal it would end `blocked`
+   with a converter "missing canonical variables" error that does not point at the configuration, and the
+   continuity expectation would be empty.
+7. `.large-file-guard.json` gains an exclusion for `services/production_closure/met_validation.py` (2055 lines
+   on master, over the 1000-line limit before this change; +~30 lines here). Splitting the module is not part
+   of this issue.
+
 ## Must preserve
 
 - Production forcing output for every valid input: the producer change only replaces a silent duplicate by an

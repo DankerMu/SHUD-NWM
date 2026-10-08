@@ -23,3 +23,7 @@ The deterministic GFS fixture of validate-met SHALL omit, at forecast hour 0, th
 #### Scenario: A canonical product is missing
 - **WHEN** the lane is configured for forecast hours 0, 3 and 6 and the canonical products of hour 6 are absent
 - **THEN** the continuity expectation still holds two row times and the check fails
+
+#### Scenario: No forecast hour above zero
+- **WHEN** validate-met is configured with forecast hours that contain no hour above 0
+- **THEN** the configuration is refused with `PRODUCTION_MET_FORECAST_HOURS_INVALID` before anything is written

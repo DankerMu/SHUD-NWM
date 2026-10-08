@@ -20,7 +20,11 @@ tagged and excluded from the pure-CI gate, then run explicitly on node-27.
   test time with the runtime's own ecCodes (`tests/grib2_fixture_support.py`); no GRIB
   file is checked in. Each test asserts the converter did not fall back to its netcdf4
   reader and prints the ecCodes version. A test that decodes no GRIB2 does not carry
-  the marker.
+  the marker. Boundary: the fixtures are instantaneous-field messages synthesised per
+  shortName by the same ecCodes that decodes them, so the lane proves the cfgrib
+  pipeline and the converter's shortName selection on that version. It does not cover
+  drift in how a new ecCodes maps real provider files (e.g. NCEP accumulated/average
+  templates) to shortNames.
 - `@pytest.mark.node27_docker` — dedicated disposable Docker oracle; only the
   `integration` / `timescaledb_210` / `node27_docker` triple is eligible.
 
@@ -150,7 +154,9 @@ GRIB env (checked 2026-09-30). If a later check finds the two builds differ,
 align them before trusting a grib receipt. The grib fixtures need no alignment
 of their own: they are encoded at test time with the same ecCodes that decodes
 them (samples resolve without `ECCODES_SAMPLES_PATH`, probed on 2.47.0), so a
-receipt proves decode on the version it prints.
+receipt proves the cfgrib pipeline and shortName selection on the version it
+prints, for synthesised messages only. It says nothing about how that version
+maps real provider files to shortNames (see the marker boundary above).
 
 `tests/conftest.py` preflights this: with `NHMS_RUN_GRIB=1` and at least one
 `grib` item left after `-m`/`-k` deselection, the session loads ecCodes once

@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from packages.common import safe_fs
-from services.production_closure import slurm_validation
+from services.production_closure import met_validation, slurm_validation
 from services.production_closure.met_validation import (
     REQUIRED_FORCING_VARIABLES,
     EvidenceWriter,
@@ -497,6 +498,23 @@ def test_validate_met_disabled_sources_record_skipped_without_success(tmp_path: 
     assert next(source for source in raw["sources"] if source["source"] == "IFS")["file_count"] == 0
 
 
+def test_validate_met_rejects_forecast_hours_without_an_hour_above_zero(tmp_path: Path) -> None:
+    config = ProductionMetConfig.from_env(
+        evidence_root=tmp_path / "artifacts",
+        run_id="houronly0",
+        cycle_end="2026-05-07T00:00:00Z",
+        forecast_hours="0",
+    )
+
+    with pytest.raises(ProductionMetValidationError) as exc_info:
+        validate_met(config)
+
+    assert exc_info.value.error_code == "PRODUCTION_MET_FORECAST_HOURS_INVALID"
+    assert "at least one hour above 0" in str(exc_info.value)
+    assert "f000" in str(exc_info.value)
+    assert not (tmp_path / "artifacts").exists()
+
+
 def test_validate_met_rejects_cycle_window_missing_endpoint(tmp_path: Path) -> None:
     config = ProductionMetConfig.from_env(
         evidence_root=tmp_path / "artifacts",
@@ -604,6 +622,45 @@ def test_validate_met_continuity_expects_rows_of_configured_hours_even_when_prod
     assert qc["status"] == "fail"
     assert qc["continuity"]["status"] == "fail"
     assert qc["continuity"]["missing_valid_times"] == ["2026-05-07T03:00:00Z"]
+
+
+def test_validate_met_lane_fails_continuity_when_canonical_products_of_a_configured_hour_are_absent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Whole lane, hours {0, 3, 6}: the hour-6 canonical products vanish between the
+    # canonical and the forcing stage, so the producer plans the cycle-time row only.
+    write_forcing_evidence = met_validation._write_forcing_evidence
+    removed: list[str] = []
+
+    def without_hour_6_products(config: ProductionMetConfig, store: Any, repository: Any) -> dict[str, Any]:
+        for product_id, record in list(repository.products.items()):
+            if int(record["lead_time_hours"]) == 6:
+                removed.append(product_id)
+                del repository.products[product_id]
+        return write_forcing_evidence(config, store, repository)
+
+    monkeypatch.setattr(met_validation, "_write_forcing_evidence", without_hour_6_products)
+    config = ProductionMetConfig.from_env(
+        evidence_root=tmp_path / "artifacts",
+        run_id="hour6absent",
+        cycle_end="2026-05-07T06:00:00Z",
+        forecast_hours="0,3,6",
+    )
+
+    summary = validate_met(config)
+
+    assert len(removed) == 7
+    lane_dir = tmp_path / "artifacts" / "hour6absent" / "met"
+    # The producer itself succeeds on what is left; only the expectation can tell.
+    assert _read_json(lane_dir / "forcing_manifest.json")["status"] == "forcing_ready"
+    qc = _read_json(lane_dir / "forcing_qc.json")
+    assert qc["continuity"]["observed_valid_times"] == ["2026-05-07T00:00:00Z"]
+    assert qc["continuity"]["expected_valid_times"] == ["2026-05-07T00:00:00Z", "2026-05-07T03:00:00Z"]
+    assert qc["continuity"]["missing_valid_times"] == ["2026-05-07T03:00:00Z"]
+    assert qc["continuity"]["status"] == "fail"
+    assert qc["status"] == "fail"
+    assert summary["status"] == "blocked"
 
 
 def test_validate_met_disabled_fallback_policy_blocks_without_fixture(

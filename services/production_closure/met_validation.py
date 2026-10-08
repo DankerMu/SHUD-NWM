@@ -1128,6 +1128,14 @@ def _validate_config(config: ProductionMetConfig) -> None:
             "PRODUCTION_MET_FORECAST_HOURS_INVALID",
             "Forecast hours must be between 0 and 240.",
         )
+    if not any(hour > 0 for hour in config.forecast_hours):
+        raise ProductionMetValidationError(
+            "PRODUCTION_MET_FORECAST_HOURS_INVALID",
+            (
+                "Forecast hours must include at least one hour above 0: GFS has no interval product "
+                "(apcp/dswrf) at f000, so the deterministic lane cannot produce a forcing row from hour 0 alone."
+            ),
+        )
     if int((config.cycle_end - config.cycle_start).total_seconds()) % (3 * 3600) != 0:
         raise ProductionMetValidationError(
             "PRODUCTION_MET_CYCLE_WINDOW_INVALID",

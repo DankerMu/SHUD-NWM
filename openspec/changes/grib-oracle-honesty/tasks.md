@@ -10,10 +10,13 @@
       no-fallback assertions; one GFS decode test.
 - [x] 1.5 Marker text (`pyproject.toml`, `tests/conftest.py`); `docs/runbooks/ci-test-routing.md` (lane text,
       `-rA` in the lane command).
+- [x] 1.6 Review fix pass 1: a lane-level test that the continuity expectation follows the configured hours;
+      refusal of a configuration with no forecast hour above 0; the runbook states what the lane does not
+      cover; the large-file exemption is recorded in the proposal.
 
 ## 2. Evidence Floor
 
-- [ ] 2.1 Local (ecCodes installed): ruff; the grib lane command; `tests/test_production_met_validation.py`
+- [x] 2.1 Local (ecCodes installed): ruff; the grib lane command; `tests/test_production_met_validation.py`
       in full; the producer unit test; touched modules import with eccodes/cfgrib blocked; selector
       meta-guards after staging; `openspec validate grib-oracle-honesty --strict --no-interactive`.
 - [ ] 2.2 CI green on the PR; the Unit Tests job log shows the six validate-met tests executed.
