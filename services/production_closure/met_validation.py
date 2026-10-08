@@ -33,6 +33,7 @@ from workers.canonical_converter.converter import (
     format_cycle_time,
     parse_cycle_time,
 )
+from workers.data_adapters.gfs_adapter import GFS_F000_UNAVAILABLE_VARIABLES
 from workers.forcing_producer.producer import (
     CanonicalProduct,
     ForcingProducer,
@@ -41,6 +42,7 @@ from workers.forcing_producer.producer import (
     ForcingTimeseriesRow,
     InterpolationWeight,
     MetStation,
+    gfs_interval_row_times,
 )
 
 SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
@@ -679,28 +681,27 @@ def _write_deterministic_source_manifest(
     compact_cycle = format_cycle_time(config.cycle_start)
     endpoint_identity = _configured_endpoint(source).rstrip("/")
     entries = []
-    for forecast_hour in config.forecast_hours:
-        for variable in _source_variables(source):
-            key = f"raw/{source_id}/{compact_cycle}/{source.lower()}.{compact_cycle}.f{forecast_hour:03d}.{variable}.nc"
-            content = _deterministic_raw_content(source, variable, forecast_hour, config.cycle_start)
-            _enforce_per_file_bound(config, key, content)
-            object_uri = _write_object_guarded(store, key, content, force=config.force)
-            entries.append(
-                {
-                    "source": source,
-                    "source_id": source_id,
-                    "cycle_time": _format_time(config.cycle_start),
-                    "forecast_hour": forecast_hour,
-                    "variable": variable,
-                    "remote_url": f"{endpoint_identity}/{compact_cycle}/f{forecast_hour:03d}/{variable}",
-                    "endpoint_identity": endpoint_identity,
-                    "local_key": key,
-                    "object_uri": object_uri,
-                    "size_bytes": len(content),
-                    "sha256": hashlib.sha256(content).hexdigest(),
-                    "retry_count": 0,
-                }
-            )
+    for forecast_hour, variable in _deterministic_entry_keys(source, config.forecast_hours):
+        key = f"raw/{source_id}/{compact_cycle}/{source.lower()}.{compact_cycle}.f{forecast_hour:03d}.{variable}.nc"
+        content = _deterministic_raw_content(source, variable, forecast_hour, config.cycle_start)
+        _enforce_per_file_bound(config, key, content)
+        object_uri = _write_object_guarded(store, key, content, force=config.force)
+        entries.append(
+            {
+                "source": source,
+                "source_id": source_id,
+                "cycle_time": _format_time(config.cycle_start),
+                "forecast_hour": forecast_hour,
+                "variable": variable,
+                "remote_url": f"{endpoint_identity}/{compact_cycle}/f{forecast_hour:03d}/{variable}",
+                "endpoint_identity": endpoint_identity,
+                "local_key": key,
+                "object_uri": object_uri,
+                "size_bytes": len(content),
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "retry_count": 0,
+            }
+        )
 
     manifest_key = f"raw/{source_id}/{compact_cycle}/manifest.json"
     manifest_payload = {
@@ -850,7 +851,7 @@ def _write_forcing_evidence(
     qc = _forcing_qc_payload(
         repository.timeseries,
         package_manifest,
-        expected_valid_times=_expected_valid_times(config),
+        expected_valid_times=_gfs_expected_row_times(config.forecast_hours, cycle_start=config.cycle_start),
         package_uri=result.forcing_package_uri,
         package_manifest_uri=package_manifest_uri,
     )
@@ -1167,7 +1168,7 @@ def _validate_deterministic_shape(config: ProductionMetConfig) -> None:
         if _source_execution_mode(config, source, _source_status(config, source)) == "deterministic_fixture"
     ]
     entry_count = sum(
-        len(_source_variables(source)) * len(config.forecast_hours) + 1 for source in deterministic_enabled
+        len(_deterministic_entry_keys(source, config.forecast_hours)) + 1 for source in deterministic_enabled
     )
     _enforce_manifest_bound(config, entry_count)
     if deterministic_enabled and config.bounds.max_deterministic_file_bytes < MIN_DETERMINISTIC_RAW_FILE_BYTES:
@@ -1721,6 +1722,20 @@ def _source_variables(source: str) -> tuple[str, ...]:
     return ()
 
 
+def _deterministic_entry_keys(source: str, forecast_hours: Sequence[int]) -> tuple[tuple[int, str], ...]:
+    """The `(forecast_hour, variable)` pairs of one deterministic source fixture.
+
+    Shared by the manifest writer and the shape bound so the bound counts exactly what
+    is written. GFS mirrors production: no interval variables at f000.
+    """
+    return tuple(
+        (forecast_hour, variable)
+        for forecast_hour in forecast_hours
+        for variable in _source_variables(source)
+        if not (source == "GFS" and forecast_hour == 0 and variable in GFS_F000_UNAVAILABLE_VARIABLES)
+    )
+
+
 def _source_status(config: ProductionMetConfig, source: str) -> str:
     if source == "CLDAS":
         return "restricted"
@@ -2022,6 +2037,16 @@ def _expected_forecast_hours(config: ProductionMetConfig) -> tuple[int, ...]:
 
 def _expected_valid_times(config: ProductionMetConfig) -> tuple[datetime, ...]:
     return tuple(config.cycle_start + timedelta(hours=hour) for hour in _expected_forecast_hours(config))
+
+
+def _gfs_expected_row_times(forecast_hours: Sequence[int], *, cycle_start: datetime) -> tuple[datetime, ...]:
+    """GFS forcing row times the configured forecast hours must yield.
+
+    The producer's own interval rule, fed the configured hours rather than the products
+    the producer consumed: a canonical product that went missing still fails continuity.
+    """
+    interval_ends = [cycle_start + timedelta(hours=hour) for hour in sorted(set(forecast_hours)) if hour > 0]
+    return gfs_interval_row_times(interval_ends, cycle_time=cycle_start)
 
 
 def _run_scoped_prefix(prefix: str, run_id: str) -> str:

@@ -6,7 +6,7 @@ The pure-CI `unit-test` job (`.github/workflows/ci.yml`) runs the backend pytest
 suite on a plain GitHub runner whose dependencies are installed from `uv.lock`
 (a `--locked` install since #2573; the job puts the resulting cwd `.venv/bin`
 on `PATH`). That environment has **no real PostgreSQL/Slurm/SHUD and
-no eccodes-version-matched GRIB fixtures**. A handful of tests are coupled to those
+no ecCodes library** (so no GRIB2 decode). A handful of tests are coupled to those
 environment facts and cannot pass in pure CI; they belong on the current
 **node-27** oracle, whose active environment is already Python 3.11.
 
@@ -16,7 +16,11 @@ tagged and excluded from the pure-CI gate, then run explicitly on node-27.
 ## Markers
 
 - `@pytest.mark.e2e` — end-to-end pipeline tests (network / multi-step).
-- `@pytest.mark.grib` — require real GRIB2 decode + eccodes-version-matched fixtures.
+- `@pytest.mark.grib` — decode GRIB2 through cfgrib. The GRIB2 payloads are encoded at
+  test time with the runtime's own ecCodes (`tests/grib2_fixture_support.py`); no GRIB
+  file is checked in. Each test asserts the converter did not fall back to its netcdf4
+  reader and prints the ecCodes version. A test that decodes no GRIB2 does not carry
+  the marker.
 - `@pytest.mark.node27_docker` — dedicated disposable Docker oracle; only the
   `integration` / `timescaledb_210` / `node27_docker` triple is eligible.
 
@@ -124,10 +128,12 @@ export ECCODES_DIR=$NHMS_GRIB_ENV_ROOT
 export ECCODES_DEFINITION_PATH=$NHMS_GRIB_ENV_ROOT/share/eccodes/definitions
 uv run --no-sync python -c "import sys; assert sys.version_info[:2] == (3, 11), sys.version"
 NHMS_RUN_E2E=1 NHMS_RUN_GRIB=1 uv run --no-sync pytest \
-  -m "e2e or grib" -v | tee artifacts/ci-routing/e2e-grib-$(date +%F).log
+  -m "e2e or grib" -v -rA | tee artifacts/ci-routing/e2e-grib-$(date +%F).log
 ```
 
 Keep the log as the receipt (gitignored `artifacts/` is fine for evidence).
+`-rA` puts the captured output of passed tests into the log: every grib test
+prints `ecCodes <version>`, so the receipt names the version that decoded.
 
 ### GRIB runtime (#2594)
 
@@ -141,8 +147,10 @@ as the library. Without them every grib test used to fail with its own
 Runtime source: `/home/nwm/nhms-grib` on node-27 ships conda build
 `eccodes-2.47.0-ha1d8304_0`, the same conda build as the production compute
 GRIB env (checked 2026-09-30). If a later check finds the two builds differ,
-align them before trusting a grib receipt: the grib fixtures are
-eccodes-version-matched.
+align them before trusting a grib receipt. The grib fixtures need no alignment
+of their own: they are encoded at test time with the same ecCodes that decodes
+them (samples resolve without `ECCODES_SAMPLES_PATH`, probed on 2.47.0), so a
+receipt proves decode on the version it prints.
 
 `tests/conftest.py` preflights this: with `NHMS_RUN_GRIB=1` and at least one
 `grib` item left after `-m`/`-k` deselection, the session loads ecCodes once

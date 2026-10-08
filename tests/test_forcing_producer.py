@@ -1523,6 +1523,47 @@ def test_gfs_forcing_rows_use_cycle_start_with_next_interval_products(tmp_path: 
     assert lineage["forcing_package_manifest_checksum"] == result.checksum
 
 
+def test_gfs_interval_row_times_are_the_interval_starts() -> None:
+    cycle_time = parse_cycle_time("2026050700")
+
+    row_times = producer_module.gfs_interval_row_times(
+        [cycle_time + timedelta(hours=6), cycle_time + timedelta(hours=3)],
+        cycle_time=cycle_time,
+    )
+
+    assert [time.isoformat() for time in row_times] == [
+        "2026-05-07T00:00:00+00:00",
+        "2026-05-07T03:00:00+00:00",
+    ]
+    assert producer_module.gfs_interval_row_times([], cycle_time=cycle_time) == ()
+
+
+@pytest.mark.parametrize(
+    ("interval_end_hours", "offending_time"),
+    [
+        # #2700: an interval product at f000 ends at the cycle time, so it has no start.
+        ((0, 3), "2026-05-07T00:00:00+00:00"),
+        ((-3, 3), "2026-05-06T21:00:00+00:00"),
+        # The same interval end twice would plan the second row at its own end.
+        ((3, 3, 6), "2026-05-07T03:00:00+00:00"),
+    ],
+)
+def test_gfs_interval_row_times_reject_a_non_increasing_interval_end(
+    interval_end_hours: tuple[int, ...],
+    offending_time: str,
+) -> None:
+    cycle_time = parse_cycle_time("2026050700")
+
+    with pytest.raises(ForcingProductionError) as error:
+        producer_module.gfs_interval_row_times(
+            [cycle_time + timedelta(hours=hour) for hour in interval_end_hours],
+            cycle_time=cycle_time,
+        )
+
+    assert "2026-05-07T00:00:00+00:00" in str(error.value)
+    assert offending_time in str(error.value)
+
+
 def test_shud_station_csv_time_day_is_relative_to_forcing_start(tmp_path: Path) -> None:
     store = LocalObjectStore(tmp_path)
     products = _write_canonical_products(store, forecast_hours=(0, 3, 6))

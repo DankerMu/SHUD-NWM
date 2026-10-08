@@ -108,7 +108,7 @@ markers = [
     "integration: requires explicitly configured external services such as PostgreSQL/PostGIS/TimescaleDB",
     "e2e: end-to-end pipeline tests (network/multi-step); run on node-27, excluded from pure CI",
     "real_disk: requires node-27 DATABASE_URL and OBJECT_STORE_ROOT, excluded from pure CI",
-    "grib: requires real GRIB2 decode + eccodes-version-matched fixtures; run on node-27, excluded from pure CI",
+    "grib: decodes GRIB2 encoded at test time with the runtime's ecCodes, through cfgrib (no checked-in GRIB files); run on node-27, excluded from pure CI",
     "timescaledb_210: compression-semantics tests whose only valid oracle is a node-27 throwaway DB (TimescaleDB 2.10.2)",
     "node27_docker: explicitly opted-in disposable Docker oracle on node-27; requires NHMS_RUN_NODE27_DOCKER=1",
 ]

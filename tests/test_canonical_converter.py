@@ -3,6 +3,7 @@ from __future__ import annotations
 import builtins
 import importlib
 import json
+import logging
 import math
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -1111,6 +1112,104 @@ def test_bundle_entries_open_cfgrib_with_entry_specific_filter(
     assert record.native_variable == "tmp2m"
     assert calls[0]["kwargs"]["engine"] == "cfgrib"
     assert calls[0]["kwargs"]["backend_kwargs"] == {"filter_by_keys": {"shortName": "t2m"}, "indexpath": ""}
+
+
+@pytest.mark.grib
+def test_gfs_grib2_bundles_decode_through_cfgrib_without_netcdf4_fallback(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Imported here, not at module level: pure CI has no ecCodes library (#2700).
+    from tests.grib2_fixture_support import eccodes_version, encode_grib2_bundle, grib2_short_names
+    from workers.data_adapters.gfs_adapter import GFS_F000_UNAVAILABLE_VARIABLES, GFS_GRIB_SHORT_NAME
+
+    print(f"ecCodes {eccodes_version()}")
+    raw_values = {
+        "tmp2m": 293.15,
+        "rh2m": 55.0,
+        "u10m": 3.0,
+        "v10m": 4.0,
+        "pressfc": 101325.0,
+        "apcp": 2.0,
+        "dswrf": 250.0,
+    }
+    cycle_time = parse_cycle_time("2026050700")
+    store = LocalObjectStore(tmp_path)
+    entries: list[dict[str, Any]] = []
+    for forecast_hour in (0, 3):
+        # Production shape: one bundle per forecast hour, no interval fields at f000.
+        variables = [
+            variable
+            for variable in GFS_GRIB_SHORT_NAME
+            if not (forecast_hour == 0 and variable in GFS_F000_UNAVAILABLE_VARIABLES)
+        ]
+        local_key = f"raw/gfs/2026050700/gfs.t00z.pgrb2.0p25.f{forecast_hour:03d}.grib2"
+        store.write_bytes_atomic(
+            local_key,
+            encode_grib2_bundle(
+                {GFS_GRIB_SHORT_NAME[variable]: raw_values[variable] for variable in variables},
+                cycle_time=cycle_time,
+                forecast_hour=forecast_hour,
+                centre="kwbc",
+                longitude=100.0,
+                latitude=30.0,
+            ),
+        )
+        assert grib2_short_names(store.resolve_path(local_key)) == [
+            GFS_GRIB_SHORT_NAME[variable] for variable in variables
+        ]
+        entries.extend(
+            {
+                "remote_url": f"mock://{variable}/{forecast_hour}",
+                "local_key": local_key,
+                "variable": variable,
+                "forecast_hour": forecast_hour,
+                "metadata": {
+                    "bundle": {"layout": "per_forecast_hour", "variables": variables},
+                    "grib_short_name": GFS_GRIB_SHORT_NAME[variable],
+                    "cfgrib_filter_by_keys": {"shortName": GFS_GRIB_SHORT_NAME[variable]},
+                },
+            }
+            for variable in variables
+        )
+    repository = FakeCanonicalRepository()
+    converter = build_converter(tmp_path, repository=repository)
+
+    with caplog.at_level(logging.WARNING, logger=converter_module.LOGGER.name):
+        result = converter.convert_manifest(
+            {"source_id": "gfs", "cycle_time": cycle_time.isoformat(), "entries": entries}
+        )
+
+    # The converter has no positive engine indicator; it logs the netcdf4 fallback.
+    assert [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == converter_module.LOGGER.name and record.levelno >= logging.WARNING
+    ] == []
+    assert result.status == "canonical_ready"
+    assert len(repository.products) == 12
+    assert {product["quality_flag"] for product in repository.products.values()} == {"ok"}
+    # Decoded coordinates and values, not the encoder's inputs echoed back by a fake.
+    grid = json.loads(store.read_bytes("canonical/gfs/grid/gfs_0p25/grid.json").decode("utf-8"))
+    assert (grid["layout"], grid["shape"], grid["longitudes"], grid["latitudes"]) == (
+        "rectilinear",
+        [1, 1],
+        [100.0],
+        [30.0],
+    )
+    import xarray as xr
+
+    def canonical_value(variable: str) -> float:
+        product = repository.products[f"gfs_2026050700_{variable}_f003"]
+        dataset = xr.open_dataset(store.resolve_path(product["object_uri"]))
+        try:
+            return float(dataset[variable].values.ravel()[0])
+        finally:
+            dataset.close()
+
+    assert canonical_value("air_temperature_2m") == pytest.approx(20.0, abs=1e-3)  # 293.15 K
+    assert canonical_value("pressure_surface") == pytest.approx(101325.0, abs=1.0)
+    assert canonical_value("prcp_rate_or_amount") == pytest.approx(16.0, abs=1e-3)  # 2.0 mm over 3 h, in mm/day
 
 
 def test_netcdf4_missing_raises_without_json_fallback(
