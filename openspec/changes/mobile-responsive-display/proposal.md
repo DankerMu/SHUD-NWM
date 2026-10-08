@@ -49,3 +49,7 @@
 - 无后端、无 API、无 DB、无 OpenAPI 变更；`src/api/types.ts` 不动。
 - CI：mocked-regression 车道用例数增加（新增三个移动 project 只跑移动专用 spec；既有 spec 仍只在桌面 project 跑一次；不新增浏览器安装）。
 - 验收 oracle：本地 vitest + mocked Playwright 是合并门；涉及展示端的每个实现 PR 仍需 node-27 live receipt；真机确认只在 epic 收尾，不卡单个 PR。
+
+## Issue triage
+
+本 change 是 Epic #2785 全部子 issue 共用的 fixture。每个 issue 的 triage（issue 类型、fixture level、blast radius、risk pack 取舍、must-preserve、evidence floor）写在 `tasks.md` 对应 task 下的「Triage（#N）」块，不在本文件逐条重复；`compact` / `none` 级 issue 复用本 change 的 `design.md`，不另写。本 change 在最后一个子 issue 合并后才归档。

@@ -17,7 +17,7 @@
 
 ## 1. 验证基建与文档
 
-- [ ] 1.1 移动 project：`playwright.config.ts` 新增约定里的三个移动 project，强制 `browserName: 'chromium'`（设备预设默认 WebKit，CI 只装 Chromium）；既有 `mocked-regression-chromium` project 的 `testIgnore` 重列顶层已忽略的四项（preview-deeplink、live-display、live-c4-display、m15-visual-conformance）并追加 `.mobile.`——project 级 `testIgnore` 会替换而非合并顶层配置。新增 `e2e/support/` 的形态判定助手。新增 `e2e/m11-baseline.mobile.mocked.spec.ts`，只断言今天已成立的事实：`/` 加载后 viewport meta 存在、地图区可见。
+- [x] 1.1 移动 project：`playwright.config.ts` 新增约定里的三个移动 project，强制 `browserName: 'chromium'`（设备预设默认 WebKit，CI 只装 Chromium）；既有 `mocked-regression-chromium` project 的 `testIgnore` 重列顶层已忽略的四项（preview-deeplink、live-display、live-c4-display、m15-visual-conformance）并追加 `.mobile.`——project 级 `testIgnore` 会替换而非合并顶层配置。新增 `e2e/support/` 的形态判定助手。新增 `e2e/m11-baseline.mobile.mocked.spec.ts`，只断言今天已成立的事实：`/` 加载后 viewport meta 存在、地图区可见。
 
   Depends on: 无
 
@@ -26,6 +26,16 @@
   **Suggested fixture level:** compact - 只改测试配置并加断言既有事实的 spec；无运行时代码、无共享入口行为变化。
 
   **Minimal mergeable slice:** atomic - project 定义与“谁匹配哪些 spec”的划分必须同时落地，否则既有 spec 会被三个新 project 重复执行，或 live spec 混进合并门。
+
+  Triage（#2786）：Issue type: test ｜ Fixture level: compact（与上游建议一致）｜ Blast radius: 合并门车道——project 划分写错会让既有 spec 被重复执行、live spec 混入合并门，或移动 project 空跑仍显示绿。
+  - Risk pack「Config / project setup」selected：改 `playwright.config.ts` 的 project 与 `testIgnore` -> `playwright test --list` 逐 project 计数（桌面用例总数与改动前相同、四个被忽略 spec 计数为 0、三个移动 project 各只列 `.mobile.` spec）。
+  - Risk pack「Error handling」selected：移动 project 必须能让车道失败 -> 临时必败断言使 `test:e2e:mocked-regression` 退出码非零，输出记入 PR 描述后移除。
+  - Risk pack「Release / packaging / dependency compatibility」selected：CI 只装 Chromium -> 三个移动 project 的 `browserName` 为 `chromium`，`.github/workflows/ci.yml` 零 diff。
+  - Risk pack「Legacy compatibility」selected：既有单测 `apps/frontend/src/__tests__/playwrightConfig.test.ts` 把 project 名单钉死为 `['mocked-regression-chromium']` -> 期望改为按配置顺序的四项 `['mocked-regression-chromium', 'mobile-portrait', 'mobile-landscape', 'mobile-landscape-wide']`，同文件的 `metadata` 断言不改。`src/` 下只允许改这一个测试文件（PR 边界相应放宽，issue 上已留言）。
+  - 未选：Public API、File IO、Schema、Auth、Concurrency、Resource limits、Documentation——本 task 不改运行时代码。
+  - 场景归属（显式 non-goal）：spec delta 的「Baseline mobile invariants」归 5.1；「A mobile regression fails the lane」（390×664 图例与控制条相交）归后续浮层 task。1.1 只交付 viewport meta 存在与地图区可见，并以临时必败断言作为“车道会失败”的代理证据。
+  - Must preserve：既有 `mocked-regression-chromium` 的用例集合与期望值（含 `m11-overlay-collision` 四个桌面宽度）、`retries` 为 0、`test:e2e:m15-visual` 与 preview/live 各自的独立 runner 不受影响。
+  - Evidence floor：约定的本地验证命令全绿 + 上述 `--list` 计数（改动前后）+ 必败断言的非零退出输出。
 
 - [ ] 1.2 设计规范文档：更新 `docs/spec/06B_frontend_ui_design_spec.md` §8（最小支持分辨率与断点行为表），新增移动形态一行（判据、单图页的移动布局概要、运维页为兜底），并把“< 1280px 不推荐使用”改述为“768–1279px 为桌面形态下的既有降级行为、< 768px 或高 < 500px 为移动形态”，注明由本 change 引入。
 
