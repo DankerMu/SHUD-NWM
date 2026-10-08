@@ -1,0 +1,5 @@
+node-27, master 19740c07, 2026-10-08 CST.
+Frontend rebuilt in the checkout (corepack pnpm build, exit 0, 16.6 s; dependencies unchanged, no install); the display API serves apps/frontend/dist, no service restart.
+index.html entry before: assets/index-Cz0xGMGL.js; after: assets/index-C7yhQKcq.js — served by http://127.0.0.1:8080/ and https://test.nwm.ac.cn/ (asset 200).
+The new status-note text is in dist/assets/OverviewPage-DdbvU45P.js.
+Not verified here: the rendered station layer in a browser (task 2.3, owner's check); the degrade path has vitest evidence only.
