@@ -1,5 +1,22 @@
 @import "tailwindcss";
 
+/*
+  移动形态判据（openspec mobile-responsive-display design.md D1）：宽 < 768px 或高 < 500px。
+  两条查询必须与 src/hooks/useMobileForm.ts 导出的常量逐字相同。
+  必须用块写法：单行简写遇到逗号分隔的查询列表只保留第一条，“高 < 500”这一半会静默失效。
+*/
+@custom-variant mobile {
+  @media (max-width: 767.98px), (max-height: 499.98px) {
+    @slot;
+  }
+}
+
+@custom-variant mobile-landscape {
+  @media (max-height: 499.98px) and (orientation: landscape) {
+    @slot;
+  }
+}
+
 @theme {
   --color-background: var(--bg, #f7f9fb);
   --color-panel: var(--panel, #ffffff);
