@@ -133,7 +133,7 @@
   - Review focus：(1) 两个变体确为块写法且含 `@slot`；(2) 查询字符串单一来源，CSS 与 JS 的阈值一致（767.98 / 499.98）；(3) hook 的监听在卸载时移除、两条查询都订阅；(4) 根节点既有 className 未被改动；(5) e2e 断言读的是真实计算样式而不是 data 属性自证。
   - Evidence floor：约定的本地验证命令全绿 + 新 e2e spec 与新 vitest 用例先红后绿；本 task 改展示端运行时代码，合并前在 node-27 出 live receipt（部署后桌面布局 oracle 不回归）。
 
-- [ ] 2.2 外壳动态视口：`AppShell` 根容器由 `h-screen w-screen` 改为 `h-dvh w-full`。新增 `e2e/m11-shell-viewport.mocked.spec.ts`。
+- [x] 2.2 外壳动态视口：`AppShell` 根容器由 `h-screen w-screen` 改为 `h-dvh w-full`。新增 `e2e/m11-shell-viewport.mocked.spec.ts`。
 
   Depends on: 2.1（无功能耦合；2.1、2.2、2.3 改的是 `AppShell` 根节点同一行 className，串行以免冲突）
 
@@ -142,6 +142,21 @@
   **Suggested fixture level:** expanded - 改 `AppShell` 根容器的尺寸声明，影响每个路由的高度计算。
 
   **Minimal mergeable slice:** atomic - 高与宽是同一根节点同一 className 上的一次替换，是“控制条被浏览器工具栏切掉”的独立修复。
+
+  Triage（#2791）：Issue type: bugfix ｜ Fixture level: expanded（与上游建议一致；设计见 design.md D2 / D3）｜ Blast radius: `AppShell` 根容器决定每个路由的可用高度——写错会让所有页面溢出或塌缩。
+  - Change surface：`src/components/layout/AppShell.tsx` 根节点 className 的两个 token（`h-screen` -> `h-dvh`，`w-screen` -> `w-full`），其余 token 逐字保留。
+  - Governing invariant：外壳根节点恰好占满动态视口——渲染宽高等于视口宽高，子布局（头部 + `main` 的 flex 列）不变。
+  - Sibling surfaces：(1) `AppShell` 包住的每个路由（`/`、`/ops`、`/monitoring`、`/system/model-assets`）；(2) 其他使用视口单位的地方——全仓 `src` 只有 `components/ui/toast.tsx` 的 `max-h-screen`，它是 fixed 定位的 toast 视口上限，不在本 task 范围（保持不动，写为 non-goal）；(3) `html` / `body` / `#root` 的高度链（已核实）：`src/index.css` 是 `html, body, #root { min-height: 100% }` 加 `body { margin: 0; min-width: 320px }`，`html` / `#root` 无宽度约束；`w-full` 只在视口 < 320px（规格域外）或文档出现纵向滚动条时与 `w-screen` 不同；(4) node-27 桌面布局 oracle（84 / 64 / 无横向滚动）。
+  - Must preserve（既有测试）：`src/components/layout/__tests__/AppShellViewportForm.test.tsx` 有一条断言钉死根节点 className 以 `relative flex h-screen w-screen flex-col overflow-hidden …` 开头（2.1 为“只追加”写的护栏）。本 task 合法地改这两个 token，须同步更新该断言为新前缀，除此之外该文件不改；`AppShell.test.tsx`、`AppFrame.test.tsx` 不改通过；`m11-overlay-collision` 四个桌面宽度不改期望通过；`e2e/monitoring.mocked.spec.ts` 里依赖外壳高度的断言（`windowScrollY == 0`、`documentScrollHeight <= innerHeight + 1`）不改通过。
+  - Risk pack「Public API / entry」selected：共享外壳尺寸 -> e2e：`/` 在 1280×900、768×1024、390×664、750×342 下，根节点（选择器 `[data-viewport-form]`）`getBoundingClientRect()` 的宽高与 `window.innerWidth` / `innerHeight` 相差不超过 1px；`/ops` 在 1280×900 下同样成立。
+  - Risk pack「Config / project setup」selected：Tailwind 是否生成 `h-dvh` -> e2e 在 `/` @ 390×664 读匹配根节点 `[data-viewport-form]` 的样式规则：递归进入分组规则（`@layer` / `@media` / `@supports` 的 `.cssRules`——Tailwind v4 的工具类在 `@layer utilities` 里，只遍历顶层找不到），用 `root.matches(rule.selectorText)` 选规则，断言声明了 `height` 的命中规则恰有一条且 `rule.style.height === '100dvh'`（不只读计算值——模拟器里 `dvh == vh`，计算值区分不出来）；变异证据：改回 `h-screen` 时该断言为红。
+  - Risk pack「Legacy compatibility」selected：不支持 `dvh` 的旧浏览器会让高度声明失效、根节点塌缩。Tailwind v4 自身的浏览器基线（Safari 16.4+、Chrome 111+、Firefox 128+）已高于 `dvh` 的支持线（Safari 15.4、Chrome 108、Firefox 101），所以不加 `vh` 回退——写为显式 non-goal。
+  - 未选：File IO、Schema、Auth、Concurrency、Resource limits、Release、Error handling、Documentation。
+  - Seams under test：浏览器里的外壳根节点（匹配规则文本 + 包围盒）。
+  - Non-goals：安全区内边距与 viewport meta（2.3）；头部（2.4）；toast 的 `max-h-screen`；“控制条是否避开真机浏览器工具栏”的行为验证（真机清单，7.3）。
+  - Review focus：(1) 只改了两个 token；(2) 断言读的是规则文本里的 `100dvh`；(3) `w-full` 下根节点宽度仍等于视口（无父级约束）；(4) 2.1 的 className 护栏断言被更新而非删除。
+  - Evidence floor：约定的本地验证命令 + `check:types` + 治理门测试全绿；新 e2e 先红后绿；node-27 live receipt（PR 构建对 live API：既有脚本 `scripts/node27_display_v2_browser_evidence.mjs` 的桌面 oracle 不回归；四个视口的根节点包围盒由编排者用仓库外的一次性探针脚本量取并记入 receipt，不入库、不放宽 PR 边界）。
+  - spec 文件归属：新 spec `e2e/m11-shell-viewport.mocked.spec.ts` 文件名不含 `.mobile.`，在桌面 project 里用 `setViewportSize` 覆盖 390×664 与 750×342（先例：2.1 的 `m11-viewport-form.mocked.spec.ts`）。
 
 - [ ] 2.3 安全区：`index.html` viewport meta 加 `viewport-fit=cover`；`AppShell` 根容器无条件应用四边 `env(safe-area-inset-*)` 内边距。新增 `e2e/m11-shell-safe-area.mocked.spec.ts`。
 
