@@ -34,7 +34,12 @@ describe('Playwright config helpers', () => {
     const config = await import('../../playwright.config')
     const projectNames = config.default.projects?.map((project) => project.name)
 
-    expect(projectNames).toEqual(['mocked-regression-chromium'])
+    expect(projectNames).toEqual([
+      'mocked-regression-chromium',
+      'mobile-portrait',
+      'mobile-landscape',
+      'mobile-landscape-wide',
+    ])
     expect(projectNames).not.toContain('chromium')
     expect(config.default.metadata).toMatchObject({
       evidenceLane: 'mocked-regression',
