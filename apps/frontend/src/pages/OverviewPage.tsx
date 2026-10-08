@@ -57,6 +57,8 @@ const OPERATOR_ROLES = ['operator', 'model_admin', 'sys_admin']
 const CONTROL_BAR_SELECTOR = '[data-testid="m11-bottom-control-bar"]'
 /** 图例区域兜底在桌面形态的定位（与桌面图例同位）。 */
 const LEGEND_REGION_DESKTOP_CLASS = 'absolute bottom-[7.5rem] right-4 z-[120]'
+/** 地图控件区域（图层 / 底图 / 运维入口）兜底在桌面形态的定位（与桌面图层面板同位）。 */
+const MAP_CONTROLS_REGION_DESKTOP_CLASS = 'absolute left-4 top-4 z-[120]'
 
 /**
  * 单页全屏地图展示端（M26）：整个展示端 = 一张铺满视口的地图 + 玻璃质感浮层。
@@ -174,7 +176,40 @@ function M11FullscreenMap({
     columnRef: launcherColumnRef,
     floorSelector: CONTROL_BAR_SELECTOR,
   })
+  const toggleLayers = useCallback(() => toggle('layers'), [toggle])
+  const toggleBasemap = useCallback(() => toggle('basemap'), [toggle])
   const toggleLegend = useCallback(() => toggle('legend'), [toggle])
+  // 一个边界覆盖图层、底图与运维入口。非错误态不加包裹元素：移动形态下三个子节点直接成为
+  // 启动器列的 flex 子项，兜底块就地落在列里（专门的移动定位归 3.6）。
+  const mapControlsRegion = (
+    <RegionErrorBoundary
+      region="地图控件"
+      testId="region-error-map-controls"
+      resetKeys={[]}
+      className={mobile ? undefined : MAP_CONTROLS_REGION_DESKTOP_CLASS}
+    >
+      <M11FloatingLayerSwitcher
+        layer={state.layer}
+        metStations={state.metStations}
+        precip={state.precip}
+        precipAvailability={precipAvailability}
+        onQueryChange={onQueryChange}
+        mobile={mobile}
+        expanded={expanded === 'layers'}
+        onToggle={toggleLayers}
+        panelMaxHeight={panelMaxHeight}
+      />
+      <M11FloatingBasemapSwitcher
+        basemap={state.basemap}
+        onQueryChange={onQueryChange}
+        mobile={mobile}
+        expanded={expanded === 'basemap'}
+        onToggle={toggleBasemap}
+        panelMaxHeight={panelMaxHeight}
+      />
+      <M11OpsLink visible={opsVisible} mobile={mobile} />
+    </RegionErrorBoundary>
+  )
   // `state.layer` 恒为 'discharge'，拿它当 key 永远不会复位，故只靠「重试」。
   const legendRegion = (
     <RegionErrorBoundary
@@ -224,22 +259,7 @@ function M11FullscreenMap({
           onMapClick={collapse}
         />
       </RegionErrorBoundary>
-      <RegionErrorBoundary
-        region="地图控件"
-        testId="region-error-map-controls"
-        resetKeys={[]}
-        className="absolute left-4 top-4 z-[120]"
-      >
-        <M11FloatingLayerSwitcher
-          layer={state.layer}
-          metStations={state.metStations}
-          precip={state.precip}
-          precipAvailability={precipAvailability}
-          onQueryChange={onQueryChange}
-        />
-        <M11FloatingBasemapSwitcher basemap={state.basemap} onQueryChange={onQueryChange} />
-        <M11OpsLink visible={opsVisible} />
-      </RegionErrorBoundary>
+      {mobile ? null : mapControlsRegion}
       {children}
       {controlBarInput ? (
         // 只按源/周期复位：时间轴步进不重挂已崩溃的控制条。
@@ -253,12 +273,14 @@ function M11FullscreenMap({
         </RegionErrorBoundary>
       ) : null}
       {mobile ? (
-        // 启动器列：地图区右上角竖排（缩放按钮在移动形态隐藏后腾出的位置）。展开的面板锚在它左侧。
+        // 启动器列：地图区右上角竖排（缩放按钮在移动形态隐藏后腾出的位置），自上而下为
+        // 图层 / 底图 / 图例 / 运维入口。三个展开的面板共用同一个锚点（列左侧、顶边对齐列顶）。
         <div
           ref={launcherColumnRef}
           className="absolute right-2 top-2 z-[120] flex flex-col items-end gap-1"
           data-testid="m11-launcher-column"
         >
+          {mapControlsRegion}
           {legendRegion}
         </div>
       ) : (

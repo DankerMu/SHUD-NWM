@@ -26,10 +26,71 @@ export const m11FloatingLayerOptions: M11FloatingLayerOption[] = [
   { value: 'discharge', label: '流量', description: 'q_down / m³/s', icon: Droplets },
 ]
 
-/** 浮层图层行的共用外观：选中态高亮、禁用态置灰且不再有 hover 反馈。 */
-function layerRowClassName({ selected, disabled }: { selected: boolean; disabled: boolean }) {
+/**
+ * 移动形态（openspec mobile-responsive-display D5）下三个浮层共用的启动器：44×44，
+ * 排在地图区右上角的启动器列里；`aria-expanded` 报告它的面板是否展开。
+ */
+function M11OverlayLauncher({
+  label,
+  testId,
+  icon: Icon,
+  expanded,
+  onToggle,
+}: {
+  label: string
+  testId: string
+  icon: LucideIcon
+  expanded: boolean
+  onToggle?: () => void
+}) {
+  return (
+    <button
+      type="button"
+      className={cn(
+        'flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center',
+        expanded ? 'text-primary-700' : 'text-neutral-700',
+        GLASS_PANEL,
+      )}
+      aria-label={label}
+      aria-expanded={expanded}
+      data-testid={testId}
+      onClick={onToggle}
+    >
+      <Icon className="h-5 w-5" aria-hidden="true" />
+    </button>
+  )
+}
+
+/**
+ * 移动形态展开面板的共用锚点：启动器列左侧、顶边与列顶对齐（定位祖先是启动器列）。
+ * 面板自身只限高、不滚动；滚动容器是里层带独立 testid 的那一层。宽度上限由各面板自己给
+ * （沿用桌面的 `max-w-*`，再按视口收一道，保证不伸出地图区左缘）。
+ */
+const MOBILE_PANEL_ANCHOR = 'absolute right-full top-0 mr-2 flex w-max flex-col overflow-hidden'
+const MOBILE_PANEL_SCROLLER = 'min-h-0 overflow-y-auto overscroll-contain'
+
+function mobilePanelStyle(panelMaxHeight: number | null) {
+  return panelMaxHeight === null ? undefined : { maxHeight: panelMaxHeight }
+}
+
+/** 三个浮层共用的形态 prop：不传 = 桌面形态的常驻面板；后三个只在移动形态被读取。 */
+interface M11OverlayFormProps {
+  /** 移动形态（openspec mobile-responsive-display D5）：收成启动器，`expanded` 时才渲染面板。 */
+  mobile?: boolean
+  expanded?: boolean
+  onToggle?: () => void
+  /** 展开面板的高度上限（px），由地图外壳按地图区与控制条的实际几何量出；null = 不设上限。 */
+  panelMaxHeight?: number | null
+}
+
+/**
+ * 浮层图层行的共用外观：选中态高亮、禁用态置灰且不再有 hover 反馈。
+ * `mobile` 只追加 44px 的触控下限，其余与桌面同一串类。
+ */
+function layerRowClassName({ selected, disabled, mobile }: { selected: boolean; disabled: boolean; mobile: boolean }) {
   return cn(
     'flex w-full items-center gap-2 rounded-md border px-2 py-2 text-left transition-colors',
+    mobile && 'min-h-11',
     disabled
       ? 'cursor-not-allowed border-transparent text-neutral-400'
       : selected
@@ -72,14 +133,42 @@ export function M11FloatingLayerSwitcher({
   precip = false,
   precipAvailability = 'absent',
   onQueryChange,
-}: {
-  layer: M11Layer
-  metStations?: boolean
-  precip?: boolean
-  precipAvailability?: M11PrecipAvailability
-  onQueryChange?: (patch: M11QueryPatch) => void
-}) {
-  const precipEnabled = precipAvailability === 'available'
+  mobile = false,
+  expanded = false,
+  onToggle,
+  panelMaxHeight = null,
+}: M11LayerSwitcherContentProps & M11OverlayFormProps) {
+  const content = (
+    <M11LayerSwitcherContent
+      layer={layer}
+      metStations={metStations}
+      precip={precip}
+      precipAvailability={precipAvailability}
+      onQueryChange={onQueryChange}
+      mobile={mobile}
+    />
+  )
+
+  if (mobile) {
+    return (
+      <>
+        <M11OverlayLauncher label="图层" testId="m11-launcher-layers" icon={Layers} expanded={expanded} onToggle={onToggle} />
+        {expanded ? (
+          <section
+            className={cn(MOBILE_PANEL_ANCHOR, 'max-w-[min(13rem,calc(100vw-5rem))]', GLASS_PANEL)}
+            style={mobilePanelStyle(panelMaxHeight)}
+            aria-label="地图图层切换"
+            data-testid="m11-floating-layer-switcher"
+          >
+            <div className={cn(MOBILE_PANEL_SCROLLER, 'p-2')} data-testid="m11-floating-layer-switcher-scroll">
+              {content}
+            </div>
+          </section>
+        ) : null}
+      </>
+    )
+  }
+
   return (
     <section
       // 与右下图例同因：固定 w-52 会在右侧留下约三分之一死白（实测卡片 208px /
@@ -88,6 +177,34 @@ export function M11FloatingLayerSwitcher({
       aria-label="地图图层切换"
       data-testid="m11-floating-layer-switcher"
     >
+      {content}
+    </section>
+  )
+}
+
+interface M11LayerSwitcherContentProps {
+  layer: M11Layer
+  metStations?: boolean
+  precip?: boolean
+  precipAvailability?: M11PrecipAvailability
+  onQueryChange?: (patch: M11QueryPatch) => void
+}
+
+/**
+ * 图层面板的内容（「水文」「气象」两组及其开关）。桌面的常驻卡片与移动形态的展开面板共用这一份，
+ * 不另写第二份行 / patch。返回 fragment：不给桌面卡片多加任何包裹元素。
+ */
+function M11LayerSwitcherContent({
+  layer,
+  metStations = false,
+  precip = false,
+  precipAvailability = 'absent',
+  onQueryChange,
+  mobile,
+}: M11LayerSwitcherContentProps & { mobile: boolean }) {
+  const precipEnabled = precipAvailability === 'available'
+  return (
+    <>
       <div role="group" aria-label="水文" data-testid="m11-layer-group-hydrology">
         <LayerGroupTitle title="水文" />
         <div className="space-y-1">
@@ -98,7 +215,7 @@ export function M11FloatingLayerSwitcher({
               <button
                 key={option.value}
                 type="button"
-                className={layerRowClassName({ selected, disabled: false })}
+                className={layerRowClassName({ selected, disabled: false, mobile })}
                 aria-pressed={selected}
                 onClick={() => onQueryChange?.({ layer: option.value })}
               >
@@ -122,7 +239,7 @@ export function M11FloatingLayerSwitcher({
         <div className="space-y-1">
           <button
             type="button"
-            className={layerRowClassName({ selected: precipEnabled && precip, disabled: !precipEnabled })}
+            className={layerRowClassName({ selected: precipEnabled && precip, disabled: !precipEnabled, mobile })}
             // 目录没有 `precip` 条目（或目录还没到）时按下态恒为 false：一颗禁用却显示"已按下"
             // 的开关，正是 spec 明令禁止的"假装那些图层在渲染"。
             aria-pressed={precipEnabled ? precip : false}
@@ -143,7 +260,7 @@ export function M11FloatingLayerSwitcher({
           </button>
           <button
             type="button"
-            className={layerRowClassName({ selected: metStations, disabled: false })}
+            className={layerRowClassName({ selected: metStations, disabled: false, mobile })}
             aria-pressed={metStations}
             onClick={() => onQueryChange?.({ metStations: !metStations })}
           >
@@ -155,7 +272,7 @@ export function M11FloatingLayerSwitcher({
           </button>
         </div>
       </div>
-    </section>
+    </>
   )
 }
 
@@ -173,10 +290,38 @@ export const m11FloatingBasemapOptions: Array<{ value: M11Basemap; label: string
 export function M11FloatingBasemapSwitcher({
   basemap,
   onQueryChange,
-}: {
-  basemap: M11Basemap
-  onQueryChange?: (patch: M11QueryPatch) => void
-}) {
+  mobile = false,
+  expanded = false,
+  onToggle,
+  panelMaxHeight = null,
+}: M11BasemapSwitcherContentProps & M11OverlayFormProps) {
+  const content = <M11BasemapSwitcherContent basemap={basemap} onQueryChange={onQueryChange} mobile={mobile} />
+
+  if (mobile) {
+    return (
+      <>
+        <M11OverlayLauncher label="底图" testId="m11-launcher-basemap" icon={MapIcon} expanded={expanded} onToggle={onToggle} />
+        {expanded ? (
+          <div
+            className={cn(MOBILE_PANEL_ANCHOR, 'max-w-[calc(100vw-5rem)]', GLASS_PANEL)}
+            style={mobilePanelStyle(panelMaxHeight)}
+            role="group"
+            aria-label="底图切换"
+            data-testid="m11-floating-basemap-switcher"
+          >
+            {/* 与桌面同一排分段按钮；视口窄到放不下一排时换行，再超高则在这一层内滚动。 */}
+            <div
+              className={cn(MOBILE_PANEL_SCROLLER, 'flex flex-wrap items-center gap-0.5 p-1')}
+              data-testid="m11-floating-basemap-switcher-scroll"
+            >
+              {content}
+            </div>
+          </div>
+        ) : null}
+      </>
+    )
+  }
+
   return (
     <div
       className={cn('absolute right-16 top-4 z-[120] flex items-center gap-0.5 p-1', GLASS_PANEL)}
@@ -184,6 +329,23 @@ export function M11FloatingBasemapSwitcher({
       aria-label="底图切换"
       data-testid="m11-floating-basemap-switcher"
     >
+      {content}
+    </div>
+  )
+}
+
+interface M11BasemapSwitcherContentProps {
+  basemap: M11Basemap
+  onQueryChange?: (patch: M11QueryPatch) => void
+}
+
+/**
+ * 底图分段按钮。桌面的常驻控件与移动形态的展开面板共用这一份；`mobile` 只把按钮从 `h-8`
+ * 换成 44×44 的触控下限，其余类、可访问名与 patch 相同。返回 fragment：桌面不多包裹元素。
+ */
+function M11BasemapSwitcherContent({ basemap, onQueryChange, mobile }: M11BasemapSwitcherContentProps & { mobile: boolean }) {
+  return (
+    <>
       {m11FloatingBasemapOptions.map((option) => {
         const Icon = option.icon
         const selected = basemap === option.value
@@ -192,7 +354,9 @@ export function M11FloatingBasemapSwitcher({
             key={option.value}
             type="button"
             className={cn(
-              'flex h-8 cursor-pointer items-center gap-1.5 rounded-md px-2.5 text-xs font-medium transition-colors',
+              'flex',
+              mobile ? 'h-11 min-w-11 justify-center' : 'h-8',
+              'cursor-pointer items-center gap-1.5 rounded-md px-2.5 text-xs font-medium transition-colors',
               selected ? 'bg-primary-600 text-white shadow-sm' : 'text-neutral-700 hover:bg-white/70',
             )}
             aria-pressed={selected}
@@ -204,7 +368,7 @@ export function M11FloatingBasemapSwitcher({
           </button>
         )
       })}
-    </div>
+    </>
   )
 }
 
@@ -245,47 +409,20 @@ export function M11FloatingLegend({
   layer: M11Layer
   layers: LayerState[]
   precipLegend?: PrecipLegendEntry[] | null
-  /**
-   * 移动形态（openspec mobile-responsive-display D5）：图例收成启动器，`expanded` 时才渲染面板。
-   * 不传 = 桌面形态的常驻面板；下面三个 prop 只在移动形态被读取。
-   */
-  mobile?: boolean
-  expanded?: boolean
-  onToggle?: () => void
-  /** 展开面板的高度上限（px），由地图外壳按地图区与控制条的实际几何量出；null = 不设上限。 */
-  panelMaxHeight?: number | null
-}) {
+} & M11OverlayFormProps) {
   if (mobile) {
     return (
       <>
-        <button
-          type="button"
-          className={cn(
-            'flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center',
-            expanded ? 'text-primary-700' : 'text-neutral-700',
-            GLASS_PANEL,
-          )}
-          aria-label="图例"
-          aria-expanded={expanded}
-          data-testid="m11-launcher-legend"
-          onClick={onToggle}
-        >
-          <Palette className="h-5 w-5" aria-hidden="true" />
-        </button>
+        <M11OverlayLauncher label="图例" testId="m11-launcher-legend" icon={Palette} expanded={expanded} onToggle={onToggle} />
         {expanded ? (
-          // 面板锚在启动器列左侧、顶边与列顶对齐（定位祖先是启动器列）。宽度规则同桌面
-          // （`w-max max-w-56`），再按视口收一道上限，保证不伸出地图区左缘。
-          // 面板自身只限高、不滚动；滚动容器是里层的 `m11-floating-legend-scroll`。
+          // 宽度规则同桌面（`w-max max-w-56`），再按视口收一道上限，保证不伸出地图区左缘。
           <section
-            className={cn(
-              'absolute right-full top-0 mr-2 flex w-max max-w-[min(14rem,calc(100vw-5rem))] flex-col overflow-hidden',
-              GLASS_PANEL,
-            )}
-            style={panelMaxHeight === null ? undefined : { maxHeight: panelMaxHeight }}
+            className={cn(MOBILE_PANEL_ANCHOR, 'max-w-[min(14rem,calc(100vw-5rem))]', GLASS_PANEL)}
+            style={mobilePanelStyle(panelMaxHeight)}
             aria-label="地图图例"
             data-testid="m11-floating-legend"
           >
-            <div className="min-h-0 overflow-y-auto overscroll-contain p-3" data-testid="m11-floating-legend-scroll">
+            <div className={cn(MOBILE_PANEL_SCROLLER, 'p-3')} data-testid="m11-floating-legend-scroll">
               <M11LegendContent layer={layer} layers={layers} precipLegend={precipLegend} />
             </div>
           </section>
@@ -386,14 +523,19 @@ function M11LegendContent({
   )
 }
 
-/** 低调运维直链（operator+ 可见），浮在地图右上角缩放控件下方。 */
-export function M11OpsLink({ visible }: { visible: boolean }) {
+/**
+ * 低调运维直链（operator+ 可见）。桌面形态浮在地图右上角缩放控件下方；移动形态（`mobile`）下
+ * 它是启动器列里的在流子项，用 `order-last` 排在图例启动器之下（列的视觉顺序：图层 / 底图 /
+ * 图例 / 运维入口）。它比启动器宽，会把列撑宽，展开面板的锚点（列左缘）随之左移。
+ */
+export function M11OpsLink({ visible, mobile = false }: { visible: boolean; mobile?: boolean }) {
   if (!visible) return null
   return (
     <Link
       to="/ops"
       className={cn(
-        'absolute right-4 top-28 z-[120] flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-neutral-700 transition-colors hover:bg-white/70',
+        mobile ? 'order-last shrink-0' : 'absolute right-4 top-28 z-[120]',
+        'flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-neutral-700 transition-colors hover:bg-white/70',
         GLASS_PANEL,
       )}
       data-testid="m11-ops-link"
