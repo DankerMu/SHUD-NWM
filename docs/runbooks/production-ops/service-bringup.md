@@ -531,8 +531,8 @@ refresh 的 canonical 与 worker mirror 均走同一注册表发布器；两端�
 （`derive_catalog_bound_readiness_entries`），不加载旧条目，所以不存在死锁——但
 `nhms-scheduler-file-provider-refresh.timer` 实测是**天级**周期（下次触发可能在 26 小时后），
 **不能等它**。触发方式与判据见 5.7.1（`latest.json` 的 `started_at` 变新；
-refresh 的 `ExecCondition` 要求 `nhms-compute-scheduler.service` 非 active，
-而一趟 pass 可以跑一小时以上）。
+手动 `start` 会阻塞到在跑的 scheduler pass 结束、refresh 跑完才返回，而一趟 pass 可以跑
+一小时以上；等满 5400 秒仍未结束则 exit 3、`start` 返回非零，什么都不刷新）。
 
 **hop 5 — 改了 `model_id` 的流域必须回补 forcing（重发场景专有；纯新增流域不触发）。**
 forcing 是**按 model 分目录**存的：`<object-store>/forcing/<source>/<cycle>/<basin_version_id>/<model_id>/`。

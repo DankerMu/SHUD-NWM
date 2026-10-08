@@ -474,17 +474,6 @@ def test_a_refresh_start_that_does_not_return_in_time_is_a_failure(
     assert START_TIMER not in space.systemctl.calls()
 
 
-def test_the_refresh_unit_skips_while_the_service_is_active_like_the_real_one(space: Space) -> None:
-    # The fake has the real unit's start condition: this is what a zero exit without a run looks like.
-    space.run_steps(*STEPS[:5])
-    from scripts.model_succession import scheduler
-
-    settings = space.settings("--apply")
-    space.systemctl.set_units(service="active")
-    with pytest.raises(Exception, match="cannot be read"):
-        scheduler.refresh(settings, space.inputs(settings))
-
-
 # --- a failure leaves the timer alone, and the same command resumes ------------------------
 
 

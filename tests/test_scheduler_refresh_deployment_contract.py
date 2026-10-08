@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -28,6 +29,7 @@ from pathlib import Path
 import pytest
 
 from scripts import scheduler_file_provider_refresh as refresh
+from scripts.model_succession import systemd as succession_systemd
 from services.orchestrator.scheduler_file_providers import (
     capture_scheduler_provider_preimage,
 )
@@ -110,11 +112,23 @@ def test_systemd_refresh_contract_is_db_free_daily_and_scheduler_independent() -
     assert "UnsetEnvironment=DATABASE_URL PIPELINE_DATABASE_URL" in service
     assert "PGPASSWORD" in service and "PGSSLROOTCERT" in service
     assert "Before=nhms-compute-scheduler.service" in service
-    assert (
-        "ExecCondition=/bin/sh -c '! /usr/bin/systemctl --user is-active --quiet "
-        "nhms-compute-scheduler.service'" in service
-    )
-    assert "is-active --quiet nhms-compute-scheduler.service" in wrapper
+    # #2749: the unit has no start condition on the scheduler service (it could
+    # never fail: a oneshot pass is `activating`, not `active`); the wrapper
+    # waits for a running pass, and `Before=` holds the next one meanwhile.
+    assert "ExecCondition" not in service
+    assert re.findall(r"^TimeoutStartSec=.*$", service, re.M) == ["TimeoutStartSec=7200"]
+    assert "is-active --quiet" not in wrapper
+    assert '"$systemctl_bin" --user is-active "$scheduler_unit"' in wrapper
+    wrapper_lines = wrapper.splitlines()
+    for fixed_assignment in (
+        "systemctl_bin=/usr/bin/systemctl",
+        "scheduler_unit=nhms-compute-scheduler.service",
+        "scheduler_wait_bound_seconds=5400",
+        "scheduler_wait_poll_seconds=15",
+    ):
+        assert wrapper_lines.count(fixed_assignment) == 1, fixed_assignment
+    # Fixed assignments, not environment overrides.
+    assert "${systemctl_bin" not in wrapper and "${scheduler_" not in wrapper
     assert "NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true" in environment
     assert '[[ "$NHMS_SCHEDULER_REQUIRE_DIRECT_GRID" == true ]]' in wrapper
     for selector in ("DATABASE_URL=", "PIPELINE_DATABASE_URL=", "PGHOST=", "PGPORT="):
@@ -420,7 +434,18 @@ def _write_wrapper_execution_fixture(
     include_forbidden: bool = False,
     declaration_path: str | None = None,
     extra_env_lines: list[str] | None = None,
+    scheduler_states: tuple[str, ...] = ("inactive",),
+    systemctl_missing: bool = False,
+    wait_bound_and_poll: tuple[int, int] | None = None,
 ) -> tuple[Path, Path]:
+    """A copy of the wrapper that runs in ``tmp_path`` against a fake ``systemctl``.
+
+    The fake prints one of ``scheduler_states`` per call (the last one repeats),
+    exits as ``is-active`` does and appends its arguments to
+    ``fake-bin/systemctl.trace``. ``fake-bin`` also holds a ``sleep`` that
+    returns at once and appends its argument to ``fake-bin/sleep.trace``; it is
+    used only when the caller puts ``fake-bin`` first on ``PATH``.
+    """
     root = Path(__file__).resolve().parents[1]
     repo = tmp_path / "repo"
     env_dir = repo / "infra/env"
@@ -475,14 +500,188 @@ def _write_wrapper_execution_fixture(
         "printf 'ARGS=%s\\n' \"$*\"\n"
     )
     interpreter.chmod(0o755)
-    wrapper = tmp_path / "refresh-wrapper.sh"
-    wrapper.write_text(
-        (root / "scripts/scheduler_file_provider_refresh_once.sh")
-        .read_text()
-        .replace("repo=/scratch/frd_muziyao/NWM", f"repo={repo}")
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    (fake_bin / "systemctl.states").write_text("".join(f"{state}\n" for state in scheduler_states))
+    fake_systemctl = fake_bin / "systemctl"
+    fake_systemctl.write_text(
+        "#!/bin/bash\n"
+        f"cd {fake_bin}\n"
+        "printf '%s\\n' \"$*\" >> systemctl.trace\n"
+        "IFS= read -r state < systemctl.states\n"
+        "if [ \"$(wc -l < systemctl.states)\" -gt 1 ]; then\n"
+        "  tail -n +2 systemctl.states > systemctl.next && mv systemctl.next systemctl.states\n"
+        "fi\n"
+        "if [ -n \"$state\" ]; then printf '%s\\n' \"$state\"; fi\n"
+        "if [ \"$state\" = active ]; then exit 0; fi\n"
+        "exit 3\n"
     )
+    fake_systemctl.chmod(0o755)
+    fake_sleep = fake_bin / "sleep"
+    fake_sleep.write_text(f"#!/bin/bash\nprintf '%s\\n' \"$*\" >> {fake_bin}/sleep.trace\n")
+    fake_sleep.chmod(0o755)
+    substitutions = {
+        "repo=/scratch/frd_muziyao/NWM": f"repo={repo}",
+        "/usr/bin/systemctl": str(fake_bin / "no-such-systemctl" if systemctl_missing else fake_systemctl),
+    }
+    if wait_bound_and_poll is not None:
+        bound, poll = wait_bound_and_poll
+        substitutions["scheduler_wait_bound_seconds=5400\n"] = f"scheduler_wait_bound_seconds={bound}\n"
+        substitutions["scheduler_wait_poll_seconds=15\n"] = f"scheduler_wait_poll_seconds={poll}\n"
+    text = (root / "scripts/scheduler_file_provider_refresh_once.sh").read_text()
+    for needle, replacement in substitutions.items():
+        assert text.count(needle) == 1, f"the wrapper must hold {needle!r} exactly once"
+        text = text.replace(needle, replacement)
+    wrapper = tmp_path / "refresh-wrapper.sh"
+    wrapper.write_text(text)
     wrapper.chmod(0o755)
     return wrapper, marker
+
+
+_SCHEDULER_QUERY = "--user is-active nhms-compute-scheduler.service"
+
+
+def _run_wrapper_with_fake_sleep(
+    tmp_path: Path, wrapper: Path
+) -> tuple[subprocess.CompletedProcess[str], list[str], list[str]]:
+    """Run the wrapper under ``/bin/bash``; return its result, the ``systemctl`` calls and the ``sleep`` calls."""
+    fake_bin = tmp_path / "fake-bin"
+    result = subprocess.run(
+        ["/bin/bash", str(wrapper), "--dry-run"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env={"HOME": str(tmp_path), "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}"},
+    )
+    traces = [
+        (fake_bin / name).read_text().splitlines() if (fake_bin / name).exists() else []
+        for name in ("systemctl.trace", "sleep.trace")
+    ]
+    return result, traces[0], traces[1]
+
+
+@pytest.mark.parametrize("state", ["inactive", "failed"])
+def test_wrapper_refreshes_at_once_when_no_scheduler_pass_is_running(tmp_path: Path, state: str) -> None:
+    wrapper, marker = _write_wrapper_execution_fixture(tmp_path, scheduler_states=(state,))
+
+    result, queries, sleeps = _run_wrapper_with_fake_sleep(tmp_path, wrapper)
+
+    assert result.returncode == 0, result.stderr
+    assert marker.exists()
+    assert queries == [_SCHEDULER_QUERY]
+    assert sleeps == []
+    assert result.stderr == ""
+
+
+def test_wrapper_waits_for_an_activating_scheduler_pass_then_refreshes(tmp_path: Path) -> None:
+    # #2749: a running oneshot pass is `activating`; `is-active --quiet` exits 3
+    # for it, so the old guard refreshed beside the pass.
+    wrapper, marker = _write_wrapper_execution_fixture(
+        tmp_path, scheduler_states=("activating", "activating", "inactive")
+    )
+
+    result, queries, sleeps = _run_wrapper_with_fake_sleep(tmp_path, wrapper)
+
+    assert result.returncode == 0, result.stderr
+    assert marker.exists()
+    assert queries == [_SCHEDULER_QUERY] * 3
+    assert sleeps == ["15", "15"]
+    wait_lines = result.stderr.splitlines()
+    assert len(wait_lines) == 1, result.stderr
+    assert "nhms-compute-scheduler.service is activating" in wait_lines[0]
+    assert "waited 0 s" in wait_lines[0]
+    assert result.stdout.rstrip().endswith("-m scripts.scheduler_file_provider_refresh --dry-run")
+
+
+@pytest.mark.parametrize("state", ["active", "deactivating", "reloading"])
+def test_wrapper_counts_every_running_state_as_a_running_pass(tmp_path: Path, state: str) -> None:
+    wrapper, marker = _write_wrapper_execution_fixture(tmp_path, scheduler_states=(state, "failed"))
+
+    result, queries, sleeps = _run_wrapper_with_fake_sleep(tmp_path, wrapper)
+
+    assert result.returncode == 0, result.stderr
+    assert marker.exists()
+    assert queries == [_SCHEDULER_QUERY] * 2
+    assert sleeps == ["15"]
+    assert f"nhms-compute-scheduler.service is {state}" in result.stderr
+
+
+def test_wrapper_reports_the_wait_once_a_minute(tmp_path: Path) -> None:
+    # Nine polls of 15 s: a line at the start, at 60 s and at 120 s.
+    wrapper, marker = _write_wrapper_execution_fixture(
+        tmp_path, scheduler_states=("activating",) * 9 + ("inactive",)
+    )
+
+    result, queries, sleeps = _run_wrapper_with_fake_sleep(tmp_path, wrapper)
+
+    assert result.returncode == 0, result.stderr
+    assert marker.exists()
+    assert len(queries) == 10 and sleeps == ["15"] * 9
+    wait_lines = result.stderr.splitlines()
+    assert len(wait_lines) == 3, result.stderr
+    for line, waited in zip(wait_lines, (0, 60, 120), strict=True):
+        assert "is activating" in line and f"waited {waited} s" in line
+
+
+@pytest.mark.parametrize(
+    ("printed", "named"),
+    [("", "printed ''"), ("unknown", "printed 'unknown'"), ("maintenance", "printed 'maintenance'")],
+)
+def test_wrapper_refuses_an_unknown_scheduler_state_without_refreshing(
+    tmp_path: Path, printed: str, named: str
+) -> None:
+    wrapper, marker = _write_wrapper_execution_fixture(tmp_path, scheduler_states=(printed,))
+
+    result, queries, sleeps = _run_wrapper_with_fake_sleep(tmp_path, wrapper)
+
+    assert result.returncode == 3, result.stderr
+    assert not marker.exists()
+    assert "ARGS=" not in result.stdout
+    assert queries == [_SCHEDULER_QUERY] and sleeps == []
+    assert named in result.stderr
+    assert "nhms-compute-scheduler.service" in result.stderr
+
+
+def test_wrapper_refuses_when_systemctl_is_missing_without_refreshing(tmp_path: Path) -> None:
+    wrapper, marker = _write_wrapper_execution_fixture(tmp_path, systemctl_missing=True)
+
+    result, queries, sleeps = _run_wrapper_with_fake_sleep(tmp_path, wrapper)
+
+    assert result.returncode == 3, result.stderr
+    assert not marker.exists()
+    assert queries == [] and sleeps == []
+    assert "printed ''" in result.stderr
+    assert str(tmp_path / "fake-bin" / "no-such-systemctl") in result.stderr
+
+
+def test_wrapper_gives_up_when_the_pass_outlasts_the_wait_bound(tmp_path: Path) -> None:
+    wrapper, marker = _write_wrapper_execution_fixture(
+        tmp_path, scheduler_states=("activating",), wait_bound_and_poll=(6, 2)
+    )
+
+    result, queries, sleeps = _run_wrapper_with_fake_sleep(tmp_path, wrapper)
+
+    assert result.returncode == 3, result.stderr
+    assert not marker.exists()
+    assert "ARGS=" not in result.stdout
+    # Queried at 0, 2, 4 and 6 s; the fourth answer is past the bound.
+    assert queries == [_SCHEDULER_QUERY] * 4 and sleeps == ["2", "2", "2"]
+    last = result.stderr.splitlines()[-1]
+    assert "is still activating after waiting 6 s" in last
+
+
+def test_wrapper_state_lists_equal_the_succession_tool_state_lists() -> None:
+    wrapper = (Path(__file__).resolve().parents[1] / "scripts/scheduler_file_provider_refresh_once.sh").read_text()
+
+    # The two `case` arms of the wait, each labelled with the name of its list.
+    arms = re.findall(r"^\s*([a-z|]+)\)\s+# (NOT_RUNNING_STATES|RUNNING_STATES)$", wrapper, re.M)
+
+    assert sorted((name, sorted(states.split("|"))) for states, name in arms) == [
+        ("NOT_RUNNING_STATES", sorted(succession_systemd.NOT_RUNNING_STATES)),
+        ("RUNNING_STATES", sorted(succession_systemd.RUNNING_STATES)),
+    ]
+    assert "scripts/model_succession/systemd.py" in wrapper
 
 
 def test_wrapper_clean_environment_loads_fixed_config_and_strips_inherited_db_selectors(tmp_path: Path) -> None:
