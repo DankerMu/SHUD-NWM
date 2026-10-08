@@ -22,6 +22,11 @@ interface M11InteractionContext {
   mapRef: MapRef | null
   onOverlayHover?: (interaction: M11MapOverlayInteraction | null) => void
   onOverlayClick?: (interaction: M11MapOverlayInteraction) => void
+  /**
+   * 地图上的每一次点击都通知一次，无论是否命中要素（移动形态收起已展开的浮层面板用）。
+   * 与 `onOverlayClick` 相互独立：后者仍只在命中站点 / 叠加层 / 流域时触发。
+   */
+  onMapClick?: () => void
 }
 
 export function buildM11InteractiveLayerIds({
@@ -161,7 +166,8 @@ export function resolveM11ClickTarget<F extends M11ClickTargetFeature>({
 }
 
 export function handleM11MapClick(event: MapLayerMouseEvent, context: M11InteractionContext) {
-  const { showStationLayer, renderableOverlay, mapRef, onOverlayClick } = context
+  const { showStationLayer, renderableOverlay, mapRef, onOverlayClick, onMapClick } = context
+  onMapClick?.()
   const target = resolveM11ClickTarget({
     features: event.features,
     showStationLayer,
