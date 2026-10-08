@@ -1,7 +1,7 @@
 import { expect, test, type Page } from '@playwright/test'
 
 import { openRiverWindow } from './support/openRiverWindow'
-import { riverFixture } from './support/riverFixture'
+import { dischargeTileCoordinates, isRiverFixtureTilePath, riverFixture, riverFixtureTilePath } from './support/riverFixture'
 import { installRiverWindowMocks, type RiverWindowMockLog } from './support/riverWindowMocks'
 
 /**
@@ -32,11 +32,30 @@ test.describe('M11 河段窗夹具：经真实点击路径打开河段窗', () =
       'forecast_gfs_deterministic',
       'forecast_ifs_deterministic',
     ])
-    // 河段来自夹具瓦片：钩子 fit 之后的请求落在夹具声明的那张瓦片上。
-    const { z, x, y } = riverFixture.tile
-    expect(mocks.riverTileRequests.length, '夹具瓦片应被请求过').toBeGreaterThan(0)
-    expect(mocks.riverTileRequests[0].endsWith(`/${z}/${x}/${y}.pbf`), mocks.riverTileRequests[0]).toBe(true)
+    // 河段来自夹具瓦片：mock 记下全部径流瓦片请求（不只是命中的），其中必须有夹具所属产品
+    // （默认源 / 周期 / 时次）下的那一条完整路径；且夹具层级上请求过的径流瓦片只有这一张——
+    // 钩子 fit 之后视口没有落到邻瓦片上。
+    expect(mocks.dischargeTileRequests, '夹具瓦片应按其所属产品的完整路径被请求过').toContain(riverFixtureTilePath)
+    const atFixtureZoom = mocks.dischargeTileRequests.filter(
+      (path) => dischargeTileCoordinates(path)?.z === riverFixture.tile.z,
+    )
+    expect(atFixtureZoom.length).toBeGreaterThan(0)
+    expect(
+      atFixtureZoom.filter((path) => !isRiverFixtureTilePath(path)),
+      `z=${riverFixture.tile.z} 上不应请求夹具瓦片以外的径流瓦片`,
+    ).toEqual([])
     expect(mocks.unmocked, '不应有未被 mock 的 /api/v1 请求').toEqual([])
+  }
+
+  // 生产的全国径流瓦片不带 segment_name（services/tiles/mvt.py 的 hydro-national 属性集），窗口标题
+  // 走 formatRiverSegmentDisplayName 的回退链：夹具河段 ID 不是 `<流域>_riv_<序号>` 形，解析不出
+  // “流域 河段 N”，于是标题就是河段 ID 本身，副行是“河段 ID <id>”。夹具瓦片若多带了名字，这里会红。
+  async function expectProductionFallbackTitle(page: Page) {
+    const header = page.getByTestId('m11-river-forecast-panel').locator('header')
+    const { riverSegmentId } = riverFixture.identity
+    await expect(header.getByText(riverSegmentId, { exact: true })).toBeVisible()
+    await expect(header.getByText(`河段 ID ${riverSegmentId}`, { exact: true })).toBeVisible()
+    await expect(header.locator(`[title="河段 ID ${riverSegmentId}"]`)).toHaveText(riverSegmentId)
   }
 
   test('桌面 1280×900：鼠标点击打开河段窗，曲线为已加载', async ({ page }) => {
@@ -44,6 +63,7 @@ test.describe('M11 河段窗夹具：经真实点击路径打开河段窗', () =
 
     expect(opened.input).toBe('click')
     await expect(page.getByTestId('m11-river-forecast-panel')).toBeVisible()
+    await expectProductionFallbackTitle(page)
     await expectCurveLoaded(page)
   })
 
@@ -56,6 +76,7 @@ test.describe('M11 河段窗夹具：经真实点击路径打开河段窗', () =
 
       expect(opened.input).toBe('tap')
       await expect(page.getByTestId('m11-river-forecast-panel')).toBeVisible()
+      await expectProductionFallbackTitle(page)
       await expectCurveLoaded(page)
     })
   })

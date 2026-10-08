@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import type { Page, Route } from '@playwright/test'
 
 import type { components } from '../../src/api/types'
-import { RIVER_TILE_URL_TEMPLATE, isRiverFixtureTilePath, riverFixture, riverTileFile } from './riverFixture'
+import { RIVER_TILE_URL_TEMPLATE, isDischargeTilePath, isRiverFixtureTilePath, riverFixture, riverTileFile } from './riverFixture'
 
 /**
  * 曲线窗 e2e 的共享 mock（openspec mobile-responsive-display task 1.3；站点两条由 1.4 消费）。
@@ -15,9 +15,10 @@ import { RIVER_TILE_URL_TEMPLATE, isRiverFixtureTilePath, riverFixture, riverTil
  */
 type Schemas = components['schemas']
 
-const { identity, tile, anchor } = riverFixture
+const { identity, tile, anchor, product } = riverFixture
 
-export const MOCK_CYCLE = '2026-05-18T00:00:00Z'
+/** 起报时次：取自夹具瓦片所属产品，瓦片属性、周期目录与各响应共用这一个值。 */
+export const MOCK_CYCLE = product.cycle
 const HOUR_MS = 60 * 60 * 1000
 const cycleMs = Date.parse(MOCK_CYCLE)
 const hoursAfterCycle = (hours: number) => new Date(cycleMs + hours * HOUR_MS).toISOString().replace('.000Z', 'Z')
@@ -27,7 +28,13 @@ const MOCK_HORIZON_HOURS = 24
 const MOCK_VALID_TIME_END = hoursAfterCycle(MOCK_HORIZON_HOURS)
 const MOCK_MODEL_ID = 'e2e-model'
 const MOCK_FORCING_VERSION_IDS = { GFS: 'e2e-forcing-gfs', IFS: 'e2e-forcing-ifs' } as const
-const MOCK_RUN_IDS = { GFS: 'e2e-run-gfs', IFS: 'e2e-run-ifs' } as const
+// 瓦片要素的 run_id 属于夹具声明的那个源；另一个源的 run 只出现在 API 响应里。
+const tileSource = product.source === 'gfs' ? 'GFS' : 'IFS'
+const otherSource = tileSource === 'GFS' ? 'IFS' : 'GFS'
+const MOCK_RUN_IDS = { [tileSource]: product.runId, [otherSource]: `e2e-run-${otherSource.toLowerCase()}` } as Record<
+  'GFS' | 'IFS',
+  string
+>
 const MOCK_SCENARIOS = { GFS: 'forecast_gfs_deterministic', IFS: 'forecast_ifs_deterministic' } as const
 type MockSource = keyof typeof MOCK_RUN_IDS
 
@@ -110,7 +117,7 @@ export const mockDischargeLayer = {
   layer_id: 'discharge',
   layer_name: 'Discharge',
   layer_type: 'hydrology',
-  variables: ['q_down'],
+  variables: [product.variable],
   metadata: {
     layer_id: 'discharge',
     tile_format: 'mvt',
@@ -120,7 +127,7 @@ export const mockDischargeLayer = {
     url_template: RIVER_TILE_URL_TEMPLATE,
     required_placeholders: ['source', 'cycle', 'valid_time', 'z', 'x', 'y'],
     source_refs: {},
-    default_source: 'gfs',
+    default_source: product.source,
     default_cycle: MOCK_CYCLE,
     valid_times: MOCK_VALID_TIMES,
     fallback_available: false,
@@ -222,7 +229,7 @@ function mockRiverForecastSeries(source: MockSource) {
   return {
     segment_id: identity.riverSegmentId,
     issue_time: MOCK_CYCLE,
-    unit: 'm3/s',
+    unit: product.unit,
     series: [
       {
         scenario_id: MOCK_SCENARIOS[source],
@@ -230,7 +237,7 @@ function mockRiverForecastSeries(source: MockSource) {
         cycle_time: MOCK_CYCLE,
         available_lead_hours: MOCK_HORIZON_HOURS,
         segment_role: 'forecast',
-        variable: 'q_down',
+        variable: product.variable,
         points: MOCK_VALID_TIMES.map((validTime, index) => [Date.parse(validTime), base + index * 1.5]),
       },
     ],
@@ -300,8 +307,8 @@ const TRANSPARENT_PNG = Buffer.from(
 )
 
 export interface RiverWindowMockLog {
-  /** 夹具瓦片被请求过的 pathname（按请求顺序）。 */
-  riverTileRequests: string[]
+  /** 全部全国径流瓦片请求的 pathname（已解码，按请求顺序）——不只是命中夹具瓦片的那些。 */
+  dischargeTileRequests: string[]
   /** 河段 forecast-series 请求的 `scenarios` 参数（按请求顺序）。 */
   forecastSeriesScenarios: string[]
   /** 没有对应 mock 的 `/api/v1/**` 请求（`METHOD pathname?search`）；正常应为空。 */
@@ -313,7 +320,7 @@ export interface RiverWindowMockLog {
  * 夹具瓦片之外的矢量瓦片回 204（空瓦片），底图瓦片回 1×1 透明 PNG——都立即返回，地图才能到 `idle`。
  */
 export async function installRiverWindowMocks(page: Page): Promise<RiverWindowMockLog> {
-  const log: RiverWindowMockLog = { riverTileRequests: [], forecastSeriesScenarios: [], unmocked: [] }
+  const log: RiverWindowMockLog = { dischargeTileRequests: [], forecastSeriesScenarios: [], unmocked: [] }
   const riverTile = readFileSync(riverTileFile)
   const json = (route: Route, data: unknown, status = 200) =>
     route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(data) })
@@ -333,8 +340,8 @@ export async function installRiverWindowMocks(page: Page): Promise<RiverWindowMo
       return route.fulfill({ status: 200, contentType: 'image/png', body: TRANSPARENT_PNG })
     }
     if (path.startsWith('/api/v1/tiles/')) {
+      if (isDischargeTilePath(path)) log.dischargeTileRequests.push(path)
       if (isRiverFixtureTilePath(path)) {
-        log.riverTileRequests.push(path)
         return route.fulfill({ status: 200, contentType: 'application/x-protobuf', body: riverTile })
       }
       return route.fulfill({ status: 204 })

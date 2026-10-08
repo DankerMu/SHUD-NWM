@@ -6,7 +6,15 @@
     "riverNetworkVersionId": "e2e-rivnet-v1",
     "riverSegmentId": "e2e-seg-0001"
   },
-  "segmentName": "E2E River",
+  "product": {
+    "source": "gfs",
+    "cycle": "2026-05-18T00:00:00Z",
+    "validTime": "2026-05-18T00:00:00Z",
+    "runId": "e2e-run-gfs",
+    "variable": "q_down",
+    "unit": "m3/s",
+    "qualityFlag": "ok"
+  },
   "value": 42.5,
   "anchor": [100.371094, 37.020098],
   "bbox": [

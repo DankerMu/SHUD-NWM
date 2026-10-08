@@ -3,7 +3,7 @@
 //
 //   cd apps/frontend && node e2e/support/fixtures/generate-river-tile.mjs [输出路径]
 //
-// 读同目录的 river-tile.fixture.json（河段几何、身份与瓦片坐标的唯一来源），写出一张只含
+// 读同目录的 river-tile.fixture.json（河段几何、身份、所属产品与瓦片坐标的唯一来源），写出一张只含
 // 该河段的 MVT。不带参数时覆盖入库文件 river-tile-<z>-<x>-<y>.pbf；带参数时写到该路径，
 // 供 `cmp <再生成> <入库>` 核对可重复性。输出是输入的纯函数（无时间戳、无随机数）。
 //
@@ -45,6 +45,8 @@ if (startLat !== endLat || fixture.anchor[1] !== startLat) fail('line must run a
 if (!(startLon < fixture.anchor[0] && fixture.anchor[0] < endLon)) fail('anchor must lie inside the line')
 
 const { basinId, basinVersionId, riverNetworkVersionId, riverSegmentId } = fixture.identity
+const { product } = fixture
+if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(product.validTime)) fail('product.validTime must be YYYY-MM-DDTHH:MM:SSZ')
 const index = geojsonvt(
   {
     type: 'FeatureCollection',
@@ -52,14 +54,22 @@ const index = geojsonvt(
       {
         type: 'Feature',
         geometry: { type: 'LineString', coordinates: fixture.line },
+        // 属性集与取值类型照 services/tiles/mvt.py 的 hydro-national 分支：恰好这 12 个，
+        // 除 value 是数值外都是字符串；feature_id = river_network_version_id || '::' || river_segment_id，
+        // valid_time 是 YYYY-MM-DDTHH:MM:SSZ。生产瓦片没有 segment_name，这里也不写。
         properties: {
-          basin_id: basinId,
-          basin_version_id: basinVersionId,
-          river_network_version_id: riverNetworkVersionId,
-          river_segment_id: riverSegmentId,
+          feature_id: `${riverNetworkVersionId}::${riverSegmentId}`,
           segment_id: riverSegmentId,
-          segment_name: fixture.segmentName,
+          river_segment_id: riverSegmentId,
+          river_network_version_id: riverNetworkVersionId,
+          basin_version_id: basinVersionId,
+          basin_id: basinId,
           value: fixture.value,
+          unit: product.unit,
+          quality_flag: product.qualityFlag,
+          run_id: product.runId,
+          variable: product.variable,
+          valid_time: product.validTime,
         },
       },
     ],

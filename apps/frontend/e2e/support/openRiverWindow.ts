@@ -27,8 +27,18 @@ type LocateOutcome =
 
 const RIVER_PANEL = '[data-testid="m11-river-forecast-panel"]'
 const MAP_WITH_DISCHARGE = '[data-testid="m11-map-surface"][data-registered-overlays="discharge"]'
-const READY_TIMEOUT_MS = 20_000
-const PANEL_TIMEOUT_MS = 10_000
+/**
+ * 各阶段的等待上限。Playwright 默认单测超时 30s（本仓 `playwright.config.ts` 没改），它还要覆盖
+ * 导航与 spec 自己的断言；这里四段相加 21s，留 9s 余量，慢机器上先触发的是本助手带原因的错误，
+ * 而不是泛泛的 "Test timeout"。钩子内部另有 15s 上限，故定位这一步在 Node 侧用更短的 5s 截断。
+ * 整条车道目前每例约 2s。改这些数时保持总和明显小于 30s（模块加载时校验）。
+ */
+const STAGE_TIMEOUT_MS = { hook: 6_000, overlay: 6_000, locate: 5_000, panel: 4_000 } as const
+const HELPER_BUDGET_MS = 22_000
+const stageTotalMs = Object.values(STAGE_TIMEOUT_MS).reduce((sum, value) => sum + value, 0)
+if (stageTotalMs > HELPER_BUDGET_MS) {
+  throw new Error(`openRiverWindow: stage timeouts sum to ${stageTotalMs}ms, over the ${HELPER_BUDGET_MS}ms helper budget`)
+}
 
 const { identity, anchor, bbox } = riverFixture
 /** `locateRenderedRiver` 的入参：全部取自夹具的唯一导出。 */
@@ -47,20 +57,20 @@ export async function openRiverWindow(page: Page, options: { url?: string } = {}
         return typeof hook?.locateRenderedRiver === 'function'
       },
       undefined,
-      { timeout: READY_TIMEOUT_MS },
+      { timeout: STAGE_TIMEOUT_MS.hook },
     )
     .catch(() => {
       throw new Error(
-        `openRiverWindow: window.__nhmsRiverClickEvidence.locateRenderedRiver is missing after ${READY_TIMEOUT_MS}ms ` +
+        `openRiverWindow: window.__nhmsRiverClickEvidence.locateRenderedRiver is missing after ${STAGE_TIMEOUT_MS.hook}ms ` +
           `(is the map mounted at ${page.url()} and was the __NHMS_E2E_HOOKS__ gate set before load?)`,
       )
     })
   await page
     .locator(MAP_WITH_DISCHARGE)
-    .waitFor({ state: 'attached', timeout: READY_TIMEOUT_MS })
+    .waitFor({ state: 'attached', timeout: STAGE_TIMEOUT_MS.overlay })
     .catch(() => {
       throw new Error(
-        `openRiverWindow: the map did not register the discharge overlay within ${READY_TIMEOUT_MS}ms ` +
+        `openRiverWindow: the map did not register the discharge overlay within ${STAGE_TIMEOUT_MS.overlay}ms ` +
           '(are the layers / cycles mocks installed via installRiverWindowMocks?)',
       )
     })
@@ -71,7 +81,7 @@ export async function openRiverWindow(page: Page, options: { url?: string } = {}
   }
 
   // 钩子以普通对象 `{code, message}` reject；在页面内折成可序列化的结果再回到 Node 侧。
-  const outcome = await page.evaluate(async (input): Promise<LocateOutcome> => {
+  const locating = page.evaluate(async (input): Promise<LocateOutcome> => {
     const hook = (
       window as unknown as {
         __nhmsRiverClickEvidence: { locateRenderedRiver: (value: typeof input) => Promise<Record<string, unknown>> }
@@ -85,6 +95,21 @@ export async function openRiverWindow(page: Page, options: { url?: string } = {}
       return { ok: false, code: String(failure.code ?? 'UNKNOWN'), message: String(failure.message ?? error) }
     }
   }, locateInput)
+  let locateTimer: ReturnType<typeof setTimeout> | undefined
+  const locateTimedOut = new Promise<LocateOutcome>((resolve) => {
+    locateTimer = setTimeout(
+      () =>
+        resolve({
+          ok: false,
+          code: 'HELPER_LOCATE_TIMEOUT',
+          message: `no answer from the hook within ${STAGE_TIMEOUT_MS.locate}ms (did the fixture tile load and the map go idle?)`,
+        }),
+      STAGE_TIMEOUT_MS.locate,
+    )
+  })
+  // 超时后页面里的定位仍在跑；它的结果（或页面关闭带来的 rejection）不再有人等，接住即可。
+  locating.catch(() => undefined)
+  const outcome = await Promise.race([locating, locateTimedOut]).finally(() => clearTimeout(locateTimer))
 
   if (!outcome.ok) {
     throw new Error(
@@ -113,10 +138,10 @@ export async function openRiverWindow(page: Page, options: { url?: string } = {}
 
   await page
     .locator(RIVER_PANEL)
-    .waitFor({ state: 'visible', timeout: PANEL_TIMEOUT_MS })
+    .waitFor({ state: 'visible', timeout: STAGE_TIMEOUT_MS.panel })
     .catch(() => {
       throw new Error(
-        `openRiverWindow: the river window did not appear within ${PANEL_TIMEOUT_MS}ms after a real ${input} ` +
+        `openRiverWindow: the river window did not appear within ${STAGE_TIMEOUT_MS.panel}ms after a real ${input} ` +
           `at (${point.x}, ${point.y})`,
       )
     })
