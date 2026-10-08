@@ -366,7 +366,7 @@ key allowlist；`NHMS_REGISTRY_CUTOVER_DECLARATION_PATH` **自 #1095 起在 allo
    （`active` / `activating` / `deactivating` / `reloading`）就每 15 秒查一次、每分钟在
    journal 记一行，等这一趟 pass 结束再刷新；unit 的 `Before=` 在此期间把下一趟 pass 排在
    refresh 后面。所以 `start` 会**阻塞**到在跑的 pass 结束、refresh 也跑完才返回。
-   等满 5400 秒 pass 仍未结束，或状态读不出来（`systemctl` 缺失、无输出、未知状态），
+   等满 14400 秒 pass 仍未结束，或状态读不出来（`systemctl` 缺失、无输出、未知状态），
    wrapper 以 exit 3 拒绝、不做任何刷新，`start` 返回非零、unit 进 `failed`，**不产生
    任何 receipt**。unit 文件
    （`infra/systemd/nhms-scheduler-file-provider-refresh.service`）不再带 `ExecCondition`，
@@ -601,21 +601,21 @@ scripts/install_node22_scheduler_file_provider_refresh.sh --rollback
 # 按 install-state/refresh.before 恢复 refresh 两个 unit 并读回确认；再读回断言 scheduler units 未变。
 ```
 
-**部署「refresh 等 scheduler pass」（#2749）——两步各自独立，都要 owner 放行**：
+**部署「refresh 等 scheduler pass」的等待上限（#2749，14400 秒）——wrapper 与已安装的 unit 必须在同一个会话里一起换，要 owner 放行**：
 
 1. `git status --porcelain` → `git pull --ff-only`：unit 的 `ExecStart` 直接执行 checkout 里的
-   wrapper，所以 pull 完等待逻辑就生效，不需要 installer。此时**已安装**的 unit 文件
-   （`~/.config/systemd/user/` 下那份）还带着旧的 `ExecCondition`；它是惰性的——对
-   `activating`、`inactive`、`failed` 都放行（oneshot 的 pass 在跑时是 `activating`，这正是
-   #2749 的成因），不影响新行为。
-2. 替换已安装的 unit 文件要走 installer 的 `--rollback` → `--install` → `--enable`
-   （顺序与前置条件见下面的演练顺序，含紧挨着 `--enable` 的 manual refresh），且必须在
-   refresh 可能在跑的时段之外（timer 02:15Z 加至多 30 分钟抖动，再加 `TimeoutStartSec=7200`，
-   最晚约 04:45Z）。行为不依赖这一步，但运维依赖：pull 之后已安装的 unit 与仓库里的
-   不再相同，而 `--enable` 会逐个 `cmp -s` 两者，不一致就拒绝，直到重新 `--install`。lane
-   现在是 armed、并保持 armed；**此后第一次任何 installer 动作都必须从这一轮
-   `--rollback` → `--install` → `--enable` 开始**。做完读回确认已安装的 unit 里没有
-   `ExecCondition`。
+   wrapper，所以 pull 完新的等待上限（14400 秒）就生效，不需要 installer。但**只 pull 不能停手**：
+   此时**已安装**的 unit 文件（`~/.config/systemd/user/` 下那份）还是 `TimeoutStartSec=7200`，
+   timer 触发的 refresh 若排在一趟长 pass 后面，会在 7200 秒被 systemd 杀掉，而不是由 wrapper 以
+   exit 3 干净拒绝。
+2. 所以紧接着在**同一个会话**里走 installer 的 `--rollback` → `--install` → 经 unit 手动跑一趟
+   refresh → `--enable`（顺序与前置条件见下面的演练顺序），**绝不把「已 pull、未 `--install`」留过夜**。
+   整个会话必须在 refresh 可能在跑的时段之外，即 02:15Z 至约 08:45Z（timer 02:15Z 加至多 30 分钟抖动，再加 `TimeoutStartSec=21600`）之外。
+   `--rollback` 到 `--enable` 之间 timer 是解除的，每小时一次的探针在这段时间报 `probe_failed` 或
+   `timer_not_enabled`，属预期。pull 之后已安装的 unit 与仓库里的不再相同，而 `--enable` 会逐个
+   `cmp -s` 两者，不一致就拒绝，直到重新 `--install`。做完读回确认：refresh service 的
+   `TimeoutStartUSec` 是 `6h`、已安装的 unit 里没有 `ExecCondition`、那趟 refresh 的 outcome 是
+   `published`、timer 的 `NEXT` 是具体时刻、`--enable` 之后探针回到 `ok`。
 
 **installer 的失败路径与恢复基线（#2294）**：
 
@@ -668,7 +668,7 @@ scripts/install_node22_scheduler_file_provider_refresh.sh --rollback
   2. 记录 before-state：`od -c` `install-state/refresh.before` 和 `scheduler.before`（后者仅供参考，
      installer 不读它），四个 unit 的 `systemctl --user show -p UnitFileState -p ActiveState`。
   3. **Pre-flight**：`systemctl --user is-active nhms-scheduler-file-provider-refresh.service` 必须是
-     `inactive`。02:15-04:15Z 之外没有 tick 到期；若是 `failed`，先
+     `inactive`。refresh 只可能在 02:15Z 至约 08:45Z（timer 02:15Z 加至多 30 分钟抖动，再加 `TimeoutStartSec=21600`）之间在跑；若是 `failed`，先
      `systemctl --user reset-failed nhms-scheduler-file-provider-refresh.service`。每个动作的入口闸门
      只接受 `inactive`，这是原有行为，未改。
   4. `--rollback`：refresh units 读回等于基线（disabled/inactive、static/inactive），scheduler 未变。
@@ -770,7 +770,7 @@ calendar event **不会**在重新 `start` 时补跑，所以既没有失败日�
 | --- | --- | --- |
 | `NHMS_REFRESH_HEALTH_MAX_NEXT_DWELL_HOURS` | 36 | 144 |
 | `NHMS_REFRESH_HEALTH_MAX_MANIFEST_AGE_HOURS` | 120 | 144 |
-| `NHMS_REFRESH_HEALTH_STOPPED_DWELL_HOURS` | 6 | 24 |
+| `NHMS_REFRESH_HEALTH_STOPPED_DWELL_HOURS` | 8 | 24 |
 
 service unit **故意不带 `EnvironmentFile=`**：默认值就是 node-22 的生产值，多一个
 未入库的 env 文件就多一条能悄悄放松告警阈值的路径。真要改阈值，用 drop-in 并把
@@ -784,9 +784,9 @@ systemctl --user daemon-reload
 ```
 
 stopped-dwell 存在的原因就是上面 #1104 那个 stop/start 窗口：窗口期间 timer 的形状
-正好是探针要抓的 `enabled` + `inactive`，而 refresh oneshot 自己的
-`TimeoutStartSec=7200` 意味着合法窗口可以跑满两小时。6 小时是它的三倍，所以一次
-最长的合法手工发布也不会吵；而 08-28 那种停了六天的，过 dwell 后第一个 tick 就报。
+正好是探针要抓的 `enabled` + `inactive`。窗口里停掉 timer 之后要先等在跑的 refresh 结束，refresh oneshot 自己的
+`TimeoutStartSec=21600` 意味着这一等最长六小时。8 小时是它加上发布用的两小时，所以一次最长的合法手工发布也不会吵；
+窗口超过 8 小时就报 `timer_stopped`，直到 timer 被重新 start；而 08-28 那种停了六天的，过 dwell 后第一个 tick 就报。
 dwell 之内不是"静默放行"——其余信号照常定级，manifest 同时 stale 一样非零。
 
 Receipt 落在 `/scratch/frd_muziyao/nhms-prod/workspace/refresh-timer-health/receipts/latest.json`，
@@ -848,7 +848,7 @@ off-host 路由是另一条有自己认证与投递面的告警链路，另案�
 | unit | 比什么 | 为什么 |
 | --- | --- | --- |
 | `nhms-compute-scheduler.timer`、`nhms-scheduler-file-provider-refresh.timer` | `UnitFileState` **和** `is-active` | timer 的两个字段在安装期间都该是静止的 |
-| `nhms-compute-scheduler.service`、`nhms-scheduler-file-provider-refresh.service` | 只比 `UnitFileState` | 这两个是 timer 驱动的 oneshot，`is-active` 本就会自己翻（compute scheduler 每 5 分钟一次，refresh 在 02:15-04:15Z 窗口内）。比它会在没人动过的 unit 上误报，而误报会触发 abort + 回退，把 arming 变成重试循环 |
+| `nhms-compute-scheduler.service`、`nhms-scheduler-file-provider-refresh.service` | 只比 `UnitFileState` | 这两个是 timer 驱动的 oneshot，`is-active` 本就会自己翻（compute scheduler 每 5 分钟一次，refresh 在 02:15Z 至约 08:45Z（timer 02:15Z 加至多 30 分钟抖动，再加 `TimeoutStartSec=21600`）之间）。比它会在没人动过的 unit 上误报，而误报会触发 abort + 回退，把 arming 变成重试循环 |
 
 探针 installer 用 `set -Eeuo pipefail`：
 没有 `-E`，顶层的 ERR trap 不会被函数体继承，断言在函数里挂掉时脚本只会

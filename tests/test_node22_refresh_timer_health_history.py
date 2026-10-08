@@ -630,9 +630,10 @@ def test_the_history_listing_cap_is_above_the_runners_history_cap() -> None:
     ) in _probe_runbook_section()
 
 
-def test_the_stopped_dwell_is_three_times_the_refresh_oneshots_start_timeout() -> None:
-    """The runbook justifies the 6 h stopped-dwell as three times the refresh
-    oneshot's `TimeoutStartSec=`; read that value from the refresh unit."""
+def test_the_stopped_dwell_is_the_refresh_oneshots_start_timeout_plus_two_hours() -> None:
+    """The runbook justifies the 8 h stopped-dwell as the refresh oneshot's
+    `TimeoutStartSec=` (the longest wait for a refresh in flight) plus two hours
+    for the publish; read that value from the refresh unit."""
     refresh_service = (
         Path(__file__).resolve().parents[1]
         / "infra"
@@ -643,11 +644,15 @@ def test_the_stopped_dwell_is_three_times_the_refresh_oneshots_start_timeout() -
     assert len(timeouts) == 1, timeouts
     seconds = int(timeouts[0])
 
-    assert probe.DEFAULT_STOPPED_DWELL_HOURS * 3600 == 3 * seconds
-    assert seconds == 2 * 3600
+    assert probe.DEFAULT_STOPPED_DWELL_HOURS * 3600 == seconds + 2 * 3600
+    assert seconds == 6 * 3600
     section = _probe_runbook_section()
-    assert f"`TimeoutStartSec={seconds}` 意味着合法窗口可以跑满两小时" in section
-    assert f"{probe.DEFAULT_STOPPED_DWELL_HOURS} 小时是它的三倍" in section
+    assert f"`TimeoutStartSec={seconds}` 意味着这一等最长六小时" in section
+    assert f"{probe.DEFAULT_STOPPED_DWELL_HOURS} 小时是它加上发布用的两小时" in section
+    assert (
+        f"窗口超过 {probe.DEFAULT_STOPPED_DWELL_HOURS} 小时就报 `timer_stopped`，直到 timer 被重新 start"
+        in section
+    )
 
 
 def test_the_probe_units_start_timeout_comment_counts_every_receipt_read(

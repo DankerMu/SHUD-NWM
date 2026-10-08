@@ -18,4 +18,6 @@ StandardError=journal
 # PrivateTmp mount namespace. The provider's no-follow verifier must open the
 # root and walk each absolute path component, so this unit cannot use PrivateTmp.
 UMask=0077
-TimeoutStartSec=7200
+# The wrapper's wait for a running scheduler pass (at most 14400 s) plus the
+# 7200 s the refresh itself had before the wait existed.
+TimeoutStartSec=21600
