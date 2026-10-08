@@ -10,6 +10,7 @@
 - **共享选择器基础组件**：4.9 与 6.1 都需要它在移动形态下字号 ≥ 16px。两者不互相依赖：先合并者落地这条规则（只加移动形态字号，不改高度与桌面样式），后合并者只验证、不重复加。曲线窗起报时次触发器的高度与选项下限归 4.9。
 - **溢出 oracle**：不用 `document.scrollWidth == innerWidth`（外壳 `overflow-hidden`，恒真）；用“元素包围盒在视口 / 容器内”或具体滚动容器的 `scrollWidth` 对 `clientWidth`。
 - **本地验证命令**：`cd apps/frontend && corepack pnpm typecheck && corepack pnpm test && corepack pnpm run test:e2e:mocked-regression`。下文 Verify 只写该 task 新增的断言。
+- **治理门**：新增或改名 `apps/frontend/e2e/**` 文件的 task 另跑 `uv run pytest -q tests/test_entropy_audit_report_contract.py`。含宽 `page.route('**/api/v1/**')` 的文件，路径里必须有独立的 `mock` / `mocked` / `fixture` / `fixtures` / `deterministic` / `preview` / `visual` token 之一（按非字母数字切分；复数 `mocks` 不算），否则 Production Topology Hard Gate 变红（#2788 实测）。
 - **桌面回归**：每个实现 task 都必须让既有 `m11-overlay-collision.mocked.spec.ts` 的 1920 / 1440 / 1280 / 800 四个宽度不改期望值通过。
 - **live receipt**：改动展示端运行时代码的 task 合并前按 CLAUDE.md 既有规则在 node-27 出 live receipt；移动形态的专门实拍在 7.2。
 - **依赖**：`Depends on` 行列出的是必须先合并的 task；未列出的 task 之间可并行。
@@ -73,7 +74,7 @@
   - 显式 non-goal：气象代站开窗（1.4）；移动 project 下开窗；抽屉打开后再点其他要素。站点列表与站点序列的 mock 在本 task 落地但不被本 task 的 spec 断言（由 1.4 消费）。
   - Evidence floor：约定的本地验证命令全绿 + 新 spec 在点击被跳过时为红（证明窗口确由点击打开）+ 重跑生成脚本（报告其路径与命令）后 `cmp <再生成文件> <入库文件>` exit 0 + 对 `e2e/support/**` 与新 spec 的 strict `tsc --noEmit`（用仓库外的临时 tsconfig，报告确切命令）exit 0。不得把 `e2e/support/**` 加进 `tsconfig.node-playwright.json`：它的 include 清单被 `src/__tests__/riverClickTypecheck.test.ts` 钉住。无运行时代码变化，不需要 node-27 live receipt。
 
-- [ ] 1.4 气象代站窗测试夹具：新增独立的门控全局 `window.__nhmsStationLocateEvidence`，恰有一个方法 `locateRenderedStation({ stationId, lngLat })`（把相机移到该点、确认该点渲染着这个 `station_id` 的 `met-stations` 要素且未被遮挡、返回视口点与身份；只读、不调用产品回调、无门控不暴露）；既有 `window.__nhmsRiverClickEvidence` 不改，仍恰为三个方法。`e2e/support/` 导出 `openStationWindow(page)`（入参取自 1.3 的站点 mock）。新增 `e2e/m11-station-open.mocked.spec.ts`（桌面 project）；移动 project 下的首次开窗同样在 4.2。
+- [x] 1.4 气象代站窗测试夹具：新增独立的门控全局 `window.__nhmsStationLocateEvidence`，恰有一个方法 `locateRenderedStation({ stationId, lngLat })`（把相机移到该点、确认该点渲染着这个 `station_id` 的 `met-stations` 要素且未被遮挡、返回视口点与身份；只读、不调用产品回调、无门控不暴露）；既有 `window.__nhmsRiverClickEvidence` 不改，仍恰为三个方法。`e2e/support/` 导出 `openStationWindow(page)`（入参取自 1.3 的站点 mock）。新增 `e2e/m11-station-open.mocked.spec.ts`（桌面 project）；移动 project 下的首次开窗同样在 4.2。
 
   Depends on: 1.3
 
@@ -82,6 +83,26 @@
   **Suggested fixture level:** expanded - 在产品代码的地图组件里新增测试门控的全局钩子（共享入口）。
 
   **Minimal mergeable slice:** atomic - 站点定位钩子与唯一使用它的 `openStationWindow` 必须同 PR，否则钩子没有调用方、助手没有定位手段。
+
+  Triage（#2789）：Issue type: feature（测试门控的产品代码）｜ Fixture level: expanded（与上游建议一致；设计见 design.md D15 与 `specs/frontend-river-click-live-evidence`）｜ Blast radius: `M11MapLibreSurface` 是 `/` 的地图本体——钩子在未开门控时泄漏、改动既有 river-click 钩子，或给测试留下绕过真实点击的口子，都会破坏 live 证据车道的可信度；钩子定位不准则下游所有代站窗 e2e 建在假象上。
+  - Change surface：`src/components/map/M11MapLibreSurface.tsx`（安装 / 卸载新全局）、新的站点定位钩子模块（与 `src/lib/riverClickEvidence/` 并列或同目录，沿用其结构）、`e2e/support/`（`openStationWindow` 与所需 mock 补充）、新 spec `e2e/m11-station-open.mocked.spec.ts`。
+  - Governing invariant：进入产品点击路径的唯一方式是在钩子返回的视口点上做一次真实指针 / 触摸激活；钩子自身只读，不暴露 map ref 或通用查询面，不调用任何产品回调；未开 `window.__NHMS_E2E_HOOKS__ === true` 时两个全局都不存在。
+  - Sibling surfaces：(1) 既有 `window.__nhmsRiverClickEvidence`（恰三个方法、安装 / 清理的代次 token 逻辑不变）；(2) 产品点击目标解析（站点聚合 -> 站点 -> overlay 命中层 -> 流域，river 钩子与产品点击共用）——站点钩子判定“该点渲染着这个站点”须复用同一解析，不另写一套；(3) 钩子的安装 / 卸载生命周期（StrictMode 双挂载、组件卸载后全局被移除、过期实例的清理不得删掉新实例的全局）；(4) live 车道（`playwright.live-*.config.ts`、`playwright.river-click-*.ts`、`src/lib/riverClickEvidence/**`）不改；(5) 测试侧 `e2e/support/openRiverWindow.ts` 与 `riverWindow.mocked.ts`（1.3 的站点列表 / 站点序列 mock 在此首次被真实请求打到，运行时形状须对上消费方）。
+  - Must preserve（源码扫描）：`src/__tests__/riverClickPhase2Closure.test.ts` 取 `M11MapLibreSurface.tsx` 里第一个门控 `useEffect` 的文本，断言其中含 `createRiverClickEvidenceHook({ controller, pointerCapture })` 且不含 `onOverlayClick`。站点钩子的安装要么并入该 effect，要么放在它之后；放在它之前即红。
+  - Must preserve：`src/components/map/__tests__/M11MapLibreSurfaceHook.test.tsx`、`src/__tests__/riverClickRealClick.test.ts`、`riverClickPhase2Closure.test.ts`、`riverClickLiveDisplayContract.test.ts`、`riverClickTypecheck.test.ts` 不改期望通过（其中有对源码文本与 tsconfig include 清单的钉死断言——新模块若放进 `src/lib/riverClickEvidence/` 会被 `tsconfig.node-playwright.json` 的 glob 收进去，须确认这些测试仍绿；不得为了过测试改它们的期望）；未开门控时普通指针、hover、选中、弹窗与请求行为不变；`src/test/maplibreStub.tsx` 的既有用法不被破坏。
+  - Risk pack「Public API / entry」selected：新增全局钩子 -> vitest：开门控时全局恰有一个方法 `locateRenderedStation`；未开门控时为 undefined；river 钩子仍恰三个方法。e2e：不设门控加载 `/` 后两个全局均为 undefined。
+  - Risk pack「Auth / 边界」selected（测试门控不得成为产品后门）-> 钩子对象上除该方法外无其他可枚举属性、返回值只含视口点与站点身份（无 map / feature 对象引用）；vitest 断言调用钩子不触发任何产品回调（选中、开窗、请求）。
+  - Risk pack「Concurrency / shared state / ordering」selected：安装 / 清理生命周期 -> vitest 覆盖卸载后全局被移除、重挂载后仍可用、过期清理不删新实例。
+  - Risk pack「Error handling」selected -> 未渲染的站点 id、站点图层未开、坐标非法、地图未就绪超时、该点被其他元素遮挡：各自返回带稳定错误码的失败且不返回点（vitest 逐项；e2e 至少覆盖“未渲染的站点 id”）。
+  - Risk pack「Schema / field names」selected：站点要素属性与站点 mock -> 真实 `met-stations` 源属性为 `station_id` / `station_name` / `basin_id`（`src/pages/m11/useStationLayer.ts`）；站点列表与站点序列 mock 的形状对上 `bootstrap.ts` 与 `validateHydroMetStationSeriesIdentity`，代站窗曲线到达已加载状态即为证据。
+  - Risk pack「Legacy compatibility」selected -> 上面 Must preserve 列出的五个既有测试文件零 diff 且通过。
+  - 未选：File IO、Resource limits、Release、Documentation——无新二进制夹具（站点来自 GeoJSON 源而非瓦片）、无新依赖。
+  - 实现须知：(a) 含宽 `page.route('**/api/v1/**')` 的 e2e 支撑文件，路径里必须有独立的 `mock` / `mocked` / `fixture` 等 token（治理门 `broad-e2e-api-mock`；复数 `mocks` 不算），否则 Production Topology Hard Gate 变红；(b) 站点可能被聚合成 cluster，钩子移动相机后须确认渲染的是单个站点而不是聚合点；(c) 站点图层默认关（`src/lib/m11/queryState.ts`），且只有要素数 > 0 时才显示：`openStationWindow` 用产品 URL 状态 `?metStations=1` 打开它，并先等站点层就绪（站点要素已渲染）再调钩子；Error handling 的“站点图层未开”即不带该参数时的状态。(d) 新模块只用相对 import（`tsconfig.node-playwright.json` 无 `paths`、无 jsx）；产品点击目标解析 `resolveM11ClickTarget` 像 river 钩子那样由 `M11MapLibreSurface` 注入，不在模块里 import `@/…`。
+  - “曲线已加载”的 oracle：`m11-station-popup-loaded` 与至少一个 `m11-station-variable-<变量>-chart` 可见，`m11-station-popup-partial` 与 `m11-station-panel-refreshing` 不存在（GFS、IFS 两源都成功）。决定能否出图的消费方除 `validateHydroMetStationSeriesIdentity` 外，还有 `src/lib/hydroMet/stationSeries.ts` 的逐变量图表校验（unit、metadata、quality_flag、limit）——1.3 的站点序列 mock 若过不了它，在本 task 修 mock。
+  - Seams under test：浏览器里的 `window.__nhmsStationLocateEvidence` 与真实点击后的代站窗；vitest 里的钩子模块（用既有 maplibre 桩）。
+  - Non-goals：移动 project 下开窗（4.2）；抽屉；对 river 钩子的任何改动；live 车道接入站点钩子。
+  - Review focus：(1) 钩子确为只读且无产品回调；(2) 未开门控零暴露；(3) 复用产品点击目标解析而非另写；(4) river 钩子及其测试零改动；(5) 跳过真实点击时 spec 为红。
+  - Evidence floor：约定的本地验证命令全绿 + `corepack pnpm run check:types` exit 0（CI 另跑它）+ `uv run pytest -q tests/test_entropy_audit_report_contract.py` 通过 + 新 vitest 与新 e2e 先红后绿 + 跳过点击为红；本 task 改展示端运行时代码，合并前在 node-27 出 live receipt（PR 构建对 live API：不设门控时两个全局均不存在，桌面布局 oracle 不回归）。
 
 ## 2. 移动形态基座
 
