@@ -13,7 +13,7 @@
 - [x] 2.1 Local: `uv run ruff check .`; `tests/test_slurm_gateway_deployment_contract.py`; the suites that
       read `file-provider-refresh.md` and `gateway-and-services.md`; selector meta-guards after staging;
       markdown lint of the two runbooks; `openspec validate gateway-rollout-pass-guard --strict --no-interactive`.
-- [ ] 2.2 CI green on the PR.
+- [x] 2.2 CI green on the PR.
 - [x] 2.3 node-22 read-only reading during a pass (2026-10-08 08:03Z, in the proposal).
       The new rollout guard block alone, piped to node-22's bash 5.2.21 at 08:30Z while a pass was
       `activating` (query only): printed the two instruction lines with the state and exited 1.
