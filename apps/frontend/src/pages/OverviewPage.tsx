@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 
+import { RegionCrashProbe } from '@/components/layout/RegionCrashProbe'
 import { RegionErrorBoundary } from '@/components/layout/RegionErrorBoundary'
 import {
   M11MapLibreSurface,
@@ -59,6 +60,12 @@ const CONTROL_BAR_SELECTOR = '[data-testid="m11-bottom-control-bar"]'
 const LEGEND_REGION_DESKTOP_CLASS = 'absolute bottom-[7.5rem] right-4 z-[120]'
 /** 地图控件区域（图层 / 底图 / 运维入口）兜底在桌面形态的定位（与桌面图层面板同位）。 */
 const MAP_CONTROLS_REGION_DESKTOP_CLASS = 'absolute left-4 top-4 z-[120]'
+/**
+ * 启动器列内两处兜底（地图控件 / 图例）在移动形态的类：只收纵向内边距，仍在流、不加定位类。
+ * 默认的 `py-2` 让兜底块高 48px，比 44px 的启动器高 4px——矮视口横屏下四项的列高正好贴到控制条顶边
+ * （750×342 余量 0）；`py-1` 把它收到不高于一个启动器。
+ */
+const IN_COLUMN_FALLBACK_MOBILE_CLASS = 'py-1'
 
 /**
  * 单页全屏地图展示端（M26）：整个展示端 = 一张铺满视口的地图 + 玻璃质感浮层。
@@ -180,14 +187,16 @@ function M11FullscreenMap({
   const toggleBasemap = useCallback(() => toggle('basemap'), [toggle])
   const toggleLegend = useCallback(() => toggle('legend'), [toggle])
   // 一个边界覆盖图层、底图与运维入口。非错误态不加包裹元素：移动形态下三个子节点直接成为
-  // 启动器列的 flex 子项，兜底块就地落在列里（专门的移动定位归 3.6）。
+  // 启动器列的 flex 子项，兜底块就地落在列里。
+  // 各边界里的 `RegionCrashProbe` 是测试门控的崩溃开关（D8）：不渲染 DOM，无门控时什么都不读。
   const mapControlsRegion = (
     <RegionErrorBoundary
       region="地图控件"
       testId="region-error-map-controls"
       resetKeys={[]}
-      className={mobile ? undefined : MAP_CONTROLS_REGION_DESKTOP_CLASS}
+      className={mobile ? IN_COLUMN_FALLBACK_MOBILE_CLASS : MAP_CONTROLS_REGION_DESKTOP_CLASS}
     >
+      <RegionCrashProbe region="map-controls" />
       <M11FloatingLayerSwitcher
         layer={state.layer}
         metStations={state.metStations}
@@ -216,9 +225,10 @@ function M11FullscreenMap({
       region="图例"
       testId="region-error-legend"
       resetKeys={[]}
-      // 移动形态下边界在启动器列内，兜底就地落在列里（专门的移动定位归 3.6）。
-      className={mobile ? undefined : LEGEND_REGION_DESKTOP_CLASS}
+      // 移动形态下边界在启动器列内，兜底就地落在列里（在流，不加定位类）。
+      className={mobile ? IN_COLUMN_FALLBACK_MOBILE_CLASS : LEGEND_REGION_DESKTOP_CLASS}
     >
+      <RegionCrashProbe region="legend" />
       <M11FloatingLegend
         layer={state.layer}
         layers={layers}
@@ -269,6 +279,7 @@ function M11FullscreenMap({
           resetKeys={[state.source, state.cycle]}
           className="absolute bottom-10 left-1/2 z-[115] -translate-x-1/2"
         >
+          <RegionCrashProbe region="control-bar" />
           <M11BottomControlBarRegion input={controlBarInput} onQueryChange={onQueryChange} />
         </RegionErrorBoundary>
       ) : null}
@@ -629,6 +640,8 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
         resetKeys={[selectedSegmentId, selectedStationId]}
         className="absolute left-1/2 top-24 z-[130] -translate-x-1/2"
       >
+        {/* 曲线探针只在有曲线面板渲染时挂载：没有窗打开时设 `curve` 不产生兜底。 */}
+        {riverForecastPanel || stationForecastPanel ? <RegionCrashProbe region="curve" /> : null}
         {riverForecastPanel}
         {stationForecastPanel}
       </RegionErrorBoundary>
