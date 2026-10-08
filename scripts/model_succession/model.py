@@ -43,8 +43,12 @@ MIRROR_STATE_INDEX_KEY = "scheduler/state-index/index-last.json"
 TIMER_UNIT = "nhms-compute-scheduler.timer"
 SERVICE_UNIT = "nhms-compute-scheduler.service"
 REFRESH_UNIT = "nhms-scheduler-file-provider-refresh.service"
-# The refresh unit's TimeoutStartSec is 7200 s; the blocking start is given a little longer.
-REFRESH_START_TIMEOUT_SECONDS = 7500
+# The refresh unit's TimeoutStartSec (21600 s: its wrapper's wait of at most 14400 s
+# for a running scheduler pass, plus 7200 s for the refresh) plus 300 s, so the
+# blocking start never gives up on a start the unit is still allowed to finish.
+# The tool starts the refresh only after it has seen the scheduler service not
+# running, so its own starts do not wait for a pass.
+REFRESH_START_TIMEOUT_SECONDS = 21900
 DEFAULT_PASS_WAIT_SECONDS = 14400
 
 KIND_RECALIBRATION = "recalibration"

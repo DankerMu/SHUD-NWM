@@ -5744,9 +5744,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # (`test_systemd_refresh_contract_is_db_free_daily_and_scheduler_independent`)
     # `read_text`s BOTH files: on the `.service` it asserts
     # `ExecStart=/scratch/frd_muziyao/NWM/scripts/scheduler_file_provider_refresh_once.sh`,
-    # `TimeoutStartSec=7200`, that `PrivateTmp=true` is ABSENT,
-    # `UnsetEnvironment=DATABASE_URL PIPELINE_DATABASE_URL`, and the
-    # `Before=` / `ExecCondition=` scheduler-independence pair (:3599-3611); on
+    # `TimeoutStartSec=21600`, that `PrivateTmp=true` is ABSENT,
+    # `UnsetEnvironment=DATABASE_URL PIPELINE_DATABASE_URL`, `Before=` on the
+    # scheduler service and that `ExecCondition` is ABSENT (:3599-3611); on
     # the `.timer` it asserts `OnCalendar=*-*-* 02:15:00 UTC`,
     # `RandomizedDelaySec=30m` and `Persistent=false` (:3603-3604, :3633).
     # Both are outside the `#2173` glob `infra/systemd/nhms-node27-*.service`
@@ -5758,7 +5758,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # Editing this service's selector list without editing the probe's would
     # red that assertion, so the probe suite is a literal reader of this path.
     # It also reads this unit's `TimeoutStartSec=` and pins the probe's default
-    # stopped-dwell at three times it.
+    # stopped-dwell at it plus two hours.
     # #2532: the probe suite is five partitions; the row carries all of them.
     PathTestRule(
         "infra/systemd/nhms-scheduler-file-provider-refresh.service",

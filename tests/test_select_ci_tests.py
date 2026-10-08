@@ -662,8 +662,8 @@ def test_node22_unit_files_select_their_owner_suites(unit: str, owners: frozense
 
     `tests/test_scheduler_refresh_deployment_contract.py::test_systemd_refresh_contract_is_db_free_daily_and_scheduler_independent`
     `read_text`s both files and asserts the `.service`'s wrapper `ExecStart`,
-    `TimeoutStartSec=7200`, the absence of `PrivateTmp=true` and the
-    `Before=`/`ExecCondition=` scheduler-independence pair, plus the `.timer`'s
+    `TimeoutStartSec=21600`, the absence of `PrivateTmp=true` and of
+    `ExecCondition`, `Before=` on the scheduler service, plus the `.timer`'s
     `OnCalendar`/`RandomizedDelaySec`/`Persistent=false` schedule. Before #2188 a
     unit-only diff selected NOTHING, so all of that degraded to a zero-assertion
     `--collect-only` smoke. Parametrized rather than looped so each unit reds

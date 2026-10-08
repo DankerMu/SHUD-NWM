@@ -12,7 +12,8 @@
 # UnitFileState and is-active are compared.  For the two timer-driven ONESHOT
 # services only UnitFileState is: a oneshot's is-active legitimately flips on
 # its own cadence -- the compute scheduler every 5 minutes, the refresh service
-# inside its 02:15-04:15Z window -- so comparing it would abort on a unit nobody
+# between 02:15Z and about 08:45Z (timer 02:15Z, up to 30 min of jitter, then
+# TimeoutStartSec=21600) -- so comparing it would abort on a unit nobody
 # touched, and an installer that rolls back on that false positive turns arming
 # into a retry loop.  UnitFileState is what "unchanged" means for a unit whose
 # activity is driven by its timer.

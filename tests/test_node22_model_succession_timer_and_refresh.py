@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -460,8 +461,11 @@ def test_a_refresh_start_that_does_not_return_in_time_is_a_failure(
 ) -> None:
     from scripts.model_succession import model, scheduler
 
-    # A little longer than the unit's own TimeoutStartSec of 7200 s.
-    assert scheduler.REFRESH_START_TIMEOUT_SECONDS == model.REFRESH_START_TIMEOUT_SECONDS == 7500
+    # The unit's own TimeoutStartSec, read from the unit file, plus 300 s.
+    unit = Path(__file__).resolve().parents[1] / "infra/systemd" / model.REFRESH_UNIT
+    (unit_timeout,) = re.findall(r"^TimeoutStartSec=(\d+)$", unit.read_text(), re.M)
+    assert scheduler.REFRESH_START_TIMEOUT_SECONDS == model.REFRESH_START_TIMEOUT_SECONDS
+    assert model.REFRESH_START_TIMEOUT_SECONDS == int(unit_timeout) + 300 == 21900
     space.run_steps(*STEPS[:5])
     space.systemctl.configure(refresh={"hang_seconds": 20})
     monkeypatch.setattr(scheduler, "REFRESH_START_TIMEOUT_SECONDS", 0.5)

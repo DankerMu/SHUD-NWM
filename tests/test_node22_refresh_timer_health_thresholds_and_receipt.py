@@ -62,7 +62,7 @@ def test_r10_defaults_are_the_documented_thresholds() -> None:
 
     assert thresholds.max_next_dwell_hours == 36
     assert thresholds.max_manifest_age_hours == 120
-    assert thresholds.stopped_dwell_hours == 6
+    assert thresholds.stopped_dwell_hours == 8
 
 
 def test_r10_the_threshold_ceilings_are_derived_from_the_consumer_bound() -> None:
@@ -339,7 +339,7 @@ def test_r14_receipt_is_private_bounded_and_carries_the_required_fields(
     assert payload["unit"] == UNIT
     assert payload["generated_at"] == "2026-09-12T15:34:00Z"
     assert (payload["max_next_dwell_hours"], payload["max_manifest_age_hours"]) == (36, 120)
-    assert payload["stopped_dwell_hours"] == 6
+    assert payload["stopped_dwell_hours"] == 8
     # No environment value other than the integer thresholds and the unit name:
     # in particular neither receipt path nor the systemctl binary path leaks.
     serialized = target.read_text()

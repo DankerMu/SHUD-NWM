@@ -674,7 +674,7 @@ def test_r11b_the_next_dwell_threshold_is_effective_through_its_env_path(
 def test_r11b_the_stopped_dwell_threshold_is_effective_through_its_env_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Idle 3 h: inside the 6 h default dwell, past a 2 h one.
+    """Idle 3 h: inside the 8 h default dwell, past a 2 h one.
 
     Note the direction: a SHORTER dwell makes the probe noisier, never quieter.
     A longer one is capped at one refresh cadence (`MAX_STOPPED_DWELL_HOURS`,

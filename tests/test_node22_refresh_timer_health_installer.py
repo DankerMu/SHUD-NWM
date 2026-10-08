@@ -184,8 +184,9 @@ def test_r15_a_oneshot_flipping_active_mid_run_does_not_fire_the_assertion(
     """The paired negative case.
 
     A timer-driven oneshot's `is-active` legitimately flips on its own cadence
-    -- the compute scheduler every 5 minutes, the refresh service inside its
-    02:15-04:15Z window.  Comparing it would make the assertion fire on a unit
+    -- the compute scheduler every 5 minutes, the refresh service between
+    02:15Z and about 08:45Z (timer 02:15Z, up to 30 min of jitter, then
+    TimeoutStartSec=21600).  Comparing it would make the assertion fire on a unit
     nobody touched, and an installer that aborts and rolls back on that false
     positive turns arming into a retry loop.
     """

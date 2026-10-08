@@ -104,7 +104,7 @@ def test_systemd_refresh_contract_is_db_free_daily_and_scheduler_independent() -
     installer = (root / "scripts/install_node22_scheduler_file_provider_refresh.sh").read_text()
 
     assert "ExecStart=/scratch/frd_muziyao/NWM/scripts/scheduler_file_provider_refresh_once.sh" in service
-    assert "TimeoutStartSec=7200" in service
+    assert "TimeoutStartSec=21600" in service
     assert "PrivateTmp=true" not in service
     assert "no-follow verifier must open" in service
     assert "OnCalendar=*-*-* 02:15:00 UTC" in timer
@@ -116,14 +116,19 @@ def test_systemd_refresh_contract_is_db_free_daily_and_scheduler_independent() -
     # never fail: a oneshot pass is `activating`, not `active`); the wrapper
     # waits for a running pass, and `Before=` holds the next one meanwhile.
     assert "ExecCondition" not in service
-    assert re.findall(r"^TimeoutStartSec=.*$", service, re.M) == ["TimeoutStartSec=7200"]
+    assert re.findall(r"^TimeoutStartSec=.*$", service, re.M) == ["TimeoutStartSec=21600"]
+    # One start timeout covers the wait and the refresh: the wait bound plus
+    # the 7200 s the refresh had before the wait existed. Read from both files.
+    (start_timeout,) = re.findall(r"^TimeoutStartSec=(\d+)$", service, re.M)
+    (wait_bound,) = re.findall(r"^scheduler_wait_bound_seconds=(\d+)$", wrapper, re.M)
+    assert int(start_timeout) >= int(wait_bound) + 7200, (start_timeout, wait_bound)
     assert "is-active --quiet" not in wrapper
     assert '"$systemctl_bin" --user is-active "$scheduler_unit"' in wrapper
     wrapper_lines = wrapper.splitlines()
     for fixed_assignment in (
         "systemctl_bin=/usr/bin/systemctl",
         "scheduler_unit=nhms-compute-scheduler.service",
-        "scheduler_wait_bound_seconds=5400",
+        "scheduler_wait_bound_seconds=14400",
         "scheduler_wait_poll_seconds=15",
     ):
         assert wrapper_lines.count(fixed_assignment) == 1, fixed_assignment
@@ -526,7 +531,7 @@ def _write_wrapper_execution_fixture(
     }
     if wait_bound_and_poll is not None:
         bound, poll = wait_bound_and_poll
-        substitutions["scheduler_wait_bound_seconds=5400\n"] = f"scheduler_wait_bound_seconds={bound}\n"
+        substitutions["scheduler_wait_bound_seconds=14400\n"] = f"scheduler_wait_bound_seconds={bound}\n"
         substitutions["scheduler_wait_poll_seconds=15\n"] = f"scheduler_wait_poll_seconds={poll}\n"
     text = (root / "scripts/scheduler_file_provider_refresh_once.sh").read_text()
     for needle, replacement in substitutions.items():
@@ -653,6 +658,27 @@ def test_wrapper_refuses_when_systemctl_is_missing_without_refreshing(tmp_path: 
     assert queries == [] and sleeps == []
     assert "printed ''" in result.stderr
     assert str(tmp_path / "fake-bin" / "no-such-systemctl") in result.stderr
+
+
+def test_wrapper_waits_out_a_pass_longer_than_the_former_bound_then_refreshes(tmp_path: Path) -> None:
+    # The wrapper's own bound and poll, not substituted ones: 361 answers of
+    # `activating` are 5415 s of waiting, past the former bound of 5400 s
+    # (node-22, 2026-10-08: a pass of 126 minutes lost that day's refresh).
+    wrapper, marker = _write_wrapper_execution_fixture(
+        tmp_path, scheduler_states=("activating",) * 361 + ("inactive",)
+    )
+
+    result, queries, sleeps = _run_wrapper_with_fake_sleep(tmp_path, wrapper)
+
+    assert result.returncode == 0, result.stderr.splitlines()[-1:]
+    assert marker.exists()
+    assert queries == [_SCHEDULER_QUERY] * 362
+    assert sleeps == ["15"] * 361 and sum(map(int, sleeps)) > 5400
+    wait_lines = result.stderr.splitlines()
+    assert len(wait_lines) == 91, wait_lines[-1:]
+    assert "is activating" in wait_lines[-1] and "waited 5400 s" in wait_lines[-1]
+    assert "refusing" not in result.stderr
+    assert result.stdout.rstrip().endswith("-m scripts.scheduler_file_provider_refresh --dry-run")
 
 
 def test_wrapper_gives_up_when_the_pass_outlasts_the_wait_bound(tmp_path: Path) -> None:

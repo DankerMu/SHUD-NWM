@@ -6,7 +6,7 @@ repo=/scratch/frd_muziyao/NWM
 # overrides: the bound plus a refresh must fit the unit's start timeout.
 systemctl_bin=/usr/bin/systemctl
 scheduler_unit=nhms-compute-scheduler.service
-scheduler_wait_bound_seconds=5400
+scheduler_wait_bound_seconds=14400
 scheduler_wait_poll_seconds=15
 env_file="$repo/infra/env/compute.scheduler-provider-refresh.env"
 db_selectors=(
