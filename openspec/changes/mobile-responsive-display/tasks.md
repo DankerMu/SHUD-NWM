@@ -182,7 +182,7 @@
   - Review focus：(1) 内边距无条件应用、四边齐全、引用的是对应方向的 `env()`；(2) 根节点为 border-box，内边距不改变其外尺寸；(3) meta 既有两项保留；(4) 断言读的是规则文本；(5) 没有往别的 task 的 spec 追加用例，三个 must-preserve 测试文件零 diff。
   - Evidence floor：约定的本地验证命令 + `check:types` + 治理门测试全绿；新 e2e 先红后绿并附上述两条变异证据；node-27 live receipt（PR 的生产构建对 live API：既有脚本的桌面 oracle 不回归；编排者用仓库外的一次性探针量取 meta、四边规则文本与计算内边距，记入 receipt）。
 
-- [ ] 2.4 头部压缩：`SiteHeader` 在移动形态为 48px 单行（徽标缩小、标题单行截断、不渲染英文副标题）；桌面形态不变。不改任何导航高度 token。新增 `e2e/m11-header.mobile.mocked.spec.ts` 与 `e2e/m11-header-desktop.mocked.spec.ts`。
+- [x] 2.4 头部压缩：`SiteHeader` 在移动形态为 48px 单行（徽标缩小、标题单行截断、不渲染英文副标题）；桌面形态不变。不改任何导航高度 token。新增 `e2e/m11-header.mobile.mocked.spec.ts` 与 `e2e/m11-header-desktop.mocked.spec.ts`。
 
   Depends on: 1.1, 2.1, 2.5
 
@@ -191,6 +191,24 @@
   **Suggested fixture level:** expanded - `SiteHeader` 由 `AppShell` 在所有路由渲染，头部变矮会改变每个页面的内容区高度。
 
   **Minimal mergeable slice:** atomic - 一个组件的一组移动样式，头部高度与标题单行互相决定，无可独立交付的子集。
+
+  Triage（#2816）：Issue type: feature ｜ Fixture level: expanded（与上游建议一致；设计见 design.md D4，规格见 `specs/mobile-viewport-shell` 的「The site header is compact in mobile form」）｜ Blast radius: 全站——`SiteHeader` 由 `AppShell` 在每个路由渲染，头部高度决定每个页面内容区的高度；写错会让桌面头部变矮（品牌口径回归），或让移动形态头部换行把内容区再压掉一截。
+  - Change surface：只有 `src/components/layout/SiteHeader.tsx` 的 className（追加 `mobile:` 变体类）、两个新 spec、它们共用的新助手 `e2e/support/siteHeader.mocked.ts`、必要时一个新 vitest 文件。`AppShell.tsx`、`src/index.css`、`useMobileForm.ts`、任何高度 token 零 diff。
+  - 实现口径（裁定）：纯 CSS——在既有元素上**追加** `mobile:` 变体类（`src/index.css` 的自定义变体，2.1 已落地），不引入 `useMobileForm()`、不按形态分支 JSX。理由：头部是首屏元素，CSS 变体没有首帧闪动；既有 `SiteHeader.test.tsx` 钉着 `h-[84px]`、`text-[28px]`、`font-extrabold`、`h-14`、`object-contain` 等桌面类，追加类不动它们。“不渲染英文副标题”因此落为移动形态下 `display: none`（不占位、对辅助技术不可见）；e2e 的 oracle 是“副标题不可见”（`toBeHidden`），不是“不在 DOM”。
+  - Governing invariant：头部高度只由视口形态决定——移动形态恒 48px 单行、桌面形态恒 84px，对所有路由一致；头部内任何元素都不得把头部撑高或溢出头部的包围盒。
+  - Sibling surfaces：(1) 头部内全部四个元素——徽标（移动 32px）、标题（移动 16–18px、单行截断，其容器须能收缩：`min-w-0`）、英文副标题（移动隐藏）、合作单位条；(2) 合作单位条的**显示规则不改**（仍是 `lg` 以上才显示），但移动形态经高度臂可以与 `lg` 同时成立（例如 1280×400 的窗口）：此时 56px 高的图片会溢出 48px 头部，须在移动形态收它的高度使其留在头部包围盒内——这是“头部不被撑破”的一部分，不是改显示规则；(3) `AppShell` 根容器的安全区上内边距（2.3）：头部在内边距之下，48px 不含安全区；(4) 依赖头部高度的既有元素都按实测几何推算、不钉 84：`main` 左缘垂直居中的角色切换器（2.5）、启动器列与展开面板限高（3.2 / 3.3）、控制条；(5) `--m11-nav-height` 与 `m11VisualTokens` 不碰（D4）。
+  - Must preserve：桌面形态（宽 ≥ 768 且高 ≥ 500）头部 84px、标题 28px extrabold、副标题可见、徽标 48px、合作单位条 `lg` 以上 56px 高——既有 `src/components/layout/__tests__/SiteHeader.test.tsx` 零 diff 通过；全部既有 vitest 文件与全部既有 e2e spec 零 diff 且通过，其中头部变矮后仍须原样通过的移动 spec：`m11-baseline.mobile`、`m11-role-selector.mobile`（触发器不与头部、控制条相交）、`m11-zoom-control.mobile`、`m11-legend-launcher.mobile`、`m11-layer-basemap-launchers.mobile`，以及桌面 project 里用 `setViewportSize` 进入移动形态的 `m11-shell-viewport`、`m11-shell-safe-area`、`m11-viewport-form`、`m11-launchers-desktop`、`m11-overlay-collision` 的 520 行；碰撞 spec 的 1920 / 1440 / 1280 / 800 四个宽度不改期望值通过。对多出的 36px 敏感的既有断言有两处，都是矮视口横屏“必须先溢出”的前置：`m11-legend-launcher.mobile` 的图例面板（内容约 347px 对可用约 222px，安全）与 `m11-layer-basemap-launchers.mobile` 的图层面板（844×390 下内容 240px 对预计可用约 220px，余量约 20px）。若某条既有断言因头部 48px 变红，停下报告确证的原因，不改那个 spec。
+  - Risk pack「Public API / entry」selected：全路由可见的头部 -> 移动 spec `e2e/m11-header.mobile.mocked.spec.ts`（三个移动 project）：`/` 上 `header`（`role="banner"`）包围盒高 48（±0.5）、y=0；标题元素可见且渲染高度为一行（标题包围盒高 ≤ 其计算 `line-height` 的 1.5 倍，且 `white-space: nowrap`）、计算字号在 16–18px；副标题 `toBeHidden`；徽标可见且 32×32；`m11-fullscreen-map` 顶边 y=48（±0.5）、底边等于视口高；`/ops` 用例的顺序钉死（auth store 不持久化，`goto` 会把角色复位成 viewer；顺序同 `m11-role-selector.mobile` 既有用例）：`goto('/ops')` -> 「权限不足」可见 -> `setRole('operator')` -> 标题「内部诊断」可见 -> 再量头部 = 48。桌面 spec `e2e/m11-header-desktop.mocked.spec.ts`（桌面 project，`setViewportSize`）：`/` 在 768×1024 与 1280×900 下头部 84、副标题可见、标题计算字号 28px、徽标 48×48；`/ops`（operator，标题「内部诊断」）、`/monitoring`（operator，标题「监控工作台」）、`/system/model-assets`（model_admin，标题「模型资产管理」）在 1280×900 下头部 84——每条都是先 `goto`、再 `setRole`、断言到授权后的页面标题可见之后才量头部；`/` 在 520×900 下头部 48（窄桌面窗口走移动形态）。
+  - Mock 来源：这些路由需要非只读的 runtime-config 与各页自己的 API mock；既有的都是 spec 私有函数（`m11-role-selector.mobile` 的 `mockApi`、`monitoring.mocked.spec.ts` 的 `mockControlledOpsApi` / `mockModelAssetsApi`），既有 spec 零 diff，所以两个新 spec 共用一个新助手 `e2e/support/siteHeader.mocked.ts`（文件名含独立的 `mocked` token），只 mock 到“授权后的页面标题能渲染”为止。
+  - Risk pack「Resource limits / 溢出」selected：窄宽与高度臂 -> 移动 spec 一条用例内 `setViewportSize(320, 568)`：头部仍 48、标题单行、标题包围盒右边 ≤ 头部右边（截断而非溢出）、徽标完整可见；桌面 spec 一条 `/` 在 1280×400（高度臂 + `lg`）：头部 48，合作单位条 `toBeVisible`（1280 满足 `lg`，显示规则不改——用 `mobile:hidden` 把它藏掉即违反 non-goal）且其包围盒完全在头部包围盒内；`/` 在 1280×900 下合作单位条可见且高 56（显示规则未变的证据）。
+  - Risk pack「Legacy compatibility」selected -> Must preserve 所列各项；PR 描述贴出 `git diff --stat --diff-filter=MDR origin/master -- apps/frontend/e2e 'apps/frontend/src/**/__tests__/**'`（期望输出为空）证明既有测试零 diff。
+  - Risk pack「Concurrency / shared state」not selected：纯 CSS，无状态；形态往返由媒体查询即时决定（520×900 用例与既有 `m11-viewport-form` 覆盖形态信号）。
+  - Risk pack「Documentation」not selected：`docs/spec/06B_frontend_ui_design_spec.md` §8 已在 1.2 写明移动形态头部 48px 单行，无需再改；§143 的“高度：84px”是桌面口径，仍成立。
+  - 未选：File IO、Auth、Schema、Release、Config、Error handling。
+  - Seams under test：浏览器里的 `header` 包围盒、标题 / 副标题 / 徽标 / 合作单位条的可见性与计算样式、地图区顶边。vitest 不新增形态断言（jsdom 不算媒体查询）；若新增 vitest，只钉“桌面类仍在、`mobile:` 类已加”。
+  - Non-goals：任何导航高度 token；合作单位条的显示规则；头部渐变是否铺进安全区上内边距带（7.3 真机清单，已留言 #2818）；`/ops` 等页面内容区自身的移动布局（6.x）；利用多出的 36px 重排地图浮层（各自的 task）。
+  - Review focus：(1) 桌面类逐字保留、只做追加；(2) 头部在移动形态下不可能被任何子元素撑高（含 1280×400 的合作单位条、320 宽的标题）；(3) 既有移动 spec 零 diff 通过，没有因头部变矮而被改写；(4) 每条移动断言在三个移动 project 下都成立，没有按 project 跳过；(5) 没有碰 token 与 `AppShell`。
+  - Evidence floor：约定的本地验证命令 + `check:types` + 治理门测试全绿；新 spec 的 strict `tsc --noEmit` exit 0；两个新 spec 先红后绿（红：对 `origin/master` 的 `src/`；桌面 spec 里改动前本就成立的 84px 断言可以先绿，须在报告里点名哪些用例是红的），移动 spec 三个移动 project 各非零 passed，`--repeat-each=5` 无 flaky；改展示端运行时代码，合并前出 node-27 live receipt（PR 的生产构建对 live API：390×664 / 750×342 / 844×390 下头部 48、副标题不可见、地图区顶边 y=48、三个启动器与控制条仍在地图区内；1280×900 与 768×1024 下头部 84、副标题可见——这些视口的量测来自编排者在仓库外的一次性探针；`scripts/node27_display_v2_browser_evidence.mjs` 对头部 ≠ 84 与控制条 ≠ 64 硬失败，只按它默认的 1920×1080 运行、零 diff、不回归）。
 
 - [x] 2.5 开发用角色切换器的移动位置：role override 开启时，移动形态下把 `AppShell` 的角色切换器收成宽不超过 56px 的紧凑触发器，移到 `main` 左边缘、垂直居中，层级高于地图浮层，保持可见可操作；桌面形态位置不变；未开启 role override 时两种形态都不渲染。在 `e2e/support/` 提供 `setRole(page, role)` 助手。新增 `e2e/m11-role-selector.mobile.mocked.spec.ts`。
 
