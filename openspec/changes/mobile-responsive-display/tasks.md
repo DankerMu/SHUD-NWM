@@ -158,7 +158,7 @@
   - Evidence floor：约定的本地验证命令 + `check:types` + 治理门测试全绿；新 e2e 先红后绿；node-27 live receipt（PR 构建对 live API：既有脚本 `scripts/node27_display_v2_browser_evidence.mjs` 的桌面 oracle 不回归；四个视口的根节点包围盒由编排者用仓库外的一次性探针脚本量取并记入 receipt，不入库、不放宽 PR 边界）。
   - spec 文件归属：新 spec `e2e/m11-shell-viewport.mocked.spec.ts` 文件名不含 `.mobile.`，在桌面 project 里用 `setViewportSize` 覆盖 390×664 与 750×342（先例：2.1 的 `m11-viewport-form.mocked.spec.ts`）。
 
-- [ ] 2.3 安全区：`index.html` viewport meta 加 `viewport-fit=cover`；`AppShell` 根容器无条件应用四边 `env(safe-area-inset-*)` 内边距。新增 `e2e/m11-shell-safe-area.mocked.spec.ts`。
+- [x] 2.3 安全区：`index.html` viewport meta 加 `viewport-fit=cover`；`AppShell` 根容器无条件应用四边 `env(safe-area-inset-*)` 内边距。新增 `e2e/m11-shell-safe-area.mocked.spec.ts`。
 
   Depends on: 2.2
 
@@ -167,6 +167,20 @@
   **Suggested fixture level:** expanded - 改全局 viewport meta 与共享外壳的内边距。
 
   **Minimal mergeable slice:** atomic - `viewport-fit=cover` 不配安全区内边距会让内容进入刘海区，二者必须同 PR。
+
+  Triage（#2792）：Issue type: feature ｜ Fixture level: expanded（与上游建议一致；设计见 design.md D3）｜ Blast radius: 全站——viewport meta 是文档级配置，外壳内边距影响每个路由的内容区；`viewport-fit=cover` 生效而内边距缺失 / 写错时，刘海屏设备上头部与控制条会被系统区域遮住。
+  - Change surface：`apps/frontend/index.html` 的 viewport meta（追加 `viewport-fit=cover`，既有 `width=device-width, initial-scale=1.0` 保留）；`src/components/layout/AppShell.tsx` 根节点追加四个物理方向的内边距类 `pt-[env(safe-area-inset-top)]`、`pr-[…right]`、`pb-[…bottom]`、`pl-[…left]`（不得用 `px-` / `py-` / `ps-` / `pe-`：它们编译成逻辑属性 `padding-inline` / `padding-block`，`rule.style.paddingTop` 等读出来为空），无条件、不按形态分支；既有 token 逐字保留。
+  - Governing invariant：外壳根节点仍恰好等于视口（border-box：内边距向内吃，不撑大根节点）；四边内边距各自等于对应的安全区 inset，inset 为 0 时布局与改动前逐像素相同。
+  - Sibling surfaces：(1) `AppShell` 包住的每个路由的内容区（头部 + `main`）；(2) 不在根节点流内、因而不受这层内边距保护的 fixed / portal 元素：`components/ui/toast.tsx` 的 toast 视口（`fixed bottom-0 right-0`）、Radix Dialog / Select 的弹层——本 task 不处理，写为 non-goal 并在 7.3 真机清单里核对；(3) 地图区内贴底 / 贴边的绝对定位元素（控制条、图例、启动器）位于 `main` 内，随内容区内缩，不重复加安全区（D3）；(4) 既有读 viewport meta 的测试：`e2e/m11-baseline.mobile.mocked.spec.ts` 断言 content 匹配 `/width=device-width/`，追加后仍成立；(5) 2.2 的规则文本护栏 `e2e/m11-shell-viewport.mocked.spec.ts`（声明 `height` 的命中规则恰一条）——本 task 只加 padding 类，不得引入第二条声明 `height` 的规则；(6) `AppShellViewportForm.test.tsx` 的 className 前缀护栏——只在末尾追加，前缀不变。
+  - Must preserve：上述 (4)(5)(6) 三个既有测试文件零 diff 且通过；`m11-overlay-collision` 四个桌面宽度与 `monitoring.mocked.spec.ts` 不改期望通过；node-27 桌面布局 oracle（头部 84、控制条 64、无横向滚动）不回归。
+  - Risk pack「Config / project setup」selected：文档级 meta 与 Tailwind 任意值类 -> 新 e2e `e2e/m11-shell-safe-area.mocked.spec.ts`（桌面 project，文件名不含 `.mobile.`，`setViewportSize`）在 `/` @ 390×664：meta content 同时含 `width=device-width`、`initial-scale=1` 与 `viewport-fit=cover`；用 2.2 同样的递归取法读命中根节点 `[data-viewport-form]` 的样式规则，对 `padding-top` / `-right` / `-bottom` / `-left` 每一边，命中规则里文本含对应 `env(safe-area-inset-<边>)` 的声明恰一条（Tailwind preflight 对 `*` 声明了 `padding: 0`，也命中根节点，所以不能断言“每边只有一条声明”；不只读计算值——模拟器里 `env()` 为 0）。变异证据：去掉任一内边距类，对应断言为红；把 meta 的 `viewport-fit=cover` 去掉，meta 断言为红。
+  - Risk pack「Public API / entry」selected：共享外壳 -> e2e：`/` @ 1280×900 与 390×664、`/ops` @ 1280×900 下根节点四边计算内边距均为 `0px`，且根节点包围盒仍等于视口（±1px）。
+  - Risk pack「Legacy compatibility」selected：`env()` 与 `viewport-fit` 在不支持的浏览器上 -> `env(safe-area-inset-*)` 的支持线（Safari 11.1、Chrome 69）远低于 Tailwind v4 基线，未知 `viewport-fit` 值被浏览器忽略；不加回退，写为显式 non-goal。
+  - 未选：File IO、Schema、Auth、Concurrency、Resource limits、Release、Error handling、Documentation。
+  - Seams under test：浏览器里的文档 meta 与外壳根节点（规则文本 + 计算内边距 + 包围盒）。
+  - Non-goals：fixed / portal 元素（toast、Dialog、Select 弹层）的安全区处理；地图区内元素重复加安全区；真机上刘海 / 底部指示条是否遮挡控件的行为验证（7.3 真机清单）；头部（2.4）。
+  - Review focus：(1) 内边距无条件应用、四边齐全、引用的是对应方向的 `env()`；(2) 根节点为 border-box，内边距不改变其外尺寸；(3) meta 既有两项保留；(4) 断言读的是规则文本；(5) 没有往别的 task 的 spec 追加用例，三个 must-preserve 测试文件零 diff。
+  - Evidence floor：约定的本地验证命令 + `check:types` + 治理门测试全绿；新 e2e 先红后绿并附上述两条变异证据；node-27 live receipt（PR 的生产构建对 live API：既有脚本的桌面 oracle 不回归；编排者用仓库外的一次性探针量取 meta、四边规则文本与计算内边距，记入 receipt）。
 
 - [ ] 2.4 头部压缩：`SiteHeader` 在移动形态为 48px 单行（徽标缩小、标题单行截断、不渲染英文副标题）；桌面形态不变。不改任何导航高度 token。新增 `e2e/m11-header.mobile.mocked.spec.ts` 与 `e2e/m11-header-desktop.mocked.spec.ts`。
 
