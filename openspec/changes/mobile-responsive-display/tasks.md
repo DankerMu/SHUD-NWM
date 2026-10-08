@@ -216,7 +216,7 @@
 
 ## 3. 地图浮层（`/`）
 
-- [ ] 3.1 隐藏地图缩放按钮：移动形态不渲染 MapLibre 缩放 / 指北控件；桌面形态保留；不改地图手势配置。新增 `e2e/m11-zoom-control.mobile.mocked.spec.ts` 与 `e2e/m11-zoom-control-desktop.mocked.spec.ts`。
+- [x] 3.1 隐藏地图缩放按钮：移动形态不渲染 MapLibre 缩放 / 指北控件；桌面形态保留；不改地图手势配置。新增 `e2e/m11-zoom-control.mobile.mocked.spec.ts` 与 `e2e/m11-zoom-control-desktop.mocked.spec.ts`。
 
   Depends on: 1.1, 2.1
 
@@ -225,6 +225,16 @@
   **Suggested fixture level:** compact - 单个控件的条件渲染。
 
   **Minimal mergeable slice:** atomic - 一个条件分支。
+
+  Triage（#2794）：Issue type: feature ｜ Fixture level: compact（与上游建议一致；设计见 design.md D7。改的是 `/` 地图本体里一个控件的条件渲染，无共享状态、无接口变化，不触发 expanded）｜ Blast radius: `/` 的地图——条件写反会让桌面丢掉缩放 / 指北按钮，或移动形态仍渲染它们而与 3.3 的启动器列抢位置。
+  - Risk pack「Public API / entry」selected：地图本体的控件 -> 新 spec `e2e/m11-zoom-control.mobile.mocked.spec.ts`（三个移动 project）：地图就绪后（等 `[data-testid="m11-map-surface"]` 与地图 canvas 可见）`.maplibregl-ctrl-zoom-in`、`.maplibregl-ctrl-zoom-out`、`.maplibregl-ctrl-compass` 计数均为 0；新 spec `e2e/m11-zoom-control-desktop.mocked.spec.ts`（桌面 project，`setViewportSize`）：1280×900 与 768×1024 下三个按钮各恰一个且可见。两个 spec 都先等地图就绪再断言，避免“地图还没挂上所以计数为 0”的空过——移动 spec 另断言 `.maplibregl-ctrl-scale` 计数 ≥ 1（`ScaleControl` 与 `NavigationControl` 是同一次提交挂载的兄弟控件，它在才证明“子控件已挂、缩放按钮确实没有”；attribution 由 `Map` 构造时挂上，早于子控件，不足以证明）以及 `.maplibregl-ctrl-attrib` 存在（计数 ≥ 1，不用 `toBeVisible`）。
+  - Risk pack「Concurrency / shared state / ordering」selected：形态在运行中翻转（旋转、窗口缩放）-> 桌面 spec 追加一例：1280×900 -> `setViewportSize(390×664)` 后三个按钮消失，再回 1280×900 后重新出现且仍各恰一个（不重复挂载、不残留）。
+  - Risk pack「Legacy compatibility」selected：既有单测用 `MaplibreControlStub` 桩掉 `NavigationControl`（`M11MapLibreSurfaceHook` / `HoverOrder` / `Precip` / `StationHook` 与四个 `OverviewPage*` 测试文件）-> 全部零 diff 且通过（jsdom 的 `matchMedia` 桩恒为桌面形态，控件仍渲染）；`src/__tests__/riverClickPhase2Closure.test.ts` 对 `M11MapLibreSurface.tsx` 的源码扫描（第一个门控 `useEffect` 的文本）不受影响——形态 hook 的调用不得插到该 effect 之前改变“第一个门控 effect”的身份；`e2e/m11-overlay-collision.mocked.spec.ts` 零 diff 且全部通过（含它的 520 宽度用例：520 属移动形态，本 task 之后那里不再有缩放按钮；该用例今天不断言缩放按钮，若实测因此变红，停下报告，不改它的期望——520 的期望改写归 3.2）。
+  - 未选：File IO、Schema、Auth、Resource limits、Release、Error handling、Documentation、Config。
+  - Must preserve：桌面形态下 `NavigationControl` 的位置（`top-right`）与 `visualizePitch` 不变；地图手势配置（`dragPan`、`touchZoomRotate`、`scrollZoom`、`doubleClickZoom` 等）零改动；`AttributionControl` 等其他控件不动。
+  - 显式 non-goal：真机上双指缩放 / 拖动的手感（7.3 真机清单）；启动器列占用腾出的右上角（3.2 / 3.3）；底图切换器当前 `right-16` 的让位偏移（3.3 收纳时处理）。
+  - vitest：新测试文件为 `NavigationControl` 装一个可观测的专用桩（带独立 testid 的元素或 `vi.fn` 调用计数；共享的 `MaplibreControlStub` 返回 `null` 且与 `ScaleControl` 共用，照它写出的“渲染 / 不渲染”断言两个分支 DOM 相同，是空断言），断言桌面形态计数为 1（正对照）、移动形态（用例内可控 `matchMedia` 桩，用后还原）计数为 0。
+  - Evidence floor：约定的本地验证命令 + `check:types` + 治理门测试全绿；移动 spec 在三个移动 project 各非零 passed、先红后绿；改展示端运行时代码，合并前出 node-27 live receipt（PR 的生产构建对 live API：1280×900 与 768×1024 下三个按钮存在，390×664 / 750×342 / 844×390 下不存在且 scale 控件与 attribution 存在；五个视口的计数由编排者用仓库外的一次性探针量取，不改 `scripts/node27_display_v2_browser_evidence.mjs`；既有脚本的桌面布局 oracle 不回归）。
 
 - [ ] 3.2 浮层展开状态与图例启动器：地图外壳持有展开值 `'layers' | 'basemap' | 'legend' | null`（默认 `null`；点地图空白、`Escape`、形态切换时复位）；移动形态下图例渲染为 44×44 启动器 `m11-launcher-legend`，位于地图区右上角启动器列，展开的图例面板沿用 `m11-floating-legend`，完全位于地图区内、不与控制条和启动器列相交、内容超出时内部滚动。展开 / 收起不改 URL、不发请求。桌面形态图例不变。**本 task 独占既有碰撞 spec 中 520px 行的全部改写**：图例相关行改为移动期望（默认无图例面板、有图例启动器）；控制条相关行改成与形态无关的“在视口内、不压 attribution”，去掉 520px 上的 64 / 40 钉值；其余四个宽度不动。新增 `e2e/m11-legend-launcher.mobile.mocked.spec.ts`。
 

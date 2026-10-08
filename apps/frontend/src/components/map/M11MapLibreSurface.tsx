@@ -9,6 +9,7 @@ import Map, {
 import type { FeatureCollection } from 'geojson'
 import 'maplibre-gl/dist/maplibre-gl.css'
 
+import { useMobileForm } from '@/hooks/useMobileForm'
 import { cn } from '@/lib/cn'
 import {
   buildBasinFeatureCollection,
@@ -346,6 +347,9 @@ export function M11MapLibreSurface({
     [onOverlayClick, renderableOverlay, showStationLayer],
   )
 
+  // 移动形态不渲染缩放 / 指北控件（openspec mobile-responsive-display D7）；手势配置不动。
+  const { mobile } = useMobileForm()
+
   return (
     <div
       className={cn('absolute inset-0', className)}
@@ -381,7 +385,7 @@ export function M11MapLibreSurface({
         onError={handleMapError}
         attributionControl
       >
-        <NavigationControl position="top-right" visualizePitch />
+        {mobile ? null : <NavigationControl position="top-right" visualizePitch />}
         <ScaleControl position="bottom-left" unit="metric" />
         {nationalRiverVectorSource ? (
           <M11NationalRiverPrimitive
