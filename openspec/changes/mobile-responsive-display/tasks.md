@@ -37,7 +37,7 @@
   - Must preserve：既有 `mocked-regression-chromium` 的用例集合与期望值（含 `m11-overlay-collision` 四个桌面宽度）、`retries` 为 0、`test:e2e:m15-visual` 与 preview/live 各自的独立 runner 不受影响。
   - Evidence floor：约定的本地验证命令全绿 + 上述 `--list` 计数（改动前后）+ 必败断言的非零退出输出。
 
-- [ ] 1.2 设计规范文档：更新 `docs/spec/06B_frontend_ui_design_spec.md` §8（最小支持分辨率与断点行为表），新增移动形态一行（判据、单图页的移动布局概要、运维页为兜底），并把“< 1280px 不推荐使用”改述为“768–1279px 为桌面形态下的既有降级行为、< 768px 或高 < 500px 为移动形态”，注明由本 change 引入。
+- [x] 1.2 设计规范文档：更新 `docs/spec/06B_frontend_ui_design_spec.md` §8（最小支持分辨率与断点行为表），新增移动形态一行（判据、单图页的移动布局概要、运维页为兜底），并把“< 1280px 不推荐使用”改述为“768–1279px 为桌面形态下的既有降级行为、< 768px 或高 < 500px 为移动形态”，注明由本 change 引入。
 
   Depends on: 无
 
