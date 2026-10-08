@@ -10,9 +10,9 @@
 
 ## 2. Evidence Floor
 
-- [ ] 2.1 Local: `cd apps/frontend && pnpm test && pnpm typecheck && pnpm build`;
+- [x] 2.1 Local: `cd apps/frontend && pnpm test && pnpm typecheck && pnpm build`;
       `openspec validate station-layer-per-basin-degrade --strict --no-interactive`.
-- [ ] 2.2 CI green on the PR (Frontend Build).
+- [x] 2.2 CI green on the PR (Frontend Build).
 - [ ] 2.3 node-27 after merge: frontend rebuilt/deployed, public `/?metStations=1` shows stations
       (owner's browser check).
 
