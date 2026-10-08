@@ -91,14 +91,14 @@ scripts/scheduler_file_provider_refresh_once.sh --dry-run
 jq '{outcome,reason,database_free,cutover_gate,providers,orphans}' \
   /scratch/frd_muziyao/nhms-prod/workspace/provider-refresh/receipts/latest.json
 
-scripts/scheduler_file_provider_refresh_once.sh
+systemctl --user start nhms-scheduler-file-provider-refresh.service
 jq '{outcome,reason,database_free,cutover_gate,providers,orphans}' \
   /scratch/frd_muziyao/nhms-prod/workspace/provider-refresh/receipts/latest.json
 ```
 
 （这两条 projection 里的 `"cutover_gate": null` 只是 `jq` 对象构造对缺失 key 的补位产物，
 表示 receipt 里根本没有该字段，**不是** 持久化的 `null` 占位；要区分请直接
-`jq 'has("cutover_gate")'`。）
+`jq 'has("cutover_gate")'`。）`--dry-run` 不发布任何 provider，保持直接调用（它同样会等在跑的 scheduler pass）；真跑一律走 unit，由 `Before=` 把下一趟 pass 排在 refresh 之后。真跑失败会让 unit 留在 `failed`，之后任何 installer 动作的入口闸门都要求先 `systemctl --user reset-failed nhms-scheduler-file-provider-refresh.service`。
 
 `published` receipt 必须绑定三个 shared canonical 文件以及
 `NHMS_SLURM_SCHEDULER_REGISTRY_MANIFEST` 指向的 private compute-visible registry mirror。
@@ -141,7 +141,7 @@ Canonical replace 前失败时旧文件完整 stat/digest tuple 不变；preimag
 失败会恢复经验证的旧 bytes 并报 `restored_previous`；replace/fsync 不确定时返回
 `replace_uncertain`，不要宣称回滚。provider 已 commit 但 primary receipt 发布失败时，
 预留的本地 mode-0600 emergency record 为唯一 acceptance evidence；用下列命令只重建
-receipt，绝不重发 provider：
+receipt，绝不重发 provider（所以保持直接调用，不走 unit；它同样会等在跑的 scheduler pass）：
 
 ```bash
 scripts/scheduler_file_provider_refresh_once.sh \
@@ -673,12 +673,12 @@ scripts/install_node22_scheduler_file_provider_refresh.sh --rollback
      只接受 `inactive`，这是原有行为，未改。
   4. `--rollback`：refresh units 读回等于基线（disabled/inactive、static/inactive），scheduler 未变。
   5. `--install`：基线保留（`refresh.before` 与第 2 步字节一致），lane 为 `installed_stopped`。
-  6. **Manual refresh**：`scripts/scheduler_file_provider_refresh_once.sh`，然后
+  6. **Manual refresh**：`systemctl --user start nhms-scheduler-file-provider-refresh.service`（走 unit，`Before=` 把下一趟 scheduler pass 排在后面；失败会让 unit 留在 `failed`，须先按第 3 步 `reset-failed`），然后
      `jq -r .outcome /scratch/frd_muziyao/nhms-prod/workspace/provider-refresh/receipts/latest.json`
      必须输出 `published`。`--enable` 的 `validate_current_receipt` 要求一份 `published` receipt，
      且其中各 provider 的 `after_sha256` 仍与磁盘一致；而每 5 分钟一次的 compute copyback 会在每次
      nightly refresh 之后挪动 `index-last.json`，所以必须紧挨着 `--enable` 现跑一次。
-  7. `--enable` → `enabled_active`。**恢复**：若失败，再跑一次 manual refresh（第 6 步），然后再
+  7. `--enable` → `enabled_active`。**恢复**：若失败，再跑一次 manual refresh（第 6 步，同样走 unit），然后再
      `--enable`。
   8. 失败路径演练：armed 状态下再跑 `--install`，必须拒绝且无 mutation。
   9. lane 保持 armed（第 7 步已 `--enable`），记录 after-state。

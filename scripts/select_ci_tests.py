@@ -5746,9 +5746,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # `ExecStart=/scratch/frd_muziyao/NWM/scripts/scheduler_file_provider_refresh_once.sh`,
     # `TimeoutStartSec=21600`, that `PrivateTmp=true` is ABSENT,
     # `UnsetEnvironment=DATABASE_URL PIPELINE_DATABASE_URL`, `Before=` on the
-    # scheduler service and that `ExecCondition` is ABSENT (:3599-3611); on
+    # scheduler service and that `ExecCondition` is ABSENT; on
     # the `.timer` it asserts `OnCalendar=*-*-* 02:15:00 UTC`,
-    # `RandomizedDelaySec=30m` and `Persistent=false` (:3603-3604, :3633).
+    # `RandomizedDelaySec=30m` and `Persistent=false`.
     # Both are outside the `#2173` glob `infra/systemd/nhms-node27-*.service`
     # (node-22 units), so neither row carries the sibling lane pin.
     # #2146 widened this row by one: `tests/test_node22_refresh_timer_health.py`

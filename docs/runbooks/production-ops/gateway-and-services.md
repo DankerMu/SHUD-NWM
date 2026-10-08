@@ -235,11 +235,27 @@ systemctl --user stop nhms-compute-scheduler.timer
 #    exit BEFORE backup/overwrite. Re-run this step once the service is
 #    inactive (the pass finished naturally). No sleep loop — one mechanical
 #    check, no waiting/retry. NEVER stop/kill the service.
-if systemctl --user is-active --quiet nhms-compute-scheduler.service; then
-  echo "rollout: a scheduler pass is still active; let it finish naturally" >&2
-  echo "rollout: re-run this rollout step once nhms-compute-scheduler.service is inactive" >&2
-  exit 1
-fi
+#    The service is Type=oneshot: a running pass is `activating`, never
+#    `active`, and `is-active` exits 3 for it (as for `inactive`), so the exit
+#    code cannot tell them apart. Read the PRINTED state and classify it;
+#    nothing printed or an unknown word also fails closed. `failed` continues
+#    with a hint (this block never resets the unit).
+SCHEDULER_STATE="$(systemctl --user is-active nhms-compute-scheduler.service || true)"
+case "$SCHEDULER_STATE" in
+  inactive) ;;
+  failed)
+    echo "rollout: the last scheduler pass failed and the fence probe below requires inactive; if this step ends there, run: systemctl --user reset-failed nhms-compute-scheduler.service, then re-run this step" >&2
+    ;;
+  active|activating|deactivating|reloading)
+    echo "rollout: a scheduler pass is still running ($SCHEDULER_STATE); let it finish naturally" >&2
+    echo "rollout: re-run this rollout step once nhms-compute-scheduler.service is inactive" >&2
+    exit 1
+    ;;
+  *)
+    echo "rollout: unknown scheduler service state '$SCHEDULER_STATE'; refusing to continue" >&2
+    exit 1
+    ;;
+esac
 #    Mechanically verify the fence is LOADED and LIVE before any
 #    backup/overwrite: both units' DropInPaths must include their runtime
 #    drop-in, and a probe `systemctl --user start` on EACH unit must be a
@@ -518,11 +534,22 @@ chmod 0600 "$RUNTIME_DIR/systemd/user/nhms-compute-scheduler.timer.d/$FENCE_NAME
            "$RUNTIME_DIR/systemd/user/nhms-compute-scheduler.service.d/$FENCE_NAME"
 systemctl --user daemon-reload
 systemctl --user stop nhms-compute-scheduler.timer
-if systemctl --user is-active --quiet nhms-compute-scheduler.service; then
-  echo "rollback: a scheduler pass is still active; let it finish naturally" >&2
-  echo "rollback: re-run this rollback step once nhms-compute-scheduler.service is inactive" >&2
-  exit 1
-fi
+SCHEDULER_STATE="$(systemctl --user is-active nhms-compute-scheduler.service || true)"
+case "$SCHEDULER_STATE" in
+  inactive) ;;
+  failed)
+    echo "rollback: the last scheduler pass failed and the fence probe below requires inactive; if this step ends there, run: systemctl --user reset-failed nhms-compute-scheduler.service, then re-run this step" >&2
+    ;;
+  active|activating|deactivating|reloading)
+    echo "rollback: a scheduler pass is still running ($SCHEDULER_STATE); let it finish naturally" >&2
+    echo "rollback: re-run this rollback step once nhms-compute-scheduler.service is inactive" >&2
+    exit 1
+    ;;
+  *)
+    echo "rollback: unknown scheduler service state '$SCHEDULER_STATE'; refusing to continue" >&2
+    exit 1
+    ;;
+esac
 systemctl --user show nhms-compute-scheduler.timer -p DropInPaths | grep -F "$RUNTIME_DIR/systemd/user/nhms-compute-scheduler.timer.d/$FENCE_NAME"
 systemctl --user show nhms-compute-scheduler.service -p DropInPaths | grep -F "$RUNTIME_DIR/systemd/user/nhms-compute-scheduler.service.d/$FENCE_NAME"
 systemctl --user start nhms-compute-scheduler.timer
