@@ -2,7 +2,7 @@ import { expect, test, type Page } from '@playwright/test'
 
 import { openRiverWindow } from './support/openRiverWindow'
 import { dischargeTileCoordinates, isRiverFixtureTilePath, riverFixture, riverFixtureTilePath } from './support/riverFixture'
-import { installRiverWindowMocks, type RiverWindowMockLog } from './support/riverWindowMocks'
+import { installRiverWindowMocks, type RiverWindowMockLog } from './support/riverWindow.mocked'
 
 /**
  * 河段窗测试夹具的自证（openspec mobile-responsive-display task 1.3）。
