@@ -19,6 +19,8 @@ export interface MetStationLayerModel {
   totalKnown: boolean
   loaded: number
   truncated: boolean
+  /** 站点请求失败的流域 id；无数据或全部成功时为 []。 */
+  failedBasinIds: string[]
   /** honest 空态/状态文案；无可渲染数据时给出原因，禁止用空图层冒充完整。 */
   statusNote: string | null
 }
@@ -112,6 +114,11 @@ export function useMetStationLayer({
     if (requestContexts.length === 0) return '暂无可用流域版本以加载气象代站'
     if (loading && !currentData) return '气象代站加载中'
     if (error && !currentData) return error
+    if (currentData && currentData.failedBasinIds.length > 0) {
+      const ids = currentData.failedBasinIds
+      const n = ids.length
+      return `已加载 ${currentData.loaded} 个代站，${n} 个流域加载失败：${ids.slice(0, 3).join('、')}${n > 3 ? ' 等' : ''}`
+    }
     if (currentData?.truncated) {
       if (!currentData.totalKnown) return `已加载 ${currentData.loaded} 个代站，列表已截断（总数未完全统计）`
       return `已加载 ${currentData.loaded}/${currentData.total} 个代站，列表已截断`
@@ -133,6 +140,7 @@ export function useMetStationLayer({
     totalKnown: currentData?.totalKnown ?? true,
     loaded: currentData?.loaded ?? 0,
     truncated: currentData?.truncated ?? false,
+    failedBasinIds: currentData?.failedBasinIds ?? [],
     statusNote,
   }
 }
