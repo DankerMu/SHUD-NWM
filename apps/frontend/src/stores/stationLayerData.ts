@@ -25,6 +25,8 @@ export interface StationLayerData {
   totalKnown: boolean
   loaded: number
   truncated: boolean
+  /** 站点请求失败的流域 id（按请求顺序、去重）；全部成功时为 []。非空时 truncated=true、total 只是下界。 */
+  failedBasinIds: string[]
 }
 
 export interface StationLayerBasinContext {
@@ -85,6 +87,11 @@ let activeRequestKey: string | null = null
  * 该清单（#2699）只列该流域版本最新可展示 forecast run 所用模型的代站，与 active_flag 无关；
  * 没有可展示 run 的流域版本返回空清单（total_count 0），图层上就没有点。
  * 曲线弹窗仍用 latest-product 做 GFS/IFS 严格身份校验；地图图层只负责把可见流域的点画出来。
+ * 源已解析时先查 latest-product 取 model_id；该查询失败（含该流域无此源产品的 404）不算流域失败，
+ * 回退为只按 basin_version_id 取清单。
+ * 按流域隔离失败（#2694）：某流域的站点分页请求抛错时记入 failedBasinIds、保留它已取到的页、
+ * 标 truncated 且 totalKnown=false，继续下一个流域；只有实际请求过的流域全部失败才抛出首个错误，
+ * 不把全失败呈现为已加载的空图层。
  */
 async function fetchAllStations(request: StationLayerRequest): Promise<StationLayerData> {
   const normalizedContexts = normalizeBasinContexts(request.basinContexts)
@@ -96,6 +103,10 @@ async function fetchAllStations(request: StationLayerRequest): Promise<StationLa
   let total = 0
   let totalKnown = normalizedContexts.length <= contexts.length
   let truncated = normalizedContexts.length > contexts.length
+  const failedBasinIds: string[] = []
+  let attemptedContexts = 0
+  let failedContexts = 0
+  let firstError: unknown
 
   for (const context of contexts) {
     if (stations.length >= STATION_CLIENT_CAP) {
@@ -104,36 +115,55 @@ async function fetchAllStations(request: StationLayerRequest): Promise<StationLa
       break
     }
 
-    const product = context.source
-      ? await fetchHydroMetLatestProduct({ basinId: context.basinId, source: context.source, cycle: context.cycle ?? null })
-      : null
-    const stationIdentity = product
-      ? { basinVersionId: product.basin_version_id, modelId: product.model_id }
-      : { basinVersionId: context.basinVersionId }
-    const firstPage = await fetchHydroMetStationsByIdentity(
-      stationIdentity,
-      { limit: Math.min(STATION_PAGE_LIMIT, STATION_CLIENT_CAP - stations.length), offset: 0 },
-    )
-    const basinTotal = Number.isFinite(firstPage.total_count) ? firstPage.total_count : firstPage.items.length
-    total += basinTotal
-
-    if (appendStations(stations, stationBasinIds, firstPage.items, context.basinId)) truncated = true
-
-    let offset = firstPage.items.length
-    while (offset < basinTotal && stations.length < STATION_CLIENT_CAP) {
-      const remainingCap = STATION_CLIENT_CAP - stations.length
-      const pageLimit = Math.min(STATION_PAGE_LIMIT, remainingCap)
-      const page = await fetchHydroMetStationsByIdentity(
-        stationIdentity,
-        { limit: pageLimit, offset },
-      )
-      if (page.items.length === 0) break
-      if (appendStations(stations, stationBasinIds, page.items, context.basinId)) truncated = true
-      offset += page.items.length
+    attemptedContexts += 1
+    let stationIdentity: { basinVersionId: string; modelId?: string } = { basinVersionId: context.basinVersionId }
+    if (context.source) {
+      try {
+        const product = await fetchHydroMetLatestProduct({
+          basinId: context.basinId,
+          source: context.source,
+          cycle: context.cycle ?? null,
+        })
+        stationIdentity = { basinVersionId: product.basin_version_id, modelId: product.model_id }
+      } catch {
+        // latest-product 不可用不是流域失败：保持 basin-only 身份。
+      }
     }
 
-    if (offset < basinTotal) truncated = true
+    try {
+      const firstPage = await fetchHydroMetStationsByIdentity(
+        stationIdentity,
+        { limit: Math.min(STATION_PAGE_LIMIT, STATION_CLIENT_CAP - stations.length), offset: 0 },
+      )
+      const basinTotal = Number.isFinite(firstPage.total_count) ? firstPage.total_count : firstPage.items.length
+      total += basinTotal
+
+      if (appendStations(stations, stationBasinIds, firstPage.items, context.basinId)) truncated = true
+
+      let offset = firstPage.items.length
+      while (offset < basinTotal && stations.length < STATION_CLIENT_CAP) {
+        const remainingCap = STATION_CLIENT_CAP - stations.length
+        const pageLimit = Math.min(STATION_PAGE_LIMIT, remainingCap)
+        const page = await fetchHydroMetStationsByIdentity(
+          stationIdentity,
+          { limit: pageLimit, offset },
+        )
+        if (page.items.length === 0) break
+        if (appendStations(stations, stationBasinIds, page.items, context.basinId)) truncated = true
+        offset += page.items.length
+      }
+
+      if (offset < basinTotal) truncated = true
+    } catch (error) {
+      if (failedContexts === 0) firstError = error
+      failedContexts += 1
+      if (!failedBasinIds.includes(context.basinId)) failedBasinIds.push(context.basinId)
+      truncated = true
+      totalKnown = false
+    }
   }
+
+  if (failedContexts > 0 && failedContexts === attemptedContexts) throw firstError
 
   const loaded = stations.length
   return {
@@ -143,6 +173,7 @@ async function fetchAllStations(request: StationLayerRequest): Promise<StationLa
     totalKnown,
     loaded,
     truncated: truncated || loaded < total,
+    failedBasinIds,
   }
 }
 
