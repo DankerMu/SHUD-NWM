@@ -566,11 +566,17 @@ export function M11FloatingNotice({ children, testId }: { children: ReactNode; t
         // 注意本值只保证越过控制条：卡片高度不定，居中提示与右下图例的水平交叠归 I15 的实机 receipt。
         'absolute left-1/2 bottom-[11.5rem] z-[110] max-w-[min(30rem,calc(100%-8rem))] -translate-x-1/2 px-3 py-2 text-xs text-neutral-800',
         GLASS_PANEL,
+        // 移动形态（mobile-responsive-display design.md D8）：地图区顶部条带的第一槽——左起 8px，
+        // 右边界让出启动器列（44px 列宽 + 8px 右边距 + 8px 间隙 = 60px，故 max-w 为 100% - 68px），
+        // 文本最多两行。两行时高 50px（16px 行高 × 2 + 16px 内边距 + 2px 边框），状态条容器
+        // （m11MapRuntime 的 M11MapStatusOverlays）的顶边按这个高度恒定预留。
+        'mobile:left-2 mobile:top-2 mobile:bottom-auto mobile:max-w-[calc(100%-4.25rem)] mobile:translate-x-0',
       )}
       role="status"
       data-testid={testId}
     >
-      {children}
+      {/* 截断放在内层：直接截带内边距的外层，第三行会从下内边距里露出半行。桌面形态下它只是个普通块。 */}
+      <div className="mobile:line-clamp-2">{children}</div>
     </div>
   )
 }
