@@ -135,9 +135,8 @@ def refresh(settings: Settings, _inputs: Inputs) -> dict[str, Any]:
         raise StepFailure(
             f"systemctl --user start {REFRESH_UNIT} returned zero, but {latest} is not newer than this step "
             f"(started_at {receipt.get('started_at')!r}, step started {utc_text(step_started)}): the start "
-            "returned without a new latest.json, so no refresh of this step is counted. Possible causes: the "
-            f"unit's start condition (it checks {SERVICE_UNIT}) skipped the run, or a refresh was already running "
-            "and the start returned with that one."
+            "returned without a new latest.json, so no refresh of this step is counted. Possible causes: a "
+            "refresh was already running and the start returned with that one."
         )
     if receipt.get("outcome") != "published":
         raise StepFailure(

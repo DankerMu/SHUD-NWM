@@ -15,8 +15,7 @@ remove, for the remove-basin suite; its defaults are the recalibration space.
 The fake ``systemctl`` is a script: it appends every call, ``--user`` included,
 to a trace, keeps unit states in a file and, for a start of the provider
 refresh service, writes a ``latest.json`` built by the refresh's own
-``_receipt``.  Like the real unit, it skips the refresh without an error while
-the scheduler service is active.
+``_receipt``.
 """
 
 from __future__ import annotations
@@ -120,8 +119,7 @@ elif verb == "start" and unit == config["refresh_unit"]:
         import time
 
         time.sleep(float(refresh["hang_seconds"]))
-    # The unit's start condition: skipped without an error while the scheduler service is active.
-    if rc == 0 and units.get(config["service_unit"]) != "active" and refresh.get("mode", "run") == "run":
+    if rc == 0 and refresh.get("mode", "run") == "run":
         sys.path.insert(0, config["repo_root"])
         from scripts.scheduler_refresh.receipt import _receipt
 
@@ -521,7 +519,6 @@ def build_space(
         {
             "repo_root": str(REPO_ROOT),
             "refresh_unit": REFRESH,
-            "service_unit": SERVICE,
             "refresh_receipt_root": str(refresh_root / "receipts"),
             "classification": classification([str(row["model_id"]) for row in ws.rows]),
             "providers": PROVIDERS,

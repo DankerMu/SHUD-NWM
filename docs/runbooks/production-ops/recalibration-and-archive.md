@@ -398,11 +398,20 @@ cd /scratch/frd_muziyao/NWM && .venv/bin/python -m scripts.node22_publish_merged
 > `dg_03b3cd97…` ifs）在 2026-08-24 #1816 重发布时被换掉；8 个流域 16 行的 old→new 映射与首趟暖启证据见
 > [`../receipts/2026-08-24-issue-1816-republish-identity.md`](../receipts/2026-08-24-issue-1816-republish-identity.md)。
 
-**触发手动 refresh 的坑**：refresh 的 unit 带
-`ExecCondition=... ! is-active nhms-compute-scheduler.service`，而 scheduler 每 5 分钟
-跑一趟 oneshot。`systemctl --user start` 返回 0 **不代表跑了**（condition 不满足会静默
-skip）。判据只有一个：`latest.json` 的 `started_at` 变新。**不要**用「receipt 文件数增加」
-判成功——`latest.json` 是原地覆写的，计数不变，照此写循环会无限重试、反复触发 refresh。
+**触发手动 refresh 的坑**：refresh 不与 scheduler pass 并行。wrapper
+（`scripts/scheduler_file_provider_refresh_once.sh`，#2749）启动后先读
+`systemctl --user is-active nhms-compute-scheduler.service` 的输出：`inactive` / `failed`
+直接刷新；`active` / `activating` / `deactivating` / `reloading`（oneshot 的 pass 在跑时是
+`activating`）就等这一趟 pass 结束，每 15 秒查一次、每分钟在 stderr（journal）记一行；
+unit 不再带 `ExecCondition`，不存在「静默 skip」这条路。所以 `systemctl --user start`
+会**一直阻塞**到在跑的 pass 结束、refresh 也跑完才返回；等待期间 unit 的 `Before=` 把下一趟
+pass 排在 refresh 后面，refresh 最多等一趟。等满 5400 秒 pass 仍未结束，或状态读不出来
+（`systemctl` 缺失、无输出、未知状态），wrapper 以 exit 3 拒绝、不做任何刷新，`start` 返回
+非零、unit 进 `failed`（再次触发或跑 installer 前先 `reset-failed`）。因为会阻塞，`start`
+同样要 detached 跑。判据仍然只有一个：`latest.json` 的 `started_at` 变新（`start` 返回 0
+而 `started_at` 没变，说明当时已有一趟 refresh 在跑，这次 `start` 只是跟着它返回）。**不要**用
+「receipt 文件数增加」判成功——`latest.json` 是原地覆写的，计数不变，照此写循环会无限重试、
+反复触发 refresh。
 
 **回补 forcing 时必须临时改指 registry，而不是提前发布 manifest。** forcing producer
 是从 **file model registry** 解析目标模型的（`Model instance '<model_id>' was not found

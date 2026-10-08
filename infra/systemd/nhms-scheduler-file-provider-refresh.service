@@ -4,7 +4,9 @@ Before=nhms-compute-scheduler.service
 
 [Service]
 Type=oneshot
-ExecCondition=/bin/sh -c '! /usr/bin/systemctl --user is-active --quiet nhms-compute-scheduler.service'
+# No start condition on the scheduler service: ExecStart's wrapper waits for a
+# running scheduler pass to end before it refreshes, and Before= above holds
+# the next pass while this unit is starting (the wait included).
 WorkingDirectory=/scratch/frd_muziyao/NWM
 EnvironmentFile=/scratch/frd_muziyao/NWM/infra/env/compute.scheduler-provider-refresh.env
 Environment=PATH=/scratch/frd_muziyao/NWM/.venv/bin:/usr/local/bin:/usr/bin:/bin

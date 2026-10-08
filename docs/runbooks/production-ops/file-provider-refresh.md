@@ -359,14 +359,22 @@ key allowlist；`NHMS_REGISTRY_CUTOVER_DECLARATION_PATH` **自 #1095 起在 allo
    `/scratch/frd_muziyao/NWM/infra/env/compute.scheduler-provider-refresh.env`（保持
    mode 0600、非 symlink），**新增一行**
    `NHMS_REGISTRY_CUTOVER_DECLARATION_PATH=<declaration 绝对路径>`。
-3. 等下一次 timer 触发，或手动触发一次：先
-   `systemctl --user is-active nhms-compute-scheduler.service` 确认它**不是** active，
-   再 `systemctl --user start nhms-scheduler-file-provider-refresh.service`。
-   unit 的 `ExecCondition`（`infra/systemd/nhms-scheduler-file-provider-refresh.service`）
-   在 scheduler 活跃时会在 ExecStart **之前**短路：`start` 仍然返回 0、unit 被 skip、
-   **不产生任何 receipt**（journal 里是 condition failed）。**不要把 `start` 返回 0
-   当成"已执行"**，一律以新 receipt 为准。wrapper 自己的 exit 3 只保护直接手工调用
-   `scripts/scheduler_file_provider_refresh_once.sh` 的场景。
+3. 等下一次 timer 触发，或手动触发一次：
+   `systemctl --user start nhms-scheduler-file-provider-refresh.service`。不需要先等
+   scheduler 空闲：wrapper 自己等（#2749）。它读
+   `systemctl --user is-active nhms-compute-scheduler.service` 的输出，pass 在跑
+   （`active` / `activating` / `deactivating` / `reloading`）就每 15 秒查一次、每分钟在
+   journal 记一行，等这一趟 pass 结束再刷新；unit 的 `Before=` 在此期间把下一趟 pass 排在
+   refresh 后面。所以 `start` 会**阻塞**到在跑的 pass 结束、refresh 也跑完才返回。
+   等满 5400 秒 pass 仍未结束，或状态读不出来（`systemctl` 缺失、无输出、未知状态），
+   wrapper 以 exit 3 拒绝、不做任何刷新，`start` 返回非零、unit 进 `failed`，**不产生
+   任何 receipt**。unit 文件
+   （`infra/systemd/nhms-scheduler-file-provider-refresh.service`）不再带 `ExecCondition`，
+   没有「返回 0 但被 skip」这条路；但 **`start` 返回 0 仍不等于"本次已执行"**（当时已有
+   一趟 refresh 在跑时，`start` 只是跟着那一趟返回），一律以新 receipt
+   （`latest.json` 的 `started_at` 变新）为准。直接手工调用
+   `scripts/scheduler_file_provider_refresh_once.sh` 走的是同一段等待，但等待结束后没有
+   `Before=` 的排队保护，仍须先停 scheduler timer。
 4. 核对 receipt：`registry_classification.declared_cutovers` 覆盖本次
    `package_changed`，且 outcome 为 `published`（timer 路径的 ExecStart 不带
    `--dry-run`，见上述 unit 文件），reason 不是 `registry_cutover_undeclared` /
@@ -592,6 +600,21 @@ proof 任一步失败，执行：
 scripts/install_node22_scheduler_file_provider_refresh.sh --rollback
 # 按 install-state/refresh.before 恢复 refresh 两个 unit 并读回确认；再读回断言 scheduler units 未变。
 ```
+
+**部署「refresh 等 scheduler pass」（#2749）——两步各自独立，都要 owner 放行**：
+
+1. `git status --porcelain` → `git pull --ff-only`：unit 的 `ExecStart` 直接执行 checkout 里的
+   wrapper，所以 pull 完等待逻辑就生效，不需要 installer。此时**已安装**的 unit 文件
+   （`~/.config/systemd/user/` 下那份）还带着旧的 `ExecCondition`；它是惰性的——对
+   `activating`、`inactive`、`failed` 都放行（oneshot 的 pass 在跑时是 `activating`，这正是
+   #2749 的成因），不影响新行为。
+2. 替换已安装的 unit 文件要走 installer 的 `--rollback` → `--install` → `--enable`
+   （顺序与前置条件见下面的演练顺序，含紧挨着 `--enable` 的 manual refresh），且必须在
+   02:15-04:15Z 窗口之外。行为不依赖这一步，但运维依赖：pull 之后已安装的 unit 与仓库里的
+   不再相同，而 `--enable` 会逐个 `cmp -s` 两者，不一致就拒绝，直到重新 `--install`。lane
+   现在是 armed、并保持 armed；**此后第一次任何 installer 动作都必须从这一轮
+   `--rollback` → `--install` → `--enable` 开始**。做完读回确认已安装的 unit 里没有
+   `ExecCondition`。
 
 **installer 的失败路径与恢复基线（#2294）**：
 
