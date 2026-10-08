@@ -36,6 +36,7 @@ import {
   M11PrecipOverlayPrimitive,
   M11StationClusterPrimitive,
   M11_NATIONAL_RIVER_LINE_LAYER_ID,
+  MET_STATION_POINT_LAYER_ID,
   ensureM11StationLayersOnTop,
   m11RegisteredOverlayHitLayerId,
   type M11StationFeatureCollection,
@@ -61,6 +62,7 @@ import {
   deleteRiverClickHookIfOwned,
   locateRenderedRiverFeature,
 } from '@/lib/riverClickEvidence/hook'
+import { createStationLocateEvidenceHook, installStationLocateEvidenceHook } from '@/lib/stationLocateEvidence/hook'
 import { type LayerState, type OverviewBasin } from '@/lib/m11/overviewDataContracts'
 import type { M11Layer, M11QueryState } from '@/lib/m11/queryState'
 import { buildMvtTileUrlTemplate, isMvtLayerMetadata } from '@/lib/mvtLayerMetadata'
@@ -279,6 +281,33 @@ export function M11MapLibreSurface({
         riverClickInstalledGeneration = null
       }
     }
+  }, [])
+
+  // 同一测试门下的只读代站定位钩子（独立全局，river-click 钩子不变）。恰一个方法：把相机移到
+  // 站点、确认该点经产品点击目标解析选中的正是这个站点且未被遮挡，返回站点 id 与视口点。
+  // 不接收也不调用任何产品回调；开窗只能靠真实指针在该点触发的 MapLibre click。
+  useEffect(() => {
+    if ((window as { __NHMS_E2E_HOOKS__?: unknown }).__NHMS_E2E_HOOKS__ !== true) return
+    const hook = createStationLocateEvidenceHook({
+      getMap: () => {
+        const native = mapRef.current?.getMap?.()
+        return native === undefined || native === null ? null : adaptRiverClickHookMap(native)
+      },
+      getStationPointLayerId: () => (showStationLayerRef.current ? MET_STATION_POINT_LAYER_ID : null),
+      productClick: {
+        getInteractiveLayerIds: () => interactiveLayerIdsRef.current,
+        resolveClickTarget: (features) =>
+          resolveM11ClickTarget({
+            features,
+            showStationLayer: showStationLayerRef.current,
+            renderableOverlay: overlayRef.current,
+          }),
+      },
+      elementFromPoint: (x, y) => document.elementFromPoint(x, y),
+      now: () => performance.now(),
+    })
+    // 安装与清理按「同一对象 + 代次 token」判所有权：过期 cleanup 删不掉更新的实例。
+    return installStationLocateEvidenceHook(window as unknown as Record<string, unknown>, hook)
   }, [])
 
   const handleMouseMove = useCallback(
