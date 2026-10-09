@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef } from 'react'
+import { useMemo } from 'react'
 import ReactEChartsCore from 'echarts-for-react/lib/core'
-import type { EChartsInstance } from 'echarts-for-react/lib/types'
 
 import { echarts } from '@/components/charts/echartsCore'
+import { useChartFollowsContainer } from '@/components/charts/useChartFollowsContainer'
 import { FORECAST_CHART_POINT_BUDGET, forecastPointBudgetMessage } from '@/lib/forecastRenderingBudget'
 import { formatUnitForDisplay } from '@/lib/format'
 import type { ForecastData } from '@/stores/forecast'
@@ -303,24 +303,8 @@ function ForecastChartInner({ data, segmentName, variant = 'full', appearance = 
     }
   }, [data, normalizedSeries, segmentName, compact, dark, axisColor, zoomable])
 
-  // fill 模式：画布跟随容器尺寸。封装库的自动重排会吞掉绑定后的第一次尺寸回调（与其后 60ms 内的
-  // 变化合并成同一次），容器恰在那时变尺寸（如刚加载完就旋转）画布会一直停在旧尺寸；这里自己观察容器。
-  const containerObserver = useRef<ResizeObserver | null>(null)
-  useEffect(() => () => containerObserver.current?.disconnect(), [])
-  const chartRendered = Boolean(data) && normalizedSeries.length > 0
-  useEffect(() => { if (!chartRendered) containerObserver.current?.disconnect() }, [chartRendered])
-  const followContainer = useCallback((instance: EChartsInstance) => {
-    const container = instance.getDom()
-    containerObserver.current?.disconnect()
-    containerObserver.current = new ResizeObserver(() => {
-      if (instance.isDisposed()) return
-      if (instance.getWidth() !== container.clientWidth || instance.getHeight() !== container.clientHeight) {
-        // 实例是带显式宽高创建的，必须显式传 auto 才会重新读容器尺寸。
-        instance.resize({ width: 'auto', height: 'auto' })
-      }
-    })
-    containerObserver.current.observe(container)
-  }, [])
+  // fill 模式：画布跟随容器尺寸（不渲染图表时断开）。
+  const followContainer = useChartFollowsContainer(Boolean(data) && normalizedSeries.length > 0)
 
   if (!data || normalizedSeries.length === 0) {
     return (
