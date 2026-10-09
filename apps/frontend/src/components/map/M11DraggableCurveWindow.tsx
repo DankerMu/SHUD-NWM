@@ -8,14 +8,18 @@ type CurveWindowKind = 'river' | 'station'
 
 const WINDOW_MARGIN_PX = 12
 const DESKTOP_PLACEMENT_WIDTH = 900
+// 桌面形态默认宽度 min(44rem, max(42vw, 30rem))（design.md D16）有两处表达，必须一致：
+// `DESKTOP_WINDOW_CLASS` 的宽度一段，与 `curveWindowSize` 在窗尚无实测盒时的回退。
 const MAX_DESKTOP_WIDTH_PX = 704
+/** 30rem：桌面形态曲线窗的最小默认宽度。 */
+const MIN_DESKTOP_WIDTH_PX = 480
 const DESKTOP_WIDTH_RATIO = 0.42
 const ASPECT_RATIO_HEIGHT = 9 / 16
 
 // 窗的类串按形态整串选择（design.md D9），不把 `mobile:` 变体叠在桌面类串上：`md:`（宽 ≥ 768）在
 // 844×390 这类矮视口横屏同时命中，层叠次序不可靠。两个抽屉的尺寸只由视口与地图区（窗的包含块）决定。
 const DESKTOP_WINDOW_CLASS =
-  'absolute flex aspect-video w-[calc(100%_-_1.5rem)] max-h-[calc(100%_-_1.5rem)] flex-col overflow-hidden md:w-[min(44rem,42vw)]'
+  'absolute flex aspect-video w-[calc(100%_-_1.5rem)] max-h-[calc(100%_-_1.5rem)] flex-col overflow-hidden md:w-[min(44rem,max(42vw,30rem))]'
 /** 非矮视口横屏的移动形态：贴地图区底、全宽、高 min(60dvh, 地图区高 − 8px)。 */
 const BOTTOM_SHEET_CLASS = 'absolute inset-x-0 bottom-0 flex h-[min(60dvh,calc(100%-8px))] flex-col overflow-hidden'
 /** 矮视口横屏：贴地图区右、全高、宽 min(50vw, 28rem)。 */
@@ -295,7 +299,7 @@ function curveWindowSize(frame: HTMLElement, viewport: CurveWindowViewport): Cur
   const availableWidth = Math.max(WINDOW_MARGIN_PX * 2, viewport.width - WINDOW_MARGIN_PX * 2)
   const width =
     viewport.width >= DESKTOP_PLACEMENT_WIDTH
-      ? Math.min(MAX_DESKTOP_WIDTH_PX, viewport.width * DESKTOP_WIDTH_RATIO)
+      ? Math.min(MAX_DESKTOP_WIDTH_PX, Math.max(viewport.width * DESKTOP_WIDTH_RATIO, MIN_DESKTOP_WIDTH_PX))
       : availableWidth
   const height = Math.min(width * ASPECT_RATIO_HEIGHT, Math.max(WINDOW_MARGIN_PX * 2, viewport.height - WINDOW_MARGIN_PX * 2))
   return { width, height }

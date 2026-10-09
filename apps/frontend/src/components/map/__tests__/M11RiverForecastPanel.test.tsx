@@ -244,8 +244,8 @@ describe('M11RiverForecastPanel', () => {
     fireEvent.pointerDown(handle, { button: 0, clientX: 24, clientY: 24 })
     fireEvent.pointerMove(window, { clientX: 4000, clientY: 4000 })
     fireEvent.pointerUp(window)
-    expect(panelPosition(panel).x).toBeCloseTo(1024 - Math.min(704, 1024 * 0.42) - 12)
-    expect(panelPosition(panel).y).toBeCloseTo(768 - Math.min(Math.min(704, 1024 * 0.42) * 9 / 16, 768 - 24) - 12)
+    expect(panelPosition(panel).x).toBeCloseTo(1024 - Math.min(704, Math.max(1024 * 0.42, 480)) - 12)
+    expect(panelPosition(panel).y).toBeCloseTo(768 - Math.min(Math.min(704, Math.max(1024 * 0.42, 480)) * 9 / 16, 768 - 24) - 12)
   })
 
   it('keeps the river window, drag handle, and close button inside a nonzero map container', async () => {
