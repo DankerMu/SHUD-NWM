@@ -124,10 +124,15 @@ describe('M11DraggableCurveWindow 的移动形态', () => {
     pressHandle()
     fireEvent.pointerMove(window, { clientX: 300, clientY: 260 })
     expect({ left: frame.style.left, top: frame.style.top }).not.toEqual(initial)
+    expect(screen.getByTestId(HANDLE_TEST_ID)).toHaveClass('cursor-grabbing')
 
     act(() => form.setForm({ mobile: true, landscape: false }))
     act(() => form.setForm({ mobile: false, landscape: false }))
 
+    // `dragging` 已归零：移动形态的抓手本来就不带拖拽光标类，只有回到桌面后才看得出来。
+    const handle = screen.getByTestId(HANDLE_TEST_ID)
+    expect(handle).not.toHaveClass('cursor-grabbing')
+    expect(handle).toHaveClass('cursor-grab')
     // 默认位置，而不是进入移动形态前拖到的位置。
     expect({ left: frame.style.left, top: frame.style.top }).toEqual(initial)
     expect(frame.style.visibility).toBe('')

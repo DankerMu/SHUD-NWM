@@ -321,18 +321,32 @@ export async function expectSheet(page: Page, kind: CurveWindowKind, where: stri
   return measure
 }
 
-/** 点 `(x, y)` 的命中测试是否落在该窗内。 */
-export async function hitsCurveWindow(page: Page, kind: CurveWindowKind, point: { x: number; y: number }) {
+/** 两个盒的交集；不相交（含仅贴边）为 null。 */
+export function intersectionOf(a: Box, b: Box): Box | null {
+  const x = Math.max(a.x, b.x)
+  const y = Math.max(a.y, b.y)
+  const width = Math.min(a.x + a.width, b.x + b.width) - x
+  const height = Math.min(a.y + a.height, b.y + b.height) - y
+  return width > 0 && height > 0 ? { x, y, width, height } : null
+}
+
+/**
+ * 点 `(x, y)` 的命中测试是否落在该窗内。给了 `beneathSelector` 时，`beneath` 说明该选择器的元素
+ * 是否也在这一点的命中栈里（`elementsFromPoint`）——它为 true 才说明“窗盖住了它”，而不是它本来就不在这一点。
+ */
+export async function hitsCurveWindow(page: Page, kind: CurveWindowKind, point: { x: number; y: number }, beneathSelector?: string) {
   return page.evaluate(
-    ({ testId, x, y }) => {
+    ({ testId, x, y, beneathSelector }) => {
       const frame = document.querySelector(`[data-testid="${testId}"]`)
       const top = document.elementFromPoint(x, y)
+      const beneath = beneathSelector ? document.querySelector(beneathSelector) : null
       return {
         inside: Boolean(frame && top && frame.contains(top)),
         top: top ? `${top.tagName.toLowerCase()}[data-testid=${top.getAttribute('data-testid')}]` : null,
+        beneath: Boolean(beneath && document.elementsFromPoint(x, y).some((element) => beneath.contains(element))),
       }
     },
-    { testId: CURVE_WINDOWS[kind].testId, ...point },
+    { testId: CURVE_WINDOWS[kind].testId, x: point.x, y: point.y, beneathSelector: beneathSelector ?? null },
   )
 }
 

@@ -5,6 +5,9 @@ import {
   CURVE_WINDOW_KINDS,
   MISMATCHED_STATION_ID,
   MOCK_EARLIER_CYCLE,
+  SHEET_MAX_WIDTH_PX,
+  SHEET_TOLERANCE_PX,
+  SHEET_WIDTH_VIEWPORT_RATIO,
   centerOf,
   curveWindowParts,
   dragWithMouse,
@@ -15,12 +18,13 @@ import {
   holdRiverForecast,
   installMultipleIssueTimes,
   installStationIdentityMismatch,
+  intersectionOf,
   measureCurveWindow,
   openCurveWindow,
   type CurveWindowKind,
 } from './support/curveSheet.mocked'
-import { contains } from './support/legendLauncher.mocked'
-import { CONTROL_BAR, boxOf } from './support/overlayLaunchers.mocked'
+import { contains, type Box } from './support/legendLauncher.mocked'
+import { CONTROL_BAR, LAUNCHER_COLUMN, boxOf } from './support/overlayLaunchers.mocked'
 import { installRiverWindowMocks } from './support/riverWindow.mocked'
 import { isMobileForm, requireViewport, type ViewportSize } from './support/viewportForm'
 
@@ -29,7 +33,7 @@ import { isMobileForm, requireViewport, type ViewportSize } from './support/view
  *
  * 用例 (a)–(l) 对应 tasks.md 里 #2803 的 Triage。需要特定视口的用例在用例内 `setViewportSize`，
  * 所以每条都在三个移动 project 下以同一组断言执行，不按 project 跳过；(d)(e) 用 project 自带的视口，
- * 三个 project 合起来覆盖底部抽屉与右侧抽屉。
+ * 三个 project 合起来覆盖底部抽屉与右侧抽屉。(d) 的层级判据是抽屉与控制条 / 启动器列的实测交集。
  */
 
 const PORTRAIT: ViewportSize = { width: 390, height: 664 }
@@ -39,6 +43,8 @@ const LANDSCAPE_WIDE: ViewportSize = { width: 844, height: 390 }
 const SHORT_PORTRAIT: ViewportSize = { width: 320, height: 480 }
 /** 宽 < 768 的矮视口横屏：右侧抽屉。 */
 const NARROW_LANDSCAPE: ViewportSize = { width: 600, height: 400 }
+/** 50vw > 28rem 的矮视口横屏：右侧抽屉宽度取 28rem（448px）那一支。 */
+const WIDE_SHORT_LANDSCAPE: ViewportSize = { width: 1000, height: 400 }
 const DESKTOP: ViewportSize = { width: 1280, height: 900 }
 const DRAG_PX = 100
 const DRAG_TOLERANCE_PX = 1
@@ -82,16 +88,17 @@ test.describe('M11 曲线窗抽屉形态', () => {
       })
     }
 
-    test(`(d) project 视口 ${name}：抽屉头部与贴边处的命中测试都落在抽屉内（盖住控制条与启动器）`, async ({ page }, testInfo) => {
+    test(`(d) project 视口 ${name}：抽屉盖住控制条与启动器列——头部、贴边处与两者交集中心的命中测试都落在抽屉内`, async ({ page }, testInfo) => {
       await installRiverWindowMocks(page)
       await openCurveWindow(page, kind)
       const where = label(page, testInfo)
       const sheet = await expectSheet(page, kind, where)
+      const anchor = expectedSheetAnchor(requireViewport(page))
 
       // 探测点避开贴 main 左缘、垂直居中的角色切换器（z-200）：底部抽屉取水平中线上贴底的一点，
       // 右侧抽屉取垂直中线上贴右的一点。
       const edgePoint =
-        expectedSheetAnchor(requireViewport(page)) === 'right'
+        anchor === 'right'
           ? { x: sheet.frame.x + sheet.frame.width - 4, y: sheet.frame.y + sheet.frame.height / 2 }
           : { x: sheet.frame.x + sheet.frame.width / 2, y: sheet.frame.y + sheet.frame.height - 4 }
       for (const [pointName, point] of [
@@ -99,7 +106,34 @@ test.describe('M11 曲线窗抽屉形态', () => {
         ['贴边点', edgePoint],
       ] as const) {
         const hit = await hitsCurveWindow(page, kind, point)
-        expect(hit, `${pointName} ${JSON.stringify(point)} 的命中测试应落在抽屉内 @ ${where}`).toEqual({ inside: true, top: hit.top })
+        expect(hit.inside, `${pointName} ${JSON.stringify(point)} 的命中测试应落在抽屉内，实际 ${hit.top} @ ${where}`).toBe(true)
+      }
+
+      // 上面两点都不在控制条 / 启动器列上方，证明不了层级。真正的判据：量出抽屉与两者的交集，
+      // 交集中心的命中栈里既有被盖住的那一个（它确实在这一点）、栈顶又在抽屉内。
+      const bar = await boxOf(page.locator(CONTROL_BAR), '控制条')
+      const column = await boxOf(page.locator(LAUNCHER_COLUMN), '启动器列')
+      const barOverlap = intersectionOf(sheet.frame, bar)
+      const columnOverlap = intersectionOf(sheet.frame, column)
+      console.log(`curve-sheet layering ${kind} @ ${where}`, JSON.stringify({ sheet: sheet.frame, bar, column, barOverlap, columnOverlap }))
+
+      // 控制条贴地图区底：两种抽屉都与它相交。
+      expect(barOverlap, `抽屉应与控制条相交 @ ${where}`).not.toBeNull()
+      const covered: Array<[string, string, Box]> = [['控制条', CONTROL_BAR, barOverlap!]]
+      if (anchor === 'right') {
+        // 启动器列在地图区右上角：右侧抽屉盖住它。
+        expect(columnOverlap, `右侧抽屉应与启动器列相交 @ ${where}`).not.toBeNull()
+        covered.push(['启动器列', LAUNCHER_COLUMN, columnOverlap!])
+      } else {
+        // 底部抽屉的顶边在启动器列底边之下：两者不相交，没有层级可断言。
+        expect(columnOverlap, `底部抽屉不应与启动器列相交 @ ${where}`).toBeNull()
+      }
+      for (const [coveredName, selector, overlap] of covered) {
+        const point = centerOf(overlap)
+        const hit = await hitsCurveWindow(page, kind, point, selector)
+        expect(hit.beneath, `前提：${coveredName}在交集中心 ${JSON.stringify(point)} 的命中栈里 @ ${where}`).toBe(true)
+        // soft：控制条与启动器列各自报告，一处被压在下面不掩盖另一处。
+        expect.soft(hit.inside, `${coveredName}交集中心 ${JSON.stringify(point)} 的命中测试应落在抽屉内（抽屉盖住${coveredName}），实际 ${hit.top} @ ${where}`).toBe(true)
       }
     })
 
@@ -147,6 +181,17 @@ test.describe('M11 曲线窗抽屉形态', () => {
     expect(expectedSheetAnchor(requireViewport(page))).toBe('right')
 
     await expectSheet(page, 'river', label(page, testInfo))
+  })
+
+  test('(b) 1000x400 河段窗：50% 视口宽超过 448 时右侧抽屉宽度封顶在 448', async ({ page }, testInfo) => {
+    await openAt(page, WIDE_SHORT_LANDSCAPE, 'river')
+    const viewport = requireViewport(page)
+    expect(expectedSheetAnchor(viewport)).toBe('right')
+    // 前提：这个视口选中的是 28rem 那一支（750 / 844 / 600 宽都只走 50vw 那一支）。
+    expect(SHEET_WIDTH_VIEWPORT_RATIO * viewport.width).toBeGreaterThan(SHEET_MAX_WIDTH_PX)
+
+    const sheet = await expectSheet(page, 'river', label(page, testInfo))
+    expect(Math.abs(sheet.frame.width - SHEET_MAX_WIDTH_PX), `抽屉宽 ${sheet.frame.width} 应为 ${SHEET_MAX_WIDTH_PX}`).toBeLessThanOrEqual(SHEET_TOLERANCE_PX)
   })
 
   test('(f) 390x664 河段窗：预报请求挂起时抽屉已是公式尺寸、标题与关闭按钮可见；加载完成后包围盒逐值不变', async ({ page }, testInfo) => {
