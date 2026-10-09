@@ -277,7 +277,8 @@ export function M11RiverForecastPanel({
           正在加载 GFS / IFS q_down forecast-series...
         </div>
       ) : forecast.data ? (
-        <div className="flex min-h-0 flex-1 flex-col px-3 pb-2 pt-2.5">
+        // 移动形态（抽屉）：容器的最小高度跟随内容，图表区被下限撑住时由抽屉主体滚动，而不是让图表区溢出本容器。
+        <div className="flex min-h-0 flex-1 flex-col px-3 pb-2 pt-2.5 mobile:min-h-auto">
           <div className="flex shrink-0 items-center gap-3 px-1 pb-1.5">
             {DUAL_SOURCES.map((source) => {
               const ok = forecast.results.some((result) => result.source === source && result.series)
@@ -290,8 +291,12 @@ export function M11RiverForecastPanel({
             })}
             <span className="ml-auto text-[10px] text-slate-500">滚轮缩放时间轴</span>
           </div>
-          <div className="min-h-0 flex-1" data-testid="m11-river-panel-chart">
-            <ForecastChart data={forecast.data} segmentName={displayName.title} variant="compact" appearance="dark" zoomable fill />
+          {/* 抽屉内图表区的可读下限：非矮视口横屏 160px、矮视口横屏 120px；有余量时仍占满剩余高度。 */}
+          <div className="relative min-h-0 flex-1 mobile:min-h-[160px] mobile-landscape:min-h-[120px]" data-testid="m11-river-panel-chart">
+            {/* 图表脱离文档流：图表库写进自身根节点的像素高度不参与图表区的固有高度，抽屉变矮后图表区能缩回去。 */}
+            <div className="absolute inset-0">
+              <ForecastChart data={forecast.data} segmentName={displayName.title} variant="compact" appearance="dark" zoomable fill />
+            </div>
           </div>
           {failedReasons.length > 0 ? (
             <p className="shrink-0 px-1 pt-1 text-[10px] text-amber-300/80" data-testid="m11-river-panel-partial">
