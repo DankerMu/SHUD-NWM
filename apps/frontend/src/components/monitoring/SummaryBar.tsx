@@ -35,7 +35,7 @@ export function SummaryBar({
   const counts = cycle?.job_counts ?? emptyJobCounts
 
   return (
-    <section className="grid gap-4 min-[900px]:grid-cols-[minmax(0,1.2fr)_minmax(22rem,0.9fr)_minmax(18rem,0.8fr)]">
+    <section className="grid gap-4 min-[900px]:grid-cols-[minmax(0,1.2fr)_minmax(22rem,0.9fr)_minmax(18rem,0.8fr)] mobile:grid-cols-1">
       <Card>
         <CardHeader className="flex-row items-center justify-between space-y-0">
           <CardTitle>当前周期</CardTitle>

@@ -77,11 +77,14 @@ export function LogModal({ jobId, open, onOpenChange, refreshKey = 0, strictIden
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[88vh] max-w-4xl">
+      {/* 移动形态：弹窗限高到动态视口（dvh），标题行取自身高度、日志区吃掉剩余高度并自己滚（纵向滚动者仍是 pre）；
+          标题 break-all 让长作业号折行而不是把网格列（连同日志区）撑出弹窗，pr-6 让折行后的标题不伸到关闭按钮底下。
+          桌面形态的类逐字保留。 */}
+      <DialogContent className="max-h-[88vh] max-w-4xl mobile:max-h-[calc(100dvh-2rem)] mobile:grid-rows-[auto_minmax(0,1fr)]">
         <DialogHeader>
-          <DialogTitle>作业日志 {jobId ?? ''}</DialogTitle>
+          <DialogTitle className="mobile:pr-6 mobile:leading-tight mobile:break-all">作业日志 {jobId ?? ''}</DialogTitle>
         </DialogHeader>
-        <pre className="max-h-[65vh] overflow-auto rounded-md border border-border bg-slate-950 p-4 font-mono text-xs leading-relaxed text-slate-100">
+        <pre className="max-h-[65vh] overflow-auto rounded-md border border-border bg-slate-950 p-4 font-mono text-xs leading-relaxed text-slate-100 mobile:max-h-none mobile:min-h-0">
           {loading ? '加载中...' : error ? `加载失败: ${error}` : content}
         </pre>
       </DialogContent>
