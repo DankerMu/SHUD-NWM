@@ -3,6 +3,7 @@ import ReactEChartsCore from 'echarts-for-react/lib/core'
 import { CloudRain } from 'lucide-react'
 
 import { echarts } from '@/components/charts/echartsCore'
+import { useChartFollowsContainer } from '@/components/charts/useChartFollowsContainer'
 import { M11DraggableCurveWindow } from '@/components/map/M11DraggableCurveWindow'
 import {
   formatIssueTime,
@@ -305,7 +306,7 @@ function StationForcingBody({
   )
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col px-3 pb-2 pt-2.5" data-testid="m11-station-popup-loaded">
+    <div className="flex min-h-0 flex-1 flex-col px-3 pb-2 pt-2.5 mobile:min-h-auto" data-testid="m11-station-popup-loaded">
       <div className="flex shrink-0 items-center gap-3 px-1 pb-1.5">
         {DUAL_SOURCES.map((source) => {
           const ok = chartResult.series.some((item) => item.source === source)
@@ -334,8 +335,11 @@ function StationForcingBody({
                 ))}
               </div>
             </div>
-            <div className="min-h-0 flex-1">
-              <StationVariableEcharts variable={selectedVariable} unit={chartResult.unitLabel} series={chartResult.series} />
+            <div className="relative min-h-0 flex-1 mobile:min-h-[160px] mobile-landscape:min-h-[120px]" data-testid="m11-station-panel-chart">
+              {/* 绝对定位：图表库写在自身根节点上的像素高度不参与图表区的固有高度。 */}
+              <div className="absolute inset-0">
+                <StationVariableEcharts variable={selectedVariable} unit={chartResult.unitLabel} series={chartResult.series} />
+              </div>
             </div>
           </div>
           {failedReasons.concat(chartResult.reasons).length > 0 ? (
@@ -479,5 +483,8 @@ function StationVariableEcharts({
     [series, unit],
   )
 
-  return <ReactEChartsCore echarts={echarts} option={option} notMerge lazyUpdate style={{ height: '100%', minHeight: 0, width: '100%' }} />
+  // 画布跟随图表区尺寸（抽屉旋转 / 形态切换）；本组件只在有可绘制序列时渲染。
+  const followContainer = useChartFollowsContainer(true)
+
+  return <ReactEChartsCore echarts={echarts} option={option} notMerge lazyUpdate onChartReady={followContainer} style={{ height: '100%', minHeight: 0, width: '100%' }} />
 }
