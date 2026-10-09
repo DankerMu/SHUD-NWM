@@ -535,7 +535,7 @@
   - Review focus：(1) 类串与回退是同一条规则（`max(42vw, 30rem)` 封顶 44rem），常量具名；(2) 桌面类串除宽度一段外逐字不变，抽屉类串与移动分支零 diff；(3) 既有测试只动了裁定点名的两处期望；(4) `≥ 1143` 不变量有浏览器与 jsdom 两侧的钉子。
   - Evidence floor：约定的本地验证命令 + `check:types` + 治理门测试全绿；新 spec 的 strict `tsc --noEmit` exit 0；先红后绿——红：对 `origin/master` 的 `src/`，(a)(c) 红（窗宽 322.56 / 430.08），(h) 的“宽 1000 -> left 40”红；(b)(d)(e)(f) 与 (h) 的 1280 / 1920 改动前已绿，须点名；`--repeat-each=5` 无 flaky；变异：只改类串不改回退 -> (g)(h) 红、e2e 全绿；只改回退不改类串 -> (a)(c) 红。改展示端运行时代码，合并前出 node-27 live receipt（PR 的生产构建对 live API）：桌面布局 oracle exit 0；768×1024 下经门控钩子打开河段窗，包围盒 480×270 且在地图区内、图表 canvas 可见；1280×900 下窗宽 537.6。
 
-- [ ] 4.4 河段抽屉图表可读高度：河段面板在抽屉内图表区占满头部与选择器之后的剩余高度，下限非矮视口横屏 160px、矮视口横屏 120px；不足时抽屉主体纵向滚动；图表画布与图表区同尺寸并随抽屉尺寸变化重排。新增 `e2e/m11-river-sheet-chart.mobile.mocked.spec.ts`。
+- [x] 4.4 河段抽屉图表可读高度：河段面板在抽屉内图表区占满头部与选择器之后的剩余高度，下限非矮视口横屏 160px、矮视口横屏 120px；不足时抽屉主体纵向滚动；图表画布与图表区同尺寸并随抽屉尺寸变化重排。新增 `e2e/m11-river-sheet-chart.mobile.mocked.spec.ts`。
 
   Depends on: 4.2
 
@@ -544,6 +544,24 @@
   **Suggested fixture level:** compact - 一个面板内部的布局约束。
 
   **Minimal mergeable slice:** atomic - 这是原“图表可读高度”的首刀（河段面板自成一个文件）；气象代站面板已切为 4.5。
+
+  Triage（#2805）：Issue type: feature ｜ Fixture level: compact（与上游建议一致；一个面板内部的布局约束——单组件、无状态 / 接口 / 共享入口变化，不触发 expanded；设计见 design.md D12 前两条，规格见 `specs/mobile-curve-sheet` 的「The curve chart keeps a minimum height inside a sheet」中的河段场景）｜ Blast radius: 河段曲线窗的图表区——下限写错会让矮抽屉里的曲线被压成细带（本 change 的起因之一），或让桌面窗里的图表区被撑出 16:9 的窗。
+  - Change surface：`apps/frontend/src/components/map/M11RiverForecastPanel.tsx`（已加载分支的容器与图表区的类）；图表区上允许加让“图表内容不参与图表区固有高度”的布局类（如 `relative` + 内层绝对定位，或等效写法——见布局口径 (5)）。仅当重排或防棘轮在面板一侧做不到时，才可改 `src/components/charts/ForecastChart.tsx`，且只限 `fill` 模式的包裹样式或尺寸变化时的重排，不改配置、不改非 `fill` 调用方的外观；改了要在偏离记录里写明原因与实测。新 spec `e2e/m11-river-sheet-chart.mobile.mocked.spec.ts`，需要的助手加进新文件 `e2e/support/sheetChart.mocked.ts`（4.5 的气象代站 spec 会复用其中与面板无关的量具）。不改 `M11DraggableCurveWindow.tsx`、`M11StationForcingPopup.tsx`（4.5）、`OverviewPage.tsx`。
+  - 布局口径（裁定）：先量再改。4.2 实测抽屉主体（`m11-river-forecast-panel-body`）在 390×664 高 317px、750×342 高 213px、320×480 高 191px——前两档里图表区多半已高于下限，下限真正咬住的是更矮的抽屉。要求：(1) 图表区（`m11-river-panel-chart`）在移动形态带最小高度：非矮视口横屏 160px、矮视口横屏 120px，用 `mobile:` / `mobile-landscape:` 变体加在图表区上（这两个变体互不依赖 `md:`，可以直接叠；`mobile-landscape:` 的值须确实盖过 `mobile:` 的值，以计算样式断言为准）；(2) 剩余高度足够时图表区仍占满剩余高度（保留 `flex-1`）；(3) 剩余高度不足时由**抽屉主体**（4.2 的 `-body` 容器，`overflow-y-auto`）滚动，且已加载分支的容器随内容长高——可观测口径：图表区的包围盒始终完整落在它的父容器（已加载容器）盒内，主体滚到底时图表区底边距主体可视底边不小于容器的下内边距（8px）；不新增第二个滚动容器；(4) 新增的移动专属取值全部带 `mobile:` 或 `mobile-landscape:` 前缀，桌面形态下图表区的计算 `min-height` 与图表容器、河段窗的包围盒不变（为 (5) 加的无前缀定位类不算违反，只要这两点成立）；(5) 防“高度棘轮”：已加载容器改为按内容定最小高之后，图表库上一次写进自身根节点的像素高度不得反过来把图表区撑住——从高抽屉转到矮抽屉后，图表区高度必须等于在矮抽屉里新打开时的高度。起报时次条、图例行、“滚轮缩放时间轴”提示（4.7 改文案）、部分失败提示的内容与顺序不动。
+  - Must preserve：桌面形态河段窗内图表容器的包围盒不变（`e2e/m11-curve-window-desktop.mocked.spec.ts` 的 1280×900 字面值、`e2e/m11-curve-window-min-size.mocked.spec.ts` 的 768×1024 canvas 可见，均不改通过）；抽屉本身的包围盒与“尺寸与内容状态无关”（`e2e/m11-curve-sheet.mobile.mocked.spec.ts` 全部用例不改通过，含 (f) 加载中 / 加载后同盒与 (h) 头部不随主体滚动）；加载中、等待、空态三个分支的 DOM 与类不动；全部既有 vitest（含 `M11RiverForecastPanel.test.tsx`）与 `m11-overlay-collision.mocked.spec.ts` 的 1920 / 1440 / 1280 / 800 不改期望值通过。
+  - Risk pack「Resource limits / 溢出」selected：图表下限与滚动兜底 -> 新移动 spec（三个移动 project 都跑、无按 project 跳过；每条用例内 `setViewportSize`；都在“曲线已加载”（图表 canvas 可见）之后量）：
+    - (a) 390×664：图表区高 ≥ 160，包围盒在抽屉盒内，区内 canvas 的宽高与图表区相等（±1px）；
+    - (b) 750×342 与 844×390：图表区高 ≥ 120，在抽屉盒内，canvas 与图表区同尺寸；
+    - (c) 下限咬住的竖向矮视口 320×480：图表区高 = 160（±0.5px，硬前提：主体 `scrollHeight > clientHeight`——若实测不溢出，换成实现者量出的、确实溢出的移动非横屏视口并写进偏离记录）；图表区盒完整在其父容器盒内；把主体滚到底后图表区完整落在抽屉的可视框内（图表区盒在主体可视盒内），图表区底边距主体可视底边 ≥ 8px（±0.5px），标题与关闭按钮仍可见；
+    - (d) 下限咬住的矮视口横屏 568×320：图表区高 = 120（±0.5px，同样的溢出硬前提；余量可能只有几像素——若实测不溢出，优先收窄宽度（如 480×320，抽屉更窄、头部折行更高）而不是再压高度，并写进偏离记录），图表区盒在父容器盒内、滚动后完整落在可视框内且底边留 ≥ 8px；PR 里报告 (c)(d) 所用视口在改动前的图表区实测高度；
+    - (e) 剩余高度足够时仍占满：390×664 下图表区高 > 160，且主体不溢出（`scrollHeight === clientHeight`）——防止把图表区钉死在下限；
+    - (f) 形态归属：图表区计算 `min-height` 在 390×664 为 `160px`、750×342 为 `120px`、1280×900（用例内 `setViewportSize`）为 `0px`（或改动前的原值——以 `origin/master` 实测为准）。
+  - Risk pack「Concurrency / 尺寸变化」selected：重排 -> 同一 spec：(g) 390×664 → 750×342 后（同一河段窗、不重开）canvas 的宽高等于新的图表区宽高（±1px），与旋转前的 canvas 尺寸不同，图表区仍在抽屉盒内，且图表区高度等于“在 750×342 新开页面、新打开的河段窗”的图表区高度（±1px，同一用例内用第二个页面量出——防棘轮）；(h) 750×342 → 390×664 反向同样成立（对照值取 390×664 新开窗）。
+  - Risk pack「Legacy compatibility」selected -> Must preserve；PR 描述贴出 `git diff --stat --diff-filter=MDR origin/master -- apps/frontend/e2e 'apps/frontend/src/**/__tests__/**'`（期望为空）与 `git diff --stat origin/master -- apps/frontend/src`（期望只有 `M11RiverForecastPanel.tsx`；出现 `ForecastChart.tsx` 时须有对应的偏离说明）。
+  - 未选：Public API（无接口 / 契约面变化，容器契约在 4.2）、Error handling（空态 / 加载分支不动）、Auth、File IO、Schema、Config、Documentation（design.md D12 与规格已写明）。
+  - Non-goals：气象代站面板（4.5）；触屏缩放与提示文案（4.7）；抽屉内控件的 44px / 16px 下限（4.9）；加载中 / 等待 / 空态分支在矮抽屉里的排版；图表配置（坐标轴、图例、tooltip）在窄图里的可读性调优；桌面形态的任何变化。
+  - Review focus：(1) 新类全部带移动前缀，桌面计算样式不变；(2) 溢出交给抽屉主体滚动，没有新增第二个滚动容器；(3) 下限咬住的两条用例确实处在溢出状态（硬前提），不是空转；(4) (e) 防钉死；(5) 重排用例比较的是旋转前后不同的尺寸；(6) 三个移动 project 都断言、无跳过。
+  - Evidence floor：约定的本地验证命令 + `check:types` + 治理门测试全绿；新 spec 与助手的 strict `tsc --noEmit` exit 0；先红后绿——红：对 `origin/master` 的 `src/`，(c)(d)（图表区被压到下限以下、主体不溢出）与 (f) 红；(a)(b)(e)(g)(h) 可能改动前已绿，须逐条点名实际结果并报告各视口下图表区与主体的实测高度；`--repeat-each=5` 无 flaky；变异：去掉 `mobile:` 下限 -> (c)(f) 红；去掉 `mobile-landscape:` 下限 -> (d)(f) 红；已加载容器不随内容长高（图表区溢出其父容器）-> (c)(d) 的“图表区在父容器盒内 / 底边留 8px”红；去掉防棘轮的处理 -> (g) 的“等于新开窗的图表区高度”红（若实现者证明现状下不存在棘轮、无需处理，则如实报告并说明 (g) 该断言靠什么保持为绿）。改展示端运行时代码，合并前出 node-27 live receipt（PR 的生产构建对 live API）：桌面布局 oracle exit 0；390×664 与 750×342 下经门控钩子打开河段窗，曲线加载后图表区高 ≥ 160 / ≥ 120、canvas 与图表区同尺寸；320×480 下图表区高 160 且可滚入可视框（live 上该河段若无曲线数据则如实写进限制）；1280×900 下图表容器盒与改动前相同。
 
 - [ ] 4.5 气象代站抽屉图表可读高度：气象代站面板同 4.4 的下限与滚动兜底；矮视口横屏下图表区可被完整滚入抽屉可视框。新增 `e2e/m11-station-sheet-chart.mobile.mocked.spec.ts`。
 
