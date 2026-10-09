@@ -307,6 +307,8 @@ function ForecastChartInner({ data, segmentName, variant = 'full', appearance = 
   // 变化合并成同一次），容器恰在那时变尺寸（如刚加载完就旋转）画布会一直停在旧尺寸；这里自己观察容器。
   const containerObserver = useRef<ResizeObserver | null>(null)
   useEffect(() => () => containerObserver.current?.disconnect(), [])
+  const chartRendered = Boolean(data) && normalizedSeries.length > 0
+  useEffect(() => { if (!chartRendered) containerObserver.current?.disconnect() }, [chartRendered])
   const followContainer = useCallback((instance: EChartsInstance) => {
     const container = instance.getDom()
     containerObserver.current?.disconnect()
