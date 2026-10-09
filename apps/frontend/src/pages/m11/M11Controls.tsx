@@ -398,9 +398,15 @@ export function M11Timeline({
               aria-hidden="true"
             />
           ) : null}
+          {/*
+            移动形态的触控命中区（44px 高）：`mobile:h-11` 把输入框撑高，`mobile:-mt-7` 抵掉多出的 28px
+            让行高不变，`mobile:top-3.5` 再下移 14px 使它仍以原来的轨道为中心。上下各外扩 14px，盖住的是
+            当前时刻行与刻度行（都不可点）。不能写成 `-my-3.5`：行内替换元素的基线在边框盒底边，
+            负的下外边距收不回行盒，这一行会被撑高 14px。
+          */}
           <input
             aria-label="有效时间滑块"
-            className="relative z-[100] h-4 w-full accent-primary-600 disabled:cursor-not-allowed"
+            className="relative z-[100] h-4 w-full accent-primary-600 disabled:cursor-not-allowed mobile:top-3.5 mobile:-mt-7 mobile:h-11"
             type="range"
             min={0}
             max={Math.max(model.validTimes.length - 1, 0)}

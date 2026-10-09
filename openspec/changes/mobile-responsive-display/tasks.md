@@ -820,7 +820,7 @@
 
 ## 5. 全页审计（`/`）
 
-- [ ] 5.1 触控与字号审计：新增 `e2e/m11-touch-audit.mobile.mocked.spec.ts`，在三种状态（默认、每个面板分别展开、河段窗 / 气象代站窗分别打开）下遍历 `/` 上所有可见可点控件，断言 ≥ 44×44；遍历所有可见 `select` / select 触发器，断言字号 ≥ 16px；并断言三个移动 project 各自的视口下以及 `setViewportSize(320, 568)` 后，所有可见可点控件的包围盒在视口内。并加一条静态检查（vitest 或车道内的一条用例均可）：`e2e/` 下所有 `.mobile.` spec 都不含截图比对断言，也不含文档滚动宽度与窗口宽度的比较。豁免 MapLibre attribution 与开发用角色切换器。本 task 默认只加断言；若审计暴露残余不达标控件，在本 PR 内修掉并在 PR 描述里列出。
+- [x] 5.1 触控与字号审计：新增 `e2e/m11-touch-audit.mobile.mocked.spec.ts`，在三种状态（默认、每个面板分别展开、河段窗 / 气象代站窗分别打开）下遍历 `/` 上所有可见可点控件，断言 ≥ 44×44；遍历所有可见 `select` / select 触发器，断言字号 ≥ 16px；并断言三个移动 project 各自的视口下以及 `setViewportSize(320, 568)` 后，所有可见可点控件的包围盒在视口内。并加一条静态检查（vitest 或车道内的一条用例均可）：`e2e/` 下所有 `.mobile.` spec 都不含截图比对断言，也不含文档滚动宽度与窗口宽度的比较。豁免 MapLibre attribution 与开发用角色切换器。本 task 默认只加断言；若审计暴露残余不达标控件，在本 PR 内修掉并在 PR 描述里列出。
 
   Depends on: 2.5, 3.3, 3.5, 3.8, 4.6, 4.9
 
@@ -829,6 +829,34 @@
   **Suggested fixture level:** compact - 以测试为主，可能附带零星尺寸类名修正。
 
   **Minimal mergeable slice:** atomic - 一条遍历式审计，按状态参数化；拆开只是同一断言的多个副本。
+
+  Triage（#2812）：Issue type: test（审计；可能附带零星移动尺寸类）｜ Fixture level: compact（与上游建议一致；规格见 `specs/mobile-viewport-shell` 的「Mobile form enforces touch-target and form-font floors」前四条 Scenario 与「Controls stay inside the viewport」，`specs/mobile-regression-evidence` 的「No pixel or document-width oracles」；设计见 design.md D13 / D15）｜ Blast radius: 以新增测试为主；若审计暴露残余控件，改动面是 `/` 上个别控件的移动前缀尺寸类——写错的后果是桌面尺寸被带着变，或移动形态下面板 / 抽屉 / 控制条被撑高而破坏 3.x / 4.x 已钉住的几何。
+  - Governing invariant：审计是**遍历式**的——控件集合由页面当前 DOM 枚举得出，不是手写的 testid 清单；因此“枚举为空 / 漏掉一类控件也通过”是本 task 唯一的真实失败方式，每个状态都必须带非空与点名的下限（见口径 (5)）。
+  - Change surface：新 spec `apps/frontend/e2e/m11-touch-audit.mobile.mocked.spec.ts`；可新增一个 support 文件（枚举与量具）；一条静态检查（vitest，放在既有读源码类 vitest 的旁边，或车道内的一条用例，实现者定）。`src/` 默认不改；审计暴露残余时只允许加 / 改**移动前缀**的尺寸类（`mobile:` / `mobile-landscape:`），逐个列进 PR。不改别的 task 的 spec 与既有 support 文件的既有行为（需要的开窗、展开面板助手直接复用）。
+  - 口径（裁定）：
+    - (1) 可点控件 = 匹配 `button, a[href], select, input:not([type=hidden]), summary, [role=button], [role=tab], [role=combobox], [role=switch], [role=checkbox], [role=radio], [role=menuitem], [role=option], [tabindex]:not([tabindex="-1"])` 且“可见”的元素；`canvas` 一律排除（MapLibre 给地图画布设了 `tabindex="0"`；图表画布同理不算控件）。可见 = 包围盒非零、`visibility` / `display` 未隐藏、不在 `[inert]` / `aria-hidden="true"` 的子树里、且与其全部裁剪祖先（`overflow` 非 `visible`）的交集非空；例外：处在面板 / 抽屉的纵向滚动容器内而被滚出的控件仍计入 44 下限与字号下限（量它自己的包围盒，不套滚动裁剪），只在“在视口内”的纵向判据里按可见部分处理（纵向滚动容器的成员整体跳过裁剪交集判定；完全滚出时纵向“在视口内”视为通过，横向照常断言）。`disabled` 的控件仍计入（它仍占位、启用后要能点）。
+    - (2) 豁免：MapLibre attribution（`.maplibregl-ctrl-attrib` 子树）与开发用角色切换器（它没有 testid：`[role=combobox][aria-label="Role"]` 触发器，同时豁免字号下限）。有效时间滑块（控制条里的 `input[type=range]`）单独裁定，见 (8)。除此之外不得再加豁免；确需再豁免某一类就停下报告。
+    - (3) 点击区 = 元素自己的包围盒；`input` 被 `label` 包住或经 `for` 关联时取该 `label` 的包围盒。实现者先核实既有控件有没有靠伪元素 / 透明外扩来放大点击区的（3.x / 4.x 里若有）：有则对这些控件改用“以控件中心为中心的 44×44 方框四角内缩 1px 处 `elementFromPoint` 命中该控件或其后代”判定，并在 PR 里点名；没有就不写这条分支。下限判据 ≥ 44（容差沿用既有移动 spec 的写法，不得放宽到 43.5 以下）。
+    - (4) 状态 × 视口：六个状态——默认；图层面板展开；底图面板展开；图例面板展开；河段窗打开；气象代站窗打开——在三个移动 project 各自的视口下断言：全部可点控件 ≥ 44×44；全部可见 `select` 与 `[role=combobox]` 的计算字号 ≥ 16px；全部可点控件在视口内。另在 `setViewportSize(320, 568)` 下对同样六个状态只断言“在视口内”（规格对 320 宽不要求 44）。“在视口内”：横向为完整包围盒落在 `[0, innerWidth]`（±0.5）；纵向对处在纵向可滚动祖先内的控件取其可见部分，其余取完整包围盒落在 `[0, innerHeight]`（±0.5）。不得用文档滚动宽度。若某控件处在横向真的可滚动的祖先内（判据 = 该祖先计算 `overflow-x` 为 `auto` / `scroll` **且** `scrollWidth > clientWidth + 1`；两条都要：单看计算样式不够——`overflow-y: auto` 会把 `overflow-x` 也算成 `auto`；单看 `scrollWidth` 也不够——`overflow: visible` 的祖先同样把后代溢出计入，如时间轴刻度标签），停下报告（不应存在）。
+    - (5) 非空下限：每个状态断言枚举数 ≥ 该状态的实测下限（实现者量出后按 project 写成常量，并在 PR 表里给出每个状态 × project 的枚举数），且枚举结果里**点名包含**该状态的代表控件：
+      - 默认：三个启动器（`m11-launcher-layers` / `-basemap` / `-legend`）、预报源的两个分段按钮、步进 / 播放的三个按钮、起报时次与播放速度两个原生 `<select>`、有效时间滑块。移动形态没有缩放按钮（3.x 已移除），站点头部没有可点元素——都不点名。默认状态另跑一遍运维角色（`setRole('operator')`，沿用既有助手），把运维入口 `m11-ops-link` 纳入审计并点名。
+      - 面板展开：该面板的启动器且 `aria-expanded="true"`；图层面板另含面板内 ≥ 1 个图层行（含 disabled 的 `m11-layer-toggle-precip`）；底图面板另含三个分段按钮；图例面板断言面板可见且面板内可点控件数为 0（图例内容没有可点元素；面板没有内部关闭按钮，收起靠启动器或点地图）。
+      - 抽屉打开：关闭按钮、起报时次触发器（气象代站另加五个要素切换项）。开窗用 `e2e/support/sheetControls.mocked.ts` 的既有助手（带多时次 mock，触发器只在有时次时渲染）。抽屉打开时外壳让位（4.6），被隐藏的启动器 / 控制条不应出现在枚举里——这一点同样断言。
+    - (6) 静态检查：`e2e/` 下文件名含 `.mobile.` 的 spec（含本 task 新增的）源码里不出现截图比对断言（`toHaveScreenshot`、`toMatchSnapshot`），也不出现文档滚动宽度的读取（`documentElement.scrollWidth`、`body.scrollWidth`）。检查自身若放在 `.mobile.` 文件里，须避免自己命中自己。`scrollingElement.scrollWidth` 一并禁用。读元素自己的 `scrollWidth`（既有 `m11-header.mobile` 有）不算违规。至少扫描到 N 个文件的下限（现有 19 个，加本 task 为 20，写成“≥ 实测数”）。
+    - (7) 残余修复的边界：只修“加一两个移动前缀类就达标”的控件。需要改结构、改共享基础选择器（6.1 / #2813 的范围）、或修复会让既有移动 spec 的几何断言变红的，停下报告，不要自行扩大。`/ops`、`/monitoring` 的字号（规格同一条 requirement 的第五个 Scenario）属 6.x，不在本 task。预先许可的一处：播放速度 `<select>`（选项 `1x` / `2x` / `4x`）若宽不足 44，可加 `mobile:min-w-11`，前提是 750×342 下既有控制条 spec（滑块宽 ≥ 120、条高）仍不改通过。
+    - (8) 有效时间滑块（3.7 / 3.8 的 Non-goals 把它的触控命中区推给了本 task）：现为 16px 高。首选修法：只加移动前缀类把输入框自身撑到 44 高而不改流内高度（如 `mobile:h-11 mobile:-my-3.5`），前提是被外扩盖住的上下邻居里没有可点控件、且既有控制条 spec（竖屏、矮视口横屏的条高 / 时间轴高 / 滑块宽，以及横屏 spec 里“滑块在时间轴盒内”的断言）不改通过。做不到（盖住了可点邻居，或既有 spec 变红）就不改 `src/`：滑块豁免 44 的**高度**下限（规格枚举的是 buttons / links / select triggers / toggles / chips，不含滑块），仍计入宽度 ≥ 44 与“在视口内”，并在 PR 偏离记录里点名“拇指命中区未达 44，留作后续”。两条路选了哪条、实测数字，都写进 PR。
+  - 实现期同步（以此为准，上文与此冲突处作废）：
+    - 首跑唯一的残余控件是有效时间滑块（高 16）。(8) 走首选分支，但示例那组类不成立：`mobile:h-11 mobile:-my-3.5` 实测把滑块那一行撑高 14px（行内替换元素的基线在边框盒底边，负的下外边距收不回行盒），既有控制条 spec 红。落地的是 `mobile:top-3.5 mobile:-mt-7 mobile:h-11`（输入框本就是 `relative`）：命中区 44 高、仍以原轨道为中心，行高 / 时间轴高 / 控制条高在全部视口不变。`top-3.5` 是定位偏移而非尺寸类——编排者裁定接受：它是移动前缀的、不改流内几何、桌面不变，符合 (7) 的本意。
+    - 枚举数在三个移动 project 与 320×568 下完全相同，下限按状态写成一个常量（不按 project 分开）。图层面板断言“面板内恰 3 个按钮且降水行 disabled”，比上文更严。
+    - 伪元素分支（口径 (3)）没写：全仓没有靠伪元素放大点击区的控件。播放速度 `<select>` 实测宽 49，没有用到预先许可的 `mobile:min-w-11`。
+    - 出界变异的实际形态：完全被裁剪祖先裁掉的控件按口径 (1) 不可见、从枚举里消失，检出靠 (5) 的枚举数下限与点名，而不是“在视口内”断言；“在视口内”断言由“启动器右移 20px”的变异钉住（字面的 200px 会让面板用例卡在点击超时，没有采用）。
+    - 静态检查按源码文本匹配，注释里出现禁用词也会红。
+  - Must preserve：全部既有 spec 不改通过（尤其 `m11-overlay-collision` 的 1920 / 1440 / 1280 / 800 与全部既有移动 spec）；桌面形态下任何控件尺寸不变（若改了 `src/`，在 1280×900 下对被改控件量改动前后尺寸，写进 PR）。
+  - Risk pack「Legacy compatibility」selected：仅当改了 `src/` 时适用 -> 上一条的桌面前后实测 + 既有桌面 spec 不改通过。
+  - 未选：其余全部（纯测试 task；无状态、无接口、无配置变化）。
+  - Non-goals：`/ops`、`/monitoring`、其他路由；起报时次下拉列表打开后的选项（4.9 已钉）；加载中 / 空态 / 兜底分支里的控件；320 宽下的 44 下限；真机手感（#2818）；共享基础选择器（6.1）；键盘可达性与对比度。
+  - Review focus：(1) 枚举是遍历式的，没有退化成手写清单；(2) 非空与点名下限齐全，抽屉状态下确实断言了被让位的外壳不在枚举里；(3) 豁免只有两类，另加 (8) 的滑块高度裁定（若走回退分支）；(4) 三个移动 project 都断言、无跳过、无 `force`、读数轮询；(5) 静态检查会因新增一处违规而变红；(6) 若改了 `src/`：只有移动前缀类，桌面不变。
+  - Evidence floor：约定的本地验证命令 + `check:types` + 治理门全绿；新 spec 的 strict `tsc --noEmit` exit 0；PR 给出每个状态 × project 的枚举数、最小宽 / 高、最小字号的实测表；审计首跑暴露的残余控件清单（没有就写“无”，并给出首跑即全绿的原始输出摘要）；`--repeat-each=5 --workers=1` 无 flaky；变异（证明审计能检出，每个状态至少一条）：两种窗的关闭按钮是两处源码，各去掉一处的移动尺寸类 -> 对应抽屉状态红；改小共用启动器类的 `h-11`（三个启动器同一串类）-> 默认与三个面板状态全红；把图层面板内一个图层行、底图面板内一个分段按钮改矮 -> 对应面板状态红；把运维入口改小 -> 运维角色那一遍红；去掉起报时次触发器的移动字号 -> 字号断言红；给某个控件加 `mobile:translate-x-[200px]`（或等价的出界）-> “在视口内”红；往任一 `.mobile.` spec 临时加一处截图比对 / 文档滚动宽度 -> 静态检查红。若改了 `src/`（展示端运行时代码）：合并前出 node-27 live receipt（390×664 与 750×342 下被改控件 ≥ 44×44、1280×900 下尺寸不变、桌面 oracle exit 0）；未改 `src/` 则不需要 receipt。
 
 ## 6. 运维页兜底
 
