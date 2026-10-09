@@ -443,7 +443,7 @@
 
 ## 4. 曲线抽屉（`/`）
 
-- [ ] 4.1 单窗策略：移动形态下打开河段窗关闭气象代站窗、反之亦然；从桌面形态进入移动形态且双窗都开时保留活动窗、关闭另一个；桌面形态双窗并存不变。只用 vitest 在页面组件层验证（既有 MapLibre 桩可直接触发要素点击回调，`matchMedia` 用可控桩）；不新增 e2e——真实浏览器里抽屉会盖住钩子定位到的第二个要素。
+- [x] 4.1 单窗策略：移动形态下打开河段窗关闭气象代站窗、反之亦然；从桌面形态进入移动形态且双窗都开时保留活动窗、关闭另一个；桌面形态双窗并存不变。只用 vitest 在页面组件层验证（既有 MapLibre 桩可直接触发要素点击回调，`matchMedia` 用可控桩）；不新增 e2e——真实浏览器里抽屉会盖住钩子定位到的第二个要素。
 
   Depends on: 2.1
 
@@ -452,6 +452,21 @@
   **Suggested fixture level:** expanded - 改页面级的曲线窗状态，并收窄既有“双窗并存”契约的适用范围。
 
   **Minimal mergeable slice:** atomic - 这是原“单窗 + 让位”的首刀：只动曲线窗状态。让位（隐藏控制条等）已切为 4.6。
+
+  Triage（#2802）：Issue type: feature ｜ Fixture level: expanded（与上游建议一致；设计见 design.md D10，规格见 `specs/mobile-curve-sheet` 的「Mobile form shows one curve window at a time」与 `specs/map-feature-popups`（MODIFIED）的「River and station curve windows can coexist and move」）｜ Blast radius: `/` 的曲线窗状态——`OverviewMode` 里的 `riverPopup` / `stationPopup` / `activeCurveWindow` 是河段窗与气象代站窗的唯一开合来源，也决定地图上的选中高亮与曲线区域错误边界的复位键；分支写错会让桌面丢掉“双窗并存”，或让移动形态在 4.2 的抽屉落地后叠出两个抽屉。
+  - Change surface：`apps/frontend/src/pages/OverviewPage.tsx` 的 `OverviewMode`（读 `useMobileForm().mobile`，加一处状态收敛）；新 vitest 文件 `src/pages/__tests__/OverviewPageSingleCurveWindow.test.tsx`。不改 `M11RiverForecastPanel` / `M11StationForcingPopup` / `M11DraggableCurveWindow` / `M11MapLibreSurface` / `useMobileForm`；不新增、不修改任何 e2e。
+  - Governing invariant：移动形态下 `riverPopup` 与 `stationPopup` 至多一个非空；两者同时非空时关闭的是 `activeCurveWindow` **没有**指向的那个。桌面形态下两者相互独立（任何一次打开、关闭都不动另一个）。
+  - 实现口径（裁定）：不变量在**一处**收敛——`OverviewMode` 里一个依赖 `mobile`、两个 popup 是否非空与 `activeCurveWindow` 的 layout effect：`mobile` 且两窗都开时，`activeCurveWindow === 'station'` 则 `setRiverPopup(null)`，否则 `setStationPopup(null)`。点击处理函数 `handleMapOverlayClick` 不加形态分支：它本来就在打开某类窗时把 `activeCurveWindow` 指向该类，所以“河段替换站点”“站点替换河段”“桌面进入移动形态”三种场景由同一条规则覆盖。用 layout effect 而不是普通 effect：收敛发生在浏览器绘制之前，移动形态下不会画出一帧双窗。“关闭”是清状态而不是隐藏：回到桌面形态后被关掉的窗不复现。不新增 state、不改 `activeCurveWindow` 的类型与初值。
+  - Sibling surfaces：(1) `selectedSegmentId` / `selectedStationId`（由两个 popup 派生，经 `M11FullscreenMap` 传给 `M11MapLibreSurface` 做选中高亮）——被关掉的那类高亮随之清除，是期望行为，须断言；(2) 留下的那个面板的 `active` prop 为 `true`（既有表达式在另一窗为空时即为真，不改表达式）；(3) 曲线区域 `RegionErrorBoundary` 的 `resetKeys=[selectedSegmentId, selectedStationId]`——替换时键变化、边界复位，与今天“选中另一个要素即复位”同一语义，不改；(4) 两个既有清理 effect（切图层清两窗、关 `metStations` 清站点窗）不动；(5) `RegionCrashProbe region="curve"` 的挂载条件不动（仍是“有任一面板”）。
+  - Must preserve：桌面形态下河段 → 站点、站点 → 河段都保持双窗并存，关闭其中一个不影响另一个；移动形态下同类再点（河段 A → 河段 B）仍是替换该类的选中、不动另一类（此时另一类本就为空）；移动形态下关闭唯一的窗后两者皆空；全部既有 vitest 文件（含 `OverviewPageRegionCrashProbes.test.tsx`、`OverviewPageRegionBoundaries.test.tsx`）与全部既有 e2e（含 `m11-overlay-collision.mocked.spec.ts` 的 1920 / 1440 / 1280 / 800、`m11-station-open.mocked.spec.ts`、河段窗夹具 spec）不改期望值通过。
+  - Risk pack「Public API / entry」selected：曲线窗开合是 `/` 的用户可见契约 -> 新 vitest（做法沿用 `OverviewPageRegionCrashProbes.test.tsx`：mock `M11MapLibreSurface`，由桩调用 `onOverlayClick` 触发河段 / 站点点击，桩同时把收到的 `selectedSegmentId` / `selectedStationId` 写到 DOM 属性；两个面板用带 testid 的桩，桩把收到的 `active` 写到 DOM 属性并暴露 `onClose`；`matchMedia` 用 `src/test/mobileFormMatchMedia.ts`），用例：(a) 移动形态：河段 → 站点后只有站点桩、其 `active` 为真；(b) 移动形态：站点 → 河段后只有河段桩、其 `active` 为真；(c) 在 (a)(b) 里被关掉那类的选中 id 在地图桩上为空，留下那类的选中 id 仍在。
+  - Risk pack「Concurrency / 状态迁移」selected：形态切换时的收敛 -> 同一 vitest：(d) 桌面形态双窗都开、站点窗为活动窗（后点站点），`setMobile(true)` 后只有站点桩；(e) 对称：桌面形态双窗都开、河段窗为活动窗，`setMobile(true)` 后只有河段桩；(f) 承接 (d)：再 `setMobile(false)` 后仍只有站点桩（被关的窗不复现）；(g) 移动形态下关闭唯一的窗（调用桩拿到的 `onClose`）后两个桩都不在，再点河段能重新打开。
+  - Risk pack「Legacy compatibility」selected：收窄既有“双窗并存”契约的适用范围 -> 同一 vitest：(h) 桌面形态河段 → 站点后两个桩都在；(i) 桌面形态站点 → 河段后两个桩都在；(j) 桌面形态双窗都开时关闭其中一个，另一个仍在。PR 描述贴出 `git diff --stat --diff-filter=MDR origin/master -- 'apps/frontend/src/**/__tests__/**'`（期望为空）与 `git diff --stat origin/master -- apps/frontend/e2e`（期望为空）。
+  - 未选：Error handling（边界与兜底不改，复位键语义不变，见 Sibling surfaces (3)；曲线兜底时的让位归 4.6）、Auth、File IO、Schema、Config、Resource limits、Documentation（规格与 design.md D10 已写明；`docs/spec/06B` §8 已在 1.2 落地）。
+  - Seams under test：`OverviewMode` 的曲线窗状态机——输入是地图点击回调与形态信号，输出是渲染了哪些面板、各自的 `active` 与传给地图的选中 id。
+  - Non-goals：抽屉形态（4.2）；抽屉打开时让位与暂停（4.6）；自动平移与站点锚点（4.10）；任何 e2e（issue 明文：真实浏览器里窗会盖住钩子定位到的第二个要素）；“不画出一帧双窗”不作自动化断言（jsdom 无绘制；由“用 layout effect”这条实现口径与 review 保证）；从移动形态回到桌面形态时恢复被关掉的窗。
+  - Review focus：(1) 不变量只在一处收敛，`handleMapOverlayClick` 无形态分支；(2) 桌面形态下该 effect 是空操作（`mobile` 为假时不调用任何 setter）；(3) effect 的依赖完整且不会自激（清掉一个之后条件不再成立）；(4) 关的是非活动窗，方向没写反——(d)(e) 两条对称用例都在；(5) 用的是 layout effect；(6) 既有测试与 e2e 零改动。
+  - Evidence floor：约定的本地验证命令 + `check:types` 全绿（本 task 不新增 e2e 文件，治理门测试照跑、期望不变）；新 vitest 先红后绿——红：对 `origin/master` 的 `src/`，(a)(b)(c)(d)(e)(f) 红（移动形态下两个桩都在），(g)(h)(i)(j) 改动前已成立、可先绿，须在 PR 里点名；变异：把 effect 里的方向写反时 (a)(b)(d)(e) 变红，去掉 `mobile` 条件时 (h)(i)(j) 变红。改展示端运行时代码，合并前出 node-27 live receipt（PR 的生产构建对 live API）：桌面布局 oracle exit 0；1280×900 下经门控钩子先开河段窗再开站点窗，两窗并存；390×664 下开河段窗成功，再经站点钩子点站点——若站点可点到则断言只剩站点窗，若被河段窗盖住点不到则如实写进限制（单窗替换的权威证据是 vitest）。
 
 - [ ] 4.2 曲线窗抽屉形态：`M11DraggableCurveWindow` 在移动形态渲染为抽屉——非矮视口横屏时贴底、全宽、高度固定为 `min(60dvh, 地图区高度 − 8px)`；矮视口横屏时贴右、全高、宽度固定为 `min(50vw, 28rem)`；尺寸不随内容状态变化；无固定宽高比；不挂拖拽监听；头部不随主体滚动；层级高于控制条、启动器与面板；回到桌面形态时为默认位置的可拖拽窗。桌面形态行为不变。新增 `e2e/m11-curve-sheet.mobile.mocked.spec.ts`。
 
