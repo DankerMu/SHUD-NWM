@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Waves, X } from 'lucide-react'
 
-import { ForecastChart } from '@/components/charts/ForecastChart'
+import { ForecastChart, type ForecastChartZoomWindow } from '@/components/charts/ForecastChart'
 import { M11DraggableCurveWindow } from '@/components/map/M11DraggableCurveWindow'
 import { formatIssueTime, M11IssueTimeSelect } from '@/components/map/M11PopupChrome'
+import { useMobileForm } from '@/hooks/useMobileForm'
 import { cn } from '@/lib/cn'
 import { formatRiverSegmentDisplayName } from '@/lib/hydroMet/displayNames'
 import {
@@ -149,9 +150,46 @@ function buildDualForecast(segment: HydroMetRiverForecastSegmentIdentity, result
   }
 }
 
+const FULL_ZOOM_WINDOW: ForecastChartZoomWindow = { start: 0, end: 100 }
+
+/**
+ * 已加载曲线的图表区。只读属性 `data-zoom-start` / `data-zoom-end`（时间轴缩放窗口，占全范围的百分比）与
+ * `data-tooltip-visible` 由图表回报的实例状态驱动；状态随本组件挂载而生，曲线重新出现时从初值开始。
+ */
+function RiverChartArea({ data, segmentName, mobile }: { data: ForecastData; segmentName: string; mobile: boolean }) {
+  const [zoomWindow, setZoomWindow] = useState(FULL_ZOOM_WINDOW)
+  const [tooltipVisible, setTooltipVisible] = useState(false)
+  return (
+    // 抽屉内图表区的可读下限：非矮视口横屏 160px、矮视口横屏 120px；有余量时仍占满剩余高度。
+    // 移动形态下横向拖动与捏合归图表（平移 / 缩放时间轴），浏览器只接管纵向滚动。
+    <div
+      className="relative min-h-0 flex-1 mobile:min-h-[160px] mobile:touch-pan-y mobile-landscape:min-h-[120px]"
+      data-testid="m11-river-panel-chart"
+      data-zoom-start={String(zoomWindow.start)}
+      data-zoom-end={String(zoomWindow.end)}
+      data-tooltip-visible={String(tooltipVisible)}
+    >
+      {/* 图表脱离文档流：图表库写进自身根节点的像素高度不参与图表区的固有高度，抽屉变矮后图表区能缩回去。 */}
+      <div className="absolute inset-0">
+        <ForecastChart
+          data={data}
+          segmentName={segmentName}
+          variant="compact"
+          appearance="dark"
+          zoomable
+          fill
+          touchPan={mobile}
+          onZoomWindowChange={setZoomWindow}
+          onTooltipVisibleChange={setTooltipVisible}
+        />
+      </div>
+    </div>
+  )
+}
+
 /**
  * 河段 q_down 预报面板（M26 单页全屏）：可拖拽玻璃曲线窗。
- * GFS + IFS 同一坐标轴同时渲染、不做切换；滚轮缩放时间轴（以光标所在时刻为中心）。
+ * GFS + IFS 同一坐标轴同时渲染、不做切换；滚轮缩放时间轴（以光标所在时刻为中心），移动形态为双指缩放、单指平移。
  * honest 红线：每个源契约校验失败/无产品 → 列出原因，绝不绘制；两源皆无 → honest 空态。
  */
 export function M11RiverForecastPanel({
@@ -179,6 +217,7 @@ export function M11RiverForecastPanel({
     }),
     [basinId, identity.river_segment_id, segment.name],
   )
+  const { mobile } = useMobileForm()
   const [loading, setLoading] = useState(true)
   const [showLoadingCopy, setShowLoadingCopy] = useState(false)
   const [forecast, setForecast] = useState<DualForecast>({ data: null, results: [] })
@@ -289,15 +328,11 @@ export function M11RiverForecastPanel({
                 </span>
               )
             })}
-            <span className="ml-auto text-[10px] text-slate-500">滚轮缩放时间轴</span>
+            <span className="ml-auto text-[10px] text-slate-500" data-testid="m11-river-panel-zoom-hint">
+              {mobile ? '双指缩放时间轴' : '滚轮缩放时间轴'}
+            </span>
           </div>
-          {/* 抽屉内图表区的可读下限：非矮视口横屏 160px、矮视口横屏 120px；有余量时仍占满剩余高度。 */}
-          <div className="relative min-h-0 flex-1 mobile:min-h-[160px] mobile-landscape:min-h-[120px]" data-testid="m11-river-panel-chart">
-            {/* 图表脱离文档流：图表库写进自身根节点的像素高度不参与图表区的固有高度，抽屉变矮后图表区能缩回去。 */}
-            <div className="absolute inset-0">
-              <ForecastChart data={forecast.data} segmentName={displayName.title} variant="compact" appearance="dark" zoomable fill />
-            </div>
-          </div>
+          <RiverChartArea data={forecast.data} segmentName={displayName.title} mobile={mobile} />
           {failedReasons.length > 0 ? (
             <p className="shrink-0 px-1 pt-1 text-[10px] text-amber-300/80" data-testid="m11-river-panel-partial">
               {failedReasons.join('；')}

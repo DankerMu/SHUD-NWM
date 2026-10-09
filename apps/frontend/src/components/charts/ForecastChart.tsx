@@ -1,5 +1,6 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import ReactEChartsCore from 'echarts-for-react/lib/core'
+import type { EChartsInstance } from 'echarts-for-react/lib/types'
 
 import { echarts } from '@/components/charts/echartsCore'
 import { useChartFollowsContainer } from '@/components/charts/useChartFollowsContainer'
@@ -9,6 +10,12 @@ import type { ForecastData } from '@/stores/forecast'
 
 const IFS_SIX_DAY_LEAD_HOURS = 144
 const HOUR_MS = 60 * 60 * 1000
+
+/** 时间轴缩放窗口：占全范围的百分比（0–100）。 */
+export interface ForecastChartZoomWindow {
+  start: number
+  end: number
+}
 
 interface ForecastChartProps {
   data: ForecastData | null
@@ -24,6 +31,29 @@ interface ForecastChartProps {
   zoomable?: boolean
   /** fill：图表高度填满父容器（height 100%），用于 16:9 面板等由父级定高的场景。 */
   fill?: boolean
+  /**
+   * touchPan：触屏形态的 inside dataZoom（仅 zoomable 时有意义）——单指拖动平移时间轴，
+   * 且不取消 touchmove 的默认行为（纵向拖动留给外层滚动容器）。缺省为桌面配置。
+   */
+  touchPan?: boolean
+  /** 缩放窗口变化（缩放 / 平移，或配置重设后回到全范围）时回报图表实例当前的窗口。 */
+  onZoomWindowChange?: (zoomWindow: ForecastChartZoomWindow) => void
+  /** tooltip 显示 / 隐藏时回报。 */
+  onTooltipVisibleChange?: (visible: boolean) => void
+}
+
+/** 滚轮缩放时间轴：inside dataZoom 以光标所在 x（时刻）为中心放大；filterMode none 保曲线连续。 */
+const WHEEL_ZOOM = { type: 'inside', zoomOnMouseWheel: true, moveOnMouseMove: false, moveOnMouseWheel: false, filterMode: 'none' }
+/**
+ * 触屏：捏合缩放不受这些键门控；单指平移要开 moveOnMouseMove。图表库在绘图区内按下后默认取消其后每个
+ * touchmove，preventDefaultMouseMove: false 把纵向滚动还给浏览器。
+ */
+const TOUCH_ZOOM = { ...WHEEL_ZOOM, moveOnMouseMove: true, preventDefaultMouseMove: false }
+
+/** 图表实例当前的缩放窗口；实例没有 dataZoom（不 zoomable）时为 null。 */
+function readZoomWindow(instance: EChartsInstance): ForecastChartZoomWindow | null {
+  const zoom = (instance.getOption() as { dataZoom?: Array<{ start?: unknown; end?: unknown }> } | undefined)?.dataZoom?.[0]
+  return typeof zoom?.start === 'number' && typeof zoom.end === 'number' ? { start: zoom.start, end: zoom.end } : null
 }
 
 /** series.color(hex) → rgba，用于深色主题的面积渐变/辉光，保持与曲线同色相。 */
@@ -147,7 +177,17 @@ function tooltipFormatter(params: TooltipParam | TooltipParam[], unit?: string) 
   return lines.join('\n')
 }
 
-export function ForecastChart({ data, segmentName, variant = 'full', appearance = 'light', zoomable = false, fill = false }: ForecastChartProps) {
+export function ForecastChart({
+  data,
+  segmentName,
+  variant = 'full',
+  appearance = 'light',
+  zoomable = false,
+  fill = false,
+  touchPan = false,
+  onZoomWindowChange,
+  onTooltipVisibleChange,
+}: ForecastChartProps) {
   if (data?.pointBudgetStatus?.overBudget) {
     return (
       <div
@@ -163,10 +203,32 @@ export function ForecastChart({ data, segmentName, variant = 'full', appearance 
     )
   }
 
-  return <ForecastChartInner data={data} segmentName={segmentName} variant={variant} appearance={appearance} zoomable={zoomable} fill={fill} />
+  return (
+    <ForecastChartInner
+      data={data}
+      segmentName={segmentName}
+      variant={variant}
+      appearance={appearance}
+      zoomable={zoomable}
+      fill={fill}
+      touchPan={touchPan}
+      onZoomWindowChange={onZoomWindowChange}
+      onTooltipVisibleChange={onTooltipVisibleChange}
+    />
+  )
 }
 
-function ForecastChartInner({ data, segmentName, variant = 'full', appearance = 'light', zoomable = false, fill = false }: ForecastChartProps) {
+function ForecastChartInner({
+  data,
+  segmentName,
+  variant = 'full',
+  appearance = 'light',
+  zoomable = false,
+  fill = false,
+  touchPan = false,
+  onZoomWindowChange,
+  onTooltipVisibleChange,
+}: ForecastChartProps) {
   const compact = variant === 'compact'
   const dark = appearance === 'dark'
   const axisColor = dark ? '#94a3b8' : '#64748b'
@@ -208,10 +270,7 @@ function ForecastChartInner({ data, segmentName, variant = 'full', appearance = 
 
     return {
       color: normalizedSeries.map((series) => series.color),
-      // 滚轮缩放时间轴：inside dataZoom 以光标所在 x（时刻）为中心放大；filterMode none 保曲线连续。
-      dataZoom: zoomable
-        ? [{ type: 'inside', zoomOnMouseWheel: true, moveOnMouseMove: false, moveOnMouseWheel: false, filterMode: 'none' }]
-        : undefined,
+      dataZoom: zoomable ? [{ ...(touchPan ? TOUCH_ZOOM : WHEEL_ZOOM) }] : undefined,
       title: compact
         ? undefined
         : {
@@ -301,7 +360,39 @@ function ForecastChartInner({ data, segmentName, variant = 'full', appearance = 
         ]),
       })),
     }
-  }, [data, normalizedSeries, segmentName, compact, dark, axisColor, zoomable])
+  }, [data, normalizedSeries, segmentName, compact, dark, axisColor, zoomable, touchPan])
+
+  // 回调放进 ref：交给封装库的 onEvents 必须是同一个对象，引用一变它就整组解绑重绑。
+  const zoomWindowCallback = useRef(onZoomWindowChange)
+  const tooltipVisibleCallback = useRef(onTooltipVisibleChange)
+  useEffect(() => {
+    zoomWindowCallback.current = onZoomWindowChange
+    tooltipVisibleCallback.current = onTooltipVisibleChange
+  })
+  /** 发过 datazoom 的那个实例；没发过就没缩放过，窗口必为初值。 */
+  const zoomedInstance = useRef<EChartsInstance | null>(null)
+  const observed = Boolean(onZoomWindowChange || onTooltipVisibleChange)
+  // 事件名按图表库的口径全小写。封装库以 (事件参数, 实例) 调用处理函数：窗口读实例，不信事件载荷。
+  const onEvents = useMemo(() => {
+    if (!observed) return undefined
+    return {
+      datazoom: (_event: unknown, instance: EChartsInstance) => {
+        zoomedInstance.current = instance
+        const zoomWindow = readZoomWindow(instance)
+        if (zoomWindow) zoomWindowCallback.current?.(zoomWindow)
+      },
+      showtip: () => tooltipVisibleCallback.current?.(true),
+      hidetip: () => tooltipVisibleCallback.current?.(false),
+    }
+  }, [observed])
+  // 配置整体重设（notMerge）会把缩放窗口打回全范围而不发 datazoom：封装库在本 effect 之前已把新配置
+  // 交给实例，这里重读一次。
+  useEffect(() => {
+    const instance = zoomedInstance.current
+    if (!instance || instance.isDisposed()) return
+    const zoomWindow = readZoomWindow(instance)
+    if (zoomWindow) zoomWindowCallback.current?.(zoomWindow)
+  }, [option])
 
   // fill 模式：画布跟随容器尺寸（不渲染图表时断开）。
   const followContainer = useChartFollowsContainer(Boolean(data) && normalizedSeries.length > 0)
@@ -327,6 +418,7 @@ function ForecastChartInner({ data, segmentName, variant = 'full', appearance = 
       notMerge
       lazyUpdate
       onChartReady={fill ? followContainer : undefined}
+      onEvents={onEvents}
       style={
         fill
           ? { height: '100%', width: '100%', minHeight: 0 }
