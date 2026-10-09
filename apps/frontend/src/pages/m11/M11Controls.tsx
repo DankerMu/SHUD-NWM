@@ -223,19 +223,43 @@ export function LayerLegendPanel({ layers = [] }: SharedControlProps) {
 const defaultM11TimelineClassName =
   'flex min-h-16 items-center gap-3 border-t border-neutral-300 bg-white px-4 text-sm xl:col-span-3'
 
+/** 播放速度的三个选项：时间轴内的选择器与控制条竖屏上提的那个共用。 */
+export function M11SpeedOptions() {
+  return (
+    <>
+      <option value={1}>1x</option>
+      <option value={2}>2x</option>
+      <option value={4}>4x</option>
+    </>
+  )
+}
+
 export function M11Timeline({
   state,
   layers = [],
   sourceSelection,
   className,
   cycle,
+  speed: controlledSpeed,
+  onSpeedChange,
+  renderSpeedSelect = true,
   onQueryChange,
 }: SharedControlProps & {
   className?: string
   cycle?: string | null
+  /**
+   * 播放速度的受控入口（mobile-responsive-display task 3.7）：底部控制条在竖屏把速度选择器排到
+   * 自己的第一行，所以速度由它持有。三个都不传时本组件自己持有速度并渲染选择器，与以往相同。
+   */
+  speed?: number
+  onSpeedChange?: (speed: number) => void
+  /** 为 false 时不渲染内部的速度选择器（由调用方另行渲染，页面上始终只有一个）。 */
+  renderSpeedSelect?: boolean
 }) {
   const [playing, setPlaying] = useState(false)
-  const [speed, setSpeed] = useState(1)
+  const [localSpeed, setLocalSpeed] = useState(1)
+  const speed = controlledSpeed ?? localSpeed
+  const changeSpeed = onSpeedChange ?? setLocalSpeed
   const model = useMemo(
     () => buildM11TimelineViewModel(state, layers, sourceSelection ?? null, cycle ?? null),
     [cycle, layers, sourceSelection, state],
@@ -288,7 +312,7 @@ export function M11Timeline({
       <div className="flex items-center gap-1">
         <button
           type="button"
-          className="flex h-8 w-8 items-center justify-center rounded text-neutral-700 hover:bg-neutral-100 disabled:cursor-not-allowed disabled:text-neutral-500"
+          className="flex h-8 w-8 items-center justify-center rounded text-neutral-700 hover:bg-neutral-100 disabled:cursor-not-allowed disabled:text-neutral-500 mobile:h-11 mobile:w-11"
           aria-label="上一个有效时刻"
           disabled={disabled || atFirst}
           onClick={() => onQueryChange?.({ validTime: model.validTimes[model.currentIndex - 1] })}
@@ -297,7 +321,7 @@ export function M11Timeline({
         </button>
         <button
           type="button"
-          className="flex h-8 w-8 items-center justify-center rounded text-neutral-700 hover:bg-neutral-100 disabled:cursor-not-allowed disabled:text-neutral-500"
+          className="flex h-8 w-8 items-center justify-center rounded text-neutral-700 hover:bg-neutral-100 disabled:cursor-not-allowed disabled:text-neutral-500 mobile:h-11 mobile:w-11"
           aria-label={playing ? '暂停时间轴' : '播放时间轴'}
           disabled={disabled || atLast}
           onClick={() => setPlaying((value) => !value)}
@@ -307,28 +331,30 @@ export function M11Timeline({
         </button>
         <button
           type="button"
-          className="flex h-8 w-8 items-center justify-center rounded text-neutral-700 hover:bg-neutral-100 disabled:cursor-not-allowed disabled:text-neutral-500"
+          className="flex h-8 w-8 items-center justify-center rounded text-neutral-700 hover:bg-neutral-100 disabled:cursor-not-allowed disabled:text-neutral-500 mobile:h-11 mobile:w-11"
           aria-label="下一个有效时刻"
           disabled={disabled || atLast}
           onClick={() => onQueryChange?.({ validTime: model.validTimes[model.currentIndex + 1] })}
         >
           <ChevronsRight className="h-4 w-4" aria-hidden="true" />
         </button>
-        <label className="ml-1 flex items-center gap-1 text-xs text-neutral-700">
-          <span className="sr-only">播放速度</span>
-          <select
-            aria-label="播放速度"
-            className="h-8 rounded border border-neutral-300 bg-white px-1 text-xs disabled:cursor-not-allowed disabled:text-neutral-500"
-            value={speed}
-            // 倍速是播放控件：fail-closed（列表为空 / 无 onQueryChange）时与三个播放按钮一同禁用。
-            disabled={disabled}
-            onChange={(event) => setSpeed(Number(event.target.value))}
-          >
-            <option value={1}>1x</option>
-            <option value={2}>2x</option>
-            <option value={4}>4x</option>
-          </select>
-        </label>
+        {renderSpeedSelect ? (
+          // 字号类放在 label 上：`src/index.css` 的无层规则 `select { font: inherit }` 压过工具层，
+          // `<select>` 的字号取自 label（移动形态 ≥ 16px，避免 iOS 聚焦时自动放大）。
+          <label className="ml-1 flex items-center gap-1 text-xs text-neutral-700 mobile:text-base">
+            <span className="sr-only">播放速度</span>
+            <select
+              aria-label="播放速度"
+              className="h-8 rounded border border-neutral-300 bg-white px-1 text-xs disabled:cursor-not-allowed disabled:text-neutral-500 mobile:h-11"
+              value={speed}
+              // 倍速是播放控件：fail-closed（列表为空 / 无 onQueryChange）时与三个播放按钮一同禁用。
+              disabled={disabled}
+              onChange={(event) => changeSpeed(Number(event.target.value))}
+            >
+              <M11SpeedOptions />
+            </select>
+          </label>
+        ) : null}
       </div>
 
       {/*

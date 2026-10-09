@@ -182,13 +182,17 @@ export function M11MapStatusOverlays({
     //   top 58px + 上内边距 8px：浮动提示（M11FloatingNotice，top 8px、两行时高 50px）占的第一槽之下，
     //     恒定预留、不随提示是否出现而变；
     //   right 52px + 右内边距 8px：让出启动器列（44px 列宽 + 8px 右边距）和 8px 间隙；
-    //   bottom 104px：控制条顶边（底边距 40px + 条高 64px）；overflow-hidden 保证放不下的状态条
-    //     被裁掉而不是伸进控制条（矮视口横屏下两条及以上两行状态条同时出现时，后面的会被裁）。
-    //     控制条的移动几何（task 3.7 / 3.8）改动后须复核这个界限。
+    //   bottom：控制条顶边之上，随控制条的两种移动布局取两个值——
+    //     竖屏 240px：竖屏控制条两行、条高由内容决定（task 3.7）。最高的形态是 fail-closed：
+    //       第一行 44px + 时间轴行（底行的「Analysis / Forecast」在 320px 宽时折成三行，三个词即上限）
+    //       + 单行截断的禁用原因行，实测条高 187px；加底边距 40px = 227px，取整到 15rem 留 13px 余量。
+    //     矮视口横屏 104px：单行控制条顶边（底边距 40px + 条高 64px）。task 3.8 改横屏条的几何后须复核。
+    //     overflow-hidden 保证放不下的状态条被裁掉而不是伸进控制条（矮视口横屏下两条及以上两行
+    //     状态条同时出现时，后面的会被裁）。
     //   四周 8px 内边距同时给状态条的阴影留出不被裁的余地。
     // 容器自身不拦指针（空容器、状态条下方的区域都要能操作地图），状态条本身照常。
     <div
-      className="contents mobile:pointer-events-none mobile:absolute mobile:bottom-[6.5rem] mobile:left-0 mobile:right-[3.25rem] mobile:top-[3.625rem] mobile:z-[90] mobile:flex mobile:flex-col mobile:items-start mobile:gap-2 mobile:overflow-hidden mobile:p-2"
+      className="contents mobile:pointer-events-none mobile:absolute mobile:bottom-[15rem] mobile:left-0 mobile:right-[3.25rem] mobile:top-[3.625rem] mobile:z-[90] mobile:flex mobile:flex-col mobile:items-start mobile:gap-2 mobile:overflow-hidden mobile:p-2 mobile:mobile-landscape:bottom-[6.5rem]"
       data-testid="m11-map-status-overlays"
     >
       {basinBoundaryOverlayEnabled && !loading && !boundaryLoading && basinCount > 0 && basinFeatureCount === 0 ? (
