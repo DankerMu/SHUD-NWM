@@ -99,12 +99,13 @@ test.describe('M11 桌面形态曲线窗最小宽度', () => {
     expectSize(measure, { width: expected }, '1143x900')
   })
 
-  test('(e) 1920x1080 河段窗：宽 704（44rem 封顶）', async ({ page }) => {
-    const viewport = { width: 1920, height: 1080 }
+  test('(e) 1680x600 河段窗：宽 704（44rem 封顶）', async ({ page }) => {
+    // 封顶一支只要视口宽 ≥ 1677，用小画布即可：1920x1080 在 CI runner 上定位 fixture 河段超时。
+    const viewport = { width: 1680, height: 600 }
     expect(ruleWidth(viewport)).toBe(MAX_WIDTH_PX)
     const measure = await openAt(page, viewport, 'river')
 
-    expectSize(measure, { width: 704, height: 396 }, '1920x1080')
+    expectSize(measure, { width: 704, height: 396 }, '1680x600')
   })
 
   test('(f) 768x1024 河段窗拖向右下角越界：右边与下边各距地图区边缘 12px', async ({ page }) => {
