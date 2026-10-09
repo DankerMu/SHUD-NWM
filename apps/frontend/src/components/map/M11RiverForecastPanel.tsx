@@ -279,7 +279,7 @@ export function M11RiverForecastPanel({
       {onClose ? (
         <button
           type="button"
-          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-white/10 hover:text-slate-100"
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-white/10 hover:text-slate-100 mobile:h-11 mobile:w-11"
           aria-label="关闭面板"
           onClick={onClose}
         >
@@ -298,7 +298,7 @@ export function M11RiverForecastPanel({
       header={header}
     >
       {issueTimes.length > 0 ? (
-        <div className="flex shrink-0 items-center gap-2 border-b border-white/10 px-4 py-2 text-[11px] text-slate-400" data-testid="m11-river-panel-cycle-bar">
+        <div className="flex shrink-0 items-center gap-2 border-b border-white/10 px-4 py-2 text-[11px] text-slate-400 mobile:py-1 mobile-landscape:py-0.5" data-testid="m11-river-panel-cycle-bar">
           <span className="shrink-0 uppercase tracking-wide">起报</span>
           <M11IssueTimeSelect
             testId="m11-river-panel-cycle"

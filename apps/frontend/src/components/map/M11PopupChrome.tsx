@@ -66,7 +66,7 @@ export function M11PopupHeader({
       {onClose ? (
         <button
           type="button"
-          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-white/10 hover:text-slate-100"
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-white/10 hover:text-slate-100 mobile:h-11 mobile:w-11"
           aria-label="关闭弹窗"
           onClick={onClose}
         >
@@ -138,7 +138,7 @@ export function M11IssueTimeSelect({
         aria-label={ariaLabel}
         data-testid={testId}
         className={cn(
-          'h-7 min-w-0 max-w-[12rem] cursor-pointer border-white/15 bg-white/10 px-2 py-0 font-mono text-[11px] text-slate-100 shadow-none ring-offset-slate-950 [color-scheme:dark] hover:border-cyan-400/50 focus:border-cyan-400 focus:ring-cyan-400 disabled:cursor-not-allowed disabled:opacity-50',
+          'h-7 min-w-0 max-w-[12rem] cursor-pointer border-white/15 bg-white/10 px-2 py-0 font-mono text-[11px] text-slate-100 shadow-none ring-offset-slate-950 [color-scheme:dark] hover:border-cyan-400/50 focus:border-cyan-400 focus:ring-cyan-400 disabled:cursor-not-allowed disabled:opacity-50 mobile:h-11 mobile:text-base!',
           triggerClassName,
         )}
       >
@@ -146,7 +146,7 @@ export function M11IssueTimeSelect({
       </SelectTrigger>
       <SelectContent
         data-testid={`${testId}-content`}
-        className="z-[180] border-white/15 bg-slate-950/95 text-slate-100 shadow-[0_18px_48px_-16px_rgba(8,14,32,0.95)] ring-1 ring-cyan-400/15 backdrop-blur-xl"
+        className="z-[180] border-white/15 bg-slate-950/95 text-slate-100 shadow-[0_18px_48px_-16px_rgba(8,14,32,0.95)] ring-1 ring-cyan-400/15 backdrop-blur-xl mobile:max-h-[min(24rem,var(--radix-select-content-available-height))]"
       >
         {visibleIssueTimes.map((time) => {
           const unavailable = unavailableSet.has(time)
@@ -158,7 +158,7 @@ export function M11IssueTimeSelect({
               disabled={unavailable}
               data-retention-unavailable={unavailable || undefined}
               className={cn(
-                'font-mono text-[11px] text-slate-100 focus:bg-cyan-400/15 focus:text-cyan-50 data-[state=checked]:bg-cyan-400/10 data-[state=checked]:text-cyan-100 disabled:text-amber-100 disabled:opacity-70',
+                'font-mono text-[11px] text-slate-100 focus:bg-cyan-400/15 focus:text-cyan-50 data-[state=checked]:bg-cyan-400/10 data-[state=checked]:text-cyan-100 disabled:text-amber-100 disabled:opacity-70 mobile:min-h-11 mobile:text-base',
                 unavailable && 'text-amber-100',
               )}
             >

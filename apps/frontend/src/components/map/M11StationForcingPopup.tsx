@@ -243,7 +243,7 @@ function StationVariableSelector({
 }) {
   return (
     <div
-      className="flex shrink-0 flex-wrap items-center gap-3 border-b border-white/10 px-4 py-2 text-[11px] text-slate-400"
+      className="flex shrink-0 flex-wrap items-center gap-3 border-b border-white/10 px-4 py-2 text-[11px] text-slate-400 mobile:gap-y-1 mobile:py-1"
       data-testid="m11-station-toolbar"
     >
       {issueTimes.length > 0 ? (
@@ -259,7 +259,7 @@ function StationVariableSelector({
         </div>
       ) : null}
       <div
-        className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-1.5"
+        className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-1.5 mobile:basis-full"
         role="tablist"
         aria-label="代站变量选择"
         data-testid="m11-station-variable-selector"
@@ -271,7 +271,7 @@ function StationVariableSelector({
               key={variable}
               type="button"
               className={cn(
-                'h-7 cursor-pointer rounded-md border px-2.5 text-xs font-medium leading-none transition-colors',
+                'h-7 cursor-pointer rounded-md border px-2.5 text-xs font-medium leading-none transition-colors mobile:h-11 mobile:min-w-11',
                 active
                   ? 'border-cyan-400/50 bg-cyan-400/15 text-cyan-200'
                   : 'border-white/15 bg-white/5 text-slate-300 hover:bg-white/10',
@@ -308,7 +308,7 @@ function StationForcingBody({
   )
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col px-3 pb-2 pt-2.5 mobile:min-h-auto" data-testid="m11-station-popup-loaded">
+    <div className="flex min-h-0 flex-1 flex-col px-3 pb-2 pt-2.5 mobile:min-h-auto mobile:pt-1" data-testid="m11-station-popup-loaded">
       <div className="flex shrink-0 items-center gap-3 px-1 pb-1.5">
         {DUAL_SOURCES.map((source) => {
           const ok = chartResult.series.some((item) => item.source === source)
