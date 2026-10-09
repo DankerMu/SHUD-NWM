@@ -1,5 +1,8 @@
+import { useState } from 'react'
+
 import type { components } from '@/api/types'
 import { GLASS_PANEL } from '@/components/map/M11FloatingControls'
+import { useMobileForm } from '@/hooks/useMobileForm'
 import { cn } from '@/lib/cn'
 import { toSecondsPrecisionInstant } from '@/lib/m11/instants'
 import {
@@ -10,7 +13,7 @@ import {
 } from '@/lib/m11/overviewDataContracts'
 import type { M11QueryPatch, M11QueryState, M11Source } from '@/lib/m11/queryState'
 import { m11VisualTokens } from '@/lib/m11/visualTokens'
-import { M11Timeline, m11LayerCatalogPendingDisabledReason, m11SourceOptions } from '@/pages/m11/M11Controls'
+import { M11SpeedOptions, M11Timeline, m11LayerCatalogPendingDisabledReason, m11SourceOptions } from '@/pages/m11/M11Controls'
 import type { DischargeCyclesState } from '@/stores/overviewData'
 
 /**
@@ -66,6 +69,20 @@ const controlBarHeightClass = m11ControlBarHeightClass(m11VisualTokens.timelineH
 
 /** 控制条内的 `M11Timeline` 外壳：玻璃条里的一行，不要网格单元的白底/上边框。 */
 const controlBarTimelineClassName = 'flex min-w-0 flex-1 items-center gap-3 text-sm'
+/**
+ * 竖屏（移动形态且非矮视口横屏）的 `M11Timeline` 外壳：`basis-full` 让它独占可换行控制条的第二行
+ * （上面的 `flex-1` 是 `flex-basis: 0%`，只给根节点加 `flex-wrap` 不会换行）。只换类名、不换元素。
+ */
+const controlBarPortraitTimelineClassName = 'flex min-w-0 basis-full items-center gap-2 text-sm'
+
+/**
+ * 控制条根节点的布局类，按形态二选一（mobile-responsive-display design.md D6）：
+ * - 单行（桌面与矮视口横屏）：64px token 条高、`gap-3 px-3`，与 #2014 以来相同；
+ * - 竖屏两行：可换行、条高由内容决定（不套 64px token 类）、间距与内边距收紧——320px 宽时
+ *   第一行（两个 44px 分段按钮 + 起报时次 + 播放速度）与第二行（三个 44px 按钮 + ≥ 120px 滑块）都要放得下。
+ */
+const controlBarSingleRowClassName = cn('gap-3 px-3', controlBarHeightClass)
+const controlBarPortraitClassName = 'flex-wrap gap-x-2 gap-y-1 px-2 py-2'
 
 /**
  * 底部控制条模型（#2014 决策 2）：cycles 来源与回落、有效 cycle、默认三元组、
@@ -148,6 +165,7 @@ export function deriveM11ControlBarModel(input: M11ControlBarInput): M11BottomCo
 
 /**
  * 底部玻璃控制条：GFS/IFS 分段 + 起报时次 `<select>` + 复用 `M11Timeline`（带 `+{lead}h` 刻度）。
+ * 桌面与矮视口横屏单行（64px）；竖屏两行——第一行分段 + 起报时次 + 播放速度，第二行步进 / 播放 + 滑块。
  * 纯展示：三个控件都只写 URL（`onQueryChange`），不取数、不写 store。
  */
 export function M11BottomControlBar({
@@ -164,12 +182,22 @@ export function M11BottomControlBar({
   // 手敲 `?cycle=` 或列表尚未覆盖该周期时，仍把活动周期显示成选中项，
   // 而不是让 `<select>` 显示一个它根本没选中的首项（`cycles` 本身保持纯粹，不掺 URL 值）。
   const cycleOptions = cycle && !cycles.includes(cycle) ? [cycle, ...cycles] : cycles
+  const form = useMobileForm()
+  // 竖屏两行；矮视口横屏在这里与桌面同为单行结构（只吃 `mobile:` 尺寸类）。
+  const portrait = form.mobile && !form.landscape
+  // 播放速度由控制条持有：竖屏时选择器排在第一行（下面），其余形态仍由 `M11Timeline` 渲染；
+  // 值跨形态保持，页面上始终恰一个选择器。`playing` 仍是 `M11Timeline` 的本地 state。
+  const [speed, setSpeed] = useState(1)
+  // 与 `M11Timeline` 内部的 `disabled` 同一表达式（活动图层没有有效时刻；控制条恒传 `onQueryChange`）。
+  const speedDisabled = (layers.find((layer) => layer.layerId === state.layer)?.validTimes ?? []).length === 0
 
   return (
+    // 根节点跨形态是同一个元素、子节点位置固定（速度选择器的槽位在非竖屏时是 null）：
+    // `M11Timeline` 不因旋转重挂，`useM11MobilePanelMaxHeight` 观察的也始终是这一个节点。
     <section
       className={cn(
-        'absolute bottom-10 left-1/2 z-[115] flex w-[min(64rem,calc(100%-2rem))] -translate-x-1/2 items-center gap-3 px-3',
-        controlBarHeightClass,
+        'absolute bottom-10 left-1/2 z-[115] flex w-[min(64rem,calc(100%-2rem))] -translate-x-1/2 items-center mobile:w-[calc(100%-1rem)]',
+        portrait ? controlBarPortraitClassName : controlBarSingleRowClassName,
         GLASS_PANEL,
       )}
       aria-label="起报时次与时间轴"
@@ -181,7 +209,7 @@ export function M11BottomControlBar({
             key={option.value}
             type="button"
             className={cn(
-              'flex h-8 cursor-pointer items-center rounded-md px-2.5 text-xs font-medium transition-colors',
+              'flex h-8 cursor-pointer items-center rounded-md px-2.5 text-xs font-medium transition-colors mobile:h-11 mobile:min-w-11 mobile:justify-center',
               source === option.value ? 'bg-primary-600 text-white shadow-sm' : 'text-neutral-700 hover:bg-white/70',
             )}
             aria-pressed={source === option.value}
@@ -202,11 +230,19 @@ export function M11BottomControlBar({
         ))}
       </div>
 
-      <label className="flex shrink-0 items-center gap-1">
+      {/*
+        竖屏时起报时次是第一行唯一的可伸缩项（`flex-1 min-w-0`）：吃掉分段与速度之外的宽度，320px 宽、
+        空周期选项「无可用起报时次」时收缩并由 `<select>` 自身截断，而不是把速度挤到下一行。
+        字号类放在 label 上：`src/index.css` 的无层规则 `select { font: inherit }` 压过工具层。
+      */}
+      <label className={cn('flex items-center gap-1 mobile:text-base', portrait ? 'min-w-0 flex-1' : 'shrink-0')}>
         <span className="sr-only">起报时次</span>
         <select
           aria-label="起报时次"
-          className="h-8 rounded border border-neutral-300 bg-white/80 px-1 text-xs disabled:cursor-not-allowed disabled:text-neutral-500"
+          className={cn(
+            'h-8 rounded border border-neutral-300 bg-white/80 px-1 text-xs disabled:cursor-not-allowed disabled:text-neutral-500 mobile:h-11',
+            portrait && 'w-full min-w-0',
+          )}
           value={cycle ?? ''}
           // **不**按图层的聚合禁用位禁：issue 只要求零周期（`default_cycle === null`）时禁用，
           // 而那样会让「某周期 valid-times 取回失败」这个终态下用户无法从控制条切回别的周期
@@ -226,9 +262,27 @@ export function M11BottomControlBar({
         </select>
       </label>
 
+      {portrait ? (
+        <label className="flex shrink-0 items-center gap-1 text-base text-neutral-700">
+          <span className="sr-only">播放速度</span>
+          <select
+            aria-label="播放速度"
+            className="h-11 rounded border border-neutral-300 bg-white px-1 disabled:cursor-not-allowed disabled:text-neutral-500"
+            value={speed}
+            disabled={speedDisabled}
+            onChange={(event) => setSpeed(Number(event.target.value))}
+          >
+            <M11SpeedOptions />
+          </select>
+        </label>
+      ) : null}
+
       <M11Timeline
-        className={controlBarTimelineClassName}
+        className={portrait ? controlBarPortraitTimelineClassName : controlBarTimelineClassName}
         cycle={cycle}
+        speed={speed}
+        onSpeedChange={setSpeed}
+        renderSpeedSelect={!portrait}
         state={state}
         layers={layers}
         sourceSelection={sourceSelection}
@@ -237,7 +291,8 @@ export function M11BottomControlBar({
 
       {disabledReason ? (
         <span
-          className="max-w-48 shrink-0 truncate text-xs text-warning"
+          // 竖屏自成第三行（`basis-full`），仍是单行截断：条高有上界，状态条容器的移动底部界限才可证。
+          className={cn('truncate text-xs text-warning', portrait ? 'min-w-0 basis-full' : 'max-w-48 shrink-0')}
           title={disabledReason}
           data-testid="m11-control-bar-disabled-reason"
         >
