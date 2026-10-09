@@ -78,8 +78,9 @@ export function LogModal({ jobId, open, onOpenChange, refreshKey = 0, strictIden
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       {/* 移动形态：弹窗限高到动态视口（dvh），标题行取自身高度、日志区吃掉剩余高度并自己滚（纵向滚动者仍是 pre）；
-          单列 minmax(0,1fr) 让长作业号折行而不是把日志区撑出弹窗。桌面形态的类逐字保留。 */}
-      <DialogContent className="max-h-[88vh] max-w-4xl mobile:max-h-[calc(100dvh-2rem)] mobile:grid-cols-[minmax(0,1fr)] mobile:grid-rows-[auto_minmax(0,1fr)]">
+          标题 break-all 让长作业号折行而不是把网格列（连同日志区）撑出弹窗，pr-6 让折行后的标题不伸到关闭按钮底下。
+          桌面形态的类逐字保留。 */}
+      <DialogContent className="max-h-[88vh] max-w-4xl mobile:max-h-[calc(100dvh-2rem)] mobile:grid-rows-[auto_minmax(0,1fr)]">
         <DialogHeader>
           <DialogTitle className="mobile:pr-6 mobile:leading-tight mobile:break-all">作业日志 {jobId ?? ''}</DialogTitle>
         </DialogHeader>

@@ -16,6 +16,7 @@ import {
   openOpsFallbackPage,
   outsidePagePadding,
   scrollOpsFallbackPageToEnd,
+  tryScrollWindowAndMain,
   visitOpsFallbackPage,
 } from './support/opsFallback.mocked'
 import { MIN_FORM_FONT_PX } from './support/sheetControls.mocked'
@@ -108,6 +109,8 @@ test.describe('运维页移动形态兜底', () => {
         expect(lastBefore.y + lastBefore.height, '滚动前最后一张卡片的底边应在视口之下').toBeGreaterThan(before.viewport.height)
 
         await scrollOpsFallbackPageToEnd(page)
+        // 只滚页面滚动容器动不了窗口；再主动去滚窗口与 main，两者都必须滚不动（唯一的纵向滚动者是页面滚动容器）。
+        await tryScrollWindowAndMain(page, 1000)
 
         await expect
           .poll(async () => {
@@ -119,11 +122,24 @@ test.describe('运维页移动形态兜底', () => {
               atEnd: measure.scroller.scrollHeight - measure.scroller.clientHeight - measure.scroller.scrollTop <= 1,
               windowScrollY: measure.windowScrollY,
               documentScrollTop: measure.documentScrollTop,
+              // 文档与 main 本身没有可滚的余量，而不只是此刻偏移为 0。
+              documentScrollable: measure.documentOverflowY > 0,
+              mainScrollable: measure.main.scrollHeight > measure.main.clientHeight,
+              mainScrollTop: measure.main.scrollTop,
             }
           })
-          .toEqual({ lastCardInside: true, atEnd: true, windowScrollY: 0, documentScrollTop: 0 })
+          .toEqual({
+            lastCardInside: true,
+            atEnd: true,
+            windowScrollY: 0,
+            documentScrollTop: 0,
+            documentScrollable: false,
+            mainScrollable: false,
+            mainScrollTop: 0,
+          })
         const after = await measureCheckedOpsFallbackPage(page)
         expect(after.scroller.scrollTop, '滚的是页面滚动容器自己').toBeGreaterThan(0)
+        expect(after.main.overflowY, 'main 的 overflow-y').toBe('hidden')
       })
 
       test('(c) 页面滚动容器不横向溢出；390x664 下任务表在自己的容器里横向滚', async ({ page }) => {

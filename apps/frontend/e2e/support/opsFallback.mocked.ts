@@ -122,13 +122,19 @@ export interface OpsFallbackPageMeasure {
   tableContainer: { overflowX: string; childTag: string; scrollWidth: number; clientWidth: number }
   windowScrollY: number
   documentScrollTop: number
+  /** 文档滚动元素的纵向溢出量 `scrollHeight − clientHeight`：> 0 即窗口可滚。 */
+  documentOverflowY: number
+  /** `main`（页面滚动容器的父元素）：它不该是滚动者。 */
+  main: { overflowY: string; scrollHeight: number; clientHeight: number; scrollTop: number }
 }
 
 /** 量页面；页面滚动容器、两个网格或任务表容器任一缺失时返回 null（供轮询等待）。 */
 export async function measureOpsFallbackPage(page: Page): Promise<OpsFallbackPageMeasure | null> {
   return page.evaluate((cardSelector) => {
-    const scroller = document.querySelector('main')?.lastElementChild
-    if (!(scroller instanceof HTMLElement)) return null
+    const main = document.querySelector('main')
+    const scroller = main?.lastElementChild
+    const scrollingElement = document.scrollingElement
+    if (!main || !(scroller instanceof HTMLElement) || !scrollingElement) return null
     const mainGrid = scroller.lastElementChild
     const summaryGrid = scroller.querySelector(':scope > section')
     const tableContainer = scroller.querySelector('table')?.parentElement
@@ -186,7 +192,14 @@ export async function measureOpsFallbackPage(page: Page): Promise<OpsFallbackPag
         clientWidth: tableContainer.clientWidth,
       },
       windowScrollY: window.scrollY,
-      documentScrollTop: document.scrollingElement?.scrollTop ?? 0,
+      documentScrollTop: scrollingElement.scrollTop,
+      documentOverflowY: scrollingElement.scrollHeight - scrollingElement.clientHeight,
+      main: {
+        overflowY: getComputedStyle(main).overflowY,
+        scrollHeight: main.scrollHeight,
+        clientHeight: main.clientHeight,
+        scrollTop: main.scrollTop,
+      },
     }
   }, CARD_SELECTOR)
 }
@@ -218,6 +231,21 @@ export async function scrollOpsFallbackPageToEnd(page: Page) {
     if (!(scroller instanceof HTMLElement)) throw new Error('page scroll container under main was not found')
     scroller.scrollTop = scroller.scrollHeight
   })
+}
+
+/**
+ * 主动去滚窗口与 `main`：`window.scrollTo`、文档滚动元素与 `main` 的 `scrollTop` 各写一次。
+ * 只设页面滚动容器自己的 scrollTop 永远动不了窗口；这里的写入在文档或 `main` 可滚时一定生效，读数由 spec 轮询。
+ */
+export async function tryScrollWindowAndMain(page: Page, offset: number) {
+  await page.evaluate((top) => {
+    const main = document.querySelector('main')
+    const scrollingElement = document.scrollingElement
+    if (!main || !scrollingElement) throw new Error('main or the document scrolling element was not found')
+    window.scrollTo(0, top)
+    scrollingElement.scrollTop = top
+    main.scrollTop = top
+  }, offset)
 }
 
 export interface FormControlMeasure {
@@ -266,6 +294,8 @@ export interface LogDialogMeasure {
   /** 弹窗自身的纵向滚动量：日志区画到弹窗框外时 `scrollHeight > clientHeight`。 */
   dialogScroll: { scrollHeight: number; clientHeight: number; overflowY: string }
   close: Box
+  /** 标题文字逐行的包围盒（`Range.getClientRects`），不是标题元素的盒——后者含右内边距、恒伸到关闭按钮底下。 */
+  titleLines: Box[]
   log: Box
   logScroll: { scrollWidth: number; clientWidth: number; scrollHeight: number; clientHeight: number; overflowX: string; overflowY: string }
   dialogMaxHeight: string
@@ -276,7 +306,10 @@ export async function measureLogDialog(page: Page): Promise<LogDialogMeasure | n
   return page.getByRole('dialog').evaluate((dialog) => {
     const close = Array.from(dialog.querySelectorAll('button')).find((button) => button.textContent?.trim() === 'Close')
     const log = dialog.querySelector('pre')
-    if (!close || !log) return null
+    const title = dialog.querySelector('h2')
+    if (!close || !log || !title) return null
+    const titleRange = document.createRange()
+    titleRange.selectNodeContents(title)
     const boxOf = (element: Element) => {
       const rect = element.getBoundingClientRect()
       return { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
@@ -302,6 +335,9 @@ export async function measureLogDialog(page: Page): Promise<LogDialogMeasure | n
       },
       dialogScroll: { scrollHeight: dialog.scrollHeight, clientHeight: dialog.clientHeight, overflowY: dialogStyle.overflowY },
       close: boxOf(close),
+      titleLines: Array.from(titleRange.getClientRects())
+        .filter((rect) => rect.width > 0 && rect.height > 0)
+        .map((rect) => ({ x: rect.x, y: rect.y, width: rect.width, height: rect.height })),
       log: boxOf(log),
       logScroll: {
         scrollWidth: log.scrollWidth,
@@ -319,7 +355,7 @@ export async function measureLogDialog(page: Page): Promise<LogDialogMeasure | n
 
 /**
  * 日志弹窗不达标的条目（口径 (7)）；空 = 达标：弹窗与关闭按钮的包围盒在视口内、日志区的包围盒在弹窗的
- * 内容框内、日志区自己双向可滚、弹窗自身不滚。
+ * 内容框内、日志区自己双向可滚、弹窗自身不滚、标题文字不与关闭按钮相交。
  * 日志区对的是内容框而不是包围盒：改动前 750×342 下日志区只越出内容框约 5px、吃进下内边距，
  * 仍在包围盒内——对包围盒断言看不出这次越界。
  */
@@ -336,6 +372,13 @@ export function logDialogViolations(measure: LogDialogMeasure, tolerance = 0.5):
   if (!inside(viewportBox, measure.close)) violations.push(`关闭按钮超出视口：${describe(measure.close)}`)
   if (!inside(measure.dialogContent, measure.log)) {
     violations.push(`日志区画到弹窗内容框外：日志区 ${describe(measure.log)}，内容框 ${describe(measure.dialogContent)}`)
+  }
+  // 标题文字与关闭按钮：严格相交（两个方向的重叠都 > 0）才算；达标时两者横向隔着标题的右内边距。
+  if (measure.titleLines.length === 0) violations.push('没有量到标题文字')
+  for (const line of measure.titleLines) {
+    const overlapX = Math.min(line.x + line.width, measure.close.x + measure.close.width) - Math.max(line.x, measure.close.x)
+    const overlapY = Math.min(line.y + line.height, measure.close.y + measure.close.height) - Math.max(line.y, measure.close.y)
+    if (overlapX > 0 && overlapY > 0) violations.push(`标题文字伸到关闭按钮底下：文字 ${describe(line)}，关闭按钮 ${describe(measure.close)}`)
   }
   const { logScroll, dialogScroll } = measure
   if (logScroll.scrollWidth <= logScroll.clientWidth) violations.push(`日志区不能横向滚动：${logScroll.scrollWidth} / ${logScroll.clientWidth}`)
