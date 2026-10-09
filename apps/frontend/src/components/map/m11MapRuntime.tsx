@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type MutableRefObject, type ReactNode } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type MutableRefObject, type ReactNode } from 'react'
 import type { MapRef, MapStyle } from 'react-map-gl/maplibre'
 
 import { buildApiTileUrlTemplate } from '@/api/base'
@@ -107,6 +107,157 @@ export function useM11MapCamera({
   }, [flyTo, mapRef])
 
   return initialViewState
+}
+
+/** 抽屉遮住地图区的哪一侧：非矮视口横屏为底部抽屉，矮视口横屏为右侧抽屉。 */
+export type M11SheetSide = 'bottom' | 'right'
+
+/**
+ * 抽屉自动平移的触发（openspec mobile-responsive-display D17）：由页面按**收敛后的状态**与页面那一份形态值算出。
+ * `key` 变成另一个值时平移一次；null = 不平移（桌面形态、没有选中锚点、曲线区域在兜底）。
+ */
+export interface M11SheetAutoPan {
+  key: string
+  side: M11SheetSide
+  /** 选中锚点所属的曲线窗种类：据它在 DOM 里找到真实渲染出来的抽屉。 */
+  kind: 'river' | 'station'
+}
+
+const M11_CAMERA_DATA_ATTRIBUTES = [
+  'data-selected-anchor-x',
+  'data-selected-anchor-y',
+  'data-camera-center',
+  'data-camera-zoom',
+] as const
+type M11CameraDataAttributes = Partial<Record<(typeof M11_CAMERA_DATA_ATTRIBUTES)[number], string>>
+
+/**
+ * 假地图（vitest 的共享桩）只有少数几个方法，所以这里用到的实例方法全部可选，调用前逐个判断存在性；
+ * 缺了就跳过那一步，不报错。
+ */
+interface M11AnchorCameraMap {
+  resize?: () => unknown
+  easeTo?: (options: { center: [number, number]; offset: [number, number]; duration: number }) => unknown
+  project?: (lngLat: [number, number]) => { x: number; y: number }
+  getCenter?: () => { lng: number; lat: number }
+  getZoom?: () => number
+  getCanvas?: () => { getBoundingClientRect?: () => { left: number; top: number } } | null | undefined
+}
+
+/** 与流域 `fitBounds` / 聚合 `flyTo` 同一个动画时长。 */
+const M11_SHEET_PAN_DURATION_MS = 450
+
+function nativeAnchorCameraMap(mapRef: MutableRefObject<MapRef | null>): M11AnchorCameraMap | null {
+  return (mapRef.current?.getMap?.() as M11AnchorCameraMap | null | undefined) ?? null
+}
+
+/** 至多两位小数的 CSS px。 */
+function cssPx(value: number) {
+  return String(Math.round(value * 100) / 100)
+}
+
+/** 地图实例未就绪、缺方法、没有选中锚点时，对应的属性就不在返回值里。 */
+function readM11CameraDataAttributes(map: M11AnchorCameraMap | null, anchor: [number, number] | null): M11CameraDataAttributes {
+  const attributes: M11CameraDataAttributes = {}
+  if (!map) return attributes
+  const canvasRect = typeof map.getCanvas === 'function' ? map.getCanvas()?.getBoundingClientRect?.() : undefined
+  if (anchor && canvasRect && typeof map.project === 'function') {
+    const point = map.project(anchor)
+    const x = canvasRect.left + point.x
+    const y = canvasRect.top + point.y
+    if (Number.isFinite(x) && Number.isFinite(y)) {
+      attributes['data-selected-anchor-x'] = cssPx(x)
+      attributes['data-selected-anchor-y'] = cssPx(y)
+    }
+  }
+  if (
+    (window as { __NHMS_E2E_HOOKS__?: unknown }).__NHMS_E2E_HOOKS__ === true &&
+    typeof map.getCenter === 'function' &&
+    typeof map.getZoom === 'function'
+  ) {
+    const center = map.getCenter()
+    attributes['data-camera-center'] = `${center.lng.toFixed(6)},${center.lat.toFixed(6)}`
+    attributes['data-camera-zoom'] = map.getZoom().toFixed(4)
+  }
+  return attributes
+}
+
+/**
+ * 选中锚点与相机的只读观测属性 + 抽屉打开时的一次性平移（D17）。
+ *
+ * - 平移：`autoPan.key` 变成另一个非空值时恰一次 `easeTo`（只给 center / offset / duration，不动缩放、方位、
+ *   俯仰，也不用相机内边距）；键不变的重渲染、键变空都不碰相机。没有任何“跟随”状态，所以用户手动移动地图后
+ *   不会被拉回。平移时刻地图区里必须真的渲染着抽屉（DOM 实测），尺寸也只取实测值。
+ *   平移放在键变化后的下一帧：形态切换时页面与抽屉各有一份 `useMobileForm()` 订阅，`matchMedia` 的 change
+ *   逐个监听器派发、React 逐个同步提交，页面那一份先翻——键变化的那次提交里抽屉还是旧形态（实测：
+ *   390×664 -> 750×342 量到的是全宽的底部抽屉，1280×900 -> 390×664 量到的是桌面浮窗）。同一帧的
+ *   `requestAnimationFrame` 排在全部 change 监听器之后，那时抽屉已是新形态。
+ * - 属性：`data-selected-anchor-x / -y` 是选中锚点在当前相机下的视口 CSS px（画布视口原点 + `project`），
+ *   只在三个时刻重读：选中锚点变化（绘制前）、相机静止（`moveend`，含画布尺寸变化引起的）、地图加载完成
+ *   ——后两个经 `onCameraSettled`，由调用方接到 `<Map>` 的 `onMoveEnd` / `onLoad`。不在渲染期现读：
+ *   页面重渲染会把动画中途的值写出来。`data-camera-center` / `data-camera-zoom` 只在测试门打开时输出，
+ *   产品逻辑不读它们。
+ */
+export function useM11SelectedAnchorCamera({
+  mapRef,
+  surfaceRef,
+  selectedAnchor,
+  autoPan,
+}: {
+  mapRef: MutableRefObject<MapRef | null>
+  surfaceRef: MutableRefObject<HTMLElement | null>
+  selectedAnchor: [number, number] | null
+  autoPan: M11SheetAutoPan | null
+}): { cameraDataAttributes: M11CameraDataAttributes; onCameraSettled: () => void } {
+  // 本次渲染的值，供下面的回调与 effect 读取（它们的依赖只列键 / 经纬度这类原始值）。
+  const latestRef = useRef({ autoPan, selectedAnchor })
+  latestRef.current = { autoPan, selectedAnchor }
+
+  const [cameraDataAttributes, setCameraDataAttributes] = useState<M11CameraDataAttributes>({})
+  const onCameraSettled = useCallback(() => {
+    const next = readM11CameraDataAttributes(nativeAnchorCameraMap(mapRef), latestRef.current.selectedAnchor)
+    // 值没变就保留原对象：不为一次没有改变任何属性的 `moveend` 重渲染。
+    setCameraDataAttributes((current) => (M11_CAMERA_DATA_ATTRIBUTES.every((name) => current[name] === next[name]) ? current : next))
+  }, [mapRef])
+  // 选中锚点变化（含变空）：绘制前就重读，不留一帧上一个锚点的坐标。
+  const anchorLng = selectedAnchor?.[0] ?? null
+  const anchorLat = selectedAnchor?.[1] ?? null
+  useLayoutEffect(onCameraSettled, [anchorLat, anchorLng, onCameraSettled])
+
+  const panKey = autoPan?.key ?? ''
+  const lastPanKeyRef = useRef('')
+  useEffect(() => {
+    // 先记键再排平移：一次键变化至多尝试一次（StrictMode 的 effect 重放、平移前 `resize()`
+    // 同步发出的 `moveend` 引起的重渲染都落在“键没变”上）。
+    if (panKey === lastPanKeyRef.current) return
+    lastPanKeyRef.current = panKey
+    if (!panKey) return
+    requestAnimationFrame(() => {
+      // 这一帧之内键又变了（含变空）：这次不平移，新键自己会排一次。
+      if (lastPanKeyRef.current !== panKey) return
+      // 锚点 / 遮盖侧 / 窗种类都已编码在键里：键没变，这里读到的就是排这次平移时的那一份。
+      const { autoPan: pan, selectedAnchor: anchor } = latestRef.current
+      const map = nativeAnchorCameraMap(mapRef)
+      if (!pan || !anchor || !map || typeof map.easeTo !== 'function') return
+      // 抽屉是地图区里的兄弟节点（`M11DraggableCurveWindow` 的 frame）；没有渲染出来就不平移——
+      // 曲线面板渲染即崩溃而键仍非空时，挡住平移的只有这道闸。
+      const sheet = surfaceRef.current?.ownerDocument.querySelector(`[data-m11-curve-window-kind="${pan.kind}"]`)
+      if (!sheet) return
+      // 形态切换时画布也在变尺寸，而地图库自己的 resize 是异步且节流的；`easeTo` 在起点就把目标屏幕点定为
+      // “当时的画布中心 + 偏移”，所以先同步 resize（空闲时幂等）再量抽屉、再平移。
+      if (typeof map.resize === 'function') map.resize()
+      const { width, height } = sheet.getBoundingClientRect()
+      if (!(width > 0 && height > 0)) return
+      // 锚点落在未被抽屉遮住的地图区的中心：底部抽屉上移半个抽屉高，右侧抽屉左移半个抽屉宽。
+      map.easeTo({
+        center: anchor,
+        offset: pan.side === 'right' ? [-width / 2, 0] : [0, -height / 2],
+        duration: M11_SHEET_PAN_DURATION_MS,
+      })
+    })
+  }, [mapRef, panKey, surfaceRef])
+
+  return { cameraDataAttributes, onCameraSettled }
 }
 
 export function m11MapSourceErrorResetKey({

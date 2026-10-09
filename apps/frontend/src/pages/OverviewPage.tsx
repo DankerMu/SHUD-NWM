@@ -7,6 +7,7 @@ import {
   M11MapLibreSurface,
   type M11MapCameraFit,
   type M11MapOverlayInteraction,
+  type M11SheetAutoPan,
   type M11StationFeatureCollection,
 } from '@/components/map/M11MapLibreSurface'
 import {
@@ -132,6 +133,8 @@ function M11FullscreenMap({
   meshRiverBasinIds,
   selectedSegmentId,
   selectedStationId,
+  selectedAnchor,
+  autoPan,
   stationFeatureCollection,
   precipOverlay,
   precipAvailability,
@@ -155,6 +158,9 @@ function M11FullscreenMap({
   meshRiverBasinIds?: string[]
   selectedSegmentId?: string | null
   selectedStationId?: string | null
+  /** 选中锚点与抽屉自动平移的触发（D17）：由 `OverviewMode` 算一次，原样交给地图组件。 */
+  selectedAnchor?: [number, number] | null
+  autoPan?: M11SheetAutoPan | null
   stationFeatureCollection?: M11StationFeatureCollection | null
   /** 已解析的降水叠加模型；不传 = 无叠加。 */
   precipOverlay?: M11PrecipOverlayModel | null
@@ -273,6 +279,8 @@ function M11FullscreenMap({
           meshRiverBasinIds={meshRiverBasinIds}
           selectedSegmentId={selectedSegmentId}
           selectedStationId={selectedStationId}
+          selectedAnchor={selectedAnchor}
+          autoPan={autoPan}
           stationFeatureCollection={stationFeatureCollection}
           precipOverlay={precipOverlay}
           loading={loading}
@@ -496,7 +504,12 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
 
   // 全国点河段的就地流量弹窗（segment 身份 + 经纬度锚点 + 反查到的 basinId）。
   const [riverPopup, setRiverPopup] = useState<{ segment: M11RiverPopupSegment; lngLat: [number, number]; basinId: string | null } | null>(null)
-  const [stationPopup, setStationPopup] = useState<{ station: M11StationPopupStation; basinId: string | null } | null>(null)
+  // 气象代站窗另记锚点（D17）：站点要素的 Point 坐标，缺失时退回点击点；都没有则为 null（窗照常打开）。
+  const [stationPopup, setStationPopup] = useState<{
+    station: M11StationPopupStation
+    basinId: string | null
+    lngLat: [number, number] | null
+  } | null>(null)
   const [activeCurveWindow, setActiveCurveWindow] = useState<ActiveCurveWindow>('river')
   // 点流域 → 相机飞到其 bbox（留在全国总览、不钻取/不锁定）。
   const [basinFit, setBasinFit] = useState<M11MapCameraFit | null>(null)
@@ -510,7 +523,7 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   }, [state.metStations])
   // 移动形态单窗（openspec mobile-responsive-display D10）：两窗同开时留下活动窗、关掉另一个。
   // 用 layout effect：收敛发生在绘制之前，不会画出一帧双窗；桌面形态下是空操作。
-  const { mobile } = useMobileForm()
+  const { mobile, landscape } = useMobileForm()
   const riverOpen = riverPopup !== null
   const stationOpen = stationPopup !== null
   useLayoutEffect(() => {
@@ -526,6 +539,26 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   // 取决于“是否有抽屉在正常渲染”，不是“是否有选中的河段 / 站点”——面板崩溃时外壳必须回来。
   // 读实时的 `mobile`：桌面形态恒为 false，形态切换时让位 / 恢复自然得到。
   const chromeYielded = mobile && (riverOpen || stationOpen) && !curveRegionInFallback
+  // 选中锚点（D17，两种形态同一规则）：只开着一种窗取它的；两种都开着取活动窗的。移动形态下“一种窗替换
+  // 另一种窗”有一个两窗同时非空的未绘制中间提交，按这条规则那时已经是存活窗的锚点——替换只换一次。
+  const riverSelected = riverOpen && (!stationOpen || activeCurveWindow === 'river')
+  const selectedKind: ActiveCurveWindow | null = riverSelected ? 'river' : stationOpen ? 'station' : null
+  const selectedFeatureId = riverSelected ? riverPopup.segment.river_segment_id : (stationPopup?.station.station_id ?? null)
+  const selectedAnchor = riverSelected ? riverPopup.lngLat : (stationPopup?.lngLat ?? null)
+  const selectedAnchorLng = selectedAnchor?.[0] ?? null
+  const selectedAnchorLat = selectedAnchor?.[1] ?? null
+  // 抽屉自动平移的触发键：移动形态 && 有选中锚点 && 曲线区域不在兜底时 = 遮盖侧 + 选中锚点的身份，否则为 null。
+  // 地图只在键变成另一个值时平移一次（打开、替换、换选、竖屏 ↔ 矮视口横屏、进入移动形态、兜底后重试成功）；
+  // 关闭、离开移动形态、进入兜底都落在 null 上，不动相机。形态与遮盖侧只用上面页面这一份 `useMobileForm()`。
+  const autoPan = useMemo<M11SheetAutoPan | null>(() => {
+    if (!mobile || curveRegionInFallback || selectedKind === null || selectedAnchorLng === null || selectedAnchorLat === null) return null
+    const side = landscape ? 'right' : 'bottom'
+    return {
+      key: [side, selectedKind, selectedFeatureId, `${selectedAnchorLng},${selectedAnchorLat}`].join('|'),
+      side,
+      kind: selectedKind,
+    }
+  }, [curveRegionInFallback, landscape, mobile, selectedAnchorLat, selectedAnchorLng, selectedFeatureId, selectedKind])
 
   const handleMapOverlayClick = useCallback(
     (interaction: M11MapOverlayInteraction) => {
@@ -536,6 +569,7 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
         setStationPopup({
           station: { station_id: stationId, station_name: mapFeatureStringProperty(interaction.feature, 'station_name') },
           basinId: mapFeatureStringProperty(interaction.feature, 'basin_id') ?? stationLayerBasinContexts[0]?.basinId ?? null,
+          lngLat: popupAnchorFromInteraction(interaction),
         })
         return
       }
@@ -652,6 +686,8 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
       meshRiverBasinIds={meshRiverBasinIds}
       selectedSegmentId={selectedSegmentId}
       selectedStationId={selectedStationId}
+      selectedAnchor={selectedAnchor}
+      autoPan={autoPan}
       stationFeatureCollection={stationLayer.featureCollection}
       precipOverlay={precipOverlay}
       precipAvailability={precipCatalog.status}

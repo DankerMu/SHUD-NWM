@@ -52,8 +52,10 @@ import {
   m11MapStyleUrls,
   useM11MapCamera,
   useM11MapSourceError,
+  useM11SelectedAnchorCamera,
   type M11MapCameraFit,
   type M11MapCameraFlyTo,
+  type M11SheetAutoPan,
 } from '@/components/map/m11MapRuntime'
 import {
   adaptRiverClickHookMap,
@@ -84,7 +86,7 @@ export {
   type SelectedSegmentFeatureCollection,
 } from '@/components/map/m11MapBuilders'
 export type { M11MapOverlayInteraction } from '@/components/map/m11MapInteractions'
-export { m11MapStyleUrls, type M11MapCameraFit, type M11MapCameraFlyTo } from '@/components/map/m11MapRuntime'
+export { m11MapStyleUrls, type M11MapCameraFit, type M11MapCameraFlyTo, type M11SheetAutoPan } from '@/components/map/m11MapRuntime'
 export { m11NationalRiverPaint, type M11StationFeatureCollection } from '@/components/map/m11MapPrimitives'
 
 // Monotonic token source and the token of the currently installed hook.
@@ -103,6 +105,12 @@ interface M11MapLibreSurfaceProps {
   meshRiverBasinIds?: string[]
   selectedSegmentId?: string | null
   selectedStationId?: string | null
+  /**
+   * 选中要素的锚点经纬度（两种形态都传；两窗并存时是活动窗的）。有它才输出 `data-selected-anchor-x / -y`。
+   */
+  selectedAnchor?: [number, number] | null
+  /** 抽屉自动平移的触发（D17）；null / 不传 = 不平移。本组件不自己判形态，只认页面算好的这一份。 */
+  autoPan?: M11SheetAutoPan | null
   metStations?: boolean
   stationFeatureCollection?: M11StationFeatureCollection | null
   /**
@@ -131,6 +139,8 @@ export function M11MapLibreSurface({
   nationalRiverGeo = null,
   selectedSegmentId = null,
   selectedStationId = null,
+  selectedAnchor = null,
+  autoPan = null,
   metStations,
   stationFeatureCollection = null,
   precipOverlay = null,
@@ -144,7 +154,9 @@ export function M11MapLibreSurface({
   onMapClick,
 }: M11MapLibreSurfaceProps) {
   const mapRef = useRef<MapRef | null>(null)
+  const surfaceRef = useRef<HTMLDivElement | null>(null)
   const initialViewState = useM11MapCamera({ fitTo, flyTo, mapRef })
+  const { cameraDataAttributes, onCameraSettled } = useM11SelectedAnchorCamera({ mapRef, surfaceRef, selectedAnchor, autoPan })
   const [overlayData, setOverlayData] = useState<FeatureCollection | null>(null)
   const [overlayUnavailableReason, setOverlayUnavailableReason] = useState<string | null>(null)
   const overlay = useMemo(() => buildM11RegisteredOverlay(state, layers), [layers, state])
@@ -356,6 +368,7 @@ export function M11MapLibreSurface({
 
   return (
     <div
+      ref={surfaceRef}
       className={cn('absolute inset-0', className)}
       data-testid="m11-map-surface"
       data-basemap={state.basemap}
@@ -364,6 +377,7 @@ export function M11MapLibreSurface({
       data-basin-feature-count={basinFeatureCollection.features.length}
       data-visible-basin-ids={basinFeatureCollection.features.map((feature) => feature.properties.basin_id).join(',')}
       {...m11SelectionDataAttributes({ selectedSegmentId, selectedSegmentMapState, selectedStationId })}
+      {...cameraDataAttributes}
       data-hovered-segment-id={hoveredSegmentId ?? ''}
       data-overlay-source-type={renderableOverlay?.source.type ?? ''}
       data-overlay-source-layer={renderableOverlay?.source.type === 'vector' ? renderableOverlay.source.sourceLayer : ''}
@@ -386,6 +400,9 @@ export function M11MapLibreSurface({
         onMouseLeave={handleMouseLeave}
         onClick={handleClick}
         onStyleData={handleStyleData}
+        // 相机静止 / 地图加载完成后重读锚点属性；经 prop 订阅，不在地图实例上 on / off。
+        onMoveEnd={onCameraSettled}
+        onLoad={onCameraSettled}
         onError={handleMapError}
         attributionControl
       >

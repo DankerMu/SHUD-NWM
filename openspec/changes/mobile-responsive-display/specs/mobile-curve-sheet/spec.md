@@ -133,7 +133,7 @@ In mobile form, in both orientations, while a curve sheet is open the bottom con
 
 ### Requirement: Opening a sheet pans the selected feature into view
 
-In mobile form, when a curve sheet opens the map SHALL ease, without changing zoom, so that the selected feature's anchor point lies inside the part of the map region that the sheet does not cover: the bottom side is treated as covered outside short-landscape and the right side in short-landscape. The same SHALL happen once when one kind of window replaces the other and once when the viewport switches between the bottom-sheet and side-sheet layouts while a sheet is open. The map SHALL be moved only at those three moments: after the user moves the map by hand while the sheet is open it SHALL NOT be moved back, although a later replacement or layout switch pans again. Closing the sheet SHALL NOT move the map, and leaving mobile form with a sheet open SHALL NOT move the map. In desktop form opening a curve window SHALL NOT move the map. The map container SHALL expose the selected anchor's current viewport position — the active window's anchor when two windows are open in desktop form — as `data-selected-anchor-x` and `data-selected-anchor-y` (CSS px) in both forms, and SHALL carry neither attribute when no feature is selected.
+In mobile form, when a curve sheet opens the map SHALL ease, without changing zoom, so that the selected feature's anchor point lies inside the part of the map region that the sheet does not cover: the bottom side is treated as covered outside short-landscape and the right side in short-landscape. The same SHALL happen once whenever a sheet appears or reappears for a selected feature (a window that was open in desktop form becoming a sheet on entering mobile form; the curve region recovering from its fallback), once whenever the selected anchor changes while a sheet is open (one kind of window replacing the other, or another feature of the same kind being selected), and once when the viewport switches between the bottom-sheet and side-sheet layouts while a sheet is open. The map SHALL be moved only at those moments: after the user moves the map by hand while the sheet is open it SHALL NOT be moved back, although a later change of the selected anchor or a later layout switch pans again. While the curve region shows its fallback instead of a sheet the map SHALL NOT be moved. Closing the sheet SHALL NOT move the map, and leaving mobile form with a sheet open SHALL NOT move the map. In desktop form opening a curve window SHALL NOT move the map. The map container SHALL expose the selected anchor's current viewport position — the active window's anchor when two windows are open in desktop form — as `data-selected-anchor-x` and `data-selected-anchor-y` (CSS px) in both forms, and SHALL carry neither attribute when no feature is selected.
 
 #### Scenario: River anchor visible above a bottom sheet
 
@@ -154,6 +154,22 @@ In mobile form, when a curve sheet opens the map SHALL ease, without changing zo
 
 - **WHEN** a river window is open in mobile form and a station is selected
 - **THEN** the map is moved once more so that the station's anchor lies inside the uncovered part of the map region
+
+#### Scenario: Selecting another feature of the same kind pans again
+
+- **WHEN** a river window is open in mobile form and another river segment is selected
+- **THEN** the map is moved once more so that the new anchor lies inside the uncovered part of the map region
+
+#### Scenario: Entering mobile form with a window open pans
+
+- **WHEN** a river window is open at 1280×900 and the viewport becomes 390×664
+- **THEN** after the camera settles the anchor point lies inside the map region and above the sheet's top edge
+
+#### Scenario: No pan while the curve region is in its fallback
+
+- **WHEN** a river is selected at 390×664 and the curve panel fails to render, so the curve region shows its fallback
+- **THEN** the map is not moved
+- **AND** when the retry succeeds and the sheet appears, the map is moved once so that the anchor lies above the sheet's top edge
 
 #### Scenario: Zoom is unchanged
 

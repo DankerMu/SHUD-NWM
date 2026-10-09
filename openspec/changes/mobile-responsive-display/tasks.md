@@ -742,7 +742,7 @@
   - Review focus：(1) 新类全部带移动前缀，桌面字面值不变；(2) 审计用例确实枚举到控件（数量 > 0）且没有豁免名单；(3) 口径 (4) 没有靠放宽 4.5 的 (a) 达成，(e) 只换了视口；(4) 选项的尺寸量的是展开后的真实选项节点；(5) 三个移动 project 都断言、无跳过、无 `force`；(6) testid / aria / DOM 顺序不变。
   - Evidence floor：约定的本地验证命令 + `check:types` + 治理门测试全绿；新 spec 的 strict `tsc --noEmit` exit 0；改动前基线表（未改动的 `src/`）：390×664 / 750×342 / 1280×900 下两种窗的关闭按钮、触发器、选项、切换项的包围盒与字号，390×664 气象代站抽屉的工具条高、图表区高、主体 client / scroll；改动后同一张表；先红后绿——(a)(b)(c)(e)(f) 改动前红，(h)(i) 改动前可能已绿，须点名；`--repeat-each=5` 无 flaky（`--workers=1`）；变异：去掉关闭按钮的移动类 -> (a)(e) 红；去掉触发器的移动高度 / 字号 -> (b)(e)(f) 红；去掉选项的移动高度 -> (b) 红；去掉切换项的移动高度 -> (c)(e) 红；去掉切换项容器的独占一行 -> (h) 或既有 4.5 的 (a) 红；把移动类去掉前缀（桌面也变大）-> (i) 红；工具条不收紧间距 -> (h) 或既有 4.5 的 (a) 红。`git diff --stat --diff-filter=MDR origin/master -- apps/frontend/e2e 'apps/frontend/src/**/__tests__/**'` 期望至多 `m11-station-sheet-chart.mobile.mocked.spec.ts`（(e) 的视口；实测 (e) 仍成立就不改）。改展示端运行时代码，合并前出 node-27 live receipt（PR 的生产构建对 live API）：桌面布局 oracle exit 0；390×664 与 750×342 经门控钩子打开河段窗与气象代站窗，抽屉内可交互控件全部 ≥ 44×44、触发器字号 ≥ 16px；390×664 气象代站图表区 ≥ 160 且不滚动就在抽屉盒内；1280×900 下控件尺寸与改动前相同。
 
-- [ ] 4.10 抽屉打开时自动平移地图：移动形态下曲线抽屉打开、一种窗替换另一种窗、抽屉开着时在底部抽屉与右侧抽屉布局之间切换时，地图平滑移动（缩放不变），做一次带像素偏移的相机移动（向上偏移半个抽屉高度，或向左偏移半个抽屉宽度；不使用持久的相机内边距），使锚点落在未被抽屉遮住的地图区内。平移只在这三个触发点各发生一次：用户在抽屉打开期间手动移动地图后不拉回，但之后的替换或布局切换仍会再平移一次。关闭抽屉、离开移动形态都不移动地图；桌面形态不平移。地图容器暴露 `data-selected-anchor-x` / `data-selected-anchor-y`（两种形态都暴露；桌面双窗并存时取活动窗的锚点；无选中要素时不带）。页面的气象代站弹窗状态需要多记站点要素的经纬度作为锚点；河段沿用已有的弹窗锚点。新增 `e2e/m11-sheet-auto-pan.mobile.mocked.spec.ts` 与 `e2e/m11-curve-anchor-desktop.mocked.spec.ts`（桌面 project）。
+- [x] 4.10 抽屉打开时自动平移地图：移动形态下曲线抽屉打开、一种窗替换另一种窗、抽屉开着时在底部抽屉与右侧抽屉布局之间切换时，地图平滑移动（缩放不变），做一次带像素偏移的相机移动（向上偏移半个抽屉高度，或向左偏移半个抽屉宽度；不使用持久的相机内边距），使锚点落在未被抽屉遮住的地图区内。平移只在这三个触发点各发生一次：用户在抽屉打开期间手动移动地图后不拉回，但之后的替换或布局切换仍会再平移一次。关闭抽屉、离开移动形态都不移动地图；桌面形态不平移。地图容器暴露 `data-selected-anchor-x` / `data-selected-anchor-y`（两种形态都暴露；桌面双窗并存时取活动窗的锚点；无选中要素时不带）。页面的气象代站弹窗状态需要多记站点要素的经纬度作为锚点；河段沿用已有的弹窗锚点。新增 `e2e/m11-sheet-auto-pan.mobile.mocked.spec.ts` 与 `e2e/m11-curve-anchor-desktop.mocked.spec.ts`（桌面 project）。
 
   Depends on: 4.2
 
@@ -751,6 +751,72 @@
   **Suggested fixture level:** expanded - 改动共享地图组件的相机行为与页面级弹窗状态，并在地图容器上新增属性。
 
   **Minimal mergeable slice:** atomic - 平移、触发条件与可观测的锚点属性互为前提：没有属性无法在真实布局下断言平移结果，没有平移属性就只是点击点的回显。
+
+  Triage（#2811）：Issue type: feature ｜ Fixture level: expanded（与上游建议一致：改共享地图组件的相机行为与页面级弹窗状态，在地图容器上新增只读属性；触发条件是一个小状态机。设计见 design.md D17（含本 task 补的「实现期裁定」），规格见 `specs/mobile-curve-sheet` 的「Opening a sheet pans the selected feature into view」）｜ Blast radius: 单图展示页的地图相机——触发条件写错会让地图在用户没要求时移动（桌面开窗时、关抽屉时、手动拖动后被拉回、每次重渲染都平移），或改掉缩放级别；锚点取错会把地图移到被替换掉的那个要素上。
+  - **⚠ 未经用户确认的优先级**（issue 的 needs-follow-up）：「平移只在触发点各发生一次；手动移动后不拉回，但之后换选要素或切换布局仍会再平移一次」是上游编排者补定的，本 task 照此实现并在 PR 里显著标注；它在实现里只对应“触发键”一处，日后改口径成本很小。
+  - Governing invariant：本功能对相机的全部影响 = **“触发键”从任意值变成另一个非空值时做一次 `easeTo`**。触发键为空（没有选中锚点、不在移动形态、曲线区域处于兜底）的任何转移都不产生相机调用；触发键不变的任何重渲染都不产生相机调用；本功能从不设置 zoom / bearing / pitch，也从不使用持久的相机内边距（`setPadding` / `padding` 选项）。第二道闸：平移时刻地图区里必须**真的渲染着抽屉**（DOM 实测），否则不平移——曲线面板首次渲染即崩溃时，兜底状态要到提交阶段才报给页面，那一次提交里触发键仍是非空的，挡住平移的只有这道闸。因为没有任何“跟随”状态，用户手动移动地图后既不会被拉回，也不需要去检测“用户动过地图”。
+  - Change surface：
+    - `apps/frontend/src/pages/OverviewPage.tsx`：`stationPopup` 多记锚点经纬度；`handleMapOverlayClick` 的气象代站分支取锚点；由**收敛后的状态**算出“选中锚点”与“触发键”并经 `M11FullscreenMap` 传给地图组件。
+    - `apps/frontend/src/components/map/M11MapLibreSurface.tsx`（及 `m11MapRuntime.tsx` / `m11MapSelection.tsx` 里与相机、选中属性相邻的位置，文件划分由实现者定）：收新 prop、做一次性平移、订阅相机静止事件、渲染新属性。
+    - 测试：新 spec `e2e/m11-sheet-auto-pan.mobile.mocked.spec.ts`、`e2e/m11-curve-anchor-desktop.mocked.spec.ts`；新 vitest（页面级与地图组件级各一个文件）；`src/test/maplibreStub.tsx` 的假地图没有 `easeTo` / `resize` / `project` 等方法，需要时在**新测试文件内**自建假地图，不改共享桩的既有行为（确需给共享桩加可选能力时只做加法并写进偏离记录）。既有页面级 vitest 里对地图组件的桩忽略未知 prop，预期不需要改；需要改就停下报告。
+    - 不改 `M11DraggableCurveWindow.tsx`、两个曲线面板、`useMobileForm.ts`、e2e 的既有 support 文件与既有定位钩子（`src/lib/riverClickEvidence`、`src/lib/stationLocateEvidence`）。
+  - 口径（裁定）：
+    - (1) 锚点：河段 = 点击时已记录的弹窗锚点（`riverPopup.lngLat`，即点击点的经纬度，不是河段中点）。气象代站 = 被点中的站点要素的 Point 几何坐标；要素没有 Point 几何时退回点击事件的经纬度；两者都没有时窗照常打开，但没有锚点（不平移、不带锚点属性）。
+    - (2) 选中锚点（两种形态同一规则）：只有一种窗开着 → 它的锚点；两种都开着 → 活动窗（`activeCurveWindow`）的锚点。移动形态下“一种窗替换另一种窗”有一个两窗同时非空的未绘制中间提交（#2802 的携带备注），按本规则该提交里选中锚点已经是存活的那个窗的，所以替换只产生一次触发键变化——不得出现先朝被替换者平移、再朝存活者平移。
+    - (3) 触发键 = 移动形态 && 有选中锚点 && 曲线区域不在兜底（`curveRegionInFallback` 为假）时，由「遮盖侧（底部 / 右侧）+ 选中锚点的身份（窗种类 + 要素 id + 锚点经纬度）」组成的字符串；否则为空。形态与遮盖侧一律用**页面那一份** `useMobileForm()` 的值（各组件各有一份订阅，可能不在同一个提交里翻转）。由此得到的触发点：打开抽屉；替换（含同一种窗内换选另一个要素、同一要素换了点击点）；竖屏 ↔ 矮视口横屏；窗开着时从桌面形态进入移动形态（窗变成了抽屉）；曲线区域兜底后「重试」成功（抽屉重新出现）。后三类原规格没有单列（原文是“只在三个时刻移动”），编排者裁定按“抽屉出现 / 选中锚点变化”处理，**规格增量已同步改写**（本 task 的 PR 一并提交）：SHALL 改为“抽屉出现或重新出现、抽屉开着时选中锚点变化、遮盖侧切换”，并各补一条 Scenario。不触发：关闭、离开移动形态、进入兜底、任何键不变的重渲染、用户手动移动地图。
+    - (4) 平移：`easeTo`，目标是选中锚点，带像素偏移，使锚点落在**未被抽屉遮住的地图区的中心**——底部抽屉：向上偏移半个抽屉高度；右侧抽屉：向左偏移半个抽屉宽度。时长不超过既有相机动画的 450ms。抽屉尺寸只取真实渲染出来的抽屉的包围盒（DOM 实测），不按尺寸规则推算（推算值在兜底时也非零，会绕过上面的第二道闸），不得另抄一份数字；平移时刻没有渲染出抽屉就不平移。布局切换与进入移动形态时地图画布自己也在变尺寸，而地图库的 `resize` 经 ResizeObserver 异步触发且有约 50ms 节流；`easeTo` 在起点就把目标屏幕点冻结为“当时的画布中心 + 偏移”，动画中途的 `resize` 既不停止动画也不重算这个点。所以默认机制：**平移前先同步调一次 `map.resize()`**（空闲时幂等），再量抽屉、再 `easeTo`；实现者实测后可换等价机制，判据是 (e)(f)(g2) 的“位于未遮盖区中心”稳定通过。
+    - (5) 锚点属性：`data-selected-anchor-x` / `data-selected-anchor-y` 加在 `m11-map-surface` 上，值为选中锚点在当前相机下的**视口** CSS px（地图画布的视口原点 + `project` 结果，至多两位小数），两种形态都带；选中锚点变化时立即更新，相机静止（`moveend`，含画布尺寸变化引起的）后更新；没有选中锚点时两个属性都不存在。地图实例尚未就绪时不带、不报错。订阅机制（裁定）：经 react-map-gl `<Map>` 的 `onMoveEnd` / `onLoad` 这类 prop，不直接在地图实例上 `on` / `off`；对实例方法（`project`、`easeTo`、`resize`、`getCenter`、`getZoom`、`getCanvas().getBoundingClientRect`）一律做存在性判断，缺了就跳过——既有约 15 个 vitest 文件渲染真实地图组件并配共享桩的假地图（没有这些方法，`getCanvas()` 多数只返回 `{ style }`，其中几个还会真的开窗），它们必须不改通过。
+    - (6) 为可测性新增（规格属性清单之外，写进偏离记录）：`m11-map-surface` 上的 `data-camera-center`（`"lng,lat"`，6 位小数）与 `data-camera-zoom`（4 位小数），相机静止后更新、两种形态都带，**只在 `window.__NHMS_E2E_HOOKS__ === true` 时输出**（mocked 车道与 node-27 receipt 都开着这个门；生产 DOM 不增属性）。理由：规格的「Zoom is unchanged」「Closing does not move the map」「Leaving mobile form does not move the map」要在真实地图库上证明（假地图证明不了尺寸变化、内边距残留这类问题），而现有两个门控钩子按设计不暴露地图实例。不新增任何可写的钩子。
+    - (7) 桌面形态：触发键恒为空，不平移；锚点属性照常暴露。
+  - 实现期同步（以此为准，上文与此冲突处作废）：
+    - 平移不在键变化的那次 effect 里同步做，而是**推迟到下一帧**（`requestAnimationFrame`；口径 (4) 允许的等价机制）。实测同步做时 (e) 两个方向、(f) 后半、(g2) 稳定红：键变化的那次提交里抽屉还是旧形态（390×664 → 750×342 量到全宽的底部抽屉，1280×900 → 390×664 量到桌面浮窗）——页面与抽屉各有一份 `useMobileForm()` 订阅，页面那份先翻。帧回调里的顺序：键仍是当前值 → DOM 里找到抽屉 → 同步 `resize()` → 量抽屉（零尺寸不平移）→ `easeTo`。
+    - 由此多出一道闸：**帧回调时键必须仍是排这次平移时的键**。曲线面板首次渲染即崩溃时，挡住平移的实际是这道闸（到帧回调时键已变空）；“必须渲染着抽屉”的 DOM 闸仍保留作第二层，只由 (s7) 钉住——上文 Governing invariant 与 Review focus (3) 里“挡住平移的只有这道闸”不再成立，变异表里“去掉 DOM 闸 -> (h) 的前半红”也不成立（实测 (h) 不红，(s7) 红）。
+    - 一帧之内键连续变化两次只平移一次，目标是最后一个键。标签页隐藏时帧回调不触发，平移要等页面可见。
+    - 抽屉在 `ownerDocument` 里按 `data-m11-curve-window-kind` 查找，没有限定在地图区子树内（全页只有一个曲线窗容器）。
+    - (c) 比上文多一条硬前提：相机中心确实变过。实测 (c) 的 750×342 河段在“不做平移”变异下也红。
+    - 曲线区域兜底时选中要素仍在，锚点属性照常输出（规格只要求“无选中要素时不带”）。
+  - Sibling surfaces（逐个核对，不只看改到的行）：`useM11MapCamera` 的 `fitTo`（流域边界点击的 `fitBounds`，450ms）与本功能的 `easeTo` 可能前后脚——后者打断前者是可接受的，但不得反过来被 `fitTo` 的 effect 因重渲染重放；站点聚合点击的 `flyTo`（会改缩放，不属于本功能，行为不变）；两个门控定位钩子在定位时 `fitBounds(duration: 0)`（e2e 里相机的起点是定位之后的状态）；`m11MapSelection.tsx` 的选中属性；单窗收敛的 layout effect 与 `chromeYielded`（4.6）——都读同一份页面形态；地图区域的 `RegionErrorBoundary`（地图崩溃重挂后相机回到初始视图；重挂后是否再平移一次取决于实现，两种结果都接受——Non-goal）；`src/main.tsx` 的 `StrictMode`（开发模式下 effect 双跑，平移须幂等：一次触发键变化只能有一次 `easeTo`；不在地图实例上 `on` / `off`）；既有页面级 vitest 对地图组件的七处桩；以及渲染真实地图组件 + 共享桩假地图的既有 vitest（组件级约 6 个文件、页面级约 9 个文件，如 `M11MapLibreSurfaceHook.test.tsx`、`OverviewPageLayerBasemapLaunchers.test.tsx`）；`handleMapOverlayClick` 里 `setActiveCurveWindow` 与 `setRiverPopup` / `setStationPopup` 在同一个回调里批处理——“替换只产生一次键变化”依赖这个耦合，不要拆开。站点锚点直接复用既有的 `popupAnchorFromInteraction`（`m11MapInteractions.ts`，已是口径 (1) 的实现）。
+  - Must preserve：桌面形态开窗不移动地图（`m11-curve-window-desktop`、`m11-curve-window-min-size`、`m11-overlay-collision` 的 1920 / 1440 / 1280 / 800 不改通过）；全部既有移动 spec 不改通过——尤其 `m11-curve-sheet.mobile`（抽屉几何）、`m11-sheet-yields-chrome.mobile`（让位、暂停、兜底）、4.4 / 4.5 的图表 spec、4.7 / 4.8 的触屏 spec、4.9 的控件 spec（它们都在开窗后量抽屉内的东西，地图多平移一次不应影响；受影响就停下报告）；既有 vitest 全部不改通过；`m11-map-surface` 既有的 `data-*` 属性与取值不变；流域点击的 `fitBounds`、聚合点击的 `flyTo` 行为不变；两个门控钩子的签名与行为不变。
+  - Risk pack「Concurrency / 状态机」selected -> vitest：
+    - 页面级（新文件，照 `OverviewPageSingleCurveWindow.test.tsx` 的写法，在本文件里把地图组件桩成会渲染所收 prop 的元素；用 `installMobileFormMatchMedia` 驱动形态）：
+      - (p1) 移动形态点河段 → 地图组件收到非空触发键与河段锚点；
+      - (p2) 河段窗开着点气象代站（替换）→ 地图组件收到的触发键序列里**没有**任何一个由“被替换者的锚点”构成的新键，最终键对应站点锚点，恰好变化一次（记录每次渲染收到的键）；
+      - (p3) 关闭 → 触发键为空、选中锚点为空；
+      - (p4) 抽屉开着离开移动形态 → 触发键为空，选中锚点仍在；
+      - (p5) 抽屉开着竖屏 → 矮视口横屏 → 触发键变化一次，遮盖侧为右侧；
+      - (p6) 桌面形态：触发键恒为空；两窗都开时选中锚点 = 活动窗的锚点，激活另一个窗后换成另一个；
+      - (p7) 桌面形态开着窗进入移动形态 → 触发键从空变为非空（一次）；两窗都开着进入移动形态 → 键只对应存活的活动窗；
+      - (p8) 气象代站锚点来源：有 Point 几何用几何；没有几何退回事件经纬度；两者都没有 → 窗打开、无锚点、键为空；
+      - (p9) 曲线区域兜底：断言**键序列**——首次渲染即崩溃时为 空 → K → 空（兜底状态在提交阶段才到页面，中间那个 K 是真实存在的），重试成功后 → K；
+      - (p10) 移动形态河段窗开着，再点另一条河段（同一种窗内换选）→ 触发键变化恰一次，对应新锚点。
+    - 地图组件级（新文件，假地图自建：`easeTo`、`resize`、`project`、`getCenter`、`getZoom`、`getCanvas`，并记录全部相机方法调用；`moveend` 经桩 `<Map>` 收到的 `onMoveEnd` prop 触发）：
+      - (s1) 触发键从空变为非空 → `easeTo` 恰一次：`center` = 锚点、`offset` 符合遮盖侧与假抽屉尺寸，选项里**没有** `zoom` / `bearing` / `pitch` / `padding` 键；
+      - (s2) 键不变的重渲染（其他 prop 变化）→ 无新增相机调用；
+      - (s3) 键变为空（关闭 / 离开移动形态）→ 任何相机方法都没有被调用（`easeTo` / `flyTo` / `jumpTo` / `panTo` / `fitBounds` / `setCenter` / `setPadding` 全部为零新增）；
+      - (s4) 键换成另一个非空值（替换 / 布局切换）→ 再恰一次，目标是新锚点 / 新偏移；
+      - (s5) 假地图发出用户拖动后的 `moveend` → 无 `easeTo`；其后键变化 → 恰一次；
+      - (s6) `StrictMode` 下挂载并走一遍 (s1) → `easeTo` 仍恰一次；
+      - (s9) 假地图缺方法（只有共享桩那几样）且有选中锚点、键非空 → 不抛错、不带锚点属性；
+      - (s10) 平移前调用了 `resize`（调用顺序：`resize` 先于 `easeTo`）；
+      - (s7) 没有渲染出抽屉时键变为非空 → 不平移；
+      - (s8) 属性：有锚点 → 两个锚点属性等于“画布视口原点 + `project`”；`moveend` 后按新的 `project` 更新；锚点为空 → 两个属性都不存在；测试门打开时 `data-camera-center` / `data-camera-zoom` 在 `moveend` 后等于假地图的值，门关着时两个相机属性都不存在。
+  - Risk pack「Public API / entry」selected：用户可见的相机行为与只读属性 -> 新移动 spec（三个移动 project 都跑、无按 project 跳过、无 `force`；每条用例内 `setViewportSize`，不用大于 1280×900 的视口，单用例最多两个页面；读数一律轮询到满足，“不应变化”的判据在等够动画时长的数倍后再读；量具用包围盒，地图区 = `m11-fullscreen-map`，抽屉 = 曲线窗 frame）：
+    - (a) 390×664 河段窗：相机静止后锚点在地图区内、在抽屉顶边之上，且位于未遮盖区的中心（横向 = 地图区中线，纵向 = 未遮盖区中线，各 ±4px）；`data-camera-zoom` 等于开窗前的值；
+    - (b) 750×342 气象代站窗：锚点在地图区内、在抽屉左边之左，且位于未遮盖区中心（±4px）；缩放不变；
+    - (c) 390×664 气象代站窗、750×342 河段窗：同上两条的对称组合（在未遮盖区内——与抽屉边的比较用严格不等号——且缩放不变）；
+    - (d) 关闭：抽屉开着并静止后记下 `data-camera-center` / `data-camera-zoom`，关闭，等待后两者与关闭前相同，两个锚点属性都不存在；
+    - (e) 旋转：390×664 开着河段窗 → 750×342，相机静止后锚点在地图区内、在右侧抽屉之左，且位于未遮盖区中心（±4px），缩放不变；反向（750×342 → 390×664）锚点在底部抽屉之上且位于未遮盖区中心（±4px）；
+    - (f) 手动移动：390×664 抽屉开着，用触摸（`e2e/support/touchGestures.ts` 的 `dragOneFinger`；起点须满足 `elementFromPoint` 是地图画布）把地图向下拖到锚点落到抽屉顶边之下（硬前提：拖动后锚点的 y 大于抽屉顶边、`data-camera-center` 已改变），等待后锚点仍在抽屉之下（没有被拉回）；随后转到 750×342，相机静止后锚点在右侧抽屉之左且位于未遮盖区中心（±4px）；
+    - (g) 离开移动形态：390×664 抽屉开着并静止后 → 1280×900，`data-camera-center` / `data-camera-zoom` 与切换前相同（地图库在画布尺寸变化时不改中心），锚点属性仍在；
+    - (g2) 进入移动形态：1280×900 开着河段窗 → 390×664，相机静止后锚点在抽屉顶边之上且位于未遮盖区中心（±4px），缩放不变；
+    - (h) 兜底：390×664 预置曲线崩溃开关后轻触河段 → 兜底块出现，等待后 `data-camera-center` 与轻触前相同（没有平移）；点「重试」（先清掉开关）→ 抽屉出现，相机静止后锚点在抽屉之上。
+    - 浏览器里做不了的：移动形态下“河段窗开着再点气象代站”（站点定位点在抽屉之下，#2807 已有同样结论）——替换路径由 (p2)(s4) 覆盖。
+  - Risk pack「Legacy compatibility」selected -> 新桌面 spec `e2e/m11-curve-anchor-desktop.mocked.spec.ts`（桌面 project，1280×900）：(i) 开河段窗：两个锚点属性与点击点相差 ≤ 1px，`data-camera-center` / `data-camera-zoom` 与点击前相同；(j) 双窗（顺序固定）：开河段窗 → 定位站点（钩子会移动相机），相机静止后记下此时的河段锚点属性 R2 → 点站点，断言属性 = 站点钩子给出的视口坐标（≤ 1px）→ 点一下河段窗使其成为活动窗，断言属性 = R2（≤ 1px）；(k) 关掉全部窗后两个锚点属性都不存在。
+  - Risk pack「Error handling」selected：锚点缺失、地图未就绪、兜底 -> (p8)(p9)(s7)(h)。
+  - 未选：Auth、File IO、Schema、Config、Resource limits、Release / dependency compatibility（不改依赖，只用 `easeTo` / `resize` 的公开选项）、Documentation（design.md D17 与规格已写明；本 task 给 D17 补「实现期裁定」并改写规格增量）。
+  - Non-goals：缩放级别变化；桌面形态平移；持久相机内边距；“用户动过地图”的检测与任何跟随；地图崩溃重挂后的再平移；选中要素的高亮样式；抽屉关闭后把地图移回去；`prefers-reduced-motion` 的处理；全国缩放级别下点不中河段（design.md Open Questions 1）；真机手感（#2818）。
+  - Review focus：(1) 触发键只由收敛后的页面状态与页面那一份形态值构成，替换时不出现朝被替换者的平移；(2) `easeTo` 的选项里没有缩放 / 方位 / 俯仰 / 内边距，全仓没有新增 `setPadding`；(3) 键为空的转移零相机调用（关闭、离开移动形态）；进入兜底不平移（键为空，或首次崩溃那一提交里靠“必须渲染着抽屉”的闸）；(4) `StrictMode` 下一次键变化恰一次 `easeTo`，不在实例上 `on` / `off`；平移前的同步 `resize` 会在 effect 内部同步发一次 `moveend`（重入）——它不得被当成触发，也不得造成第二次 `easeTo`；(5) 属性是视口坐标、相机静止后更新、无锚点时不存在；(6) 布局切换时以新画布尺寸为准（(e) 的两个方向）；(7) 桌面形态零相机调用；(8) 新增的两个相机只读属性没有被产品逻辑读取；(9) 既有相机调用（流域 `fitBounds`、聚合 `flyTo`）与门控钩子不变；(10) 三个移动 project 都断言、无跳过。
+  - Evidence floor：约定的本地验证命令 + `check:types` + 治理门测试全绿；新 spec 的 strict `tsc --noEmit` exit 0；先红后绿——对 `origin/master` 的 `src/`：移动 spec 与桌面 spec 全红（属性不存在），其中哪些断言在“属性已存在但不平移”时仍会红，由下面的变异给出；vitest (p1)–(p10)、(s1)–(s10) 改动前红（(s9) 是防御性用例，改动前可能已绿，须点名）；`--repeat-each=5` 无 flaky（`--workers=1`），(e)(f)(g2)(h) 另跑 `--repeat-each=8`；变异：不做平移 -> (a)(b)(e)(f 的后半)(g2)(h 的后半)、(s1)(s4) 红（(c) 的 750×342 河段在这个变异下只差一个边界值，是否变红须点名）；偏移取反或取整个抽屉尺寸 -> (a)(b)、(s1) 红；触发键里去掉遮盖侧 -> (e)(f)、(p5)(s4) 红；触发键不看形态（桌面也平移）-> (i)、(p6) 红；关闭时把地图移回 -> (d)、(s3) 红；`easeTo` 带上 `zoom` -> (s1) 红（浏览器里若缩放值恰好相同则 e2e 不红，须点名）；选中锚点在两窗并存时取“非活动窗” -> (j)、(p2)(p6) 红；键不排除兜底 -> (p9) 红；去掉“必须渲染着抽屉”的闸，或抽屉尺寸改按规则推算 -> (s7)、(h) 的前半红；平移前不 `resize` -> (s10) 红（e2e 的 (e)(g2) 是否变红取决于时序，须如实报告）；属性不在 `moveend` 后更新 -> (a)–(f)、(s8) 红；每次渲染都平移（键比较失效）-> (f 的前半)、(s2)(s5) 红。`git diff --stat --diff-filter=MDR origin/master -- apps/frontend/e2e 'apps/frontend/src/**/__tests__/**' apps/frontend/src/test` 期望为空（既有 vitest 与共享桩一个不改）。改展示端运行时代码，合并前出 node-27 live receipt（PR 的生产构建对 live API）：桌面布局 oracle exit 0；390×664 与 750×342 经门控钩子打开河段窗与气象代站窗，相机静止后锚点在未遮盖区内、缩放不变；关闭后中心与缩放不变、锚点属性消失；390×664 → 750×342 后锚点在右侧抽屉之左；1280×900 开河段窗后锚点与点击点相差 ≤ 1px、相机不动。
 
 ## 5. 全页审计（`/`）
 
