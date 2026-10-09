@@ -5,6 +5,7 @@ import {
   controlBarParts,
   expectControlsInViewport,
   installFailClosedDischargeLayer,
+  installFailClosedDischargeWithPrecipLegend,
   measureControlBar,
   overlapsVertically,
   type ControlBarMeasure,
@@ -44,6 +45,8 @@ const BAR_BOTTOM_INSET = 40
 /** 移动形态下控制条左右各让出的边距。 */
 const BAR_SIDE_INSET = 8
 const STATUS_CONTAINER = 'm11-map-status-overlays'
+const LEGEND_SCROLLER = 'm11-floating-legend-scroll'
+const LEGEND_PRECIP_ROW = 'm11-floating-legend-precip-row'
 const FAIL_CLOSED_REASON = 'No cycle covers every basin, so the national discharge layer is disabled.'
 
 /** 两种目录：带 9 个有效时刻与一个起报时次；fail-closed（无周期、禁用原因出现——竖屏下最高的条）。 */
@@ -239,6 +242,60 @@ test.describe('M11 控制条竖屏两行', () => {
       })
     }
   }
+
+  // 上一组用例的图例只有径流分级，面板比限高矮，证明不了“限高按变高后的竖屏控制条重量”。
+  // 这里让内容真的顶到限高：径流分级 + 六级降水，配最高的条（两行 + 禁用原因行）。
+  test('320x568（无周期 + 禁用原因 + 双图例）：图例内容超出限高时面板仍止于控制条顶边之上，滚到底后末项在面板可视框内', async ({ page }, testInfo) => {
+    await page.setViewportSize(NARROW)
+    await installRiverWindowMocks(page)
+    await installFailClosedDischargeWithPrecipLegend(page)
+    await openMap(page, true)
+    const where = label(page, testInfo)
+
+    const { launcher, panel } = overlayPart(page, 'legend')
+    await launcher.tap()
+    await expectOnlyExpanded(page, 'legend')
+    const scroller = page.getByTestId(LEGEND_SCROLLER)
+    const lastEntry = page.getByTestId(LEGEND_PRECIP_ROW).last()
+    await expect(page.getByTestId(LEGEND_PRECIP_ROW)).toHaveCount(6)
+    const scrollMetrics = () =>
+      scroller.evaluate((element) => ({
+        scrollHeight: element.scrollHeight,
+        clientHeight: element.clientHeight,
+        scrollTop: element.scrollTop,
+      }))
+
+    // (1) 硬前提：内容确实溢出滚动容器，否则下面的断言与短面板那组没有区别。
+    const before = await scrollMetrics()
+    console.log(`control-bar legend overflow scroll @ ${where}`, JSON.stringify(before))
+    expect(before.scrollHeight, `双图例内容 ${before.scrollHeight}px 应超出滚动容器 ${before.clientHeight}px @ ${where}`).toBeGreaterThan(
+      before.clientHeight,
+    )
+
+    const map = await boxOf(page.locator(MAP_REGION), '地图区')
+    const bar = await boxOf(page.locator(CONTROL_BAR), '控制条')
+    const panelBox = await boxOf(panel, '图例面板')
+    const lastBefore = await boxOf(lastEntry, '图例末项')
+    console.log(`control-bar legend overflow boxes @ ${where}`, JSON.stringify({ map, bar, panel: panelBox, lastEntry: lastBefore }))
+    // 条确实是带禁用原因的高条，而不是 64px 的桌面条。
+    expect(bar.height, `竖屏条高 ${bar.height} @ ${where}`).toBeGreaterThan(64 + TOLERANCE)
+    // (2) 面板在地图区内。
+    expect(contains(map, panelBox), `图例面板 ${JSON.stringify(panelBox)} 不在地图区 ${JSON.stringify(map)} 内 @ ${where}`).toBe(true)
+    // (3) 面板底边在控制条顶边之上。
+    expect(panelBox.y + panelBox.height, `图例面板底边应在控制条顶边 ${bar.y} 之上 @ ${where}`).toBeLessThanOrEqual(bar.y + TOLERANCE)
+    expect(intersects(panelBox, bar), `图例面板与控制条相交 @ ${where}`).toBe(false)
+    expect(contains(panelBox, lastBefore), `滚动前末项不应已在面板可视框内 @ ${where}`).toBe(false)
+
+    // (4) 滚到底后末项在面板可视框内；滚的是面板内部，面板自身不动。
+    await scroller.evaluate((element) => {
+      element.scrollTop = element.scrollHeight
+    })
+    const after = await scrollMetrics()
+    expect(after.scrollTop + after.clientHeight).toBeGreaterThanOrEqual(after.scrollHeight - 1)
+    const lastAfter = await boxOf(lastEntry, '图例末项')
+    expect(contains(panelBox, lastAfter), `滚到底后末项 ${JSON.stringify(lastAfter)} 不在面板 ${JSON.stringify(panelBox)} 内 @ ${where}`).toBe(true)
+    expect(await boxOf(panel, '图例面板')).toEqual(panelBox)
+  })
 
   // 状态条容器的竖屏底部界限：320×568 + fail-closed 是最高的条（「Analysis / Forecast」折成三行 + 禁用原因行）。
   for (const viewport of [PORTRAIT, NARROW]) {
