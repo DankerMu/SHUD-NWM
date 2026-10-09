@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 
 import { RegionCrashProbe } from '@/components/layout/RegionCrashProbe'
@@ -490,6 +490,16 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   useEffect(() => {
     if (!state.metStations) setStationPopup(null)
   }, [state.metStations])
+  // 移动形态单窗（openspec mobile-responsive-display D10）：两窗同开时留下活动窗、关掉另一个。
+  // 用 layout effect：收敛发生在绘制之前，不会画出一帧双窗；桌面形态下是空操作。
+  const { mobile } = useMobileForm()
+  const riverOpen = riverPopup !== null
+  const stationOpen = stationPopup !== null
+  useLayoutEffect(() => {
+    if (!mobile || !riverOpen || !stationOpen) return
+    if (activeCurveWindow === 'station') setRiverPopup(null)
+    else setStationPopup(null)
+  }, [mobile, riverOpen, stationOpen, activeCurveWindow])
 
   const handleMapOverlayClick = useCallback(
     (interaction: M11MapOverlayInteraction) => {
