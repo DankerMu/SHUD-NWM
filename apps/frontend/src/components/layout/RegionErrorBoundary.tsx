@@ -13,6 +13,11 @@ interface RegionErrorBoundaryProps {
   variant?: 'region' | 'page'
   /** 浮层区域的定位类：fallback 落在原区域的位置上。 */
   className?: string
+  /**
+   * 错误态变化的通知：捕获时以该错误调用，错误被清除（「重试」或 `resetKeys` 变化）时以 `null` 调用。
+   * 同一次提交里可能连续触发（清错后子树立刻再抛），调用方的写入须幂等。不传 = 行为与没有它时相同。
+   */
+  onErrorChange?: (error: Error | null) => void
   children?: ReactNode
 }
 
@@ -39,9 +44,13 @@ export class RegionErrorBoundary extends Component<RegionErrorBoundaryProps, Reg
   componentDidCatch(error: Error, info: ErrorInfo) {
     // 目前没有远端上报通道；原始错误只进日志，不给用户看。
     console.error('[RegionErrorBoundary]', this.props.region, error, info.componentStack)
+    this.props.onErrorChange?.(error)
   }
 
   componentDidUpdate(prevProps: RegionErrorBoundaryProps, prevState: RegionErrorBoundaryState) {
+    // 有错 -> 无错：「重试」与 `resetKeys` 复位两条清除路径都经 `setState({ error: null })` 落到这里。
+    // 清错后子树立刻再抛时，这次提交的状态仍是“有错”，不会误报清除。
+    if (prevState.error !== null && this.state.error === null) this.props.onErrorChange?.(null)
     // 守卫 `prevState.error !== null`：key 变化与抛错落在同一次提交时，不能把刚捕获的错误当成
     // 「key 变了」立刻清掉——那会让子树马上再抛一次（react-error-boundary 同一语义）。
     if (

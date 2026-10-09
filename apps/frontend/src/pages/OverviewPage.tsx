@@ -24,6 +24,7 @@ import { bboxToMapFit } from '@/components/map/m11MapRuntime'
 import { M11RiverForecastPanel, type M11RiverPopupSegment } from '@/components/map/M11RiverForecastPanel'
 import { M11StationForcingPopup, type M11StationPopupStation } from '@/components/map/M11StationForcingPopup'
 import { useMobileForm } from '@/hooks/useMobileForm'
+import { cn } from '@/lib/cn'
 import type { HydroMetSource } from '@/lib/hydroMet/queryState'
 import { mergeLayerStates, type LayerState, type OverviewBasin } from '@/lib/m11/overviewDataContracts'
 import {
@@ -108,12 +109,14 @@ export function OverviewPage() {
 function M11BottomControlBarRegion({
   input,
   onQueryChange,
+  yielded,
 }: {
   input: M11ControlBarInput
   onQueryChange: (patch: M11QueryPatch) => void
+  yielded: boolean
 }) {
   const model = useMemo(() => deriveM11ControlBarModel(input), [input])
-  return <M11BottomControlBar {...model} onQueryChange={onQueryChange} />
+  return <M11BottomControlBar {...model} onQueryChange={onQueryChange} yielded={yielded} />
 }
 
 /**
@@ -138,6 +141,7 @@ function M11FullscreenMap({
   fitTo,
   mapLabel,
   controlBarInput,
+  yielded = false,
   onQueryChange,
   onOverlayHover,
   onOverlayClick,
@@ -164,6 +168,11 @@ function M11FullscreenMap({
   mapLabel: string
   /** 底部控制条的派生入参（模型在控制条区域内派生）。null / 不传 = 不渲染任何控制条 DOM。 */
   controlBarInput?: M11ControlBarInput | null
+  /**
+   * 地图外壳让位（openspec mobile-responsive-display D11）：由 `OverviewMode` 算一次传进来，桌面形态恒为 false。
+   * 为真时控制条与启动器列隐藏（保持挂载）、展开值复位、时间轴暂停——三处都只读这一个布尔。
+   */
+  yielded?: boolean
   onQueryChange: (patch: M11QueryPatch) => void
   onOverlayHover?: (interaction: M11MapOverlayInteraction | null) => void
   onOverlayClick?: (interaction: M11MapOverlayInteraction) => void
@@ -183,6 +192,11 @@ function M11FullscreenMap({
     columnRef: launcherColumnRef,
     floorSelector: CONTROL_BAR_SELECTOR,
   })
+  // 让位即复位展开值。显式做，不靠“点要素时地图点击顺带收起”：兜底态下「重试」成功重新进入让位、
+  // 以及页面直接收到要素点击回调的路径都不经地图点击。
+  useEffect(() => {
+    if (yielded) collapse()
+  }, [yielded, collapse])
   const toggleLayers = useCallback(() => toggle('layers'), [toggle])
   const toggleBasemap = useCallback(() => toggle('basemap'), [toggle])
   const toggleLegend = useCallback(() => toggle('legend'), [toggle])
@@ -280,7 +294,7 @@ function M11FullscreenMap({
           className="absolute bottom-10 left-1/2 z-[115] -translate-x-1/2"
         >
           <RegionCrashProbe region="control-bar" />
-          <M11BottomControlBarRegion input={controlBarInput} onQueryChange={onQueryChange} />
+          <M11BottomControlBarRegion input={controlBarInput} onQueryChange={onQueryChange} yielded={yielded} />
         </RegionErrorBoundary>
       ) : null}
       {mobile ? (
@@ -288,9 +302,13 @@ function M11FullscreenMap({
         // 图层 / 底图 / 图例 / 运维入口。三个展开的面板共用同一个锚点（列左侧、顶边对齐列顶）。
         // 矮视口横屏把顶距收到 4px、间距收到 2px：四个 44px 的项才放得进列顶到控制条顶之间
         // （750×342 下可用 182px，8 / 4 的几何要 188px）。
+        // 让位时整列 `invisible`：竖屏下列在底部抽屉上方、不被盖住，必须真的隐藏（保持挂载）。
         <div
           ref={launcherColumnRef}
-          className="absolute right-2 top-2 z-[120] flex flex-col items-end gap-1 mobile-landscape:top-1 mobile-landscape:gap-0.5"
+          className={cn(
+            'absolute right-2 top-2 z-[120] flex flex-col items-end gap-1 mobile-landscape:top-1 mobile-landscape:gap-0.5',
+            yielded && 'invisible',
+          )}
           data-testid="m11-launcher-column"
         >
           {mapControlsRegion}
@@ -500,6 +518,14 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
     if (activeCurveWindow === 'station') setRiverPopup(null)
     else setStationPopup(null)
   }, [mobile, riverOpen, stationOpen, activeCurveWindow])
+  // 曲线区域是否在兜底：由该区域边界的 `onErrorChange` 写入（捕获 -> true；「重试」/ 换要素清错 -> false）。
+  // 写入幂等：替换要素又崩溃时回调会连续触发。
+  const [curveRegionInFallback, setCurveRegionInFallback] = useState(false)
+  const handleCurveRegionErrorChange = useCallback((error: Error | null) => setCurveRegionInFallback(error !== null), [])
+  // 地图外壳让位（D11）的唯一判定：移动形态 && 有曲线面板在渲染 && 曲线区域不在兜底。
+  // 取决于“是否有抽屉在正常渲染”，不是“是否有选中的河段 / 站点”——面板崩溃时外壳必须回来。
+  // 读实时的 `mobile`：桌面形态恒为 false，形态切换时让位 / 恢复自然得到。
+  const chromeYielded = mobile && (riverOpen || stationOpen) && !curveRegionInFallback
 
   const handleMapOverlayClick = useCallback(
     (interaction: M11MapOverlayInteraction) => {
@@ -635,6 +661,7 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
       fitTo={basinFit}
       mapLabel="全国总览地图"
       controlBarInput={controlBarInput}
+      yielded={chromeYielded}
       onQueryChange={onQueryChange}
       onOverlayHover={handleMapOverlayHover}
       onOverlayClick={handleMapOverlayClick}
@@ -648,7 +675,9 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
         region="预报面板"
         testId="region-error-map-panels"
         resetKeys={[selectedSegmentId, selectedStationId]}
+        // 移动形态不加类：390×664 / 750×342 / 844×390 实测兜底块都在地图区内，不与控制条和任一启动器相交。
         className="absolute left-1/2 top-24 z-[130] -translate-x-1/2"
+        onErrorChange={handleCurveRegionErrorChange}
       >
         {/* 曲线探针只在有曲线面板渲染时挂载：没有窗打开时设 `curve` 不产生兜底。 */}
         {riverForecastPanel || stationForecastPanel ? <RegionCrashProbe region="curve" /> : null}
