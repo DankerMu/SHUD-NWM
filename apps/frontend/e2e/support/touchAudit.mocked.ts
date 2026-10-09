@@ -1,4 +1,4 @@
-import { expect, type Page } from '@playwright/test'
+import { expect, type Locator, type Page } from '@playwright/test'
 
 import type { Box } from './legendLauncher.mocked'
 import { MIN_FORM_FONT_PX, MIN_TOUCH_TARGET_PX } from './sheetControls.mocked'
@@ -241,4 +241,44 @@ export function summarize(controls: AuditedControl[]) {
     formSelects: fonts.length,
     minFormFontPx: fonts.length > 0 ? Math.min(...fonts) : null,
   }
+}
+
+export interface SliderHitBox {
+  slider: Box
+  /** 同一行里画出来的轨道：滑块所在定位容器的第一个子元素（分隔线是条件渲染，排在它之后）。 */
+  track: Box
+  /** 滑块纵向中心 − 轨道纵向中心（px）；正值 = 滑块偏下。 */
+  centreDeltaY: number
+  /** 滑块横向中心、上 / 下边各往里 1px 处 `elementFromPoint` 命中的元素；命中滑块自己时为 `self`。 */
+  topHit: string
+  bottomHit: string
+}
+
+/**
+ * 量有效时间滑块的命中区与它所在行的轨道（一次 evaluate 取齐，两个盒子同一帧）。
+ * 轨道没有 testid，按结构取：滑块父元素（`relative` 的定位容器）的第一个子元素。
+ * 只在 `auditSettledControls` 返回之后调用，不量渲染中途的盒子。
+ */
+export async function measureSliderHitBox(slider: Locator): Promise<SliderHitBox> {
+  return slider.evaluate((input) => {
+    const boxOf = (rect: DOMRect) => ({ x: rect.left, y: rect.top, width: rect.width, height: rect.height })
+    const describe = (element: Element | null) => {
+      if (element === null) return 'null'
+      if (element === input) return 'self'
+      const testId = element.getAttribute('data-testid')
+      return `${element.tagName.toLowerCase()}${testId ? `[data-testid=${testId}]` : ''}`
+    }
+    const trackElement = input.parentElement?.firstElementChild
+    if (!trackElement || trackElement === input) throw new Error('有效时间滑块的同行里找不到轨道元素')
+    const own = input.getBoundingClientRect()
+    const track = trackElement.getBoundingClientRect()
+    const centreX = own.left + own.width / 2
+    return {
+      slider: boxOf(own),
+      track: boxOf(track),
+      centreDeltaY: own.top + own.height / 2 - (track.top + track.height / 2),
+      topHit: describe(document.elementFromPoint(centreX, own.top + 1)),
+      bottomHit: describe(document.elementFromPoint(centreX, own.bottom - 1)),
+    }
+  })
 }

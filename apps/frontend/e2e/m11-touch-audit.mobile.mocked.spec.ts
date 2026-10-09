@@ -11,6 +11,7 @@ import {
   belowFormFontFloor,
   belowTouchFloor,
   insideHorizontalScroller,
+  measureSliderHitBox,
   outsideViewport,
   summarize,
   type AuditedControl,
@@ -43,6 +44,14 @@ const CONTROL_BAR_TEST_ID = 'm11-bottom-control-bar'
 const LAUNCHER_COLUMN_TEST_ID = 'm11-launcher-column'
 const OPS_LINK_TEST_ID = 'm11-ops-link'
 const PRECIP_TOGGLE_TEST_ID = 'm11-layer-toggle-precip'
+/**
+ * 滑块命中区与轨道的纵向中心差上限。实测恒为 −2.5px（三个移动 project 与 320×568；行内替换元素
+ * 落在行盒基线上的既有偏差）；去掉 `mobile:top-3.5` 会让命中区整体上移 14px（变成 −16.5px）。
+ */
+const MAX_SLIDER_CENTRE_DELTA_PX = 3
+/** 画出来的轨道是 `h-1`（4px）：按结构取到的元素得是它，不是别的同行元素。 */
+const TRACK_HEIGHT_PX = 4
+const EDGE_ALIGN_TOLERANCE_PX = 0.5
 
 /**
  * `minControls` = 该状态的枚举数下限（实测值；三个移动 project 与 320×568 下相同）：
@@ -180,6 +189,24 @@ function expectAudit(audit: TouchAudit, where: string, floors: boolean) {
   expect.soft(outsideViewport(audit), `不在视口内的可点控件 @ ${where}`).toEqual([])
 }
 
+/**
+ * 滑块的 44px 命中区（`mobile:h-11` + `mobile:-mt-7` + `mobile:top-3.5`）仍以画出来的轨道为中心，
+ * 上下各外扩的 14px 没被别的元素盖住、也没被祖先裁掉。高度由上面的 44×44 审计钉住，这里钉位置。
+ */
+async function expectSliderCentredOnTrack(page: Page, where: string) {
+  const m = await measureSliderHitBox(controlBarParts(page).slider)
+  console.log(`touch-audit slider @ ${where}`, JSON.stringify(m))
+
+  expect(m.track.height, `按结构取到的应是 4px 高的轨道 ${JSON.stringify(m.track)} @ ${where}`).toBe(TRACK_HEIGHT_PX)
+  expect(Math.abs(m.track.width - m.slider.width), `轨道与滑块应等宽 @ ${where}`).toBeLessThanOrEqual(EDGE_ALIGN_TOLERANCE_PX)
+  expect(
+    Math.abs(m.centreDeltaY),
+    `滑块 ${JSON.stringify(m.slider)} 与轨道 ${JSON.stringify(m.track)} 的纵向中心差 ${m.centreDeltaY}px @ ${where}`,
+  ).toBeLessThanOrEqual(MAX_SLIDER_CENTRE_DELTA_PX)
+  expect(m.topHit, `滑块上边往里 1px 处应命中滑块自己 @ ${where}`).toBe('self')
+  expect(m.bottomHit, `滑块下边往里 1px 处应命中滑块自己 @ ${where}`).toBe('self')
+}
+
 test.describe('M11 全页触控与字号审计', () => {
   test.beforeEach(async ({ page }) => {
     expect(isMobileForm(requireViewport(page))).toBe(true)
@@ -204,6 +231,16 @@ test.describe('M11 全页触控与字号审计', () => {
       expectAudit(audit, where, false)
     })
   }
+
+  test('默认：有效时间滑块的命中区以轨道为中心、外扩部分不被遮挡', async ({ page }, testInfo) => {
+    await enter(page, STATES[0], requireViewport(page))
+    await expectSliderCentredOnTrack(page, label(page, testInfo))
+  })
+
+  test('320x568 默认：有效时间滑块的命中区以轨道为中心、外扩部分不被遮挡', async ({ page }, testInfo) => {
+    await enter(page, STATES[0], NARROW)
+    await expectSliderCentredOnTrack(page, label(page, testInfo))
+  })
 
   test('默认（运维角色）：运维入口计入审计', async ({ page }, testInfo) => {
     await openMap(page, requireViewport(page))
