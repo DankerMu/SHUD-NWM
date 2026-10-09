@@ -356,3 +356,67 @@ def test_ci_yml_still_has_exactly_three_locked_installs() -> None:
     text = CI_WORKFLOW.read_text(encoding="utf-8")
 
     assert text.count(f"run: {LOCKED_SYNC}\n") == 3
+
+
+# --- ci.yml wiring: the sharded mocked-regression Playwright lane (#2844) ---------------
+
+E2E_LANE_SCRIPT = "test:e2e:mocked-regression"
+
+
+def _frontend_job(key: str) -> dict[str, Any]:
+    return yaml.safe_load(CI_WORKFLOW.read_text(encoding="utf-8"))["jobs"][key]
+
+
+def test_mocked_lane_is_a_single_dimension_matrix_whose_shards_do_not_cancel_each_other() -> None:
+    job = _frontend_job("frontend-e2e")
+    strategy = job["strategy"]
+
+    assert strategy["fail-fast"] is False
+    assert set(strategy) == {"fail-fast", "matrix"}
+    assert set(strategy["matrix"]) == {"shard"}
+    shards = strategy["matrix"]["shard"]
+    # Playwright shards are 1-based and contiguous; a gap would drop that shard's tests.
+    assert shards == list(range(1, len(shards) + 1))
+    assert len(shards) > 1
+    assert job["name"] == "Frontend E2E (mocked)"  # GitHub appends " (<shard>)"
+    assert type(job["timeout-minutes"]) is int
+
+
+def test_mocked_lane_shard_total_comes_from_the_matrix_so_the_shards_cover_the_lane() -> None:
+    # `--shard=k/N` is complete and disjoint only when N is the number of jobs
+    # that run; `strategy.job-total` is that number, a literal could drift.
+    (lane,) = [run for run in _runs(_frontend_job("frontend-e2e")) if E2E_LANE_SCRIPT in run]
+
+    assert lane == (
+        f"cd apps/frontend && pnpm run {E2E_LANE_SCRIPT} --shard=${{{{ matrix.shard }}}}/${{{{ strategy.job-total }}}}"
+    )
+
+
+def test_mocked_lane_shard_failure_fails_the_check_and_keeps_one_worker() -> None:
+    job = _frontend_job("frontend-e2e")
+    text = yaml.safe_dump(job)
+
+    assert "continue-on-error" not in text
+    assert "--retries" not in text
+    # One worker per shard: more would change the conditions the specs run under.
+    assert "PLAYWRIGHT_WORKERS" not in text
+    assert "--workers" not in text
+    assert not any("if" in step for step in job["steps"])
+
+
+def test_mocked_lane_keeps_the_frontend_gate_and_frontend_build_no_longer_runs_it() -> None:
+    e2e = _frontend_job("frontend-e2e")
+    build = _frontend_job("frontend-build")
+
+    for job in (e2e, build):
+        assert job["needs"] == "changes"
+        assert job["if"] == "needs.changes.outputs.frontend == 'true'"
+    assert not any("playwright" in run or "test:e2e" in run for run in _runs(build))
+    assert "strategy" not in build
+    build_runs = "\n".join(_runs(build))
+    for command in ("pnpm typecheck", "pnpm run check:types", "pnpm build && pnpm test", "pnpm check:bundle"):
+        assert command in build_runs
+    # The dev server command is `corepack pnpm dev`; the browser must be installed.
+    e2e_runs = "\n".join(_runs(e2e))
+    assert "corepack prepare pnpm@" in e2e_runs
+    assert "playwright install --with-deps chromium" in e2e_runs
