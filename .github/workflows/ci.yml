@@ -519,7 +519,10 @@ jobs:
     needs: changes
     if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # 20: the mocked-regression Playwright lane runs serially and has grown
+    # with the mobile projects (openspec change mobile-responsive-display);
+    # the cap leaves headroom for it.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

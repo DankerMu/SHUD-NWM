@@ -468,7 +468,7 @@
   - Review focus：(1) 不变量只在一处收敛，`handleMapOverlayClick` 无形态分支；(2) 桌面形态下该 effect 是空操作（`mobile` 为假时不调用任何 setter）；(3) effect 的依赖完整且不会自激（清掉一个之后条件不再成立）；(4) 关的是非活动窗，方向没写反——(d)(e) 两条对称用例都在；(5) 用的是 layout effect；(6) 既有测试与 e2e 零改动。
   - Evidence floor：约定的本地验证命令 + `check:types` 全绿（本 task 不新增 e2e 文件，治理门测试照跑、期望不变）；新 vitest 先红后绿——红：对 `origin/master` 的 `src/`，(a)(b)(c)(d)(e)(f) 红（移动形态下两个桩都在），(g)(h)(i)(j) 改动前已成立、可先绿，须在 PR 里点名；变异：把 effect 里的方向写反时 (a)(b)(d)(e) 变红，去掉 `mobile` 条件时 (h)(i)(j) 变红。改展示端运行时代码，合并前出 node-27 live receipt（PR 的生产构建对 live API）：桌面布局 oracle exit 0；1280×900 下经门控钩子先开河段窗再开站点窗，两窗并存；390×664 下开河段窗成功，再经站点钩子点站点——若站点可点到则断言只剩站点窗，若被河段窗盖住点不到则如实写进限制（单窗替换的权威证据是 vitest）。
 
-- [ ] 4.2 曲线窗抽屉形态：`M11DraggableCurveWindow` 在移动形态渲染为抽屉——非矮视口横屏时贴底、全宽、高度固定为 `min(60dvh, 地图区高度 − 8px)`；矮视口横屏时贴右、全高、宽度固定为 `min(50vw, 28rem)`；尺寸不随内容状态变化；无固定宽高比；不挂拖拽监听；头部不随主体滚动；层级高于控制条、启动器与面板；回到桌面形态时为默认位置的可拖拽窗。桌面形态行为不变。新增 `e2e/m11-curve-sheet.mobile.mocked.spec.ts`。
+- [x] 4.2 曲线窗抽屉形态：`M11DraggableCurveWindow` 在移动形态渲染为抽屉——非矮视口横屏时贴底、全宽、高度固定为 `min(60dvh, 地图区高度 − 8px)`；矮视口横屏时贴右、全高、宽度固定为 `min(50vw, 28rem)`；尺寸不随内容状态变化；无固定宽高比；不挂拖拽监听；头部不随主体滚动；层级高于控制条、启动器与面板；回到桌面形态时为默认位置的可拖拽窗。桌面形态行为不变。新增 `e2e/m11-curve-sheet.mobile.mocked.spec.ts`。
 
   Depends on: 1.4, 3.3, 4.1
 
@@ -477,6 +477,42 @@
   **Suggested fixture level:** expanded - 改两个曲线窗共用的窗口容器，并改变既有 `map-feature-popups` 契约的适用范围。
 
   **Minimal mergeable slice:** atomic - 依赖 3.3 是因为三个移动 project 下的触摸开窗首次出现在本 task，而钩子定位点在地图区中央，需要浮层已收纳。容器只有一个，河段窗与气象代站窗同时受影响；竖屏与横屏两种锚定是同一组件同一条 CSS 分支上的两个取值，只做其一会让另一档视口的窗落到无定义位置。
+
+  Triage（#2803）：Issue type: feature ｜ Fixture level: expanded（与上游建议一致；设计见 design.md D9，规格见 `specs/mobile-curve-sheet` 的「Curve windows render as sheets in mobile form」、`specs/map-feature-popups`（MODIFIED 三条）与 `specs/mobile-regression-evidence` 的「Station window opens in a mobile project」）｜ Blast radius: 河段窗与气象代站窗共用的唯一窗口容器 `M11DraggableCurveWindow`——移动分支写错会让手机上看不到曲线（窗落到视口外或保持隐藏），桌面分支被牵动则破坏既有的拖拽、默认摆位与 16:9。
+  - Change surface：`apps/frontend/src/components/map/M11DraggableCurveWindow.tsx`（唯一产品文件）；新移动 spec `e2e/m11-curve-sheet.mobile.mocked.spec.ts`、新桌面 spec `e2e/m11-curve-window-desktop.mocked.spec.ts`、助手 `e2e/support/curveSheet.mocked.ts`（需要的 mock 变体三个，都用在 `installRiverWindowMocks` 之后注册的更窄 `page.route` 覆盖实现：河段预报请求挂起；气象代站序列身份校验失败；latest-product 的 `available_issue_times` 多列一个更早的起报时次——只用于断言“旋转后选中值不变”，不要求该时次的曲线能加载，选中后面板进入什么内容状态不作断言；复用 `riverWindow.mocked.ts` / `openRiverWindow.ts` / `openStationWindow.ts` / `viewportForm.ts`，不改它们的既有导出行为——若必须给既有助手加可选参数，缺省行为不变并写进偏离记录）；新 vitest `src/components/map/__tests__/M11DraggableCurveWindowMobileForm.test.tsx`。不改 `M11RiverForecastPanel.tsx`、`M11StationForcingPopup.tsx`、`M11PopupChrome.tsx`、`OverviewPage.tsx`、`RegionErrorBoundary.tsx`。
+  - Governing invariant：移动形态下曲线窗的包围盒只由形态与地图区尺寸决定——与内容状态、拖拽输入、历史拖拽坐标无关；桌面形态下窗的 DOM 盒、默认摆位、拖拽与 clamp 行为与改动前相同。
+  - 实现口径（裁定）：
+    - (1) 形态信号用 `useMobileForm()` 的 `{ mobile, landscape }`，窗的类串按三态在 JS 里整串选择：桌面 = 现有类串逐字不变；底部抽屉（`mobile && !landscape`）= `absolute inset-x-0 bottom-0 h-[min(60dvh,calc(100%-8px))]` + 只在上方的圆角；右侧抽屉（`mobile && landscape`）= `absolute inset-y-0 right-0 w-[min(50vw,28rem)]`。两个抽屉类串都保留 `flex flex-col overflow-hidden` 与 `M11_POPUP_GLASS`（主体容器的 `flex-1` 依赖它），都不含 `aspect-video`、不含 `md:` 宽度、不含 `max-h`。不用 `mobile:` / `mobile-landscape:` 变体叠在桌面类串上——`md:`（宽 ≥ 768）在 844×390 同时命中，层叠次序不可靠。`100%` 以窗的包含块（地图区）为准：实现者须确认窗的 offsetParent 就是 `m11-fullscreen-map`（曲线区域的 `RegionErrorBoundary` 无错时不产生包裹元素），不是则停下报告。
+    - (2) 移动形态不写 `left` / `top` / `visibility` 内联样式（位置完全由类决定，首帧即可见）；`zIndex`（活动 142 / 非活动 132）两种形态都保留——它已高于控制条（115）与启动器列（120）。
+    - (3) 移动形态不挂拖拽：抓手容器不绑 `onPointerDown`、不带 `cursor-grab` / `cursor-grabbing` / `touch-none`（`select-none` 可留）；`startDrag` 不可达；`resize` 监听在移动形态不注册或为空操作。`onPointerDownCapture` / `onFocusCapture` / `onClickCapture` 的 `onActivate` 两种形态都保留。
+    - (4) 进入移动形态时清掉 `positionRef` 与 `position`、终止进行中的拖拽（移除 window 监听、`dragging` 归零）；回到桌面形态时由一个依赖形态的 layout effect 重新计算**默认**位置（不恢复进入移动形态前的拖拽坐标）。
+    - (5) 头部不随主体滚动：`children` 外包一层主体容器 `data-testid="${testId}-body"`，两种形态都渲染（形态切换不重挂子树——图表实例与面板内部 state 不丢）；桌面类为 `contents`（不产生布局盒，桌面几何不变），移动类为 `flex min-h-0 flex-1 flex-col overflow-y-auto`。头部（抓手容器）留在主体容器之外。
+    - (6) 不新增 prop；两个面板的调用点零改动。
+  - Sibling surfaces：(1) 两个消费者 `M11RiverForecastPanel`（头部内联关闭按钮、可选的起报时次条、图表 / 加载 / 空态）与 `M11StationForcingPopup`（`M11PopupHeader`、要素选择器、图表 / `M11PopupLoading` / `M11PopupEmpty`）——四种内容状态都经同一容器；(2) `OverviewPage` 曲线区域的 `RegionErrorBoundary`（兜底块 `absolute left-1/2 top-24`，不改；曲线兜底的移动几何归 4.6）与 `RegionCrashProbe region="curve"`；(3) 4.1 的单窗 layout effect：移动形态下至多一个窗，本 task 不需要处理双抽屉；(4) 控制条、启动器列与展开面板：抽屉盖在其上（层级更高），本 task 不隐藏它们（4.6）；(5) `src/__tests__/riverClickPhase2Closure.test.ts`、`riverClickFakePage.test.ts` 引用窗的 testid——testid 与 `data-m11-curve-window-*` 属性不变；(6) 既有桌面窗 spec `m11-river-open.mocked.spec.ts`、`m11-station-open.mocked.spec.ts`。
+  - Must preserve：桌面形态（含 768×1024 与 800 宽）窗的类串逐字不变、默认摆位公式与 `DESKTOP_PLACEMENT_WIDTH` 阈值不变、拖拽 / clamp / pointer capture / 忽略交互控件的规则不变、未定位前 `visibility: hidden` 不变；`data-testid`、`${testId}-drag-handle`、`data-m11-curve-window-kind`、`data-m11-curve-window-active` 不变；全部既有 vitest（含 `M11RiverForecastPanel.test.tsx`、`M11StationForcingPopup.test.tsx` 里的拖拽用例）与全部既有 e2e（含 `m11-overlay-collision.mocked.spec.ts` 的 1920 / 1440 / 1280 / 800、`m11-river-open`、`m11-station-open`、`m11-region-fallbacks.mobile`）不改期望值通过。
+  - Risk pack「Public API / entry」selected：两个曲线窗的容器契约 -> 新移动 spec（三个移动 project 都跑、无按 project 跳过；需要特定视口的用例在用例内 `setViewportSize`；河段窗与气象代站窗各自断言，除非下文点名只测一种）：
+    - (a) 390×664：河段窗、气象代站窗的左 / 右 / 底边与 `m11-fullscreen-map` 重合（±0.5px），高度 = `min(0.6 × 视口高, 地图区高 − 8)`（±0.5px）；
+    - (b) 750×342 与 844×390：两种窗的上 / 下 / 右边与地图区重合，宽度 = `min(0.5 × 视口宽, 448)`；
+    - (c) 320×480：河段窗为底部抽屉（同 (a) 的三边 + 高度公式）；600×400：河段窗为右侧抽屉（同 (b)）；
+    - (d) 层级：抽屉头部中心点与抽屉内靠近底边 / 右边的一个点 `elementFromPoint` 都落在抽屉内（控制条与启动器列在其下）；
+    - (e) 三个移动 project 下窗都由真实轻触打开（`openRiverWindow` / `openStationWindow` 的 `input` 为 `tap`），且打开后窗内图表 canvas 可见（规格「Station window opens in a mobile project」的 THEN 是“带已加载的曲线可见”；河段窗同样断言）。
+  - Risk pack「Resource limits / 溢出」selected：尺寸与内容状态无关 -> 同一移动 spec：
+    - (f) 390×664 河段预报请求挂起时（mock 不应答）抽屉包围盒与 (a) 的公式值相同，标题与关闭按钮可见且在抽屉盒内；放行请求、曲线加载完成后包围盒逐值不变；
+    - (g) 390×664 气象代站序列身份校验失败时，不可用原因文案的包围盒在抽屉盒内，抽屉包围盒等于公式值；
+    - (h) 750×342 气象代站窗：把 `${testId}-body` 的 `scrollTop` 设到 `scrollHeight` 后，标题与关闭按钮仍在抽屉可视框内；另加结构断言——抓手容器不是主体容器的后代，主体容器计算 `overflow-y` 为 `auto`。PR 里报告该状态下主体 `scrollHeight` 与 `clientHeight` 的实测值；若两者相等（本 task 的内容还不会溢出——图表下限归 4.4 / 4.5），如实写进限制，不为制造溢出改产品代码。
+  - Risk pack「Concurrency / 状态迁移」selected：拖拽与形态切换 -> 同一移动 spec：
+    - (i) 390×664：在头部按下、**纵向向上**移动 100px、抬起（鼠标指针与 CDP 触摸各一次）后包围盒不变（必须纵向：改动前 390 宽时窗的水平 clamp 区间只有一个点，水平拖动本来就不动，测不出东西）；
+    - (j) 390×664 → 750×342：同一河段（面板标题文本不变）、同一起报时次（用多起报时次的 mock 变体，先在竖屏把起报时次切到非默认项，旋转后选择器的选中值不变）的窗变为右侧抽屉（(b) 的三边 + 宽度断言）；
+    - (k) 390×664 → 1280×900：窗的包围盒等于“在 1280×900 新开页面、新打开的河段窗”的包围盒（同一用例内用第二个页面量出，不写死数值），抓手容器计算 `cursor` 为 `grab`，拖头部 100px 后窗移动 100px（±1px），`m11-bottom-control-bar` 可见；
+    - (l) 承接 (k) 的反向：1280×900 把窗拖离默认位置 → 390×664（成为底部抽屉，(a) 的断言）→ 1280×900：包围盒回到默认位置而不是拖拽后的位置。
+    - vitest（`installMobileFormMatchMedia`）：(m) 移动形态渲染后在抓手上派发 `pointerdown`，`window.addEventListener` 没有被以 `pointermove` / `pointerup` / `pointercancel` 调用，窗无 `left` / `top` / `visibility` 内联样式，抓手类不含 `cursor-grab` 与 `touch-none`；(n) 桌面形态下同样操作会注册这三个监听（对照，防止 (m) 恒真）；(o) 桌面拖拽进行中切到移动形态：三个监听被移除；(p) 两种形态下主体容器都存在且子节点不重挂（同一 DOM 节点身份）；(q) 移动形态下 `pointerdown` 仍触发 `onActivate`。
+  - Risk pack「Legacy compatibility」selected：桌面不变量 -> 新桌面 spec（桌面 project）：1280×900 下河段窗、气象代站窗的包围盒，以及窗内图表容器的包围盒，等于在 `origin/master` 上实测的字面值（实现者先在未改动的 `src/` 上量出并写进 spec——这条用例改动前后都绿，是“加了主体容器后桌面几何不变”的钉子，须在 PR 里点名）；1280×900 与 768×1024 下窗的计算 `aspect-ratio` 为 `16 / 9`、主体容器计算 `display` 为 `contents`。字面包围盒只钉 1280×900（宽 ≥ 1143px，4.3 不改它）；768×1024 的包围盒不写字面值——4.3 会把该视口的默认宽度从 42vw 改为 30rem，那一行归 4.3 的 spec。PR 描述贴出 `git diff --stat --diff-filter=MDR origin/master -- apps/frontend/e2e 'apps/frontend/src/**/__tests__/**'`（期望为空；给既有助手加可选参数时该文件会出现在这里，须逐个说明）。
+  - Risk pack「Error handling」selected：非正常内容状态仍在抽屉内 -> (f)(g)；曲线区域崩溃兜底不在本 task（Non-goals）。
+  - 未选：Auth、File IO、Schema、Config、Documentation（design.md D9 与规格已写明；`docs/spec/06B` §8 已在 1.2 落地）。
+  - Seams under test：浏览器里窗的包围盒 / 层级 / 可拖性随视口的变化；vitest 里拖拽监听的注册与形态切换时的清理。
+  - Non-goals：图表在抽屉内的最小高度与重排（4.4 / 4.5——本 task 之后图表可能偏矮，不作断言）；抽屉打开时隐藏控制条 / 启动器、收起面板、暂停播放（4.6）；自动平移（4.10）；抽屉内控件的 44px / 16px 下限（4.9）；桌面最小宽度 30rem（4.3）；安全区内边距（外壳已处理，真机确认归 7.x）；曲线区域错误兜底的移动几何（4.6）；抽屉的进出场动画与下拉关闭手势。
+  - Review focus：(1) 桌面类串逐字不变、桌面分支的每个 JS 路径与改动前等价；(2) 移动形态没有任何内联定位、没有可达的拖拽路径；(3) 形态切换时拖拽状态与位置被清干净，回桌面取默认位置；(4) 主体容器两种形态都渲染、子树不重挂；(5) 高度 / 宽度公式与规格逐字一致，`100%` 的包含块是地图区；(6) 三个移动 project 都断言、无跳过；(7) 桌面 spec 的字面值确实量自 `origin/master`。
+  - Evidence floor：约定的本地验证命令 + `check:types` + 治理门测试全绿；新 spec 与助手的 strict `tsc --noEmit` exit 0；新移动 spec 与新 vitest 先红后绿——红：对 `origin/master` 的 `src/`，(a)(b)(c)(f)(g)(i)(j)(l) 与 (m)(o)(p) 红；(e) 的轻触开窗、(k) 的部分断言、(n)(q) 与桌面 spec 可能改动前已绿，须逐条点名实际结果；三个移动 project 各非零 passed，`--repeat-each=5` 无 flaky；变异：给底部抽屉类串加回 `aspect-video` 时 (a) 变红，移动形态保留内联 `left` / `top` 时 (a)(b) 变红，移动形态保留 `onPointerDown` 时仅 (m) 变红（没有内联定位，包围盒仍不变），同时保留 `onPointerDown` 与内联定位时 (i) 变红，回桌面不重算位置时 (k) 或 (l) 变红。改展示端运行时代码，合并前出 node-27 live receipt（PR 的生产构建对 live API）：桌面布局 oracle exit 0；390×664 与 750×342 下经门控钩子打开河段窗、气象代站窗，包围盒满足 (a)(b) 的公式；1280×900 下两窗为可拖拽桌面窗且并存。
 
 - [ ] 4.3 桌面形态曲线窗最小宽度：桌面形态曲线窗默认宽度由 `min(44rem, 42vw)` 改为 `min(44rem, max(42vw, 30rem))`，保持 16:9 与既有的地图区内 clamp；组件里用于定位计算的尺寸回退公式须同步为同一宽度规则（只同步宽度表达式；该回退里区分“桌面摆位”的既有宽度阈值不动）。新增 `e2e/m11-curve-window-min-size.mocked.spec.ts`（桌面 project）。
 

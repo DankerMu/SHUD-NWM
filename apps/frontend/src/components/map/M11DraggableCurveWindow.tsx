@@ -1,6 +1,7 @@
 import { useCallback, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
 
 import { M11_POPUP_GLASS } from '@/components/map/M11PopupChrome'
+import { useMobileForm } from '@/hooks/useMobileForm'
 import { cn } from '@/lib/cn'
 
 type CurveWindowKind = 'river' | 'station'
@@ -10,6 +11,15 @@ const DESKTOP_PLACEMENT_WIDTH = 900
 const MAX_DESKTOP_WIDTH_PX = 704
 const DESKTOP_WIDTH_RATIO = 0.42
 const ASPECT_RATIO_HEIGHT = 9 / 16
+
+// 窗的类串按形态整串选择（design.md D9），不把 `mobile:` 变体叠在桌面类串上：`md:`（宽 ≥ 768）在
+// 844×390 这类矮视口横屏同时命中，层叠次序不可靠。两个抽屉的尺寸只由视口与地图区（窗的包含块）决定。
+const DESKTOP_WINDOW_CLASS =
+  'absolute flex aspect-video w-[calc(100%_-_1.5rem)] max-h-[calc(100%_-_1.5rem)] flex-col overflow-hidden md:w-[min(44rem,42vw)]'
+/** 非矮视口横屏的移动形态：贴地图区底、全宽、高 min(60dvh, 地图区高 − 8px)。 */
+const BOTTOM_SHEET_CLASS = 'absolute inset-x-0 bottom-0 flex h-[min(60dvh,calc(100%-8px))] flex-col overflow-hidden'
+/** 矮视口横屏：贴地图区右、全高、宽 min(50vw, 28rem)。 */
+const SIDE_SHEET_CLASS = 'absolute inset-y-0 right-0 flex w-[min(50vw,28rem)] flex-col overflow-hidden'
 
 interface CurveWindowViewport {
   width: number
@@ -31,6 +41,9 @@ interface ActiveDrag {
   offsetX: number
   offsetY: number
   ownerWindow: Window
+  /** 这次拖拽注册在 `ownerWindow` 上的两个回调：结束拖拽时按同一引用移除。 */
+  onMove: (event: PointerEvent) => void
+  onStop: (event: PointerEvent) => void
 }
 
 export function M11DraggableCurveWindow({
@@ -50,6 +63,8 @@ export function M11DraggableCurveWindow({
   children: ReactNode
   className?: string
 }) {
+  // 移动形态（design.md D9）：窗是贴边抽屉，位置完全由类决定——不写内联定位、不可拖。
+  const { mobile, landscape } = useMobileForm()
   const frameRef = useRef<HTMLElement | null>(null)
   const positionRef = useRef<CurveWindowPosition | null>(null)
   const dragRef = useRef<ActiveDrag | null>(null)
@@ -68,18 +83,6 @@ export function M11DraggableCurveWindow({
     setPosition(next)
   }, [kind, setPosition])
 
-  useLayoutEffect(() => {
-    const frame = frameRef.current
-    if (!frame) return
-    setPosition(clampPosition(frame, defaultPosition(frame, kind)))
-  }, [kind, setPosition])
-
-  useLayoutEffect(() => {
-    const ownerWindow = frameRef.current?.ownerDocument.defaultView ?? window
-    ownerWindow.addEventListener('resize', clampCurrentPosition)
-    return () => ownerWindow.removeEventListener('resize', clampCurrentPosition)
-  }, [clampCurrentPosition])
-
   const handleMove = useCallback((event: PointerEvent) => {
     const frame = frameRef.current
     const drag = dragRef.current
@@ -89,14 +92,13 @@ export function M11DraggableCurveWindow({
     setPosition(clampPosition(frame, { x: event.clientX - drag.offsetX, y: event.clientY - drag.offsetY }))
   }, [setPosition])
 
-  const stopDrag = useCallback((event: PointerEvent) => {
+  /** 结束进行中的拖拽：移除 window 监听、释放 pointer capture、`dragging` 归零。没有拖拽时是空操作。 */
+  const endDrag = useCallback(() => {
     const drag = dragRef.current
     if (!drag) return
-    const pointerId = getPointerId(event)
-    if (drag.pointerId !== null && pointerId !== null && drag.pointerId !== pointerId) return
-    drag.ownerWindow.removeEventListener('pointermove', handleMove)
-    drag.ownerWindow.removeEventListener('pointerup', stopDrag)
-    drag.ownerWindow.removeEventListener('pointercancel', stopDrag)
+    drag.ownerWindow.removeEventListener('pointermove', drag.onMove)
+    drag.ownerWindow.removeEventListener('pointerup', drag.onStop)
+    drag.ownerWindow.removeEventListener('pointercancel', drag.onStop)
     if (drag.pointerId !== null) {
       try {
         frameRef.current?.releasePointerCapture(drag.pointerId)
@@ -106,7 +108,37 @@ export function M11DraggableCurveWindow({
     }
     dragRef.current = null
     setDragging(false)
-  }, [handleMove])
+  }, [])
+
+  const stopDrag = useCallback((event: PointerEvent) => {
+    const drag = dragRef.current
+    if (!drag) return
+    const pointerId = getPointerId(event)
+    if (drag.pointerId !== null && pointerId !== null && drag.pointerId !== pointerId) return
+    endDrag()
+  }, [endDrag])
+
+  // 桌面形态：挂载时与从移动形态回来时都取默认位置（不恢复进入移动形态前的拖拽坐标）。
+  // 移动形态：清掉位置、终止进行中的拖拽——抽屉的位置只由类决定。
+  useLayoutEffect(() => {
+    if (mobile) {
+      endDrag()
+      positionRef.current = null
+      setPositionState(null)
+      return
+    }
+    const frame = frameRef.current
+    if (!frame) return
+    setPosition(clampPosition(frame, defaultPosition(frame, kind)))
+  }, [endDrag, kind, mobile, setPosition])
+
+  // 视口变化时把窗夹回地图区内；移动形态不注册（没有可夹的位置）。
+  useLayoutEffect(() => {
+    if (mobile) return
+    const ownerWindow = frameRef.current?.ownerDocument.defaultView ?? window
+    ownerWindow.addEventListener('resize', clampCurrentPosition)
+    return () => ownerWindow.removeEventListener('resize', clampCurrentPosition)
+  }, [clampCurrentPosition, mobile])
 
   const startDrag = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -123,6 +155,8 @@ export function M11DraggableCurveWindow({
         offsetX: event.clientX - current.x,
         offsetY: event.clientY - current.y,
         ownerWindow,
+        onMove: handleMove,
+        onStop: stopDrag,
       }
       if (pointerId !== null) {
         try {
@@ -140,25 +174,31 @@ export function M11DraggableCurveWindow({
     [handleMove, kind, onActivate, setPosition, stopDrag],
   )
 
-  const inlineStyle = position
-    ? {
-        left: `${position.x}px`,
-        top: `${position.y}px`,
-        zIndex: active ? 142 : 132,
-      }
-    : {
-        left: 0,
-        top: 0,
-        visibility: 'hidden' as const,
-        zIndex: active ? 142 : 132,
-      }
+  // 层级两种形态都保留：已高于控制条（115）与启动器列（120）。
+  const zIndex = active ? 142 : 132
+  const inlineStyle = mobile
+    ? { zIndex }
+    : position
+      ? {
+          left: `${position.x}px`,
+          top: `${position.y}px`,
+          zIndex,
+        }
+      : {
+          left: 0,
+          top: 0,
+          visibility: 'hidden' as const,
+          zIndex,
+        }
 
   return (
     <aside
       ref={frameRef}
       className={cn(
-        'absolute flex aspect-video w-[calc(100%_-_1.5rem)] max-h-[calc(100%_-_1.5rem)] flex-col overflow-hidden md:w-[min(44rem,42vw)]',
+        mobile ? (landscape ? SIDE_SHEET_CLASS : BOTTOM_SHEET_CLASS) : DESKTOP_WINDOW_CLASS,
         M11_POPUP_GLASS,
+        // 底部抽屉的圆角只在上方；须排在玻璃类之后（它带四角圆角）。
+        mobile && !landscape && 'rounded-b-none',
         className,
       )}
       style={inlineStyle}
@@ -171,13 +211,22 @@ export function M11DraggableCurveWindow({
     >
       <div className="h-px shrink-0 bg-gradient-to-r from-transparent via-cyan-400/60 to-transparent" aria-hidden="true" />
       <div
-        className={cn('shrink-0 touch-none select-none cursor-grab', dragging && 'cursor-grabbing')}
+        className={mobile ? 'shrink-0 select-none' : cn('shrink-0 touch-none select-none cursor-grab', dragging && 'cursor-grabbing')}
         data-testid={`${testId}-drag-handle`}
-        onPointerDown={startDrag}
+        onPointerDown={mobile ? undefined : startDrag}
       >
         {header}
       </div>
-      {children}
+      {/*
+        主体容器两种形态都渲染（形态切换不重挂子树）：桌面为 `contents`，不产生布局盒；
+        移动形态自己纵向滚动，头部留在它之外、不随主体滚动。
+      */}
+      <div
+        className={mobile ? 'flex min-h-0 flex-1 flex-col overflow-y-auto' : 'contents'}
+        data-testid={`${testId}-body`}
+      >
+        {children}
+      </div>
     </aside>
   )
 }
