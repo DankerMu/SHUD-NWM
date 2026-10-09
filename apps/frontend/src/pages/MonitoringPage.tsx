@@ -220,7 +220,7 @@ export function MonitoringPage({ mode = 'monitoring' }: MonitoringPageProps) {
   }
 
   return (
-    <div className="h-full min-h-0 space-y-4 overflow-y-auto">
+    <div className="h-full min-h-0 space-y-4 overflow-y-auto mobile:px-3">
       <div>
         <h1 className="text-xl font-semibold text-foreground">{canonicalRoute === '/ops' ? '内部诊断' : '监控工作台'}</h1>
         <p className="mt-1 text-sm text-muted">
@@ -251,7 +251,7 @@ export function MonitoringPage({ mode = 'monitoring' }: MonitoringPageProps) {
             type="datetime-local"
             value={cycleInputValue(cycleTime)}
             onChange={(event) => handleCycleTimeChange(event.target.value)}
-            className="h-10 w-full rounded-md border border-border bg-panel px-3 py-2 text-sm text-foreground ring-offset-background focus:outline-none focus:ring-2 focus:ring-accent"
+            className="h-10 w-full rounded-md border border-border bg-panel px-3 py-2 text-sm text-foreground ring-offset-background focus:outline-none focus:ring-2 focus:ring-accent mobile:text-base!"
           />
         </label>
       </div>
@@ -295,7 +295,7 @@ export function MonitoringPage({ mode = 'monitoring' }: MonitoringPageProps) {
         />
       </RegionErrorBoundary>
 
-      <div className="grid gap-4 min-[800px]:grid-cols-[minmax(18rem,0.8fr)_minmax(0,1.2fr)] min-[1200px]:grid-cols-[20rem_minmax(0,1fr)_22rem]">
+      <div className="grid gap-4 min-[800px]:grid-cols-[minmax(18rem,0.8fr)_minmax(0,1.2fr)] min-[1200px]:grid-cols-[20rem_minmax(0,1fr)_22rem] mobile:grid-cols-1">
         <RegionErrorBoundary region="阶段" testId="region-error-stages" resetKeys={regionResetKeys}>
           <StageList
             diagnosticContext={{
@@ -327,7 +327,7 @@ export function MonitoringPage({ mode = 'monitoring' }: MonitoringPageProps) {
           />
         </RegionErrorBoundary>
         {/* 边界放在网格项**内**：fallback 出现时 col-span 仍在。 */}
-        <div className="min-[800px]:col-span-2 min-[1200px]:col-span-1">
+        <div className="min-[800px]:col-span-2 min-[1200px]:col-span-1 mobile:col-span-1">
           <RegionErrorBoundary region="趋势" testId="region-error-trend" resetKeys={regionResetKeys}>
             <TrendPanel
               fetchEnabled={isOperationalDataReady}
