@@ -199,6 +199,10 @@ jobs:
               # and positive examples cannot prove its branch rejections.
               - 'schemas/frontend_c4_live_evidence.schema.json'
               - 'schemas/examples/frontend_c4_live_evidence*.json'
+              # #2844: this workflow defines the frontend jobs (build and the
+              # sharded mocked-regression lane); a workflow-only PR that
+              # rewires them must run them. Exact literal, as under `backend`.
+              - '.github/workflows/ci.yml'
             docs:
               - 'docs/**'
             openapi:
@@ -519,11 +523,10 @@ jobs:
     needs: changes
     if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
-    # 30: the mocked-regression Playwright lane runs serially (one worker) and
-    # has grown with the mobile projects (openspec change
-    # mobile-responsive-display): it measured 16m41s / 14m10s before the
-    # three-project sheet-yields-chrome spec was added, so 20 left no headroom.
-    timeout-minutes: 30
+    # 10: typecheck, build, vitest and the bundle check only. The
+    # mocked-regression Playwright lane left this job in #2844 (it is the
+    # `frontend-e2e` matrix below); what remains measured about 2m40s.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -542,6 +545,41 @@ jobs:
         run: cd apps/frontend && pnpm build && pnpm test
       - name: Check frontend bundle size
         run: cd apps/frontend && pnpm check:bundle
+
+  frontend-e2e:
+    name: Frontend E2E (mocked)
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    # #2844: the mocked-regression Playwright lane ran serially (one worker)
+    # inside `Frontend Build` and grew with every spec: 15m24s for 470 tests,
+    # with that job's timeout raised twice (10 -> 20 -> 30). It is now a matrix
+    # of Playwright's own `--shard=k/N`. playwright.config.ts sets
+    # `fullyParallel: true`, so Playwright splits by test, not by file: the
+    # shards are disjoint, near-equal in test count, and together run the whole
+    # lane. Each shard still runs one worker, so the specs run under the
+    # conditions they ran under before. The shard list below is the only place
+    # the shard count is written: the step passes `strategy.job-total`. More
+    # specs are absorbed by adding a shard here, not by raising the timeout.
+    # Jobs show as `Frontend E2E (mocked) (<shard>)`; keep `name` static and
+    # the matrix one-dimensional, or those names change.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    # 15 per shard: a quarter of the measured lane is about 4 min, plus about
+    # 1 min of setup (install, browser cache, dev server start).
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.11.0
+      - name: Install frontend dependencies
+        run: cd apps/frontend && pnpm install --frozen-lockfile
       # playwright.config.ts's webServer.command hardcodes `corepack pnpm dev`,
       # and this job gets pnpm from pnpm/action-setup (no corepack shim), so the
       # mocked-regression dev server cannot start without activating corepack.
@@ -560,4 +598,4 @@ jobs:
       # preview-deeplink, live-display, live-c4-display and m15-visual specs).
       # No retries: a failure here must stay a failure.
       - name: Run frontend mocked-regression Playwright lane
-        run: cd apps/frontend && pnpm run test:e2e:mocked-regression
+        run: cd apps/frontend && pnpm run test:e2e:mocked-regression --shard=${{ matrix.shard }}/${{ strategy.job-total }}

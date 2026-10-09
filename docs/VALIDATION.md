@@ -563,10 +563,14 @@ lane that produced them:
   Broad API mocks such as `page.route('**/api/v1/**')` are allowed. Receipts from
   this lane are mocked evidence only and must not be cited as live receipts or
   live `display_readonly` proof. This lane is an automatic CI gate: the
-  `frontend-build` job in `.github/workflows/ci.yml` runs
-  `pnpm run test:e2e:mocked-regression` on every PR whose diff matches the
-  `frontend` path filter, so a failing mocked spec fails the `Frontend Build`
-  check.
+  `frontend-e2e` matrix job in `.github/workflows/ci.yml` runs
+  `pnpm run test:e2e:mocked-regression --shard=<k>/<N>` on every PR whose diff
+  matches the `frontend` path filter. Playwright splits the lane by test into
+  disjoint shards that together run all of it, one worker each, shown as
+  `Frontend E2E (mocked) (<shard>)`; a failing mocked spec fails its shard's
+  check, and every shard must be green. The shard count is the matrix list in
+  `ci.yml`. The `Frontend Build` check (job `frontend-build`) no longer runs
+  the lane: it covers typecheck, build, vitest and the bundle check.
 - `preview`: browser coverage for preview or ephemeral frontend builds where API
   responses may still be simulated. Broad API mocks such as
   `page.route('**/api/v1/**')` are allowed. Receipts from this lane are preview
