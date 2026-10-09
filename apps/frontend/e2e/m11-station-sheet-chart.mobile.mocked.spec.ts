@@ -35,6 +35,8 @@ const CARD_TEST_ID = CURVE_WINDOWS.station.chart
 const STATION: SheetChartTarget = { kind: 'station', chartTestId: CHART_AREA_TEST_ID }
 
 const PORTRAIT: ViewportSize = { width: 390, height: 664 }
+/** 剩余高度足够（不咬下限）的移动竖屏视口：task 4.9 把要素切换项加到 44px 高之后 390×664 已咬住下限，这里实测图表区 231.5px、主体不溢出。 */
+const TALL_PORTRAIT: ViewportSize = { width: 390, height: 800 }
 /** 下限咬住的矮视口横屏：只加 testid 的改动前 `src/` 上图表区实测 61.5px（主体 213px，不溢出）。 */
 const LANDSCAPE: ViewportSize = { width: 750, height: 342 }
 /** 改动前图表区实测 109.5px（主体 261px）。 */
@@ -242,8 +244,8 @@ test.describe('M11 气象代站抽屉图表可读高度', () => {
     await expectFloorBites(page, LANDSCAPE, label(page, testInfo))
   })
 
-  test('(e) 390x664：剩余高度足够时图表区仍占满——高 > 160，主体不溢出，已加载容器底贴主体可视底边', async ({ page }, testInfo) => {
-    await openLoadedCurveWindow(page, PORTRAIT, STATION)
+  test('(e) 390x800：剩余高度足够时图表区仍占满——高 > 160，主体不溢出，已加载容器底贴主体可视底边', async ({ page }, testInfo) => {
+    await openLoadedCurveWindow(page, TALL_PORTRAIT, STATION)
     const where = label(page, testInfo)
     await expectSheet(page, 'station', where)
 
