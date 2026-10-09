@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useRef } from 'react'
+import { useMemo } from 'react'
 import ReactEChartsCore from 'echarts-for-react/lib/core'
-import type { EChartsInstance } from 'echarts-for-react/lib/types'
 
 import { echarts } from '@/components/charts/echartsCore'
 import { useChartFollowsContainer } from '@/components/charts/useChartFollowsContainer'
+import { useChartZoomObserver, type ChartZoomWindow } from '@/components/charts/useChartZoomObserver'
 import { FORECAST_CHART_POINT_BUDGET, forecastPointBudgetMessage } from '@/lib/forecastRenderingBudget'
 import { formatUnitForDisplay } from '@/lib/format'
 import type { ForecastData } from '@/stores/forecast'
@@ -12,10 +12,7 @@ const IFS_SIX_DAY_LEAD_HOURS = 144
 const HOUR_MS = 60 * 60 * 1000
 
 /** 时间轴缩放窗口：占全范围的百分比（0–100）。 */
-export interface ForecastChartZoomWindow {
-  start: number
-  end: number
-}
+export type ForecastChartZoomWindow = ChartZoomWindow
 
 interface ForecastChartProps {
   data: ForecastData | null
@@ -49,12 +46,6 @@ const WHEEL_ZOOM = { type: 'inside', zoomOnMouseWheel: true, moveOnMouseMove: fa
  * touchmove，preventDefaultMouseMove: false 把纵向滚动还给浏览器。
  */
 const TOUCH_ZOOM = { ...WHEEL_ZOOM, moveOnMouseMove: true, preventDefaultMouseMove: false }
-
-/** 图表实例当前的缩放窗口；实例没有 dataZoom（不 zoomable）时为 null。 */
-function readZoomWindow(instance: EChartsInstance): ForecastChartZoomWindow | null {
-  const zoom = (instance.getOption() as { dataZoom?: Array<{ start?: unknown; end?: unknown }> } | undefined)?.dataZoom?.[0]
-  return typeof zoom?.start === 'number' && typeof zoom.end === 'number' ? { start: zoom.start, end: zoom.end } : null
-}
 
 /** series.color(hex) → rgba，用于深色主题的面积渐变/辉光，保持与曲线同色相。 */
 function hexToRgba(hex: string, alpha: number): string {
@@ -362,37 +353,8 @@ function ForecastChartInner({
     }
   }, [data, normalizedSeries, segmentName, compact, dark, axisColor, zoomable, touchPan])
 
-  // 回调放进 ref：交给封装库的 onEvents 必须是同一个对象，引用一变它就整组解绑重绑。
-  const zoomWindowCallback = useRef(onZoomWindowChange)
-  const tooltipVisibleCallback = useRef(onTooltipVisibleChange)
-  useEffect(() => {
-    zoomWindowCallback.current = onZoomWindowChange
-    tooltipVisibleCallback.current = onTooltipVisibleChange
-  })
-  /** 发过 datazoom 的那个实例；没发过就没缩放过，窗口必为初值。 */
-  const zoomedInstance = useRef<EChartsInstance | null>(null)
-  const observed = Boolean(onZoomWindowChange || onTooltipVisibleChange)
-  // 事件名按图表库的口径全小写。封装库以 (事件参数, 实例) 调用处理函数：窗口读实例，不信事件载荷。
-  const onEvents = useMemo(() => {
-    if (!observed) return undefined
-    return {
-      datazoom: (_event: unknown, instance: EChartsInstance) => {
-        zoomedInstance.current = instance
-        const zoomWindow = readZoomWindow(instance)
-        if (zoomWindow) zoomWindowCallback.current?.(zoomWindow)
-      },
-      showtip: () => tooltipVisibleCallback.current?.(true),
-      hidetip: () => tooltipVisibleCallback.current?.(false),
-    }
-  }, [observed])
-  // 配置整体重设（notMerge）会把缩放窗口打回全范围而不发 datazoom：封装库在本 effect 之前已把新配置
-  // 交给实例，这里重读一次。
-  useEffect(() => {
-    const instance = zoomedInstance.current
-    if (!instance || instance.isDisposed()) return
-    const zoomWindow = readZoomWindow(instance)
-    if (zoomWindow) zoomWindowCallback.current?.(zoomWindow)
-  }, [option])
+  // 缩放窗口 / tooltip 可见性的观察；两个回调都不传时不挂任何事件。
+  const onEvents = useChartZoomObserver(option, onZoomWindowChange, onTooltipVisibleChange)
 
   // fill 模式：画布跟随容器尺寸（不渲染图表时断开）。
   const followContainer = useChartFollowsContainer(Boolean(data) && normalizedSeries.length > 0)
