@@ -243,6 +243,7 @@ export function M11Timeline({
   speed: controlledSpeed,
   onSpeedChange,
   renderSpeedSelect = true,
+  yielded = false,
   onQueryChange,
 }: SharedControlProps & {
   className?: string
@@ -255,6 +256,11 @@ export function M11Timeline({
   onSpeedChange?: (speed: number) => void
   /** 为 false 时不渲染内部的速度选择器（由调用方另行渲染，页面上始终只有一个）。 */
   renderSpeedSelect?: boolean
+  /**
+   * 地图外壳让位（mobile-responsive-display task 4.6，design.md D11）：为真时停止播放。
+   * 只暂停、不续播——它回到 false 不会把 `playing` 设回 true（`playing` 仍是本地 state）。
+   */
+  yielded?: boolean
 }) {
   const [playing, setPlaying] = useState(false)
   const [localSpeed, setLocalSpeed] = useState(1)
@@ -300,6 +306,11 @@ export function M11Timeline({
   useEffect(() => {
     if (disabled) setPlaying(false)
   }, [disabled])
+
+  // 让位即暂停（D11）：与上面的 `disabled` 同一写法，单向。
+  useEffect(() => {
+    if (yielded) setPlaying(false)
+  }, [yielded])
 
   return (
     <section

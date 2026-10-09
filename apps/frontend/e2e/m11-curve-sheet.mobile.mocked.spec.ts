@@ -110,7 +110,8 @@ test.describe('M11 曲线窗抽屉形态', () => {
       }
 
       // 上面两点都不在控制条 / 启动器列上方，证明不了层级。真正的判据：量出抽屉与两者的交集，
-      // 交集中心的命中栈里既有被盖住的那一个（它确实在这一点）、栈顶又在抽屉内。
+      // 交集中心的命中测试落在抽屉内。抽屉打开时两者让位（task 4.6，D11）：`visibility: hidden`、
+      // 仍在 DOM、仍有包围盒，所以前提从“在命中栈里”改为“不可见且保持挂载”。
       const bar = await boxOf(page.locator(CONTROL_BAR), '控制条')
       const column = await boxOf(page.locator(LAUNCHER_COLUMN), '启动器列')
       const barOverlap = intersectionOf(sheet.frame, bar)
@@ -130,8 +131,9 @@ test.describe('M11 曲线窗抽屉形态', () => {
       }
       for (const [coveredName, selector, overlap] of covered) {
         const point = centerOf(overlap)
-        const hit = await hitsCurveWindow(page, kind, point, selector)
-        expect(hit.beneath, `前提：${coveredName}在交集中心 ${JSON.stringify(point)} 的命中栈里 @ ${where}`).toBe(true)
+        const hit = await hitsCurveWindow(page, kind, point)
+        await expect(page.locator(selector), `前提：${coveredName}让位后保持挂载 @ ${where}`).toHaveCount(1)
+        await expect(page.locator(selector), `前提：${coveredName}让位后不可见 @ ${where}`).toBeHidden()
         // soft：控制条与启动器列各自报告，一处被压在下面不掩盖另一处。
         expect.soft(hit.inside, `${coveredName}交集中心 ${JSON.stringify(point)} 的命中测试应落在抽屉内（抽屉盖住${coveredName}），实际 ${hit.top} @ ${where}`).toBe(true)
       }

@@ -1,5 +1,6 @@
 import type { Page } from '@playwright/test'
 
+import { tapLocatedPoint } from './openRiverWindow'
 import { mockStation } from './riverWindow.mocked'
 
 /**
@@ -126,14 +127,11 @@ export async function locateStationOnPage(page: Page, input: StationLocateInput)
   return Promise.race([locating, locateTimedOut]).finally(() => clearTimeout(locateTimer))
 }
 
-export async function openStationWindow(page: Page, options: { url?: string } = {}): Promise<OpenStationWindowResult> {
-  await gotoWithStationLayer(page, options)
-
-  const alreadyOpen = await page.locator(STATION_WINDOW).count()
-  if (alreadyOpen > 0) {
-    throw new Error('openStationWindow: a station window is already open; this helper only opens one from the no-window state')
-  }
-
+/**
+ * 把 mock 站点移到地图区中央并返回它的视口点；只定位、不点（task 4.6）。须在 `gotoWithStationLayer` 之后调用。
+ * 定位失败抛出带错误码的错误。点它用 `openRiverWindow.ts` 的 `tapLocatedPoint`。
+ */
+export async function locateStationPoint(page: Page): Promise<{ x: number; y: number }> {
   const outcome = await locateStationOnPage(page, stationLocateInput)
   if (!outcome.ok) {
     throw new Error(
@@ -151,14 +149,19 @@ export async function openStationWindow(page: Page, options: { url?: string } = 
     )
   }
 
-  const point = { x: located.clientX, y: located.clientY }
-  const hasTouch = await page.evaluate(() => navigator.maxTouchPoints > 0)
-  const input: OpenStationWindowResult['input'] = hasTouch ? 'tap' : 'click'
-  if (hasTouch) {
-    await page.touchscreen.tap(point.x, point.y)
-  } else {
-    await page.mouse.click(point.x, point.y)
+  return { x: located.clientX, y: located.clientY }
+}
+
+export async function openStationWindow(page: Page, options: { url?: string } = {}): Promise<OpenStationWindowResult> {
+  await gotoWithStationLayer(page, options)
+
+  const alreadyOpen = await page.locator(STATION_WINDOW).count()
+  if (alreadyOpen > 0) {
+    throw new Error('openStationWindow: a station window is already open; this helper only opens one from the no-window state')
   }
+
+  const point = await locateStationPoint(page)
+  const input = await tapLocatedPoint(page, point)
 
   await page
     .locator(STATION_WINDOW)

@@ -12,6 +12,10 @@ import { riverFixture } from './riverFixture'
  * 窗口只能由这次指针输入触发的 MapLibre click 打开。
  *
  * 只负责“从无窗状态打开一个窗”。钩子缺失、定位失败、点击后窗未出现都抛出带原因的错误。
+ *
+ * 三步也各自导出（task 4.6）：`gotoWithRiverHooks`（开门控并导航）、`locateRiverPoint`（只定位、不点）、
+ * `tapLocatedPoint`（只点、不等窗）。要在已加载的页面上先布置状态再开窗，或点了之后窗不会出现
+ * （曲线区域崩溃开关）的用例用它们；`openRiverWindow` 就是这三步加“窗已出现”的等待。
  */
 export interface OpenRiverWindowResult {
   /** 实际点击 / 轻触的视口坐标（CSS px）。 */
@@ -44,7 +48,8 @@ const { identity, anchor, bbox } = riverFixture
 /** `locateRenderedRiver` 的入参：全部取自夹具的唯一导出。 */
 const locateInput = { bbox, anchor, ...identity }
 
-export async function openRiverWindow(page: Page, options: { url?: string } = {}): Promise<OpenRiverWindowResult> {
+/** 开门控并导航，等到定位钩子存在、径流叠加层已注册。 */
+export async function gotoWithRiverHooks(page: Page, options: { url?: string } = {}): Promise<void> {
   await page.addInitScript(() => {
     ;(window as unknown as { __NHMS_E2E_HOOKS__?: boolean }).__NHMS_E2E_HOOKS__ = true
   })
@@ -74,12 +79,13 @@ export async function openRiverWindow(page: Page, options: { url?: string } = {}
           '(are the layers / cycles mocks installed via installRiverWindowMocks?)',
       )
     })
+}
 
-  const alreadyOpen = await page.locator(RIVER_PANEL).count()
-  if (alreadyOpen > 0) {
-    throw new Error('openRiverWindow: a river window is already open; this helper only opens one from the no-window state')
-  }
-
+/**
+ * 把夹具河段移到地图区中央并返回它的视口点；只定位、不点。须在 `gotoWithRiverHooks` 之后调用。
+ * 定位失败（含定位点被别的元素盖住的 `HOOK_POINT_OCCLUDED`）抛出带错误码的错误。
+ */
+export async function locateRiverPoint(page: Page): Promise<{ x: number; y: number }> {
   // 钩子以普通对象 `{code, message}` reject；在页面内折成可序列化的结果再回到 Node 侧。
   const locating = page.evaluate(async (input): Promise<LocateOutcome> => {
     const hook = (
@@ -127,14 +133,30 @@ export async function openRiverWindow(page: Page, options: { url?: string } = {}
     }
   }
 
-  const point = { x: located.clientX, y: located.clientY }
+  return { x: located.clientX, y: located.clientY }
+}
+
+/** 在视口点上做一次真实指针输入（触屏上下文轻触，否则鼠标点击）；不等待任何结果。 */
+export async function tapLocatedPoint(page: Page, point: { x: number; y: number }): Promise<OpenRiverWindowResult['input']> {
   const hasTouch = await page.evaluate(() => navigator.maxTouchPoints > 0)
-  const input: OpenRiverWindowResult['input'] = hasTouch ? 'tap' : 'click'
   if (hasTouch) {
     await page.touchscreen.tap(point.x, point.y)
-  } else {
-    await page.mouse.click(point.x, point.y)
+    return 'tap'
   }
+  await page.mouse.click(point.x, point.y)
+  return 'click'
+}
+
+export async function openRiverWindow(page: Page, options: { url?: string } = {}): Promise<OpenRiverWindowResult> {
+  await gotoWithRiverHooks(page, options)
+
+  const alreadyOpen = await page.locator(RIVER_PANEL).count()
+  if (alreadyOpen > 0) {
+    throw new Error('openRiverWindow: a river window is already open; this helper only opens one from the no-window state')
+  }
+
+  const point = await locateRiverPoint(page)
+  const input = await tapLocatedPoint(page, point)
 
   await page
     .locator(RIVER_PANEL)

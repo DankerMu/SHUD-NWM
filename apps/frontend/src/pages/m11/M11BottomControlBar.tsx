@@ -178,7 +178,16 @@ export function M11BottomControlBar({
   layers,
   sourceSelection,
   onQueryChange,
-}: M11BottomControlBarProps & { onQueryChange: (patch: M11QueryPatch) => void }) {
+  yielded = false,
+}: M11BottomControlBarProps & {
+  onQueryChange: (patch: M11QueryPatch) => void
+  /**
+   * 地图外壳让位（mobile-responsive-display task 4.6，design.md D11）：移动形态下有曲线抽屉在正常渲染时为真。
+   * 根节点只加 `invisible`（`visibility: hidden`）：不可见、不接收指针与焦点，但保持挂载——包围盒仍可量
+   * （展开面板的限高以它的顶边为底），速度与起报时次的值都留着。同一个布尔原样传给时间轴，让它暂停。
+   */
+  yielded?: boolean
+}) {
   // 手敲 `?cycle=` 或列表尚未覆盖该周期时，仍把活动周期显示成选中项，
   // 而不是让 `<select>` 显示一个它根本没选中的首项（`cycles` 本身保持纯粹，不掺 URL 值）。
   const cycleOptions = cycle && !cycles.includes(cycle) ? [cycle, ...cycles] : cycles
@@ -199,6 +208,7 @@ export function M11BottomControlBar({
         'absolute bottom-10 left-1/2 z-[115] flex w-[min(64rem,calc(100%-2rem))] -translate-x-1/2 items-center mobile:w-[calc(100%-1rem)]',
         portrait ? controlBarPortraitClassName : controlBarSingleRowClassName,
         GLASS_PANEL,
+        yielded && 'invisible',
       )}
       aria-label="起报时次与时间轴"
       data-testid="m11-bottom-control-bar"
@@ -283,6 +293,7 @@ export function M11BottomControlBar({
         speed={speed}
         onSpeedChange={setSpeed}
         renderSpeedSelect={!portrait}
+        yielded={yielded}
         state={state}
         layers={layers}
         sourceSelection={sourceSelection}
