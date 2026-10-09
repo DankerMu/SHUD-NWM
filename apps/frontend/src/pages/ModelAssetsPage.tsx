@@ -358,7 +358,7 @@ export function ModelAssetsPage() {
           </CardContent>
         </Card>
 
-        <div className="space-y-4">
+        <div className="space-y-4 mobile:min-w-0">
           {!selectedModelId ? (
             <Card>
               <CardContent className="p-8 text-center text-sm text-muted">选择一个模型资产查看详情。</CardContent>
