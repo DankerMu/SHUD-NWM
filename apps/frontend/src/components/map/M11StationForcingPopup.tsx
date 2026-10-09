@@ -4,6 +4,7 @@ import { CloudRain } from 'lucide-react'
 
 import { echarts } from '@/components/charts/echartsCore'
 import { useChartFollowsContainer } from '@/components/charts/useChartFollowsContainer'
+import { useChartZoomObserver, type ChartZoomWindow } from '@/components/charts/useChartZoomObserver'
 import { M11DraggableCurveWindow } from '@/components/map/M11DraggableCurveWindow'
 import {
   formatIssueTime,
@@ -12,6 +13,7 @@ import {
   M11PopupHeader,
   M11PopupLoading,
 } from '@/components/map/M11PopupChrome'
+import { useMobileForm } from '@/hooks/useMobileForm'
 import { cn } from '@/lib/cn'
 import { formatUnitForDisplay } from '@/lib/format'
 import { formatStationDisplayName } from '@/lib/hydroMet/displayNames'
@@ -335,12 +337,7 @@ function StationForcingBody({
                 ))}
               </div>
             </div>
-            <div className="relative min-h-0 flex-1 mobile:min-h-[160px] mobile-landscape:min-h-[120px]" data-testid="m11-station-panel-chart">
-              {/* 绝对定位：图表库写在自身根节点上的像素高度不参与图表区的固有高度。 */}
-              <div className="absolute inset-0">
-                <StationVariableEcharts variable={selectedVariable} unit={chartResult.unitLabel} series={chartResult.series} />
-              </div>
-            </div>
+            <StationChartArea variable={selectedVariable} unit={chartResult.unitLabel} series={chartResult.series} />
           </div>
           {failedReasons.concat(chartResult.reasons).length > 0 ? (
             <p className="shrink-0 px-1 pt-1 text-[10px] text-amber-300/80" data-testid="m11-station-popup-partial">
@@ -428,7 +425,14 @@ function buildVariableBadges(variable: HydroMetStationSeriesVariable, series: Va
   })
 }
 
-function StationVariableEcharts({
+const FULL_ZOOM_WINDOW: ChartZoomWindow = { start: 0, end: 100 }
+
+/**
+ * 图表区。只读属性 `data-zoom-start` / `data-zoom-end`（时间轴缩放窗口，占全范围的百分比）与
+ * `data-tooltip-visible` 由图表回报的实例状态驱动；状态随本组件挂载而生——切到没有可绘制序列的要素时
+ * 本组件与图表实例一起卸载，切回来从初值开始。
+ */
+function StationChartArea({
   variable,
   unit,
   series,
@@ -436,6 +440,56 @@ function StationVariableEcharts({
   variable: HydroMetStationSeriesVariable
   unit: string
   series: ValidVariableSeries[]
+}) {
+  const { mobile } = useMobileForm()
+  const [zoomWindow, setZoomWindow] = useState(FULL_ZOOM_WINDOW)
+  const [tooltipVisible, setTooltipVisible] = useState(false)
+  return (
+    // 移动形态下横向拖动与捏合归图表（平移 / 缩放时间轴），浏览器只接管纵向滚动。
+    <div
+      className="relative min-h-0 flex-1 mobile:min-h-[160px] mobile:touch-pan-y mobile-landscape:min-h-[120px]"
+      data-testid="m11-station-panel-chart"
+      data-zoom-start={String(zoomWindow.start)}
+      data-zoom-end={String(zoomWindow.end)}
+      data-tooltip-visible={String(tooltipVisible)}
+    >
+      {/* 绝对定位：图表库写在自身根节点上的像素高度不参与图表区的固有高度。 */}
+      <div className="absolute inset-0">
+        <StationVariableEcharts
+          variable={variable}
+          unit={unit}
+          series={series}
+          mobile={mobile}
+          onZoomWindowChange={setZoomWindow}
+          onTooltipVisibleChange={setTooltipVisible}
+        />
+      </div>
+    </div>
+  )
+}
+
+/** 时间轴缩放：缺省即滚轮 / 捏合缩放、拖动平移；filterMode none 保曲线连续。 */
+const INSIDE_ZOOM = { type: 'inside', xAxisIndex: 0, filterMode: 'none' }
+/**
+ * 触屏：图表库在绘图区内按下后默认取消其后每个 touchmove，preventDefaultMouseMove: false 把纵向滚动
+ * 还给浏览器。
+ */
+const TOUCH_ZOOM = { ...INSIDE_ZOOM, preventDefaultMouseMove: false }
+
+function StationVariableEcharts({
+  variable,
+  unit,
+  series,
+  mobile,
+  onZoomWindowChange,
+  onTooltipVisibleChange,
+}: {
+  variable: HydroMetStationSeriesVariable
+  unit: string
+  series: ValidVariableSeries[]
+  mobile: boolean
+  onZoomWindowChange: (zoomWindow: ChartZoomWindow) => void
+  onTooltipVisibleChange: (visible: boolean) => void
 }) {
   const option = useMemo(
     () => ({
@@ -466,7 +520,7 @@ function StationVariableEcharts({
         nameTextStyle: { color: '#94a3b8' },
         splitLine: { lineStyle: { color: 'rgba(148, 163, 184, 0.14)' } },
       },
-      dataZoom: [{ type: 'inside', xAxisIndex: 0, filterMode: 'none' }],
+      dataZoom: [{ ...(mobile ? TOUCH_ZOOM : INSIDE_ZOOM) }],
       series: series.map((item) => ({
         type: 'line',
         name: item.source,
@@ -480,11 +534,13 @@ function StationVariableEcharts({
         data: item.validation.renderedPoints.map((point: ChartableStationSeriesPoint) => [point.timestamp, point.value]),
       })),
     }),
-    [series, unit],
+    [series, unit, mobile],
   )
+
+  const onEvents = useChartZoomObserver(option, onZoomWindowChange, onTooltipVisibleChange)
 
   // 画布跟随图表区尺寸（抽屉旋转 / 形态切换）；本组件只在有可绘制序列时渲染。
   const followContainer = useChartFollowsContainer(true)
 
-  return <ReactEChartsCore echarts={echarts} option={option} notMerge lazyUpdate onChartReady={followContainer} style={{ height: '100%', minHeight: 0, width: '100%' }} />
+  return <ReactEChartsCore echarts={echarts} option={option} notMerge lazyUpdate onChartReady={followContainer} onEvents={onEvents} style={{ height: '100%', minHeight: 0, width: '100%' }} />
 }
