@@ -362,7 +362,11 @@ export function M11Timeline({
         「再加一行让流高从 64px 回到 80px」的只有直接钉 `children.length === 3`。不要改用
         `div.min-w-0.flex-1` 之类的类名选择器 —— 类名会漂，testid 不会。
       */}
-      <div className="min-w-0 flex-1" data-testid="m11-timeline-rows">
+      {/*
+        `mobile-landscape:min-w-[120px]`：矮视口横屏单行里滑块永不窄于 120px（规格下限）；让出宽度的是
+        控制条右端的禁用原因（它在矮视口横屏有专属的宽度上限，见 `M11BottomControlBar`）。
+      */}
+      <div className="min-w-0 flex-1 mobile-landscape:min-w-[120px]" data-testid="m11-timeline-rows">
         <div className="flex items-center justify-between gap-3">
           <span className="truncate font-medium text-neutral-900">{model.currentValidTime ?? '当前图层没有有效时间'}</span>
           {/*
@@ -424,7 +428,8 @@ export function M11Timeline({
         {cycle ? null : (
           <div className="mt-1 flex items-center justify-between gap-3 text-xs text-neutral-500">
             <span className="truncate">{model.sourceLabel}</span>
-            <span>Analysis / Forecast</span>
+            {/* 矮视口横屏不折行：列宽贴近 120px 时折成三行会把时间轴撑到 101px，溢出 64px 的条。 */}
+            <span className="mobile-landscape:whitespace-nowrap">Analysis / Forecast</span>
           </div>
         )}
       </div>

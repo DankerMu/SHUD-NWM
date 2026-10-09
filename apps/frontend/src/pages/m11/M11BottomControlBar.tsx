@@ -292,7 +292,14 @@ export function M11BottomControlBar({
       {disabledReason ? (
         <span
           // 竖屏自成第三行（`basis-full`），仍是单行截断：条高有上界，状态条容器的移动底部界限才可证。
-          className={cn('truncate text-xs text-warning', portrait ? 'min-w-0 basis-full' : 'max-w-48 shrink-0')}
+          // 矮视口横屏把宽度上限收到 80px（全文仍在 `title`）：750×342 无周期时条内容宽 708px，
+          // 预报源 98 + 起报时次 145 + 步进 / 播放与速度 197 + 四个 12px 间距后只剩 220px，
+          // 滑块列要占 120px（`m11-timeline-rows` 的最小宽度），留给原因的至多 99.5px；
+          // 取 80px 给字体与 `<select>` 外观的跨平台宽度差留约 20px 余量。
+          className={cn(
+            'truncate text-xs text-warning',
+            portrait ? 'min-w-0 basis-full' : 'max-w-48 shrink-0 mobile-landscape:max-w-20',
+          )}
           title={disabledReason}
           data-testid="m11-control-bar-disabled-reason"
         >
