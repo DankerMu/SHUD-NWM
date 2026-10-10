@@ -1,4 +1,5 @@
 import { useEffect, type ReactNode } from 'react'
+import { useLocation } from 'react-router-dom'
 
 import {
   Select,
@@ -42,6 +43,7 @@ export function AppShell({ children }: AppShellProps) {
   const setRole = useAuthStore((state) => state.setRole)
   const { toasts, dismiss } = useToast()
   const viewportForm = useMobileForm()
+  const { pathname } = useLocation()
 
   // runtime config 全局唯一加载点（去 NavBar 后迁到此处）：
   // 加载到既有 store，display_readonly 检测的唯一来源，不新造 fetch。
@@ -54,6 +56,35 @@ export function AppShell({ children }: AppShellProps) {
     void fetchRuntimeConfig()
   }, [fetchRuntimeConfig, runtimeConfig, runtimeConfigError])
 
+  // 开发用角色切换器的位置。移动形态的地图页（design.md D5 末段，只适用于 `/`）：收成贴 main 左缘、垂直居中的
+  // 紧凑触发器，层级在地图浮层（最高 z-[130]）之上、Radix 弹层（--z-popover: 300）之下。移动形态的其余路由是
+  // 整页滚动的页面，没有空的左缘，同一个紧凑触发器改放进头部右端（#2862）。角色显示名留在 DOM 里只做视觉截断，
+  // 测试靠 getByLabel('Role') 的文本判定当前角色。桌面形态的类名逐字保留。
+  const roleSelectorInHeader = viewportForm.mobile && pathname !== '/'
+  const roleSelectorAtMapEdge = viewportForm.mobile && !roleSelectorInHeader
+  const roleSelector = isRoleOverrideEnabled ? (
+    <Select value={role} onValueChange={(value) => setRole(value as AuthRole)}>
+      <SelectTrigger
+        className={
+          viewportForm.mobile
+            ? 'w-14 gap-0 px-[var(--space-1)] [&>span]:min-w-0 [&>span]:truncate [&>svg]:shrink-0'
+            : 'w-36'
+        }
+        aria-label="Role"
+      >
+        <SelectValue />
+      </SelectTrigger>
+      {/* 地图页左缘的弹层开在触发器右侧：矮视口横屏下触发器下方放不下五个选项。头部里的与桌面形态的开在下方、向右对齐。 */}
+      <SelectContent align={roleSelectorAtMapEdge ? 'center' : 'end'} side={roleSelectorAtMapEdge ? 'right' : 'bottom'}>
+        {roleOptions.map((option) => (
+          <SelectItem key={option.value} value={option.value}>
+            {option.label}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  ) : null
+
   return (
     <ToastProvider duration={toastDuration}>
       {/* data-* 来自 useMobileForm（JS 侧），--nhms-viewport-form 经 `mobile:` 变体设置（CSS 侧）；二者不可见，供浏览器测试核对两侧结论一致。 */}
@@ -62,12 +93,9 @@ export function AppShell({ children }: AppShellProps) {
         data-viewport-form={viewportForm.mobile ? 'mobile' : 'desktop'}
         data-viewport-short-landscape={viewportForm.landscape ? 'true' : 'false'}
       >
-        <SiteHeader />
+        <SiteHeader endSlot={roleSelectorInHeader ? roleSelector : undefined} />
         <main className="relative min-h-0 w-full flex-1 overflow-hidden">
-          {isRoleOverrideEnabled ? (
-            // 移动形态（design.md D5 末段）：收成贴 main 左缘、垂直居中的紧凑触发器，层级在地图浮层
-            // （最高 z-[130]）之上、Radix 弹层（--z-popover: 300）之下。角色显示名留在 DOM 里只做视觉截断，
-            // 测试靠 getByLabel('Role') 的文本判定当前角色。桌面形态的类名逐字保留。
+          {roleSelector && !roleSelectorInHeader ? (
             <div
               className={
                 viewportForm.mobile
@@ -75,29 +103,7 @@ export function AppShell({ children }: AppShellProps) {
                   : 'absolute right-4 top-4 z-30'
               }
             >
-              <Select value={role} onValueChange={(value) => setRole(value as AuthRole)}>
-                <SelectTrigger
-                  className={
-                    viewportForm.mobile
-                      ? 'w-14 gap-0 px-[var(--space-1)] [&>span]:min-w-0 [&>span]:truncate [&>svg]:shrink-0'
-                      : 'w-36'
-                  }
-                  aria-label="Role"
-                >
-                  <SelectValue />
-                </SelectTrigger>
-                {/* 移动形态弹层开在触发器右侧：矮视口横屏下触发器下方放不下五个选项。 */}
-                <SelectContent
-                  align={viewportForm.mobile ? 'center' : 'end'}
-                  side={viewportForm.mobile ? 'right' : 'bottom'}
-                >
-                  {roleOptions.map((option) => (
-                    <SelectItem key={option.value} value={option.value}>
-                      {option.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              {roleSelector}
             </div>
           ) : null}
           {children}
