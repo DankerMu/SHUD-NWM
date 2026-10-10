@@ -1,5 +1,6 @@
 import { expect, test, type Locator, type Page } from '@playwright/test'
 
+import { mockMinimalDischargeCatalogApi } from './support/layerCatalog.mocked'
 import { isMobileForm, isShortLandscape } from './support/viewportForm'
 
 /**
@@ -38,28 +39,7 @@ function computedViewportForm(root: Locator): Promise<string> {
 
 test.describe('M11 移动形态判据', () => {
   test.beforeEach(async ({ page }) => {
-    await page.route('**/api/v1/**', async (route) => {
-      const url = new URL(route.request().url())
-      if (url.pathname === '/api/v1/layers') {
-        return route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({
-            status: 'ok',
-            data: [
-              {
-                layer_id: 'discharge',
-                layer_name: 'Discharge',
-                layer_type: 'hydrology',
-                variables: ['q_down'],
-                metadata: { layer_id: 'discharge', valid_times: [] },
-              },
-            ],
-          }),
-        })
-      }
-      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'ok', data: [] }) })
-    })
+    await mockMinimalDischargeCatalogApi(page)
   })
 
   for (const { width, height, form, shortLandscape } of formCases) {

@@ -1,5 +1,6 @@
 import { expect, type Locator, type Page } from '@playwright/test'
 
+import { MOCK_MINIMAL_DISCHARGE_LAYER } from './layerCatalog.mocked'
 import { setRole, type RoleValue } from './setRole'
 
 /**
@@ -32,15 +33,7 @@ export async function mockSiteHeaderApi(page: Page) {
         display_readonly: false,
       }
     } else if (url.pathname === '/api/v1/layers') {
-      data = [
-        {
-          layer_id: 'discharge',
-          layer_name: 'Discharge',
-          layer_type: 'hydrology',
-          variables: ['q_down'],
-          metadata: { layer_id: 'discharge', valid_times: [] },
-        },
-      ]
+      data = [MOCK_MINIMAL_DISCHARGE_LAYER]
     }
     return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'ok', data }) })
   })

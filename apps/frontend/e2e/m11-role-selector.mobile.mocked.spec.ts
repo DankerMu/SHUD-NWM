@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test'
 
+import { MOCK_MINIMAL_DISCHARGE_LAYER } from './support/layerCatalog.mocked'
 import { ROLE_LABELS, setRole, type RoleValue } from './support/setRole'
 import { isMobileForm, requireViewport } from './support/viewportForm'
 
@@ -43,17 +44,7 @@ async function mockApi(page: Page, seen: { runtimeConfig: number }) {
       )
     }
     if (url.pathname === '/api/v1/layers') {
-      return route.fulfill(
-        json([
-          {
-            layer_id: 'discharge',
-            layer_name: 'Discharge',
-            layer_type: 'hydrology',
-            variables: ['q_down'],
-            metadata: { layer_id: 'discharge', valid_times: [] },
-          },
-        ]),
-      )
+      return route.fulfill(json([MOCK_MINIMAL_DISCHARGE_LAYER]))
     }
     return route.fulfill(json([]))
   })

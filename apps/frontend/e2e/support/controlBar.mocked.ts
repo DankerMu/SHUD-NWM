@@ -1,7 +1,8 @@
 import { expect, type Page, type Route } from '@playwright/test'
 
 import type { components } from '../../src/api/types'
-import { MOCK_PRECIP_LEGEND, contains, type Box } from './legendLauncher.mocked'
+import { MOCK_PRECIP_LAYER } from './layerCatalog.mocked'
+import { contains, type Box } from './legendLauncher.mocked'
 import { CONTROL_BAR, MAP_REGION, boxOf } from './overlayLaunchers.mocked'
 import { mockDischargeLayer } from './riverWindow.mocked'
 import type { ViewportSize } from './viewportForm'
@@ -59,27 +60,6 @@ export async function installFailClosedDischargeLayer(page: Page) {
   )
 }
 
-/** 降水目录条目：只为让图例面板多出六级降水段（`precip` 的 URL 缺省即开启）；不 mock 降水 index / PNG。 */
-const precipLayer = {
-  layer_id: 'precip',
-  layer_name: 'Past 24h precipitation',
-  layer_type: 'meteorology',
-  variables: ['prcp_rate_or_amount'],
-  metadata: {
-    layer_id: 'precip',
-    tile_format: 'png',
-    image_url_template: '/api/v1/precip/{source}/{cycle}/{valid_time}.png',
-    index_url_template: '/api/v1/precip/{source}/{cycle}/index',
-    bounds: [63, 8, 145, 64],
-    legend: MOCK_PRECIP_LEGEND,
-    window_hours: 24,
-    unit: 'mm/24h',
-    palette_version: 'v1',
-    fallback_available: false,
-    release_blocking: false,
-  },
-} satisfies Schemas['Layer']
-
 /**
  * 最高的控制条 + 最长的图例：fail-closed 的径流图层（两行 + 禁用原因行）再加一条降水目录条目，
  * 图例面板因此同时列出径流分级与六级降水——竖屏窄视口下内容超出面板限高。
@@ -92,7 +72,7 @@ export async function installFailClosedDischargeWithPrecipLegend(page: Page) {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({ status: 'ok', data: [failClosedDischargeLayer, precipLayer] satisfies Schemas['Layer'][] }),
+        body: JSON.stringify({ status: 'ok', data: [failClosedDischargeLayer, MOCK_PRECIP_LAYER] satisfies Schemas['Layer'][] }),
       }),
   )
 }

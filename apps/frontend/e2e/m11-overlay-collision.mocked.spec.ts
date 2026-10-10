@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test'
 
+import { mockMinimalDischargeCatalogApi } from './support/layerCatalog.mocked'
 import { isMobileForm } from './support/viewportForm'
 
 /**
@@ -66,35 +67,7 @@ async function expectLegendCollapsedToLauncher(page: Page, width: number) {
 
 test.describe('M11 单图浮层与地图自带控件不互相压盖', () => {
   test.beforeEach(async ({ page }) => {
-    await page.route('**/api/v1/**', async (route) => {
-      const url = new URL(route.request().url())
-      if (url.pathname === '/api/v1/layers') {
-        return route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({
-            status: 'ok',
-            data: [
-              {
-                layer_id: 'discharge',
-                layer_name: 'Discharge',
-                layer_type: 'hydrology',
-                variables: ['q_down'],
-                metadata: { layer_id: 'discharge', valid_times: [] },
-              },
-            ],
-          }),
-        })
-      }
-      if (url.pathname === '/api/v1/basins') {
-        return route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({ status: 'ok', data: [] }),
-        })
-      }
-      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'ok', data: [] }) })
-    })
+    await mockMinimalDischargeCatalogApi(page)
   })
 
   // 五个宽度都要量：attribution 与控制条的避让不是只对某一个宽度成立。
