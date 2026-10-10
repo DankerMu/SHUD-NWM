@@ -145,6 +145,7 @@ function M11FullscreenMap({
   mapLabel,
   controlBarInput,
   yielded = false,
+  controlBarYielded = false,
   onQueryChange,
   onOverlayHover,
   onOverlayClick,
@@ -176,9 +177,14 @@ function M11FullscreenMap({
   controlBarInput?: M11ControlBarInput | null
   /**
    * 地图外壳让位（openspec mobile-responsive-display D11）：由 `OverviewMode` 算一次传进来，桌面形态恒为 false。
-   * 为真时控制条与启动器列隐藏（保持挂载）、展开值复位、时间轴暂停——三处都只读这一个布尔。
+   * 为真时启动器列隐藏（保持挂载）、展开值复位。
    */
   yielded?: boolean
+  /**
+   * 给底部控制条的让位：比 `yielded` 晚一个 effect 周期变真（同时变假），同样由 `OverviewMode` 算好传进来。
+   * 为真时控制条隐藏（保持挂载）、时间轴暂停——控制条用同一个布尔做这两件事。
+   */
+  controlBarYielded?: boolean
   onQueryChange: (patch: M11QueryPatch) => void
   onOverlayHover?: (interaction: M11MapOverlayInteraction | null) => void
   onOverlayClick?: (interaction: M11MapOverlayInteraction) => void
@@ -302,7 +308,7 @@ function M11FullscreenMap({
           className="absolute bottom-10 left-1/2 z-[115] -translate-x-1/2"
         >
           <RegionCrashProbe region="control-bar" />
-          <M11BottomControlBarRegion input={controlBarInput} onQueryChange={onQueryChange} yielded={yielded} />
+          <M11BottomControlBarRegion input={controlBarInput} onQueryChange={onQueryChange} yielded={controlBarYielded} />
         </RegionErrorBoundary>
       ) : null}
       {mobile ? (
@@ -539,6 +545,16 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   // 取决于“是否有抽屉在正常渲染”，不是“是否有选中的河段 / 站点”——面板崩溃时外壳必须回来。
   // 读实时的 `mobile`：桌面形态恒为 false，形态切换时让位 / 恢复自然得到。
   const chromeYielded = mobile && (riverOpen || stationOpen) && !curveRegionInFallback
+  // 给底部控制条（隐藏 + 时间轴暂停）的让位晚一个 effect 周期：面板首次渲染即崩溃时，抛错的那次提交里
+  // `curveRegionInFallback` 还没翻过来、`chromeYielded` 瞬时为真——抽屉从未出现，不能为它暂停播放。
+  // 兜底标记在同一次提交的生命周期里写入，回写的 state 赶到时 `chromeYielded` 已经回到 false，两者相与恒为假。
+  // 点击 / 轻触这类离散事件里 effect 同步冲刷，正常打开抽屉仍在绘制之前暂停；非离散来源（如 `matchMedia`
+  // 切进移动形态）控制条比启动器列晚一次提交隐藏。
+  const [chromeYieldedSettled, setChromeYieldedSettled] = useState(false)
+  useEffect(() => {
+    setChromeYieldedSettled(chromeYielded)
+  }, [chromeYielded])
+  const controlBarYielded = chromeYieldedSettled && chromeYielded
   // 选中锚点（D17，两种形态同一规则）：只开着一种窗取它的；两种都开着取活动窗的。移动形态下“一种窗替换
   // 另一种窗”有一个两窗同时非空的未绘制中间提交，按这条规则那时已经是存活窗的锚点——替换只换一次。
   const riverSelected = riverOpen && (!stationOpen || activeCurveWindow === 'river')
@@ -698,6 +714,7 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
       mapLabel="全国总览地图"
       controlBarInput={controlBarInput}
       yielded={chromeYielded}
+      controlBarYielded={controlBarYielded}
       onQueryChange={onQueryChange}
       onOverlayHover={handleMapOverlayHover}
       onOverlayClick={handleMapOverlayClick}

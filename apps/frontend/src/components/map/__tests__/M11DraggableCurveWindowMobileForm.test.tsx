@@ -140,6 +140,31 @@ describe('M11DraggableCurveWindow 的移动形态', () => {
     expect({ left: frame.style.left, top: frame.style.top }).toEqual(initial)
   })
 
+  it('桌面拖拽进行中窗被卸载：三个拖拽监听以注册时的回调被移除', () => {
+    const view = renderWindow({ mobile: false })
+    pressHandle()
+    expect(dragEventCalls(addSpy)).toEqual([...DRAG_EVENTS].sort())
+    expect(dragEventCalls(removeSpy)).toEqual([])
+
+    view.unmount()
+
+    expect(dragEventCalls(removeSpy)).toEqual([...DRAG_EVENTS].sort())
+    for (const type of DRAG_EVENTS) {
+      const added = addSpy.mock.calls.find(([name]) => name === type)?.[1]
+      const removed = removeSpy.mock.calls.find(([name]) => name === type)?.[1]
+      expect(added).toBeTypeOf('function')
+      expect(removed).toBe(added)
+    }
+  })
+
+  it('没有拖拽时卸载：不抛错，也不移除任何拖拽监听', () => {
+    const view = renderWindow({ mobile: false })
+
+    expect(() => view.unmount()).not.toThrow()
+
+    expect(dragEventCalls(removeSpy)).toEqual([])
+  })
+
   it('(p) 两种形态下主体容器都在，形态切换不重挂子树；头部在主体容器之外', () => {
     renderWindow({ mobile: false })
     const frame = screen.getByTestId(WINDOW_TEST_ID)

@@ -192,6 +192,7 @@ function readM11CameraDataAttributes(map: M11AnchorCameraMap | null, anchor: [nu
  *   逐个监听器派发、React 逐个同步提交，页面那一份先翻——键变化的那次提交里抽屉还是旧形态（实测：
  *   390×664 -> 750×342 量到的是全宽的底部抽屉，1280×900 -> 390×664 量到的是桌面浮窗）。同一帧的
  *   `requestAnimationFrame` 排在全部 change 监听器之后，那时抽屉已是新形态。
+ *   还没执行的那一帧在键再次变化（含变空）与卸载时取消：一帧之内键变走又变回同一个值，也只平移一次。
  * - 属性：`data-selected-anchor-x / -y` 是选中锚点在当前相机下的视口 CSS px（画布视口原点 + `project`），
  *   只在三个时刻重读：选中锚点变化（绘制前）、相机静止（`moveend`，含画布尺寸变化引起的）、地图加载完成
  *   ——后两个经 `onCameraSettled`，由调用方接到 `<Map>` 的 `onMoveEnd` / `onLoad`。不在渲染期现读：
@@ -225,16 +226,12 @@ export function useM11SelectedAnchorCamera({
   useLayoutEffect(onCameraSettled, [anchorLat, anchorLng, onCameraSettled])
 
   const panKey = autoPan?.key ?? ''
-  const lastPanKeyRef = useRef('')
   useEffect(() => {
-    // 先记键再排平移：一次键变化至多尝试一次（StrictMode 的 effect 重放、平移前 `resize()`
-    // 同步发出的 `moveend` 引起的重渲染都落在“键没变”上）。
-    if (panKey === lastPanKeyRef.current) return
-    lastPanKeyRef.current = panKey
+    // 键非空即排一帧，清理即取消：effect 只随键重跑（平移前 `resize()` 同步发出的 `moveend` 引起的重渲染
+    // 不重跑），一帧之内键又变了（含变空）、卸载、StrictMode 的 effect 重放都先把还没执行的那一帧取消掉，
+    // 所以一次键变化至多尝试一次。
     if (!panKey) return
-    requestAnimationFrame(() => {
-      // 这一帧之内键又变了（含变空）：这次不平移，新键自己会排一次。
-      if (lastPanKeyRef.current !== panKey) return
+    const frame = requestAnimationFrame(() => {
       // 锚点 / 遮盖侧 / 窗种类都已编码在键里：键没变，这里读到的就是排这次平移时的那一份。
       const { autoPan: pan, selectedAnchor: anchor } = latestRef.current
       const map = nativeAnchorCameraMap(mapRef)
@@ -255,6 +252,7 @@ export function useM11SelectedAnchorCamera({
         duration: M11_SHEET_PAN_DURATION_MS,
       })
     })
+    return () => cancelAnimationFrame(frame)
   }, [mapRef, panKey, surfaceRef])
 
   return { cameraDataAttributes, onCameraSettled }
