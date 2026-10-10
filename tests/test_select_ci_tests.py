@@ -12961,6 +12961,46 @@ def test_c4_schema_only_change_runs_frontend_ajv_negative_suite() -> None:
     assert "'schemas/**'" not in frontend
 
 
+# #2863: the three entries that switch the frontend lanes on. Exact literals at
+# the filter-entry indent, so a commented-out or re-indented line does not count.
+_FRONTEND_LANE_SWITCH_ENTRIES = (
+    pytest.param("              - '.github/workflows/ci.yml'\n", id="ci-workflow"),
+    pytest.param("              - 'apps/frontend/**'\n", id="apps-frontend"),
+    pytest.param("              - 'openapi/**'\n", id="openapi"),
+)
+
+
+@pytest.mark.parametrize("entry", _FRONTEND_LANE_SWITCH_ENTRIES)
+def test_ci_frontend_filter_block_lists_the_lane_switch_entry(entry: str) -> None:
+    # #2863 (#2844 follow-up): the `frontend` filter is the only switch for
+    # Frontend Build and the sharded Frontend E2E (mocked) lane. Pin each exact
+    # literal inside the `frontend:` filter block — `ci.yml` and `openapi/**`
+    # also sit under `backend:`/`database:`/`openapi:`, and a mention there
+    # starts neither frontend job.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+
+    assert entry in _frontend_filter_block(workflow)
+
+
+@pytest.mark.parametrize("entry", _FRONTEND_LANE_SWITCH_ENTRIES)
+def test_ci_frontend_filter_pin_reds_when_the_entry_leaves_the_frontend_block(entry: str) -> None:
+    # Constructed workflow text, so the tracked ci.yml is untouched. Two shapes:
+    # the entry deleted from the `frontend:` block only (its copies under other
+    # filters stay, which is exactly what a whole-file grep would be fooled by),
+    # and the entry moved under `docs:`, the key the `frontend:` slice ends at.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    block = _frontend_filter_block(workflow)
+    assert entry in block
+    assert workflow.count(block) == 1
+
+    deleted = workflow.replace(block, block.replace(entry, ""))
+    assert entry not in _frontend_filter_block(deleted)
+
+    moved_to_docs = deleted.replace("            docs:\n", "            docs:\n" + entry)
+    assert moved_to_docs.count(entry) == deleted.count(entry) + 1
+    assert entry not in _frontend_filter_block(moved_to_docs)
+
+
 def _backend_filter_block(workflow: str) -> str:
     """ci.yml's `backend:` paths-filter block, from its key to the next key.
 
