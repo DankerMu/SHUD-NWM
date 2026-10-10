@@ -274,18 +274,27 @@ export function m11MapSourceErrorResetKey({
   return [basinFeatureCount, overlaySourceId ?? '', basemap, layer, validTime ?? ''].join('|')
 }
 
-export function useM11MapSourceError(resetKey: string) {
-  const [mapSourceError, setMapSourceError] = useState<string | null>(null)
+/**
+ * 两份状态，清空时机不同：底图提示只在换底图时清（MapLibre 对同一张已失败的瓦片不再发 error，
+ * 图层目录 / 有效时刻晚到时清掉它就再也亮不回来）；业务图层错误随 `resetKey` 清。
+ * 显示时业务错误优先，它清空后仍失败着的底图重新露出提示。
+ */
+export function useM11MapSourceError(resetKey: string, basemap: M11Basemap) {
+  const [basemapUnavailable, setBasemapUnavailable] = useState(false)
+  const [layerError, setLayerError] = useState<string | null>(null)
 
   useEffect(() => {
-    setMapSourceError(null)
+    setBasemapUnavailable(false)
+  }, [basemap])
+
+  useEffect(() => {
+    setLayerError(null)
   }, [resetKey])
 
   const handleMapError = useCallback((event: { error?: { message?: string }; sourceId?: string }) => {
-    // 底图瓦片失败每张一个 error 事件：收敛为一条固定提示（同值 setState 不触发重渲染），
-    // 且不覆盖已显示的业务图层错误。
+    // 底图瓦片失败每张一个 error 事件：收敛为一条固定提示（同值 setState 不触发重渲染）。
     if (event.sourceId && m11BasemapSourceIds.has(event.sourceId)) {
-      setMapSourceError((current) => (current && current !== M11_BASEMAP_UNAVAILABLE_NOTICE ? current : M11_BASEMAP_UNAVAILABLE_NOTICE))
+      setBasemapUnavailable(true)
       return
     }
     const message = event.error?.message ?? ''
@@ -295,9 +304,10 @@ export function useM11MapSourceError(resetKey: string) {
       console.warn('[m11-map] symbol text layer skipped (no glyphs in raster basemap style):', message)
       return
     }
-    setMapSourceError(message || '地图源加载失败，受影响图层暂不可用。')
+    setLayerError(message || '地图源加载失败，受影响图层暂不可用。')
   }, [])
 
+  const mapSourceError = layerError ?? (basemapUnavailable ? M11_BASEMAP_UNAVAILABLE_NOTICE : null)
   return { mapSourceError, handleMapError }
 }
 

@@ -11,6 +11,8 @@ import {
   useM11MapSourceError,
 } from '@/components/map/m11MapRuntime'
 
+type SourceErrorProps = { resetKey: string; basemap: Parameters<typeof useM11MapSourceError>[1] }
+
 function renderStatusOverlays(basinBoundaryOverlayEnabled: boolean) {
   return render(
     <M11MapStatusOverlays
@@ -74,7 +76,7 @@ describe('useM11MapSourceError', () => {
   })
 
   it('collapses basemap tile failures into one stable notice', () => {
-    const { result } = renderHook(() => useM11MapSourceError('k'))
+    const { result } = renderHook(() => useM11MapSourceError('k', 'vector'))
 
     act(() => result.current.handleMapError(tileError('vec-base')))
     act(() => result.current.handleMapError(tileError('cva-anno')))
@@ -83,7 +85,7 @@ describe('useM11MapSourceError', () => {
   })
 
   it('never hides a business-layer error behind the basemap notice', () => {
-    const { result } = renderHook(() => useM11MapSourceError('k'))
+    const { result } = renderHook(() => useM11MapSourceError('k', 'vector'))
 
     act(() => result.current.handleMapError({ sourceId: 'hydro-mvt', error: { message: 'hydro tile failed' } }))
     act(() => result.current.handleMapError(tileError('img-base')))
@@ -92,12 +94,54 @@ describe('useM11MapSourceError', () => {
   })
 
   it('lets a business-layer error replace the basemap notice', () => {
-    const { result } = renderHook(() => useM11MapSourceError('k'))
+    const { result } = renderHook(() => useM11MapSourceError('k', 'vector'))
 
     act(() => result.current.handleMapError(tileError('ter-base')))
     act(() => result.current.handleMapError({ sourceId: 'hydro-mvt', error: { message: 'hydro tile failed' } }))
 
     expect(result.current.mapSourceError).toBe('hydro tile failed')
+  })
+
+  const businessError = { sourceId: 'hydro-mvt', error: { message: 'hydro tile failed' } }
+  const renderSourceError = (initialProps: SourceErrorProps) =>
+    renderHook(({ resetKey, basemap }: SourceErrorProps) => useM11MapSourceError(resetKey, basemap), { initialProps })
+
+  it('keeps the basemap notice when the layer inputs change but the basemap does not', () => {
+    const { result, rerender } = renderSourceError({ resetKey: '0||vector|discharge|', basemap: 'vector' })
+
+    act(() => result.current.handleMapError(tileError('vec-base')))
+    rerender({ resetKey: '0|hydro-mvt|vector|discharge|2026-10-10T00:00:00Z', basemap: 'vector' })
+
+    expect(result.current.mapSourceError).toBe(M11_BASEMAP_UNAVAILABLE_NOTICE)
+  })
+
+  it('clears the basemap notice when the basemap changes', () => {
+    const { result, rerender } = renderSourceError({ resetKey: 'k', basemap: 'vector' })
+
+    act(() => result.current.handleMapError(tileError('vec-base')))
+    rerender({ resetKey: 'k', basemap: 'satellite' })
+
+    expect(result.current.mapSourceError).toBeNull()
+  })
+
+  it('clears a business-layer error when the layer inputs change', () => {
+    const { result, rerender } = renderSourceError({ resetKey: 'k1', basemap: 'vector' })
+
+    act(() => result.current.handleMapError(businessError))
+    rerender({ resetKey: 'k2', basemap: 'vector' })
+
+    expect(result.current.mapSourceError).toBeNull()
+  })
+
+  it('shows the basemap notice again once the business-layer error covering it is cleared', () => {
+    const { result, rerender } = renderSourceError({ resetKey: 'k1', basemap: 'vector' })
+
+    act(() => result.current.handleMapError(tileError('vec-base')))
+    act(() => result.current.handleMapError(businessError))
+    expect(result.current.mapSourceError).toBe('hydro tile failed')
+    rerender({ resetKey: 'k2', basemap: 'vector' })
+
+    expect(result.current.mapSourceError).toBe(M11_BASEMAP_UNAVAILABLE_NOTICE)
   })
 })
 

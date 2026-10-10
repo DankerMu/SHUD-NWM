@@ -213,7 +213,7 @@ export function M11MapLibreSurface({
     layer: state.layer,
     validTime: state.validTime,
   })
-  const { mapSourceError, handleMapError } = useM11MapSourceError(sourceErrorResetKey)
+  const { mapSourceError, handleMapError } = useM11MapSourceError(sourceErrorResetKey, state.basemap)
 
   useEffect(() => {
     setOverlayData(null)
