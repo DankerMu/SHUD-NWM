@@ -181,7 +181,8 @@ function M11FullscreenMap({
    */
   yielded?: boolean
   /**
-   * 给底部控制条的让位：比 `yielded` 晚一个 effect 周期变真（同时变假），同样由 `OverviewMode` 算好传进来。
+   * 给底部控制条的让位：比 `yielded` 晚一次同步重渲染变真（在绘制之前提交；与 `yielded` 同时变假），
+   * 同样由 `OverviewMode` 算好传进来。
    * 为真时控制条隐藏（保持挂载）、时间轴暂停——控制条用同一个布尔做这两件事。
    */
   controlBarYielded?: boolean
@@ -545,13 +546,15 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   // 取决于“是否有抽屉在正常渲染”，不是“是否有选中的河段 / 站点”——面板崩溃时外壳必须回来。
   // 读实时的 `mobile`：桌面形态恒为 false，形态切换时让位 / 恢复自然得到。
   const chromeYielded = mobile && (riverOpen || stationOpen) && !curveRegionInFallback
-  // 给底部控制条（隐藏 + 时间轴暂停）的让位晚一个 effect 周期：面板首次渲染即崩溃时，抛错的那次提交里
-  // `curveRegionInFallback` 还没翻过来、`chromeYielded` 瞬时为真——抽屉从未出现，不能为它暂停播放。
-  // 兜底标记在同一次提交的生命周期里写入，回写的 state 赶到时 `chromeYielded` 已经回到 false，两者相与恒为假。
-  // 点击 / 轻触这类离散事件里 effect 同步冲刷，正常打开抽屉仍在绘制之前暂停；非离散来源（如 `matchMedia`
-  // 切进移动形态）控制条比启动器列晚一次提交隐藏。
+  // 给底部控制条（隐藏 + 时间轴暂停）的让位经一个镜像 state 回写，比 `chromeYielded` 晚一次重渲染：面板首次
+  // 渲染即崩溃时，抛错的那次提交里 `curveRegionInFallback` 还没翻过来、`chromeYielded` 瞬时为真——抽屉从未
+  // 出现，不能为它暂停播放。
+  // 回写放在 layout effect 里：其中排出的更新是同步优先级，在这次提交结束时、浏览器绘制之前就重渲染并提交，
+  // 所以正常打开抽屉时控制条与抽屉在同一帧里切换，与触发来源（轻触、「重试」、`matchMedia` 切形态）无关。
+  // 崩溃路径上，边界 `componentDidCatch` 写兜底标记的更新与这里的回写落在同一次提交里、合并进同一次同步
+  // 重渲染，那次渲染里 `chromeYielded` 已经回到 false，两者相与恒为假。
   const [chromeYieldedSettled, setChromeYieldedSettled] = useState(false)
-  useEffect(() => {
+  useLayoutEffect(() => {
     setChromeYieldedSettled(chromeYielded)
   }, [chromeYielded])
   const controlBarYielded = chromeYieldedSettled && chromeYielded
