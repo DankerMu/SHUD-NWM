@@ -576,7 +576,8 @@ describe('M11BottomControlBar', () => {
   it('lets the tick row replace the bottom metadata row so the rows still fit 64px', () => {
     // AC6 的行数预算代理断言（决策 10【Phase 2 后修订】）：jsdom 量不了像素，唯一能挡住
     // 「再加一行静默溢出」的结构性 oracle 是「传 cycle 时刻度行取代底行」。
-    // 右侧列流高 = 20（当前时次行）+ 8+16（滑块）+ 4+16（刻度行）= 64px 整；
+    // 右侧列流高 = 20（当前时次行）+ 8+16（滑块行）+ 4+16（刻度行）= 64px（浏览器实测；滑块行 16px
+    // 靠它是 flex 容器，不是的话行内基线会把它撑到 21px、流高 69px——由 e2e 的桌面 spec 钉像素，#2864）；
     // 首版（`h-3` 刻度行追加在底行之上）是 80px，固定 h-16 上下各溢出 8px 并压进版权归属带。
     const { unmount } = renderControlBar(inputFor(defaultM11QueryState))
 

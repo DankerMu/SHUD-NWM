@@ -33,9 +33,12 @@ const MIN_SELECT_FONT_PX = 16
 const BAR_HEIGHT = 64
 /** 控制条底边距地图区底边（attribution 带）。 */
 const BAR_BOTTOM_INSET = 40
-/** 时间轴的自然高度约 69px（滑块行的行盒约 21px），在 64px 的条里上下各溢出约 2.5px；折行即超过这两个上限。 */
-const MAX_TIMELINE_HEIGHT = 70
-const MAX_TIMELINE_OVERHANG = 3
+/**
+ * 时间轴在条内（#2864）：流高 = 20 + (8+16) + (4+16) = 64px，实测与条同高、上下溢出 0；
+ * 滑块行的行盒回到 21px（+5px）或底行折行（+16px / 行）都会超过这两个上限。
+ */
+const MAX_TIMELINE_HEIGHT = BAR_HEIGHT + TOLERANCE
+const MAX_TIMELINE_OVERHANG = TOLERANCE
 /** 桌面 / 横屏单行里禁用原因的既有宽度上限（`max-w-48`）；矮视口横屏的专属上限必须比它小。 */
 const DESKTOP_REASON_MAX_WIDTH = 192
 const TIMELINE_ROWS = 'm11-timeline-rows'
@@ -130,7 +133,7 @@ async function expectLandscapeSingleRow(page: Page, where: string, failClosed: b
     expect.soft(button.height, `按钮 ${index + 1} 高 ${button.height} @ ${where}`).toBeGreaterThanOrEqual(MIN_TOUCH_TARGET)
   }
 
-  // 时间轴内容不因折行变高：盒高 ≤ 70，上下各不超出控制条 3px（既有的约 2.5px 行盒溢出之内）。
+  // 时间轴在条内：盒高 ≤ 64、上下都不超出控制条（各留 0.5px 容差）——折行或滑块行行盒变高都会红。
   const overhangTop = m.bar.y - m.timeline.y
   const overhangBottom = m.timeline.y + m.timeline.height - (m.bar.y + m.bar.height)
   expect.soft(m.timeline.height, `时间轴盒高 ${m.timeline.height} @ ${where}`).toBeLessThanOrEqual(MAX_TIMELINE_HEIGHT)
