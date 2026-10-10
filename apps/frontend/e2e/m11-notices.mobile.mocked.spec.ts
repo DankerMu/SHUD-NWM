@@ -33,6 +33,7 @@ import { expectMapControlsMounted } from './support/zoomControl.mocked'
  */
 
 const STATUS_CONTAINER = 'm11-map-status-overlays'
+const MAP_SURFACE = 'm11-map-surface'
 /** 两行上限的容差（亚像素取整）。 */
 const TWO_LINE_TOLERANCE_PX = 1
 /** 截断用例加长后的文本长度：844 宽条带里 12px / 14px 字号也远超两行。 */
@@ -93,13 +94,34 @@ function expectInFirstSlot(geometry: { box: Box; chrome: { map: Box } }, name: s
 
 /** 场景 (4) 的现场：代站状态提示与地图源错误状态条同时出现。 */
 async function openWithNoticeAndStatus(page: Page) {
-  await installNoticeMocks(page, { failBasemapTiles: true, emptyStations: true })
+  const mocks = await installNoticeMocks(page, { failBasemapTiles: true, emptyStations: true })
   await openMap(page, STATION_LAYER_URL)
   const notice = page.getByTestId(NOTICE_TEST_IDS.stationStatus)
   const status = page.getByTestId(STATUS_TEST_IDS.mapSourceError)
   await expect(notice).toHaveText(STATION_EMPTY_TEXT)
-  await expect(status).toHaveText(BASEMAP_UNAVAILABLE_TEXT)
+  // 先等瓦片真的被 503：之后状态条再红，日志能区分“瓦片没被请求”与“请求了但状态条没亮”。
+  await expect.poll(() => mocks.failedBasemapTiles(), '底图瓦片应已被请求并回 503（计数为 0 = 地图还没发出底图瓦片请求）').toBeGreaterThan(0)
+  await expect(status, `底图瓦片已 503 ${mocks.failedBasemapTiles()} 张，状态条应亮`).toHaveText(BASEMAP_UNAVAILABLE_TEXT)
   return { notice, status }
+}
+
+/** 从现在起记录某个 testid 的元素是否缺席过（只看终态会被“清掉后又被重新点亮”骗过）。 */
+async function watchAbsence(page: Page, testId: string) {
+  await page.evaluate((id) => {
+    const selector = `[data-testid="${id}"]`
+    const record = { absent: document.querySelector(selector) === null }
+    ;(window as unknown as { __m11AbsenceRecord: typeof record }).__m11AbsenceRecord = record
+    new MutationObserver((mutations) => {
+      // 同一批变更里“删掉又加回”时终态查询看不出来，所以被删节点也要查。
+      const removed = mutations.some((mutation) =>
+        Array.from(mutation.removedNodes).some(
+          (node) => node instanceof Element && (node.matches(selector) || node.querySelector(selector) !== null),
+        ),
+      )
+      if (removed || document.querySelector(selector) === null) record.absent = true
+    }).observe(document.body, { childList: true, subtree: true })
+  }, testId)
+  return () => page.evaluate(() => (window as unknown as { __m11AbsenceRecord: { absent: boolean } }).__m11AbsenceRecord.absent)
 }
 
 test.describe('M11 浮动提示与状态条移动位置', () => {
@@ -221,5 +243,38 @@ test.describe('M11 浮动提示与状态条移动位置', () => {
     const noticeGeometry = await expectInBand(page, notice, '加长后的代站状态提示', where)
     const statusGeometry = await expectInBand(page, status, statusLengthened ? '加长后的地图源错误状态条' : '地图源错误状态条', where)
     expect(intersects(noticeGeometry.box, statusGeometry.box), '截断后的提示与状态条相交').toBe(false)
+  })
+
+  test('底图不可用状态条在总览数据晚到（图层目录到达、有效时刻校正）之后从未被清掉', async ({ page }, testInfo) => {
+    const where = label(page, testInfo)
+    const mocks = await installNoticeMocks(page, { failBasemapTiles: true, holdBootstrap: true })
+    const status = page.getByTestId(STATUS_TEST_IDS.mapSourceError)
+    let n0 = 0
+    let wasAbsent: () => Promise<boolean>
+    try {
+      await openMap(page)
+      // 流域清单挂着：图层目录不落，底图瓦片先 503 并点亮状态条。
+      await expect.poll(() => mocks.failedBasemapTiles(), '底图瓦片应已被请求并回 503').toBeGreaterThan(0)
+      await expect(status, `放行前：底图瓦片已 503 ${mocks.failedBasemapTiles()} 张，状态条应亮`).toHaveText(BASEMAP_UNAVAILABLE_TEXT)
+      await expect(page.getByTestId(MAP_SURFACE), '放行前不应已注册径流叠加层').not.toHaveAttribute('data-registered-overlays')
+      expect(page.url(), '放行前 URL 不应已带 validTime').not.toContain('validTime=')
+      n0 = mocks.failedBasemapTiles()
+      wasAbsent = await watchAbsence(page, STATUS_TEST_IDS.mapSourceError)
+    } finally {
+      mocks.releaseBootstrap()
+    }
+
+    // 放行已生效的两个独立信号：径流叠加层已注册（overlay.sourceId 变了），URL 带上 validTime（最后一次 key 变化）。
+    await expect(page.getByTestId(MAP_SURFACE)).toHaveAttribute('data-registered-overlays', 'discharge')
+    await expect(page).toHaveURL(/[?&]validTime=/)
+    await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
+
+    const n1 = mocks.failedBasemapTiles()
+    const absent = await wasAbsent()
+    const present = (await status.count()) > 0
+    const observed = JSON.stringify({ absent, present, n0, n1 })
+    console.log(`notices basemap notice across bootstrap release @ ${where}`, observed)
+    expect(absent, `放行之后状态条缺席过 ${observed}`).toBe(false)
+    await expect(status, `放行之后状态条终态应仍是底图不可用 ${observed}`).toHaveText(BASEMAP_UNAVAILABLE_TEXT)
   })
 })

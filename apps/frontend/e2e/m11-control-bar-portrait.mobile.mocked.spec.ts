@@ -309,8 +309,9 @@ test.describe('M11 控制条竖屏两行', () => {
         const notice = page.getByTestId(NOTICE_TEST_IDS.stationStatus)
         const status = page.getByTestId(STATUS_TEST_IDS.mapSourceError)
         await expect(notice).toHaveText(STATION_EMPTY_TEXT)
-        await expect(status).toHaveText(BASEMAP_UNAVAILABLE_TEXT)
-        expect(mocks.failedBasemapTiles(), '状态条应由真实的底图瓦片 503 点亮').toBeGreaterThan(0)
+        // 计数先于状态条：状态条再红时，日志能区分“瓦片没被请求”与“请求了但状态条没亮”。
+        await expect.poll(() => mocks.failedBasemapTiles(), '状态条应由真实的底图瓦片 503 点亮').toBeGreaterThan(0)
+        await expect(status, `底图瓦片已 503 ${mocks.failedBasemapTiles()} 张，状态条应亮`).toHaveText(BASEMAP_UNAVAILABLE_TEXT)
 
         const container = page.getByTestId(STATUS_CONTAINER)
         await expect(container).toHaveCSS('pointer-events', 'none')
