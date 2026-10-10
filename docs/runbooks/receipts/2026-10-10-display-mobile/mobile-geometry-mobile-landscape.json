@@ -1,0 +1,626 @@
+{
+  "schema": "nhms.node27-display-mobile-evidence.v1",
+  "base_url": "https://test.nwm.ac.cn",
+  "preset": {
+    "name": "mobile-landscape",
+    "viewport": {
+      "width": 750,
+      "height": 342
+    },
+    "deviceScaleFactor": 2,
+    "hasTouch": true,
+    "isMobile": true,
+    "userAgent": "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+  },
+  "form": "mobile-short-landscape",
+  "expectations": {
+    "form": "mobile",
+    "shortLandscape": true,
+    "headerHeight": 48,
+    "controlBarHeight": null,
+    "horizontalScrollCheck": false,
+    "controlsInViewport": true,
+    "chartMinHeight": 120,
+    "sheetSide": "right"
+  },
+  "river_target": {
+    "basin_id": "basins_heihe",
+    "basin_version_id": "basins_heihe_vbasins",
+    "river_network_version_id": "basins_heihe_rivnet_vbasins",
+    "model_id": "dg_f6175cdb0f3825bec4807c386b5cbf38",
+    "river_segment_id": "basins_heihe_shud_shud_riv_000001",
+    "bbox": [
+      [
+        100.883333333,
+        42.39
+      ],
+      [
+        100.904166667,
+        42.403333333
+      ]
+    ],
+    "anchor": [
+      100.895833333,
+      42.395833333
+    ]
+  },
+  "station_target": {
+    "basin_id": "basins_heihe",
+    "basin_version_id": "basins_heihe_vbasins",
+    "river_network_version_id": "basins_heihe_rivnet_vbasins",
+    "model_id": "dg_f6175cdb0f3825bec4807c386b5cbf38",
+    "requested_station_id": null,
+    "total_count": 287,
+    "candidates": [
+      {
+        "station_id": "dg-gfs-30fffff33ad6d8dd4591::cell:28107",
+        "longitude": 98.5,
+        "latitude": 42.75
+      },
+      {
+        "station_id": "dg-gfs-30fffff33ad6d8dd4591::cell:28108",
+        "longitude": 98.75,
+        "latitude": 42.75
+      },
+      {
+        "station_id": "dg-gfs-30fffff33ad6d8dd4591::cell:28113",
+        "longitude": 100,
+        "latitude": 42.75
+      },
+      {
+        "station_id": "dg-gfs-30fffff33ad6d8dd4591::cell:28114",
+        "longitude": 100.25,
+        "latitude": 42.75
+      },
+      {
+        "station_id": "dg-gfs-30fffff33ad6d8dd4591::cell:28115",
+        "longitude": 100.5,
+        "latitude": 42.75
+      }
+    ]
+  },
+  "captured_at": "2026-10-10T01:08:24.851Z",
+  "states": {
+    "default": {
+      "url": "https://test.nwm.ac.cn/",
+      "settle_ms": 876,
+      "tap": null,
+      "attempts": null,
+      "curve_wait": null,
+      "geometry": {
+        "state": "default",
+        "viewport": {
+          "width": 750,
+          "height": 342
+        },
+        "header": {
+          "x": 0,
+          "y": 0,
+          "width": 750,
+          "height": 48
+        },
+        "controlBar": {
+          "x": 8,
+          "y": 238,
+          "width": 734,
+          "height": 64
+        },
+        "launchers": {
+          "layers": {
+            "x": 698,
+            "y": 52,
+            "width": 44,
+            "height": 44
+          },
+          "basemap": {
+            "x": 698,
+            "y": 98,
+            "width": 44,
+            "height": 44
+          },
+          "legend": {
+            "x": 698,
+            "y": 144,
+            "width": 44,
+            "height": 44
+          }
+        },
+        "map": {
+          "x": 0,
+          "y": 48,
+          "width": 750,
+          "height": 294
+        },
+        "sheet": null,
+        "chart": null,
+        "loading": false,
+        "panel": null,
+        "emptyText": null,
+        "anchor": {
+          "x": null,
+          "y": null
+        },
+        "camera": {
+          "center": null,
+          "zoom": null
+        },
+        "controls": [
+          {
+            "name": "GFS",
+            "tag": "button",
+            "box": {
+              "x": 21,
+              "y": 248,
+              "width": 52.890625,
+              "height": 44
+            },
+            "inSheet": false,
+            "inVerticalScroller": false,
+            "visibleY": null
+          },
+          {
+            "name": "IFS",
+            "tag": "button",
+            "box": {
+              "x": 75.890625,
+              "y": 248,
+              "width": 44.890625,
+              "height": 44
+            },
+            "inSheet": false,
+            "inVerticalScroller": false,
+            "visibleY": null
+          },
+          {
+            "name": "起报时次",
+            "tag": "select",
+            "box": {
+              "x": 132.78125,
+              "y": 248,
+              "width": 103,
+              "height": 44
+            },
+            "inSheet": false,
+            "inVerticalScroller": false,
+            "visibleY": null
+          },
+          {
+            "name": "上一个有效时刻",
+            "tag": "button",
+            "box": {
+              "x": 247.78125,
+              "y": 248,
+              "width": 44,
+              "height": 44
+            },
+            "inSheet": false,
+            "inVerticalScroller": false,
+            "visibleY": null
+          },
+          {
+            "name": "播放时间轴",
+            "tag": "button",
+            "box": {
+              "x": 295.78125,
+              "y": 248,
+              "width": 44,
+              "height": 44
+            },
+            "inSheet": false,
+            "inVerticalScroller": false,
+            "visibleY": null
+          },
+          {
+            "name": "下一个有效时刻",
+            "tag": "button",
+            "box": {
+              "x": 343.78125,
+              "y": 248,
+              "width": 44,
+              "height": 44
+            },
+            "inSheet": false,
+            "inVerticalScroller": false,
+            "visibleY": null
+          },
+          {
+            "name": "播放速度",
+            "tag": "select",
+            "box": {
+              "x": 395.78125,
+              "y": 248,
+              "width": 47,
+              "height": 44
+            },
+            "inSheet": false,
+            "inVerticalScroller": false,
+            "visibleY": null
+          },
+          {
+            "name": "有效时间滑块",
+            "tag": "input",
+            "box": {
+              "x": 454.78125,
+              "y": 249.5,
+              "width": 274.21875,
+              "height": 44
+            },
+            "inSheet": false,
+            "inVerticalScroller": false,
+            "visibleY": null
+          },
+          {
+            "name": "m11-launcher-layers",
+            "tag": "button",
+            "box": {
+              "x": 698,
+              "y": 52,
+              "width": 44,
+              "height": 44
+            },
+            "inSheet": false,
+            "inVerticalScroller": false,
+            "visibleY": null
+          },
+          {
+            "name": "m11-launcher-basemap",
+            "tag": "button",
+            "box": {
+              "x": 698,
+              "y": 98,
+              "width": 44,
+              "height": 44
+            },
+            "inSheet": false,
+            "inVerticalScroller": false,
+            "visibleY": null
+          },
+          {
+            "name": "m11-launcher-legend",
+            "tag": "button",
+            "box": {
+              "x": 698,
+              "y": 144,
+              "width": 44,
+              "height": 44
+            },
+            "inSheet": false,
+            "inVerticalScroller": false,
+            "visibleY": null
+          }
+        ]
+      },
+      "screenshot": "mobile-mobile-landscape-default.png",
+      "failures": []
+    },
+    "river": {
+      "url": "https://test.nwm.ac.cn/",
+      "settle_ms": 559,
+      "tap": {
+        "id": "basins_heihe_shud_shud_riv_000001",
+        "x": 398,
+        "y": 207
+      },
+      "attempts": [
+        {
+          "id": "basins_heihe_shud_shud_riv_000001",
+          "ok": true,
+          "code": null,
+          "message": null
+        }
+      ],
+      "curve_wait": {
+        "waited_ms": 255,
+        "limit_ms": 60000,
+        "timed_out": false
+      },
+      "geometry": {
+        "state": "river",
+        "viewport": {
+          "width": 750,
+          "height": 342
+        },
+        "header": {
+          "x": 0,
+          "y": 0,
+          "width": 750,
+          "height": 48
+        },
+        "controlBar": {
+          "x": 8,
+          "y": 238,
+          "width": 734,
+          "height": 64
+        },
+        "launchers": {
+          "layers": {
+            "x": 698,
+            "y": 52,
+            "width": 44,
+            "height": 44
+          },
+          "basemap": {
+            "x": 698,
+            "y": 98,
+            "width": 44,
+            "height": 44
+          },
+          "legend": {
+            "x": 698,
+            "y": 144,
+            "width": 44,
+            "height": 44
+          }
+        },
+        "map": {
+          "x": 0,
+          "y": 48,
+          "width": 750,
+          "height": 294
+        },
+        "sheet": {
+          "x": 375,
+          "y": 48,
+          "width": 375,
+          "height": 294
+        },
+        "chart": {
+          "x": 388,
+          "y": 209.5,
+          "width": 349,
+          "height": 123.5
+        },
+        "loading": false,
+        "panel": "m11-river-panel-chart",
+        "emptyText": null,
+        "anchor": {
+          "x": "187.5",
+          "y": "195"
+        },
+        "camera": {
+          "center": "100.912945,42.395859",
+          "zoom": "12.9127"
+        },
+        "controls": [
+          {
+            "name": "关闭面板",
+            "tag": "button",
+            "box": {
+              "x": 689,
+              "y": 62,
+              "width": 44,
+              "height": 44
+            },
+            "inSheet": true,
+            "inVerticalScroller": false,
+            "visibleY": null
+          },
+          {
+            "name": "m11-river-panel-cycle",
+            "tag": "button",
+            "box": {
+              "x": 422.5625,
+              "y": 130,
+              "width": 192,
+              "height": 44
+            },
+            "inSheet": true,
+            "inVerticalScroller": true,
+            "visibleY": {
+              "top": 130,
+              "bottom": 174
+            }
+          }
+        ]
+      },
+      "screenshot": "mobile-mobile-landscape-river.png",
+      "failures": []
+    },
+    "station": {
+      "url": "https://test.nwm.ac.cn/?metStations=1",
+      "settle_ms": 269,
+      "tap": {
+        "id": "dg-gfs-30fffff33ad6d8dd4591::cell:28107",
+        "x": 375,
+        "y": 195
+      },
+      "attempts": [
+        {
+          "id": "dg-gfs-30fffff33ad6d8dd4591::cell:28107",
+          "ok": true,
+          "code": null,
+          "message": null
+        }
+      ],
+      "curve_wait": {
+        "waited_ms": 89,
+        "limit_ms": 60000,
+        "timed_out": false
+      },
+      "geometry": {
+        "state": "station",
+        "viewport": {
+          "width": 750,
+          "height": 342
+        },
+        "header": {
+          "x": 0,
+          "y": 0,
+          "width": 750,
+          "height": 48
+        },
+        "controlBar": {
+          "x": 8,
+          "y": 238,
+          "width": 734,
+          "height": 64
+        },
+        "launchers": {
+          "layers": {
+            "x": 698,
+            "y": 52,
+            "width": 44,
+            "height": 44
+          },
+          "basemap": {
+            "x": 698,
+            "y": 98,
+            "width": 44,
+            "height": 44
+          },
+          "legend": {
+            "x": 698,
+            "y": 144,
+            "width": 44,
+            "height": 44
+          }
+        },
+        "map": {
+          "x": 0,
+          "y": 48,
+          "width": 750,
+          "height": 294
+        },
+        "sheet": {
+          "x": 375,
+          "y": 48,
+          "width": 375,
+          "height": 294
+        },
+        "chart": {
+          "x": 396,
+          "y": 279.5,
+          "width": 333,
+          "height": 120
+        },
+        "loading": false,
+        "panel": "m11-station-panel-chart",
+        "emptyText": null,
+        "anchor": {
+          "x": "187.5",
+          "y": "195"
+        },
+        "camera": {
+          "center": "98.508047,42.750000",
+          "zoom": "14.0000"
+        },
+        "controls": [
+          {
+            "name": "关闭弹窗",
+            "tag": "button",
+            "box": {
+              "x": 689,
+              "y": 62,
+              "width": 44,
+              "height": 44
+            },
+            "inSheet": true,
+            "inVerticalScroller": false,
+            "visibleY": null
+          },
+          {
+            "name": "m11-popup-issue-time",
+            "tag": "button",
+            "box": {
+              "x": 422.5625,
+              "y": 132,
+              "width": 164.734375,
+              "height": 44
+            },
+            "inSheet": true,
+            "inVerticalScroller": true,
+            "visibleY": {
+              "top": 132,
+              "bottom": 176
+            }
+          },
+          {
+            "name": "m11-station-variable-toggle-PRCP",
+            "tag": "button",
+            "box": {
+              "x": 471.25,
+              "y": 180,
+              "width": 52.5625,
+              "height": 44
+            },
+            "inSheet": true,
+            "inVerticalScroller": true,
+            "visibleY": {
+              "top": 180,
+              "bottom": 224
+            }
+          },
+          {
+            "name": "m11-station-variable-toggle-TEMP",
+            "tag": "button",
+            "box": {
+              "x": 529.8125,
+              "y": 180,
+              "width": 52.5625,
+              "height": 44
+            },
+            "inSheet": true,
+            "inVerticalScroller": true,
+            "visibleY": {
+              "top": 180,
+              "bottom": 224
+            }
+          },
+          {
+            "name": "m11-station-variable-toggle-RH",
+            "tag": "button",
+            "box": {
+              "x": 588.375,
+              "y": 180,
+              "width": 44,
+              "height": 44
+            },
+            "inSheet": true,
+            "inVerticalScroller": true,
+            "visibleY": {
+              "top": 180,
+              "bottom": 224
+            }
+          },
+          {
+            "name": "m11-station-variable-toggle-wind",
+            "tag": "button",
+            "box": {
+              "x": 638.375,
+              "y": 180,
+              "width": 44.625,
+              "height": 44
+            },
+            "inSheet": true,
+            "inVerticalScroller": true,
+            "visibleY": {
+              "top": 180,
+              "bottom": 224
+            }
+          },
+          {
+            "name": "m11-station-variable-toggle-Rn",
+            "tag": "button",
+            "box": {
+              "x": 689,
+              "y": 180,
+              "width": 44,
+              "height": 44
+            },
+            "inSheet": true,
+            "inVerticalScroller": true,
+            "visibleY": {
+              "top": 180,
+              "bottom": 224
+            }
+          }
+        ]
+      },
+      "screenshot": "mobile-mobile-landscape-station.png",
+      "failures": []
+    }
+  },
+  "non_get_requests": [],
+  "failures": [],
+  "pass": true
+}

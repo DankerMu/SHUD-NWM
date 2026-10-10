@@ -971,7 +971,7 @@
     - **pin 的取法与口径 (8) 相反**：`river-segments?limit=1` 清单取不到可用的 pin——清单的要素 id 是另一族（喂给详情接口回 404，或钩子回“要素不匹配”）。可用的是既有约定 `<basin_id>_shud_shud_riv_000001`；runbook 写成“不要从清单取”，并给出详情接口回 200 的确认命令。
     - 选流域有两个实测出来的前置（写进 runbook，7.2 选 pin 的起点）：流域要排在页面站点图层的 5000 站截断之前（`basins_qhh` 在截断之后，站点永远“未渲染”）；流域不能与别的流域的河段 / 站点坐标重合（`basins_byh` 上钩子回“定位点被遮挡”）。`basins_heihe` 两个预设全通过。
     - 报告多一个键 `non_get_requests`（页面发出的非 GET 请求，只作只读旁证，不参与判定）。移动头部按 `|h − 48| ≤ 0.5` 判；默认状态另判“控制条的盒在视口内”；窗没开成时不再跑几何判定（失败原因已记，几何与截图照常产出）。
-    - 没有被 live 或单测触发到的采集层路径：`--station-id` 指定站点、“被聚合”换候选、latest-product 失败时两状态记失败、曲线加载超时（只有候选筛选逻辑有单测）。
+    - 没有被 live 或单测触发到的采集层路径：“被聚合”换候选（只有候选筛选逻辑有单测）。`--station-id` 与 latest-product 失败两条已在 node-27 实跑（#2854 的评论），曲线加载超时见下一条。
     - **曲线等待改为等正向终态（评审第 1 轮 P1，口径 (5) 的“等 loading 提示消失”作废）**：河段面板加载的前 600ms 渲染的是无文字占位 `m11-river-panel-pending`，之后才是 `m11-river-panel-loading`，所以“等 loading 消失”在轻触后立即返回、序列稍慢就误报。现在等到窗口主体里没有任何“仍在加载”标记**且**图表区或空态之一已出现，上限 `--timeout-ms`。仍在加载：河段 `-pending` / `-loading`；气象代站 `m11-station-popup-loading` / `-no-product` / `m11-station-panel-refreshing`。终态：`m11-river-panel-chart` 或 `m11-river-panel-empty`；`m11-station-panel-chart` 或 `m11-station-popup-empty`。等待结果记在 `states.<state>.curve_wait = { waited_ms, limit_ms, timed_out }`，几何另带 `panel` 与 `emptyText`（对同一 schema 版本的增量——7.2 的 receipt 尚未产出，无既有消费者）。失败信息：等满上限才报 `curve still loading after <limit> ms`；加载结束却没有图表区报 `no curve data`（带看到的终态与空态原文）。曲线加载超时与空态两条路径已由带延迟 / 503 的代理实跑覆盖；`--timeout-ms` 同时限制站点图层就绪等待，调得过小会先红在更早一步。
     - 入口守卫：模块自身 URL 不是真实文件（stdin / eval 方式执行）时判为入口，`node --input-type=module - < 脚本` 与改动前一样 exit 2；被别的入口文件 import 仍无副作用。单测共 59 条。
   - Sibling surfaces（逐个核对）：既有 receipt 的键集合（顶层 10 个键、`scenes` 四个场景、每场景 7 个键、`default` 另 2 个、`layout` 10 个键）；脚本头部的用法注释（要补预设用法）；引用该脚本的文档（`docs/runbooks/canonical-precip-mirror-backfill.md` 的命令行示例、`docs/runbooks/receipts/2026-09-16-display-v2.md`、`openspec/project-profile.md`）——默认用法不变，所以它们不需要改，确认即可；本 Epic 编排者每个 PR 都在用的桌面 oracle 调用方式（`--base-url … --out-dir … --playwright-root …`）必须原样可用；治理门（`uv run python scripts/governance/audit_repo_entropy.py --mode hard-gate --format json`）对新 `.mjs` / `.md` 的扫描。
@@ -985,11 +985,13 @@
   - Review focus：(1) 默认路径逐项不变——读 diff 确认 `main()` 默认分支的访问序列、检查与报告构造没有被重排或加键，测试门只在预设路径注入；(2) 入口守卫在 node-27 的调用方式（绝对路径、`node scripts/…`）下为真，被 import 时为假；(3) 预设路径不覆盖桌面输出文件；(4) 某状态失败不吞掉其余状态、退出码正确；(5) 钩子 reject 的纯对象被正确读取；(6) 移动判定不含文档滚动宽度；(7) 只读——没有非 GET 请求；(8) runbook 的命令能照抄运行；(9) 单测是对导出的纯函数断言，不是复制一份逻辑再测。
   - Evidence floor：`node --check scripts/node27_display_v2_browser_evidence.mjs`；`node --test scripts/__tests__/node27_display_v2_browser_evidence.test.mjs` 全绿（PR 给出用例数）；变异（对纯函数，证明单测有判别力）：移动头部期望改成 84 -> 红；图表下限两档对调 -> 红；锚点比较取反 -> 红；形态判据把 `< 768` 改成 `<= 768` -> 红；去掉入口守卫 -> import 用例红（或挂起，如实报告）；守卫改成恒假 -> 入口执行用例红。`uv run python scripts/governance/audit_repo_entropy.py --mode hard-gate --format json` 无新增命中；runbook 过 markdownlint（用 CI 同一份配置）；`openspec validate mobile-responsive-display --strict --no-interactive`。实现者本地可对公网只读入口做冒烟（不带预设一次、`mobile-portrait` 一次；pin 取自 runbook 既有约定），结果如实写进报告（本地冒烟不替代 node-27）。合并前由编排者在 node-27 出 live 证据：不带预设的键路径集合对比（见 Legacy compatibility）；`mobile-portrait` 与 `mobile-landscape` 各运行一次，三张截图与几何 JSON 都产出（报告是否通过如实记录——取决于被测入口部署到了哪个 commit，通过与否归 7.2）；另对本 Epic 最新 master 的生产构建（node-27 上的验证 checkout）各运行一次，记录是否通过。
 
-- [ ] 7.2 node-27 移动实拍 receipt：全部实现 task 部署到 node-27 后，按 `docs/runbooks/display-mobile-evidence.md` 以 `mobile-portrait` 与 `mobile-landscape` 两个预设对 live 展示入口运行 7.1 的脚本，receipt 存入 `docs/runbooks/receipts/`。
+- [x] 7.2 node-27 移动实拍 receipt：全部实现 task 部署到 node-27 后，按 `docs/runbooks/display-mobile-evidence.md` 以 `mobile-portrait` 与 `mobile-landscape` 两个预设对 live 展示入口运行 7.1 的脚本，receipt 存入 `docs/runbooks/receipts/`。
 
   Depends on: 2.3, 2.4, 3.4, 3.5, 3.6, 3.8, 4.3, 4.6, 4.8, 4.9, 4.10, 5.1, 6.1, 6.2, 7.1
 
   Verify：receipt 含两条完整命令行、部署 commit、六张截图与两份几何 JSON 的路径；两份报告均为通过，河段与气象代站图表区分别 ≥ 160px（竖屏）与 ≥ 120px（矮视口横屏），两种窗打开后选中锚点都在未被抽屉遮住的地图区内。
+
+  完成记录（#2817）：2026-10-10 把 master `9c2724a18` 部署到 node-27 活动 checkout（ff-only + 前端重建，API 未重启），两个预设对 `https://test.nwm.ac.cn` 均 exit 0；receipt 在 `docs/runbooks/receipts/2026-10-10-display-mobile.md`，两份几何 JSON 入库，截图按仓库惯例不入库、以 node-27 路径与 sha256 标识。
 
   **Suggested fixture level:** none - 运维证据，无代码变化。
 
