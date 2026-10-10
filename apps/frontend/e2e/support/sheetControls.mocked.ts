@@ -172,6 +172,67 @@ export async function measureControl(locator: Locator, name: string): Promise<Co
   return measured[0]
 }
 
+export interface IssueTimeTriggerMeasure {
+  box: Box
+  fontSizePx: number
+  title: string | null
+  /** 触发器自身的内容盒与滚动盒：`scroll* > client*` 即文字出框。 */
+  clientWidth: number
+  clientHeight: number
+  scrollWidth: number
+  scrollHeight: number
+  /** 值元素：触发器的直接子 `span`（箭头是 `svg`）。 */
+  value: { text: string; box: Box; clientWidth: number; scrollWidth: number; textOverflow: string }
+  /** 值文本的日期时间部分（`MM-DD HH:MM UTC`）加省略号，用值元素自己的字体单行排出来的宽度。 */
+  dateTimeWithEllipsisWidth: number
+}
+
+/**
+ * 量起报时次触发器里的文字是否出框、是否被省略。日期时间部分的宽度用一个离屏量具量：
+ * 复制值元素的计算字体，不钉死像素（实际字体随平台与 #2861 变）。
+ */
+export async function measureIssueTimeTrigger(trigger: Locator): Promise<IssueTimeTriggerMeasure> {
+  return trigger.evaluate((element) => {
+    const value = element.querySelector<HTMLElement>(':scope > span')
+    if (!value) throw new Error('measureIssueTimeTrigger: the trigger has no direct `span` child holding the value')
+    const box = (target: Element) => {
+      const rect = target.getBoundingClientRect()
+      return { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
+    }
+    const valueStyle = getComputedStyle(value)
+    const text = (value.textContent ?? '').trim()
+    const probe = document.createElement('span')
+    probe.textContent = `${text.split(' · ')[0]}\u2026`
+    Object.assign(probe.style, {
+      position: 'absolute',
+      visibility: 'hidden',
+      whiteSpace: 'nowrap',
+      fontFamily: valueStyle.fontFamily,
+      fontSize: valueStyle.fontSize,
+      fontWeight: valueStyle.fontWeight,
+      fontStyle: valueStyle.fontStyle,
+      fontStretch: valueStyle.fontStretch,
+      fontVariantNumeric: valueStyle.fontVariantNumeric,
+      fontFeatureSettings: valueStyle.fontFeatureSettings,
+      letterSpacing: valueStyle.letterSpacing,
+    })
+    document.body.appendChild(probe)
+    const dateTimeWithEllipsisWidth = probe.getBoundingClientRect().width
+    probe.remove()
+    return {
+      box: box(element),
+      fontSizePx: Number.parseFloat(getComputedStyle(element).fontSize),
+      title: element.getAttribute('title'),
+      clientWidth: element.clientWidth,
+      clientHeight: element.clientHeight,
+      scrollWidth: element.scrollWidth,
+      scrollHeight: element.scrollHeight,
+      value: { text, box: box(value), clientWidth: value.clientWidth, scrollWidth: value.scrollWidth, textOverflow: valueStyle.textOverflow },
+      dateTimeWithEllipsisWidth,
+    }
+  })
+}
+
 /** 宽或高不到触控下限的控件清单；空 = 全部达标。 */
 export function belowTouchTarget(controls: ControlMeasure[]): string[] {
   return controls

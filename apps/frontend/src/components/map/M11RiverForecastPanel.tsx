@@ -298,7 +298,13 @@ export function M11RiverForecastPanel({
       header={header}
     >
       {issueTimes.length > 0 ? (
-        <div className="flex shrink-0 items-center gap-2 border-b border-white/10 px-4 py-2 text-[11px] text-slate-400 mobile:py-1 mobile-landscape:py-0.5" data-testid="m11-river-panel-cycle-bar">
+        // 定高单行、溢出裁剪的换行容器：放不下时说明文字整个折到第二行被裁掉（行距 ≥ 下内边距，落在条外），
+        // 触发器不被它挤窄，条高恒为触发器高 + 上下内边距 + 下边线（`h-*` 是内容盒高，与触发器的高度类同值；
+        // `box-content` 带 `!` 是因为 index.css 未分层的 `* { box-sizing: border-box }` 压过普通 utility）。
+        <div
+          className="box-content! flex h-7 shrink-0 flex-wrap content-start items-center gap-x-2 gap-y-3 overflow-hidden border-b border-white/10 px-4 py-2 text-[11px] text-slate-400 mobile:h-11 mobile:py-1 mobile-landscape:py-0.5"
+          data-testid="m11-river-panel-cycle-bar"
+        >
           <span className="shrink-0 uppercase tracking-wide">起报</span>
           <M11IssueTimeSelect
             testId="m11-river-panel-cycle"
@@ -307,7 +313,7 @@ export function M11RiverForecastPanel({
             onIssueTimeChange={(cycle) => setSelection({ key: identityKey, cycle })}
             disabled={loading}
           />
-          <span className="ml-auto text-[10px] text-slate-500">GFS + IFS 同步切换</span>
+          <span className="ml-auto whitespace-nowrap text-[10px] text-slate-500">GFS + IFS 同步切换</span>
         </div>
       ) : null}
 

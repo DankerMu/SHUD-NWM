@@ -1,6 +1,12 @@
 import { expect, test, type Page } from '@playwright/test'
 
-import { CURVE_WINDOWS, CURVE_WINDOW_KINDS, installMultipleIssueTimes } from './support/curveSheet.mocked'
+import {
+  CURVE_WINDOWS,
+  CURVE_WINDOW_KINDS,
+  RETENTION_UNAVAILABLE_SUFFIX,
+  installMultipleIssueTimes,
+  installRetainedIssueTime,
+} from './support/curveSheet.mocked'
 import { boxOf } from './support/overlayLaunchers.mocked'
 import {
   ISSUE_TIME_BAR,
@@ -11,6 +17,7 @@ import {
   STATION_VARIABLE_SELECTOR,
   measureControl,
   measureControls,
+  measureIssueTimeTrigger,
   openSheetWithControls,
   sheetControlParts,
 } from './support/sheetControls.mocked'
@@ -25,6 +32,8 @@ import { isMobileForm, requireViewport, type ViewportSize } from './support/view
  * 不写字面值，改为钉“没有被撑到触控下限”（切换项计算 `min-width` 为 `auto`、RH / Rn 宽 < 44）。
  */
 const DESKTOP: ViewportSize = { width: 1280, height: 900 }
+/** 「保留时次」用例的视口（openspec issue-time-trigger-truncate task 1.4）。 */
+const DESKTOP_1280x800: ViewportSize = { width: 1280, height: 800 }
 const TOLERANCE_PX = 0.01
 
 const MASTER_1280x900 = {
@@ -100,5 +109,31 @@ test.describe('M11 曲线窗控件桌面尺寸不变', () => {
     for (const toggle of toggles) expectNear(toggle.box.y, issueTimeBar.y, `切换项「${toggle.name}」顶边`)
 
     expect(await frame.getByTestId(STATION_LOADED).evaluate((element) => getComputedStyle(element).paddingTop)).toBe(MASTER_1280x900.stationLoadedPaddingTop)
+  })
+
+  // openspec issue-time-trigger-truncate（#2870）的桌面形态：长标签被截断而不是折成两行越出触发器。
+  test('(j) 1280x800 河段窗：保留时次的长标签不出框，触发器高仍为 28，title 为完整标签', async ({ page }) => {
+    await openSheetWithControls(page, DESKTOP_1280x800, 'river', installRetainedIssueTime)
+    expect(isMobileForm(requireViewport(page))).toBe(false)
+    const parts = sheetControlParts(page, 'river')
+
+    const latest = (await parts.trigger.innerText()).trim()
+    await parts.trigger.click()
+    await expect(parts.options).toHaveCount(2)
+    const earlier = (await parts.options.allInnerTexts()).map((text) => text.trim()).find((text) => text !== latest)
+    expect(earlier, `应有一个不同于默认项「${latest}」的时次`).toMatch(/^\d{2}-\d{2} \d{2}:\d{2} UTC$/)
+    await parts.options.filter({ hasText: earlier! }).click()
+    await expect(parts.listbox).toHaveCount(0)
+    // 选中保留时次后窗进入空态、没有图表 canvas：同步点是触发器文本里的后缀。
+    await expect(parts.trigger).toContainText(RETENTION_UNAVAILABLE_SUFFIX.trim())
+    const fullLabel = `${earlier}${RETENTION_UNAVAILABLE_SUFFIX}`
+
+    const trigger = await measureIssueTimeTrigger(parts.trigger)
+    console.log('sheet-controls-desktop (j)', JSON.stringify(trigger))
+    expect(trigger.value.text, '触发器显示的是保留时次的长标签').toBe(fullLabel)
+    expectNear(trigger.box.height, MASTER_1280x900.triggerHeight, '触发器高')
+    expect(trigger.scrollHeight, `触发器 scrollHeight ${trigger.scrollHeight} 应 ≤ clientHeight ${trigger.clientHeight}`).toBeLessThanOrEqual(trigger.clientHeight)
+    expect(trigger.scrollWidth, `触发器 scrollWidth ${trigger.scrollWidth} 应 ≤ clientWidth ${trigger.clientWidth}`).toBeLessThanOrEqual(trigger.clientWidth)
+    expect(trigger.title, '触发器 title').toBe(fullLabel)
   })
 })
