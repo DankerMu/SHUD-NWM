@@ -509,6 +509,7 @@ describe('M11StationForcingPopup', () => {
 
     render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)
     await screen.findByTestId('m11-station-variable-PRCP-chart')
+    expect(screen.getByTestId('m11-popup-issue-time')).toHaveAttribute('title', formatIssueTime(DEFAULT_CYCLE)) // 普通时次：title 即普通标签
 
     await user.click(screen.getByTestId('m11-popup-issue-time'))
     await user.click(screen.getByRole('option', { name: formatIssueTime(RETAINED_OUT_CYCLE) }))
@@ -516,6 +517,8 @@ describe('M11StationForcingPopup', () => {
     const empty = await screen.findByTestId('m11-station-popup-empty')
     expect(empty).toHaveTextContent(/起报.*已不可用/)
     expect(screen.getByTestId('m11-popup-issue-time')).toHaveTextContent(formatIssueTime(RETAINED_OUT_CYCLE))
+    // 触发器里的长标签会被截断，完整标签留在 title 上。
+    expect(screen.getByTestId('m11-popup-issue-time')).toHaveAttribute('title', `${formatIssueTime(RETAINED_OUT_CYCLE)} · 磁盘保留不可用`)
 
     await user.click(screen.getByTestId('m11-popup-issue-time'))
     const staleOption = screen.getByRole('option', { name: /05-20 00:00 UTC.*磁盘保留不可用/ })

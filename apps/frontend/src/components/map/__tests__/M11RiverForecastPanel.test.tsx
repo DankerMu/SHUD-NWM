@@ -402,6 +402,7 @@ describe('M11RiverForecastPanel', () => {
     render(<M11RiverForecastPanel basinId="basins_qhh" segment={segment} />)
 
     await screen.findByTestId('m11-river-panel-chart') // 初次（最新）正常渲染
+    expect(screen.getByTestId('m11-river-panel-cycle')).toHaveAttribute('title', formatIssueTime(latestCycle)) // 普通时次：title 即普通标签
     await openIssueTimeSelect(user, 'm11-river-panel-cycle')
     await user.click(screen.getByRole('option', { name: formatIssueTime(staleCycle) })) // 选旧时次；后端仍回最新
 
@@ -410,6 +411,8 @@ describe('M11RiverForecastPanel', () => {
     expect(empty.textContent).toMatch(/起报.*已不可用/)
     expect(screen.queryByTestId('m11-river-panel-chart')).not.toBeInTheDocument()
     expect(screen.getByTestId('m11-river-panel-cycle')).toHaveTextContent(formatIssueTime(staleCycle))
+    // 触发器里的长标签会被截断，完整标签留在 title 上。
+    expect(screen.getByTestId('m11-river-panel-cycle')).toHaveAttribute('title', `${formatIssueTime(staleCycle)} · 磁盘保留不可用`)
 
     await openIssueTimeSelect(user, 'm11-river-panel-cycle')
     const staleOption = screen.getByRole('option', { name: /05-20 12:00 UTC.*磁盘保留不可用/ })

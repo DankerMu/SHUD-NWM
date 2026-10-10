@@ -124,6 +124,7 @@ export function M11IssueTimeSelect({
     retainedIssueTime ? [retainedIssueTime, ...normalizedUnavailableIssueTimes] : normalizedUnavailableIssueTimes,
   )
   const selectedValue = normalizedIssueTime && visibleIssueTimes.includes(normalizedIssueTime) ? normalizedIssueTime : normalizedIssueTimes[0]
+  const labelOf = (time: string) => `${formatIssueTime(time)}${unavailableSet.has(time) ? ' · 磁盘保留不可用' : ''}`
 
   return (
     <Select
@@ -137,8 +138,11 @@ export function M11IssueTimeSelect({
       <SelectTrigger
         aria-label={ariaLabel}
         data-testid={testId}
+        // 触发器定高、限宽：值单行，放不下时省略号截断（长标签只出现在保留时次上），完整标签留在 title。
+        // 截断类经子选择器下发——Radix 的 SelectValue 不接收 className；`>span` 只命中值，箭头是 svg。
+        title={labelOf(selectedValue)}
         className={cn(
-          'h-7 min-w-0 max-w-[12rem] cursor-pointer border-white/15 bg-white/10 px-2 py-0 font-mono text-[11px] text-slate-100 shadow-none ring-offset-slate-950 [color-scheme:dark] hover:border-cyan-400/50 focus:border-cyan-400 focus:ring-cyan-400 disabled:cursor-not-allowed disabled:opacity-50 mobile:h-11 mobile:text-base!',
+          'h-7 min-w-0 max-w-[12rem] cursor-pointer border-white/15 bg-white/10 px-2 py-0 font-mono text-[11px] text-slate-100 shadow-none ring-offset-slate-950 [color-scheme:dark] hover:border-cyan-400/50 focus:border-cyan-400 focus:ring-cyan-400 disabled:cursor-not-allowed disabled:opacity-50 mobile:h-11 mobile:text-base! [&>span]:min-w-0 [&>span]:truncate [&>svg]:shrink-0',
           triggerClassName,
         )}
       >
@@ -150,7 +154,6 @@ export function M11IssueTimeSelect({
       >
         {visibleIssueTimes.map((time) => {
           const unavailable = unavailableSet.has(time)
-          const label = `${formatIssueTime(time)}${unavailable ? ' · 磁盘保留不可用' : ''}`
           return (
             <SelectItem
               key={time}
@@ -162,7 +165,7 @@ export function M11IssueTimeSelect({
                 unavailable && 'text-amber-100',
               )}
             >
-              {label}
+              {labelOf(time)}
             </SelectItem>
           )
         })}

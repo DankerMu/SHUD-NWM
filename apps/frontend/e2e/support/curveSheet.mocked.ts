@@ -12,7 +12,7 @@ import { isShortLandscape, requireViewport, type ViewportSize } from './viewport
  * 曲线窗抽屉形态两个 spec（openspec mobile-responsive-display task 4.2，design.md D9）共用的
  * mock 变体与量具。文件名带 `mocked` token：只被 mocked 车道的 spec 引用。
  *
- * 三个 mock 变体都是在 `installRiverWindowMocks` **之后**注册的更窄 `page.route`（后注册者先匹配），
+ * 四个 mock 变体都是在 `installRiverWindowMocks` **之后**注册的更窄 `page.route`（后注册者先匹配），
  * 须在 `page.goto` 之前调用；基线 mock 与两个开窗助手原样复用。
  */
 type Schemas = components['schemas']
@@ -163,6 +163,69 @@ export async function installMultipleIssueTimes(page: Page): Promise<IssueTimeMo
         available_issue_times: [MOCK_CYCLE, MOCK_EARLIER_CYCLE],
         source_id: source,
         cycle_time: requested ?? MOCK_CYCLE,
+        run_id: run.run_id,
+        forcing_version_id: run.forcing_version_id,
+        station_count: 1,
+        expected_station_count: 1,
+        segment_count: 1,
+        expected_segment_count: 1,
+        status: 'ready',
+        run_status: 'published',
+        valid_time_start: run.start_time,
+        valid_time_end: run.end_time,
+        river_valid_time_start: run.start_time,
+        river_valid_time_end: run.end_time,
+        forcing_valid_time_start: run.start_time,
+        forcing_valid_time_end: run.end_time,
+        available_horizon_hours: 24,
+        expected_horizon_hours: 24,
+        shorter_horizon: false,
+        availability: { ready: true, unavailable_reasons: [], quality_flags: [], quality_notes: [] },
+        quality: {
+          station_sample_count: 0,
+          river_sample_count: 0,
+          required_station_variables: ['PRCP', 'TEMP', 'RH', 'wind', 'Rn'],
+          station_variable_coverage: [],
+          candidate_limit: 0,
+          search_limit: 0,
+          context_limit: 0,
+          query_indexes: [],
+        },
+      } satisfies Schemas['QhhLatestProduct']
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'ok', data }) })
+    },
+  )
+  return log
+}
+
+/** 「保留时次」状态下触发器与选项标签带的后缀（生产文案）。 */
+export const RETENTION_UNAVAILABLE_SUFFIX = ' · 磁盘保留不可用'
+
+/**
+ * 变体四：选中的更早时次已被保留策略清掉。不带 `cycle_time` 的请求列出两个时次；带 `cycle_time` 的请求
+ * 回退到最新一轮——`cycle_time` 为最新时次、`available_issue_times` 只剩最新时次（做法同
+ * `M11RiverForecastPanel.test.tsx` 的桩）。在下拉里选中更早时次后，窗进入空态，触发器显示带
+ * 「磁盘保留不可用」后缀的保留时次。与变体三是两个独立函数：变体三的“原样回显”语义不变。
+ */
+export async function installRetainedIssueTime(page: Page): Promise<IssueTimeMockLog> {
+  const log: IssueTimeMockLog = { requestedCycles: [] }
+  await page.route(
+    (url) => url.pathname === '/api/v1/mvp/qhh/latest-product',
+    (route) => {
+      const query = new URL(route.request().url()).searchParams
+      const source = sourceParam(query.get('source'))
+      if (!source) return route.fallback()
+      const requested = query.get('cycle_time')
+      log.requestedCycles.push(requested)
+      const run = mockRuns[source]
+      const data = {
+        basin_id: run.basin_id,
+        model_id: mockModel.model_id,
+        basin_version_id: run.basin_version_id,
+        river_network_version_id: run.river_network_version_id,
+        available_issue_times: requested ? [MOCK_CYCLE] : [MOCK_CYCLE, MOCK_EARLIER_CYCLE],
+        source_id: source,
+        cycle_time: MOCK_CYCLE,
         run_id: run.run_id,
         forcing_version_id: run.forcing_version_id,
         station_count: 1,
