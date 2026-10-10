@@ -16,13 +16,13 @@ export interface M11OverlayExpansionControls {
   /** 桌面形态恒为 `null`：桌面渲染路径不读展开值。 */
   expanded: M11OverlayExpansion
   toggle: (panel: M11OverlayPanel) => void
-  /** 复位入口：点地图、`Escape`、形态切换都走这里；曲线抽屉打开时的复位（4.x）也接它。 */
+  /** 交给页面的复位入口：地图点击与地图外壳让位（曲线抽屉打开）调它。`Escape` 与形态切换在 hook 内直接复位，不经它。 */
   collapse: () => void
 }
 
 /**
- * 展开值的唯一持有者。写入点恰四个：`toggle`（启动器）、`collapse`（地图点击）、
- * `Escape`（仅移动形态且有展开值时挂 document 级监听）、形态切换（`mobile` 翻转即复位）。
+ * 展开值的唯一持有者。写入点恰四个：`toggle`（启动器）、`collapse`（页面在地图点击与地图外壳让位时调用）、
+ * `Escape`（仅移动形态且有展开值时挂 document 级监听）、形态切换（`mobile` 翻转即复位）；后两个直接写，不经 `collapse`。
  */
 export function useM11OverlayExpansion(mobile: boolean): M11OverlayExpansionControls {
   const [value, setValue] = useState<M11OverlayExpansion>(null)

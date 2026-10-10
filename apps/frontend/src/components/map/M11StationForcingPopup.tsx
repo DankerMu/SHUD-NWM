@@ -337,7 +337,7 @@ function StationForcingBody({
                 ))}
               </div>
             </div>
-            <StationChartArea variable={selectedVariable} unit={chartResult.unitLabel} series={chartResult.series} />
+            <StationChartArea unit={chartResult.unitLabel} series={chartResult.series} />
           </div>
           {failedReasons.concat(chartResult.reasons).length > 0 ? (
             <p className="shrink-0 px-1 pt-1 text-[10px] text-amber-300/80" data-testid="m11-station-popup-partial">
@@ -433,11 +433,9 @@ const FULL_ZOOM_WINDOW: ChartZoomWindow = { start: 0, end: 100 }
  * 本组件与图表实例一起卸载，切回来从初值开始。
  */
 function StationChartArea({
-  variable,
   unit,
   series,
 }: {
-  variable: HydroMetStationSeriesVariable
   unit: string
   series: ValidVariableSeries[]
 }) {
@@ -456,7 +454,6 @@ function StationChartArea({
       {/* 绝对定位：图表库写在自身根节点上的像素高度不参与图表区的固有高度。 */}
       <div className="absolute inset-0">
         <StationVariableEcharts
-          variable={variable}
           unit={unit}
           series={series}
           mobile={mobile}
@@ -477,14 +474,12 @@ const INSIDE_ZOOM = { type: 'inside', xAxisIndex: 0, filterMode: 'none' }
 const TOUCH_ZOOM = { ...INSIDE_ZOOM, preventDefaultMouseMove: false }
 
 function StationVariableEcharts({
-  variable,
   unit,
   series,
   mobile,
   onZoomWindowChange,
   onTooltipVisibleChange,
 }: {
-  variable: HydroMetStationSeriesVariable
   unit: string
   series: ValidVariableSeries[]
   mobile: boolean

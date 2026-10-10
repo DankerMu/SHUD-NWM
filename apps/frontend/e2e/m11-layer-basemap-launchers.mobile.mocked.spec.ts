@@ -362,7 +362,7 @@ test.describe('M11 图层与底图启动器移动形态', () => {
     expect.soft(map.x + map.width - (opsBox.x + opsBox.width), '运维入口右边距').toBeGreaterThanOrEqual(0)
     expect.soft(opsBox.x, '运维入口左边不得伸出地图区').toBeGreaterThanOrEqual(map.x)
 
-    // 运维入口比启动器宽，会把面板的锚点（列左缘）往左推：面板仍须整个留在地图区内。
+    // 运维入口与启动器同宽（44×44），列多出第四项但不变宽：每个面板展开后仍须整个留在地图区内、不与运维入口相交。
     for (const name of OVERLAY_PANELS) {
       const title = OVERLAY_PANEL_PARTS[name].title
       await expand(page, name)
