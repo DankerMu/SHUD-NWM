@@ -1,7 +1,6 @@
 import type { Page } from '@playwright/test'
 
-import type { components } from '../../src/api/types'
-import { MOCK_PRECIP_LEGEND } from './legendLauncher.mocked'
+import { MOCK_LAYERS } from './layerCatalog.mocked'
 
 /**
  * 运维入口 spec（openspec mobile-responsive-display task 3.5，design.md D8）的 API mock。
@@ -14,36 +13,6 @@ import { MOCK_PRECIP_LEGEND } from './legendLauncher.mocked'
  * - 图层目录 = 径流 + 降水两条（同图例启动器 spec 的目录），图层面板与图例面板的内容高度因此与
  *   既有移动 spec 相同，量到的滚动数字可以直接对照。
  */
-type Schemas = components['schemas']
-
-const MOCK_LAYERS = [
-  {
-    layer_id: 'discharge',
-    layer_name: 'Discharge',
-    layer_type: 'hydrology',
-    variables: ['q_down'],
-    metadata: { layer_id: 'discharge', tile_format: 'mvt', valid_times: [], fallback_available: false, release_blocking: false },
-  },
-  {
-    layer_id: 'precip',
-    layer_name: 'Past 24h precipitation',
-    layer_type: 'meteorology',
-    variables: ['prcp_rate_or_amount'],
-    metadata: {
-      layer_id: 'precip',
-      tile_format: 'png',
-      image_url_template: '/api/v1/precip/{source}/{cycle}/{valid_time}.png',
-      index_url_template: '/api/v1/precip/{source}/{cycle}/index',
-      bounds: [63, 8, 145, 64],
-      legend: MOCK_PRECIP_LEGEND,
-      window_hours: 24,
-      unit: 'mm/24h',
-      palette_version: 'v1',
-      fallback_available: false,
-      release_blocking: false,
-    },
-  },
-] satisfies Schemas['Layer'][]
 
 const MOCK_RUNTIME_CONFIG = {
   service_role: 'compute_control',

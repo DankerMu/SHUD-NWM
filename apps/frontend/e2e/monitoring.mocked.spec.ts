@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test'
 
+import { MOCK_MINIMAL_DISCHARGE_LAYER } from './support/layerCatalog.mocked'
 import {
   controlledCycleTime,
   controlledFailedJobId,
@@ -362,15 +363,7 @@ async function mockOverviewApi(page: Page) {
         contentType: 'application/json',
         body: JSON.stringify({
           status: 'ok',
-          data: [
-            {
-              layer_id: 'discharge',
-              layer_name: 'Discharge',
-              layer_type: 'hydrology',
-              variables: ['q_down'],
-              metadata: { layer_id: 'discharge', valid_times: [] },
-            },
-          ],
+          data: [MOCK_MINIMAL_DISCHARGE_LAYER],
         }),
       })
     }

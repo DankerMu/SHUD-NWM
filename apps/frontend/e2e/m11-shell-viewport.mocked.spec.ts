@@ -1,5 +1,7 @@
 import { expect, test, type Locator, type Page } from '@playwright/test'
 
+import { mockMinimalDischargeCatalogApi } from './support/layerCatalog.mocked'
+
 /**
  * 外壳动态视口（openspec mobile-responsive-display task 2.2 / design.md D3）。
  * 桌面 project 下用 setViewportSize 走各视口，核对外壳根节点的两个事实：
@@ -23,28 +25,7 @@ function shellRoot(page: Page): Locator {
 
 test.describe('M11 外壳动态视口', () => {
   test.beforeEach(async ({ page }) => {
-    await page.route('**/api/v1/**', async (route) => {
-      const url = new URL(route.request().url())
-      if (url.pathname === '/api/v1/layers') {
-        return route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({
-            status: 'ok',
-            data: [
-              {
-                layer_id: 'discharge',
-                layer_name: 'Discharge',
-                layer_type: 'hydrology',
-                variables: ['q_down'],
-                metadata: { layer_id: 'discharge', valid_times: [] },
-              },
-            ],
-          }),
-        })
-      }
-      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'ok', data: [] }) })
-    })
+    await mockMinimalDischargeCatalogApi(page)
   })
 
   test('390×664 根节点的高度声明是 100dvh（读匹配的样式规则）', async ({ page }) => {

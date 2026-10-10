@@ -1,55 +1,15 @@
 import type { Page } from '@playwright/test'
 
-import type { components } from '../../src/api/types'
+import { MOCK_LAYERS, MOCK_PRECIP_LEGEND } from './layerCatalog.mocked'
 
 /**
  * 图例启动器 spec（openspec mobile-responsive-display task 3.2）的 mock 与共用量具。
  * 文件名带 `mocked` token：这里有覆盖全部 api v1 路径的宽路由。
  *
- * 图层目录 = 径流 + 降水两条。降水条目只为让图例出现六级降水段（`precip` 的 URL 缺省即开启），
+ * 图层目录 = 径流 + 降水两条（`layerCatalog.mocked` 的 `MOCK_LAYERS`）。降水条目只为让图例出现六级降水段（`precip` 的 URL 缺省即开启），
  * 不 mock 降水 index / PNG：栅格不画，页面可能因此挂一条降水提示，找地图空白点时须避开它。
  */
-type Schemas = components['schemas']
-
-/** 六级降水色阶（mm/24h），形状同 `/api/v1/layers` 里 `precip` 条目的 `metadata.legend`。 */
-export const MOCK_PRECIP_LEGEND = [
-  { min: 0.1, max: 10, color: '#A6F28F', label: '0.1-10' },
-  { min: 10, max: 25, color: '#3DBA3D', label: '10-25' },
-  { min: 25, max: 50, color: '#61B8FF', label: '25-50' },
-  { min: 50, max: 100, color: '#0000FF', label: '50-100' },
-  { min: 100, max: 250, color: '#FA00FA', label: '100-250' },
-  { min: 250, max: null, color: '#800040', label: '≥250' },
-] satisfies Schemas['PrecipLegendEntry'][]
-
-const MOCK_LAYERS = [
-  {
-    layer_id: 'discharge',
-    layer_name: 'Discharge',
-    layer_type: 'hydrology',
-    variables: ['q_down'],
-    // 没有瓦片模板与有效时刻：径流叠加层不画，图例走前端的径流分级合同。
-    metadata: { layer_id: 'discharge', tile_format: 'mvt', valid_times: [], fallback_available: false, release_blocking: false },
-  },
-  {
-    layer_id: 'precip',
-    layer_name: 'Past 24h precipitation',
-    layer_type: 'meteorology',
-    variables: ['prcp_rate_or_amount'],
-    metadata: {
-      layer_id: 'precip',
-      tile_format: 'png',
-      image_url_template: '/api/v1/precip/{source}/{cycle}/{valid_time}.png',
-      index_url_template: '/api/v1/precip/{source}/{cycle}/index',
-      bounds: [63, 8, 145, 64],
-      legend: MOCK_PRECIP_LEGEND,
-      window_hours: 24,
-      unit: 'mm/24h',
-      palette_version: 'v1',
-      fallback_available: false,
-      release_blocking: false,
-    },
-  },
-] satisfies Schemas['Layer'][]
+export { MOCK_PRECIP_LEGEND }
 
 export interface LegendLauncherMockLog {
   /** 页面发出的 api v1 请求数（含瓦片）；零请求窗口的判据。 */

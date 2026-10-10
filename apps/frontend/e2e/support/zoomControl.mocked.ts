@@ -2,7 +2,7 @@ import { expect, type Page } from '@playwright/test'
 
 /**
  * 缩放 / 指北控件两个 spec（task 3.1）共用的 mock 与就绪判据。
- * 文件名带 `mocked` token：这里有覆盖全部 api v1 路径的宽路由。
+ * 文件名带 `mocked` token：转导出 `layerCatalog.mocked` 里覆盖全部 api v1 路径的宽路由。
  */
 
 export const ZOOM_CONTROL_SELECTORS = {
@@ -11,24 +11,8 @@ export const ZOOM_CONTROL_SELECTORS = {
   compass: '.maplibregl-ctrl-compass',
 } as const
 
-export async function mockZoomControlApi(page: Page) {
-  await page.route('**/api/v1/**', async (route) => {
-    const url = new URL(route.request().url())
-    const data =
-      url.pathname === '/api/v1/layers'
-        ? [
-            {
-              layer_id: 'discharge',
-              layer_name: 'Discharge',
-              layer_type: 'hydrology',
-              variables: ['q_down'],
-              metadata: { layer_id: 'discharge', valid_times: [] },
-            },
-          ]
-        : []
-    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'ok', data }) })
-  })
-}
+/** 两个 spec 用的 API mock：最小径流目录 + 其余 api v1 路径回空数组。 */
+export { mockMinimalDischargeCatalogApi as mockZoomControlApi } from './layerCatalog.mocked'
 
 /**
  * 地图就绪 = 地图容器与 canvas 可见，且子控件已挂载。
