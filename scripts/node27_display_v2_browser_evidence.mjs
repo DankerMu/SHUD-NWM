@@ -242,6 +242,8 @@ const RIVER_HOOK_HINTS = {
 }
 /** Both hooks bound themselves at 15 s; the Node-side cut-off sits just above it. */
 const LOCATE_TIMEOUT_MS = 20000
+/** Both hooks are installed when the map surface mounts, and the page-ready wait has already seen the map. */
+const HOOK_TIMEOUT_MS = 10000
 const WINDOW_TIMEOUT_MS = 10000
 const GEOMETRY_SETTLE_TIMEOUT_MS = 10000
 const GEOMETRY_PROBE_MS = 250
@@ -269,6 +271,10 @@ const SELECTORS = {
   ].join(', '),
   exempt: '.maplibregl-ctrl-attrib',
 }
+/** The error fallback of the region both curve windows render in; it replaces the window, frame included. */
+const CURVE_FALLBACK = 'region-error-map-panels'
+const CURVE_FALLBACK_SELECTOR = `[data-testid="${CURVE_FALLBACK}"]`
+const CURVE_FALLBACK_FAILURE = `the curve region crashed: its error fallback ${CURVE_FALLBACK} replaced the curve window (a product bug; a larger --timeout-ms does not help)`
 /** `busy` = every window body that means "not finished". River: the blank placeholder of the first 600 ms, then the notice. Station: the notice (no delayed placeholder), "waiting for the source", a refresh. */
 const WINDOWS = {
   river: {
@@ -311,10 +317,8 @@ export function resolveDevicePreset(name) {
 }
 
 /**
- * Viewport -> form -> the layout expectations that hold in it. Desktop form
- * is the three pinned checks `checkScene` applies; mobile form replaces the
- * control-bar height pin with "inside the viewport" and never consults the
- * document scroll width (the shell clips overflow, so it proves nothing).
+ * Viewport -> form -> the layout expectations that hold in it. Desktop form is the three pinned checks of `checkScene`; mobile form replaces the
+ * control-bar height pin with "inside the viewport" and never consults the document scroll width (the shell clips overflow, so it proves nothing).
  */
 export function expectationsForViewport({ width, height }) {
   const mobile = width < MOBILE_FORM_MAX_WIDTH || height < MOBILE_FORM_MAX_HEIGHT
@@ -347,11 +351,7 @@ function describeBox(box) {
   return `${box.width}x${box.height} @ (${box.x}, ${box.y})`
 }
 
-/**
- * Horizontally the whole hit box counts. Vertically a member of a vertical
- * scroller (the sheet body) is judged on its visible span only, and one
- * scrolled fully out of view passes.
- */
+/** Horizontally the whole hit box counts. Vertically a member of a vertical scroller (the sheet body) is judged on its visible span only, and one scrolled fully out of view passes. */
 function controlOutsideViewport(control, viewport) {
   const { box } = control
   if (box.x < -EDGE_TOLERANCE_PX || box.x + box.width > viewport.width + EDGE_TOLERANCE_PX) return true
@@ -362,9 +362,8 @@ function controlOutsideViewport(control, viewport) {
 }
 
 /**
- * Judge one captured state against the mobile expectations and return the
- * failures (empty = the state holds). Pure -- `curveWait` is how the wait for
- * the curve ended -- so it is unit-tested on synthetic geometry.
+ * Judge one captured state against the mobile expectations and return the failures (empty = the state holds).
+ * Pure -- `curveWait` is how the wait for the curve ended -- so it is unit-tested on synthetic geometry.
  */
 export function judgeMobileState(geometry, expectations, curveWait = null) {
   const failures = []
@@ -392,6 +391,8 @@ export function judgeMobileState(geometry, expectations, curveWait = null) {
     return failures
   }
 
+  // The fallback is the whole story of the state: no frame, no chart and no anchor left to judge.
+  if (geometry.panel === CURVE_FALLBACK) return [CURVE_FALLBACK_FAILURE]
   if (!geometry.sheet) return ['curve window frame is missing']
   const panel = `panel state: ${geometry.panel ?? 'none'}${geometry.emptyText ? `「${geometry.emptyText}」` : ''}`
   // A wait that ran out fails the state even if the curve turned up before the read.
@@ -447,10 +448,8 @@ export function assembleMobileReport({ baseUrl, preset, expectations, riverTarge
 }
 
 /**
- * Segment geometry -> the river hook's `bbox` and `anchor`: bbox over every
- * coordinate (a zero-width or zero-height extent padded by a tiny epsilon),
- * anchor = the middle of the flattened coordinates. Returns null when the
- * geometry is not a usable LineString / MultiLineString.
+ * Segment geometry -> the river hook's `bbox` and `anchor`: bbox over every coordinate (a zero-width or zero-height extent padded by a tiny
+ * epsilon), anchor = the middle of the flattened coordinates. Returns null when the geometry is not a usable LineString / MultiLineString.
  */
 export function riverTargetFromGeometry(geom) {
   const parts = geom?.type === 'LineString' ? [geom.coordinates] : geom?.type === 'MultiLineString' ? geom.coordinates : null
@@ -475,14 +474,16 @@ export function riverTargetFromGeometry(geom) {
 }
 
 /**
- * Station list -> the candidates to try, in `station_id` order, keeping only
- * stations with coordinates. With `stationId` the list is that one station or
- * empty.
+ * Station list -> the candidates to try, in `station_id` order, keeping only stations with coordinates. With `stationId` the list is that one
+ * station or empty. Coordinates are read the way the page reads them (`getHydroMetStationCoordinates`): the first two numbers of
+ * `geom.coordinates` when both are finite, else the top-level `longitude` / `latitude`.
  */
 export function stationCandidates(items, stationId) {
+  const pair = ([longitude, latitude]) => (Number.isFinite(longitude) && Number.isFinite(latitude) ? { longitude, latitude } : null)
+  const coordinates = (item) => (Array.isArray(item?.geom?.coordinates) ? pair(item.geom.coordinates) : null) ?? pair([item?.longitude, item?.latitude])
   const located = items
-    .filter((item) => typeof item?.station_id === 'string' && Number.isFinite(item.longitude) && Number.isFinite(item.latitude))
-    .map((item) => ({ station_id: item.station_id, longitude: item.longitude, latitude: item.latitude }))
+    .map((item) => ({ station_id: item?.station_id, ...coordinates(item) }))
+    .filter((item) => typeof item.station_id === 'string' && 'longitude' in item)
     .sort((a, b) => (a.station_id < b.station_id ? -1 : a.station_id > b.station_id ? 1 : 0))
   if (stationId) return located.filter((item) => item.station_id === stationId).slice(0, 1)
   return located.slice(0, STATION_CANDIDATE_LIMIT)
@@ -504,11 +505,9 @@ async function getApiData(context, args, route) {
 }
 
 /**
- * Resolve what to tap, the way the live-river-click preflight does: the GFS
- * identity-only latest product for the basin pin, then the segment geometry
- * and the station list of that product's model (the set the page renders).
- * Each target is `{ ...fields }` or `{ error }`; a failed product request
- * fails both.
+ * Resolve what to tap, the way the live-river-click preflight does: the GFS identity-only latest product for the basin pin, then the segment
+ * geometry and the station list of that product's model (the set the page renders). Each target is `{ ...fields }` or `{ error }`; a failed
+ * product request fails both.
  */
 async function resolveMobileTargets(context, args) {
   const enc = encodeURIComponent
@@ -570,8 +569,7 @@ async function resolveMobileTargets(context, args) {
 }
 
 /**
- * Call a locate hook in the page. The hooks reject with a plain
- * `{ code, message }` object, which is folded into a serializable outcome in
+ * Call a locate hook in the page. The hooks reject with a plain `{ code, message }` object, which is folded into a serializable outcome in
  * the page; the Node-side timer covers a hook that never answers.
  */
 async function callLocateHook(page, spec, input, timeoutMs) {
@@ -612,9 +610,8 @@ function readCamera(page) {
 }
 
 /**
- * The anchor attributes only update once the camera rests, so a read taken
- * during the sheet's auto-pan still shows the covered pre-pan position. Poll
- * until two reads at least one pan duration apart agree on all four.
+ * The anchor attributes only update once the camera rests, so a read taken during the sheet's auto-pan still shows the covered pre-pan
+ * position. Poll until two reads at least one pan duration apart agree on all four.
  */
 async function waitForCameraSettled(page, timeoutMs) {
   const deadline = Date.now() + timeoutMs
@@ -632,7 +629,7 @@ async function waitForCameraSettled(page, timeoutMs) {
 function measureGeometry(page, state) {
   const windowSpec = WINDOWS[state] ?? null
   return page.evaluate(
-    ({ stateName, selectors, frame, chart, busy, empty }) => {
+    ({ stateName, selectors, frame, chart, busy, empty, fallback }) => {
       const rectBox = (rect) => ({ x: rect.left, y: rect.top, width: rect.right - rect.left, height: rect.bottom - rect.top })
       const box = (selector) => {
         const element = selector ? document.querySelector(selector) : null
@@ -685,7 +682,7 @@ function measureGeometry(page, state) {
       }
 
       const attribute = (name) => document.querySelector(selectors.surface)?.getAttribute(name) ?? null
-      const panel = frame === null ? null : document.querySelector(`${busy}, ${chart}, ${empty}`)
+      const panel = frame === null ? null : document.querySelector(`${fallback}, ${busy}, ${chart}, ${empty}`)
       return {
         state: stateName,
         viewport: { width: window.innerWidth, height: window.innerHeight },
@@ -703,7 +700,7 @@ function measureGeometry(page, state) {
         controls,
       }
     },
-    { stateName: state, selectors: SELECTORS, frame: windowSpec?.frame ?? null, chart: windowSpec?.chart ?? null, busy: windowSpec?.busy ?? null, empty: windowSpec?.empty ?? null },
+    { stateName: state, selectors: SELECTORS, frame: windowSpec?.frame ?? null, chart: windowSpec?.chart ?? null, busy: windowSpec?.busy ?? null, empty: windowSpec?.empty ?? null, fallback: CURVE_FALLBACK_SELECTOR },
   )
 }
 
@@ -726,21 +723,20 @@ async function measureSettledGeometry(page, state, timeoutMs, failures) {
 }
 
 /**
- * Open one curve window on a page that already shows `/`: wait for the hook
- * and the layer, locate, tap once, wait for the frame, the curve and the
- * camera. Returns whether the window opened; every reason it did not is in
- * `result.failures`.
+ * Open one curve window on a page that already shows `/`: wait for the hook and the layer, locate, tap once, wait for the frame, the curve
+ * and the camera. Returns whether the window opened; every reason it did not is in `result.failures`.
  */
 async function openCurveWindow(page, state, target, args, result) {
   const spec = WINDOWS[state]
   const fail = (message) => { result.failures.push(message); return false }
   if (target.error) return fail(target.error)
 
+  const hookTimeoutMs = Math.min(HOOK_TIMEOUT_MS, args.timeoutMs)
   const hookPresent = await page
-    .waitForFunction(({ hookGlobal, hookMethod }) => typeof window[hookGlobal]?.[hookMethod] === 'function', spec, { timeout: args.timeoutMs })
+    .waitForFunction(({ hookGlobal, hookMethod }) => typeof window[hookGlobal]?.[hookMethod] === 'function', spec, { timeout: hookTimeoutMs })
     .then(() => true, () => false)
   if (!hookPresent) {
-    return fail(`window.${spec.hookGlobal}.${spec.hookMethod} is missing after ${args.timeoutMs} ms (does the deployed build carry the hook?)`)
+    return fail(`window.${spec.hookGlobal}.${spec.hookMethod} is missing after ${hookTimeoutMs} ms (does the deployed build carry the hook?)`)
   }
   const ready = await page.waitForSelector(spec.ready, { state: 'attached', timeout: args.timeoutMs }).then(() => true, () => false)
   if (!ready) return fail(`${spec.readyWhat} within ${args.timeoutMs} ms`)
@@ -786,14 +782,17 @@ async function openCurveWindow(page, state, target, args, result) {
   await page.touchscreen.tap(located.x, located.y)
   result.tap = located
   const windowTimeoutMs = Math.min(WINDOW_TIMEOUT_MS, args.timeoutMs)
-  const opened = await page.waitForSelector(spec.frame, { state: 'visible', timeout: windowTimeoutMs }).then(() => true, () => false)
+  // A region that crashes on its first render never shows the frame: its fallback ends this wait too (the two never coexist).
+  const opened = await page.waitForSelector(`${spec.frame}, ${CURVE_FALLBACK_SELECTOR}`, { state: 'visible', timeout: windowTimeoutMs }).then(() => true, () => false)
   if (!opened) return fail(`the ${state} window did not appear within ${windowTimeoutMs} ms after a tap at (${located.x}, ${located.y})`)
+  if ((await page.locator(CURVE_FALLBACK_SELECTOR).count()) > 0) return fail(CURVE_FALLBACK_FAILURE)
 
-  // Wait for a terminal body -- nothing still loading AND the chart or the empty
+  // Wait for a terminal body -- the region's fallback, or nothing still loading AND the chart or the empty
   // notice present. "No loading notice" alone is true before the notice mounts.
   const waitStarted = Date.now()
+  const terminal = ({ busy, chart, empty, fallback }) => document.querySelector(fallback) !== null || (!document.querySelector(busy) && document.querySelector(`${chart}, ${empty}`) !== null)
   const timedOut = await page
-    .waitForFunction(({ busy, chart, empty }) => !document.querySelector(busy) && document.querySelector(`${chart}, ${empty}`) !== null, spec, { timeout: args.timeoutMs })
+    .waitForFunction(terminal, { ...spec, fallback: CURVE_FALLBACK_SELECTOR }, { timeout: args.timeoutMs })
     .then(() => false, (error) => { if (error?.name !== 'TimeoutError') throw error; return true })
   result.curve_wait = { waited_ms: Date.now() - waitStarted, limit_ms: args.timeoutMs, timed_out: timedOut }
   if (!(await waitForCameraSettled(page, args.timeoutMs))) {
