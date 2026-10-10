@@ -80,3 +80,9 @@ node scripts/node27_display_v2_browser_evidence.mjs --base-url "$BASE_URL" --out
 - 这是 Chromium 设备模拟，不是真机：浏览器工具栏遮挡、安全区、聚焦自动放大、捏合 / 拖动手势冲突都不在本 receipt 的证明范围内，由 task 7.3（#2818）的真机清单覆盖。
 - 截图在 `/home/nwm/tmp/` 下，不保证长期保留；需要长期留存时另行拷出。
 - 截图里可见、未判定的两处观察，转 #2818 真机核对：MapLibre 的版权标注叠在抽屉内容之上（竖屏在图表右下角，横屏在图表区右侧）；横屏页面左上角有“已加载 5000 个代站，列表已截断”的提示。
+
+## 更正（2026-10-10，#2865）
+
+- 「限制」里“MapLibre 的版权标注叠在抽屉内容之上”的说法不准确。按层级抽屉在标注之上：抽屉 `M11DraggableCurveWindow` 的 z-index 是 132（激活时 142），MapLibre 控件容器的 z-index 是 2；标注是透过抽屉的半透明底色（`M11_POPUP_GLASS`）被看见的，不是叠在抽屉之上。
+- 2026-10-10 在 node-27 上对同一入口、两个预设用 headless shell 与完整 Chromium 各拍一组，河段窗截图里标注同样可见。产物在 node-27 的 `/home/nwm/tmp/2785-receipts/2865-fgate/`。
+- 标注是否影响判读由真机清单 RD-15（`docs/runbooks/display-mobile-real-device-checklist.md`）判定。

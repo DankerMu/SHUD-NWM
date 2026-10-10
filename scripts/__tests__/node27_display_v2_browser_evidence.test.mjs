@@ -436,7 +436,9 @@ test('"still loading" is never reported for a wait that did not time out', () =>
 
 test('the chart floor is not judged on top of a curve failure', () => {
   const short = { x: 12, y: 360, width: 366, height: 100 }
-  assert.equal(judgeMobileState(bottomSheetGeometry({ chart: short }), portrait, WAIT_TIMED_OUT).length, 1)
+  assert.deepEqual(judgeMobileState(bottomSheetGeometry({ chart: short }), portrait, WAIT_TIMED_OUT), [
+    'curve still loading after 4000 ms (panel state: m11-river-panel-chart)',
+  ])
   assert.deepEqual(judgeMobileState(bottomSheetGeometry({ chart: short }), portrait, WAIT_DONE), ['chart area height 100 < 160'])
 })
 
@@ -483,6 +485,38 @@ test('an anchor outside the map area fails once', () => {
 test('a missing curve window is the single failure of an open-window state', () => {
   const failures = judgeMobileState(bottomSheetGeometry({ sheet: null, chart: null, anchor: { x: null, y: null } }), portrait)
   assert.deepEqual(failures, ['curve window frame is missing'])
+})
+
+// --- the curve region's error fallback ---------------------------------------
+
+const CURVE_REGION_CRASHED = 'the curve region crashed: its error fallback region-error-map-panels replaced the curve window (a product bug; a larger --timeout-ms does not help)'
+/** What the read sees once the fallback replaced the window: no frame, no chart, the fallback as the panel. */
+const CRASHED = { sheet: null, chart: null, loading: false, panel: 'region-error-map-panels' }
+
+test('a curve region in its error fallback is the single failure of the state, and it names the fallback', () => {
+  // The wait ends at once on the fallback, so it did not time out; the anchor may or may not still be there.
+  for (const curveWait of [WAIT_DONE, { waited_ms: 12, limit_ms: 60000, timed_out: false }, null]) {
+    assert.deepEqual(judgeMobileState(bottomSheetGeometry(CRASHED), portrait, curveWait), [CURVE_REGION_CRASHED])
+    assert.deepEqual(judgeMobileState(rightSheetGeometry({ ...CRASHED, anchor: { x: null, y: null } }), landscape, curveWait), [CURVE_REGION_CRASHED])
+  }
+})
+
+test('the fallback is never reported as "still loading" or as a missing frame, even after a timed-out wait', () => {
+  const failures = judgeMobileState(bottomSheetGeometry(CRASHED), portrait, WAIT_TIMED_OUT)
+  assert.deepEqual(failures, [CURVE_REGION_CRASHED])
+  assert.doesNotMatch(failures.join('\n'), /still loading|frame is missing|no curve data/)
+})
+
+test('the fallback wins over everything else the read could fail on', () => {
+  const geometry = bottomSheetGeometry({ ...CRASHED, map: null, controls: [control('retry', { x: 400, y: 100, width: 44, height: 44 }, { inSheet: true })] })
+  assert.deepEqual(judgeMobileState(geometry, portrait, WAIT_DONE), [CURVE_REGION_CRASHED])
+})
+
+test('without the fallback a missing frame keeps its own message, whatever the panel marker', () => {
+  for (const panel of [null, 'm11-river-panel-pending', 'region-error-map', 'region-error-map-panels-other']) {
+    const failures = judgeMobileState(bottomSheetGeometry({ sheet: null, chart: null, panel }), portrait, WAIT_TIMED_OUT)
+    assert.deepEqual(failures, ['curve window frame is missing'])
+  }
 })
 
 test('the judge ignores the document scroll width', () => {
@@ -594,6 +628,35 @@ test('station candidates: an explicit station id selects only that station, or n
   const items = ['s7', 's3', 's9', 's1', 's5', 's8', 's2'].map((station_id) => ({ station_id, longitude: 98, latitude: 38 }))
   assert.deepEqual(stationCandidates(items, 's9'), [{ station_id: 's9', longitude: 98, latitude: 38 }])
   assert.deepEqual(stationCandidates(items, 'missing'), [])
+})
+
+test('station candidates: a station with only geom.coordinates is kept, located by geom', () => {
+  const items = [{ station_id: 'g1', geom: { type: 'Point', coordinates: [98.5, 38.25] } }]
+  assert.deepEqual(stationCandidates(items, null), [{ station_id: 'g1', longitude: 98.5, latitude: 38.25 }])
+  // A third ordinate (elevation) is ignored, as on the page.
+  const withElevation = [{ station_id: 'g2', geom: { type: 'Point', coordinates: [98.5, 38.25, 4100] } }]
+  assert.deepEqual(stationCandidates(withElevation, 'g2'), [{ station_id: 'g2', longitude: 98.5, latitude: 38.25 }])
+})
+
+test('station candidates: geom.coordinates wins over different top-level fields', () => {
+  const items = [{ station_id: 'b1', longitude: 100, latitude: 40, geom: { type: 'Point', coordinates: [98.5, 38.25] } }]
+  assert.deepEqual(stationCandidates(items, null), [{ station_id: 'b1', longitude: 98.5, latitude: 38.25 }])
+})
+
+test('station candidates: top-level fields alone still locate a station', () => {
+  for (const geom of [undefined, null, {}, { type: 'Point' }]) {
+    assert.deepEqual(stationCandidates([{ station_id: 't1', longitude: 100, latitude: 40, geom }], null), [{ station_id: 't1', longitude: 100, latitude: 40 }])
+  }
+})
+
+test('station candidates: non-finite geom.coordinates fall back to the top-level fields', () => {
+  const unusable = [[Number.NaN, 38.25], [98.5, null], ['98.5', '38.25'], [98.5], [], 'POINT(98.5 38.25)']
+  for (const coordinates of unusable) {
+    const items = [{ station_id: 'f1', longitude: 100, latitude: 40, geom: { type: 'Point', coordinates } }]
+    assert.deepEqual(stationCandidates(items, null), [{ station_id: 'f1', longitude: 100, latitude: 40 }], JSON.stringify(coordinates))
+    // With nothing to fall back to the station has no coordinates and is dropped.
+    assert.deepEqual(stationCandidates([{ station_id: 'f2', geom: { type: 'Point', coordinates } }], null), [], JSON.stringify(coordinates))
+  }
 })
 
 // --- entry guard (subprocesses) ---------------------------------------------
