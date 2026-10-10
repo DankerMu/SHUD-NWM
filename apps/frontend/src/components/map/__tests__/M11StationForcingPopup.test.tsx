@@ -888,10 +888,11 @@ describe('M11StationForcingPopup', () => {
   })
 
   // Epic #992 SUB-3 §2.1 (T2, picker-catalog-only mechanical property) —
-  // M11IssueTimeSelect (M11PopupChrome.tsx:97-127) offers only cycles from the
-  // issueTimes prop derived from product.available_issue_times. A pre-cutover
-  // cycle NOT in available_issue_times MUST NOT be added to the picker options
-  // by any synthesis path.
+  // M11IssueTimeSelect offers the cycles from the issueTimes prop derived from
+  // product.available_issue_times, plus at most the currently selected cycle
+  // when it is absent from that prop (its `retainedIssueTime`). A pre-cutover
+  // cycle that is neither in available_issue_times nor selected MUST NOT be
+  // added to the picker options by any synthesis path.
   it('picker offers only catalog-provided cycles; never synthesizes a pre-cutover option', async () => {
     const user = userEvent.setup()
     // Catalog offers ONLY DEFAULT_CYCLE — no pre-cutover option.

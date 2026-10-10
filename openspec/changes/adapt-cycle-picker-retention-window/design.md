@@ -22,7 +22,9 @@ Keep backend contracts as-is and handle the miss at the frontend boundary:
    `STATION_FORCING_FILE_NOT_FOUND` from malformed data, identity mismatch, or
    transient API failures.
 3. `M11StationForcingPopup` does not keep a per-session record of retained-miss
-   issue times; a retained-disk miss only produces the empty state of step 5.
+   issue times; a retained-disk miss only produces a reason message: a partial
+   notice under the chart when the other source is still plotted, or the empty
+   state of step 5 when neither source is plottable.
 4. `M11IssueTimeSelect` (the selector both curve windows use; there is no
    `M11PopupSourceControls`) keeps a selected issue time that is no longer in
    `available_issue_times` as the first option, disabled and labelled as

@@ -1,7 +1,7 @@
 # pipeline-monitoring-frontend Specification
 
 ## Purpose
-TBD - created by archiving change m3-slurm-nationalization. Update Purpose after archive.
+定义流水线监控页（`/monitoring`，与 `/ops` 共用同一页面）的前端行为：按角色的访问控制；顶部汇总条、左侧流水线视图、中部作业列表、右侧趋势面板各自的内容与状态；自动刷新；以及桌面形态下按宽度分档的布局（移动形态遵循 `mobile-ops-fallback` 的单列兜底）。
 
 ## Requirements
 

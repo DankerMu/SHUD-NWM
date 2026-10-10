@@ -236,8 +236,8 @@ export function useM11SelectedAnchorCamera({
       const { autoPan: pan, selectedAnchor: anchor } = latestRef.current
       const map = nativeAnchorCameraMap(mapRef)
       if (!pan || !anchor || !map || typeof map.easeTo !== 'function') return
-      // 抽屉是地图区里的兄弟节点（`M11DraggableCurveWindow` 的 frame）；没有渲染出来就不平移——
-      // 曲线面板渲染即崩溃而键仍非空时，挡住平移的只有这道闸。
+      // 抽屉是地图区里的兄弟节点（`M11DraggableCurveWindow` 的 frame）；找不到就不平移。必须量真实渲染出来的
+      // 那一个：形态切换时页面那份形态值先翻、抽屉还是旧形态（见本 hook 头注释“平移”一段），键算不出抽屉的尺寸。
       const sheet = surfaceRef.current?.ownerDocument.querySelector(`[data-m11-curve-window-kind="${pan.kind}"]`)
       if (!sheet) return
       // 形态切换时画布也在变尺寸，而地图库自己的 resize 是异步且节流的；`easeTo` 在起点就把目标屏幕点定为
