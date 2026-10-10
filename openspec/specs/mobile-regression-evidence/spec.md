@@ -105,3 +105,54 @@ A runbook SHALL list the real-device checks that emulation cannot prove — bott
 
 - **WHEN** the user completes the checklist on both device classes
 - **THEN** the result of every check is recorded in the receipt, and each failed check references a follow-up issue
+
+### Requirement: Mobile evidence capture SHALL name a crashed curve region
+
+With a device preset, when the curve window's region shows its error fallback — before or after the window frame appears — the node-27 browser-evidence script SHALL end the wait it is in at once and SHALL report the state as a failure that names the fallback, rather than as a window that did not appear or a curve that is still loading.
+
+#### Scenario: Region crashes before the window frame appears
+
+- **WHEN** the curve region falls into its error fallback on first render during a preset capture
+- **THEN** the state fails with a message naming the fallback, without waiting for the window-appearance limit
+
+#### Scenario: Region crashes after the window frame appeared
+
+- **WHEN** the fallback replaces an already visible curve window during a preset capture
+- **THEN** the state fails with a message naming the fallback, and no "still loading" or "frame is missing" failure is reported for it
+
+### Requirement: Regression tests SHALL wait on the state they assert
+
+A regression case that changes the viewport on a loaded page SHALL, before measuring, wait on a condition that only holds once the rendered structure for the new viewport form has been committed; a style-only condition SHALL NOT be the only gate before assertions that depend on rendered structure. The display-lane unit cases for headers-only, failed-completion and stalled-body responses SHALL run on an injected clock and SHALL each assert one specific failure code and stage.
+
+#### Scenario: Rotating the control bar on a loaded page
+
+- **WHEN** the control-bar rotation case switches a loaded page from portrait to short landscape
+- **THEN** it waits for the landscape structure of the control bar before measuring geometry
+
+#### Scenario: Time-budget cases are deterministic
+
+- **WHEN** the display-lane unit tests exercise headers-only, failed-completion and stalled-body responses
+- **THEN** each case runs on an injected clock and asserts exactly one failure code and stage
+
+### Requirement: Every documented test entry point SHALL select tests
+
+A package script that documentation or a workflow names as a test entry point SHALL select at least one test and exit zero when they pass. The M15 visual conformance spec SHALL stay excluded from every project of the mocked regression lane and SHALL be runnable through its own script.
+
+#### Scenario: The M15 visual script runs its spec
+
+- **WHEN** `pnpm run test:e2e:m15-visual --list` is run
+- **THEN** at least one test is listed and the command exits zero
+
+#### Scenario: The mocked lane still excludes it
+
+- **WHEN** the mocked regression lane lists its tests
+- **THEN** no test from the M15 visual conformance spec is listed
+
+### Requirement: Broad-route layer-catalogue fixtures SHALL come from one source
+
+The layer-catalogue entries that the mocked regression lane serves through its broad catalogue routes — the minimal discharge entry, the discharge entry with extended metadata, the precipitation entry and their combined list — SHALL each be defined once in a shared e2e support module, and specs and support files SHALL import them instead of restating the literals. The river-window fixtures, which serve their own discharge layer with tile templates and valid times, are outside this requirement.
+
+#### Scenario: A broad-route catalogue entry changes
+
+- **WHEN** a field of the minimal discharge entry, the extended discharge entry or the precipitation entry has to change
+- **THEN** it is changed in one support module and every mocked spec that serves that entry through a broad catalogue route receives the new value

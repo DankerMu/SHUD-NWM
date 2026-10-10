@@ -72,3 +72,31 @@ A dedicated workflow SHALL be triggered only by a weekly schedule and by manual 
 #### Scenario: Triggers
 - **WHEN** the workflow file is inspected
 - **THEN** its triggers are exactly `schedule` and `workflow_dispatch`
+
+### Requirement: Script-level node tests SHALL run in a path-scoped CI lane
+
+The CI workflow SHALL run every `*.test.mjs` file located directly in `scripts/__tests__/` in a dedicated job that is triggered only when `scripts/**/*.mjs`, `scripts/__tests__/**` or the CI workflow file itself changes. The job SHALL install no dependencies and SHALL pass the test files to `node --test` as shell-expanded file paths, so that the same command executes all cases on Node 20 and on later Node versions. The job SHALL fail when no test file matches.
+
+#### Scenario: A change to the evidence script runs its tests
+
+- **WHEN** a pull request changes `scripts/node27_display_v2_browser_evidence.mjs` or a file under `scripts/__tests__/`
+- **THEN** the job runs, executes every case of every `*.test.mjs` file directly in `scripts/__tests__/`, and fails if any case fails
+
+#### Scenario: Unrelated changes skip the lane
+
+- **WHEN** a pull request changes none of the lane's paths
+- **THEN** the job is skipped
+
+#### Scenario: No matching test file fails the lane
+
+- **WHEN** the job runs and no `*.test.mjs` file exists directly in `scripts/__tests__/`
+- **THEN** the job fails instead of reporting zero tests as a pass
+
+### Requirement: The frontend CI filter entries SHALL be pinned by a meta-test
+
+The `frontend` paths-filter block of the CI workflow SHALL contain the entries for the workflow file itself, the frontend app tree and the OpenAPI tree, and a selector meta-test SHALL fail when any of them is removed from that block or moved to another filter block.
+
+#### Scenario: An entry leaves the frontend block
+
+- **WHEN** the workflow-file entry is deleted from the `frontend` filter block or moved under another filter block
+- **THEN** the meta-test for the frontend filter fails

@@ -129,6 +129,24 @@ not draggable and only one is open at a time.
 - **AND** on narrow desktop-form viewports the windows MUST fall back to clamped
   positions that keep headers and close controls reachable.
 
+#### Scenario: Overlapping default positions keep the river window's close control clear
+
+- **WHEN** both curve windows are opened at their default positions in desktop
+  form with a map area at least 900px wide and the two default horizontal
+  extents overlap
+- **THEN** the default positions are vertically staggered, the river window
+  above the station window, so that the river window's close control lies
+  outside the station window's box and a hit test on it reaches the river
+  window even when the station window was opened last
+
+#### Scenario: Non-overlapping default positions share one top offset
+
+- **WHEN** both curve windows are opened at their default positions in desktop
+  form with a map area at least 900px wide and the two default horizontal
+  extents do not overlap
+- **THEN** both windows have the same default top offset and are anchored
+  horizontally at 0.28 and 0.72 of the map width
+
 #### Scenario: Active window rises above the other
 
 - **WHEN** both curve windows are visible in desktop form
@@ -162,3 +180,52 @@ In desktop form a curve window's default width SHALL be the smaller of 44rem and
 
 - **WHEN** a river window is opened at 1280×900
 - **THEN** the window's width is 42% of the viewport width
+
+### Requirement: The issue-time trigger SHALL keep its value on one line inside its box
+
+The issue-time trigger in a curve window (river and station) SHALL render the selected issue time on a single line that never extends beyond the trigger's box, in desktop and mobile form. When the label does not fit, it SHALL be truncated with an ellipsis, the date-time part (`MM-DD HH:MM UTC`) SHALL remain fully visible at every supported sheet width, and the full label SHALL remain available as the trigger's `title`. The trigger's height SHALL NOT depend on the selected label.
+
+In the river window's issue-time bar, the trigger SHALL NOT be narrowed by the caption next to it: when both do not fit on one line, the caption SHALL be the one that is not shown, and the bar SHALL stay a single row of unchanged height.
+
+#### Scenario: Retained issue time in a portrait sheet
+
+- **WHEN** a curve sheet at 390×664 shows an issue time that is no longer in the available list, labelled with the retention-unavailable suffix
+- **THEN** the trigger is 44px high, its content does not overflow it vertically or horizontally, the date-time part is not elided, and the trigger's `title` is the full label
+
+#### Scenario: Retained issue time in a desktop curve window
+
+- **WHEN** the river curve window at 1280×800 shows a retained issue time
+- **THEN** the trigger is 28px high, its content does not overflow it, and the trigger's `title` is the full label
+
+#### Scenario: Narrow river sheet
+
+- **WHEN** the river sheet is shown at 568×320 or 320×568 with an ordinary issue time
+- **THEN** the issue-time bar is a single row, the trigger shows the whole label without elision, and the caption is either on one line beside the trigger or not shown
+
+#### Scenario: Caption stays where it fits
+
+- **WHEN** the river sheet is shown at 750×342 with an ordinary issue time
+- **THEN** the caption is visible on one line beside the trigger
+
+### Requirement: Curve windows SHALL NOT offer a forecast-source switch
+
+The river curve window SHALL show its forecast sources together in one chart and SHALL NOT render a control for switching between forecast sources; the station curve window SHALL NOT render a forecast-source switch either.
+
+#### Scenario: River window has no source switch
+
+- **WHEN** the river curve window is open and its issue times have been resolved
+- **THEN** it contains an issue-time selector and no button for choosing GFS or IFS
+
+#### Scenario: Station window has no source switch
+
+- **WHEN** the station curve window is open and its issue times have been resolved
+- **THEN** it contains an issue-time selector and no button for choosing GFS or IFS
+
+### Requirement: Curve windows SHALL resolve their issue-time options without a shared popup product hook
+
+The river forecast window and the station forcing window SHALL each obtain the latest-product identity and its available issue times directly from the latest-product fetch, and the frontend SHALL NOT keep a separate popup product hook that requests the same endpoint without a caller.
+
+#### Scenario: A curve window opens
+
+- **WHEN** a river forecast window or a station forcing window opens for a source
+- **THEN** the window itself requests the latest-product identity for that source and builds its issue-time selector from the returned available issue times
