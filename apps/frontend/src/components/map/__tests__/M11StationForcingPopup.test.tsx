@@ -314,7 +314,7 @@ describe('M11StationForcingPopup', () => {
     expect(screen.getByText('站点 ID qhh_forc_001')).toBeInTheDocument()
     expect(screen.getByTestId('m11-station-variable-selector')).toBeInTheDocument()
     expect(await screen.findByTestId('m11-station-popup-loaded')).toBeInTheDocument()
-    expect(screen.queryByTestId('m11-popup-source-controls')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /GFS|IFS/ })).not.toBeInTheDocument()
 
     expect(fetchHydroMetLatestProduct).toHaveBeenCalledTimes(2)
     expect(fetchHydroMetLatestProduct).toHaveBeenCalledWith(expect.objectContaining({ source: 'GFS', basinId: 'basins_qhh' }))
