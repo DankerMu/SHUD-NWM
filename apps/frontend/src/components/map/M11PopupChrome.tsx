@@ -9,8 +9,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import type { HydroMetSource } from '@/lib/hydroMet/queryState'
-import { M11_POPUP_SOURCES } from '@/components/map/useHydroMetPopupProduct'
 
 // 弹窗玻璃质感外壳：深蓝玻璃 + 强 backdrop-blur + 细描边 + 大圆角 + 深投影（指挥舱风格）。
 export const M11_POPUP_GLASS =
@@ -25,15 +23,6 @@ export function formatIssueTime(iso: string): string {
   const hh = String(date.getUTCHours()).padStart(2, '0')
   const mi = String(date.getUTCMinutes()).padStart(2, '0')
   return `${mm}-${dd} ${hh}:${mi} UTC`
-}
-
-export function M11PopupShell({ children, testId }: { children: ReactNode; testId: string }) {
-  return (
-    <div className={cn('w-[min(30rem,90vw)] overflow-hidden', M11_POPUP_GLASS)} data-testid={testId}>
-      <div className="h-px bg-gradient-to-r from-transparent via-cyan-400/60 to-transparent" aria-hidden="true" />
-      {children}
-    </div>
-  )
 }
 
 export function M11PopupHeader({
@@ -171,70 +160,6 @@ export function M11IssueTimeSelect({
         })}
       </SelectContent>
     </Select>
-  )
-}
-
-/**
- * 弹窗内 source（GFS/IFS）+ 起报时间选择条。
- * 起报时间因后端仅 latest-product 至多一项；为空时诚实显示「暂无可用起报时间」。
- */
-export function M11PopupSourceControls({
-  source,
-  onSourceChange,
-  issueTimes,
-  issueTime,
-  unavailableIssueTimes = [],
-  onIssueTimeChange,
-}: {
-  source: HydroMetSource
-  onSourceChange: (source: HydroMetSource) => void
-  issueTimes: string[]
-  issueTime: string | null
-  unavailableIssueTimes?: string[]
-  onIssueTimeChange?: (issueTime: string) => void
-}) {
-  const normalizedIssueTimes = normalizeIssueTimes(issueTimes)
-
-  return (
-    <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-white/10 px-4 py-2.5" data-testid="m11-popup-source-controls">
-      <div className="inline-flex items-center rounded-lg bg-white/5 p-0.5 ring-1 ring-inset ring-white/10" role="group" aria-label="预报源选择">
-        {M11_POPUP_SOURCES.map((option) => (
-          <button
-            key={option}
-            type="button"
-            className={cn(
-              'cursor-pointer rounded-md px-3 py-1 text-xs font-medium transition-all',
-              source === option
-                ? 'bg-cyan-400/15 text-cyan-200 ring-1 ring-inset ring-cyan-400/40'
-                : 'text-slate-400 hover:text-slate-100',
-            )}
-            aria-pressed={source === option}
-            data-testid={`m11-popup-source-${option}`}
-            onClick={() => onSourceChange(option)}
-          >
-            {option}
-          </button>
-        ))}
-      </div>
-      <div className="flex min-w-0 flex-1 items-center justify-end gap-1.5 text-[11px] text-slate-400">
-        <span className="shrink-0 uppercase tracking-wide">起报</span>
-        {normalizedIssueTimes.length > 0 ? (
-          <M11IssueTimeSelect
-            testId="m11-popup-issue-time"
-            issueTimes={normalizedIssueTimes}
-            issueTime={issueTime}
-            unavailableIssueTimes={unavailableIssueTimes}
-            onIssueTimeChange={onIssueTimeChange}
-            disabled={!onIssueTimeChange}
-            triggerClassName="w-auto flex-1"
-          />
-        ) : (
-          <span className="text-slate-500" data-testid="m11-popup-issue-time-empty">
-            暂无可用起报时间
-          </span>
-        )}
-      </div>
-    </div>
   )
 }
 

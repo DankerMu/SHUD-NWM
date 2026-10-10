@@ -5,8 +5,6 @@ import type { HydroMetSource } from '@/lib/hydroMet/queryState'
 import { sanitizeHydroMetMessage } from '@/lib/hydroMet/runtime'
 import { fetchHydroMetLatestProduct, type QhhLatestProduct } from '@/pages/hydroMet/bootstrap'
 
-export const M11_POPUP_SOURCES: HydroMetSource[] = ['GFS', 'IFS']
-
 export interface M11PopupProductModel {
   /** 当前 source 下解析到的 latest-product；加载中 / 失败 / 无 basin 时为 null。 */
   product: QhhLatestProduct | null

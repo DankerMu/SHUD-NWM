@@ -21,10 +21,14 @@ Keep backend contracts as-is and handle the miss at the frontend boundary:
 2. Add a type guard for retained-disk misses so callers can distinguish
    `STATION_FORCING_FILE_NOT_FOUND` from malformed data, identity mismatch, or
    transient API failures.
-3. In `M11StationForcingPopup`, record retained-miss issue times by source,
-   cycle, and station within the current popup session.
-4. Pass those known-unavailable issue times to `M11PopupSourceControls`, which
-   disables them and labels them as retained-disk unavailable.
+3. `M11StationForcingPopup` does not keep a per-session record of retained-miss
+   issue times; a retained-disk miss only produces the empty state of step 5.
+4. `M11IssueTimeSelect` (the selector both curve windows use; there is no
+   `M11PopupSourceControls`) keeps a selected issue time that is no longer in
+   `available_issue_times` as the first option, disabled and labelled as
+   retained-disk unavailable. No product caller passes it a list of
+   known-unavailable issue times. (Steps 3-4 corrected 2026-10-10, #2848, to
+   describe the code as it is.)
 5. Render a retention-specific empty state for the selected missing cycle.
 
 ## Rationale

@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { client } from '@/api/client'
-import { formatIssueTime, M11PopupSourceControls } from '@/components/map/M11PopupChrome'
+import { formatIssueTime, M11IssueTimeSelect } from '@/components/map/M11PopupChrome'
 import { M11RiverForecastPanel, type M11RiverPopupSegment } from '@/components/map/M11RiverForecastPanel'
 import type { HydroMetSource } from '@/lib/hydroMet/queryState'
 import { fetchHydroMetLatestProduct, type QhhLatestProduct } from '@/pages/hydroMet/bootstrap'
@@ -215,7 +215,7 @@ describe('M11RiverForecastPanel', () => {
     // 滚轮缩放时间轴
     expect(option).toContain('"dataZoom"')
     // 不再有 GFS/IFS 切换控件（不做切换）
-    expect(screen.queryByTestId('m11-popup-source-controls')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /GFS|IFS/ })).not.toBeInTheDocument()
     // 两源各解析一次 latest-product
     expect(fetchHydroMetLatestProduct).toHaveBeenCalledWith(expect.objectContaining({ source: 'GFS', basinId: 'basins_qhh' }))
     expect(fetchHydroMetLatestProduct).toHaveBeenCalledWith(expect.objectContaining({ source: 'IFS', basinId: 'basins_qhh' }))
@@ -477,17 +477,15 @@ describe('M11RiverForecastPanel', () => {
   })
 })
 
-describe('M11PopupSourceControls', () => {
-  it('filters blank and duplicate issue times before rendering select items', async () => {
+describe('M11IssueTimeSelect', () => {
+  it('filters blank and duplicate issue times and keeps a selected out-of-list issue time as a disabled first item', async () => {
     const user = userEvent.setup()
     const latestCycle = '2026-05-21T00:00:00Z'
     const staleCycle = '2026-05-20T12:00:00Z'
     const onIssueTimeChange = vi.fn()
 
     render(
-      <M11PopupSourceControls
-        source="GFS"
-        onSourceChange={vi.fn()}
+      <M11IssueTimeSelect
         issueTimes={['', '  ', ` ${latestCycle} `, latestCycle, '']}
         issueTime={` ${staleCycle} `}
         unavailableIssueTimes={['', '  ', ` ${staleCycle} `, staleCycle]}
@@ -512,38 +510,41 @@ describe('M11PopupSourceControls', () => {
     expect(onIssueTimeChange).toHaveBeenCalledWith(latestCycle)
   })
 
-  it('keeps source buttons and exposes disabled unavailable issue times in the dark selector', async () => {
+  it('disables an in-list unselected issue time named by unavailableIssueTimes and labels the trigger by default', async () => {
     const user = userEvent.setup()
-    const cycles = ['2026-05-21T00:00:00Z', '2026-05-20T12:00:00Z']
-    const onSourceChange = vi.fn()
+    const cycles = ['2026-05-21T00:00:00Z', '2026-05-20T12:00:00Z', '2026-05-20T00:00:00Z']
     const onIssueTimeChange = vi.fn()
 
     render(
-      <M11PopupSourceControls
-        source="GFS"
-        onSourceChange={onSourceChange}
+      <M11IssueTimeSelect
         issueTimes={cycles}
         issueTime={cycles[0]}
-        unavailableIssueTimes={[cycles[1]]}
+        unavailableIssueTimes={[` ${cycles[1]} `]}
         onIssueTimeChange={onIssueTimeChange}
       />,
     )
 
-    expect(screen.getByTestId('m11-popup-source-GFS')).toHaveAttribute('aria-pressed', 'true')
-    expect(screen.getByTestId('m11-popup-source-IFS')).toHaveAttribute('aria-pressed', 'false')
-    await user.click(screen.getByTestId('m11-popup-source-IFS'))
-    expect(onSourceChange).toHaveBeenCalledWith('IFS')
-
+    // 不传 ariaLabel：测的是缺省可访问名。
     const trigger = screen.getByTestId('m11-popup-issue-time')
     expect(trigger).toHaveAccessibleName('起报时间选择')
+    expect(trigger).toHaveTextContent(formatIssueTime(cycles[0]))
     await user.click(trigger)
-    const content = await screen.findByTestId('m11-popup-issue-time-content')
-    expect(content).toHaveClass('bg-slate-950/95')
 
+    // 仅由 prop 指名（带首尾空格）的时次不可用；其余在列时次保持可选、无后缀。
+    expect(screen.getAllByRole('option').map((option) => option.textContent)).toEqual([
+      formatIssueTime(cycles[0]),
+      `${formatIssueTime(cycles[1])} · 磁盘保留不可用`,
+      formatIssueTime(cycles[2]),
+    ])
     const unavailableOption = screen.getByRole('option', { name: /05-20 12:00 UTC.*磁盘保留不可用/ })
     expect(unavailableOption).toHaveAttribute('aria-disabled', 'true')
     expect(unavailableOption).toHaveAttribute('data-retention-unavailable', 'true')
     fireEvent.click(unavailableOption)
     expect(onIssueTimeChange).not.toHaveBeenCalled()
+
+    const availableOption = screen.getByRole('option', { name: formatIssueTime(cycles[2]) })
+    expect(availableOption).not.toHaveAttribute('data-retention-unavailable')
+    await user.click(availableOption)
+    expect(onIssueTimeChange).toHaveBeenCalledWith(cycles[2])
   })
 })
