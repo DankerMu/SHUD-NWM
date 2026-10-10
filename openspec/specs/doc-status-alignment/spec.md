@@ -3,7 +3,6 @@
 ## Purpose
 Define how project documents declare their authority status and stay aligned with the code. Current entrypoint docs link the authority model, node-27 live MVT facts stay synchronized with display config, bugs are triaged as a governance ledger, agent and generated artifacts have explicit owners, `active_flag` authority is declared, and living documents cite code by symbol while historical measurements are pinned to a SHA.
 
-
 ## Requirements
 
 ### Requirement: Documents declare authority status
@@ -147,3 +146,12 @@ A living document that describes current code SHALL cite that code by a symbol n
 
 - **WHEN** a document records a measurement taken at an earlier commit
 - **THEN** its coordinates carry that commit's SHA, and resolving them at that SHA shows the measured code
+
+### Requirement: The legacy inventory SHALL name the CI jobs that currently cover the frontend
+
+The governed legacy / dead-code inventory SHALL describe the frontend's CI coverage as it is: the build job and the separate sharded mocked end-to-end job SHALL both be named in the rows for the CI workflow and the frontend app.
+
+#### Scenario: Inventory rows after the mocked lane was split out
+
+- **WHEN** a reader looks up the CI workflow row or the frontend app row of the inventory
+- **THEN** both rows name the `frontend-build` job and the `frontend-e2e` job
