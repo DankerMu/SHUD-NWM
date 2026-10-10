@@ -33,6 +33,7 @@ jobs:
       docs: ${{ steps.filter.outputs.docs }}
       openapi: ${{ steps.filter.outputs.openapi }}
       schemas: ${{ steps.filter.outputs.schemas }}
+      node_tests: ${{ steps.filter.outputs.node_tests }}
       all_files: ${{ steps.filter.outputs.all_files }}
     steps:
       - uses: actions/checkout@v4
@@ -209,6 +210,13 @@ jobs:
               - 'openapi/**'
             schemas:
               - 'schemas/**'
+            # #2856: the node:test suites under scripts/__tests__ pin the
+            # node-27 browser-evidence oracle; nothing else runs them. This
+            # workflow defines the lane, so a workflow-only PR must run it.
+            node_tests:
+              - 'scripts/**/*.mjs'
+              - 'scripts/__tests__/**'
+              - '.github/workflows/ci.yml'
 
   markdown-lint:
     name: Markdown Lint
@@ -237,6 +245,26 @@ jobs:
         if: hashFiles('openapi/nhms.v1.yaml') != ''
       - run: echo "openapi/nhms.v1.yaml not found — skipping validation"
         if: hashFiles('openapi/nhms.v1.yaml') == ''
+
+  # #2856: no install step — the suites import only `node:` built-ins. The shell
+  # expands the glob so node receives file paths: a bare directory fails on
+  # Node 22+, a quoted glob (expanded by node) fails on Node 20. `failglob`
+  # makes a zero-match glob fail here instead of reaching Node 22+ as a literal
+  # pattern that reports zero tests and exits 0.
+  script-node-tests:
+    name: Script Node Tests
+    needs: changes
+    if: needs.changes.outputs.node_tests == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: |
+          shopt -s failglob
+          node --test scripts/__tests__/*.test.mjs
 
   json-schema-validate:
     name: JSON Schema Validate

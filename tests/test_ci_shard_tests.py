@@ -420,3 +420,64 @@ def test_mocked_lane_keeps_the_frontend_gate_and_frontend_build_no_longer_runs_i
     e2e_runs = "\n".join(_runs(e2e))
     assert "corepack prepare pnpm@" in e2e_runs
     assert "playwright install --with-deps chromium" in e2e_runs
+
+
+# --- ci.yml wiring: the path-scoped node:test lane over scripts/__tests__ (#2856) --------
+
+NODE_TEST_JOB = "script-node-tests"
+NODE_TEST_OUTPUT = "node_tests"
+NODE_TEST_GLOB = "scripts/__tests__/*.test.mjs"
+
+
+def _node_test_run() -> str:
+    (run,) = [run for run in _runs(_frontend_job(NODE_TEST_JOB)) if run]
+    return run
+
+
+def test_node_test_lane_is_gated_on_its_own_changes_output() -> None:
+    workflow = yaml.safe_load(CI_WORKFLOW.read_text(encoding="utf-8"))
+    job = workflow["jobs"][NODE_TEST_JOB]
+
+    assert job["needs"] == "changes"
+    assert job["if"] == f"needs.changes.outputs.{NODE_TEST_OUTPUT} == 'true'"
+    assert workflow["jobs"]["changes"]["outputs"][NODE_TEST_OUTPUT] == (
+        f"${{{{ steps.filter.outputs.{NODE_TEST_OUTPUT} }}}}"
+    )
+    assert type(job["timeout-minutes"]) is int
+    # scripts/ci/full_regression_watch.py takes every "Unit Tests…" job for a full-regression shard.
+    assert not job["name"].startswith("Unit Tests")
+
+
+def test_node_test_lane_filter_covers_the_scripts_their_tests_and_this_workflow() -> None:
+    changes = yaml.safe_load(CI_WORKFLOW.read_text(encoding="utf-8"))["jobs"]["changes"]
+    (filter_step,) = [step for step in changes["steps"] if step.get("id") == "filter"]
+    paths = yaml.safe_load(filter_step["with"]["filters"])[NODE_TEST_OUTPUT]
+
+    # ci.yml itself: a workflow-only PR that rewires the lane must run it.
+    assert {"scripts/**/*.mjs", "scripts/__tests__/**", ".github/workflows/ci.yml"} <= set(paths)
+
+
+def test_node_test_lane_hands_node_shell_expanded_files_and_fails_on_zero_matches() -> None:
+    lines = [line.strip() for line in _node_test_run().splitlines() if line.strip()]
+
+    # The shell expands the glob, so node gets file paths. A bare directory fails
+    # on Node 22+, a quoted glob (expanded by node) fails on Node 20.
+    assert f"node --test {NODE_TEST_GLOB}" in lines
+    assert [line for line in lines if line.startswith("node ")] == [f"node --test {NODE_TEST_GLOB}"]
+    # Without failglob a zero-match glob reaches Node 22+ as a literal pattern:
+    # "tests 0", exit 0.
+    assert "shopt -s failglob" in lines
+    assert lines.index("shopt -s failglob") < lines.index(f"node --test {NODE_TEST_GLOB}")
+
+
+def test_node_test_lane_is_checkout_node_20_and_one_run_with_no_install() -> None:
+    job = _frontend_job(NODE_TEST_JOB)
+    checkout, setup_node, run_step = job["steps"]
+
+    assert checkout == {"uses": "actions/checkout@v4"}
+    assert setup_node == {"uses": "actions/setup-node@v4", "with": {"node-version": "20"}}
+    # No `if:` / `continue-on-error` / `shell:` on the step: default `bash -e`.
+    assert set(run_step) <= {"name", "run"}
+    assert "continue-on-error" not in job
+    for word in ("npm", "pnpm", "npx", "install", "corepack", "yarn"):
+        assert word not in run_step["run"]
