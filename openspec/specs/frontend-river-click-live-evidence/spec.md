@@ -8,8 +8,8 @@ Define the gated, no-mock browser oracle and private current-run evidence contra
 
 ### Requirement: The live river hook MUST be absent by default and select one actual rendered discharge feature
 
-`M11MapLibreSurface` SHALL expose exactly
-`window.__nhmsRiverClickEvidence` with the three methods
+`M11MapLibreSurface` SHALL expose
+`window.__nhmsRiverClickEvidence` with exactly the three methods
 `locateRenderedRiver(input)`, `armPointerCapture()` and `takePointerCapture()`,
 only when the exact
 pre-start boolean `window.__NHMS_E2E_HOOKS__ === true` is present. The global
@@ -355,3 +355,28 @@ as PASS.
 
 - **WHEN** the node-27 runbook runs the merged live profile for each of the three current pins with an absent private receipt path
 - **THEN** it accepts the click gate only from the three current commands' schema-1.1 mode-0600 PASS receipts with `click_dispatch=trusted_pointer_event`, matching origins, feature/products, counts, nearest-rank method, and P95 below 2000 ms
+
+### Requirement: A separate gated hook SHALL locate one rendered station
+
+`M11MapLibreSurface` SHALL expose `window.__nhmsStationLocateEvidence` with exactly one method, `locateRenderedStation(input)`, only when the exact pre-start boolean `window.__NHMS_E2E_HOOKS__ === true` is present. `input` SHALL carry the station's `stationId` and its `lngLat`. The method SHALL move the camera to that point, confirm that a rendered `met-stations` feature with that `station_id` lies at the returned viewport point and is not covered by another element, and return the viewport point and the feature's identity. It SHALL be read-only: it SHALL NOT expose a map ref or a generic query surface and SHALL NOT invoke any product callback; the only way into the product click path remains a real pointer or touch activation at the returned point. This hook SHALL NOT change `window.__nhmsRiverClickEvidence`, which keeps exactly its three methods.
+
+#### Scenario: Station hook absent by default
+
+- **WHEN** the map mounts without `window.__NHMS_E2E_HOOKS__ === true`
+- **THEN** `window.__nhmsStationLocateEvidence` is undefined
+
+#### Scenario: Station hook locates a rendered station
+
+- **WHEN** the gate is present, the station overlay is on, and `locateRenderedStation` is called with a rendered station's id and coordinates
+- **THEN** it returns a viewport point inside the map canvas together with that `station_id`
+- **AND** a real click at that point opens the station forcing window for that station
+
+#### Scenario: Station hook refuses an unrendered station
+
+- **WHEN** `locateRenderedStation` is called with a station id that has no rendered feature at the given coordinates
+- **THEN** it reports failure and returns no point
+
+#### Scenario: River hook is unchanged
+
+- **WHEN** the gate is present
+- **THEN** `window.__nhmsRiverClickEvidence` exposes exactly `locateRenderedRiver`, `armPointerCapture` and `takePointerCapture`
