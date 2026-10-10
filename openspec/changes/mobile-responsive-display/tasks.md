@@ -997,11 +997,13 @@
 
   **Minimal mergeable slice:** atomic - 这是原“实拍 + 真机确认”的首刀（自动化产物）；真机确认已切为 7.3。
 
-- [ ] 7.3 真机确认清单与结果：新建 `docs/runbooks/display-mobile-real-device-checklist.md`，列出模拟器证明不了的检查项——底部控件不被浏览器工具栏遮挡、控件不进安全区、选择器与输入框聚焦不自动放大、地图与图表的捏合 / 拖动无手势冲突、抽屉打开后选中要素在抽屉旁可见——以及 design.md Open Questions 的全部条目（全国级别能否点中河段）；iOS Safari 与 Android Chrome 各至少一台。记录用户逐项结果，失败项各立后续 issue 并在 receipt 引用。
+- [x] 7.3 真机确认清单与结果：新建 `docs/runbooks/display-mobile-real-device-checklist.md`，列出模拟器证明不了的检查项——底部控件不被浏览器工具栏遮挡、控件不进安全区、选择器与输入框聚焦不自动放大、地图与图表的捏合 / 拖动无手势冲突、抽屉打开后选中要素在抽屉旁可见——以及 design.md Open Questions 的全部条目（全国级别能否点中河段）；iOS Safari 与 Android Chrome 各至少一台。记录用户逐项结果，失败项各立后续 issue 并在 receipt 引用。
 
   Depends on: 7.2
 
   Verify：receipt 中每个检查项在两类设备上都有结果；每个失败项有后续 issue 编号。
+
+  完成记录（#2818）：清单 `docs/runbooks/display-mobile-real-device-checklist.md`（26 项）；2026-10-10 owner 整体声明“真机确认通过”并要求收尾，receipt `docs/runbooks/receipts/2026-10-10-display-mobile-real-device.md` 按该声明记录——没有逐项回报与设备信息，编排者未独立核实。清单范围外的厂商浏览器上 RD-02 失败（标题栏上方约 40px 灰带），已立 #2857，owner 决定不处理并关闭。
 
   **Suggested fixture level:** none - 文档与人工验收记录。
 
