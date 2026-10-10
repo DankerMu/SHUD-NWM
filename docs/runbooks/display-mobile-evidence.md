@@ -168,4 +168,5 @@ node scripts/node27_display_v2_browser_evidence.mjs --base-url "$BASE_URL" --out
 - 河段目标的取法是 live-river-click 车道 preflight 的简化：同一组只读请求（GFS latest-product -> segment detail），但不做 IFS 交叉核对，也不做字节预算与重定向约束。本脚本是证据采集，不是合并门。
 - 钩子定位会把相机移到目标处并放大，所以开窗状态的截图是放大后的局部，不是全国视图。
 - 页面只为前 50 个流域取站点、全图层 5000 站截断：见「前置」。
-- 单测 `node --test scripts/__tests__/node27_display_v2_browser_evidence.test.mjs` 覆盖预设解析（含上表的 DPR 与 UA 原文）、参数解析、形态与期望、移动判定（含曲线等待结果的两种失败）、报告组装与入口守卫（按路径 / 符号链接 / stdin 运行都执行，被其他模块 import 时无副作用）；它目前不在 CI 里，改脚本后手动跑。
+- 单测 `node --test scripts/__tests__/node27_display_v2_browser_evidence.test.mjs` 覆盖预设解析（含上表的 DPR 与 UA 原文）、参数解析、形态与期望、移动判定（含曲线等待结果的两种失败）、报告组装与入口守卫（按路径 / 符号链接 / stdin 运行都执行，被其他模块 import 时无副作用）。
+- 这组单测在 CI 里由 `Script Node Tests` job 跑：Node 20、不装依赖，执行 `scripts/__tests__/` 下全部 `*.test.mjs`；改动命中 `scripts/**/*.mjs`、`scripts/__tests__/**` 或 `.github/workflows/ci.yml` 时触发，其余改动下为 skipped。改脚本后本地仍可用上面的命令先跑一遍。
