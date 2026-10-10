@@ -388,7 +388,13 @@ export function M11Timeline({
           {cycle ? <span className="truncate text-xs text-neutral-500">{model.sourceLabel}</span> : null}
           <span className="shrink-0 text-xs text-neutral-700">{model.nativeResolutionLabel}</span>
         </div>
-        <div className="relative mt-2">
+        {/*
+          `flex`：滑块行的行高 = input 的外边距盒（16px）。不加时 input 是行内替换元素、坐在基线上，
+          行盒还要算上 `text-sm` strut 的基线下部分——实测 21px 而不是 16px，时间轴流高 69px，
+          在 64px 且不裁剪的条里上下各溢出 2.5px，滑块也比画出来的轨道高 2.5px（#2864）。
+          不要给 input 套包裹层：轨道须是本行首子节点、input 须是本行直接子节点（e2e 按这个结构取轨道）。
+        */}
+        <div className="relative mt-2 flex">
           <div className="absolute left-0 right-0 top-1/2 h-1 -translate-y-1/2 rounded-full bg-neutral-100" />
           {model.dividerPercent !== null ? (
             <div
@@ -400,9 +406,9 @@ export function M11Timeline({
           ) : null}
           {/*
             移动形态的触控命中区（44px 高）：`mobile:h-11` 把输入框撑高，`mobile:-mt-7` 抵掉多出的 28px
-            让行高不变，`mobile:top-3.5` 再下移 14px 使它仍以原来的轨道为中心。上下各外扩 14px，盖住的是
-            当前时刻行与刻度行（都不可点）。不能写成 `-my-3.5`：行内替换元素的基线在边框盒底边，
-            负的下外边距收不回行盒，这一行会被撑高 14px。
+            ——作为 flex 子项它的外边距盒仍是 16px，行高不变（flex 子项的外边距不与容器折叠）；
+            `mobile:top-3.5` 再下移 14px，输入框相对行顶占 −14..30，中心与轨道重合（实测中心差 0）。
+            上下各外扩 14px，盖住的是当前时刻行与刻度行（都不可点）。
           */}
           <input
             aria-label="有效时间滑块"
@@ -439,14 +445,23 @@ export function M11Timeline({
           是固定 `h-16`（64px，`m11VisualTokens.timelineHeight`）+ `items-center` 且无 overflow 控制，
           上下各溢出 8px，底行会压进 MapLibre 版权归属带。改 `min-h-16` 不可接受（token 是高度不是
           下限，会让 AC6 的耦合断言不再校验「条真的是 64px」；且图例/提示条的 bottom-[7.5rem] /
-          bottom-[11.5rem] 是按控制条占 40–104px 推出来的）。二选一后流高回到 20 + 24 + 20 = 64px 整。
+          bottom-[11.5rem] 是按控制条占 40–104px 推出来的）。二选一后流高 = 20 + (8+16) + (4+16) = 64px
+          （实测；前提是滑块行的行盒是 16px，见上面滑块行的 `flex`，e2e 的桌面 spec 钉住）。
           缺省（不传 cycle）时刻度行不渲染、底行照旧，默认路径 DOM 逐字不变。
         */}
         {cycle ? null : (
           <div className="mt-1 flex items-center justify-between gap-3 text-xs text-neutral-500">
             <span className="truncate">{model.sourceLabel}</span>
-            {/* 矮视口横屏不折行：列宽贴近 120px 时折成三行会把时间轴撑到 101px，溢出 64px 的条。 */}
-            <span className="mobile-landscape:whitespace-nowrap">Analysis / Forecast</span>
+            {/*
+              单行的条（桌面、矮视口横屏）里不折行：折成三行会把时间轴撑到 96px，溢出 64px 的条。
+              桌面 768 宽 + 禁用原因时列只剩约 70px，不折行的全文要约 113px，放不下就截断（`truncate`
+              自带不折行；两个 span 按比例让宽）。竖屏移动形态的条高由内容决定，保持可折行且不截断：
+              `mobile:overflow-visible` 把 flex 子项的最小宽度还原成 auto，320 宽时仍是三行。
+              矮视口横屏的列宽下限是 120px，放得下全文，不折行、不截断。
+            */}
+            <span className="truncate mobile:overflow-visible mobile:whitespace-normal mobile-landscape:whitespace-nowrap">
+              Analysis / Forecast
+            </span>
           </div>
         )}
       </div>

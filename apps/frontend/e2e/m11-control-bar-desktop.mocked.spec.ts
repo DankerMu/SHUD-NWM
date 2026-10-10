@@ -1,6 +1,16 @@
 import { expect, test } from '@playwright/test'
 
-import { controlBarParts, expectControlsInViewport, measureControlBar, overlapsVertically } from './support/controlBar.mocked'
+import {
+  EMPTY_CYCLE_OPTION_TEXT,
+  controlBarParts,
+  expectControlsInViewport,
+  installFailClosedDischargeLayer,
+  measureControlBar,
+  measureTimelineRows,
+  overlapsVertically,
+  type ControlBarMeasure,
+  type TimelineRowsMeasure,
+} from './support/controlBar.mocked'
 import { intersects } from './support/legendLauncher.mocked'
 import { installRiverWindowMocks } from './support/riverWindow.mocked'
 import { isMobileForm, requireViewport } from './support/viewportForm'
@@ -25,6 +35,23 @@ const DESKTOP_CONTROL_SIZE = 32
  */
 const DESKTOP_CYCLE_FONT_PX = 16
 const DESKTOP_SPEED_FONT_PX = 12
+/** 滑块行的设计行高（`h-4` 的 input 恰好撑满，行盒里没有行内基线的多余部分）。 */
+const SLIDER_ROW_HEIGHT = 16
+
+/**
+ * 时间轴在条内（#2864）：条是定高 64px 且不裁剪，时间轴的包围盒一旦比条高，文字就画在地图上。
+ * 量的是滑块**行**（`m11-timeline-rows` 的第 2 个子节点），不是 input——桌面下 input 自身恒为 16px。
+ */
+function expectTimelineInsideBar(m: ControlBarMeasure, rows: TimelineRowsMeasure, where: string) {
+  const overhangTop = m.bar.y - m.timeline.y
+  const overhangBottom = m.timeline.y + m.timeline.height - (m.bar.y + m.bar.height)
+  expect.soft(m.timeline.height, `时间轴盒高 ${m.timeline.height} @ ${where}`).toBeLessThanOrEqual(BAR_HEIGHT + TOLERANCE)
+  expect.soft(overhangTop, `时间轴顶边超出控制条 ${overhangTop}px @ ${where}`).toBeLessThanOrEqual(TOLERANCE)
+  expect.soft(overhangBottom, `时间轴底边超出控制条 ${overhangBottom}px @ ${where}`).toBeLessThanOrEqual(TOLERANCE)
+  expect
+    .soft(Math.abs(rows.sliderRow.height - SLIDER_ROW_HEIGHT), `滑块行高 ${rows.sliderRow.height} @ ${where}`)
+    .toBeLessThanOrEqual(TOLERANCE)
+}
 
 test.describe('M11 控制条桌面形态', () => {
   for (const viewport of [
@@ -45,6 +72,9 @@ test.describe('M11 控制条桌面形态', () => {
       const m = await measureControlBar(page, requireViewport(page))
       console.log(`control-bar desktop @ ${where}`, JSON.stringify(m))
       expectControlsInViewport(m, where)
+      const rows = await measureTimelineRows(page)
+      console.log(`control-bar desktop timeline rows @ ${where}`, JSON.stringify(rows))
+      expectTimelineInsideBar(m, rows, where)
 
       expect(Math.abs(m.bar.height - BAR_HEIGHT), `条高 ${m.bar.height}`).toBeLessThanOrEqual(TOLERANCE)
       // 单行：滑块、三个步进 / 播放按钮、两个选择器都与预报源分段纵向重叠。
@@ -86,4 +116,44 @@ test.describe('M11 控制条桌面形态', () => {
       await expect(parts.reason).toHaveCount(0)
     })
   }
+
+  // 桌面形态最挤的状态：768 宽 + fail-closed（无周期 + 禁用原因）。时间轴列只剩约 70px，
+  // 底行的「Analysis / Forecast」放不下——既不能折行把时间轴撑出条外，也不能横向伸出列。
+  test('无周期 + 禁用原因 @ 768x1024：时间轴在条内、不压版权归属，底行文字不伸出列也不压禁用原因', async ({ page }) => {
+    await page.setViewportSize({ width: 768, height: 1024 })
+    expect(isMobileForm(requireViewport(page))).toBe(false)
+    await installRiverWindowMocks(page)
+    await installFailClosedDischargeLayer(page)
+    await page.goto('/')
+    await expectMapControlsMounted(page)
+    const parts = controlBarParts(page)
+    await expect(parts.reason).toBeVisible()
+    await expect(parts.cycle.locator('option')).toHaveText([EMPTY_CYCLE_OPTION_TEXT])
+    await expect(parts.cycle).toBeDisabled()
+
+    const where = '768x1024 fail-closed'
+    const m = await measureControlBar(page, requireViewport(page))
+    const rows = await measureTimelineRows(page)
+    console.log(`control-bar desktop @ ${where}`, JSON.stringify(m), JSON.stringify(rows))
+    expectControlsInViewport(m, where)
+    expect(Math.abs(m.bar.height - BAR_HEIGHT), `条高 ${m.bar.height}`).toBeLessThanOrEqual(TOLERANCE)
+    expectTimelineInsideBar(m, rows, where)
+    expect
+      .soft(intersects(m.timeline, m.attribution), `时间轴 ${JSON.stringify(m.timeline)} 与版权归属 ${JSON.stringify(m.attribution)} 相交`)
+      .toBe(false)
+
+    // 底行：数据源标签 + 「Analysis / Forecast」两个 span，都有面积、都在列内、都不压禁用原因。
+    expect(m.reason, 'fail-closed 目录下禁用原因应出现').not.toBeNull()
+    const reason = m.reason!
+    expect(rows.lastRowSpans, '无周期时末行是底行，应恰有两个 span').toHaveLength(2)
+    const rowsRight = rows.rows.x + rows.rows.width
+    for (const [index, span] of rows.lastRowSpans.entries()) {
+      expect.soft(span.height, `底行 span ${index + 1} 高应 > 0`).toBeGreaterThan(0)
+      expect
+        .soft(span.x + span.width, `底行 span ${index + 1} ${JSON.stringify(span)} 的右边超出列右边 ${rowsRight}`)
+        .toBeLessThanOrEqual(rowsRight + TOLERANCE)
+      expect.soft(span.x, `底行 span ${index + 1} ${JSON.stringify(span)} 的左边超出列左边 ${rows.rows.x}`).toBeGreaterThanOrEqual(rows.rows.x - TOLERANCE)
+      expect.soft(intersects(span, reason), `底行 span ${index + 1} ${JSON.stringify(span)} 压到禁用原因 ${JSON.stringify(reason)} 上`).toBe(false)
+    }
+  })
 })

@@ -45,10 +45,11 @@ const LAUNCHER_COLUMN_TEST_ID = 'm11-launcher-column'
 const OPS_LINK_TEST_ID = 'm11-ops-link'
 const PRECIP_TOGGLE_TEST_ID = 'm11-layer-toggle-precip'
 /**
- * 滑块命中区与轨道的纵向中心差上限。实测恒为 −2.5px（三个移动 project 与 320×568；行内替换元素
- * 落在行盒基线上的既有偏差）；去掉 `mobile:top-3.5` 会让命中区整体上移 14px（变成 −16.5px）。
+ * 滑块命中区与轨道的纵向中心差上限。实测恒为 0（三个移动 project 与 320×568；滑块行是 flex 容器，
+ * 行高 = 滑块的 16px 外边距盒，#2864）；去掉 `mobile:top-3.5` 会让命中区整体上移 14px（变成 −14px），
+ * 去掉滑块行的 `flex` 则回到行内基线的 −2.5px。
  */
-const MAX_SLIDER_CENTRE_DELTA_PX = 3
+const MAX_SLIDER_CENTRE_DELTA_PX = 0.5
 /** 画出来的轨道是 `h-1`（4px）：按结构取到的元素得是它，不是别的同行元素。 */
 const TRACK_HEIGHT_PX = 4
 const EDGE_ALIGN_TOLERANCE_PX = 0.5

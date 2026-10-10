@@ -181,3 +181,39 @@ export function expectControlsInViewport(measure: ControlBarMeasure, where: stri
 export function overlapsVertically(a: Box, b: Box): boolean {
   return a.y < b.y + b.height && b.y < a.y + a.height
 }
+
+export interface TimelineRowsMeasure {
+  /** `m11-timeline-rows`：时间轴右侧的行列。 */
+  rows: Box
+  /** 滑块行 = 行列的第 2 个子节点（滑块的父节点）。 */
+  sliderRow: Box
+  /** 末行（第 3 个子节点：有周期时是刻度行，无周期时是底行）里的 `<span>`，按文档顺序。 */
+  lastRowSpans: Box[]
+  /** 滑块与轨道（滑块行的首子节点）的纵向中心差。 */
+  sliderCentreDeltaY: number
+}
+
+/**
+ * 量时间轴行列的内部几何（#2864）。按结构取节点：滑块行没有 testid，它是 `m11-timeline-rows` 的
+ * 第 2 个子节点。量的是**行**而不是 input——桌面形态下 input 自身恒为 16px，量它恒真。
+ */
+export async function measureTimelineRows(page: Page): Promise<TimelineRowsMeasure> {
+  return page.getByTestId('m11-timeline-rows').evaluate((rows) => {
+    const boxOfRect = (rect: DOMRect) => ({ x: rect.left, y: rect.top, width: rect.width, height: rect.height })
+    const sliderRow = rows.children[1]
+    const lastRow = rows.children[2]
+    const input = sliderRow?.querySelector(':scope > input[type="range"]')
+    const track = sliderRow?.firstElementChild
+    if (!sliderRow || !lastRow || !input || !track || track === input) {
+      throw new Error('m11-timeline-rows 的结构不是「当前时次行 / 滑块行（轨道在前、滑块为直接子节点）/ 末行」')
+    }
+    const own = input.getBoundingClientRect()
+    const trackRect = track.getBoundingClientRect()
+    return {
+      rows: boxOfRect(rows.getBoundingClientRect()),
+      sliderRow: boxOfRect(sliderRow.getBoundingClientRect()),
+      lastRowSpans: Array.from(lastRow.querySelectorAll(':scope > span')).map((span) => boxOfRect(span.getBoundingClientRect())),
+      sliderCentreDeltaY: own.top + own.height / 2 - (trackRect.top + trackRect.height / 2),
+    }
+  })
+}
