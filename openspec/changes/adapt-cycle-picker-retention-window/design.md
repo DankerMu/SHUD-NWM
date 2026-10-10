@@ -2,8 +2,9 @@
 
 ## Current Behavior
 
-`useHydroMetPopupProduct` resolves a lightweight latest-product identity and
-uses `available_issue_times` for the popup issue-time selector. Those issue
+The river forecast window and the station forcing window each call
+`fetchHydroMetLatestProduct` for a lightweight latest-product identity and use
+its `available_issue_times` for their issue-time selector. Those issue
 times come from DB candidate rows and are not filtered by retained disk
 availability. `M11StationForcingPopup` then requests
 `/api/v1/met/stations/{station_id}/series` for the selected product identity.

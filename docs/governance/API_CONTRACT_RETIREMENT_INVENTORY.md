@@ -129,8 +129,7 @@ rg --files apps/frontend/e2e | sort
   with `identity_only=true` for popup product identity. Current consumers fan
   out through `apps/frontend/src/stores/hydroMetProductData.ts`,
   `apps/frontend/src/stores/stationLayerData.ts`,
-  `apps/frontend/src/components/map/useHydroMetPopupProduct.ts`,
-  `apps/frontend/src/components/map/M11RiverForecastPopup.tsx`, and
+  `apps/frontend/src/components/map/M11RiverForecastPanel.tsx`, and
   `apps/frontend/src/components/map/M11StationForcingPopup.tsx`.
 - Frontend test evidence: `apps/frontend/src/pages/hydroMet/__tests__/bootstrap.test.ts`
   asserts direct latest-product calls and strict-identity behavior;

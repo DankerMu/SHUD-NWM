@@ -76,8 +76,7 @@ Search `F1`/`F3` found active frontend consumers of the canonical active route:
   `identity_only=true` popup product identity.
 - Consumer fan-out: `apps/frontend/src/stores/hydroMetProductData.ts`,
   `apps/frontend/src/stores/stationLayerData.ts`,
-  `apps/frontend/src/components/map/useHydroMetPopupProduct.ts`,
-  `apps/frontend/src/components/map/M11RiverForecastPopup.tsx`, and
+  `apps/frontend/src/components/map/M11RiverForecastPanel.tsx`, and
   `apps/frontend/src/components/map/M11StationForcingPopup.tsx`.
 - Generated type binding: `apps/frontend/src/api/types.ts` exposes the
   `/api/v1/mvp/qhh/latest-product` path, `QhhLatestProduct` schema, and
