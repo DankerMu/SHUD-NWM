@@ -143,14 +143,23 @@ def test_entropy_baseline_writer_preserves_v1_trend_semantics_for_current_repo()
         "top_severity": "high",
     }
 
-    cleanup_priorities = baseline["cleanup_priorities"]
-    assert cleanup_priorities == [
-        {
-            "target": "Align current display runbooks with M26 single-map route authority",
-            "impact": "high",
-            "effort": "low",
-            "axis": "context",
-        },
+    # #2885: the Playwright entry's ``impact`` flips with the live broad-mock
+    # findings (count >= 10, or one P1/high live-tagged mock), so it is taken from
+    # the writer's own computation over this very ``report``'s group; the threshold
+    # and the sort key are pinned by literals in the synthetic test below.
+    broad_mock_findings = [
+        finding for finding in report["findings"] if finding["check_id"] == "broad-e2e-api-mock"
+    ]
+    playwright_impact = write_entropy_baseline._cleanup_priority_targets(broad_mock_findings)[0]["impact"]
+    assert playwright_impact in {"medium", "high"}
+    route_token_priority = {
+        "target": "Align current display runbooks with M26 single-map route authority",
+        "impact": "high",
+        "effort": "low",
+        "axis": "context",
+    }
+    expected_cleanup_priorities = [
+        route_token_priority,
         {
             "target": (
                 "Stage large decomposition of services/orchestrator/scheduler.py and "
@@ -162,10 +171,52 @@ def test_entropy_baseline_writer_preserves_v1_trend_semantics_for_current_repo()
         },
         {
             "target": "Keep mocked Playwright regression separated from live display evidence",
+            "impact": playwright_impact,
+            "effort": "medium",
+            "axis": "behavior/context",
+        },
+    ]
+    cleanup_priorities = baseline["cleanup_priorities"]
+    assert cleanup_priorities == sorted(
+        expected_cleanup_priorities,
+        key=lambda item: (
+            -write_entropy_baseline._impact_rank(item["impact"]),
+            write_entropy_baseline._effort_rank(item["effort"]),
+            item["target"],
+        ),
+    )
+    assert cleanup_priorities[0] == route_token_priority
+
+
+def test_entropy_baseline_cleanup_priorities_flip_impact_and_order_at_ten_broad_mocks() -> None:
+    broad_mock = {"check_id": "broad-e2e-api-mock", "priority": "P2", "severity": "medium"}
+    orchestrator_priority = {
+        "target": (
+            "Stage large decomposition of services/orchestrator/scheduler.py and "
+            "services/orchestrator/chain.py"
+        ),
+        "impact": "high",
+        "effort": "high",
+        "axis": "structure/behavior",
+    }
+
+    assert write_entropy_baseline._baseline_cleanup_priorities([dict(broad_mock) for _ in range(9)]) == [
+        orchestrator_priority,
+        {
+            "target": "Keep mocked Playwright regression separated from live display evidence",
             "impact": "medium",
             "effort": "medium",
             "axis": "behavior/context",
         },
+    ]
+    assert write_entropy_baseline._baseline_cleanup_priorities([dict(broad_mock) for _ in range(10)]) == [
+        {
+            "target": "Keep mocked Playwright regression separated from live display evidence",
+            "impact": "high",
+            "effort": "medium",
+            "axis": "behavior/context",
+        },
+        orchestrator_priority,
     ]
 
 
