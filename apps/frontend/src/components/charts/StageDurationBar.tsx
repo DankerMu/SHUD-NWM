@@ -2,6 +2,7 @@ import { useMemo } from 'react'
 import ReactEChartsCore from 'echarts-for-react/lib/core'
 
 import { echarts } from '@/components/charts/echartsCore'
+import { useChartFollowsContainer } from '@/components/charts/useChartFollowsContainer'
 import { STAGE_NAMES } from '@/lib/constants'
 import { formatDuration } from '@/lib/format'
 import type { PipelineStage } from '@/stores/monitoring'
@@ -40,7 +41,11 @@ export function StageDurationBar({ stages }: StageDurationBarProps) {
     [stages],
   )
 
-  if (!stages.length) {
+  const hasData = stages.length > 0
+  // 空数据时不渲染图表：hook 必须在提前 return 之前调用，入参为 false 时断开容器观察。
+  const followContainer = useChartFollowsContainer(hasData)
+
+  if (!hasData) {
     return <div className="rounded-md border border-dashed border-border p-4 text-sm text-muted">暂无耗时数据</div>
   }
 
@@ -50,6 +55,7 @@ export function StageDurationBar({ stages }: StageDurationBarProps) {
       option={option}
       notMerge
       lazyUpdate
+      onChartReady={followContainer}
       style={{ height: 260, width: '100%' }}
     />
   )

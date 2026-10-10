@@ -146,7 +146,7 @@ test.describe('运维页移动形态兜底', () => {
         await openOpsFallbackPage(page, target)
         await expectNoPageOverflow(page)
 
-        // 换视口后重新加载，不在已加载的页面上直接改视口（见 visitOpsFallbackPage 的说明）。
+        // 换视口后重新加载，不依赖改视口的时序（见 visitOpsFallbackPage 的说明）。
         await page.setViewportSize(PHONE_VIEWPORT)
         await visitOpsFallbackPage(page, target)
         await expectNoPageOverflow(page)

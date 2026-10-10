@@ -2,6 +2,7 @@ import { useMemo } from 'react'
 import ReactEChartsCore from 'echarts-for-react/lib/core'
 
 import { echarts } from '@/components/charts/echartsCore'
+import { useChartFollowsContainer } from '@/components/charts/useChartFollowsContainer'
 import type { QueueState } from '@/stores/monitoring'
 
 interface QueueDonutProps {
@@ -12,6 +13,7 @@ interface QueueDonutProps {
 export function QueueDonut({ queue, error }: QueueDonutProps) {
   const values = queue ?? { running: 0, pending: 0, idle: 0 }
   const total = values.running + values.pending + values.idle
+  const followContainer = useChartFollowsContainer(true)
 
   const option = useMemo(
     () => ({
@@ -57,6 +59,7 @@ export function QueueDonut({ queue, error }: QueueDonutProps) {
         option={option}
         notMerge
         lazyUpdate
+        onChartReady={followContainer}
         style={{ height: 180, width: '100%' }}
       />
       {error ? <p className="mt-1 text-xs text-danger">{error}</p> : null}
