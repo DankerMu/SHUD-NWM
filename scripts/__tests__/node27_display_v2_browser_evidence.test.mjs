@@ -11,7 +11,7 @@
  */
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, rmSync, symlinkSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
@@ -30,6 +30,9 @@ import {
 
 const SCRIPT = fileURLToPath(new URL('../node27_display_v2_browser_evidence.mjs', import.meta.url))
 const REPO_ROOT = path.resolve(path.dirname(SCRIPT), '..')
+// The values docs/runbooks/display-mobile-evidence.md documents for both presets.
+const DOCUMENTED_DPR = 2
+const DOCUMENTED_USER_AGENT = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36'
 const PINS = ['--river-basin-id', 'basins_qhh', '--river-segment-id', 'basins_qhh_shud_reach_000001']
 
 // --- preset resolution ------------------------------------------------------
@@ -40,8 +43,8 @@ test('mobile-portrait preset is a 390x664 touch phone', () => {
   assert.deepEqual(preset.viewport, { width: 390, height: 664 })
   assert.equal(preset.hasTouch, true)
   assert.equal(preset.isMobile, true)
-  assert.ok(preset.deviceScaleFactor >= 1)
-  assert.match(preset.userAgent, /Mobile/)
+  assert.equal(preset.deviceScaleFactor, DOCUMENTED_DPR)
+  assert.equal(preset.userAgent, DOCUMENTED_USER_AGENT)
 })
 
 test('mobile-landscape preset is a 750x342 touch phone', () => {
@@ -50,8 +53,8 @@ test('mobile-landscape preset is a 750x342 touch phone', () => {
   assert.deepEqual(preset.viewport, { width: 750, height: 342 })
   assert.equal(preset.hasTouch, true)
   assert.equal(preset.isMobile, true)
-  assert.ok(preset.deviceScaleFactor >= 1)
-  assert.match(preset.userAgent, /Mobile/)
+  assert.equal(preset.deviceScaleFactor, DOCUMENTED_DPR)
+  assert.equal(preset.userAgent, DOCUMENTED_USER_AGENT)
 })
 
 test('an unknown preset name is rejected and the message lists the valid names', () => {
@@ -233,6 +236,8 @@ function defaultGeometry(overrides = {}) {
     sheet: null,
     chart: null,
     loading: false,
+    panel: null,
+    emptyText: null,
     anchor: { x: null, y: null },
     camera: { center: '98.000000,38.000000', zoom: '9.0000' },
     controls: [
@@ -255,6 +260,8 @@ function bottomSheetGeometry(overrides = {}) {
     sheet: { x: 0, y: 264, width: 390, height: 400 },
     chart: { x: 12, y: 360, width: 366, height: 200 },
     loading: false,
+    panel: 'm11-river-panel-chart',
+    emptyText: null,
     anchor: { x: '195', y: '156' },
     camera: { center: '98.000000,38.000000', zoom: '12.0000' },
     controls: [control('close', { x: 334, y: 272, width: 44, height: 44 }, { inSheet: true })],
@@ -274,6 +281,8 @@ function rightSheetGeometry(overrides = {}) {
     sheet: { x: 390, y: 48, width: 360, height: 294 },
     chart: { x: 402, y: 150, width: 336, height: 140 },
     loading: false,
+    panel: 'm11-station-panel-chart',
+    emptyText: null,
     anchor: { x: '195', y: '195' },
     camera: { center: '98.000000,38.000000', zoom: '12.0000' },
     controls: [control('close', { x: 698, y: 52, width: 44, height: 44 }, { inSheet: true })],
@@ -384,13 +393,51 @@ test('the short-landscape chart floor is 120: 119 fails, exactly 120 passes', ()
   assert.equal(judgeMobileState(bottomSheetGeometry({ chart: { x: 12, y: 360, width: 366, height: 140 } }), portrait).length, 1)
 })
 
-test('a missing chart area is reported as still loading or as no curve data', () => {
-  const loading = judgeMobileState(bottomSheetGeometry({ chart: null, loading: true }), portrait)
-  assert.equal(loading.length, 1)
-  assert.match(loading[0], /still loading/)
-  const empty = judgeMobileState(bottomSheetGeometry({ chart: null, loading: false }), portrait)
-  assert.equal(empty.length, 1)
-  assert.match(empty[0], /no curve data/)
+const WAIT_DONE = { waited_ms: 3200, limit_ms: 60000, timed_out: false }
+const WAIT_TIMED_OUT = { waited_ms: 4003, limit_ms: 4000, timed_out: true }
+const PENDING = { chart: null, loading: true, panel: 'm11-river-panel-pending' }
+const EMPTY = { chart: null, loading: false, panel: 'm11-river-panel-empty', emptyText: '暂无 q_down 预报数据' }
+
+test('a curve wait that ended on a chart leaves the state passing', () => {
+  assert.deepEqual(judgeMobileState(bottomSheetGeometry(), portrait, WAIT_DONE), [])
+  assert.deepEqual(judgeMobileState(rightSheetGeometry(), landscape, WAIT_DONE), [])
+})
+
+test('a curve wait that ran to the timeout is "still loading after <timeout> ms", with the panel state', () => {
+  assert.deepEqual(judgeMobileState(bottomSheetGeometry(PENDING), portrait, WAIT_TIMED_OUT), [
+    'curve still loading after 4000 ms (panel state: m11-river-panel-pending)',
+  ])
+  const station = judgeMobileState(rightSheetGeometry({ chart: null, loading: true, panel: 'm11-station-popup-no-product' }), landscape, { ...WAIT_TIMED_OUT, limit_ms: 60000 })
+  assert.deepEqual(station, ['curve still loading after 60000 ms (panel state: m11-station-popup-no-product)'])
+})
+
+test('a timed-out curve wait fails the state even when the chart turned up before the read', () => {
+  const failures = judgeMobileState(bottomSheetGeometry(), portrait, WAIT_TIMED_OUT)
+  assert.deepEqual(failures, ['curve still loading after 4000 ms (panel state: m11-river-panel-chart)'])
+})
+
+test('a curve wait that finished without a chart is "no curve data", naming the terminal state seen', () => {
+  assert.deepEqual(judgeMobileState(bottomSheetGeometry(EMPTY), portrait, WAIT_DONE), [
+    'no curve data: the wait for the curve ended without a chart area (panel state: m11-river-panel-empty「暂无 q_down 预报数据」)',
+  ])
+})
+
+test('"still loading" is never reported for a wait that did not time out', () => {
+  // A busy marker at the read alone does not make it a timeout.
+  for (const curveWait of [WAIT_DONE, null, undefined]) {
+    const failures = judgeMobileState(bottomSheetGeometry(PENDING), portrait, curveWait)
+    assert.equal(failures.length, 1)
+    assert.match(failures[0], /^no curve data: .*\(panel state: m11-river-panel-pending\)$/)
+    assert.doesNotMatch(failures[0], /still loading/)
+  }
+  const none = judgeMobileState(bottomSheetGeometry({ chart: null, panel: null }), portrait, WAIT_DONE)
+  assert.deepEqual(none, ['no curve data: the wait for the curve ended without a chart area (panel state: none)'])
+})
+
+test('the chart floor is not judged on top of a curve failure', () => {
+  const short = { x: 12, y: 360, width: 366, height: 100 }
+  assert.equal(judgeMobileState(bottomSheetGeometry({ chart: short }), portrait, WAIT_TIMED_OUT).length, 1)
+  assert.deepEqual(judgeMobileState(bottomSheetGeometry({ chart: short }), portrait, WAIT_DONE), ['chart area height 100 < 160'])
 })
 
 test('missing anchor attributes fail an open-window state once', () => {
@@ -563,14 +610,32 @@ test('importing the script has no side effect', () => {
 test('importing the script from another entry file has no side effect', () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'nhms-evidence-entry-'))
   try {
+    // A real second entry file: `argv[1]` exists and is not the script. It
+    // imports the script directly and through a symlink, then proves it ran.
     const entry = path.join(dir, 'entry.mjs')
     symlinkSync(SCRIPT, path.join(dir, 'linked.mjs'))
-    const result = run(['--input-type=module', '-e', `await import(${JSON.stringify(pathToFileURL(path.join(dir, 'linked.mjs')).href)})`, entry])
+    writeFileSync(entry, [
+      `const direct = await import(${JSON.stringify(pathToFileURL(SCRIPT).href)})`,
+      "const linked = await import('./linked.mjs')",
+      "process.stdout.write(`imported ${typeof direct.parseArgs} ${typeof linked.parseArgs}\\n`)",
+      '',
+    ].join('\n'))
+    const result = run([entry])
     assert.equal(result.status, 0, result.stderr)
-    assert.equal(result.stdout, '')
+    assert.equal(result.stdout, 'imported function function\n')
     assert.equal(result.stderr, '')
   } finally {
     rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('feeding the script through stdin with no arguments exits 2 with the usage error', () => {
+  // No file to compare `argv[1]` with: the module text itself is the entry.
+  for (const argv of [['--input-type=module', '-'], ['--input-type=module']]) {
+    const result = run(argv, { input: readFileSync(SCRIPT) })
+    assert.equal(result.status, 2, JSON.stringify(argv))
+    assert.match(result.stderr, /--out-dir is required/)
+    assert.equal(result.stdout, '')
   }
 })
 

@@ -44,6 +44,7 @@
 
 ```bash
 cd /home/nwm/NWM
+mkdir -p /home/nwm/tmp
 OUT=$(mktemp -d /home/nwm/tmp/display-mobile-evidence-XXXXXX)
 BASE_URL=https://test.nwm.ac.cn
 BASIN=<basin_id>
@@ -65,7 +66,7 @@ node scripts/node27_display_v2_browser_evidence.mjs --base-url "$BASE_URL" --out
 - `--device-preset mobile-portrait|mobile-landscape`：选预设；未知名字是用法错误，报错信息列出合法取值。
 - `--river-basin-id`、`--river-segment-id`：带预设时必填，须匹配 `[A-Za-z0-9._:-]{1,96}`。
 - `--station-id`：可选。
-- `--timeout-ms`（默认 60000）：每一步等待的上限（导航、钩子出现、图层就绪、曲线加载、相机静止）。
+- `--timeout-ms`（默认 60000）：每一步等待的上限。导航、钩子出现、图层就绪、曲线加载、相机静止以及取定位目标的每个 GET 直接用这个值；另外三步有自己的上限，实际取 `min(自身上限, --timeout-ms)`——单次钩子调用 20000ms、轻触后窗口出现 10000ms、几何读数稳定 10000ms。所以加大 `--timeout-ms` 对这三步超过自身上限的部分不起作用，调小则一并收紧。
 - `--viewport` 不能和 `--device-preset` 同时给（视口由预设决定）；`--river-basin-id` / `--river-segment-id` / `--station-id` 不带预设时不能出现。这些都是用法错误。
 - `--settle-budget-ms` / `--settle-samples` 在预设路径不参与判定：各状态的 `settle_ms` 只记录。
 
@@ -84,7 +85,11 @@ node scripts/node27_display_v2_browser_evidence.mjs --base-url "$BASE_URL" --out
 
 报告的顶层键：`schema`、`base_url`、`preset`（预设全量）、`form`、`expectations`（按形态选出的期望）、`river_target` / `station_target`（从展示 API 取到的定位目标，取不到时是 `{ "error": … }`）、`captured_at`、`states`、`non_get_requests`、`failures`、`pass`。
 
-`states.default` / `states.river` / `states.station` 各含 `url`、`settle_ms`、`tap`（轻触的视口点与目标 id）、`attempts`（每次钩子调用的结果与错误码）、`geometry`、`screenshot`、`failures`。`geometry` 含视口、头部盒、控制条盒、三个启动器盒、地图区盒、曲线窗 frame 盒（`sheet`）、图表区盒（`chart`）、`anchor`（`data-selected-anchor-x/-y` 原文）、`camera`，以及该状态下全部可见可点控件的盒（每个带“是否在曲线窗内”“是否在纵向滚动容器内”与可见纵向区间）。
+`states.default` / `states.river` / `states.station` 各含 `url`、`settle_ms`、`tap`（轻触的视口点与目标 id）、`attempts`（每次钩子调用的结果与错误码）、`curve_wait`、`geometry`、`screenshot`、`failures`。
+
+- `curve_wait`：“等曲线加载结束”这一步的结果 `{ waited_ms, limit_ms, timed_out }`（实际等了多久、上限即 `--timeout-ms`、是否等到上限）；默认状态与没走到这一步的开窗状态为 `null`。
+- `geometry`：视口、头部盒、控制条盒、三个启动器盒、地图区盒、曲线窗 frame 盒（`sheet`）、图表区盒（`chart`）、`anchor`（`data-selected-anchor-x/-y` 原文）、`camera`，以及该状态下全部可见可点控件的盒（每个带“是否在曲线窗内”“是否在纵向滚动容器内”与可见纵向区间）。
+- `geometry` 里还有曲线窗主体在读数时所处的状态：`panel`（「通过条件」表里的标记 testid，没有则 `null`）、`loading`（`panel` 是否为“仍在加载”类标记，含河段窗的无文字占位）、`emptyText`（空态提示的文字，否则 `null`）。
 
 `non_get_requests` 记录三个页面发出的全部非 GET 请求，正常为空数组——它是“只读”的旁证，不参与判定。
 
@@ -104,12 +109,21 @@ node scripts/node27_display_v2_browser_evidence.mjs --base-url "$BASE_URL" --out
 河段窗、气象代站窗两个状态各自：
 
 - 曲线窗 frame 存在；
-- 图表区存在且高度不低于下限（`mobile-portrait` 160px，`mobile-landscape` 120px）。图表区不存在时分两种失败：曲线到超时仍在加载、加载结束但没有曲线数据；
+- 曲线在 `--timeout-ms` 内加载结束，且结束于图表区而不是空态；图表区高度不低于下限（`mobile-portrait` 160px，`mobile-landscape` 120px）。
 - 地图容器上有两个选中锚点属性；
 - 锚点在地图区内，且在未被抽屉遮住的一侧——底部抽屉：锚点 y 小于抽屉顶边；右侧抽屉：锚点 x 小于抽屉左边；
 - 曲线窗内全部可见可点控件的盒在视口内。
 
 “可见可点控件”的口径与 mocked 车道的全页触控审计相同：跳过宽或高为 0、`display: none`、`visibility` 非 visible、处在 `[inert]` / `[aria-hidden="true"]` 子树里的元素与 `canvas`；被非滚动的裁剪祖先完全裁掉的跳过；纵向滚动容器（抽屉主体）的成员横向判完整盒、纵向只判可见区间，完全滚出算通过；边缘容差 0.5px；MapLibre attribution 豁免。
+
+“加载结束”等的是一个正向终态，不是“加载提示不在”：轻触、曲线窗 frame 可见之后，脚本在 `--timeout-ms` 内等到窗口主体里**没有任何“仍在加载”类标记，并且图表区或空态提示之一已经出现**。两个窗口主体的全部渲染分支如下（各分支互斥）：
+
+| 窗口 | 仍在加载（继续等） | 终态：有曲线 | 终态：无曲线 |
+|---|---|---|---|
+| 河段窗 | `m11-river-panel-pending`（加载的前 600ms 只有这个无文字占位，之后才换成提示）、`m11-river-panel-loading`（加载提示） | `m11-river-panel-chart`（部分来源失败时旁边另有 `m11-river-panel-partial`） | `m11-river-panel-empty`（暂无数据，或两个来源都失败时的原因列表） |
+| 气象代站窗 | `m11-station-popup-loading`（加载提示，一开始加载就出现，没有延迟占位）、`m11-station-popup-no-product`（展示来源尚未解析完）、`m11-station-panel-refreshing`（已有曲线时的刷新） | `m11-station-panel-chart`（部分失败时另有 `m11-station-popup-partial`） | `m11-station-popup-empty`（所选要素无可绘制序列，或失败原因列表） |
+
+等到上限仍未到终态，该状态记 `curve still loading after <--timeout-ms> ms`（即使曲线在随后的读数之前赶到也照记：这一步已经超时）；到了终态但没有图表区，记 `no curve data`。两条信息都带读数时的 `panel state`，后者还带空态提示的原文。
 
 量几何之前脚本先等相机静止：间隔 650ms 的连续两次读数里，`data-selected-anchor-x/-y`、`data-camera-center`、`data-camera-zoom` 四个属性都相同（平移动画 450ms，锚点属性只在相机静止后更新）。等不到时该状态记一条失败。
 
@@ -123,8 +137,19 @@ node scripts/node27_display_v2_browser_evidence.mjs --base-url "$BASE_URL" --out
 | 同上，含 `STATION_HOOK_POINT_OCCLUDED` / `STATION_HOOK_CLUSTERED` | 候选站点被另一个流域的重合站点盖住或被聚合 | 换一个不重叠的流域，或用 `--station-id` 指定一个 |
 | `is missing after … ms (does the deployed build carry the hook?)` | 被测入口的构建里没有该钩子 | 被测入口尚未部署到含钩子的 commit；不是脚本问题 |
 | `the station layer has no features` | `data-met-station-feature-count` 在超时内一直是 0（页面要为最多 50 个流域串行取数后才写入） | 加大 `--timeout-ms` 重跑；仍为 0 查站点接口 |
+| `the map did not register the discharge overlay` | 地图在超时内没有登记 discharge 图层 | 加大 `--timeout-ms` 重跑；仍然如此查 `/api/v1/tiles/hydro-national/` 瓦片请求 |
+| `no answer from locateRenderedRiver / locateRenderedStation within N ms`（`LOCATE_TIMEOUT`） | 钩子调用在 `min(20000, --timeout-ms)` 内没有返回（钩子自身 15 秒内必有答复，所以多半是 `--timeout-ms` 调得比它短，或页面卡死） | `--timeout-ms` 不低于 20000 重跑；仍然如此看该状态的截图 |
+| `located X, not segment … / station …` | 钩子返回的要素 id 不是请求的那个（脚本不会去点别的要素） | 被测构建的钩子与脚本不匹配，按 bug 上报；不要换 pin 绕过 |
+| `returned a non-finite point` | 钩子成功但没给出可用的视口坐标 | 同上，按钩子 bug 上报 |
+| `the river / station window did not appear within N ms after a tap at (x, y)` | 轻触后 `min(10000, --timeout-ms)` 内曲线窗 frame 没有出现 | 看该状态截图里 (x, y) 处是什么；`--timeout-ms` 低于 10000 时调回去重跑；仍不出现按产品点击链路的问题上报 |
+| `the map camera did not come to rest within N ms` | 相机属性在超时内没有连续两次相同，或构建没有 `data-camera-center` / `data-camera-zoom` | 加大 `--timeout-ms` 重跑；属性缺失说明被测入口未部署到含该属性的 commit |
+| `geometry did not settle within N ms; the last read is reported` | `min(10000, --timeout-ms)` 内没有连续两次（间隔 250ms）完全相同的几何读数——页面上有东西一直在动 | 重跑一次；稳定复现时对比报告里该状态的 `geometry` 与截图找出在动的元素，按布局抖动上报 |
+| `map area is missing` | 读数时页面上没有 `m11-fullscreen-map`（页面崩了或被导航走） | 看截图与 `capture failed` 类信息；重跑一次 |
+| `curve window frame is missing` | 窗口打开过，但读数时 frame 已不在 | 同上 |
+| `capture failed: …` | 该状态采集中途抛错（导航超时、页面关闭等），原文在冒号后 | 按原文处置；导航超时加大 `--timeout-ms` |
 | `latest-product … is unavailable` | 流域 pin 没有 GFS 展示产品；河段与气象代站两个状态都记失败，默认状态照常采集 | 换流域 pin |
-| `curve still loading at the timeout` / `no curve data` | 曲线到超时还在加载 / 加载完但 live 上没有曲线数据 | 前者加大 `--timeout-ms`；后者换 pin 或查序列接口 |
+| `curve still loading after N ms (panel state: …)` | “等曲线加载结束”实打实等满了 `--timeout-ms`（`curve_wait.timed_out` 为真、`waited_ms` ≈ N），仍没到终态；`panel state` 是读数时的标记 | 加大 `--timeout-ms` 重跑（这一步直接用该值，加大有效）；默认 60000 仍超时就查序列接口（河段 `…/river-segments/<id>/forecast-series`，代站 `/api/v1/met/stations/<id>/series`）的耗时。`panel state` 为 `m11-station-popup-no-product` 时是展示来源一直没解析出来，查 latest-product |
+| `no curve data: … (panel state: …「…」)` | 加载已结束（没有等满上限），终态是空态而不是图表区；括号里是空态标记与它显示的原文 | 加大 `--timeout-ms` 无效。按原文处置：暂无数据换 pin；来源失败原因查序列接口 |
 | `header height 84 != 48`、`launcher … is missing` | 被测入口还是桌面布局 | 被测入口尚未部署移动形态改动 |
 
 ## receipt 应记录的内容
@@ -143,4 +168,4 @@ node scripts/node27_display_v2_browser_evidence.mjs --base-url "$BASE_URL" --out
 - 河段目标的取法是 live-river-click 车道 preflight 的简化：同一组只读请求（GFS latest-product -> segment detail），但不做 IFS 交叉核对，也不做字节预算与重定向约束。本脚本是证据采集，不是合并门。
 - 钩子定位会把相机移到目标处并放大，所以开窗状态的截图是放大后的局部，不是全国视图。
 - 页面只为前 50 个流域取站点、全图层 5000 站截断：见「前置」。
-- 单测 `node --test scripts/__tests__/node27_display_v2_browser_evidence.test.mjs` 覆盖预设解析、参数解析、形态与期望、移动判定与报告组装；它目前不在 CI 里，改脚本后手动跑。
+- 单测 `node --test scripts/__tests__/node27_display_v2_browser_evidence.test.mjs` 覆盖预设解析（含上表的 DPR 与 UA 原文）、参数解析、形态与期望、移动判定（含曲线等待结果的两种失败）、报告组装与入口守卫（按路径 / 符号链接 / stdin 运行都执行，被其他模块 import 时无副作用）；它目前不在 CI 里，改脚本后手动跑。

@@ -31,13 +31,11 @@
  * river window, station window -- each on a fresh page, opening a window with
  * one real touch tap at the located point. It writes its own files
  * (`mobile-<preset>-<state>.png`, `mobile-geometry-<preset>.json`) and only
- * ever issues GET requests.
+ * ever issues GET requests. See docs/runbooks/display-mobile-evidence.md.
  *
  *   node scripts/node27_display_v2_browser_evidence.mjs --base-url https://test.nwm.ac.cn \
  *        --out-dir /path/to/evidence --device-preset mobile-portrait|mobile-landscape \
  *        --river-basin-id <basin_id> --river-segment-id <river_segment_id> [--station-id <station_id>]
- *
- * See docs/runbooks/display-mobile-evidence.md.
  *
  * Exit codes: 0 every assertion held, 1 at least one failed, 2 usage/launch error.
  */
@@ -271,6 +269,7 @@ const SELECTORS = {
   ].join(', '),
   exempt: '.maplibregl-ctrl-attrib',
 }
+/** `busy` = every window body that means "not finished". River: the blank placeholder of the first 600 ms, then the notice. Station: the notice (no delayed placeholder), "waiting for the source", a refresh. */
 const WINDOWS = {
   river: {
     path: '/',
@@ -280,7 +279,8 @@ const WINDOWS = {
     readyWhat: 'the map did not register the discharge overlay',
     frame: '[data-testid="m11-river-forecast-panel"]',
     chart: '[data-testid="m11-river-panel-chart"]',
-    loading: '[data-testid="m11-river-panel-loading"]',
+    busy: '[data-testid="m11-river-panel-pending"], [data-testid="m11-river-panel-loading"]',
+    empty: '[data-testid="m11-river-panel-empty"]',
   },
   station: {
     path: '/?metStations=1',
@@ -290,7 +290,8 @@ const WINDOWS = {
     readyWhat: 'the station layer has no features (the page loads stations for up to 50 basins one after another)',
     frame: '[data-testid="m11-station-popup"]',
     chart: '[data-testid="m11-station-panel-chart"]',
-    loading: '[data-testid="m11-station-popup-loading"]',
+    busy: '[data-testid="m11-station-popup-loading"], [data-testid="m11-station-popup-no-product"], [data-testid="m11-station-panel-refreshing"]',
+    empty: '[data-testid="m11-station-popup-empty"]',
   },
 }
 
@@ -361,11 +362,11 @@ function controlOutsideViewport(control, viewport) {
 }
 
 /**
- * Judge one captured state's geometry against the mobile expectations and
- * return the failures (empty = the state holds). Pure: everything it needs is
- * in `geometry`, so it is unit-tested on synthetic geometry.
+ * Judge one captured state against the mobile expectations and return the
+ * failures (empty = the state holds). Pure -- `curveWait` is how the wait for
+ * the curve ended -- so it is unit-tested on synthetic geometry.
  */
-export function judgeMobileState(geometry, expectations) {
+export function judgeMobileState(geometry, expectations, curveWait = null) {
   const failures = []
   const { viewport } = geometry
   const outside = (controls) => {
@@ -392,11 +393,11 @@ export function judgeMobileState(geometry, expectations) {
   }
 
   if (!geometry.sheet) return ['curve window frame is missing']
-  if (!geometry.chart) {
-    failures.push(geometry.loading ? 'curve still loading at the timeout: no chart area to measure' : 'no curve data: the window finished loading without a chart area')
-  } else if (geometry.chart.height < expectations.chartMinHeight) {
-    failures.push(`chart area height ${geometry.chart.height} < ${expectations.chartMinHeight}`)
-  }
+  const panel = `panel state: ${geometry.panel ?? 'none'}${geometry.emptyText ? `「${geometry.emptyText}」` : ''}`
+  // A wait that ran out fails the state even if the curve turned up before the read.
+  if (curveWait?.timed_out) failures.push(`curve still loading after ${curveWait.limit_ms} ms (${panel})`)
+  else if (!geometry.chart) failures.push(`no curve data: the wait for the curve ended without a chart area (${panel})`)
+  else if (geometry.chart.height < expectations.chartMinHeight) failures.push(`chart area height ${geometry.chart.height} < ${expectations.chartMinHeight}`)
   if (!geometry.map) failures.push('map area is missing')
   if (geometry.anchor.x === null || geometry.anchor.y === null) {
     failures.push('selected-anchor attributes are missing on the map surface')
@@ -631,7 +632,7 @@ async function waitForCameraSettled(page, timeoutMs) {
 function measureGeometry(page, state) {
   const windowSpec = WINDOWS[state] ?? null
   return page.evaluate(
-    ({ stateName, selectors, frame, chart, loading }) => {
+    ({ stateName, selectors, frame, chart, busy, empty }) => {
       const rectBox = (rect) => ({ x: rect.left, y: rect.top, width: rect.right - rect.left, height: rect.bottom - rect.top })
       const box = (selector) => {
         const element = selector ? document.querySelector(selector) : null
@@ -684,6 +685,7 @@ function measureGeometry(page, state) {
       }
 
       const attribute = (name) => document.querySelector(selectors.surface)?.getAttribute(name) ?? null
+      const panel = frame === null ? null : document.querySelector(`${busy}, ${chart}, ${empty}`)
       return {
         state: stateName,
         viewport: { width: window.innerWidth, height: window.innerHeight },
@@ -693,13 +695,15 @@ function measureGeometry(page, state) {
         map: box(selectors.map),
         sheet: box(frame),
         chart: box(chart),
-        loading: loading !== null && document.querySelector(loading) !== null,
+        loading: panel !== null && panel.matches(busy),
+        panel: panel?.getAttribute('data-testid') ?? null,
+        emptyText: panel?.matches(empty) ? panel.textContent.trim().replace(/\s+/g, ' ').slice(0, 120) : null,
         anchor: { x: attribute('data-selected-anchor-x'), y: attribute('data-selected-anchor-y') },
         camera: { center: attribute('data-camera-center'), zoom: attribute('data-camera-zoom') },
         controls,
       }
     },
-    { stateName: state, selectors: SELECTORS, frame: windowSpec?.frame ?? null, chart: windowSpec?.chart ?? null, loading: windowSpec?.loading ?? null },
+    { stateName: state, selectors: SELECTORS, frame: windowSpec?.frame ?? null, chart: windowSpec?.chart ?? null, busy: windowSpec?.busy ?? null, empty: windowSpec?.empty ?? null },
   )
 }
 
@@ -785,10 +789,13 @@ async function openCurveWindow(page, state, target, args, result) {
   const opened = await page.waitForSelector(spec.frame, { state: 'visible', timeout: windowTimeoutMs }).then(() => true, () => false)
   if (!opened) return fail(`the ${state} window did not appear within ${windowTimeoutMs} ms after a tap at (${located.x}, ${located.y})`)
 
-  // The chart area only renders once the series arrived. A loading notice that
-  // outlives the timeout is left in place: the geometry read sees it and the
-  // judge reports it apart from "loaded, but no curve".
-  await page.waitForSelector(spec.loading, { state: 'detached', timeout: args.timeoutMs }).catch(() => undefined)
+  // Wait for a terminal body -- nothing still loading AND the chart or the empty
+  // notice present. "No loading notice" alone is true before the notice mounts.
+  const waitStarted = Date.now()
+  const timedOut = await page
+    .waitForFunction(({ busy, chart, empty }) => !document.querySelector(busy) && document.querySelector(`${chart}, ${empty}`) !== null, spec, { timeout: args.timeoutMs })
+    .then(() => false, (error) => { if (error?.name !== 'TimeoutError') throw error; return true })
+  result.curve_wait = { waited_ms: Date.now() - waitStarted, limit_ms: args.timeoutMs, timed_out: timedOut }
   if (!(await waitForCameraSettled(page, args.timeoutMs))) {
     result.failures.push(`the map camera did not come to rest within ${args.timeoutMs} ms (or the build does not expose data-camera-center / -zoom); the anchor may be the pre-pan one`)
   }
@@ -798,7 +805,7 @@ async function openCurveWindow(page, state, target, args, result) {
 /** Capture one state on a fresh page. Never throws: a failure is recorded and the screenshot still taken. */
 async function captureMobileState(context, state, target, args, expectations, nonGetRequests) {
   const url = `${args.baseUrl}${WINDOWS[state]?.path ?? '/'}`
-  const result = { url, settle_ms: null, tap: null, attempts: null, geometry: null, screenshot: null, failures: [] }
+  const result = { url, settle_ms: null, tap: null, attempts: null, curve_wait: null, geometry: null, screenshot: null, failures: [] }
   const page = await context.newPage()
   page.on('request', (request) => {
     if (request.method() !== 'GET') nonGetRequests.push(`${state}: ${request.method()} ${request.url()}`)
@@ -818,7 +825,7 @@ async function captureMobileState(context, state, target, args, expectations, no
     const judged = state === 'default' || (await openCurveWindow(page, state, target, args, result))
     result.geometry = await measureSettledGeometry(page, state, args.timeoutMs, result.failures)
     // A window that never opened already has its reason; judging its absent geometry adds nothing.
-    if (judged) result.failures.push(...judgeMobileState(result.geometry, expectations))
+    if (judged) result.failures.push(...judgeMobileState(result.geometry, expectations, result.curve_wait))
   } catch (error) {
     result.failures.push(`capture failed: ${errorText(error)}`)
   }
@@ -969,17 +976,15 @@ async function main() {
 }
 
 /**
- * True only when this file is the process entry. Node resolves symlinks for
- * the module URL but leaves `argv[1]` as typed, so both sides go through
- * realpath; an import (`argv[1]` absent or another file) is false.
+ * True only when this module is the process entry. Fed through stdin it has no
+ * file of its own (URL `<cwd>/[eval1]`), so nothing can have imported it: entry.
+ * Otherwise `argv[1]` must be this file, both sides through realpath (Node
+ * resolves symlinks for the module URL only); absent or another file = import.
  */
 function isEntry() {
-  if (!process.argv[1]) return false
-  try {
-    return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))
-  } catch {
-    return false
-  }
+  let self
+  try { self = realpathSync(fileURLToPath(import.meta.url)) } catch { return true }
+  try { return realpathSync(process.argv[1]) === self } catch { return false }
 }
 
 if (isEntry()) {
