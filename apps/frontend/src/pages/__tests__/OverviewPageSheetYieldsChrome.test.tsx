@@ -11,7 +11,8 @@ import { layer, mockApi, resetOverviewDataTestState, success } from '@/test/over
 /**
  * 抽屉打开时地图外壳让位（openspec mobile-responsive-display task 4.6，design.md D11）。
  * 让位 = 移动形态 && 有曲线面板在渲染 && 曲线区域不在兜底；控制条与启动器列据它加 `invisible`
- * （保持挂载）、展开值复位、时间轴暂停。桌面形态恒不让位。
+ * （保持挂载）、展开值复位、时间轴暂停。桌面形态恒不让位。控制条（隐藏 + 暂停）收到的让位晚一个 effect
+ * 周期：面板首次渲染即崩溃的那次瞬时让位到不了时间轴（#2869）。
  *
  * 做法沿用 `OverviewPageSingleCurveWindow.test.tsx`：地图本体换成桩，由桩把一次命中要素的点击交给
  * 页面传下来的 `onOverlayClick`——它**不**调用 `onMapClick`，所以这里的“收起面板”只能来自让位本身。
@@ -269,6 +270,47 @@ describe('OverviewPage: an open sheet yields the map chrome (D11)', () => {
       })
       expect(validTimeInUrl()).toBe(pausedAt)
       expect(screen.getByLabelText('播放时间轴')).toBeInTheDocument()
+    })
+
+    it('a panel that crashes on its first render while playing leaves playback running; a successful retry opens the sheet and pauses', async () => {
+      await renderIn(true)
+      vi.useFakeTimers()
+      fireEvent.click(screen.getByLabelText('播放时间轴'))
+      expect(screen.getByLabelText('暂停时间轴')).toBeInTheDocument()
+      switchWindow.__NHMS_E2E_HOOKS__ = true
+      switchWindow.__NHMS_E2E_CRASH_REGION__ = 'curve'
+
+      clickRiver()
+
+      // 假计时器下不用 `findBy*` / `waitFor`：兜底块在点击的 `act` 里已经同步出现。
+      expect(screen.getByTestId('region-error-map-panels')).toBeInTheDocument()
+      expect(screen.queryByTestId('stub-river-panel')).toBeNull()
+      expectYielded(false)
+      expect(screen.getByLabelText('暂停时间轴')).toBeInTheDocument()
+      expect(screen.queryByLabelText('播放时间轴')).toBeNull()
+      // 兜底之后才推进计时器：有效时刻的前进只能来自“抽屉没出现时仍在播放”。
+      const atFallback = validTimeInUrl()
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000)
+      })
+      const advanced = validTimeInUrl()
+      expect(advanced).not.toBeNull()
+      expect(advanced).not.toBe(atFallback)
+
+      // 清掉开关后「重试」：抽屉出现，按“打开抽屉即暂停”处理。
+      delete switchWindow.__NHMS_E2E_CRASH_REGION__
+      fireEvent.click(screen.getByRole('button', { name: '重试' }))
+
+      expect(screen.queryByTestId('region-error-map-panels')).toBeNull()
+      expect(screen.getByTestId('stub-river-panel')).toBeInTheDocument()
+      expectYielded(true)
+      expect(screen.getByLabelText('播放时间轴')).toBeInTheDocument()
+      expect(screen.queryByLabelText('暂停时间轴')).toBeNull()
+      const pausedAt = validTimeInUrl()
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000)
+      })
+      expect(validTimeInUrl()).toBe(pausedAt)
     })
 
     it('leaving mobile form with a sheet open restores the chrome; re-entering yields again', async () => {

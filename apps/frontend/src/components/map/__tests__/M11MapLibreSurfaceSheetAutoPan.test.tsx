@@ -14,7 +14,8 @@ import { installMaplibreStubMap, maplibreMapStubProps } from '@/test/maplibreStu
  * `<Map>` 用共享桩；假地图在本文件自建（共享桩的假地图没有 `easeTo` / `resize` / `project` 等方法），并把
  * 全部相机方法调用按顺序记进 `calls`。`moveend` 经桩 `<Map>` 收到的 `onMoveEnd` prop 触发；假地图的
  * `resize()` 像真实地图库那样同步发一次 `moveend`。平移排在键变化后的下一帧，所以这里把
- * `requestAnimationFrame` 换成手动队列，由 `flushFrames()` 在 `act` 里执行。
+ * `requestAnimationFrame` 换成手动队列，由 `flushFrames()` 在 `act` 里执行；`cancelAnimationFrame` 把还没
+ * 执行的那一帧从队列里摘掉。
  */
 vi.mock('react-map-gl/maplibre', async () => {
   const { MaplibreMapStub, MaplibreControlStub, MaplibreSourceStub, MaplibreLayerStub, MaplibreMarkerStub } = await import(
@@ -165,7 +166,20 @@ describe('M11MapLibreSurface: sheet auto-pan and selected-anchor attributes (D17
 
   beforeEach(() => {
     frames = []
-    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => frames.push(callback))
+    // 每一帧一个唯一句柄；`cancelAnimationFrame` 按句柄把还没执行的回调从队列里摘掉（已执行的是空操作）。
+    let lastFrameId = 0
+    const callbacksById = new Map<number, FrameRequestCallback>()
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      lastFrameId += 1
+      callbacksById.set(lastFrameId, callback)
+      frames.push(callback)
+      return lastFrameId
+    })
+    vi.stubGlobal('cancelAnimationFrame', (frameId: number) => {
+      const callback = callbacksById.get(frameId)
+      const index = callback ? frames.indexOf(callback) : -1
+      if (index >= 0) frames.splice(index, 1)
+    })
   })
 
   afterEach(() => {
@@ -326,6 +340,30 @@ describe('M11MapLibreSurface: sheet auto-pan and selected-anchor attributes (D17
     view.rerender(harness({ props: { selectedAnchor: RIVER_ANCHOR, autoPan: RIVER_PAN } }))
     flushFrames()
     expect(fake.names()).toEqual(['resize', 'easeTo'])
+  })
+
+  it('a key that goes away and comes back to the same value inside one frame eases exactly once', () => {
+    const fake = installFakeMap()
+    const view = render(harness())
+    view.rerender(harness({ props: { selectedAnchor: RIVER_ANCHOR, autoPan: RIVER_PAN } }))
+    view.rerender(harness({ props: { selectedAnchor: RIVER_ANCHOR, autoPan: null } }))
+    view.rerender(harness({ props: { selectedAnchor: RIVER_ANCHOR, autoPan: RIVER_PAN } }))
+    flushFrames()
+
+    expect(fake.names()).toEqual(['resize', 'easeTo'])
+  })
+
+  it('unmounting with a pan still scheduled cancels that frame', () => {
+    installFakeMap()
+    const view = render(harness())
+    expect(frames).toHaveLength(0)
+    view.rerender(harness({ props: { selectedAnchor: RIVER_ANCHOR, autoPan: RIVER_PAN } }))
+    expect(frames).toHaveLength(1)
+
+    view.unmount()
+
+    // 断言取消本身：卸载后地图引用已被置空，残留的帧回调本来就提前返回，“相机零调用”分辨不出有没有取消。
+    expect(frames).toHaveLength(0)
   })
 
   describe('(s8) attributes', () => {

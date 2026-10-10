@@ -146,6 +146,10 @@ export function M11DraggableCurveWindow({
     setPosition(clampPosition(frame, defaultPosition(frame, kind)))
   }, [endDrag, kind, mobile, setPosition])
 
+  // 卸载时终止进行中的拖拽：window 上的三个监听不能留到窗没了之后。用 layout effect——清理时 frame 还在，
+  // pointer capture 也一并释放。
+  useLayoutEffect(() => endDrag, [endDrag])
+
   // 视口变化时把窗夹回地图区内；移动形态不注册（没有可夹的位置）。
   useLayoutEffect(() => {
     if (mobile) return
