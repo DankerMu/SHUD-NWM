@@ -2,6 +2,7 @@ import { useMemo } from 'react'
 import ReactEChartsCore from 'echarts-for-react/lib/core'
 
 import { echarts } from '@/components/charts/echartsCore'
+import { useChartFollowsContainer } from '@/components/charts/useChartFollowsContainer'
 
 export interface TrendLineSeries {
   name: string
@@ -54,7 +55,11 @@ export function TrendLine({ title, dates, series, unit = 'seconds' }: TrendLineP
     [dates, series, title, unit],
   )
 
-  if (!dates.length || !series.length) {
+  const hasData = dates.length > 0 && series.length > 0
+  // 空数据时不渲染图表：hook 必须在提前 return 之前调用，入参为 false 时断开容器观察。
+  const followContainer = useChartFollowsContainer(hasData)
+
+  if (!hasData) {
     return <div className="rounded-md border border-dashed border-border p-4 text-sm text-muted">暂无趋势数据</div>
   }
 
@@ -64,6 +69,7 @@ export function TrendLine({ title, dates, series, unit = 'seconds' }: TrendLineP
       option={option}
       notMerge
       lazyUpdate
+      onChartReady={followContainer}
       style={{ height: 280, width: '100%' }}
     />
   )

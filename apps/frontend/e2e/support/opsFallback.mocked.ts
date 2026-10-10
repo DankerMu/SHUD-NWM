@@ -77,9 +77,10 @@ export async function openOpsFallbackPage(page: Page, target: OpsFallbackTarget,
 
 /**
  * 导航到运维页（mock 已装好）、切到 operator 并等到数据就绪。角色不跨导航保留，每次导航后都重新切。
- * 用例内换视口后要量页面的，先 `setViewportSize` 再调用这里重新加载，不要在已加载的页面上直接改视口：
- * echarts-for-react 会吞掉图表初始化后的第一次尺寸回调，视口若恰在那之前变化，趋势图就永久停在旧宽度上、
- * 把页面滚动容器撑出横向溢出（改动前后都能复现的既有竞态，与本 task 的样式无关）。
+ * 用例内换视口后要量页面的，先 `setViewportSize` 再调用这里重新加载。#2860 已让三类图表（环图、趋势、阶段时长）
+ * 自己跟随容器——此前 echarts-for-react 吞掉图表初始化后的第一次尺寸回调，视口恰在那时变化画布就停在旧宽度、
+ * 把页面滚动容器撑出横向溢出；既有 spec 仍重新加载，是为了不依赖改视口的时序。
+ * 在已加载页面上直接改视口的守卫见 `ops-charts-follow-container.mocked.spec.ts`。
  */
 export async function visitOpsFallbackPage(page: Page, target: OpsFallbackTarget) {
   await page.goto(target.url)
@@ -214,6 +215,28 @@ export async function measureCheckedOpsFallbackPage(page: Page): Promise<OpsFall
   expect(measure!.mainGridColumns, '主网格应是 grid').toBeGreaterThan(0)
   expect(measure!.summaryGridColumns, '概要区外层应是 grid').toBeGreaterThan(0)
   return measure!
+}
+
+export interface OpsChartMeasure {
+  /** 图表容器 = 封装库的根节点 `.echarts-for-react`。 */
+  containerWidth: number
+  /** 根节点内第一张 canvas 的 CSS 宽（不是乘了 DPR 的 `canvas.width` 属性）；还没画出来时为 null。 */
+  canvasWidth: number | null
+}
+
+/**
+ * 按 DOM 顺序量页面滚动容器内的每张图表：一个 `.echarts-for-react` 根节点算一张，只取其中第一张 canvas
+ * （指针交互后 zrender 可能再加一张悬浮层 canvas，不按全局 canvas 数算）。只量、不判。
+ */
+export async function measureOpsCharts(page: Page): Promise<OpsChartMeasure[]> {
+  return page.evaluate(() => {
+    const scroller = document.querySelector('main')?.lastElementChild
+    if (!(scroller instanceof HTMLElement)) return []
+    return Array.from(scroller.querySelectorAll('.echarts-for-react')).map((root) => ({
+      containerWidth: root.clientWidth,
+      canvasWidth: root.querySelector('canvas')?.getBoundingClientRect().width ?? null,
+    }))
+  })
 }
 
 /** 左边 < `minPadding` 或右边 > 视口宽 − `minPadding` 的卡片与页面容器直接子元素；空 = 都在内边距内。 */
