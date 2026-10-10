@@ -8,6 +8,16 @@ type CurveWindowKind = 'river' | 'station'
 
 const WINDOW_MARGIN_PX = 12
 const DESKTOP_PLACEMENT_WIDTH = 900
+// 桌面摆位（地图区宽 ≥ 900）：两窗的中心分别锚在地图区宽的这两个比例上。
+const RIVER_ANCHOR_RATIO = 0.28
+const STATION_ANCHOR_RATIO = 0.72
+const DESKTOP_DEFAULT_TOP_PX = 88
+/**
+ * 两窗默认的横向范围重叠时（窗宽 > 两锚点间距）气象代站窗默认 top 的下移量：它在右，会盖住河段窗右端的
+ * 关闭按钮（实测占窗顶 +14 到 +42），下移后该按钮整个露在它之外。不能取得刚好够：桌面形态最矮的视口
+ * 900×500（地图区高 416）里窗被夹回到 top 134，实际错开只剩 46px。
+ */
+const OVERLAP_STAGGER_PX = 56
 // 桌面形态默认宽度 min(44rem, max(42vw, 30rem))（design.md D16）有两处表达，必须一致：
 // `DESKTOP_WINDOW_CLASS` 的宽度一段，与 `curveWindowSize` 在窗尚无实测盒时的回退。
 const MAX_DESKTOP_WIDTH_PX = 704
@@ -264,10 +274,13 @@ function defaultPosition(frame: HTMLElement, kind: CurveWindowKind): CurveWindow
   const viewport = curveWindowViewport(frame)
   const size = curveWindowSize(frame, viewport)
   const desktop = viewport.width >= DESKTOP_PLACEMENT_WIDTH
-  const x = desktop
-    ? viewport.width * (kind === 'river' ? 0.28 : 0.72) - size.width / 2
-    : viewport.width / 2 - size.width / 2 + (kind === 'river' ? -18 : 18)
-  const y = desktop ? 88 : kind === 'river' ? 64 : 88
+  if (!desktop) {
+    return { x: viewport.width / 2 - size.width / 2 + (kind === 'river' ? -18 : 18), y: kind === 'river' ? 64 : 88 }
+  }
+  const x = viewport.width * (kind === 'river' ? RIVER_ANCHOR_RATIO : STATION_ANCHOR_RATIO) - size.width / 2
+  // 只看窗的 kind 与地图区尺寸，不看另一窗是否打开：重叠区间里单开气象代站窗也在下移后的位置。
+  const overlapping = size.width > viewport.width * (STATION_ANCHOR_RATIO - RIVER_ANCHOR_RATIO)
+  const y = DESKTOP_DEFAULT_TOP_PX + (overlapping && kind === 'station' ? OVERLAP_STAGGER_PX : 0)
   return { x, y }
 }
 
