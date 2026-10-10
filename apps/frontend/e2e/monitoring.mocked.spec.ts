@@ -15,12 +15,7 @@ import {
   runtimeConfig,
   type MonitoringApiMockOptions,
 } from './support/monitoring.mocked'
-
-async function selectRole(page: Page, roleName: 'Viewer' | 'Operator' | 'Model Admin' | 'Sys Admin') {
-  await expect(page.getByLabel('Role')).toBeVisible()
-  await page.getByLabel('Role').click({ force: true })
-  await page.getByRole('option', { name: roleName }).click({ force: true })
-}
+import { setRole } from './support/setRole'
 
 async function openMonitoringAsOperator(page: Page, mockOptions?: MonitoringApiMockOptions) {
   await mockMonitoringApi(page, mockOptions)
@@ -28,7 +23,7 @@ async function openMonitoringAsOperator(page: Page, mockOptions?: MonitoringApiM
   // 必须用 URL 钉住该 source/cycle，使页面请求的 cycle 与 mocked 响应身份一致。
   await page.goto(`/monitoring?source=gfs&cycle=${encodeURIComponent(cycleTime)}`)
   await expect(page.getByText('权限不足')).toBeVisible()
-  await selectRole(page, 'Operator')
+  await setRole(page, 'operator')
   await expect(page.getByRole('heading', { name: '监控工作台' })).toBeVisible()
 }
 
@@ -133,7 +128,7 @@ test.describe('monitoring page', () => {
     ])
     await expect(page.getByRole('listitem').filter({ hasText: '重试已提交' })).toBeVisible()
 
-    await selectRole(page, 'Viewer')
+    await setRole(page, 'viewer')
 
     await expect(page.getByText('权限不足')).toBeVisible()
     await expect(page.getByRole('button', { name: /重试/ })).toHaveCount(0)
@@ -155,7 +150,7 @@ test.describe('monitoring page', () => {
     await expect(page.getByText('权限不足')).toBeVisible()
     await expect(page.getByRole('button', { name: /重试/ })).toHaveCount(0)
 
-    await selectRole(page, 'Operator')
+    await setRole(page, 'operator')
     // M26：/ops 工作台标题为「内部诊断」（旧「运维工作台」已改名）。
     await expect(page.getByRole('heading', { name: '内部诊断' })).toBeVisible()
     const currentStateField = page.getByText('Current State').locator('..')
@@ -193,7 +188,7 @@ test.describe('monitoring page', () => {
       expect(query).toEqual({ source: 'GFS', cycle: controlledCycleTime })
     }
 
-    await selectRole(page, 'Viewer')
+    await setRole(page, 'viewer')
     await expect(page.getByText('权限不足')).toBeVisible()
     await expect(page.getByRole('button', { name: /重试/ })).toHaveCount(0)
   })
@@ -219,7 +214,7 @@ test.describe('monitoring page', () => {
     ])
     await expect(page.getByRole('listitem').filter({ hasText: '取消请求已提交' })).toBeVisible()
 
-    await selectRole(page, 'Viewer')
+    await setRole(page, 'viewer')
 
     await expect(page.getByText('权限不足')).toBeVisible()
     await expect(page.getByRole('button', { name: /取消/ })).toHaveCount(0)
@@ -277,7 +272,7 @@ async function wheelPageToBottom(page: Page, heading: string) {
   const headingLocator = page.getByRole('heading', { name: heading })
   await expect(headingLocator).toBeVisible()
 
-  const geometry = await headingLocator.evaluate((node) => {
+  const geometry = await headingLocator.evaluate(() => {
     const root = document.querySelector('main')?.querySelector(':scope > :last-child')
     if (!(root instanceof HTMLElement)) {
       throw new Error('operational page root under main was not found')
@@ -294,7 +289,7 @@ async function wheelPageToBottom(page: Page, heading: string) {
   expect(geometry.scrollHeight, 'fixture content must overflow the short viewport').toBeGreaterThan(geometry.clientHeight)
   expect(geometry.contentY).not.toBeNull()
 
-  const rootBox = await headingLocator.evaluate((node) => {
+  const rootBox = await headingLocator.evaluate(() => {
     const root = document.querySelector('main')?.querySelector(':scope > :last-child')
     if (!(root instanceof HTMLElement)) throw new Error('missing operational scroll root')
     const box = root.getBoundingClientRect()
@@ -389,7 +384,7 @@ test.describe('operational pages own vertical scrolling', () => {
     await mockMonitoringApi(page)
     await page.goto(`/monitoring?source=gfs&cycle=${encodeURIComponent(cycleTime)}`)
     await expect(page.getByText('权限不足')).toBeVisible()
-    await selectRole(page, 'Operator')
+    await setRole(page, 'operator')
     await wheelPageToBottom(page, '监控工作台')
   })
 
@@ -398,7 +393,7 @@ test.describe('operational pages own vertical scrolling', () => {
     await mockControlledOpsApi(page)
     await page.goto(`/ops?source=gfs&cycle=${encodeURIComponent(controlledCycleTime)}`)
     await expect(page.getByText('权限不足')).toBeVisible()
-    await selectRole(page, 'Operator')
+    await setRole(page, 'operator')
     await wheelPageToBottom(page, '内部诊断')
   })
 
@@ -407,7 +402,7 @@ test.describe('operational pages own vertical scrolling', () => {
     await mockModelAssetsApi(page)
     await page.goto('/system/model-assets?modelId=basins_basin_a_shud')
     await expect(page.getByText('权限不足')).toBeVisible()
-    await selectRole(page, 'Model Admin')
+    await setRole(page, 'model_admin')
     await expect(page.getByRole('heading', { name: '模型资产管理' })).toBeVisible()
     await expect(page.getByText('生命周期操作')).toBeVisible()
     await wheelPageToBottom(page, '模型资产管理')

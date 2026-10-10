@@ -6,12 +6,24 @@ export { parsePlaywrightWorkers } from './playwright.config.helpers'
 
 const e2ePort = Number(process.env.PLAYWRIGHT_DEV_PORT ?? 5174)
 const externalBaseURL = process.env.PLAYWRIGHT_TEST_BASE_URL
-const baseURL = externalBaseURL ?? `http://127.0.0.1:${e2ePort}`
+export const baseURL = externalBaseURL ?? `http://127.0.0.1:${e2ePort}`
 const apiBaseURL = process.env.VITE_API_BASE_URL ?? 'https://api.example.test'
 const workers = parsePlaywrightWorkers(process.env.PLAYWRIGHT_WORKERS)
+// 展开进配置的 webServer 片段；给了 PLAYWRIGHT_TEST_BASE_URL 时为空（不自起 dev server）。
+// 具名导出供 playwright.m15-visual.config.ts 复用，两份配置起的是同一条命令。
+export const webServerConfig = externalBaseURL
+  ? {}
+  : {
+      webServer: {
+        command: `VITE_API_BASE_URL=${apiBaseURL} VITE_ENABLE_ROLE_OVERRIDE=true VITE_AUTH_ROLE=viewer corepack pnpm dev --host 127.0.0.1 --port ${e2ePort} --strictPort`,
+        url: baseURL,
+        reuseExistingServer: false,
+      },
+    }
 
 // m15-visual-conformance 是 M15 里程碑的多页视觉/几何证据门（NavBar + 各独立全页布局），
-// 其多页前提在 M26 单图下已不成立；它有独立 runner（pnpm test:e2e:m15-visual）且在 CI 已暂停，
+// 其多页前提在 M26 单图下已不成立；它由独立配置 playwright.m15-visual.config.ts 运行
+// （pnpm test:e2e:m15-visual，只有手动 workflow 调用，PR 的 CI 不跑），
 // 不属于 M26 单图 mocked regression 合同，故与 preview-deeplink/live-display 一样从本门排除。
 const excludedFromLane = [
   /preview-deeplink\.spec\.ts/,
@@ -44,15 +56,7 @@ export default defineConfig({
     baseURL,
     trace: 'on-first-retry',
   },
-  ...(externalBaseURL
-    ? {}
-    : {
-        webServer: {
-          command: `VITE_API_BASE_URL=${apiBaseURL} VITE_ENABLE_ROLE_OVERRIDE=true VITE_AUTH_ROLE=viewer corepack pnpm dev --host 127.0.0.1 --port ${e2ePort} --strictPort`,
-          url: baseURL,
-          reuseExistingServer: false,
-        },
-      }),
+  ...webServerConfig,
   projects: [
     {
       name: 'mocked-regression-chromium',

@@ -559,13 +559,34 @@ describe('C4 live lane', () => {
   })
 
   it('does not accept headers-only, failed completion, or stalled jobs bodies', async () => {
+    // Injected clock (#2868). The budget must exceed the fault-free run (three 500ms quiet periods plus
+    // 50ms polls: 1600ms on this clock), otherwise a timeout could come from the budget instead of the
+    // injected fault; the fault-free control below pins that premise with the same budget.
+    const budgetMs = 2_000
     const stalled = new Promise<string>(() => undefined)
-    const cases: Array<{ name: string; response: Partial<C4FakeResponseSpec> }> = [
-      { name: 'headers-only status', response: { finished: () => new Promise(() => undefined) } },
-      { name: 'post-header logs failure', response: { finished: () => Promise.resolve(new Error('network failed')) } },
-      { name: 'stalled jobs body', response: { text: () => stalled } },
+    const headersOnlyFinished = vi.fn(() => new Promise(() => undefined))
+    const stalledTextCalls = { value: 0 }
+    const cases: Array<{
+      name: string
+      response: Partial<C4FakeResponseSpec>
+      failure: { code: string; stage: string } | null
+    }> = [
+      { name: 'fault-free control', response: {}, failure: null },
+      { name: 'headers-only status', response: { finished: headersOnlyFinished }, failure: { code: 'STEP_TIMEOUT', stage: 'ops' } },
+      {
+        name: 'post-header logs failure',
+        response: { finished: () => Promise.resolve(new Error('network failed')) },
+        failure: { code: 'OPS_UNAVAILABLE', stage: 'ops' },
+      },
+      {
+        name: 'stalled jobs body',
+        response: { text: () => stalled, textCallCount: stalledTextCalls },
+        failure: { code: 'STEP_TIMEOUT', stage: 'ops' },
+      },
     ]
-    for (const { name, response } of cases) {
+    for (const { name, response, failure } of cases) {
+      const clock = { now: 0 }
+      const deadline = createRiverClickDeadline(budgetMs, () => clock.now)
       const state = makeC4FakePageState({
         homeResponses: homeResponses(),
         opsResponsesFor: (url) => opsResponses(url.includes('IFS') ? 'IFS' : 'GFS').map((spec) => {
@@ -584,14 +605,24 @@ describe('C4 live lane', () => {
             ...(name === 'post-header logs failure' ? response : {}),
           }]
         },
+        sleepMs: 0,
       })
-      const deadline = createRiverClickDeadline(25)
-      const result = await runC4DisplayLane({ config: config(), page: makeC4FakePage(state) }, defaultFetch(), { deadline })
-      expect(result.ok, name).toBe(false)
-      if (!result.ok) {
-        expect(['STEP_TIMEOUT', 'OPS_UNAVAILABLE', 'JOB_LOG_MISSING'], name).toContain(result.terminal.failure?.code)
+      const page = makeC4FakePage(state)
+      page.waitForTimeout = async (ms) => { clock.now += ms }
+      const result = await runC4DisplayLane({ config: config(), page }, defaultFetch(), { deadline })
+      if (failure === null) {
+        expect(result.ok, name).toBe(true)
+        expect(clock.now, name).toBeLessThan(budgetMs)
+        continue
       }
+      expect(result.ok, name).toBe(false)
+      expect(result.terminal.failure, name).toMatchObject(failure)
     }
+    // headers-only and stalled share a code and stage, so the lane output cannot tell them apart. These two
+    // prove only that the faulty response reached the lane in the ops stage; they hold on the fault-free
+    // path too, so they are reach proofs, not discrimination proofs.
+    expect(headersOnlyFinished).toHaveBeenCalled()
+    expect(stalledTextCalls.value).toBeGreaterThan(0)
   })
 
   it('ignores aborted non-required API and tile requests while transitioning to ops', async () => {

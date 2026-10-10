@@ -237,6 +237,10 @@ test.describe('M11 控制条矮视口横屏单行', () => {
     // 旋转到矮视口横屏：同一页面、不重新导航，专属类随媒体查询生效。
     await page.setViewportSize(LANDSCAPE)
     expect(isShortLandscape(requireViewport(page))).toBe(true)
+    // 先等 React 把横屏结构提交出来再量（#2868）：速度选择器进到时间轴里只在 `portrait` 翻成 false 之后成立
+    // （旋转前它不在时间轴里，上面的 `speedInsideTimeline` 为 false 用的是同一判据）；下面的 min-width 只是 CSS，
+    // 媒体查询一命中就成立，等不到这一步。
+    await expect(controlBarParts(page).timeline.getByLabel('播放速度'), '旋转后播放速度应回到时间轴里').toHaveCount(1)
     await expect.poll(() => rowsMinWidth(page), '矮视口横屏专属的 120px 最小宽度应在 750x342 生效').toBe('120px')
     const landscapeWhere = label(page, testInfo)
     const landscape = await measure(page, landscapeWhere, 'rotated fail-closed')
