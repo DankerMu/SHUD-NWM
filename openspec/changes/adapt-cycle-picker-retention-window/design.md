@@ -29,8 +29,7 @@ Keep backend contracts as-is and handle the miss at the frontend boundary:
 4. `M11IssueTimeSelect` (the selector both curve windows use; there is no
    `M11PopupSourceControls`) keeps a selected issue time that is no longer in
    `available_issue_times` as the first option, disabled and labelled as
-   retained-disk unavailable. No product caller passes it a list of
-   known-unavailable issue times. (Steps 3-4 corrected 2026-10-10, #2848, to
+   retained-disk unavailable. It takes no list of known-unavailable issue times. (Steps 3-4 corrected 2026-10-10, #2848, to
    describe the code as it is.)
 5. Render a retention-specific empty state for the selected missing cycle.
 
@@ -39,8 +38,9 @@ Keep backend contracts as-is and handle the miss at the frontend boundary:
 This keeps the direct-disk truth boundary intact: the UI does not infer that a
 DB row means disk data exists, and it does not hide the miss with fallback data.
 It also avoids speculative prefetching every issue time for every station, which
-would multiply popup latency and API load. The first miss becomes explicit and
-prevents repeated selection of the same known-unavailable cycle.
+would multiply popup latency and API load. The first miss becomes explicit; a
+missed cycle that is still listed can be selected again and shows the same
+state (no per-session memory, owner ruling 2026-10-11, #2881).
 
 ## Test Plan
 
@@ -49,5 +49,6 @@ prevents repeated selection of the same known-unavailable cycle.
   `STATION_FORCING_FILE_NOT_FOUND` response:
   - no chart is drawn;
   - the empty state names the retained disk cycle as unavailable;
-  - the failed issue time option is disabled/labeled;
+  - a failed issue time that is still listed stays selectable and unlabelled; a
+    selected issue time that is no longer listed is disabled/labelled;
   - selecting another issue time still refetches normally.

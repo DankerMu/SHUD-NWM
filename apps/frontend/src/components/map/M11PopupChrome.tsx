@@ -86,7 +86,6 @@ function normalizeIssueTimes(values: string[]) {
 export function M11IssueTimeSelect({
   issueTimes,
   issueTime,
-  unavailableIssueTimes = [],
   disabled = false,
   ariaLabel = '起报时间选择',
   testId = 'm11-popup-issue-time',
@@ -95,7 +94,6 @@ export function M11IssueTimeSelect({
 }: {
   issueTimes: string[]
   issueTime: string | null
-  unavailableIssueTimes?: string[]
   disabled?: boolean
   ariaLabel?: string
   testId?: string
@@ -106,14 +104,10 @@ export function M11IssueTimeSelect({
   if (normalizedIssueTimes.length === 0) return null
 
   const normalizedIssueTime = normalizeIssueTimeValue(issueTime)
-  const normalizedUnavailableIssueTimes = normalizeIssueTimes(unavailableIssueTimes)
   const retainedIssueTime = normalizedIssueTime && !normalizedIssueTimes.includes(normalizedIssueTime) ? normalizedIssueTime : null
   const visibleIssueTimes = retainedIssueTime ? [retainedIssueTime, ...normalizedIssueTimes] : normalizedIssueTimes
-  const unavailableSet = new Set(
-    retainedIssueTime ? [retainedIssueTime, ...normalizedUnavailableIssueTimes] : normalizedUnavailableIssueTimes,
-  )
   const selectedValue = normalizedIssueTime && visibleIssueTimes.includes(normalizedIssueTime) ? normalizedIssueTime : normalizedIssueTimes[0]
-  const labelOf = (time: string) => `${formatIssueTime(time)}${unavailableSet.has(time) ? ' · 磁盘保留不可用' : ''}`
+  const labelOf = (time: string) => `${formatIssueTime(time)}${time === retainedIssueTime ? ' · 磁盘保留不可用' : ''}`
 
   return (
     <Select
@@ -142,7 +136,7 @@ export function M11IssueTimeSelect({
         className="z-[180] border-white/15 bg-slate-950/95 text-slate-100 shadow-[0_18px_48px_-16px_rgba(8,14,32,0.95)] ring-1 ring-cyan-400/15 backdrop-blur-xl mobile:max-h-[min(24rem,var(--radix-select-content-available-height))]"
       >
         {visibleIssueTimes.map((time) => {
-          const unavailable = unavailableSet.has(time)
+          const unavailable = time === retainedIssueTime
           return (
             <SelectItem
               key={time}
