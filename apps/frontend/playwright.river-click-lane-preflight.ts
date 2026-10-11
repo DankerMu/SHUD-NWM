@@ -12,7 +12,6 @@
 import {
   RIVER_CLICK_FAILURE_MESSAGE_MAX_BYTES,
   RIVER_CLICK_PER_SAMPLE_DEADLINE_MS,
-  RIVER_CLICK_PREFLIGHT_MAX_BODY_BYTES,
   RIVER_CLICK_WHOLE_RUN_DEADLINE_MS,
 } from './src/lib/riverClickEvidence/constants'
 import type { RiverClickConfig } from './src/lib/riverClickEvidence/config'

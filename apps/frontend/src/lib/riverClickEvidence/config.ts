@@ -63,7 +63,7 @@ function failure(
   return { ok: false, classification, code, stage, message }
 }
 
-function bareHttpOrigin(name: string, value: string): string | null {
+function bareHttpOrigin(value: string): string | null {
   const trimmed = value.trim()
   let parsed: URL
   try {
@@ -114,11 +114,11 @@ export function parseRiverClickConfig(env: Record<string, string | undefined>): 
     return failure('FAIL', 'CONFIG_INVALID', 'config', `blank river-click live evidence pin supplied: ${blankPins.join(', ')}`)
   }
 
-  const frontendOrigin = bareHttpOrigin('PLAYWRIGHT_LIVE_BASE_URL', env.PLAYWRIGHT_LIVE_BASE_URL as string)
+  const frontendOrigin = bareHttpOrigin(env.PLAYWRIGHT_LIVE_BASE_URL as string)
   if (!frontendOrigin) {
     return failure('FAIL', 'CONFIG_INVALID', 'config', 'PLAYWRIGHT_LIVE_BASE_URL must be a bare http(s) origin without userinfo/query/fragment')
   }
-  const apiOrigin = bareHttpOrigin('PLAYWRIGHT_LIVE_API_BASE_URL', env.PLAYWRIGHT_LIVE_API_BASE_URL as string)
+  const apiOrigin = bareHttpOrigin(env.PLAYWRIGHT_LIVE_API_BASE_URL as string)
   if (!apiOrigin) {
     return failure('FAIL', 'CONFIG_INVALID', 'config', 'PLAYWRIGHT_LIVE_API_BASE_URL must be a bare http(s) origin without userinfo/query/fragment')
   }

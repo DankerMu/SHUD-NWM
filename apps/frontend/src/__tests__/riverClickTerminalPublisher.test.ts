@@ -243,7 +243,7 @@ describe('river-click PASS publisher (whole-deadline-enforced, exactly one publi
     // republish.
     const terminal = passTerminal()
     let publicationAttempted = false
-    const publish = vi.fn((_path: string, receipt: unknown) => {
+    const publish = vi.fn((_path: string, _receipt: unknown) => {
       publicationAttempted = true
       return { path: '/x' }
     })

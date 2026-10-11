@@ -30,7 +30,6 @@ import {
 } from './src/lib/riverClickEvidence/receipt'
 import { parseRiverClickConfig, riverClickReceiptPathFromEnv, type RiverClickConfigParse } from './src/lib/riverClickEvidence/config'
 import {
-  publishRiverClickEvidence,
   validateRiverClickReceiptPath,
   RiverClickPublicationError,
   type RiverClickEvidenceFs,

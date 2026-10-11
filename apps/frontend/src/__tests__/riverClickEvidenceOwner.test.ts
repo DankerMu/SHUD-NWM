@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
-import { existsSync, mkdtempSync, mkdirSync, rmSync, chmodSync, realpathSync, readFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, chmodSync, realpathSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
-import { parseRiverClickConfig, riverClickReceiptPathFromEnv } from '../lib/riverClickEvidence/config'
+import { riverClickReceiptPathFromEnv } from '../lib/riverClickEvidence/config'
 import { runRiverClickLiveEvidenceOwner, type RiverClickEvidenceOwnerPublication } from '../../playwright.river-click-evidence-owner'
 import { publishRiverClickEvidence } from '../../playwright.river-click-evidence'
 import type { RiverClickEvidence } from '../lib/riverClickEvidence/receipt'
@@ -136,10 +136,6 @@ describe('river-click evidence-owner config-before-browser terminal publication'
 
   it('writes no file with CLOSED classification codes: malformed path => FAIL CONFIG_INVALID, missing path => BLOCKED REQUIRED_ENV_MISSING', async () => {
     // Supplied lexically malformed path: FAIL CONFIG_INVALID no file.
-    const malformed = await runRiverClickLiveEvidenceOwner(
-      { PLAYWRIGHT_LIVE_RIVER_CLICK_RECEIPT_PATH: 'relative/unsafe.json', PLAYWRIGHT_LIVE_BASE_URL: 'https://x' },
-      { publish: vi.fn() },
-    )
     const malformedResult = expectOwnerFailure(await runRiverClickLiveEvidenceOwner(
       { PLAYWRIGHT_LIVE_RIVER_CLICK_RECEIPT_PATH: 'relative/unsafe.json', PLAYWRIGHT_LIVE_BASE_URL: 'https://x' },
       { publish: vi.fn() },

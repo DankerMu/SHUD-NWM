@@ -6,7 +6,6 @@ import {
   RIVER_CLICK_PREFLIGHT_MAX_DEPTH,
   RIVER_CLICK_PREFLIGHT_MAX_NODES,
   RIVER_CLICK_PREFLIGHT_OBJECT_MAX_WIDTH,
-  RIVER_CLICK_VARIABLE,
 } from './constants'
 
 /**
@@ -465,7 +464,7 @@ export function parseRiverClickPreflightSegment(
   payload: Record<string, unknown>,
   segmentId: string,
   riverNetworkVersionId: string,
-  basinVersionId: string,
+  _basinVersionId: string,
 ): RiverClickPreflightSegment {
   if (nonEmptyString(payload.river_segment_id, 256) !== segmentId) {
     return { ok: false, reason: `segment river_segment_id must be ${segmentId}` }

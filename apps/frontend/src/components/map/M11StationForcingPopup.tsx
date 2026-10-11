@@ -28,7 +28,6 @@ import {
   validateHydroMetStationSeriesIdentity,
   type ChartableStationSeriesPoint,
   type HydroMetStationSeriesProductIdentity,
-  type HydroMetStationSeriesRecord,
   type HydroMetStationSeriesResponse,
   type HydroMetStationSeriesVariable,
   type StationSeriesValidation,

@@ -3,7 +3,7 @@ import { create } from 'zustand'
 import { client } from '@/api/client'
 import { getApiErrorMessage, unwrapApiData } from '@/api/response'
 import type { components } from '@/api/types'
-import type { JobStatus, PipelineStatus } from '@/lib/constants'
+import type { JobStatus } from '@/lib/constants'
 
 export type PipelineCycle = components['schemas']['PipelineStatus']
 export type PipelineJob = components['schemas']['PipelineJob'] & {

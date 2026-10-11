@@ -86,7 +86,7 @@ function jsonResponse(payload: unknown, status = 200): Response {
 }
 
 function fakeFetch(routes: Record<string, (url: string) => Response>) {
-  return vi.fn(async (url: string, init: RequestInit) => {
+  return vi.fn(async (url: string) => {
     const pathname = new URL(url).pathname
     const route = routes[pathname]
     if (!route) throw new Error(`no fake route for ${pathname}`)

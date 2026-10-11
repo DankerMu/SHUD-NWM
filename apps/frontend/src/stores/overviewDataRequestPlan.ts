@@ -116,7 +116,7 @@ export function pipelineRequestParams(query: M11QueryState, run: ApiHydroRun | n
 }
 
 export function buildOverviewRequestPlan(
-  query: M11QueryState,
+  _query: M11QueryState,
   basinCount: number,
   _hasLatestRun: boolean,
   hasPipelineRequest: boolean,

@@ -1,5 +1,5 @@
 import { lstatSync, statSync, realpathSync, openSync, fstatSync, fchmodSync, writeSync, fsyncSync, closeSync, linkSync, unlinkSync, readSync } from 'node:fs'
-import { expect, test, type Page } from '@playwright/test'
+import { expect, test } from '@playwright/test'
 
 import {
   assertLiveDisplayPageEvidence,
@@ -14,7 +14,7 @@ import {
 import { parseRiverClickConfig } from '../src/lib/riverClickEvidence/config'
 import { createRiverClickDeadline } from '../src/lib/riverClickEvidence/deadline'
 import { RIVER_CLICK_WHOLE_RUN_DEADLINE_MS } from '../src/lib/riverClickEvidence/constants'
-import { buildRiverClickTerminalEvidence, type RiverClickFeatureIdentity, type RiverClickProductIdentity } from '../src/lib/riverClickEvidence/receipt'
+import { buildRiverClickTerminalEvidence } from '../src/lib/riverClickEvidence/receipt'
 import { runRiverClickLane, type RiverClickLanePageSurface, type RiverClickLaneTerminal } from '../playwright.river-click-lane'
 import { publishRiverClickPass, publishRiverClickTerminal } from '../playwright.river-click-terminal'
 import {

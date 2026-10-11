@@ -238,8 +238,6 @@ const MAX_QUERY_RESULTS = HOOK_QUERY_LIMIT
  */
 function waitForPostFitIdle(
   map: RiverClickHookMap,
-  startedAt: number,
-  now: () => number,
   deadline: RiverClickDeadline,
 ): Promise<{ done: boolean }> {
   return new Promise((resolve, reject) => {
@@ -296,7 +294,6 @@ function waitForPostFitIdle(
 async function waitForMapDischargeReady(
   map: RiverClickHookMap,
   getOverlayHitLayerId: () => string | null,
-  now: () => number,
   deadline: RiverClickDeadline,
 ): Promise<string | null> {
   for (;;) {
@@ -376,7 +373,7 @@ export async function locateRenderedRiverFeature({
   // ONE budget across wait-for-map/overlay + fit + post-fit idle. The hit layer
   // may legitimately arrive late (async overlay data); the map may not be loaded
   // yet. Spend the budget in a single poll loop, never 15s + 15s.
-  const hitLayerId = await waitForMapDischargeReady(map, getOverlayHitLayerId, now, deadline)
+  const hitLayerId = await waitForMapDischargeReady(map, getOverlayHitLayerId, deadline)
   if (hitLayerId === null) {
     if (deadline.expired()) {
       return { ok: false, code: 'HOOK_MAP_TIMEOUT', message: 'river-click hook map/overlay did not become ready within the bounded deadline' }
@@ -394,7 +391,7 @@ export async function locateRenderedRiverFeature({
   // verify loaded/style-loaded (a bare idle without both is still not ready).
   let ready = false
   try {
-    const idle = await waitForPostFitIdle(map, startedAt, now, deadline)
+    const idle = await waitForPostFitIdle(map, deadline)
     if (idle.done) {
       ready = map.loaded() && map.isStyleLoaded()
     }

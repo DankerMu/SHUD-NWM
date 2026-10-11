@@ -289,7 +289,7 @@ describe('river-click evidence publisher failure and race handling', () => {
   it('fails on fsync failure and removes the temp (FSYNC_FAILED)', () => {
     const runDir = privateRunDir()
     try {
-      const fsSeam = publishingFs({ fsyncSync: (fd) => { throw new Error('fsync failed') } })
+      const fsSeam = publishingFs({ fsyncSync: () => { throw new Error('fsync failed') } })
       expect(catchCode(() => publishRiverClickEvidence(receiptName(runDir), passPayload(), { fs: fsSeam }))).toBe('FSYNC_FAILED')
       expect(fs.readdirSync(runDir)).toEqual([])
     } finally {
@@ -302,7 +302,7 @@ describe('river-click evidence publisher failure and race handling', () => {
     try {
       const target = receiptName(runDir)
       const fsSeam = publishingFs({
-        linkSync: (oldPath, newPath) => {
+        linkSync: (_oldPath, newPath) => {
           fs.writeFileSync(newPath, '{"winner":true}', { mode: 0o600 })
           throw Object.assign(new Error('file exists'), { code: 'EEXIST' })
         },
@@ -542,7 +542,7 @@ describe('river-click evidence publisher failure and race handling', () => {
           }
           return info
         },
-        unlinkSync: (p) => {
+        unlinkSync: () => {
           throw new Error('must not unlink an identity-changed temp')
         },
       })

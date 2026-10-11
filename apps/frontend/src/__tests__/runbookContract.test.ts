@@ -1,4 +1,4 @@
-import { readFileSync, copyFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { mkdtempSync, rmSync, writeFileSync, chmodSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
