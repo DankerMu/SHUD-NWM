@@ -290,7 +290,16 @@ def test_each_seeded_model_lands_in_the_class_the_rule_gives_it(
     # Model by model, and again one model at a time (the form each purge transaction uses).
     settings = tool.settings_from_arguments(
         tool._parse_args(
-            ["--operator-id", "it2699p", "--reason", "integration", "--env-file", str(deployment.env_file)]
+            [
+                "--operator-id",
+                "it2699p",
+                "--reason",
+                "integration",
+                "--env-file",
+                str(deployment.env_file),
+                "--receipt-root",
+                str(deployment.receipt_root),
+            ]
         )
     )
     manifest = tool.read_manifest(settings.manifest)
