@@ -21,6 +21,8 @@ export interface MetStationLayerModel {
   truncated: boolean
   /** 站点请求失败的流域 id；无数据或全部成功时为 []。 */
   failedBasinIds: string[]
+  /** 安全阀使其没有代站的流域数；无数据或未触发时为 0。 */
+  unloadedBasinCount: number
   /** honest 空态/状态文案；无可渲染数据时给出原因，禁止用空图层冒充完整。 */
   statusNote: string | null
 }
@@ -117,7 +119,11 @@ export function useMetStationLayer({
     if (currentData && currentData.failedBasinIds.length > 0) {
       const ids = currentData.failedBasinIds
       const n = ids.length
-      return `已加载 ${currentData.loaded} 个代站，${n} 个流域加载失败：${ids.slice(0, 3).join('、')}${n > 3 ? ' 等' : ''}`
+      const unloaded = currentData.unloadedBasinCount > 0 ? `；另有 ${currentData.unloadedBasinCount} 个流域未加载` : ''
+      return `已加载 ${currentData.loaded} 个代站，${n} 个流域加载失败：${ids.slice(0, 3).join('、')}${n > 3 ? ' 等' : ''}${unloaded}`
+    }
+    if (currentData && currentData.unloadedBasinCount > 0) {
+      return `已加载 ${currentData.loaded} 个代站，${currentData.unloadedBasinCount} 个流域未加载（超出客户端上限）`
     }
     if (currentData?.truncated) {
       if (!currentData.totalKnown) return `已加载 ${currentData.loaded} 个代站，列表已截断（总数未完全统计）`
@@ -141,6 +147,7 @@ export function useMetStationLayer({
     loaded: currentData?.loaded ?? 0,
     truncated: currentData?.truncated ?? false,
     failedBasinIds: currentData?.failedBasinIds ?? [],
+    unloadedBasinCount: currentData?.unloadedBasinCount ?? 0,
     statusNote,
   }
 }

@@ -25,10 +25,10 @@
 
   **不要**从 `/api/v1/basin-versions/{bv}/river-segments?limit=1` 的清单里取 pin：清单返回的是 `…_shud_seg_…` id（segment detail 对它回 404）与 `properties.reach_segment_id` 的 `…_shud_reach_…` id（detail 回 200，但 discharge 图层不渲染它，钩子以 `HOOK_FEATURE_MISMATCH` 拒绝）。2026-10-09 对公网入口实测如此。
 - **选流域时同时要满足气象代站一侧的两个条件**（河段与气象代站共用同一个流域 pin）：
-  1. 页面只为前 50 个流域取站点，且全图层在 5000 站处截断（页面左上角会提示“已加载 5000 个代站，列表已截断”）；流域按 `basin_id` 顺序取数，排在截断之后的流域没有站点要素，钩子对它的每个候选都回 `STATION_HOOK_NOT_RENDERED`。
+  1. 该流域要有站点要素。页面为全部已解析流域取站点（#2867：有限并发、不按 `basin_id` 顺序截断；流域数 500 / 站点数 50000 的上限只是远高于现量的安全阀，触发时页面左上角提示“N 个流域未加载（超出客户端上限）”），所以流域在 `basin_id` 顺序里的位置不影响它有没有站点要素。没有站点要素的流域只剩两种：站点清单本身为空（该流域版本没有可展示的 forecast run），或该流域的站点请求失败（页面左上角提示“N 个流域加载失败”）；钩子对它的每个候选都回 `STATION_HOOK_NOT_RENDERED`。
   2. 嵌套 / 重叠流域的代站坐标重合（同一格点上叠着另一个流域的站点），钩子回 `STATION_HOOK_POINT_OCCLUDED`；这类流域的 `…_riv_000001` 河段也常与另一张河网的河段重合，河段钩子回 `HOOK_POINT_OCCLUDED`。
 
-  所以选一个 `basin_id` 排序靠前、不与其他流域重叠的流域。2026-10-09 实测可用的一组：`basins_heihe` / `basins_heihe_shud_shud_riv_000001`（`basins_byh` 因重叠两侧都被拒，`basins_qhh` 排在 5000 站截断之后）。产品身份会变，这组值每次使用前按上面的命令重新确认。
+  所以选一个有站点、不与其他流域重叠的流域。2026-10-09 实测可用的一组：`basins_heihe` / `basins_heihe_shud_shud_riv_000001`（`basins_byh` 因重叠两侧都被拒；`basins_qhh` 当时被拒是因为排在旧的 5000 站截断之后，#2867 起这个原因不再存在）。产品身份会变，这组值每次使用前按上面的命令重新确认。
 - **站点**默认由脚本自己取：用 GFS latest-product 的 `model_id` 请求 `/api/v1/met/stations?basin_version_id=<bv>&model_id=<model_id>&limit=200`（按 `offset` 翻页取全），按 `station_id` 排序后取前 5 个有坐标的依次尝试。要钉住某一个站点时加 `--station-id <station_id>`（必须在同一份清单里）。
 
 ## 两个预设
@@ -136,10 +136,10 @@ node scripts/node27_display_v2_browser_evidence.mjs --base-url "$BASE_URL" --out
 |---|---|---|
 | `HOOK_POINT_OCCLUDED` | 河段定位点被遮挡：锚点落在控制条或启动器下，或该点的产品点击会落到另一个要素上 | 换一个河段 pin |
 | `HOOK_FEATURE_MISMATCH` | discharge 图层在该点渲染的不是这个 id | pin 用 `…_shud_riv_…` id 族，见「前置」 |
-| `no station could be located after N candidate(s)`，全部 `STATION_HOOK_NOT_RENDERED` | 该流域没有站点要素（排在前 50 个流域或 5000 站截断之后） | 换一个流域 pin |
+| `no station could be located after N candidate(s)`，全部 `STATION_HOOK_NOT_RENDERED` | 该流域没有站点要素（站点清单为空，或该流域的站点请求失败；见「前置」） | 换一个流域 pin |
 | 同上，含 `STATION_HOOK_POINT_OCCLUDED` / `STATION_HOOK_CLUSTERED` | 候选站点被另一个流域的重合站点盖住或被聚合 | 换一个不重叠的流域，或用 `--station-id` 指定一个 |
 | `is missing after N ms (does the deployed build carry the hook?)` | `min(10000, --timeout-ms)` 内钩子没有出现（N 即这个实际上限）：被测入口的构建里没有该钩子 | 被测入口尚未部署到含钩子的 commit；不是脚本问题，加大 `--timeout-ms` 无效 |
-| `the station layer has no features` | `data-met-station-feature-count` 在超时内一直是 0（页面要为最多 50 个流域串行取数后才写入） | 加大 `--timeout-ms` 重跑；仍为 0 查站点接口 |
+| `the station layer has no features` | `data-met-station-feature-count` 在超时内一直是 0（页面要把全部流域的站点取完后才写入，流域之间有限并发） | 加大 `--timeout-ms` 重跑；仍为 0 查站点接口 |
 | `the map did not register the discharge overlay` | 地图在超时内没有登记 discharge 图层 | 加大 `--timeout-ms` 重跑；仍然如此查 `/api/v1/tiles/hydro-national/` 瓦片请求 |
 | `no answer from locateRenderedRiver / locateRenderedStation within N ms`（`LOCATE_TIMEOUT`） | 钩子调用在 `min(20000, --timeout-ms)` 内没有返回（钩子自身 15 秒内必有答复，所以多半是 `--timeout-ms` 调得比它短，或页面卡死） | `--timeout-ms` 不低于 20000 重跑；仍然如此看该状态的截图 |
 | `located X, not segment … / station …` | 钩子返回的要素 id 不是请求的那个（脚本不会去点别的要素） | 被测构建的钩子与脚本不匹配，按 bug 上报；不要换 pin 绕过 |
@@ -174,6 +174,6 @@ node scripts/node27_display_v2_browser_evidence.mjs --base-url "$BASE_URL" --out
 - 这是 Chromium 的设备模拟：视口、DPR、触屏与 UA。模拟器里 `dvh == vh`、`env(safe-area-inset-*)` 为 0，证明不了浏览器工具栏遮挡、安全区、聚焦自动放大、捏合 / 拖动手势冲突——这些归真机确认清单（task 7.3，`docs/runbooks/display-mobile-real-device-checklist.md`）。
 - 河段目标的取法是 live-river-click 车道 preflight 的简化：同一组只读请求（GFS latest-product -> segment detail），但不做 IFS 交叉核对，也不做字节预算与重定向约束。本脚本是证据采集，不是合并门。
 - 钩子定位会把相机移到目标处并放大，所以开窗状态的截图是放大后的局部，不是全国视图。
-- 页面只为前 50 个流域取站点、全图层 5000 站截断：见「前置」。
+- 代站图层加载全部流域；流域数 / 站点数上限只是安全阀，正常数据量下不触发：见「前置」。
 - 单测 `node --test scripts/__tests__/node27_display_v2_browser_evidence.test.mjs` 覆盖预设解析（含上表的 DPR 与 UA 原文）、参数解析、形态与期望、移动判定（含曲线等待结果的两种失败与曲线区域兜底）、报告组装与入口守卫（按路径 / 符号链接 / stdin 运行都执行，被其他模块 import 时无副作用）。
 - 这组单测在 CI 里由 `Script Node Tests` job 跑：Node 20、不装依赖，执行 `scripts/__tests__/` 下全部 `*.test.mjs`；改动命中 `scripts/**/*.mjs`、`scripts/__tests__/**` 或 `.github/workflows/ci.yml` 时触发，其余改动下为 skipped。改脚本后本地仍可用上面的命令先跑一遍。

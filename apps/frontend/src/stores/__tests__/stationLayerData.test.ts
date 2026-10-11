@@ -4,6 +4,7 @@ import type { HydroMetStation } from '@/pages/hydroMet/bootstrap'
 import {
   STATION_CLIENT_CAP,
   STATION_CONTEXT_CAP,
+  STATION_FETCH_CONCURRENCY,
   STATION_PAGE_LIMIT,
   stationLayerRequestKey,
   useStationLayerDataStore,
@@ -44,6 +45,50 @@ function stationPage(items: HydroMetStation[], totalCount?: number) {
     limit: STATION_PAGE_LIMIT,
     offset: 0,
   }
+}
+
+type IdentityArg = { basinVersionId: string; modelId?: string }
+type QueryArg = { limit: number; offset: number }
+type Page = ReturnType<typeof stationPage>
+
+function contexts(...basinIds: string[]) {
+  return basinIds.map((basinId) => ({ basinId, basinVersionId: `bv-${basinId}` }))
+}
+
+/**
+ * 受控 resolver：每个流域版本的首页请求挂起，由测试决定谁先完成。
+ * requested 按请求发出的顺序记录 basinVersionId；settle 在该请求发出后才生效（否则抛错，避免测试空转）。
+ */
+function controlStationRequests() {
+  const pending = new Map<string, { resolve: (page: Page) => void; reject: (error: Error) => void }>()
+  const requested: string[] = []
+  fetchHydroMetStationsByIdentityMock.mockImplementation(
+    (identity: IdentityArg) =>
+      new Promise<Page>((resolve, reject) => {
+        requested.push(identity.basinVersionId)
+        pending.set(identity.basinVersionId, { resolve, reject })
+      }),
+  )
+  const take = (basinVersionId: string) => {
+    const entry = pending.get(basinVersionId)
+    if (!entry) throw new Error(`no pending station request for ${basinVersionId}`)
+    pending.delete(basinVersionId)
+    return entry
+  }
+  return {
+    requested,
+    pendingIds: () => [...pending.keys()],
+    resolve: (basinVersionId: string, page: Page) => take(basinVersionId).resolve(page),
+    reject: (basinVersionId: string, error: Error) => take(basinVersionId).reject(error),
+    waitForRequest: (basinVersionId: string) => vi.waitFor(() => expect(requested).toContain(basinVersionId)),
+  }
+}
+
+/** 让已排队的 promise 回调全部跑完（一个宏任务之后），用于断言"没有再发请求"。 */
+function settle() {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, 0)
+  })
 }
 
 describe('stationLayerData store (M26-3)', () => {
@@ -97,13 +142,11 @@ describe('stationLayerData store (M26-3)', () => {
   })
 
   it('loads every visible basin version and pages by offset until total is reached', async () => {
-    // Heihe-style: total 1709 → 首页 500 + 3 翻页 (500/500/209)。
-    fetchHydroMetStationsByIdentityMock
-      .mockResolvedValueOnce(stationPage(stations('heihe', STATION_PAGE_LIMIT, 0), 1709))
-      .mockResolvedValueOnce({ items: stations('heihe', STATION_PAGE_LIMIT, 500) })
-      .mockResolvedValueOnce({ items: stations('heihe', STATION_PAGE_LIMIT, 1000) })
-      .mockResolvedValueOnce({ items: stations('heihe', 209, 1500) })
-      .mockResolvedValueOnce(stationPage(stations('qhh', 386, 0), 386))
+    // Heihe-style: total 1709 → 首页 500 + 3 翻页 (500/500/209)。两个流域并发取数，按身份 + offset 应答。
+    fetchHydroMetStationsByIdentityMock.mockImplementation(async (identity: IdentityArg, query: QueryArg) => {
+      if (identity.basinVersionId === 'bv-qhh') return stationPage(stations('qhh', 386, 0), 386)
+      return stationPage(stations('heihe', Math.min(STATION_PAGE_LIMIT, 1709 - query.offset), query.offset), 1709)
+    })
 
     const data = await useStationLayerDataStore.getState().loadStationLayer({
       basinContexts: [
@@ -116,34 +159,41 @@ describe('stationLayerData store (M26-3)', () => {
     expect(data.totalKnown).toBe(true)
     expect(data.loaded).toBe(2095)
     expect(data.truncated).toBe(false)
+    expect(data.unloadedBasinCount).toBe(0)
     expect(data.stationBasinIds['heihe-0']).toBe('heihe')
     expect(data.stationBasinIds['qhh-0']).toBe('qhh')
     // 身份直接来自流域版本，不依赖 latest-product ready。
     expect(fetchHydroMetStationsByIdentityMock.mock.calls[0][0]).toEqual({ basinVersionId: 'bv-heihe' })
-    // offset 翻页正确：首页 0，后续 500 / 1000 / 1500。
-    expect(fetchHydroMetStationsByIdentityMock.mock.calls.slice(0, 4).map((call) => (call[1] as { offset: number }).offset)).toEqual([
-      0,
-      500,
-      1000,
-      1500,
-    ])
+    // offset 翻页正确：首页 0，后续 500 / 1000 / 1500；每页都按 STATION_PAGE_LIMIT 请求。
+    const heihePages = fetchHydroMetStationsByIdentityMock.mock.calls
+      .filter((call) => (call[0] as IdentityArg).basinVersionId === 'bv-heihe')
+      .map((call) => call[1] as QueryArg)
+    expect(heihePages).toEqual([0, 500, 1000, 1500].map((offset) => ({ limit: STATION_PAGE_LIMIT, offset })))
+    expect(fetchHydroMetStationsByIdentityMock).toHaveBeenCalledTimes(5)
     expect(useStationLayerDataStore.getState().data?.loaded).toBe(2095)
   })
 
-  it('caps oversized basins and flags truncation honestly', async () => {
-    // 每次翻页返回满页，直到触顶 cap。
-    fetchHydroMetStationsByIdentityMock.mockImplementation(async (_identity: unknown, query: { limit: number; offset: number }) =>
-      stationPage(stations('cn', query.limit, query.offset), 12000),
+  it('caps a single basin larger than the client cap and flags truncation honestly', async () => {
+    // 每次翻页返回满页，直到该流域自己的行数触顶 cap；其后没有别的流域 → unloadedBasinCount 为 0。
+    const total = STATION_CLIENT_CAP + 3 * STATION_PAGE_LIMIT
+    fetchHydroMetStationsByIdentityMock.mockImplementation(async (_identity: unknown, query: QueryArg) =>
+      stationPage(stations('cn', query.limit, query.offset), total),
     )
 
     const data = await useStationLayerDataStore.getState().loadStationLayer({
       basinContexts: [{ basinId: 'china', basinVersionId: 'bv-cn' }],
     })
 
-    expect(data.total).toBe(12000)
+    expect(data.total).toBe(total)
     expect(data.totalKnown).toBe(true)
     expect(data.loaded).toBe(STATION_CLIENT_CAP)
     expect(data.truncated).toBe(true)
+    expect(data.unloadedBasinCount).toBe(0)
+    // 触顶即停翻页，且每页都按 STATION_PAGE_LIMIT 请求（不随剩余 cap 收窄）。
+    expect(fetchHydroMetStationsByIdentityMock).toHaveBeenCalledTimes(STATION_CLIENT_CAP / STATION_PAGE_LIMIT)
+    expect(
+      fetchHydroMetStationsByIdentityMock.mock.calls.every((call) => (call[1] as QueryArg).limit === STATION_PAGE_LIMIT),
+    ).toBe(true)
   })
 
   it('caps a backend page that over-returns beyond the remaining client cap', async () => {
@@ -158,6 +208,7 @@ describe('stationLayerData store (M26-3)', () => {
     expect(data.loaded).toBe(STATION_CLIENT_CAP)
     expect(data.stations).toHaveLength(STATION_CLIENT_CAP)
     expect(data.truncated).toBe(true)
+    expect(data.unloadedBasinCount).toBe(0)
     expect(data.total).toBe(STATION_CLIENT_CAP + 37)
     expect(fetchHydroMetStationsByIdentityMock).toHaveBeenCalledWith(
       { basinVersionId: 'bv-over' },
@@ -165,50 +216,383 @@ describe('stationLayerData store (M26-3)', () => {
     )
   })
 
-  it('marks totals unknown when the client cap skips later basin totals', async () => {
-    fetchHydroMetStationsByIdentityMock.mockImplementation(async (identity: { basinVersionId: string }, query: { limit: number; offset: number }) => {
-      if (identity.basinVersionId === 'bv-first') {
-        return stationPage(stations('first', query.limit, query.offset), STATION_CLIENT_CAP)
+  describe('safety valves (#2867)', () => {
+    // c0 + c1 累计越过 cap：c1 是截断流域，c2..c7 共 6 个流域未加载（其中 c3 的请求失败，同样被丢弃）。
+    const VALVE_CONTEXTS = contexts('c0', 'c1', 'c2', 'c3', 'c4', 'c5', 'c6', 'c7')
+    const C0_COUNT = STATION_CLIENT_CAP - 20_000
+    const C1_COUNT = 20_005
+
+    function settleValveBasin(control: ReturnType<typeof controlStationRequests>, basinId: string) {
+      const basinVersionId = `bv-${basinId}`
+      if (basinId === 'c0') return control.resolve(basinVersionId, stationPage(stations('c0', C0_COUNT), C0_COUNT))
+      if (basinId === 'c1') return control.resolve(basinVersionId, stationPage(stations('c1', C1_COUNT), C1_COUNT))
+      if (basinId === 'c3') return control.reject(basinVersionId, new Error('c3 failed'))
+      return control.resolve(basinVersionId, stationPage(stations(basinId, 10), 10))
+    }
+
+    function expectValveResult(data: Awaited<ReturnType<ReturnType<typeof useStationLayerDataStore.getState>['loadStationLayer']>>) {
+      expect(data.loaded).toBe(STATION_CLIENT_CAP)
+      expect(data.stations).toHaveLength(STATION_CLIENT_CAP)
+      expect(data.unloadedBasinCount).toBe(6)
+      // total 只含截断流域及之前的流域，不含其后已取到的 10 站流域。
+      expect(data.total).toBe(C0_COUNT + C1_COUNT)
+      expect(data.totalKnown).toBe(false)
+      expect(data.truncated).toBe(true)
+      expect(data.failedBasinIds).toEqual([])
+      expect(data.stations[0]?.station_id).toBe('c0-0')
+      expect(data.stations[C0_COUNT]?.station_id).toBe('c1-0')
+      expect(data.stations[STATION_CLIENT_CAP - 1]?.station_id).toBe(`c1-${STATION_CLIENT_CAP - C0_COUNT - 1}`)
+      expect(new Set(Object.values(data.stationBasinIds))).toEqual(new Set(['c0', 'c1']))
+    }
+
+    it('cuts at the client cap and counts the contexts after the cut when the cut context finishes first', async () => {
+      const control = controlStationRequests()
+      const load = useStationLayerDataStore.getState().loadStationLayer({ basinContexts: VALVE_CONTEXTS })
+      await control.waitForRequest('bv-c5')
+
+      // c0 完成时累计未到 cap：腾出的 worker 认领 c6。
+      settleValveBasin(control, 'c0')
+      await control.waitForRequest('bv-c6')
+      // c1 完成后已取到的站点数达到 cap：之后腾出的 worker 不再认领 c7。
+      settleValveBasin(control, 'c1')
+      await settle()
+      for (const basinId of ['c2', 'c3', 'c4', 'c5', 'c6']) settleValveBasin(control, basinId)
+
+      expectValveResult(await load)
+      expect(control.requested).toEqual(['bv-c0', 'bv-c1', 'bv-c2', 'bv-c3', 'bv-c4', 'bv-c5', 'bv-c6'])
+    })
+
+    it('gives the same cut, total and unloaded count when the contexts after the cut finish first', async () => {
+      const control = controlStationRequests()
+      const load = useStationLayerDataStore.getState().loadStationLayer({ basinContexts: VALVE_CONTEXTS })
+      await control.waitForRequest('bv-c5')
+
+      // 截断点之后的流域先完成（含失败的 c3），c6 / c7 也被认领并取到；最后才是 c1、c0。
+      for (const basinId of ['c5', 'c4', 'c3', 'c2']) settleValveBasin(control, basinId)
+      await control.waitForRequest('bv-c7')
+      for (const basinId of ['c7', 'c6', 'c1', 'c0']) settleValveBasin(control, basinId)
+
+      expectValveResult(await load)
+      expect(control.requested).toHaveLength(8)
+    })
+
+    it('reports no unloaded basin when the sum lands exactly on the client cap with nothing after the cut', async () => {
+      const control = controlStationRequests()
+      const load = useStationLayerDataStore.getState().loadStationLayer({ basinContexts: contexts('c0', 'c1') })
+      await control.waitForRequest('bv-c1')
+
+      control.resolve('bv-c1', stationPage(stations('c1', 20_000), 20_000))
+      control.resolve('bv-c0', stationPage(stations('c0', C0_COUNT), C0_COUNT))
+      const data = await load
+
+      expect(data.loaded).toBe(STATION_CLIENT_CAP)
+      expect(data.total).toBe(STATION_CLIENT_CAP)
+      expect(data.unloadedBasinCount).toBe(0)
+      expect(data.totalKnown).toBe(true)
+      expect(data.truncated).toBe(false)
+    })
+
+    it('keeps the loaded < total marking when the last context is cut mid-way', async () => {
+      const control = controlStationRequests()
+      const load = useStationLayerDataStore.getState().loadStationLayer({ basinContexts: contexts('c0', 'c1') })
+      await control.waitForRequest('bv-c1')
+
+      control.resolve('bv-c1', stationPage(stations('c1', C1_COUNT), C1_COUNT))
+      control.resolve('bv-c0', stationPage(stations('c0', C0_COUNT), C0_COUNT))
+      const data = await load
+
+      expect(data.loaded).toBe(STATION_CLIENT_CAP)
+      expect(data.total).toBe(STATION_CLIENT_CAP + 5)
+      expect(data.unloadedBasinCount).toBe(0)
+      expect(data.totalKnown).toBe(true)
+      expect(data.truncated).toBe(true)
+    })
+
+    it('requests only the first STATION_CONTEXT_CAP contexts and counts the excess as unloaded', async () => {
+      const control = controlStationRequests()
+      const basinContexts = contexts(...Array.from({ length: STATION_CONTEXT_CAP + 3 }, (_, index) => `basin-${index}`))
+
+      const load = useStationLayerDataStore.getState().loadStationLayer({ basinContexts })
+      let done = false
+      void load.finally(() => {
+        done = true
+      })
+      // 每一轮把在途请求按逆序应答（空清单），直到加载结束。
+      while (!done) {
+        for (const basinVersionId of control.pendingIds().reverse()) control.resolve(basinVersionId, stationPage([], 0))
+        await settle()
       }
-      return stationPage(stations('second', 10, query.offset), 10)
-    })
+      const data = await load
 
-    const data = await useStationLayerDataStore.getState().loadStationLayer({
-      basinContexts: [
-        { basinId: 'first', basinVersionId: 'bv-first' },
-        { basinId: 'second', basinVersionId: 'bv-second' },
-      ],
+      expect(data.total).toBe(0)
+      expect(data.loaded).toBe(0)
+      expect(data.unloadedBasinCount).toBe(3)
+      expect(data.totalKnown).toBe(false)
+      expect(data.truncated).toBe(true)
+      // 按上下文顺序认领，且只认领前 STATION_CONTEXT_CAP 个。
+      expect(control.requested).toEqual(
+        basinContexts.slice(0, STATION_CONTEXT_CAP).map((context) => context.basinVersionId),
+      )
+      expect(control.requested).not.toContain(`bv-basin-${STATION_CONTEXT_CAP}`)
     })
-
-    expect(data.loaded).toBe(STATION_CLIENT_CAP)
-    expect(data.total).toBe(STATION_CLIENT_CAP)
-    expect(data.totalKnown).toBe(false)
-    expect(data.truncated).toBe(true)
-    expect(fetchHydroMetStationsByIdentityMock).not.toHaveBeenCalledWith(
-      { basinVersionId: 'bv-second' },
-      expect.anything(),
-    )
   })
 
-  it('caps empty visible basin contexts and reports unknown total coverage', async () => {
-    fetchHydroMetStationsByIdentityMock.mockResolvedValue(stationPage([], 0))
-    const basinContexts = Array.from({ length: STATION_CONTEXT_CAP + 3 }, (_, index) => ({
-      basinId: `basin-${index}`,
-      basinVersionId: `bv-${index}`,
-    }))
+  describe('load every basin with bounded concurrency (#2867)', () => {
+    it('gives every basin its stations when there are more than 50 contexts and more than 5000 stations', async () => {
+      const basinIds = Array.from({ length: 60 }, (_, index) => `basin-${index}`)
+      fetchHydroMetStationsByIdentityMock.mockImplementation(async (identity: IdentityArg) => {
+        const basinId = identity.basinVersionId.slice('bv-'.length)
+        return stationPage(stations(basinId, 100), 100)
+      })
 
-    const data = await useStationLayerDataStore.getState().loadStationLayer({ basinContexts })
+      const data = await useStationLayerDataStore.getState().loadStationLayer({ basinContexts: contexts(...basinIds) })
 
-    expect(data.total).toBe(0)
-    expect(data.loaded).toBe(0)
-    expect(data.totalKnown).toBe(false)
-    expect(data.truncated).toBe(true)
-    expect(fetchHydroMetStationsByIdentityMock).toHaveBeenCalledTimes(STATION_CONTEXT_CAP)
-    expect(fetchHydroMetStationsByIdentityMock.mock.calls.map((call) => call[0])).toEqual(
-      basinContexts.slice(0, STATION_CONTEXT_CAP).map((context) => ({ basinVersionId: context.basinVersionId })),
-    )
-    expect(fetchHydroMetStationsByIdentityMock.mock.calls.map((call) => call[0])).not.toContainEqual({
-      basinVersionId: `bv-${STATION_CONTEXT_CAP}`,
+      expect(data.loaded).toBe(6000)
+      expect(data.total).toBe(6000)
+      expect(data.totalKnown).toBe(true)
+      expect(data.truncated).toBe(false)
+      expect(data.unloadedBasinCount).toBe(0)
+      expect(data.failedBasinIds).toEqual([])
+      const countByBasin = new Map<string, number>()
+      for (const basinId of Object.values(data.stationBasinIds)) countByBasin.set(basinId, (countByBasin.get(basinId) ?? 0) + 1)
+      expect([...countByBasin.keys()]).toEqual(basinIds)
+      expect([...countByBasin.values()].every((count) => count === 100)).toBe(true)
+      expect(data.stationBasinIds['basin-59-99']).toBe('basin-59')
+    })
+
+    it('keeps more than one and at most STATION_FETCH_CONCURRENCY basin loads in flight', async () => {
+      // 每个流域两页：首页挂起由测试放行，第二页立即返回；worker 在两页之间不让出名额。
+      const firstPages = new Map<string, (page: Page) => void>()
+      const inFlightBasins = new Set<string>()
+      let peak = 0
+      fetchHydroMetStationsByIdentityMock.mockImplementation((identity: IdentityArg, query: QueryArg) => {
+        const basinId = identity.basinVersionId.slice('bv-'.length)
+        if (query.offset > 0) {
+          inFlightBasins.delete(basinId)
+          return Promise.resolve(stationPage(stations(basinId, 1, query.offset), STATION_PAGE_LIMIT + 1))
+        }
+        inFlightBasins.add(basinId)
+        peak = Math.max(peak, inFlightBasins.size)
+        return new Promise<Page>((resolve) => {
+          firstPages.set(basinId, resolve)
+        })
+      })
+      const basinIds = Array.from({ length: 20 }, (_, index) => `basin-${index}`)
+
+      const load = useStationLayerDataStore.getState().loadStationLayer({ basinContexts: contexts(...basinIds) })
+      await settle()
+      // 没有任何请求完成之前，恰好 STATION_FETCH_CONCURRENCY 个流域在途，第 7 个没有被认领。
+      expect([...firstPages.keys()]).toEqual(basinIds.slice(0, STATION_FETCH_CONCURRENCY))
+
+      let done = false
+      void load.finally(() => {
+        done = true
+      })
+      while (!done) {
+        for (const [basinId, resolve] of [...firstPages].reverse()) {
+          firstPages.delete(basinId)
+          resolve(stationPage(stations(basinId, STATION_PAGE_LIMIT), STATION_PAGE_LIMIT + 1))
+        }
+        await settle()
+      }
+      const data = await load
+
+      expect(STATION_FETCH_CONCURRENCY).toBeGreaterThan(1)
+      expect(peak).toBe(STATION_FETCH_CONCURRENCY)
+      expect(data.loaded).toBe(20 * (STATION_PAGE_LIMIT + 1))
+      expect(data.truncated).toBe(false)
+    })
+
+    it('merges stations in context order when later contexts resolve first', async () => {
+      const control = controlStationRequests()
+      const load = useStationLayerDataStore.getState().loadStationLayer({ basinContexts: contexts('c0', 'c1', 'c2') })
+      await control.waitForRequest('bv-c2')
+
+      control.resolve('bv-c2', stationPage(stations('c2', 2), 2))
+      await settle()
+      control.resolve('bv-c1', stationPage(stations('c1', 3), 3))
+      await settle()
+      control.resolve('bv-c0', stationPage(stations('c0', 1), 1))
+      const data = await load
+
+      expect(data.stations.map((item) => item.station_id)).toEqual(['c0-0', 'c1-0', 'c1-1', 'c1-2', 'c2-0', 'c2-1'])
+      expect(Object.keys(data.stationBasinIds)).toEqual(['c0-0', 'c1-0', 'c1-1', 'c1-2', 'c2-0', 'c2-1'])
+      expect(data.total).toBe(6)
+      expect(data.truncated).toBe(false)
+    })
+
+    it('lists failed basins in context order and keeps the others when later contexts fail first', async () => {
+      const control = controlStationRequests()
+      const load = useStationLayerDataStore.getState().loadStationLayer({ basinContexts: contexts('c0', 'c1', 'c2', 'c3') })
+      await control.waitForRequest('bv-c3')
+
+      control.reject('bv-c2', new Error('c2 failed'))
+      await settle()
+      control.resolve('bv-c3', stationPage(stations('c3', 2), 2))
+      control.resolve('bv-c1', stationPage(stations('c1', 1), 1))
+      await settle()
+      control.reject('bv-c0', new Error('c0 failed'))
+      const data = await load
+
+      expect(data.failedBasinIds).toEqual(['c0', 'c2'])
+      expect(data.stations.map((item) => item.station_id)).toEqual(['c1-0', 'c3-0', 'c3-1'])
+      expect(data.total).toBe(3)
+      expect(data.totalKnown).toBe(false)
+      expect(data.truncated).toBe(true)
+      expect(data.unloadedBasinCount).toBe(0)
+      expect(useStationLayerDataStore.getState().error).toBeNull()
+    })
+
+    it('rejects with the first error in context order when every basin fails, whichever fails first', async () => {
+      const control = controlStationRequests()
+      const load = useStationLayerDataStore.getState().loadStationLayer({ basinContexts: contexts('c0', 'c1', 'c2') })
+      const outcome = load.then(
+        () => 'resolved',
+        (error: Error) => error.message,
+      )
+      await control.waitForRequest('bv-c2')
+
+      control.reject('bv-c2', new Error('c2 failed'))
+      await settle()
+      control.reject('bv-c1', new Error('c1 failed'))
+      await settle()
+      control.reject('bv-c0', new Error('c0 failed'))
+
+      expect(await outcome).toBe('c0 failed')
+      const state = useStationLayerDataStore.getState()
+      expect(state.data).toBeNull()
+      expect(state.error).toBe('c0 failed')
+    })
+  })
+
+  describe('superseded load (#2867)', () => {
+    const supersededMessage = '代站图层请求已被取代'
+
+    it('claims no further context, requests no further page and rejects once a different key starts', async () => {
+      const control = controlStationRequests()
+      const firstContexts = contexts('a0', 'a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'a7')
+      const secondRequest = { basinContexts: contexts('b0') }
+      const store = useStationLayerDataStore.getState()
+
+      const first = store.loadStationLayer({ basinContexts: firstContexts })
+      const firstOutcome = first.then(
+        () => 'resolved',
+        (error: Error) => error.message,
+      )
+      await control.waitForRequest('bv-a5')
+
+      const second = store.loadStationLayer(secondRequest)
+      await control.waitForRequest('bv-b0')
+      control.resolve('bv-b0', stationPage(stations('b0', 4), 4))
+      const secondData = await second
+
+      // 旧加载在途的 6 个首页此时才返回，每个流域都还有第二页。
+      for (const basinId of ['a0', 'a1', 'a2', 'a3', 'a4', 'a5']) {
+        control.resolve(`bv-${basinId}`, stationPage(stations(basinId, STATION_PAGE_LIMIT), 2 * STATION_PAGE_LIMIT))
+      }
+
+      expect(await firstOutcome).toBe(supersededMessage)
+      await settle()
+      // 没有第二页请求，也没有认领 a6 / a7。
+      expect(control.requested).toEqual(['bv-a0', 'bv-a1', 'bv-a2', 'bv-a3', 'bv-a4', 'bv-a5', 'bv-b0'])
+      expect(control.pendingIds()).toEqual([])
+      const state = useStationLayerDataStore.getState()
+      expect(state.data).toBe(secondData)
+      expect(state.data?.stations.map((item) => item.station_id)).toEqual(['b0-0', 'b0-1', 'b0-2', 'b0-3'])
+      expect(state.requestKey).toBe(stationLayerRequestKey(secondRequest))
+      expect(state.error).toBeNull()
+      expect(state.loading).toBe(false)
+    })
+
+    it('claims no further context when the in-flight basins finish on their only page', async () => {
+      const control = controlStationRequests()
+      // 源已解析：认领一个流域的第一步是 latest-product 查询，被取代后连这一步也不得再发。
+      fetchHydroMetLatestProductMock.mockImplementation(async ({ basinId }: { basinId: string }) => ({
+        basin_version_id: `bv-${basinId}`,
+        model_id: 'm-gfs',
+      }))
+      const store = useStationLayerDataStore.getState()
+      const first = store.loadStationLayer({
+        basinContexts: contexts('a0', 'a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'a7').map((context) => ({
+          ...context,
+          source: 'GFS' as const,
+        })),
+      })
+      const firstOutcome = first.then(
+        () => 'resolved',
+        (error: Error) => error.message,
+      )
+      await control.waitForRequest('bv-a5')
+
+      const second = store.loadStationLayer({ basinContexts: contexts('b0') })
+      await control.waitForRequest('bv-b0')
+      // 在途的 6 个流域都只有一页：返回后 worker 回到认领处，不得再认领 a6 / a7。
+      for (const basinId of ['a0', 'a1', 'a2', 'a3', 'a4', 'a5']) {
+        control.resolve(`bv-${basinId}`, stationPage(stations(basinId, 2), 2))
+      }
+      await settle()
+
+      expect(control.requested).toEqual(['bv-a0', 'bv-a1', 'bv-a2', 'bv-a3', 'bv-a4', 'bv-a5', 'bv-b0'])
+      expect(fetchHydroMetLatestProductMock.mock.calls.map((call) => (call[0] as { basinId: string }).basinId)).toEqual([
+        'a0',
+        'a1',
+        'a2',
+        'a3',
+        'a4',
+        'a5',
+      ])
+      expect(await firstOutcome).toBe(supersededMessage)
+      control.resolve('bv-b0', stationPage(stations('b0', 4), 4))
+      const secondData = await second
+      expect(useStationLayerDataStore.getState().data).toBe(secondData)
+    })
+
+    it('requests no station page when superseded during the latest-product lookup', async () => {
+      const products: Array<(product: { basin_version_id: string; model_id: string }) => void> = []
+      fetchHydroMetLatestProductMock.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            products.push(resolve)
+          }),
+      )
+      fetchHydroMetStationsByIdentityMock.mockResolvedValue(stationPage(stations('b0', 1), 1))
+      const store = useStationLayerDataStore.getState()
+
+      const first = store.loadStationLayer({
+        basinContexts: [{ basinId: 'a0', basinVersionId: 'bv-a0', source: 'GFS', cycle: '2026-07-06T00:00:00Z' }],
+      })
+      const firstOutcome = first.then(
+        () => 'resolved',
+        (error: Error) => error.message,
+      )
+      await vi.waitFor(() => expect(products).toHaveLength(1))
+      await store.loadStationLayer({ basinContexts: contexts('b0') })
+      products[0]?.({ basin_version_id: 'bv-a0', model_id: 'm-gfs' })
+
+      expect(await firstOutcome).toBe(supersededMessage)
+      expect(fetchHydroMetStationsByIdentityMock.mock.calls.map((call) => call[0])).toEqual([{ basinVersionId: 'bv-b0' }])
+      expect(useStationLayerDataStore.getState().data?.stations[0]?.station_id).toBe('b0-0')
+    })
+
+    it('rejects a load in flight when the store is cleared', async () => {
+      const control = controlStationRequests()
+      const store = useStationLayerDataStore.getState()
+      const first = store.loadStationLayer({ basinContexts: contexts('a0') })
+      const firstOutcome = first.then(
+        () => 'resolved',
+        (error: Error) => error.message,
+      )
+      await control.waitForRequest('bv-a0')
+
+      store.clear()
+      control.resolve('bv-a0', stationPage(stations('a0', STATION_PAGE_LIMIT), 2 * STATION_PAGE_LIMIT))
+
+      expect(await firstOutcome).toBe(supersededMessage)
+      expect(control.requested).toEqual(['bv-a0'])
+      const state = useStationLayerDataStore.getState()
+      expect(state.data).toBeNull()
+      expect(state.error).toBeNull()
+      expect(state.requestKey).toBeNull()
     })
   })
 
@@ -411,9 +795,6 @@ describe('stationLayerData store (M26-3)', () => {
   })
 
   describe('per-basin degrade (#2694)', () => {
-    type IdentityArg = { basinVersionId: string; modelId?: string }
-    type QueryArg = { limit: number; offset: number }
-
     it('keeps the basins that loaded when another basin fails on its first page', async () => {
       fetchHydroMetStationsByIdentityMock.mockImplementation(async (identity: IdentityArg) => {
         if (identity.basinVersionId === 'bv-hlj') throw new Error('statement timeout')
@@ -504,12 +885,11 @@ describe('stationLayerData store (M26-3)', () => {
         }),
       ).rejects.toThrow('first failed')
 
-      // 两个流域都试过才报错，不在第一个失败处中断。
-      expect(fetchHydroMetStationsByIdentityMock.mock.calls.map((call) => (call[0] as IdentityArg).basinVersionId)).toEqual([
-        'bv-first',
-        'bv-first',
-        'bv-second',
-      ])
+      // 两个流域都试过才报错，不在第一个失败处中断；并发下请求先后不固定，只核对每个流域各自的请求。
+      const requests = fetchHydroMetStationsByIdentityMock.mock.calls.map(
+        (call) => `${(call[0] as IdentityArg).basinVersionId}@${(call[1] as QueryArg).offset}`,
+      )
+      expect([...requests].sort()).toEqual([`bv-first@${STATION_PAGE_LIMIT}`, 'bv-first@0', 'bv-second@0'].sort())
       const state = useStationLayerDataStore.getState()
       expect(state.data).toBeNull()
       expect(state.error).toBe('first failed')
@@ -538,9 +918,11 @@ describe('stationLayerData store (M26-3)', () => {
     })
 
     it('reports no failed basin on a full success', async () => {
-      fetchHydroMetStationsByIdentityMock
-        .mockResolvedValueOnce(stationPage(stations('heihe', 287, 0), 287))
-        .mockResolvedValueOnce(stationPage(stations('qhh', 386, 0), 386))
+      fetchHydroMetStationsByIdentityMock.mockImplementation(async (identity: IdentityArg) =>
+        identity.basinVersionId === 'bv-heihe'
+          ? stationPage(stations('heihe', 287, 0), 287)
+          : stationPage(stations('qhh', 386, 0), 386),
+      )
 
       const data = await useStationLayerDataStore.getState().loadStationLayer({
         basinContexts: [
@@ -550,6 +932,7 @@ describe('stationLayerData store (M26-3)', () => {
       })
 
       expect(data.failedBasinIds).toEqual([])
+      expect(data.unloadedBasinCount).toBe(0)
       expect(data.truncated).toBe(false)
       expect(data.totalKnown).toBe(true)
       expect(data.total).toBe(673)
