@@ -16,7 +16,6 @@ import {
   RIVER_CLICK_PERCENTILE_METHOD,
   RIVER_CLICK_SCHEMA_VERSION,
   RIVER_CLICK_THRESHOLD_MS,
-  RIVER_CLICK_VARIABLE,
   RIVER_CLICK_WARMUP,
   type RiverClickFailureCode,
   type RiverClickFailureStage,
@@ -456,16 +455,6 @@ function isValidUtcTimestamp(value: unknown): value is string {
     replayed.getUTCMinutes() === minute &&
     replayed.getUTCSeconds() === second
   )
-}
-
-function isUrlUserinfoFree(value: unknown): value is string {
-  if (typeof value !== 'string') return false
-  try {
-    const parsed = new URL(value)
-    return parsed.username === '' && parsed.password === '' && parsed.pathname !== '/'
-  } catch {
-    return false
-  }
 }
 
 function isRawUrlLike(value: string): boolean {

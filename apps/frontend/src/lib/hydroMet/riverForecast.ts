@@ -1,5 +1,5 @@
 import { client } from '@/api/client'
-import { getApiErrorMessage, unwrapApiData } from '@/api/response'
+import { unwrapApiData } from '@/api/response'
 import type { components } from '@/api/types'
 import { createForecastPointBudgetGuard } from '@/lib/forecastRenderingBudget'
 import { normalizeHydroMetCycle, type HydroMetSource } from '@/lib/hydroMet/queryState'

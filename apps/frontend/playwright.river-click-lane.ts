@@ -17,9 +17,7 @@ import { nearestRankP95, validateRiverClickDurations } from './src/lib/riverClic
 import type { RiverClickFeatureIdentity, RiverClickFailure, RiverClickSample } from './src/lib/riverClickEvidence/receipt'
 import {
   failureOf,
-  boundedMessage,
   resolveRiverClickIdentity,
-  TIMEOUT_SENTINEL,
   type RiverClickFailureShape,
   type RiverClickLaneEnv,
   type RiverClickLaneIdentity,

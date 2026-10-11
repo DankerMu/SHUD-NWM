@@ -14,7 +14,7 @@ function safeParentDir() {
   return root
 }
 
-function ownerSeam(parentDir: string): C4EvidenceOwnerPublication & { publish: ReturnType<typeof vi.fn> } {
+function ownerSeam(): C4EvidenceOwnerPublication & { publish: ReturnType<typeof vi.fn> } {
   const publish = vi.fn((_path: string, _receipt: C4Evidence) => ({ path: _path }))
   return { publish }
 }
@@ -34,7 +34,7 @@ describe('C4 evidence-owner config-before-browser publication', () => {
     const parent = safeParentDir()
     try {
       const receiptPath = path.join(parent, 'nhms-frontend-c4-live-evidence-owner.json')
-      const seam = ownerSeam(parent)
+      const seam = ownerSeam()
       const env = validEnv(receiptPath)
       delete env.PLAYWRIGHT_LIVE_BASE_URL
       const result = await runC4LiveEvidenceOwner(env, seam)
@@ -57,7 +57,7 @@ describe('C4 evidence-owner config-before-browser publication', () => {
     const parent = safeParentDir()
     try {
       const receiptPath = path.join(parent, 'nhms-frontend-c4-live-evidence-owner.json')
-      const seam = ownerSeam(parent)
+      const seam = ownerSeam()
       const result = await runC4LiveEvidenceOwner({
         ...validEnv(receiptPath),
         PLAYWRIGHT_LIVE_RIVER_RUN_ID: 'run-1',
@@ -75,7 +75,7 @@ describe('C4 evidence-owner config-before-browser publication', () => {
         PLAYWRIGHT_LIVE_API_BASE_URL: 'https://api.example.test',
         PLAYWRIGHT_LIVE_C4_BASIN_ID: 'basins_qhh',
         PLAYWRIGHT_LIVE_C4_SEGMENT_ID: 'seg-001',
-      }, ownerSeam(parent))
+      }, ownerSeam())
       expect(missing.ok).toBe(false)
       if (!missing.ok) {
         expect(missing.classification).toBe('BLOCKED')
@@ -90,7 +90,7 @@ describe('C4 evidence-owner config-before-browser publication', () => {
     const parent = safeParentDir()
     try {
       const receiptPath = path.join(parent, 'nhms-frontend-c4-live-evidence-owner.json')
-      const seam = ownerSeam(parent)
+      const seam = ownerSeam()
       const result = await runC4LiveEvidenceOwner(validEnv(receiptPath), seam)
       expect(result).toEqual({ ok: true })
       expect(seam.publish).not.toHaveBeenCalled()

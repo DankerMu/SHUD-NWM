@@ -92,7 +92,7 @@ export interface C4PassBuildHooks {
 }
 
 export function publishC4Pass(
-  terminal: C4LaneTerminal,
+  _terminal: C4LaneTerminal,
   input: C4PassPublicationInput,
   publication: C4TerminalPublication,
   wholeDeadline: RiverClickDeadline | null = null,

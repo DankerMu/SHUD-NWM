@@ -8,7 +8,7 @@ import {
   type RiverClickLaneBrowserRequest,
   type RiverClickLaneBrowserResponse,
 } from '../../playwright.river-click-lane-preflight'
-import { runRiverClickAttempt, riverClickChartStateScript, type RiverClickAttemptOptions } from '../../playwright.river-click-lane-attempt'
+import { runRiverClickAttempt, riverClickChartStateScript } from '../../playwright.river-click-lane-attempt'
 import {
   RIVER_CLICK_HOOK_READY_SCRIPT,
   runRiverClickLane,

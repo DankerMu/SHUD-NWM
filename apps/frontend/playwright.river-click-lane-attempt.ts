@@ -18,7 +18,6 @@ import { matchRiverClickSeriesRequest } from './src/lib/riverClickEvidence/reque
 import type { RiverClickFeatureIdentity } from './src/lib/riverClickEvidence/receipt'
 import {
   failureOf,
-  simpleFailure,
   timeoutValue,
   TIMEOUT_SENTINEL,
   type RiverClickFailureShape,
@@ -332,7 +331,7 @@ export async function runRiverClickAttempt(
   expectedRendered: RiverClickFeatureIdentity,
   options: RiverClickAttemptOptions = {},
 ): Promise<RiverClickAttemptResult> {
-  const { page, config } = env
+  const { page } = env
   const clock = options.now ?? (() => performance.now())
   const attemptDeadlineMs = options.attemptDeadlineMs ?? RIVER_CLICK_PER_SAMPLE_DEADLINE_MS
   const pollMs = options.pollMs ?? 100

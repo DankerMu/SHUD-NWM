@@ -67,7 +67,7 @@ import {
 } from '@/lib/riverClickEvidence/hook'
 import { createStationLocateEvidenceHook, installStationLocateEvidenceHook } from '@/lib/stationLocateEvidence/hook'
 import { type LayerState, type OverviewBasin } from '@/lib/m11/overviewDataContracts'
-import type { M11Layer, M11QueryState } from '@/lib/m11/queryState'
+import type { M11QueryState } from '@/lib/m11/queryState'
 import { buildMvtTileUrlTemplate, isMvtLayerMetadata } from '@/lib/mvtLayerMetadata'
 
 export {

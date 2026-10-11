@@ -15,7 +15,6 @@ import { lstatSync, statSync, realpathSync, openSync, fstatSync, fchmodSync, wri
 import { parseC4DisplayConfig, c4ReceiptPathFromEnv, type C4ConfigParse } from './src/lib/c4DisplayEvidence/config'
 import { buildC4TerminalEvidence, type C4Evidence, type C4Failure } from './src/lib/c4DisplayEvidence/receipt'
 import {
-  publishC4Evidence,
   validateC4ReceiptPath,
   type C4EvidenceFs,
 } from './playwright.c4-display-evidence'

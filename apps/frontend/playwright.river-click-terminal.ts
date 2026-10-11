@@ -150,7 +150,7 @@ export function publishRiverClickTerminal(
  * `wholeDeadline` may be undefined in unit tests (no expiry enforced).
  */
 export function publishRiverClickPass(
-  terminal: RiverClickLaneTerminal,
+  _terminal: RiverClickLaneTerminal,
   input: RiverClickPassPublicationInput,
   publication: RiverClickTerminalPublication,
   wholeDeadline: RiverClickDeadline | null = null,

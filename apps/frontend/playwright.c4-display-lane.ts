@@ -335,7 +335,7 @@ function attachObservers(page: C4LanePageSurface, apiOrigin: string, deadline: R
     const captureBody = isC4RuntimeConfigUrl(url, apiOrigin) || pathname === '/api/v1/jobs'
     if (captureBody) {
       observed.bodyState = 'pending'
-      const capture = boundedResponseText(response, state.activeDeadline).then((text) => {
+      void boundedResponseText(response, state.activeDeadline).then((text) => {
         if (text === null) {
           observed.bodyState = 'invalid'
           return
