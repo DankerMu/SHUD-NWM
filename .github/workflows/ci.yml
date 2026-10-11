@@ -34,6 +34,7 @@ jobs:
       openapi: ${{ steps.filter.outputs.openapi }}
       schemas: ${{ steps.filter.outputs.schemas }}
       node_tests: ${{ steps.filter.outputs.node_tests }}
+      workflows: ${{ steps.filter.outputs.workflows }}
       all_files: ${{ steps.filter.outputs.all_files }}
     steps:
       - uses: actions/checkout@v4
@@ -217,6 +218,10 @@ jobs:
               - 'scripts/**/*.mjs'
               - 'scripts/__tests__/**'
               - '.github/workflows/ci.yml'
+            # #2863: nothing else statically checks the workflow files; a
+            # PR that leaves them untouched does not pay for the lint.
+            workflows:
+              - '.github/workflows/**'
 
   markdown-lint:
     name: Markdown Lint
@@ -265,6 +270,21 @@ jobs:
       - run: |
           shopt -s failglob
           node --test scripts/__tests__/*.test.mjs
+
+  # #2863: actionlint over every workflow file, from the pinned official image
+  # (it bundles shellcheck and pyflakes, so `run:` blocks are checked too). No
+  # job may `needs:` this one: a skipped lint would skip its dependants.
+  workflow-lint:
+    name: Workflow Lint
+    needs: changes
+    if: needs.changes.outputs.workflows == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker://rhysd/actionlint:1.7.7
+        with:
+          args: -color
 
   json-schema-validate:
     name: JSON Schema Validate
