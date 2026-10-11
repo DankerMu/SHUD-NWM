@@ -27,7 +27,8 @@ import { isMobileForm, requireViewport, type ViewportSize } from './support/view
  * 曲线窗控件的桌面不变量（openspec mobile-responsive-display task 4.9 的 Risk pack「Legacy compatibility」）。
  *
  * 4.9 只加带移动前缀的尺寸类；桌面形态下这些控件的包围盒与计算字号必须与改动前相同。下面的字面值
- * 量自改动前的 `src/`（`origin/master` d0a570f6b，1280×900，Chromium），改动前后都绿。
+ * 量自改动前的 `src/`（`origin/master` d0a570f6b，1280×900，Chromium），改动前后都绿；唯一的例外是要素切换项的
+ * 字号，#2861 之后它取自己的 `text-xs`（见 `toggleFontPx`）。
  * 只钉由 CSS 决定的量（高度、定宽、字号、内边距）；由字体决定的文本宽度（气象代站触发器、要素切换项）
  * 不写字面值，改为钉“没有被撑到触控下限”（切换项计算 `min-width` 为 `auto`、RH / Rn 宽 < 44）。
  */
@@ -41,7 +42,10 @@ const MASTER_1280x900 = {
   triggerHeight: 28,
   /** 河段触发器占满剩余宽度后被 `max-w-[12rem]` 截到 192px。 */
   riverTriggerWidth: 192,
-  controlFontPx: 11,
+  /** 触发器自己的 `text-[11px]`。 */
+  triggerFontPx: 11,
+  /** 要素切换项自己的 `text-xs`（#2861 之前被层外的 `font: inherit` 压成继承来的 11px）。 */
+  toggleFontPx: 12,
   optionHeight: 24.5,
   optionFontPx: 11,
   toggleHeight: 28,
@@ -71,7 +75,7 @@ test.describe('M11 曲线窗控件桌面尺寸不变', () => {
 
       const trigger = await measureControl(parts.trigger, '起报时次触发器')
       expectNear(trigger.box.height, MASTER_1280x900.triggerHeight, '触发器高')
-      expect(trigger.fontSizePx, '触发器字号').toBe(MASTER_1280x900.controlFontPx)
+      expect(trigger.fontSizePx, '触发器字号').toBe(MASTER_1280x900.triggerFontPx)
       if (kind === 'river') expectNear(trigger.box.width, MASTER_1280x900.riverTriggerWidth, '河段触发器宽')
 
       // 河段的起报时次条自带内边距与边线；气象代站的那一条包在工具条里，量工具条。
@@ -88,7 +92,7 @@ test.describe('M11 曲线窗控件桌面尺寸不变', () => {
     })
   }
 
-  test('(i) 1280x900 气象代站窗：要素切换项高 28、字号 11px、没有最小宽度，与起报时次条同一行；已加载容器上内边距 10px', async ({ page }) => {
+  test('(i) 1280x900 气象代站窗：要素切换项高 28、字号 12px、没有最小宽度，与起报时次条同一行；已加载容器上内边距 10px', async ({ page }) => {
     await openSheetWithControls(page, DESKTOP, 'station')
     expect(isMobileForm(requireViewport(page))).toBe(false)
     const frame = page.getByTestId(CURVE_WINDOWS.station.testId)
@@ -97,10 +101,10 @@ test.describe('M11 曲线窗控件桌面尺寸不变', () => {
     expect(toggles.map((toggle) => toggle.name)).toEqual([...STATION_VARIABLES])
     for (const toggle of toggles) {
       expectNear(toggle.box.height, MASTER_1280x900.toggleHeight, `切换项「${toggle.name}」高`)
-      expect(toggle.fontSizePx, `切换项「${toggle.name}」字号`).toBe(MASTER_1280x900.controlFontPx)
+      expect(toggle.fontSizePx, `切换项「${toggle.name}」字号`).toBe(MASTER_1280x900.toggleFontPx)
       expect(toggle.minWidth, `切换项「${toggle.name}」计算 min-width`).toBe('auto')
     }
-    // 短标签没有被撑到触控下限（改动前实测 RH 37.88、Rn 36.09）。
+    // 短标签没有被撑到触控下限（实测 RH 39.59、Rn 37.73；#2861 之前 11px 字号下是 37.88、36.09）。
     for (const name of ['RH', 'Rn']) {
       expect(toggles.find((toggle) => toggle.name === name)!.box.width, `切换项「${name}」宽`).toBeLessThan(MIN_TOUCH_TARGET_PX)
     }

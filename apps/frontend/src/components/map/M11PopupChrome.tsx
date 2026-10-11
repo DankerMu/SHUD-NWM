@@ -123,9 +123,11 @@ export function M11IssueTimeSelect({
         data-testid={testId}
         // 触发器定高、限宽：值单行，放不下时省略号截断（长标签只出现在保留时次上），完整标签留在 title。
         // 截断类经子选择器下发——Radix 的 SelectValue 不接收 className；`>span` 只命中值，箭头是 svg。
+        // 移动形态的限宽比桌面宽 1rem（#2861）：`font-mono` 在 16px 下 `MM-DD HH:MM UTC…` 约 154px，加触发器自身的
+        // 42px（内边距、边线、间距、箭头）超过 12rem；13rem 给值留 166px，余量留给各平台等宽字体的字宽差。
         title={labelOf(selectedValue)}
         className={cn(
-          'h-7 min-w-0 max-w-[12rem] cursor-pointer border-white/15 bg-white/10 px-2 py-0 font-mono text-[11px] text-slate-100 shadow-none ring-offset-slate-950 [color-scheme:dark] hover:border-cyan-400/50 focus:border-cyan-400 focus:ring-cyan-400 disabled:cursor-not-allowed disabled:opacity-50 mobile:h-11 mobile:text-base! [&>span]:min-w-0 [&>span]:truncate [&>svg]:shrink-0',
+          'h-7 min-w-0 max-w-[12rem] cursor-pointer border-white/15 bg-white/10 px-2 py-0 font-mono text-[11px] text-slate-100 shadow-none ring-offset-slate-950 [color-scheme:dark] hover:border-cyan-400/50 focus:border-cyan-400 focus:ring-cyan-400 disabled:cursor-not-allowed disabled:opacity-50 mobile:h-11 mobile:max-w-[13rem] mobile:text-base [&>span]:min-w-0 [&>span]:truncate [&>svg]:shrink-0',
           triggerClassName,
         )}
       >

@@ -181,7 +181,7 @@ test.describe('运维页移动形态兜底', () => {
 
       test('(e) 祖先带 12px 字号时五个表单控件仍不小于 16px', async ({ page }) => {
         await openOpsFallbackPage(page, target)
-        // 表单控件靠 `font: inherit` 取祖先字号；注入小字号祖先才能证明移动字号规则本身在起作用。
+        // 注入小字号祖先：控件量到 16px 说明是自己的 `mobile:text-base`（不带 `!`，#2861）在起作用，不是从祖先继承来的。
         await page.addStyleTag({ content: 'main { font-size: 12px; }' })
         await expect.poll(() => page.locator('main').evaluate((main) => getComputedStyle(main).fontSize)).toBe('12px')
 

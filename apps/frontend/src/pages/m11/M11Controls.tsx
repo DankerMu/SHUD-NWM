@@ -350,13 +350,13 @@ export function M11Timeline({
           <ChevronsRight className="h-4 w-4" aria-hidden="true" />
         </button>
         {renderSpeedSelect ? (
-          // 字号类放在 label 上：`src/index.css` 的无层规则 `select { font: inherit }` 压过工具层，
-          // `<select>` 的字号取自 label（移动形态 ≥ 16px，避免 iOS 聚焦时自动放大）。
+          // 字号类放在 label 上、`<select>` 自己不带字号类（#2861）：`<select>` 经 preflight 的 `font: inherit` 取 label 的
+          // 字号——桌面形态 `text-xs`，移动形态 `mobile:text-base`（≥ 16px，避免 iOS 聚焦时自动放大）。
           <label className="ml-1 flex items-center gap-1 text-xs text-neutral-700 mobile:text-base">
             <span className="sr-only">播放速度</span>
             <select
               aria-label="播放速度"
-              className="h-8 rounded border border-neutral-300 bg-white px-1 text-xs disabled:cursor-not-allowed disabled:text-neutral-500 mobile:h-11"
+              className="h-8 rounded border border-neutral-300 bg-white px-1 disabled:cursor-not-allowed disabled:text-neutral-500 mobile:h-11"
               value={speed}
               // 倍速是播放控件：fail-closed（列表为空 / 无 onQueryChange）时与三个播放按钮一同禁用。
               disabled={disabled}

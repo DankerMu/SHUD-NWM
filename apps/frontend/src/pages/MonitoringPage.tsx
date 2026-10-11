@@ -251,7 +251,7 @@ export function MonitoringPage({ mode = 'monitoring' }: MonitoringPageProps) {
             type="datetime-local"
             value={cycleInputValue(cycleTime)}
             onChange={(event) => handleCycleTimeChange(event.target.value)}
-            className="h-10 w-full rounded-md border border-border bg-panel px-3 py-2 text-sm text-foreground ring-offset-background focus:outline-none focus:ring-2 focus:ring-accent mobile:text-base!"
+            className="h-10 w-full rounded-md border border-border bg-panel px-3 py-2 text-sm text-foreground ring-offset-background focus:outline-none focus:ring-2 focus:ring-accent mobile:text-base"
           />
         </label>
       </div>

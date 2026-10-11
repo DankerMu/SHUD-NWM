@@ -29,9 +29,9 @@ const BAR_BOTTOM_INSET = 40
 /** 桌面的 `h-8` / `w-8`。 */
 const DESKTOP_CONTROL_SIZE = 32
 /**
- * 桌面两个选择器的计算字号（改动前的实测事实）：`src/index.css` 的无层规则 `select { font: inherit }`
- * 压过 Tailwind 工具层，`<select>` 自身的 `text-xs` 不生效，字号取自各自的 `<label>`——
- * 起报时次的 label 没有字号类（继承 16px），播放速度的 label 是 `text-xs`（12px）。
+ * 桌面两个选择器的计算字号：`<select>` 自己不带字号类，经 preflight 的 `font: inherit` 取各自 `<label>` 的字号——
+ * 起报时次的 label 没有字号类（继承 16px），播放速度的 label 是 `text-xs`（12px）。#2861 删掉层外的
+ * `font: inherit` 时一并删了 `<select>` 上从未生效的 `text-xs`，这两个值因此没有变。
  */
 const DESKTOP_CYCLE_FONT_PX = 16
 const DESKTOP_SPEED_FONT_PX = 12
