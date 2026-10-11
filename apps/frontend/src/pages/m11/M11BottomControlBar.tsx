@@ -243,14 +243,15 @@ export function M11BottomControlBar({
       {/*
         竖屏时起报时次是第一行唯一的可伸缩项（`flex-1 min-w-0`）：吃掉分段与速度之外的宽度，320px 宽、
         空周期选项「无可用起报时次」时收缩并由 `<select>` 自身截断，而不是把速度挤到下一行。
-        字号类放在 label 上：`src/index.css` 的无层规则 `select { font: inherit }` 压过工具层。
+        字号类放在 label 上、`<select>` 自己不带字号类（#2861）：`<select>` 经 preflight 的 `font: inherit` 取 label 的
+        字号——桌面形态是继承来的 16px，移动形态是 `mobile:text-base`（≥ 16px，避免 iOS 聚焦时自动放大）。
       */}
       <label className={cn('flex items-center gap-1 mobile:text-base', portrait ? 'min-w-0 flex-1' : 'shrink-0')}>
         <span className="sr-only">起报时次</span>
         <select
           aria-label="起报时次"
           className={cn(
-            'h-8 rounded border border-neutral-300 bg-white/80 px-1 text-xs disabled:cursor-not-allowed disabled:text-neutral-500 mobile:h-11',
+            'h-8 rounded border border-neutral-300 bg-white/80 px-1 disabled:cursor-not-allowed disabled:text-neutral-500 mobile:h-11',
             portrait && 'w-full min-w-0',
           )}
           value={cycle ?? ''}

@@ -59,3 +59,6 @@ if [[ "$total_bytes" -gt "$limit_bytes" ]]; then
 fi
 
 echo "Bundle size check passed: ${total_kb} KB gzip under ${limit_kb} KB limit."
+
+# Same build, second gate (#2861): no form-control font reset outside @layer in the built CSS.
+node "$(dirname "${BASH_SOURCE[0]}")/check-unlayered-font-reset.mjs" "$assets_dir"
