@@ -1,4 +1,4 @@
-import { renderHook, waitFor } from '@testing-library/react'
+import { act, renderHook, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { HydroMetStation } from '@/pages/hydroMet/bootstrap'
@@ -7,6 +7,8 @@ import {
   STATION_CLIENT_CAP,
   STATION_CONTEXT_CAP,
   type StationLayerBasinContext,
+  type StationLayerData,
+  stationLayerRequestKey,
   useStationLayerDataStore,
 } from '@/stores/stationLayerData'
 
@@ -57,6 +59,8 @@ function contexts(...basinIds: string[]): StationLayerBasinContext[] {
 // basinContexts 用模块级常量，避免每次渲染换引用。
 const QHH = contexts('qhh')
 const CHINA = contexts('china')
+const BIG_PLUS_TWO = contexts('big', 't1', 't2')
+const BIG_FAILED_PLUS_TWO = contexts('basins_hlj', 'big', 't1', 't2')
 const QHH_AND_UNRESOLVED: StationLayerBasinContext[] = [...QHH, { basinId: 'heihe', basinVersionId: null }]
 const UNRESOLVED_ONLY: StationLayerBasinContext[] = [{ basinId: 'qhh', basinVersionId: null }]
 const FIRST_SECOND = contexts('first', 'second')
@@ -116,21 +120,40 @@ describe('useMetStationLayer status note — existing branches', () => {
     expect(result.current.featureCollection).toBeNull()
   })
 
-  it('reports cap truncation with a known total', async () => {
-    fetchHydroMetStationsByIdentityMock.mockImplementation(async (_identity: unknown, query: { limit: number; offset: number }) => ({
-      items: stations('cn', query.limit, query.offset),
-      total_count: 12000,
-    }))
+  it('reports cap truncation with a known total when a single basin is cut mid-way', async () => {
+    // 单个流域自己就超过 cap、其后没有别的流域：沿用 loaded/total 的截断文案。
+    respondByBasinVersion({ 'bv-china': { items: stations('cn', STATION_CLIENT_CAP), total_count: STATION_CLIENT_CAP + 12000 } })
 
     const { result } = renderLayer(CHINA)
 
     await waitFor(() => expect(result.current.loaded).toBe(STATION_CLIENT_CAP))
-    expect(result.current.statusNote).toBe(`已加载 ${STATION_CLIENT_CAP}/12000 个代站，列表已截断`)
+    expect(result.current.statusNote).toBe(`已加载 ${STATION_CLIENT_CAP}/${STATION_CLIENT_CAP + 12000} 个代站，列表已截断`)
     expect(result.current.truncated).toBe(true)
     expect(result.current.totalKnown).toBe(true)
+    expect(result.current.unloadedBasinCount).toBe(0)
   })
 
-  it('reports truncation with an unknown total when the context cap drops basins', async () => {
+  it('keeps the unknown-total truncation note for truncated data without failed or unloaded basins', async () => {
+    // store 现在不会产出这种组合；文案分支保留，直接注入快照核对。
+    const data: StationLayerData = {
+      stations: stations('qhh', 2),
+      stationBasinIds: { 'qhh-0': 'qhh', 'qhh-1': 'qhh' },
+      total: 2,
+      totalKnown: false,
+      loaded: 2,
+      truncated: true,
+      failedBasinIds: [],
+      unloadedBasinCount: 0,
+    }
+    useStationLayerDataStore.setState({ data, loading: false, error: null, requestKey: stationLayerRequestKey({ basinContexts: QHH }) })
+
+    const { result } = renderLayer(QHH)
+
+    expect(result.current.statusNote).toBe('已加载 2 个代站，列表已截断（总数未完全统计）')
+    expect(fetchHydroMetStationsByIdentityMock).not.toHaveBeenCalled()
+  })
+
+  it('names the number of unloaded basins when the context cap drops basins', async () => {
     fetchHydroMetStationsByIdentityMock.mockImplementation(async (identity: { basinVersionId: string }) => ({
       items: [station(`s-${identity.basinVersionId}`)],
       total_count: 1,
@@ -139,8 +162,39 @@ describe('useMetStationLayer status note — existing branches', () => {
     const { result } = renderLayer(OVER_CONTEXT_CAP)
 
     await waitFor(() => expect(result.current.loaded).toBe(STATION_CONTEXT_CAP))
-    expect(result.current.statusNote).toBe(`已加载 ${STATION_CONTEXT_CAP} 个代站，列表已截断（总数未完全统计）`)
+    expect(result.current.statusNote).toBe(`已加载 ${STATION_CONTEXT_CAP} 个代站，1 个流域未加载（超出客户端上限）`)
+    expect(result.current.unloadedBasinCount).toBe(1)
+    expect(result.current.truncated).toBe(true)
     expect(result.current.totalKnown).toBe(false)
+  })
+
+  it('names the number of unloaded basins when the client cap cuts before later basins', async () => {
+    // 受控 resolver：截断点之后的两个流域先完成，状态文案仍只按上下文顺序给出未加载流域数。
+    const resolvers = new Map<string, (page: Page) => void>()
+    fetchHydroMetStationsByIdentityMock.mockImplementation(
+      (identity: { basinVersionId: string }) =>
+        new Promise<Page>((resolve) => {
+          resolvers.set(identity.basinVersionId, resolve)
+        }),
+    )
+
+    const { result } = renderLayer(BIG_PLUS_TWO)
+    await waitFor(() => expect(resolvers.size).toBe(3))
+    expect(result.current.statusNote).toBe('气象代站加载中')
+
+    await act(async () => {
+      resolvers.get('bv-t2')?.({ items: stations('t2', 3), total_count: 3 })
+      resolvers.get('bv-t1')?.({ items: stations('t1', 3), total_count: 3 })
+      resolvers.get('bv-big')?.({ items: stations('big', STATION_CLIENT_CAP), total_count: STATION_CLIENT_CAP })
+    })
+
+    await waitFor(() => expect(result.current.loaded).toBe(STATION_CLIENT_CAP))
+    expect(result.current.statusNote).toBe(`已加载 ${STATION_CLIENT_CAP} 个代站，2 个流域未加载（超出客户端上限）`)
+    expect(result.current.unloadedBasinCount).toBe(2)
+    expect(result.current.total).toBe(STATION_CLIENT_CAP)
+    expect(result.current.truncated).toBe(true)
+    expect(result.current.totalKnown).toBe(false)
+    expect(result.current.featureCollection?.features).toHaveLength(STATION_CLIENT_CAP)
   })
 
   it('reports an empty layer when the basins have no station', async () => {
@@ -183,6 +237,7 @@ describe('useMetStationLayer status note — existing branches', () => {
     expect(result.current.truncated).toBe(false)
     expect(result.current.total).toBe(5)
     expect(result.current.totalKnown).toBe(true)
+    expect(result.current.unloadedBasinCount).toBe(0)
     expect(result.current.featureCollection?.features).toHaveLength(5)
     expect(result.current.featureCollection?.features[2]?.properties.basin_id).toBe('second')
   })
@@ -199,6 +254,7 @@ describe('useMetStationLayer status note — failed basins (#2694)', () => {
     await waitFor(() => expect(result.current.loaded).toBe(71))
     expect(result.current.statusNote).toBe('已加载 71 个代站，1 个流域加载失败：basins_hlj')
     expect(result.current.failedBasinIds).toEqual(['basins_hlj'])
+    expect(result.current.unloadedBasinCount).toBe(0)
     expect(result.current.error).toBeNull()
     expect(result.current.truncated).toBe(true)
     expect(result.current.totalKnown).toBe(false)
@@ -237,7 +293,7 @@ describe('useMetStationLayer status note — failed basins (#2694)', () => {
     expect(result.current.loaded).toBe(0)
   })
 
-  it('hides a simultaneous cap-truncation note', async () => {
+  it('appends the number of unloaded basins when the context cap also drops basins', async () => {
     fetchHydroMetStationsByIdentityMock.mockImplementation(async (identity: { basinVersionId: string }) => {
       if (identity.basinVersionId === 'bv-basins_hlj') throw new Error('statement timeout')
       return { items: [station(`s-${identity.basinVersionId}`)], total_count: 1 }
@@ -246,7 +302,33 @@ describe('useMetStationLayer status note — failed basins (#2694)', () => {
     const { result } = renderLayer(OVER_CONTEXT_CAP_ONE_FAILED)
 
     await waitFor(() => expect(result.current.loaded).toBe(STATION_CONTEXT_CAP - 1))
-    expect(result.current.statusNote).toBe(`已加载 ${STATION_CONTEXT_CAP - 1} 个代站，1 个流域加载失败：basins_hlj`)
+    expect(result.current.statusNote).toBe(
+      `已加载 ${STATION_CONTEXT_CAP - 1} 个代站，1 个流域加载失败：basins_hlj；另有 1 个流域未加载`,
+    )
+    expect(result.current.unloadedBasinCount).toBe(1)
+  })
+
+  it('appends the number of unloaded basins when the client cap cuts after a failed basin', async () => {
+    respondByBasinVersion({
+      'bv-basins_hlj': new Error('statement timeout'),
+      'bv-big': { items: stations('big', STATION_CLIENT_CAP), total_count: STATION_CLIENT_CAP },
+      'bv-t1': { items: stations('t1', 3), total_count: 3 },
+      'bv-t2': new Error('discarded failure'),
+    })
+
+    const { result } = renderLayer(BIG_FAILED_PLUS_TWO)
+
+    await waitFor(() => expect(result.current.loaded).toBe(STATION_CLIENT_CAP))
+    // 截断点之后失败的 t2 不计入失败流域，只计入未加载。
+    expect(result.current.statusNote).toBe(
+      `已加载 ${STATION_CLIENT_CAP} 个代站，1 个流域加载失败：basins_hlj；另有 2 个流域未加载`,
+    )
+    expect(result.current.failedBasinIds).toEqual(['basins_hlj'])
+    expect(result.current.unloadedBasinCount).toBe(2)
+  })
+
+  it('exposes a zero unloadedBasinCount without data', () => {
+    expect(renderLayer(QHH, false).result.current.unloadedBasinCount).toBe(0)
   })
 
   it('exposes an empty failedBasinIds without data', () => {
