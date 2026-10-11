@@ -13,11 +13,14 @@ do not weaken the constraint:
    `mobile-curve-sheet`, `mobile-map-overlay-layout`): every visible `select`, select trigger and `input`
    in mobile form stays ≥ 16px. Controls that reached 16px only by inheriting from `body` now need an
    explicit `mobile:text-base` (no `!`).
-2. **Issue-time trigger width** (#2870 coupling note on the issue): if `font-mono` now applies to the
-   trigger at 16px in mobile form, `MM-DD HH:MM UTC…` no longer fits the value element and
-   `e2e/m11-issue-time-trigger.mobile.mocked.spec.ts` case (a) goes red. Keep that spec's assertions and
-   make the trigger fit — prefer widening `M11IssueTimeSelect`'s mobile `max-w` over dropping `font-mono`;
-   report the measured widths.
+2. **Issue-time trigger in mobile form** (#2870 coupling note on the issue; revised after review round
+   1). `font-mono` now applies to the trigger. On desktop that is the as-written result and stays. In
+   mobile form a 16px monospace `MM-DD HH:MM UTC…` does not fit the value element that #2870 tuned for the
+   proportional face; widening the trigger to make it fit costs the river cycle bar 16px and, by the
+   round-1 reviewer's arithmetic, pushes the caption "GFS + IFS 同步切换" out of view on ~360px-wide
+   phones. Ruling: **mobile pixels unchanged** — the trigger carries `mobile:font-sans`, its mobile
+   `max-w` stays at the pre-change value, and `e2e/m11-issue-time-trigger.mobile.mocked.spec.ts` keeps
+   its assertions. No Linux monospace-width risk remains.
 3. **Layout assertions that are not font baselines** (bar heights, no-overflow, tap targets, overlap
    and same-row specs, e.g. `m11-sheet-controls-desktop.mocked.spec.ts` :104-109): stay as they are. If an
    as-written font makes one fail, the tie-break is fixed: rewrite that control's font classes to the

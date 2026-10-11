@@ -11,9 +11,9 @@
  * Node stdlib only. `src/__tests__/indexCssFontReset.test.ts` runs the same scan over `src/index.css`.
  */
 
-import { readdirSync, readFileSync } from 'node:fs'
+import { readdirSync, readFileSync, realpathSync } from 'node:fs'
 import path from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath } from 'node:url'
 
 const FORM_CONTROL_SELECTOR = /(^|[\s>+~,(])(button|input|select|textarea)(?![\w-])/
 const FONT_DECLARATION = /(^|[;{\s])font\s*:/
@@ -80,6 +80,7 @@ function main(assetsDir) {
   process.stdout.write(`Unlayered font reset check passed: ${files.length} CSS asset(s), no form-control font rule outside @layer.\n`)
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+// 比较真实路径：经符号链接调用时 `process.argv[1]` 是链接路径，而 `import.meta.url` 是解析后的真实路径。
+if (process.argv[1] && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1])) {
   main(process.argv[2] ?? 'dist/assets')
 }

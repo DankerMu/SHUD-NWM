@@ -1,4 +1,6 @@
-import { readFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 import { describe, expect, it } from 'vitest'
@@ -49,5 +51,25 @@ describe('findUnlayeredFontResets', () => {
     expect(findUnlayeredFontResets(css)).toEqual([])
     // 上面那些规则不会让扫描错位：紧跟其后的层外重置照样被报出。
     expect(findUnlayeredFontResets(`${css}\nselect { font: inherit }`)).toEqual(['select { font: inherit }'])
+  })
+})
+
+describe('check-unlayered-font-reset.mjs CLI', () => {
+  it('runs the scan and exits 1 on a violating asset when invoked through a symlinked path', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'font-reset-cli-'))
+    try {
+      const assets = path.join(dir, 'assets')
+      mkdirSync(assets)
+      writeFileSync(path.join(assets, 'index.css'), 'button{font:inherit}')
+      const link = path.join(dir, 'check.mjs')
+      symlinkSync(path.resolve(__dirname, '../../scripts/check-unlayered-font-reset.mjs'), link)
+
+      const result = spawnSync(process.execPath, [link, assets], { encoding: 'utf8' })
+
+      expect(result.stderr).toContain('index.css: button { font:inherit }')
+      expect(result.status).toBe(1)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
