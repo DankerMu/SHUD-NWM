@@ -85,7 +85,6 @@ APPLICATION_NAME = "nhms-purge-superseded-weights"
 DATABASE_URL_ENV = "DATABASE_URL"
 OBJECT_STORE_ROOT_ENV = "OBJECT_STORE_ROOT"
 DEFAULT_ENV_FILE_KEY = "infra/env/node27-ingest.env"
-DEFAULT_RECEIPT_ROOT_KEY = "scheduler/weight-purge"
 MANIFEST_KEY = "scheduler/registry/manifest-last.json"
 LOCK_SUFFIX = ".weight-purge-lock"
 RUNBOOK = "docs/runbooks/production-ops/operating-scope.md (7.7)"
@@ -292,7 +291,8 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--receipt-root",
-        help=f"Directory of the run directories (default: <{OBJECT_STORE_ROOT_ENV}>/{DEFAULT_RECEIPT_ROOT_KEY}).",
+        required=True,
+        help="Directory of the run directories.",
     )
     parser.add_argument(
         "--min-idle-days",
@@ -342,11 +342,7 @@ def settings_from_arguments(args: argparse.Namespace) -> Settings:
         operator_id=args.operator_id.strip(),
         reason=args.reason.strip(),
         env_file=Path(os.path.abspath(env_file)),
-        receipt_root=(
-            Path(os.path.abspath(args.receipt_root))
-            if args.receipt_root
-            else object_store_root / DEFAULT_RECEIPT_ROOT_KEY
-        ),
+        receipt_root=Path(os.path.abspath(args.receipt_root)),
         object_store_root=object_store_root,
         database_url=values[DATABASE_URL_ENV],
         min_idle_days=args.min_idle_days,

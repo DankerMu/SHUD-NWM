@@ -668,8 +668,8 @@ cd /home/nwm/NWM && uv run --no-sync python -m scripts.node27_purge_superseded_w
 cd /home/nwm/NWM && { setsid nohup uv run --no-sync python -m scripts.node27_purge_superseded_weights "${PURGE_ARGS[@]}" --apply > "$LOG" 2>&1 < /dev/null & }
 ```
 
-参数：`--env-file`（默认本 checkout 的 `infra/env/node27-ingest.env`）、`--receipt-root`（默认
-`<OBJECT_STORE_ROOT>/scheduler/weight-purge`）、`--min-idle-days`（默认 30；低于 21 即生产 forcing 保留期，拒绝）、
+参数：`--env-file`（默认本 checkout 的 `infra/env/node27-ingest.env`）、`--receipt-root`（必填）、
+`--min-idle-days`（默认 30；低于 21 即生产 forcing 保留期，拒绝）、
 `--pause-seconds`（model 之间的停顿，默认 2.0）、`--max-models`（本次最多处理几个 model，先小批试跑时用）。
 
 - **连库之前就拒绝的**：`--operator-id` / `--reason` 为空；`--min-idle-days` 低于 21；进程的 `DATABASE_URL` 不是 env 文件里

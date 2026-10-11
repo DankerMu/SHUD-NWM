@@ -245,7 +245,7 @@ class Deployment:
 
     def run(self, *extra: str) -> int:
         arguments = ["--operator-id", "it2699p", "--reason", "integration", "--env-file", str(self.env_file)]
-        return tool.main([*arguments, "--pause-seconds", "0", *extra])
+        return tool.main([*arguments, "--receipt-root", str(self.receipt_root), "--pause-seconds", "0", *extra])
 
     def run_directory(self) -> Path:
         (directory,) = list(self.receipt_root.iterdir())
