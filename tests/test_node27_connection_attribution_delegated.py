@@ -174,25 +174,19 @@ DELEGATED_CONNECT_CLOSURE: tuple[tuple[str, str, str, str], ...] = (
         ATTRIBUTED,
         "refresh_all_run_display_coverage",
     ),
-    # Both rows below entered this closure with #1991 task 7.3:
-    # packages/common/forcing_store_routing.py derives its refusal exception from
-    # met_store.MetStoreError, so every module that routes a forcing store now
-    # imports met_store. The edge is the exception base class and nothing else.
+    # Entered this closure with #1991 task 7.3 through forcing_store_routing.py's
+    # refusal exception; #1993's first cut deleted that class and the edge with
+    # it, which took met_store out of the coverage refresh's closure altogether.
+    # The autopipeline still reaches it statically through the orchestrator
+    # package.
     (
         "scripts/node27_autopipeline.py",
         "packages/common/met_store.py",
         UNREACHABLE,
-        "via packages/common/forcing_domain_handoff_apply.py -> forcing_store_routing.py, which imports "
-        "MetStoreError only as the base of LegacyForcingStoreRefusedError; PsycopgMetStore.from_env() is "
-        "called from worker/CLI factories, and autopipeline reaches ingest only by subprocess (separately "
-        "registered), never in-process",
-    ),
-    (
-        "scripts/node27_refresh_coverage.py",
-        "packages/common/met_store.py",
-        UNREACHABLE,
-        "via packages/common/display_coverage.py -> forcing_store_routing.py, same single edge: the "
-        "MetStoreError base class. The coverage refresh constructs no met store",
+        "static-only: via services/orchestrator/__init__.py -> chain.py -> "
+        "workers/canonical_converter/converter.py; PsycopgMetStore.from_env() is called from worker/CLI "
+        "factories, and autopipeline reaches ingest only by subprocess (separately registered), never "
+        "in-process",
     ),
     (
         "scripts/node27_refresh_coverage.py",

@@ -16,10 +16,7 @@ from packages.common.forcing_domain_handoff import (
 from packages.common.forcing_store_routing import (
     FORCING_NARROW_INSERT_COLUMNS,
     FORCING_NARROW_INSERT_TEMPLATE,
-    FORCING_STORE_DEFAULT,
-    FORCING_STORE_LEGACY,
     FORCING_VERSION_ROUTING_SQL,
-    legacy_store_refusal_message,
     row_value,
 )
 from packages.common.redaction import redact_payload, redact_text
@@ -55,27 +52,6 @@ REASON_APPLY_COMPRESSED_CHUNK_BLOCKED = "HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED"
 # terminal-states the BLOCKED code permanently, and a DB contention blip must
 # stay retryable.
 REASON_APPLY_COMPRESSED_CHUNK_GUARD_FAILED = "HANDOFF_APPLY_COMPRESSED_CHUNK_GUARD_FAILED"
-# #1991 (task 7.3): the forcing version is routed to the LEGACY store, so this
-# narrow-only writer must not touch it. Distinct from both compressed-chunk
-# codes above, and distinct from HANDOFF_APPLY_SQL_FAILURE: those are
-# "unappliable until an operator acts" and "possibly transient" respectively,
-# while this one has no remedy at all until task 8.2 drops the legacy table. It
-# is PERMANENT for the version by construction — `timeseries_store` is set once
-# by 000061 and no writer flips it back — so unlike river there is no
-# `ops.ingest_recompute_decline` row (that table has zero forcing-side uses;
-# fixture `I12-1991.md` R2.2). The node-27 ingest pipeline routes this code to a
-# NON-FAILING tick outcome -- it applies a handoff on EVERY tick, so a legacy
-# version in scope must not redden production continuously. That routing lives
-# with the pipeline; this module only has to make the code distinguishable.
-#
-# "Distinguishable" is an ORDERING property, not just a spelling one. This code
-# only actually reaches the pipeline because `_refuse_legacy_routed_forcing_version`
-# runs as the first statement of `_apply_with_cursor` after the #2713 ingest
-# fence (which reads nothing and writes nothing). Moved below
-# `_upsert_forcing_version`, a regenerated package for a legacy version reports
-# REASON_APPLY_FORCING_VERSION_CONFLICT instead — a code the skip branch does not
-# recognise — and the non-failing outcome silently stops happening.
-REASON_APPLY_LEGACY_STORE_REFUSED = "HANDOFF_APPLY_LEGACY_STORE_REFUSED"
 # #2713: the compression/ingest fence on met.forcing_station_timeseries was
 # busy (chunk DDL queued for or holding it), so the whole apply rolled back
 # before any statement touched a table. NOT a fault: the node-27 ingest
@@ -362,7 +338,7 @@ def _apply_with_cursor(
     identity = prepared["identity"]
 
     # #2713: the compression/ingest fence is the FIRST statement of the write
-    # transaction, ahead even of the routing read below. `_upsert_met_stations`
+    # transaction. `_upsert_met_stations`
     # and `_upsert_forcing_version` lock the tables
     # `met.forcing_station_timeseries` references by FK, and chunk DDL locks
     # those too; trying the fence after them would re-create the cycle. On the
@@ -370,16 +346,6 @@ def _apply_with_cursor(
     # `apply_forcing_domain_handoff`).
     if not try_ingest_fence(cursor, FORCING_STATION_TIMESERIES_HYPERTABLE):
         raise IngestFenceBusy(FORCING_STATION_TIMESERIES_HYPERTABLE)
-    # ROUTING REFUSAL FIRST after the fence, above `_upsert_forcing_version` and not only inside
-    # `_replace_forcing_station_timeseries` (#1991, M5). That upsert's
-    # `ON CONFLICT ... WHERE (checksum IS NULL OR checksum = EXCLUDED.checksum)`
-    # returns no row when the checksum changes and raises
-    # REASON_APPLY_FORCING_VERSION_CONFLICT — so a node-22 REGENERATION of a
-    # legacy-routed version's package would report a code the ingest pipeline's
-    # skip branch does not recognise, failing every tick with no remedy. Hoisted
-    # here, both replay shapes report the one code that is true of both: the
-    # version's rows are in the other table.
-    _refuse_legacy_routed_forcing_version(cursor, forcing_version["forcing_version_id"])
     _verify_existing_station_rows(cursor, stations)
     _upsert_forcing_version(cursor, forcing_version, parser_envelope)
     _upsert_met_stations(cursor, stations)
@@ -890,55 +856,13 @@ def _coerce_valid_time(value: Any) -> datetime | None:
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
-def _forcing_version_routing(cursor: Any, forcing_version_id: str) -> tuple[Any, str] | None:
-    """``(forcing_version_key, timeseries_store)``, or ``None`` when no version row exists.
-
-    One primary-key lookup, spelled once, used by both the hoisted refusal in
-    :func:`_apply_with_cursor` and by the writer's own guard — which additionally
-    needs the surrogate key. ``None`` means "this envelope introduces the
-    version", which is the normal case and not an error here.
-    """
+def _forcing_version_key(cursor: Any, forcing_version_id: str) -> Any | None:
+    """The version's surrogate key, or ``None`` when no version row exists."""
     cursor.execute(FORCING_VERSION_ROUTING_SQL, (forcing_version_id,))
     row = cursor.fetchone()
     if row is None:
         return None
-    return (
-        row_value(row, "forcing_version_key", 0),
-        str(row_value(row, "timeseries_store", 1) or FORCING_STORE_DEFAULT),
-    )
-
-
-def _legacy_store_refusal_reason(forcing_version_id: str, timeseries_store: str) -> dict[str, Any]:
-    return _reason(
-        REASON_APPLY_LEGACY_STORE_REFUSED,
-        field="met.forcing_version.timeseries_store",
-        forcing_version_id=forcing_version_id,
-        timeseries_store=timeseries_store,
-        detail=legacy_store_refusal_message(forcing_version_id),
-    )
-
-
-def _refuse_legacy_routed_forcing_version(cursor: Any, forcing_version_id: str) -> None:
-    """Refuse a legacy-routed version before ANY write in this transaction (#1991, M5).
-
-    Placed ahead of ``_upsert_forcing_version`` because that statement can fail
-    FIRST, with a different and misleading code: its ``ON CONFLICT ... WHERE
-    (checksum IS NULL OR checksum = EXCLUDED.checksum)`` returns no row on a
-    checksum change, which is exactly what a node-22 regeneration of a
-    legacy-routed version's package produces. The ingest pipeline routes the
-    refusal code to a non-failing tick outcome and does not recognise the
-    conflict code, so without this hoist a single legacy version in scope turns
-    every tick red with no operator remedy.
-
-    An absent version row is NOT an error: the envelope is introducing it, and
-    every version created after 000061 takes the column's ``narrow`` default.
-    """
-    routing = _forcing_version_routing(cursor, forcing_version_id)
-    if routing is None:
-        return
-    _forcing_version_key, timeseries_store = routing
-    if timeseries_store == FORCING_STORE_LEGACY:
-        raise ForcingDomainHandoffApplyError(_legacy_store_refusal_reason(forcing_version_id, timeseries_store))
+    return row_value(row, "forcing_version_key", 0)
 
 
 def _replace_forcing_station_timeseries(
@@ -946,21 +870,11 @@ def _replace_forcing_station_timeseries(
     forcing_version_id: str,
     rows: Sequence[Mapping[str, Any]],
 ) -> None:
-    # ROUTING REFUSAL FIRST — the first statement of this function, before the
-    # existence probe, before the compressed-chunk guard and before the DELETE
-    # (spec `forcing-narrow-store` :21, :29; must-preserve M3). This is a
-    # DELETE-then-INSERT replace window, so a store check placed anywhere after
-    # the window opens destroys the legacy rows and only then refuses. The read
-    # is on the SAME cursor, inside the caller's transaction/savepoint, so the
-    # value the refusal is based on is the value the write would have raced
-    # against.
-    #
-    # `_apply_with_cursor` already refused above `_upsert_forcing_version`, which
-    # is where the DECISION has to live because that upsert can fail first with a
-    # different code. This repeat is DEFENCE IN DEPTH, and it is also what
-    # resolves `forcing_version_key`, which the statements below predicate on.
-    routing = _forcing_version_routing(cursor, forcing_version_id)
-    if routing is None:
+    # The narrow statements below predicate on the surrogate key.
+    # `_upsert_forcing_version` has already run for this envelope, so a missing
+    # row here is a real conflict.
+    forcing_version_key = _forcing_version_key(cursor, forcing_version_id)
+    if forcing_version_key is None:
         raise ForcingDomainHandoffApplyError(
             _reason(
                 REASON_APPLY_FORCING_VERSION_CONFLICT,
@@ -968,9 +882,6 @@ def _replace_forcing_station_timeseries(
                 forcing_version_id=forcing_version_id,
             )
         )
-    forcing_version_key, timeseries_store = routing
-    if timeseries_store == FORCING_STORE_LEGACY:
-        raise ForcingDomainHandoffApplyError(_legacy_store_refusal_reason(forcing_version_id, timeseries_store))
 
     # Surrogate keys resolved in Python, not by an `INSERT … SELECT … JOIN
     # met.met_station`: a join DROPS a row whose station has no authority entry,
@@ -1163,13 +1074,10 @@ def _verify_apply_row_counts(cursor: Any, prepared: Mapping[str, Any]) -> dict[s
             (station_ids,),
         ),
         # Post-write verification, narrow, BY `forcing_version_key` (#1991
-        # invariant I4). NOT a renderer template: `render_forcing_ts_sql` takes a
-        # PAIR, and after task 7.3 this writer is narrow-only, so a legacy
-        # variant could never be rendered — registering it would mean authoring
-        # dead SQL. It is a NAMED census exemption instead (fixture
-        # `I12-1991.md` R3), cleared with the legacy templates in task 8.3. The
-        # scalar sub-select rather than a join keeps the predicate on
-        # `forcing_version_key`, which leads the narrow primary key.
+        # invariant I4). NOT a renderer template: it is write-side
+        # verification, and a NAMED census exemption instead (fixture
+        # `I12-1991.md` R3). The scalar sub-select rather than a join keeps the
+        # predicate on `forcing_version_key`, which leads the narrow primary key.
         #
         # The row_counts KEY stays `met.forcing_station_timeseries`: it is
         # compared against the payload's `expected_row_counts`, which the

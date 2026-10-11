@@ -4,7 +4,7 @@ Postgres lane. The schema is built by applying the REAL migrations from zero
 (``apply_migrations_from_zero``), so everything asserted here is asserted about
 the DDL that will run on node-27, not about a hand-built catalog.
 
-Three things live here and nothing else:
+Four things live here and nothing else:
 
 1. **The catalog after 000061** — invariant I1 and spec ``forcing-narrow-store``
    :5,13. The narrow table's exact column set and nullability, its primary key,
@@ -18,9 +18,16 @@ Three things live here and nothing else:
    ``met.forcing_version`` has neither ``parsed_at`` nor ``status``, so river's
    predicate (``000059:78-79``) has nothing to map onto.
 
-3. **Invariant I6 / spec scenario :36** — divergent-basin coverage equality,
-   moved here from task 7.2 by ``fixtures/I11-1990.md`` C1 because it needs BOTH
-   fact tables, which only this migration creates.
+3. **The read path after #1993's first cut** — the readers render only the
+   narrow template and never read the routing column, so the column's value
+   changes nothing, rows in the renamed legacy table are invisible, and the
+   narrow leg reports the station authority's basin. (During the expand window
+   this section proved legacy↔narrow equality, spec scenario :36; that
+   comparison has no legacy reader left to stand on.)
+
+4. **The writer after #1993's first cut** (fixture ``I14-1993.md`` D3) — a
+   version whose column still reads ``legacy`` is replaced like any other: the
+   rows land in the narrow table, the legacy rows are untouched, nothing raises.
 
 SILENT-SKIP TRAP. ``tests/conftest.py``'s ``_integration_skip_reason`` skips this
 whole module unless ``NHMS_RUN_INTEGRATION=1`` AND
@@ -40,11 +47,7 @@ from psycopg2.extras import RealDictCursor, execute_values
 
 from packages.common import display_coverage, forecast_store
 from packages.common.display_coverage import refresh_run_display_coverage
-from packages.common.forcing_store_routing import (
-    FORCING_NARROW_INSERT_TEMPLATE,
-    FORCING_STORE_LEGACY,
-    FORCING_STORE_NARROW,
-)
+from packages.common.forcing_store_routing import FORCING_NARROW_INSERT_TEMPLATE
 from tests.integration_helpers import (
     BASIN_ID,
     BASIN_VERSION_ID,
@@ -88,20 +91,16 @@ GRID_ID = f"{ISSUE_126_PREFIX}_narrow_grid"
 GRID_CELL_ID = f"{ISSUE_126_PREFIX}_narrow_cell"
 
 #: The basin version the LEGACY fact rows claim, which is NOT the one
-#: `met.met_station` declares for `STATION_ID`. That divergence is the whole
-#: point of spec scenario :36: the legacy fact row stores its own
-#: `basin_version_id` with no foreign key to `met.met_station`
+#: `met.met_station` declares for `STATION_ID`. The legacy fact row stores its
+#: own `basin_version_id` with no foreign key to `met.met_station`
 #: (`db/migrations/000005_met.sql:101`), so the two CAN disagree, and the narrow
 #: table removes the column entirely and derives it from the station authority.
 DIVERGENT_BASIN_VERSION_ID = f"{ISSUE_126_PREFIX}_divergent_basin_v"
 
 #: A second forecast run, on the divergent basin version, sharing the SAME
-#: forcing version. It exists because the coverage CTE joins the fact rows to
-#: `candidate_runs.basin_version_id`: the legacy leg on the fact row's own
-#: column, the narrow leg on the station's. With one run only one leg can ever
-#: join, and "the station counts are equal" would be a comparison between a
-#: number and zero. Two runs is the smallest shape in which both legs produce
-#: rows and the counts are comparable at all.
+#: forcing version. Only the legacy rows' own `basin_version_id` matches it, so
+#: it is the candidate that would light up if anything still read the legacy
+#: table.
 DIVERGENT_RUN_ID = f"{ISSUE_126_PREFIX}_divergent_forecast_run"
 
 VARIABLES: tuple[str, ...] = tuple(forecast_store.MVP_STATION_VARIABLES)
@@ -384,12 +383,12 @@ def test_routing_backfill_classifies_by_row_existence_in_the_legacy_table(
     finally:
         connection.close()
 
-    assert stores[FORCING_VERSION_ID] == FORCING_STORE_LEGACY
-    assert stores[empty_version_id] == FORCING_STORE_NARROW
+    assert stores[FORCING_VERSION_ID] == "legacy"
+    assert stores[empty_version_id] == "narrow"
 
 
 # ---------------------------------------------------------------------------
-# 3. Invariant I6 / spec scenario :36 — divergent-basin coverage equality
+# 3. The read path after #1993's first cut — narrow only, column ignored
 # ---------------------------------------------------------------------------
 
 
@@ -534,7 +533,7 @@ def _station_identity_rows(connection: Any, run_id: str) -> list[dict[str, Any]]
     """`station_identity_coverage` for one run, straight out of the coverage CTEs.
 
     `hydro.run_display_coverage` carries no `basin_version_id` column, so the
-    provenance half of spec scenario :36 has to be read one level in -- off the
+    basin provenance has to be read one level in -- off the
     CTE whose rows the coverage row is aggregated from. The CTE chain is the
     production constant, not a copy.
     """
@@ -551,6 +550,7 @@ def _station_identity_rows(connection: Any, run_id: str) -> list[dict[str, Any]]
                 "variable_count": len(VARIABLES),
                 "scan_run_id": None,
                 "scan_forcing_version_id": None,
+                "scan_forcing_version_key": None,
                 "scan_basin_version_id": None,
                 "scan_river_network_version_id": None,
                 "scan_source_id_lower": None,
@@ -568,28 +568,22 @@ def _station_count(connection: Any, run_id: str) -> int:
     return 0 if row is None else int(row["station_count"])
 
 
-def test_coverage_station_counts_are_equal_across_stores_and_narrow_follows_the_station_authority(
+def test_coverage_reads_only_the_narrow_table_and_follows_the_station_authority(
     expanded_database: str,
 ) -> None:
-    """Invariant I6, spec scenario :36 (moved here by `fixtures/I11-1990.md` C1).
+    """A legacy-routed version's legacy rows are invisible; its narrow rows are not.
 
-    ONE forcing version, materialised once in each table. The legacy rows carry
-    `basin_version_id = DIVERGENT_BASIN_VERSION_ID`; `met.met_station` declares
-    `BASIN_VERSION_ID` for the same station. The narrow table has no such column
-    at all, so its basin comes from the station authority.
+    ONE forcing version, materialised in both tables and marked ``legacy``. The
+    legacy rows carry `basin_version_id = DIVERGENT_BASIN_VERSION_ID`;
+    `met.met_station` declares `BASIN_VERSION_ID` for the same station. The
+    narrow table has no such column at all, so its basin comes from the station
+    authority.
 
-    Two candidate runs rather than one, and that is forced by the SQL rather than
-    chosen: the coverage CTE joins the fact rows to `candidate_runs`, the legacy
-    leg on the fact row's own `basin_version_id` and the narrow leg on the
-    station's. With a single run only one leg could ever produce rows and the
-    "counts are equal" claim would be a comparison against zero. Each run is
-    refreshed while the version is routed to the store that run's basin matches,
-    which is exactly "the store of the forcing version in scope" (spec :33).
-
-    What this proves that a text pin cannot: the two stores return the SAME
-    number of stations for the same rows, and the narrow one reports the basin
-    the station authority declares rather than the one a fact row happened to
-    store.
+    During the expand window the divergent-basin run saw one station through the
+    legacy leg. After #1993's first cut nothing reads that table: the divergent
+    run sees none, and the seeded run sees the station through the narrow rows
+    even though the routing column still says ``legacy`` -- which is the reason
+    the entry gate (fixture ``I14-1993.md`` D0) had to be met before this code.
     """
     seed_issue_126_data(expanded_database)
     connection = _connect(expanded_database)
@@ -599,39 +593,25 @@ def test_coverage_station_counts_are_equal_across_stores_and_narrow_follows_the_
             _seed_divergent_run(cursor)
             _seed_legacy_rows_in_legacy_table(cursor, basin_version_id=DIVERGENT_BASIN_VERSION_ID)
             _materialise_narrow_rows(cursor, FORCING_VERSION_ID)
+        _set_store(connection, "legacy")
 
-        # Phase 1 -- the version is routed to the LEGACY store, so the legacy
-        # leg is the one that contributes and the divergent-basin run is the
-        # candidate whose basin its rows match.
-        _set_store(connection, FORCING_STORE_LEGACY)
         refresh_run_display_coverage(connection, DIVERGENT_RUN_ID, force=True)
-        legacy_count = _station_count(connection, DIVERGENT_RUN_ID)
-        legacy_rows = _station_identity_rows(connection, DIVERGENT_RUN_ID)
+        divergent_count = _station_count(connection, DIVERGENT_RUN_ID)
+        divergent_rows = _station_identity_rows(connection, DIVERGENT_RUN_ID)
 
-        # Phase 2 -- routed NARROW. The narrow leg contributes and its basin is
-        # the station authority's, so the candidate is the seeded run.
-        _set_store(connection, FORCING_STORE_NARROW)
         refresh_run_display_coverage(connection, FORECAST_RUN_ID, force=True)
         narrow_count = _station_count(connection, FORECAST_RUN_ID)
         narrow_rows = _station_identity_rows(connection, FORECAST_RUN_ID)
     finally:
         connection.close()
 
-    assert legacy_count == narrow_count == 1
-
-    # Provenance: legacy reports what the fact row stored, narrow reports what
-    # the station authority declares, and they are different -- which is the
-    # semantic change the narrow store makes, stated as a row-level fact rather
-    # than as a claim about the SQL text.
-    assert {row["basin_version_id"] for row in legacy_rows} == {DIVERGENT_BASIN_VERSION_ID}
-    assert {row["basin_version_id"] for row in narrow_rows} == {BASIN_VERSION_ID}
     assert DIVERGENT_BASIN_VERSION_ID != BASIN_VERSION_ID
+    assert divergent_count == 0
+    assert divergent_rows == []
 
-    # Same rows, same per-variable sample counts: the composition did not drop
-    # or duplicate anything on either side.
-    assert [(row["variable"], row["sample_count"]) for row in legacy_rows] == [
-        (row["variable"], row["sample_count"]) for row in narrow_rows
-    ]
+    assert narrow_count == 1
+    assert {row["basin_version_id"] for row in narrow_rows} == {BASIN_VERSION_ID}
+    assert sorted(row["variable"] for row in narrow_rows) == sorted(VARIABLES)
     assert {row["sample_count"] for row in narrow_rows} == {2}
 
 
@@ -673,56 +653,51 @@ def _set_store(connection: Any, store: str) -> None:
         )
 
 
-def test_the_two_store_composition_filters_each_leg_by_the_routing_column(
+def test_the_routing_column_no_longer_changes_what_coverage_reads(
     expanded_database: str,
 ) -> None:
-    """Invariant I7's row-level half: the filter is not decoration.
+    """Both materialisations under the SAME basin; the column flipped both ways.
 
-    Both materialisations are present and the version is routed to exactly one
-    of them, so an UNFILTERED `UNION ALL` would count every station sample
-    twice. Asserted as sample counts rather than as station counts: `COUNT
-    (DISTINCT station)` would be 1 either way and would not see the duplication
-    at all.
+    The expand window composed two legs and filtered each by the routing column.
+    There is one leg now and no filter, so the answer must be the same whichever
+    value the column holds, and the legacy rows must not be counted on top of the
+    narrow ones. Asserted as sample counts rather than as station counts:
+    `COUNT(DISTINCT station)` would be 1 either way and would not see a
+    duplication at all.
     """
     seed_issue_126_data(expanded_database)
     connection = _connect(expanded_database)
     try:
         with connection.cursor() as cursor:
             _seed_station(cursor, basin_version_id=BASIN_VERSION_ID)
-            # BOTH materialisations under the SAME basin this time, so both legs
-            # would join if the filter were missing.
             _seed_legacy_rows_in_legacy_table(cursor, basin_version_id=BASIN_VERSION_ID)
             _materialise_narrow_rows(cursor, FORCING_VERSION_ID)
 
-        _set_store(connection, FORCING_STORE_NARROW)
-        refresh_run_display_coverage(connection, FORECAST_RUN_ID, force=True)
-        narrow_rows = _station_identity_rows(connection, FORECAST_RUN_ID)
-
-        _set_store(connection, FORCING_STORE_LEGACY)
-        refresh_run_display_coverage(connection, FORECAST_RUN_ID, force=True)
-        legacy_rows = _station_identity_rows(connection, FORECAST_RUN_ID)
+        rows_by_store = {}
+        for store in ("narrow", "legacy"):
+            _set_store(connection, store)
+            refresh_run_display_coverage(connection, FORECAST_RUN_ID, force=True)
+            rows_by_store[store] = _station_identity_rows(connection, FORECAST_RUN_ID)
     finally:
         connection.close()
 
     # Two valid_times per variable, ONCE -- not four.
-    assert {row["sample_count"] for row in narrow_rows} == {2}
-    assert {row["sample_count"] for row in legacy_rows} == {2}
-    assert len(narrow_rows) == len(legacy_rows) == len(VARIABLES)
+    assert {row["sample_count"] for row in rows_by_store["narrow"]} == {2}
+    assert len(rows_by_store["narrow"]) == len(VARIABLES)
+    assert rows_by_store["legacy"] == rows_by_store["narrow"]
 
 
-def test_station_series_returns_the_identical_payload_under_both_stores(
+def test_station_series_reads_the_narrow_rows_whatever_the_routing_column_says(
     expanded_database: str,
 ) -> None:
-    """Invariant I8: the reader's ANSWER, not its SQL text, is store-invariant.
+    """Reader #3's ANSWER, not its SQL text.
 
-    Reader #3 (`PsycopgForecastStore.station_series`) is the only routed reader
-    with a public JSON payload, and every other oracle for it in this repo is a
-    text pin against a recording cursor. Both materialisations of the same rows
-    are seeded, the version is routed to one store and then the other, and the
-    two payloads are compared WHOLE -- units, quality flags, native resolution,
-    per-variable metadata and all. A narrow template that dropped
-    `native_resolution`, spelled a unit differently, or lost the enum-to-text
-    projection produces a passing text pin and a different payload here.
+    `PsycopgForecastStore.station_series` is the only forcing reader with a
+    public JSON payload. Both tables hold rows for the version, and the legacy
+    copies are then shifted by 1000 so the two materialisations are
+    distinguishable: the payload must carry the narrow values, and must be the
+    same payload under either value of the routing column -- compared WHOLE,
+    units, quality flags, native resolution, per-variable metadata and all.
     """
     seed_issue_126_data(expanded_database)
     connection = _connect(expanded_database)
@@ -731,44 +706,45 @@ def test_station_series_returns_the_identical_payload_under_both_stores(
             _seed_station(cursor, basin_version_id=BASIN_VERSION_ID)
             _seed_legacy_rows_in_legacy_table(cursor, basin_version_id=BASIN_VERSION_ID)
             _materialise_narrow_rows(cursor, FORCING_VERSION_ID)
+            cursor.execute(f"UPDATE {LEGACY_TABLE} SET value = value + 1000")
 
         store = forecast_store.PsycopgForecastStore(expanded_database)
-
-        _set_store(connection, FORCING_STORE_LEGACY)
-        legacy_payload = store.station_series(
-            station_id=STATION_ID,
-            forcing_version_id=FORCING_VERSION_ID,
-            variables=list(VARIABLES),
-        )
-
-        _set_store(connection, FORCING_STORE_NARROW)
-        narrow_payload = store.station_series(
-            station_id=STATION_ID,
-            forcing_version_id=FORCING_VERSION_ID,
-            variables=list(VARIABLES),
-        )
+        payloads = {}
+        for routed in ("legacy", "narrow"):
+            _set_store(connection, routed)
+            payloads[routed] = store.station_series(
+                station_id=STATION_ID,
+                forcing_version_id=FORCING_VERSION_ID,
+                variables=list(VARIABLES),
+            )
     finally:
         connection.close()
 
-    # Guard against comparing two empty answers: an unseeded fixture would make
-    # `legacy == narrow` true and meaningless.
-    assert [series["variable"] for series in legacy_payload["series"]] == list(VARIABLES)
-    assert all(len(series["points"]) == 2 for series in legacy_payload["series"])
+    # Guard against comparing two empty answers.
+    assert [series["variable"] for series in payloads["narrow"]["series"]] == list(VARIABLES)
+    assert all(len(series["points"]) == 2 for series in payloads["narrow"]["series"])
+    assert all(point["value"] < 1000 for series in payloads["narrow"]["series"] for point in series["points"])
 
-    assert narrow_payload == legacy_payload
+    assert payloads["legacy"] == payloads["narrow"]
 
 
-def test_the_narrow_writer_refuses_a_legacy_routed_version_without_deleting_its_rows(
+# ---------------------------------------------------------------------------
+# 4. The writer after #1993's first cut — no refusal
+# ---------------------------------------------------------------------------
+
+
+def test_the_narrow_writer_replaces_a_formerly_legacy_routed_version_and_leaves_its_legacy_rows(
     expanded_database: str,
 ) -> None:
-    """Must-preserve M3 against a REAL database, not a recording cursor.
+    """Fixture ``I14-1993.md`` D3 against a REAL database: the inverted refusal.
 
-    The refusal ordering is the one data-loss property in this task's surface,
-    and the unit test for it is driven through a fake. This is the same claim
-    with real rows in a real legacy table: after the refusal they are all still
-    there.
+    The expand window refused this replace before any DELETE. The writer no
+    longer reads the routing column, so a version marked ``legacy`` is treated
+    like any other: nothing raises, the rows land in the narrow table through
+    the unchanged compressed-chunk write guard, and the rows in the renamed
+    legacy table -- orphans until task 8.2 drops it -- are not touched. Nobody
+    maintains the column, so it still reads ``legacy`` afterwards.
     """
-    from packages.common.forcing_store_routing import LegacyForcingStoreRefusedError
     from workers.forcing_producer.producer import ForcingTimeseriesRow
     from workers.forcing_producer.store import PsycopgForcingRepository
 
@@ -778,35 +754,42 @@ def test_the_narrow_writer_refuses_a_legacy_routed_version_without_deleting_its_
         with connection.cursor() as cursor:
             _seed_station(cursor, basin_version_id=BASIN_VERSION_ID)
             _seed_legacy_rows_in_legacy_table(cursor, basin_version_id=BASIN_VERSION_ID)
-        _set_store(connection, FORCING_STORE_LEGACY)
+        _set_store(connection, "legacy")
 
         repository = PsycopgForcingRepository(database_url=expanded_database)
-        with pytest.raises(LegacyForcingStoreRefusedError):
-            repository.replace_forcing_timeseries(
-                FORCING_VERSION_ID,
-                [
-                    ForcingTimeseriesRow(
-                        forcing_version_id=FORCING_VERSION_ID,
-                        basin_version_id=BASIN_VERSION_ID,
-                        station_id=STATION_ID,
-                        valid_time=VALID_TIME_1,
-                        source_id=SOURCE_ID,
-                        variable="PRCP",
-                        value=1.0,
-                        unit="mm/day",
-                        native_resolution="1h",
-                    )
-                ],
-            )
+        repository.replace_forcing_timeseries(
+            FORCING_VERSION_ID,
+            [
+                ForcingTimeseriesRow(
+                    forcing_version_id=FORCING_VERSION_ID,
+                    basin_version_id=BASIN_VERSION_ID,
+                    station_id=STATION_ID,
+                    valid_time=VALID_TIME_1,
+                    source_id=SOURCE_ID,
+                    variable="PRCP",
+                    value=1.0,
+                    unit="mm/day",
+                    native_resolution="1h",
+                )
+            ],
+        )
 
         with connection.cursor() as cursor:
             cursor.execute(
                 f"SELECT count(*) AS rows FROM {LEGACY_TABLE} WHERE forcing_version_id = %s",
                 (FORCING_VERSION_ID,),
             )
-            surviving = int(cursor.fetchone()["rows"])
-            cursor.execute(f"SELECT count(*) AS rows FROM {NARROW_TABLE}")
-            narrow_rows = int(cursor.fetchone()["rows"])
+            legacy_rows = int(cursor.fetchone()["rows"])
+            cursor.execute(
+                f"""
+                SELECT fv.forcing_version_id, ms.station_id, fst.valid_time,
+                       fst.variable_e::text AS variable, fst.value, fst.unit_e::text AS unit
+                FROM {NARROW_TABLE} fst
+                JOIN met.forcing_version fv ON fv.forcing_version_key = fst.forcing_version_key
+                JOIN met.met_station ms ON ms.station_key = fst.station_key
+                """
+            )
+            narrow_rows = [dict(row) for row in cursor.fetchall()]
             cursor.execute(
                 "SELECT timeseries_store FROM met.forcing_version WHERE forcing_version_id = %s",
                 (FORCING_VERSION_ID,),
@@ -815,13 +798,19 @@ def test_the_narrow_writer_refuses_a_legacy_routed_version_without_deleting_its_
     finally:
         connection.close()
 
-    # Every legacy row survived a refused replace. A store check placed after the
-    # replace window opened would leave 0 here and still raise.
-    assert surviving == len(VARIABLES) * 2
-    assert narrow_rows == 0
-    # And the refusal is permanent by construction: no writer flips the column
-    # back, so the next attempt reads the same answer (fixture R2.2).
-    assert store_after == FORCING_STORE_LEGACY
+    assert narrow_rows == [
+        {
+            "forcing_version_id": FORCING_VERSION_ID,
+            "station_id": STATION_ID,
+            "valid_time": VALID_TIME_1,
+            "variable": "PRCP",
+            "value": 1.0,
+            "unit": "mm/day",
+        }
+    ]
+    # Every legacy row survived: the writer's DELETE names the narrow table only.
+    assert legacy_rows == len(VARIABLES) * 2
+    assert store_after == "legacy"
 
 
 def test_cycle_time_is_unused_here_but_the_seed_row_exists(expanded_database: str) -> None:
@@ -854,4 +843,4 @@ def test_cycle_time_is_unused_here_but_the_seed_row_exists(expanded_database: st
     # 000061 gave it a key and, having no rows in the legacy table, the default
     # store.
     assert version is not None and version["forcing_version_key"] is not None
-    assert version["timeseries_store"] == FORCING_STORE_NARROW
+    assert version["timeseries_store"] == "narrow"

@@ -1,19 +1,21 @@
-"""Test-only oracle for #2516 D3: the pre-change station legs, frozen from master.
+"""Test-only oracle for #2516 D3: the pre-change narrow station leg, frozen from master.
 
-``PRE_2516_LEGACY_STATION_LEG`` and ``PRE_2516_NARROW_STATION_LEG`` are the two
-variants master ``64f47adee`` rendered for BOTH station legs --
+``PRE_2516_NARROW_STATION_LEG`` is the narrow variant master ``64f47adee``
+rendered for BOTH station legs --
 ``forecast_store._LATEST_PRODUCT_STATION_SOURCE_TEMPLATES`` and
 ``display_coverage._STATION_SAMPLE_ROWS_TEMPLATES``. The two templates were
-byte-identical apart from indentation, so one dedented copy of each variant
-stands for both.
+byte-identical apart from indentation, so one dedented copy stands for both.
 
 design.md D3 (revised) changes exactly one thing: the narrow variant's
 ``interp_weight`` membership ``EXISTS`` gains ``OFFSET 0`` as its last clause, so
 the planner keeps the probe a correlated SubPlan instead of pulling it up into a
 semi-join, and ``(fst.variable_e)::text`` becomes an index-scan parameter of
-``interp_weight_qhh_latest_membership_idx``. The legacy variant is unchanged.
-Frozen as literals so the shape and equality tests compare the new legs with
-what production DID run. Never executed by production code.
+``interp_weight_qhh_latest_membership_idx``. Frozen as a literal so the shape
+and equality tests compare the new legs with what production DID run. Never
+executed by production code.
+
+The legacy variant this module also froze went with #1993's first cut, which
+deleted the legacy templates it was compared against.
 """
 
 from __future__ import annotations
@@ -25,50 +27,8 @@ from packages.common.forcing_ts_render import FORCING_TABLE_TOKEN, ForcingTempla
 
 #: The one line D3 adds, as the last clause inside the narrow membership EXISTS.
 MEMBERSHIP_FENCE = "OFFSET 0"
-#: The flattened opening of the membership EXISTS (both variants, both legs).
+#: The flattened opening of the membership EXISTS (both legs).
 MEMBERSHIP_EXISTS_OPENING = "AND EXISTS ( SELECT 1 FROM met.interp_weight iw"
-
-PRE_2516_LEGACY_STATION_LEG = f"""SELECT
-    cr.run_id,
-    cr.model_id,
-    cr.display_start_time,
-    cr.display_end_time,
-    fst.forcing_version_id,
-    fst.basin_version_id,
-    LOWER(fst.source_id) AS station_source_id,
-    fst.station_id,
-    fst.variable,
-    cr.expected_station_count,
-    fst.valid_time,
-    fst.unit,
-    fst.quality_flag
-FROM {FORCING_TABLE_TOKEN} fst
-JOIN candidate_runs cr
-  ON cr.forcing_version_id = fst.forcing_version_id
- AND fst.basin_version_id = cr.basin_version_id
- AND LOWER(fst.source_id) = LOWER(cr.source_id)
-WHERE fst.variable = ANY(%(variables)s)
-  AND fst.valid_time >= cr.display_start_time
-  AND fst.valid_time <= cr.display_end_time
-  AND (%(scan_forcing_version_id)s IS NULL
-       OR fst.forcing_version_id = %(scan_forcing_version_id)s)
-  AND (%(scan_basin_version_id)s IS NULL
-       OR fst.basin_version_id = %(scan_basin_version_id)s)
-  AND (%(scan_source_id_lower)s IS NULL
-       OR LOWER(fst.source_id) = %(scan_source_id_lower)s)
-  AND (%(scan_display_start)s IS NULL
-       OR fst.valid_time >= %(scan_display_start)s)
-  AND (%(scan_display_end)s IS NULL
-       OR fst.valid_time <= %(scan_display_end)s)
-  AND EXISTS (
-      SELECT 1
-      FROM met.interp_weight iw
-      WHERE iw.model_id = cr.model_id
-        AND iw.station_id = fst.station_id
-        AND iw.variable = fst.variable
-        AND LOWER(iw.source_id) = LOWER(cr.source_id)
-  )
-"""
 
 PRE_2516_NARROW_STATION_LEG = f"""SELECT
     cr.run_id,
@@ -134,20 +94,16 @@ def membership_exists_body(sql: str) -> str:
     raise AssertionError("unbalanced membership EXISTS")
 
 
-def rendered_leg(template_pair: ForcingTemplatePair, store: str) -> str:
-    return render_forcing_ts_sql(template_pair, store, entry="station_membership_fence_oracle").sql
-
-
 def rendered_narrow_leg(template_pair: ForcingTemplatePair) -> str:
-    return rendered_leg(template_pair, "narrow")
+    return render_forcing_ts_sql(template_pair, "narrow", entry="station_membership_fence_oracle").sql
 
 
-#: Master's pair, as both station templates were before D3.
-PRE_2516_STATION_LEGS = ForcingTemplatePair(legacy=PRE_2516_LEGACY_STATION_LEG, narrow=PRE_2516_NARROW_STATION_LEG)
+#: Master's narrow leg, as both station templates were before D3.
+PRE_2516_STATION_LEGS = ForcingTemplatePair(narrow=PRE_2516_NARROW_STATION_LEG)
 
 
-def pre_2516_leg(store: str = "narrow") -> str:
-    return rendered_leg(PRE_2516_STATION_LEGS, store)
+def pre_2516_leg() -> str:
+    return rendered_narrow_leg(PRE_2516_STATION_LEGS)
 
 
 #: A one-row ``candidate_runs`` with the eight columns both legs read off ``cr``.
@@ -178,6 +134,7 @@ def standalone_leg_parameters(
     run_id: str,
     model_id: str,
     forcing_version_id: str,
+    forcing_version_key: int,
     basin_version_id: str,
     source_id: str,
     display_start_time: datetime,
@@ -195,6 +152,9 @@ def standalone_leg_parameters(
         "cr_expected_station_count": 2,
         "variables": list(variables),
         "scan_forcing_version_id": forcing_version_id if scan_pinned else None,
+        # #2511: read by the current legs only; the frozen pre-change leg has no
+        # such placeholder and ignores the extra key.
+        "scan_forcing_version_key": forcing_version_key if scan_pinned else None,
         "scan_basin_version_id": basin_version_id if scan_pinned else None,
         "scan_source_id_lower": source_id.lower() if scan_pinned else None,
         "scan_display_start": display_start_time if scan_pinned else None,

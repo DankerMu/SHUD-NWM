@@ -626,6 +626,7 @@ def _latest_product_fallback_execution() -> tuple[str, Any]:
     header = {
         "run_id": "qhh_gfs_2026050700",
         "forcing_version_id": "forc_qhh_gfs_2026050700",
+        "forcing_version_key": 4242,
         "basin_version_id": "basins_qhh_vbasins",
         "river_network_version_id": "basins_qhh_rivnet_vbasins",
         "source_id_lower": "gfs",

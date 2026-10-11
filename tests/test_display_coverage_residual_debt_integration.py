@@ -45,6 +45,7 @@ from psycopg2.extras import RealDictCursor, execute_values
 import scripts.node27_autopipeline as autopipe
 from packages.common import forecast_store
 from packages.common.display_coverage import _stale_run_ids, refresh_run_display_coverage
+from packages.common.forcing_store_routing import FORCING_NARROW_INSERT_TEMPLATE
 from packages.common.forecast_store import PsycopgForecastStore
 from tests.integration_helpers import (
     BASIN_ID,
@@ -101,18 +102,13 @@ assert _LEGACY_FALLBACK_SQL.count("%") == 6 and _LEGACY_FALLBACK_SQL.count("%s")
 
 # Columns the production candidate CTE carries that the frozen text does not:
 # #1442 added the three surrogate keys for the river fact-table join and the
-# final SELECT is `cr.*`, so they ride out to the caller. #2517 added the
-# fourth: the candidate's `met.forcing_version.timeseries_store`, which task 7.3
-# already projected into the CTE for the header's routing decision and which the
-# final SELECT now passes through, because the public `quality.query_indexes`
-# evidence is assembled from the ROW and has to name the relation THIS
-# candidate's forcing rows were read from. The parity helper pops exactly this
-# set off each production row and ASSERTS what it popped — the projection is
-# pinned, not tolerant, so a fifth new column reddens the parity test instead of
-# being silently excused.
-_NEW_ONLY_COLUMNS = frozenset(
-    {"run_key", "basin_version_key", "river_network_version_key", "forcing_timeseries_store"}
-)
+# final SELECT is `cr.*`, so they ride out to the caller. (#2517's fourth, the
+# candidate's forcing store, went with #1993's first cut; the forcing surrogate
+# key #2511 projects into the CTE is read by the header only and is not passed
+# through.) The parity helper pops exactly this set off each production row and
+# ASSERTS what it popped — the projection is pinned, not tolerant, so a fourth
+# new column reddens the parity test instead of being silently excused.
+_NEW_ONLY_COLUMNS = frozenset({"run_key", "basin_version_key", "river_network_version_key"})
 
 # Sentinel for the pop above: a column present with value None must still count
 # as present, which `row.pop(key, None)` cannot express.
@@ -139,16 +135,18 @@ _LEGACY_PUBLISHED_RUN_SHIFT = timedelta(days=30)
 _ROWS_WITHOUT_PARSED_AT_RUN_ID = f"{ISSUE_126_PREFIX}_rows_without_parsed_at_run"
 _ROWS_WITHOUT_PARSED_AT_RUN_SHIFT = timedelta(days=15)
 
-# One unit and one deterministic value per MVP station variable. Units only have
-# to be non-empty and stable: the coverage CTEs count DISTINCT units per
-# variable, they do not interpret them.
+# One unit and one deterministic value per MVP station variable. The coverage
+# CTEs count DISTINCT units per variable and do not interpret them, but the same
+# rows are also seeded into the narrow table (fixture `I14-1993.md` D6), whose
+# `unit_e` is 000061's `met.forcing_unit` enum -- so each unit must be one of its
+# six values, or the narrow INSERT fails its cast.
 _PARITY_STATION_UNITS = {
-    "PRCP": "mm/h",
+    "PRCP": "mm/day",
     "TEMP": "degC",
-    "RH": "percent",
+    "RH": "0-1",
     "wind": "m/s",
     "Rn": "W/m2",
-    "Press": "kPa",
+    "Press": "Pa",
 }
 # Checked at import so a change to MVP_STATION_VARIABLES fails at collection —
 # on any machine — instead of as a KeyError inside a DB-only test.
@@ -165,9 +163,10 @@ def _connect(database_url: str) -> Any:
 
 def _prepared_database(database_url: str) -> None:
     # 000058 pins RIVER's pre-identity catalog. The coverage refresh these tests
-    # drive also reads the FORCING plane, whose readers name
-    # `met.forcing_station_timeseries_legacy` unconditionally after #1991, so
-    # the forcing expand has to be applied on top of the river pin.
+    # drive also reads the FORCING plane, whose readers name the narrow table
+    # 000061 creates (and whose frozen #1414 oracle names the legacy table
+    # 000061 renames), so the forcing expand has to be applied on top of the
+    # river pin.
     apply_migrations_from_zero(database_url, through="000058", also=FORCING_PLANE_MIGRATIONS)
     seed_issue_126_data(database_url)
 
@@ -674,12 +673,18 @@ def _seed_station_coverage(connection: Any) -> None:
                 for variable in variables
             ],
         )
-        # #1991 renamed this relation: the LEGACY materialisation now lives in
-        # `met.forcing_station_timeseries_legacy` and the canonical name is the
-        # narrow key/enum table. The frozen #1414 oracle is a legacy-shaped
-        # statement, so these rows belong in the legacy store and the version is
-        # routed there below -- otherwise production would render its narrow leg
-        # and the parity comparison would be against an empty set.
+        # DUAL-SEEDED (fixture `I14-1993.md` D6). The frozen #1414 oracle is a
+        # legacy-shaped statement that reads the table 000061 renamed aside;
+        # production reads only the narrow table since #1993's first cut. The
+        # same facts therefore go into BOTH, or the parity comparison would be
+        # one side against an empty set. Once task 8.2 drops the legacy table
+        # the frozen text cannot execute; re-freezing or retiring the oracle is
+        # that task's decision.
+        facts = [
+            (variable, valid_time, float(10 * index + hour_offset))
+            for index, variable in enumerate(variables)
+            for hour_offset, valid_time in enumerate((VALID_TIME_1, VALID_TIME_2))
+        ]
         execute_values(
             cursor,
             """
@@ -697,17 +702,43 @@ def _seed_station_coverage(connection: Any) -> None:
                     valid_time,
                     SOURCE_ID,
                     variable,
-                    float(10 * index + hour_offset),
+                    value,
                     _PARITY_STATION_UNITS[variable],
                     "ok",
                 )
-                for index, variable in enumerate(variables)
-                for hour_offset, valid_time in enumerate((VALID_TIME_1, VALID_TIME_2))
+                for variable, valid_time, value in facts
             ],
         )
         cursor.execute(
-            "UPDATE met.forcing_version SET timeseries_store = 'legacy' WHERE forcing_version_id = %s",
+            "SELECT forcing_version_key FROM met.forcing_version WHERE forcing_version_id = %s",
             (FORCING_VERSION_ID,),
+        )
+        forcing_version_key = cursor.fetchone()["forcing_version_key"]
+        cursor.execute("SELECT station_key FROM met.met_station WHERE station_id = %s", (_PARITY_STATION_ID,))
+        station_key = cursor.fetchone()["station_key"]
+        execute_values(
+            cursor,
+            """
+            INSERT INTO met.forcing_station_timeseries (
+                forcing_version_key, station_key, valid_time, variable_e, value,
+                unit_e, quality_flag_e, native_resolution
+            )
+            VALUES %s
+            """,
+            [
+                (
+                    forcing_version_key,
+                    station_key,
+                    valid_time,
+                    variable,
+                    value,
+                    _PARITY_STATION_UNITS[variable],
+                    "ok",
+                    None,
+                )
+                for variable, valid_time, value in facts
+            ],
+            template=FORCING_NARROW_INSERT_TEMPLATE,
         )
 
 
@@ -841,9 +872,10 @@ def test_forced_fallback_matches_frozen_statement_with_null_forcing_version_cand
     """The `scan_forcing_version_id IS NULL` branch of the pushdown guards.
 
     What this state pins is binding, not admission: with the candidate's
-    forcing_version_id NULL, the one NULL scan scalar -- scan_forcing_version_id,
-    read only by the station guard -- binds and executes through the
-    named-parameter path, while the river guards bind non-NULL.
+    forcing_version_id NULL, the two NULL scan scalars -- scan_forcing_version_id
+    and (#2511) scan_forcing_version_key, read only by the station guards --
+    bind and execute through the named-parameter path, while the river guards
+    bind non-NULL.
 
     It deliberately does not claim to catch a forcing-version guard that
     "degraded into NULL means match everything" -- that IS the guard's

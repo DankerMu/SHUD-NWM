@@ -56,14 +56,12 @@ statement timeout），**全程无人知道**：autopipe unit 没挂 `OnFailure=
     `declined_at` 不会被续期，所以**只告警一次**：阈值加车道周期（30 min）必须小于存活界，
     `阈值 >= 存活界` 视为配置错误，退 2。周期写在 timer 里，脚本读不到，因此只校验
     `阈值 < 存活界`。
-  - 只读角色需要对 `met.forcing_version` 和 `ops.ingest_recompute_decline` 有 SELECT 权限。仓库的
-    migration 不授予这两项，部署时要核对：
-    `SELECT has_table_privilege('nhms_display_ro','met.forcing_version','SELECT'), has_table_privilege('nhms_display_ro','ops.ingest_recompute_decline','SELECT');`
+  - 只读角色需要对 `ops.ingest_recompute_decline` 有 SELECT 权限。仓库的
+    migration 不授予这一项，部署时要核对：
+    `SELECT has_table_privilege('nhms_display_ro','ops.ingest_recompute_decline','SELECT');`
     若缺失，本车道会每个 tick 退 2（`OBSERVATION_FAILED`）。
-  - `source=legacy_store_refused`：`failed` 的 run，其 `forcing_version.timeseries_store='legacy'`。
-    autopipe 拒绝 legacy forcing 的 apply，但按 #1991 **不写** decline，register 每个 tick 都会续期它。
-    这类 run 首次越过阈值时照常告警，之后只要还在集合里就**不再重告**。即使分类错了，也只会少发重复告警，
-    首封一定会发出。
+  - 自 #1993 起本车道不再读 `met.forcing_version`，也没有 `legacy_store_refused` 这一类：写入方不再拒绝
+    曾路由到 legacy store 的 forcing 版本，这类 run 与其他 `failed` run 同样被观察、告警、按 `realert` 重告。
   - 同一个 run 在两个来源里同时出现时，按 `failed` 那一行算。
 
 ### 13.2 邮件怎么读
@@ -73,7 +71,7 @@ statement timeout），**全程无人知道**：autopipe unit 没挂 `OnFailure=
 
 ```text
 parse-failure-residency now=… watched=<N> resident=<R> newly_alerted=<A> already_alerted=<K> threshold=2h realert=24h liveness=6h runbook=…
-resident run_id=<run> first_error_code=<第一次失败的码> source=<failed|published_reparse|legacy_store_refused> first_observed=<UTC> residency_h=<h> alert=due
+resident run_id=<run> first_error_code=<第一次失败的码> source=<failed|published_reparse> first_observed=<UTC> residency_h=<h> alert=due
 … 至多 10 行 resident …
 ... and <M> more
 ```
@@ -139,9 +137,6 @@ ORDER BY d.declined_at DESC;
 - **强制重试同一份证据**：先确认失败原因已消除（例如解析器已修复），再删掉该行：
   `DELETE FROM ops.ingest_recompute_decline WHERE run_id = '<run_id>' AND reason_code = 'PUBLISHED_REPARSE_FAILED';`
   这一步要用写角色执行，只读 DSN 没有写权限。
-
-`source=legacy_store_refused`：forcing 被路由到 legacy store，按 #1991 属预期拒绝，这封信只发一次。
-处置归 legacy 表下线（task 8.2）那条线，不在本车道。
 
 `first_error_code=OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED`：自 #2690 起，published run 的重解析撞上已压缩 chunk
 时同样写 `PUBLISHED_REPARSE_FAILED` decline，由 `published_reparse` 来源覆盖，tick 不再因它 rc=1。处置：

@@ -41,7 +41,6 @@ from psycopg2.extras import RealDictCursor
 
 from packages.common.display_watermark import DisplayWatermarkError, fetch_display_watermark
 from packages.common.forcing_ts_render import (
-    FORCING_STORES,
     FORCING_TABLE_TOKEN,
     ForcingTemplatePair,
     render_forcing_ts_sql,
@@ -67,12 +66,13 @@ from packages.common.river_ts_render import render_river_ts_sql
 #     refresh seq-scans BOTH hypertables end to end (measured 633s for one run
 #     at 180M forcing + 730M river rows). ``_refresh`` prefetches the single
 #     run's scalar identity/window and binds it here, enabling chunk exclusion
-#     and the existing (forcing_version_id, basin_version_id, lower(source_id),
-#     variable, valid_time) index on the station side and, since issue #1341,
-#     000051's (run_key, basin_version_key, river_network_version_key,
-#     variable_e, valid_time DESC) index on the river side. The values are
-#     exactly the join equalities for that run, so the result set is identical;
-#     with NULL bindings the guards fold away and the query is unchanged.
+#     and 000061's (forcing_version_key, variable_e, valid_time DESC) index on
+#     the station side (the %(scan_forcing_version_key)s guard, #2511) and,
+#     since issue #1341, 000051's (run_key, basin_version_key,
+#     river_network_version_key, variable_e, valid_time DESC) index on the
+#     river side. The values are exactly the join equalities for that run, so
+#     the result set is identical; with NULL bindings the guards fold away and
+#     the query is unchanged.
 # Keeping the arithmetic identical is what guarantees parity with the CTE path.
 # ---------------------------------------------------------------------------
 _CANDIDATE_RUNS_SQL = """
@@ -81,6 +81,10 @@ _CANDIDATE_RUNS_SQL = """
                 h.model_id,
                 h.basin_version_id,
                 h.forcing_version_id,
+                -- #2511: bound as the station leg's fact-table scan predicate.
+                -- NULL only when the run has no met.forcing_version row, where
+                -- the guard folds away and the leg finds nothing either way.
+                fv.forcing_version_key,
                 h.source_id,
                 h.cycle_time,
                 mi.river_network_version_id,
@@ -134,6 +138,7 @@ _SCAN_HEADER_SQL = (
         SELECT
             run_id,
             forcing_version_id,
+            forcing_version_key,
             basin_version_id,
             river_network_version_id,
             LOWER(source_id) AS source_id_lower,
@@ -189,51 +194,16 @@ def _river_sample_rows_template(store: str) -> str:
 _RIVER_SAMPLE_ROWS_NARROW_SQL = render_river_ts_sql(_river_sample_rows_template("narrow"), "narrow").sql
 
 
-# The forcing station leg (#1990 task 7.2, reader #1). Same pair shape as
+# The forcing station leg (#1990 task 7.2, reader #1). Same shape as
 # `packages/common/forecast_store.py`'s twin four spaces further in — the two are
 # separate templates, not one shared constant, exactly as the river legs are.
+#
+# The version restriction is bound on BOTH sides of the `fv` join: on
+# `fv.forcing_version_id`, and on the hypertable's own `fst.forcing_version_key`
+# (#2511). Only the second is a literal predicate on the fact table; without it
+# the scan leans on the planner pushing the join equality down (see the 633 s
+# precedent in the header comment above).
 _STATION_SAMPLE_ROWS_TEMPLATES = ForcingTemplatePair(
-    legacy=f"""            SELECT
-                cr.run_id,
-                cr.model_id,
-                cr.display_start_time,
-                cr.display_end_time,
-                fst.forcing_version_id,
-                fst.basin_version_id,
-                LOWER(fst.source_id) AS station_source_id,
-                fst.station_id,
-                fst.variable,
-                cr.expected_station_count,
-                fst.valid_time,
-                fst.unit,
-                fst.quality_flag
-            FROM {FORCING_TABLE_TOKEN} fst
-            JOIN candidate_runs cr
-              ON cr.forcing_version_id = fst.forcing_version_id
-             AND fst.basin_version_id = cr.basin_version_id
-             AND LOWER(fst.source_id) = LOWER(cr.source_id)
-            WHERE fst.variable = ANY(%(variables)s)
-              AND fst.valid_time >= cr.display_start_time
-              AND fst.valid_time <= cr.display_end_time
-              AND (%(scan_forcing_version_id)s IS NULL
-                   OR fst.forcing_version_id = %(scan_forcing_version_id)s)
-              AND (%(scan_basin_version_id)s IS NULL
-                   OR fst.basin_version_id = %(scan_basin_version_id)s)
-              AND (%(scan_source_id_lower)s IS NULL
-                   OR LOWER(fst.source_id) = %(scan_source_id_lower)s)
-              AND (%(scan_display_start)s IS NULL
-                   OR fst.valid_time >= %(scan_display_start)s)
-              AND (%(scan_display_end)s IS NULL
-                   OR fst.valid_time <= %(scan_display_end)s)
-              AND EXISTS (
-                  SELECT 1
-                  FROM met.interp_weight iw
-                  WHERE iw.model_id = cr.model_id
-                    AND iw.station_id = fst.station_id
-                    AND iw.variable = fst.variable
-                    AND LOWER(iw.source_id) = LOWER(cr.source_id)
-              )
-""",
     narrow=f"""            SELECT
                 cr.run_id,
                 cr.model_id,
@@ -262,6 +232,8 @@ _STATION_SAMPLE_ROWS_TEMPLATES = ForcingTemplatePair(
               AND fst.valid_time <= cr.display_end_time
               AND (%(scan_forcing_version_id)s IS NULL
                    OR fv.forcing_version_id = %(scan_forcing_version_id)s)
+              AND (%(scan_forcing_version_key)s IS NULL
+                   OR fst.forcing_version_key = %(scan_forcing_version_key)s)
               AND (%(scan_basin_version_id)s IS NULL
                    OR ms.basin_version_id = %(scan_basin_version_id)s)
               AND (%(scan_source_id_lower)s IS NULL
@@ -282,58 +254,11 @@ _STATION_SAMPLE_ROWS_TEMPLATES = ForcingTemplatePair(
 """,
 )
 
-# C4, delivered in 7.3 (#1991): the STATIC TWO-STORE composition.
-#
-# `_COVERAGE_CTES` and `_REFRESH_SQL` are module-level constants built at IMPORT
-# time, in every process that imports this module — including the display API on
-# node-27 — so this reader cannot route per call the way the single-version
-# readers do. Per-version routing therefore happens IN THE DATA: both variants
-# are rendered once here and composed into one relation, and each leg selects
-# only the versions `met.forcing_version.timeseries_store` assigns to it.
-#
-# There is no river twin left to mirror: #1342's contract (task 6.3) dropped
-# river's routing column and its legacy table, so `grep -c "UNION ALL"` on this
-# module was 0 and this composition is authored from `ForcingTemplatePair`
-# directly, as C4 said it would have to be.
-#
-# WHY EACH LEG IS FILTERED, rather than relying on the two tables being
-# disjoint. In production they are: 000061 classified every version by row
-# existence and the writers are narrow-only, so no version has rows in both.
-# But the invariant the spec states is per-version routing ("with the store of
-# the forcing version in scope", spec :33), and its own acceptance scenario
-# (:36) materialises ONE forcing version in BOTH tables. Unfiltered, that
-# scenario double-counts every station sample and the coverage-equality check it
-# exists to make would compare a number against twice itself.
-#
-# The filter is applied OUTSIDE each rendered variant, over the projected
-# `forcing_version_id` that both variants carry (invariant I5: same column names
-# in the same order). It is deliberately not pushed into the templates: the
-# legacy variant would need a join the census and the shape oracle both pin, and
-# the point of the pair is that neither variant is derived from the other.
-#
-# The composition is INSIDE this reader and ahead of every outer aggregate
-# (`station_identity_coverage` groups the result below), which is invariant I7 —
-# there is no shared text-level union combinator between the two renders.
-def _store_routed_leg(store: str) -> str:
-    """One rendered variant, restricted to the versions routed to ``store``."""
-    rendered = render_forcing_ts_sql(
-        _STATION_SAMPLE_ROWS_TEMPLATES,
-        store,
-        entry="display_coverage.station_sample_rows",
-    ).sql
-    alias = f"{store}_store_rows"
-    return (
-        "            SELECT * FROM (\n"
-        f"{rendered}"
-        f"            ) AS {alias}\n"
-        f"            WHERE {alias}.forcing_version_id IN (\n"
-        "                SELECT forcing_version_id FROM met.forcing_version\n"
-        f"                WHERE timeseries_store = '{store}'\n"
-        "            )\n"
-    )
-
-
-_STATION_SAMPLE_ROWS_UNION_SQL = "            UNION ALL\n".join(_store_routed_leg(store) for store in FORCING_STORES)
+_STATION_SAMPLE_ROWS_NARROW_SQL = render_forcing_ts_sql(
+    _STATION_SAMPLE_ROWS_TEMPLATES,
+    "narrow",
+    entry="display_coverage.station_sample_rows",
+).sql
 
 
 _COVERAGE_CTES = (
@@ -343,7 +268,7 @@ _COVERAGE_CTES = (
     + """        ),
         station_sample_rows AS (
 """
-    + _STATION_SAMPLE_ROWS_UNION_SQL
+    + _STATION_SAMPLE_ROWS_NARROW_SQL
     + """        ),
         station_identity_coverage AS (
             SELECT
@@ -783,6 +708,7 @@ def _refresh_statement_timeout_ms() -> int:
 _SCAN_PARAM_KEYS = (
     "scan_run_id",
     "scan_forcing_version_id",
+    "scan_forcing_version_key",
     "scan_basin_version_id",
     "scan_river_network_version_id",
     "scan_source_id_lower",
@@ -925,6 +851,7 @@ def _refresh(
             params.update(
                 scan_run_id=header["run_id"],
                 scan_forcing_version_id=header["forcing_version_id"],
+                scan_forcing_version_key=header["forcing_version_key"],
                 scan_basin_version_id=header["basin_version_id"],
                 scan_river_network_version_id=header["river_network_version_id"],
                 scan_source_id_lower=header["source_id_lower"],

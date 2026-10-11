@@ -7,15 +7,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from packages.common.forcing_store_routing import (
-    FORCING_STORE_LEGACY,
-    FORCING_STORE_NARROW,
-    forcing_store_or_default,
-    forcing_version_store,
-)
 from packages.common.forcing_ts_render import (
     FORCING_TABLE,
-    FORCING_TABLE_LEGACY,
     FORCING_TABLE_TOKEN,
     ForcingTemplatePair,
     render_forcing_ts_sql,
@@ -325,72 +318,17 @@ def _latest_product_river_source_template(store: str) -> str:
 # Forcing fact-table read templates (#1990 task 7.2, fixture `I11-1990.md`).
 #
 # Five of the nine registered forcing readers live in this module. Each is a
-# `ForcingTemplatePair`: the `legacy` variant is today's text, verbatim, with the
-# schema-qualified table name replaced by `FORCING_TABLE_TOKEN`; the `narrow`
-# variant is INDEPENDENTLY AUTHORED against 7.3's key/enum table and joins
-# `met.forcing_version` for `source_id` / `forcing_version_id` and
-# `met.met_station` for `basin_version_id` / `station_id`. There is no marker
-# mechanism and no line deletion between them — the legacy forcing table has no
-# key columns, so neither text is derivable from the other (`design.md` D9).
+# `ForcingTemplatePair` whose `narrow` text reads 000061's key/enum table and
+# joins `met.forcing_version` for `source_id` / `forcing_version_id` and
+# `met.met_station` for `basin_version_id` / `station_id`; the schema-qualified
+# table name is `FORCING_TABLE_TOKEN`, bound by the renderer.
 #
-# EVERY CALL SITE BELOW PASSES THE LITERAL `"legacy"`. That is not a default to
-# be tidied into a variable: `met.forcing_version.timeseries_store` does not
-# exist until task 7.3, so there is nothing to look up, and a narrow render
-# reaching an executed statement would name `forcing_version_key` /
-# `variable_e` against a table that has neither (must-preserve M6). River no
-# longer has a routing column of its own to be confused with this one — #1342's
-# contract (task 6.3) dropped it — so the only store literal left in this
-# module's river calls is `"narrow"`.
-# `tests/test_forcing_read_path_store_routing.py` asserts the forcing literal by
-# AST over every wired reader.
-#
-# While the two D1 constants agree the legacy render is byte-identical to the
-# text it replaced, which is what makes this wiring a provable no-op; the
-# equality pins in that same suite are the proof.
+# Every call site below passes the literal `"narrow"`: it is the only store the
+# renderer accepts since #1993's first cut removed the legacy templates and the
+# per-version routing off `met.forcing_version`'s store column.
 # ---------------------------------------------------------------------------
 
 _LATEST_PRODUCT_STATION_SOURCE_TEMPLATES = ForcingTemplatePair(
-    legacy=f"""                SELECT
-                    cr.run_id,
-                    cr.model_id,
-                    cr.display_start_time,
-                    cr.display_end_time,
-                    fst.forcing_version_id,
-                    fst.basin_version_id,
-                    LOWER(fst.source_id) AS station_source_id,
-                    fst.station_id,
-                    fst.variable,
-                    cr.expected_station_count,
-                    fst.valid_time,
-                    fst.unit,
-                    fst.quality_flag
-                FROM {FORCING_TABLE_TOKEN} fst
-                JOIN candidate_runs cr
-                  ON cr.forcing_version_id = fst.forcing_version_id
-                 AND fst.basin_version_id = cr.basin_version_id
-                 AND LOWER(fst.source_id) = LOWER(cr.source_id)
-                WHERE fst.variable = ANY(%(variables)s)
-                  AND fst.valid_time >= cr.display_start_time
-                  AND fst.valid_time <= cr.display_end_time
-                  AND (%(scan_forcing_version_id)s IS NULL
-                       OR fst.forcing_version_id = %(scan_forcing_version_id)s)
-                  AND (%(scan_basin_version_id)s IS NULL
-                       OR fst.basin_version_id = %(scan_basin_version_id)s)
-                  AND (%(scan_source_id_lower)s IS NULL
-                       OR LOWER(fst.source_id) = %(scan_source_id_lower)s)
-                  AND (%(scan_display_start)s IS NULL
-                       OR fst.valid_time >= %(scan_display_start)s)
-                  AND (%(scan_display_end)s IS NULL
-                       OR fst.valid_time <= %(scan_display_end)s)
-                  AND EXISTS (
-                      SELECT 1
-                      FROM met.interp_weight iw
-                      WHERE iw.model_id = cr.model_id
-                        AND iw.station_id = fst.station_id
-                        AND iw.variable = fst.variable
-                        AND LOWER(iw.source_id) = LOWER(cr.source_id)
-                  )
-""",
     narrow=f"""                SELECT
                     cr.run_id,
                     cr.model_id,
@@ -419,6 +357,8 @@ _LATEST_PRODUCT_STATION_SOURCE_TEMPLATES = ForcingTemplatePair(
                   AND fst.valid_time <= cr.display_end_time
                   AND (%(scan_forcing_version_id)s IS NULL
                        OR fv.forcing_version_id = %(scan_forcing_version_id)s)
+                  AND (%(scan_forcing_version_key)s IS NULL
+                       OR fst.forcing_version_key = %(scan_forcing_version_key)s)
                   AND (%(scan_basin_version_id)s IS NULL
                        OR ms.basin_version_id = %(scan_basin_version_id)s)
                   AND (%(scan_source_id_lower)s IS NULL
@@ -442,8 +382,8 @@ _LATEST_PRODUCT_STATION_SOURCE_TEMPLATES = ForcingTemplatePair(
 # Reader #3. UNLIKE the other eight this one was NOT a template before this task:
 # `clauses` was a Python list joined with " AND " and spliced into an f-string,
 # so its SQL text and its positional parameter tuple both varied with the two
-# optional bounds. A per-store pair cannot be registered over a text that the
-# caller rebuilds, so the two optional conjuncts become NULL-GUARDED binds —
+# optional bounds. A template cannot be registered over a text that the caller
+# rebuilds, so the two optional conjuncts become NULL-GUARDED binds —
 # `(%s IS NULL OR fst.valid_time >= %s)` — exactly the fold-away shape the QHH
 # fallback's `scan_*` guards already use in this file. The statement is now
 # constant and the tuple is a fixed ten.
@@ -455,50 +395,6 @@ _LATEST_PRODUCT_STATION_SOURCE_TEMPLATES = ForcingTemplatePair(
 # TRUE at plan time and a bound timestamp folds to the same range predicate the
 # old conditional clause emitted, so the row set is identical either way.
 _STATION_SERIES_ROWS_TEMPLATES = ForcingTemplatePair(
-    legacy=f"""
-            WITH requested(variable, ordinal) AS (
-                SELECT variable, ordinal
-                FROM unnest(%s::text[]) WITH ORDINALITY AS variables(variable, ordinal)
-            )
-            SELECT
-                limited.forcing_version_id,
-                limited.station_id,
-                limited.variable,
-                limited.valid_time,
-                limited.value,
-                limited.unit,
-                limited.native_resolution,
-                limited.quality_flag,
-                limited.source_id,
-                ROW_NUMBER() OVER (
-                    PARTITION BY limited.variable
-                    ORDER BY limited.valid_time
-                ) AS row_number
-            FROM requested
-            CROSS JOIN LATERAL (
-                SELECT
-                    fst.forcing_version_id,
-                    fst.station_id,
-                    fst.variable,
-                    fst.valid_time,
-                    fst.value,
-                    fst.unit,
-                    fst.native_resolution,
-                    fst.quality_flag,
-                    fst.source_id
-                FROM {FORCING_TABLE_TOKEN} fst
-                WHERE fst.forcing_version_id = %s
-                  AND fst.station_id = %s
-                  AND fst.variable = requested.variable
-                  AND fst.valid_time >= %s
-                  AND fst.valid_time <= %s
-                  AND (%s IS NULL OR fst.valid_time >= %s)
-                  AND (%s IS NULL OR fst.valid_time <= %s)
-                ORDER BY fst.valid_time
-                LIMIT %s
-            ) limited
-            ORDER BY requested.ordinal, limited.valid_time
-            """,
     narrow=f"""
             WITH requested(variable, ordinal) AS (
                 SELECT variable, ordinal
@@ -550,15 +446,6 @@ _STATION_SERIES_ROWS_TEMPLATES = ForcingTemplatePair(
 )
 
 _STATION_FORCING_MEMBERSHIP_TEMPLATES = ForcingTemplatePair(
-    legacy=f"""
-            SELECT 1 AS present
-            FROM {FORCING_TABLE_TOKEN}
-            WHERE forcing_version_id = %s
-              AND station_id = %s
-              AND valid_time >= %s
-              AND valid_time <= %s
-            LIMIT 1
-            """,
     narrow=f"""
             SELECT 1 AS present
             FROM {FORCING_TABLE_TOKEN} fst
@@ -575,18 +462,6 @@ _STATION_FORCING_MEMBERSHIP_TEMPLATES = ForcingTemplatePair(
 )
 
 _FORCING_READINESS_OVERALL_TEMPLATES = ForcingTemplatePair(
-    legacy=f"""
-            SELECT
-                COUNT(DISTINCT station_id) AS actual_station_count,
-                COUNT(*) AS sample_count,
-                MIN(valid_time) AS valid_time_start,
-                MAX(valid_time) AS valid_time_end
-            FROM {FORCING_TABLE_TOKEN}
-            WHERE forcing_version_id = %s
-              AND valid_time >= %s
-              AND valid_time <= %s
-              AND variable = ANY(%s)
-            """,
     narrow=f"""
             SELECT
                 COUNT(DISTINCT fst.station_key) AS actual_station_count,
@@ -604,40 +479,15 @@ _FORCING_READINESS_OVERALL_TEMPLATES = ForcingTemplatePair(
 )
 
 # Reader #6, and the one the Invariant Matrix calls the BTRIM trap (I5): `unit`
-# and `quality_flag` become ENUMS on the narrow side, and `BTRIM(unit_e)` does
-# not compile. Every text function over an enum column below therefore carries an
+# and `quality_flag` are ENUMS on the narrow table, and `BTRIM(unit_e)` does not
+# compile. Every text function over an enum column below therefore carries an
 # explicit `::text`, including the two `ORDER BY` / projection sites — an enum
 # sorts by DECLARATION order, so `ORDER BY variable_e` would reorder the response
-# array relative to legacy's alphabetical `ORDER BY variable`.
+# array relative to the alphabetical order the payload has always had.
 #
-# The `IS NULL` halves are kept verbatim from legacy even though `unit_e` and
-# `quality_flag_e` are `NOT NULL` on the narrow table: they are dead on BOTH
-# stores today (legacy's `unit` / `quality_flag` are already `NOT NULL`,
-# `000005_met.sql:107,109`), so dropping them on one side only would be a gratuitous
-# text divergence in a task whose whole claim is that the two variants agree
-# (fixture C5, which raised a NOT-NULL divergence here and withdrew it on
-# evidence).
+# The `IS NULL` halves are dead (`unit_e` and `quality_flag_e` are `NOT NULL`);
+# they are kept so the statement text stays what the expand window shipped.
 _FORCING_READINESS_VARIABLE_ROWS_TEMPLATES = ForcingTemplatePair(
-    legacy=f"""
-            SELECT
-                variable,
-                COUNT(DISTINCT station_id) AS station_count,
-                COUNT(*) AS sample_count,
-                COUNT(DISTINCT NULLIF(BTRIM(unit), '')) AS unit_count,
-                SUM(CASE WHEN unit IS NULL OR BTRIM(unit) = '' THEN 1 ELSE 0 END) AS missing_unit_samples,
-                COUNT(DISTINCT NULLIF(BTRIM(quality_flag), '')) AS quality_flag_count,
-                SUM(CASE WHEN quality_flag IS NULL OR BTRIM(quality_flag) = '' THEN 1 ELSE 0 END)
-                    AS missing_quality_flag_samples,
-                MIN(valid_time) AS valid_time_start,
-                MAX(valid_time) AS valid_time_end
-            FROM {FORCING_TABLE_TOKEN}
-            WHERE forcing_version_id = %s
-              AND valid_time >= %s
-              AND valid_time <= %s
-              AND variable = ANY(%s)
-            GROUP BY variable
-            ORDER BY variable
-            """,
     narrow=f"""
             SELECT
                 fst.variable_e::text AS variable,
@@ -802,12 +652,12 @@ _QHH_LATEST_CANDIDATE_RUNS_SQL = """
                         rnv.segment_count
                     ) AS expected_segment_count,
                     fv.forcing_version_id AS fv_forcing_version_id,
-                    -- #1991 (task 7.3): the candidate's forcing store. This CTE
-                    -- already LEFT JOINs met.forcing_version, so routing the
-                    -- fallback's station leg costs no round trip and no extra
-                    -- join -- the header statement projects it and the heavy
-                    -- statement renders the matching variant.
-                    fv.timeseries_store AS forcing_timeseries_store,
+                    -- #2511: the candidate's forcing surrogate key. This CTE
+                    -- already LEFT JOINs met.forcing_version, so it costs no
+                    -- round trip and no extra join -- the header statement
+                    -- projects it and the heavy statement binds it as the
+                    -- station leg's fact-table scan predicate.
+                    fv.forcing_version_key,
                     fv.model_id AS forcing_model_id,
                     fv.source_id AS forcing_source_id,
                     fv.cycle_time AS forcing_cycle_time,
@@ -1914,7 +1764,6 @@ class PsycopgForecastStore:
                 cursor,
                 station_id=station_id,
                 forcing_version_id=str(forcing_version["forcing_version_id"]),
-                store=forcing_version_store(forcing_version),
                 valid_time_start=valid_time_start,
                 valid_time_end=valid_time_end,
                 variables=requested_variables,
@@ -1963,7 +1812,6 @@ class PsycopgForecastStore:
             overall = self._fetch_forcing_readiness_overall(
                 cursor,
                 forcing_version_id=str(forcing_version["forcing_version_id"]),
-                store=forcing_version_store(forcing_version),
                 valid_time_start=valid_time_start,
                 valid_time_end=valid_time_end,
                 variables=variables,
@@ -1971,7 +1819,6 @@ class PsycopgForecastStore:
             coverage_rows = self._fetch_forcing_readiness_variable_rows(
                 cursor,
                 forcing_version_id=str(forcing_version["forcing_version_id"]),
-                store=forcing_version_store(forcing_version),
                 valid_time_start=valid_time_start,
                 valid_time_end=valid_time_end,
                 variables=variables,
@@ -2218,7 +2065,7 @@ class PsycopgForecastStore:
             SELECT
                 run_id,
                 forcing_version_id,
-                forcing_timeseries_store,
+                forcing_version_key,
                 basin_version_id,
                 river_network_version_id,
                 LOWER(source_id) AS source_id_lower,
@@ -2234,6 +2081,7 @@ class PsycopgForecastStore:
         parameters.update(
             scan_run_id=header["run_id"],
             scan_forcing_version_id=header["forcing_version_id"],
+            scan_forcing_version_key=header["forcing_version_key"],
             scan_basin_version_id=header["basin_version_id"],
             scan_river_network_version_id=header["river_network_version_id"],
             scan_source_id_lower=header["source_id_lower"],
@@ -2245,19 +2093,9 @@ class PsycopgForecastStore:
             pin_scan_run_id=True,
         )
         river_source_sql = render_river_ts_sql(_latest_product_river_source_template("narrow"), "narrow").sql
-        # River is narrow-only since #1342's contract (task 6.3). The forcing leg
-        # is ROUTED since #1991 (task 7.3): the header above pinned exactly ONE
-        # candidate (QHH_LATEST_SEARCH_LIMIT), so exactly one forcing version is
-        # in scope and it is in exactly one of the two tables. That makes this a
-        # routing question and not a composition one — there is nothing to
-        # compose, and composing anyway would scan both tables for every request.
-        #
-        # A candidate whose `met.forcing_version` row is missing (the CTE's LEFT
-        # JOIN) projects NULL here; `forcing_store_or_default` resolves that to
-        # the canonical narrow table, which is the one that survives task 8.2.
         station_source_sql = render_forcing_ts_sql(
             _LATEST_PRODUCT_STATION_SOURCE_TEMPLATES,
-            forcing_store_or_default(header.get("forcing_timeseries_store")),
+            "narrow",
             entry="forecast_store.latest_product_station_source",
         ).sql
         return self._fetch_all(
@@ -2674,7 +2512,6 @@ class PsycopgForecastStore:
                 cr.forcing_end_time,
                 cr.expected_station_count,
                 cr.forcing_checksum,
-                cr.forcing_timeseries_store,
                 cr.display_start_time,
                 cr.display_end_time,
                 COALESCE(sc.station_count, 0) AS station_count,
@@ -2788,13 +2625,6 @@ class PsycopgForecastStore:
                         rnv.segment_count
                     ) AS expected_segment_count,
                     fv.forcing_version_id AS fv_forcing_version_id,
-                    -- Mirrors _QHH_LATEST_CANDIDATE_RUNS_SQL's task 7.3
-                    -- projection at the identical position. The fast path runs
-                    -- no forcing fact scan of its own, but the row it hands
-                    -- back still has to say which relation this candidate's
-                    -- forcing rows live in (#2517) -- and it must stay
-                    -- field-for-field equal to the CTE path.
-                    fv.timeseries_store AS forcing_timeseries_store,
                     fv.model_id AS forcing_model_id,
                     fv.source_id AS forcing_source_id,
                     fv.cycle_time AS forcing_cycle_time,
@@ -2905,13 +2735,6 @@ class PsycopgForecastStore:
                     rnv.segment_count
                 ) AS expected_segment_count,
                 fv.forcing_version_id AS fv_forcing_version_id,
-                -- #2517: same projection as both candidate paths, so every row
-                -- shape `_qhh_latest_candidate_response` consumes carries the
-                -- store. These rows are only ever summarised (they are never
-                -- `ready`), so the evidence block they build is not served
-                -- today -- which is exactly why the column must be here rather
-                -- than relied on to be absent.
-                fv.timeseries_store AS forcing_timeseries_store,
                 fv.model_id AS forcing_model_id,
                 fv.source_id AS forcing_source_id,
                 fv.cycle_time AS forcing_cycle_time,
@@ -3052,8 +2875,7 @@ class PsycopgForecastStore:
                 forcing_package_uri,
                 checksum,
                 lineage_json,
-                created_at,
-                timeseries_store
+                created_at
             FROM met.forcing_version
             WHERE model_id = %s
               AND LOWER(source_id) = %s
@@ -3110,13 +2932,7 @@ class PsycopgForecastStore:
                 forcing_package_uri,
                 checksum,
                 lineage_json,
-                created_at,
-                -- #1991 (task 7.3): which of the two forcing fact tables this
-                -- version's rows are in. Projected on the version row rather
-                -- than looked up per reader, because every single-version
-                -- forcing reader below is handed this mapping already and a
-                -- second round trip would answer a question this row can.
-                timeseries_store
+                created_at
             FROM met.forcing_version
             WHERE forcing_version_id = %s
             """,
@@ -3145,11 +2961,7 @@ class PsycopgForecastStore:
             cursor,
             render_forcing_ts_sql(
                 _STATION_FORCING_MEMBERSHIP_TEMPLATES,
-                # #1991 (task 7.3): the store of the forcing version IN SCOPE
-                # (spec :33), read off the version row this method is already
-                # handed. A single-version reader needs no cross-store
-                # composition -- one version is in exactly one table.
-                forcing_version_store(forcing_version),
+                "narrow",
                 entry="forecast_store.station_forcing_membership",
             ).sql,
             (forcing_version_id, station_id, valid_time_start, valid_time_end),
@@ -3173,7 +2985,6 @@ class PsycopgForecastStore:
         *,
         station_id: str,
         forcing_version_id: str,
-        store: str,
         valid_time_start: datetime,
         valid_time_end: datetime,
         variables: Sequence[str],
@@ -3189,7 +3000,7 @@ class PsycopgForecastStore:
             cursor,
             render_forcing_ts_sql(
                 _STATION_SERIES_ROWS_TEMPLATES,
-                store,
+                "narrow",
                 entry="forecast_store.station_series_rows",
             ).sql,
             (
@@ -3211,7 +3022,6 @@ class PsycopgForecastStore:
         cursor: Any,
         *,
         forcing_version_id: str,
-        store: str,
         valid_time_start: datetime,
         valid_time_end: datetime,
         variables: Sequence[str],
@@ -3220,7 +3030,7 @@ class PsycopgForecastStore:
             cursor,
             render_forcing_ts_sql(
                 _FORCING_READINESS_OVERALL_TEMPLATES,
-                store,
+                "narrow",
                 entry="forecast_store.forcing_readiness_overall",
             ).sql,
             (forcing_version_id, valid_time_start, valid_time_end, list(variables)),
@@ -3237,7 +3047,6 @@ class PsycopgForecastStore:
         cursor: Any,
         *,
         forcing_version_id: str,
-        store: str,
         valid_time_start: datetime,
         valid_time_end: datetime,
         variables: Sequence[str],
@@ -3246,7 +3055,7 @@ class PsycopgForecastStore:
             cursor,
             render_forcing_ts_sql(
                 _FORCING_READINESS_VARIABLE_ROWS_TEMPLATES,
-                store,
+                "narrow",
                 entry="forecast_store.forcing_readiness_variable_rows",
             ).sql,
             (forcing_version_id, valid_time_start, valid_time_end, list(variables)),
@@ -3850,12 +3659,7 @@ def _qhh_latest_candidate_response(row: Mapping[str, Any], *, basin_id: str = QH
             "candidate_limit": QHH_LATEST_CANDIDATE_LIMIT,
             "search_limit": QHH_LATEST_SEARCH_LIMIT,
             "context_limit": QHH_LATEST_CONTEXT_LIMIT,
-            # #2517: the candidate's OWN forcing store, resolved with the very
-            # function the station leg routes on (`forcing_store_or_default`
-            # over the candidate_runs CTE's `fv.timeseries_store`), so the
-            # evidence names the relation this candidate's rows were read from
-            # rather than one store's answer for both.
-            "query_indexes": _qhh_latest_query_indexes(row.get("forcing_timeseries_store")),
+            "query_indexes": _qhh_latest_query_indexes(),
         },
     }
     return {"ready": not reasons, "product": product, "unavailable_reasons": reasons}
@@ -4402,116 +4206,65 @@ def _qhh_latest_context_reasons(evaluations: Sequence[Mapping[str, Any]]) -> lis
     return reasons
 
 
-# The forcing leg's index evidence, ROUTED (#2517) exactly like the SQL it
-# describes. Until #2517 this was one hardcoded entry, and 000061 made it false
-# on BOTH routes at once: the migration renamed the wide table to
-# `met.forcing_station_timeseries_legacy` (:231) — taking
-# `forcing_station_timeseries_qhh_latest_window_idx` with it — and created the
-# narrow table under the canonical name with a different secondary index
-# (:263-265). So the constant named the canonical table with an index that no
-# longer lives there (narrow route wrong) while the legacy route's SQL read the
-# renamed table the payload never mentioned (legacy route wrong).
-#
-# The table names come from the renderer's own D1 constants rather than being
-# spelled again here, so task 8.2's contract cannot desync the two a second
-# time. The index names cannot come from a constant — nothing in the read path
-# names an index — so each (table, index, columns) triple is attributed to the
-# migration that creates it by
+# The forcing leg's index evidence (#2517): the relation and index the station
+# leg's rendered SQL actually scans. The table name comes from the renderer's
+# own constant rather than being spelled again here. The index name cannot come
+# from a constant — nothing in the read path names an index — so the
+# (table, index, columns) triple is attributed to the migration that creates it
+# by
 # `tests/test_migrations.py::test_forcing_query_index_payloads_name_the_relations_000061_actually_left`.
-# Refresh both this map and that pin whenever the shape moves. Do NOT reach for
-# the older `…_migration_matches_candidate_and_window_queries` pin beside it:
-# that one only asks whether an index NAME occurs in this source region, which
-# is why it stayed green all the way through #2517.
+# Refresh both this entry and that pin whenever the shape moves. Do NOT reach
+# for the older `…_migration_matches_candidate_and_window_queries` pin beside
+# it: that one only asks whether an index NAME occurs in this source region,
+# which is why it stayed green all the way through #2517.
 #
-# Measured provenance for the narrow repin: the #1992 I13 rollout receipt's
-# production `EXPLAIN (ANALYZE)` on node-27, whose narrow leg scans
+# Measured provenance: the #1992 I13 rollout receipt's production
+# `EXPLAIN (ANALYZE)` on node-27, whose narrow leg scans
 # `forcing_ts_version_variable_time_key_idx`
 # (`openspec/changes/timeseries-narrow-store-expand-contract/receipts/
 # 2026-09-20-i13-forcing-dual-store-readpath/explain-before-after.txt`).
-#
-# 8.2 drops the legacy table; the `legacy` entry goes with it.
-_QHH_LATEST_FORCING_QUERY_INDEX_BY_STORE: dict[str, dict[str, Any]] = {
-    FORCING_STORE_LEGACY: {
-        "table": FORCING_TABLE_LEGACY,
-        "index": "forcing_station_timeseries_qhh_latest_window_idx",
-        "status": "covered_by_latest_product_station_window_index",
-        "columns": [
-            "forcing_version_id",
-            "basin_version_id",
-            "LOWER(source_id)",
-            "variable",
-            "valid_time DESC",
-            "station_id",
-        ],
-    },
-    FORCING_STORE_NARROW: {
-        "table": FORCING_TABLE,
-        "index": "forcing_ts_version_variable_time_key_idx",
-        "status": "covered_by_version_variable_time_key_index",
-        "columns": [
-            "forcing_version_key",
-            "variable_e",
-            "valid_time DESC",
-        ],
-    },
+_QHH_LATEST_FORCING_QUERY_INDEX: dict[str, Any] = {
+    "table": FORCING_TABLE,
+    "index": "forcing_ts_version_variable_time_key_idx",
+    "status": "covered_by_version_variable_time_key_index",
+    "columns": [
+        "forcing_version_key",
+        "variable_e",
+        "valid_time DESC",
+    ],
 }
 
-#: The readiness helper's primary-key evidence, routed for the same reason and
-#: from the same migration. The legacy table kept the auto-generated
-#: `forcing_station_timeseries_pkey` through 000061's rename; the narrow table's
-#: primary key is named explicitly (`000061:250-251`) because index names are
-#: unique per schema. `station_forcing_readiness` has no HTTP route, so this one
-#: is internal — but it is the same claim about the same catalog.
-_STATION_FORCING_READINESS_QUERY_INDEX_BY_STORE: dict[str, dict[str, Any]] = {
-    FORCING_STORE_LEGACY: {
-        "status": "covered_by_primary_key",
-        "table": FORCING_TABLE_LEGACY,
-        "index": "forcing_station_timeseries_pkey",
-        "columns": ["forcing_version_id", "station_id", "variable", "valid_time"],
-        "reason": (
-            "Station-series reads constrain forcing_version_id and station_id before variable and valid_time, "
-            "matching the source-of-truth primary key prefix; no additive index is required for #204."
-        ),
-    },
-    FORCING_STORE_NARROW: {
-        "status": "covered_by_primary_key",
-        "table": FORCING_TABLE,
-        "index": "forcing_station_timeseries_narrow_pkey",
-        "columns": ["forcing_version_key", "station_key", "variable_e", "valid_time"],
-        "reason": (
-            "Station-series reads constrain forcing_version_key and station_key before variable_e and valid_time, "
-            "matching the source-of-truth primary key prefix; no additive index is required for #204."
-        ),
-    },
+#: The readiness helper's primary-key evidence, from the same migration: the
+#: narrow table's primary key is named explicitly (`000061:250-251`) because
+#: index names are unique per schema. `station_forcing_readiness` has no HTTP
+#: route, so this one is internal — but it is the same claim about the same
+#: catalog.
+_STATION_FORCING_READINESS_QUERY_INDEX: dict[str, Any] = {
+    "status": "covered_by_primary_key",
+    "table": FORCING_TABLE,
+    "index": "forcing_station_timeseries_narrow_pkey",
+    "columns": ["forcing_version_key", "station_key", "variable_e", "valid_time"],
+    "reason": (
+        "Station-series reads constrain forcing_version_key and station_key before variable_e and valid_time, "
+        "matching the source-of-truth primary key prefix; no additive index is required for #204."
+    ),
 }
 
 
-def _routed_query_index(by_store: Mapping[str, Mapping[str, Any]], store: Any) -> dict[str, Any]:
-    """A fresh copy of ``store``'s entry, ``columns`` list included.
-
-    ``store`` is typed as the routing helpers type it, because the value comes
-    off a LEFT JOIN: a candidate with no ``met.forcing_version`` row projects
-    ``None``, and ``forcing_store_or_default`` resolves that to the narrow table
-    — the one that survives task 8.2 — exactly as the render at :2088 does.
+def _query_index_copy(entry: Mapping[str, Any]) -> dict[str, Any]:
+    """A fresh copy of ``entry``, ``columns`` list included.
 
     Copied rather than returned by reference because these entries are serialized
     straight into a public response: handing the caller the module constant would
     let one request's post-processing rewrite every later request's evidence.
     """
-    entry = dict(by_store[forcing_store_or_default(store)])
-    entry["columns"] = list(entry["columns"])
-    return entry
+    copied = dict(entry)
+    copied["columns"] = list(copied["columns"])
+    return copied
 
 
-def _qhh_latest_query_indexes(store: Any) -> list[dict[str, Any]]:
-    """The latest-product index evidence for a candidate routed to ``store``.
-
-    Parameterless until #2517, which is how it came to describe one store's plan
-    for both. ``store`` is the SAME value the station leg renders from
-    (``forcing_store_or_default`` over the candidate's
-    ``met.forcing_version.timeseries_store``), so the description and the
-    described statement cannot disagree about which relation was read.
-    """
+def _qhh_latest_query_indexes() -> list[dict[str, Any]]:
+    """The latest-product index evidence."""
     return [
         {
             "table": "hydro.hydro_run",
@@ -4560,7 +4313,7 @@ def _qhh_latest_query_indexes(store: Any) -> list[dict[str, Any]]:
                 "valid_time DESC",
             ],
         },
-        _routed_query_index(_QHH_LATEST_FORCING_QUERY_INDEX_BY_STORE, store),
+        _query_index_copy(_QHH_LATEST_FORCING_QUERY_INDEX),
         {
             "table": "met.interp_weight",
             "index": "interp_weight_qhh_latest_membership_idx",
@@ -5051,13 +4804,7 @@ def _station_forcing_readiness_response(
                 }
             )
 
-    # #2517: routed on the same `met.forcing_version.timeseries_store` the two
-    # readiness fetches above bind (`station_forcing_readiness`, :1794/:1802),
-    # so the primary key named here is the one the executed statement used.
-    query_index = _routed_query_index(
-        _STATION_FORCING_READINESS_QUERY_INDEX_BY_STORE,
-        forcing_version_store(forcing_version),
-    )
+    query_index = _query_index_copy(_STATION_FORCING_READINESS_QUERY_INDEX)
     ready = not missing_reasons and all(item["ready"] for item in coverage)
     return {
         "forcing_version_id": str(forcing_version["forcing_version_id"]),

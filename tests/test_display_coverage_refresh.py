@@ -35,6 +35,7 @@ from tests.test_sql_shape_helpers import outer_predicates, text_fact_columns
 _HEADER_ROW = {
     "run_id": "run-1",
     "forcing_version_id": "fv-1",
+    "forcing_version_key": 4242,
     "basin_version_id": "bv-1",
     "river_network_version_id": "rnv-1",
     "source_id_lower": "gfs",
@@ -190,9 +191,10 @@ def test_eligible_run_binds_header_values_as_scan_pushdown() -> None:
     _assert_executed_narrow_river_cte(_sql, params)
     assert sqls.index(display_coverage._SCAN_HEADER_SQL) < sqls.index(_sql)
     assert sqls.count(display_coverage._REFRESH_SQL) == 1
-    assert len(sqls) == 3  # timeout, seven-column header, one upsert
+    assert len(sqls) == 3  # timeout, eight-column header, one upsert
     assert params["scan_run_id"] == "run-1"
     assert params["scan_forcing_version_id"] == "fv-1"
+    assert params["scan_forcing_version_key"] == 4242
     assert params["scan_basin_version_id"] == "bv-1"
     assert params["scan_river_network_version_id"] == "rnv-1"
     assert params["scan_source_id_lower"] == "gfs"
@@ -357,8 +359,17 @@ def test_pushdown_predicates_present_in_both_sample_ctes() -> None:
     key-resolution sub-selects, never against the fact table.
     """
     sql = display_coverage._REFRESH_SQL
-    assert "fst.forcing_version_id = %(scan_forcing_version_id)s" in sql
-    assert "LOWER(fst.source_id) = %(scan_source_id_lower)s" in sql
+    # #2511 (a): the version restriction is pinned on the FACT TABLE's own
+    # surrogate key, inside the station CTE and as a whole fold-away guard. The
+    # `fv.forcing_version_id` conjunct beside it restricts the joined row, not
+    # the hypertable, so it cannot stand in for this one.
+    station_cte = " ".join(
+        sql[sql.index("station_sample_rows AS") : sql.index("station_identity_coverage AS")].split()
+    )
+    assert (
+        "AND (%(scan_forcing_version_key)s IS NULL OR fst.forcing_version_key = %(scan_forcing_version_key)s)"
+    ) in station_cte
+    assert "LOWER(fv.source_id) = %(scan_source_id_lower)s" in sql
     assert "fst.valid_time >= %(scan_display_start)s" in sql
     assert "rt.run_key = (SELECT run_key FROM hydro.hydro_run" in sql
     assert "WHERE run_id = %(scan_run_id)s)" in sql

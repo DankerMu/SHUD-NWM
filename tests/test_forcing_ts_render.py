@@ -1,15 +1,15 @@
-"""The forcing renderer's own contract (#1990, task 7.2a).
+"""The forcing renderer's own contract (#1990, task 7.2a; narrow-only since #1993).
 
-Unit oracle for ``packages/common/forcing_ts_render.py``: variant selection,
-table-name binding through the D1 constants, and the four refusals. The
-discovery-set census is ``tests/test_forcing_ts_template_census.py``; the shape
-oracle over the nine registered templates — byte identity, store routing, and
-I1–I5 — is ``tests/test_forcing_read_path_store_routing.py`` (cut (b), 7.2).
+Unit oracle for ``packages/common/forcing_ts_render.py``: table-name binding
+through the D1 constant, and the refusals — including the refusal of every store
+but ``narrow``. The discovery-set census is
+``tests/test_forcing_ts_template_census.py``; the shape oracle over the nine
+registered templates is ``tests/test_forcing_read_path_store_routing.py``.
 """
 
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, fields
 
 import pytest
 
@@ -17,7 +17,6 @@ from packages.common import forcing_ts_render
 from packages.common.forcing_ts_render import (
     FORCING_STORES,
     FORCING_TABLE,
-    FORCING_TABLE_LEGACY,
     FORCING_TABLE_TOKEN,
     ForcingTemplateError,
     ForcingTemplatePair,
@@ -25,14 +24,6 @@ from packages.common.forcing_ts_render import (
     render_forcing_ts_sql,
 )
 from tests.forcing_ts_template_registry import REPO_ROOT
-
-LEGACY_BODY = f"""
-SELECT fst.station_id, fst.variable, fst.valid_time, fst.value, fst.unit, fst.quality_flag,
-       fst.source_id, fst.basin_version_id
-FROM {FORCING_TABLE_TOKEN} fst
-WHERE fst.forcing_version_id = %(forcing_version_id)s
-  AND fst.variable = ANY(%(variables)s)
-"""
 
 NARROW_BODY = f"""
 SELECT ms.station_id, fst.variable_e::text AS variable, fst.valid_time, fst.value,
@@ -45,7 +36,7 @@ WHERE fv.forcing_version_id = %(forcing_version_id)s
   AND fst.variable_e = ANY(%(variables)s)
 """
 
-PAIR = ForcingTemplatePair(legacy=LEGACY_BODY, narrow=NARROW_BODY)
+PAIR = ForcingTemplatePair(narrow=NARROW_BODY)
 
 
 # ---------------------------------------------------------------------------
@@ -53,136 +44,84 @@ PAIR = ForcingTemplatePair(legacy=LEGACY_BODY, narrow=NARROW_BODY)
 # ---------------------------------------------------------------------------
 
 
-def test_both_table_constants_spell_the_relation_the_migration_left(monkeypatch) -> None:
+def test_the_table_constant_spells_the_relation_the_migration_created() -> None:
     """The pin that keeps master deployable to node-27 (#1991, must-preserve M1).
 
-    FLIPPED WITH THE MIGRATION, in its own commit.
-    ``db/migrations/000061_forcing_station_timeseries_narrow_expand.sql`` renames
-    the deployed table to ``…_legacy`` and creates the narrow one under the
-    canonical name, so from that commit on each constant names a relation that
-    exists — and before it, neither did. River's equivalent wiring shipped three
-    days ahead of its migration and left master fail-closed on HTTP 500 in
-    between; flipping either the constant or the migration alone is the bug both
-    of them exist to catch.
-
-    The migration file is read here rather than trusted: this test's whole value
-    is that the constant and the DDL agree, and asserting the constant against a
-    second copy of the same string would only prove the string was typed twice.
+    ``db/migrations/000061_forcing_station_timeseries_narrow_expand.sql`` creates
+    the narrow table under the canonical name. The migration file is read here
+    rather than trusted: this test's whole value is that the constant and the DDL
+    agree, and asserting the constant against a second copy of the same string
+    would only prove the string was typed twice.
     """
     assert FORCING_TABLE == "met.forcing_station_timeseries"
-    assert FORCING_TABLE_LEGACY == "met.forcing_station_timeseries_legacy"
 
     migration = (
         REPO_ROOT / "db/migrations/000061_forcing_station_timeseries_narrow_expand.sql"
     ).read_text(encoding="utf-8")
-    assert "ALTER TABLE met.forcing_station_timeseries RENAME TO forcing_station_timeseries_legacy" in migration
     assert f"CREATE TABLE IF NOT EXISTS {FORCING_TABLE} (" in migration
-    assert f"to_regclass('{FORCING_TABLE_LEGACY}')" in migration
 
 
-def test_the_two_variants_now_bind_different_relations() -> None:
-    """The successor to I11's byte-identity pin, inverted by the 7.3 flip.
+def test_narrow_is_the_only_store_and_the_pair_has_one_field() -> None:
+    """#1993's first cut, as a shape: one store, one template per reader.
 
-    While both constants spelled the deployed name, rendering the SAME body for
-    the two stores produced the same string, and that is what made task 7.2 a
-    provable no-op. After 000061 the two stores are two relations, so the same
-    body must render DIFFERENTLY and differ by exactly the ``_legacy`` suffix.
-
-    Asserted on a pair whose two bodies are identical text, so the only thing
-    that CAN differ is the bound table name — which is what makes this a pin on
-    the binding rather than on whatever the registered templates happen to say.
+    ``ForcingTemplatePair`` survives as a frozen dataclass with the single field
+    ``narrow`` so the nine construction sites and the class-name-based discovery
+    kept their shape; a second field coming back is a legacy template coming
+    back.
     """
-    same = ForcingTemplatePair(legacy=LEGACY_BODY, narrow=LEGACY_BODY)
-    legacy_sql = render_forcing_ts_sql(same, "legacy").sql
-    narrow_sql = render_forcing_ts_sql(same, "narrow").sql
-    assert legacy_sql != narrow_sql
-    assert legacy_sql == narrow_sql.replace(FORCING_TABLE, FORCING_TABLE_LEGACY)
+    assert FORCING_STORES == ("narrow",)
+    assert [field.name for field in fields(ForcingTemplatePair)] == ["narrow"]
+    with pytest.raises(TypeError):
+        ForcingTemplatePair(legacy=NARROW_BODY, narrow=NARROW_BODY)  # type: ignore[call-arg]
+    with pytest.raises(FrozenInstanceError):
+        PAIR.narrow = "SELECT 1"  # type: ignore[misc]
+    assert not hasattr(forcing_ts_render, "FORCING_TABLE_LEGACY")
 
 
-def test_the_seven_three_flip_is_the_one_line_it_claims_to_be(monkeypatch) -> None:
-    """Simulate the migration commit: only the legacy render must move.
+def test_a_rename_is_the_one_line_it_claims_to_be(monkeypatch) -> None:
+    """The constant is read at call time, so a rename needs no caller re-imported."""
+    monkeypatch.setattr(forcing_ts_render, "FORCING_TABLE", "met.forcing_station_timeseries_renamed")
 
-    The constant is read at call time precisely so this holds without any caller
-    being re-imported. If this test ever needs a second edit to pass, the "one
-    line, in the migration's own commit" claim has stopped being true.
-    """
-    monkeypatch.setattr(forcing_ts_render, "FORCING_TABLE_LEGACY", "met.forcing_station_timeseries_legacy")
-
-    legacy = render_forcing_ts_sql(PAIR, "legacy")
-    narrow = render_forcing_ts_sql(PAIR, "narrow")
-    assert "FROM met.forcing_station_timeseries_legacy fst" in legacy.sql
-    assert "FROM met.forcing_station_timeseries fst" in narrow.sql
-    assert "_legacy" not in narrow.sql
+    assert "FROM met.forcing_station_timeseries_renamed fst" in render_forcing_ts_sql(PAIR, "narrow").sql
 
 
 # ---------------------------------------------------------------------------
-# Selection and binding
+# Binding
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("store", FORCING_STORES)
-def test_rendering_binds_the_constant_and_leaves_no_token(store) -> None:
-    rendered = render_forcing_ts_sql(PAIR, store)
-    expected = FORCING_TABLE_LEGACY if store == "legacy" else FORCING_TABLE
-    assert f"FROM {expected} fst" in rendered.sql
+def test_rendering_binds_the_constant_and_leaves_no_token() -> None:
+    rendered = render_forcing_ts_sql(PAIR, "narrow")
+    assert f"FROM {FORCING_TABLE} fst" in rendered.sql
     assert FORCING_TABLE_TOKEN not in rendered.sql
-    assert rendered.store == store
+    assert rendered.store == "narrow"
 
 
-@pytest.mark.parametrize(
-    ("store", "body", "expected_table"),
-    [
-        ("legacy", LEGACY_BODY, FORCING_TABLE_LEGACY),
-        ("narrow", NARROW_BODY, FORCING_TABLE),
-    ],
-)
-def test_rendering_is_token_substitution_and_nothing_else(store, body, expected_table) -> None:
-    """Invariant I6 as an EQUALITY, which every other assertion here stops short of.
+def test_rendering_is_token_substitution_and_nothing_else() -> None:
+    """An EQUALITY, which every other assertion here stops short of.
 
     The rest of this module tests containment (``in`` / ``count`` / ``not in``),
     and containment cannot see a line that goes missing. If someone later ports
     river's ``_rename_table``, adds comment stripping, normalises whitespace or
-    drops a line from the narrow path, every containment assertion still passes
-    while the rendered statement has silently stopped being the registered one.
-    This is the assertion that says the renderer SELECTS a variant and replaces a
-    token, and does nothing else to the text a reader registered.
+    drops a line, every containment assertion still passes while the rendered
+    statement has silently stopped being the registered one. This is the
+    assertion that says the renderer replaces a token and does nothing else to
+    the text a reader registered.
     """
-    assert render_forcing_ts_sql(PAIR, store).sql == body.replace(FORCING_TABLE_TOKEN, expected_table)
-
-
-def test_the_variants_are_two_independent_templates_not_one_minus_lines() -> None:
-    """Invariant I6, made structural by :class:`ForcingTemplatePair`.
-
-    The narrow variant is not the legacy one with lines deleted: it predicates on
-    keys and enums, and it takes ``source_id`` from a joined
-    ``met.forcing_version`` and ``basin_version_id`` from a joined
-    ``met.met_station`` — two joins the legacy variant does not have, because the
-    legacy fact row stores both columns itself.
-    """
-    legacy = render_forcing_ts_sql(PAIR, "legacy").sql
-    narrow = render_forcing_ts_sql(PAIR, "narrow").sql
-
-    assert "fst.basin_version_id" in legacy
-    assert "fst.basin_version_id" not in narrow
-    assert "JOIN met.met_station" in narrow
-    assert "JOIN met.forcing_version" in narrow
-    assert "JOIN met.met_station" not in legacy
-    # Not derivable by deletion in either direction: each variant carries lines
-    # the other does not.
-    assert len(narrow.split("\n")) > len(legacy.split("\n"))
+    assert render_forcing_ts_sql(PAIR, "narrow").sql == NARROW_BODY.replace(FORCING_TABLE_TOKEN, FORCING_TABLE)
 
 
 def test_every_token_occurrence_is_bound() -> None:
     """A self-join names the table twice; a single ``replace`` of the first would
     leave an unbound token in an executed statement."""
-    body = f"SELECT 1 FROM {FORCING_TABLE_TOKEN} a JOIN {FORCING_TABLE_TOKEN} b ON a.station_id = b.station_id"
-    rendered = render_forcing_ts_sql(ForcingTemplatePair(legacy=body, narrow=body), "legacy")
-    assert rendered.sql.count(FORCING_TABLE_LEGACY) == 2
+    body = f"SELECT 1 FROM {FORCING_TABLE_TOKEN} a JOIN {FORCING_TABLE_TOKEN} b ON a.station_key = b.station_key"
+    rendered = render_forcing_ts_sql(ForcingTemplatePair(narrow=body), "narrow")
+    assert rendered.sql.count(FORCING_TABLE) == 2
     assert FORCING_TABLE_TOKEN not in rendered.sql
 
 
 def test_the_result_is_frozen() -> None:
-    rendered = render_forcing_ts_sql(PAIR, "legacy")
+    rendered = render_forcing_ts_sql(PAIR, "narrow")
     assert isinstance(rendered, RenderedForcingSql)
     with pytest.raises(FrozenInstanceError):
         rendered.sql = "SELECT 1"  # type: ignore[misc]
@@ -195,11 +134,21 @@ def test_the_result_is_frozen() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_the_legacy_store_is_refused() -> None:
+    """The store the expand window rendered has no template any more (#1993).
+
+    Named on its own rather than left to the typo sweep below: ``"legacy"`` was a
+    VALID store for the whole expand window, so it is the one stale value a
+    caller can plausibly still pass, and silently answering it with the narrow
+    statement would read the wrong table for the question asked.
+    """
+    with pytest.raises(ForcingTemplateError, match=r"probe: unknown timeseries store 'legacy'.*\['narrow'\]"):
+        render_forcing_ts_sql(PAIR, "legacy", entry="probe")
+
+
 @pytest.mark.parametrize("store", ["", "narow", "LEGACY", "both", None])
 def test_an_unknown_store_is_refused_loudly(store) -> None:
-    """A silent fallback to ``legacy`` on a typo would route a narrow-stored
-    version's read at the legacy table and return zero rows, which reads as "no
-    data" rather than as an error."""
+    """A typo must not be answered with a statement nobody asked for."""
     with pytest.raises(ForcingTemplateError, match="unknown timeseries store"):
         render_forcing_ts_sql(PAIR, store, entry="probe")
 
@@ -209,14 +158,13 @@ def test_the_error_names_the_entry() -> None:
         render_forcing_ts_sql(PAIR, "sideways", entry="forecast_store:station_series")
 
 
-@pytest.mark.parametrize("store", FORCING_STORES)
-def test_a_template_without_the_token_is_refused(store) -> None:
+def test_a_template_without_the_token_is_refused() -> None:
     """A registered fact-table template that never names the fact table is
     misregistered, and rendering it would hand back a statement the renderer had
     no effect on."""
     body = "SELECT 1 FROM met.forcing_version WHERE forcing_version_id = %(forcing_version_id)s"
     with pytest.raises(ForcingTemplateError, match="carries no .* token"):
-        render_forcing_ts_sql(ForcingTemplatePair(legacy=body, narrow=body), store, entry="probe")
+        render_forcing_ts_sql(ForcingTemplatePair(narrow=body), "narrow", entry="probe")
 
 
 @pytest.mark.parametrize(
@@ -228,18 +176,16 @@ def test_a_template_without_the_token_is_refused(store) -> None:
         "met.forcing_station_timeseries_legacy",
     ],
 )
-@pytest.mark.parametrize("store", FORCING_STORES)
-def test_a_hardcoded_table_name_is_refused_however_it_is_spelled(spelling, store) -> None:
+def test_a_hardcoded_table_name_is_refused_however_it_is_spelled(spelling) -> None:
     """D1's guard, over the CLASS of qualified spellings.
 
     A substring check for the canonical spelling sees neither the quoted nor the
-    spaced form, and either would survive task 7.3's flip still pointing at
-    whichever table the author happened to type. The ``_legacy`` case is what
-    keeps the guard biting AFTER 7.3.
+    spaced form. The ``_legacy`` case is the renamed table, which no template
+    may name at all.
     """
-    body = f"SELECT 1 FROM {FORCING_TABLE_TOKEN} a JOIN {spelling} b ON a.station_id = b.station_id"
+    body = f"SELECT 1 FROM {FORCING_TABLE_TOKEN} a JOIN {spelling} b ON a.station_key = b.station_key"
     with pytest.raises(ForcingTemplateError, match="spells the fact table literally"):
-        render_forcing_ts_sql(ForcingTemplatePair(legacy=body, narrow=body), store, entry="probe")
+        render_forcing_ts_sql(ForcingTemplatePair(narrow=body), "narrow", entry="probe")
 
 
 @pytest.mark.parametrize(
@@ -248,11 +194,9 @@ def test_a_hardcoded_table_name_is_refused_however_it_is_spelled(spelling, store
         "forcing_station_timeseries",
         "FORCING_STATION_TIMESERIES",
         '"forcing_station_timeseries"',
-        "forcing_station_timeseries_legacy",
     ],
 )
-@pytest.mark.parametrize("store", FORCING_STORES)
-def test_an_unqualified_table_name_is_refused_too(spelling, store) -> None:
+def test_an_unqualified_table_name_is_refused_too(spelling) -> None:
     """The compensation river gets for free and forcing has to spell out.
 
     The census deliberately does NOT count the bare token — several sites spell
@@ -263,12 +207,11 @@ def test_an_unqualified_table_name_is_refused_too(spelling, store) -> None:
     (``river_ts_render.fact_table_name_occurrences``), so an unqualified read is
     refused at render time. Nothing here plays that role, so without this refusal
     a template written ``FROM forcing_station_timeseries`` escapes the census AND
-    the D1 guard, and after 7.3 resolves through ``search_path`` to the NARROW
-    table with none of the legacy columns.
+    the D1 guard, and resolves through ``search_path``.
     """
-    body = f"SELECT 1 FROM {FORCING_TABLE_TOKEN} a JOIN {spelling} b ON a.station_id = b.station_id"
+    body = f"SELECT 1 FROM {FORCING_TABLE_TOKEN} a JOIN {spelling} b ON a.station_key = b.station_key"
     with pytest.raises(ForcingTemplateError, match="names the fact table without a schema"):
-        render_forcing_ts_sql(ForcingTemplatePair(legacy=body, narrow=body), store, entry="probe")
+        render_forcing_ts_sql(ForcingTemplatePair(narrow=body), "narrow", entry="probe")
 
 
 def test_the_qualified_spelling_keeps_its_own_reason() -> None:
@@ -277,7 +220,7 @@ def test_the_qualified_spelling_keeps_its_own_reason() -> None:
     also matches it."""
     body = f"SELECT 1 FROM {FORCING_TABLE_TOKEN} a JOIN met.forcing_station_timeseries b ON a.x = b.x"
     with pytest.raises(ForcingTemplateError, match="spells the fact table literally"):
-        render_forcing_ts_sql(ForcingTemplatePair(legacy=body, narrow=body), "legacy", entry="probe")
+        render_forcing_ts_sql(ForcingTemplatePair(narrow=body), "narrow", entry="probe")
 
 
 def test_the_unqualified_guard_does_not_fire_on_names_that_merely_start_with_it() -> None:
@@ -287,16 +230,16 @@ def test_the_unqualified_guard_does_not_fire_on_names_that_merely_start_with_it(
     body = (
         f"SELECT 1 FROM {FORCING_TABLE_TOKEN} fst "
         "-- planner note: forcing_station_timeseries_valid_time_idx\n"
-        "WHERE fst.forcing_version_id = %(forcing_version_id)s"
+        "WHERE fst.forcing_version_key = %(forcing_version_key)s"
     )
-    rendered = render_forcing_ts_sql(ForcingTemplatePair(legacy=body, narrow=body), "legacy", entry="probe")
+    rendered = render_forcing_ts_sql(ForcingTemplatePair(narrow=body), "narrow", entry="probe")
     assert "forcing_station_timeseries_valid_time_idx" in rendered.sql
 
 
 def test_the_literal_guard_does_not_fire_on_the_other_met_tables() -> None:
-    """Non-vacuity: the narrow variant MUST name ``met.forcing_version`` and
+    """Non-vacuity: a template MUST name ``met.forcing_version`` and
     ``met.met_station``, so a guard that refused any ``met.`` reference would make
-    every narrow template unregisterable."""
+    every template unregisterable."""
     assert render_forcing_ts_sql(PAIR, "narrow").sql.count("JOIN met.") == 2
 
 

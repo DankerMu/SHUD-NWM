@@ -504,7 +504,6 @@ def _qhh_ready_row() -> dict[str, Any]:
         "river_valid_time_start": QHH_CYCLE,
         "river_valid_time_end": QHH_END,
         "max_lead_time_hours": 120,
-        "forcing_timeseries_store": "narrow",
     }
 
 

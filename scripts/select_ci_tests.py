@@ -1837,11 +1837,8 @@ SQL_SHAPE_ORACLE_TESTS: tuple[str, ...] = (
 # I11 #1990 task 7.2 — the FORCING counterpart of the group above, and
 # deliberately a SEPARATE tuple rather than three more members of it.
 #
-# The two sets have different subjects and different lifetimes: `tasks.md` 6.3
-# deletes the river renderer's legacy path and collapses its oracles while the
-# forcing transition is still open (`tasks.md` 8.3 is what finally retires this
-# one). Folding them together would route every river reader diff at three
-# forcing suites for nothing.
+# The two sets have different subjects. Folding them together would route every
+# river reader diff at three forcing suites for nothing.
 #
 # Separate does NOT mean uncoupled, and the coupling that exists is deliberately
 # visible here: `tests/test_forcing_read_path_store_routing.py` imports four
@@ -1863,10 +1860,10 @@ SQL_SHAPE_ORACLE_TESTS: tuple[str, ...] = (
 FORCING_SQL_SHAPE_ORACLE_TESTS: tuple[str, ...] = (
     "tests/test_forcing_ts_render.py",
     "tests/test_forcing_ts_template_census.py",
-    # Task 7.2's own oracle: byte identity against the pre-wiring snapshot, the
-    # "store is the literal legacy" AST sweep (must-preserve M6) and the narrow
-    # variants' shape invariants. It reads every wired reader module, so a diff
-    # to one of them must run it.
+    # Task 7.2's own oracle: the "store is the literal narrow" AST sweep, the
+    # #2511 fact-table scan predicate and the registered templates' shape
+    # invariants. It reads every wired reader module, so a diff to one of them
+    # must run it.
     "tests/test_forcing_read_path_store_routing.py",
 )
 
@@ -2659,22 +2656,22 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         # Cut (a) landed the register EMPTY of reader entries; cut (b) (task
         # 7.2) populated it with the nine and brought a SECOND importer,
         # tests/test_forcing_read_path_store_routing.py, which parametrises its
-        # byte-identity / M6 / narrow-shape assertions over this register — so
+        # call-site / narrow-shape assertions over this register — so
         # an entry added or dropped here rewrites what that suite asserts too.
         # Both importers are listed; both are non-gated.
         "tests/forcing_ts_template_registry.py",
         (
             "tests/test_forcing_ts_template_census.py",
             # Cut (b)'s second importer: the register is now the parametrisation
-            # source of the byte-identity / routing / narrow-shape oracle too, so
+            # source of the call-site / narrow-shape oracle too, so
             # an entry added or dropped here changes what that suite asserts
             # without touching it.
             "tests/test_forcing_read_path_store_routing.py",
             # #1991 task 7.3's third importer: the renderer suite takes this
             # module's REPO_ROOT to read
             # `db/migrations/000061_forcing_station_timeseries_narrow_expand.sql`
-            # and hold the flipped FORCING_TABLE_LEGACY constant against the
-            # `ALTER TABLE … RENAME TO` that made it true. A one-name import, but
+            # and hold the FORCING_TABLE constant against the `CREATE TABLE`
+            # that made it true. A one-name import, but
             # the closure check is over edges and not over how much is imported.
             "tests/test_forcing_ts_render.py",
         ),
@@ -4609,19 +4606,18 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         SQL_SHAPE_ORACLE_TESTS,
     ),
     PathTestRule(
-        # I11 #1990 forcing_ts_render: the forcing per-store renderer, and the
+        # I11 #1990 forcing_ts_render: the forcing renderer, and the
         # same gap as the river rule above one layer up from the register.
         # No pattern matched this path before — `packages/common/**` is not a
         # broad rule, it only re-adds the core-smoke baseline (#1744 path B) —
         # so a renderer diff selected its same-name suite and nothing else.
         # It is a registered source of the forcing discovery-set census
-        # (FORCING_TABLE_CENSUS pins it at 2: `FORCING_TABLE` and
-        # `FORCING_TABLE_LEGACY`, the same two-constant shape river_ts_render.py
-        # carries), so a third table-name mention here, or a mention deleted,
-        # reds a suite this path did not run — post-merge, exactly the failure
-        # river's wiring meta-test exists to prevent. The census also imports
-        # FORCING_STORES and render_forcing_ts_sql at module scope and renders
-        # every registered template through them.
+        # (FORCING_TABLE_CENSUS pins it at 1: `FORCING_TABLE`), so a second
+        # table-name mention here, or the mention deleted, reds a suite this
+        # path did not run — post-merge, exactly the failure river's wiring
+        # meta-test exists to prevent. The census also imports
+        # render_forcing_ts_sql at module scope and renders every registered
+        # template through it.
         # The same-name suite is named explicitly rather than left to same-name
         # derivation, as the river rule does through SQL_SHAPE_ORACLE_TESTS: the
         # rule should read as the renderer's full unit closure, not as the half
@@ -4683,12 +4679,12 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
-        # #1991 task 7.3: the per-version store routing both writers, all nine
-        # readers, the seed and the autopipeline's non-failing tick outcome now
-        # depend on. No pattern matched it before -- `packages/common/**` is not
-        # a broad rule (#1744 path B) and it has no same-name suite -- so a diff
-        # to the store names, the refusal code or the narrow INSERT template
-        # would have been red only on the post-merge master run.
+        # #1991 task 7.3: the forcing-version key lookup and the narrow INSERT
+        # column list / row template both writers and the seed depend on. No
+        # pattern matched it before -- `packages/common/**` is not a broad rule
+        # (#1744 path B) and it has no same-name suite -- so a diff to the
+        # lookup or the INSERT template would have been red only on the
+        # post-merge master run.
         "packages/common/forcing_store_routing.py",
         (
             *FORCING_SQL_SHAPE_ORACLE_TESTS,
@@ -4750,19 +4746,6 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # new base is routed the same way.
         "tests/fixtures/river_ts_templates_*.json",
         SQL_SHAPE_ORACLE_TESTS,
-    ),
-    PathTestRule(
-        # I11 #1990 task 7.2's forcing counterpart of the rule above, for the
-        # identical reason (review #1996, C10). This is the PRE-WIRING snapshot
-        # the byte-identity pins compare against — captured by executing the nine
-        # readers in a worktree at the cut-(a) merge, which is the whole reason
-        # those pins are evidence rather than a golden certifying its own source.
-        # It is data, not Python, so the `tests/**.py` branch never sees it and it
-        # reached no rule at all: a PR that re-captured it after editing a
-        # template would select zero backend tests. Globbed on the capture SHA so
-        # a re-capture at a new base routes the same way.
-        "tests/fixtures/forcing_read_path_pre_wiring_*.json",
-        FORCING_SQL_SHAPE_ORACLE_TESTS,
     ),
     PathTestRule(
         # #2183: the #1913 registry-partition additions ledger is a hand-edited

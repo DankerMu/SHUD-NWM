@@ -109,11 +109,7 @@ def _seed(database_url: str) -> None:
                     for variable in variables
                 ],
             )
-            cursor.execute(
-                "SELECT forcing_version_key FROM met.forcing_version WHERE forcing_version_id = %s",
-                (FORCING_VERSION_ID,),
-            )
-            forcing_version_key = cursor.fetchone()["forcing_version_key"]
+            forcing_version_key = _forcing_version_key(cursor)
             cursor.execute(
                 "SELECT station_id, station_key FROM met.met_station WHERE station_id = ANY(%s)",
                 (list(MEMBERSHIP),),
@@ -151,6 +147,14 @@ def _seed(database_url: str) -> None:
         connection.close()
 
 
+def _forcing_version_key(cursor: Any) -> int:
+    cursor.execute(
+        "SELECT forcing_version_key FROM met.forcing_version WHERE forcing_version_id = %s",
+        (FORCING_VERSION_ID,),
+    )
+    return cursor.fetchone()["forcing_version_key"]
+
+
 def _rows(connection: Any, leg_sql: str, *, variables: list[str], scan_pinned: bool) -> list[dict[str, Any]]:
     with connection.cursor() as cursor:
         cursor.execute(
@@ -160,6 +164,7 @@ def _rows(connection: Any, leg_sql: str, *, variables: list[str], scan_pinned: b
                 run_id=f"{ISSUE_126_PREFIX}_forecast_run",
                 model_id=MODEL_ID,
                 forcing_version_id=FORCING_VERSION_ID,
+                forcing_version_key=_forcing_version_key(cursor),
                 basin_version_id=BASIN_VERSION_ID,
                 source_id=SOURCE_ID.upper(),
                 display_start_time=VALID_TIME_1,
@@ -179,6 +184,7 @@ def _explain(connection: Any, leg_sql: str, *, scan_pinned: bool) -> dict[str, A
                 run_id=f"{ISSUE_126_PREFIX}_forecast_run",
                 model_id=MODEL_ID,
                 forcing_version_id=FORCING_VERSION_ID,
+                forcing_version_key=_forcing_version_key(cursor),
                 basin_version_id=BASIN_VERSION_ID,
                 source_id=SOURCE_ID.upper(),
                 display_start_time=VALID_TIME_1,

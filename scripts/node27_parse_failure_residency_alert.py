@@ -58,7 +58,7 @@ Criterion — RESIDENCY, not a tick's rc:
 - A second instance holding the lock exits 0 with one line (a skipped tick is
   not an alert).
 
-Two more sources join the set (#2590):
+One more source joins the set (#2590):
 
 - **published re-parse**: an already-``published`` run whose rewritten product
   fails to parse never becomes ``failed`` (``mark_run_failed`` excludes
@@ -72,12 +72,6 @@ Two more sources join the set (#2590):
   Nothing renews ``declined_at``, so the run alerts ONCE — which holds only
   while ``threshold`` plus the lane cadence (30 min) stays under the liveness
   bound; ``threshold >= liveness`` is refused as a configuration error.
-- **legacy_store_refused**: a ``failed`` run whose recorded forcing version is
-  routed to the legacy timeseries store. The autopipe refuses that forcing
-  apply without a decline row (#1991), so the register keeps renewing the run;
-  it alerts on first crossing the threshold and is never re-alerted while it
-  stays watched. Classifying a run here wrongly can only drop repeat mails,
-  never the first one.
 
 Delivery: the unit carries ``OnFailure=nhms-node27-unit-failure-alert@%n.service``
 and keeps stdout/stderr on the JOURNAL; the handler mails ``journalctl -n 30``,
@@ -86,8 +80,8 @@ at most ``--report-runs`` (default 10) resident lines, then ``... and K more``
 — 12 lines plus systemd's own five framing lines fit the 30-line tail.
 
 The DSN is the read-only ``nhms_display_ro`` role (``SELECT`` on
-``hydro.hydro_run``, ``met.forcing_version`` and ``ops.ingest_recompute_decline``),
-shared with the frontier / coverage-freshness lanes.
+``hydro.hydro_run`` and ``ops.ingest_recompute_decline``), shared with the
+frontier / coverage-freshness lanes.
 
 Injection seams: ``main(argv, now=..., observe=..., env=...)``;
 ``observe(config, liveness_floor)`` returns ``FailingRun`` rows.
@@ -144,17 +138,14 @@ RUNBOOK_REFERENCE = "docs/runbooks/production-ops/parse-failure-residency-alert.
 # clock, so the SQL bound and the in-process re-check are the same instant.
 CLASS_FAILED = "failed"
 CLASS_PUBLISHED_REPARSE = "published_reparse"
-CLASS_LEGACY_STORE_REFUSED = "legacy_store_refused"
 PUBLISHED_REPARSE_REASON = "PUBLISHED_REPARSE_FAILED"
 
 # Source 2 keeps only each run's LATEST published-reparse decline, and only
 # while it is newer than the run's last successful parse (a repaired product
 # re-parses, stamps `parsed_at` and drops the run).
 OBSERVATION_QUERY = """
-SELECT h.run_id, h.run_key, h.error_code, h.updated_at,
-       CASE WHEN f.timeseries_store = 'legacy' THEN 'legacy_store_refused' ELSE 'failed' END
+SELECT h.run_id, h.run_key, h.error_code, h.updated_at, 'failed'
 FROM hydro.hydro_run h
-LEFT JOIN met.forcing_version f ON f.forcing_version_id = h.forcing_version_id
 WHERE h.status = 'failed'
   AND h.updated_at > %(liveness_floor)s
 UNION ALL
@@ -202,8 +193,8 @@ class FailingRun:
     # already-failed row, so later retries' errors are only in autopipe.log.
     first_error_code: str
     updated_at: datetime
-    # Which source saw it: `failed`, `published_reparse` (the decline stands in
-    # for the failure; its code is the re-parse's) or `legacy_store_refused`.
+    # Which source saw it: `failed` or `published_reparse` (the decline stands
+    # in for the failure; its code is the re-parse's).
     classification: str = CLASS_FAILED
 
 
@@ -531,12 +522,7 @@ def evaluate(
         last = prior.last_alerted_at if prior else None
         due = False
         if now - first >= config.threshold:
-            if last is None:
-                due = True
-            else:
-                # A legacy-store refusal has no remedy the autopipe will ever
-                # record; one mail says it, repeats would be unending noise.
-                due = run.classification != CLASS_LEGACY_STORE_REFUSED and now - last >= config.realert
+            due = last is None or now - last >= config.realert
             if due:
                 last = now
             residents.append(Resident(run=run, first_observed=first, due=due))

@@ -821,6 +821,9 @@ def test_coverage_scan_parameters_keep_their_text_semantics() -> None:
     assert display_coverage._SCAN_PARAM_KEYS == (
         "scan_run_id",
         "scan_forcing_version_id",
+        # #2511: the one surrogate key among them, read off the joined
+        # `met.forcing_version` row for the station leg's fact-table predicate.
+        "scan_forcing_version_key",
         "scan_basin_version_id",
         "scan_river_network_version_id",
         "scan_source_id_lower",
