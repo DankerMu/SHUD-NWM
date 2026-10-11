@@ -7,7 +7,7 @@
 
 - [x] 2.1 Preserve station-series API error code information in the frontend adapter.
 - [x] 2.2 Render a retention-specific empty state for `STATION_FORCING_FILE_NOT_FOUND`.
-- [x] 2.3 Mark known retained-out issue-time options unavailable in the popup cycle picker.
+- [x] 2.3 Keep a selected issue time that is no longer listed as a disabled, labelled first option; do not remember per-session retained-disk misses (owner ruling 2026-10-11, #2881: the "known retained-out option is not selectable again" scenario is dropped).
 - [x] 2.4 Keep the station-series API/direct-disk backend behavior unchanged.
 
 ## 3. Verification

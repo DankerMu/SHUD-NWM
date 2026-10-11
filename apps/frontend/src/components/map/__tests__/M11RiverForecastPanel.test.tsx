@@ -488,7 +488,6 @@ describe('M11IssueTimeSelect', () => {
       <M11IssueTimeSelect
         issueTimes={['', '  ', ` ${latestCycle} `, latestCycle, '']}
         issueTime={` ${staleCycle} `}
-        unavailableIssueTimes={['', '  ', ` ${staleCycle} `, staleCycle]}
         onIssueTimeChange={onIssueTimeChange}
       />,
     )
@@ -510,7 +509,7 @@ describe('M11IssueTimeSelect', () => {
     expect(onIssueTimeChange).toHaveBeenCalledWith(latestCycle)
   })
 
-  it('disables an in-list unselected issue time named by unavailableIssueTimes and labels the trigger by default', async () => {
+  it('keeps every listed issue time selectable and unlabelled, and labels the trigger by default', async () => {
     const user = userEvent.setup()
     const cycles = ['2026-05-21T00:00:00Z', '2026-05-20T12:00:00Z', '2026-05-20T00:00:00Z']
     const onIssueTimeChange = vi.fn()
@@ -519,7 +518,6 @@ describe('M11IssueTimeSelect', () => {
       <M11IssueTimeSelect
         issueTimes={cycles}
         issueTime={cycles[0]}
-        unavailableIssueTimes={[` ${cycles[1]} `]}
         onIssueTimeChange={onIssueTimeChange}
       />,
     )
@@ -530,21 +528,16 @@ describe('M11IssueTimeSelect', () => {
     expect(trigger).toHaveTextContent(formatIssueTime(cycles[0]))
     await user.click(trigger)
 
-    // 仅由 prop 指名（带首尾空格）的时次不可用；其余在列时次保持可选、无后缀。
-    expect(screen.getAllByRole('option').map((option) => option.textContent)).toEqual([
-      formatIssueTime(cycles[0]),
-      `${formatIssueTime(cycles[1])} · 磁盘保留不可用`,
-      formatIssueTime(cycles[2]),
-    ])
-    const unavailableOption = screen.getByRole('option', { name: /05-20 12:00 UTC.*磁盘保留不可用/ })
-    expect(unavailableOption).toHaveAttribute('aria-disabled', 'true')
-    expect(unavailableOption).toHaveAttribute('data-retention-unavailable', 'true')
-    fireEvent.click(unavailableOption)
-    expect(onIssueTimeChange).not.toHaveBeenCalled()
+    // 在列时次一律可选、无后缀：只有“已选但不在列表里”的保留时次才不可用。
+    const options = screen.getAllByRole('option')
+    expect(options.map((option) => option.textContent)).toEqual(cycles.map((cycle) => formatIssueTime(cycle)))
+    for (const option of options) {
+      expect(option).not.toHaveAttribute('data-retention-unavailable')
+      expect(option).not.toHaveAttribute('aria-disabled', 'true')
+    }
 
-    const availableOption = screen.getByRole('option', { name: formatIssueTime(cycles[2]) })
-    expect(availableOption).not.toHaveAttribute('data-retention-unavailable')
-    await user.click(availableOption)
-    expect(onIssueTimeChange).toHaveBeenCalledWith(cycles[2])
+    await user.click(screen.getByRole('option', { name: formatIssueTime(cycles[1]) }))
+    expect(onIssueTimeChange).toHaveBeenCalledTimes(1)
+    expect(onIssueTimeChange).toHaveBeenCalledWith(cycles[1])
   })
 })

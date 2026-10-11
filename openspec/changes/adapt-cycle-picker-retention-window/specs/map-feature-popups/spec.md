@@ -17,12 +17,14 @@ not as generic chart failures and not as permission to fall back to DB history.
   selected retained-disk cycle
 - **AND** it SHALL NOT draw station forcing charts for that response.
 
-#### Scenario: known retained-out option is not selectable again
+#### Scenario: a retained-out issue time stays selectable
 
 - **WHEN** an issue time has failed with `STATION_FORCING_FILE_NOT_FOUND` for
-  the current station/source popup session
-- **THEN** the issue-time picker SHALL label or disable that option as retained
-  disk unavailable
+  the current station/source popup session and is still among the available
+  issue times
+- **THEN** the issue-time picker SHALL keep that option selectable without a
+  session-level unavailable mark, and selecting it again SHALL show the same
+  retention-specific state
 - **AND** selecting a different still-available issue time SHALL refetch
   latest-product and station-series normally.
 
