@@ -481,3 +481,108 @@ def test_node_test_lane_is_checkout_node_20_and_one_run_with_no_install() -> Non
     assert "continue-on-error" not in job
     for word in ("npm", "pnpm", "npx", "install", "corepack", "yarn"):
         assert word not in run_step["run"]
+
+
+# --- ci.yml wiring: the path-scoped actionlint lane over .github/workflows (#2863) ------
+
+WORKFLOW_LINT_JOB = "workflow-lint"
+WORKFLOW_LINT_OUTPUT = "workflows"
+WORKFLOW_LINT_GLOB = ".github/workflows/**"
+WORKFLOW_LINT_IMAGE = "docker://rhysd/actionlint:1.7.7"
+_WORKFLOW_LINT_FILTER_KEY = f"            {WORKFLOW_LINT_OUTPUT}:\n"
+_WORKFLOW_LINT_FILTER_ENTRY = f"              - '{WORKFLOW_LINT_GLOB}'\n"
+_WORKFLOW_LINT_OUTPUT_LINE = f"      {WORKFLOW_LINT_OUTPUT}: ${{{{ steps.filter.outputs.{WORKFLOW_LINT_OUTPUT} }}}}\n"
+
+
+def _needs(job: dict[str, Any]) -> list[str]:
+    needs = job.get("needs", [])
+    return [needs] if isinstance(needs, str) else list(needs)
+
+
+def _assert_workflow_lint_wiring(text: str) -> None:
+    """Every lookup is asserted before it is indexed, so a mutation fails as an AssertionError."""
+    jobs = yaml.safe_load(text)["jobs"]
+
+    assert WORKFLOW_LINT_JOB in jobs
+    job = jobs[WORKFLOW_LINT_JOB]
+    assert job.get("needs") == "changes"
+    assert job.get("if") == f"needs.changes.outputs.{WORKFLOW_LINT_OUTPUT} == 'true'"
+
+    changes = jobs["changes"]
+    assert changes["outputs"].get(WORKFLOW_LINT_OUTPUT) == (f"${{{{ steps.filter.outputs.{WORKFLOW_LINT_OUTPUT} }}}}")
+    (filter_step,) = [step for step in changes["steps"] if step.get("id") == "filter"]
+    filters = yaml.safe_load(filter_step["with"]["filters"])
+    assert filters.get(WORKFLOW_LINT_OUTPUT) == [WORKFLOW_LINT_GLOB]
+
+    # A lint lane nothing waits on: a skipped or red lint never skips another job.
+    dependants = sorted(key for key, other in jobs.items() if WORKFLOW_LINT_JOB in _needs(other))
+    assert dependants == []
+
+
+def _wired_ci_text() -> str:
+    text = CI_WORKFLOW.read_text(encoding="utf-8")
+    _assert_workflow_lint_wiring(text)  # the mutations below start from a wiring that holds
+    return text
+
+
+def _replace_once(text: str, old: str, new: str) -> str:
+    assert text.count(old) == 1, old
+    return text.replace(old, new)
+
+
+def test_workflow_lint_lane_is_gated_on_its_own_filter_and_nothing_needs_it() -> None:
+    _assert_workflow_lint_wiring(CI_WORKFLOW.read_text(encoding="utf-8"))
+
+
+def test_workflow_lint_lane_runs_the_pinned_actionlint_image_after_checkout() -> None:
+    job = _frontend_job(WORKFLOW_LINT_JOB)
+
+    assert job["name"] == "Workflow Lint"
+    # scripts/ci/full_regression_watch.py takes every "Unit Tests…" job for a full-regression shard.
+    assert not job["name"].startswith("Unit Tests")
+    assert job["runs-on"] == "ubuntu-latest"
+    assert type(job["timeout-minutes"]) is int
+    assert job["timeout-minutes"] == 5
+    assert job["steps"] == [
+        {"uses": "actions/checkout@v4"},
+        {"uses": WORKFLOW_LINT_IMAGE, "with": {"args": "-color"}},
+    ]
+    assert "continue-on-error" not in job
+    assert "permissions" not in job
+
+
+def test_workflow_lint_wiring_fails_when_the_filter_entry_is_deleted() -> None:
+    mutated = _replace_once(_wired_ci_text(), _WORKFLOW_LINT_FILTER_ENTRY, "")
+
+    with pytest.raises(AssertionError):
+        _assert_workflow_lint_wiring(mutated)
+
+
+def test_workflow_lint_wiring_fails_when_the_filter_entry_moves_under_an_earlier_filter() -> None:
+    text = _wired_ci_text()
+    without_block = _replace_once(text, _WORKFLOW_LINT_FILTER_KEY + _WORKFLOW_LINT_FILTER_ENTRY, "")
+    docs_entry = "            docs:\n              - 'docs/**'\n"
+    mutated = _replace_once(without_block, docs_entry, docs_entry + _WORKFLOW_LINT_FILTER_ENTRY)
+
+    # The glob is still in the file and still parses — only under the wrong filter.
+    changes = yaml.safe_load(mutated)["jobs"]["changes"]
+    (filter_step,) = [step for step in changes["steps"] if step.get("id") == "filter"]
+    assert WORKFLOW_LINT_GLOB in yaml.safe_load(filter_step["with"]["filters"])["docs"]
+    with pytest.raises(AssertionError):
+        _assert_workflow_lint_wiring(mutated)
+
+
+def test_workflow_lint_wiring_fails_when_the_changes_output_is_dropped() -> None:
+    mutated = _replace_once(_wired_ci_text(), _WORKFLOW_LINT_OUTPUT_LINE, "")
+
+    with pytest.raises(AssertionError):
+        _assert_workflow_lint_wiring(mutated)
+
+
+def test_workflow_lint_wiring_fails_when_another_job_needs_the_lane() -> None:
+    gate = "    name: Markdown Lint\n    needs: changes\n"
+    for needs in (f"[changes, {WORKFLOW_LINT_JOB}]", WORKFLOW_LINT_JOB):
+        mutated = _replace_once(_wired_ci_text(), gate, f"    name: Markdown Lint\n    needs: {needs}\n")
+
+        with pytest.raises(AssertionError):
+            _assert_workflow_lint_wiring(mutated)
