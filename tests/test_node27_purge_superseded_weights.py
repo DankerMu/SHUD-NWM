@@ -363,7 +363,8 @@ class Space:
 
     def run(self, *extra: str) -> int:
         arguments = ["--operator-id", "ops-test", "--reason", "owner decision 2026-10-07", "--env-file"]
-        status = tool.main([*arguments, str(self.env_file), *extra], sleep=self._sleep)
+        receipts = ["--receipt-root", str(self.receipt_root)]
+        status = tool.main([*arguments, str(self.env_file), *receipts, *extra], sleep=self._sleep)
         self.out, self.err = self.capsys.readouterr()
         return status
 
@@ -814,6 +815,24 @@ def test_model_ids_outside_the_pattern_are_not_rendered(model_id: str) -> None:
     assert not tool.MODEL_ID_PATTERN.fullmatch(model_id)
     assert tool.MODEL_ID_PATTERN.fullmatch("dg_09fce53ac1464cc52f57e1900d09d89b")
     assert tool.MODEL_ID_PATTERN.fullmatch("basins_lh_gl_shud") and tool.MODEL_ID_PATTERN.fullmatch("A.b-c_" * 21)
+
+
+@pytest.mark.parametrize("mode", [(), ("--apply",)])
+def test_a_run_without_a_receipt_root_is_a_usage_error_before_anything_is_opened(
+    space: Space, capsys: pytest.CaptureFixture[str], mode: tuple[str, ...]
+) -> None:
+    before = [dict(row) for row in space.database.weights]
+    arguments = ["--operator-id", "ops-test", "--reason", "owner decision 2026-10-07", "--env-file"]
+    with pytest.raises(SystemExit) as refused:
+        tool.main([*arguments, str(space.env_file), *mode])
+    assert refused.value.code == 2
+    error = capsys.readouterr().err
+    assert "usage:" in error and "the following arguments are required: --receipt-root" in error
+    assert space.database.connections == [] and space.database.weights == before
+    # No file, no directory: no receipt root anywhere under the object store, no lock file.
+    assert space.files_written() == []
+    assert not (space.object_store / "scheduler" / "weight-purge").exists()
+    assert not Path(f"{space.env_file}.weight-purge-lock").exists()
 
 
 def test_a_second_instance_is_refused_while_the_lock_is_held(space: Space) -> None:
