@@ -1737,41 +1737,24 @@ def test_compressed_chunk_blocked_recompute_is_declined_and_recorded(
     assert summary["declines_active"] == 1
 
 
-# #1991 (task 7.3). Literal, not the constant, for the same reason GUARD_FAILED
-# above is: the gate must key on this exact wire value, and a rename in the apply
-# layer has to break this file rather than pass silently.
+# The wire value the apply layer reported until #1993's first cut deleted it.
+# A literal on purpose: no constant spells it any more.
 LEGACY_STORE_REFUSED = "HANDOFF_APPLY_LEGACY_STORE_REFUSED"
 
 
-def test_legacy_store_refusal_finishes_the_tick_green_without_a_decline_row(
+def test_the_retired_legacy_store_code_is_no_longer_a_skip_code(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Must-preserve M5: a routing refusal must not fail the tick (#1991, R2).
+    """#1993 (fixture ``I14-1993.md`` D3): the skip mapping is gone with the refusal.
 
-    ``packages/common/forcing_domain_handoff_apply.py`` applies a handoff on EVERY
-    tick of this pipeline. From task 7.3 both forcing writers are narrow-only and
-    refuse a forcing version 000061 routed to the legacy store — so if that
-    refusal propagated as ``outcome == "failed"``, the production pipeline would
-    go red on every tick for as long as such a version is in scope, which is the
-    whole fourteen-day transition task 8.2's entry gate requires.
-
-    TWO halves, and the second is why this is not just a copy of the
-    compressed-chunk decline test:
-
-    * ``rc == 0`` and the run is not in the failed bucket;
-    * ``ops.ingest_recompute_decline`` gains NO row. That is a deliberate
-      divergence from river (fixture ``I12-1991.md`` R2.2): river needs a decline
-      record because its recompute is reopened by a newer ``product_mtime``, while
-      this refusal is keyed on ``met.forcing_version.timeseries_store``, which
-      000061 sets once and no writer flips back. The column IS the permanent
-      record; a decline row would be a second, drifting copy of the same fact, in
-      a table with zero forcing-side uses.
-
-    The reason code survives on the run's evidence rather than being softened
-    into a generic skip, so an operator can tell this apart from a run whose
-    handoff manifest was simply missing.
+    The expand window mapped this reason code to a non-failing ``skipped``
+    outcome, because both forcing writers refused a legacy-routed version on
+    every tick. They no longer refuse, the apply layer no longer emits the code,
+    and the pipeline no longer recognises it: a forcing failure carrying it is
+    an ordinary failure that fails the tick and retries, like any reason code
+    the pipeline has no rule for.
     """
     store = _DeclineStore()
     object_store_root, calls, published_calls = _prepare_autopipe(
@@ -1785,23 +1768,16 @@ def test_legacy_store_refusal_finishes_the_tick_green_without_a_decline_row(
 
     rc, summary = _run_main(capsys, object_store_root)
 
-    assert rc == 0
-    assert summary["status"] == "completed"
-    assert summary["runs"]["failed"] == 0
-    assert summary["runs"]["failed_runs"] == []
-    # No decline row, and no decline accounting either.
+    assert rc == 1
+    assert summary["runs"]["failed"] == 1
+    assert summary["runs"]["skipped_runs"] == []
     assert store.rows == []
     assert summary["runs"]["declined"] == 0
-    assert summary["declines_active"] == 0
 
     detail = summary["runs"]["details"][0]
-    assert detail["outcome"] == "skipped"
-    assert detail["reason"] == LEGACY_STORE_REFUSED
+    assert detail["outcome"] == "failed"
     assert detail["stage"] == "forcing_handoff"
     assert detail["forcing_stage"]["reason_codes"] == [LEGACY_STORE_REFUSED]
-    assert summary["runs"]["skipped_runs"] == [{"run_id": RUN_A, "reason": LEGACY_STORE_REFUSED}]
-    # The refused run is not parsed or published: its facts are in the other
-    # table and this tick has nothing to add to them.
     assert _command_kinds(calls) == ["register"]
     assert published_calls == []
 

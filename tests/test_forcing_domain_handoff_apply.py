@@ -252,62 +252,58 @@ def test_existing_seed_forcing_version_with_same_checksum_allows_handoff_time_wi
 
 
 @pytest.mark.parametrize("regenerated_package", [False, True])
-def test_legacy_routed_forcing_version_is_refused_before_the_parent_upsert(regenerated_package: bool) -> None:
-    """#1991 M5: the apply layer's raise -> reported-reason link, on BOTH replay shapes.
+def test_a_formerly_legacy_routed_forcing_version_is_treated_like_any_other(regenerated_package: bool) -> None:
+    """#1993 (fixture ``I14-1993.md`` D3): no refusal, on BOTH replay shapes.
 
-    The refusal has to sit above ``_upsert_forcing_version``, not only inside
-    ``_replace_forcing_station_timeseries``. That upsert's
-    ``ON CONFLICT ... WHERE (checksum IS NULL OR checksum = EXCLUDED.checksum)``
-    returns no row when the incoming checksum differs and raises
-    ``HANDOFF_APPLY_FORCING_VERSION_CONFLICT`` — so if node-22 REGENERATES the
-    package for a legacy-routed version, the conflict fires first and the tick
-    gets a reason code ``scripts/node27_autopipeline.py``'s skip branch does not
-    recognise: ``outcome="failed"``, ``rc=1``, on every tick, for ever. The
-    ``regenerated_package`` leg is exactly that shape.
+    The expand window refused a version whose ``met.forcing_version`` row read
+    ``timeseries_store = 'legacy'`` before any write. That vocabulary is gone:
+    the writer no longer reads the column, so such a version takes the ordinary
+    paths —
 
-    Both legs must report the SAME permanent, recognised code, because "this
-    version's rows are in the other table" is the true and unchanging reason in
-    both, and only that code routes to a non-failing outcome.
+    * same checksum: the rows are written to the narrow table (the cure);
+    * a node-22 REGENERATION with a different checksum: ``_upsert_forcing_version``'s
+      ``ON CONFLICT ... WHERE (checksum IS NULL OR checksum = EXCLUDED.checksum)``
+      returns no row and the apply fails with the ordinary
+      ``HANDOFF_APPLY_FORCING_VERSION_CONFLICT``, before any DELETE, exactly as
+      it does for any other version.
+
+    Nobody maintains the column afterwards, so it still reads ``legacy``.
     """
     envelope = _parse_complete()
     seeded = copy.deepcopy(envelope["parsed"]["met.forcing_version"][0])
     seeded["source_id"] = "gfs"
-    # 000061's routing column, set on a version that had rows in the renamed
-    # legacy table. `_stamp_identity_keys` only fills a DEFAULT, so this survives.
-    seeded["timeseries_store"] = apply_module.FORCING_STORE_LEGACY
+    # The column value 000061 gave a version that had rows in the renamed legacy
+    # table. No code reads it; it must also survive the apply untouched.
+    seeded["timeseries_store"] = "legacy"
     if regenerated_package:
         seeded["checksum"] = "0" * 64
         assert seeded["checksum"] != envelope["parsed"]["met.forcing_version"][0]["checksum"]
     connection = _FakeConnection()
     connection.tables["met.forcing_version"].append(seeded)
-    checksum_before = seeded["checksum"]
 
     report = apply_module.apply_forcing_domain_handoff(envelope, connection=connection)
 
-    assert report["status"] == "failed"
-    assert report["available"] is False
-    assert report["writes_performed"] is False
-    assert len(report["unavailable_reasons"]) == 1
-    reason = report["unavailable_reasons"][0]
-    assert reason["code"] == apply_module.REASON_APPLY_LEGACY_STORE_REFUSED
-    assert reason["code"] == "HANDOFF_APPLY_LEGACY_STORE_REFUSED"
-    assert reason["timeseries_store"] == apply_module.FORCING_STORE_LEGACY
-    assert reason["forcing_version_id"] == seeded["forcing_version_id"]
-
-    # Nothing was written, and — the point of hoisting — the parent upsert was
-    # never even ATTEMPTED, so its conflict could not pre-empt this code.
     statements = [statement.lower() for _mode, statement, _params in connection.executions]
-    assert not any("insert into met.forcing_version" in statement for statement in statements)
-    assert not any("insert into met.met_station" in statement for statement in statements)
-    assert not any("delete from met.forcing_station_timeseries" in statement for statement in statements)
-    # #2713: the compression/ingest fence try reads and writes nothing, and is
-    # the one statement allowed ahead of the routing read.
-    assert statements[0].startswith("select pg_try_advisory_xact_lock_shared"), "the fence opens the transaction"
-    assert "timeseries_store" in statements[1], "the routing read is the first statement after the fence"
-    assert connection.tables["met.forcing_version"][0]["checksum"] == checksum_before
-    assert connection.tables["met.forcing_station_timeseries"] == []
-    assert connection.rollbacks == 1
-    assert connection.commits == 0
+    assert not any("timeseries_store" in statement for statement in statements)
+    assert connection.tables["met.forcing_version"][0]["timeseries_store"] == "legacy"
+    if regenerated_package:
+        assert report["status"] == "failed"
+        assert report["writes_performed"] is False
+        assert [reason["code"] for reason in report["unavailable_reasons"]] == [
+            apply_module.REASON_APPLY_FORCING_VERSION_CONFLICT
+        ]
+        assert not any("delete from met.forcing_station_timeseries" in statement for statement in statements)
+        assert connection.tables["met.forcing_version"][0]["checksum"] == "0" * 64
+        assert connection.tables["met.forcing_station_timeseries"] == []
+        assert connection.rollbacks == 1
+        assert connection.commits == 0
+        return
+    assert report["status"] == "applied"
+    assert report["unavailable_reasons"] == []
+    assert len(connection.tables["met.forcing_station_timeseries"]) == EXPECTED_COUNTS[
+        "met.forcing_station_timeseries"
+    ]
+    assert connection.commits == 1
 
 
 @pytest.mark.parametrize(
@@ -925,7 +921,6 @@ class _FakeConnection:
         """
         for index, row in enumerate(self._transaction_tables["met.forcing_version"] or []):
             row.setdefault("forcing_version_key", FORCING_VERSION_KEY_BASE + index)
-            row.setdefault("timeseries_store", apply_module.FORCING_STORE_DEFAULT)
         for index, row in enumerate(self._transaction_tables["met.met_station"] or []):
             row.setdefault("station_key", STATION_KEY_BASE + index)
 
@@ -1005,19 +1000,11 @@ class _FakeCursor:
         if normalized.startswith("select pg_advisory_xact_lock"):
             self._fetchone = {"pg_advisory_xact_lock": None}
             return
-        if normalized.startswith("select forcing_version_key, timeseries_store from met.forcing_version"):
-            # #1991 (task 7.3): the narrow writer's FIRST statement. Answering it
-            # from the fake's own state rather than from a constant is what lets
-            # a test route a version to `legacy` and observe the refusal.
+        if normalized.startswith("select forcing_version_key from met.forcing_version"):
+            # The narrow writer's surrogate-key lookup, answered from the fake's
+            # own state.
             row = _find_row(self.connection.state["met.forcing_version"], "forcing_version_id", parameters[0])
-            self._fetchone = (
-                None
-                if row is None
-                else {
-                    "forcing_version_key": row["forcing_version_key"],
-                    "timeseries_store": row.get("timeseries_store", apply_module.FORCING_STORE_DEFAULT),
-                }
-            )
+            self._fetchone = None if row is None else {"forcing_version_key": row["forcing_version_key"]}
             return
         if normalized.startswith("select station_id, station_key from met.met_station"):
             station_ids = set(parameters[0])
@@ -1150,12 +1137,8 @@ class _FakeCursor:
             record["forcing_version_id"],
         )
         if existing is None:
-            # #1991 (task 7.3): 000061's IDENTITY key and routing column. A row
-            # inserted after the expand takes the column's own `narrow` default,
-            # which is what makes "the writers write only the narrow table" true
-            # for every new version with no extra write.
+            # #1991 (task 7.3): 000061's IDENTITY key.
             record["forcing_version_key"] = self.connection.next_forcing_version_key()
-            record.setdefault("timeseries_store", apply_module.FORCING_STORE_DEFAULT)
             self.connection.state["met.forcing_version"].append(record)
             self._fetchone = {"forcing_version_id": record["forcing_version_id"]}
             return

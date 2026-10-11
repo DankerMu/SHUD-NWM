@@ -10,15 +10,13 @@ This is the forcing mirror of ``tests/river_ts_template_registry.py``, with two
 deliberate divergences:
 
 * **no ``expected_aids``.** There is no ``#1342`` marker mechanism on the forcing
-  side — the legacy forcing table has no key columns, so the two store variants
-  are two independently authored templates rather than one template minus its
-  marked lines (``design.md:126``, invariant I6). No forcing file may introduce a
-  marker (must-preserve M3), so there is nothing per entry to count.
+  side and never was: during the expand window the two stores were two
+  independently authored templates, not one template minus its marked lines.
+  Since #1993's first cut there is one template per reader.
 * **``source(store)`` returns a :class:`~packages.common.forcing_ts_render.ForcingTemplatePair`,
   not a ``str``.** The store argument is kept — a reader may still compose
-  caller-owned store-specific literals around the pair — but the renderer selects
-  between two texts instead of transforming one, so the pair is what a reader
-  hands it.
+  caller-owned store-specific literals around the pair — and the pair is what a
+  reader hands the renderer.
 
 THE NINE READERS ARE WIRED (cut (b) = task 7.2)
 -----------------------------------------------
@@ -34,7 +32,7 @@ templates carry :data:`~packages.common.forcing_ts_render.FORCING_TABLE_TOKEN`
 and the renderer substitutes the constant, so the five reader FILES stopped
 containing a schema-qualified spelling of the fact table at all and dropped out
 of the discovery sweep. The closure assertion's weight moved onto
-``packages/common/forcing_ts_render.py``'s own two constants and onto the exempt
+``packages/common/forcing_ts_render.py``'s own constant and onto the exempt
 files. See the execution split in ``fixtures/I11-1990.md``.
 
 AND THAT IS WHY THERE IS A SECOND SWEEP. ``mentions=0`` everywhere makes
@@ -53,8 +51,7 @@ The census counter
 :func:`forcing_table_mentions` and :func:`discover_forcing_mentions` live here
 rather than being imported from ``tests/test_river_ts_text_identity_cleanup.py``:
 ``tasks.md`` 6.3 collapses that module's oracles when the river contract lands,
-and the forcing census outlives it (``tasks.md`` 8.3 is what finally retires
-this one).
+and the forcing census outlives it.
 """
 
 from __future__ import annotations
@@ -96,13 +93,11 @@ class TemplateEntry:
         ``dml`` is the same, for a template that writes rather than projects —
         the QHH smoke reset's forcing ``DELETE``. It is carried as a kind rather
         than left to the oracle to sniff from the text, because the projection
-        invariant (I5, same column names in the same order across the pair) is
-        meaningless for it and "this one has no SELECT list" must be a declared
-        property, not an inferred one.
+        invariant (I5) is meaningless for it and "this one has no SELECT list"
+        must be a declared property, not an inferred one.
     ``params``
         ``positional`` (``%s``) or ``named`` (``%(name)s`` / ``:name``). Pinned
-        per entry because no deletion computes it: the two variants of a pair are
-        authored separately and must agree on their parameter shape.
+        per entry because nothing computes it.
     ``mentions``
         schema-qualified fact-table occurrences in the entry's own SOURCE FILE
         that this entry accounts for, which the closure check sums per file.
@@ -113,8 +108,7 @@ class TemplateEntry:
         split in ``fixtures/I11-1990.md``.
     ``source(store)``
         The pair the reader hands the renderer for that store, including any
-        caller-owned routing literals. The store is required: there is no
-        implicit legacy input for a narrow render.
+        caller-owned routing literals.
     """
 
     key: str
@@ -263,17 +257,16 @@ class ExemptMentions:
 #: ``test_the_nine_readers_left_the_exemption_ledger``.
 UNWIRED_READERS: tuple[ExemptMentions, ...] = ()
 
-#: The 39 mentions that are not reads at all. Measured, not estimated: the issue
+#: The 38 mentions that are not reads at all. Measured, not estimated: the issue
 #: text's "the two write-side verification queries" was six sites short by an
 #: order of magnitude.
 #:
 #: The twelve write-side rows below CONVERTED WITH THE WRITERS in task 7.3 and
 #: are now narrow, key-predicated statements. They stay EXEMPTIONS rather than
 #: becoming registered templates, which is fixture `I12-1991.md` R3's ruling:
-#: `render_forcing_ts_sql` takes a PAIR, and the writers are narrow-only from
-#: 7.3 on, so registering them would mean authoring legacy variants that can
-#: never be rendered. Task 8.3 clears these rows together with the legacy
-#: templates.
+#: they are write-side statements, not reader templates. #1993's first cut
+#: deleted the legacy templates and left these rows as they are: the writers
+#: still spell the narrow qualified name.
 NON_READ_MENTIONS: tuple[ExemptMentions, ...] = (
     # -- write side: NARROW since 7.3, still exempt (R3) ---------------------
     ExemptMentions(
@@ -415,25 +408,29 @@ NON_READ_MENTIONS: tuple[ExemptMentions, ...] = (
         owner="name-only, no SQL",
         note="the lane's expected-table lists (:72, :88)",
     ),
+    # -- REMOVED WITH TASK 8.2 (fixture `I14-1993.md` D5) ---------------------
+    ExemptMentions(
+        path="scripts/reset_qhh_smoke_db.py",
+        count=1,
+        shape="smoke-reset legacy table name",
+        owner="8.2 (I14) contract migration",
+        note=(
+            "_LEGACY_FORCING_TIMESERIES_TABLE: the one bare DELETE against the renamed legacy table, guarded "
+            "by to_regclass, kept only because that table's foreign keys carry no ON DELETE CASCADE. The "
+            "counter's spelling class has no trailing word boundary, so it matches `…_legacy` as a prefix"
+        ),
+    ),
 )
 
-#: The renderer's own two D1 constants. Two, not one, because both spell the
-#: qualified name today — and it stays two after 7.3, because the counter's
-#: spelling class has no trailing word boundary and therefore matches the
-#: ``…_legacy`` literal as a prefix (the river register records the identical
-#: fact for ``river_ts_render.py``).
+#: The renderer's own D1 constant. One since #1993's first cut deleted the
+#: legacy name.
 RENDERER_CONSTANTS: tuple[ExemptMentions, ...] = (
     ExemptMentions(
         path="packages/common/forcing_ts_render.py",
-        count=2,
+        count=1,
         shape="renderer table-name constant",
         owner="renderer constants (D1)",
-        note=(
-            "FORCING_TABLE and FORCING_TABLE_LEGACY. Still two after 7.3 flipped the second "
-            "one to `…_legacy`: the counter's spelling class has no trailing word boundary, "
-            "so it matches that literal as a prefix (the river register records the identical "
-            "fact for `river_ts_render.py`)"
-        ),
+        note="FORCING_TABLE",
     ),
 )
 
@@ -744,7 +741,7 @@ def registered_template_pairs() -> dict[str, tuple[str, ...]]:
     resolved: dict[str, set[str]] = {}
     for entry in FORCING_REGISTRY:
         module = import_module(entry.path.removesuffix(".py").replace("/", "."))
-        pair = entry.source("legacy")
+        pair = entry.source("narrow")
         bound = {name for name, value in vars(module).items() if value is pair}
         if not bound:
             raise ValueError(

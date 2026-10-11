@@ -471,6 +471,7 @@ def _refresh_coverage(database_url: str, run_id: str = _RUN_ID) -> None:
                     "expired_cutoff": None,
                     "scan_run_id": None,
                     "scan_forcing_version_id": None,
+                    "scan_forcing_version_key": None,
                     "scan_basin_version_id": None,
                     "scan_river_network_version_id": None,
                     "scan_source_id_lower": None,

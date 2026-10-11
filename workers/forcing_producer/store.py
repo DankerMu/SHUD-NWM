@@ -10,11 +10,7 @@ from typing import Any
 
 from packages.common.forcing_store_routing import (
     FORCING_NARROW_INSERT_TEMPLATE,
-    FORCING_STORE_DEFAULT,
-    FORCING_STORE_LEGACY,
     FORCING_VERSION_ROUTING_SQL,
-    LegacyForcingStoreRefusedError,
-    legacy_store_refusal_message,
     row_value,
 )
 from packages.common.met_store import MetStoreError, default_database_url
@@ -683,11 +679,8 @@ class PsycopgForcingRepository:
             for row in component_rows
         )
         # Post-write verification, narrow, BY `forcing_version_key` (#1991
-        # invariant I4). NOT a renderer template: `render_forcing_ts_sql` takes a
-        # PAIR, and after 7.3 the writers are narrow-only, so a legacy variant of
-        # this statement could never be rendered — registering it would mean
-        # authoring dead SQL. It is a NAMED census exemption instead (fixture
-        # `I12-1991.md` R3), cleared with the legacy templates in task 8.3.
+        # invariant I4). NOT a renderer template: it is write-side verification,
+        # and a NAMED census exemption instead (fixture `I12-1991.md` R3).
         #
         # The scalar sub-select rather than a join to `met.forcing_version`: the
         # predicate must sit on `forcing_version_key` itself so it leads the
@@ -799,14 +792,8 @@ class PsycopgForcingRepository:
             # precedes every read and lock below. Try-only: busy rolls back.
             if not try_ingest_fence(cursor, FORCING_STATION_TIMESERIES_HYPERTABLE):
                 raise IngestFenceBusy(FORCING_STATION_TIMESERIES_HYPERTABLE)
-            # ROUTING REFUSAL FIRST after the fence, before the existence probe, before the
-            # compressed-chunk guard and — the property that matters — before
-            # the DELETE (spec `forcing-narrow-store` :21, :29; must-preserve
-            # M3). This replace window is DELETE-then-INSERT, so a store check
-            # placed anywhere after the window opens destroys the legacy rows
-            # and THEN refuses. It reads `timeseries_store` on the WRITE cursor,
-            # in the write transaction, so the value the refusal is based on is
-            # the value the write would have raced against.
+            # Resolved on the WRITE cursor, in the write transaction: the narrow
+            # statements below predicate on the surrogate key.
             cursor.execute(FORCING_VERSION_ROUTING_SQL, (forcing_version_id,))
             version_row = cursor.fetchone()
             if version_row is None:
@@ -815,9 +802,6 @@ class PsycopgForcingRepository:
                     "its timeseries cannot be replaced."
                 )
             forcing_version_key = row_value(version_row, "forcing_version_key", 0)
-            timeseries_store = str(row_value(version_row, "timeseries_store", 1) or FORCING_STORE_DEFAULT)
-            if timeseries_store == FORCING_STORE_LEGACY:
-                raise LegacyForcingStoreRefusedError(legacy_store_refusal_message(forcing_version_id))
 
             station_ids = sorted({str(row.station_id) for row in rows})
             station_keys: dict[str, Any] = {}

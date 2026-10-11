@@ -40,21 +40,12 @@ from tests.test_sql_shape_helpers import outer_predicates
 _NAMED_PLACEHOLDER = re.compile(r"%\(([a-zA-Z_][a-zA-Z0-9_]*)\)s")
 _POSITIONAL_PLACEHOLDER = re.compile(r"%s")
 
-#: The two values ``met.forcing_version.timeseries_store`` can take (#1991).
-#: Spelled locally rather than imported so this suite keeps depending only on the
-#: reader it certifies.
-_FORCING_STORES = ("legacy", "narrow")
-
 _HEADER_ROW = {
     "run_id": "qhh_gfs_2026050700",
     "forcing_version_id": "forc_qhh_gfs_2026050700",
-    # #1991 (task 7.3): the header now projects the candidate's forcing store and
-    # the heavy statement renders the matching variant. This default keeps the
-    # suite's non-pushdown tests on the leg they were written against; the
-    # pushdown contract itself (#1120) is parametrized over BOTH stores, because
-    # production writes every post-000061 version to the narrow one and a
-    # legacy-only oracle would leave that leg's scan shape unasserted.
-    "forcing_timeseries_store": "legacy",
+    # #2511: the header projects the candidate's forcing surrogate key and the
+    # heavy statement binds it as the station leg's fact-table scan predicate.
+    "forcing_version_key": 4242,
     "basin_version_id": "basins_qhh_vbasins",
     "river_network_version_id": "basins_qhh_rivnet_vbasins",
     "source_id_lower": "gfs",
@@ -63,11 +54,6 @@ _HEADER_ROW = {
 }
 
 _CANDIDATE_ROW = {"run_id": "qhh_gfs_2026050700", "station_count": 386, "segment_count": 1633}
-
-
-def _header_row(store: str = "legacy") -> dict[str, Any]:
-    """``_HEADER_ROW`` routed to ``store`` — the one field the heavy variant turns on."""
-    return {**_HEADER_ROW, "forcing_timeseries_store": store}
 
 
 class BindingCheckedCursor:
@@ -169,52 +155,41 @@ def test_header_runs_first_and_reuses_the_shared_candidate_sql_constant() -> Non
     assert "hydro.river_timeseries" not in header_sql
 
 
-@pytest.mark.parametrize("store", _FORCING_STORES)
-def test_scan_pushdown_predicates_present_in_both_sample_ctes(store: str) -> None:
-    """#1120's structural contract, asserted on BOTH forcing legs (#1991).
+def test_scan_pushdown_predicates_present_in_both_sample_ctes() -> None:
+    """#1120's structural contract, on the station leg and the river leg.
 
-    Parametrized over ``timeseries_store`` because after 000061 production writes
-    every new forcing version to the narrow table, so a legacy-only run of this
-    test would leave the leg that actually serves production with no structural
-    guard at all.
-
-    The two legs are asserted SEPARATELY rather than through one loosened
-    substring, because the narrow variant deliberately moved three of the five
-    restrictions OFF the hypertable and onto the authority tables it joins:
-    ``fst.forcing_version_id`` -> ``fv.forcing_version_id``,
-    ``fst.basin_version_id`` -> ``ms.basin_version_id``,
-    ``LOWER(fst.source_id)`` -> ``LOWER(fv.source_id)``
-    (``packages/common/forecast_store.py:333-338``). Only the two ``valid_time``
-    bounds still sit on the fact alias in both. Recording WHERE each restriction
-    lands is the point: this test is the text oracle and it does not claim the
-    narrow shape plans well. **Task 8.1 owns the before/after EXPLAIN evidence**
-    for whether the planner still excludes chunks with the version restriction
-    one join away; nothing here substitutes for it.
+    The narrow station template has three of its restrictions on the authority
+    tables it joins rather than on the hypertable:
+    ``fv.forcing_version_id``, ``ms.basin_version_id``, ``LOWER(fv.source_id)``.
+    None of those is a literal predicate on the fact table, and the module
+    docstring above records what a hypertable scan without one costs. So the
+    version restriction is ALSO bound on the fact alias, as
+    ``fst.forcing_version_key`` (#2511, option (a)), next to the two
+    ``valid_time`` bounds — and it is asserted INSIDE the station CTE, as a whole
+    fold-away guard, so that removing it from the template is red here.
     """
-    cursor = BindingCheckedCursor(header_rows=[_header_row(store)])
+    cursor = BindingCheckedCursor(header_rows=[dict(_HEADER_ROW)])
 
     _run_fallback(cursor)
 
     _header_sql, heavy_sql = _fallback_statements(cursor)
     station_cte = heavy_sql[heavy_sql.index("station_sample_rows AS") : heavy_sql.index("river_sample_rows AS")]
     river_cte = heavy_sql[heavy_sql.index("river_sample_rows AS") :]
-    assert "(%(scan_forcing_version_id)s IS NULL" in station_cte
-    if store == "legacy":
-        assert "fst.forcing_version_id = %(scan_forcing_version_id)s" in station_cte
-        assert "fst.basin_version_id = %(scan_basin_version_id)s" in station_cte
-        assert "LOWER(fst.source_id) = %(scan_source_id_lower)s" in station_cte
-    else:
-        assert "fv.forcing_version_id = %(scan_forcing_version_id)s" in station_cte
-        assert "ms.basin_version_id = %(scan_basin_version_id)s" in station_cte
-        assert "LOWER(fv.source_id) = %(scan_source_id_lower)s" in station_cte
-        # Non-vacuity: the narrow fact row HAS no such columns, so a variant that
-        # still named them on `fst` would not be a narrow variant at all.
-        assert "fst.forcing_version_id" not in station_cte
-        assert "fst.basin_version_id" not in station_cte
-        assert "fst.source_id" not in station_cte
-    # Unchanged by the narrowing: `valid_time` is the partitioning column and
-    # stays on the fact alias in both variants, which is the one predicate the
-    # planner can use to exclude chunks without resolving a join first.
+    station_outer = " ".join(station_cte.split())
+    assert (
+        "AND (%(scan_forcing_version_id)s IS NULL OR fv.forcing_version_id = %(scan_forcing_version_id)s)"
+    ) in station_outer
+    assert (
+        "AND (%(scan_forcing_version_key)s IS NULL OR fst.forcing_version_key = %(scan_forcing_version_key)s)"
+    ) in station_outer
+    assert "ms.basin_version_id = %(scan_basin_version_id)s" in station_cte
+    assert "LOWER(fv.source_id) = %(scan_source_id_lower)s" in station_cte
+    # Non-vacuity: the narrow fact row HAS no such columns.
+    assert "fst.forcing_version_id" not in station_cte
+    assert "fst.basin_version_id" not in station_cte
+    assert "fst.source_id" not in station_cte
+    # `valid_time` is the partitioning column and sits on the fact alias, which
+    # is what lets the planner exclude chunks without resolving a join first.
     assert "fst.valid_time >= %(scan_display_start)s" in station_cte
     assert "fst.valid_time <= %(scan_display_end)s" in station_cte
     # The river leg filters on the surrogate keys since #1442. Each scan_* guard
@@ -285,6 +260,7 @@ def test_header_scalars_are_bound_as_the_heavy_statement_scan_parameters() -> No
     _statement, parameters = cursor.executed[-1]
     assert parameters["scan_run_id"] == _HEADER_ROW["run_id"]
     assert parameters["scan_forcing_version_id"] == _HEADER_ROW["forcing_version_id"]
+    assert parameters["scan_forcing_version_key"] == _HEADER_ROW["forcing_version_key"]
     assert parameters["scan_basin_version_id"] == _HEADER_ROW["basin_version_id"]
     assert parameters["scan_river_network_version_id"] == _HEADER_ROW["river_network_version_id"]
     assert parameters["scan_source_id_lower"] == _HEADER_ROW["source_id_lower"]

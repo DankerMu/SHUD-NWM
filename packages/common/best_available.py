@@ -6,53 +6,19 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
-from packages.common.forcing_store_routing import (
-    FORCING_VERSION_STORE_SQL,
-    forcing_store_or_default,
-)
 from packages.common.forcing_ts_render import (
     FORCING_TABLE_TOKEN,
     ForcingTemplatePair,
     render_forcing_ts_sql,
 )
 
-# Reader #7 (#1990 task 7.2). The cheapest of the nine: the legacy variant
-# already joins `met.forcing_version`, so the narrow variant only has to move
-# `source_id` and `forcing_version_id` onto that alias and the variable onto the
-# enum.
+# Reader #7 (#1990 task 7.2). `source_id` and `forcing_version_id` come from the
+# joined `met.forcing_version` row and the variable from the enum.
 #
 # `DISTINCT ON` / `ORDER BY` carry `::text` on `variable_e` deliberately: an enum
 # sorts by DECLARATION order, so ordering on the raw enum would reorder this
-# listing relative to legacy's alphabetical `ORDER BY fst.variable` for the same
-# rows (I5).
+# listing relative to the alphabetical order it has always had (I5).
 _FORCING_INPUTS_TEMPLATES = ForcingTemplatePair(
-    legacy=f"""
-            SELECT DISTINCT ON (fst.valid_time, fst.variable)
-                fst.valid_time,
-                fst.variable,
-                fst.source_id AS selected_source,
-                COALESCE(cmp.cycle_time, fv.cycle_time, fst.valid_time) AS source_cycle_time
-            FROM {FORCING_TABLE_TOKEN} fst
-            JOIN met.forcing_version fv
-              ON fv.forcing_version_id = fst.forcing_version_id
-            LEFT JOIN met.forcing_version_component fvc
-              ON fvc.forcing_version_id = fst.forcing_version_id
-             AND fvc.variable = fst.variable
-             AND (fvc.valid_time_start IS NULL OR fst.valid_time >= fvc.valid_time_start)
-             AND (fvc.valid_time_end IS NULL OR fst.valid_time <= fvc.valid_time_end)
-            LEFT JOIN met.canonical_met_product cmp
-              ON cmp.canonical_product_id = fvc.canonical_product_id
-            WHERE fst.forcing_version_id = %s
-            ORDER BY
-                fst.valid_time,
-                fst.variable,
-                CASE UPPER(fst.source_id)
-                    WHEN 'ERA5' THEN 100
-                    WHEN 'CLDAS' THEN 90
-                    WHEN 'GFS' THEN 10
-                    ELSE 0
-                END DESC
-            """,
     narrow=f"""
             SELECT DISTINCT ON (fst.valid_time, fst.variable_e::text)
                 fst.valid_time,
@@ -223,16 +189,10 @@ class PsycopgBestAvailableRepository:
         return tuple(str(row["source_id"]).upper() for row in rows)
 
     def list_forcing_inputs(self, forcing_version_id: str) -> list[ForcingInputSelection]:
-        # #1991 (task 7.3): one forcing version is in scope and it is in exactly
-        # one of the two fact tables, so this routes rather than composes. The
-        # store lookup is its own statement because this repository opens a
-        # connection per call (`_fetch_all`) and has no version row in hand; it
-        # is a primary-key read of one row on `met.forcing_version`.
-        store = forcing_store_or_default(self._fetch_forcing_timeseries_store(forcing_version_id))
         rows = self._fetch_all(
             render_forcing_ts_sql(
                 _FORCING_INPUTS_TEMPLATES,
-                store,
+                "narrow",
                 entry="best_available.forcing_inputs",
             ).sql,
             (forcing_version_id,),
@@ -246,16 +206,6 @@ class PsycopgBestAvailableRepository:
             )
             for row in rows
         ]
-
-    def _fetch_forcing_timeseries_store(self, forcing_version_id: str) -> str | None:
-        """``met.forcing_version.timeseries_store`` for one version, or ``None``.
-
-        ``None`` means no such version row — the caller then renders the default
-        store and gets an empty list, which is what an unknown forcing version
-        produced before task 7.3 as well.
-        """
-        rows = self._fetch_all(FORCING_VERSION_STORE_SQL, (forcing_version_id,))
-        return str(rows[0]["timeseries_store"]) if rows else None
 
     def upsert_selection(self, selection: BestAvailableSelection) -> dict[str, Any]:
         valid_time = _ensure_utc(selection.valid_time)

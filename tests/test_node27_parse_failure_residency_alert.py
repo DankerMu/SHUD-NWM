@@ -544,15 +544,16 @@ def test_the_observation_query_selects_every_live_failed_run_whatever_its_code(t
 
 
 # ---------------------------------------------------------------------------
-# #2590: the two extra sources.
+# #2590: the extra source.
 #
 # - `published_reparse`: the latest `PUBLISHED_REPARSE_FAILED` decline of a
 #   run that has not parsed since; `declined_at` is its last-updated time and is
 #   never renewed, so the run alerts once and then ages out of the liveness
 #   bound.
-# - `legacy_store_refused`: a `failed` run on a legacy-store forcing version,
-#   renewed every tick by the register with no decline to stop it (#1991); it
-#   alerts once and is never re-alerted.
+#
+# The `legacy_store_refused` class that used to sit beside it went with #1993:
+# the writers no longer refuse a formerly legacy-routed forcing version, so such
+# a run is an ordinary `failed` run.
 # ---------------------------------------------------------------------------
 
 S0 = datetime(2026, 9, 28, 6, 0, tzinfo=UTC)
@@ -619,24 +620,18 @@ def test_a_published_compressed_chunk_block_decline_is_reported_with_its_code(
     assert any(f"run_id=run-pub first_error_code={code} source=published_reparse " in line for line in lines), lines
 
 
-def test_a_legacy_store_refused_run_alerts_once_and_is_never_re_alerted(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    now = S0
-    rcs = []
-    for _ in range(8):  # 2 h to become resident, then ~27 h more, renewed every tick
-        rcs.append(
-            _tick(
-                tmp_path,
-                capsys,
-                now,
-                [_sourced_run("run-legacy", classification=alert.CLASS_LEGACY_STORE_REFUSED, touched=now)],
-            )[0]
-        )
-        now += TICK if len(rcs) < 5 else timedelta(hours=9)
+def test_the_observer_has_no_legacy_store_class_and_does_not_read_the_forcing_store() -> None:
+    """#1993: one fewer class, and the statement stops at ``hydro.hydro_run``.
 
-    assert rcs.count(1) == 1 and rcs.index(1) == 4, rcs
-    assert now - S0 > timedelta(hours=26)
+    A run on a formerly legacy-routed forcing version is watched, alerted and
+    re-alerted like any other failed run (the re-alert itself is the test
+    below; the classification on a real database is the integration test at the
+    end of this module).
+    """
+    assert not hasattr(alert, "CLASS_LEGACY_STORE_REFUSED")
+    assert "timeseries_store" not in alert.OBSERVATION_QUERY
+    assert "met.forcing_version" not in alert.OBSERVATION_QUERY
+    assert "legacy_store_refused" not in alert.OBSERVATION_QUERY
 
 
 def test_an_ordinary_failed_run_is_still_re_alerted(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -682,7 +677,9 @@ def test_a_failed_row_wins_over_a_decline_for_the_same_run() -> None:
 
 
 @pytest.mark.integration
-def test_the_observation_query_reads_both_new_sources(throwaway_database_url: str) -> None:
+def test_the_observation_query_reads_both_sources_and_ignores_the_forcing_store(
+    throwaway_database_url: str,
+) -> None:
     from tests.integration_helpers import apply_migrations_from_zero
 
     apply_migrations_from_zero(throwaway_database_url)
@@ -755,7 +752,8 @@ def test_the_observation_query_reads_both_new_sources(throwaway_database_url: st
     rows = alert.default_observe(config, datetime.now(UTC) - timedelta(hours=6))
 
     assert [(row.run_id, row.first_error_code, row.classification) for row in rows] == [
-        ("run-failed-legacy", "RIVQDOWN_EMPTY", "legacy_store_refused"),
+        # #1993: its forcing version's column still reads `legacy`; nobody looks.
+        ("run-failed-legacy", "RIVQDOWN_EMPTY", "failed"),
         ("run-failed-narrow", "OUTPUT_PARSE_DB_ERROR", "failed"),
         ("run-pub-latest", "MODEL_RIVER_FILE_MALFORMED", "published_reparse"),
         ("run-pub-never-parsed", "", "published_reparse"),

@@ -13,7 +13,7 @@ forcing fact table.
 
 The census answers one question per mention of ``met.forcing_station_timeseries``
 anywhere under ``packages/ workers/ scripts/ services/ apps/ db/``: is it a
-REGISTERED read template (rendered per store through
+REGISTERED read template (rendered through
 ``packages.common.forcing_ts_render``) or is it on an explicit EXEMPTION list with
 a named owner? Anything that is neither is red.
 
@@ -38,8 +38,10 @@ all nine readers**, so:
   same files for ``ForcingTemplatePair`` construction sites and demands the
   register name every one of them. A tenth pair beside the nine is red there,
   which is also what stops it from silently skipping ``test_i1_i2_*``,
-  ``test_i5_*``, the byte-identity pins and the ``params`` claim.
-* **the five wired reader files are GONE from the census, by design.** Their
+  ``test_i5_*`` and the ``params`` claim.
+* **four of the five wired reader files are GONE from the census, by design**
+  (the fifth, ``scripts/reset_qhh_smoke_db.py``, is back at 1 until task 8.2 —
+  see :data:`TASK_83A_ADDED_MENTIONS`). Their
   templates carry :data:`~packages.common.forcing_ts_render.FORCING_TABLE_TOKEN`
   rather than the name, so ``packages/common/display_coverage.py``,
   ``packages/common/best_available.py``,
@@ -47,24 +49,19 @@ all nine readers**, so:
   ``scripts/reset_qhh_smoke_db.py`` score 0 and drop out, and
   ``packages/common/forecast_store.py`` fell 7 → 2 (its two surviving mentions
   were the index/catalog metadata payloads, which are not SQL) and then 2 → 0
-  at #2517, which routed those payloads off ``FORCING_TABLE`` /
-  ``FORCING_TABLE_LEGACY`` after 000061's rename had made both of them assert a
-  relation/index pairing that no longer existed. Closure for the five departed
-  files is ``0 + 0 == 0`` — trivially true, and the reason the weight of the
-  assertion moved onto the renderer's own two constants and onto the exempt
-  files. This is the execution split in ``fixtures/I11-1990.md`` playing out
+  at #2517, which derived those payloads' table name from the renderer's
+  constant after 000061's rename had made both of them assert a relation/index
+  pairing that no longer existed. Closure for the departed files is
+  ``0 + 0 == 0`` — trivially true, and the reason the weight of the assertion
+  moved onto the renderer's own constant and onto the exempt files. This is the
+  execution split in ``fixtures/I11-1990.md`` playing out
   exactly as recorded, not a census that quietly went blind.
-* **what a green run here still does NOT prove — and who proves it now.**
-  Invariant I7 (a cross-store reader composes both rendered fact-row
-  subrelations inside itself, before any outer aggregate) is a claim about
-  EXECUTION, and nothing in this suite or its siblings executes SQL: the narrow
-  variants are registered and text-pinned here and never run here. Task 7.3
-  landed the migration that makes the narrow table real, so I7 is no longer
-  unprovable — it is proved at row level against a live database by
-  ``tests/test_forcing_narrow_store_expand_integration.py`` (see :676, one
-  version materialised in BOTH tables and counted exactly once). Read a green
-  run of THIS module as "every mention is accounted for and every registered
-  text has the right shape", not as "the composition returns the right rows".
+* **what a green run here still does NOT prove.** Nothing in this suite or its
+  siblings executes SQL: the registered texts are pinned here and run against a
+  live database by ``tests/test_forcing_narrow_store_expand_integration.py``.
+  Read a green run of THIS module as "every mention is accounted for and every
+  registered text has the right shape", not as "the statements return the right
+  rows".
 
 Two known limits of the counter, both measured, both recorded rather than fixed
 (the river census records the second one for itself at
@@ -104,7 +101,7 @@ from importlib import import_module
 
 import pytest
 
-from packages.common.forcing_ts_render import FORCING_STORES, render_forcing_ts_sql
+from packages.common.forcing_ts_render import render_forcing_ts_sql
 from tests.forcing_ts_template_registry import (
     DISCOVERY_ROOTS,
     EXEMPT_MENTIONS,
@@ -126,8 +123,8 @@ from tests.forcing_ts_template_registry import (
 #
 # Cut (a) declared sixteen files and 49 mentions: `fixtures/I11-1990.md` C3's
 # measured 15 files / 47 mentions (9 of them reader sites) plus the renderer
-# module D1 introduces, which contributes exactly two (`FORCING_TABLE` and
-# `FORCING_TABLE_LEGACY`).
+# module D1 introduces, which contributed exactly two (`FORCING_TABLE` and
+# its since-deleted legacy twin).
 #
 # Wiring moved the table name out of the readers and into those two constants,
 # so the nine reader mentions are gone and four files left the discovery set
@@ -139,18 +136,24 @@ from tests.forcing_ts_template_registry import (
 #
 # #2517 took that last 2 to 0 and the file out of the set: those two payloads
 # asserted indexes that 000061's rename had moved to another relation, and the
-# fix routes them per store off `FORCING_TABLE` / `FORCING_TABLE_LEGACY`. So the
-# total is 40 − 2 = 38 across 11 files, and ALL FIVE wired readers now score 0.
+# fix routed them per store off the renderer's two table constants. So the
+# total is 40 − 2 = 38 across 11 files, and ALL FIVE wired readers scored 0.
+#
+# #1993's first cut (fixture `I14-1993.md` D7) deleted the renderer's legacy
+# constant (2 → 1) and gave `scripts/reset_qhh_smoke_db.py` one bare,
+# to_regclass-guarded DELETE against the renamed legacy table (0 → 1, removed
+# with task 8.2): still 38, across 12 files.
 # ---------------------------------------------------------------------------
 FORCING_TABLE_CENSUS: dict[str, int] = {
     "db/seeds/seed_demo.py": 3,
     "packages/common/forcing_domain_handoff.py": 3,
     "packages/common/forcing_domain_handoff_apply.py": 17,
-    "packages/common/forcing_ts_render.py": 2,
+    "packages/common/forcing_ts_render.py": 1,
     "packages/common/node27_container_contract.py": 1,
     "scripts/node27_autopipeline.py": 1,
     "scripts/node27_timeseries_compression_capture.py": 2,
     "scripts/node27_timeseries_compression_live_evidence.py": 1,
+    "scripts/reset_qhh_smoke_db.py": 1,
     "services/production_closure/two_node_e2e_readonly_db_lane.py": 2,
     "workers/forcing_producer/file_store.py": 2,
     "workers/forcing_producer/store.py": 5,
@@ -187,10 +190,19 @@ TASK_73_ADDED_MENTIONS = 1
 #: stay the fixed points they were measured as.
 ISSUE_2517_REMOVED_MENTIONS = 2
 
-#: The five files whose forcing readers task 7.2 wired. All five score 0 since
-#: #2517 removed `forecast_store.py`'s last two non-SQL index payloads. Named
-#: explicitly so the "went vacuous by design" claim is a pin and not a sentence
-#: in a PR body.
+#: Mentions #1993's first cut ADDED (fixture ``I14-1993.md`` D5/D7), declared for
+#: the same reason: the smoke reset's one name-only mention of the renamed legacy
+#: table. Task 8.2 drops that table and this goes back to 0 with it.
+TASK_83A_ADDED_MENTIONS = 1
+
+#: The file that mention lives in — the one wired reader file that is back in
+#: the census until task 8.2.
+LEGACY_RESET_FILE = "scripts/reset_qhh_smoke_db.py"
+
+#: The five files whose forcing readers task 7.2 wired. Their READER mentions are
+#: all 0 since #2517 removed `forecast_store.py`'s last two non-SQL index
+#: payloads. Named explicitly so the "went vacuous by design" claim is a pin and
+#: not a sentence in a PR body.
 WIRED_READER_FILES: tuple[str, ...] = (
     "packages/common/best_available.py",
     "packages/common/display_coverage.py",
@@ -266,20 +278,18 @@ def test_every_forcing_template_pair_in_the_tree_is_registered() -> None:
     ``registered + exempt == mentions`` cannot see a new template any more —
     every entry carries ``mentions=0`` — so this is the assertion that forces a
     tenth pair into the register, and through it into the shape oracles
-    (``test_i1_i2_*``, ``test_i3_i4_*``, ``test_i5_*``, ``params``) and the M6
-    AST sweep, whose ``WIRED_READER_PATHS`` is itself DERIVED from the register
-    and therefore blind to a sixth file on its own.
+    (``test_i1_i2_*``, ``test_i3_i4_*``, ``test_i5_*``, ``params``) and the
+    render-call sweep, whose ``WIRED_READER_PATHS`` is itself DERIVED from the
+    register and therefore blind to a sixth file on its own.
 
     Task 7.3 did NOT add a tenth pair, and the earlier prediction that it would
     — the write-side row-count payloads in ``workers/forcing_producer/store.py``
     and ``packages/common/forcing_domain_handoff_apply.py`` "become templates in
     task 7.3" — was decided the other way (fixture ``I12-1991.md`` R3, and
     ``tests/forcing_ts_template_registry.py``'s ``NON_READ_MENTIONS`` note):
-    ``render_forcing_ts_sql`` takes a PAIR, and those statements are narrow-only
-    from 7.3 on, so registering them would mean authoring a legacy variant that
-    can never be rendered. They converted in place and stay NAMED EXEMPTIONS,
-    cleared with the legacy templates in task 8.3. This guard is what would have
-    caught the other decision, which is why it still matters.
+    they are write-side statements, converted in place, and stay NAMED
+    EXEMPTIONS. This guard is what would have caught the other decision, which
+    is why it still matters.
     """
     _assert_every_pair_is_registered(discover_forcing_template_pairs())
 
@@ -346,12 +356,12 @@ def test_the_pair_sweep_sees_every_callee_form_and_refuses_an_unnameable_pair(tm
     (tmp_path / "packages").mkdir(parents=True)
     (tmp_path / "packages" / "attribute_form.py").write_text(
         "from packages.common import forcing_ts_render\n"
-        'PAIR = forcing_ts_render.ForcingTemplatePair(legacy="a", narrow="b")\n',
+        'PAIR = forcing_ts_render.ForcingTemplatePair(narrow="b")\n',
         encoding="utf-8",
     )
     (tmp_path / "packages" / "aliased.py").write_text(
         "from packages.common.forcing_ts_render import ForcingTemplatePair as Pair\n"
-        'ALIASED: Pair = Pair(legacy="a", narrow="b")\n',
+        'ALIASED: Pair = Pair(narrow="b")\n',
         encoding="utf-8",
     )
     (tmp_path / "packages" / "no_pairs.py").write_text("X = 1\n", encoding="utf-8")
@@ -364,7 +374,7 @@ def test_the_pair_sweep_sees_every_callee_form_and_refuses_an_unnameable_pair(tm
     (tmp_path / "packages" / "built_in_a_function.py").write_text(
         "from packages.common.forcing_ts_render import ForcingTemplatePair\n"
         "def templates():\n"
-        '    return ForcingTemplatePair(legacy="a", narrow="b")\n',
+        '    return ForcingTemplatePair(narrow="b")\n',
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="built_in_a_function.py"):
@@ -381,7 +391,7 @@ def test_the_census_closes_over_registered_and_exempt_mentions() -> None:
 
     Every wired reader contributes ``0`` registered mentions because its
     templates carry the renderer's token instead of the table's name, so this
-    reads as ``exempt == mentions`` over the twelve surviving files. That is NOT
+    reads as ``exempt == mentions`` over the twelve censused files. That is NOT
     the vacuity cut (a) had: the file-set equality inside
     :func:`_assert_census_closes` is what now carries the weight, and a wired
     reader that reverts to spelling the name re-enters the discovered set and
@@ -396,7 +406,7 @@ def test_the_nine_readers_are_registered_and_render_from_their_own_modules() -> 
 
     Cut (a) carried the opposite assertion (`FORCING_REGISTRY == ()`), whose
     whole value was that nobody could read a green suite as evidence that a
-    forcing read rendered per store. This replaces it rather than deleting it:
+    forcing read went through the renderer. This replaces it rather than deleting it:
     the register is now the nine, keyed and path-sorted, and every entry's
     ``source`` really reaches into the production module (a registry that
     returned locally authored text would render perfectly and prove nothing).
@@ -405,7 +415,7 @@ def test_the_nine_readers_are_registered_and_render_from_their_own_modules() -> 
     assert {entry.path for entry in FORCING_REGISTRY} == set(WIRED_READER_FILES)
     for entry in FORCING_REGISTRY:
         module = import_module(entry.path.removesuffix(".py").replace("/", "."))
-        pair = entry.source("legacy")
+        pair = entry.source("narrow")
         assert any(value is pair for value in vars(module).values()), (
             f"{entry.key}: source() must return the pair the production module holds, not a copy"
         )
@@ -420,11 +430,15 @@ def test_the_nine_readers_left_the_exemption_ledger() -> None:
     """
     assert UNWIRED_READERS == ()
     still_exempt = {row.path for row in EXEMPT_MENTIONS} & set(WIRED_READER_FILES)
-    assert still_exempt == set(), (
-        "no wired reader file may keep an exemption row: forecast_store.py's was the last one, "
-        "and #2517 removed it by deriving its index payloads' table name from the renderer's "
-        "D1 constants — restoring the row would re-admit the literal that survived 000061's rename"
+    assert still_exempt == {LEGACY_RESET_FILE}, (
+        "no wired reader file may keep an exemption row for a READ: forecast_store.py's was the last "
+        "one, and #2517 removed it by deriving its index payloads' table name from the renderer's "
+        "constant. The one row left is the smoke reset's bare legacy-table DELETE (fixture "
+        "`I14-1993.md` D5), which task 8.2 removes with the table"
     )
+    legacy_reset_rows = [row for row in EXEMPT_MENTIONS if row.path == LEGACY_RESET_FILE]
+    assert [row.count for row in legacy_reset_rows] == [TASK_83A_ADDED_MENTIONS]
+    assert "8.2" in legacy_reset_rows[0].owner
 
 
 def test_the_declared_census_reproduces_the_fixture_baseline() -> None:
@@ -442,24 +456,27 @@ def test_the_declared_census_reproduces_the_fixture_baseline() -> None:
     assert UNWIRED_READERS == ()
     assert len(FORCING_REGISTRY) == FIXTURE_BASELINE_READER_MENTIONS
     assert (
-        non_read_mentions - TASK_73_ADDED_MENTIONS + ISSUE_2517_REMOVED_MENTIONS
+        non_read_mentions - TASK_73_ADDED_MENTIONS - TASK_83A_ADDED_MENTIONS + ISSUE_2517_REMOVED_MENTIONS
         == FIXTURE_BASELINE_EXEMPT_MENTIONS
     )
     assert declared == non_read_mentions + renderer_mentions
-    # C3's 47 = the 38 that are not reads + the 9 that were. Task 7.3's addition
-    # is subtracted and #2517's removal added back, so the historical
-    # measurement stays a fixed point rather than being re-agreed.
+    assert renderer_mentions == 1
+    # C3's 47 = the 38 that are not reads + the 9 that were. Task 7.3's and
+    # #1993's additions are subtracted and #2517's removal added back, so the
+    # historical measurement stays a fixed point rather than being re-agreed.
     assert (
         declared
         - renderer_mentions
         - TASK_73_ADDED_MENTIONS
+        - TASK_83A_ADDED_MENTIONS
         + ISSUE_2517_REMOVED_MENTIONS
         + len(FORCING_REGISTRY)
         == FIXTURE_BASELINE_MENTIONS
     )
-    # All five reader files have now left the set outright (#2517 took the last
-    # one), and the renderer module joined.
-    assert len(FORCING_TABLE_CENSUS) == FIXTURE_BASELINE_FILES - 5 + 1
+    # All five reader files left the set (#2517 took the last one), the renderer
+    # module joined, and #1993's bare legacy DELETE brought the smoke reset back
+    # until task 8.2.
+    assert len(FORCING_TABLE_CENSUS) == FIXTURE_BASELINE_FILES - 5 + 1 + 1
     assert set(RENDERER_CONSTANTS) == {
         row for row in EXEMPT_MENTIONS if row.path == "packages/common/forcing_ts_render.py"
     }
@@ -473,17 +490,22 @@ def test_the_wired_reader_files_dropped_out_of_the_census_by_design() -> None:
     `qhh_production_bootstrap.py` 1→0, `reset_qhh_smoke_db.py` 1→0. #2517 then
     took `forecast_store.py` 2→0 as well: its two index-metadata payloads had
     outlived 000061's rename precisely because being exempt made them
-    uncheckable, and they now take the name from the renderer's D1 constants.
-    Five files going to zero is indistinguishable, from the closure equality
-    alone, from five files nobody ever swept — so the drop is pinned against the
-    LIVE counter over each file's current source.
+    uncheckable, and they now take the name from the renderer's constant.
+    Files going to zero are indistinguishable, from the closure equality alone,
+    from files nobody ever swept — so the drop is pinned against the LIVE
+    counter over each file's current source.
+
+    The smoke reset is the one declared exception: its single mention is the
+    bare legacy-table DELETE of fixture ``I14-1993.md`` D5, not a read, and task
+    8.2 takes it back to 0.
     """
     discovered = discover_forcing_mentions()
     for path in WIRED_READER_FILES:
         source = REPO_ROOT.joinpath(*path.split("/")).read_text(encoding="utf-8")
         counted = forcing_table_mentions(source, filename=path)
-        assert counted == 0, f"{path}: {counted} qualified mentions, expected 0"
-        assert discovered.get(path, 0) == 0
+        expected = TASK_83A_ADDED_MENTIONS if path == LEGACY_RESET_FILE else 0
+        assert counted == expected, f"{path}: {counted} qualified mentions, expected {expected}"
+        assert discovered.get(path, 0) == expected
 
 
 def test_a_wired_reader_that_respells_the_table_name_is_red() -> None:
@@ -699,24 +721,16 @@ def test_the_census_rejects_an_unregistered_unexempted_site() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Shape oracle: every registered template renders for BOTH stores.
-#
-# Nine live renders since cut (b). The narrow half named columns no deployed
-# table had until task 7.3's 000061 created them; it is REAL SQL now, executed
-# against a live database by
-# `tests/test_forcing_narrow_store_expand_integration.py`. What this parametrize
-# still uniquely covers is that EVERY registered pair renders for BOTH stores —
-# including the legacy variants, which the integration suite exercises only
-# where it seeds legacy rows. It is the cheap total-coverage sweep, not the
-# only thing that touches the narrow text any more.
+# Shape oracle: every registered template renders. The cheap total-coverage
+# sweep; the statements are executed against a live database by
+# `tests/test_forcing_narrow_store_expand_integration.py`.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("entry", FORCING_REGISTRY, ids=lambda entry: entry.key)
-@pytest.mark.parametrize("store", FORCING_STORES)
-def test_every_registered_template_renders_for_both_stores(entry, store) -> None:
-    rendered = render_forcing_ts_sql(entry.source(store), store, entry=entry.key)
-    assert rendered.store == store
+def test_every_registered_template_renders(entry) -> None:
+    rendered = render_forcing_ts_sql(entry.source("narrow"), "narrow", entry=entry.key)
+    assert rendered.store == "narrow"
     assert rendered.sql.strip()
 
 

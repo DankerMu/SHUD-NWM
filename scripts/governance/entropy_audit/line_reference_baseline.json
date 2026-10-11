@@ -37,9 +37,6 @@
   "apps/api/routes/precip.py": {
     "`:30": 2
   },
-  "packages/common/forcing_ts_render.py": {
-    "db/seeds/seed_demo.py:1021": 1
-  },
   "packages/common/forecast_store.py": {
     "`:660": 1,
     "packages/common/forecast_curve_capture.py:82": 1,

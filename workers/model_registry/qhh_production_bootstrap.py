@@ -15,7 +15,6 @@ from pathlib import PurePosixPath as PurePosixPath
 from typing import Any
 
 from packages.common.forcing_ts_render import (
-    FORCING_STORES,
     FORCING_TABLE_TOKEN,
     ForcingTemplatePair,
     render_forcing_ts_sql,
@@ -829,33 +828,13 @@ def _output_segment_order_offset(cursor: Any, river_network_version_id: str) -> 
     return int(cursor.fetchone()["order_offset"] or 0)
 
 
-# Reader #8 (#1990 task 7.2, routed by #1991 task 7.3). This reader does NOT
-# join `met.forcing_version` at all — it counts fact rows by MODEL across every
-# forcing version, so "look the store up by forcing version" does not map onto
-# it. It is one of the two readers that SPAN both stores, and the only one whose
-# templates had to change shape at 7.3.
+# Reader #8 (#1990 task 7.2). This reader does NOT join `met.forcing_version` at
+# all — it counts fact rows by MODEL across every forcing version.
 #
-# THE VARIANTS PROJECT ROWS, NOT A COUNT. Invariant I7 requires the two rendered
-# fact-row subrelations to be composed inside the owning reader BEFORE any outer
-# aggregate; a pair of `SELECT COUNT(*)` texts can only be combined by summing
-# two answers in Python, which is exactly the shape the invariant forbids. So
-# each variant emits one row per fact row (`SELECT 1 AS present`), the reader
-# composes them, and ONE `COUNT(*)` runs over the composition. The projection is
-# the same single column in the same order on both sides (I5).
-#
-# There is no store filter on either leg, and that is the difference from the
-# display-coverage composition: this reader counts rows, not versions, and the
-# two tables are disjoint per version by construction (000061 classified by row
-# existence; the writers are narrow-only). A filter here would add a
-# `met.forcing_version` join this reader deliberately does not have.
+# The template projects rows (`SELECT 1 AS present`), not a count; the reader
+# wraps ONE `COUNT(*)` around it. That is the shape the expand window's
+# two-table composition needed, kept so the registered text did not move.
 _DYNAMIC_FORCING_COUNT_TEMPLATES = ForcingTemplatePair(
-    legacy=f"""
-        SELECT 1 AS present
-        FROM {FORCING_TABLE_TOKEN} fst
-        JOIN met.met_station ms
-          ON ms.station_id = fst.station_id
-        WHERE ms.properties_json->>'model_id' = %s
-        """,
     narrow=f"""
         SELECT 1 AS present
         FROM {FORCING_TABLE_TOKEN} fst
@@ -867,23 +846,19 @@ _DYNAMIC_FORCING_COUNT_TEMPLATES = ForcingTemplatePair(
 
 
 def _dynamic_forcing_count_sql() -> str:
-    """One count over both stores' fact rows, composed inside this reader (I7)."""
-    legs = [
-        render_forcing_ts_sql(
-            _DYNAMIC_FORCING_COUNT_TEMPLATES,
-            store,
-            entry="qhh_production_bootstrap.dynamic_forcing_count",
-        ).sql
-        for store in FORCING_STORES
-    ]
-    return "SELECT COUNT(*) AS count FROM (" + " UNION ALL ".join(legs) + ") AS forcing_rows"
+    """One count over the model's forcing fact rows."""
+    rows = render_forcing_ts_sql(
+        _DYNAMIC_FORCING_COUNT_TEMPLATES,
+        "narrow",
+        entry="qhh_production_bootstrap.dynamic_forcing_count",
+    ).sql
+    return "SELECT COUNT(*) AS count FROM (" + rows + ") AS forcing_rows"
 
 
 def _dynamic_forcing_counts(cursor: Any, model_id: str) -> dict[str, int]:
     cursor.execute("SELECT COUNT(*) AS count FROM met.forcing_version WHERE model_id = %s", (model_id,))
     forcing_versions = int(cursor.fetchone()["count"])
-    # Both legs bind the same `model_id`, in the order `FORCING_STORES` spells.
-    cursor.execute(_dynamic_forcing_count_sql(), (model_id, model_id))
+    cursor.execute(_dynamic_forcing_count_sql(), (model_id,))
     timeseries_rows = int(cursor.fetchone()["count"])
     return {
         "forcing_version_count": forcing_versions,

@@ -224,7 +224,7 @@ def test_a_busy_parse_finishes_the_tick_green_as_skipped(
 # ---------------------------------------------------------------------------
 
 
-def test_handoff_apply_tries_the_fence_before_the_routing_read(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_handoff_apply_tries_the_fence_before_any_other_statement(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(apply_module, "execute_values", _fake_execute_values)
     connection = _ApplyConnection()
 
@@ -233,7 +233,7 @@ def test_handoff_apply_tries_the_fence_before_the_routing_read(monkeypatch: pyte
     assert report["status"] == "applied"
     statements = [(statement, params) for _mode, statement, params in connection.executions]
     assert statements[0] == (_FENCE_TRY, _FORCING_KEY)
-    assert "timeseries_store" in statements[1][0]
+    assert sum(1 for statement, _params in statements if statement == _FENCE_TRY) == 1
 
 
 def test_a_busy_fence_rolls_the_owned_apply_back_untouched() -> None:
@@ -296,14 +296,14 @@ def test_a_busy_forcing_apply_finishes_the_tick_green_as_skipped(
 # ---------------------------------------------------------------------------
 
 
-def test_forcing_store_tries_the_fence_before_the_routing_read(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_forcing_store_tries_the_fence_before_the_key_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
     connection = _RecordingConnection()
     _install_fake_psycopg2(monkeypatch, connection)
 
     PsycopgForcingRepository(database_url="postgres://unused").replace_forcing_timeseries("fv_a", _forcing_rows())
 
     assert connection.executions[0] == (_FENCE_TRY, _FORCING_KEY)
-    assert "timeseries_store" in connection.executions[1][0]
+    assert "SELECT forcing_version_key" in connection.executions[1][0]
     assert connection.commits == 1
 
 

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from packages.common.forcing_ts_render import FORCING_TABLE_LEGACY
+from packages.common.forcing_ts_render import FORCING_TABLE
 from packages.common.object_store import LocalObjectStore, sha256_bytes
 from packages.common.shud_forcing_contract import (
     CANONICAL_SHUD_FORCING_INDEX_BASENAME,
@@ -954,8 +954,10 @@ def test_qhh_backend_smoke_tests_never_write_tracked_sources() -> None:
 class _QhhCatalogCursor:
     """DB-API boundary capture: catalog and run rows, never mocked script helpers."""
 
-    def __init__(self, run_ids):
+    def __init__(self, run_ids, *, forcing_ids=(), legacy_forcing_table=False):
         self.run_ids = tuple(run_ids)
+        self.forcing_ids = tuple(forcing_ids)
+        self.legacy_forcing_table = legacy_forcing_table
         self.statements = []
         self.rows = []
         self.rowcount = 0
@@ -976,6 +978,10 @@ class _QhhCatalogCursor:
             self.rows = [{"run_id": run} for run in self.run_ids]
         elif "SELECT run_id, status" in sql:
             self.rows = [{"run_id": params[0], "status": "succeeded"}]
+        elif "SELECT forcing_version_id" in sql:
+            self.rows = [{"forcing_version_id": forcing_id} for forcing_id in self.forcing_ids]
+        elif "to_regclass(" in sql:
+            self.rows = [{"present": self.legacy_forcing_table}]
         elif "count(DISTINCT river_segment_key)" in sql:
             self.rows = [{"rows": 4, "segment_count": 2, "min_m3s": 1, "max_m3s": 3, "avg_m3s": 2}]
 
@@ -1019,17 +1025,54 @@ def test_qhh_reset_deletes_river_rows_from_the_one_fact_table(monkeypatch, tmp_p
     assert not any("river_timeseries_legacy" in sql for sql, _ in cursor.statements)
     assert not any("timeseries_store" in sql for sql, _ in cursor.statements)
 
-    # #1990 M1b: EQUALITY on the whole rendered DELETE, not a prefix match.
-    # The forcing leg is a SINGLE `_delete` rendered `legacy` -- and now river
-    # has one too. A `startswith` pin cannot tell "still one legacy DELETE" from
-    # "the table was renamed and the predicate rewritten"; this can.
-    forcing_deletes = [
-        sql for sql, _ in cursor.statements if sql.startswith(f"DELETE FROM {FORCING_TABLE_LEGACY}")
-    ]
-    assert forcing_deletes == [
-        f"DELETE FROM {FORCING_TABLE_LEGACY} WHERE forcing_version_id = ANY(%s)"
-    ]
     assert "secret-do-not-print" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("legacy_forcing_table", [True, False])
+def test_qhh_reset_deletes_forcing_rows_narrow_and_legacy_only_while_it_exists(
+    monkeypatch, tmp_path, legacy_forcing_table
+):
+    """Fixture ``I14-1993.md`` D5: the narrow DELETE always, the legacy one guarded.
+
+    The renamed legacy table's foreign keys to ``met.forcing_version`` carry no
+    ``ON DELETE CASCADE``, so a smoke database that still holds pre-expand rows
+    would fail the later ``DELETE FROM met.forcing_version`` unless they go
+    first. The bare statement is issued only when ``to_regclass`` finds the
+    table — task 8.2 drops it — and before the version rows are deleted. Neither
+    statement selects ids by the routing column.
+
+    #1990 M1b: EQUALITY on each whole DELETE, not a prefix match.
+    """
+    from scripts import reset_qhh_smoke_db as reset
+
+    cursor = _QhhCatalogCursor(("run",), forcing_ids=("forc_a", "forc_b"), legacy_forcing_table=legacy_forcing_table)
+    monkeypatch.setenv("DATABASE_URL", "secret-do-not-print")
+    monkeypatch.setattr(reset.psycopg2, "connect", lambda _: cursor)
+    monkeypatch.setattr(reset, "RUN_ROOT", tmp_path)
+    assert reset.main() == 0
+
+    statements = [sql for sql, _ in cursor.statements]
+    forcing_deletes = [
+        (sql, params)
+        for sql, params in cursor.statements
+        if sql.startswith("DELETE FROM met.forcing_station_timeseries")
+    ]
+    narrow_delete = (
+        f"DELETE FROM {FORCING_TABLE} AS fst WHERE fst.forcing_version_key IN ("
+        "SELECT forcing_version_key FROM met.forcing_version WHERE forcing_version_id = ANY(%s))"
+    )
+    legacy_delete = "DELETE FROM met.forcing_station_timeseries_legacy WHERE forcing_version_id = ANY(%s)"
+    expected = [narrow_delete, legacy_delete] if legacy_forcing_table else [narrow_delete]
+    assert [sql for sql, _ in forcing_deletes] == expected
+    assert all(params == (["forc_a", "forc_b"],) for _, params in forcing_deletes)
+
+    probes = [params for sql, params in cursor.statements if "to_regclass(" in sql]
+    assert probes == [("met.forcing_station_timeseries_legacy",)]
+    version_delete = next(
+        index for index, sql in enumerate(statements) if sql.startswith("DELETE FROM met.forcing_version WHERE")
+    )
+    assert all(statements.index(sql) < version_delete for sql, _ in forcing_deletes)
+    assert not any("timeseries_store" in sql for sql in statements)
 
 
 def test_qhh_summary_reads_the_one_fact_table_by_run_key(monkeypatch, tmp_path, capsys):

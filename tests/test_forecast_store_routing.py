@@ -107,27 +107,17 @@ A9_RESPONSE = {
                     "valid_time DESC",
                 ],
             },
-            # #2517: the ONE licensed drift of this snapshot from the
-            # pre-routing capture, and it is a correction rather than a
-            # behaviour change. `_qhh_candidate_row` routes to `legacy`, and
-            # 000061:231 renamed the relation the legacy variant reads; the
-            # capture predates that rename. The index name is unchanged because
-            # it travelled with the table. The NARROW entry is asserted, per
-            # store and against the rendered SQL, in
-            # tests/test_forecast_api.py and
+            # The ONE licensed drift of this snapshot from the pre-routing
+            # capture: the forcing entry names the narrow table and the index
+            # 000061 created on it (#2517), which is the only relation the
+            # station leg reads since #1993's first cut. Asserted against the
+            # rendered SQL in tests/test_forecast_api.py and
             # tests/test_forcing_read_path_store_routing.py.
             {
-                "table": "met.forcing_station_timeseries_legacy",
-                "index": "forcing_station_timeseries_qhh_latest_window_idx",
-                "status": "covered_by_latest_product_station_window_index",
-                "columns": [
-                    "forcing_version_id",
-                    "basin_version_id",
-                    "LOWER(source_id)",
-                    "variable",
-                    "valid_time DESC",
-                    "station_id",
-                ],
+                "table": "met.forcing_station_timeseries",
+                "index": "forcing_ts_version_variable_time_key_idx",
+                "status": "covered_by_version_variable_time_key_index",
+                "columns": ["forcing_version_key", "variable_e", "valid_time DESC"],
             },
             {
                 "table": "met.interp_weight",
@@ -323,13 +313,9 @@ def test_latest_product_reads_one_narrow_river_cte_and_preserves_public_response
     assert response["status"] == "ready"
     assert "timeseries_store" not in repr(response)
     header, _header_params = store.cursor.header_executions[0]
-    # Scoped to RIVER's routing column, which #1342's contract deleted. #1991
-    # task 7.3 gives the candidate CTE the FORCING version's store, because the
-    # station leg is rendered from it — so the bare word is no longer a
-    # river statement, and asserting on it would pin the forcing plane by
-    # accident. Both halves are named, so neither can drift unnoticed.
-    assert "h.timeseries_store" not in header
-    assert "fv.timeseries_store AS forcing_timeseries_store" in header
+    # Neither routing column is read: #1342's contract deleted river's, and
+    # #1993's first cut removed every read of forcing's.
+    assert "timeseries_store" not in header
     sql, params = next((sql, params) for sql, params in store.cursor.executions if "river_sample_rows AS" in sql)
     river = sql[sql.index("river_sample_rows AS") : sql.index("river_identity_coverage AS")]
     assert re.findall(r"FROM (hydro\.river_timeseries(?:_legacy)?) rt", river) == ["hydro.river_timeseries"]
