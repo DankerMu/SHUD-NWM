@@ -15,8 +15,8 @@ a retained-out cycle and receive a generic station-series error.
   `STATION_FORCING_FILE_NOT_FOUND` as a retained-disk unavailable cycle.
 - Keep the station-series API direct-disk behavior unchanged; do not add DB
   fallback or archive reads.
-- Mark issue-time options that have failed with the retained-disk miss as
-  unavailable for the current popup session.
+- Keep an issue time that hit the retained-disk miss selectable; only the
+  currently selected miss is labelled unavailable.
 - Render a clear retention-specific empty state instead of a generic error or a
   fake chart.
 
