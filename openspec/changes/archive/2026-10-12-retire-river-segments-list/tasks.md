@@ -2,20 +2,20 @@
 
 ## 1. Retire the list endpoint (#2866)
 
-- [ ] 1.1 Backend: delete the list route in `apps/api/routes/models.py`, the store list entry + Path C
+- [x] 1.1 Backend: delete the list route in `apps/api/routes/models.py`, the store list entry + Path C
       slice branch in `packages/common/model_registry_river_segments.py` (and re-exports in
       `model_registry.py` / `model_registry_public.py` / `model_registry_contracts.py`) **only where no
       caller other than the route remains**; delete the response models / OpenAPI patches that only the
       list used. Any non-route caller found (scripts, services, tests of import correctness) is reported
       and kept working — do not delete a helper that something else still calls.
-- [ ] 1.2 Frontend: delete `fetchHydroMetRiverSegments`, its call, the `riverSegments` field and now-unused
+- [x] 1.2 Frontend: delete `fetchHydroMetRiverSegments`, its call, the `riverSegments` field and now-unused
       types / tests; regenerate `apps/frontend/src/api/types.ts`; `pnpm check:api-types` passes.
-- [ ] 1.3 Tests: a contract test that the list path is absent from the OpenAPI document and is not
+- [x] 1.3 Tests: a contract test that the list path is absent from the OpenAPI document and is not
       served, and that detail still answers for a reach id and an output-river id (existing tests may
       already pin the latter — name them). Tests that pinned the list shape are deleted or re-pointed,
       each listed in the PR with its disposition. Tests that used the list only as a convenient way to
       observe import results are re-pointed at the store / SQL, not deleted.
-- [ ] 1.4 Docs: retirement record in `docs/governance/API_CONTRACT_RETIREMENT_INVENTORY.md`;
+- [x] 1.4 Docs: retirement record in `docs/governance/API_CONTRACT_RETIREMENT_INVENTORY.md`;
       `docs/runbooks/display-mobile-evidence.md` workaround replaced; `docs/spec/04_api_design.md` and
       other LIVING docs that advertise the list updated; `services/production_closure/*` fixture
       dictionaries that name the list URL updated or reported.

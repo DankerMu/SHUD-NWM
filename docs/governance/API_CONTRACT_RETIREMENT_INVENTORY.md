@@ -268,9 +268,10 @@ the #411 evidence snapshot and are not rewritten.
   no row of `core.river_segment`; the detail and forecast-series endpoints
   answer `404` for it, and the map renders rivers from the MVT layer, not from
   this GeoJSON list.
-- Unchanged: `GET .../river-segments/{segment_id}` and
-  `GET .../river-segments/{segment_id}/forecast-series` (the `active` rows
-  above), import, `core.river_segment_crosswalk` writing, MVT. No migration.
+- Unchanged: `GET .../river-segments/{segment_id}/forecast-series` (the
+  `active` row above), `GET .../river-segments/{segment_id}` (the detail
+  endpoint, not in the #411 matrix), import, `core.river_segment_crosswalk`
+  writing, MVT. No migration.
 - Basis against the external-consumer rule: `API_CONTRACT_DEPRECATION_POLICY.md`
   states that external consumers are unknown and that repository-only evidence
   must not be used to contract OpenAPI. That rule is not relaxed here. For this
