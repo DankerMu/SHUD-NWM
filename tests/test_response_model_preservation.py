@@ -328,33 +328,8 @@ def _registry_reads_string_timestamps(env: SampleEnv) -> None:
     ok(client.get("/api/v1/models/inactive_model"))
 
 
-class _SliceRiverSegmentStore(_RiverSegmentStore):
-    """Path C slice features (`model_registry_river_segments.py:655-677`) plus a
-    legacy reach feature; the detail row carries a psycopg ``datetime``."""
-
-    def list_river_segments(self, *, limit: int, offset: int, **kwargs: Any) -> dict[str, Any]:
-        collection = super().list_river_segments(limit=limit, offset=offset, **kwargs)
-        slice_feature = {
-            "type": "Feature",
-            "id": "seg_1_s2",
-            "geometry": {"type": "LineString", "coordinates": [[101.05, 36.05], [101.1, 36.1]]},
-            "properties": {
-                "segment_id": "seg_1_s2",
-                "river_segment_id": "seg_1_s2",
-                "basin_version_id": "basin_v1",
-                "river_network_version_id": "network_v1",
-                "name": "seg_1_s2",
-                "stream_order": 1,
-                "segment_order": None,
-                "length_m": 617,
-                "iRiv": 7,
-                "iEle": 4412,
-                "reach_segment_id": "seg_1",
-            },
-        }
-        collection["features"].append(slice_feature)
-        collection["feature_total"] = 2
-        return collection
+class _DatetimeRiverSegmentStore(_RiverSegmentStore):
+    """The detail row carries a psycopg ``datetime`` and null order/downstream."""
 
     def get_river_segment(self, **kwargs: Any) -> dict[str, Any]:
         row = super().get_river_segment(**kwargs)
@@ -362,10 +337,9 @@ class _SliceRiverSegmentStore(_RiverSegmentStore):
 
 
 def _river_segments(env: SampleEnv) -> None:
-    for store in (_RiverSegmentStore(), _SliceRiverSegmentStore()):
+    for store in (_RiverSegmentStore(), _DatetimeRiverSegmentStore()):
         client = env.client(get_model_registry_store, store)
         params = {"river_network_version_id": "network_v1"}
-        ok(client.get("/api/v1/basin-versions/basin_v1/river-segments", params=params))
         ok(client.get("/api/v1/basin-versions/basin_v1/river-segments/seg_1", params=params))
 
 
@@ -654,12 +628,9 @@ SAMPLES: dict[str, Sample] = {
             "GET /api/v1/models/{model_id}",
         ),
     ),
-    "river_segments_reach_and_slice": Sample(
+    "river_segment_detail_string_and_datetime": Sample(
         _river_segments,
-        _routes(
-            "GET /api/v1/basin-versions/{basin_version_id}/river-segments",
-            "GET /api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}",
-        ),
+        _routes("GET /api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}"),
     ),
     "model_lifecycle_allowed_blocked_already_current": Sample(
         _model_lifecycle,
@@ -788,7 +759,8 @@ def test_every_json_route_is_sampled() -> None:
 
     sampled = set().union(*(sample.routes for sample in (*SAMPLES.values(), *PIPELINE_SAMPLES.values())))
     in_scope = _in_scope_json_routes()
-    assert len(in_scope) == 35, sorted(in_scope)
+    # 35 #2348 routes minus the river-segment list retired by #2866.
+    assert len(in_scope) == 34, sorted(in_scope)
     assert sampled == in_scope, {"unsampled": sorted(in_scope - sampled), "unknown": sorted(sampled - in_scope)}
     # ...and each is typed by an `apps.api.response_models` model, not by the
     # implicit `dict[str, Any]` FastAPI infers from the return annotation.

@@ -114,9 +114,10 @@ def _basin_version_schema() -> dict:
 
 
 def _geojson_line_string_schema() -> dict:
-    """:source: ``ST_LineSubstring`` output on the Path C segment-slice branch
-    (``_RiverSegmentReadMixin._list_river_segments_segment_slice`` in
-    ``model_registry_river_segments``)."""
+    """:source: no route emits it today. It was the ``ST_LineSubstring`` output of
+    the list endpoint's segment-slice branch, retired by #2866; the component
+    stays because the detail ``geom`` ``oneOf`` still references it (detail
+    itself returns the ``MultiLineString`` column value)."""
     position = {"type": "array", "minItems": 2, "maxItems": 3, "items": {"type": "number"}}
     return {
         "type": "object",
@@ -178,91 +179,6 @@ def _river_segment_schema() -> dict:
             "geom": _river_segment_geometry_schema(),
             "properties_json": dict(_JSON_OBJECT),
             "created_at": {"type": "string", "format": "date-time"},
-        },
-    }
-
-
-def _river_segment_feature_schema() -> dict:
-    """:source: ``PsycopgModelRegistryStore.list_river_segments``
-    (reach path: the body of ``_RiverSegmentReadMixin.list_river_segments``;
-    Path C slice path: ``_RiverSegmentReadMixin._list_river_segments_segment_slice``,
-    both in ``model_registry_river_segments``).
-
-    ``id`` is emitted only by the Path C slice branch; ``downstream_segment_id``
-    only by the reach branch, and the slice branch adds ``iRiv``/``iEle``/
-    ``reach_segment_id`` inside ``properties`` (admitted by
-    ``additionalProperties: true``). The six ``required`` property keys are the
-    ones both branches write unconditionally.
-    """
-    return {
-        "type": "object",
-        "required": ["type", "properties", "geometry"],
-        "properties": {
-            "type": {"type": "string", "enum": ["Feature"]},
-            "id": {
-                "type": "string",
-                "description": "Segment-level feature id, emitted by the segment-slice query path only.",
-            },
-            "properties": {
-                "type": "object",
-                "required": [
-                    "segment_id",
-                    "river_segment_id",
-                    "basin_version_id",
-                    "river_network_version_id",
-                    "name",
-                    "stream_order",
-                ],
-                "properties": {
-                    "segment_id": {"type": "string"},
-                    "river_segment_id": {"type": "string"},
-                    "basin_version_id": {"type": "string"},
-                    "river_network_version_id": {"type": "string"},
-                    "name": {"type": "string"},
-                    "stream_order": {"type": "integer"},
-                    "segment_order": _null_union({"type": "integer"}),
-                    "downstream_segment_id": _null_union({"type": "string"}),
-                    "length_m": _null_union({"type": "number"}),
-                },
-                "additionalProperties": True,
-            },
-            "geometry": _river_segment_geometry_schema(),
-        },
-    }
-
-
-def _river_segment_feature_collection_schema() -> dict:
-    """:source: ``PsycopgModelRegistryStore.list_river_segments``
-    (the ``FeatureCollection`` envelope each branch returns: the reach path in
-    ``_RiverSegmentReadMixin.list_river_segments`` and the Path C slice path in
-    ``_RiverSegmentReadMixin._list_river_segments_segment_slice``)."""
-    return {
-        "type": "object",
-        "required": ["type", "features", "total", "feature_total", "limit", "offset"],
-        "properties": {
-            "type": {"type": "string", "enum": ["FeatureCollection"]},
-            "features": {
-                "type": "array",
-                "items": {"$ref": "#/components/schemas/RiverSegmentFeature"},
-            },
-            "total": {
-                "type": "integer",
-                "minimum": 0,
-                "description": (
-                    "Total matching stored river segment rows, including rows omitted from "
-                    "features because geom is null."
-                ),
-            },
-            "feature_total": {
-                "type": "integer",
-                "minimum": 0,
-                "description": (
-                    "Total matching river segment rows with non-null LineString geometry that "
-                    "can be emitted as GeoJSON features."
-                ),
-            },
-            "limit": {"type": "integer", "minimum": 1},
-            "offset": {"type": "integer", "minimum": 0},
         },
     }
 

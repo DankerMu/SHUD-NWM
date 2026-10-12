@@ -614,16 +614,6 @@ class _ModelRegistryStore:
 
 
 class _OversizedRiverSegmentStore(_ModelRegistryStore):
-    def list_river_segments(self, **_kwargs: Any) -> dict[str, Any]:
-        from packages.common.model_registry import RiverSegmentGeoJsonBudgetError
-
-        raise RiverSegmentGeoJsonBudgetError(
-            limit_type="serialized_bytes",
-            max_bytes=100,
-            serialized_bytes=101,
-            scope="collection",
-        )
-
     def get_river_segment(self, **_kwargs: Any) -> dict[str, Any]:
         from packages.common.model_registry import RiverSegmentGeoJsonBudgetError
 

@@ -25,10 +25,8 @@ from apps.api.response_models.models import (
     ModelOperationPreflightEnvelope,
     RiverNetworkCreateResultEnvelope,
     RiverSegmentEnvelope,
-    RiverSegmentFeatureCollectionEnvelope,
 )
 from packages.common.model_registry import (
-    RIVER_SEGMENT_COLLECTION_MAX_SERIALIZED_BYTES,
     RIVER_SEGMENT_DETAIL_MAX_SERIALIZED_BYTES,
     DuplicateResourceError,
     InvalidPayloadError,
@@ -457,78 +455,6 @@ def create_river_network(
 
 
 @router.get(
-    "/basin-versions/{basin_version_id}/river-segments",
-    responses={
-        status.HTTP_413_CONTENT_TOO_LARGE: {
-            "description": "River segment GeoJSON payload budget exceeded.",
-        },
-    },
-    response_model=RiverSegmentFeatureCollectionEnvelope,
-    response_model_exclude_unset=True,
-)
-def list_river_segments(
-    request: Request,
-    response: Response,
-    basin_version_id: str,
-    river_network_version_id: str | None = None,
-    search: str | None = Query(
-        default=None,
-        description="Case-insensitive substring match over river_segment_id and name (backend-applied).",
-    ),
-    stream_order_min: int | None = Query(
-        default=None,
-        ge=0,
-        description="Inclusive lower bound on stream order (river_segment.segment_order).",
-    ),
-    stream_order_max: int | None = Query(
-        default=None,
-        ge=0,
-        description="Inclusive upper bound on stream order (river_segment.segment_order).",
-    ),
-    limit: int = Query(default=500, ge=1, le=5000),
-    offset: int = Query(default=0, ge=0),
-    store: PsycopgModelRegistryStore = Depends(get_model_registry_store),
-) -> dict[str, Any]:
-    if stream_order_min is not None and stream_order_max is not None and stream_order_min > stream_order_max:
-        raise ApiError(
-            status_code=422,
-            code="VALIDATION_ERROR",
-            message="stream_order_min must be less than or equal to stream_order_max.",
-            details={
-                "field": "stream_order_min",
-                "stream_order_min": stream_order_min,
-                "stream_order_max": stream_order_max,
-            },
-        )
-    try:
-        data = store.list_river_segments(
-            basin_version_id=basin_version_id,
-            river_network_version_id=river_network_version_id,
-            search=search,
-            stream_order_min=stream_order_min,
-            stream_order_max=stream_order_max,
-            limit=limit,
-            offset=offset,
-        )
-        _enforce_river_segment_response_budget(
-            data,
-            max_bytes=RIVER_SEGMENT_COLLECTION_MAX_SERIALIZED_BYTES,
-            scope="collection",
-        )
-        # 河段几何目录按 (basin_version_id, river_network_version_id) 版本键控、内容不可变；
-        # 浏览器缓存可让前端刷新免重拉 ~3.4MB 分页 GeoJSON（display 首屏主要耗时）。
-        response.headers["Cache-Control"] = "public, max-age=3600"
-        return _ok(
-            request,
-            data,
-        )
-    except (ModelRegistryError, ModelPackageValidationError) as error:
-        raise _handle_registry_error(error) from error
-    except Exception as error:
-        raise _handle_registry_error(error) from error
-
-
-@router.get(
     "/basin-versions/{basin_version_id}/river-segments/{segment_id}",
     responses={
         status.HTTP_413_CONTENT_TOO_LARGE: {
@@ -557,7 +483,7 @@ def get_river_segment(
             max_bytes=RIVER_SEGMENT_DETAIL_MAX_SERIALIZED_BYTES,
             scope="detail",
         )
-        # 与 list 端点同理：版本键控静态几何，浏览器可缓存。
+        # 河段几何按 (basin_version_id, river_network_version_id) 版本键控、内容不可变，浏览器可缓存。
         response.headers["Cache-Control"] = "public, max-age=3600"
         return _ok(
             request,

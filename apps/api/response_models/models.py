@@ -22,9 +22,9 @@ Number = int | float
 class GeoJsonGeometry(OpenModel):
     """A PostGIS ``ST_AsGeoJSON(...)::json`` object.
 
-    ``type`` stays a plain string (``ST_LineSubstring`` can degrade to a
-    ``Point``) and ``coordinates`` a ``list[Any]``: nested positions are neither
-    re-validated nor re-typed. ``crs`` and any other member pass through.
+    ``type`` stays a plain string and ``coordinates`` a ``list[Any]``: nested
+    positions are neither re-validated nor re-typed. ``crs`` and any other
+    member pass through.
     """
 
     type: str
@@ -107,38 +107,6 @@ class RiverNetworkVersionRecord(OpenModel):
 class RiverNetworkCreateResult(OpenModel):
     river_network_version: RiverNetworkVersionRecord
     segment_count: int
-
-
-class RiverSegmentProperties(OpenModel):
-    """Feature ``properties``: the reach branch spreads ``properties_json``
-    first, the Path C slice branch adds ``iRiv``/``iEle``/``reach_segment_id``;
-    both pass through as extras."""
-
-    segment_id: str
-    river_segment_id: str
-    basin_version_id: str
-    river_network_version_id: str
-    name: str
-    stream_order: int
-    segment_order: int | None = None
-    downstream_segment_id: str | None = None
-    length_m: Number | None = None
-
-
-class RiverSegmentFeature(OpenModel):
-    type: str
-    id: str | None = None
-    properties: RiverSegmentProperties
-    geometry: GeoJsonGeometry
-
-
-class RiverSegmentFeatureCollection(OpenModel):
-    type: str
-    features: list[RiverSegmentFeature]
-    total: int
-    feature_total: int
-    limit: int
-    offset: int
 
 
 class RiverSegment(OpenModel):
@@ -311,10 +279,6 @@ class BasinVersionRecordEnvelope(OkEnvelope):
 
 class RiverNetworkCreateResultEnvelope(OkEnvelope):
     data: RiverNetworkCreateResult
-
-
-class RiverSegmentFeatureCollectionEnvelope(OkEnvelope):
-    data: RiverSegmentFeatureCollection
 
 
 class RiverSegmentEnvelope(OkEnvelope):

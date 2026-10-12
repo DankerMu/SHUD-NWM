@@ -20,6 +20,17 @@
       other LIVING docs that advertise the list updated; `services/production_closure/*` fixture
       dictionaries that name the list URL updated or reported.
 
+## Correction (2026-10-12, during implementation)
+
+Task 1.1's store deletion and the re-pointing of the two basins-registry import DB files are **withdrawn
+from this change** — see proposal "Scope correction". Consequences for the text below: the store list
+entry, its helpers, the `RIVER_SEGMENT_COLLECTION_*` constants, the river cases of
+`tests/test_list_search_contract.py` and the store-level list tests of `tests/test_model_registration.py`
+stay; the two Evidence-floor zero-greps are replaced by: no route, OpenAPI path / component, response
+model, generated type or frontend source names the list (`git grep -nE "river-segments[\"'?]" -- apps
+openapi` leaves only the detail match in `riverClickLane.test.ts`), and `git grep "_seg_" -- apps` is
+empty. Follow-up issue: oracle transition + store removal.
+
 ## Named surfaces (from fixture review; not exhaustive, but each must be dispositioned in the PR)
 
 **OpenAPI is hand-maintained.** `apps/frontend/src/api/types.ts` is generated from

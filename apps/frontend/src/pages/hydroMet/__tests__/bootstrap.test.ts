@@ -13,7 +13,6 @@ import {
   validateHydroMetStationSeriesIdentity,
 } from '@/lib/hydroMet/stationSeries'
 import {
-  HYDRO_MET_RIVER_SEGMENT_LIMIT,
   HYDRO_MET_STATION_LIMIT,
   _clearHydroMetLatestProductIdentityCache,
   fetchHydroMetLatestProduct,
@@ -127,29 +126,6 @@ const runtimeStationPage = {
     },
   ],
 }
-
-const riverSegments = {
-  type: 'FeatureCollection',
-  features: [
-    {
-      type: 'Feature',
-      properties: {
-        segment_id: 'seg-001',
-        river_segment_id: 'seg-001',
-        basin_version_id: 'basins_qhh_vbasins',
-        river_network_version_id: 'basins_qhh_rivnet_vbasins',
-        name: 'QHH segment 001',
-        stream_order: 2,
-        length_m: 1200,
-      },
-      geometry: { type: 'LineString', coordinates: [[104, 31], [105, 32]] },
-    },
-  ],
-  total: 1633,
-  feature_total: 1633,
-  limit: HYDRO_MET_RIVER_SEGMENT_LIMIT,
-  offset: 0,
-} as const
 
 function riverForecastResponse(
   overrides: Record<string, unknown> = {},
@@ -287,11 +263,10 @@ describe('loadHydroMetBootstrap', () => {
     _clearHydroMetLatestProductIdentityCache()
   })
 
-  it('loads latest product, station inventory, and river segment candidates from latest-product IDs', async () => {
+  it('loads latest product and station inventory from latest-product IDs, and nothing else', async () => {
     vi.mocked(client.GET).mockImplementation(async (path: string) => {
       if (path === '/api/v1/mvp/qhh/latest-product') return { data: success(latestProduct()), error: undefined } as never
       if (path === '/api/v1/met/stations') return { data: success(stationPage), error: undefined } as never
-      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments') return { data: success(riverSegments), error: undefined } as never
       return { data: success({}), error: undefined } as never
     })
 
@@ -299,22 +274,13 @@ describe('loadHydroMetBootstrap', () => {
 
     expect(result.status).toBe('ready')
     expect(result.stations).toHaveLength(1)
-    expect(result.riverSegments).toHaveLength(1)
+    // #2866: the river-segment list is retired; bootstrap issues exactly these two reads.
+    expect(apiGetCalls().map(([path]) => path)).toEqual(['/api/v1/mvp/qhh/latest-product', '/api/v1/met/stations'])
     expect(client.GET).toHaveBeenCalledWith('/api/v1/mvp/qhh/latest-product', {
       params: { query: { source: 'GFS' } },
     })
     expect(client.GET).toHaveBeenCalledWith('/api/v1/met/stations', {
       params: { query: { model_id: 'basins_qhh_shud', basin_version_id: 'basins_qhh_vbasins', limit: HYDRO_MET_STATION_LIMIT, offset: 0 } },
-    })
-    expect(client.GET).toHaveBeenCalledWith('/api/v1/basin-versions/{basin_version_id}/river-segments', {
-      params: {
-        path: { basin_version_id: 'basins_qhh_vbasins' },
-        query: {
-          river_network_version_id: 'basins_qhh_rivnet_vbasins',
-          limit: HYDRO_MET_RIVER_SEGMENT_LIMIT,
-          offset: 0,
-        },
-      },
     })
     const serializedCalls = JSON.stringify(vi.mocked(client.GET).mock.calls)
     expect(serializedCalls).not.toContain('manual')
@@ -328,7 +294,6 @@ describe('loadHydroMetBootstrap', () => {
       calls.push({ path, query: options?.params?.query })
       if (path === '/api/v1/mvp/qhh/latest-product') return { data: success(latestProduct()), error: undefined } as never
       if (path === '/api/v1/met/stations') return { data: success(stationPage), error: undefined } as never
-      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments') return { data: success(riverSegments), error: undefined } as never
       throw new Error(`Unexpected GET ${path}`)
     })
 
@@ -373,7 +338,6 @@ describe('loadHydroMetBootstrap', () => {
         } as never
       }
       if (path === '/api/v1/met/stations') return { data: success(stationPage), error: undefined } as never
-      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments') return { data: success(riverSegments), error: undefined } as never
       throw new Error(`Unexpected GET ${path}`)
     })
 
@@ -388,16 +352,6 @@ describe('loadHydroMetBootstrap', () => {
     expect(client.GET).toHaveBeenCalledWith('/api/v1/met/stations', {
       params: { query: { model_id: 'basins_heihe_shud', basin_version_id: 'basins_heihe_vbasins', limit: HYDRO_MET_STATION_LIMIT, offset: 0 } },
     })
-    expect(client.GET).toHaveBeenCalledWith('/api/v1/basin-versions/{basin_version_id}/river-segments', {
-      params: {
-        path: { basin_version_id: 'basins_heihe_vbasins' },
-        query: {
-          river_network_version_id: 'basins_heihe_rivnet_vbasins',
-          limit: HYDRO_MET_RIVER_SEGMENT_LIMIT,
-          offset: 0,
-        },
-      },
-    })
   })
 
   it('combines basinId with strict identity in the latest-product query (#314)', async () => {
@@ -406,7 +360,6 @@ describe('loadHydroMetBootstrap', () => {
       calls.push({ path, query: options?.params?.query })
       if (path === '/api/v1/mvp/qhh/latest-product') return { data: success(latestProduct()), error: undefined } as never
       if (path === '/api/v1/met/stations') return { data: success(stationPage), error: undefined } as never
-      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments') return { data: success(riverSegments), error: undefined } as never
       throw new Error(`Unexpected GET ${path}`)
     })
 
@@ -440,7 +393,6 @@ describe('loadHydroMetBootstrap', () => {
       calls.push({ path, query: options?.params?.query })
       if (path === '/api/v1/mvp/qhh/latest-product') return { data: success(latestProduct()), error: undefined } as never
       if (path === '/api/v1/met/stations') return { data: success(stationPage), error: undefined } as never
-      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments') return { data: success(riverSegments), error: undefined } as never
       throw new Error(`Unexpected GET ${path}`)
     })
 
@@ -472,11 +424,10 @@ describe('loadHydroMetBootstrap', () => {
     expect(apiGetCalls().map(([path]) => path)).toEqual(['/api/v1/mvp/qhh/latest-product'])
   })
 
-  it('normalizes runtime-shaped station inventory coordinates without losing river candidates', async () => {
+  it('normalizes runtime-shaped station inventory coordinates', async () => {
     vi.mocked(client.GET).mockImplementation(async (path: string) => {
       if (path === '/api/v1/mvp/qhh/latest-product') return { data: success(latestProduct()), error: undefined } as never
       if (path === '/api/v1/met/stations') return { data: success(runtimeStationPage), error: undefined } as never
-      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments') return { data: success(riverSegments), error: undefined } as never
       return { data: success({}), error: undefined } as never
     })
 
@@ -487,7 +438,6 @@ describe('loadHydroMetBootstrap', () => {
       station_id: 'qhh_forc_runtime_001',
       geom: { type: 'Point', coordinates: [104.25, 31.5] },
     })
-    expect(result.riverSegments).toHaveLength(1)
   })
 
   it('does not load downstream candidates when requested cycle differs from latest product', async () => {
@@ -500,7 +450,7 @@ describe('loadHydroMetBootstrap', () => {
     expect(apiGetCalls().map(([path]) => path)).toEqual(['/api/v1/mvp/qhh/latest-product'])
   })
 
-  it('reports latest unavailable and incomplete products before station or river requests', async () => {
+  it('reports latest unavailable and incomplete products before the station request', async () => {
     vi.mocked(client.GET).mockResolvedValueOnce({
       data: success(latestProduct({
         status: 'unavailable',
@@ -534,13 +484,10 @@ describe('loadHydroMetBootstrap', () => {
     expect(apiGetCalls().map(([path]) => path)).toEqual(['/api/v1/mvp/qhh/latest-product'])
   })
 
-  it('keeps station and river partial failures separate without failing the whole bootstrap', async () => {
+  it('keeps a station inventory failure from failing the whole bootstrap', async () => {
     vi.mocked(client.GET).mockImplementation(async (path: string) => {
       if (path === '/api/v1/mvp/qhh/latest-product') return { data: success(latestProduct()), error: undefined } as never
       if (path === '/api/v1/met/stations') return { data: undefined, error: { error: { message: 'station db timeout' } } } as never
-      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments') {
-        return { data: undefined, error: { error: { message: 'river db timeout' } } } as never
-      }
       return { data: success({}), error: undefined } as never
     })
 
@@ -548,9 +495,7 @@ describe('loadHydroMetBootstrap', () => {
 
     expect(result.status).toBe('ready')
     expect(result.stationError).toBe('station db timeout')
-    expect(result.riverError).toBe('river db timeout')
     expect(result.stations).toEqual([])
-    expect(result.riverSegments).toEqual([])
   })
 
   it('redacts hydro-met UI-bound backend messages while keeping error labels', async () => {

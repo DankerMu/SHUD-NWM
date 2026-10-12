@@ -247,3 +247,49 @@ rg --files apps/frontend/e2e | sort
   references.
 - #416: endpoint removal or explicit deferral after #415. No active route in
   this inventory is removal-ready today.
+
+## Retirement Records
+
+Records appended after the 2026-06-11 inventory. The sections above remain
+the #411 evidence snapshot and are not rewritten.
+
+### `GET /api/v1/basin-versions/{basin_version_id}/river-segments` — retired by #2866
+
+- Status: removed (was never a candidate in the #411 matrix above, which covers
+  the forecast/latest-product family only). Decision date: 2026-10-12.
+- What was removed: the route (`apps/api/routes/models.py:list_river_segments`),
+  its OpenAPI path and the `RiverSegmentFeature` /
+  `RiverSegmentFeatureCollection` components (`openapi/nhms.v1.yaml`, the
+  runtime patches, `apps/frontend/src/api/types.ts`), the response models that
+  only it used, and its one frontend caller (`fetchHydroMetRiverSegments` in
+  `apps/frontend/src/pages/hydroMet/bootstrap.ts`, whose result no product code
+  consumed). No shim, no `410`, no deprecation header: the path answers `404`.
+- Why: its features carried a derived id `<model_id>_seg_<iRiv>_<iEle>` that is
+  no row of `core.river_segment`; the detail and forecast-series endpoints
+  answer `404` for it, and the map renders rivers from the MVT layer, not from
+  this GeoJSON list.
+- Unchanged: `GET .../river-segments/{segment_id}` and
+  `GET .../river-segments/{segment_id}/forecast-series` (the `active` rows
+  above), import, `core.river_segment_crosswalk` writing, MVT. No migration.
+- Basis against the external-consumer rule: `API_CONTRACT_DEPRECATION_POLICY.md`
+  states that external consumers are unknown and that repository-only evidence
+  must not be used to contract OpenAPI. That rule is not relaxed here. For this
+  endpoint the unknown was resolved by the owner, not by repository search: the
+  owner ruling of 2026-10-12 on #2866 states that the system has no external
+  API users and selects retirement. That ruling is the documented
+  external-consumer treatment the policy requires; it covers this endpoint only
+  and does not change the status of any row in the Candidate Matrix.
+- Replacement for clients: `core.river_segment.river_segment_id` values (reach
+  ids `<model_id>_reach_<iRiv:06d>` or SHUD output-river ids) with the detail
+  and forecast-series endpoints; the river-network MVT tiles for map rendering.
+- Rollback: revert the #2866 change; no data or schema was touched.
+- Contract evidence: `tests/test_api_contract_resources.py`
+  (`test_river_segment_list_endpoint_is_retired_and_not_served`,
+  `test_river_segment_list_is_absent_from_the_published_openapi_and_generated_types`,
+  `test_river_segment_detail_is_still_served_after_the_list_retirement`).
+- Residual, stated not hidden: the store read
+  `PsycopgModelRegistryStore.list_river_segments` is still present in
+  `packages/common/model_registry_river_segments.py` with no API caller. The
+  frozen #1913 registry-import partition tests observe import results through it and
+  are byte-pinned by `tests/fixtures/basins_registry_partition_oracle.json`;
+  removing it needs a recorded transition of that oracle first.

@@ -73,8 +73,6 @@ from apps.api.openapi_restored_schemas import (
     _model_instance_schema,
     _model_lifecycle_result_schema,
     _model_operation_preflight_schema,
-    _river_segment_feature_collection_schema,
-    _river_segment_feature_schema,
     _river_segment_schema,
     _river_series_response_schema,
     _run_status_schema,
@@ -370,10 +368,11 @@ def _patch_basin_registry_openapi(schema: dict) -> None:
 
 
 def _patch_river_segment_openapi(schema: dict) -> None:
-    """Restore the river-segment GeoJSON collection and detail response bodies.
+    """Restore the river-segment detail response body.
 
-    Both handlers return ``_ok()`` around the store payload; their runtime
-    models (#2348) are bound to these hand schemas by the parity test.
+    The handler returns ``_ok()`` around the store payload; its runtime model
+    (#2348) is bound to this hand schema by the parity test. The list endpoint
+    and its two components were retired by #2866.
     """
     components = schema.setdefault("components", {})
     schemas = components.setdefault("schemas", {})
@@ -381,14 +380,7 @@ def _patch_river_segment_openapi(schema: dict) -> None:
     schemas["GeoJsonLineString"] = _geojson_line_string_schema()
     schemas["GeoJsonMultiLineString"] = _geojson_multi_line_string_schema()
     schemas["RiverSegment"] = _river_segment_schema()
-    schemas["RiverSegmentFeature"] = _river_segment_feature_schema()
-    schemas["RiverSegmentFeatureCollection"] = _river_segment_feature_collection_schema()
 
-    _set_operation_response_schema(
-        schema,
-        "/api/v1/basin-versions/{basin_version_id}/river-segments",
-        _success_response_schema({"$ref": "#/components/schemas/RiverSegmentFeatureCollection"}),
-    )
     _set_operation_response_schema(
         schema,
         "/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}",

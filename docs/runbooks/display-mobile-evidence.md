@@ -23,7 +23,7 @@
   curl -sS -o /dev/null -w '%{http_code}\n' "$BASE_URL/api/v1/basin-versions/$BV/river-segments/$SEGMENT?river_network_version_id=$RNV"
   ```
 
-  **不要**从 `/api/v1/basin-versions/{bv}/river-segments?limit=1` 的清单里取 pin：清单返回的是 `…_shud_seg_…` id（segment detail 对它回 404）与 `properties.reach_segment_id` 的 `…_shud_reach_…` id（detail 回 200，但 discharge 图层不渲染它，钩子以 `HOOK_FEATURE_MISMATCH` 拒绝）。2026-10-09 对公网入口实测如此。
+  pin 只能由操作者按上面的 id 族直接给出：河段清单端点 `/api/v1/basin-versions/{bv}/river-segments` 已由 #2866 退役（回 404），API 不再提供可供挑选河段的清单；它当年返回的派生 `…_seg_…` id 也从来不是 detail 认的 id。
 - **选流域时同时要满足气象代站一侧的两个条件**（河段与气象代站共用同一个流域 pin）：
   1. 该流域要有站点要素。页面为全部已解析流域取站点（#2867：有限并发、不按 `basin_id` 顺序截断；流域数 500 / 站点数 50000 的上限只是远高于现量的安全阀，触发时页面左上角提示“N 个流域未加载（超出客户端上限）”），所以流域在 `basin_id` 顺序里的位置不影响它有没有站点要素。没有站点要素的流域只剩两种：站点清单本身为空（该流域版本没有可展示的 forecast run），或该流域的站点请求失败（页面左上角提示“N 个流域加载失败”）；钩子对它的每个候选都回 `STATION_HOOK_NOT_RENDERED`。
   2. 嵌套 / 重叠流域的代站坐标重合（同一格点上叠着另一个流域的站点），钩子回 `STATION_HOOK_POINT_OCCLUDED`；这类流域的 `…_riv_000001` 河段也常与另一张河网的河段重合，河段钩子回 `HOOK_POINT_OCCLUDED`。
