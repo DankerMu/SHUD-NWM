@@ -185,7 +185,8 @@ even if the host date is later.
 
 ## Three-day chunk geometry (#2210; requires migration rollout)
 
-**River half superseded 2026-09-19; forcing half still live.** `000058`'s
+**River half superseded 2026-09-19; forcing half transitional (see the end of
+this paragraph).** `000058`'s
 3-day interval was set on the *then-canonical, text-identity*
 `hydro.river_timeseries` — the table `000059` renamed to
 `hydro.river_timeseries_legacy` and `000060` dropped on 2026-09-19 (receipt
@@ -195,8 +196,13 @@ The live river store is the narrow table created by `000059` with
 contract window at **1 day**, 30 chunks, oldest `range_start`
 `2026-08-27T00:00Z`, newest `range_end` `2026-09-26T00:00Z`, 10 compressed.
 **Do not read 3 days (or 7) as current river geometry.**
-`met.forcing_station_timeseries` was never renamed or recreated; everything
-below still describes it, and its narrow expand is the deferred I12 work.
+**Forcing half transitional since 2026-09-20.** `000061` renamed the
+text-identity `met.forcing_station_timeseries` to
+`met.forcing_station_timeseries_legacy` and created the narrow table under the
+canonical name with a **1-day** interval (`000061:255-257`). The 3-day geometry
+below therefore describes the `_legacy` sibling only, and only until the forcing
+contract drops it: migration `000066`, **not yet executed** — see §4.12. Do not
+read 3 days as the narrow forcing store's geometry.
 
 Migration `000058_hot_timeseries_chunk_interval_3d.sql` sets the interval for
 **new** chunks of `hydro.river_timeseries` and `met.forcing_station_timeseries`
@@ -6791,7 +6797,10 @@ the legacy sibling references the same FK tables (`core.river_segment`,
 `hydro.hydro_run`, `met.met_station`, `met.forcing_version`), so compressing or
 dropping a legacy chunk locks the relations a canonical writer holds; a separate
 legacy key would leave that cycle open (node-27 still carries
-`met.forcing_station_timeseries_legacy` chunks that both lanes reach).
+`met.forcing_station_timeseries_legacy` chunks that both lanes reach). The
+forcing legacy sibling is transitional: the forcing contract, migration
+`000066` (§4.12, not yet executed), drops it, after which the forcing family
+has one member as the river family has had since `000060`.
 
 - every production ingest write transaction on `hydro.river_timeseries` or
   `met.forcing_station_timeseries` tries the fence **shared, transaction-scoped,
@@ -6895,6 +6904,448 @@ First tell the two kinds of deferral apart in the receipt:
 them only while holding the lifecycle flock
 (`/tmp/nhms-node27-timeseries-lifecycle.lock`, e.g. `flock -n` around the
 `psql` call) or with the compression and retention timers stopped.
+
+### 4.12 Forcing contract: migration `000066` (`#1993`) — NOT YET EXECUTED
+
+**Status: NOT YET EXECUTED on node-27.** `db/migrations/000066_forcing_timeseries_contract.sql`
+is merged code, not applied state. Everything below is a procedure still to be
+carried out, on the owner's word only. Until the execution receipt below is
+filled in, node-27 still has `met.forcing_station_timeseries_legacy` and
+`met.forcing_version.timeseries_store`, and every passage of this runbook that
+describes them describes the live catalog.
+
+| Execution receipt | |
+|---|---|
+| applied on node-27 | *pending — not yet executed* |
+| receipt | *pending — to be archived under `openspec/changes/timeseries-narrow-store-expand-contract/receipts/` and linked here* |
+
+Governing references: fixture
+`openspec/changes/timeseries-narrow-store-expand-contract/fixtures/I14-1993-task82.md`
+(D0, D5, D6), spec `specs/forcing-narrow-store/spec.md` requirement "The forcing
+contract SHALL mirror the river contract", and the river precedent
+(`000060_river_timeseries_contract.sql`, receipt
+[`receipts/2026-09-19-i9-contract-window/README.md`](../../openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-19-i9-contract-window/README.md)).
+
+#### 4.12.1 What the migration will do
+
+One `DO` block, hence one transaction: it either drops both objects or changes
+nothing.
+
+- **Refuses** while any `met.forcing_version` row is routed `legacy` with a
+  `cycle_time` inside the retention window. The window is
+  `GREATEST(21, nhms.retention_window_days)`: 21 days is a floor, the GUC can only
+  widen it. `cycle_time` is nullable; a legacy-routed row with a NULL
+  `cycle_time` counts as inside the window.
+- **Refuses** when the routing column is already gone but the legacy table still
+  exists (a half-applied or hand-edited catalog).
+- Otherwise drops `met.forcing_station_timeseries_legacy` (its primary key,
+  indexes including `forcing_station_timeseries_qhh_latest_window_idx`, chunks,
+  both foreign keys and its grants go with it) and then
+  `met.forcing_version.timeseries_store` (its default and CHECK go with it).
+- Keeps `forcing_version_key`, `station_key`, the three `met.forcing_*` enums and
+  the narrow `met.forcing_station_timeseries` with its two indexes.
+- Replays as a no-op once both objects are gone. A replay is not lock-free,
+  though. If the block committed and its ledger row was never written (the
+  runner records the row in a separate autocommit statement,
+  `packages/common/migrate.py:233-239`), the next run executes the file again:
+  both refusal branches are skipped, `DROP TABLE IF EXISTS` finds nothing and
+  locks nothing, and `ALTER TABLE met.forcing_version DROP COLUMN IF EXISTS`
+  still takes ACCESS EXCLUSIVE on `met.forcing_version` before it finds the
+  column absent. The wait for that lock is bounded by the migrate lane's
+  `lock_timeout`; the lock is held for the remainder of that near-empty block.
+
+**There is no down migration.** The legacy facts are unlinked at COMMIT.
+Recovery from a wrong apply is restore-from-backup.
+
+A restore does not bring the wide table back for good either. Restoring a
+backup taken before `000061` and migrating it to head renames the wide table to
+`met.forcing_station_timeseries_legacy` and routes every version that has rows
+in it `legacy` (`000061`); if all of those versions have a non-NULL `cycle_time`
+older than the retention window, `000066` then passes its own gate and drops
+the table in the same run. That is by design and of the same nature as the
+river contract `000060`: the contract keeps nothing retention would already
+have removed. The runner has no target-version argument, so a backup restored
+in order to read old wide-table facts must not be migrated from a checkout that
+contains `000066`.
+
+#### 4.12.2 Standing constraints between merge and the window
+
+Two constraints hold until the window in §4.12.4 has been executed. The first
+starts at the merge of the PR that carries `000066`; the second is already in
+force (see its text). Both are operator discipline; nothing in the code
+enforces them.
+
+1. **No pull of `/home/nwm/NWM` before 2026-10-16** unless the owner has
+   explicitly accepted the `end_time` cohort (fixture `I14-1993.md` D0). The
+   autopipe reads its scripts from that tree on every tick, so a pull made for
+   any unrelated issue deploys the routing-free write and refresh side at once,
+   with no restart. Verification uses the separate checkout
+   `/home/nwm/nwm-2785-verify`.
+2. **No migrate entry point against the node-27 production database from any
+   checkout that contains `000066_forcing_timeseries_contract.sql`, until the
+   owner-approved window.** The boundary is the checkout and the DSN, not a
+   pull of `/home/nwm/NWM`: the runner resolves its migration directory from
+   its own module file (`MIGRATIONS_DIR`, `packages/common/migrate.py:16`) and
+   its target from `DATABASE_URL` (`:383-384`), so whichever tree it is started
+   from supplies the files, and whichever database the DSN names receives
+   them. The constraint therefore starts the moment any checkout on node-27
+   contains the file, and one already does: the verify checkout
+   `/home/nwm/nwm-2785-verify` has been at a head that contains `000066` since
+   2026-10-12 (the shape-gate receipt was measured from it). It applies equally
+   to every later checkout or worktree on node-27 that contains the file,
+   `/home/nwm/NWM` included once it is pulled.
+
+   The migration's own gate has been satisfiable since 2026-10-09 (zero
+   in-window legacy-routed versions by `cycle_time`), so the file does not
+   protect itself against being applied in passing: **any** migrate run from
+   such a checkout with the production DSN, for any issue, executes the `DROP`
+   with no window, under live traffic. `packages.common.migrate` has no
+   target-version argument and applies every pending file.
+
+   A run from the verify checkout **before** `/home/nwm/NWM` is pulled is the
+   worse case, not the milder one. Until that pull and a restart, the running
+   display API and the autopipe are the pre-#2901, routing-aware code
+   (`/home/nwm/NWM` was at `b0831d6ce`, the parent of the #2901 merge, when the
+   receipt was taken), and that code reads `met.forcing_version.timeseries_store`.
+   Dropping the column underneath it turns those statements into
+   `column does not exist` errors, on top of the unfenced lock.
+
+   pytest's throwaway-database fixtures are not affected.
+   `integration_database_url` and `throwaway_database_url`
+   (`tests/conftest.py:199-240`) always create and drop a separate
+   `nhms_it_<uuid>` database (`:304-305`) on the server they are pointed at,
+   and that database, never the one named in the DSN, is what a test migrates;
+   running the integration suite from the verify checkout stays allowed. That exemption covers those
+   fixtures only, not a migrate entry point started by hand with the same DSN.
+
+   The entry points that reach the apply loop, none of which may be run that
+   way:
+
+   | entry point | how it applies pending files |
+   |---|---|
+   | `uv run python -m packages.common.migrate` | directly |
+   | `make migrate`, `make reset-db` | `Makefile:18-20,27` calls the module |
+   | `scripts/apply_smoke_migrations.py` | its own loop over the same `MIGRATIONS_DIR`, using the module's `apply_migration`. It does **not** call `configure_migration_session` or `ledger_disk_mismatches`: no default `lock_timeout`, no ledger/disk check. It is written for local databases without TimescaleDB, and nothing in it refuses a production DSN |
+   | `scripts/run_qhh_cycle.sh` | `:420-426`: `apply_smoke_migrations.py` by default (`QHH_USE_SMOKE_MIGRATIONS` defaults to `1`), the module otherwise. An ambient `DATABASE_URL` is used as it is (`:309-313`) |
+   | `scripts/run_qhh_backend_smoke.sh` | `:152-158`: same switch, same default |
+   | `scripts/run_qhh_cycle.sbatch` | indirect: `:54` execs `run_qhh_cycle.sh` |
+   | `scripts/run_qhh_continuous.py` | indirect: runs `run_qhh_cycle.sh` (`:315`) or submits `run_qhh_cycle.sbatch` (`:405`) per cycle |
+
+   So the default QHH path reaches `000066` through the smoke runner, which
+   would wait for the `DROP`'s locks with no timeout of its own.
+
+   None of these is on a node-27 timer path: the timers are autopipe, download,
+   and the alert / retention / compression / governance units, and none of them
+   migrates. The exposure is a person running one of the entry points above by
+   hand.
+
+A migration for another issue that has to land on node-27 in that interval
+waits for the window, or the window is brought forward. There is no third
+option that keeps `000066` unapplied.
+
+#### 4.12.3 Gates before the window (all read-only)
+
+1. **Gate count is 0**, re-measured at execution time (it moves with the clock):
+
+   ```sql
+   SELECT count(*) FROM met.forcing_version
+   WHERE timeseries_store = 'legacy'
+     AND (cycle_time IS NULL OR cycle_time > now() - make_interval(days => 21));
+   ```
+
+   Compare the deployed `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` with the
+   migration's floor of 21. If the deployment's window is wider, set
+   `nhms.retention_window_days` to it for the migrate session; never narrower.
+2. **Shape-gate receipt confirmed** (fixture D5). The probe and judge are
+   `receipts/2026-10-11-i14-forcing-shape-gate/probe.py` and `gate.py` under the
+   change directory. The probe runs read-only from the verify checkout and
+   records every forcing reader statement on master with its plan; the judge
+   exits non-zero on any Seq Scan of `met.forcing_station_timeseries` or one of
+   its chunks. A tripped criterion blocks applying `000066` and goes to the
+   owner.
+
+   ```bash
+   cd /home/nwm/nwm-2785-verify
+   DATABASE_URL=... PYTHONPATH=$PWD .venv/bin/python \
+     openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-10-11-i14-forcing-shape-gate/probe.py \
+     --out /home/nwm/tmp/forcing-shape-gate.json
+   .venv/bin/python \
+     openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-10-11-i14-forcing-shape-gate/gate.py \
+     /home/nwm/tmp/forcing-shape-gate.json
+   ```
+
+   Every reader is called once to obtain its statement and then measured once
+   under `EXPLAIN ANALYZE`, each bounded by the probe's 120 s
+   `statement_timeout`. One of the eight,
+   `qhh_production_bootstrap.dynamic_forcing_count`, counts a model's fact rows
+   across every forcing version and has no predicate on the fact table's keys,
+   so its measured leg would read the whole hypertable until the timeout. Pass
+   `--plan-only-for qhh_production_bootstrap.dynamic_forcing_count` to the probe
+   to take its plan without executing it; the judge then reports that statement
+   as not measured, and its plan is still judged. Expect that statement's plan
+   to show a fact-table scan: that is the shape the reader has always had, not
+   one `000066` introduces, and whether it blocks the apply is the owner's
+   decision, not the judge's.
+
+   **Expected outcome: with that flag the gate cannot exit 0.** Reader 8 has no
+   key predicate, so its plan carries the Seq Scans the judge counts as
+   violations, and its ANALYZE leg is reported as skipped; either alone keeps
+   the exit code non-zero. Do not read the exit code as the verdict on the
+   other seven: readers 1–7 are each judged by their own `PASS` line. The
+   2026-10-12 measurement is recorded in
+   [`receipts/2026-10-11-i14-forcing-shape-gate/README.md`](../../openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-10-11-i14-forcing-shape-gate/README.md):
+   7 `PASS`, reader 8 `FAIL`, gate line
+   `SHAPE GATE: RED (8 expected, 1 violating, 0 incomplete)`, exit 1. Whether
+   reader 8 is accepted as a documented exception is the **owner's decision and
+   is still pending**; until it is made this gate is not confirmed.
+
+3. **The routing-free code is the running process, not just the tree.** To be
+   true before the window, and not true yet: `/home/nwm/NWM` must be at a
+   commit containing #1993's first cut (PR #2901) and the display API must
+   have been restarted since that pull. When the shape-gate receipt was taken
+   (2026-10-12) the tree was still at `b0831d6ce`, the parent of the #2901
+   merge. Check the process (`/proc/<pid>/cwd`, start time against the pull),
+   not `git log`.
+4. **No TimescaleDB background job is attached to the legacy hypertable:**
+
+   ```sql
+   SELECT count(*) FROM timescaledb_information.jobs
+   WHERE hypertable_schema = 'met'
+     AND hypertable_name = 'forcing_station_timeseries_legacy';
+   -- expected: 0
+   ```
+
+   Zero is what the deployment implies: compression and retention are explicit
+   script calls, not policies (§9.2). A non-zero count means **stop**: dropping
+   the table with a policy job attached is not covered by the migration's
+   tests.
+
+#### 4.12.4 Window procedure (to be executed; owner approval required)
+
+Use the superuser lane (`nhms`) for the migrate and the post-state checks, as
+the river window did: `public.schema_migrations` is not readable by
+`nhms_ingest_rw`. Assert that user-systemd is reachable
+(`XDG_RUNTIME_DIR=/run/user/$(id -u)`) before stopping anything. Run under a
+private receipt directory with `umask 077` and `set -euo pipefail`, as §4.10.2
+does; `RECEIPT_DIR` below is that directory.
+
+**Binding the superuser DSN.** `packages.common.migrate` reads `DATABASE_URL`
+after `load_dotenv()` (`packages/common/migrate.py:383-384`). `load_dotenv()`
+is called with its default `override=False`, so a `.env` it finds does **not**
+replace a `DATABASE_URL` already exported in the shell; with nothing exported,
+whatever that `.env` names is what gets migrated. Export the superuser DSN
+explicitly and prove what it is before using it. The `000065` window
+(2026-09-28) took it from the replay lane's env file, the one lane that runs as
+`nhms` (§9.2), and the same source is used here:
+
+```bash
+umask 077
+RECEIPT_DIR="/home/nwm/tmp/forcing-contract-$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir -p "$RECEIPT_DIR"
+REPO=/home/nwm/NWM
+DATABASE_URL="$(grep '^DATABASE_URL=' "$REPO/infra/env/node27-timeseries-compression-replay.env" | cut -d= -f2-)"
+export DATABASE_URL
+test "$(psql "$DATABASE_URL" -Atc 'SELECT current_user')" = nhms
+test "$(psql "$DATABASE_URL" -Atc 'SELECT current_database()')" = nhms
+```
+
+Never print the DSN. If either `test` fails, stop: the migrate must not run on
+a DSN that has not been identified.
+
+1. Re-measure gate 1 of §4.12.3 and re-confirm gates 2, 3 and 4.
+2. **Pending set is exactly `000066`, judged by file, not by row count.** Every
+   file in `db/migrations/` other than
+   `000066_forcing_timeseries_contract.sql` must have a row in
+   `public.schema_migrations`; the ledger also carries rows for files that no
+   longer exist, so a count proves nothing.
+
+   ```bash
+   cd "$REPO"
+   comm -23 <(ls db/migrations/*.sql | xargs -n1 basename | sort) \
+            <(psql "$DATABASE_URL" -Atc "SELECT version FROM public.schema_migrations" | sort)
+   # expected output, exactly one line:
+   # 000066_forcing_timeseries_contract.sql
+   ```
+
+   Any other line means another migration would be applied in the same run:
+   stop.
+3. **Record which timers are active, before touching any of them.** The
+   restore in step 6 starts only the timers this file lists as `active`; without
+   it "restore only those" cannot be carried out. The unit lists are those of
+   §4.10.2 plus the download pair:
+
+   ```bash
+   export XDG_RUNTIME_DIR=/run/user/$(id -u)
+   timers=(nhms-node27-autopipe.timer nhms-node27-download.timer
+     nhms-node27-timeseries-compression.timer nhms-node27-timeseries-retention.timer
+     nhms-node27-resource-governance.timer)
+   services=(nhms-display-api.service nhms-node27-autopipe.service
+     nhms-node27-download.service nhms-node27-timeseries-compression.service
+     nhms-node27-timeseries-retention.service nhms-node27-resource-governance.service)
+   for unit in "${timers[@]}" "${services[@]}"; do
+     test "$(systemctl --user show "$unit" -p LoadState --value)" = loaded
+   done
+   for unit in "${timers[@]}"; do
+     printf '%s %s %s\n' "$unit" \
+       "$(systemctl --user show "$unit" -p ActiveState --value)" \
+       "$(systemctl --user show "$unit" -p UnitFileState --value)"
+   done | tee "$RECEIPT_DIR/timers-before.txt"
+   ```
+
+   `nhms-node27-timeseries-compression-replay.service` has no timer; give it
+   the `REPLAY_DISPOSITION` treatment of §4.10.2 (`required` adds it to
+   `services`, `absent-approved` asserts `LoadState` is `not-found`).
+4. **Stop the display API. Pause the timers and wait for a running tick to
+   end.** This is forcing-specific. `DROP TABLE` on the legacy table takes
+   ACCESS EXCLUSIVE on `met.forcing_version` and `met.met_station` through its
+   foreign keys (measured on a local TimescaleDB 2.10.2 catalog, 2026-10-11),
+   and the autopipe writes `met.forcing_version` on every tick; the river
+   window had no live writer in that position. The QHH read path holds both
+   tables, so the API is stopped for the migration as in the river window.
+   Pause these timers as well, and confirm no unit of theirs is mid-run:
+
+   | timer | why it is paused |
+   |---|---|
+   | `nhms-node27-autopipe.timer` | writes `met.forcing_version` and the narrow fact table, whose foreign keys reference `met.met_station` |
+   | `nhms-node27-timeseries-compression.timer` | enumerates the legacy table's chunks from the catalog; `compress_chunk` there locks the same FK-referenced tables |
+   | `nhms-node27-timeseries-retention.timer` | same, through `drop_chunks` |
+   | `nhms-node27-download.timer` | writes into `met` — see below |
+   | `nhms-node27-resource-governance.timer` | its collection SQL enumerates every hypertable chunk, the legacy table's included: `hypertable_size_breakdown` and `largest_chunks` read `timescaledb_information.chunks` with no hypertable filter and resolve each chunk through `::regclass` into `pg_relation_size` / `pg_total_relation_size` (`packages/common/node27_resource_governance_collection.py:528-559`). A run that overlaps the drop either holds a lock the `DROP` waits for or loses a chunk mid-statement. Daily at 04:10 UTC, `Persistent=true` |
+
+   **The download lane does write into `met`.** Established from the repository,
+   not from a role name: `scripts/node27_download_once.sh` requires
+   `DATABASE_URL` (the `nhms_download_rw` DSN of
+   `infra/env/node27-download.example`), `nhms-gfs` / `nhms-ifs download` build
+   their adapter with `PsycopgMetStore.from_env()`
+   (`workers/data_adapters/gfs_adapter.py:420`, `ifs_adapter.py`), and that store
+   writes `met.data_source` and `met.forecast_cycle`
+   (`packages/common/met_store.py:71,120,204`). It does **not** write
+   `met.forcing_version`, `met.met_station` or either forcing fact table, so it
+   does not contend for a lock `000066` takes; it is paused because fixture D6
+   pauses every `met` writer for the window and the pause costs one skipped
+   tick.
+
+   Stop the timers first so nothing new starts, stop the display API, then let
+   a tick that is already running finish instead of killing it:
+
+   ```bash
+   systemctl --user stop "${timers[@]}"
+   systemctl --user stop nhms-display-api.service
+   for unit in "${services[@]}"; do
+     for _ in $(seq 1 180); do
+       case "$(systemctl --user show "$unit" -p ActiveState --value)" in
+         inactive|failed) break ;;
+       esac
+       sleep 10
+     done
+   done
+   ```
+
+   Then verify with the second `for unit in "${timers[@]}" "${services[@]}"`
+   loop of §4.10.2, unchanged, over the arrays of step 3: every unit `loaded`
+   and `inactive`, timers `dead`/`waiting`, services `dead` with `MainPID` 0
+   and `Result` `success` or `n/a`. A unit still running after the wait, or a
+   failed one, fails that loop: NO-GO, stay stopped and resolve with the owner.
+
+   Drain check, also as in §4.10.2: no held `/tmp/autopipe.cron.lock` or
+   `/tmp/nhms-node27-timeseries-lifecycle.lock`, and no other session holding
+   or awaiting a lock on the three relations the `DROP` locks. Run it on the
+   superuser DSN: `pg_stat_activity` masks other users' sessions for a role
+   without `pg_read_all_stats` (§9.2).
+
+   ```sql
+   SELECT a.pid, a.usename, a.application_name, a.state, a.xact_start,
+          l.relation::regclass AS relation, l.mode, l.granted
+   FROM pg_locks l
+   JOIN pg_stat_activity a USING (pid)
+   WHERE l.relation IN (to_regclass('met.forcing_station_timeseries_legacy'),
+                        'met.forcing_version'::regclass, 'met.met_station'::regclass)
+     AND a.pid <> pg_backend_pid();
+   -- expected: 0 rows
+   SELECT pid, usename, application_name, state, xact_start
+   FROM pg_stat_activity
+   WHERE datname = current_database() AND pid <> pg_backend_pid()
+     AND state LIKE 'idle in transaction%';
+   -- expected: 0 rows
+   ```
+
+   The first query covers the three parent relations only; a session holding
+   nothing but a chunk of the legacy table surfaces as a lock timeout in
+   step 5, which is a clean refusal. Do not terminate a session whose owner is
+   unknown.
+5. **Apply**, on the superuser lane bound above, through the verified active
+   environment exactly as the river window did (§4.10.2). `--no-sync` forbids a
+   dependency sync or environment rebuild during the window:
+
+   ```bash
+   cd "$REPO"
+   date -u +%FT%TZ
+   PGOPTIONS='-c lock_timeout=5s -c statement_timeout=120s' \
+     uv run --no-sync --project "$REPO" python -m packages.common.migrate
+   date -u +%FT%TZ
+   ```
+
+   The runner prints its effective `lock_timeout` and `statement_timeout`
+   before the first statement (§4.10.2, "Runner session guard"); keep both
+   lines in the receipt.
+
+   A lock timeout is a clean refusal, and so is a statement timeout: the block
+   rolls back and no ledger row is written. Find the session holding the lock
+   and retry; do not raise the timeout blindly. `lock_timeout` bounds the wait for a lock, not how long the
+   migration holds its own, and the legacy relation files are unlinked at
+   COMMIT.
+6. **Verify**, then restore:
+
+   ```sql
+   SELECT to_regclass('met.forcing_station_timeseries_legacy') IS NULL AS legacy_table_gone,
+          NOT EXISTS (SELECT 1 FROM information_schema.columns
+                      WHERE table_schema = 'met' AND table_name = 'forcing_version'
+                        AND column_name = 'timeseries_store') AS routing_column_gone,
+          to_regclass('met.forcing_station_timeseries') IS NOT NULL AS narrow_present,
+          (SELECT count(*) FROM public.schema_migrations
+           WHERE version = '000066_forcing_timeseries_contract.sql') AS ledger_rows;
+   -- expected: t | t | t | 1
+   SELECT indexname FROM pg_indexes
+   WHERE schemaname = 'met' AND tablename = 'forcing_station_timeseries' ORDER BY 1;
+   -- expected: forcing_station_timeseries_narrow_pkey, forcing_ts_version_variable_time_key_idx
+   ```
+
+   Re-run `scripts/node27_provision_write_roles.sh` (§9.6, mandatory after any
+   migrate). Start the display API; confirm the QHH latest-product endpoint and
+   one station series answer. Restore only the timers that were active before
+   the window, last, from the file written in step 3:
+
+   ```bash
+   systemctl --user start nhms-display-api.service
+   # ... endpoint checks above ...
+   while read -r unit active _; do
+     if [ "$active" = active ]; then systemctl --user start "$unit"; fi
+   done < "$RECEIPT_DIR/timers-before.txt"
+   for unit in "${timers[@]}"; do
+     printf '%s %s\n' "$unit" "$(systemctl --user show "$unit" -p ActiveState --value)"
+   done | tee "$RECEIPT_DIR/timers-after.txt"
+   ```
+
+   `start`, not `enable --now`: the enablement recorded in step 3 is left as it
+   was, and a timer that was inactive before the window stays inactive. The
+   first two columns of `timers-after.txt` must equal those of
+   `timers-before.txt`. `Persistent=true` timers whose slot passed during the
+   window (governance at 04:10 UTC) fire as soon as they are started. Confirm
+   one autopipe tick completes green.
+7. Record the timeline, the gate readings, the pending-set output, the
+   post-state and the first green tick as the execution receipt, link it in the
+   table at the top of this section and change the status line. Until then this
+   section stays "NOT YET EXECUTED".
+
+#### 4.12.5 After the window
+
+`scripts/ops/node27_2621_delete_rename_leftovers.sql` (#2621, not yet applied)
+holds in both catalog states: with the legacy table present it expects its two
+foreign keys and probes it, with the table absent it expects neither and skips
+the probe with a NOTICE. It may run before or after `000066`.
+`scripts/ops/node27_1729_delete_evidence_basin.sql` is executed history
+(2026-09-24) and names the two legacy foreign keys in an equality check; it
+will refuse on a contracted catalog and is not to be re-run.
 
 ## 8. Gated DB retention (`timeseries-db-retention`)
 
@@ -8308,7 +8759,7 @@ scan and fails if a lane grows a requirement this table does not cover.
 | Unit (systemd) | Entrypoint | Measured DB requirement | Role |
 |---|---|---|---|
 | `nhms-node27-autopipe.service` | `scripts/node27_autopipeline.py` | DML across `core`/`met`/`hydro`/`ops`/`map`; **`ANALYZE` on frontier chunks and on authority tables** → ownership. No `compress_chunk`/`drop_chunks`/policy calls, no runtime `CREATE TABLE`/`CREATE INDEX`/`TRUNCATE`/`REFRESH MATERIALIZED VIEW` | `nhms_ingest_rw` |
-| `nhms-node27-download.service` | `scripts/node27_download_once.sh` → `node27_download_cycles.py` → `nhms-gfs`/`nhms-ifs download` | **no database connection at all** (no `execute(`, no `psycopg2`/`DATABASE_URL` under `workers/data_adapters/`); the `met.*` forcing DML is applied from the ingest lane | `nhms_download_rw` (DML on `met` only — provisioned so the template's promise holds and a future adapter write does not land on the superuser) |
+| `nhms-node27-download.service` | `scripts/node27_download_once.sh` → `node27_download_cycles.py` → `nhms-gfs`/`nhms-ifs download` | DML on `met.data_source` and `met.forecast_cycle` only: the wrapper requires `DATABASE_URL` when it sources its env file (`scripts/node27_download_once.sh:76-78`), and the adapters write through `PsycopgMetStore` (`workers/data_adapters/gfs_adapter.py:420`, `ifs_adapter.py:335` → `packages/common/met_store.py:71,120,204`). There is no SQL text under `workers/data_adapters/` itself; the `met.*` forcing DML is applied from the ingest lane | `nhms_download_rw` (DML on `met` only) |
 | `nhms-node27-timeseries-compression.service` (compression leg) | `scripts/node27_timeseries_compression.py:595` | `compress_chunk(regclass)` → ownership; read-only watermark query | `nhms_ingest_rw` |
 | Withdrawn cold-residency leg (source retirement complete; R3 removed cold grant/positive audit from repository source; not a deployment instruction) | `scripts/node27_cold_residency.py` → `packages/common/compressed_chunk_cold_residency.py` | Historical `ALTER TABLE/INDEX … SET TABLESPACE nhms_cold` and tablespace `CREATE`; source retirement does not authorize live `REVOKE`/`DROP` | historical `nhms_ingest_rw` requirement only |
 | `nhms-node27-timeseries-retention.service` | `scripts/node27_timeseries_retention.py:851` | `drop_chunks(...)` → ownership | `nhms_ingest_rw` |

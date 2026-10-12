@@ -26,6 +26,7 @@ node-27 的 `hydro.river_timeseries` 未压缩工作集已经大到威胁 `/home
 - `river-identity-normalization`: MODIFIED "in-boundary river_timeseries readers SHALL filter by surrogate keys with field-identical external responses"（text aid 只属 legacy 变体；narrow 变体无 text 谓词；`valid_time` 索引结论限定为 legacy）；REMOVED "river_timeseries identity columns SHALL have integer surrogate-key targets with an idempotent, bounded, receipted backfill"（authority 表的 000050 键保留为身份权威，backfill runner 与 cutover/verify 函数删除）、"writers SHALL dual-write"、"Out-of-boundary consumers ... transitional aids"、"The parser's replace chain SHALL locate rows by surrogate keys end to end"（其存活条款并入 `timeseries-narrow-store`）、"The forcing-copyback transitional pushdown aid SHALL be labelled"、"The identity backfill SHALL bound lock waits"。
 - `output-parsing`: MODIFIED "TimescaleDB ingestion into river_timeseries"（列集与主键改为键形态）。
 - `hypertable-compression`: MODIFIED "The compression per-tick bound MUST be a capacity-derived target consistent across template, live env, and receipts"（chunk 宽度为输入、legacy 兄弟按有限存量建模、模板 lag 赋值对齐 live）。
+- `autopipe-parse-failure-residency`: MODIFIED "A resident parse-stage failure SHALL raise an operator alert and a self-healing burst SHALL NOT"（#1993 第一刀：观察器不再读 `met.forcing_version.timeseries_store`，没有 `legacy_store_refused` 类；场景标题按历史保留）。
 - 关系说明：`timeseries-working-set-governance` 只新增推荐码，`timeseries-db-retention` 的"critical 即非零退出"契约不变；`timeseries-index-hygiene` 的证据门以引用方式适用于本 change 消失的两个索引，其 requirement 文本不改。
 
 ## Impact

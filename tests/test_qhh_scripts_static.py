@@ -954,10 +954,9 @@ def test_qhh_backend_smoke_tests_never_write_tracked_sources() -> None:
 class _QhhCatalogCursor:
     """DB-API boundary capture: catalog and run rows, never mocked script helpers."""
 
-    def __init__(self, run_ids, *, forcing_ids=(), legacy_forcing_table=False):
+    def __init__(self, run_ids, *, forcing_ids=()):
         self.run_ids = tuple(run_ids)
         self.forcing_ids = tuple(forcing_ids)
-        self.legacy_forcing_table = legacy_forcing_table
         self.statements = []
         self.rows = []
         self.rowcount = 0
@@ -980,8 +979,6 @@ class _QhhCatalogCursor:
             self.rows = [{"run_id": params[0], "status": "succeeded"}]
         elif "SELECT forcing_version_id" in sql:
             self.rows = [{"forcing_version_id": forcing_id} for forcing_id in self.forcing_ids]
-        elif "to_regclass(" in sql:
-            self.rows = [{"present": self.legacy_forcing_table}]
         elif "count(DISTINCT river_segment_key)" in sql:
             self.rows = [{"rows": 4, "segment_count": 2, "min_m3s": 1, "max_m3s": 3, "avg_m3s": 2}]
 
@@ -1028,24 +1025,21 @@ def test_qhh_reset_deletes_river_rows_from_the_one_fact_table(monkeypatch, tmp_p
     assert "secret-do-not-print" not in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("legacy_forcing_table", [True, False])
-def test_qhh_reset_deletes_forcing_rows_narrow_and_legacy_only_while_it_exists(
-    monkeypatch, tmp_path, legacy_forcing_table
-):
-    """Fixture ``I14-1993.md`` D5: the narrow DELETE always, the legacy one guarded.
+def test_qhh_reset_deletes_forcing_rows_from_the_one_fact_table(monkeypatch, tmp_path):
+    """One forcing DELETE, against the narrow table, and no catalog probe.
 
-    The renamed legacy table's foreign keys to ``met.forcing_version`` carry no
-    ``ON DELETE CASCADE``, so a smoke database that still holds pre-expand rows
-    would fail the later ``DELETE FROM met.forcing_version`` unless they go
-    first. The bare statement is issued only when ``to_regclass`` finds the
-    table — task 8.2 drops it — and before the version rows are deleted. Neither
-    statement selects ids by the routing column.
+    This was parametrized over whether ``to_regclass`` found the renamed legacy
+    table (fixture ``I14-1993.md`` D5): the reset issued a second, bare DELETE
+    against it while it existed. Migration 000066 (task 8.2, fixture
+    ``I14-1993-task82.md`` D3) drops that table, so the probe and the second
+    statement have no subject; what remains is the one narrow DELETE, issued
+    before the version rows go, selecting by key and never by a routing column.
 
-    #1990 M1b: EQUALITY on each whole DELETE, not a prefix match.
+    #1990 M1b: EQUALITY on the whole DELETE, not a prefix match.
     """
     from scripts import reset_qhh_smoke_db as reset
 
-    cursor = _QhhCatalogCursor(("run",), forcing_ids=("forc_a", "forc_b"), legacy_forcing_table=legacy_forcing_table)
+    cursor = _QhhCatalogCursor(("run",), forcing_ids=("forc_a", "forc_b"))
     monkeypatch.setenv("DATABASE_URL", "secret-do-not-print")
     monkeypatch.setattr(reset.psycopg2, "connect", lambda _: cursor)
     monkeypatch.setattr(reset, "RUN_ROOT", tmp_path)
@@ -1061,13 +1055,11 @@ def test_qhh_reset_deletes_forcing_rows_narrow_and_legacy_only_while_it_exists(
         f"DELETE FROM {FORCING_TABLE} AS fst WHERE fst.forcing_version_key IN ("
         "SELECT forcing_version_key FROM met.forcing_version WHERE forcing_version_id = ANY(%s))"
     )
-    legacy_delete = "DELETE FROM met.forcing_station_timeseries_legacy WHERE forcing_version_id = ANY(%s)"
-    expected = [narrow_delete, legacy_delete] if legacy_forcing_table else [narrow_delete]
-    assert [sql for sql, _ in forcing_deletes] == expected
-    assert all(params == (["forc_a", "forc_b"],) for _, params in forcing_deletes)
-
-    probes = [params for sql, params in cursor.statements if "to_regclass(" in sql]
-    assert probes == [("met.forcing_station_timeseries_legacy",)]
+    assert forcing_deletes == [(narrow_delete, (["forc_a", "forc_b"],))]
+    # Non-vacuity for the collapse: no probe, and the dropped table is not named
+    # in any statement or parameter.
+    assert not any("to_regclass(" in sql for sql in statements)
+    assert not any("_legacy" in sql or "_legacy" in repr(params) for sql, params in cursor.statements)
     version_delete = next(
         index for index, sql in enumerate(statements) if sql.startswith("DELETE FROM met.forcing_version WHERE")
     )

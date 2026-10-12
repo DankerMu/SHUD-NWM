@@ -29,6 +29,13 @@ Four things live here and nothing else:
    version whose column still reads ``legacy`` is replaced like any other: the
    rows land in the narrow table, the legacy rows are untouched, nothing raises.
 
+PINNED AT 000065. Every catalog here is the EXPAND-era one: the file reads and
+writes ``met.forcing_station_timeseries_legacy`` and
+``met.forcing_version.timeseries_store``, both of which the forcing contract
+(migration 000066, #1993 task 8.2) drops. That transitional state still exists
+inside every from-zero rebuild, so the pin keeps these oracles meaningful; the
+post-contract catalog is ``tests/test_forcing_timeseries_contract_integration.py``'s.
+
 SILENT-SKIP TRAP. ``tests/conftest.py``'s ``_integration_skip_reason`` skips this
 whole module unless ``NHMS_RUN_INTEGRATION=1`` AND
 ``NHMS_INTEGRATION_DATABASE_URL`` are set; a generic ``DATABASE_URL`` is ignored.
@@ -67,6 +74,10 @@ pytestmark = pytest.mark.integration
 
 NARROW_TABLE = "met.forcing_station_timeseries"
 LEGACY_TABLE = "met.forcing_station_timeseries_legacy"
+
+#: The last migration before the forcing contract (000066) drops the legacy
+#: table and the routing column this file is about.
+EXPAND_ERA = "000065"
 
 #: Spec :5, in the migration's own declaration order. Nullability included: it is
 #: half the claim, and ``native_resolution`` is the one column an implementer
@@ -128,8 +139,8 @@ def _connect(database_url: str) -> Any:
 
 @pytest.fixture()
 def expanded_database(throwaway_database_url: str) -> str:
-    """A throwaway catalog with EVERY migration applied, 000061 included."""
-    apply_migrations_from_zero(throwaway_database_url)
+    """A throwaway catalog at the end of the expand era: 000061 applied, 000066 not."""
+    apply_migrations_from_zero(throwaway_database_url, through=EXPAND_ERA)
     return throwaway_database_url
 
 
@@ -371,7 +382,7 @@ def test_routing_backfill_classifies_by_row_existence_in_the_legacy_table(
     finally:
         connection.close()
 
-    apply_migrations_from_zero(throwaway_database_url)
+    apply_migrations_from_zero(throwaway_database_url, through=EXPAND_ERA)
 
     connection = _connect(throwaway_database_url)
     try:

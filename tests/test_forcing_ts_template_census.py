@@ -39,9 +39,9 @@ all nine readers**, so:
   register name every one of them. A tenth pair beside the nine is red there,
   which is also what stops it from silently skipping ``test_i1_i2_*``,
   ``test_i5_*`` and the ``params`` claim.
-* **four of the five wired reader files are GONE from the census, by design**
-  (the fifth, ``scripts/reset_qhh_smoke_db.py``, is back at 1 until task 8.2 —
-  see :data:`TASK_83A_ADDED_MENTIONS`). Their
+* **all five wired reader files are GONE from the census, by design**
+  (``scripts/reset_qhh_smoke_db.py`` was back at 1 between #1993's first cut
+  and task 8.2, which dropped the legacy table and that mention with it). Their
   templates carry :data:`~packages.common.forcing_ts_render.FORCING_TABLE_TOKEN`
   rather than the name, so ``packages/common/display_coverage.py``,
   ``packages/common/best_available.py``,
@@ -103,6 +103,7 @@ import pytest
 
 from packages.common.forcing_ts_render import render_forcing_ts_sql
 from tests.forcing_ts_template_registry import (
+    _PRUNED_DIRECTORIES,
     DISCOVERY_ROOTS,
     EXEMPT_MENTIONS,
     FORCING_REGISTRY,
@@ -143,6 +144,11 @@ from tests.forcing_ts_template_registry import (
 # constant (2 → 1) and gave `scripts/reset_qhh_smoke_db.py` one bare,
 # to_regclass-guarded DELETE against the renamed legacy table (0 → 1, removed
 # with task 8.2): still 38, across 12 files.
+#
+# Task 8.2 (fixture `I14-1993-task82.md` D3, migration 000066) dropped that
+# table and the DELETE with it (1 → 0): 37 non-renderer mentions plus the
+# renderer's one, across 11 files, and NOT ONE of them names the legacy table —
+# see :func:`test_no_python_source_names_the_dropped_legacy_forcing_table`.
 # ---------------------------------------------------------------------------
 FORCING_TABLE_CENSUS: dict[str, int] = {
     "db/seeds/seed_demo.py": 3,
@@ -153,7 +159,6 @@ FORCING_TABLE_CENSUS: dict[str, int] = {
     "scripts/node27_autopipeline.py": 1,
     "scripts/node27_timeseries_compression_capture.py": 2,
     "scripts/node27_timeseries_compression_live_evidence.py": 1,
-    "scripts/reset_qhh_smoke_db.py": 1,
     "services/production_closure/two_node_e2e_readonly_db_lane.py": 2,
     "workers/forcing_producer/file_store.py": 2,
     "workers/forcing_producer/store.py": 5,
@@ -190,14 +195,11 @@ TASK_73_ADDED_MENTIONS = 1
 #: stay the fixed points they were measured as.
 ISSUE_2517_REMOVED_MENTIONS = 2
 
-#: Mentions #1993's first cut ADDED (fixture ``I14-1993.md`` D5/D7), declared for
-#: the same reason: the smoke reset's one name-only mention of the renamed legacy
-#: table. Task 8.2 drops that table and this goes back to 0 with it.
-TASK_83A_ADDED_MENTIONS = 1
-
-#: The file that mention lives in — the one wired reader file that is back in
-#: the census until task 8.2.
-LEGACY_RESET_FILE = "scripts/reset_qhh_smoke_db.py"
+#: The relation migration 000066 (task 8.2) drops. #1993's first cut left ONE
+#: mention of it under the discovery roots — the smoke reset's guarded DELETE —
+#: and task 8.2 removed it; the spec's census clause ("the forcing census SHALL
+#: show no legacy-table reference") is pinned on this name.
+DROPPED_LEGACY_FORCING_TABLE = "forcing_station_timeseries_legacy"
 
 #: The five files whose forcing readers task 7.2 wired. Their READER mentions are
 #: all 0 since #2517 removed `forecast_store.py`'s last two non-SQL index
@@ -430,15 +432,40 @@ def test_the_nine_readers_left_the_exemption_ledger() -> None:
     """
     assert UNWIRED_READERS == ()
     still_exempt = {row.path for row in EXEMPT_MENTIONS} & set(WIRED_READER_FILES)
-    assert still_exempt == {LEGACY_RESET_FILE}, (
-        "no wired reader file may keep an exemption row for a READ: forecast_store.py's was the last "
-        "one, and #2517 removed it by deriving its index payloads' table name from the renderer's "
-        "constant. The one row left is the smoke reset's bare legacy-table DELETE (fixture "
-        "`I14-1993.md` D5), which task 8.2 removes with the table"
+    assert still_exempt == set(), (
+        "no wired reader file may keep an exemption row: forecast_store.py's last READ row went with "
+        "#2517, and the smoke reset's bare legacy-table DELETE (fixture `I14-1993.md` D5) went with "
+        "task 8.2, which drops the table"
     )
-    legacy_reset_rows = [row for row in EXEMPT_MENTIONS if row.path == LEGACY_RESET_FILE]
-    assert [row.count for row in legacy_reset_rows] == [TASK_83A_ADDED_MENTIONS]
-    assert "8.2" in legacy_reset_rows[0].owner
+
+
+def test_no_python_source_names_the_dropped_legacy_forcing_table() -> None:
+    """The spec's census clause: the forcing census shows NO legacy-table reference.
+
+    Migration 000066 drops ``met.forcing_station_timeseries_legacy``. A statement
+    that still names it is not transitional any more, it is an `UndefinedTable`
+    waiting for its first execution — so the claim is checked over the same
+    discovery roots the census walks, by the bare relation name rather than by
+    the counter's schema-qualified spelling class: a `to_regclass` argument, an
+    unqualified `FROM` and an f-string fragment would all be the same mistake.
+    Docstrings and comments count too; none is left to excuse.
+
+    SQL files are out of scope here on purpose. The two that name it are ops
+    scripts fixture ``I14-1993-task82.md`` D3 dispositions individually: #1729's
+    is executed history, #2621's holds in both catalog states and has its own
+    two-state integration test.
+    """
+    assert all(DROPPED_LEGACY_FORCING_TABLE not in row.note for row in EXEMPT_MENTIONS)
+    offenders: list[str] = []
+    for root in DISCOVERY_ROOTS:
+        for path in sorted(REPO_ROOT.joinpath(root).rglob("*.py")):
+            relative = path.relative_to(REPO_ROOT)
+            if any(part in _PRUNED_DIRECTORIES for part in relative.parts):
+                continue
+            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+                if DROPPED_LEGACY_FORCING_TABLE in line:
+                    offenders.append(f"{relative.as_posix()}:{number}")
+    assert offenders == []
 
 
 def test_the_declared_census_reproduces_the_fixture_baseline() -> None:
@@ -456,27 +483,27 @@ def test_the_declared_census_reproduces_the_fixture_baseline() -> None:
     assert UNWIRED_READERS == ()
     assert len(FORCING_REGISTRY) == FIXTURE_BASELINE_READER_MENTIONS
     assert (
-        non_read_mentions - TASK_73_ADDED_MENTIONS - TASK_83A_ADDED_MENTIONS + ISSUE_2517_REMOVED_MENTIONS
+        non_read_mentions - TASK_73_ADDED_MENTIONS + ISSUE_2517_REMOVED_MENTIONS
         == FIXTURE_BASELINE_EXEMPT_MENTIONS
     )
     assert declared == non_read_mentions + renderer_mentions
     assert renderer_mentions == 1
-    # C3's 47 = the 38 that are not reads + the 9 that were. Task 7.3's and
-    # #1993's additions are subtracted and #2517's removal added back, so the
-    # historical measurement stays a fixed point rather than being re-agreed.
+    # C3's 47 = the 38 that are not reads + the 9 that were. Task 7.3's
+    # addition is subtracted and #2517's removal added back, so the historical
+    # measurement stays a fixed point rather than being re-agreed. (#1993's
+    # first cut added one smoke-reset mention and task 8.2 removed it: net 0.)
     assert (
         declared
         - renderer_mentions
         - TASK_73_ADDED_MENTIONS
-        - TASK_83A_ADDED_MENTIONS
         + ISSUE_2517_REMOVED_MENTIONS
         + len(FORCING_REGISTRY)
         == FIXTURE_BASELINE_MENTIONS
     )
-    # All five reader files left the set (#2517 took the last one), the renderer
-    # module joined, and #1993's bare legacy DELETE brought the smoke reset back
-    # until task 8.2.
-    assert len(FORCING_TABLE_CENSUS) == FIXTURE_BASELINE_FILES - 5 + 1 + 1
+    # All five reader files left the set (#2517 took the last one; the smoke
+    # reset came back for #1993's bare legacy DELETE and left again with task
+    # 8.2) and the renderer module joined.
+    assert len(FORCING_TABLE_CENSUS) == FIXTURE_BASELINE_FILES - 5 + 1
     assert set(RENDERER_CONSTANTS) == {
         row for row in EXEMPT_MENTIONS if row.path == "packages/common/forcing_ts_render.py"
     }
@@ -495,17 +522,16 @@ def test_the_wired_reader_files_dropped_out_of_the_census_by_design() -> None:
     from files nobody ever swept — so the drop is pinned against the LIVE
     counter over each file's current source.
 
-    The smoke reset is the one declared exception: its single mention is the
-    bare legacy-table DELETE of fixture ``I14-1993.md`` D5, not a read, and task
-    8.2 takes it back to 0.
+    The smoke reset was the one declared exception between #1993's first cut
+    and task 8.2 (its bare legacy-table DELETE, fixture ``I14-1993.md`` D5);
+    task 8.2 took it back to 0 with the table.
     """
     discovered = discover_forcing_mentions()
     for path in WIRED_READER_FILES:
         source = REPO_ROOT.joinpath(*path.split("/")).read_text(encoding="utf-8")
         counted = forcing_table_mentions(source, filename=path)
-        expected = TASK_83A_ADDED_MENTIONS if path == LEGACY_RESET_FILE else 0
-        assert counted == expected, f"{path}: {counted} qualified mentions, expected {expected}"
-        assert discovered.get(path, 0) == expected
+        assert counted == 0, f"{path}: {counted} qualified mentions, expected 0"
+        assert path not in discovered
 
 
 def test_a_wired_reader_that_respells_the_table_name_is_red() -> None:

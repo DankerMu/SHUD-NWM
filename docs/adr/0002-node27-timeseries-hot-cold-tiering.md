@@ -27,6 +27,12 @@ not as the in-place cutover; Decision 4's river segmentby/orderby list, its
 "no database-enforced referential integrity" cost record are superseded — see
 "Amendment (2026-09-19)" below)
 
+Amendment: 2026-10-11 (the forcing narrow store shipped the same way — `000061`
+expand on 2026-09-20; the forcing contract `000066` is merged code and **not yet
+applied**: Decision 4's forcing segmentby/orderby list is superseded for the
+narrow table now, and for the whole forcing plane when `000066` is applied — see
+"Amendment (2026-10-11)" below)
+
 ## Status
 
 Accepted, as amended below. **Current selective-cold direction: repository source
@@ -186,7 +192,8 @@ the union of the segmentby and orderby lists above. The forcing half of
 Decision 4 (`met.forcing_station_timeseries`, segmentby
 `forcing_version_id, station_id`) is **unchanged** — that hypertable was not
 renamed, recreated, or contracted here; its expand is still the deferred I12
-work.
+work. (Superseded: `000061` expanded it on 2026-09-20 — see "Amendment
+(2026-10-11)".)
 
 Decision 4's parenthetical "compress-after lag is configurable (default one
 chunk width, 7 days)" is stale in both halves: the live lag is **172800 s
@@ -236,6 +243,72 @@ deferred, exactly as the 2026-08-15 amendment's "Disposition for Decision 6"
 narrowed it. The 2919 legacy-routed runs that lost their last physical copy, and
 the pre-existing populated-but-empty coverage rows found beside them, are
 accounted for in the receipt's §8 and §10, not here.
+
+## Amendment (2026-10-11): the forcing narrow store; the delivered geometry after 000066 takes effect when that migration is applied
+
+**Effect date: not yet.** This amendment records a decision and the migration
+source that implements it. `000066_forcing_timeseries_contract.sql` has **not
+been applied on node-27**; the paragraphs marked "after 000066" describe the
+catalog that migration will leave, and they become the description of
+production only when it is applied in the window procedure of
+[`docs/runbooks/tier-node27-timeseries-storage.md`](../runbooks/tier-node27-timeseries-storage.md)
+§4.12 and the execution receipt is linked there. Until then the legacy forcing
+table and the routing column exist on node-27.
+
+The 2026-09-19 amendment above said the forcing half of Decision 4 was
+"unchanged — that hypertable was not renamed, recreated, or contracted here; its
+expand is still the deferred I12 work". That stopped being true the next day,
+and this amendment supersedes that sentence:
+
+- `000061_forcing_station_timeseries_narrow_expand.sql` (applied on node-27
+  2026-09-20) renamed the text-identity table to
+  `met.forcing_station_timeseries_legacy` (`:230-232`), created a key-only
+  `met.forcing_station_timeseries` (`:241-252`) as a hypertable with
+  `chunk_time_interval => interval '1 day'` (`:255-257`), set its compression
+  configuration (`:296-300`), added `forcing_version_key` / `station_key` to the
+  two authority tables (`:192-195`) and added the routing column
+  `met.forcing_version.timeseries_store` (`:313-314`).
+- `000066_forcing_timeseries_contract.sql` drops the legacy table and the routing
+  column, in one `DO` block that refuses while a legacy-routed version has a
+  `cycle_time` inside the retention window (floor 21 days, a GUC may only widen
+  it; a NULL `cycle_time` counts as inside). It is the forcing mirror of
+  `000060`. No down migration.
+
+### The delivered forcing geometry and compression configuration (after 000066)
+
+| | `met.forcing_station_timeseries` once `000066` is applied |
+|---|---|
+| time dimension | single, `valid_time`, **1 day** (set by `000061`, unchanged by `000066`) |
+| segmentby | `forcing_version_key, station_key` |
+| orderby | `variable_e, valid_time` |
+| primary key | `forcing_station_timeseries_narrow_pkey (forcing_version_key, station_key, variable_e, valid_time)` |
+| indexes | exactly two: the primary key and `forcing_ts_version_variable_time_key_idx (forcing_version_key, variable_e, valid_time DESC)` |
+| foreign keys | two, enforced: `forcing_version_key → met.forcing_version`, `station_key → met.met_station` |
+| sibling tables | none: `met.forcing_station_timeseries_legacy` is dropped |
+| routing | none: `met.forcing_version.timeseries_store` is dropped |
+
+Chunk counts and sizes are deliberately absent: they are measured in the window
+and belong to its receipt, not to this record. The row values above are read
+from the migration source and are pinned on a real catalog by
+`tests/test_forcing_timeseries_contract_integration.py` and
+`tests/test_forcing_narrow_store_expand_integration.py`.
+
+Decision 4's forcing column list (segmentby `forcing_version_id, station_id`,
+`000047`) describes the table `000061` renamed to `_legacy` and `000066` drops.
+For the narrow table it is already history; for the forcing plane as a whole it
+becomes history when `000066` is applied. Decision 4's *principle* still holds
+and is satisfied: the narrow primary key is exactly the union of the segmentby
+and orderby lists, and both foreign-key columns are segmentby columns, so
+TimescaleDB 2.10.2's FK-coverage rule is met as it is for river.
+
+### What this amendment does not claim
+
+It does not claim `000066` has run, and it changes no retention or compression
+policy. Legacy-routed forcing versions whose `cycle_time` is outside the window
+lose their last physical copy when the migration is applied — the same
+visibility loss retention imposes, accepted in the spec's recorded deviation on
+the choice of `cycle_time` over `end_time`. Decision 6's dimension-table half
+stays deferred.
 
 ## Context
 

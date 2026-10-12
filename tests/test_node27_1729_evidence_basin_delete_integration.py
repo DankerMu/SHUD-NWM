@@ -130,7 +130,9 @@ def _seed_basin(
 
 
 def _seed(database_url: str) -> None:
-    apply_migrations_from_zero(database_url)
+    # Pinned before the forcing contract (000066): #1729 is closed (executed 2026-09-24) and its script is
+    # history, whose expected-FK equality names the two FKs of the legacy forcing table 000066 drops.
+    apply_migrations_from_zero(database_url, through="000065")
     with psycopg_connection(database_url) as connection, connection.cursor() as cursor:
         cursor.execute("CREATE SCHEMA flood")
         cursor.execute(

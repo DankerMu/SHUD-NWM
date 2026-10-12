@@ -1,0 +1,46 @@
+identity run=fcst_gfs_2026101100_dg_0883c7e9c1006c6fd347df500315e9df forcing_version=forc_gfs_2026101100_dg_0883c7e9c1006c6fd347df500315e9df basin=basins_qhh cycle_time=2026-10-11 00:00:00+00:00 station=dg-gfs-f7751638e3b5ef6811b6::cell:34028
+fact met.forcing_station_timeseries: 30 chunk(s), 9 compressed; server 15.2 (Ubuntu 15.2-1.pgdg22.04+1) / timescaledb 2.10.2; read_only=on
+PASS forecast_store.latest_product_station_source: fact_seq_scans=0 fact_nodes=14 exec_ms=1446.187 planning_ms=16.971 shared_hit=169928 shared_read=0
+      note: vs legacy baseline 1612.573 ms (2026-09-20, another cycle): x0.90
+PASS forecast_store.station_forcing_membership: fact_seq_scans=0 fact_nodes=14 exec_ms=0.113 planning_ms=1.45 shared_hit=13 shared_read=0
+PASS forecast_store.station_series_rows: fact_seq_scans=0 fact_nodes=16 exec_ms=2.688 planning_ms=1.617 shared_hit=312 shared_read=0
+PASS forecast_store.forcing_readiness_overall: fact_seq_scans=0 fact_nodes=14 exec_ms=19.561 planning_ms=1.41 shared_hit=3707 shared_read=0
+PASS forecast_store.forcing_readiness_variable_rows: fact_seq_scans=0 fact_nodes=14 exec_ms=56.162 planning_ms=1.469 shared_hit=11085 shared_read=0
+PASS display_coverage.station_sample_rows: fact_seq_scans=0 fact_nodes=14 exec_ms=1392.251 planning_ms=8.29 shared_hit=169928 shared_read=0
+      note: analyze leg ran the derived SELECT, not the product INSERT
+PASS best_available.forcing_inputs: fact_seq_scans=0 fact_nodes=78 exec_ms=57.192 planning_ms=4.289 shared_hit=11067 shared_read=0
+FAIL qhh_production_bootstrap.dynamic_forcing_count: fact_seq_scans=30 fact_nodes=39 exec_ms=None planning_ms=None shared_hit=None shared_read=None
+      VIOLATION Seq Scan on _hyper_11_192_chunk [rows=720205 removed_by_filter=0 filter=None]
+      VIOLATION Seq Scan on _hyper_11_195_chunk [rows=1964866 removed_by_filter=0 filter=None]
+      VIOLATION Seq Scan on _hyper_11_196_chunk [rows=2385446 removed_by_filter=0 filter=None]
+      VIOLATION Seq Scan on _hyper_11_199_chunk [rows=2875318 removed_by_filter=0 filter=None]
+      VIOLATION Seq Scan on _hyper_11_203_chunk [rows=2831326 removed_by_filter=0 filter=None]
+      VIOLATION Seq Scan on _hyper_11_207_chunk [rows=2771959 removed_by_filter=0 filter=None]
+      VIOLATION Seq Scan on _hyper_11_214_chunk [rows=3003064 removed_by_filter=0 filter=None]
+      VIOLATION Seq Scan on _hyper_11_218_chunk [rows=3142482 removed_by_filter=0 filter=None]
+      VIOLATION Seq Scan on _hyper_11_222_chunk [rows=3345545 removed_by_filter=0 filter=None]
+      VIOLATION Seq Scan on _hyper_11_246_chunk [rows=3783650 removed_by_filter=0 filter=None]
+      VIOLATION Seq Scan on _hyper_11_250_chunk [rows=3793422 removed_by_filter=0 filter=None]
+      VIOLATION Seq Scan on _hyper_11_254_chunk [rows=3793417 removed_by_filter=0 filter=None]
+      VIOLATION Seq Scan on _hyper_11_256_chunk [rows=3787708 removed_by_filter=0 filter=None]
+      VIOLATION Seq Scan on _hyper_11_262_chunk [rows=3654518 removed_by_filter=0 filter=None]
+      VIOLATION Seq Scan on _hyper_11_265_chunk [rows=3107679 removed_by_filter=0 filter=None]
+      VIOLATION Seq Scan on _hyper_11_269_chunk [rows=2547645 removed_by_filter=0 filter=None]
+      VIOLATION Seq Scan on _hyper_11_273_chunk [rows=1996825 removed_by_filter=0 filter=None]
+      VIOLATION Seq Scan on _hyper_11_277_chunk [rows=1801342 removed_by_filter=0 filter=None]
+      VIOLATION Seq Scan on _hyper_11_281_chunk [rows=1101295 removed_by_filter=0 filter=None]
+      VIOLATION Seq Scan on _hyper_11_285_chunk [rows=571461 removed_by_filter=0 filter=None]
+      VIOLATION Seq Scan on _hyper_11_289_chunk [rows=41050 removed_by_filter=0 filter=None]
+      VIOLATION Seq Scan on compress_hyper_12_229_chunk (compressed batches of _hyper_11_194_chunk) [rows=102952 removed_by_filter=0 filter=None]
+      VIOLATION Seq Scan on compress_hyper_12_230_chunk (compressed batches of _hyper_11_193_chunk) [rows=76312 removed_by_filter=0 filter=None]
+      VIOLATION Seq Scan on compress_hyper_12_240_chunk (compressed batches of _hyper_11_197_chunk) [rows=176964 removed_by_filter=0 filter=None]
+      VIOLATION Seq Scan on compress_hyper_12_244_chunk (compressed batches of _hyper_11_198_chunk) [rows=192088 removed_by_filter=0 filter=None]
+      VIOLATION Seq Scan on compress_hyper_12_271_chunk (compressed batches of _hyper_11_226_chunk) [rows=237714 removed_by_filter=0 filter=None]
+      VIOLATION Seq Scan on compress_hyper_12_275_chunk (compressed batches of _hyper_11_232_chunk) [rows=246542 removed_by_filter=0 filter=None]
+      VIOLATION Seq Scan on compress_hyper_12_279_chunk (compressed batches of _hyper_11_234_chunk) [rows=255370 removed_by_filter=0 filter=None]
+      VIOLATION Seq Scan on compress_hyper_12_283_chunk (compressed batches of _hyper_11_238_chunk) [rows=264198 removed_by_filter=0 filter=None]
+      VIOLATION Seq Scan on compress_hyper_12_287_chunk (compressed batches of _hyper_11_242_chunk) [rows=265071 removed_by_filter=0 filter=None]
+      PROBLEM analyze EXPLAIN skipped: --plan-only-for: the operator asked for no measured execution
+NOT PROBED reset_qhh_smoke_db.forcing_timeseries_delete: not a reader, not probed (a DELETE; never executed, planned or imported by this probe)
+
+SHAPE GATE: RED (8 expected, 1 violating, 0 incomplete)

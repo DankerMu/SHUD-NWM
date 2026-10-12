@@ -408,18 +408,6 @@ NON_READ_MENTIONS: tuple[ExemptMentions, ...] = (
         owner="name-only, no SQL",
         note="the lane's expected-table lists (:72, :88)",
     ),
-    # -- REMOVED WITH TASK 8.2 (fixture `I14-1993.md` D5) ---------------------
-    ExemptMentions(
-        path="scripts/reset_qhh_smoke_db.py",
-        count=1,
-        shape="smoke-reset legacy table name",
-        owner="8.2 (I14) contract migration",
-        note=(
-            "_LEGACY_FORCING_TIMESERIES_TABLE: the one bare DELETE against the renamed legacy table, guarded "
-            "by to_regclass, kept only because that table's foreign keys carry no ON DELETE CASCADE. The "
-            "counter's spelling class has no trailing word boundary, so it matches `…_legacy` as a prefix"
-        ),
-    ),
 )
 
 #: The renderer's own D1 constant. One since #1993's first cut deleted the

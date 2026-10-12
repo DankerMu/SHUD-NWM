@@ -35,13 +35,6 @@ _FORCING_TIMESERIES_DELETE_TEMPLATES = ForcingTemplatePair(
     ),
 )
 
-# REMOVED WITH TASK 8.2, which drops this table. Until then a smoke database may
-# still hold pre-expand rows in it, and its foreign keys to `met.forcing_version`
-# and `met.met_station` carry no ON DELETE CASCADE, so leaving them would fail
-# the `DELETE FROM met.forcing_version` below. Outside the renderer on purpose:
-# no reader names this relation any more.
-_LEGACY_FORCING_TIMESERIES_TABLE = "met.forcing_station_timeseries_legacy"
-
 RUN_ROOT = Path(os.getenv("QHH_RUN_ROOT", ROOT / ".nhms-runs" / "qhh-smoke")).resolve()
 MODEL_ID = os.getenv("QHH_MODEL_ID", "basins_qhh_shud")
 BASIN_ID = os.getenv("QHH_BASIN_ID", "basins_qhh")
@@ -112,15 +105,6 @@ def main() -> int:
             ).sql,
             (forcing_ids,),
         )
-        cur.execute("SELECT to_regclass(%s) IS NOT NULL AS present", (_LEGACY_FORCING_TIMESERIES_TABLE,))
-        if cur.fetchone()["present"]:
-            _delete(
-                cur,
-                deleted,
-                _LEGACY_FORCING_TIMESERIES_TABLE,
-                "forcing_version_id = ANY(%s)",
-                (forcing_ids,),
-            )
         _delete(cur, deleted, "met.forcing_version_component", "forcing_version_id = ANY(%s)", (forcing_ids,))
         _delete(cur, deleted, "met.forcing_version", "forcing_version_id = ANY(%s)", (forcing_ids,))
         _delete(
