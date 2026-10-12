@@ -37,7 +37,7 @@ Each imported reach geometry SHALL be a single-part `MULTILINESTRING` (a `LINEST
 #### Scenario: The river segment list endpoint is retired
 
 - **WHEN** a client requests `GET /api/v1/basin-versions/{basin_version_id}/river-segments`
-- **THEN** no route serves it: the path is absent from the published OpenAPI document and from the generated frontend types, and the request is answered by the framework's not-found / method-not-allowed response rather than by a registry handler
+- **THEN** no route serves it: the response status is `404` and the body is not the API's `ok` / `data` envelope; the path is absent from the published OpenAPI document (`openapi/nhms.v1.yaml` and the runtime schema alike) and from the generated frontend types, and so are the `RiverSegmentFeature` and `RiverSegmentFeatureCollection` components that only the list used
 - **AND** no API response exposes the derived segment-level id form `<model_id>_seg_<iRiv>_<iEle>`; the only river segment ids the API accepts or returns are `core.river_segment.river_segment_id` values (reach rows `<model_id>_reach_<iRiv:06d>` and SHUD output rows)
 - **AND** `GET /api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}` and `.../river-segments/{segment_id}/forecast-series` are unchanged: both still answer 200 for a reach id and for a SHUD output-river id of a renderable segment
 - **AND** `core.river_segment_crosswalk` rows are still written by import and still joinable; retiring the list endpoint removes a reader, not the data

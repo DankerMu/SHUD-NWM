@@ -21,6 +21,14 @@ that no longer exists (the river layer is MVT). The list has no product caller: 
 - Frontend: remove `fetchHydroMetRiverSegments`, its call in `loadHydroMetBootstrap`, and the
   `riverSegments` field / types that carry its result; regenerate `src/api/types.ts`.
 - Spec: the list scenario is replaced by a retirement scenario.
+- The list was the only READER of `core.river_segment_crosswalk` in `apps/` and `packages/`; after this
+  change the table is still written by import but no API path reads it. Stated, not hidden: the living
+  spec lines that speak of crosswalk "hover/click lookups" (`basins-registry-import/spec.md:158-162`,
+  `:254`) lose their only API-level verifier. Whether the crosswalk itself is still wanted is a separate
+  question, not decided here.
+- `docs/governance/API_CONTRACT_DEPRECATION_POLICY.md` says OpenAPI must not contract while external
+  consumers are unknown; the retirement record cites the owner's 2026-10-12 ruling (no external users) as
+  the basis, so the two governance documents do not contradict each other.
 - Docs: `docs/governance/API_CONTRACT_RETIREMENT_INVENTORY.md` gets the retirement record;
   `docs/runbooks/display-mobile-evidence.md` drops the "do not take a pin from the list" workaround in
   favour of the fact that there is no list.

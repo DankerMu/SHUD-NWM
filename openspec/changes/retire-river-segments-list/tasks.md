@@ -20,6 +20,44 @@
       other LIVING docs that advertise the list updated; `services/production_closure/*` fixture
       dictionaries that name the list URL updated or reported.
 
+## Named surfaces (from fixture review; not exhaustive, but each must be dispositioned in the PR)
+
+**OpenAPI is hand-maintained.** `apps/frontend/src/api/types.ts` is generated from
+`openapi/nhms.v1.yaml` (`apps/frontend/package.json:22-23`), and
+`tests/test_openapi_drift.py::test_static_openapi_matches_runtime_schema` requires the YAML to equal
+`app.openapi()`. So: edit the runtime patches, hand-edit the YAML to match, then regenerate types.
+
+- Delete: the two component injections and the list patch in `apps/api/openapi_patching.py` (~:384-391;
+  `_set_operation_response_schema` returns silently for a missing path, so leaving them would keep two
+  orphan components green); the two builders in `apps/api/openapi_restored_schemas.py` (~:185-250);
+  the list response models in `apps/api/response_models/models.py` (~:128-137, :316-317); the store's
+  list entry and its private helpers (`_list_river_segment_rnv_ids`, `_has_segment_crosswalk_for_rnv`,
+  `_list_river_segments_segment_slice`, `_reach_row_to_legacy_feature`); the `RIVER_SEGMENT_COLLECTION_*`
+  constants if nothing else uses them.
+- Keep: `GeoJsonLineString` / `GeoJsonMultiLineString` / `RiverSegment` (detail's `geom` still references
+  them — fix the docstring that names Path C as their source), `RiverSegmentGeoJsonBudgetError` and
+  `RIVER_SEGMENT_DETAIL_MAX_SERIALIZED_BYTES` (detail still uses them).
+- Route count pin: `tests/test_response_model_schema_parity.py:237-238` asserts `len(ROUTES) == 39`; it
+  becomes 38 (the file does not contain the string `river-segments`, so a keyword grep misses it).
+- Backend tests to disposition: `tests/test_api_contract_resources.py` (~:454-489),
+  `tests/test_openapi_response_conformance.py`, `tests/test_response_model_preservation.py`,
+  `tests/test_model_registration.py` (list cases), `tests/test_list_search_contract.py` (delete only the
+  river cases; the FILE stays — met-station cases live there and `scripts/select_ci_tests.py` names it),
+  `tests/api_contract_helpers.py`, `tests/test_basins_registry_import_db.py` and
+  `tests/test_basins_registry_import_qhh.py` (re-point at SQL), `tests/test_real_database_integration.py`
+  (~:242). Frontend: `apps/frontend/src/pages/hydroMet/__tests__/bootstrap.test.ts`.
+- New contract test: `GET` on the list path answers `404` and not an `ok`/`data` envelope (do not assert
+  the body text — the SPA fallback in `apps/api/startup_wiring.py:84-87` answers it); the path and the two
+  components are absent from `app.openapi()`.
+- Living docs to update: `docs/spec/04_api_design.md`, `docs/modules/13_api_backend_design.md`,
+  `docs/modules/13_api_backend_spec.md`, `docs/spec/06_frontend_gis_design.md`,
+  `docs/appendices/E_api_openapi_draft.md`, `docs/runbooks/qhh-backend-smoke.md` (~:218),
+  `docs/runbooks/display-mobile-evidence.md`, `docs/governance/API_CONTRACT_RETIREMENT_INVENTORY.md`.
+  `services/production_closure/scale_validation.py:97` names a list URL with a `bbox` parameter the route
+  never had: remove or replace that synthetic entry with a real endpoint, do not invent another URL.
+- Not touched: `workers/model_registry/basins_geometry.py` `_stable_segment_id` (pre-existing dead `_seg_`
+  generator — report only); historical receipts and `docs/review/**`.
+
 ## 约定
 
 - **Fixture level:** compact. **Risk packs:** api-contract, frontend type sync.
@@ -30,5 +68,8 @@
 - **Evidence floor:** `uv run ruff check .`; touched pytest files green; the new contract test red
   against the pre-change tree; `pnpm tsc` / `pnpm test` / `pnpm check:api-types` green;
   `openspec validate retire-river-segments-list --strict`; `git grep "_seg_"` in `apps/ packages/`
-  shows no remaining producer of the derived id. node-27 real-DB pytest for the touched integration
-  files from the verify checkout. No production deploy.
+  shows no remaining producer of the derived id; `git grep -nE "list_river_segments|river-segments[\"'?]" -- apps packages tests services`
+  leaves only the new contract test. Must-run even though not edited: `tests/test_openapi_drift.py`,
+  `tests/test_response_model_schema_parity.py`. node-27 real-DB pytest for the touched integration
+  files (`tests/test_real_database_integration.py`, the two basins-registry import DB files) from the
+  verify checkout. No production deploy.
