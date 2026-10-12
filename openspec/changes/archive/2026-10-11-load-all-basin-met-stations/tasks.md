@@ -15,4 +15,4 @@
 ## 4. Verification
 - [x] 4.1 `pnpm test`, `typecheck`, `check:types`, `build`, full mocked Playwright lane
 - [x] 4.2 `openspec validate load-all-basin-met-stations --strict --no-interactive`
-- [ ] 4.3 node-27 live receipt (orchestrator)
+- [x] 4.3 node-27 live receipt (orchestrator)

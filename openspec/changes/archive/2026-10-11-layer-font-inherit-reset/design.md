@@ -67,10 +67,11 @@ only one that renders `M11Controls`' speed select). Reuse the control enumeratio
 station curve windows open, the log dialog, a region error boundary, `/ops` including the rollback
 select, the monitoring page and the model-assets page.
 
-"Before" and "after" are measured in one checkout: right after deleting the rule and **before any class
-edit**, measure once with `page.addStyleTag({ content: 'button,input,select,textarea{font:inherit}' })`
-(the same unlayered rule, so the cascade equals master's) and once without. The later class edits (D1's
-exceptions, D2) are measured again and listed as separate rows.
+As delivered, "before" is the master rendering and "after" is the final PR head: "before" is measured
+with every source file the PR touches reverted to master (so the unlayered rule and the old classes are
+both back), "after" with the PR as merged. An earlier plan — inject the rule with `page.addStyleTag`
+right after deleting it and before any class edit — was dropped: it would have compared against an
+intermediate state and missed geometry-only changes caused by the later class edits.
 
 Output for the PR body: the rows that differ (page, element, location, property, before → after), grouped
 by page, plus the count of unchanged rows. Screenshots are not compared in the mocked lane
