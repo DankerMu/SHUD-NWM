@@ -503,8 +503,9 @@ def national_tile(
 ) -> Any:
     # 000058 pins RIVER's pre-identity catalog. The display coverage refresh
     # this fixture's tests drive also reads the FORCING plane, whose readers
-    # name `met.forcing_station_timeseries_legacy` unconditionally after
-    # #1991, so the forcing expand applies on top of the river pin.
+    # use the narrow `met.forcing_station_timeseries` and the surrogate keys
+    # 000061 creates, so the forcing expand applies on top of the river pin.
+    # The forcing contract (000066) does not: this catalog stays expand-era.
     apply_migrations_from_zero(throwaway_database_url, through="000058", also=FORCING_PLANE_MIGRATIONS)
     _seed(throwaway_database_url)
     object_root = tmp_path / "object-store"

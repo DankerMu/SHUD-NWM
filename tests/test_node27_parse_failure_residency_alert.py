@@ -707,12 +707,15 @@ def test_the_observation_query_reads_both_sources_and_ignores_the_forcing_store(
                 "INSERT INTO met.data_source (source_id, source_name, source_type, status, adapter_name) "
                 "VALUES ('src-2590', 'GFS', 'forecast', 'mock', 'gfs')"
             )
-            for forcing_id, store in (("fv-legacy", "legacy"), ("fv-narrow", "narrow")):
+            # The ids keep their historical names; the routing column they once
+            # carried is gone at head (migration 000066) and the observer never
+            # read it, so the seed does not name it.
+            for forcing_id in ("fv-legacy", "fv-narrow"):
                 cursor.execute(
                     "INSERT INTO met.forcing_version (forcing_version_id, model_id, source_id, start_time, end_time, "
-                    "station_count, forcing_package_uri, timeseries_store) "
-                    "VALUES (%s, 'm-2590', 'src-2590', now(), now(), 1, 's3://f', %s)",
-                    (forcing_id, store),
+                    "station_count, forcing_package_uri) "
+                    "VALUES (%s, 'm-2590', 'src-2590', now(), now(), 1, 's3://f')",
+                    (forcing_id,),
                 )
             for run_id, status, code, forcing_id, parsed_ago in (
                 ("run-failed-legacy", "failed", "RIVQDOWN_EMPTY", "fv-legacy", None),

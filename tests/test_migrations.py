@@ -81,6 +81,7 @@ EXPECTED_MIGRATIONS: tuple[str, ...] = (
     "000063_hydro_run_partial_index_predicate_convergence.sql",
     "000064_drop_retired_flood_schema.sql",
     "000065_hydro_run_candidate_index_dedup.sql",
+    "000066_forcing_timeseries_contract.sql",
 )
 
 EXPECTED_SCHEMAS = {"core", "met", "hydro", "map", "ops"}
@@ -1808,6 +1809,61 @@ def _split_index_columns(columns_sql: str) -> list[str]:
     if current:
         columns.append("".join(current))
     return columns
+
+
+def test_forcing_contract_is_one_atomic_statement_with_one_spelling_of_its_time_column() -> None:
+    """000066 (#1993 task 8.2), the properties a database run cannot see from outside.
+
+    The behaviour is executed in ``tests/test_forcing_timeseries_contract_integration.py``.
+    What is pinned here is the SHAPE that behaviour depends on and that a later
+    edit could change while every real-DB case stayed green on its seed.
+    """
+    migration = (MIGRATIONS_DIR / "000066_forcing_timeseries_contract.sql").read_text()
+    executable = "\n".join(line for line in migration.splitlines() if not line.strip().startswith("--"))
+
+    # ONE statement to the splitter `packages.common.migrate` applies files with:
+    # under its autocommit a second statement would not be atomic with the first.
+    statements = [statement for statement in split_sql_statements(migration) if statement.strip()]
+    assert len(statements) == 1
+    assert executable.lstrip().startswith("DO $$") and executable.rstrip().endswith("$$;")
+
+    # The refusal window's column is ONE token (specs/forcing-narrow-store/spec.md:
+    # the choice of `cycle_time` over `end_time` stays revisitable), and it is fed
+    # to the count as an identifier with the NULL-is-inside clause.
+    assert executable.count("cycle_time") == 1
+    assert "c_time_column constant text := 'cycle_time';" in executable
+    assert "end_time" not in executable
+    assert "(%I IS NULL OR %I > now() - make_interval(days => $1))" in executable
+    assert "'legacy', c_time_column, c_time_column" in executable
+    # Only LEGACY-routed versions can refuse: a fresh narrow version is always in window.
+    assert "'WHERE timeseries_store = %L '" in executable
+
+    # 21 is a floor the GUC can only widen.
+    assert re.search(
+        r"GREATEST\(\s*21,\s*COALESCE\(NULLIF\(current_setting\('nhms\.retention_window_days', true\), ''\)"
+        r"::integer, 0\)\s*\)",
+        executable,
+    )
+
+    # Both refusals precede both drops; the table goes before the column; nothing
+    # else is dropped and nothing is cascaded.
+    ordered = [
+        "RAISE EXCEPTION",
+        "ELSIF to_regclass('met.forcing_station_timeseries_legacy') IS NOT NULL THEN",
+        "DROP TABLE IF EXISTS met.forcing_station_timeseries_legacy;",
+        "ALTER TABLE met.forcing_version DROP COLUMN IF EXISTS timeseries_store;",
+    ]
+    positions = [executable.index(fragment) for fragment in ordered]
+    assert positions == sorted(positions)
+    assert executable.count("RAISE EXCEPTION") == 2
+    assert len(re.findall(r"\bDROP\b", executable)) == 2
+    assert "CASCADE" not in executable
+
+    # The migrate lane owns the lock wait (default 5s); the file must not override it.
+    assert not re.search(r"\bSET\b[^;]*\b(lock_timeout|statement_timeout)\b", executable)
+    # The header says what an operator needs before running it hot.
+    for stated in ("met.forcing_version", "met.met_station", "ACCESS", "NO down migration", "maintenance window"):
+        assert stated in migration, stated
 
 
 def test_river_expand_pins_canonical_narrow_contract_and_order() -> None:

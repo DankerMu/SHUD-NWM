@@ -59,8 +59,10 @@
 --     successor exists, IS in the manifest and has an active model;
 --   * the live FK set whose parent is a table this delete touches or cascades
 --     through equals the 21 non-chunk FKs inventoried on node-27
---     (TimescaleDB per-chunk copies in _timescaledb_internal excluded); no user
---     trigger on the eight tables deleted from;
+--     (TimescaleDB per-chunk copies in _timescaledb_internal excluded) -- 19
+--     once migration 000066 has dropped met.forcing_station_timeseries_legacy
+--     and its two with it; this script holds in either catalog state, whichever
+--     of the two runs first; no user trigger on the eight tables deleted from;
 --   * per target: exactly its one basin_version / river_network_version /
 --     mesh_version and the inventoried river_segment / crosswalk / met_station
 --     counts; the target stations reference exactly the two pinned
@@ -80,7 +82,8 @@
 --   * Gate A2, with the rows locked: hydro.river_timeseries.river_segment_key,
 --     met.forcing_station_timeseries.station_key and
 --     met.forcing_station_timeseries_legacy.station_id hold 0 rows for the
---     target keys. `= ANY (<array>)` only (a join or IN-subquery decompresses
+--     target keys (the third probe is skipped, with a NOTICE, when 000066 has
+--     already dropped that table). `= ANY (<array>)` only (a join or IN-subquery decompresses
 --     every chunk); each probe is its own statement under its own
 --     statement_timeout (nhms.probe_timeout_s; the timer is armed per
 --     top-level statement), timed in a NOTICE. The transaction is held open
@@ -268,6 +271,7 @@ DECLARE
     v_ids      text[];
     v_want     text[];
     v_fks      text[];
+    v_expected text[];
     v_n        bigint;
 BEGIN
     -- 1. Targets are live-looking rename leftovers; successors are scheduled.
@@ -295,6 +299,15 @@ BEGIN
     END LOOP;
 
     -- 2. Live FK dependents of the touched parents == the inventoried 21; no user trigger.
+    --    Migration 000066 (forcing contract) drops met.forcing_station_timeseries_legacy
+    --    and its two FKs with it. This script may run before or after it, so the two
+    --    are expected exactly when the table exists: 21 before, 19 after.
+    v_expected := ARRAY(
+        SELECT fk FROM unnest(c_expected_fks) fk
+        WHERE to_regclass('met.forcing_station_timeseries_legacy') IS NOT NULL
+           OR fk NOT LIKE 'met.forcing\_station\_timeseries\_legacy|%'
+        ORDER BY fk COLLATE "C"
+    );
     SELECT coalesce(array_agg(fk ORDER BY fk COLLATE "C"), '{}') INTO v_fks
     FROM (
         SELECT c.conrelid::regclass::text || '|' || c.confrelid::regclass::text || '|' || pg_get_constraintdef(c.oid) AS fk
@@ -309,11 +322,14 @@ BEGIN
               'core.river_segment'::regclass, 'core.river_segment_crosswalk'::regclass, 'met.forcing_version'::regclass
           )
     ) live;
-    IF v_fks IS DISTINCT FROM (SELECT array_agg(fk ORDER BY fk COLLATE "C") FROM unnest(c_expected_fks) fk) THEN
+    IF v_fks IS DISTINCT FROM v_expected THEN
         RAISE EXCEPTION '#2621: live FK set differs; unexpected=% missing=%',
-            ARRAY(SELECT unnest(v_fks) EXCEPT SELECT unnest(c_expected_fks)),
-            ARRAY(SELECT unnest(c_expected_fks) EXCEPT SELECT unnest(v_fks));
+            ARRAY(SELECT unnest(v_fks) EXCEPT SELECT unnest(v_expected)),
+            ARRAY(SELECT unnest(v_expected) EXCEPT SELECT unnest(v_fks));
     END IF;
+    RAISE NOTICE '#2621 FK inventory: % of the % pinned FKs expected and found (met.forcing_station_timeseries_legacy %)',
+        cardinality(v_expected), cardinality(c_expected_fks),
+        CASE WHEN to_regclass('met.forcing_station_timeseries_legacy') IS NULL THEN 'absent' ELSE 'present' END;
     SELECT count(*) INTO v_n FROM pg_trigger
     WHERE NOT tgisinternal
       AND tgrelid IN (
@@ -536,11 +552,16 @@ DECLARE
     v_started timestamptz := clock_timestamp();
 BEGIN
     SELECT array_agg(station_id ORDER BY station_id COLLATE "C") INTO v_ids FROM pg_temp.n2621_station;
-    SELECT count(*) INTO v_n FROM met.forcing_station_timeseries_legacy WHERE station_id = ANY (v_ids);
-    RAISE NOTICE '#2621 probe met.forcing_station_timeseries_legacy.station_id: % row(s) for % id(s) in %',
-        v_n, cardinality(v_ids), clock_timestamp() - v_started;
-    IF v_n <> 0 THEN
-        RAISE EXCEPTION '#2621: met.forcing_station_timeseries_legacy.station_id: % row(s) reference the targets', v_n;
+    IF to_regclass('met.forcing_station_timeseries_legacy') IS NULL THEN
+        -- Dropped by migration 000066: no relation, so no row can reference the targets.
+        RAISE NOTICE '#2621 probe met.forcing_station_timeseries_legacy.station_id: skipped, the relation is absent (dropped by migration 000066)';
+    ELSE
+        SELECT count(*) INTO v_n FROM met.forcing_station_timeseries_legacy WHERE station_id = ANY (v_ids);
+        RAISE NOTICE '#2621 probe met.forcing_station_timeseries_legacy.station_id: % row(s) for % id(s) in %',
+            v_n, cardinality(v_ids), clock_timestamp() - v_started;
+        IF v_n <> 0 THEN
+            RAISE EXCEPTION '#2621: met.forcing_station_timeseries_legacy.station_id: % row(s) reference the targets', v_n;
+        END IF;
     END IF;
     -- Invariant, not a substitute for the probes: every river_timeseries row hangs
     -- off a hydro_run through run_key, and the targets own none (step 3).

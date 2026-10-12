@@ -18,6 +18,14 @@ counts -- there is no count-override path to test against a smaller seed:
   in all three hypertables -- inside COMPRESSED chunks, so the zero-reference
   probes scan real compressed data and must still find nothing for the targets.
 
+Two catalog states. #2621 is not yet applied on production and may run before
+or after the forcing contract (migration 000066), which drops
+``met.forcing_station_timeseries_legacy`` and its two foreign keys. The script
+must hold in both: ``PRE_CONTRACT`` builds the catalog to 000065 (the legacy
+table exists, is seeded and is probed; 21 FKs), ``CONTRACTED`` builds it to head
+(no such table; the probe is skipped with a NOTICE; 19 FKs). Cases that are not
+about that table run at head.
+
 Every table the delete touches is fingerprinted (row count + md5 over each
 row's full text, identity keys and the generated ``stream_type`` included), so
 "nothing deleted" and "restored byte for byte" are exact comparisons.
@@ -72,6 +80,11 @@ CONTROL = "basins_it2621_control"
 # What the operator passes from manifest-last.json: the successors are scheduled.
 MANIFEST = ",".join((*SUCCESSORS, CONTROL))
 SETTINGS = {"nhms.manifest_basins": MANIFEST}
+
+LEGACY_FORCING_TABLE = "met.forcing_station_timeseries_legacy"
+#: `apply_migrations_from_zero(through=...)` pins for the two catalog states.
+PRE_CONTRACT: str | None = "000065"  # 000066 not applied: the legacy forcing table still exists
+CONTRACTED: str | None = None  # head: 000066 has dropped it
 
 
 def _ids(basin_id: str) -> tuple[str, str, str]:
@@ -215,9 +228,20 @@ def _seed_basin(cursor: Any, basin_id: str, models: tuple[tuple[str, bool], ...]
     )  # fmt: skip
 
 
-def _seed(database_url: str) -> dict[str, int]:
-    """Seed the inventory; return the control run / forcing keys the hypertable rows hang off."""
-    apply_migrations_from_zero(database_url)
+def _legacy_forcing_table_exists(database_url: str) -> bool:
+    with psycopg_connection(database_url) as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT to_regclass(%s) IS NOT NULL AS present", (LEGACY_FORCING_TABLE,))
+        return bool(cursor.fetchone()["present"])
+
+
+def _seed(database_url: str, *, through: str | None = CONTRACTED) -> dict[str, int]:
+    """Seed the inventory; return the control run / forcing keys the hypertable rows hang off.
+
+    ``through`` picks the catalog state (module docstring). The legacy forcing
+    table gets its control row exactly when that state still has the table.
+    """
+    apply_migrations_from_zero(database_url, through=through)
+    assert _legacy_forcing_table_exists(database_url) is (through == PRE_CONTRACT)
     with psycopg_connection(database_url) as connection, connection.cursor() as cursor:
         _seed_grid_snapshots(cursor)
         # The control basin first, so no target identity key is 1.
@@ -272,7 +296,8 @@ def _seed(database_url: str) -> dict[str, int]:
     # Control rows in every hypertable, compressed: the probes must scan them and find no target key.
     _insert_hypertable_row(database_url, "hydro.river_timeseries", keys, segment_key, station)
     _insert_hypertable_row(database_url, "met.forcing_station_timeseries", keys, segment_key, station)
-    _insert_hypertable_row(database_url, "met.forcing_station_timeseries_legacy", keys, segment_key, station)
+    if through == PRE_CONTRACT:
+        _insert_hypertable_row(database_url, LEGACY_FORCING_TABLE, keys, segment_key, station)
     return keys
 
 
@@ -362,9 +387,39 @@ def _mkdir(tmp_path: Path, name: str) -> Path:
     return directory
 
 
-def test_apply_then_rollback_restores_every_row_byte_exact(throwaway_database_url: str, tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("through", "legacy_notices", "absent_notices"),
+    [
+        (
+            PRE_CONTRACT,
+            (
+                "#2621 FK inventory: 21 of the 21 pinned FKs expected and found "
+                "(met.forcing_station_timeseries_legacy present)",
+                "#2621 probe met.forcing_station_timeseries_legacy.station_id: 0 row(s) for 2290 id(s) in",
+            ),
+            ("met.forcing_station_timeseries_legacy.station_id: skipped",),
+        ),
+        (
+            CONTRACTED,
+            (
+                "#2621 FK inventory: 19 of the 21 pinned FKs expected and found "
+                "(met.forcing_station_timeseries_legacy absent)",
+                "#2621 probe met.forcing_station_timeseries_legacy.station_id: skipped, the relation is absent",
+            ),
+            ("met.forcing_station_timeseries_legacy.station_id: 0 row(s)",),
+        ),
+    ],
+    ids=["legacy_forcing_table_present", "legacy_forcing_table_dropped_by_000066"],
+)
+def test_apply_then_rollback_restores_every_row_byte_exact(
+    throwaway_database_url: str,
+    tmp_path: Path,
+    through: str | None,
+    legacy_notices: tuple[str, ...],
+    absent_notices: tuple[str, ...],
+) -> None:
     url = throwaway_database_url
-    _seed(url)
+    _seed(url, through=through)
     targets, others = _digest(url, targets=True), _digest(url, targets=False)
     assert _counts(targets) == INVENTORY
     with psycopg_connection(url) as connection, connection.cursor() as cursor:
@@ -383,13 +438,15 @@ def test_apply_then_rollback_restores_every_row_byte_exact(throwaway_database_ur
         "met_station=2290 river_segment=85196 river_segment_crosswalk=85471",
         "#2621 probe hydro.river_timeseries.river_segment_key: 0 row(s) for 85196 key(s) in",
         "#2621 probe met.forcing_station_timeseries.station_key: 0 row(s) for 2290 key(s) in",
-        "#2621 probe met.forcing_station_timeseries_legacy.station_id: 0 row(s) for 2290 id(s) in",
+        *legacy_notices,
         "#2621 deleted core.river_segment=85196 (session_replication_role=replica) in",
         "#2621 deleted met.met_station=2290 (session_replication_role=replica) in",
         "#2621 deleted core.basin=7 in",
         "#2621 gate B: no orphan references",
     ):
         assert expected in notices, (expected, dry_run.notices)
+    for absent in absent_notices:
+        assert absent not in notices, (absent, dry_run.notices)
     assert sorted(_copy_files(dry_dir)) == sorted(f"{relation}.copy" for relation, _, _ in _TABLES)
 
     applied = run_sql_file(DELETE_SQL, database_url=url, copy_dir=apply_dir, settings=SETTINGS, apply=True)
@@ -593,9 +650,13 @@ def test_an_undeclared_setting_is_refused_before_connecting(throwaway_database_u
 def test_a_target_reference_in_a_compressed_hypertable_chunk_raises_before_any_delete(
     throwaway_database_url: str, tmp_path: Path, relation: str, column: str
 ) -> None:
-    """In replica mode the hypertable FK would not fire: the zero-reference probe is the only guard."""
+    """In replica mode the hypertable FK would not fire: the zero-reference probe is the only guard.
+
+    The legacy forcing table only exists before migration 000066, so its case
+    is the one that builds the pre-contract catalog.
+    """
     url = throwaway_database_url
-    keys = _seed(url)
+    keys = _seed(url, through=PRE_CONTRACT if relation == LEGACY_FORCING_TABLE else CONTRACTED)
     with psycopg_connection(url) as connection, connection.cursor() as cursor:
         cursor.execute(
             "SELECT river_segment_key FROM core.river_segment WHERE river_network_version_id = %s "

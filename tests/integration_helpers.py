@@ -61,7 +61,10 @@ OWNED_SCHEMAS: tuple[str, ...] = ("hydro", "core", "met")
 
 #: The FORCING-plane migrations a RIVER-plane pin must still apply (`also=`).
 #: Named once so the next forcing migration is added here rather than hunted for
-#: across every suite that pins the ledger for river's sake.
+#: across every suite that pins the ledger for river's sake. The forcing CONTRACT
+#: (000066) is not one of them and must not be added: a river-pinned catalog is
+#: expand-era on the forcing plane as well, and several of its suites seed
+#: `met.forcing_station_timeseries_legacy`, which 000066 drops.
 FORCING_PLANE_MIGRATIONS: tuple[str, ...] = ("000061",)
 
 
@@ -122,8 +125,13 @@ def post_expand_forecast_database(
         # past 000060 and this call becomes a no-op over a contracted catalog.
         # `also=FORCING_PLANE_MIGRATIONS` because the pin is a RIVER statement:
         # the forcing readers this fixture's tests execute (display coverage,
-        # the national tile) spell `met.forcing_station_timeseries_legacy`
-        # unconditionally after #1991, so 000061 has to be applied regardless.
+        # the national tile) read the narrow `met.forcing_station_timeseries`
+        # by `forcing_version_key` / `station_key`, all of which 000061
+        # creates, so 000061 has to be applied regardless. The forcing contract
+        # (000066) is deliberately NOT in that tuple: this catalog keeps
+        # `met.forcing_station_timeseries_legacy` and
+        # `met.forcing_version.timeseries_store`, i.e. it is expand-era on the
+        # forcing plane too.
         apply_migrations_from_zero(throwaway_database_url, through="000059", also=FORCING_PLANE_MIGRATIONS)
         with psycopg_connection(throwaway_database_url) as connection:
             with connection.cursor() as cursor:
