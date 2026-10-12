@@ -24,7 +24,7 @@ that no longer exists (the river layer is MVT). The list has no product caller: 
 - The list was the only READER of `core.river_segment_crosswalk` in `apps/` and `packages/`; after this
   change the table is still written by import but no API path reads it. Stated, not hidden: the living
   spec lines that speak of crosswalk "hover/click lookups" (`basins-registry-import/spec.md:158-162`,
-  `:254`) lose their only API-level verifier. Whether the crosswalk itself is still wanted is a separate
+  `:255`) lose their only API-level verifier. Whether the crosswalk itself is still wanted is a separate
   question, not decided here.
 - `docs/governance/API_CONTRACT_DEPRECATION_POLICY.md` says OpenAPI must not contract while external
   consumers are unknown; the retirement record cites the owner's 2026-10-12 ruling (no external users) as
