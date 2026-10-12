@@ -239,7 +239,16 @@ def test_real_schema_api_and_postgis_spatial_smoke(
     with TestClient(app) as client:
         models = client.get("/api/v1/models", params={"active": "all"})
         active_models = client.get("/api/v1/models")
-        segments = client.get(f"/api/v1/basin-versions/{BASIN_VERSION_ID}/river-segments")
+        # #2866 retired the river-segment list; the seeded segments are observed
+        # through the detail endpoint, one read per `core.river_segment` row.
+        segment_details = {
+            segment_id: client.get(
+                f"/api/v1/basin-versions/{BASIN_VERSION_ID}/river-segments/{segment_id}",
+                params={"river_network_version_id": RIVER_NETWORK_VERSION_ID},
+            )
+            for segment_id in ("it126_seg_inside", "it126_seg_outside")
+        }
+        retired_segment_list = client.get(f"/api/v1/basin-versions/{BASIN_VERSION_ID}/river-segments")
         forecast = client.get(
             f"/api/v1/basin-versions/{BASIN_VERSION_ID}/river-segments/it126_seg_inside/forecast-series",
             params={
@@ -264,7 +273,7 @@ def test_real_schema_api_and_postgis_spatial_smoke(
     for response in (
         models,
         active_models,
-        segments,
+        *segment_details.values(),
         forecast,
         status,
         stages,
@@ -276,10 +285,11 @@ def test_real_schema_api_and_postgis_spatial_smoke(
 
     assert any(item["model_id"] == MODEL_ID for item in models.json()["data"]["items"])
     assert any(item["model_id"] == MODEL_ID for item in active_models.json()["data"]["items"])
-    assert {feature["properties"]["segment_id"] for feature in segments.json()["data"]["features"]} == {
-        "it126_seg_inside",
-        "it126_seg_outside",
-    }
+    for segment_id, detail in segment_details.items():
+        assert detail.json()["data"]["river_segment_id"] == segment_id
+        assert detail.json()["data"]["river_network_version_id"] == RIVER_NETWORK_VERSION_ID
+        assert detail.json()["data"]["geom"]["type"] == "MultiLineString"
+    assert retired_segment_list.status_code == 404, retired_segment_list.text
     assert forecast.json()["segment_id"] == "it126_seg_inside"
     assert forecast.json()["series"][0]["variable"] == "q_down"
     assert [point[1] for point in forecast.json()["series"][0]["points"]] == [180.0, 250.0]

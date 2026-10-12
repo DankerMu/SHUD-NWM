@@ -3,6 +3,15 @@ GeoJSON collection (legacy and segment-slice paths) and the single-segment
 detail, under the serialized payload budgets (#2617 split of
 ``packages.common.model_registry``).
 
+#2866 retired the HTTP list route (``GET /api/v1/basin-versions/{bv}/river-segments``);
+no API path reaches ``list_river_segments`` any more. The method and its helpers
+are retained because frozen #1913 registry-import partition tests
+(``tests/test_basins_registry_import_db.py`` / ``..._qhh.py``) still observe import
+results through it, and those definitions are byte-pinned by
+``tests/fixtures/basins_registry_partition_oracle.json``; its store-level unit
+tests (``tests/test_list_search_contract.py``, ``tests/test_model_registration.py``)
+stay with it. Do not add callers.
+
 A plain mixin: no fields and no dunders. ``PsycopgModelRegistryStore`` in
 ``packages.common.model_registry`` is the only class that composes it.
 """

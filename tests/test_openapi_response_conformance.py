@@ -79,35 +79,7 @@ COMPONENT_REF_PREFIX = "#/components/schemas/"
 
 
 class _RiverSegmentStore(_ModelRegistryStore):
-    """Shapes mirror `PsycopgModelRegistryStore.list_river_segments` (feature
-    assembly at `packages/common/model_registry.py:1180-1218`) and
-    `_river_segment_detail` (`:3580`)."""
-
-    def list_river_segments(self, *, limit: int, offset: int, **_kwargs: Any) -> dict[str, Any]:
-        return {
-            "type": "FeatureCollection",
-            "features": [
-                {
-                    "type": "Feature",
-                    "properties": {
-                        "segment_id": "seg_1",
-                        "river_segment_id": "seg_1",
-                        "basin_version_id": "basin_v1",
-                        "river_network_version_id": "network_v1",
-                        "name": "seg_1",
-                        "stream_order": 3,
-                        "segment_order": 3,
-                        "downstream_segment_id": "seg_2",
-                        "length_m": 1234.5,
-                    },
-                    "geometry": {"type": "LineString", "coordinates": [[101.0, 36.0], [101.1, 36.1]]},
-                }
-            ],
-            "total": 1,
-            "feature_total": 1,
-            "limit": limit,
-            "offset": offset,
-        }
+    """Shape mirrors `model_registry_public._river_segment_detail`."""
 
     def get_river_segment(self, *, segment_id: str, river_network_version_id: str, **_kwargs: Any) -> dict[str, Any]:
         return {
@@ -277,16 +249,6 @@ def _fetch_basins() -> Any:
 def _fetch_basin_versions() -> Any:
     with _overridden_client(get_model_registry_store, _ModelRegistryStore()) as client:
         return _json_200(client.get("/api/v1/basins/basins_basin_a/versions"))
-
-
-def _fetch_river_segments() -> Any:
-    with _overridden_client(get_model_registry_store, _RiverSegmentStore()) as client:
-        return _json_200(
-            client.get(
-                "/api/v1/basin-versions/basin_v1/river-segments",
-                params={"river_network_version_id": "network_v1"},
-            )
-        )
 
 
 def _fetch_river_segment_detail() -> Any:
@@ -481,21 +443,6 @@ ROUTE_CASES: tuple[RouteCase, ...] = (
             kind="required",
             validator="required",
             apply=lambda body: _pop(body, ("data", 0, "geom")),
-        ),
-    ),
-    RouteCase(
-        route_id="GET /api/v1/basin-versions/{basin_version_id}/river-segments",
-        method="get",
-        path="/api/v1/basin-versions/{basin_version_id}/river-segments",
-        fetch=_fetch_river_segments,
-        data_components=("RiverSegmentFeatureCollection",),
-        non_empty=(("data", "features"),),
-        mutation=Mutation(
-            component="RiverSegmentFeature",
-            field="geometry",
-            kind="required",
-            validator="required",
-            apply=lambda body: _pop(body, ("data", "features", 0, "geometry")),
         ),
     ),
     RouteCase(

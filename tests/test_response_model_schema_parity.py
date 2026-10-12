@@ -5,8 +5,9 @@ The published ``openapi/nhms.v1.yaml`` keeps its hand-written data schemas
 owners), while the wire is now shaped by ``apps/api/response_models``. The two
 are independent sources, so nothing but this test stops them drifting apart.
 
-For every modelled JSON route (the 35 #2348 routes plus the four display
-routes modelled earlier) the model's serialization JSON schema is compared with
+For every modelled JSON route (the 34 surviving #2348 routes -- #2866 retired
+the river-segment list -- plus the four display routes modelled earlier) the
+model's serialization JSON schema is compared with
 the published ``data`` schema (or the response root for the bare routes), and
 the ops ``identity`` envelope member with ``OpsStrictIdentity``:
 
@@ -234,8 +235,9 @@ def test_envelopes_declare_only_the_published_envelope_members() -> None:
             assert set(model.model_fields) - ENVELOPE_KEYS <= {"identity"}, model
 
 
-def test_route_table_is_the_35_plus_4_modelled_routes() -> None:
-    assert len(ROUTES) == 39, sorted(ROUTES)
+def test_route_table_is_the_34_plus_4_modelled_routes() -> None:
+    # 35 + 4 = 39 until #2866 retired `GET /api/v1/basin-versions/{bv}/river-segments`.
+    assert len(ROUTES) == 38, sorted(ROUTES)
 
 
 def test_every_unmodelled_business_route_is_annotated_to_return_a_response() -> None:

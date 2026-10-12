@@ -5,13 +5,10 @@ import { normalizeHydroMetCycle, type HydroMetSource, type HydroMetStrictIdentit
 import { normalizeHydroMetStation, sanitizeHydroMetMessage } from '@/lib/hydroMet/runtime'
 
 export const HYDRO_MET_STATION_LIMIT = 500
-export const HYDRO_MET_RIVER_SEGMENT_LIMIT = 250
 
 export type QhhLatestProduct = components['schemas']['QhhLatestProduct']
 export type HydroMetStation = components['schemas']['MetStation']
 export type HydroMetStationPage = components['schemas']['MetStationPage']
-export type HydroMetRiverSegmentFeature = components['schemas']['RiverSegmentFeature']
-export type HydroMetRiverSegmentCollection = components['schemas']['RiverSegmentFeatureCollection']
 
 export type HydroMetBootstrapStatus =
   | 'ready'
@@ -26,7 +23,6 @@ export interface HydroMetBootstrapRequest {
   basinId?: string | null
   strictIdentity?: HydroMetStrictIdentity | null
   stationLimit?: number
-  riverSegmentLimit?: number
 }
 
 export interface HydroMetBootstrapResult {
@@ -35,12 +31,9 @@ export interface HydroMetBootstrapResult {
   cycle: string | null
   product: QhhLatestProduct | null
   stations: HydroMetStation[]
-  riverSegments: HydroMetRiverSegmentFeature[]
   stationPage: HydroMetStationPage | null
-  riverSegmentCollection: HydroMetRiverSegmentCollection | null
   latestReasons: string[]
   stationError: string | null
-  riverError: string | null
 }
 
 const HYDRO_MET_LATEST_PRODUCT_IDENTITY_CACHE_TTL_MS = 120_000
@@ -70,7 +63,7 @@ async function getLatestProduct(request: HydroMetBootstrapRequest) {
 /**
  * 弹窗专用轻量 latest-product 解析（identity_only=true）。
  * 后端只跑 run 身份 + cycle + horizon（实测 ~50ms），不算 station/segment 覆盖（实测 ~17s），
- * 也不附带 stations / river-segments 候选；并返回最近 N 个 cycle 作为可选起报时间。
+ * 也不附带 stations 候选；并返回最近 N 个 cycle 作为可选起报时间。
  * request.cycle 可指定具体起报 cycle（起报时间选择器重取用）。失败抛错。
  */
 async function fetchHydroMetLatestProductUncached(request: HydroMetBootstrapRequest): Promise<QhhLatestProduct> {
@@ -145,14 +138,6 @@ export interface HydroMetStationIdentity {
   modelId?: string | null
 }
 
-export interface HydroMetRiverSegmentQuery {
-  search?: string
-  streamOrderMin?: number
-  streamOrderMax?: number
-  limit?: number
-  offset?: number
-}
-
 function trimmedOrUndefined(value: string | undefined | null) {
   const trimmed = value?.trim()
   return trimmed ? trimmed : undefined
@@ -195,33 +180,6 @@ export async function fetchHydroMetStations(product: QhhLatestProduct, query: Hy
   )
 }
 
-/**
- * River segment candidates query. basin_version_id (path) and river_network_version_id come
- * from the latest-product, so search/stream_order filtering keeps the same product identity.
- */
-export async function fetchHydroMetRiverSegments(product: QhhLatestProduct, query: HydroMetRiverSegmentQuery = {}) {
-  const search = trimmedOrUndefined(query.search)
-  const { data, error } = await client.GET('/api/v1/basin-versions/{basin_version_id}/river-segments', {
-    params: {
-      path: {
-        basin_version_id: product.basin_version_id,
-      },
-      query: {
-        river_network_version_id: product.river_network_version_id,
-        ...(search ? { search } : {}),
-        ...(Number.isFinite(query.streamOrderMin) ? { stream_order_min: query.streamOrderMin } : {}),
-        ...(Number.isFinite(query.streamOrderMax) ? { stream_order_max: query.streamOrderMax } : {}),
-        limit: query.limit ?? HYDRO_MET_RIVER_SEGMENT_LIMIT,
-        offset: query.offset ?? 0,
-      },
-    },
-  })
-  if (error) throw new Error(getApiErrorMessage(error, '河段流量候选加载失败'))
-  const collection = unwrapApiData<HydroMetRiverSegmentCollection>(data, '河段流量候选加载失败')
-  if (!collection || !Array.isArray(collection.features)) throw new Error('河段流量候选响应不完整')
-  return collection
-}
-
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0
 }
@@ -245,15 +203,6 @@ export function hydroMetStationFilterAvailability(page: HydroMetStationPage | nu
     variables: flag('variables', false),
     qcStatus: flag('qc_status', false),
   }
-}
-
-/**
- * stream_order filtering is an optional enhancement: only offer it when the river segment data
- * actually carries a finite stream_order field. The river-segments collection has no filters
- * block, so availability is inferred from the returned features (honest, no schema fabrication).
- */
-export function hydroMetStreamOrderAvailable(features: HydroMetRiverSegmentFeature[]) {
-  return features.some((feature) => Number.isFinite(feature.properties?.stream_order))
 }
 
 function productAvailabilityReasons(product: QhhLatestProduct) {
@@ -334,12 +283,9 @@ function baseResult(
     cycle: request.cycle,
     product,
     stations: [],
-    riverSegments: [],
     stationPage: null,
-    riverSegmentCollection: null,
     latestReasons,
     stationError: null,
-    riverError: null,
   }
 }
 
@@ -349,7 +295,6 @@ function settledError(result: PromiseSettledResult<unknown>, fallback: string) {
 
 export async function loadHydroMetBootstrap(request: HydroMetBootstrapRequest): Promise<HydroMetBootstrapResult> {
   const stationLimit = request.stationLimit ?? HYDRO_MET_STATION_LIMIT
-  const riverSegmentLimit = request.riverSegmentLimit ?? HYDRO_MET_RIVER_SEGMENT_LIMIT
   let product: QhhLatestProduct
 
   try {
@@ -365,13 +310,9 @@ export async function loadHydroMetBootstrap(request: HydroMetBootstrapRequest): 
     return baseResult(request, product, validation.status, validation.reasons)
   }
 
-  const [stationResult, riverResult] = await Promise.allSettled([
-    fetchHydroMetStations(product, { limit: stationLimit }),
-    fetchHydroMetRiverSegments(product, { limit: riverSegmentLimit }),
-  ])
+  const [stationResult] = await Promise.allSettled([fetchHydroMetStations(product, { limit: stationLimit })])
 
   const stationPage = stationResult.status === 'fulfilled' ? stationResult.value : null
-  const riverSegmentCollection = riverResult.status === 'fulfilled' ? riverResult.value : null
 
   return {
     status: 'ready',
@@ -379,11 +320,8 @@ export async function loadHydroMetBootstrap(request: HydroMetBootstrapRequest): 
     cycle: request.cycle,
     product,
     stations: stationPage?.items ?? [],
-    riverSegments: riverSegmentCollection?.features ?? [],
     stationPage,
-    riverSegmentCollection,
     latestReasons: [],
     stationError: settledError(stationResult, '站点 inventory 加载失败'),
-    riverError: settledError(riverResult, '河段流量候选加载失败'),
   }
 }

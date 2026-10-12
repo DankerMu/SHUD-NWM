@@ -162,41 +162,6 @@ class FakeModelRegistryStore:
             "segment_count": 1,
         }
 
-    def list_river_segments(
-        self,
-        *,
-        basin_version_id: str,
-        river_network_version_id: str | None,
-        search: str | None = None,
-        stream_order_min: int | None = None,
-        stream_order_max: int | None = None,
-        limit: int,
-        offset: int,
-    ) -> dict[str, Any]:
-        assert basin_version_id == "basin_v01"
-        assert river_network_version_id == "basin_rivnet_v01"
-        return {
-            "type": "FeatureCollection",
-            "features": [
-                {
-                    "type": "Feature",
-                    "properties": {
-                        "segment_id": "seg_001",
-                        "river_segment_id": "seg_001",
-                        "basin_version_id": "basin_v01",
-                        "river_network_version_id": "basin_rivnet_v01",
-                        "name": "Segment 001",
-                        "stream_order": 2,
-                    },
-                    "geometry": {"type": "LineString", "coordinates": [[90, 25], [91, 26]]},
-                }
-            ],
-            "total": 1,
-            "feature_total": 1,
-            "limit": limit,
-            "offset": offset,
-        }
-
     def get_river_segment(
         self,
         *,
@@ -445,28 +410,6 @@ class FakeModelRegistryStore:
 
 
 class NullGeometryModelRegistryStore(FakeModelRegistryStore):
-    def list_river_segments(
-        self,
-        *,
-        basin_version_id: str,
-        river_network_version_id: str | None,
-        search: str | None = None,
-        stream_order_min: int | None = None,
-        stream_order_max: int | None = None,
-        limit: int,
-        offset: int,
-    ) -> dict[str, Any]:
-        assert basin_version_id == "basin_v01"
-        assert river_network_version_id == "basin_rivnet_v01"
-        return {
-            "type": "FeatureCollection",
-            "features": [],
-            "total": 1,
-            "feature_total": 0,
-            "limit": limit,
-            "offset": offset,
-        }
-
     def get_river_segment(
         self,
         *,
@@ -544,42 +487,6 @@ class DuplicateSegmentIdModelRegistryStore(FakeModelRegistryStore):
 
 
 class OversizedPropertiesModelRegistryStore(FakeModelRegistryStore):
-    def list_river_segments(
-        self,
-        *,
-        basin_version_id: str,
-        river_network_version_id: str | None,
-        search: str | None = None,
-        stream_order_min: int | None = None,
-        stream_order_max: int | None = None,
-        limit: int,
-        offset: int,
-    ) -> dict[str, Any]:
-        assert basin_version_id == "basin_v01"
-        assert river_network_version_id == "basin_rivnet_v01"
-        return {
-            "type": "FeatureCollection",
-            "features": [
-                {
-                    "type": "Feature",
-                    "properties": {
-                        "segment_id": "seg_oversized",
-                        "river_segment_id": "seg_oversized",
-                        "basin_version_id": "basin_v01",
-                        "river_network_version_id": "basin_rivnet_v01",
-                        "name": "Oversized",
-                        "stream_order": 1,
-                        "blob": "x" * (RIVER_SEGMENT_COLLECTION_MAX_SERIALIZED_BYTES + 1),
-                    },
-                    "geometry": {"type": "LineString", "coordinates": [[90, 25], [91, 26]]},
-                }
-            ],
-            "total": 1,
-            "feature_total": 1,
-            "limit": limit,
-            "offset": offset,
-        }
-
     def get_river_segment(
         self,
         *,
@@ -606,48 +513,6 @@ class OversizedPropertiesModelRegistryStore(FakeModelRegistryStore):
 
 
 class BasinsRiverSegmentStore(FakeModelRegistryStore):
-    def list_river_segments(
-        self,
-        *,
-        basin_version_id: str,
-        river_network_version_id: str | None,
-        search: str | None = None,
-        stream_order_min: int | None = None,
-        stream_order_max: int | None = None,
-        limit: int,
-        offset: int,
-    ) -> dict[str, Any]:
-        assert basin_version_id == "basins_basin_a_vbasins"
-        assert river_network_version_id == "basins_basin_a_rivnet_vbasins"
-        assert limit == 1
-        assert offset == 0
-        return {
-            "type": "FeatureCollection",
-            "features": [
-                {
-                    "type": "Feature",
-                    "properties": {
-                        "segment_id": "basins_basin_a_shud_seg_1",
-                        "river_segment_id": "basins_basin_a_shud_seg_1",
-                        "basin_version_id": "basins_basin_a_vbasins",
-                        "river_network_version_id": "basins_basin_a_rivnet_vbasins",
-                        "basin_slug": "basin-a",
-                        "shud_input_name": "alias-a",
-                        "name": "Basins Segment 1",
-                        "stream_order": 1,
-                        "segment_order": 1,
-                        "downstream_segment_id": "basins_basin_a_shud_seg_2",
-                        "length_m": 1234.5,
-                    },
-                    "geometry": {"type": "LineString", "coordinates": [[90.0, 25.0], [90.5, 25.5]]},
-                }
-            ],
-            "total": 2,
-            "feature_total": 2,
-            "limit": limit,
-            "offset": offset,
-        }
-
     def get_river_segment(
         self,
         *,
@@ -1313,50 +1178,6 @@ async def test_model_lifecycle_rbac_denial_happens_before_store_mutation(
 
 
 @pytest.mark.asyncio
-async def test_list_river_segments_returns_backend_geojson(fake_store: FakeModelRegistryStore) -> None:
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get(
-            "/api/v1/basin-versions/basin_v01/river-segments",
-            params={"river_network_version_id": "basin_rivnet_v01", "limit": 100, "offset": 0},
-        )
-
-    assert fake_store is not None
-    assert response.status_code == 200
-    # 版本键控的静态几何目录：必须可被浏览器缓存（display 刷新免重拉分页 GeoJSON）。
-    assert response.headers["Cache-Control"] == "public, max-age=3600"
-    payload = response.json()["data"]
-    assert payload["type"] == "FeatureCollection"
-    expected_properties = {
-        "segment_id": "seg_001",
-        "basin_version_id": "basin_v01",
-        "river_network_version_id": "basin_rivnet_v01",
-    }
-    assert expected_properties.items() <= payload["features"][0]["properties"].items()
-    assert payload["features"][0]["geometry"]["type"] == "LineString"
-    assert payload["total"] == 1
-    assert payload["feature_total"] == 1
-
-
-@pytest.mark.asyncio
-async def test_list_river_segments_can_omit_null_geometry_features() -> None:
-    store = NullGeometryModelRegistryStore()
-    app.dependency_overrides[get_model_registry_store] = lambda: store
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get(
-            "/api/v1/basin-versions/basin_v01/river-segments",
-            params={"river_network_version_id": "basin_rivnet_v01", "limit": 100, "offset": 0},
-        )
-
-    assert response.status_code == 200
-    payload = response.json()["data"]
-    assert payload["total"] == 1
-    assert payload["feature_total"] == 0
-    assert payload["features"] == []
-
-
-@pytest.mark.asyncio
 async def test_get_river_segment_null_geometry_uses_not_found_envelope() -> None:
     store = NullGeometryModelRegistryStore()
     app.dependency_overrides[get_model_registry_store] = lambda: store
@@ -1461,25 +1282,6 @@ async def test_get_river_segment_duplicate_ids_return_selected_network_row() -> 
 
 
 @pytest.mark.asyncio
-async def test_river_segment_collection_oversized_properties_return_413_envelope() -> None:
-    store = OversizedPropertiesModelRegistryStore()
-    app.dependency_overrides[get_model_registry_store] = lambda: store
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get(
-            "/api/v1/basin-versions/basin_v01/river-segments",
-            params={"river_network_version_id": "basin_rivnet_v01", "limit": 100, "offset": 0},
-        )
-
-    assert response.status_code == 413
-    body = response.json()
-    assert body["status"] == "error"
-    assert body["error"]["code"] == "RIVER_SEGMENT_GEOJSON_BUDGET_EXCEEDED"
-    assert body["error"]["details"]["limit_type"] == "serialized_bytes"
-    assert body["error"]["details"]["scope"] == "collection"
-
-
-@pytest.mark.asyncio
 async def test_river_segment_detail_oversized_properties_return_413_envelope() -> None:
     store = OversizedPropertiesModelRegistryStore()
     app.dependency_overrides[get_model_registry_store] = lambda: store
@@ -1515,32 +1317,6 @@ async def test_get_missing_river_segment_uses_not_found_envelope(fake_store: Fak
         message_contains="missing_seg",
         error_type="MissingResourceError",
     )
-
-
-@pytest.mark.asyncio
-async def test_basins_river_segment_api_returns_paginated_geojson_for_map_rendering() -> None:
-    store = BasinsRiverSegmentStore()
-    app.dependency_overrides[get_model_registry_store] = lambda: store
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get(
-            "/api/v1/basin-versions/basins_basin_a_vbasins/river-segments",
-            params={"river_network_version_id": "basins_basin_a_rivnet_vbasins", "limit": 1, "offset": 0},
-        )
-
-    assert response.status_code == 200
-    payload = response.json()["data"]
-    assert payload["type"] == "FeatureCollection"
-    assert payload["total"] == 2
-    assert payload["feature_total"] == 2
-    assert payload["limit"] == 1
-    feature = payload["features"][0]
-    assert feature["geometry"]["type"] == "LineString"
-    assert feature["properties"]["river_segment_id"] == "basins_basin_a_shud_seg_1"
-    assert feature["properties"]["basin_version_id"] == "basins_basin_a_vbasins"
-    assert feature["properties"]["river_network_version_id"] == "basins_basin_a_rivnet_vbasins"
-    assert feature["properties"]["basin_slug"] == "basin-a"
-    assert feature["properties"]["shud_input_name"] == "alias-a"
 
 
 @pytest.mark.asyncio

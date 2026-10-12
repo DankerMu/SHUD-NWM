@@ -57,23 +57,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/basin-versions/{basin_version_id}/river-segments": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List River Segments */
-        get: operations["list_river_segments_api_v1_basin_versions__basin_version_id__river_segments_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}": {
         parameters: {
             query?: never;
@@ -1609,37 +1592,6 @@ export interface components {
             /** Format: date-time */
             created_at: string;
         };
-        RiverSegmentFeature: {
-            /** @enum {string} */
-            type: "Feature";
-            /** @description Segment-level feature id, emitted by the segment-slice query path only. */
-            id?: string;
-            properties: {
-                segment_id: string;
-                river_segment_id: string;
-                basin_version_id: string;
-                river_network_version_id: string;
-                name: string;
-                stream_order: number;
-                segment_order?: number | null;
-                downstream_segment_id?: string | null;
-                length_m?: number | null;
-            } & {
-                [key: string]: unknown;
-            };
-            geometry: components["schemas"]["GeoJsonLineString"] | components["schemas"]["GeoJsonMultiLineString"];
-        };
-        RiverSegmentFeatureCollection: {
-            /** @enum {string} */
-            type: "FeatureCollection";
-            features: components["schemas"]["RiverSegmentFeature"][];
-            /** @description Total matching stored river segment rows, including rows omitted from features because geom is null. */
-            total: number;
-            /** @description Total matching river segment rows with non-null LineString geometry that can be emitted as GeoJSON features. */
-            feature_total: number;
-            limit: number;
-            offset: number;
-        };
         ModelInstance: {
             model_id: string;
             model_name?: string | null;
@@ -2751,56 +2703,6 @@ export interface operations {
                         data: components["schemas"]["RiverNetworkCreateResult"];
                     };
                 };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    list_river_segments_api_v1_basin_versions__basin_version_id__river_segments_get: {
-        parameters: {
-            query?: {
-                river_network_version_id?: string | null;
-                /** @description Case-insensitive substring match over river_segment_id and name (backend-applied). */
-                search?: string | null;
-                /** @description Inclusive lower bound on stream order (river_segment.segment_order). */
-                stream_order_min?: number | null;
-                /** @description Inclusive upper bound on stream order (river_segment.segment_order). */
-                stream_order_max?: number | null;
-                limit?: number;
-                offset?: number;
-            };
-            header?: never;
-            path: {
-                basin_version_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["RiverSegmentFeatureCollection"];
-                    };
-                };
-            };
-            /** @description River segment GeoJSON payload budget exceeded. */
-            413: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
             };
             /** @description Validation Error */
             422: {

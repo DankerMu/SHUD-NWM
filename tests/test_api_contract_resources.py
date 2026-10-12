@@ -19,6 +19,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 from fastapi.testclient import TestClient
 
@@ -450,10 +451,6 @@ def test_river_segment_geojson_budget_error_contract() -> None:
     app.dependency_overrides[get_model_registry_store] = lambda: store
     try:
         with TestClient(app) as client:
-            collection_response = client.get(
-                "/api/v1/basin-versions/basin_v1/river-segments",
-                params={"river_network_version_id": "network_v1"},
-            )
             detail_response = client.get(
                 "/api/v1/basin-versions/basin_v1/river-segments/seg_1",
                 params={"river_network_version_id": "network_v1"},
@@ -461,43 +458,18 @@ def test_river_segment_geojson_budget_error_contract() -> None:
     finally:
         app.dependency_overrides.pop(get_model_registry_store, None)
 
-    for response, scope in ((collection_response, "collection"), (detail_response, "detail")):
-        assert response.status_code == 413
-        body = response.json()
-        assert body["status"] == "error"
-        assert body["error"]["code"] == "RIVER_SEGMENT_GEOJSON_BUDGET_EXCEEDED"
-        assert body["error"]["details"]["limit_type"] == "serialized_bytes"
-        assert body["error"]["details"]["scope"] == scope
+    assert detail_response.status_code == 413
+    body = detail_response.json()
+    assert body["status"] == "error"
+    assert body["error"]["code"] == "RIVER_SEGMENT_GEOJSON_BUDGET_EXCEEDED"
+    assert body["error"]["details"]["limit_type"] == "serialized_bytes"
+    assert body["error"]["details"]["scope"] == "detail"
 
     spec = yaml.safe_load((Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml").read_text())
-    collection_responses = spec["paths"]["/api/v1/basin-versions/{basin_version_id}/river-segments"]["get"][
-        "responses"
-    ]
     detail_responses = spec["paths"]["/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}"]["get"][
         "responses"
     ]
-    assert collection_responses["413"]["description"] == "River segment GeoJSON payload budget exceeded."
     assert detail_responses["413"]["description"] == "River segment GeoJSON payload budget exceeded."
-
-
-def test_river_segments_reversed_stream_order_range_rejected() -> None:
-    store = _ModelRegistryStore()
-    app.dependency_overrides[get_model_registry_store] = lambda: store
-    try:
-        with TestClient(app) as client:
-            response = client.get(
-                "/api/v1/basin-versions/basin_v1/river-segments",
-                params={"stream_order_min": 5, "stream_order_max": 2},
-            )
-    finally:
-        app.dependency_overrides.pop(get_model_registry_store, None)
-
-    assert response.status_code == 422
-    body = response.json()
-    assert body["status"] == "error"
-    assert body["error"]["code"] == "VALIDATION_ERROR"
-    assert body["error"]["details"]["stream_order_min"] == 5
-    assert body["error"]["details"]["stream_order_max"] == 2
 
 
 def test_forecast_series_contract_accepts_include_analysis_query() -> None:
@@ -523,3 +495,109 @@ def test_forecast_series_contract_accepts_include_analysis_query() -> None:
             "data": [{"valid_time": "2026-05-14T00:00:00Z", "value": 10.0}],
         }
     ]
+
+
+# --------------------------------------------------------------------------- #
+# #2866: the river-segment LIST endpoint is retired (owner ruling 2026-10-12).
+# Spec: basins-registry-import "The river segment list endpoint is retired".
+# --------------------------------------------------------------------------- #
+
+_RETIRED_RIVER_SEGMENT_LIST_PATH = "/api/v1/basin-versions/{basin_version_id}/river-segments"
+_RETIRED_RIVER_SEGMENT_LIST_COMPONENTS = ("RiverSegmentFeature", "RiverSegmentFeatureCollection")
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+class _RiverSegmentDetailStore(_ModelRegistryStore):
+    """Answers the detail read for any id; ``list_calls`` records a list read."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.list_calls = 0
+
+    def list_river_segments(self, **_kwargs: Any) -> dict[str, Any]:
+        self.list_calls += 1
+        return {"type": "FeatureCollection", "features": [], "total": 0, "feature_total": 0, "limit": 1, "offset": 0}
+
+    def get_river_segment(
+        self, *, basin_version_id: str, river_network_version_id: str, segment_id: str
+    ) -> dict[str, Any]:
+        del basin_version_id
+        return {
+            "river_segment_id": segment_id,
+            "river_network_version_id": river_network_version_id,
+            "segment_order": 1,
+            "downstream_segment_id": None,
+            "length_m": 12.5,
+            "geom": {"type": "MultiLineString", "coordinates": [[[100.0, 36.0], [100.1, 36.1]]]},
+            "properties_json": {},
+            "created_at": "2026-05-14T00:00:00Z",
+        }
+
+
+def test_river_segment_list_endpoint_is_retired_and_not_served() -> None:
+    store = _RiverSegmentDetailStore()
+    app.dependency_overrides[get_model_registry_store] = lambda: store
+    try:
+        with TestClient(app) as client:
+            response = client.get(
+                "/api/v1/basin-versions/basin_v1/river-segments",
+                params={"river_network_version_id": "network_v1", "limit": 1},
+            )
+    finally:
+        app.dependency_overrides.pop(get_model_registry_store, None)
+
+    assert response.status_code == 404
+    # Whatever answers the 404 (the SPA fallback when a frontend build is mounted,
+    # the framework otherwise), it is not the API's success envelope.
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    if isinstance(body, dict):
+        assert body.get("status") != "ok"
+        assert "data" not in body
+    assert store.list_calls == 0
+
+
+def test_river_segment_list_is_absent_from_the_published_openapi_and_generated_types() -> None:
+    runtime = app.openapi()
+    static = yaml.safe_load((_REPO_ROOT / "openapi" / "nhms.v1.yaml").read_text(encoding="utf-8"))
+    for label, document in (("runtime", runtime), ("openapi/nhms.v1.yaml", static)):
+        assert _RETIRED_RIVER_SEGMENT_LIST_PATH not in document["paths"], label
+        for component in _RETIRED_RIVER_SEGMENT_LIST_COMPONENTS:
+            assert component not in document["components"]["schemas"], f"{label}: {component}"
+        # Detail and forecast-series stay published.
+        assert f"{_RETIRED_RIVER_SEGMENT_LIST_PATH}/{{segment_id}}" in document["paths"], label
+        assert f"{_RETIRED_RIVER_SEGMENT_LIST_PATH}/{{segment_id}}/forecast-series" in document["paths"], label
+        assert "RiverSegment" in document["components"]["schemas"], label
+
+    generated = (_REPO_ROOT / "apps" / "frontend" / "src" / "api" / "types.ts").read_text(encoding="utf-8")
+    assert f'"{_RETIRED_RIVER_SEGMENT_LIST_PATH}":' not in generated
+    for component in _RETIRED_RIVER_SEGMENT_LIST_COMPONENTS:
+        assert f"{component}:" not in generated, component
+    assert f'"{_RETIRED_RIVER_SEGMENT_LIST_PATH}/{{segment_id}}":' in generated
+
+
+@pytest.mark.parametrize(
+    "segment_id",
+    ["basins_qhh_reach_000001", "basins_qhh_shud_riv_000001"],
+    ids=["reach-row-id", "shud-output-river-id"],
+)
+def test_river_segment_detail_is_still_served_after_the_list_retirement(segment_id: str) -> None:
+    store = _RiverSegmentDetailStore()
+    app.dependency_overrides[get_model_registry_store] = lambda: store
+    try:
+        with TestClient(app) as client:
+            response = client.get(
+                f"/api/v1/basin-versions/basin_v1/river-segments/{segment_id}",
+                params={"river_network_version_id": "network_v1"},
+            )
+    finally:
+        app.dependency_overrides.pop(get_model_registry_store, None)
+
+    assert response.status_code == 200, response.text
+    data = _assert_success_envelope(response.json())
+    assert data["river_segment_id"] == segment_id
+    assert data["river_network_version_id"] == "network_v1"
+    assert data["geom"]["type"] == "MultiLineString"
+    assert response.headers["Cache-Control"] == "public, max-age=3600"

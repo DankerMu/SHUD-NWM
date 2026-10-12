@@ -94,7 +94,10 @@ QUERY_TARGETS = {
         ),
     },
     "river_bbox": {
-        "endpoint": "/api/v1/basin-versions/{basin_version_id}/river-segments?bbox={bbox}",
+        # The envelope read of core.river_segment that the API actually serves is
+        # the river-network tile; the river-segment list this entry once named
+        # (with a `bbox` parameter that route never had) was retired by #2866.
+        "endpoint": "/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf",
         "row_count": 18_500,
         "latency_samples_ms": (158.0, 165.0, 171.0, 168.0, 174.0),
         "threshold_key": "river_bbox_ms",

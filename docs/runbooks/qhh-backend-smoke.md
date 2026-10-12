@@ -215,7 +215,7 @@ forcing 采用原始 qhh/rSHUD 站点表：
 - `GET /api/v1/basins/basins_qhh/versions`
 - `GET /api/v1/runs?status=frequency_done&source=GFS`
 - `GET /api/v1/models?basin_version_id=basins_qhh_vbasins&active=true`
-- `GET /api/v1/basin-versions/basins_qhh_vbasins/river-segments?river_network_version_id=basins_qhh_rivnet_vbasins`
+- `GET /api/v1/basin-versions/basins_qhh_vbasins/river-segments?river_network_version_id=basins_qhh_rivnet_vbasins`（2026-05-26 复测时存在；该河段清单端点已由 #2866 于 2026-10-12 退役，现回 404，河网展示走 MVT 图层，单河段走 `.../river-segments/{segment_id}` 详情）
 - `GET /api/v1/basin-versions/basins_qhh_vbasins/river-segments/{segment_id}/forecast-series`
 - `GET /api/v1/layers?run_id=qhh_gfs_2026052100_smoke`
 - `GET /api/v1/layers/discharge/valid-times?run_id=qhh_gfs_2026052100_smoke`
@@ -240,7 +240,7 @@ forcing 采用原始 qhh/rSHUD 站点表：
 15. 重复复测会撞旧 qhh DB 状态：新增 `scripts/reset_qhh_smoke_db.py`，`QHH_RESET_SMOKE_DB=1` 时只清理 qhh smoke 相关 registry、forcing、run、timeseries、QC 行。
 16. 前端展示发现缺 `GET /api/v1/basins` 与 `GET /api/v1/basins/{basin_id}/versions`：补齐 registry read API。
 17. qhh 专用 scenario 不被前端默认 GFS 选择命中：发布步骤标准化为 `forecast_gfs_deterministic`。
-18. 河段列表默认先返回 GIS rivseg 分段而非有时序结果的 SHUD 输出河段：river segment API 对 `shud_output_river=true` 的河段优先排序。
+18. 河段列表默认先返回 GIS rivseg 分段而非有时序结果的 SHUD 输出河段：river segment API 对 `shud_output_river=true` 的河段优先排序。（该清单端点已由 #2866 退役，此条仅为当时记录。）
 
 ## 当前剩余工作
 
