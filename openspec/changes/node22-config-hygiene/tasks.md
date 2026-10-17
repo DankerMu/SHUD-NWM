@@ -14,14 +14,14 @@
 - Public API / CLI / script entry — selected：1.2 drift 探针、3.1 handler、4.4 sweep 是新 CLI；退出码矩阵由各自测试覆盖。1.1 不涉及（纯数据 + 守卫测试）。
 - Config / project setup — selected：1.1/3.1/3.2 追踪 systemd 单元与 manifest，4.1 gitignore，4.3 env 键分类；全部由守卫测试钉死，部署是运维 non-goal。
 - File IO / path safety / overwrite — selected：4.4 `mv -n`、拒绝集归一化、目标已存在退出 2；1.2 只读 systemd 目录（测试以空 `PATH` 证明不调 `systemctl`）。1.1 只新增仓库文件。
-- Schema / columns / units / field names — selected：1.1 `MANIFEST.json` 字段 `{deployed_relative_path, tracked_path, sha256}` 是 1.2 探针与 3.x 的契约，由 `tests/test_node22_unit_tracking.py` 断言。
-- Auth / permissions / secrets — selected：1.1/3.1 追踪的单元只引用 secret 路径；守卫测试断言无 `*TOKEN|*SECRET|*PASS|*PASSWORD` 赋值且 `EnvironmentFile=` 属 authority 表或 secret 路径。
+- Schema / columns / units / field names — selected：1.1 `MANIFEST.json` 字段 `{deployed_relative_path, tracked_path, sha256}` 是 1.2 探针与 3.x 的契约，由 `tests/test_node22_unit_tracking.py` 断言。 1.2 的 receipt `nhms.node22.unit_drift_check.v1` 键集合由 `tests/test_node22_unit_drift_check.py` 精确断言；探针对 manifest 畸形 fail-closed（退出 2）。
+- Auth / permissions / secrets — selected：1.1/3.1 追踪的单元只引用 secret 路径；守卫测试断言无 `*TOKEN|*SECRET|*PASS|*PASSWORD` 赋值且 `EnvironmentFile=` 属 authority 表或 secret 路径。 1.2 的 diff 只打 stdout、receipt 不含文件内容，测试断言 receipt 键集合。
 - Concurrency / shared state / ordering — not selected：无共享状态；探针与 sweep 单进程只读/`mv -n`。
 - Resource limits / large input / discovery — not selected：输入是 ≤20 个小文件。
 - Legacy compatibility / examples — selected：1.1 保留 `infra/systemd/nhms-slurm-gateway.service` 通用模板不改（design D1 rejected alternative）；4.3 effective default 含 legacy fallback 链。
 - Error handling / rollback / partial outputs — selected：1.2 与 4.4 的退出码 2 分支、receipt 写失败；2.1 verdict 槽位顺序。1.1 non-goal。
 - Release / packaging / dependency compatibility — not selected：无依赖变更。
-- Documentation / migration notes — selected：README authority 表/备份策略、runbook 节、DOC_STATUS 标记由 `tests/test_entropy_audit_report_contract.py` 与各 task 的文档断言覆盖；实机部署步骤在 design Migration Plan。
+- Documentation / migration notes — selected：README authority 表/备份策略、runbook 节、DOC_STATUS 标记由 `tests/test_entropy_audit_report_contract.py` 与各 task 的文档断言覆盖；实机部署步骤在 design Migration Plan。 1.2 的 runbook 节只由 `tests/test_entropy_audit_report_contract.py` 文档门覆盖，无内容断言。
 
 ## 1. 追踪 node-22 live 单元（spec: node22-unit-tracking）
 
@@ -42,11 +42,23 @@
 
   **Minimal mergeable slice:** atomic - manifest、七个文件与守卫测试互为 oracle，缺一则守卫要么空跑要么立刻红。
 
-- [ ] 1.2 新增 `scripts/node22_unit_drift_check.py`（manifest 驱动；`--manifest`、`--systemd-user-dir`、`--receipt`；按 design D2 的扫描范围、分类与退出码矩阵；`differs` 打印 unified diff）与 `tests/test_node22_unit_drift_check.py` 覆盖 spec 六个 scenario；`node22-control-plane-manual-recovery.md` 增加"改单元前后各跑一次 drift 探针"步骤；selector 登记。
+- [x] 1.2 新增 `scripts/node22_unit_drift_check.py`（manifest 驱动；`--manifest`、`--systemd-user-dir`、`--receipt`；按 design D2 的扫描范围、分类与退出码矩阵；`differs` 打印 unified diff）与 `tests/test_node22_unit_drift_check.py` 覆盖 spec 六个 scenario；`node22-control-plane-manual-recovery.md` 增加「改单元前后各跑一次 drift 探针」步骤；selector 登记；并吸收 PR #2966 审查推迟到 #2911 的三项守卫加固。钉死的契约（fixture review 2026-10-17）：
+
+  - **运行与消费者**：运维在 node-22 手动运行（Migration Plan 首跑、改单元前后各一次），无 timer、无自动读者；receipt 附到 `docs/runbooks/receipts/` 的运维收据。脚本 stdlib only、不 import `nhms`/`subprocess`、兼容 3.11/3.12（node-22 是 3.12.7 `.venv`）。
+  - **路径解析**：仓库根 = `Path(manifest).resolve().parents[3]`（manifest 在 `infra/systemd/node22/MANIFEST.json`）；`--manifest` 默认 `Path(__file__).resolve().parents[1] / "infra/systemd/node22/MANIFEST.json"`；`--systemd-user-dir` 默认 `$XDG_CONFIG_HOME/systemd/user`（仅当变量非空且为绝对路径），否则 `~/.config/systemd/user`。
+  - **manifest 校验（探针侧，fail-closed → 退出 2）**：`schema_version == nhms.node22.unit_manifest.v1`；每条恰好三个键；两个路径字段非绝对、无 `..` 段；`tracked_path` 以 `infra/systemd/` 开头；`deployed_relative_path` 无重复且最多一层目录；tracked 文件 sha256 必须等于条目（tracked 侧不可信即退出 2 并点名条目）。一个用例把真实 `MANIFEST.json` 过一遍校验器。
+  - **分类**：`missing` 仅指 deployed 路径 `FileNotFoundError`；`PermissionError`/其它 `OSError`/deployed 路径是目录或非常规文件 → 退出 2；manifest 条目的 deployed 路径若是符号链接则透过链接按内容分类。untracked 扫描：顶层 `nhms-*.service`、`nhms-*.timer` 与一层 `nhms-*.service.d/*.conf`（精确后缀 + `nhms-` 前缀；无 `.timer.d`；`*.service.pre-*`、`*.conf.<date>` 永不匹配）；`is_symlink()` 为真的一律跳过（含同名顶层链接、链接目录、`*.wants/`）。退出 2 优先于 1。
+  - **diff**：只打 stdout，`difflib.unified_diff`，标签 `a/<tracked_path>`、`b/<deployed_relative_path>`，显示用 `utf-8` + `errors="replace"` 解码，分类仍按字节。receipt 不含任何文件内容（secret 贴进 drop-in 也不会进 receipt）。
+  - **receipt**：`--receipt` 必填文件路径，无环境变量默认；父目录不存在或解析到 systemd 目录之下 → 在任何写入前退出 2；临时文件 + `os.replace`，mode 0600；字段 `schema_version`（`nhms.node22.unit_drift_check.v1`）、`generated_at`（UTC ISO-8601 `Z` 后缀，沿用 stall 探针）、`status`（`ok|drift|probe_failed`）、`exit_code`、`manifest_path`、`manifest_sha256`（原始字节 hex）、`systemd_user_dir`、`entries`（`[{deployed_relative_path, tracked_path, status}]` 按 manifest 顺序）、`untracked`（排序后的相对路径）、`errors`；`sort_keys`、结尾一个换行。退出 2 时只要路径可写就照样写 receipt（`status: probe_failed` + `errors` + 已分类条目）；只有写 receipt 失败时不产 receipt，`status: probe_failed` 打到 stderr。
+  - **测试证据**：六个 scenario 各一用例；「Backup directories are ignored」按 spec 重建 entropy-audit 记录的真实残留（含 `*.wants/` 符号链接）并断言退出 0、`untracked` 空；exit-2 参数化：manifest 缺失 / `entries: []` / 非法 JSON / 每种 manifest 畸形 / systemd 目录不存在 / tracked 文件缺失 / deployed 文件 chmod 000（root 下 skip）/ receipt 父目录不存在 / receipt 在 systemd 目录下 / drift + 不可读文件同时出现；receipt 键集合精确断言；只读证明：drift 运行前后对 systemd 树做（路径、字节、mtime）快照并断言相等；no-systemctl 证明：`env={"PATH": ""}` 用 `sys.executable` 运行脚本并显式传三个参数（`HOME` 未设），另静态断言脚本不 import `subprocess`。
+  - **吸收 #2966 推迟项（允许改 `tests/test_node22_unit_tracking.py`）**：(1) `directive_value` 在第一个 `=` 处 partition、key/value 两侧 strip、扫描前拼接 `\` 续行；三条合成用例 HEAD 红修后绿：`Environment = X_TOKEN=abc` 拒绝、`EnvironmentFile = /scratch/frd_muziyao/NWM/infra/env/compute.env` 拒绝、`Environment=A=1 \` + 下一行 `X_TOKEN=abc` 拒绝；(2) shape 测试加断言：`tracked_path` 以 `infra/systemd/` 开头，两个路径字段非绝对且无 `..`；(3) `tracked_node22_files()` 跳过 `.` 开头文件，加 tmp 目录含 `.DS_Store` 的用例。
+  - **runbook**：在 `## 已知限制` 之前新增一小节；命令用 `/scratch/frd_muziyao/NWM/.venv/bin/python scripts/node22_unit_drift_check.py --receipt <systemd 目录之外的路径>`（node-22 禁止 `uv run`）；写明 0/1/2 含义；该节只由 `tests/test_entropy_audit_report_contract.py` 的文档门覆盖。
+  - **selector**：pin 行 `PathTestRule("scripts/node22_unit_drift_check.py", ("tests/test_node22_unit_drift_check.py",))`（仿 stall 探针 pin）；`infra/systemd/node22/*` 行追加 drift 测试（它读真实 `MANIFEST.json`）；runbook 行不追加（无测试读它）；`tests/test_select_ci_tests.py` 更新 exact-set 守卫并为 pin 行加「删掉即红」断言。
+  - **PR Boundary 偏离**：issue 写「一个测试、selector 一行」；本 task 还改 `tests/test_node22_unit_tracking.py`（推迟项）与 2 处 selector。PR 的偏离记录写明。
 
   Depends on: 1.1
 
-  Verify：`uv run pytest -q tests/test_node22_unit_drift_check.py tests/test_select_ci_tests.py tests/test_entropy_audit_report_contract.py`；测试以空 `PATH` 运行脚本证明不调用 `systemctl`。
+  Verify：`uv run pytest -q tests/test_node22_unit_drift_check.py tests/test_node22_unit_tracking.py tests/test_select_ci_tests.py tests/test_entropy_audit_report_contract.py`；测试以空 `PATH` 运行脚本证明不调用 `systemctl`。
 
   **Suggested fixture level:** compact - 新增独立 CLI，爆炸半径是它自己的退出码。
 

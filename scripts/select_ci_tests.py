@@ -5816,9 +5816,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # `fnmatch`'s `*` crosses `/`, so the glob also reaches the drop-in
     # directories. The evidence-retention timer and the snapshot receipt (whose
     # sha256 table the suite compares) had no row at all.
+    # #2911: the drift probe suite also reads the real `MANIFEST.json` (and the
+    # tracked files it hashes) through the probe's validator.
     PathTestRule(
         "infra/systemd/node22/*",
-        ("tests/test_node22_unit_tracking.py",),
+        ("tests/test_node22_unit_tracking.py", "tests/test_node22_unit_drift_check.py"),
     ),
     PathTestRule(
         "infra/systemd/nhms-scheduler-evidence-retention.timer",
@@ -5827,6 +5829,12 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "docs/runbooks/receipts/2026-10-16-node22-live-units-snapshot.md",
         ("tests/test_node22_unit_tracking.py",),
+    ),
+    # #2911: pin for the node-22 unit drift probe, same reasoning as the stall
+    # probe pin below (the same-name derivation also reaches this suite).
+    PathTestRule(
+        "scripts/node22_unit_drift_check.py",
+        ("tests/test_node22_unit_drift_check.py",),
     ),
     # The probe module itself. The same-name derivation
     # (`scripts/<x>.py` -> `tests/test_<x>.py`) already reaches this suite, so

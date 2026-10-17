@@ -715,6 +715,56 @@ def test_node22_unit_tracking_new_rules_red_when_removed(monkeypatch: pytest.Mon
         )
 
 
+# #2911 -- the node-22 unit drift probe. Its suite runs the probe's validator
+# over the real `MANIFEST.json` (and the tracked files it hashes), so every
+# `infra/systemd/node22/*` path selects it alongside the tracking suite. The
+# probe module's row is a PIN (same-name derivation also reaches the suite).
+NODE22_UNIT_DRIFT_SUITE = "tests/test_node22_unit_drift_check.py"
+NODE22_UNIT_DRIFT_PROBE = "scripts/node22_unit_drift_check.py"
+
+
+@pytest.mark.parametrize(
+    "source",
+    (
+        NODE22_UNIT_DRIFT_PROBE,
+        "infra/systemd/node22/MANIFEST.json",
+        "infra/systemd/node22/nhms-slurm-gateway.service.d/10-node22-live.conf",
+    ),
+)
+def test_node22_unit_drift_reader_edges_select_the_suite(source: str) -> None:
+    assert NODE22_UNIT_DRIFT_SUITE in select_tests([source], repo_root=Path(".")), source
+
+
+def test_node22_manifest_selects_both_node22_unit_suites() -> None:
+    selected = set(select_tests(["infra/systemd/node22/MANIFEST.json"], repo_root=Path(".")))
+
+    assert {NODE22_UNIT_TRACKING_SUITE, NODE22_UNIT_DRIFT_SUITE} <= selected
+
+
+def test_node22_unit_drift_probe_pin_red_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The pin row itself must exist; removing it reds here.
+
+    The same-name derivation keeps the probe path lit without the pin (the
+    stall-probe pin's exemption, measured the same way), so the complement leg
+    for the probe is the row's membership, while the `node22/*` row's drift
+    target is proven by the MANIFEST.json path going dark without it.
+    """
+    from scripts import select_ci_tests
+
+    pin = PathTestRule(NODE22_UNIT_DRIFT_PROBE, (NODE22_UNIT_DRIFT_SUITE,))
+    assert pin in PATH_TEST_RULES
+
+    without_pin = tuple(rule for rule in PATH_TEST_RULES if rule != pin)
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", without_pin)
+    assert NODE22_UNIT_DRIFT_SUITE in select_tests([NODE22_UNIT_DRIFT_PROBE], repo_root=Path(".")), (
+        "the probe lost its same-name derivation; the pin is now its only route"
+    )
+
+    without_glob = tuple(rule for rule in PATH_TEST_RULES if rule.pattern != "infra/systemd/node22/*")
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", without_glob)
+    assert NODE22_UNIT_DRIFT_SUITE not in select_tests(["infra/systemd/node22/MANIFEST.json"], repo_root=Path("."))
+
+
 @pytest.mark.parametrize(
     ("unit", "owners"),
     sorted(NODE22_UNIT_OWNER_SUITES.items()),
