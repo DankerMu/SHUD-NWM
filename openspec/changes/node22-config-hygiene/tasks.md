@@ -15,13 +15,13 @@
 - Config / project setup — selected：1.1/3.1/3.2 追踪 systemd 单元与 manifest，4.1 gitignore，4.3 env 键分类；全部由守卫测试钉死，部署是运维 non-goal。2.1 新 env 键默认值在脚本内，stall 单元无 `EnvironmentFile=`，部署无变化；校验用例覆盖范围。
 - File IO / path safety / overwrite — selected：4.4 `mv -n`、拒绝集归一化、目标已存在退出 2；1.2 只读 systemd 目录（测试以空 `PATH` 证明不调 `systemctl`）。1.1 只新增仓库文件。
 - Schema / columns / units / field names — selected：1.1 `MANIFEST.json` 字段 `{deployed_relative_path, tracked_path, sha256}` 是 1.2 探针与 3.x 的契约，由 `tests/test_node22_unit_tracking.py` 断言。 1.2 的 receipt `nhms.node22.unit_drift_check.v1` 键集合由 `tests/test_node22_unit_drift_check.py` 精确断言；探针对 manifest 畸形 fail-closed（退出 2）。 2.1 的 `PassRecord.__slots__` 新字段与顶层 receipt 块 `root_blocked_run`（四键精确断言）为增量，`RECEIPT_SCHEMA_VERSION` 保持 v1。
-- Auth / permissions / secrets — selected：1.1/3.1 追踪的单元只引用 secret 路径；守卫测试断言无 `*TOKEN|*SECRET|*PASS|*PASSWORD` 赋值且 `EnvironmentFile=` 属 authority 表或 secret 路径。 1.2 的 diff 只打 stdout、receipt 不含文件内容，测试断言 receipt 键集合。
+- Auth / permissions / secrets — selected：1.1/3.1 追踪的单元只引用 secret 路径；守卫测试断言无 `*TOKEN|*SECRET|*PASS|*PASSWORD` 赋值且 `EnvironmentFile=` 属 authority 表或 secret 路径。 1.2 的 diff 只打 stdout、receipt 不含文件内容，测试断言 receipt 键集合。 4.4 搬走的备份可能含明文凭据：`umask 077`、目标目录 0700（测试断言）。
 - Concurrency / shared state / ordering — not selected：无共享状态；探针与 sweep 单进程只读/`mv -n`。
 - Resource limits / large input / discovery — not selected：输入是 ≤20 个小文件。
 - Legacy compatibility / examples — selected：1.1 保留 `infra/systemd/nhms-slurm-gateway.service` 通用模板不改（design D1 rejected alternative）；4.3 effective default 含 legacy fallback 链。2.1 无 `execution_boundary` 或非字符串的旧 artifact 读为 `None`、绝不 `probe_failed`（既有 `_pass_payload` fixture 全部无该字段，既有期望值不变即证据）。
 - Error handling / rollback / partial outputs — selected：1.2 与 4.4 的退出码 2 分支、receipt 写失败；2.1 verdict 槽位顺序。1.1 non-goal。
 - Release / packaging / dependency compatibility — not selected：无依赖变更。
-- Documentation / migration notes — selected：README authority 表/备份策略、runbook 节、DOC_STATUS 标记由 `tests/test_entropy_audit_report_contract.py` 与各 task 的文档断言覆盖；实机部署步骤在 design Migration Plan。 1.2 的 runbook 节只由 `tests/test_entropy_audit_report_contract.py` 文档门覆盖，无内容断言。 2.1 的 runbook 锚由 `test_r2` 遍历 `RUNBOOK_ANCHORS` 校验。
+- Documentation / migration notes — selected：README authority 表/备份策略、runbook 节、DOC_STATUS 标记由 `tests/test_entropy_audit_report_contract.py` 与各 task 的文档断言覆盖；实机部署步骤在 design Migration Plan。 3.1 的 README authority 行由 `tests/test_node22_unit_failure_alert.py` 断言；3.2 把 stall 探针 docstring 与 stuck-detection runbook 中 "node-22 无 `OnFailure=` 通道" 的陈述改为已接线（钉死块列出两处）。 1.2 的 runbook 节只由 `tests/test_entropy_audit_report_contract.py` 文档门覆盖，无内容断言。 2.1 的 runbook 锚由 `test_r2` 遍历 `RUNBOOK_ANCHORS` 校验。
 
 ## 1. 追踪 node-22 live 单元（spec: node22-unit-tracking）
 
@@ -89,21 +89,40 @@
 
 ## 3. node-22 单元失败告警（spec: node22-unit-failure-alert）
 
-- [ ] 3.1 新增 `infra/systemd/nhms-node22-unit-failure-alert@.service`（绝对路径）、`scripts/node22_unit_failure_alert_once.sh`、`infra/env/node22-unit-failure-alert.example`（恰好七个键，`NHMS_FRONTIER_SENDMAIL=/usr/sbin/sendmail`）；README authority 表补一行；`MANIFEST.json` 追加模板条目（第 20 条）；selector 登记。新增 `tests/test_node22_unit_failure_alert.py`：假 transport 断言恰好一封含单元名与 journal 尾行；无收件人 `SKIPPED` 退出 0 且不调用 transport；transport 退出 1 时 handler 非 0；example 键集合精确；节点 22 单元与模板不含 `%h/NWM`；manifest 含模板 sha256。
+- [x] 3.1 新增 `infra/systemd/nhms-node22-unit-failure-alert@.service`（绝对路径）、`scripts/node22_unit_failure_alert_once.sh`、`infra/env/node22-unit-failure-alert.example`（恰好七个键，`NHMS_FRONTIER_SENDMAIL=/usr/sbin/sendmail`）；README authority 表补一行；`MANIFEST.json` 追加模板条目（第 20 条）；selector 登记。新增 `tests/test_node22_unit_failure_alert.py`。钉死的契约（fixture review 2026-10-17）：
+
+  - **模板单元（恰好这些指令）**：`[Unit] Description=... %i`；`[Service] Type=oneshot`、`WorkingDirectory=/scratch/frd_muziyao/NWM`、`EnvironmentFile=-/scratch/frd_muziyao/NWM/infra/env/node22-unit-failure-alert.env`、`ExecStart=/scratch/frd_muziyao/NWM/scripts/node22_unit_failure_alert_once.sh %i`、`TimeoutStartSec=120`；无 `[Install]`、无 `UnsetEnvironment=`；头注释不得含字面 `%h/NWM`（即使作为与 node-27 的对比）。`-` 前缀是有意的：env 文件缺失时 handler 照常运行并 SKIPPED。
+  - **example**：恰好七个非注释 `KEY=` 行（`^[A-Z_][A-Z0-9_]*=`）：`NHMS_FRONTIER_SENDMAIL=/usr/sbin/sendmail` 唯一带值；`NHMS_ALERT_EMAIL_TO`、`NHMS_ALERT_EMAIL_FROM`、`NHMS_SMTP_HOST`、`NHMS_SMTP_PORT`、`NHMS_SMTP_USER`、`NHMS_SMTP_PASS` 为空；不得复制 node-27 example 的真实收件人或 `REPLACE_ME` 密码；注释可说明 SMTP 键只供认证 SMTP shim 使用、node-22 本 change 不交付该 shim。真实 `.env` 只在 node-22，由既有 `infra/env/` ignore 规则覆盖。三个新文件与 README 行均不得出现字面 `DATABASE_URL`（拓扑硬门禁扫描 `scripts/`、`infra/env/`、`openspec/changes`；缺失断言只写在 `tests/`）。
+  - **handler（与 node-27 的差异）**：`#!/usr/bin/env bash` + `set -euo pipefail`（node-22 的 `env` 禁令只针对 Python）；journal 固定 30 行：`journalctl --user -u "$UNIT" -n 30 --no-pager 2>&1 || true`，保留 "(no journal context available for ...)" 回退；去掉 `NHMS_UNIT_FAILURE_JOURNAL_LINES` 旋钮与 `JOURNAL_SCOPE=system` 分支；脚本内不给 `NHMS_FRONTIER_SENDMAIL` 默认值（默认只在 example）；绝不调用 `systemctl`；无 `LANG`/locale 处理（`charset="utf-8"` 头足够）；git 模式 `100755`。
+  - **退出矩阵（镜像 node-27）**：缺 `$1`、`NHMS_ALERT_EMAIL_TO` 未设、`NHMS_ALERT_EMAIL_FROM` 未设、TO/FROM 含 CR/LF、`NHMS_FRONTIER_SENDMAIL` 未设或不可执行 → stderr `SKIPPED reason=...`、退出 0；发送用 `"$SENDMAIL" -t -i`；transport 非 0 用 `|| rc=$?` 捕获、记 `SEND_FAILED` 并以该 rc 退出；成功记 `SENT`。主题 `[NHMS node-22] unit failed: <unit>`，日志前缀 `node22-unit-failure-alert:`，hostname 缺省 `node-22`，保留 Date/MIME/`charset="utf-8"` 头。
+  - **README 行（逐字）**：`| `nhms-node22-unit-failure-alert@.service` | `NWM/infra/env/node22-unit-failure-alert.env` | `node22-unit-failure-alert.example` |`，记为"未部署（见 Migration Plan）"而非"2026-09-02 实机核验"；`nhms-required-keys` 块不动；该节"five units in the table above"之类计数文字同步改正。
+  - **manifest**：第 20 条 `{"deployed_relative_path": "nhms-node22-unit-failure-alert@.service", "tracked_path": "infra/systemd/nhms-node22-unit-failure-alert@.service", "sha256": ...}`，按字节序插在 `nhms-node22-scheduler-stall-health.timer` 之后、`nhms-scheduler-evidence-retention.service` 之前（0 起索引 9）；`tests/test_node22_unit_tracking.py` 与 drift 测试无需改动（可选：drift 测试 docstring 的 "nineteen"）。
+  - **测试**：子进程 env 从零构建（不继承 `os.environ`），`PATH` = `tmp_path:` + 系统路径，放一个回显 argv 并打印哨兵行的假 `journalctl`；`NHMS_FRONTIER_SENDMAIL` 指向假 sendmail，它对每次调用**追加**一条记录（stdin + argv）以证明"恰好一封"；按路径执行脚本（缺 exec 位即失败）。断言：调用次数 == 1、argv == `-t -i`、正文含单元名、journal 哨兵与 journalctl argv `--user -u <unit> -n 30 --no-pager`；SKIPPED 用例退出 0、stderr 含 `SKIPPED`、捕获文件不存在；transport 退出 1 → handler 退出 1；静态断言脚本不含 `systemctl`；example 键集合精确；对 manifest 全部 20 个 `tracked_path` 断言不含字面子串 `%h/NWM`（不是裸 `%h`：三个 oneshot 合法使用 `%h/.local/bin`）；manifest 含模板条目且 sha256 等于文件（与 tracking 测试 (b) 有意重复，spec scenario 要求）；对模板跑 secret-value 扫描与 `EnvironmentFile=` authority 检查（去 `-`、拼 `/scratch/frd_muziyao/`、须是 README §#1694 表第 2 列反引号 token；tracking 测试只扫 `node22/`，顶层模板由本测试覆盖）。
+  - **selector**：新增 3 行——模板单元 → (新测试, `tests/test_node22_unit_tracking.py`)；`scripts/node22_unit_failure_alert_once.sh` → (新测试)；`infra/env/node22-unit-failure-alert.example` → (新测试)；在精确的 `infra/env/README.md` 行与 `infra/systemd/node22/*` 行追加新测试；模板行不追加 drift 测试（与十二个 oneshot 行一致，master 全量回归兜底）；`tests/test_select_ci_tests.py` 更新 exact-set 字典并加 3 条「删掉即红」断言。
+  - **PR Boundary 偏离**：issue 写「README/manifest/selector 各一处」，selector 实为 3 行 + 2 处追加；PR 偏离记录写明。
 
   Depends on: 1.1
 
-  Verify：`uv run pytest -q tests/test_node22_unit_failure_alert.py tests/test_node22_unit_tracking.py tests/test_select_ci_tests.py tests/test_entropy_audit_report_contract.py`；`bash -n scripts/node22_unit_failure_alert_once.sh`。
+  Verify：`uv run pytest -q tests/test_node22_unit_failure_alert.py tests/test_node22_unit_tracking.py tests/test_node22_unit_drift_check.py tests/test_select_ci_tests.py tests/test_entropy_audit_report_contract.py tests/test_env_templates.py`；`bash -n scripts/node22_unit_failure_alert_once.sh`。
 
   **Suggested fixture level:** compact - 复制已在 27 运行的模式到 22，改动面是路径、键集合与失败退出。
 
   **Minimal mergeable slice:** atomic - 模板单元、handler 与 example 三者缺一则无法被任何单元消费。
 
-- [ ] 3.2 为 `infra/systemd/` 下六个 node-22 oneshot 单元各加一行 `OnFailure=nhms-node22-unit-failure-alert@%n.service`，同 PR 更新 `MANIFEST.json` 中这六个文件的 sha256；`tests/test_node22_unit_failure_alert.py` 增加 wiring 断言（恰好这六个各一行；gateway 单元与 `infra/systemd/node22/**` 为零；manifest sha256 一致）。
+- [ ] 3.2 为 `infra/systemd/` 下六个 node-22 oneshot 单元各加一行 `OnFailure=nhms-node22-unit-failure-alert@%n.service`，同 PR 更新 `MANIFEST.json` 中这六个文件的 sha256；`tests/test_node22_unit_failure_alert.py` 增加 wiring 断言（恰好这六个各一行；gateway 单元与 `infra/systemd/node22/**` 为零；manifest sha256 一致）。钉死的契约（fixture review 2026-10-17）：
+
+  - **行文本与位置**：逐字 `OnFailure=nhms-node22-unit-failure-alert@%n.service`（`%n` = 完整单元名含 `.service`，实例化后为 `nhms-node22-unit-failure-alert@nhms-x.service.service`，handler 的 `$1` 收到 `nhms-x.service`，与 node-27 消费者一致；不用 `%N`/`%i`/`%I`）。放在 `[Unit]` 节最后一个 directive 之后、分隔 `[Service]` 的空行之前：`nhms-scheduler-file-provider-refresh.service` 在 `Before=` 之后，`nhms-node22-scheduler-stall-health.service` 在 "declares NO relationship" 注释块之后，其余四个在 `Description=` 之后。不加注释行、不加空行，文件仍以单个 LF 结尾——六个文件的 diff 恰好各 +1 行。
+  - **不接线**：六个 `.timer`、`nhms-compute-scheduler.service`（design Open Question Q1）、`nhms-compute-api.service`、`nhms-slurm-gateway.service`、`infra/systemd/node22/**` 与 3.1 模板本身都不加 `OnFailure=`。
+  - **wiring 断言口径**：按节切片（参照 `tests/test_node27_raw_retention_canonical_deployment.py` 的 `_section` 写法），只数非注释行 strip 后与该行全等的次数，不用子串计数（模板与注释会提及该 directive）；`[Unit]` 内恰好 1、`[Service]` 内 0。"恰好这六个" = `infra/systemd/**` 下 `rglob` 到的全部文件（含 `.timer`、`.d/*.conf`、`MANIFEST.json`、3.1 模板、gateway 单元）中含该行的集合等于这六个 `.service`。manifest 断言只断言这六条的 `sha256` 等于文件内容的小写 hex（"同 PR 更新"由 `tests/test_node22_unit_tracking.py` 兜底）。
+  - **manifest**：只替换六条的 `sha256`；条目顺序、2 空格缩进、结尾换行不变（3.1 加的第 20 条按字节序，不影响六条的位置）。
+  - **文档漂移归本 task**：`scripts/node22_scheduler_stall_health.py` 模块 docstring 的 "A failed unit in the journal is this host's only alerting channel: node-22 carries no ``OnFailure=`` mail lane." 改为陈述 `OnFailure=` 已接到 `nhms-node22-unit-failure-alert@.service`；`docs/runbooks/production-ops/stuck-detection.md` "node-22 实测**没有**任何 `OnFailure=` 通道（node-27 才有 ... 接 mail 是独立一单" 一句改为已接线并指向 3.1 的 example/README 行。PR Boundary 偏离记录：多改一个 `.py` docstring 与一个 runbook 段落。
+  - **selector**：把 `tests/test_node22_unit_failure_alert.py` 追加到六个 `.service` 行的测试元组（同 1.1/3.1 的 append 先例），`tests/test_select_ci_tests.py` 中钉住这些行精确集合的断言同 PR 更新；不追加的后果是以后只改 unit、删掉这一行并重算 manifest 的 PR 在 PR CI 上会绿。
+  - **既有读者不变红（fixture review 已核实）**：stall 套件 u1 的 directive 元组不含 `OnFailure=` 且只抓含 `nhms-compute-scheduler` 的行；entrypoint invariant 的 exact-once 字段（`uv`/`python`/`enforce`/`EnvironmentFile=`/`ExecStart=`）不受影响；refresh installer 的 `UnsetEnvironment=` 字节相等与各处 `TimeoutStartSec` 正则不受影响；唯一变红的是 tracking 的 sha256 检查，同 PR 更新 manifest 即可。合并后到运维部署前 drift 探针对六条报 `differs` 是预期。
+  - fixture level 保持 `none`：production config 触发项已由 design D4、Migration Plan 与 1.1 的 manifest 守卫消化；部署是带 receipt 的运维动作。模板 handler 不去重（stall 探针 15 分钟一趟，持续停摆约每天 96 封）是 D4 的既定选择，部署 receipt 应记录预期告警量。
 
   Depends on: 3.1, 1.1
 
-  Verify：`uv run pytest -q tests/test_node22_unit_failure_alert.py tests/test_node22_unit_tracking.py tests/test_entropy_audit_report_contract.py`。
+  Verify：`uv run pytest -q tests/test_node22_unit_failure_alert.py tests/test_node22_unit_tracking.py tests/test_node22_unit_drift_check.py tests/test_node22_entrypoint_invariant.py tests/test_node22_entrypoint_invariant_python_scan.py tests/test_node22_scheduler_stall_health.py tests/test_scheduler_refresh_deployment_contract.py tests/test_node22_refresh_timer_health_installer.py tests/test_node22_refresh_timer_health_history.py tests/test_select_ci_tests.py tests/test_entropy_audit_report_contract.py`；`git diff --stat` 显示六个 `.service` 各 +1 行。
 
   **Suggested fixture level:** none - 六行声明式配置加断言与 manifest 更新。
 
@@ -143,21 +162,45 @@
 
   **Minimal mergeable slice:** atomic - 标记与断言互为 oracle。
 
-- [ ] 4.3 `infra/env/README.md` 在 required-key 块外新增 live-drift 分类表（七个键；status 三选一；"effective value when unset"按 loader 实际取值，含 legacy fallback，如 `LEASE_GUARD_MODE` → `NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE` → `flock`）；`required` 行在 `node22-control-plane-manual-recovery.md` 补操作步骤。新增 `tests/test_node22_scheduler_env_drift_table.py`：表内键均在 example；每个 effective default 通过调用 loader（去掉该键）核实。
+- [ ] 4.3 `infra/env/README.md` 在 required-key 块外新增 live-drift 分类表（七个键；status 三选一；「effective value when unset」按 loader 实际取值）；新增 `tests/test_node22_scheduler_env_drift_table.py`。钉死的契约（fixture review 2026-10-17）：
+
+  - **三个 loader，逐行指定**：`NHMS_SCHEDULER_LEASE_GUARD_MODE` → `services/orchestrator/scheduler_lease.py` 的 `_file_lock_guard_mode()`（不是 `file_orchestration_journal.py` 里读 `JOURNAL_LOCK_GUARD_MODE` 的同名函数）；`NHMS_SCHEDULER_RECONCILE_ABSENCE_SECONDS`、`NHMS_SCHEDULER_IDENTITY_BLOCKED_STREAK_LIMIT`、`NHMS_SCHEDULER_NO_PROGRESS_CIRCUIT_PASSES`、`NHMS_SCHEDULER_TIMING_LEVEL` → `services/orchestrator/scheduler_config/config.py` `ProductionSchedulerConfig` 各字段的 `default_factory`；`NHMS_SCHEDULER_EVIDENCE_RETENTION_DAYS`、`NHMS_SCHEDULER_EVIDENCE_MAX_MB` → `scripts/node22_scheduler_evidence_retention.py` 的 `config_from_env`（retention 单元使用，非 scheduler loader）。
+  - **七行取值（测试逐行断言字面值）**：LEASE `optional, example differs (example: atomic, default: flock)`；RECONCILE_ABSENCE_SECONDS `optional (effective default: 300)`；IDENTITY_BLOCKED_STREAK_LIMIT `optional (effective default: 3)`；NO_PROGRESS_CIRCUIT_PASSES `optional (effective default: 3)`；TIMING_LEVEL `optional (effective default: stage)`；EVIDENCE_RETENTION_DAYS `optional (effective default: 90)`；EVIDENCE_MAX_MB `optional (effective default: 512)`。`required` 行为 0；键集合与 spec 七键精确相等、无重复。实现时若 loader 源码与此不符，以源码为准并在 PR 偏离记录说明。
+  - **测试调 loader**：基线 = 当前进程环境只 `monkeypatch.delenv(key, raising=False)` 该键；LEASE 行同时删 legacy 键 `NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE` 后调 `_file_lock_guard_mode()` 期望 `flock`；四个 config 字段用 `dataclasses.fields(ProductionSchedulerConfig)` 取 field 并调 `default_factory()`（绕开 `__post_init__` 路径解析）；retention 用 `config_from_env(build_parser().parse_args(["--evidence-root", str(tmp_path)]))` 断言 `retention_days == 90`、`max_bytes == 512 * 1024 * 1024`。example 值用 `tests/test_env_templates.parse_env_template` 解析（截掉行尾 `#`）；断言 `optional (effective default: v)` 行的 example 值 == v，example differs 行的 example 值 == 表中值且 != default；status 与「effective value when unset」列一致。
+  - **operator action 列**：只给不带注释的 `KEY=value` 或「保持未设置」，绝不写「从 example 复制」（systemd `EnvironmentFile=` 只认整行注释，行尾 `# ...` 会进值，TIMING_LEVEL 会让每趟 fail-closed；example 的三行行尾注释本身由 #2970 处理）；LEASE 行只提主键 `NHMS_SCHEDULER_LEASE_GUARD_MODE`，不设 legacy 键；本 change 不改 live 值（Non-Goals），LEASE 行动作是「记录、另行决策」并提示核对 live 文件是否带 legacy 键。
+  - **runbook**：`required` 行为 0 → 4.3 不改 runbook；测试显式断言 required 集合为空，并加一个合成用例证明「required 行缺少 runbook `KEY=` 步骤时 helper 报违规」（不空跑）；PR 偏离记录写明「runbook 一节」缩为无。
+  - **README 位置**：文件末尾追加 `## compute.scheduler-dbfree.env live-drift classification (2026-10-16)`，标准管道表 `| key | status | effective value when unset | operator action |`，键用反引号；测试按标题定位到下一个标题为止；避开 `nhms-required-keys` 块与 `- Forbidden env keys must match` ... `- Forbidden container/host surfaces:` 段（`tests/test_two_node_docker_runtime.py` 精确断言）；措辞不含拓扑硬门禁敏感字样。
+  - **selector**：新测试追加到 `infra/env/README.md` 行、`infra/env/compute.scheduler-dbfree.env.example` 行（同步更新 `test_sibling_env_templates_keep_their_pinned_selections` 的精确列表）、`services/orchestrator/scheduler_lease.py` 行、`scripts/node22_scheduler_evidence_retention.py` 行；`services/orchestrator/scheduler_config/config.py` 无专属行 → 新开一行；新行加「删掉即红」断言；PR 偏离记录写明。
+  - **与 4.4 的冲突**：两者都改 README 尾部与同一条 README selector 行；后合并者负责 rebase。
 
   Depends on: 无
 
-  Verify：`uv run pytest -q tests/test_node22_scheduler_env_drift_table.py tests/test_env_templates.py tests/test_entropy_audit_report_contract.py`。
+  Verify：`uv run pytest -q tests/test_node22_scheduler_env_drift_table.py tests/test_env_templates.py tests/test_entropy_audit_report_contract.py tests/test_select_ci_tests.py tests/test_node22_unit_tracking.py tests/test_slurm_gateway_deployment_contract.py tests/test_two_node_docker_runtime.py`。
 
   **Suggested fixture level:** compact - 文档契约加一个对照 loader 的测试。
 
   **Minimal mergeable slice:** atomic - 七行分类是一张表，表与测试同生。
 
-- [ ] 4.4 `infra/env/README.md` 新增"Backup copies"节；新增 `scripts/ops/node22_env_backup_sweep.sh`（`--env-dir`、`--systemd-user-dir`、`--backup-root`、`--home`、`--apply`；候选模式、归一化拒绝集、plan 行、receipt、`mv -n`、目标已存在退出 2，按 design D5）与 `tests/test_node22_env_backup_sweep.py` 覆盖 spec 四个 scenario；`node22-control-plane-manual-recovery.md` 补"先 dry-run 后 --apply、附 receipt"步骤；selector 登记。
+- [ ] 4.4 `infra/env/README.md` 新增「Backup copies」节；新增 `scripts/ops/node22_env_backup_sweep.sh`（`--env-dir`、`--systemd-user-dir`、`--backup-root`、`--home`、`--apply`）与 `tests/test_node22_env_backup_sweep.py` 覆盖 spec 四个 scenario；`node22-control-plane-manual-recovery.md` 补「先 dry-run 后 --apply、附 receipt」步骤；selector 登记。钉死的契约（fixture review 2026-10-17）：
+
+  - **可移植性（本地 macOS 仍是 oracle）**：不用 `realpath -m`（macOS 无）、不用 bash 4 特性（`declare -A`、`mapfile`；本机 `/bin/bash` 3.2）、不用 `jq`/`python`/`rm `/`systemctl`；路径归一化用 `readlink -f`（父目录须存在；失败时退回「`%h` 展开后的原字符串」比较）；`set -euo pipefail`；`umask 077`。
+  - **候选**：env 目录正下方、basename 匹配 `*.bak*`、`*.backup-*`、`*.pre-*`、且 `[ -f ] && [ ! -L ]` 的普通文件；不递归、不含点文件、`LC_ALL=C` 排序去重。
+  - **拒绝集**：扫描 `--systemd-user-dir` 顶层 `nhms-*` 普通文件（任意后缀，含 `.service.pre-*` 残留，宁可多拒）与一层 `nhms-*.service.d/*.conf`；取非空 `EnvironmentFile=` 值（跳过 reset 行；`=` 两侧去空白；去一个前导 `-`；只展开 `%h` 为 `--home`）；两侧归一化后字符串相等即命中，stderr 点名单元相对路径，dry-run 也退出 2、零移动。fail-closed：`--env-dir`/`--systemd-user-dir` 不存在或不可读 → 2；扫到 0 个 `nhms-*` 单元 → 2（防目录写错导致空拒绝集）；`--backup-root/infra-env` 归一化后落在 env 目录或 systemd 目录之下 → 2。systemd 目录只读；`~/.config/systemd/user/` 下的 rollout 目录与 `disabled/` 不在范围（design「Not yet specified」）。
+  - **apply**：第一次移动之前先对全部目标检查 `[ -e ] || [ -L ]`，任一已存在 → 2、零移动（`mv -n` 退出码不可靠，只作兜底）；每次 `mv -n` 后断言源已消失、目标存在，否则 2；目标目录 `infra-env/` 权限 0700（测试断言）。
+  - **退出码只有 {0, 2}**：0 = dry-run 或零候选或 apply 成功；参数错误、拒绝、目标已存在、receipt 写失败、mv 失败 = 2。
+  - **默认值**：`--backup-root` 默认 `$HOME/NWM-presync-backup-$(date -u +%Y-%m-%d)`（`--home` 只用于 `%h` 展开）；`--home` 默认 `$HOME`；`--systemd-user-dir` 默认同 1.2（`$XDG_CONFIG_HOME/systemd/user` 否则 `~/.config/systemd/user`）；`--env-dir` **必填**（避免漏传时扫开发机的 `infra/env/`）。
+  - **plan 行**：每个候选一行 `plan: <env-dir>/<name> -> <backup-dir>/<name>`，测试按前缀计数。
+  - **receipt**：`<backup-root>/infra-env/sweep-receipt-<UTC %Y%m%dT%H%M%SZ>.json`（dry-run 也 `mkdir -p` 该目录）；键集合精确为 `schema_version`（`nhms.node22.env_backup_sweep.v1`）、`generated_at`、`mode`（`dry_run|apply`）、`status`、`exit_code`、`env_dir`、`systemd_user_dir`、`home`、`backup_dir`、`candidates`、`moved`、`refusals[{candidate, unit}]`、`conflicts`、`errors`；只记文件名不记内容；bash 手写 JSON，转义 `"` 与 `\`，basename 含控制字符 → 2；receipt 已存在（同秒两次）→ 2 不覆盖；退出 2 时只要目录可建照样写 receipt。
+  - **四个 scenario**（测试始终显式传全部路径参数，`["bash", script, ...]`）：dry-run——三个备份 + 一个 live 文件 → 三行 plan、receipt `candidates` 三项、文件都在、退出 0；拒绝——drop-in 写 `EnvironmentFile=-%h/NWM/infra/env/compute.env.bak-x`、`--home` 指向 tmp、env 目录 `<tmp>/NWM/infra/env` → 退出 2、stderr 含 drop-in 名、零移动；`--apply`——一个用例走默认 backup root（`env={"HOME": tmp, ...}`）断言目录名匹配 `NWM-presync-backup-\d{4}-\d{2}-\d{2}`、原名迁入、非匹配文件未动、receipt 存在、目录 0700；目标已存在——预置同名目标 → 退出 2、零移动、预置内容未变。静态断言：含 `set -euo pipefail`、`umask 077`；不含 `rm `、`systemctl`、`jq`、`python`、`realpath -m`、`declare -A`、`mapfile`；另跑 `bash -n`。测试同时断言 README「Backup copies」节写的默认路径与脚本默认值一致。
+  - **README 节**：文件末尾（4.3 表之后）`## Backup copies`，prose/bullet 不用表格：备份绝不放 `infra/env/` 下，放 `~/NWM-presync-backup-<date>/infra-env/`，sweep 脚本用法与 receipt 位置；措辞不含拓扑硬门禁敏感字样。
+  - **runbook**：放在 drift 探针节之后、`## 已知限制` 之前：`bash /scratch/frd_muziyao/NWM/scripts/ops/node22_env_backup_sweep.sh --env-dir /scratch/frd_muziyao/NWM/infra/env`，先 dry-run 再 `--apply`，receipt 附到 `docs/runbooks/receipts/`。
+  - **selector**：新增 `PathTestRule("scripts/ops/node22_env_backup_sweep.sh", ("tests/test_node22_env_backup_sweep.py",))`（`.sh` 无同名推导）+「删掉即红」断言；README 行追加本测试（并更新成员守卫）；runbook 行不追加（无测试读新步骤）。
+  - **与 4.3 的冲突**：同 README 尾部与 README selector 行；后合并者 rebase。
+  - **PR Boundary 偏离**：selector 1 新行 + README 行追加。
 
   Depends on: 无
 
-  Verify：`uv run pytest -q tests/test_node22_env_backup_sweep.py tests/test_select_ci_tests.py tests/test_entropy_audit_report_contract.py`；`bash -n scripts/ops/node22_env_backup_sweep.sh`。
+  Verify：`uv run pytest -q tests/test_node22_env_backup_sweep.py tests/test_select_ci_tests.py tests/test_entropy_audit_report_contract.py tests/test_env_templates.py tests/test_node22_unit_tracking.py tests/test_slurm_gateway_deployment_contract.py tests/test_two_node_docker_runtime.py`；`bash -n scripts/ops/node22_env_backup_sweep.sh`。
 
   **Suggested fixture level:** compact - 新增独立脚本，File IO 风险包（mv -n、拒绝集归一化）由测试覆盖。
 

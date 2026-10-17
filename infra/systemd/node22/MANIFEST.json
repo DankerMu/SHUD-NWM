@@ -47,6 +47,11 @@
       "sha256": "40562e04092e68b32c2ca69d543767499e2dfa6e0030f508cda89218c9d13dd5"
     },
     {
+      "deployed_relative_path": "nhms-node22-unit-failure-alert@.service",
+      "tracked_path": "infra/systemd/nhms-node22-unit-failure-alert@.service",
+      "sha256": "04f41264a29c16b8db7754cade4f6686c50f5071d5786a3ba6c0ad9735ba2da4"
+    },
+    {
       "deployed_relative_path": "nhms-scheduler-evidence-retention.service",
       "tracked_path": "infra/systemd/nhms-scheduler-evidence-retention.service",
       "sha256": "87e81a4e0fb589f234c7c9eb67dfb44e1be03a4497fb6cea1194e1cd93e38363"

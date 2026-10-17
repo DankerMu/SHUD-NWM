@@ -1,0 +1,35 @@
+# node-22 unit-failure alert channel (#2913, OpenSpec node22-config-hygiene
+# design D4).
+#
+# Copy to node22-unit-failure-alert.env on node-22 (chmod 0600). It is loaded
+# by infra/systemd/nhms-node22-unit-failure-alert@.service through
+# `EnvironmentFile=-` and read by scripts/node22_unit_failure_alert_once.sh.
+# The real .env stays on node-22 only and is never committed (infra/env/*
+# ignore rule).
+#
+# A missing file, an empty recipient or sender, or an unusable transport makes
+# the handler log `SKIPPED reason=...` and exit 0: nothing is mailed. Fill in
+# both addresses to arm the lane.
+
+# Alert recipient. Keep it to a single address; fan out at the mailbox. A CR/LF
+# in this value is refused (header injection), not stripped.
+NHMS_ALERT_EMAIL_TO=
+
+# From header. Quote the value if it carries a display name with spaces
+# (systemd strips the surrounding double quotes).
+NHMS_ALERT_EMAIL_FROM=
+
+# Absolute path of the sendmail-compatible transport, invoked as
+# `<path> -t -i` with the message on stdin; exit 0 == accepted. The handler
+# has no default of its own: this example value is the only default.
+NHMS_FRONTIER_SENDMAIL=/usr/sbin/sendmail
+
+# --- SMTP shim channel. Read ONLY by an authenticated-SMTP sendmail shim, if
+# an operator points NHMS_FRONTIER_SENDMAIL at one; the handler never reads
+# them. This change does not deliver such a shim for node-22. If one is used,
+# invoke it through /scratch/frd_muziyao/NWM/.venv/bin/python, never through an
+# `env python3` shebang. Credentials are deposited by hand on node-22 only.
+NHMS_SMTP_HOST=
+NHMS_SMTP_PORT=
+NHMS_SMTP_USER=
+NHMS_SMTP_PASS=

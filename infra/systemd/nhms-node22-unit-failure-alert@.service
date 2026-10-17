@@ -1,0 +1,27 @@
+[Unit]
+# Generic node-22 unit-failure alert (#2913, OpenSpec node22-config-hygiene
+# design D4). Same `%n`/`%i` convention and exit discipline as the node-27
+# template, with node-22 absolute paths: the node-22 checkout lives under
+# /scratch/frd_muziyao/NWM, not under the user's home directory.
+#
+# A consumer wires it as `OnFailure=nhms-node22-unit-failure-alert@%n.service`.
+# `%n` is the FULL unit name (including `.service`), so the instance reads
+# `...@nhms-x.service.service` and `%i` -- the handler's $1 -- already carries
+# the suffix. Verify the INSTANCE, not the bare template.
+#
+# Deliberately dumb: no dedup, no state. A consumer that fails on every tick
+# mails on every tick; silence comes from clearing the condition.
+Description=NHMS node-22 unit failure alert for %i
+
+[Service]
+Type=oneshot
+WorkingDirectory=/scratch/frd_muziyao/NWM
+# Keys and authority: infra/env/node22-unit-failure-alert.example and the
+# infra/env/README.md unit -> EnvironmentFile table. `-` prefix on purpose: a
+# box without the env file still runs the handler, which logs SKIPPED and exits
+# 0 instead of adding a second failed unit.
+EnvironmentFile=-/scratch/frd_muziyao/NWM/infra/env/node22-unit-failure-alert.env
+ExecStart=/scratch/frd_muziyao/NWM/scripts/node22_unit_failure_alert_once.sh %i
+# Bounded: 30 journal lines and one message to $NHMS_FRONTIER_SENDMAIL. A
+# wedged alerter must become visible, not hang forever.
+TimeoutStartSec=120

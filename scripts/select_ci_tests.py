@@ -5425,9 +5425,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "infra/env/compute.scheduler-dbfree.env.example",
         (SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST, "tests/test_env_templates.py"),
     ),
+    # #2913: the alert suite parses the authority table for the alert template's `EnvironmentFile=`.
     PathTestRule(
         "infra/env/README.md",
-        (SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST, "tests/test_env_templates.py", "tests/test_node22_unit_tracking.py"),
+        (
+            SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,
+            "tests/test_env_templates.py",
+            "tests/test_node22_unit_tracking.py",
+            "tests/test_node22_unit_failure_alert.py",
+        ),
     ),
     # #2195: this template's owner suite reads it BY PATH and asserts its
     # content -- `tests/test_scheduler_refresh_deployment_contract.py`'s
@@ -5820,9 +5826,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # sha256 table the suite compares) had no row at all.
     # #2911: the drift probe suite also reads the real `MANIFEST.json` (and the
     # tracked files it hashes) through the probe's validator.
+    # #2913: the alert suite reads `MANIFEST.json` and scans every file it lists for `%h/NWM`.
     PathTestRule(
         "infra/systemd/node22/*",
-        ("tests/test_node22_unit_tracking.py", "tests/test_node22_unit_drift_check.py"),
+        (
+            "tests/test_node22_unit_tracking.py",
+            "tests/test_node22_unit_drift_check.py",
+            "tests/test_node22_unit_failure_alert.py",
+        ),
     ),
     PathTestRule(
         "infra/systemd/nhms-scheduler-evidence-retention.timer",
@@ -5831,6 +5842,19 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "docs/runbooks/receipts/2026-10-16-node22-live-units-snapshot.md",
         ("tests/test_node22_unit_tracking.py",),
+    ),
+    # #2913: alert suite reads the template, runs the handler, reads the example; no drift suite (master full run).
+    PathTestRule(
+        "infra/systemd/nhms-node22-unit-failure-alert@.service",
+        ("tests/test_node22_unit_failure_alert.py", "tests/test_node22_unit_tracking.py"),
+    ),
+    PathTestRule(
+        "scripts/node22_unit_failure_alert_once.sh",
+        ("tests/test_node22_unit_failure_alert.py",),
+    ),
+    PathTestRule(
+        "infra/env/node22-unit-failure-alert.example",
+        ("tests/test_node22_unit_failure_alert.py",),
     ),
     # #2911: pin for the node-22 unit drift probe, same reasoning as the stall
     # probe pin below (the same-name derivation also reaches this suite).

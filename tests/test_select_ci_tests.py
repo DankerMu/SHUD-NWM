@@ -765,6 +765,61 @@ def test_node22_unit_drift_probe_pin_red_when_removed(monkeypatch: pytest.Monkey
     assert NODE22_UNIT_DRIFT_SUITE not in select_tests(["infra/systemd/node22/MANIFEST.json"], repo_root=Path("."))
 
 
+# #2913 -- the node-22 unit-failure alert suite. It executes the handler by
+# path, reads the template unit and the env example, parses the
+# `infra/env/README.md` authority table for the template's `EnvironmentFile=`
+# and reads `MANIFEST.json` (template entry and every tracked file). The three
+# new files had no route to it; README and the `node22/*` glob gained it as an
+# extra target.
+NODE22_UNIT_FAILURE_ALERT_SUITE = "tests/test_node22_unit_failure_alert.py"
+# pattern -> one representative changed path the pattern must route.
+NODE22_UNIT_FAILURE_ALERT_NEW_ROWS: dict[str, str] = {
+    "infra/systemd/nhms-node22-unit-failure-alert@.service": "infra/systemd/nhms-node22-unit-failure-alert@.service",
+    "scripts/node22_unit_failure_alert_once.sh": "scripts/node22_unit_failure_alert_once.sh",
+    "infra/env/node22-unit-failure-alert.example": "infra/env/node22-unit-failure-alert.example",
+}
+
+
+@pytest.mark.parametrize(
+    "source",
+    (
+        *NODE22_UNIT_FAILURE_ALERT_NEW_ROWS.values(),
+        "infra/env/README.md",
+        "infra/systemd/node22/MANIFEST.json",
+        "infra/systemd/node22/nhms-slurm-gateway.service.d/10-node22-live.conf",
+    ),
+)
+def test_node22_unit_failure_alert_reader_edges_select_the_suite(source: str) -> None:
+    assert NODE22_UNIT_FAILURE_ALERT_SUITE in select_tests([source], repo_root=Path(".")), source
+
+
+def test_node22_unit_failure_alert_template_also_selects_the_tracking_suite() -> None:
+    # The template is a MANIFEST.json entry, so the tracking suite hashes it.
+    assert select_tests(["infra/systemd/nhms-node22-unit-failure-alert@.service"], repo_root=Path(".")) == [
+        NODE22_UNIT_FAILURE_ALERT_SUITE,
+        NODE22_UNIT_TRACKING_SUITE,
+    ]
+
+
+def test_node22_unit_failure_alert_new_rules_red_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The complement leg: drop exactly the three #2913 rows and their paths go dark.
+
+    README and the `node22/*` glob are not in this set: their rows carry other
+    owners too, so removing them would prove nothing about this suite.
+    """
+    from scripts import select_ci_tests
+
+    patterns = set(NODE22_UNIT_FAILURE_ALERT_NEW_ROWS)
+    mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern not in patterns)
+    assert len(mutant) == len(PATH_TEST_RULES) - len(patterns), "a new row is missing or duplicated"
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+
+    for pattern, source in NODE22_UNIT_FAILURE_ALERT_NEW_ROWS.items():
+        assert NODE22_UNIT_FAILURE_ALERT_SUITE not in select_tests([source], repo_root=Path(".")), (
+            f"{source} still reaches the alert suite without the {pattern} row"
+        )
+
+
 @pytest.mark.parametrize(
     ("unit", "owners"),
     sorted(NODE22_UNIT_OWNER_SUITES.items()),
