@@ -12,33 +12,33 @@
 
 ## 1. 导入分层守卫与契约抽取（spec: import-layering-guard）
 
-- [ ] 1.1 新增 `tests/test_import_layering_guard.py` 与 `tests/import_layering_allowlist.json`（`{file, module}` 条目，初始为当前 11 处 `packages/common -> workers` 与 1 处 `workers/shud_runtime -> services`，按 (file, module) 去重后约 8 条），按 spec 实现"向上导入即失败、条目在 AST 中不存在即失败、向下导入不需条目"；在 `scripts/select_ci_tests.py` 为 `packages/**`、`workers/**` 增加该测试的补充型路由行。
+- [ ] 1.1 新增 `tests/test_import_layering_guard.py` 与 `tests/import_layering_allowlist.json`（`{file, module}` 条目，初始为当前 11 处 `packages/common -> workers` 与 1 处 `workers/shud_runtime -> services`，按 (file, module) 去重后 9 条；扫描根只有 `apps packages services workers scripts tests`），按 spec 实现"向上导入即失败、条目在 AST 中不存在即失败、向下导入不需条目"；在 `scripts/select_ci_tests.py` 的 `select_tests` 中按 #1656/#2185 形态加一个 additive loop：`packages/**`、`workers/**` 任一路径改动即加选该测试（不参与 stop 规则）。允许的测试改动：`tests/test_select_ci_tests.py` 中因该 rider 而变的精确集合断言（同 #1656/#2185 先例，PR 列出）。
 
   Depends on: 无
 
-  Verify：`uv run pytest -q tests/test_import_layering_guard.py tests/test_select_ci_tests.py`；守卫单测含"向下导入条目不报"与"导入已删除即 stale"两个样例；人为在 `packages/common/` 加一行 `from workers.x import y` 确认失败后撤销（PR 描述记录）。
+  Verify：`uv run pytest -q tests/test_import_layering_guard.py tests/test_select_ci_tests.py`；守卫单测含"向下导入条目不报"与"导入已删除即 stale"两个样例；selector 断言：只改 `workers/forcing_producer/direct_grid_contract.py`（stop 规则 owner）时守卫仍被选中；人为在 `packages/common/` 加一行 `from workers.x import y` 确认失败后撤销（PR 描述记录）。
 
   **Suggested fixture level:** compact - 新增守卫测试与路由规则，无运行时代码。
 
   **Minimal mergeable slice:** atomic - 守卫、allowlist 与路由三者缺一则守卫要么在 CI 上不跑、要么立刻红。
 
-- [ ] 1.2 expand：新建 `packages/common/contracts/{direct_grid,time_normalization,region,hydrologic_fingerprint}.py`，把 spec 列出的符号搬入（`time_normalization` 含 `base.py` 九个纯助手 + `check_three_way_time_consistency`；`hydrologic_fingerprint` 含 `SpAttRewriteError` 基类与两个异常子类）；五个原模块改为显式 re-export shim（`direct_grid_contract.py`、`region.py`、`base.py` 保留适配器基类与 dataclass、`rewrite.py` 其余异常改继承契约基类、`time_consistency.py`）；`workers/shud_runtime/runtime.py` 与 `packages/common` 的 7 个文件改从 `contracts` 导入；allowlist 变为 `[]`；selector 为四个 contract 模块各加一行与旧路径 owner 规则等价的规则（相同测试集，补充型）。
+- [ ] 1.2 expand：新建 `packages/common/contracts/{direct_grid,time_normalization,region,hydrologic_fingerprint}.py`，把 spec 列出的符号搬入（`time_normalization` 含 `base.py` 九个纯助手 + `check_three_way_time_consistency`；`hydrologic_fingerprint` 含 `verify_hydrologic_core_fingerprint_equal` 的 AST 传递闭包：基类、四个异常、`HydrologicCoreFingerprint`、`compute_hydrologic_core_fingerprint`、`_validate_category_files`、三个常量等，PR 附闭包清单）；五个原模块改为显式 re-export shim（`direct_grid_contract.py`、`region.py`、`base.py` 保留适配器基类与 dataclass、`rewrite.py` 其余异常改继承契约基类、`time_consistency.py`）；`workers/shud_runtime/runtime.py` 与 `packages/common` 的 7 个文件改从 `contracts` 导入；allowlist 变为 `[]`；selector 在 `PATH_TEST_RULES` 为四个 contract 模块各加一行与旧路径 owner 规则等价的规则（相同测试集、相同 `stop_on_match` 语义）。
 
   Depends on: 1.1
 
-  Verify：`uv run pytest -q tests/test_import_layering_guard.py tests/test_select_ci_tests.py tests/test_forcing_producer*.py tests/test_data_adapter_resolution.py tests/test_era5_adapter.py tests/test_gfs_adapter.py tests/test_ifs_adapter.py tests/test_shud_runtime.py tests/test_mapping_builder*.py tests/test_state_clone*.py tests/test_state_manager*.py tests/test_model_registry*.py tests/test_orchestration_chain.py`，全部零改动通过；`git grep -nE '^\s*(from|import)\s+workers' packages/` 为空；selector 断言"改 `packages/common/contracts/direct_grid.py` 选中 direct-grid 契约测试集"。
+  Verify：`uv run pytest -q tests/test_import_layering_guard.py tests/test_select_ci_tests.py tests/test_forcing_producer*.py tests/test_data_adapter_resolution.py tests/test_era5_adapter.py tests/test_gfs_adapter.py tests/test_ifs_adapter.py tests/test_shud_runtime.py tests/test_mapping_builder*.py tests/test_state_clone*.py tests/test_state_manager*.py tests/test_model_registry*.py tests/test_orchestration_chain.py`，全部零改动通过；`git grep -nE '^[[:space:]]*(from|import)[[:space:]]+workers' packages/` 为空（macOS grep 不认 `\s`）；selector 断言"改 `packages/common/contracts/direct_grid.py` 选中 direct-grid 契约测试集"。
 
-  首刀 Verify：`uv run pytest -q tests/test_import_layering_guard.py tests/test_select_ci_tests.py tests/test_model_registry*.py tests/test_state_clone*.py`；allowlist 中不再有 `direct_grid_contract` 条目；`git grep -n "direct_grid_contract" packages/` 为空。
+  首刀 Verify：`uv run pytest -q tests/test_import_layering_guard.py tests/test_select_ci_tests.py tests/test_model_registry*.py tests/test_state_clone*.py`；allowlist 中不再有 `direct_grid_contract` 条目；`git grep -nE '^[[:space:]]*(from|import)[[:space:]]+workers\.forcing_producer\.direct_grid_contract' packages/` 为空（docstring/注释中的提及不计）。
 
   **Suggested fixture level:** expanded - 跨 5 个模块的符号搬迁，约 65 个导入文件，fingerprint 校验与 direct-grid 契约属 project-profile 的 forcing/identity 风险轴。
 
   **Minimal mergeable slice:** `contracts/direct_grid.py` + `direct_grid_contract.py` shim + selector 等价规则行 + `packages/common` 的 4 个文件 7 行 direct_grid 导入改向 - 该模块只依赖 `source_identity`、无 monkeypatch 风险、12 个导入文件全部经 shim 保持可用，可独立合并保绿；其余三个契约模块作为后继。
 
-- [ ] 1.3 contract：迁移仓库内全部旧路径导入与模块属性访问到 `packages.common.contracts.*`（含 tests；`chain_compat_runtime` 的 owner 模块改指向契约模块），删除 `direct_grid_contract.py`、`region.py` shim，去掉 `base.py`/`rewrite.py`/`time_consistency.py` 的 re-export。允许的测试改动：`tests/test_orchestration_chain.py` 中与旧 owner 模块比较的 identity 断言改为契约模块。
+- [ ] 1.3 contract：迁移仓库内全部旧路径导入与模块属性访问到 `packages.common.contracts.*`（含 tests；`chain_compat_runtime` 的 owner 模块改指向契约模块），删除 `direct_grid_contract.py`、`region.py` shim，去掉 `base.py`/`rewrite.py`/`time_consistency.py` 的 re-export；`tests/test_import_layering_guard.py` 增加 contract 检查函数（AST 扫描 `from`/`import`/`import … as` 无旧路径、无旧模块的被搬名字）。允许的测试改动：`tests/test_orchestration_chain.py` 中与旧 owner 模块比较的 identity 断言改为契约模块，及其钉住的 `CHAIN_COMPATIBILITY_INVENTORY.md` owner 行同步更新。
 
   Depends on: 1.2
 
-  Verify：`uv run pytest -q tests/test_import_layering_guard.py tests/test_orchestration_chain.py`（守卫的 contract 检查：AST 扫描 `from`/`import`/`import … as` 无旧路径、无旧模块的被搬名字）；`uv run python -c "import services.orchestrator.chain"` 成功；全量 `uv run pytest -q`（本地或 node-27）通过。
+  Verify：`uv run pytest -q tests/test_import_layering_guard.py tests/test_orchestration_chain.py`（含新增的 contract 检查函数）；`uv run python -c "import services.orchestrator.chain"` 成功；全量 `uv run pytest -q`（本地或 node-27）通过。
 
   **Suggested fixture level:** compact - 机械改导入路径加删文件，守卫与全量测试是 oracle。
 
@@ -46,7 +46,7 @@
 
 ## 2. 状态词汇单一来源（spec: status-vocabulary）
 
-- [ ] 2.1 新增 `packages/common/status_vocab.py`（design D3 表中全部命名集合 + 三个有序 tuple + `Literal` 别名 + `normalize_qc_verdict`；hydro 的三个集合从 `scheduler_state_types.py` 移入并由其同名重新绑定同一对象）与 `tests/test_status_vocab_parity.py`：每个命名集合对照从 canonical 站点钉入测试的字面量；schema/折叠 DB enum 对照（复用 `tests/test_hydro_status_set_parity.py` 的折叠 helper）；重复字面量扫描 + `tests/status_literal_allowlist.json`（在当前树上跑扫描，30 处命中逐条裁决，写 `file:line` + reason）。同 PR：`schemas/pipeline_job.schema.json` enum 加 `reservation_lost`（按 `PIPELINE_JOB_STATUS_ORDER` 顺序）；selector 为 `apps|packages|services|workers|scripts/**` 加该测试的补充型路由行。
+- [ ] 2.1 新增 `packages/common/status_vocab.py`（design D3 表中全部命名集合 + 三个有序 tuple + `Literal` 别名 + `normalize_qc_verdict`；hydro 的三个集合从 `scheduler_state_types.py` 移入并由其同名重新绑定同一对象）与 `tests/test_status_vocab_parity.py`：每个命名集合对照从 canonical 站点钉入测试的字面量；schema/折叠 DB enum 对照（复用 `tests/test_hydro_status_set_parity.py` 的折叠 helper）；重复字面量扫描（排除 `status_vocab.py` 自身）+ `tests/status_literal_allowlist.json`（在当前树上跑扫描，命中逐条裁决，键为 `file` + 排序成员 + reason）；每个命名集合的 Python 类型（set/frozenset/tuple 含顺序）与 canonical 站点一致。同 PR：`schemas/pipeline_job.schema.json` enum 加 `reservation_lost`（按 `PIPELINE_JOB_STATUS_ORDER` 顺序）；selector 以 #1656 形态的 additive loop 为 `apps|packages|services|workers|scripts/**` 加选该测试（允许的测试改动：受影响的精确集合断言，PR 列出）。
 
   Depends on: 无
 
@@ -78,13 +78,13 @@
 
   **Minimal mergeable slice:** `chain_types.py`、`chain_runtime_utils.py`、`file_orchestration_journal.py:621` 三个 `PIPELINE_JOB_TERMINAL` 站点改为绑定 - 内容逐字相同（7 值）、`chain_types` 保持 `set` 与共享对象，`test_forced_resubmit_veto` 的类型/identity 钉死照旧通过；其余站点（各自对应不同命名集合，同样内容相同）作为后继。
 
-- [ ] 2.4 其余站点改为导入（`packages/common/{forecast_store,met_store}.py`、`workers/output_parser/parser.py`、`apps/api/routes/hydro_display_constants.py`、`services/production_closure/{slurm_validation,met_validation,readiness_item_contracts,readiness_scheduler_evidence}.py`、`services/slurm_gateway/real_backend.py`、`scripts/{run_qhh_continuous,node27_frontier_stall_alert,m24_gateway_proof}.py`、`scripts/basin_retirement/database.py`）；QC verdict **读取/比较**站点改用 `normalize_qc_verdict`（receipt 写入与校验器保持原拼写，allowlist `distinct-vocabulary`）；allowlist 中无 `pending-migration` 条目。
+- [ ] 2.4 其余站点改为导入（tuple 站点绑定词汇中同序的 tuple：`packages/common/{forecast_store,met_store}.py`、`workers/output_parser/parser.py`、`apps/api/routes/hydro_display_constants.py`、`services/production_closure/{slurm_validation,met_validation,readiness_item_contracts,readiness_scheduler_evidence}.py`、`services/slurm_gateway/real_backend.py`、`scripts/{run_qhh_continuous,node27_frontier_stall_alert,m24_gateway_proof}.py`、`scripts/basin_retirement/database.py`）；QC verdict **读取/比较**站点改用 `normalize_qc_verdict`（receipt 写入与校验器保持原拼写，allowlist `distinct-vocabulary`）；allowlist 中无 `pending-migration` 条目。
 
   Depends on: 2.3
 
-  Verify：`uv run pytest -q tests/test_status_vocab_parity.py tests/test_forecast_store_routing.py tests/test_output_parser.py tests/test_output_parser_cli.py tests/test_production_slurm_validation.py tests/test_production_met_validation.py tests/test_m24_receipt.py tests/test_m24_gateway_proof.py` 加 `scripts/select_ci_tests.py` 对本 PR diff 选出的集合（`met_store`、`real_backend`、`basin_retirement` 无同名测试文件，PR 记录选出集合）；allowlist 无 `pending-migration`；m24 receipt fixture 带 `PASS` 仍通过校验。
+  Verify：`uv run pytest -q tests/test_status_vocab_parity.py tests/test_forecast_store_routing.py tests/test_output_parser.py tests/test_output_parser_dual_write.py tests/test_output_parser_cli.py tests/test_production_slurm_validation.py tests/test_production_met_validation.py tests/test_m24_receipt.py tests/test_m24_gateway_proof.py` 加 `scripts/select_ci_tests.py` 对本 PR diff 选出的集合（`met_store`、`real_backend`、`basin_retirement` 无同名测试文件，PR 记录选出集合）；allowlist 无 `pending-migration`；m24 receipt fixture 带 `PASS` 仍通过校验。
 
-  首刀 Verify：`uv run pytest -q tests/test_status_vocab_parity.py tests/test_forecast_store_routing.py tests/test_output_parser.py tests/test_hydro_display_mvt_scaling.py`；allowlist 中 `forecast_store`、`met_store`、`parser`、`hydro_display_constants` 条目已删除。
+  首刀 Verify：`uv run pytest -q tests/test_status_vocab_parity.py tests/test_forecast_store_routing.py tests/test_output_parser.py tests/test_output_parser_dual_write.py tests/test_hydro_display_mvt_scaling.py`；allowlist 中 `forecast_store`、`met_store`、`parser`、`hydro_display_constants` 条目已删除。
 
   **Suggested fixture level:** compact - 导入改向加归一化函数调用。
 
@@ -92,7 +92,7 @@
 
 ## 3. 时间/标识助手去重（spec: time-helper-consolidation）
 
-- [ ] 3.1 在 `packages/common/contracts/time_normalization.py` 补齐 `utc_now`、`parse_iso_utc`、`format_iso_utc`（带 docstring 与往返测试）；新增 `tests/test_time_helper_consolidation.py`（fullmatch 规则）、`tests/time_helper_ceiling.json`（初始 ceiling = 当前计数，PR 附命中清单）与 `tests/time_helper_allowlist.json`（空或含已裁决的不同概念函数）；selector 补充型路由行。
+- [ ] 3.1 在 `packages/common/contracts/time_normalization.py` 补齐 `utc_now`、`parse_iso_utc`、`format_iso_utc`（带 docstring 与往返测试）；新增 `tests/test_time_helper_consolidation.py`（fullmatch 规则）、`tests/time_helper_ceiling.json`（初始 ceiling = 当前计数，PR 附命中清单）与 `tests/time_helper_allowlist.json`（空或含已裁决的不同概念函数）；selector 以 #1656 形态的 additive loop 加选（允许的测试改动：受影响的精确集合断言，PR 列出）。
 
   Depends on: 1.2
 
@@ -102,7 +102,7 @@
 
   **Minimal mergeable slice:** atomic - 规范函数与 ceiling 测试同生，否则后续批次无 oracle。
 
-- [ ] 3.2 批次 `packages/`：替换本地重复助手（含 `packages/common` 的三个本地 source 归一化器）为规范导入并删除本地定义，降低 ceiling。
+- [ ] 3.2 批次 `packages/`：替换 3.1 命中清单中 `packages/` 下的函数（fullmatch 口径，时间助手 + `object_store_forcing._normalize_source_id` 一处归一化器）为规范导入并删除本地定义，降低 ceiling。
 
   Depends on: 3.1
 
@@ -112,7 +112,7 @@
 
   **Minimal mergeable slice:** atomic - 单包一批即最小刀；批内再拆无独立验证路径。
 
-- [ ] 3.3 批次 `services/`（含 orchestrator 的 `_utcnow`：保留 facade 名以维持 monkeypatch，改为 `from ... import utc_now as _utcnow`；含 `services/*` 的五个本地 source 归一化器）。
+- [ ] 3.3 批次 `services/`：3.1 命中清单中 `services/` 下的函数（含 orchestrator 的 `_utcnow`：保留 facade 名以维持 monkeypatch，改为 `from ... import utc_now as _utcnow`；fullmatch 命中的三个归一化器；`scheduler_runtime_roots._normalize_sources(Sequence)` 不命中、不动）。
 
   Depends on: 3.1
 
@@ -122,7 +122,7 @@
 
   **Minimal mergeable slice:** atomic - 同 3.2。
 
-- [ ] 3.4 批次 `workers/` + `apps/`（含 `apps/api` 的两个本地 source 归一化器；`pipeline.py::_normalize_source_for_query` 若行为不同则按 spec 改名并 allowlist）。
+- [ ] 3.4 批次 `workers/` + `apps/`：3.1 命中清单中这两个根下的函数（`apps/` 下无 fullmatch 命中的归一化器；`_normalize_source_for_query/_strict` 名字不匹配、不动）。
 
   Depends on: 3.1
 
@@ -132,7 +132,7 @@
 
   **Minimal mergeable slice:** atomic - 同 3.2。
 
-- [ ] 3.5 批次 `scripts/`（时间助手；`node27_download_cycles.py::_normalize_sources(values, env)` 是不同概念，改名并 allowlist 而非替换）。
+- [ ] 3.5 批次 `scripts/`：3.1 命中清单中 `scripts/` 下的函数（时间助手 17 处；`_normalize_sources(values, env)` 名字不匹配、不动）。
 
   Depends on: 3.1
 
@@ -154,7 +154,7 @@
 
   **Minimal mergeable slice:** atomic - 规则与冻结清单必须同 PR。
 
-- [ ] 4.2 新增 `tests/test_any_ratchet.py` 与 `tests/any_ratchet_ceiling.json`（初始 ceiling = 引入时计数；计数定义见 spec：注解内 `Name`/`Attribute` `Any`，字符串注解先解析）；selector 补充型路由行。
+- [ ] 4.2 新增 `tests/test_any_ratchet.py` 与 `tests/any_ratchet_ceiling.json`（初始 ceiling = 引入时计数；计数定义见 spec：注解内 `Name`/`Attribute` `Any`，字符串注解先解析）；selector 以 #1656 形态的 additive loop 加选（允许的测试改动：受影响的精确集合断言，PR 列出）。
 
   Depends on: 无
 
@@ -168,7 +168,7 @@
 
 聚簇顺序：context → read_attribution → primitives（打破 paths 环的标识/段原语）→ replay → candidates → paths（**最高风险**：含被 monkeypatch 名的调用者）→ retry_helpers。`FileOrchestrationJournalRepository`、`FileJournalRetryService` 与 facade 驻留的被 patch 名不搬。函数级归属由 5.0 的 map 决定，本节不再估算行数。
 
-- [ ] 5.0 聚簇图：新增 `tests/fixtures/file_journal_cluster_map.json`（每个顶层定义 → 一个聚簇或 `facade`；每个被 patch 名 → 其聚簇与全部调用点聚簇；`_utcnow` 与 Repository 调用的六个名标为 `facade`）与 `tests/test_file_journal_cluster_map.py`（覆盖、唯一、被 patch 名规则）。
+- [ ] 5.0 聚簇图：新增 `tests/fixtures/file_journal_cluster_map.json`（每个顶层定义 → 一个聚簇或 `facade`；每个被 patch 名 → 其聚簇与全部调用点聚簇；全部九个被 patch 名（`_utcnow`、Repository 调用的五个 IO/stat/iter 名、以及 Repository/RetryService 调用的 `_released_candidate_cycle_scope`、`_cycle_scope_from_job_id`、`_next_file_manual_retry_job_id_for_run`）标为 `facade`）与 `tests/test_file_journal_cluster_map.py`（覆盖、唯一、被 patch 名规则）。
 
   Depends on: 2.3, 3.3
 
@@ -212,13 +212,13 @@
 
   **Minimal mergeable slice:** primitives 模块单独 - 它是 paths 环的解扣，可独立保绿；replay 作为后继。
 
-- [ ] 5.4 抽取 candidates → `file_journal_candidates.py`：`_released_candidate_cycle_scope`、`_cycle_scope_from_job_id`、`_next_file_manual_retry_job_id_for_run` 与其全部调用点一起搬，patch 目标改到新模块，facade 不 re-export；调用 facade 驻留名（如 `read_bytes_limited_no_follow`）的函数用函数体内延迟导入经 facade 属性取用。允许的测试改动：这三个名字的 patch 目标字符串。
+- [ ] 5.4 抽取 candidates → `file_journal_candidates.py`：`_released_candidate_cycle_scope`、`_cycle_scope_from_job_id`、`_next_file_manual_retry_job_id_for_run` 被 Repository/RetryService 调用（且测试直接以 `journal_module.<name>` 调用），**留在 facade**；搬走的调用者与调用其它 facade 驻留名（如 `read_bytes_limited_no_follow`）的函数用函数体内延迟导入经 facade 属性取用。无测试改动。
 
   Depends on: 5.3
 
-  Verify：同 5.2，另加 `tests/test_gateway_reconcile_*.py`；每个搬走的被 patch 名有一条"patch 生效（计数 > 0）"断言。
+  Verify：同 5.2，另加 `tests/test_gateway_reconcile_*.py`；新增断言：patch facade 上述三名之一为计数 stub 后调用一个已搬到 `file_journal_candidates.py` 的调用者，计数 > 0。
 
-  **Suggested fixture level:** expanded - 候选/队列判定是 scheduler 不变量，且含 patch 目标迁移。
+  **Suggested fixture level:** expanded - 候选/队列判定是 scheduler 不变量。
 
   **Minimal mergeable slice:** atomic - 该聚簇内部互相调用，拆一半会让 facade 与 sibling 互导。
 
@@ -252,7 +252,7 @@
 
   Depends on: 无
 
-  Verify：`uv run pytest -q tests/test_select_ci_tests.py`；`scripts/ci_selector_snapshot.sh` 在父提交与 head 输出仅因新增 sibling 规则行而异（PR 附 diff）。
+  Verify：`uv run pytest -q tests/test_select_ci_tests.py`；`scripts/ci_selector_snapshot.sh` 在父提交与 head 输出字节一致（固定列表不含 sibling 路径；sibling 路由由 spec 的 "Sibling edit selects the meta guard" 断言覆盖）。
 
   **Suggested fixture level:** compact - 路由规则与快照脚本。
 
@@ -278,11 +278,11 @@
 
   **Minimal mergeable slice:** atomic - 三张规则表引用同一批常量与 `PathTestRule`。
 
-- [ ] 6.4 B3 import-graph derivation 与 `_SUITE_IMPORTER_PARSE_STATS` → `select_ci_tests_imports.py`（所有读者一起搬）；搬走的函数读 facade 可 patch 全局时由 `select_tests` 以参数传入；允许的测试改动：`_SUITE_IMPORTER_PARSE_STATS` 的 patch 目标。
+- [ ] 6.4 B3 import-graph derivation 与 `_SUITE_IMPORTER_PARSE_STATS` → `select_ci_tests_imports.py`（所有读者一起搬）；搬走的函数读 facade 可 patch 全局时由 `select_tests` 以参数传入；允许的测试改动：`_SUITE_IMPORTER_PARSE_STATS` 的全部引用（两个测试中的四行：两处 setattr 与两处读取）。
 
   Depends on: 6.3
 
-  Verify：同 6.3；tests 改动仅限 `_SUITE_IMPORTER_PARSE_STATS` patch 目标。
+  Verify：同 6.3；tests 改动仅限 `_SUITE_IMPORTER_PARSE_STATS` 的引用行。
 
   **Suggested fixture level:** compact - 逻辑搬迁，patch 目标随动。
 
@@ -290,7 +290,7 @@
 
 ## 7. 前端 lint 与分层（spec: frontend-lint-and-layering）
 
-- [ ] 7.1 `pages/hydroMet/bootstrap.ts` → `stores/hydroMetBootstrap.ts`（导出不变；7 个生产导入方与 10 个测试文件只改路径字符串）。
+- [ ] 7.1 `pages/hydroMet/bootstrap.ts` → `stores/hydroMetBootstrap.ts`（导出不变；7 个生产导入方与 8 个测试文件（含 `bootstrap.test.ts` 的路径读取）只改路径字符串，共 15 个文件）。
 
   Depends on: 无
 
@@ -320,17 +320,17 @@
 
   **Minimal mergeable slice:** atomic - 别名与消费点同 PR。
 
-- [ ] 7.4 API 错误单一归一化：四个本地归一化器（spec 点名）委托或删除；两个静默站点加错误载体（`NationalBasinGeoState.error`、mvt loader 返回 `{ layers, error }`）；新增 vitest 断言。
+- [ ] 7.4 API 错误单一归一化：三个本地归一化器委托 `getApiErrorMessage` 或删除，`apiErrorCode` 改为解析共享 `ApiErrorShape`；`useNationalBasinGeo` 加错误载体（`NationalBasinGeoState.error`，失败不缓存）；`lib/mvtLayerMetadata.ts` 的无调用方 loader 删除；新增 vitest 断言。
 
   Depends on: 7.1
 
-  Verify：`corepack pnpm test`（新增两个失败路径用例 + absent-data 渲染断言）；mocked-regression lane `corepack pnpm run test:e2e:mocked-regression` 期望值不变。
+  Verify：`corepack pnpm test`（新增 `useNationalBasinGeo` 失败路径用例 + absent-data 渲染断言；loader 删除后 `git grep` 无引用）；mocked-regression lane `corepack pnpm run test:e2e:mocked-regression` 期望值不变。
 
-  首刀 Verify：`corepack pnpm test`，两个失败路径用例通过。
+  首刀 Verify：`corepack pnpm test`，失败路径用例通过，loader 已删除。
 
   **Suggested fixture level:** expanded - 改 API 失败路径，project-profile 的 `unwrapApiData`/`getApi` 消费者契约要求 malformed-payload 测试。
 
-  **Minimal mergeable slice:** 两个静默站点加错误载体 + 对应 vitest - 可独立保绿；四个归一化器的收敛作为后继。
+  **Minimal mergeable slice:** `useNationalBasinGeo` 错误载体 + 删除死 loader + 对应 vitest - 可独立保绿；四个归一化器的收敛作为后继。
 
 - [ ] 7.5 `frontend-build` job 加 `pnpm check:api-types` 步。
 
@@ -354,7 +354,7 @@
 
   **Minimal mergeable slice:** atomic - 谓词与测试同 PR。
 
-- [ ] 8.2 `tests/test_entropy_audit_baseline_writer_summary.py` 删除对 tracked 计数的两条字面量断言、保留 HEAD inventory 比较并加 tracked summary 自洽断言；随后 `uv run python scripts/governance/write_entropy_baseline.py` 刷新 `latest.json` 并提交归档快照。
+- [ ] 8.2 `tests/test_entropy_audit_baseline_writer_summary.py` 删除对 tracked 计数的两条字面量断言、保留 HEAD inventory 比较并加 tracked 断言（正整数、`total_modules == len(modules)`）；随后 `uv run python scripts/governance/write_entropy_baseline.py` 刷新 `latest.json` 并提交归档快照。
 
   Depends on: 8.1
 
@@ -380,13 +380,13 @@
 
   **Width exception:** merged-tasks - 九个文件互相独立但没有代码、只有一条验证路径，拆成九个 issue 对交付没有价值（用户决定）。
 
-- [ ] 9.2 `node27_pgdata_workload_plan.py` 移除 `LEGACY_HYPERTABLE` 与 SQL/默认关系中的引用；新增"字符串只出现在注释/docstring/`_REFUSAL_ADVICE`"测试；新增 catalog 无 legacy 表时"无缺失关系"的用例。
+- [ ] 9.2 `node27_pgdata_workload_plan.py` 移除 `LEGACY_HYPERTABLE` 与三处引用（SQL `IN` 列表、候选加载器父表集合、默认 `expected_relations`）；新增"字符串只出现在注释/docstring/`_REFUSAL_ADVICE`"测试；新增 catalog 无 legacy 表时"无缺失关系"用例与"legacy 父表候选被拒 `PLAN_UNRELATED_PARENT`"用例。允许的测试改动：`tests/test_node27_pgdata_workload.py` 中喂入 legacy 候选并期待成功的用例改为期待拒绝。
 
   Depends on: 无
 
-  Verify：`uv run pytest -q tests/test_node27_pgdata_workload_plan.py tests/test_display_coverage_refresh.py`。
+  Verify：`uv run pytest -q tests/test_node27_pgdata_workload_plan.py tests/test_node27_pgdata_workload.py tests/test_display_coverage_refresh.py`。
 
-  **Suggested fixture level:** compact - 删除一个常量与两处引用。
+  **Suggested fixture level:** compact - 删除一个常量与三处引用，一个用例改向。
 
   **Minimal mergeable slice:** atomic - 常量与引用同删。
 
@@ -394,7 +394,7 @@
 
   Depends on: 无
 
-  Verify：`uv run pytest -q tests/test_entropy_audit_report_contract.py`；`openspec validate --specs --strict --no-interactive`。
+  Verify：`uv run pytest -q tests/test_entropy_audit_report_contract.py`；`openspec validate --specs --no-interactive`（非 strict：HEAD 上 201 个既有 spec 因缺 scenario 不过 strict，与本 change 无关）。
 
   **Suggested fixture level:** none - 纯文档。
 
