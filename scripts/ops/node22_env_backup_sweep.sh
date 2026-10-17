@@ -28,22 +28,33 @@
 # fails). A candidate in the set exits 2 naming the unit, dry run included,
 # before anything moves. The systemd directory is only read.
 #
+# Only literal paths and `%h` are understood. A value holding a wildcard (`*`,
+# `?`, `[`), any other specifier (`%` not followed by `h`, `%%` and a trailing
+# `%` included) or a line ending in `\` (continuation) cannot be compared, so
+# the refusal set would be incomplete: the run exits 2 at scan time naming the
+# unit and the value, nothing moved. Not read: units loaded but not on disk
+# under --systemd-user-dir, non-`nhms-` units, global `service.d/` drop-ins and
+# other unit search paths.
+#
 # Order of checks (fixed):
 #   1. arguments (stderr only, no receipt);
 #   2. <backup-root>/infra-env resolving to or under --env-dir or
-#      --systemd-user-dir -> 2, nothing created, no receipt;
+#      --systemd-user-dir, or <backup-root>/infra-env being a symlink -> 2,
+#      nothing created, no receipt;
 #   3. `mkdir -p` + `chmod 700` of <backup-root>/infra-env (failure -> 2, no
 #      receipt); an already existing receipt for this second -> 2, untouched;
 #   4. from here every exit writes
 #      <backup-root>/infra-env/sweep-receipt-<UTC %Y%m%dT%H%M%SZ>.json
 #      (schema nhms.node22.env_backup_sweep.v1, file names only, never file
 #      content): unreadable/missing --env-dir or --systemd-user-dir, zero
-#      `nhms-*` unit files, a control character in a candidate basename,
-#      refusals, existing targets, a failed move -> 2.
+#      `nhms-*` unit files, an unparseable `EnvironmentFile=` value, a control
+#      character in a candidate basename, refusals, existing targets, a failed
+#      move -> 2.
 #
 # --apply checks every target (`-e` or `-L`) before the first move; any hit
 # exits 2 with nothing moved (a dry run reports the same conflicts and exits 2
-# too). Each `mv -n` is followed by "source gone, target present", else 2.
+# too). Each `mv -n` is followed by "source gone, target present", else 2,
+# and by a `moved: <name>` line on stderr (the record if the receipt is lost).
 # Nothing is ever deleted. Exit codes: 0 or 2 only.
 
 set -euo pipefail
@@ -244,6 +255,11 @@ for guarded in "$ENV_DIR" "$SYSTEMD_DIR"; do
   fi
 done
 
+# chmod would follow a link and change a directory this script did not create.
+if [ -L "$BACKUP_DIR" ]; then
+  note "refused: backup directory is a symlink: $BACKUP_DIR"
+  exit 2
+fi
 if ! mkdir -p -- "$BACKUP_DIR" || ! chmod -- 700 "$BACKUP_DIR"; then
   note "cannot create backup directory $BACKUP_DIR"
   exit 2
@@ -352,8 +368,9 @@ fi
 UNIT_COUNT=0
 
 # Collects the EnvironmentFile= values of one unit file into REF_PATHS/REF_UNITS.
+# A value that is not a literal path or `%h` fails the run (see the header).
 scan_unit() {
-  local file=$1 rel=$2 line value
+  local file=$1 rel=$2 line value rest
   [ -r "$file" ] || return 1
   UNIT_COUNT=$((UNIT_COUNT + 1))
   while IFS= read -r line || [ -n "$line" ]; do
@@ -373,6 +390,23 @@ scan_unit() {
     value=${value%"${value##*[![:space:]]}"}
     [ -n "$value" ] || continue
     value=${value#-}
+    # Checked on the trimmed value so trailing blanks after the `\` count too.
+    case $value in
+    *"$BS")
+      fail "unparseable EnvironmentFile= value in $rel (line continues with a backslash): $value"
+      ;;
+    esac
+    case $value in
+    *\** | *\?* | *\[*)
+      fail "unparseable EnvironmentFile= value in $rel (wildcard): $value"
+      ;;
+    esac
+    rest=${value//"$H_SPEC"/}
+    case $rest in
+    *%*)
+      fail "unparseable EnvironmentFile= value in $rel (specifier other than %h): $value"
+      ;;
+    esac
     value=${value//"$H_SPEC"/"$HOME_DIR"}
     REF_PATHS+=("$(normalize "$value")")
     REF_UNITS+=("$rel")
@@ -460,6 +494,7 @@ if [ "$APPLY" = 1 ]; then
       fail "move not confirmed (source still present or target missing): $name"
     fi
     MOVED+=("$name")
+    note "moved: $name"
   done
 fi
 

@@ -325,6 +325,9 @@ def test_apply_moves_into_the_dated_directory(tree: Tree) -> None:
     assert receipt["candidates"] == sorted(BACKUPS)
     assert receipt["moved"] == sorted(BACKUPS)
     assert receipt["backup_dir"] == str(backup_dir)
+    # One stderr line per move: the record when the receipt cannot be written.
+    moved_lines = [line for line in result.stderr.splitlines() if ": moved: " in line]
+    assert moved_lines == [f"node22-env-backup-sweep: moved: {name}" for name in sorted(BACKUPS)]
 
 
 @pytest.mark.parametrize("apply", (True, False), ids=("apply", "dry-run"))
@@ -372,6 +375,99 @@ def test_zero_candidates_is_ok(tree: Tree) -> None:
 
 
 # --- fail-closed cases -------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "line",
+    (
+        # A glob would load `compute.env.bak-x`; a literal compare would miss it.
+        "EnvironmentFile={env_dir}/compute.env*",
+        "EnvironmentFile=-%h/NWM/infra/env/compute.env.bak-?",
+        "EnvironmentFile=-%h/NWM/infra/env/compute.env.bak-[x]",
+        # Specifiers other than `%h`, `%%` and a trailing `%`.
+        "EnvironmentFile=-%h/NWM/infra/env/%i.env",
+        "EnvironmentFile=%E/nhms/compute.env.bak-x",
+        "EnvironmentFile=%h/NWM/infra/env/100%%.env",
+        "EnvironmentFile=%h/NWM/infra/env/compute.env.bak-x%",
+        # A continuation: the next line is part of the value.
+        "EnvironmentFile=-%h/NWM/infra/env/\\\ncompute.env.bak-x",
+        "EnvironmentFile=-%h/NWM/infra/env/compute.env.bak-x \\  \n",
+    ),
+    ids=(
+        "glob-star",
+        "glob-question",
+        "glob-bracket",
+        "specifier-i",
+        "specifier-E",
+        "escaped-percent",
+        "trailing-percent",
+        "continuation",
+        "continuation-trailing-blank",
+    ),
+)
+def test_unparseable_environment_file_value_fails_closed(tree: Tree, line: str) -> None:
+    tree.add_backups(("compute.env.bak-x",))
+    text = line.replace("{env_dir}", str(tree.env_dir))
+    tree.write_unit(REFERENCING_DROPIN, "[Service]\n" + text + "\n")
+    value = text.split("\n")[0].split("=", 1)[1].strip().removeprefix("-")
+    before_env = snapshot(tree.env_dir)
+    before_units = snapshot(tree.systemd)
+
+    result = run(tree.argv("--apply"), tree.env())
+
+    assert result.returncode == 2
+    assert REFERENCING_DROPIN in result.stderr
+    assert value in result.stderr
+    assert plan_lines(result.stdout) == []
+    assert snapshot(tree.env_dir) == before_env
+    assert snapshot(tree.systemd) == before_units
+    assert [path.name for path in tree.backup_dir.iterdir()] == [tree.receipts()[0].name]
+    receipt = tree.receipt()
+    assert_receipt_shape(receipt, mode="apply", status="error", exit_code=2)
+    assert len(receipt["errors"]) == 1
+    assert REFERENCING_DROPIN in receipt["errors"][0]
+    assert value in receipt["errors"][0]
+    # Refused at scan time, before candidates are listed.
+    assert receipt["candidates"] == []
+    assert receipt["moved"] == []
+    assert receipt["refusals"] == []
+
+
+def test_unparseable_value_in_a_top_level_unit_fails_closed_in_dry_run(tree: Tree) -> None:
+    tree.add_backups(("compute.env.bak-x",))
+    tree.write_unit(SCHEDULER_UNIT, "[Service]\nEnvironmentFile=%h/NWM/infra/env/compute.env*\n")
+    before_env = snapshot(tree.env_dir)
+
+    result = run(tree.argv(), tree.env())
+
+    assert result.returncode == 2
+    assert SCHEDULER_UNIT in result.stderr
+    assert snapshot(tree.env_dir) == before_env
+    receipt = tree.receipt()
+    assert_receipt_shape(receipt, mode="dry_run", status="error", exit_code=2)
+    assert SCHEDULER_UNIT in receipt["errors"][0]
+
+
+def test_symlinked_backup_dir_refuses(tree: Tree, tmp_path: Path) -> None:
+    """`chmod 700` would follow a pre-existing `infra-env` link into a directory the script did not create."""
+    tree.add_backups()
+    other = tmp_path / "other"
+    other.mkdir()
+    other.chmod(0o755)
+    tree.backup_root.mkdir(parents=True)
+    tree.backup_dir.symlink_to(other)
+    before_env = snapshot(tree.env_dir)
+    before_root = snapshot(tree.backup_root)
+
+    result = run(tree.argv("--apply"), tree.env())
+
+    assert result.returncode == 2
+    assert "symlink" in result.stderr
+    assert mode_bits(other) == 0o755
+    assert list(other.iterdir()) == []
+    assert snapshot(tree.backup_root) == before_root
+    assert snapshot(tree.env_dir) == before_env
+
 
 
 def test_missing_env_dir_fails_closed(tree: Tree, tmp_path: Path) -> None:

@@ -583,9 +583,29 @@ through `EnvironmentFile=` and may carry plaintext credentials.
 - The sweep exits 2 before any move when a copy is still named by an
   `EnvironmentFile=` line of an `nhms-*` unit or of one of its
   `nhms-*.service.d/*.conf` drop-ins (the unit is named on stderr), when a
-  target already exists, or when the unit directory holds no `nhms-*` unit.
+  target already exists, when the unit directory holds no `nhms-*` unit, when
+  `<backup-root>/infra-env` resolves under the env or unit directory or is a
+  symlink, or when an `EnvironmentFile=` value cannot be parsed (a wildcard
+  `*`/`?`/`[`, a specifier other than `%h`, or a line ending in `\`; stderr
+  names the unit and the value).
+- A failed `mv` midway or a receipt that cannot be written after a complete
+  `--apply` also exits 2, after moves happened: the receipt's `moved` list is
+  the record, and stderr prints one `moved: <name>` line per move as well (a
+  zero-byte receipt is not a record; then stderr is). After `mv failed`,
+  compare the target's size with the source's and delete a leftover partial
+  target by hand before re-running (a cross-filesystem move that runs out of
+  space leaves a truncated target that every later run reports as a conflict).
+- The parser reads only the unit files on disk under `--systemd-user-dir`: not
+  the state systemd loaded at its last `daemon-reload`, not non-`nhms-` units,
+  not global `service.d/` drop-ins, not other unit search paths. It handles
+  literal paths and `%h` only and refuses anything else. Before `--apply`,
+  cross-check each unit with `systemctl --user show <unit> -p EnvironmentFiles`.
 - Every run writes `sweep-receipt-<UTC %Y%m%dT%H%M%SZ>.json` into the same
-  `infra-env/` directory (file names only, never file content). Other defaults:
+  `infra-env/` directory (file names only, never file content), except the
+  exits that happen before the receipt can exist: argument errors, the
+  backup-directory refusals, a failed `mkdir -p`/`chmod 700`, and a receipt for
+  the same second already present (stderr states the reason; nothing is
+  written). Other defaults:
   `--backup-root ~/NWM-presync-backup-<UTC date>`, `--home $HOME` (only for
   `%h`), `--systemd-user-dir` `$XDG_CONFIG_HOME/systemd/user` when absolute,
   else `~/.config/systemd/user`. `--env-dir` has no default.
