@@ -1170,7 +1170,7 @@ def test_select_tests_maps_runtime_changes_to_runtime_contract_tests() -> None:
     # The write-site invariant joins because runtime.py lives under workers/**
     # (#1656 supplemental routing), the river-segment write-surface scan joins
     # by the same root (#2185), and so does the path-canonicalisation family
-    # guard (#1627). #1908 added the production-closure Slurm validation suite to
+    # guard (#1627), and the import layering guard (#2920). #1908 added the production-closure Slurm validation suite to
     # the `workers/shud_runtime/**` rule: that suite asserts cli.py's manifest
     # safety gate directly, because the submission-scoped task run ids exist to
     # satisfy that gate unchanged.
@@ -1190,6 +1190,7 @@ def test_select_tests_maps_runtime_changes_to_runtime_contract_tests() -> None:
             "tests/test_warm_start_chaining.py",
             FAMILY_GUARD_PATH,
             RESOLVE_SURFACE_GUARD_PATH,
+            IMPORT_LAYERING_GUARD_PATH,
         }
     )
 
@@ -1205,7 +1206,8 @@ def test_select_tests_maps_direct_grid_producer_surface_to_compact_e2e_fixture()
     # tests/test_forcing_producer.py never comes back. The write-site invariant
     # joins because direct_grid_contract.py lives under workers/** (#1656), the
     # river-segment write-surface scan joins by the same root (#2185), and so
-    # does the path-canonicalisation family guard (#1627).
+    # does the path-canonicalisation family guard (#1627). The import layering
+    # guard (#2920) joins too: its additive loop runs after the stop rule.
     assert selected == sorted(
         {
             *DIRECT_GRID_SURFACE_TESTS,
@@ -1214,6 +1216,7 @@ def test_select_tests_maps_direct_grid_producer_surface_to_compact_e2e_fixture()
             WRITE_SURFACE_SCAN_PATH,
             FAMILY_GUARD_PATH,
             RESOLVE_SURFACE_GUARD_PATH,
+            IMPORT_LAYERING_GUARD_PATH,
         }
     )
     assert list(DIRECT_GRID_E2E_TESTS) == ["tests/test_direct_grid_e2e.py"]
@@ -1250,7 +1253,8 @@ def test_select_tests_keeps_issue_548_direct_grid_change_set_bounded() -> None:
     # five #1455 importer suites (all seconds-scale), plus the write-site
     # invariant (workers/** root, #1656), the river-segment write-surface
     # scan (same root, #2185) and the path-canonicalisation family guard (same
-    # root, #1627) — and no core-smoke blowout. #2323 adds the one
+    # root, #1627) and the import layering guard (same root, #2920) — and no
+    # core-smoke blowout. #2323 adds the one
     # production-topology hard-gate node for the three `openspec/changes/**`
     # scan inputs.
     assert selected == sorted(
@@ -1261,12 +1265,13 @@ def test_select_tests_keeps_issue_548_direct_grid_change_set_bounded() -> None:
             WRITE_SURFACE_SCAN_PATH,
             FAMILY_GUARD_PATH,
             RESOLVE_SURFACE_GUARD_PATH,
+            IMPORT_LAYERING_GUARD_PATH,
             TOPOLOGY_HARD_GATE_NODE,
         }
     )
-    # The trailing `+ 5` is the five supplemental riders: #1656, #2185, #1627,
-    # #2452 and #2323.
-    assert len(selected) == 1 + len(DIRECT_GRID_CONTRACT_TESTS) + len(DIRECT_GRID_CONTRACT_IMPORTER_TESTS) + 5
+    # The trailing `+ 6` is the six supplemental riders: #1656, #2185, #1627,
+    # #2452, #2920 and #2323.
+    assert len(selected) == 1 + len(DIRECT_GRID_CONTRACT_TESTS) + len(DIRECT_GRID_CONTRACT_IMPORTER_TESTS) + 6
     assert "tests/test_forcing_producer.py" not in selected
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 
@@ -1384,7 +1389,8 @@ def test_select_tests_maps_file_journal_read_state_without_whole_legacy_suites()
     # `tests/test_safe_fs.py` is #1192's at-site addition to the safe_fs.py rule:
     # the helper's own suite, which a safe_fs-only change could not reach before.
     # Additive to the redirect, exactly like the two journal importer targets.
-    # The write-site invariant joins via the packages/common/** root, and the
+    # The write-site invariant joins via the packages/common/** root (and the
+    # #2920 import layering guard via packages/**), and the
     # full core-smoke baseline joins via #1744 shared-library additivity — that
     # is exactly why the whole legacy suites now appear (safe_fs.py is a shared
     # module; the scheduler/chain baseline is retained BY POLICY, never removed
@@ -1445,6 +1451,7 @@ def test_select_tests_maps_file_journal_read_state_without_whole_legacy_suites()
             WRITE_SURFACE_SCAN_PATH,
             FAMILY_GUARD_PATH,
             RESOLVE_SURFACE_GUARD_PATH,
+            IMPORT_LAYERING_GUARD_PATH,
             # #2632: scheduler_runtime.py calls create_engine, so the driver
             # guard's content sniff adds it (supplemental, set union only).
             _prod_module.SQLALCHEMY_DRIVER_GUARD_TEST,
@@ -2015,7 +2022,8 @@ def test_select_tests_maps_forecast_store_without_core_smoke_fallback() -> None:
     # #1744 path B: forecast_store.py lives under packages/common/**, so the
     # core-smoke baseline is now retained BY POLICY in addition to the explicit
     # targets — it is no longer "without core smoke fallback" but "with the
-    # shared baseline". The invariant suite joins via the same root (#1656).
+    # shared baseline". The invariant suite joins via the same root (#1656), and
+    # the import layering guard via packages/** (#2920).
     selected = select_tests(["packages/common/forecast_store.py"], repo_root=Path("."))
 
     assert selected == sorted(
@@ -2069,6 +2077,7 @@ def test_select_tests_maps_forecast_store_without_core_smoke_fallback() -> None:
             WRITE_SURFACE_SCAN_PATH,
             FAMILY_GUARD_PATH,
             RESOLVE_SURFACE_GUARD_PATH,
+            IMPORT_LAYERING_GUARD_PATH,
         }
     )
     assert set(CORE_SMOKE_TESTS) <= set(selected)
@@ -7579,6 +7588,7 @@ def test_mixed_known_and_unknown_paths_union_rider_with_fallback_smoke() -> None
     # scans, so #1656's write-site invariant, #2185's river-segment
     # write-surface scan and #1627's family guard all join the union too. The
     # unknown path is under services/**, which also routes #2185 and #1627.
+    # #2920's import layering guard joins via the known path's workers/** root.
     assert (
         sorted(
             set(CORE_SMOKE_TESTS)
@@ -7589,6 +7599,7 @@ def test_mixed_known_and_unknown_paths_union_rider_with_fallback_smoke() -> None
                 WRITE_SURFACE_SCAN_PATH,
                 FAMILY_GUARD_PATH,
                 RESOLVE_SURFACE_GUARD_PATH,
+                IMPORT_LAYERING_GUARD_PATH,
             }
         )
         == selected
@@ -7729,7 +7740,8 @@ def test_selector_state_matrix_rows_6_7_no_suite_fallback_and_missing_targets(
     # meta-guard rider (D6 unchanged). #1684 EVID-01: the shared policy owner now
     # also selects its dedicated focused matrix suite. #2757: and the five basin
     # retirement partitions, which assert the explicit deactivate decision the
-    # tool builds with `trusted_internal_policy_decision`.
+    # tool builds with `trusted_internal_policy_decision`. #2920: packages/**
+    # also routes the import layering guard.
     assert sorted(no_suite) == sorted(
         {
             *CORE_SMOKE_TESTS,
@@ -7739,6 +7751,7 @@ def test_selector_state_matrix_rows_6_7_no_suite_fallback_and_missing_targets(
             *BASIN_RETIREMENT_TESTS,
             FAMILY_GUARD_PATH,
             RESOLVE_SURFACE_GUARD_PATH,
+            IMPORT_LAYERING_GUARD_PATH,
         }
     )
     assert SELECTOR_META_GUARD_TEST not in no_suite
@@ -7794,6 +7807,7 @@ def test_selector_state_matrix_row_11_multiple_changed_paths_accumulate() -> Non
     # and under #1627 family-guard roots, which adds the guard.
     # #1684 EVID-01: auth_policy's focused matrix suite joins the accumulation.
     # #2757: so do the basin retirement partitions on the same rule.
+    # #2920: both paths sit under import-layering roots, which adds that guard.
     assert (
         sorted(
             set(CORE_SMOKE_TESTS)
@@ -7806,6 +7820,7 @@ def test_selector_state_matrix_row_11_multiple_changed_paths_accumulate() -> Non
                 *BASIN_RETIREMENT_TESTS,
                 FAMILY_GUARD_PATH,
                 RESOLVE_SURFACE_GUARD_PATH,
+                IMPORT_LAYERING_GUARD_PATH,
             }
         )
         == selected
@@ -12801,6 +12816,7 @@ def test_copyback_guard_selects_the_copyback_mutex_suite_without_losing_its_owne
     # 16 -> 17 (#2259): the mutex partition became two collectible halves.
     # 17 -> 18 (#2452): the `.resolve()`-surface guard rides the same
     # packages/** supplemental route as the family guard.
+    # 18 -> 19 (#2920): packages/** is an import-layering guard root.
     assert Path("packages/common/copyback_guard.py").is_file()
 
     assert select_tests(["packages/common/copyback_guard.py"], repo_root=Path(".")) == [
@@ -12809,6 +12825,7 @@ def test_copyback_guard_selects_the_copyback_mutex_suite_without_losing_its_owne
         "tests/test_copyback_guard_primitive.py",
         "tests/test_forcing_copyback_backfill_lock_scope.py",
         "tests/test_gateway.py",
+        "tests/test_import_layering_guard.py",
         "tests/test_migrations.py",
         "tests/test_node27_raw_retention_copyback_mutex.py",
         "tests/test_orchestration_chain.py",
@@ -14678,6 +14695,118 @@ def test_family_guard_derivation_rejects_unreadable_scan_roots(
             _family_guard_scan_roots()
 
 
+# #2920: the import layering guard. Spelled locally for the same reason
+# FAMILY_GUARD_PATH is: this module must import against PRE-change selector
+# source; an anchor test keeps the literal in sync with the constant.
+IMPORT_LAYERING_GUARD_PATH = "tests/test_import_layering_guard.py"
+IMPORT_LAYERING_ALLOWLIST_PATH = "tests/import_layering_allowlist.json"
+
+
+def _import_layering_guard_roots() -> tuple[str, ...]:
+    """The selector's import-layering root globs, read lazily from the source."""
+    from scripts.select_ci_tests import IMPORT_LAYERING_GUARD_ROOTS
+
+    return IMPORT_LAYERING_GUARD_ROOTS
+
+
+def _import_layering_guard_root_globs() -> set[str]:
+    """The guard's own `_SCAN_ROOTS` (the authority) mapped to `<root>/**` globs."""
+    return {f"{root}/**" for root in _module_level_string_sequence(IMPORT_LAYERING_GUARD_PATH, "_SCAN_ROOTS")}
+
+
+def _assert_import_layering_guard_roots_match(roots: Sequence[str]) -> None:
+    expected = _import_layering_guard_root_globs()
+    missing = sorted(expected - set(roots))
+    unexpected = sorted(set(roots) - expected)
+    assert not missing and not unexpected, (
+        f"{IMPORT_LAYERING_GUARD_PATH}: the selector's roots and the guard's _SCAN_ROOTS "
+        f"disagree -- missing {missing}, unexpected {unexpected}"
+    )
+
+
+def test_import_layering_guard_literal_anchors_to_the_selector_constant() -> None:
+    from scripts.select_ci_tests import IMPORT_LAYERING_GUARD_TEST
+
+    assert IMPORT_LAYERING_GUARD_PATH == IMPORT_LAYERING_GUARD_TEST
+    assert Path(IMPORT_LAYERING_GUARD_PATH).is_file()
+    assert Path(IMPORT_LAYERING_ALLOWLIST_PATH).is_file()
+
+
+def test_import_layering_guard_roots_derive_from_the_guard_scan_roots() -> None:
+    # #2920: the selector's roots equal the guard's own `_SCAN_ROOTS` as globs;
+    # widening the scan without wiring the routing reddens by the root's name.
+    _assert_import_layering_guard_roots_match(_import_layering_guard_roots())
+
+
+def test_import_layering_guard_routes_every_python_path_under_its_roots() -> None:
+    # Spec "Guard runs for package changes" and "Guard runs even under a
+    # stop-rule owner": the direct-grid contract module is owned by a
+    # stop_on_match row, and the additive loop sits after the stop-rule loop.
+    owner = "workers/forcing_producer/direct_grid_contract.py"
+    assert any(rule.stop_on_match and fnmatch.fnmatch(owner, rule.pattern) for rule in PATH_TEST_RULES), (
+        f"{owner} is no longer owned by a stop_on_match rule -- the scenario is stale"
+    )
+    for module in ("packages/common/state_manager.py", owner, "workers/shud_runtime/runtime.py"):
+        assert Path(module).is_file(), module
+        selected = set(select_tests([module], repo_root=Path(".")))
+        assert IMPORT_LAYERING_GUARD_PATH in selected, f"{module}: does not select {IMPORT_LAYERING_GUARD_PATH}"
+    for root in sorted(_import_layering_guard_root_globs()):
+        probe = root.replace("**", "brand_new_thing.py")
+        selected = set(select_tests([probe], repo_root=Path(".")))
+        assert IMPORT_LAYERING_GUARD_PATH in selected, f"{probe}: does not select {IMPORT_LAYERING_GUARD_PATH}"
+
+    # Negatives: non-Python under a root (the `.sql` keeps the known-empty
+    # selection class empty), and Python outside both importer roots.
+    for probe in (
+        "packages/common/sql/x.sql",
+        "workers/README.md",
+        "services/brand_new_thing.py",
+        "apps/api/brand_new_thing.py",
+        "scripts/brand_new_thing.py",
+    ):
+        selected = set(select_tests([probe], repo_root=Path(".")))
+        assert IMPORT_LAYERING_GUARD_PATH not in selected, f"{probe}: must not select {IMPORT_LAYERING_GUARD_PATH}"
+
+
+def test_import_layering_guard_routing_reds_when_a_root_is_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Leg (a): the parity oracle names the dropped root. Leg (b): the routing
+    # loop reads the constant, so dropping a root stops that root's paths from
+    # selecting the guard while the retained root keeps routing.
+    from scripts import select_ci_tests
+
+    live = _import_layering_guard_roots()
+    assert "packages/**" in live
+    reduced = tuple(root for root in live if root != "packages/**")
+    monkeypatch.setattr(select_ci_tests, "IMPORT_LAYERING_GUARD_ROOTS", reduced)
+
+    with pytest.raises(AssertionError, match=r"missing \['packages/\*\*'\]"):
+        _assert_import_layering_guard_roots_match(reduced)
+    dropped = set(select_tests(["packages/common/state_manager.py"], repo_root=Path(".")))
+    assert IMPORT_LAYERING_GUARD_PATH not in dropped, (
+        f"dropping packages/** from IMPORT_LAYERING_GUARD_ROOTS left {IMPORT_LAYERING_GUARD_PATH} selected: "
+        "the routing loop reads inlined roots, not the constant"
+    )
+    retained = set(select_tests(["workers/shud_runtime/runtime.py"], repo_root=Path(".")))
+    assert IMPORT_LAYERING_GUARD_PATH in retained, (
+        f"dropping packages/** also stopped workers/** from selecting {IMPORT_LAYERING_GUARD_PATH}"
+    )
+
+
+def test_import_layering_allowlist_selects_the_guard() -> None:
+    assert IMPORT_LAYERING_GUARD_PATH in select_tests([IMPORT_LAYERING_ALLOWLIST_PATH], repo_root=Path("."))
+
+
+def test_import_layering_allowlist_rule_red_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drop exactly the #2920 allowlist row and the allowlist no longer reaches the guard."""
+    from scripts import select_ci_tests
+
+    mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern != IMPORT_LAYERING_ALLOWLIST_PATH)
+    assert len(mutant) == len(PATH_TEST_RULES) - 1, "the #2920 allowlist row is missing or duplicated"
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+
+    assert IMPORT_LAYERING_GUARD_PATH not in select_tests([IMPORT_LAYERING_ALLOWLIST_PATH], repo_root=Path("."))
+
+
 # The #1744 shared-library additivity authority: `packages/common/**` must
 # retain ALL of CORE_SMOKE_TESTS for every changed backend Python source, on
 # top of any explicit/same-name/supplemental targets.
@@ -15413,7 +15542,8 @@ def test_cutover_flip_parts_ride_the_registry_and_station_flip_owners(source: st
 def test_station_set_flip_selects_its_importers_and_keeps_its_prior_picks() -> None:
     # #2612: the hook's direct importers (incl. the cutover history suite) plus
     # both flip partitions; the #1744 core-smoke baseline and the supplemental
-    # scans it already had are untouched.
+    # scans it already had are untouched. #2920 adds the import layering guard
+    # (packages/** root).
     selected = select_tests(["packages/common/station_set_flip.py"], repo_root=Path("."))
 
     assert selected == sorted(
@@ -15425,6 +15555,7 @@ def test_station_set_flip_selects_its_importers_and_keeps_its_prior_picks() -> N
             WRITE_SURFACE_SCAN_PATH,
             FAMILY_GUARD_PATH,
             RESOLVE_SURFACE_GUARD_PATH,
+            IMPORT_LAYERING_GUARD_PATH,
         }
     )
 

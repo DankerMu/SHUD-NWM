@@ -339,6 +339,24 @@ PATH_CANONICALIZATION_FAMILY_GUARD_ROOTS: tuple[str, ...] = (
     "apps/**",
 )
 
+# #2920: the import layering guard. It AST-parses every Python file under
+# packages/ and workers/ and fails on an upward import (packages -> workers/
+# services/apps/scripts, workers -> services/apps) that
+# tests/import_layering_allowlist.json does not name, and on a stale allowlist
+# entry. A new upward import anywhere under those roots must red the MERGE GATE,
+# so every Python path the guard reads routes to it, SUPPLEMENTALLY in the shape
+# #1656/#2185/#1627 established: no `matched`, no stop-rule participation, so a
+# `stop_on_match` owner of the changed path cannot shadow it.
+IMPORT_LAYERING_GUARD_TEST = "tests/test_import_layering_guard.py"
+
+# #2920: the guard's importer roots, mirroring its module-level `_SCAN_ROOTS`
+# binding mapped to `<root>/**` globs; a selector meta-guard parses that binding
+# and asserts the two sets are equal.
+IMPORT_LAYERING_GUARD_ROOTS: tuple[str, ...] = (
+    "packages/**",
+    "workers/**",
+)
+
 # #2323: the entropy production-topology hard gate. It builds one full-repo
 # entropy report and asserts zero production-topology findings, and that report
 # reads every scannable text file under the scanner's seven roots plus four
@@ -4781,6 +4799,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "tests/fixtures/station_series_baseline_heihe_ifs_2026060100.json",
         ("tests/test_object_store_forcing.py",),
     ),
+    # #2920: the import layering allowlist is data read only by the guard; as
+    # data it reaches no other rule, so an allowlist-only PR would select nothing.
+    PathTestRule("tests/import_layering_allowlist.json", (IMPORT_LAYERING_GUARD_TEST,)),
     PathTestRule(
         "packages/common/forecast_store.py",
         (
@@ -7403,6 +7424,12 @@ def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -
             selected.add(PATH_CANONICALIZATION_FAMILY_GUARD_TEST)
             # #2452: the `.resolve()`-surface guard scans the same file walk.
             selected.add(RESOLVE_SURFACE_GUARD_TEST)
+
+    # #2920: supplemental import-layering routing, same additive shape as the
+    # #1627 loop above (no `matched`, no stop rules, no fallback effect).
+    for path in changed:
+        if path.endswith(".py") and _any_path_matches([path], IMPORT_LAYERING_GUARD_ROOTS):
+            selected.add(IMPORT_LAYERING_GUARD_TEST)
 
     # #2498: supplemental forcing-template import sniff, same additive shape as
     # the loops above (no `matched`, no stop-rule participation, no effect on

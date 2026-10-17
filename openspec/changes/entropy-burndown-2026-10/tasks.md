@@ -26,7 +26,7 @@
 
 ## 1. 导入分层守卫与契约抽取（spec: import-layering-guard）
 
-- [ ] 1.1 新增 `tests/test_import_layering_guard.py` 与 `tests/import_layering_allowlist.json`（`{file, module}` 条目，初始为当前 11 处 `packages/common -> workers` 与 1 处 `workers/shud_runtime -> services`，按 (file, module) 去重后 9 条；扫描根只有 `apps packages services workers scripts tests`），按 spec 实现"向上导入即失败、条目在 AST 中不存在即失败、向下导入不需条目"；在 `scripts/select_ci_tests.py` 的 `select_tests` 中按 #1656/#2185 形态加一个 additive loop：`packages/**`、`workers/**` 任一路径改动即加选该测试（不参与 stop 规则）。允许的测试改动：`tests/test_select_ci_tests.py` 中因该 rider 而变的精确集合断言（同 #1656/#2185 先例，PR 列出）。
+- [x] 1.1 新增 `tests/test_import_layering_guard.py` 与 `tests/import_layering_allowlist.json`（`{file, module}` 条目，初始为当前 11 处 `packages/common -> workers` 与 1 处 `workers/shud_runtime -> services`，按 (file, module) 去重后 9 条；扫描根只有 `apps packages services workers scripts tests`），按 spec 实现"向上导入即失败、条目在 AST 中不存在即失败、向下导入不需条目"；在 `scripts/select_ci_tests.py` 的 `select_tests` 中按 #1656/#2185 形态加一个 additive loop：`packages/**`、`workers/**` 任一路径改动即加选该测试（不参与 stop 规则）。允许的测试改动：`tests/test_select_ci_tests.py` 中因该 rider 而变的精确集合断言（同 #1656/#2185 先例，PR 列出）。
 
   Depends on: 无
 
