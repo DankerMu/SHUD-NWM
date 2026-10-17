@@ -5,6 +5,7 @@ Description=NHMS node-22 DB-free scheduler stall health probe (read-only)
 # After=, Requires=, Before=, BindsTo= or PartOf=. The watcher queries the
 # watched lane with a read-only `systemctl --user show` and must never be able
 # to drag it into its own start-up or failure path.
+OnFailure=nhms-node22-unit-failure-alert@%n.service
 
 [Service]
 Type=oneshot

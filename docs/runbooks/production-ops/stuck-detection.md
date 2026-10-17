@@ -133,8 +133,10 @@ node-22 的 DB-free 调度器卡住时以前**没有任何出口会响**：`no_p
 
 形状与 file-provider refresh 探针同构：**本机、DB-free、只读、有界、固定优先级
 判级、非健康即非零退出**。出口 = 非零退出 → failed unit + journal + receipt +
-本节巡检行。node-22 实测**没有**任何 `OnFailure=` 通道（node-27 才有
-`nhms-node27-unit-failure-alert@.service` 那条 mail lane），接 mail 是独立一单。
+本节巡检行。本单元与另外五个 node-22 oneshot 单元已接 `OnFailure=` 到
+`nhms-node22-unit-failure-alert@.service`（#2914），失败即寄出该单元最后 30 行
+journal；mail lane 按 `infra/env/node22-unit-failure-alert.example` 配置，env 文件
+权威行见 `infra/env/README.md`。
 
 - 脚本：`scripts/node22_scheduler_stall_health.py`（stdlib only，可从部署树之外
   staged 运行）

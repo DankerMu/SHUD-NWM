@@ -1,5 +1,6 @@
 [Unit]
 Description=NHMS node-22 file-provider refresh timer health probe (read-only)
+OnFailure=nhms-node22-unit-failure-alert@%n.service
 
 [Service]
 Type=oneshot

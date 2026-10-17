@@ -5778,12 +5778,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # It also reads this unit's `TimeoutStartSec=` and pins the probe's default
     # stopped-dwell at it plus two hours.
     # #2532: the probe suite is five partitions; the row carries all of them.
+    # #2914: the alert suite's wiring test reads this unit's `[Unit]` `OnFailure=` line.
     PathTestRule(
         "infra/systemd/nhms-scheduler-file-provider-refresh.service",
         (
             *SCHEDULER_REFRESH_DEPLOYMENT_TESTS,
             *NODE22_REFRESH_TIMER_HEALTH_TESTS,
             "tests/test_node22_unit_tracking.py",
+            "tests/test_node22_unit_failure_alert.py",
         ),
     ),
     PathTestRule(
@@ -5811,9 +5813,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "scripts/install_node22_refresh_timer_health.sh",
         NODE22_REFRESH_TIMER_HEALTH_TESTS,
     ),
+    # #2914: the alert suite's wiring test reads this unit's `[Unit]` `OnFailure=` line.
     PathTestRule(
         "infra/systemd/nhms-node22-refresh-timer-health.service",
-        (*NODE22_REFRESH_TIMER_HEALTH_TESTS, "tests/test_node22_unit_tracking.py"),
+        (
+            *NODE22_REFRESH_TIMER_HEALTH_TESTS,
+            "tests/test_node22_unit_tracking.py",
+            "tests/test_node22_unit_failure_alert.py",
+        ),
     ),
     PathTestRule(
         "infra/systemd/nhms-node22-refresh-timer-health.timer",
@@ -5830,9 +5837,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # before this row, which degrades the PR lane to a zero-assertion
     # `--collect-only` smoke on exactly the file whose content is the
     # assertion.
+    # #2914: the alert suite's wiring test reads this unit's `[Unit]` `OnFailure=` line.
     PathTestRule(
         "infra/systemd/nhms-node22-scheduler-stall-health.service",
-        ("tests/test_node22_scheduler_stall_health.py", "tests/test_node22_unit_tracking.py"),
+        (
+            "tests/test_node22_scheduler_stall_health.py",
+            "tests/test_node22_unit_tracking.py",
+            "tests/test_node22_unit_failure_alert.py",
+        ),
     ),
     PathTestRule(
         "infra/systemd/nhms-node22-scheduler-stall-health.timer",
@@ -6555,14 +6567,25 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # #1571: the evidence-retention unit's single exact ExecStart is
         # uniquely asserted by the node-22 owner.
         NODE22_RETENTION_UNIT,
-        (*NODE22_ENTRYPOINT_INVARIANT_TESTS, "tests/test_node22_unit_tracking.py"),
+        # #2914: the alert suite's wiring test reads this unit's `[Unit]` `OnFailure=` line.
+        (
+            *NODE22_ENTRYPOINT_INVARIANT_TESTS,
+            "tests/test_node22_unit_tracking.py",
+            "tests/test_node22_unit_failure_alert.py",
+        ),
     ),
     PathTestRule(
         # The journal archive service and timer jointly define one mutation
         # entrypoint. Each changed unit must run its active-runtime invariant
         # and both archive/retention behavioral partitions.
         NODE22_JOURNAL_RETENTION_SERVICE,
-        (*NODE22_ENTRYPOINT_INVARIANT_TESTS, *JOURNAL_RETENTION_TESTS, "tests/test_node22_unit_tracking.py"),
+        # #2914: the alert suite's wiring test reads this unit's `[Unit]` `OnFailure=` line.
+        (
+            *NODE22_ENTRYPOINT_INVARIANT_TESTS,
+            *JOURNAL_RETENTION_TESTS,
+            "tests/test_node22_unit_tracking.py",
+            "tests/test_node22_unit_failure_alert.py",
+        ),
     ),
     PathTestRule(
         NODE22_JOURNAL_RETENTION_TIMER,
@@ -6572,10 +6595,12 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # #2653: a unit-only diff would otherwise select nothing (infra/**
         # non-python) and degrade to the zero-assertion collect-only smoke.
         NODE22_STATE_INDEX_CAPACITY_SERVICE,
+        # #2914: the alert suite's wiring test reads this unit's `[Unit]` `OnFailure=` line.
         (
             *NODE22_ENTRYPOINT_INVARIANT_TESTS,
             NODE22_STATE_INDEX_CAPACITY_WATCH_TEST,
             "tests/test_node22_unit_tracking.py",
+            "tests/test_node22_unit_failure_alert.py",
         ),
     ),
     PathTestRule(

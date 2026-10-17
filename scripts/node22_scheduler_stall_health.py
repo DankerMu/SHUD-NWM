@@ -14,8 +14,12 @@ This probe grades three evidence sources --- ``systemctl --user show`` for the
 scheduler timer and service, the governed terminal pass artifacts under the
 evidence root, and the no-progress tracker --- into exactly one verdict by a
 fixed precedence, writes a bounded receipt, and exits non-zero for every
-verdict other than ``ok``.  A failed unit in the journal is this host's only
-alerting channel: node-22 carries no ``OnFailure=`` mail lane.
+verdict other than ``ok``.  The failed unit is the alert: the probe's unit and
+the other five node-22 oneshots carry ``OnFailure=`` wired to
+``nhms-node22-unit-failure-alert@.service``, which mails the unit's last 30
+journal lines (mail lane configured via
+``infra/env/node22-unit-failure-alert.example``, authority row in
+``infra/env/README.md``).
 
 Two structural properties are load-bearing, inherited verbatim from the
 precedent probe ``scripts/node22_refresh_timer_health.py`` (OpenSpec change

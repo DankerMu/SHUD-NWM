@@ -474,3 +474,77 @@ def test_no_manifest_tracked_file_names_the_home_relative_checkout() -> None:
     assert TEMPLATE_TRACKED_PATH in tracked
     offenders = [path for path in tracked if "%h/NWM" in read_text(REPO_ROOT / path)]
     assert offenders == []
+
+
+# --- scenario: six oneshots wired, long-running units untouched (#2914) -------
+
+SYSTEMD_ROOT = REPO_ROOT / "infra/systemd"
+ON_FAILURE_LINE = "OnFailure=nhms-node22-unit-failure-alert@%n.service"
+WIRED_UNITS = (
+    "nhms-node22-refresh-timer-health.service",
+    "nhms-node22-scheduler-stall-health.service",
+    "nhms-scheduler-evidence-retention.service",
+    "nhms-scheduler-file-provider-refresh.service",
+    "nhms-scheduler-journal-retention.service",
+    "nhms-scheduler-state-index-capacity.service",
+)
+# Paths the exact-six scan must actually reach, so "none of these is wired" is
+# a measured fact rather than a vacuous one (spec: gateway and `node22/**`).
+MUST_SCAN = (
+    "nhms-slurm-gateway.service",
+    "nhms-node22-unit-failure-alert@.service",
+    "nhms-scheduler-file-provider-refresh.timer",
+    "node22/MANIFEST.json",
+    "node22/nhms-compute-scheduler.service",
+    "node22/nhms-compute-scheduler.service.d/10-slurm-gateway-token.conf",
+)
+
+
+def unit_section(text: str, name: str) -> list[str]:
+    """Stripped non-comment, non-blank lines of section ``[name]``, header excluded."""
+    lines = [line.strip() for line in text.splitlines() if line.strip() and not line.lstrip().startswith(("#", ";"))]
+    start = lines.index(f"[{name}]")
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("[")), len(lines))
+    return lines[start + 1 : end]
+
+
+def carries_on_failure_line(text: str) -> bool:
+    """Whole-line equality on non-comment lines: prose naming the directive never matches."""
+    return any(
+        line.strip() == ON_FAILURE_LINE for line in text.splitlines() if not line.lstrip().startswith(("#", ";"))
+    )
+
+
+@pytest.mark.parametrize("unit", WIRED_UNITS)
+def test_wired_unit_carries_the_alert_line_once_in_unit_section(unit: str) -> None:
+    text = read_text(SYSTEMD_ROOT / unit)
+
+    assert unit_section(text, "Unit").count(ON_FAILURE_LINE) == 1, unit
+    assert unit_section(text, "Service").count(ON_FAILURE_LINE) == 0, unit
+
+
+def test_exactly_the_six_oneshots_carry_the_alert_line() -> None:
+    scanned = {path.relative_to(SYSTEMD_ROOT).as_posix(): path for path in SYSTEMD_ROOT.rglob("*") if path.is_file()}
+
+    assert set(MUST_SCAN) <= set(scanned), sorted(set(MUST_SCAN) - set(scanned))
+    wired = {name for name, path in scanned.items() if carries_on_failure_line(read_text(path))}
+    assert wired == set(WIRED_UNITS)
+
+
+def test_wiring_rule_functions_bite() -> None:
+    commented = f"[Unit]\n# A consumer wires it as `{ON_FAILURE_LINE}`.\n\n[Service]\nType=oneshot\n"
+    in_service = f"[Unit]\nDescription=x\n\n[Service]\n{ON_FAILURE_LINE}\n"
+
+    assert not carries_on_failure_line(commented)
+    assert unit_section(commented, "Unit") == []
+    assert carries_on_failure_line(in_service)
+    assert unit_section(in_service, "Unit").count(ON_FAILURE_LINE) == 0
+    assert unit_section(in_service, "Service").count(ON_FAILURE_LINE) == 1
+    assert not carries_on_failure_line("OnFailure=nhms-node22-unit-failure-alert@%N.service\n")
+
+
+@pytest.mark.parametrize("unit", WIRED_UNITS)
+def test_manifest_sha256_of_wired_unit_matches_its_content(unit: str) -> None:
+    entries = [entry for entry in load_manifest()["entries"] if entry["tracked_path"] == f"infra/systemd/{unit}"]
+
+    assert [entry["sha256"] for entry in entries] == [sha256_hex(SYSTEMD_ROOT / unit)]
