@@ -312,7 +312,7 @@ receipt 顶层块 `root_blocked_run`（每档 verdict 都写，含 `ok` 与 `pro
 | `newest_is_root_blocked` | 最新一趟是否 root-blocked |
 
 `passes` / `span_minutes` 只在 ordering-safe 前缀（`SCAN_LIMIT - 12` 趟；默认 `SCAN_LIMIT` = 96 时为 84
-趟、至多 415 分钟）里量，是故障时长的**下限**，不是故障时长本身。
+趟，按 5 分钟最小间隔算至少 415 分钟；实测 6.1 分钟/趟时约 505 分钟）里量，是故障时长的**下限**，不是故障时长本身。
 
 `newest_is_root_blocked` 为真且 `span_minutes >= threshold_minutes` 即本档，只凭
 receipt 就能复算。
@@ -326,7 +326,7 @@ node-22 上逐个检查 `NHMS_SCHEDULER_ALLOWED_ROOTS` 的每一项，以及
 的人工流程确认调度器下一趟不再被拒。确认恢复要看最新一趟产物的 `execution_boundary`
 不再是任何 `*preflight_blocked` / `*_blocked` 边界，**不能**以 verdict 回到 `ok` 为准：
 停在 `db_free_runtime_preflight_blocked`（`/ghdc` 的 registry/index/copyback 根）或
-`db_free_registry_blocked` 上的 lane 仍报 `ok`，且 `root_blocked_run.passes == 0`
+`db_free_registry_blocked` 上的 lane 不会报 `scheduler_root_blocked`（`root_blocked_run.passes == 0`，其它档仍按窗口内别的趟判定）
 （已知残留，见 #2969）。**探针自己不修任何东西**。
 
 ##### stall-submission-stalled
