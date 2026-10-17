@@ -915,14 +915,20 @@ def classify_pass(payload: dict[str, Any]) -> tuple[str, int | None, int | None]
     the scheduler itself; and an early-exit pass has no status string of its
     own, so it would fall through to idle and reset the streak.
 
-    A PRE-LOCK ``preflight_blocked`` pass is a different shape under the same
-    status: ``execution_boundary`` ``scheduler_root_preflight_blocked`` or
-    ``scheduler_timing_level_unrecognised`` returns before the guard exists,
-    so it is neutral here like every other early return.  That is deliberate
-    and stays so (issue #2912): re-classifying it would bend the streak, the
-    in-flight time gate and the frontier.  A run of root-blocked passes is
-    graded instead by ``root_blocked_run``, which reads
-    ``execution_boundary`` directly.
+    A guard-less ``preflight_blocked`` pass is a different shape under the
+    same status: it returns before the guard exists, so it is neutral here
+    like every other early return, and it ends a root-blocked run.  Its
+    ``execution_boundary`` is one of ``scheduler_root_preflight_blocked`` and
+    ``db_free_runtime_preflight_blocked`` (pre-lock, both written through
+    ``_write_prelock_blocked_evidence`` in the same shape), or
+    ``scheduler_rollback_fence_prepared`` and ``db_free_registry_blocked``
+    (post-lock, pre-candidate).  ``scheduler_timing_level_unrecognised`` is
+    pre-lock too, but its artifact never lands.  Staying neutral is
+    deliberate (issue #2912): re-classifying these would bend the streak, the
+    in-flight time gate and the frontier.  Only the root boundary is graded
+    instead, by ``root_blocked_run``, which reads ``execution_boundary``
+    directly; the other guard-less boundaries are a known residual tracked in
+    #2969.
 
     The absent-count case is the second neutral rule and is concentrated
     exactly where the probe is needed most: the resource-limit fallback

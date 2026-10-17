@@ -311,6 +311,9 @@ receipt 顶层块 `root_blocked_run`（每档 verdict 都写，含 `ok` 与 `pro
 | `threshold_minutes` | 生效阈值（`NHMS_SCHEDULER_STALL_ROOT_BLOCKED_MINUTES`） |
 | `newest_is_root_blocked` | 最新一趟是否 root-blocked |
 
+`passes` / `span_minutes` 只在 ordering-safe 前缀（`SCAN_LIMIT - 12` 趟；默认 `SCAN_LIMIT` = 96 时为 84
+趟、至多 415 分钟）里量，是故障时长的**下限**，不是故障时长本身。
+
 `newest_is_root_blocked` 为真且 `span_minutes >= threshold_minutes` 即本档，只凭
 receipt 就能复算。
 
@@ -320,7 +323,11 @@ node-22 上逐个检查 `NHMS_SCHEDULER_ALLOWED_ROOTS` 的每一项，以及
 **是否存在、是否已挂载**（`findmnt -T <path>`、`ls -ld <path>`；NFS `/ghdc/data/nwm/`
 掉挂是首要嫌疑）。恢复挂载或修正配置后，按
 [`../node22-control-plane-manual-recovery.md`](../node22-control-plane-manual-recovery.md)
-的人工流程确认调度器下一趟不再被拒。**探针自己不修任何东西**。
+的人工流程确认调度器下一趟不再被拒。确认恢复要看最新一趟产物的 `execution_boundary`
+不再是任何 `*preflight_blocked` / `*_blocked` 边界，**不能**以 verdict 回到 `ok` 为准：
+停在 `db_free_runtime_preflight_blocked`（`/ghdc` 的 registry/index/copyback 根）或
+`db_free_registry_blocked` 上的 lane 仍报 `ok`，且 `root_blocked_run.passes == 0`
+（已知残留，见 #2969）。**探针自己不修任何东西**。
 
 ##### stall-submission-stalled
 

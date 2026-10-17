@@ -2825,7 +2825,7 @@ def test_i2_fix_a_alone_alerts_three_hours_in_through_the_bypassed_entries(
     The frontier entries have been counted 25 times --- the reconstruction
     walks the measured 338 back to this instant --- which is over the
     20-pass circuit threshold.  This is the "about three hours after the last
-    submission" the issue says an unsuppressed verdict 11 would have given.
+    submission" the issue says an unsuppressed verdict 12 would have given.
     """
 
     root = _evidence_root(tmp_path)
@@ -3900,9 +3900,23 @@ def test_j11_the_root_blocked_boundary_is_the_literal_the_scheduler_writes() -> 
     writer = (Path(__file__).resolve().parents[1] / "services" / "orchestrator" / "scheduler_runtime.py").read_text()
 
     assert probe.ROOT_BLOCKED_EXECUTION_BOUNDARY == ROOT_BLOCKED_BOUNDARY
-    assert re.search(
-        rf'"execution_boundary":\s*"{re.escape(probe.ROOT_BLOCKED_EXECUTION_BOUNDARY)}"', writer
-    ), "scheduler_runtime.py no longer writes the boundary the stall probe grades"
+    _assert_writer_parity(writer)
+
+
+def _assert_writer_parity(writer: str) -> None:
+    pin = rf'"execution_boundary":\s*"{re.escape(probe.ROOT_BLOCKED_EXECUTION_BOUNDARY)}"'
+    # Two writer sites: the pre-lock DB-free branch node-22 runs, and the
+    # post-lock non-DB-free branch.  Both must stay in step; a new or removed
+    # site must be reviewed against the probe, not silently absorbed.
+    assert len(re.findall(pin, writer)) == 2, "scheduler_runtime.py root-blocked writer sites changed"
+    # The pre-lock site is the one node-22 runs: bound it by its lock payload
+    # reason and the pre-lock artifact writer call, so the post-lock site alone
+    # cannot keep this green.
+    start = writer.index('"reason": "scheduler_root_preflight_blocked"')
+    end = writer.index("self._write_prelock_blocked_evidence(", start)
+    assert re.search(pin, writer[start:end]), (
+        "the pre-lock branch no longer writes the boundary the stall probe grades"
+    )
 
 
 def _boundary_record(minutes_ago: int, boundary: str | None) -> probe.PassRecord:

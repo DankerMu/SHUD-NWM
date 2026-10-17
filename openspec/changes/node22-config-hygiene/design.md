@@ -109,9 +109,18 @@ Receipt gains `root_blocked_run: {passes, span_minutes, threshold_minutes, newes
 be recomputed from the receipt. Alternative rejected: a new non-neutral shape, because it would break the in-flight
 time gate and frontier selection (`#2655` freeze shape) and the closed `shapes` dictionary.
 
-Sibling surfaces (D3): `scheduler_timing_level_unrecognised` (`scheduler_runtime.py` ~:614) is a second pre-lock
-boundary written without `progress_guard`; it stays neutral and, like every non-root boundary, ends the root-blocked
-run. The other `*preflight_blocked` boundaries are post-candidate and already counted by the blocked streak. The
+Sibling surfaces (D3): the writer has more guard-less `preflight_blocked` boundaries than the root one, and every one
+of them reads as neutral in `classify_pass` and ends the root-blocked run: `db_free_runtime_preflight_blocked`
+(`scheduler_runtime.py` ~:670-709, pre-lock, same `_write_prelock_blocked_evidence` shape; it checks the `/ghdc`
+registry/index/copyback roots the root preflight does not), `scheduler_rollback_fence_prepared` (~:758-793) and
+`db_free_registry_blocked` (~:895-925, post-lock, pre-candidate, guard constructed but not written).
+`scheduler_timing_level_unrecognised` (~:597-619) is also pre-lock and guard-less but its artifact never lands (the
+write helper returns `None` for its payload). The post-candidate boundaries (`evidence_preflight_blocked`,
+`slurm_preflight_blocked`, bare `preflight_blocked`) carry the guard and are counted by the blocked streak. Residual
+risk, deliberately out of this change's scope (spec pins that `db_free_runtime_preflight_blocked` ends the run): a lane
+that sits on one of the other guard-less boundaries still grades `ok` with `root_blocked_run.passes == 0`; the runbook
+therefore tells the operator to confirm recovery by the newest artifact's `execution_boundary`, not by the verdict, and
+widening the predicate is a follow-up issue. The
 `lock_contended_persistent`-over-root-blocked pairing is structurally unreachable (both predicates start at the newest
 pass, which cannot be both lock-contended and root-blocked), so it has no test; the buildable precedence cases are
 `timer_stopped`, `pass_limit_blocked` (outrank) and `submission_stalled` (outranked). The predicate walks
