@@ -548,6 +548,34 @@ mkdir -p /scratch/frd_muziyao/tmp/unit-drift
   目录不存在、已部署文件存在但不可读、receipt 被拒或写不出。此时探针结论不可信，先修探针输入；
   receipt 写不出时 `status: probe_failed` 只在 stderr。
 
+## env 备份副本清扫（`node22_env_backup_sweep.sh`，#2918）
+
+`infra/env/` 下的 `*.bak*` / `*.backup-*` / `*.pre-*` 备份副本按
+[`infra/env/README.md`](../../infra/env/README.md)「Backup copies」迁到
+`~/NWM-presync-backup-<UTC date>/infra-env/`。脚本是纯 bash，不需要解释器，**先 dry-run**：
+
+```bash
+bash /scratch/frd_muziyao/NWM/scripts/ops/node22_env_backup_sweep.sh --env-dir /scratch/frd_muziyao/NWM/infra/env
+```
+
+- 退出 0：stdout 每个备份副本一行 `plan: <env-dir>/<name> -> <backup-dir>/<name>`，什么都没动。
+  核对 plan 行后，同一命令加 `--apply` 再跑一次，用 `mv -n` 迁走（从不删除）。
+- 退出 2 且没有任何移动：stderr 说明原因：某个副本仍被 `nhms-*` 单元或其
+  `nhms-*.service.d/*.conf` drop-in 的 `EnvironmentFile=` 引用（stderr 点名该单元，先改单元，
+  改前后按上节跑 drift 探针）、目标已存在、systemd 目录下一个 `nhms-*` 单元都没有、
+  备份目录落在 env 目录 / systemd 目录之下或本身是 symlink、或某个 `EnvironmentFile=` 值
+  无法解析（含通配符 `*`/`?`/`[`、`%h` 以外的说明符、或行尾 `\` 续行；stderr 点名单元与该值）。
+- `mv` 中途失败或 receipt 写失败也退出 2，但此前的移动已经发生——以 receipt 的 `moved` 为准
+  （stderr 也会每次移动打一行 `moved: <name>`）。`mv failed` 后先比较目标与源的大小，再手工删除残留的目标文件（跨文件系统
+  ENOSPC 会留下截断的目标文件，之后每次重跑都报 conflict）；0 字节的 receipt 无效。
+- 解析范围有限：只读 `--systemd-user-dir` 下磁盘上的单元文件，不看 `daemon-reload` 后实际
+  加载的状态、不看非 `nhms-` 单元、不看全局 `service.d/`、不看其他搜索路径；只认字面路径与
+  `%h`，其余一律拒绝。`--apply` 之前先用 `systemctl --user show <unit> -p EnvironmentFiles`
+  逐个单元交叉核对。
+- 两次运行各写一份 `<backup-dir>/sweep-receipt-<UTC>.json`（只含文件名，不含内容；参数错误、
+  备份目录被拒、`mkdir`/`chmod` 失败、同一秒已有 receipt 这四种退出不写 receipt，原因只在 stderr），stderr 打印其路径；把 dry-run 与 `--apply` 两份 receipt 附到本次操作在
+  `docs/runbooks/receipts/` 下的运维收据里。
+
 ## 已知限制
 
 - **Slurm 层失败的 rerun 不会恢复确认物**：计数在 rerun 被接受提交时已经 +1，失败不回退。

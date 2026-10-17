@@ -5446,6 +5446,8 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node22_unit_failure_alert.py",
             # #2917: the suite parses the scheduler env live-drift table.
             "tests/test_node22_scheduler_env_drift_table.py",
+            # #2918: the sweep suite matches the "Backup copies" default path against the script.
+            "tests/test_node22_env_backup_sweep.py",
         ),
     ),
     # #2195: this template's owner suite reads it BY PATH and asserts its
@@ -5875,6 +5877,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "infra/env/node22-unit-failure-alert.example",
         ("tests/test_node22_unit_failure_alert.py",),
+    ),
+    # #2918: a `.sh` has no same-name derivation; this row is the sweep's only route to its suite.
+    PathTestRule(
+        "scripts/ops/node22_env_backup_sweep.sh",
+        ("tests/test_node22_env_backup_sweep.py",),
     ),
     # #2911: pin for the node-22 unit drift probe, same reasoning as the stall
     # probe pin below (the same-name derivation also reaches this suite).

@@ -182,7 +182,7 @@
 
   **Minimal mergeable slice:** atomic - 七行分类是一张表，表与测试同生。
 
-- [ ] 4.4 `infra/env/README.md` 新增「Backup copies」节；新增 `scripts/ops/node22_env_backup_sweep.sh`（`--env-dir`、`--systemd-user-dir`、`--backup-root`、`--home`、`--apply`）与 `tests/test_node22_env_backup_sweep.py` 覆盖 spec 四个 scenario；`node22-control-plane-manual-recovery.md` 补「先 dry-run 后 --apply、附 receipt」步骤；selector 登记。钉死的契约（fixture review 2026-10-17）：
+- [x] 4.4 `infra/env/README.md` 新增「Backup copies」节；新增 `scripts/ops/node22_env_backup_sweep.sh`（`--env-dir`、`--systemd-user-dir`、`--backup-root`、`--home`、`--apply`）与 `tests/test_node22_env_backup_sweep.py` 覆盖 spec 四个 scenario；`node22-control-plane-manual-recovery.md` 补「先 dry-run 后 --apply、附 receipt」步骤；selector 登记。钉死的契约（fixture review 2026-10-17）：
 
   - **可移植性（本地 macOS 仍是 oracle）**：不用 `realpath -m`（macOS 无）、不用 bash 4 特性（`declare -A`、`mapfile`；本机 `/bin/bash` 3.2）、不用 `jq`/`python`/`rm `/`systemctl`；路径归一化用 `readlink -f`（父目录须存在；失败时退回「`%h` 展开后的原字符串」比较）；`set -euo pipefail`；`umask 077`。
   - **候选**：env 目录正下方、basename 匹配 `*.bak*`、`*.backup-*`、`*.pre-*`、且 `[ -f ] && [ ! -L ]` 的普通文件；不递归、不含点文件、`LC_ALL=C` 排序去重。
