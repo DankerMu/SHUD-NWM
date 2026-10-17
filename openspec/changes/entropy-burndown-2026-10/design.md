@@ -144,9 +144,9 @@ and the output parser). Public closed sets are spelled out in the spec; the per-
 | `PIPELINE_JOB_TERMINAL` | `chain_types.py` (binds `set(...)` once, shared object) | `chain_runtime_utils.py:32` and `file_orchestration_journal.py:621` hold independent literal sets today (not the `chain_types` object); each binds its own `set(PIPELINE_JOB_TERMINAL)` in 2.3 |
 | `PIPELINE_JOB_TERMINAL_WITHOUT_RESERVATION` | `scheduler.py` and `scheduler_candidates.py` each bind their own `set(...)` (two independent objects today; `scheduler` imports `scheduler_candidates`, never the reverse) | — |
 | `PIPELINE_JOB_TERMINAL_GUARD`, `PIPELINE_JOB_TERMINAL_OVERRIDES`, `PIPELINE_JOB_ACTIVE_MANUAL_RETRY` | `persistence.py` | — |
-| `PIPELINE_JOB_SUCCESS` (`scheduler_state_types` binds `set(...)` once) | `scheduler_state_types.py` `TERMINAL_PIPELINE_SUCCESS_STATUSES` | `chain.py`, `chain_runtime_utils.py`, `chain_source_cycle.py`, `chain_repository_state.py`, `retry.py`, inline sites in journal / `persistence.py` / `forcing_submit_identity.py` |
+| `PIPELINE_JOB_SUCCESS` (`scheduler_state_types` binds `set(...)` once) | `scheduler_state_types.py` `TERMINAL_PIPELINE_SUCCESS_STATUSES` | `chain.py:216`, `chain_runtime_utils.py:41`, `chain_source_cycle.py:12`, `chain_repository_state.py:23`, `retry.py:80` hold independent literal sets today (not the `scheduler_state_types` object); each binds its own `set(PIPELINE_JOB_SUCCESS)` in 2.3; inline sites in journal / `persistence.py` / `forcing_submit_identity.py` |
 | `PIPELINE_JOB_ACTIVE`, `PIPELINE_JOB_PENDING`, `PIPELINE_JOB_FAILED_UI` | `apps/api/routes/pipeline.py` `_ACTIVE/_PENDING/_FAILED_JOB_STATUSES` | — |
-| `FAILED_PIPELINE_STATUSES`, `DURABLE_HYDRO_SUCCESS_STATUSES`, `HYDRO_RUN_CODE_CLEARING_STATUSES` | `scheduler_state_types.py` (moved as frozensets; `scheduler_state_types` binds `set(...)` for the two `set`-typed ones and the frozenset itself for the third, same names) | #1581 consumers unchanged |
+| `FAILED_PIPELINE_STATUSES`, `DURABLE_HYDRO_SUCCESS_STATUSES`, `HYDRO_RUN_CODE_CLEARING_STATUSES` | `scheduler_state_types.py` (moved as frozensets; `scheduler_state_types` binds `set(...)` for the two `set`-typed ones and the frozenset itself for the third, same names) | #1581 consumers unchanged; `chain.py:217`, `chain_repository_state.py:19`, `chain_source_cycle.py:13` hold independent literal `FAILED_PIPELINE_STATUSES` sets today; each binds its own `set(FAILED_PIPELINE_STATUSES)` in 2.3 |
 | `HYDRO_RUN_STATUSES` | `schemas/run_status.schema.json` enum | parity ⊇ folded DB enum − `frequency_done` |
 | `HYDRO_RUN_TERMINAL_UI` | `apps/api/routes/pipeline.py` `_TERMINAL_HYDRO_STATUSES` | — |
 | `DISPLAY_PRODUCT_READY_STATUSES` (site binds `set(...)`) | `hydro_display_constants.py` | — |
@@ -160,6 +160,9 @@ and the output parser). Public closed sets are spelled out in the spec; the per-
 | `SLURM_TERMINAL_SUCCESS`, `SLURM_TERMINAL_FAILURE` | `scripts/run_qhh_continuous.py` | — |
 | `QC_VERDICTS` + `normalize_qc_verdict` | new (lowercase) | read/compare paths in `production_closure/*`, `scripts/*` |
 | `READINESS_ITEM_STATUSES` | `readiness_item_contracts.py` | — |
+| `ACTIVE_PIPELINE_STATUSES` | `scheduler_state_types.py:28` (binds `set(...)` once, shared object) | `scheduler_state.py`, `scheduler_state_decision.py`, `scheduler_state_failure.py`, `scheduler_state_manual_retry.py`, `scheduler_state_rows.py` import the object; same members as `PIPELINE_JOB_ACTIVE` (`pipeline.py:76`), `PIPELINE_JOB_ACTIVE_MANUAL_RETRY` (`persistence.py:11`, tuple) and `retry.py:77` `ACTIVE_RETRY_STATUSES` — distinct purposes, kept distinct; `retry.py:77` binds its own `set(...)` in 2.3 |
+| `ACTIVE_HYDRO_STATUSES` | `scheduler_state_types.py:32` (binds `set(...)` once, shared object; six-site identity pinned by `test_hydro_status_set_parity.py::test_active_hydro_statuses_are_the_same_object`) | `chain.py:211`, `scheduler_state.py`, `scheduler_state_decision.py`, `scheduler_state_manual_retry.py` import the object |
+| `RESERVATION_ACTIVE_STATUSES` (`tuple`, order `reserved, submitted, running, queued, pending`) | `persistence.py:17` | `reservation.py:38` imports it |
 
 Vocabulary objects are immutable; `set`-typed sites bind `set(...)` once in the module that owns the shared object today, so every site keeps its type and identity (the parity test checks both). The vocabulary provides an ordered tuple for every set that reaches a schema or OpenAPI enum (`PIPELINE_JOB_STATUS_ORDER`,
 `HYDRO_RUN_STATUS_ORDER`, `CYCLE_STATUS_ORDER`) so generated enums are deterministic under hash randomisation; frozensets
@@ -308,7 +311,7 @@ table as history and is allowlisted by name in the string test (rewording it wou
 - The expand window of D1 leaves two import paths for the same symbol; the allowlist-with-rot check in D2 bounds it.
 - D3 adds `reservation_lost` to the pipeline-job schema, API tuple and generated type: validators accept one more
   value than before. Whether the API already returns such rows is verified on node-27 in task 2.2's receipt.
-- D3 allowlist adjudication (every hit of the widened scan) is manual work in task 2.1; a wrong `not-a-status-set` tag hides a copy.
+- D3 allowlist adjudication (every hit of the widened scan) is manual work in task 2.1b; a wrong `not-a-status-set` tag hides a copy.
 - D5 freezes a large `per-file-ignores` list; it is generated, not hand-written, and shrinks only by cleanup PRs (a
   pure move/rename may re-key an entry without growth, see tasks.md 4.1). Codes left in the list after a cleanup are
   not reported by ruff (RUF100 only covers `noqa`), so cleanup PRs must drop them by hand.
