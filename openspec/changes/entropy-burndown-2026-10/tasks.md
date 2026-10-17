@@ -127,19 +127,48 @@
 
 ## 2. 状态词汇单一来源（spec: status-vocabulary）
 
-- [ ] 2.1 新增 `packages/common/status_vocab.py`（design D3 表中全部命名集合 + 三个有序 tuple + `Literal` 别名 + `normalize_qc_verdict`；hydro 的三个集合从 `scheduler_state_types.py` 移入并由其同名重新绑定同一对象）与 `tests/test_status_vocab_parity.py`：每个命名集合对照从 canonical 站点钉入测试的字面量；schema/折叠 DB enum 对照（复用 `tests/test_hydro_status_set_parity.py` 的折叠 helper）；重复字面量扫描（排除 `status_vocab.py` 自身）+ `tests/status_literal_allowlist.json`（在当前树上跑扫描，命中逐条裁决，键为 `file` + 排序成员 + reason）；每个命名集合的 Python 类型（set/frozenset/tuple 含顺序）与 canonical 站点一致。同 PR：`schemas/pipeline_job.schema.json` enum 加 `reservation_lost`（按 `PIPELINE_JOB_STATUS_ORDER` 顺序）；selector 以 #1656 形态的 additive loop 为 `apps|packages|services|workers|scripts/**` 加选该测试（允许的测试改动：受影响的精确集合断言，PR 列出）。
+- [ ] 2.1a 新增 `packages/common/status_vocab.py`（design D3 表中全部命名集合 + 三个有序 tuple + `Literal` 别名 + `normalize_qc_verdict`；`scheduler_state_types.py` 的四处同名重新绑定同一对象）与 `tests/test_status_vocab_parity.py` 的 canonical 对照部分：每个命名集合对照从 canonical 站点钉入测试的字面量与 Python 类型；schema/折叠 DB enum 对照（复用 `tests/test_hydro_status_set_parity.py` 的折叠 helper）；selector 路由。**不改任何 schema**（`schemas/pipeline_job.schema.json` 的 `reservation_lost` 归 2.2）；重复字面量扫描与 allowlist 归 2.1b。
 
   Depends on: 无
 
-  Verify：`uv run pytest -q tests/test_status_vocab_parity.py tests/test_hydro_status_set_parity.py tests/test_select_ci_tests.py`；CI `check-jsonschema` 示例循环通过；PR 附 allowlist 裁决表。
+  Verify：`uv run ruff check .`；`uv run pytest -q tests/test_status_vocab_parity.py tests/test_hydro_status_set_parity.py tests/test_api_contract_pipeline_ops.py tests/test_select_ci_tests.py`；`openspec validate entropy-burndown-2026-10 --strict --no-interactive`。
 
-  **Suggested fixture level:** expanded - 改公共 schema enum，project-profile 的 run_status/pipeline_job 契约风险轴。
+  钉死的契约（2.1a，fixture review 2026-10-17 + split）：
 
-  **Minimal mergeable slice:** atomic - 词汇与对照测试互为 oracle，先改任一边都会让 parity 红。
+  - **schema 不动**：`tests/test_api_contract_pipeline_ops.py:464-467`（经 `tests/api_contract_helpers.py:125-127`）断言 schema enum == 硬编码 11 值 `OPS_JOB_STATUS_ENUM`（`:72-82`）== OpenAPI `BasinResult.status.enum` == `PipelineJob.status.enum`，而 selector 把 schema 文件路由到空集（PR 车道绿、master 红）。2.1a 的 parity 断言 `tuple(s for s in PIPELINE_JOB_STATUS_ORDER if s not in _PENDING_PUBLIC_DELTA) == schema enum`，`_PENDING_PUBLIC_DELTA = ("reservation_lost",)`；spec「schema enum SHALL equal `PIPELINE_JOB_STATUS_ORDER`」由 2.2 完全满足（2.2 删 `_PENDING_PUBLIC_DELTA`、把 `reservation_lost` 加进 `OPS_JOB_STATUS_ENUM` :72、加 `PathTestRule("schemas/pipeline_job.schema.json", (parity, test_api_contract_pipeline_ops, test_file_journal_full_tree_budget_contract))`）。「Schema enum drift fails parity」场景以纯函数 + 合成输入实现。
+  - **折叠 helper（唯一允许的既有测试改动）**：`tests/test_hydro_status_set_parity.py:61-118` 的 `_hydro_run_status_enum_members()` 无参、正则写死 `hydro.run_status`（:43-58），3 个探针 monkeypatch `_MIGRATIONS_DIR`（:293）。只新增 `_fold_enum_members(schema, type_name, *, create_sentinel, add_sentinel)`（调用时读 `_MIGRATIONS_DIR`），`_hydro_run_status_enum_members()` 改为对它的调用；9 个既有测试零改动通过；parity 测试 `from tests.test_hydro_status_set_parity import _fold_enum_members`（先例 `tests/api_contract_helpers.py:30`）；不做第二份折叠实现。
+  - **重新绑定是四处、在 `services/orchestrator/scheduler_state_types.py`**（不是 packages/common）：`:48 DURABLE_HYDRO_SUCCESS_STATUSES = set(_vocab....)`（必须仍是可变 set；变异探针 `test_hydro_status_set_parity.py:148-159`）；`:57 HYDRO_RUN_CODE_CLEARING_STATUSES = _vocab.HYDRO_RUN_CODE_CLEARING_STATUSES`（同一 frozenset；写赋值而非裸 from-import——无 `__all__`，F401）；`:60 FAILED_PIPELINE_STATUSES = set(...)`；`:58 TERMINAL_PIPELINE_SUCCESS_STATUSES = set(_vocab.PIPELINE_JOB_SUCCESS)`（2.1a 做绑定，2.3 不再碰）。消费者绑定 `scheduler_state_types` 创建的对象。
+  - **D3 补行（扫描会命中、无合法 allowlist 理由，2.1a 一并入词汇并在 2.3 绑定）**：`scheduler_state_types.py:28 ACTIVE_PIPELINE_STATUSES`（set，成员同 `_ACTIVE_JOB_STATUSES` 与 `persistence.ACTIVE_MANUAL_RETRY_STATUSES`）、`:32 ACTIVE_HYDRO_STATUSES`（set；六处 `:214-259` 钉同一性）、`FAILED_PIPELINE_STATUSES` 副本（`chain.py:217`、`chain_repository_state.py:19`、`chain_source_cycle.py:13`）、`persistence.RESERVATION_ACTIVE_STATUSES`（`:17`，tuple）——同「搬入并重绑」规则。
+  - **有序 tuple**：`PIPELINE_JOB_STATUS_ORDER` 按 spec 第 11 行（12 值，`reservation_lost` 在 `submission_failed` 之后）；`HYDRO_RUN_STATUS_ORDER` 按 `schemas/run_status.schema.json:53`（14）；`CYCLE_STATUS_ORDER` 按 DB ordinal 并尊重 AFTER（`canonical_incomplete` 在 `canonical_ready` 之后；`cancelled` 在 `failed_publish` 之后）。`CYCLE_UPSERT_PRESERVED` = 拼接的 10 元 tuple（`met_store.py:22-31` 8 + `_TERMINAL_CYCLE_STATUSES`）；`PIPELINE_JOB_ACTIVE_MANUAL_RETRY` 是 **tuple**（`persistence.py:11`）；`SLURM_RAW_STATES` = `real_backend.SLURM_STATE_MAP` 的 17 个键（`:172`，parity 读 dict 键）；`Literal` 别名拼出成员并断言 `typing.get_args(Alias) == ORDER`。
+  - **`normalize_qc_verdict`**：显式映射 {pass,PASS,passed,PASSED}→passed、{fail,FAIL,failed,FAILED}→failed、{blocked,BLOCKED}→blocked；`""`、`None`、非 str → `ValueError`；2.1a 不接任何调用者。
+  - **parity 钉每个 canonical 站点对象的类型（基线 `f7be77f22`）**；站点在 2.1a 不改。清单（名 ← 站点 → 成员/类型）：`PIPELINE_JOB_STATUS_ORDER` ← `apps/api/routes/pipeline.py:61` tuple 11（+`reservation_lost` → 12）；`PIPELINE_JOB_INTERNAL_STATUSES` = {reserved, cancellation_pending, reconcile_unverified}，来自 `accepted_submit_identity.py:189` `ACCEPTED_SUBMIT_MASTER_STATUSES`（frozenset 14；(12−skipped)∪INTERNAL = 14）；`PIPELINE_JOB_TERMINAL` ← `chain_types.py:15` set 7（含 `reservation_lost`），副本 `chain_runtime_utils.py:32`、`file_orchestration_journal.py:621` 是独立字面量 set；`PIPELINE_JOB_TERMINAL_WITHOUT_RESERVATION` ← `scheduler.py:354` 与 `scheduler_candidates.py:74` 各 set 6；`PIPELINE_JOB_TERMINAL_GUARD` ← `persistence.py:9` set 4、`_OVERRIDES` ← `:10` set 2、`_ACTIVE_MANUAL_RETRY` ← `:11` tuple 4；`PIPELINE_JOB_SUCCESS` ← `scheduler_state_types.py:58` set {succeeded, complete, published}（副本 `chain.py:216`、`chain_runtime_utils.py:41`、`chain_source_cycle.py:12`、`chain_repository_state.py:23`、`retry.py:80`；inline journal:6898,6902,15262、persistence.py:186,188、forcing_submit_identity.py:208）；`PIPELINE_JOB_ACTIVE` ← `pipeline.py:76` set 4、`_PENDING` ← `:77`、`_FAILED_UI` ← `:78`；`FAILED_PIPELINE_STATUSES` ← `scheduler_state_types.py:60` set 4；`DURABLE_HYDRO_SUCCESS_STATUSES` ← `:48` set 4；`HYDRO_RUN_CODE_CLEARING_STATUSES` ← `:57` frozenset 6；`HYDRO_RUN_STATUSES` ← `schemas/run_status.schema.json:53` enum 14；折叠 `hydro.run_status` = 12（000003 的 10 + `pending` 000013:3 + `frequency_done` 000062:17），减 `frequency_done` = 11 ⊆ 14；`HYDRO_RUN_TERMINAL_UI` ← `pipeline.py:79` set 6；`DISPLAY_PRODUCT_READY_STATUSES` ← `hydro_display_constants.py:31` set 3；`QHH_LATEST_READY_RUN_STATUSES` ← `forecast_store.py:28` tuple 3；`PARSE_READY_RUN_STATUSES` ← `parser.py:48` tuple 3、`FAILABLE_RUN_STATUSES` ← `:49` tuple 6；`FORECAST_CYCLE_SUCCESS_STATUSES` ← `file_orchestration_journal.py:707` set 4；`CYCLE_STATUSES` = 折叠 `met.cycle_status` 18（000003:35-52 的 16 + `cancelled` 000013:7 + `canonical_incomplete` 000027:7）；`CYCLE_TERMINAL_UI` ← `pipeline.py:80` set 10；`CYCLE_TERMINAL_UPSERT` ← `met_store.py:16` tuple 2；`SLURM_TERMINAL_STATES` ← `slurm_validation.py:78` set 11；`SLURM_TERMINAL_SUCCESS` ← `run_qhh_continuous.py:69` {COMPLETED}、`SLURM_TERMINAL_FAILURE` ← `:70` set 8；`QC_VERDICTS` 新 {passed, failed, blocked}；`READINESS_ITEM_STATUSES` ← `readiness_item_contracts.py:5` frozenset 5。
+  - **selector**：`.py` additive loop（#1656 形态，`apps|packages|services|workers|scripts/**`，放 #1627 之后、#2323 之前）；`tests/test_status_vocab_parity.py` 追加进 `PathTestRule("db/migrations/*.sql", …)`（~:5264-5276）；新行 `PathTestRule("schemas/run_status.schema.json", (parity,))`；`PathTestRule("packages/common/status_vocab.py", ("tests/test_hydro_status_set_parity.py",))`；exact-set 断言与 4.2 同根（#2937 pin 清单 ~33 处 + `:1189` rider 集合 + `:14180-14181` 计数 "3"→"4"），与 1.1/3.1/4.2 谁先合并谁先改。PR Boundary 偏离：以上路由行 + 受影响断言。
+  - **风险包**：Concurrency（`scheduler_state_types` hydro 集合保持 #1581 共享对象身份与 `DURABLE` 可变性，词汇 frozenset 不直接共享）；Schema（只读不改）。三席 `correctness`、`test-evidence+spec-compliance`、`integration`（selector 路由 + 对象身份）。
 
-- [ ] 2.2 `apps/api/routes/pipeline.py` 的状态 tuple 与四个本地集合改为从 `status_vocab` 绑定（tuple 用 `PIPELINE_JOB_STATUS_ORDER`）；手改 `openapi/nhms.v1.yaml` 的 enum（该文件为手工维护）；`cd apps/frontend && corepack pnpm generate:api` 重生成 `src/api/types.ts`；allowlist 中 `pipeline.py` 的条目删除。
+  **Suggested fixture level:** expanded - project-profile 的 run_status/pipeline_job 契约风险轴 + #1581 共享对象身份。
 
-  Depends on: 2.1
+  **Minimal mergeable slice:** atomic - 词汇与 canonical 对照测试互为 oracle。
+
+- [ ] 2.1b `tests/test_status_vocab_parity.py` 的重复字面量扫描（排除 `status_vocab.py` 自身）+ `tests/status_literal_allowlist.json`（在当前树上跑扫描，命中逐条裁决，键为 `file` + 排序成员 + reason）+ allowlist 路由。
+
+  Depends on: 2.1a
+
+  Verify：`uv run pytest -q tests/test_status_vocab_parity.py tests/test_select_ci_tests.py`；PR 附 allowlist 裁决表（估算 130 命中 / 43 文件 / 111 唯一键：services 106、apps 13、scripts 6、packages 3、workers 2；Set 117 / Tuple 13）。
+
+  钉死的契约（2.1b，fixture review 2026-10-17 + split）：
+
+  - **扫描口径**：只看 `ast.Set` 与 `ast.Tuple`（List 不算；`frozenset({...})` 不重复计数）；`ast.walk` 全模块；星号元素只比较常量元素或跳过（择一并写明）；大小写敏感（`receipt.py:57 ("PASS","BLOCKED")` 不命中，因此不能是 allowlist 条目）；排除 tests 与 `status_vocab.py`。
+  - **allowlist**：顶层 list，条目恰好 `{file, members(sorted), reason}`，唯一、按 `(file, members)` 排序；stale（文件缺失 / 键不再匹配）失败；消息写 `file:line`；reason ∈ `pending-migration | distinct-vocabulary | not-a-status-set`；`PathTestRule("tests/status_literal_allowlist.json", (parity,))` + red-when-removed。
+  - **D3 补行的处置在 2.1b 前定**：`ACTIVE_PIPELINE_STATUSES`、`ACTIVE_HYDRO_STATUSES`、`FAILED_PIPELINE_STATUSES` 三副本、`RESERVATION_ACTIVE_STATUSES` 已由 2.1a 入词汇，allowlist 中记 `pending-migration`（2.3 清）。
+  - **2.2 的 `apps/api/routes/pipeline.py:76-80` 是五个本地集合**（不是四个）。
+
+  **Suggested fixture level:** compact - 纯测试 + 数据文件。
+
+  **Minimal mergeable slice:** atomic - 扫描与 allowlist 互为 oracle。
+
+- [ ] 2.2 `apps/api/routes/pipeline.py` 的状态 tuple 与五个本地集合（:76-80）改为从 `status_vocab` 绑定（tuple 用 `PIPELINE_JOB_STATUS_ORDER`）；`schemas/pipeline_job.schema.json` enum 加 `reservation_lost`（按 `PIPELINE_JOB_STATUS_ORDER` 顺序，从 2.1 移来）并删 parity 的 `_PENDING_PUBLIC_DELTA`、把 `reservation_lost` 加进 `tests/api_contract_helpers.py` 的 `OPS_JOB_STATUS_ENUM`、加 `PathTestRule("schemas/pipeline_job.schema.json", (parity, test_api_contract_pipeline_ops, test_file_journal_full_tree_budget_contract))`；手改 `openapi/nhms.v1.yaml` 的 enum（该文件为手工维护）；`cd apps/frontend && corepack pnpm generate:api` 重生成 `src/api/types.ts`；allowlist 中 `pipeline.py` 的条目删除。
+
+  Depends on: 2.1b
 
   Verify：`uv run pytest -q tests/test_api_contract.py tests/test_openapi_drift.py tests/test_api_contract_pipeline_ops.py tests/test_pipeline_logs_artifacts.py tests/test_response_model_preservation_pipeline.py tests/test_monitoring_api.py tests/test_retry_cancel_consistency.py tests/test_file_journal_full_tree_budget_contract.py`；`PYTHONHASHSEED=0` 与 `=1` 下 `tests/test_openapi_drift.py` 均通过；`cd apps/frontend && corepack pnpm run check:api-types`；**node-27 live receipt**：display API 对含 `reservation_lost` 行的 pipeline 查询返回 200 且 schema 校验通过（CLAUDE.md oracle 路由）。
 
@@ -149,7 +178,7 @@
 
 - [ ] 2.3 orchestrator 内站点改为导入命名集合（D3 表 orchestrator 行：`chain_types` 绑 `set(PIPELINE_JOB_TERMINAL)` 并继续作为共享对象、`chain_runtime_utils`、journal `:621`/`:707`、`scheduler`、`scheduler_candidates`、`persistence`、`scheduler_state_types` 重新绑定、六处 success 集合、`accepted_submit_identity` 派生 + parity pin）；allowlist 中这些条目删除。
 
-  Depends on: 2.1
+  Depends on: 2.1b
 
   Verify：`uv run pytest -q tests/test_status_vocab_parity.py tests/test_forced_resubmit_veto.py tests/test_hydro_status_set_parity.py tests/test_production_scheduler.py tests/test_orchestration_chain.py tests/test_file_orchestration_journal.py tests/test_file_orchestration_journal_read_cache.py`，既有用例零改动通过。
 
@@ -161,7 +190,7 @@
 
 - [ ] 2.4 其余站点改为导入（tuple 站点绑定词汇中同序的 tuple：`packages/common/{forecast_store,met_store}.py`、`workers/output_parser/parser.py`、`apps/api/routes/hydro_display_constants.py`、`services/production_closure/{slurm_validation,met_validation,readiness_item_contracts,readiness_scheduler_evidence}.py`、`services/slurm_gateway/real_backend.py`、`scripts/{run_qhh_continuous,node27_frontier_stall_alert,m24_gateway_proof}.py`、`scripts/basin_retirement/database.py`）；QC verdict **读取/比较**站点改用 `normalize_qc_verdict`（receipt 写入与校验器保持原拼写，allowlist `distinct-vocabulary`）；allowlist 中无 `pending-migration` 条目。
 
-  Depends on: 2.1（首刀：四个非 orchestrator 站点，不继承 2.3）；后继另依赖 2.3 与 2.2（"allowlist 无 `pending-migration`"要等 orchestrator 条目与 `apps/api/routes/pipeline.py` 条目都清掉）
+  Depends on: 2.1b（首刀：四个非 orchestrator 站点，不继承 2.3）；后继另依赖 2.3 与 2.2（"allowlist 无 `pending-migration`"要等 orchestrator 条目与 `apps/api/routes/pipeline.py` 条目都清掉）
 
   Verify：`uv run pytest -q tests/test_status_vocab_parity.py tests/test_forecast_store_routing.py tests/test_output_parser.py tests/test_output_parser_dual_write.py tests/test_output_parser_cli.py tests/test_production_slurm_validation.py tests/test_production_met_validation.py tests/test_m24_receipt.py tests/test_m24_gateway_proof.py` 加 `scripts/select_ci_tests.py` 对本 PR diff 选出的集合（`met_store`、`real_backend`、`basin_retirement` 无同名测试文件，PR 记录选出集合）；allowlist 无 `pending-migration`；m24 receipt fixture 带 `PASS` 仍通过校验。
 

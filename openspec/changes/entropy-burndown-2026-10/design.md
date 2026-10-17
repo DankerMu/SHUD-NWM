@@ -141,7 +141,7 @@ and the output parser). Public closed sets are spelled out in the spec; the per-
 |---|---|---|
 | `PIPELINE_JOB_STATUS_ORDER` / `PIPELINE_JOB_STATUSES` | `apps/api/routes/pipeline.py` tuple + `reservation_lost` | `schemas/pipeline_job.schema.json`, OpenAPI, `types.ts` |
 | `PIPELINE_JOB_INTERNAL_STATUSES` | `accepted_submit_identity.py` (`reserved`, `cancellation_pending`, `reconcile_unverified`) | `ACCEPTED_SUBMIT_MASTER_STATUSES` derived as `(PIPELINE_JOB_STATUSES - {skipped}) \| INTERNAL` with a parity pin |
-| `PIPELINE_JOB_TERMINAL` | `chain_types.py` (binds `set(...)` once, shared object) | `chain_runtime_utils.py`, `file_orchestration_journal.py` import the `chain_types` object |
+| `PIPELINE_JOB_TERMINAL` | `chain_types.py` (binds `set(...)` once, shared object) | `chain_runtime_utils.py:32` and `file_orchestration_journal.py:621` hold independent literal sets today (not the `chain_types` object); each binds its own `set(PIPELINE_JOB_TERMINAL)` in 2.3 |
 | `PIPELINE_JOB_TERMINAL_WITHOUT_RESERVATION` | `scheduler.py` and `scheduler_candidates.py` each bind their own `set(...)` (two independent objects today; `scheduler` imports `scheduler_candidates`, never the reverse) | — |
 | `PIPELINE_JOB_TERMINAL_GUARD`, `PIPELINE_JOB_TERMINAL_OVERRIDES`, `PIPELINE_JOB_ACTIVE_MANUAL_RETRY` | `persistence.py` | — |
 | `PIPELINE_JOB_SUCCESS` (`scheduler_state_types` binds `set(...)` once) | `scheduler_state_types.py` `TERMINAL_PIPELINE_SUCCESS_STATUSES` | `chain.py`, `chain_runtime_utils.py`, `chain_source_cycle.py`, `chain_repository_state.py`, `retry.py`, inline sites in journal / `persistence.py` / `forcing_submit_identity.py` |
@@ -174,6 +174,18 @@ adjudicating every hit. `normalize_qc_verdict` is read-side only: receipt writer
 and are allowlisted `distinct-vocabulary`. `reservation_lost` is the only value added to any schema; `complete`/`published`
 are not added anywhere (no pipeline-job writer emits them; they stay in the read-side `PIPELINE_JOB_SUCCESS`).
 Alternative rejected: eight union sets (Stage 2 draft) — four review findings showed it changes runtime behaviour.
+
+### D3 (2.1a) risk contract
+
+- **Change surface**: new `packages/common/status_vocab.py`; four rebinds in `services/orchestrator/scheduler_state_types.py` (`:48`, `:57`, `:58`, `:60`); `tests/test_status_vocab_parity.py` (canonical pins, site types, `run_status` schema, two DB folds, `pipeline_job` schema modulo `_PENDING_PUBLIC_DELTA`); one additive helper in `tests/test_hydro_status_set_parity.py`; selector routing rows.
+- **Must preserve**: every canonical site's object type and identity (`set` sites stay mutable `set`s, the `DURABLE_HYDRO_SUCCESS_STATUSES` mutation probe stays green, `ACTIVE_HYDRO_STATUSES` identity across its six sites); no schema, OpenAPI or generated-type change; the 11-value `OPS_JOB_STATUS_ENUM` parity in `tests/test_api_contract_pipeline_ops.py` stays green.
+- **Must add**: the vocabulary objects as frozensets / ordered tuples / `Literal` aliases; `normalize_qc_verdict` (read-side, unwired); the parity test; the `.py` additive selector loop and the `db/migrations`, `run_status.schema.json` and `status_vocab.py` routing rows.
+- **Governing invariant**: one named set per site purpose, never a union; the vocabulary never changes membership at any site (2.1a changes no consumer).
+- **Sibling surfaces**: `chain_runtime_utils.py:32` and `file_orchestration_journal.py:621` keep their independent literal sets until 2.3; `ACTIVE_PIPELINE_STATUSES`, `ACTIVE_HYDRO_STATUSES`, the three `FAILED_PIPELINE_STATUSES` copies and `persistence.RESERVATION_ACTIVE_STATUSES` enter the vocabulary in 2.1a and are rebound in 2.3.
+- **Seams**: `scheduler_state_types` module globals (patched by #1581 tests); `_MIGRATIONS_DIR` monkeypatch in the folding helper.
+- **Required evidence**: parity test green on the real tree; `test_hydro_status_set_parity.py` nine tests unchanged and green; `test_api_contract_pipeline_ops.py` green; selector exact-set updates listed in the PR; `--changed-file` runs for `packages/common/status_vocab.py`, `db/migrations/x.sql`, `schemas/run_status.schema.json` selecting the parity test.
+- **Non-goals**: the duplicate-literal scan and allowlist (2.1b); any schema edit (2.2); any consumer rebind outside `scheduler_state_types.py` (2.2–2.4).
+- **Review focus**: object identity and mutability at the four rebinds; the fold helper's `_MIGRATIONS_DIR` late read; ordered tuples vs DB ordinal; the `_PENDING_PUBLIC_DELTA` transitional assertion.
 
 ### D4 Helper consolidation lands after D1 (user)
 Targets: utc-now → `packages/common/contracts/time_normalization.py::utc_now`; ISO parse → `parse_iso_utc`; format →
