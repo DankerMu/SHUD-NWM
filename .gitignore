@@ -38,6 +38,7 @@ minio-data/
 .nhms-runs/
 .nhms-workspace/
 .nhms-object-store/
+.nhms-work/
 # Node-27 per-issue live-evidence directories (mode-0600 receipts; never synced).
 # The replay supervisor's checkout-lineage gate runs
 # `git status --porcelain=v1 --untracked-files=normal` and fails closed on ANY
