@@ -17,7 +17,7 @@ Broad exception handling and untyped `Any` cannot grow without an explicit, revi
 - **THEN** `uv run ruff check .` passes
 
 ### Requirement: An `Any` count ratchet SHALL only decrease
-`tests/test_any_ratchet.py` SHALL count `Any` occurrences inside function parameter annotations, return annotations and annotated assignments (AST walk) over `apps/ packages/ services/ workers/ scripts/`, excluding tests, compare to `tests/any_ratchet_ceiling.json` `{"ceiling": <int>}`, fail when the count exceeds the ceiling, and fail when the count is more than 5 % below the ceiling. The initial ceiling SHALL equal the count measured when the test is introduced.
+`tests/test_any_ratchet.py` SHALL count `Any` occurrences inside function parameter annotations, return annotations and annotated assignments (AST walk; an occurrence is a `Name` `Any` or an `Attribute` whose attr is `Any`; string annotations are parsed with `ast.parse(mode="eval")` first) over `apps/ packages/ services/ workers/ scripts/`, excluding tests, compare to `tests/any_ratchet_ceiling.json` `{"ceiling": <int>}`, fail when the count exceeds the ceiling, and fail when the count is more than 5 % below the ceiling. The initial ceiling SHALL equal the count measured when the test is introduced. The test SHALL be routed by `scripts/select_ci_tests.py` for any change under `apps/ packages/ services/ workers/ scripts/` (supplemental rule row).
 
 #### Scenario: Added `Any` fails
 - **WHEN** a PR adds annotations using `Any` beyond the ceiling

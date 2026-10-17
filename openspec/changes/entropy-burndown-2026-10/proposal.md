@@ -33,26 +33,27 @@ still being replicated by every new change:
 - Extract the contract subset that `packages/common` needs from the four workers into `packages/common`, leave
   re-export shims in the workers, add a pytest AST guard that forbids `packages/` from importing `workers|services|apps`,
   then contract the shims.
-- Create `packages/common/status_vocab.py` as the single source for pipeline-job terminal/success sets, hydro run
-  status, cycle status, QC verdict and Slurm raw states, with parity tests against `schemas/*.json` and
-  `db/migrations/000003_enums.sql`; add the runtime-real values (`reservation_lost`, `complete`, `published`) to the
-  schemas and the API tuple; migrate the copied sets to import from it.
+- Create `packages/common/status_vocab.py` as the single source for status sets (one named set per site purpose,
+  contents identical to today's sites), with parity tests against `schemas/*.json` and the migration-folded DB enums;
+  add the one runtime-written value the public enum lacks (`reservation_lost`) to the pipeline-job schema and the API
+  tuple; migrate the copied sets to import from it.
 - Consolidate utc-now / ISO parse / time format / source-normalizer helpers onto the shared ones, one top-level package
   per batch.
 - Lint ratchet: enable ruff `B` and `BLE001` with the existing violations frozen in `per-file-ignores`; add an `Any`
   count ratchet test whose ceiling is the current count and may only go down.
-- Decompose `file_orchestration_journal.py` and `select_ci_tests.py` by responsibility cluster into sibling modules,
-  keeping each original as a re-export facade until the last importer moves, then contract.
+- Produce a checked-in function-level cluster map for `file_orchestration_journal.py`, then decompose it and
+  `select_ci_tests.py` by responsibility cluster into sibling modules, keeping each original as a re-export facade until
+  the last importer moves, then contract.
 - Frontend: relocate `pages/hydroMet/bootstrap.ts` under `stores/`, replace hand-typed status types with generated
   aliases and a single `failedStatuses`, route API failures through one normalizer, add ESLint with three rules
   (`no-explicit-any`, `import/no-cycle`, `no-restricted-imports` against upward imports into `pages/`), and run
-  `lint` plus `check:api-types` in the `frontend-build` CI job.
+  `check:api-types` and `lint` in the `frontend-build` CI job.
 - Remove the `hydro.river_timeseries_legacy` reference from live code and retired-store wording from active runbooks
   and specs.
 - Skip `openspec/changes/archive/` in the `stale-display-route-token` check only.
 - Add scoped AGENTS.md files for the nine critical modules without one, following the existing four-section template.
-- Make the baseline pin test read counts from the tracked baseline file, then refresh `.entropy-baseline/latest.json`
-  with the repository writer.
+- Drop the literal count pins from the baseline test, then refresh `.entropy-baseline/latest.json` with the repository
+  writer.
 
 ## Capabilities
 
@@ -69,7 +70,7 @@ still being replicated by every new change:
 - `orchestrator-structural-burndown`: adds the journal decomposition requirements (facade-preserving cluster extraction, then contract).
 - `ci-test-selector-routing`: test-list data tables and selection logic become separate modules with unchanged selection output.
 - `entropy-automation`: `stale-display-route-token` skips `openspec/changes/archive/`.
-- `governance-entropy-baseline`: the baseline pin test derives its expected counts from the tracked baseline instead of literals.
+- `governance-entropy-baseline`: the baseline pin test no longer pins tracked counts as literals.
 
 ## Impact
 
@@ -79,5 +80,6 @@ still being replicated by every new change:
   `openapi/nhms.v1.yaml` where status enums are exposed, `pyproject.toml` ruff config, `apps/frontend` (eslint config,
   `package.json`, `src/`), `.github/workflows/ci.yml` frontend job, `scripts/governance/entropy_audit/`,
   `tests/test_entropy_audit_baseline_writer_summary.py`, `.entropy-baseline/latest.json`, nine new `AGENTS.md`.
-- No runtime behaviour change is intended anywhere; every refactor task carries a behaviour-preservation oracle (existing
-  tests plus a before/after output comparison where named).
+- No runtime behaviour change except the public pipeline-job enum gaining `reservation_lost` (node-27 receipt in task
+  2.2); every refactor task carries a behaviour-preservation oracle (existing tests plus a before/after output
+  comparison where named).
