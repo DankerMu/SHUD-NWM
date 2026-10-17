@@ -48,7 +48,10 @@ Do not use unprefixed `PUBLISHED_ARTIFACT_ROOT` as an app runtime variable.
 ## node-22 unit → EnvironmentFile authority (#1694)
 
 Which file a node-22 user systemd unit actually loads. Paths are on node-22
-under `/scratch/frd_muziyao/`. Verified read-only on the live host 2026-09-02.
+under `/scratch/frd_muziyao/`. The first five rows were verified read-only on
+the live host 2026-09-02; the `nhms-node22-unit-failure-alert@.service` row is
+not deployed yet (未部署，见 OpenSpec `node22-config-hygiene` design Migration
+Plan).
 
 | Unit (`systemctl --user`) | EnvironmentFile(s) loaded | Tracked template |
 |---|---|---|
@@ -57,6 +60,7 @@ under `/scratch/frd_muziyao/`. Verified read-only on the live host 2026-09-02.
 | `nhms-scheduler-file-provider-refresh.service` | `NWM/infra/env/compute.scheduler-provider-refresh.env` | `compute.scheduler-provider-refresh.env.example` |
 | `nhms-compute-api.service` | `NWM/infra/env/compute.host.env` | **untracked, no template** |
 | `nhms-slurm-gateway.service` | `NWM/infra/env/compute.host.env` + `nhms-prod/secrets/slurm-gateway.env` | **untracked, no template** for `compute.host.env` |
+| `nhms-node22-unit-failure-alert@.service` | `NWM/infra/env/node22-unit-failure-alert.env` | `node22-unit-failure-alert.example` |
 
 Notes:
 
@@ -78,9 +82,10 @@ Notes:
 - **`infra/env/compute.env` is the compose-lane instance of `compute.example`.**
   Verified on node-22 read-only 2026-09-02, receipt
   `.workplans/pr-1956/node22-compute-env-receipt.log`: no user systemd unit
-  lists it in `EnvironmentFiles` (receipt `:1-13`, the five units in the table
-  above), and `docker ps` on the node-22 login host (`xnode`) returned no
-  container rows at all, so no running container reads it (receipt `:98-100`).
+  lists it in `EnvironmentFiles` (receipt `:1-13`, the five deployed units in the
+  first five rows of the table above), and `docker ps` on the node-22 login
+  host (`xnode`) returned no container rows at all, so no running container
+  reads it (receipt `:98-100`).
   Values in it — including basin roots and scheduler model/basin filters — are
   **not** the production scheduler's configuration and must not be quoted as
   such.
