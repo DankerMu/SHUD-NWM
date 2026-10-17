@@ -109,7 +109,7 @@
 
   **Minimal mergeable slice:** atomic - 模板单元、handler 与 example 三者缺一则无法被任何单元消费。
 
-- [ ] 3.2 为 `infra/systemd/` 下六个 node-22 oneshot 单元各加一行 `OnFailure=nhms-node22-unit-failure-alert@%n.service`，同 PR 更新 `MANIFEST.json` 中这六个文件的 sha256；`tests/test_node22_unit_failure_alert.py` 增加 wiring 断言（恰好这六个各一行；gateway 单元与 `infra/systemd/node22/**` 为零；manifest sha256 一致）。钉死的契约（fixture review 2026-10-17）：
+- [x] 3.2 为 `infra/systemd/` 下六个 node-22 oneshot 单元各加一行 `OnFailure=nhms-node22-unit-failure-alert@%n.service`，同 PR 更新 `MANIFEST.json` 中这六个文件的 sha256；`tests/test_node22_unit_failure_alert.py` 增加 wiring 断言（恰好这六个各一行；gateway 单元与 `infra/systemd/node22/**` 为零；manifest sha256 一致）。钉死的契约（fixture review 2026-10-17）：
 
   - **行文本与位置**：逐字 `OnFailure=nhms-node22-unit-failure-alert@%n.service`（`%n` = 完整单元名含 `.service`，实例化后为 `nhms-node22-unit-failure-alert@nhms-x.service.service`，handler 的 `$1` 收到 `nhms-x.service`，与 node-27 消费者一致；不用 `%N`/`%i`/`%I`）。放在 `[Unit]` 节最后一个 directive 之后、分隔 `[Service]` 的空行之前：`nhms-scheduler-file-provider-refresh.service` 在 `Before=` 之后，`nhms-node22-scheduler-stall-health.service` 在 "declares NO relationship" 注释块之后，其余四个在 `Description=` 之后。不加注释行、不加空行，文件仍以单个 LF 结尾——六个文件的 diff 恰好各 +1 行。
   - **不接线**：六个 `.timer`、`nhms-compute-scheduler.service`（design Open Question Q1）、`nhms-compute-api.service`、`nhms-slurm-gateway.service`、`infra/systemd/node22/**` 与 3.1 模板本身都不加 `OnFailure=`。

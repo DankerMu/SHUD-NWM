@@ -1,6 +1,7 @@
 [Unit]
 Description=NHMS node-22 DB-free scheduler file-provider refresh
 Before=nhms-compute-scheduler.service
+OnFailure=nhms-node22-unit-failure-alert@%n.service
 
 [Service]
 Type=oneshot

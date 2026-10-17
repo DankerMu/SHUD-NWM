@@ -820,6 +820,57 @@ def test_node22_unit_failure_alert_new_rules_red_when_removed(monkeypatch: pytes
         )
 
 
+# #2914 -- the alert suite's wiring test reads the six wired node-22 oneshot
+# units (`[Unit]` `OnFailure=` line, exact-six set, manifest sha256). Each
+# already had an exact row carrying other owners; the suite was appended to
+# those rows, so the complement strips only that target, never the row.
+NODE22_UNIT_FAILURE_ALERT_WIRED_UNITS: tuple[str, ...] = (
+    "infra/systemd/nhms-node22-refresh-timer-health.service",
+    "infra/systemd/nhms-node22-scheduler-stall-health.service",
+    "infra/systemd/nhms-scheduler-evidence-retention.service",
+    "infra/systemd/nhms-scheduler-file-provider-refresh.service",
+    "infra/systemd/nhms-scheduler-journal-retention.service",
+    "infra/systemd/nhms-scheduler-state-index-capacity.service",
+)
+
+
+@pytest.mark.parametrize(
+    "source",
+    NODE22_UNIT_FAILURE_ALERT_WIRED_UNITS,
+    ids=[PurePosixPath(source).name for source in NODE22_UNIT_FAILURE_ALERT_WIRED_UNITS],
+)
+def test_node22_wired_units_select_the_alert_suite(source: str) -> None:
+    assert Path(source).is_file()
+
+    assert NODE22_UNIT_FAILURE_ALERT_SUITE in select_tests([source], repo_root=Path(".")), source
+
+
+def test_node22_wired_unit_alert_target_red_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The complement leg: strip the alert suite from exactly the six rows and the units go dark."""
+    from scripts import select_ci_tests
+
+    wired = set(NODE22_UNIT_FAILURE_ALERT_WIRED_UNITS)
+    stripped = [rule for rule in PATH_TEST_RULES if rule.pattern in wired]
+    assert sorted(rule.pattern for rule in stripped) == sorted(wired), "a wired unit lost its own row"
+    assert all(NODE22_UNIT_FAILURE_ALERT_SUITE in rule.tests for rule in stripped)
+    mutant = tuple(
+        PathTestRule(
+            rule.pattern,
+            tuple(target for target in rule.tests if target != NODE22_UNIT_FAILURE_ALERT_SUITE),
+            rule.stop_on_match,
+        )
+        if rule.pattern in wired
+        else rule
+        for rule in PATH_TEST_RULES
+    )
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+
+    for source in NODE22_UNIT_FAILURE_ALERT_WIRED_UNITS:
+        selected = select_tests([source], repo_root=Path("."))
+        assert NODE22_UNIT_FAILURE_ALERT_SUITE not in selected, f"{source} still reaches the alert suite"
+        assert NODE22_UNIT_TRACKING_SUITE in selected, f"{source} lost its other owners with the strip"
+
+
 # #2916 -- the node-22 runbook section-marker suite parses the two-node
 # overview with the entropy audit's section-marker parser. The runbook had no
 # row at all; `docs/**` does not open the backend lane, so the row takes
@@ -4559,15 +4610,18 @@ def test_state_index_capacity_watch_units_and_wrapper_select_the_watch_suite() -
     # watch suite; the wrapper and the repair CLI it consumes both reach it.
     # #2910: plus the node-22 unit-tracking suite, which hashes both units
     # against `infra/systemd/node22/MANIFEST.json`.
+    # #2914: the `.service` alone also selects the alert suite, whose wiring
+    # test reads its `OnFailure=` line; the `.timer` is not wired.
     watch_suite = "tests/test_node22_state_index_capacity_watch.py"
-    for unit in (
-        "infra/systemd/nhms-scheduler-state-index-capacity.service",
-        "infra/systemd/nhms-scheduler-state-index-capacity.timer",
+    for unit, alert in (
+        ("infra/systemd/nhms-scheduler-state-index-capacity.service", [NODE22_UNIT_FAILURE_ALERT_SUITE]),
+        ("infra/systemd/nhms-scheduler-state-index-capacity.timer", []),
     ):
         assert select_tests([unit], repo_root=Path(".")) == [
             "tests/test_node22_entrypoint_invariant.py",
             "tests/test_node22_entrypoint_invariant_python_scan.py",
             watch_suite,
+            *alert,
             NODE22_UNIT_TRACKING_SUITE,
         ], unit
     for source in (
