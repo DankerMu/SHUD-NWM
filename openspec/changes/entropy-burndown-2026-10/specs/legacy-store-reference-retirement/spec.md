@@ -10,7 +10,7 @@ No live code or active runbook/spec treats the dropped `hydro.river_timeseries_l
 
 #### Scenario: Workload plan on a catalog without the legacy table
 - **WHEN** the workload plan runs against a catalog that has only `hydro.river_timeseries`
-- **THEN** it reports no missing relation
+- **THEN** the candidate loader accepts those rows without refusal, the plan's default `expected_relations` is exactly `river_timeseries`, and the module exposes no legacy hypertable constant
 
 #### Scenario: Legacy candidate is refused
 - **WHEN** the candidate loader receives a row whose `hypertable_name` is `river_timeseries_legacy`
@@ -21,4 +21,4 @@ No live code or active runbook/spec treats the dropped `hydro.river_timeseries_l
 
 #### Scenario: Governance gate accepts the markers
 - **WHEN** `uv run pytest -q tests/test_entropy_audit_report_contract.py` and `openspec validate --specs --no-interactive` run (non-strict: 201 pre-existing specs fail `--strict` on HEAD for missing scenarios, unrelated to this change)
-- **THEN** both pass and no active runbook instructs an operator to read `timeseries_store`
+- **THEN** both pass and no active runbook instructs an operator to read the river routing column `hydro.hydro_run.timeseries_store` or the dropped `hydro.river_timeseries_legacy` table; the tier runbook §4.12 and ADR 0002's Amendment (2026-10-11), which still read the forcing column `met.forcing_version.timeseries_store`, stay unchanged until migration `000066` is applied
