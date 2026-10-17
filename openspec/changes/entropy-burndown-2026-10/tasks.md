@@ -26,13 +26,13 @@
 
   Depends on: 1.1
 
-  Verify：`uv run pytest -q tests/test_import_layering_guard.py tests/test_select_ci_tests.py tests/test_forcing_producer*.py tests/test_data_adapter_resolution.py tests/test_era5_adapter.py tests/test_gfs_adapter.py tests/test_ifs_adapter.py tests/test_shud_runtime.py tests/test_mapping_builder*.py tests/test_state_clone*.py tests/test_state_manager*.py tests/test_model_registry*.py tests/test_orchestration_chain.py`，全部零改动通过；`git grep -nE '^[[:space:]]*(from|import)[[:space:]]+workers' packages/` 为空（macOS grep 不认 `\s`）；selector 断言"改 `packages/common/contracts/direct_grid.py` 选中 direct-grid 契约测试集"。
+  Verify：`uv run pytest -q tests/test_import_layering_guard.py tests/test_select_ci_tests.py tests/test_forcing_producer*.py tests/test_data_adapter_resolution.py tests/test_era5_adapter.py tests/test_gfs_adapter.py tests/test_ifs_adapter.py tests/test_shud_runtime.py tests/test_mapping_builder*.py tests/test_state_clone*.py tests/test_state_manager*.py tests/test_model_registry*.py tests/test_orchestration_chain.py tests/test_grid_registry_bbox.py tests/test_download_bbox_clip.py tests/test_producer_bbox_preflight.py`，全部零改动通过；`git grep -nE '^[[:space:]]*(from|import)[[:space:]]+workers' packages/` 为空（macOS grep 不认 `\s`）；selector 断言"改 `packages/common/contracts/direct_grid.py` 选中 direct-grid 契约测试集"。
 
   首刀 Verify：`uv run pytest -q tests/test_import_layering_guard.py tests/test_select_ci_tests.py tests/test_model_registry*.py tests/test_state_clone*.py`；allowlist 中不再有 `direct_grid_contract` 条目；`git grep -nE '^[[:space:]]*(from|import)[[:space:]]+workers\.forcing_producer\.direct_grid_contract' packages/` 为空（docstring/注释中的提及不计）。
 
   **Suggested fixture level:** expanded - 跨 5 个模块的符号搬迁，约 65 个导入文件，fingerprint 校验与 direct-grid 契约属 project-profile 的 forcing/identity 风险轴。
 
-  **Minimal mergeable slice:** `contracts/direct_grid.py` + `direct_grid_contract.py` shim + selector 等价规则行 + `packages/common` 的 4 个文件 7 行 direct_grid 导入改向 - 该模块只依赖 `source_identity`、无 monkeypatch 风险、12 个导入文件全部经 shim 保持可用，可独立合并保绿；其余三个契约模块作为后继。
+  **Minimal mergeable slice:** `contracts/direct_grid.py` + `direct_grid_contract.py` shim + selector 等价规则行 + `packages/common` 的 4 个文件 7 行 direct_grid 导入改向 - 该模块只依赖 `source_identity`、无 monkeypatch 风险、12 个导入文件全部经 shim 保持可用，可独立合并保绿；其余三个契约模块各为一个后继（time_normalization、region、hydrologic_fingerprint 互相独立，均依赖首刀建立的包骨架；"allowlist 为 `[]`"只在三片都合并后成立，由 1.3 验收）。
 
 - [ ] 1.3 contract：迁移仓库内全部旧路径导入与模块属性访问到 `packages.common.contracts.*`（含 tests；`chain_compat_runtime` 的 owner 模块改指向契约模块），删除 `direct_grid_contract.py`、`region.py` shim，去掉 `base.py`/`rewrite.py`/`time_consistency.py` 的 re-export；`tests/test_import_layering_guard.py` 增加 contract 检查函数（AST 扫描 `from`/`import`/`import … as` 无旧路径、无旧模块的被搬名字）。允许的测试改动：`tests/test_orchestration_chain.py` 中与旧 owner 模块比较的 identity 断言改为契约模块，及其钉住的 `CHAIN_COMPATIBILITY_INVENTORY.md` owner 行同步更新。
 
@@ -56,7 +56,7 @@
 
   **Minimal mergeable slice:** atomic - 词汇与对照测试互为 oracle，先改任一边都会让 parity 红。
 
-- [ ] 2.2 `apps/api/routes/pipeline.py` 的状态 tuple 与四个本地集合改为从 `status_vocab` 绑定（tuple 用 `PIPELINE_JOB_STATUS_ORDER`）；手改 `openapi/nhms.v1.yaml` 的 enum（该文件为手工维护）；`cd apps/frontend && corepack pnpm generate:api` 重生成 `src/api/types.ts`。
+- [ ] 2.2 `apps/api/routes/pipeline.py` 的状态 tuple 与四个本地集合改为从 `status_vocab` 绑定（tuple 用 `PIPELINE_JOB_STATUS_ORDER`）；手改 `openapi/nhms.v1.yaml` 的 enum（该文件为手工维护）；`cd apps/frontend && corepack pnpm generate:api` 重生成 `src/api/types.ts`；allowlist 中 `pipeline.py` 的条目删除。
 
   Depends on: 2.1
 
@@ -80,7 +80,7 @@
 
 - [ ] 2.4 其余站点改为导入（tuple 站点绑定词汇中同序的 tuple：`packages/common/{forecast_store,met_store}.py`、`workers/output_parser/parser.py`、`apps/api/routes/hydro_display_constants.py`、`services/production_closure/{slurm_validation,met_validation,readiness_item_contracts,readiness_scheduler_evidence}.py`、`services/slurm_gateway/real_backend.py`、`scripts/{run_qhh_continuous,node27_frontier_stall_alert,m24_gateway_proof}.py`、`scripts/basin_retirement/database.py`）；QC verdict **读取/比较**站点改用 `normalize_qc_verdict`（receipt 写入与校验器保持原拼写，allowlist `distinct-vocabulary`）；allowlist 中无 `pending-migration` 条目。
 
-  Depends on: 2.3
+  Depends on: 2.1（首刀：四个非 orchestrator 站点，不继承 2.3）；后继另依赖 2.3 与 2.2（"allowlist 无 `pending-migration`"要等 orchestrator 条目与 `apps/api/routes/pipeline.py` 条目都清掉）
 
   Verify：`uv run pytest -q tests/test_status_vocab_parity.py tests/test_forecast_store_routing.py tests/test_output_parser.py tests/test_output_parser_dual_write.py tests/test_output_parser_cli.py tests/test_production_slurm_validation.py tests/test_production_met_validation.py tests/test_m24_receipt.py tests/test_m24_gateway_proof.py` 加 `scripts/select_ci_tests.py` 对本 PR diff 选出的集合（`met_store`、`real_backend`、`basin_retirement` 无同名测试文件，PR 记录选出集合）；allowlist 无 `pending-migration`；m24 receipt fixture 带 `PASS` 仍通过校验。
 
@@ -322,7 +322,7 @@
 
 - [ ] 7.4 API 错误单一归一化：三个本地归一化器委托 `getApiErrorMessage` 或删除，`apiErrorCode` 改为解析共享 `ApiErrorShape`；`useNationalBasinGeo` 加错误载体（`NationalBasinGeoState.error`，失败不缓存）；`lib/mvtLayerMetadata.ts` 的无调用方 loader 删除；新增 vitest 断言。
 
-  Depends on: 7.1
+  Depends on: 7.1（仅后继：`settledError` 在 bootstrap 模块；首刀的两个站点不碰 bootstrap，无前置）
 
   Verify：`corepack pnpm test`（新增 `useNationalBasinGeo` 失败路径用例 + absent-data 渲染断言；loader 删除后 `git grep` 无引用）；mocked-regression lane `corepack pnpm run test:e2e:mocked-regression` 期望值不变。
 
