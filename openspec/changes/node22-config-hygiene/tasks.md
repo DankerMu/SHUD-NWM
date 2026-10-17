@@ -15,7 +15,7 @@
 
   Depends on: 无
 
-  Verify：`uv run pytest -q tests/test_node22_unit_tracking.py tests/test_select_ci_tests.py`；`sha256sum infra/systemd/node22/*` 与收据表逐项一致。
+  Verify：`uv run pytest -q tests/test_node22_unit_tracking.py tests/test_select_ci_tests.py tests/test_entropy_audit_report_contract.py`；`sha256sum infra/systemd/node22/*` 与收据表逐项一致。
 
   **Suggested fixture level:** compact - 纯数据文件加一个守卫测试，无运行时代码。
 
@@ -25,7 +25,7 @@
 
   Depends on: 1.1
 
-  Verify：`uv run pytest -q tests/test_node22_unit_drift_check.py tests/test_select_ci_tests.py`；测试以空 `PATH` 运行脚本证明不调用 `systemctl`。
+  Verify：`uv run pytest -q tests/test_node22_unit_drift_check.py tests/test_select_ci_tests.py tests/test_entropy_audit_report_contract.py`；测试以空 `PATH` 运行脚本证明不调用 `systemctl`。
 
   **Suggested fixture level:** compact - 新增独立 CLI，爆炸半径是它自己的退出码。
 
@@ -37,7 +37,7 @@
 
   Depends on: 无
 
-  Verify：`uv run pytest -q tests/test_node22_scheduler_stall_health.py`；新增一个用例直接复用 2026-10-17 真实 artifact 的字段子集（`execution_boundary: scheduler_root_preflight_blocked`、counts 全 0、无 `progress_guard`），断言退出码 1。
+  Verify：`uv run pytest -q tests/test_node22_scheduler_stall_health.py tests/test_entropy_audit_report_contract.py`；新增一个用例直接复用 2026-10-13 之后某个真实 pass artifact 的字段子集（`execution_boundary: scheduler_root_preflight_blocked`、counts 全 0、无 `progress_guard`），断言退出码 1。
 
   **Suggested fixture level:** expanded - 告警 lane 的判定谓词与优先级改动；observer/observed 谓词一致性风险轴直接命中。
 
@@ -49,7 +49,7 @@
 
   Depends on: 1.1
 
-  Verify：`uv run pytest -q tests/test_node22_unit_failure_alert.py tests/test_node22_unit_tracking.py tests/test_select_ci_tests.py`；`bash -n scripts/node22_unit_failure_alert_once.sh`。
+  Verify：`uv run pytest -q tests/test_node22_unit_failure_alert.py tests/test_node22_unit_tracking.py tests/test_select_ci_tests.py tests/test_entropy_audit_report_contract.py`；`bash -n scripts/node22_unit_failure_alert_once.sh`。
 
   **Suggested fixture level:** compact - 复制已在 27 运行的模式到 22，改动面是路径、键集合与失败退出。
 
@@ -59,7 +59,7 @@
 
   Depends on: 3.1, 1.1
 
-  Verify：`uv run pytest -q tests/test_node22_unit_failure_alert.py tests/test_node22_unit_tracking.py`。
+  Verify：`uv run pytest -q tests/test_node22_unit_failure_alert.py tests/test_node22_unit_tracking.py tests/test_entropy_audit_report_contract.py`。
 
   **Suggested fixture level:** none - 六行声明式配置加断言与 manifest 更新。
 
