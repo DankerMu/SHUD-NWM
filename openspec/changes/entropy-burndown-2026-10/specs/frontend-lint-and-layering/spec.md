@@ -24,7 +24,7 @@ The `frontend-build` job in `.github/workflows/ci.yml` SHALL run `pnpm check:api
 - **THEN** the `frontend-build` job fails at `check:api-types`
 
 ### Requirement: `pages/` SHALL be a leaf layer
-`src/pages/hydroMet/bootstrap.ts` SHALL move to `src/stores/hydroMetBootstrap.ts` with identical exports; its seven production importers (`stores/hydroMetProductData.ts`, `stores/stationLayerData.ts`, `components/map/M11StationForcingPopup.tsx`, `components/map/M11RiverForecastPanel.tsx`, `pages/OverviewPage.tsx`, `pages/m11/useHydroMetProduct.ts`, `pages/m11/useStationLayer.ts`) SHALL import the new path, and the nine test files that `vi.mock` or import the old path plus `pages/hydroMet/__tests__/bootstrap.test.ts` (which reads the source by path) SHALL be edited **only** in their path strings. No non-test file outside `src/pages` and `src/App.tsx` SHALL import from `src/pages`. `import-x/no-cycle` SHALL report zero cycles over `src/`.
+`src/pages/hydroMet/bootstrap.ts` SHALL move to `src/stores/hydroMetBootstrap.ts` with identical exports; its seven production importers (`stores/hydroMetProductData.ts`, `stores/stationLayerData.ts`, `components/map/M11StationForcingPopup.tsx`, `components/map/M11RiverForecastPanel.tsx`, `pages/OverviewPage.tsx`, `pages/m11/useHydroMetProduct.ts`, `pages/m11/useStationLayer.ts`) SHALL import the new path, and the seven test files that `vi.mock` or import the old path plus `pages/hydroMet/__tests__/bootstrap.test.ts` (which imports it and reads the source by path; 15 files in all) SHALL be edited **only** in their path strings. No non-test file outside `src/pages` and `src/App.tsx` SHALL import from `src/pages`. `import-x/no-cycle` SHALL report zero cycles over `src/`.
 
 #### Scenario: No directory cycle remains
 - **WHEN** `pnpm lint` runs on `src/`
@@ -38,8 +38,12 @@ The `frontend-build` job in `.github/workflows/ci.yml` SHALL run `pnpm check:api
 - **THEN** `pnpm typecheck` surfaces every exhaustive switch over `PipelineStatus` that misses it
 
 ### Requirement: API failures SHALL resolve through one normalizer
-Every fetch site under `src/` (openapi-fetch `client`, `apiFetch` and raw `fetch` callers) SHALL surface errors through `api/response.ts::getApiErrorMessage`; the local normalizers `safeM11ErrorMessage`, `getSafeModelAssetErrorMessage`, `apiErrorCode`, `settledError` SHALL delegate to it or be removed. The two silent sites gain an error carrier: `useNationalBasinGeo`'s returned `NationalBasinGeoState` gains `error: string | null` (a failed fetch is not cached for the session), and the loader in `lib/mvtLayerMetadata.ts` that returns `[]` on failure returns `{ layers, error }` instead, with callers updated. Neither change alters what the UI renders when data is absent; the absent-data assertion is "the dependent map layer is not rendered", in the existing component tests.
+Every fetch site under `src/` (openapi-fetch `client`, `apiFetch` and raw `fetch` callers) SHALL surface errors through `api/response.ts::getApiErrorMessage`; the four local normalizers `safeM11ErrorMessage`, `getSafeModelAssetErrorMessage`, `settledError` SHALL delegate to it or be removed and `apiErrorCode` (which extracts a code, not a message) SHALL parse the shared `ApiErrorShape` envelope from `api/response.ts` instead of its own shape. Of the two silent sites, `useNationalBasinGeo`'s returned `NationalBasinGeoState` gains `error: string | null` (a failed fetch is not cached for the session), and the uncalled loader in `lib/mvtLayerMetadata.ts` that returns `[]` on failure is deleted as a dead export (zero callers). The change does not alter what the UI renders when data is absent; the absent-data assertion is "the dependent map layer is not rendered", in the existing component tests.
 
 #### Scenario: Silent site now records the error
 - **WHEN** the national basin geometry request fails with HTTP 500
 - **THEN** the hook state exposes a non-empty `error` from `getApiErrorMessage` and the map renders the same absent-data state as before
+
+#### Scenario: Dead loader removed
+- **WHEN** `src/` is searched for the former `mvtLayerMetadata` catalog loader
+- **THEN** no definition or caller remains
