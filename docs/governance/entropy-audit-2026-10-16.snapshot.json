@@ -1,0 +1,1011 @@
+{
+  "version": 1,
+  "timestamp": "2026-10-17T01:49:57Z",
+  "repo": "https://github.com/DankerMu/SHUD-NWM.git",
+  "branch": "master",
+  "commit": "f7be77f22e06",
+  "method": "repo-entropy-audit skill v6-axis; AST scanner scan_py.py + explorer passes; NOT produced by scripts/governance/write_entropy_baseline.py",
+  "summary": {
+    "total_source_files": 636,
+    "total_test_files": 576,
+    "total_instruction_files": 6,
+    "total_modules": 23,
+    "modules_with_high_entropy": 16,
+    "naming_variant_total": 48,
+    "state_entities_scattered_3plus_files": 6,
+    "glossary_compliance": "6/12",
+    "error_envelope_variants_max_per_module": 6,
+    "stale_docs_total": 0,
+    "dead_markdown_links": 13,
+    "governance_finding_count": 834,
+    "budget_counted_count": 354,
+    "gate_eligible_count": 0,
+    "overall_trend": "worsening",
+    "trend_note": "governance findings 356->834 and budget-counted 169->354 on the comparable governance-report metrics; per-module six-axis scores are method-incompatible with the 2026-06-12 writer-produced baseline"
+  },
+  "node22": {
+    "checkout_head": "7ac79243 (2026-10-08), 160 commits behind origin/master",
+    "python": "3.12.7 anaconda venv vs 3.11 pin (#1831)",
+    "env_backup_files": 57,
+    "deployed_units_untracked": [
+      "nhms-compute-api.service",
+      "nhms-compute-scheduler.service",
+      "nhms-compute-scheduler.timer"
+    ],
+    "deployed_units_differ": [
+      "nhms-slurm-gateway.service"
+    ],
+    "failed_units": [
+      "nhms-node22-refresh-timer-health",
+      "nhms-scheduler-file-provider-refresh",
+      "nhms-scheduler-journal-retention",
+      "nhms-scheduler-state-index-capacity"
+    ],
+    "root_cause": "ghdc-data.mount failed after 2026-10-13 reboot; /ghdc/data/nwm absent",
+    "stashes": 6,
+    "untracked_nhms_work_files": 25
+  },
+  "modules": {
+    "apps/api": {
+      "file_count": 43,
+      "lines": 12656,
+      "structure": {
+        "score": "medium",
+        "cycle_member": false,
+        "layer_violations": 0,
+        "files_over_5_sources": 2,
+        "max_file_lines": 2480,
+        "mutable_module_state": 2
+      },
+      "semantics": {
+        "score": "high"
+      },
+      "behavior": {
+        "score": "high",
+        "any_ratio": 0.127,
+        "except_exception": 23,
+        "except_swallow": 7,
+        "return_none": 33
+      },
+      "context": {
+        "score": "low",
+        "has_instruction_file": true
+      },
+      "protocol": {
+        "score": "low",
+        "template_compliance": true
+      },
+      "control": {
+        "score": "medium",
+        "cleanup_markers": 3
+      },
+      "priority": "attention"
+    },
+    "db": {
+      "file_count": 4,
+      "lines": 1288,
+      "structure": {
+        "score": "low",
+        "cycle_member": false,
+        "layer_violations": 0,
+        "files_over_5_sources": 0,
+        "max_file_lines": 1272,
+        "mutable_module_state": 0
+      },
+      "semantics": {
+        "score": "low"
+      },
+      "behavior": {
+        "score": "medium",
+        "any_ratio": 0.27,
+        "except_exception": 2,
+        "except_swallow": 0,
+        "return_none": 0
+      },
+      "context": {
+        "score": "medium",
+        "has_instruction_file": false
+      },
+      "protocol": {
+        "score": "medium",
+        "template_compliance": false
+      },
+      "control": {
+        "score": "low",
+        "cleanup_markers": 0
+      },
+      "priority": "attention"
+    },
+    "packages/common": {
+      "file_count": 79,
+      "lines": 47574,
+      "structure": {
+        "score": "high",
+        "cycle_member": true,
+        "layer_violations": 11,
+        "files_over_5_sources": 0,
+        "max_file_lines": 5101,
+        "mutable_module_state": 6
+      },
+      "semantics": {
+        "score": "high"
+      },
+      "behavior": {
+        "score": "high",
+        "any_ratio": 0.23,
+        "except_exception": 61,
+        "except_swallow": 35,
+        "return_none": 255
+      },
+      "context": {
+        "score": "high",
+        "has_instruction_file": false
+      },
+      "protocol": {
+        "score": "critical",
+        "template_compliance": false
+      },
+      "control": {
+        "score": "medium",
+        "cleanup_markers": 14
+      },
+      "priority": "critical"
+    },
+    "packages/scheduler": {
+      "file_count": 3,
+      "lines": 123,
+      "structure": {
+        "score": "low",
+        "cycle_member": false,
+        "layer_violations": 0,
+        "files_over_5_sources": 0,
+        "max_file_lines": 96,
+        "mutable_module_state": 0
+      },
+      "semantics": {
+        "score": "low"
+      },
+      "behavior": {
+        "score": "medium",
+        "any_ratio": 0.571,
+        "except_exception": 0,
+        "except_swallow": 0,
+        "return_none": 0
+      },
+      "context": {
+        "score": "medium",
+        "has_instruction_file": false
+      },
+      "protocol": {
+        "score": "medium",
+        "template_compliance": false
+      },
+      "control": {
+        "score": "medium",
+        "cleanup_markers": 0
+      },
+      "priority": "attention"
+    },
+    "scripts": {
+      "file_count": 140,
+      "lines": 82022,
+      "structure": {
+        "score": "medium",
+        "cycle_member": false,
+        "layer_violations": 0,
+        "files_over_5_sources": 1,
+        "max_file_lines": 7623,
+        "mutable_module_state": 6
+      },
+      "semantics": {
+        "score": "high"
+      },
+      "behavior": {
+        "score": "high",
+        "any_ratio": 0.152,
+        "except_exception": 129,
+        "except_swallow": 69,
+        "return_none": 195
+      },
+      "context": {
+        "score": "high",
+        "has_instruction_file": false
+      },
+      "protocol": {
+        "score": "critical",
+        "template_compliance": false
+      },
+      "control": {
+        "score": "medium",
+        "cleanup_markers": 0
+      },
+      "priority": "critical"
+    },
+    "services/artifacts": {
+      "file_count": 2,
+      "lines": 850,
+      "structure": {
+        "score": "low",
+        "cycle_member": false,
+        "layer_violations": 0,
+        "files_over_5_sources": 0,
+        "max_file_lines": 826,
+        "mutable_module_state": 1
+      },
+      "semantics": {
+        "score": "low"
+      },
+      "behavior": {
+        "score": "low",
+        "any_ratio": 0.0,
+        "except_exception": 4,
+        "except_swallow": 0,
+        "return_none": 5
+      },
+      "context": {
+        "score": "medium",
+        "has_instruction_file": false
+      },
+      "protocol": {
+        "score": "medium",
+        "template_compliance": false
+      },
+      "control": {
+        "score": "medium",
+        "cleanup_markers": 0
+      },
+      "priority": "attention"
+    },
+    "services/m24_live": {
+      "file_count": 2,
+      "lines": 409,
+      "structure": {
+        "score": "low",
+        "cycle_member": false,
+        "layer_violations": 0,
+        "files_over_5_sources": 0,
+        "max_file_lines": 375,
+        "mutable_module_state": 1
+      },
+      "semantics": {
+        "score": "medium"
+      },
+      "behavior": {
+        "score": "medium",
+        "any_ratio": 0.309,
+        "except_exception": 0,
+        "except_swallow": 0,
+        "return_none": 0
+      },
+      "context": {
+        "score": "medium",
+        "has_instruction_file": false
+      },
+      "protocol": {
+        "score": "medium",
+        "template_compliance": false
+      },
+      "control": {
+        "score": "medium",
+        "cleanup_markers": 0
+      },
+      "priority": "attention"
+    },
+    "services/orchestrator": {
+      "file_count": 113,
+      "lines": 96529,
+      "structure": {
+        "score": "high",
+        "cycle_member": false,
+        "layer_violations": 0,
+        "files_over_5_sources": 2,
+        "max_file_lines": 17506,
+        "mutable_module_state": 13
+      },
+      "semantics": {
+        "score": "high"
+      },
+      "behavior": {
+        "score": "high",
+        "any_ratio": 0.298,
+        "except_exception": 104,
+        "except_swallow": 60,
+        "return_none": 737
+      },
+      "context": {
+        "score": "low",
+        "has_instruction_file": true
+      },
+      "protocol": {
+        "score": "low",
+        "template_compliance": true
+      },
+      "control": {
+        "score": "medium",
+        "cleanup_markers": 1
+      },
+      "priority": "attention"
+    },
+    "services/precip": {
+      "file_count": 7,
+      "lines": 942,
+      "structure": {
+        "score": "low",
+        "cycle_member": false,
+        "layer_violations": 0,
+        "files_over_5_sources": 0,
+        "max_file_lines": 195,
+        "mutable_module_state": 1
+      },
+      "semantics": {
+        "score": "low"
+      },
+      "behavior": {
+        "score": "low",
+        "any_ratio": 0.022,
+        "except_exception": 0,
+        "except_swallow": 2,
+        "return_none": 4
+      },
+      "context": {
+        "score": "high",
+        "has_instruction_file": false
+      },
+      "protocol": {
+        "score": "critical",
+        "template_compliance": false
+      },
+      "control": {
+        "score": "medium",
+        "cleanup_markers": 0
+      },
+      "priority": "critical"
+    },
+    "services/production_closure": {
+      "file_count": 45,
+      "lines": 38091,
+      "structure": {
+        "score": "medium",
+        "cycle_member": false,
+        "layer_violations": 0,
+        "files_over_5_sources": 1,
+        "max_file_lines": 4512,
+        "mutable_module_state": 1
+      },
+      "semantics": {
+        "score": "medium"
+      },
+      "behavior": {
+        "score": "high",
+        "any_ratio": 0.321,
+        "except_exception": 26,
+        "except_swallow": 15,
+        "return_none": 103
+      },
+      "context": {
+        "score": "low",
+        "has_instruction_file": true
+      },
+      "protocol": {
+        "score": "low",
+        "template_compliance": true
+      },
+      "control": {
+        "score": "medium",
+        "cleanup_markers": 1
+      },
+      "priority": "attention"
+    },
+    "services/slurm_gateway": {
+      "file_count": 12,
+      "lines": 4084,
+      "structure": {
+        "score": "low",
+        "cycle_member": false,
+        "layer_violations": 0,
+        "files_over_5_sources": 0,
+        "max_file_lines": 2365,
+        "mutable_module_state": 0
+      },
+      "semantics": {
+        "score": "low"
+      },
+      "behavior": {
+        "score": "medium",
+        "any_ratio": 0.179,
+        "except_exception": 1,
+        "except_swallow": 2,
+        "return_none": 13
+      },
+      "context": {
+        "score": "high",
+        "has_instruction_file": false
+      },
+      "protocol": {
+        "score": "critical",
+        "template_compliance": false
+      },
+      "control": {
+        "score": "medium",
+        "cleanup_markers": 0
+      },
+      "priority": "critical"
+    },
+    "services/tile_publisher": {
+      "file_count": 3,
+      "lines": 4190,
+      "structure": {
+        "score": "low",
+        "cycle_member": false,
+        "layer_violations": 0,
+        "files_over_5_sources": 0,
+        "max_file_lines": 3211,
+        "mutable_module_state": 1
+      },
+      "semantics": {
+        "score": "low"
+      },
+      "behavior": {
+        "score": "high",
+        "any_ratio": 0.191,
+        "except_exception": 9,
+        "except_swallow": 8,
+        "return_none": 21
+      },
+      "context": {
+        "score": "medium",
+        "has_instruction_file": false
+      },
+      "protocol": {
+        "score": "medium",
+        "template_compliance": false
+      },
+      "control": {
+        "score": "medium",
+        "cleanup_markers": 0
+      },
+      "priority": "attention"
+    },
+    "services/tiles": {
+      "file_count": 2,
+      "lines": 3199,
+      "structure": {
+        "score": "low",
+        "cycle_member": false,
+        "layer_violations": 0,
+        "files_over_5_sources": 0,
+        "max_file_lines": 3197,
+        "mutable_module_state": 0
+      },
+      "semantics": {
+        "score": "low"
+      },
+      "behavior": {
+        "score": "medium",
+        "any_ratio": 0.103,
+        "except_exception": 1,
+        "except_swallow": 5,
+        "return_none": 29
+      },
+      "context": {
+        "score": "medium",
+        "has_instruction_file": false
+      },
+      "protocol": {
+        "score": "medium",
+        "template_compliance": false
+      },
+      "control": {
+        "score": "medium",
+        "cleanup_markers": 0
+      },
+      "priority": "attention"
+    },
+    "workers/canonical_converter": {
+      "file_count": 3,
+      "lines": 3018,
+      "structure": {
+        "score": "medium",
+        "cycle_member": true,
+        "layer_violations": 0,
+        "files_over_5_sources": 0,
+        "max_file_lines": 2935,
+        "mutable_module_state": 0
+      },
+      "semantics": {
+        "score": "low"
+      },
+      "behavior": {
+        "score": "medium",
+        "any_ratio": 0.21,
+        "except_exception": 11,
+        "except_swallow": 1,
+        "return_none": 7
+      },
+      "context": {
+        "score": "medium",
+        "has_instruction_file": false
+      },
+      "protocol": {
+        "score": "medium",
+        "template_compliance": false
+      },
+      "control": {
+        "score": "medium",
+        "cleanup_markers": 1
+      },
+      "priority": "attention"
+    },
+    "workers/data_adapters": {
+      "file_count": 8,
+      "lines": 5895,
+      "structure": {
+        "score": "medium",
+        "cycle_member": true,
+        "layer_violations": 0,
+        "files_over_5_sources": 0,
+        "max_file_lines": 2246,
+        "mutable_module_state": 0
+      },
+      "semantics": {
+        "score": "low"
+      },
+      "behavior": {
+        "score": "medium",
+        "any_ratio": 0.121,
+        "except_exception": 28,
+        "except_swallow": 1,
+        "return_none": 51
+      },
+      "context": {
+        "score": "high",
+        "has_instruction_file": false
+      },
+      "protocol": {
+        "score": "critical",
+        "template_compliance": false
+      },
+      "control": {
+        "score": "medium",
+        "cleanup_markers": 0
+      },
+      "priority": "critical"
+    },
+    "workers/forcing_producer": {
+      "file_count": 6,
+      "lines": 7250,
+      "structure": {
+        "score": "medium",
+        "cycle_member": true,
+        "layer_violations": 0,
+        "files_over_5_sources": 0,
+        "max_file_lines": 3965,
+        "mutable_module_state": 1
+      },
+      "semantics": {
+        "score": "low"
+      },
+      "behavior": {
+        "score": "medium",
+        "any_ratio": 0.157,
+        "except_exception": 7,
+        "except_swallow": 2,
+        "return_none": 53
+      },
+      "context": {
+        "score": "high",
+        "has_instruction_file": false
+      },
+      "protocol": {
+        "score": "critical",
+        "template_compliance": false
+      },
+      "control": {
+        "score": "medium",
+        "cleanup_markers": 0
+      },
+      "priority": "critical"
+    },
+    "workers/grid_registry": {
+      "file_count": 7,
+      "lines": 2704,
+      "structure": {
+        "score": "low",
+        "cycle_member": false,
+        "layer_violations": 0,
+        "files_over_5_sources": 0,
+        "max_file_lines": 792,
+        "mutable_module_state": 3
+      },
+      "semantics": {
+        "score": "low"
+      },
+      "behavior": {
+        "score": "low",
+        "any_ratio": 0.004,
+        "except_exception": 2,
+        "except_swallow": 1,
+        "return_none": 7
+      },
+      "context": {
+        "score": "high",
+        "has_instruction_file": false
+      },
+      "protocol": {
+        "score": "critical",
+        "template_compliance": false
+      },
+      "control": {
+        "score": "medium",
+        "cleanup_markers": 0
+      },
+      "priority": "critical"
+    },
+    "workers/mapping_builder": {
+      "file_count": 8,
+      "lines": 11985,
+      "structure": {
+        "score": "medium",
+        "cycle_member": true,
+        "layer_violations": 0,
+        "files_over_5_sources": 0,
+        "max_file_lines": 2750,
+        "mutable_module_state": 2
+      },
+      "semantics": {
+        "score": "medium"
+      },
+      "behavior": {
+        "score": "medium",
+        "any_ratio": 0.02,
+        "except_exception": 1,
+        "except_swallow": 7,
+        "return_none": 11
+      },
+      "context": {
+        "score": "high",
+        "has_instruction_file": false
+      },
+      "protocol": {
+        "score": "critical",
+        "template_compliance": false
+      },
+      "control": {
+        "score": "medium",
+        "cleanup_markers": 0
+      },
+      "priority": "critical"
+    },
+    "workers/model_registry": {
+      "file_count": 28,
+      "lines": 14905,
+      "structure": {
+        "score": "low",
+        "cycle_member": false,
+        "layer_violations": 0,
+        "files_over_5_sources": 0,
+        "max_file_lines": 1441,
+        "mutable_module_state": 0
+      },
+      "semantics": {
+        "score": "medium"
+      },
+      "behavior": {
+        "score": "high",
+        "any_ratio": 0.154,
+        "except_exception": 14,
+        "except_swallow": 19,
+        "return_none": 34
+      },
+      "context": {
+        "score": "high",
+        "has_instruction_file": false
+      },
+      "protocol": {
+        "score": "critical",
+        "template_compliance": false
+      },
+      "control": {
+        "score": "medium",
+        "cleanup_markers": 2
+      },
+      "priority": "critical"
+    },
+    "workers/output_parser": {
+      "file_count": 3,
+      "lines": 1801,
+      "structure": {
+        "score": "low",
+        "cycle_member": false,
+        "layer_violations": 0,
+        "files_over_5_sources": 0,
+        "max_file_lines": 1601,
+        "mutable_module_state": 1
+      },
+      "semantics": {
+        "score": "medium"
+      },
+      "behavior": {
+        "score": "medium",
+        "any_ratio": 0.113,
+        "except_exception": 4,
+        "except_swallow": 0,
+        "return_none": 1
+      },
+      "context": {
+        "score": "medium",
+        "has_instruction_file": false
+      },
+      "protocol": {
+        "score": "medium",
+        "template_compliance": false
+      },
+      "control": {
+        "score": "medium",
+        "cleanup_markers": 0
+      },
+      "priority": "attention"
+    },
+    "workers/shud_runtime": {
+      "file_count": 3,
+      "lines": 4776,
+      "structure": {
+        "score": "medium",
+        "cycle_member": false,
+        "layer_violations": 1,
+        "files_over_5_sources": 0,
+        "max_file_lines": 4586,
+        "mutable_module_state": 1
+      },
+      "semantics": {
+        "score": "low"
+      },
+      "behavior": {
+        "score": "high",
+        "any_ratio": 0.171,
+        "except_exception": 14,
+        "except_swallow": 9,
+        "return_none": 18
+      },
+      "context": {
+        "score": "medium",
+        "has_instruction_file": false
+      },
+      "protocol": {
+        "score": "medium",
+        "template_compliance": false
+      },
+      "control": {
+        "score": "medium",
+        "cleanup_markers": 0
+      },
+      "priority": "attention"
+    },
+    "apps/frontend": {
+      "file_count": 115,
+      "structure": {
+        "score": "high",
+        "cycle_member": true,
+        "files_over_5_sources": 9,
+        "max_file_lines": 918,
+        "mutable_module_state": 17
+      },
+      "semantics": {
+        "score": "high",
+        "state_scatter_files": 4
+      },
+      "behavior": {
+        "score": "high",
+        "any_count": 0,
+        "error_envelope_variants": 6,
+        "api_transports": 3
+      },
+      "context": {
+        "score": "low",
+        "has_instruction_file": true
+      },
+      "protocol": {
+        "score": "low",
+        "template_compliance": true
+      },
+      "control": {
+        "score": "medium",
+        "eslint": false,
+        "cleanup_markers": 0
+      },
+      "priority": "attention"
+    },
+    "infra": {
+      "file_count": 53,
+      "structure": {
+        "score": "low"
+      },
+      "semantics": {
+        "score": "medium"
+      },
+      "behavior": {
+        "score": "low"
+      },
+      "context": {
+        "score": "high",
+        "note": "compute.env/compose lane still presented as node-22 entry without supersession marker"
+      },
+      "protocol": {
+        "score": "high",
+        "note": "nhms-compute-api/scheduler units + timer deployed on node-22 but untracked; slurm-gateway unit differs"
+      },
+      "control": {
+        "score": "high",
+        "note": "57 env backups beside live files; 4 timers failing silently since 2026-10-13 (ghdc-data.mount failed); no OnFailure alerting on node-22"
+      },
+      "priority": "attention"
+    }
+  },
+  "high_spread_patterns": [
+    {
+      "description": "Any in signatures with no type checker",
+      "occurrences": "10-32% of annotations in 15/22 python modules",
+      "axis": "behavior",
+      "spread_risk": "high",
+      "actively_spreading": true
+    },
+    {
+      "description": "except Exception + silent pass/continue",
+      "occurrences": 569,
+      "axis": "behavior",
+      "spread_risk": "high",
+      "actively_spreading": true
+    },
+    {
+      "description": "packages/common imports workers.* (5-module SCC)",
+      "occurrences": 11,
+      "files": [
+        "packages/common/state_manager.py -> workers.data_adapters.base",
+        "packages/common/grid_registry_bbox_guard.py -> workers.data_adapters.region",
+        "packages/common/station_set_flip.py -> workers.forcing_producer.direct_grid_contract",
+        "packages/common/state_cli.py -> workers.data_adapters.base",
+        "packages/common/model_registry_contracts.py -> workers.forcing_producer.direct_grid_contract",
+        "packages/common/model_registry.py -> workers.forcing_producer.direct_grid_contract",
+        "packages/common/model_registry.py -> workers.forcing_producer.direct_grid_contract",
+        "packages/common/model_registry.py -> workers.forcing_producer.direct_grid_contract",
+        "packages/common/model_registry.py -> workers.forcing_producer.direct_grid_contract",
+        "packages/common/state_clone.py -> workers.forcing_producer.direct_grid_contract",
+        "packages/common/state_clone.py -> workers.mapping_builder.rewrite"
+      ],
+      "axis": "structure",
+      "spread_risk": "high",
+      "actively_spreading": true
+    },
+    {
+      "description": "single files > 2000 lines",
+      "occurrences": 20,
+      "axis": "structure",
+      "spread_risk": "medium",
+      "actively_spreading": true
+    },
+    {
+      "description": "backend status vocabularies hand-copied per file and diverging (pipeline terminal set in 8 files, reservation_lost missing from schema/API; success set copied 6x; run status schema vs DB enum vs code)",
+      "occurrences": 8,
+      "axis": "semantics",
+      "spread_risk": "high",
+      "actively_spreading": true
+    },
+    {
+      "description": "duplicated time helpers: 30 utc-now defs, 28 ISO parsers, 52 formatters, 13 local source normalizers beside shared normalize_source_id",
+      "occurrences": 123,
+      "axis": "semantics",
+      "spread_risk": "high"
+    },
+    {
+      "description": "globals().update / mass re-export facades (orchestrator 9, mapping_builder __init__ 183 re-imports, readiness_validation 92 rebinds)",
+      "occurrences": 12,
+      "axis": "structure",
+      "spread_risk": "medium"
+    },
+    {
+      "description": "frontend status/state types defined per file",
+      "occurrences": 4,
+      "axis": "semantics",
+      "spread_risk": "medium"
+    },
+    {
+      "description": "frontend API error handling: 3 transports / 6 normalizers",
+      "occurrences": 11,
+      "axis": "behavior",
+      "spread_risk": "medium"
+    },
+    {
+      "description": "stale-display-route-token in openspec/changes/archive",
+      "occurrences": 665,
+      "axis": "context",
+      "spread_risk": "low"
+    },
+    {
+      "description": "node-22 env backup copies beside live env files",
+      "occurrences": 57,
+      "axis": "control",
+      "spread_risk": "high",
+      "actively_spreading": true
+    }
+  ],
+  "cleanup_priorities": [
+    {
+      "target": "node-22 control gap: OnFailure unit-failure alerting + stall probe must flag scheduler_root_preflight_blocked (mount restore itself is an ops incident)",
+      "impact": "high",
+      "effort": "low",
+      "axis": "control"
+    },
+    {
+      "target": "Track node-22 production systemd units in infra/systemd + deployed-vs-tracked probe",
+      "impact": "high",
+      "effort": "low",
+      "axis": "protocol/control"
+    },
+    {
+      "target": "Retire compute.env + 57 backups; mark compose lane superseded; reconcile dbfree.env with example",
+      "impact": "high",
+      "effort": "low",
+      "axis": "context/control"
+    },
+    {
+      "target": "gitignore .nhms-work; drop stale worktree; decide openspec/config.yaml",
+      "impact": "medium",
+      "effort": "low",
+      "axis": "control"
+    },
+    {
+      "target": "Frontend: relocate pages/hydroMet/bootstrap.ts, unify status types + error normalizer, add ESLint, wire check:api-types",
+      "impact": "high",
+      "effort": "medium",
+      "axis": "structure/semantics/behavior"
+    },
+    {
+      "target": "Break packages/common -> workers cycle via contracts package + import-linter",
+      "impact": "high",
+      "effort": "medium",
+      "axis": "structure"
+    },
+    {
+      "target": "Staged ruff B/BLE001/ANN401 rollout for broad except + Any",
+      "impact": "high",
+      "effort": "medium",
+      "axis": "behavior"
+    },
+    {
+      "target": "Decompose file_orchestration_journal.py and select_ci_tests.py",
+      "impact": "high",
+      "effort": "high",
+      "axis": "structure"
+    },
+    {
+      "target": "Centralize state vocabularies (pipeline terminal/success sets incl. reservation_lost, hydro run status, cycle status, QC verdict, Slurm raw states) in packages/common with schema/DB-enum parity tests",
+      "impact": "high",
+      "effort": "medium",
+      "axis": "semantics"
+    },
+    {
+      "target": "Consolidate utc-now/ISO-parse/format and source-normalizer helpers onto the shared ones (search-replace scale)",
+      "impact": "medium",
+      "effort": "low",
+      "axis": "semantics"
+    },
+    {
+      "target": "Drop LEGACY_HYPERTABLE (hydro.river_timeseries_legacy) from node27_pgdata_workload_plan.py and purge retired-store text from active runbooks/specs",
+      "impact": "medium",
+      "effort": "low",
+      "axis": "semantics/context"
+    },
+    {
+      "target": "Scoped AGENTS.md for 9 critical modules lacking one",
+      "impact": "medium",
+      "effort": "low",
+      "axis": "context/protocol"
+    },
+    {
+      "target": "Exclude/allowlist openspec/changes/archive in stale-display-route-token",
+      "impact": "medium",
+      "effort": "low",
+      "axis": "control"
+    }
+  ]
+}
