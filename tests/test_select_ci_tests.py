@@ -820,6 +820,33 @@ def test_node22_unit_failure_alert_new_rules_red_when_removed(monkeypatch: pytes
         )
 
 
+# #2916 -- the node-22 runbook section-marker suite parses the two-node
+# overview with the entropy audit's section-marker parser. The runbook had no
+# row at all; `docs/**` does not open the backend lane, so the row takes
+# effect only when the lane opens for another reason.
+NODE22_RUNBOOK_SECTION_MARKERS_SUITE = "tests/test_node22_runbook_section_markers.py"
+TWO_NODE_DEPLOYMENT_OVERVIEW_RUNBOOK = "docs/runbooks/two-node-deployment-overview.md"
+
+
+def test_two_node_overview_runbook_selects_the_section_marker_suite() -> None:
+    assert NODE22_RUNBOOK_SECTION_MARKERS_SUITE in select_tests(
+        [TWO_NODE_DEPLOYMENT_OVERVIEW_RUNBOOK], repo_root=Path(".")
+    )
+
+
+def test_two_node_overview_runbook_rule_red_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drop exactly the #2916 row and the runbook no longer reaches the suite."""
+    from scripts import select_ci_tests
+
+    mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern != TWO_NODE_DEPLOYMENT_OVERVIEW_RUNBOOK)
+    assert len(mutant) == len(PATH_TEST_RULES) - 1, "the #2916 row is missing or duplicated"
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+
+    assert NODE22_RUNBOOK_SECTION_MARKERS_SUITE not in select_tests(
+        [TWO_NODE_DEPLOYMENT_OVERVIEW_RUNBOOK], repo_root=Path(".")
+    )
+
+
 @pytest.mark.parametrize(
     ("unit", "owners"),
     sorted(NODE22_UNIT_OWNER_SUITES.items()),
