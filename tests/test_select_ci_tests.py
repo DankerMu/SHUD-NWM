@@ -11166,6 +11166,16 @@ INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
         "services/orchestrator/__init__.py",
         "tests/test_node22_publish_merged_scheduler_registry_plan_and_checks.py",
     ): "edge-consumer",
+    # #2917: the env drift table pins `ProductionSchedulerConfig`'s field
+    # defaults, which live in scheduler_config/config.py; it reaches the
+    # dataclass through the `scheduler` re-export (hence the package
+    # `__init__`) only because importing config.py first trips the package's
+    # import cycle at collection. `scheduler_lease` (its guard-mode fallback)
+    # already routes the suite on its own row. The owning route is the
+    # config.py row, plus the README / dbfree example / retention-script rows;
+    # a change to scheduler.py itself does not move the defaults the table pins.
+    ("services/orchestrator/__init__.py", "tests/test_node22_scheduler_env_drift_table.py"): "edge-consumer",
+    ("services/orchestrator/scheduler.py", "tests/test_node22_scheduler_env_drift_table.py"): "edge-consumer",
     # -- edge-consumer: slurm array-job entry points ------------------------
     # tests/test_slurm_array_contract.py contracts the sbatch array entry
     # points, so it top-level-imports the `cli` module (and package) of five
