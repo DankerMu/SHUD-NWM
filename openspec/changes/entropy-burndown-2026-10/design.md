@@ -139,7 +139,7 @@ and the output parser). Public closed sets are spelled out in the spec; the per-
 | `PIPELINE_JOB_STATUS_ORDER` / `PIPELINE_JOB_STATUSES` | `apps/api/routes/pipeline.py` tuple + `reservation_lost` | `schemas/pipeline_job.schema.json`, OpenAPI, `types.ts` |
 | `PIPELINE_JOB_INTERNAL_STATUSES` | `accepted_submit_identity.py` (`reserved`, `cancellation_pending`, `reconcile_unverified`) | `ACCEPTED_SUBMIT_MASTER_STATUSES` derived as `(PIPELINE_JOB_STATUSES - {skipped}) \| INTERNAL` with a parity pin |
 | `PIPELINE_JOB_TERMINAL` | `chain_types.py` (binds `set(...)` once, shared object) | `chain_runtime_utils.py`, `file_orchestration_journal.py` import the `chain_types` object |
-| `PIPELINE_JOB_TERMINAL_WITHOUT_RESERVATION` | `scheduler.py` (binds `set(...)` once) | `scheduler_candidates.py` imports the `scheduler` object |
+| `PIPELINE_JOB_TERMINAL_WITHOUT_RESERVATION` | `scheduler.py` and `scheduler_candidates.py` each bind their own `set(...)` (two independent objects today; `scheduler` imports `scheduler_candidates`, never the reverse) | — |
 | `PIPELINE_JOB_TERMINAL_GUARD`, `PIPELINE_JOB_TERMINAL_OVERRIDES`, `PIPELINE_JOB_ACTIVE_MANUAL_RETRY` | `persistence.py` | — |
 | `PIPELINE_JOB_SUCCESS` (`scheduler_state_types` binds `set(...)` once) | `scheduler_state_types.py` `TERMINAL_PIPELINE_SUCCESS_STATUSES` | `chain.py`, `chain_runtime_utils.py`, `chain_source_cycle.py`, `chain_repository_state.py`, `retry.py`, inline sites in journal / `persistence.py` / `forcing_submit_identity.py` |
 | `PIPELINE_JOB_ACTIVE`, `PIPELINE_JOB_PENDING`, `PIPELINE_JOB_FAILED_UI` | `apps/api/routes/pipeline.py` `_ACTIVE/_PENDING/_FAILED_JOB_STATUSES` | — |
