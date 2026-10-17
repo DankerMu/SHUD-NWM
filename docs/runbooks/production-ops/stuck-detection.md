@@ -177,13 +177,13 @@ NHMS_SCHEDULER_STALL_RECEIPT_ROOT=/tmp/stall-replay-receipts \
   「无 tracker」处理、不报错。
 - receipt 根**不得**在证据根之内（退出码 2），只会新建 `latest.json`（0600，目录 0700）。
 - 回放历史产物必须带 `--now`（取产物时代的时刻）：否则第 7 档 `evidence_stale` 先命中，
-  第 8–11 档看不到。`--now` 只有 CLI、没有环境变量。
+  第 8–12 档看不到。`--now` 只有 CLI、没有环境变量。
 - systemd 侧只有两条 `systemctl --user show`（只读），**跳不过**：不改
   `NHMS_SCHEDULER_STALL_SYSTEMCTL` 时第 2–5、7 档反映的是**此刻活着的**调度器单元，
   与被回放的产物无关；配了 `--now` 的历史回放里 `LastTriggerUSec` 相对 `--now` 的 age
   为负，不会触发第 5 档。要彻底隔离，把该变量指向一个只回显健康属性的桩脚本。
 
-#### 6.2.1 十一档 verdict 的处置
+#### 6.2.1 十二档 verdict 的处置
 
 下面每档的五级标题就是探针 receipt/stderr 里 `runbook=` 指针的锚点，标题文本即锚点
 id（小写字母与连字符，渲染器 slug 后不变），改标题等于改探针的对外指针。
@@ -264,7 +264,7 @@ lane 现在不会再触发。合取项是**保守**写法，不是「timer 在�
 `NHMS_SCHEDULER_STALL_LIMIT_LOOKBACK_MINUTES`（默认 120 分钟）内**存在**某趟
 `status == "resource_limit_blocked"`。**窗口存在性**判定，不是「最新一趟」定点
 判定：该状态只在那趟是最新期间成立（实测空闲态 4.5–27 分钟），定点判定配上 15
-分钟探针周期几乎观测不到。这档压在后三档之上，因为那趟产物本身已降级（`counts`
+分钟探针周期几乎观测不到。这档压在后四档之上，因为那趟产物本身已降级（`counts`
 缺键），诊断窗口最窄。
 处置：receipt 的 `signals.resource_limit_pass_names` 列出窗口内这几趟产物的文件名
 （有界，超出部分计入 `resource_limit_pass_names_truncated`；
@@ -283,9 +283,48 @@ lane 现在不会再触发。合取项是**保守**写法，不是「timer 在�
 的人工处置流程核对锁主，再决定是否清锁，并照既有形状把凭据落成
 `stale-lock-clear-<issue>-<ts>.json`；**探针自己绝不清锁**。
 
+##### stall-scheduler-root-blocked
+
+**10. `scheduler_root_blocked`** —— 从最新一趟起，连续每一趟产物的
+`execution_boundary` 都**恰为** `scheduler_root_preflight_blocked`（DB-free 调度器在
+拿锁之前的 root preflight 拒绝了本趟），且这段 run 从最旧成员到最新成员的
+`started_at` 跨度 ≥ `NHMS_SCHEDULER_STALL_ROOT_BLOCKED_MINUTES`（默认 60 分钟；下限
+10 = 两个 timer 间隔，上限与时间闸门同为 `(SCAN_LIMIT - 12 - 1) × 5`，越界退出码 2）。
+这类产物没有 `progress_guard`、`counts` 全 0，在计数 streak、时间闸门与 frontier 里
+一律是中性、被跳过，receipt 的 `passes.neutral_count` 照常计它们 —— 2026-10-13 起
+每一趟都是这种形状，探针却一直报 `ok`（#2912）。
+
+- 只走 ordering-safe 前缀（`streak_window`），所以上限借用时间闸门的可达上限。
+- 任何别的产物都截断 run：`db_free_runtime_preflight_blocked`、
+  `scheduler_timing_level_unrecognised`（同为拿锁前、同样中性，但处置不同）、没有
+  `execution_boundary` 的旧产物、正常趟。最新一趟不是 root-blocked 时 run 为空，
+  lane 恢复后不会凭历史告警；单趟偶发拒绝的跨度是 0，不报。
+- 压在 `submission_stalled` 之上：root-blocked 趟在计数 streak 里是中性的，它们背后
+  的老 blocked 趟仍可能凑够计数，但那描述的是根目录消失**之前**的 lane。
+
+receipt 顶层块 `root_blocked_run`（每档 verdict 都写，含 `ok` 与 `probe_failed`）：
+
+| 字段 | 含义 |
+|---|---|
+| `passes` | run 的趟数；最新一趟不是 root-blocked 时为 0 |
+| `span_minutes` | 最旧成员到最新成员的 `started_at` 分钟数；单趟 `0.0`，空 run 为 `null` |
+| `threshold_minutes` | 生效阈值（`NHMS_SCHEDULER_STALL_ROOT_BLOCKED_MINUTES`） |
+| `newest_is_root_blocked` | 最新一趟是否 root-blocked |
+
+`newest_is_root_blocked` 为真且 `span_minutes >= threshold_minutes` 即本档，只凭
+receipt 就能复算。
+
+处置：打开最新一趟产物，读 `root_preflight.blockers[]` 看是哪个 root 不可用；然后在
+node-22 上逐个检查 `NHMS_SCHEDULER_ALLOWED_ROOTS` 的每一项，以及
+`NHMS_SCHEDULER_REGISTRY_MANIFEST` 指向的 registry manifest 与其中登记的每个根目录：
+**是否存在、是否已挂载**（`findmnt -T <path>`、`ls -ld <path>`；NFS `/ghdc/data/nwm/`
+掉挂是首要嫌疑）。恢复挂载或修正配置后，按
+[`../node22-control-plane-manual-recovery.md`](../node22-control-plane-manual-recovery.md)
+的人工流程确认调度器下一趟不再被拒。**探针自己不修任何东西**。
+
 ##### stall-submission-stalled
 
-**10. `submission_stalled`** —— 两个信号任一成立（receipt 里各自带观测值与阈值，
+**11. `submission_stalled`** —— 两个信号任一成立（receipt 里各自带观测值与阈值，
 看哪一对越界就知道是谁报的）：
 
 - **计数**：连续 ≥ `NHMS_SCHEDULER_STALL_NO_SUBMISSION_PASSES`（默认 20）趟
@@ -365,7 +404,7 @@ forcing / forecast reservation 走
 
 ##### stall-no-progress-circuit-open
 
-**11. `no_progress_circuit_open`** —— `no-progress-tracker.json` 里存在**未被抑制
+**12. `no_progress_circuit_open`** —— `no-progress-tracker.json` 里存在**未被抑制
 的**条目 `consecutive_passes >= NHMS_SCHEDULER_STALL_CIRCUIT_PASSES`（默认 20）。
 该阈值**刻意高于**调度器自身的 observe 阈值
 `NHMS_SCHEDULER_NO_PROGRESS_CIRCUIT_PASSES=3`：circuit 负责观测，探针负责告警，
@@ -376,7 +415,7 @@ forcing / forecast reservation 走
 
 ##### stall-ok
 
-**12. `ok`** —— 以上皆不匹配。仅在无任何条件匹配时可达。
+**13. `ok`** —— 以上皆不匹配。仅在无任何条件匹配时可达。
 
 #### 6.2.2 阈值 retune（drop-in，不是 EnvironmentFile）
 
@@ -405,7 +444,9 @@ drop-in 写 `Environment=NHMS_SCHEDULER_STALL_SUPPRESSED_REASONS=`（等号后�
 余量）；`LOCK_PASSES` / `NO_SUBMISSION_PASSES` ≥ 2；`CIRCUIT_PASSES` ≥ 1；
 `SCAN_LIMIT > max(NO_SUBMISSION_PASSES, LOCK_PASSES) + 12`（**严格大于**；12 是单小时桶
 余量，实测单桶最多 8 趟）；`MAX_ENTRIES_SCANNED >= SCAN_LIMIT`；
-`10 <= IN_FLIGHT_MINUTES <= (SCAN_LIMIT - 12 - 1) * 5`（默认 `SCAN_LIMIT=96` 时上限 415）。
+`10 <= IN_FLIGHT_MINUTES <= (SCAN_LIMIT - 12 - 1) * 5`（默认 `SCAN_LIMIT=96` 时上限 415）；
+`10 <= ROOT_BLOCKED_MINUTES <= (SCAN_LIMIT - 12 - 1) * 5`（#2912，默认 60；同一前缀、
+同一可达上限，校验排在 `IN_FLIGHT_MINUTES` 之后）。
 严格大于是因为 streak 只在前缀 `SCAN_LIMIT - 12` 里找：前缀必须比阈值长，否则前缀里
 一趟中性就把 streak 封顶在阈值减一、这档永远不报。**调高任一 streak 阈值时同步调高
 `SCAN_LIMIT`**：例如 `NO_SUBMISSION_PASSES=84` 需要 `SCAN_LIMIT >= 97`，只改前者而留着
@@ -515,25 +556,26 @@ absence/release 出口」，处置是有保护的 `nhms-pipeline demote-reserved
   推导，**不需要改配置**。出处：#2655 冻结时 tracker 里四条同 reason 的条目，两条是老
   cycle 的慢性噪声（2200 / 2098 趟），两条正是冻结本身（338 趟），被同一条规则一起
   压掉。
-- **抑制只作用于 verdict 11**，对 verdict 1–10 任何一条都没有影响。
+- **抑制只作用于 verdict 12**，对 verdict 1–11 任何一条都没有影响。
 - 被抑制的条目照样写进 receipt 的 `suppressed[]`
   （`subject_kind`/`subject_id`/`reason`/`consecutive_passes`/`matched_rule`），
   可审计性由 receipt 承担，不靠人记。
 - `suppressed[]` 里的条目**应走人工处置流程**（上面 `failed-basin-retry.md` 的有保护
   运维动作），**不是可以无视**：抑制只是不让它每 15 分钟重复告警，不是宣布它无害。
 - 残余风险（明写、不消除），#2662 之后收窄为三条：
-  1. 复用被抑制 reason、且 cycle **不在** frontier 上的真实新 stall，verdict 11 不报
+  1. 复用被抑制 reason、且 cycle **不在** frontier 上的真实新 stall，verdict 12 不报
      （例如调度器已经越过去的老 cycle 上新挂住的 held 行）。接受，因为该 reason 已判定
      为不能自动收敛、且按上条走人工处置。
   2. frontier 那趟产物的候选行读不出 `source` / `cycle_time` 时 `frontier.cycles` 为空，
      本 tick 没有条目能被 bypass（receipt 里 `frontier.pass` 有名而 `cycles` 为 `[]`）。
      writer 尺寸回退把候选列表清空的那种产物 `status` 是 `resource_limit_blocked`，属
      中性、不会被取作 frontier；前缀里若**全是**中性趟，frontier 与时间闸门的 run 都
-     为空，这两条规则都不报，由第 8 档 `pass_limit_blocked` 覆盖。
+     为空，这两条规则都不报，由第 8 档 `pass_limit_blocked` 覆盖（前缀全是
+     root-blocked 趟时由第 10 档 `scheduler_root_blocked` 覆盖）。
   3. `subject_id` 不带 `<source>_<YYYYMMDDHH>` 的条目（candidate 类
      `gfs:2026-09-23T00:00:00+00:00`）永远不匹配 frontier，继续被抑制。
 
-  换 reason 类的 stall 仍会报；frontier 整体不动的冻结由 verdict 10 的时间闸门独立
+  换 reason 类的 stall 仍会报；frontier 整体不动的冻结由 verdict 11 的时间闸门独立
   覆盖，不依赖 tracker。
 
 #### 6.2.5 巡检行：探针自己还活着吗

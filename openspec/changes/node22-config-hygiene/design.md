@@ -102,12 +102,30 @@ No new pass shape. `PassRecord` gains `execution_boundary: str | None` read from
 count and the minutes from the oldest run member's recorded time to the newest. The shape of those passes stays
 `neutral`, so `blocked_streak`, `in_flight_run`, `frontier_pass` and the receipt `shapes` counts are unchanged. Verdict
 `scheduler_root_blocked` fires when the newest pass is in the run and `span_minutes >= root_blocked_minutes`; it is
-graded immediately after `lock_contended_persistent` and before `submission_stalled` (slot 10 of 12), exit 1, runbook
+graded immediately after `lock_contended_persistent` and before `submission_stalled` (slot 10 of 13: twelve non-ok verdicts plus `ok`), exit 1, runbook
 section `stall-scheduler-root-blocked`. Threshold env `NHMS_SCHEDULER_STALL_ROOT_BLOCKED_MINUTES`, default 60; `load_config`
 rejects values below `2 * MIN_INTER_PASS_MINUTES` (10) and above the same reachable bound the in-flight gate uses.
 Receipt gains `root_blocked_run: {passes, span_minutes, threshold_minutes, newest_is_root_blocked}` so the verdict can
 be recomputed from the receipt. Alternative rejected: a new non-neutral shape, because it would break the in-flight
 time gate and frontier selection (`#2655` freeze shape) and the closed `shapes` dictionary.
+
+Sibling surfaces (D3): `scheduler_timing_level_unrecognised` (`scheduler_runtime.py` ~:614) is a second pre-lock
+boundary written without `progress_guard`; it stays neutral and, like every non-root boundary, ends the root-blocked
+run. The other `*preflight_blocked` boundaries are post-candidate and already counted by the blocked streak. The
+`lock_contended_persistent`-over-root-blocked pairing is structurally unreachable (both predicates start at the newest
+pass, which cannot be both lock-contended and root-blocked), so it has no test; the buildable precedence cases are
+`timer_stopped`, `pass_limit_blocked` (outrank) and `submission_stalled` (outranked). The predicate walks
+`records[:streak_window]`, which is what makes "the same reachable bound the in-flight gate uses" the correct upper
+bound. Observer/observed parity: the probe carries the literal `scheduler_root_preflight_blocked`; a parity test reads
+the writer source (`services/orchestrator/scheduler_runtime.py`) and asserts the literal, routed by a second node id on
+the writer's selector stop rule (same pattern as `test_e5`).
+
+Review focus (D3): (1) test-harness reachability — `BASE_CONFIG` (`SCAN_LIMIT=16`) admits at most 15 minutes, so the
+suite must set the new env to 10 and the 60-minute scenario runs under `SHIPPED_CONFIG`; (2) the walked window is
+`streak_window`, not `scan_limit`; (3) the new `load_config` check sits after the in-flight check so existing exact
+stderr assertions (c1, c7, i17) see their own message first; (4) the parity edge above; (5) existing verdict
+expectations unchanged with the root-blocked pass inserted (only `neutral_count`, `no_submission_neutral_skipped` and
+the new block differ).
 
 ### D4 node-22 unit-failure alert mirrors node-27, with absolute paths and an explicit env key set
 `infra/systemd/nhms-node22-unit-failure-alert@.service` (user scope, `Type=oneshot`,

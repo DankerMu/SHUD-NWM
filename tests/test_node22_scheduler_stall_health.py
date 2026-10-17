@@ -7,7 +7,7 @@ database, no production path.
 
 Honest oracle statement: this module is new, so "red on master" would only mean
 "the file does not exist".  The oracle is the behaviour table below --- the
-eleven non-healthy verdicts, the precedence between them, the four pass shapes,
+twelve non-healthy verdicts, the precedence between them, the four pass shapes,
 the ordering rules and the fail-closed rules --- each of which is falsifiable
 against a plausible wrong implementation and several of which were built to red
 on a specific one (lexical ordering, truncate-before-exclude, a status
@@ -33,6 +33,13 @@ measured counts.  The row shape is the one the real writer produces
 (``{**SchedulerCandidate.to_dict(), "reason": ...}``), reduced to the keys the
 writer's own summary tier keeps.  Individual pass start times between the two
 measured instants are evenly spaced, which is an assumption.
+
+Issue #2912 adds the ``j``-series after it (OpenSpec change
+``node22-config-hygiene``, task 2.1): the root-blocked run predicate, its
+threshold, the ``scheduler_root_blocked`` verdict slot and the receipt block.
+Its real-artifact case is likewise a RECONSTRUCTION: no node-22 artifact is
+checked into this repository, so the pass is rebuilt from the writer's key set
+(``services/orchestrator/scheduler_runtime.py`` root-preflight branch).
 """
 
 from __future__ import annotations
@@ -121,6 +128,8 @@ PG_ENVIRONMENT_VARIABLES = (
 # Spelled as a literal rather than read from the probe: the name is part of
 # the operator contract (a drop-in spells it), so a rename must red here.
 ENV_IN_FLIGHT_MINUTES = "NHMS_SCHEDULER_STALL_IN_FLIGHT_MINUTES"
+# #2912: the root-blocked threshold, spelled literally for the same reason.
+ENV_ROOT_BLOCKED_MINUTES = "NHMS_SCHEDULER_STALL_ROOT_BLOCKED_MINUTES"
 
 # Small thresholds keep the fixtures readable.  `SCAN_LIMIT` obeys the probe's
 # own config rule, `SCAN_LIMIT - HOUR_BUCKET_MARGIN > max(no_submission, lock)`:
@@ -138,6 +147,10 @@ BASE_CONFIG = {
     # and the pre-#2662 fixtures in this module space their passes ten
     # minutes apart in runs short enough to stay under it.
     ENV_IN_FLIGHT_MINUTES: "15",
+    # #2912: the root-blocked threshold shares that reachable bound, so the
+    # shipped 60 would be refused here.  10 is the floor (two timer
+    # intervals); every test that runs on this config proves it is accepted.
+    ENV_ROOT_BLOCKED_MINUTES: "10",
 }
 
 ALL_ENV_NAMES = (
@@ -153,6 +166,7 @@ ALL_ENV_NAMES = (
     probe.ENV_NO_SUBMISSION_PASSES,
     probe.ENV_CIRCUIT_PASSES,
     ENV_IN_FLIGHT_MINUTES,
+    ENV_ROOT_BLOCKED_MINUTES,
     probe.ENV_SUPPRESSED_REASONS,
     probe.ENV_SCAN_LIMIT,
     probe.ENV_MAX_ENTRIES_SCANNED,
@@ -276,8 +290,12 @@ def _pass_payload(
     counts: bool = True,
     pass_id: str = "scheduler_2026092312_000000000000",
     skipped: list[dict[str, object]] | None = None,
+    execution_boundary: object = None,
 ) -> dict[str, object]:
     """Build a terminal pass artifact with the shape the writer produces.
+
+    ``execution_boundary`` is written only when given, so every pre-#2912
+    fixture keeps the legacy shape that carries no such key.
 
     ``skipped`` are ``skipped_candidates`` rows (see ``_skip_row``); they are
     disjoint from the blocked candidates and counted in ``candidate_count``,
@@ -307,6 +325,8 @@ def _pass_payload(
         payload["candidates"] = []
         payload["blocked_candidates"] = []
         payload["skipped_candidates"] = skipped
+    if execution_boundary is not None:
+        payload["execution_boundary"] = execution_boundary
     return payload
 
 
@@ -476,7 +496,7 @@ def _verdict(root: Path) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 3.1 -- the twelve verdicts, each with its exit status
+# 3.1 -- the thirteen verdicts, each with its exit status
 # ---------------------------------------------------------------------------
 
 
@@ -1929,6 +1949,12 @@ def test_f12_a_never_triggered_timer_with_an_idle_service_is_not_graded_healthy(
         # window can span ((16 - 12 - 1) x 5 = 15 minutes at BASE_CONFIG).
         {ENV_IN_FLIGHT_MINUTES: "9"},
         {ENV_IN_FLIGHT_MINUTES: "16"},
+        # #2912: below the two-timer-interval floor (twice), and above the
+        # same 15-minute reachable bound.  10 is accepted: it is BASE_CONFIG's
+        # own value, so every test in this module runs on it.
+        {ENV_ROOT_BLOCKED_MINUTES: "9"},
+        {ENV_ROOT_BLOCKED_MINUTES: "5"},
+        {ENV_ROOT_BLOCKED_MINUTES: "16"},
     ],
 )
 def test_c1_an_out_of_range_threshold_is_refused_before_any_evidence_is_read(
@@ -2620,6 +2646,7 @@ SHIPPED_CONFIG = {
     probe.ENV_CIRCUIT_PASSES: "20",
     probe.ENV_SCAN_LIMIT: "96",
     ENV_IN_FLIGHT_MINUTES: "360",
+    ENV_ROOT_BLOCKED_MINUTES: "60",
 }
 
 
@@ -2735,8 +2762,10 @@ def test_i0_the_shipped_literals_are_the_shipped_defaults() -> None:
         probe.DEFAULT_CIRCUIT_PASSES,
         probe.DEFAULT_SCAN_LIMIT,
         probe.DEFAULT_IN_FLIGHT_MINUTES,
-    ) == (20, 5, 20, 96, 360)
+        probe.DEFAULT_ROOT_BLOCKED_MINUTES,
+    ) == (20, 5, 20, 96, 360, 60)
     assert probe.ENV_IN_FLIGHT_MINUTES == ENV_IN_FLIGHT_MINUTES
+    assert probe.ENV_ROOT_BLOCKED_MINUTES == ENV_ROOT_BLOCKED_MINUTES
 
 
 def test_i1_the_reconstructed_freeze_is_not_ok_with_both_fixes(
@@ -2745,7 +2774,7 @@ def test_i1_the_reconstructed_freeze_is_not_ok_with_both_fixes(
     """The receipt of 2026-09-27T03:18:31Z said `ok`.  It must not.
 
     Shipped defaults, the full measured tracker.  Both fixes are live: the
-    time gate fires verdict 10, and the two frontier entries are open with
+    time gate fires verdict 11, and the two frontier entries are open with
     the bypass mark while the two old-cycle ones stay suppressed.
     """
 
@@ -3392,3 +3421,566 @@ def test_i18_the_runbook_documents_the_new_shape_the_gate_and_the_bypass() -> No
     assert ENV_IN_FLIGHT_MINUTES in text
     assert "suppression_bypassed_frontier" in text
     assert "in_flight_run_start_is_lower_bound" in text
+
+
+# ---------------------------------------------------------------------------
+# Issue #2912 -- the root-blocked run (OpenSpec change node22-config-hygiene 2.1)
+# ---------------------------------------------------------------------------
+
+#: The boundary the DB-free pre-lock root preflight writes.  Spelled as a
+#: literal; j11 pins it to the writer's source and the probe's own constant.
+ROOT_BLOCKED_BOUNDARY = "scheduler_root_preflight_blocked"
+ROOT_BLOCKED_RUN_KEYS = {"passes", "span_minutes", "threshold_minutes", "newest_is_root_blocked"}
+
+
+def _root_blocked_payload(started_at: datetime) -> dict[str, object]:
+    """A pre-lock root-blocked pass: zero counts, no progress guard."""
+
+    return _pass_payload(
+        started_at=started_at,
+        status="preflight_blocked",
+        guard=False,
+        execution_boundary=ROOT_BLOCKED_BOUNDARY,
+    )
+
+
+def _write_root_blocked_run(
+    root: Path, *, count: int, newest_minutes_ago: int = 5, spacing_minutes: int = 5, first_index: int = 0
+) -> None:
+    """``count`` root-blocked passes newest-first, ``spacing_minutes`` apart."""
+
+    for offset in range(count):
+        started_at = NOW - timedelta(minutes=newest_minutes_ago + offset * spacing_minutes)
+        _write_pass(root, _freeze_pass_name(started_at, first_index + offset), _root_blocked_payload(started_at))
+
+
+@pytest.mark.parametrize(("count", "verdict", "span"), [(13, "scheduler_root_blocked", 60.0), (12, "ok", 55.0)])
+def test_j1_one_hour_of_root_blocked_passes_is_its_own_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, count: int, verdict: str, span: float
+) -> None:
+    """Thirteen passes five minutes apart span exactly 60 minutes: `>=` fires.
+
+    Twelve span 55 and stay `ok`.  Shipped thresholds, because the 60-minute
+    default is above what `BASE_CONFIG`'s scan can span.
+    """
+
+    root = _evidence_root(tmp_path)
+    _write_root_blocked_run(root, count=count)
+
+    status, receipt = _run_at(tmp_path, monkeypatch, root=root, now=NOW, config=SHIPPED_CONFIG)
+
+    assert receipt["verdict"] == verdict
+    assert status == (1 if verdict != "ok" else 0)
+    assert receipt["exit_code"] == status
+    assert receipt["root_blocked_run"] == {
+        "passes": count,
+        "span_minutes": span,
+        "threshold_minutes": 60,
+        "newest_is_root_blocked": True,
+    }
+    # No new shape: every root-blocked pass is still neutral.
+    assert receipt["passes"] == {
+        "progress_count": 0,
+        "blocked_count": 0,
+        "idle_count": 0,
+        "in_flight_held_count": 0,
+        "neutral_count": count,
+    }
+    if verdict != "ok":
+        assert receipt["runbook"] == f"{probe.RUNBOOK_PATH}#stall-scheduler-root-blocked"
+
+
+def test_j2_a_single_transient_refusal_stays_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = _evidence_root(tmp_path)
+    _healthy_passes(root)
+    _write_pass(root, _pass_name(1, "f" * 12), _root_blocked_payload(NOW - timedelta(minutes=1)))
+
+    status, receipts, _log = _run(tmp_path, monkeypatch, evidence_root=root)
+    receipt = _receipt(receipts)
+
+    assert status == 0
+    assert receipt["verdict"] == "ok"
+    assert receipt["root_blocked_run"] == {
+        "passes": 1,
+        "span_minutes": 0.0,
+        "threshold_minutes": 10,
+        "newest_is_root_blocked": True,
+    }
+
+
+@pytest.mark.parametrize(
+    "boundary", ["db_free_runtime_preflight_blocked", "scheduler_timing_level_unrecognised", None]
+)
+def test_j3_a_non_root_pass_ends_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str | None
+) -> None:
+    """Two root-blocked groups split by another neutral pre-lock pass.
+
+    Walked through the splitter the run would be three passes over 15
+    minutes, past the 10-minute threshold; the newer group alone spans 5.
+    ``None`` is a legacy artifact that carries no boundary at all.
+    """
+
+    root = _evidence_root(tmp_path)
+    _write_root_blocked_run(root, count=2, newest_minutes_ago=1)
+    _write_pass(
+        root,
+        _pass_name(11, "a" * 12),
+        _pass_payload(
+            started_at=NOW - timedelta(minutes=11),
+            status="preflight_blocked",
+            guard=False,
+            execution_boundary=boundary,
+        ),
+    )
+    _write_root_blocked_run(root, count=1, newest_minutes_ago=16, first_index=10)
+
+    status, receipts, _log = _run(tmp_path, monkeypatch, evidence_root=root)
+    receipt = _receipt(receipts)
+
+    assert status == 0
+    assert receipt["verdict"] == "ok"
+    assert receipt["root_blocked_run"] == {
+        "passes": 2,
+        "span_minutes": 5.0,
+        "threshold_minutes": 10,
+        "newest_is_root_blocked": True,
+    }
+    assert receipt["passes"]["neutral_count"] == 4
+
+
+#: A scan of 20 (an ordering-safe prefix of 8) so inserting one pass never
+#: pushes a fixture pass out of the walked window: the comparison must isolate
+#: the root-blocked pass, not the window edge.
+NEUTRAL_CONFIG = {probe.ENV_SCAN_LIMIT: "20"}
+
+
+def _neutral_case_lane(root: Path, case: str, *, with_root_blocked: bool) -> None:
+    """Write one stays-neutral lane, with or without the root-blocked pass.
+
+    No lock-contended pass in any of them: a root-blocked NEWEST pass ends the
+    lock-contended streak, which would be a real `signals` difference outside
+    the allowed list.
+    """
+
+    held_rows = [_skip_row("active_duplicate_pipeline", "gfs", FREEZE_CYCLE)]
+    if case == "streak":
+        lane = [(5, "blocked"), (15, "blocked"), (25, "blocked"), (35, "progress")]
+        inserted = 10
+    elif case == "in_flight_run":
+        lane = [(5, "held"), (9, "held"), (13, "progress")]
+        inserted = 7
+    else:
+        lane = [(5, "held"), (7, "held"), (9, "progress")]
+        inserted = 3
+        _write_tracker(
+            root,
+            [
+                _tracker_entry(
+                    reason=SUPPRESSED_REASON,
+                    consecutive_passes=5,
+                    subject_kind="job",
+                    subject_id=FRONTIER_GFS_SUBJECT,
+                )
+            ],
+        )
+    for index, (minutes, shape) in enumerate(lane):
+        _write_pass(
+            root,
+            _pass_name(minutes, f"{index:012x}"),
+            _pass_payload(
+                started_at=NOW - timedelta(minutes=minutes),
+                blocked=4 if shape == "blocked" else 0,
+                submitted=1 if shape == "progress" else 0,
+                skipped=held_rows if shape == "held" else None,
+            ),
+        )
+    if with_root_blocked:
+        _write_pass(root, _pass_name(inserted, "f" * 12), _root_blocked_payload(NOW - timedelta(minutes=inserted)))
+
+
+@pytest.mark.parametrize(
+    ("case", "verdict"),
+    [
+        ("streak", "submission_stalled"),
+        ("in_flight_run", "ok"),
+        ("frontier", "no_progress_circuit_open"),
+    ],
+)
+def test_j4_a_root_blocked_pass_stays_neutral_for_every_existing_signal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str, verdict: str
+) -> None:
+    """Between two streak passes, inside an in-flight run, newest while bypassed.
+
+    Run with and without the root-blocked pass: `signals` and `frontier` are
+    identical except that the streak search walked past one more neutral pass,
+    and the receipt counts one more neutral pass.
+    """
+
+    receipts = []
+    for label, with_root_blocked in (("absent", False), ("present", True)):
+        workdir = tmp_path / label
+        root = _evidence_root(workdir)
+        _neutral_case_lane(root, case, with_root_blocked=with_root_blocked)
+        status, receipt_root, _log = _run(workdir, monkeypatch, evidence_root=root, config=NEUTRAL_CONFIG)
+        receipt = _receipt(receipt_root)
+        assert receipt["verdict"] == verdict, label
+        assert status == (0 if verdict == "ok" else 1)
+        receipts.append(receipt)
+    absent, present = receipts
+
+    absent_signals, present_signals = dict(absent["signals"]), dict(present["signals"])
+    assert (
+        present_signals.pop("no_submission_neutral_skipped")
+        == absent_signals.pop("no_submission_neutral_skipped") + 1
+    )
+    assert present_signals == absent_signals
+    assert present["frontier"] == absent["frontier"]
+    absent_passes, present_passes = dict(absent["passes"]), dict(present["passes"])
+    assert present_passes.pop("neutral_count") == absent_passes.pop("neutral_count") + 1
+    assert present_passes == absent_passes
+    if case == "frontier":
+        assert present["frontier"]["cycles"] == ["gfs_2026092500"]
+        assert present_signals["circuit_bypassed_frontier_entries"] == 1
+        assert present["root_blocked_run"]["newest_is_root_blocked"] is True
+
+
+@pytest.mark.parametrize("outranking", ["timer_stopped", "pass_limit_blocked"])
+def test_j5_a_dead_lane_and_a_pass_limit_outrank_a_blocked_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outranking: str
+) -> None:
+    """The root-blocked run meets its threshold; the higher slot still wins."""
+
+    root = _evidence_root(tmp_path)
+    _write_root_blocked_run(root, count=13)
+    timer = _timer_properties(last_trigger=_systemd_timestamp(NOW - timedelta(minutes=2)))
+    if outranking == "timer_stopped":
+        timer = _timer_properties(
+            active_state="inactive",
+            sub_state="dead",
+            last_trigger=_systemd_timestamp(NOW - timedelta(minutes=2)),
+        )
+    else:
+        # Older than the run (so it does not end it) and inside the
+        # 120-minute lookback, which reads every parsed artifact.
+        _write_pass(
+            root,
+            _pass_name(70, "b" * 12),
+            _pass_payload(
+                started_at=NOW - timedelta(minutes=70),
+                status="resource_limit_blocked",
+                counts=False,
+                guard=False,
+            ),
+        )
+
+    status, receipts, _log = _run(
+        tmp_path, monkeypatch, evidence_root=root, timer_properties=timer, config=SHIPPED_CONFIG
+    )
+    receipt = _receipt(receipts)
+
+    assert status == 1
+    assert receipt["verdict"] == outranking
+    assert receipt["root_blocked_run"] == {
+        "passes": 13,
+        "span_minutes": 60.0,
+        "threshold_minutes": 60,
+        "newest_is_root_blocked": True,
+    }
+
+
+def test_j6_a_blocked_root_outranks_a_stalled_submission_streak(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Thirteen root-blocked passes over twenty blocked ones.
+
+    The root-blocked passes are neutral, so the streak search walks past them
+    and still counts the twenty blocked passes behind: both thresholds are met
+    and the receipt shows it.
+    """
+
+    root = _evidence_root(tmp_path)
+    _write_root_blocked_run(root, count=13)
+    for index in range(20):
+        minutes = 70 + index * 5
+        _write_pass(
+            root,
+            _pass_name(minutes, f"{100 + index:012x}"),
+            _pass_payload(started_at=NOW - timedelta(minutes=minutes), blocked=4),
+        )
+
+    status, receipt = _run_at(tmp_path, monkeypatch, root=root, now=NOW, config=SHIPPED_CONFIG)
+
+    assert status == 1
+    assert receipt["verdict"] == "scheduler_root_blocked"
+    signals = receipt["signals"]
+    assert signals["no_submission_streak"] == 20
+    assert signals["no_submission_streak"] >= signals["no_submission_passes"]
+    assert signals["no_submission_neutral_skipped"] == 13
+    assert receipt["root_blocked_run"]["span_minutes"] >= receipt["root_blocked_run"]["threshold_minutes"]
+
+
+def test_j7_the_receipt_block_is_written_on_a_verdict_with_no_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every verdict carries the block, including one graded on no pass at all."""
+
+    root = _evidence_root(tmp_path)
+    _write_pass(root, _pass_name(1, "f" * 12), None, raw="{not json")
+
+    status, receipts, _log = _run(tmp_path, monkeypatch, evidence_root=root)
+    receipt = _receipt(receipts)
+
+    assert status == 1
+    assert receipt["verdict"] == "probe_failed"
+    assert set(receipt["root_blocked_run"]) == ROOT_BLOCKED_RUN_KEYS
+    assert receipt["root_blocked_run"] == {
+        "passes": 0,
+        "span_minutes": None,
+        "threshold_minutes": 10,
+        "newest_is_root_blocked": False,
+    }
+
+
+#: An October instant, after the 2026-10-13 onset, so neither the stale-
+#: evidence nor the trigger-age verdict fires before the new slot.
+ARTIFACT_NOW = datetime(2026, 10, 14, 3, 0, tzinfo=UTC)
+
+
+def _reconstructed_root_blocked_artifact(started_at: datetime, pass_id: str) -> dict[str, object]:
+    """A post-2026-10-13 node-22 pass, rebuilt from the writer's key set.
+
+    Reconstructed, not replayed: no node-22 artifact is in this repository.
+    The keys and values follow the root-preflight branch of
+    ``services/orchestrator/scheduler_runtime.py`` (``status``, ``lock``,
+    ``root_preflight``, ``counts`` from ``empty_counts()``, empty candidate
+    lists, ``execution_boundary``) and the DB-free lock redaction; there is
+    no ``progress_guard``.  Timing and base-evidence blocks are omitted
+    because the probe reads none of them.
+    """
+
+    started_text = started_at.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    finished_text = (started_at + timedelta(seconds=1)).astimezone(UTC).isoformat().replace("+00:00", "Z")
+    return {
+        "schema_version": "nhms.production_scheduler.pass_evidence.v1",
+        "pass_id": pass_id,
+        "status": "preflight_blocked",
+        "started_at": started_text,
+        "finished_at": finished_text,
+        "lock": {
+            "acquired": False,
+            "contention": False,
+            "lock_path": "[local-path]",
+            "lock_type": "file",
+            "reason": "scheduler_root_preflight_blocked",
+        },
+        "root_preflight": {
+            "status": "blocked",
+            "blockers": [{"field": "object_store_root", "reason": "root_missing"}],
+        },
+        # `scheduler_evidence_proofs.empty_counts()`: every key it returns, all zero.
+        "counts": {
+            "candidate_count": 0,
+            "blocked_candidate_count": 0,
+            "skipped_candidate_count": 0,
+            "selected_model_count": 0,
+            "source_cycle_count": 0,
+            "submitted_count": 0,
+            "failed_count": 0,
+            "partial_count": 0,
+            "slurm_status_sync_count": 0,
+            "slurm_status_sync_unknown_count": 0,
+            "slurm_cancelled_count": 0,
+            "slurm_cancellation_blocked_count": 0,
+            "slurm_cancellation_unknown_count": 0,
+        },
+        "candidates": [],
+        "blocked_candidates": [],
+        "skipped_candidates": [],
+        "duplicate_exclusions": [],
+        "source_cycles": [],
+        "model_run_evidence": [],
+        "slurm_cancellation_evidence": [],
+        "execution_boundary": "scheduler_root_preflight_blocked",
+    }
+
+
+def test_j8_reconstructed_post_onset_artifacts_raise_the_new_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exact blind spot: every pass since 2026-10-13 was neutral and skipped."""
+
+    root = _evidence_root(tmp_path)
+    for index in range(13):
+        started_at = ARTIFACT_NOW - timedelta(minutes=5 + index * 5)
+        pass_id = f"scheduler_{started_at:%Y%m%d%H}_{0x5E1A00000000 + index:012x}"
+        _write_pass(root, f"{pass_id}.json", _reconstructed_root_blocked_artifact(started_at, pass_id))
+
+    status, receipt = _run_at(tmp_path, monkeypatch, root=root, now=ARTIFACT_NOW, config=SHIPPED_CONFIG)
+
+    assert status == 1
+    assert receipt["verdict"] == "scheduler_root_blocked"
+    assert receipt["root_blocked_run"] == {
+        "passes": 13,
+        "span_minutes": 60.0,
+        "threshold_minutes": 60,
+        "newest_is_root_blocked": True,
+    }
+    assert receipt["passes"]["neutral_count"] == 13
+
+
+@pytest.mark.parametrize(
+    ("config", "value", "refused"),
+    [
+        ({}, 10, False),
+        ({}, 15, False),
+        (SHIPPED_CONFIG, 415, False),
+        (SHIPPED_CONFIG, 416, True),
+    ],
+)
+def test_j9_a_root_blocked_threshold_the_scan_cannot_span_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    config: dict[str, str],
+    value: int,
+    refused: bool,
+) -> None:
+    """`threshold <= (scan_limit - 12 - 1) x 5`, the in-flight gate's own bound."""
+
+    root = _evidence_root(tmp_path)
+    _healthy_passes(root)
+    scan_limit = int({**BASE_CONFIG, **config}[probe.ENV_SCAN_LIMIT])
+
+    status, receipts, log = _run(
+        tmp_path,
+        monkeypatch,
+        evidence_root=root,
+        config={**config, ENV_ROOT_BLOCKED_MINUTES: str(value)},
+    )
+    stderr = capsys.readouterr().err
+
+    if not refused:
+        assert status == 0
+        assert _receipt(receipts)["root_blocked_run"]["threshold_minutes"] == value
+        return
+    assert status == 2
+    assert not log.exists(), "systemctl was invoked before the configuration was validated"
+    assert not (receipts / "latest.json").exists()
+    assert f"{ENV_ROOT_BLOCKED_MINUTES}={value} must be at most {(scan_limit - 13) * 5}" in stderr
+    assert "or the verdict is unreachable" in stderr
+
+
+def test_j10_a_trivial_root_blocked_threshold_names_the_variable_and_the_floor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _evidence_root(tmp_path)
+    _healthy_passes(root)
+
+    status, receipts, log = _run(
+        tmp_path, monkeypatch, evidence_root=root, config={ENV_ROOT_BLOCKED_MINUTES: "5"}
+    )
+    stderr = capsys.readouterr().err
+
+    assert status == 2
+    assert not log.exists()
+    assert not (receipts / "latest.json").exists()
+    assert f"{ENV_ROOT_BLOCKED_MINUTES}=5 must be at least 10" in stderr
+    assert probe.MIN_ROOT_BLOCKED_MINUTES == 2 * probe.MIN_INTER_PASS_MINUTES == 10
+
+
+def test_j11_the_root_blocked_boundary_is_the_literal_the_scheduler_writes() -> None:
+    """Observer/observed parity: the probe cannot import the writer (D4).
+
+    The literal also appears as the pre-lock `lock.reason`, so the pin matches
+    the writer's `execution_boundary` key/value text, not the bare string.
+    `scripts/select_ci_tests.py` routes `scheduler_runtime.py` to this node id.
+    """
+
+    writer = (Path(__file__).resolve().parents[1] / "services" / "orchestrator" / "scheduler_runtime.py").read_text()
+
+    assert probe.ROOT_BLOCKED_EXECUTION_BOUNDARY == ROOT_BLOCKED_BOUNDARY
+    assert re.search(
+        rf'"execution_boundary":\s*"{re.escape(probe.ROOT_BLOCKED_EXECUTION_BOUNDARY)}"', writer
+    ), "scheduler_runtime.py no longer writes the boundary the stall probe grades"
+
+
+def _boundary_record(minutes_ago: int, boundary: str | None) -> probe.PassRecord:
+    return probe.PassRecord(
+        name=f"scheduler_{minutes_ago}.json",
+        started_at=NOW - timedelta(minutes=minutes_ago),
+        status="preflight_blocked",
+        shape="neutral",
+        submitted_count=0,
+        blocked_candidate_count=0,
+        execution_boundary=boundary,
+    )
+
+
+@pytest.mark.parametrize(
+    ("boundaries", "window", "passes", "span", "newest"),
+    [
+        # The walk stops at the window: the ordering-safe prefix, never the scan.
+        ([ROOT_BLOCKED_BOUNDARY] * 5, 3, 3, 10.0, True),
+        ([ROOT_BLOCKED_BOUNDARY] * 5, 10, 5, 20.0, True),
+        ([ROOT_BLOCKED_BOUNDARY], 10, 1, 0.0, True),
+        # A recovered lane: the newest pass is not root-blocked.
+        ([None, ROOT_BLOCKED_BOUNDARY, ROOT_BLOCKED_BOUNDARY], 10, 0, None, False),
+        (["scheduler_timing_level_unrecognised", ROOT_BLOCKED_BOUNDARY], 10, 0, None, False),
+        # Exact string equality: no case folding, no prefix match.
+        (["SCHEDULER_ROOT_PREFLIGHT_BLOCKED"], 10, 0, None, False),
+        ([ROOT_BLOCKED_BOUNDARY + "_v2"], 10, 0, None, False),
+        ([], 10, 0, None, False),
+    ],
+)
+def test_j12_the_run_is_contiguous_from_the_newest_pass_within_the_window(
+    boundaries: list[str | None], window: int, passes: int, span: float | None, newest: bool
+) -> None:
+    records = [_boundary_record(5 * (index + 1), boundary) for index, boundary in enumerate(boundaries)]
+
+    run = probe.root_blocked_run(records, window=window)
+
+    assert run.passes == passes
+    assert run.span_minutes == span
+    assert run.newest_is_root_blocked is newest
+
+
+@pytest.mark.parametrize(
+    ("boundary", "expected"),
+    [
+        (ROOT_BLOCKED_BOUNDARY, ROOT_BLOCKED_BOUNDARY),
+        ("db_free_runtime_preflight_blocked", "db_free_runtime_preflight_blocked"),
+        (42, None),
+        (["scheduler_root_preflight_blocked"], None),
+        ({"value": "scheduler_root_preflight_blocked"}, None),
+    ],
+)
+def test_j13_an_absent_or_non_string_boundary_reads_as_none_not_probe_failed(
+    tmp_path: Path, boundary: object, expected: str | None
+) -> None:
+    root = _evidence_root(tmp_path)
+    written = _write_pass(
+        root,
+        _pass_name(5, "c" * 12),
+        _pass_payload(started_at=NOW - timedelta(minutes=5), guard=False, execution_boundary=boundary),
+    )
+    legacy = _write_pass(
+        root, _pass_name(6, "d" * 12), _pass_payload(started_at=NOW - timedelta(minutes=6), guard=False)
+    )
+
+    assert probe.read_pass_record(written).execution_boundary == expected
+    assert probe.read_pass_record(legacy).execution_boundary is None
+
+
+def test_j14_the_runbook_documents_the_root_blocked_section() -> None:
+    text = RUNBOOK.read_text()
+    section = text.split("##### stall-scheduler-root-blocked", 1)[1].split("#####", 1)[0]
+
+    assert text.index("##### stall-lock-contended-persistent") < text.index(
+        "##### stall-scheduler-root-blocked"
+    ) < text.index("##### stall-submission-stalled")
+    assert ENV_ROOT_BLOCKED_MINUTES in section
+    for field in ("root_blocked_run", *sorted(ROOT_BLOCKED_RUN_KEYS)):
+        assert field in section, field
+    assert "NHMS_SCHEDULER_ALLOWED_ROOTS" in section
+    assert "node22-control-plane-manual-recovery.md" in section
