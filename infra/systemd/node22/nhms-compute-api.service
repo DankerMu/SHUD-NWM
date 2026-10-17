@@ -1,0 +1,23 @@
+[Unit]
+Description=NHMS compute/control API (node 22 user)
+After=network-online.target nhms-slurm-gateway.service
+Wants=network-online.target nhms-slurm-gateway.service
+
+[Service]
+Type=simple
+WorkingDirectory=/scratch/frd_muziyao/NWM
+EnvironmentFile=/scratch/frd_muziyao/NWM/infra/env/compute.host.env
+Environment=NHMS_SERVICE_ROLE=compute_control
+Environment=SLURM_GATEWAY_URL=http://127.0.0.1:8090
+Environment=NHMS_PRODUCTION_SLURM_ENABLED=true
+ExecStart=/scratch/frd_muziyao/NWM/.venv/bin/python -m uvicorn apps.api.main:app --host 0.0.0.0 --port 8001 --log-level info
+StandardOutput=append:/scratch/frd_muziyao/nhms-prod/runtime/api/nhms-api-8001.log
+StandardError=append:/scratch/frd_muziyao/nhms-prod/runtime/api/nhms-api-8001.log
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=0
+TimeoutStopSec=30
+LimitNOFILE=65536
+
+[Install]
+WantedBy=default.target

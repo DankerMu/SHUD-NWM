@@ -9,13 +9,34 @@
 - **CI 路由**：新增的 `infra/**` 非 Python 文件与新脚本在 `scripts/select_ci_tests.py` 登记 `PathTestRule`，否则 PR CI 退化为 collect-only。
 - **依赖**：`Depends on` 列出的是必须先合并的 task；未列出的 task 之间可并行。
 
+## Risk packs（issue-risk-contract.md；selected 的每一项映射到下方某 task 的测试、Verify 命令或显式 non-goal）
+
+- Public API / CLI / script entry — selected：1.2 drift 探针、3.1 handler、4.4 sweep 是新 CLI；退出码矩阵由各自测试覆盖。1.1 不涉及（纯数据 + 守卫测试）。
+- Config / project setup — selected：1.1/3.1/3.2 追踪 systemd 单元与 manifest，4.1 gitignore，4.3 env 键分类；全部由守卫测试钉死，部署是运维 non-goal。
+- File IO / path safety / overwrite — selected：4.4 `mv -n`、拒绝集归一化、目标已存在退出 2；1.2 只读 systemd 目录（测试以空 `PATH` 证明不调 `systemctl`）。1.1 只新增仓库文件。
+- Schema / columns / units / field names — selected：1.1 `MANIFEST.json` 字段 `{deployed_relative_path, tracked_path, sha256}` 是 1.2 探针与 3.x 的契约，由 `tests/test_node22_unit_tracking.py` 断言。
+- Auth / permissions / secrets — selected：1.1/3.1 追踪的单元只引用 secret 路径；守卫测试断言无 `*TOKEN|*SECRET|*PASS|*PASSWORD` 赋值且 `EnvironmentFile=` 属 authority 表或 secret 路径。
+- Concurrency / shared state / ordering — not selected：无共享状态；探针与 sweep 单进程只读/`mv -n`。
+- Resource limits / large input / discovery — not selected：输入是 ≤20 个小文件。
+- Legacy compatibility / examples — selected：1.1 保留 `infra/systemd/nhms-slurm-gateway.service` 通用模板不改（design D1 rejected alternative）；4.3 effective default 含 legacy fallback 链。
+- Error handling / rollback / partial outputs — selected：1.2 与 4.4 的退出码 2 分支、receipt 写失败；2.1 verdict 槽位顺序。1.1 non-goal。
+- Release / packaging / dependency compatibility — not selected：无依赖变更。
+- Documentation / migration notes — selected：README authority 表/备份策略、runbook 节、DOC_STATUS 标记由 `tests/test_entropy_audit_report_contract.py` 与各 task 的文档断言覆盖；实机部署步骤在 design Migration Plan。
+
 ## 1. 追踪 node-22 live 单元（spec: node22-unit-tracking）
 
-- [ ] 1.1 新建 `infra/systemd/node22/` 放入收据中七个文件的逐字节副本与 `MANIFEST.json`（七个 `node22/` 条目 + 十二个顶层 oneshot `.service`/`.timer` 条目，含 sha256；告警模板条目由 3.1 追加）；新增 `tests/test_node22_unit_tracking.py`（sha256 对照 manifest 与收据表；无 secret 值；`EnvironmentFile=` 归一化后属 README authority 表或 secret 路径，空重置行放行）；README authority 表补一行指向 `infra/systemd/node22/`；`scripts/select_ci_tests.py` 为 `infra/systemd/node22/**` 登记规则。
+- [x] 1.1 新建 `infra/systemd/node22/` 放入收据中七个文件的逐字节副本与 `MANIFEST.json`（七个 `node22/` 条目 + 十二个顶层 oneshot `.service`/`.timer` 条目，含 sha256；告警模板条目由 3.1 追加）；新增 `tests/test_node22_unit_tracking.py`；README authority 表下补一条 Notes 指向 `infra/systemd/node22/`；`scripts/select_ci_tests.py` 登记路由。钉死的契约（fixture review 2026-10-17）：
+
+  - **MANIFEST.json 结构**：顶层对象 `{"schema_version": "nhms.node22.unit_manifest.v1", "entries": [...]}`；每条 `{deployed_relative_path, tracked_path, sha256}`；`deployed_relative_path` 相对 `~/.config/systemd/user/`（七个与收据表第一列逐字相同，十二个 oneshot 就是文件名）；`tracked_path` 相对仓库根（七个 `infra/systemd/node22/<deployed_relative_path>`，十二个 `infra/systemd/<name>`）；`sha256` 为仓库内 `tracked_path` 文件内容的小写 hex；`entries` 按 `deployed_relative_path` 字节序排序，3.1"追加"第 20 条即按序插入。1.2 探针与 3.x 都以此结构为契约。
+  - **文件字节**：收据每个 ```ini fence 正文 + 恰好一个尾随 LF 即原文件（已核对七个 sha256 一致）；LF 换行、结尾一个换行。十二个 oneshot 文件本身不改。
+  - **守卫测试断言**（stdlib only：json/hashlib/re/pathlib；不从 `scripts/` import；仓库根 `Path(__file__).resolve().parents[1]`）：(a) manifest `entries` 包含这 19 条已知 `(deployed_relative_path, tracked_path)`（超集断言，不写 `len == 19`，3.1 加第 20 条时本测试不改）；(b) 每条 sha256 等于 `tracked_path` 文件的 sha256；(c) 七个 `node22/` 条目的 sha256 等于收据表（路径列与 sha256 列去反引号后比对；比对对象是文件内容的 sha256）；(d) 对 `node22/` 下每个文件逐行检查：`Environment=` 值中的每一对 `KEY=VALUE`（含引号、一行多对）若 KEY 以 `TOKEN|SECRET|PASS|PASSWORD` 结尾（大小写敏感、全大写）且 VALUE 非空即违规，`*_FILE` 等不以这几个词结尾的名字与文件名不在范围；只扫 `Environment=`，不扫其它裸 `NAME=value`；(e) 每个非空 `EnvironmentFile=` 值去掉前导 `-` 后，要么等于测试内常量 `/scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env`，要么等于 `/scratch/frd_muziyao/` + README §"node-22 unit → EnvironmentFile authority (#1694)" 一节（到下一个 `##` 为止）表格第 2 列中反引号包住、以 `NWM/infra/env/` 开头的 token；空 `EnvironmentFile=` 放行；不全文扫 README（否则已退役的 `compute.env` 会被误放行）；(f) 规则函数另以合成行级用例检验：`Environment=SLURM_GATEWAY_TOKEN=x` 拒绝、`Environment="FOO_PASSWORD=y"` 拒绝、`EnvironmentFile=` 放行、`EnvironmentFile=-/scratch/frd_muziyao/NWM/infra/env/compute.host.env` 放行、`EnvironmentFile=/scratch/frd_muziyao/NWM/infra/env/compute.env` 拒绝、文件名 `10-slurm-gateway-token.conf` 不算违规。
+  - **README**：不加表格行（第 3 列"Tracked template"指 env 模板）；在该节表下 Notes 增加一条 bullet："部署的单元体与 drop-in 的逐字节副本在 `infra/systemd/node22/`（`MANIFEST.json`，收据 `docs/runbooks/receipts/2026-10-16-node22-live-units-snapshot.md`），本表仍是 EnvironmentFile 权威，`tests/test_node22_unit_tracking.py` 以本表校验那些文件的 `EnvironmentFile=`"；三列表结构与 `nhms-required-keys` 块不动（`tests/test_env_templates.py` 解析该块）；措辞不含 Production Topology Hard Gate 扫描的敏感字样（旧 DB 端口、已退役 writer 角色等）。
+  - **selector**：新增一行 `PathTestRule("infra/systemd/node22/*", ("tests/test_node22_unit_tracking.py",))`（fnmatch 的 `*` 跨 `/`，先例 `infra/systemd/system/*`）；另外本测试是十二个 oneshot 文件、`infra/env/README.md` 与收据的字面读者：十一个 oneshot 各有一条精确既有行，加上精确的 `infra/env/README.md` 行，共 12 条既有行在 tests tuple 末尾追加本测试（不新开重复 pattern 的行）；`infra/systemd/nhms-scheduler-evidence-retention.timer` 与收据路径没有任何匹配行，各新开一行。合计新增 3 行（`infra/systemd/node22/*`、evidence-retention timer、收据）+ 12 处追加。相应更新 `tests/test_select_ci_tests.py` 中既有 producer 的 exact-set 守卫（允许的测试改动），并为 3 条新行各写一个仿现有 `*_rule_red_when_removed` 的「删掉即红」断言。不改 `infra/systemd/nhms-slurm-gateway.service` 通用模板及其 selector 常量。
+  - **PR Boundary 偏离**：issue #2910 写的是"selector 一条规则"；按上面 selector 项扩为新增 3 行 + 12 处追加，原因是 3.2 改六个 `.service` 时 PR CI 必须选中本测试，否则 manifest sha256 错也绿。PR 的偏离记录写明。
 
   Depends on: 无
 
-  Verify：`uv run pytest -q tests/test_node22_unit_tracking.py tests/test_select_ci_tests.py tests/test_entropy_audit_report_contract.py`；`sha256sum infra/systemd/node22/*` 与收据表逐项一致。
+  Verify：`uv run pytest -q tests/test_node22_unit_tracking.py tests/test_select_ci_tests.py tests/test_entropy_audit_report_contract.py tests/test_env_templates.py`；`find infra/systemd/node22 -type f ! -name MANIFEST.json -print0 | xargs -0 sha256sum` 七行与收据表逐项一致；README 的其它读者（`tests/test_slurm_gateway_deployment_contract.py`、`tests/test_two_node_docker_runtime.py`）由既有 `infra/env/README.md` 路由在 PR CI 上选中。
 
   **Suggested fixture level:** compact - 纯数据文件加一个守卫测试，无运行时代码。
 

@@ -23,6 +23,16 @@ failure mode it is currently in:
   `.nhms-work/` is not gitignored and shows 25 untracked files in `git status`, which is the gate the ff-only sync
   runbook relies on.
 
+## Triage (subagent-workflow fixture)
+
+Issue type: refactor (configuration tracking, probes, env hygiene; no scheduler/gateway/API runtime change)
+Fixture level: per task, as declared in `tasks.md` (1.1 compact, 1.2 compact, 2.1 expanded, 3.1 compact, 3.2 none, 4.1 none, 4.2 compact, 4.3 compact, 4.4 compact); `design.md` exists because 2.1 is expanded
+Upstream suggested level: same values written by `stage-change-pipeline` into #2910-#2918 (agree)
+Fixture level note for 1.1: stays compact although it selects the schema / secrets / config / legacy packs — the manifest format's only consumers are inside this change (1.2, 3.1, 3.2), the tracked files are data with no runtime path, and design D1 already names must-preserve behaviour, consumers and seams; the sibling-surface check that expanded would add was done in the fixture review (selector routing for the test's literal readers, now pinned in tasks.md 1.1).
+Blast radius: a wrong tracked copy or manifest makes the drift probe (1.2) report drift against the real node-22 or hide it; a wrong stall predicate (2.1) mails on healthy passes or stays silent on a root-blocked scheduler; a wrong sweep (4.4) moves a live env file. Nothing here changes what the scheduler, gateway or API execute.
+Selected risk packs: see "Risk packs" in `tasks.md`
+Evidence floor: per task `Verify` line in `tasks.md` (local `uv run ruff check .` + the listed pytest files; no node-22 / node-27 oracle, design D6)
+
 ## What Changes
 
 - Track the live node-22 user-scope units, the gateway base unit and the drop-ins under `infra/systemd/node22/`

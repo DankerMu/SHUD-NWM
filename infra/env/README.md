@@ -121,6 +121,7 @@ Notes:
     so a green PR here does not exercise them — run the grep set locally.
 - `compute.host.env` is untracked with no committed template. That gap is
   recorded, not fixed, by #1694.
+- 部署的单元体与 drop-in 的逐字节副本在 `infra/systemd/node22/`（`MANIFEST.json`，收据 `docs/runbooks/receipts/2026-10-16-node22-live-units-snapshot.md`），本表仍是 EnvironmentFile 权威，`tests/test_node22_unit_tracking.py` 以本表校验那些文件的 `EnvironmentFile=`
 
 ### Where the scheduler's basin configuration actually lives
 
