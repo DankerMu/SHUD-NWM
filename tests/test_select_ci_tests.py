@@ -847,6 +847,37 @@ def test_two_node_overview_runbook_rule_red_when_removed(monkeypatch: pytest.Mon
     )
 
 
+# #2917 -- the node-22 scheduler env live-drift table suite parses the table
+# out of `infra/env/README.md`, cross-checks values against the DB-free env
+# template, and calls three loaders. Four of its reader paths already had an
+# exact row and gained the suite as an extra target; the config module had no
+# row of its own and is the complement leg below.
+NODE22_SCHEDULER_ENV_DRIFT_SUITE = "tests/test_node22_scheduler_env_drift_table.py"
+SCHEDULER_CONFIG_MODULE = "services/orchestrator/scheduler_config/config.py"
+NODE22_SCHEDULER_ENV_DRIFT_APPENDED_EDGES: tuple[str, ...] = (
+    "infra/env/README.md",
+    "infra/env/compute.scheduler-dbfree.env.example",
+    "services/orchestrator/scheduler_lease.py",
+    "scripts/node22_scheduler_evidence_retention.py",
+)
+
+
+@pytest.mark.parametrize("source", (*NODE22_SCHEDULER_ENV_DRIFT_APPENDED_EDGES, SCHEDULER_CONFIG_MODULE))
+def test_node22_scheduler_env_drift_reader_edges_select_the_suite(source: str) -> None:
+    assert NODE22_SCHEDULER_ENV_DRIFT_SUITE in select_tests([source], repo_root=Path(".")), source
+
+
+def test_scheduler_config_module_rule_red_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drop exactly the #2917 row and the config module no longer reaches the suite."""
+    from scripts import select_ci_tests
+
+    mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern != SCHEDULER_CONFIG_MODULE)
+    assert len(mutant) == len(PATH_TEST_RULES) - 1, "the #2917 row is missing or duplicated"
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+
+    assert NODE22_SCHEDULER_ENV_DRIFT_SUITE not in select_tests([SCHEDULER_CONFIG_MODULE], repo_root=Path("."))
+
+
 @pytest.mark.parametrize(
     ("unit", "owners"),
     sorted(NODE22_UNIT_OWNER_SUITES.items()),
@@ -4281,9 +4312,12 @@ def test_scheduler_provider_refresh_template_rule_carries_no_selection_flags() -
             # must run it -- the previous 2-set was non-empty yet held no reader
             # of this file, which is how the missing
             # `NHMS_ORCHESTRATOR_TERMINAL_STAGE` reached a rebuilt node.
+            # #2917 widened it again: the env drift table suite parses this
+            # template's values for its example cross-check.
             [
                 TOPOLOGY_HARD_GATE_NODE,
                 "tests/test_env_templates.py",
+                NODE22_SCHEDULER_ENV_DRIFT_SUITE,
                 SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,
                 "tests/test_two_node_docker_runtime.py",
             ],

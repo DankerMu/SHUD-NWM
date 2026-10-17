@@ -3047,7 +3047,8 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # first-creation Barrier race against this module. Additive (no stop):
         # the broad orchestrator directory rule still applies. Sub-second.
         "services/orchestrator/scheduler_lease.py",
-        ("tests/test_safe_fs_lock.py",),
+        # #2917: the env drift table asserts `_file_lock_guard_mode()`'s unset default.
+        ("tests/test_safe_fs_lock.py", "tests/test_node22_scheduler_env_drift_table.py"),
     ),
     # C4 reads pinned evidence through evidence_io's descriptor-bound
     # byte/JSON identity primitives. This exact owner has no same-name suite,
@@ -5428,7 +5429,12 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # run on the PR that removed it.
     PathTestRule(
         "infra/env/compute.scheduler-dbfree.env.example",
-        (SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST, "tests/test_env_templates.py"),
+        # #2917: the env drift table cross-checks its example values against this template.
+        (
+            SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,
+            "tests/test_env_templates.py",
+            "tests/test_node22_scheduler_env_drift_table.py",
+        ),
     ),
     # #2913: the alert suite parses the authority table for the alert template's `EnvironmentFile=`.
     PathTestRule(
@@ -5438,6 +5444,8 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_env_templates.py",
             "tests/test_node22_unit_tracking.py",
             "tests/test_node22_unit_failure_alert.py",
+            # #2917: the suite parses the scheduler env live-drift table.
+            "tests/test_node22_scheduler_env_drift_table.py",
         ),
     ),
     # #2195: this template's owner suite reads it BY PATH and asserts its
@@ -5720,6 +5728,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "services/orchestrator/scheduler_config/path_modes.py",
         ("tests/test_preserve_final_component_loop_spelling.py",),
+    ),
+    # #2917: the env drift table calls four `ProductionSchedulerConfig` field
+    # `default_factory`s defined here; the module has no same-name suite and no
+    # exact row, so a default changed in this file must reach the table check.
+    PathTestRule(
+        "services/orchestrator/scheduler_config/config.py",
+        ("tests/test_node22_scheduler_env_drift_table.py",),
     ),
     # #2401: the newest-truth guard on the completed-type terminal skips lives in
     # its own module and is consumed by the candidate-state decision.  Its
@@ -6716,6 +6731,8 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_scheduler_evidence_retention.py",
             "tests/test_scheduler_evidence_retention_reservation_mtime.py",
+            # #2917: the env drift table asserts `config_from_env`'s unset defaults.
+            "tests/test_node22_scheduler_env_drift_table.py",
         ),
     ),
     PathTestRule(
