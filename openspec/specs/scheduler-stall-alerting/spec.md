@@ -48,8 +48,9 @@ healthy verdict SHALL be reachable only when no other condition matches, and
 SHALL NOT be produced as a fallback for evidence the probe could not obtain.
 
 Each non-healthy verdict SHALL name a runbook section, both in the receipt and
-on the probe's error output, because a failed unit in the journal is this host's
-only alerting channel. The receipt SHALL record every graded signal's observed
+on the probe's error output, because the failed unit is what the host's
+`OnFailure=` alert lane forwards (`nhms-node22-unit-failure-alert@.service`,
+with the unit's last journal lines). The receipt SHALL record every graded signal's observed
 value beside the threshold it was compared against, so the verdict can be
 re-derived from the receipt alone, and the receipt SHALL be written outside the
 evidence root so the probe's own output never enters readiness discovery or
@@ -200,9 +201,18 @@ opposite of what the scheduler declares for that class.
 A status allowlist SHALL NOT be used in its place, because it is wrong in both
 directions on this lane: a reconciled-restart pass carrying dozens of blocked
 candidates — the first pass of the very incident this probe exists for — would
-be skipped as neutral, a preflight-blocked pass is fully observed and counted by
+be skipped as neutral, a post-candidate preflight-blocked pass (`evidence_preflight_blocked`,
+`slurm_preflight_blocked`, bare `preflight_blocked`) is fully observed and counted by
 the scheduler yet would also be skipped, and an early-exit pass has no status
 string of its own and would fall through to the idle case and reset the streak.
+
+A pre-lock root-blocked pass (`execution_boundary` equal to
+`scheduler_root_preflight_blocked`) carries no progress-guard block and is therefore
+neutral under the rule above, for this streak, for the in-flight time gate and for
+frontier selection; it SHALL NOT be re-classified as blocked or idle, so the shape
+taxonomy stays closed and the receipt shape counts are unchanged. Its condition is
+reported by the separate root-blocked run predicate (next requirement), which reads
+`execution_boundary` directly instead of the counts.
 
 The absent-count case is real and is concentrated exactly where the probe is
 needed most: the resource-limit fallback artifact is the shape that omits those
@@ -213,31 +223,20 @@ count SHALL be recorded in the receipt.
 
 #### Scenario: A degraded artifact neither advances nor blocks the streak
 
-- **WHEN** the graded window contains a resource-limit fallback artifact whose
-  submission and blocked-candidate counts are absent, surrounded by passes that
-  submitted nothing while holding blocked candidates
-- **THEN** the degraded artifact does not advance the streak and does not reset
-  it, the tick is not graded probe-failed on its account, and the receipt records
-  it as neutral
-- **AND** the resource-limit condition is still reported, because it is carried
-  by its own higher-precedence verdict
+- **WHEN** the graded window contains a resource-limit fallback artifact whose submission and blocked-candidate counts are absent, surrounded by passes that submitted nothing while holding blocked candidates
+- **THEN** the degraded artifact does not advance the streak and does not reset it, the tick is not graded probe-failed on its account, and the receipt records it as neutral
+- **AND** the resource-limit condition is still reported, because it is carried by its own higher-precedence verdict
 
 #### Scenario: A fully observed pass is classified by its counts whatever its status
 
-- **WHEN** the graded window contains a pass that carries a progress-guard
-  block, reports a status other than the ordinary submitted or planned ones —
-  a reconciled restart, or a preflight block — and records zero submissions with
-  dozens of blocked candidates
+- **WHEN** the graded window contains a pass that carries a progress-guard block, reports a status other than the ordinary submitted or planned ones (a reconciled restart, or a post-candidate preflight block) and records zero submissions with dozens of blocked candidates
 - **THEN** that pass extends the streak as blocked work
 - **AND** it is not treated as neutral, because the writer observed it fully
 
-A neutral pass SHALL NOT consume a position in whatever bound the streak search
-scans. Counting the streak inside a window whose size equals the alert threshold
-makes the verdict unreachable as soon as one neutral pass falls inside it, which
-on this lane is the common case rather than the exception. The search SHALL
-instead run over the prefix the ordering margin can vouch for, stop at the first
-pass that submitted work or held no blocked candidate, and report how many
-neutral passes it skipped.
+#### Scenario: A root-blocked pass stays neutral for every existing signal
+
+- **WHEN** a pass with `execution_boundary: scheduler_root_preflight_blocked` and no progress-guard block sits between two passes that count toward the no-submission streak, or inside an in-flight-held run, or is the newest pass while a frontier entry is bypassed
+- **THEN** the streak, the in-flight span and the frontier selection are the same as if that pass were absent, and the receipt counts it as neutral
 
 #### Scenario: A neutral pass does not cost the streak a position
 
@@ -408,3 +407,37 @@ A no-progress tracker entry matching a suppressed reason SHALL remain suppressed
 #### Scenario: Old-cycle entry with a suppressed reason
 - **WHEN** the only matching entries name cycles absent from the newest pass
 - **THEN** they stay in `suppressed[]` and the verdict is unaffected
+
+### Requirement: A root-blocked scheduler SHALL become a non-zero unit
+
+The probe SHALL read `execution_boundary` from each pass artifact into the pass record. A root-blocked run SHALL be the contiguous newest-first sequence of passes whose `execution_boundary` equals exactly `scheduler_root_preflight_blocked`; any other pass ends the run. When the newest pass is in the run and the minutes from the oldest run member's recorded time to the newest are greater than or equal to `NHMS_SCHEDULER_STALL_ROOT_BLOCKED_MINUTES` (default 60), the verdict SHALL be `scheduler_root_blocked`, exit status 1, runbook section `stall-scheduler-root-blocked`, graded immediately after `lock_contended_persistent` and before `submission_stalled`. Configuration SHALL reject the threshold when it is below twice the minimum inter-pass interval or above the same reachable bound the in-flight gate uses. The receipt SHALL record `root_blocked_run` with `passes`, `span_minutes`, `threshold_minutes` and `newest_is_root_blocked` so the verdict can be re-derived from the receipt alone.
+
+#### Scenario: One hour of root-blocked passes
+
+- **WHEN** the newest thirteen passes carry `execution_boundary: scheduler_root_preflight_blocked`, no progress-guard block and zero counts, with recorded times five minutes apart so the span is exactly 60 minutes, and no higher-precedence condition holds
+- **THEN** the verdict is `scheduler_root_blocked`, the receipt names `stall-scheduler-root-blocked` and `root_blocked_run.span_minutes` is 60, and the exit status is 1
+
+#### Scenario: A single transient refusal stays ok
+
+- **WHEN** only the newest pass is root-blocked and the pass before it submitted normally within the window
+- **THEN** the verdict is `ok` and `root_blocked_run.passes` is 1
+
+#### Scenario: A non-root pass ends the run
+
+- **WHEN** a `db_free_runtime_preflight_blocked` pass sits between two root-blocked groups
+- **THEN** the run counts only the newer group
+
+#### Scenario: Dead lane and pass-limit outrank blocked root
+
+- **WHEN** the scheduler timer is stopped, or a resource-limit pass is inside the pass-limit lookback, while the newest passes are root-blocked beyond the threshold
+- **THEN** the verdict is `timer_stopped` or `pass_limit_blocked` respectively, and the receipt still records the root-blocked run
+
+#### Scenario: Blocked root outranks a stalled submission streak
+
+- **WHEN** the root-blocked run meets its threshold and the no-submission streak also meets its threshold
+- **THEN** the verdict is `scheduler_root_blocked`
+
+#### Scenario: Unreachable or trivial threshold is rejected
+
+- **WHEN** `NHMS_SCHEDULER_STALL_ROOT_BLOCKED_MINUTES` is 5 or exceeds the reachable bound
+- **THEN** configuration loading fails with a message naming the variable and the allowed range
