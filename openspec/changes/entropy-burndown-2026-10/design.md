@@ -50,12 +50,14 @@ Measured facts (audit at `f7be77f22`, methods in `docs/governance/entropy-audit-
   helpers; no file-level import cycle exists today (the audit's cycles are directory-level); hand-typed
   `PipelineStatus`/`JobStatus` in `lib/constants.ts:10,18` with generated equivalents in `api/types.ts:1818,1835`;
   `failedStatuses` duplicated in `components/monitoring/BasinFailures.tsx:19` and `JobsTable.tsx:39`; one shared
-  envelope `api/response.ts` (`ApiErrorShape`, `getApiErrorMessage`, `unwrapApiData`) beside four local normalizers
-  (`safeM11ErrorMessage`, `getSafeModelAssetErrorMessage`, `apiErrorCode`, `settledError`);
+  envelope `api/response.ts` (`ApiErrorShape`, `getApiErrorMessage`, `unwrapApiData`) beside two masking wrappers that already
+  delegate to it (`getSafeModelAssetErrorMessage`, `settledError`), the M11 label mask `safeM11ErrorMessage` (consumes no
+  error) and the untyped code extractor `apiErrorCode`;
   `tsconfig.app.json` is `strict` with unused checks; no ESLint anywhere; `check:api-types` exists as a script but the
   CI job runs only typecheck, check:types, build, test, check:bundle.
 - Governance: `scripts/governance/entropy_audit/check_stale_routes.py::_path_is_route_authority_expanded_scope` already
-  treats `openspec/changes/archive/` as expanded authority scope (which is why 665 findings land there);
+  treats `openspec/changes/archive/` as expanded authority scope (which is why 586 `stale-display-route-token`
+  findings land there; the other 79 archive findings are `placeholder-path-token` and stay);
   `tests/test_entropy_audit_baseline_writer_summary.py:76-77` pins `total_test_files == 247` and
   `total_instruction_files == 3` as literals read from the tracked baseline.
 - Journal: 17 505 lines; `FileOrchestrationJournalRepository` ≈ 11 063 lines and `FileJournalRetryService` ≈ 1 377 lines
@@ -122,10 +124,11 @@ selector rule rows for the four contract modules equivalent to the rows that own
 ### D2 Layering guard is a pytest over the AST (user)
 `tests/test_import_layering_guard.py` walks every `.py` under `packages/` and fails on any `import`/`from` whose
 top-level package is `workers`, `services`, `apps` or `scripts`, and every `.py` under `workers/` importing `services`
-or `apps`. It runs in the normal targeted lane (it is selected whenever `packages/**` or `workers/**` changes, via
-`scripts/select_ci_tests.py` guarded-owner rules) and in the full lane. An allowlist file
+or `apps`. It runs in the normal targeted lane (it is selected whenever a `.py` under `packages/**` or `workers/**` changes, via
+an additive loop in `scripts/select_ci_tests.py::select_tests` after the stop rules, as #1656/#2185/#1627 do; the
+allowlist file routes to it by a `PathTestRule`) and in the full lane. An allowlist file
 `tests/import_layering_allowlist.json` (`{file, module}` entries, deduplicated) lists the upward imports that still
-exist; it starts with the current 12 sites and is `[]` as soon as the expand step lands, because shim re-exports are
+exist; it starts with the current 12 import statements, 9 entries after `(file, module)` deduplication, and is `[]` as soon as the expand step lands, because shim re-exports are
 downward imports; the test fails if an entry's import is absent from the file's AST (dead entries rot).
 Alternative rejected: import-linter (new dependency, second config language).
 
@@ -138,12 +141,12 @@ and the output parser). Public closed sets are spelled out in the spec; the per-
 |---|---|---|
 | `PIPELINE_JOB_STATUS_ORDER` / `PIPELINE_JOB_STATUSES` | `apps/api/routes/pipeline.py` tuple + `reservation_lost` | `schemas/pipeline_job.schema.json`, OpenAPI, `types.ts` |
 | `PIPELINE_JOB_INTERNAL_STATUSES` | `accepted_submit_identity.py` (`reserved`, `cancellation_pending`, `reconcile_unverified`) | `ACCEPTED_SUBMIT_MASTER_STATUSES` derived as `(PIPELINE_JOB_STATUSES - {skipped}) \| INTERNAL` with a parity pin |
-| `PIPELINE_JOB_TERMINAL` | `chain_types.py` (binds `set(...)` once, shared object) | `chain_runtime_utils.py`, `file_orchestration_journal.py` import the `chain_types` object |
+| `PIPELINE_JOB_TERMINAL` | `chain_types.py` (binds `set(...)` once, shared object) | `chain_runtime_utils.py:32` and `file_orchestration_journal.py:621` hold independent literal sets today (not the `chain_types` object); each binds its own `set(PIPELINE_JOB_TERMINAL)` in 2.3 |
 | `PIPELINE_JOB_TERMINAL_WITHOUT_RESERVATION` | `scheduler.py` and `scheduler_candidates.py` each bind their own `set(...)` (two independent objects today; `scheduler` imports `scheduler_candidates`, never the reverse) | — |
 | `PIPELINE_JOB_TERMINAL_GUARD`, `PIPELINE_JOB_TERMINAL_OVERRIDES`, `PIPELINE_JOB_ACTIVE_MANUAL_RETRY` | `persistence.py` | — |
-| `PIPELINE_JOB_SUCCESS` (`scheduler_state_types` binds `set(...)` once) | `scheduler_state_types.py` `TERMINAL_PIPELINE_SUCCESS_STATUSES` | `chain.py`, `chain_runtime_utils.py`, `chain_source_cycle.py`, `chain_repository_state.py`, `retry.py`, inline sites in journal / `persistence.py` / `forcing_submit_identity.py` |
+| `PIPELINE_JOB_SUCCESS` (`scheduler_state_types` binds `set(...)` once) | `scheduler_state_types.py` `TERMINAL_PIPELINE_SUCCESS_STATUSES` | `chain.py:216`, `chain_runtime_utils.py:41`, `chain_source_cycle.py:12`, `chain_repository_state.py:23`, `retry.py:80` hold independent literal sets today (not the `scheduler_state_types` object); each binds its own `set(PIPELINE_JOB_SUCCESS)` in 2.3; inline sites in journal / `persistence.py` / `forcing_submit_identity.py` |
 | `PIPELINE_JOB_ACTIVE`, `PIPELINE_JOB_PENDING`, `PIPELINE_JOB_FAILED_UI` | `apps/api/routes/pipeline.py` `_ACTIVE/_PENDING/_FAILED_JOB_STATUSES` | — |
-| `FAILED_PIPELINE_STATUSES`, `DURABLE_HYDRO_SUCCESS_STATUSES`, `HYDRO_RUN_CODE_CLEARING_STATUSES` | `scheduler_state_types.py` (moved as frozensets; `scheduler_state_types` binds `set(...)` for the two `set`-typed ones and the frozenset itself for the third, same names) | #1581 consumers unchanged |
+| `FAILED_PIPELINE_STATUSES`, `DURABLE_HYDRO_SUCCESS_STATUSES`, `HYDRO_RUN_CODE_CLEARING_STATUSES` | `scheduler_state_types.py` (moved as frozensets; `scheduler_state_types` binds `set(...)` for the two `set`-typed ones and the frozenset itself for the third, same names) | #1581 consumers unchanged; `chain.py:217`, `chain_repository_state.py:19`, `chain_source_cycle.py:13` hold independent literal `FAILED_PIPELINE_STATUSES` sets today; each binds its own `set(FAILED_PIPELINE_STATUSES)` in 2.3 |
 | `HYDRO_RUN_STATUSES` | `schemas/run_status.schema.json` enum | parity ⊇ folded DB enum − `frequency_done` |
 | `HYDRO_RUN_TERMINAL_UI` | `apps/api/routes/pipeline.py` `_TERMINAL_HYDRO_STATUSES` | — |
 | `DISPLAY_PRODUCT_READY_STATUSES` (site binds `set(...)`) | `hydro_display_constants.py` | — |
@@ -157,6 +160,9 @@ and the output parser). Public closed sets are spelled out in the spec; the per-
 | `SLURM_TERMINAL_SUCCESS`, `SLURM_TERMINAL_FAILURE` | `scripts/run_qhh_continuous.py` | — |
 | `QC_VERDICTS` + `normalize_qc_verdict` | new (lowercase) | read/compare paths in `production_closure/*`, `scripts/*` |
 | `READINESS_ITEM_STATUSES` | `readiness_item_contracts.py` | — |
+| `ACTIVE_PIPELINE_STATUSES` | `scheduler_state_types.py:28` (binds `set(...)` once, shared object) | `scheduler_state.py`, `scheduler_state_decision.py`, `scheduler_state_failure.py`, `scheduler_state_manual_retry.py`, `scheduler_state_rows.py` import the object; same members as `PIPELINE_JOB_ACTIVE` (`pipeline.py:76`), `PIPELINE_JOB_ACTIVE_MANUAL_RETRY` (`persistence.py:11`, tuple) and `retry.py:77` `ACTIVE_RETRY_STATUSES` — distinct purposes, kept distinct; `retry.py:77` binds its own `set(...)` in 2.3 |
+| `ACTIVE_HYDRO_STATUSES` | `scheduler_state_types.py:32` (binds `set(...)` once, shared object; six-site identity pinned by `test_hydro_status_set_parity.py::test_active_hydro_statuses_are_the_same_object`) | `chain.py:211`, `scheduler_state.py`, `scheduler_state_decision.py`, `scheduler_state_manual_retry.py` import the object |
+| `RESERVATION_ACTIVE_STATUSES` (`tuple`, order `reserved, submitted, running, queued, pending`) | `persistence.py:17` | `reservation.py:38` imports it |
 
 Vocabulary objects are immutable; `set`-typed sites bind `set(...)` once in the module that owns the shared object today, so every site keeps its type and identity (the parity test checks both). The vocabulary provides an ordered tuple for every set that reaches a schema or OpenAPI enum (`PIPELINE_JOB_STATUS_ORDER`,
 `HYDRO_RUN_STATUS_ORDER`, `CYCLE_STATUS_ORDER`) so generated enums are deterministic under hash randomisation; frozensets
@@ -171,6 +177,18 @@ adjudicating every hit. `normalize_qc_verdict` is read-side only: receipt writer
 and are allowlisted `distinct-vocabulary`. `reservation_lost` is the only value added to any schema; `complete`/`published`
 are not added anywhere (no pipeline-job writer emits them; they stay in the read-side `PIPELINE_JOB_SUCCESS`).
 Alternative rejected: eight union sets (Stage 2 draft) — four review findings showed it changes runtime behaviour.
+
+### D3 (2.1a) risk contract
+
+- **Change surface**: new `packages/common/status_vocab.py`; four rebinds in `services/orchestrator/scheduler_state_types.py` (`:48`, `:57`, `:58`, `:60`); `tests/test_status_vocab_parity.py` (canonical pins, site types, `run_status` schema, two DB folds, `pipeline_job` schema modulo `_PENDING_PUBLIC_DELTA`); one additive helper in `tests/test_hydro_status_set_parity.py`; selector routing rows.
+- **Must preserve**: every canonical site's object type and identity (`set` sites stay mutable `set`s, the `DURABLE_HYDRO_SUCCESS_STATUSES` mutation probe stays green, `ACTIVE_HYDRO_STATUSES` identity across its six sites); no schema, OpenAPI or generated-type change; the 11-value `OPS_JOB_STATUS_ENUM` parity in `tests/test_api_contract_pipeline_ops.py` stays green.
+- **Must add**: the vocabulary objects as frozensets / ordered tuples / `Literal` aliases; `normalize_qc_verdict` (read-side, unwired); the parity test; the `.py` additive selector loop and the `db/migrations`, `run_status.schema.json` and `status_vocab.py` routing rows.
+- **Governing invariant**: one named set per site purpose, never a union; the vocabulary never changes membership at any site (2.1a changes no consumer).
+- **Sibling surfaces**: `chain_runtime_utils.py:32` and `file_orchestration_journal.py:621` keep their independent literal sets until 2.3; `ACTIVE_PIPELINE_STATUSES`, `ACTIVE_HYDRO_STATUSES`, the three `FAILED_PIPELINE_STATUSES` copies and `persistence.RESERVATION_ACTIVE_STATUSES` enter the vocabulary in 2.1a and are rebound in 2.3.
+- **Seams**: `scheduler_state_types` module globals (patched by #1581 tests); `_MIGRATIONS_DIR` monkeypatch in the folding helper.
+- **Required evidence**: parity test green on the real tree; `test_hydro_status_set_parity.py` nine tests unchanged and green; `test_api_contract_pipeline_ops.py` green; selector exact-set updates listed in the PR; `--changed-file` runs for `packages/common/status_vocab.py`, `db/migrations/x.sql`, `schemas/run_status.schema.json` selecting the parity test.
+- **Non-goals**: the duplicate-literal scan and allowlist (2.1b); any schema edit (2.2); any consumer rebind outside `scheduler_state_types.py` (2.2–2.4).
+- **Review focus**: object identity and mutability at the four rebinds; the fold helper's `_MIGRATIONS_DIR` late read; ordered tuples vs DB ordinal; the `_PENDING_PUBLIC_DELTA` transitional assertion.
 
 ### D4 Helper consolidation lands after D1 (user)
 Targets: utc-now → `packages/common/contracts/time_normalization.py::utc_now`; ISO parse → `parse_iso_utc`; format →
@@ -188,7 +206,11 @@ parity tests get additive-loop routing (#1656 shape) for `apps|packages|services
 ### D5 Lint ratchet: ruff rules with frozen inventory plus `Any` count ceiling (user)
 `pyproject.toml` `[tool.ruff.lint] select` gains `"B"` and `"BLE"`; `[tool.ruff.lint.per-file-ignores]` lists every file
 that currently violates, generated by `ruff check --select B,BLE --output-format json` at the time of the change and
-committed; CI already runs `uv run ruff check .`, so new violations fail. `tests/test_any_ratchet.py` counts `Any`
+committed; no workflow runs ruff today (the only `uv run ruff check .` is in the Makefile), so task 4.1 adds a
+non-path-scoped `lint-ruff` job to `ci.yml` running `uv run ruff check .`, and new violations then fail CI. FastAPI
+positional defaults (`Depends`/`Query`/`Path`) are declared via `flake8-bugbear.extend-immutable-calls` instead of being
+frozen per file, so the inventory is generated under the final configuration. A pure move or rename may re-key or split
+an entry but only with codes the source entry already carried and without raising any per-code total. `tests/test_any_ratchet.py` counts `Any`
 occurrences in annotations (AST: `Name` `Any` or `Attribute` ending in `.Any`, string annotations parsed first; the audit
 scanner is not in the repository, so the test's own method is the definition) over `apps/ packages/ services/ workers/ scripts/`,
 compares to `tests/any_ratchet_ceiling.json` (`{"ceiling": <n>}`), fails above the ceiling, and fails when the count is
@@ -212,6 +234,17 @@ parses the shared envelope shape); `useNationalBasinGeo` gains an error carrier 
 string | null`, failed fetch not cached) and the uncalled `lib/mvtLayerMetadata.ts` loader is deleted instead of being
 given one, with no change to what the UI renders when data is absent (`settledError` lives in the bootstrap module, so this lands after its move). Alternative
 rejected: Biome (another toolchain for three rules).
+
+### D6 (7.4 首刀) risk-contract block (fixture review 2026-10-17)
+Change surface: `apps/frontend/src/pages/m11/useNationalBasinGeo.ts` (fetchOne, loadNationalBasinGeo, module cache `cached`/`inflight`, hook); `apps/frontend/src/lib/mvtLayerMetadata.ts` (delete `fetchLayerCatalogMetadata`, its only helper `isLayerRecord`, and the `apiFetch` import); `apps/frontend/src/pages/m11/__tests__/useNationalBasinGeo.test.tsx` (extend; no new file).
+Must preserve: success path unchanged (one fetch of `/geo/national-basin-domain.geojson`, river never fetched, `river: null`, success cached for the session; the existing case passes unedited); first frame `loading = active && !cached`; inactive returns `{domain:null, river:null, loading:false, error:null}`; on failure `domain`/`river` are null and `loading` settles false (the pre-change absent shape), so `OverviewPage.tsx` `withStaticBasinBboxes(basins, null)` returns basins unchanged and `boundaryLoading` is false; every other `mvtLayerMetadata.ts` export untouched. Accepted delta: a failed load is no longer cached, so a later mount/re-activation retries with `loading=true` (same transient as a first load).
+Must add/change: `NationalBasinGeoState.error: string | null`, initial null, held in hook `useState` only; failure = fetch rejection, `!response.ok`, JSON parse failure, or `features` not an array; message via `getApiErrorMessage` with the strings pinned in tasks.md 7.4; on failure `cached` stays null and `inflight` is reset to null on the shared promise chain; `error` cleared when a retry starts and null after success.
+Governing invariant: a failed national-domain load is visible in the hook state and is never pinned for the session; a successful one is fetched at most once per session.
+Sibling surfaces: concurrent consumers sharing `inflight` (all see the failure, none caches it, no unhandled rejection); sole production consumer `OverviewPage.tsx` (does not read `error`, no render change); the `OverviewPage*.test.tsx` / `App*.test.tsx` suites that neither stub fetch nor mock the hook (retry per mount, no fetch-count assertions); the mocked-regression Playwright lane (`/geo/` served by vite dev from `public/geo`, success path); `fetchLayerCatalogMetadata` has zero callers/tests repo-wide.
+Seams under test: `useNationalBasinGeo` via `renderHook` + stubbed fetch; absent-data oracle `src/lib/__tests__/m11StaticBasinFallback.test.ts` (null domain → empty index / identity), unchanged.
+Required evidence: tasks.md 7.4 首刀 (a)–(f).
+Non-goals: rendering `error` in any component; AbortController; per-feature validation; the three local normalizers and `apiErrorCode` (#2956); moving the hook onto `unwrapApiData` (static file, no envelope).
+Review focus: (1) rejected `inflight` cleared on the shared chain, no memoized rejected promise, no unhandled rejection; (2) `error` not stored at module level; (3) failure returns exactly the pre-change absent shape; (4) loader + `isLayerRecord` + `apiFetch` import removed, other exports untouched; (5) no error-driven render branch in OverviewPage.
 
 ### D7 Decomposition by responsibility cluster, facade-preserving (user)
 For each of `file_orchestration_journal.py` and `select_ci_tests.py`: one task per cluster moves that cluster's
@@ -278,8 +311,10 @@ table as history and is allowlisted by name in the string test (rewording it wou
 - The expand window of D1 leaves two import paths for the same symbol; the allowlist-with-rot check in D2 bounds it.
 - D3 adds `reservation_lost` to the pipeline-job schema, API tuple and generated type: validators accept one more
   value than before. Whether the API already returns such rows is verified on node-27 in task 2.2's receipt.
-- D3 allowlist adjudication (every hit of the widened scan) is manual work in task 2.1; a wrong `not-a-status-set` tag hides a copy.
-- D5 freezes a large `per-file-ignores` list; it is generated, not hand-written, and shrinks only by cleanup PRs.
+- D3 allowlist adjudication (every hit of the widened scan) is manual work in task 2.1b; a wrong `not-a-status-set` tag hides a copy.
+- D5 freezes a large `per-file-ignores` list; it is generated, not hand-written, and shrinks only by cleanup PRs (a
+  pure move/rename may re-key an entry without growth, see tasks.md 4.1). Codes left in the list after a cleanup are
+  not reported by ruff (RUF100 only covers `noqa`), so cleanup PRs must drop them by hand.
 - D6 `import/no-cycle` on a 115-file tree is the slowest rule; measured impact belongs in the issue's evidence.
 - D7 touches a 17.5 k-line file that receives ~1.7 commits/day; each extraction PR must rebase quickly or conflict.
   Mitigation: small clusters, one PR at a time, facade keeps names stable; the status (2.3) and `_utcnow` (3.3) edits

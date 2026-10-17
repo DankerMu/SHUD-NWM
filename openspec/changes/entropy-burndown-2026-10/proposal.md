@@ -28,6 +28,15 @@ still being replicated by every new change:
   `openspec/changes/archive`, which DOC_STATUS classifies as historical evidence; the tracked entropy baseline is pinned
   by literal counts in a test, so it cannot be refreshed without editing the test.
 
+## Triage (subagent-workflow fixture)
+
+Issue type: refactor (structural burndown: layering guard, status vocabulary, helper dedupe, lint ratchet, journal/selector split, frontend lint, governance noise, scoped instructions)
+Fixture level: per task, as declared in `tasks.md` (`Suggested fixture level` line of each task); `design.md` exists because 1.2, 2.1a, 2.2, 2.3, 5.4, 5.5, 5.6, 6.3 and 7.4 are expanded
+Upstream suggested level: same values written by `stage-change-pipeline` into #2920-#2964 (agree)
+Blast radius: a wrong symbol move or shim leaves an import path broken for every caller of `packages/common` / `workers`; a wrong status set changes what the API, orchestrator or schema accept; a wrong journal/selector extraction silently changes scheduler behaviour or CI routing; the frontend changes can only break typecheck/lint/tests, not production data. Nothing here changes a runtime algorithm; every refactor task carries its existing tests as a zero-change oracle (`tasks.md` 约定).
+Selected risk packs: see "Risk packs" in `tasks.md`
+Evidence floor: per task `Verify` line in `tasks.md` (local `uv run ruff check .` + listed pytest files, frontend `corepack pnpm typecheck && corepack pnpm test`; node-27 live receipt only for 2.2, design Migration Plan)
+
 ## What Changes
 
 - Extract the contract subset that `packages/common` needs from the four workers into `packages/common`, leave

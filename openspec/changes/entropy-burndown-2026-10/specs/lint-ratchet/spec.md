@@ -6,7 +6,7 @@ Broad exception handling and untyped `Any` cannot grow without an explicit, revi
 ## ADDED Requirements
 
 ### Requirement: ruff SHALL select `B` and `BLE` with a frozen inventory
-`pyproject.toml` `[tool.ruff.lint] select` SHALL include `"B"` and `"BLE"`; `[tool.ruff.lint.per-file-ignores]` SHALL list, per file, exactly the `B*`/`BLE001` codes that file violated at the time of the change (generated from `ruff check --select B,BLE --output-format json`); `uv run ruff check .` SHALL pass on the resulting tree. Files not listed SHALL be fully subject to the rules.
+`pyproject.toml` `[tool.ruff.lint] select` SHALL include `"B"` and `"BLE"`; `[tool.ruff.lint.per-file-ignores]` SHALL list, per file, exactly the `B*`/`BLE001` codes that file violated at the time of the change (generated from `ruff check --select B,BLE --output-format json`); `uv run ruff check .` SHALL pass on the resulting tree and SHALL run as a non-path-scoped CI job on every pull request and master push. FastAPI `Depends`/`Query`/`Path` defaults SHALL be declared immutable via `flake8-bugbear.extend-immutable-calls` rather than frozen per file. Files not listed SHALL be fully subject to the rules.
 
 #### Scenario: New broad except in a clean file fails lint
 - **WHEN** a file with no `per-file-ignores` entry gains `except Exception:` that does not re-raise
