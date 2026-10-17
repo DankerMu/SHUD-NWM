@@ -5409,6 +5409,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "docs/runbooks/node22-control-plane-manual-recovery.md",
         ("tests/test_operator_reentry_confirmation.py",),
     ),
+    # #2916: the section-marker suite parses this runbook; `docs/**` does not open the backend lane.
+    PathTestRule(
+        "docs/runbooks/two-node-deployment-overview.md",
+        ("tests/test_node22_runbook_section_markers.py",),
+    ),
     PathTestRule(
         "infra/env/compute.example",
         (SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,),

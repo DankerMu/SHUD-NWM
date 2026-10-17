@@ -206,7 +206,17 @@ Slurm 计算节点不是第三个业务部署节点，但它是 22 计算控制�
 
 ### 5.2 22 节点部署入口
 
+`infra/env/compute.env` 是已退役的 docker-e2e 产物，node-22 没有任何单元加载它；单元到环境文件的权威见 [`infra/env/README.md`](../../infra/env/README.md#node-22-unit--environmentfile-authority-1694)。
+
 22 使用：
+
+Archive status:
+- status: superseded
+- current_authority: infra/env/README.md#node-22-unit--environmentfile-authority-1694
+- superseded_by: docs/runbooks/node22-control-plane-manual-recovery.md
+- status_since: 2026-10-16
+- archive_scope: section
+- retained_for: compose-lane design evidence
 
 - Compose 文件：[`infra/compose.compute.yml`](../../infra/compose.compute.yml)
 - 环境样例：[`infra/env/compute.example`](../../infra/env/compute.example)

@@ -146,7 +146,7 @@
 
   **Minimal mergeable slice:** atomic - 单行。
 
-- [ ] 4.2 `docs/runbooks/two-node-deployment-overview.md` §5.2：列表上方加退役句与完整六字段 section 标记，列表原样保留在标记区间内；新增 `tests/test_node22_runbook_section_markers.py` 用 `_section_archive_status_marker_ranges` 断言恰好一个完整 `section` 区间覆盖列表。钉死的契约（fixture review 2026-10-17）：
+- [x] 4.2 `docs/runbooks/two-node-deployment-overview.md` §5.2：列表上方加退役句与完整六字段 section 标记，列表原样保留在标记区间内；新增 `tests/test_node22_runbook_section_markers.py` 用 `_section_archive_status_marker_ranges` 断言恰好一个完整 `section` 区间覆盖列表。钉死的契约（fixture review 2026-10-17）：
 
   - **版面（从上到下，相邻段之间各恰好一个空行）**：`### 5.2` 标题 → 退役句 → `22 使用：` → `Archive status:` 紧跟六行 `- key: value`（中间无空行；字段块后恰好一个空行，否则全角冒号的 `- Compose 文件：…` 会被当成 `retained_for` 续行吞掉）→ 原样保留的四行列表。先例版面：`docs/runbooks/node-27-database-container-operations.md:117-126`。不插入新的 `####` 标题截断区间：按解析器（`scripts/governance/entropy_audit/archive_status.py:45`、`_archive_status_section_end_line` ~:169）区间延伸到下一个任意级标题 `### 5.3`，因此覆盖 §5.2 剩余全部内容（Compose 形态列表与 writer DB / env roots / `NHMS_SCHEDULER_ALLOWED_ROOTS` 段），文件头 blockquote 已声明该段是设计意图描述，接受此结果。
   - **退役句原文**：`` `infra/env/compute.env` 是已退役的 docker-e2e 产物，node-22 没有任何单元加载它；单元到环境文件的权威见 [`infra/env/README.md`](../../infra/env/README.md#node-22-unit--environmentfile-authority-1694)。``（不含拓扑硬门禁敏感字样。）
