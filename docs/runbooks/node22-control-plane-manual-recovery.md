@@ -548,6 +548,26 @@ mkdir -p /scratch/frd_muziyao/tmp/unit-drift
   目录不存在、已部署文件存在但不可读、receipt 被拒或写不出。此时探针结论不可信，先修探针输入；
   receipt 写不出时 `status: probe_failed` 只在 stderr。
 
+## env 备份副本清扫（`node22_env_backup_sweep.sh`，#2918）
+
+`infra/env/` 下的 `*.bak*` / `*.backup-*` / `*.pre-*` 备份副本按
+[`infra/env/README.md`](../../infra/env/README.md)「Backup copies」迁到
+`~/NWM-presync-backup-<UTC date>/infra-env/`。脚本是纯 bash，不需要解释器，**先 dry-run**：
+
+```bash
+bash /scratch/frd_muziyao/NWM/scripts/ops/node22_env_backup_sweep.sh --env-dir /scratch/frd_muziyao/NWM/infra/env
+```
+
+- 退出 0：stdout 每个备份副本一行 `plan: <env-dir>/<name> -> <backup-dir>/<name>`，什么都没动。
+  核对 plan 行后，同一命令加 `--apply` 再跑一次，用 `mv -n` 迁走（从不删除）。
+- 退出 2：没有任何移动。stderr 说明原因：某个副本仍被 `nhms-*` 单元或其
+  `nhms-*.service.d/*.conf` drop-in 的 `EnvironmentFile=` 引用（stderr 点名该单元，先改单元，
+  改前后按上节跑 drift 探针）、目标已存在、systemd 目录下一个 `nhms-*` 单元都没有、
+  或备份目录落在 env 目录 / systemd 目录之下。
+- 两次运行各写一份 `<backup-dir>/sweep-receipt-<UTC>.json`（只含文件名，不含内容），
+  stderr 打印其路径；把 dry-run 与 `--apply` 两份 receipt 附到本次操作在
+  `docs/runbooks/receipts/` 下的运维收据里。
+
 ## 已知限制
 
 - **Slurm 层失败的 rerun 不会恢复确认物**：计数在 rerun 被接受提交时已经 +1，失败不回退。

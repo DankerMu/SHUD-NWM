@@ -878,6 +878,30 @@ def test_scheduler_config_module_rule_red_when_removed(monkeypatch: pytest.Monke
     assert NODE22_SCHEDULER_ENV_DRIFT_SUITE not in select_tests([SCHEDULER_CONFIG_MODULE], repo_root=Path("."))
 
 
+# #2918 -- the node-22 env backup sweep suite runs the script by path and
+# matches the `infra/env/README.md` "Backup copies" default path against it.
+# The script had no route at all (`.sh` has no same-name derivation); README
+# gained the suite as an extra target.
+NODE22_ENV_BACKUP_SWEEP_SUITE = "tests/test_node22_env_backup_sweep.py"
+NODE22_ENV_BACKUP_SWEEP_SCRIPT = "scripts/ops/node22_env_backup_sweep.sh"
+
+
+@pytest.mark.parametrize("source", (NODE22_ENV_BACKUP_SWEEP_SCRIPT, "infra/env/README.md"))
+def test_node22_env_backup_sweep_reader_edges_select_the_suite(source: str) -> None:
+    assert NODE22_ENV_BACKUP_SWEEP_SUITE in select_tests([source], repo_root=Path(".")), source
+
+
+def test_node22_env_backup_sweep_rule_red_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drop exactly the #2918 row and the script no longer reaches the suite."""
+    from scripts import select_ci_tests
+
+    mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern != NODE22_ENV_BACKUP_SWEEP_SCRIPT)
+    assert len(mutant) == len(PATH_TEST_RULES) - 1, "the #2918 row is missing or duplicated"
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+
+    assert NODE22_ENV_BACKUP_SWEEP_SUITE not in select_tests([NODE22_ENV_BACKUP_SWEEP_SCRIPT], repo_root=Path("."))
+
+
 @pytest.mark.parametrize(
     ("unit", "owners"),
     sorted(NODE22_UNIT_OWNER_SUITES.items()),

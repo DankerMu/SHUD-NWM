@@ -567,3 +567,25 @@ loaders and the example.
 | `NHMS_SCHEDULER_TIMING_LEVEL` | optional (effective default: stage) | `stage` | 保持未设置 |
 | `NHMS_SCHEDULER_EVIDENCE_RETENTION_DAYS` | optional (effective default: 90) | `90` | 保持未设置 |
 | `NHMS_SCHEDULER_EVIDENCE_MAX_MB` | optional (effective default: 512) | `512` | 保持未设置 |
+
+## Backup copies
+
+Backup copies of env files (`*.bak*`, `*.backup-*`, `*.pre-*`) never live under
+`infra/env/`. A copy left there sits next to the live files that units load
+through `EnvironmentFile=` and may carry plaintext credentials.
+
+- Home for backup copies: `~/NWM-presync-backup-<UTC date YYYY-MM-DD>/infra-env/`
+  (the same dated directory used for pre-sync backups), mode `0700`.
+- `scripts/ops/node22_env_backup_sweep.sh --env-dir <checkout>/infra/env` lists
+  the backup copies directly under the env dir, one `plan:` line each, and moves
+  nothing. Re-run it with `--apply` to move them with `mv -n` into the home
+  above; nothing is ever deleted.
+- The sweep exits 2 before any move when a copy is still named by an
+  `EnvironmentFile=` line of an `nhms-*` unit or of one of its
+  `nhms-*.service.d/*.conf` drop-ins (the unit is named on stderr), when a
+  target already exists, or when the unit directory holds no `nhms-*` unit.
+- Every run writes `sweep-receipt-<UTC %Y%m%dT%H%M%SZ>.json` into the same
+  `infra-env/` directory (file names only, never file content). Other defaults:
+  `--backup-root ~/NWM-presync-backup-<UTC date>`, `--home $HOME` (only for
+  `%h`), `--systemd-user-dir` `$XDG_CONFIG_HOME/systemd/user` when absolute,
+  else `~/.config/systemd/user`. `--env-dir` has no default.
