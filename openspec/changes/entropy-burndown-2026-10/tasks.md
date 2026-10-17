@@ -5,7 +5,7 @@
 - **本地验证命令**：后端 `uv run ruff check . && uv run pytest -q <本 task 的测试文件>`；前端 `cd apps/frontend && corepack pnpm typecheck && corepack pnpm test`，自 7.2 合并后再加 `corepack pnpm lint`（7.1/7.3/7.4/7.5 不跑 lint）；改 `docs/**`/`openspec/specs/**`/`AGENTS.md`/`infra/**` 的 task 另跑 `uv run pytest -q tests/test_entropy_audit_report_contract.py`。
 - **行为保持 oracle**：每个重构 task 的既有测试文件必须零改动通过，例外只限各 task 明文列出的"允许的测试改动"（patch 目标字符串、导入/mock 路径、identity 断言的模块对象），且只限该 task 搬走的名字。
 - **oracle 节点**：除 2.2（公共 enum 扩一值，需 node-27 live receipt）外全部本地。
-- **CI 路由**：新增的守卫/棘轮测试必须在 `scripts/select_ci_tests.py` 登记**补充型**（set-union，非 `stop_on_match`）规则行，否则 PR 上不跑（CLAUDE.md：PR 只跑定向测试）；改了 selector 的 task 都跑 `tests/test_select_ci_tests.py`。
+- **CI 路由**：新增的守卫/棘轮测试必须在 `scripts/select_ci_tests.py` 的 `select_tests` 中以 #1656/#2185 形态的 **additive loop**（stop 规则循环之后、不设 `matched`、不参与 stop 规则）加选，否则 PR 上不跑或被 `stop_on_match` owner 遮蔽（CLAUDE.md：PR 只跑定向测试）；受影响的精确集合断言按先例同 PR 更新；改了 selector 的 task 都跑 `tests/test_select_ci_tests.py`。
 - **依赖**：`Depends on` 列出的是必须先合并的 task；未列出的 task 之间可并行。
 - **审计引用**：模块与行号以 `docs/governance/entropy-audit-2026-10-16.md` 与 design.md Context 为准；issue 正文只写契约不写行号。
 - **非 atomic 首刀**：带"首刀 Verify"行的 task，首刀 issue 以该行为验收；整 task 的 Verify 由后继 issue 承担。
@@ -216,7 +216,7 @@
 
   Depends on: 5.3
 
-  Verify：同 5.2，另加 `tests/test_gateway_reconcile_*.py`；新增断言：patch facade 上述三名之一为计数 stub 后调用一个已搬到 `file_journal_candidates.py` 的调用者，计数 > 0。
+  Verify：同 5.2，另加 `tests/test_gateway_reconcile_*.py`；新增断言：patch facade 的 `read_bytes_limited_no_follow` 为计数 stub 后调用已搬到 `file_journal_candidates.py` 的 `_run_manifest_model_package_identity`（map 中该聚簇唯一调用 facade 驻留名的函数；若 map 另有，以 map 为准），计数 > 0。
 
   **Suggested fixture level:** expanded - 候选/队列判定是 scheduler 不变量。
 
@@ -248,7 +248,7 @@
 
 固定 changed-path 列表（前后字节一致 oracle，在每个 6.x PR 的父提交与 head 各跑一次比较，不提交快照）：`packages/common/state_manager.py`、`apps/api/routes/pipeline.py`、`apps/frontend/src/App.tsx`、`docs/runbooks/current-production-ops.md`、`scripts/select_ci_tests.py`、`tests/test_production_scheduler.py`、`db/migrations/000003_enums.sql`。
 
-- [ ] 6.1 前置：`PATH_TEST_RULES` 为三个 sibling 各加一行；`_collection_smoke_required` 匹配 sibling；解决 `scripts` 无 `__init__.py` 的导入路径（沿用其他脚本的 `sys.path` 模式）；盘点 `tests/test_select_ci_tests.py` 在 facade 上 patch 的全部全局名并写入 PR 描述；新增 `scripts/ci_selector_snapshot.sh`（对固定列表输出四个 output 的 JSON，供父提交/head 比较）。
+- [ ] 6.1 前置：`PATH_TEST_RULES` 为三个 sibling 各加一行；`_collection_smoke_required` 匹配 sibling；解决 `scripts` 无 `__init__.py` 的导入路径（沿用其他脚本的 `sys.path` 模式）；盘点 `tests/test_select_ci_tests.py` 在 facade 上 patch 的全部全局名并写入 PR 描述；`tests/test_select_ci_tests.py` 新增 "只改 `scripts/select_ci_tests_rules.py` 时返回与改 facade 相同的 meta-guard 集合"断言；新增 `scripts/ci_selector_snapshot.sh`（对固定列表输出四个 output 的 JSON，供父提交/head 比较）。
 
   Depends on: 无
 

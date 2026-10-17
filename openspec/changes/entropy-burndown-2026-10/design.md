@@ -44,8 +44,7 @@ Measured facts (audit at `f7be77f22`, methods in `docs/governance/entropy-audit-
   `Any` in annotations per module 0–57 %.
 - Frontend: `src/pages/hydroMet/bootstrap.ts` imported by seven production files (`stores/hydroMetProductData.ts`,
   `stores/stationLayerData.ts`, `components/map/M11StationForcingPopup.tsx`, `components/map/M11RiverForecastPanel.tsx`,
-  `pages/OverviewPage.tsx`, `pages/m11/useHydroMetProduct.ts`, `pages/m11/useStationLayer.ts`) and by nine test files
-  and by seven test files
+  `pages/OverviewPage.tsx`, `pages/m11/useHydroMetProduct.ts`, `pages/m11/useStationLayer.ts`) and by seven test files
   via import or `vi.mock('@/pages/hydroMet/bootstrap')`, plus `pages/hydroMet/__tests__/bootstrap.test.ts` importing it
   and reading the source by path (15 files); `stores/__tests__/overviewData*.test.ts` and `__tests__/AppRoutes.test.tsx` import `@/pages/*`
   helpers; no file-level import cycle exists today (the audit's cycles are directory-level); hand-typed
@@ -139,15 +138,15 @@ and the output parser). Public closed sets are spelled out in the spec; the per-
 |---|---|---|
 | `PIPELINE_JOB_STATUS_ORDER` / `PIPELINE_JOB_STATUSES` | `apps/api/routes/pipeline.py` tuple + `reservation_lost` | `schemas/pipeline_job.schema.json`, OpenAPI, `types.ts` |
 | `PIPELINE_JOB_INTERNAL_STATUSES` | `accepted_submit_identity.py` (`reserved`, `cancellation_pending`, `reconcile_unverified`) | `ACCEPTED_SUBMIT_MASTER_STATUSES` derived as `(PIPELINE_JOB_STATUSES - {skipped}) \| INTERNAL` with a parity pin |
-| `PIPELINE_JOB_TERMINAL` | `chain_types.py` (bound as `set(...)` there, shared object) | `chain_runtime_utils.py`, `file_orchestration_journal.py` |
-| `PIPELINE_JOB_TERMINAL_WITHOUT_RESERVATION` | `scheduler.py` | `scheduler_candidates.py` |
+| `PIPELINE_JOB_TERMINAL` | `chain_types.py` (binds `set(...)` once, shared object) | `chain_runtime_utils.py`, `file_orchestration_journal.py` import the `chain_types` object |
+| `PIPELINE_JOB_TERMINAL_WITHOUT_RESERVATION` | `scheduler.py` (binds `set(...)` once) | `scheduler_candidates.py` imports the `scheduler` object |
 | `PIPELINE_JOB_TERMINAL_GUARD`, `PIPELINE_JOB_TERMINAL_OVERRIDES`, `PIPELINE_JOB_ACTIVE_MANUAL_RETRY` | `persistence.py` | — |
-| `PIPELINE_JOB_SUCCESS` (`set`) | `scheduler_state_types.py` `TERMINAL_PIPELINE_SUCCESS_STATUSES` | `chain.py`, `chain_runtime_utils.py`, `chain_source_cycle.py`, `chain_repository_state.py`, `retry.py`, inline sites in journal / `persistence.py` / `forcing_submit_identity.py` |
+| `PIPELINE_JOB_SUCCESS` (`scheduler_state_types` binds `set(...)` once) | `scheduler_state_types.py` `TERMINAL_PIPELINE_SUCCESS_STATUSES` | `chain.py`, `chain_runtime_utils.py`, `chain_source_cycle.py`, `chain_repository_state.py`, `retry.py`, inline sites in journal / `persistence.py` / `forcing_submit_identity.py` |
 | `PIPELINE_JOB_ACTIVE`, `PIPELINE_JOB_PENDING`, `PIPELINE_JOB_FAILED_UI` | `apps/api/routes/pipeline.py` `_ACTIVE/_PENDING/_FAILED_JOB_STATUSES` | — |
-| `FAILED_PIPELINE_STATUSES`, `DURABLE_HYDRO_SUCCESS_STATUSES` (set), `HYDRO_RUN_CODE_CLEARING_STATUSES` (frozenset) | `scheduler_state_types.py` (moved, same type; `scheduler_state_types` re-binds the same objects) | #1581 consumers unchanged |
+| `FAILED_PIPELINE_STATUSES`, `DURABLE_HYDRO_SUCCESS_STATUSES`, `HYDRO_RUN_CODE_CLEARING_STATUSES` | `scheduler_state_types.py` (moved as frozensets; `scheduler_state_types` binds `set(...)` for the two `set`-typed ones and the frozenset itself for the third, same names) | #1581 consumers unchanged |
 | `HYDRO_RUN_STATUSES` | `schemas/run_status.schema.json` enum | parity ⊇ folded DB enum − `frequency_done` |
 | `HYDRO_RUN_TERMINAL_UI` | `apps/api/routes/pipeline.py` `_TERMINAL_HYDRO_STATUSES` | — |
-| `DISPLAY_PRODUCT_READY_STATUSES` (`set`) | `hydro_display_constants.py` | — |
+| `DISPLAY_PRODUCT_READY_STATUSES` (site binds `set(...)`) | `hydro_display_constants.py` | — |
 | `QHH_LATEST_READY_RUN_STATUSES` (`tuple`) | `forecast_store.py` | — |
 | `PARSE_READY_RUN_STATUSES`, `FAILABLE_RUN_STATUSES` (`tuple`, DB parameters) | `workers/output_parser/parser.py` | — |
 | `FORECAST_CYCLE_SUCCESS_STATUSES` | `file_orchestration_journal.py` `_TERMINAL_FORECAST_CYCLE_SUCCESS_STATUSES` | — |
@@ -159,7 +158,7 @@ and the output parser). Public closed sets are spelled out in the spec; the per-
 | `QC_VERDICTS` + `normalize_qc_verdict` | new (lowercase) | read/compare paths in `production_closure/*`, `scripts/*` |
 | `READINESS_ITEM_STATUSES` | `readiness_item_contracts.py` | — |
 
-Every named set keeps the Python type (and tuple order) of its canonical site. The vocabulary provides an ordered tuple for every set that reaches a schema or OpenAPI enum (`PIPELINE_JOB_STATUS_ORDER`,
+Vocabulary objects are immutable; `set`-typed sites bind `set(...)` once in the module that owns the shared object today, so every site keeps its type and identity (the parity test checks both). The vocabulary provides an ordered tuple for every set that reaches a schema or OpenAPI enum (`PIPELINE_JOB_STATUS_ORDER`,
 `HYDRO_RUN_STATUS_ORDER`, `CYCLE_STATUS_ORDER`) so generated enums are deterministic under hash randomisation; frozensets
 and `Literal` aliases derive from the tuples. `tests/test_status_vocab_parity.py` asserts: each named set equals the
 literal pinned from its canonical site at `f7be77f22`; `PIPELINE_JOB_STATUS_ORDER == schemas/pipeline_job.schema.json`

@@ -20,7 +20,7 @@ The match rule is `re.fullmatch` of a module-level function name against `_?utc_
 - **THEN** no module under `services/` defines a function matching the rule except allowlisted ones
 
 ### Requirement: A ceiling test SHALL forbid regrowth
-`tests/test_time_helper_consolidation.py` SHALL count matching module-level functions outside the canonical modules over `apps/ packages/ services/ workers/ scripts/`, compare to `tests/time_helper_ceiling.json`, fail above the ceiling, and fail when the count is below the ceiling by more than 5 % (so each batch lowers the ceiling in its PR). The PR introducing the ceiling SHALL attach the hit list. The test SHALL be routed by `scripts/select_ci_tests.py` for any change under `apps/ packages/ services/ workers/ scripts/` (supplemental rule row).
+`tests/test_time_helper_consolidation.py` SHALL count matching module-level functions outside the canonical modules over `apps/ packages/ services/ workers/ scripts/`, compare to `tests/time_helper_ceiling.json`, fail above the ceiling, and fail when the count is below the ceiling by more than 5 % (so each batch lowers the ceiling in its PR). The PR introducing the ceiling SHALL attach the hit list. The test SHALL be routed by `scripts/select_ci_tests.py` for any change under `apps/ packages/ services/ workers/ scripts/` through an additive loop in `select_tests` in the #1656/#2185 shape (not a `PATH_TEST_RULES` row, which a `stop_on_match` owner would shadow).
 
 #### Scenario: New local helper fails
 - **WHEN** a new `_utcnow` is defined in a non-canonical module without lowering another
