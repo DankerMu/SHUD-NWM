@@ -521,6 +521,33 @@ hydro run 已成功时，选择器对 hydro run id 一律拒绝（`no_retryable_
 [`scheduler-dbfree-typed-reasons.md`](scheduler-dbfree-typed-reasons.md)
 （§8.7 断路器）与 [`failed-basin-retry.md`](failed-basin-retry.md)（strict 预算）。
 
+## 改单元前后：drift 探针（`node22_unit_drift_check.py`，#2911）
+
+任何对 `~/.config/systemd/user/` 下 `nhms-*` 单元或 drop-in 的编辑（安装、hotfix、回滚）
+**之前和之后各跑一次** drift 探针，把两份 receipt 附到本次操作在 `docs/runbooks/receipts/`
+下的运维收据里。探针以 `infra/systemd/node22/MANIFEST.json` 为准逐字节比对已部署文件与仓库
+副本，只读：不调 `systemctl`、不在 systemd 目录下写任何字节，receipt 不含文件内容（diff 只打
+stdout）。stdout 的 diff 可能带出已部署 drop-in 里的 secret，**不要**把 stdout 的 hunk 贴进
+`docs/runbooks/receipts/` 下提交的运维收据，只附 receipt JSON。按执行纪律用活动解释器，**不要**
+`uv run`；`--receipt` 必须落在 systemd 目录之外（所在位置或解析后落在其下、已存在但不是普通文件（symlink/目录/FIFO）、父目录不存在或不可检视，都会被拒绝，退出 2）：
+
+```bash
+cd /scratch/frd_muziyao/NWM
+mkdir -p /scratch/frd_muziyao/tmp/unit-drift
+/scratch/frd_muziyao/NWM/.venv/bin/python scripts/node22_unit_drift_check.py \
+  --receipt /scratch/frd_muziyao/tmp/unit-drift/$(date -u +%Y%m%dT%H%M%SZ)-before.json
+```
+
+- 退出 0（`status: ok`）：每个 manifest 条目都是 `same`，没有 `untracked`。
+- 退出 1（`status: drift`）：有条目 `differs`（stdout 打 unified diff）或 `missing`，或
+  `untracked` 非空（顶层 `nhms-*.service`/`nhms-*.timer` 或 `nhms-*.service.d/*.conf` 不在
+  manifest 里）。备份目录、`*.pre-*`/`*.conf.<date>` 残留、`*.wants/` 与符号链接不计入。
+  改单元之前就是 1 时，先把差异回写仓库（更新 `infra/systemd/` 与 `MANIFEST.json`）或确认
+  是有意的 hotfix，再动手。
+- 退出 2（`status: probe_failed`）：manifest 缺失/为空/畸形或与仓库副本 sha256 不符、systemd
+  目录不存在、已部署文件存在但不可读、receipt 被拒或写不出。此时探针结论不可信，先修探针输入；
+  receipt 写不出时 `status: probe_failed` 只在 stderr。
+
 ## 已知限制
 
 - **Slurm 层失败的 rerun 不会恢复确认物**：计数在 rerun 被接受提交时已经 +1，失败不回退。
