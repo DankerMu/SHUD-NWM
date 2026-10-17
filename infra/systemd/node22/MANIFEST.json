@@ -1,0 +1,100 @@
+{
+  "schema_version": "nhms.node22.unit_manifest.v1",
+  "entries": [
+    {
+      "deployed_relative_path": "nhms-compute-api.service",
+      "tracked_path": "infra/systemd/node22/nhms-compute-api.service",
+      "sha256": "c6dff9aa650bb0741401e1da0cdd0120cc66a403373d8803b214d322b7469ab7"
+    },
+    {
+      "deployed_relative_path": "nhms-compute-scheduler.service",
+      "tracked_path": "infra/systemd/node22/nhms-compute-scheduler.service",
+      "sha256": "caacdab45a4bfe1b2b8c0ff0b1dd27e0fef3eb33e5913a14964640800847dbc5"
+    },
+    {
+      "deployed_relative_path": "nhms-compute-scheduler.service.d/10-slurm-gateway-token.conf",
+      "tracked_path": "infra/systemd/node22/nhms-compute-scheduler.service.d/10-slurm-gateway-token.conf",
+      "sha256": "9ebc7fdd3c9e05fd692d50b12436c5ff2c35a218825d6b8d6f2601e769e6e7a7"
+    },
+    {
+      "deployed_relative_path": "nhms-compute-scheduler.service.d/20-runtime-path.conf",
+      "tracked_path": "infra/systemd/node22/nhms-compute-scheduler.service.d/20-runtime-path.conf",
+      "sha256": "ae59e26c2440c3a9e886c1f2914d6f4907c67f881feb5ca49d7d1555b1d66a97"
+    },
+    {
+      "deployed_relative_path": "nhms-compute-scheduler.timer",
+      "tracked_path": "infra/systemd/node22/nhms-compute-scheduler.timer",
+      "sha256": "858ab2f357a1116ba765dc78aa328b5c16c815778cd0f08c34c7bbdcb4fbfeaa"
+    },
+    {
+      "deployed_relative_path": "nhms-node22-refresh-timer-health.service",
+      "tracked_path": "infra/systemd/nhms-node22-refresh-timer-health.service",
+      "sha256": "b9fb762e8d801daff2b1d902afce16fdf121ea80d716a097fda682599baedce1"
+    },
+    {
+      "deployed_relative_path": "nhms-node22-refresh-timer-health.timer",
+      "tracked_path": "infra/systemd/nhms-node22-refresh-timer-health.timer",
+      "sha256": "3671c34565c3e8333ad4b9ed31af394b15554c65ae5a4a65b3147cb0bb949873"
+    },
+    {
+      "deployed_relative_path": "nhms-node22-scheduler-stall-health.service",
+      "tracked_path": "infra/systemd/nhms-node22-scheduler-stall-health.service",
+      "sha256": "153163a884b9b23dd11e6a0a8553d6f0ed9dc92f517a87759a960da61464f1c6"
+    },
+    {
+      "deployed_relative_path": "nhms-node22-scheduler-stall-health.timer",
+      "tracked_path": "infra/systemd/nhms-node22-scheduler-stall-health.timer",
+      "sha256": "40562e04092e68b32c2ca69d543767499e2dfa6e0030f508cda89218c9d13dd5"
+    },
+    {
+      "deployed_relative_path": "nhms-scheduler-evidence-retention.service",
+      "tracked_path": "infra/systemd/nhms-scheduler-evidence-retention.service",
+      "sha256": "87e81a4e0fb589f234c7c9eb67dfb44e1be03a4497fb6cea1194e1cd93e38363"
+    },
+    {
+      "deployed_relative_path": "nhms-scheduler-evidence-retention.timer",
+      "tracked_path": "infra/systemd/nhms-scheduler-evidence-retention.timer",
+      "sha256": "0236045382cb86ded458f7183f634afd546d1684731556dde337f68807abc481"
+    },
+    {
+      "deployed_relative_path": "nhms-scheduler-file-provider-refresh.service",
+      "tracked_path": "infra/systemd/nhms-scheduler-file-provider-refresh.service",
+      "sha256": "00ab7f8d43a2aad4669a2857d19d8c58e406669b6fedebe15d25395be98b03d8"
+    },
+    {
+      "deployed_relative_path": "nhms-scheduler-file-provider-refresh.timer",
+      "tracked_path": "infra/systemd/nhms-scheduler-file-provider-refresh.timer",
+      "sha256": "b09747ef5f1580e2db738e3387dcd362893fdfcf7314f594043c90cd32623790"
+    },
+    {
+      "deployed_relative_path": "nhms-scheduler-journal-retention.service",
+      "tracked_path": "infra/systemd/nhms-scheduler-journal-retention.service",
+      "sha256": "65450d04577d99829b6dce4ebbdeadd408d6e6cb15c0185dedfa935d370eb130"
+    },
+    {
+      "deployed_relative_path": "nhms-scheduler-journal-retention.timer",
+      "tracked_path": "infra/systemd/nhms-scheduler-journal-retention.timer",
+      "sha256": "4833c0d94751c07e995bc702cda752b652688f5da4b60fef49bcd9947c9b0c3b"
+    },
+    {
+      "deployed_relative_path": "nhms-scheduler-state-index-capacity.service",
+      "tracked_path": "infra/systemd/nhms-scheduler-state-index-capacity.service",
+      "sha256": "ea5841fbd34eaa884175149c1c187fa7e375c9ab538e387af83e2388f0a9f4db"
+    },
+    {
+      "deployed_relative_path": "nhms-scheduler-state-index-capacity.timer",
+      "tracked_path": "infra/systemd/nhms-scheduler-state-index-capacity.timer",
+      "sha256": "bd83115e3cb513ba9388a296bb38d49b0d608cd13bc2687aacbc2e2eaa9713be"
+    },
+    {
+      "deployed_relative_path": "nhms-slurm-gateway.service",
+      "tracked_path": "infra/systemd/node22/nhms-slurm-gateway.service",
+      "sha256": "56a54b2eff37d52002ecbb6b6dd02f143b3ad61941e9fd1971f7366a270b6afb"
+    },
+    {
+      "deployed_relative_path": "nhms-slurm-gateway.service.d/10-node22-live.conf",
+      "tracked_path": "infra/systemd/node22/nhms-slurm-gateway.service.d/10-node22-live.conf",
+      "sha256": "de28aa310e7ba456578f07d558a7fb932e6cd0ff30f4b4ac561e924e40e4ef2f"
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+[Unit]
+Description=Run NHMS production scheduler every five minutes
+
+[Timer]
+OnBootSec=2min
+OnActiveSec=30s
+OnUnitActiveSec=5min
+Persistent=false
+Unit=nhms-compute-scheduler.service
+
+[Install]
+WantedBy=timers.target

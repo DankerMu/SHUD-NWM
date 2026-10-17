@@ -5425,7 +5425,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         "infra/env/README.md",
-        (SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST, "tests/test_env_templates.py"),
+        (SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST, "tests/test_env_templates.py", "tests/test_node22_unit_tracking.py"),
     ),
     # #2195: this template's owner suite reads it BY PATH and asserts its
     # content -- `tests/test_scheduler_refresh_deployment_contract.py`'s
@@ -5753,11 +5753,12 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             *SCHEDULER_REFRESH_DEPLOYMENT_TESTS,
             *NODE22_REFRESH_TIMER_HEALTH_TESTS,
+            "tests/test_node22_unit_tracking.py",
         ),
     ),
     PathTestRule(
         "infra/systemd/nhms-scheduler-file-provider-refresh.timer",
-        SCHEDULER_REFRESH_DEPLOYMENT_TESTS,
+        (*SCHEDULER_REFRESH_DEPLOYMENT_TESTS, "tests/test_node22_unit_tracking.py"),
     ),
     # #2146: the refresh-lane health probe's installer and its two units.
     # The probe suite (five `tests/test_node22_refresh_timer_health_*.py`
@@ -5782,11 +5783,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         "infra/systemd/nhms-node22-refresh-timer-health.service",
-        NODE22_REFRESH_TIMER_HEALTH_TESTS,
+        (*NODE22_REFRESH_TIMER_HEALTH_TESTS, "tests/test_node22_unit_tracking.py"),
     ),
     PathTestRule(
         "infra/systemd/nhms-node22-refresh-timer-health.timer",
-        NODE22_REFRESH_TIMER_HEALTH_TESTS,
+        (*NODE22_REFRESH_TIMER_HEALTH_TESTS, "tests/test_node22_unit_tracking.py"),
     ),
     # #2570: the DB-free scheduler stall probe and its two units, the node-22
     # dual of the refresh probe above. `tests/test_node22_scheduler_stall_health.py`
@@ -5801,11 +5802,31 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # assertion.
     PathTestRule(
         "infra/systemd/nhms-node22-scheduler-stall-health.service",
-        ("tests/test_node22_scheduler_stall_health.py",),
+        ("tests/test_node22_scheduler_stall_health.py", "tests/test_node22_unit_tracking.py"),
     ),
     PathTestRule(
         "infra/systemd/nhms-node22-scheduler-stall-health.timer",
-        ("tests/test_node22_scheduler_stall_health.py",),
+        ("tests/test_node22_scheduler_stall_health.py", "tests/test_node22_unit_tracking.py"),
+    ),
+    # #2910: `tests/test_node22_unit_tracking.py` reads every file deployed on
+    # node-22 by path -- it hashes each against `infra/systemd/node22/MANIFEST.json`
+    # (the twelve top-level oneshots get the suite appended on their own exact
+    # rows) and scans the `node22/` copies for secret values and
+    # `EnvironmentFile=` paths outside the `infra/env/README.md` authority table.
+    # `fnmatch`'s `*` crosses `/`, so the glob also reaches the drop-in
+    # directories. The evidence-retention timer and the snapshot receipt (whose
+    # sha256 table the suite compares) had no row at all.
+    PathTestRule(
+        "infra/systemd/node22/*",
+        ("tests/test_node22_unit_tracking.py",),
+    ),
+    PathTestRule(
+        "infra/systemd/nhms-scheduler-evidence-retention.timer",
+        ("tests/test_node22_unit_tracking.py",),
+    ),
+    PathTestRule(
+        "docs/runbooks/receipts/2026-10-16-node22-live-units-snapshot.md",
+        ("tests/test_node22_unit_tracking.py",),
     ),
     # The probe module itself. The same-name derivation
     # (`scripts/<x>.py` -> `tests/test_<x>.py`) already reaches this suite, so
@@ -6473,28 +6494,36 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # #1571: the evidence-retention unit's single exact ExecStart is
         # uniquely asserted by the node-22 owner.
         NODE22_RETENTION_UNIT,
-        NODE22_ENTRYPOINT_INVARIANT_TESTS,
+        (*NODE22_ENTRYPOINT_INVARIANT_TESTS, "tests/test_node22_unit_tracking.py"),
     ),
     PathTestRule(
         # The journal archive service and timer jointly define one mutation
         # entrypoint. Each changed unit must run its active-runtime invariant
         # and both archive/retention behavioral partitions.
         NODE22_JOURNAL_RETENTION_SERVICE,
-        (*NODE22_ENTRYPOINT_INVARIANT_TESTS, *JOURNAL_RETENTION_TESTS),
+        (*NODE22_ENTRYPOINT_INVARIANT_TESTS, *JOURNAL_RETENTION_TESTS, "tests/test_node22_unit_tracking.py"),
     ),
     PathTestRule(
         NODE22_JOURNAL_RETENTION_TIMER,
-        (*NODE22_ENTRYPOINT_INVARIANT_TESTS, *JOURNAL_RETENTION_TESTS),
+        (*NODE22_ENTRYPOINT_INVARIANT_TESTS, *JOURNAL_RETENTION_TESTS, "tests/test_node22_unit_tracking.py"),
     ),
     PathTestRule(
         # #2653: a unit-only diff would otherwise select nothing (infra/**
         # non-python) and degrade to the zero-assertion collect-only smoke.
         NODE22_STATE_INDEX_CAPACITY_SERVICE,
-        (*NODE22_ENTRYPOINT_INVARIANT_TESTS, NODE22_STATE_INDEX_CAPACITY_WATCH_TEST),
+        (
+            *NODE22_ENTRYPOINT_INVARIANT_TESTS,
+            NODE22_STATE_INDEX_CAPACITY_WATCH_TEST,
+            "tests/test_node22_unit_tracking.py",
+        ),
     ),
     PathTestRule(
         NODE22_STATE_INDEX_CAPACITY_TIMER,
-        (*NODE22_ENTRYPOINT_INVARIANT_TESTS, NODE22_STATE_INDEX_CAPACITY_WATCH_TEST),
+        (
+            *NODE22_ENTRYPOINT_INVARIANT_TESTS,
+            NODE22_STATE_INDEX_CAPACITY_WATCH_TEST,
+            "tests/test_node22_unit_tracking.py",
+        ),
     ),
     PathTestRule(
         # #2653: a PIN, not the only route -- the same-name derivation already

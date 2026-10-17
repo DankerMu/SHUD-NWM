@@ -1,0 +1,17 @@
+[Unit]
+Description=NHMS production scheduler one bounded continuous pass (node 22 user)
+After=nhms-slurm-gateway.service
+Wants=nhms-slurm-gateway.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/scratch/frd_muziyao/NWM
+EnvironmentFile=/scratch/frd_muziyao/NWM/infra/env/compute.scheduler-dbfree.env
+Environment=NHMS_SERVICE_ROLE=compute_control
+Environment=SLURM_GATEWAY_URL=http://127.0.0.1:8090
+Environment=NHMS_PRODUCTION_SLURM_ENABLED=true
+ExecStart=/scratch/frd_muziyao/NWM/.venv/bin/python -m services.orchestrator.cli plan-production --submit --continuous --max-passes 1
+StandardOutput=append:/scratch/frd_muziyao/nhms-prod/workspace/scheduler/logs/nhms-compute-scheduler.log
+StandardError=append:/scratch/frd_muziyao/nhms-prod/workspace/scheduler/logs/nhms-compute-scheduler.err
+TimeoutStartSec=0
+LimitNOFILE=65536

@@ -1,0 +1,24 @@
+[Unit]
+Description=NHMS standalone Slurm gateway (node 22 user)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/scratch/frd_muziyao/NWM
+EnvironmentFile=/scratch/frd_muziyao/NWM/infra/env/compute.host.env
+Environment=NHMS_SERVICE_ROLE=slurm_gateway
+Environment=SLURM_GATEWAY_BACKEND=slurm
+Environment=SLURM_GATEWAY_URL=http://127.0.0.1:8090
+Environment=SLURM_GATEWAY_TEMPLATE_DIR=infra/sbatch
+Environment=SLURM_GATEWAY_RESOURCE_PROFILES_PATH=config/resource_profiles.yaml
+Environment=SLURM_GATEWAY_PARTITION_OVERRIDE=CPU
+Environment=SLURM_GATEWAY_SLURM_BIN_PATH=/usr/bin
+ExecStart=/scratch/frd_muziyao/NWM/.venv/bin/python -m services.slurm_gateway
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=0
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

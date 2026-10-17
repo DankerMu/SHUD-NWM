@@ -652,6 +652,69 @@ def test_node22_stall_reader_edge_rules_red_when_removed(monkeypatch: pytest.Mon
             )
 
 
+# #2910 -- every route into the node-22 unit-tracking suite. The suite hashes
+# every file listed in `infra/systemd/node22/MANIFEST.json` (the `node22/`
+# copies and the twelve top-level oneshots), compares the `node22/` copies with
+# the snapshot receipt's sha256 table, and parses the `infra/env/README.md`
+# authority table for the `EnvironmentFile=` allowlist. Twelve of these paths
+# already had an exact row and gained the suite as an extra target; the last
+# three had no row of their own and are the complement set below.
+NODE22_UNIT_TRACKING_SUITE = "tests/test_node22_unit_tracking.py"
+NODE22_UNIT_TRACKING_APPENDED_EDGES: tuple[str, ...] = (
+    "infra/env/README.md",
+    "infra/systemd/nhms-node22-refresh-timer-health.service",
+    "infra/systemd/nhms-node22-refresh-timer-health.timer",
+    "infra/systemd/nhms-node22-scheduler-stall-health.service",
+    "infra/systemd/nhms-node22-scheduler-stall-health.timer",
+    "infra/systemd/nhms-scheduler-evidence-retention.service",
+    "infra/systemd/nhms-scheduler-file-provider-refresh.service",
+    "infra/systemd/nhms-scheduler-file-provider-refresh.timer",
+    "infra/systemd/nhms-scheduler-journal-retention.service",
+    "infra/systemd/nhms-scheduler-journal-retention.timer",
+    "infra/systemd/nhms-scheduler-state-index-capacity.service",
+    "infra/systemd/nhms-scheduler-state-index-capacity.timer",
+)
+# pattern -> one representative changed path the pattern must route.
+NODE22_UNIT_TRACKING_NEW_ROWS: dict[str, str] = {
+    "infra/systemd/node22/*": "infra/systemd/node22/nhms-compute-scheduler.service.d/10-slurm-gateway-token.conf",
+    "infra/systemd/nhms-scheduler-evidence-retention.timer": "infra/systemd/nhms-scheduler-evidence-retention.timer",
+    "docs/runbooks/receipts/2026-10-16-node22-live-units-snapshot.md": (
+        "docs/runbooks/receipts/2026-10-16-node22-live-units-snapshot.md"
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "source",
+    (
+        *NODE22_UNIT_TRACKING_APPENDED_EDGES,
+        *NODE22_UNIT_TRACKING_NEW_ROWS.values(),
+        "infra/systemd/node22/MANIFEST.json",
+    ),
+)
+def test_node22_unit_tracking_reader_edges_select_the_suite(source: str) -> None:
+    assert NODE22_UNIT_TRACKING_SUITE in select_tests([source], repo_root=Path(".")), source
+
+
+def test_node22_unit_tracking_new_rules_red_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The complement leg: drop exactly the three #2910 rows and their paths go dark.
+
+    The twelve appended edges are not in this set: their rows carry other
+    owners too, so removing them would prove nothing about this suite.
+    """
+    from scripts import select_ci_tests
+
+    patterns = set(NODE22_UNIT_TRACKING_NEW_ROWS)
+    mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern not in patterns)
+    assert len(mutant) == len(PATH_TEST_RULES) - len(patterns), "a new row is missing or duplicated"
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+
+    for pattern, source in NODE22_UNIT_TRACKING_NEW_ROWS.items():
+        assert NODE22_UNIT_TRACKING_SUITE not in select_tests([source], repo_root=Path(".")), (
+            f"{source} still reaches the tracking suite without the {pattern} row"
+        )
+
+
 @pytest.mark.parametrize(
     ("unit", "owners"),
     sorted(NODE22_UNIT_OWNER_SUITES.items()),
@@ -4302,6 +4365,8 @@ def test_journal_retention_systemd_units_select_invariant_and_retention_contract
 def test_state_index_capacity_watch_units_and_wrapper_select_the_watch_suite() -> None:
     # #2653 frozen pins: each unit selects exactly the invariant owners plus the
     # watch suite; the wrapper and the repair CLI it consumes both reach it.
+    # #2910: plus the node-22 unit-tracking suite, which hashes both units
+    # against `infra/systemd/node22/MANIFEST.json`.
     watch_suite = "tests/test_node22_state_index_capacity_watch.py"
     for unit in (
         "infra/systemd/nhms-scheduler-state-index-capacity.service",
@@ -4311,6 +4376,7 @@ def test_state_index_capacity_watch_units_and_wrapper_select_the_watch_suite() -
             "tests/test_node22_entrypoint_invariant.py",
             "tests/test_node22_entrypoint_invariant_python_scan.py",
             watch_suite,
+            NODE22_UNIT_TRACKING_SUITE,
         ], unit
     for source in (
         "scripts/node22_state_index_capacity_watch.py",
