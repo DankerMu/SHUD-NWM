@@ -11,7 +11,7 @@
 
 ## 1. 追踪 node-22 live 单元（spec: node22-unit-tracking）
 
-- [ ] 1.1 新建 `infra/systemd/node22/` 放入收据中七个文件的逐字节副本与 `MANIFEST.json`（七个 `node22/` 条目 + 十二个顶层 oneshot `.service`/`.timer` 条目，含 sha256）；新增 `tests/test_node22_unit_tracking.py`（sha256 对照 manifest 与收据表；无 secret 值；`EnvironmentFile=` 归一化后属 README authority 表或 secret 路径，空重置行放行）；README authority 表补一行指向 `infra/systemd/node22/`；`scripts/select_ci_tests.py` 为 `infra/systemd/node22/**` 登记规则。
+- [ ] 1.1 新建 `infra/systemd/node22/` 放入收据中七个文件的逐字节副本与 `MANIFEST.json`（七个 `node22/` 条目 + 十二个顶层 oneshot `.service`/`.timer` 条目，含 sha256；告警模板条目由 3.1 追加）；新增 `tests/test_node22_unit_tracking.py`（sha256 对照 manifest 与收据表；无 secret 值；`EnvironmentFile=` 归一化后属 README authority 表或 secret 路径，空重置行放行）；README authority 表补一行指向 `infra/systemd/node22/`；`scripts/select_ci_tests.py` 为 `infra/systemd/node22/**` 登记规则。
 
   Depends on: 无
 
@@ -25,7 +25,7 @@
 
   Depends on: 1.1
 
-  Verify：`uv run pytest -q tests/test_node22_unit_drift_check.py`；测试以空 `PATH` 运行脚本证明不调用 `systemctl`。
+  Verify：`uv run pytest -q tests/test_node22_unit_drift_check.py tests/test_select_ci_tests.py`；测试以空 `PATH` 运行脚本证明不调用 `systemctl`。
 
   **Suggested fixture level:** compact - 新增独立 CLI，爆炸半径是它自己的退出码。
 
@@ -45,11 +45,11 @@
 
 ## 3. node-22 单元失败告警（spec: node22-unit-failure-alert）
 
-- [ ] 3.1 新增 `infra/systemd/nhms-node22-unit-failure-alert@.service`（绝对路径）、`scripts/node22_unit_failure_alert_once.sh`、`infra/env/node22-unit-failure-alert.example`（恰好七个键，`NHMS_FRONTIER_SENDMAIL=/usr/sbin/sendmail`）；README authority 表补一行；selector 登记。新增 `tests/test_node22_unit_failure_alert.py`：假 transport 断言恰好一封含单元名与 journal 尾行；无收件人 `SKIPPED` 退出 0 且不调用 transport；transport 退出 1 时 handler 非 0；example 键集合精确；节点 22 单元与模板不含 `%h/NWM`。
+- [ ] 3.1 新增 `infra/systemd/nhms-node22-unit-failure-alert@.service`（绝对路径）、`scripts/node22_unit_failure_alert_once.sh`、`infra/env/node22-unit-failure-alert.example`（恰好七个键，`NHMS_FRONTIER_SENDMAIL=/usr/sbin/sendmail`）；README authority 表补一行；`MANIFEST.json` 追加模板条目（第 20 条）；selector 登记。新增 `tests/test_node22_unit_failure_alert.py`：假 transport 断言恰好一封含单元名与 journal 尾行；无收件人 `SKIPPED` 退出 0 且不调用 transport；transport 退出 1 时 handler 非 0；example 键集合精确；节点 22 单元与模板不含 `%h/NWM`；manifest 含模板 sha256。
 
-  Depends on: 无
+  Depends on: 1.1
 
-  Verify：`uv run pytest -q tests/test_node22_unit_failure_alert.py`；`bash -n scripts/node22_unit_failure_alert_once.sh`。
+  Verify：`uv run pytest -q tests/test_node22_unit_failure_alert.py tests/test_node22_unit_tracking.py tests/test_select_ci_tests.py`；`bash -n scripts/node22_unit_failure_alert_once.sh`。
 
   **Suggested fixture level:** compact - 复制已在 27 运行的模式到 22，改动面是路径、键集合与失败退出。
 
@@ -101,7 +101,7 @@
 
   Depends on: 无
 
-  Verify：`uv run pytest -q tests/test_node22_env_backup_sweep.py tests/test_entropy_audit_report_contract.py`；`bash -n scripts/ops/node22_env_backup_sweep.sh`。
+  Verify：`uv run pytest -q tests/test_node22_env_backup_sweep.py tests/test_select_ci_tests.py tests/test_entropy_audit_report_contract.py`；`bash -n scripts/ops/node22_env_backup_sweep.sh`。
 
   **Suggested fixture level:** compact - 新增独立脚本，File IO 风险包（mv -n、拒绝集归一化）由测试覆盖。
 

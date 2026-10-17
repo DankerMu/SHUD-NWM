@@ -4,11 +4,49 @@
 
 ### Requirement: The no-submission streak SHALL classify every pass shape it can meet, including the degraded ones
 
-The sustained-no-submission signal SHALL classify each graded pass into exactly one of: a pass that submitted work, which breaks the streak; a pass that submitted nothing while holding at least one blocked candidate, which extends it; a pass that submitted nothing and held no blocked candidate, which breaks it; and a neutral pass, which neither extends nor breaks it.
+The sustained-no-submission signal SHALL classify each graded pass into exactly
+one of: a pass that submitted work, which breaks the streak; a pass that
+submitted nothing while holding at least one blocked candidate, which extends
+it; a pass that submitted nothing and held no blocked candidate, which breaks it
+because work that no longer appears blocked is no longer stalled; and a neutral
+pass, which neither extends nor breaks it.
 
-Neutral SHALL be decided by an observable the pass writer itself produces, not by a list of pass status strings: a pass whose artifact carries no progress-guard block, whose submission or blocked-candidate count is absent, or whose status is the resource-limit fallback. A pre-lock root-blocked pass (`execution_boundary == "scheduler_root_preflight_blocked"`) carries no progress-guard block and is therefore neutral for this streak, for the in-flight time gate and for frontier selection; it SHALL NOT be re-classified as blocked or idle. Its condition is reported by the separate root-blocked run predicate below, so the shape taxonomy stays closed and the receipt `shapes` counts are unchanged. Post-candidate preflight blocks (`evidence_preflight_blocked`, `slurm_preflight_blocked`, bare `preflight_blocked`) carry a progress guard and SHALL keep being classified by their counts.
+Neutral SHALL be decided by an observable the pass writer itself produces, not
+by a list of pass status strings. The scheduler's own no-progress circuit
+declares early-exit, pre-lock, lock-contended and resource-limit-aborted passes
+neither-count-nor-clear, and those are four early-return sites rather than four
+status values: the progress guard is constructed only after that region, so a
+pass that returned earlier carries no progress-guard block at all. Neutral
+SHALL therefore mean a pass whose artifact carries no progress-guard block,
+whose submission or blocked-candidate count is absent, or whose status is the
+resource-limit fallback. That last clause is not a return to a status allowlist
+but a second reading of the same writer: the resource-limit path writes both
+counts as zero and may still attach a progress-guard block, so a guard-tripped
+resource-limit pass would otherwise read as idle and reset the streak — the
+opposite of what the scheduler declares for that class.
 
-A status allowlist SHALL NOT be used in its place. The neutral count SHALL be recorded in the receipt.
+A status allowlist SHALL NOT be used in its place, because it is wrong in both
+directions on this lane: a reconciled-restart pass carrying dozens of blocked
+candidates — the first pass of the very incident this probe exists for — would
+be skipped as neutral, a post-candidate preflight-blocked pass (`evidence_preflight_blocked`,
+`slurm_preflight_blocked`, bare `preflight_blocked`) is fully observed and counted by
+the scheduler yet would also be skipped, and an early-exit pass has no status
+string of its own and would fall through to the idle case and reset the streak.
+
+A pre-lock root-blocked pass (`execution_boundary` equal to
+`scheduler_root_preflight_blocked`) carries no progress-guard block and is therefore
+neutral under the rule above, for this streak, for the in-flight time gate and for
+frontier selection; it SHALL NOT be re-classified as blocked or idle, so the shape
+taxonomy stays closed and the receipt shape counts are unchanged. Its condition is
+reported by the separate root-blocked run predicate (next requirement), which reads
+`execution_boundary` directly instead of the counts.
+
+The absent-count case is real and is concentrated exactly where the probe is
+needed most: the resource-limit fallback artifact is the shape that omits those
+counts. Such a pass SHALL NOT be read as having submitted nothing, and SHALL NOT
+by itself make the whole tick probe-failed, because a legitimate degraded
+artifact inside the window would then suppress every other signal. The neutral
+count SHALL be recorded in the receipt.
 
 #### Scenario: A degraded artifact neither advances nor blocks the streak
 

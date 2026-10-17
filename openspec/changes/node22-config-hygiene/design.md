@@ -70,9 +70,10 @@ Live units go under `infra/systemd/node22/` as byte-exact copies of the seven de
 `nhms-compute-scheduler.service.d/10-slurm-gateway-token.conf`, `nhms-compute-scheduler.service.d/20-runtime-path.conf`,
 `nhms-slurm-gateway.service` (the deployed base unit, distinct from the generic template at `infra/systemd/`) and
 `nhms-slurm-gateway.service.d/10-node22-live.conf`. `infra/systemd/node22/MANIFEST.json` lists every file deployed on
-node-22 as `{deployed_relative_path, tracked_path, sha256}`: the seven above (tracked under `node22/`) and the twelve
-top-level oneshot `.service`/`.timer` files (tracked at `infra/systemd/<name>`), so the drift probe has one explicit
-comparison set and the top-level oneshots are byte-compared too. Secret files are referenced by path only
+node-22 as `{deployed_relative_path, tracked_path, sha256}`: the seven above (tracked under `node22/`), the twelve
+top-level oneshot `.service`/`.timer` files (tracked at `infra/systemd/<name>`) and, once D4 lands, the alert template
+(twenty entries), so the drift probe has one explicit comparison set, the top-level oneshots are byte-compared too, and
+nothing this change deploys is `untracked` to its own probe. Secret files are referenced by path only
 (`/scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env`); a test asserts no tracked file under `node22/` assigns a
 non-empty value to a `*TOKEN`, `*SECRET`, `*PASS`, `*PASSWORD` variable, that every non-empty `EnvironmentFile=` value
 (after stripping a leading `-` and resolving `NWM/...` table entries against `/scratch/frd_muziyao/`) is a README
@@ -163,7 +164,8 @@ Everything in this change is verified by local pytest plus `uv run ruff check .`
 `tests/test_env_templates.py`, `tests/test_node22_env_backup_sweep.py`, and the governance docs gate
 `tests/test_entropy_audit_report_contract.py` for runbook edits. New files under `infra/systemd/node22/`,
 `infra/systemd/nhms-node22-unit-failure-alert@.service`, `infra/env/node22-unit-failure-alert.example` and the two new
-scripts get `PathTestRule` rows in `scripts/select_ci_tests.py` so PR CI runs their tests instead of collect-only.
+scripts get `PathTestRule` rows in `scripts/select_ci_tests.py` so PR CI runs their tests instead of collect-only; every
+task that edits the selector also runs `tests/test_select_ci_tests.py`.
 `systemd-analyze --user verify` is not available locally and is part of the operator deployment receipt, not of any
 task's acceptance. node-22 live receipts are deferred until the server upgrade ends.
 
@@ -195,10 +197,10 @@ task's acceptance. node-22 live receipts are deferred until the server upgrade e
 
 ## Migration Plan
 
-Repository-only. Operator deployment, after the upgrade window: install the alert template and env file, `daemon-reload`,
-run `systemd-analyze --user verify` on the instantiated template, run the drift probe (expect every manifest entry
-`same`, no `untracked`), run the sweep in dry-run, then `--apply`, send one test mail through the configured transport,
-record receipts.
+Repository-only. Operator deployment, after the upgrade window: install the alert template, its env file and the six
+`OnFailure=`-wired oneshot units from the merged tree, `daemon-reload`, run `systemd-analyze --user verify` on the
+instantiated template, run the drift probe (expect every manifest entry `same`, no `untracked`), run the sweep in
+dry-run, then `--apply`, send one test mail through the configured transport, record receipts.
 
 ## Open Questions
 
