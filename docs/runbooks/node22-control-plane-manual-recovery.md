@@ -527,8 +527,9 @@ hydro run 已成功时，选择器对 hydro run id 一律拒绝（`no_retryable_
 **之前和之后各跑一次** drift 探针，把两份 receipt 附到本次操作在 `docs/runbooks/receipts/`
 下的运维收据里。探针以 `infra/systemd/node22/MANIFEST.json` 为准逐字节比对已部署文件与仓库
 副本，只读：不调 `systemctl`、不在 systemd 目录下写任何字节，receipt 不含文件内容（diff 只打
-stdout）。按执行纪律用活动解释器，**不要** `uv run`；`--receipt` 必须落在 systemd 目录之外
-（落在其下或父目录不存在会被拒绝，退出 2）：
+stdout）。stdout 的 diff 可能带出已部署 drop-in 里的 secret，**不要**把 stdout 的 hunk 贴进
+`docs/runbooks/receipts/` 下提交的运维收据，只附 receipt JSON。按执行纪律用活动解释器，**不要**
+`uv run`；`--receipt` 必须落在 systemd 目录之外（落在其下或父目录不存在会被拒绝，退出 2）：
 
 ```bash
 cd /scratch/frd_muziyao/NWM

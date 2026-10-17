@@ -72,12 +72,17 @@ def logical_lines(text: str) -> list[tuple[int, str]]:
 
     systemd concatenates a line ending in a backslash with the next one and
     replaces the backslash with a space, so a value split across lines must be
-    scanned as one directive.
+    scanned as one directive.  Comment lines (``#`` or ``;`` after leading
+    whitespace) are dropped first: a comment ending in a backslash starts no
+    continuation, and a comment inside a pending continuation neither joins
+    nor ends it.
     """
     joined: list[tuple[int, str]] = []
     pending: str | None = None
     start = 0
     for number, line in enumerate(text.splitlines(), start=1):
+        if line.lstrip().startswith(("#", ";")):
+            continue
         if pending is None:
             start, pending = number, ""
         if line.endswith("\\"):
@@ -347,6 +352,22 @@ def test_continuation_lines_are_joined_before_the_secret_scan() -> None:
     lines = logical_lines(text)
 
     assert lines == [(1, "[Service]"), (2, "Environment=A=1  X_TOKEN=abc"), (4, "ExecStart=/bin/true")]
+    assert [key for _, line in lines for key in secret_assignment_violations(line)] == ["X_TOKEN"]
+
+
+def test_a_comment_ending_in_a_backslash_starts_no_continuation() -> None:
+    text = "[Service]\n#ExecStart=/old \\\nEnvironment=X_TOKEN=abc\n"
+    lines = logical_lines(text)
+
+    assert lines == [(1, "[Service]"), (3, "Environment=X_TOKEN=abc")]
+    assert [key for _, line in lines for key in secret_assignment_violations(line)] == ["X_TOKEN"]
+
+
+def test_a_comment_inside_a_continuation_is_skipped_not_a_terminator() -> None:
+    text = "[Service]\nEnvironment=A=1 \\\n  ; note\n# note\nX_TOKEN=abc\nExecStart=/bin/true\n"
+    lines = logical_lines(text)
+
+    assert lines == [(1, "[Service]"), (2, "Environment=A=1  X_TOKEN=abc"), (6, "ExecStart=/bin/true")]
     assert [key for _, line in lines for key in secret_assignment_violations(line)] == ["X_TOKEN"]
 
 

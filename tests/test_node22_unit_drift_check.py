@@ -155,6 +155,7 @@ def test_a_top_level_oneshot_differs(layout: Layout, capsys: pytest.CaptureFixtu
     assert probe.main(layout.argv()) == 1
 
     receipt = layout.read_receipt()
+    assert set(receipt) == RECEIPT_KEYS
     assert receipt["status"] == "drift"
     assert receipt["exit_code"] == 1
     assert receipt["entries"] == expected_entries({ONESHOT: "differs"})
@@ -323,6 +324,12 @@ def _duplicate_entry(lay: Layout) -> None:
     lay.write_manifest(document)
 
 
+def _entry_not_an_object(lay: Layout) -> None:
+    document = json.loads(lay.manifest.read_text(encoding="utf-8"))
+    document["entries"].append("nhms-compute-api.service")
+    lay.write_manifest(document)
+
+
 def _deep_deployed_path(lay: Layout) -> None:
     _mutate_entry(lay, 2, deployed_relative_path="nhms-compute-scheduler.service.d/sub/10-slurm-gateway-token.conf")
 
@@ -396,6 +403,30 @@ EXIT_2_CASES = [
         "tracked_path contains a '..' segment",
         None,
     ),
+    (
+        "deployed-dot-prefix",
+        lambda lay: _mutate_entry(lay, 0, deployed_relative_path="./nhms-compute-api.service"),
+        False,
+        "deployed_relative_path is not a normalized relative POSIX path",
+        None,
+    ),
+    (
+        "deployed-double-slash",
+        lambda lay: _mutate_entry(lay, 2, deployed_relative_path=DROPIN.replace("/", "//")),
+        False,
+        "deployed_relative_path is not a normalized relative POSIX path",
+        None,
+    ),
+    (
+        "deployed-trailing-slash",
+        lambda lay: _mutate_entry(lay, 0, deployed_relative_path="nhms-compute-api.service/"),
+        False,
+        "deployed_relative_path is not a normalized relative POSIX path",
+        None,
+    ),
+    ("field-empty", lambda lay: _mutate_entry(lay, 0, sha256=""), False, "non-string or empty field", None),
+    ("field-not-string", lambda lay: _mutate_entry(lay, 0, tracked_path=123), False, "non-string or empty field", None),
+    ("entry-not-object", _entry_not_an_object, False, f"manifest entry #{len(real_entries())} is not an object", None),
     ("tracked-outside-infra-systemd", _tracked_outside_infra_systemd, False, "outside infra/systemd/", None),
     ("duplicate-deployed", _duplicate_entry, False, "duplicate deployed_relative_path", None),
     ("deployed-too-deep", _deep_deployed_path, False, "more than one directory deep", None),
@@ -487,7 +518,25 @@ def test_missing_manifest_receipt_has_null_sha(layout: Layout) -> None:
     assert receipt["manifest_sha256"] is None
 
 
-@pytest.mark.parametrize("where", ["parent-missing", "under-systemd-dir", "systemd-dir-itself", "link-into-systemd"])
+SYMLINK_RECEIPTS = (
+    "link-in-systemd-dangling",
+    "link-in-systemd-to-file",
+    "link-in-systemd-to-dir",
+    "link-outside-systemd",
+)
+
+
+@pytest.mark.parametrize(
+    "where",
+    [
+        "parent-missing",
+        "under-systemd-dir",
+        "systemd-dir-itself",
+        "link-into-systemd",
+        "receipt-is-a-directory",
+        *SYMLINK_RECEIPTS,
+    ],
+)
 def test_refused_receipt_writes_nothing_anywhere(
     layout: Layout, capsys: pytest.CaptureFixture[str], tmp_path: Path, where: str
 ) -> None:
@@ -497,29 +546,68 @@ def test_refused_receipt_writes_nothing_anywhere(
         receipt = layout.systemd / "drift.json"
     elif where == "systemd-dir-itself":
         receipt = layout.systemd
-    else:
+    elif where == "link-into-systemd":
         (layout.receipts / "into-systemd").symlink_to(layout.systemd)
         receipt = layout.receipts / "into-systemd" / "drift.json"
+    elif where == "receipt-is-a-directory":
+        receipt = layout.receipt
+        receipt.mkdir()
+    elif where == "link-in-systemd-dangling":
+        # e.g. a `systemctl --user link`ed unit whose target is gone
+        receipt = layout.systemd / "nhms-linked.service"
+        receipt.symlink_to(layout.receipts / "linked.service")
+    elif where == "link-in-systemd-to-file":
+        (layout.receipts / "linked.service").write_text("[Service]\n", encoding="utf-8")
+        receipt = layout.systemd / "nhms-linked.service"
+        receipt.symlink_to(layout.receipts / "linked.service")
+    elif where == "link-in-systemd-to-dir":
+        receipt = layout.systemd / "timers.target.wants"
+        receipt.symlink_to(layout.receipts, target_is_directory=True)
+    else:
+        (tmp_path / "elsewhere.json").write_text("{}\n", encoding="utf-8")
+        receipt = layout.receipts / "drift.json"
+        receipt.symlink_to(tmp_path / "elsewhere.json")
     (layout.systemd / ONESHOT).write_text("[Service]\ndrift\n", encoding="utf-8")
     before = snapshot(tmp_path)
 
     assert probe.main(layout.argv(receipt=receipt)) == 2
 
     assert snapshot(tmp_path) == before
+    if where in SYMLINK_RECEIPTS:
+        assert receipt.is_symlink()
+    assert list(layout.systemd.rglob("*.partial")) == []
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "status: probe_failed" in captured.err
 
 
-def test_unwritable_receipt_target_reports_probe_failed_on_stderr(
+def test_unwritable_receipt_directory_reports_probe_failed_on_stderr(
     layout: Layout, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    layout.receipt.mkdir()  # os.replace cannot replace a directory with a file
+    if os.geteuid() == 0:
+        pytest.skip("root writes into chmod 500 directories")
+    layout.receipts.chmod(0o500)  # passes the refusal checks; the temp file cannot be created
+    try:
+        exit_code = probe.main(layout.argv())
+    finally:
+        layout.receipts.chmod(0o755)
+
+    assert exit_code == 2
+    assert list(layout.receipts.iterdir()) == []
+    assert "status: probe_failed" in capsys.readouterr().err
+
+
+def test_a_failed_replace_removes_the_staged_temp_file(
+    layout: Layout, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refuse(src: object, dst: object) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(probe.os, "replace", refuse)
 
     assert probe.main(layout.argv()) == 2
 
-    assert layout.receipt.is_dir()
-    assert list(layout.receipts.iterdir()) == [layout.receipt]  # temp file cleaned up
+    assert list(layout.receipts.iterdir()) == []
     assert "status: probe_failed" in capsys.readouterr().err
 
 

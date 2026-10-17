@@ -16,8 +16,10 @@ Read-only guarantees, load-bearing for running it on the live host:
 
 * It never writes under the systemd directory.  The only file it writes is
   the ``--receipt`` (temp file in the receipt's own directory, then
-  ``os.replace``, mode 0600), and a receipt path that resolves under the
-  systemd directory is refused before anything is read or written.
+  ``os.replace``, mode 0600).  Before anything is read or written, the
+  receipt is refused when it already exists as anything but a regular file
+  (a symlink, directory, FIFO ...), when the directory it sits in is the
+  systemd directory or below it, or when its fully resolved path is.
 * It never calls ``systemctl`` or any other program: standard library only,
   no ``subprocess``, no import of ``nhms`` or any repo package, so it runs
   under node-22's 3.12.7 ``.venv`` and the repo's 3.11 pin alike.
@@ -289,14 +291,34 @@ def utc_now_iso() -> str:
 
 
 def receipt_refusal(receipt: Path, systemd_dir: Path) -> str | None:
-    """Why the receipt path is refused, or None.  Checked before any write."""
+    """Why the receipt path is refused, or None.  Checked before any input is read.
+
+    ``os.replace`` swaps the directory entry itself, so a receipt that is a
+    symlink would replace the link, not its target: an existing receipt must
+    be a regular file (``lstat``, never followed).  Containment is checked on
+    where the entry sits (resolved parent plus the unresolved name) -- so a
+    link inside the systemd directory pointing outside is refused -- and on
+    the fully resolved path.
+    """
 
     if not receipt.parent.is_dir():
         return f"receipt parent directory does not exist: {receipt.parent}"
-    resolved = receipt.resolve()
+    try:
+        status = os.lstat(receipt)
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        return f"receipt path cannot be inspected: {receipt}: {error.strerror or error}"
+    else:
+        if not stat.S_ISREG(status.st_mode):
+            return f"receipt path exists and is not a regular file: {receipt}"
     systemd_resolved = systemd_dir.resolve()
-    if resolved == systemd_resolved or resolved.is_relative_to(systemd_resolved):
-        return f"receipt path resolves under the systemd directory: {resolved}"
+    for label, candidate in (
+        ("sits", receipt.parent.resolve() / receipt.name),
+        ("resolves", receipt.resolve()),
+    ):
+        if candidate == systemd_resolved or candidate.is_relative_to(systemd_resolved):
+            return f"receipt path {label} under the systemd directory: {candidate}"
     return None
 
 
@@ -366,7 +388,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--receipt",
         required=True,
-        help="receipt JSON file path; must not resolve under the systemd directory (no environment default)",
+        help=(
+            "receipt JSON file path; must not sit or resolve under the systemd directory and, if it "
+            "exists, must be a regular file (no environment default)"
+        ),
     )
     return parser
 
