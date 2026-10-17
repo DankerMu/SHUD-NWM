@@ -301,7 +301,11 @@ def receipt_refusal(receipt: Path, systemd_dir: Path) -> str | None:
     the fully resolved path.
     """
 
-    if not receipt.parent.is_dir():
+    try:
+        parent_is_dir = receipt.parent.is_dir()
+    except OSError as error:
+        return f"receipt parent directory cannot be inspected: {receipt.parent}: {error.strerror or error}"
+    if not parent_is_dir:
         return f"receipt parent directory does not exist: {receipt.parent}"
     try:
         status = os.lstat(receipt)
@@ -422,8 +426,11 @@ def main(argv: list[str] | None = None) -> int:
 
     manifest = load_manifest(manifest_path)
     errors.extend(manifest.errors)
-    if not systemd_dir.is_dir():
-        errors.append(f"systemd directory does not exist: {systemd_dir}")
+    try:
+        if not systemd_dir.is_dir():
+            errors.append(f"systemd directory does not exist: {systemd_dir}")
+    except OSError as error:
+        errors.append(f"systemd directory cannot be inspected: {systemd_dir}: {error.strerror or error}")
 
     if not errors:
         for entry in manifest.entries:

@@ -597,6 +597,43 @@ def test_unwritable_receipt_directory_reports_probe_failed_on_stderr(
     assert "status: probe_failed" in capsys.readouterr().err
 
 
+def test_an_uninspectable_receipt_parent_is_refused(layout: Layout, capsys: pytest.CaptureFixture[str]) -> None:
+    if os.geteuid() == 0:
+        pytest.skip("root searches chmod 000 directories")
+    locked = layout.receipts / "locked"
+    (locked / "inner").mkdir(parents=True)
+    locked.chmod(0)
+    try:
+        exit_code = probe.main(layout.argv(receipt=locked / "inner" / "drift.json"))
+    finally:
+        locked.chmod(0o755)
+
+    assert exit_code == 2
+    assert list((locked / "inner").iterdir()) == []
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "status: probe_failed" in captured.err
+    assert "receipt parent directory cannot be inspected" in captured.err
+
+
+def test_an_uninspectable_systemd_dir_writes_a_probe_failed_receipt(layout: Layout) -> None:
+    if os.geteuid() == 0:
+        pytest.skip("root searches chmod 000 directories")
+    ancestor = layout.systemd.parent
+    ancestor.chmod(0)
+    try:
+        exit_code = probe.main(layout.argv())
+    finally:
+        ancestor.chmod(0o755)
+
+    assert exit_code == 2
+    document = layout.read_receipt()
+    assert document["status"] == "probe_failed"
+    assert document["exit_code"] == 2
+    assert document["entries"] == []
+    assert any("systemd directory cannot be inspected" in error for error in document["errors"])
+
+
 def test_a_failed_replace_removes_the_staged_temp_file(
     layout: Layout, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
