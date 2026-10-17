@@ -532,3 +532,38 @@ Node-27 resource governance role:
 - The daily receipt reports filesystem pressure, node-27 service states,
   PostgreSQL/TimescaleDB size risks, missing retention/compression policies,
   index ratio hotspots, and temp-spill logging state.
+
+## compute.scheduler-dbfree.env live-drift classification (2026-10-16)
+
+The live node-22 `compute.scheduler-dbfree.env` lacks the seven keys below that
+`compute.scheduler-dbfree.env.example` carries. None of them is required: each
+row states what the loader applies when only that key is absent (legacy aliases
+included). "effective value when unset" comes from the loader source, not from
+the example:
+
+- `NHMS_SCHEDULER_LEASE_GUARD_MODE`: `_file_lock_guard_mode()` in
+  `services/orchestrator/scheduler_lease.py`.
+- `NHMS_SCHEDULER_RECONCILE_ABSENCE_SECONDS`,
+  `NHMS_SCHEDULER_IDENTITY_BLOCKED_STREAK_LIMIT`,
+  `NHMS_SCHEDULER_NO_PROGRESS_CIRCUIT_PASSES`, `NHMS_SCHEDULER_TIMING_LEVEL`:
+  the `ProductionSchedulerConfig` field defaults in
+  `services/orchestrator/scheduler_config/config.py`.
+- `NHMS_SCHEDULER_EVIDENCE_RETENTION_DAYS`, `NHMS_SCHEDULER_EVIDENCE_MAX_MB`:
+  `config_from_env` in `scripts/node22_scheduler_evidence_retention.py` (the
+  evidence-retention unit, not the scheduler).
+
+This classification changes no live value. If an operator does set a key, the
+line must be a bare `KEY=value`: systemd `EnvironmentFile=` treats only
+whole-line comments as comments, so a trailing `# ...` becomes part of the value.
+`tests/test_node22_scheduler_env_drift_table.py` checks every row against the
+loaders and the example.
+
+| key | status | effective value when unset | operator action |
+| --- | --- | --- | --- |
+| `NHMS_SCHEDULER_LEASE_GUARD_MODE` | optional, example differs (example: atomic, default: flock) | `flock` | 保持未设置；记录差异、另行决策，并核对 live 文件是否带 `scheduler_lease.py` 读取的 legacy 旧键（它在主键缺失时生效） |
+| `NHMS_SCHEDULER_RECONCILE_ABSENCE_SECONDS` | optional (effective default: 300) | `300` | 保持未设置 |
+| `NHMS_SCHEDULER_IDENTITY_BLOCKED_STREAK_LIMIT` | optional (effective default: 3) | `3` | 保持未设置 |
+| `NHMS_SCHEDULER_NO_PROGRESS_CIRCUIT_PASSES` | optional (effective default: 3) | `3` | 保持未设置 |
+| `NHMS_SCHEDULER_TIMING_LEVEL` | optional (effective default: stage) | `stage` | 保持未设置 |
+| `NHMS_SCHEDULER_EVIDENCE_RETENTION_DAYS` | optional (effective default: 90) | `90` | 保持未设置 |
+| `NHMS_SCHEDULER_EVIDENCE_MAX_MB` | optional (effective default: 512) | `512` | 保持未设置 |

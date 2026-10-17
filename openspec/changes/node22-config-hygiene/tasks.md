@@ -163,7 +163,7 @@
 
   **Minimal mergeable slice:** atomic - 标记与断言互为 oracle。
 
-- [ ] 4.3 `infra/env/README.md` 在 required-key 块外新增 live-drift 分类表（七个键；status 三选一；「effective value when unset」按 loader 实际取值）；新增 `tests/test_node22_scheduler_env_drift_table.py`。钉死的契约（fixture review 2026-10-17）：
+- [x] 4.3 `infra/env/README.md` 在 required-key 块外新增 live-drift 分类表（七个键；status 三选一；「effective value when unset」按 loader 实际取值）；新增 `tests/test_node22_scheduler_env_drift_table.py`。钉死的契约（fixture review 2026-10-17）：
 
   - **三个 loader，逐行指定**：`NHMS_SCHEDULER_LEASE_GUARD_MODE` → `services/orchestrator/scheduler_lease.py` 的 `_file_lock_guard_mode()`（不是 `file_orchestration_journal.py` 里读 `JOURNAL_LOCK_GUARD_MODE` 的同名函数）；`NHMS_SCHEDULER_RECONCILE_ABSENCE_SECONDS`、`NHMS_SCHEDULER_IDENTITY_BLOCKED_STREAK_LIMIT`、`NHMS_SCHEDULER_NO_PROGRESS_CIRCUIT_PASSES`、`NHMS_SCHEDULER_TIMING_LEVEL` → `services/orchestrator/scheduler_config/config.py` `ProductionSchedulerConfig` 各字段的 `default_factory`；`NHMS_SCHEDULER_EVIDENCE_RETENTION_DAYS`、`NHMS_SCHEDULER_EVIDENCE_MAX_MB` → `scripts/node22_scheduler_evidence_retention.py` 的 `config_from_env`（retention 单元使用，非 scheduler loader）。
   - **七行取值（测试逐行断言字面值）**：LEASE `optional, example differs (example: atomic, default: flock)`；RECONCILE_ABSENCE_SECONDS `optional (effective default: 300)`；IDENTITY_BLOCKED_STREAK_LIMIT `optional (effective default: 3)`；NO_PROGRESS_CIRCUIT_PASSES `optional (effective default: 3)`；TIMING_LEVEL `optional (effective default: stage)`；EVIDENCE_RETENTION_DAYS `optional (effective default: 90)`；EVIDENCE_MAX_MB `optional (effective default: 512)`。`required` 行为 0；键集合与 spec 七键精确相等、无重复。实现时若 loader 源码与此不符，以源码为准并在 PR 偏离记录说明。
