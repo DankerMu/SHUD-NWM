@@ -229,6 +229,8 @@ Repository-only. Operator deployment, after the upgrade window: install the aler
 instantiated template, run the drift probe (expect every manifest entry `same`, no `untracked`), run the sweep in
 dry-run, then `--apply`, send one test mail through the configured transport, record receipts.
 
+Between the merge of 3.1 and the operator deployment the hand-run drift probe (1.2) reports the alert template as `missing` (exit 1) and, after 3.2, the six wired oneshot units as `differs`; both are the expected pre-deployment state, not drift, and the deployment receipt closes them.
+
 ## Open Questions
 
 - Q1: whether `nhms-compute-scheduler.service` (timer-driven, `Restart=` semantics) should also carry `OnFailure=`; the

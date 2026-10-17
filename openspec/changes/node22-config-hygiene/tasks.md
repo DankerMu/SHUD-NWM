@@ -118,6 +118,7 @@
   - **文档漂移归本 task**：`scripts/node22_scheduler_stall_health.py` 模块 docstring 的 "A failed unit in the journal is this host's only alerting channel: node-22 carries no ``OnFailure=`` mail lane." 改为陈述 `OnFailure=` 已接到 `nhms-node22-unit-failure-alert@.service`；`docs/runbooks/production-ops/stuck-detection.md` "node-22 实测**没有**任何 `OnFailure=` 通道（node-27 才有 ... 接 mail 是独立一单" 一句改为已接线并指向 3.1 的 example/README 行。PR Boundary 偏离记录：多改一个 `.py` docstring 与一个 runbook 段落。
   - **selector**：把 `tests/test_node22_unit_failure_alert.py` 追加到六个 `.service` 行的测试元组（同 1.1/3.1 的 append 先例），`tests/test_select_ci_tests.py` 中钉住这些行精确集合的断言同 PR 更新；不追加的后果是以后只改 unit、删掉这一行并重算 manifest 的 PR 在 PR CI 上会绿。
   - **既有读者不变红（fixture review 已核实）**：stall 套件 u1 的 directive 元组不含 `OnFailure=` 且只抓含 `nhms-compute-scheduler` 的行；entrypoint invariant 的 exact-once 字段（`uv`/`python`/`enforce`/`EnvironmentFile=`/`ExecStart=`）不受影响；refresh installer 的 `UnsetEnvironment=` 字节相等与各处 `TimeoutStartSec` 正则不受影响；唯一变红的是 tracking 的 sha256 检查，同 PR 更新 manifest 即可。合并后到运维部署前 drift 探针对六条报 `differs` 是预期。
+  - **journal 内容进 mail 的 secret 风险（#2971 security-perf note）**：handler 原样寄出失败单元最后 30 行 journal；六个消费者都是 DB-free 探针与 retention 作业，不打印环境变量，与 node-27 的暴露面一致，本 change 记为 non-goal，wiring 测试不为此新增断言；若将来给会打印 `*_TOKEN`/`*_PASS` 的单元接线，须先加 journal 脱敏。
   - fixture level 保持 `none`：production config 触发项已由 design D4、Migration Plan 与 1.1 的 manifest 守卫消化；部署是带 receipt 的运维动作。模板 handler 不去重（stall 探针 15 分钟一趟，持续停摆约每天 96 封）是 D4 的既定选择，部署 receipt 应记录预期告警量。
 
   Depends on: 3.1, 1.1
@@ -130,7 +131,7 @@
 
 ## 4. env 卫生（spec: node22-env-hygiene）
 
-- [ ] 4.1 `.gitignore` 增加 `.nhms-work/`；新增 `tests/test_gitignore_nhms_work.py` 用 `git check-ignore` 断言。钉死的契约（fixture review 2026-10-17）：
+- [x] 4.1 `.gitignore` 增加 `.nhms-work/`；新增 `tests/test_gitignore_nhms_work.py` 用 `git check-ignore` 断言。钉死的契约（fixture review 2026-10-17）：
 
   - **位置与写法**：在 `.gitignore` 的 `.nhms-object-store/` 行（~:40）之后、`# Node-27 per-issue...` 注释之前插入 `.nhms-work/`（带尾斜杠），与 `.nhms-runs/`、`.nhms-workspace/`、`.nhms-object-store/` 并列。
   - **测试**：`REPO_ROOT = Path(__file__).resolve().parents[1]`；`subprocess.run(["git", "-c", "core.excludesFile=/dev/null", "check-ignore", "-v", <path>], cwd=REPO_ROOT)`，不在 git 仓库内直接失败、不 skip。正向：spec scenario 的嵌套路径 `.nhms-work/scheduler/basins-file-registry-publish/basins-inventory.json` 返回 0 且 `-v` 输出的 source 是 `.gitignore`、pattern 是 `.nhms-work/`（不钉行号；裸目录名 `.nhms-work` 不存在时 `check-ignore` 返回 1，所以必须用嵌套路径）。负向：同前缀兄弟 `.nhms-work.md` 与 `.nhms-workx/y` 返回 **1**（写 `== 1`，128 是 git 出错）；不要用已被忽略的 `.nhms-workspace/`。
