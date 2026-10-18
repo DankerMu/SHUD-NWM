@@ -12,6 +12,9 @@ Public functions:
 - ``generate_segmented_forecast_hours`` -- expand resolution segments to lead hours.
 - ``validate_forecast_hours`` -- validate caller-supplied lead hours.
 - ``check_three_way_time_consistency`` -- warm-start snapshot / ``.cfg.ic`` / run-start check.
+- ``utc_now`` -- the current time as a timezone-aware UTC datetime.
+- ``parse_iso_utc`` -- parse an ISO-8601 timestamp string to a timezone-aware UTC datetime.
+- ``format_iso_utc`` -- render a datetime as an ISO-8601 UTC string with a ``Z`` suffix.
 
 The three-way (snapshot ``valid_time`` / native ``.cfg.ic`` header minute-time / run
 ``start_time``) equality check is used both at daemon selection time
@@ -205,3 +208,46 @@ def check_three_way_time_consistency(
                 "(minutes since epoch); restart at the wrong time is a blocker."
             )
     return None
+
+
+def utc_now() -> datetime:
+    """Return the current time as a timezone-aware UTC datetime.
+
+    Takes no input. The result is ``datetime.now(UTC)``: ``tzinfo is UTC`` and the
+    microseconds are kept (not truncated).
+    """
+    return datetime.now(UTC)
+
+
+def parse_iso_utc(text: str) -> datetime:
+    """Parse an ISO-8601 timestamp string to a timezone-aware UTC datetime.
+
+    Accepts a ``str`` that ``datetime.fromisoformat`` parses after surrounding
+    whitespace is stripped and an uppercase ``Z`` is replaced by ``+00:00``, e.g.
+    ``"2026-10-17T06:00:00Z"``, ``"2026-10-17T14:00:00+08:00"``,
+    ``"2026-10-17T06:00:00.123456"`` or the date-only ``"2026-10-17Z"`` (that day
+    00:00 UTC). A naive result is taken to be UTC; an offset-aware result is
+    converted to UTC. The returned datetime always has ``tzinfo is UTC``; ``None``
+    is never returned.
+
+    Raises ``TypeError`` for a non-``str`` input and ``ValueError`` for an empty or
+    unparseable string, including a lowercase ``z`` suffix and the compact
+    ``YYYYMMDDHH`` cycle form (that one is ``parse_cycle_time``'s concept).
+    """
+    if not isinstance(text, str):
+        raise TypeError(f"parse_iso_utc expects str, got {type(text).__name__}")
+    return ensure_utc(datetime.fromisoformat(text.strip().replace("Z", "+00:00")))
+
+
+def format_iso_utc(value: datetime) -> str:
+    """Render a datetime as an ISO-8601 UTC string with a ``Z`` suffix.
+
+    Accepts a ``datetime``; a naive value is taken to be UTC and an offset-aware
+    value is converted to UTC. The output is ``YYYY-MM-DDTHH:MM:SSZ``, or
+    ``YYYY-MM-DDTHH:MM:SS.ffffffZ`` when the microseconds are non-zero (the
+    default ``isoformat`` timespec). Raises ``TypeError`` for any non-``datetime``
+    input, including ``None``.
+    """
+    if not isinstance(value, datetime):
+        raise TypeError(f"format_iso_utc expects datetime, got {type(value).__name__}")
+    return ensure_utc(value).isoformat().replace("+00:00", "Z")

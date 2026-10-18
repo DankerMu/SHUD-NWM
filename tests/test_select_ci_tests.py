@@ -1084,6 +1084,7 @@ def test_select_tests_maps_openapi_patch_owner_to_drift_plus_api_consumers() -> 
             RESOLVE_SURFACE_GUARD_PATH,
             ANY_RATCHET_PATH,
             STATUS_VOCAB_PARITY_PATH,
+            TIME_HELPER_CONSOLIDATION_PATH,
         }
     )
     assert selected == expected
@@ -1202,6 +1203,7 @@ def test_select_tests_maps_runtime_changes_to_runtime_contract_tests() -> None:
             IMPORT_LAYERING_GUARD_PATH,
             ANY_RATCHET_PATH,
             STATUS_VOCAB_PARITY_PATH,
+            TIME_HELPER_CONSOLIDATION_PATH,
         }
     )
 
@@ -1230,11 +1232,13 @@ def test_select_tests_maps_direct_grid_contract_canonical_path_like_the_shim() -
             IMPORT_LAYERING_GUARD_PATH,
             ANY_RATCHET_PATH,
             STATUS_VOCAB_PARITY_PATH,
+            TIME_HELPER_CONSOLIDATION_PATH,
         }
     )
-    # 1 e2e + 10 contract nodes + 5 importer suites + 5 core-smoke + 7 guards
-    # (#2937 added the `Any` ratchet, task 2.1a the status-vocabulary parity).
-    assert len(selected) == 28
+    # 1 e2e + 10 contract nodes + 5 importer suites + 5 core-smoke + 8 guards
+    # (#2937 added the `Any` ratchet, task 2.1a the status-vocabulary parity,
+    # task 3.1 the time-helper consolidation ceiling).
+    assert len(selected) == 29
     assert "tests/test_forcing_producer.py" not in selected
     assert list(DIRECT_GRID_E2E_TESTS) == ["tests/test_direct_grid_e2e.py"]
     assert all(
@@ -1281,11 +1285,13 @@ def test_select_tests_maps_time_normalization_contract_to_base_helper_owners() -
             IMPORT_LAYERING_GUARD_PATH,
             ANY_RATCHET_PATH,
             STATUS_VOCAB_PARITY_PATH,
+            TIME_HELPER_CONSOLIDATION_PATH,
         }
     )
     # 10 directory + 5 base-helper + 1 warm-start chaining + 4 core-smoke
-    # (test_production_scheduler.py is already a directory target) + 7 guards.
-    assert len(selected) == 27
+    # (test_production_scheduler.py is already a directory target) + 8 guards
+    # (task 3.1 added the time-helper consolidation ceiling).
+    assert len(selected) == 28
 
 
 def test_time_normalization_contract_row_red_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1324,11 +1330,13 @@ def test_select_tests_maps_region_contract_to_data_adapters_directory_owners() -
             IMPORT_LAYERING_GUARD_PATH,
             ANY_RATCHET_PATH,
             STATUS_VOCAB_PARITY_PATH,
+            TIME_HELPER_CONSOLIDATION_PATH,
         }
     )
     # 10 directory + 1 bbox clip + 4 core-smoke (test_production_scheduler.py is
-    # already a directory target) + 7 guards.
-    assert len(selected) == 22
+    # already a directory target) + 8 guards (task 3.1 added the time-helper
+    # consolidation ceiling).
+    assert len(selected) == 23
 
 
 def test_region_contract_row_red_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1367,10 +1375,12 @@ def test_select_tests_maps_hydrologic_fingerprint_contract_like_mapping_builder_
             IMPORT_LAYERING_GUARD_PATH,
             ANY_RATCHET_PATH,
             STATUS_VOCAB_PARITY_PATH,
+            TIME_HELPER_CONSOLIDATION_PATH,
         }
     )
-    # 8 mapping-builder suites + 5 core-smoke + 7 guards.
-    assert len(selected) == 20
+    # 8 mapping-builder suites + 5 core-smoke + 8 guards (task 3.1 added the
+    # time-helper consolidation ceiling).
+    assert len(selected) == 21
     old_path = select_tests(["workers/mapping_builder/rewrite.py"], repo_root=Path("."))
     assert set(selected) == set(old_path) | set(SHARED_BASELINE_CONTRACT)
 
@@ -1434,6 +1444,7 @@ def test_select_tests_maps_orchestrator_chain_types_to_manifest_surface_nodes() 
             RESOLVE_SURFACE_GUARD_PATH,
             ANY_RATCHET_PATH,
             STATUS_VOCAB_PARITY_PATH,
+            TIME_HELPER_CONSOLIDATION_PATH,
         }
     )
     assert "tests/test_orchestration_chain.py" not in selected
@@ -1463,6 +1474,7 @@ def test_select_tests_maps_orchestrator_manifest_surface_without_whole_slow_suit
             RESOLVE_SURFACE_GUARD_PATH,
             ANY_RATCHET_PATH,
             STATUS_VOCAB_PARITY_PATH,
+            TIME_HELPER_CONSOLIDATION_PATH,
         }
     )
     # The REDIRECT targets are still focused node ids — that is what keeps the
@@ -1475,6 +1487,7 @@ def test_select_tests_maps_orchestrator_manifest_surface_without_whole_slow_suit
         RESOLVE_SURFACE_GUARD_PATH,
         ANY_RATCHET_PATH,
         STATUS_VOCAB_PARITY_PATH,
+        TIME_HELPER_CONSOLIDATION_PATH,
         manifest_contract,
         "tests/test_scheduler_registry_capacity.py",
     }
@@ -1605,6 +1618,7 @@ def test_select_tests_maps_file_journal_read_state_without_whole_legacy_suites()
             _prod_module.SQLALCHEMY_DRIVER_GUARD_TEST,
             ANY_RATCHET_PATH,
             STATUS_VOCAB_PARITY_PATH,
+            TIME_HELPER_CONSOLIDATION_PATH,
         }
     )
     assert "tests/test_orchestration_chain.py" in selected
@@ -1788,6 +1802,7 @@ def test_select_tests_maps_known_slow_manifest_test_file_changes_with_surface_ch
             RESOLVE_SURFACE_GUARD_PATH,
             ANY_RATCHET_PATH,
             STATUS_VOCAB_PARITY_PATH,
+            TIME_HELPER_CONSOLIDATION_PATH,
         }
     )
     assert "tests/test_orchestration_chain.py" not in selected
@@ -2105,6 +2120,7 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         # scheduler_state_decision.py importer gaps). DB-free, sub-second.
         "tests/test_state_save_submit_ambiguity.py",
         STATUS_VOCAB_PARITY_PATH,
+        TIME_HELPER_CONSOLIDATION_PATH,
         "tests/test_variant_activation_cutover.py",
         "tests/test_warm_start_chaining.py",
     ]
@@ -2139,6 +2155,7 @@ def test_released_reservation_recovery_module_selects_its_exact_suites() -> None
             RESOLVE_SURFACE_GUARD_PATH,
             ANY_RATCHET_PATH,
             STATUS_VOCAB_PARITY_PATH,
+            TIME_HELPER_CONSOLIDATION_PATH,
         }
     )
     assert "tests/test_state_clone.py" not in selected
@@ -2241,6 +2258,7 @@ def test_select_tests_maps_forecast_store_without_core_smoke_fallback() -> None:
             IMPORT_LAYERING_GUARD_PATH,
             ANY_RATCHET_PATH,
             STATUS_VOCAB_PARITY_PATH,
+            TIME_HELPER_CONSOLIDATION_PATH,
         }
     )
     assert set(CORE_SMOKE_TESTS) <= set(selected)
@@ -2381,6 +2399,7 @@ def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
         "tests/test_slurm_gateway_openapi_security.py",
         "tests/test_sql_shape_helpers.py",
         STATUS_VOCAB_PARITY_PATH,
+        TIME_HELPER_CONSOLIDATION_PATH,
     ]
     assert not fallback_only_tests & set(selected)
 
@@ -2668,6 +2687,7 @@ def test_select_tests_maps_autopipeline_script_without_core_smoke_fallback() -> 
         # by the same file.
         "tests/test_river_ts_text_identity_cleanup.py",
         STATUS_VOCAB_PARITY_PATH,
+        TIME_HELPER_CONSOLIDATION_PATH,
         # #1656: scripts/** is a scanned invariant root.
         INVARIANT_SUITE_PATH,
         # #2713: the fence-busy skip classification of `_process_run` is pinned
@@ -2846,6 +2866,7 @@ def test_precip_tree_module_selects_the_prewarm_reader_suite(module: str) -> Non
         # #2185: services/** is a river-segment write-surface root.
         WRITE_SURFACE_SCAN_PATH,
         STATUS_VOCAB_PARITY_PATH,
+        TIME_HELPER_CONSOLIDATION_PATH,
     ]
 
 
@@ -2880,6 +2901,7 @@ def test_precip_route_rule_stays_without_the_prewarm_suite() -> None:
         # #2185: apps/** is a river-segment write-surface root.
         WRITE_SURFACE_SCAN_PATH,
         STATUS_VOCAB_PARITY_PATH,
+        TIME_HELPER_CONSOLIDATION_PATH,
     ]
 
 
@@ -2950,6 +2972,7 @@ def test_route_registry_owner_selects_the_precip_surface_and_keeps_attribution()
         # #2185: apps/** is a river-segment write-surface root.
         WRITE_SURFACE_SCAN_PATH,
         STATUS_VOCAB_PARITY_PATH,
+        TIME_HELPER_CONSOLIDATION_PATH,
     ]
 
 
@@ -2984,6 +3007,7 @@ def test_main_owner_selects_the_precip_surface_and_keeps_error_logging() -> None
         # #2185: apps/** is a river-segment write-surface root.
         WRITE_SURFACE_SCAN_PATH,
         STATUS_VOCAB_PARITY_PATH,
+        TIME_HELPER_CONSOLIDATION_PATH,
     ]
 
 
@@ -3269,6 +3293,7 @@ def test_select_tests_maps_governance_entropy_scripts_without_core_smoke_fallbac
         *ENTROPY_AUDIT_TESTS,
         WRITE_SURFACE_SCAN_PATH,
         STATUS_VOCAB_PARITY_PATH,
+        TIME_HELPER_CONSOLIDATION_PATH,
         INVARIANT_SUITE_PATH,
     ]
     assert not set(CORE_SMOKE_TESTS) & set(selected)
@@ -3299,6 +3324,7 @@ def test_select_tests_maps_the_replay_script_to_every_partition_without_core_smo
             TOPOLOGY_HARD_GATE_NODE,
             ANY_RATCHET_PATH,
             STATUS_VOCAB_PARITY_PATH,
+            TIME_HELPER_CONSOLIDATION_PATH,
         ]
     )
     assert not set(CORE_SMOKE_TESTS) & set(selected)
@@ -3725,6 +3751,7 @@ def test_entropy_audit_package_tracked_tree_is_exactly_twenty_two_modules() -> N
         *ENTROPY_AUDIT_TESTS,
         WRITE_SURFACE_SCAN_PATH,
         STATUS_VOCAB_PARITY_PATH,
+        TIME_HELPER_CONSOLIDATION_PATH,
         INVARIANT_SUITE_PATH,
     ]
     assert not set(CORE_SMOKE_TESTS) & set(
@@ -3880,6 +3907,7 @@ def test_select_tests_keeps_explicit_differently_named_script_rule() -> None:
             TOPOLOGY_HARD_GATE_NODE,
             ANY_RATCHET_PATH,
             STATUS_VOCAB_PARITY_PATH,
+            TIME_HELPER_CONSOLIDATION_PATH,
         ]
     )
     assert not set(CORE_SMOKE_TESTS) & set(selected)
@@ -5154,6 +5182,7 @@ def test_select_tests_unions_explicit_rule_and_same_name_derivation() -> None:
             RESOLVE_SURFACE_GUARD_PATH,
             ANY_RATCHET_PATH,
             STATUS_VOCAB_PARITY_PATH,
+            TIME_HELPER_CONSOLIDATION_PATH,
         }
     )
 
@@ -6936,6 +6965,7 @@ def test_conditional_redirect_owner_focused_when_surface_present() -> None:
         "tests/test_pipeline_job_provenance_publisher.py",
         ANY_RATCHET_PATH,
         STATUS_VOCAB_PARITY_PATH,
+        TIME_HELPER_CONSOLIDATION_PATH,
     }
     assert owner not in selected
 
@@ -7761,6 +7791,7 @@ def test_select_tests_falls_back_to_core_smoke_for_unknown_backend_python_path()
             RESOLVE_SURFACE_GUARD_PATH,
             ANY_RATCHET_PATH,
             STATUS_VOCAB_PARITY_PATH,
+            TIME_HELPER_CONSOLIDATION_PATH,
         }
     )
     assert SELECTOR_META_GUARD_TEST not in selected
@@ -7809,6 +7840,7 @@ def test_mixed_known_and_unknown_paths_union_rider_with_fallback_smoke() -> None
                 IMPORT_LAYERING_GUARD_PATH,
                 ANY_RATCHET_PATH,
                 STATUS_VOCAB_PARITY_PATH,
+                TIME_HELPER_CONSOLIDATION_PATH,
             }
         )
         == selected
@@ -7885,6 +7917,7 @@ def test_selector_state_matrix_rows_3_4_5_same_name_class_and_provenance(
         TOPOLOGY_HARD_GATE_NODE,
         ANY_RATCHET_PATH,
         STATUS_VOCAB_PARITY_PATH,
+        TIME_HELPER_CONSOLIDATION_PATH,
     }
 
     # (b) Same-name class: ordinary suite (row 3) and a same-name suite that IS
@@ -7935,6 +7968,7 @@ def test_selector_state_matrix_row_5b_explicit_plus_same_name_union() -> None:
         RESOLVE_SURFACE_GUARD_PATH,
         ANY_RATCHET_PATH,
         STATUS_VOCAB_PARITY_PATH,
+        TIME_HELPER_CONSOLIDATION_PATH,
     }
 
 
@@ -7967,6 +8001,7 @@ def test_selector_state_matrix_rows_6_7_no_suite_fallback_and_missing_targets(
             IMPORT_LAYERING_GUARD_PATH,
             ANY_RATCHET_PATH,
             STATUS_VOCAB_PARITY_PATH,
+            TIME_HELPER_CONSOLIDATION_PATH,
         }
     )
     assert SELECTOR_META_GUARD_TEST not in no_suite
@@ -8038,6 +8073,7 @@ def test_selector_state_matrix_row_11_multiple_changed_paths_accumulate() -> Non
                 IMPORT_LAYERING_GUARD_PATH,
                 ANY_RATCHET_PATH,
                 STATUS_VOCAB_PARITY_PATH,
+                TIME_HELPER_CONSOLIDATION_PATH,
             }
         )
         == selected
@@ -8328,6 +8364,7 @@ def test_select_tests_routes_apps_outside_api_to_the_write_surface_scan() -> Non
             RESOLVE_SURFACE_GUARD_PATH,
             ANY_RATCHET_PATH,
             STATUS_VOCAB_PARITY_PATH,
+            TIME_HELPER_CONSOLIDATION_PATH,
         }
     )
     for path in (tracked, future):
@@ -8574,14 +8611,16 @@ def test_github_output_flags_selector_source_diff_is_not_a_collapse(tmp_path: Pa
     # made it four: `scripts/` is also a production-topology scan root, so the
     # hard-gate node rides along. #2937 made it five: `scripts/**` is an `Any`
     # ratchet root. Task 2.1a made it six: `scripts/**` is also a
-    # status-vocabulary parity root. The
+    # status-vocabulary parity root. Task 3.1 made it seven: `scripts/**` is
+    # also a time-helper consolidation root. The
     # collection signal is still true by PROVENANCE (the selector source itself
     # changed), so the workflow runs the full-tree collect smoke in addition to
-    # those six — the round-1 cand-01 fix.
+    # those seven — the round-1 cand-01 fix.
     fields = _github_output_fields(tmp_path, ["scripts/select_ci_tests.py"], repo_root=Path("."))
 
-    assert fields["count"] == "6"
+    assert fields["count"] == "7"
     assert ANY_RATCHET_PATH in fields["tests"]
+    assert TIME_HELPER_CONSOLIDATION_PATH in fields["tests"]
     assert "tests/test_timescale_write_guard_wire_site_invariant.py" in fields["tests"]
     assert WRITE_SURFACE_SCAN_PATH in fields["tests"]
     assert TOPOLOGY_HARD_GATE_NODE in fields["tests"]
@@ -13041,6 +13080,7 @@ def test_scheduler_runtime_selects_the_copyback_mutex_suite() -> None:
         # driver guard's content sniff adds it as a supplemental rider.
         "tests/test_sqlalchemy_driver_explicit.py",
         STATUS_VOCAB_PARITY_PATH,
+        TIME_HELPER_CONSOLIDATION_PATH,
     ]
 
 
@@ -13079,6 +13119,7 @@ def test_copyback_guard_selects_the_copyback_mutex_suite_without_losing_its_owne
         "tests/test_run_tree_copyback_backup_lifecycle.py",
         "tests/test_select_ci_tests.py",
         STATUS_VOCAB_PARITY_PATH,
+        TIME_HELPER_CONSOLIDATION_PATH,
         "tests/test_timescale_write_guard_wire_site_invariant.py",
     ]
 
@@ -14584,10 +14625,11 @@ def test_write_surface_flip_pins_the_apps_class_at_the_github_output_layer(tmp_p
     # still the targeted branch, one more assertion-bearing suite. #2452 adds the
     # `.resolve()`-surface guard over the same walk, so the selection is three.
     # #2937 adds the `Any` ratchet over `apps/**`, so it is four. Task 2.1a adds
-    # the status-vocabulary parity suite over `apps/**`, so it is five.
+    # the status-vocabulary parity suite over `apps/**`, so it is five. Task 3.1
+    # adds the time-helper consolidation ceiling over `apps/**`, so it is six.
     fields = _github_output_fields(tmp_path, ["apps/__init__.py"], repo_root=Path("."))
 
-    assert fields["count"] == "5"
+    assert fields["count"] == "6"
     assert fields["tests"] == " ".join(
         sorted(
             {
@@ -14596,6 +14638,7 @@ def test_write_surface_flip_pins_the_apps_class_at_the_github_output_layer(tmp_p
                 RESOLVE_SURFACE_GUARD_PATH,
                 ANY_RATCHET_PATH,
                 STATUS_VOCAB_PARITY_PATH,
+                TIME_HELPER_CONSOLIDATION_PATH,
             }
         )
     )
@@ -15219,6 +15262,7 @@ def test_status_vocab_routing_rows_select_their_exact_suites() -> None:
             *CORE_SMOKE_TESTS,
             "tests/test_hydro_status_set_parity.py",
             STATUS_VOCAB_PARITY_PATH,
+            TIME_HELPER_CONSOLIDATION_PATH,
             INVARIANT_SUITE_PATH,
             WRITE_SURFACE_SCAN_PATH,
             FAMILY_GUARD_PATH,
@@ -15285,6 +15329,124 @@ def test_status_vocab_migration_target_red_when_removed(monkeypatch: pytest.Monk
     monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
 
     assert STATUS_VOCAB_PARITY_PATH not in select_tests(["db/migrations/x.sql"], repo_root=Path("."))
+
+
+# entropy-burndown task 3.1: the time-helper consolidation ceiling. Spelled
+# locally for the same reason ANY_RATCHET_PATH is; an anchor test keeps the
+# literal in sync with the selector constant.
+TIME_HELPER_CONSOLIDATION_PATH = "tests/test_time_helper_consolidation.py"
+TIME_HELPER_CEILING_PATH = "tests/time_helper_ceiling.json"
+TIME_HELPER_ALLOWLIST_PATH = "tests/time_helper_allowlist.json"
+
+
+def _time_helper_roots() -> tuple[str, ...]:
+    """The selector's time-helper root globs, read lazily from the source."""
+    from scripts.select_ci_tests import TIME_HELPER_CONSOLIDATION_ROOTS
+
+    return TIME_HELPER_CONSOLIDATION_ROOTS
+
+
+def _time_helper_root_globs() -> set[str]:
+    """The consolidation test's own `_SCAN_ROOTS` (the authority) mapped to `<root>/**` globs."""
+    return {f"{root}/**" for root in _module_level_string_sequence(TIME_HELPER_CONSOLIDATION_PATH, "_SCAN_ROOTS")}
+
+
+def _assert_time_helper_roots_match(roots: Sequence[str]) -> None:
+    expected = _time_helper_root_globs()
+    missing = sorted(expected - set(roots))
+    unexpected = sorted(set(roots) - expected)
+    assert not missing and not unexpected, (
+        f"{TIME_HELPER_CONSOLIDATION_PATH}: the selector's roots and the test's _SCAN_ROOTS "
+        f"disagree -- missing {missing}, unexpected {unexpected}"
+    )
+
+
+def test_time_helper_literal_anchors_to_the_selector_constant() -> None:
+    from scripts.select_ci_tests import TIME_HELPER_CONSOLIDATION_TEST
+
+    assert TIME_HELPER_CONSOLIDATION_PATH == TIME_HELPER_CONSOLIDATION_TEST
+    assert Path(TIME_HELPER_CONSOLIDATION_PATH).is_file()
+    assert Path(TIME_HELPER_CEILING_PATH).is_file()
+    assert Path(TIME_HELPER_ALLOWLIST_PATH).is_file()
+
+
+def test_time_helper_roots_derive_from_the_test_scan_roots() -> None:
+    # The selector's roots equal the consolidation test's own `_SCAN_ROOTS` as
+    # globs; widening the count without wiring the routing reddens by name.
+    _assert_time_helper_roots_match(_time_helper_roots())
+
+
+def test_time_helper_routes_every_python_path_under_its_roots() -> None:
+    # The direct-grid contract module is owned by a stop_on_match row, and the
+    # additive loop sits after the stop-rule loop, so the owner cannot shadow
+    # the consolidation test.
+    owner = DIRECT_GRID_CONTRACT_CANONICAL_PATH
+    assert any(rule.stop_on_match and fnmatch.fnmatch(owner, rule.pattern) for rule in PATH_TEST_RULES), (
+        f"{owner} is no longer owned by a stop_on_match rule -- the scenario is stale"
+    )
+    for module in (
+        owner,
+        "packages/common/contracts/time_normalization.py",
+        "services/orchestrator/retry.py",
+        "workers/shud_runtime/runtime.py",
+        "apps/api/main.py",
+        "scripts/select_ci_tests.py",
+    ):
+        assert Path(module).is_file(), module
+        selected = set(select_tests([module], repo_root=Path(".")))
+        assert TIME_HELPER_CONSOLIDATION_PATH in selected, f"{module}: does not select {TIME_HELPER_CONSOLIDATION_PATH}"
+    for root in sorted(_time_helper_root_globs()):
+        probe = root.replace("**", "brand_new_thing.py")
+        selected = set(select_tests([probe], repo_root=Path(".")))
+        assert TIME_HELPER_CONSOLIDATION_PATH in selected, f"{probe}: does not select {TIME_HELPER_CONSOLIDATION_PATH}"
+
+    # Negatives: non-Python under a root, and Python outside the five roots.
+    for probe in ("packages/common/sql/x.sql", "db/x.py", "openspec/tools/x.py", "tests/x.py"):
+        selected = set(select_tests([probe], repo_root=Path(".")))
+        assert TIME_HELPER_CONSOLIDATION_PATH not in selected, (
+            f"{probe}: must not select {TIME_HELPER_CONSOLIDATION_PATH}"
+        )
+
+
+def test_time_helper_routing_reds_when_a_root_is_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Leg (a): the parity oracle names the dropped root. Leg (b): the routing
+    # loop reads the constant, so dropping a root stops that root's paths from
+    # selecting the test while the retained roots keep routing.
+    from scripts import select_ci_tests
+
+    live = _time_helper_roots()
+    assert "services/**" in live
+    reduced = tuple(root for root in live if root != "services/**")
+    monkeypatch.setattr(select_ci_tests, "TIME_HELPER_CONSOLIDATION_ROOTS", reduced)
+
+    with pytest.raises(AssertionError, match=r"missing \['services/\*\*'\]"):
+        _assert_time_helper_roots_match(reduced)
+    dropped = set(select_tests(["services/orchestrator/retry.py"], repo_root=Path(".")))
+    assert TIME_HELPER_CONSOLIDATION_PATH not in dropped, (
+        f"dropping services/** from TIME_HELPER_CONSOLIDATION_ROOTS left {TIME_HELPER_CONSOLIDATION_PATH} "
+        "selected: the routing loop reads inlined roots, not the constant"
+    )
+    retained = set(select_tests(["workers/shud_runtime/runtime.py"], repo_root=Path(".")))
+    assert TIME_HELPER_CONSOLIDATION_PATH in retained, (
+        f"dropping services/** also stopped workers/** from selecting {TIME_HELPER_CONSOLIDATION_PATH}"
+    )
+
+
+@pytest.mark.parametrize("data_path", [TIME_HELPER_CEILING_PATH, TIME_HELPER_ALLOWLIST_PATH])
+def test_time_helper_data_files_select_only_the_consolidation_test(data_path: str) -> None:
+    assert select_tests([data_path], repo_root=Path(".")) == [TIME_HELPER_CONSOLIDATION_PATH]
+
+
+@pytest.mark.parametrize("data_path", [TIME_HELPER_CEILING_PATH, TIME_HELPER_ALLOWLIST_PATH])
+def test_time_helper_data_file_rule_red_when_removed(monkeypatch: pytest.MonkeyPatch, data_path: str) -> None:
+    """Drop exactly one task 3.1 JSON row and that file no longer reaches the consolidation test."""
+    from scripts import select_ci_tests
+
+    mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern != data_path)
+    assert len(mutant) == len(PATH_TEST_RULES) - 1, f"the task 3.1 row for {data_path} is missing or duplicated"
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+
+    assert TIME_HELPER_CONSOLIDATION_PATH not in select_tests([data_path], repo_root=Path("."))
 
 
 # The #1744 shared-library additivity authority: `packages/common/**` must
@@ -16033,6 +16195,7 @@ def test_station_set_flip_selects_its_importers_and_keeps_its_prior_picks() -> N
             IMPORT_LAYERING_GUARD_PATH,
             ANY_RATCHET_PATH,
             STATUS_VOCAB_PARITY_PATH,
+            TIME_HELPER_CONSOLIDATION_PATH,
         }
     )
 
