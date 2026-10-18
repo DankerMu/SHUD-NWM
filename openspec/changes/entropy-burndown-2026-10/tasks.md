@@ -330,7 +330,7 @@
 
   **Minimal mergeable slice:** atomic - 规范函数与 ceiling 测试同生，否则后续批次无 oracle。
 
-- [ ] 3.2 批次 `packages/`：替换 3.1 命中清单中 `packages/` 下的函数（fullmatch 口径 10 处：6 处删除并改用规范导入；三处透传 None 的 `_format_time` 改名 `_format_optional_time`；`object_store_forcing._normalize_source_id` 改名 `_storage_source_segment`、体不变），ceiling −10。
+- [x] 3.2 批次 `packages/`：替换 3.1 命中清单中 `packages/` 下的函数（fullmatch 口径 10 处：6 处删除并改用规范导入；三处透传 None 的 `_format_time` 改名 `_format_optional_time`；`object_store_forcing._normalize_source_id` 改名 `_storage_source_segment`、体不变），ceiling −10。
 
   Depends on: 3.1
 
@@ -342,6 +342,7 @@
   - **删 6 个（直接换规范名，不起别名；10 个名字全仓 0 处 monkeypatch/patch 字符串）**：`best_available.py:415 _format_time`（`:400/:403` → `format_iso_utc`）；`forcing_domain_handoff.py:2709 _parse_time`（`:798 :1387×2 :2196 :2544 :2582 :2593` → `parse_iso_utc`）、`:2717 _format_time`（16 处 → `format_iso_utc`；naive 风险已排除：全部输入来自 `_parse_time`/lattice 运算，均为 aware UTC）；`node27_pgdata_workload_io.py:438 utc_now`（同删 `:13 from datetime import UTC, datetime`；`node27_pgdata_workload.py:14` 改为 `from packages.common.node27_pgdata_workload_io import prove_server_identity` + `from packages.common.contracts.time_normalization import utc_now`）；`state_cli.py:1122 _parse_time`（`:852 :956 :1136` → `parse_iso_utc`，`:823` 注释同步；datetime 分支本就走不到；`.strip()` 放宽对闸门 `:852` 与加载器 `:956` 同时生效，PR 记录）、`:1139 _format_time`（`:233` → `format_iso_utc`）。
   - **改名 4 个（离开规则，不加 allowlist 条目）**：`forecast_store.py:4444`、`object_store_forcing.py:969`、`state_manager.py:5084` 的 `_format_time` → `_format_optional_time(value: datetime | None) -> str | None`，体为 `if value is None: return None` + `return format_iso_utc(value)`（68/9/24 处调用点逐字改名；`forecast_store.py:1924` 改后 126 字符须折行）；`object_store_forcing.py:242 _normalize_source_id` → `_storage_source_segment`，**体不变**（不换成 `normalize_source_id`：它在规范函数之上加 strip/必填/`.lower()`/`_safe_storage_segment`，ERA5/IFS 落盘段保持小写），`:395` 同步。
   - **允许的测试改动**：`tests/object_store_forcing_real_disk_support.py:29/:83/:92` 导入/引用改名（导入路径类，只限本 task 改名的名字）；其余测试零改动。
+  - **允许的测试改动补正（2026-10-18，#2932 实现前核对，编排者裁决 A）**：fixture review 漏列了另外三个导入并调用 `_normalize_source_id` 的测试文件（`f04b5a20d` 即已存在）：`tests/test_object_store_forcing.py`（导入 :21，调用 :85/:169/:947/:958）、`tests/test_direct_grid_display_cutover_b4_leak.py`（导入 :35，调用 :79）、`tests/test_direct_grid_display_cutover_history.py`（导入 :66，调用 :130）。同属导入路径类，只把名字改为 `_storage_source_segment`，不改断言；不改名则三者收集期 ImportError。ceiling 目标仍为 −10。
   - **接受的异常类变化（记录）**：非 str/非 datetime 输入由 `AttributeError` 变 `TypeError`，只发生在本来就会崩溃的路径上；6 个文件里没有处理器捕获这两类（已核对 `except (TypeError, ValueError)` 各处，均不包住这些调用）。
   - **ceiling**：`tests/time_helper_ceiling.json` = rebase 后 PR head 实测计数（= base ceiling − 10，3.1 以 69 落地则为 59）；3.2–3.5 并行、共享此文件，后落地者重新实测。allowlist 不动（预期仍为 `[]`）；`packages/` 下 0 个非 allowlist 命中。演练：ceiling −1 → 失败；`floor(count/0.95)+1`（59 → 63）→ 失败并提示降低；均恢复并记入 PR。
   - **selector**：不改。3.1 的 `.py` loop 对 8 个 `packages/common/*.py` 与 `apps/api/response_models/forecast.py` 加选 `tests/test_time_helper_consolidation.py`，ceiling JSON 经 3.1 的 `PathTestRule` 选中；测试辅助文件经既有规则行选中 `test_object_store_forcing_real_disk_support.py`；无精确集合断言变化。

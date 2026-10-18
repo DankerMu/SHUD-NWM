@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from packages.common.contracts.time_normalization import cycle_id_for, parse_cycle_time
+from packages.common.contracts.time_normalization import cycle_id_for, format_iso_utc, parse_cycle_time, parse_iso_utc
 from packages.common.manifest_index import (
     MAX_MANIFEST_INDEX_BYTES,
     MAX_MANIFEST_INDEX_ENTRIES,
@@ -230,7 +230,7 @@ def save_state_for_run(
                 "qc_passed": qc_passed,
                 "state_uri": result.snapshot.state_uri,
                 "checksum": result.snapshot.checksum,
-                "valid_time": _format_time(result.snapshot.valid_time),
+                "valid_time": format_iso_utc(result.snapshot.valid_time),
                 "source_id": result.snapshot.source_id,
                 "cycle_id": result.snapshot.cycle_id,
                 "lead_hours": result.snapshot.lead_hours,
@@ -820,7 +820,7 @@ def _verify_declared_checkpoints(output_root: Path, manifest_path: Path, raw_che
         if not _parseable_checkpoint_valid_time(valid_time):
             # Presence is not usability: an unparseable stamp is a malformed
             # declaration here, and letting it reach the loader turns a typed
-            # reject into a bare ``ValueError`` out of `_parse_time`.
+            # reject into a bare ``ValueError`` out of `parse_iso_utc`.
             unusable.append(f"entry {index} ({relative_path}, unparseable valid_time)")
             continue
         state = _declared_artifact_state(output_root, raw, relative_path)
@@ -849,7 +849,7 @@ def _parseable_checkpoint_valid_time(value: Any) -> bool:
     """
 
     try:
-        _ensure_utc(_parse_time(str(value)))
+        _ensure_utc(parse_iso_utc(str(value)))
     except (TypeError, ValueError, OverflowError, OSError):
         return False
     return True
@@ -953,7 +953,7 @@ def _load_state_checkpoint_manifest(manifest_path: Path) -> list[StateCheckpoint
             continue
         checkpoints.append(
             StateCheckpoint(
-                valid_time=_ensure_utc(_parse_time(str(valid_time))),
+                valid_time=_ensure_utc(parse_iso_utc(str(valid_time))),
                 ic_file=path,
                 original_shud_filename=str(raw.get("checkpoint_filename") or path.name),
                 lead_hours=_optional_int(raw.get("lead_hours")),
@@ -1119,13 +1119,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     return _click_main(argv)
 
 
-def _parse_time(value: str | datetime) -> datetime:
-    if isinstance(value, datetime):
-        return _ensure_utc(value)
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    return _ensure_utc(parsed)
-
-
 def _parse_time_flexible(value: str | datetime) -> datetime:
     if isinstance(value, datetime):
         return _ensure_utc(value)
@@ -1133,11 +1126,7 @@ def _parse_time_flexible(value: str | datetime) -> datetime:
     try:
         return _ensure_utc(parse_cycle_time(text))
     except ValueError:
-        return _parse_time(text)
-
-
-def _format_time(value: datetime) -> str:
-    return _ensure_utc(value).isoformat().replace("+00:00", "Z")
+        return parse_iso_utc(text)
 
 
 def _state_cycle_id(run: StateRunContext) -> str | None:

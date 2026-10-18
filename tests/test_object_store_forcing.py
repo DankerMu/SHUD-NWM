@@ -18,8 +18,8 @@ from packages.common.object_store_forcing import (
     PsycopgStationLookup,
     StationMetadata,
     _compute_cycle_compact,
-    _normalize_source_id,
     _resolve_disk_path,
+    _storage_source_segment,
     raise_station_not_found,
     read_station_forcing_csv,
 )
@@ -82,7 +82,7 @@ def _write_csv(
     station = station or _station()
     path = _resolve_disk_path(
         root,
-        _normalize_source_id(source_id),
+        _storage_source_segment(source_id),
         _compute_cycle_compact(cycle_time),
         station.basin_version_id,
         model_id,
@@ -166,7 +166,7 @@ def test_1_13a_path_resolution_heihe_ifs_happy_path(tmp_path: Path) -> None:
 
     resolved = _resolve_disk_path(
         tmp_path,
-        _normalize_source_id("IFS"),
+        _storage_source_segment("IFS"),
         _compute_cycle_compact(CYCLE_TIME),
         station.basin_version_id,
         MODEL_ID,
@@ -944,7 +944,7 @@ def _read_lines(
     station = station or _station()
     path = _resolve_disk_path(
         root,
-        _normalize_source_id(SOURCE_ID),
+        _storage_source_segment(SOURCE_ID),
         _compute_cycle_compact(CYCLE_TIME),
         station.basin_version_id,
         MODEL_ID,
@@ -955,7 +955,7 @@ def _read_lines(
         "object_store_root": root,
         "station_id": station.station_id,
         "basin_version_id": station.basin_version_id,
-        "source_id": _normalize_source_id(SOURCE_ID),
+        "source_id": _storage_source_segment(SOURCE_ID),
         "cycle_time": CYCLE_TIME,
         "model_id": MODEL_ID,
         "active_flag": station.active_flag,

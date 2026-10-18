@@ -10,7 +10,6 @@ import secrets
 import stat
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -433,10 +432,6 @@ def prove_server_identity(connection: Any) -> dict[str, Any]:
     except Exception:
         return dict.fromkeys(SERVER_IDENTITY_KEYS)
     return identity
-
-
-def utc_now() -> datetime:
-    return datetime.now(UTC)
 
 
 def encode_evidence(document: Mapping[str, Any]) -> bytes:

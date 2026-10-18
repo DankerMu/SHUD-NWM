@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
+from packages.common.contracts.time_normalization import format_iso_utc
 from packages.common.forcing_ts_render import (
     FORCING_TABLE_TOKEN,
     ForcingTemplatePair,
@@ -397,10 +398,10 @@ def source_priority(source_id: str) -> int:
 def _selection_row_response(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "forcing_version_id": row["forcing_version_id"],
-        "valid_time": _format_time(row["valid_time"]),
+        "valid_time": format_iso_utc(row["valid_time"]),
         "variable": row["variable"],
         "selected_source": row["selected_source"],
-        "source_cycle_time": _format_time(row["source_cycle_time"]),
+        "source_cycle_time": format_iso_utc(row["source_cycle_time"]),
         "fallback_order": list(row["fallback_order"]),
         "quality_flag": row["quality_flag"],
     }
@@ -410,7 +411,3 @@ def _ensure_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
-
-
-def _format_time(value: datetime) -> str:
-    return _ensure_utc(value).isoformat().replace("+00:00", "Z")

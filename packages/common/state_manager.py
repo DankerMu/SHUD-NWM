@@ -17,7 +17,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterator, Protocol
 from urllib.parse import unquote, urlparse
 
-from packages.common.contracts.time_normalization import cycle_id_for
+from packages.common.contracts.time_normalization import cycle_id_for, format_iso_utc
 from packages.common.object_store import LocalObjectStore, ObjectStoreError, sha256_bytes
 from packages.common.provider_atomic import (
     ProviderAtomicError,
@@ -1441,7 +1441,7 @@ class FileStateSnapshotIndexRepository:
                     "entry_status": "ready",
                     "entry_model_id": snapshot.model_id,
                     "entry_source_id": snapshot.source_id,
-                    "entry_valid_time": _format_time(snapshot.valid_time),
+                    "entry_valid_time": _format_optional_time(snapshot.valid_time),
                     "object_evidence": entry.get("object_evidence"),
                 },
             }
@@ -1466,7 +1466,7 @@ class FileStateSnapshotIndexRepository:
                     "reason": reason,
                     "model_id": model_id,
                     "source_id": source_id,
-                    "before_time": _format_time(before_time),
+                    "before_time": _format_optional_time(before_time),
                     "history_exists": None,
                     "state_snapshot_index": index_evidence,
                     "dependency": {
@@ -1513,7 +1513,7 @@ class FileStateSnapshotIndexRepository:
                 "reason": None,
                 "model_id": model_id,
                 "source_id": source,
-                "before_time": _format_time(cutoff),
+                "before_time": _format_optional_time(cutoff),
                 "history_exists": latest_entry is not None,
                 "history_entry_count": len(history_entries),
                 "latest_usable_state": latest_state,
@@ -1566,7 +1566,7 @@ class FileStateSnapshotIndexRepository:
                     "reason": reason,
                     "model_id": model_id,
                     "source_id": source_id,
-                    "before_time": _format_time(before_time),
+                    "before_time": _format_optional_time(before_time),
                     "history_exists_any_generation": None,
                     "history_exists_current_generation": None,
                     "state_snapshot_index": index_evidence,
@@ -1708,7 +1708,7 @@ class FileStateSnapshotIndexRepository:
                 "reason": None,
                 "model_id": model_id,
                 "source_id": source,
-                "before_time": _format_time(cutoff),
+                "before_time": _format_optional_time(cutoff),
                 "history_exists_any_generation": bool(any_entries),
                 "history_exists_current_generation": bool(current_entries),
                 "history_entry_count_any": len(any_entries),
@@ -1835,7 +1835,7 @@ class FileStateSnapshotIndexRepository:
                     _optional_str(earliest.get("cloned_from_model_id")) if earliest is not None else None
                 ),
                 "cutover_valid_time": (
-                    _format_time(_parse_state_index_time(earliest["valid_time"], field="valid_time"))
+                    _format_optional_time(_parse_state_index_time(earliest["valid_time"], field="valid_time"))
                     if earliest is not None
                     else None
                 ),
@@ -2159,7 +2159,7 @@ def publish_state_snapshot_index(
     generated = _ensure_utc(generated_at or datetime.now(tz=UTC))
     payload: dict[str, Any] = {
         "schema_version": FILE_STATE_SNAPSHOT_INDEX_SCHEMA_VERSION,
-        "generated_at": _format_time(generated),
+        "generated_at": _format_optional_time(generated),
         "entries": [dict(entry) for entry in entries],
     }
     payload["checksum"] = f"sha256:{_payload_checksum(payload)}"
@@ -3466,10 +3466,10 @@ def _plan_state_index_retention_lane(
             {
                 "model_id": group_key[0],
                 "source_id": group_key[1],
-                "window_start": _format_time(window_starts[group_key]),
+                "window_start": _format_optional_time(window_starts[group_key]),
                 "removed_count": len(times),
-                "removed_valid_time_min": _format_time(min(times)),
-                "removed_valid_time_max": _format_time(max(times)),
+                "removed_valid_time_min": _format_optional_time(min(times)),
+                "removed_valid_time_max": _format_optional_time(max(times)),
                 "kept_count": len(groups[group_key]) - len(times),
             }
         )
@@ -3489,7 +3489,7 @@ def _plan_state_index_retention_lane(
     if removed:
         payload: dict[str, Any] = {
             "schema_version": FILE_STATE_SNAPSHOT_INDEX_SCHEMA_VERSION,
-            "generated_at": _format_time(generated_at),
+            "generated_at": _format_optional_time(generated_at),
             "entries": [dict(entry) for entry in retained],
         }
         payload["checksum"] = f"sha256:{_payload_checksum(payload)}"
@@ -3576,7 +3576,7 @@ def _state_index_repair_entry_matches(
     try:
         parsed_valid_time = _parse_state_index_time(valid_time, field="valid_time")
         normalized_source = _normalize_state_index_source_id(source_id, field="source_id")
-        selector_valid_time = _format_time(
+        selector_valid_time = _format_optional_time(
             _ensure_utc(_parse_state_index_time(selector["valid_time"], field="valid_time"))
         )
     except StateManagerError:
@@ -3584,7 +3584,7 @@ def _state_index_repair_entry_matches(
     return (
         model_id == selector["model_id"]
         and normalized_source == selector["source_id"]
-        and _format_time(_ensure_utc(parsed_valid_time)) == selector_valid_time
+        and _format_optional_time(_ensure_utc(parsed_valid_time)) == selector_valid_time
         and identity_key[:3] == (model_id, normalized_source, selector_valid_time)
     )
 
@@ -3903,7 +3903,7 @@ def _validate_state_snapshot_index(
                 evidence={"state_id": state_id},
             )
         state_ids.add(state_id)
-        entry["index_generated_at"] = _format_time(generated_at)
+        entry["index_generated_at"] = _format_optional_time(generated_at)
         entries[key] = entry
     return entries
 
@@ -3965,11 +3965,11 @@ def _normalize_state_index_entry(
         "model_id": str(row["model_id"]),
         "run_id": str(row["run_id"]),
         "source_id": source_id,
-        "valid_time": _format_time(valid_time),
+        "valid_time": _format_optional_time(valid_time),
         "state_uri": state_uri,
         "checksum": checksum,
         "usable_flag": usable_flag,
-        "created_at": _format_time(
+        "created_at": _format_optional_time(
             _parse_state_index_time(row["created_at"], field=f"entries[{index}].created_at")
         )
         if row.get("created_at") not in (None, "")
@@ -3988,11 +3988,11 @@ def _state_index_entry_from_snapshot(snapshot: StateSnapshot) -> dict[str, Any]:
         "state_id": snapshot.state_id,
         "model_id": snapshot.model_id,
         "run_id": snapshot.run_id,
-        "valid_time": _format_time(snapshot.valid_time),
+        "valid_time": _format_optional_time(snapshot.valid_time),
         "state_uri": snapshot.state_uri,
         "checksum": snapshot.checksum,
         "usable_flag": snapshot.usable_flag,
-        "created_at": _format_time(snapshot.created_at),
+        "created_at": _format_optional_time(snapshot.created_at),
         "source_id": snapshot.source_id,
         "cycle_id": snapshot.cycle_id,
         "lead_hours": snapshot.lead_hours,
@@ -4044,7 +4044,7 @@ def _candidate_state_from_snapshot(snapshot: StateSnapshot) -> dict[str, Any]:
         "state_index_schema_version": FILE_STATE_SNAPSHOT_INDEX_SCHEMA_VERSION,
     }
     lineage = {key: value for key, value in lineage.items() if value not in (None, "")}
-    valid_time = _format_time(snapshot.valid_time)
+    valid_time = _format_optional_time(snapshot.valid_time)
     return {
         "state_id": snapshot.state_id,
         "init_state_id": snapshot.state_id,
@@ -4078,7 +4078,7 @@ def _state_index_identity_key(
     return (
         str(model_id),
         _normalize_state_index_source_id(source_id, field=f"{field_prefix}.source_id"),
-        _format_time(_ensure_utc(parsed_valid_time)) or "",
+        _format_optional_time(_ensure_utc(parsed_valid_time)) or "",
         str(cycle_id or ""),
         lead_text,
     )
@@ -4152,7 +4152,7 @@ def _state_index_base_key(*, model_id: str, source_id: str, valid_time: datetime
     return (
         str(model_id),
         _normalize_state_index_source_id(source_id, field="identity.source_id"),
-        _format_time(_ensure_utc(valid_time)) or "",
+        _format_optional_time(_ensure_utc(valid_time)) or "",
     )
 
 
@@ -4225,7 +4225,7 @@ def _state_index_unavailable_evidence(
             "reason": reason,
             "model_id": model_id,
             "source_id": source_id,
-            "valid_time": _format_time(valid_time),
+            "valid_time": _format_optional_time(valid_time),
             "state_snapshot_index": dict(index_evidence),
             "dependency": {
                 "name": "file_state_snapshot_index",
@@ -5051,11 +5051,11 @@ def _snapshot_to_dict(snapshot: StateSnapshot) -> dict[str, Any]:
         "state_id": snapshot.state_id,
         "model_id": snapshot.model_id,
         "run_id": snapshot.run_id,
-        "valid_time": _format_time(snapshot.valid_time),
+        "valid_time": _format_optional_time(snapshot.valid_time),
         "state_uri": snapshot.state_uri,
         "checksum": snapshot.checksum,
         "usable_flag": snapshot.usable_flag,
-        "created_at": _format_time(snapshot.created_at),
+        "created_at": _format_optional_time(snapshot.created_at),
         "source_id": snapshot.source_id,
         "cycle_id": snapshot.cycle_id,
         "lead_hours": snapshot.lead_hours,
@@ -5081,10 +5081,10 @@ def _ensure_utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
-def _format_time(value: datetime | None) -> str | None:
+def _format_optional_time(value: datetime | None) -> str | None:
     if value is None:
         return None
-    return _ensure_utc(value).isoformat().replace("+00:00", "Z")
+    return format_iso_utc(value)
 
 
 _SAFE_PATH_COMPONENT = re.compile(r"^[A-Za-z0-9_.-]+$")

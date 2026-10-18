@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
+from packages.common.contracts.time_normalization import format_iso_utc
 from packages.common.forecast_store import (
     DEFAULT_STATION_SERIES_LIMIT,
     MAX_STATION_SERIES_LIMIT,
@@ -144,7 +145,7 @@ class StationForcingFileNotFoundError(ObjectStoreForcingError):
                 "expected_path": str(expected_path),
                 "basin_version_id": basin_version_id,
                 "source_id": source_id,
-                "cycle_time": _format_time(cycle_time),
+                "cycle_time": _format_optional_time(cycle_time),
                 "model_id": model_id,
             }
         super().__init__(
@@ -239,7 +240,7 @@ class PsycopgStationLookup:
         return station
 
 
-def _normalize_source_id(source_id: str) -> str:
+def _storage_source_segment(source_id: str) -> str:
     raw_source_id = str(source_id or "").strip()
     if not raw_source_id:
         raise ValueError("source_id is required")
@@ -392,7 +393,7 @@ def read_station_forcing_csv(
     model_id = _required_text(model_id, "model_id")
     try:
         model_id = _safe_storage_segment(model_id, "model_id")
-        source_normalized = _normalize_source_id(source_id)
+        source_normalized = _storage_source_segment(source_id)
     except ValueError as error:
         field = "source_id" if "source_id" in str(error) else "model_id"
         rejected_value = source_id if field == "source_id" else model_id
@@ -792,7 +793,7 @@ def _station_series_response(
     window_rows: Sequence[tuple[str, datetime, float]],
 ) -> dict[str, Any]:
     source_display = _display_source_id(source_id)
-    cycle_time_formatted = _format_time(cycle_time)
+    cycle_time_formatted = _format_optional_time(cycle_time)
     available_by_variable = _group_rows(unbounded_rows)
     returned_by_variable = _group_rows(rows)
     series_items: list[dict[str, Any]] = []
@@ -807,7 +808,7 @@ def _station_series_response(
         is_truncated = len(returned_points) < len(available_points)
         point_payload = [
             {
-                "valid_time": _format_time(valid_time),
+                "valid_time": _format_optional_time(valid_time),
                 "value": float(value),
                 "quality_flag": "ok",
                 "source_id": source_display,
@@ -829,8 +830,8 @@ def _station_series_response(
                 "metadata": {
                     "limit": limit,
                     "returned_points": len(point_payload),
-                    "requested_from": _format_time(requested_from),
-                    "requested_to": _format_time(requested_to),
+                    "requested_from": _format_optional_time(requested_from),
+                    "requested_to": _format_optional_time(requested_to),
                     "returned_from": returned_from,
                     "returned_to": returned_to,
                     "truncated": is_truncated,
@@ -846,11 +847,11 @@ def _station_series_response(
         "model_id": model_id,
         "source_id": source_display,
         "cycle_time": cycle_time_formatted,
-        "valid_time_start": _format_time(min(valid_times)) if valid_times else None,
-        "valid_time_end": _format_time(max(valid_times)) if valid_times else None,
+        "valid_time_start": _format_optional_time(min(valid_times)) if valid_times else None,
+        "valid_time_end": _format_optional_time(max(valid_times)) if valid_times else None,
         "limit": limit,
-        "requested_from": _format_time(requested_from),
-        "requested_to": _format_time(requested_to),
+        "requested_from": _format_optional_time(requested_from),
+        "requested_to": _format_optional_time(requested_to),
         "series": series_items,
     }
 
@@ -966,10 +967,10 @@ def _ensure_utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
-def _format_time(value: datetime | None) -> str | None:
+def _format_optional_time(value: datetime | None) -> str | None:
     if value is None:
         return None
-    return _ensure_utc(value).isoformat().replace("+00:00", "Z")
+    return format_iso_utc(value)
 
 
 def _display_source_id(source_id: str) -> str:
