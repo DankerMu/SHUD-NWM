@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 from apps.api.errors import ApiError
 from apps.api.routes.hydro_display_catalog import _require_live_postgis_mvt
 from apps.api.routes.hydro_display_constants import logger
-from apps.api.routes.hydro_display_instants import _format_time
+from apps.api.routes.hydro_display_instants import _mvt_time_text
 from services.tiles.mvt import (
     MVT_BUFFER,
     MVT_EXTENT,
@@ -241,7 +241,7 @@ def _fetch_hydro_national_mvt_tile_bytes(
                 details={
                     "layer_id": public_hydro_layer_id(variable),
                     "source": source,
-                    "cycle": _format_time(cycle),
+                    "cycle": _mvt_time_text(cycle),
                     "covered_network_count": len(coverage.covered_networks),
                     "active_network_count": len(coverage.active_networks),
                 },

@@ -1385,11 +1385,11 @@ def _forecast_cycle_source_matches(value: Any, source: str) -> bool:
 
 
 def _forecast_cycle_time_matches(value: Any, cycle_time: datetime) -> bool:
-    parsed = _coerce_datetime(value)
+    parsed = _lenient_utc_datetime(value)
     return parsed == cycle_time
 
 
-def _coerce_datetime(value: Any) -> datetime | None:
+def _lenient_utc_datetime(value: Any) -> datetime | None:
     if value is None:
         return None
     if isinstance(value, datetime):
@@ -1682,8 +1682,8 @@ def _strict_identity_from_hydro_row(
         run_id=requested.run_id,
         model_id=requested.model_id,
         hydro_status=str(row["status"]) if row.get("status") is not None else None,
-        hydro_started_at=_coerce_datetime(row.get("started_at")),
-        hydro_updated_at=_coerce_datetime(row.get("updated_at")),
+        hydro_started_at=_lenient_utc_datetime(row.get("started_at")),
+        hydro_updated_at=_lenient_utc_datetime(row.get("updated_at")),
     )
 
 
@@ -1794,7 +1794,7 @@ def _source_cycle_for_job(store: PipelineStore, job: PipelineJob) -> tuple[str |
         return (None, None)
     return (
         str(row["source_id"]) if row.get("source_id") is not None else None,
-        _coerce_datetime(row.get("cycle_time")),
+        _lenient_utc_datetime(row.get("cycle_time")),
     )
 
 
@@ -1826,7 +1826,7 @@ def _requested_identity_payload(identity: _StrictPipelineIdentity) -> dict[str, 
 
 
 def _candidate_identity_payload(row: dict[str, Any]) -> dict[str, Any]:
-    cycle_time = _coerce_datetime(row.get("cycle_time"))
+    cycle_time = _lenient_utc_datetime(row.get("cycle_time"))
     return _bounded_mapping(
         {
             "source_id": row.get("source_id"),

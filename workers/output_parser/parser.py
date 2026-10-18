@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
+from packages.common.contracts.time_normalization import format_iso_utc
 from packages.common.object_store import LocalObjectStore
 from packages.common.status_vocab import FAILABLE_RUN_STATUSES, PARSE_READY_RUN_STATUSES
 from packages.common.storage import validate_object_path
@@ -371,11 +372,11 @@ class FileOutputParserRepository:
         outputs = _mapping(manifest.get("outputs"))
         run_type = str(manifest.get("run_type") or "forecast")
         cycle_time_value = manifest.get("cycle_time") or identity.get("cycle_time")
-        cycle_time = _parse_time(cycle_time_value) if cycle_time_value not in (None, "") else None
+        cycle_time = _parse_manifest_time(cycle_time_value) if cycle_time_value not in (None, "") else None
         if cycle_time is None and run_type != "analysis":
             raise OutputParsingError("CYCLE_TIME_MISSING", f"hydro_run {run_id} has no cycle_time.")
         end_time_value = manifest.get("end_time") or identity.get("end_time")
-        end_time = _parse_time(end_time_value) if end_time_value not in (None, "") else None
+        end_time = _parse_manifest_time(end_time_value) if end_time_value not in (None, "") else None
         if end_time is None and run_type != "analysis":
             raise OutputParsingError("END_TIME_MISSING", f"hydro_run {run_id} has no end_time.")
         context = HydroRunContext(
@@ -388,7 +389,7 @@ class FileOutputParserRepository:
             source_id=manifest.get("source_id") or identity.get("source_id") or identity.get("source"),
             cycle_id=identity.get("cycle_id"),
             cycle_time=cycle_time,
-            start_time=_parse_time(manifest.get("start_time") or identity.get("start_time")),
+            start_time=_parse_manifest_time(manifest.get("start_time") or identity.get("start_time")),
             output_uri=outputs.get("output_uri") or manifest.get("output_uri"),
             run_type=run_type,
             scenario_id=manifest.get("scenario_id") or identity.get("scenario_id"),
@@ -467,7 +468,7 @@ class FileOutputParserRepository:
             "rows_written": self._last_rows_written.get(run_id, 0),
             "timeseries_uri": self._last_timeseries_uri.get(run_id),
             "qc_result_uri": self._last_qc_uri.get(run_id),
-            "parsed_at": _format_time(datetime.now(UTC)),
+            "parsed_at": format_iso_utc(datetime.now(UTC)),
             "repository": "file",
         }
         uri = self.object_store.write_bytes_atomic(
@@ -482,7 +483,7 @@ class FileOutputParserRepository:
             "status": "failed",
             "error_code": error_code,
             "error_message": error_message,
-            "failed_at": _format_time(datetime.now(UTC)),
+            "failed_at": format_iso_utc(datetime.now(UTC)),
             "repository": "file",
         }
         uri = self.object_store.write_bytes_atomic(
@@ -1426,8 +1427,8 @@ def _require_valid_time_in_run_window(valid_time: datetime, context: HydroRunCon
     if not cycle_time <= _ensure_utc(valid_time) <= end_time:
         raise OutputParsingError(
             "VALID_TIME_OUTSIDE_RUN_WINDOW",
-            f"Row {line_number} has valid_time {_format_time(valid_time)} outside the run window "
-            f"[{_format_time(cycle_time)}, {_format_time(end_time)}]",
+            f"Row {line_number} has valid_time {format_iso_utc(valid_time)} outside the run window "
+            f"[{format_iso_utc(cycle_time)}, {format_iso_utc(end_time)}]",
         )
 
 
@@ -1444,7 +1445,7 @@ def _lead_time_hours(valid_time: datetime, cycle_time: datetime | None) -> int:
 def _qc_row(row: RiverTimeseriesRow) -> dict[str, Any]:
     return {
         "segment_id": row.river_segment_id,
-        "valid_time": _format_time(row.valid_time),
+        "valid_time": format_iso_utc(row.valid_time),
         "value": row.value,
     }
 
@@ -1453,7 +1454,7 @@ def _mapping(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
 
-def _parse_time(value: Any) -> datetime:
+def _parse_manifest_time(value: Any) -> datetime:
     if isinstance(value, datetime):
         return _ensure_utc(value)
     if value in (None, ""):
@@ -1509,7 +1510,7 @@ def _timeseries_row_payload(row: RiverTimeseriesRow) -> dict[str, Any]:
         "basin_version_id": row.basin_version_id,
         "river_network_version_id": row.river_network_version_id,
         "river_segment_id": row.river_segment_id,
-        "valid_time": _format_time(row.valid_time),
+        "valid_time": format_iso_utc(row.valid_time),
         "lead_time_hours": row.lead_time_hours,
         "variable": row.variable,
         "value": row.value,
@@ -1552,10 +1553,6 @@ def _ensure_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
-
-
-def _format_time(value: datetime) -> str:
-    return _ensure_utc(value).isoformat().replace("+00:00", "Z")
 
 
 def _runtime_error_message(error: BaseException) -> str:

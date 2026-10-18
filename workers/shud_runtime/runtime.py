@@ -21,6 +21,7 @@ from urllib.parse import urlparse
 from packages.common.contracts.time_normalization import (
     check_three_way_time_consistency as _check_three_way_time_consistency,
 )
+from packages.common.contracts.time_normalization import format_iso_utc
 from packages.common.object_store import LocalObjectStore, ObjectStoreReadLimitExceededError, sha256_bytes
 from packages.common.redaction import redact_text
 from packages.common.safe_fs import (
@@ -283,8 +284,8 @@ class PsycopgHydroRunRepository:
                 _initial_state_id(manifest),
                 manifest.get("source_id"),
                 _parse_time_or_none(manifest.get("cycle_time")),
-                _parse_time(manifest["start_time"]),
-                _parse_time(manifest["end_time"]),
+                _parse_aware_time(manifest["start_time"]),
+                _parse_aware_time(manifest["end_time"]),
                 run_manifest_uri,
             ),
         )
@@ -875,8 +876,8 @@ class SHUDRuntime:
                         content, "Update_IC_STEP", str(hour * 60), separator=separator
                     )
                 else:
-                    end_time = _parse_time(manifest["start_time"]) + timedelta(hours=hour)
-                    content = _replace_or_append(content, "END_TIME", _format_time(end_time), separator=separator)
+                    end_time = _parse_aware_time(manifest["start_time"]) + timedelta(hours=hour)
+                    content = _replace_or_append(content, "END_TIME", format_iso_utc(end_time), separator=separator)
                 content = _replace_or_append(content, "OUTPUT_DIR", str(recovery_root), separator=separator)
                 command = _runtime_command(
                     self.config.shud_executable,
@@ -1448,7 +1449,7 @@ class SHUDRuntime:
             return
 
         rejected_state_ids: set[str] = set()
-        before_time = _parse_time(manifest.get("cycle_time") or manifest["start_time"])
+        before_time = _parse_aware_time(manifest.get("cycle_time") or manifest["start_time"])
         # #1431 escalate accounting: one drifted snapshot is a snapshot accident and
         # degrades like any other corrupt candidate, but a ladder whose candidates were
         # ALL rejected for a time mismatch (at least two of them) is systematic drift and
@@ -1883,7 +1884,7 @@ class SHUDRuntime:
         # snapshot/header/run-start equality of warm continuity is enforced at daemon
         # selection time; here a forecast may legitimately reuse an older state and the
         # header is deliberately re-stamped to the run start below.)
-        start_time = _parse_time(manifest["start_time"])
+        start_time = _parse_aware_time(manifest["start_time"])
         native_header_minute = _read_cfg_ic_header_minute(target)
         self._verify_ic_time_consistency(manifest, native_header_minute)
         normalize_staged_ic_negative_residuals(manifest, target, input_dir)
@@ -2559,7 +2560,7 @@ class SHUDRuntime:
             "array_task_id": array_task_id,
             "error_code": error.error_code,
             "error_message": error.message[:TASK_OUTCOME_MESSAGE_MAX_LENGTH],
-            "failed_at": _format_time(datetime.now(UTC)),
+            "failed_at": format_iso_utc(datetime.now(UTC)),
         }
         _write_text_no_follow(
             log_dir / TASK_OUTCOME_RECEIPT_FILENAME,
@@ -3126,8 +3127,8 @@ def _cfg_replacements(
     default_interval_minutes: int,
 ) -> dict[str, str]:
     return {
-        "START_TIME": _format_time(_parse_time(manifest["start_time"])),
-        "END_TIME": _format_time(_parse_time(manifest["end_time"])),
+        "START_TIME": format_iso_utc(_parse_aware_time(manifest["start_time"])),
+        "END_TIME": format_iso_utc(_parse_aware_time(manifest["end_time"])),
         "OUTPUT_DIR": str(output_dir),
         "MODEL_OUTPUT_INTERVAL": str(_output_interval_minutes(manifest, default_interval_minutes)),
         "INIT_MODE": init_mode,
@@ -3148,7 +3149,9 @@ def _shud_end_day(manifest: dict[str, Any]) -> float:
     runtime = manifest.get("runtime") or {}
     if runtime.get("shud_end_day") is not None:
         return float(runtime["shud_end_day"])
-    duration_days = (_parse_time(manifest["end_time"]) - _parse_time(manifest["start_time"])).total_seconds() / 86_400.0
+    duration_days = (
+        _parse_aware_time(manifest["end_time"]) - _parse_aware_time(manifest["start_time"])
+    ).total_seconds() / 86_400.0
     return _shud_start_day(manifest) + duration_days
 
 
@@ -3156,7 +3159,7 @@ def _shud_start_minute(manifest: dict[str, Any]) -> float:
     runtime = manifest.get("runtime") or {}
     if runtime.get("shud_start_minute") is not None:
         return float(runtime["shud_start_minute"])
-    return _parse_time(manifest["start_time"]).timestamp() / 60.0
+    return _parse_aware_time(manifest["start_time"]).timestamp() / 60.0
 
 
 def _read_internal_forcing_rows(path: Path) -> list[dict[str, Any]]:
@@ -3167,7 +3170,7 @@ def _read_internal_forcing_rows(path: Path) -> list[dict[str, Any]]:
             return []
         if {"valid_time", "variable", "value"}.issubset(set(reader.fieldnames)):
             for row in reader:
-                valid_time = _parse_time(str(row["valid_time"]))
+                valid_time = _parse_aware_time(str(row["valid_time"]))
                 variable = str(row["variable"])
                 buckets.setdefault(valid_time, {})[variable] = float(row["value"])
         elif "valid_time" in reader.fieldnames and "variable" in reader.fieldnames:
@@ -3176,7 +3179,7 @@ def _read_internal_forcing_rows(path: Path) -> list[dict[str, Any]]:
                 raise SHUDRuntimeError("FORCING_FORMAT_UNSUPPORTED", f"No station value column found in {path}.")
             value_column = station_columns[0]
             for row in reader:
-                valid_time = _parse_time(str(row["valid_time"]))
+                valid_time = _parse_aware_time(str(row["valid_time"]))
                 variable = str(row["variable"])
                 buckets.setdefault(valid_time, {})[variable] = float(row[value_column])
         else:
@@ -3706,7 +3709,7 @@ class _StateCheckpointTracker:
     def __init__(self, manifest: dict[str, Any], output_dir: Path) -> None:
         self.manifest = manifest
         self.output_dir = output_dir
-        self.start_time = _parse_time(manifest["start_time"])
+        self.start_time = _parse_aware_time(manifest["start_time"])
         self.project_name = _project_name(manifest)
         self.source_path = output_dir / f"{self.project_name}.cfg.ic.update"
         self.checkpoint_dir = output_dir / "state_checkpoints"
@@ -3807,7 +3810,7 @@ class _StateCheckpointTracker:
         slurm_job_id, array_task_id = _task_outcome_attempt_identity()
         return {
             "run_id": str(self.manifest["run_id"]),
-            "generated_at": _format_time(datetime.now(UTC)),
+            "generated_at": format_iso_utc(datetime.now(UTC)),
             "slurm_job_id": slurm_job_id,
             "array_task_id": array_task_id,
             "requested_checkpoint_hours": sorted(self.targets),
@@ -3886,7 +3889,7 @@ class _StateCheckpointTracker:
             return False
         self.captured[hour] = {
             "lead_hours": hour,
-            "valid_time": _format_time(valid_time),
+            "valid_time": format_iso_utc(valid_time),
             "path": str(target),
             "relative_path": str(target.relative_to(self.output_dir)),
             "original_shud_filename": source_path.name,
@@ -3921,7 +3924,7 @@ class _StateCheckpointTracker:
             return
         self.captured[hour] = {
             "lead_hours": hour,
-            "valid_time": _format_time(valid_time),
+            "valid_time": format_iso_utc(valid_time),
             "path": str(target),
             "relative_path": str(target.relative_to(self.output_dir)),
             "original_shud_filename": self.source_path.name,
@@ -4029,7 +4032,7 @@ def _first_file(directory: Path, pattern: str) -> Path | None:
     return matches[0] if matches else None
 
 
-def _parse_time(value: str | datetime) -> datetime:
+def _parse_aware_time(value: str | datetime) -> datetime:
     if isinstance(value, datetime):
         return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
     candidate = value.replace("Z", "+00:00")
@@ -4038,11 +4041,7 @@ def _parse_time(value: str | datetime) -> datetime:
 
 
 def _parse_time_or_none(value: str | datetime | None) -> datetime | None:
-    return _parse_time(value) if value is not None else None
-
-
-def _format_time(value: datetime) -> str:
-    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    return _parse_aware_time(value) if value is not None else None
 
 
 def _ensure_utc(value: datetime) -> datetime:
@@ -4060,7 +4059,9 @@ def _expected_timesteps(manifest: dict[str, Any], default_interval_minutes: int)
     if explicit is not None:
         return int(explicit)
     interval_minutes = _output_interval_minutes(manifest, default_interval_minutes)
-    duration_seconds = (_parse_time(manifest["end_time"]) - _parse_time(manifest["start_time"])).total_seconds()
+    duration_seconds = (
+        _parse_aware_time(manifest["end_time"]) - _parse_aware_time(manifest["start_time"])
+    ).total_seconds()
     if duration_seconds <= 0:
         raise SHUDRuntimeError("INVALID_TIME_WINDOW", "end_time must be after start_time.")
     step_seconds = interval_minutes * 60
@@ -4466,7 +4467,7 @@ def _set_initial_state_from_snapshot(manifest: dict[str, Any], snapshot: StateSn
     manifest["initial_state"] = {
         "state_id": snapshot.state_id,
         "ic_file_uri": snapshot.state_uri,
-        "valid_time": _format_time(snapshot.valid_time),
+        "valid_time": format_iso_utc(snapshot.valid_time),
         "checksum": snapshot.checksum,
         "quality": quality,
     }

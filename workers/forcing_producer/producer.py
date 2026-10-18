@@ -21,6 +21,7 @@ from packages.common.contracts.direct_grid import (
     DirectGridForcingContract,
 )
 from packages.common.contracts.region import GeoBBox
+from packages.common.contracts.time_normalization import format_iso_utc
 from packages.common.grid_registry_bbox_guard import (
     BboxMismatchError,
     verify_download_bbox_matches_registry,
@@ -1871,7 +1872,7 @@ class ForcingProducer:
                     if not math.isfinite(value):
                         raise ForcingProductionError(
                             f"Interpolated forcing value is not finite for station {station.station_id} "
-                            f"variable {variable} at {_format_time(valid_time)}."
+                            f"variable {variable} at {format_iso_utc(valid_time)}."
                         )
                     rows.append(
                         ForcingTimeseriesRow(
@@ -2037,7 +2038,7 @@ class ForcingProducer:
         lineage_json = {
             "producer_version": self.config.producer_version,
             "source_id": source_id,
-            "cycle_time": _format_time(cycle_time),
+            "cycle_time": format_iso_utc(cycle_time),
             "min_lead_hours": (lead_window or {}).get("min_lead_hours"),
             "max_lead_hours": (lead_window or {}).get("max_lead_hours"),
             "model_id": model_id,
@@ -2070,7 +2071,7 @@ class ForcingProducer:
                     "fallback_reason": fallback_lineage.fallback_reason,
                     "fallback_source_id": fallback_lineage.fallback_source_id,
                     "fallback_valid_times": [
-                        _format_time(valid_time) for valid_time in fallback_lineage.fallback_valid_times
+                        format_iso_utc(valid_time) for valid_time in fallback_lineage.fallback_valid_times
                     ],
                 }
             )
@@ -2084,9 +2085,9 @@ class ForcingProducer:
             "forcing_version_id": forcing_version_id,
             "model_id": model_id,
             "source_id": source_id,
-            "cycle_time": _format_time(cycle_time),
-            "start_time": _format_time(valid_times[0]),
-            "end_time": _format_time(coverage_end_time),
+            "cycle_time": format_iso_utc(cycle_time),
+            "start_time": format_iso_utc(valid_times[0]),
+            "end_time": format_iso_utc(coverage_end_time),
             "basin_id": basin_id,
             "basin_version_id": basin_version_id,
             "river_network_version_id": river_network_version_id,
@@ -2557,7 +2558,7 @@ def format_tsd_forc(
         for variable in variables:
             writer.writerow(
                 [
-                    _format_time(valid_time),
+                    format_iso_utc(valid_time),
                     variable,
                     *[_format_number(values[(valid_time, variable, station_id)]) for station_id in station_ids],
                 ]
@@ -2572,7 +2573,7 @@ def format_debug_csv(rows: Sequence[ForcingTimeseriesRow]) -> str:
     for row in sorted(rows, key=lambda item: (item.valid_time, item.station_id, item.variable)):
         writer.writerow(
             [
-                _format_time(row.valid_time),
+                format_iso_utc(row.valid_time),
                 row.station_id,
                 row.variable,
                 _format_number(row.value),
@@ -2666,10 +2667,6 @@ def _ensure_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
-
-
-def _format_time(value: datetime) -> str:
-    return _ensure_utc(value).isoformat().replace("+00:00", "Z")
 
 
 def _format_number(value: float) -> str:
@@ -3065,8 +3062,8 @@ def _time_range_manifest(valid_times: Sequence[datetime]) -> dict[str, str | int
         return {"start_time": "", "end_time": "", "timestep_count": 0}
     ordered = sorted(valid_times)
     return {
-        "start_time": _format_time(ordered[0]),
-        "end_time": _format_time(ordered[-1]),
+        "start_time": format_iso_utc(ordered[0]),
+        "end_time": format_iso_utc(ordered[-1]),
         "timestep_count": len(ordered),
     }
 
@@ -3104,8 +3101,8 @@ def _canonical_input_signature(
         {
             "canonical_product_id": product.canonical_product_id,
             "source_id": product.source_id,
-            "cycle_time": _format_time(product.cycle_time),
-            "valid_time": _format_time(product.valid_time),
+            "cycle_time": format_iso_utc(product.cycle_time),
+            "valid_time": format_iso_utc(product.valid_time),
             "lead_time_hours": _product_lead_hours(product, cycle_time),
             "variable": product.variable,
             "unit": product.unit,
@@ -3240,7 +3237,7 @@ def _missing_product_details(
             continue
         for valid_time in all_times:
             if valid_time not in product_times:
-                missing.append(f"{variable}:{_format_time(valid_time)}")
+                missing.append(f"{variable}:{format_iso_utc(valid_time)}")
     return missing
 
 
@@ -3289,7 +3286,7 @@ def _validate_canonical_product_units(
         for valid_time, product in sorted(products_for_variable.items(), key=lambda item: item[0]):
             if product.unit not in expected_units:
                 mismatches.append(
-                    f"{variable}:{_format_time(valid_time)} unit={product.unit!r} expected={list(expected_units)}"
+                    f"{variable}:{format_iso_utc(valid_time)} unit={product.unit!r} expected={list(expected_units)}"
                 )
     if mismatches:
         raise ForcingProductionError(f"Canonical product unit mismatch: {', '.join(mismatches[:10])}")

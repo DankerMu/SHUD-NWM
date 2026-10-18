@@ -382,7 +382,7 @@
 
   **Minimal mergeable slice:** atomic - 同 3.2。
 
-- [ ] 3.4 批次 `workers/` + `apps/`：3.1 命中清单中这两个根下的函数（fullmatch 口径 8 处：workers 4 个 `_format_time` 删除并改用 `format_iso_utc`；`runtime._parse_time`、`parser._parse_time`、`pipeline._coerce_datetime`、`hydro_display_instants._format_time` 行为不同，改名、体不变；`apps/` 下无 fullmatch 命中的归一化器，`_normalize_source_for_query/_strict` 名字不匹配、不动），ceiling −8。
+- [x] 3.4 批次 `workers/` + `apps/`：3.1 命中清单中这两个根下的函数（fullmatch 口径 8 处：workers 4 个 `_format_time` 删除并改用 `format_iso_utc`；`runtime._parse_time`、`parser._parse_time`、`pipeline._coerce_datetime`、`hydro_display_instants._format_time` 行为不同，改名、体不变；`apps/` 下无 fullmatch 命中的归一化器，`_normalize_source_for_query/_strict` 名字不匹配、不动），ceiling −8。
 
   Depends on: 3.1
 

@@ -95,7 +95,7 @@ def _validated_national_valid_time_selector(
     return _require_seconds_precision_instant(cycle, "cycle")
 
 
-def _format_time(value: Any) -> str:
+def _mvt_time_text(value: Any) -> str:
     return canonical_mvt_time(value) or str(value)
 
 
@@ -195,7 +195,7 @@ def _national_source_cycle_tile_input(
         layer_id=public_hydro_layer_id(variable),
         source_id=HYDRO_NATIONAL_SOURCE_ID,
         source_version=f"{HYDRO_NATIONAL_SOURCE_VERSION}:{source}:{cycle_text}:{source_digest}",
-        valid_time=_format_time(valid_time),
+        valid_time=_mvt_time_text(valid_time),
         z=z,
         x=x,
         y=y,
