@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from packages.common.contracts.time_normalization import cycle_id_for, parse_cycle_time
 from packages.common.manifest_index import (
     MAX_MANIFEST_INDEX_BYTES,
     MAX_MANIFEST_INDEX_ENTRIES,
@@ -41,7 +42,6 @@ from packages.common.state_qc import (
     cfg_ic_header_shape,
     normalize_state_negative_residuals,
 )
-from workers.data_adapters.base import cycle_id_for, parse_cycle_time
 
 LOGGER = logging.getLogger(__name__)
 

@@ -18,6 +18,9 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
 
+from packages.common.contracts.time_normalization import (
+    check_three_way_time_consistency as _check_three_way_time_consistency,
+)
 from packages.common.object_store import LocalObjectStore, ObjectStoreReadLimitExceededError, sha256_bytes
 from packages.common.redaction import redact_text
 from packages.common.safe_fs import (
@@ -47,7 +50,6 @@ from packages.common.state_qc import (
     normalize_state_negative_residuals,
     state_ic_structure_complete,
 )
-from services.orchestrator.time_consistency import check_three_way_time_consistency as _check_three_way_time_consistency
 
 
 class SHUDRuntimeError(RuntimeError):

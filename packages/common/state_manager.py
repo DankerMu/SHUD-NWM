@@ -17,6 +17,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterator, Protocol
 from urllib.parse import unquote, urlparse
 
+from packages.common.contracts.time_normalization import cycle_id_for
 from packages.common.object_store import LocalObjectStore, ObjectStoreError, sha256_bytes
 from packages.common.provider_atomic import (
     ProviderAtomicError,
@@ -39,7 +40,6 @@ from packages.common.scheduler_limits import MAX_LOOKBACK_HOURS
 from packages.common.source_identity import normalize_source_id
 from packages.common.state_lineage import STATE_QC_FAILED
 from packages.common.state_qc import MAX_STATE_IC_BYTES, run_state_variable_qc
-from workers.data_adapters.base import cycle_id_for
 
 logger = logging.getLogger(__name__)
 

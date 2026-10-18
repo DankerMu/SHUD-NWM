@@ -1495,6 +1495,35 @@ DIRECT_GRID_SURFACE_PATH_PATTERNS: tuple[str, ...] = (
 # deletes `[0]`, and an appended entry would shift every index after it.
 DIRECT_GRID_CONTRACT_CANONICAL_PATH = "packages/common/contracts/direct_grid.py"
 
+# The `workers/data_adapters/**` and `workers/data_adapters/base.py` rule
+# targets, extracted (#2922) so the time-normalization contract row below
+# shares them instead of copying them.
+DATA_ADAPTERS_DIRECTORY_TESTS: tuple[str, ...] = (
+    "tests/test_gfs_adapter.py",
+    "tests/test_ifs_adapter.py",
+    "tests/test_era5_adapter.py",
+    "tests/test_data_adapter_resolution.py",
+    "tests/test_production_scheduler.py",
+    "tests/test_object_store_roots.py",
+    "tests/test_grid_registry_bbox.py",
+    "tests/test_producer_bbox_preflight.py",
+    "tests/test_e2e.py",
+    "tests/test_e2e_ifs.py",
+)
+
+DATA_ADAPTERS_BASE_HELPER_TESTS: tuple[str, ...] = (
+    "tests/test_state_clone_cutover_hook.py",
+    "tests/test_scheduler_journal_retention_archive.py",
+    "tests/test_pipeline_job_provenance_importer.py",
+    "tests/test_pipeline_job_provenance_publisher.py",
+    "tests/test_pipeline_ops_identity_envelope.py",
+)
+
+# entropy-burndown 1.2 (#2922): the time-normalization contract's canonical
+# home. base.py and services/orchestrator/time_consistency.py stay re-export
+# shims until 1.3, so their rules stay too.
+TIME_NORMALIZATION_CONTRACT_PATH = "packages/common/contracts/time_normalization.py"
+
 FILE_JOURNAL_READ_STATE_TESTS: tuple[str, ...] = (
     "tests/test_file_orchestration_journal.py",
     "tests/test_file_orchestration_migration.py",
@@ -3394,18 +3423,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # (0.8-2.4s) and every adapter shares the object-store root convention,
         # so they ride the directory list rather than three narrow rules.
         "workers/data_adapters/**",
-        (
-            "tests/test_gfs_adapter.py",
-            "tests/test_ifs_adapter.py",
-            "tests/test_era5_adapter.py",
-            "tests/test_data_adapter_resolution.py",
-            "tests/test_production_scheduler.py",
-            "tests/test_object_store_roots.py",
-            "tests/test_grid_registry_bbox.py",
-            "tests/test_producer_bbox_preflight.py",
-            "tests/test_e2e.py",
-            "tests/test_e2e_ifs.py",
-        ),
+        DATA_ADAPTERS_DIRECTORY_TESTS,
     ),
     PathTestRule(
         # base.py's remaining non-gated importers are orchestration-layer suites
@@ -3416,13 +3434,17 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # #2420: the provenance publisher/importer and Ops identity envelope mint
         # cycle ids through cycle_id_for, so a helper-only PR must run them.
         "workers/data_adapters/base.py",
-        (
-            "tests/test_state_clone_cutover_hook.py",
-            "tests/test_scheduler_journal_retention_archive.py",
-            "tests/test_pipeline_job_provenance_importer.py",
-            "tests/test_pipeline_job_provenance_publisher.py",
-            "tests/test_pipeline_ops_identity_envelope.py",
-        ),
+        DATA_ADAPTERS_BASE_HELPER_TESTS,
+    ),
+    PathTestRule(
+        # #2922: the nine cycle-time helpers moved here from base.py, and
+        # check_three_way_time_consistency from services/orchestrator/
+        # time_consistency.py. NOT a stop row and NOT a copy of the broad
+        # `services/orchestrator/**` row: the targets are base.py's two rows
+        # (shared constants, so they cannot drift apart) plus the direct
+        # consumer suite of the three-way check.
+        TIME_NORMALIZATION_CONTRACT_PATH,
+        (*DATA_ADAPTERS_DIRECTORY_TESTS, *DATA_ADAPTERS_BASE_HELPER_TESTS, "tests/test_warm_start_chaining.py"),
     ),
     PathTestRule(
         # #1455: the producer/cli/store/package surface has same-subject suites
