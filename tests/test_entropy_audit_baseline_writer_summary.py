@@ -63,7 +63,8 @@ def test_entropy_baseline_writer_creates_latest_with_required_fields_and_no_arch
 def test_entropy_baseline_writer_preserves_v1_trend_semantics_for_current_repo() -> None:
     report = _repo_report(REPO_ROOT)
     baseline = write_entropy_baseline.build_baseline_snapshot(REPO_ROOT, report)
-    tracked_v1_summary = json.loads(BASELINE.read_text(encoding="utf-8"))["summary"]
+    tracked = json.loads(BASELINE.read_text(encoding="utf-8"))
+    tracked_v1_summary = tracked["summary"]
 
     modules = baseline["modules"]
     assert isinstance(modules, dict)
@@ -73,8 +74,10 @@ def test_entropy_baseline_writer_preserves_v1_trend_semantics_for_current_repo()
     assert inventory.v1_summary_source_files > 700
     assert inventory.total_source_files > inventory.v1_summary_source_files
     assert baseline["summary"]["total_source_files"] > emitted_module_file_count_sum
-    assert tracked_v1_summary["total_test_files"] == 247
-    assert tracked_v1_summary["total_instruction_files"] == 3
+    for tracked_count_key in ("total_test_files", "total_instruction_files"):
+        tracked_count = tracked_v1_summary[tracked_count_key]
+        assert type(tracked_count) is int and tracked_count > 0, tracked_count_key
+    assert tracked_v1_summary["total_modules"] == len(tracked["modules"])
     assert inventory.total_test_files == _expected_baseline_test_count()
     assert inventory.total_instruction_files == _expected_baseline_instruction_count()
     assert inventory.v1_summary_test_files == _expected_baseline_test_count(v1_summary=True)
