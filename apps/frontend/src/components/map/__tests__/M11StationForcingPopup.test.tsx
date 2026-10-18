@@ -7,14 +7,14 @@ import { formatIssueTime } from '@/components/map/M11PopupChrome'
 import { M11StationForcingPopup, type M11StationPopupStation } from '@/components/map/M11StationForcingPopup'
 import type { HydroMetSource } from '@/lib/hydroMet/queryState'
 import { HYDRO_MET_STATION_SERIES_API_TUPLE_LIMIT, HYDRO_MET_STATION_VARIABLES } from '@/lib/hydroMet/stationSeries'
-import { fetchHydroMetLatestProduct, type QhhLatestProduct } from '@/pages/hydroMet/bootstrap'
+import { fetchHydroMetLatestProduct, type QhhLatestProduct } from '@/stores/hydroMetBootstrap'
 
 vi.mock('@/api/client', () => ({
   client: { GET: vi.fn() },
 }))
 
-vi.mock('@/pages/hydroMet/bootstrap', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@/pages/hydroMet/bootstrap')>()
+vi.mock('@/stores/hydroMetBootstrap', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/stores/hydroMetBootstrap')>()
   return { ...actual, fetchHydroMetLatestProduct: vi.fn() }
 })
 

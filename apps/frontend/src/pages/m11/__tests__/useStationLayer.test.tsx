@@ -1,7 +1,7 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { HydroMetStation } from '@/pages/hydroMet/bootstrap'
+import type { HydroMetStation } from '@/stores/hydroMetBootstrap'
 import { useMetStationLayer } from '@/pages/m11/useStationLayer'
 import {
   STATION_CLIENT_CAP,
@@ -15,8 +15,8 @@ import {
 const fetchHydroMetStationsByIdentityMock = vi.fn()
 const fetchHydroMetLatestProductMock = vi.fn()
 
-vi.mock('@/pages/hydroMet/bootstrap', async () => {
-  const actual = await vi.importActual<typeof import('@/pages/hydroMet/bootstrap')>('@/pages/hydroMet/bootstrap')
+vi.mock('@/stores/hydroMetBootstrap', async () => {
+  const actual = await vi.importActual<typeof import('@/stores/hydroMetBootstrap')>('@/stores/hydroMetBootstrap')
   return {
     ...actual,
     fetchHydroMetLatestProduct: (...args: unknown[]) => fetchHydroMetLatestProductMock(...args),

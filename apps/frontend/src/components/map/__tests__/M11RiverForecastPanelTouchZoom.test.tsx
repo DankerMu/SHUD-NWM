@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { client } from '@/api/client'
 import { M11RiverForecastPanel, type M11RiverPopupSegment } from '@/components/map/M11RiverForecastPanel'
 import type { HydroMetSource } from '@/lib/hydroMet/queryState'
-import { fetchHydroMetLatestProduct, type QhhLatestProduct } from '@/pages/hydroMet/bootstrap'
+import { fetchHydroMetLatestProduct, type QhhLatestProduct } from '@/stores/hydroMetBootstrap'
 import { installMobileFormMatchMedia } from '@/test/mobileFormMatchMedia'
 
 /**
@@ -15,8 +15,8 @@ import { installMobileFormMatchMedia } from '@/test/mobileFormMatchMedia'
 
 vi.mock('@/api/client', () => ({ client: { GET: vi.fn() } }))
 
-vi.mock('@/pages/hydroMet/bootstrap', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@/pages/hydroMet/bootstrap')>()
+vi.mock('@/stores/hydroMetBootstrap', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/stores/hydroMetBootstrap')>()
   return { ...actual, fetchHydroMetLatestProduct: vi.fn() }
 })
 

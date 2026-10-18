@@ -19,7 +19,7 @@ import {
   loadHydroMetBootstrap,
   prefetchHydroMetLatestProducts,
   type QhhLatestProduct,
-} from '@/pages/hydroMet/bootstrap'
+} from '@/stores/hydroMetBootstrap'
 import {
   mergeHydroMetQueryState,
   needsHydroMetQueryReplacement,
@@ -577,7 +577,7 @@ describe('fetchHydroMetLatestProduct', () => {
     // runs from ``apps/frontend/`` so ``process.cwd()`` resolves to the
     // frontend package root — the source path is stable relative to
     // that root regardless of test file location.
-    const bootstrapPath = pathResolve(process.cwd(), 'src/pages/hydroMet/bootstrap.ts')
+    const bootstrapPath = pathResolve(process.cwd(), 'src/stores/hydroMetBootstrap.ts')
     const source = readFileSync(bootstrapPath, 'utf-8')
 
     expect(source).toMatch(
