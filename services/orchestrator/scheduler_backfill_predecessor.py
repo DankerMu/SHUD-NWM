@@ -68,7 +68,7 @@ TRANSIENT_PREDECESSOR_SKIP_REASONS = frozenset(
 )
 
 
-def _parse_iso(value: Any) -> datetime | None:
+def _parse_aware_utc_or_none(value: Any) -> datetime | None:
     if not value:
         return None
     try:
@@ -119,7 +119,7 @@ def _extract_pending_predecessors(
         selected = transition.get("selected_predecessor") or {}
         if not isinstance(selected, Mapping):
             continue
-        state_valid_time = _parse_iso(selected.get("valid_time"))
+        state_valid_time = _parse_aware_utc_or_none(selected.get("valid_time"))
         source_id = str(selected.get("source_id") or "")
         model_id = str(getattr(entry, "model_id", "") or "")
         if state_valid_time is None or not source_id or not model_id:
@@ -789,7 +789,7 @@ def _record_blocks_emission(record: Mapping[str, Any], *, successor_cycle_time: 
         return False
     if reason == _scheduler_lineage.LINEAGE_SCOPED_OUT_REASON:
         lineage = record.get("lineage")
-        cutover = _parse_iso(lineage.get("cutover_valid_time")) if isinstance(lineage, Mapping) else None
+        cutover = _parse_aware_utc_or_none(lineage.get("cutover_valid_time")) if isinstance(lineage, Mapping) else None
         if cutover is not None and isinstance(successor_cycle_time, datetime):
             return not successor_cycle_time.astimezone(UTC) < cutover
     return True

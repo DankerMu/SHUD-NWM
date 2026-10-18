@@ -355,7 +355,7 @@
 
   **Minimal mergeable slice:** atomic - 单包一批即最小刀；批内再拆无独立验证路径。
 
-- [ ] 3.3 批次 `services/`：3.1 命中清单中 `services/` 下的函数（fullmatch 34 处：删 10 改规范导入（journal `_utcnow` 以 `utc_now as _utcnow` 保留 patch 名，`chain_runtime_utils`/`chain_manifest_contracts` 的 `_format_time` 以 import 别名保名）；改名 14；10 个 late-binding 转发器 allowlist；三个归一化器：两个改名，`scheduler_candidate_manifest.normalize_source_id` 转发器 allowlist；`scheduler_runtime_roots._normalize_sources(Sequence)` 不命中、不动），ceiling −34。
+- [x] 3.3 批次 `services/`：3.1 命中清单中 `services/` 下的函数（fullmatch 34 处：删 10 改规范导入（journal `_utcnow` 以 `utc_now as _utcnow` 保留 patch 名，`chain_runtime_utils`/`chain_manifest_contracts` 的 `_format_time` 以 import 别名保名）；改名 14；10 个 late-binding 转发器 allowlist；三个归一化器：两个改名，`scheduler_candidate_manifest.normalize_source_id` 转发器 allowlist；`scheduler_runtime_roots._normalize_sources(Sequence)` 不命中、不动），ceiling −34。
 
   Depends on: 3.1
 

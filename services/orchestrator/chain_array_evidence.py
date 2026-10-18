@@ -3,11 +3,11 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Mapping, Sequence
 
+from packages.common.contracts.time_normalization import format_iso_utc
 from packages.common.redaction import redact_payload
 from services.orchestrator.chain_array_accounting import (
     ArrayAccountingDependencies,
     _default_dependencies,
-    _format_time,
 )
 from services.orchestrator.chain_types import (
     ArrayAggregation,
@@ -174,7 +174,7 @@ def safe_candidate_outcome_payload(payload: Mapping[str, Any]) -> dict[str, Any]
 
 def json_safe_pipeline_event_value(value: Any) -> Any:
     if isinstance(value, datetime):
-        return _format_time(value)
+        return format_iso_utc(value)
     if isinstance(value, Mapping):
         return {str(key): json_safe_pipeline_event_value(nested) for key, nested in value.items()}
     if isinstance(value, tuple):

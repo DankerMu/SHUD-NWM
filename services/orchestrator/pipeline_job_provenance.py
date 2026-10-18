@@ -640,7 +640,7 @@ def _identity_from_manifest(manifest: Mapping[str, Any], *, expected_run_id: str
             "Scientific manifest run_id does not match the selected run.",
             {"expected_run_id": expected_run_id, "manifest_run_id": run_id},
         )
-    source = _normalize_source(manifest.get("source_id") or nested.get("source_id") or nested.get("source"))
+    source = _require_supported_source(manifest.get("source_id") or nested.get("source_id") or nested.get("source"))
     cycle_time = _require_cycle_time(manifest.get("cycle_time") or nested.get("cycle_time"))
     model_id = _require_safe_identity(
         nested.get("model_id") or manifest.get("model_id") or _model_id_from_run_id(run_id),
@@ -653,7 +653,7 @@ def _identity_from_manifest(manifest: Mapping[str, Any], *, expected_run_id: str
             "Selected run_id is not a forecast run identity.",
             {"run_id": run_id},
         )
-    embedded_source = _normalize_source(match.group(1))
+    embedded_source = _require_supported_source(match.group(1))
     embedded_cycle = parse_cycle_time(match.group(2))
     if embedded_source != source or format_cycle_time(embedded_cycle) != format_cycle_time(cycle_time):
         raise PipelineJobProvenanceError(
@@ -1285,7 +1285,7 @@ def _load_sidecar(store: LocalObjectStore, sidecar_key: str) -> dict[str, Any]:
     if parsed_version < 0:
         raise PipelineJobProvenanceError("SIDECAR_VERSION_INVALID", "Provenance sidecar source_version is invalid.")
     closed_identity = {
-        "source": _normalize_source(identity.get("source") or identity.get("source_id")),
+        "source": _require_supported_source(identity.get("source") or identity.get("source_id")),
         "cycle_time": _format_utc(_require_cycle_time(identity.get("cycle_time"))),
         "run_id": _require_safe_identity(identity.get("run_id"), field="run_id"),
         "model_id": _require_safe_identity(identity.get("model_id"), field="model_id"),
@@ -1448,7 +1448,7 @@ def _load_hydro_identity(cursor: Any, run_id: str) -> dict[str, Any]:
 
 
 def _require_hydro_matches_sidecar(hydro: Mapping[str, Any], identity: Mapping[str, str]) -> None:
-    hydro_source = _normalize_source(hydro.get("source_id"))
+    hydro_source = _require_supported_source(hydro.get("source_id"))
     hydro_cycle = hydro.get("cycle_time")
     if isinstance(hydro_cycle, datetime):
         hydro_cycle_text = _format_utc(hydro_cycle)
@@ -1871,7 +1871,7 @@ def _require_cycle_time(value: Any) -> datetime:
     return parsed.astimezone(UTC)
 
 
-def _normalize_source(value: Any) -> str:
+def _require_supported_source(value: Any) -> str:
     try:
         return normalize_source_id(str(value))
     except (TypeError, ValueError) as error:

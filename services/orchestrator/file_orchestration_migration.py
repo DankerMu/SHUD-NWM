@@ -1726,7 +1726,7 @@ def _source_cycle_from_row(row: Mapping[str, Any]) -> tuple[str, datetime]:
     source_id = row.get("source_id")
     cycle_time = row.get("cycle_time")
     if source_id not in (None, "") and cycle_time not in (None, ""):
-        return str(source_id), _coerce_datetime(cycle_time)
+        return str(source_id), _coerce_cycle_or_iso_datetime(cycle_time)
     cycle_id = str(row["cycle_id"])
     source, separator, cycle_stamp = cycle_id.rpartition("_")
     if not separator:
@@ -1734,7 +1734,7 @@ def _source_cycle_from_row(row: Mapping[str, Any]) -> tuple[str, datetime]:
     return source, parse_cycle_time(cycle_stamp)
 
 
-def _coerce_datetime(value: Any) -> datetime:
+def _coerce_cycle_or_iso_datetime(value: Any) -> datetime:
     if isinstance(value, datetime):
         return _ensure_utc(value)
     return parse_cycle_time(str(value))

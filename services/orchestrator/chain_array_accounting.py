@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Mapping, Protocol, Sequence
 
+from packages.common.contracts.time_normalization import utc_now
 from services.orchestrator.accepted_submit_identity import (
     accepted_submit_contract_is_current,
     accepted_submit_row_kind,
@@ -89,7 +90,7 @@ def _default_dependencies() -> ArrayAccountingDependencies:
         basin_original_task_id=basin_original_task_id,
         status_from_gateway_job=status_from_gateway_job,
         parse_gateway_time=parse_gateway_time,
-        utcnow=utcnow,
+        utcnow=utc_now,
         build_reindexed_manifest=build_reindexed_manifest,
     )
 
@@ -928,10 +929,6 @@ def parse_gateway_time(value: Any) -> datetime | None:
     return None
 
 
-def utcnow() -> datetime:
-    return datetime.now(UTC)
-
-
 def build_reindexed_manifest(
     entries: Sequence[Mapping[str, Any]],
     succeeded_task_ids: Sequence[int],
@@ -997,7 +994,3 @@ def _ensure_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
-
-
-def _format_time(value: datetime) -> str:
-    return _ensure_utc(value).isoformat().replace("+00:00", "Z")

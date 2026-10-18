@@ -6,7 +6,7 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 
 from packages.common import status_vocab as _vocab
-from packages.common.contracts.time_normalization import format_cycle_time
+from packages.common.contracts.time_normalization import format_cycle_time, format_iso_utc
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator.scheduler_state_types import cohort_member_row_is_attributed
 
@@ -54,10 +54,6 @@ def _parse_gateway_time(value: Any) -> datetime | None:
     if isinstance(value, str):
         return _ensure_utc(datetime.fromisoformat(value.replace("Z", "+00:00")))
     return None
-
-
-def _format_time(value: datetime) -> str:
-    return _ensure_utc(value).isoformat().replace("+00:00", "Z")
 
 
 def _source_cycle_download_repair_state(
@@ -254,7 +250,7 @@ def _source_cycle_raw_manifest_binding(
         "forecast_cycle_status": status,
         "source_id": normalize_source_id(source_id),
         "cycle_id": cycle_id,
-        "cycle_time": _format_time(cycle_time),
+        "cycle_time": format_iso_utc(cycle_time),
     }
 
 
@@ -507,7 +503,7 @@ def _source_cycle_repaired_stage_evidence(
         "forecast_cycle_status": manifest_binding.get("forecast_cycle_status"),
         "source_id": manifest_binding.get("source_id") or normalize_source_id(source_id),
         "cycle_id": manifest_binding.get("cycle_id") or cycle_id,
-        "cycle_time": manifest_binding.get("cycle_time") or _format_time(cycle_time),
+        "cycle_time": manifest_binding.get("cycle_time") or format_iso_utc(cycle_time),
     }
 
 

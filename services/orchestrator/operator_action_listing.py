@@ -520,7 +520,7 @@ def _orphan_reservations(root: Path, newest_evaluating_started_at: str | None) -
 
     if newest_evaluating_started_at is None:
         return []
-    newest_started_at = _parse_utc(newest_evaluating_started_at)
+    newest_started_at = _parse_aware_timestamp_or_none(newest_evaluating_started_at)
     if newest_started_at is None:
         return []
     orphans: list[dict[str, Any]] = []
@@ -544,7 +544,7 @@ def _orphan_reservations(root: Path, newest_evaluating_started_at: str | None) -
             if (root / os.path.basename(final_artifact)).exists():
                 continue
         reserved_at_text = payload.get("reserved_at")
-        reserved_at = _parse_utc(reserved_at_text) if isinstance(reserved_at_text, str) else None
+        reserved_at = _parse_aware_timestamp_or_none(reserved_at_text) if isinstance(reserved_at_text, str) else None
         if reserved_at is None or reserved_at <= newest_started_at:
             continue
         lease = payload.get("lease")
@@ -572,7 +572,7 @@ def _orphan_reservations(root: Path, newest_evaluating_started_at: str | None) -
     return sorted(orphans, key=lambda item: item["reservation"])
 
 
-def _parse_utc(value: str) -> datetime | None:
+def _parse_aware_timestamp_or_none(value: str) -> datetime | None:
     """Parse one writer timestamp, or ``None``.
 
     Compared as datetimes, never as strings: the writer's ``_format_utc`` emits

@@ -30,7 +30,7 @@ from .file_orchestration_journal import (
 from .journal_root_authority import verify_journal_root_authority
 
 
-def _parse_iso_utc(value: str, option_name: str) -> datetime:
+def _parse_option_timestamp(value: str, option_name: str) -> datetime:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"demote-reserved-job {option_name} must be an ISO-8601 timestamp")
     normalized = value.strip()
@@ -70,8 +70,8 @@ def _demote_reserved_job(
 
     if type(expected_attempt) is not int or expected_attempt < 1:
         raise ValueError("demote-reserved-job --expected-attempt must be a positive integer")
-    checked_at_value = _parse_iso_utc(checked_at, "--checked-at")
-    expected_anchor_value = _parse_iso_utc(expected_attempt_started_at, "--expected-attempt-started-at")
+    checked_at_value = _parse_option_timestamp(checked_at, "--checked-at")
+    expected_anchor_value = _parse_option_timestamp(expected_attempt_started_at, "--expected-attempt-started-at")
     if not checked_by.strip():
         raise ValueError("demote-reserved-job --checked-by must not be blank")
     if not verification_note.strip():

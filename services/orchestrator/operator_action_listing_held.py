@@ -127,7 +127,7 @@ def _pass_held_reservations(outcomes: Sequence[Any], payload: Mapping[str, Any])
     """The held entries one lane-ran pass lists, per the closed per-action table."""
 
     started_text = payload.get("started_at")
-    pass_started = _parse_utc(started_text) if isinstance(started_text, str) else None
+    pass_started = _parse_aware_timestamp_or_none(started_text) if isinstance(started_text, str) else None
     found: list[dict[str, Any]] = []
     for outcome in outcomes:
         if not isinstance(outcome, Mapping):
@@ -141,7 +141,7 @@ def _pass_held_reservations(outcomes: Sequence[Any], payload: Mapping[str, Any])
         anchor_text = outcome.get("submission_attempt_started_at")
         anchor_text = anchor_text if isinstance(anchor_text, str) and anchor_text else None
         if action in HELD_RESERVATION_AGED_LISTED_ACTIONS:
-            anchor = _parse_utc(anchor_text) if anchor_text is not None else None
+            anchor = _parse_aware_timestamp_or_none(anchor_text) if anchor_text is not None else None
             if anchor is not None and pass_started is not None and pass_started - anchor < HELD_RESERVATION_MIN_AGE:
                 continue
             command = HELD_RESERVATION_AGED_LISTED_ACTIONS[action]
@@ -210,7 +210,7 @@ def _held_job_source_cycle(job_id: str) -> tuple[str | None, str | None]:
     return source_id, cycle_time.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _parse_utc(value: str) -> datetime | None:
+def _parse_aware_timestamp_or_none(value: str) -> datetime | None:
     """Parse one writer timestamp as an aware datetime, or ``None`` (compared as datetimes, never strings)."""
 
     try:

@@ -24,6 +24,7 @@ from packages.common.auth_policy import (
     trusted_internal_policy_decision,
 )
 from packages.common.contracts.time_normalization import cycle_id_for, format_cycle_time, parse_cycle_time
+from packages.common.contracts.time_normalization import utc_now as _utcnow
 from packages.common.safe_fs import (
     SafeFilesystemError,
     atomic_write_bytes_no_follow,
@@ -2533,7 +2534,7 @@ class FileOrchestrationJournalRepository:
                 field="reconcile_inventory_rollback_receipt",
             )
         prepared = self._validated_reconcile_inventory_rollback_receipt(fence)
-        prepared_at = _coerce_datetime(prepared["prepared_at"], field="prepared_at").timestamp()
+        prepared_at = _coerce_cycle_or_iso_datetime(prepared["prepared_at"], field="prepared_at").timestamp()
         # #2660: compare filesystem clock with filesystem clock.  No sidecar
         # (receipt prepared by older code) keeps the wall-clock comparison.
         fence_mtime_ns: int | None
@@ -2817,8 +2818,8 @@ class FileOrchestrationJournalRepository:
                 field="source_id",
             ),
             "cycle_time": _format_utc(cycle_time),
-            "start_time": _format_utc(_coerce_datetime(manifest["start_time"], field="start_time")),
-            "end_time": _format_utc(_coerce_datetime(manifest["end_time"], field="end_time")),
+            "start_time": _format_utc(_coerce_cycle_or_iso_datetime(manifest["start_time"], field="start_time")),
+            "end_time": _format_utc(_coerce_cycle_or_iso_datetime(manifest["end_time"], field="end_time")),
             "status": "created",
             "submission_attempt": max(int(manifest.get("submission_attempt") or 1), 1),
             "run_manifest_uri": outputs.get("run_manifest_uri"),
@@ -9122,8 +9123,8 @@ class FileOrchestrationJournalRepository:
         lease_identity = self._validated_scheduler_lease_identity(
             receipt.get("scheduler_lease_identity")
         )
-        _coerce_datetime(receipt.get("prepared_at"), field="prepared_at")
-        _coerce_datetime(preflight.get("checked_at"), field="checked_at")
+        _coerce_cycle_or_iso_datetime(receipt.get("prepared_at"), field="prepared_at")
+        _coerce_cycle_or_iso_datetime(preflight.get("checked_at"), field="checked_at")
         _safe_identity_text(preflight["checked_by"], field="checked_by")
         target_writer_generation = _validated_git_writer_generation(
             preflight["target_writer_generation"],
@@ -9185,7 +9186,7 @@ class FileOrchestrationJournalRepository:
                 "file_journal_rollforward_receipt_invalid",
                 field="reconcile_inventory_rollforward_receipt",
             )
-        _coerce_datetime(receipt.get("completed_at"), field="completed_at")
+        _coerce_cycle_or_iso_datetime(receipt.get("completed_at"), field="completed_at")
         root_identity = self._validated_journal_root_identity(
             receipt.get("journal_root_identity")
         )
@@ -13761,10 +13762,6 @@ def _next_current_master_retry_identity(current: Mapping[str, Any]) -> tuple[str
     return f"{base_job_id}{RETRY_JOB_ID_MARKER}{retry_count}", retry_count
 
 
-def _utcnow() -> datetime:
-    return datetime.now(UTC)
-
-
 def _json_bytes(payload: Mapping[str, Any]) -> bytes:
     return (json.dumps(payload, sort_keys=True, separators=(",", ":"), default=_json_default) + "\n").encode("utf-8")
 
@@ -14147,7 +14144,7 @@ def _optional_mapping_value(row: Mapping[str, Any], field: str) -> Mapping[str, 
     return value
 
 
-def _coerce_datetime(value: Any, *, field: str) -> datetime:
+def _coerce_cycle_or_iso_datetime(value: Any, *, field: str) -> datetime:
     if isinstance(value, datetime):
         return _ensure_utc(value)
     try:
@@ -14184,7 +14181,7 @@ def _strict_utc_datetime(value: Any) -> datetime | None:
 def _optional_format_datetime(value: Any, *, field: str) -> str | None:
     if value in (None, ""):
         return None
-    return _format_utc(_coerce_datetime(value, field=field))
+    return _format_utc(_coerce_cycle_or_iso_datetime(value, field=field))
 
 
 def _file_retry_job_value(job: Any, field: str) -> Any:
@@ -14213,7 +14210,7 @@ def _file_reconcile_namespace(row: Mapping[str, Any]) -> SimpleNamespace:
         if value in (None, ""):
             continue
         try:
-            payload[dt_field] = _coerce_datetime(value, field=dt_field)
+            payload[dt_field] = _coerce_cycle_or_iso_datetime(value, field=dt_field)
         except FileOrchestrationJournalError:
             pass
     return SimpleNamespace(**payload)
@@ -14596,7 +14593,7 @@ def _file_retry_gateway_payload(value: Any) -> dict[str, Any]:
 def _file_retry_gateway_time(value: Any) -> datetime | None:
     if value in (None, ""):
         return None
-    return _coerce_datetime(value, field="gateway_time")
+    return _coerce_cycle_or_iso_datetime(value, field="gateway_time")
 
 
 def _manual_retry_submission_failure_details(

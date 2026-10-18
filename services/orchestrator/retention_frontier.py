@@ -32,6 +32,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from packages.common.contracts.time_normalization import parse_iso_utc
+
 from .scheduler_evidence import MAX_EVIDENCE_BYTES
 
 __all__ = (
@@ -154,7 +156,7 @@ def _read_latest_pass_frontier(
             receipt_path=str(path),
             receipt_started_at=started_at,
         )
-    bound = _parse_utc(raw_bound)
+    bound = _parse_utc_or_none(raw_bound)
     if bound is None:
         return _unavailable("frontier_bound_invalid", path=path, started_at=started_at)
     return FrontierReadResult(
@@ -183,7 +185,7 @@ def _select_latest_receipt(entries: list[Path]) -> tuple[Path, datetime, dict[st
         payload = _load_receipt(path)
         if payload is None:
             continue
-        started_at = _parse_utc(payload.get("started_at"))
+        started_at = _parse_utc_or_none(payload.get("started_at"))
         if started_at is None:
             continue
         candidate = (started_at, path.name, path, payload)
@@ -209,19 +211,12 @@ def _load_receipt(path: Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
-def _parse_utc(value: Any) -> datetime | None:
+def _parse_utc_or_none(value: Any) -> datetime | None:
     """Parse an ISO-8601 timestamp to UTC, or None when malformed."""
-    if not isinstance(value, str) or not value.strip():
-        return None
     try:
-        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
-    except ValueError:
+        return parse_iso_utc(value)
+    except (TypeError, ValueError):
         return None
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        # Naive timestamps are read as UTC, matching retention's own bound
-        # normalisation, never silently dropped.
-        return parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
 
 
 def _source_label(value: Any) -> str:

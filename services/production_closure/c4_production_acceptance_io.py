@@ -197,10 +197,6 @@ def require_ordered_bracket(cmd_start: object, cmd_end: object) -> tuple[int, in
     return start, end
 
 
-def utc_now() -> datetime:
-    return datetime.now(UTC)
-
-
 def format_utc(instant: datetime) -> str:
     if instant.tzinfo is None:
         refuse("timestamp is not UTC", "C4_TIMESTAMP_INVALID")
@@ -211,7 +207,7 @@ def format_utc(instant: datetime) -> str:
     return text
 
 
-def parse_utc(value: object) -> datetime:
+def parse_strict_utc_rfc3339(value: object) -> datetime:
     if not isinstance(value, str) or _RFC3339_COMPILED.fullmatch(value) is None:
         refuse("timestamp is not strict UTC RFC3339", "C4_TIMESTAMP_INVALID")
     try:
@@ -769,7 +765,7 @@ __all__ = (
     "identity_from_mapping",
     "parent_from_mapping",
     "parse_closed_json",
-    "parse_utc",
+    "parse_strict_utc_rfc3339",
     "publish_private_json",
     "read_private_json",
     "recapture_held_private_file",
@@ -780,5 +776,4 @@ __all__ = (
     "require_ordered_bracket",
     "require_origin",
     "require_sha",
-    "utc_now",
 )

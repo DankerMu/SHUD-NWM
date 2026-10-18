@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from packages.common.contracts.time_normalization import utc_now
 from packages.common.node27_pgdata_command import CommandError, CommandRunner, run_bounded_command
 from services.production_closure.c4_production_acceptance_io import (
     C4AcceptanceError,
@@ -28,7 +29,7 @@ from services.production_closure.c4_production_acceptance_io import (
     freeze_is_not_later_than_cmd_start,
     identity_from_mapping,
     parent_from_mapping,
-    parse_utc,
+    parse_strict_utc_rfc3339,
     publish_private_json,
     read_private_json,
     recapture_held_private_file,
@@ -39,7 +40,6 @@ from services.production_closure.c4_production_acceptance_io import (
     require_ordered_bracket,
     require_origin,
     require_sha,
-    utc_now,
 )
 
 SCHEMA_VERSION = "1.0"
@@ -341,7 +341,7 @@ def _load_freeze(path: Path, reviewed_sha: str) -> tuple[dict[str, Any], Private
         refuse("freeze artifact is not the closed owner schema", "C4_FREEZE_SCHEMA")
     if mapping["reviewed_sha"] != reviewed_sha:
         refuse("freeze SHA does not bind the supplied reviewed SHA", "C4_SHA_MISMATCH")
-    parse_utc(mapping["frozen_at"])
+    parse_strict_utc_rfc3339(mapping["frozen_at"])
     approved = _require_closed_object(
         mapping["approved_record"],
         _APPROVED_RECORD_KEYS,
@@ -368,7 +368,7 @@ def _load_binding(path: Path, reviewed_sha: str) -> tuple[dict[str, Any], Privat
         refuse("binding artifact is not the closed owner schema", "C4_BINDING_SCHEMA")
     if mapping["reviewed_sha"] != reviewed_sha:
         refuse("binding SHA does not bind the supplied reviewed SHA", "C4_SHA_MISMATCH")
-    parse_utc(mapping["bound_at"])
+    parse_strict_utc_rfc3339(mapping["bound_at"])
     _parse_file_ref(mapping["freeze"], code="C4_BINDING_SCHEMA")
     _parse_file_ref(mapping["c4"], code="C4_BINDING_SCHEMA")
     _parse_inputs(mapping["c4_inputs"])
@@ -435,7 +435,7 @@ def bind(
         [output],
         [freeze_path, approved_path, receipt],
     )
-    freeze_at = parse_utc(freeze_document["frozen_at"])
+    freeze_at = parse_strict_utc_rfc3339(freeze_document["frozen_at"])
     if not freeze_is_not_later_than_cmd_start(freeze_at, start):
         refuse("freeze is later than the C4 command-start second", "C4_FREEZE_AFTER_START")
     _assert_source_unchanged(approved_path, approved_identity, approved_parent)
@@ -498,7 +498,7 @@ def verify(
     if inputs != bound_inputs:
         refuse("binding inputs drifted from the original freeze", "C4_INPUT_MISMATCH")
     start, end = _parse_bracket(binding_document["bracket"])
-    freeze_at = parse_utc(freeze_document["frozen_at"])
+    freeze_at = parse_strict_utc_rfc3339(freeze_document["frozen_at"])
     if not freeze_is_not_later_than_cmd_start(freeze_at, start):
         refuse("freeze is later than the C4 command-start second", "C4_FREEZE_AFTER_START")
     receipt = require_absolute_path(inputs["receipt"], code="C4_PATH_INVALID")

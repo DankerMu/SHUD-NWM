@@ -5,6 +5,7 @@ import re
 from datetime import UTC, datetime
 from typing import Any, Callable, Mapping, Sequence
 
+from packages.common.contracts.time_normalization import format_iso_utc as _format_time
 from packages.common.object_store import LocalObjectStore
 from services.orchestrator.chain_types import CycleOrchestrationContext
 from services.orchestrator.production_contract import production_stage_for
@@ -471,10 +472,6 @@ def _ensure_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
-
-
-def _format_time(value: datetime) -> str:
-    return _ensure_utc(value).isoformat().replace("+00:00", "Z")
 
 
 def _format_time_or_none(value: datetime | None) -> str | None:

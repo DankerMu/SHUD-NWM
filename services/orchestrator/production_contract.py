@@ -484,7 +484,7 @@ def _identity_values(payload: Mapping[str, Any]) -> dict[str, Any]:
             values[field] = None
             continue
         if field == "source":
-            values[field] = _normalize_source(value)
+            values[field] = _normalize_source_or_raw(value)
         elif field == "cycle_time":
             values[field] = _normalize_cycle_time(value)
         else:
@@ -505,7 +505,7 @@ def _first_nested_value(payload: Mapping[str, Any], aliases: Sequence[tuple[str,
     return None
 
 
-def _normalize_source(value: Any) -> str:
+def _normalize_source_or_raw(value: Any) -> str:
     raw = _clean_text(value)
     try:
         return normalize_source_id(raw)
