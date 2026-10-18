@@ -15195,6 +15195,7 @@ def test_status_vocab_parity_routes_every_python_path_under_its_roots() -> None:
     # (the direct-grid contract module) cannot shadow the parity suite.
     for module in (
         DIRECT_GRID_CONTRACT_CANONICAL_PATH,
+        "workers/forcing_producer/producer.py",
         "services/orchestrator/scheduler_state_types.py",
         "apps/api/routes/pipeline.py",
         "scripts/run_qhh_continuous.py",
