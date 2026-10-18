@@ -1529,6 +1529,11 @@ TIME_NORMALIZATION_CONTRACT_PATH = "packages/common/contracts/time_normalization
 # `workers/data_adapters/**` row keeps owning it too.
 REGION_CONTRACT_PATH = "packages/common/contracts/region.py"
 
+# entropy-burndown 1.2 (#2923): the hydrologic-core fingerprint contract's
+# canonical home. workers/mapping_builder/rewrite.py stays a re-export shim
+# until 1.3, so the `workers/mapping_builder/**` row keeps owning it too.
+HYDROLOGIC_FINGERPRINT_CONTRACT_PATH = "packages/common/contracts/hydrologic_fingerprint.py"
+
 FILE_JOURNAL_READ_STATE_TESTS: tuple[str, ...] = (
     "tests/test_file_orchestration_journal.py",
     "tests/test_file_orchestration_migration.py",
@@ -3591,6 +3596,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # are dispositioned as `edge-consumer` pairs in
         # tests/test_select_ci_tests.py's INTENTIONAL_RULE_GAP_EXCLUSIONS.
         "workers/mapping_builder/**",
+        MAPPING_BUILDER_TESTS,
+    ),
+    PathTestRule(
+        # #2923: the verify_hydrologic_core_fingerprint_equal closure (and
+        # STATE_COMPATIBILITY_SURFACES) moved here from
+        # workers/mapping_builder/rewrite.py. NOT a stop row: same targets as
+        # the `workers/mapping_builder/**` row (shared constant, so they cannot
+        # drift apart); like that row it leaves the state_clone suites to their
+        # own owning surfaces.
+        HYDROLOGIC_FINGERPRINT_CONTRACT_PATH,
         MAPPING_BUILDER_TESTS,
     ),
     PathTestRule(

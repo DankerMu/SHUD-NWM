@@ -63,6 +63,7 @@ from scripts.select_ci_tests import (
     FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS,
     FORCED_RESUBMIT_SURFACE_TESTS,
     FORCING_SQL_SHAPE_ORACLE_TESTS,
+    HYDROLOGIC_FINGERPRINT_CONTRACT_PATH,
     LOOP_LOG_AUDIT_PATH,
     LOOP_LOG_AUDIT_TEST,
     LOOP_LOG_PATH,
@@ -1369,6 +1370,48 @@ def test_region_contract_row_red_when_removed(monkeypatch: pytest.MonkeyPatch) -
     assert "tests/test_download_bbox_clip.py" not in selected
     assert "tests/test_grid_registry_bbox.py" not in selected
     assert "tests/test_gfs_adapter.py" not in selected
+
+
+def test_select_tests_maps_hydrologic_fingerprint_contract_like_mapping_builder_modules() -> None:
+    # #2923: the contract module holds rewrite.py's fingerprint-gate closure
+    # verbatim. The old path is owned only by the non-stop
+    # `workers/mapping_builder/**` row, so the contract row carries exactly that
+    # row's targets. As with #2921/#2922/#2964, `packages/common/**` adds the
+    # #1744 core-smoke baseline; that is the only difference from the old path.
+    assert HYDROLOGIC_FINGERPRINT_CONTRACT_PATH == "packages/common/contracts/hydrologic_fingerprint.py"
+    assert Path(HYDROLOGIC_FINGERPRINT_CONTRACT_PATH).is_file()
+
+    selected = select_tests([HYDROLOGIC_FINGERPRINT_CONTRACT_PATH], repo_root=Path("."))
+
+    assert selected == sorted(
+        _tracked_mapping_builder_suites()
+        | set(SHARED_BASELINE_CONTRACT)
+        | {
+            INVARIANT_SUITE_PATH,
+            WRITE_SURFACE_SCAN_PATH,
+            FAMILY_GUARD_PATH,
+            RESOLVE_SURFACE_GUARD_PATH,
+            IMPORT_LAYERING_GUARD_PATH,
+            ANY_RATCHET_PATH,
+            STATUS_VOCAB_PARITY_PATH,
+        }
+    )
+    # 8 mapping-builder suites + 5 core-smoke + 7 guards.
+    assert len(selected) == 20
+    old_path = select_tests(["workers/mapping_builder/rewrite.py"], repo_root=Path("."))
+    assert set(selected) == set(old_path) | set(SHARED_BASELINE_CONTRACT)
+
+
+def test_hydrologic_fingerprint_contract_row_red_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drop exactly the #2923 row and the mapping-builder suites leave the selection."""
+    from scripts import select_ci_tests
+
+    mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern != HYDROLOGIC_FINGERPRINT_CONTRACT_PATH)
+    assert len(mutant) == len(PATH_TEST_RULES) - 1, "the #2923 row is missing or duplicated"
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+
+    selected = select_tests([HYDROLOGIC_FINGERPRINT_CONTRACT_PATH], repo_root=Path("."))
+    assert "tests/test_mapping_builder_rewrite.py" not in selected
 
 
 def test_select_tests_maps_direct_grid_openspec_change_to_compact_e2e_fixture() -> None:

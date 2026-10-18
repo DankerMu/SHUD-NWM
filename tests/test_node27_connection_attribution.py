@@ -890,8 +890,8 @@ DISPLAY_UNIT_CONNECT_CLOSURE: tuple[tuple[str, str, str], ...] = (
     (
         "packages/common/grid_registry_store.py",
         UNREACHABLE,
-        "import-only: models.py -> model_registry -> state_clone -> workers/mapping_builder/rewrite.py -> "
-        "algorithm.py imports dataclasses from this module; PsycopgGridRegistryStore is constructed only in "
+        "import-only: workers/forcing_producer/producer.py -> packages/common/grid_registry_bbox_guard.py "
+        "imports this module; PsycopgGridRegistryStore is constructed only in "
         "workers/grid_registry/__main__.py, which is not part of the display unit",
     ),
     (

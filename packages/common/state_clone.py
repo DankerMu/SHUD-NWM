@@ -122,16 +122,16 @@ from packages.common.contracts.direct_grid import (
     DirectGridContractError,
     load_forcing_mapping_contract_from_manifest,
 )
-from packages.common.state_manager import (
-    StateSnapshot,
-    state_snapshot_id,
-)
-from workers.mapping_builder.rewrite import (
+from packages.common.contracts.hydrologic_fingerprint import (
     HYDROLOGIC_CORE_FINGERPRINT_LABELS,
     STATE_COMPATIBILITY_SURFACES,
     HydrologicCoreFingerprintMismatchError,
     MissingPackageFileError,
     verify_hydrologic_core_fingerprint_equal,
+)
+from packages.common.state_manager import (
+    StateSnapshot,
+    state_snapshot_id,
 )
 
 __all__ = [
