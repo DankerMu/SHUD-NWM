@@ -15180,6 +15180,7 @@ def test_any_ratchet_ceiling_rule_red_when_removed(monkeypatch: pytest.MonkeyPat
 STATUS_VOCAB_PARITY_PATH = "tests/test_status_vocab_parity.py"
 STATUS_VOCAB_SOURCE_PATH = "packages/common/status_vocab.py"
 RUN_STATUS_SCHEMA_PATH = "schemas/run_status.schema.json"
+STATUS_LITERAL_ALLOWLIST_PATH = "tests/status_literal_allowlist.json"
 
 
 def test_status_vocab_parity_literal_anchors_to_the_selector_constant() -> None:
@@ -15249,6 +15250,24 @@ def test_status_vocab_routing_row_red_when_removed(
     monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
 
     assert target not in select_tests([changed], repo_root=Path("."))
+
+
+def test_status_literal_allowlist_selects_exactly_the_parity_suite() -> None:
+    # entropy-burndown task 2.1b: the allowlist is read only by the parity suite's
+    # duplicate-literal scan; before the row it selected nothing.
+    assert Path(STATUS_LITERAL_ALLOWLIST_PATH).is_file()
+    assert select_tests([STATUS_LITERAL_ALLOWLIST_PATH], repo_root=Path(".")) == [STATUS_VOCAB_PARITY_PATH]
+
+
+def test_status_literal_allowlist_row_red_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scripts import select_ci_tests
+
+    rows = [rule for rule in PATH_TEST_RULES if rule.pattern == STATUS_LITERAL_ALLOWLIST_PATH]
+    assert [rule.tests for rule in rows] == [(STATUS_VOCAB_PARITY_PATH,)]
+    mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern != STATUS_LITERAL_ALLOWLIST_PATH)
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+
+    assert STATUS_VOCAB_PARITY_PATH not in select_tests([STATUS_LITERAL_ALLOWLIST_PATH], repo_root=Path("."))
 
 
 def test_status_vocab_migration_target_red_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
