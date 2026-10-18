@@ -46,11 +46,17 @@ Follow them there; do not restate or reinterpret them in a script header.
 
 ## State And Mutation Fences
 
-- A script that changes rows, files, units, or receipts is dry-run by default
-  and acts only with an explicit `--apply`, as in
+- A new script that changes rows, files, units, or receipts must be dry-run by
+  default and act only with an explicit `--apply`, as in
   `scripts/ops/node27_oneshot_sql.py`, `scripts/node27_retire_basin.py`, and
-  `scripts/node22_model_succession.py`. A dry run changes nothing and says so
-  in its output.
+  `scripts/node22_model_succession.py`. Its dry run changes nothing and says
+  so in its output.
+- Existing scripts gate inconsistently: some use `--apply`, some `--execute`
+  (`scripts/node22_backfill_forcing_for_model_ids.py`), some `--enforce`
+  (`scripts/node27_pgdata_migrate.py`), some act by default with an opt-in
+  `--dry-run` (`scripts/scheduler_file_provider_refresh.py`), and
+  `scripts/register_grid_snapshot_drift.py` has no gate at all. Read a
+  script's `--help` before running it.
 - One-shot SQL in `scripts/ops/` ships with a paired `*_rollback.sql` file and
   runs through `scripts/ops/node27_oneshot_sql.py` in one transaction; copy-out
   backups are fsynced before the transaction commits. Credentials stay in the

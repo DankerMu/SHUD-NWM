@@ -28,32 +28,42 @@ registered snapshot, so a wrong decision here propagates to every consumer.
   derives the key through `packages/common/canonical_grid_key.py`, and
   cross-checks the signature against the forcing producer's live grid-point
   path (lazy imports from `workers/forcing_producer/producer.py`).
-- `drift_lifecycle.py` owns supersession decisions, `stability.py` owns the
-  pre-registration signature stability sweep, and
+- `drift_lifecycle.py` holds the library supersession composer, `stability.py`
+  owns the pre-registration signature stability sweep, and
   `shared_binding_eligibility.py` owns the shared-binding grant. They are
   decision layers over store protocols; keep SQL out of them.
-- `packages/common/grid_registry_store.py` owns all SQL and the append-only
-  guarantees. `__main__.py` is the CLI (`python -m workers.grid_registry`);
-  `scripts/register_grid_snapshot_drift.py` is the operator wrapper for drift.
-  Workers may import `packages`, never `services` or `apps`.
+- `packages/common/grid_registry_store.py` owns the registry store SQL and its
+  append-only guarantees, and `__main__.py` is the first-registration CLI
+  (`python -m workers.grid_registry`). Workers may import `packages`, never
+  `services` or `apps`.
+- `scripts/register_grid_snapshot_drift.py` is the operator drift tool and does
+  not go through the store. It validates with `read_input_record` and
+  `prepare_snapshot` (the same checks as first registration), then carries its
+  own SQL in one transaction: insert into `met.canonical_grid_snapshot` and
+  `met.canonical_grid_cell`, supersede the prior snapshot, and invalidate
+  derived `met.met_station` and `met.interp_weight` rows.
 
 ## State And Mutation Fences
 
 - Registration is append-only and immutable. `insert_snapshot` writes one
   snapshot plus its ordered cells atomically; delete and identity-field update
   primitives always raise `RegistryImmutabilityError`.
-- Only two post-insert writes exist: `supersede` (drift lifecycle) and
-  `extend_applicable_source_ids` (shared eligibility). Do not add a third
-  mutation path without a spec change.
+- Post-insert writes today: the store primitives `supersede` and
+  `extend_applicable_source_ids` (shared eligibility), plus the drift script's
+  raw `UPDATE` statements (prior `superseded_at`, and `active_flag` and
+  `superseded_at` on derived `met.met_station` and `met.interp_weight` rows).
+  Do not add another mutation path without a spec change.
 - A different signature for an existing `(source_id, grid_id)` is drift:
-  `register_snapshot` refuses it with `GridDriftDetectedError`, and
-  `drift_lifecycle.py:register_new_version()` registers a new version,
-  supersedes the prior, and marks derived caches stale.
+  `register_snapshot` refuses it with `GridDriftDetectedError`, and the
+  operator path is `scripts/register_grid_snapshot_drift.py`.
   `reject_inplace_signature_replacement` always raises; never edit a
   signature in place.
-- `register_new_version` rollback is best-effort across store primitives: if
-  marking derived caches stale fails it restores the prior `superseded_at`.
-  Preserve that inversion when touching the composer.
+- `drift_lifecycle.py:register_new_version()` is a library-level composer with
+  no production caller today; only its tests drive it, and the
+  `mark_derived_stale` primitive it needs exists only as a protocol and test
+  fakes. Its rollback is best-effort across store primitives: if marking
+  derived caches stale fails it restores the prior `superseded_at`. Preserve
+  that inversion when touching the composer.
 - Shared-binding denials run in a pinned order (key mismatch, missing
   comparison evidence, single-source verification, incomplete source ids) and
   raise `SharedBindingEligibilityError` subclasses; acceptance extends both
