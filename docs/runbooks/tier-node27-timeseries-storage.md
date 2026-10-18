@@ -190,7 +190,8 @@ this paragraph).** `000058`'s
 3-day interval was set on the *then-canonical, text-identity*
 `hydro.river_timeseries` — the table `000059` renamed to
 `hydro.river_timeseries_legacy` and `000060` dropped on 2026-09-19 (receipt
-[`receipts/2026-09-19-i9-contract-window/README.md`](../../openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-19-i9-contract-window/README.md)).
+[`receipts/2026-09-19-i9-contract-window/README.md`](../../openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-19-i9-contract-window/README.md);
+see "legacy store" in `openspec/glossary.md`).
 The live river store is the narrow table created by `000059` with
 `chunk_time_interval => interval '1 day'` (`000059:28-30`), measured after the
 contract window at **1 day**, 30 chunks, oldest `range_start`
@@ -3606,7 +3607,7 @@ arrival.
 chunks newest `range_end` first; the hypertable order stays
 `(schema, name)`, which since 2026-09-19 is `hydro.river_timeseries` →
 `met.*` — `hydro.river_timeseries_legacy` was a member of that walk until
-`000060` dropped it. Compression cutoff is `W − 2 d` and DB retention's is `W − 21 d` on
+`000060` dropped it (see "legacy store" in `openspec/glossary.md`). Compression cutoff is `W − 2 d` and DB retention's is `W − 21 d` on
 the same display watermark W, so retention's drop set is always the OLDEST
 prefix of compression's eligible set; oldest-first spent the slots on chunks
 retention dropped the same day (2026-09-16: 4 of 4; 2026-09-17: 3 of 4).
@@ -3618,7 +3619,8 @@ Newest-first compresses chunks with ~19 days of life left.
 out of eligible chunks, with a bound-1 override as the remedy. It became
 structurally impossible on 2026-09-19, when `000060` dropped the legacy table
 (receipt
-[`receipts/2026-09-19-i9-contract-window/README.md`](../../openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-19-i9-contract-window/README.md));
+[`receipts/2026-09-19-i9-contract-window/README.md`](../../openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-19-i9-contract-window/README.md);
+see "legacy store" in `openspec/glossary.md`);
 the compression lane now walks only `hydro.river_timeseries` and `met.*`. Its
 detection SQL named `river_timeseries_legacy` in an `IN`-list, which is now
 simply a row that never matches, and its bound-1 remedy has nothing to protect
@@ -3640,7 +3642,7 @@ wall margin allows (≈ 29 GB/chunk at 55 s/GB), the wrapper wall/timeout triple
 changes (including a §4.5 override window), the retention window or timer
 changes, or a hypertable joins or leaves the lane. **That last condition fired
 on 2026-09-19**: `hydro.river_timeseries_legacy` left the lane when `000060`
-dropped it. The bound-2 arithmetic above is not recomputed here — it was
+dropped it (see "legacy store" in `openspec/glossary.md`). The bound-2 arithmetic above is not recomputed here — it was
 derived from the narrow one-day chunks, which are unchanged; what the drop
 removes is the legacy sibling that the retired risk block above guarded
 against.
@@ -5474,8 +5476,8 @@ Archive status:
 - current_authority: db/migrations/000059_river_timeseries_narrow_expand.sql; db/migrations/000060_river_timeseries_contract.sql
 - superseded_by: docs/adr/0002-node27-timeseries-hot-cold-tiering.md, section "Amendment (2026-09-19)"
 - status_since: 2026-09-19
-- archive_scope: section, §4.6 through the paragraph before §4.7
-- retained_for: the 2.10.2 engine measurements and the #1339/#1476 fail-closed taxonomy, which are still the record of why the narrow store has the shape it has
+- archive_scope: section
+- retained_for: the 2.10.2 engine measurements and the #1339/#1476 fail-closed taxonomy, which are still the record of why the narrow store has the shape it has; applies to §4.6 through the paragraph before §4.7
 
 **This whole section is dead procedure. Do not execute any of it.** The
 identity switch it describes — an in-place cutover of the text-identity
@@ -5494,6 +5496,7 @@ its window has executed):
 `hydro.river_timeseries` beside it; `000060` dropped the legacy table, both
 functions and `hydro.hydro_run.timeseries_store`. Window receipt:
 [`receipts/2026-09-19-i9-contract-window/README.md`](../../openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-19-i9-contract-window/README.md).
+Glossary: "legacy store" and "routing column" in `openspec/glossary.md`.
 
 Read on only for the engine facts: the 2.10.2 DDL refusals under
 `timescaledb.compress = true`, the measured `VALIDATE`/`SET NOT NULL` costs, and
@@ -6296,6 +6299,14 @@ done < "$PIN_DIR/pins.tsv"
   is a product finding; `CLICK_DISPATCH_INVALID`, `HOOK_*` or
   `SERIES_REQUEST_INVALID` is a mechanism defect to fix.
 
+Archive status:
+- status: historical baseline
+- current_authority: db/migrations/000060_river_timeseries_contract.sql; openspec/glossary.md
+- superseded_by: none
+- status_since: 2026-09-19
+- archive_scope: section
+- retained_for: record of the executed I8 expand/re-forward window and the #2382 reparse runner (deleted 2026-09-18, bd06c6ddc)
+
 ### 4.10 River narrow expand: fenced window and D12 reverse (#1987)
 
 **Task 5.1 procedure; task 5.2 live receipt is pending.** This section does not
@@ -6537,8 +6548,8 @@ Archive status:
 - current_authority: db/migrations/000060_river_timeseries_contract.sql; openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-19-i9-contract-window/README.md
 - superseded_by: none
 - status_since: 2026-09-19
-- archive_scope: section, §4.10.3 only
-- retained_for: the record of the rollback option that existed between expand and contract, and of the post-D12 re-forward that was actually exercised on 2026-09-15
+- archive_scope: section
+- retained_for: the record of the rollback option that existed between expand and contract, and of the post-D12 re-forward that was actually exercised on 2026-09-15; applies to §4.10.3 only
 
 **Not executable.** Every object this procedure renames, updates or preserves is
 gone: `000060_river_timeseries_contract.sql` dropped
@@ -6790,10 +6801,12 @@ out on correctness grounds, which says nothing about lock liveness.
 
 **Semantics** (`packages/common/timeseries_compression_fence.py`). One advisory
 key per canonical hypertable **family**, in the two-int4 keyspace
-`(2713, crc32(canonical name))`: `hydro.river_timeseries_legacy` shares the key
-of `hydro.river_timeseries`, and `met.forcing_station_timeseries_legacy` that
-of `met.forcing_station_timeseries`. Ingest writes only the canonical table, but
-the legacy sibling references the same FK tables (`core.river_segment`,
+`(2713, crc32(canonical name))`: `met.forcing_station_timeseries_legacy` shares
+the key of `met.forcing_station_timeseries`, as `hydro.river_timeseries_legacy`
+shared that of `hydro.river_timeseries` until `000060` dropped it on 2026-09-19
+(the fence code still maps the river name; see "legacy store" in `openspec/glossary.md`).
+Ingest writes only the canonical table, but a legacy sibling references the same
+FK tables (`core.river_segment`,
 `hydro.hydro_run`, `met.met_station`, `met.forcing_version`), so compressing or
 dropping a legacy chunk locks the relations a canonical writer holds; a separate
 legacy key would leave that cycle open (node-27 still carries

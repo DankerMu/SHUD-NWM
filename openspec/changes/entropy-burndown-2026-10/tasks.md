@@ -1282,7 +1282,7 @@
 
   **Minimal mergeable slice:** atomic - 常量与引用同删。
 
-- [ ] 9.3 三个 runbook/ADR 与五个 active spec（spec 点名）的 legacy-store/routing-column 文本改过去时或加 DOC_STATUS 标记。
+- [x] 9.3 三个 runbook/ADR 与五个 active spec（spec 点名）的 legacy-store/routing-column 文本改过去时或加 DOC_STATUS 标记。
 
   Depends on: 无
 

@@ -266,10 +266,11 @@ several runs — splicing analysis runs by valid time, or reporting over every r
 constraint it applies SHALL be one that holds for all of those runs, and MUST NOT reduce the read to a
 single run.
 
-Because the legacy and narrow fact stores are physically organised on different identity columns, the
-constraint SHALL be expressed per store. The narrow store's rendered read MUST NOT reference a text
-identity column of the fact table; a constraint that names one SHALL appear only in the legacy store's
-rendered read.
+Until `000060` dropped the legacy fact store on 2026-09-19, the legacy and narrow stores were physically
+organised on different identity columns and the constraint was expressed per store; a constraint naming a
+text identity column appeared only in the legacy store's rendered read. The narrow store is now the only
+store and the renderer refuses the store name `"legacy"` (see "legacy store" in `openspec/glossary.md`).
+The narrow store's rendered read MUST NOT reference a text identity column of the fact table.
 
 #### Scenario: A segment read bound to a single run identity
 
@@ -278,8 +279,8 @@ rendered read.
 - **THEN** the fact-table access SHALL be constrained to that run's rows
 - **AND** the returned rows SHALL be identical to those the unconstrained read returns, compared by a
   digest over the sorted fields of every row, not by row count alone
-- **AND** the warm plan's shared buffer usage SHALL stay within the display curve bound, while the legacy
-  fact table is still present
+- **AND** the warm plan's shared buffer usage SHALL stay within the display curve bound (originally
+  measured while the legacy fact table was still present; it was dropped on 2026-09-19)
 
 #### Scenario: A segment read bound to a resolved set of cycles
 
@@ -302,8 +303,8 @@ rendered read.
 
 - **WHEN** the shared segment-rows source is rendered for the narrow store
 - **THEN** the rendered statement SHALL contain no text identity column of the fact table
-- **AND** any identity constraint that names such a column SHALL be absent from that statement, while
-  remaining present in the legacy store's rendering
+- **AND** any identity constraint that names such a column SHALL be absent from that statement (the legacy
+  store's rendering, which carried such constraints, was retired with that store on 2026-09-19)
 
 ### Requirement: Run responses expose only the public HydroRun projection
 

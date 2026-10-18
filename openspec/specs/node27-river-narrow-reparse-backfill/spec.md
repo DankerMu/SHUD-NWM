@@ -2,6 +2,15 @@
 
 ## Purpose
 TBD - created by archiving change node27-river-narrow-reparse-backfill. Update Purpose after archive.
+
+Archive status:
+- status: historical baseline
+- current_authority: db/migrations/000060_river_timeseries_contract.sql; openspec/glossary.md
+- superseded_by: none
+- status_since: 2026-09-18
+- archive_scope: section
+- retained_for: record of the #2382 reparse runner contract; scripts/node27_river_narrow_reparse_backfill.py was deleted on 2026-09-18 (bd06c6ddc) and the route column it flipped was dropped by 000060 on 2026-09-19
+
 ## Requirements
 ### Requirement: Reparse SHALL flip a run's route and write its narrow facts in one transaction
 
