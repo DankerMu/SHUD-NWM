@@ -1,9 +1,5 @@
 [
   {
-    "file": "packages/common/grid_registry_bbox_guard.py",
-    "module": "workers.data_adapters.region"
-  },
-  {
     "file": "packages/common/state_clone.py",
     "module": "workers.mapping_builder.rewrite"
   }
