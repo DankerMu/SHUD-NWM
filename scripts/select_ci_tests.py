@@ -357,6 +357,26 @@ IMPORT_LAYERING_GUARD_ROOTS: tuple[str, ...] = (
     "workers/**",
 )
 
+# #2937 (entropy-burndown task 4.2): the `Any` annotation ratchet. It counts
+# `Any` inside annotations of every Python file under the five production roots
+# and fails above tests/any_ratchet_ceiling.json's ceiling or more than 5 %
+# below it. Any Python change under those roots can move the count, so every
+# such path routes to it SUPPLEMENTALLY in the #1656/#2185/#1627/#2920 shape:
+# no `matched`, no stop-rule participation, so a `stop_on_match` owner of the
+# changed path cannot shadow it.
+ANY_RATCHET_TEST = "tests/test_any_ratchet.py"
+
+# #2937: the ratchet's scan roots, mirroring its module-level `_SCAN_ROOTS`
+# binding mapped to `<root>/**` globs; a selector meta-guard parses that binding
+# and asserts the two sets are equal.
+ANY_RATCHET_ROOTS: tuple[str, ...] = (
+    "apps/**",
+    "packages/**",
+    "services/**",
+    "workers/**",
+    "scripts/**",
+)
+
 # #2323: the entropy production-topology hard gate. It builds one full-repo
 # entropy report and asserts zero production-topology findings, and that report
 # reads every scannable text file under the scanner's seven roots plus four
@@ -4817,6 +4837,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # #2920: the import layering allowlist is data read only by the guard; as
     # data it reaches no other rule, so an allowlist-only PR would select nothing.
     PathTestRule("tests/import_layering_allowlist.json", (IMPORT_LAYERING_GUARD_TEST,)),
+    # #2937: the `Any` ratchet ceiling is data read only by the ratchet; a
+    # ceiling-only PR would otherwise select nothing.
+    PathTestRule("tests/any_ratchet_ceiling.json", (ANY_RATCHET_TEST,)),
     PathTestRule(
         "packages/common/forecast_store.py",
         (
@@ -7445,6 +7468,12 @@ def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -
     for path in changed:
         if path.endswith(".py") and _any_path_matches([path], IMPORT_LAYERING_GUARD_ROOTS):
             selected.add(IMPORT_LAYERING_GUARD_TEST)
+
+    # #2937: supplemental `Any`-ratchet routing, same additive shape as the
+    # #2920 loop above (no `matched`, no stop rules, no fallback effect).
+    for path in changed:
+        if path.endswith(".py") and _any_path_matches([path], ANY_RATCHET_ROOTS):
+            selected.add(ANY_RATCHET_TEST)
 
     # #2498: supplemental forcing-template import sniff, same additive shape as
     # the loops above (no `matched`, no stop-rule participation, no effect on

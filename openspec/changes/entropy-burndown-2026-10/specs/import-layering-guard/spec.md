@@ -31,7 +31,7 @@ During expand, `workers/forcing_producer/direct_grid_contract.py` and `workers/d
 - **THEN** the guard fails and names the stale entry
 
 #### Scenario: Downward import needs no entry
-- **WHEN** `workers/data_adapters/region.py` imports `packages.common.contracts.region`
+- **WHEN** `workers/data_adapters/gfs_adapter.py` imports `packages.common.contracts.region`
 - **THEN** the guard reports nothing
 
 #### Scenario: Guard runs for package changes
@@ -39,12 +39,12 @@ During expand, `workers/forcing_producer/direct_grid_contract.py` and `workers/d
 - **THEN** `select_tests` includes `tests/test_import_layering_guard.py`
 
 #### Scenario: Guard runs even under a stop-rule owner
-- **WHEN** the changed-path list contains only `workers/forcing_producer/direct_grid_contract.py` (owned by a `stop_on_match` rule)
+- **WHEN** the changed-path list contains only `packages/common/contracts/direct_grid.py` (owned by a `stop_on_match` rule)
 - **THEN** `select_tests` still includes `tests/test_import_layering_guard.py`
 
 ### Requirement: Contract SHALL remove the shims and empty the allowlist
-After every repository importer has been migrated to `packages.common.contracts.*`, the shim modules for `direct_grid_contract` and `region` SHALL be deleted, `base.py`, `rewrite.py` and `time_consistency.py` SHALL no longer re-export the moved names, `services/orchestrator/chain_compat_runtime.py` SHALL take its cycle-alias owner module from the contract module, and no file under the repository SHALL import or attribute-access the moved names through their old module paths. The identity assertions in `tests/test_orchestration_chain.py` that compare against the old owner module SHALL be repointed to the contract module, and `CHAIN_COMPATIBILITY_INVENTORY.md` (pinned by that test) SHALL name the contract modules as owners, with the test's expected-string tuple for the inventory updated alongside, in the same PR (the allowed test edits of the contract step). The contract check is a second test function added to `tests/test_import_layering_guard.py` by the contract step. `import services.orchestrator.chain` SHALL succeed.
+After every repository importer has been migrated to `packages.common.contracts.*`, the shim modules for `direct_grid_contract`, `region` and `time_consistency` SHALL be deleted, `base.py` and `rewrite.py` SHALL no longer re-export the moved names (their `__all__` lists none; they import only the moved names their remaining code calls, so the rewrite private-helper seam stays), `services/orchestrator/chain_compat_runtime.py` SHALL take its cycle-alias owner module from the contract module, and no file under the repository SHALL import or attribute-access the moved names through their old module paths. The identity assertions in `tests/test_orchestration_chain.py` that compare against the old owner module SHALL be repointed to the contract module, and `CHAIN_COMPATIBILITY_INVENTORY.md` and `SCHEDULER_COMPATIBILITY_INVENTORY.md` SHALL name the contract modules as owners (Guard Hook Seed coverage for the repointed facade imports), with the test's expected-string tuple for the inventory updated alongside, in the same PR (the allowed test edits of the contract step). The contract check is a second test function added to `tests/test_import_layering_guard.py` by the contract step. `import services.orchestrator.chain` SHALL succeed.
 
 #### Scenario: No old-path importer remains
-- **WHEN** the guard's contract check scans the repository AST for `from`/`import` statements and `import … as` module aliases naming `workers.forcing_producer.direct_grid_contract`, `workers.data_adapters.region`, and for the moved names imported from `workers.data_adapters.base`, `workers.mapping_builder.rewrite` or `services.orchestrator.time_consistency`
-- **THEN** there are no matches outside `openspec/changes/archive/` and `docs/`
+- **WHEN** the guard's contract check scans the repository AST for `from`/`import` statements and `import … as` module aliases (relative imports resolved to absolute names, and `importlib.import_module` string constants included) naming `workers.forcing_producer.direct_grid_contract`, `workers.data_adapters.region` or `services.orchestrator.time_consistency`, and for the moved names imported or attribute-accessed from `workers.data_adapters.base` or `workers.mapping_builder.rewrite`
+- **THEN** there are no matches under `apps packages services workers scripts tests`, and the three deleted shim files do not exist
