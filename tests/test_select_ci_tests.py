@@ -8440,6 +8440,73 @@ def test_github_output_flags_selector_source_diff_is_not_a_collapse(tmp_path: Pa
     assert fields["collection_smoke_required"] == "true"
 
 
+# #2948 (entropy-burndown task 6.1) -- the selector splits into three siblings
+# plus a parent/head snapshot script. Each sibling must route exactly like the
+# facade (selection AND the collection-smoke provenance), and the snapshot
+# script must select this suite rather than the `.sh` core-smoke fallback.
+SELECTOR_FACADE_PATH = "scripts/select_ci_tests.py"
+SELECTOR_SIBLING_PATHS: tuple[str, ...] = (
+    "scripts/select_ci_tests_tables.py",
+    "scripts/select_ci_tests_rules.py",
+    "scripts/select_ci_tests_imports.py",
+)
+SELECTOR_SNAPSHOT_SCRIPT = "scripts/ci_selector_snapshot.sh"
+_SELECTOR_OUTPUT_KEYS: tuple[str, ...] = ("count", "tests_json", "meta_guard_only", "collection_smoke_required")
+
+
+@pytest.mark.parametrize("sibling", SELECTOR_SIBLING_PATHS)
+def test_selector_sibling_edit_selects_the_same_targets_as_the_facade(sibling: str) -> None:
+    facade = select_tests([SELECTOR_FACADE_PATH], repo_root=Path("."))
+
+    assert SELECTOR_META_GUARD_TEST in facade
+    assert select_tests([sibling], repo_root=Path(".")) == facade
+
+
+@pytest.mark.parametrize("sibling", SELECTOR_SIBLING_PATHS)
+def test_selector_sibling_edit_emits_the_facade_github_outputs(tmp_path: Path, sibling: str) -> None:
+    facade_dir = tmp_path / "facade"
+    sibling_dir = tmp_path / "sibling"
+    facade_dir.mkdir()
+    sibling_dir.mkdir()
+    facade = _github_output_fields(facade_dir, [SELECTOR_FACADE_PATH], repo_root=Path("."))
+    edited = _github_output_fields(sibling_dir, [sibling], repo_root=Path("."))
+
+    assert facade["collection_smoke_required"] == "true"
+    assert {key: edited[key] for key in _SELECTOR_OUTPUT_KEYS} == {key: facade[key] for key in _SELECTOR_OUTPUT_KEYS}
+
+
+def test_selector_sibling_rows_red_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drop exactly the three #2948 sibling rows and no sibling reaches this suite."""
+    from scripts import select_ci_tests
+
+    mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern not in SELECTOR_SIBLING_PATHS)
+    assert len(mutant) == len(PATH_TEST_RULES) - 3, "a #2948 sibling row is missing or duplicated"
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+
+    for sibling in SELECTOR_SIBLING_PATHS:
+        assert SELECTOR_META_GUARD_TEST not in select_tests([sibling], repo_root=Path(".")), sibling
+
+
+def test_selector_snapshot_script_selects_the_meta_guard_without_core_smoke() -> None:
+    selected = select_tests([SELECTOR_SNAPSHOT_SCRIPT], repo_root=Path("."))
+
+    assert SELECTOR_META_GUARD_TEST in selected
+    assert not set(CORE_SMOKE_TESTS) & set(selected), selected
+
+
+def test_selector_snapshot_script_rule_red_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drop exactly the #2948 `.sh` row and the script falls back to core smoke."""
+    from scripts import select_ci_tests
+
+    mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern != SELECTOR_SNAPSHOT_SCRIPT)
+    assert len(mutant) == len(PATH_TEST_RULES) - 1, "the #2948 snapshot-script row is missing or duplicated"
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+
+    selected = select_tests([SELECTOR_SNAPSHOT_SCRIPT], repo_root=Path("."))
+    assert SELECTOR_META_GUARD_TEST not in selected
+    assert set(CORE_SMOKE_TESTS) <= set(selected), selected
+
+
 @pytest.mark.parametrize(
     ("changed_path", "expected_count"),
     [

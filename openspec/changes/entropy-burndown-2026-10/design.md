@@ -362,7 +362,7 @@ the code the cluster map assigns to it. Patched seams follow the base requiremen
 their negative oracles live": a patched name moves only with all its call sites (tests repoint, no re-export); a patched
 name with a call site that stays in the facade (the Repository and RetryService classes stay) stays too, and moved
 callers reach it through a late `from . import file_orchestration_journal` inside the function body, so the facade
-patch remains the single interception point and no import-time cycle appears. Because no function-level cluster map
+patch remains the single interception point and no import-time cycle appears. Unpatched facade-resident names a moved function needs at runtime (e.g. `FileOrchestrationJournalError`) are likewise imported inside the function body; a sibling never imports the facade at module level. Because no function-level cluster map
 exists yet, the first journal task produces it as a checked-in fixture with a test; extraction tasks consume it and the
 contract oracle is "facade top-level definitions == map's `facade` cluster", not a line-count target (the arithmetic
 ceiling is ≈ 3 500 lines). For the selector the same rule applies to `_SUITE_IMPORTER_PARSE_STATS` (moves with the
@@ -371,6 +371,30 @@ there and moved functions receive them as parameters from `select_tests`. Behavi
 files pass, and for the selector `uv run python scripts/select_ci_tests.py` over a fixed changed-path list yields
 byte-identical output at the PR's parent commit and head (no committed snapshot: parallel tasks add rule rows and would
 invalidate one). Extraction order is in tasks.md §5/§6; the highest-risk step is flagged there.
+
+#### D7 (5.1) risk contract
+
+- **Change surface**: journal `__all__` extended from 11 to the measured external read surface (113 at `890bb4569`: from-imports ∪ alias attribute reads, minus dunders and module objects; patch-only names excluded), three dead entries dropped; zero `# noqa: F401`; one new AST-only hygiene test; one selector constant entry.
+- **Must preserve**: every journal binding and patch seam (no definition moves); the cluster map unchanged; all 76 journal-referencing test files byte-identical; frozen per-file-ignores codes.
+- **Must add**: hygiene test asserting `__all__` is a sorted unique literal tuple, every name has at least one AST-resolved user (from-import, alias attribute, literal-name getattr/setattr/patch.object, dotted-string fullmatch), and loud failure on non-literal attribute names on a journal alias; tmp_path red/green per shape.
+- **Governing invariant**: `__all__` names what other modules read from the facade, so each later move keeps its binding as an import (F822-enforced) and stays a pure move; a monkeypatch target never earns membership.
+- **Sibling surfaces**: 5.0 map (`__all__` already in `facade`); 2.3 parity reads and 3.3 `_utcnow` import binding (re-measure at PR head); 5.6 contract (direction two deferred there); selector `FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS`.
+- **Seams under test**: real-tree hygiene scan; synthetic shape cases; existing journal suites selected by the journal path; ruff F822/F401 on the facade.
+- **Required evidence**: Verify set green; one-off reconciliation (measured read surface == `__all__`) with per-shape counts and base SHA; empty tests diff besides the new file; `select_tests` output containing the new test.
+- **Non-goals**: moving any definition; `# noqa: F401` lines; two-sided equality; resolving parameter aliases or dynamic `import_module`.
+- **Review focus**: exactly three dropped names; no patch-only name listed; one name per line, sorted; the test never imports the journal and never requires a top-level `def`; docstring/comment mentions do not count as users.
+
+#### D7 (5.2) risk contract
+
+- **Change surface**: two new sibling modules — `file_journal_context.py` (9 defs, journal tail :17401–17505) and `file_journal_read_attribution.py` (17 names + the #1734 D11 comment block, :214–407); facade re-binds 2 + 9 names via top-of-file imports and drops the orphaned `contextvars`/`functools`/`inspect`/`TypeVar` imports; one stop-on-match selector row for `services/orchestrator/file_journal_*.py` plus its at-site and red-when-removed tests (first cut only).
+- **Must preserve**: every from-import and alias read of the 5 external read_attribution names; `__all__` unchanged; zero patched names moved; exception-class identity on every raise path (`FileOrchestrationJournalError` is the facade's object); single instances of the read-attribution lock, counters and ContextVars; decorator application at class-definition time; frozen per-file-ignores; 76 journal test files byte-identical (first cut: except the selector test).
+- **Must add**: function-body imports of the four unpatched facade-resident names in exactly six context functions; no top-level facade import in any sibling; no facade binding of mutable or `global`-rebound read-attribution state.
+- **Governing invariant**: siblings never import the facade at import time; anything a moved function needs from the facade is resolved at call time, so the facade stays the single owner of its names and no import cycle exists.
+- **Sibling surfaces**: 5.0 map (option a: sibling top-level == cluster; no `__all__`); 5.1 hygiene (direction one unaffected; sibling late imports count as users — 5.6 decides direction two); 5.3+ owners of `_scalar_text` / `_required_safe_identity` / `_validate_model_context_identity`; selector `FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS`; 6.x selector split (row rebase); `scheduler_runtime.py:16`.
+- **Seams under test**: existing journal suites (context reads + malformed-context negatives; read counters, lanes, thread safety, scheduler evidence); standalone sibling import; identity/exception probes; AST verbatim probe; selector at-site + stop tell.
+- **Required evidence**: Verify sets green; probes' output in the PR; tests diff limited to the selector test (first cut) / empty (successor); `select_tests` output for the PR paths.
+- **Non-goals**: moving any patched name or `FileOrchestrationJournalError`; repointing importers to siblings; `# noqa: F401`; touching `scheduler_init_state_match.py` prose.
+- **Review focus**: (1) no sibling top-level facade import and no `TYPE_CHECKING` for runtime names; (2) exact facade re-bind lists (2 / 9) and the 8 unbound read_attribution names; (3) bodies verbatim except the six inserted imports; (4) the `#1748` comment at :408 stays; (5) the selector row stops (`test_state_clone.py` not selected).
 
 #### D7 (6.3) risk contract
 

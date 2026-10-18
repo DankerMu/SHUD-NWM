@@ -11,6 +11,21 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+# #2948 (entropy-burndown task 6.1): the selector is being split into
+# `scripts/select_ci_tests_{tables,rules,imports}.py` siblings, imported as
+# `from scripts.select_ci_tests_<x> import ...` (dotted only; a non-dotted
+# sibling import breaks under pytest and creates a second module identity).
+# `python scripts/select_ci_tests.py` (how ci.yml invokes it) puts `scripts/`
+# on sys.path, not the repository root, so those imports are not resolvable
+# without this -- same guard as publish_scheduler_file_registry.py.
+# It compares the resolved absolute path, so it is a no-op whenever the root
+# is already on sys.path in that exact form -- which covers `-m`, `uv run`
+# and pytest. A root present only as an equivalent-but-different string (`''`
+# under `python -c`, `'.'` after a manual insert) does not match and gets a
+# redundant absolute entry; harmless, but it is not literal idempotence.
+if str(Path(__file__).resolve().parents[1]) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 # The selector's own suite carries tracked-tree-derived meta-guards (same-name
 # script pairs, container-contract closure, guarded-module importer closure). A
 # PR that adds or moves a test file can invalidate any of them, so every changed
@@ -6830,6 +6845,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "scripts/select_ci_tests.py",
         (SELECTOR_META_GUARD_TEST,),
     ),
+    # #2948 (entropy-burndown task 6.1): the selector's split-out siblings and
+    # its parent/head snapshot script route exactly like the facade. Exact
+    # strings, no glob: a sibling matches before it exists (fnmatch on the
+    # path string), and without its row a sibling edit would arm the
+    # unknown-backend core-smoke fallback and a `.sh` edit the
+    # `_is_backend_shell_path` fallback instead of selecting this suite.
+    PathTestRule("scripts/select_ci_tests_tables.py", (SELECTOR_META_GUARD_TEST,)),
+    PathTestRule("scripts/select_ci_tests_rules.py", (SELECTOR_META_GUARD_TEST,)),
+    PathTestRule("scripts/select_ci_tests_imports.py", (SELECTOR_META_GUARD_TEST,)),
+    PathTestRule("scripts/ci_selector_snapshot.sh", (SELECTOR_META_GUARD_TEST,)),
     # #1650 self-routing: ci.yml's top-level concurrency and the backend
     # paths-filter ARE the contract tests/select_ci_tests.py pins, so a
     # workflow-only PR must select the meta-guard suite and not collapse to
@@ -7289,8 +7314,11 @@ def _collection_smoke_required(changed: Sequence[str], *, meta_guard_only: bool)
     (``PRODUCTION_TOPOLOGY_HARD_GATE_TEST``) disregarded, because that rider
     rides on nearly every PR (any ``openspec/changes/**`` edit is a scan input)
     and must never mask the collapse — OR when the changed-file set touches
-    the selector itself (``scripts/select_ci_tests.py`` or
-    ``tests/test_select_ci_tests.py``) — the class of diff that rewrites the
+    the selector itself (``scripts/select_ci_tests.py``, its split-out siblings
+    ``scripts/select_ci_tests_tables.py``, ``scripts/select_ci_tests_rules.py``
+    and ``scripts/select_ci_tests_imports.py`` (#2948), or
+    ``tests/test_select_ci_tests.py``; exact-string membership, never a
+    prefix match) — the class of diff that rewrites the
     gate and must not silently lose the full-tree collection oracle, even when
     supplemental routing makes the final selection non-collapsed (e.g. a
     selector-source PR also selects the Timescale invariant). Deliberately
@@ -7299,7 +7327,17 @@ def _collection_smoke_required(changed: Sequence[str], *, meta_guard_only: bool)
     """
     if meta_guard_only:
         return True
-    return any(path in ("scripts/select_ci_tests.py", SELECTOR_META_GUARD_TEST) for path in changed)
+    return any(
+        path
+        in (
+            "scripts/select_ci_tests.py",
+            "scripts/select_ci_tests_tables.py",
+            "scripts/select_ci_tests_rules.py",
+            "scripts/select_ci_tests_imports.py",
+            SELECTOR_META_GUARD_TEST,
+        )
+        for path in changed
+    )
 
 
 def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -> list[str]:
