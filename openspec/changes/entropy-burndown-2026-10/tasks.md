@@ -1240,7 +1240,7 @@
 
 ## 9. 指令文件与退役引用（spec: scoped-agent-instructions、legacy-store-reference-retirement）
 
-- [ ] 9.1 九个模块（含 `services/precip`，不含 `packages/scheduler`）各一份 AGENTS.md（四节模板），引用与命令可运行。
+- [x] 9.1 九个模块（含 `services/precip`，不含 `packages/scheduler`）各一份 AGENTS.md（四节模板），引用与命令可运行。
 
   Depends on: 无
 
