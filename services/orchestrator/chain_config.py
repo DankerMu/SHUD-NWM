@@ -7,12 +7,12 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 
+from packages.common.contracts.time_normalization import format_cycle_time, parse_cycle_time
 from packages.common.python_runtime import validated_target_python_runtime
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator.chain_runtime_utils import _format_time
 from services.orchestrator.chain_stages import STAGES, terminal_stage_names
 from services.orchestrator.chain_types import OrchestratorError
-from workers.data_adapters.base import format_cycle_time, parse_cycle_time
 
 
 def scenario_for_source(source_id: str) -> str:

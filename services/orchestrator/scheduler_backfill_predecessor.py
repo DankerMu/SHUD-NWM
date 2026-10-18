@@ -41,9 +41,10 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from packages.common.contracts.time_normalization import cycle_id_for
 from services.orchestrator import scheduler_lineage as _scheduler_lineage
 from services.orchestrator.scheduler_discovery import SchedulerResourceLimitError
-from workers.data_adapters.base import CycleDiscovery, cycle_id_for
+from workers.data_adapters.base import CycleDiscovery
 
 log = logging.getLogger(__name__)
 

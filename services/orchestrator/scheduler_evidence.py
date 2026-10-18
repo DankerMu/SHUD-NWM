@@ -10,6 +10,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Any, Protocol
 from urllib.parse import urlparse
 
+from packages.common.contracts.time_normalization import cycle_id_for
 from services.orchestrator.production_contract import production_contract_matrix
 from services.orchestrator.scheduler_lease import (
     UnsafeSchedulerLockError,
@@ -17,7 +18,6 @@ from services.orchestrator.scheduler_lease import (
     lease_heartbeat_interval_seconds,
 )
 from services.orchestrator.scheduler_state import _evidence_safe, _format_utc
-from workers.data_adapters.base import cycle_id_for
 
 SCHEDULER_EVIDENCE_SCHEMA_VERSION = "nhms.production_scheduler.pass_evidence.v1"
 SCHEDULER_EVIDENCE_CONTRACT_ID = "runtime-evidence-and-operations.scheduler-evidence.v1"

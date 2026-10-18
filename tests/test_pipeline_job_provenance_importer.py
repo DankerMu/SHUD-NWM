@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 import scripts.backfill_pipeline_job_provenance as provenance_backfill
+from packages.common.contracts.time_normalization import cycle_id_for
 from packages.common.object_store import LocalObjectStore
 from scripts import node27_autopipeline
 from services.orchestrator.pipeline_job_provenance import (
@@ -16,7 +17,6 @@ from services.orchestrator.pipeline_job_provenance import (
     PipelineJobProvenanceError,
     import_run_pipeline_job_provenance,
 )
-from workers.data_adapters.base import cycle_id_for
 
 IFS_RUN_ID = "fcst_ifs_2026091612_dg_9ccb261a39d51c24f4de9173fb4461b6"
 IFS_MODEL_ID = "dg_9ccb261a39d51c24f4de9173fb4461b6"

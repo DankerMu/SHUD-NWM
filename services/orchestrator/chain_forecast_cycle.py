@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from packages.common.contracts.time_normalization import cycle_id_for, format_cycle_time
 from packages.common.source_identity import normalize_source_id
 from packages.common.state_lineage import WARM_START_SUCCESSOR_CHECKPOINT_MISSING
 from services.orchestrator import chain as _chain
@@ -28,7 +29,6 @@ from services.orchestrator.scheduler_generation import (
     PACKAGED_IC_BOOTSTRAP_MODE,
     PACKAGED_IC_QUALITY,
 )
-from workers.data_adapters.base import cycle_id_for, format_cycle_time
 
 __all__ = (
     "apply_cohort_warm_start",

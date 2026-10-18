@@ -2391,8 +2391,8 @@ _QUARANTINE_REQUIRED_LEAD_HOURS = 6
 
 def _quarantine_state_id(*, lead_hours: int) -> str:
     """Compose the token the write side would produce for this lineage."""
+    from packages.common.contracts.time_normalization import cycle_id_for
     from packages.common.state_manager import state_snapshot_id
-    from workers.data_adapters.base import cycle_id_for
 
     valid_time = _dt(_QUARANTINE_CYCLE_TIME)
     return state_snapshot_id(
@@ -2421,12 +2421,12 @@ def _quarantine_state_index_orchestrator(
     is perfectly usable at the provider, and ``_validate_state_lineage`` in the
     caller's loop then rejects it.
     """
+    from packages.common.contracts.time_normalization import cycle_id_for
     from packages.common.state_manager import (
         FileStateSnapshotIndexRepository,
         StateManager,
         StateSnapshot,
     )
-    from workers.data_adapters.base import cycle_id_for
 
     valid_time = _dt(_QUARANTINE_CYCLE_TIME)
     state_object_root = tmp_path / "state-object-store"

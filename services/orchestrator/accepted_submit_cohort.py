@@ -16,10 +16,10 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC
 from typing import Any
 
+from packages.common.contracts.time_normalization import cycle_id_for, format_cycle_time, parse_cycle_time
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator.chain_config import scenario_for_source
 from services.orchestrator.reservation import slurm_comment_for
-from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time
 
 MAX_FORECAST_COHORT_MEMBERS = 256
 FORECAST_COHORT_STAGE_ALIASES = frozenset({"forecast", "run_shud_forecast", "run_shud_forecast_array"})

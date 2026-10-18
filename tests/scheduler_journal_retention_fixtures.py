@@ -12,13 +12,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from packages.common.contracts.time_normalization import cycle_id_for
 from services.orchestrator import scheduler_journal_archive as archive
 from services.orchestrator import scheduler_journal_retention as retention
 from services.orchestrator.file_orchestration_journal import (
     FILE_ORCHESTRATION_JOURNAL_SCHEMA_VERSION,
     FILE_ORCHESTRATION_LATEST_SCHEMA_VERSION,
 )
-from workers.data_adapters.base import cycle_id_for
 
 FrontierReadResult = retention.FrontierReadResult
 SchedulerJournalRetentionConfig = retention.SchedulerJournalRetentionConfig

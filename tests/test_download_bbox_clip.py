@@ -9,7 +9,7 @@ import pytest
 
 from packages.common.object_store import LocalObjectStore
 
-region_module = importlib.import_module("workers.data_adapters.region")
+region_module = importlib.import_module("packages.common.contracts.region")
 gfs_module = importlib.import_module("workers.data_adapters.gfs_adapter")
 ifs_module = importlib.import_module("workers.data_adapters.ifs_adapter")
 
@@ -20,7 +20,7 @@ GFSAdapterConfig = gfs_module.GFSAdapterConfig
 GFSCdoMissingError = gfs_module.CdoMissingError
 GFSCdoClipError = gfs_module.CdoClipError
 GFSManifestEntry = importlib.import_module("workers.data_adapters.base").ManifestEntry
-parse_cycle_time = importlib.import_module("workers.data_adapters.base").parse_cycle_time
+parse_cycle_time = importlib.import_module("packages.common.contracts.time_normalization").parse_cycle_time
 IFSAdapter = ifs_module.IFSAdapter
 IFSAdapterConfig = ifs_module.IFSAdapterConfig
 CdoMissingError = ifs_module.CdoMissingError

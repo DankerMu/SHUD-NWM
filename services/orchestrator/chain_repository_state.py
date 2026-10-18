@@ -6,13 +6,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
 
+from packages.common.contracts.time_normalization import cycle_id_for, format_cycle_time
 from services.orchestrator import chain_source_cycle, source_cycle_raw_manifest
 from services.orchestrator.scheduler_state_rows import (
     STAGE_RETRY_ATTEMPT_FLOOR_SOURCES_KEY,
     STAGE_RETRY_ATTEMPT_FLOORS_KEY,
     stage_retry_attempt_floors,
 )
-from workers.data_adapters.base import cycle_id_for, format_cycle_time
 
 DEFAULT_CANDIDATE_STATE_EVENT_LIMIT = 100
 DEFAULT_CANDIDATE_STATE_JOB_LIMIT = 100

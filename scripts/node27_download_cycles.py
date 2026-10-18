@@ -26,8 +26,8 @@ from urllib.parse import parse_qsl, urlsplit
 
 import psycopg2
 
+from packages.common.contracts.time_normalization import parse_cycle_time
 from packages.common.redaction import redact_payload, redact_text
-from workers.data_adapters.base import parse_cycle_time
 
 DOWNLOAD_ROLE = "node27_data_plane_download"
 DOWNLOAD_SUMMARY_SCHEMA = "nhms.node27_download.summary.v1"

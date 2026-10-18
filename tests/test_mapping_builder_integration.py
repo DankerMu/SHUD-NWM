@@ -91,12 +91,12 @@ from datetime import UTC, datetime
 import pytest
 
 from packages.common import grid_signature as grid_signature_module
+from packages.common.contracts.direct_grid import DirectGridForcingContract
 from tests.fixtures.mapping_builder.in_memory_grid_snapshot import (
     InMemoryGridSnapshotLoader,
     make_regular_grid_cells,
     make_snapshot,
 )
-from workers.forcing_producer.direct_grid_contract import DirectGridForcingContract
 from workers.mapping_builder import (
     ALGORITHM_ID,
     EVIDENCE_CHECKSUM_EXCLUDED_FIELDS,

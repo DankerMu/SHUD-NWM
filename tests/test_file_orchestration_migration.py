@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from packages.common.contracts.time_normalization import cycle_id_for
 from services.orchestrator import cli as cli_module
 from services.orchestrator import file_orchestration_migration as migration_module
 from services.orchestrator import scheduler as scheduler_module
@@ -31,7 +32,6 @@ from services.orchestrator.scheduler_state_failure import (
     _retry_failure_evidence,
 )
 from tests.test_production_scheduler import _dt
-from workers.data_adapters.base import cycle_id_for
 
 
 def _job(

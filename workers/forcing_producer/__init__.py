@@ -1,12 +1,13 @@
 """SHUD forcing production worker."""
 
-from .direct_grid_contract import (
+from packages.common.contracts.direct_grid import (
     DirectGridContractError,
     DirectGridForcingContract,
     DirectGridStationBinding,
     load_forcing_mapping_contract_from_manifest,
     parse_direct_grid_forcing_contract,
 )
+
 from .producer import (
     ERA5_CANONICAL_TO_FORCING,
     ERA5_REQUIRED_CANONICAL_VARIABLES,

@@ -14,6 +14,11 @@ from typing import Any
 
 import pytest
 
+from packages.common.contracts.direct_grid import (
+    MAX_DIRECT_GRID_STATION_BINDINGS,
+    REQUIRED_MANIFEST_FIELDS,
+    REQUIRED_STATION_FIELDS,
+)
 from packages.common.forcing_domain_handoff import parse_forcing_domain_handoff_path
 from packages.common.met_store import MetStoreError
 from packages.common.object_store import LocalObjectStore, sha256_bytes
@@ -40,11 +45,6 @@ from workers.forcing_producer import (
     wind_speed,
 )
 from workers.forcing_producer import producer as producer_module
-from workers.forcing_producer.direct_grid_contract import (
-    MAX_DIRECT_GRID_STATION_BINDINGS,
-    REQUIRED_MANIFEST_FIELDS,
-    REQUIRED_STATION_FIELDS,
-)
 from workers.forcing_producer.file_store import FileForcingRepository
 from workers.forcing_producer.producer import (
     EXPECTED_CANONICAL_UNITS,
@@ -454,7 +454,7 @@ class FakeForcingRepository:
         # override this method or set the class attribute directly.
         from uuid import NAMESPACE_URL, uuid5
 
-        from workers.data_adapters.region import china_buffered_bbox_from_env
+        from packages.common.contracts.region import china_buffered_bbox_from_env
 
         bbox = china_buffered_bbox_from_env()
         snapshot_id = uuid5(

@@ -3133,8 +3133,8 @@ def test_d89_preflight_returns_none_preserves_pre_section8_evidence_shape(
 
 def _wrong_suffix_init_state_id() -> str:
     """Recorded id sharing T's base key but naming a 12h-off predecessor."""
+    from packages.common.contracts.time_normalization import cycle_id_for
     from packages.common.state_manager import state_snapshot_id
-    from workers.data_adapters.base import cycle_id_for
 
     valid_time = _dt("2026-05-21T12:00:00Z")
     return state_snapshot_id(
@@ -3148,8 +3148,8 @@ def _wrong_suffix_init_state_id() -> str:
 
 def _expected_init_state_id() -> str:
     """Expected token for T with the 6h cadence lead (independent composition)."""
+    from packages.common.contracts.time_normalization import cycle_id_for
     from packages.common.state_manager import state_snapshot_id
-    from workers.data_adapters.base import cycle_id_for
 
     valid_time = _dt("2026-05-21T12:00:00Z")
     return state_snapshot_id(
@@ -3170,8 +3170,8 @@ def _state_index_entry(
     model_id: str = "model_a",
 ) -> dict[str, Any]:
     """Compose one state-index entry the same way the DB-free fixtures do."""
+    from packages.common.contracts.time_normalization import cycle_id_for, format_cycle_time
     from packages.common.object_store import LocalObjectStore, sha256_bytes
-    from workers.data_adapters.base import cycle_id_for, format_cycle_time
 
     store = LocalObjectStore(roots["object_store_root"], "s3://nhms")
     content = f"state-fixture-{format_cycle_time(valid_time)}\n".encode()
@@ -3207,7 +3207,7 @@ def _running_forecast_job(cycle_time: datetime) -> dict[str, Any]:
     so the decision is ``active_duplicate_pipeline`` rather than the
     ``active_slurm_job`` skip that the else-leg excludes outright.
     """
-    from workers.data_adapters.base import cycle_id_for, format_cycle_time
+    from packages.common.contracts.time_normalization import cycle_id_for, format_cycle_time
 
     stamp = format_cycle_time(cycle_time)
     return {
@@ -3226,7 +3226,7 @@ def _running_forecast_job(cycle_time: datetime) -> dict[str, Any]:
 
 def _terminal_state_save_qc_job(cycle_time: datetime) -> dict[str, Any]:
     """A candidate-scoped terminal pipeline success for cycle T."""
-    from workers.data_adapters.base import cycle_id_for, format_cycle_time
+    from packages.common.contracts.time_normalization import cycle_id_for, format_cycle_time
 
     stamp = format_cycle_time(cycle_time)
     return {
@@ -3276,6 +3276,7 @@ def _run_wiring_a_build_candidates(
 
     Returns ``_build_candidates``' full 5-tuple.
     """
+    from packages.common.contracts.time_normalization import format_cycle_time
     from services.orchestrator import scheduler as scheduler_module
     from services.orchestrator.scheduler import ProductionSchedulerConfig
     from tests.test_file_orchestration_journal import _latest_view, _write_json
@@ -3290,7 +3291,7 @@ def _run_wiring_a_build_candidates(
     from tests.test_production_scheduler import (
         _dt as _pdt,
     )
-    from workers.data_adapters.base import CycleDiscovery, format_cycle_time
+    from workers.data_adapters.base import CycleDiscovery
 
     roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
     cycle_time = _pdt("2026-05-21T12:00:00Z")
@@ -3618,7 +3619,7 @@ def _cohort_master_recording(
     the shape of an unrelated whitelisted replacement, and of every journal
     written before #1157.
     """
-    from workers.data_adapters.base import cycle_id_for, format_cycle_time
+    from packages.common.contracts.time_normalization import cycle_id_for, format_cycle_time
 
     run_id = f"cycle_gfs_{format_cycle_time(cycle_time)}"
     row = {
@@ -3917,8 +3918,8 @@ def _write_side_init_state_id(
     source_id=run.source_id, ...)``.  Reproducing that call shape here is the
     independent oracle for the scheduler-side expectation.
     """
+    from packages.common.contracts.time_normalization import cycle_id_for
     from packages.common.state_manager import state_snapshot_id
-    from workers.data_adapters.base import cycle_id_for
 
     return state_snapshot_id(
         model_id,

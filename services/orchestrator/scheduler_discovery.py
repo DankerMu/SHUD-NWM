@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any, Protocol
 
+from packages.common.contracts.time_normalization import cycle_id_for
 from packages.common.redaction import redact_payload
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator import scheduler_discovery_evidence as _evidence
@@ -24,7 +25,7 @@ from services.orchestrator.scheduler_init_state_match import (
     terminal_init_state_match,
 )
 from services.orchestrator.scheduler_state import _ensure_utc, _evidence_safe, _format_utc
-from workers.data_adapters.base import CycleDiscovery, cycle_id_for
+from workers.data_adapters.base import CycleDiscovery
 
 MAX_DISCOVERED_CYCLES = 10000
 #: The typed ``source_cycles`` entry naming the discovery leg a pass executed

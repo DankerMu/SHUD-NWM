@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient
 from apps.api.main import app
 from apps.api.routes import pipeline as pipeline_routes
 from apps.api.routes.forecast import get_forecast_store
+from packages.common.contracts.time_normalization import cycle_id_for
 from services.orchestrator.production_contract import (
     PRODUCTION_STAGE_TAXONOMY,
     PRODUCTION_STATUS_TAXONOMY,
@@ -44,7 +45,6 @@ from tests.test_monitoring_api import (
     _seed_monitoring_jobs,
     _store,
 )
-from workers.data_adapters.base import cycle_id_for
 
 PIPELINE_JOB_KEYS = {
     "job_id",

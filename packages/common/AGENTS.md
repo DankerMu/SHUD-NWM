@@ -24,10 +24,13 @@ changes compute, display, ingest, and gateway behavior at once.
   add an entry: move the needed contract down instead. The guard also fails on
   a stale entry, so remove the entry in the same change that removes the import.
 - Contracts that several planes parse belong under `packages/common/contracts/`
-  (today `packages/common/contracts/direct_grid.py`). A worker-side module
-  that re-exports one of them, such as
-  `workers/forcing_producer/direct_grid_contract.py`, is a compatibility
-  facade; put new logic in the contract module.
+  (today `packages/common/contracts/direct_grid.py`,
+  `packages/common/contracts/time_normalization.py`,
+  `packages/common/contracts/region.py` and
+  `packages/common/contracts/hydrologic_fingerprint.py`). Import them from
+  there: the old worker-side shims were deleted, and
+  `tests/test_import_layering_guard.py` rejects old-path imports. Put new
+  logic in the contract module.
 - `model_registry.py` is a stable import path: `PsycopgModelRegistryStore` is
   composed from the `model_registry_*.py` owner mixins, and every name they
   define is re-exported by identity. Add behavior to the owner module, not to

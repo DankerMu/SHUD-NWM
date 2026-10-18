@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from packages.common.contracts.time_normalization import format_cycle_time
 from packages.common.object_store import LocalObjectStore, sha256_bytes
 from services.orchestrator.chain import (
     ForcingContext,
@@ -19,7 +20,6 @@ from services.orchestrator.chain import (
     scenario_for_source,
 )
 from workers.canonical_converter.converter import IFS_REQUIRED_STANDARD_VARIABLES
-from workers.data_adapters.base import format_cycle_time
 from workers.forcing_producer import (
     CanonicalProduct,
     ForcingProducer,

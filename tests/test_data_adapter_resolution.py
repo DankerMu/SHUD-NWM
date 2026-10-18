@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from workers.data_adapters.base import (
+from packages.common.contracts.time_normalization import (
     generate_segmented_forecast_hours,
     parse_resolution_segments,
     validate_forecast_hours,

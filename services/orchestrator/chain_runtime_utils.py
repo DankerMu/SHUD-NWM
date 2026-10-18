@@ -9,6 +9,7 @@ from typing import Any, Mapping, Sequence
 
 import httpx
 
+from packages.common.contracts.time_normalization import cycle_id_for, format_cycle_time, parse_cycle_time
 from packages.common.python_runtime import validated_target_python_runtime
 from packages.common.redaction import redact_payload
 from packages.common.source_identity import normalize_source_id
@@ -27,7 +28,6 @@ from services.orchestrator.retry_identity import (
     log_ignored_manual_retry_attempt_claim,
 )
 from workers.canonical_converter.converter import expected_converter_version
-from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time
 
 TERMINAL_JOB_STATUSES = {
     "succeeded",

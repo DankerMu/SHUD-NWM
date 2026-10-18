@@ -1469,11 +1469,12 @@ DIRECT_GRID_CONTRACT_TESTS: tuple[str, ...] = (
 
 DIRECT_GRID_SURFACE_TESTS: tuple[str, ...] = DIRECT_GRID_E2E_TESTS + DIRECT_GRID_CONTRACT_TESTS
 
-# Non-gated top-level importers of workers/forcing_producer/direct_grid_contract.py
-# that the focused DIRECT_GRID_SURFACE_TESTS node ids never reach (#1455). The
-# contract module is owned by a stop_on_match rule, so the
-# `workers/forcing_producer/**` rule below is unreachable for it and these have
-# to ride the stop rule itself. Kept as a separate tuple appended at the rule
+# Non-gated top-level importers of the direct-grid contract
+# (packages/common/contracts/direct_grid.py; workers/forcing_producer/
+# direct_grid_contract.py until entropy-burndown 1.3) that the focused
+# DIRECT_GRID_SURFACE_TESTS node ids never reach (#1455). The contract module is
+# owned by a stop_on_match rule, so no broader rule is reachable for it and these
+# have to ride the stop rule itself. Kept as a separate tuple appended at the rule
 # site so DIRECT_GRID_SURFACE_TESTS keeps meaning "the compact e2e fixture" for
 # every other reader.
 DIRECT_GRID_CONTRACT_IMPORTER_TESTS: tuple[str, ...] = (
@@ -1484,15 +1485,11 @@ DIRECT_GRID_CONTRACT_IMPORTER_TESTS: tuple[str, ...] = (
     "tests/test_mapping_builder_integration.py",
 )
 
-DIRECT_GRID_SURFACE_PATH_PATTERNS: tuple[str, ...] = (
-    "workers/forcing_producer/direct_grid_contract.py",
-    "openspec/changes/direct-grid-forcing/**",
-)
+DIRECT_GRID_SURFACE_PATH_PATTERNS: tuple[str, ...] = ("openspec/changes/direct-grid-forcing/**",)
 
-# entropy-burndown 1.2 (#2921): the direct-grid contract's canonical home. The
-# old workers/ path stays a re-export shim until 1.3, so its rule above stays
-# too. Deliberately NOT appended to DIRECT_GRID_SURFACE_PATH_PATTERNS: 1.3
-# deletes `[0]`, and an appended entry would shift every index after it.
+# entropy-burndown 1.2 (#2921): the direct-grid contract's canonical home. 1.3
+# deleted the workers/forcing_producer/direct_grid_contract.py shim together
+# with its rule and its DIRECT_GRID_SURFACE_PATH_PATTERNS entry.
 DIRECT_GRID_CONTRACT_CANONICAL_PATH = "packages/common/contracts/direct_grid.py"
 
 # The `workers/data_adapters/**` and `workers/data_adapters/base.py` rule
@@ -1520,18 +1517,17 @@ DATA_ADAPTERS_BASE_HELPER_TESTS: tuple[str, ...] = (
 )
 
 # entropy-burndown 1.2 (#2922): the time-normalization contract's canonical
-# home. base.py and services/orchestrator/time_consistency.py stay re-export
-# shims until 1.3, so their rules stay too.
+# home. 1.3 deleted the services/orchestrator/time_consistency.py shim and
+# narrowed base.py to its own classes; base.py's rules stay.
 TIME_NORMALIZATION_CONTRACT_PATH = "packages/common/contracts/time_normalization.py"
 
-# entropy-burndown 1.2 (#2964): the region contract's canonical home.
-# workers/data_adapters/region.py stays a re-export shim until 1.3, so the
-# `workers/data_adapters/**` row keeps owning it too.
+# entropy-burndown 1.2 (#2964): the region contract's canonical home. 1.3
+# deleted the workers/data_adapters/region.py shim.
 REGION_CONTRACT_PATH = "packages/common/contracts/region.py"
 
 # entropy-burndown 1.2 (#2923): the hydrologic-core fingerprint contract's
-# canonical home. workers/mapping_builder/rewrite.py stays a re-export shim
-# until 1.3, so the `workers/mapping_builder/**` row keeps owning it too.
+# canonical home. 1.3 narrowed workers/mapping_builder/rewrite.py to its own
+# names; the `workers/mapping_builder/**` row keeps owning rewrite.py.
 HYDROLOGIC_FINGERPRINT_CONTRACT_PATH = "packages/common/contracts/hydrologic_fingerprint.py"
 
 FILE_JOURNAL_READ_STATE_TESTS: tuple[str, ...] = (
@@ -3104,24 +3100,18 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (*ORCHESTRATOR_MANIFEST_SURFACE_TESTS, *SCHEDULER_IMPORTER_TESTS),
     ),
     PathTestRule(
-        DIRECT_GRID_SURFACE_PATH_PATTERNS[0],
-        # Extended AT THE RULE SITE, not by editing DIRECT_GRID_SURFACE_TESTS:
-        # the shared constant also serves the openspec-change pattern below,
-        # whose selection must not move (#1455 scopes to the nine directories).
-        (*DIRECT_GRID_SURFACE_TESTS, *DIRECT_GRID_CONTRACT_IMPORTER_TESTS),
-        stop_on_match=True,
-    ),
-    PathTestRule(
-        # #2921: the contract module moved here; same targets and stop semantics
-        # as the shim's row above. `packages/common/**` still adds the #1744
-        # core-smoke baseline outside the rule loop, so the effective selection
-        # is wider than the shim path's -- intentionally.
+        # #2921: the contract module moved here and inherited the deleted shim
+        # row's targets and stop semantics. Extended AT THE RULE SITE, not by
+        # editing DIRECT_GRID_SURFACE_TESTS: the shared constant also serves the
+        # openspec-change pattern below, whose selection must not move (#1455
+        # scopes to the nine directories). `packages/common/**` still adds the
+        # #1744 core-smoke baseline outside the rule loop -- intentionally.
         DIRECT_GRID_CONTRACT_CANONICAL_PATH,
         (*DIRECT_GRID_SURFACE_TESTS, *DIRECT_GRID_CONTRACT_IMPORTER_TESTS),
         stop_on_match=True,
     ),
     PathTestRule(
-        DIRECT_GRID_SURFACE_PATH_PATTERNS[1],
+        DIRECT_GRID_SURFACE_PATH_PATTERNS[0],
         DIRECT_GRID_SURFACE_TESTS,
         stop_on_match=True,
     ),
@@ -3429,7 +3419,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # The three object-store-root additions (#1455) are non-gated top-level
         # importer suites of the adapters that this rule already owns:
         # test_object_store_roots.py builds ERA5/GFS/IFS adapters directly, and
-        # the bbox pair consumes workers/data_adapters/region.py. They are cheap
+        # the bbox pair consumes the bbox contract (region.py here until 1.3). They are cheap
         # (0.8-2.4s) and every adapter shares the object-store root convention,
         # so they ride the directory list rather than three narrow rules.
         "workers/data_adapters/**",

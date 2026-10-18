@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from packages.common.contracts.time_normalization import cycle_id_for
 from packages.common.object_store import LocalObjectStore
 from services.artifacts import published_log_uri
 from services.orchestrator.chain_types import OrchestratorError
@@ -21,7 +22,6 @@ from services.orchestrator.pipeline_job_provenance import (
 )
 from tests.test_file_orchestration_journal import _journal_record as _file_journal_record
 from tests.test_file_orchestration_journal import _latest_view, _model_context, _write_json, _write_jsonl
-from workers.data_adapters.base import cycle_id_for
 
 # Independent expected values from `.workplans/2420/node22-bound-task-log-provenance.jsonl`.
 IFS_PARENT_JOB_ID = "49999"

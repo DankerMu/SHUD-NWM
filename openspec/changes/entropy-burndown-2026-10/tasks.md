@@ -47,7 +47,7 @@
 
   **Minimal mergeable slice:** atomic - 守卫、allowlist 与路由三者缺一则守卫要么在 CI 上不跑、要么立刻红。
 
-- [ ] 1.2 expand：新建 `packages/common/contracts/{direct_grid,time_normalization,region,hydrologic_fingerprint}.py`，把 spec 列出的符号搬入（`time_normalization` 含 `base.py` 九个纯助手 + `check_three_way_time_consistency`；`hydrologic_fingerprint` 含 `verify_hydrologic_core_fingerprint_equal` 的 AST 传递闭包：基类、四个异常、`HydrologicCoreFingerprint`、`compute_hydrologic_core_fingerprint`、`_validate_category_files`、三个常量等，PR 附闭包清单）；五个原模块改为显式 re-export shim（`direct_grid_contract.py`、`region.py`、`base.py` 保留适配器基类与 dataclass、`rewrite.py` 其余异常改继承契约基类、`time_consistency.py`）；`workers/shud_runtime/runtime.py` 与 `packages/common` 的 7 个文件改从 `contracts` 导入；allowlist 变为 `[]`；selector 在 `PATH_TEST_RULES` 为四个 contract 模块各加一行与旧路径 owner 规则等价的规则（相同测试集、相同 `stop_on_match` 语义）。
+- [x] 1.2 expand：新建 `packages/common/contracts/{direct_grid,time_normalization,region,hydrologic_fingerprint}.py`，把 spec 列出的符号搬入（`time_normalization` 含 `base.py` 九个纯助手 + `check_three_way_time_consistency`；`hydrologic_fingerprint` 含 `verify_hydrologic_core_fingerprint_equal` 的 AST 传递闭包：基类、四个异常、`HydrologicCoreFingerprint`、`compute_hydrologic_core_fingerprint`、`_validate_category_files`、三个常量等，PR 附闭包清单）；五个原模块改为显式 re-export shim（`direct_grid_contract.py`、`region.py`、`base.py` 保留适配器基类与 dataclass、`rewrite.py` 其余异常改继承契约基类、`time_consistency.py`）；`workers/shud_runtime/runtime.py` 与 `packages/common` 的 7 个文件改从 `contracts` 导入；allowlist 变为 `[]`；selector 在 `PATH_TEST_RULES` 为四个 contract 模块各加一行与旧路径 owner 规则等价的规则（相同测试集、相同 `stop_on_match` 语义）。
 
   Depends on: 1.1
 
@@ -116,7 +116,7 @@
 
   **Minimal mergeable slice:** `contracts/direct_grid.py` + `direct_grid_contract.py` shim + selector 等价规则行 + `packages/common` 的 4 个文件 7 行 direct_grid 导入改向 - 该模块只依赖 `source_identity`、无 monkeypatch 风险、其余 16 个导入文件全部经 shim 保持可用，可独立合并保绿；其余三个契约模块各为一个后继（time_normalization、region、hydrologic_fingerprint 互相独立，均依赖首刀建立的包骨架；"allowlist 为 `[]`"只在三片都合并后成立，由 1.3 验收）。
 
-- [ ] 1.3 contract：迁移仓库内全部旧路径导入与模块属性访问到 `packages.common.contracts.*`（含 tests；`chain_compat_runtime` 的 owner 模块改指向契约模块），删除 `direct_grid_contract.py`、`region.py`、`time_consistency.py` 三个 shim，去掉 `base.py`/`rewrite.py` 的 re-export；`tests/test_import_layering_guard.py` 增加 contract 检查函数（AST 扫描 `from`/`import`/`import … as` 无旧路径、无旧模块的被搬名字）。允许的测试改动：见下方「钉死的契约（1.3）」全集（导入路径、importlib 站点、`test_orchestration_chain` identity 块、`tests/test_select_ci_tests.py` 不再派生的条目与四个直连测试）。
+- [x] 1.3 contract：迁移仓库内全部旧路径导入与模块属性访问到 `packages.common.contracts.*`（含 tests；`chain_compat_runtime` 的 owner 模块改指向契约模块），删除 `direct_grid_contract.py`、`region.py`、`time_consistency.py` 三个 shim，去掉 `base.py`/`rewrite.py` 的 re-export；`tests/test_import_layering_guard.py` 增加 contract 检查函数（AST 扫描 `from`/`import`/`import … as` 无旧路径、无旧模块的被搬名字）。允许的测试改动：见下方「钉死的契约（1.3）」全集（导入路径、importlib 站点、`test_orchestration_chain` identity 块、`tests/test_select_ci_tests.py` 不再派生的条目与四个直连测试）。
 
   Depends on: 1.2
 

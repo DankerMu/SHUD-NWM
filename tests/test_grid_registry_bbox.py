@@ -46,6 +46,14 @@ from datetime import UTC, datetime
 import pytest
 
 from packages.common.canonical_grid_key import derive_canonical_grid_key
+from packages.common.contracts.region import (
+    DEFAULT_BBOX_EAST,
+    DEFAULT_BBOX_NORTH,
+    DEFAULT_BBOX_SOUTH,
+    DEFAULT_BBOX_WEST,
+    GeoBBox,
+    china_buffered_bbox_from_env,
+)
 from packages.common.grid_registry_bbox_guard import (
     BboxMismatchError,
     RegisteredBboxSnapshotProtocol,
@@ -54,14 +62,6 @@ from packages.common.grid_registry_bbox_guard import (
 from packages.common.grid_registry_store import (
     CanonicalGridSnapshot,
     RegistryStoreError,
-)
-from workers.data_adapters.region import (
-    DEFAULT_BBOX_EAST,
-    DEFAULT_BBOX_NORTH,
-    DEFAULT_BBOX_SOUTH,
-    DEFAULT_BBOX_WEST,
-    GeoBBox,
-    china_buffered_bbox_from_env,
 )
 
 # IFS/GFS 0.25° pinned China-buffered bbox — sourced from

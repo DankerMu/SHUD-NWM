@@ -5,6 +5,7 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
+from packages.common.contracts.time_normalization import cycle_id_for, format_cycle_time
 from services.orchestrator.scheduler_state_common import (
     _first_nonempty,
     _first_state_datetime,
@@ -45,7 +46,6 @@ from services.orchestrator.scheduler_state_types import (
     SchedulerCandidateLike,
     cohort_member_row_is_attributed,
 )
-from workers.data_adapters.base import cycle_id_for, format_cycle_time
 
 
 def _candidate_state_decision_state(state: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, Any]:

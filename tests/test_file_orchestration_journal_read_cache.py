@@ -20,6 +20,7 @@ from unittest import mock
 
 import pytest
 
+from packages.common.contracts.time_normalization import cycle_id_for, format_cycle_time
 from packages.common.safe_fs import SafeFilesystemError, read_bytes_limited_no_follow
 from services.orchestrator import file_orchestration_journal as journal_module
 from services.orchestrator.file_orchestration_journal import (
@@ -27,7 +28,6 @@ from services.orchestrator.file_orchestration_journal import (
     FileOrchestrationJournalRepository,
 )
 from tests.test_file_orchestration_journal import _join_all
-from workers.data_adapters.base import cycle_id_for, format_cycle_time
 
 
 def _dt(value: str) -> datetime:

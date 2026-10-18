@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from packages.common.contracts.time_normalization import cycle_id_for, format_cycle_time, parse_cycle_time
 from packages.common.copyback_guard import CopybackLockError, copyback_batch_lock
 from packages.common.object_store import (
     MAX_OBJECT_MANIFEST_BYTES,
@@ -42,7 +43,6 @@ from services.orchestrator.file_orchestration_journal import (
 )
 from services.orchestrator.journal_root_authority import verify_journal_root_authority
 from services.orchestrator.run_identity import FORECAST_RUN_ID_RE
-from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time
 
 LOGGER = logging.getLogger(__name__)
 

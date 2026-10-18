@@ -118,14 +118,6 @@ DELEGATED_CONNECT_CLOSURE: tuple[tuple[str, str, str, str], ...] = (
     ),
     (
         "scripts/node27_autopipeline.py",
-        "packages/common/grid_registry_store.py",
-        UNREACHABLE,
-        "static-only through chain.py -> scheduler_file_providers -> forcing_producer; "
-        "PsycopgGridRegistryStore is constructed only in workers/grid_registry/__main__.py, "
-        "which autopipeline never calls",
-    ),
-    (
-        "scripts/node27_autopipeline.py",
         "packages/common/met_store.py",
         UNREACHABLE,
         "static-only through chain.py -> forcing_producer/producer.py; PsycopgMetStore.from_env() is "
@@ -160,13 +152,6 @@ DELEGATED_CONNECT_CLOSURE: tuple[tuple[str, str, str, str], ...] = (
         UNREACHABLE,
         "static-only: imported by services/orchestrator/chain.py on the node-22 publisher path; "
         "autopipeline never publishes tiles",
-    ),
-    (
-        "scripts/node27_autopipeline.py",
-        "workers/forcing_producer/store.py",
-        UNREACHABLE,
-        "static-only: imported function-locally at workers/forcing_producer/producer.py:485 inside "
-        "ForcingProducer.from_env(), which autopipeline never calls",
     ),
     (
         "scripts/node27_refresh_coverage.py",
@@ -234,13 +219,6 @@ DELEGATED_CONNECT_CLOSURE: tuple[tuple[str, str, str, str], ...] = (
     ),
     (
         "apps/api/routes/hydro_display.py",
-        "packages/common/grid_registry_store.py",
-        UNREACHABLE,
-        "import-only, same verdict and reason as the unit-level row: PsycopgGridRegistryStore is "
-        "constructed only in workers/grid_registry/__main__.py",
-    ),
-    (
-        "apps/api/routes/hydro_display.py",
         "services/orchestrator/chain_compat_runtime.py",
         UNREACHABLE,
         "static-only: services/orchestrator/chain.py is imported ONLY inside the module __getattr__ at "
@@ -259,13 +237,6 @@ DELEGATED_CONNECT_CLOSURE: tuple[tuple[str, str, str, str], ...] = (
         UNREACHABLE,
         "static-only: imported by services/orchestrator/chain.py, behind the deferred import in "
         "services/orchestrator/__init__.py:53",
-    ),
-    (
-        "apps/api/routes/hydro_display.py",
-        "workers/forcing_producer/store.py",
-        UNREACHABLE,
-        "static-only: imported function-locally at workers/forcing_producer/producer.py:485 inside "
-        "ForcingProducer.from_env(), which no display route calls",
     ),
     (
         "apps/api/routes/hydro_display.py",

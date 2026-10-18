@@ -38,14 +38,12 @@ from typing import Any
 import pytest
 
 from packages.common.auth_policy import trusted_internal_policy_decision
+from packages.common.contracts.direct_grid import load_forcing_mapping_contract_from_manifest
 from packages.common.model_registry import (
     ModelLifecycleOperation,
     PostCommitPublishContext,
     PsycopgModelRegistryStore,
     _classify_forcing_mapping_mode,
-)
-from workers.forcing_producer.direct_grid_contract import (
-    load_forcing_mapping_contract_from_manifest,
 )
 
 # --- test harness ----------------------------------------------------------

@@ -195,6 +195,12 @@ from typing import Any
 
 import pyproj
 
+from packages.common.contracts.direct_grid import (
+    DIRECT_GRID_MODE,
+    DirectGridContractError,
+    DirectGridForcingContract,
+    load_forcing_mapping_contract_from_manifest,
+)
 from packages.common.grid_registry_store import CanonicalGridCell
 from packages.common.grid_signature import (
     COORDINATE_ROUNDING_DECIMALS as _SHARED_COORDINATE_ROUNDING_DECIMALS,
@@ -203,12 +209,6 @@ from packages.common.grid_signature import (
     canonical_json_bytes as _shared_canonical_json_bytes,
 )
 from packages.common.shud_forcing_contract import SHUD_FORCING_INDEX_BASENAMES
-from workers.forcing_producer.direct_grid_contract import (
-    DIRECT_GRID_MODE,
-    DirectGridContractError,
-    DirectGridForcingContract,
-    load_forcing_mapping_contract_from_manifest,
-)
 from workers.mapping_builder.rewrite import (
     LEGACY_CYCLE_TSD_FORC_PATTERN,
     LEGACY_STATION_LONLAT_CSV_PATTERN,

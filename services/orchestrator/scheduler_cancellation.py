@@ -4,9 +4,9 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
+from packages.common.contracts.time_normalization import cycle_id_for
 from services.orchestrator import scheduler as _scheduler
 from services.orchestrator.scheduler_evidence import UNKNOWN_AFTER_ATTEMPT
-from workers.data_adapters.base import cycle_id_for
 
 
 def _bounded_active_slurm_jobs(*args, **kwargs):

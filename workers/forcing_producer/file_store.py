@@ -12,6 +12,11 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from packages.common.contracts.direct_grid import (
+    DirectGridContractError,
+    DirectGridForcingContract,
+    load_forcing_mapping_contract_from_manifest,
+)
 from packages.common.forcing_domain_handoff import (
     CONTRACT_ID as FORCING_DOMAIN_HANDOFF_CONTRACT_ID,
 )
@@ -36,11 +41,6 @@ from packages.common.shud_forcing_contract import (
 )
 from packages.common.source_identity import normalize_source_id
 from workers.canonical_converter.converter import unit_for_standard_variable
-from workers.forcing_producer.direct_grid_contract import (
-    DirectGridContractError,
-    DirectGridForcingContract,
-    load_forcing_mapping_contract_from_manifest,
-)
 from workers.forcing_producer.producer import (
     CanonicalProduct,
     ForcingComponent,

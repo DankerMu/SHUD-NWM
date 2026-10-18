@@ -14,6 +14,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import AbstractSet, Any, Protocol
 
+from packages.common.contracts.direct_grid import (
+    DIRECT_GRID_MODE,
+    IDW_MODE,
+    DirectGridContractError,
+    DirectGridForcingContract,
+)
+from packages.common.contracts.region import GeoBBox
 from packages.common.grid_registry_bbox_guard import (
     BboxMismatchError,
     verify_download_bbox_matches_registry,
@@ -42,13 +49,6 @@ from packages.common.timescale_write_guard import (
 )
 from packages.common.timeseries_compression_fence import IngestFenceBusy
 from workers.canonical_converter.converter import canonical_product_is_forcing_usable
-from workers.data_adapters.region import GeoBBox
-from workers.forcing_producer.direct_grid_contract import (
-    DIRECT_GRID_MODE,
-    IDW_MODE,
-    DirectGridContractError,
-    DirectGridForcingContract,
-)
 
 LOGGER = logging.getLogger(__name__)
 

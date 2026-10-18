@@ -54,7 +54,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, NamedTuple
 
-from workers.forcing_producer.direct_grid_contract import (
+from packages.common.contracts.direct_grid import (
     DirectGridContractError,
     DirectGridForcingContract,
     load_forcing_mapping_contract_from_manifest,

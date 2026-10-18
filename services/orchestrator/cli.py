@@ -9,9 +9,9 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Sequence
 
+from packages.common.contracts.time_normalization import parse_cycle_time
 from services.tile_publisher import PublishError, TilePublisher
 from services.tile_publisher.publisher import failure_payload
-from workers.data_adapters.base import parse_cycle_time
 
 from .chain import AnalysisOrchestrator, OrchestratorError
 from .file_orchestration_journal import (

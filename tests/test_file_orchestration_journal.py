@@ -21,6 +21,7 @@ from typing import Any, Callable, Mapping
 import pytest
 
 from packages.common import safe_fs
+from packages.common.contracts.time_normalization import cycle_id_for, format_cycle_time
 from services.orchestrator import chain_repository_state as chain_repository_state_module
 from services.orchestrator import file_orchestration_journal as journal_module
 from services.orchestrator import public_evidence as public_evidence_module
@@ -68,7 +69,7 @@ from tests.test_retry import (
     _spec_non_transient_error_codes,
     _unknown_error_code_warning,
 )
-from workers.data_adapters.base import CycleDiscovery, cycle_id_for, format_cycle_time
+from workers.data_adapters.base import CycleDiscovery
 
 
 @pytest.mark.parametrize("fault", ["directory_fsync", "parent_identity"])

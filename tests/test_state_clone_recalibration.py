@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 
+from packages.common.contracts.hydrologic_fingerprint import STATE_COMPATIBILITY_SURFACES
 from packages.common.state_clone import (
     STATE_CLONE_COLD_START_APPROVAL_REQUIRED,
     fingerprint_gated_state_clone,
@@ -59,7 +60,6 @@ from tests.state_clone_recalibration_fixtures import (
     _sp_att_rows,
     _write_package,
 )
-from workers.mapping_builder.rewrite import STATE_COMPATIBILITY_SURFACES
 
 # --- §6.1 Run manifest / QC provenance: the admit path (row 1) --------------
 
@@ -613,7 +613,7 @@ def test_fix_forward_default_records_the_hydrologic_core_gate_kind(
 def test_fix_forward_propagates_a_missing_package_file(tmp_path: Path) -> None:
     """Only recalibration maps MissingPackageFileError into a refusal scope."""
 
-    from workers.mapping_builder.rewrite import MissingPackageFileError
+    from packages.common.contracts.hydrologic_fingerprint import MissingPackageFileError
 
     source_root = _write_package(
         tmp_path / "m0",
@@ -665,7 +665,7 @@ def test_fix_forward_propagates_a_missing_package_file(tmp_path: Path) -> None:
 
 
 def test_state_compatibility_surfaces_is_the_ten_labels_minus_two() -> None:
-    from workers.mapping_builder.rewrite import HYDROLOGIC_CORE_FINGERPRINT_LABELS
+    from packages.common.contracts.hydrologic_fingerprint import HYDROLOGIC_CORE_FINGERPRINT_LABELS
 
     assert len(HYDROLOGIC_CORE_FINGERPRINT_LABELS) == 10
     assert STATE_COMPATIBILITY_SURFACES == (
@@ -689,10 +689,7 @@ def test_state_compatibility_surfaces_is_the_ten_labels_minus_two() -> None:
     [(), ("mesh", "mesh"), ("mesh", "not_a_surface")],
 )
 def test_invalid_surface_set_is_refused(tmp_path: Path, surfaces: tuple[str, ...]) -> None:
-    from workers.mapping_builder.rewrite import (
-        SpAttRewriteError,
-        compute_hydrologic_core_fingerprint,
-    )
+    from packages.common.contracts.hydrologic_fingerprint import SpAttRewriteError, compute_hydrologic_core_fingerprint
 
     root = _write_package(
         tmp_path / "pkg",
@@ -716,7 +713,7 @@ def test_invalid_surface_set_is_refused(tmp_path: Path, surfaces: tuple[str, ...
 def test_surface_order_does_not_change_the_fingerprint(tmp_path: Path) -> None:
     """The domain separation is alphabetical regardless of argument order."""
 
-    from workers.mapping_builder.rewrite import compute_hydrologic_core_fingerprint
+    from packages.common.contracts.hydrologic_fingerprint import compute_hydrologic_core_fingerprint
 
     root = _write_package(
         tmp_path / "pkg",
