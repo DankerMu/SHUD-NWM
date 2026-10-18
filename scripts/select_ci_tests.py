@@ -4912,6 +4912,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # #2937: the `Any` ratchet ceiling is data read only by the ratchet; a
     # ceiling-only PR would otherwise select nothing.
     PathTestRule("tests/any_ratchet_ceiling.json", (ANY_RATCHET_TEST,)),
+    # entropy-burndown task 2.1b: the status-literal allowlist is data read only by
+    # the status-vocabulary parity suite; an allowlist-only PR (2.2-2.4 delete
+    # entries) would otherwise select nothing.
+    PathTestRule("tests/status_literal_allowlist.json", (STATUS_VOCAB_PARITY_TEST,)),
     PathTestRule(
         "packages/common/forecast_store.py",
         (
