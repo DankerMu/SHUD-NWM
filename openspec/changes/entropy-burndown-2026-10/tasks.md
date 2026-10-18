@@ -543,6 +543,69 @@
 
   **Suggested fixture level:** compact - 两个小聚簇，无被 patch 名；context 有 4 个 facade 驻留依赖（函数体内导入），read_attribution 是零依赖叶子、带模块级共享状态。
 
+  钉死的契约（5.2 首刀 context，fixture review 2026-10-17）：
+
+  - **搬什么（按 5.0 map；预测 9 个 def）**：`_model_context_from_mapping`、`_forcing_context_from_mapping`、`_fallback_value`、`_lineage_mapping`、`_optional_str`、`_required_context_str`、`_required_int`、`_optional_int`、`_optional_datetime`（facade :17401–17505，文件尾，整段切走），按原顺序写入新文件 `services/orchestrator/file_journal_context.py`。新文件顶层只放 `from __future__ import annotations`、叶子导入和这 9 个 def。可以有模块 docstring；不得有 `__all__`、`LOGGER`、常量或新 helper（5.0 的选项 a：sibling 顶层名必须等于 `clusters.context`）。顶层导入恰为 `json`、`collections.abc.Mapping`、`datetime.{UTC, datetime}`、`typing.Any`、`services.orchestrator.chain_types.{ForcingContext, ModelContext}`、`services.orchestrator.scheduler_state._ensure_utc`。`field` 是参数名，不需要 `dataclasses`。
+  - **facade 驻留依赖（决定）**：4 个名要留在 facade，而且都不是被 patch 名：`FileOrchestrationJournalError`（:744，全文件 60+ 个单元在用）、`_scalar_text`（:16511）、`_required_safe_identity`（:16488）、`_validate_model_context_identity`（:16816）。6 个函数在函数体第一条语句写 `from services.orchestrator.file_orchestration_journal import …`，只导入自己用到的名：
+    - `_model_context_from_mapping` → `_required_safe_identity, _validate_model_context_identity`
+    - `_optional_str` → `_scalar_text`
+    - `_required_context_str` → `FileOrchestrationJournalError, _scalar_text`
+    - `_required_int`、`_optional_int`、`_optional_datetime` → `FileOrchestrationJournalError`
+
+    其余 3 个函数不导入。函数体的其它部分逐字不变。为什么合法：5.0 的迟查检查只禁止 import 绑定**被 patch 名**；如果以后这 4 个名有谁变成被 patch 名，map 测试会红，逼着改成属性形式。**禁止**以下写法：sibling 顶层导入 facade（循环导入）；把这些名放在 `if TYPE_CHECKING:` 下（它们是运行时名，只有错误路径才会 NameError）；复制异常类或改用其它异常类（`load_model_context`/`find_forcing_context` 在 :2121/:2142 是按 facade 那个类对象 `except` 的）。spec 的 "Annotation-only back references" 对本聚簇不触发：注解里没有 Repository。
+  - **facade 回绑**：在顶部 import 块恰好加 `from services.orchestrator.file_journal_context import _forcing_context_from_mapping, _model_context_from_mapping`（两名在 :2120/:2141 有使用，不触发 F401），然后 `uv run ruff check --fix` 处理 I001。其余 7 名**不回绑**：全仓 0 个使用方，`__all__` 里也没有。不加 `# noqa: F401`，`__all__` 不变。facade 没有导入变成孤儿（`json`、`UTC`、`datetime`、`Mapping`、`ModelContext`、`ForcingContext`、`_ensure_utc` 在别处仍在用）。
+  - **patch 点**：0 个。对 9 个名跑 dotted 字符串、字面量 `setattr`/`patch.object`、`-A2` 多行三种扫描都是 0 命中。聚簇调用的被 patch 名也是 0 个，所以不需要按 facade 属性迟查。logger 名不受影响（聚簇里没有 `LOGGER`）。
+  - **selector（本片新增，PR Boundary 偏离）**：在 facade 那一行（~:3120–3123）后面紧跟一行 `PathTestRule("services/orchestrator/file_journal_*.py", (*FILE_JOURNAL_READ_STATE_TESTS, *FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS), stop_on_match=True)`。glob 直接写字面量，不新建常量，避免让 6.3 的 B2 常量计数变化。代码从 facade 搬出来以后，沿用它在 facade 里时的路由。今天只改 sibling 时走 `services/orchestrator/**` 选出 124 个，漏掉 map 测试、卫生测试和 `test_node22_manual_retry_failed_runs.py`。`tests/test_select_ci_tests.py` 要改三处：
+    - `STOP_RULE_AT_SITE_EXTENSIONS` 加 `("services/orchestrator/file_journal_context.py", FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS)`。这样现有的 at-site 测试和 `did_not_widen` 测试（tell 是 `test_state_clone.py`）会自动证明这一行既选得到、也停得住。
+    - 加一条按 #2916 形状的 red-when-removed 测试，tell 是 `tests/test_file_journal_cluster_map.py`。
+    - 不改 real-DB 车道。不预测哪些 exact-set 断言会红：今天没有任何钉在 `file_journal_*` 上的断言，以首跑为准。PR 里记录 sibling 和 facade 两条路径的选择差集。
+  - **允许的测试改动**：只有 `tests/test_select_ci_tests.py` 的上述 3 处。其余 76 个 journal 测试文件零改动。
+  - **守卫**：ruff `--isolated --select B,BLE` 对新文件是 0（9 个函数都用 `raise … from error`，没有 `except Exception`），不加 per-file-ignores 键，journal 那一条（B904×9、BLE001×7）不动。新增行里不得出现 `.py:NNN` 或 `` `:NNN ``，`line_reference_baseline.json` 零改动。Any 计数不变（函数体内导入不带注解）。新文件远小于 1000 行。
+  - **Verify（补全）**：
+    1. `git add services/orchestrator/file_journal_context.py`；
+    2. `uv run ruff check .`；
+    3. `uv run pytest -q tests/test_file_orchestration_journal.py tests/test_file_orchestration_journal_read_cache.py tests/test_file_orchestration_journal_facade.py tests/test_file_journal_cluster_map.py tests/test_select_ci_tests.py tests/test_any_ratchet.py`。正例在 :424；负例在 :1063（`_optional_int` 走 `invalid_field`，验证异常类同一性）和 :1085；
+    4. 新进程里只导入 sibling：`uv run python -c "import sys, services.orchestrator.file_journal_context; assert 'services.orchestrator.file_orchestration_journal' not in sys.modules"`；
+    5. 导入冒烟：`uv run python -c "import services.orchestrator.file_orchestration_journal, services.orchestrator.scheduler_runtime, apps.api.main"`；
+    6. 同一性/异常类探针（PR 附输出）：两个回绑名 `is` sibling 对象；7 个不回绑名 `not hasattr(facade, n)`；对 `_required_int({}, "x")`、`_required_context_str({}, "x")`、`_optional_datetime("bad", field="x")`，`except facade.FileOrchestrationJournalError` 能接住，且 reason 分别是 `file_journal_missing_field`、`file_journal_missing_field`、`file_journal_invalid_field`；
+    7. AST 逐字探针：恰好 9 个 `FunctionDef`。对每个函数，去掉函数体第一条 facade 导入语句（如果有）后，`ast.get_source_segment` 和 `git show origin/master:` 的源段逐字相等；
+    8. `git grep -nE '^(from|import)[[:space:]]+services\.orchestrator(\.file_orchestration_journal|[[:space:]]+import[[:space:]]+.*file_orchestration_journal)' -- services/orchestrator/file_journal_context.py` 为空（顶层没有 facade 导入）；
+    9. `git diff --name-only origin/master -- tests/` 只含 `tests/test_select_ci_tests.py`；
+    10. PR 记录 `select_tests(<本 PR 全部路径>)`；
+    11. `openspec validate entropy-burndown-2026-10 --strict --no-interactive`（如果改了 change 目录）。
+
+    不需要 node-22/node-27。
+  - **级别与席位**：compact 成立，两席 `correctness`、`test-evidence+spec-compliance`。风险包：Error handling（异常类跨模块抛出时必须是同一对象）、Legacy compatibility（facade 回绑 2 名）。Concurrency 不选：聚簇是纯函数。
+  - **边界**：rebase 到 5.1（#2939）之后，在 PR head 按 map 复核 9 个名。2.3、3.3、1.3 只和 journal 的 import 块或其它行有文本冲突，都不碰这 9 个名。后面任何 task 搬走 `_scalar_text`、`_required_safe_identity` 或 `_validate_model_context_identity` 时，如果 facade 不再绑定它，同一个 PR 必须把 context 的函数体导入改成从新宿主顶层导入（新宿主顶层不得导入 facade）；`FileOrchestrationJournalError` 不搬。6.1/6.2/6.3 改 selector 时，后落地的一方 rebase。5.6 第二方向见 Ambiguity 4。
+  - **残余风险（记录）**：`_required_context_str`/`_required_int` 的 model 侧错误路径没有既有负例，只靠探针 6；sibling 的函数体导入每次调用都做一次 `sys.modules` 查找，开销可以忽略。
+
+  钉死的契约（5.2 后继 read_attribution，fixture review 2026-10-17）：
+
+  - **搬什么（按 5.0 map；预测 17 个名）**：:214–224 的 `#1734 D11` 注释块（含锁顺序说明），加上 :225–407 的 17 个名，逐字按原顺序写入 `services/orchestrator/file_journal_read_attribution.py`。名字：`JOURNAL_READ_ATTRIBUTION_SCHEMA_VERSION`、`MAX_JOURNAL_READ_ATTRIBUTION_TAGS`、`_JOURNAL_READ_UNATTRIBUTED`、`_ClassT`、`_journal_read_counter_lock`、`_journal_read_counters`、`_journal_read_counter_tags_dropped`、`_journal_read_entrypoint`、`_journal_read_lane`、`_flat_direct_job_listing_memo`、`_flat_direct_job_listing_memo_scope`、`journal_read_lane`、`_attributed_public_method`、`_install_public_read_attribution`、`_record_journal_read`、`reset_journal_read_counters`、`journal_read_attribution`（memo 对的去向见 Ambiguity 1）。:408–410 的 `#1748` 注释属于 :411 的常量，**不搬**。sibling 的顶层导入恰为 `contextvars`、`functools`、`inspect`、`threading`、`collections.abc.{Callable, Iterable}`、`contextlib.contextmanager`、`pathlib.Path`（只在注解里用，仍需导入，否则 F821）、`typing.{Any, TypeVar}`。对 facade 的依赖是 0，不需要任何函数体导入。不得有 `__all__`。
+  - **facade 回绑（9 个名，一条顶部 from-import，放在类定义之前，因为 :1296/:12379 的装饰器在类定义时执行）**：`JOURNAL_READ_ATTRIBUTION_SCHEMA_VERSION`、`_JOURNAL_READ_UNATTRIBUTED`、`_flat_direct_job_listing_memo`、`_flat_direct_job_listing_memo_scope`、`_install_public_read_attribution`、`_record_journal_read`、`journal_read_attribution`、`journal_read_lane`、`reset_journal_read_counters`。其中 5 个在 facade 体内有使用，另外 4 个靠 5.1 的 `__all__`，不加 `# noqa: F401`，`__all__` 不变。**不得在 facade 绑定**：`MAX_JOURNAL_READ_ATTRIBUTION_TAGS`、`_ClassT`、`_journal_read_counter_lock`、`_journal_read_counters`、`_journal_read_counter_tags_dropped`（被 `global` 改写的 int，绑定就是一份过期快照）、`_journal_read_entrypoint`、`_journal_read_lane`、`_attributed_public_method`。全仓 0 个使用方。计数器的三个读写函数全部在 sibling。facade 删除变成孤儿的 `import contextvars`、`import functools`、`import inspect`，以及 `from typing import … TypeVar` 里的 `TypeVar`（ruff F401 强制；没有人经 facade 访问这些模块对象）。
+  - **共享状态**：锁、计数器 dict、丢弃计数 int、三个 ContextVar（名字字符串 `nhms_journal_read_*` 不变）在 sibling 导入时只创建一份。facade 和 `scheduler_runtime.py:16` 的 from-import 拿到的是同一批对象。lock 只做递增，不参与 `_write_lock` → `_cache_lock` 的锁顺序（注释块随代码搬走）。`functools.wraps` 会保留 `__module__` 和 `__wrapped__`。
+  - **patch 点**：0 个（三种扫描都是 0 命中）。聚簇不调用任何被 patch 名。
+  - **5.1 用户形态仍能解析**：`scheduler_runtime.py:16` 的 from-import；测试按别名读取 `test_file_orchestration_journal.py` :16638–17727 和 `test_production_scheduler.py:23931`。都经 facade 绑定拿到同一对象。不改 `scheduler_runtime` 的导入（那是 5.6 contract 的事）。
+  - **selector**：首刀加的 glob 行已覆盖 `file_journal_read_attribution.py`，本片不改 selector，也不改测试。
+  - **允许的测试改动**：无。
+  - **守卫**：聚簇里 B/BLE 是 0，没有 `except`，不加 per-file-ignores 键。注释里的 `L550` 不匹配行号引用模式，基线零改动。Any 计数不变。
+  - **Verify（补全）**：
+    1. `git add services/orchestrator/file_journal_read_attribution.py`；
+    2. `uv run ruff check .`；
+    3. `uv run pytest -q tests/test_file_orchestration_journal.py tests/test_file_orchestration_journal_read_cache.py tests/test_file_orchestration_journal_facade.py tests/test_file_journal_cluster_map.py tests/test_any_ratchet.py tests/test_retry.py tests/test_production_scheduler.py::test_scheduler_caps_reject_oversized_config_and_bound_candidate_work`。覆盖：:16620/:16681/:16752/:16792 是计数、入口、lane、线程安全；:16858 是 scheduler 证据；`test_retry.py` 覆盖被装饰的 RetryService；
+    4. 新进程里只导入 sibling，facade 不在 `sys.modules`；
+    5. 导入冒烟 `services.orchestrator.file_orchestration_journal, services.orchestrator.scheduler_runtime, apps.api.main`；
+    6. 同一性探针：9 个回绑名 `getattr(facade, n) is getattr(sibling, n)`；8 个不绑定名 `not hasattr(facade, n)`；`scheduler_runtime.journal_read_attribution is sibling.journal_read_attribution`；
+    7. AST 逐字探针：恰好 17 个顶层单元，源段和 `git show origin/master:` 逐字相等（本片没有任何函数体改动）；
+    8. 本 sibling 的顶层 facade 导入 grep 为空；
+    9. `git diff --name-only origin/master -- tests/` 为空；
+    10. PR 记录 `select_tests(<本 PR 全部路径>)`；
+    11. `openspec validate …`（如果改了 change 目录）。
+
+    不需要 node-22/node-27。
+  - **级别与席位**：compact 成立，两席 `correctness`、`test-evidence+spec-compliance`。风险包：Concurrency/shared state（模块级锁、计数器、ContextVar 搬模块后仍是单实例，`global` 写入方不在 facade 重绑）、Legacy（5 个外部名，其中 2 个来自非测试模块的 from-import）。Error handling 不选。
+  - **边界**：Depends on #2940。可勾 5.2。`services/orchestrator/scheduler_init_state_match.py:21` 里的 `file_orchestration_journal.py:1203/1234` 原本就已漂移，这次会再偏 −183 行；基线只计数，不修（见 Note）。
+
   **Minimal mergeable slice:** context 单独 - 最小叶子、无被 patch 名；read_attribution 作为后继。
 
 - [ ] 5.3 抽取 primitives → `file_journal_primitives.py`，replay → `file_journal_replay.py`。
@@ -557,11 +620,65 @@
 
   **Minimal mergeable slice:** primitives 模块单独 - 它是 paths 环的解扣，可独立保绿；replay 作为后继。
 
-- [ ] 5.4 抽取 candidates → `file_journal_candidates.py`：`_released_candidate_cycle_scope`、`_cycle_scope_from_job_id`、`_next_file_manual_retry_job_id_for_run` 被 Repository/RetryService 调用（且测试直接以 `journal_module.<name>` 调用），**留在 facade**；搬走的调用者与调用其它 facade 驻留名（如 `read_bytes_limited_no_follow`）的函数用函数体内延迟导入经 facade 属性取用。无测试改动。
+- [ ] 5.4 抽取 candidates → `file_journal_candidates.py`：`_released_candidate_cycle_scope`、`_cycle_scope_from_job_id`、`_next_file_manual_retry_job_id_for_run` 被 Repository/RetryService 调用（且测试直接以 `journal_module.<name>` 调用），**留在 facade**；三者只被两个类调用，无顶层调用者；聚簇内调用被 patch 名的函数（按 map；预测 `_run_manifest_model_package_identity`、`_candidate_row_self_bound_identity`）在函数体内 `from services.orchestrator import file_orchestration_journal` 后以属性调用，其余 facade 驻留名在函数体内 from-import。既有测试零改动；唯一测试 diff 为新文件 `tests/test_file_journal_late_lookup_seams.py`。
 
   Depends on: 5.3
 
-  Verify：同 5.2，另加 `tests/test_gateway_reconcile_*.py`；新增断言：patch facade 的 `read_bytes_limited_no_follow` 为计数 stub 后调用已搬到 `file_journal_candidates.py` 的 `_run_manifest_model_package_identity`（map 中该聚簇唯一调用 facade 驻留名的函数；若 map 另有，以 map 为准），计数 > 0。
+  Verify：见「钉死的契约（5.4）」Verify（补全）。
+
+  钉死的契约（5.4，fixture review 2026-10-17）：
+
+  - **搬什么（按 5.0 map；预测 69 名 = 56 def + 13 Assign）**：facade :14653–:15965 按原顺序写入 `services/orchestrator/file_journal_candidates.py`，跳过两个洞：`_cycle_scope_from_job_id` :14706–14732 和 `_released_candidate_cycle_scope` :14753–14773，它们是被 patch 名，留在 facade。`_next_file_manual_retry_job_id_for_run` :14564 不在范围内，留在 facade。sibling 顶层名必须 == `clusters.candidates`。不得有 `__all__`、`LOGGER` 或新 helper，可以有模块 docstring。
+  - **sibling 顶层导入（恰为）**：`hashlib`、`json`、`os`、`re`、`collections.abc.{Iterable, Iterator, Mapping, Sequence}`、`datetime.{UTC, datetime}`、`pathlib.Path`、`typing.{TYPE_CHECKING, Any}`、`packages.common.safe_fs.SafeFilesystemError`、`services.orchestrator.chain_repository_state`（模块对象）、`accepted_submit_identity.{AcceptedSubmitEvidenceError, IDENTITY_MISMATCH_RELEASED_DECISION, INIT_STATE_IDENTITY_FIELD, MAX_FORECAST_COHORT_MEMBERS, QUARANTINE_RERUN_PROVENANCE_FIELD, accepted_submit_contract_is_current, accepted_submit_row_kind, normalize_quarantine_rerun_model_ids, ordered_cohort_members}`、`chain_source_cycle.{_datetime_sort_key, _pipeline_job_truth_sort_key}`、`public_evidence._public_evidence`、`run_identity.{_CYCLE_COHORT_RUN_ID_RE, _FORECAST_RUN_ID_RE}`、`scheduler_file_providers._public_raw_manifest_evidence`、`scheduler_init_state_match.{INIT_STATE_IDENTITY_FIELDS, init_state_field}`、`scheduler_state.{_evidence_safe, _format_utc}`、`scheduler_state_types.{COHORT_MEMBER_ATTRIBUTED_STAGES, DOWNSTREAM_STAGE_ALIASES}`、`workers.data_adapters.base.{format_cycle_time, parse_cycle_time}`，另加 `if TYPE_CHECKING: from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalError`（3 个函数只在注解里用它，否则 F821）。**禁止**在顶层或函数体内导入 `read_bytes_limited_no_follow` 或 `accepted_submit_candidate_immutable_evidence`，从哪个模块导入都不行。`field` 是循环变量，不需要导入 `dataclasses`。原语区 8 名（`_normalize_file_source_id`、`_optional_source_id`、`_cycle_id_for_file_source`、`_blocked_cycle_id`、`_required_safe_identity`、`_scalar_text`、`_safe_identity_text`、`_parse_cycle_time_field`）按 PR head 的 map 处理：宿主是 5.3 已经抽出的 sibling，就在顶层从该 sibling 导入；宿主是 facade 或更晚的聚簇，就在函数体内从 facade 导入。只有按 D7 顺序更早的 sibling 可以在顶层导入。
+  - **被 patch 名的迟查（2 个函数）**：函数体内导入放在 docstring 之后（没有 docstring 就作为第一条语句），写 `from services.orchestrator import file_orchestration_journal`。`_run_manifest_model_package_identity` 里的调用改成 `file_orchestration_journal.read_bytes_limited_no_follow(...)`，并另起一句 `from services.orchestrator.file_orchestration_journal import MAX_FILE_JOURNAL_JSON_BYTES`。`_candidate_row_self_bound_identity` 里的调用改成 `file_orchestration_journal.accepted_submit_candidate_immutable_evidence(job)`。除此之外函数体逐字不变。函数体内 `from … import <被 patch 名>` 在运行时能逐次取到属性，但 5.0 的迟查 AST 检查会判红，所以禁止。
+  - **未被 patch 的 facade 驻留名（函数体内 from-import，放在 docstring 之后）**：`FileOrchestrationJournalError` → `_accepted_submit_source_cycle_from_job_id`（另加 `_ACCEPTED_SUBMIT_MASTER_JOB_ID_RE`）、`_pipeline_event_entity_type`（另加 `_SUPPORTED_PIPELINE_EVENT_ENTITY_TYPES`）、`_cycle_scope_from_cycle_id`、`_cycle_scope_from_file_run_id`、`_source_cycle_from_cycle_id`、`_source_cycle_from_file_run_id`、`_row_matches_candidate`；`_job_is_active` → `TERMINAL_PIPELINE_STATUSES`；`_blocked_query_job` → `FILE_JOURNAL_READ_BLOCKED_STATUS`；`_candidate_scoped_forecast_cycle` → `_TERMINAL_FORECAST_CYCLE_SUCCESS_STATUSES`（取 2.3 之后 facade 的那个对象）。原语区名按上一条的宿主规则另加。异常类必须是 facade 的同一个对象，`except FileOrchestrationJournalError` 要能接住。
+  - **facade 回绑（一条顶部 from-import，52 名；不加 `# noqa: F401`，`__all__` 不变）**：`COHORT_MEMBERSHIP_INCOMPLETE`、`COHORT_MEMBERSHIP_MEMBER`、`COHORT_MEMBERSHIP_NON_MEMBER`、`_CYCLE_SCOPE_COMPLETION_STAGES`、`_CYCLE_SCOPE_JOB_PROJECTION_KEYS`、`_accepted_submit_source_cycle_from_job_id`、`_blocked_query_job`、`_blocked_query_job_fault`、`_blocked_stage_status`、`_candidate_row_self_bound_identity`、`_candidate_scoped_forecast_cycle`、`_cohort_member_row_view`、`_cohort_member_task_outcomes`、`_cohort_run_ids_excluding_model`、`_compact_cycle_scope_event`、`_compact_cycle_scope_job`、`_complete_cohort_members_by_run`、`_current_terminal_jobs`、`_cycle_scope_cohort_membership`、`_cycle_scope_from_cycle_id`、`_cycle_scope_from_file_run_id`、`_cycle_scope_from_idempotency_key`、`_cycle_time_from_job`、`_event_matches_candidate_rows`、`_file_journal_blocked_candidate_state`、`_forcing_submitline_array_spec`、`_init_state_identity_from_hydro`、`_is_blocked_query_job`、`_is_foreign_model_cycle_scope_job`、`_is_manual_retry_marker_event`、`_is_model_less_cycle_scope_job`、`_job_is_active`、`_job_is_current_terminal_completion`、`_job_is_terminal_success`、`_job_matches_candidate`、`_job_matches_source_cycle`、`_master_row_records_init_state_id`、`_model_id_from_file_run_id`、`_newer_master_identity_than_hydro`、`_pipeline_event_entity_type`、`_public_candidate_state`、`_public_scheduler_row`、`_publication_scheduler_row`、`_quarantine_rerun_masters`、`_released_identity_blocked_row`、`_resolved_caller_evidence`、`_row_matches_candidate`、`_run_manifest_model_package_identity`、`_source_cycle_from_cycle_id`、`_source_cycle_from_file_run_id`、`_source_id_from_job`、`_strip_redaction_placeholders`。其中 50 名在 facade 体内有使用，`_complete_cohort_members_by_run`（node22 脚本 from-import）和 `_CYCLE_SCOPE_JOB_PROJECTION_KEYS`（测试按别名读取）靠 5.1 的 `__all__` 保住。**不回绑（17 名）**：`_object_store_uri_local_path`、`_object_store_root`、`_first_nested_text`、`_stable_sha256`、`_PUBLICATION_JOB_FIELDS`、`_PERSISTED_REDACTION_PLACEHOLDERS`、`_job_is_unsubmitted_retry_placeholder`、`_job_is_breaker_terminal_success`、`_INIT_STATE_ALIAS_KEYS`、`_INIT_STATE_CANONICAL_KEYS`（这是 dict，只保留一份）、`_recorded_cohort_member_model_ids`、`COHORT_MEMBERSHIP_UNWITNESSED`、`COHORT_TASK_OUTCOME_{SUCCEEDED,FAILED,UNKNOWN}`、`_cohort_row_ended_partially`、`_cohort_member_task_outcome`。facade 删掉变成孤儿的导入：`Iterator`、`_public_raw_manifest_evidence`、`INIT_STATE_IDENTITY_FIELDS`、`init_state_field`、`COHORT_MEMBER_ATTRIBUTED_STAGES`、`DOWNSTREAM_STAGE_ALIASES`。19 个被 patch 名在 facade 的绑定**一个都不能删**：`read_bytes_limited_no_follow` 还有 Repository 在用，`accepted_submit_candidate_immutable_evidence` 还有 `_accepted_submit_candidate_evidence` :14355 在用，所以后者不得进 candidates。
+  - **新增测试（唯一允许的 tests/ 改动）**：新建 `tests/test_file_journal_late_lookup_seams.py`，正好两个用例，不写 `Any` 注解（stub 用 `object`）。
+    - (1) `monkeypatch.setenv("OBJECT_STORE_ROOT", str(tmp_path))`，`delenv("OBJECT_STORE_PREFIX", raising=False)`。把 facade 的 `read_bytes_limited_no_follow` patch 成计数 stub，返回 `b'{"model_package_checksum": "c"}'`。调用 `file_journal_candidates._run_manifest_model_package_identity({"run_manifest_uri": "runs/r/manifest.json"})`，断言 count == 1，且结果含 `model_package_checksum == "c"`。不设 env 的话，函数在读之前就返回 None，正确实现也会假红。
+    - (2) 把 facade 的 `accepted_submit_candidate_immutable_evidence` patch 成计数 stub，返回 `{"init_state_identities": [{"model_id": "m", "init_state_id": "s"}]}`。调用 `file_journal_candidates._candidate_row_self_bound_identity({}, model_id="m")`，断言 count == 1，结果 == `{"model_id": "m", "init_state_id": "s"}`。
+    - 红绿机制：如果 sibling 以导入方式绑定这两个名（顶层导入，或者从 `safe_fs`/`accepted_submit_identity` 导入），会跑到真实函数。真实 reader 读不存在的文件，FileNotFoundError 被吞掉；真实 evidence 遇到 `{}` 抛 `AcceptedSubmitEvidenceError`，也被吞掉。两种情况都返回 None，count 为 0，测试红。改成属性迟查后绿。
+    - `test_file_orchestration_journal.py:8289` 是负向哨兵，搬错也不会变红，所以 (2) 是 seam 2 唯一的正向 oracle，(1) 是 seam 1 唯一的运行时 oracle；5.0 的迟查 AST 检查是结构兜底。
+    - 5.5（`_stat_signature`）和 5.6（`_utcnow`）把各自的 seam 用例追加到这个文件，算作它们各自允许的改动。其余 76 个 journal 测试文件零改动。
+  - **selector**：`"tests/test_file_journal_late_lookup_seams.py"` 追加进 `FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS`（HEAD :1662，接在 5.0/5.1 条目之后，注释写 `#2944`）。facade 那一行（:3122）和 5.2 首刀加的 glob 行都会展开这个常量，所以不加新行，也不改字面量；exact-set 断言是否变红以首跑为准。PR Boundary 偏离：selector 一行。
+  - **守卫**：
+    - large-file：同一个 commit 在 `.large-file-guard.json` 的 `exclude` 里加 `services/orchestrator/file_journal_candidates.py`（预计约 1 300 行 > 1000；PR Boundary 偏离，先例是 6.3）。
+    - ruff `--isolated --select B,BLE`：新文件是 0，不加 per-file-ignores 键，journal 那一条（B904×9、BLE001×7）不动。
+    - 行号引用基线零改动；搬走的范围内没有 `.py:NNN`，新增的行里也不得出现。
+    - Any 计数不变。
+  - **Verify（补全）**：
+    1. `git add services/orchestrator/file_journal_candidates.py tests/test_file_journal_late_lookup_seams.py`；
+    2. `uv run ruff check .`；`uv run ruff check --isolated --select B,BLE services/orchestrator/file_journal_candidates.py` 为 0；
+    3. `uv run python scripts/select_ci_tests.py --changed-file <本 PR 全部路径> --github-output out`，然后 `uv run pytest -q $(sed -n 's/^tests=//p' out) tests/test_gateway_reconcile_*.py tests/test_retry.py`。选出的集合必须含 `test_file_journal_full_tree_budget_contract.py`、`test_scheduler_journal_scope_census.py`、`test_file_journal_read_blocked_consumers.py`、`test_node22_manual_retry_failed_runs.py`、新 seam 测试、map 测试和 facade 卫生测试。gateway_reconcile 的理由：selector 从这两条路径都选不到它们（0/26），21 个文件绑定 journal，其中 2 个直接读取被搬走的名；
+    4. 新进程里只导入 sibling：`uv run python -c "import sys, services.orchestrator.file_journal_candidates; assert 'services.orchestrator.file_orchestration_journal' not in sys.modules"`；
+    5. 导入冒烟：`uv run python -c "import services.orchestrator.file_orchestration_journal, services.orchestrator.chain_forecast_execution, services.orchestrator.operator_action_listing_held, services.orchestrator.operator_released_reservation_recovery, services.orchestrator.scheduler_runtime, apps.api.main"`，并且 `uv run python scripts/node22_manual_retry_failed_runs.py --help` 退出码为 0；
+    6. 同一性探针（PR 附输出）：
+       - 52 个回绑名 `getattr(facade, n) is getattr(sibling, n)`；17 个名 `not hasattr(facade, n)`；
+       - 19 个被 patch 名全部 `hasattr(facade, n)`，且都不在 sibling 顶层；
+       - 4 个非测试 from-import 方拿到的对象 `is` sibling 里的对象；
+       - `_source_cycle_from_cycle_id("bad")` 能被 `except facade.FileOrchestrationJournalError` 接住，reason 为 `file_journal_invalid_identity`；
+       - 函数体内插入了导入的 5 个有 docstring 的函数，`__doc__` 和 `origin/master` 一致；
+    7. AST 逐字探针：sibling 顶层单元集合 == `clusters.candidates`（预测 69）。对每个单元，去掉 docstring 之后插入的 facade 导入语句，再把 `file_orchestration_journal.<19 名之一>` 还原成裸名，然后 `ast.dump` 和 `git show origin/master:` 的对应节点相等；
+    8. `git grep -nE '^(from|import)[[:space:]]+services\.orchestrator(\.file_orchestration_journal|[[:space:]]+import[[:space:]]+.*file_orchestration_journal)' -- services/orchestrator/file_journal_candidates.py` 为空（`TYPE_CHECKING` 下有缩进的导入不匹配）；AST 检查 sibling 里没有任何 import 别名名字落在 19 名内；
+    9. `git diff --name-only origin/master -- tests/` == `tests/test_file_journal_late_lookup_seams.py`；
+    10. PR 记录 `select_tests(<本 PR 全部路径>)` 的输出；
+    11. `openspec validate entropy-burndown-2026-10 --strict --no-interactive`（如果改了 change 目录）。
+
+    不需要 node-22/node-27。
+  - **级别与席位**：expanded 成立，三席：
+    - `correctness`：逐字搬迁、两个迟查形式、异常类同一性、docstring 位置；
+    - `test-evidence+spec-compliance`：两条计数断言的红绿机制、Verify 集合、tests diff 只有一个新文件；
+    - `integration`：facade 与 sibling 的导入方向和 `TYPE_CHECKING`、52/17/6 三份名单、4 个非测试 from-import 方加 node22 脚本、sibling 之间按 D7 顺序无环、被 patch 绑定不得被 F401 清掉。
+  - **风险包**：
+    - Concurrency/shared state/ordering：monkeypatch seam 的迟查、导入时的顺序；
+    - Legacy：52 名回绑，6 个非测试外部 from-import；
+    - Error handling：`FileOrchestrationJournalError` 的同一性，7 个运行时函数 + 3 个只在注解用的函数；
+    - File IO/path safety：no-follow、带 containment 的读取仍然只经过 facade seam，`OBJECT_STORE_ROOT` 在调用时才读取。
+    - Public API/Schema/Auth/Resource 不选。
+  - **边界**：
+    - Depends on #2943。rebase 到 5.3 之后，在 PR head 按 map 重算三份名单和原语区宿主。
+    - 5.5 搬走的名如果 facade 不再绑定，同一个 PR 必须把这里对应的函数体导入改成从 paths 导入，而且只能在函数体内导入（paths 比 candidates 晚）。
+    - 2.3 与本 PR 只有 journal 文本冲突。
+    - 6.x 改 selector 时，后落地的一方 rebase。
 
   **Suggested fixture level:** expanded - 候选/队列判定是 scheduler 不变量。
 

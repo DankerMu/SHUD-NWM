@@ -361,7 +361,7 @@ keep passing unchanged; the final task deletes the re-exports once an AST scan s
 the code the cluster map assigns to it. Patched seams follow the base requirement "Relocated monkeypatch seams keep
 their negative oracles live": a patched name moves only with all its call sites (tests repoint, no re-export); a patched
 name with a call site that stays in the facade (the Repository and RetryService classes stay) stays too, and moved
-callers reach it through a late `from . import file_orchestration_journal` inside the function body, so the facade
+callers reach it through a late `from services.orchestrator import file_orchestration_journal` inside the function body (after any docstring) and call it as an attribute of that module; a function-body `from … import <patched name>` is not used, so the facade
 patch remains the single interception point and no import-time cycle appears. Unpatched facade-resident names a moved function needs at runtime (e.g. `FileOrchestrationJournalError`) are likewise imported inside the function body; a sibling never imports the facade at module level. Because no function-level cluster map
 exists yet, the first journal task produces it as a checked-in fixture with a test; extraction tasks consume it and the
 contract oracle is "facade top-level definitions == map's `facade` cluster", not a line-count target (the arithmetic
@@ -395,6 +395,18 @@ invalidate one). Extraction order is in tasks.md §5/§6; the highest-risk step 
 - **Required evidence**: Verify sets green; probes' output in the PR; tests diff limited to the selector test (first cut) / empty (successor); `select_tests` output for the PR paths.
 - **Non-goals**: moving any patched name or `FileOrchestrationJournalError`; repointing importers to siblings; `# noqa: F401`; touching `scheduler_init_state_match.py` prose.
 - **Review focus**: (1) no sibling top-level facade import and no `TYPE_CHECKING` for runtime names; (2) exact facade re-bind lists (2 / 9) and the 8 unbound read_attribution names; (3) bodies verbatim except the six inserted imports; (4) the `#1748` comment at :408 stays; (5) the selector row stops (`test_state_clone.py` not selected).
+
+#### D7 (5.4) risk contract
+
+- **Change surface**: new `services/orchestrator/file_journal_candidates.py` (map's `candidates`; predicted 69 names, journal :14653–:15965 minus `_cycle_scope_from_job_id`/`_released_candidate_cycle_scope`); facade re-binds 52 names and drops 6 orphaned imports; new `tests/test_file_journal_late_lookup_seams.py` + one `FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS` entry; `.large-file-guard.json` exclude entry.
+- **Must preserve**: all 19 patched names bound on the facade (incl. import-bound `read_bytes_limited_no_follow`, `accepted_submit_candidate_immutable_evidence`); the three named patched names stay facade with zero moved callers; `FileOrchestrationJournalError` identity on every raise/except; from-imports in `chain_forecast_execution`, `operator_action_listing_held`, `operator_released_reservation_recovery`, `scripts/node22_manual_retry_failed_runs.py`; `__all__` unchanged; 76 journal test files byte-identical; frozen per-file-ignores.
+- **Must add**: call-time attribute lookup `file_orchestration_journal.<name>` (absolute late import after any docstring) in `_run_manifest_model_package_identity` and `_candidate_row_self_bound_identity`; function-body imports of unpatched facade-resident names; `TYPE_CHECKING` import for annotation-only `FileOrchestrationJournalError`; two counting-stub cases.
+- **Governing invariant**: a facade monkeypatch reaches every moved caller at call time, and no sibling imports the facade (or a later sibling) at import time.
+- **Sibling surfaces**: 5.0 map (option a, late-lookup AST rule by name), 5.1 hygiene (direction two at 5.6 must account for sibling alias reads of patch-only names), 5.3 primitives host of 8 identity helpers, 5.5/5.6 seam-test appends and large-file excludes, selector constant, 2.3 `set(...)` constants.
+- **Seams under test**: two counting stubs (sole positive oracles); `select_tests` set for the PR paths incl. the three patch-site files; `tests/test_gateway_reconcile_*.py` (unrouted by CI); standalone sibling import; identity/exception/docstring probes; AST verbatim probe.
+- **Required evidence**: Verify set green; probe output in PR; tests diff == the new file; `select_tests` output.
+- **Non-goals**: moving any patched name, `_accepted_submit_candidate_evidence`, or `_filter_cycle_rows_for_model`; repointing external importers; `# noqa: F401`.
+- **Review focus**: (1) no import binding of any of the 19 names in the sibling; (2) 52/17/6 lists exact, no patched binding removed; (3) imports after docstrings; (4) sibling top-level imports only leaves and earlier siblings; (5) both counting cases go red on an import-bound mutant.
 
 #### D7 (6.3) risk contract
 
