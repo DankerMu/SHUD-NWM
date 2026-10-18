@@ -118,13 +118,13 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import Any, Protocol
 
+from packages.common.contracts.direct_grid import (
+    DirectGridContractError,
+    load_forcing_mapping_contract_from_manifest,
+)
 from packages.common.model_registry import (
     ModelActivationContext,
     PreActivationHook,
-)
-from workers.forcing_producer.direct_grid_contract import (
-    DirectGridContractError,
-    load_forcing_mapping_contract_from_manifest,
 )
 
 __all__ = [

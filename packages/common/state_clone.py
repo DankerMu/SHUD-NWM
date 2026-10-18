@@ -118,13 +118,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
+from packages.common.contracts.direct_grid import (
+    DirectGridContractError,
+    load_forcing_mapping_contract_from_manifest,
+)
 from packages.common.state_manager import (
     StateSnapshot,
     state_snapshot_id,
-)
-from workers.forcing_producer.direct_grid_contract import (
-    DirectGridContractError,
-    load_forcing_mapping_contract_from_manifest,
 )
 from workers.mapping_builder.rewrite import (
     HYDROLOGIC_CORE_FINGERPRINT_LABELS,

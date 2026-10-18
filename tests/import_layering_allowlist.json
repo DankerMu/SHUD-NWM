@@ -4,20 +4,8 @@
     "module": "workers.data_adapters.region"
   },
   {
-    "file": "packages/common/model_registry.py",
-    "module": "workers.forcing_producer.direct_grid_contract"
-  },
-  {
-    "file": "packages/common/model_registry_contracts.py",
-    "module": "workers.forcing_producer.direct_grid_contract"
-  },
-  {
     "file": "packages/common/state_cli.py",
     "module": "workers.data_adapters.base"
-  },
-  {
-    "file": "packages/common/state_clone.py",
-    "module": "workers.forcing_producer.direct_grid_contract"
   },
   {
     "file": "packages/common/state_clone.py",
@@ -26,10 +14,6 @@
   {
     "file": "packages/common/state_manager.py",
     "module": "workers.data_adapters.base"
-  },
-  {
-    "file": "packages/common/station_set_flip.py",
-    "module": "workers.forcing_producer.direct_grid_contract"
   },
   {
     "file": "workers/shud_runtime/runtime.py",
