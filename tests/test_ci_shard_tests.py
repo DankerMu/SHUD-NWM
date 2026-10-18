@@ -352,10 +352,10 @@ def test_full_job_keeps_its_gate_and_prerequisite_steps() -> None:
     assert any("mkdir -p /scratch/frd_muziyao" in run for run in runs)
 
 
-def test_ci_yml_still_has_exactly_three_locked_installs() -> None:
+def test_ci_yml_still_has_exactly_four_locked_installs() -> None:
     text = CI_WORKFLOW.read_text(encoding="utf-8")
 
-    assert text.count(f"run: {LOCKED_SYNC}\n") == 3
+    assert text.count(f"run: {LOCKED_SYNC}\n") == 4
 
 
 # --- ci.yml wiring: the sharded mocked-regression Playwright lane (#2844) ---------------

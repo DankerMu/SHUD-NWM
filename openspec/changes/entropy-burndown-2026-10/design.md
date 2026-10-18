@@ -143,24 +143,24 @@ and the output parser). Public closed sets are spelled out in the spec; the per-
 | `PIPELINE_JOB_INTERNAL_STATUSES` | `accepted_submit_identity.py` (`reserved`, `cancellation_pending`, `reconcile_unverified`) | `ACCEPTED_SUBMIT_MASTER_STATUSES` derived as `(PIPELINE_JOB_STATUSES - {skipped}) \| INTERNAL` with a parity pin |
 | `PIPELINE_JOB_TERMINAL` | `chain_types.py` (binds `set(...)` once, shared object) | `chain_runtime_utils.py:32` and `file_orchestration_journal.py:621` hold independent literal sets today (not the `chain_types` object); each binds its own `set(PIPELINE_JOB_TERMINAL)` in 2.3 |
 | `PIPELINE_JOB_TERMINAL_WITHOUT_RESERVATION` | `scheduler.py` and `scheduler_candidates.py` each bind their own `set(...)` (two independent objects today; `scheduler` imports `scheduler_candidates`, never the reverse) | — |
-| `PIPELINE_JOB_TERMINAL_GUARD`, `PIPELINE_JOB_TERMINAL_OVERRIDES`, `PIPELINE_JOB_ACTIVE_MANUAL_RETRY` | `persistence.py` | — |
-| `PIPELINE_JOB_SUCCESS` (`scheduler_state_types` binds `set(...)` once) | `scheduler_state_types.py` `TERMINAL_PIPELINE_SUCCESS_STATUSES` | `chain.py:216`, `chain_runtime_utils.py:41`, `chain_source_cycle.py:12`, `chain_repository_state.py:23`, `retry.py:80` hold independent literal sets today (not the `scheduler_state_types` object); each binds its own `set(PIPELINE_JOB_SUCCESS)` in 2.3; inline sites in journal / `persistence.py` / `forcing_submit_identity.py` |
+| `PIPELINE_JOB_TERMINAL_GUARD`, `PIPELINE_JOB_TERMINAL_OVERRIDES`, `PIPELINE_JOB_ACTIVE_MANUAL_RETRY` | `persistence.py` | journal `update_job_status` inline override set tests membership in `PIPELINE_JOB_TERMINAL_OVERRIDES` (its `{succeeded, failed, cancelled}` half stays distinct) |
+| `PIPELINE_JOB_SUCCESS` (`scheduler_state_types` binds `set(...)` once) | `scheduler_state_types.py` `TERMINAL_PIPELINE_SUCCESS_STATUSES` | `chain.py:216`, `chain_runtime_utils.py:41`, `chain_source_cycle.py:12`, `chain_repository_state.py:23`, `retry.py:80` hold independent literal sets today (not the `scheduler_state_types` object); each binds its own `set(PIPELINE_JOB_SUCCESS)` in 2.3; `chain.py`'s object is shared with `chain_forecast_execution.py:110`; inline literals in journal (three) / `persistence.py` (two) / `forcing_submit_identity.py` test membership in `PIPELINE_JOB_SUCCESS` directly |
 | `PIPELINE_JOB_ACTIVE`, `PIPELINE_JOB_PENDING`, `PIPELINE_JOB_FAILED_UI` | `apps/api/routes/pipeline.py` `_ACTIVE/_PENDING/_FAILED_JOB_STATUSES` | — |
-| `FAILED_PIPELINE_STATUSES`, `DURABLE_HYDRO_SUCCESS_STATUSES`, `HYDRO_RUN_CODE_CLEARING_STATUSES` | `scheduler_state_types.py` (moved as frozensets; `scheduler_state_types` binds `set(...)` for the two `set`-typed ones and the frozenset itself for the third, same names) | #1581 consumers unchanged; `chain.py:217`, `chain_repository_state.py:19`, `chain_source_cycle.py:13` hold independent literal `FAILED_PIPELINE_STATUSES` sets today; each binds its own `set(FAILED_PIPELINE_STATUSES)` in 2.3 |
+| `FAILED_PIPELINE_STATUSES`, `DURABLE_HYDRO_SUCCESS_STATUSES`, `HYDRO_RUN_CODE_CLEARING_STATUSES` | `scheduler_state_types.py` (moved as frozensets; `scheduler_state_types` binds `set(...)` for the two `set`-typed ones and the frozenset itself for the third, same names) | #1581 consumers unchanged; `chain.py:217`, `chain_repository_state.py:19`, `chain_source_cycle.py:13` and `retry.py:78` `FAILED_RETRY_STATUSES` hold independent literal sets today; each binds its own `set(FAILED_PIPELINE_STATUSES)` in 2.3 |
 | `HYDRO_RUN_STATUSES` | `schemas/run_status.schema.json` enum | parity ⊇ folded DB enum − `frequency_done` |
 | `HYDRO_RUN_TERMINAL_UI` | `apps/api/routes/pipeline.py` `_TERMINAL_HYDRO_STATUSES` | — |
-| `DISPLAY_PRODUCT_READY_STATUSES` (site binds `set(...)`) | `hydro_display_constants.py` | — |
-| `QHH_LATEST_READY_RUN_STATUSES` (`tuple`) | `forecast_store.py` | — |
+| `DISPLAY_PRODUCT_READY_STATUSES` (site binds `set(...)`) | `hydro_display_constants.py` | `apps/api/routes/hydro_display.py` imports it from `hydro_display_constants` (unchanged) |
+| `QHH_LATEST_READY_RUN_STATUSES` (`tuple`) | `forecast_store.py` | `model_registry.py` (re-export), `model_registry_catalog.py`, `services/production_closure/readonly_db_probe_adapter.py` import it from `forecast_store` (unchanged) |
 | `PARSE_READY_RUN_STATUSES`, `FAILABLE_RUN_STATUSES` (`tuple`, DB parameters) | `workers/output_parser/parser.py` | — |
 | `FORECAST_CYCLE_SUCCESS_STATUSES` | `file_orchestration_journal.py` `_TERMINAL_FORECAST_CYCLE_SUCCESS_STATUSES` | — |
 | `CYCLE_STATUSES` | folded `met.cycle_status` migrations | — |
 | `CYCLE_TERMINAL_UI` | `apps/api/routes/pipeline.py` `_TERMINAL_CYCLE_STATUSES` | — |
 | `CYCLE_TERMINAL_UPSERT`, `CYCLE_UPSERT_PRESERVED` (`tuple`, concatenated) | `packages/common/met_store.py` | — |
-| `SLURM_TERMINAL_STATES` | `slurm_validation.py` | `SLURM_RAW_STATES` = this ∪ `real_backend.SLURM_STATE_MAP` keys ∪ `run_qhh_continuous` sets |
+| `SLURM_TERMINAL_STATES` | `slurm_validation.py` `TERMINAL_SLURM_STATES` (binds `set(...)`) | `SLURM_RAW_STATES` = this ∪ `run_qhh_continuous` sets = the 17 `real_backend.SLURM_STATE_MAP` keys (dict, not bound; parity asserts `==`; `real_backend.py` unchanged) |
 | `SLURM_TERMINAL_SUCCESS`, `SLURM_TERMINAL_FAILURE` | `scripts/run_qhh_continuous.py` | — |
-| `QC_VERDICTS` + `normalize_qc_verdict` | new (lowercase) | read/compare paths in `production_closure/*`, `scripts/*` |
-| `READINESS_ITEM_STATUSES` | `readiness_item_contracts.py` | — |
-| `ACTIVE_PIPELINE_STATUSES` | `scheduler_state_types.py:28` (binds `set(...)` once, shared object) | `scheduler_state.py`, `scheduler_state_decision.py`, `scheduler_state_failure.py`, `scheduler_state_manual_retry.py`, `scheduler_state_rows.py` import the object; same members as `PIPELINE_JOB_ACTIVE` (`pipeline.py:76`), `PIPELINE_JOB_ACTIVE_MANUAL_RETRY` (`persistence.py:11`, tuple) and `retry.py:77` `ACTIVE_RETRY_STATUSES` — distinct purposes, kept distinct; `retry.py:77` binds its own `set(...)` in 2.3 |
+| `QC_VERDICTS` + `normalize_qc_verdict` | new (lowercase) | `met_validation.py` forcing-QC reads (closed domain {pass, fail}); never readiness-item compares, mixed-domain sets, receipt writers or validators (`m24_live/receipt.py`, `c4_production_acceptance.py`, `m24_gateway_proof.py`) |
+| `READINESS_ITEM_STATUSES` | `readiness_item_contracts.py` `STATUS_VALUES` (binds the frozenset itself) | `readiness_validation.py` re-exports the same object (`is`-pinned) |
+| `ACTIVE_PIPELINE_STATUSES` | `scheduler_state_types.py:28` (binds `set(...)` once, shared object) | `scheduler_state.py`, `scheduler_state_decision.py`, `scheduler_state_failure.py`, `scheduler_state_manual_retry.py`, `scheduler_state_rows.py` import the object; same members as `PIPELINE_JOB_ACTIVE` (`pipeline.py:76`), `PIPELINE_JOB_ACTIVE_MANUAL_RETRY` (`persistence.py:11`, tuple) and `retry.py:77` `ACTIVE_RETRY_STATUSES` — distinct purposes, kept distinct; `retry.py:77` binds its own `set(ACTIVE_PIPELINE_STATUSES)` in 2.3 |
 | `ACTIVE_HYDRO_STATUSES` | `scheduler_state_types.py:32` (binds `set(...)` once, shared object; six-site identity pinned by `test_hydro_status_set_parity.py::test_active_hydro_statuses_are_the_same_object`) | `chain.py:211`, `scheduler_state.py`, `scheduler_state_decision.py`, `scheduler_state_manual_retry.py` import the object |
 | `RESERVATION_ACTIVE_STATUSES` (`tuple`, order `reserved, submitted, running, queued, pending`) | `persistence.py:17` | `reservation.py:38` imports it |
 
@@ -201,6 +201,42 @@ Alternative rejected: eight union sets (Stage 2 draft) — four review findings 
 - **Required evidence**: the pytest set above plus `PYTHONHASHSEED` 0/1 runs; `check:api-types`, `typecheck`, `test`; read-only precount, then `GET /api/v1/jobs?status=reservation_lost` 200 validated against the PR-head yaml with a master-yaml negative control (count > 0), or an acceptance amendment (count = 0).
 - **Non-goals**: changing any bucket or terminal set to include `reservation_lost`; frontend `FAILED_STATUSES`; the 4 residual inline literals; production `:8080` redeploy.
 - **Review focus**: index-8 position in all six places; `set(...)` vs frozenset at the five sites; exactly-6 allowlist deletion; receipt validator target (yaml, not the durable JSON schema) and the count-0 branch.
+
+### D3 (2.3 首刀) risk contract
+
+- **Change surface**: `chain_types.py`, `chain_runtime_utils.py`, `file_orchestration_journal.py` each bind `set(PIPELINE_JOB_TERMINAL)` under the existing name; parity terminal assertions for the three sites; three allowlist entries removed.
+- **Must preserve**: `chain_types.TERMINAL_JOB_STATUSES` is one mutable `set` shared by `chain`, `chain_forced_resubmit`, `chain_forecast_execution`, `forcing_submit_identity`; the other two stay independent `set` objects; members unchanged (7); `chain_types` import stays light (`test_orchestration_chain.py:858-879`).
+- **Must add**: parity `== PIPELINE_JOB_TERMINAL`, `type is set`, and non-identity with the `chain_types` object for the two independent sites.
+- **Governing invariant**: binding changes where members come from, never membership, type or identity.
+- **Sibling surfaces**: `chain_runtime_utils` success set and journal `FORECAST_CYCLE_SUCCESS` set (2.3 successor); `scheduler`/`scheduler_candidates` six-value sets (successor); the `chain_forecast_*` `getattr` facades.
+- **Seams under test**: `test_forced_resubmit_veto.py` identity triple (local + master full; not PR-selected); parity (PR lane via the `.py` loop); budget-contract equality.
+- **Required evidence**: the 首刀 Verify set green; allowlist minus exactly 3 keys; `select_tests` output for the three paths showing parity.
+- **Non-goals**: any other orchestrator site; selector rows; `status_vocab` changes.
+- **Review focus**: `set(...)` at all three (no frozenset, no shared import into the two independent sites); exactly-3 deletion.
+
+### D3 (2.3 后继) risk contract
+
+- **Change surface**: `scheduler`, `scheduler_candidates`, `persistence`, `file_orchestration_journal`, `chain`, `chain_runtime_utils`, `chain_source_cycle`, `chain_repository_state`, `retry`, `forcing_submit_identity`, `accepted_submit_identity`, `scheduler_state_types` bind their D3 sets (module-level `set(...)`/tuple/derived frozenset; inline literals become membership tests on the vocabulary); one source-text assertion in `tests/test_migrations.py`; parity terminal assertions; 24 allowlist entries removed.
+- **Must preserve**: members, type and identity at every site: `scheduler`/`scheduler_candidates` two independent sets; `chain.TERMINAL_PIPELINE_SUCCESS_STATUSES` shared with `chain_forecast_execution`; `retry` active/success sets shared with the journal; `scheduler_state_types.ACTIVE_*` shared by six sites and the scheduler re-export; `persistence` tuples in order (index predicate, `reservation`); `ACCEPTED_SUBMIT_MASTER_STATUSES` a 14-member frozenset; zero facade-guard signals on `chain.py`/`scheduler.py`.
+- **Must add**: parity `== VOCAB` + `type is` per site, `is not` for independent copies, `is` for shared aliases; the runtime value check replacing `test_migrations.py:1154`.
+- **Governing invariant**: binding changes where members come from, never membership, type or identity; orchestrator allowlist ends with no `pending-migration`.
+- **Sibling surfaces**: 首刀 sites; 2.1a `scheduler_state_types:48/:57/:58/:60`; journal `{succeeded, failed, cancelled}` guard half, `:3706` admission set, `retry.py:86`, `chain_stage_execution.py:1155`, `RAW_MANIFEST_READY_CYCLE_STATUSES` (`distinct-vocabulary`).
+- **Seams under test**: parity (PR lane via `.py` loop); `test_hydro_status_set_parity.py` identity/mutation; `test_production_scheduler.py:813-838`; `test_gateway_reconcile_round10.py`; `test_migrations.py`; facade-guard real-tree node.
+- **Required evidence**: the Verify set green; allowlist minus exactly 24 keys; `select_tests` union recorded.
+- **Non-goals**: any membership change; 2.2/2.4 sites; selector rows; `status_vocab` changes.
+- **Review focus**: `_vocab` module alias in `chain.py`/`scheduler.py`; own `set(...)` vs shared import per site; tuple order at `persistence`; all three journal inline success sites; the single test edit.
+
+### D3 (2.4 后继) risk contract
+
+- **Change surface**: `slurm_validation.py:78`, `run_qhh_continuous.py:69-70` bind `set(_vocab.…)`; `readiness_item_contracts.py:5` binds the `READINESS_ITEM_STATUSES` frozenset itself; six forcing-QC read expressions in `met_validation.py` route through `normalize_qc_verdict`; parity terminal assertions plus the `no pending-migration` exit assertion; three allowlist entries removed.
+- **Must preserve**: site names, members and types (`set` ×3, frozenset ×1); the `readiness_validation.STATUS_VALUES is readiness_item_contracts.STATUS_VALUES` chain; every QC truth table over the closed {pass, fail} domain; all receipt/evidence spellings (`m24_live/receipt.py`, `c4_production_acceptance.py`, `m24_gateway_proof.py`, met evidence JSON); `real_backend.py`, frontier-alert and basin-retirement sources byte-identical.
+- **Must add**: `SLURM_RAW_STATES == frozenset(real_backend.SLURM_STATE_MAP)` (if 2.1a left it weaker); `test_allowlist_has_no_pending_migration`.
+- **Governing invariant**: binding changes where members come from, never membership, type or identity; `normalize_qc_verdict` only where the input domain is provably closed within its mapping.
+- **Sibling surfaces**: readiness-item compares and `met_validation.py:1099` (open domain, never routed); `e2e_validation.py` QC reads (closed {pass, blocked}, outside this change); 12 `distinct-vocabulary` keys in the issue's files; 34 hits in 17 files outside every 2.2–2.4 issue (2.1b must not tag them `pending-migration`).
+- **Seams under test**: parity (PR lane via the `.py` loop and the allowlist rule); `test_production_{slurm,met,readiness}_validation.py`; `test_run_qhh_continuous.py`; `test_m24_receipt.py:63`.
+- **Required evidence**: the Verify set green; allowlist minus exactly 3 keys with zero `pending-migration`; `select_tests` output for the four paths showing parity.
+- **Non-goals**: binding `POST_INGEST_STATUSES`/`CANDIDATE_STATUSES`; editing `SLURM_STATE_MAP`; normalising validators, writers, readiness items or mixed-domain sets; new selector rows.
+- **Review focus**: `set(...)` vs frozenset at each site; no `normalize_qc_verdict` outside the six `met_validation` expressions; exactly-3 deletion; exit assertion present.
 
 ### D4 Helper consolidation lands after D1 (user)
 Targets: utc-now → `packages/common/contracts/time_normalization.py::utc_now`; ISO parse → `parse_iso_utc`; format →
@@ -276,6 +312,36 @@ there and moved functions receive them as parameters from `select_tests`. Behavi
 files pass, and for the selector `uv run python scripts/select_ci_tests.py` over a fixed changed-path list yields
 byte-identical output at the PR's parent commit and head (no committed snapshot: parallel tasks add rule rows and would
 invalidate one). Extraction order is in tasks.md §5/§6; the highest-risk step is flagged there.
+
+#### D7 (6.3) risk contract
+
+```text
+6.3 fixture (expanded):
+Change surface: new scripts/select_ci_tests_rules.py (3 tables + 37 B2 constants, verbatim, source order); scripts/select_ci_tests.py (delete B2, bind 10 rules names, prune tables import to the 99 read names); .large-file-guard.json exclude; line_reference_baseline.json (22 entries re-keyed, 1 deleted); one new test in tests/test_select_ci_tests.py.
+Must preserve: select_tests/main signatures and the four GitHub outputs; every name tests import or read from the facade; facade monkeypatch of PATH_TEST_RULES/SUPPORT_MODULE_TEST_RULES steers select_tests; table element order.
+Must add/change: rules module importing tables only (no facade import, no sys.path insert).
+Governing invariant: select_tests reads the rule tables as facade globals; the facade is the single interception point.
+Sibling surfaces: hard-line-reference baseline (path-keyed); large-file-guard hook; node-id glob scan (6.2); exec mutation pin (stays green unchanged); 6.1 sibling rule row + collection-smoke predicate; scripts/ci_selector_snapshot.sh; ruff F401 on the facade import blocks.
+Seams under test: select_tests with a patched facade global; CLI --github-output via snapshot; module values via the parity probe.
+Required evidence: snapshot cmp 0 (parent vs head); parity probe green (37 ==, 3 tables astuple, 109 identities); scenario test both arms; line-reference test + hard-gate audit zero findings; ruff clean.
+Non-goals: moving B3 or any function (6.4); touching the exec pin or the sys.path leak unless it reds; rewording the 22 re-keyed references; any routing change.
+Review focus: (1) B2 set equals the merge-base AST recomputation; (2) no table-row reorder or edit (parity probe); (3) select_tests still reads facade globals; (4) baseline diff limited to the two keys; (5) facade import pruning drops only unread names.
+```
+
+#### D7 (6.4) risk contract
+
+```text
+6.4 fixture (compact):
+Change surface: new scripts/select_ci_tests_imports.py (11 B3 definitions, contiguous block verbatim incl. comments, stdlib-only imports); scripts/select_ci_tests.py (delete B3, bind 5 names: 4 plain + CHANGED_TEST_SUITE_BASENAME_PATTERNS as X); .large-file-guard.json (remove the facade exclude); tests/test_select_ci_tests.py (2 function-local import lines repointed, one new scenario test).
+Must preserve: select_tests/main signatures and the four GitHub outputs; every B3 name tests import or read via the facade; facade monkeypatch of _build_suite_importer_index steers select_tests; parse-cache reuse semantics.
+Must add/change: leaf imports module (no scripts.* import, no sys.path insert); _SUITE_IMPORTER_PARSE_STATS/_CACHE not bound on the facade.
+Governing invariant: select_tests resolves _build_suite_importer_index as a facade global at call time; the parse stats/cache live only in the module whose function mutates them.
+Sibling surfaces: large-file-guard hook (facade exclude removed); exec mutation pin (unchanged); node-id glob scan; 6.1 sibling rule row + collection-smoke predicate; scripts/ci_selector_snapshot.sh; ruff F401/E501 on facade import block and the two repointed tests.
+Seams under test: select_tests with a patched facade builder (new scenario, both legs); parse-stats seam on the imports module (:7123/:7149); lazy-build negative oracles (:7179/:7203).
+Required evidence: snapshot cmp 0; parity probe (11 ast.dump ==, block substring, importer-index equality on the real tree, 5 identities, 6 absences); scenario test both legs; line-reference test + hard-gate zero findings; wc -l <= 1000 for facade and imports.
+Non-goals: any signature change or new parameter; touching B1/B2 or the baseline JSON; editing :5984 or other prose that names the old location; routing changes.
+Review focus: (1) B3 block byte-identical incl. comments; (2) select_tests still calls the facade-global builder (no body import, no module-qualified call); (3) facade binds exactly the 5 names; (4) test diff = 2 import lines + 1 new test; (5) facade exclude removed only with measured size <= 1000.
+```
 
 ### D8 Governance noise and baseline (user)
 `check_stale_routes.py::_check_stale_route_tokens` skips paths under `openspec/changes/archive/` (one path-family

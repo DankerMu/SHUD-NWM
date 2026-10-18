@@ -491,9 +491,9 @@ def test_workflow_never_writes_to_the_repository() -> None:
         assert forbidden not in text
 
 
-def test_ci_yml_keeps_its_three_locked_installs_and_does_not_call_the_floating_lane() -> None:
+def test_ci_yml_keeps_its_four_locked_installs_and_does_not_call_the_floating_lane() -> None:
     text = CI_WORKFLOW.read_text(encoding="utf-8")
 
-    assert text.count(f"run: {LOCKED_SYNC}\n") == 3
+    assert text.count(f"run: {LOCKED_SYNC}\n") == 4
     assert "uv lock --upgrade" not in text
     assert "floating_resolve_report" not in text
