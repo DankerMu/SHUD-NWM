@@ -168,7 +168,7 @@ and the output parser). Public closed sets are spelled out in the spec; the per-
 | `CYCLE_STATUSES` | folded `met.cycle_status` migrations | — |
 | `CYCLE_TERMINAL_UI` | `apps/api/routes/pipeline.py` `_TERMINAL_CYCLE_STATUSES` | — |
 | `CYCLE_TERMINAL_UPSERT`, `CYCLE_UPSERT_PRESERVED` (`tuple`, concatenated) | `packages/common/met_store.py` | — |
-| `SLURM_TERMINAL_STATES` | `slurm_validation.py` `TERMINAL_SLURM_STATES` (binds `set(...)`) | `SLURM_RAW_STATES` = this ∪ `run_qhh_continuous` sets = the 17 `real_backend.SLURM_STATE_MAP` keys (dict, not bound; parity asserts `==`; `real_backend.py` unchanged) |
+| `SLURM_TERMINAL_STATES` | `slurm_validation.py` `TERMINAL_SLURM_STATES` (binds `set(...)`) | `SLURM_RAW_STATES` = the 17 `real_backend.SLURM_STATE_MAP` keys (dict, not bound; parity asserts `==`; `real_backend.py` unchanged). The three terminal sets (`slurm_validation` ∪ the two `run_qhh_continuous` sets) union to 11 and are asserted `<=` the raw states, not `==` (corrected 2026-10-18 by #2925: the `run_qhh` sets are subsets of `TERMINAL_SLURM_STATES`) |
 | `SLURM_TERMINAL_SUCCESS`, `SLURM_TERMINAL_FAILURE` | `scripts/run_qhh_continuous.py` | — |
 | `QC_VERDICTS` + `normalize_qc_verdict` | new (lowercase) | `met_validation.py` forcing-QC reads (closed domain {pass, fail}); never readiness-item compares, mixed-domain sets, receipt writers or validators (`m24_live/receipt.py`, `c4_production_acceptance.py`, `m24_gateway_proof.py`) |
 | `READINESS_ITEM_STATUSES` | `readiness_item_contracts.py` `STATUS_VALUES` (binds the frozenset itself) | `readiness_validation.py` re-exports the same object (`is`-pinned) |

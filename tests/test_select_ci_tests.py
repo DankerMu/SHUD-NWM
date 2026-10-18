@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import builtins
+import dataclasses
 import fnmatch
 import hashlib
 import json
@@ -1077,6 +1078,7 @@ def test_select_tests_maps_openapi_patch_owner_to_drift_plus_api_consumers() -> 
             FAMILY_GUARD_PATH,
             RESOLVE_SURFACE_GUARD_PATH,
             ANY_RATCHET_PATH,
+            STATUS_VOCAB_PARITY_PATH,
         }
     )
     assert selected == expected
@@ -1194,6 +1196,7 @@ def test_select_tests_maps_runtime_changes_to_runtime_contract_tests() -> None:
             RESOLVE_SURFACE_GUARD_PATH,
             IMPORT_LAYERING_GUARD_PATH,
             ANY_RATCHET_PATH,
+            STATUS_VOCAB_PARITY_PATH,
         }
     )
 
@@ -1221,6 +1224,7 @@ def test_select_tests_maps_direct_grid_producer_surface_to_compact_e2e_fixture()
             RESOLVE_SURFACE_GUARD_PATH,
             IMPORT_LAYERING_GUARD_PATH,
             ANY_RATCHET_PATH,
+            STATUS_VOCAB_PARITY_PATH,
         }
     )
     assert list(DIRECT_GRID_E2E_TESTS) == ["tests/test_direct_grid_e2e.py"]
@@ -1252,11 +1256,12 @@ def test_select_tests_maps_direct_grid_contract_canonical_path_like_the_shim() -
             RESOLVE_SURFACE_GUARD_PATH,
             IMPORT_LAYERING_GUARD_PATH,
             ANY_RATCHET_PATH,
+            STATUS_VOCAB_PARITY_PATH,
         }
     )
-    # 1 e2e + 10 contract nodes + 5 importer suites + 5 core-smoke + 6 guards
-    # (#2937 added the `Any` ratchet).
-    assert len(selected) == 27
+    # 1 e2e + 10 contract nodes + 5 importer suites + 5 core-smoke + 7 guards
+    # (#2937 added the `Any` ratchet, task 2.1a the status-vocabulary parity).
+    assert len(selected) == 28
     assert "tests/test_forcing_producer.py" not in selected
 
 
@@ -1315,11 +1320,12 @@ def test_select_tests_keeps_issue_548_direct_grid_change_set_bounded() -> None:
             IMPORT_LAYERING_GUARD_PATH,
             TOPOLOGY_HARD_GATE_NODE,
             ANY_RATCHET_PATH,
+            STATUS_VOCAB_PARITY_PATH,
         }
     )
-    # The trailing `+ 7` is the seven supplemental riders: #1656, #2185, #1627,
-    # #2452, #2920, #2937 and #2323.
-    assert len(selected) == 1 + len(DIRECT_GRID_CONTRACT_TESTS) + len(DIRECT_GRID_CONTRACT_IMPORTER_TESTS) + 7
+    # The trailing `+ 8` is the eight supplemental riders: #1656, #2185, #1627,
+    # #2452, #2920, #2937, task 2.1a's status-vocabulary parity and #2323.
+    assert len(selected) == 1 + len(DIRECT_GRID_CONTRACT_TESTS) + len(DIRECT_GRID_CONTRACT_IMPORTER_TESTS) + 8
     assert "tests/test_forcing_producer.py" not in selected
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 
@@ -1339,6 +1345,7 @@ def test_select_tests_maps_orchestrator_chain_types_to_manifest_surface_nodes() 
             FAMILY_GUARD_PATH,
             RESOLVE_SURFACE_GUARD_PATH,
             ANY_RATCHET_PATH,
+            STATUS_VOCAB_PARITY_PATH,
         }
     )
     assert "tests/test_orchestration_chain.py" not in selected
@@ -1367,6 +1374,7 @@ def test_select_tests_maps_orchestrator_manifest_surface_without_whole_slow_suit
             FAMILY_GUARD_PATH,
             RESOLVE_SURFACE_GUARD_PATH,
             ANY_RATCHET_PATH,
+            STATUS_VOCAB_PARITY_PATH,
         }
     )
     # The REDIRECT targets are still focused node ids — that is what keeps the
@@ -1378,6 +1386,7 @@ def test_select_tests_maps_orchestrator_manifest_surface_without_whole_slow_suit
         FAMILY_GUARD_PATH,
         RESOLVE_SURFACE_GUARD_PATH,
         ANY_RATCHET_PATH,
+        STATUS_VOCAB_PARITY_PATH,
         manifest_contract,
         "tests/test_scheduler_registry_capacity.py",
     }
@@ -1507,6 +1516,7 @@ def test_select_tests_maps_file_journal_read_state_without_whole_legacy_suites()
             # guard's content sniff adds it (supplemental, set union only).
             _prod_module.SQLALCHEMY_DRIVER_GUARD_TEST,
             ANY_RATCHET_PATH,
+            STATUS_VOCAB_PARITY_PATH,
         }
     )
     assert "tests/test_orchestration_chain.py" in selected
@@ -1689,6 +1699,7 @@ def test_select_tests_maps_known_slow_manifest_test_file_changes_with_surface_ch
             FAMILY_GUARD_PATH,
             RESOLVE_SURFACE_GUARD_PATH,
             ANY_RATCHET_PATH,
+            STATUS_VOCAB_PARITY_PATH,
         }
     )
     assert "tests/test_orchestration_chain.py" not in selected
@@ -2005,6 +2016,7 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         # chain_forecast_submission.py, retry.py, scheduler_state_types.py,
         # scheduler_state_decision.py importer gaps). DB-free, sub-second.
         "tests/test_state_save_submit_ambiguity.py",
+        STATUS_VOCAB_PARITY_PATH,
         "tests/test_variant_activation_cutover.py",
         "tests/test_warm_start_chaining.py",
     ]
@@ -2038,6 +2050,7 @@ def test_released_reservation_recovery_module_selects_its_exact_suites() -> None
             FAMILY_GUARD_PATH,
             RESOLVE_SURFACE_GUARD_PATH,
             ANY_RATCHET_PATH,
+            STATUS_VOCAB_PARITY_PATH,
         }
     )
     assert "tests/test_state_clone.py" not in selected
@@ -2139,6 +2152,7 @@ def test_select_tests_maps_forecast_store_without_core_smoke_fallback() -> None:
             RESOLVE_SURFACE_GUARD_PATH,
             IMPORT_LAYERING_GUARD_PATH,
             ANY_RATCHET_PATH,
+            STATUS_VOCAB_PARITY_PATH,
         }
     )
     assert set(CORE_SMOKE_TESTS) <= set(selected)
@@ -2278,6 +2292,7 @@ def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
         # tests/test_openapi_31_contract.py.
         "tests/test_slurm_gateway_openapi_security.py",
         "tests/test_sql_shape_helpers.py",
+        STATUS_VOCAB_PARITY_PATH,
     ]
     assert not fallback_only_tests & set(selected)
 
@@ -2564,6 +2579,7 @@ def test_select_tests_maps_autopipeline_script_without_core_smoke_fallback() -> 
         # statement; the ingest criterion's fact-table-free shape is pinned
         # by the same file.
         "tests/test_river_ts_text_identity_cleanup.py",
+        STATUS_VOCAB_PARITY_PATH,
         # #1656: scripts/** is a scanned invariant root.
         INVARIANT_SUITE_PATH,
         # #2713: the fence-busy skip classification of `_process_run` is pinned
@@ -2628,6 +2644,9 @@ def test_select_tests_maps_a_migration_to_the_node27_write_roles_guard() -> None
     #
     # #2048 adds the schema-ledger convergence suite, which runs the real runner
     # over every migration against a production-shaped catalog.
+    #
+    # Task 2.1a adds the status-vocabulary parity suite, which folds
+    # hydro.run_status and met.cycle_status over the same glob.
     migration = "db/migrations/000043_canonical_grid_snapshot.sql"
     assert Path(migration).exists()
     expected = [
@@ -2636,6 +2655,7 @@ def test_select_tests_maps_a_migration_to_the_node27_write_roles_guard() -> None
         "tests/test_node27_write_roles.py",
         "tests/test_river_segment_write_surface_scan.py",
         "tests/test_schema_ledger_convergence_integration.py",
+        "tests/test_status_vocab_parity.py",
     ]
 
     assert select_tests([migration], repo_root=Path(".")) == expected
@@ -2737,6 +2757,7 @@ def test_precip_tree_module_selects_the_prewarm_reader_suite(module: str) -> Non
         RESOLVE_SURFACE_GUARD_PATH,
         # #2185: services/** is a river-segment write-surface root.
         WRITE_SURFACE_SCAN_PATH,
+        STATUS_VOCAB_PARITY_PATH,
     ]
 
 
@@ -2770,6 +2791,7 @@ def test_precip_route_rule_stays_without_the_prewarm_suite() -> None:
         RESOLVE_SURFACE_GUARD_PATH,
         # #2185: apps/** is a river-segment write-surface root.
         WRITE_SURFACE_SCAN_PATH,
+        STATUS_VOCAB_PARITY_PATH,
     ]
 
 
@@ -2839,6 +2861,7 @@ def test_route_registry_owner_selects_the_precip_surface_and_keeps_attribution()
         RESOLVE_SURFACE_GUARD_PATH,
         # #2185: apps/** is a river-segment write-surface root.
         WRITE_SURFACE_SCAN_PATH,
+        STATUS_VOCAB_PARITY_PATH,
     ]
 
 
@@ -2872,6 +2895,7 @@ def test_main_owner_selects_the_precip_surface_and_keeps_error_logging() -> None
         RESOLVE_SURFACE_GUARD_PATH,
         # #2185: apps/** is a river-segment write-surface root.
         WRITE_SURFACE_SCAN_PATH,
+        STATUS_VOCAB_PARITY_PATH,
     ]
 
 
@@ -3152,7 +3176,13 @@ def test_select_tests_maps_governance_entropy_scripts_without_core_smoke_fallbac
     # the fifteen partitions: EXACT equality against the selector's own tuple, so
     # a rule that quietly narrows to one partition — or a sixteenth partition that
     # never reaches the rules — reds here rather than shrinking the PR lane.
-    assert selected == [ANY_RATCHET_PATH, *ENTROPY_AUDIT_TESTS, WRITE_SURFACE_SCAN_PATH, INVARIANT_SUITE_PATH]
+    assert selected == [
+        ANY_RATCHET_PATH,
+        *ENTROPY_AUDIT_TESTS,
+        WRITE_SURFACE_SCAN_PATH,
+        STATUS_VOCAB_PARITY_PATH,
+        INVARIANT_SUITE_PATH,
+    ]
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 
 
@@ -3180,6 +3210,7 @@ def test_select_tests_maps_the_replay_script_to_every_partition_without_core_smo
             WRITE_SURFACE_SCAN_PATH,
             TOPOLOGY_HARD_GATE_NODE,
             ANY_RATCHET_PATH,
+            STATUS_VOCAB_PARITY_PATH,
         ]
     )
     assert not set(CORE_SMOKE_TESTS) & set(selected)
@@ -3601,7 +3632,13 @@ def test_entropy_audit_package_tracked_tree_is_exactly_twenty_two_modules() -> N
     # one partition -- or a core-smoke fallback creeping back in -- reds here.
     assert select_tests(
         ["scripts/governance/entropy_audit/report.py"], repo_root=Path(".")
-    ) == [ANY_RATCHET_PATH, *ENTROPY_AUDIT_TESTS, WRITE_SURFACE_SCAN_PATH, INVARIANT_SUITE_PATH]
+    ) == [
+        ANY_RATCHET_PATH,
+        *ENTROPY_AUDIT_TESTS,
+        WRITE_SURFACE_SCAN_PATH,
+        STATUS_VOCAB_PARITY_PATH,
+        INVARIANT_SUITE_PATH,
+    ]
     assert not set(CORE_SMOKE_TESTS) & set(
         select_tests(["scripts/governance/entropy_audit/report.py"], repo_root=Path("."))
     )
@@ -3754,6 +3791,7 @@ def test_select_tests_keeps_explicit_differently_named_script_rule() -> None:
             WRITE_SURFACE_SCAN_PATH,
             TOPOLOGY_HARD_GATE_NODE,
             ANY_RATCHET_PATH,
+            STATUS_VOCAB_PARITY_PATH,
         ]
     )
     assert not set(CORE_SMOKE_TESTS) & set(selected)
@@ -5027,6 +5065,7 @@ def test_select_tests_unions_explicit_rule_and_same_name_derivation() -> None:
             FAMILY_GUARD_PATH,
             RESOLVE_SURFACE_GUARD_PATH,
             ANY_RATCHET_PATH,
+            STATUS_VOCAB_PARITY_PATH,
         }
     )
 
@@ -6808,6 +6847,7 @@ def test_conditional_redirect_owner_focused_when_surface_present() -> None:
         RESOLVE_SURFACE_GUARD_PATH,
         "tests/test_pipeline_job_provenance_publisher.py",
         ANY_RATCHET_PATH,
+        STATUS_VOCAB_PARITY_PATH,
     }
     assert owner not in selected
 
@@ -7626,7 +7666,14 @@ def test_select_tests_falls_back_to_core_smoke_for_unknown_backend_python_path()
     selected = select_tests(["services/new_surface/new_module.py"], repo_root=Path("."))
 
     assert selected == sorted(
-        {*CORE_SMOKE_TESTS, WRITE_SURFACE_SCAN_PATH, FAMILY_GUARD_PATH, RESOLVE_SURFACE_GUARD_PATH, ANY_RATCHET_PATH}
+        {
+            *CORE_SMOKE_TESTS,
+            WRITE_SURFACE_SCAN_PATH,
+            FAMILY_GUARD_PATH,
+            RESOLVE_SURFACE_GUARD_PATH,
+            ANY_RATCHET_PATH,
+            STATUS_VOCAB_PARITY_PATH,
+        }
     )
     assert SELECTOR_META_GUARD_TEST not in selected
 
@@ -7673,6 +7720,7 @@ def test_mixed_known_and_unknown_paths_union_rider_with_fallback_smoke() -> None
                 RESOLVE_SURFACE_GUARD_PATH,
                 IMPORT_LAYERING_GUARD_PATH,
                 ANY_RATCHET_PATH,
+                STATUS_VOCAB_PARITY_PATH,
             }
         )
         == selected
@@ -7748,6 +7796,7 @@ def test_selector_state_matrix_rows_3_4_5_same_name_class_and_provenance(
         WRITE_SURFACE_SCAN_PATH,
         TOPOLOGY_HARD_GATE_NODE,
         ANY_RATCHET_PATH,
+        STATUS_VOCAB_PARITY_PATH,
     }
 
     # (b) Same-name class: ordinary suite (row 3) and a same-name suite that IS
@@ -7797,6 +7846,7 @@ def test_selector_state_matrix_row_5b_explicit_plus_same_name_union() -> None:
         FAMILY_GUARD_PATH,
         RESOLVE_SURFACE_GUARD_PATH,
         ANY_RATCHET_PATH,
+        STATUS_VOCAB_PARITY_PATH,
     }
 
 
@@ -7828,6 +7878,7 @@ def test_selector_state_matrix_rows_6_7_no_suite_fallback_and_missing_targets(
             RESOLVE_SURFACE_GUARD_PATH,
             IMPORT_LAYERING_GUARD_PATH,
             ANY_RATCHET_PATH,
+            STATUS_VOCAB_PARITY_PATH,
         }
     )
     assert SELECTOR_META_GUARD_TEST not in no_suite
@@ -7898,6 +7949,7 @@ def test_selector_state_matrix_row_11_multiple_changed_paths_accumulate() -> Non
                 RESOLVE_SURFACE_GUARD_PATH,
                 IMPORT_LAYERING_GUARD_PATH,
                 ANY_RATCHET_PATH,
+                STATUS_VOCAB_PARITY_PATH,
             }
         )
         == selected
@@ -8181,7 +8233,15 @@ def test_select_tests_routes_apps_outside_api_to_the_write_surface_scan() -> Non
     assert not tracked.startswith(BACKEND_PYTHON_SOURCE_PREFIXES)
     assert not future.startswith(BACKEND_PYTHON_SOURCE_PREFIXES)
 
-    expected = sorted({WRITE_SURFACE_SCAN_PATH, FAMILY_GUARD_PATH, RESOLVE_SURFACE_GUARD_PATH, ANY_RATCHET_PATH})
+    expected = sorted(
+        {
+            WRITE_SURFACE_SCAN_PATH,
+            FAMILY_GUARD_PATH,
+            RESOLVE_SURFACE_GUARD_PATH,
+            ANY_RATCHET_PATH,
+            STATUS_VOCAB_PARITY_PATH,
+        }
+    )
     for path in (tracked, future):
         assert select_tests([path], repo_root=Path(".")) == expected, path
 
@@ -8425,13 +8485,14 @@ def test_github_output_flags_selector_source_diff_is_not_a_collapse(tmp_path: Pa
     # write-surface scan — three targets, NOT the meta-guard collapse. #2323
     # made it four: `scripts/` is also a production-topology scan root, so the
     # hard-gate node rides along. #2937 made it five: `scripts/**` is an `Any`
-    # ratchet root. The
+    # ratchet root. Task 2.1a made it six: `scripts/**` is also a
+    # status-vocabulary parity root. The
     # collection signal is still true by PROVENANCE (the selector source itself
     # changed), so the workflow runs the full-tree collect smoke in addition to
-    # those five — the round-1 cand-01 fix.
+    # those six — the round-1 cand-01 fix.
     fields = _github_output_fields(tmp_path, ["scripts/select_ci_tests.py"], repo_root=Path("."))
 
-    assert fields["count"] == "5"
+    assert fields["count"] == "6"
     assert ANY_RATCHET_PATH in fields["tests"]
     assert "tests/test_timescale_write_guard_wire_site_invariant.py" in fields["tests"]
     assert WRITE_SURFACE_SCAN_PATH in fields["tests"]
@@ -12953,6 +13014,7 @@ def test_scheduler_runtime_selects_the_copyback_mutex_suite() -> None:
         # 31 -> 32 (#2632): this module calls create_engine, so the SQLAlchemy
         # driver guard's content sniff adds it as a supplemental rider.
         "tests/test_sqlalchemy_driver_explicit.py",
+        STATUS_VOCAB_PARITY_PATH,
     ]
 
 
@@ -12990,6 +13052,7 @@ def test_copyback_guard_selects_the_copyback_mutex_suite_without_losing_its_owne
         "tests/test_river_segment_write_surface_scan.py",
         "tests/test_run_tree_copyback_backup_lifecycle.py",
         "tests/test_select_ci_tests.py",
+        STATUS_VOCAB_PARITY_PATH,
         "tests/test_timescale_write_guard_wire_site_invariant.py",
     ]
 
@@ -14494,12 +14557,21 @@ def test_write_surface_flip_pins_the_apps_class_at_the_github_output_layer(tmp_p
     # canonicalisation family guard), so the selection is the two of them —
     # still the targeted branch, one more assertion-bearing suite. #2452 adds the
     # `.resolve()`-surface guard over the same walk, so the selection is three.
-    # #2937 adds the `Any` ratchet over `apps/**`, so it is four.
+    # #2937 adds the `Any` ratchet over `apps/**`, so it is four. Task 2.1a adds
+    # the status-vocabulary parity suite over `apps/**`, so it is five.
     fields = _github_output_fields(tmp_path, ["apps/__init__.py"], repo_root=Path("."))
 
-    assert fields["count"] == "4"
+    assert fields["count"] == "5"
     assert fields["tests"] == " ".join(
-        sorted({WRITE_SURFACE_SCAN_PATH, FAMILY_GUARD_PATH, RESOLVE_SURFACE_GUARD_PATH, ANY_RATCHET_PATH})
+        sorted(
+            {
+                WRITE_SURFACE_SCAN_PATH,
+                FAMILY_GUARD_PATH,
+                RESOLVE_SURFACE_GUARD_PATH,
+                ANY_RATCHET_PATH,
+                STATUS_VOCAB_PARITY_PATH,
+            }
+        )
     )
     assert fields["meta_guard_only"] == "false"
     assert fields["collection_smoke_required"] == "false"
@@ -15074,6 +15146,99 @@ def test_any_ratchet_ceiling_rule_red_when_removed(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
 
     assert ANY_RATCHET_PATH not in select_tests([ANY_RATCHET_CEILING_PATH], repo_root=Path("."))
+
+
+# entropy-burndown task 2.1a: the status-vocabulary parity suite. Spelled locally
+# for the same reason ANY_RATCHET_PATH is; an anchor test keeps the literal in
+# sync with the selector constant.
+STATUS_VOCAB_PARITY_PATH = "tests/test_status_vocab_parity.py"
+STATUS_VOCAB_SOURCE_PATH = "packages/common/status_vocab.py"
+RUN_STATUS_SCHEMA_PATH = "schemas/run_status.schema.json"
+
+
+def test_status_vocab_parity_literal_anchors_to_the_selector_constant() -> None:
+    from scripts.select_ci_tests import STATUS_VOCAB_PARITY_ROOTS, STATUS_VOCAB_PARITY_TEST
+
+    assert STATUS_VOCAB_PARITY_PATH == STATUS_VOCAB_PARITY_TEST
+    assert Path(STATUS_VOCAB_PARITY_PATH).is_file()
+    assert set(STATUS_VOCAB_PARITY_ROOTS) == {"apps/**", "packages/**", "services/**", "workers/**", "scripts/**"}
+
+
+def test_status_vocab_parity_routes_every_python_path_under_its_roots() -> None:
+    # The additive loop sits after the stop-rule loop, so a stop_on_match owner
+    # (the direct-grid contract module) cannot shadow the parity suite.
+    for module in (
+        "workers/forcing_producer/direct_grid_contract.py",
+        "services/orchestrator/scheduler_state_types.py",
+        "apps/api/routes/pipeline.py",
+        "scripts/run_qhh_continuous.py",
+        "packages/common/met_store.py",
+        "packages/brand_new_thing.py",
+    ):
+        assert STATUS_VOCAB_PARITY_PATH in select_tests([module], repo_root=Path(".")), module
+    for probe in ("packages/common/sql/x.sql", "db/x.py", "openspec/tools/x.py", "tests/x.py"):
+        assert STATUS_VOCAB_PARITY_PATH not in select_tests([probe], repo_root=Path(".")), probe
+
+
+def test_status_vocab_routing_rows_select_their_exact_suites() -> None:
+    # The run_status schema used to select nothing; the parity suite asserts its enum.
+    assert select_tests([RUN_STATUS_SCHEMA_PATH], repo_root=Path(".")) == [STATUS_VOCAB_PARITY_PATH]
+    # The vocabulary module: the #1581 parity lock by its row, the vocabulary's
+    # own parity suite by the packages/** loop, on top of the #1744 core smoke
+    # and the other packages/** supplemental riders.
+    assert select_tests([STATUS_VOCAB_SOURCE_PATH], repo_root=Path(".")) == sorted(
+        {
+            *CORE_SMOKE_TESTS,
+            "tests/test_hydro_status_set_parity.py",
+            STATUS_VOCAB_PARITY_PATH,
+            INVARIANT_SUITE_PATH,
+            WRITE_SURFACE_SCAN_PATH,
+            FAMILY_GUARD_PATH,
+            RESOLVE_SURFACE_GUARD_PATH,
+            IMPORT_LAYERING_GUARD_PATH,
+            ANY_RATCHET_PATH,
+        }
+    )
+    # Any migration: the parity suite folds both enums over db/migrations.
+    assert STATUS_VOCAB_PARITY_PATH in select_tests(["db/migrations/x.sql"], repo_root=Path("."))
+
+
+@pytest.mark.parametrize(
+    ("pattern", "changed", "target"),
+    [
+        pytest.param(RUN_STATUS_SCHEMA_PATH, RUN_STATUS_SCHEMA_PATH, STATUS_VOCAB_PARITY_PATH, id="run-status-schema"),
+        pytest.param(
+            STATUS_VOCAB_SOURCE_PATH, STATUS_VOCAB_SOURCE_PATH, "tests/test_hydro_status_set_parity.py", id="vocab"
+        ),
+    ],
+)
+def test_status_vocab_routing_row_red_when_removed(
+    pattern: str, changed: str, target: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts import select_ci_tests
+
+    mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern != pattern)
+    assert len(mutant) == len(PATH_TEST_RULES) - 1, f"the {pattern} row is missing or duplicated"
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+
+    assert target not in select_tests([changed], repo_root=Path("."))
+
+
+def test_status_vocab_migration_target_red_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scripts import select_ci_tests
+
+    rows = [rule for rule in PATH_TEST_RULES if rule.pattern == "db/migrations/*.sql"]
+    assert len(rows) == 1
+    assert STATUS_VOCAB_PARITY_PATH in rows[0].tests
+    mutant = tuple(
+        dataclasses.replace(rule, tests=tuple(t for t in rule.tests if t != STATUS_VOCAB_PARITY_PATH))
+        if rule.pattern == "db/migrations/*.sql"
+        else rule
+        for rule in PATH_TEST_RULES
+    )
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+
+    assert STATUS_VOCAB_PARITY_PATH not in select_tests(["db/migrations/x.sql"], repo_root=Path("."))
 
 
 # The #1744 shared-library additivity authority: `packages/common/**` must
@@ -15830,6 +15995,7 @@ def test_station_set_flip_selects_its_importers_and_keeps_its_prior_picks() -> N
             RESOLVE_SURFACE_GUARD_PATH,
             IMPORT_LAYERING_GUARD_PATH,
             ANY_RATCHET_PATH,
+            STATUS_VOCAB_PARITY_PATH,
         }
     )
 

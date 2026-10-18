@@ -392,6 +392,21 @@ ANY_RATCHET_ROOTS: tuple[str, ...] = (
     "scripts/**",
 )
 
+# entropy-burndown task 2.1a: the status-vocabulary parity suite. It imports and
+# pins the canonical status-set objects of modules across the five production
+# roots (and task 2.1b adds a duplicate-literal scan over the same roots), so
+# every Python change there routes to it SUPPLEMENTALLY in the #1656 shape: no
+# `matched`, no stop-rule participation, so a `stop_on_match` owner of the
+# changed path cannot shadow it.
+STATUS_VOCAB_PARITY_TEST = "tests/test_status_vocab_parity.py"
+STATUS_VOCAB_PARITY_ROOTS: tuple[str, ...] = (
+    "apps/**",
+    "packages/**",
+    "services/**",
+    "workers/**",
+    "scripts/**",
+)
+
 # #2323: the entropy production-topology hard gate. It builds one full-repo
 # entropy report and asserts zero production-topology findings, and that report
 # reads every scannable text file under the scanner's seven roots plus four
@@ -5057,6 +5072,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ("tests/test_state_index_retention.py",),
     ),
     PathTestRule(
+        # entropy-burndown task 2.1a: `scheduler_state_types` binds its hydro
+        # status sets from the vocabulary, and the #1581 parity lock pins their
+        # members, mutability and shared-object identity. The vocabulary's own
+        # parity suite arrives through the `packages/**` supplemental loop.
+        "packages/common/status_vocab.py",
+        ("tests/test_hydro_status_set_parity.py",),
+    ),
+    PathTestRule(
         "packages/common/state_cli.py",
         (
             "tests/test_state_manager.py",
@@ -5348,6 +5371,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # tests/test_migrations.py, which never parses the enum. 9 tests in
             # 0.29s, DB-free.
             "tests/test_hydro_status_set_parity.py",
+            # entropy-burndown task 2.1a: the status-vocabulary parity suite folds
+            # `hydro.run_status` and `met.cycle_status` over this same glob with
+            # the parity lock's helper and compares them with the vocabulary.
+            STATUS_VOCAB_PARITY_TEST,
         ),
     ),
     # #2048. The schema-ledger convergence suite rebuilds node-27's drift and runs
@@ -6425,6 +6452,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "schemas/timeseries_retention_receipt.schema.json",
         ("tests/test_node27_lifecycle_contract.py",),
     ),
+    # entropy-burndown task 2.1a: the status-vocabulary parity suite asserts this
+    # schema's status enum equals `HYDRO_RUN_STATUS_ORDER`; without the row the
+    # path selected nothing.
+    PathTestRule("schemas/run_status.schema.json", (STATUS_VOCAB_PARITY_TEST,)),
     PathTestRule(
         # #2032: the `infra/env/node27-*.example` glob above only buys
         # tests/test_node27_write_roles.py, which never reads this template.
@@ -7512,6 +7543,13 @@ def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -
     for path in changed:
         if path.endswith(".py") and _any_path_matches([path], ANY_RATCHET_ROOTS):
             selected.add(ANY_RATCHET_TEST)
+
+    # entropy-burndown task 2.1a: supplemental status-vocabulary parity routing,
+    # same additive shape as the #1656 loop (no `matched`, no stop rules, no
+    # fallback effect).
+    for path in changed:
+        if path.endswith(".py") and _any_path_matches([path], STATUS_VOCAB_PARITY_ROOTS):
+            selected.add(STATUS_VOCAB_PARITY_TEST)
 
     # #2498: supplemental forcing-template import sniff, same additive shape as
     # the loops above (no `matched`, no stop-rule participation, no effect on

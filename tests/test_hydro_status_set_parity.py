@@ -58,6 +58,58 @@ _RENAME_RUN_STATUS_RE = re.compile(
 )
 
 
+def _fold_enum_members(schema: str, type_name: str, *, create_sentinel: str, add_sentinel: str) -> frozenset[str]:
+    """The declared members of enum ``<schema>.<type_name>``, folded over the migration tree as text.
+
+    The one folding implementation, shared by this suite (``hydro.run_status``)
+    and ``tests/test_status_vocab_parity.py`` (``hydro.run_status`` and
+    ``met.cycle_status``): every ``CREATE TYPE ... AS ENUM`` plus every
+    ``ALTER TYPE ... ADD VALUE`` under ``_MIGRATIONS_DIR``, which is read at call
+    time so the probes below can point it at a tmp copy. Each identifier segment
+    may be bare or double-quoted; renames fail closed naming the migration; one
+    ``CREATE TYPE`` is required, and the two sentinels self-check the parse:
+    ``create_sentinel`` must come from the CREATE block and ``add_sentinel`` from
+    an ``ADD VALUE`` (so a regex that drifted onto a neighbouring type, or never
+    reached the ALTER statements, is caught).
+    """
+
+    qualified = f"{schema}.{type_name}"
+    ident = rf'"?{re.escape(schema)}"?\."?{re.escape(type_name)}"?'
+    create_re = re.compile(rf"CREATE\s+TYPE\s+{ident}\s+AS\s+ENUM\s*\(([^)]*)\)", re.IGNORECASE)
+    add_value_re = re.compile(
+        rf"ALTER\s+TYPE\s+{ident}\s+ADD\s+VALUE(?:\s+IF\s+NOT\s+EXISTS)?\s+'([^']+)'",
+        re.IGNORECASE,
+    )
+    rename_re = re.compile(rf"ALTER\s+TYPE\s+{ident}\s+RENAME\s+(?:VALUE|TO)\b", re.IGNORECASE)
+
+    migrations = sorted(_MIGRATIONS_DIR.rglob("*.sql"))
+    assert migrations, f"no migration SQL found under {_MIGRATIONS_DIR}"
+
+    declaring: list[Path] = []
+    declared: set[str] = set()
+    added: set[str] = set()
+    renames: list[str] = []
+    for migration in migrations:
+        text = migration.read_text(encoding="utf-8")
+        for declaration in create_re.finditer(text):
+            declaring.append(migration)
+            declared.update(re.findall(r"'([^']+)'", declaration.group(1)))
+        added.update(add_value_re.findall(text))
+        if rename_re.search(text):
+            renames.append(migration.name)
+
+    # Checked FIRST: after a rename every downstream conclusion drawn from
+    # `declared | added` is a fiction, including the self-checks below.
+    assert not renames, (
+        f"migration(s) {sorted(renames)} rename the {qualified} type or one of its values; "
+        "this oracle does not model renames; extend it before merging such a migration"
+    )
+    assert len(declaring) == 1, f"expected one CREATE TYPE {qualified}, found {declaring}"
+    assert create_sentinel in declared, f"CREATE block parsed as {sorted(declared)}"
+    assert add_sentinel in added, f"ADD VALUE sweep parsed as {sorted(added)}"
+    return frozenset(declared | added)
+
+
 def _hydro_run_status_enum_members() -> frozenset[str]:
     """The declared ``hydro.run_status`` members, swept from the migration tree as text.
 
@@ -82,40 +134,7 @@ def _hydro_run_status_enum_members() -> frozenset[str]:
     offending file and says so, rather than guessing at the post-rename set.
     """
 
-    migrations = sorted(_MIGRATIONS_DIR.rglob("*.sql"))
-    assert migrations, f"no migration SQL found under {_MIGRATIONS_DIR}"
-
-    declaring: list[Path] = []
-    declared: set[str] = set()
-    added: set[str] = set()
-    renames: list[str] = []
-    for migration in migrations:
-        text = migration.read_text(encoding="utf-8")
-        for declaration in _CREATE_RUN_STATUS_RE.finditer(text):
-            declaring.append(migration)
-            declared.update(re.findall(r"'([^']+)'", declaration.group(1)))
-        added.update(_ADD_RUN_STATUS_VALUE_RE.findall(text))
-        if _RENAME_RUN_STATUS_RE.search(text):
-            renames.append(migration.name)
-
-    # Checked FIRST: after a rename every downstream conclusion drawn from
-    # `declared | added` is a fiction, including the self-checks below.
-    assert not renames, (
-        f"migration(s) {sorted(renames)} rename the hydro.run_status type or one of its values; "
-        "this oracle does not model renames; extend it before merging such a migration"
-    )
-
-    # One declaration across the tree: a second CREATE would mean the sweep is
-    # reading a type this suite does not reason about (a rename, a shadow schema).
-    assert len(declaring) == 1, f"expected one CREATE TYPE hydro.run_status, found {declaring}"
-    # Self-check on the parse itself. A regex that drifted onto the neighbouring
-    # `hydro.run_type` / `met.cycle_status` declarations would still return a
-    # non-empty set, so the two named members pin that BOTH kinds of statement
-    # were reached: `succeeded` comes from the CREATE block, `pending` only from
-    # an ADD VALUE (`000013`).
-    assert "succeeded" in declared, f"CREATE block parsed as {sorted(declared)}"
-    assert "pending" in added, f"ADD VALUE sweep parsed as {sorted(added)}"
-    return frozenset(declared | added)
+    return _fold_enum_members("hydro", "run_status", create_sentinel="succeeded", add_sentinel="pending")
 
 
 def test_durable_success_aliases_are_the_same_object() -> None:
