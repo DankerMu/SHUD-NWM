@@ -274,6 +274,18 @@ parity tests get additive-loop routing (#1656 shape) for `apps|packages|services
 - **Non-goals**: replacing the storage-segment wrapper with `normalize_source_id`; adding allowlist entries; editing `services/`/`workers/`/`scripts/` helpers; changing canonical semantics in this PR.
 - **Review focus**: no `normalize_source_id` call where `_storage_source_segment` was; None guard at the three optional sites; `forcing_domain_handoff` inputs stay aware; exactly −10; F401 on `node27_pgdata_workload_io`; large-file-guard exclude present.
 
+### D4 (3.3) risk contract
+
+- **Change surface**: 34 module-level hits under `services/`: ten deleted in favour of `utc_now`/`format_iso_utc` (journal `_utcnow` and the two cross-module `_format_time` owners keep their name as an import alias); fourteen renamed to state their behaviour, bodies unchanged except `retention_frontier` (delegates, proven equal); ten late-binding forwarders allowlisted; ceiling −34; two large-file-guard excludes.
+- **Must preserve**: every journal `_utcnow` and c4 `utc_now` monkeypatch (module-global lookup at call time); the `chain.py`/`scheduler.py` facade surface byte-identical; every formatted string; strict/None-returning parser semantics; cycle (`YYYYMMDDHH`) acceptance; c4 RFC3339 refusal codes; provenance `SOURCE_INVALID` and production-contract raw fallback.
+- **Must add**: ten allowlist entries; lowered ceiling.
+- **Governing invariant**: a local goes only where its domain is proven equal (aware-input proof for the astimezone formatters); a patch seam or facade name survives as an import binding, never as a captured reference.
+- **Sibling surfaces**: 1.3 import blocks and `pipeline_job_provenance` exclude; 2.3 journal and 2.4 后继 met_validation edits; 5.0 cluster map generated after this merge; 3.4 `hydro_display_instants._format_time`; nested `chain_compat_runtime._utcnow` (uncounted).
+- **Seams under test**: eight journal `_utcnow` patch files (two not auto-selected); c4 acceptance tests; e2e/met/object-store validation; operator listing/bind/demote CLI tests; lineage/backfill/retention/raw-manifest/migration/provenance/mvt suites; connection-attribution closure; real-tree ceiling count.
+- **Required evidence**: Verify set green; ceiling = measured (base −34) with both drills; zero non-allowlisted `services/` hits; empty diff on `chain.py`/`scheduler.py`; `select_tests` output.
+- **Non-goals**: replacing forwarders; editing `chain.py`, `scheduler.py`, `chain_compat_runtime.py`; touching local `_ensure_utc`; any test edit.
+- **Review focus**: alias only where the name is a patch seam or a cross-module surface still used locally; F401/F822 on `persistence`, `c4_production_acceptance_io.__all__`; `scheduler_lineage` body unchanged; exactly −34 with ten sorted allowlist keys; guard excludes present.
+
 ### D4 (3.4) risk contract
 
 - **Change surface**: four `workers/` `_format_time` copies deleted in favour of `format_iso_utc` (`forcing_producer/file_store`, `forcing_producer/producer`, `output_parser/parser`, `shud_runtime/runtime`); four behaviour-different helpers renamed with bodies unchanged (`runtime._parse_time` → `_parse_aware_time`, `parser._parse_time` → `_parse_manifest_time`, `pipeline._coerce_datetime` → `_lenient_utc_datetime`, `hydro_display_instants._format_time` → `_mvt_time_text` plus its three importers); ceiling −8; one large-file-guard exclude.
