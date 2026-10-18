@@ -1,4 +1,4 @@
-import { apiFetch, buildApiTileUrlTemplate } from '@/api/base'
+import { buildApiTileUrlTemplate } from '@/api/base'
 import type { components } from '@/api/types'
 
 export type MvtLayerMetadata = components['schemas']['LayerMetadata'] & {
@@ -46,19 +46,6 @@ export function buildMvtTileUrlTemplate(metadata: MvtLayerMetadata, replacements
   return appendMvtCacheVersion(buildApiTileUrlTemplate(template), metadata)
 }
 
-export async function fetchLayerCatalogMetadata(
-  signal?: AbortSignal,
-  runId?: string | null,
-): Promise<components['schemas']['Layer'][]> {
-  const params = new URLSearchParams({ limit: '100', offset: '0' })
-  if (runId) params.set('run_id', runId)
-  const response = await apiFetch(`/api/v1/layers?${params.toString()}`, { signal })
-  if (!response.ok) return []
-  const body = (await response.json()) as unknown
-  if (!isRecord(body) || !Array.isArray(body.data)) return []
-  return body.data.filter(isLayerRecord)
-}
-
 export function metadataMatchesRun(metadata: MvtLayerMetadata, runId: string, identity?: RunSourceIdentity | null): boolean {
   const metadataRunId = metadata.source_refs?.run_id
   if (typeof metadataRunId === 'string' && metadataRunId !== runId) return false
@@ -95,10 +82,6 @@ function normalizeMvtValidTime(value: string | null | undefined): string | null 
   if (!value) return null
   const timestamp = Date.parse(value)
   return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null
-}
-
-function isLayerRecord(value: unknown): value is components['schemas']['Layer'] {
-  return isRecord(value) && typeof value.layer_id === 'string' && typeof value.layer_name === 'string'
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
