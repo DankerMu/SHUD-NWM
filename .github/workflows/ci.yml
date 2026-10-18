@@ -288,6 +288,23 @@ jobs:
         with:
           args: -color
 
+  # #2936: ruff over the whole repo. Deliberately NOT scoped by `changes`: it
+  # guards pyproject.toml (select + the frozen per-file-ignores) and every .py.
+  lint-ruff:
+    name: Ruff Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v5
+      - name: Install dependencies
+        run: uv sync --locked --all-extras --dev
+      - name: Ruff check
+        run: uv run ruff check .
+
   json-schema-validate:
     name: JSON Schema Validate
     needs: changes
