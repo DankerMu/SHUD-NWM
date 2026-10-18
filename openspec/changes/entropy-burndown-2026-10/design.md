@@ -114,9 +114,9 @@ whatever further private helpers the closure reaches; the rest of the 2 298-line
 a re-export shim (explicit `from packages.common.contracts.x import a, b` plus `__all__`, five shims including
 `time_consistency.py`) so every importer, including module-attribute access, keeps working (expand). After every
 importer in the repository is migrated, the shims are deleted (contract); the contract step also repoints
-`chain_compat_runtime`'s owner module and the identity assertions in `tests/test_orchestration_chain.py`, and adds
-selector rule rows for the four contract modules equivalent to the rows that own the old paths (same test sets, same
-`stop_on_match` semantics, in `PATH_TEST_RULES`); the guard/ratchet tests use the other mechanism, an additive loop in
+`chain_compat_runtime`'s owner module and the identity assertions in `tests/test_orchestration_chain.py`, and deletes
+the old `direct_grid_contract` selector row; the four contract-module rows equivalent to the old-path rows (same test sets,
+same `stop_on_match` semantics, in `PATH_TEST_RULES`) are added by the expand slices; the guard/ratchet tests use the other mechanism, an additive loop in
 `select_tests` after the stop-rule loop in the #1656/#2185 shape, with the affected exact-set assertions in
 `tests/test_select_ci_tests.py` updated in the same PR as those precedents did. Alternative rejected: a new `packages/contracts` distribution, because
 `packages/common` is already the shared layer and a second one adds a naming decision with no enforcement benefit.
@@ -131,6 +131,18 @@ allowlist file routes to it by a `PathTestRule`) and in the full lane. An allowl
 exist; it starts with the current 12 import statements, 9 entries after `(file, module)` deduplication, and is `[]` as soon as the expand step lands, because shim re-exports are
 downward imports; the test fails if an entry's import is absent from the file's AST (dead entries rot).
 Alternative rejected: import-linter (new dependency, second config language).
+
+### D2 (1.3) risk contract
+
+- **Change surface**: 100 importer files (55 non-test, 45 tests/helpers) repointed from the five old paths to `packages.common.contracts.*`; three pure shims deleted (`direct_grid_contract.py`, `region.py`, `time_consistency.py`); `base.py`/`rewrite.py` `__all__` narrowed to own names; `chain.py` module object and `chain_compat_runtime` owner repointed; both governed compatibility inventories; one selector row; the selector meta-test entries that stop deriving; the guard's contract check function.
+- **Must preserve**: every bound import name/alias (consumer monkeypatch seams `scheduler.format_cycle_time`, `scheduler_discovery.cycle_id_for`); `rewrite._sha256_file` interception of the calls left in `rewrite.py`; chain compat owner/facade identity and empty drift tuples; `workers.forcing_producer`/`workers.mapping_builder` package re-exports; zero facade-guard signals on `chain.py`/`scheduler.py`; `import services.orchestrator.chain` and every node-22/node-27 entrypoint importable.
+- **Must add**: contract check over the six code roots (relative imports resolved, `importlib.import_module` constants, alias attribute access, retired files absent, moved names absent from `__all__`, `hasattr` anti-vacuity on contract modules) with synthetic red/green cases; Guard Hook Seed lines for the six new facade imports.
+- **Governing invariant**: no file under `apps packages services workers scripts tests` reaches a moved name through an old module path; old modules keep only bindings their own code calls.
+- **Sibling surfaces**: docstring path mentions (not code); 2.3/3.x/5.x/6.x edits to the same files (textual only); the 1.1 allowlist (already `[]`).
+- **Seams under test**: guard real tree + contract check; `tests/test_orchestration_chain.py` compat identity block; facade-guard real-tree node; selector importer-gap disposition and response-model oracle; full local pytest.
+- **Required evidence**: Verify set green incl. full local `uv run pytest -q`; removed exclusion pairs listed; allowlist `[]`; retired modules unresolvable; four liveness drills recorded.
+- **Non-goals**: new contract content; behaviour change; docstring rewrites; new selector rows or CI filter changes; widening guard routing beyond `packages/**`/`workers/**`.
+- **Review focus**: relative-import resolution and importlib handling in the check; the 5 seam privates not flagged; single-line inventory coverage; identical binding names at patched consumer modules; exactly the stale exclusion pairs removed.
 
 ### D3 Status vocabulary module and parity tests (user: code is truth, schemas follow)
 `packages/common/status_vocab.py` defines **one named set per site purpose**, never a union across sites (the
@@ -240,16 +252,27 @@ Alternative rejected: eight union sets (Stage 2 draft) — four review findings 
 
 ### D4 Helper consolidation lands after D1 (user)
 Targets: utc-now → `packages/common/contracts/time_normalization.py::utc_now`; ISO parse → `parse_iso_utc`; format →
-`format_iso_utc`; source normalizer → existing `packages/common/source_identity.py::normalize_source_id`. One batch per
+`format_iso_utc`; source normalizer → existing `packages/common/source_identity.py::normalize_source_id` (wrappers that add behaviour on top of it, such as `object_store_forcing`'s storage-segment builder, are renamed, not replaced). One batch per
 top-level package (`packages`, `services`, `workers`, `apps`, `scripts`); each batch replaces local definitions with
 imports and deletes the local definition; a count test `tests/test_time_helper_consolidation.py` asserts the number of
 module-level functions whose name `re.fullmatch`es the spec's pattern list (`_?utc_?now|_?now_iso|_?iso_now|
 _?parse_(iso|utc|time|iso8601|iso_utc)|_?coerce_datetime|_?format_time|_?format_iso_utc|_?normalize_source(_id)?`) outside the canonical
 modules does not exceed a ceiling file that each batch lowers; the initial PR attaches the hit list (69 by fullmatch at f04b5a20d, module-body definitions over the five roots;
-prefix matching would wrongly include ≈19 different-concept helpers such as `_normalize_sources(values, env)`). Locals
-that are a different concept are renamed to say so and allowlisted with a reason. The ceiling, `Any` ratchet and status
+prefix matching would wrongly include ≈19 different-concept helpers such as `_normalize_sources(values, env)`). Locals with behaviour the canonical lacks are either renamed to say so (which takes them out of the rule) or kept under their name and allowlisted with a reason. The ceiling, `Any` ratchet and status
 parity tests get additive-loop routing (#1656 shape) for `apps|packages|services|workers|scripts/**` so they run on PRs
 (targeted lane) even when a `stop_on_match` rule owns the changed path, not only on master.
+
+### D4 (3.2) risk contract
+
+- **Change surface**: six `packages/common` helpers deleted in favour of `utc_now`/`parse_iso_utc`/`format_iso_utc` (`best_available`, `forcing_domain_handoff` ×2, `node27_pgdata_workload_io`, `state_cli` ×2); three None-passing `_format_time` renamed `_format_optional_time` over `format_iso_utc`; `object_store_forcing._normalize_source_id` renamed `_storage_source_segment` with its body unchanged; ceiling −10; one test-support import.
+- **Must preserve**: every formatted string (`YYYY-MM-DDTHH:MM:SS[.ffffff]Z`) and None passthrough at the three optional sites; the on-disk source segment (`normalize_source_id(...).lower()` through `_safe_storage_segment`); the state-checkpoint gate and loader sharing one conversion; `node27_pgdata_workload`'s injectable `now`.
+- **Must add**: nothing beyond the lowered ceiling; allowlist unchanged.
+- **Governing invariant**: a local is deleted only where its domain is proven equal to the canonical's; a different behaviour gets a name saying so, never a silent swap.
+- **Sibling surfaces**: 3.1 `parse_iso_utc` `Z` handling (option A recommended); 3.3–3.5 share the ceiling file; #2922 owns the `state_cli`/`state_manager` import blocks; local `_ensure_utc` copies (outside the rule).
+- **Seams under test**: `test_time_helper_consolidation.py` real-tree count; `test_best_available.py`; `test_forcing_domain_handoff_{contract,apply}.py`; `test_forecast_store_routing.py`/`test_forecast_api.py`; `test_node27_pgdata_workload*.py`; `test_object_store_forcing{,_real_disk_support}.py`; `test_state_manager*.py`; `test_warm_start_chaining.py`.
+- **Required evidence**: the Verify set green; ceiling = measured count (base −10) with both drills; zero non-allowlisted `packages/` hits; `select_tests` output for the PR paths.
+- **Non-goals**: replacing the storage-segment wrapper with `normalize_source_id`; adding allowlist entries; editing `services/`/`workers/`/`scripts/` helpers; changing canonical semantics in this PR.
+- **Review focus**: no `normalize_source_id` call where `_storage_source_segment` was; None guard at the three optional sites; `forcing_domain_handoff` inputs stay aware; exactly −10; F401 on `node27_pgdata_workload_io`; large-file-guard exclude present.
 
 ### D5 Lint ratchet: ruff rules with frozen inventory plus `Any` count ceiling (user)
 `pyproject.toml` `[tool.ruff.lint] select` gains `"B"` and `"BLE"`; `[tool.ruff.lint.per-file-ignores]` lists every file
