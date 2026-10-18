@@ -289,6 +289,21 @@ files pass, and for the selector `uv run python scripts/select_ci_tests.py` over
 byte-identical output at the PR's parent commit and head (no committed snapshot: parallel tasks add rule rows and would
 invalidate one). Extraction order is in tasks.md §5/§6; the highest-risk step is flagged there.
 
+#### D7 (6.3) risk contract
+
+```text
+6.3 fixture (expanded):
+Change surface: new scripts/select_ci_tests_rules.py (3 tables + 37 B2 constants, verbatim, source order); scripts/select_ci_tests.py (delete B2, bind 10 rules names, prune tables import to the 99 read names); .large-file-guard.json exclude; line_reference_baseline.json (22 entries re-keyed, 1 deleted); one new test in tests/test_select_ci_tests.py.
+Must preserve: select_tests/main signatures and the four GitHub outputs; every name tests import or read from the facade; facade monkeypatch of PATH_TEST_RULES/SUPPORT_MODULE_TEST_RULES steers select_tests; table element order.
+Must add/change: rules module importing tables only (no facade import, no sys.path insert).
+Governing invariant: select_tests reads the rule tables as facade globals; the facade is the single interception point.
+Sibling surfaces: hard-line-reference baseline (path-keyed); large-file-guard hook; node-id glob scan (6.2); exec mutation pin (stays green unchanged); 6.1 sibling rule row + collection-smoke predicate; scripts/ci_selector_snapshot.sh; ruff F401 on the facade import blocks.
+Seams under test: select_tests with a patched facade global; CLI --github-output via snapshot; module values via the parity probe.
+Required evidence: snapshot cmp 0 (parent vs head); parity probe green (37 ==, 3 tables astuple, 109 identities); scenario test both arms; line-reference test + hard-gate audit zero findings; ruff clean.
+Non-goals: moving B3 or any function (6.4); touching the exec pin or the sys.path leak unless it reds; rewording the 22 re-keyed references; any routing change.
+Review focus: (1) B2 set equals the merge-base AST recomputation; (2) no table-row reorder or edit (parity probe); (3) select_tests still reads facade globals; (4) baseline diff limited to the two keys; (5) facade import pruning drops only unread names.
+```
+
 ### D8 Governance noise and baseline (user)
 `check_stale_routes.py::_check_stale_route_tokens` skips paths under `openspec/changes/archive/` (one path-family
 predicate local to that check; `_path_is_route_authority_expanded_scope` is not changed for `docs/archived/` or
