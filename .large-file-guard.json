@@ -138,6 +138,7 @@
     "workers/forcing_producer/file_store.py",
     "workers/mapping_builder/binding.py",
     "workers/mapping_builder/cli.py",
-    "workers/mapping_builder/evidence.py"
+    "workers/mapping_builder/evidence.py",
+    "tests/test_status_vocab_parity.py"
   ]
 }

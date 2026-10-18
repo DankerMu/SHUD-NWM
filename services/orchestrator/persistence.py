@@ -6,15 +6,17 @@ from typing import Any
 from sqlalchemy import JSON, BigInteger, Boolean, DateTime, Index, Integer, MetaData, Text, false, func, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
-TERMINAL_STATUS_GUARD = {"succeeded", "failed", "cancelled", "permanently_failed"}
-TERMINAL_STATUS_OVERRIDES = {"partially_failed", "permanently_failed"}
-ACTIVE_MANUAL_RETRY_STATUSES = ("pending", "queued", "submitted", "running")
+from packages.common import status_vocab as _vocab
+
+TERMINAL_STATUS_GUARD = set(_vocab.PIPELINE_JOB_TERMINAL_GUARD)
+TERMINAL_STATUS_OVERRIDES = set(_vocab.PIPELINE_JOB_TERMINAL_OVERRIDES)
+ACTIVE_MANUAL_RETRY_STATUSES = _vocab.PIPELINE_JOB_ACTIVE_MANUAL_RETRY
 
 # M24 §3A two-phase reservation.
 RESERVED_STATUS = "reserved"
 # A candidate whose idempotency_key already maps to one of these is considered
 # already in-flight; an overlapping pass must NOT re-submit it.
-RESERVATION_ACTIVE_STATUSES = ("reserved", "submitted", "running", "queued", "pending")
+RESERVATION_ACTIVE_STATUSES = _vocab.RESERVATION_ACTIVE_STATUSES
 
 
 # Sentinel so create_job can distinguish "caller wants NULL submitted_at" (a
@@ -183,9 +185,9 @@ class PipelineStore:
             job.finished_at = finished_at
         if exit_code is not None:
             job.exit_code = exit_code
-        if status in {"succeeded", "complete", "published"} and error_code is None:
+        if status in _vocab.PIPELINE_JOB_SUCCESS and error_code is None:
             job.error_code = None
-        if status in {"succeeded", "complete", "published"} and error_message is None:
+        if status in _vocab.PIPELINE_JOB_SUCCESS and error_message is None:
             job.error_message = None
         if error_code is not None:
             job.error_code = error_code

@@ -1142,6 +1142,8 @@ def test_active_manual_retry_guard_backfill_is_duplicate_safe_before_index() -> 
 
 
 def test_active_manual_retry_guard_predicate_matches_runtime_guard() -> None:
+    from services.orchestrator.persistence import ACTIVE_MANUAL_RETRY_STATUSES
+
     migration = dict(_migration_sql())["000025_active_manual_retry_guard.sql"]
     persistence_source = (
         Path(__file__).resolve().parents[1] / "services" / "orchestrator" / "persistence.py"
@@ -1151,7 +1153,7 @@ def test_active_manual_retry_guard_predicate_matches_runtime_guard() -> None:
     assert "manual_retry_marker IS true" in index_source
     assert "run_id IS NOT NULL" in index_source
     assert "status IN ('pending', 'queued', 'submitted', 'running')" in index_source
-    assert 'ACTIVE_MANUAL_RETRY_STATUSES = ("pending", "queued", "submitted", "running")' in persistence_source
+    assert ACTIVE_MANUAL_RETRY_STATUSES == ("pending", "queued", "submitted", "running")
     assert "PipelineJob.manual_retry_marker.is_(True)" in persistence_source
     assert "PipelineJob.run_id.is_not(None)" in persistence_source
     assert "PipelineJob.status.in_(ACTIVE_MANUAL_RETRY_STATUSES)" in persistence_source

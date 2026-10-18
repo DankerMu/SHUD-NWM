@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
+from packages.common import status_vocab as _vocab
 from packages.common.contracts.direct_grid import DirectGridContractError, load_forcing_mapping_contract_from_manifest
 from packages.common.contracts.time_normalization import cycle_id_for
 from packages.common.source_identity import normalize_source_id
@@ -69,14 +70,7 @@ _DIRECT_GRID_SOURCE_SCOPE_ERROR_MESSAGE = "Direct-grid contract does not apply t
 MAX_CANDIDATES = 10000
 UNKNOWN_AFTER_ATTEMPT = "unknown_after_attempt"
 
-CANDIDATE_CONSTRUCTION_TERMINAL_PIPELINE_STATUSES = {
-    "succeeded",
-    "partially_failed",
-    "failed",
-    "cancelled",
-    "submission_failed",
-    "permanently_failed",
-}
+CANDIDATE_CONSTRUCTION_TERMINAL_PIPELINE_STATUSES = set(_vocab.PIPELINE_JOB_TERMINAL_WITHOUT_RESERVATION)
 _STRICT_WARM_START_TERMINAL_SKIP_REASONS = {"terminal_hydro_success", "terminal_pipeline_success"}
 #: Restart stage the strict warm-start terminal mismatch retry would re-run, and
 #: therefore the stage whose retry budget governs it (Issue #1173).

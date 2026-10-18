@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from packages.common import status_vocab as _vocab
+
 from .accepted_submit_cohort import (
     _MEMBER_FIELDS as _MEMBER_FIELDS,
 )
@@ -186,24 +188,7 @@ ACCEPTED_RECONCILIATION_REASON_CLASSES = frozenset(
 )
 ACCEPTED_RESTART_STAGES = frozenset({"forecast", "state_save_qc"})
 ACCEPTED_PROJECTION_OUTCOMES = frozenset({"succeeded", "failed", "unverified"})
-ACCEPTED_SUBMIT_MASTER_STATUSES = frozenset(
-    {
-        "reserved",
-        "pending",
-        "queued",
-        "submitted",
-        "running",
-        "cancellation_pending",
-        "reconcile_unverified",
-        "submission_failed",
-        "reservation_lost",
-        "succeeded",
-        "partially_failed",
-        "failed",
-        "cancelled",
-        "permanently_failed",
-    }
-)
+ACCEPTED_SUBMIT_MASTER_STATUSES = (_vocab.PIPELINE_JOB_STATUSES - {"skipped"}) | _vocab.PIPELINE_JOB_INTERNAL_STATUSES
 ACCEPTED_PROJECTION_FIELDS = frozenset(
     {
         "array_task_id",

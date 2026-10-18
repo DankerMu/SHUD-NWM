@@ -5,12 +5,13 @@ from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+from packages.common import status_vocab as _vocab
 from packages.common.contracts.time_normalization import format_cycle_time
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator.scheduler_state_types import cohort_member_row_is_attributed
 
-TERMINAL_PIPELINE_SUCCESS_STATUSES = {"succeeded", "complete", "published"}
-FAILED_PIPELINE_STATUSES = {"failed", "submission_failed", "partially_failed", "permanently_failed"}
+TERMINAL_PIPELINE_SUCCESS_STATUSES = set(_vocab.PIPELINE_JOB_SUCCESS)
+FAILED_PIPELINE_STATUSES = set(_vocab.FAILED_PIPELINE_STATUSES)
 # The status domain a manual repair may TARGET, i.e. the rows a successful retry can supersede.
 # It is deliberately wider than ``FAILED_PIPELINE_STATUSES``: ``cancelled`` is a first-class
 # manual-retry source (``retry.MANUAL_RETRY_SOURCE_STATUSES``) and the scheduler's live-failure

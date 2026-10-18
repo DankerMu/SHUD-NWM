@@ -33,12 +33,14 @@ from scripts import run_qhh_continuous
 from services.orchestrator import (
     accepted_submit_identity,
     chain,
+    chain_forecast_execution,
     chain_repository_state,
     chain_runtime_utils,
     chain_source_cycle,
     chain_types,
     file_orchestration_journal,
     persistence,
+    reservation,
     retry,
     scheduler,
     scheduler_candidates,
@@ -483,6 +485,73 @@ def test_orchestrator_terminal_sites_rebind_the_vocabulary() -> None:
         assert site == vocab.PIPELINE_JOB_TERMINAL
     assert chain_runtime_utils.TERMINAL_JOB_STATUSES is not shared
     assert file_orchestration_journal.TERMINAL_PIPELINE_STATUSES is not shared
+
+
+def test_orchestrator_follow_up_sites_rebind_the_vocabulary() -> None:
+    """Task 2.3 follow-up: each copy binds its own `set`, shared objects stay shared.
+
+    Independent copies stay distinct objects (none borrows another module's set);
+    re-exports keep pointing at their owner's object; the two ordered `persistence`
+    tuples are the vocabulary tuples themselves.
+    """
+
+    set_sites = (
+        (scheduler.TERMINAL_PIPELINE_STATUSES, vocab.PIPELINE_JOB_TERMINAL_WITHOUT_RESERVATION),
+        (
+            scheduler_candidates.CANDIDATE_CONSTRUCTION_TERMINAL_PIPELINE_STATUSES,
+            vocab.PIPELINE_JOB_TERMINAL_WITHOUT_RESERVATION,
+        ),
+        (persistence.TERMINAL_STATUS_GUARD, vocab.PIPELINE_JOB_TERMINAL_GUARD),
+        (persistence.TERMINAL_STATUS_OVERRIDES, vocab.PIPELINE_JOB_TERMINAL_OVERRIDES),
+        (file_orchestration_journal._TERMINAL_FORECAST_CYCLE_SUCCESS_STATUSES, vocab.FORECAST_CYCLE_SUCCESS_STATUSES),
+        (chain.TERMINAL_PIPELINE_SUCCESS_STATUSES, vocab.PIPELINE_JOB_SUCCESS),
+        (chain_runtime_utils.TERMINAL_PIPELINE_SUCCESS_STATUSES, vocab.PIPELINE_JOB_SUCCESS),
+        (chain_source_cycle.TERMINAL_PIPELINE_SUCCESS_STATUSES, vocab.PIPELINE_JOB_SUCCESS),
+        (chain_repository_state.TERMINAL_PIPELINE_SUCCESS_STATUSES, vocab.PIPELINE_JOB_SUCCESS),
+        (retry.TERMINAL_SUCCESS_RETRY_STATUSES, vocab.PIPELINE_JOB_SUCCESS),
+        (chain.FAILED_PIPELINE_STATUSES, vocab.FAILED_PIPELINE_STATUSES),
+        (chain_source_cycle.FAILED_PIPELINE_STATUSES, vocab.FAILED_PIPELINE_STATUSES),
+        (chain_repository_state.FAILED_PIPELINE_STATUSES, vocab.FAILED_PIPELINE_STATUSES),
+        (retry.FAILED_RETRY_STATUSES, vocab.FAILED_PIPELINE_STATUSES),
+        (retry.ACTIVE_RETRY_STATUSES, vocab.ACTIVE_PIPELINE_STATUSES),
+        (scheduler_state_types.ACTIVE_PIPELINE_STATUSES, vocab.ACTIVE_PIPELINE_STATUSES),
+        (scheduler_state_types.ACTIVE_HYDRO_STATUSES, vocab.ACTIVE_HYDRO_STATUSES),
+    )
+    for site, vocabulary_value in set_sites:
+        assert type(site) is set
+        assert site == vocabulary_value
+
+    success_copies = (
+        scheduler_state_types.TERMINAL_PIPELINE_SUCCESS_STATUSES,
+        chain.TERMINAL_PIPELINE_SUCCESS_STATUSES,
+        chain_runtime_utils.TERMINAL_PIPELINE_SUCCESS_STATUSES,
+        chain_source_cycle.TERMINAL_PIPELINE_SUCCESS_STATUSES,
+        chain_repository_state.TERMINAL_PIPELINE_SUCCESS_STATUSES,
+        retry.TERMINAL_SUCCESS_RETRY_STATUSES,
+    )
+    failed_copies = (
+        scheduler_state_types.FAILED_PIPELINE_STATUSES,
+        chain.FAILED_PIPELINE_STATUSES,
+        chain_source_cycle.FAILED_PIPELINE_STATUSES,
+        chain_repository_state.FAILED_PIPELINE_STATUSES,
+        retry.FAILED_RETRY_STATUSES,
+    )
+    for copies in (success_copies, failed_copies):
+        assert len({id(copy) for copy in copies}) == len(copies)
+    assert retry.ACTIVE_RETRY_STATUSES is not scheduler_state_types.ACTIVE_PIPELINE_STATUSES
+    assert (
+        scheduler.TERMINAL_PIPELINE_STATUSES
+        is not scheduler_candidates.CANDIDATE_CONSTRUCTION_TERMINAL_PIPELINE_STATUSES
+    )
+
+    assert chain_forecast_execution.TERMINAL_PIPELINE_SUCCESS_STATUSES is chain.TERMINAL_PIPELINE_SUCCESS_STATUSES
+    assert file_orchestration_journal.ACTIVE_RETRY_STATUSES is retry.ACTIVE_RETRY_STATUSES
+    assert file_orchestration_journal.TERMINAL_SUCCESS_RETRY_STATUSES is retry.TERMINAL_SUCCESS_RETRY_STATUSES
+    assert reservation.RESERVATION_ACTIVE_STATUSES is persistence.RESERVATION_ACTIVE_STATUSES
+    assert chain_repository_state.REPAIRABLE_PIPELINE_STATUSES is chain_source_cycle.REPAIRABLE_PIPELINE_STATUSES
+
+    assert persistence.ACTIVE_MANUAL_RETRY_STATUSES is vocab.PIPELINE_JOB_ACTIVE_MANUAL_RETRY
+    assert persistence.RESERVATION_ACTIVE_STATUSES is vocab.RESERVATION_ACTIVE_STATUSES
 
 
 def test_terminal_with_and_without_reservation_lost() -> None:

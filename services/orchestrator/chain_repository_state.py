@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
 
+from packages.common import status_vocab as _vocab
 from packages.common.contracts.time_normalization import cycle_id_for, format_cycle_time
 from services.orchestrator import chain_source_cycle, source_cycle_raw_manifest
 from services.orchestrator.scheduler_state_rows import (
@@ -16,11 +17,11 @@ from services.orchestrator.scheduler_state_rows import (
 
 DEFAULT_CANDIDATE_STATE_EVENT_LIMIT = 100
 DEFAULT_CANDIDATE_STATE_JOB_LIMIT = 100
-FAILED_PIPELINE_STATUSES = {"failed", "submission_failed", "partially_failed", "permanently_failed"}
+FAILED_PIPELINE_STATUSES = set(_vocab.FAILED_PIPELINE_STATUSES)
 # Aliased, not restated: this module writes the same repaired annotations
 # ``chain_source_cycle`` does, so both producers must gate on ONE repair-target domain (#1294).
 REPAIRABLE_PIPELINE_STATUSES = chain_source_cycle.REPAIRABLE_PIPELINE_STATUSES
-TERMINAL_PIPELINE_SUCCESS_STATUSES = {"succeeded", "complete", "published"}
+TERMINAL_PIPELINE_SUCCESS_STATUSES = set(_vocab.PIPELINE_JOB_SUCCESS)
 TERMINAL_PIPELINE_COMPLETION_STAGES = {"parse", "state_save_qc", "publish"}
 _FORECAST_STAGE_ORDER = ("convert", "forcing", "forecast", "parse", "state_save_qc")
 _COMPUTE_STATE_SAVE_QC_TERMINAL_STAGE = "forecast_state_save_qc"
