@@ -372,6 +372,18 @@ files pass, and for the selector `uv run python scripts/select_ci_tests.py` over
 byte-identical output at the PR's parent commit and head (no committed snapshot: parallel tasks add rule rows and would
 invalidate one). Extraction order is in tasks.md §5/§6; the highest-risk step is flagged there.
 
+#### D7 (5.1) risk contract
+
+- **Change surface**: journal `__all__` extended from 11 to the measured external read surface (113 at `890bb4569`: from-imports ∪ alias attribute reads, minus dunders and module objects; patch-only names excluded), three dead entries dropped; zero `# noqa: F401`; one new AST-only hygiene test; one selector constant entry.
+- **Must preserve**: every journal binding and patch seam (no definition moves); the cluster map unchanged; all 76 journal-referencing test files byte-identical; frozen per-file-ignores codes.
+- **Must add**: hygiene test asserting `__all__` is a sorted unique literal tuple, every name has at least one AST-resolved user (from-import, alias attribute, literal-name getattr/setattr/patch.object, dotted-string fullmatch), and loud failure on non-literal attribute names on a journal alias; tmp_path red/green per shape.
+- **Governing invariant**: `__all__` names what other modules read from the facade, so each later move keeps its binding as an import (F822-enforced) and stays a pure move; a monkeypatch target never earns membership.
+- **Sibling surfaces**: 5.0 map (`__all__` already in `facade`); 2.3 parity reads and 3.3 `_utcnow` import binding (re-measure at PR head); 5.6 contract (direction two deferred there); selector `FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS`.
+- **Seams under test**: real-tree hygiene scan; synthetic shape cases; existing journal suites selected by the journal path; ruff F822/F401 on the facade.
+- **Required evidence**: Verify set green; one-off reconciliation (measured read surface == `__all__`) with per-shape counts and base SHA; empty tests diff besides the new file; `select_tests` output containing the new test.
+- **Non-goals**: moving any definition; `# noqa: F401` lines; two-sided equality; resolving parameter aliases or dynamic `import_module`.
+- **Review focus**: exactly three dropped names; no patch-only name listed; one name per line, sorted; the test never imports the journal and never requires a top-level `def`; docstring/comment mentions do not count as users.
+
 #### D7 (6.3) risk contract
 
 ```text
