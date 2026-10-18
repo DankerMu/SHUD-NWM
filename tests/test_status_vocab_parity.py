@@ -466,6 +466,25 @@ def test_scheduler_state_types_rebinds_the_vocabulary() -> None:
     assert scheduler_state_types.HYDRO_RUN_CODE_CLEARING_STATUSES is vocab.HYDRO_RUN_CODE_CLEARING_STATUSES
 
 
+def test_orchestrator_terminal_sites_rebind_the_vocabulary() -> None:
+    """Task 2.3 first slice: three mutable `set` copies of `PIPELINE_JOB_TERMINAL`.
+
+    `chain_types` owns the one shared object (re-exported by `chain`); the
+    `chain_runtime_utils` and journal copies stay independent objects.
+    """
+
+    shared = chain_types.TERMINAL_JOB_STATUSES
+    for site in (
+        shared,
+        chain_runtime_utils.TERMINAL_JOB_STATUSES,
+        file_orchestration_journal.TERMINAL_PIPELINE_STATUSES,
+    ):
+        assert type(site) is set
+        assert site == vocab.PIPELINE_JOB_TERMINAL
+    assert chain_runtime_utils.TERMINAL_JOB_STATUSES is not shared
+    assert file_orchestration_journal.TERMINAL_PIPELINE_STATUSES is not shared
+
+
 def test_terminal_with_and_without_reservation_lost() -> None:
     assert "reservation_lost" in vocab.PIPELINE_JOB_TERMINAL
     assert "reservation_lost" not in vocab.PIPELINE_JOB_TERMINAL_WITHOUT_RESERVATION

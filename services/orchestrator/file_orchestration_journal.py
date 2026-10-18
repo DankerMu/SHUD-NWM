@@ -38,6 +38,7 @@ from packages.common.safe_fs import (
 from packages.common.safe_fs_lock import open_lock_file_no_follow
 from packages.common.slurm_env import secret_manifest_value_reason
 from packages.common.source_identity import normalize_source_id
+from packages.common.status_vocab import PIPELINE_JOB_TERMINAL
 from services.orchestrator import chain_repository_state
 from services.orchestrator.accepted_submit_identity import (
     ACCEPTED_PROJECTION_FIELDS,
@@ -618,15 +619,7 @@ _ARRAY_MANUAL_RETRY_MANIFEST_INDEX_NAMES = {
     "hindcast": "hindcast_manifest_index.json",
 }
 
-TERMINAL_PIPELINE_STATUSES = {
-    "succeeded",
-    "partially_failed",
-    "failed",
-    "cancelled",
-    "submission_failed",
-    "reservation_lost",
-    "permanently_failed",
-}
+TERMINAL_PIPELINE_STATUSES = set(PIPELINE_JOB_TERMINAL)
 #: The status the five query entrypoints put on the synthetic row they return
 #: when the journal could not be read within its budget (#1953).  It is NOT a
 #: pipeline-job status: the ROW is synthesised per call and never persisted, so
