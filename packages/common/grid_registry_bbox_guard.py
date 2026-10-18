@@ -63,8 +63,8 @@ import uuid
 from collections.abc import Callable
 from typing import Protocol, runtime_checkable
 
+from packages.common.contracts.region import GeoBBox, china_buffered_bbox_from_env
 from packages.common.grid_registry_store import RegistryStoreError
-from workers.data_adapters.region import GeoBBox, china_buffered_bbox_from_env
 
 __all__ = [
     "BboxMismatchError",

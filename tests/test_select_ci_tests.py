@@ -99,6 +99,7 @@ from scripts.select_ci_tests import (
     QHH_CYCLE_SBATCH,
     QHH_DIAGNOSTIC_README,
     READONLY_DB_VALIDATION_TESTS,
+    REGION_CONTRACT_PATH,
     RELEASED_RESERVATION_RECOVERY_TESTS,
     RETENTION_COPYBACK_MUTEX_HELPERS_PATH,
     RETENTION_COPYBACK_MUTEX_OWNER_PATH,
@@ -1324,6 +1325,50 @@ def test_time_normalization_contract_row_red_when_removed(monkeypatch: pytest.Mo
     selected = select_tests([TIME_NORMALIZATION_CONTRACT_PATH], repo_root=Path("."))
     assert "tests/test_gfs_adapter.py" not in selected
     assert "tests/test_warm_start_chaining.py" not in selected
+
+
+def test_select_tests_maps_region_contract_to_data_adapters_directory_owners() -> None:
+    # #2964: the contract module holds workers/data_adapters/region.py's bbox
+    # config verbatim. Its row is NOT a stop row: it carries the
+    # `workers/data_adapters/**` row's targets plus test_download_bbox_clip.py,
+    # whose region use is importlib-only and so invisible to every other row.
+    # As with #2921/#2922, `packages/common/**` adds the #1744 core-smoke baseline.
+    assert REGION_CONTRACT_PATH == "packages/common/contracts/region.py"
+    assert Path(REGION_CONTRACT_PATH).is_file()
+
+    selected = select_tests([REGION_CONTRACT_PATH], repo_root=Path("."))
+
+    assert selected == sorted(
+        {
+            *DATA_ADAPTERS_DIRECTORY_TESTS,
+            "tests/test_download_bbox_clip.py",
+            *SHARED_BASELINE_CONTRACT,
+            INVARIANT_SUITE_PATH,
+            WRITE_SURFACE_SCAN_PATH,
+            FAMILY_GUARD_PATH,
+            RESOLVE_SURFACE_GUARD_PATH,
+            IMPORT_LAYERING_GUARD_PATH,
+            ANY_RATCHET_PATH,
+            STATUS_VOCAB_PARITY_PATH,
+        }
+    )
+    # 10 directory + 1 bbox clip + 4 core-smoke (test_production_scheduler.py is
+    # already a directory target) + 7 guards.
+    assert len(selected) == 22
+
+
+def test_region_contract_row_red_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drop exactly the #2964 row and the region consumer suites leave the selection."""
+    from scripts import select_ci_tests
+
+    mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern != REGION_CONTRACT_PATH)
+    assert len(mutant) == len(PATH_TEST_RULES) - 1, "the #2964 row is missing or duplicated"
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+
+    selected = select_tests([REGION_CONTRACT_PATH], repo_root=Path("."))
+    assert "tests/test_download_bbox_clip.py" not in selected
+    assert "tests/test_grid_registry_bbox.py" not in selected
+    assert "tests/test_gfs_adapter.py" not in selected
 
 
 def test_select_tests_maps_direct_grid_openspec_change_to_compact_e2e_fixture() -> None:

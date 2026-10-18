@@ -1524,6 +1524,11 @@ DATA_ADAPTERS_BASE_HELPER_TESTS: tuple[str, ...] = (
 # shims until 1.3, so their rules stay too.
 TIME_NORMALIZATION_CONTRACT_PATH = "packages/common/contracts/time_normalization.py"
 
+# entropy-burndown 1.2 (#2964): the region contract's canonical home.
+# workers/data_adapters/region.py stays a re-export shim until 1.3, so the
+# `workers/data_adapters/**` row keeps owning it too.
+REGION_CONTRACT_PATH = "packages/common/contracts/region.py"
+
 FILE_JOURNAL_READ_STATE_TESTS: tuple[str, ...] = (
     "tests/test_file_orchestration_journal.py",
     "tests/test_file_orchestration_migration.py",
@@ -3424,6 +3429,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # so they ride the directory list rather than three narrow rules.
         "workers/data_adapters/**",
         DATA_ADAPTERS_DIRECTORY_TESTS,
+    ),
+    PathTestRule(
+        # #2964: GeoBBox / china_buffered_bbox_from_env moved here from
+        # workers/data_adapters/region.py. NOT a stop row: the targets are the
+        # `workers/data_adapters/**` row's (shared constant, so they cannot
+        # drift apart) plus test_download_bbox_clip.py, which reaches region
+        # only through importlib and so is invisible to gap derivation; it is
+        # added here only (deviation from "same test set", precedent #2922).
+        REGION_CONTRACT_PATH,
+        (*DATA_ADAPTERS_DIRECTORY_TESTS, "tests/test_download_bbox_clip.py"),
     ),
     PathTestRule(
         # base.py's remaining non-gated importers are orchestration-layer suites
