@@ -202,6 +202,18 @@ Alternative rejected: eight union sets (Stage 2 draft) — four review findings 
 - **Non-goals**: changing any bucket or terminal set to include `reservation_lost`; frontend `FAILED_STATUSES`; the 4 residual inline literals; production `:8080` redeploy.
 - **Review focus**: index-8 position in all six places; `set(...)` vs frozenset at the five sites; exactly-6 allowlist deletion; receipt validator target (yaml, not the durable JSON schema) and the count-0 branch.
 
+### D3 (2.3 首刀) risk contract
+
+- **Change surface**: `chain_types.py`, `chain_runtime_utils.py`, `file_orchestration_journal.py` each bind `set(PIPELINE_JOB_TERMINAL)` under the existing name; parity terminal assertions for the three sites; three allowlist entries removed.
+- **Must preserve**: `chain_types.TERMINAL_JOB_STATUSES` is one mutable `set` shared by `chain`, `chain_forced_resubmit`, `chain_forecast_execution`, `forcing_submit_identity`; the other two stay independent `set` objects; members unchanged (7); `chain_types` import stays light (`test_orchestration_chain.py:858-879`).
+- **Must add**: parity `== PIPELINE_JOB_TERMINAL`, `type is set`, and non-identity with the `chain_types` object for the two independent sites.
+- **Governing invariant**: binding changes where members come from, never membership, type or identity.
+- **Sibling surfaces**: `chain_runtime_utils` success set and journal `FORECAST_CYCLE_SUCCESS` set (2.3 successor); `scheduler`/`scheduler_candidates` six-value sets (successor); the `chain_forecast_*` `getattr` facades.
+- **Seams under test**: `test_forced_resubmit_veto.py` identity triple (local + master full; not PR-selected); parity (PR lane via the `.py` loop); budget-contract equality.
+- **Required evidence**: the 首刀 Verify set green; allowlist minus exactly 3 keys; `select_tests` output for the three paths showing parity.
+- **Non-goals**: any other orchestrator site; selector rows; `status_vocab` changes.
+- **Review focus**: `set(...)` at all three (no frozenset, no shared import into the two independent sites); exactly-3 deletion.
+
 ### D4 Helper consolidation lands after D1 (user)
 Targets: utc-now → `packages/common/contracts/time_normalization.py::utc_now`; ISO parse → `parse_iso_utc`; format →
 `format_iso_utc`; source normalizer → existing `packages/common/source_identity.py::normalize_source_id`. One batch per
