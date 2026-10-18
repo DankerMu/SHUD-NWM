@@ -135,6 +135,8 @@ jobs:
               - 'workers/grid_registry/**'
               - 'workers/model_registry/**'
               - 'workers/forcing_producer/**'
+              # #2921: the direct-grid contract's canonical home (the old path is a shim).
+              - 'packages/common/contracts/direct_grid.py'
               - 'services/orchestrator/scheduler.py'
               - 'services/orchestrator/pipeline_job_provenance.py'
               - 'scripts/backfill_pipeline_job_provenance.py'

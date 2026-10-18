@@ -139,7 +139,7 @@ and the output parser). Public closed sets are spelled out in the spec; the per-
 
 | Named set | Canonical site (members copied verbatim) | Other consumers that import it |
 |---|---|---|
-| `PIPELINE_JOB_STATUS_ORDER` / `PIPELINE_JOB_STATUSES` | `apps/api/routes/pipeline.py` tuple + `reservation_lost` | `schemas/pipeline_job.schema.json`, OpenAPI, `types.ts` |
+| `PIPELINE_JOB_STATUS_ORDER` / `PIPELINE_JOB_STATUSES` | `apps/api/routes/pipeline.py` `PIPELINE_JOB_STATUS_VALUES` (tuple) + `reservation_lost` after `submission_failed` | `pipeline.py` binds the tuple itself in 2.2; runtime OpenAPI via `apps/api/openapi_patching_ops_schemas.py:7,122,169` (`BasinResult.status`, `PipelineJob.status`); hand-maintained `openapi/nhms.v1.yaml` (two inline enums); `schemas/pipeline_job.schema.json`; `types.ts` (two unions); `tests/test_file_journal_full_tree_budget_contract.py` imports the name |
 | `PIPELINE_JOB_INTERNAL_STATUSES` | `accepted_submit_identity.py` (`reserved`, `cancellation_pending`, `reconcile_unverified`) | `ACCEPTED_SUBMIT_MASTER_STATUSES` derived as `(PIPELINE_JOB_STATUSES - {skipped}) \| INTERNAL` with a parity pin |
 | `PIPELINE_JOB_TERMINAL` | `chain_types.py` (binds `set(...)` once, shared object) | `chain_runtime_utils.py:32` and `file_orchestration_journal.py:621` hold independent literal sets today (not the `chain_types` object); each binds its own `set(PIPELINE_JOB_TERMINAL)` in 2.3 |
 | `PIPELINE_JOB_TERMINAL_WITHOUT_RESERVATION` | `scheduler.py` and `scheduler_candidates.py` each bind their own `set(...)` (two independent objects today; `scheduler` imports `scheduler_candidates`, never the reverse) | — |
@@ -190,14 +190,26 @@ Alternative rejected: eight union sets (Stage 2 draft) — four review findings 
 - **Non-goals**: the duplicate-literal scan and allowlist (2.1b); any schema edit (2.2); any consumer rebind outside `scheduler_state_types.py` (2.2–2.4).
 - **Review focus**: object identity and mutability at the four rebinds; the fold helper's `_MIGRATIONS_DIR` late read; ordered tuples vs DB ordinal; the `_PENDING_PUBLIC_DELTA` transitional assertion.
 
+### D3 (2.2) risk contract
+
+- **Change surface**: `apps/api/routes/pipeline.py` (tuple + five local sets bound from `status_vocab`); `schemas/pipeline_job.schema.json` and `openapi/nhms.v1.yaml` (`BasinResult`/`PipelineJob` `status`) gain `reservation_lost`; regenerated `apps/frontend/src/api/types.ts`; `OPS_JOB_STATUS_ENUM`; parity drops `_PENDING_PUBLIC_DELTA`; one selector row; six allowlist entries removed.
+- **Must preserve**: names `PIPELINE_JOB_STATUS_VALUES` and `_ACTIVE_JOB_STATUSES` (imported elsewhere); `set` type and members of the five local sets; every route's bucketing (count summary, stage display status, basin progress, cancel/terminal checks); `RetryRunResult.status`, `PipelineStage.display_status`, schema examples; frontend typecheck with no consumer edits.
+- **Must add**: `reservation_lost` at index 8 in six places (vocab tuple, schema, two yaml enums, `OPS_JOB_STATUS_ENUM`, two `types.ts` unions); the schema routing row with positive and red-when-removed selector tests; the node-27 live receipt.
+- **Governing invariant**: the API tuple is `PIPELINE_JOB_STATUS_ORDER`, and the runtime OpenAPI, static yaml, durable schema and generated type list exactly its values in its order.
+- **Sibling surfaces**: `apps/api/openapi_patching_ops_schemas.py` (runtime enum source); `tests/api_contract_helpers.py:125-127` (schema reader); frontend `JobStatus`/`failedStatuses` (no exhaustive consumer; `FAILED_STATUSES` membership out of scope); the 4 residual `pipeline.py` literals (`distinct-vocabulary`, untouched).
+- **Seams under test**: `tests/test_openapi_drift.py` (yaml == runtime, ordered); `test_api_contract_pipeline_ops.py:464-467` (schema == OPS == both yaml enums); `test_api_contract.py:50-65` (byte-identical generated types); parity; live `GET /api/v1/jobs` on node-27.
+- **Required evidence**: the pytest set above plus `PYTHONHASHSEED` 0/1 runs; `check:api-types`, `typecheck`, `test`; read-only precount, then `GET /api/v1/jobs?status=reservation_lost` 200 validated against the PR-head yaml with a master-yaml negative control (count > 0), or an acceptance amendment (count = 0).
+- **Non-goals**: changing any bucket or terminal set to include `reservation_lost`; frontend `FAILED_STATUSES`; the 4 residual inline literals; production `:8080` redeploy.
+- **Review focus**: index-8 position in all six places; `set(...)` vs frozenset at the five sites; exactly-6 allowlist deletion; receipt validator target (yaml, not the durable JSON schema) and the count-0 branch.
+
 ### D4 Helper consolidation lands after D1 (user)
 Targets: utc-now → `packages/common/contracts/time_normalization.py::utc_now`; ISO parse → `parse_iso_utc`; format →
 `format_iso_utc`; source normalizer → existing `packages/common/source_identity.py::normalize_source_id`. One batch per
 top-level package (`packages`, `services`, `workers`, `apps`, `scripts`); each batch replaces local definitions with
 imports and deletes the local definition; a count test `tests/test_time_helper_consolidation.py` asserts the number of
 module-level functions whose name `re.fullmatch`es the spec's pattern list (`_?utc_?now|_?now_iso|_?iso_now|
-_?parse_(iso|utc|time|iso8601|iso_utc)|_?coerce_datetime|_?format_time|_?normalize_source(_id)?`) outside the canonical
-modules does not exceed a ceiling file that each batch lowers; the initial PR attaches the hit list (≈70 by fullmatch;
+_?parse_(iso|utc|time|iso8601|iso_utc)|_?coerce_datetime|_?format_time|_?format_iso_utc|_?normalize_source(_id)?`) outside the canonical
+modules does not exceed a ceiling file that each batch lowers; the initial PR attaches the hit list (69 by fullmatch at f04b5a20d, module-body definitions over the five roots;
 prefix matching would wrongly include ≈19 different-concept helpers such as `_normalize_sources(values, env)`). Locals
 that are a different concept are renamed to say so and allowlisted with a reason. The ceiling, `Any` ratchet and status
 parity tests get additive-loop routing (#1656 shape) for `apps|packages|services|workers|scripts/**` so they run on PRs

@@ -1439,6 +1439,12 @@ DIRECT_GRID_SURFACE_PATH_PATTERNS: tuple[str, ...] = (
     "openspec/changes/direct-grid-forcing/**",
 )
 
+# entropy-burndown 1.2 (#2921): the direct-grid contract's canonical home. The
+# old workers/ path stays a re-export shim until 1.3, so its rule above stays
+# too. Deliberately NOT appended to DIRECT_GRID_SURFACE_PATH_PATTERNS: 1.3
+# deletes `[0]`, and an appended entry would shift every index after it.
+DIRECT_GRID_CONTRACT_CANONICAL_PATH = "packages/common/contracts/direct_grid.py"
+
 FILE_JOURNAL_READ_STATE_TESTS: tuple[str, ...] = (
     "tests/test_file_orchestration_journal.py",
     "tests/test_file_orchestration_migration.py",
@@ -3013,6 +3019,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # Extended AT THE RULE SITE, not by editing DIRECT_GRID_SURFACE_TESTS:
         # the shared constant also serves the openspec-change pattern below,
         # whose selection must not move (#1455 scopes to the nine directories).
+        (*DIRECT_GRID_SURFACE_TESTS, *DIRECT_GRID_CONTRACT_IMPORTER_TESTS),
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        # #2921: the contract module moved here; same targets and stop semantics
+        # as the shim's row above. `packages/common/**` still adds the #1744
+        # core-smoke baseline outside the rule loop, so the effective selection
+        # is wider than the shim path's -- intentionally.
+        DIRECT_GRID_CONTRACT_CANONICAL_PATH,
         (*DIRECT_GRID_SURFACE_TESTS, *DIRECT_GRID_CONTRACT_IMPORTER_TESTS),
         stop_on_match=True,
     ),

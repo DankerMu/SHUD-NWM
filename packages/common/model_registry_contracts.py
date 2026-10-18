@@ -16,7 +16,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from workers.forcing_producer.direct_grid_contract import (
+from packages.common.contracts.direct_grid import (
     DIRECT_GRID_MODE,
     DIRECT_GRID_SECTION_KEYS,
     DirectGridContractError,

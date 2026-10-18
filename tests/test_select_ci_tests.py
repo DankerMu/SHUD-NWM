@@ -44,6 +44,7 @@ from scripts.select_ci_tests import (
     CHANGED_TEST_FILE_RULES,
     CHANGED_TEST_SUITE_BASENAME_PATTERNS,
     CORE_SMOKE_TESTS,
+    DIRECT_GRID_CONTRACT_CANONICAL_PATH,
     DIRECT_GRID_CONTRACT_IMPORTER_TESTS,
     DIRECT_GRID_CONTRACT_TESTS,
     DIRECT_GRID_DISPLAY_CUTOVER_FLIP_ATOMIC_TEST,
@@ -1225,6 +1226,47 @@ def test_select_tests_maps_direct_grid_producer_surface_to_compact_e2e_fixture()
         for target in DIRECT_GRID_CONTRACT_TESTS
     )
     assert "tests/test_forcing_producer.py" not in selected
+
+
+def test_select_tests_maps_direct_grid_contract_canonical_path_like_the_shim() -> None:
+    # #2921: the contract module's canonical home carries the shim row's exact
+    # targets and stop semantics. The selection is WIDER than the shim path's on
+    # purpose: `packages/common/**` adds the #1744 shared-library core-smoke
+    # baseline outside the rule loop, which no stop rule suppresses.
+    assert DIRECT_GRID_CONTRACT_CANONICAL_PATH == "packages/common/contracts/direct_grid.py"
+    assert Path(DIRECT_GRID_CONTRACT_CANONICAL_PATH).is_file()
+
+    selected = select_tests([DIRECT_GRID_CONTRACT_CANONICAL_PATH], repo_root=Path("."))
+
+    assert selected == sorted(
+        {
+            *DIRECT_GRID_SURFACE_TESTS,
+            *DIRECT_GRID_CONTRACT_IMPORTER_TESTS,
+            *SHARED_BASELINE_CONTRACT,
+            INVARIANT_SUITE_PATH,
+            WRITE_SURFACE_SCAN_PATH,
+            FAMILY_GUARD_PATH,
+            RESOLVE_SURFACE_GUARD_PATH,
+            IMPORT_LAYERING_GUARD_PATH,
+        }
+    )
+    # 1 e2e + 10 contract nodes + 5 importer suites + 5 core-smoke + 5 guards.
+    assert len(selected) == 26
+    assert "tests/test_forcing_producer.py" not in selected
+
+
+def test_direct_grid_contract_canonical_row_red_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The complement leg: drop exactly the #2921 row and the importer suites leave the selection."""
+    from scripts import select_ci_tests
+
+    mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern != DIRECT_GRID_CONTRACT_CANONICAL_PATH)
+    assert len(mutant) == len(PATH_TEST_RULES) - 1, "the canonical-path row is missing or duplicated"
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+
+    selected = set(select_tests([DIRECT_GRID_CONTRACT_CANONICAL_PATH], repo_root=Path(".")))
+    leaked = sorted(set(DIRECT_GRID_CONTRACT_IMPORTER_TESTS) & selected)
+    assert not leaked, f"importer suites still selected without the canonical-path row: {leaked}"
+    assert "tests/test_direct_grid_e2e.py" not in selected
 
 
 def test_select_tests_maps_direct_grid_openspec_change_to_compact_e2e_fixture() -> None:
@@ -12599,6 +12641,9 @@ STOP_RULE_AT_SITE_EXTENSIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
     ("workers/forcing_producer/direct_grid_contract.py", DIRECT_GRID_CONTRACT_IMPORTER_TESTS),
+    # #2921: the contract's canonical home carries the same at-site importer
+    # suites on its own stop rule.
+    (DIRECT_GRID_CONTRACT_CANONICAL_PATH, DIRECT_GRID_CONTRACT_IMPORTER_TESTS),
     # #2260: the scheduler_runtime.py stop rule's at-site addition. Its shared
     # constant FILE_JOURNAL_READ_STATE_TESTS was never pinned here (it is the
     # redirect, pinned by the file-journal selection test), so only the at-site
@@ -15418,6 +15463,10 @@ INTEGRATION_TRIGGER_SOURCES: tuple[str, ...] = (
     # #2300: `_upsert_met_stations`' no-rewrite property is a heap fact
     # (ctid / xmin) that only the real-DB lane observes.
     "packages/common/forcing_domain_handoff_apply.py",
+    # #2921: the direct-grid contract left `workers/forcing_producer/**` (the
+    # old path is a shim); the integration-marked variant-registration cases
+    # still consume its parser.
+    "packages/common/contracts/direct_grid.py",
 )
 
 INTEGRATION_TRIGGER_ROOT_GLOBS: tuple[str, ...] = (

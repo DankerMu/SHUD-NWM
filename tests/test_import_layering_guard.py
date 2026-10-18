@@ -357,7 +357,8 @@ def test_import_node_rules(tmp_path: Path) -> None:
         "x: 'workers.Str'\n"  # string annotation: out of scope
         "import importlib\n"
         "importlib.import_module('workers.dyn')\n"  # dynamic: out of scope
-        "__import__('services.dyn')\n",
+        "__import__('services.dyn')\n"
+        "from .workers import x\n",  # relative with a layer-named module: still skipped
     )
 
     found = sorted((site.lineno, site.module) for site in scan_upward_imports(tmp_path))
