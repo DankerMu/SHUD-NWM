@@ -362,7 +362,7 @@ the code the cluster map assigns to it. Patched seams follow the base requiremen
 their negative oracles live": a patched name moves only with all its call sites (tests repoint, no re-export); a patched
 name with a call site that stays in the facade (the Repository and RetryService classes stay) stays too, and moved
 callers reach it through a late `from services.orchestrator import file_orchestration_journal` inside the function body (after any docstring) and call it as an attribute of that module; a function-body `from … import <patched name>` is not used, so the facade
-patch remains the single interception point and no import-time cycle appears. Unpatched facade-resident names a moved function needs at runtime (e.g. `FileOrchestrationJournalError`) are likewise imported inside the function body; a sibling never imports the facade at module level. Because no function-level cluster map
+patch remains the single interception point and no import-time cycle appears. Unpatched facade-resident names a moved function needs at runtime (e.g. `FileOrchestrationJournalError`) are likewise imported inside the function body; a sibling never imports the facade at module level. A name owned by an already-extracted sibling is imported from that sibling at module level, never through the facade; on per-record hot paths the function-body import sits immediately before each use site rather than as the first statement. Because no function-level cluster map
 exists yet, the first journal task produces it as a checked-in fixture with a test; extraction tasks consume it and the
 contract oracle is "facade top-level definitions == map's `facade` cluster", not a line-count target (the arithmetic
 ceiling is ≈ 3 500 lines). For the selector the same rule applies to `_SUITE_IMPORTER_PARSE_STATS` (moves with the
@@ -395,6 +395,18 @@ invalidate one). Extraction order is in tasks.md §5/§6; the highest-risk step 
 - **Required evidence**: Verify sets green; probes' output in the PR; tests diff limited to the selector test (first cut) / empty (successor); `select_tests` output for the PR paths.
 - **Non-goals**: moving any patched name or `FileOrchestrationJournalError`; repointing importers to siblings; `# noqa: F401`; touching `scheduler_init_state_match.py` prose.
 - **Review focus**: (1) no sibling top-level facade import and no `TYPE_CHECKING` for runtime names; (2) exact facade re-bind lists (2 / 9) and the 8 unbound read_attribution names; (3) bodies verbatim except the six inserted imports; (4) the `#1748` comment at :408 stays; (5) the selector row stops (`test_state_clone.py` not selected).
+
+#### D7 (5.3) risk contract
+
+- **Change surface**: `file_journal_primitives.py` (9 identity/text primitives + `MAX_FILE_JOURNAL_PATH_SEGMENT_CHARS`, `_SAFE_SEGMENT_RE`) and `file_journal_replay.py` (20 replay/JSON defs + 4 constants); facade re-binds 11 + 20 names, drops the orphaned `cycle_id_for` import; first cut repoints `file_journal_context.py` to import `_scalar_text`/`_required_safe_identity` from primitives.
+- **Must preserve**: exception-class identity on 22 raise sites and the `_blocked_cycle_id` except clause; every from-import (`journal_scope_census`, `operator_reentry_confirmation`, node-22 `node22_repair_placeholder_hydro_uris`) and test alias read; `_LATEST_REPLAY_ORDER_SENTINEL` and `_stat_signature` in the facade; `__all__` unchanged; 76 journal test files byte-identical; no added import on any non-raising path.
+- **Must add**: one function-body facade import immediately before each use site (raise statement / sentinel assignment; first statement only in `_blocked_cycle_id`); owner imports between siblings at module level.
+- **Governing invariant**: siblings never import the facade at import time and never fetch a sibling-owned name through the facade; primitives depends only on leaf modules and, at call time on error paths, the facade's exception class.
+- **Sibling surfaces**: 5.0 map (option a; rule 7 pins the sentinel); 5.2 context file and selector row; 5.4/5.5 import primitives at top level, 5.5 repoints context's `_validate_model_context_identity` and drops the facade re-bind of `MAX_FILE_JOURNAL_PATH_SEGMENT_CHARS`; 1.3 contract import path; 6.x selector.
+- **Seams under test**: journal suites (identity negatives, blocked reads, replay order, JSON limits), consumer suites, standalone sibling import, identity/exception probes, AST probe with import-placement check.
+- **Required evidence**: Verify sets green; probe output in the PR; empty tests diff; `select_tests` output.
+- **Non-goals**: moving `FileOrchestrationJournalError` or any patched name; repointing external importers; `# noqa: F401`.
+- **Review focus**: (1) import placement (no first-statement imports except `_blocked_cycle_id`); (2) exact re-bind lists (11 / 20) and the 4 unbound replay names; (3) context repoint limited to the two primitives names; (4) sentinel stays and is read via late import.
 
 #### D7 (5.4) risk contract
 
