@@ -18,7 +18,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from apps.api.errors import ApiError
-from apps.api.routes.hydro_display_instants import _format_time
+from apps.api.routes.hydro_display_instants import _mvt_time_text
 from packages.common.river_ts_render import render_river_ts_sql
 from services.tiles.mvt import MVT_MAX_FEATURES, public_hydro_layer_id
 
@@ -91,7 +91,7 @@ def _station_source_version(session: Session, basin_version_id: str) -> str:
                 row.get("station_role"),
                 _station_active_flag(row.get("active_flag")),
                 row.get("geom"),
-                _format_time(row.get("created_at")) if row.get("created_at") is not None else None,
+                _mvt_time_text(row.get("created_at")) if row.get("created_at") is not None else None,
             ]
             for row in rows
         ],
@@ -173,7 +173,7 @@ def _require_hydro_mvt_source_identity(
             "layer_id": public_hydro_layer_id(variable),
             "run_id": run_id,
             "variable": variable,
-            "valid_time": _format_time(valid_time),
+            "valid_time": _mvt_time_text(valid_time),
             "basin_version_id": basin_version_id,
             "river_network_version_id": river_network_version_id,
         },

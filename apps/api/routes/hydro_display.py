@@ -74,7 +74,7 @@ from apps.api.routes.hydro_display_identity import (
 )
 from apps.api.routes.hydro_display_instants import (
     Rfc3339Instant,
-    _format_time,
+    _mvt_time_text,
     _national_source_cycle_tile_input,
     _require_representable_instant,
     _require_seconds_precision_instant,
@@ -399,7 +399,7 @@ def list_layer_valid_times(
         layer_id=layer_id, run_id=run_id, source=source, cycle=cycle
     )
     requested_run_id = run_id
-    cycle_key = _format_time(cycle_instant) if cycle_instant is not None else None
+    cycle_key = _mvt_time_text(cycle_instant) if cycle_instant is not None else None
 
     def _load() -> dict[str, Any]:
         run_id = requested_run_id
@@ -488,7 +488,7 @@ def hydro_mvt_tile(
         layer_id=public_hydro_layer_id(variable),
         source_id=run_id,
         source_version=_run_source_version(run),
-        valid_time=_format_time(valid_time),
+        valid_time=_mvt_time_text(valid_time),
         z=z,
         x=x,
         y=y,
@@ -545,7 +545,7 @@ def hydro_national_source_cycle_mvt_tile(
     valid_time_instant = _require_seconds_precision_instant(valid_time, "valid_time")
     tile_input = _national_source_cycle_tile_input(
         source=source,
-        cycle_text=_format_time(cycle_instant),
+        cycle_text=_mvt_time_text(cycle_instant),
         variable=variable,
         valid_time=valid_time_instant,
         z=z,
@@ -609,7 +609,7 @@ def hydro_national_mvt_tile(
             f"{HYDRO_NATIONAL_SOURCE_VERSION}:"
             f"{national_discharge_source_version(session, valid_time=valid_time)}"
         ),
-        valid_time=_format_time(valid_time),
+        valid_time=_mvt_time_text(valid_time),
         z=z,
         x=x,
         y=y,
@@ -823,13 +823,13 @@ def _run_source_version(run: dict[str, Any] | Any) -> str:
     base_version = str(run.get("river_network_version_id") or run.get("basin_version_id") or run.get("run_id"))
     revision_basis = {
         "basin_version_id": run.get("basin_version_id"),
-        "cycle_time": _format_time(run.get("cycle_time")) if run.get("cycle_time") is not None else None,
+        "cycle_time": _mvt_time_text(run.get("cycle_time")) if run.get("cycle_time") is not None else None,
         "geometry_generation": run.get("geometry_generation"),
         "river_network_version_id": run.get("river_network_version_id"),
         "run_id": run.get("run_id"),
         "source_id": run.get("source_id"),
         "status": run.get("status"),
-        "updated_at": _format_time(run.get("updated_at")) if run.get("updated_at") is not None else None,
+        "updated_at": _mvt_time_text(run.get("updated_at")) if run.get("updated_at") is not None else None,
     }
     digest = hashlib.sha256(
         json.dumps(revision_basis, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")

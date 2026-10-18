@@ -17,6 +17,7 @@ from packages.common.contracts.direct_grid import (
     DirectGridForcingContract,
     load_forcing_mapping_contract_from_manifest,
 )
+from packages.common.contracts.time_normalization import format_iso_utc
 from packages.common.forcing_domain_handoff import (
     CONTRACT_ID as FORCING_DOMAIN_HANDOFF_CONTRACT_ID,
 )
@@ -773,9 +774,9 @@ class FileForcingRepository:
             "run_id": run_id,
             "source_id": source_id,
             "source": source_key,
-            "cycle_time": _format_time(cycle_time),
-            "start_time": _format_time(start_time),
-            "end_time": _format_time(end_time),
+            "cycle_time": format_iso_utc(cycle_time),
+            "start_time": format_iso_utc(start_time),
+            "end_time": format_iso_utc(end_time),
             "model_id": model_id,
             "basin_id": basin_id,
             "basin_version_id": basin_version_id,
@@ -1133,7 +1134,7 @@ def _json_bytes(value: Any) -> bytes:
 
 def _json_default(value: Any) -> str:
     if isinstance(value, datetime):
-        return _format_time(value)
+        return format_iso_utc(value)
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable.")
 
 
@@ -1147,10 +1148,6 @@ def _ensure_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
-
-
-def _format_time(value: datetime) -> str:
-    return _ensure_utc(value).isoformat().replace("+00:00", "Z")
 
 
 def _forcing_package_manifest_uri(record: Mapping[str, Any], package_uri: str) -> str:
@@ -1269,7 +1266,7 @@ def _handoff_timeseries_row(row: ForcingTimeseriesRow, *, native_resolution: str
         "forcing_version_id": row.forcing_version_id,
         "basin_version_id": row.basin_version_id,
         "station_id": row.station_id,
-        "valid_time": _format_time(row.valid_time),
+        "valid_time": format_iso_utc(row.valid_time),
         "source_id": row.source_id,
         "variable": row.variable,
         "value": row.value,
@@ -1364,8 +1361,8 @@ def _time_lattice_resolution_by_variable_time(
 def _time_lattice_segment(variable: str, start: datetime, end: datetime, native_resolution: str) -> dict[str, Any]:
     return {
         "variable": variable,
-        "valid_time_start": _format_time(start),
-        "valid_time_end": _format_time(end),
+        "valid_time_start": format_iso_utc(start),
+        "valid_time_end": format_iso_utc(end),
         "native_resolution": native_resolution,
     }
 
