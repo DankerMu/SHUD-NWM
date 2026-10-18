@@ -1,3 +1,5 @@
+import type { components } from '@/api/types'
+
 export const STAGE_NAMES = {
   download: '下载',
   convert: '标准化',
@@ -7,26 +9,11 @@ export const STAGE_NAMES = {
   publish: '发布',
 } as const
 
-export type PipelineStatus =
-  | 'pending'
-  | 'running'
-  | 'succeeded'
-  | 'partially_failed'
-  | 'failed'
-  | 'skipped'
+export type PipelineStatus = components['schemas']['PipelineStage']['display_status']
 
-export type JobStatus =
-  | 'pending'
-  | 'queued'
-  | 'submitted'
-  | 'running'
-  | 'succeeded'
-  | 'partially_failed'
-  | 'failed'
-  | 'cancelled'
-  | 'submission_failed'
-  | 'permanently_failed'
-  | 'skipped'
+export type JobStatus = components['schemas']['PipelineJob']['status']
+
+export const FAILED_STATUSES: ReadonlySet<string> = new Set(['failed', 'submission_failed', 'permanently_failed', 'cancelled', 'partially_failed'] as const satisfies readonly JobStatus[])
 
 export const STATUS_COLORS: Record<PipelineStatus, string> = {
   pending: 'bg-muted/10 text-muted border-border',

@@ -1115,7 +1115,7 @@
 
   **Minimal mergeable slice:** atomic - 规则、脚本与 CI 步骤缺一则门不存在。
 
-- [ ] 7.3 `lib/constants.ts` 状态类型改为生成别名，`FAILED_STATUSES` 单一常量（成员不变），两个 monitoring 组件改用。
+- [x] 7.3 `lib/constants.ts` 状态类型改为生成别名，`FAILED_STATUSES` 单一常量（成员不变），两个 monitoring 组件改用。
 
   Depends on: 无
 
