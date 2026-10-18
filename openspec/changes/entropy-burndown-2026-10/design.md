@@ -149,8 +149,8 @@ and the output parser). Public closed sets are spelled out in the spec; the per-
 | `FAILED_PIPELINE_STATUSES`, `DURABLE_HYDRO_SUCCESS_STATUSES`, `HYDRO_RUN_CODE_CLEARING_STATUSES` | `scheduler_state_types.py` (moved as frozensets; `scheduler_state_types` binds `set(...)` for the two `set`-typed ones and the frozenset itself for the third, same names) | #1581 consumers unchanged; `chain.py:217`, `chain_repository_state.py:19`, `chain_source_cycle.py:13` hold independent literal `FAILED_PIPELINE_STATUSES` sets today; each binds its own `set(FAILED_PIPELINE_STATUSES)` in 2.3 |
 | `HYDRO_RUN_STATUSES` | `schemas/run_status.schema.json` enum | parity ⊇ folded DB enum − `frequency_done` |
 | `HYDRO_RUN_TERMINAL_UI` | `apps/api/routes/pipeline.py` `_TERMINAL_HYDRO_STATUSES` | — |
-| `DISPLAY_PRODUCT_READY_STATUSES` (site binds `set(...)`) | `hydro_display_constants.py` | — |
-| `QHH_LATEST_READY_RUN_STATUSES` (`tuple`) | `forecast_store.py` | — |
+| `DISPLAY_PRODUCT_READY_STATUSES` (site binds `set(...)`) | `hydro_display_constants.py` | `apps/api/routes/hydro_display.py` imports it from `hydro_display_constants` (unchanged) |
+| `QHH_LATEST_READY_RUN_STATUSES` (`tuple`) | `forecast_store.py` | `model_registry.py` (re-export), `model_registry_catalog.py`, `services/production_closure/readonly_db_probe_adapter.py` import it from `forecast_store` (unchanged) |
 | `PARSE_READY_RUN_STATUSES`, `FAILABLE_RUN_STATUSES` (`tuple`, DB parameters) | `workers/output_parser/parser.py` | — |
 | `FORECAST_CYCLE_SUCCESS_STATUSES` | `file_orchestration_journal.py` `_TERMINAL_FORECAST_CYCLE_SUCCESS_STATUSES` | — |
 | `CYCLE_STATUSES` | folded `met.cycle_status` migrations | — |
