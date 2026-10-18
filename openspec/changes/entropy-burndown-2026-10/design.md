@@ -196,8 +196,8 @@ Targets: utc-now → `packages/common/contracts/time_normalization.py::utc_now`;
 top-level package (`packages`, `services`, `workers`, `apps`, `scripts`); each batch replaces local definitions with
 imports and deletes the local definition; a count test `tests/test_time_helper_consolidation.py` asserts the number of
 module-level functions whose name `re.fullmatch`es the spec's pattern list (`_?utc_?now|_?now_iso|_?iso_now|
-_?parse_(iso|utc|time|iso8601|iso_utc)|_?coerce_datetime|_?format_time|_?normalize_source(_id)?`) outside the canonical
-modules does not exceed a ceiling file that each batch lowers; the initial PR attaches the hit list (≈70 by fullmatch;
+_?parse_(iso|utc|time|iso8601|iso_utc)|_?coerce_datetime|_?format_time|_?format_iso_utc|_?normalize_source(_id)?`) outside the canonical
+modules does not exceed a ceiling file that each batch lowers; the initial PR attaches the hit list (69 by fullmatch at f04b5a20d, module-body definitions over the five roots;
 prefix matching would wrongly include ≈19 different-concept helpers such as `_normalize_sources(values, env)`). Locals
 that are a different concept are renamed to say so and allowlisted with a reason. The ceiling, `Any` ratchet and status
 parity tests get additive-loop routing (#1656 shape) for `apps|packages|services|workers|scripts/**` so they run on PRs
