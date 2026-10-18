@@ -38,7 +38,12 @@ from packages.common.safe_fs import (
 from packages.common.safe_fs_lock import open_lock_file_no_follow
 from packages.common.slurm_env import secret_manifest_value_reason
 from packages.common.source_identity import normalize_source_id
-from packages.common.status_vocab import PIPELINE_JOB_TERMINAL
+from packages.common.status_vocab import (
+    FORECAST_CYCLE_SUCCESS_STATUSES,
+    PIPELINE_JOB_SUCCESS,
+    PIPELINE_JOB_TERMINAL,
+    PIPELINE_JOB_TERMINAL_OVERRIDES,
+)
 from services.orchestrator import chain_repository_state
 from services.orchestrator.accepted_submit_identity import (
     ACCEPTED_PROJECTION_FIELDS,
@@ -697,7 +702,7 @@ _GENERIC_VERSIONED_RECONCILIATION_DECISIONS = frozenset(
         "multiple_matches_blocked",
     }
 )
-_TERMINAL_FORECAST_CYCLE_SUCCESS_STATUSES = {"complete", "succeeded", "parsed", "published"}
+_TERMINAL_FORECAST_CYCLE_SUCCESS_STATUSES = set(FORECAST_CYCLE_SUCCESS_STATUSES)
 _STAGE_STATUS_ORDER = {
     "download": 1,
     "download_gfs": 1,
@@ -6858,10 +6863,10 @@ class FileOrchestrationJournalRepository:
                     field="status",
                 )
             previous_status = str(existing.get("status") or "") or None
-            terminal_guarded = previous_status in {"succeeded", "failed", "cancelled"} and status not in {
-                "partially_failed",
-                "permanently_failed",
-            }
+            terminal_guarded = (
+                previous_status in {"succeeded", "failed", "cancelled"}
+                and status not in PIPELINE_JOB_TERMINAL_OVERRIDES
+            )
             if previous_status == "permanently_failed" or terminal_guarded:
                 return previous_status, _public_scheduler_row(existing)
             row = dict(existing)
@@ -6888,11 +6893,11 @@ class FileOrchestrationJournalRepository:
             ):
                 if value is not None:
                     row[key] = _format_utc(value) if isinstance(value, datetime) else value
-            if status in {"succeeded", "complete", "published"} and error_code is None:
+            if status in PIPELINE_JOB_SUCCESS and error_code is None:
                 row["error_code"] = None
             elif error_code is not None:
                 row["error_code"] = error_code
-            if status in {"succeeded", "complete", "published"} and error_message is None:
+            if status in PIPELINE_JOB_SUCCESS and error_message is None:
                 row["error_message"] = None
             elif error_message is not None:
                 row["error_message"] = safe_error_message
@@ -15252,7 +15257,7 @@ def _job_is_unsubmitted_retry_placeholder(job: Mapping[str, Any], *, status: str
 
 
 def _job_is_terminal_success(job: Mapping[str, Any]) -> bool:
-    return str(job.get("status") or "") in {"succeeded", "complete", "published"}
+    return str(job.get("status") or "") in PIPELINE_JOB_SUCCESS
 
 
 def _job_is_breaker_terminal_success(job: Mapping[str, Any], *, model_id: str) -> bool:

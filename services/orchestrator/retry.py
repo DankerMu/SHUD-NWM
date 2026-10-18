@@ -13,6 +13,7 @@ from typing import Any, Protocol, runtime_checkable
 from sqlalchemy import func, inspect, select, text, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
+from packages.common import status_vocab as _vocab
 from packages.common.auth_policy import PolicyDecision, require_policy_evidence, trusted_internal_policy_decision
 from packages.common.redaction import redact_payload
 from packages.common.slurm_env import secret_manifest_value_reason
@@ -74,10 +75,10 @@ NON_TRANSIENT_ERROR_CODES: set[str] = {
 AUTO_RETRY_SKIPPED_NON_TRANSIENT_REASON = "non_transient_error"
 AUTO_RETRY_SKIPPED_UNKNOWN_REASON = "unknown_error_code_defaulted_non_transient"
 DEFAULT_BACKOFF_SCHEDULE = [60, 300, 900]
-ACTIVE_RETRY_STATUSES = {"pending", "queued", "submitted", "running"}
-FAILED_RETRY_STATUSES = {"failed", "submission_failed", "partially_failed", "permanently_failed"}
+ACTIVE_RETRY_STATUSES = set(_vocab.ACTIVE_PIPELINE_STATUSES)
+FAILED_RETRY_STATUSES = set(_vocab.FAILED_PIPELINE_STATUSES)
 MANUAL_RETRY_SOURCE_STATUSES = FAILED_RETRY_STATUSES | {"cancelled"}
-TERMINAL_SUCCESS_RETRY_STATUSES = {"succeeded", "complete", "published"}
+TERMINAL_SUCCESS_RETRY_STATUSES = set(_vocab.PIPELINE_JOB_SUCCESS)
 # Manual-retry refusal predicate: a durable hydro run in one of these statuses makes the run
 # non-retryable by hand (RetryNotFoundError). Deliberately NOT the same set as
 # scheduler_state_types.DURABLE_HYDRO_SUCCESS_STATUSES, which additionally holds "complete":

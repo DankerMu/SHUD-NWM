@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from packages.common import status_vocab as _vocab
 from services.orchestrator.accepted_submit_identity import ordered_cohort_members
 from services.orchestrator.chain_types import TERMINAL_JOB_STATUSES, StageDefinition
 from services.orchestrator.reservation import validate_idempotency_key
@@ -205,7 +206,7 @@ def is_resolved_forcing_attempt(job: Mapping[str, Any] | None) -> bool:
     assert job is not None
     matched = str(job.get("matched_slurm_job_id") or "")
     return bool(
-        str(job.get("status") or "") in {"succeeded", "complete", "published"}
+        str(job.get("status") or "") in _vocab.PIPELINE_JOB_SUCCESS
         and str(job.get("submit_outcome") or "") == "accepted"
         and str(job.get("reconciliation_decision") or "") == "matched_bound"
         and matched.isdigit()

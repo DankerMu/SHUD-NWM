@@ -13,6 +13,7 @@ from typing import Any
 from uuid import uuid4 as _uuid4
 
 from packages.common import scheduler_limits as _scheduler_limits
+from packages.common import status_vocab as _vocab
 from packages.common.model_registry import PsycopgModelRegistryStore
 from packages.common.redaction import redact_payload  # noqa: F401
 from packages.common.slurm_env import (
@@ -352,14 +353,7 @@ SLURM_RESOURCE_PROFILE_TEMPLATE_IDENTITY_FIELDS = {
 }
 TASK_RESULT_CANDIDATE_IDENTITY_FIELDS = ("candidate_id", "run_id", "forcing_version_id", "model_id")
 TASK_RESULT_INDEX_IDENTITY_FIELDS = ("task_id", "array_task_id", "original_task_id")
-TERMINAL_PIPELINE_STATUSES = {
-    "succeeded",
-    "partially_failed",
-    "failed",
-    "cancelled",
-    "submission_failed",
-    "permanently_failed",
-}
+TERMINAL_PIPELINE_STATUSES = set(_vocab.PIPELINE_JOB_TERMINAL_WITHOUT_RESERVATION)
 PIPELINE_TERMINAL_SUCCESS_STAGES = {
     "parse",
     "state_save_qc",

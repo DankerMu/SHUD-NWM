@@ -214,7 +214,7 @@
 
   **Minimal mergeable slice:** atomic - API tuple、OpenAPI 与生成类型必须同 PR，否则 `test_api_contract` 红。
 
-- [ ] 2.3 orchestrator 内站点改为导入命名集合（D3 表 orchestrator 行：`chain_types` 绑 `set(PIPELINE_JOB_TERMINAL)` 并继续作为共享对象、`chain_runtime_utils`、journal `:621`/`:707`、`scheduler`、`scheduler_candidates`、`persistence`、`scheduler_state_types.py:28/:32` 两个 `ACTIVE_*` 集合重新绑定（`:48/:57/:58/:60` 已在 2.1a）、三处 `FAILED_PIPELINE_STATUSES` 副本（`chain.py:217`、`chain_repository_state.py:19`、`chain_source_cycle.py:13`）、`persistence.RESERVATION_ACTIVE_STATUSES`、`retry.py:77 ACTIVE_RETRY_STATUSES`、六处 success 集合、`accepted_submit_identity` 派生 + parity pin）；allowlist 中这些条目删除；允许的测试改动：`tests/test_migrations.py:1154` 源码文本断言改为运行时值断言（见后继钉死块）。
+- [x] 2.3 orchestrator 内站点改为导入命名集合（D3 表 orchestrator 行：`chain_types` 绑 `set(PIPELINE_JOB_TERMINAL)` 并继续作为共享对象、`chain_runtime_utils`、journal `:621`/`:707`、`scheduler`、`scheduler_candidates`、`persistence`、`scheduler_state_types.py:28/:32` 两个 `ACTIVE_*` 集合重新绑定（`:48/:57/:58/:60` 已在 2.1a）、三处 `FAILED_PIPELINE_STATUSES` 副本（`chain.py:217`、`chain_repository_state.py:19`、`chain_source_cycle.py:13`）、`persistence.RESERVATION_ACTIVE_STATUSES`、`retry.py:77 ACTIVE_RETRY_STATUSES`、六处 success 集合、`accepted_submit_identity` 派生 + parity pin）；allowlist 中这些条目删除；允许的测试改动：`tests/test_migrations.py:1154` 源码文本断言改为运行时值断言（见后继钉死块）。
 
   Depends on: 2.1b
 

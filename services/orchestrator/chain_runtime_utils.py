@@ -13,7 +13,7 @@ from packages.common.contracts.time_normalization import cycle_id_for, format_cy
 from packages.common.python_runtime import validated_target_python_runtime
 from packages.common.redaction import redact_payload
 from packages.common.source_identity import normalize_source_id
-from packages.common.status_vocab import PIPELINE_JOB_TERMINAL
+from packages.common.status_vocab import PIPELINE_JOB_SUCCESS, PIPELINE_JOB_TERMINAL
 from services.orchestrator.chain_stages import STAGES
 from services.orchestrator.chain_types import (
     CycleOrchestrationContext,
@@ -31,7 +31,7 @@ from services.orchestrator.retry_identity import (
 from workers.canonical_converter.converter import expected_converter_version
 
 TERMINAL_JOB_STATUSES = set(PIPELINE_JOB_TERMINAL)
-TERMINAL_PIPELINE_SUCCESS_STATUSES = {"succeeded", "complete", "published"}
+TERMINAL_PIPELINE_SUCCESS_STATUSES = set(PIPELINE_JOB_SUCCESS)
 CANONICAL_PRECIP_VARIABLE = "prcp_rate_or_amount"
 CANONICAL_PRECIP_UNIT = "mm/day"
 

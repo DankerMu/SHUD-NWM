@@ -15,6 +15,7 @@ import packages.common.contracts.time_normalization as _time_normalization_modul
 import services.tile_publisher as _tile_publisher_module
 import services.tile_publisher.publisher as _tile_publisher_publisher_module
 import workers.canonical_converter.converter as _canonical_converter_module
+from packages.common import status_vocab as _vocab
 from packages.common.best_available import BestAvailableManager  # noqa: F401
 from packages.common.object_store import LocalObjectStore
 from packages.common.redaction import redact_payload
@@ -216,8 +217,8 @@ ACTIVE_HYDRO_STATUSES = ACTIVE_HYDRO_STATUSES
 # name stays because chain_forecast_trigger._completed_hydro_statuses() reads it off this module by
 # getattr, and that seam must keep resolving to the single definition.
 COMPLETED_HYDRO_STATUSES = DURABLE_HYDRO_SUCCESS_STATUSES
-TERMINAL_PIPELINE_SUCCESS_STATUSES = {"succeeded", "complete", "published"}
-FAILED_PIPELINE_STATUSES = {"failed", "submission_failed", "partially_failed", "permanently_failed"}
+TERMINAL_PIPELINE_SUCCESS_STATUSES = set(_vocab.PIPELINE_JOB_SUCCESS)
+FAILED_PIPELINE_STATUSES = set(_vocab.FAILED_PIPELINE_STATUSES)
 RAW_MANIFEST_READY_CYCLE_STATUSES = {"raw_complete", "canonical_ready", "forcing_ready", "complete", "published"}
 ANALYSIS_SOURCE_ID = "ERA5"
 # ERA5 reanalysis is published with a multi-day production delay; the analysis
