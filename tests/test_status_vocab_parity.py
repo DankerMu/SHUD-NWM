@@ -554,6 +554,24 @@ def test_orchestrator_follow_up_sites_rebind_the_vocabulary() -> None:
     assert persistence.RESERVATION_ACTIVE_STATUSES is vocab.RESERVATION_ACTIVE_STATUSES
 
 
+def test_non_orchestrator_first_slice_sites_rebind_the_vocabulary() -> None:
+    """Task 2.4 first slice: tuple sites are the vocabulary tuples, the display site a `set` copy.
+
+    The tuple sites reach psycopg2 `IN %s` / `= ANY(%s)` or an API error payload,
+    so each must be the ordered vocabulary tuple itself, never a re-wrapped copy.
+    """
+
+    assert forecast_store.QHH_LATEST_READY_RUN_STATUSES is vocab.QHH_LATEST_READY_RUN_STATUSES
+    assert parser.PARSE_READY_RUN_STATUSES is vocab.PARSE_READY_RUN_STATUSES
+    assert parser.FAILABLE_RUN_STATUSES is vocab.FAILABLE_RUN_STATUSES
+    assert met_store._TERMINAL_CYCLE_STATUSES is vocab.CYCLE_TERMINAL_UPSERT
+    assert met_store._UPSERT_PRESERVED_CYCLE_STATUSES is vocab.CYCLE_UPSERT_PRESERVED
+
+    display_ready = hydro_display_constants.DISPLAY_PRODUCT_READY_STATUSES
+    assert type(display_ready) is set
+    assert display_ready == vocab.DISPLAY_PRODUCT_READY_STATUSES
+
+
 def test_terminal_with_and_without_reservation_lost() -> None:
     assert "reservation_lost" in vocab.PIPELINE_JOB_TERMINAL
     assert "reservation_lost" not in vocab.PIPELINE_JOB_TERMINAL_WITHOUT_RESERVATION

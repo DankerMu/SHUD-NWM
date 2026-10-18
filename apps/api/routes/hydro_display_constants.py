@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 
+from packages.common import status_vocab as _vocab
 from services.tiles.mvt import (
     MVT_MAX_TILE_COORDINATE,
     MVT_MAX_ZOOM,
@@ -28,7 +29,7 @@ logger = logging.getLogger("apps.api.routes.hydro_display")
 HYDRO_NATIONAL_SOURCE_ID = "hydro-national"
 HYDRO_NATIONAL_SOURCE_VERSION = "hydro-national-latest-per-basin-stream-type-v3"
 RIVER_NETWORK_NATIONAL_SOURCE_ID = "river-network-national"
-DISPLAY_PRODUCT_READY_STATUSES = {"succeeded", "parsed", "published"}
+DISPLAY_PRODUCT_READY_STATUSES = set(_vocab.DISPLAY_PRODUCT_READY_STATUSES)
 PUBLIC_LAYER_DEFINITIONS: tuple[tuple[str, str, str, list[str]], ...] = (
     ("discharge", "Discharge", "hydrology", ["q_down"]),
     ("river-network", "River network", "base", ["geometry"]),
