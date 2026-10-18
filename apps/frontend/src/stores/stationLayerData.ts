@@ -6,7 +6,7 @@ import {
   fetchHydroMetLatestProduct,
   fetchHydroMetStationsByIdentity,
   type HydroMetStation,
-} from '@/pages/hydroMet/bootstrap'
+} from '@/stores/hydroMetBootstrap'
 import { sanitizeHydroMetMessage } from '@/lib/hydroMet/runtime'
 
 /**

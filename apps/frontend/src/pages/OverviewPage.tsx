@@ -37,7 +37,7 @@ import {
   serializeM11QueryState,
 } from '@/lib/m11/queryState'
 import { withStaticBasinBboxes } from '@/lib/m11/staticBasinFallback'
-import { prefetchHydroMetLatestProducts } from '@/pages/hydroMet/bootstrap'
+import { prefetchHydroMetLatestProducts } from '@/stores/hydroMetBootstrap'
 import {
   M11BottomControlBar,
   deriveM11ControlBarModel,

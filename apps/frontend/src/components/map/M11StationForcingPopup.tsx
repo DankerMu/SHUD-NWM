@@ -33,7 +33,7 @@ import {
   type StationSeriesValidation,
 } from '@/lib/hydroMet/stationSeries'
 import type { HydroMetSource } from '@/lib/hydroMet/queryState'
-import { fetchHydroMetLatestProduct, type QhhLatestProduct } from '@/pages/hydroMet/bootstrap'
+import { fetchHydroMetLatestProduct, type QhhLatestProduct } from '@/stores/hydroMetBootstrap'
 
 /** 选中代站（来自地图 feature.properties + 坐标）的必要字段。 */
 export interface M11StationPopupStation {

@@ -6,13 +6,13 @@ import { client } from '@/api/client'
 import { formatIssueTime, M11IssueTimeSelect } from '@/components/map/M11PopupChrome'
 import { M11RiverForecastPanel, type M11RiverPopupSegment } from '@/components/map/M11RiverForecastPanel'
 import type { HydroMetSource } from '@/lib/hydroMet/queryState'
-import { fetchHydroMetLatestProduct, type QhhLatestProduct } from '@/pages/hydroMet/bootstrap'
+import { fetchHydroMetLatestProduct, type QhhLatestProduct } from '@/stores/hydroMetBootstrap'
 
 vi.mock('@/api/client', () => ({ client: { GET: vi.fn() } }))
 
 // 面板按源解析 latest-product（GFS+IFS 各一次），mock 它隔离双源/honest 逻辑。
-vi.mock('@/pages/hydroMet/bootstrap', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@/pages/hydroMet/bootstrap')>()
+vi.mock('@/stores/hydroMetBootstrap', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/stores/hydroMetBootstrap')>()
   return { ...actual, fetchHydroMetLatestProduct: vi.fn() }
 })
 

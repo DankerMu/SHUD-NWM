@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 
 import { getApiErrorMessage } from '@/api/response'
-import { loadHydroMetBootstrap, type QhhLatestProduct } from '@/pages/hydroMet/bootstrap'
+import { loadHydroMetBootstrap, type QhhLatestProduct } from '@/stores/hydroMetBootstrap'
 import type { HydroMetSource } from '@/lib/hydroMet/queryState'
 import { sanitizeHydroMetMessage } from '@/lib/hydroMet/runtime'
 

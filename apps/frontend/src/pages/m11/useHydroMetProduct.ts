@@ -1,7 +1,7 @@
 import { useEffect } from 'react'
 
 import type { HydroMetSource } from '@/lib/hydroMet/queryState'
-import type { QhhLatestProduct } from '@/pages/hydroMet/bootstrap'
+import type { QhhLatestProduct } from '@/stores/hydroMetBootstrap'
 import {
   hydroMetProductRequestKey,
   useHydroMetProductDataStore,

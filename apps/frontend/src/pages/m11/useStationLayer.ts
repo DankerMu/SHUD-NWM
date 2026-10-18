@@ -2,7 +2,7 @@ import { useEffect, useMemo } from 'react'
 
 import type { M11StationFeatureCollection } from '@/components/map/M11MapLibreSurface'
 import { getHydroMetStationCoordinates } from '@/lib/hydroMet/runtime'
-import type { HydroMetStation } from '@/pages/hydroMet/bootstrap'
+import type { HydroMetStation } from '@/stores/hydroMetBootstrap'
 import {
   stationLayerRequestKey,
   type StationLayerBasinContext,
