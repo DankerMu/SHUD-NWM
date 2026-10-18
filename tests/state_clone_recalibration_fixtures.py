@@ -25,14 +25,14 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from packages.common.contracts.hydrologic_fingerprint import STATE_COMPATIBILITY_SURFACES
+from packages.common.contracts.time_normalization import cycle_id_for
 from packages.common.state_clone import fingerprint_gated_state_clone
 from packages.common.state_manager import (
     StateSnapshot,
     state_snapshot_id,
 )
 from scripts.node22_clone_direct_grid_cutover_states import _state_compatibility_category_files
-from workers.data_adapters.base import cycle_id_for
-from workers.mapping_builder.rewrite import STATE_COMPATIBILITY_SURFACES
 
 # --- Identities -------------------------------------------------------------
 

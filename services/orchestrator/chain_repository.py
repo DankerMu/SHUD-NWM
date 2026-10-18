@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Mapping
 
+from packages.common.contracts.time_normalization import cycle_id_for, format_cycle_time, parse_cycle_time
 from services.orchestrator import chain_array_accounting, chain_manifests, chain_repository_state, chain_runtime_utils
 from services.orchestrator.chain_types import (
     AnalysisRunContext,
@@ -14,7 +15,6 @@ from services.orchestrator.chain_types import (
     OrchestratorError,
 )
 from services.orchestrator.scheduler_state_types import ACTIVE_HYDRO_STATUSES, DURABLE_HYDRO_SUCCESS_STATUSES
-from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time
 
 # The SAME object as scheduler_state_types.ACTIVE_HYDRO_STATUSES, not a copy; the name stays
 # because it is an importable surface of this module. Consequence: the hydro arm of

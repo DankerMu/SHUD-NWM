@@ -124,6 +124,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from packages.common.contracts.hydrologic_fingerprint import HydrologicCoreFingerprint
 from packages.common.grid_signature import (
     canonical_json_bytes as _shared_canonical_json_bytes,
 )
@@ -133,10 +134,7 @@ from workers.mapping_builder.binding import (
     ForbiddenOutputScanResult,
     StationBinding,
 )
-from workers.mapping_builder.rewrite import (
-    HydrologicCoreFingerprint,
-    SemanticDiff,
-)
+from workers.mapping_builder.rewrite import SemanticDiff
 
 # --- module-level constants -----------------------------------------------
 

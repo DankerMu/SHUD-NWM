@@ -26,6 +26,7 @@ from typing import Any
 import pytest
 
 from packages.common import state_manager as state_manager_module
+from packages.common.contracts.time_normalization import cycle_id_for
 from packages.common.object_store import LocalObjectStore, sha256_bytes
 from packages.common.provider_atomic import ProviderAtomicError
 from packages.common.state_manager import (
@@ -39,7 +40,6 @@ from scripts import scheduler_state_index_repair as repair
 from services.orchestrator import scheduler_generation as generation
 from services.orchestrator.scheduler_generation import TransitionDecision
 from tests.provider_mode_helpers import make_directory_with_explicit_mode
-from workers.data_adapters.base import cycle_id_for
 
 PREFIX = "s3://nhms"
 NOW = datetime(2026, 7, 21, tzinfo=UTC)

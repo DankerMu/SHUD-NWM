@@ -28,6 +28,8 @@ from typing import Any, Mapping, Sequence
 
 import pytest
 
+from packages.common.contracts.hydrologic_fingerprint import compute_hydrologic_core_fingerprint
+from packages.common.contracts.time_normalization import cycle_id_for
 from packages.common.object_store import LocalObjectStore, sha256_bytes
 from packages.common.state_clone import (
     STATE_CLONE_COLD_START_APPROVAL_REQUIRED,
@@ -45,10 +47,6 @@ from packages.common.state_manager import (
     state_snapshot_id,
 )
 from services.orchestrator import chain_forecast_state
-from workers.data_adapters.base import cycle_id_for
-from workers.mapping_builder.rewrite import (
-    compute_hydrologic_core_fingerprint,
-)
 
 # --- Package + .sp.att builders (mirror test_mapping_builder_rewrite) ------
 

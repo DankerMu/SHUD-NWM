@@ -30,6 +30,7 @@ from typing import Any
 
 import pytest
 
+from packages.common.contracts.time_normalization import cycle_id_for
 from services.orchestrator import cli as cli_module
 from services.orchestrator import file_orchestration_journal as journal_module
 from services.orchestrator.chain_runtime_utils import (
@@ -47,7 +48,6 @@ from tests.test_file_orchestration_journal import (
     _populate_narrowing_journal,
     _released_identity_blocked_master,
 )
-from workers.data_adapters.base import cycle_id_for
 
 #: The two static pins below read repository files, so they must not depend on
 #: the process working directory (the suite may be invoked from anywhere).

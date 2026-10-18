@@ -28,7 +28,7 @@ import sys
 import uuid
 from typing import Any
 
-from workers.data_adapters.base import parse_cycle_time
+from packages.common.contracts.time_normalization import parse_cycle_time
 
 from . import scheduler_generation as _scheduler_generation
 from .chain_types import OrchestratorError

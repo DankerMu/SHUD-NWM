@@ -28,11 +28,12 @@ from typing import Any
 
 import pytest
 
+from packages.common.contracts.time_normalization import cycle_id_for, format_cycle_time
 from services.orchestrator import scheduler as scheduler_module
 from services.orchestrator import scheduler_backfill_predecessor as _bf
 from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
 from tests.test_file_orchestration_journal import _latest_view
-from workers.data_adapters.base import CycleDiscovery, cycle_id_for, format_cycle_time
+from workers.data_adapters.base import CycleDiscovery
 
 SchedulerCandidate = scheduler_module.SchedulerCandidate
 

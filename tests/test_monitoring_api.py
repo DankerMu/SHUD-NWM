@@ -17,10 +17,10 @@ from sqlalchemy.pool import StaticPool
 
 from apps.api.main import app, create_app
 from apps.api.routes import pipeline as pipeline_routes
+from packages.common.contracts.time_normalization import cycle_id_for
 from services.orchestrator.persistence import Base, PipelineEvent, PipelineJob, PipelineStore
 from services.orchestrator.retry import RetryConfig, RetryService
 from services.slurm_gateway.gateway import SlurmGatewayError
-from workers.data_adapters.base import cycle_id_for
 
 GENERIC_RETRY_JOB_TYPE = "forecast_qhh_stage"
 # #2308: the configured scheduler binary path and the workspace root — host text,

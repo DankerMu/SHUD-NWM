@@ -6,9 +6,9 @@ import sys
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from packages.common.contracts.time_normalization import parse_cycle_time
 from packages.common.redaction import redact_payload
 
-from .base import parse_cycle_time
 from .era5_adapter import ERA5Adapter, parse_area
 from .gfs_adapter import GFSAdapter
 from .ifs_adapter import IFS_DISCOVERY_ATTEMPT_LIMIT, IFS_DISCOVERY_TEXT_LIMIT, IFSAdapter

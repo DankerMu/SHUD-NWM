@@ -888,13 +888,6 @@ DISPLAY_UNIT_CONNECT_CLOSURE: tuple[tuple[str, str, str], ...] = (
     ("packages/common/model_registry.py", ATTRIBUTED, "model registry store"),
     ("packages/common/state_manager.py", ATTRIBUTED, "state-snapshot repository"),
     (
-        "packages/common/grid_registry_store.py",
-        UNREACHABLE,
-        "import-only: workers/forcing_producer/producer.py -> packages/common/grid_registry_bbox_guard.py "
-        "imports this module; PsycopgGridRegistryStore is constructed only in "
-        "workers/grid_registry/__main__.py, which is not part of the display unit",
-    ),
-    (
         "packages/common/met_store.py",
         UNREACHABLE,
         "static-only: apps/api/routes/pipeline.py -> services/orchestrator/__init__.py:53 (module __getattr__ "
@@ -923,12 +916,6 @@ DISPLAY_UNIT_CONNECT_CLOSURE: tuple[tuple[str, str, str], ...] = (
         UNREACHABLE,
         "static-only: imported by services/orchestrator/chain.py, which is behind the deferred import in "
         "services/orchestrator/__init__.py:53; absent from the unit's runtime sys.modules",
-    ),
-    (
-        "workers/forcing_producer/store.py",
-        UNREACHABLE,
-        "static-only: imported function-locally at workers/forcing_producer/producer.py:485, inside "
-        "ForcingProducer.from_env(), which no display-unit route calls; absent from the unit's runtime sys.modules",
     ),
     (
         "services/orchestrator/pipeline_job_provenance.py",

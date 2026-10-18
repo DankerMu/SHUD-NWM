@@ -13,6 +13,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from packages.common.contracts.direct_grid import DirectGridContractError, load_forcing_mapping_contract_from_manifest
 from packages.common.safe_fs import SafeFilesystemError, read_bytes_limited_no_follow
 from packages.common.source_identity import normalize_source_id
 from scripts.merged_registry_publish.model import (
@@ -38,10 +39,6 @@ from services.orchestrator import scheduler_file_providers as providers
 from services.orchestrator.scheduler_file_providers import (
     SchedulerFileProviderError,
     publish_scheduler_registry_manifest,
-)
-from workers.forcing_producer.direct_grid_contract import (
-    DirectGridContractError,
-    load_forcing_mapping_contract_from_manifest,
 )
 
 # --- new rows come from a provisioned registry --------------------------------

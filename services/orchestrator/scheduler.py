@@ -227,7 +227,8 @@ from services.orchestrator.scheduler_state import (  # noqa: F401
     _top_level_source_cycle_download_blocker,
 )
 from services.orchestrator.scheduler_state_compat import install_scheduler_state_compat
-from workers.data_adapters.base import CycleDiscovery, cycle_id_for, format_cycle_time
+from workers.data_adapters.base import CycleDiscovery
+from packages.common.contracts.time_normalization import cycle_id_for, format_cycle_time
 
 globals().update(install_scheduler_state_compat(globals(), _scheduler_state_module))
 

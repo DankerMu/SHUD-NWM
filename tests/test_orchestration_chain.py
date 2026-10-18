@@ -21,6 +21,7 @@ from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
+from packages.common.contracts.time_normalization import cycle_id_for, format_cycle_time
 from packages.common.copyback_guard import (
     COPYBACK_BATCH_LOCK_NAME,
     COPYBACK_LOCK_TIMEOUT_ENV,
@@ -57,7 +58,6 @@ from workers.canonical_converter.converter import (
     GFS_REQUIRED_STANDARD_VARIABLES,
     expected_converter_version,
 )
-from workers.data_adapters.base import cycle_id_for, format_cycle_time
 
 
 class FakeCycleSlurmClient:
@@ -12365,9 +12365,8 @@ def test_chain_tile_publisher_compat_local_publish_failure_paths(
 
 def test_chain_worker_adapter_compat_facade_matches_owner_modules_and_inventory(tmp_path: Path) -> None:
     import services.orchestrator.chain as legacy_chain
-    from services.orchestrator import time_consistency
+    from packages.common.contracts import time_normalization
     from workers.canonical_converter import converter as canonical_converter
-    from workers.data_adapters import base as data_adapter_base
 
     expected_canonical_names = ("evaluate_canonical_readiness", "expected_converter_version")
     expected_cycle_names = ("parse_cycle_time", "format_cycle_time", "cycle_id_for")
@@ -12432,23 +12431,23 @@ def test_chain_worker_adapter_compat_facade_matches_owner_modules_and_inventory(
         assert getattr(legacy_chain, alias_name) is getattr(canonical_converter, alias_name)
     for alias_name in cycle_names:
         assert legacy_chain._CHAIN_WORKER_ADAPTER_COMPAT_OWNER_ALIASES[alias_name] is getattr(
-            data_adapter_base,
+            time_normalization,
             alias_name,
         )
         assert legacy_chain._CHAIN_WORKER_ADAPTER_COMPAT_FACADE_ALIASES[alias_name] is getattr(
             legacy_chain,
             alias_name,
         )
-        assert getattr(legacy_chain, alias_name) is getattr(data_adapter_base, alias_name)
+        assert getattr(legacy_chain, alias_name) is getattr(time_normalization, alias_name)
     assert (
         legacy_chain._CHAIN_WORKER_ADAPTER_COMPAT_TIME_OWNER_ALIASES["_check_three_way_time_consistency"]
-        is time_consistency.check_three_way_time_consistency
+        is time_normalization.check_three_way_time_consistency
     )
     assert (
         legacy_chain._CHAIN_WORKER_ADAPTER_COMPAT_TIME_FACADE_ALIASES["_check_three_way_time_consistency"]
         is legacy_chain._check_three_way_time_consistency
     )
-    assert legacy_chain._check_three_way_time_consistency is time_consistency.check_three_way_time_consistency
+    assert legacy_chain._check_three_way_time_consistency is time_normalization.check_three_way_time_consistency
 
     assert legacy_chain.scenario_for_source("gfs") == "forecast_gfs_deterministic"
     assert legacy_chain.scenario_for_source("IFS") == "forecast_ifs_deterministic"
@@ -12503,10 +12502,10 @@ assert chain.scenario_for_source('IFS') == 'forecast_ifs_deterministic'
         *expected_time_names,
         *expected_local_helper_names,
         "workers.canonical_converter.converter",
-        "workers.data_adapters.base",
+        "packages.common.contracts.time_normalization",
         "workers.data_adapters.gfs_adapter",
         "workers.data_adapters.ifs_adapter",
-        "services.orchestrator.time_consistency",
+        "packages.common.contracts.time_normalization",
     ):
         assert expected_inventory_text in inventory_text
 

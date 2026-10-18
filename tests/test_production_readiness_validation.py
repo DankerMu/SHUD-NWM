@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from packages.common.contracts.time_normalization import cycle_id_for, format_cycle_time
 from services.orchestrator.chain import PipelineResult, StageRunResult
 from services.orchestrator.scheduler import ProductionScheduler
 from services.production_closure import (
@@ -50,7 +51,6 @@ from tests.test_production_scheduler import (
 from tests.test_production_scheduler import (
     _model as _scheduler_model,
 )
-from workers.data_adapters.base import cycle_id_for, format_cycle_time
 
 LIVE_SCHEMA = "nhms.production_readiness.live_proof.v1"
 SCHEDULER_SCHEMA = "nhms.production_scheduler.pass_evidence.v1"

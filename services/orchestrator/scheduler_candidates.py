@@ -8,6 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
+from packages.common.contracts.direct_grid import DirectGridContractError, load_forcing_mapping_contract_from_manifest
+from packages.common.contracts.time_normalization import cycle_id_for
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator import scheduler_discovery as _scheduler_discovery
 from services.orchestrator import scheduler_generation as _scheduler_generation
@@ -55,11 +57,7 @@ from services.orchestrator.source_cycle_raw_manifest import (
     NFS_RAW_MANIFEST_READY_SOURCE,
     nfs_raw_manifest_readiness,
 )
-from workers.data_adapters.base import CycleDiscovery, cycle_id_for
-from workers.forcing_producer.direct_grid_contract import (
-    DirectGridContractError,
-    load_forcing_mapping_contract_from_manifest,
-)
+from workers.data_adapters.base import CycleDiscovery
 
 # Source-scope fail-closed reason codes (Epic #961, §4.1). Inline sentinels — no
 # module-level enum: the codes appear only at the two raise/append sites below

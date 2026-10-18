@@ -54,6 +54,7 @@ from typing import Any
 import pytest
 
 from packages.common import grid_registry_bbox_guard as _guard_module
+from packages.common.contracts.region import GeoBBox
 from packages.common.grid_registry_bbox_guard import (
     BboxMismatchError,
     RegisteredBboxSnapshotProtocol,
@@ -62,7 +63,6 @@ from tests.test_forcing_producer import (
     _build_direct_grid_repository,
     _direct_grid_manifest_for_default_grid,
 )
-from workers.data_adapters.region import GeoBBox
 from workers.forcing_producer import (
     ForcingProducer,
     ForcingProducerConfig,

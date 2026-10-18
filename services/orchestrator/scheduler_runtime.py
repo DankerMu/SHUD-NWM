@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from packages.common.contracts.time_normalization import format_cycle_time
 from packages.common.redaction import redact_payload
 from services.orchestrator import scheduler as _scheduler
 from services.orchestrator import scheduler_discovery as _scheduler_discovery
@@ -20,7 +21,6 @@ from services.orchestrator.file_orchestration_journal import (
 from services.orchestrator.retention import RetentionConfig, run_retention
 from services.orchestrator.scheduler_lease import lease_heartbeat_interval_seconds
 from services.orchestrator.scheduler_timing import SchedulerPassTiming
-from workers.data_adapters.base import format_cycle_time
 
 _VALID_TIMING_LEVELS = frozenset({"pass", "stage", "candidate"})
 _PROGRESS_GUARD_REASON = "scheduler_progress_guard_blocked"

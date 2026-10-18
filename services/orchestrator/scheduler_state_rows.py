@@ -5,6 +5,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
+from packages.common.contracts.time_normalization import format_cycle_time
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator.persistence import RESERVED_STATUS
 from services.orchestrator.production_contract import (
@@ -33,7 +34,6 @@ from services.orchestrator.scheduler_state_types import (
     STATE_M23_COMPARISON_FIELDS,
     cohort_member_row_is_attributed,
 )
-from workers.data_adapters.base import format_cycle_time
 
 # State keys carrying the per-stage attempt maxima across the job-limit
 # truncation (#1179), and the candidate-identity metadata of the rows those

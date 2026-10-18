@@ -379,9 +379,9 @@ def test_live_caller_plans_scan_the_narrow_store_and_never_the_legacy_one(
 def test_actual_publisher_and_copyback_discover_the_narrow_facts(
     seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None], tmp_path: Path,
 ) -> None:
+    from packages.common.contracts.time_normalization import cycle_id_for
     from services.tile_publisher.forcing_copyback_backfill import discover_backfill_runs
     from services.tile_publisher.publisher import TilePublisher
-    from workers.data_adapters.base import cycle_id_for
 
     url, session = seeded
     _expand(session, post_expand_forecast_database)

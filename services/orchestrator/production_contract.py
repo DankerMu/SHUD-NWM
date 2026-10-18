@@ -7,9 +7,9 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
 from urllib.parse import SplitResult, unquote, urlsplit
 
+from packages.common.contracts.time_normalization import parse_cycle_time
 from packages.common.source_identity import normalize_source_id
 from services.artifacts.reader import DEFAULT_PUBLISHED_URI_PREFIX
-from workers.data_adapters.base import parse_cycle_time
 
 PRODUCTION_CONTRACT_SCHEMA_VERSION = "nhms.production.identity_status_uri_contract.v1"
 PRODUCTION_CONTRACT_ID = "m23-qhh-22-production-identity-status-uri.v1"

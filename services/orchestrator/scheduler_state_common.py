@@ -6,11 +6,11 @@ from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
 
+from packages.common.contracts.time_normalization import format_cycle_time
 from packages.common.object_store import LocalObjectStore
 from packages.common.redaction import redact_payload
 from packages.common.slurm_env import secret_manifest_key_reason, secret_manifest_value_reason
 from services.orchestrator.scheduler_state_types import SchedulerCandidateLike
-from workers.data_adapters.base import format_cycle_time
 
 
 def _coerce_int(value: Any, *, default: int) -> int:

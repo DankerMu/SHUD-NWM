@@ -19,6 +19,7 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from packages.common.contracts.time_normalization import cycle_id_for, format_cycle_time
 from packages.common.copyback_guard import (
     CopybackLockError,
     CopybackLockTimeout,
@@ -41,7 +42,6 @@ from packages.common.safe_fs import (
 )
 from packages.common.source_identity import normalize_source_id
 from packages.common.sqlalchemy_url import sqlalchemy_url
-from workers.data_adapters.base import cycle_id_for, format_cycle_time
 
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _CYCLE_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*_\d{10}")
@@ -3177,7 +3177,7 @@ def _cycle_filter(cycle_id: str) -> dict[str, Any] | None:
     if len(compact_time) != 10 or not compact_time.isdigit():
         return None
     try:
-        from workers.data_adapters.base import parse_cycle_time
+        from packages.common.contracts.time_normalization import parse_cycle_time
 
         cycle_time = parse_cycle_time(compact_time)
         expected_cycle_id = cycle_id_for(source_id, cycle_time)

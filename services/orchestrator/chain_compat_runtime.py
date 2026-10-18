@@ -376,7 +376,7 @@ def install_chain_runtime_compat() -> dict[str, object]:
         (
             name
             for name in _CHAIN_WORKER_ADAPTER_COMPAT_CYCLE_ALIAS_NAMES
-            if not hasattr(_chain._data_adapters_base_module, name)
+            if not hasattr(_chain._time_normalization_module, name)
         )
     )
     _CHAIN_WORKER_ADAPTER_COMPAT_ALIAS_FACADE_MISSING = tuple(
@@ -386,7 +386,7 @@ def install_chain_runtime_compat() -> dict[str, object]:
         (
             facade_name
             for facade_name, owner_name in _CHAIN_WORKER_ADAPTER_COMPAT_TIME_ALIAS_OWNER_NAMES.items()
-            if not hasattr(_chain._time_consistency_module, owner_name)
+            if not hasattr(_chain._time_normalization_module, owner_name)
         )
     )
     _CHAIN_WORKER_ADAPTER_COMPAT_TIME_ALIAS_FACADE_MISSING = tuple(
@@ -426,7 +426,7 @@ def install_chain_runtime_compat() -> dict[str, object]:
                 for name in _CHAIN_WORKER_ADAPTER_COMPAT_CANONICAL_ALIAS_NAMES
             },
             **{
-                name: getattr(_chain._data_adapters_base_module, name)
+                name: getattr(_chain._time_normalization_module, name)
                 for name in _CHAIN_WORKER_ADAPTER_COMPAT_CYCLE_ALIAS_NAMES
             },
         }
@@ -436,7 +436,7 @@ def install_chain_runtime_compat() -> dict[str, object]:
     )
     _CHAIN_WORKER_ADAPTER_COMPAT_TIME_OWNER_ALIASES = _chain.MappingProxyType(
         {
-            facade_name: getattr(_chain._time_consistency_module, owner_name)
+            facade_name: getattr(_chain._time_normalization_module, owner_name)
             for facade_name, owner_name in _CHAIN_WORKER_ADAPTER_COMPAT_TIME_ALIAS_OWNER_NAMES.items()
         }
     )

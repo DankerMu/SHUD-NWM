@@ -25,6 +25,7 @@ from urllib.parse import unquote, urlparse
 import httpx
 import pytest
 
+from packages.common.contracts.time_normalization import cycle_id_for, format_cycle_time
 from packages.common.object_store import LocalObjectStore, ObjectStoreError, sha256_bytes
 from packages.common.slurm_env import is_sensitive_slurm_env_key, reserved_slurm_env_reason
 from packages.common.state_manager import publish_state_snapshot_index
@@ -103,7 +104,7 @@ from services.orchestrator.source_cycle_raw_manifest import nfs_raw_manifest_rea
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES
 from tests.provider_mode_helpers import make_directory_with_explicit_mode, write_provider_destination
 from workers.canonical_converter.converter import GFS_REQUIRED_STANDARD_VARIABLES, evaluate_canonical_readiness
-from workers.data_adapters.base import CycleDiscovery, cycle_id_for, format_cycle_time
+from workers.data_adapters.base import CycleDiscovery
 from workers.shud_runtime import runtime as shud_runtime_module
 
 _TEST_CANONICAL_READINESS_PROVIDER_UNSET = object()

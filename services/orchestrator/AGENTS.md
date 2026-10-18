@@ -33,7 +33,7 @@ assignment without checking root `AGENTS.md` and `docs/governance/ROLE_BOUNDARY.
   `chain_stages.py`, `chain_types.py`, `chain_stage_execution.py`,
   `chain_array_accounting.py`, `chain_manifests.py`, `reservation.py`,
   `retry.py`, `persistence.py`, `production_contract.py`, or
-  `time_consistency.py`. Treat `chain.py` compatibility exports and
+  `packages/common/contracts/time_normalization.py`. Treat `chain.py` compatibility exports and
   monkeypatch paths as facade surface.
 - A new re-export, monkeypatch alias, forwarding wrapper, or local implementation
   added to `scheduler.py` or `chain.py` must update the matching compatibility

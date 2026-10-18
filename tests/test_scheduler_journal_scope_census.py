@@ -27,6 +27,7 @@ from typing import Any
 
 import pytest
 
+from packages.common.contracts.time_normalization import cycle_id_for, format_cycle_time
 from services.orchestrator import cli as cli_module
 from services.orchestrator import file_orchestration_journal as journal_module
 from services.orchestrator import journal_scope_census as census_module
@@ -40,7 +41,6 @@ from services.orchestrator.journal_scope_census import (
     OUTPUT_UNWRITABLE_MESSAGE,
     census_job_id_scope,
 )
-from workers.data_adapters.base import cycle_id_for, format_cycle_time
 
 _ENTRYPOINTS = ("click", "argparse")
 

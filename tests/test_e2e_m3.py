@@ -14,13 +14,13 @@ from sqlalchemy.pool import StaticPool
 
 from apps.api.main import app
 from apps.api.routes import pipeline as pipeline_routes
+from packages.common.contracts.time_normalization import cycle_id_for, format_cycle_time
 from packages.common.object_store import LocalObjectStore
 from services.orchestrator import chain as chain_module
 from services.orchestrator.chain import M3_STAGES, ForecastOrchestrator, OrchestratorConfig
 from services.orchestrator.persistence import Base, PipelineEvent, PipelineJob, PipelineStore
 from services.orchestrator.retry import RetryConfig, RetryService
 from tests.test_orchestration_chain import FakeCycleSlurmClient
-from workers.data_adapters.base import cycle_id_for, format_cycle_time
 
 
 def test_e2e_m3_complete_cycle_monitoring_api(tmp_path: Path, monkeypatch: Any) -> None:

@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from packages.common import state_manager as state_manager_module
+from packages.common.contracts.time_normalization import cycle_id_for, format_cycle_time
 from packages.common.object_store import LocalObjectStore, sha256_bytes
 from packages.common.state_manager import StateSnapshot, state_snapshot_id
 from services.orchestrator import cli
@@ -40,7 +41,6 @@ from tests.test_production_scheduler import (
     _write_db_free_raw_manifest_fixture,
     _write_db_free_state_index_fixture,
 )
-from workers.data_adapters.base import cycle_id_for, format_cycle_time
 
 
 class CompletionByCycleRepository(FakeActiveRepository):

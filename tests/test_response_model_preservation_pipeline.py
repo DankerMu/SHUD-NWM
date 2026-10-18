@@ -20,9 +20,9 @@ import pytest
 
 import tests.test_monitoring_api as monitoring
 import tests.test_retry_cancel_consistency as cancels
+from packages.common.contracts.time_normalization import cycle_id_for
 from tests.api_contract_helpers import _RetryGateway
 from tests.test_response_model_preservation import Sample, SampleEnv, ok, run_sample
-from workers.data_adapters.base import cycle_id_for
 
 OPERATOR = {"X-User-Role": "operator"}
 

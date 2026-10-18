@@ -19,7 +19,7 @@ gfs_module = importlib.import_module("workers.data_adapters.gfs_adapter")
 
 DownloadManifest = base.DownloadManifest
 ManifestEntry = base.ManifestEntry
-parse_cycle_time = base.parse_cycle_time
+parse_cycle_time = importlib.import_module("packages.common.contracts.time_normalization").parse_cycle_time
 CanonicalConverter = converter_module.CanonicalConverter
 CanonicalConverterConfig = converter_module.CanonicalConverterConfig
 RawRecord = converter_module.RawRecord

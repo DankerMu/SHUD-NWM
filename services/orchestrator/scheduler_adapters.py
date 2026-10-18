@@ -5,12 +5,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Protocol
 
-from services.orchestrator.scheduler_candidates import _canonical_readiness_unavailable_evidence
-from services.orchestrator.scheduler_state import _format_utc
-from services.orchestrator.scheduler_types import SchedulerCandidate
-from workers.canonical_converter.converter import evaluate_canonical_readiness
-from workers.data_adapters.base import (
-    CycleDiscovery,
+from packages.common.contracts.time_normalization import (
     cycle_id_for,
     format_cycle_time,
     generate_segmented_forecast_hours,
@@ -18,6 +13,11 @@ from workers.data_adapters.base import (
     parse_cycle_time,
     parse_resolution_segments,
 )
+from services.orchestrator.scheduler_candidates import _canonical_readiness_unavailable_evidence
+from services.orchestrator.scheduler_state import _format_utc
+from services.orchestrator.scheduler_types import SchedulerCandidate
+from workers.canonical_converter.converter import evaluate_canonical_readiness
+from workers.data_adapters.base import CycleDiscovery
 
 
 class ModelRegistryReader(Protocol):

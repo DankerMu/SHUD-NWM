@@ -14,6 +14,7 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
+from packages.common.contracts.time_normalization import cycle_id_for, parse_cycle_date, validate_forecast_hours
 from packages.common.met_store import PsycopgMetStore
 from packages.common.object_store import LocalObjectStore, ObjectStoreError, sha256_bytes
 
@@ -26,9 +27,6 @@ from .base import (
     ManifestEntry,
     VerificationFailure,
     VerificationResult,
-    cycle_id_for,
-    parse_cycle_date,
-    validate_forecast_hours,
 )
 from .gfs_adapter import ForecastCycleRepository
 
@@ -1025,7 +1023,7 @@ def parse_era5_cycle_time(value: str | datetime) -> datetime:
     if len(candidate) == 10 and candidate[4] == "-" and candidate[7] == "-":
         parsed_date = parse_cycle_date(candidate)
         return datetime(parsed_date.year, parsed_date.month, parsed_date.day, tzinfo=UTC)
-    from .base import parse_cycle_time
+    from packages.common.contracts.time_normalization import parse_cycle_time
 
     parsed = parse_cycle_time(candidate)
     return datetime(parsed.year, parsed.month, parsed.day, tzinfo=UTC)

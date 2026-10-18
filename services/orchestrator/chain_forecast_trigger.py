@@ -3,13 +3,13 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Mapping, Sequence
 
+from packages.common.contracts.time_normalization import cycle_id_for, format_cycle_time, parse_cycle_time
 from packages.common.redaction import redact_payload
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator import chain as _chain
 from services.orchestrator.chain_stages import LEGACY_FORECAST_STAGES
 from services.orchestrator.chain_types import OrchestratorError, PipelineResult
 from workers.canonical_converter.converter import evaluate_canonical_readiness, expected_converter_version
-from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time
 
 CANONICAL_DEMOTE_CYCLE_STATUS = "raw_complete"
 

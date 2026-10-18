@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+from packages.common.contracts.time_normalization import cycle_id_for
 from scripts import node22_scheduler_journal_retention as entrypoint
 from services.orchestrator import scheduler_journal_archive as archive
 from services.orchestrator import scheduler_journal_restore as restore
@@ -36,7 +37,6 @@ from tests.scheduler_journal_retention_fixtures import (
     _seed_cycle,
     _write_json,
 )
-from workers.data_adapters.base import cycle_id_for
 
 SchedulerJournalRetentionConfig = retention.SchedulerJournalRetentionConfig
 ReceiptReservation = retention.ReceiptReservation

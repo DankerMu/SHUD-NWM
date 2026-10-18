@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 import yaml
 
+from packages.common.contracts.time_normalization import cycle_id_for
 from services.production_closure.readonly_db_route_smoke import (
     _route_response_identity,
     _route_response_identity_blockers,
@@ -18,7 +19,6 @@ from tests.test_monitoring_api import (
     _insert_hydro_run,
     _store,
 )
-from workers.data_adapters.base import cycle_id_for
 
 SELECTED_RUN_ID = "fcst_gfs_2026091612_dg_0883c7e9c1006c6fd347df500315e9df"
 SELECTED_MODEL_ID = "dg_0883c7e9c1006c6fd347df500315e9df"

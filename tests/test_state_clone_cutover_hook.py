@@ -43,6 +43,8 @@ from typing import Any
 
 import pytest
 
+from packages.common.contracts.hydrologic_fingerprint import compute_hydrologic_core_fingerprint
+from packages.common.contracts.time_normalization import cycle_id_for
 from packages.common.model_registry import (
     ColdStartApprovalInput,
     ModelActivationContext,
@@ -80,8 +82,6 @@ from tests.test_state_clone import (
     _write_package,
     _write_sp_att,
 )
-from workers.data_adapters.base import cycle_id_for
-from workers.mapping_builder.rewrite import compute_hydrologic_core_fingerprint
 
 # --- Local package fixtures (duplicated cleanly from tests.test_state_clone) ---
 #

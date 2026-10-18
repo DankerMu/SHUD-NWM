@@ -11,11 +11,10 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping, Protocol, Sequence
 
-import services.orchestrator.time_consistency as _time_consistency_module
+import packages.common.contracts.time_normalization as _time_normalization_module
 import services.tile_publisher as _tile_publisher_module
 import services.tile_publisher.publisher as _tile_publisher_publisher_module
 import workers.canonical_converter.converter as _canonical_converter_module
-import workers.data_adapters.base as _data_adapters_base_module
 from packages.common.best_available import BestAvailableManager  # noqa: F401
 from packages.common.object_store import LocalObjectStore
 from packages.common.redaction import redact_payload
@@ -96,7 +95,12 @@ from services.orchestrator.reservation import (
 from services.orchestrator.retry import RetryConfig, RetryService, compute_backoff_seconds
 from services.orchestrator.retry_identity import retry_suffix_attempt
 from services.orchestrator.scheduler_state_types import ACTIVE_HYDRO_STATUSES, DURABLE_HYDRO_SUCCESS_STATUSES
-from services.orchestrator.time_consistency import check_three_way_time_consistency
+from packages.common.contracts.time_normalization import (  # noqa: F401
+    check_three_way_time_consistency,
+    cycle_id_for,
+    format_cycle_time,
+    parse_cycle_time,
+)
 from services.slurm_gateway.config import SlurmGatewaySettings
 from services.tile_publisher import PublishError, TilePublisher
 from services.tile_publisher.publisher import failure_payload
@@ -104,7 +108,6 @@ from workers.canonical_converter.converter import (
     evaluate_canonical_readiness,  # noqa: F401
     expected_converter_version,  # noqa: F401
 )
-from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time  # noqa: F401
 
 ANALYSIS_SCENARIO_ID = chain_manifests.ANALYSIS_SCENARIO_ID
 DEFAULT_ERA5_REANALYSIS_LATENCY_MINUTES = chain_manifests.DEFAULT_ERA5_REANALYSIS_LATENCY_MINUTES
@@ -268,7 +271,7 @@ del _chain_config_class
 _MAX_STATE_FALLBACK_CANDIDATES = 8
 
 # Re-exported from the shared module so chain and the forecast runtime share one
-# implementation (single source of truth; see services.orchestrator.time_consistency).
+# implementation (single source of truth; see packages.common.contracts.time_normalization).
 _check_three_way_time_consistency = check_three_way_time_consistency
 
 

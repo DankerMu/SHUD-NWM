@@ -8,9 +8,9 @@ from pathlib import Path, PurePosixPath
 from typing import Protocol
 from urllib.parse import SplitResult, unquote, urlsplit, urlunsplit
 
+from packages.common.contracts.time_normalization import format_cycle_time
 from packages.common.redaction import redact_payload
 from packages.common.safe_fs import SafeFilesystemError, read_tail_bytes_limited_no_follow, verify_directory_no_follow
-from workers.data_adapters.base import format_cycle_time
 
 DEFAULT_PUBLISHED_URI_PREFIX = "published://"
 DEFAULT_LOG_TAIL_MAX_BYTES = 1024 * 1024

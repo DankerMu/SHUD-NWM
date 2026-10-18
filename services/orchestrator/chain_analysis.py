@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from packages.common.contracts.time_normalization import cycle_id_for, format_cycle_time
 from packages.common.state_manager import StateSnapshot
 from services.orchestrator import chain_manifests
 from services.orchestrator.chain_types import (
@@ -12,7 +13,6 @@ from services.orchestrator.chain_types import (
     ModelContext,
     StageDefinition,
 )
-from workers.data_adapters.base import cycle_id_for, format_cycle_time
 
 ANALYSIS_SOURCE_ID = "ERA5"
 

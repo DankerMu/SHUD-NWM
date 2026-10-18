@@ -45,6 +45,7 @@ from apps.api.main import app
 from apps.api.routes.data_sources import get_data_source_store
 from apps.api.routes.forecast import get_forecast_store
 from apps.api.routes.models import get_model_registry_store
+from packages.common.contracts.time_normalization import cycle_id_for
 from tests.api_contract_helpers import _ModelRegistryStore, _RunStore
 from tests.test_monitoring_api import (
     _client,
@@ -54,7 +55,6 @@ from tests.test_monitoring_api import (
     _seed_monitoring_jobs,
     _store,
 )
-from workers.data_adapters.base import cycle_id_for
 
 SPEC_PATH = Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml"
 SPEC: dict[str, Any] = yaml.safe_load(SPEC_PATH.read_text(encoding="utf-8"))

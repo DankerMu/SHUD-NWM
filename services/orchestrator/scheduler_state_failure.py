@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+from packages.common.contracts.time_normalization import format_cycle_time
 from packages.common.object_store import (
     OBJECT_KIND_DIRECTORY,
     OBJECT_KIND_OTHER,
@@ -64,7 +65,6 @@ from services.orchestrator.scheduler_state_types import (
     TRANSIENT_RETRY_REASON_CODES,
     SchedulerCandidateLike,
 )
-from workers.data_adapters.base import format_cycle_time
 
 _COPYBACK_REQUIRED_RESTART_STAGES = {"copyback"}
 #: ``unsafe_reason`` for a probe the object store RAISED on (#1365 round-1): a

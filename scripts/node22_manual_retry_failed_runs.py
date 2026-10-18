@@ -39,6 +39,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from packages.common.contracts.time_normalization import cycle_id_for, format_cycle_time, parse_cycle_time  # noqa: E402
 from packages.common.source_identity import normalize_source_id  # noqa: E402
 from services.orchestrator.chain_types import OrchestratorError  # noqa: E402
 from services.orchestrator.file_orchestration_journal import (  # noqa: E402
@@ -57,7 +58,6 @@ from services.orchestrator.journal_root_authority import (  # noqa: E402
 from services.orchestrator.retry import MANUAL_RETRY_SOURCE_STATUSES  # noqa: E402
 from services.orchestrator.run_identity import FORECAST_RUN_ID_RE  # noqa: E402
 from services.orchestrator.scheduler_state_types import DOWNSTREAM_STAGE_ALIASES  # noqa: E402
-from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time  # noqa: E402
 
 COHORT_RESTART_WARNING = (
     "Marking a cohort master re-runs the WHOLE cohort (all member_count models). It restarts "

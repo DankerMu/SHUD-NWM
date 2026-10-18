@@ -1206,45 +1206,13 @@ def test_select_tests_maps_runtime_changes_to_runtime_contract_tests() -> None:
     )
 
 
-def test_select_tests_maps_direct_grid_producer_surface_to_compact_e2e_fixture() -> None:
-    selected = select_tests(["workers/forcing_producer/direct_grid_contract.py"], repo_root=Path("."))
-
-    # The compact fixture is still the core of the selection; #1455 appended the
-    # module's five other non-gated top-level importer suites AT THIS RULE SITE
-    # (the stop rule makes `workers/forcing_producer/**` unreachable here, and
-    # DIRECT_GRID_SURFACE_TESTS itself must not move — the openspec-change rule
-    # below shares it). The redirect intent is unchanged: the whole
-    # tests/test_forcing_producer.py never comes back. The write-site invariant
-    # joins because direct_grid_contract.py lives under workers/** (#1656), the
-    # river-segment write-surface scan joins by the same root (#2185), and so
-    # does the path-canonicalisation family guard (#1627). The import layering
-    # guard (#2920) joins too: its additive loop runs after the stop rule.
-    assert selected == sorted(
-        {
-            *DIRECT_GRID_SURFACE_TESTS,
-            *DIRECT_GRID_CONTRACT_IMPORTER_TESTS,
-            INVARIANT_SUITE_PATH,
-            WRITE_SURFACE_SCAN_PATH,
-            FAMILY_GUARD_PATH,
-            RESOLVE_SURFACE_GUARD_PATH,
-            IMPORT_LAYERING_GUARD_PATH,
-            ANY_RATCHET_PATH,
-            STATUS_VOCAB_PARITY_PATH,
-        }
-    )
-    assert list(DIRECT_GRID_E2E_TESTS) == ["tests/test_direct_grid_e2e.py"]
-    assert all(
-        target.startswith("tests/test_forcing_producer.py::test_direct_grid_contract_")
-        for target in DIRECT_GRID_CONTRACT_TESTS
-    )
-    assert "tests/test_forcing_producer.py" not in selected
-
-
 def test_select_tests_maps_direct_grid_contract_canonical_path_like_the_shim() -> None:
-    # #2921: the contract module's canonical home carries the shim row's exact
-    # targets and stop semantics. The selection is WIDER than the shim path's on
-    # purpose: `packages/common/**` adds the #1744 shared-library core-smoke
-    # baseline outside the rule loop, which no stop rule suppresses.
+    # #2921: the contract module's canonical home carries the (1.3-deleted) shim
+    # row's exact targets and stop semantics. The selection is WIDER than the
+    # shim path's was on purpose: `packages/common/**` adds the #1744
+    # shared-library core-smoke baseline outside the rule loop, which no stop
+    # rule suppresses. The redirect intent is unchanged: the whole
+    # tests/test_forcing_producer.py never comes back.
     assert DIRECT_GRID_CONTRACT_CANONICAL_PATH == "packages/common/contracts/direct_grid.py"
     assert Path(DIRECT_GRID_CONTRACT_CANONICAL_PATH).is_file()
 
@@ -1268,6 +1236,11 @@ def test_select_tests_maps_direct_grid_contract_canonical_path_like_the_shim() -
     # (#2937 added the `Any` ratchet, task 2.1a the status-vocabulary parity).
     assert len(selected) == 28
     assert "tests/test_forcing_producer.py" not in selected
+    assert list(DIRECT_GRID_E2E_TESTS) == ["tests/test_direct_grid_e2e.py"]
+    assert all(
+        target.startswith("tests/test_forcing_producer.py::test_direct_grid_contract_")
+        for target in DIRECT_GRID_CONTRACT_TESTS
+    )
 
 
 def test_direct_grid_contract_canonical_row_red_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1428,7 +1401,7 @@ def test_select_tests_maps_direct_grid_openspec_change_to_compact_e2e_fixture() 
 def test_select_tests_keeps_issue_548_direct_grid_change_set_bounded() -> None:
     selected = select_tests(
         [
-            "workers/forcing_producer/direct_grid_contract.py",
+            DIRECT_GRID_CONTRACT_CANONICAL_PATH,
             "openspec/changes/direct-grid-forcing/proposal.md",
             "openspec/changes/direct-grid-forcing/design.md",
             "openspec/changes/direct-grid-forcing/specs/direct-grid-forcing-production/spec.md",
@@ -1436,33 +1409,13 @@ def test_select_tests_keeps_issue_548_direct_grid_change_set_bounded() -> None:
         repo_root=Path("."),
     )
 
-    # Still bounded, just by a bigger constant: the compact e2e fixture plus the
-    # five #1455 importer suites (all seconds-scale), plus the write-site
-    # invariant (workers/** root, #1656), the river-segment write-surface
-    # scan (same root, #2185) and the path-canonicalisation family guard (same
-    # root, #1627) and the import layering guard (same root, #2920) and the
-    # `Any` ratchet (same root, #2937) — and no core-smoke blowout. #2323 adds the one
-    # production-topology hard-gate node for the three `openspec/changes/**`
-    # scan inputs.
-    assert selected == sorted(
-        {
-            *DIRECT_GRID_SURFACE_TESTS,
-            *DIRECT_GRID_CONTRACT_IMPORTER_TESTS,
-            INVARIANT_SUITE_PATH,
-            WRITE_SURFACE_SCAN_PATH,
-            FAMILY_GUARD_PATH,
-            RESOLVE_SURFACE_GUARD_PATH,
-            IMPORT_LAYERING_GUARD_PATH,
-            TOPOLOGY_HARD_GATE_NODE,
-            ANY_RATCHET_PATH,
-            STATUS_VOCAB_PARITY_PATH,
-        }
-    )
-    # The trailing `+ 8` is the eight supplemental riders: #1656, #2185, #1627,
-    # #2452, #2920, #2937, task 2.1a's status-vocabulary parity and #2323.
-    assert len(selected) == 1 + len(DIRECT_GRID_CONTRACT_TESTS) + len(DIRECT_GRID_CONTRACT_IMPORTER_TESTS) + 8
+    # Still bounded: exactly the canonical contract path's own selection (pinned
+    # by the test above) plus the one production-topology hard-gate node that
+    # #2323 adds for the three `openspec/changes/**` scan inputs.
+    canonical = set(select_tests([DIRECT_GRID_CONTRACT_CANONICAL_PATH], repo_root=Path(".")))
+    assert selected == sorted(canonical | {TOPOLOGY_HARD_GATE_NODE})
+    assert TOPOLOGY_HARD_GATE_NODE not in canonical
     assert "tests/test_forcing_producer.py" not in selected
-    assert not set(CORE_SMOKE_TESTS) & set(selected)
 
 
 def test_select_tests_maps_orchestrator_chain_types_to_manifest_surface_nodes() -> None:
@@ -11557,8 +11510,7 @@ INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
     # -- redirect ----------------------------------------------------------
     # These six modules are owned by `stop_on_match` rules that deliberately
     # swap the two slow orchestrator suites for focused `::` node ids
-    # (ORCHESTRATOR_MANIFEST_SURFACE_TESTS / FILE_JOURNAL_READ_STATE_TESTS),
-    # and direct_grid_contract.py for DIRECT_GRID_CONTRACT_TESTS. The suite is
+    # (ORCHESTRATOR_MANIFEST_SURFACE_TESTS / FILE_JOURNAL_READ_STATE_TESTS). The suite is
     # reached, just not whole-file — which is why the derivation still calls it
     # a gap rather than normalizing the `::` away and losing the distinction.
     ("services/orchestrator/chain.py", "tests/test_orchestration_chain.py"): "redirect",
@@ -11567,7 +11519,6 @@ INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
     ("services/orchestrator/cli.py", "tests/test_production_scheduler.py"): "redirect",
     ("services/orchestrator/file_orchestration_journal.py", "tests/test_production_scheduler.py"): "redirect",
     ("services/orchestrator/scheduler.py", "tests/test_production_scheduler.py"): "redirect",
-    ("workers/forcing_producer/direct_grid_contract.py", "tests/test_forcing_producer.py"): "redirect",
     # -- edge-consumer: the loop-spelling measurement's import-order fixture --
     # (#1627) ---------------------------------------------------------------
     # tests/test_preserve_final_component_loop_spelling.py has exactly one
@@ -11642,51 +11593,18 @@ INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
         "tests/test_two_node_docker_runtime.py",
     ): "edge-consumer",
     ("services/production_closure/two_node_e2e_evidence.py", "tests/test_two_node_docker_runtime.py"): "edge-consumer",
-    # -- edge-consumer: data_adapters/base.py cycle-identity helpers --------
-    # base.py exports `cycle_id_for`, `format_cycle_time` and `CycleDiscovery`;
-    # fifteen orchestration-, API- and journal-layer suites import one of those
-    # three names and nothing else from the adapters. Each is selected by the
-    # rule that owns its own surface, which is where a regression in it would be
-    # investigated. Pulling all fifteen into `workers/data_adapters/**` would
-    # put the orchestrator's journal and scheduler suites on every GFS/IFS/ERA5
-    # adapter PR. The one importer with NO owning rule anywhere,
-    # tests/test_state_clone_cutover_hook.py, is not here: it gets a narrow
-    # `workers/data_adapters/base.py` rule instead.
-    # #2074 partitioned tests/test_api_contract.py; `cycle_id_for` is imported at
-    # module scope by the control-plane partition (it mints the cycle ids behind the
-    # pipeline/ops routes), so the disposition follows that owner.
-    ("workers/data_adapters/base.py", "tests/test_api_contract_pipeline_ops.py"): "edge-consumer",
-    ("workers/data_adapters/base.py", "tests/test_e2e_m3.py"): "edge-consumer",
+    # -- edge-consumer: data_adapters/base.py `CycleDiscovery` -------------
+    # base.py exports `CycleDiscovery` (its cycle-identity helpers moved to
+    # packages/common/contracts/time_normalization.py in entropy-burndown 1.2/1.3);
+    # these orchestration- and journal-layer suites import it and nothing else
+    # from the adapters. Each is selected by the rule that owns its own surface,
+    # which is where a regression in it would be investigated. Pulling them into
+    # `workers/data_adapters/**` would put the orchestrator's journal and
+    # scheduler suites on every GFS/IFS/ERA5 adapter PR. The one importer with NO
+    # owning rule anywhere, tests/test_state_clone_cutover_hook.py, is not here:
+    # it gets a narrow `workers/data_adapters/base.py` rule instead.
     ("workers/data_adapters/base.py", "tests/test_file_orchestration_journal.py"): "edge-consumer",
-    ("workers/data_adapters/base.py", "tests/test_file_orchestration_journal_read_cache.py"): "edge-consumer",
-    ("workers/data_adapters/base.py", "tests/test_file_orchestration_migration.py"): "edge-consumer",
-    ("workers/data_adapters/base.py", "tests/test_ifs_forecast_integration.py"): "edge-consumer",
-    ("workers/data_adapters/base.py", "tests/test_monitoring_api.py"): "edge-consumer",
-    # #2022: the OpenAPI response-conformance suite validates TestClient bodies
-    # against the schemas in `openapi/nhms.v1.yaml`; it imports `cycle_id_for`
-    # to mint the cycle ids that seed the in-memory sqlite store behind the
-    # three `pipeline.py` metrics routes. Fixture material, not a subject — it
-    # is selected by `openapi/**`, the surface it actually contracts.
-    ("workers/data_adapters/base.py", "tests/test_openapi_response_conformance.py"): "edge-consumer",
-    # #2348: the pipeline half of the response-model oracle imports `cycle_id_for`
-    # to mint the cycle ids of the sqlite rows behind the ops routes it samples,
-    # exactly like the two suites above. Its subject is `apps/api/routes/pipeline.py`
-    # and `apps/api/response_models/**`, the rules that select it.
-    ("workers/data_adapters/base.py", "tests/test_response_model_preservation_pipeline.py"): "edge-consumer",
-    ("workers/data_adapters/base.py", "tests/test_pipeline_logs_artifacts.py"): "edge-consumer",
-    ("workers/data_adapters/base.py", "tests/test_production_readiness_validation.py"): "edge-consumer",
-    ("workers/data_adapters/base.py", "tests/test_scheduler_backfill.py"): "edge-consumer",
     ("workers/data_adapters/base.py", "tests/test_scheduler_backfill_predecessor.py"): "edge-consumer",
-    # #1944: the job-id scope census imports `cycle_id_for`/`format_cycle_time`
-    # to mint the journal rows it censuses; it is an orchestrator-journal suite,
-    # selected by `services/orchestrator/**`.
-    ("workers/data_adapters/base.py", "tests/test_scheduler_journal_scope_census.py"): "edge-consumer",
-    # #1953: the full-tree budget contract imports `cycle_id_for` for exactly
-    # the same reason as its fourteen neighbours above — to mint the job ids of
-    # the rows it drives the budget over. Its subject is the journal's record
-    # budget and the synthetic blocked row, not the adapters; it is selected by
-    # `services/orchestrator/**` and by the journal module's own stop rule.
-    ("workers/data_adapters/base.py", "tests/test_file_journal_full_tree_budget_contract.py"): "edge-consumer",
     ("workers/data_adapters/base.py", "tests/test_source_scoped_dispatch.py"): "edge-consumer",
     # #1555/#1768: the operator re-entry confirmation suite imports
     # `CycleDiscovery` and nothing else from the adapters — fixture material for
@@ -11697,22 +11615,16 @@ INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
     # `workers/data_adapters/**` would put a 47s scheduler suite on every
     # GFS/IFS/ERA5 adapter PR.
     ("workers/data_adapters/base.py", "tests/test_operator_reentry_confirmation.py"): "edge-consumer",
-    ("workers/data_adapters/base.py", "tests/test_state_clone.py"): "edge-consumer",
-    # #2548: the state-index retention suite imports `cycle_id_for` to mint the
-    # cycle ids of the index entries it prunes — fixture material, like the
-    # neighbours above. It is selected whole by the state_manager.py rule.
-    ("workers/data_adapters/base.py", "tests/test_state_index_retention.py"): "edge-consumer",
     # -- runtime-budget ----------------------------------------------------
     # Two of the 74 suites do not fit the lane. tests/test_orchestration_chain.py
     # is the extreme one: the capped PR-lane run was killed at 596s having
     # completed 47% of its 306 items (~21 min extrapolated), against a ~5 min
     # per-module line. `services/orchestrator/**` already carries it for the
     # orchestrator's own modules; putting it on an adapter or gateway PR as
-    # well is what would actually threaten the 35-min Unit Tests cap. Both
-    # importers here take it as a fixture dependency — base.py for
-    # `cycle_id_for`, config.py for the gateway settings object.
+    # well is what would actually threaten the 35-min Unit Tests cap. The
+    # importer here takes it as a fixture dependency — config.py for the
+    # gateway settings object.
     ("services/slurm_gateway/config.py", "tests/test_orchestration_chain.py"): "runtime-budget",
-    ("workers/data_adapters/base.py", "tests/test_orchestration_chain.py"): "runtime-budget",
     # The #1809 gateway-reconcile partitions (formerly one 14k-line suite, the
     # audit's second-heaviest: 246.5s for 487 assertions) are collectively the
     # same lane cost. Their primary subject IS
@@ -11840,26 +11752,6 @@ INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
         "services/production_closure/scale_validation.py",
         "tests/test_river_ts_read_path_surrogate_keys.py",
     ): "edge-consumer",
-    # -- edge-consumer: workers/mapping_builder/rewrite.py state-clone importers
-    # (#1711) ---------------------------------------------------------------
-    # rewrite.py's four non-gated importer suites OUTSIDE the mapping-builder
-    # package set each belong to an independent owning surface, never the
-    # mapping-builder lane: tests/test_state_clone.py rides the broad
-    # `services/orchestrator/**` rule; tests/test_state_clone_cutover_hook.py
-    # rides the `workers/data_adapters/base.py` and
-    # `packages/common/state_clone_hook.py` rules; tests/test_state_clone_
-    # recalibration.py and tests/test_state_clone_baseline_cutover_cli.py ride
-    # the `scripts/node22_clone_direct_grid_cutover_states.py` rule (the
-    # baseline suite imports `HydrologicCoreFingerprintMismatchError` from
-    # rewrite.py to name the fingerprint-gate failure it induces). Copying any
-    # of them into `workers/mapping_builder/**` would make every mapping-builder
-    # PR pay for a state-clone surface — the exact contamination #1711 forbids.
-    # The edge-consumer liveness guard machine-checks each suite is selected by
-    # a rule whose pattern does not match rewrite.py.
-    ("workers/mapping_builder/rewrite.py", "tests/test_state_clone.py"): "edge-consumer",
-    ("workers/mapping_builder/rewrite.py", "tests/test_state_clone_cutover_hook.py"): "edge-consumer",
-    ("workers/mapping_builder/rewrite.py", "tests/test_state_clone_recalibration.py"): "edge-consumer",
-    ("workers/mapping_builder/rewrite.py", "tests/test_state_clone_baseline_cutover_cli.py"): "edge-consumer",
     # -- edge-consumer: the forcing read-path suite's package drag-in (#1990) -
     # tests/test_forcing_read_path_store_routing.py belongs to the FORCING read
     # surface: FORCING_SQL_SHAPE_ORACLE_TESTS is ridden by every registered
@@ -12941,9 +12833,8 @@ STOP_RULE_AT_SITE_EXTENSIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "tests/test_gateway_reconcile_writer_quiescence.py",
         ),
     ),
-    ("workers/forcing_producer/direct_grid_contract.py", DIRECT_GRID_CONTRACT_IMPORTER_TESTS),
-    # #2921: the contract's canonical home carries the same at-site importer
-    # suites on its own stop rule.
+    # #2921: the contract's canonical home carries the direct-grid at-site
+    # importer suites on its own stop rule.
     (DIRECT_GRID_CONTRACT_CANONICAL_PATH, DIRECT_GRID_CONTRACT_IMPORTER_TESTS),
     # #2260: the scheduler_runtime.py stop rule's at-site addition. Its shared
     # constant FILE_JOURNAL_READ_STATE_TESTS was never pinned here (it is the
@@ -15104,7 +14995,7 @@ def test_import_layering_guard_routes_every_python_path_under_its_roots() -> Non
     # Spec "Guard runs for package changes" and "Guard runs even under a
     # stop-rule owner": the direct-grid contract module is owned by a
     # stop_on_match row, and the additive loop sits after the stop-rule loop.
-    owner = "workers/forcing_producer/direct_grid_contract.py"
+    owner = DIRECT_GRID_CONTRACT_CANONICAL_PATH
     assert any(rule.stop_on_match and fnmatch.fnmatch(owner, rule.pattern) for rule in PATH_TEST_RULES), (
         f"{owner} is no longer owned by a stop_on_match rule -- the scenario is stale"
     )
@@ -15218,7 +15109,7 @@ def test_any_ratchet_routes_every_python_path_under_its_roots() -> None:
     # scripts/ through an additive loop": the direct-grid contract module is
     # owned by a stop_on_match row, and the additive loop sits after the
     # stop-rule loop, so the owner cannot shadow the ratchet.
-    owner = "workers/forcing_producer/direct_grid_contract.py"
+    owner = DIRECT_GRID_CONTRACT_CANONICAL_PATH
     assert any(rule.stop_on_match and fnmatch.fnmatch(owner, rule.pattern) for rule in PATH_TEST_RULES), (
         f"{owner} is no longer owned by a stop_on_match rule -- the scenario is stale"
     )
@@ -15303,7 +15194,8 @@ def test_status_vocab_parity_routes_every_python_path_under_its_roots() -> None:
     # The additive loop sits after the stop-rule loop, so a stop_on_match owner
     # (the direct-grid contract module) cannot shadow the parity suite.
     for module in (
-        "workers/forcing_producer/direct_grid_contract.py",
+        DIRECT_GRID_CONTRACT_CANONICAL_PATH,
+        "workers/forcing_producer/producer.py",
         "services/orchestrator/scheduler_state_types.py",
         "apps/api/routes/pipeline.py",
         "scripts/run_qhh_continuous.py",
@@ -15858,26 +15750,17 @@ def test_state_clone_shared_fixtures_select_all_their_consumers() -> None:
 
 def test_mapping_builder_joins_the_directory_audit_without_new_gaps() -> None:
     # #1711: workers/mapping_builder must be in DIRECTORY_RULE_AUDIT_PATHS, and
-    # its derived importer gaps must be EXACTLY the four rewrite.py state-clone
-    # pairs, each dispositioned as `edge-consumer` in the exclusion table (they
-    # belong to independent owning surfaces, never the mapping-builder lane;
-    # the baseline suite imports `HydrologicCoreFingerprintMismatchError` from
-    # rewrite.py to name the fingerprint-gate failure it induces).
-    # The global disposition guard therefore stays clean while the mapping
-    # rule itself carries no state-clone suites.
+    # it derives NO importer gaps: the four rewrite.py state-clone pairs it used
+    # to carry (dispositioned `edge-consumer`) left with entropy-burndown 1.3,
+    # when those suites began importing the fingerprint names from
+    # packages/common/contracts/hydrologic_fingerprint.py. Any pair that appears
+    # must still be dispositioned `edge-consumer` (loop below).
     assert "workers/mapping_builder" in DIRECTORY_RULE_AUDIT_PATHS
     universe, gaps = _directory_rule_importer_map()
     assert any(module.startswith("workers/mapping_builder/") for module in universe)
     mapping_gaps = {m: s for m, s in gaps.items() if m.startswith("workers/mapping_builder/")}
 
-    expected_gaps = {
-        "workers/mapping_builder/rewrite.py": {
-            "tests/test_state_clone.py",
-            "tests/test_state_clone_cutover_hook.py",
-            "tests/test_state_clone_recalibration.py",
-            "tests/test_state_clone_baseline_cutover_cli.py",
-        }
-    }
+    expected_gaps = {}
     assert mapping_gaps == expected_gaps, f"mapping-builder gap set changed: {mapping_gaps}"
 
     for module, suites in mapping_gaps.items():
@@ -22998,17 +22881,23 @@ def _response_model_oracle_imports() -> set[str]:
     return owners
 
 
-def _response_model_oracle_fixture_imports() -> set[str]:
-    """Imports the gap ledger rules fixture material for an oracle half.
+# Oracle-half imports that are fixture material, named here because the gap
+# ledger does not cover packages/**: the pipeline half imports `cycle_id_for`
+# from the time-normalization contract only to mint the ids of its sqlite rows.
+RESPONSE_MODEL_ORACLE_FIXTURE_IMPORTS: tuple[str, ...] = ("packages/common/contracts/time_normalization.py",)
 
-    e.g. `workers/data_adapters/base.py`: the pipeline half imports `cycle_id_for`
-    only to mint the ids of its sqlite rows (a reasoned `edge-consumer`).
+
+def _response_model_oracle_fixture_imports() -> set[str]:
+    """Imports that are fixture material for an oracle half, not builders.
+
+    The gap ledger's reasoned `edge-consumer` edges into an oracle half, plus the
+    named RESPONSE_MODEL_ORACLE_FIXTURE_IMPORTS.
     """
     return {
         owner
         for (owner, suite), reason in INTENTIONAL_RULE_GAP_EXCLUSIONS.items()
         if suite in RESPONSE_MODEL_PRESERVATION and reason == "edge-consumer"
-    }
+    } | set(RESPONSE_MODEL_ORACLE_FIXTURE_IMPORTS)
 
 
 def _response_model_oracle_builder_owners() -> set[str]:
@@ -23050,8 +22939,8 @@ def test_every_builder_the_preservation_oracle_drives_selects_both_halves() -> N
     public_tree = ast.parse(Path("packages/common/model_registry_public.py").read_text(encoding="utf-8"))
     defined = {node.name for node in public_tree.body if isinstance(node, ast.FunctionDef)}
     assert REGISTRY_ROUTE_SANITIZERS <= defined, sorted(defined)
-    # The ledger exclusion is live, not vacuous: the import is really there.
-    assert "workers/data_adapters/base.py" in _response_model_oracle_imports() - owners
+    # The fixture exclusion is live, not vacuous: the import is really there.
+    assert "packages/common/contracts/time_normalization.py" in _response_model_oracle_imports() - owners
     # #2624: the named pipeline builders are live, not vacuous: the route
     # imports each one at module level.
     pipeline_tree = _parse_tracked("apps/api/routes/pipeline.py")

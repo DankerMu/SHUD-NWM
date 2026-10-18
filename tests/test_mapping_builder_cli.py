@@ -47,14 +47,11 @@ import struct
 
 import pytest
 
+from packages.common.contracts.direct_grid import DirectGridForcingContract, load_forcing_mapping_contract_from_manifest
 from tests.fixtures.mapping_builder.in_memory_grid_snapshot import (
     InMemoryGridSnapshotLoader,
     make_regular_grid_cells,
     make_snapshot,
-)
-from workers.forcing_producer.direct_grid_contract import (
-    DirectGridForcingContract,
-    load_forcing_mapping_contract_from_manifest,
 )
 from workers.mapping_builder import cli as cli_module
 from workers.mapping_builder.algorithm import GridSignatureMismatchError

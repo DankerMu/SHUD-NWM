@@ -28,8 +28,8 @@ the object store, so the file layout here is a cross-plane read contract.
   `file_store.py:db_free_repository_enabled()` is true. Any new repository
   method must exist on both with the same semantics.
 - The direct-grid contract parser lives in
-  `packages/common/contracts/direct_grid.py`. `direct_grid_contract.py` here is
-  a compatibility re-export; do not add logic to it.
+  `packages/common/contracts/direct_grid.py`; import it from there. The package
+  `__init__.py` still re-exports its public names, but add no logic here.
 - Shared forcing contracts stay in `packages/common`:
   `packages/common/shud_forcing_contract.py`,
   `packages/common/forcing_store_routing.py`,

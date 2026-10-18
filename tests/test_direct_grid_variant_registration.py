@@ -80,12 +80,8 @@ from typing import Any
 
 import pytest
 
-from workers.forcing_producer.direct_grid_contract import (
-    load_forcing_mapping_contract_from_manifest,
-)
-from workers.forcing_producer.direct_grid_contract import (
-    parse_direct_grid_forcing_contract as _parse_direct_grid_contract,
-)
+from packages.common.contracts.direct_grid import load_forcing_mapping_contract_from_manifest
+from packages.common.contracts.direct_grid import parse_direct_grid_forcing_contract as _parse_direct_grid_contract
 from workers.forcing_producer.store import (
     DIRECT_GRID_CACHE_STATION_ROLE,
     MetStoreError,

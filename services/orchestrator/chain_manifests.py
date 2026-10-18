@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
+from packages.common.contracts.time_normalization import cycle_id_for, format_cycle_time, parse_cycle_time
 from packages.common.manifest_index import ManifestValidationError, serialize_manifest_index
 from packages.common.object_store import LocalObjectStore
 from packages.common.safe_fs import SafeFilesystemError, read_bytes_limited_no_follow
@@ -57,7 +58,6 @@ from services.orchestrator.production_contract import (
     production_stage_for,
 )
 from services.orchestrator.scheduler_generation import PACKAGED_IC_QUALITY
-from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time
 
 __all__ = (
     "ANALYSIS_SCENARIO_ID",

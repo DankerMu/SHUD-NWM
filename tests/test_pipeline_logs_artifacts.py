@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from apps.api.main import create_app
 from apps.api.routes import pipeline as pipeline_routes
+from packages.common.contracts.time_normalization import cycle_id_for
 from packages.common.object_store import LocalObjectStore
 from services.artifacts import ArtifactReader, ArtifactReaderConfig
 from services.orchestrator.chain import ForecastOrchestrator, OrchestratorConfig
@@ -20,7 +21,6 @@ from tests.test_orchestration_chain import (
     _basins,
     _successful_control_node_publisher,
 )
-from workers.data_adapters.base import cycle_id_for
 
 
 class StubObjectReader:

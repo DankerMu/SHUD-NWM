@@ -33,6 +33,7 @@ import pytest
 
 import scripts.model_succession.scheduler as scheduler_steps
 import scripts.node22_model_succession as tool
+from packages.common.contracts.time_normalization import cycle_id_for
 from packages.common.object_store import LocalObjectStore, sha256_bytes
 from packages.common.state_manager import publish_state_snapshot_index, state_snapshot_id
 from scripts.model_succession import plan as planning
@@ -57,7 +58,6 @@ from tests.state_clone_recalibration_fixtures import (
     _PARA_V2,
     _write_package,
 )
-from workers.data_adapters.base import cycle_id_for
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TIMER = "nhms-compute-scheduler.timer"

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any, Mapping
 
+from packages.common.contracts.time_normalization import cycle_id_for, format_cycle_time
 from packages.common.source_identity import normalize_source_id
 from packages.common.state_lineage import (
     STATE_QC_FAILED,
@@ -21,7 +22,6 @@ from services.orchestrator.chain_types import (
     ModelContext,
     OrchestratorError,
 )
-from workers.data_adapters.base import cycle_id_for, format_cycle_time
 
 scenario_for_source = _chain.scenario_for_source
 _MAX_STATE_FALLBACK_CANDIDATES = _chain._MAX_STATE_FALLBACK_CANDIDATES

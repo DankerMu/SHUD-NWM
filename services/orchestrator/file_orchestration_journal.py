@@ -23,6 +23,7 @@ from packages.common.auth_policy import (
     require_policy_evidence,
     trusted_internal_policy_decision,
 )
+from packages.common.contracts.time_normalization import cycle_id_for, format_cycle_time, parse_cycle_time
 from packages.common.safe_fs import (
     SafeFilesystemError,
     atomic_write_bytes_no_follow,
@@ -178,7 +179,6 @@ from services.orchestrator.scheduler_state_types import (
     HYDRO_RUN_CODE_CLEARING_STATUSES,
 )
 from services.slurm_gateway.models import SubmitJobRequest
-from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time
 
 LOGGER = logging.getLogger(__name__)
 

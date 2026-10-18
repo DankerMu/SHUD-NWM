@@ -5,9 +5,9 @@ from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+from packages.common.contracts.time_normalization import format_cycle_time
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator.scheduler_state_types import cohort_member_row_is_attributed
-from workers.data_adapters.base import format_cycle_time
 
 TERMINAL_PIPELINE_SUCCESS_STATUSES = {"succeeded", "complete", "published"}
 FAILED_PIPELINE_STATUSES = {"failed", "submission_failed", "partially_failed", "permanently_failed"}

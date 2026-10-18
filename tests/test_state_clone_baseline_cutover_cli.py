@@ -26,6 +26,7 @@ from typing import Any
 
 import pytest
 
+from packages.common.contracts.hydrologic_fingerprint import HydrologicCoreFingerprintMismatchError
 from packages.common.object_store import LocalObjectStore, sha256_bytes
 from packages.common.state_manager import (
     publish_state_snapshot_index,
@@ -44,7 +45,6 @@ from tests.state_clone_recalibration_fixtures import (
     _PARA_V1,
     _write_package,
 )
-from workers.mapping_builder.rewrite import HydrologicCoreFingerprintMismatchError
 
 BASIN_A = "huai"  # warm
 BASIN_B = "huai_ift"  # warm
@@ -316,9 +316,9 @@ def _expected_fingerprint_hash(env: Mapping[str, Any], model: Mapping[str, Any])
     and the same relative paths are fingerprinted on the baseline root.
     """
 
+    from packages.common.contracts.hydrologic_fingerprint import compute_hydrologic_core_fingerprint
     from packages.common.object_store import LocalObjectStore as _Store
     from scripts.provision_direct_grid_scheduler_registry import _category_files as _cat
-    from workers.mapping_builder.rewrite import compute_hydrologic_core_fingerprint
 
     store = _Store(env["object_root"], "s3://nhms")
     variant_root = store.resolve_path(str(model["model_package_uri"]))

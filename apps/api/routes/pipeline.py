@@ -29,6 +29,7 @@ from apps.api.response_models.pipeline import (
     StageDurationMetricListEnvelope,
     SuccessRateMetricListEnvelope,
 )
+from packages.common.contracts.time_normalization import format_cycle_time, parse_cycle_time
 from packages.common.redaction import redact_payload
 from packages.common.source_identity import normalize_source_id
 from packages.common.sqlalchemy_url import sqlalchemy_url
@@ -50,7 +51,6 @@ from services.orchestrator.retry import (
 )
 from services.slurm_gateway.config import SlurmGatewaySettings, get_settings
 from services.slurm_gateway.gateway import SlurmGateway, SlurmGatewayError
-from workers.data_adapters.base import format_cycle_time, parse_cycle_time
 
 router = APIRouter(prefix="/api/v1", tags=["pipeline"])
 # #1728: this router's connection surface in pg_stat_activity. Distinct from

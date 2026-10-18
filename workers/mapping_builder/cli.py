@@ -64,6 +64,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from packages.common.contracts.hydrologic_fingerprint import verify_hydrologic_core_fingerprint_equal
 from packages.common.grid_registry_store import CanonicalGridCell
 from packages.common.grid_signature import canonical_json_bytes
 
@@ -121,7 +122,6 @@ from workers.mapping_builder.rewrite import (
     SpAttRewriteReport,
     copy_and_rewrite_sp_att_forc,
     parse_sp_att_forc_rows,
-    verify_hydrologic_core_fingerprint_equal,
     verify_no_legacy_weather_path_in_active_tree,
     verify_non_forc_columns_unchanged,
     verify_non_sp_att_checksums_equal,

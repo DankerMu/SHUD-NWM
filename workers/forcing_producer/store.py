@@ -8,6 +8,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from packages.common.contracts.direct_grid import (
+    DirectGridContractError,
+    DirectGridForcingContract,
+    load_forcing_mapping_contract_from_manifest,
+)
 from packages.common.forcing_store_routing import (
     FORCING_NARROW_INSERT_TEMPLATE,
     FORCING_VERSION_ROUTING_SQL,
@@ -22,11 +27,6 @@ from packages.common.timeseries_compression_fence import (
     try_ingest_fence,
 )
 
-from .direct_grid_contract import (
-    DirectGridContractError,
-    DirectGridForcingContract,
-    load_forcing_mapping_contract_from_manifest,
-)
 from .producer import (
     CanonicalProduct,
     ForcingComponent,

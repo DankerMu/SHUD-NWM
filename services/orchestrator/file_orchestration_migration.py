@@ -17,6 +17,7 @@ from typing import Any, Iterator
 from urllib.parse import urlparse
 from uuid import uuid4
 
+from packages.common.contracts.time_normalization import parse_cycle_time
 from packages.common.rollback_execution_binding import (
     ROLLBACK_EXECUTION_BINDING_SCHEMA_VERSION,
     RollbackExecutionBindingError,
@@ -38,7 +39,6 @@ from services.orchestrator.file_orchestration_journal import (
 )
 from services.orchestrator.journal_root_authority import verify_journal_root_authority
 from services.orchestrator.scheduler_state import _format_utc
-from workers.data_adapters.base import parse_cycle_time
 
 HISTORICAL_NODE22_DB_PORT = 55433
 MIGRATION_RECEIPT_SCHEMA_VERSION = "nhms.scheduler.file_orchestration_migration.v1"

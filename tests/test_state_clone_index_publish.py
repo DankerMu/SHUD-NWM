@@ -90,7 +90,7 @@ def _cycle_id_for_source(source_id: str) -> str:
     """
     from datetime import timedelta as _td
 
-    from workers.data_adapters.base import cycle_id_for
+    from packages.common.contracts.time_normalization import cycle_id_for
 
     producer_cycle_time = CUTOVER_VALID_TIME - _td(hours=LEAD_HOURS)
     return cycle_id_for(source_id, producer_cycle_time)
