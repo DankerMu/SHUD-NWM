@@ -537,11 +537,11 @@
 
   Depends on: 5.1
 
-  Verify：`uv run pytest -q tests/test_file_orchestration_journal.py tests/test_file_orchestration_journal_read_cache.py tests/test_file_orchestration_journal_facade.py tests/test_file_journal_cluster_map.py`，零改动通过。
+  Verify：见「钉死的契约（5.2 后继 read_attribution）」Verify（补全）。
 
-  首刀 Verify：同上，map 中 `context` 聚簇的名字已不在 facade 顶层定义中。
+  首刀 Verify：见「钉死的契约（5.2 首刀 context）」Verify（补全）；map 中 `context` 聚簇的名字已不在 facade 顶层定义中。
 
-  **Suggested fixture level:** compact - 两个叶子聚簇，无被 patch 名。
+  **Suggested fixture level:** compact - 两个小聚簇，无被 patch 名；context 有 4 个 facade 驻留依赖（函数体内导入），read_attribution 是零依赖叶子、带模块级共享状态。
 
   **Minimal mergeable slice:** context 单独 - 最小叶子、无被 patch 名；read_attribution 作为后继。
 
