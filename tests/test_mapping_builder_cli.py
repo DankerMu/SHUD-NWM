@@ -2183,7 +2183,7 @@ def test_no_duplicated_stage_logic_all_stage_functions_come_from_stage_modules()
         "parse_sp_att_forc_rows": "workers.mapping_builder.rewrite",
         "verify_non_forc_columns_unchanged": "workers.mapping_builder.rewrite",
         "verify_non_sp_att_checksums_equal": "workers.mapping_builder.rewrite",
-        "verify_hydrologic_core_fingerprint_equal": "workers.mapping_builder.rewrite",
+        "verify_hydrologic_core_fingerprint_equal": "packages.common.contracts.hydrologic_fingerprint",
         "verify_no_legacy_weather_path_in_active_tree": "workers.mapping_builder.rewrite",
         "emit_direct_grid_manifest_and_binding": "workers.mapping_builder.binding",
         "verify_no_forbidden_runtime_producer_artifacts": "workers.mapping_builder.binding",
