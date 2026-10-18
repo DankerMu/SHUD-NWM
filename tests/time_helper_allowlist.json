@@ -1,1 +1,52 @@
-[]
+[
+  {
+    "file": "services/orchestrator/chain_forecast_control.py",
+    "name": "_format_time",
+    "reason": "late-binding forwarder to the services.orchestrator.chain facade attribute (same getattr(_chain, ...) seam as the module's sibling forwarders); a direct import would silently drop facade patches"
+  },
+  {
+    "file": "services/orchestrator/chain_forecast_control.py",
+    "name": "_utcnow",
+    "reason": "late-binding forwarder to the services.orchestrator.chain facade attribute (same getattr(_chain, ...) seam as the module's sibling forwarders); a direct import would silently drop facade patches"
+  },
+  {
+    "file": "services/orchestrator/chain_forecast_cycle.py",
+    "name": "_format_time",
+    "reason": "late-binding forwarder to the services.orchestrator.chain facade attribute (same getattr(_chain, ...) seam as the module's sibling forwarders); a direct import would silently drop facade patches"
+  },
+  {
+    "file": "services/orchestrator/chain_forecast_execution.py",
+    "name": "_format_time",
+    "reason": "late-binding forwarder to the services.orchestrator.chain facade attribute (same getattr(_chain, ...) seam as the module's sibling forwarders); a direct import would silently drop facade patches"
+  },
+  {
+    "file": "services/orchestrator/chain_forecast_execution.py",
+    "name": "_utcnow",
+    "reason": "late-binding forwarder to the services.orchestrator.chain facade attribute (same getattr(_chain, ...) seam as the module's sibling forwarders); a direct import would silently drop facade patches"
+  },
+  {
+    "file": "services/orchestrator/chain_forecast_state.py",
+    "name": "_format_time",
+    "reason": "late-binding forwarder to the services.orchestrator.chain facade attribute (same getattr(_chain, ...) seam as the module's sibling forwarders); a direct import would silently drop facade patches"
+  },
+  {
+    "file": "services/orchestrator/chain_forecast_submission.py",
+    "name": "_utcnow",
+    "reason": "late-binding forwarder to the services.orchestrator.chain facade attribute (same getattr(_chain, ...) seam as the module's sibling forwarders); a direct import would silently drop facade patches"
+  },
+  {
+    "file": "services/orchestrator/chain_forecast_templates.py",
+    "name": "_format_time",
+    "reason": "late-binding forwarder to the services.orchestrator.chain facade attribute (same getattr(_chain, ...) seam as the module's sibling forwarders); a direct import would silently drop facade patches"
+  },
+  {
+    "file": "services/orchestrator/chain_forecast_trigger.py",
+    "name": "_format_time",
+    "reason": "late-binding forwarder to the services.orchestrator.chain facade attribute (same getattr(_chain, ...) seam as the module's sibling forwarders); a direct import would silently drop facade patches"
+  },
+  {
+    "file": "services/orchestrator/scheduler_candidate_manifest.py",
+    "name": "normalize_source_id",
+    "reason": "late-binding forwarder to services.orchestrator.scheduler (sibling format_cycle_time is monkeypatched on that facade)"
+  }
+]

@@ -10,6 +10,7 @@ from typing import Any, Mapping, Sequence
 import httpx
 
 from packages.common.contracts.time_normalization import cycle_id_for, format_cycle_time, parse_cycle_time
+from packages.common.contracts.time_normalization import format_iso_utc as _format_time
 from packages.common.python_runtime import validated_target_python_runtime
 from packages.common.redaction import redact_payload
 from packages.common.source_identity import normalize_source_id
@@ -983,10 +984,6 @@ def _ensure_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
-
-
-def _format_time(value: datetime) -> str:
-    return _ensure_utc(value).isoformat().replace("+00:00", "Z")
 
 
 def _format_time_or_none(value: datetime | None) -> str | None:

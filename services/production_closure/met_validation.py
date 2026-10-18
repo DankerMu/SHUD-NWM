@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.parse import unquote, urlsplit, urlunsplit
 
+from packages.common.contracts.time_normalization import format_iso_utc
 from packages.common.object_store import LocalObjectStore
 from packages.common.redaction import redact_payload, redact_text
 from packages.common.safe_fs import (
@@ -535,8 +536,8 @@ def _preflight_payload(config: ProductionMetConfig) -> dict[str, Any]:
         "access_mode": config.access_mode,
         "cached_fallback_policy": config.cached_fallback_policy,
         "cycle_window": {
-            "start": _format_time(config.cycle_start),
-            "end": _format_time(config.cycle_end),
+            "start": format_iso_utc(config.cycle_start),
+            "end": format_iso_utc(config.cycle_end),
             "forecast_hours": list(config.forecast_hours),
         },
         "object_prefix": config.object_prefix,
@@ -630,7 +631,7 @@ def _write_raw_source_evidence(config: ProductionMetConfig, store: LocalObjectSt
         "schema": "nhms.production_closure.met.raw_cycle_manifest.v1",
         "status": raw_status,
         "run_id": config.run_id,
-        "cycle_time": _format_time(config.cycle_start),
+        "cycle_time": format_iso_utc(config.cycle_start),
         "sources": source_entries,
         "total_file_count": total_files,
         "total_byte_count": total_bytes,
@@ -690,7 +691,7 @@ def _write_deterministic_source_manifest(
             {
                 "source": source,
                 "source_id": source_id,
-                "cycle_time": _format_time(config.cycle_start),
+                "cycle_time": format_iso_utc(config.cycle_start),
                 "forecast_hour": forecast_hour,
                 "variable": variable,
                 "remote_url": f"{endpoint_identity}/{compact_cycle}/f{forecast_hour:03d}/{variable}",
@@ -707,7 +708,7 @@ def _write_deterministic_source_manifest(
     manifest_payload = {
         "source_id": source_id,
         "source": source,
-        "cycle_time": _format_time(config.cycle_start),
+        "cycle_time": format_iso_utc(config.cycle_start),
         "metadata": {
             "forecast_hours": list(config.forecast_hours),
             "execution_mode": "deterministic_fixture",
@@ -735,7 +736,7 @@ def _write_deterministic_source_manifest(
         "source_id": source_id,
         "status": "available",
         "execution_mode": "deterministic_fixture",
-        "cycle_time": _format_time(config.cycle_start),
+        "cycle_time": format_iso_utc(config.cycle_start),
         "selected_forecast_hours": list(config.forecast_hours),
         "file_count": len(entries) + 1,
         "byte_count": byte_count,
@@ -800,7 +801,7 @@ def _write_canonical_evidence(
         "status": "ready",
         "conversion_status": result.status,
         "source_id": "gfs",
-        "cycle_time": _format_time(config.cycle_start),
+        "cycle_time": format_iso_utc(config.cycle_start),
         "product_count": len(products),
         "source_statuses": source_statuses,
         "products": products,
@@ -862,7 +863,7 @@ def _write_forcing_evidence(
         "model_id": config.model_id,
         "model_version": config.model_version,
         "source_id": "gfs",
-        "cycle_time": _format_time(config.cycle_start),
+        "cycle_time": format_iso_utc(config.cycle_start),
         "forcing_package_uri": result.forcing_package_uri,
         "forcing_package_manifest_uri": package_manifest_uri,
         "checksum": result.checksum,
@@ -889,7 +890,7 @@ def _forcing_qc_payload(
     missing_values = [
         {
             "station_id": row.station_id,
-            "valid_time": _format_time(row.valid_time),
+            "valid_time": format_iso_utc(row.valid_time),
             "variable": row.variable,
         }
         for row in rows
@@ -976,7 +977,7 @@ def _best_available_lineage(
     per_valid_time = []
     for forecast_hour in config.forecast_hours:
         valid_time = config.cycle_start + timedelta(hours=forecast_hour)
-        valid_time_text = _format_time(valid_time)
+        valid_time_text = format_iso_utc(valid_time)
         candidates = []
         for source in SOURCE_ORDER:
             mode = source_modes.get(source, "not_executed")
@@ -1050,7 +1051,7 @@ def _summary(
         "final_production_readiness_claimed": False,
         "object_prefix": config.object_prefix,
         "enabled_sources": list(config.enabled_sources),
-        "cycle_time": _format_time(config.cycle_start),
+        "cycle_time": format_iso_utc(config.cycle_start),
         "forecast_hours": list(config.forecast_hours),
         "model_id": config.model_id,
         "blockers": blockers,
@@ -1243,7 +1244,7 @@ def _deterministic_raw_content(source: str, variable: str, forecast_hour: int, c
         "source": source,
         "variable": variable,
         "forecast_hour": forecast_hour,
-        "cycle_time": _format_time(cycle_time),
+        "cycle_time": format_iso_utc(cycle_time),
         "values": _deterministic_values(source, variable, forecast_hour),
     }
     return _json_bytes(payload)
@@ -1345,14 +1346,14 @@ def _canonical_product_payloads(
                 "canonical_product_id": product.canonical_product_id,
                 "source_id": record["source_id"],
                 "source_cycle": f"{record['source_id']}_{format_cycle_time(record['cycle_time'])}",
-                "cycle_time": _format_time(record["cycle_time"]),
-                "valid_time": _format_time(product.valid_time),
+                "cycle_time": format_iso_utc(record["cycle_time"]),
+                "valid_time": format_iso_utc(product.valid_time),
                 "lead_time_hours": product.lead_time_hours,
                 "variable": product.variable,
                 "unit": record["unit"],
                 "time_axis": {
-                    "cycle_time": _format_time(record["cycle_time"]),
-                    "valid_time": _format_time(product.valid_time),
+                    "cycle_time": format_iso_utc(record["cycle_time"]),
+                    "valid_time": format_iso_utc(product.valid_time),
                     "lead_time_hours": product.lead_time_hours,
                 },
                 "object_uri": product.object_uri,
@@ -1402,7 +1403,7 @@ def _missing_raw_failure_check(config: ProductionMetConfig, manifest: Mapping[st
         "error_code": "PRODUCTION_MET_RAW_MISSING_REQUIRED_VARIABLE",
         "downstream_forcing_ready": False,
         "source_id": "gfs",
-        "cycle_time": _format_time(config.cycle_start),
+        "cycle_time": format_iso_utc(config.cycle_start),
         "malformed_manifest_entry_count": len(malformed["entries"]),
         "missing": missing,
     }
@@ -1547,7 +1548,7 @@ def _conversion_failure_payload(
         "failure_type": failure_type,
         "downstream_forcing_ready": True,
         "source_id": "gfs",
-        "cycle_time": _format_time(config.cycle_start),
+        "cycle_time": format_iso_utc(config.cycle_start),
     }
 
 
@@ -1620,7 +1621,7 @@ def _qc_failure_payload(
         "failure_type": failure_type,
         "downstream_forcing_ready": False if qc.get("status") == "fail" else True,
         "source_id": "gfs",
-        "cycle_time": _format_time(config.cycle_start),
+        "cycle_time": format_iso_utc(config.cycle_start),
         "qc_status": qc.get("status"),
         "missing_values": qc.get("missing_values"),
         "range_checks": qc.get("range_checks"),
@@ -1641,7 +1642,7 @@ def _negative_blocked_payload(
         "failure_type": failure_type,
         "downstream_forcing_ready": False,
         "source_id": source_id,
-        "cycle_time": _format_time(config.cycle_start),
+        "cycle_time": format_iso_utc(config.cycle_start),
         "error_message": error_message,
     }
 
@@ -1659,7 +1660,7 @@ def _requested_negative_fixture_check(
                 "failure_type": requested,
                 "downstream_forcing_ready": False,
                 "source_id": "gfs",
-                "cycle_time": _format_time(config.cycle_start),
+                "cycle_time": format_iso_utc(config.cycle_start),
                 "affected_source_blocked": check.get("status") == "blocked",
             }
     return {
@@ -1668,7 +1669,7 @@ def _requested_negative_fixture_check(
         "failure_type": requested,
         "downstream_forcing_ready": False,
         "source_id": "gfs",
-        "cycle_time": _format_time(config.cycle_start),
+        "cycle_time": format_iso_utc(config.cycle_start),
     }
 
 
@@ -1690,8 +1691,8 @@ def _continuity_check(
             "status": "fail",
             "reason": "no_valid_times",
             "expected_step_hours": 3,
-            "expected_valid_times": [_format_time(value) for value in expected],
-            "missing_valid_times": [_format_time(value) for value in expected],
+            "expected_valid_times": [format_iso_utc(value) for value in expected],
+            "missing_valid_times": [format_iso_utc(value) for value in expected],
         }
     deltas = [
         (later - earlier).total_seconds() / 3600.0
@@ -1705,11 +1706,11 @@ def _continuity_check(
     return {
         "status": "pass" if deltas_pass and expected_pass else "fail",
         "expected_step_hours": 3,
-        "expected_valid_times": [_format_time(value) for value in expected],
-        "observed_valid_times": [_format_time(value) for value in valid_times],
+        "expected_valid_times": [format_iso_utc(value) for value in expected],
+        "observed_valid_times": [format_iso_utc(value) for value in valid_times],
         "observed_deltas_hours": deltas,
-        "missing_valid_times": [_format_time(value) for value in missing],
-        "unexpected_valid_times": [_format_time(value) for value in unexpected],
+        "missing_valid_times": [format_iso_utc(value) for value in missing],
+        "unexpected_valid_times": [format_iso_utc(value) for value in unexpected],
     }
 
 
@@ -2078,10 +2079,6 @@ def _directory_uri(store: LocalObjectStore, key: str) -> str:
 
 def _json_bytes(payload: Any) -> bytes:
     return json.dumps(payload, indent=2, sort_keys=True).encode("utf-8") + b"\n"
-
-
-def _format_time(value: datetime) -> str:
-    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _truthy_env(value: str | None) -> bool:

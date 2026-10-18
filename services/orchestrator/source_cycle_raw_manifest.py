@@ -81,7 +81,7 @@ def nfs_raw_manifest_readiness_from_env(source_id: str, cycle_time: datetime) ->
             "source": NFS_RAW_MANIFEST_READY_SOURCE,
             "source_id": normalize_source_id(source_id),
             "cycle_id": cycle_id_for(source_id, cycle_time),
-            "cycle_time": _format_time(cycle_time),
+            "cycle_time": _format_cycle_time_iso(cycle_time),
             "env": NFS_RAW_MANIFEST_ROOT_ENV,
         }
     return nfs_raw_manifest_readiness(
@@ -111,7 +111,7 @@ def nfs_raw_manifest_readiness(
         "source": NFS_RAW_MANIFEST_READY_SOURCE,
         "source_id": source_id,
         "cycle_id": cycle_id_for(source_id, cycle_time),
-        "cycle_time": _format_time(cycle_time),
+        "cycle_time": _format_cycle_time_iso(cycle_time),
         "object_store_root": str(root),
     }
     try:
@@ -541,7 +541,7 @@ def _nfs_stage_result(
         "source": NFS_RAW_MANIFEST_READY_SOURCE,
         "source_id": normalize_source_id(source_id),
         "cycle_id": str(readiness.get("cycle_id") or cycle_id_for(source_id, cycle_time)),
-        "cycle_time": _format_time(cycle_time),
+        "cycle_time": _format_cycle_time_iso(cycle_time),
         "manifest_uri": _object_uri_evidence(manifest_uri),
         "manifest_key": manifest_key,
         "source_object_store_root": "[local-path]",
@@ -636,8 +636,8 @@ def _validate_manifest_identity(
     if format_cycle_time(manifest_cycle_time) != format_cycle_time(cycle_time):
         return {
             "reason": "manifest_cycle_time_mismatch",
-            "manifest_cycle_time": _format_time(manifest_cycle_time),
-            "expected_cycle_time": _format_time(cycle_time),
+            "manifest_cycle_time": _format_cycle_time_iso(manifest_cycle_time),
+            "expected_cycle_time": _format_cycle_time_iso(cycle_time),
         }
     manifest_uri = str(payload.get("manifest_uri") or "").strip()
     expected_manifest_uri = _manifest_uri_for_key(manifest_key, object_store_prefix)
@@ -780,5 +780,5 @@ def _object_uri_evidence(value: str) -> str:
     return str(value or "")
 
 
-def _format_time(value: datetime) -> str:
+def _format_cycle_time_iso(value: datetime) -> str:
     return parse_cycle_time(value).isoformat().replace("+00:00", "Z")

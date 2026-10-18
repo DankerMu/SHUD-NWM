@@ -177,7 +177,7 @@ def _ensure_utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
-def _parse_utc(value: Any) -> datetime | None:
+def _coerce_utc_or_none(value: Any) -> datetime | None:
     if isinstance(value, datetime):
         return _ensure_utc(value)
     if not value:
@@ -197,7 +197,7 @@ def _from_index_signal(
     if not bool(signal.get("has_lineage")):
         return None
     predecessor_model_id = str(signal.get("predecessor_model_id") or "").strip()
-    cutover_time = _parse_utc(signal.get("cutover_valid_time"))
+    cutover_time = _coerce_utc_or_none(signal.get("cutover_valid_time"))
     if not predecessor_model_id or cutover_time is None:
         return None
     if predecessor_model_id == str(model_id):
@@ -214,7 +214,7 @@ def _from_index_signal(
 
 def _from_clone_row(row: Any, *, model_id: str, source_id: str) -> LineageCutover | None:
     predecessor_model_id = str(getattr(row, "cloned_from_model_id", "") or "").strip()
-    cutover_time = _parse_utc(getattr(row, "valid_time", None))
+    cutover_time = _coerce_utc_or_none(getattr(row, "valid_time", None))
     if not predecessor_model_id or cutover_time is None:
         return None
     if predecessor_model_id == str(model_id):

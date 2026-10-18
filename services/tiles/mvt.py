@@ -2109,7 +2109,7 @@ def national_discharge_valid_times(
     retained_count = min(sample_limit, observed_count)
     retained_start = common_end - timedelta(hours=max(0, retained_count - 1))
     valid_times = [
-        _format_time(retained_start + timedelta(hours=offset))
+        _format_mvt_time_text(retained_start + timedelta(hours=offset))
         for offset in range(retained_count)
     ]
     return ValidTimeDiscovery(
@@ -2212,7 +2212,7 @@ def national_discharge_cycles(
             continue
         cycles.append(
             {
-                "cycle_time": _format_time(cycle_time),
+                "cycle_time": _format_mvt_time_text(cycle_time),
                 "valid_time_start": discovery.valid_times[0],
                 "valid_time_end": discovery.valid_times[-1],
             }
@@ -2526,7 +2526,7 @@ def _national_cycle_valid_times(
     observed_count = last_index - first_index + 1
     retained_count = min(limit, observed_count)
     valid_times = [
-        _format_time(cycle + timedelta(seconds=step_seconds * (first_index + offset)))
+        _format_mvt_time_text(cycle + timedelta(seconds=step_seconds * (first_index + offset)))
         for offset in range(retained_count)
     ]
     return ValidTimeDiscovery(
@@ -2549,7 +2549,7 @@ def _coverage_datetime(value: Any) -> datetime | None:
 
 
 def _valid_time_discovery(rows: Iterable[Mapping[str, Any]], limit: int) -> ValidTimeDiscovery:
-    formatted = [_format_time(row["valid_time"]) for row in rows]
+    formatted = [_format_mvt_time_text(row["valid_time"]) for row in rows]
     truncated = len(formatted) > limit
     valid_times = sorted(formatted[:limit])
     return ValidTimeDiscovery(
@@ -3183,7 +3183,7 @@ def _canonical_utc_text(dt: datetime, original: Any) -> str:
         ) from exc
 
 
-def _format_time(value: Any) -> str:
+def _format_mvt_time_text(value: Any) -> str:
     formatted = canonical_mvt_time(value)
     return "None" if formatted is None else formatted
 

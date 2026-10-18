@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import JSON, BigInteger, Boolean, DateTime, Index, Integer, MetaData, Text, false, func, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 from packages.common import status_vocab as _vocab
+from packages.common.contracts.time_normalization import utc_now
 
 TERMINAL_STATUS_GUARD = set(_vocab.PIPELINE_JOB_TERMINAL_GUARD)
 TERMINAL_STATUS_OVERRIDES = set(_vocab.PIPELINE_JOB_TERMINAL_OVERRIDES)
@@ -22,10 +23,6 @@ RESERVATION_ACTIVE_STATUSES = _vocab.RESERVATION_ACTIVE_STATUSES
 # Sentinel so create_job can distinguish "caller wants NULL submitted_at" (a
 # reservation) from "caller omitted it" (stamp now()).
 _UNSET_SUBMITTED_AT = object()
-
-
-def _utcnow() -> datetime:
-    return datetime.now(UTC)
 
 
 class Base(DeclarativeBase):
@@ -55,12 +52,12 @@ class PipelineJob(Base):
     error_code: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     log_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        default=_utcnow,
-        onupdate=_utcnow,
+        default=utc_now,
+        onupdate=utc_now,
     )
 
 
@@ -78,7 +75,7 @@ class PipelineEvent(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        default=_utcnow,
+        default=utc_now,
         server_default=func.now(),
     )
 
@@ -132,7 +129,7 @@ class PipelineStore:
         # Default to now() for ordinary creates; reservations pass
         # ``submitted_at=None`` so the column stays NULL until phase-2 bind.
         if submitted_at is _UNSET_SUBMITTED_AT:
-            submitted_at = _utcnow()
+            submitted_at = utc_now()
         job = PipelineJob(
             job_id=job_id,
             run_id=run_id,
@@ -195,7 +192,7 @@ class PipelineStore:
             job.error_message = error_message
         if log_uri is not None:
             job.log_uri = log_uri
-        job.updated_at = _utcnow()
+        job.updated_at = utc_now()
         self.session.commit()
         self.session.refresh(job)
         return job
@@ -285,8 +282,8 @@ class PipelineStore:
         if array_task_id is not None:
             job.array_task_id = array_task_id
         if job.submitted_at is None:
-            job.submitted_at = _utcnow()
-        job.updated_at = _utcnow()
+            job.submitted_at = utc_now()
+        job.updated_at = utc_now()
         self.session.add(job)
         self.session.commit()
         self.session.refresh(job)
@@ -398,7 +395,7 @@ class PipelineStore:
             job.stage = stage
         if job.candidate_id is None:
             job.candidate_id = candidate_id
-        job.updated_at = _utcnow()
+        job.updated_at = utc_now()
         self.session.add(job)
         self.session.commit()
         self.session.refresh(job)

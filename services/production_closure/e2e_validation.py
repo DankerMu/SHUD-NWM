@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.parse import unquote, urlsplit, urlunsplit
 
+from packages.common.contracts.time_normalization import format_iso_utc
 from packages.common.redaction import redact_payload, redact_text
 from packages.common.safe_fs import (
     SafeFilesystemError,
@@ -348,7 +349,7 @@ def _preflight_payload(config: ProductionE2EConfig) -> dict[str, Any]:
         "schema": "nhms.production_closure.e2e.preflight.v1",
         "issue": 150,
         "run_id": config.run_id,
-        "source_cycle": _format_time(config.source_cycle),
+        "source_cycle": format_iso_utc(config.source_cycle),
         "model_set": list(config.model_set),
         "db_target": config.db_target,
         "object_prefix": config.object_prefix,
@@ -827,12 +828,12 @@ def _derived_identifiers(config: ProductionE2EConfig) -> dict[str, Any]:
         "segment_id": DERIVED_SEGMENT_IDS[0],
         "segment_ids": list(DERIVED_SEGMENT_IDS),
         "source": source_id,
-        "cycle_time": _format_time(config.source_cycle),
+        "cycle_time": format_iso_utc(config.source_cycle),
         "run_id": config.run_id,
         "job_id": f"{config.run_id}-array-0",
         "layer_id": f"{config.run_id}-q-down-rp",
         "tilejson_url": f"{config.object_prefix}/tiles/{config.run_id}/tilejson.json",
-        "publication_time": _format_time(config.source_cycle + timedelta(hours=3)),
+        "publication_time": format_iso_utc(config.source_cycle + timedelta(hours=3)),
     }
 
 
@@ -916,9 +917,9 @@ def _write_qc_fixture(
     log_path: Path,
 ) -> None:
     if config.shud_qc_fixture != "missing_rivqdown":
-        first_time = _format_time(config.source_cycle)
-        second_time = _format_time(config.source_cycle + timedelta(hours=3))
-        mismatched_time = _format_time(config.source_cycle + timedelta(hours=6))
+        first_time = format_iso_utc(config.source_cycle)
+        second_time = format_iso_utc(config.source_cycle + timedelta(hours=3))
+        mismatched_time = format_iso_utc(config.source_cycle + timedelta(hours=6))
         rows = {
             "valid": f"time,seg_a,seg_b\n{first_time},86400,172800\n{second_time},129600,216000\n",
             "missing_required_output": (
@@ -935,7 +936,7 @@ def _write_qc_fixture(
     if config.shud_qc_fixture != "missing_required_output":
         writer.write_text(
             log_path,
-            f"run_id={config.run_id} source_cycle={_format_time(config.source_cycle)} status=completed\n",
+            f"run_id={config.run_id} source_cycle={format_iso_utc(config.source_cycle)} status=completed\n",
         )
 
 
@@ -1022,7 +1023,7 @@ def _qc_result(
             retained_paths,
         )
     expected_times = {
-        _format_time(config.source_cycle + timedelta(hours=hours)) for hours in EXPECTED_TIMESTEP_HOURS
+        format_iso_utc(config.source_cycle + timedelta(hours=hours)) for hours in EXPECTED_TIMESTEP_HOURS
     }
     observed_times = {row[0] for row in data_rows}
     if observed_times != expected_times:
@@ -1155,7 +1156,7 @@ def _stage_manifest(
     return {
         "schema": "nhms.production_closure.e2e.stage_manifest.v1",
         "run_id": config.run_id,
-        "source_cycle": _format_time(config.source_cycle),
+        "source_cycle": format_iso_utc(config.source_cycle),
         "derived_identifiers": dict(derived_ids),
         "dependency_status": dependency_status["dependencies"],
         "stages": stages,
@@ -1299,7 +1300,7 @@ def _summary(
         "deterministic_fixture": deterministic_fixture,
         **live_stage_fields,
         "final_production_readiness_claimed": False,
-        "source_cycle": _format_time(config.source_cycle),
+        "source_cycle": format_iso_utc(config.source_cycle),
         "model_set": list(config.model_set),
         "db_target": config.db_target,
         "object_prefix": config.object_prefix,
@@ -1410,7 +1411,7 @@ def _write_stage_artifacts(
     }
     base_payload = {
         "run_id": config.run_id,
-        "source_cycle": _format_time(config.source_cycle),
+        "source_cycle": format_iso_utc(config.source_cycle),
         "model_id": derived_ids["model_id"],
         "source": derived_ids["source"],
         "cycle_time": derived_ids["cycle_time"],
@@ -1582,7 +1583,7 @@ def _blocked_stage_artifact_payload(
     return {
         "schema": f"nhms.production_closure.e2e.stage.{stage_name}.v1",
         "run_id": config.run_id,
-        "source_cycle": _format_time(config.source_cycle),
+        "source_cycle": format_iso_utc(config.source_cycle),
         "model_id": derived_ids["model_id"],
         "source": derived_ids["source"],
         "cycle_time": derived_ids["cycle_time"],
@@ -1970,10 +1971,6 @@ def _run_scoped_prefix(prefix: str, run_id: str) -> str:
     if parsed.port is not None:
         netloc = f"{netloc}:{parsed.port}"
     return urlunsplit((parsed.scheme, netloc, scoped_path, "", ""))
-
-
-def _format_time(value: datetime) -> str:
-    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _click_main(argv: Sequence[str] | None = None) -> int:
