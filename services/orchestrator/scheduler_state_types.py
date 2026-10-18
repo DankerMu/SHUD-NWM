@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol
 
+from packages.common import status_vocab as _vocab
+
 CANDIDATE_STATE_TASK_RESULT_LIMIT = 16
 DEFAULT_RETRY_LIMIT = 3
 DEFAULT_CANDIDATE_STATE_JOB_LIMIT = 100
@@ -45,7 +47,7 @@ ACTIVE_HYDRO_STATUSES = {"created", "staged", "pending", "submitted", "running"}
 # _validate_hydro_run_identity constrains identity fields only and never the status, and the
 # journal's test construction face writes hydro_status="complete" — so dropping it would change
 # journal decisions there. tests/test_hydro_status_set_parity.py pins it as that single exception.
-DURABLE_HYDRO_SUCCESS_STATUSES = {"succeeded", "parsed", "published", "complete"}
+DURABLE_HYDRO_SUCCESS_STATUSES = set(_vocab.DURABLE_HYDRO_SUCCESS_STATUSES)
 # The hydro_run statuses whose journal write CLEARS the row's error code -- it is NOT the
 # durable-output success set above, which answers a different question. Consumed by
 # file_orchestration_journal.update_hydro_run_status (the write at :2485 of 4f3fd89a) and, as
@@ -54,10 +56,10 @@ DURABLE_HYDRO_SUCCESS_STATUSES = {"succeeded", "parsed", "published", "complete"
 # successful transition there leaves an older code in place: a code sitting on a run row in one of
 # these statuses is stale residue rather than the current failure's own record. Frozen because
 # tests/test_production_scheduler.py pins the alias' top-level type.
-HYDRO_RUN_CODE_CLEARING_STATUSES = frozenset({"pending", "created", "succeeded", "complete", "parsed", "published"})
-TERMINAL_PIPELINE_SUCCESS_STATUSES = {"succeeded", "complete", "published"}
+HYDRO_RUN_CODE_CLEARING_STATUSES = _vocab.HYDRO_RUN_CODE_CLEARING_STATUSES
+TERMINAL_PIPELINE_SUCCESS_STATUSES = set(_vocab.PIPELINE_JOB_SUCCESS)
 TERMINAL_PIPELINE_COMPLETION_STAGES = {"parse", "state_save_qc", "publish"}
-FAILED_PIPELINE_STATUSES = {"failed", "submission_failed", "partially_failed", "permanently_failed"}
+FAILED_PIPELINE_STATUSES = set(_vocab.FAILED_PIPELINE_STATUSES)
 DOWNSTREAM_RESTART_STAGES = ("convert", "forcing", "forecast", "parse", "state_save_qc", "publish", "copyback")
 DOWNSTREAM_STAGE_ALIASES = {
     "convert": "convert",

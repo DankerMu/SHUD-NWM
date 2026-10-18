@@ -145,7 +145,7 @@
 
 ## 2. 状态词汇单一来源（spec: status-vocabulary）
 
-- [ ] 2.1a 新增 `packages/common/status_vocab.py`（design D3 表中全部命名集合 + 三个有序 tuple + `Literal` 别名 + `normalize_qc_verdict`；`scheduler_state_types.py` 的四处同名重新绑定同一对象）与 `tests/test_status_vocab_parity.py` 的 canonical 对照部分：每个命名集合对照从 canonical 站点钉入测试的字面量与 Python 类型；schema/折叠 DB enum 对照（复用 `tests/test_hydro_status_set_parity.py` 的折叠 helper）；selector 路由。**不改任何 schema**（`schemas/pipeline_job.schema.json` 的 `reservation_lost` 归 2.2）；重复字面量扫描与 allowlist 归 2.1b。
+- [x] 2.1a 新增 `packages/common/status_vocab.py`（design D3 表中全部命名集合 + 三个有序 tuple + `Literal` 别名 + `normalize_qc_verdict`；`scheduler_state_types.py` 的四处同名重新绑定同一对象）与 `tests/test_status_vocab_parity.py` 的 canonical 对照部分：每个命名集合对照从 canonical 站点钉入测试的字面量与 Python 类型；schema/折叠 DB enum 对照（复用 `tests/test_hydro_status_set_parity.py` 的折叠 helper）；selector 路由。**不改任何 schema**（`schemas/pipeline_job.schema.json` 的 `reservation_lost` 归 2.2）；重复字面量扫描与 allowlist 归 2.1b。
 
   Depends on: 无
 
