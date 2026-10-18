@@ -304,6 +304,21 @@ Non-goals: moving B3 or any function (6.4); touching the exec pin or the sys.pat
 Review focus: (1) B2 set equals the merge-base AST recomputation; (2) no table-row reorder or edit (parity probe); (3) select_tests still reads facade globals; (4) baseline diff limited to the two keys; (5) facade import pruning drops only unread names.
 ```
 
+#### D7 (6.4) risk contract
+
+```text
+6.4 fixture (compact):
+Change surface: new scripts/select_ci_tests_imports.py (11 B3 definitions, contiguous block verbatim incl. comments, stdlib-only imports); scripts/select_ci_tests.py (delete B3, bind 5 names: 4 plain + CHANGED_TEST_SUITE_BASENAME_PATTERNS as X); .large-file-guard.json (remove the facade exclude); tests/test_select_ci_tests.py (2 function-local import lines repointed, one new scenario test).
+Must preserve: select_tests/main signatures and the four GitHub outputs; every B3 name tests import or read via the facade; facade monkeypatch of _build_suite_importer_index steers select_tests; parse-cache reuse semantics.
+Must add/change: leaf imports module (no scripts.* import, no sys.path insert); _SUITE_IMPORTER_PARSE_STATS/_CACHE not bound on the facade.
+Governing invariant: select_tests resolves _build_suite_importer_index as a facade global at call time; the parse stats/cache live only in the module whose function mutates them.
+Sibling surfaces: large-file-guard hook (facade exclude removed); exec mutation pin (unchanged); node-id glob scan; 6.1 sibling rule row + collection-smoke predicate; scripts/ci_selector_snapshot.sh; ruff F401/E501 on facade import block and the two repointed tests.
+Seams under test: select_tests with a patched facade builder (new scenario, both legs); parse-stats seam on the imports module (:7123/:7149); lazy-build negative oracles (:7179/:7203).
+Required evidence: snapshot cmp 0; parity probe (11 ast.dump ==, block substring, importer-index equality on the real tree, 5 identities, 6 absences); scenario test both legs; line-reference test + hard-gate zero findings; wc -l <= 1000 for facade and imports.
+Non-goals: any signature change or new parameter; touching B1/B2 or the baseline JSON; editing :5984 or other prose that names the old location; routing changes.
+Review focus: (1) B3 block byte-identical incl. comments; (2) select_tests still calls the facade-global builder (no body import, no module-qualified call); (3) facade binds exactly the 5 names; (4) test diff = 2 import lines + 1 new test; (5) facade exclude removed only with measured size <= 1000.
+```
+
 ### D8 Governance noise and baseline (user)
 `check_stale_routes.py::_check_stale_route_tokens` skips paths under `openspec/changes/archive/` (one path-family
 predicate local to that check; `_path_is_route_authority_expanded_scope` is not changed for `docs/archived/` or

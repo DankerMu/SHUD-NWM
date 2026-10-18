@@ -319,11 +319,11 @@
 
 ## 4. lint 棘轮（spec: lint-ratchet）
 
-- [ ] 4.1 `pyproject.toml` ruff `select` 加 `B`、`BLE`；用 `ruff check --select B,BLE --output-format json` 生成 `per-file-ignores` 并提交；`uv run ruff check .` 绿。
+- [x] 4.1 `pyproject.toml` ruff `select` 加 `B`、`BLE`；用 `ruff check --select B,BLE --output-format json` 生成 `per-file-ignores` 并提交；`uv run ruff check .` 绿。
 
   Depends on: 无
 
-  Verify：`uv run ruff check .`；`uv run ruff --version`（记录到 PR）；在未冻结文件 `packages/common/region.py` 临时加完整的 `try:\n    pass\nexcept Exception:\n    pass` 确认报 BLE001 后撤销；在已冻结文件 `services/orchestrator/file_orchestration_journal.py` 确认同样代码不报；`uv run pytest -q tests/test_select_ci_tests.py`（`pyproject.toml` 是路由触发路径）；actionlint（CI `Workflow Lint`）绿。
+  Verify：`uv run ruff check .`；`uv run ruff --version`（记录到 PR）；在未冻结文件 `packages/common/auth_policy.py`（fixture review 原写 `region.py`，该文件不存在）临时加完整的 `try:\n    pass\nexcept Exception:\n    pass` 确认报 BLE001 后撤销；在已冻结文件 `services/orchestrator/file_orchestration_journal.py` 确认同样代码不报；`uv run pytest -q tests/test_select_ci_tests.py`（`pyproject.toml` 是路由触发路径）；actionlint（CI `Workflow Lint`）绿。
 
   钉死的契约（fixture review 2026-10-17）：
 
@@ -475,7 +475,7 @@
   - **父/head 比较方法（§6 全部沿用）**：`P=$(git merge-base origin/master HEAD)`；`git archive "$P" scripts | tar -x -C <scratch>/parent`（不建 worktree、不 stash、不 `git checkout <P> -- …`、不单文件 `git show` facade——6.2 起父 facade 会经命名空间包解析到 head 的 sibling，比较会假绿）；`scripts/ci_selector_snapshot.sh "$PWD" > head.json`、`scripts/ci_selector_snapshot.sh <scratch>/parent "$PWD" > parent.json`（父 selector 代码 + head 仓库根，只有 selector 代码变）；`cmp parent.json head.json`。
   - **`.sh` 路由**：加第四行 `PathTestRule("scripts/ci_selector_snapshot.sh", (SELECTOR_META_GUARD_TEST,))` +「删掉即红」断言（今天经 `_is_backend_shell_path` 掉到 6 个核心冒烟）；PR Boundary 偏离：「三行」变「四行」。
   - **Q2**：6.1 定为平铺文件（sibling 3 个 ≤ 4），不建 `scripts/ci_selector/`。
-  - **PR 盘点格式**：表 name | 测试里用的别名 | `setattr` 次数 | 留 facade 或在 6.x 搬走。实测（f78db4c4a）12 个名、64 次 `monkeypatch.setattr`：`PATH_TEST_RULES` 46（35 经 `select_ci_tests`、11 经 `_prod_module`）、`IMPORT_LAYERING_GUARD_ROOTS` 1（#2920）、`SUPPORT_MODULE_TEST_RULES` 5、`_build_suite_importer_index` 3（6.4 搬走，facade 全局读于 `:7206`）、`_SUITE_IMPORTER_PARSE_STATS` 2（6.4 搬走）、`TIMESCALE_WRITE_GUARD_INVARIANT_ROOTS`、`RIVER_SEGMENT_WRITE_SURFACE_ROOTS`、`RIVER_SEGMENT_WRITE_SURFACE_SQL_ROOTS`、`PATH_CANONICALIZATION_FAMILY_GUARD_ROOTS`、`CORE_SMOKE_TESTS`、`PRODUCTION_TOPOLOGY_SCAN_ROOTS`、`PRODUCTION_TOPOLOGY_SCAN_FILES` 各 1；无字符串形式 `patch(...)`/`patch.object`。两处源码 pin：exec 变异 `:7467-7494`、node-id 正则扫描 `:10930`。
+  - **PR 盘点格式**：表 name | 测试里用的别名 | `setattr` 次数 | 留 facade 或在 6.x 搬走。实测（f78db4c4a）12 个名、64 次 `monkeypatch.setattr`：`PATH_TEST_RULES` 46（35 经 `select_ci_tests`、11 经 `_prod_module`）、`IMPORT_LAYERING_GUARD_ROOTS` 1（#2920）、`SUPPORT_MODULE_TEST_RULES` 5、`_build_suite_importer_index` 3（6.4 搬走但 facade 以导入绑定，`select_tests` ~:7296 全局读，patch 目标不变）、`_SUITE_IMPORTER_PARSE_STATS` 2（6.4 搬走）、`TIMESCALE_WRITE_GUARD_INVARIANT_ROOTS`、`RIVER_SEGMENT_WRITE_SURFACE_ROOTS`、`RIVER_SEGMENT_WRITE_SURFACE_SQL_ROOTS`、`PATH_CANONICALIZATION_FAMILY_GUARD_ROOTS`、`CORE_SMOKE_TESTS`、`PRODUCTION_TOPOLOGY_SCAN_ROOTS`、`PRODUCTION_TOPOLOGY_SCAN_FILES` 各 1；无字符串形式 `patch(...)`/`patch.object`。两处源码 pin：exec 变异 `:7467-7494`、node-id 正则扫描 `:10930`。
 
   **Suggested fixture level:** compact - 路由规则与快照脚本。
 
@@ -521,7 +521,7 @@
   - **新增 scenario 测试（唯一新增，spec "Patched facade global still steers a moved function"）**：`monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", (PathTestRule("zz_selector_probe/never.txt", (SELECTOR_META_GUARD_TEST,)),))` → `select_tests(["zz_selector_probe/never.txt"], repo_root=Path(".")) == [SELECTOR_META_GUARD_TEST]`；未 patch 时同输入 `== []`（非空洞，该路径不是 topology scan input、不命中任何 supplemental loop，HEAD 已实测）；第二腿：仅 patch `scripts.select_ci_tests_rules.PATH_TEST_RULES` 为同一单行规则 → 输出仍 `== []`（facade 是唯一拦截点）。
   - **exec pin（~:7651-7690）**：预期零改动——变异锚点在 `select_tests`（留 facade），exec 副本从 `sys.modules` 取已加载的 rules；Verify 必须见其绿且 `mutated != source` 仍成立。仅当它实际变红时才允许改它（spec 允许的唯一既有测试改动），并在 PR 记录原因。6.1 记录的 `sys.path` 泄漏仍「已知、接受」，6.3 不修。
   - **line-reference 基线（硬门会红，23 条非 1 条）**：B2 内 23 条基线行引用随搬迁变为 rules 键的新增（`CONNECTION_ATTRIBUTION_STORE_PATHS` 前导注释 3 条 + `PATH_TEST_RULES` 内 20 条）。处理：仅 `` `select_ci_tests.py:5354-5364` ``（~:5956，自指且陈旧）改写为点名 `scripts/select_ci_tests.py` 中 `select_tests` 的 changed-test importer-closure 分支，并删其条目；其余 22 条注释逐字不动，条目原样（同文本、同计数 1）迁到新键 `"scripts/select_ci_tests_rules.py"`，删除已空的 `"scripts/select_ci_tests.py"` 键。生成方式：`uv run python -m scripts.governance.entropy_audit.check_line_references --write-baseline` 后 `git diff` 该 JSON 只能有上述两键变化，否则手改。总数 208 → 207 ≤ cap 210。
-  - **large-file-guard**：rules 约 5,250 行；同 commit 把 `scripts/select_ci_tests_rules.py`（字面量，紧邻 :67 的 facade 项）加进 `exclude`，记 PR Boundary 偏离。facade 降到约 1,000 行（信息项，6.3 不动其排除项）。
+  - **large-file-guard**：rules 约 5,250 行；同 commit 把 `scripts/select_ci_tests_rules.py`（字面量，紧邻 :67 的 facade 项）加进 `exclude`，记 PR Boundary 偏离。facade 降到约 1,030 行（信息项，6.3 不动其排除项；6.4 后约 815 行并移除排除）。
   - **值等价探针（主 oracle，本地跑、PR body 贴结果、不提交）**：按 6.1 方法 `git archive` merge-base 的 `scripts` 到 scratch；先 `import scripts.select_ci_tests`/`scripts.select_ci_tests_rules`/`scripts.select_ci_tests_tables`（head），再用 `spec_from_file_location` 以独立名加载父 facade；断言 37 个 B2 常量 `getattr(parent, n) == getattr(head_rules, n)`；三表逐元素 `dataclasses.astuple` 相等（含顺序）；facade 绑定的 10 个 rules 名与 99 个 tables 名 `getattr(head_facade, n) is getattr(sibling, n)`。
   - **活性演练（本地、不提交、PR 记录）**：(a) 交换 `PATH_TEST_RULES` 两行 → 值等价探针红；(b) `select_tests` 改读 rules 模块属性 → 新 scenario 第二腿与既有 46 个 patch 测试红；(c) 从 facade 删 `PATH_TEST_RULES` 绑定 → 测试模块导入 `ImportError`。
   - **路由**：6.1 的精确行与 `_collection_smoke_required` 已覆盖 rules 路径，6.3 不加行；基线 JSON 经既有行路由到 `LINE_REFERENCE_TEST`；Verify 前 `git add scripts/select_ci_tests_rules.py`。
@@ -532,11 +532,29 @@
 
   **Minimal mergeable slice:** atomic - 三张规则表引用同一批常量与 `PathTestRule`。
 
-- [ ] 6.4 B3 import-graph derivation 与 `_SUITE_IMPORTER_PARSE_STATS` → `select_ci_tests_imports.py`（所有读者一起搬）；搬走的函数读 facade 可 patch 全局时由 `select_tests` 以参数传入；允许的测试改动：`_SUITE_IMPORTER_PARSE_STATS` 的全部引用（两个测试中的四行：两处 setattr 与两处读取）。
+- [ ] 6.4 B3 import-graph derivation 与 `_SUITE_IMPORTER_PARSE_STATS` → `select_ci_tests_imports.py`（所有读者一起搬）；B3 不读 facade 可 patch 全局（零新参数）；facade 绑定 5 名，`select_tests` 继续读 facade 全局 `_build_suite_importer_index`；允许的测试改动：`_SUITE_IMPORTER_PARSE_STATS` 两个测试的函数内导入改向（2 行，四行引用不变）+ 一个新增 scenario 测试；同 commit 移除 facade 的 large-file-guard 排除。
 
   Depends on: 6.3
 
-  Verify：同 6.3；tests 改动仅限 `_SUITE_IMPORTER_PARSE_STATS` 的引用行。
+  Verify：`git add scripts/select_ci_tests_imports.py` 后：`uv run ruff check .`；`uv run pytest -q tests/test_select_ci_tests.py tests/test_entropy_audit_line_references.py`；`uv run python scripts/governance/audit_repo_entropy.py --mode hard-gate --format json` 零 finding；6.1 父提交/head 快照 `cmp` 为 0（PR 附 `shasum -a 256 parent.json head.json`）；值等价探针 (a)-(d) 全绿；`git diff -U0 origin/master -- tests/test_select_ci_tests.py` 只含 `:7131`/`:7157` 两行导入改向与新增 scenario 测试；`git diff origin/master -- scripts/governance/entropy_audit/line_reference_baseline.json` 为空；`wc -l scripts/select_ci_tests.py scripts/select_ci_tests_imports.py` 均 ≤ 1000 且 `.large-file-guard.json` 不再含 facade 项；`openspec validate entropy-burndown-2026-10 --strict --no-interactive`。
+
+  钉死的契约（6.4，fixture review 2026-10-17）：
+
+  - **B3 = 11 个定义**（行号 HEAD f3d0a12f7，6.2/6.3 后漂移，PR 在 merge-base 用 AST 重算贴 PR body）：`CHANGED_TEST_SUITE_BASENAME_PATTERNS`、`is_test_suite_path`、`SUITE_FILE_GATING_MARKERS`、`_test_module_name`、`_top_level_imported_module_names`、`_import_from_base`、`_file_level_gating_markers`、`_SUITE_IMPORTER_PARSE_CACHE`、`_SUITE_IMPORTER_PARSE_STATS`、`_suite_import_derivation`、`_build_suite_importer_index`（~:20-232，自 `# pytest's own collection rule, mirrored` 注释至 `return index`，连续块）。**整块逐字搬、保持源顺序、连同前导注释**。判定规则：B3 内部闭包只引用 B3 名与 stdlib（`ast`/`fnmatch`/`os`/`Path`/`PurePosixPath`），不读任何 B1/B2 名、不读 6.1 盘点的 12 个被 patch 名——与重算不一致以重算为准并记 PR。
+  - **imports 模块形态**：`from __future__ import annotations` + `import ast`/`import fnmatch`/`import os`/`from pathlib import Path, PurePosixPath`；不导入任何 `scripts.*`（叶子模块，零环）；无 `sys.path.insert`；绝不导入 facade。
+  - **D7 参数条款对 6.4 为空**：B3 不读 facade 可 patch 全局，故零新参数、零签名改动；facade 四处调用点文本不变（`select_tests` ~:7296 `_build_suite_importer_index(repo_root)`、~:7301 `is_test_suite_path(path)`、~:7342 `_test_module_name(path)`；`_imports_forcing_template_renderer` ~:7665 `_top_level_imported_module_names(path, tree)`）。
+  - **facade 绑定（F401 驱动）恰 5 个名**：裸 `_build_suite_importer_index`、`is_test_suite_path`、`_test_module_name`、`_top_level_imported_module_names`；`CHANGED_TEST_SUITE_BASENAME_PATTERNS as CHANGED_TEST_SUITE_BASENAME_PATTERNS`（只供测试 `:30` 导入、`:7558` 断言）。**不绑定** `SUITE_FILE_GATING_MARKERS`、`_import_from_base`、`_file_level_gating_markers`、`_suite_import_derivation`、`_SUITE_IMPORTER_PARSE_CACHE`、`_SUITE_IMPORTER_PARSE_STATS`（后两者按基础 spec「Relocated monkeypatch seams」不得 re-export，残留旧 patch 必须 `AttributeError`）。放在 6.1 受保护 insert 之后，`ruff check --fix` 排序；stdlib 导入不变（`ast`/`os`/`fnmatch`/`PurePosixPath` 仍有 facade 读者）。
+  - **`_build_suite_importer_index` 的 patch 语义**：随 B3 搬走，但调用点 `select_tests`（嵌套 `importer_index()` 内自由变量，调用时全局查找）留 facade，facade 以导入绑定，故 `:7193`/`:7220`/`:7226` 三处 facade `setattr` 与 `:7115`/`:7215` 两处读取零改动仍生效（基础 spec「调用点留原模块则 patch 目标不变」）。`select_tests` 不得改为函数体内导入或经 `select_ci_tests_imports.` 属性调用。
+  - **唯一测试改向（2 行）**：`tests/test_select_ci_tests.py:7131` 与 `:7157`（`test_suite_importer_closure_reuses_parse_work_across_calls` / `..._rewrite_to_module_scope_edge_is_observed` 的函数内导入）`import scripts.select_ci_tests as _prod` → `import scripts.select_ci_tests_imports as _prod`；四行引用 `:7138`/`:7141`/`:7146`/`:7165` 字节不变（`:7146` 已 118 字符，任何更长别名都触 E501）。`:7109`/`:7188`/`:7211` 三处 `_prod` 仍指 facade。保持函数内导入（不加顶层导入，免进 #1561 顶层 importer 推导）。
+  - **新增 scenario 测试（唯一新增）**：tmp 根写 `tests/test_owner.py`（`HELPER = 1`）与 `tests/test_probe_importer.py`（`HELPER = 2`，不导入 owner）；未 patch：`set(select_tests(["tests/test_owner.py"], repo_root=tmp_path)) == {"tests/test_owner.py"}`；`monkeypatch.setattr(select_ci_tests, "_build_suite_importer_index", lambda _root: {"tests.test_owner": {"tests/test_probe_importer.py"}})` → `== {"tests/test_owner.py", "tests/test_probe_importer.py"}`；第二腿仅 patch `scripts.select_ci_tests_imports._build_suite_importer_index` 为同一 stub → 仍 `== {"tests/test_owner.py"}`（facade 是唯一拦截点；HEAD 已实测正腿）。无此测试时 `select_tests` 绕过 facade 调用构建器不会使任何既有测试变红（`:7179`/`:7203` 是「不得调用」型负 oracle，拦截失效即空洞）。
+  - **exec pin（~:7651-7690）**：预期零改动（锚点在 `select_tests`；exec 副本从 `sys.modules` 取已加载的 imports 模块，与真模块共享解析缓存，该探针输入不建索引，无害）。仅实际变红才允许改并记原因。
+  - **line-reference 基线**：B3 内 0 条行引用；6.4 不改 `line_reference_baseline.json`（`git diff` 为空）。`:5984` 测试 docstring 与 `tests/test_forcing_read_path_store_routing.py:39` 注释不动。
+  - **large-file-guard（决定：移除 facade 排除）**：搬后 facade ≈ 815 行（原地保留 685 + tables/rules/imports 导入块与 insert ≈ 125）、imports ≈ 221 行，均 ≤ `maxLines` 1000；同 commit 删除 `.large-file-guard.json:67` 的 `"scripts/select_ci_tests.py"`，tables/rules 排除保留，imports 不加排除；PR 贴 `wc -l scripts/select_ci_tests*.py`。若实测 facade > 1000，保留排除并记偏离。
+  - **值等价探针（主 oracle，本地跑、PR body 贴结果、不提交）**：按 6.1 方法 `git archive` merge-base 的 `scripts` 到 scratch，`spec_from_file_location` 以独立名加载父 facade；(a) 11 个 B3 定义 `ast.dump(父 facade 节点) == ast.dump(head imports 节点)`，且父 facade B3 连续块文本是 `scripts/select_ci_tests_imports.py` 的子串（含注释、逐字）；(b) `parent._build_suite_importer_index(Path("."))== scripts.select_ci_tests_imports._build_suite_importer_index(Path("."))`（今日 2,927 键 / 11,714 边，贴实测）；(c) 5 个绑定名 `getattr(head_facade, n) is getattr(head_imports, n)`；(d) 6 个未绑定名 `not hasattr(head_facade, n)`。
+  - **活性演练（本地、不提交、PR 记录）**：(a) 回退 `:7131`/`:7157` 改向 → `:7138`/`:7165` `setattr` 抛 `AttributeError`；(b) `select_tests` 改为开头即构建索引（去惰性）→ `:7179`、`:7203` 红；(c) `:7296` 改为 `select_ci_tests_imports._build_suite_importer_index(repo_root)` → 新 scenario 正腿红（既有测试全绿，证明新增必要）；(d) 删 facade 的 `_build_suite_importer_index` 绑定 → `NameError`/`AttributeError` 红；(e) 扰动一个 B3 定义 → 探针 (a) 红。
+  - **路由**：6.1 精确行与 `_collection_smoke_required` 已覆盖 imports 路径，6.4 不加行；Verify 前 `git add scripts/select_ci_tests_imports.py`。
+  - **PR Boundary 偏离（记录）**：移除 facade 的 large-file-guard 排除、2 行测试导入改向（非 spec 原写的 4 行引用）、新增一个 scenario 测试、tasks/design/spec/issue 措辞。
+  - **残余风险**：快照 7 路仅 `tests/test_production_scheduler.py` 触发 B3；探针是 PR 证据非提交测试；6.4 后新的 import-graph 逻辑必须进 imports 模块（facade 导入处加一行指针注释）。
 
   **Suggested fixture level:** compact - 逻辑搬迁，patch 目标随动。
 
