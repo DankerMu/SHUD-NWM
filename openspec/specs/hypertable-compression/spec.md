@@ -1242,10 +1242,11 @@ identity gate is introduced. The three-key criterion of
 
 - **WHEN** forcing handoff 因任何非 `HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED`
   的原因失败（含通用异常路径与 `HANDOFF_APPLY_SQL_FAILURE`），且其 reason codes
-  不含非失败的 skip 码 `HANDOFF_APPLY_LEGACY_STORE_REFUSED`（legacy 路由的
-  forcing_version，#1991 I12）或 `HANDOFF_APPLY_COMPRESSION_FENCE_BUSY`（#2713
-  压缩/ingest fence 被 chunk DDL 持有或排队）——这两者 `_process_run` 返回
-  `outcome="skipped"`、不写 decline 行、不计入 tick rc
+  不含非失败的 skip 码 `HANDOFF_APPLY_COMPRESSION_FENCE_BUSY`（#2713
+  压缩/ingest fence 被 chunk DDL 持有或排队）——它使 `_process_run` 返回
+  `outcome="skipped"`、不写 decline 行、不计入 tick rc（另一个 skip 码
+  `HANDOFF_APPLY_LEGACY_STORE_REFUSED` 已于 2026-10-11 随 #1993 移除，现按普通
+  失败处理；见 `openspec/glossary.md` 的 "routing column" 条目）
 - **THEN** `_process_run` 返回 `outcome="failed"`，`ops.ingest_recompute_decline`
   不新增任何行，进程 `rc == 1`，该 run 在下个 tick 仍进入 pending
 
@@ -1502,6 +1503,8 @@ compression's.
 
 - **WHEN** `hydro.river_timeseries` has at least `per_tick_bound` eligible
   chunks and `hydro.river_timeseries_legacy` has older eligible chunks
+  (historical example: that table was dropped on 2026-09-19; see "legacy
+  store" in `openspec/glossary.md`)
 - **THEN** every selected chunk belongs to `hydro.river_timeseries`
 - **AND** the selected chunks are that table's newest eligible chunks in
   `range_end` descending order

@@ -2,6 +2,15 @@
 
 ## Purpose
 TBD - created by archiving change refresh-node27-window-admission. Update Purpose after archive.
+
+Archive status:
+- status: historical baseline
+- current_authority: db/migrations/000060_river_timeseries_contract.sql; openspec/glossary.md
+- superseded_by: none
+- status_since: 2026-09-19
+- archive_scope: section
+- retained_for: record of the I8 expand-window admission contract; its tools survive only under openspec/changes/archive/2026-09-15-node27-post-d12-reforward/tools/, and 000060 dropped hydro.river_timeseries_legacy and hydro.hydro_run.timeseries_store on 2026-09-19
+
 ## Requirements
 ### Requirement: Exact pending migration admission preserves historical ledger
 

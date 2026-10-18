@@ -66,7 +66,7 @@ tail -n 160 /home/nwm/autopipe-logs/autopipe.log
   当前使用两个独立连接并行刷新。该步骤非 fatal，不应掩盖 autopipe 主返回码。
 - **legacy run 覆写已由 guard 兜底（#1446），且只在保留窗口内兜底（#2504）**：#1341 后 river
   coverage 扫描按代理键选行，#1342 contract（migration 000060）后 legacy 路由 run 的 river 行随
-  `hydro.river_timeseries_legacy` 一起没了，重扫一无所获，已物化的计数是唯一记录。upsert 的条件
+  `hydro.river_timeseries_legacy` 一起没了（见 `openspec/glossary.md` 的 "legacy store" 条目），重扫一无所获，已物化的计数是唯一记录。upsert 的条件
   `DO UPDATE ... WHERE` 因此**拒绝**把一个 populated 行（`segment_count > 0`）写成空扫描——
   `--run-id` 退出码 **3** 并在 stderr 打一行
   `DISPLAY_COVERAGE_REFRESH_REFUSED run_id=… existing_segment_count=… advice=…`，
