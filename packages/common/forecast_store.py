@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from packages.common.contracts.time_normalization import format_iso_utc
 from packages.common.forcing_ts_render import (
     FORCING_TABLE,
     FORCING_TABLE_TOKEN,
@@ -1921,7 +1922,9 @@ class PsycopgForecastStore:
                 details={"source_id": source_id, "basin_id": basin_id, "status": "unavailable"},
             )
         available_issue_times = [
-            _format_time(_datetime_value(row.get("cycle_time"))) for row in rows if row.get("cycle_time") is not None
+            _format_optional_time(_datetime_value(row.get("cycle_time")))
+            for row in rows
+            if row.get("cycle_time") is not None
         ]
         target = rows[0]
         if requested_cycle is not None:
@@ -2893,7 +2896,7 @@ class PsycopgForecastStore:
                 details={
                     "model_id": model_token,
                     "source_id": source_token,
-                    "cycle_time": _format_time(parsed_cycle_time),
+                    "cycle_time": _format_optional_time(parsed_cycle_time),
                 },
             )
         if len(rows) > 1:
@@ -2904,7 +2907,7 @@ class PsycopgForecastStore:
                 details={
                     "model_id": model_token,
                     "source_id": source_token,
-                    "cycle_time": _format_time(parsed_cycle_time),
+                    "cycle_time": _format_optional_time(parsed_cycle_time),
                     "candidates": [
                         {
                             "forcing_version_id": row.get("forcing_version_id"),
@@ -2974,8 +2977,8 @@ class PsycopgForecastStore:
                 details={
                     "station_id": station_id,
                     "forcing_version_id": forcing_version_id,
-                    "valid_time_start": _format_time(valid_time_start),
-                    "valid_time_end": _format_time(valid_time_end),
+                    "valid_time_start": _format_optional_time(valid_time_start),
+                    "valid_time_end": _format_optional_time(valid_time_end),
                 },
             )
 
@@ -3315,8 +3318,8 @@ def _forcing_version_time_window(forcing_version: Mapping[str, Any]) -> tuple[da
             message="Forcing version has an invalid valid-time window.",
             details={
                 "forcing_version_id": forcing_version_id,
-                "valid_time_start": _format_time(start_time),
-                "valid_time_end": _format_time(end_time),
+                "valid_time_start": _format_optional_time(start_time),
+                "valid_time_end": _format_optional_time(end_time),
             },
         )
     return start_time, end_time
@@ -3510,7 +3513,7 @@ def _qhh_latest_requested_identity_details(identity: _QhhLatestStrictIdentity) -
         "source": identity.source_id,
         "source_id": identity.source_id,
         "run_id": _bounded_reflected_value(identity.run_id),
-        "cycle_time": _format_time(identity.cycle_time),
+        "cycle_time": _format_optional_time(identity.cycle_time),
         "model_id": _bounded_reflected_value(identity.model_id),
     }
 
@@ -3557,7 +3560,7 @@ def _qhh_identity_product(
         "basin_version_id": str(row.get("basin_version_id") or ""),
         "river_network_version_id": str(row.get("river_network_version_id") or ""),
         "source_id": source_id,
-        "cycle_time": _format_time(cycle_time),
+        "cycle_time": _format_optional_time(cycle_time),
         "run_id": str(row.get("run_id") or ""),
         "forcing_version_id": str(row.get("forcing_version_id") or ""),
         "station_count": 0,
@@ -3566,10 +3569,10 @@ def _qhh_identity_product(
         "expected_segment_count": _optional_non_negative_response_int(row.get("expected_segment_count")),
         "status": "ready",
         "run_status": str(row.get("status") or ""),
-        "valid_time_start": _format_time(available_start_time),
-        "valid_time_end": _format_time(available_end_time),
-        "river_valid_time_start": _format_time(_datetime_value(row.get("display_start_time")) or cycle_time),
-        "river_valid_time_end": _format_time(available_end_time),
+        "valid_time_start": _format_optional_time(available_start_time),
+        "valid_time_end": _format_optional_time(available_end_time),
+        "river_valid_time_start": _format_optional_time(_datetime_value(row.get("display_start_time")) or cycle_time),
+        "river_valid_time_end": _format_optional_time(available_end_time),
         "forcing_valid_time_start": _format_time_value(row.get("forcing_start_time")),
         "forcing_valid_time_end": _format_time_value(row.get("forcing_end_time")),
         "available_horizon_hours": horizon_hours,
@@ -3617,7 +3620,7 @@ def _qhh_latest_candidate_response(row: Mapping[str, Any], *, basin_id: str = QH
                 "message": "Available horizon is shorter than the default seven-day display window.",
                 "expected_horizon_hours": expected_horizon_hours,
                 "available_horizon_hours": horizon_hours,
-                "available_end_time": _format_time(available_end_time),
+                "available_end_time": _format_optional_time(available_end_time),
             }
         )
 
@@ -3627,7 +3630,7 @@ def _qhh_latest_candidate_response(row: Mapping[str, Any], *, basin_id: str = QH
         "basin_version_id": str(row.get("basin_version_id") or ""),
         "river_network_version_id": str(row.get("river_network_version_id") or ""),
         "source_id": source_id,
-        "cycle_time": _format_time(cycle_time),
+        "cycle_time": _format_optional_time(cycle_time),
         "run_id": str(row.get("run_id") or ""),
         "forcing_version_id": str(row.get("forcing_version_id") or ""),
         "station_count": _non_negative_int(row.get("station_count")),
@@ -3636,8 +3639,8 @@ def _qhh_latest_candidate_response(row: Mapping[str, Any], *, basin_id: str = QH
         "expected_segment_count": _optional_non_negative_response_int(row.get("expected_segment_count")),
         "status": "ready" if not reasons else "unavailable",
         "run_status": str(row.get("status") or ""),
-        "valid_time_start": _format_time(available_start_time),
-        "valid_time_end": _format_time(available_end_time),
+        "valid_time_start": _format_optional_time(available_start_time),
+        "valid_time_end": _format_optional_time(available_end_time),
         "river_valid_time_start": _format_time_value(row.get("river_valid_time_start")),
         "river_valid_time_end": _format_time_value(row.get("river_valid_time_end")),
         "forcing_valid_time_start": _format_time_value(row.get("forcing_start_time")),
@@ -3762,8 +3765,8 @@ def _qhh_latest_unavailable_reasons(row: Mapping[str, Any]) -> list[dict[str, An
         add(
             "FORCING_CYCLE_MISMATCH",
             "Hydro run cycle_time does not match forcing version cycle_time.",
-            cycle_time=_format_time(cycle_time),
-            forcing_cycle_time=_format_time(forcing_cycle_time),
+            cycle_time=_format_optional_time(cycle_time),
+            forcing_cycle_time=_format_optional_time(forcing_cycle_time),
         )
 
     display_start_time = _datetime_value(row.get("display_start_time"))
@@ -3781,8 +3784,8 @@ def _qhh_latest_unavailable_reasons(row: Mapping[str, Any]) -> list[dict[str, An
         add(
             "DISPLAY_WINDOW_NONPOSITIVE",
             "Selected display window must have positive duration.",
-            display_start_time=_format_time(display_start_time),
-            display_end_time=_format_time(display_end_time),
+            display_start_time=_format_optional_time(display_start_time),
+            display_end_time=_format_optional_time(display_end_time),
         )
 
     station_count = _non_negative_int(row.get("station_count"))
@@ -3825,8 +3828,8 @@ def _qhh_latest_unavailable_reasons(row: Mapping[str, Any]) -> list[dict[str, An
         add(
             "STATION_DISPLAY_WINDOW_MISMATCH",
             "Station forcing rows do not match the selected display window.",
-            display_start_time=_format_time(display_start_time),
-            station_display_start_time=_format_time(station_display_start_time),
+            display_start_time=_format_optional_time(display_start_time),
+            station_display_start_time=_format_optional_time(station_display_start_time),
         )
     station_display_end_time = _datetime_value(row.get("station_display_end_time"))
     if (
@@ -3837,8 +3840,8 @@ def _qhh_latest_unavailable_reasons(row: Mapping[str, Any]) -> list[dict[str, An
         add(
             "STATION_DISPLAY_WINDOW_MISMATCH",
             "Station forcing rows do not match the selected display window.",
-            display_end_time=_format_time(display_end_time),
-            station_display_end_time=_format_time(station_display_end_time),
+            display_end_time=_format_optional_time(display_end_time),
+            station_display_end_time=_format_optional_time(station_display_end_time),
         )
     if station_basin_version_id and row.get("basin_version_id") != station_basin_version_id:
         add(
@@ -3866,15 +3869,15 @@ def _qhh_latest_unavailable_reasons(row: Mapping[str, Any]) -> list[dict[str, An
             add(
                 "STATION_WINDOW_UNDERFLOW",
                 "Station forcing coverage includes samples before the selected display window.",
-                display_start_time=_format_time(display_start_time),
-                station_valid_time_start=_format_time(station_start),
+                display_start_time=_format_optional_time(display_start_time),
+                station_valid_time_start=_format_optional_time(station_start),
             )
         if display_end_time is not None and station_end is not None and station_end > display_end_time:
             add(
                 "STATION_WINDOW_OVERFLOW",
                 "Station forcing coverage includes samples after the selected display window.",
-                display_end_time=_format_time(display_end_time),
-                station_valid_time_end=_format_time(station_end),
+                display_end_time=_format_optional_time(display_end_time),
+                station_valid_time_end=_format_optional_time(station_end),
             )
 
     station_coverage = _qhh_station_variable_coverage(row.get("station_variable_coverage"))
@@ -3937,24 +3940,24 @@ def _qhh_latest_unavailable_reasons(row: Mapping[str, Any]) -> list[dict[str, An
                 "STATION_VARIABLE_COMMON_HORIZON_NONPOSITIVE",
                 "Station forcing variable does not provide a positive common station horizon.",
                 variable=variable,
-                valid_time_start=_format_time(variable_start),
-                valid_time_end=_format_time(variable_end),
+                valid_time_start=_format_optional_time(variable_start),
+                valid_time_end=_format_optional_time(variable_end),
             )
         if display_start_time is not None and variable_start is not None and variable_start < display_start_time:
             add(
                 "STATION_VARIABLE_WINDOW_UNDERFLOW",
                 "Station forcing variable coverage includes samples before the selected display window.",
                 variable=variable,
-                display_start_time=_format_time(display_start_time),
-                valid_time_start=_format_time(variable_start),
+                display_start_time=_format_optional_time(display_start_time),
+                valid_time_start=_format_optional_time(variable_start),
             )
         if display_end_time is not None and variable_end is not None and variable_end > display_end_time:
             add(
                 "STATION_VARIABLE_WINDOW_OVERFLOW",
                 "Station forcing variable coverage includes samples after the selected display window.",
                 variable=variable,
-                display_end_time=_format_time(display_end_time),
-                valid_time_end=_format_time(variable_end),
+                display_end_time=_format_optional_time(display_end_time),
+                valid_time_end=_format_optional_time(variable_end),
             )
 
     segment_count = _non_negative_int(row.get("segment_count"))
@@ -3985,29 +3988,29 @@ def _qhh_latest_unavailable_reasons(row: Mapping[str, Any]) -> list[dict[str, An
         add(
             "Q_DOWN_COMMON_HORIZON_NONPOSITIVE",
             "River q_down coverage does not provide a positive common segment horizon.",
-            river_valid_time_start=_format_time(river_start),
-            river_valid_time_end=_format_time(river_end),
+            river_valid_time_start=_format_optional_time(river_start),
+            river_valid_time_end=_format_optional_time(river_end),
         )
     if display_start_time is not None and river_start is not None and river_start < display_start_time:
         add(
             "Q_DOWN_WINDOW_UNDERFLOW",
             "River q_down coverage includes samples before the selected display window.",
-            display_start_time=_format_time(display_start_time),
-            river_valid_time_start=_format_time(river_start),
+            display_start_time=_format_optional_time(display_start_time),
+            river_valid_time_start=_format_optional_time(river_start),
         )
     if display_end_time is not None and river_end is not None and river_end > display_end_time:
         add(
             "Q_DOWN_WINDOW_OVERFLOW",
             "River q_down coverage includes samples after the selected display window.",
-            display_end_time=_format_time(display_end_time),
-            river_valid_time_end=_format_time(river_end),
+            display_end_time=_format_optional_time(display_end_time),
+            river_valid_time_end=_format_optional_time(river_end),
         )
     if cycle_time is not None and river_end is not None and _elapsed_lead_hours(cycle_time, river_end) is None:
         add(
             "Q_DOWN_HORIZON_NONPOSITIVE",
             "River q_down coverage must extend beyond the selected cycle_time.",
-            cycle_time=_format_time(cycle_time),
-            river_valid_time_end=_format_time(river_end),
+            cycle_time=_format_optional_time(cycle_time),
+            river_valid_time_end=_format_optional_time(river_end),
         )
     max_lead_time_hours = _optional_int(row.get("max_lead_time_hours"))
     if max_lead_time_hours is not None and max_lead_time_hours <= 0:
@@ -4022,19 +4025,19 @@ def _qhh_latest_unavailable_reasons(row: Mapping[str, Any]) -> list[dict[str, An
         add(
             "DISPLAYABLE_WINDOW_MISSING",
             "Station forcing and river q_down coverage do not provide a common displayable window.",
-            display_start_time=_format_time(display_start_time),
-            display_end_time=_format_time(display_end_time),
-            station_valid_time_start=_format_time(station_start),
-            station_valid_time_end=_format_time(station_end),
-            river_valid_time_start=_format_time(river_start),
-            river_valid_time_end=_format_time(river_end),
+            display_start_time=_format_optional_time(display_start_time),
+            display_end_time=_format_optional_time(display_end_time),
+            station_valid_time_start=_format_optional_time(station_start),
+            station_valid_time_end=_format_optional_time(station_end),
+            river_valid_time_start=_format_optional_time(river_start),
+            river_valid_time_end=_format_optional_time(river_end),
         )
     elif available_end_time <= available_start_time:
         add(
             "DISPLAYABLE_WINDOW_NONPOSITIVE",
             "Station forcing and river q_down coverage do not overlap for a positive displayable window.",
-            available_start_time=_format_time(available_start_time),
-            available_end_time=_format_time(available_end_time),
+            available_start_time=_format_optional_time(available_start_time),
+            available_end_time=_format_optional_time(available_end_time),
         )
     if (
         cycle_time is not None
@@ -4044,8 +4047,8 @@ def _qhh_latest_unavailable_reasons(row: Mapping[str, Any]) -> list[dict[str, An
         add(
             "DISPLAYABLE_HORIZON_NONPOSITIVE",
             "The common displayable window must extend beyond the hydro cycle_time.",
-            cycle_time=_format_time(cycle_time),
-            available_end_time=_format_time(available_end_time),
+            cycle_time=_format_optional_time(cycle_time),
+            available_end_time=_format_optional_time(available_end_time),
         )
 
     return reasons
@@ -4373,8 +4376,8 @@ def _validate_forcing_version_filter_consistency(
             conflicts.append(
                 {
                     "field": "cycle_time",
-                    "supplied": _format_time(supplied_cycle_time),
-                    "selected": _format_time(selected_cycle_time),
+                    "supplied": _format_optional_time(supplied_cycle_time),
+                    "selected": _format_optional_time(selected_cycle_time),
                 }
             )
 
@@ -4396,7 +4399,7 @@ def _validate_time_range(from_time: datetime | None, to_time: datetime | None) -
             status_code=422,
             code="VALIDATION_ERROR",
             message="from must be earlier than or equal to to.",
-            details={"from": _format_time(from_time), "to": _format_time(to_time)},
+            details={"from": _format_optional_time(from_time), "to": _format_optional_time(to_time)},
         )
 
 
@@ -4441,14 +4444,14 @@ def _datetime_value(value: Any) -> datetime | None:
     return None
 
 
-def _format_time(value: datetime | None) -> str | None:
+def _format_optional_time(value: datetime | None) -> str | None:
     if value is None:
         return None
-    return _ensure_utc(value).isoformat().replace("+00:00", "Z")
+    return format_iso_utc(value)
 
 
 def _format_time_value(value: Any) -> str | None:
-    return _format_time(_datetime_value(value))
+    return _format_optional_time(_datetime_value(value))
 
 
 def _timestamp_ms(value: datetime) -> int:
@@ -4457,7 +4460,7 @@ def _timestamp_ms(value: datetime) -> int:
 
 def _json_ready(value: Any) -> Any:
     if isinstance(value, datetime):
-        return _format_time(value)
+        return _format_optional_time(value)
     if isinstance(value, dict):
         return {key: _json_ready(item) for key, item in value.items()}
     if isinstance(value, list | tuple):
@@ -4497,7 +4500,7 @@ def _latest_cycle_time(cycle_times_by_scenario: Mapping[str, datetime]) -> datet
 def _empty_forecast_response(*, segment_id: str, issue_time: datetime | None) -> dict[str, Any]:
     return {
         "segment_id": segment_id,
-        "issue_time": _format_time(issue_time),
+        "issue_time": _format_optional_time(issue_time),
         "unit": "m3/s",
         "series": [],
     }
@@ -4512,7 +4515,7 @@ def _empty_spliced_response(
 ) -> dict[str, Any]:
     return {
         "segments": [],
-        "issue_time": _format_time(issue_time),
+        "issue_time": _format_optional_time(issue_time),
         "river_segment_id": river_segment_id,
         "variable": variable,
         "unit": unit,
@@ -4550,7 +4553,7 @@ def _forecast_response_from_rows(
 
     return {
         "segment_id": segment_id,
-        "issue_time": _format_time(issue_time),
+        "issue_time": _format_optional_time(issue_time),
         "unit": unit,
         "series": list(grouped.values()),
     }
@@ -4605,7 +4608,7 @@ def _station_series_response(
         if series["native_resolution"] is None and row.get("native_resolution") is not None:
             series["native_resolution"] = str(row["native_resolution"])
         point = {
-            "valid_time": _format_time(valid_time),
+            "valid_time": _format_optional_time(valid_time),
             "value": float(row["value"]),
             "quality_flag": row.get("quality_flag"),
             "source_id": _display_source_id(str(row["source_id"])) if row.get("source_id") else None,
@@ -4637,8 +4640,8 @@ def _station_series_response(
         "valid_time_start": _format_time_value(forcing_version.get("start_time")),
         "valid_time_end": _format_time_value(forcing_version.get("end_time")),
         "limit": limit,
-        "requested_from": _format_time(requested_from),
-        "requested_to": _format_time(requested_to),
+        "requested_from": _format_optional_time(requested_from),
+        "requested_to": _format_optional_time(requested_to),
         "series": list(grouped.values()),
     }
 
@@ -4679,8 +4682,8 @@ def _station_truncation_metadata(
     return {
         "limit": limit,
         "returned_points": returned_points,
-        "requested_from": _format_time(requested_from),
-        "requested_to": _format_time(requested_to),
+        "requested_from": _format_optional_time(requested_from),
+        "requested_to": _format_optional_time(requested_to),
         "returned_from": returned_from,
         "returned_to": returned_to,
         "truncated": False,
@@ -4873,7 +4876,7 @@ def _spliced_response_from_rows(
 
     return {
         "segments": segments,
-        "issue_time": _format_time(normalized_issue_time),
+        "issue_time": _format_optional_time(normalized_issue_time),
         "river_segment_id": river_segment_id,
         "variable": variable,
         "unit": unit,
@@ -4881,7 +4884,7 @@ def _spliced_response_from_rows(
 
 
 def _segment_point(row: dict[str, Any]) -> dict[str, Any]:
-    return {"valid_time": _format_time(row["valid_time"]), "value": float(row["value"])}
+    return {"valid_time": _format_optional_time(row["valid_time"]), "value": float(row["value"])}
 
 
 def _unit_from_rows(rows: Sequence[dict[str, Any]]) -> str:

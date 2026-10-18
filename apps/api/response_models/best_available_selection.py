@@ -2,7 +2,7 @@
 
 The route returns a bare list (no ``_ok`` envelope): each item is
 ``_selection_row_response`` (``packages/common/best_available.py``), whose
-timestamps are already ``_format_time`` strings.
+timestamps are already ``_format_optional_time`` strings.
 """
 
 from __future__ import annotations

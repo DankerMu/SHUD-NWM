@@ -1,7 +1,7 @@
 """Response models for ``apps/api/routes/forecast.py`` (#2222, #2348).
 
 Every datetime here is already a string when the handler returns it
-(``_json_ready`` / ``_format_time`` in ``packages/common/forecast_store.py``),
+(``_json_ready`` / ``_format_optional_time`` in ``packages/common/forecast_store.py``),
 so the fields are ``str``.
 """
 

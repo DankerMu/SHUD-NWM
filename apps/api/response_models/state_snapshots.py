@@ -2,7 +2,7 @@
 
 Both routes return bare bodies (no ``_ok`` envelope) built by
 ``packages/common/state_manager._snapshot_to_dict``, whose timestamps are
-already ``_format_time`` strings.
+already ``_format_optional_time`` strings.
 """
 
 from __future__ import annotations

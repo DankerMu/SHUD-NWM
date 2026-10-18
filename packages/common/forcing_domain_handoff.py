@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from packages.common.contracts.time_normalization import format_iso_utc, parse_iso_utc
 from packages.common.object_store import LocalObjectStore, sha256_bytes
 from packages.common.redaction import is_sensitive_key, redact_payload, redact_text
 from packages.common.storage import validate_object_path
@@ -309,7 +310,7 @@ def validate_forcing_domain_handoff(
         "identity": identity,
         "compatibility": compatibility,
         "temporal_bounds": {
-            field: _format_time(parsed_times[field])
+            field: format_iso_utc(parsed_times[field])
             for field in TEMPORAL_FIELDS
             if field in parsed_times
         },
@@ -795,7 +796,7 @@ def _validate_temporal_fields(
             reasons.append(_reason(REASON_TEMPORAL_FIELD_MISSING, field=field))
             continue
         try:
-            parsed_times[field] = _parse_time(str(value))
+            parsed_times[field] = parse_iso_utc(str(value))
         except ValueError as error:
             reasons.append(_reason(REASON_TEMPORAL_FIELD_MALFORMED, field=field, detail=str(error)))
 
@@ -1384,7 +1385,7 @@ def _validate_package_manifest_identity_field(
         matches = str(package_value).lower() == str(manifest_value).lower()
     elif field in TEMPORAL_FIELDS:
         try:
-            matches = _parse_time(str(package_value)) == _parse_time(str(manifest_value))
+            matches = parse_iso_utc(str(package_value)) == parse_iso_utc(str(manifest_value))
         except ValueError:
             matches = False
     else:
@@ -1745,8 +1746,8 @@ def _validate_time_lattice_bounds(
             _reason(
                 REASON_TEMPORAL_WINDOW_INVALID,
                 field="payloads.station_timeseries.time_lattice.valid_time_start",
-                expected=_format_time(start_time),
-                actual=_format_time(lattice_start),
+                expected=format_iso_utc(start_time),
+                actual=format_iso_utc(lattice_start),
             )
         )
     if end_time is not None and lattice_end != end_time:
@@ -1754,8 +1755,8 @@ def _validate_time_lattice_bounds(
             _reason(
                 REASON_TEMPORAL_WINDOW_INVALID,
                 field="payloads.station_timeseries.time_lattice.valid_time_end",
-                expected=_format_time(end_time),
-                actual=_format_time(lattice_end),
+                expected=format_iso_utc(end_time),
+                actual=format_iso_utc(lattice_end),
             )
         )
 
@@ -2033,7 +2034,7 @@ def _validate_station_timeseries_rows(
                 actual=variable,
             )
         if station_id is not None and variable is not None and valid_time is not None:
-            actual_tuples.append((station_id, variable, _format_time(valid_time)))
+            actual_tuples.append((station_id, variable, format_iso_utc(valid_time)))
         unit = _row_text(row, "unit", "station_timeseries", index, reasons, row_diagnostics)
         if variable is not None and unit is not None and isinstance(units, Mapping):
             expected_unit = units.get(variable)
@@ -2048,7 +2049,7 @@ def _validate_station_timeseries_rows(
                 )
         native_resolution = _row_text(row, "native_resolution", "station_timeseries", index, reasons, row_diagnostics)
         if native_resolution is not None and valid_time is not None and variable is not None:
-            expected_resolution = time_resolution_by_variable_time.get((variable, _format_time(valid_time)))
+            expected_resolution = time_resolution_by_variable_time.get((variable, format_iso_utc(valid_time)))
             if expected_resolution is not None and native_resolution != expected_resolution:
                 row_diagnostics.add(
                     REASON_IDENTITY_MISMATCH,
@@ -2068,8 +2069,8 @@ def _validate_station_timeseries_rows(
             _reason(
                 REASON_TEMPORAL_WINDOW_INVALID,
                 field="payloads.station_timeseries.valid_time_coverage_start",
-                expected=_format_time(start_time),
-                actual=_format_time(min(valid_times)),
+                expected=format_iso_utc(start_time),
+                actual=format_iso_utc(min(valid_times)),
             )
         )
     if not lattice_too_large and valid_times and end_time is not None and max(valid_times) != end_time:
@@ -2077,8 +2078,8 @@ def _validate_station_timeseries_rows(
             _reason(
                 REASON_TEMPORAL_WINDOW_INVALID,
                 field="payloads.station_timeseries.valid_time_coverage_end",
-                expected=_format_time(end_time),
-                actual=_format_time(max(valid_times)),
+                expected=format_iso_utc(end_time),
+                actual=format_iso_utc(max(valid_times)),
             )
         )
     _validate_station_timeseries_lattice(time_resolution_by_variable_time, known_station_ids, actual_tuples, reasons)
@@ -2193,12 +2194,12 @@ def _validate_time_lattice_declared_variable_bounds(
     times_by_variable: dict[str, list[datetime]] = {variable: [] for variable in declared_variables}
     for variable, valid_time in time_resolution_by_variable_time:
         if variable in times_by_variable:
-            times_by_variable[variable].append(_parse_time(valid_time))
+            times_by_variable[variable].append(parse_iso_utc(valid_time))
 
     missing_count = 0
     samples: list[dict[str, str]] = []
-    expected_start = _format_time(start_time)
-    expected_end = _format_time(end_time)
+    expected_start = format_iso_utc(start_time)
+    expected_end = format_iso_utc(end_time)
     for variable in sorted(declared_variables):
         variable_times = times_by_variable.get(variable, [])
         if not variable_times:
@@ -2223,7 +2224,7 @@ def _validate_time_lattice_declared_variable_bounds(
                         "variable": variable,
                         "missing": "valid_time_start",
                         "expected": expected_start,
-                        "actual": _format_time(variable_start),
+                        "actual": format_iso_utc(variable_start),
                     }
                 )
         if variable_end != end_time:
@@ -2234,7 +2235,7 @@ def _validate_time_lattice_declared_variable_bounds(
                         "variable": variable,
                         "missing": "valid_time_end",
                         "expected": expected_end,
-                        "actual": _format_time(variable_end),
+                        "actual": format_iso_utc(variable_end),
                     }
                 )
 
@@ -2365,7 +2366,7 @@ def _time_resolution_by_variable_time(
         for variable in sorted(_segment_variables(variable_scope, declared_variables)):
             current = start
             for _ in range(point_count):
-                formatted_time = _format_time(current)
+                formatted_time = format_iso_utc(current)
                 key = (variable, formatted_time)
                 if key in time_resolution_by_variable_time:
                     duplicate_count += 1
@@ -2541,7 +2542,7 @@ def _row_time(
     if value is None:
         return None
     try:
-        return _parse_time(value)
+        return parse_iso_utc(value)
     except ValueError as error:
         if row_diagnostics is not None:
             row_diagnostics.add(REASON_TEMPORAL_FIELD_MALFORMED, role, field, index, detail=str(error))
@@ -2579,7 +2580,7 @@ def _required_lattice_time(
         reasons.append(_reason(REASON_TEMPORAL_FIELD_MISSING, field=detail_field))
         return None
     try:
-        return _parse_time(str(value))
+        return parse_iso_utc(str(value))
     except ValueError as error:
         reasons.append(_reason(REASON_TEMPORAL_FIELD_MALFORMED, field=detail_field, detail=str(error)))
         return None
@@ -2590,7 +2591,7 @@ def _optional_manifest_time(manifest: Mapping[str, Any], field: str) -> datetime
     if not _present_text(value):
         return None
     try:
-        return _parse_time(str(value))
+        return parse_iso_utc(str(value))
     except ValueError:
         return None
 
@@ -2704,18 +2705,6 @@ def _manifest_key(manifest_path: str | Path, root: Path) -> str:
 
 def _safe_manifest_uri(manifest_path: str | Path) -> str:
     return Path(manifest_path).name if Path(manifest_path).is_absolute() else str(manifest_path)
-
-
-def _parse_time(value: str) -> datetime:
-    normalized = value.strip().replace("Z", "+00:00")
-    parsed = datetime.fromisoformat(normalized)
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
-
-
-def _format_time(value: datetime) -> str:
-    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _parse_duration(value: str) -> timedelta | None:

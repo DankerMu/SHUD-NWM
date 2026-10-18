@@ -9,6 +9,8 @@
     "services/tiles/mvt.py",
     "db/seeds/seed_demo.py",
     "packages/common/forcing_domain_handoff_apply.py",
+    "packages/common/forcing_domain_handoff.py",
+    "packages/common/state_cli.py",
     "workers/output_parser/parser.py",
     "workers/forcing_producer/producer.py",
     "workers/forcing_producer/store.py",
@@ -139,6 +141,7 @@
     "workers/mapping_builder/binding.py",
     "workers/mapping_builder/cli.py",
     "workers/mapping_builder/evidence.py",
-    "tests/test_status_vocab_parity.py"
+    "tests/test_status_vocab_parity.py",
+    "tests/test_object_store_forcing.py"
   ]
 }

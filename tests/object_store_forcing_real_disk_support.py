@@ -26,7 +26,7 @@ from typing import Any, Protocol
 
 import pytest
 
-from packages.common.object_store_forcing import _normalize_source_id, _resolve_disk_path
+from packages.common.object_store_forcing import _resolve_disk_path, _storage_source_segment
 
 # A CSV younger than this may still be being written by the forcing producer,
 # so the cycle it belongs to is not a candidate yet.
@@ -80,7 +80,7 @@ def latest_complete_cycle(
     ``<root>/forcing/<source>/<cycle>/<basin_version_id>/`` holds exactly one
     ``dg_*`` directory (the model; none or several is absent, never a guess),
     ``station_for_model`` names a station for it, and that station's CSV -- path
-    from the production resolver (``_normalize_source_id`` + ``_resolve_disk_path``)
+    from the production resolver (``_storage_source_segment`` + ``_resolve_disk_path``)
     with ``basin_version_id`` and ``forcing_filename`` from ``lookup`` -- exists
     with an mtime at least ``MIN_SETTLED_AGE_SECONDS`` old. Both callables are
     asked once per model / station, not per cycle. No qualifying cycle is a hard
@@ -89,7 +89,7 @@ def latest_complete_cycle(
     """
     current = time.time() if now is None else now
     labelled = [
-        (f"{basin_version_id}/{source_id}", basin_version_id, source_id, _normalize_source_id(source_id))
+        (f"{basin_version_id}/{source_id}", basin_version_id, source_id, _storage_source_segment(source_id))
         for basin_version_id, source_id in combos
     ]
 

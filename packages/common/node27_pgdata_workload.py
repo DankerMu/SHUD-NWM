@@ -11,7 +11,8 @@ from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import Any
 
-from packages.common.node27_pgdata_workload_io import prove_server_identity, utc_now
+from packages.common.contracts.time_normalization import utc_now
+from packages.common.node27_pgdata_workload_io import prove_server_identity
 from packages.common.node27_pgdata_workload_measure import (
     evaluate_api_samples,
     evaluate_sql_samples,

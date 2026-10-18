@@ -6,7 +6,7 @@ the parsed response (``tests/test_response_model_preservation.py``):
 
 * ``datetime`` where the handler returns ``datetime`` objects (registry rows,
   pipeline ORM rows); ``str`` only where the value is already stringified
-  (``_json_ready`` / ``_format_time``); ``datetime | str`` where a raw driver
+  (``_json_ready`` / ``_format_optional_time``); ``datetime | str`` where a raw driver
   value is passed through untouched;
 * ``int | float`` wherever either can occur (a bare ``float`` would print
   ``3`` as ``3.0``), ``list[Any]`` for GeoJSON coordinates and forecast

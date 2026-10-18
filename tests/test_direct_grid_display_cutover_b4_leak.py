@@ -32,8 +32,8 @@ from packages.common.object_store_forcing import (
     StationForcingFileNotFoundError,
     StationMetadata,
     _compute_cycle_compact,
-    _normalize_source_id,
     _resolve_disk_path,
+    _storage_source_segment,
     raise_station_not_found,
     read_station_forcing_csv,
 )
@@ -76,7 +76,7 @@ def _station(*, active_flag: bool | None) -> StationMetadata:
 def _write_csv_at(root: Path, *, station: StationMetadata) -> Path:
     path = _resolve_disk_path(
         root,
-        _normalize_source_id(SOURCE_ID),
+        _storage_source_segment(SOURCE_ID),
         _compute_cycle_compact(CYCLE_TIME),
         station.basin_version_id,
         MODEL_ID,
