@@ -1216,7 +1216,7 @@
 
   **Minimal mergeable slice:** atomic - 谓词与测试同 PR。
 
-- [ ] 8.2 `tests/test_entropy_audit_baseline_writer_summary.py` 删除对 tracked 计数的两条字面量断言、保留 HEAD inventory 比较并加 tracked 断言（正整数、`total_modules == len(modules)`）；随后 `uv run python scripts/governance/write_entropy_baseline.py` 刷新 `latest.json` 并提交归档快照。
+- [x] 8.2 `tests/test_entropy_audit_baseline_writer_summary.py` 删除对 tracked 计数的两条字面量断言、保留 HEAD inventory 比较并加 tracked 断言（正整数、`total_modules == len(modules)`）；随后 `uv run python scripts/governance/write_entropy_baseline.py` 刷新 `latest.json` 并提交归档快照。
 
   Depends on: 8.1
 

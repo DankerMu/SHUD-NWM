@@ -1,54 +1,122 @@
 {
-  "version": 1,
-  "timestamp": "2026-06-12T16:02:45Z",
-  "repo": "https://github.com/DankerMu/SHUD-NWM.git",
-  "branch": "master",
-  "commit": "d5cacfeda976",
-  "summary": {
-    "total_source_files": 716,
-    "total_test_files": 247,
-    "total_instruction_files": 3,
-    "total_modules": 28,
-    "modules_with_high_entropy": 2,
-    "overall_trend": "baseline",
-    "governance_finding_count": 356,
-    "budget_counted_count": 169,
-    "gate_eligible_count": 4
-  },
-  "metadata": {
-    "source_report_schema": "governance-4a.entropy-report.v1",
-    "source_report_generated_at": "2026-06-12T15:30:59+00:00",
-    "source_report_mode": "report-only",
-    "summary_counts": {
-      "by_allowlist_state": {
-        "allowlisted": 187,
-        "unallowlisted": 169
-      },
-      "by_budget_count": {
-        "budget_counted": 169,
-        "not_budget_counted": 187
-      },
-      "by_check_id": {
-        "agent-artifact-ownership-policy": 1,
-        "broad-e2e-api-mock": 6,
-        "openapi-frontend-types-delegated": 1,
-        "openapi-frontend-types-signal": 1,
-        "placeholder-path-token": 117,
-        "stale-display-route-token": 230
-      },
-      "by_gate_eligibility": {
-        "gate_eligible": 4,
-        "not_gate_eligible": 352
-      },
-      "by_priority": {
-        "P2": 172,
-        "P3": 184
-      },
-      "by_role": {
-        "display_readonly": 236,
-        "shared_contract": 120
-      }
+  "branch": "feat/issue-2960-entropy-burndown-2026-10",
+  "cleanup_priorities": [
+    {
+      "axis": "context",
+      "effort": "low",
+      "impact": "high",
+      "target": "Align current display runbooks with M26 single-map route authority"
     },
+    {
+      "axis": "behavior/context",
+      "effort": "medium",
+      "impact": "high",
+      "target": "Keep mocked Playwright regression separated from live display evidence"
+    },
+    {
+      "axis": "structure/behavior",
+      "effort": "high",
+      "impact": "high",
+      "target": "Stage large decomposition of services/orchestrator/scheduler.py and services/orchestrator/chain.py"
+    }
+  ],
+  "commit": "b640720420ec",
+  "high_spread_patterns": [
+    {
+      "axis": "legacy/dead-code",
+      "description": "placeholder-path-token",
+      "governance_faces": [
+        "legacy/dead-code"
+      ],
+      "module_count": 4,
+      "modules": [
+        "docs/archived",
+        "docs/governance",
+        "openspec/archive",
+        "services/slurm_gateway"
+      ],
+      "occurrence_count": 109,
+      "occurrences": 109,
+      "pattern": "placeholder-path-token",
+      "roles": [
+        "shared_contract"
+      ],
+      "spread_risk": "high",
+      "top_priority": "P2",
+      "top_severity": "medium"
+    },
+    {
+      "axis": "docs alignment",
+      "description": "broad-e2e-api-mock",
+      "governance_faces": [
+        "docs alignment"
+      ],
+      "module_count": 1,
+      "modules": [
+        "apps/frontend"
+      ],
+      "occurrence_count": 14,
+      "occurrences": 14,
+      "pattern": "broad-e2e-api-mock",
+      "roles": [
+        "display_readonly"
+      ],
+      "spread_risk": "high",
+      "top_priority": "P2",
+      "top_severity": "medium"
+    },
+    {
+      "axis": "docs alignment",
+      "description": "stale-display-route-token",
+      "governance_faces": [
+        "docs alignment"
+      ],
+      "module_count": 19,
+      "modules": [
+        "CLAUDE.md",
+        "README.md",
+        "apps/frontend",
+        "docs/governance",
+        "docs/plans",
+        "docs/runbooks",
+        "openspec/display-readonly-ops-ui",
+        "openspec/display-route-evidence-cleanup",
+        "openspec/entropy-burndown-2026-10",
+        "openspec/evidence-boundary-hardening",
+        "openspec/hydro-met-mvp-ui",
+        "openspec/hydromet-multibasin-display",
+        "openspec/legacy-display-page-retirement",
+        "openspec/qhh-latest-display-product",
+        "openspec/qhh-latest-product-identity",
+        "openspec/qhh-mvp-smoke-readiness",
+        "openspec/readonly-db-and-e2e-evidence",
+        "openspec/single-map-shell-routing",
+        "progress.md"
+      ],
+      "occurrence_count": 124,
+      "occurrences": 124,
+      "pattern": "stale-display-route-token",
+      "roles": [
+        "display_readonly"
+      ],
+      "spread_risk": "high",
+      "top_priority": "P3",
+      "top_severity": "low"
+    },
+    {
+      "axis": "structure,behavior",
+      "description": "orchestrator mixed responsibilities in scheduler.py and chain.py",
+      "files": [
+        "services/orchestrator/scheduler.py",
+        "services/orchestrator/chain.py"
+      ],
+      "occurrences": 2,
+      "spread_risk": "high",
+      "top_priority": "P1",
+      "top_severity": "high"
+    }
+  ],
+  "metadata": {
     "skipped_path_families": [
       ".git",
       ".nhms-*",
@@ -57,759 +125,640 @@
       "caches",
       "data",
       "dist",
-      "node_modules"
-    ]
+      "node_modules",
+      "openspec/changes/archive (stale-display-route-token only)"
+    ],
+    "source_report_generated_at": "2026-10-18T07:21:30+00:00",
+    "source_report_mode": "report-only",
+    "source_report_schema": "governance-4a.entropy-report.v1",
+    "summary_counts": {
+      "by_allowlist_state": {
+        "allowlisted": 212,
+        "unallowlisted": 37
+      },
+      "by_budget_count": {
+        "budget_counted": 37,
+        "not_budget_counted": 212
+      },
+      "by_check_id": {
+        "broad-e2e-api-mock": 14,
+        "openapi-frontend-types-delegated": 1,
+        "openapi-frontend-types-signal": 1,
+        "placeholder-path-token": 109,
+        "stale-display-route-token": 124
+      },
+      "by_gate_eligibility": {
+        "gate_eligible": 0,
+        "not_gate_eligible": 249
+      },
+      "by_priority": {
+        "P2": 51,
+        "P3": 198
+      },
+      "by_role": {
+        "display_readonly": 138,
+        "shared_contract": 111
+      }
+    }
   },
   "modules": {
-    "apps/frontend": {
-      "file_count": 120,
-      "finding_count": 13,
-      "priority": "P2",
-      "structure": {
+    "CLAUDE.md": {
+      "behavior": {
+        "score": "low"
+      },
+      "context": {
+        "score": "low"
+      },
+      "control": {
+        "score": "low"
+      },
+      "file_count": 0,
+      "finding_count": 1,
+      "priority": "P3",
+      "protocol": {
         "score": "low"
       },
       "semantics": {
         "score": "low"
       },
+      "structure": {
+        "score": "low"
+      }
+    },
+    "README.md": {
+      "behavior": {
+        "score": "low"
+      },
+      "context": {
+        "score": "low"
+      },
+      "control": {
+        "score": "low"
+      },
+      "file_count": 0,
+      "finding_count": 6,
+      "priority": "P3",
+      "protocol": {
+        "score": "low"
+      },
+      "semantics": {
+        "score": "low"
+      },
+      "structure": {
+        "score": "low"
+      }
+    },
+    "apps/frontend": {
       "behavior": {
         "score": "medium"
       },
       "context": {
-        "score": "medium"
-      },
-      "protocol": {
         "score": "low"
       },
       "control": {
+        "score": "low"
+      },
+      "file_count": 279,
+      "finding_count": 18,
+      "priority": "P2",
+      "protocol": {
+        "score": "low"
+      },
+      "semantics": {
+        "score": "low"
+      },
+      "structure": {
         "score": "low"
       }
     },
     "docs/archived": {
-      "file_count": 0,
-      "finding_count": 2,
-      "priority": "P3",
-      "structure": {
-        "score": "low"
-      },
-      "semantics": {
-        "score": "low"
-      },
       "behavior": {
         "score": "low"
       },
       "context": {
         "score": "low"
       },
+      "control": {
+        "score": "low"
+      },
+      "file_count": 0,
+      "finding_count": 2,
+      "priority": "P3",
       "protocol": {
         "score": "low"
       },
-      "control": {
+      "semantics": {
+        "score": "low"
+      },
+      "structure": {
         "score": "low"
       }
     },
     "docs/governance": {
-      "file_count": 0,
-      "finding_count": 39,
-      "priority": "P2",
-      "structure": {
-        "score": "low"
-      },
-      "semantics": {
-        "score": "medium"
-      },
-      "behavior": {
-        "score": "low"
-      },
-      "context": {
-        "score": "medium"
-      },
-      "protocol": {
-        "score": "low"
-      },
-      "control": {
-        "score": "low"
-      }
-    },
-    "docs/modules": {
-      "file_count": 0,
-      "finding_count": 1,
-      "priority": "P2",
-      "structure": {
-        "score": "low"
-      },
-      "semantics": {
-        "score": "medium"
-      },
       "behavior": {
         "score": "low"
       },
       "context": {
         "score": "low"
       },
+      "control": {
+        "score": "low"
+      },
+      "file_count": 0,
+      "finding_count": 36,
+      "priority": "P3",
       "protocol": {
         "score": "low"
       },
-      "control": {
+      "semantics": {
+        "score": "low"
+      },
+      "structure": {
         "score": "low"
       }
     },
     "docs/plans": {
-      "file_count": 0,
-      "finding_count": 18,
-      "priority": "P3",
-      "structure": {
-        "score": "low"
-      },
-      "semantics": {
-        "score": "low"
-      },
       "behavior": {
         "score": "low"
       },
       "context": {
         "score": "low"
       },
+      "control": {
+        "score": "low"
+      },
+      "file_count": 0,
+      "finding_count": 17,
+      "priority": "P3",
       "protocol": {
         "score": "low"
       },
-      "control": {
+      "semantics": {
+        "score": "low"
+      },
+      "structure": {
         "score": "low"
       }
     },
     "docs/runbooks": {
+      "behavior": {
+        "score": "low"
+      },
+      "context": {
+        "score": "low"
+      },
+      "control": {
+        "score": "low"
+      },
       "file_count": 0,
-      "finding_count": 38,
-      "priority": "P2",
-      "structure": {
+      "finding_count": 46,
+      "priority": "P3",
+      "protocol": {
         "score": "low"
       },
       "semantics": {
         "score": "low"
       },
-      "behavior": {
-        "score": "low"
-      },
-      "context": {
-        "score": "medium"
-      },
-      "protocol": {
-        "score": "low"
-      },
-      "control": {
+      "structure": {
         "score": "low"
       }
     },
     "openapi": {
+      "behavior": {
+        "score": "low"
+      },
+      "context": {
+        "score": "low"
+      },
+      "control": {
+        "score": "low"
+      },
       "file_count": 0,
       "finding_count": 2,
       "priority": "P3",
-      "structure": {
+      "protocol": {
         "score": "low"
       },
       "semantics": {
         "score": "low"
       },
+      "structure": {
+        "score": "low"
+      }
+    },
+    "openspec/archive": {
       "behavior": {
         "score": "low"
       },
       "context": {
         "score": "low"
       },
-      "protocol": {
-        "score": "low"
-      },
       "control": {
         "score": "low"
-      }
-    },
-    "openspec/governance-2-legacy-dead-code-retirement": {
+      },
       "file_count": 0,
-      "finding_count": 42,
-      "priority": "P3",
-      "structure": {
-        "score": "low"
-      },
-      "semantics": {
-        "score": "low"
-      },
-      "behavior": {
-        "score": "low"
-      },
-      "context": {
-        "score": "low"
-      },
-      "protocol": {
-        "score": "low"
-      },
-      "control": {
-        "score": "low"
-      }
-    },
-    "openspec/governance-4-entropy-automation": {
-      "file_count": 0,
-      "finding_count": 6,
+      "finding_count": 79,
       "priority": "P2",
-      "structure": {
+      "protocol": {
         "score": "low"
       },
       "semantics": {
         "score": "medium"
       },
+      "structure": {
+        "score": "low"
+      }
+    },
+    "openspec/display-readonly-ops-ui": {
       "behavior": {
         "score": "low"
       },
       "context": {
-        "score": "medium"
-      },
-      "protocol": {
         "score": "low"
       },
       "control": {
         "score": "low"
-      }
-    },
-    "openspec/governance-5-e1-entropy-baseline-burndown": {
+      },
       "file_count": 0,
-      "finding_count": 8,
+      "finding_count": 3,
       "priority": "P3",
-      "structure": {
+      "protocol": {
         "score": "low"
       },
       "semantics": {
         "score": "low"
       },
+      "structure": {
+        "score": "low"
+      }
+    },
+    "openspec/display-route-evidence-cleanup": {
       "behavior": {
         "score": "low"
       },
       "context": {
         "score": "low"
       },
-      "protocol": {
-        "score": "low"
-      },
       "control": {
         "score": "low"
-      }
-    },
-    "openspec/governance-5-e2-display-route-evidence-cleanup": {
-      "file_count": 0,
-      "finding_count": 10,
-      "priority": "P2",
-      "structure": {
-        "score": "low"
       },
-      "semantics": {
-        "score": "low"
-      },
-      "behavior": {
-        "score": "low"
-      },
-      "context": {
-        "score": "medium"
-      },
-      "protocol": {
-        "score": "low"
-      },
-      "control": {
-        "score": "low"
-      }
-    },
-    "openspec/issue-122-publish-tiles": {
       "file_count": 0,
       "finding_count": 2,
-      "priority": "P2",
-      "structure": {
+      "priority": "P3",
+      "protocol": {
         "score": "low"
       },
       "semantics": {
-        "score": "medium"
+        "score": "low"
       },
+      "structure": {
+        "score": "low"
+      }
+    },
+    "openspec/entropy-burndown-2026-10": {
       "behavior": {
         "score": "low"
       },
       "context": {
         "score": "low"
       },
-      "protocol": {
-        "score": "low"
-      },
       "control": {
         "score": "low"
-      }
-    },
-    "openspec/issue-124-slurm-production-paths": {
-      "file_count": 0,
-      "finding_count": 9,
-      "priority": "P2",
-      "structure": {
-        "score": "low"
       },
-      "semantics": {
-        "score": "medium"
-      },
-      "behavior": {
-        "score": "low"
-      },
-      "context": {
-        "score": "low"
-      },
-      "protocol": {
-        "score": "low"
-      },
-      "control": {
-        "score": "low"
-      }
-    },
-    "openspec/m0-engineering-init": {
-      "file_count": 0,
-      "finding_count": 6,
-      "priority": "P2",
-      "structure": {
-        "score": "low"
-      },
-      "semantics": {
-        "score": "medium"
-      },
-      "behavior": {
-        "score": "low"
-      },
-      "context": {
-        "score": "low"
-      },
-      "protocol": {
-        "score": "low"
-      },
-      "control": {
-        "score": "low"
-      }
-    },
-    "openspec/m1-gfs-forecast-loop": {
       "file_count": 0,
       "finding_count": 1,
-      "priority": "P2",
-      "structure": {
+      "priority": "P3",
+      "protocol": {
         "score": "low"
       },
       "semantics": {
-        "score": "medium"
+        "score": "low"
       },
+      "structure": {
+        "score": "low"
+      }
+    },
+    "openspec/evidence-boundary-hardening": {
       "behavior": {
         "score": "low"
       },
       "context": {
         "score": "low"
       },
+      "control": {
+        "score": "low"
+      },
+      "file_count": 0,
+      "finding_count": 5,
+      "priority": "P3",
       "protocol": {
+        "score": "low"
+      },
+      "semantics": {
+        "score": "low"
+      },
+      "structure": {
+        "score": "low"
+      }
+    },
+    "openspec/hydro-met-mvp-ui": {
+      "behavior": {
+        "score": "low"
+      },
+      "context": {
         "score": "low"
       },
       "control": {
         "score": "low"
+      },
+      "file_count": 0,
+      "finding_count": 3,
+      "priority": "P3",
+      "protocol": {
+        "score": "low"
+      },
+      "semantics": {
+        "score": "low"
+      },
+      "structure": {
+        "score": "low"
       }
     },
-    "openspec/m20-production-multibasin-continuous-automation": {
+    "openspec/hydromet-multibasin-display": {
+      "behavior": {
+        "score": "low"
+      },
+      "context": {
+        "score": "low"
+      },
+      "control": {
+        "score": "low"
+      },
+      "file_count": 0,
+      "finding_count": 6,
+      "priority": "P3",
+      "protocol": {
+        "score": "low"
+      },
+      "semantics": {
+        "score": "low"
+      },
+      "structure": {
+        "score": "low"
+      }
+    },
+    "openspec/legacy-display-page-retirement": {
+      "behavior": {
+        "score": "low"
+      },
+      "context": {
+        "score": "low"
+      },
+      "control": {
+        "score": "low"
+      },
+      "file_count": 0,
+      "finding_count": 4,
+      "priority": "P3",
+      "protocol": {
+        "score": "low"
+      },
+      "semantics": {
+        "score": "low"
+      },
+      "structure": {
+        "score": "low"
+      }
+    },
+    "openspec/qhh-latest-display-product": {
+      "behavior": {
+        "score": "low"
+      },
+      "context": {
+        "score": "low"
+      },
+      "control": {
+        "score": "low"
+      },
+      "file_count": 0,
+      "finding_count": 1,
+      "priority": "P3",
+      "protocol": {
+        "score": "low"
+      },
+      "semantics": {
+        "score": "low"
+      },
+      "structure": {
+        "score": "low"
+      }
+    },
+    "openspec/qhh-latest-product-identity": {
+      "behavior": {
+        "score": "low"
+      },
+      "context": {
+        "score": "low"
+      },
+      "control": {
+        "score": "low"
+      },
       "file_count": 0,
       "finding_count": 2,
-      "priority": "P2",
-      "structure": {
-        "score": "low"
-      },
-      "semantics": {
-        "score": "low"
-      },
-      "behavior": {
-        "score": "low"
-      },
-      "context": {
-        "score": "medium"
-      },
-      "protocol": {
-        "score": "low"
-      },
-      "control": {
-        "score": "low"
-      }
-    },
-    "openspec/m21-qhh-hydro-met-ops-mvp": {
-      "file_count": 0,
-      "finding_count": 56,
-      "priority": "P2",
-      "structure": {
-        "score": "low"
-      },
-      "semantics": {
-        "score": "low"
-      },
-      "behavior": {
-        "score": "low"
-      },
-      "context": {
-        "score": "medium"
-      },
-      "protocol": {
-        "score": "low"
-      },
-      "control": {
-        "score": "low"
-      }
-    },
-    "openspec/m22-two-node-docker-readonly-display": {
-      "file_count": 0,
-      "finding_count": 32,
       "priority": "P3",
-      "structure": {
+      "protocol": {
         "score": "low"
       },
       "semantics": {
         "score": "low"
       },
+      "structure": {
+        "score": "low"
+      }
+    },
+    "openspec/qhh-mvp-smoke-readiness": {
       "behavior": {
         "score": "low"
       },
       "context": {
         "score": "low"
       },
-      "protocol": {
-        "score": "low"
-      },
       "control": {
         "score": "low"
-      }
-    },
-    "openspec/m25-multibasin-frontend-production": {
+      },
       "file_count": 0,
-      "finding_count": 19,
-      "priority": "P2",
-      "structure": {
-        "score": "low"
-      },
-      "semantics": {
-        "score": "low"
-      },
-      "behavior": {
-        "score": "low"
-      },
-      "context": {
-        "score": "medium"
-      },
-      "protocol": {
-        "score": "low"
-      },
-      "control": {
-        "score": "low"
-      }
-    },
-    "openspec/m26-unified-map-display": {
-      "file_count": 0,
-      "finding_count": 37,
+      "finding_count": 1,
       "priority": "P3",
-      "structure": {
+      "protocol": {
         "score": "low"
       },
       "semantics": {
         "score": "low"
       },
+      "structure": {
+        "score": "low"
+      }
+    },
+    "openspec/readonly-db-and-e2e-evidence": {
       "behavior": {
         "score": "low"
       },
       "context": {
         "score": "low"
       },
-      "protocol": {
-        "score": "low"
-      },
       "control": {
         "score": "low"
-      }
-    },
-    "openspec/m5-flood-frequency-warning": {
+      },
       "file_count": 0,
       "finding_count": 1,
-      "priority": "P2",
-      "structure": {
-        "score": "low"
-      },
-      "semantics": {
-        "score": "medium"
-      },
-      "behavior": {
-        "score": "low"
-      },
-      "context": {
-        "score": "low"
-      },
+      "priority": "P3",
       "protocol": {
         "score": "low"
       },
-      "control": {
+      "semantics": {
+        "score": "low"
+      },
+      "structure": {
         "score": "low"
       }
     },
-    "openspec/m6-system-hardening-alignment": {
-      "file_count": 0,
-      "finding_count": 6,
-      "priority": "P2",
-      "structure": {
-        "score": "low"
-      },
-      "semantics": {
-        "score": "medium"
-      },
+    "openspec/single-map-shell-routing": {
       "behavior": {
         "score": "low"
       },
       "context": {
         "score": "low"
       },
-      "protocol": {
-        "score": "low"
-      },
       "control": {
         "score": "low"
-      }
-    },
-    "openspec/m7-second-review-remediation": {
+      },
       "file_count": 0,
-      "finding_count": 1,
-      "priority": "P2",
-      "structure": {
+      "finding_count": 2,
+      "priority": "P3",
+      "protocol": {
         "score": "low"
       },
       "semantics": {
-        "score": "medium"
-      },
-      "behavior": {
         "score": "low"
       },
-      "context": {
-        "score": "low"
-      },
-      "protocol": {
-        "score": "low"
-      },
-      "control": {
-        "score": "low"
-      }
-    },
-    "openspec/m8-fourth-review-remediation": {
-      "file_count": 0,
-      "finding_count": 1,
-      "priority": "P2",
       "structure": {
-        "score": "low"
-      },
-      "semantics": {
-        "score": "medium"
-      },
-      "behavior": {
-        "score": "low"
-      },
-      "context": {
-        "score": "low"
-      },
-      "protocol": {
-        "score": "low"
-      },
-      "control": {
         "score": "low"
       }
     },
     "progress.md": {
-      "file_count": 0,
-      "finding_count": 3,
-      "priority": "P3",
-      "structure": {
-        "score": "low"
-      },
-      "semantics": {
-        "score": "low"
-      },
       "behavior": {
         "score": "low"
       },
       "context": {
         "score": "low"
       },
+      "control": {
+        "score": "low"
+      },
+      "file_count": 0,
+      "finding_count": 10,
+      "priority": "P3",
       "protocol": {
         "score": "low"
       },
-      "control": {
+      "semantics": {
+        "score": "low"
+      },
+      "structure": {
         "score": "low"
       }
     },
     "services/orchestrator": {
-      "file_count": 12,
-      "finding_count": 0,
-      "priority": "P1",
-      "structure": {
-        "score": "high",
-        "hotspots": [
-          "services/orchestrator/scheduler.py",
-          "services/orchestrator/chain.py"
-        ]
-      },
-      "semantics": {
-        "score": "medium"
-      },
       "behavior": {
         "score": "high"
       },
       "context": {
         "score": "medium"
       },
+      "control": {
+        "score": "medium"
+      },
+      "file_count": 114,
+      "finding_count": 0,
+      "priority": "P1",
       "protocol": {
         "score": "medium"
       },
-      "control": {
-        "score": "medium"
+      "semantics": {
+        "score": "low"
+      },
+      "structure": {
+        "hotspots": [
+          "services/orchestrator/scheduler.py",
+          "services/orchestrator/chain.py"
+        ],
+        "score": "high"
       }
     },
     "services/production_closure": {
-      "file_count": 10,
+      "behavior": {
+        "score": "medium"
+      },
+      "context": {
+        "score": "medium"
+      },
+      "control": {
+        "score": "medium"
+      },
+      "file_count": 46,
       "finding_count": 0,
       "priority": "P1",
+      "protocol": {
+        "score": "medium"
+      },
+      "semantics": {
+        "score": "low"
+      },
       "structure": {
-        "score": "high",
         "hotspots": [
           "services/production_closure/two_node_e2e_evidence.py",
           "services/production_closure/readiness_validation.py"
-        ]
-      },
-      "semantics": {
-        "score": "low"
-      },
-      "behavior": {
-        "score": "medium"
-      },
-      "context": {
-        "score": "medium"
-      },
-      "protocol": {
-        "score": "medium"
-      },
-      "control": {
-        "score": "medium"
+        ],
+        "score": "high"
       }
     },
     "services/slurm_gateway": {
-      "file_count": 11,
-      "finding_count": 1,
-      "priority": "P2",
-      "structure": {
-        "score": "low"
-      },
-      "semantics": {
-        "score": "medium"
-      },
       "behavior": {
         "score": "low"
       },
       "context": {
         "score": "low"
       },
+      "control": {
+        "score": "low"
+      },
+      "file_count": 13,
+      "finding_count": 1,
+      "priority": "P3",
       "protocol": {
         "score": "low"
       },
-      "control": {
+      "semantics": {
+        "score": "low"
+      },
+      "structure": {
         "score": "low"
       }
     }
   },
-  "high_spread_patterns": [
-    {
-      "description": "stale-display-route-token",
-      "occurrences": 230,
-      "modules": [
-        "apps/frontend",
-        "docs/governance",
-        "docs/plans",
-        "docs/runbooks",
-        "openspec/governance-4-entropy-automation",
-        "openspec/governance-5-e2-display-route-evidence-cleanup",
-        "openspec/m20-production-multibasin-continuous-automation",
-        "openspec/m21-qhh-hydro-met-ops-mvp",
-        "openspec/m22-two-node-docker-readonly-display",
-        "openspec/m25-multibasin-frontend-production",
-        "openspec/m26-unified-map-display",
-        "progress.md"
-      ],
-      "axis": "docs alignment",
-      "spread_risk": "high",
-      "top_priority": "P2",
-      "top_severity": "medium"
-    },
-    {
-      "description": "placeholder-path-token",
-      "occurrences": 117,
-      "modules": [
-        "docs/archived",
-        "docs/governance",
-        "docs/modules",
-        "openspec/governance-2-legacy-dead-code-retirement",
-        "openspec/governance-4-entropy-automation",
-        "openspec/governance-5-e1-entropy-baseline-burndown",
-        "openspec/issue-122-publish-tiles",
-        "openspec/issue-124-slurm-production-paths",
-        "openspec/m0-engineering-init",
-        "openspec/m1-gfs-forecast-loop",
-        "openspec/m5-flood-frequency-warning",
-        "openspec/m6-system-hardening-alignment",
-        "openspec/m7-second-review-remediation",
-        "openspec/m8-fourth-review-remediation",
-        "services/slurm_gateway"
-      ],
-      "axis": "legacy/dead-code",
-      "spread_risk": "high",
-      "top_priority": "P2",
-      "top_severity": "medium"
-    },
-    {
-      "description": "broad-e2e-api-mock",
-      "occurrences": 6,
-      "modules": [
-        "apps/frontend"
-      ],
-      "axis": "docs alignment",
-      "spread_risk": "medium",
-      "top_priority": "P2",
-      "top_severity": "medium"
-    },
-    {
-      "description": "orchestrator mixed responsibilities in scheduler.py and chain.py",
-      "occurrences": 2,
-      "files": [
-        "services/orchestrator/scheduler.py",
-        "services/orchestrator/chain.py"
-      ],
-      "axis": "structure,behavior",
-      "spread_risk": "high",
-      "top_priority": "P1",
-      "top_severity": "high"
-    }
-  ],
-  "cleanup_priorities": [
-    {
-      "target": "Align current display runbooks with M26 single-map route authority",
-      "impact": "high",
-      "effort": "low",
-      "axis": "context"
-    },
-    {
-      "target": "Resolve gate-eligible broad E2E API mocks and DOC_STATUS artifact ownership term",
-      "impact": "high",
-      "effort": "low",
-      "axis": "protocol/control"
-    },
-    {
-      "target": "Stage large decomposition of services/orchestrator/scheduler.py and services/orchestrator/chain.py",
-      "impact": "high",
-      "effort": "high",
-      "axis": "structure/behavior"
-    },
-    {
-      "target": "Keep mocked Playwright regression separated from live display evidence",
-      "impact": "medium",
-      "effort": "medium",
-      "axis": "behavior/context"
-    }
-  ]
+  "repo": "https://github.com/DankerMu/SHUD-NWM.git",
+  "summary": {
+    "budget_counted_count": 37,
+    "check_family_count": 5,
+    "gate_eligible_count": 0,
+    "governance_finding_count": 249,
+    "modules_with_high_entropy": 2,
+    "overall_trend": "baseline",
+    "total_instruction_files": 15,
+    "total_modules": 25,
+    "total_source_files": 4471,
+    "total_test_files": 815
+  },
+  "timestamp": "2026-10-18T07:21:08Z",
+  "version": 1
 }
