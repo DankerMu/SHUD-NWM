@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from packages.common.object_store import LocalObjectStore
+from packages.common.status_vocab import FAILABLE_RUN_STATUSES, PARSE_READY_RUN_STATUSES
 from packages.common.storage import validate_object_path
 from packages.common.timescale_write_guard import (
     CompressedChunkGuardError,
@@ -45,8 +46,6 @@ IDENTITY_KEY_MISSING_ERROR_CODE = "OUTPUT_PARSE_IDENTITY_KEY_MISSING"
 # transaction is rolled back, and the CLI prints it so the autopipe tick
 # records the run as skipped and retries it on a later tick.
 COMPRESSION_FENCE_BUSY_ERROR_CODE = "OUTPUT_PARSE_COMPRESSION_FENCE_BUSY"
-PARSE_READY_RUN_STATUSES = ("succeeded", "parsed", "failed")
-FAILABLE_RUN_STATUSES = ("created", "staged", "submitted", "running", "succeeded", "parsed")
 
 
 def _result_value(row: Any, key: str, index: int) -> Any:

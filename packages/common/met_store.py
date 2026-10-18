@@ -7,28 +7,16 @@ from datetime import datetime
 from typing import Any
 
 from packages.common.source_identity import normalize_source_id
+from packages.common.status_vocab import CYCLE_TERMINAL_UPSERT, CYCLE_UPSERT_PRESERVED
 
 
 class MetStoreError(RuntimeError):
     """Raised when a met-schema database operation fails."""
 
 
-_TERMINAL_CYCLE_STATUSES = (
-    # Keep aligned with apps.api.routes.pipeline._TERMINAL_CYCLE_STATUSES and
-    # met.cycle_status migrations; failed_* remain overwritable for retries.
-    "published",
-    "cancelled",
-)
-_UPSERT_PRESERVED_CYCLE_STATUSES = (
-    "raw_complete",
-    "canonical_ready",
-    "canonical_incomplete",
-    "forcing_ready_partial",
-    "forcing_ready",
-    "forecast_running",
-    "parsed_partial",
-    "complete",
-) + _TERMINAL_CYCLE_STATUSES
+# failed_* remain overwritable for retries.
+_TERMINAL_CYCLE_STATUSES = CYCLE_TERMINAL_UPSERT
+_UPSERT_PRESERVED_CYCLE_STATUSES = CYCLE_UPSERT_PRESERVED
 
 
 def default_database_url() -> str:

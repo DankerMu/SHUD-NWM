@@ -14,6 +14,7 @@ from packages.common.forcing_ts_render import (
     render_forcing_ts_sql,
 )
 from packages.common.river_ts_render import render_river_ts_sql
+from packages.common.status_vocab import QHH_LATEST_READY_RUN_STATUSES
 
 MVP_STATION_VARIABLES = ("PRCP", "TEMP", "RH", "wind", "Rn", "Press")
 DEFAULT_STATION_SERIES_LIMIT = 500
@@ -25,7 +26,6 @@ QHH_LATEST_CONTEXT_LIMIT = 10
 QHH_LATEST_EXPECTED_HORIZON_HOURS = 168
 ANALYSIS_LOOKBACK_DAYS = 3
 QHH_LATEST_SUPPORTED_SOURCES = ("GFS", "IFS")
-QHH_LATEST_READY_RUN_STATUSES = ("succeeded", "parsed", "published")
 QHH_LATEST_REFLECTED_VALUE_LIMIT = 64
 QHH_LATEST_STRICT_IDENTITY_FIELDS = ("source", "run_id", "cycle_time", "model_id")
 # #2222: the public ``HydroRun`` projection. Every ``hydro.hydro_run`` column a
