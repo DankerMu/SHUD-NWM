@@ -1262,7 +1262,7 @@
 
   **Width exception:** merged-tasks - 九个文件互相独立但没有代码、只有一条验证路径，拆成九个 issue 对交付没有价值（用户决定）。
 
-- [ ] 9.2 `node27_pgdata_workload_plan.py` 移除 `LEGACY_HYPERTABLE` 与三处引用（SQL `IN` 列表、候选加载器父表集合、默认 `expected_relations`）；新增"字符串只出现在注释/docstring/`_REFUSAL_ADVICE`"测试；新增 catalog 无 legacy 表时"无缺失关系"用例与"legacy 父表候选被拒 `PLAN_UNRELATED_PARENT`"用例。允许的测试改动：`tests/test_node27_pgdata_workload.py` 中喂入 legacy 候选并期待成功的用例改为期待拒绝。
+- [x] 9.2 `node27_pgdata_workload_plan.py` 移除 `LEGACY_HYPERTABLE` 与三处引用（SQL `IN` 列表、候选加载器父表集合、默认 `expected_relations`）；新增"字符串只出现在注释/docstring/`_REFUSAL_ADVICE`"测试；新增 catalog 无 legacy 表时"无缺失关系"用例与"legacy 父表候选被拒 `PLAN_UNRELATED_PARENT`"用例。允许的测试改动：`tests/test_node27_pgdata_workload.py` 中喂入 legacy 候选并期待成功的用例改为期待拒绝。
 
   Depends on: 无
 
