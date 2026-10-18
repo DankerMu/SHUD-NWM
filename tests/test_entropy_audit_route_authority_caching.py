@@ -3,8 +3,8 @@
 The per-unique-context memoization of mention context, redirect spans, semantic
 keys, list-item ends and paragraph governing text; the large-line and
 route-free shapes that must not build a governing context; and the
-whole-repository floors (no unallowlisted findings in current docs, the M26
-archive evidence, the alias coverage and the scan-scope exclusions).
+whole-repository floors (no unallowlisted findings in current docs, no findings
+under archived OpenSpec changes, the alias coverage and the scan-scope exclusions).
 
 The shared constants, the memoized ``build_report`` accessor, the finding
 selectors and the fixture builders live in ``tests/entropy_audit_helpers.py``.
@@ -23,7 +23,6 @@ from tests.entropy_audit_helpers import (
     _assert_unallowlisted_budget_counted_report_only_finding,
     _route_authority_findings,
     _route_authority_findings_by_token,
-    _route_authority_token_from_finding,
     _write,
 )
 
@@ -233,62 +232,14 @@ def test_route_authority_m26_references_preserve_expected_allowlist_keys(
     assert all(finding["allowlist_state"] == "allowlisted" for finding in findings)
 
 
-def test_route_authority_current_repo_m26_archive_evidence_uses_complete_marker_allowlist() -> None:
-    archive_root = "openspec/changes/archive/2026-06-18-m26-unified-map-display"
-    expected_token_counts_by_path = {
-        f"{archive_root}/proposal.md": {
-            "/basins/:basinId": 3,
-            "/forecast": 2,
-            "/hydro-met": 3,
-            "/meteorology": 2,
-            "/overview": 2,
-            "/segments/:segmentId": 2,
-            "HydroMetPage": 3,
-        },
-        f"{archive_root}/specs/single-map-shell-routing/spec.md": {
-            "/basins/:basinId": 1,
-            "/basins/basins_qhh": 1,
-            "/forecast": 2,
-            "/hydro-met": 2,
-            "/meteorology": 3,
-            "/overview": 2,
-            "/segments/:segmentId": 2,
-            "/segments/seg_001": 1,
-        },
-        f"{archive_root}/tasks.md": {
-            "/basins/:basinId": 1,
-            "/basins/:id": 1,
-            "/forecast": 2,
-            "/hydro-met": 2,
-            "/meteorology": 2,
-            "/overview": 2,
-            "/segments/:id": 1,
-            "/segments/:segmentId": 2,
-            "HydroMetPage": 1,
-        },
-    }
-    actual_token_counts_by_path = {
-        evidence_path: {token: 0 for token in expected_tokens}
-        for evidence_path, expected_tokens in expected_token_counts_by_path.items()
-    }
-    findings: list[dict[str, object]] = []
-    for finding in _route_authority_findings(REPO_ROOT):
-        evidence_path = str(finding["evidence_path"])
-        if evidence_path not in expected_token_counts_by_path:
-            continue
-        token = _route_authority_token_from_finding(finding)
-        assert token is not None
-        findings.append(finding)
-        actual_token_counts_by_path[evidence_path][token] = (
-            actual_token_counts_by_path[evidence_path].get(token, 0) + 1
-        )
+def test_route_authority_current_repo_has_no_archived_openspec_change_findings() -> None:
+    archived = [
+        finding["evidence_path"]
+        for finding in _route_authority_findings(REPO_ROOT)
+        if str(finding["evidence_path"]).startswith("openspec/changes/archive/")
+    ]
 
-    assert actual_token_counts_by_path == expected_token_counts_by_path
-    assert {finding["allowlist_key"] for finding in findings} == {
-        "stale-display-route-token:complete-archive-status-marker"
-    }
-    assert all(finding["allowlist_state"] == "allowlisted" for finding in findings)
-    assert all(finding["budget_counted"] is False for finding in findings)
+    assert archived == []
 
 
 def test_route_authority_large_line_matches_route_tokens_without_prefix_scan_shape(

@@ -111,6 +111,10 @@ def test_entropy_audit_json_schema_is_stable() -> None:
     assert metadata["max_artifact_fingerprint_bytes"] == audit_repo_entropy.MAX_ARTIFACT_FINGERPRINT_BYTES
     assert ".venv" in metadata["skipped_path_families"]
     assert "node_modules" in metadata["skipped_path_families"]
+    assert {".git", ".nhms-*", ".venv", "artifacts", "caches", "data", "dist", "node_modules"} <= set(
+        metadata["skipped_path_families"]
+    )
+    assert metadata["skipped_path_families"].count("openspec/changes/archive (stale-display-route-token only)") == 1
     assert {
         "role-env-boundary",
         "qhh-diagnostic-token",

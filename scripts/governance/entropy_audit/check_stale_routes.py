@@ -301,6 +301,8 @@ def _check_stale_route_tokens(root: Path) -> list[FindingSpec]:
     findings: list[FindingSpec] = []
     for path in _iter_text_files(root, roots):
         rel = _rel(root, path)
+        if rel.startswith("openspec/changes/archive/"):
+            continue
         text = _read_repo_text(root, path)
         lines = text.splitlines()
         archive_status_markers = _complete_archive_status_marker_ranges(lines)

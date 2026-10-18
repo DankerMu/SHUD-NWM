@@ -1,7 +1,7 @@
 """Route authority: list, table and archive contexts (#1823 partition).
 
-Archive markers over route tokens (section, expanded and archived-openspec
-forms), the markdown table/list/wrapped allowlist contexts, and the
+Archive markers over route tokens (section and expanded forms; archived OpenSpec
+changes are skipped), the markdown table/list/wrapped allowlist contexts, and the
 per-mention redirect rules -- sibling lists, nested children, table cells and
 same-item continuations -- that decide which mention on a mixed line stays an
 active finding.
@@ -45,7 +45,7 @@ def test_complete_archive_marker_allowlists_section_route_token_without_global_a
     tmp_path: Path,
 ) -> None:
     _write(
-        tmp_path / "openspec" / "changes" / "archive" / "m26-route-notes.md",
+        tmp_path / "docs" / "archived" / "m26-route-notes.md",
         """
         Archive status:
         - status: superseded
@@ -137,39 +137,31 @@ def test_complete_archive_marker_allowlists_expanded_archive_route_token(
     assert findings[0]["gate_eligible"] is False
 
 
-def test_archived_openspec_expanded_route_token_without_marker_remains_budget_counted(
+def test_archived_openspec_change_is_not_a_stale_route_finding(
     tmp_path: Path,
 ) -> None:
     _write(
         tmp_path / "openspec" / "changes" / "archive" / "m26" / "tasks.md",
-        "Current route link ?next=/forecast.\n",
+        "Current route link ?next=/hydro-met.\n",
+    )
+
+    assert _route_authority_findings(tmp_path) == []
+
+
+def test_active_openspec_change_is_still_a_stale_route_finding(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "openspec" / "changes" / "m26" / "tasks.md",
+        "Current route link ?next=/hydro-met.\n",
     )
 
     findings = _route_authority_findings(tmp_path)
 
     assert len(findings) == 1
-    assert findings[0]["evidence_path"] == "openspec/changes/archive/m26/tasks.md"
-    assert _route_authority_token_from_finding(findings[0]) == "/forecast"
+    assert findings[0]["evidence_path"] == "openspec/changes/m26/tasks.md"
+    assert _route_authority_token_from_finding(findings[0]) == "/hydro-met"
     _assert_unallowlisted_budget_counted_report_only_finding(findings[0])
-
-
-def test_complete_archive_marker_allowlists_archived_openspec_expanded_route_token(
-    tmp_path: Path,
-) -> None:
-    _write(
-        tmp_path / "openspec" / "changes" / "archive" / "m26" / "tasks.md",
-        _complete_archive_status_front_matter("Current route link ?next=/meteorology.\n"),
-    )
-
-    findings = _route_authority_findings(tmp_path)
-
-    assert len(findings) == 1
-    assert findings[0]["evidence_path"] == "openspec/changes/archive/m26/tasks.md"
-    assert _route_authority_token_from_finding(findings[0]) == "/meteorology"
-    assert findings[0]["allowlist_key"] == "stale-display-route-token:complete-archive-status-marker"
-    assert findings[0]["allowlist_state"] == "allowlisted"
-    assert findings[0]["budget_counted"] is False
-    assert findings[0]["gate_eligible"] is False
 
 
 def test_current_active_doc_route_tokens_without_archive_marker_remain_budget_counted(

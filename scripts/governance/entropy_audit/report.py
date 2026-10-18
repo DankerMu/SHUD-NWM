@@ -288,6 +288,7 @@ def _metadata(
                 "data",
                 ".nhms-*",
                 "caches",
+                "openspec/changes/archive (stale-display-route-token only)",
             ]
         ),
     }
