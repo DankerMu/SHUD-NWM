@@ -102,7 +102,8 @@ so neither Governance Audit job fails on it.
       "caches",
       "data",
       "dist",
-      "node_modules"
+      "node_modules",
+      "openspec/changes/archive (stale-display-route-token only)"
     ]
   },
   "module_heatmap": [
@@ -332,7 +333,9 @@ explicit hard-gate mode would fail. `metadata.summary_counts` groups findings by
 The scan limit fields are byte limits used by bounded readers and artifact
 fingerprinting. `skipped_path_families` lists intentionally skipped repository
 path families, including `.git`, virtualenv/dependency directories, large data
-or artifact roots, cache roots, and `.nhms-*` work directories.
+or artifact roots, cache roots, and `.nhms-*` work directories; it may also
+carry check-scoped entries such as
+`openspec/changes/archive (stale-display-route-token only)`.
 
 `module_heatmap` rows summarize the highest observed severity on each axis for
 a module. The axis fields are `structure`, `semantics`, `behavior`, `context`,

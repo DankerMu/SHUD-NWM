@@ -1195,7 +1195,7 @@
 
 ## 8. 治理报告与 baseline（spec: entropy-automation、governance-entropy-baseline）
 
-- [ ] 8.1 `check_stale_routes.py` 跳过 `openspec/changes/archive/`，`skipped_path_families` 加一条作用域字符串；更新 `tests/test_entropy_audit_*` 对应用例。
+- [x] 8.1 `check_stale_routes.py` 跳过 `openspec/changes/archive/`，`skipped_path_families` 加一条作用域字符串；更新 `tests/test_entropy_audit_*` 对应用例。
 
   Depends on: 无
 
