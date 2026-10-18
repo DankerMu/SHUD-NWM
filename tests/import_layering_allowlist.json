@@ -4,19 +4,7 @@
     "module": "workers.data_adapters.region"
   },
   {
-    "file": "packages/common/state_cli.py",
-    "module": "workers.data_adapters.base"
-  },
-  {
     "file": "packages/common/state_clone.py",
     "module": "workers.mapping_builder.rewrite"
-  },
-  {
-    "file": "packages/common/state_manager.py",
-    "module": "workers.data_adapters.base"
-  },
-  {
-    "file": "workers/shud_runtime/runtime.py",
-    "module": "services.orchestrator.time_consistency"
   }
 ]

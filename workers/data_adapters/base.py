@@ -1,154 +1,41 @@
 from __future__ import annotations
 
-import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime
 from typing import Any
 
-from packages.common.source_identity import normalize_source_id
+from packages.common.contracts.time_normalization import (
+    cycle_id_for,
+    ensure_utc,
+    format_cycle_time,
+    generate_segmented_forecast_hours,
+    parse_cycle_date,
+    parse_cycle_time,
+    parse_resolution_segments,
+    valid_time_for,
+    validate_forecast_hours,
+)
 
-
-def ensure_utc(value: datetime) -> datetime:
-    """Return a timezone-aware UTC datetime."""
-    if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)
-
-
-def parse_cycle_time(value: str | datetime) -> datetime:
-    """Parse YYYYMMDDHH or ISO-8601 cycle time values as UTC datetimes."""
-    if isinstance(value, datetime):
-        return ensure_utc(value)
-
-    candidate = value.strip()
-    if len(candidate) == 10 and candidate.isdigit():
-        return datetime.strptime(candidate, "%Y%m%d%H").replace(tzinfo=UTC)
-
-    if candidate.endswith("Z"):
-        candidate = f"{candidate[:-1]}+00:00"
-    return ensure_utc(datetime.fromisoformat(candidate))
-
-
-def parse_cycle_date(value: str | date | datetime) -> date:
-    """Parse a date input accepted by cycle discovery."""
-    if isinstance(value, datetime):
-        return ensure_utc(value).date()
-    if isinstance(value, date):
-        return value
-    return datetime.strptime(value.strip(), "%Y-%m-%d").date()
-
-
-def format_cycle_time(value: str | datetime) -> str:
-    return parse_cycle_time(value).strftime("%Y%m%d%H")
-
-
-def cycle_id_for(source_id: str, cycle_time: str | datetime) -> str:
-    source_id = normalize_source_id(source_id)
-    return f"{source_id.lower()}_{format_cycle_time(cycle_time)}"
-
-
-def valid_time_for(cycle_time: str | datetime, forecast_hour: int) -> datetime:
-    return parse_cycle_time(cycle_time) + timedelta(hours=forecast_hour)
-
-
-def parse_resolution_segments(spec: str | None) -> tuple[tuple[int, int], ...] | None:
-    """Parse a piecewise forecast-resolution spec like "120:1,384:3".
-
-    Each segment is ``upto_hour:step_hours`` (ascending upto), meaning forecast hours
-    up to and including ``upto_hour`` use ``step_hours``. Segments may be separated by
-    ``,`` or ``;`` (the latter survives Slurm env-export value filtering). Returns None
-    for an empty spec so callers fall back to a single uniform step.
-    """
-    if not spec or not spec.strip():
-        return None
-    segments: list[tuple[int, int]] = []
-    last_upto = -1
-    for raw in re.split(r"[,;]", spec):
-        token = raw.strip()
-        if not token:
-            continue
-        try:
-            upto_text, step_text = token.split(":")
-            upto, step = int(upto_text), int(step_text)
-        except ValueError as error:
-            raise ValueError(f"Invalid forecast-resolution segment {token!r}; expected 'upto:step'.") from error
-        if step <= 0:
-            raise ValueError(f"Forecast-resolution step must be positive in segment {token!r}.")
-        if upto <= last_upto:
-            raise ValueError(f"Forecast-resolution segments must have strictly ascending upto: {token!r}.")
-        segments.append((upto, step))
-        last_upto = upto
-    return tuple(segments) or None
-
-
-def generate_segmented_forecast_hours(
-    start_hour: int,
-    end_hour: int,
-    segments: tuple[tuple[int, int], ...],
-) -> list[int]:
-    """Generate non-uniform forecast hours from piecewise (upto, step) segments.
-
-    Each segment emits hours on its own step grid within ``(previous_upto, upto]``,
-    so e.g. GFS ``((120, 1), (384, 3))`` yields hourly 0..120 then 3-hourly 123..end.
-    """
-    hours: list[int] = []
-    seen: set[int] = set()
-    lower = start_hour
-    for upto, step in segments:
-        seg_hi = min(end_hour, upto)
-        remainder = lower % step
-        hour = lower if remainder == 0 else lower + (step - remainder)
-        while hour <= seg_hi:
-            if hour not in seen:
-                seen.add(hour)
-                hours.append(hour)
-            hour += step
-        lower = upto + 1
-        if lower > end_hour:
-            break
-    return hours
-
-
-def validate_forecast_hours(
-    forecast_hours: list[int],
-    *,
-    source_id: str,
-    min_hour: int,
-    max_hour: int,
-    step_hours: int,
-    allowed_hours: set[int] | None = None,
-) -> list[int]:
-    """Validate caller-supplied lead hours before manifest path generation.
-
-    When ``allowed_hours`` is provided each hour must be a member of that canonical
-    set (supporting non-uniform native resolution); otherwise hours must align to a
-    single uniform ``step_hours`` grid.
-    """
-    if step_hours <= 0:
-        raise ValueError(f"{source_id} forecast-hour step must be positive.")
-
-    normalized: list[int] = []
-    seen: set[int] = set()
-    for forecast_hour in forecast_hours:
-        if not isinstance(forecast_hour, int) or isinstance(forecast_hour, bool):
-            raise ValueError(f"{source_id} forecast hour must be an integer: {forecast_hour!r}")
-        if forecast_hour in seen:
-            raise ValueError(f"{source_id} forecast hours must be unique: {forecast_hour}")
-        if forecast_hour < min_hour:
-            raise ValueError(f"{source_id} forecast hour {forecast_hour} is below minimum {min_hour}.")
-        if forecast_hour > max_hour:
-            raise ValueError(f"{source_id} forecast hour {forecast_hour} exceeds maximum {max_hour}.")
-        if allowed_hours is not None:
-            if forecast_hour not in allowed_hours:
-                raise ValueError(
-                    f"{source_id} forecast hour {forecast_hour} is not in the native resolution schedule."
-                )
-        elif (forecast_hour - min_hour) % step_hours != 0:
-            raise ValueError(f"{source_id} forecast hour {forecast_hour} is not aligned to {step_hours}h steps.")
-        seen.add(forecast_hour)
-        normalized.append(forecast_hour)
-    return normalized
+__all__ = [
+    "CycleDiscovery",
+    "ManifestEntry",
+    "DownloadManifest",
+    "DownloadFileResult",
+    "DownloadPlanResult",
+    "VerificationFailure",
+    "VerificationResult",
+    "DataSourceAdapter",
+    "ensure_utc",
+    "parse_cycle_time",
+    "parse_cycle_date",
+    "format_cycle_time",
+    "cycle_id_for",
+    "valid_time_for",
+    "parse_resolution_segments",
+    "generate_segmented_forecast_hours",
+    "validate_forecast_hours",
+]
 
 
 @dataclass(frozen=True)

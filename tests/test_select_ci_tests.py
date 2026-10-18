@@ -45,6 +45,8 @@ from scripts.select_ci_tests import (
     CHANGED_TEST_FILE_RULES,
     CHANGED_TEST_SUITE_BASENAME_PATTERNS,
     CORE_SMOKE_TESTS,
+    DATA_ADAPTERS_BASE_HELPER_TESTS,
+    DATA_ADAPTERS_DIRECTORY_TESTS,
     DIRECT_GRID_CONTRACT_CANONICAL_PATH,
     DIRECT_GRID_CONTRACT_IMPORTER_TESTS,
     DIRECT_GRID_CONTRACT_TESTS,
@@ -125,6 +127,7 @@ from scripts.select_ci_tests import (
     STATE_INDEX_COPYBACK_REPLAY_TESTS,
     SUPPORT_MODULE_TEST_RULES,
     THREAD_EXCEPTION_POLICY_TESTS,
+    TIME_NORMALIZATION_CONTRACT_PATH,
     TIMESCALE_WRITE_GUARD_INVARIANT_TEST,
     PathTestRule,
     is_test_suite_path,
@@ -1277,6 +1280,50 @@ def test_direct_grid_contract_canonical_row_red_when_removed(monkeypatch: pytest
     leaked = sorted(set(DIRECT_GRID_CONTRACT_IMPORTER_TESTS) & selected)
     assert not leaked, f"importer suites still selected without the canonical-path row: {leaked}"
     assert "tests/test_direct_grid_e2e.py" not in selected
+
+
+def test_select_tests_maps_time_normalization_contract_to_base_helper_owners() -> None:
+    # #2922: the contract module holds base.py's nine cycle-time helpers and the
+    # warm-start three-way check. Its row is NOT a stop row and does NOT copy
+    # the broad `services/orchestrator/**` row: it carries base.py's two rows'
+    # targets plus the three-way check's direct consumer suite. As with #2921,
+    # `packages/common/**` adds the #1744 shared-library core-smoke baseline.
+    assert TIME_NORMALIZATION_CONTRACT_PATH == "packages/common/contracts/time_normalization.py"
+    assert Path(TIME_NORMALIZATION_CONTRACT_PATH).is_file()
+
+    selected = select_tests([TIME_NORMALIZATION_CONTRACT_PATH], repo_root=Path("."))
+
+    assert selected == sorted(
+        {
+            *DATA_ADAPTERS_DIRECTORY_TESTS,
+            *DATA_ADAPTERS_BASE_HELPER_TESTS,
+            "tests/test_warm_start_chaining.py",
+            *SHARED_BASELINE_CONTRACT,
+            INVARIANT_SUITE_PATH,
+            WRITE_SURFACE_SCAN_PATH,
+            FAMILY_GUARD_PATH,
+            RESOLVE_SURFACE_GUARD_PATH,
+            IMPORT_LAYERING_GUARD_PATH,
+            ANY_RATCHET_PATH,
+            STATUS_VOCAB_PARITY_PATH,
+        }
+    )
+    # 10 directory + 5 base-helper + 1 warm-start chaining + 4 core-smoke
+    # (test_production_scheduler.py is already a directory target) + 7 guards.
+    assert len(selected) == 27
+
+
+def test_time_normalization_contract_row_red_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drop exactly the #2922 row and the helper and three-way consumer suites leave the selection."""
+    from scripts import select_ci_tests
+
+    mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern != TIME_NORMALIZATION_CONTRACT_PATH)
+    assert len(mutant) == len(PATH_TEST_RULES) - 1, "the #2922 row is missing or duplicated"
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+
+    selected = select_tests([TIME_NORMALIZATION_CONTRACT_PATH], repo_root=Path("."))
+    assert "tests/test_gfs_adapter.py" not in selected
+    assert "tests/test_warm_start_chaining.py" not in selected
 
 
 def test_select_tests_maps_direct_grid_openspec_change_to_compact_e2e_fixture() -> None:
