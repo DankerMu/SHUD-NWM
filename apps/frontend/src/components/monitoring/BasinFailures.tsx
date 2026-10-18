@@ -7,6 +7,7 @@ import {
   buildStageDiagnosticPayload,
   type DiagnosticContext,
 } from '@/components/monitoring/diagnostics'
+import { FAILED_STATUSES } from '@/lib/constants'
 import type { PipelineStage } from '@/stores/monitoring'
 
 interface BasinFailuresProps {
@@ -16,8 +17,6 @@ interface BasinFailuresProps {
   stage: PipelineStage
 }
 
-const failedStatuses = new Set(['failed', 'submission_failed', 'permanently_failed', 'cancelled', 'partially_failed'])
-
 export function BasinFailures({
   diagnosticContext = null,
   diagnosticsDisplayReadonly = false,
@@ -26,7 +25,7 @@ export function BasinFailures({
 }: BasinFailuresProps) {
   const { toast } = useToast()
   const failures = (stage.basin_results ?? []).filter(
-    (item) => failedStatuses.has(item.status) || Boolean(item.error_code),
+    (item) => FAILED_STATUSES.has(item.status) || Boolean(item.error_code),
   )
   const canCopyDiagnostics = diagnosticsEnabled && Boolean(diagnosticContext)
   const manualRecoveryGuidance = diagnosticsDisplayReadonly

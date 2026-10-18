@@ -23,6 +23,7 @@ import {
 } from '@/components/ui/table'
 import { useToast } from '@/hooks/useToast'
 import { cn } from '@/lib/cn'
+import { FAILED_STATUSES } from '@/lib/constants'
 import { formatDate, formatDuration } from '@/lib/format'
 import { canUseDevRoleActions, useAuthStore } from '@/stores/auth'
 import {
@@ -36,14 +37,13 @@ import {
 type SortKey = 'submitted_at' | 'duration_seconds'
 type SortDirection = 'asc' | 'desc'
 
-const failedStatuses = new Set(['failed', 'submission_failed', 'permanently_failed', 'cancelled', 'partially_failed'])
 const retryableStatuses = new Set(['failed', 'submission_failed', 'permanently_failed', 'partially_failed'])
 const activeStatuses = new Set(['pending', 'queued', 'submitted', 'running'])
 type OperatorHeaderRole = components['parameters']['UserRole']
 
 function statusClass(status: string) {
   if (status === 'succeeded') return 'border-emerald-200 bg-emerald-50 text-emerald-700'
-  if (failedStatuses.has(status)) return 'border-danger/30 bg-danger/10 text-danger'
+  if (FAILED_STATUSES.has(status)) return 'border-danger/30 bg-danger/10 text-danger'
   if (status === 'running' || status === 'submitted') return 'border-accent/30 bg-accent/10 text-accent'
   return 'border-border bg-muted/10 text-muted'
 }
@@ -271,7 +271,7 @@ export function JobsTable({
             {visibleJobs.length ? (
               visibleJobs.map((job) => {
                 const logAvailable = Boolean(job.log_uri)
-                const diagnosticAvailable = diagnosticsEnabled && failedStatuses.has(job.status)
+                const diagnosticAvailable = diagnosticsEnabled && FAILED_STATUSES.has(job.status)
                 const notified = notifiedJobs.has(job.job_id)
                 return (
                   <TableRow key={job.job_id}>
