@@ -1075,7 +1075,7 @@
 
 ## 7. 前端 lint 与分层（spec: frontend-lint-and-layering）
 
-- [ ] 7.1 `pages/hydroMet/bootstrap.ts` → `stores/hydroMetBootstrap.ts`（导出不变；7 个生产导入方与 8 个测试文件（含 `bootstrap.test.ts` 的路径读取）只改路径字符串，共 15 个文件）。
+- [x] 7.1 `pages/hydroMet/bootstrap.ts` → `stores/hydroMetBootstrap.ts`（导出不变；7 个生产导入方与 8 个测试文件（含 `bootstrap.test.ts` 的路径读取）只改路径字符串，共 15 个文件）。
 
   Depends on: 无
 
