@@ -593,7 +593,7 @@
 
 固定 changed-path 列表（前后字节一致 oracle，在每个 6.x PR 的父提交与 head 各跑一次比较，不提交快照）：`packages/common/state_manager.py`、`apps/api/routes/pipeline.py`、`apps/frontend/src/App.tsx`、`docs/runbooks/current-production-ops.md`、`scripts/select_ci_tests.py`、`tests/test_production_scheduler.py`、`db/migrations/000003_enums.sql`。
 
-- [ ] 6.1 前置：`PATH_TEST_RULES` 为三个 sibling 各加一行；`_collection_smoke_required` 匹配 sibling；解决 `scripts` 无 `__init__.py` 的导入路径（沿用其他脚本的 `sys.path` 模式）；盘点 `tests/test_select_ci_tests.py` 在 facade 上 patch 的全部全局名并写入 PR 描述；`tests/test_select_ci_tests.py` 新增 "只改 `scripts/select_ci_tests_rules.py` 时返回与改 facade 相同的 meta-guard 集合"断言；新增 `scripts/ci_selector_snapshot.sh`（对固定列表输出四个 output 的 JSON，供父提交/head 比较）。
+- [x] 6.1 前置：`PATH_TEST_RULES` 为三个 sibling 各加一行；`_collection_smoke_required` 匹配 sibling；解决 `scripts` 无 `__init__.py` 的导入路径（沿用其他脚本的 `sys.path` 模式）；盘点 `tests/test_select_ci_tests.py` 在 facade 上 patch 的全部全局名并写入 PR 描述；`tests/test_select_ci_tests.py` 新增 "只改 `scripts/select_ci_tests_rules.py` 时返回与改 facade 相同的 meta-guard 集合"断言；新增 `scripts/ci_selector_snapshot.sh`（对固定列表输出四个 output 的 JSON，供父提交/head 比较）。
 
   Depends on: 无
 
