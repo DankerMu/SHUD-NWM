@@ -4,23 +4,18 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Mapping
 
+from packages.common.status_vocab import PIPELINE_JOB_TERMINAL
+
 #: Terminal job statuses shared across the orchestrator chain.  Lives here (the
 #: dependency-free types module) so light owner modules such as
 #: ``chain_forced_resubmit`` can read it without importing the heavy ``chain``
 #: facade; ``chain`` re-exports the same object, so the legacy
-#: ``chain.TERMINAL_JOB_STATUSES`` import surface is unchanged.  Deliberately a
+#: ``chain.TERMINAL_JOB_STATUSES`` import surface is unchanged.  Bound from the
+#: status vocabulary's ``PIPELINE_JOB_TERMINAL`` as a fresh copy, deliberately a
 #: plain ``set`` (not ``frozenset``): the pre-split canonical object was a
 #: mutable ``set`` and the behavior-preserving split must not change an
 #: importable object's type or mutability.
-TERMINAL_JOB_STATUSES = {
-    "succeeded",
-    "partially_failed",
-    "failed",
-    "cancelled",
-    "submission_failed",
-    "reservation_lost",
-    "permanently_failed",
-}
+TERMINAL_JOB_STATUSES = set(PIPELINE_JOB_TERMINAL)
 
 
 class OrchestratorError(RuntimeError):
