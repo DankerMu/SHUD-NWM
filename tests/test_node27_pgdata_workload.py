@@ -673,7 +673,7 @@ def test_chunk_quals_bind_segment_without_index_cond() -> None:
     assert result["shared_buffer_blocks"] == 5
 
 
-def test_candidate_loader_binds_narrow_legacy_and_physical_compressed() -> None:
+def test_candidate_loader_binds_narrow_and_physical_compressed() -> None:
     rows = [
         {
             "hypertable_schema": "hydro",
@@ -688,7 +688,7 @@ def test_candidate_loader_binds_narrow_legacy_and_physical_compressed() -> None:
         },
         {
             "hypertable_schema": "hydro",
-            "hypertable_name": "river_timeseries_legacy",
+            "hypertable_name": "river_timeseries",
             "chunk_schema": "_timescaledb_internal",
             "chunk_name": "_hyper_2_1_chunk",
             "range_start": ISSUE,
@@ -730,6 +730,16 @@ def test_candidate_loader_binds_narrow_legacy_and_physical_compressed() -> None:
 
     _assert_code(
         lambda: load_candidate_relations(unrelated, window_start=ISSUE, window_end=WINDOW_END),
+        "PLAN_UNRELATED_PARENT",
+    )
+
+    def legacy_parent(_sql: str, _params: object = None) -> list[dict[str, Any]]:
+        dropped = dict(rows[0])
+        dropped["hypertable_name"] = "river_timeseries_legacy"
+        return [dropped]
+
+    _assert_code(
+        lambda: load_candidate_relations(legacy_parent, window_start=ISSUE, window_end=WINDOW_END),
         "PLAN_UNRELATED_PARENT",
     )
 

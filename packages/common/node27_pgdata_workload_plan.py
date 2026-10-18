@@ -1,7 +1,8 @@
 """PGDATA-owned window/catalog candidate discovery and structural EXPLAIN checks.
 
-Candidates bind the shipping query's actual parents (narrow ``hydro.river_timeseries``
-and legacy ``hydro.river_timeseries_legacy``) and the frozen seven-day window.
+Candidates bind the shipping query's actual parent (narrow ``hydro.river_timeseries``)
+and the frozen seven-day window. The legacy sibling ``hydro.river_timeseries_legacy``
+was dropped on 2026-09-19 (``db/migrations/000060_river_timeseries_contract.sql``).
 Origin and physical compressed identities come from Timescale catalog
 relationships, not name prefixes or cold topology. Own-candidate DecompressChunk
 is allowed; unrelated chunk or relevant Seq Scan refuses. Root Shared Hit+Read
@@ -31,7 +32,6 @@ PLAN_MAX_NODES = 10_000
 PLAN_MAX_ARRAY_ITEMS = 1_000
 MAX_CANDIDATES = 64
 NARROW_HYPERTABLE = ("hydro", "river_timeseries")
-LEGACY_HYPERTABLE = ("hydro", "river_timeseries_legacy")
 CHUNK_NAME_RE = re.compile(r"^[_A-Za-z][_A-Za-z0-9]*$")
 _INITPLAN_RETURNS_RE = re.compile(r"InitPlan\s+\d+\s+\(\s*returns\s+(\$\d+)\s*\)", re.IGNORECASE)
 _TIME_PREDICATE_RE = re.compile(
@@ -65,8 +65,7 @@ LEFT JOIN _timescaledb_catalog.chunk compressed
   ON compressed.id = origin.compressed_chunk_id
  AND NOT compressed.dropped
 WHERE (v.hypertable_schema, v.hypertable_name) IN (
-    ('hydro', 'river_timeseries'),
-    ('hydro', 'river_timeseries_legacy')
+    ('hydro', 'river_timeseries')
 )
   AND v.range_end > %(window_start)s::timestamptz
   AND v.range_start <= %(window_end)s::timestamptz
@@ -365,7 +364,7 @@ def load_candidate_relations(
         if not isinstance(row, Mapping):
             refuse("candidate discovery row is not a mapping", code="PLAN_CANDIDATE_ROW_INVALID", stage="plan")
         parent = (str(row.get("hypertable_schema") or ""), str(row.get("hypertable_name") or ""))
-        if parent not in {NARROW_HYPERTABLE, LEGACY_HYPERTABLE}:
+        if parent != NARROW_HYPERTABLE:
             refuse("candidate belongs to an unrelated hypertable", code="PLAN_UNRELATED_PARENT", stage="plan")
         origin = normalize_candidate_chunk_name(row.get("chunk_name"))
         if origin in seen:
@@ -394,7 +393,7 @@ def evaluate_explain_json_plan(
     payload: Any,
     *,
     candidate_chunk_names: Sequence[str],
-    expected_relations: Sequence[str] = ("river_timeseries", "river_timeseries_legacy"),
+    expected_relations: Sequence[str] = ("river_timeseries",),
     buffer_limit: int = PLAN_BUFFER_LIMIT,
     require_segment_bound: bool = True,
     segment_id: str | None = None,
