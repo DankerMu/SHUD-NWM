@@ -407,6 +407,27 @@ STATUS_VOCAB_PARITY_ROOTS: tuple[str, ...] = (
     "scripts/**",
 )
 
+# entropy-burndown task 3.1: the time/identity helper consolidation ceiling. It
+# counts module-level local re-definitions of the canonical time/identity helpers
+# (`_utcnow`, `_parse_time`, `_format_time`, `_normalize_source_id`, ...) in every
+# Python file under the five production roots and fails above
+# tests/time_helper_ceiling.json's ceiling or more than 5 % below it. Any Python
+# change under those roots can move the count, so every such path routes to it
+# SUPPLEMENTALLY in the #1656 shape: no `matched`, no stop-rule participation, so
+# a `stop_on_match` owner of the changed path cannot shadow it.
+TIME_HELPER_CONSOLIDATION_TEST = "tests/test_time_helper_consolidation.py"
+
+# entropy-burndown task 3.1: the ceiling's scan roots, mirroring its module-level
+# `_SCAN_ROOTS` binding mapped to `<root>/**` globs; a selector meta-guard parses
+# that binding and asserts the two sets are equal.
+TIME_HELPER_CONSOLIDATION_ROOTS: tuple[str, ...] = (
+    "apps/**",
+    "packages/**",
+    "services/**",
+    "workers/**",
+    "scripts/**",
+)
+
 # #2323: the entropy production-topology hard gate. It builds one full-repo
 # entropy report and asserts zero production-topology findings, and that report
 # reads every scannable text file under the scanner's seven roots plus four
@@ -4916,6 +4937,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # the status-vocabulary parity suite; an allowlist-only PR (2.2-2.4 delete
     # entries) would otherwise select nothing.
     PathTestRule("tests/status_literal_allowlist.json", (STATUS_VOCAB_PARITY_TEST,)),
+    # entropy-burndown task 3.1: the time-helper ceiling and allowlist are data read
+    # only by the consolidation test; a ceiling- or allowlist-only PR (3.2-3.5
+    # lower the ceiling / adjudicate entries) would otherwise select nothing.
+    PathTestRule("tests/time_helper_ceiling.json", (TIME_HELPER_CONSOLIDATION_TEST,)),
+    PathTestRule("tests/time_helper_allowlist.json", (TIME_HELPER_CONSOLIDATION_TEST,)),
     PathTestRule(
         "packages/common/forecast_store.py",
         (
@@ -7596,6 +7622,13 @@ def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -
     for path in changed:
         if path.endswith(".py") and _any_path_matches([path], STATUS_VOCAB_PARITY_ROOTS):
             selected.add(STATUS_VOCAB_PARITY_TEST)
+
+    # entropy-burndown task 3.1: supplemental time-helper consolidation routing,
+    # same additive shape as the #1656 loop (no `matched`, no stop rules, no
+    # fallback effect).
+    for path in changed:
+        if path.endswith(".py") and _any_path_matches([path], TIME_HELPER_CONSOLIDATION_ROOTS):
+            selected.add(TIME_HELPER_CONSOLIDATION_TEST)
 
     # #2498: supplemental forcing-template import sniff, same additive shape as
     # the loops above (no `matched`, no stop-rule participation, no effect on

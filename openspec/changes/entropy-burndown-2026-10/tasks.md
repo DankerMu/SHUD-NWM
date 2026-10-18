@@ -301,7 +301,7 @@
 
 ## 3. 时间/标识助手去重（spec: time-helper-consolidation）
 
-- [ ] 3.1 在 `packages/common/contracts/time_normalization.py` 补齐 `utc_now`、`parse_iso_utc`、`format_iso_utc`（带 docstring 与往返测试）；新增 `tests/test_time_helper_consolidation.py`（fullmatch 规则）、`tests/time_helper_ceiling.json`（初始 ceiling = 当前计数，PR 附命中清单）与 `tests/time_helper_allowlist.json`（空或含已裁决的不同概念函数）；selector 以 #1656 形态的 additive loop 加选（允许的测试改动：受影响的精确集合断言，PR 列出）。
+- [x] 3.1 在 `packages/common/contracts/time_normalization.py` 补齐 `utc_now`、`parse_iso_utc`、`format_iso_utc`（带 docstring 与往返测试）；新增 `tests/test_time_helper_consolidation.py`（fullmatch 规则）、`tests/time_helper_ceiling.json`（初始 ceiling = 当前计数，PR 附命中清单）与 `tests/time_helper_allowlist.json`（空或含已裁决的不同概念函数）；selector 以 #1656 形态的 additive loop 加选（允许的测试改动：受影响的精确集合断言，PR 列出）。
 
   Depends on: 1.2
 
