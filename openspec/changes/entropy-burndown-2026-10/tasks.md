@@ -1169,7 +1169,7 @@
 
   **Minimal mergeable slice:** `useNationalBasinGeo` 错误载体 + 删除死 loader + 对应 vitest - 可独立保绿；`apiErrorCode` 类型化 + `apiFetch` fallback 入 envelope + `getApiErrorMessage` 特征测试作为后继（两个脱敏包装与 M11 标签掩码保持不动）。
 
-- [ ] 7.5 `frontend-build` job 加 `pnpm check:api-types` 步。
+- [x] 7.5 `frontend-build` job 加 `pnpm check:api-types` 步。
 
   Depends on: 无
 
