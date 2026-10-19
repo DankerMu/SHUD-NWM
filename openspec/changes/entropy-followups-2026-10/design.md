@@ -82,6 +82,8 @@ Governing invariant: every module under `services/orchestrator`, discovered from
 
 Under B, a bare `import services.orchestrator.scheduler` that does not go through `cli` leaves `ProductionSchedulerConfig` out of `vars(scheduler)`, and its `__module__` stays `…scheduler_config.config` until the name is first accessed. Base sets both at import time. Through `cli` (every scheduler-loading production entry point; `nhms-monitor` never loads `scheduler`), the name is resolved during import, so behaviour is unchanged. Test 2.3 pins the post-access `__module__`.
 
+A second consequence, found in the PR #3041 review: `scheduler_candidate_runtime` and `scheduler_compat_runtime` copy the scheduler namespace with `globals().update(_scheduler.__dict__)` before the name is resolved, so the copy does not hold it. `typing.get_type_hints` on three helpers whose string annotations name it therefore raises `NameError`, while master resolves them. The helpers are `_now`, `_scheduler_resolved_runtime_roots` and `_scheduler_runtime_config_evidence`. No caller introspects these annotations, and both modules use `from __future__ import annotations`, so runtime behaviour does not change. #3040 tracks the fix together with the namespace-copy rewrite.
+
 ### Non-goals
 
 - The 8 allowlisted modules. They are the follow-up issue, filed in the same PR.

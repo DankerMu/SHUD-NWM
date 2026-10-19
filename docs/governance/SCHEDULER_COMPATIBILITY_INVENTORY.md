@@ -214,6 +214,11 @@ Guard-hook metadata rows required by #712 through #719:
   removal condition: callers use owner/public API;
   verification command:
   `uv run pytest -q tests/test_production_scheduler.py -k "default_config_paths_created or plan_production_cli or blank_config_paths or allowed_cycle_hours or evidence_dir_symlink"`.
+- `__getattr__`: owner `services.orchestrator.scheduler_config`; owner module cannot host this facade-side PEP 562 hook; follow-up issue #3040; removal condition: `scheduler_config` no longer imports the scheduler facade at import time, or #3040 rewrites the compat namespace copies.
+  Retention reason: lazily binds the owner `ProductionSchedulerConfig` only, breaking the
+  `scheduler` <-> `scheduler_config` first-import cycle (#3032) while keeping
+  `scheduler.ProductionSchedulerConfig` and its `__module__`; verification
+  command: `uv run pytest -q tests/test_orchestrator_first_import.py`.
 - `discovery-compat-aliases`: owner `services.orchestrator.scheduler_discovery`; retention reason: legacy discovery/backfill paths; removal condition: callers use owner module/public API; verification command: `uv run pytest -q tests/test_scheduler_backfill.py tests/test_production_scheduler.py`.
 - `scheduler-model-discovery-forwarders`: owner
   `services.orchestrator.scheduler_models`; retention reason: legacy active
