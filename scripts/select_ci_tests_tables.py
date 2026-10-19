@@ -612,7 +612,7 @@ RECALIBRATION_CLI_FIXTURES_TESTS: tuple[str, ...] = (
 
 # #1571: the repository default Python pin and its instruction source are the
 # producer pair for the Python-environment truth oracle. Neither is a backend
-# Python path (the pin is a bare version file, shared.md akdown instruction
+# Python path (the pin is a bare version file, shared.md a markdown instruction
 # source), so without these rules a pin/instruction-only PR would never run the
 # suite that locks 3.11 (the ci.yml backend filter does start the lane, but the
 # selector would yield an empty list and CI would fall to collect-only with
@@ -1271,8 +1271,8 @@ FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     # rides this at-site tuple rather than the `services/orchestrator/**` list.
     # 9 tests in 0.29s.
     "tests/test_hydro_status_set_parity.py",
-    # #1825: the node-22 manual-retryker suite top-level-imports the journal
-    # repository and pins theker contract (per-run row vs cohort master) the
+    # #1825: the node-22 manual-retry marker suite top-level-imports the journal
+    # repository and pins the marker contract (per-run row vs cohort master) the
     # operator channel depends on. It runs in well under a second, so a rule is
     # the right disposition rather than a rule-gap exclusion.
     "tests/test_node22_manual_retry_failed_runs.py",
