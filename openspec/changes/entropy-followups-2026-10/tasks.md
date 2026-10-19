@@ -105,7 +105,7 @@ Risk packs:
 - Schema / field names — selected：钉住只读 envelope `error.error.code`；evidence = 6.1 用例 + 变异演练。
 - 其余 pack — not selected：运行时代码零改动。
 
-- [ ] 6.1 在 `apps/frontend/src/stores/__tests__/overviewDataSourceSelection.test.ts`（或同目录新文件）经真实 store 路径（`loadOverview` / precip index 请求）加参数化用例：envelope `{error:{code:'PRECIP_CYCLE_NOT_MIRRORED'}}` → `not_mirrored`（对照）；顶层 `{code:'PRECIP_CYCLE_NOT_MIRRORED', message}` → `error`；`{error:'PRECIP_CYCLE_NOT_MIRRORED'}` → `error`；`{error:{code:42}}` → `error`。需要时在 `apps/frontend/src/test/overviewDataFixture.ts` 加构造非 envelope 错误体的小 helper。不导出 `apiErrorCode`，不改 `overviewDataStore.ts`。
+- [x] 6.1 在 `apps/frontend/src/stores/__tests__/overviewDataSourceSelection.test.ts`（或同目录新文件）经真实 store 路径（`loadOverview` / precip index 请求）加参数化用例：envelope `{error:{code:'PRECIP_CYCLE_NOT_MIRRORED'}}` → `not_mirrored`（对照）；顶层 `{code:'PRECIP_CYCLE_NOT_MIRRORED', message}` → `error`；`{error:'PRECIP_CYCLE_NOT_MIRRORED'}` → `error`；`{error:{code:42}}` → `error`。需要时在 `apps/frontend/src/test/overviewDataFixture.ts` 加构造非 envelope 错误体的小 helper。不导出 `apiErrorCode`，不改 `overviewDataStore.ts`。
 
 Evidence Floor: 变异演练——把 `apiErrorCode` 临时改为也接受顶层 `code` → 新用例至少一条红；还原后绿（PR 记录）；`cd apps/frontend && corepack pnpm typecheck && corepack pnpm lint && corepack pnpm test`；`git diff --stat -- apps/frontend/src/stores/overviewDataStore.ts` 为空。
 

@@ -377,6 +377,39 @@ describe('overview data store discharge loading', () => {
     expect(useOverviewDataStore.getState().precipIndexByCycle).toEqual({ [key]: { status: 'error' } })
   })
 
+  // #3025：`apiErrorCode` 只认后端 envelope 的 `error.error.code`（字符串）。顶层 `code`、非对象
+  // `error`、非字符串 code 都不是 code——走无 code 的抛出路径，被降级为 `'error'`，绝不误判成
+  // `not_mirrored`。envelope 一行是对照：证明同一路径确实会采纳 envelope code。
+  it.each([
+    {
+      label: 'an envelope error.code (control)',
+      body: { request_id: 'req-1', status: 'error', error: { code: 'PRECIP_CYCLE_NOT_MIRRORED', message: 'not mirrored' } },
+      expected: 'not_mirrored',
+    },
+    {
+      label: 'a top-level code',
+      body: { code: 'PRECIP_CYCLE_NOT_MIRRORED', message: 'not mirrored' },
+      expected: 'error',
+    },
+    {
+      label: 'a non-object error string',
+      body: { error: 'PRECIP_CYCLE_NOT_MIRRORED' },
+      expected: 'error',
+    },
+    {
+      label: 'a non-string envelope code',
+      body: { error: { code: 42 } },
+      expected: 'error',
+    },
+  ] as const)('reads the precip index failure code only from the envelope: $label -> $expected', async ({ body, expected }) => {
+    const key = `gfs|${DEFAULT_CYCLE}`
+    mockApi({ [PRECIP_INDEX_PATH]: () => ({ data: undefined, error: body }) })
+
+    await useOverviewDataStore.getState().loadOverview({ ...query, cycle: null })
+
+    expect(useOverviewDataStore.getState().precipIndexByCycle).toEqual({ [key]: { status: expected } })
+  })
+
   it('never spells best or compare into a cycles, valid-times or precip request', async () => {
     // fixture 决策 8：只用解析出的具体 gfs/ifs 拼 URL，解析不出就一条都不发。
     const bestCalls = mockApi()
