@@ -892,7 +892,7 @@
 
   **Minimal mergeable slice:** atomic - 搬走的调用者与延迟查找规则必须同 PR，否则 facade patch 对搬走的调用者失效。
 
-- [ ] 5.6 抽取 retry_helpers → `file_journal_retry_helpers.py`（`FileJournalRetryService` 与 `_utcnow` 留 facade；调用 `_utcnow` 的函数经延迟导入取 facade 属性，8 个 patch `_utcnow` 的测试文件零改动），随后 contract：在 PR head 重测 `__all__`（预测零删除），卫生测试加第二方向（非 sibling 读取 ⊆ `__all__`，patch 形态不计）；map 测试覆盖规则在第七个 sibling 落地后即为 facade 顶层 == `facade` 聚簇（零改动）。
+- [x] 5.6 抽取 retry_helpers → `file_journal_retry_helpers.py`（`FileJournalRetryService` 与 `_utcnow` 留 facade；调用 `_utcnow` 的函数经延迟导入取 facade 属性，8 个 patch `_utcnow` 的测试文件零改动），随后 contract：在 PR head 重测 `__all__`（预测零删除），卫生测试加第二方向（非 sibling 读取 ⊆ `__all__`，patch 形态不计）；map 测试覆盖规则在第七个 sibling 落地后即为 facade 顶层 == `facade` 聚簇（零改动）。
 
   Depends on: 5.5
 
@@ -983,6 +983,14 @@
   - **守卫**：新增代码在 `E`/`F`/`I`/`B`/`BLE` 下干净，没有 `except Exception`，测试代码里没有名字为字面量的 `getattr`/`setattr`。Any 计数不变。
   - **Verify（补全）**：`uv run ruff check .`；`uv run pytest -q tests/test_file_orchestration_journal_facade.py tests/test_file_journal_cluster_map.py tests/test_file_orchestration_journal.py tests/test_file_orchestration_journal_read_cache.py tests/test_file_journal_late_lookup_seams.py`；PR 附一次性对账：成员集合 == `__all__`，两个方向都成立，附各形态计数和基线 SHA；`git diff --name-only origin/master -- tests/` == `tests/test_file_orchestration_journal_facade.py`；PR 记录 facade 的 `wc -l`：5.0 map 基线 SHA（预期 ≈17.5k）和本 PR head（预期约 13.7–13.9k），信息项、非验收；记录 facade 顶层按 kind 的计数；PR 记录 `select_tests(<本 PR 全部路径>)`；`openspec validate entropy-burndown-2026-10 --strict --no-interactive`。8 个 `_utcnow` 文件不跑：没有运行时变化，全仓 `import *` 为 0。不需要 node-22/node-27。
   - **级别与席位**：compact，两席 `correctness`（成员规则、排除项）和 `test-evidence+spec-compliance`（合成红绿、对账）。风险包：Legacy（re-export 表面）。
+  - **开工前确认性 fixture review（2026-10-19，base = master + 5.6 首刀，verdict pass）**：设计成立；按下列实测改正执行：
+    - `__all__` 删除集合为空，但第二方向在真实树上有 1 个违例：`tests/test_file_journal_late_lookup_seams.py` 以别名属性读取 `file_orchestration_journal._RetentionDiscoveryBudget`（5.5 / #2945 引入的 seam 用例；该名在 map 里归 `facade` 聚簇，无别的宿主）。按 5.1 成员规则这是缺失的 `__all__` 条目，不是应排除的形态：`__all__` 116 → 117，按 code point 插在 `_RecordBudget` 与 `_SAFE_SEGMENT_RE` 之间，PR 写明首个使用方是 #2945。本 PR 因此改 facade（`__all__` 一行），「集合为空时零改动」不适用；selector 按实际输出跑与记录。
+    - 预测值改为：`__all__` 116 → 117（pin 写 113）；facade 顶层 101 = 61 Assign + 21 class + 19 def（pin 写 105 = 64 + 22 + 19）；facade `wc -l` 5.0 基线 17500 → 本 PR head 约 13949（信息项）。
+    - 收集器注解盲区同 PR 修：`_scope_nodes` 对 FunctionDef/AsyncFunctionDef 只压装饰器和默认值，参数注解（`posonlyargs`/`args`/`kwonlyargs`/`vararg`/`kwarg` 的 `.annotation`）与 `returns` 从不访问；对第二方向这是假绿入口。改为与默认值一样在外层作用域压栈（约 4 行）。实测对真实树零影响（消费者 985 → 985，名集合不变），第一方向结果不变。加一个注解绿例（`def f(x: fj._foo) -> None` 识别为形态 (b)）。
+    - 第二方向函数复用 `collect_consumers`（`Consumer.reads` 已编码取舍：(a)、(b) Load、字面量 getattr/hasattr 计入；setattr/delattr/patch.object/(d) 不计入），过滤 `services/orchestrator/file_journal_*.py` 与 facade，再去掉 dunder 和 facade 顶层 `ast.Import` 绑定的模块名（新 helper；今天 7 个：hashlib、json、logging、os、re、stat、threading）。经 `ImportFrom` 绑定的模块对象纯 AST 判不了，保持 fail-closed。签名仿 `unconsumed(root, names)`，返回排序的 `file:line: name` 列表。另加模块对象排除绿例（facade `import os`，使用方读 `fj.os.stat`）。
+    - 合成用例的 dotted 串约束：5.0 的 `scan_patch_sites` 也扫本卫生测试文件，会把以 `"services.orchestrator.file_orchestration_journal."` 开头的 str 位置参数记成 patch 点；`_baz` 的 dotted 串只能嵌在更长的源码串里（照现有 `mock_patch_string` 写法），否则 map 测试 `patched == scanner` 变红。红例只断言第二方向函数（合成 facade 的第一方向本来就报 `_foo`）。
+    - 卫生测试模块 docstring 里「反方向留给 5.6」的说明同步改为已落地。
+    - archive 前提：除 5.6 外仍未勾 2.2、2.4、6.2、6.3、6.4、7.2、7.4（#2926、#2930、#2949、#2950、#2951、#2953、#2956），archive 不在本 PR；「5.5 还缺钉死块」已过时（5.5 钉死块已落）。
   - **archive 前提（勾 5.6 之后）**：tasks.md 全部 `[x]`（5.5 还缺钉死块）；`openspec validate --strict` 绿；`openspec archive entropy-burndown-2026-10 -y` 不加 `--skip-specs`；`orchestrator-structural-burndown` 的 3 个 ADDED requirement 与主 spec 不重名（已核：主 spec 没有 journal cluster/contract 的 requirement 名）；本 change 目录下没有需要重键 per-file-ignores 的脚本；5.6 不改 journal 的 per-file-ignores 键。
 
   **Suggested fixture level:** expanded - 含 `_utcnow` 被 patch 名的 2 个调用者（8 个 patch 文件观察不到，seam 用例是唯一正向 oracle）、45 名回绑、13 个孤儿导入。

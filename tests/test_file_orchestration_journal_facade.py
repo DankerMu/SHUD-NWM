@@ -1,10 +1,12 @@
-"""Re-export hygiene of the file orchestration journal facade (entropy-burndown-2026-10, task 5.1).
+"""Re-export hygiene of the file orchestration journal facade (entropy-burndown-2026-10, tasks 5.1 and 5.6).
 
 ``services/orchestrator/file_orchestration_journal.py`` declares its external
-read surface in ``__all__``.  This suite pins the declaration's form and that
-every listed name has at least one consumer somewhere in the repository, so a
-name whose last consumer goes away is noticed instead of lingering as a dead
-re-export.  It reads source with ``ast`` only and never imports the journal.
+read surface in ``__all__``.  This suite pins the declaration's form and both
+directions of it: every listed name has at least one consumer somewhere in the
+repository, so a name whose last consumer goes away is noticed instead of
+lingering as a dead re-export; and every name read from the facade outside its
+``file_journal_*`` siblings is listed.  It reads source with ``ast`` only and
+never imports the journal.
 
 A consumer is any of these, in any ``.py`` under ``apps packages services
 workers scripts tests`` (the facade itself and this file excluded):
@@ -29,10 +31,20 @@ Not consumers: comments, docstrings, f-strings, string concatenation, the bare
 logger name ``"services.orchestrator.file_orchestration_journal"``, and a
 function parameter the module is passed into.
 
+Parameter and return annotations of a ``def`` count as reads in the enclosing
+scope, like its defaults.
+
 How a name is bound in the facade is not checked here (ruff F822 covers a
 listed name that is not bound), so names moved to ``file_journal_*`` siblings
-and re-bound by import keep passing.  The reverse direction (every consumer is
-listed) is left to task 5.6.
+and re-bound by import keep passing.
+
+The reverse direction (task 5.6): every *read* -- (a), (b) in load context,
+and the ``getattr`` / ``hasattr`` part of (c) -- in a file other than
+``services/orchestrator/file_journal_*.py`` names something in ``__all__``.
+Dunders (``__file__``) and module objects the facade binds with a top-level
+``import`` (``os`` and the like) are not part of the surface and are skipped.
+The patching forms (``setattr`` / ``delattr`` / ``patch.object`` and (d)) are
+not reads, so a name that is only ever patched never has to be listed.
 """
 
 from __future__ import annotations
@@ -42,7 +54,7 @@ import itertools
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -51,6 +63,8 @@ FACADE = "services/orchestrator/file_orchestration_journal.py"
 FACADE_MODULE = "services.orchestrator.file_orchestration_journal"
 FACADE_PACKAGE, FACADE_LEAF = FACADE_MODULE.rsplit(".", 1)
 THIS_TEST = "tests/test_file_orchestration_journal_facade.py"
+SIBLING_DIR = "services/orchestrator"
+SIBLING_PREFIX = "file_journal_"
 SCAN_ROOTS = ("apps", "packages", "services", "workers", "scripts", "tests")
 _PRUNED_DIRS = frozenset({"__pycache__", ".venv", "node_modules", ".mypy_cache", ".pytest_cache"})
 _DOTTED_NAME = re.compile(re.escape(FACADE_MODULE) + r"\.([A-Za-z_]\w*)(?:\.\w+)*")
@@ -143,8 +157,9 @@ def _docstring_ids(tree: ast.Module) -> set[int]:
 def _scope_nodes(scope: ast.AST) -> tuple[list[ast.AST], list[ast.AST]]:
     """Split a scope into its own nodes and its directly nested def/class scopes.
 
-    Decorators, defaults, bases and keywords of a nested def/class are
-    evaluated in the enclosing scope, so they stay with it.
+    Decorators, defaults, parameter and return annotations, bases and keywords
+    of a nested def/class are evaluated in the enclosing scope, so they stay
+    with it.
     """
     own: list[ast.AST] = []
     nested: list[ast.AST] = []
@@ -158,8 +173,14 @@ def _scope_nodes(scope: ast.AST) -> tuple[list[ast.AST], list[ast.AST]]:
                 stack.extend(node.bases)
                 stack.extend(node.keywords)
             else:
-                stack.extend(node.args.defaults)
-                stack.extend(d for d in node.args.kw_defaults if d is not None)
+                arguments = node.args
+                stack.extend(arguments.defaults)
+                stack.extend(d for d in arguments.kw_defaults if d is not None)
+                parameters = (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs)
+                parameters += tuple(p for p in (arguments.vararg, arguments.kwarg) if p is not None)
+                stack.extend(p.annotation for p in parameters if p.annotation is not None)
+                if node.returns is not None:
+                    stack.append(node.returns)
             continue
         own.append(node)
         stack.extend(ast.iter_child_nodes(node))
@@ -309,6 +330,43 @@ def unconsumed(root: Path, names: tuple[str, ...]) -> list[str]:
     return sorted(set(names) - consumed)
 
 
+def facade_module_objects(root: Path) -> frozenset[str]:
+    """Names the facade binds to a module object with a top-level ``import``.
+
+    A module bound by ``from pkg import module`` cannot be told apart from any
+    other imported name by ``ast`` alone, so it is not skipped: a read of one
+    fails the reverse direction until someone decides what it is.
+    """
+    names: set[str] = set()
+    for node in _parse(root / FACADE).body:
+        if isinstance(node, ast.Import):
+            names.update(alias.asname or alias.name.split(".")[0] for alias in node.names)
+    return frozenset(names)
+
+
+def _is_sibling(rel: str) -> bool:
+    path = PurePosixPath(rel)
+    return path.parent.as_posix() == SIBLING_DIR and path.name.startswith(SIBLING_PREFIX) and path.suffix == ".py"
+
+
+def _is_dunder(name: str) -> bool:
+    return len(name) > 4 and name.startswith("__") and name.endswith("__")
+
+
+def unlisted(root: Path, names: tuple[str, ...]) -> list[str]:
+    """``file:line: name`` for every read, outside the siblings, of a name missing from ``names``."""
+    skipped = set(names) | facade_module_objects(root)
+    sites = {
+        (consumer.file, consumer.lineno, consumer.name)
+        for consumer in collect_consumers(root)
+        if consumer.reads
+        and not _is_sibling(consumer.file)
+        and not _is_dunder(consumer.name)
+        and consumer.name not in skipped
+    }
+    return [f"{file}:{lineno}: {name}" for file, lineno, name in sorted(sites)]
+
+
 # ---------------------------------------------------------------------------
 # Real tree
 # ---------------------------------------------------------------------------
@@ -324,6 +382,12 @@ def test_every_listed_name_has_a_consumer() -> None:
     names, _ = declared_all(REPO_ROOT)
     missing = unconsumed(REPO_ROOT, names)
     assert missing == [], f"listed in __all__ but no consumer anywhere in the repository: {missing}"
+
+
+def test_every_name_read_outside_the_siblings_is_listed() -> None:
+    names, _ = declared_all(REPO_ROOT)
+    extra = unlisted(REPO_ROOT, names)
+    assert extra == [], f"read from the journal facade outside its file_journal_* siblings, not in __all__: {extra}"
 
 
 # ---------------------------------------------------------------------------
@@ -411,6 +475,18 @@ _GREEN_FORMS = {
         "from services.orchestrator import file_orchestration_journal as fj\n\nVALUE = getattr(fj, '_foo')\n",
         "c",
     ),
+    "parameter_annotation": (
+        "tests/test_x.py",
+        "from services.orchestrator import file_orchestration_journal as fj\n\n\n"
+        "def f(x: fj._foo) -> None:\n    return None\n",
+        "b",
+    ),
+    "return_annotation_of_nested_method": (
+        "apps/x.py",
+        "from services.orchestrator import file_orchestration_journal as fj\n\n\n"
+        "class C:\n    def f(self, *args: int, **kwargs: int) -> list[fj._foo]:\n        return []\n",
+        "b",
+    ),
     "mock_patch_string": (
         "tests/test_x.py",
         "from unittest import mock\n\n\n"
@@ -426,6 +502,75 @@ def test_synthetic_consumer_form_is_recognised(tmp_path: Path, case: str) -> Non
     names = _tree(tmp_path, {rel: text})
     assert unconsumed(tmp_path, names) == []
     assert {(c.name, c.form) for c in collect_consumers(tmp_path)} == {("_foo", form)}
+
+
+def test_synthetic_unlisted_read_is_named(tmp_path: Path) -> None:
+    names = _tree(tmp_path, {"apps/x.py": "from services.orchestrator.file_orchestration_journal import _bar\n"})
+    assert unlisted(tmp_path, names) == ["apps/x.py:1: _bar"]
+
+
+def test_synthetic_unlisted_read_in_an_annotation_is_named(tmp_path: Path) -> None:
+    names = _tree(
+        tmp_path,
+        {
+            "tests/test_x.py": (
+                "from services.orchestrator import file_orchestration_journal as fj\n\n\n"
+                "def f(x: int, *, y: fj._bar) -> None:\n    return None\n"
+            )
+        },
+    )
+    assert unlisted(tmp_path, names) == ["tests/test_x.py:4: _bar"]
+
+
+def test_synthetic_unlisted_read_in_a_sibling_is_allowed(tmp_path: Path) -> None:
+    sibling = "services/orchestrator/file_journal_x.py"
+    names = _tree(tmp_path, {sibling: "from services.orchestrator.file_orchestration_journal import _bar\n"})
+    assert ("_bar", "a", True) in {(c.name, c.form, c.reads) for c in collect_consumers(tmp_path)}
+    assert unlisted(tmp_path, names) == []
+
+
+def test_synthetic_sibling_rule_does_not_cover_subdirectories(tmp_path: Path) -> None:
+    nested = "services/orchestrator/sub/file_journal_x.py"
+    names = _tree(tmp_path, {nested: "from services.orchestrator.file_orchestration_journal import _bar\n"})
+    assert unlisted(tmp_path, names) == [f"{nested}:1: _bar"]
+
+
+def test_synthetic_patched_unlisted_name_is_allowed(tmp_path: Path) -> None:
+    names = _tree(
+        tmp_path,
+        {
+            "tests/test_x.py": (
+                "from unittest import mock\n\nfrom services.orchestrator import file_orchestration_journal as fj\n\n\n"
+                "def test(monkeypatch):\n    monkeypatch.setattr(fj, '_baz', 1)\n\n\n"
+                "@mock.patch('services.orchestrator.file_orchestration_journal._baz')\n"
+                "def test_patched(patched):\n    pass\n"
+            )
+        },
+    )
+    assert {(c.name, c.form, c.reads) for c in collect_consumers(tmp_path)} == {
+        ("_baz", "c", False),
+        ("_baz", "d", False),
+    }
+    assert unlisted(tmp_path, names) == []
+
+
+_MODULE_OBJECT_READER = (
+    "from services.orchestrator import file_orchestration_journal as fj\n\nSTAT = fj.os.stat\nPATH = fj.__file__\n"
+)
+
+
+def test_synthetic_module_object_and_dunder_reads_are_allowed(tmp_path: Path) -> None:
+    names = _tree(tmp_path, {"tests/test_x.py": _MODULE_OBJECT_READER}, facade="import os\n" + _SYNTHETIC_FACADE)
+    assert {(c.name, c.form, c.reads) for c in collect_consumers(tmp_path)} == {
+        ("os", "b", True),
+        ("__file__", "b", True),
+    }
+    assert unlisted(tmp_path, names) == []
+
+
+def test_synthetic_module_object_read_needs_the_facade_import(tmp_path: Path) -> None:
+    names = _tree(tmp_path, {"tests/test_x.py": _MODULE_OBJECT_READER})
+    assert unlisted(tmp_path, names) == ["tests/test_x.py:3: os"]
 
 
 def test_synthetic_name_without_a_consumer_is_named(tmp_path: Path) -> None:

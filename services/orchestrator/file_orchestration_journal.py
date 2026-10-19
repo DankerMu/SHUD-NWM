@@ -715,6 +715,7 @@ __all__ = (
     "_REPLAY_ORDER_FIELD",
     "_RUNTIME_ROOT_SAME_RUN_JOB_SCAN_LIMIT",
     "_RecordBudget",
+    "_RetentionDiscoveryBudget",
     "_SAFE_SEGMENT_RE",
     "_SOURCE_SEGMENT_SURFACES",
     "_TERMINAL_FORECAST_CYCLE_SUCCESS_STATUSES",
