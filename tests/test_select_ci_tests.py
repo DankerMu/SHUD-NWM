@@ -12852,6 +12852,10 @@ STOP_RULE_AT_SITE_EXTENSIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
     ("services/orchestrator/file_orchestration_journal.py", FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS),
+    # #2940 (entropy-burndown task 5.2): code extracted from the facade into a
+    # `file_journal_*.py` sibling keeps the facade's route through the glob stop
+    # rule placed right after the facade's own row.
+    ("services/orchestrator/file_journal_context.py", FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS),
     # #1955: the file_orchestration_migration.py stop rule's at-site addition.
     # Its shared constant FILE_JOURNAL_READ_STATE_TESTS is the redirect, pinned
     # by the file-journal selection test, so only the at-site target is named --
@@ -12934,6 +12938,27 @@ def test_at_site_extensions_did_not_widen_the_stop_rules() -> None:
         assert broad_only_target not in selected, (
             f"{module_path} now reaches the broad services/orchestrator/** rule: a stop rule stopped stopping"
         )
+
+
+# #2940 -- the facade's extracted siblings ride one glob stop rule that carries
+# the facade's routing. Without it a sibling-only PR falls through to the broad
+# `services/orchestrator/**` rule, which does not reach the cluster map test.
+FILE_JOURNAL_SIBLING_GLOB = "services/orchestrator/file_journal_*.py"
+FILE_JOURNAL_CONTEXT_SIBLING = "services/orchestrator/file_journal_context.py"
+FILE_JOURNAL_CLUSTER_MAP_TEST = "tests/test_file_journal_cluster_map.py"
+
+
+def test_file_journal_sibling_glob_rule_red_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drop exactly the #2940 row and the sibling no longer reaches the cluster map test."""
+    from scripts import select_ci_tests
+
+    assert FILE_JOURNAL_CLUSTER_MAP_TEST in select_tests([FILE_JOURNAL_CONTEXT_SIBLING], repo_root=Path("."))
+
+    mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern != FILE_JOURNAL_SIBLING_GLOB)
+    assert len(mutant) == len(PATH_TEST_RULES) - 1, "the #2940 row is missing or duplicated"
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+
+    assert FILE_JOURNAL_CLUSTER_MAP_TEST not in select_tests([FILE_JOURNAL_CONTEXT_SIBLING], repo_root=Path("."))
 
 
 # #2316 / #2390: the targets the two at-site extensions of this change add,
