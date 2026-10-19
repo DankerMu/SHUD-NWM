@@ -7315,7 +7315,7 @@ def test_suite_importer_closure_reuses_parse_work_across_calls(
     # synthetic root must not re-parse the suite tree — the per-file derivation
     # is cached by absolute path + strong stat identity. The parse count is the
     # call-count seam; no wall-clock threshold is asserted.
-    import scripts.select_ci_tests as _prod
+    import scripts.select_ci_tests_imports as _prod
 
     owner = tmp_path / "tests" / "test_owner.py"
     owner.parent.mkdir(parents=True)
@@ -7341,7 +7341,7 @@ def test_suite_importer_closure_rewrite_to_module_scope_edge_is_observed(
     # a function-local/no edge to a module-scope edge is observed even though
     # the filename is unchanged. The rewrite changes the file's stat identity,
     # so the cache must not serve the stale derivation.
-    import scripts.select_ci_tests as _prod
+    import scripts.select_ci_tests_imports as _prod
 
     owner = tmp_path / "tests" / "test_owner.py"
     owner.parent.mkdir(parents=True)
@@ -8712,6 +8712,32 @@ def test_patched_facade_rule_table_still_steers_select_tests_after_the_rules_mov
     with pytest.MonkeyPatch.context() as patched:
         patched.setattr(select_ci_tests_rules, "PATH_TEST_RULES", probe_rules)
         assert select_tests([probe], repo_root=Path(".")) == []
+
+
+def test_patched_facade_importer_index_still_steers_select_tests_after_the_imports_move(tmp_path: Path) -> None:
+    """#2951: `_build_suite_importer_index` lives in the imports module; the facade binding is the only patch point."""
+    import scripts.select_ci_tests_imports as select_ci_tests_imports
+    from scripts import select_ci_tests
+
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_owner.py").write_text("HELPER = 1\n", encoding="utf-8")
+    (tmp_path / "tests" / "test_probe_importer.py").write_text("HELPER = 2\n", encoding="utf-8")
+
+    def stub_index(_root: Path) -> dict[str, set[str]]:
+        return {"tests.test_owner": {"tests/test_probe_importer.py"}}
+
+    assert set(select_tests(["tests/test_owner.py"], repo_root=tmp_path)) == {"tests/test_owner.py"}
+
+    with pytest.MonkeyPatch.context() as patched:
+        patched.setattr(select_ci_tests, "_build_suite_importer_index", stub_index)
+        assert set(select_tests(["tests/test_owner.py"], repo_root=tmp_path)) == {
+            "tests/test_owner.py",
+            "tests/test_probe_importer.py",
+        }
+
+    with pytest.MonkeyPatch.context() as patched:
+        patched.setattr(select_ci_tests_imports, "_build_suite_importer_index", stub_index)
+        assert set(select_tests(["tests/test_owner.py"], repo_root=tmp_path)) == {"tests/test_owner.py"}
 
 
 @pytest.mark.parametrize(

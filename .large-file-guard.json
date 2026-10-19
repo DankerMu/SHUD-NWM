@@ -66,7 +66,6 @@
     "services/orchestrator/chain_runtime_utils.py",
     "services/orchestrator/scheduler_candidate_execution_evidence.py",
     "services/production_closure/readiness_scheduler_evidence.py",
-    "scripts/select_ci_tests.py",
     "scripts/select_ci_tests_tables.py",
     "scripts/select_ci_tests_rules.py",
     "services/tile_publisher/publisher.py",
