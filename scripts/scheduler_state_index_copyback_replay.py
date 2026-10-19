@@ -371,7 +371,7 @@ def replay_state_index_copyback(
     receipt: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "mode": "enforce" if enforce else "dry_run",
-        "started_at": _format_time(started_at),
+        "started_at": _format_utc_seconds(started_at),
         "reference_root": str(reference),
         "destination_root": str(destination),
         "object_store_prefix": prefix,
@@ -478,7 +478,7 @@ def replay_state_index_copyback(
             if index_may_be_committed
             else None
         )
-        receipt["completed_at"] = _format_time(datetime.now(tz=UTC))
+        receipt["completed_at"] = _format_utc_seconds(datetime.now(tz=UTC))
         receipt_failure: ReplayError | None = None
         if receipt_root is not None:
             try:
@@ -897,7 +897,7 @@ def _write_receipt(root: Path, receipt: Mapping[str, Any]) -> None:
         raise ReplayError("receipt_write_failed", {"root": str(root), "error": str(error)}) from error
 
 
-def _format_time(value: datetime) -> str:
+def _format_utc_seconds(value: datetime) -> str:
     return value.astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 

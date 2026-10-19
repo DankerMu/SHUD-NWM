@@ -15,6 +15,7 @@ from datetime import datetime
 from typing import Any
 
 from packages.common import succession_receipt as succession
+from packages.common.contracts.time_normalization import utc_now
 from scripts.model_succession import systemd
 from scripts.model_succession.model import (
     REFRESH_START_TIMEOUT_SECONDS,
@@ -33,7 +34,6 @@ from scripts.model_succession.model import (
     TimerNotStopped,
     read_json,
     receipt_header,
-    utc_now,
     utc_text,
 )
 from scripts.model_succession.plan import manifest_model_ids, refuse_other_timer_holder
@@ -112,7 +112,7 @@ def begin(settings: Settings, _inputs: Inputs) -> dict[str, Any]:
     }
 
 
-def _parse_time(value: Any) -> datetime | None:
+def _parse_aware_or_none(value: Any) -> datetime | None:
     try:
         parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except ValueError:
@@ -130,7 +130,7 @@ def refresh(settings: Settings, _inputs: Inputs) -> dict[str, Any]:
         raise StepFailure(
             f"The provider refresh was started but its receipt {latest} cannot be read: {error}"
         ) from error
-    receipt_started = _parse_time(receipt.get("started_at"))
+    receipt_started = _parse_aware_or_none(receipt.get("started_at"))
     if receipt_started is None or receipt_started <= step_started:
         raise StepFailure(
             f"systemctl --user start {REFRESH_UNIT} returned zero, but {latest} is not newer than this step "

@@ -277,7 +277,7 @@ def parse_systemd_timestamp(raw: str) -> datetime | None:
     return moment.astimezone()
 
 
-def parse_iso8601(raw: str) -> datetime:
+def parse_aware_iso8601(raw: str) -> datetime:
     """Parse a receipt ISO-8601 instant; a naive value is a refusal."""
     value = (raw or "").strip()
     if not value:
@@ -414,7 +414,7 @@ def read_manifest_generated_at(path: Path) -> datetime:
                     f"registry provider has no {field} (outcome {outcome!r})"
                 )
             try:
-                return parse_iso8601(generated_at)
+                return parse_aware_iso8601(generated_at)
             except ValueError as error:
                 raise ProbeEvidenceError(
                     f"registry {field} is unparseable: {error}"
@@ -757,7 +757,7 @@ def resolve_now(raw: str) -> datetime:
     if not raw:
         return datetime.now(UTC)
     try:
-        return parse_iso8601(raw)
+        return parse_aware_iso8601(raw)
     except ValueError as error:
         raise ConfigError(f"--now must be a timezone-aware ISO-8601 instant: {error}") from error
 

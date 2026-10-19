@@ -20,6 +20,7 @@ from typing import Any
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
+from packages.common.contracts.time_normalization import format_iso_utc
 from packages.common.object_store import LocalObjectStore
 from packages.common.shud_forcing_contract import (
     CANONICAL_SHUD_FORCING_INDEX_MEMBER,
@@ -100,14 +101,14 @@ def main() -> int:
     station_count = _forcing_manifest_station_count(forcing_manifest)
     station_source = _validate_shud_forcing_header(forcing_manifest, object_store, station_count)
     forcing_files = _forcing_file_checksums(forcing_manifest)
-    start_time = _format_time(forcing["start_time"])
-    end_time = _format_time(forcing["end_time"])
+    start_time = format_iso_utc(forcing["start_time"])
+    end_time = format_iso_utc(forcing["end_time"])
     manifest = {
         "run_id": run_id,
         "run_type": "forecast",
         "scenario_id": _scenario_for_source(SOURCE_ID),
         "source_id": SOURCE_ID,
-        "cycle_time": _format_time(cycle_time),
+        "cycle_time": format_iso_utc(cycle_time),
         "start_time": start_time,
         "end_time": end_time,
         "model": {
@@ -167,10 +168,6 @@ def _one(row: Any, message: str) -> dict[str, Any]:
     if row is None:
         raise RuntimeError(message)
     return dict(row)
-
-
-def _format_time(value: datetime) -> str:
-    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _first_int(path: Path) -> int:

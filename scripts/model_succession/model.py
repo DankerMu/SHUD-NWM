@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from packages.common import succession_receipt as succession
+from packages.common.contracts.time_normalization import utc_now
 from scripts.merged_registry_publish.model import (
     CANONICAL_MANIFEST_ENV,
     MIRROR_MANIFEST_ENV,
@@ -284,10 +285,6 @@ class Inputs:
     provision_receipt: dict[str, Any] | None  # {"path", "sha256"}
     new_rows_registry: dict[str, Any] | None  # {"path", "sha256"}
     new_rows: dict[str, dict[str, Any]]  # the plan's new rows, by model_id
-
-
-def utc_now() -> datetime:
-    return datetime.now(UTC)
 
 
 def utc_text(value: datetime) -> str:

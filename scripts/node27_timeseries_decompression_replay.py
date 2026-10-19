@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from packages.common import node27_container_contract as contract
+from packages.common.contracts.time_normalization import format_iso_utc, utc_now
 from packages.common.evidence_io import reject_secret_material
 from packages.common.node27_timeseries_lifecycle_lock import (
     LifecycleLockContended,
@@ -52,10 +53,6 @@ SELECT current_database(), current_setting('server_version'),
 
 class DecompressionError(RuntimeError):
     """The exact authorized decompression could not be proven safe/complete."""
-
-
-def _iso_now() -> str:
-    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _iso_value(value: Any) -> str:
@@ -148,7 +145,7 @@ def produce_recovery_receipt(
 
     if re.fullmatch(r"[0-9a-f]{40}", mutation_head_sha) is None:
         raise DecompressionError("mutation SHA is invalid")
-    started_at = _iso_now()
+    started_at = format_iso_utc(utc_now())
     try:
         refuse_lifecycle_lock_env_override(os.environ)
         with timeseries_lifecycle_lock():
@@ -203,7 +200,7 @@ def _produce_recovery_receipt_locked(
         connection.commit()
         receipt = {
             "started_at": started_at,
-            "finished_at": _iso_now(),
+            "finished_at": format_iso_utc(utc_now()),
             "node": EXPECTED_NODE,
             "mutation_head_sha": mutation_head_sha,
             "database_identity": database_identity,
@@ -224,7 +221,7 @@ def _produce_recovery_receipt_locked(
         failure = {
             "schema_version": "1.0",
             "outcome": "failed",
-            "generated_at": _iso_now(),
+            "generated_at": format_iso_utc(utc_now()),
             "node": EXPECTED_NODE,
             "mutation_head_sha": mutation_head_sha,
             "target": dict(target),

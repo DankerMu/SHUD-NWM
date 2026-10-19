@@ -143,6 +143,7 @@
     "workers/mapping_builder/evidence.py",
     "tests/test_status_vocab_parity.py",
     "tests/test_object_store_forcing.py",
-    "services/production_closure/e2e_validation.py"
+    "services/production_closure/e2e_validation.py",
+    "scripts/validate_two_node_docker_runtime.py"
   ]
 }
