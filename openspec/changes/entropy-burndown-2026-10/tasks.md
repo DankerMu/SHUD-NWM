@@ -1023,7 +1023,7 @@
 
   **Minimal mergeable slice:** atomic - 规则行、smoke 匹配与快照脚本是同一前置。
 
-- [ ] 6.2 B1 + `PathTestRule` → `select_ci_tests_tables.py`；facade 以导入绑定同名。
+- [x] 6.2 B1 + `PathTestRule` → `select_ci_tests_tables.py`；facade 以导入绑定同名。
 
   Depends on: 6.1
 
@@ -1044,6 +1044,13 @@
   - **路由**：6.1 的精确行已把 `scripts/select_ci_tests_tables.py` 路由到 `SELECTOR_META_GUARD_TEST`，`_collection_smoke_required` 已覆盖，6.2 不加新行；基线 JSON 改动经 ~:6804-6805 路由到 `LINE_REFERENCE_TEST`。Verify 前必须 `git add scripts/select_ci_tests_tables.py`（`_tracked_python_files("scripts")` ~:5498 与 one-hop 域 ~:5937 只看 tracked 文件）。`INTENTIONAL_RULE_GAP_EXCLUSIONS` 在测试文件内（~:11120），不在 selector。选择器常量在 `scripts`/`tests`/`.github` 下无外部导入方。
   - **PR Boundary 偏离（记录）**：`.large-file-guard.json` 排除项、基线条目删除、line-reference 注释改写、node-id 扫描 glob、tasks.md 6.2/6.3 措辞。facade 实为 7,707 行。
   - **残余风险**：6.2 后任何向 facade 新增 `*_TESTS`/`*_PATH` 常量的 PR 会重新引入 B1 漂移（facade 导入处加一行指针注释）；6.3 继承约 40 个只被规则表读的常量、~:5901 的行引用与体积排除；值等价探针是 PR body 证据而非提交测试。
+  - **开工前确认性 fixture review（2026-10-19，base = master + 5.x，verdict pass）**：搬迁机制成立（模拟 head 上实跑搬迁、导入、值等价与 exec 探针）；按下列实测改正执行，行号一律按名定位：
+    - B1 = 142 名：68 `*_TESTS` + 46 `*_PATH` + 11 `*_ROOTS` + 6 `*_MODULES` + `PathTestRule` + 同样 10 个单例；数据名 141（pin 的 131 写下时即应为 133）。自 pin 起新增 8 名：`ANY_RATCHET_ROOTS`、`STATUS_VOCAB_PARITY_ROOTS`、`TIME_HELPER_CONSOLIDATION_ROOTS`、`DATA_ADAPTERS_BASE_HELPER_TESTS`、`DATA_ADAPTERS_DIRECTORY_TESTS`、`HYDROLOGIC_FINGERPRINT_CONTRACT_PATH`、`REGION_CONTRACT_PATH`、`TIME_NORMALIZATION_CONTRACT_PATH`。前向引用 0，指向 facade 专属名的引用 0。sibling 约 1,729 行，facade 7,983 → 约 6,403 行。`X as X` 的 13 名不变。
+    - 被 patch 的 facade 全局今天是 14 名 / 78 次 `setattr`；搬走的是 9 个：`CORE_SMOKE_TESTS` + 8 个 `*_ROOTS`（TIMESCALE、RIVER、RIVER_SQL、PATH_CANONICALIZATION、IMPORT_LAYERING、ANY_RATCHET、TIME_HELPER、PRODUCTION_TOPOLOGY_SCAN）。读者（`select_tests`、`_is_production_topology_scan_input`）都留 facade 且在调用时查全局，patch 仍生效。
+    - 注释改写范围放宽：搬迁区内指向「下面/上面那条 rule/row/route」的注释约 12 处（不止 pin 举的一例），统一改为直接点名 `PATH_TEST_RULES`（不写文件名，6.3 还会再搬）；指向常量、搬后仍成立的不改。`PathTestRule` 上方的孤立注释留 facade，按「前导注释一起搬」规则会被卷走，须特意排除。
+    - line-reference：B1 内仍只有 `SCHEDULER_IMPORTER_TESTS` 注释一条；基线总数 209 → 208（上限 210）。large-file-guard：facade 已排除，sibling 需同 commit 加入排除项。
+    - 值等价探针写法修正：照原文「先加载父 facade」会出两个问题——`spec_from_file_location` 加载前不注册 `sys.modules[name]` 时 `@dataclass` 抛 `AttributeError`；父 facade 自带的 6.1 `sys.path.insert` 把父目录插到 `sys.path[0]`，之后 `import scripts.select_ci_tests` 解析到父副本，`is` 断言全红、规则表比较空洞通过。改为：先 `import scripts.select_ci_tests` 与 `scripts.select_ci_tests_tables`（并断言 `head_facade.__file__` 在仓库内），再注册并加载父 facade；对 141 个数据名断言 `==` 与 `is`（含 `PathTestRule` 共 142 个 `is`），三张规则表逐元素 `astuple`（模拟 head 实测 377 / 42 / 11 行全等）。
+    - 6.3 前瞻（不在本 PR 改）：6.3 pin 的 facade 裸绑定名单漏了 `ANY_RATCHET_ROOTS`、`STATUS_VOCAB_PARITY_ROOTS`、`TIME_HELPER_CONSOLIDATION_ROOTS`（应为 16），patch 计数「12/64」已过时，6.3 开工前重测。
 
 
   **Minimal mergeable slice:** atomic - 常量表互相 `*` 展开，拆半则导入断。

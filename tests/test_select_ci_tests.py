@@ -11416,7 +11416,7 @@ def test_every_pinned_node_id_resolves_to_an_existing_test_function() -> None:
     import re
     from pathlib import Path
 
-    source = Path("scripts/select_ci_tests.py").read_text(encoding="utf-8")
+    source = "\n".join(path.read_text(encoding="utf-8") for path in sorted(Path("scripts").glob("select_ci_tests*.py")))
     node_ids = sorted(set(re.findall(r'"(tests/[^"]+::[^"]+)"', source)))
     assert node_ids, "expected pinned node ids in the selector"
     stale = []
