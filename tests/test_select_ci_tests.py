@@ -8695,6 +8695,25 @@ def test_selector_snapshot_script_rule_red_when_removed(monkeypatch: pytest.Monk
     assert set(CORE_SMOKE_TESTS) <= set(selected), selected
 
 
+def test_patched_facade_rule_table_still_steers_select_tests_after_the_rules_move() -> None:
+    """#2950: `PATH_TEST_RULES` lives in the rules module; the facade binding is the only patch point."""
+    import scripts.select_ci_tests_rules as select_ci_tests_rules
+    from scripts import select_ci_tests
+
+    probe = "zz_selector_probe/never.txt"
+    probe_rules = (PathTestRule(probe, (SELECTOR_META_GUARD_TEST,)),)
+
+    assert select_tests([probe], repo_root=Path(".")) == []
+
+    with pytest.MonkeyPatch.context() as patched:
+        patched.setattr(select_ci_tests, "PATH_TEST_RULES", probe_rules)
+        assert select_tests([probe], repo_root=Path(".")) == [SELECTOR_META_GUARD_TEST]
+
+    with pytest.MonkeyPatch.context() as patched:
+        patched.setattr(select_ci_tests_rules, "PATH_TEST_RULES", probe_rules)
+        assert select_tests([probe], repo_root=Path(".")) == []
+
+
 @pytest.mark.parametrize(
     ("changed_path", "expected_count"),
     [
