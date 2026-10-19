@@ -3211,6 +3211,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         stop_on_match=True,
     ),
     PathTestRule(
+        "services/orchestrator/file_journal_*.py",
+        (*FILE_JOURNAL_READ_STATE_TESTS, *FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS),
+        stop_on_match=True,
+    ),
+    PathTestRule(
         # Extended AT THE RULE SITE (#1955), not by editing the shared constant:
         # FILE_JOURNAL_READ_STATE_TESTS also serves safe_fs.py and every other
         # journal pattern, whose selection must not move. This module owns the
