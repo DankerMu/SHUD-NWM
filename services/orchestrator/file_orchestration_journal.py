@@ -20,7 +20,7 @@ from packages.common.auth_policy import (
     require_policy_evidence,
     trusted_internal_policy_decision,
 )
-from packages.common.contracts.time_normalization import cycle_id_for, format_cycle_time, parse_cycle_time
+from packages.common.contracts.time_normalization import format_cycle_time, parse_cycle_time
 from packages.common.contracts.time_normalization import utc_now as _utcnow
 from packages.common.safe_fs import (
     SafeFilesystemError,
@@ -93,6 +93,19 @@ from services.orchestrator.chain_types import (
     OrchestratorError,
 )
 from services.orchestrator.file_journal_context import _forcing_context_from_mapping, _model_context_from_mapping
+from services.orchestrator.file_journal_primitives import (
+    _SAFE_SEGMENT_RE,
+    MAX_FILE_JOURNAL_PATH_SEGMENT_CHARS,
+    _blocked_cycle_id,
+    _cycle_id_for_file_source,
+    _normalize_file_source_id,
+    _optional_source_id,
+    _parse_cycle_time_field,
+    _required_safe_identity,
+    _required_text,
+    _safe_identity_text,
+    _scalar_text,
+)
 from services.orchestrator.file_journal_read_attribution import (
     _JOURNAL_READ_UNATTRIBUTED,
     JOURNAL_READ_ATTRIBUTION_SCHEMA_VERSION,
@@ -216,7 +229,6 @@ MAX_FILE_JOURNAL_DISCOVERED_FILES = 100_000
 MAX_FILE_JOURNAL_SCAN_DEPTH = 32
 MAX_FILE_JOURNAL_JSON_DEPTH = 64
 MAX_FILE_JOURNAL_JSON_NODES = 300_000
-MAX_FILE_JOURNAL_PATH_SEGMENT_CHARS = 255
 MAX_FILE_JOURNAL_CYCLE_ROWS_CACHE_ENTRIES = 512
 #: Total attempts (initial plus retries) the journal's cached read chokepoint
 #: makes against a mid-open atomic replacement of the file it is reading.  An
@@ -341,7 +353,6 @@ _RECONCILE_MIGRATION_TEMP_RE = re.compile(
 # with MAX_FILE_JOURNAL_CYCLE_SEGMENTS.
 _LATEST_REPLAY_ORDER_SENTINEL = MAX_FILE_JOURNAL_CYCLE_SEGMENTS * MAX_FILE_JOURNAL_RECORDS + 1
 _UNSET = object()
-_SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _JOURNAL_SEGMENT_INDEX_RE = re.compile(r"[1-9][0-9]*")
 # The forecast and cohort shapes now live in run_identity (#1405) so retention
 # adjudicates deletions against the same canonical identities; they are
@@ -16141,21 +16152,6 @@ def _require_schema(payload: Mapping[str, Any], expected: str) -> None:
         )
 
 
-def _normalize_file_source_id(value: Any, *, field: str) -> str:
-    if value in (None, ""):
-        raise FileOrchestrationJournalError("file_journal_missing_identity", field=field)
-    text = _scalar_text(value, field=field, invalid_reason="file_journal_invalid_identity")
-    text = _safe_identity_text(text, field=field)
-    try:
-        return normalize_source_id(text)
-    except ValueError as error:
-        raise FileOrchestrationJournalError(
-            "file_journal_invalid_identity",
-            field=field,
-            evidence={"actual": text[:80]},
-        ) from error
-
-
 def _cycle_source_discovery_from_segment(source_segment: str) -> _CycleSourceDiscovery:
     source_segment = _safe_segment(source_segment)
     return _CycleSourceDiscovery(
@@ -16329,24 +16325,6 @@ def _required_source_id(row: Mapping[str, Any], field: str) -> str:
     return _normalize_file_source_id(row.get(field), field=field)
 
 
-def _optional_source_id(row: Mapping[str, Any], field: str) -> str | None:
-    value = row.get(field)
-    if value in (None, ""):
-        return None
-    return _normalize_file_source_id(value, field=field)
-
-
-def _cycle_id_for_file_source(source_id: str, cycle_time: datetime) -> str:
-    return cycle_id_for(_normalize_file_source_id(source_id, field="source_id"), cycle_time)
-
-
-def _blocked_cycle_id(source_id: str, cycle_time: datetime) -> str:
-    try:
-        return _cycle_id_for_file_source(source_id, cycle_time)
-    except FileOrchestrationJournalError:
-        return "file_journal_read_blocked"
-
-
 def _canonical_candidate_run_id(value: str, *, source_id: str, cycle_time: datetime, model_id: str) -> str:
     cycle_stamp = format_cycle_time(cycle_time)
     match = _FORECAST_RUN_ID_RE.fullmatch(str(value))
@@ -16392,17 +16370,6 @@ def _canonical_candidate_id(value: str, *, source_id: str, cycle_time: datetime,
     return f"{source_id}:{remainder}"
 
 
-def _required_text(row: Mapping[str, Any], field: str) -> str:
-    value = row.get(field)
-    if value in (None, ""):
-        raise FileOrchestrationJournalError("file_journal_missing_identity", field=field)
-    return _scalar_text(value, field=field, invalid_reason="file_journal_invalid_identity")
-
-
-def _required_safe_identity(row: Mapping[str, Any], field: str) -> str:
-    return _safe_identity_text(_required_text(row, field), field=field)
-
-
 def _optional_text(
     row: Mapping[str, Any],
     field: str,
@@ -16420,25 +16387,6 @@ def _optional_safe_identity(row: Mapping[str, Any], field: str) -> str | None:
     if value is None:
         return None
     return _safe_identity_text(value, field=field)
-
-
-def _scalar_text(value: Any, *, field: str, invalid_reason: str) -> str:
-    if isinstance(value, Mapping) or (isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray)):
-        raise FileOrchestrationJournalError(invalid_reason, field=field)
-    if isinstance(value, bytes | bytearray):
-        raise FileOrchestrationJournalError(invalid_reason, field=field)
-    return str(value)
-
-
-def _safe_identity_text(value: str, *, field: str) -> str:
-    if (
-        not value
-        or len(value) > MAX_FILE_JOURNAL_PATH_SEGMENT_CHARS
-        or value in {".", ".."}
-        or _SAFE_SEGMENT_RE.fullmatch(value) is None
-    ):
-        raise FileOrchestrationJournalError("file_journal_unsafe_identity", field=field)
-    return value
 
 
 def _validated_actual_writer_generation(value: str) -> str:
@@ -16472,16 +16420,6 @@ def _validate_scheduler_visible_fields(row: Mapping[str, Any]) -> None:
         "status_to",
     ):
         _optional_text(row, visible_field)
-
-
-def _parse_cycle_time_field(row: Mapping[str, Any], field: str) -> datetime:
-    value = row.get(field)
-    if value in (None, ""):
-        raise FileOrchestrationJournalError("file_journal_missing_identity", field=field)
-    try:
-        return parse_cycle_time(str(value))
-    except (TypeError, ValueError) as error:
-        raise FileOrchestrationJournalError("file_journal_invalid_cycle_time", field=field) from error
 
 
 def _require_source_cycle(row: Mapping[str, Any], *, source_id: str, cycle_time: datetime) -> None:
