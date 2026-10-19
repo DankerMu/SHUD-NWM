@@ -2,7 +2,7 @@ import { create } from 'zustand'
 
 import { apiFetch } from '@/api/base'
 import { client } from '@/api/client'
-import { getApiErrorMessage, unwrapApiData } from '@/api/response'
+import { type ApiErrorShape, getApiErrorMessage, unwrapApiData } from '@/api/response'
 import type { components } from '@/api/types'
 import { toSecondsPrecisionInstant } from '@/lib/m11/instants'
 import {
@@ -169,9 +169,7 @@ async function getApi<T>(path: string, options?: unknown, fallback = '请求失�
 
 function apiErrorCode(error: unknown): string | null {
   if (!error || typeof error !== 'object') return null
-  const envelope = (error as { error?: unknown }).error
-  if (!envelope || typeof envelope !== 'object') return null
-  const code = (envelope as { code?: unknown }).code
+  const code = (error as ApiErrorShape).error?.code
   return typeof code === 'string' ? code : null
 }
 
@@ -334,7 +332,7 @@ async function fetchLayers(runId?: string | null) {
             const params = new URLSearchParams({ limit: '100', offset: '0' })
             if (runId) params.set('run_id', runId)
             const response = await apiFetch(`/api/v1/layers?${params.toString()}`)
-            if (!response.ok) throw new Error('获取图层列表失败')
+            if (!response.ok) throw new Error(getApiErrorMessage(await response.json().catch(() => null), '获取图层列表失败'))
             return unwrapApiData<unknown>(await response.json(), '获取图层列表失败')
           },
         )

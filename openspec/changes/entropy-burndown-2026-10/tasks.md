@@ -2,7 +2,7 @@
 
 ## 约定（对所有 task 生效）
 
-- **本地验证命令**：后端 `uv run ruff check . && uv run pytest -q <本 task 的测试文件>`；前端 `cd apps/frontend && corepack pnpm typecheck && corepack pnpm test`，自 7.2 合并后再加 `corepack pnpm lint`（7.1/7.3/7.4/7.5 不跑 lint）；改 `docs/**`/`openspec/specs/**`/`AGENTS.md`/`infra/**` 的 task 另跑 `uv run pytest -q tests/test_entropy_audit_report_contract.py`。
+- **本地验证命令**：后端 `uv run ruff check . && uv run pytest -q <本 task 的测试文件>`；前端 `cd apps/frontend && corepack pnpm typecheck && corepack pnpm test`，自 7.2 合并后再加 `corepack pnpm lint`（7.1/7.3/7.4 首刀/7.5 不跑 lint；7.4 后继在 7.2 之后，必跑 lint）；改 `docs/**`/`openspec/specs/**`/`AGENTS.md`/`infra/**` 的 task 另跑 `uv run pytest -q tests/test_entropy_audit_report_contract.py`。
 - **行为保持 oracle**：每个重构 task 的既有测试文件必须零改动通过，例外只限各 task 明文列出的"允许的测试改动"（patch 目标字符串、导入/mock 路径、identity 断言的模块对象），且只限该 task 搬走的名字。
 - **oracle 节点**：除 2.2（公共 enum 扩一值，需 node-27 live receipt）外全部本地。
 - **CI 路由**：新增的守卫/棘轮测试必须在 `scripts/select_ci_tests.py` 的 `select_tests` 中以 #1656/#2185 形态的 **additive loop**（stop 规则循环之后、不设 `matched`、不参与 stop 规则）加选，否则 PR 上不跑或被 `stop_on_match` owner 遮蔽（CLAUDE.md：PR 只跑定向测试）；受影响的精确集合断言按先例同 PR 更新；改了 selector 的 task 都跑 `tests/test_select_ci_tests.py`。
@@ -22,7 +22,7 @@
 - Resource limits / large input / discovery — not selected：无新的发现/扫描路径；1.1/4.2 的 AST 扫描只读仓库树，规模固定。
 - Legacy compatibility / examples — selected：1.2 expand 窗口保留 re-export shim，1.3 contract 删 shim 并以守卫的 contract 检查函数封死旧路径；9.2/9.3 退役 legacy store 引用（表已于 2026-09-19 drop，design D10）；2.2 公共 enum 加一值：`schemas/examples/pipeline_job.example.json` 不变（CI check-jsonschema 照旧），前端无 job status 穷举消费者，typecheck 零改动；5.1 journal `__all__` = 外部读取面（113 名，含 16 个外来透传），删 3 个无使用方条目，全仓 `import *` 0 处。
 - Error handling / rollback / partial outputs — selected：7.4 首刀是 hook 失败路径 + 载荷合法性校验（静态 geojson、非 envelope 消费者，project-profile 的 `unwrapApiData`/`getApi` 契约不直接触发，malformed 用例按同等标准补）；7.4 后继：`apiErrorCode` 以 `ApiErrorShape` 类型化、`apiFetch` fallback 经 envelope，两个脱敏包装（`getSafeModelAssetErrorMessage`、`settledError`）与 M11 标签掩码 `safeM11ErrorMessage` 原样保留（脱敏边界）；1.2/5.x/6.x 采用 expand–contract，半搬状态可合并（design Migration Plan）；2.4 后继 normalize_qc_verdict 只接 met_validation 闭合域 {pass, fail} 读点（ValueError 不可达），readiness/混合域/校验器不接；3.2 替换后非 str/非 datetime 输入的异常类由 AttributeError 变 TypeError（只在本来就崩溃的路径上，无处理器捕获）；3.3 `_format_time` 非 datetime 输入的异常类由 AttributeError 变 TypeError（只在崩溃路径上）。
-- Release / packaging / dependency compatibility — selected：4.1 的 per-file-ignores 清单在 `uv.lock` 钉住的 ruff 版本下生成，升级 ruff 须同 PR 重生成（钉死块）；7.2 新增 `typescript-eslint`、`eslint-plugin-import-x`、`eslint-import-resolver-typescript` 三个 devDependency（lockfile 同 PR，`corepack pnpm install --frozen-lockfile` 绿）；后端无依赖变更。
+- Release / packaging / dependency compatibility — selected：4.1 的 per-file-ignores 清单在 `uv.lock` 钉住的 ruff 版本下生成，升级 ruff 须同 PR 重生成（钉死块）；7.2 新增 `eslint`、`typescript-eslint`、`eslint-plugin-import-x`、`eslint-import-resolver-typescript` 四个 devDependency（lockfile 同 PR，`corepack pnpm install --frozen-lockfile` 绿）；后端无依赖变更。
 - Documentation / migration notes — selected：9.1 九份 AGENTS.md、9.3 runbook/ADR/spec 文本、8.x 审计报告契约，3.1 三个规范函数的 docstring（输入形态 + 精确输出格式）与模块 docstring，由 `tests/test_entropy_audit_report_contract.py` 文档门覆盖；`docs/governance/entropy-audit-2026-10-16.md` 行号引用以 design Context 为准；2.2 手维护 `openapi/nhms.v1.yaml` 由 `tests/test_openapi_drift.py` 守，node-27 receipt 落 `docs/runbooks/receipts/` 并跑文档门。
 
 ## 1. 导入分层守卫与契约抽取（spec: import-layering-guard）
@@ -1197,7 +1197,7 @@
 
   **Minimal mergeable slice:** atomic - 别名与消费点同 PR。
 
-- [ ] 7.4 API 错误单一归一化：三个本地归一化器委托 `getApiErrorMessage` 或删除，`apiErrorCode` 改为解析共享 `ApiErrorShape`；`useNationalBasinGeo` 加错误载体（`NationalBasinGeoState.error`，失败不缓存）；`lib/mvtLayerMetadata.ts` 的无调用方 loader 删除；新增 vitest 断言。
+- [x] 7.4 API 错误单一归一化：三个本地归一化器委托 `getApiErrorMessage` 或删除，`apiErrorCode` 改为解析共享 `ApiErrorShape`；`useNationalBasinGeo` 加错误载体（`NationalBasinGeoState.error`，失败不缓存）；`lib/mvtLayerMetadata.ts` 的无调用方 loader 删除；新增 vitest 断言。
 
   Depends on: 7.1（仅后继：`settledError` 在 bootstrap 模块；首刀的两个站点不碰 bootstrap，无前置）
 
@@ -1225,6 +1225,13 @@
   - **级别降为 compact**（共享状态风险已在首刀；本片运行时增量只是一个 fallback 的 `Error.message` 且无 UI 显示；掩码函数由 no-op pin 与既有测试围住）；若 diff 触及三个包装函数体任一，回到 expanded。席位：`correctness+test-evidence`。
   - **冲突与顺序**：依赖 #2952（`settledError` 路径）；#2955 文件集不重叠（仅 tasks.md 勾选归属）；#2954 碰 `constants.ts`/`BasinFailures.tsx`/`JobsTable.tsx`，本片不碰 JobsTable；#2957 只碰 `ci.yml`。PR 偏离记录须指向本 pin（issue body 仍写「三个归一化器变薄包装或删除」）。
   - **残余风险（记录，范围外）**：非 JSON 错误体（502 HTML/纯文本）经 `String(error)` 原样到达用户——monitoring toasts（`JobsTable.tsx:202`、`MonitoringPage.tsx:176,214`）未脱敏显示，代理错误页可能带内部主机名；design Non-Goals 禁止在此改，另立 issue。另有两个精度不同的错误码提取器（`lib/hydroMet/stationSeries.ts:106-116` 顶层 `code` 回落、`m11MvtRetryProtocol.ts:78-79`）不在四个命名函数内，不动。
+  - **开工前确认性 fixture review（2026-10-19，base = master + 7.5 + 7.4 首刀，verdict pass）**：三个 no-op 目标及其 oracle、`apiErrorCode` 新写法（tsc 通过、运行时等价）、`apiFetch` fallback 替换（tsc 通过；两个消费者都丢弃 message）、`response.test.ts` 输入表逐行与 `getApiErrorMessage` 实际行为一致，均成立（在仓库外 scratch 副本里装依赖、套改动、跑 typecheck；vitest 由实现者实跑）。按下列改正执行，行号一律按名定位：
+    - 首刀证据的 grep 加范围：`git grep -n fetchLayerCatalogMetadata -- apps` 为空（不带范围时 design.md/tasks.md 的文字引用会命中）。
+    - spec 文字已在之前修好（`frontend-lint-and-layering` 已写「two masking wrappers」与 `safeM11ErrorMessage` 是不消费 error 的 label mask）：跳过 pin 里的 spec 改字；design.md 只剩「three local normalizers become thin wrappers or are deleted」一句需按本 pin 方向改写。
+    - lint：7.2（#2953）先于本片合并，本片 Verify 必跑 `corepack pnpm lint`（`tasks.md` 约定节里「7.4 不跑 lint」的说法以本条为准）。
+    - `response.test.ts` 的「原始值 → `String(e)`」一行要用非零、非 NaN 的值（`0`/`NaN`/`0n` 会被 `!error` 拦成 fallback）；全量 `corepack pnpm test` 首次运行贴出计数并确认新文件被收集。
+    - 本机 Playwright 缓存是 chromium 1234/1243，仍无 `playwright-core@1.59.1` 钉的 1217；mocked-regression lane 仍以 CI `frontend-e2e` 4 分片为 oracle。
+    - 范围说明：spec 的「Every fetch site」与本 pin 排除的 MapLibre 瓦片传输（`m11MvtRetryProtocol.ts`）有字面落差；PR 偏离记录引用本 pin 的范围外理由。
 
   **Suggested fixture level:** expanded - 改 API 失败路径，project-profile 的 `unwrapApiData`/`getApi` 消费者契约要求 malformed-payload 测试。
 

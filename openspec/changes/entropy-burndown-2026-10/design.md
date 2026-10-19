@@ -336,8 +336,8 @@ their path strings. There is no file-level cycle today, so the cycle rule's orac
 cycle must fail lint). `lib/constants.ts`
 `PipelineStatus`/`JobStatus` become aliases of the generated `components["schemas"]` types; `failedStatuses` becomes one
 exported constant in `lib/constants.ts`. API failure handling: every fetch site in `src/` resolves errors through
-`api/response.ts::getApiErrorMessage` (three local normalizers become thin wrappers or are deleted; `apiErrorCode`
-parses the shared envelope shape); `useNationalBasinGeo` gains an error carrier (`NationalBasinGeoState.error:
+`api/response.ts::getApiErrorMessage` (the two masking wrappers already delegate and stay as they are -- the 7.4 successor pin in tasks.md; `apiErrorCode`
+parses the shared envelope shape; the one `apiFetch` fallback that bypassed it goes through `getApiErrorMessage`); `useNationalBasinGeo` gains an error carrier (`NationalBasinGeoState.error:
 string | null`, failed fetch not cached) and the uncalled `lib/mvtLayerMetadata.ts` loader is deleted instead of being
 given one, with no change to what the UI renders when data is absent (`settledError` lives in the bootstrap module, so this lands after its move). Alternative
 rejected: Biome (another toolchain for three rules).
