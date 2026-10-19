@@ -327,7 +327,6 @@
       "_json_bytes",
       "_json_default",
       "_manual_retry_submission_failure_details",
-      "_mapping_has_runtime_root_fields",
       "_mapping_value",
       "_next_current_master_retry_identity",
       "_operator_evidence_text",
