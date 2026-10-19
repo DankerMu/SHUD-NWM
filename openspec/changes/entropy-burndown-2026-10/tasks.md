@@ -610,7 +610,7 @@
 
   **Minimal mergeable slice:** context 单独 - 最小叶子、无被 patch 名；read_attribution 作为后继。
 
-- [ ] 5.3 抽取 primitives → `file_journal_primitives.py`，replay → `file_journal_replay.py`。
+- [x] 5.3 抽取 primitives → `file_journal_primitives.py`，replay → `file_journal_replay.py`。
 
   Depends on: 5.2
 
