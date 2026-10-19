@@ -68,6 +68,7 @@
     "services/production_closure/readiness_scheduler_evidence.py",
     "scripts/select_ci_tests.py",
     "scripts/select_ci_tests_tables.py",
+    "scripts/select_ci_tests_rules.py",
     "services/tile_publisher/publisher.py",
     "tests/test_canonical_precip_copyback_backfill.py",
     "tests/test_forcing_copyback_backfill.py",

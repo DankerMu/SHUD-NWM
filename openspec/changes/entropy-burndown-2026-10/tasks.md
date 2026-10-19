@@ -1047,7 +1047,7 @@
   - **开工前确认性 fixture review（2026-10-19，base = master + 5.x，verdict pass）**：搬迁机制成立（模拟 head 上实跑搬迁、导入、值等价与 exec 探针）；按下列实测改正执行，行号一律按名定位：
     - B1 = 142 名：68 `*_TESTS` + 46 `*_PATH` + 11 `*_ROOTS` + 6 `*_MODULES` + `PathTestRule` + 同样 10 个单例；数据名 141（pin 的 131 写下时即应为 133）。自 pin 起新增 8 名：`ANY_RATCHET_ROOTS`、`STATUS_VOCAB_PARITY_ROOTS`、`TIME_HELPER_CONSOLIDATION_ROOTS`、`DATA_ADAPTERS_BASE_HELPER_TESTS`、`DATA_ADAPTERS_DIRECTORY_TESTS`、`HYDROLOGIC_FINGERPRINT_CONTRACT_PATH`、`REGION_CONTRACT_PATH`、`TIME_NORMALIZATION_CONTRACT_PATH`。前向引用 0，指向 facade 专属名的引用 0。sibling 约 1,729 行，facade 7,983 → 约 6,403 行。`X as X` 的 13 名不变。
     - 被 patch 的 facade 全局今天是 14 名 / 78 次 `setattr`；搬走的是 9 个：`CORE_SMOKE_TESTS` + 8 个 `*_ROOTS`（TIMESCALE、RIVER、RIVER_SQL、PATH_CANONICALIZATION、IMPORT_LAYERING、ANY_RATCHET、TIME_HELPER、PRODUCTION_TOPOLOGY_SCAN）。读者（`select_tests`、`_is_production_topology_scan_input`）都留 facade 且在调用时查全局，patch 仍生效。
-    - 注释改写范围放宽：搬迁区内指向「下面/上面那条 rule/row/route」的注释约 12 处（不止 pin 举的一例），统一改为直接点名 `PATH_TEST_RULES`（不写文件名，6.3 还会再搬）；指向常量、搬后仍成立的不改。`PathTestRule` 上方的孤立注释留 facade，按「前导注释一起搬」规则会被卷走，须特意排除。
+    - 注释改写范围放宽：搬迁区内指向「下面/上面那条 rule/row/route」的注释约 12 处（不止 pin 举的一例），改为直接点名该行实际所在的表（多数是 `PATH_TEST_RULES`，部分是 `SUPPORT_MODULE_TEST_RULES`；不写文件名，6.3 还会再搬；PR #3020 实施时按实际所在表点名，此处措辞随 6.3 更正）；指向常量、搬后仍成立的不改。`PathTestRule` 上方的孤立注释留 facade，按「前导注释一起搬」规则会被卷走，须特意排除。
     - line-reference：B1 内仍只有 `SCHEDULER_IMPORTER_TESTS` 注释一条；基线总数 209 → 208（上限 210）。large-file-guard：facade 已排除，sibling 需同 commit 加入排除项。
     - 值等价探针写法修正：照原文「先加载父 facade」会出两个问题——`spec_from_file_location` 加载前不注册 `sys.modules[name]` 时 `@dataclass` 抛 `AttributeError`；父 facade 自带的 6.1 `sys.path.insert` 把父目录插到 `sys.path[0]`，之后 `import scripts.select_ci_tests` 解析到父副本，`is` 断言全红、规则表比较空洞通过。改为：先 `import scripts.select_ci_tests` 与 `scripts.select_ci_tests_tables`（并断言 `head_facade.__file__` 在仓库内），再注册并加载父 facade；对 141 个数据名断言 `==` 与 `is`（含 `PathTestRule` 共 142 个 `is`），三张规则表逐元素 `astuple`（模拟 head 实测 377 / 42 / 11 行全等）。
     - 6.3 前瞻（不在本 PR 改）：6.3 pin 的 facade 裸绑定名单漏了 `ANY_RATCHET_ROOTS`、`STATUS_VOCAB_PARITY_ROOTS`、`TIME_HELPER_CONSOLIDATION_ROOTS`（应为 16），patch 计数「12/64」已过时，6.3 开工前重测。
@@ -1055,7 +1055,7 @@
 
   **Minimal mergeable slice:** atomic - 常量表互相 `*` 展开，拆半则导入断。
 
-- [ ] 6.3 B2 规则表 → `select_ci_tests_rules.py`，facade 以导入绑定 `PATH_TEST_RULES` 等（`select_tests` 继续读 facade 全局，patch 生效）；同 PR 确认读源码的 `select_tests` exec pin 仍绿（预期零改动；node-id 扫描已在 6.2 改为 glob 全部 `scripts/select_ci_tests*.py`）；同 commit 把 `select_ci_tests_rules.py` 加进 `.large-file-guard.json` 排除项，并把 B2 内 23 条基线行引用迁到 `scripts/select_ci_tests_rules.py` 键（`select_ci_tests.py:5354-5364` 一条改注释 + 删条目，其余 22 条原样迁键）。**最高风险步骤。**
+- [x] 6.3 B2 规则表 → `select_ci_tests_rules.py`，facade 以导入绑定 `PATH_TEST_RULES` 等（`select_tests` 继续读 facade 全局，patch 生效）；同 PR 确认读源码的 `select_tests` exec pin 仍绿（预期零改动；node-id 扫描已在 6.2 改为 glob 全部 `scripts/select_ci_tests*.py`）；同 commit 把 `select_ci_tests_rules.py` 加进 `.large-file-guard.json` 排除项，并把 B2 内 23 条基线行引用迁到 `scripts/select_ci_tests_rules.py` 键（`select_ci_tests.py:5354-5364` 一条改注释 + 删条目，其余 22 条原样迁键）。**最高风险步骤。**
 
   Depends on: 6.2
 
@@ -1076,6 +1076,16 @@
   - **路由**：6.1 的精确行与 `_collection_smoke_required` 已覆盖 rules 路径，6.3 不加行；基线 JSON 经既有行路由到 `LINE_REFERENCE_TEST`；Verify 前 `git add scripts/select_ci_tests_rules.py`。
   - **PR Boundary 偏离（记录）**：`.large-file-guard.json` 排除项、基线键迁移与一条注释改写、facade tables 导入块裁剪、新增一个 scenario 测试、tasks/design/spec 措辞。
   - **残余风险**：快照 7 路只触及少数表，真正的保序证明是值等价探针（PR body 证据非提交测试）；6.3 后新增规则行必须进 rules 模块（facade 导入处加一行指针注释）；22 条迁移行引用仍是存量债。
+  - **开工前确认性 fixture review（2026-10-19，base = master + 6.2，verdict pass）**：模拟 head 上实跑导入、值等价、exec pin、新 scenario、line-reference 与 `--write-baseline`，全部成立；父/head `select_tests` 对拍 259 条单路径 + 全部 tracked 文件并集零差异。按下列实测改正执行，行号一律按名定位：
+    - B2 = 43 名：三张表 + 40 个常量（pin 的 37 个全在，另加 `ANY_RATCHET_TEST`、`STATUS_VOCAB_PARITY_TEST`、`TIME_HELPER_CONSOLIDATION_TEST`——与 `IMPORT_LAYERING_GUARD_TEST` 同形态：被规则表引用、`select_tests` 也读）。前向引用、B2 互引、B2→facade 专属名、两边都不在的引用均为 0。搬迁段三块：4 个 supplemental `*_TEST` 连同前导注释；`SQLALCHEMY_URL_HELPER_TEST` 单行（其上方 #2632 注释属于 `SQLALCHEMY_DRIVER_GUARD_TEST`，留 facade，不得按「前导注释一起搬」带走）；其余连续一整块。搬迁区内没有按位置指向 facade 函数的注释，无需改写。rules 约 5,440 行。
+    - rules 从 tables 导入 117 名（含 `PathTestRule`）；无 `sys.path.insert`，不导入 facade。
+    - facade ← rules 13 名：7 裸（三张表、`IMPORT_LAYERING_GUARD_TEST` 与上述 3 个新 `*_TEST`）+ 6 个只供测试读取（同 pin）；不绑定 30 个。facade ← tables 保留 107 名：16 裸（pin 的 13 个 + `ANY_RATCHET_ROOTS`、`STATUS_VOCAB_PARITY_ROOTS`、`TIME_HELPER_CONSOLIDATION_ROOTS`）+ 91 个只供测试读取（pin 的 86 个 + `DATA_ADAPTERS_BASE_HELPER_TESTS`、`DATA_ADAPTERS_DIRECTORY_TESTS`、`HYDROLOGIC_FINGERPRINT_CONTRACT_PATH`、`REGION_CONTRACT_PATH`、`TIME_NORMALIZATION_CONTRACT_PATH`）；删除 35 个（不变）。测试侧 `from scripts.select_ci_tests import` 23 处，属性读取别名 `select_ci_tests`/`_prod_module`/`_prod`。
+    - **导入形态（编排者裁决）**：6.2 落地的 `X as X` 被 ruff isort（未开 `combine-as-imports`）拆成每名一条三行 `from` 语句；照此形态 6.3 后 facade 约 1,269 行，6.4 后约 1,055 行，6.4 的「facade ≤ 1000 并移除排除项」做不到。全局开 `combine-as-imports` 会让全仓 187 处 I001 改写，超范围，不取。裁决：6.3 把 facade 的 tables 导入与 rules 导入各写成**一条** `from … import (...)`，只供测试读取的名改为普通名加行尾 `# noqa: F401`（全仓已有 67 个文件用此写法），裸名不加——F401 仍对 facade 实际使用的名生效，语义与 `X as X`（显式 re-export 标记）相同。预计 facade 约 1,117 行，6.4 后约 913 行；「6.3 后 facade ≤ ~1,200 行」作信息门槛，PR 贴 `wc -l`。
+    - 被 patch 的 facade 全局 14 名 / 78 次（`PATH_TEST_RULES` 58、`SUPPORT_MODULE_TEST_RULES` 5、`CHANGED_TEST_FILE_RULES` 0）；三张表唯一读者 `select_tests`，调用时查全局。
+    - line-reference：23 条（3 + 20）全部在搬迁段内；陈旧自指一条按 pin 改写并删条目；`--write-baseline` 在模拟 head 上只动两个键（删 `scripts/select_ci_tests.py`、新增 `scripts/select_ci_tests_rules.py` 22 条），总数 208 → 207。
+    - 新 scenario 测试三腿在模拟 head 上成立；第二腿需在测试里 `import scripts.select_ci_tests_rules`。exec pin 在 `tests/test_select_ci_tests.py` 中按名定位，模拟 head 上 `mutated != source` 且绿。
+    - 值等价探针补前置检查：父 facade 的 B1 绑定会解析到已加载的 head tables，所以只有 tables 与 merge-base 相同时探针才不空洞——先断言 `git diff --quiet $(git merge-base origin/master HEAD) HEAD -- scripts/select_ci_tests_tables.py`。计数：40 个常量 `==`，三表 `astuple`（11 / 42 / 377），`is`：rules 13、tables 107；不绑定名与删除名在 facade 上不存在。
+    - `.large-file-guard.json`：rules 条目紧挨 facade、tables 两项加入。rules 路径的路由行在 `PATH_TEST_RULES` 内随表搬走（rules 模块自己路由自己，与 tables 相同）；`_collection_smoke_required` 字面量留 facade。
 
   **Suggested fixture level:** expanded - 静默路由回归风险。
 

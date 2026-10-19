@@ -117,7 +117,7 @@
     "provider_atomic.py:97": 1,
     "safe_fs.py:138": 1
   },
-  "scripts/select_ci_tests.py": {
+  "scripts/select_ci_tests_rules.py": {
     "`:1111": 1,
     "`:1553": 1,
     "`:1964": 1,
@@ -131,7 +131,6 @@
     "model_registry_public.py:21-31": 1,
     "pipeline.py:40-49": 1,
     "scripts/node27_mvt_prewarm.py:57": 1,
-    "select_ci_tests.py:5354-5364": 1,
     "tests/test_hydro_display_mvt_scaling.py:184-190": 1,
     "tests/test_node27_autopipeline_preflight.py:19": 1,
     "tests/test_node27_download_cycles.py:18": 1,
