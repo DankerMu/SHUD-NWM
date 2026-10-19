@@ -1148,7 +1148,7 @@
 
   **Minimal mergeable slice:** atomic - 搬迁与导入/mock 改路径同 PR。
 
-- [ ] 7.2 引入 ESLint flat config（三条规则，依赖 `typescript-eslint`、`eslint-plugin-import-x`、`eslint-import-resolver-typescript`；restricted-imports 块 `ignores` 测试文件）、`lint` 脚本、`frontend-build` job 加 `pnpm lint`。
+- [x] 7.2 引入 ESLint flat config（三条规则，依赖 `typescript-eslint`、`eslint-plugin-import-x`、`eslint-import-resolver-typescript`；restricted-imports 块 `ignores` 测试文件）、`lint` 脚本、`frontend-build` job 加 `pnpm lint`。
 
   Depends on: 7.1
 
@@ -1165,6 +1165,12 @@
   - **selector**：无 Python 改动、无需路由；`scripts/select_ci_tests.py` 无读取 `apps/frontend/package.json` 的规则。
   - **不改**：`apps/frontend/AGENTS.md`（:93-102 命令清单无 lint，归 9.1）与 `docs/VALIDATION.md`，只在偏离记录列为已知过时，避免打开 docs lane。
   - **残余风险（记录）**：纯类型导入环检测不到；核心 `no-restricted-imports` 不查动态 `import()`；`frontend-e2e` 浏览器缓存 key 含 `hashFiles(pnpm-lock.yaml)`，本 PR 与合并后 master 各一次缓存未命中。
+  - **开工前确认性 fixture review（2026-10-19，base = master + 7.5，verdict pass）**：在仓库外的 scratch 副本里装依赖实测，版本、API 写法、基线（246 文件，三条规则 0 违规，约 3.1 s，`no-cycle` 约 1.7 s）、防空过对照（去掉 `import-x/extensions` 后 `no-cycle` 约 21 ms 且环不报）、drill A/B 输出与退出码、`--print-config` 3/2 条规则、lockfile +1142/-0 均成立。按下列改正执行，行号一律按名定位：
+    - 新增的 devDependency 是**四个**（`eslint` 本身也不在 package.json 里）：`eslint`、`typescript-eslint`、`eslint-plugin-import-x`、`eslint-import-resolver-typescript`；四个包的 npm `latest` 恰为钉的下限版本，无 unmet peer。
+    - `@unrs/resolver-binding-linux-x64-gnu` 不是「已在 lockfile」，而是由本次 install 写入（ubuntu-latest 与 bookworm-slim 均为 glibc，可拿到）。pnpm 10 打印 `Ignored build scripts: unrs-resolver` 可忽略（走预编译 optional binding）。
+    - 配置文件用 `apps/frontend/eslint.config.js`（package 已是 `"type": "module"`，免 jiti 加载 `.ts` 配置）。
+    - CI：`Lint frontend` 放在 `Check generated API types`（7.5 已合并）与 `Build and test frontend` 之间；job 注释在 "generated API types check" 后补 "lint"。`test_ci_shard_tests.py` 只断言 e2e job 有 `corepack prepare pnpm@`，并不禁止 build job 用 corepack；build job 用 pnpm/action-setup、无 corepack shim，所以裸 `pnpm lint` 的结论不变。
+    - lockfile 的其他消费方 `.github/workflows/m15-visual-evidence.yml` 同用这份 lockfile，无影响；entropy 结构预算与 large-file-guard 都豁免 `pnpm-lock.yaml`。
 
   **Suggested fixture level:** compact - 工具链配置，无运行时代码。
 

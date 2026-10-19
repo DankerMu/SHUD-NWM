@@ -590,7 +590,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
-    # 10: typecheck, generated API types check, build, vitest and the
+    # 10: typecheck, generated API types check, lint, build, vitest and the
     # bundle check only. The
     # mocked-regression Playwright lane left this job in #2844 (it is the
     # `frontend-e2e` matrix below); what remains measured about 2m40s.
@@ -611,6 +611,8 @@ jobs:
         run: cd apps/frontend && pnpm run check:types
       - name: Check generated API types
         run: cd apps/frontend && pnpm check:api-types
+      - name: Lint frontend
+        run: cd apps/frontend && pnpm lint
       - name: Build and test frontend
         run: cd apps/frontend && pnpm build && pnpm test
       - name: Check frontend bundle size
