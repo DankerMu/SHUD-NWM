@@ -45,10 +45,12 @@ if TYPE_CHECKING:
 _UNSET = object()
 _JOURNAL_SEGMENT_INDEX_RE = re.compile(r"[1-9][0-9]*")
 # The forecast and cohort shapes now live in run_identity (#1405) so retention
-# adjudicates deletions against the same canonical identities; they are
-# imported above under their historical private names. This strict cohort
-# variant stays here — its only consumer, the cohort branch of
-# `_model_id_from_run_identity`, needs an exact cohort id.
+# adjudicates deletions against the same canonical identities. Only the
+# forecast shape is imported above (under its historical private name); this
+# module does not use the cohort shape, which stays imported in the facade
+# `file_orchestration_journal`. This strict cohort variant stays here — its
+# only consumer, the cohort branch of `_model_id_from_run_identity`, needs an
+# exact cohort id.
 _CYCLE_RUN_ID_RE = re.compile(r"^cycle_([^_]+)_(\d{10})$")
 
 

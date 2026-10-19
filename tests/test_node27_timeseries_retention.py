@@ -2260,7 +2260,7 @@ def test_enforced_receipt_salvage_backed_window_datetime_format_enforced() -> No
     """G Schema C2: FormatChecker enforces ``format: date-time`` on
     salvage-backed window ``start``/``end``. Reject a bad-format string
     via the retention module's own ``_validate_receipt`` (which registers
-    a custom date-time checker that reuses ``_parse_iso`` — same acceptance
+    a custom date-time checker that reuses ``parse_iso_utc`` — same acceptance
     oracle as the emitter).
     """
     bad_receipt = {
