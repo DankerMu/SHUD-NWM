@@ -15124,16 +15124,17 @@ def test_log_uri_write_leg_table_covers_every_log_uri_taking_method() -> None:
 
 
 def test_journal_records_have_exactly_one_construction_site() -> None:
-    """#1592 structural guard: no second record constructor in this module.
+    """#1592 structural guard: no second record constructor in the journal facade and its ``file_journal_*`` siblings.
 
     The whole point of putting the anti-laundering strip in
     ``_journal_record_for_write`` is that a write path added later inherits it.
     That only holds while this stays the ONE place a journal record dict is
-    built, so this walks the module's AST for any dict literal carrying the full
-    record key set and requires the sole hit to be inside that function.
+    built, so this walks the AST of the journal facade and each ``file_journal_*``
+    sibling for any dict literal carrying the full record key set and requires
+    the sole hit to be inside that function.
 
     Known limits, stated rather than papered over: it sees literal dict
-    construction in THIS module only.  A record assembled by ``dict()`` /
+    construction in the journal facade and its ``file_journal_*`` siblings only.  A record assembled by ``dict()`` /
     ``update()`` / a comprehension, or one built in another module, would slip
     past.  It is a cheap guard against the most likely regression -- someone
     copying the constructor next to a new write path -- not a proof of the
@@ -15148,11 +15149,12 @@ def test_journal_records_have_exactly_one_construction_site() -> None:
 
     record_keys = {"schema_version", "sequence", "record_type", "source_id", "cycle_time"}
     module_path = Path(journal_module.__file__)
-    tree = ast.parse(module_path.read_text(encoding="utf-8"))
+    module_paths = [module_path, *sorted(module_path.parent.glob("file_journal_*.py"))]
 
-    sites: list[tuple[str, int]] = []
+    sites: list[tuple[str, str, int]] = []
     enclosing: list[str] = []
-    definitions: list[int] = []
+    definitions: list[tuple[str, int]] = []
+    file_name = ""
 
     def walk(node: ast.AST) -> None:
         pushed = False
@@ -15160,7 +15162,7 @@ def test_journal_records_have_exactly_one_construction_site() -> None:
             enclosing.append(node.name)
             pushed = True
             if node.name == "_journal_record_for_write":
-                definitions.append(node.lineno)
+                definitions.append((file_name, node.lineno))
         if isinstance(node, ast.Dict):
             keys = {
                 key.value
@@ -15168,15 +15170,17 @@ def test_journal_records_have_exactly_one_construction_site() -> None:
                 if isinstance(key, ast.Constant) and isinstance(key.value, str)
             }
             if record_keys <= keys:
-                sites.append((enclosing[-1] if enclosing else "<module>", node.lineno))
+                sites.append((file_name, enclosing[-1] if enclosing else "<module>", node.lineno))
         for child in ast.iter_child_nodes(node):
             walk(child)
         if pushed:
             enclosing.pop()
 
-    walk(tree)
+    for path in module_paths:
+        file_name = path.name
+        walk(ast.parse(path.read_text(encoding="utf-8")))
 
-    assert [name for name, _line in sites] == ["_journal_record_for_write"], sites
+    assert [name for _file, name, _line in sites] == ["_journal_record_for_write"], sites
     assert len(definitions) == 1, definitions
 
 

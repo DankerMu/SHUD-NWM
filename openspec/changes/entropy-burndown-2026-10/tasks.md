@@ -873,7 +873,7 @@
     - Public API/Schema/Auth/Resource 不选。
   - **边界**：
     - Depends on #2944。rebase 到 5.4 之后，在 PR head 按 map 重算三份名单。5.4 的"5.5 回指"条款是空真：candidates 对 paths 名的引用为 0。
-    - 5.6：retry_helpers 用到的 paths 名（`_require_model_id`、`_require_source_cycle`、`_safe_segment`、`_optional_safe_identity`）从 paths 顶层导入。
+    - 5.6：retry_helpers 用到的 paths 名（`_require_model_id`、`_require_source_cycle`、`_safe_segment`）从 paths 顶层导入（`_optional_safe_identity` 只在 paths 内部使用，2026-10-19 5.6 开工前复核更正）。
     - 2.3/3.3 只和 journal 有文本冲突。
     - 6.x 改 selector 时，后落地的一方 rebase。
   - **残余风险（记录）**：
@@ -960,6 +960,15 @@
     - 1.3 的 `workers.data_adapters.base` 导入路径，由后落地的一方处理。
     - 6.x 改 selector 时，后落地的一方 rebase。
   - **残余风险（记录）**：3 个 `_utcnow` patch 文件和 21 个绑定 journal 的 gateway 文件 CI 都不路由，只在本地跑；`_mapping_has_runtime_root_fields` 是死代码，原样搬走。
+  - **开工前确认性 fixture review（2026-10-19，base = master + 5.5，verdict pass）**：56 名搬迁清单、2 处迟查、26 条函数体导入（18 个函数）、45/11/13 三份名单、19 个被 patch 绑定、守卫均成立。按下列实测改正执行：
+    - 行号已漂移，按名定位：两个常量在搬迁段之外各自原处，搬迁段内的洞现为 6 个（`_utcnow` 自 3.3 起是头部 import 绑定，已不在段内）；两段随迁注释（`_PROJECTION_WARNING_FALLBACK_TOKEN` 的 `#:` 块 11 行、`MAX_OPERATOR_*` 的 3 行）按名定位。`_public_evidence` 的外部导入方是 `file_orchestration_migration.py` 从顶部开始的 from-import 块。
+    - `time_normalization` 导入冲突裁定：`workers.data_adapters.base` 已无 `format_cycle_time`，且 `test_import_layering_guard.py` 的 `_MOVED_NAMES` 会把该路径判红，所以按 1.3 分支改为 `from packages.common.contracts.time_normalization import format_cycle_time, parse_cycle_time`（primitives/candidates/paths 先例）。「禁止导入 `time_normalization`」收窄为禁令本意：不得以任何别名导入 `utc_now`、不得使用 `datetime.now`。Verify 8 第二条 grep 改为 `git grep -nP '\butc_now\b|datetime\.now' -- services/orchestrator/file_journal_retry_helpers.py` 为空（必须用 `-P`：`-E` 不支持 `\b`，在 macOS git 上对 `utc_now` 恒为空，实现期实测 mutant A 漏检），另加 AST 检查：sibling 中来自 `time_normalization` 的 `ImportFrom` 名集合恰为 `{format_cycle_time, parse_cycle_time}`（map 测试只看绑定名，抓不到无别名的 `utc_now` 裸调用，故 grep 保留）。
+    - paths owner 名按 3 个执行（`_require_model_id`、`_require_source_cycle`、`_safe_segment`）；5.5 边界条款里多列的 `_optional_safe_identity` 已删（retry_helpers 无引用）。
+    - status 字面量 allowlist：按 5.4 补正规则，`_job_needs_restart_reconcile` 的 6 元集合与 `_file_auto_retry_job_can_be_reused` 的 `{pending, submission_failed}` 整条迁移（`file` 改为 sibling 路径并按文件排序）；`_job_needs_restart_reconcile` 的 `{failed, succeeded}` 在 facade 仍有 Repository 命中，facade 条目保留并新增一条 sibling 条目（`members`/`reason` 相同）。条目总数 74 → 75，是 5.4 补正「总数不变」的唯一例外（唯一替代是改写字面量，违反逐字搬迁）。Verify 9 改读为 `git diff --name-only origin/master -- tests/` == {`tests/test_file_journal_late_lookup_seams.py`, `tests/status_literal_allowlist.json`}。
+    - **实现期补正（2026-10-19，编排者裁决）**：`tests/test_file_orchestration_journal.py::test_journal_records_have_exactly_one_construction_site`（#1592 结构守卫）只解析 facade 源码，`_journal_record_for_write` 搬走后它在 PR 车道变红（selector 选中该文件；确认性 review 未跑 pytest 故漏算）。裁决：守卫改为扫描 journal 家族——facade 加 `services/orchestrator/file_journal_*.py` 全部 sibling——在全家族合计恰有 1 个 `_journal_record_for_write` 定义、恰有 1 个完整 record dict 字面量且位于其中；docstring 的「只看本模块」限制说明同步改为「只看 journal 家族」。只改模块路径的方案不取：它会放过 facade 里复制出来的第二个构造点。Verify 9 因此改读为 tests diff == {seam 测试、`tests/status_literal_allowlist.json`、`tests/test_file_orchestration_journal.py`（仅该守卫）}。
+    - Verify 7 的「每条导入的下一条语句读取它绑定的名」改读为：每段连续 facade 导入之后的第一条非导入语句用到该段导入的全部名字（`_journal_record_for_write` 两条相邻导入；`_file_reconcile_namespace` 的首条语句形式除外）。
+    - seam 文件已有 5 个用例（5.5 用了 (3)(4)(5)），本 pin 的 (3)(4) 在 PR 文本与 tasks 里改称 (6)(7)；参数与断言不变（已用进程内纯函数探针确认：计数 1、`created_at` 与 `candidates` 匹配；`details={}` 时返回 None）。
+    - 后继 contract 的预测值已漂移，开工前在 PR head 重测：`__all__` 现为 116 名（pin 写 113），map `facade` 聚簇 101 名 = 61 Assign + 21 class + 19 def（pin 写 105）。
 
   钉死的契约（5.6 后继 contract，fixture review 2026-10-17）：
   - **`__all__` 删除**：在 PR head 用 5.1 卫生测试自带的收集函数实测。预测删除集合为空（113 → 113）：搬定义只会增加使用方（sibling 的函数体导入），不会移除外部读取方，而 5.1 第一方向测试已经保证每个名都有使用方。集合为空时 `__all__` 零改动，PR 里写明；不为空时逐名列出最后一个使用方消失的 commit。`scheduler_runtime.py:16`、`file_orchestration_migration.py:32`、node22 两个脚本等外部导入方零改动，不改指向 sibling。
