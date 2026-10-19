@@ -535,7 +535,7 @@
 
   **Minimal mergeable slice:** atomic - 卫生测试与透传清单互为 oracle。
 
-- [ ] 5.2 抽取 context → `file_journal_context.py`，read_attribution → `file_journal_read_attribution.py`（按 map）。
+- [x] 5.2 抽取 context → `file_journal_context.py`，read_attribution → `file_journal_read_attribution.py`（按 map）。
 
   Depends on: 5.1
 
