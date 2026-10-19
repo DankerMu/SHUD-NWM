@@ -505,7 +505,7 @@
 
   **Minimal mergeable slice:** atomic - map 与覆盖测试互为 oracle。
 
-- [ ] 5.1 前置：facade 扩展 `__all__` 为外部读取面（from-import ∪ 别名属性读取，去 dunder/模块对象；patch-only 名不列；删 3 个无使用方的旧条目；不加 `# noqa: F401`）；新增 `tests/test_file_orchestration_journal_facade.py`（re-export 卫生测试：`__all__` 每个名至少有一个 AST 解析（from-import、别名属性访问、字面量 getattr/setattr/patch.object、dotted patch 字符串）得到的使用方）+ selector 常量一行。
+- [x] 5.1 前置：facade 扩展 `__all__` 为外部读取面（from-import ∪ 别名属性读取，去 dunder/模块对象；patch-only 名不列；删 3 个无使用方的旧条目；不加 `# noqa: F401`）；新增 `tests/test_file_orchestration_journal_facade.py`（re-export 卫生测试：`__all__` 每个名至少有一个 AST 解析（from-import、别名属性访问、字面量 getattr/setattr/patch.object、dotted patch 字符串）得到的使用方）+ selector 常量一行。
 
   Depends on: 5.0
 

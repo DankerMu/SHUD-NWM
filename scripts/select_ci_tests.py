@@ -1912,6 +1912,9 @@ FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     # renames or moves a definition must redden it on the PR. Stop-rule owned
     # module, so like #1581 the addition rides this at-site tuple. AST-only, ~2s.
     "tests/test_file_journal_cluster_map.py",
+    # #2939 (entropy-burndown task 5.1): the facade hygiene test parses this
+    # module's `__all__` and needs every listed name to keep a consumer. AST-only.
+    "tests/test_file_orchestration_journal_facade.py",
 )
 
 FILE_JOURNAL_READ_STATE_PATH_PATTERNS: tuple[str, ...] = (
