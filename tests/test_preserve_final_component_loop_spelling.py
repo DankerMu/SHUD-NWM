@@ -42,12 +42,6 @@ from pathlib import Path
 
 import pytest
 
-# ``services.orchestrator.scheduler`` first, deliberately: the scheduler package
-# and its config package import each other, and reaching path_modes before the
-# scheduler module is initialised raises AttributeError on the partially
-# initialised package. This ordering matches how the other scheduler tests enter
-# the package; it is not a style preference.
-from services.orchestrator import scheduler as _scheduler  # noqa: F401  (import-order fixture)
 from services.orchestrator.scheduler_config.path_modes import _safe_preserve_final_component
 
 

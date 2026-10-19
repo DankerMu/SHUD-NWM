@@ -4,7 +4,6 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from packages.common.redaction import redact_payload
-from services.orchestrator import scheduler as _scheduler
 
 
 def _slurm_preflight(config: Any) -> dict[str, Any]:
@@ -253,3 +252,6 @@ def _slurm_gateway_check(
         )
 
     return redact_payload(checks), redact_payload(blockers)
+
+
+from services.orchestrator import scheduler as _scheduler  # noqa: E402

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from services.orchestrator import chain as _chain
-
 
 class ForecastOrchestratorRuntimeMixin:
     def trigger_forecast(
@@ -493,3 +491,6 @@ class ForecastOrchestratorRuntimeMixin:
             workspace_relative_parts_fn=_chain._workspace_relative_parts,
             read_bytes=_chain.read_bytes_no_follow,
         )
+
+
+from services.orchestrator import chain as _chain  # noqa: E402

@@ -1439,6 +1439,7 @@ def test_select_tests_maps_orchestrator_chain_types_to_manifest_surface_nodes() 
         {
             *ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
             "tests/test_pipeline_job_provenance_publisher.py",
+            "tests/test_orchestrator_first_import.py",
             WRITE_SURFACE_SCAN_PATH,
             FAMILY_GUARD_PATH,
             RESOLVE_SURFACE_GUARD_PATH,
@@ -1469,6 +1470,7 @@ def test_select_tests_maps_orchestrator_manifest_surface_without_whole_slow_suit
             *ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
             manifest_contract,
             "tests/test_scheduler_registry_capacity.py",
+            "tests/test_orchestrator_first_import.py",
             WRITE_SURFACE_SCAN_PATH,
             FAMILY_GUARD_PATH,
             RESOLVE_SURFACE_GUARD_PATH,
@@ -1490,6 +1492,7 @@ def test_select_tests_maps_orchestrator_manifest_surface_without_whole_slow_suit
         TIME_HELPER_CONSOLIDATION_PATH,
         manifest_contract,
         "tests/test_scheduler_registry_capacity.py",
+        "tests/test_orchestrator_first_import.py",
     }
     assert all("::" in test_path for test_path in selected if test_path not in supplemental)
 
@@ -1576,6 +1579,7 @@ def test_select_tests_maps_file_journal_read_state_without_whole_legacy_suites()
             *FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS,
             *CORE_SMOKE_TESTS,
             *RETENTION_COPYBACK_MUTEX_TESTS,
+            "tests/test_orchestrator_first_import.py",
             "tests/test_production_scheduler.py"
             "::test_every_dimension_a_real_pass_publishes_has_a_scope_disposition",
             # #1905/#2402's at-site addition to the same scheduler_runtime.py
@@ -1796,6 +1800,7 @@ def test_select_tests_maps_known_slow_manifest_test_file_changes_with_surface_ch
         {
             *ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
             "tests/test_pipeline_job_provenance_publisher.py",
+            "tests/test_orchestrator_first_import.py",
             "tests/test_select_ci_tests.py",
             WRITE_SURFACE_SCAN_PATH,
             FAMILY_GUARD_PATH,
@@ -2000,6 +2005,7 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         # (reconcile.py, reservation.py and forcing_submit_identity.py importer
         # gaps). ~3s.
         "tests/test_orchestrator_demote_reserved_job_forcing.py",
+        "tests/test_orchestrator_first_import.py",
         # #1627: services/** is a path-canonicalisation family-guard root, so the
         # guard rides every source under it — a supplemental rider, not a rule
         # target. It sorts here, between the demote and pipeline suites.
@@ -2150,6 +2156,7 @@ def test_released_reservation_recovery_module_selects_its_exact_suites() -> None
     assert selected == sorted(
         {
             *RELEASED_RESERVATION_RECOVERY_TESTS,
+            "tests/test_orchestrator_first_import.py",
             WRITE_SURFACE_SCAN_PATH,
             FAMILY_GUARD_PATH,
             RESOLVE_SURFACE_GUARD_PATH,
@@ -6959,6 +6966,7 @@ def test_conditional_redirect_owner_focused_when_surface_present() -> None:
     # so that suite also joins via the chain_types stop rule.
     assert selected == redirect_targets | {
         SELECTOR_META_GUARD_TEST,
+        "tests/test_orchestrator_first_import.py",
         WRITE_SURFACE_SCAN_PATH,
         FAMILY_GUARD_PATH,
         RESOLVE_SURFACE_GUARD_PATH,
@@ -11603,25 +11611,6 @@ INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
     ("services/orchestrator/cli.py", "tests/test_production_scheduler.py"): "redirect",
     ("services/orchestrator/file_orchestration_journal.py", "tests/test_production_scheduler.py"): "redirect",
     ("services/orchestrator/scheduler.py", "tests/test_production_scheduler.py"): "redirect",
-    # -- edge-consumer: the loop-spelling measurement's import-order fixture --
-    # (#1627) ---------------------------------------------------------------
-    # tests/test_preserve_final_component_loop_spelling.py has exactly one
-    # subject: `_safe_preserve_final_component` in
-    # services/orchestrator/scheduler_config/path_modes.py, which owns the suite
-    # through its own per-file rule in the selector. The other two edges are an
-    # import-order fixture, not consumption: the scheduler package and its
-    # config package import each other, so the module imports
-    # `services.orchestrator.scheduler` (and thereby the package `__init__`)
-    # FIRST — under its own `noqa: F401  (import-order fixture)` — purely so
-    # reaching path_modes does not hit a partially initialised package. Copying
-    # the suite into either module's rule would couple unrelated PR classes,
-    # which is exactly what this token refuses: the scheduler stop rule's own
-    # convention (SCHEDULER_IMPORTER_TESTS in the selector) admits a suite when
-    # "the suite's subject IS this module", and this one's subject is one
-    # function two packages down; the broad `services/orchestrator/**` list
-    # would make every orchestrator PR pay for it as well.
-    ("services/orchestrator/__init__.py", "tests/test_preserve_final_component_loop_spelling.py"): "edge-consumer",
-    ("services/orchestrator/scheduler.py", "tests/test_preserve_final_component_loop_spelling.py"): "edge-consumer",
     # #2548: the state-index retention suite imports
     # `services.orchestrator.scheduler_generation` (hence the package
     # `__init__`) for its prune-never-admits decision test. Its subject is the
@@ -13153,6 +13142,7 @@ def test_scheduler_runtime_selects_the_copyback_mutex_suite() -> None:
         "tests/test_orchestration_chain.py::test_psycopg_candidate_state_limits_jobs_and_reads_events_for_candidate_scope",
         "tests/test_orchestration_chain.py::test_psycopg_find_forcing_context_populates_package_manifest_metadata",
         "tests/test_orchestration_chain.py::test_psycopg_has_active_pipeline_includes_queued_pipeline_rows",
+        "tests/test_orchestrator_first_import.py",
         # #1627: services/** is a path-canonicalisation family-guard root.
         FAMILY_GUARD_PATH,
         "tests/test_production_scheduler.py::test_db_free_from_env_raw_invalid_blocks_without_submission",
@@ -23458,3 +23448,38 @@ def test_ci_gates_batch_workflow_routes_are_exact(changed_path: str, expected: l
 def test_ci_gates_batch_script_and_baseline_routes_reach_their_suite(changed_path: str, required: str) -> None:
     assert Path(changed_path).is_file() and Path(required).is_file()
     assert required in select_tests([changed_path], repo_root=Path("."))
+
+
+# #3032: one non-stop row at index 0 routes every services/orchestrator path to
+# the first-import cycle guard, so no orchestrator stop rule can shadow it. The
+# stop-rule leg is derived from PATH_TEST_RULES (one concrete on-disk path per
+# rule), so a new orchestrator stop rule is covered without editing this list.
+ORCHESTRATOR_FIRST_IMPORT_GUARD_TEST = "tests/test_orchestrator_first_import.py"
+_SELECTOR_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _orchestrator_first_import_guard_paths() -> list[str]:
+    paths: list[str] = []
+    for rule in PATH_TEST_RULES:
+        if not (rule.stop_on_match and rule.pattern.startswith("services/orchestrator/")):
+            continue
+        matches = sorted(
+            path.relative_to(_SELECTOR_REPO_ROOT).as_posix() for path in _SELECTOR_REPO_ROOT.glob(rule.pattern)
+        )
+        assert matches, f"stop rule {rule.pattern!r} matches no file on disk"
+        paths.append(matches[0])
+    assert paths, "no services/orchestrator stop rules found"
+    # A plain split module no stop rule owns, and a scheduler_config subpackage path.
+    paths.extend(
+        [
+            "services/orchestrator/chain_forecast_orchestrator_runtime.py",
+            "services/orchestrator/scheduler_config/config.py",
+        ]
+    )
+    return paths
+
+
+@pytest.mark.parametrize("changed_path", _orchestrator_first_import_guard_paths())
+def test_every_orchestrator_path_selects_the_first_import_guard(changed_path: str) -> None:
+    assert (_SELECTOR_REPO_ROOT / changed_path).is_file()
+    assert ORCHESTRATOR_FIRST_IMPORT_GUARD_TEST in select_tests([changed_path], repo_root=Path("."))

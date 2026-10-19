@@ -371,10 +371,13 @@ SchedulerResourceLimitError = _scheduler_discovery.SchedulerResourceLimitError
 SchedulerEvidenceWriteError = _scheduler_evidence.SchedulerEvidenceWriteError
 
 
-ProductionSchedulerConfig = importlib.import_module(
-    "services.orchestrator.scheduler_config"
-).ProductionSchedulerConfig
-ProductionSchedulerConfig.__module__ = __name__
+def __getattr__(name: str) -> Any:
+    if name != "ProductionSchedulerConfig":
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = importlib.import_module("services.orchestrator.scheduler_config").ProductionSchedulerConfig
+    value.__module__ = __name__
+    globals()[name] = value
+    return value
 
 
 _scheduler_types_module = importlib.import_module("services.orchestrator.scheduler_types")

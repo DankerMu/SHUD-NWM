@@ -1133,6 +1133,12 @@ API_ERROR_LOGGING_TEST = "tests/test_api_errors_logging.py"
 
 
 PATH_TEST_RULES: tuple[PathTestRule, ...] = (
+    # #3032: every services/orchestrator path (fnmatch `*` crosses `/`, so the
+    # scheduler_config subpackage too) reaches the first-import cycle guard. It
+    # sits at index 0, ahead of every orchestrator stop rule, and does not stop.
+    # The pattern is deliberately not `services/orchestrator/**`, which is the
+    # broad fallback row's own pattern.
+    PathTestRule("services/orchestrator/*.py", ("tests/test_orchestrator_first_import.py",)),
     PathTestRule(
         ORCHESTRATOR_MANIFEST_SURFACE_PATH_PATTERNS[0],
         (*ORCHESTRATOR_MANIFEST_SURFACE_TESTS, "tests/test_pipeline_job_provenance_publisher.py"),
