@@ -771,7 +771,7 @@
 
   **Minimal mergeable slice:** atomic - 该聚簇内部互相调用，拆一半会让 facade 与 sibling 互导。
 
-- [ ] 5.5 抽取 paths → `file_journal_paths.py`：六个 facade 驻留 IO/stat/iter 名（`_stat_signature`、`_iter_regular_json_files`、`_iter_jsonl_files`、`read_bytes_limited_no_follow`、`list_directory_no_follow_limited`、`stat_no_follow`）按 5.0 map **留在 facade**（Repository 调用它们）；`_UNSET`（默认实参，定义时读取）随 paths 搬、facade 回绑同一对象；三个调用者（`_require_journal_segment_lineage`、`_iter_retention_surface_files`、`_iter_discovered_files`）在函数体内 `from services.orchestrator import file_orchestration_journal` 后以属性调用（walker 在外层导入一次）。既有测试零改动；唯一测试 diff 为在 `tests/test_file_journal_late_lookup_seams.py` 追加 3 个用例。
+- [x] 5.5 抽取 paths → `file_journal_paths.py`：六个 facade 驻留 IO/stat/iter 名（`_stat_signature`、`_iter_regular_json_files`、`_iter_jsonl_files`、`read_bytes_limited_no_follow`、`list_directory_no_follow_limited`、`stat_no_follow`）按 5.0 map **留在 facade**（Repository 调用它们）；`_UNSET`（默认实参，定义时读取）随 paths 搬、facade 回绑同一对象；三个调用者（`_require_journal_segment_lineage`、`_iter_retention_surface_files`、`_iter_discovered_files`）在函数体内 `from services.orchestrator import file_orchestration_journal` 后以属性调用（walker 在外层导入一次）。既有测试零改动；唯一测试 diff 为在 `tests/test_file_journal_late_lookup_seams.py` 追加 3 个用例。
 
   Depends on: 5.4
 
@@ -880,6 +880,13 @@
     - 计数是 HEAD 实测值，以后改 walker 的 PR 必须同步更新；
     - 函数体内 `from facade import <名>` 的变异体只有 AST 检查能抓到；
     - gateway 测试只在本地或 master 全量回归跑。
+  - **开工前确认性 fixture review（2026-10-19，base = master + 5.4，verdict pass）**：名单、9 个迟查点、44 条函数体导入、40/9/3 三份名单、seam 计数、守卫均成立。按下列实测改正执行：
+    - 行号已漂移，按名定位；搬迁段内只剩 `_iter_regular_json_files`/`_iter_jsonl_files` 一个洞（primitives 已搬，`_stat_signature` 位于段首之前，原样留下）。
+    - `workers.data_adapters.base` 已无 `format_cycle_time`：按本 pin 的 1.3 分支，`format_cycle_time, parse_cycle_time` 从 `packages.common.contracts.time_normalization` 导入。
+    - Verify 7 的「每条导入的下一条语句会用到它」改读为：每段连续 facade 导入之后的第一条非导入语句用到该段导入的全部名字（lineage 与两个 walker 各有两条相邻导入）。
+    - seam 用例 (3) 用返回固定值 `(1, 1, 1)` 并记录路径的 stub，不用代理（代理会调真实 `_stat_signature`，对不存在的路径返回 None 并抛 `file_journal_segment_gap`）；「代理型计数 stub」只适用于 (4)(5)。
+    - `journal_module.os.stat` 的测试锚点现在是 `tests/test_file_orchestration_journal.py:15642`。
+    - status 字面量 allowlist：paths 聚簇单元里没有命中，5.5 不改 allowlist，Verify 9 维持只有 seam 文件。
 
   **Suggested fixture level:** expanded - 最高风险步骤：文件发现与 identity 校验路径搬迁。
 
