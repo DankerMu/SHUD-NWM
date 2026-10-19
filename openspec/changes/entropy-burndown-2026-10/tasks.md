@@ -703,7 +703,7 @@
 
   **Minimal mergeable slice:** primitives 模块单独 - 它是 paths 环的解扣，可独立保绿；replay 作为后继。
 
-- [ ] 5.4 抽取 candidates → `file_journal_candidates.py`：`_released_candidate_cycle_scope`、`_cycle_scope_from_job_id`、`_next_file_manual_retry_job_id_for_run` 被 Repository/RetryService 调用（且测试直接以 `journal_module.<name>` 调用），**留在 facade**；三者只被两个类调用，无顶层调用者；聚簇内调用被 patch 名的函数（按 map；预测 `_run_manifest_model_package_identity`、`_candidate_row_self_bound_identity`）在函数体内 `from services.orchestrator import file_orchestration_journal` 后以属性调用，其余 facade 驻留名在函数体内 from-import。既有测试零改动；唯一测试 diff 为新文件 `tests/test_file_journal_late_lookup_seams.py`。
+- [x] 5.4 抽取 candidates → `file_journal_candidates.py`：`_released_candidate_cycle_scope`、`_cycle_scope_from_job_id`、`_next_file_manual_retry_job_id_for_run` 被 Repository/RetryService 调用（且测试直接以 `journal_module.<name>` 调用），**留在 facade**；三者只被两个类调用，无顶层调用者；聚簇内调用被 patch 名的函数（按 map；预测 `_run_manifest_model_package_identity`、`_candidate_row_self_bound_identity`）在函数体内 `from services.orchestrator import file_orchestration_journal` 后以属性调用，其余 facade 驻留名在函数体内 from-import。既有测试零改动；唯一测试 diff 为新文件 `tests/test_file_journal_late_lookup_seams.py`。
 
   Depends on: 5.3
 
@@ -762,6 +762,10 @@
     - 5.5 搬走的名如果 facade 不再绑定，同一个 PR 必须把这里对应的函数体导入改成从 paths 导入，而且只能在函数体内导入（paths 比 candidates 晚）。
     - 2.3 与本 PR 只有 journal 文本冲突。
     - 6.x 改 selector 时，后落地的一方 rebase。
+  - **实现期补正（2026-10-19，编排者裁决，适用于 5.4–5.6）**：
+    - **status allowlist 随代码迁移**：`tests/status_literal_allowlist.json` 按文件路径登记字面量。聚簇里带状态字面量的单元搬到 sibling 后，`tests/test_status_vocab_parity.py::test_repository_status_literals_match_the_allowlist` 会同时报 facade 条目 stale、sibling 行未登记。补正：允许把对应条目的 `file` 改成 sibling 路径，并按文件排序挪到正确位置；`members`、`reason` 不变，条目总数不变。这是 pin 漏算的第二个 tests/ 文件，Verify 9 相应放宽为「seam 测试 + allowlist 的路径迁移」。5.4 有 1 条（`_job_is_unsubmitted_retry_placeholder` 的 `{pending, queued, submitted}`）；5.5/5.6 开工前按同一规则在 PR head 实测并列出。
+    - **seam 用例 (1) 的 stub 返回值**：pin 写的 `b'{"model_package_checksum": "c"}'` 不在 `_run_manifest_model_package_identity` 查找的 4 条路径上，函数会返回 None。改为 `b'{"model": {"model_package_checksum": "c"}}'`，断言不变。
+    - **sibling 补一条导入**：`_job_is_terminal_success` 用到 `PIPELINE_JOB_SUCCESS`，sibling 顶层加 `from packages.common.status_vocab import PIPELINE_JOB_SUCCESS`；facade 仍在用它，不变成孤儿。
 
   **Suggested fixture level:** expanded - 候选/队列判定是 scheduler 不变量。
 
