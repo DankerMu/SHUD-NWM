@@ -4,7 +4,7 @@ Epic #2919 (entropy-burndown-2026-10) left out-of-scope findings that were filed
 
 ## What Changes
 
-- #3028: the CI selector routes journal facade and `file_journal_*` sibling edits to every test file that patches a facade global through a function-body import. A disk-globbed parametrised pin covers every sibling.
+- #3028: the CI selector routes journal facade and `file_journal_*` sibling edits to the 10 suites that import the facade in a function body and patch a facade global directly. A disk-globbed parametrised pin covers every sibling. Four further cases found in review (two redirect-suite nodes and two suites patching through `tests/file_journal_legacy_seed_helpers.py`) are tracked in #3034.
 - #3032 (hybrid, see design.md): the 9 first-import failures that a pure import move or the single lazy `scheduler.ProductionSchedulerConfig` fixes are fixed. A guard test imports every `services/orchestrator` module first in a fresh interpreter and holds the remaining 8 in an exact ratcheting allowlist, which gets a follow-up issue. The import-order workaround fixture in `tests/test_preserve_final_component_loop_spelling.py` goes.
 - #3027: restore the 10 selector comments corrupted by the `" mar"` deletion in a0b6ccf9d.
 - #3029: fix 5 comments/docstrings that still name renamed or moved symbols.

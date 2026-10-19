@@ -40,12 +40,12 @@ def is_test_suite_path(path: str) -> bool:
     return any(fnmatch.fnmatch(name, pattern) for pattern in CHANGED_TEST_SUITE_BASENAME_PATTERNS)
 
 
-# #1561: the only auto-skipker names pytest collection treats as file-level
-# gates. A suite carrying a file-level `pytestmark` of eitherker skips in the
+# #1561: the only auto-skip marker names pytest collection treats as file-level
+# gates. A suite carrying a file-level `pytestmark` of either marker skips in the
 # pull-request lane (tests/conftest.py's pytest_collection_modifyitems), so an
-# importer suite soked must not join the ordinary importer closure — the
+# importer suite so marked must not join the ordinary importer closure — the
 # closure is for suites that RUN their assertions on the PR. Function-level
-# ks do not gate the whole file and never appear here: theker is read
+# marks do not gate the whole file and never appear here: the marker is read
 # from a module-level `pytestmark` assignment only.
 SUITE_FILE_GATING_MARKERS: frozenset[str] = frozenset({"integration", "e2e"})
 
@@ -107,7 +107,7 @@ def _import_from_base(path: str, node: ast.ImportFrom) -> str | None:
 
 
 def _file_level_gating_markers(tree: ast.Module) -> frozenset[str]:
-    """File-level gatingker names a module-level ``pytestmark`` applies.
+    """File-level gating marker names a module-level ``pytestmark`` applies.
 
     Read from the AST, not the file text: a ``@pytest.mark.integration``
     decorator on one function gates that function, not the file, and a

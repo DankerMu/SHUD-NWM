@@ -4762,7 +4762,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         # #1571: the two-node Docker runbook is `infra/**`, which already opens
         # the backend lane; the rule converts that collect-only lane into real
-        # assertions. Exact path, deliberately NOT a glob over infrakdown —
+        # assertions. Exact path, deliberately NOT a glob over infra markdown —
         # other runbooks must not start the backend lane (inventory scope).
         "infra/README.two-node-docker.md",
         (TWO_NODE_DOCKER_RUNBOOK_ENV_TEST,),
@@ -5114,7 +5114,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # #1646: a pytest-config change must re-prove the thread-exception
         # policy (the file carries the exact filter and the no-timeout
         # decision) and still keep core smoke plus the selector meta-guard.
-        # #1894 additionally registers the dedicated disposable-Dockerker,
+        # #1894 additionally registers the dedicated disposable-Docker marker,
         # whose gate contract is asserted without executing its real rows.
         "pyproject.toml",
         (
