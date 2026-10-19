@@ -92,7 +92,7 @@ Risk packs:
 - Legacy compatibility — selected：名字不在 `__all__`、无调用方、无 patch；evidence = 全仓 `git grep` 为空（openspec 历史记录除外）。
 - 其余 pack — not selected。
 
-- [ ] 5.1 删除 `services/orchestrator/file_journal_retry_helpers.py` 中的定义；从 `tests/fixtures/file_journal_cluster_map.json` 的 `clusters.retry_helpers` 删掉该名字（保持 `json.dumps(indent=2, sort_keys=True) + "\n"` 序列化）。不改 `retry.py`。
+- [x] 5.1 删除 `services/orchestrator/file_journal_retry_helpers.py` 中的定义；从 `tests/fixtures/file_journal_cluster_map.json` 的 `clusters.retry_helpers` 删掉该名字（保持 `json.dumps(indent=2, sort_keys=True) + "\n"` 序列化）。不改 `retry.py`。
 
 Evidence Floor: `git grep -n "_mapping_has_runtime_root_fields" -- services tests scripts apps packages workers` 无输出；fixture `git diff --numstat` 为 `0 1`；issue #3030 Verification 命令 ∪ selector 全绿。
 

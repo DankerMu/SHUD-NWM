@@ -892,10 +892,6 @@ def _manual_retry_submission_failure_details(
     return details
 
 
-def _mapping_has_runtime_root_fields(value: Mapping[str, Any]) -> bool:
-    return any(field in value for field in (*_RUNTIME_ROOT_FIELDS, *_DB_FREE_RUNTIME_FIELDS))
-
-
 def _file_retry_job_truth_sort_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
     return (
         _datetime_sort_key(
