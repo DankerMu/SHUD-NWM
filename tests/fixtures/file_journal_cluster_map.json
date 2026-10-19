@@ -1,0 +1,551 @@
+{
+  "clusters": {
+    "candidates": [
+      "COHORT_MEMBERSHIP_INCOMPLETE",
+      "COHORT_MEMBERSHIP_MEMBER",
+      "COHORT_MEMBERSHIP_NON_MEMBER",
+      "COHORT_MEMBERSHIP_UNWITNESSED",
+      "COHORT_TASK_OUTCOME_FAILED",
+      "COHORT_TASK_OUTCOME_SUCCEEDED",
+      "COHORT_TASK_OUTCOME_UNKNOWN",
+      "_CYCLE_SCOPE_COMPLETION_STAGES",
+      "_CYCLE_SCOPE_JOB_PROJECTION_KEYS",
+      "_INIT_STATE_ALIAS_KEYS",
+      "_INIT_STATE_CANONICAL_KEYS",
+      "_PERSISTED_REDACTION_PLACEHOLDERS",
+      "_PUBLICATION_JOB_FIELDS",
+      "_accepted_submit_source_cycle_from_job_id",
+      "_blocked_query_job",
+      "_blocked_query_job_fault",
+      "_blocked_stage_status",
+      "_candidate_row_self_bound_identity",
+      "_candidate_scoped_forecast_cycle",
+      "_cohort_member_row_view",
+      "_cohort_member_task_outcome",
+      "_cohort_member_task_outcomes",
+      "_cohort_row_ended_partially",
+      "_cohort_run_ids_excluding_model",
+      "_compact_cycle_scope_event",
+      "_compact_cycle_scope_job",
+      "_complete_cohort_members_by_run",
+      "_current_terminal_jobs",
+      "_cycle_scope_cohort_membership",
+      "_cycle_scope_from_cycle_id",
+      "_cycle_scope_from_file_run_id",
+      "_cycle_scope_from_idempotency_key",
+      "_cycle_time_from_job",
+      "_event_matches_candidate_rows",
+      "_file_journal_blocked_candidate_state",
+      "_first_nested_text",
+      "_forcing_submitline_array_spec",
+      "_init_state_identity_from_hydro",
+      "_is_blocked_query_job",
+      "_is_foreign_model_cycle_scope_job",
+      "_is_manual_retry_marker_event",
+      "_is_model_less_cycle_scope_job",
+      "_job_is_active",
+      "_job_is_breaker_terminal_success",
+      "_job_is_current_terminal_completion",
+      "_job_is_terminal_success",
+      "_job_is_unsubmitted_retry_placeholder",
+      "_job_matches_candidate",
+      "_job_matches_source_cycle",
+      "_master_row_records_init_state_id",
+      "_model_id_from_file_run_id",
+      "_newer_master_identity_than_hydro",
+      "_object_store_root",
+      "_object_store_uri_local_path",
+      "_pipeline_event_entity_type",
+      "_public_candidate_state",
+      "_public_scheduler_row",
+      "_publication_scheduler_row",
+      "_quarantine_rerun_masters",
+      "_recorded_cohort_member_model_ids",
+      "_released_identity_blocked_row",
+      "_resolved_caller_evidence",
+      "_row_matches_candidate",
+      "_run_manifest_model_package_identity",
+      "_source_cycle_from_cycle_id",
+      "_source_cycle_from_file_run_id",
+      "_source_id_from_job",
+      "_stable_sha256",
+      "_strip_redaction_placeholders"
+    ],
+    "context": [
+      "_fallback_value",
+      "_forcing_context_from_mapping",
+      "_lineage_mapping",
+      "_model_context_from_mapping",
+      "_optional_datetime",
+      "_optional_int",
+      "_optional_str",
+      "_required_context_str",
+      "_required_int"
+    ],
+    "facade": [
+      "COMMITTED_PROJECTION_FAULT_EVENT",
+      "FILE_JOURNAL_LOCK_GUARD_MODE_ENV",
+      "FILE_JOURNAL_READ_BLOCKED_STATUS",
+      "FILE_ORCHESTRATION_JOURNAL_SCHEMA_VERSION",
+      "FILE_ORCHESTRATION_LATEST_SCHEMA_VERSION",
+      "FileJournalRetentionCycle",
+      "FileJournalRetentionCycleInspection",
+      "FileJournalRetentionDiscovery",
+      "FileJournalRetentionMember",
+      "FileJournalRetentionRemoval",
+      "FileJournalRetryService",
+      "FileOrchestrationJournalError",
+      "FileOrchestrationJournalRepository",
+      "IDENTITY_RELEASED_OPERATOR_SIGNAL",
+      "IDENTITY_RELEASED_SIGNAL_FAILED_EVENT",
+      "LEGACY_FILE_LOCK_GUARD_MODE_ENV",
+      "LOGGER",
+      "MAX_FILE_JOURNAL_CYCLE_ROWS_CACHE_ENTRIES",
+      "MAX_FILE_JOURNAL_CYCLE_SEGMENTS",
+      "MAX_FILE_JOURNAL_DISCOVERED_FILES",
+      "MAX_FILE_JOURNAL_IDENTITY_RETRY_ATTEMPTS",
+      "MAX_FILE_JOURNAL_JSON_BYTES",
+      "MAX_FILE_JOURNAL_JSON_DEPTH",
+      "MAX_FILE_JOURNAL_JSON_NODES",
+      "MAX_FILE_JOURNAL_READ_CACHE_BYTES",
+      "MAX_FILE_JOURNAL_READ_CACHE_ENTRIES",
+      "MAX_FILE_JOURNAL_RECORDS",
+      "MAX_FILE_JOURNAL_SCAN_DEPTH",
+      "OPERATOR_BIND_REFUSALS",
+      "OPERATOR_DEMOTE_REFUSALS",
+      "OPERATOR_RECOVERY_ATTESTATION_FIELD",
+      "OPERATOR_REENTRY_CONFIRMATION_EVENT",
+      "OPERATOR_VERIFIED_BIND_EVENT_TYPE",
+      "OperatorBindReceipt",
+      "OperatorBindResult",
+      "OperatorDemoteReceipt",
+      "OperatorDemoteResult",
+      "PERMANENT_FAILURE_SOURCE_STATUSES",
+      "PROJECTION_DERIVED_MASTER_STATUSES",
+      "ProjectionWarning",
+      "RELEASED_RESERVATION_RECOVERY_COMMAND",
+      "ROW_CONTENT_SKIP_REASONS",
+      "RetryEvidenceInvalidError",
+      "TERMINAL_PIPELINE_STATUSES",
+      "_ACCEPTED_RUNTIME_TRANSITIONS",
+      "_ACCEPTED_SUBMIT_MASTER_JOB_ID_RE",
+      "_ARRAY_MANUAL_RETRY_JOB_TYPES",
+      "_ARRAY_MANUAL_RETRY_MANIFEST_INDEX_NAMES",
+      "_ATOMIC_TEMP_NONCE_RE",
+      "_CANDIDATE_JOB_ID_RE",
+      "_CycleRows",
+      "_FINGERPRINT_CONTAINMENT_FAULT",
+      "_FingerprintContainmentFault",
+      "_GENERIC_VERSIONED_RECONCILIATION_DECISIONS",
+      "_JournalProbeContainmentError",
+      "_LATEST_REPLAY_ORDER_SENTINEL",
+      "_LEGACY_ACTIVE_RECONCILE_DIRECTORY",
+      "_OPERATOR_BIND_COMMIT_REFUSALS",
+      "_OPERATOR_BIND_FORCING_ARRAY_SPEC_RE",
+      "_OPERATOR_BIND_SLURM_ID_RE",
+      "_OperatorBindAudit",
+      "_PIPELINE_JOB_UPSERT_MUTABLE_FIELDS",
+      "_PendingManualRetryResult",
+      "_RECONCILE_INVENTORY_DIRECTORY",
+      "_RECONCILE_INVENTORY_MIGRATION_MARKER",
+      "_RECONCILE_INVENTORY_MIGRATION_SCHEMA_VERSION",
+      "_RECONCILE_INVENTORY_ROLLBACK_FENCE_SIDECAR",
+      "_RECONCILE_INVENTORY_ROLLBACK_PREP_RECEIPT",
+      "_RECONCILE_INVENTORY_ROLLBACK_PREP_SCHEMA_VERSION",
+      "_RECONCILE_INVENTORY_ROLLFORWARD_RECEIPT",
+      "_RECONCILE_INVENTORY_ROLLFORWARD_SCHEMA_VERSION",
+      "_RECONCILE_INVENTORY_SCHEMA_VERSION",
+      "_RECONCILE_INVENTORY_TEMP_RE",
+      "_RECONCILE_MIGRATION_TEMP_RE",
+      "_RUNTIME_ROOT_EVENT_CANDIDATE_PATHS",
+      "_RUNTIME_ROOT_SAME_RUN_JOB_SCAN_LIMIT",
+      "_RecordBudget",
+      "_RetentionDiscoveryBudget",
+      "_SLURM_MASTER_PART_RE",
+      "_SUPPORTED_PIPELINE_EVENT_ENTITY_TYPES",
+      "_TERMINAL_FORECAST_CYCLE_SUCCESS_STATUSES",
+      "__all__",
+      "_accepted_submit_candidate_evidence",
+      "_clone_cycle_rows",
+      "_cycle_scope_from_job_id",
+      "_emit_reclaim_projection_warning",
+      "_file_lock_guard_mode",
+      "_file_manual_retry_array_tasks",
+      "_filter_cycle_rows_for_model",
+      "_is_legacy_unversioned_reserved_forecast_master",
+      "_iter_jsonl_files",
+      "_iter_regular_json_files",
+      "_next_file_manual_retry_job_id_for_run",
+      "_probe_containment_failure",
+      "_refuse_legacy_unversioned_reserved_forecast_master",
+      "_refuse_legacy_unversioned_reserved_forecast_master_record",
+      "_released_candidate_cycle_scope",
+      "_released_reservation_recovery_command",
+      "_signature_has_containment_fault",
+      "_stat_signature",
+      "_submit_file_manual_retry_job"
+    ],
+    "paths": [
+      "_CYCLE_RUN_ID_RE",
+      "_CycleSourceDiscovery",
+      "_JOURNAL_SEGMENT_INDEX_RE",
+      "_RECORD_PAYLOAD_IDENTITY_FIELDS",
+      "_SOURCE_SEGMENT_SURFACES",
+      "_UNSET",
+      "_canonical_candidate_id",
+      "_canonical_candidate_run_id",
+      "_canonical_forcing_version_id",
+      "_cycle_read_source_segment",
+      "_cycle_read_source_segments",
+      "_cycle_source_discovery_from_segment",
+      "_explicit_record_model_id",
+      "_iter_discovered_files",
+      "_iter_retention_surface_files",
+      "_journal_identity_from_path",
+      "_journal_segment_identity_from_path",
+      "_journal_segment_name",
+      "_journal_segment_names",
+      "_journal_segment_sort_key",
+      "_journal_segment_stem_in_cycle_scope",
+      "_latest_identity_from_path",
+      "_merge_cycle_source_discovery",
+      "_model_id_from_run_identity",
+      "_names_same_directory",
+      "_optional_safe_identity",
+      "_optional_text",
+      "_parse_cycle_segment",
+      "_record_model_id",
+      "_relative_evidence",
+      "_require_cycle_id",
+      "_require_journal_segment_lineage",
+      "_require_model_id",
+      "_require_record_payload_identity_match",
+      "_require_source_cycle",
+      "_required_source_id",
+      "_safe_segment",
+      "_source_segment_directory_identities",
+      "_split_journal_segment_stem",
+      "_validate_event_identity",
+      "_validate_forcing_version_identity",
+      "_validate_forecast_cycle_identity",
+      "_validate_hydro_run_identity",
+      "_validate_model_context_identity",
+      "_validate_payload_identity",
+      "_validate_pipeline_job_identity",
+      "_validate_scheduler_visible_fields",
+      "_validated_actual_writer_generation",
+      "_validated_git_writer_generation"
+    ],
+    "primitives": [
+      "MAX_FILE_JOURNAL_PATH_SEGMENT_CHARS",
+      "_SAFE_SEGMENT_RE",
+      "_blocked_cycle_id",
+      "_cycle_id_for_file_source",
+      "_normalize_file_source_id",
+      "_optional_source_id",
+      "_parse_cycle_time_field",
+      "_required_safe_identity",
+      "_required_text",
+      "_safe_identity_text",
+      "_scalar_text"
+    ],
+    "read_attribution": [
+      "JOURNAL_READ_ATTRIBUTION_SCHEMA_VERSION",
+      "MAX_JOURNAL_READ_ATTRIBUTION_TAGS",
+      "_ClassT",
+      "_JOURNAL_READ_UNATTRIBUTED",
+      "_attributed_public_method",
+      "_flat_direct_job_listing_memo",
+      "_flat_direct_job_listing_memo_scope",
+      "_install_public_read_attribution",
+      "_journal_read_counter_lock",
+      "_journal_read_counter_tags_dropped",
+      "_journal_read_counters",
+      "_journal_read_entrypoint",
+      "_journal_read_lane",
+      "_record_journal_read",
+      "journal_read_attribution",
+      "journal_read_lane",
+      "reset_journal_read_counters"
+    ],
+    "replay": [
+      "_REPLAY_ORDER_FIELD",
+      "_REPLAY_SEQUENCE_FIELD",
+      "_STAGE_STATUS_ORDER",
+      "_UNKNOWN_STAGE_STATUS_ORDER",
+      "_db_compatible_pipeline_job_order_key",
+      "_db_compatible_stage_status_order_key",
+      "_decode_mapping",
+      "_decode_mapping_prevalidated",
+      "_dedupe_events",
+      "_first_mapping",
+      "_insert_missing_by_key",
+      "_latest_mapping",
+      "_latest_replay_sequence",
+      "_optional_positive_int",
+      "_optional_replay_sequence",
+      "_payload_or_record_payload",
+      "_record_list",
+      "_record_type",
+      "_replay_order_key",
+      "_require_schema",
+      "_upsert_by_key",
+      "_validate_json_complexity",
+      "_with_latest_replay_order",
+      "_with_replay_order"
+    ],
+    "retry_helpers": [
+      "FILE_ORCHESTRATION_PRIVATE_RECOVERY_SCHEMA_VERSION",
+      "MAX_OPERATOR_CHECKED_BY_LENGTH",
+      "MAX_OPERATOR_VERIFICATION_NOTE_LENGTH",
+      "_PRIVATE_RUNTIME_ROOT_RECOVERY_RECORD_TYPE",
+      "_PROJECTION_WARNING_FALLBACK_TOKEN",
+      "_RETRY_LINEAGE_PLACEHOLDER_TOKENS",
+      "_accepted_submit_attempt_anchor",
+      "_accepted_submit_master_identity",
+      "_accepted_submit_master_state",
+      "_bounded_candidate_projections",
+      "_bounded_cohort_members",
+      "_bounded_init_state_identities",
+      "_coerce_cycle_or_iso_datetime",
+      "_durable_error_message",
+      "_file_auto_retry_job_can_be_reused",
+      "_file_journal_real_slurm_job_id",
+      "_file_reconcile_namespace",
+      "_file_retry_gateway_payload",
+      "_file_retry_gateway_time",
+      "_file_retry_job_int",
+      "_file_retry_job_record",
+      "_file_retry_job_text",
+      "_file_retry_job_truth_sort_key",
+      "_file_retry_job_value",
+      "_file_retry_namespace",
+      "_is_legacy_unversioned_forecast_cohort_master",
+      "_job_blocks_rollback_quiescence",
+      "_job_needs_restart_reconcile",
+      "_journal_record_for_write",
+      "_json_bytes",
+      "_json_default",
+      "_manual_retry_submission_failure_details",
+      "_mapping_has_runtime_root_fields",
+      "_mapping_value",
+      "_next_current_master_retry_identity",
+      "_operator_evidence_text",
+      "_operator_owner_evidence_text",
+      "_optional_format_datetime",
+      "_optional_mapping_value",
+      "_private_event_identity_value",
+      "_private_runtime_root_recovery_path",
+      "_private_runtime_root_recovery_record",
+      "_projection_error_reason",
+      "_projection_error_type",
+      "_public_pipeline_event_payload",
+      "_reconcile_inventory_row_kind",
+      "_redact_durable_error_message_fields",
+      "_retry_lineage_contains_placeholder",
+      "_runtime_root_recovery_candidate_records",
+      "_runtime_root_recovery_candidate_value",
+      "_settled_incarnation_matches_candidate",
+      "_strict_retry_init_state_identities",
+      "_strict_utc_datetime",
+      "_strip_internal_fields",
+      "_validate_accepted_submit_evidence",
+      "_validate_private_runtime_root_recovery_record"
+    ]
+  },
+  "module": "services/orchestrator/file_orchestration_journal.py",
+  "patched": {
+    "FileOrchestrationJournalRepository": {
+      "binding": "class",
+      "callers": {},
+      "cluster": "facade"
+    },
+    "MAX_FILE_JOURNAL_CYCLE_ROWS_CACHE_ENTRIES": {
+      "binding": "assign",
+      "callers": {
+        "facade": [
+          "FileOrchestrationJournalRepository"
+        ]
+      },
+      "cluster": "facade"
+    },
+    "MAX_FILE_JOURNAL_READ_CACHE_ENTRIES": {
+      "binding": "assign",
+      "callers": {
+        "facade": [
+          "FileOrchestrationJournalRepository"
+        ]
+      },
+      "cluster": "facade"
+    },
+    "MAX_FILE_JOURNAL_RECORDS": {
+      "binding": "assign",
+      "callers": {
+        "facade": [
+          "FileOrchestrationJournalRepository",
+          "_LATEST_REPLAY_ORDER_SENTINEL"
+        ]
+      },
+      "cluster": "facade"
+    },
+    "_cycle_scope_from_job_id": {
+      "binding": "def",
+      "callers": {
+        "facade": [
+          "FileOrchestrationJournalRepository"
+        ]
+      },
+      "cluster": "facade"
+    },
+    "_is_legacy_unversioned_reserved_forecast_master": {
+      "binding": "def",
+      "callers": {
+        "facade": [
+          "_refuse_legacy_unversioned_reserved_forecast_master"
+        ]
+      },
+      "cluster": "facade"
+    },
+    "_iter_jsonl_files": {
+      "binding": "def",
+      "callers": {
+        "facade": [
+          "FileOrchestrationJournalRepository"
+        ]
+      },
+      "cluster": "facade"
+    },
+    "_iter_regular_json_files": {
+      "binding": "def",
+      "callers": {
+        "facade": [
+          "FileOrchestrationJournalRepository"
+        ]
+      },
+      "cluster": "facade"
+    },
+    "_next_file_manual_retry_job_id_for_run": {
+      "binding": "def",
+      "callers": {
+        "facade": [
+          "FileJournalRetryService"
+        ]
+      },
+      "cluster": "facade"
+    },
+    "_released_candidate_cycle_scope": {
+      "binding": "def",
+      "callers": {
+        "facade": [
+          "FileOrchestrationJournalRepository"
+        ]
+      },
+      "cluster": "facade"
+    },
+    "_runtime_root_env_candidate": {
+      "binding": "import",
+      "callers": {
+        "facade": [
+          "FileJournalRetryService"
+        ]
+      },
+      "cluster": "facade"
+    },
+    "_stat_signature": {
+      "binding": "def",
+      "callers": {
+        "facade": [
+          "FileOrchestrationJournalRepository"
+        ],
+        "paths": [
+          "_iter_discovered_files",
+          "_require_journal_segment_lineage"
+        ]
+      },
+      "cluster": "facade"
+    },
+    "_utcnow": {
+      "binding": "import",
+      "callers": {
+        "facade": [
+          "FileJournalRetryService",
+          "FileOrchestrationJournalRepository"
+        ],
+        "retry_helpers": [
+          "_journal_record_for_write",
+          "_private_runtime_root_recovery_record"
+        ]
+      },
+      "cluster": "facade"
+    },
+    "accepted_submit_candidate_immutable_evidence": {
+      "binding": "import",
+      "callers": {
+        "candidates": [
+          "_candidate_row_self_bound_identity"
+        ],
+        "facade": [
+          "_accepted_submit_candidate_evidence"
+        ]
+      },
+      "cluster": "facade"
+    },
+    "list_directory_no_follow_limited": {
+      "binding": "import",
+      "callers": {
+        "facade": [
+          "FileOrchestrationJournalRepository"
+        ],
+        "paths": [
+          "_iter_discovered_files",
+          "_iter_retention_surface_files"
+        ]
+      },
+      "cluster": "facade"
+    },
+    "open_lock_file_no_follow": {
+      "binding": "import",
+      "callers": {
+        "facade": [
+          "FileOrchestrationJournalRepository"
+        ]
+      },
+      "cluster": "facade"
+    },
+    "read_bytes_limited_no_follow": {
+      "binding": "import",
+      "callers": {
+        "candidates": [
+          "_run_manifest_model_package_identity"
+        ],
+        "facade": [
+          "FileOrchestrationJournalRepository",
+          "_file_manual_retry_array_tasks"
+        ]
+      },
+      "cluster": "facade"
+    },
+    "stat_no_follow": {
+      "binding": "import",
+      "callers": {
+        "facade": [
+          "FileOrchestrationJournalRepository"
+        ],
+        "paths": [
+          "_iter_discovered_files",
+          "_iter_retention_surface_files"
+        ]
+      },
+      "cluster": "facade"
+    },
+    "unlink_no_follow": {
+      "binding": "import",
+      "callers": {
+        "facade": [
+          "FileOrchestrationJournalRepository"
+        ]
+      },
+      "cluster": "facade"
+    }
+  }
+}
