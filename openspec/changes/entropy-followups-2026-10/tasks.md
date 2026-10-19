@@ -79,7 +79,7 @@ Minimal mergeable slice: atomic
 
 Risk packs: 全部 not selected — 只改注释 / docstring。
 
-- [ ] 4.1 按 issue #3029「解决思路·推荐」改 5 处文字；不改代码行。
+- [x] 4.1 按 issue #3029「解决思路·推荐」改 5 处文字；不改代码行。
 
 Evidence Floor: issue #3029 验收标准中的 5 条 grep / 检查；`uv run ruff check .`；`uv run pytest -q tests/test_hydro_display_mvt_scaling_discovery.py tests/test_node27_timeseries_retention.py tests/test_file_journal_late_lookup_seams.py` ∪ selector。
 

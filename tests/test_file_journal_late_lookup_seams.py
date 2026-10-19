@@ -6,7 +6,9 @@ when it reads the name off the facade module at call time; a copy bound by
 import (at the sibling's top level, or from the name's original owner module)
 keeps calling the real function.  Each case patches the facade with a counting
 stub and calls the moved function directly, so an import-bound copy shows up as
-a zero count.
+a wrong call count, or, for the segment-lineage case, as the real
+``file_journal_segment_gap`` error being raised (the real ``_stat_signature``
+finds no segment 0 under ``tmp_path``).
 """
 
 from __future__ import annotations

@@ -43,7 +43,7 @@ def _cycle_days_ago(days: int) -> datetime:
     """A cycle `days` before now, aligned to the hour.
 
     Relative, because these are the cases the lookback bound actually moves, and
-    hour-aligned because `_format_time` spells seconds and the rectangle check
+    hour-aligned because `_mvt_time_text` spells seconds and the rectangle check
     divides the coverage window by 3600.
     """
     now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
