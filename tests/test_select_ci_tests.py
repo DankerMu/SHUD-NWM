@@ -15314,6 +15314,25 @@ def test_status_literal_allowlist_row_red_when_removed(monkeypatch: pytest.Monke
     assert STATUS_VOCAB_PARITY_PATH not in select_tests([STATUS_LITERAL_ALLOWLIST_PATH], repo_root=Path("."))
 
 
+FILE_JOURNAL_CLUSTER_MAP_PATH = "tests/fixtures/file_journal_cluster_map.json"
+FILE_JOURNAL_CLUSTER_MAP_TEST = "tests/test_file_journal_cluster_map.py"
+
+
+def test_file_journal_cluster_map_row_red_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
+    # #2938 (entropy-burndown task 5.0): the cluster map is data read only by its
+    # own test; without the row a map-only PR selects nothing.
+    from scripts import select_ci_tests
+
+    assert Path(FILE_JOURNAL_CLUSTER_MAP_PATH).is_file() and Path(FILE_JOURNAL_CLUSTER_MAP_TEST).is_file()
+    rows = [rule for rule in PATH_TEST_RULES if rule.pattern == FILE_JOURNAL_CLUSTER_MAP_PATH]
+    assert [rule.tests for rule in rows] == [(FILE_JOURNAL_CLUSTER_MAP_TEST,)]
+    assert select_tests([FILE_JOURNAL_CLUSTER_MAP_PATH], repo_root=Path(".")) == [FILE_JOURNAL_CLUSTER_MAP_TEST]
+    mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern != FILE_JOURNAL_CLUSTER_MAP_PATH)
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+
+    assert FILE_JOURNAL_CLUSTER_MAP_TEST not in select_tests([FILE_JOURNAL_CLUSTER_MAP_PATH], repo_root=Path("."))
+
+
 def test_status_vocab_migration_target_red_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
     from scripts import select_ci_tests
 

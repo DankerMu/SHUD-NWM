@@ -1907,6 +1907,11 @@ FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     "tests/test_retry.py::test_retry_api_file_lane_local_root_event_bytes_are_unchanged_by_the_single_render",
     "tests/test_retry.py::test_retry_api_file_lane_503_classifies_whitespace_bearing_uri_roots_whole",
     "tests/test_retry.py::test_retry_api_file_lane_db_free_runtime_evidence_values_survive_the_single_render",
+    # #2938 (entropy-burndown task 5.0): the cluster map test parses this module's
+    # top-level definitions and their callers, so a journal edit that adds,
+    # renames or moves a definition must redden it on the PR. Stop-rule owned
+    # module, so like #1581 the addition rides this at-site tuple. AST-only, ~2s.
+    "tests/test_file_journal_cluster_map.py",
 )
 
 FILE_JOURNAL_READ_STATE_PATH_PATTERNS: tuple[str, ...] = (
@@ -4927,6 +4932,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "tests/fixtures/station_series_baseline_heihe_ifs_2026060100.json",
         ("tests/test_object_store_forcing.py",),
     ),
+    # #2938 (entropy-burndown task 5.0): the journal cluster map is data read only
+    # by its own test; there is no generic `tests/fixtures/*.json` row, so a
+    # map-only PR would otherwise select nothing.
+    PathTestRule("tests/fixtures/file_journal_cluster_map.json", ("tests/test_file_journal_cluster_map.py",)),
     # #2920: the import layering allowlist is data read only by the guard; as
     # data it reaches no other rule, so an allowlist-only PR would select nothing.
     PathTestRule("tests/import_layering_allowlist.json", (IMPORT_LAYERING_GUARD_TEST,)),

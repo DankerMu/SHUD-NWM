@@ -478,7 +478,7 @@
 
 聚簇顺序：context → read_attribution → primitives（打破 paths 环的标识/段原语）→ replay → candidates → paths（**最高风险**：含被 monkeypatch 名的调用者）→ retry_helpers。`FileOrchestrationJournalRepository`、`FileJournalRetryService` 与 facade 驻留的被 patch 名不搬。函数级归属由 5.0 的 map 决定，本节不再估算行数。
 
-- [ ] 5.0 聚簇图：新增 `tests/fixtures/file_journal_cluster_map.json`（每个顶层定义 → 一个聚簇或 `facade`；每个被 patch 名 → 其聚簇与全部调用点聚簇；全部九个被 patch 名（`_utcnow`、Repository 调用的五个 IO/stat/iter 名、以及 Repository/RetryService 调用的 `_released_candidate_cycle_scope`、`_cycle_scope_from_job_id`、`_next_file_manual_retry_job_id_for_run`）标为 `facade`）与 `tests/test_file_journal_cluster_map.py`（覆盖、唯一、被 patch 名规则）。
+- [x] 5.0 聚簇图：新增 `tests/fixtures/file_journal_cluster_map.json`（每个顶层定义 → 一个聚簇或 `facade`；每个被 patch 名 → 其聚簇与全部调用点聚簇；全部九个被 patch 名（`_utcnow`、Repository 调用的五个 IO/stat/iter 名、以及 Repository/RetryService 调用的 `_released_candidate_cycle_scope`、`_cycle_scope_from_job_id`、`_next_file_manual_retry_job_id_for_run`）标为 `facade`）与 `tests/test_file_journal_cluster_map.py`（覆盖、唯一、被 patch 名规则）。
 
   Depends on: 2.3, 3.3
 
