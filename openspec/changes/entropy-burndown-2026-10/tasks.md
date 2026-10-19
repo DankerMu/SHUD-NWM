@@ -1091,7 +1091,7 @@
 
   **Minimal mergeable slice:** atomic - 三张规则表引用同一批常量与 `PathTestRule`。
 
-- [ ] 6.4 B3 import-graph derivation 与 `_SUITE_IMPORTER_PARSE_STATS` → `select_ci_tests_imports.py`（所有读者一起搬）；B3 不读 facade 可 patch 全局（零新参数）；facade 绑定 5 名，`select_tests` 继续读 facade 全局 `_build_suite_importer_index`；允许的测试改动：`_SUITE_IMPORTER_PARSE_STATS` 两个测试的函数内导入改向（2 行，四行引用不变）+ 一个新增 scenario 测试；同 commit 移除 facade 的 large-file-guard 排除。
+- [x] 6.4 B3 import-graph derivation 与 `_SUITE_IMPORTER_PARSE_STATS` → `select_ci_tests_imports.py`（所有读者一起搬）；B3 不读 facade 可 patch 全局（零新参数）；facade 绑定 5 名，`select_tests` 继续读 facade 全局 `_build_suite_importer_index`；允许的测试改动：`_SUITE_IMPORTER_PARSE_STATS` 两个测试的函数内导入改向（2 行，四行引用不变）+ 一个新增 scenario 测试；同 commit 移除 facade 的 large-file-guard 排除。
 
   Depends on: 6.3
 
@@ -1114,6 +1114,15 @@
   - **路由**：6.1 精确行与 `_collection_smoke_required` 已覆盖 imports 路径，6.4 不加行；Verify 前 `git add scripts/select_ci_tests_imports.py`。
   - **PR Boundary 偏离（记录）**：移除 facade 的 large-file-guard 排除、2 行测试导入改向（非 spec 原写的 4 行引用）、新增一个 scenario 测试、tasks/design/spec/issue 措辞。
   - **残余风险**：快照 7 路仅 `tests/test_production_scheduler.py` 触发 B3；探针是 PR 证据非提交测试；6.4 后新的 import-graph 逻辑必须进 imports 模块（facade 导入处加一行指针注释）。
+  - **开工前确认性 fixture review（2026-10-19，base = master + 6.3，verdict pass）**：模拟 head 上实跑导入、值等价 (a)–(d)、新 scenario 三腿、两行改向与反改向、exec pin、演练 (c) 与路由，全部成立；按下列实测改正执行，pin 与 Verify 里的行号一律改为按名定位：
+    - B3 = 同样 11 个定义，连续块；只引用 B3 名与 5 个 stdlib 名，不读 tables/rules/facade 名，也不读今天被 patch 的 14 个名（pin 写的 12 个已过时）。facade 里没有别的只被 B3 用、或读 cache/stats 的定义。
+    - facade 绑定：4 个裸名（facade 代码在用）+ `CHANGED_TEST_SUITE_BASENAME_PATTERNS` **按 6.3 导入形态裁决写成普通名加行尾 `# noqa: F401`**（不写 `X as X`；design.md D7 的 `as X` 写法以本条为准）；不绑定 6 个名不变；facade 的 stdlib 导入全部仍有读者，不删。
+    - 测试改向：两个 `_SUITE_IMPORTER_PARSE_STATS` 测试（`test_suite_importer_closure_reuses_parse_work_across_calls`、`…_rewrite_to_module_scope_edge_is_observed`）里的函数内 `import scripts.select_ci_tests as _prod` 改为 `import scripts.select_ci_tests_imports as _prod`；四行引用字节不变，最长一行仍 118 字符。
+    - 新 scenario 测试：函数内 `from scripts import select_ci_tests` 与 `import scripts.select_ci_tests_imports`（同 6.3 的 scenario 测试形态，不加顶层导入）；pin 所称「第二腿」（只 patch imports 模块）实为第三腿。演练 (b) 的目标测试是 `test_suite_importer_closure_not_parsed_for_redirect_selection` 与 `test_suite_importer_closure_malformed_only_fails_when_needed`；exec pin 是 `test_fallback_rider_mutant_reds_the_exact_no_suite_fallback_pin`。
+    - 体积：模拟 head 上 facade 870 行、imports 220 行，均 ≤ 1000；同 commit 移除 facade 的 large-file 排除可行。
+    - 值等价 (b) 的键/边数在 PR 的 merge-base 上重测贴实测值（2f57d47ae 上为 2,948 键 / 11,848 边；pin 写 2,927 / 11,714）。前置检查同时点名两个已拆出的模块：`git diff --quiet $P HEAD -- scripts/select_ci_tests_tables.py scripts/select_ci_tests_rules.py`（父 facade 会绑定到已加载的 head tables 与 head rules）；顺序沿用 6.2/6.3：先导入 head 四个模块并断言 `__file__` 在仓库内，再注册并加载父 facade。
+    - line-reference：B3 与 facade 剩余部分都是 0 条，基线不改。路由：rules 表里已有 imports 路径的精确行，`_collection_smoke_required` 已含该字面量，不加行。
+    - 范围外（不在 6.4 修）：B3 块里有几处注释文字损坏（"…ker" 之类，master 上已如此）；6.4 必须原样搬走（探针 (a) 做子串比对），另行立单。
 
   **Suggested fixture level:** compact - 逻辑搬迁，patch 目标随动。
 
