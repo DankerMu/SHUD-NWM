@@ -87,18 +87,25 @@ def observations(monkeypatch, tmp_path):
     real_stat = Path.stat
     directory_stat = tmp_path.stat()
 
+    def aliases(*paths):
+        # Production resolves symlinks (macOS /home -> /System/Volumes/Data/home);
+        # evaluated per call because tests rewrite target_path after setup.
+        # realpath is resolve(strict=False) without its loop-check Path.stat(),
+        # which would recurse into this fake.
+        return {form for p in paths for form in (p, os.path.realpath(p))}
+
     def stat(path, *args, **kwargs):
         # Keep lstat identity real for no-follow receipt publication.
         if not kwargs.get("follow_symlinks", True):
             return real_stat(path, *args, **kwargs)
-        if str(path) in {"/", "/home", "/data/GHDC", state["target_path"]}:
-            if str(path) == state["target_path"] and state["target_failure"] == "missing":
+        if str(path) in aliases("/", "/home", "/data/GHDC", state["target_path"]):
+            if str(path) in aliases(state["target_path"]) and state["target_failure"] == "missing":
                 raise FileNotFoundError(errno.ENOENT, "password=os-secret", str(path))
             return directory_stat
         return real_stat(path, *args, **kwargs)
 
     def statvfs(path):
-        is_target = str(path) == state["target_path"]
+        is_target = str(path) in aliases(state["target_path"])
         identity = 1
         if is_target:
             state["target_samples"] += 1
@@ -290,7 +297,7 @@ def test_cli_configured_paths_and_duplicate_device_labels(observations, tmp_path
     assert governance.main(_argv(tmp_path, path, ["--pgdata-root", target])) == 0
     receipt = json.loads(path.read_text())
     binding = receipt["working_set"]["working_set_filesystem"]
-    assert binding["path"] == target
+    assert binding["path"] == str(Path(target).resolve(strict=False))
     assert binding["status"] == "ok"
     assert binding["blockers"] == []
     assert receipt["working_set"]["working_set_free_bytes"] == 900 * GIB
