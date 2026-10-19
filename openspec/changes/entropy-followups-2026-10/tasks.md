@@ -118,7 +118,7 @@ Risk packs:
 - File IO / path safety — selected（测试侧）：fake `stat`/`statvfs` 同时认字面路径与 `Path(p).resolve(strict=False)`，在调用时计算；evidence = macOS 3/3 绿 + Linux CI 绿。
 - 其余 pack — not selected：生产代码 `packages/common/node27_resource_governance_collection.py` 不改。
 
-- [ ] 7.1 按 issue #3031「解决思路·推荐」改 `tests/test_node27_working_set.py` 的 `observations` fixture 与 `:293` 路径断言；`:297` 同设备身份断言保留；不加 platform skip。
+- [x] 7.1 按 issue #3031「解决思路·推荐」改 `tests/test_node27_working_set.py` 的 `observations` fixture 与 `:293` 路径断言；`:297` 同设备身份断言保留；不加 platform skip。
 
 Evidence Floor: macOS `uv run pytest -q "tests/test_node27_working_set.py::test_cli_configured_paths_and_duplicate_device_labels"` 3/3 绿，且改前 3/3 红（记录）；`uv run pytest -q tests/test_node27_working_set.py tests/test_node27_resource_governance.py` ∪ selector 本地绿；PR CI（Linux）定向车道含 `tests/test_node27_working_set.py` 且绿；selector 不选 `tests/test_node27_resource_governance.py`（实测 count=2），本地跑并在 PR 记录；`git diff --stat -- packages/` 为空。
 
