@@ -6,7 +6,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from services.orchestrator import scheduler as _scheduler
 from services.orchestrator.production_contract import production_identity_contract_evidence
 
 
@@ -134,6 +133,9 @@ class SchedulerCandidate:
                 state_evidence = _compact_selected_state_evidence(state_evidence)
             payload["state_evidence"] = _scheduler._evidence_safe(state_evidence)
         return payload
+
+
+from services.orchestrator import scheduler as _scheduler  # noqa: E402
 
 
 def _compact_selected_state_evidence(state_evidence: Mapping[str, Any]) -> dict[str, Any]:

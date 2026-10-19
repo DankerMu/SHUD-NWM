@@ -15,7 +15,6 @@ from packages.common.contracts.time_normalization import (
 )
 from services.orchestrator.scheduler_candidates import _canonical_readiness_unavailable_evidence
 from services.orchestrator.scheduler_state import _format_utc
-from services.orchestrator.scheduler_types import SchedulerCandidate
 from workers.canonical_converter.converter import evaluate_canonical_readiness
 from workers.data_adapters.base import CycleDiscovery
 
@@ -441,3 +440,6 @@ def _orchestrator_repository_from_env() -> Any:
     from services.orchestrator.chain import PsycopgOrchestratorRepository
 
     return PsycopgOrchestratorRepository.from_env()
+
+
+from services.orchestrator.scheduler_types import SchedulerCandidate  # noqa: E402

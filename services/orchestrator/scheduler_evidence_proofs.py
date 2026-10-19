@@ -3,8 +3,6 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from services.orchestrator import scheduler_evidence as _scheduler_evidence
-
 
 def scheduler_pass_status_from_cancellation(cancellation_evidence: Sequence[Mapping[str, Any]]) -> str:
     if not cancellation_evidence:
@@ -665,6 +663,8 @@ def no_mutation_proof() -> dict[str, bool]:
         "pipeline_event_writes": False,
     }
 
+
+from services.orchestrator import scheduler_evidence as _scheduler_evidence  # noqa: E402
 
 __all__ = [
     "empty_counts",
