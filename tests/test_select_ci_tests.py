@@ -13006,6 +13006,45 @@ def test_file_journal_sibling_glob_rule_red_when_removed(monkeypatch: pytest.Mon
     assert FILE_JOURNAL_CLUSTER_MAP_TEST not in select_tests([FILE_JOURNAL_CONTEXT_SIBLING], repo_root=Path("."))
 
 
+# #3028: these suites import the journal facade inside a function body and patch
+# a facade global through it (`_utcnow`, `open_lock_file_no_follow`, ...), so no
+# importer derivation reaches them; the facade's stop rule and the #2940 sibling
+# glob rule are their only route. Spelled as LITERALS (#1827) so a rename in
+# production cannot move the pin.
+_FILE_JOURNAL_FACADE_PATCHER_TESTS: tuple[str, ...] = (
+    "tests/test_gateway_reconcile_claimant_exclusivity.py",
+    "tests/test_gateway_reconcile_file_cohort_comment.py",
+    "tests/test_gateway_reconcile_file_submit_barrier.py",
+    "tests/test_gateway_reconcile_identity_release.py",
+    "tests/test_gateway_reconcile_inventory.py",
+    "tests/test_gateway_reconcile_round10.py",
+    "tests/test_gateway_reconcile_writer_launch.py",
+    "tests/test_gateway_reconcile_writer_quiescence.py",
+    "tests/test_gateway_reconcile_writer_receipts.py",
+    "tests/test_safe_fs_lock.py",
+)
+# Parameters come from disk, so a new sibling is pinned without editing this file.
+_FILE_JOURNAL_SIBLING_PATHS: tuple[str, ...] = tuple(
+    path.as_posix() for path in sorted(Path("services/orchestrator").glob("file_journal_*.py"))
+)
+assert _FILE_JOURNAL_SIBLING_PATHS, "the services/orchestrator/file_journal_*.py glob found no sibling"
+
+
+@pytest.mark.parametrize(
+    "journal_path",
+    [*_FILE_JOURNAL_SIBLING_PATHS, "services/orchestrator/file_orchestration_journal.py"],
+)
+def test_every_file_journal_sibling_selects_the_facade_importers_and_patchers(journal_path: str) -> None:
+    selected = set(select_tests([journal_path], repo_root=Path(".")))
+
+    missing_importers = sorted(set(FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS) - selected)
+    assert not missing_importers, f"{journal_path} lost the journal facade route: {missing_importers}"
+    missing_patchers = [test for test in _FILE_JOURNAL_FACADE_PATCHER_TESTS if test not in selected]
+    assert not missing_patchers, f"{journal_path} does not select the facade-global patchers: {missing_patchers}"
+    broad_only_target = "tests/test_state_clone.py"
+    assert broad_only_target not in selected, f"{journal_path} reaches the broad services/orchestrator/** rule"
+
+
 # #2316 / #2390: the targets the two at-site extensions of this change add,
 # spelled as LITERALS (#1827) so a rename in production cannot move the pin.
 _EXTRA_ROOTS_WIRING_TEST = "tests/test_retention_extra_roots.py"

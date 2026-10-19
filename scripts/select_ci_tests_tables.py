@@ -1433,6 +1433,17 @@ FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     # module's `__all__` and needs every listed name to keep a consumer. AST-only.
     "tests/test_file_orchestration_journal_facade.py",
     "tests/test_file_journal_late_lookup_seams.py",  # #2944 (task 5.4): facade patches reach moved siblings
+    # #3028: function-body facade import + facade-global patch, so importer derivation misses them. ~30s.
+    "tests/test_gateway_reconcile_claimant_exclusivity.py",
+    "tests/test_gateway_reconcile_file_cohort_comment.py",
+    "tests/test_gateway_reconcile_file_submit_barrier.py",
+    "tests/test_gateway_reconcile_identity_release.py",
+    "tests/test_gateway_reconcile_inventory.py",
+    "tests/test_gateway_reconcile_round10.py",
+    "tests/test_gateway_reconcile_writer_launch.py",
+    "tests/test_gateway_reconcile_writer_quiescence.py",
+    "tests/test_gateway_reconcile_writer_receipts.py",
+    "tests/test_safe_fs_lock.py",
 )
 
 
