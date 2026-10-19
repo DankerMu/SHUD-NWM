@@ -11,11 +11,13 @@ a zero count.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
 import services.orchestrator.file_journal_candidates as file_journal_candidates
+import services.orchestrator.file_journal_paths as file_journal_paths
 import services.orchestrator.file_orchestration_journal as file_orchestration_journal
 
 
@@ -54,3 +56,115 @@ def test_candidate_row_identity_reads_through_the_facade_evidence(monkeypatch: p
 
     assert len(calls) == 1
     assert identity == {"model_id": "m", "init_state_id": "s"}
+
+
+def test_journal_segment_lineage_reads_through_the_facade_stat_signature(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[object] = []
+
+    def signature_stub(path: object) -> tuple[int, int, int]:
+        calls.append(path)
+        return (1, 1, 1)
+
+    monkeypatch.setattr(file_orchestration_journal, "_stat_signature", signature_stub)
+
+    result = file_journal_paths._require_journal_segment_lineage(
+        tmp_path / "journal" / "gfs" / "2026071200.1.jsonl",
+        root=tmp_path,
+        cycle_segment="2026071200",
+        segment_index=1,
+    )
+
+    assert result is None
+    assert calls == [tmp_path / "journal" / "gfs" / "2026071200.jsonl"]
+
+
+def test_discovered_files_walker_reads_through_the_facade_stat_primitives(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    directory = tmp_path / "d"
+    directory.mkdir()
+    (directory / "a.json").write_text("{}", encoding="utf-8")
+    signature = file_orchestration_journal._stat_signature(directory)
+    counts: dict[str, int] = {}
+
+    def counting(name: str, real: Callable[..., object]) -> Callable[..., object]:
+        def proxy(*args: object, **kwargs: object) -> object:
+            counts[name] = counts.get(name, 0) + 1
+            return real(*args, **kwargs)
+
+        return proxy
+
+    monkeypatch.setattr(
+        file_orchestration_journal,
+        "_stat_signature",
+        counting("_stat_signature", file_orchestration_journal._stat_signature),
+    )
+    monkeypatch.setattr(
+        file_orchestration_journal,
+        "stat_no_follow",
+        counting("stat_no_follow", file_orchestration_journal.stat_no_follow),
+    )
+    monkeypatch.setattr(
+        file_orchestration_journal,
+        "list_directory_no_follow_limited",
+        counting("list_directory_no_follow_limited", file_orchestration_journal.list_directory_no_follow_limited),
+    )
+
+    found = list(
+        file_journal_paths._iter_discovered_files(
+            directory,
+            root=tmp_path,
+            suffix=".json",
+            recursive=False,
+            max_files=10,
+            max_depth=2,
+            strict_disappearance=True,
+            expected_root_signature=signature,
+        )
+    )
+
+    assert found == [directory / "a.json"]
+    assert counts == {"_stat_signature": 4, "stat_no_follow": 2, "list_directory_no_follow_limited": 1}
+
+
+def test_retention_surface_walker_reads_through_the_facade_stat_primitives(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    directory = tmp_path / "journal"
+    directory.mkdir()
+    budget = file_orchestration_journal._RetentionDiscoveryBudget(limit=10)
+    counts: dict[str, int] = {}
+
+    def counting(name: str, real: Callable[..., object]) -> Callable[..., object]:
+        def proxy(*args: object, **kwargs: object) -> object:
+            counts[name] = counts.get(name, 0) + 1
+            return real(*args, **kwargs)
+
+        return proxy
+
+    monkeypatch.setattr(
+        file_orchestration_journal,
+        "stat_no_follow",
+        counting("stat_no_follow", file_orchestration_journal.stat_no_follow),
+    )
+    monkeypatch.setattr(
+        file_orchestration_journal,
+        "list_directory_no_follow_limited",
+        counting("list_directory_no_follow_limited", file_orchestration_journal.list_directory_no_follow_limited),
+    )
+
+    found = list(
+        file_journal_paths._iter_retention_surface_files(
+            directory,
+            root=tmp_path,
+            surface="journal",
+            max_files=10,
+            max_depth=3,
+            budget=budget,
+        )
+    )
+
+    assert found == []
+    assert counts == {"stat_no_follow": 1, "list_directory_no_follow_limited": 1}

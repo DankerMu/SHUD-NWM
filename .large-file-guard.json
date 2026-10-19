@@ -145,6 +145,7 @@
     "tests/test_object_store_forcing.py",
     "services/production_closure/e2e_validation.py",
     "scripts/validate_two_node_docker_runtime.py",
-    "services/orchestrator/file_journal_candidates.py"
+    "services/orchestrator/file_journal_candidates.py",
+    "services/orchestrator/file_journal_paths.py"
   ]
 }
