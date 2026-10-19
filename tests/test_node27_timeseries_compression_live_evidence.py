@@ -4955,9 +4955,9 @@ _ROLE = {
 
 
 def _e2e_build_timeline() -> tuple[list[datetime], dict[str, datetime], _timedelta]:
-    """Deterministic, compressed 2026-07-15 timeline for the 55 ``_utc_now`` calls.
+    """Deterministic, compressed 2026-07-15 timeline for the 55 ``_utc_now_text`` calls.
 
-    The supervisor state machine calls ``_utc_now`` in a fixed order: one per
+    The supervisor state machine calls ``_utc_now_text`` in a fixed order: one per
     checkpoint, two (start/finish) per child, two per capture.  Child wall deltas
     must be within 0.5s of the real monotonic elapsed (verifier isclose gate), so
     every child/capture start->finish is a small 0.3s window while distinct
@@ -5389,7 +5389,7 @@ def test_real_state_machine_bundle_verifies_task_4_5_pass(
     """The REAL state machine + REAL build_bundle + REAL verify_bundle => PASS.
 
     Hermetic: no network, no DB, disk-size-independent (the free-bytes seam), and
-    deterministic (``_utc_now`` is driven by a fixed timeline).  Node-27 exercises
+    deterministic (``_utc_now_text`` is driven by a fixed timeline).  Node-27 exercises
     the real provenance/identity binaries; here the autouse fixtures repoint the
     narrow git-provenance seams onto a suite-owned lineage, exactly as the other
     verifier tests in this module do.
@@ -5398,7 +5398,7 @@ def test_real_state_machine_bundle_verifies_task_4_5_pass(
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run-user"))
     seq, starts, child = _e2e_build_timeline()
     clock = iter(seq)
-    monkeypatch.setattr(supervisor, "_utc_now", lambda: _e2e_fmt(next(clock)))
+    monkeypatch.setattr(supervisor, "_utc_now_text", lambda: _e2e_fmt(next(clock)))
 
     fixture_repo = _capture_harness._fixture_repo(tmp_path)
     checkpoint_bin = tmp_path / "checkpoint-bin"

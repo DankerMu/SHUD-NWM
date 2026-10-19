@@ -696,7 +696,7 @@ def parse_systemd_timestamp(raw: str) -> datetime | None:
     return moment.astimezone()
 
 
-def parse_iso8601(raw: str) -> datetime:
+def parse_aware_iso8601(raw: str) -> datetime:
     """Parse an artifact ISO-8601 instant; a naive value is a refusal."""
 
     value = (raw or "").strip()
@@ -1059,7 +1059,7 @@ def pass_cycle_keys(payload: dict[str, Any]) -> frozenset[str]:
             if not isinstance(source, str) or not isinstance(raw_cycle, str):
                 continue
             try:
-                keys.add(cycle_key(source, parse_iso8601(raw_cycle)))
+                keys.add(cycle_key(source, parse_aware_iso8601(raw_cycle)))
             except ValueError:
                 continue
     return frozenset(keys)
@@ -1084,7 +1084,7 @@ def read_pass_record(path: Path) -> PassRecord:
     if not isinstance(raw_started_at, str):
         raise ProbeEvidenceError(f"records no started_at: {path.name}")
     try:
-        started_at = parse_iso8601(raw_started_at)
+        started_at = parse_aware_iso8601(raw_started_at)
     except ValueError as error:
         raise ProbeEvidenceError(f"started_at is unparseable: {path.name}: {error}") from error
     status = payload.get("status")
@@ -1993,7 +1993,7 @@ def resolve_now(raw: str) -> datetime:
     if not raw:
         return datetime.now(UTC)
     try:
-        return parse_iso8601(raw)
+        return parse_aware_iso8601(raw)
     except ValueError as error:
         raise ConfigError(f"--now must be a timezone-aware ISO-8601 instant: {error}") from error
 

@@ -161,8 +161,8 @@ def _refused(started: datetime, exit_code: int, error: dict[str, Any], *, attemp
 def _header(started: datetime, status: str, exit_code: int, *, attempts: int) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
-        "started_at": _format_time(started),
-        "finished_at": _format_time(datetime.now(tz=UTC)),
+        "started_at": _format_utc_seconds(started),
+        "finished_at": _format_utc_seconds(datetime.now(tz=UTC)),
         "status": status,
         "exit_code": exit_code,
         "attempts": attempts,
@@ -214,7 +214,7 @@ def _write_receipt(root: Path, receipt: dict[str, Any], safe_fs: Any) -> None:
         os.unlink(root / stale)
 
 
-def _format_time(value: datetime) -> str:
+def _format_utc_seconds(value: datetime) -> str:
     return value.astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 

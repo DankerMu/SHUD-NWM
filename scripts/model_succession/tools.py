@@ -30,7 +30,7 @@ from packages.common.contracts.hydrologic_fingerprint import (
     MissingPackageFileError,
     verify_hydrologic_core_fingerprint_equal,
 )
-from packages.common.contracts.time_normalization import parse_cycle_time
+from packages.common.contracts.time_normalization import parse_cycle_time, utc_now
 from packages.common.source_identity import normalize_source_id
 from scripts.model_succession import copyback
 from scripts.model_succession import plan as planning
@@ -49,7 +49,6 @@ from scripts.model_succession.model import (
     Settings,
     StepFailure,
     read_json,
-    utc_now,
     utc_text,
 )
 

@@ -668,7 +668,7 @@ def _validate_reviewed_file_ref(
     return ref
 
 
-def _parse_utc(value: Any, label: str) -> datetime:
+def _parse_evidence_utc(value: Any, label: str) -> datetime:
     try:
         parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except ValueError as error:
@@ -1560,8 +1560,8 @@ def _validate_supervisor_execution(
                     )
                     if ref["path"] != path:
                         raise EvidenceError("supervisor observed artifact path differs from run plan output")
-            started_at = _parse_utc(event.get("started_at"), "supervisor child start")
-            finished_at = _parse_utc(event.get("finished_at"), "supervisor child finish")
+            started_at = _parse_evidence_utc(event.get("started_at"), "supervisor child start")
+            finished_at = _parse_evidence_utc(event.get("finished_at"), "supervisor child finish")
             started_mono = event.get("started_monotonic")
             finished_mono = event.get("finished_monotonic")
             if (
@@ -1655,8 +1655,8 @@ def _validate_supervisor_execution(
             )
             if ref["path"] != capture["output_path"]:
                 raise EvidenceError("supervisor capture output path differs")
-            started_at = _parse_utc(event["started_at"], "supervisor capture start")
-            finished_at = _parse_utc(event["finished_at"], "supervisor capture finish")
+            started_at = _parse_evidence_utc(event["started_at"], "supervisor capture start")
+            finished_at = _parse_evidence_utc(event["finished_at"], "supervisor capture finish")
             started_mono = event["started_monotonic"]
             finished_mono = event["finished_monotonic"]
             if (
@@ -1744,7 +1744,7 @@ def _validate_supervisor_execution(
                 for key, value in checkpoint_result.items()
                 if key not in {"journal_start_cursor", "journal_end_cursor", "replay_activation"}
             )
-            checkpoint_at = _parse_utc(event["captured_at"], f"supervisor checkpoint[{index}].captured_at")
+            checkpoint_at = _parse_evidence_utc(event["captured_at"], f"supervisor checkpoint[{index}].captured_at")
             checkpoint_times[checkpoint_id] = checkpoint_at
             checkpoint_mono = event["monotonic"]
             if not isinstance(checkpoint_mono, (int, float)) or checkpoint_mono <= previous_event_mono:
@@ -1950,7 +1950,7 @@ def _catalog_snapshot(
         {"captured_at", "snapshot_id", "phase", "mutation_head_sha", "catalog"},
         label,
     )
-    captured_at = _parse_utc(snapshot["captured_at"], f"{label}.captured_at")
+    captured_at = _parse_evidence_utc(snapshot["captured_at"], f"{label}.captured_at")
     if (
         snapshot["phase"] != phase
         or snapshot["mutation_head_sha"] != mutation_head_sha
@@ -1997,7 +1997,7 @@ def _validate_dump_listing(
         },
         "preflight.schema_dump_list document",
     )
-    captured_at = _parse_utc(listing["captured_at"], "preflight.schema_dump_list.captured_at")
+    captured_at = _parse_evidence_utc(listing["captured_at"], "preflight.schema_dump_list.captured_at")
     if (
         listing["mutation_head_sha"] != mutation_head_sha
         or not isinstance(listing["snapshot_id"], str)
@@ -2056,7 +2056,7 @@ def _validate_preflight(raw: Any, mutation_head_sha: str) -> dict[str, Any]:
         set(PREFLIGHT_KEYS),
         "preflight.evidence document",
     )
-    captured_at = _parse_utc(preflight["captured_at"], "preflight.captured_at")
+    captured_at = _parse_evidence_utc(preflight["captured_at"], "preflight.captured_at")
     if (
         preflight["node"] != "node-27"
         or preflight["repo_path"] != EXPECTED_REPO_PATH
@@ -2157,7 +2157,7 @@ def _validate_preflight(raw: Any, mutation_head_sha: str) -> dict[str, Any]:
         "extversion AS timescaledb_version FROM pg_extension "
         "WHERE extname = 'timescaledb'"
     )
-    probe_captured = _parse_utc(probe["captured_at"], "preflight.database_identity_probe.captured_at")
+    probe_captured = _parse_evidence_utc(probe["captured_at"], "preflight.database_identity_probe.captured_at")
     if (
         database.get("dbname") != "nhms"
         or database.get("instance") != "node27-primary-pg15"
@@ -2269,9 +2269,9 @@ def _validate_recovery(
         raise EvidenceError("recovery row parity failed")
     if recovery_receipt["exit_code"] != 0 or recovery_receipt["decompress_return_relation"] != RECOVERY_RETURN_RELATION:
         raise EvidenceError("recovery decompression result is not the exact target relation")
-    preflight_at = _parse_utc(recovery_safety_summary["captured_at"], "recovery.preflight.captured_at")
-    started_at = _parse_utc(recovery_receipt["started_at"], "recovery.receipt.started_at")
-    finished_at = _parse_utc(recovery_receipt["finished_at"], "recovery.receipt.finished_at")
+    preflight_at = _parse_evidence_utc(recovery_safety_summary["captured_at"], "recovery.preflight.captured_at")
+    started_at = _parse_evidence_utc(recovery_receipt["started_at"], "recovery.receipt.started_at")
+    finished_at = _parse_evidence_utc(recovery_receipt["finished_at"], "recovery.receipt.finished_at")
     if not (preflight_at < started_at < finished_at < compression_preflight_captured_at):
         raise EvidenceError("recovery chronology must precede the compression preflight")
     return {
@@ -2313,7 +2313,7 @@ def _table_snapshot(
         },
         label,
     )
-    captured_at = _parse_utc(snapshot["captured_at"], f"{label}.captured_at")
+    captured_at = _parse_evidence_utc(snapshot["captured_at"], f"{label}.captured_at")
     if (
         snapshot["phase"] != expected_phase
         or snapshot["mutation_head_sha"] != mutation_head_sha
@@ -2400,8 +2400,8 @@ def _validate_selection_snapshot(raw: Any, label: str) -> dict[str, Any]:
         {"observed_at", "cutoff", "free_bytes", "candidates", "selected"},
         f"{label} document",
     )
-    observed_at = _parse_utc(snapshot["observed_at"], f"{label}.observed_at")
-    cutoff = _parse_utc(snapshot["cutoff"], f"{label}.cutoff")
+    observed_at = _parse_evidence_utc(snapshot["observed_at"], f"{label}.observed_at")
+    cutoff = _parse_evidence_utc(snapshot["cutoff"], f"{label}.cutoff")
     derived_cutoff = observed_at - timedelta(seconds=EXPECTED_LAG_SECONDS)
     if cutoff != derived_cutoff:
         raise EvidenceError(f"{label} cutoff is not observed_at minus the authorized lag")
@@ -2435,8 +2435,8 @@ def _validate_selection_snapshot(raw: Any, label: str) -> dict[str, Any]:
         before_bytes = candidate["before_bytes"]
         if not isinstance(before_bytes, int) or isinstance(before_bytes, bool) or before_bytes < 1:
             raise EvidenceError(f"{label} candidate before_bytes must be positive")
-        range_start = _parse_utc(candidate["range_start"], f"{label} candidate range_start")
-        range_end = _parse_utc(candidate["range_end"], f"{label} candidate range_end")
+        range_start = _parse_evidence_utc(candidate["range_start"], f"{label} candidate range_start")
+        range_end = _parse_evidence_utc(candidate["range_end"], f"{label} candidate range_end")
         if range_start >= range_end or range_end >= cutoff:
             raise EvidenceError(f"{label} candidate is not strictly terminal")
         candidates.append(dict(candidate))
@@ -2445,7 +2445,7 @@ def _validate_selection_snapshot(raw: Any, label: str) -> dict[str, Any]:
         key=lambda item: (
             item["hypertable_schema"],
             item["hypertable_name"],
-            _parse_utc(item["range_end"], "candidate range_end"),
+            _parse_evidence_utc(item["range_end"], "candidate range_end"),
             item["chunk_schema"],
             item["chunk_name"],
         ),
@@ -2462,7 +2462,9 @@ def _validate_selection_snapshot(raw: Any, label: str) -> dict[str, Any]:
         or selected_row["before_bytes"] > MAX_SELECTED_BYTES
     ):
         raise EvidenceError(f"{label} selected row violates hydro/bound/8-GiB authorization")
-    cutoff_margin = int((cutoff - _parse_utc(selected_row["range_end"], f"{label} selected range_end")).total_seconds())
+    cutoff_margin = int(
+        (cutoff - _parse_evidence_utc(selected_row["range_end"], f"{label} selected range_end")).total_seconds()
+    )
     if cutoff_margin < 600:
         raise EvidenceError(f"{label} selected chunk is within ten minutes of cutoff")
     identities = [_selected_identity(value) for value in selected]
@@ -2794,7 +2796,7 @@ def _validate_phase(
             {"captured_at", "stage", "sessions", "material_load_stable"},
             f"benchmark activity[{index}]",
         )
-        activity_times.append(_parse_utc(activity["captured_at"], f"benchmark activity[{index}].captured_at"))
+        activity_times.append(_parse_evidence_utc(activity["captured_at"], f"benchmark activity[{index}].captured_at"))
         if activity["stage"] != expected_stages[index] or activity["material_load_stable"] is not True:
             raise EvidenceError(f"benchmark {query_name} {phase_name} has load drift")
         sessions = _require_list(activity["sessions"], f"benchmark activity[{index}].sessions")
@@ -2836,8 +2838,8 @@ def _validate_phase(
         },
         f"benchmark {query_name} {phase_name}.execution_bounds",
     )
-    started_at = _parse_utc(bounds["started_at"], "benchmark phase started_at")
-    finished_at = _parse_utc(bounds["finished_at"], "benchmark phase finished_at")
+    started_at = _parse_evidence_utc(bounds["started_at"], "benchmark phase started_at")
+    finished_at = _parse_evidence_utc(bounds["finished_at"], "benchmark phase finished_at")
     if (
         bounds["statement_timeout_ms"] != 60_000
         or bounds["lock_timeout_ms"] != 5_000
@@ -3045,8 +3047,8 @@ def _validate_benchmarks(
                 basin_version_id=str(request["basin_version_id"]),
                 river_segment_id=str(request["river_segment_id"]),
                 river_network_version_id=str(request["river_network_version_id"]),
-                issue_time=_parse_utc(request["issue_time"], "curve request issue_time"),
-                end_time=_parse_utc(request["end_time"], "curve request end_time"),
+                issue_time=_parse_evidence_utc(request["issue_time"], "curve request issue_time"),
+                end_time=_parse_evidence_utc(request["end_time"], "curve request end_time"),
                 scenario=str(request["scenario"]),
                 resolve_cursor=seeded_resolve_cursor([{"run_key": key} for key in recorded_keys]),
             )
@@ -3058,10 +3060,10 @@ def _validate_benchmarks(
             ):
                 raise EvidenceError("benchmark curve query/binding differs from the public production owner")
             bound = dict(zip(parameter_names, bound_parameters, strict=True))
-            request_start = _parse_utc(bound["issue_time"], "benchmark curve issue_time")
-            request_end = _parse_utc(bound["end_time"], "benchmark curve end_time")
-            selected_start = _parse_utc(selected["range_start"], "selected range_start")
-            selected_end = _parse_utc(selected["range_end"], "selected range_end")
+            request_start = _parse_evidence_utc(bound["issue_time"], "benchmark curve issue_time")
+            request_end = _parse_evidence_utc(bound["end_time"], "benchmark curve end_time")
+            selected_start = _parse_evidence_utc(selected["range_start"], "selected range_start")
+            selected_end = _parse_evidence_utc(selected["range_end"], "selected range_end")
             if not (
                 request_start < request_end
                 and request_start < selected_end
@@ -3096,7 +3098,7 @@ def _validate_benchmarks(
                     "basin_version_id": request["basin_version_id"],
                     "river_network_version_id": request["river_network_version_id"],
                     "variable": "q_down",
-                    "valid_time": _parse_utc(request["valid_time"], "mvt request valid_time"),
+                    "valid_time": _parse_evidence_utc(request["valid_time"], "mvt request valid_time"),
                 },
                 z=int(request["z"]),
                 x=int(request["x"]),
@@ -3118,11 +3120,11 @@ def _validate_benchmarks(
             }
             if any(binding[key] != value for key, value in expected_mvt_values.items()):
                 raise EvidenceError("benchmark mvt budget/identity binding differs from production")
-            valid_time = _parse_utc(binding["valid_time"], "benchmark mvt valid_time")
+            valid_time = _parse_evidence_utc(binding["valid_time"], "benchmark mvt valid_time")
             if not (
-                _parse_utc(selected["range_start"], "selected range_start")
+                _parse_evidence_utc(selected["range_start"], "selected range_start")
                 <= valid_time
-                < _parse_utc(selected["range_end"], "selected range_end")
+                < _parse_evidence_utc(selected["range_end"], "selected range_end")
             ):
                 raise EvidenceError("benchmark mvt request is not bound to the selected chunk range")
             z = binding["z"]
@@ -3213,8 +3215,8 @@ def _validate_benchmarks(
             {"started_at", "finished_at", "wall_seconds"},
             f"benchmarks.execution_bounds.{phase_name}",
         )
-        capture_started = _parse_utc(bounds["started_at"], f"benchmark {phase_name} capture-wide start")
-        capture_finished = _parse_utc(bounds["finished_at"], f"benchmark {phase_name} capture-wide finish")
+        capture_started = _parse_evidence_utc(bounds["started_at"], f"benchmark {phase_name} capture-wide start")
+        capture_finished = _parse_evidence_utc(bounds["finished_at"], f"benchmark {phase_name} capture-wide finish")
         phase_intervals = [_phase_interval(query, phase_name) for query in output]
         if (
             bounds["wall_seconds"] != EXPECTED_TIMEOUT_SECONDS
@@ -3250,9 +3252,9 @@ def _validate_cleanup(
         },
         "cleanup.evidence document",
     )
-    started = _parse_utc(cleanup["window_started_at"], "cleanup.window_started_at")
-    finished = _parse_utc(cleanup["window_finished_at"], "cleanup.window_finished_at")
-    captured = _parse_utc(cleanup["captured_at"], "cleanup.captured_at")
+    started = _parse_evidence_utc(cleanup["window_started_at"], "cleanup.window_started_at")
+    finished = _parse_evidence_utc(cleanup["window_finished_at"], "cleanup.window_finished_at")
+    captured = _parse_evidence_utc(cleanup["captured_at"], "cleanup.captured_at")
     if not window_started_at < started < finished < captured:
         raise EvidenceError("cleanup activation-window chronology differs")
     expected_repo = {
@@ -3343,8 +3345,8 @@ def _phase_interval(query: Mapping[str, Any], phase: str) -> tuple[datetime, dat
     capture = _require_mapping(query[f"{phase}_capture"], f"benchmark {phase} capture")
     bounds = _require_mapping(capture["execution_bounds"], f"benchmark {phase} bounds")
     return (
-        _parse_utc(bounds["started_at"], f"benchmark {phase} started_at"),
-        _parse_utc(bounds["finished_at"], f"benchmark {phase} finished_at"),
+        _parse_evidence_utc(bounds["started_at"], f"benchmark {phase} started_at"),
+        _parse_evidence_utc(bounds["finished_at"], f"benchmark {phase} finished_at"),
     )
 
 
@@ -3574,7 +3576,7 @@ def verify_bundle(
         or bundle["verifier_head_sha"] != verifier_head_sha
     ):
         raise EvidenceError("bundle node/mutation/verifier SHA mismatch")
-    _parse_utc(bundle["generated_at"], "generated_at")
+    _parse_evidence_utc(bundle["generated_at"], "generated_at")
     authorization = _require_mapping(bundle["authorization"], "authorization")
     expected_authorization = {
         "lag_seconds": EXPECTED_LAG_SECONDS,
@@ -3612,8 +3614,8 @@ def verify_bundle(
     def ledger_invocation(kind: str, ordinal: int = 0) -> dict[str, Any]:
         event = execution_summary["events_by_kind"][kind][ordinal]
         return {
-            "started_at_dt": _parse_utc(event["started_at"], f"{kind} ledger start"),
-            "finished_at_dt": _parse_utc(event["finished_at"], f"{kind} ledger finish"),
+            "started_at_dt": _parse_evidence_utc(event["started_at"], f"{kind} ledger start"),
+            "finished_at_dt": _parse_evidence_utc(event["finished_at"], f"{kind} ledger finish"),
             "artifact_associations": _require_mapping(event["artifact_associations"], f"{kind} artifacts"),
             "kind": kind,
             "ordinal": ordinal,
@@ -3622,8 +3624,8 @@ def verify_bundle(
     def capture_invocation(kind: str) -> dict[str, Any]:
         event = execution_summary["capture_events_by_kind"][kind]
         return {
-            "started_at_dt": _parse_utc(event["started_at"], f"capture {kind} ledger start"),
-            "finished_at_dt": _parse_utc(event["finished_at"], f"capture {kind} ledger finish"),
+            "started_at_dt": _parse_evidence_utc(event["started_at"], f"capture {kind} ledger start"),
+            "finished_at_dt": _parse_evidence_utc(event["finished_at"], f"capture {kind} ledger finish"),
             "artifact_associations": {kind: event["artifact_association"]},
             "kind": f"capture:{kind}",
             "ordinal": 0,
@@ -3666,7 +3668,9 @@ def verify_bundle(
         recovery_receipt_raw,
         mutation_head_sha=str(bundle["mutation_head_sha"]),
         database_identity=_require_mapping(preflight["database_identity"], "preflight.database_identity"),
-        compression_preflight_captured_at=_parse_utc(preflight_summary["captured_at"], "preflight captured_at"),
+        compression_preflight_captured_at=_parse_evidence_utc(
+            preflight_summary["captured_at"], "preflight captured_at"
+        ),
     )
     dump_ref, _ = _streaming_artifact_ref(
         preflight_bundle.get("schema_dump"),
@@ -3718,9 +3722,9 @@ def verify_bundle(
     recovery_invocation = ledger_invocation("decompress")
     require_observed_artifact(capture_invocation("recovery_preflight"), "recovery_preflight", recovery_preflight_ref)
     require_observed_artifact(recovery_invocation, "recovery_receipt", recovery_receipt_ref)
-    if recovery_invocation["started_at_dt"] != _parse_utc(
+    if recovery_invocation["started_at_dt"] != _parse_evidence_utc(
         recovery_receipt_raw["started_at"], "recovery receipt started"
-    ) or recovery_invocation["finished_at_dt"] != _parse_utc(
+    ) or recovery_invocation["finished_at_dt"] != _parse_evidence_utc(
         recovery_receipt_raw["finished_at"], "recovery receipt finished"
     ):
         raise EvidenceError("recovery invocation does not bind receipt chronology")
@@ -3786,7 +3790,7 @@ def verify_bundle(
     pre_enforce = _validate_selection_snapshot(pre_enforce_raw, "selection.pre_enforce")
     if post_dry["identities"] != pre_enforce["identities"]:
         raise EvidenceError("post-dry-run and pre-enforce selected tuples differ")
-    if _parse_utc(preflight_summary["captured_at"], "preflight captured_at") > post_dry["observed_at_dt"]:
+    if _parse_evidence_utc(preflight_summary["captured_at"], "preflight captured_at") > post_dry["observed_at_dt"]:
         raise EvidenceError("preflight was captured after the post-dry-run observation")
     identities = pre_enforce["identities"]
     if identities != [dict(RECOVERY_TARGET)]:
@@ -3816,15 +3820,15 @@ def verify_bundle(
     require_observed_artifact(enforce_invocation, "enforce_receipt", enforce_ref)
     if not (
         dry_invocation["started_at_dt"]
-        <= _parse_utc(dry["generated_at"], "dry generated_at")
+        <= _parse_evidence_utc(dry["generated_at"], "dry generated_at")
         <= dry_invocation["finished_at_dt"]
         <= enforce_invocation["started_at_dt"]
-        <= _parse_utc(enforce["generated_at"], "enforce generated_at")
+        <= _parse_evidence_utc(enforce["generated_at"], "enforce generated_at")
         <= enforce_invocation["finished_at_dt"]
     ):
         raise EvidenceError("dry-run/enforce invocation chronology differs")
-    dry_generated_at = _parse_utc(dry["generated_at"], "dry-run generated_at")
-    enforce_started_at = _parse_utc(enforce["now_utc"], "enforce now_utc")
+    dry_generated_at = _parse_evidence_utc(dry["generated_at"], "dry-run generated_at")
+    enforce_started_at = _parse_evidence_utc(enforce["now_utc"], "enforce now_utc")
     if post_dry["observed_at_dt"] < dry_generated_at:
         raise EvidenceError("post-dry-run selection was observed before dry-run completion")
     pre_enforce_delta = (enforce_started_at - pre_enforce["observed_at_dt"]).total_seconds()
@@ -4021,7 +4025,7 @@ def verify_bundle(
         },
         "catalog.post document",
     )
-    catalog_captured_at = _parse_utc(catalog_post["captured_at"], "catalog.post.captured_at")
+    catalog_captured_at = _parse_evidence_utc(catalog_post["captured_at"], "catalog.post.captured_at")
     if (
         catalog_post["mutation_head_sha"] != bundle["mutation_head_sha"]
         or not isinstance(catalog_post["snapshot_id"], str)
@@ -4054,7 +4058,9 @@ def verify_bundle(
         cleanup_raw,
         mutation_head_sha=str(bundle["mutation_head_sha"]),
         prior_autopipe_state=preflight_summary["prior_autopipe_state"],
-        window_started_at=_parse_utc(recovery_summary["preflight_captured_at"], "recovery preflight captured_at"),
+        window_started_at=_parse_evidence_utc(
+            recovery_summary["preflight_captured_at"], "recovery preflight captured_at"
+        ),
     )
     require_observed_artifact(capture_invocation("cleanup"), "cleanup", cleanup_ref)
     before_intervals = [_phase_interval(query, "before") for query in benchmark_results]
@@ -4087,7 +4093,7 @@ def verify_bundle(
         ("catalog-2", second_catalog_snapshot["captured_at_dt"]),
         (
             "recovery-preflight",
-            _parse_utc(
+            _parse_evidence_utc(
                 recovery_summary["preflight_captured_at"],
                 "recovery preflight",
             ),
@@ -4096,7 +4102,7 @@ def verify_bundle(
         ("recovery-finish", recovery_invocation["finished_at_dt"]),
         (
             "compression-preflight",
-            _parse_utc(preflight_summary["captured_at"], "compression preflight"),
+            _parse_evidence_utc(preflight_summary["captured_at"], "compression preflight"),
         ),
         ("dry-start", dry_invocation["started_at_dt"]),
         ("dry-finish", dry_invocation["finished_at_dt"]),
@@ -4113,11 +4119,11 @@ def verify_bundle(
         ("benchmark-after-finish", benchmark_after_invocation["finished_at_dt"]),
         (
             "cleanup-finish",
-            _parse_utc(cleanup_summary["window_finished_at"], "cleanup finish"),
+            _parse_evidence_utc(cleanup_summary["window_finished_at"], "cleanup finish"),
         ),
         (
             "cleanup-captured",
-            _parse_utc(cleanup_summary["captured_at"], "cleanup captured"),
+            _parse_evidence_utc(cleanup_summary["captured_at"], "cleanup captured"),
         ),
         ("audit-window-finish", execution_summary["artifact_window_finished_at"]),
     ]

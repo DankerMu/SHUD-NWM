@@ -154,7 +154,7 @@ def repair_state_index(
     retention_days: int = DEFAULT_STATE_INDEX_RETENTION_DAYS,
     cycle_lag_hours: int | None = None,
 ) -> dict[str, Any]:
-    started_at = _format_time(datetime.now(tz=UTC))
+    started_at = _format_utc_seconds(datetime.now(tz=UTC))
     retention_kwargs: dict[str, Any] = {}
     if operation == "prune-retention":
         retention_kwargs = {
@@ -256,7 +256,7 @@ def _receipt_from_summary(
     return {
         "schema_version": SCHEMA_VERSION,
         "started_at": started_at,
-        "completed_at": _format_time(datetime.now(tz=UTC)),
+        "completed_at": _format_utc_seconds(datetime.now(tz=UTC)),
         "operation": summary.get("operation"),
         "mode": summary.get("mode"),
         "lane": summary.get("lane"),
@@ -369,7 +369,7 @@ def _write_receipt(root: Path, receipt: Mapping[str, Any]) -> None:
         raise RepairCliError("receipt_write_failed", {"root": str(root), "error": str(error)}) from error
 
 
-def _format_time(value: datetime) -> str:
+def _format_utc_seconds(value: datetime) -> str:
     return value.astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 

@@ -52,6 +52,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlparse
 
+from packages.common.contracts.time_normalization import format_iso_utc, utc_now
 from packages.common.safe_fs import SafeFilesystemError, ensure_directory_no_follow
 from packages.common.source_identity import normalize_source_id
 
@@ -217,7 +218,7 @@ def run_pass(*, args: argparse.Namespace, run_root: Path, state_root: Path) -> d
         max_cycles_per_source=args.max_cycles_per_source,
         cycle_lag_hours=args.cycle_lag_hours,
     )
-    pass_started_at = _now_iso()
+    pass_started_at = format_iso_utc(utc_now())
     results: list[dict[str, Any]] = []
     for candidate in candidates:
         state_file = _state_file(state_root, candidate)
@@ -254,7 +255,7 @@ def run_pass(*, args: argparse.Namespace, run_root: Path, state_root: Path) -> d
     summary = {
         "status": "completed_with_failures" if any(item["status"] == "failed" for item in results) else "completed",
         "pass_started_at": pass_started_at,
-        "pass_finished_at": _now_iso(),
+        "pass_finished_at": format_iso_utc(utc_now()),
         "run_root": str(run_root),
         "candidate_count": len(candidates),
         "results": results,
@@ -299,7 +300,7 @@ def _run_cycle(candidate: CandidateCycle, *, run_root: Path, state_file: Path) -
             "source_id": candidate.source_id,
             "cycle_time": candidate.token,
             "run_id": candidate.run_id,
-            "started_at": _now_iso(),
+            "started_at": format_iso_utc(utc_now()),
         },
     )
     env = os.environ.copy()
@@ -328,7 +329,7 @@ def _run_cycle(candidate: CandidateCycle, *, run_root: Path, state_file: Path) -
             "elapsed_seconds": elapsed_seconds,
         }
         if not state:
-            _write_state(state_file, {**result, "finished_at": _now_iso()})
+            _write_state(state_file, {**result, "finished_at": format_iso_utc(utc_now())})
         return result
 
     typed_state = _known_retryable_download_state(candidate, state)
@@ -344,7 +345,7 @@ def _run_cycle(candidate: CandidateCycle, *, run_root: Path, state_file: Path) -
         for key in ("reason", "classifier", "retryable"):
             if key in typed_state:
                 result[key] = typed_state[key]
-        _write_state(state_file, {**state, **result, "finished_at": _now_iso()})
+        _write_state(state_file, {**state, **result, "finished_at": format_iso_utc(utc_now())})
         return result
 
     result = {
@@ -355,7 +356,7 @@ def _run_cycle(candidate: CandidateCycle, *, run_root: Path, state_file: Path) -
         "returncode": completed.returncode,
         "elapsed_seconds": elapsed_seconds,
     }
-    _write_state(state_file, {**result, "finished_at": _now_iso()})
+    _write_state(state_file, {**result, "finished_at": format_iso_utc(utc_now())})
     return result
 
 
@@ -416,7 +417,7 @@ def _submit_slurm_cycle(
             "returncode": submitted.returncode,
             "stderr": submitted.stderr.strip(),
         }
-        _write_state(state_file, {**result, "finished_at": _now_iso()})
+        _write_state(state_file, {**result, "finished_at": format_iso_utc(utc_now())})
         return result
 
     try:
@@ -433,7 +434,7 @@ def _submit_slurm_cycle(
             "stderr": submitted.stderr.strip(),
             "error": str(error),
         }
-        _write_state(state_file, {**result, "finished_at": _now_iso()})
+        _write_state(state_file, {**result, "finished_at": format_iso_utc(utc_now())})
         return result
 
     _write_state(
@@ -444,7 +445,7 @@ def _submit_slurm_cycle(
             "cycle_time": candidate.token,
             "run_id": candidate.run_id,
             "slurm_job_id": job_id,
-            "submitted_at": _now_iso(),
+            "submitted_at": format_iso_utc(utc_now()),
             "slurm_log_dir": str(slurm_root),
         },
     )
@@ -486,7 +487,7 @@ def _submit_slurm_cycle(
             "elapsed_seconds": elapsed_seconds,
             "reason": f"slurm status {status} is nonterminal or unknown",
         }
-        _write_state(state_file, {**state, **result, "last_checked_at": _now_iso()})
+        _write_state(state_file, {**state, **result, "last_checked_at": format_iso_utc(utc_now())})
         return result
     result = {
         "source_id": candidate.source_id,
@@ -497,7 +498,7 @@ def _submit_slurm_cycle(
         "slurm_job_id": job_id,
         "elapsed_seconds": elapsed_seconds,
     }
-    _write_state(state_file, {**result, "finished_at": _now_iso()})
+    _write_state(state_file, {**result, "finished_at": format_iso_utc(utc_now())})
     return result
 
 
@@ -865,10 +866,6 @@ def _env_bool(name: str, default: bool) -> bool:
 
 def _has_failed(summary: dict[str, Any]) -> bool:
     return any(item.get("status") == "failed" for item in summary.get("results", []))
-
-
-def _now_iso() -> str:
-    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 if __name__ == "__main__":

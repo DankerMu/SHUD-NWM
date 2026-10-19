@@ -1042,7 +1042,7 @@ def run_preflight(
         "change_id": CHANGE_ID,
         "status": status,
         "evidence_run_id": resolved_run_id,
-        "checked_at": _now_iso(),
+        "checked_at": _utc_now_seconds_text(),
         "evidence_root": str(evidence_root),
         "tmpdir": str(tmpdir),
         "docker_root_dir": docker_root,
@@ -1091,7 +1091,7 @@ def write_static_report(
         "schema_version": "nhms.two_node_docker.static_check.v1",
         "change_id": CHANGE_ID,
         "evidence_run_id": resolved_run_id,
-        "checked_at": _now_iso(),
+        "checked_at": _utc_now_seconds_text(),
         **result.to_dict(),
         **_static_proof_payload(result),
     }
@@ -1170,7 +1170,7 @@ def write_docker_security_summary(
         "schema_version": "nhms.two_node_docker.security_summary.v1",
         "change_id": CHANGE_ID,
         "status": status,
-        "checked_at": _now_iso(),
+        "checked_at": _utc_now_seconds_text(),
         "evidence_run_id": evidence_run_id,
         "live_docker_evidence": smoke_payload.get("status") == "PASS",
         "runtime_config": runtime_config,
@@ -3950,7 +3950,7 @@ def _docker_smoke_payload(
         "change_id": CHANGE_ID,
         "evidence_run_id": evidence_run_id or _evidence_run_id_from_output(evidence_root),
         "status": status,
-        "checked_at": _now_iso(),
+        "checked_at": _utc_now_seconds_text(),
         "evidence_root": str(evidence_root),
         "repo_root": str(repo_root),
         "image_tag": image_tag,
@@ -5359,7 +5359,7 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
     return True
 
 
-def _now_iso() -> str:
+def _utc_now_seconds_text() -> str:
     return dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 

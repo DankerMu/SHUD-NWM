@@ -27,11 +27,11 @@ import uuid
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, BinaryIO
 
 from packages.common import compression_terminal_state as terminal_state
+from packages.common.contracts.time_normalization import format_iso_utc, utc_now
 from packages.common.evidence_io import (
     BoundedEvidenceError,
     FileIdentity,
@@ -222,8 +222,8 @@ def _canonical(value: Any) -> bytes:
     return (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode()
 
 
-def _utc_now() -> str:
-    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+def _utc_now_text() -> str:
+    return format_iso_utc(utc_now())
 
 
 def _host_bin(name: str) -> str:
@@ -906,7 +906,7 @@ def run_child(
             continue
         raise SupervisorError(f"{kind} output {label} exists before spawn")
     wall.remaining(f"spawn {kind}")
-    started_utc = _utc_now()
+    started_utc = _utc_now_text()
     started_mono = time.monotonic()
     process = subprocess.Popen(
         argv,
@@ -924,7 +924,7 @@ def run_child(
         term_grace=term_grace,
     )
     finished_mono = time.monotonic()
-    finished_utc = _utc_now()
+    finished_utc = _utc_now_text()
     stdout_identity: dict[str, Any] = {
         "bytes": len(stdout),
         "sha256": hashlib.sha256(stdout).hexdigest(),
@@ -1014,7 +1014,7 @@ def run_capture_step(
     else:
         raise SupervisorError(f"capture {kind} output exists before its owner")
     wall.remaining(f"spawn capture {kind}")
-    started_at = _utc_now()
+    started_at = _utc_now_text()
     started_monotonic = time.monotonic()
     process = subprocess.Popen(
         argv,
@@ -1032,7 +1032,7 @@ def run_capture_step(
         term_grace=term_grace,
     )
     finished_monotonic = time.monotonic()
-    finished_at = _utc_now()
+    finished_at = _utc_now_text()
     if terminated or dropped["stdout"] or dropped["stderr"]:
         raise HardWallExpired(f"capture {kind} exceeded the hard wall or output ceiling")
     if process.returncode != 0 or stderr.strip() or not stdout:
@@ -1481,7 +1481,7 @@ def capture_checkpoint(
             "checkpoint_id": checkpoint_id,
             "phase": checkpoint["phase"],
             "command_id": checkpoint["command_id"],
-            "captured_at": _utc_now(),
+            "captured_at": _utc_now_text(),
             "monotonic": time.monotonic(),
             "journal_start_cursor": journal_cursor,
             "journal_end_cursor": end_cursor,

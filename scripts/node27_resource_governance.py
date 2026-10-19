@@ -84,7 +84,7 @@ class AuditConfig:
     thresholds: AuditThresholds
 
 
-def _utc_now() -> str:
+def _utc_now_seconds_text() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -562,7 +562,7 @@ def _maintenance_output_recommendations(
 
 
 def build_receipt(config: AuditConfig) -> dict[str, Any]:
-    started_at = _utc_now()
+    started_at = _utc_now_seconds_text()
     filesystem = collect_filesystem(config)
     postgres = collect_postgres(config.database_url)
     systemd = collect_systemd(config.services)
@@ -589,7 +589,7 @@ def build_receipt(config: AuditConfig) -> dict[str, Any]:
         "status": "completed",
         "execution_mode": "read_only_audit",
         "started_at": started_at,
-        "finished_at": _utc_now(),
+        "finished_at": _utc_now_seconds_text(),
         "paths": {
             "repo_root": str(config.repo_root),
             "object_store_root": str(config.object_store_root),

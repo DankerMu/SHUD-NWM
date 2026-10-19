@@ -36,11 +36,12 @@ import stat
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, TextIO
 
 from packages.common import compression_terminal_state as terminal_state
+from packages.common.contracts.time_normalization import utc_now
 from packages.common.safe_fs import SafeFilesystemError, atomic_write_bytes_no_follow
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -82,10 +83,6 @@ class PrearmError(RuntimeError):
     The working directory is left byte-identical, except post-move refusals,
     which report what already moved.
     """
-
-
-def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def _absolute(value: str | os.PathLike[str]) -> Path:
@@ -600,7 +597,7 @@ def run_prearm(
             "moves": [],
         }
 
-    now = _utc_now()
+    now = utc_now()
     archive_dir = _create_archive_dir(workdir / ARCHIVE_DIR_NAME, now=now)
     moves: list[dict[str, str]] = []
 

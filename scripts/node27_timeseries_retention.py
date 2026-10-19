@@ -69,6 +69,7 @@ from urllib.parse import urlsplit
 
 import jsonschema
 
+from packages.common.contracts.time_normalization import parse_iso_utc
 from packages.common.display_watermark import fetch_display_watermark
 from packages.common.node27_timeseries_discovery import CANONICAL_HYPERTABLES, RUNTIME_HYPERTABLES_SQL
 from packages.common.node27_timeseries_lifecycle_lock import (
@@ -587,15 +588,6 @@ def _load_schema(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _parse_iso(value: str) -> datetime:
-    """Parse an ISO-8601 timestamp; treat a naive result as UTC."""
-    text = value.replace("Z", "+00:00") if value.endswith("Z") else value
-    parsed = datetime.fromisoformat(text)
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
-
-
 def _iso(value: datetime) -> str:
     """Emit RFC-3339 ``Z``-suffixed UTC — mirrors compression `:260-261`."""
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
@@ -635,9 +627,9 @@ def _row_to_chunk(row: Mapping[str, Any]) -> ChunkRow:
     range_start = row["range_start"]
     range_end = row["range_end"]
     if isinstance(range_start, str):
-        range_start = _parse_iso(range_start)
+        range_start = parse_iso_utc(range_start)
     if isinstance(range_end, str):
-        range_end = _parse_iso(range_end)
+        range_end = parse_iso_utc(range_end)
     if range_start.tzinfo is None:
         range_start = range_start.replace(tzinfo=UTC)
     if range_end.tzinfo is None:
@@ -935,7 +927,7 @@ def _default_drop_chunk(config: RetentionConfig, chunk: ChunkRow) -> None:
 # informational unless a checker registers it, and the built-in FormatChecker
 # only registers ``date-time`` when an optional ``rfc3339-validator``-style
 # dep is installed (not a project dep here). Register a local checker that
-# reuses ``_parse_iso`` so the receipt emitter's OWN output is the acceptance
+# reuses ``parse_iso_utc`` so the receipt emitter's OWN output is the acceptance
 # oracle — no drift between what we emit and what we accept.
 _RECEIPT_FORMAT_CHECKER = jsonschema.FormatChecker()
 
@@ -944,7 +936,7 @@ _RECEIPT_FORMAT_CHECKER = jsonschema.FormatChecker()
 def _validate_date_time_format(value: object) -> bool:
     if not isinstance(value, str):
         return False
-    _parse_iso(value)
+    parse_iso_utc(value)
     return True
 
 

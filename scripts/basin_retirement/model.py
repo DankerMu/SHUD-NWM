@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from packages.common import succession_receipt as succession
+from packages.common.contracts.time_normalization import utc_now
 
 DATABASE_URL_ENV = "DATABASE_URL"
 OBJECT_STORE_ROOT_ENV = "OBJECT_STORE_ROOT"
@@ -135,10 +136,6 @@ def validate_basin_version_id(value: str) -> str:
             f"directory). {NOTHING_WRITTEN}"
         )
     return value
-
-
-def utc_now() -> datetime:
-    return datetime.now(UTC)
 
 
 def utc_text(value: datetime) -> str:

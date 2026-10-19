@@ -407,7 +407,7 @@
 
   **Minimal mergeable slice:** atomic - 同 3.2。
 
-- [ ] 3.5 批次 `scripts/`：3.1 命中清单中 `scripts/` 下的函数（fullmatch 口径 17 处：7 个与规范函数等价者删除并改用 `utc_now`/`parse_iso_utc`/`format_iso_utc`；10 个行为不同或作为 patch 落点者改名离开规则（两个 node-22 探针保持 stdlib-only）；`_normalize_sources(values, env)` 名字不匹配、不动），ceiling −17。
+- [x] 3.5 批次 `scripts/`：3.1 命中清单中 `scripts/` 下的函数（fullmatch 口径 17 处：7 个与规范函数等价者删除并改用 `utc_now`/`parse_iso_utc`/`format_iso_utc`；10 个行为不同或作为 patch 落点者改名离开规则（两个 node-22 探针保持 stdlib-only）；`_normalize_sources(values, env)` 名字不匹配、不动），ceiling −17。
 
   Depends on: 3.1
 
