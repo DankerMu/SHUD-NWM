@@ -1915,6 +1915,7 @@ FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     # #2939 (entropy-burndown task 5.1): the facade hygiene test parses this
     # module's `__all__` and needs every listed name to keep a consumer. AST-only.
     "tests/test_file_orchestration_journal_facade.py",
+    "tests/test_file_journal_late_lookup_seams.py",  # #2944 (task 5.4): facade patches reach moved siblings
 )
 
 FILE_JOURNAL_READ_STATE_PATH_PATTERNS: tuple[str, ...] = (
