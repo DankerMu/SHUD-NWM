@@ -6,14 +6,12 @@ from datetime import UTC, datetime
 from typing import Any
 
 from services.orchestrator.chain_types import ForcingContext, ModelContext
+from services.orchestrator.file_journal_primitives import _required_safe_identity, _scalar_text
 from services.orchestrator.scheduler_state import _ensure_utc
 
 
 def _model_context_from_mapping(row: Mapping[str, Any], *, model_id: str) -> ModelContext:
-    from services.orchestrator.file_orchestration_journal import (
-        _required_safe_identity,
-        _validate_model_context_identity,
-    )
+    from services.orchestrator.file_orchestration_journal import _validate_model_context_identity
     _validate_model_context_identity(row, model_id=model_id)
     return ModelContext(
         model_id=_required_safe_identity(row, "model_id"),
@@ -75,14 +73,13 @@ def _lineage_mapping(value: Any) -> Mapping[str, Any]:
 
 
 def _optional_str(value: Any, *, field: str = "value") -> str | None:
-    from services.orchestrator.file_orchestration_journal import _scalar_text
     if value in (None, ""):
         return None
     return _scalar_text(value, field=field, invalid_reason="file_journal_invalid_field")
 
 
 def _required_context_str(row: Mapping[str, Any], field: str) -> str:
-    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalError, _scalar_text
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalError
     value = row.get(field)
     if value in (None, ""):
         raise FileOrchestrationJournalError("file_journal_missing_field", field=field)
