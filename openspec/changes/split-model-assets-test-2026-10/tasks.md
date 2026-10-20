@@ -13,9 +13,9 @@ Risk packs:
 - Legacy compatibility — selected：拆分前后收集用例集合与断言不变（evidence = 集合对比 + `expect(` 多重集合 + 逐段字节比对）。
 - 其余 pack — not selected：生产代码零改动。
 
-- [ ] 1.1 共享部分（imports 之外的 `:30-109` helper/常量：`success`、`failure`、`UNSAFE_MODEL_ASSET_ERROR*`、`expectNoUnsafeModelAssetErrorText`、`BASINS_MODEL_ID`/`MANIFEST_URI`/`PACKAGE_URI`、`makeBasinsModel`、`resetStore`）移入不被收集的 `apps/frontend/src/stores/__tests__/modelAssetsFixtures.ts`（只加 `export` 与必要 import，先例 `apps/frontend/src/components/map/__tests__/m11StationForcingPopupFixtures.tsx:1-8`：`import { expect } from 'vitest'`、`type ModelAsset`/`useModelAssetsStore` 等；不得含 `vi.mock`、顶层 `vi.mocked(...)` 或 hooks；文件名不得匹配 vitest include glob `src/**/*.test.{ts,tsx}`）。
-- [ ] 1.2 `describe('useModelAssetsStore')` 内用例按 issue「解决思路·推荐」的主题分到 4–5 个 `modelAssets<Topic>.test.ts`（行段按 base 上实测为准；sanitizer 与 lifecycle 两组可合并）；每个文件各自声明 `vi.mock('@/api/client', ...)` 与原 `beforeEach`（字节一致），describe 名保持 `useModelAssetsStore`；用例体按原顺序搬运，不改任何断言；原文件删除（或保留为其中一个主题文件）。每个文件的 import 只保留实际用到的符号（`tsconfig.app.json` 开了 `noUnusedLocals`，builder 组不用 `client`/`success`/`failure` 等），禁止用 `void x`、`eslint-disable`、`@ts-expect-error` 绕过。
-- [ ] 1.3 `.large-file-guard.json` 不改（该路径从未豁免）。
+- [x] 1.1 共享部分（imports 之外的 `:30-109` helper/常量：`success`、`failure`、`UNSAFE_MODEL_ASSET_ERROR*`、`expectNoUnsafeModelAssetErrorText`、`BASINS_MODEL_ID`/`MANIFEST_URI`/`PACKAGE_URI`、`makeBasinsModel`、`resetStore`）移入不被收集的 `apps/frontend/src/stores/__tests__/modelAssetsFixtures.ts`（只加 `export` 与必要 import，先例 `apps/frontend/src/components/map/__tests__/m11StationForcingPopupFixtures.tsx:1-8`：`import { expect } from 'vitest'`、`type ModelAsset`/`useModelAssetsStore` 等；不得含 `vi.mock`、顶层 `vi.mocked(...)` 或 hooks；文件名不得匹配 vitest include glob `src/**/*.test.{ts,tsx}`）。
+- [x] 1.2 `describe('useModelAssetsStore')` 内用例按 issue「解决思路·推荐」的主题分到 4–5 个 `modelAssets<Topic>.test.ts`（行段按 base 上实测为准；sanitizer 与 lifecycle 两组可合并）；每个文件各自声明 `vi.mock('@/api/client', ...)` 与原 `beforeEach`（字节一致），describe 名保持 `useModelAssetsStore`；用例体按原顺序搬运，不改任何断言；原文件删除（或保留为其中一个主题文件）。每个文件的 import 只保留实际用到的符号（`tsconfig.app.json` 开了 `noUnusedLocals`，builder 组不用 `client`/`success`/`failure` 等），禁止用 `void x`、`eslint-disable`、`@ts-expect-error` 绕过。
+- [x] 1.3 `.large-file-guard.json` 不改（该路径从未豁免）。
 
 Evidence Floor:
 - 拆分前后 `cd apps/frontend && corepack pnpm exec vitest list src/stores/__tests__/modelAssets` 收集集合相等（路径写死，避免混入 `src/api/__tests__/modelAssets.test.ts`）：36 条 = 26 `it` + `it.each` 展开 (2+3+3+2)；「拆分前」快照在改动前于 master 上取；比较时去掉文件路径前缀，只比 `<describe> > <title>`。
