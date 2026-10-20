@@ -95,12 +95,19 @@ function capHydroMetStationSeriesMessageTokens(value: string) {
   })
 }
 
-export function formatHydroMetStationSeriesMessage(value: unknown, fallback = 'station-series 不可用') {
-  const message = sanitizeHydroMetMessage(getApiErrorMessage(value, fallback), fallback)
-  return formatHydroMetStationSeriesUiString(capHydroMetStationSeriesMessageTokens(message), {
+// String half: sanitize + token cap + UI string for an already-known message text
+// (for example client-generated contract messages); an empty string becomes `fallback`.
+export function formatHydroMetStationSeriesMessageText(message: string, fallback = 'station-series 不可用') {
+  const sanitized = sanitizeHydroMetMessage(message || fallback, fallback)
+  return formatHydroMetStationSeriesUiString(capHydroMetStationSeriesMessageTokens(sanitized), {
     limit: HYDRO_MET_STATION_SERIES_MESSAGE_STRING_LIMIT,
     fallback,
   })
+}
+
+// Error half: extracts the API error message, then formats it as UI text.
+export function formatHydroMetStationSeriesMessage(value: unknown, fallback = 'station-series 不可用') {
+  return formatHydroMetStationSeriesMessageText(getApiErrorMessage(value, fallback), fallback)
 }
 
 function hydroMetStationSeriesApiErrorRecord(value: unknown) {

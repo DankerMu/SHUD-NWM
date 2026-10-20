@@ -556,6 +556,22 @@ describe('useMonitoringStore', () => {
     expect(state.jobTotal).toBe(0)
   })
 
+  it('stores the fallback text, not the raw body, when a proxy returns a non-JSON 502 page', async () => {
+    // openapi-fetch hands back the raw response text as `error` when the body is not JSON.
+    const nginx502 = '<html>\r\n<head><title>502 Bad Gateway</title></head>\r\n<body>\r\n<center><h1>502 Bad Gateway</h1></center>\r\n<hr><center>nginx/1.24.0</center>\r\n</body>\r\n</html>\r\n'
+    vi.mocked(client.GET).mockResolvedValue({ data: undefined, error: nginx502 } as never)
+
+    const rejection = await useMonitoringStore.getState().fetchJobs().catch((error: unknown) => error)
+
+    expect(rejection).toBeInstanceOf(Error)
+    expect((rejection as Error).message).toBe('获取作业列表失败')
+    const state = useMonitoringStore.getState()
+    expect(state.jobsError).toBe('获取作业列表失败')
+    expect(state.error).toBe('获取作业列表失败')
+    expect(state.jobsError).not.toContain('<html')
+    expect(state.error).not.toContain('nginx')
+  })
+
   it('sends complete strict identity for status, stages, and jobs requests', async () => {
     const calls: Array<{ path: string; query?: Record<string, unknown> }> = []
     useMonitoringStore.setState({
