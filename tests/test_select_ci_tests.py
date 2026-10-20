@@ -23483,3 +23483,122 @@ def _orchestrator_first_import_guard_paths() -> list[str]:
 def test_every_orchestrator_path_selects_the_first_import_guard(changed_path: str) -> None:
     assert (_SELECTOR_REPO_ROOT / changed_path).is_file()
     assert ORCHESTRATOR_FIRST_IMPORT_GUARD_TEST in select_tests([changed_path], repo_root=Path("."))
+
+
+# ---------------------------------------------------------------------------
+# #3042: compatibility facade guard inputs -> the facade-guard current-repo nodes.
+# ---------------------------------------------------------------------------
+# The two "current repo" assertions build a full-repo entropy report at run time
+# instead of importing the facades, so no import edge connects a facade (or its
+# inventory) to them; PR #3041 grew `services/orchestrator/scheduler.py` and went
+# green in the PR lane, then reddened the full run. Both the node ids and the
+# four inputs are spelled LITERALLY here (#1827) so this module imports against
+# pre-change selector source; the anchor pins tie them to the selector constants.
+FACADE_GUARD_CURRENT_REPO_NODES: tuple[str, ...] = (
+    "tests/test_entropy_audit_baseline_writer_summary.py"
+    "::test_entropy_baseline_writer_preserves_v1_trend_semantics_for_current_repo",
+    "tests/test_entropy_audit_report_contract.py::test_compatibility_facade_guard_current_repo_passes_with_inventories",
+)
+FACADE_GUARD_INPUT_PROBES: tuple[str, ...] = (
+    "services/orchestrator/scheduler.py",
+    "services/orchestrator/chain.py",
+    "docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md",
+    "docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md",
+)
+_FACADE_GUARD_INVENTORIES: tuple[str, ...] = FACADE_GUARD_INPUT_PROBES[2:]
+
+
+@pytest.mark.parametrize("node", FACADE_GUARD_CURRENT_REPO_NODES)
+def test_facade_guard_current_repo_nodes_name_real_test_functions(node: str) -> None:
+    # (a) `_test_target_exists` only checks the FILE, so a renamed function would
+    # ship as a pytest "not found" error instead of a selector red.
+    test_file, function = node.split("::")
+    tree = ast.parse(Path(test_file).read_text(encoding="utf-8"))
+    assert function in {item.name for item in tree.body if isinstance(item, ast.FunctionDef)}
+    # The whole-file skip only dedups against a partition the entropy rules select.
+    assert test_file in ENTROPY_AUDIT_TESTS
+    assert node in _prod_module.COMPATIBILITY_FACADE_GUARD_CURRENT_REPO_TESTS
+    assert len(_prod_module.COMPATIBILITY_FACADE_GUARD_CURRENT_REPO_TESTS) == len(FACADE_GUARD_CURRENT_REPO_NODES)
+
+
+def test_facade_guard_input_mirror_equals_the_compatibility_facade_configs() -> None:
+    # (b) the selector imports no repository module, so its input set is a mirror
+    # of COMPATIBILITY_FACADE_CONFIGS; a facade config added without wiring the
+    # selector must red here, naming the missing path.
+    from scripts.governance.entropy_audit.schema import COMPATIBILITY_FACADE_CONFIGS
+
+    governed = {
+        path for config in COMPATIBILITY_FACADE_CONFIGS for path in (config.relative_path, config.inventory_path)
+    }
+    mirrored = set(_prod_module.COMPATIBILITY_FACADE_GUARD_INPUT_PATHS)
+
+    assert mirrored == governed, {
+        "unrouted_facade_inputs": sorted(governed - mirrored),
+        "mirror_only": sorted(mirrored - governed),
+    }
+    assert len(_prod_module.COMPATIBILITY_FACADE_GUARD_INPUT_PATHS) == len(mirrored)
+    # Anti-vacuity: the literal probes below are exactly the governed inputs.
+    assert governed == set(FACADE_GUARD_INPUT_PROBES)
+
+
+@pytest.mark.parametrize("changed_path", FACADE_GUARD_INPUT_PROBES)
+def test_facade_guard_input_selects_both_current_repo_nodes(tmp_path: Path, changed_path: str) -> None:
+    # (c) each input alone: both nodes selected, and the rider never makes the
+    # selection read as the #1454 meta-guard collapse.
+    assert Path(changed_path).is_file(), changed_path
+
+    fields = _github_output_fields(tmp_path, [changed_path], repo_root=Path("."))
+
+    tests = json.loads(fields["tests_json"])
+    assert set(FACADE_GUARD_CURRENT_REPO_NODES) <= set(tests)
+    assert SELECTOR_META_GUARD_TEST not in tests
+    assert fields["meta_guard_only"] == "false"
+    assert fields["collection_smoke_required"] == "false"
+
+
+@pytest.mark.parametrize("inventory", _FACADE_GUARD_INVENTORIES)
+@pytest.mark.parametrize("collapsed_path", ["tests/test_deleted_x.py", "tests/integration_helpers.py"])
+def test_github_output_facade_guard_rider_does_not_mask_the_meta_guard_collapse(
+    tmp_path: Path, collapsed_path: str, inventory: str
+) -> None:
+    # (c) an inventory is ALSO a production-topology scan input, so a collapse
+    # diff that touches one carries three supplemental nodes; all of them are
+    # disregarded and the collapse keeps the full-tree collect-only smoke.
+    if collapsed_path == "tests/test_deleted_x.py":
+        assert not Path(collapsed_path).exists()
+
+    fields = _github_output_fields(tmp_path, [collapsed_path, inventory], repo_root=Path("."))
+
+    assert json.loads(fields["tests_json"]) == sorted(
+        [*FACADE_GUARD_CURRENT_REPO_NODES, TOPOLOGY_HARD_GATE_NODE, SELECTOR_META_GUARD_TEST]
+    )
+    assert fields["meta_guard_only"] == "true"
+    assert fields["collection_smoke_required"] == "true"
+
+
+def test_facade_guard_nodes_are_not_emitted_when_their_whole_files_are_selected() -> None:
+    # (d) facade_guard.py selects every ENTROPY_AUDIT_TESTS partition, so both
+    # whole files run and neither node may be emitted beside them.
+    selected = select_tests(
+        ["services/orchestrator/scheduler.py", "scripts/governance/entropy_audit/facade_guard.py"],
+        repo_root=Path("."),
+    )
+
+    for node in FACADE_GUARD_CURRENT_REPO_NODES:
+        assert node.split("::", 1)[0] in selected
+        assert node not in selected
+
+
+def test_facade_guard_whole_file_skip_is_per_node() -> None:
+    # (d) the skip is decided per node: a diff that self-selects only the
+    # report-contract partition still needs the baseline-writer node.
+    report_contract = "tests/test_entropy_audit_report_contract.py"
+    (report_node,) = (node for node in FACADE_GUARD_CURRENT_REPO_NODES if node.startswith(report_contract))
+    (baseline_node,) = (node for node in FACADE_GUARD_CURRENT_REPO_NODES if node != report_node)
+
+    selected = select_tests(["services/orchestrator/chain.py", report_contract], repo_root=Path("."))
+
+    assert report_contract in selected
+    assert report_node not in selected
+    assert baseline_node.split("::", 1)[0] not in selected
+    assert baseline_node in selected

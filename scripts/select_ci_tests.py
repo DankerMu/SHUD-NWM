@@ -66,6 +66,8 @@ from scripts.select_ci_tests_tables import (
     C4_PRODUCTION_ACCEPTANCE_TESTS,  # noqa: F401
     CALIBRATION_OVERRIDES_PATH,  # noqa: F401
     CHAIN_IMPORTER_TESTS,  # noqa: F401
+    COMPATIBILITY_FACADE_GUARD_CURRENT_REPO_TESTS,
+    COMPATIBILITY_FACADE_GUARD_INPUT_PATHS,
     CORE_SMOKE_TESTS,
     DATA_ADAPTERS_BASE_HELPER_TESTS,  # noqa: F401
     DATA_ADAPTERS_DIRECTORY_TESTS,  # noqa: F401
@@ -317,10 +319,13 @@ def _collection_smoke_required(changed: Sequence[str], *, meta_guard_only: bool)
 
     True when the final selection is exactly the selector meta-guard (the
     #1454 shape: deleted test file, unrouted support module, or a selector-test
-    PR) — with the supplemental production-topology hard-gate node
-    (``PRODUCTION_TOPOLOGY_HARD_GATE_TEST``) disregarded, because that rider
-    rides on nearly every PR (any ``openspec/changes/**`` edit is a scan input)
-    and must never mask the collapse — OR when the changed-file set touches
+    PR) — with the supplemental riders disregarded: the production-topology
+    hard-gate node (``PRODUCTION_TOPOLOGY_HARD_GATE_TEST``), which rides on
+    nearly every PR (any ``openspec/changes/**`` edit is a scan input), and the
+    two compatibility-facade-guard current-repo nodes
+    (``COMPATIBILITY_FACADE_GUARD_CURRENT_REPO_TESTS``, #3042), which ride on a
+    governed facade or inventory edit; neither may mask the collapse — OR when
+    the changed-file set touches
     the selector itself (``scripts/select_ci_tests.py``, its split-out siblings
     ``scripts/select_ci_tests_tables.py``, ``scripts/select_ci_tests_rules.py``
     and ``scripts/select_ci_tests_imports.py`` (#2948), or
@@ -564,6 +569,18 @@ def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -
     if any(_is_production_topology_scan_input(path) for path in changed):
         if ENTROPY_AUDIT_REPORT_CONTRACT_TEST not in selected:
             selected.add(PRODUCTION_TOPOLOGY_HARD_GATE_TEST)
+
+    # #3042: supplemental compatibility-facade-guard input route, same additive
+    # shape as the #2323 rider above (no `matched`, no stop-rule participation,
+    # no effect on the unknown-backend fallback). A changed governed facade or
+    # inventory adds the two "current repo" nodes; each is skipped when its whole
+    # partition is already selected, decided per node so a diff that selects
+    # only one of the two files still gets the other node. Also a RIDER that
+    # `_write_github_output` disregards for `meta_guard_only`.
+    if any(path in COMPATIBILITY_FACADE_GUARD_INPUT_PATHS for path in changed):
+        for node in COMPATIBILITY_FACADE_GUARD_CURRENT_REPO_TESTS:
+            if node.split("::", 1)[0] not in selected:
+                selected.add(node)
 
     selected_paths = sorted(selected)
     # A selected target pointing at a deleted/renamed test file used to vanish
@@ -819,9 +836,13 @@ def _write_github_output(
     # selection onto the targeted branch without re-arming the smoke), and the
     # zero-selection class here is non-importable data, so no cross-test import
     # surface is at risk and the flag stays false.
-    meta_guard_only = [test for test in tests if test != PRODUCTION_TOPOLOGY_HARD_GATE_TEST] == [
-        SELECTOR_META_GUARD_TEST
-    ]
+    #
+    # #3042: the two compatibility-facade-guard current-repo nodes are riders of
+    # the same kind and are disregarded on the same terms. A governed inventory
+    # is also a topology scan input, so a collapse diff that touches one reads
+    # `[node, node, NODE, META]`; it stays a collapse.
+    supplemental_riders = {PRODUCTION_TOPOLOGY_HARD_GATE_TEST, *COMPATIBILITY_FACADE_GUARD_CURRENT_REPO_TESTS}
+    meta_guard_only = [test for test in tests if test not in supplemental_riders] == [SELECTOR_META_GUARD_TEST]
     # `collection_smoke_required` is INDEPENDENT provenance, not a restatement
     # of the final-list shape: a selector-development PR stays collection-
     # required even when supplemental routing makes the final selection
