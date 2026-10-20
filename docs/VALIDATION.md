@@ -550,7 +550,7 @@ Focused M9 frontend asset fixture checks:
 ```bash
 cd apps/frontend
 corepack pnpm check:api-types
-corepack pnpm test -- src/api/__tests__/modelAssets.test.ts src/stores/__tests__/modelAssets.test.ts
+corepack pnpm test -- src/api/__tests__/modelAssets.test.ts src/stores/__tests__/modelAssets
 corepack pnpm build
 ```
 
