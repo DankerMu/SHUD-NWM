@@ -1468,6 +1468,25 @@ FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     "tests/test_gateway_reconcile_writer_quiescence.py",
     "tests/test_gateway_reconcile_writer_receipts.py",
     "tests/test_safe_fs_lock.py",
+    # #3034: same blind spot as #3028, one level out -- a function-body facade
+    # import + `_utcnow` patch in the redirect suite, or the legacy seed helper's
+    # patch of the facade's `_is_legacy_unversioned_reserved_forecast_master`
+    # (directly or via `_file_cohort_repository(versioned=False)`). Node ids, not
+    # files: the chain suite is a redirect suite and comment_capability is ~50s.
+    "tests/test_orchestration_chain.py::test_public_operator_recovery_reuses_demoted_master_identity_and_reclaims",
+    "tests/test_orchestration_chain.py::test_public_operator_recovery_hostile_context_attempt_and_anchor_cannot_override",
+    "tests/test_orchestration_chain.py::test_two_concurrent_public_operator_recovery_cycles_submit_once",
+    "tests/test_orchestration_chain.py::test_public_operator_recovery_never_reports_pipeline_already_active",
+    "tests/test_orchestration_chain.py::test_public_operator_recovery_post_append_projection_fault_still_submits_once",
+    "tests/test_orchestration_chain.py::test_public_operator_recovery_identity_release_stays_non_reclaimable",
+    "tests/test_orchestration_chain.py::test_public_operator_recovery_automatic_absence_keeps_retry_suffix_replacement",
+    "tests/test_orchestration_chain.py::test_public_automatic_absence_post_append_projection_fault_still_submits_once",
+    "tests/test_orchestration_chain.py::test_two_concurrent_public_automatic_absence_cycles_with_projection_fault_submit_once",  # noqa: E501
+    "tests/test_gateway_reconcile_comment_accounting.py::test_valid_custom_coverage_permits_exactly_one_retry_and_marker_free_is_unchanged",  # noqa: E501
+    "tests/test_gateway_reconcile_comment_accounting.py::test_legacy_custom_comment_adapter_remains_callable_but_cannot_prove_versioned_zero",  # noqa: E501
+    "tests/test_gateway_reconcile_comment_capability.py::test_capability_probe_not_called_with_unversioned_only_rows",
+    "tests/test_gateway_reconcile_comment_capability.py::test_marker_free_historical_master_is_read_only_to_accepted_submit_reconcile",  # noqa: E501
+    "tests/test_gateway_reconcile_master_transitions.py::test_marker_free_master_compatibility_mutations_remain_available",  # noqa: E501
 )
 
 

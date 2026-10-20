@@ -41,8 +41,8 @@ Risk packs:
   - `tests/test_gateway_reconcile_master_transitions.py::test_marker_free_master_compatibility_mutations_remain_available`
   实现者在 base 上重新枚举确认（grep + AST），若与上表不同则以实测为准并在 PR 列出差异。
 
-- [ ] 2.1 `FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS`（`scripts/select_ci_tests_tables.py`）末尾追加这些 node id，附 `# #3034` 注释；同步追加到 `tests/test_select_ci_tests.py` 的 `_FILE_JOURNAL_FACADE_PATCHER_TESTS` 字面量。若某既有测试对选择结果做 node 级精确断言（redirect 套件的 `FILE_JOURNAL_READ_STATE_TESTS` 等）因此变化，只允许并入这些 node，PR 列出。
-- [ ] 2.2 selector 没有通用的 node/整文件去重；沿用 `FILE_JOURNAL_READ_STATE_TESTS` 的先例（node 与整文件并存，见 `test_select_tests_maps_file_journal_read_state_without_whole_legacy_suites`），不新增去重逻辑。
+- [x] 2.1 `FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS`（`scripts/select_ci_tests_tables.py`）末尾追加这些 node id，附 `# #3034` 注释；同步追加到 `tests/test_select_ci_tests.py` 的 `_FILE_JOURNAL_FACADE_PATCHER_TESTS` 字面量。若某既有测试对选择结果做 node 级精确断言（redirect 套件的 `FILE_JOURNAL_READ_STATE_TESTS` 等）因此变化，只允许并入这些 node，PR 列出。
+- [x] 2.2 selector 没有通用的 node/整文件去重；沿用 `FILE_JOURNAL_READ_STATE_TESTS` 的先例（node 与整文件并存，见 `test_select_tests_maps_file_journal_read_state_without_whole_legacy_suites`），不新增去重逻辑。
 
 Evidence Floor:
 - 对 facade 与全部 `services/orchestrator/file_journal_*.py` 逐个跑 selector：输出都含新增 node（PR 贴表）。
