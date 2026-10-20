@@ -5,6 +5,8 @@ import { getApiErrorMessage } from '@/api/response'
 // Characterization test: pins what getApiErrorMessage does today for every error
 // shape the frontend actually receives. Expectations come from the input table in
 // openspec/changes/entropy-burndown-2026-10/tasks.md (7.4 successor, #2956).
+// #2978 (entropy-followups-2-2026-10 task 4.1) made non-Error, non-object values
+// fail closed: the raw HTML body and number rows now expect the fallback.
 const FALLBACK = '回落文案'
 
 const cases: Array<[label: string, input: unknown, expected: string]> = [
@@ -22,8 +24,10 @@ const cases: Array<[label: string, input: unknown, expected: string]> = [
     new DOMException('The operation was aborted.', 'AbortError'),
     'The operation was aborted.',
   ],
-  // openapi-fetch hands back the raw text when the error body is not JSON.
-  ['non-JSON error body -> the raw string', '<html>502 Bad Gateway</html>', '<html>502 Bad Gateway</html>'],
+  // openapi-fetch hands back the raw text when the error body is not JSON; the
+  // contract is the JSON envelope, so raw proxy/gateway text never reaches the UI (#2978).
+  ['non-JSON HTML error body -> fallback', '<html>502 Bad Gateway</html>', FALLBACK],
+  ['non-JSON plain-text proxy error -> fallback', 'upstream connect error or disconnect/reset before headers', FALLBACK],
   // Backend envelope, apps/api/errors.py.
   [
     'backend error envelope -> error.message',
@@ -39,7 +43,7 @@ const cases: Array<[label: string, input: unknown, expected: string]> = [
   // apps/api/startup_wiring.py: the only non-envelope response.
   ['{detail} non-envelope -> fallback', { detail: 'Not found' }, FALLBACK],
   // Non-zero, non-NaN primitive: 0 / NaN / 0n are caught by the falsy guard instead.
-  ['number primitive -> String(e)', 42, '42'],
+  ['number primitive -> fallback', 42, FALLBACK],
 ]
 
 describe('getApiErrorMessage', () => {

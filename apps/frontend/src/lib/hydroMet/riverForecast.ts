@@ -8,6 +8,7 @@ import {
   HYDRO_MET_STATION_SERIES_UI_STRING_LIMIT,
   formatHydroMetStationSeriesContractValue,
   formatHydroMetStationSeriesMessage,
+  formatHydroMetStationSeriesMessageText,
   formatHydroMetStationSeriesUiString,
   isHydroMetStationSeriesUiStringCapped,
   type HydroMetStationSeriesUiStringOptions,
@@ -495,7 +496,7 @@ function buildRiverForecastHorizonLabel({
 
 function capHydroMetRiverForecastMessages(messages: string[]) {
   const safeMessages = messages.map((message) => (
-    formatHydroMetRiverForecastMessage(message, 'river forecast-series contract 问题已截断')
+    formatHydroMetStationSeriesMessageText(message, 'river forecast-series contract 问题已截断')
   ))
   if (safeMessages.length <= HYDRO_MET_RIVER_FORECAST_MESSAGE_LIMIT) return safeMessages
   return [

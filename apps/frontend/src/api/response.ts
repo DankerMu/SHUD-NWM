@@ -18,7 +18,10 @@ export function getApiErrorMessage(error: unknown, fallback = '请求失败') {
     return apiError.error?.message || apiError.message || fallback
   }
 
-  return String(error) || fallback
+  // The error contract is the JSON envelope. openapi-fetch hands back raw response
+  // text (proxy HTML pages, plain-text gateway errors) when the body is not JSON;
+  // never surface it, or any other primitive, to the UI.
+  return fallback
 }
 
 export function unwrapApiData<T>(payload: unknown, fallback = '请求失败'): T {

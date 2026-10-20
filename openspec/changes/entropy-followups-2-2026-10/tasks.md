@@ -76,8 +76,8 @@ Risk packs:
 - Legacy compatibility — selected：envelope、`Error`、非 envelope 对象三类行为不变；evidence = response.test.ts 对应行不改。
 - 其余 pack — not selected。
 
-- [ ] 4.0（阻塞 4.1）`apps/frontend/src/lib/hydroMet/riverForecast.ts:496-499` 的 `capHydroMetRiverForecastMessages` 把客户端生成的契约消息字符串经 `formatHydroMetStationSeriesMessage`（`apps/frontend/src/lib/hydroMet/stationSeries.ts:99`）传给 `getApiErrorMessage`，方案 (a) 会把它们全换成 fallback。先把 `formatHydroMetStationSeriesMessage` 拆成「错误取值」与「字符串格式化（sanitize + token cap + UI string）」两半，cap 函数直接调用字符串那一半；回归 oracle：`apps/frontend/src/pages/hydroMet/__tests__/bootstrap.test.ts:920-986` 的 `messages` 断言不改且保持绿。
-- [ ] 4.1 改 `apps/frontend/src/api/response.ts` 非对象分支为返回 `fallback`；`apps/frontend/src/api/__tests__/response.test.ts` 只有 `:26`（HTML）与 `:42`（数字 42）两行期望改为 `fallback`，另新增一行纯文本代理错误 → `fallback`；其余行不改，PR 列出新旧期望。实现前 `git grep` 所有 `getApiErrorMessage(` 调用点：除 4.0 已处理的河段契约消息外，若还有调用方有意传入原始字符串文案，STOP 报告。
-- [ ] 4.2 新增一个调用面测试：monitoring store（`apps/frontend/src/stores/monitoring.ts` 的 retry/cancel 或 fetch 路径）以 openapi-fetch 风格的非 JSON 错误（`error` 为 nginx 502 HTML 字符串）驱动，断言状态/抛出的消息是 fallback 文案且不含 `<html`。
+- [x] 4.0（阻塞 4.1）`apps/frontend/src/lib/hydroMet/riverForecast.ts:496-499` 的 `capHydroMetRiverForecastMessages` 把客户端生成的契约消息字符串经 `formatHydroMetStationSeriesMessage`（`apps/frontend/src/lib/hydroMet/stationSeries.ts:99`）传给 `getApiErrorMessage`，方案 (a) 会把它们全换成 fallback。先把 `formatHydroMetStationSeriesMessage` 拆成「错误取值」与「字符串格式化（sanitize + token cap + UI string）」两半，cap 函数直接调用字符串那一半；回归 oracle：`apps/frontend/src/pages/hydroMet/__tests__/bootstrap.test.ts:920-986` 的 `messages` 断言不改且保持绿。
+- [x] 4.1 改 `apps/frontend/src/api/response.ts` 非对象分支为返回 `fallback`；`apps/frontend/src/api/__tests__/response.test.ts` 只有 `:26`（HTML）与 `:42`（数字 42）两行期望改为 `fallback`，另新增一行纯文本代理错误 → `fallback`；其余行不改，PR 列出新旧期望。实现前 `git grep` 所有 `getApiErrorMessage(` 调用点：除 4.0 已处理的河段契约消息外，若还有调用方有意传入原始字符串文案，STOP 报告。
+- [x] 4.2 新增一个调用面测试：monitoring store（`apps/frontend/src/stores/monitoring.ts` 的 retry/cancel 或 fetch 路径）以 openapi-fetch 风格的非 JSON 错误（`error` 为 nginx 502 HTML 字符串）驱动，断言状态/抛出的消息是 fallback 文案且不含 `<html`。
 
 Evidence Floor: 先红后绿（4.2 与 HTML 行在改前红）；`cd apps/frontend && corepack pnpm typecheck && corepack pnpm lint && corepack pnpm test`；`corepack pnpm run test:e2e:mocked-regression` 期望值不变（或 PR CI 的 mocked e2e 4 片全绿作为等价证据，若本地无法运行需说明）。
