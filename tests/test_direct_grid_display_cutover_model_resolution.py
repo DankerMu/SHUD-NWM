@@ -36,7 +36,7 @@ Path 3 — explicit historical ``(cycle, model_id)`` route
 
 Path 4 / Path 5 — frontend live ``model_id`` resolution and no-pin
     Frontend claims are closed by the extended
-    ``M11StationForcingPopup.test.tsx`` suite (``product.model_id`` at
+    ``M11StationForcingPopupCutover.test.tsx`` suite (``product.model_id`` at
     request time; no reuse across two live requests when the latest
     product changes) plus the ``bootstrap.test.ts`` suite (identity
     cache invalidator + bounded TTL constant lock). Backend guardrail
@@ -538,7 +538,7 @@ def test_station_source_version_key_self_invalidates_when_active_flag_flips(
 
 # =========================================================================
 # Path 4 / Path 5 — backend guardrail (frontend claims live in
-# apps/frontend/src/components/map/__tests__/M11StationForcingPopup.test.tsx
+# apps/frontend/src/components/map/__tests__/M11StationForcingPopupCutover.test.tsx
 # and apps/frontend/src/pages/hydroMet/__tests__/bootstrap.test.ts)
 # =========================================================================
 

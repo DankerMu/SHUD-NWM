@@ -117,7 +117,6 @@
     "tests/test_orchestrator_demote_core_cas.py",
     "tests/test_two_node_docker_runtime.py",
     "services/production_closure/met_validation.py",
-    "apps/frontend/src/components/map/__tests__/M11StationForcingPopup.test.tsx",
     "services/orchestrator/chain_repository.py",
     "services/orchestrator/pipeline_job_provenance.py",
     "services/orchestrator/scheduler_file_providers.py",
