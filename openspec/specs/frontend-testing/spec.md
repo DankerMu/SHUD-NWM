@@ -1,7 +1,7 @@
 # frontend-testing Specification
 
 ## Purpose
-TBD - created by archiving change m35-frontend-modernization. Update Purpose after archive.
+Define how the frontend is tested: the Vitest unit and Playwright E2E infrastructure, the required component, store and page coverage, the mocked-regression lane as an automatic CI gate, strict type checks, and keeping test files under the large-file limit without exemptions.
 
 ## Requirements
 
@@ -103,3 +103,7 @@ A frontend test file SHALL be split by topic instead of being exempted when it r
 #### Scenario: Popup test split
 - **WHEN** `apps/frontend/src/components/map/__tests__/M11StationForcingPopup.test.tsx` is split
 - **THEN** every resulting file is under 1000 lines, `.large-file-guard.json` no longer exempts it, and the collected `it` titles equal the 24 before the split
+
+#### Scenario: Model assets store test split
+- **WHEN** `apps/frontend/src/stores/__tests__/modelAssets.test.ts` is split
+- **THEN** every resulting file is under 1000 lines, `.large-file-guard.json` gains no exclude, the 36 collected cases (with `it.each` expanded) equal those before the split, and the `expect(` multiset is unchanged
