@@ -59,7 +59,7 @@ Risk packs:
 - Legacy compatibility — selected：收集到的 `it` 标题集合与断言不变（evidence = 集合对比 + `git diff` 中 `expect(` 行只有搬移）。
 - 其余 pack — not selected：生产代码零改动。
 
-- [ ] 3.1 按 issue #2986「解决思路·推荐」拆分：共享常量/类型/helper 移入不被收集的 `__tests__/m11StationForcingPopupFixtures.tsx`；`it` 按主题分到 3–5 个 `M11StationForcingPopup<Topic>.test.tsx`；每个新测试文件各自声明 4 条 `vi.mock(...)` 与 `beforeEach`/`afterEach`；原文件删除（或保留为其中一个主题文件）；从 `.large-file-guard.json` 删除该 exclude，不加替代 exclude。
+- [x] 3.1 按 issue #2986「解决思路·推荐」拆分：共享常量/类型/helper 移入不被收集的 `__tests__/m11StationForcingPopupFixtures.tsx`；`it` 按主题分到 3–5 个 `M11StationForcingPopup<Topic>.test.tsx`；每个新测试文件各自声明 4 条 `vi.mock(...)` 与 `beforeEach`/`afterEach`；原文件删除（或保留为其中一个主题文件）；从 `.large-file-guard.json` 删除该 exclude，不加替代 exclude。
 
 Evidence Floor: 拆分前后 `it` 集合相等（24 个，PR 附对比；比较时去掉 `vitest list` 输出中的文件路径前缀，只比 `<describe> > <title>`，每个新文件的 describe 名保持 `M11StationForcingPopup`）；helper 模块中不得出现 `vi.mock`、顶层 `vi.mocked(...)` 或 hooks；每个新文件 `wc -l` < 1000；`expect(` 行多重集合拆分前后相等（排序后 diff 为空）；`cd apps/frontend && corepack pnpm typecheck && corepack pnpm lint && corepack pnpm test` 绿；`git diff --stat origin/master -- apps/frontend/src ':!apps/frontend/src/**/__tests__/**'` 为空；`.large-file-guard.json` 不含该路径。
 
