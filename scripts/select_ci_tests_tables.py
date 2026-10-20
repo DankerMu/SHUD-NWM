@@ -731,6 +731,30 @@ ENTROPY_AUDIT_TESTS: tuple[str, ...] = (
 # SUPPORT_MODULE_TEST_RULES.
 ENTROPY_AUDIT_HELPERS_PATH = "tests/entropy_audit_helpers.py"
 
+# #3042: the compatibility facade guard's inputs, MIRRORED from
+# `COMPATIBILITY_FACADE_CONFIGS` in scripts/governance/entropy_audit/schema.py
+# (each governed facade's `relative_path` and `inventory_path`; the selector
+# imports no repository module, and tests/test_select_ci_tests.py pins the two
+# equal, naming any unwired path). The guard's two "current repo" assertions
+# build a full-repo report at run time instead of importing the facades, so no
+# import edge reaches them: PR #3041 grew `scheduler.py`, passed the PR lane and
+# reddened the full run. `select_tests` adds the two NODES as a supplemental
+# rider in the #2323 shape (set union only; skipped per node when its whole
+# partition is already selected; disregarded by `meta_guard_only`). Known limit:
+# `docs/**` does not open the ci.yml backend lane, so an inventory-only PR runs
+# them on master, not in the PR lane.
+COMPATIBILITY_FACADE_GUARD_INPUT_PATHS: tuple[str, ...] = (
+    "services/orchestrator/scheduler.py",
+    "docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md",
+    "services/orchestrator/chain.py",
+    "docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md",
+)
+COMPATIBILITY_FACADE_GUARD_CURRENT_REPO_TESTS: tuple[str, ...] = (
+    "tests/test_entropy_audit_baseline_writer_summary.py"
+    "::test_entropy_baseline_writer_preserves_v1_trend_semantics_for_current_repo",
+    "tests/test_entropy_audit_report_contract.py::test_compatibility_facade_guard_current_repo_passes_with_inventories",
+)
+
 # #1842 split the 9000-line audit enforcer into this package; the historical
 # path stayed the console entrypoint (it owns the `__main__` guard) and an
 # attribute-broadcast facade, so it keeps its own row in PATH_TEST_RULES and is NOT a member
