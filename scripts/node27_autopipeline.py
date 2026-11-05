@@ -804,7 +804,26 @@ def _basin_identity(object_store_root: Path, run_id: str) -> dict[str, str]:
         "basin_slug": str(basin_slug or str(basin_id).removeprefix("basins_")),
         "package_version": version,
         "package_uri": str(package_uri),
+        "direct_grid_baseline_model_id": _direct_grid_baseline_model_id(segments),
     }
+
+
+def _direct_grid_baseline_model_id(package_uri_segments: list[str]) -> str:
+    """Baseline model id when the package is a direct-grid variant, else "".
+
+    ``scripts/provision_direct_grid_scheduler_registry.py`` is the only writer
+    of ``models/direct_grid_variants/<baseline_model_id>/dg-<source>-<id>/package``.
+    Such a variant is registered by that tool and is never seedable from
+    BASINS_ROOT by ``publish-basins``; only its baseline is.
+    """
+    try:
+        index = package_uri_segments.index("models")
+    except ValueError:
+        return ""
+    tail = package_uri_segments[index + 1 :]
+    if len(tail) == 4 and tail[0] == "direct_grid_variants" and tail[2].startswith("dg-") and tail[3] == "package":
+        return tail[1]
+    return ""
 
 
 def _discover_seed_basin_identities(
@@ -2017,6 +2036,23 @@ def _isolate_basin_root(basins_root: Path, basin: str) -> Path:
     return only_root
 
 
+def _resolve_basin_dir(basins_root: Path, basin: str) -> str | None:
+    """Directory name under BASINS_ROOT for ``basin``, or None.
+
+    A run manifest's ``basin_slug`` is normalised (``bj_ers``) while the
+    directory may not be (``BJ-ERS``). Fall back to the unique top-level
+    directory whose normalised name matches; zero or several matches is None.
+    """
+    if (basins_root / basin).is_dir():
+        return basin
+    key = _slug_id(basin)
+    try:
+        matches = [entry.name for entry in basins_root.iterdir() if entry.is_dir() and _slug_id(entry.name) == key]
+    except OSError:
+        return None
+    return matches[0] if len(matches) == 1 else None
+
+
 def _seed_basin(
     *,
     basin: str,
@@ -2024,8 +2060,18 @@ def _seed_basin(
     database_url: str,
     basins_root: Path,
     env: dict[str, str],
+    activate: bool = True,
 ) -> dict[str, Any]:
     model_id = identity["model_id"]
+    basin_dir = _resolve_basin_dir(basins_root, basin)
+    if basin_dir is None:
+        return {
+            "basin": basin,
+            "outcome": "seed_failed",
+            "stage": "discover",
+            "error": f"no unique basin directory for {basin!r} under BASINS_ROOT",
+        }
+    basin = basin_dir
     basin_key = _slug_id(basin)
     work = Path(WORK_ROOT) / f"{basin_key}-seed"
     work.mkdir(parents=True, exist_ok=True)
@@ -2091,7 +2137,7 @@ def _seed_basin(
 
         rnv_id = import_report.get("river_network_version_id")
         geom_rows = _backfill_output_geometry(database_url, rnv_id) if rnv_id else 0
-        activated = _activate_model(database_url, model_id)
+        activated = _activate_model(database_url, model_id) if activate else 0
         return {
             "basin": basin,
             "outcome": "seeded",
@@ -2554,7 +2600,8 @@ def main(argv: list[str] | None = None) -> int:
     # Seed candidates come from BASINS_ROOT first so node-27 display metadata is
     # ready for every publishable basin before the first node-22 run lands. If a
     # run manifest already exists, it overrides the inventory-derived package
-    # identity for that basin.
+    # identity for that basin -- except as the SEED target when the run model is
+    # a direct-grid variant (see `_direct_grid_baseline_model_id`).
     seed_results: list[dict[str, Any]] = []
     seed_identities = _discover_seed_basin_identities(
         basins_root,
@@ -2582,13 +2629,22 @@ def main(argv: list[str] | None = None) -> int:
                 )
             continue
         inventory_identity = seed_identities.get(basin_key, {})
-        seed_identities[basin_key] = {
+        merged_identity: dict[str, Any] = {
             **inventory_identity,
             **run_identity,
             "basin_key": basin_key,
             "basin_slug": inventory_identity.get("basin_slug") or run_identity.get("basin_slug") or basin_key,
             "identity_source": "run_manifest",
         }
+        baseline_model_id = run_identity.get("direct_grid_baseline_model_id")
+        if baseline_model_id:
+            # The run model is a direct-grid variant: it stays the display /
+            # activation target, but an unseeded basin can only be seeded from
+            # the inventory model that IS its baseline (None = not seedable).
+            merged_identity["seed_identity"] = (
+                inventory_identity if inventory_identity.get("model_id") == baseline_model_id else None
+            )
+        seed_identities[basin_key] = merged_identity
     basins = sorted(seed_identities)
     for basin in basins:
         identity = seed_identities[basin]
@@ -2621,19 +2677,58 @@ def main(argv: list[str] | None = None) -> int:
                 }
             )
             continue
+        direct_grid = "seed_identity" in identity
+        seed_identity = identity.get("seed_identity") if direct_grid else identity
+        if seed_identity is None:
+            seed_results.append(
+                {
+                    "basin": basin,
+                    "basin_slug": basin_slug,
+                    "outcome": "seed_failed",
+                    "stage": "identity",
+                    "basin_id": identity["basin_id"],
+                    "model_id": identity["model_id"],
+                    "identity_source": identity.get("identity_source"),
+                    "error": (
+                        f"direct-grid run model {identity['model_id']} needs baseline "
+                        f"{identity['direct_grid_baseline_model_id']}, which the BASINS_ROOT inventory does "
+                        "not offer as a seedable model; register the baseline, then provision the variant "
+                        "with scripts/provision_direct_grid_scheduler_registry.py"
+                    ),
+                }
+            )
+            continue
         if args.progress:
             print(
-                f"[seed] {basin_slug} ({identity['model_id']} @ {identity['package_version']})",
+                f"[seed] {basin_slug} ({seed_identity['model_id']} @ {seed_identity['package_version']})",
                 file=sys.stderr,
                 flush=True,
             )
+        # A direct-grid basin seeds its baseline INACTIVE: only the variant may
+        # carry the basin's active flag, and it becomes display-ready here once
+        # provisioned (until then the basin fails closed at display_ready).
         result = _seed_basin(
-            basin=basin_slug,
-            identity=identity,
+            basin=seed_identity.get("basin_slug") or basin_slug,
+            identity=seed_identity,
             database_url=database_url,
             basins_root=basins_root,
             env=env,
+            activate=not direct_grid,
         )
+        if direct_grid and result["outcome"] == "seeded":
+            try:
+                display_ready = _ensure_seeded_basin_display_ready(database_url, identity["model_id"])
+            except Exception as exc:  # noqa: BLE001 - record + continue, isolate failure
+                result = {
+                    **result,
+                    "outcome": "seed_failed",
+                    "stage": "display_ready",
+                    "seeded_model_id": result.get("model_id"),
+                    "model_id": identity["model_id"],
+                    "error": redact_text(str(exc)),
+                }
+            else:
+                result = {**result, "seeded_model_id": result.get("model_id"), **display_ready}
         result["basin"] = basin
         result["basin_slug"] = basin_slug
         result["identity_source"] = identity.get("identity_source")
