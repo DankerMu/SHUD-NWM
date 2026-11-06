@@ -16,7 +16,6 @@ from pathlib import Path
 
 import pytest
 
-from packages.common.model_registry import PsycopgModelRegistryStore
 from tests.basins_registry_import_helpers import (
     _assert_registry_fixture_rows_absent,
     _package_manifest_for_model,
@@ -132,32 +131,23 @@ def test_registry_import_creates_idempotent_inactive_rows(
     assert row["second_downstream"] is None
     assert row["basin_geom"].startswith("MULTIPOLYGON")
 
-    store = PsycopgModelRegistryStore(integration_database_url)
-    segments = store.list_river_segments(
-        basin_version_id=first["basin_version_id"],
-        river_network_version_id=first["river_network_version_id"],
-        limit=10,
-        offset=0,
-    )
-    assert segments["type"] == "FeatureCollection"
-    # PR 2 Path C: API returns segment-level FeatureCollection sliced from
-    # parent reach polylines via ST_LineSubstring. The crosswalk fixture
-    # has 2 seg.shp records (matching ``_make_valid_model`` defaults), so
-    # 2 segment-level features come back. The legacy 4-row "geometry +
-    # .sp.riv output" total no longer applies because the segment-slice
-    # path does its own grouping.
-    assert segments["total"] == 2
-    assert segments["feature_total"] == 2
-    # Sliced geometry is a LineString (ST_LineSubstring against a
-    # single-part MultiLineString returns LineString).
-    assert segments["features"][0]["geometry"]["type"] in ("LineString", "MultiLineString")
-    # Segment-level id preserves the frontend contract:
-    # ``<model>_seg_<iRiv>_<iEle>`` (OQ2 in feat-reach-geom-oq-findings).
-    assert segments["features"][0]["properties"]["river_segment_id"].startswith(
-        f"{model_id}_seg_"
-    )
-    assert segments["features"][0]["properties"]["river_network_version_id"] == first["river_network_version_id"]
-    assert segments["features"][0]["properties"]["basin_version_id"] == first["basin_version_id"]
+    # #2907: the import's seg.shp crosswalk, read from the table it writes. The
+    # fixture carries 2 seg.shp records (``_make_valid_model`` defaults), the same
+    # count the first report states as ``row_counts.river_segment_crosswalk``; the
+    # already-imported second run must not have added any.
+    with psycopg_connection(integration_database_url) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT COUNT(*) AS crosswalk_rows
+                FROM core.river_segment_crosswalk
+                WHERE river_network_version_id = %s
+                  AND source = 'basins_seg_shp'
+                """,
+                (first["river_network_version_id"],),
+            )
+            crosswalk = cursor.fetchone()
+    assert crosswalk["crosswalk_rows"] == 2
 
 
 @pytest.mark.integration
@@ -355,22 +345,20 @@ def test_real_basins_import_smoke_is_gated(
     assert report["segment_count"] > 0
     assert report["active"] is False
 
-    store = PsycopgModelRegistryStore(integration_database_url)
-    segments = store.list_river_segments(
-        basin_version_id=report["basin_version_id"],
-        river_network_version_id=report["river_network_version_id"],
-        limit=5,
-        offset=0,
-    )
-    assert segments["type"] == "FeatureCollection"
-    assert segments["feature_total"] > 0
-    # PR 2 Path C: API segment-slice path can return LineString
-    # (ST_LineSubstring against a single-part MultiLineString returns a
-    # LineString). Keep both shapes as acceptable.
-    assert segments["features"][0]["geometry"]["type"] in (
-        "LineString",
-        "MultiLineString",
-    )
-    assert segments["features"][0]["properties"]["river_segment_id"]
-    assert segments["features"][0]["properties"]["river_network_version_id"] == report["river_network_version_id"]
-    assert segments["features"][0]["properties"]["basin_version_id"] == report["basin_version_id"]
+    # #2907: the imported reach rows (not the ``.sp.riv`` SHUD output siblings) of
+    # the real model carry geometry.
+    with psycopg_connection(integration_database_url) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT COUNT(*) AS reach_rows
+                FROM core.river_segment
+                WHERE river_network_version_id = %s
+                  AND COALESCE(properties_json->>'shud_output_river', 'false') = 'false'
+                  AND geom IS NOT NULL
+                  AND NOT ST_IsEmpty(geom)
+                """,
+                (report["river_network_version_id"],),
+            )
+            reaches = cursor.fetchone()
+    assert reaches["reach_rows"] > 0

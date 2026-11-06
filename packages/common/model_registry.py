@@ -50,18 +50,6 @@ from packages.common.model_registry_contracts import (
     _default_no_op_state_index_publisher,
 )
 from packages.common.model_registry_contracts import (
-    RIVER_SEGMENT_COLLECTION_GEOMETRY_MAX_COORDINATES as RIVER_SEGMENT_COLLECTION_GEOMETRY_MAX_COORDINATES,
-)
-from packages.common.model_registry_contracts import (
-    RIVER_SEGMENT_COLLECTION_GEOMETRY_MAX_DIMENSIONS as RIVER_SEGMENT_COLLECTION_GEOMETRY_MAX_DIMENSIONS,
-)
-from packages.common.model_registry_contracts import (
-    RIVER_SEGMENT_COLLECTION_MAX_SERIALIZED_BYTES as RIVER_SEGMENT_COLLECTION_MAX_SERIALIZED_BYTES,
-)
-from packages.common.model_registry_contracts import (
-    RIVER_SEGMENT_COLLECTION_PAGE_MAX_COORDINATES as RIVER_SEGMENT_COLLECTION_PAGE_MAX_COORDINATES,
-)
-from packages.common.model_registry_contracts import (
     RIVER_SEGMENT_DETAIL_MAX_SERIALIZED_BYTES as RIVER_SEGMENT_DETAIL_MAX_SERIALIZED_BYTES,
 )
 from packages.common.model_registry_contracts import (

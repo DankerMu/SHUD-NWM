@@ -1,0 +1,109 @@
+{
+  "schema": "basins-registry-partition-retirements/v1",
+  "retirements": [
+    {
+      "issue": 2907,
+      "base_commit": "4511d3f4801e7cfc9e38ca42f083f224a6428046",
+      "owner": "tests/test_basins_registry_import_db.py",
+      "name": "test_registry_import_creates_idempotent_inactive_rows",
+      "action": "rewrite",
+      "reason": "observed the import through the deleted store list read path; now asserts the core.river_segment_crosswalk rows of the fixture RNV with source='basins_seg_shp' (== 2) directly",
+      "row": [
+        "tests/test_basins_registry_import_db.py",
+        "9537931d92d2c8f05fbea4f84778fd507fd1786d295bdebb3990b956b3c24d19",
+        "4043cceb9d0cb6ff557084557cf6a1d1326c68e2cdd34f3c5329023ebed8a59b",
+        "integration",
+        "c6b573d82535ed6a956c87a86aeac636ccf2c8e607bd6e355f7f33a9edf5249e",
+        "8f30f473b0794c09bda0006f1f35519b31884ff9407723492cb9a06fe90a0cb8",
+        "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+      ],
+      "nodes": [
+        "test_registry_import_creates_idempotent_inactive_rows"
+      ],
+      "integration_nodes": [
+        "test_registry_import_creates_idempotent_inactive_rows"
+      ]
+    },
+    {
+      "issue": 2907,
+      "base_commit": "4511d3f4801e7cfc9e38ca42f083f224a6428046",
+      "owner": "tests/test_basins_registry_import_db.py",
+      "name": "test_real_basins_import_smoke_is_gated",
+      "action": "rewrite",
+      "reason": "observed the real-Basins import through the deleted store list read path; now asserts the imported model's non-empty-geometry reach row count is > 0 directly",
+      "row": [
+        "tests/test_basins_registry_import_db.py",
+        "bf3053a8e74be16482252794d95ea6e909d0a5049a1427dee6ee34ce68b79bbf",
+        "4cab6428c7d64aff06614a472c1854361df5497ecefb97d067faf8087fc540f0",
+        "skipif,integration",
+        "9b9d8ae416c78fcc0d56ef44c69b17924f40fa22a8a5e96143cbacf22b54ed7a",
+        "748195236ac9eb9c2e4a0a7d7351ae2b3961713c2ec341703820a63b4f589fff",
+        "9ebdf7fbae886d3a52c77fcd13ec995bfda36d36382285eb59367c39049aec04"
+      ],
+      "nodes": [
+        "test_real_basins_import_smoke_is_gated"
+      ],
+      "integration_nodes": [
+        "test_real_basins_import_smoke_is_gated"
+      ]
+    },
+    {
+      "issue": 2907,
+      "base_commit": "4511d3f4801e7cfc9e38ca42f083f224a6428046",
+      "owner": "tests/test_basins_registry_import_qhh.py",
+      "name": "test_segment_slice_count_matches_sp_rivseg",
+      "action": "retire",
+      "reason": "pinned the deleted store list read path's feature count; the 18-row seg.shp crosswalk count stays covered by test_pr2_contract_reach_rows_single_part_and_crosswalk_count",
+      "row": null,
+      "nodes": [
+        "test_segment_slice_count_matches_sp_rivseg"
+      ],
+      "integration_nodes": [
+        "test_segment_slice_count_matches_sp_rivseg"
+      ]
+    },
+    {
+      "issue": 2907,
+      "base_commit": "4511d3f4801e7cfc9e38ca42f083f224a6428046",
+      "owner": "tests/test_basins_registry_import_qhh.py",
+      "name": "test_segment_slice_last_endpoint_saturates_to_reach_terminus",
+      "action": "retire",
+      "reason": "pinned the segment-slice geometry shape of the deleted store list read path",
+      "row": null,
+      "nodes": [
+        "test_segment_slice_last_endpoint_saturates_to_reach_terminus"
+      ],
+      "integration_nodes": [
+        "test_segment_slice_last_endpoint_saturates_to_reach_terminus"
+      ]
+    },
+    {
+      "issue": 2907,
+      "base_commit": "4511d3f4801e7cfc9e38ca42f083f224a6428046",
+      "owner": "tests/test_basins_registry_import_qhh.py",
+      "name": "test_segment_slice_river_segment_id_preserves_frontend_contract",
+      "action": "retire",
+      "reason": "pinned the derived <model>_seg_<iRiv>_<iEle> id that only the deleted store list read path produced",
+      "row": null,
+      "nodes": [
+        "test_segment_slice_river_segment_id_preserves_frontend_contract"
+      ],
+      "integration_nodes": [
+        "test_segment_slice_river_segment_id_preserves_frontend_contract"
+      ]
+    },
+    {
+      "issue": 2907,
+      "base_commit": "4511d3f4801e7cfc9e38ca42f083f224a6428046",
+      "owner": "tests/test_basins_registry_import_qhh.py",
+      "name": "test_segment_slice_length_m_none_uses_equal_partition",
+      "action": "retire",
+      "reason": "checked inline arithmetic against itself for the deleted store slice path's equal partition; it called no product code",
+      "row": null,
+      "nodes": [
+        "test_segment_slice_length_m_none_uses_equal_partition"
+      ],
+      "integration_nodes": []
+    }
+  ]
+}
