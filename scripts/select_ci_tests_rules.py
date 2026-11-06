@@ -4611,6 +4611,19 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # schema's status enum equals `HYDRO_RUN_STATUS_ORDER`; without the row the
     # path selected nothing.
     PathTestRule("schemas/run_status.schema.json", (STATUS_VOCAB_PARITY_TEST,)),
+    # entropy-burndown task 2.2: the public pipeline-job status enum. The parity
+    # suite asserts it equals `PIPELINE_JOB_STATUS_ORDER`, the ops contract that
+    # it equals both OpenAPI enums and `OPS_JOB_STATUS_ENUM`, and the full-tree
+    # budget contract that the blocked literal stays outside it; without the row
+    # the path selected nothing.
+    PathTestRule(
+        "schemas/pipeline_job.schema.json",
+        (
+            STATUS_VOCAB_PARITY_TEST,
+            "tests/test_api_contract_pipeline_ops.py",
+            "tests/test_file_journal_full_tree_budget_contract.py",
+        ),
+    ),
     PathTestRule(
         # #2032: the `infra/env/node27-*.example` glob above only buys
         # tests/test_node27_write_roles.py, which never reads this template.

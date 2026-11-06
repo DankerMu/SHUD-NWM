@@ -33,6 +33,14 @@ from packages.common.contracts.time_normalization import format_cycle_time, pars
 from packages.common.redaction import redact_payload
 from packages.common.source_identity import normalize_source_id
 from packages.common.sqlalchemy_url import sqlalchemy_url
+from packages.common.status_vocab import (
+    CYCLE_TERMINAL_UI,
+    HYDRO_RUN_TERMINAL_UI,
+    PIPELINE_JOB_ACTIVE,
+    PIPELINE_JOB_FAILED_UI,
+    PIPELINE_JOB_PENDING,
+    PIPELINE_JOB_STATUS_ORDER,
+)
 from services.artifacts import (
     ArtifactLogError,
     ArtifactReader,
@@ -58,37 +66,14 @@ router = APIRouter(prefix="/api/v1", tags=["pipeline"])
 # retry/cancel writes an operator most needs to tell apart before cancelling.
 _APPLICATION_NAME = "nhms-api-pipeline"
 _SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
-PIPELINE_JOB_STATUS_VALUES = (
-    "pending",
-    "queued",
-    "submitted",
-    "running",
-    "succeeded",
-    "partially_failed",
-    "failed",
-    "submission_failed",
-    "permanently_failed",
-    "cancelled",
-    "skipped",
-)
+PIPELINE_JOB_STATUS_VALUES = PIPELINE_JOB_STATUS_ORDER
 PIPELINE_STAGE_BASIN_RESULTS_LIMIT = 50
 PIPELINE_PUBLIC_LOG_URI_MAX_LENGTH = 512
-_ACTIVE_JOB_STATUSES = {"pending", "queued", "submitted", "running"}
-_PENDING_JOB_STATUSES = {"pending", "queued"}
-_FAILED_JOB_STATUSES = {"failed", "submission_failed", "permanently_failed", "cancelled"}
-_TERMINAL_HYDRO_STATUSES = {"succeeded", "parsed", "published", "failed", "cancelled", "superseded"}
-_TERMINAL_CYCLE_STATUSES = {
-    "complete",
-    "published",
-    "parsed_partial",
-    "failed_download",
-    "failed_convert",
-    "failed_forcing",
-    "failed_run",
-    "failed_parse",
-    "failed_publish",
-    "cancelled",
-}
+_ACTIVE_JOB_STATUSES = set(PIPELINE_JOB_ACTIVE)
+_PENDING_JOB_STATUSES = set(PIPELINE_JOB_PENDING)
+_FAILED_JOB_STATUSES = set(PIPELINE_JOB_FAILED_UI)
+_TERMINAL_HYDRO_STATUSES = set(HYDRO_RUN_TERMINAL_UI)
+_TERMINAL_CYCLE_STATUSES = set(CYCLE_TERMINAL_UI)
 _STAGE_ORDER = ("download", "convert", "forcing", "forecast", "parse", "state_save_qc")
 _MAX_JOBS_LIMIT = 200
 _MAX_LOG_BYTES = 1024 * 1024

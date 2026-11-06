@@ -15407,6 +15407,16 @@ def test_any_ratchet_ceiling_rule_red_when_removed(monkeypatch: pytest.MonkeyPat
 STATUS_VOCAB_PARITY_PATH = "tests/test_status_vocab_parity.py"
 STATUS_VOCAB_SOURCE_PATH = "packages/common/status_vocab.py"
 RUN_STATUS_SCHEMA_PATH = "schemas/run_status.schema.json"
+# entropy-burndown task 2.2: the public pipeline-job status enum. Read by the
+# parity suite (schema == PIPELINE_JOB_STATUS_ORDER), the ops contract
+# (three-way schema == OpenAPI == OPS_JOB_STATUS_ENUM) and the full-tree budget
+# contract (the blocked literal stays outside the durable enum).
+PIPELINE_JOB_SCHEMA_PATH = "schemas/pipeline_job.schema.json"
+PIPELINE_JOB_SCHEMA_TESTS = (
+    STATUS_VOCAB_PARITY_PATH,
+    "tests/test_api_contract_pipeline_ops.py",
+    "tests/test_file_journal_full_tree_budget_contract.py",
+)
 STATUS_LITERAL_ALLOWLIST_PATH = "tests/status_literal_allowlist.json"
 # #3026: the task 2.1b duplicate-literal scan, split out of the parity suite. It
 # scans the same five roots, so the same additive loop routes it.
@@ -15477,10 +15487,25 @@ def test_status_vocab_routing_rows_select_their_exact_suites() -> None:
     assert STATUS_VOCAB_PARITY_PATH in select_tests(["db/migrations/x.sql"], repo_root=Path("."))
 
 
+def test_pipeline_job_schema_selects_exactly_its_three_readers() -> None:
+    # Before the task 2.2 row the schema selected nothing, so a schema-only enum
+    # edit went green on the PR lane and red on the full master run.
+    assert all(Path(test).is_file() for test in PIPELINE_JOB_SCHEMA_TESTS)
+    rows = [rule for rule in PATH_TEST_RULES if rule.pattern == PIPELINE_JOB_SCHEMA_PATH]
+    assert [(rule.tests, rule.stop_on_match) for rule in rows] == [(PIPELINE_JOB_SCHEMA_TESTS, False)]
+    assert select_tests([PIPELINE_JOB_SCHEMA_PATH], repo_root=Path(".")) == sorted(PIPELINE_JOB_SCHEMA_TESTS)
+
+
 @pytest.mark.parametrize(
     ("pattern", "changed", "target"),
     [
         pytest.param(RUN_STATUS_SCHEMA_PATH, RUN_STATUS_SCHEMA_PATH, STATUS_VOCAB_PARITY_PATH, id="run-status-schema"),
+        pytest.param(
+            PIPELINE_JOB_SCHEMA_PATH,
+            PIPELINE_JOB_SCHEMA_PATH,
+            "tests/test_api_contract_pipeline_ops.py",
+            id="pipeline-job-schema",
+        ),
         pytest.param(
             STATUS_VOCAB_SOURCE_PATH, STATUS_VOCAB_SOURCE_PATH, "tests/test_hydro_status_set_parity.py", id="vocab"
         ),
