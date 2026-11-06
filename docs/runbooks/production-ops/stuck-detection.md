@@ -185,7 +185,7 @@ NHMS_SCHEDULER_STALL_RECEIPT_ROOT=/tmp/stall-replay-receipts \
   与被回放的产物无关；配了 `--now` 的历史回放里 `LastTriggerUSec` 相对 `--now` 的 age
   为负，不会触发第 5 档。要彻底隔离，把该变量指向一个只回显健康属性的桩脚本。
 
-#### 6.2.1 十二档 verdict 的处置
+#### 6.2.1 十五档 verdict 的处置
 
 下面每档的五级标题就是探针 receipt/stderr 里 `runbook=` 指针的锚点，标题文本即锚点
 id（小写字母与连字符，渲染器 slug 后不变），改标题等于改探针的对外指针。
@@ -287,37 +287,77 @@ lane 现在不会再触发。合取项是**保守**写法，不是「timer 在�
 
 ##### stall-scheduler-root-blocked
 
-**10. `scheduler_root_blocked`** —— 从最新一趟起，连续每一趟产物的
-`execution_boundary` 都**恰为** `scheduler_root_preflight_blocked`（DB-free 调度器在
-拿锁之前的 root preflight 拒绝了本趟），且这段 run 从最旧成员到最新成员的
-`started_at` 跨度 ≥ `NHMS_SCHEDULER_STALL_ROOT_BLOCKED_MINUTES`（默认 60 分钟；下限
-10 = 两个 timer 间隔，上限与时间闸门同为 `(SCAN_LIMIT - 12 - 1) × 5`，越界退出码 2）。
-这类产物没有 `progress_guard`、`counts` 全 0，在计数 streak、时间闸门与 frontier 里
-一律是中性、被跳过，receipt 的 `passes.neutral_count` 照常计它们 —— 2026-10-13 起
-每一趟都是这种形状，探针却一直报 `ok`（#2912）。
+**10. `scheduler_root_blocked`** —— 第 10 档共用的 preflight-blocked run（见下）跨度
+≥ `NHMS_SCHEDULER_STALL_ROOT_BLOCKED_MINUTES`，且**最新一趟**的 `execution_boundary`
+**恰为** `scheduler_root_preflight_blocked`（DB-free 调度器在拿锁之前的 root preflight
+拒绝了本趟）。这类产物没有 `progress_guard`、`counts` 全 0，在计数 streak、时间闸门与
+frontier 里一律是中性、被跳过，receipt 的 `passes.neutral_count` 照常计它们 ——
+2026-10-13 起每一趟都是这种形状，探针却一直报 `ok`（#2912）。
 
+**第 10 档共用的 preflight-blocked run（#2969）**。writer 在挑候选之前、写
+`progress_guard` 之前退出的 `preflight_blocked` 边界有四个会落盘，四个都是中性，四个都
+零提交；探针把它们当成**一条** run 量，按**最新一趟**的边界选处置：
+
+| 最新一趟的 `execution_boundary` | verdict | 本节锚点 |
+|---|---|---|
+| `scheduler_root_preflight_blocked` | `scheduler_root_blocked` | `stall-scheduler-root-blocked` |
+| `db_free_runtime_preflight_blocked` | `scheduler_db_free_runtime_blocked` | `stall-scheduler-db-free-runtime-blocked` |
+| `scheduler_rollback_fence_prepared` | `scheduler_rollback_fenced` | `stall-scheduler-rollback-fenced` |
+| `db_free_registry_blocked` | `scheduler_registry_blocked` | `stall-scheduler-registry-blocked` |
+
+- run = 从最新一趟起、`execution_boundary` 是上表**任一**边界（精确字符串相等）的连续
+  趟；四个边界之间互换**不截断** run。修好 `/scratch` 的 root 而 `/ghdc` 仍未挂载时，
+  lane 从 `scheduler_root_preflight_blocked` 翻到 `db_free_runtime_preflight_blocked`，
+  run 接着量，verdict 当即换成 `scheduler_db_free_runtime_blocked`，**不会**回到 `ok`；
+  反向翻转同理。
+- 截断 run 的：豁免边界 `scheduler_timing_level_unrecognised`（拿锁前、中性，但产物从不
+  落盘，无 run 可量）、`scheduler_progress_guard_blocked`（自己写 `progress_guard`，不是
+  中性）、没有 `execution_boundary` 的旧产物、所有走到候选阶段的趟（含带 guard 的
+  `evidence_preflight_blocked` / `slurm_preflight_blocked` / 裸 `preflight_blocked`，它们
+  由 `submission_stalled` 的计数 streak 管）。最新一趟不在 run 里时 run 为空，lane 恢复
+  后不会凭历史告警；单趟偶发拒绝的跨度是 0，不报。
+- 阈值四档共用 `NHMS_SCHEDULER_STALL_ROOT_BLOCKED_MINUTES`（默认 60 分钟；下限 10 = 两个
+  timer 间隔，上限与时间闸门同为 `(SCAN_LIMIT - 12 - 1) × 5`，越界退出码 2）；变量名不改，
+  已部署的 drop-in 含义不变。
 - 只走 ordering-safe 前缀（`streak_window`），所以上限借用时间闸门的可达上限。
-- 任何别的产物都截断 run：`db_free_runtime_preflight_blocked`、
-  `scheduler_timing_level_unrecognised`（同为拿锁前、同样中性，但处置不同）、没有
-  `execution_boundary` 的旧产物、正常趟。最新一趟不是 root-blocked 时 run 为空，
-  lane 恢复后不会凭历史告警；单趟偶发拒绝的跨度是 0，不报。
-- 压在 `submission_stalled` 之上：root-blocked 趟在计数 streak 里是中性的，它们背后
-  的老 blocked 趟仍可能凑够计数，但那描述的是根目录消失**之前**的 lane。
+- 四档同处第 10 档：都从最新一趟起量，最新一趟只有一个边界，所以四档互斥。压在
+  `submission_stalled` 之上：这些趟在计数 streak 里是中性的，它们背后的老 blocked 趟仍可能
+  凑够计数，但那描述的是 preflight 开始拒绝**之前**的 lane。`timer_stopped`、
+  `pass_limit_blocked` 等更高档照旧压过它们。
+- 中性形态不变（#2912 design 否决了新的非中性 shape）：`passes` 五类计数、计数 streak、
+  时间闸门与 frontier 都与以前完全一样。
 
-receipt 顶层块 `root_blocked_run`（每档 verdict 都写，含 `ok` 与 `probe_failed`）：
+receipt 顶层块 `preflight_blocked_run`（每档 verdict 都写，含 `ok` 与 `probe_failed`），
+**第 10 档按它判级**：
 
 | 字段 | 含义 |
 |---|---|
-| `passes` | run 的趟数；最新一趟不是 root-blocked 时为 0 |
+| `passes` | run 的趟数；最新一趟不在 run 里时为 0 |
 | `span_minutes` | 最旧成员到最新成员的 `started_at` 分钟数；单趟 `0.0`，空 run 为 `null` |
 | `threshold_minutes` | 生效阈值（`NHMS_SCHEDULER_STALL_ROOT_BLOCKED_MINUTES`） |
+| `newest_boundary` | 最新一趟的 `execution_boundary`；空 run 为 `null` |
+| `remedy_verdict` | 按上表由 `newest_boundary` 得出的 verdict；空 run 为 `null` |
+| `boundary_passes` | run 内每个边界各几趟（最多四个键），看得出 lane 是从哪个边界翻过来的 |
+
+`remedy_verdict` 非空且 `span_minutes >= threshold_minutes` 即第 10 档、verdict 就是
+`remedy_verdict`，只凭 receipt 就能复算。
+
+receipt 顶层块 `root_blocked_run`（#2912 原样保留，每档 verdict 都写）只量 root 边界本身：
+
+| 字段 | 含义 |
+|---|---|
+| `passes` | 从最新一趟起**恰为** `scheduler_root_preflight_blocked` 的连续趟数；任何别的边界都截断它 |
+| `span_minutes` | 最旧成员到最新成员的 `started_at` 分钟数；单趟 `0.0`，空 run 为 `null` |
+| `threshold_minutes` | 生效阈值（同上） |
 | `newest_is_root_blocked` | 最新一趟是否 root-blocked |
 
-`passes` / `span_minutes` 只在 ordering-safe 前缀（`SCAN_LIMIT - 12` 趟；默认 `SCAN_LIMIT` = 96 时为 84
-趟，按 5 分钟最小间隔算至少 415 分钟；实测 6.1 分钟/趟时约 505 分钟）里量，是故障时长的**下限**，不是故障时长本身。
+它是 `preflight_blocked_run` 的前缀，所以 `newest_is_root_blocked` 为真且
+`span_minutes >= threshold_minutes` 时本档必报（充分条件，与 #2912 时一样）；但本档也可能在
+它不够阈值时报 —— 例如 lane 先在 `/ghdc` 上卡了一小时、再翻回 root —— 那时以
+`preflight_blocked_run` 为准。
 
-`newest_is_root_blocked` 为真且 `span_minutes >= threshold_minutes` 即本档，只凭
-receipt 就能复算。
+两个块的 `passes` / `span_minutes` 都只在 ordering-safe 前缀（`SCAN_LIMIT - 12` 趟；默认 `SCAN_LIMIT` = 96 时为 84
+趟，按 5 分钟最小间隔算至少 415 分钟；实测 6.1 分钟/趟时约 505 分钟）里量，是故障时长的**下限**，不是故障时长本身。
 
 处置：打开最新一趟产物，读 `root_preflight.blockers[]` 看是哪个 root 不可用；然后在
 node-22 上逐个检查 `NHMS_SCHEDULER_ALLOWED_ROOTS` 的每一项，以及
@@ -325,11 +365,83 @@ node-22 上逐个检查 `NHMS_SCHEDULER_ALLOWED_ROOTS` 的每一项，以及
 **是否存在、是否已挂载**（`findmnt -T <path>`、`ls -ld <path>`；NFS `/ghdc/data/nwm/`
 掉挂是首要嫌疑）。恢复挂载或修正配置后，按
 [`../node22-control-plane-manual-recovery.md`](../node22-control-plane-manual-recovery.md)
-的人工流程确认调度器下一趟不再被拒。确认恢复要看最新一趟产物的 `execution_boundary`
-不再是任何 `*preflight_blocked` / `*_blocked` 边界，**不能**以 verdict 回到 `ok` 为准：
-停在 `db_free_runtime_preflight_blocked`（`/ghdc` 的 registry/index/copyback 根）或
-`db_free_registry_blocked` 上的 lane 不会报 `scheduler_root_blocked`（`root_blocked_run.passes == 0`，其它档仍按窗口内别的趟判定）
-（已知残留，见 #2969）。**探针自己不修任何东西**。
+的人工流程确认调度器下一趟不再被拒。修好 root 后 verdict 若换成本节下面三档之一，那是
+同一次停摆的下一层阻塞（run 不清零），转对应一节；verdict 回到 `ok` 且
+`preflight_blocked_run.passes == 0` 才说明最新一趟已经走过了全部 pre-candidate preflight。
+**探针自己不修任何东西**。
+
+##### stall-scheduler-db-free-runtime-blocked
+
+**10b. `scheduler_db_free_runtime_blocked`** —— 第 10 档的 `preflight_blocked_run` 跨度
+≥ `NHMS_SCHEDULER_STALL_ROOT_BLOCKED_MINUTES`，且最新一趟的 `execution_boundary` 为
+`db_free_runtime_preflight_blocked`：root preflight 已过，但 DB-free 运行期 preflight 在
+拿锁之前拒绝了本趟。它查的是 root preflight **不查**的那批路径与配置 ——
+`NHMS_SCHEDULER_REGISTRY_MANIFEST` / `NHMS_SCHEDULER_CANONICAL_READINESS_INDEX` /
+`NHMS_SCHEDULER_JOURNAL_ROOT` / `NHMS_SCHEDULER_STATE_INDEX` /
+`NHMS_OBJECT_STORE_COPYBACK_ROOT` / `NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT`（node-22 上多在
+`/ghdc/...`，而 root preflight 查的根在 `/scratch/...`），外加 `DATABASE_URL` 必须为空、
+Slurm 提交属主与 selector 配置。典型路径：`/ghdc` NFS 未挂载时先修好了 `/scratch` 的根，
+lane 从 `scheduler_root_preflight_blocked` 翻到本边界，run 不清零、本档立即接替
+`scheduler_root_blocked`（`preflight_blocked_run.boundary_passes` 里两种边界都在）。
+
+处置：打开最新一趟产物，读 `db_free_runtime.blockers[]`（每条有 `code` / `field` /
+`reason`）：
+
+- `db_free_required_path_*`（`not_found`、`parent_missing`、`unsafe` 等）：对 `field` 指向
+  的路径做 `findmnt -T <path>`、`ls -ld <path>`；`/ghdc/data/nwm/` 掉挂是首要嫌疑，恢复挂载；
+  路径本身配错则改 `infra/env/compute.scheduler-dbfree.env`（权威行见 `infra/env/README.md`）。
+- `database_url_forbidden`：DB-free 调度器的环境里混进了 `DATABASE_URL`，从 env 文件 /
+  drop-in 里删掉。
+- `accepted_submit_owner_missing`：补齐 `NHMS_SCHEDULER_RECONCILE_SLURM_USER` /
+  `NHMS_SCHEDULER_RECONCILE_SLURM_ACCOUNT`。
+
+修复后按
+[`../node22-control-plane-manual-recovery.md`](../node22-control-plane-manual-recovery.md)
+确认下一趟不再被拒。**探针自己不修任何东西**。
+
+##### stall-scheduler-rollback-fenced
+
+**10c. `scheduler_rollback_fenced`** —— 第 10 档的 `preflight_blocked_run` 跨度
+≥ `NHMS_SCHEDULER_STALL_ROOT_BLOCKED_MINUTES`，且最新一趟的 `execution_boundary` 为
+`scheduler_rollback_fence_prepared`：调度器拿到了锁，但文件 journal 上有一道 live 的
+rollback fence（或 fence 读不出），本趟在挑候选前拒绝提交。
+
+fence 是 `prepare-file-journal-rollback` **有意**写下的暂停，但 runbook 规定 fence 存在
+期间调度器 timer/service 必须**停着**、前滚成功消费 fence 之后才恢复 timer
+（[`../qhh-22-business-bringup.md`](../qhh-22-business-bringup.md) 与
+[`service-bringup.md`](service-bringup.md) 的 rollback / roll-forward 段落）。timer 停着时
+探针先报第 3 档 `timer_stopped`，所以**本档只在 timer 已恢复而 fence 仍在时出现**：要么
+前滚还没做就恢复了 timer，要么前滚失败、fence 没被消费。不是可以静默的预期状态。
+
+处置：打开最新一趟产物，读 `rollback_fence.reason` 与 `rollback_fence.receipt_id`。
+
+- `file_journal_rollback_fence_prepared`：先停 `nhms-compute-scheduler.timer`，确认旧 writer
+  已停，再用 `receipt_id` 按上面两份 runbook 执行 `complete-file-journal-rollforward`；成功
+  receipt 落盘、fence 被消费后再恢复 timer。
+- `file_journal_rollback_fence_invalid`：fence / preparation receipt 校验失败或读不出，
+  **不得**手工删 marker / receipt；停 timer，按同一 runbook 的 `preparing` / binding 篡改段落
+  处置。
+
+**探针自己不修任何东西**。
+
+##### stall-scheduler-registry-blocked
+
+**10d. `scheduler_registry_blocked`** —— 第 10 档的 `preflight_blocked_run` 跨度
+≥ `NHMS_SCHEDULER_STALL_ROOT_BLOCKED_MINUTES`，且最新一趟的 `execution_boundary` 为
+`db_free_registry_blocked`：调度器拿到锁、完成了 restart reconcile 与模型发现，但 file
+provider 的 registry 证据是 `blocked`，本趟在挑候选前退出。progress guard 此时已构造
+却**没写进产物**，所以这趟同样中性。
+
+已有实例：2026-08-28 起 file-provider refresh timer 静默 inactive，11 天后 manifest 越过
+168 小时 consumer 上限，compute 先 `file_manifest_stale`、随即停在本边界
+（[`file-provider-refresh.md`](file-provider-refresh.md)）。
+
+处置：打开最新一趟产物，读 `model_discovery.registry`（`status: blocked` 及其 reason，
+例如 `file_manifest_stale`）。先查 file-provider refresh lane：
+`systemctl --user list-timers nhms-scheduler-file-provider-refresh.timer --all` 与 refresh
+timer 健康探针的 receipt，按 [`file-provider-refresh.md`](file-provider-refresh.md) 恢复
+refresh；registry manifest 所在的 `/ghdc` 路径掉挂时按 10b 的挂载检查处置。refresh 产出新
+manifest 后确认下一趟不再停在本边界。**探针自己不修任何东西**。
 
 ##### stall-submission-stalled
 
@@ -580,7 +692,7 @@ absence/release 出口」，处置是有保护的 `nhms-pipeline demote-reserved
      writer 尺寸回退把候选列表清空的那种产物 `status` 是 `resource_limit_blocked`，属
      中性、不会被取作 frontier；前缀里若**全是**中性趟，frontier 与时间闸门的 run 都
      为空，这两条规则都不报，由第 8 档 `pass_limit_blocked` 覆盖（前缀全是
-     root-blocked 趟时由第 10 档 `scheduler_root_blocked` 覆盖）。
+     guard-less preflight-blocked 趟时由第 10 档（`scheduler_root_blocked` 与 10b–10d）覆盖）。
   3. `subject_id` 不带 `<source>_<YYYYMMDDHH>` 的条目（candidate 类
      `gfs:2026-09-23T00:00:00+00:00`）永远不匹配 frontier，继续被抑制。
 
