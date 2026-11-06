@@ -188,7 +188,7 @@
 
   **Minimal mergeable slice:** atomic - 扫描与 allowlist 互为 oracle。
 
-- [ ] 2.2 `apps/api/routes/pipeline.py` 的状态 tuple 与五个本地集合（:76-80）改为从 `status_vocab` 绑定（tuple 用 `PIPELINE_JOB_STATUS_ORDER`）；`schemas/pipeline_job.schema.json` enum 加 `reservation_lost`（按 `PIPELINE_JOB_STATUS_ORDER` 顺序，从 2.1 移来）并删 parity 的 `_PENDING_PUBLIC_DELTA`、把 `reservation_lost` 加进 `tests/test_api_contract_pipeline_ops.py:72` 的 `OPS_JOB_STATUS_ENUM`（允许的测试改动，连同 parity 的 `_PENDING_PUBLIC_DELTA` 删除与受影响的 selector 精确集合断言）、加 `PathTestRule("schemas/pipeline_job.schema.json", (parity, test_api_contract_pipeline_ops, test_file_journal_full_tree_budget_contract))`；手改 `openapi/nhms.v1.yaml` 的 enum（该文件为手工维护）；`cd apps/frontend && corepack pnpm generate:api` 重生成 `src/api/types.ts`；allowlist 中 `pipeline.py` 的条目删除。
+- [x] 2.2 `apps/api/routes/pipeline.py` 的状态 tuple 与五个本地集合（:76-80）改为从 `status_vocab` 绑定（tuple 用 `PIPELINE_JOB_STATUS_ORDER`）；`schemas/pipeline_job.schema.json` enum 加 `reservation_lost`（按 `PIPELINE_JOB_STATUS_ORDER` 顺序，从 2.1 移来）并删 parity 的 `_PENDING_PUBLIC_DELTA`、把 `reservation_lost` 加进 `tests/test_api_contract_pipeline_ops.py:72` 的 `OPS_JOB_STATUS_ENUM`（允许的测试改动，连同 parity 的 `_PENDING_PUBLIC_DELTA` 删除与受影响的 selector 精确集合断言）、加 `PathTestRule("schemas/pipeline_job.schema.json", (parity, test_api_contract_pipeline_ops, test_file_journal_full_tree_budget_contract))`；手改 `openapi/nhms.v1.yaml` 的 enum（该文件为手工维护）；`cd apps/frontend && corepack pnpm generate:api` 重生成 `src/api/types.ts`；allowlist 中 `pipeline.py` 的条目删除。
 
   Depends on: 2.1b
 
