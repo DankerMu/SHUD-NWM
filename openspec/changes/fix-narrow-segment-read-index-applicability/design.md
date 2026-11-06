@@ -40,7 +40,7 @@ the text twin's — so a change touching only one of them does not go silently g
 `tests/test_river_identity_normalization_integration.py:270` comments that the legacy text indexes
 remain on the renamed table. **Both have the same column order as F1's discovery index and the same
 missing column.** The narrow index is therefore the key-column *analogue* of 000051's, not its
-successor: `openspec/changes/timeseries-narrow-store-expand-contract/design.md:57` says "替代 000051",
+successor: `openspec/changes/archive/2026-11-05-timeseries-narrow-store-expand-contract/design.md:57` says "替代 000051",
 but that replacement is scoped to the narrow table only.
 
 **F1c — one template renders both branches.** `packages/common/forecast_store.py:136-143`
@@ -60,7 +60,7 @@ predicate.**
 `apps/api/routes/hydro_display.py:1123-1164` (called from `:1093`), `services/tiles/mvt.py:702-730`,
 `packages/common/display_coverage.py:139-160` (whose comment at `:64-65` names the index's column tuple
 as its intended plan). Purpose stated at
-`openspec/changes/timeseries-narrow-store-expand-contract/design.md:57`. A fourth historical consumer,
+`openspec/changes/archive/2026-11-05-timeseries-narrow-store-expand-contract/design.md:57`. A fourth historical consumer,
 the hydro tile point lookup, was rewritten as a per-segment `CROSS JOIN LATERAL` and no longer uses it
 (`db/migrations/000051_river_ts_surrogate_key_read_index.sql:44-57`, Round-3 amendment).
 
@@ -105,7 +105,7 @@ usage exists in the repo's Python read path; `ForecastStore._transaction`
 (`packages/common/forecast_store.py:2810-2811`) issues no session GUCs.
 
 **F8 — the measured failure.** Receipt
-`openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-17-i8-explain-gate/`:
+`openspec/changes/archive/2026-11-05-timeseries-narrow-store-expand-contract/receipts/2026-09-17-i8-explain-gate/`:
 run-bound flips `_hyper_9_175_chunk` (192 096 / 12 = 16 008 per-node ratio, 2 204 node hits);
 `issue_time=latest` flips `_hyper_9_170_chunk` (384 192 / 24 = 16 008, 4 480 node hits). Different
 chunks, so the defect is not chunk-specific. D11 evaluates the ratio per node: the loop starts at

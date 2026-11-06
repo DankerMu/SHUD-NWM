@@ -140,7 +140,7 @@ Three deviations from what the Verify clauses above expected, recorded rather th
 ## 4. Live evidence on node-27
 
 - [x] 4.1 Re-run the receipt probes
-  (`openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-17-i8-explain-gate/probe1987.py`,
+  (`openspec/changes/archive/2026-11-05-timeseries-narrow-store-expand-contract/receipts/2026-09-17-i8-explain-gate/probe1987.py`,
   `probe1987latest.py`) **as a same-session A/B against two worktrees** — the merge-base and this change
   — exactly as the 2026-09-17 receipt did. A cross-day comparison against that receipt is **not**
   acceptable evidence: `_analyze_frontier_chunks` (`scripts/node27_autopipeline.py:1628`, called at `:1761`) refreshes them, so by then an *unfixed* tree may also measure green (design.md F11). Record, for **every chunk the plan touches**, in the same read-only

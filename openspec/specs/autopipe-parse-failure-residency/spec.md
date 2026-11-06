@@ -7,7 +7,7 @@ Detect a node-27 autopipe hydro run that stays `failed` across retried ticks (th
 
 ### Requirement: A resident parse-stage failure SHALL raise an operator alert and a self-healing burst SHALL NOT
 
-A node-27 observer SHALL watch every run whose status is `failed`, whatever its error code, that the pipeline is still retrying (last updated within the retry-liveness bound), and SHALL alert (non-zero exit delivered through the unit-failure handler, with the report on the journal as the message body) when at least one run has stayed failing across its observations for at least the residency threshold and has not been alerted within the re-alert interval. On node-27 the output parser is the only writer of the `failed` status, so the watched set carries no error-code filter: the parser's bare output-parsing codes (for example a missing or malformed river output file) are the permanent, never-healing failures the lane exists for. The retry liveness rests on the autopipe re-registering a failed run on every tick, which renews its last-updated time while keeping its status; a repeated parse failure does not rewrite an already-failed run, so the recorded error code is the first failure's and the report SHALL label it as such. The watched set SHALL also include every run with a `PUBLISHED_REPARSE_FAILED` decline (an already `published` run whose rewritten product failed to parse with a deterministic output-parsing code) whose latest such decline lies within the liveness bound and after the run's last successful parse; for these runs the decline time stands in for the last-updated time and the decline detail's leading `<ERROR_CODE>` is the reported code. A run that recovers before the threshold SHALL NOT cause an alert. Configuration, database, or state errors SHALL exit with a distinct typed status and no traceback; a residency threshold that is not shorter than the liveness bound is a configuration error. Until #1993's first cut on 2026-10-11, a watched `failed` run whose recorded forcing version was routed to the legacy timeseries store was classified `legacy_store_refused` and alerted once without re-alert; that class no longer exists, the observer no longer reads `met.forcing_version`, and such a run is watched, alerted and re-alerted like any other `failed` run (`tests/test_node27_parse_failure_residency_alert.py`, `docs/runbooks/production-ops/parse-failure-residency-alert.md`; see "routing column" in `openspec/glossary.md`).
+A node-27 observer SHALL watch every run whose status is `failed`, whatever its error code, that the pipeline is still retrying (last updated within the retry-liveness bound), and SHALL alert (non-zero exit delivered through the unit-failure handler, with the report on the journal as the message body) when at least one run has stayed failing across its observations for at least the residency threshold and has not been alerted within the re-alert interval. On node-27 the output parser is the only writer of the `failed` status, so the watched set carries no error-code filter: the parser's bare output-parsing codes (for example a missing or malformed river output file) are the permanent, never-healing failures the lane exists for. The retry liveness rests on the autopipe re-registering a failed run on every tick, which renews its last-updated time while keeping its status; a repeated parse failure does not rewrite an already-failed run, so the recorded error code is the first failure's and the report SHALL label it as such. The watched set SHALL also include every run with a `PUBLISHED_REPARSE_FAILED` decline (an already `published` run whose rewritten product failed to parse with a deterministic output-parsing code) whose latest such decline lies within the liveness bound and after the run's last successful parse; for these runs the decline time stands in for the last-updated time and the decline detail's leading `<ERROR_CODE>` is the reported code. A run that recovers before the threshold SHALL NOT cause an alert. Configuration, database, or state errors SHALL exit with a distinct typed status and no traceback; a residency threshold that is not shorter than the liveness bound is a configuration error. The observer SHALL NOT read `met.forcing_version.timeseries_store` and has no `legacy_store_refused` class: the writers no longer refuse a formerly legacy-routed forcing version (#1993), so such a run is watched, alerted and re-alerted like any other failed run.
 
 #### Scenario: A permanent parse failure alerts once per interval
 
@@ -45,19 +45,11 @@ A node-27 observer SHALL watch every run whose status is `failed`, whatever its 
 - **WHEN** the autopipe processes it
 - **THEN** no decline is written and the run is retried on the next tick
 
-Archive status:
-- status: historical baseline
-- current_authority: openspec/glossary.md; docs/runbooks/production-ops/parse-failure-residency-alert.md
-- superseded_by: none
-- status_since: 2026-10-11
-- archive_scope: section
-- retained_for: record of the retired legacy_store_refused class, removed by #1993's first cut (6a843b84f); the current behaviour is the re-alert of every failed run
-
 #### Scenario: A legacy-store-refused failed run alerts once and is not re-alerted
 
-- **GIVEN** a `failed` run whose recorded forcing version has `timeseries_store = 'legacy'`, observed failing for longer than the threshold
+- **GIVEN** a `failed` run whose recorded forcing version was written before the narrow store, observed failing for longer than the threshold (the scenario title is historical: the refusal it names was removed by #1993)
 - **WHEN** the observer runs, and runs again after the re-alert interval with the run still in the watched set
-- **THEN** the first run exits 1 with the run reported under `legacy_store_refused`, and the later run exits 0 without mailing it again
+- **THEN** both runs treat it as an ordinary failed run: the first exits 1 naming the run under its recorded error code, the later one alerts again, and no report line carries `source=legacy_store_refused`
 
 ### Requirement: A published re-parse blocked by a compressed chunk is declined and visible
 

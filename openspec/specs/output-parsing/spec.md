@@ -1,7 +1,7 @@
 # output-parsing Specification
 
 ## Purpose
-TBD - created by archiving change m1-gfs-forecast-loop. Update Purpose after archive.
+Defines how SHUD river output (`.rivqdown`) is parsed into `hydro.river_timeseries`: file parsing, unit conversion to m³/s, column-to-segment consistency, ingestion, QC, idempotent re-parsing and the run-window bound on forecast fact rows.
 
 ## Requirements
 
@@ -72,13 +72,13 @@ Before ingestion, the parser MUST verify that the number of data columns in `.ri
 
 ### Requirement: TimescaleDB ingestion into river_timeseries
 
-Parsed and converted data MUST be written to `hydro.river_timeseries` with ALL required columns: `run_id`, `basin_version_id`, `river_network_version_id`, `river_segment_id`, `valid_time`, `lead_time_hours`, `variable`, `value`, `unit`, `quality_flag`. The composite primary key is `(run_id, river_network_version_id, river_segment_id, variable, valid_time)`. The write MUST use upsert semantics (`INSERT ... ON CONFLICT DO UPDATE`) on this composite PK to support idempotent re-parsing. The `variable` column MUST be set to `'q_down'` (not `'discharge'`) for `.rivqdown` data, per DB query pattern section 6.1. The `unit` column MUST be set to `'m3/s'`. The `basin_version_id` MUST be looked up from the `hydro.hydro_run` record. The `lead_time_hours` MUST be calculated as the difference between each `valid_time` and `hydro.hydro_run.cycle_time`, expressed in hours.
+Parsed and converted data MUST be written to the narrow `hydro.river_timeseries` with ALL of its columns: `run_key`, `basin_version_key`, `river_network_version_key`, `river_segment_key`, `valid_time`, `lead_time_hours`, `variable_e`, `value`, `unit_e`, `quality_flag_e`. The composite primary key is `(run_key, river_segment_key, variable_e, valid_time)`. The write MUST use upsert semantics (`INSERT ... ON CONFLICT DO UPDATE`) on this composite PK to support idempotent re-parsing. `variable_e` MUST be set to `'q_down'` (not `'discharge'`) for `.rivqdown` data, per DB query pattern section 6.1. `unit_e` MUST be set to `'m3/s'`. `run_key` and `basin_version_key` MUST be looked up from the `hydro.hydro_run` record and `river_network_version_key`/`river_segment_key` from `core.river_segment`; no text identity column is written because the narrow table has none (`timeseries-narrow-store`). The `lead_time_hours` MUST be calculated as the difference between each `valid_time` and `hydro.hydro_run.cycle_time`, expressed in hours, and MUST be NULL for analysis runs.
 
 #### Scenario: Successful ingestion of a complete forecast
 
 - **WHEN** the parser processes a `.rivqdown` with 7 time steps and 10 segments
 - **THEN** exactly 70 rows MUST be inserted into `hydro.river_timeseries`
-- **THEN** each row MUST have `run_id` from the current run, `basin_version_id` from the hydro_run record, `river_network_version_id` from the model instance, `river_segment_id`, `variable = 'q_down'`, `value` in m³/s, `unit = 'm3/s'`, `lead_time_hours` calculated from run cycle_time, and `quality_flag`
+- **THEN** each row MUST have `run_key` and `basin_version_key` from the hydro_run record, `river_network_version_key` and `river_segment_key` from the segment authority row, `variable_e = 'q_down'`, `value` in m³/s, `unit_e = 'm3/s'`, `lead_time_hours` calculated from run cycle_time, and `quality_flag_e`
 - **THEN** the `valid_time` MUST be a proper `TIMESTAMPTZ` derived from the time column (SHUD output time converted to UTC using run start_time as reference)
 
 #### Scenario: Upsert overwrites on re-parse

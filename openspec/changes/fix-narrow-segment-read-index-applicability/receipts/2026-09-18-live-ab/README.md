@@ -202,7 +202,7 @@ carry #2417 into production (`tasks.md` §6.4's deploy hold). Recorded as blocke
 | `compare-arms-output.txt` | `compare-arms.py`'s console output |
 
 The probes themselves are **not copied here**: they are
-`openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-17-i8-explain-gate/probe1987*.py`,
+`openspec/changes/archive/2026-11-05-timeseries-narrow-store-expand-contract/receipts/2026-09-17-i8-explain-gate/probe1987*.py`,
 run unmodified. They select fact statements by table-name marker (`FACT_MARKERS`) and pin no conjunct
 literal, so they capture the head arm's rewritten SQL correctly — checked before the run, because a probe
 that silently captures nothing reports no violation and reads as PASS.

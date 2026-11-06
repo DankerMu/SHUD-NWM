@@ -4224,7 +4224,7 @@ def _qhh_latest_context_reasons(evaluations: Sequence[Mapping[str, Any]]) -> lis
 # Measured provenance: the #1992 I13 rollout receipt's production
 # `EXPLAIN (ANALYZE)` on node-27, whose narrow leg scans
 # `forcing_ts_version_variable_time_key_idx`
-# (`openspec/changes/timeseries-narrow-store-expand-contract/receipts/
+# (`openspec/changes/archive/2026-11-05-timeseries-narrow-store-expand-contract/receipts/
 # 2026-09-20-i13-forcing-dual-store-readpath/explain-before-after.txt`).
 _QHH_LATEST_FORCING_QUERY_INDEX: dict[str, Any] = {
     "table": FORCING_TABLE,
