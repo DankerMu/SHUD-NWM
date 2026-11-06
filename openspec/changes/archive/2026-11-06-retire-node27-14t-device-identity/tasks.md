@@ -40,6 +40,8 @@
 - [x] 4.4 `git grep -n -e "/data/GHDC" -e "/dev/md0" -- packages scripts` leaves only
   the historical comments in `node27_container_contract.py` and
   `node27_timeseries_retention.py` and the inert frozen `DEFAULTS` identity.
-- [ ] 4.5 node-27 manual governance run
+- [x] 4.5 node-27 manual governance run
   (`systemctl --user start nhms-node27-resource-governance.service`) shows no
-  `cold` entry in the report. Post-merge, owned by the orchestrator; not run from this PR.
+  `cold` entry in the report. Done 2026-11-06 on node-27 `cee8dbef8`: Result=success,
+  receipt `resource-governance-20261106T071218Z.json` has no `cold` key and no `/data/GHDC`
+  string; working-set target `/home/nwm/nhms-primary/pgdata` status ok (#3059 comment).
