@@ -2668,6 +2668,8 @@ def test_select_tests_maps_autopipeline_script_without_core_smoke_fallback() -> 
         # #3062: the AUTOPIPE_MAX_CYCLE_AGE_DAYS cycle floor suite, same rule.
         "tests/test_node27_autopipeline_cycle_floor.py",
         "tests/test_node27_autopipeline_handoff.py",
+        # #3057: the inventory-only activation suite, same rule.
+        "tests/test_node27_autopipeline_inventory_activation.py",
         "tests/test_node27_autopipeline_preflight.py",
         # #2590: the published re-parse decline suite, same rule.
         "tests/test_node27_autopipeline_published_reparse.py",

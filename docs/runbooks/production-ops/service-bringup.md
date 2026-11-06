@@ -68,6 +68,9 @@ tail -n 160 /home/nwm/autopipe-logs/autopipe.log
   非正整数（`abc`、`0`、`14.5`）在 preflight 阶段 fail closed（`AUTOPIPE_MAX_CYCLE_AGE_DAYS_INVALID`，rc=2）。
   2 周以外的周期由运维手动入库：显式传 `--only-cycle YYYYMMDDHH` 时不应用下限
   （summary 中 `bypassed_by_only_cycle=true`）。
+- **active 标记只给 run 带来的模型（#3057）**：生产只用 dg 变体，basin version 唯一的 active 行必须是 dg。本轮范围内没有 run 的 inventory-only basin（空库首次 seed，或已 seed 后再经过）只做 seed / 几何回填、**不激活** baseline（detail `model_activated_rows=0`），
+  否则之后第一个 dg run 的 `_activate_model` 会因已有 active sibling 静默 0 行。已 seed basin 的 run 模型激活被别的 sibling 挡住（0 行且 active 的不是 run 模型）时，detail 带 `activation_skipped_other_active=<active model_id>`，`seed.activation_skipped_other_active`
+  汇总 `{basin, model_id, active_model_id}`；outcome 仍是 `already_seeded`、run 照常入库，autopipe **不会**自动做 baseline→dg 切换，该列表非空即需运维处理。
 - `OUTPUT_PARSER_BATCH_SIZE=10000` 将河段时序批量写入页从默认 1,000 行提升为
   10,000 行，减少数据库往返；这不改变事务边界或最终 publish 语义。
 - `coverage backstop (--all --skip-fresh)` 可刷新或跳过 display coverage；

@@ -159,11 +159,11 @@ def _prepare_autopipe(
     monkeypatch.setattr(
         autopipe,
         "_ensure_seeded_basin_display_ready",
-        lambda _database_url, model_id: {
+        lambda _database_url, model_id, activate=True: {
             "model_id": model_id,
             "river_network_version_id": f"{model_id}_rivnet",
             "output_geometry_backfilled": 0,
-            "model_activated_rows": 1,
+            "model_activated_rows": int(activate),
         },
     )
     monkeypatch.setattr(autopipe, "_already_ingested_runs", lambda *_args, **_kwargs: set())
@@ -375,11 +375,20 @@ def test_model_exclusion_ids_preserve_exact_case_and_ignore_empty_duplicates(
     assert autopipe._model_id_set(value) == expected
 
 
-def _replace_run_model(object_store_root: Path, run_id: str, model_id: str) -> None:
+def _replace_run_model(
+    object_store_root: Path, run_id: str, model_id: str, *, baseline: str = "basins_qhh_shud",
+) -> None:
+    """Point a run at a direct-grid variant in the layout node-22 really writes.
+
+    ``scripts/provision_direct_grid_scheduler_registry.py`` places a variant at
+    ``models/direct_grid_variants/<baseline>/dg-<source>-<id>/package`` (#3057).
+    """
     path = object_store_root / "runs" / run_id / "input" / "manifest.json"
     manifest = json.loads(path.read_text(encoding="utf-8"))
     manifest["identity"]["model_id"] = model_id
-    manifest["identity"]["model_package_uri"] = f"s3://nhms/models/{model_id}/vnew/package/"
+    manifest["identity"]["model_package_uri"] = (
+        f"s3://nhms/models/direct_grid_variants/{baseline}/dg-gfs-{model_id.removeprefix('dg_')}/package/"
+    )
     path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
 
 
@@ -387,9 +396,10 @@ def _capture_scope_calls(monkeypatch: pytest.MonkeyPatch) -> tuple[list[str], li
     activated: list[str] = []
     eligible_runs: list[str] = []
 
-    def display_ready(_database_url: str, model_id: str) -> dict[str, Any]:
-        activated.append(model_id)
-        return {"model_id": model_id, "model_activated_rows": 1}
+    def display_ready(_database_url: str, model_id: str, *, activate: bool = True) -> dict[str, Any]:
+        if activate:
+            activated.append(model_id)
+        return {"model_id": model_id, "model_activated_rows": int(activate)}
 
     def already_ingested(_database_url: str, run_ids: list[str], **_kwargs: Any) -> set[str]:
         eligible_runs.extend(run_ids)
@@ -435,26 +445,32 @@ def test_retired_model_cannot_override_replacement_identity_for_same_basin(
     )
     monkeypatch.setattr(autopipe, "_basin_seeded", lambda *_args: already_seeded)
     activated, eligible_runs = _capture_scope_calls(monkeypatch)
-    seeded: list[dict[str, str]] = []
+    seeded: list[tuple[str, bool]] = []
 
     def seed(**kwargs: Any) -> dict[str, Any]:
-        seeded.append(kwargs["identity"])
+        seeded.append((kwargs["identity"]["model_id"], kwargs["activate"]))
         return {"outcome": "seeded", "model_id": kwargs["identity"]["model_id"]}
 
     monkeypatch.setattr(autopipe, "_seed_basin", seed)
+    # Both variants hang off the same inventory baseline (the real layout), so
+    # only the retired VARIANT is excluded: the baseline is the seed source.
     rc, summary = _run_main(
-        capsys, root, "--exclude-model-ids", f" {old_baseline},{old_model},{old_model},, ",
+        capsys, root, "--exclude-model-ids", f" {old_model},{old_model},, ",
     )
 
     assert rc == 0
-    assert summary["excluded_model_ids"] == sorted([old_baseline, old_model])
+    assert summary["excluded_model_ids"] == [old_model]
     assert summary["excluded_model_runs"] == [retired_run]
     assert summary["basins"] == ["qhh"]
     assert summary["discovered_runs"] == 1
-    assert summary["seed"]["details"][0]["model_id"] == new_model
-    assert summary["seed"]["details"][0]["identity_source"] == "run_manifest"
-    assert activated == ([new_model] if already_seeded else [])
-    assert [identity["model_id"] for identity in seeded] == ([] if already_seeded else [new_model])
+    detail = summary["seed"]["details"][0]
+    assert detail["model_id"] == new_model
+    assert detail["identity_source"] == "run_manifest"
+    # Seeded or not, only the replacement variant is ever activated; an
+    # unseeded basin seeds its baseline INACTIVE first (#3052).
+    assert activated == [new_model]
+    assert seeded == ([] if already_seeded else [(old_baseline, False)])
+    assert detail.get("seeded_model_id") == (None if already_seeded else old_baseline)
     assert eligible_runs == [new_run]
     assert summary["runs"]["ingested"] == 1
     assert summary["runs"]["details"][0]["run_id"] == new_run
@@ -2755,14 +2771,14 @@ def test_cancelled_display_ready_seed_fails_that_basin_and_the_tick_still_report
         monkeypatch, tmp_path, runs={RUN_A: True, RUN_HEIHE: True}
     )
 
-    def cancelled_for_qhh(_database_url: str, model_id: str) -> dict[str, Any]:
+    def cancelled_for_qhh(_database_url: str, model_id: str, *, activate: bool = True) -> dict[str, Any]:
         if model_id == "basins_qhh_shud":
             raise cancelled
         return {
             "model_id": model_id,
             "river_network_version_id": f"{model_id}_rivnet",
             "output_geometry_backfilled": 0,
-            "model_activated_rows": 1,
+            "model_activated_rows": int(activate),
         }
 
     monkeypatch.setattr(autopipe, "_ensure_seeded_basin_display_ready", cancelled_for_qhh)

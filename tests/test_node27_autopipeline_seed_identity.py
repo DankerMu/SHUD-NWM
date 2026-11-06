@@ -59,7 +59,8 @@ def _unseeded_with_capture(
         seeded.append({"identity": kwargs["identity"], "activate": kwargs["activate"], "basin": kwargs["basin"]})
         return {"basin": kwargs["basin"], "outcome": "seeded", "model_id": kwargs["identity"]["model_id"]}
 
-    def ready(_database_url: str, model_id: str) -> dict[str, Any]:
+    def ready(_database_url: str, model_id: str, *, activate: bool = True) -> dict[str, Any]:
+        assert activate, f"{model_id}: a run-backed basin must attempt activation"
         display_ready.append(model_id)
         if display_ready_error is not None:
             raise display_ready_error
