@@ -301,14 +301,21 @@ def test_shared_basetemp_is_never_introduced() -> None:
 def test_capacity_check_covers_the_root_volume() -> None:
     """`/` was absent from every human capacity check while it was the volume
     that filled. All three instruction surfaces name it now.
+
+    #3054: the 14T `/data/GHDC` volume is retired (2026-11-05) and PGDATA lives
+    on `/home`, so the check is `/` + `/home`; `/data/GHDC` is now just a
+    directory on `/` and listing it as a third mount would be stale.
     """
     for surface in INSTRUCTION_SURFACES:
         text = (REPO_ROOT / surface).read_text(encoding="utf-8")
-        assert "df -h / /home /data/GHDC" in text, surface
+        assert "df -h / /home" in text, surface
+        assert "df -h / /home /data/GHDC" not in text, surface
+        assert "df -h /home" not in text, surface
 
-    # #1103: the capacity line moved into a sub-runbook. The negative pin
-    # below is the vacuity-sensitive half -- read only the index and the
-    # forbidden two-mount spelling is absent for the wrong reason.
+    # #1103: the capacity line moved into a sub-runbook. The negative pins
+    # below are the vacuity-sensitive half -- read only the index and the
+    # forbidden spellings are absent for the wrong reason.
     ops_text = production_ops_text()
-    assert "df -h / /home /data/GHDC" in ops_text
-    assert "df -h /home /data/GHDC" not in ops_text
+    assert "df -h / /home" in ops_text
+    assert "df -h / /home /data/GHDC" not in ops_text
+    assert "df -h /home" not in ops_text

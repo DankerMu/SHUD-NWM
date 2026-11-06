@@ -7,8 +7,10 @@
 
 NODE27_RESOURCE_GOVERNANCE_REPO_ROOT=/home/nwm/NWM
 NODE27_GOVERNANCE_OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store
-NODE27_GOVERNANCE_PGDATA_ROOT=/data/GHDC/nhms-primary/pgdata
-# Current host PGDATA; the container bind remains /home/postgres/pgdata/data.
+NODE27_GOVERNANCE_PGDATA_ROOT=/home/nwm/nhms-primary/pgdata
+# Current host PGDATA since the 2026-11-05 rebuild (fresh initdb after the 14T
+# /dev/md0 volume at /data/GHDC was retired); the container bind remains
+# /home/postgres/pgdata/data. PGDATA now shares the /home filesystem.
 # #2273 corrected source observes the configured target directly using statvfs
 # available bytes (f_bavail) and device identity, never a path-prefix/home label.
 # working_set_free_bytes and working_set_filesystem {path, device_identity,

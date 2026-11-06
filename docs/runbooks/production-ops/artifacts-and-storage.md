@@ -58,15 +58,17 @@ ownership 由幂等脚本 `scripts/node27_provision_write_roles.sh`
 `nhms` 所有、其 ANALYZE 会被静默跳过；完整口径与切换/回滚流程见
 `docs/runbooks/tier-node27-timeseries-storage.md` §9。
 
-当前宿主 PGDATA 已迁至 `/data/GHDC/nhms-primary/pgdata`，容器路径不变。
+2026-11-05 换盘后，原挂在 `/data/GHDC` 的 14T `/dev/md0` 已退役（不再启用），`/data/GHDC`
+现在只是根卷 `/` 上的普通目录；DB 以 fresh initdb 重建，当前宿主 PGDATA 为
+`/home/nwm/nhms-primary/pgdata`，容器路径不变。旧容器 `nhms-db-lost14t-20261105`
+（exited，restart=no）仅作证据保留。
 容器 `nhms-db` 由裸 `docker run` 创建（无 compose、无 systemd unit）。
-以下区分当前 bind 与历史 `ghdc` 残留；若该历史 catalog/relations 仍在，必须保留其 bind，
-不能据此重建退役车道或启用 `nhms_cold`：
+当前 bind 如下；`ghdc` 只剩空 stub 以保持容器参数一致，不能据此重建退役车道或启用 `nhms_cold`：
 
 | 宿主机路径 | 容器路径 | 设备 | 内容 |
 |---|---|---|---|
-| `/data/GHDC/nhms-primary/pgdata` | `/home/postgres/pgdata/data` | 配置目标实测 `device_identity`（不按路径前缀猜测） | 当前主 `pg_default` 表空间 |
-| `/data/GHDC/nwm-archive/nhms-tablespace` | `/home/postgres/pgdata/tablespaces/ghdc` | 历史记录 `/dev/md0`；如仍有残留须现场确认 | 历史 `ghdc` overflow 残留，不是新冷层 |
+| `/home/nwm/nhms-primary/pgdata` | `/home/postgres/pgdata/data` | 配置目标实测 `device_identity`（不按路径前缀猜测；2026-11-05 起是 `/home` LV） | 当前主 `pg_default` 表空间 |
+| `/home/nwm/nhms-tablespace-ghdc-stub` | `/home/postgres/pgdata/tablespaces/ghdc` | 宿主 `/home` | 空 stub：fresh initdb 后 catalog 只有 `pg_default`/`pg_global`，不存在 `ghdc` 表空间，不是新冷层 |
 | `/home/nwm/nhms-evidence` | `/var/lib/postgresql/evidence` | 宿主 `/home` 实测设备（独立于 PGDATA 容量证据） | evidence 输出 |
 
 2026-08-06 的 `ghdc` overflow 与归档根共卷是**历史例外**，成因与当时条件见
@@ -74,7 +76,8 @@ ownership 由幂等脚本 `scripts/node27_provision_write_roles.sh`
 归档车道已随 #1370 永久退役；历史表空间/归档统计偏差见 #1290，不把当时的
 约 502 GB 当作当前体量，也不把 retained old PGDATA 当作第二个 current cluster。
 
-容量核查仍须三个挂载点都看：`df -h / /home /data/GHDC`，并用 `psql` 实测。
+容量核查看 `/` 与 `/home` 两个挂载点：`df -h / /home`，并用 `psql` 实测（PGDATA 与 pytest
+临时文件等现在共用 `/home` 余量；`/data/GHDC` 已不是独立卷，不再列入）。
 Issue #2273 修正后的源码对配置 PGDATA 直接观察 available bytes（`statvfs.f_bavail`）
 与设备身份，复用既有 `pgdata_root` 的 `du`；当前 receipt 的
 `working_set_free_bytes` 和 `working_set_filesystem`（`path`、`device_identity`、

@@ -3614,7 +3614,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # missing: the node-22 entrypoint invariant suite scans every `uv run` /
     # `uv sync` line of this runbook for a node-27 marker (a bare `uv sync`
     # added here reddens it), the Python environment truth suite pins the
-    # `df -h / /home /data/GHDC` capacity check in it, and the role boundary
+    # `df -h / /home` capacity check in it, and the role boundary
     # static suite pins its node-27/node-22 topology sentences.
     # #1103 split this file into an index landing page plus the
     # `docs/runbooks/production-ops/` sub-runbooks and repointed every reader

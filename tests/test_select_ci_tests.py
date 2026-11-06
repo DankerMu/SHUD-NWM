@@ -4987,7 +4987,7 @@ def test_generated_roots_and_unscoped_runbooks_select_exactly_the_hard_gate_node
     # runbook's §11 and pins that every `COVERAGE_FRESHNESS_*` code is named there.
     # #2472/#2473 round 1 added the three readers the row had been missing: the
     # node-22 entrypoint invariant suite (scans every `uv run` / `uv sync` line),
-    # the Python environment truth suite (`df -h / /home /data/GHDC`) and the role
+    # the Python environment truth suite (`df -h / /home`) and the role
     # boundary static suite (node-27/node-22 topology sentences).
     # #1103 split the runbook into an index page plus the `production-ops/`
     # sub-runbooks and partitioned the node-22 entrypoint owner; the index row
