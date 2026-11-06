@@ -136,17 +136,17 @@ def _scheduler_runtime_root_preflight(config: Any) -> dict[str, Any]:
             getattr(config, "_evidence_root_raw_preflight_path", config._evidence_root_preflight_path),
         ),
     ):
-        # The published artifact root is a control-node display mount. Compute
-        # stages write to object_store_root; the local publish stage creates and
-        # mirrors artifacts into this root after Slurm work completes.
-        allow_publish_root_create = field_name == "published_artifact_root"
+        # Creatable roots: the published display mount (the local publish stage creates
+        # it after Slurm work) and the disposable temp_root (the pass creates it, 0700,
+        # via scheduler_temp_root -- #3061). Every other root, runtime_root included, must exist.
+        allow_create = field_name in {"published_artifact_root", "temp_root"}
         check, blocker = _scheduler._scheduler_root_check(
             field_name,
             path,
             allowed_roots,
             required=True,
-            must_exist=not allow_publish_root_create,
-            allow_create=allow_publish_root_create,
+            must_exist=not allow_create,
+            allow_create=allow_create,
             require_approved_root=enforce_approved_roots and field_name not in {"lock_root", "evidence_root"},
             require_under_workspace=field_name in {"lock_root", "evidence_root"},
             workspace_root=workspace_root_preflight_path,

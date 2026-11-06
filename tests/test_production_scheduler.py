@@ -34693,7 +34693,6 @@ def test_explicit_workspace_submit_missing_allowed_roots_blocks_before_registry_
         ("workspace_root", "SCHEDULER_ROOT_WORKSPACE_ROOT_NOT_FOUND"),
         ("object_store_root", "SCHEDULER_ROOT_OBJECT_STORE_ROOT_NOT_FOUND"),
         ("runtime_root", "SCHEDULER_ROOT_RUNTIME_ROOT_NOT_FOUND"),
-        ("temp_root", "SCHEDULER_ROOT_TEMP_ROOT_NOT_FOUND"),
         ("lock_root", "SCHEDULER_ROOT_LOCK_ROOT_NOT_FOUND"),
         ("evidence_root", "SCHEDULER_ROOT_EVIDENCE_ROOT_NOT_FOUND"),
     ],
@@ -34789,6 +34788,312 @@ def test_no_flag_missing_published_artifact_root_is_created_by_control_publish_s
     assert payload["no_mutation_proof"] == _expected_no_mutation_proof()
     assert adapter.download_calls == 0
     assert not roots["published_root"].exists()
+
+
+def _plannable_no_flag_scheduler(monkeypatch: Any) -> FakeAdapter:
+    monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env",
+        lambda: FakeRegistry([_model("model_a", "basin_a")]),
+    )
+    adapter = FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])
+    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", lambda: {"gfs": adapter})
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._active_repository_from_env",
+        lambda: FakeActiveRepository(active=False),
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._now",
+        lambda config: config.now or _dt("2026-05-21T12:00:00Z"),
+    )
+    return adapter
+
+
+def _assert_created_temp_root(temp_root: Path) -> None:
+    entry = temp_root.lstat()
+    assert stat.S_ISDIR(entry.st_mode) and not stat.S_ISLNK(entry.st_mode)
+    assert stat.S_IMODE(entry.st_mode) == 0o700
+
+
+def test_no_flag_missing_temp_root_is_created_0700_and_the_pass_proceeds(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    # #3061: node-22 lost NHMS_SCHEDULER_TEMP_ROOT on 2026-10-15 and every pass was
+    # preflight_blocked on SCHEDULER_ROOT_TEMP_ROOT_NOT_FOUND for three weeks.
+    roots = _scheduler_env_roots(tmp_path)
+    _set_scheduler_root_env(monkeypatch, roots)
+    shutil.rmtree(roots["temp_root"])
+    adapter = _plannable_no_flag_scheduler(monkeypatch)
+
+    payload = _run_no_flag_plan()
+
+    assert payload["status"] == "planned"
+    assert payload["root_preflight"]["status"] == "ready"
+    assert payload["root_preflight"]["blockers"] == []
+    temp_check = payload["root_preflight"]["checks"]["temp_root"]
+    assert temp_check["exists"] is False
+    assert temp_check["allow_create"] is True
+    assert temp_check["created"] is True
+    _assert_created_temp_root(roots["temp_root"])
+    persisted = json.loads(Path(payload["artifact_path"]).read_text(encoding="utf-8"))
+    assert persisted["root_preflight"]["checks"]["temp_root"]["created"] is True
+    assert payload["no_mutation_proof"] == _expected_no_mutation_proof()
+    assert adapter.download_calls == 0
+
+
+def test_no_flag_existing_temp_root_is_left_untouched(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots = _scheduler_env_roots(tmp_path)
+    _set_scheduler_root_env(monkeypatch, roots)
+    mode_before = stat.S_IMODE(roots["temp_root"].stat().st_mode)
+    _plannable_no_flag_scheduler(monkeypatch)
+
+    payload = _run_no_flag_plan()
+
+    assert payload["status"] == "planned"
+    temp_check = payload["root_preflight"]["checks"]["temp_root"]
+    assert temp_check["exists"] is True
+    assert "created" not in temp_check
+    assert stat.S_IMODE(roots["temp_root"].stat().st_mode) == mode_before
+
+
+def _temp_root_geometry(tmp_path: Path, roots: Mapping[str, Path], shape: str) -> tuple[Path, Path]:
+    """Return (configured temp_root, path that must stay absent) for a refused shape."""
+
+    approved_tmp = roots["temp_root"]
+    if shape == "parent_missing":
+        return approved_tmp / "gone" / "leaf", approved_tmp / "gone"
+    if shape == "outside_approved_roots":
+        outside_parent = tmp_path / "outside"
+        outside_parent.mkdir()
+        return outside_parent / "tmp", outside_parent / "tmp"
+    if shape == "parent_symlink_out_of_approved_roots":
+        outside_parent = tmp_path / "outside"
+        outside_parent.mkdir()
+        (approved_tmp / "link").symlink_to(outside_parent, target_is_directory=True)
+        return approved_tmp / "link" / "leaf", outside_parent / "leaf"
+    if shape == "dangling_symlink":
+        dangling_target = approved_tmp / "never-created"
+        link = approved_tmp / "link"
+        link.symlink_to(dangling_target, target_is_directory=True)
+        return link, dangling_target
+    raise AssertionError(shape)
+
+
+@pytest.mark.parametrize(
+    ("shape", "expected_code"),
+    [
+        ("parent_missing", "SCHEDULER_ROOT_TEMP_ROOT_NOT_WRITABLE"),
+        ("outside_approved_roots", "SCHEDULER_ROOT_TEMP_ROOT_OUT_OF_APPROVED_ROOT"),
+        ("parent_symlink_out_of_approved_roots", "SCHEDULER_ROOT_TEMP_ROOT_OUT_OF_APPROVED_ROOT"),
+        ("dangling_symlink", "SCHEDULER_ROOT_TEMP_ROOT_SYMLINK"),
+    ],
+)
+def test_no_flag_refused_missing_temp_root_still_blocks_and_creates_nothing(
+    monkeypatch: Any,
+    tmp_path: Path,
+    shape: str,
+    expected_code: str,
+) -> None:
+    roots = _scheduler_env_roots(tmp_path / "approved")
+    _set_scheduler_root_env(monkeypatch, roots)
+    temp_root, must_stay_absent = _temp_root_geometry(tmp_path, roots, shape)
+    monkeypatch.setenv("NHMS_SCHEDULER_TEMP_ROOT", str(temp_root))
+    monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
+    monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
+    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._active_repository_from_env",
+        lambda: pytest.fail("refused temp_root must not construct active repository"),
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._now",
+        lambda config: config.now or _dt("2026-05-21T12:00:00Z"),
+    )
+
+    payload = _run_no_flag_plan()
+
+    assert payload["status"] == "preflight_blocked"
+    temp_codes = [
+        blocker["code"] for blocker in payload["root_preflight"]["blockers"] if blocker["field"] == "temp_root"
+    ]
+    assert temp_codes == [expected_code]
+    assert "created" not in payload["root_preflight"]["checks"]["temp_root"]
+    assert not os.path.lexists(must_stay_absent)
+    assert payload["counts"]["submitted_count"] == 0
+    assert payload["no_mutation_proof"] == _expected_no_mutation_proof()
+
+
+def test_temp_root_whose_parent_became_a_symlink_after_config_is_refused_and_not_created(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    # Config canonicalises the parent segment, so a parent symlink can only meet the
+    # preflight path by a swap after construction: the preflight must refuse it and
+    # the pass must not create anything through it.
+    from services.orchestrator.scheduler_runtime import _scheduler_prepared_runtime_root_preflight
+
+    roots = _scheduler_env_roots(tmp_path)
+    _set_scheduler_root_env(monkeypatch, roots)
+    parent = roots["temp_root"] / "parent"
+    parent.mkdir()
+    monkeypatch.setenv("NHMS_SCHEDULER_TEMP_ROOT", str(parent / "leaf"))
+    monkeypatch.setenv("NHMS_SCHEDULER_REQUIRE_ROOTS", "true")
+    monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
+    config = ProductionSchedulerConfig()
+    swapped_target = roots["temp_root"] / "elsewhere"
+    swapped_target.mkdir()
+    parent.rmdir()
+    parent.symlink_to(swapped_target, target_is_directory=True)
+
+    preflight = _scheduler_prepared_runtime_root_preflight(config)
+
+    assert preflight["status"] == "blocked"
+    assert [blocker["code"] for blocker in preflight["blockers"] if blocker["field"] == "temp_root"] == [
+        "SCHEDULER_ROOT_TEMP_ROOT_NOT_WRITABLE"
+    ]
+    assert "created" not in preflight["checks"]["temp_root"]
+    assert not os.path.lexists(swapped_target / "leaf")
+
+
+def _ready_temp_root_preflight(path_label: str) -> dict[str, Any]:
+    return {
+        "status": "ready",
+        "required": True,
+        "blockers": [],
+        "checks": {"temp_root": {"path": path_label, "exists": False, "allow_create": True}},
+        "allowed_roots": [],
+    }
+
+
+def test_temp_root_creation_race_outcomes_fail_closed_through_the_preflight_verdict(tmp_path: Path) -> None:
+    from services.orchestrator.scheduler_temp_root import _scheduler_create_admitted_temp_root
+
+    # A concurrent creator already made the real directory: benign, nothing re-created.
+    concurrent = tmp_path / "concurrent"
+    concurrent.mkdir(mode=0o755)
+    preflight = _ready_temp_root_preflight(str(concurrent))
+    _scheduler_create_admitted_temp_root(preflight, concurrent)
+    assert preflight["status"] == "ready"
+    assert preflight["blockers"] == []
+    assert preflight["checks"]["temp_root"]["created"] is False
+
+    # The parent vanished between the preflight and the mkdir.
+    vanished = tmp_path / "vanished-parent" / "tmp"
+    preflight = _ready_temp_root_preflight("[local-path]")
+    _scheduler_create_admitted_temp_root(preflight, vanished)
+    assert preflight["status"] == "blocked"
+    assert preflight["blockers"] == [
+        {
+            "code": "SCHEDULER_ROOT_TEMP_ROOT_NOT_WRITABLE",
+            "field": "temp_root",
+            "reason": "not_writable",
+            "message": "Production scheduler temp_root is not a safe writable runtime root.",
+            "path": "[local-path]",
+        }
+    ]
+    assert preflight["checks"]["temp_root"]["created"] is False
+    assert not os.path.lexists(vanished.parent)
+
+    # A symlink appeared at the final name: never followed, never accepted.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    racing_link = tmp_path / "racing-link"
+    racing_link.symlink_to(elsewhere, target_is_directory=True)
+    preflight = _ready_temp_root_preflight(str(racing_link))
+    _scheduler_create_admitted_temp_root(preflight, racing_link)
+    assert preflight["status"] == "blocked"
+    assert [blocker["code"] for blocker in preflight["blockers"]] == ["SCHEDULER_ROOT_TEMP_ROOT_SYMLINK"]
+    assert racing_link.is_symlink()
+
+    # A symlinked ancestor on the walk is refused without following it.
+    link_parent = tmp_path / "link-parent"
+    link_parent.symlink_to(elsewhere, target_is_directory=True)
+    preflight = _ready_temp_root_preflight(str(link_parent / "tmp"))
+    _scheduler_create_admitted_temp_root(preflight, link_parent / "tmp")
+    assert preflight["status"] == "blocked"
+    assert [blocker["code"] for blocker in preflight["blockers"]] == ["SCHEDULER_ROOT_TEMP_ROOT_UNSAFE_PATH"]
+    assert not os.path.lexists(elsewhere / "tmp")
+
+    # A regular file took the final name.
+    squatter = tmp_path / "squatter"
+    squatter.write_text("x", encoding="utf-8")
+    preflight = _ready_temp_root_preflight(str(squatter))
+    _scheduler_create_admitted_temp_root(preflight, squatter)
+    assert [blocker["code"] for blocker in preflight["blockers"]] == ["SCHEDULER_ROOT_TEMP_ROOT_NOT_DIRECTORY"]
+
+
+@pytest.mark.parametrize(
+    "preflight",
+    [
+        {
+            "status": "blocked",
+            "blockers": [{"code": "X"}],
+            "checks": {"temp_root": {"exists": False, "allow_create": True}},
+        },
+        {"status": "ready", "blockers": [], "checks": {"temp_root": {"exists": True, "allow_create": True}}},
+        {"status": "ready", "blockers": [], "checks": {"temp_root": {"exists": False, "allow_create": False}}},
+        {"status": "not_required", "required": False, "blockers": [], "checks": {}},
+    ],
+    ids=("blocked", "exists", "not-creatable", "not-required"),
+)
+def test_temp_root_creation_acts_only_on_a_ready_creatable_missing_verdict(
+    tmp_path: Path,
+    preflight: dict[str, Any],
+) -> None:
+    from services.orchestrator.scheduler_temp_root import _scheduler_create_admitted_temp_root
+
+    target = tmp_path / "tmp"
+    before = copy.deepcopy(preflight)
+
+    _scheduler_create_admitted_temp_root(preflight, target)
+
+    assert preflight == before
+    assert not os.path.lexists(target)
+
+
+def test_db_free_pass_creates_missing_temp_root_with_redacted_created_evidence(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    # node-22 runs the db-free arm, whose runtime-root preflight is the pre-lock one.
+    roots, _paths = _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    shutil.rmtree(roots["temp_root"])
+
+    config = ProductionSchedulerConfig()
+    assert scheduler_module._scheduler_runtime_root_preflight(config)["status"] == "ready"
+    assert not roots["temp_root"].exists()
+    result = ProductionScheduler.from_env(config).run_once()
+
+    root_preflight = result.evidence["root_preflight"]
+    assert root_preflight["status"] == "ready"
+    assert root_preflight["checks"]["temp_root"]["created"] is True
+    assert root_preflight["checks"]["temp_root"]["path"] == "[local-path]"
+    assert not any(blocker.get("field") == "temp_root" for blocker in root_preflight["blockers"])
+    assert result.evidence.get("execution_boundary") != "scheduler_root_preflight_blocked"
+    _assert_created_temp_root(roots["temp_root"])
+
+
+def test_bounded_evidence_keeps_the_temp_root_created_proof(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr("services.orchestrator.scheduler.MAX_EVIDENCE_BYTES", 2_400)
+    roots = _scheduler_env_roots(tmp_path)
+    _set_scheduler_root_env(monkeypatch, roots)
+    shutil.rmtree(roots["temp_root"])
+    _plannable_no_flag_scheduler(monkeypatch)
+
+    payload = _run_no_flag_plan()
+    persisted = json.loads(Path(payload["artifact_path"]).read_text(encoding="utf-8"))
+
+    assert persisted["status"] == "resource_limit_blocked"
+    assert persisted["root_preflight"]["status"] == "ready"
+    assert persisted["root_preflight"]["checks"]["temp_root"] == {"created": True}
+    _assert_created_temp_root(roots["temp_root"])
 
 
 @pytest.mark.parametrize(

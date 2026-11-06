@@ -1281,6 +1281,11 @@ def _compact_root_preflight(value: Any) -> Any:
         evidence_root = checks.get("evidence_root")
         if isinstance(evidence_root, Mapping):
             compact_checks["evidence_root"] = _compact_mapping(evidence_root, ("writable", "safe"))
+        temp_root = checks.get("temp_root")
+        if isinstance(temp_root, Mapping) and "created" in temp_root:
+            # #3061: a pass that re-created a cleared temp_root keeps saying so under
+            # evidence pressure; the key only exists on passes that acted on it.
+            compact_checks["temp_root"] = _compact_mapping(temp_root, ("created",))
         compact["checks"] = compact_checks
     return compact
 

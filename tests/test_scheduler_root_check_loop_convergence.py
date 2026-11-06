@@ -337,7 +337,7 @@ def test_allow_create_published_root_loop_is_blocked_like_its_non_loop_sibling(
     reason: str,
     reference: str,
 ) -> None:
-    # published_artifact_root is the one field with allow_create=True / must_exist=False,
+    # published_artifact_root (and temp_root, #3061) has allow_create=True / must_exist=False,
     # i.e. the arm where the canonicaliser's non-strict fallback is taken. A loop there
     # must be blocked with the same code and key set on every interpreter.
     reference_dir = tmp_path / "reference"

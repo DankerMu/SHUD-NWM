@@ -344,6 +344,13 @@ PASS/BLOCKED smoke，不等同于 Task 7 live E2E。需要真实提交时必须�
 `NHMS_SCHEDULER_TEMP_ROOT` 必须落在该 allowlist 内；`NHMS_SCHEDULER_LOCK_ROOT` 和
 `NHMS_SCHEDULER_EVIDENCE_ROOT` 必须在 `WORKSPACE_ROOT` 内。
 
+`NHMS_SCHEDULER_TEMP_ROOT` 是唯一可自愈的根（#3061）：目录被清掉时，只要父目录存在、不是 symlink、可写，
+且路径仍在 allowlist 内，调度器会在该趟 pass 的 root preflight 之后以 no-follow 方式建出末级目录（0700），
+evidence 的 `root_preflight.checks.temp_root.created=true`；父目录缺失/不可写报
+`SCHEDULER_ROOT_TEMP_ROOT_NOT_WRITABLE`，越出 allowlist 报 `..._OUT_OF_APPROVED_ROOT`，自身是 symlink 报
+`..._SYMLINK`。其余根（含 `NHMS_SCHEDULER_RUNTIME_ROOT`）缺失仍按 `SCHEDULER_ROOT_<FIELD>_NOT_FOUND`
+fail-closed。
+
 有界连续/定时 lane 示例：
 
 ```bash
