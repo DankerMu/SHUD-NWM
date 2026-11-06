@@ -46,7 +46,7 @@ from services.orchestrator import (
     scheduler_candidates,
     scheduler_state_types,
 )
-from services.production_closure import readiness_item_contracts, slurm_validation
+from services.production_closure import readiness_item_contracts, readiness_validation, slurm_validation
 from services.slurm_gateway import real_backend
 from tests.test_hydro_status_set_parity import _fold_enum_members
 from workers.output_parser import parser
@@ -55,6 +55,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 _PIPELINE_JOB_SCHEMA = _REPO_ROOT / "schemas" / "pipeline_job.schema.json"
 _RUN_STATUS_SCHEMA = _REPO_ROOT / "schemas" / "run_status.schema.json"
 _STATUS_VOCAB_SOURCE = _REPO_ROOT / "packages" / "common" / "status_vocab.py"
+_STATUS_LITERAL_ALLOWLIST = _REPO_ROOT / "tests" / "status_literal_allowlist.json"
 
 # --- Literals pinned from the canonical sites at f7be77f22 ---------------------------
 
@@ -553,6 +554,34 @@ def test_non_orchestrator_first_slice_sites_rebind_the_vocabulary() -> None:
     display_ready = hydro_display_constants.DISPLAY_PRODUCT_READY_STATUSES
     assert type(display_ready) is set
     assert display_ready == vocab.DISPLAY_PRODUCT_READY_STATUSES
+
+
+def test_non_orchestrator_follow_up_sites_rebind_the_vocabulary() -> None:
+    """Task 2.4 follow-up: the Slurm sites are `set` copies, the readiness set the frozenset itself.
+
+    `readiness_validation` re-exports `readiness_item_contracts.STATUS_VALUES`, so
+    both names must be the one vocabulary object.
+    """
+
+    for site, vocabulary_value in (
+        (slurm_validation.TERMINAL_SLURM_STATES, vocab.SLURM_TERMINAL_STATES),
+        (run_qhh_continuous.SLURM_TERMINAL_SUCCESS, vocab.SLURM_TERMINAL_SUCCESS),
+        (run_qhh_continuous.SLURM_TERMINAL_FAILURE, vocab.SLURM_TERMINAL_FAILURE),
+    ):
+        assert type(site) is set
+        assert site == vocabulary_value
+    assert readiness_item_contracts.STATUS_VALUES is vocab.READINESS_ITEM_STATUSES
+    assert readiness_validation.STATUS_VALUES is vocab.READINESS_ITEM_STATUSES
+
+
+def test_allowlist_has_no_pending_migration() -> None:
+    """Migration exit condition: every allowlisted literal is adjudicated, none awaits a rebind."""
+
+    allowlist = json.loads(_STATUS_LITERAL_ALLOWLIST.read_text(encoding="utf-8"))
+    pending = [
+        f"{entry['file']} {entry['members']}" for entry in allowlist if entry.get("reason") == "pending-migration"
+    ]
+    assert pending == [], "pending-migration entries remain:\n" + "\n".join(pending)
 
 
 def test_pipeline_route_sites_rebind_the_vocabulary() -> None:

@@ -19,6 +19,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import yaml
 
+from packages.common import status_vocab as _vocab
 from packages.common.redaction import redact_payload, redact_text
 from packages.common.safe_fs import (
     SafeFilesystemError,
@@ -75,19 +76,7 @@ SENSITIVE_URI_ASSIGNMENT_RE = re.compile(
     re.IGNORECASE,
 )
 MAX_WALLTIME_SECONDS = 30 * 24 * 60 * 60
-TERMINAL_SLURM_STATES = {
-    "BOOT_FAIL",
-    "CANCELLED",
-    "COMPLETED",
-    "DEADLINE",
-    "FAILED",
-    "NODE_FAIL",
-    "OUT_OF_MEMORY",
-    "PREEMPTED",
-    "REVOKED",
-    "SPECIAL_EXIT",
-    "TIMEOUT",
-}
+TERMINAL_SLURM_STATES = set(_vocab.SLURM_TERMINAL_STATES)
 DEFAULT_POLL_INTERVAL_SECONDS = 15.0
 DEFAULT_POLL_TIMEOUT_SECONDS = 900.0
 MAX_POLL_INTERVAL_SECONDS = 300.0
