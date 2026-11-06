@@ -1476,6 +1476,8 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node22_scheduler_stall_health.py::test_e5_the_terminal_skip_reasons_equal_the_schedulers_own",
             # #2912: parity pin for the probe's `scheduler_root_preflight_blocked` literal (writer source).
             "tests/test_node22_scheduler_stall_health.py::test_j11_the_root_blocked_boundary_is_the_literal_the_scheduler_writes",
+            # #2969: the guard-less preflight boundary set parity pin (writer source).
+            "tests/test_node22_scheduler_stall_health.py::test_k9_every_guardless_preflight_boundary_the_scheduler_writes_is_graded_or_exempt",
             # #2316: the extra-root wiring oracle (rationale above).
             "tests/test_retention_extra_roots.py",
         ),

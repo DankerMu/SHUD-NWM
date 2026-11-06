@@ -40,6 +40,12 @@ threshold, the ``scheduler_root_blocked`` verdict slot and the receipt block.
 Its real-artifact case is likewise a RECONSTRUCTION: no node-22 artifact is
 checked into this repository, so the pass is rebuilt from the writer's key set
 (``services/orchestrator/scheduler_runtime.py`` root-preflight branch).
+
+Issue #2969 adds the ``k``-series at the end (OpenSpec change
+``stall-probe-preflight-boundaries``): the three sibling guard-less preflight
+boundaries, the shared preflight-blocked run, its receipt block and the writer
+parity over the whole boundary set.  Its ``/ghdc`` flip replay is likewise a
+reconstruction from the writer's ``db_free_runtime_preflight_blocked`` branch.
 """
 
 from __future__ import annotations
@@ -3509,16 +3515,55 @@ def test_j2_a_single_transient_refusal_stays_ok(tmp_path: Path, monkeypatch: pyt
 
 
 @pytest.mark.parametrize(
-    "boundary", ["db_free_runtime_preflight_blocked", "scheduler_timing_level_unrecognised", None]
+    ("boundary", "verdict", "preflight_run"),
+    [
+        # #2969: another graded guard-less boundary carries the preflight run
+        # across the splitter: four passes over 15 minutes, past the
+        # 10-minute threshold, graded by the newest (root) boundary.
+        (
+            "db_free_runtime_preflight_blocked",
+            "scheduler_root_blocked",
+            {
+                "passes": 4,
+                "span_minutes": 15.0,
+                "threshold_minutes": 10,
+                "newest_boundary": ROOT_BLOCKED_BOUNDARY,
+                "remedy_verdict": "scheduler_root_blocked",
+                "boundary_passes": {"db_free_runtime_preflight_blocked": 1, ROOT_BLOCKED_BOUNDARY: 3},
+            },
+        ),
+        # The exempt boundary (its artifact never lands) and a legacy artifact
+        # with no boundary at all still end it: the newer group alone spans 5.
+        *[
+            (
+                splitter,
+                "ok",
+                {
+                    "passes": 2,
+                    "span_minutes": 5.0,
+                    "threshold_minutes": 10,
+                    "newest_boundary": ROOT_BLOCKED_BOUNDARY,
+                    "remedy_verdict": "scheduler_root_blocked",
+                    "boundary_passes": {ROOT_BLOCKED_BOUNDARY: 2},
+                },
+            )
+            for splitter in ("scheduler_timing_level_unrecognised", None)
+        ],
+    ],
 )
-def test_j3_a_non_root_pass_ends_the_run(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str | None
+def test_j3_a_root_exact_run_ends_at_any_other_pass_the_graded_run_only_at_an_ungraded_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str | None,
+    verdict: str,
+    preflight_run: dict[str, object],
 ) -> None:
     """Two root-blocked groups split by another neutral pre-lock pass.
 
-    Walked through the splitter the run would be three passes over 15
-    minutes, past the 10-minute threshold; the newer group alone spans 5.
-    ``None`` is a legacy artifact that carries no boundary at all.
+    ``root_blocked_run`` stays root-exact (#2912): the newer group alone, two
+    passes over 5 minutes, whatever the splitter.  The graded
+    ``preflight_blocked_run`` (#2969) walks through a splitter that is itself
+    a graded guard-less boundary and stops at any other.
     """
 
     root = _evidence_root(tmp_path)
@@ -3538,8 +3583,9 @@ def test_j3_a_non_root_pass_ends_the_run(
     status, receipts, _log = _run(tmp_path, monkeypatch, evidence_root=root)
     receipt = _receipt(receipts)
 
-    assert status == 0
-    assert receipt["verdict"] == "ok"
+    assert status == (0 if verdict == "ok" else 1)
+    assert receipt["verdict"] == verdict
+    assert receipt["preflight_blocked_run"] == preflight_run
     assert receipt["root_blocked_run"] == {
         "passes": 2,
         "span_minutes": 5.0,
@@ -3998,3 +4044,498 @@ def test_j14_the_runbook_documents_the_root_blocked_section() -> None:
         assert field in section, field
     assert "NHMS_SCHEDULER_ALLOWED_ROOTS" in section
     assert "node22-control-plane-manual-recovery.md" in section
+
+
+# ---------------------------------------------------------------------------
+# Issue #2969 -- every guard-less preflight boundary is graded (OpenSpec change
+# stall-probe-preflight-boundaries)
+# ---------------------------------------------------------------------------
+
+#: The three sibling boundaries and the verdict each one's remedy class names.
+#: Spelled as literals: the verdict names and anchors are the operator
+#: contract (the OnFailure mail carries the runbook pointer).
+SIBLING_BOUNDARY_VERDICTS = {
+    "db_free_runtime_preflight_blocked": "scheduler_db_free_runtime_blocked",
+    "scheduler_rollback_fence_prepared": "scheduler_rollback_fenced",
+    "db_free_registry_blocked": "scheduler_registry_blocked",
+}
+SIBLING_BOUNDARY_ANCHORS = {
+    "db_free_runtime_preflight_blocked": "stall-scheduler-db-free-runtime-blocked",
+    "scheduler_rollback_fence_prepared": "stall-scheduler-rollback-fenced",
+    "db_free_registry_blocked": "stall-scheduler-registry-blocked",
+}
+PREFLIGHT_BLOCKED_RUN_KEYS = {
+    "passes",
+    "span_minutes",
+    "threshold_minutes",
+    "newest_boundary",
+    "remedy_verdict",
+    "boundary_passes",
+}
+#: Guard-less ``preflight_blocked`` boundaries the probe deliberately does not
+#: grade: the timing-level validator's artifact never lands (design D3 of
+#: node22-config-hygiene), so there is no run to measure.
+EXEMPT_GUARDLESS_PREFLIGHT_BOUNDARIES = frozenset({"scheduler_timing_level_unrecognised"})
+#: The one pre-candidate ``preflight_blocked`` literal that writes its own
+#: ``progress_guard`` block (a zero guard limit), so it is not neutral and is
+#: outside this gap.  Classified explicitly so a guard dropped from it, or
+#: added to a sibling, moves a boundary between the two sets and reds k9.
+GUARDED_PRE_CANDIDATE_PREFLIGHT_BOUNDARIES = frozenset({"scheduler_progress_guard_blocked"})
+WRITER_SOURCE = Path(__file__).resolve().parents[1] / "services" / "orchestrator" / "scheduler_runtime.py"
+
+
+def _preflight_payload(started_at: datetime, boundary: str) -> dict[str, object]:
+    """A guard-less pre-candidate preflight-blocked pass: zero counts, no guard."""
+
+    return _pass_payload(
+        started_at=started_at,
+        status="preflight_blocked",
+        guard=False,
+        execution_boundary=boundary,
+    )
+
+
+def _write_preflight_run(
+    root: Path,
+    boundary: str,
+    *,
+    count: int,
+    newest_minutes_ago: int = 5,
+    spacing_minutes: int = 5,
+    first_index: int = 0,
+) -> None:
+    for offset in range(count):
+        started_at = NOW - timedelta(minutes=newest_minutes_ago + offset * spacing_minutes)
+        _write_pass(root, _freeze_pass_name(started_at, first_index + offset), _preflight_payload(started_at, boundary))
+
+
+def test_k1_the_graded_boundary_table_is_the_issue_table() -> None:
+    assert probe.PREFLIGHT_BLOCKED_BOUNDARY_VERDICTS == {
+        "scheduler_root_preflight_blocked": "scheduler_root_blocked",
+        **SIBLING_BOUNDARY_VERDICTS,
+    }
+    for boundary, anchor in SIBLING_BOUNDARY_ANCHORS.items():
+        verdict = SIBLING_BOUNDARY_VERDICTS[boundary]
+        assert probe.runbook_pointer(verdict) == f"{probe.RUNBOOK_PATH}#{anchor}"
+
+
+@pytest.mark.parametrize("boundary", sorted(SIBLING_BOUNDARY_VERDICTS))
+@pytest.mark.parametrize(("count", "span", "fires"), [(13, 60.0, True), (12, 55.0, False)])
+def test_k2_one_hour_of_a_sibling_boundary_is_its_remedy_verdict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+    count: int,
+    span: float,
+    fires: bool,
+) -> None:
+    """Thirteen passes five minutes apart span 60: `>=` fires; twelve stay ok.
+
+    On master every one of these lanes graded `ok` with
+    `root_blocked_run.passes == 0` --- the blind spot of #2969.
+    """
+
+    root = _evidence_root(tmp_path)
+    _write_preflight_run(root, boundary, count=count)
+
+    status, receipt = _run_at(tmp_path, monkeypatch, root=root, now=NOW, config=SHIPPED_CONFIG)
+
+    verdict = SIBLING_BOUNDARY_VERDICTS[boundary] if fires else "ok"
+    assert receipt["verdict"] == verdict
+    assert status == receipt["exit_code"] == (1 if fires else 0)
+    assert receipt["preflight_blocked_run"] == {
+        "passes": count,
+        "span_minutes": span,
+        "threshold_minutes": 60,
+        "newest_boundary": boundary,
+        "remedy_verdict": SIBLING_BOUNDARY_VERDICTS[boundary],
+        "boundary_passes": {boundary: count},
+    }
+    # Re-derived from the receipt alone, as the runbook states the rule.
+    block = receipt["preflight_blocked_run"]
+    rederived = (
+        block["remedy_verdict"]
+        if block["remedy_verdict"] is not None and block["span_minutes"] >= block["threshold_minutes"]
+        else "ok"
+    )
+    assert rederived == receipt["verdict"]
+    # The root-exact block is untouched by a sibling run.
+    assert receipt["root_blocked_run"] == {
+        "passes": 0,
+        "span_minutes": None,
+        "threshold_minutes": 60,
+        "newest_is_root_blocked": False,
+    }
+    # Still no new shape: every member stays neutral.
+    assert receipt["passes"]["neutral_count"] == count
+    if fires:
+        assert receipt["runbook"] == f"{probe.RUNBOOK_PATH}#{SIBLING_BOUNDARY_ANCHORS[boundary]}"
+
+
+def _reconstructed_db_free_runtime_artifact(started_at: datetime, pass_id: str) -> dict[str, object]:
+    """A `/ghdc`-unmounted pass after the `/scratch` roots were repaired.
+
+    Reconstructed from the `db_free_runtime_preflight_blocked` branch of
+    ``services/orchestrator/scheduler_runtime.py`` like the j8 artifact: the
+    root preflight passed and is carried along, ``db_free_runtime`` holds the
+    blocker of a missing `/ghdc` registry manifest, and there is no
+    ``progress_guard``.
+    """
+
+    artifact = _reconstructed_root_blocked_artifact(started_at, pass_id)
+    artifact["lock"] = {**artifact["lock"], "reason": "db_free_runtime_preflight_blocked"}
+    artifact["root_preflight"] = {"status": "ready", "blockers": []}
+    artifact["db_free_runtime"] = {
+        "status": "blocked",
+        "required": True,
+        "blockers": [
+            {
+                "code": "db_free_required_path_not_found",
+                "field": "NHMS_SCHEDULER_REGISTRY_MANIFEST",
+                "reason": "not_found",
+                "path": "[local-path]",
+            }
+        ],
+    }
+    artifact["execution_boundary"] = "db_free_runtime_preflight_blocked"
+    return artifact
+
+
+def _tick_dir(tmp_path: Path, label: str) -> Path:
+    """A fresh working directory per probe tick: fake systemctl and receipts."""
+
+    workdir = tmp_path / f"tick-{label}"
+    workdir.mkdir()
+    return workdir
+
+
+def test_k3_repairing_the_roots_while_ghdc_is_unmounted_never_returns_to_ok(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The replay acceptance item: root-blocked for an hour, then the flip.
+
+    Each tick runs the probe 80 seconds after the newest pass, as the 15-minute
+    probe timer would see the lane.  On master the first tick after the flip
+    already graded `ok`.  Recovery --- one pass that submits --- clears it.
+    """
+
+    root = _evidence_root(tmp_path)
+    onset = ARTIFACT_NOW - timedelta(minutes=65)
+    for index in range(13):
+        started_at = onset + timedelta(minutes=5 * index)
+        pass_id = f"scheduler_{started_at:%Y%m%d%H}_{0x5E1A00000000 + index:012x}"
+        _write_pass(root, f"{pass_id}.json", _reconstructed_root_blocked_artifact(started_at, pass_id))
+    newest = onset + timedelta(minutes=60)
+
+    status, receipt = _run_at(
+        _tick_dir(tmp_path, "root"), monkeypatch, root=root, now=newest + timedelta(seconds=80), config=SHIPPED_CONFIG
+    )
+    assert (status, receipt["verdict"]) == (1, "scheduler_root_blocked")
+
+    flipped = 0
+    for tick in (1, 2, 12, 13, 20):
+        while flipped < tick:
+            flipped += 1
+            newest = onset + timedelta(minutes=60 + 5 * flipped)
+            pass_id = f"scheduler_{newest:%Y%m%d%H}_{0x6DFA00000000 + flipped:012x}"
+            _write_pass(root, f"{pass_id}.json", _reconstructed_db_free_runtime_artifact(newest, pass_id))
+
+        status, receipt = _run_at(
+            _tick_dir(tmp_path, str(tick)),
+            monkeypatch,
+            root=root,
+            now=newest + timedelta(seconds=80),
+            config=SHIPPED_CONFIG,
+        )
+
+        assert (status, receipt["verdict"]) == (1, "scheduler_db_free_runtime_blocked"), tick
+        assert receipt["runbook"] == f"{probe.RUNBOOK_PATH}#stall-scheduler-db-free-runtime-blocked"
+        assert receipt["preflight_blocked_run"] == {
+            "passes": 13 + tick,
+            "span_minutes": 60.0 + 5 * tick,
+            "threshold_minutes": 60,
+            "newest_boundary": "db_free_runtime_preflight_blocked",
+            "remedy_verdict": "scheduler_db_free_runtime_blocked",
+            "boundary_passes": {
+                "db_free_runtime_preflight_blocked": tick,
+                "scheduler_root_preflight_blocked": 13,
+            },
+        }
+        # The root-exact block sees the flip, exactly as on master.
+        assert receipt["root_blocked_run"]["passes"] == 0
+        assert receipt["root_blocked_run"]["newest_is_root_blocked"] is False
+
+    recovered = newest + timedelta(minutes=5)
+    _write_pass(
+        root,
+        f"scheduler_{recovered:%Y%m%d%H}_{0x7E0000000000:012x}.json",
+        _pass_payload(started_at=recovered, status="submitted", submitted=2),
+    )
+    status, receipt = _run_at(
+        _tick_dir(tmp_path, "recovered"),
+        monkeypatch,
+        root=root,
+        now=recovered + timedelta(seconds=80),
+        config=SHIPPED_CONFIG,
+    )
+    assert (status, receipt["verdict"]) == (0, "ok")
+    assert receipt["preflight_blocked_run"]["passes"] == 0
+    assert receipt["preflight_blocked_run"]["remedy_verdict"] is None
+
+
+@pytest.mark.parametrize("boundary", sorted(SIBLING_BOUNDARY_VERDICTS))
+@pytest.mark.parametrize("outranking", ["timer_stopped", "pass_limit_blocked"])
+def test_k4_a_dead_lane_and_a_pass_limit_outrank_every_sibling_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str, outranking: str
+) -> None:
+    root = _evidence_root(tmp_path)
+    _write_preflight_run(root, boundary, count=13)
+    timer = _timer_properties(last_trigger=_systemd_timestamp(NOW - timedelta(minutes=2)))
+    if outranking == "timer_stopped":
+        timer = _timer_properties(
+            active_state="inactive",
+            sub_state="dead",
+            last_trigger=_systemd_timestamp(NOW - timedelta(minutes=2)),
+        )
+    else:
+        _write_pass(
+            root,
+            _pass_name(70, "b" * 12),
+            _pass_payload(
+                started_at=NOW - timedelta(minutes=70),
+                status="resource_limit_blocked",
+                counts=False,
+                guard=False,
+            ),
+        )
+
+    status, receipts, _log = _run(
+        tmp_path, monkeypatch, evidence_root=root, timer_properties=timer, config=SHIPPED_CONFIG
+    )
+    receipt = _receipt(receipts)
+
+    assert status == 1
+    assert receipt["verdict"] == outranking
+    # The outranked run is still on the receipt, met.
+    assert receipt["preflight_blocked_run"]["remedy_verdict"] == SIBLING_BOUNDARY_VERDICTS[boundary]
+    assert receipt["preflight_blocked_run"]["span_minutes"] == 60.0
+
+
+@pytest.mark.parametrize("boundary", sorted(SIBLING_BOUNDARY_VERDICTS))
+def test_k5_a_sibling_verdict_outranks_a_stalled_submission_streak(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str
+) -> None:
+    root = _evidence_root(tmp_path)
+    _write_preflight_run(root, boundary, count=13)
+    for index in range(20):
+        minutes = 70 + index * 5
+        _write_pass(
+            root,
+            _pass_name(minutes, f"{100 + index:012x}"),
+            _pass_payload(started_at=NOW - timedelta(minutes=minutes), blocked=4),
+        )
+
+    status, receipt = _run_at(tmp_path, monkeypatch, root=root, now=NOW, config=SHIPPED_CONFIG)
+
+    assert status == 1
+    assert receipt["verdict"] == SIBLING_BOUNDARY_VERDICTS[boundary]
+    assert receipt["signals"]["no_submission_streak"] == 20
+    assert receipt["signals"]["no_submission_neutral_skipped"] == 13
+
+
+def test_k6_a_flip_back_to_the_root_boundary_keeps_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reverse flip: an hour on `/ghdc`, then the `/scratch` roots go too.
+
+    The newest boundary picks the root verdict at once; the root-exact block
+    alone (one pass, span 0) would have said `ok` for the next hour.
+    """
+
+    root = _evidence_root(tmp_path)
+    _write_preflight_run(root, ROOT_BLOCKED_BOUNDARY, count=1, newest_minutes_ago=5)
+    _write_preflight_run(
+        root, "db_free_runtime_preflight_blocked", count=12, newest_minutes_ago=10, first_index=1
+    )
+
+    status, receipt = _run_at(tmp_path, monkeypatch, root=root, now=NOW, config=SHIPPED_CONFIG)
+
+    assert (status, receipt["verdict"]) == (1, "scheduler_root_blocked")
+    assert receipt["root_blocked_run"] == {
+        "passes": 1,
+        "span_minutes": 0.0,
+        "threshold_minutes": 60,
+        "newest_is_root_blocked": True,
+    }
+    assert receipt["preflight_blocked_run"]["span_minutes"] == 60.0
+    assert receipt["preflight_blocked_run"]["boundary_passes"] == {
+        "db_free_runtime_preflight_blocked": 12,
+        ROOT_BLOCKED_BOUNDARY: 1,
+    }
+
+
+def test_k7_the_receipt_block_is_written_on_a_verdict_with_no_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _evidence_root(tmp_path)
+    _write_pass(root, _pass_name(1, "f" * 12), None, raw="{not json")
+
+    status, receipts, _log = _run(tmp_path, monkeypatch, evidence_root=root)
+    receipt = _receipt(receipts)
+
+    assert (status, receipt["verdict"]) == (1, "probe_failed")
+    assert set(receipt["preflight_blocked_run"]) == PREFLIGHT_BLOCKED_RUN_KEYS
+    assert receipt["preflight_blocked_run"] == {
+        "passes": 0,
+        "span_minutes": None,
+        "threshold_minutes": 10,
+        "newest_boundary": None,
+        "remedy_verdict": None,
+        "boundary_passes": {},
+    }
+
+
+@pytest.mark.parametrize(
+    ("boundaries", "window", "passes", "span", "newest", "counts"),
+    [
+        # Mixed graded boundaries are one run; the newest picks the remedy.
+        (
+            ["db_free_registry_blocked", "scheduler_rollback_fence_prepared", ROOT_BLOCKED_BOUNDARY],
+            10,
+            3,
+            10.0,
+            "db_free_registry_blocked",
+            {"db_free_registry_blocked": 1, ROOT_BLOCKED_BOUNDARY: 1, "scheduler_rollback_fence_prepared": 1},
+        ),
+        # The ordering-safe prefix bounds the walk.
+        (["db_free_registry_blocked"] * 5, 3, 3, 10.0, "db_free_registry_blocked", {"db_free_registry_blocked": 3}),
+        # The exempt boundary, a guarded boundary and a legacy pass all end it.
+        (
+            ["db_free_runtime_preflight_blocked", "scheduler_timing_level_unrecognised", ROOT_BLOCKED_BOUNDARY],
+            10,
+            1,
+            0.0,
+            "db_free_runtime_preflight_blocked",
+            {"db_free_runtime_preflight_blocked": 1},
+        ),
+        (["scheduler_progress_guard_blocked", "db_free_registry_blocked"], 10, 0, None, None, {}),
+        ([None, "db_free_registry_blocked"], 10, 0, None, None, {}),
+        # Exact string equality: no case folding, no prefix match.
+        (["DB_FREE_REGISTRY_BLOCKED"], 10, 0, None, None, {}),
+        (["db_free_registry_blocked_v2"], 10, 0, None, None, {}),
+        ([], 10, 0, None, None, {}),
+    ],
+)
+def test_k8_the_graded_run_is_contiguous_over_every_graded_boundary(
+    boundaries: list[str | None],
+    window: int,
+    passes: int,
+    span: float | None,
+    newest: str | None,
+    counts: dict[str, int],
+) -> None:
+    records = [_boundary_record(5 * (index + 1), boundary) for index, boundary in enumerate(boundaries)]
+
+    run = probe.preflight_blocked_run(records, window=window)
+
+    assert run.passes == passes
+    assert run.span_minutes == span
+    assert run.newest_boundary == newest
+    assert run.boundary_passes == counts
+    graded = {ROOT_BLOCKED_BOUNDARY: "scheduler_root_blocked", **SIBLING_BOUNDARY_VERDICTS}
+    assert run.remedy_verdict == (None if newest is None else graded[newest])
+
+
+def _guardless_preflight_literal_boundaries(source: str) -> tuple[frozenset[str], frozenset[str]]:
+    """Return ``(guard-less, guarded)`` boundaries of the writer's literals.
+
+    Every dict literal whose ``"status"`` is ``"preflight_blocked"`` is an
+    early-return evidence block, and in that same literal the writer spells
+    its ``"execution_boundary"`` and, when it has one, its ``"progress_guard"``.
+    The post-candidate boundaries (``evidence_preflight_blocked``,
+    ``slurm_preflight_blocked``, bare ``preflight_blocked``,
+    ``db_free_journal_write_blocked``) are a different syntactic shape --- an
+    ``execution_boundary = "..."`` assignment folded into the terminal evidence
+    that carries ``progress_guard.evidence()`` --- so they never match here,
+    and the blocked streak already counts them.
+    """
+
+    guardless: set[str] = set()
+    guarded: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Dict):
+            continue
+        entries = {
+            key.value: value
+            for key, value in zip(node.keys, node.values, strict=True)
+            if isinstance(key, ast.Constant) and isinstance(key.value, str)
+        }
+        status = entries.get("status")
+        if not (isinstance(status, ast.Constant) and status.value == "preflight_blocked"):
+            continue
+        boundary = entries.get("execution_boundary")
+        assert isinstance(boundary, ast.Constant) and isinstance(boundary.value, str), (
+            f"scheduler_runtime.py line {node.lineno}: a preflight_blocked literal without a literal "
+            "execution_boundary cannot be graded by the stall probe"
+        )
+        (guarded if "progress_guard" in entries else guardless).add(boundary.value)
+    return frozenset(guardless), frozenset(guarded)
+
+
+def _assert_guardless_preflight_parity(source: str) -> None:
+    guardless, guarded = _guardless_preflight_literal_boundaries(source)
+    assert guardless == set(probe.PREFLIGHT_BLOCKED_BOUNDARY_VERDICTS) | EXEMPT_GUARDLESS_PREFLIGHT_BOUNDARIES, (
+        "a guard-less preflight_blocked boundary in scheduler_runtime.py is neither graded by the stall "
+        "probe (PREFLIGHT_BLOCKED_BOUNDARY_VERDICTS) nor explicitly exempt"
+    )
+    assert guarded == GUARDED_PRE_CANDIDATE_PREFLIGHT_BOUNDARIES
+
+
+def test_k9_every_guardless_preflight_boundary_the_scheduler_writes_is_graded_or_exempt() -> None:
+    """Observer/observed parity over the whole boundary set (D4 again).
+
+    `scripts/select_ci_tests.py` routes `scheduler_runtime.py` to this node id,
+    so the diff that adds a guard-less boundary runs it.
+    """
+
+    _assert_guardless_preflight_parity(WRITER_SOURCE.read_text())
+    assert not set(probe.PREFLIGHT_BLOCKED_BOUNDARY_VERDICTS) & EXEMPT_GUARDLESS_PREFLIGHT_BOUNDARIES
+
+
+@pytest.mark.parametrize(
+    "site",
+    [
+        # A new guard-less boundary the probe does not grade.
+        '{"status": "preflight_blocked", "execution_boundary": "scheduler_new_preflight_blocked"}',
+        # A new guarded pre-candidate boundary nobody classified.
+        '{"status": "preflight_blocked", "progress_guard": {}, "execution_boundary": "scheduler_new_guarded"}',
+        # An early return whose boundary the enumeration cannot read.
+        '{"status": "preflight_blocked", "execution_boundary": boundary}',
+    ],
+)
+def test_k10_a_new_writer_site_turns_the_parity_red(site: str) -> None:
+    """The parity helper bites: one more writer literal and it fails."""
+
+    mutated = WRITER_SOURCE.read_text() + f"\n\ndef _new_site(boundary):\n    return {site}\n"
+
+    with pytest.raises(AssertionError):
+        _assert_guardless_preflight_parity(mutated)
+
+
+def test_k11_the_runbook_documents_every_sibling_section() -> None:
+    text = RUNBOOK.read_text()
+    order = [
+        text.index("##### stall-scheduler-root-blocked"),
+        *(text.index(f"##### {SIBLING_BOUNDARY_ANCHORS[boundary]}") for boundary in SIBLING_BOUNDARY_VERDICTS),
+        text.index("##### stall-submission-stalled"),
+    ]
+    assert order == sorted(order)
+    for boundary, anchor in SIBLING_BOUNDARY_ANCHORS.items():
+        section = text.split(f"##### {anchor}", 1)[1].split("#####", 1)[0]
+        assert f"`{SIBLING_BOUNDARY_VERDICTS[boundary]}`" in section, anchor
+        assert f"`{boundary}`" in section, anchor
+        assert "preflight_blocked_run" in section, anchor
+        assert ENV_ROOT_BLOCKED_MINUTES in section, anchor
+    shared = text.split("##### stall-scheduler-root-blocked", 1)[1].split("##### stall-submission-stalled", 1)[0]
+    for field in sorted(PREFLIGHT_BLOCKED_RUN_KEYS):
+        assert f"`{field}`" in shared, field

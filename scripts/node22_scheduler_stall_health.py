@@ -232,7 +232,10 @@ MIN_INTER_PASS_MINUTES = 5
 # roots since 2026-10-13 graded `ok`.  One hour (twelve timer intervals) keeps
 # a transient mount hiccup quiet.  The floor is two timer intervals, so one
 # refused pass can never meet it; the ceiling is the in-flight gate's
-# reachable bound, because both walk the same ordering-safe prefix.
+# reachable bound, because both walk the same ordering-safe prefix.  Issue
+# #2969 reuses the same threshold for the run of EVERY guard-less preflight
+# boundary (see `PREFLIGHT_BLOCKED_BOUNDARY_VERDICTS`): the variable keeps its
+# name so no deployed drop-in changes meaning.
 DEFAULT_ROOT_BLOCKED_MINUTES = 60
 MIN_ROOT_BLOCKED_MINUTES = 2 * MIN_INTER_PASS_MINUTES
 # The lexical candidate scan is sound only with room above the largest hour
@@ -343,6 +346,11 @@ VERDICT_EVIDENCE_STALE = "evidence_stale"
 VERDICT_PASS_LIMIT_BLOCKED = "pass_limit_blocked"
 VERDICT_LOCK_CONTENDED_PERSISTENT = "lock_contended_persistent"
 VERDICT_SCHEDULER_ROOT_BLOCKED = "scheduler_root_blocked"
+# The three sibling guard-less preflight boundaries (issue #2969).  Same slot
+# as the root-blocked verdict, one verdict per remedy class.
+VERDICT_SCHEDULER_DB_FREE_RUNTIME_BLOCKED = "scheduler_db_free_runtime_blocked"
+VERDICT_SCHEDULER_ROLLBACK_FENCED = "scheduler_rollback_fenced"
+VERDICT_SCHEDULER_REGISTRY_BLOCKED = "scheduler_registry_blocked"
 VERDICT_SUBMISSION_STALLED = "submission_stalled"
 VERDICT_NO_PROGRESS_CIRCUIT_OPEN = "no_progress_circuit_open"
 VERDICT_OK = "ok"
@@ -364,6 +372,9 @@ RUNBOOK_ANCHORS = {
     VERDICT_PASS_LIMIT_BLOCKED: "stall-pass-limit-blocked",
     VERDICT_LOCK_CONTENDED_PERSISTENT: "stall-lock-contended-persistent",
     VERDICT_SCHEDULER_ROOT_BLOCKED: "stall-scheduler-root-blocked",
+    VERDICT_SCHEDULER_DB_FREE_RUNTIME_BLOCKED: "stall-scheduler-db-free-runtime-blocked",
+    VERDICT_SCHEDULER_ROLLBACK_FENCED: "stall-scheduler-rollback-fenced",
+    VERDICT_SCHEDULER_REGISTRY_BLOCKED: "stall-scheduler-registry-blocked",
     VERDICT_SUBMISSION_STALLED: "stall-submission-stalled",
     VERDICT_NO_PROGRESS_CIRCUIT_OPEN: "stall-no-progress-circuit-open",
     VERDICT_OK: "stall-ok",
@@ -390,6 +401,20 @@ STATUS_LOCK_CONTENDED = "lock_contended"
 #: the writer's source by a parity test that `scripts/select_ci_tests.py`
 #: routes from that module.
 ROOT_BLOCKED_EXECUTION_BOUNDARY = "scheduler_root_preflight_blocked"
+#: Every guard-less pre-candidate ``preflight_blocked`` boundary whose artifact
+#: lands, mapped to the verdict of its remedy class (issue #2969).  These
+#: passes return before the progress guard is written, so every signal below
+#: slot 10 reads them as neutral; ``preflight_blocked_run`` grades them
+#: instead.  Literal copies again: a parity test enumerates the writer's
+#: guard-less ``preflight_blocked`` literals and requires them to equal these
+#: keys plus an explicit exemption (``scheduler_timing_level_unrecognised``,
+#: whose artifact never lands), so a new boundary turns that test red.
+PREFLIGHT_BLOCKED_BOUNDARY_VERDICTS = {
+    ROOT_BLOCKED_EXECUTION_BOUNDARY: VERDICT_SCHEDULER_ROOT_BLOCKED,
+    "db_free_runtime_preflight_blocked": VERDICT_SCHEDULER_DB_FREE_RUNTIME_BLOCKED,
+    "scheduler_rollback_fence_prepared": VERDICT_SCHEDULER_ROLLBACK_FENCED,
+    "db_free_registry_blocked": VERDICT_SCHEDULER_REGISTRY_BLOCKED,
+}
 
 PROGRAM = "node22-scheduler-stall-health"
 
@@ -613,7 +638,7 @@ def load_config(env: dict[str, str] | None = None) -> Config:
     if root_blocked_minutes > reachable_minutes:
         raise ConfigError(
             f"{ENV_ROOT_BLOCKED_MINUTES}={root_blocked_minutes} must be at most {reachable_minutes}: "
-            f"the root-blocked run is measured across the ordering-safe prefix "
+            f"the preflight-blocked run is measured across the ordering-safe prefix "
             f"{ENV_SCAN_LIMIT} - {HOUR_BUCKET_MARGIN} = {scan_limit - HOUR_BUCKET_MARGIN} passes, "
             f"which is only guaranteed to span ({scan_limit - HOUR_BUCKET_MARGIN} - 1) x "
             f"{MIN_INTER_PASS_MINUTES} minutes; raise {ENV_SCAN_LIMIT} to at least "
@@ -921,18 +946,18 @@ def classify_pass(payload: dict[str, Any]) -> tuple[str, int | None, int | None]
 
     A guard-less ``preflight_blocked`` pass is a different shape under the
     same status: it returns before the guard exists, so it is neutral here
-    like every other early return, and it ends a root-blocked run.  Its
-    ``execution_boundary`` is one of ``scheduler_root_preflight_blocked`` and
+    like every other early return.  Its ``execution_boundary`` is one of
+    ``scheduler_root_preflight_blocked`` and
     ``db_free_runtime_preflight_blocked`` (pre-lock, both written through
     ``_write_prelock_blocked_evidence`` in the same shape), or
     ``scheduler_rollback_fence_prepared`` and ``db_free_registry_blocked``
     (post-lock, pre-candidate).  ``scheduler_timing_level_unrecognised`` is
     pre-lock too, but its artifact never lands.  Staying neutral is
     deliberate (issue #2912): re-classifying these would bend the streak, the
-    in-flight time gate and the frontier.  Only the root boundary is graded
-    instead, by ``root_blocked_run``, which reads ``execution_boundary``
-    directly; the other guard-less boundaries are a known residual tracked in
-    #2969.
+    in-flight time gate and the frontier.  They are graded instead by
+    ``preflight_blocked_run`` (issue #2969), which reads
+    ``execution_boundary`` directly against
+    ``PREFLIGHT_BLOCKED_BOUNDARY_VERDICTS``.
 
     The absent-count case is the second neutral rule and is concentrated
     exactly where the probe is needed most: the resource-limit fallback
@@ -1401,6 +1426,10 @@ def root_blocked_run(records: list[PassRecord], *, window: int) -> RootBlockedRu
     counts are themselves neutral there.  The span runs from the oldest run
     member's ``started_at`` to the newest's, as ``in_flight_run`` measures
     its own; a single pass spans ``0.0``.
+
+    Since issue #2969 this run is REPORTED, not graded: ``grade`` reads
+    ``preflight_blocked_run``, whose run contains this one as a prefix, so
+    every tick this run alone would have fired still fires.
     """
 
     members = 0
@@ -1417,6 +1446,77 @@ def root_blocked_run(records: list[PassRecord], *, window: int) -> RootBlockedRu
         return RootBlockedRun(passes=0, span_minutes=None, newest_is_root_blocked=False)
     return RootBlockedRun(
         passes=members, span_minutes=_age_minutes(newest, oldest), newest_is_root_blocked=True
+    )
+
+
+class PreflightBlockedRun:
+    """The newest contiguous run of guard-less preflight-blocked passes."""
+
+    __slots__ = ("passes", "span_minutes", "newest_boundary", "boundary_passes")
+
+    def __init__(
+        self,
+        *,
+        passes: int,
+        span_minutes: float | None,
+        newest_boundary: str | None,
+        boundary_passes: dict[str, int],
+    ) -> None:
+        self.passes = passes
+        self.span_minutes = span_minutes
+        self.newest_boundary = newest_boundary
+        self.boundary_passes = boundary_passes
+
+    @property
+    def remedy_verdict(self) -> str | None:
+        """The verdict this run raises once it meets the threshold."""
+
+        if self.newest_boundary is None:
+            return None
+        return PREFLIGHT_BLOCKED_BOUNDARY_VERDICTS[self.newest_boundary]
+
+
+def preflight_blocked_run(records: list[PassRecord], *, window: int) -> PreflightBlockedRun:
+    """Measure the run of guard-less preflight-blocked passes from the newest.
+
+    Walked newest-first over ``records[:window]`` like ``root_blocked_run``,
+    but a pass belongs to the run when its ``execution_boundary`` is ANY key
+    of ``PREFLIGHT_BLOCKED_BOUNDARY_VERDICTS`` (exact string equality).  Every
+    member is a pass the scheduler refused before it looked at a candidate,
+    so the lane has submitted nothing for the whole span whichever boundary
+    each pass hit: a lane whose root preflight is repaired while ``/ghdc`` is
+    still unmounted flips to ``db_free_runtime_preflight_blocked`` and the
+    run carries on instead of restarting at zero.  Any other pass ends it,
+    including an exempt guard-less boundary, a pass with no boundary and every
+    pass that reached candidate selection.
+
+    The remedy is the NEWEST pass's boundary --- what the operator has to fix
+    now --- so ``newest_boundary`` picks the verdict and ``boundary_passes``
+    counts each boundary inside the run.  When the newest pass is not a member
+    the run is empty (``passes == 0``, ``span_minutes is None``,
+    ``newest_boundary is None``).
+    """
+
+    boundary_passes: dict[str, int] = {}
+    newest: datetime | None = None
+    oldest: datetime | None = None
+    newest_boundary: str | None = None
+    for record in records[:window]:
+        boundary = record.execution_boundary
+        if boundary is None or boundary not in PREFLIGHT_BLOCKED_BOUNDARY_VERDICTS:
+            break
+        if newest is None:
+            newest = record.started_at
+            newest_boundary = boundary
+        oldest = record.started_at
+        boundary_passes[boundary] = boundary_passes.get(boundary, 0) + 1
+    if newest is None or oldest is None:
+        return PreflightBlockedRun(passes=0, span_minutes=None, newest_boundary=None, boundary_passes={})
+    return PreflightBlockedRun(
+        passes=sum(boundary_passes.values()),
+        span_minutes=_age_minutes(newest, oldest),
+        newest_boundary=newest_boundary,
+        boundary_passes=dict(sorted(boundary_passes.items())),
     )
 
 
@@ -1527,14 +1627,18 @@ def grade(*, now: datetime, config: Config, observations: Observations) -> str:
     "the last pass failed" outranks "no trigger is arriving".  The
     resource-limit verdict sits above the four slower artifact signals
     because that artifact is itself degraded and its diagnostic window is the
-    narrowest of all.  Twelve non-healthy verdicts, then ``ok``.
+    narrowest of all.  Fifteen non-healthy verdicts, then ``ok``.
 
-    The root-blocked verdict (slot 10) sits below lock contention and above
-    the submission streak.  Both it and the lock streak begin at the newest
-    pass, which cannot be both, so that pairing never meets.  It outranks the
-    streak because a root-blocked pass is neutral there: the blocked passes
-    behind the run can still make up a streak, and they describe the lane
-    before its roots went away, not what the operator has to fix now.
+    Slot 10 holds the four preflight-blocked verdicts (root-blocked since
+    #2912, its three guard-less siblings since #2969).  They share one slot
+    because they read one run that starts at the newest pass, and the newest
+    pass's boundary picks exactly one of them.  The slot sits below lock
+    contention and above the submission streak.  It and the lock streak both
+    begin at the newest pass, which cannot be both, so that pairing never
+    meets.  It outranks the streak because a preflight-blocked pass is neutral
+    there: the blocked passes behind the run can still make up a streak, and
+    they describe the lane before the preflight started refusing it, not what
+    the operator has to fix now.
     """
 
     # 1. Unreadable evidence can never fall through to healthy.
@@ -1602,16 +1706,17 @@ def grade(*, now: datetime, config: Config, observations: Observations) -> str:
     if lock_contended_streak(observations.records, window=config.streak_window) >= config.lock_passes:
         return VERDICT_LOCK_CONTENDED_PERSISTENT
 
-    # 10. Every pass for the threshold has been refused by the pre-lock root
-    #     preflight.  Invisible to every signal below: those passes are
-    #     neutral, so the streak, the time gate and the frontier skip them.
-    root_run = root_blocked_run(observations.records, window=config.streak_window)
+    # 10. Every pass for the threshold has been refused by a guard-less
+    #     preflight before candidate selection.  Invisible to every signal
+    #     below: those passes are neutral, so the streak, the time gate and the
+    #     frontier skip them.  The newest pass's boundary names the remedy.
+    preflight_run = preflight_blocked_run(observations.records, window=config.streak_window)
     if (
-        root_run.newest_is_root_blocked
-        and root_run.span_minutes is not None
-        and root_run.span_minutes >= config.root_blocked_minutes
+        preflight_run.remedy_verdict is not None
+        and preflight_run.span_minutes is not None
+        and preflight_run.span_minutes >= config.root_blocked_minutes
     ):
-        return VERDICT_SCHEDULER_ROOT_BLOCKED
+        return preflight_run.remedy_verdict
 
     # 11. Sustained blocked work with nothing submitted: by COUNT for blocked
     #     passes, or by TIME for a run of blocked / in-flight-held passes since
@@ -1679,7 +1784,8 @@ def build_receipt(
     either.  The resource-limit passes are named, bounded, so the operator can
     open the exact artifacts the verdict was graded on.  The in-flight run is
     reported with its origin, its newest pass, how it ended and its span
-    beside the gate, the root-blocked run beside its threshold, and every open
+    beside the gate, the root-blocked run and the preflight-blocked run
+    beside their shared threshold, and every open
     tracker row says whether it is open only because
     the frontier bypassed its suppression.  Paths are not recorded --- unit names, filenames and counters
     only --- so an ops receipt never becomes a configuration leak.
@@ -1708,6 +1814,7 @@ def build_receipt(
     bypassed_ids = {id(entry) for entry in bypassed_entries}
     run = in_flight_run(records, window=config.streak_window)
     root_run = root_blocked_run(records, window=config.streak_window)
+    preflight_run = preflight_blocked_run(records, window=config.streak_window)
     limit_window = resource_limit_passes_in_window(
         records, now=now, lookback_minutes=config.limit_lookback_minutes
     )
@@ -1836,13 +1943,27 @@ def build_receipt(
             "tracker_present": observations.tracker_present,
             "tracker_entries": len(observations.tracker_entries),
         },
-        # Re-derivable alone: the verdict fires when `newest_is_root_blocked`
-        # and `span_minutes >= threshold_minutes`.  Written on every verdict.
+        # The root-exact run, unchanged since #2912.  `newest_is_root_blocked`
+        # and `span_minutes >= threshold_minutes` is still sufficient for the
+        # root-blocked verdict; the graded run is the block below, which
+        # contains this one as a prefix.  Written on every verdict.
         "root_blocked_run": {
             "passes": root_run.passes,
             "span_minutes": root_run.span_minutes,
             "threshold_minutes": config.root_blocked_minutes,
             "newest_is_root_blocked": root_run.newest_is_root_blocked,
+        },
+        # Re-derivable alone (#2969): slot 10 fires `remedy_verdict` when it
+        # is not null and `span_minutes >= threshold_minutes`.
+        # `boundary_passes` has at most one key per graded boundary.
+        # Written on every verdict.
+        "preflight_blocked_run": {
+            "passes": preflight_run.passes,
+            "span_minutes": preflight_run.span_minutes,
+            "threshold_minutes": config.root_blocked_minutes,
+            "newest_boundary": preflight_run.newest_boundary,
+            "remedy_verdict": preflight_run.remedy_verdict,
+            "boundary_passes": preflight_run.boundary_passes,
         },
         # The pass the suppression bypass was graded against and the
         # `<source>_<YYYYMMDDHH>` cycles it worked on.  An empty list with a
