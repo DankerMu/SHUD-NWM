@@ -626,7 +626,7 @@ def run_once(self) -> SchedulerPassResult:
             )
         db_free_required = bool(getattr(self.config, "db_free_required", False))
         root_preflight = (
-            _scheduler_runtime_root_preflight(self.config)
+            _scheduler_prepared_runtime_root_preflight(self.config)
             if db_free_required
             else _scheduler_lock_evidence_root_preflight(self.config)
         )
@@ -833,7 +833,7 @@ def run_once(self) -> SchedulerPassResult:
                 )
             progress_guard = _SchedulerProgressGuard(progress_guard_limit)
             if not db_free_required:
-                root_preflight = _scheduler_runtime_root_preflight(self.config)
+                root_preflight = _scheduler_prepared_runtime_root_preflight(self.config)
             if not db_free_required and root_preflight["status"] == "blocked":
                 finished_at = _now(self.config)
                 evidence = self._base_evidence(pass_id, started_at)
@@ -2244,3 +2244,20 @@ def _scheduler_evidence_write_context(self) -> _scheduler_evidence_module.Schedu
         ),
         evidence_write_error_payload=_scheduler._evidence_write_error_payload,
     )
+
+
+def _scheduler_prepared_runtime_root_preflight(config):
+    """The pass-scoped runtime-root verdict (#3061).
+
+    The preflight stays a pure check (``from_env`` runs it too); only a pass
+    creates the missing temp_root it admitted, before ``run_once``'s blocked
+    branch so a creation failure still leaves through it. Defined at the end of
+    the module with a function-scope import so no line above moves: the stall
+    probe and runbooks cite ``run_once`` by line number.
+    """
+
+    from services.orchestrator.scheduler_temp_root import _scheduler_create_admitted_temp_root
+
+    root_preflight = _scheduler_runtime_root_preflight(config)
+    _scheduler_create_admitted_temp_root(root_preflight, getattr(config, "_temp_root_preflight_path", None))
+    return root_preflight
