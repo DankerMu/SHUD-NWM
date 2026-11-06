@@ -1,7 +1,11 @@
 # orchestrator-structural-burndown Specification
 
 ## Purpose
-TBD - created by archiving change governance-6-entropy-structural-burndown. Update Purpose after archive.
+Keep the orchestrator, scheduler and test corpora below the 1,000-line structural guard by splitting
+oversized modules and test files without behaviour drift: extractions preserve mutation fences, patch
+seams and CLI facades, and every physically partitioned test corpus stays complete against a frozen,
+tracked oracle whose only change channels are audited ledgers (additions, retirements) and named
+transitions, never a re-capture.
 
 ## Requirements
 
@@ -592,7 +596,12 @@ collectible modules and one non-collectible helper whose individual line counts 
 shim. Every case in the frozen `3c29698f…` baseline SHALL remain collected exactly once: all
 96 unique `::test_name[param-id]` suffixes and all 94 test definitions, decorators, fixture
 arguments, parameter values/IDs, assertions, skips, markers, and monkeypatch targets remain
-equivalent.
+equivalent, except definitions retired or rewritten through the tracked retirements ledger
+`tests/fixtures/basins_registry_partition_retirements.json` (#2907). That ledger SHALL be the only
+channel for removing or rewriting a frozen definition: the oracle file stays byte-identical, and every
+guard compares the tree against the frozen oracle with the retirements ledger applied (a retired
+definition and all of its frozen nodes removed, a rewritten definition compared against its ledgered
+row with its frozen nodes and markers unchanged) and then united with the #2183 additions ledger.
 
 The helper SHALL retain its exact 19-function, one-class, four-constant member inventory.
 Issue #1903 may change only `_make_valid_model`'s `.sp.rivseg` synthetic row construction so
@@ -608,14 +617,21 @@ before-blob allowlist SHALL fail.
 
 - **WHEN** the baseline monolith and all seven post-partition suites are collected,
   fingerprinted, and executed without integration opt-in
-- **THEN** each side yields exactly 96 unique identical sorted node suffixes and 94
-  one-to-one normalized test definitions
-- **AND** the retained core, parser, CLI, security, auth, DB, and QHH owners contain exactly
-  18, 13, 5, 20, 11, 5, and 22 test functions respectively
-- **AND** default execution yields 78 passed and 18 skipped, non-integration execution yields
-  78 passed, one skipped, and 17 deselected, and the helper collects no tests
+- **THEN** the baseline yields exactly 96 unique sorted node suffixes and 94 normalized test
+  definitions, with the retained core, parser, CLI, security, auth, DB, and QHH owners holding 18,
+  13, 5, 20, 11, 5, and 22 test functions, and the post-partition side yields exactly that frozen set
+  minus the ledgered retirements and united with the additions ledger, one-to-one (after #2907: 92
+  suffixes, 90 definitions, QHH 18 functions, every other owner unchanged)
+- **AND** default execution yields the frozen 78 passed and 18 skipped, and non-integration
+  execution the frozen 78 passed, one skipped, and 17 deselected, each adjusted by the ledgered
+  retirements (a retired non-integration node leaves `passed`, a retired integration node leaves
+  `skipped` or `deselected`) and by the additions ledger (after #2907: 77 passed / 15 skipped and
+  77 passed / 1 skipped / 14 deselected); the helper collects no tests
 - **AND** the retained-core BUG-008 command passes exactly the two `output_segment_count`
-  cases.
+  cases, and no retirement may name a retained-core definition
+- **AND** effective counts are derived from the frozen oracle and the two ledgers, never restated
+  as free literals, and frozen digests are compared on the reconstructed frozen set (observed minus
+  additions, with ledgered retired entries restored).
 
 #### Scenario: Registry helper transition is independently bounded
 
@@ -658,10 +674,12 @@ before-blob allowlist SHALL fail.
 
 #### Scenario: Integration markers remain bound to the exact combined database authority
 
-- **WHEN** the 17 registry integration suffixes and the CI `database:` block are evaluated
-- **THEN** exactly five auth cases map to `tests/test_basins_registry_import_auth.py`, five
-  DB cases map to `tests/test_basins_registry_import_db.py`, and seven QHH/crosswalk cases
-  map to `tests/test_basins_registry_import_qhh.py`
+- **WHEN** the frozen 17 registry integration suffixes, minus the ledgered retired integration
+  nodes, and the CI `database:` block are evaluated
+- **THEN** the frozen map of five auth cases to `tests/test_basins_registry_import_auth.py`, five
+  DB cases to `tests/test_basins_registry_import_db.py`, and seven QHH/crosswalk cases to
+  `tests/test_basins_registry_import_qhh.py` holds after subtracting the ledgered retirements
+  (after #2907: 5 / 5 / 4)
 - **AND** the exact relevant database authority is the six registry paths for helper, core,
   auth, DB, QHH, and reingest united with the QHH helper and scheduler-owner paths
 - **AND** parser, CLI, security, and QHH-bootstrap A/B paths are absent, and no broad registry
@@ -674,12 +692,17 @@ before-blob allowlist SHALL fail.
 - **WHEN** the frozen final SHA is checked on node-27 with integration enabled against an
   isolated temporary database derived from node-27's local PostgreSQL `:55432`
 - **THEN** the combined registry auth/DB/QHH and QHH-bootstrap scheduler selection contains
-  exactly 28 nodes
-- **AND** 27 nodes report PASSED, including all seven registry-QHH and all eleven
-  QHH-bootstrap nodes, while only the explicitly disabled real-Basins import smoke reports
+  exactly 28 nodes minus the ledgered retired integration nodes
+- **AND** every remaining node except the real-Basins smoke reports PASSED, including every
+  non-retired registry-QHH node, the ledgered rewrite
+  `test_registry_import_creates_idempotent_inactive_rows` and all eleven QHH-bootstrap nodes, while only the explicitly disabled real-Basins import smoke reports
   SKIPPED
 - **AND** the temporary database and role are removed, production DB/display identity is
-  unchanged, no real-Basins ingest gate is enabled, and no credential enters public evidence
+  unchanged, no real-Basins ingest gate is enabled for this combined selection, and no credential
+  enters public evidence
+- **AND** a ledgered rewrite of the real-Basins smoke is proven by a separate run of that single
+  test on the same SHA and isolated database with the real-Basins gate enabled and `data/Basins`
+  provided read-only, which reports it PASSED
 - **AND** node-22 is not accessed for this database proof and remains DB-free.
 
 #### Scenario: Structural guard and current commands match the maintained layout
@@ -691,9 +714,35 @@ before-blob allowlist SHALL fail.
   guard edit
 - **AND** an ordinary commit passes the wired hook, live full-registry commands execute all
   seven suites, and the BUG-008 retained-core command remains valid
-- **AND** historical and archived evidence remains unchanged; current changes are limited
-  to the controlled `_make_valid_model` fixture transition and oracle evidence, with no
-  production registry SQL/schema/geometry/auth behavior or Basins real-fixture byte change.
+- **AND** historical and archived evidence remains unchanged; partition changes are limited to
+  the controlled `_make_valid_model` fixture transition, oracle evidence, and ledgered
+  retirements/rewrites, with no registry import SQL/schema/geometry/auth behaviour or Basins
+  real-fixture byte change; deleting caller-less store read paths and id producers that no import
+  path reaches (#2907) is not such a change.
+
+#### Scenario: A ledgered retirement or rewrite passes every partition guard
+
+- **WHEN** a frozen definition is deleted (or rewritten) and one retirements-ledger record names its
+  issue, 40-hex base commit, owner, name, action, reason, frozen nodes and integration nodes (and, for
+  a rewrite, the new 7-field row whose first field is the owner)
+- **THEN** the collection, integration, owner-count, definitions/digests, execution and database-proof
+  guards all pass, and the oracle file is byte-identical to its tracked content.
+
+#### Scenario: An unledgered or malformed retirement stays RED by name
+
+- **WHEN** a frozen definition is deleted or rewritten without a ledger record
+- **THEN** the definitions guard fails and names `<partition>::<name>`
+- **WHEN** a ledger record names a definition that is not a frozen oracle row or that belongs to the
+  retained core, changes a rewrite row field other than source, AST or monkeypatch digest, lists nodes
+  that differ from the frozen nodes, duplicates a name, overlaps an additions record, or carries a base
+  commit that does not resolve, is not an ancestor of HEAD, or whose owner blob does not define the name
+- **THEN** the ledger checker, which reads only the oracle, the two ledgers and git history,
+  reports one named `ledger.<rule>` violation for that record
+- **WHEN** a `retire` record names a definition the tree still defines, or a `rewrite` record's row
+  differs from the tree's observed row
+- **THEN** the definitions guard fails and names `<partition>::<name>`, printing the observed row
+- **AND** the retirements ledger path routes targeted selection to the partition meta-suite, and
+  removing that route makes the routing contract RED.
 
 ### Requirement: Guard exclusion burndown removes ten oversized surfaces without replacement
 
