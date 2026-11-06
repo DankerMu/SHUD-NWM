@@ -39,16 +39,15 @@ _LAYER_PARAMS: dict[str, dict[str, Any]] = {
     "river-network": {"basin_version_id": "bv_a"},
     "hydro": {"variable": "q_down"},
     "hydro-national": {"variable": "q_down"},
-    "met-stations": {"basin_version_id": "bv_a"},
 }
 
 
 def test_feature_limit_is_raised_only_for_the_national_discharge_layer() -> None:
     assert mvt_module.feature_limit("hydro-national") == _NATIONAL_DISCHARGE_FEATURE_LIMIT
-    # The other four layers, and a caller that names no layer, keep the global
+    # The other three layers, and a caller that names no layer, keep the global
     # budget -- whose value this change does not move.
     assert mvt_module.MVT_MAX_FEATURES == _GLOBAL_FEATURE_LIMIT
-    for layer in ("river-network", "river-network-national", "hydro", "met-stations", None):
+    for layer in ("river-network", "river-network-national", "hydro", None):
         assert mvt_module.feature_limit(layer) == mvt_module.MVT_MAX_FEATURES, layer
 
 

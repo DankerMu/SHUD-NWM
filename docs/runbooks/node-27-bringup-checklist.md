@@ -81,15 +81,16 @@ producer/binder 成功不代替它，也不代替独立的生产部署证明。
   bbox + 真实渲染要素定位 + 浏览器真实指针点击走产品 MapLibre click 路径），live
   receipt 由独立 C4-river-click 展示 lane 执行（原 #1895
   rollout 归属已撤回）；**station
-  popup**（station-MVT 端点/bbox 属 #342 协同）仍由 #389 承接，绘制不变量已由本地单测全覆盖、数据 live 就绪。这不再是整体「#389 唯一承接」的表述。
+  popup**（bbox 部分；station-MVT 端点已按 #2773 第 4 项下线）仍由 #389 承接，绘制不变量已由本地单测全覆盖、数据 live 就绪。这不再是整体「#389 唯一承接」的表述。
 - **live MVT closure（#351 → #343）**：#351 已用 2026-06-08 node-27 live
   receipt 闭合 #343；`NHMS_ENABLE_LIVE_POSTGIS_MVT=true` 后 `/api/v1/layers`
   返回 live layers，`hydro-national/q_down` tile 200。原 river-network 424 /
   hydro 409 根因是 display readonly 未启用 live PostGIS MVT 和图层未注册。
-- **解耦平行 issue**：**#342**（station-MVT 点图层端点，全国万级代站，node-27/display
-  API oracle，除非改 Slurm/SHUD 调度）仍 open；**#389**
+- **解耦平行 issue**：#342 交付的 station-MVT 点图层端点
+  `/api/v1/tiles/met-stations/...` 已按 #2773 第 4 项 owner 裁决（2026-11-06）下线（dg 站点全是
+  `active_flag=false`，该路径对所有 dg 流域返回 404，且无调用方；站点经 `/api/v1/met/stations` 读取）；**#389**
   承接 bbox/framing/点击自动化/popup live
-  click 浏览器证据缺口；二者均独立于 #351/#343 的 live MVT closure。
+  click 浏览器证据缺口，独立于 #351/#343 的 live MVT closure。
 
 ## 拓扑回顾
 
@@ -365,8 +366,8 @@ uv run --no-sync python scripts/node27_c4_production_acceptance.py verify \
   PASS 不替代此外层 gate，也不代替独立 C1–C3 或部署完成。不向 C4 闭集 schema/既有 binder
   CLI 增加 SHA/digest 字段。本登记只覆盖 R1.6 外层接受职责，不声称全部 C1–C3、R1.4 或 epic 已完成。旧冷 G0–G8 不恢复为上线流程。
 
-Issue #389 的 station popup/bbox/framing 与 #342
-station-MVT 是独立缺口，不挂在本 C4 checkbox 下。#1970 已交付的河段 click
+Issue #389 的 station popup/bbox/framing 是独立缺口，不挂在本 C4 checkbox 下（#342 的
+station-MVT 端点已按 #2773 第 4 项下线）。#1970 已交付的河段 click
 oracle 仍由上述 C4 lane live 执行。
 
 #### 外部底图 provider：同源缓存代理（#2436 → #2550）
@@ -406,8 +407,7 @@ oracle 仍由上述 C4 lane live 执行。
 #### ④⑤ 代站/河段 popup live click 证据缺口定义（#389 承接）
 
 > 三类证据严格分离，不得互相冒充：**live MVT closure**（#351→#343，已闭合）/
-> **station-MVT 端点** （#342，node-27/display API
-> oracle，open；不含 Slurm/SHUD 调度）/ **bbox·framing·popup live
+> **station-MVT 端点**（#342，已按 #2773 第 4 项下线，不再是证据项）/ **bbox·framing·popup live
 > click 浏览器自动化**（#389，本节）。
 
 要让 #389 可靠自动化 river/station

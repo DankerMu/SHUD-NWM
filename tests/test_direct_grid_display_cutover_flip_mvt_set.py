@@ -4,12 +4,15 @@ Partition (#2527 partition of the 1814-line / 15-case
 tests/test_direct_grid_display_cutover_flip.py):
 the SUB-2 MVT station-set family -- shadow-period, pre-cutover exclusion,
 post-cutover exclusion, never-union and feature-budget non-mixing -- plus the
-``_mvt_station_set`` model of the station-MVT layer's row selection. The flip
+``_mvt_station_set`` model of the active station set's row selection. The flip
 harness these tests drive lives in
-``tests/direct_grid_display_cutover_flip_helpers.py``; the structural lock on
-``apps/api/routes/hydro_display_identity.py::_station_source_version`` that
-``_mvt_station_set`` mirrors ("test 7 above") lives in
-``tests/test_direct_grid_display_cutover_flip_atomic.py``.
+``tests/direct_grid_display_cutover_flip_helpers.py``.
+
+#2773 item 4 retired the station vector-tile route (and its
+``_station_source_version`` query) that the "MVT layer" wording below refers to.
+These tests are kept because they lock the station-flag flip hook
+(``packages/common/station_set_flip.py``), which still maintains the
+``basin_version_id + active_flag=true`` set; "MVT set" now reads as that set.
 
 Covers the OpenSpec §1.2 required evidence pinned in
 ``openspec/changes/direct-grid-display-cutover/tasks.md``.
@@ -60,9 +63,9 @@ from tests.test_variant_activation_cutover import (
 #       observed emitted-set size never exceeds the largest single-set
 #       size.
 #
-# "MVT layer returns" is modeled by :func:`_mvt_station_set` below — it
-# mirrors ``apps/api/routes/hydro_display_identity.py::_station_source_version``'s
-# row-selection predicate (locked byte-for-byte by test 7 above): the set
+# "MVT layer returns" is modeled by :func:`_mvt_station_set` below — the
+# row-selection predicate the retired station-MVT query used (#2773 item 4)
+# and the flip hook still maintains: the set
 # of ``met.met_station`` rows where ``basin_version_id`` matches the
 # scope AND ``active_flag`` is true. SUB-2 tests seed the fake inventory,
 # optionally drive the SUB-1 flip hook end-to-end via the same
@@ -80,8 +83,8 @@ def _mvt_station_set(
 ) -> set[str]:
     """Return the set of ``station_id``s the station-MVT layer would emit.
 
-    Mirrors ``apps/api/routes/hydro_display_identity.py::_station_source_version``'s
-    row-selection predicate (locked by test 7 above): only rows where
+    The row-selection predicate of the retired station-MVT query (#2773
+    item 4), which the flip hook still maintains: only rows where
     ``basin_version_id`` matches the scope AND ``active_flag`` is true.
     No role filter, no ``model_id`` filter — single-track visibility is
     delivered by the SUB-1 flip hook's row selection, not by the query.

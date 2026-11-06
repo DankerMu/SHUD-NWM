@@ -360,7 +360,7 @@ def test_collection_coordinate_limit_is_raised_only_for_the_national_river_layer
         return params["collection_coordinate_limit"], params["feature_coordinate_limit"]
 
     assert limits(layer="river-network-national") == (120000, 50000)
-    for layer in ("river-network", "hydro", "hydro-national", "met-stations"):
+    for layer in ("river-network", "hydro", "hydro-national"):
         assert limits(layer=layer) == (50000, 50000)
     # Existing script and test callers compare the exact binding dictionary and
     # pass no layer; the default must stay on the shared limit.
@@ -380,14 +380,12 @@ def test_production_tile_bind_site_forwards_the_layer_to_the_collection_limit(mo
         "river-network": {"basin_version_id": "bv_a"},
         "hydro": {"variable": "q_down"},
         "hydro-national": {"variable": "q_down"},
-        "met-stations": {"basin_version_id": "bv_a"},
     }
     expected_collection_limits = {
         "river-network-national": 120000,
         "river-network": MVT_MAX_COORDINATES,
         "hydro": MVT_MAX_COORDINATES,
         "hydro-national": MVT_MAX_COORDINATES,
-        "met-stations": MVT_MAX_COORDINATES,
     }
 
     for layer, params in layer_params.items():
@@ -402,7 +400,7 @@ def test_production_tile_bind_site_forwards_the_layer_to_the_collection_limit(mo
         assert bound["feature_coordinate_limit"] == MVT_MAX_COORDINATES, layer
 
 
-_TILE_LAYERS = ("river-network", "river-network-national", "hydro", "hydro-national", "met-stations")
+_TILE_LAYERS = ("river-network", "river-network-national", "hydro", "hydro-national")
 
 
 def _final_select_text(layer: str) -> str:

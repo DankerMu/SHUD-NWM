@@ -485,22 +485,6 @@ def test_operations_without_reachable_4xx_declare_none() -> None:
             assert client_error_codes == [], (spec_name, path, method, client_error_codes)
 
 
-def test_station_mvt_tile_static_runtime_contract() -> None:
-    static_spec = yaml.safe_load(
-        (Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml").read_text(encoding="utf-8")
-    )
-    app.openapi_schema = None
-    runtime_spec = app.openapi()
-    path = "/api/v1/tiles/met-stations/{basin_version_id}/{z}/{x}/{y}.pbf"
-
-    static_operation = static_spec["paths"][path]["get"]
-    runtime_operation = runtime_spec["paths"][path]["get"]
-    assert static_operation["operationId"] == runtime_operation["operationId"] == "getMetStationTile"
-    assert static_operation["responses"]["200"]["content"] == runtime_operation["responses"]["200"]["content"]
-    assert set(static_operation["responses"]["200"]["headers"]) == set(runtime_operation["responses"]["200"]["headers"])
-    assert static_operation["responses"]["424"] == runtime_operation["responses"]["424"]
-
-
 def test_job_log_error_codes_are_declared_in_static_and_runtime_contract() -> None:
     static_spec = yaml.safe_load(
         (Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml").read_text(encoding="utf-8")

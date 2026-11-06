@@ -267,17 +267,6 @@ def _fetch_river_network_mvt_tile_bytes(
     return _fetch_postgis_tile_bytes(session, "river-network", {"basin_version_id": basin_version_id}, z=z, x=x, y=y)
 
 
-def _fetch_station_mvt_tile_bytes(
-    session: Session,
-    *,
-    basin_version_id: str,
-    z: int,
-    x: int,
-    y: int,
-) -> bytes:
-    return _fetch_postgis_tile_bytes(session, "met-stations", {"basin_version_id": basin_version_id}, z=z, x=x, y=y)
-
-
 def _validate_supported_hydro_variable(variable: str) -> None:
     if variable in SUPPORTED_HYDRO_MVT_VARIABLES:
         return

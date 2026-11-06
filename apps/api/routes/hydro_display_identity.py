@@ -8,104 +8,16 @@ which stays.
 
 from __future__ import annotations
 
-import hashlib
-import json
 from datetime import datetime
 from typing import Any
 
 from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from apps.api.errors import ApiError
 from apps.api.routes.hydro_display_instants import _mvt_time_text
 from packages.common.river_ts_render import render_river_ts_sql
-from services.tiles.mvt import MVT_MAX_FEATURES, public_hydro_layer_id
-
-
-def _station_source_version(session: Session, basin_version_id: str) -> str:
-    try:
-        row_limit = MVT_MAX_FEATURES + 1
-        if session.get_bind().dialect.name == "sqlite":
-            rows = session.execute(
-                text(
-                    """
-                    SELECT station_id, basin_version_id, COALESCE(station_name, '') AS station_name,
-                           station_role, active_flag, geom, created_at
-                    FROM met.met_station
-                    WHERE basin_version_id = :basin_version_id
-                      AND active_flag = 1
-                    ORDER BY station_id
-                    LIMIT :limit
-                    """
-                ),
-                {"basin_version_id": basin_version_id, "limit": row_limit},
-            ).mappings().all()
-        else:
-            rows = session.execute(
-                text(
-                    """
-                    SELECT station_id, basin_version_id, COALESCE(station_name, '') AS station_name,
-                           station_role, active_flag, encode(ST_AsEWKB(geom), 'hex') AS geom, created_at
-                    FROM met.met_station
-                    WHERE basin_version_id = :basin_version_id
-                      AND active_flag = true
-                    ORDER BY station_id
-                    LIMIT :limit
-                    """
-                ),
-                {"basin_version_id": basin_version_id, "limit": row_limit},
-            ).mappings().all()
-    except SQLAlchemyError as exc:
-        try:
-            session.rollback()
-        except SQLAlchemyError:
-            pass
-        raise ApiError(
-            status_code=424,
-            code="MVT_LIVE_POSTGIS_UNAVAILABLE",
-            message="Station MVT source inventory is unavailable for canonical .pbf tile generation.",
-            details={"layer_id": "met-stations", "basin_version_id": basin_version_id},
-        ) from exc
-
-    if not rows:
-        raise ApiError(
-            status_code=404,
-            code="MVT_SOURCE_IDENTITY_NOT_FOUND",
-            message="Station MVT source identity was not found for the requested basin version.",
-            details={"layer_id": "met-stations", "basin_version_id": basin_version_id},
-        )
-    if len(rows) > MVT_MAX_FEATURES:
-        raise ApiError(
-            status_code=413,
-            code="MVT_TILE_BUDGET_EXCEEDED",
-            message="Station MVT source inventory exceeded the configured feature budget.",
-            details={"layer_id": "met-stations", "basin_version_id": basin_version_id},
-        )
-    basis = {
-        "rows": [
-            [
-                row.get("station_id"),
-                row.get("basin_version_id"),
-                row.get("station_name"),
-                row.get("station_role"),
-                _station_active_flag(row.get("active_flag")),
-                row.get("geom"),
-                _mvt_time_text(row.get("created_at")) if row.get("created_at") is not None else None,
-            ]
-            for row in rows
-        ],
-    }
-    digest = hashlib.sha256(
-        json.dumps(basis, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
-    ).hexdigest()[:16]
-    return f"met-stations:{digest}:{basin_version_id}:{len(rows)}"
-
-
-def _station_active_flag(value: Any) -> bool:
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "t", "true", "yes"}
-    return bool(value)
+from services.tiles.mvt import public_hydro_layer_id
 
 
 def _require_hydro_mvt_source_identity(

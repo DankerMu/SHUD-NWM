@@ -686,23 +686,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/tiles/met-stations/{basin_version_id}/{z}/{x}/{y}.pbf": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Met Station Mvt Tile */
-        get: operations["getMetStationTile"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/precip/{source}/{cycle}/index": {
         parameters: {
             query?: never;
@@ -4025,45 +4008,6 @@ export interface operations {
         };
     };
     river_network_mvt_tile_api_v1_tiles_river_network__basin_version_id___z___x___y__pbf_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                basin_version_id: string;
-                /** @description Web Mercator XYZ zoom level. */
-                z: number;
-                /** @description Web Mercator XYZ tile column. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= x < 2^z. */
-                x: number;
-                /** @description Web Mercator XYZ tile row. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= y < 2^z. */
-                y: number;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Raw Mapbox vector tile */
-            200: {
-                headers: {
-                    "Cache-Control"?: string;
-                    ETag?: string;
-                    "X-Tile-Layer-ID"?: string;
-                    "X-Tile-Checksum"?: string;
-                    "X-Tile-Cache"?: "hit" | "miss" | "bypass";
-                    "X-Tile-Cache-Key"?: string;
-                    "X-MVT-Schema-Version"?: string;
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/x-protobuf": string;
-                };
-            };
-            424: components["responses"]["MvtLivePostgisUnavailable"];
-            503: components["responses"]["MvtColdGenerationBusy"];
-            "4XX": components["responses"]["Error"];
-            "5XX": components["responses"]["Error"];
-        };
-    };
-    getMetStationTile: {
         parameters: {
             query?: never;
             header?: never;

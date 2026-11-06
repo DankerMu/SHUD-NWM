@@ -97,8 +97,9 @@ GET /api/v1/tiles/hydro-national/{source}/{cycle}/{variable}/{valid_time}/{z}/{x
 GET /api/v1/tiles/hydro-national/{variable}/{valid_time}/{z}/{x}/{y}.pbf  # legacy source-less alias of the above (was canonical per PR #602); same bytes, run selection unbound; also in openapi/nhms.v1.yaml:2308 (present on master since #2007) and pinned by tests/test_openapi_drift.py::test_static_openapi_matches_runtime_schema; no in-repo caller issues it since #2013 moved scripts/node27_mvt_prewarm.py to the canonical source/cycle URL — the frontend follows the tile_url_template /api/v1/layers advertises, which has been the canonical source/cycle route since #2007 — so it now survives on the route + drift tests alone
 GET /api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf  # direct-deeplink only; not surfaced via /api/v1/layers discharge entry — see openspec/specs/mvt-tile-contract/spec.md
 GET /api/v1/tiles/flood-return-period?run_id=&duration=1h&valid_time=&bbox=&return_period=
-GET /api/v1/tiles/met-stations/{basin_version_id}/{z}/{x}/{y}.pbf
 ```
+
+站点矢量瓦片 `GET /api/v1/tiles/met-stations/{basin_version_id}/{z}/{x}/{y}.pbf` 已按 #2773 第 4 项 owner 裁决（2026-11-06）下线：它按 `active_flag = true` 列站，Direct Grid 站点全是 `active_flag = false`，所有 dg 流域都返回 404，且无调用方。该 URL 现为路由层 404；站点一律经 `GET /api/v1/met/stations` 读取。
 
 洪水重现期地图数据本版本发布为 GeoJSON，而不是 MVT/PBF。原因是 `.pbf`
 瓦片需要 PostGIS tile clipping 和 MVT 编码能力，本阶段不把该实现作为发布范围。
