@@ -47,7 +47,7 @@ The series reader SHALL derive the absolute disk path of a station's per-cycle f
 #### Scenario: missing required filter returns 422
 
 - **WHEN** API receives a request missing any of `cycle_time` / `model_id` / `source_id`
-- **THEN** the API SHALL return HTTP 422 with code `MISSING_REQUIRED_FILTER` and details `{"required_alternatives": [["forcing_version_id"], ["model_id", "source_id", "cycle_time"]]}` (reusing the exact existing error shape from `packages/common/forecast_store.py:2132-2146`, the current station_series call-site)
+- **THEN** the API SHALL return HTTP 422 with code `MISSING_REQUIRED_FILTER` and details `{"required_alternatives": [["model_id", "source_id", "cycle_time"]]}` (the disk-only route accepts no other filter alternative; `forcing_version_id` is not a route parameter, is ignored if sent, and SHALL NOT be advertised as an alternative — #3058)
 
 #### Scenario: unsafe API path segments are rejected before file open
 
@@ -341,7 +341,7 @@ After this change, `/api/v1/met/stations/{station_id}/series` SHALL never return
 
 ### Requirement: forcing_version_id query param silently ignored
 
-The existing `forcing_version_id` query param on `apps/api/routes/data_sources.py:get_met_station_series` SHALL be silently accepted but unused by the new disk-only path only when the full `model_id`, `source_id`, and `cycle_time` tuple is present. OpenAPI documentation MUST mark this param deprecated.
+`apps/api/routes/data_sources.py:get_met_station_series` SHALL NOT declare a `forcing_version_id` query param, and the OpenAPI operation `getMetStationSeries` (and the generated frontend types) MUST NOT list it (#3058). A `forcing_version_id` still sent by a legacy client SHALL be silently ignored as an unknown query param; it never substitutes for the `model_id`, `source_id`, and `cycle_time` tuple.
 
 #### Scenario: forcing_version_id passed alongside full disk tuple is ignored, request succeeds
 
@@ -351,7 +351,7 @@ The existing `forcing_version_id` query param on `apps/api/routes/data_sources.p
 #### Scenario: forcing_version_id alone without cycle_time returns 422
 
 - **WHEN** API request includes ONLY `forcing_version_id=...` without `cycle_time`/`model_id`/`source_id`
-- **THEN** the API SHALL return HTTP 422 `MISSING_REQUIRED_FILTER` listing the missing fields (because the new path requires cycle_time/model_id/source_id; forcing_version_id alone is no longer enough)
+- **THEN** the API SHALL return HTTP 422 `MISSING_REQUIRED_FILTER` with details `{"required_alternatives": [["model_id", "source_id", "cycle_time"]]}` (because the new path requires cycle_time/model_id/source_id; forcing_version_id alone is no longer enough and is not advertised as an alternative)
 
 ### Requirement: The station CSV read SHALL absorb a concurrent atomic replacement with a bounded retry, and SHALL keep failing closed when it cannot
 

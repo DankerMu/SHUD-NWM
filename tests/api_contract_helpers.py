@@ -33,7 +33,7 @@ PIPELINE_JOB_SCHEMA_PATH = Path(__file__).resolve().parents[1] / "schemas" / "pi
 
 
 STATION_SERIES_MISSING_REQUIRED_FILTER_MESSAGE = (
-    "forcing_version_id or model_id, source_id, and cycle_time are required for station series queries."
+    "model_id, source_id, and cycle_time are required for station series queries."
 )
 
 

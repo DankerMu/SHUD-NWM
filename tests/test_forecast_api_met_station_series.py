@@ -23,7 +23,7 @@ CYCLE_TIME = "2026-06-20T12:00:00Z"
 BASIN_VERSION_ID = "basins_heihe_vbasins"
 FORCING_FILENAME = "X100.75Y37.65.csv"
 MISSING_REQUIRED_FILTER_MESSAGE = (
-    "forcing_version_id or model_id, source_id, and cycle_time are required for station series queries."
+    "model_id, source_id, and cycle_time are required for station series queries."
 )
 
 
@@ -104,6 +104,18 @@ def test_station_series_route_ignores_forcing_version_when_tuple_filters_are_pre
                 "variables": "PRCP",
             },
         )
+        # #3058: the parameter is no longer declared, so legacy clients that still send it
+        # (even as an empty string, which the old minLength=1 declaration rejected) are not broken.
+        with_empty_forcing_version = client.get(
+            f"/api/v1/met/stations/{STATION_ID}/series",
+            params={
+                "forcing_version_id": "",
+                "model_id": MODEL_ID,
+                "source_id": SOURCE_ID,
+                "cycle_time": CYCLE_TIME,
+                "variables": "PRCP",
+            },
+        )
         without_forcing_version = client.get(
             f"/api/v1/met/stations/{STATION_ID}/series",
             params={
@@ -115,8 +127,10 @@ def test_station_series_route_ignores_forcing_version_when_tuple_filters_are_pre
         )
 
     assert with_forcing_version.status_code == 200
+    assert with_empty_forcing_version.status_code == 200
     assert without_forcing_version.status_code == 200
     assert with_forcing_version.json()["data"] == without_forcing_version.json()["data"]
+    assert with_empty_forcing_version.json()["data"] == without_forcing_version.json()["data"]
 
 
 def test_station_series_route_forcing_version_alone_returns_missing_required_filter(tmp_path: Path) -> None:
@@ -133,7 +147,6 @@ def test_station_series_route_forcing_version_alone_returns_missing_required_fil
     assert response.json()["error"]["message"] == MISSING_REQUIRED_FILTER_MESSAGE
     assert response.json()["error"]["details"] == {
         "required_alternatives": [
-            ["forcing_version_id"],
             ["model_id", "source_id", "cycle_time"],
         ]
     }

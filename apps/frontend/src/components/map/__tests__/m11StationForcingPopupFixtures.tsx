@@ -13,7 +13,6 @@ export const RETAINED_OUT_CYCLE = '2026-05-20T00:00:00Z'
 export const station: M11StationPopupStation = { station_id: 'qhh_forc_001', station_name: 'QHH forcing 001' }
 
 export type SeriesQuery = {
-  forcing_version_id?: unknown
   model_id?: unknown
   source_id?: unknown
   cycle_time?: unknown
@@ -101,7 +100,6 @@ export function metadata(overrides: Record<string, unknown> = {}) {
 export function seriesOverridesFromQuery(query: SeriesQuery) {
   const overrides: Record<string, unknown> = {}
   if (typeof query.cycle_time === 'string') overrides.cycle_time = query.cycle_time
-  if (typeof query.forcing_version_id === 'string') overrides.forcing_version_id = query.forcing_version_id
   if (typeof query.model_id === 'string') overrides.model_id = query.model_id
   return overrides
 }

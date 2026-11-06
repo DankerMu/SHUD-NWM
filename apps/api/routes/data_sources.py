@@ -163,7 +163,6 @@ def list_met_stations(
 def get_met_station_series(
     request: Request,
     station_id: str,
-    forcing_version_id: str | None = Query(default=None, min_length=1),
     model_id: str | None = Query(default=None, min_length=1),
     source_id: str | None = Query(default=None, min_length=1),
     cycle_time: datetime | None = Query(default=None),

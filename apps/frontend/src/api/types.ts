@@ -3347,11 +3347,6 @@ export interface operations {
     getMetStationSeries: {
         parameters: {
             query?: {
-                /**
-                 * @deprecated
-                 * @description Deprecated compatibility parameter. The disk-only route ignores this value when model_id, source_id, and cycle_time are supplied; by itself it no longer selects DB-backed series.
-                 */
-                forcing_version_id?: string;
                 model_id?: string;
                 source_id?: string;
                 cycle_time?: string;

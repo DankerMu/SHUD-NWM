@@ -494,13 +494,9 @@ def _raise_missing_required_filter_if_needed(
     raise ForecastStoreError(
         status_code=422,
         code="MISSING_REQUIRED_FILTER",
-        message=(
-            "forcing_version_id or model_id, source_id, and cycle_time are required "
-            "for station series queries."
-        ),
+        message="model_id, source_id, and cycle_time are required for station series queries.",
         details={
             "required_alternatives": [
-                ["forcing_version_id"],
                 ["model_id", "source_id", "cycle_time"],
             ]
         },

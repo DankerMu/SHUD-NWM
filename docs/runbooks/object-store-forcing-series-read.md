@@ -16,7 +16,7 @@ GET /api/v1/met/stations/{station_id}/series?model_id=...&source_id=...&cycle_ti
 
 - `met.met_station` 仍是站点元数据来源；API 用它查 `basin_version_id`、坐标、高程、角色、active flag 和 `properties_json.forcing_filename`。
 - 序列值不再读取 `met.forcing_station_timeseries`，也不再经过 `met.forcing_version` finalize gate。
-- `forcing_version_id` 参数保留兼容形状；只有与完整 `model_id + source_id + cycle_time` tuple 同传时才会被接受并忽略。单独只传 `forcing_version_id` 会返回 `MISSING_REQUIRED_FILTER`。
+- `forcing_version_id` 已不是该 route 的参数（#3058 从 route、OpenAPI 与错误 details 中移除）。旧客户端多传它不会报错，按未知 query 参数忽略；`model_id + source_id + cycle_time` 仍必须完整，只传 `forcing_version_id` 会返回 `MISSING_REQUIRED_FILTER`，其 `details.required_alternatives` 只有 `[["model_id", "source_id", "cycle_time"]]`。响应体里的 `forcing_version_id` 由 tuple 按 `forc_<source>_<YYYYMMDDHH>_<model_id>` 合成，不受请求影响。
 - `variables` 省略、空字符串或纯空白时等同于默认变量集，返回 `PRCP`、`TEMP`、`RH`、`wind`、`Rn`；非空但不支持的变量名（例如 `Press` 或未知变量）会被静默丢弃。
 - disk 缺文件即返回 `STATION_FORCING_FILE_NOT_FOUND`；不会 fallback 到 DB。
 
@@ -86,7 +86,7 @@ station-series reader 只读 forcing producer 已发布到共享 object-store mi
 
 | HTTP | code | 触发条件 |
 |---:|---|---|
-| 422 | `MISSING_REQUIRED_FILTER` | 请求未同时提供 `model_id`、`source_id`、`cycle_time`。只传旧 `forcing_version_id` 也会触发该错误 |
+| 422 | `MISSING_REQUIRED_FILTER` | 请求未同时提供 `model_id`、`source_id`、`cycle_time`。只传旧 `forcing_version_id`（已非参数、被忽略）也会触发该错误 |
 | 404 | `STATION_NOT_FOUND` | `met.met_station` 查不到 `station_id` |
 | 500 | `STATION_FORCING_FILENAME_MISSING` | 站点存在，但 `properties_json.forcing_filename` 缺失或为空 |
 | 404 | `STATION_FORCING_FILE_NOT_FOUND` | 按模板解析出的 disk CSV 不存在，包括 cycle 目录已被 retention 清理的情况 |

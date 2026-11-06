@@ -189,7 +189,6 @@ def test_met_station_series_forcing_version_alone_uses_error_envelope_without_st
     assert body["error"]["message"] == STATION_SERIES_MISSING_REQUIRED_FILTER_MESSAGE
     assert body["error"]["details"] == {
         "required_alternatives": [
-            ["forcing_version_id"],
             ["model_id", "source_id", "cycle_time"],
         ]
     }

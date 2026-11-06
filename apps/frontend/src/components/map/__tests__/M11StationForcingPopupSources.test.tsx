@@ -13,7 +13,6 @@ import {
   RETAINED_OUT_CYCLE,
   station,
   success,
-  forcingVersionFor,
   productFor,
   seriesOverridesFromQuery,
   seriesResponseFor,
@@ -151,7 +150,6 @@ describe('M11StationForcingPopup', () => {
       expect(queries.find((query) => sourceFromQuery(query) === source)).toEqual(
         expect.objectContaining({
           cycle_time: DEFAULT_CYCLE,
-          forcing_version_id: forcingVersionFor(source, DEFAULT_CYCLE),
           model_id: 'm-1',
         }),
       )
@@ -202,7 +200,6 @@ describe('M11StationForcingPopup', () => {
       expect(queries.find((query) => sourceFromQuery(query) === source)).toEqual(
         expect.objectContaining({
           cycle_time: DEFAULT_CYCLE,
-          forcing_version_id: forcingVersionFor(source, DEFAULT_CYCLE),
           model_id: 'm-1',
         }),
       )

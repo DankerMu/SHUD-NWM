@@ -1193,16 +1193,6 @@ paths:
         required: true
         schema:
           type: string
-      - name: forcing_version_id
-        in: query
-        required: false
-        schema:
-          type: string
-          minLength: 1
-        deprecated: true
-        description: Deprecated compatibility parameter. The disk-only route ignores
-          this value when model_id, source_id, and cycle_time are supplied; by itself
-          it no longer selects DB-backed series.
       - name: model_id
         in: query
         required: false
@@ -1290,11 +1280,10 @@ paths:
                     status: error
                     error:
                       code: MISSING_REQUIRED_FILTER
-                      message: forcing_version_id or model_id, source_id, and cycle_time
-                        are required for station series queries.
+                      message: model_id, source_id, and cycle_time are required for
+                        station series queries.
                       details:
                         required_alternatives:
-                        - - forcing_version_id
                         - - model_id
                           - source_id
                           - cycle_time

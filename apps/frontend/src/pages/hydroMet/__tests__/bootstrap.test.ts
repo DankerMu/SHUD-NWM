@@ -695,7 +695,7 @@ describe('loadHydroMetStationSeries', () => {
     _clearHydroMetLatestProductIdentityCache()
   })
 
-  it('calls the generated station-series API with tuple filters, deprecated companion, five public variables, and tuple limit', async () => {
+  it('calls the generated station-series API with tuple filters only, five public variables, and tuple limit', async () => {
     vi.mocked(client.GET).mockResolvedValueOnce({
       data: success(stationSeriesResponse()),
       error: undefined,
@@ -713,7 +713,6 @@ describe('loadHydroMetStationSeries', () => {
       params: {
         path: { station_id: 'qhh_forc_001' },
         query: {
-          forcing_version_id: product.forcing_version_id,
           model_id: product.model_id,
           source_id: product.source_id,
           cycle_time: product.cycle_time,
