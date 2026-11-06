@@ -1210,3 +1210,9 @@ Consequences:
   separately re-contracted.
 - Code that still samples `/data/GHDC` as a separate filesystem now observes
   the root LV. Correcting it is outside this revision.
+- Follow-up (#3059, 2026-11-06): resource governance no longer samples
+  `/data/GHDC` (the report's `filesystem.filesystems.cold` key is removed; it
+  only re-measured `/`). The #2240 CLI now enforces the "must not be run"
+  rule: without `--disposable-root`, `plan` reports the retirement as its only
+  blocker and every mutating action exits non-zero before the lifecycle lock.
+  Only isolated disposable mechanics stay runnable; the tool is not re-contracted.

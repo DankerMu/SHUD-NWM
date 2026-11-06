@@ -98,7 +98,7 @@ def observations(monkeypatch, tmp_path):
         # Keep lstat identity real for no-follow receipt publication.
         if not kwargs.get("follow_symlinks", True):
             return real_stat(path, *args, **kwargs)
-        if str(path) in aliases("/", "/home", "/data/GHDC", state["target_path"]):
+        if str(path) in aliases("/", "/home", state["target_path"]):
             if str(path) in aliases(state["target_path"]) and state["target_failure"] == "missing":
                 raise FileNotFoundError(errno.ENOENT, "password=os-secret", str(path))
             return directory_stat
@@ -290,7 +290,7 @@ def test_cli_missing_capacity_and_usage_fail_independently(observations, tmp_pat
         assert secret not in path.read_text() + stderr
 
 
-@pytest.mark.parametrize("target", ["/home/nwm/nhms-pgdata", "/data/GHDC/nhms-primary/pgdata", "/srv/db-alias"])
+@pytest.mark.parametrize("target", ["/home/nwm/nhms-pgdata", "/home/nwm/nhms-primary/pgdata", "/srv/db-alias"])
 def test_cli_configured_paths_and_duplicate_device_labels(observations, tmp_path, target):
     observations.update(target_path=target, target=900 * GIB, home=800 * GIB)
     path = tmp_path / "audit.json"
@@ -315,7 +315,9 @@ def test_cli_ordinary_receipt_ignores_retired_cold_environment(observations, tmp
     assert receipt["status"] == "completed"
     assert receipt["working_set"]["projected_peak_bytes"] == 750 * GIB
     assert receipt["working_set"]["working_set_free_bytes"] == 900 * GIB
-    assert receipt["filesystem"]["filesystems"]["cold"]["path"] == "/data/GHDC"
+    # #3059: the retired 14T cold volume is no longer sampled (it only re-measured `/`).
+    assert "cold" not in receipt["filesystem"]["filesystems"]
+    assert {"root", "home"} <= set(receipt["filesystem"]["filesystems"])
     assert receipt["postgres"]["maintenance_output"] == {"status": "ok", "summary": {}, "rows": []}
     assert "cold_tablespace_governance" not in receipt
     assert {"cold_tablespace", "cold_relation_by_tablespace", "external_pg_tblspc_targets"}.isdisjoint(

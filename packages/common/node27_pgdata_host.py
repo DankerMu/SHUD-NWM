@@ -11,7 +11,6 @@ import socket
 import stat
 import time
 from contextlib import closing
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.error import URLError
@@ -19,7 +18,6 @@ from urllib.request import urlopen
 
 from packages.common.node27_pgdata_command import CommandError, run_bounded_command
 from packages.common.node27_pgdata_container import normalize_raw_inspect
-from packages.common.node27_pgdata_evidence import EvidencePolicy, verify_root_storage_evidence
 from packages.common.safe_fs import (
     atomic_write_bytes_no_follow,
     directory_identity_no_follow,
@@ -52,6 +50,13 @@ TREE_HASH = (
     "tar -C /source --sort=name --numeric-owner --format=posix "
     "--pax-option=exthdr.name=%d/PaxHeaders/%f,delete=atime,delete=ctime "
     "--acls --xattrs -cf - . | sha256sum"
+)
+# #3059: the #2240 production identity (14T RAID target, retained /home source)
+# no longer exists on node-27; only disposable mechanics remain runnable.
+PRODUCTION_RELOCATION_RETIRED = (
+    "production PGDATA relocation is retired: its 14T RAID target was removed from node-27 on 2026-11-05 "
+    "(docs/adr/0002-node27-timeseries-hot-cold-tiering.md, ADR 0002 Revision 2026-11-05); "
+    "re-contract the source/target device identity before any production run; only --disposable-root mechanics remain"
 )
 
 
@@ -296,39 +301,7 @@ class Host:
     def health(self, config: dict[str, Any]) -> dict[str, Any]:
         if config.get("disposable_root"):
             return {"scope": "isolated-mechanics-only", "hardware_health": "not-applicable"}
-        require(
-            config.get("mdadm_evidence") and len(config.get("smart_evidence", {})) == 2,
-            "fresh root mdadm and both SMART evidence files are required",
-        )
-        policy = EvidencePolicy(
-            socket.gethostname(),
-            "/dev/md0",
-            86400,
-            0,
-            (0o600, 0o640),
-            ("/usr/sbin/mdadm", "--detail", "/dev/md0"),
-            ("/usr/sbin/smartctl",),
-            (),
-            config["source_pgdata"],
-        )
-        result = verify_root_storage_evidence(
-            Path(config["mdadm_evidence"]),
-            {key: Path(value) for key, value in config["smart_evidence"].items()},
-            policy=policy,
-            now=datetime.now(UTC),
-        )
-        require(result.healthy, "root storage health is not PASS")
-        fs = self.filesystem(Path(config["target_pgdata"]).parent)
-        require(
-            fs["source"] == "/dev/md0" and fs["target"] == "/data/GHDC",
-            "target is not the evidenced GHDC RAID filesystem",
-        )
-        return {
-            "scope": "root-storage-health",
-            "members": list(result.members),
-            "raid": result.raid.file_identity,
-            "smart": [item.file_identity for item in result.smart],
-        }
+        raise MigrationError(PRODUCTION_RELOCATION_RETIRED)
 
     def helper(
         self,

@@ -351,7 +351,6 @@ def collect_filesystem(config: Any) -> dict[str, Any]:
         "home": disk_usage(Path("/home")),
         "repo_root_fs": disk_usage(config.repo_root),
         "object_store_fs": disk_usage(config.object_store_root),
-        "cold": disk_usage(Path("/data/GHDC")),
     }
     path_sizes: dict[str, Any] = {
         "repo_root": du_bytes(config.repo_root),
