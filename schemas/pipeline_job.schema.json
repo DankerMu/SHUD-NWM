@@ -64,6 +64,7 @@
         "partially_failed",
         "failed",
         "submission_failed",
+        "reservation_lost",
         "permanently_failed",
         "cancelled",
         "skipped"

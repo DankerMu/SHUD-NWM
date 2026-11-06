@@ -1798,7 +1798,7 @@ export interface components {
             model_id: string | null;
             basin_id: string | null;
             /** @enum {string} */
-            status: "pending" | "queued" | "submitted" | "running" | "succeeded" | "partially_failed" | "failed" | "submission_failed" | "permanently_failed" | "cancelled" | "skipped";
+            status: "pending" | "queued" | "submitted" | "running" | "succeeded" | "partially_failed" | "failed" | "submission_failed" | "reservation_lost" | "permanently_failed" | "cancelled" | "skipped";
             stage: string | null;
             /** Format: date-time */
             submitted_at: string | null;
@@ -1839,7 +1839,7 @@ export interface components {
             slurm_job_id: string | null;
             model_id: string | null;
             /** @enum {string} */
-            status: "pending" | "queued" | "submitted" | "running" | "succeeded" | "partially_failed" | "failed" | "submission_failed" | "permanently_failed" | "cancelled" | "skipped";
+            status: "pending" | "queued" | "submitted" | "running" | "succeeded" | "partially_failed" | "failed" | "submission_failed" | "reservation_lost" | "permanently_failed" | "cancelled" | "skipped";
             stage: string | null;
             /** Format: date-time */
             submitted_at: string | null;

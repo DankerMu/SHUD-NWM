@@ -1,11 +1,5 @@
 [
-  {"file": "apps/api/routes/pipeline.py", "members": ["cancelled", "complete", "failed_convert", "failed_download", "failed_forcing", "failed_parse", "failed_publish", "failed_run", "parsed_partial", "published"], "reason": "pending-migration"},
-  {"file": "apps/api/routes/pipeline.py", "members": ["cancelled", "failed", "parsed", "published", "succeeded", "superseded"], "reason": "pending-migration"},
-  {"file": "apps/api/routes/pipeline.py", "members": ["cancelled", "failed", "partially_failed", "pending", "permanently_failed", "queued", "running", "skipped", "submission_failed", "submitted", "succeeded"], "reason": "pending-migration"},
-  {"file": "apps/api/routes/pipeline.py", "members": ["cancelled", "failed", "permanently_failed", "submission_failed"], "reason": "pending-migration"},
   {"file": "apps/api/routes/pipeline.py", "members": ["failed", "partially_failed"], "reason": "distinct-vocabulary"},
-  {"file": "apps/api/routes/pipeline.py", "members": ["pending", "queued"], "reason": "pending-migration"},
-  {"file": "apps/api/routes/pipeline.py", "members": ["pending", "queued", "running", "submitted"], "reason": "pending-migration"},
   {"file": "apps/api/routes/pipeline.py", "members": ["pending", "submitted"], "reason": "distinct-vocabulary"},
   {"file": "apps/api/routes/pipeline.py", "members": ["running", "submitted"], "reason": "distinct-vocabulary"},
   {"file": "apps/api/routes/pipeline.py", "members": ["skipped", "succeeded"], "reason": "distinct-vocabulary"},

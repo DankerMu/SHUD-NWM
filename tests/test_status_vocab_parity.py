@@ -56,25 +56,8 @@ _PIPELINE_JOB_SCHEMA = _REPO_ROOT / "schemas" / "pipeline_job.schema.json"
 _RUN_STATUS_SCHEMA = _REPO_ROOT / "schemas" / "run_status.schema.json"
 _STATUS_VOCAB_SOURCE = _REPO_ROOT / "packages" / "common" / "status_vocab.py"
 
-# Transitional (task 2.2 deletes it): the runtime-written `reservation_lost` is in
-# `PIPELINE_JOB_STATUS_ORDER` but not yet in the public schema / API tuple.
-_PENDING_PUBLIC_DELTA: tuple[str, ...] = ("reservation_lost",)
-
 # --- Literals pinned from the canonical sites at f7be77f22 ---------------------------
 
-_PIPELINE_API_TUPLE = (
-    "pending",
-    "queued",
-    "submitted",
-    "running",
-    "succeeded",
-    "partially_failed",
-    "failed",
-    "submission_failed",
-    "permanently_failed",
-    "cancelled",
-    "skipped",
-)
 _PIPELINE_JOB_ORDER = (
     "pending",
     "queued",
@@ -572,6 +555,27 @@ def test_non_orchestrator_first_slice_sites_rebind_the_vocabulary() -> None:
     assert display_ready == vocab.DISPLAY_PRODUCT_READY_STATUSES
 
 
+def test_pipeline_route_sites_rebind_the_vocabulary() -> None:
+    """Task 2.2: the public tuple is the ordered vocabulary tuple, the buckets `set` copies.
+
+    The tuple feeds the published OpenAPI enum in order, so it must be the
+    vocabulary tuple itself; the five route buckets stay fresh mutable sets.
+    """
+
+    assert pipeline_route.PIPELINE_JOB_STATUS_VALUES is vocab.PIPELINE_JOB_STATUS_ORDER
+    for site_name, vocab_name in (
+        ("_ACTIVE_JOB_STATUSES", "PIPELINE_JOB_ACTIVE"),
+        ("_PENDING_JOB_STATUSES", "PIPELINE_JOB_PENDING"),
+        ("_FAILED_JOB_STATUSES", "PIPELINE_JOB_FAILED_UI"),
+        ("_TERMINAL_HYDRO_STATUSES", "HYDRO_RUN_TERMINAL_UI"),
+        ("_TERMINAL_CYCLE_STATUSES", "CYCLE_TERMINAL_UI"),
+    ):
+        site = getattr(pipeline_route, site_name)
+        assert type(site) is set, site_name
+        assert site is not getattr(vocab, vocab_name), site_name
+        assert site == getattr(vocab, vocab_name), site_name
+
+
 def test_terminal_with_and_without_reservation_lost() -> None:
     assert "reservation_lost" in vocab.PIPELINE_JOB_TERMINAL
     assert "reservation_lost" not in vocab.PIPELINE_JOB_TERMINAL_WITHOUT_RESERVATION
@@ -587,15 +591,11 @@ def test_internal_statuses_complete_the_accepted_submit_master_set() -> None:
     assert not vocab.PIPELINE_JOB_INTERNAL_STATUSES & set(_schema_status_enum(_PIPELINE_JOB_SCHEMA))
 
 
-def test_pipeline_job_order_matches_schema_and_api_tuple_modulo_pending_delta() -> None:
-    assert _PENDING_PUBLIC_DELTA == ("reservation_lost",)
-    _assert_public_enum_matches(
-        vocab.PIPELINE_JOB_STATUS_ORDER, _schema_status_enum(_PIPELINE_JOB_SCHEMA), _PENDING_PUBLIC_DELTA
-    )
+def test_pipeline_job_order_matches_schema_and_api_tuple() -> None:
+    _assert_public_enum_matches(vocab.PIPELINE_JOB_STATUS_ORDER, _schema_status_enum(_PIPELINE_JOB_SCHEMA), ())
     site = pipeline_route.PIPELINE_JOB_STATUS_VALUES
-    assert type(site) is tuple
-    assert site == _PIPELINE_API_TUPLE
-    _assert_public_enum_matches(vocab.PIPELINE_JOB_STATUS_ORDER, list(site), _PENDING_PUBLIC_DELTA)
+    assert site is vocab.PIPELINE_JOB_STATUS_ORDER
+    _assert_public_enum_matches(vocab.PIPELINE_JOB_STATUS_ORDER, list(site), ())
     # `reservation_lost` sits right after `submission_failed`.
     order = vocab.PIPELINE_JOB_STATUS_ORDER
     assert order.index("reservation_lost") == order.index("submission_failed") + 1
@@ -604,8 +604,7 @@ def test_pipeline_job_order_matches_schema_and_api_tuple_modulo_pending_delta() 
 def test_public_enum_check_names_a_value_missing_from_the_schema() -> None:
     """Synthetic drift: a value added to the order but not to the schema reds, naming it.
 
-    The delta is passed explicitly (empty here), so these cases outlive the
-    deletion of `_PENDING_PUBLIC_DELTA` in task 2.2.
+    The delta is passed explicitly (empty here); the real tree passes `()` too.
     """
 
     schema_enum = ["pending", "running", "succeeded"]

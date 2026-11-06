@@ -78,6 +78,7 @@ OPS_JOB_STATUS_ENUM = [
     "partially_failed",
     "failed",
     "submission_failed",
+    "reservation_lost",
     "permanently_failed",
     "cancelled",
     "skipped",
