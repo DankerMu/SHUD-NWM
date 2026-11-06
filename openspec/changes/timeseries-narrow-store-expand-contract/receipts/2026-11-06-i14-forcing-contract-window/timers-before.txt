@@ -1,0 +1,5 @@
+nhms-node27-autopipe.timer inactive disabled
+nhms-node27-download.timer inactive disabled
+nhms-node27-timeseries-compression.timer inactive disabled
+nhms-node27-timeseries-retention.timer inactive disabled
+nhms-node27-resource-governance.timer inactive disabled
