@@ -94,6 +94,8 @@ AutoSHUD/
 # produced permanent working-tree drift (edits plus relocations between
 # .agents/skills/ and .agents/skills-manual/) on every install. Untracked as of
 # this commit; recover history from git log if a copy is ever needed.
+# .claude/hooks/large-file-guard/ is likewise an install of the my-agents
+# large-file-guard hook (the NWM fork was ported upstream in 0.3.0).
 .claude/
 .agents/skills/
 .agents/skills-manual/
