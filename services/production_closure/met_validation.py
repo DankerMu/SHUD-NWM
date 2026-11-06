@@ -22,6 +22,7 @@ from packages.common.safe_fs import (
     ensure_directory_no_follow,
     rmtree_no_follow,
 )
+from packages.common.status_vocab import normalize_qc_verdict
 from packages.common.test_netcdf4 import encode_test_netcdf4
 from workers.canonical_converter.converter import (
     CanonicalConversionError,
@@ -914,8 +915,8 @@ def _forcing_qc_payload(
             }
         )
     status = "pass"
-    if missing_required or missing_values or continuity["status"] != "pass" or any(
-        check["status"] != "pass" for check in range_checks
+    if missing_required or missing_values or normalize_qc_verdict(continuity["status"]) != "passed" or any(
+        normalize_qc_verdict(check["status"]) != "passed" for check in range_checks
     ):
         status = "fail"
     return {
@@ -981,7 +982,11 @@ def _best_available_lineage(
         candidates = []
         for source in SOURCE_ORDER:
             mode = source_modes.get(source, "not_executed")
-            if source == "GFS" and mode == "deterministic_fixture" and forcing_qc.get("status") == "pass":
+            if (
+                source == "GFS"
+                and mode == "deterministic_fixture"
+                and normalize_qc_verdict(forcing_qc.get("status")) == "passed"
+            ):
                 candidates.append({"source": source, "status": "selected", "execution_mode": mode})
             elif mode in {"deterministic_fixture", "live_executed"}:
                 candidates.append({"source": source, "status": "available_not_selected", "execution_mode": mode})
@@ -994,9 +999,9 @@ def _best_available_lineage(
         per_valid_time.append(
             {
                 "valid_time": valid_time_text,
-                "selected_source": "GFS" if forcing_qc.get("status") == "pass" else None,
+                "selected_source": "GFS" if normalize_qc_verdict(forcing_qc.get("status")) == "passed" else None,
                 "selection_reason": "deterministic_gfs_fixture_passed_forcing_qc"
-                if forcing_qc.get("status") == "pass"
+                if normalize_qc_verdict(forcing_qc.get("status")) == "passed"
                 else "forcing_qc_not_passed",
                 "canonical_product_ids": sorted(products_by_time.get(valid_time_text, [])),
                 "candidates": candidates,
@@ -1005,7 +1010,7 @@ def _best_available_lineage(
     return {
         "schema": "nhms.production_closure.met.best_available_lineage.v1",
         "status": "ready"
-        if raw_evidence.get("status") == "ready" and forcing_qc.get("status") == "pass"
+        if raw_evidence.get("status") == "ready" and normalize_qc_verdict(forcing_qc.get("status")) == "passed"
         else "blocked",
         "run_id": config.run_id,
         "per_valid_time": per_valid_time,

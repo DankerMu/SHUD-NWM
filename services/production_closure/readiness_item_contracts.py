@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-STATUS_VALUES = frozenset({"passed", "failed", "blocked", "not_executed", "release_blocked"})
+from packages.common import status_vocab as _vocab
+
+STATUS_VALUES = _vocab.READINESS_ITEM_STATUSES
 EXECUTION_MODE_VALUES = frozenset(
     {
         "deterministic",

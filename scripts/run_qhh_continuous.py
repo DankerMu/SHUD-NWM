@@ -52,6 +52,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlparse
 
+from packages.common import status_vocab as _vocab
 from packages.common.contracts.time_normalization import format_iso_utc, utc_now
 from packages.common.safe_fs import SafeFilesystemError, ensure_directory_no_follow
 from packages.common.source_identity import normalize_source_id
@@ -67,17 +68,8 @@ TERMINAL_SUCCESS = {"parsed", "published", "already_done"}
 KNOWN_RETRYABLE_DOWNLOAD_STATE = {"probe_failed", "rate_limited", "unavailable"}
 RETRYABLE_STATE = {"failed", *KNOWN_RETRYABLE_DOWNLOAD_STATE}
 ACTIVE_STATE = {"submitted", "running"}
-SLURM_TERMINAL_SUCCESS = {"COMPLETED"}
-SLURM_TERMINAL_FAILURE = {
-    "FAILED",
-    "CANCELLED",
-    "TIMEOUT",
-    "OUT_OF_MEMORY",
-    "NODE_FAIL",
-    "PREEMPTED",
-    "BOOT_FAIL",
-    "DEADLINE",
-}
+SLURM_TERMINAL_SUCCESS = set(_vocab.SLURM_TERMINAL_SUCCESS)
+SLURM_TERMINAL_FAILURE = set(_vocab.SLURM_TERMINAL_FAILURE)
 SLURM_ACCOUNTING_UNKNOWN = "UNKNOWN_ACCOUNTING_UNAVAILABLE"
 SLURM_WAIT_TIMEOUT = "UNKNOWN_WAIT_TIMEOUT"
 SLURM_UNKNOWN_ACTIVE = {SLURM_ACCOUNTING_UNKNOWN, SLURM_WAIT_TIMEOUT}

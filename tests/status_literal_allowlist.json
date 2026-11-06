@@ -7,7 +7,6 @@
   {"file": "scripts/m24_gateway_proof.py", "members": ["cancelled", "failed", "succeeded"], "reason": "distinct-vocabulary"},
   {"file": "scripts/node27_frontier_stall_alert.py", "members": ["cancelled", "created", "failed", "pending", "running", "staged", "submitted", "superseded"], "reason": "distinct-vocabulary"},
   {"file": "scripts/node27_frontier_stall_alert.py", "members": ["parsed", "published", "succeeded"], "reason": "distinct-vocabulary"},
-  {"file": "scripts/run_qhh_continuous.py", "members": ["BOOT_FAIL", "CANCELLED", "DEADLINE", "FAILED", "NODE_FAIL", "OUT_OF_MEMORY", "PREEMPTED", "TIMEOUT"], "reason": "pending-migration"},
   {"file": "scripts/run_qhh_continuous.py", "members": ["running", "submitted"], "reason": "distinct-vocabulary"},
   {"file": "services/orchestrator/chain.py", "members": ["canonical_ready", "complete", "forcing_ready", "published", "raw_complete"], "reason": "distinct-vocabulary"},
   {"file": "services/orchestrator/chain_array_accounting.py", "members": ["cancelled", "failed"], "reason": "distinct-vocabulary"},
@@ -60,12 +59,10 @@
   {"file": "services/orchestrator/scheduler_state_rows.py", "members": ["pending", "submission_failed"], "reason": "distinct-vocabulary"},
   {"file": "services/production_closure/ops_validation.py", "members": ["blocked", "not_executed"], "reason": "distinct-vocabulary"},
   {"file": "services/production_closure/readiness_final_aggregation.py", "members": ["blocked", "failed", "release_blocked"], "reason": "distinct-vocabulary"},
-  {"file": "services/production_closure/readiness_item_contracts.py", "members": ["blocked", "failed", "not_executed", "passed", "release_blocked"], "reason": "pending-migration"},
   {"file": "services/production_closure/readiness_scheduler_evidence.py", "members": ["accepted", "active", "complete", "completed", "passed", "published", "queued", "running", "submitted", "succeeded", "success"], "reason": "distinct-vocabulary"},
   {"file": "services/production_closure/readiness_scheduler_evidence.py", "members": ["blocked", "failed", "lock_contended", "partial", "partially_failed", "permanently_failed", "preflight_blocked", "reconciling", "resource_limit_blocked", "skipped_duplicate_submission", "slurm_cancellation_blocked", "slurm_partially_cancelled", "slurm_status_sync_failed", "submission_failed", "submitted_partial"], "reason": "distinct-vocabulary"},
   {"file": "services/production_closure/readiness_scheduler_evidence.py", "members": ["complete", "completed", "passed", "published", "succeeded", "success"], "reason": "distinct-vocabulary"},
   {"file": "services/production_closure/readiness_scheduler_evidence.py", "members": ["failed", "permanently_failed", "submission_failed"], "reason": "distinct-vocabulary"},
-  {"file": "services/production_closure/slurm_validation.py", "members": ["BOOT_FAIL", "CANCELLED", "COMPLETED", "DEADLINE", "FAILED", "NODE_FAIL", "OUT_OF_MEMORY", "PREEMPTED", "REVOKED", "SPECIAL_EXIT", "TIMEOUT"], "reason": "pending-migration"},
   {"file": "services/production_closure/slurm_validation.py", "members": ["CANCELLED", "COMPLETED"], "reason": "distinct-vocabulary"},
   {"file": "services/slurm_gateway/real_backend.py", "members": ["BOOT_FAIL", "NODE_FAIL", "PREEMPTED"], "reason": "distinct-vocabulary"}
 ]
