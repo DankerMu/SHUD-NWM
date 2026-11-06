@@ -1,10 +1,11 @@
-"""Issue #313: river-segment / met-station list search + pagination + filter contract.
+"""Issue #313: met-station list search + pagination + filter contract.
 
 Requirement-driven coverage for the backend ``search`` predicate, retained
-limit/offset pagination, advanced filters (stream_order / variable coverage),
-and graceful degradation when a filter field is not reachable from the inventory
-query (QC status). All search input is parameter-bound and wildcard-escaped, so
-the tests also assert there is no SQL-injection face.
+limit/offset pagination, advanced filters (variable coverage), and graceful
+degradation when a filter field is not reachable from the inventory query (QC
+status). All search input is parameter-bound and wildcard-escaped, so the tests
+also assert there is no SQL-injection face. The river-segment list cases left with
+the store read path they pinned (#2866 retired the route, #2907 the store method).
 """
 
 from __future__ import annotations
@@ -14,43 +15,18 @@ from typing import Any
 import pytest
 
 from packages.common.forecast_store import PsycopgForecastStore, _escape_like
-from packages.common.model_registry import PsycopgModelRegistryStore
 
 
 class _RecordingCursor:
-    """Captures every executed statement/params pair; returns scripted rows.
-
-    PR 2: ``list_river_segments`` now runs a per-RNV crosswalk probe
-    before its main reach query (RNV-id collect + per-RNV EXISTS probe).
-    Those queries are absorbed as no-ops so the scripted results still
-    map 1:1 with the legacy reach query path that these contract tests
-    pin down. ``statements`` / ``parameters`` only capture the queries
-    that consume scripted results, preserving the original index-based
-    assertions.
-    """
+    """Captures every executed statement/params pair; returns scripted rows."""
 
     def __init__(self, results: list[Any]) -> None:
         self._results = list(results)
         self.statements: list[str] = []
         self.parameters: list[Any] = []
         self._last: Any = None
-        self._absorbed_rnv_ids = False
 
     def execute(self, statement: str, parameters: Any = None) -> None:
-        if (
-            "SELECT DISTINCT rs.river_network_version_id" in statement
-            and "core.river_segment" in statement
-        ):
-            # Hand back a single RNV so the per-RNV probe runs exactly once.
-            self._last = [{"river_network_version_id": "rivnet_v01"}]
-            self._absorbed_rnv_ids = True
-            return
-        if "river_segment_crosswalk" in statement and "EXISTS" in statement:
-            # Force the legacy reach-level dispatch path.
-            self._last = {"exists": False}
-            self._absorbed_rnv_ids = False
-            return
-        self._absorbed_rnv_ids = False
         self.statements.append(statement)
         self.parameters.append(parameters)
         self._last = self._results.pop(0) if self._results else None
@@ -59,8 +35,6 @@ class _RecordingCursor:
         return self._last
 
     def fetchall(self) -> Any:
-        if self._absorbed_rnv_ids and isinstance(self._last, list):
-            return self._last
         return self._last if isinstance(self._last, list) else []
 
 
@@ -75,128 +49,9 @@ class _Transaction:
         return False
 
 
-def _river_store(monkeypatch: pytest.MonkeyPatch, cursor: _RecordingCursor) -> PsycopgModelRegistryStore:
-    monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: _Transaction(cursor))
-    return PsycopgModelRegistryStore("postgresql://example")
-
-
 def _forecast_store(monkeypatch: pytest.MonkeyPatch, cursor: _RecordingCursor) -> PsycopgForecastStore:
     monkeypatch.setattr(PsycopgForecastStore, "_transaction", lambda _self: _Transaction(cursor))
     return PsycopgForecastStore("postgresql://example")
-
-
-# --------------------------------------------------------------------------- #
-# River segments: search hits + pagination is not full-scan
-# --------------------------------------------------------------------------- #
-
-
-def test_river_segment_search_emits_ilike_predicate_and_paginates(monkeypatch: pytest.MonkeyPatch) -> None:
-    cursor = _RecordingCursor([{"total": 3, "feature_total": 1}, []])
-    store = _river_store(monkeypatch, cursor)
-
-    store.list_river_segments(
-        basin_version_id="basin_v01",
-        river_network_version_id="rivnet_v01",
-        search="TRIB-7",
-        limit=25,
-        offset=50,
-    )
-
-    count_statement = cursor.statements[0]
-    page_statement = cursor.statements[1]
-    page_params = cursor.parameters[1]
-    # The id arm spells the expression migration 000052 built the trigram index
-    # on (issue #1468): a bare-column ILIKE would no longer be index-servable,
-    # and an equality lookup must stay structurally unable to match it.
-    assert "lower(rs.river_segment_id) LIKE %s ESCAPE" in page_statement
-    assert "rs.river_segment_id ILIKE" not in page_statement
-    # The two name arms are served by bare-column trigram indexes: still ILIKE.
-    assert page_statement.count("ILIKE %s ESCAPE") == 2
-    assert "COALESCE(rs.properties_json->>'name', '') ILIKE %s ESCAPE" in page_statement
-    assert "COALESCE(rs.properties_json->>'segment_name', '') ILIKE %s ESCAPE" in page_statement
-    # search predicate is parameter-bound (no literal value spliced in), and the
-    # id arm's pattern is lowercased in Python so `lower(col) LIKE` keeps the
-    # case-insensitive hit set ILIKE used to produce.
-    assert "TRIB-7" not in page_statement
-    # params[0:2] are the basin-version / river-network-version scope binds.
-    assert page_params[2:5] == ("%trib-7%", "%TRIB-7%", "%TRIB-7%")
-    # COUNT and page statements share one filter list, so both carry it.
-    assert "lower(rs.river_segment_id) LIKE %s ESCAPE" in count_statement
-    assert cursor.parameters[0][2:5] == ("%trib-7%", "%TRIB-7%", "%TRIB-7%")
-    # pagination retained: filter first, then LIMIT/OFFSET (not full-scan).
-    assert "LIMIT %s OFFSET %s" in page_statement
-    assert page_params[-2:] == (25, 50)
-
-
-def test_river_segment_search_omitted_adds_no_predicate(monkeypatch: pytest.MonkeyPatch) -> None:
-    cursor = _RecordingCursor([{"total": 1, "feature_total": 1}, []])
-    store = _river_store(monkeypatch, cursor)
-
-    store.list_river_segments(
-        basin_version_id="basin_v01",
-        river_network_version_id="rivnet_v01",
-        limit=10,
-        offset=0,
-    )
-
-    assert "ILIKE" not in cursor.statements[1]
-    assert "lower(rs.river_segment_id)" not in cursor.statements[1]
-
-
-# --------------------------------------------------------------------------- #
-# River segments: stream_order filter lands on segment_order
-# --------------------------------------------------------------------------- #
-
-
-def test_river_segment_stream_order_filter_lands_on_segment_order(monkeypatch: pytest.MonkeyPatch) -> None:
-    cursor = _RecordingCursor([{"total": 1, "feature_total": 1}, []])
-    store = _river_store(monkeypatch, cursor)
-
-    store.list_river_segments(
-        basin_version_id="basin_v01",
-        river_network_version_id="rivnet_v01",
-        stream_order_min=2,
-        stream_order_max=5,
-        limit=10,
-        offset=0,
-    )
-
-    page_statement = cursor.statements[1]
-    page_params = cursor.parameters[1]
-    assert "rs.segment_order >= %s" in page_statement
-    assert "rs.segment_order <= %s" in page_statement
-    assert 2 in page_params
-    assert 5 in page_params
-
-
-# --------------------------------------------------------------------------- #
-# River segments: parameterised safety (special chars never break SQL)
-# --------------------------------------------------------------------------- #
-
-
-def test_river_segment_search_escapes_wildcards_and_quotes(monkeypatch: pytest.MonkeyPatch) -> None:
-    cursor = _RecordingCursor([{"total": 0, "feature_total": 0}, []])
-    store = _river_store(monkeypatch, cursor)
-
-    malicious = "100%_'; DROP TABLE core.river_segment;--"
-    store.list_river_segments(
-        basin_version_id="basin_v01",
-        river_network_version_id="rivnet_v01",
-        search=malicious,
-        limit=10,
-        offset=0,
-    )
-
-    page_statement = cursor.statements[1]
-    page_params = cursor.parameters[1]
-    # the raw value never appears in the SQL text; it is bound as a parameter.
-    assert "DROP TABLE" not in page_statement
-    # every %/_ in the user value is escaped so it matches literally (no widening).
-    bound = next(p for p in page_params if isinstance(p, str) and "DROP TABLE" in p)
-    assert bound == "%100\\%\\_'; DROP TABLE core.river\\_segment;--%"
-    # The id arm lowercases AFTER escaping, so the backslash escapes survive
-    # intact -- only the payload's letters change case.
-    assert page_params[2] == "%100\\%\\_'; drop table core.river\\_segment;--%"
 
 
 def test_escape_like_neutralizes_metacharacters() -> None:

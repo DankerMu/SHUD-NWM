@@ -5,6 +5,7 @@ import builtins
 import dataclasses
 import fnmatch
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -13,6 +14,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
@@ -2531,6 +2533,32 @@ def test_select_tests_routes_the_registry_partition_additions_ledger_to_the_meta
     # #2183: the ledger is data read only by the #1913 guards in this suite.
     selected = select_tests(["tests/fixtures/basins_registry_partition_additions.json"], repo_root=Path("."))
     assert selected == ["tests/test_select_ci_tests.py"]
+
+
+REGISTRY_PARTITION_RETIREMENTS_LEDGER = "tests/fixtures/basins_registry_partition_retirements.json"
+
+
+def test_select_tests_routes_the_registry_partition_retirements_ledger_to_the_meta_suite() -> None:
+    # #2907: the retirements ledger is data read only by the #1913 guards in this suite.
+    assert Path(REGISTRY_PARTITION_RETIREMENTS_LEDGER).is_file()
+    assert select_tests([REGISTRY_PARTITION_RETIREMENTS_LEDGER], repo_root=Path(".")) == [
+        "tests/test_select_ci_tests.py"
+    ]
+
+
+def test_select_tests_registry_partition_retirements_route_reds_when_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The complement leg: without its exact row the ledger reaches no rule, so a
+    # ledger-only PR would not run the guards that read it.
+    from scripts import select_ci_tests
+
+    mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern != REGISTRY_PARTITION_RETIREMENTS_LEDGER)
+    assert len(mutant) == len(PATH_TEST_RULES) - 1, "the ledger has no row of its own"
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+
+    selected = select_tests([REGISTRY_PARTITION_RETIREMENTS_LEDGER], repo_root=Path("."))
+    assert "tests/test_select_ci_tests.py" not in selected, selected
 
 
 @pytest.mark.parametrize(
@@ -20262,12 +20290,38 @@ def _qhh_imports_module(path: str, module: str) -> bool:
 # every definition, frozen or added. The base_commit checks (resolves, ancestor of HEAD,
 # owner blob exists there and does not define the name) read git history only and are a
 # weak provenance check — the author chooses the commit. An added test later changes only
-# by updating its record row. Amending an EXISTING frozen definition or helper member is
-# not an addition: it keeps the #1903 transition shape (`issue_1903_mapping_transition`:
-# pinned merge-base, single-member whitelist, before/after digests via `_qhh_blob_at`).
+# by updating its record row.
+#
+# Retiring or rewriting a FROZEN test definition (#2907) — ledger it, never re-capture
+# the oracle. The tracked retirements ledger
+# `tests/fixtures/basins_registry_partition_retirements.json` is the only such channel:
+#   1. Delete the definition (`retire`) or edit its body (`rewrite`) in its partition —
+#      never in the retained core `tests/test_basins_registry_import.py` (its bug008
+#      literal command and `bug008.suffixes` stay frozen). A rewrite keeps its name, its
+#      frozen nodes, markers, arguments and decorators; only the source/AST digests and
+#      the monkeypatch-target digest may move. The one frozen non-integration skip node
+#      (the real-Basins parser smoke) cannot be retired.
+#   2. Run `uv run pytest -q tests/test_select_ci_tests.py -k registry_partition`. The
+#      definitions guard names `<partition>::<name>` (missing, or drifted from its frozen
+#      row); for a ledgered rewrite whose row differs it prints the observed row as JSON.
+#   3. Write ONE record per definition: `issue`, `base_commit` = `git merge-base HEAD
+#      origin/master` (40-hex; the owner blob there must still define `name`), `owner`,
+#      `name`, `action` (`retire` | `rewrite`), a one-line `reason`, `row` (`null` for a
+#      retire, the printed observed 7-field row for a rewrite), `nodes` and
+#      `integration_nodes` (exactly the oracle's frozen nodes of `name`).
+#   4. Re-run until green and have the record reviewed with the PR.
+# Every guard then compares the tree with `frozen − retirements ∪ additions`: counts are
+# derived (frozen literal − retired + added), and frozen digests are recomputed over the
+# reconstructed frozen set (observed − added, with the ledgered retired entries restored),
+# so they match the oracle only when the tree lacks exactly the ledgered entries. The
+# checker `_partition_retirement_violations` is pure over the oracle, both ledgers, git
+# history and a partition config (reusable by the #1948 partition, not wired there).
+# Amending a HELPER member is neither: it keeps the #1903 transition shape
+# (`issue_1903_mapping_transition`: pinned merge-base, single-member whitelist,
+# before/after digests via `_qhh_blob_at`).
 #
 # Staging dependency: the tree-derived helpers below go through `git ls-files`, so the
-# seven new suite files, the helper, the oracle and the additions ledger must be at least
+# seven new suite files, the helper, the oracle and both ledgers must be at least
 # intent-to-added (`git add -N`) for these guards to see them — the same requirement every
 # other tracked-tree guard in this module already carries.
 # ---------------------------------------------------------------------------
@@ -20285,6 +20339,25 @@ REGISTRY_PARTITION_ADDITION_KEYS: tuple[str, ...] = (
     "nodes",
     "integration_nodes",
 )
+REGISTRY_PARTITION_RETIREMENTS_PATH = "tests/fixtures/basins_registry_partition_retirements.json"
+REGISTRY_PARTITION_RETIREMENTS_SCHEMA = "basins-registry-partition-retirements/v1"
+# Partition-agnostic retirements-ledger vocabulary (#2907): the checker reads these and
+# its config, never a `REGISTRY_PARTITION_*` global, so #1948 can reuse it.
+PARTITION_RETIREMENT_KEYS: tuple[str, ...] = (
+    "issue",
+    "base_commit",
+    "owner",
+    "name",
+    "action",
+    "reason",
+    "row",
+    "nodes",
+    "integration_nodes",
+)
+PARTITION_RETIREMENT_ACTIONS: tuple[str, ...] = ("retire", "rewrite")
+# Row fields a rewrite must keep: [0] owner, [3] markers, [4] args, [5] decorators. Only
+# [1] source_sha256, [2] ast_sha256 and [6] the monkeypatch-target digest may move.
+PARTITION_REWRITE_FROZEN_FIELDS: tuple[int, ...] = (0, 3, 4, 5)
 REGISTRY_PARTITION_STRUCTURAL_LIMIT = 1000
 REGISTRY_PARTITION_HELPER = "tests/basins_registry_import_helpers.py"
 REGISTRY_PARTITION_HELPER_MODULE = "tests.basins_registry_import_helpers"
@@ -20684,6 +20757,204 @@ def test_registry_partition_additions_ledger_is_tracked_and_valid() -> None:
     assert not violations, "\n".join(violations)
 
 
+# #2907 retirements ledger: the one channel that removes or rewrites a FROZEN definition.
+@dataclasses.dataclass(frozen=True)
+class PartitionRetirementConfig:
+    """What a frozen partition tells the retirements checker about itself."""
+
+    schema: str
+    owners: tuple[str, ...]
+    retained_core: str
+    database_authority: tuple[str, ...]
+
+
+def _registry_retirement_config(oracle: dict[str, Any]) -> PartitionRetirementConfig:
+    return PartitionRetirementConfig(
+        schema=REGISTRY_PARTITION_RETIREMENTS_SCHEMA,
+        owners=_registry_partitions(oracle),
+        retained_core=REGISTRY_PARTITION_RETAINED_CORE,
+        database_authority=REGISTRY_PARTITION_DATABASE_AUTHORITY,
+    )
+
+
+def _registry_partition_retirements_ledger() -> dict[str, Any]:
+    return json.loads(Path(REGISTRY_PARTITION_RETIREMENTS_PATH).read_text(encoding="utf-8"))
+
+
+def _registry_partition_retirements() -> list[dict[str, Any]]:
+    ledger = _registry_partition_retirements_ledger()
+    assert ledger.get("schema") == REGISTRY_PARTITION_RETIREMENTS_SCHEMA, ledger.get("schema")
+    return list(ledger["retirements"])
+
+
+def _partition_frozen_nodes_of(oracle: dict[str, Any], name: str) -> tuple[list[str], list[str]]:
+    """The oracle's frozen ``(nodes, integration_nodes)`` of definition ``name``, sorted."""
+    return (
+        sorted(node for node in oracle["node_suffixes"] if node.split("[", 1)[0] == name),
+        sorted(node for node in oracle["integration_suffixes"] if node.split("[", 1)[0] == name),
+    )
+
+
+def _partition_non_integration_skip_nodes(oracle: dict[str, Any]) -> set[str]:
+    """Frozen nodes skipped outside the integration lane: ``skip``/``skipif`` without ``integration``."""
+    names = {
+        name
+        for name, row in oracle["rows"].items()
+        if {"skip", "skipif"} & set(row[3].split(",")) and "integration" not in row[3].split(",")
+    }
+    return {node for node in oracle["node_suffixes"] if node.split("[", 1)[0] in names}
+
+
+def _partition_retirement_git_violation(label: str, record: dict[str, Any], run_git: RegistryRunGit) -> str | None:
+    """Ordered history checks; the first failure is the only one reported.
+
+    The inverse of the additions provenance: the owner blob at ``base_commit`` MUST define
+    ``name`` — a retirement or rewrite starts from a tree that still has the definition.
+    """
+    base, owner, name = record["base_commit"], record["owner"], record["name"]
+    if run_git(["rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"])[0] != 0:
+        return f"ledger.base_commit_unresolved: {label} base_commit {base} does not resolve to a commit"
+    if run_git(["merge-base", "--is-ancestor", base, "HEAD"])[0] != 0:
+        return f"ledger.base_commit_not_ancestor: {label} base_commit {base} is not an ancestor of HEAD"
+    returncode, blob = run_git(["show", f"{base}:{owner}"])
+    if returncode != 0:
+        return f"ledger.owner_absent_at_base: {label} {owner} does not exist at {base}"
+    tree = ast.parse(blob.decode("utf-8"), filename=f"{base}:{owner}")
+    if not any(isinstance(node, ast.FunctionDef) and node.name == name for node in tree.body):
+        return f"ledger.name_absent_at_base: {label} {owner} does not define {name} at {base}"
+    return None
+
+
+def _partition_retirement_violations(
+    oracle: dict[str, Any],
+    retirements: dict[str, Any],
+    additions: Sequence[dict[str, Any]],
+    run_git: RegistryRunGit,
+    *,
+    config: PartitionRetirementConfig,
+) -> list[str]:
+    """Every retirements-ledger rule as a named violation (``ledger.<rule>: ...``).
+
+    Pure over its inputs: the oracle, the retirements ledger payload, the additions
+    records, ``run_git`` and ``config``. The tree is never read; whether the tree matches
+    a record is the definitions guard's job (``retired_still_defined`` /
+    ``rewrite_row_drift``).
+    """
+    if retirements.get("schema") != config.schema or not isinstance(retirements.get("retirements"), list):
+        return [
+            f"ledger.schema: expected schema {config.schema!r} with a `retirements` list, "
+            f"got schema {retirements.get('schema')!r}"
+        ]
+    rows = oracle["rows"]
+    allowed_owners = set(config.owners) - {config.retained_core}
+    added_names = {record.get("name") for record in additions}
+    protected_skip_nodes = _partition_non_integration_skip_nodes(oracle)
+    violations: list[str] = []
+    names: set[str] = set()
+    for index, record in enumerate(retirements["retirements"]):
+        missing = [key for key in PARTITION_RETIREMENT_KEYS if key not in record]
+        if missing:
+            violations.append(f"ledger.missing_key: retirements[{index}] lacks {missing}")
+            continue
+        name, owner, action, row = record["name"], record["owner"], record["action"], record["row"]
+        label = f"retirements[{index}] {name!r}"
+        lists_ok = all(
+            isinstance(record[key], list) and all(isinstance(node, str) for node in record[key])
+            for key in ("nodes", "integration_nodes")
+        )
+        shape_ok = (
+            isinstance(record["issue"], int)
+            and not isinstance(record["issue"], bool)
+            and isinstance(record["base_commit"], str)
+            and re.fullmatch(r"[0-9a-f]{40}", record["base_commit"]) is not None
+            and action in PARTITION_RETIREMENT_ACTIONS
+            and isinstance(record["reason"], str)
+            and bool(record["reason"].strip())
+            and lists_ok
+        )
+        if not shape_ok:
+            violations.append(
+                f"ledger.field_shape: {label} needs an int issue, a 40-hex base_commit, an action in "
+                f"{list(PARTITION_RETIREMENT_ACTIONS)}, a non-empty reason and string-list nodes, got "
+                f"issue={record['issue']!r} base_commit={record['base_commit']!r} action={action!r} "
+                f"reason={record['reason']!r}"
+            )
+        if name in names:
+            violations.append(f"ledger.duplicate_name: {label} is recorded twice")
+        names.add(name)
+        if name in added_names:
+            violations.append(f"ledger.overlaps_addition: {label} is also an additions-ledger record")
+        frozen = rows.get(name)
+        if frozen is None:
+            violations.append(f"ledger.name_not_frozen: {label} is not a frozen oracle definition")
+            continue
+        if owner != frozen[0]:
+            violations.append(f"ledger.owner_mismatch: {label} owner {owner!r} != frozen owner {frozen[0]!r}")
+        if owner not in allowed_owners:
+            violations.append(
+                f"ledger.owner_not_allowed: {label} owner {owner!r} is not one of {sorted(allowed_owners)}"
+            )
+            continue
+        if lists_ok:
+            frozen_nodes, frozen_integration = _partition_frozen_nodes_of(oracle, name)
+            if sorted(record["nodes"]) != frozen_nodes:
+                violations.append(
+                    f"ledger.nodes_mismatch: {label} nodes {sorted(record['nodes'])} != frozen {frozen_nodes}"
+                )
+            if sorted(record["integration_nodes"]) != frozen_integration:
+                violations.append(
+                    f"ledger.integration_nodes_mismatch: {label} integration_nodes "
+                    f"{sorted(record['integration_nodes'])} != frozen {frozen_integration}"
+                )
+            if record["integration_nodes"] and owner not in config.database_authority:
+                violations.append(
+                    f"ledger.integration_owner_not_database_authority: {label} owner {owner!r} has integration "
+                    f"nodes but is not one of {sorted(config.database_authority)}"
+                )
+            if action == "retire" and set(record["nodes"]) & protected_skip_nodes:
+                violations.append(
+                    f"ledger.retire_non_integration_skip: {label} would retire the frozen non-integration "
+                    f"skip node(s) {sorted(set(record['nodes']) & protected_skip_nodes)}"
+                )
+        if action == "retire" and row is not None:
+            violations.append(f"ledger.retire_has_row: {label} is a retire record but carries row {row!r}")
+        if action == "rewrite":
+            if not (isinstance(row, list) and len(row) == 7 and all(isinstance(field, str) for field in row)):
+                violations.append(f"ledger.row_shape: {label} row must be a list of 7 strings, got {row!r}")
+            else:
+                changed = [field for field in PARTITION_REWRITE_FROZEN_FIELDS if row[field] != frozen[field]]
+                if changed:
+                    violations.append(
+                        f"ledger.row_frozen_field_changed: {label} row fields {changed} differ from the frozen "
+                        f"row; only [1] source, [2] ast and [6] monkeypatch digests may change"
+                    )
+                elif row == list(frozen):
+                    violations.append(f"ledger.row_unchanged: {label} row equals the frozen row; not a rewrite")
+        if not shape_ok:
+            continue
+        git_violation = _partition_retirement_git_violation(label, record, run_git)
+        if git_violation is not None:
+            violations.append(git_violation)
+    return violations
+
+
+def test_registry_partition_retirements_ledger_is_tracked_and_valid() -> None:
+    tracked_fixtures = [line for line in _qhh_git_stdout("ls-files", "--", "tests/fixtures").splitlines() if line]
+
+    assert REGISTRY_PARTITION_RETIREMENTS_PATH in tracked_fixtures, (
+        f"{REGISTRY_PARTITION_RETIREMENTS_PATH} is not version-controlled"
+    )
+    oracle = _registry_partition_oracle()
+    violations = _partition_retirement_violations(
+        oracle,
+        _registry_partition_retirements_ledger(),
+        _registry_partition_additions(),
+        _registry_run_git,
+        config=_registry_retirement_config(oracle),
+    )
+    assert not violations, "\n".join(violations)
+
+
 def test_registry_partition_oracle_self_digest_covers_its_own_payload() -> None:
     # Anti-tamper: `digests.self` is recomputed over the canonical JSON of every other key,
     # so editing a frozen row, an owner map, a database path or an execution summary in the
@@ -21021,8 +21292,55 @@ def _registry_addition_integration_nodes(additions: Sequence[dict[str, Any]]) ->
     return [node for record in additions for node in record["integration_nodes"]]
 
 
+def _registry_retired_records(retirements: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [record for record in retirements if record["action"] == "retire"]
+
+
+def _registry_retired_names(retirements: Sequence[dict[str, Any]]) -> set[str]:
+    return {record["name"] for record in _registry_retired_records(retirements)}
+
+
+def _registry_retired_nodes(retirements: Sequence[dict[str, Any]]) -> list[str]:
+    return [node for record in _registry_retired_records(retirements) for node in record["nodes"]]
+
+
+def _registry_retired_integration_nodes(retirements: Sequence[dict[str, Any]]) -> list[str]:
+    return [node for record in _registry_retired_records(retirements) for node in record["integration_nodes"]]
+
+
+def _registry_rewrite_rows(retirements: Sequence[dict[str, Any]]) -> dict[str, list[str]]:
+    return {record["name"]: record["row"] for record in retirements if record["action"] == "rewrite"}
+
+
+def _registry_effective_suffixes(
+    oracle: dict[str, Any],
+    retirements: Sequence[dict[str, Any]],
+    additions: Sequence[dict[str, Any]],
+) -> list[str]:
+    """``frozen node_suffixes − retired nodes ∪ added nodes`` (frozen order, then ledger order)."""
+    retired = set(_registry_retired_nodes(retirements))
+    return [*(node for node in oracle["node_suffixes"] if node not in retired), *_registry_addition_nodes(additions)]
+
+
+def _registry_effective_integration_suffixes(
+    oracle: dict[str, Any],
+    retirements: Sequence[dict[str, Any]],
+    additions: Sequence[dict[str, Any]],
+) -> list[str]:
+    """``frozen integration_suffixes − retired ∪ added`` integration nodes."""
+    retired = set(_registry_retired_integration_nodes(retirements))
+    return [
+        *(node for node in oracle["integration_suffixes"] if node not in retired),
+        *_registry_addition_integration_nodes(additions),
+    ]
+
+
 def _registry_owner_of(oracle: dict[str, Any], additions: Sequence[dict[str, Any]]) -> dict[str, str]:
-    """Definition name -> owning partition over ``frozen rows ∪ additions``; frozen wins on a collision."""
+    """Definition name -> owning partition over ``frozen rows ∪ additions``; frozen wins on a collision.
+
+    Retired names stay in the map (they are frozen rows), so a missing or still-present
+    retired definition is named ``<partition>::<name>`` like any other.
+    """
     owner_of = {record["name"]: record["owner"] for record in additions}
     owner_of.update({name: row[0] for name, row in oracle["rows"].items()})
     return owner_of
@@ -21033,46 +21351,74 @@ def _registry_owned_nodes(owner_of: dict[str, str], nodes: Iterable[str]) -> lis
     return sorted(f"{owner_of.get(node.split('[', 1)[0], '?')}::{node}" for node in nodes)
 
 
+def _registry_frozen_owner_counter(oracle: dict[str, Any], nodes: Iterable[str]) -> Counter[str]:
+    """Per-owner count of frozen ``nodes`` (each resolved through its frozen row)."""
+    return Counter(oracle["rows"][node.split("[", 1)[0]][0] for node in nodes)
+
+
 def _registry_assert_collected_suffixes(
     oracle: dict[str, Any],
     additions: Sequence[dict[str, Any]],
     observed: Sequence[str],
+    *,
+    retirements: Sequence[dict[str, Any]],
 ) -> None:
-    """Collection guard over ``frozen node_suffixes ∪ additions`` (pure; ``observed`` injected)."""
+    """Collection guard over ``frozen node_suffixes − retirements ∪ additions`` (pure; ``observed`` injected)."""
     added = _registry_addition_nodes(additions)
-    expected = sorted([*oracle["node_suffixes"], *added])
+    retired = _registry_retired_nodes(retirements)
+    expected = sorted(_registry_effective_suffixes(oracle, retirements, additions))
+    owner_of = _registry_owner_of(oracle, additions)
     assert sorted(observed) == expected, (
-        f"collected suffixes != frozen ∪ registered additions: "
+        f"collected suffixes != frozen − ledgered retirements ∪ registered additions: "
         f"unregistered nodes={sorted(set(observed) - set(expected))} "
-        f"missing={_registry_owned_nodes(_registry_owner_of(oracle, additions), set(expected) - set(observed))}"
+        f"missing={_registry_owned_nodes(owner_of, set(expected) - set(observed))}"
     )
-    assert len(observed) == len(set(observed)) == 96 + len(added), "a suffix vanished or landed in two partitions"
-    assert _registry_digest_lines(sorted(set(observed) - set(added))) == oracle["digests"]["suffix"]
+    assert len(observed) == len(set(observed)) == 96 - len(retired) + len(added), (
+        "a suffix vanished or landed in two partitions"
+    )
+    # Frozen-digest layer: put the ledgered retired nodes back to reconstruct the frozen set.
+    assert _registry_digest_lines(sorted((set(observed) - set(added)) | set(retired))) == oracle["digests"]["suffix"]
+    expected_owner_nodes = (
+        Counter(oracle["owner_node_counts"])
+        - _registry_frozen_owner_counter(oracle, retired)
+        + Counter(record["owner"] for record in additions for _ in record["nodes"])
+    )
+    assert Counter(owner_of[node.split("[", 1)[0]] for node in observed) == expected_owner_nodes
 
 
 def _registry_assert_integration_suffixes(
     oracle: dict[str, Any],
     additions: Sequence[dict[str, Any]],
     observed: Sequence[str],
+    *,
+    retirements: Sequence[dict[str, Any]],
 ) -> None:
-    """Integration + per-owner count guard over ``frozen ∪ additions`` (pure; ``observed`` injected)."""
+    """Integration + per-owner count guard over ``frozen − retirements ∪ additions`` (pure; ``observed`` injected)."""
     added = _registry_addition_integration_nodes(additions)
-    expected = sorted([*oracle["integration_suffixes"], *added])
-    assert sorted(observed) == expected, (
-        f"integration suffixes != frozen ∪ registered additions: "
-        f"unregistered nodes={sorted(set(observed) - set(expected))} "
-        f"missing={_registry_owned_nodes(_registry_owner_of(oracle, additions), set(expected) - set(observed))}"
-    )
-    assert _registry_digest_lines(sorted(set(observed) - set(added))) == oracle["digests"]["integration_suffix"]
+    retired = _registry_retired_integration_nodes(retirements)
+    expected = sorted(_registry_effective_integration_suffixes(oracle, retirements, additions))
     owner_of = _registry_owner_of(oracle, additions)
+    assert sorted(observed) == expected, (
+        f"integration suffixes != frozen − ledgered retirements ∪ registered additions: "
+        f"unregistered nodes={sorted(set(observed) - set(expected))} "
+        f"missing={_registry_owned_nodes(owner_of, set(expected) - set(observed))}"
+    )
+    assert (
+        _registry_digest_lines(sorted((set(observed) - set(added)) | set(retired)))
+        == oracle["digests"]["integration_suffix"]
+    )
     owner_counts = Counter(owner_of[suffix.split("[", 1)[0]] for suffix in observed)
-    expected_counts = Counter(
-        {
-            "tests/test_basins_registry_import_auth.py": 5,
-            "tests/test_basins_registry_import_db.py": 5,
-            "tests/test_basins_registry_import_qhh.py": 7,
-        }
-    ) + Counter(record["owner"] for record in additions for _ in record["integration_nodes"])
+    expected_counts = (
+        Counter(
+            {
+                "tests/test_basins_registry_import_auth.py": 5,
+                "tests/test_basins_registry_import_db.py": 5,
+                "tests/test_basins_registry_import_qhh.py": 7,
+            }
+        )
+        - _registry_frozen_owner_counter(oracle, retired)
+        + Counter(record["owner"] for record in additions for _ in record["integration_nodes"])
+    )
     assert dict(owner_counts) == dict(expected_counts)
 
 
@@ -21081,7 +21427,7 @@ def _registry_read_partition_text(path: str) -> str:
 
 
 def _registry_definition_row(owner: str, node: ast.FunctionDef, lines: list[str]) -> tuple[str, ...]:
-    """The 7-field per-definition row the frozen oracle and the additions ledger both pin."""
+    """The 7-field per-definition row the frozen oracle and both ledgers pin."""
     fragment = _qhh_source_fragment(node, lines)
     return (
         owner,
@@ -21098,16 +21444,22 @@ def _registry_definition_violations(
     oracle: dict[str, Any],
     additions: Sequence[dict[str, Any]],
     read_text: Callable[[str], str],
+    *,
+    retirements: Sequence[dict[str, Any]],
 ) -> list[str]:
-    """Definition identity over ``frozen rows ∪ addition rows``; partition text via ``read_text``.
+    """Definition identity over ``frozen rows − retirements ∪ addition rows``; text via ``read_text``.
 
-    Expected rows are never recomputed from the tree: a frozen name matches its frozen
-    row (looked up first, so a record naming a frozen definition is inert here), an added
-    name matches its ledger row, and anything else is unregistered — reported with the
-    observed row, which is the addition procedure's data source.
+    Expected rows are never recomputed from the tree: a ledgered retired name must be
+    absent (``retired_still_defined``), a ledgered rewrite matches its ledger row
+    (``rewrite_row_drift``, printing the observed row), any other frozen name matches its
+    frozen row (looked up before additions, so an addition naming a frozen definition is
+    inert here), an added name matches its ledger row, and anything else is unregistered —
+    reported with the observed row, which is the addition procedure's data source.
     """
     rows = oracle["rows"]
     added_rows = {record["name"]: record["row"] for record in additions}
+    retired = _registry_retired_names(retirements)
+    rewritten = _registry_rewrite_rows(retirements)
     violations: list[str] = []
     observed_by_name: dict[str, str] = {}
     for owner in _registry_partitions(oracle):
@@ -21121,6 +21473,19 @@ def _registry_definition_violations(
                 continue
             observed_by_name[node.name] = owner
             observed = _registry_definition_row(owner, node, lines)
+            if node.name in retired:
+                violations.append(
+                    f"{owner}::{node.name} retired_still_defined: the retirements ledger retires it "
+                    "but the partition still defines it"
+                )
+                continue
+            if node.name in rewritten:
+                if observed != tuple(rewritten[node.name]):
+                    violations.append(
+                        f"{owner}::{node.name} rewrite_row_drift: ledger row={json.dumps(list(rewritten[node.name]))} "
+                        f"observed row={json.dumps(list(observed))}"
+                    )
+                continue
             expected = rows.get(node.name, added_rows.get(node.name))
             if expected is None:
                 violations.append(
@@ -21129,54 +21494,88 @@ def _registry_definition_violations(
                 )
             elif observed != tuple(expected):
                 violations.append(f"{owner}::{node.name} drifted: observed={observed} expected={tuple(expected)}")
-    missing = (set(rows) | set(added_rows)) - set(observed_by_name)
+    missing = ((set(rows) - retired) | set(added_rows)) - set(observed_by_name)
     if missing:
         owned = _registry_owned_nodes(_registry_owner_of(oracle, additions), missing)
         violations.append(f"missing definitions: {owned}")
-    frozen_observed = {name: owner for name, owner in observed_by_name.items() if name in rows}
-    if len(frozen_observed) != 94:
-        violations.append(f"frozen definition count {len(frozen_observed)} != 94")
-    owner_map = _registry_digest_lines([f"{name}:{frozen_observed[name]}" for name in sorted(frozen_observed)])
+    kept = {name: owner for name, owner in observed_by_name.items() if name in rows and name not in retired}
+    if len(kept) != 94 - len(retired):
+        violations.append(f"frozen definition count {len(kept)} != 94 - {len(retired)} ledgered retirements")
+    kept_counts = Counter(kept.values())
+    expected_counts = Counter(oracle["owner_function_counts"]) - Counter(rows[name][0] for name in retired)
+    if kept_counts != expected_counts:
+        violations.append(f"frozen owner function counts {dict(kept_counts)} != {dict(expected_counts)}")
+    # Frozen-digest layer: the ledgered retired names come back with their frozen owner.
+    reconstructed = {**kept, **{name: rows[name][0] for name in retired}}
+    owner_map = _registry_digest_lines([f"{name}:{reconstructed[name]}" for name in sorted(reconstructed)])
     if owner_map != oracle["digests"]["owner_map"]:
         violations.append(f"frozen owner_map digest {owner_map} != {oracle['digests']['owner_map']}")
     return violations
 
 
-def _registry_expected_execution_counts(additions: Sequence[dict[str, Any]]) -> tuple[str, str, str]:
-    """``(default, -m "not integration", -m integration)`` counts: frozen literals + additions.
+def _registry_expected_execution_counts(
+    additions: Sequence[dict[str, Any]],
+    *,
+    retirements: Sequence[dict[str, Any]],
+) -> tuple[str, str, str]:
+    """``(default, -m "not integration", -m integration)`` counts: frozen literals − retirements + additions.
 
     Registrable outcome rule: a non-integration addition node passes and an integration
-    addition node skips under the sandboxed child pytest.
+    addition node skips under the sandboxed child pytest. A retired non-integration node
+    leaves ``passed`` (default, not_integration) and ``deselected`` (integration_only); a
+    retired integration node leaves ``skipped`` (default, integration_only) and
+    ``deselected`` (not_integration). The frozen non-integration skip node cannot be
+    retired (``ledger.retire_non_integration_skip``), and a rewrite keeps every count.
     """
     integration = sum(len(set(record["integration_nodes"])) for record in additions)
     plain = sum(len(set(record["nodes"]) - set(record["integration_nodes"])) for record in additions)
+    retired = _registry_retired_records(retirements)
+    retired_integration = sum(len(set(record["integration_nodes"])) for record in retired)
+    retired_plain = sum(len(set(record["nodes"]) - set(record["integration_nodes"])) for record in retired)
+    passed = 78 + plain - retired_plain
+    skipped = 17 + integration - retired_integration
     return (
-        f"{78 + plain} passed, {18 + integration} skipped",
-        f"{78 + plain} passed, 1 skipped, {17 + integration} deselected",
-        f"{17 + integration} skipped, {79 + plain} deselected",
+        f"{passed} passed, {skipped + 1} skipped",
+        f"{passed} passed, 1 skipped, {skipped} deselected",
+        f"{skipped} skipped, {79 + plain - retired_plain} deselected",
     )
 
 
 def test_registry_partition_collects_its_frozen_suffixes_exactly_once() -> None:
     observed = _registry_collected_suffixes(list(_registry_partitions()))
 
-    _registry_assert_collected_suffixes(_registry_partition_oracle(), _registry_partition_additions(), observed)
+    _registry_assert_collected_suffixes(
+        _registry_partition_oracle(),
+        _registry_partition_additions(),
+        observed,
+        retirements=_registry_partition_retirements(),
+    )
 
 
 def test_registry_partition_integration_suffixes_and_owner_counts_are_frozen() -> None:
     observed = _registry_collected_suffixes(list(_registry_partitions()), "-m", "integration")
 
-    _registry_assert_integration_suffixes(_registry_partition_oracle(), _registry_partition_additions(), observed)
+    _registry_assert_integration_suffixes(
+        _registry_partition_oracle(),
+        _registry_partition_additions(),
+        observed,
+        retirements=_registry_partition_retirements(),
+    )
 
 
 def test_registry_partition_definitions_are_byte_and_ast_identical_to_the_baseline() -> None:
-    # Per-definition proof against the frozen rows (plus registered addition rows): same
-    # name set, same source-fragment digest, same normalized-AST digest, same markers,
-    # signature, decorators and monkeypatch targets, in exactly one partition each. Imports
-    # and module headers are the only permitted differences, and no rephrased body can
-    # satisfy this. The 94-count and owner_map digest stay computed over the frozen subset.
+    # Per-definition proof against the frozen rows (minus ledgered retirements, with
+    # ledgered rewrites at their ledger row, plus registered addition rows): same name set,
+    # same source-fragment digest, same normalized-AST digest, same markers, signature,
+    # decorators and monkeypatch targets, in exactly one partition each. Imports and module
+    # headers are the only permitted differences, and no rephrased body can satisfy this.
+    # The 94 − retired count and the owner_map digest (retired names restored) stay
+    # computed over the frozen subset.
     violations = _registry_definition_violations(
-        _registry_partition_oracle(), _registry_partition_additions(), _registry_read_partition_text
+        _registry_partition_oracle(),
+        _registry_partition_additions(),
+        _registry_read_partition_text,
+        retirements=_registry_partition_retirements(),
     )
 
     assert not violations, "\n".join(violations)
@@ -21216,7 +21615,7 @@ def test_registry_partition_execution_semantics_match_the_frozen_baseline() -> N
     oracle = _registry_partition_oracle()
     partitions = list(_registry_partitions())
     expected_default, expected_non_integration, expected_integration_only = _registry_expected_execution_counts(
-        _registry_partition_additions()
+        _registry_partition_additions(), retirements=_registry_partition_retirements()
     )
 
     default = _registry_pytest(*partitions)
@@ -21359,7 +21758,10 @@ def _registry_without_definition(text: str, name: str) -> str:
 def _registry_demo_record() -> dict[str, Any]:
     """Build the demo record by the written procedure: copy the checker's printed row."""
     violations = _registry_definition_violations(
-        _registry_partition_oracle(), _registry_additions_with(), _registry_demo_reader(_registry_demo_text())
+        _registry_partition_oracle(),
+        _registry_additions_with(),
+        _registry_demo_reader(_registry_demo_text()),
+        retirements=_registry_partition_retirements(),
     )
     assert len(violations) == 1, violations
     return {
@@ -21602,7 +22004,10 @@ def test_registry_partition_ledger_checker_accepts_a_valid_record() -> None:
 def test_registry_partition_unregistered_addition_reds_the_definitions_checker_by_name() -> None:
     # 5.4(a): no record -> red naming `<partition>::<name>` and printing the observed row.
     violations = _registry_definition_violations(
-        _registry_partition_oracle(), _registry_additions_with(), _registry_demo_reader(_registry_demo_text())
+        _registry_partition_oracle(),
+        _registry_additions_with(),
+        _registry_demo_reader(_registry_demo_text()),
+        retirements=_registry_partition_retirements(),
     )
 
     assert len(violations) == 1, violations
@@ -21615,19 +22020,25 @@ def test_registry_partition_unregistered_addition_reds_the_definitions_checker_b
 
 def test_registry_partition_registered_addition_passes_every_rebased_guard() -> None:
     # 5.4(b): the printed row copied into a record -> definitions green; the collection,
-    # integration and owner-count checks accept the injected observed suffix lists; the
-    # record itself passes ledger integrity against the REAL repository history.
+    # integration and owner-count checks accept the injected observed suffix lists (the
+    # effective `frozen − retirements ∪ additions` set); the record itself passes ledger
+    # integrity against the REAL repository history.
     oracle = _registry_partition_oracle()
+    retirements = _registry_partition_retirements()
     record = _registry_demo_record()
 
     additions = _registry_additions_with(record)
 
-    assert _registry_definition_violations(oracle, additions, _registry_demo_reader(_registry_demo_text())) == []
+    reader = _registry_demo_reader(_registry_demo_text())
+    assert _registry_definition_violations(oracle, additions, reader, retirements=retirements) == []
     _registry_assert_collected_suffixes(
-        oracle, additions, [*oracle["node_suffixes"], *_registry_addition_nodes(additions)]
+        oracle, additions, _registry_effective_suffixes(oracle, retirements, additions), retirements=retirements
     )
     _registry_assert_integration_suffixes(
-        oracle, additions, [*oracle["integration_suffixes"], *_registry_addition_integration_nodes(additions)]
+        oracle,
+        additions,
+        _registry_effective_integration_suffixes(oracle, retirements, additions),
+        retirements=retirements,
     )
     ledger = {"schema": REGISTRY_PARTITION_ADDITIONS_SCHEMA, "additions": additions}
     assert _registry_ledger_violations(oracle, ledger, _registry_run_git) == []
@@ -21640,7 +22051,10 @@ def test_registry_partition_registered_addition_reds_when_its_body_drifts() -> N
     assert edited != _registry_demo_text()
 
     violations = _registry_definition_violations(
-        _registry_partition_oracle(), _registry_additions_with(record), _registry_demo_reader(edited)
+        _registry_partition_oracle(),
+        _registry_additions_with(record),
+        _registry_demo_reader(edited),
+        retirements=_registry_partition_retirements(),
     )
 
     assert len(violations) == 1, violations
@@ -21654,7 +22068,10 @@ def test_registry_partition_registered_addition_cannot_cover_a_frozen_definition
     assert edited.count("package-sha-mutated-again") == 1
 
     violations = _registry_definition_violations(
-        _registry_partition_oracle(), _registry_additions_with(record), _registry_demo_reader(edited)
+        _registry_partition_oracle(),
+        _registry_additions_with(record),
+        _registry_demo_reader(edited),
+        retirements=_registry_partition_retirements(),
     )
 
     assert len(violations) == 1, violations
@@ -21677,27 +22094,52 @@ def test_registry_partition_record_naming_a_frozen_definition_reds_the_ledger() 
     violations = _registry_ledger_violations(oracle, ledger, _registry_run_git)
 
     assert any(violation.startswith("ledger.name_frozen:") for violation in violations), violations
-    inert = _registry_definition_violations(oracle, _registry_additions_with(record), _registry_read_partition_text)
+    inert = _registry_definition_violations(
+        oracle,
+        _registry_additions_with(record),
+        _registry_read_partition_text,
+        retirements=_registry_partition_retirements(),
+    )
     assert inert == []
 
 
 def test_registry_partition_expected_execution_counts_are_frozen_literals_plus_additions() -> None:
-    # 5.4(f): one non-integration + one integration addition; the empty ledger keeps the
-    # three frozen literals exactly.
+    # 5.4(f): one non-integration + one integration addition; empty ledgers keep the three
+    # frozen literals exactly. #2907: one retired non-integration + one retired integration
+    # node move the counts the other way, and this PR's six records give the recorded values.
     additions = [
         {"name": "test_added_plain", "nodes": ["test_added_plain"], "integration_nodes": []},
         {"name": "test_added_db", "nodes": ["test_added_db"], "integration_nodes": ["test_added_db"]},
     ]
+    retired = [
+        {"name": "test_gone_plain", "action": "retire", "nodes": ["test_gone_plain"], "integration_nodes": []},
+        {"name": "test_gone_db", "action": "retire", "nodes": ["test_gone_db"], "integration_nodes": ["test_gone_db"]},
+        {"name": "test_kept_db", "action": "rewrite", "nodes": ["test_kept_db"], "integration_nodes": ["test_kept_db"]},
+    ]
 
-    assert _registry_expected_execution_counts(additions) == (
+    assert _registry_expected_execution_counts(additions, retirements=[]) == (
         "79 passed, 19 skipped",
         "79 passed, 1 skipped, 18 deselected",
         "18 skipped, 80 deselected",
     )
-    assert _registry_expected_execution_counts([]) == (
+    assert _registry_expected_execution_counts([], retirements=[]) == (
         "78 passed, 18 skipped",
         "78 passed, 1 skipped, 17 deselected",
         "17 skipped, 79 deselected",
+    )
+    assert _registry_expected_execution_counts([], retirements=retired) == (
+        "77 passed, 17 skipped",
+        "77 passed, 1 skipped, 16 deselected",
+        "16 skipped, 78 deselected",
+    )
+    assert _registry_expected_execution_counts(additions, retirements=retired) == (
+        _registry_expected_execution_counts([], retirements=[])
+    )
+    issue_2907 = [record for record in _registry_partition_retirements() if record["issue"] == 2907]
+    assert _registry_expected_execution_counts([], retirements=issue_2907) == (
+        "77 passed, 15 skipped",
+        "77 passed, 1 skipped, 14 deselected",
+        "14 skipped, 78 deselected",
     )
 
 
@@ -21707,19 +22149,26 @@ def test_registry_partition_unchanged_ledger_cannot_absorb_a_tree_addition() -> 
     # feeds an expected value.
     oracle = _registry_partition_oracle()
     additions = _registry_partition_additions()
+    retirements = _registry_partition_retirements()
     node = REGISTRY_PARTITION_DEMO_NAME
 
-    violations = _registry_definition_violations(oracle, additions, _registry_demo_reader(_registry_demo_text()))
+    violations = _registry_definition_violations(
+        oracle, additions, _registry_demo_reader(_registry_demo_text()), retirements=retirements
+    )
     assert any(v.startswith(f"{REGISTRY_PARTITION_DEMO_OWNER}::{node} is neither") for v in violations), violations
     with pytest.raises(AssertionError, match=re.escape(node)):
         _registry_assert_collected_suffixes(
-            oracle, additions, [*oracle["node_suffixes"], *_registry_addition_nodes(additions), node]
+            oracle,
+            additions,
+            [*_registry_effective_suffixes(oracle, retirements, additions), node],
+            retirements=retirements,
         )
     with pytest.raises(AssertionError, match=re.escape(node)):
         _registry_assert_integration_suffixes(
             oracle,
             additions,
-            [*oracle["integration_suffixes"], *_registry_addition_integration_nodes(additions), node],
+            [*_registry_effective_integration_suffixes(oracle, retirements, additions), node],
+            retirements=retirements,
         )
 
 
@@ -21728,21 +22177,28 @@ def test_registry_partition_deleted_frozen_definition_is_named_with_its_partitio
     # `<partition>::<name>` by the definitions, collection and integration checks.
     oracle = _registry_partition_oracle()
     additions = _registry_additions_with()
+    retirements = _registry_partition_retirements()
     owned = f"{REGISTRY_PARTITION_DEMO_OWNER}::{REGISTRY_PARTITION_DEMO_FROZEN_NAME}"
     text = _registry_without_definition(
         _registry_read_partition_text(REGISTRY_PARTITION_DEMO_OWNER), REGISTRY_PARTITION_DEMO_FROZEN_NAME
     )
 
-    violations = _registry_definition_violations(oracle, additions, _registry_demo_reader(text))
+    violations = _registry_definition_violations(
+        oracle, additions, _registry_demo_reader(text), retirements=retirements
+    )
     assert any(v.startswith("missing definitions:") and repr(owned) in v for v in violations), violations
     node = REGISTRY_PARTITION_DEMO_FROZEN_NAME
     with pytest.raises(AssertionError, match=re.escape(repr(owned))):
-        nodes = [*oracle["node_suffixes"], *_registry_addition_nodes(additions)]
-        _registry_assert_collected_suffixes(oracle, additions, [s for s in nodes if s != node])
-    integration = [*oracle["integration_suffixes"], *_registry_addition_integration_nodes(additions)]
+        nodes = _registry_effective_suffixes(oracle, retirements, additions)
+        _registry_assert_collected_suffixes(
+            oracle, additions, [s for s in nodes if s != node], retirements=retirements
+        )
+    integration = _registry_effective_integration_suffixes(oracle, retirements, additions)
     assert node in integration
     with pytest.raises(AssertionError, match=re.escape(repr(owned))):
-        _registry_assert_integration_suffixes(oracle, additions, [s for s in integration if s != node])
+        _registry_assert_integration_suffixes(
+            oracle, additions, [s for s in integration if s != node], retirements=retirements
+        )
 
 
 def test_registry_partition_registered_addition_absent_from_the_tree_is_named_with_its_partition() -> None:
@@ -21750,18 +22206,152 @@ def test_registry_partition_registered_addition_absent_from_the_tree_is_named_wi
     oracle = _registry_partition_oracle()
     record = _registry_demo_record()
     additions = _registry_additions_with(record)
+    retirements = _registry_partition_retirements()
     owned = f"{REGISTRY_PARTITION_DEMO_OWNER}::{REGISTRY_PARTITION_DEMO_NAME}"
 
-    violations = _registry_definition_violations(oracle, additions, _registry_read_partition_text)
+    violations = _registry_definition_violations(
+        oracle, additions, _registry_read_partition_text, retirements=retirements
+    )
     assert violations == [f"missing definitions: {[owned]}"], violations
     with pytest.raises(AssertionError, match=re.escape(repr(owned))):
         _registry_assert_collected_suffixes(
-            oracle, additions, [*oracle["node_suffixes"], *_registry_addition_nodes(additions)[:-1]]
+            oracle,
+            additions,
+            _registry_effective_suffixes(oracle, retirements, additions)[:-1],
+            retirements=retirements,
         )
     with pytest.raises(AssertionError, match=re.escape(repr(owned))):
         _registry_assert_integration_suffixes(
-            oracle, additions, [*oracle["integration_suffixes"], *_registry_addition_integration_nodes(additions)[:-1]]
+            oracle,
+            additions,
+            _registry_effective_integration_suffixes(oracle, retirements, additions)[:-1],
+            retirements=retirements,
         )
+
+
+# #2907 tree-side retirement arms. Every one reads the REAL retirements ledger (never an
+# empty one) and the partition text through the module-global reader, so the non-empty
+# additions proof below re-runs them on top of a simulated genuine addition.
+REGISTRY_PARTITION_RETIRE_PROBE = "test_segment_slice_count_matches_sp_rivseg"
+REGISTRY_PARTITION_REWRITE_PROBE = "test_registry_import_creates_idempotent_inactive_rows"
+
+
+def _registry_real_retirement(name: str) -> dict[str, Any]:
+    return next(record for record in _registry_partition_retirements() if record["name"] == name)
+
+
+def test_registry_partition_real_retirements_ledger_passes_every_rebased_guard() -> None:
+    # GREEN: the real tree under the real ledgers (definitions, collection and integration
+    # over the effective set the guards derive), plus the recorded #2907 effective facts.
+    oracle = _registry_partition_oracle()
+    additions = _registry_partition_additions()
+    retirements = _registry_partition_retirements()
+    assert retirements, "the #2907 retirements ledger is empty: these proofs would be vacuous"
+
+    assert (
+        _registry_definition_violations(oracle, additions, _registry_read_partition_text, retirements=retirements)
+        == []
+    )
+    _registry_assert_collected_suffixes(
+        oracle, additions, _registry_effective_suffixes(oracle, retirements, additions), retirements=retirements
+    )
+    _registry_assert_integration_suffixes(
+        oracle,
+        additions,
+        _registry_effective_integration_suffixes(oracle, retirements, additions),
+        retirements=retirements,
+    )
+    issue_2907 = [record for record in retirements if record["issue"] == 2907]
+    retired = _registry_retired_names(issue_2907)
+    owner_counts = Counter(oracle["owner_function_counts"]) - Counter(oracle["rows"][name][0] for name in retired)
+    integration = _registry_effective_integration_suffixes(oracle, issue_2907, [])
+    assert (len(_registry_effective_suffixes(oracle, issue_2907, [])), len(oracle["rows"]) - len(retired)) == (92, 90)
+    assert owner_counts["tests/test_basins_registry_import_qhh.py"] == 18
+    assert Counter(oracle["rows"][node.split("[", 1)[0]][0] for node in integration) == {
+        "tests/test_basins_registry_import_auth.py": 5,
+        "tests/test_basins_registry_import_db.py": 5,
+        "tests/test_basins_registry_import_qhh.py": 4,
+    }
+
+
+def test_registry_partition_unledgered_retirement_or_rewrite_is_named_with_its_partition() -> None:
+    # RED: drop ONE real record at a time -> the definitions guard names `<partition>::<name>`
+    # (a retired definition as missing, a rewritten one as drifted from its frozen row), and
+    # the collection / integration guards name a retired node.
+    oracle = _registry_partition_oracle()
+    additions = _registry_partition_additions()
+    real = _registry_partition_retirements()
+    assert {record["action"] for record in real} == {"retire", "rewrite"}, real
+    for record in real:
+        retirements = [other for other in real if other is not record]
+        owned = f"{record['owner']}::{record['name']}"
+
+        violations = _registry_definition_violations(
+            oracle, additions, _registry_read_partition_text, retirements=retirements
+        )
+
+        if record["action"] == "rewrite":
+            assert any(v.startswith(f"{owned} drifted:") for v in violations), (owned, violations)
+            continue
+        assert any(v.startswith("missing definitions:") and repr(owned) in v for v in violations), violations
+        observed = _registry_effective_suffixes(oracle, real, additions)
+        with pytest.raises(AssertionError, match=re.escape(repr(owned))):
+            _registry_assert_collected_suffixes(oracle, additions, observed, retirements=retirements)
+        if record["integration_nodes"]:
+            observed = _registry_effective_integration_suffixes(oracle, real, additions)
+            with pytest.raises(AssertionError, match=re.escape(repr(owned))):
+                _registry_assert_integration_suffixes(oracle, additions, observed, retirements=retirements)
+
+
+def test_registry_partition_retired_definition_still_defined_reds_by_name() -> None:
+    # RED `retired_still_defined`: the QHH partition as it was at the ledger's base commit
+    # (every retired definition still present) names each retired definition.
+    record = _registry_real_retirement(REGISTRY_PARTITION_RETIRE_PROBE)
+    owner = record["owner"]
+    before = _qhh_blob_at(record["base_commit"], owner).decode("utf-8")
+    retired_here = sorted(
+        r["name"] for r in _registry_partition_retirements() if r["action"] == "retire" and r["owner"] == owner
+    )
+
+    def read(path: str) -> str:
+        return before if path == owner else _registry_read_partition_text(path)
+
+    violations = _registry_definition_violations(
+        _registry_partition_oracle(),
+        _registry_partition_additions(),
+        read,
+        retirements=_registry_partition_retirements(),
+    )
+
+    assert sorted(violations) == [
+        f"{owner}::{name} retired_still_defined: the retirements ledger retires it but the partition still defines it"
+        for name in retired_here
+    ], violations
+
+
+def test_registry_partition_rewrite_row_drift_reds_by_name_and_prints_the_observed_row() -> None:
+    # RED `rewrite_row_drift`: the ledgered rewrite's body edited again -> named, with the
+    # observed row printed as pasteable JSON (only its source/AST digests move).
+    record = _registry_real_retirement(REGISTRY_PARTITION_REWRITE_PROBE)
+    owner = record["owner"]
+    text = _registry_read_partition_text(owner)
+    edited = text.replace('assert crosswalk["crosswalk_rows"] == 2', 'assert crosswalk["crosswalk_rows"] >= 2')
+    assert edited.count('crosswalk["crosswalk_rows"] >= 2') == 1
+
+    def read(path: str) -> str:
+        return edited if path == owner else _registry_read_partition_text(path)
+
+    violations = _registry_definition_violations(
+        _registry_partition_oracle(),
+        _registry_partition_additions(),
+        read,
+        retirements=_registry_partition_retirements(),
+    )
+
+    assert len(violations) == 1, violations
+    assert violations[0].startswith(f"{owner}::{record['name']} rewrite_row_drift:"), violations
+    observed = json.loads(violations[0].split("observed row=", 1)[1])
+    assert [field for field in range(7) if observed[field] != record["row"][field]] == [1, 2], observed
 
 
 def _registry_non_empty_ledger_proof(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -21779,7 +22369,9 @@ def _registry_non_empty_ledger_proof(monkeypatch: pytest.MonkeyPatch) -> None:
     def read(path: str) -> str:
         return auth_text if path == REGISTRY_PARTITION_DEMO_AUTH_OWNER else real_read(path)
 
-    printed = _registry_definition_violations(oracle, real, read)
+    retirements = _registry_partition_retirements()
+    assert retirements, "the proofs must run on top of the real (non-empty) retirements ledger"
+    printed = _registry_definition_violations(oracle, real, read, retirements=retirements)
     assert len(printed) == 1 and printed[0].startswith(f"{REGISTRY_PARTITION_DEMO_AUTH_OWNER}::"), printed
     auth_record = {
         "issue": 2183,
@@ -21794,7 +22386,7 @@ def _registry_non_empty_ledger_proof(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _registry_ledger_violations(oracle, ledger, _registry_run_git) == []
     monkeypatch.setattr(module, "_registry_read_partition_text", read)
     monkeypatch.setattr(module, "_registry_partition_additions", lambda: [*real, dict(auth_record)])
-    assert _registry_definition_violations(oracle, [*real, auth_record], read) == []
+    assert _registry_definition_violations(oracle, [*real, auth_record], read, retirements=retirements) == []
 
     for proof in (
         test_registry_partition_unregistered_addition_reds_the_definitions_checker_by_name,
@@ -21805,6 +22397,10 @@ def _registry_non_empty_ledger_proof(monkeypatch: pytest.MonkeyPatch) -> None:
         test_registry_partition_unchanged_ledger_cannot_absorb_a_tree_addition,
         test_registry_partition_deleted_frozen_definition_is_named_with_its_partition,
         test_registry_partition_registered_addition_absent_from_the_tree_is_named_with_its_partition,
+        test_registry_partition_real_retirements_ledger_passes_every_rebased_guard,
+        test_registry_partition_unledgered_retirement_or_rewrite_is_named_with_its_partition,
+        test_registry_partition_retired_definition_still_defined_reds_by_name,
+        test_registry_partition_rewrite_row_drift_reds_by_name_and_prints_the_observed_row,
     ):
         proof()
 
@@ -21833,7 +22429,8 @@ def test_registry_partition_non_empty_ledger_proof_unions_a_pre_existing_additio
     def read(path: str) -> str:
         return security_text if path == owner else real_read(path)
 
-    printed = _registry_definition_violations(oracle, _registry_additions_with(), read)
+    retirements = _registry_partition_retirements()
+    printed = _registry_definition_violations(oracle, _registry_additions_with(), read, retirements=retirements)
     assert len(printed) == 1 and printed[0].startswith(f"{owner}::{name} is neither"), printed
     record = {
         "issue": 2183,
@@ -21852,9 +22449,9 @@ def test_registry_partition_non_empty_ledger_proof_unions_a_pre_existing_additio
 
     # Discriminator: the pre-fix bare-list shape (no real additions) reds on the tree, naming
     # the pre-existing addition; the union shape is green.
-    bare = _registry_definition_violations(oracle, [], read)
+    bare = _registry_definition_violations(oracle, [], read, retirements=retirements)
     assert any(v.startswith(f"{owner}::{name} is neither") for v in bare), bare
-    assert _registry_definition_violations(oracle, _registry_partition_additions(), read) == []
+    assert _registry_definition_violations(oracle, _registry_partition_additions(), read, retirements=retirements) == []
 
     _registry_non_empty_ledger_proof(monkeypatch)
 
@@ -21889,6 +22486,320 @@ def test_registry_partition_ledger_checker_reads_before_state_only_through_git(
         oracle, _registry_valid_ledger(), _registry_valid_git([], blob_defines_name)
     )
     assert len(violations) == 1 and violations[0].startswith("ledger.name_present_at_base:"), violations
+
+
+# #2907 retirements-checker RED/GREEN arms on a SYNTHETIC ledger and a recording fake git.
+_RETIREMENT_PROBE_OWNER = REGISTRY_PARTITION_DEMO_OWNER
+_RETIREMENT_PROBE_RETIRE = REGISTRY_PARTITION_DEMO_FROZEN_NAME
+_RETIREMENT_PROBE_REWRITE = "test_registry_import_mismatch_rolls_back_all_rows"
+_RETIREMENT_PROBE_CORE_NAME = "test_canonical_geometry_collapses_negative_zero"
+_RETIREMENT_PROBE_SKIP_OWNER = "tests/test_basins_registry_import_parser.py"
+_RETIREMENT_PROBE_SKIP_NAME = "test_real_basins_parser_smoke_reprojects_and_uses_rivseg_count"
+
+
+def _registry_valid_retirements() -> dict[str, Any]:
+    """One retire and one rewrite of real frozen DB definitions, at a fake base commit."""
+    rewrite_row = list(_registry_partition_oracle()["rows"][_RETIREMENT_PROBE_REWRITE])
+    rewrite_row[1], rewrite_row[2] = "1" * 64, "2" * 64
+    return {
+        "schema": REGISTRY_PARTITION_RETIREMENTS_SCHEMA,
+        "retirements": [
+            {
+                "issue": 2907,
+                "base_commit": _REGISTRY_FAKE_BASE_COMMIT,
+                "owner": _RETIREMENT_PROBE_OWNER,
+                "name": _RETIREMENT_PROBE_RETIRE,
+                "action": "retire",
+                "reason": "synthetic retire",
+                "row": None,
+                "nodes": [_RETIREMENT_PROBE_RETIRE],
+                "integration_nodes": [_RETIREMENT_PROBE_RETIRE],
+            },
+            {
+                "issue": 2907,
+                "base_commit": _REGISTRY_FAKE_BASE_COMMIT,
+                "owner": _RETIREMENT_PROBE_OWNER,
+                "name": _RETIREMENT_PROBE_REWRITE,
+                "action": "rewrite",
+                "reason": "synthetic rewrite",
+                "row": rewrite_row,
+                "nodes": [_RETIREMENT_PROBE_REWRITE],
+                "integration_nodes": [_RETIREMENT_PROBE_REWRITE],
+            },
+        ],
+    }
+
+
+def _registry_retirement_blob() -> str:
+    names = (_RETIREMENT_PROBE_RETIRE, _RETIREMENT_PROBE_REWRITE)
+    return "".join(f"def {name}() -> None:\n    pass\n" for name in names)
+
+
+def _registry_valid_retirement_git(calls: list[tuple[str, ...]]) -> RegistryRunGit:
+    return _registry_fake_git(
+        calls,
+        commits={_REGISTRY_FAKE_BASE_COMMIT},
+        ancestors={_REGISTRY_FAKE_BASE_COMMIT},
+        blobs={f"{_REGISTRY_FAKE_BASE_COMMIT}:{_RETIREMENT_PROBE_OWNER}": _registry_retirement_blob()},
+    )
+
+
+def _registry_retirement_violations_of(
+    ledger: dict[str, Any],
+    run_git: RegistryRunGit,
+    additions: Sequence[dict[str, Any]] = (),
+    config: PartitionRetirementConfig | None = None,
+) -> list[str]:
+    oracle = _registry_partition_oracle()
+    return _partition_retirement_violations(
+        oracle, ledger, list(additions), run_git, config=config or _registry_retirement_config(oracle)
+    )
+
+
+def _retire_record(ledger: dict[str, Any]) -> dict[str, Any]:
+    return ledger["retirements"][0]
+
+
+def _rewrite_record(ledger: dict[str, Any]) -> dict[str, Any]:
+    return ledger["retirements"][1]
+
+
+def _frozen_field_mutation(field: int) -> Callable[[dict[str, Any]], object]:
+    return lambda ledger: _rewrite_record(ledger)["row"].__setitem__(field, "f" * 64)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "rule"),
+    (
+        (lambda ledger: ledger.update(schema="basins-registry-partition-retirements/v0"), "ledger.schema"),
+        (lambda ledger: ledger.pop("retirements"), "ledger.schema"),
+        (lambda ledger: _retire_record(ledger).pop("reason"), "ledger.missing_key"),
+        (lambda ledger: _retire_record(ledger).update(issue="2907"), "ledger.field_shape"),
+        (lambda ledger: _retire_record(ledger).update(issue=True), "ledger.field_shape"),
+        (lambda ledger: _retire_record(ledger).update(base_commit="HEAD"), "ledger.field_shape"),
+        (lambda ledger: _retire_record(ledger).update(action="remove"), "ledger.field_shape"),
+        (lambda ledger: _retire_record(ledger).update(reason="  "), "ledger.field_shape"),
+        (lambda ledger: _retire_record(ledger).update(nodes=_RETIREMENT_PROBE_RETIRE), "ledger.field_shape"),
+        (
+            lambda ledger: _retire_record(ledger).update(
+                name="test_registry_import_never_frozen", nodes=["test_registry_import_never_frozen"]
+            ),
+            "ledger.name_not_frozen",
+        ),
+        (
+            lambda ledger: _retire_record(ledger).update(owner=REGISTRY_PARTITION_DEMO_AUTH_OWNER),
+            "ledger.owner_mismatch",
+        ),
+        (
+            lambda ledger: _retire_record(ledger).update(
+                owner=REGISTRY_PARTITION_RETAINED_CORE,
+                name=_RETIREMENT_PROBE_CORE_NAME,
+                nodes=[_RETIREMENT_PROBE_CORE_NAME],
+                integration_nodes=[],
+            ),
+            "ledger.owner_not_allowed",
+        ),
+        (lambda ledger: ledger["retirements"].append(dict(_retire_record(ledger))), "ledger.duplicate_name"),
+        (
+            lambda ledger: _retire_record(ledger)["nodes"].append(f"{_RETIREMENT_PROBE_RETIRE}[extra]"),
+            "ledger.nodes_mismatch",
+        ),
+        (lambda ledger: _retire_record(ledger).update(nodes=[]), "ledger.nodes_mismatch"),
+        (lambda ledger: _retire_record(ledger).update(integration_nodes=[]), "ledger.integration_nodes_mismatch"),
+        (
+            lambda ledger: _retire_record(ledger).update(
+                owner=_RETIREMENT_PROBE_SKIP_OWNER,
+                name=_RETIREMENT_PROBE_SKIP_NAME,
+                nodes=[_RETIREMENT_PROBE_SKIP_NAME],
+                integration_nodes=[],
+            ),
+            "ledger.retire_non_integration_skip",
+        ),
+        (
+            lambda ledger: _retire_record(ledger).update(
+                row=_registry_partition_oracle()["rows"][_RETIREMENT_PROBE_RETIRE]
+            ),
+            "ledger.retire_has_row",
+        ),
+        (lambda ledger: _rewrite_record(ledger).update(row=None), "ledger.row_shape"),
+        (lambda ledger: _rewrite_record(ledger).update(row=_rewrite_record(ledger)["row"][:6]), "ledger.row_shape"),
+        (_frozen_field_mutation(0), "ledger.row_frozen_field_changed"),
+        (_frozen_field_mutation(3), "ledger.row_frozen_field_changed"),
+        (_frozen_field_mutation(4), "ledger.row_frozen_field_changed"),
+        (_frozen_field_mutation(5), "ledger.row_frozen_field_changed"),
+        (
+            lambda ledger: _rewrite_record(ledger).update(
+                row=list(_registry_partition_oracle()["rows"][_RETIREMENT_PROBE_REWRITE])
+            ),
+            "ledger.row_unchanged",
+        ),
+    ),
+    ids=[
+        "wrong-schema",
+        "no-retirements-list",
+        "missing-key",
+        "issue-not-int",
+        "issue-bool",
+        "base-commit-not-hex",
+        "action-unknown",
+        "reason-blank",
+        "nodes-not-a-list",
+        "name-not-frozen",
+        "owner-not-the-frozen-owner",
+        "owner-retained-core",
+        "duplicate-name",
+        "nodes-extra",
+        "nodes-empty",
+        "integration-nodes-differ",
+        "retire-the-non-integration-skip-node",
+        "retire-with-row",
+        "rewrite-without-row",
+        "rewrite-row-malformed",
+        "rewrite-changes-owner-field",
+        "rewrite-changes-markers",
+        "rewrite-changes-args",
+        "rewrite-changes-decorators",
+        "rewrite-row-is-the-frozen-row",
+    ],
+)
+def test_registry_partition_retirement_checker_names_each_record_rule(
+    mutate: Callable[[dict[str, Any]], object],
+    rule: str,
+) -> None:
+    ledger = _registry_valid_retirements()
+    mutate(ledger)
+
+    violations = _registry_retirement_violations_of(ledger, _registry_valid_retirement_git([]))
+
+    assert any(violation.startswith(f"{rule}:") for violation in violations), violations
+
+
+def test_registry_partition_retirement_checker_names_an_overlap_with_the_additions_ledger() -> None:
+    addition = {"name": _RETIREMENT_PROBE_RETIRE}
+
+    violations = _registry_retirement_violations_of(
+        _registry_valid_retirements(), _registry_valid_retirement_git([]), additions=[addition]
+    )
+
+    assert [v for v in violations if v.startswith("ledger.overlaps_addition:")], violations
+    assert _registry_retirement_violations_of(_registry_valid_retirements(), _registry_valid_retirement_git([])) == []
+
+
+def test_registry_partition_retirement_checker_accepts_a_valid_ledger() -> None:
+    calls: list[tuple[str, ...]] = []
+
+    ledger = _registry_valid_retirements()
+
+    violations = _registry_retirement_violations_of(ledger, _registry_valid_retirement_git(calls))
+
+    assert violations == []
+    assert [call[0] for call in calls] == ["rev-parse", "merge-base", "show"] * 2
+
+
+@pytest.mark.parametrize(
+    ("git_kwargs", "rule", "consulted"),
+    (
+        ({}, "ledger.base_commit_unresolved", ["rev-parse"]),
+        ({"commits": {_REGISTRY_FAKE_BASE_COMMIT}}, "ledger.base_commit_not_ancestor", ["rev-parse", "merge-base"]),
+        (
+            {"commits": {_REGISTRY_FAKE_BASE_COMMIT}, "ancestors": {_REGISTRY_FAKE_BASE_COMMIT}},
+            "ledger.owner_absent_at_base",
+            ["rev-parse", "merge-base", "show"],
+        ),
+        (
+            {
+                "commits": {_REGISTRY_FAKE_BASE_COMMIT},
+                "ancestors": {_REGISTRY_FAKE_BASE_COMMIT},
+                "blobs": {
+                    f"{_REGISTRY_FAKE_BASE_COMMIT}:{_RETIREMENT_PROBE_OWNER}": "def test_other() -> None:\n    pass\n"
+                },
+            },
+            "ledger.name_absent_at_base",
+            ["rev-parse", "merge-base", "show"],
+        ),
+    ),
+    ids=["base-commit-unresolved", "base-commit-not-ancestor", "owner-blob-absent-at-base", "name-absent-at-base"],
+)
+def test_registry_partition_retirement_checker_runs_git_checks_in_order_and_stops_at_the_first(
+    git_kwargs: dict[str, Any],
+    rule: str,
+    consulted: list[str],
+) -> None:
+    calls: list[tuple[str, ...]] = []
+    ledger = _registry_valid_retirements()
+    del ledger["retirements"][1]
+
+    violations = _registry_retirement_violations_of(ledger, _registry_fake_git(calls, **git_kwargs))
+
+    assert len(violations) == 1 and violations[0].startswith(f"{rule}:"), violations
+    assert [call[0] for call in calls] == consulted
+
+
+def test_registry_partition_retirement_checker_names_an_unknown_base_commit_against_the_real_repo() -> None:
+    ledger = _registry_valid_retirements()
+    for record in ledger["retirements"]:
+        record["base_commit"] = "0" * 40
+
+    violations = _registry_retirement_violations_of(ledger, _registry_run_git)
+
+    assert len(violations) == 2 and all(v.startswith("ledger.base_commit_unresolved:") for v in violations), violations
+
+
+def test_registry_partition_retirement_checker_reads_only_the_oracle_ledgers_and_git(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    oracle = _registry_partition_oracle()
+    config = _registry_retirement_config(oracle)
+    calls: list[tuple[str, ...]] = []
+
+    def _tree_read(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("the retirements checker read the working tree")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(Path, "read_text", _tree_read)
+        patched.setattr(Path, "read_bytes", _tree_read)
+        patched.setattr(builtins, "open", _tree_read)
+        violations = _partition_retirement_violations(
+            oracle, _registry_valid_retirements(), [], _registry_valid_retirement_git(calls), config=config
+        )
+    assert violations == []
+    assert len(calls) == 6
+
+
+def test_registry_partition_retirement_checker_is_parameterised_by_its_partition_config() -> None:
+    # Reusable by #1948: no rule reads a `REGISTRY_PARTITION_*` global or a `_registry_*`
+    # helper, and every partition fact comes from `config`.
+    checker_parts = (
+        _partition_retirement_violations,
+        _partition_retirement_git_violation,
+        _partition_frozen_nodes_of,
+        _partition_non_integration_skip_nodes,
+    )
+    for function in checker_parts:
+        tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
+        names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+        leaked = sorted(name for name in names if name.startswith(("REGISTRY_PARTITION_", "_registry_")))
+        assert not leaked, f"{function.__name__} reads partition globals {leaked}"
+
+    foreign = PartitionRetirementConfig(
+        schema="other-partition-retirements/v1",
+        owners=(_RETIREMENT_PROBE_OWNER, REGISTRY_PARTITION_DEMO_AUTH_OWNER),
+        retained_core=REGISTRY_PARTITION_DEMO_AUTH_OWNER,
+        database_authority=(),
+    )
+    ledger = _registry_valid_retirements()
+    violations = _registry_retirement_violations_of(ledger, _registry_valid_retirement_git([]), config=foreign)
+    assert [v.split(":", 1)[0] for v in violations] == ["ledger.schema"], violations
+    ledger["schema"] = foreign.schema
+    violations = _registry_retirement_violations_of(ledger, _registry_valid_retirement_git([]), config=foreign)
+    assert sorted(v.split(":", 1)[0] for v in violations) == ["ledger.integration_owner_not_database_authority"] * 2
+    _retire_record(ledger).update(
+        owner=REGISTRY_PARTITION_DEMO_AUTH_OWNER,
+        name="test_import_basins_registry_without_policy_rejects_before_writes",
+        nodes=["test_import_basins_registry_without_policy_rejects_before_writes"],
+    )
+    violations = _registry_retirement_violations_of(ledger, _registry_valid_retirement_git([]), config=foreign)
+    assert any(v.startswith("ledger.owner_not_allowed:") for v in violations), violations
 
 
 def test_registry_partition_direct_importers_derive_from_tracked_asts() -> None:
@@ -22189,11 +23100,11 @@ def test_registry_partition_database_authority_is_the_exact_eight_path_union() -
     assert sorted(oracle["database_authority"]["exact_paths"]) == sorted(REGISTRY_PARTITION_DATABASE_AUTHORITY)
     assert sorted(oracle["database_authority"]["absent_paths"]) == sorted(REGISTRY_PARTITION_DATABASE_ABSENT)
     _registry_database_contract(observed, oracle["database_authority"]["baseline_patterns"])
-    # The 17 frozen integration suffixes (plus registered integration additions, #2183)
-    # bind suffix -> owner -> an exact literal.
+    # The 17 frozen integration suffixes (minus ledgered retirements, #2907, plus registered
+    # integration additions, #2183) bind suffix -> owner -> an exact literal.
     additions = _registry_partition_additions()
     owner_of = _registry_owner_of(oracle, additions)
-    for suffix in [*oracle["integration_suffixes"], *_registry_addition_integration_nodes(additions)]:
+    for suffix in _registry_effective_integration_suffixes(oracle, _registry_partition_retirements(), additions):
         owner = owner_of[suffix.split("[", 1)[0]]
         assert any(fnmatch.fnmatch(owner, pattern) for pattern in observed), (
             f"integration owner {owner} for {suffix} matches no database pattern"
@@ -22242,7 +23153,8 @@ def test_registry_partition_database_edge_deletion_is_independent_and_unrescued(
     oracle = _registry_partition_oracle()
     additions = _registry_partition_additions()
     owner_of = _registry_owner_of(oracle, additions)
-    integration_suffixes = [*oracle["integration_suffixes"], *_registry_addition_integration_nodes(additions)]
+    retirements = _registry_partition_retirements()
+    integration_suffixes = _registry_effective_integration_suffixes(oracle, retirements, additions)
     other_owners = {owner_of[suffix.split("[", 1)[0]] for suffix in integration_suffixes} - {target}
     for owner in other_owners:
         assert any(fnmatch.fnmatch(owner, pattern) for pattern in remaining), (

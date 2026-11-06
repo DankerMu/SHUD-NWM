@@ -1,10 +1,12 @@
-"""Basins registry import: QHH crosswalk, segment slices and post-import DB contracts.
+"""Basins registry import: QHH crosswalk, reach geometry and post-import DB contracts.
 
 Partition 7 of 7 of the former monolith ``tests/test_basins_registry_import.py``
-(issue #1913): the 22 QHH/crosswalk cases, kept together because their PR1/PR2/Path-C
+(issue #1913): the 18 QHH/crosswalk cases, kept together because their PR1/PR2/Path-C
 and issue #566 contracts share the ``tests/fixtures/basins/qhh-sample`` fixture, and
-because their seven integration nodes are one ci.yml ``database:`` path.  That
-fixture's sample constants and loaders moved to the non-collectible
+because their four integration nodes are one ci.yml ``database:`` path.  #2907 retired
+the four segment-slice cases that observed the deleted store list read path, through
+``tests/fixtures/basins_registry_partition_retirements.json``.  That fixture's sample
+constants and loaders moved to the non-collectible
 ``tests/basins_registry_import_helpers.py`` so this file stays under the 1,000-line
 structural limit.
 """
@@ -12,16 +14,13 @@ structural limit.
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from packages.common.model_registry import PsycopgModelRegistryStore
 from tests.basins_registry_import_helpers import (
     _CLI_MODEL_ADMIN_AUTH_ARGS,
-    _QHH_SAMPLE_DIR,
     _QHH_SAMPLE_SEG_SHP,
     _parse_qhh_sample,
     _stage_qhh_sample_fixture,
@@ -680,46 +679,8 @@ def test_re_ingest_replaces_legacy_seg_ids(
 
 
 # ---------------------------------------------------------------------------
-# Section 2c: Path C segment-slice API tests
+# Section 2c: Path C reach polyline as the slice parent
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.integration
-def test_segment_slice_count_matches_sp_rivseg(
-    integration_database_url: str,
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """qhh-sample fixture: 5 reaches in river.shp + 18 segments in seg.shp.
-    PR 2 Path C endpoint must return 18 features (one per crosswalk row)."""
-
-    apply_migrations_from_zero(integration_database_url)
-    input_dir, inventory_path, manifest_path, model_id = _stage_qhh_sample_fixture(tmp_path)
-    del input_dir
-    assert _argparse_main(
-        [
-            "import-basins-registry",
-            "--inventory",
-            str(inventory_path),
-            "--package-manifest",
-            str(manifest_path),
-            "--database-url",
-            integration_database_url,
-            *_CLI_MODEL_ADMIN_AUTH_ARGS,
-        ]
-    ) == 0
-    report = json.loads(capsys.readouterr().out)
-    store = PsycopgModelRegistryStore(integration_database_url)
-    segments = store.list_river_segments(
-        basin_version_id=report["basin_version_id"],
-        river_network_version_id=report["river_network_version_id"],
-        limit=100,
-        offset=0,
-    )
-    assert segments["total"] == 18
-    assert segments["features"]
-    for feature in segments["features"]:
-        assert feature["properties"]["river_segment_id"].startswith(f"{model_id}_seg_")
 
 
 @pytest.mark.integration
@@ -767,115 +728,6 @@ def test_segment_slice_geometry_is_subset_of_reach(
     # of itself; sliced sub-polylines inherit that property by construction.
     assert row["total"] > 0
     assert row["within_count"] == row["total"]
-
-
-@pytest.mark.integration
-def test_segment_slice_last_endpoint_saturates_to_reach_terminus(
-    integration_database_url: str,
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """The last segment in each reach must end at the reach polyline
-    terminus (end_fraction saturated to 1.0). Smoke-check by computing
-    the distance from each last slice's terminal vertex to the reach end."""
-
-    apply_migrations_from_zero(integration_database_url)
-    _, inventory_path, manifest_path, model_id = _stage_qhh_sample_fixture(tmp_path)
-    assert _argparse_main(
-        [
-            "import-basins-registry",
-            "--inventory",
-            str(inventory_path),
-            "--package-manifest",
-            str(manifest_path),
-            "--database-url",
-            integration_database_url,
-            *_CLI_MODEL_ADMIN_AUTH_ARGS,
-        ]
-    ) == 0
-    report = json.loads(capsys.readouterr().out)
-    store = PsycopgModelRegistryStore(integration_database_url)
-    segments = store.list_river_segments(
-        basin_version_id=report["basin_version_id"],
-        river_network_version_id=report["river_network_version_id"],
-        limit=100,
-        offset=0,
-    )
-    # Group features by parent reach, take the last (highest segment_order)
-    # in each reach, and assert its terminal coordinate matches the reach
-    # polyline's terminal coordinate (within an epsilon).
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    for feature in segments["features"]:
-        reach_id = feature["properties"].get("reach_segment_id")
-        grouped.setdefault(reach_id, []).append(feature)
-    with psycopg_connection(integration_database_url) as connection:
-        with connection.cursor() as cursor:
-            for reach_id, members in grouped.items():
-                ordered = sorted(
-                    members,
-                    key=lambda item: item["properties"].get("segment_order") or 0,
-                )
-                last = ordered[-1]
-                cursor.execute(
-                    "SELECT ST_AsGeoJSON(ST_EndPoint(ST_LineMerge(rs.geom)))::json AS geom "
-                    "FROM core.river_segment rs WHERE rs.river_segment_id = %s",
-                    (reach_id,),
-                )
-                reach_end_geojson = cursor.fetchone()["geom"]
-                if reach_end_geojson is None:
-                    continue
-                reach_end = reach_end_geojson["coordinates"]
-                last_coords = last["geometry"]["coordinates"]
-                # LineString coords -> last vertex.
-                if last["geometry"]["type"] == "LineString":
-                    last_vertex = last_coords[-1]
-                else:
-                    last_vertex = last_coords[-1][-1]
-                assert abs(last_vertex[0] - reach_end[0]) < 1e-6
-                assert abs(last_vertex[1] - reach_end[1]) < 1e-6
-    assert model_id
-
-
-@pytest.mark.integration
-def test_segment_slice_river_segment_id_preserves_frontend_contract(
-    integration_database_url: str,
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Every API feature must carry ``river_segment_id`` in the
-    ``<model>_seg_<iRiv>_<iEle>`` form so the frontend
-    promoteId='river_segment_id' contract (OQ2) keeps working."""
-
-    apply_migrations_from_zero(integration_database_url)
-    _, inventory_path, manifest_path, model_id = _stage_qhh_sample_fixture(tmp_path)
-    assert _argparse_main(
-        [
-            "import-basins-registry",
-            "--inventory",
-            str(inventory_path),
-            "--package-manifest",
-            str(manifest_path),
-            "--database-url",
-            integration_database_url,
-            *_CLI_MODEL_ADMIN_AUTH_ARGS,
-        ]
-    ) == 0
-    report = json.loads(capsys.readouterr().out)
-    store = PsycopgModelRegistryStore(integration_database_url)
-    segments = store.list_river_segments(
-        basin_version_id=report["basin_version_id"],
-        river_network_version_id=report["river_network_version_id"],
-        limit=100,
-        offset=0,
-    )
-    pattern = re.compile(rf"^{re.escape(model_id)}_seg_\d+_\d+$")
-    assert segments["features"]
-    for feature in segments["features"]:
-        rid = feature["properties"]["river_segment_id"]
-        assert pattern.match(rid) is not None, rid
-        # MapLibre's promoteId path also reads feature.id; the store
-        # populates that for the slice path.
-        assert feature.get("id") == rid
 
 
 # ---------------------------------------------------------------------------
@@ -967,27 +819,3 @@ def test_pr2_contract_reach_rows_single_part_and_crosswalk_count(
     assert classes["total_rows"] == 2 * rnv["segment_count"]
     assert classes["output_rows"] == row["reach_count"]
     del model_id
-
-
-def test_segment_slice_length_m_none_uses_equal_partition(tmp_path: Path) -> None:
-    """qhh seg.shp has no Length field, so length_m=None for every
-    crosswalk row. The store falls back to equal-N partitioning of the
-    parent reach polyline. We pin that behaviour by constructing the
-    fraction-derivation in isolation (the integration round-trip is
-    covered by the count / contract tests above)."""
-
-    # Pure Python check: 4 segments under one reach, all length_m=None -> each
-    # occupies (i/N, (i+1)/N) of the polyline, last fraction saturated to 1.0.
-    member_count = 4
-    expected = [(0.0, 0.25), (0.25, 0.5), (0.5, 0.75), (0.75, 1.0)]
-    actual = [
-        (
-            index / member_count,
-            1.0 if index == member_count - 1 else (index + 1) / member_count,
-        )
-        for index in range(member_count)
-    ]
-    assert actual == expected
-    # qhh-sample fixture sanity: documented in tests/fixtures/.../README.md.
-    assert (_QHH_SAMPLE_DIR / "gis" / "seg.dbf").is_file()
-    assert tmp_path  # silence unused-fixture warning

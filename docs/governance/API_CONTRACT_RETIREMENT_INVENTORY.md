@@ -288,9 +288,23 @@ the #411 evidence snapshot and are not rewritten.
   (`test_river_segment_list_endpoint_is_retired_and_not_served`,
   `test_river_segment_list_is_absent_from_the_published_openapi_and_generated_types`,
   `test_river_segment_detail_is_still_served_after_the_list_retirement`).
-- Residual, stated not hidden: the store read
-  `PsycopgModelRegistryStore.list_river_segments` is still present in
-  `packages/common/model_registry_river_segments.py` with no API caller. The
-  frozen #1913 registry-import partition tests observe import results through it and
-  are byte-pinned by `tests/fixtures/basins_registry_partition_oracle.json`;
-  removing it needs a recorded transition of that oracle first.
+- Residual, closed by #2907: the store read
+  `PsycopgModelRegistryStore.list_river_segments`, its legacy / segment-slice
+  helpers, the four `RIVER_SEGMENT_COLLECTION_*` budgets (and their
+  `packages.common.model_registry` re-exports) are deleted. The frozen #1913 registry-import partition tests that observed import
+  results through the store were recorded in the retirements ledger
+  `tests/fixtures/basins_registry_partition_retirements.json` (two rewritten to
+  assert the imported rows directly, four retired); the oracle
+  `tests/fixtures/basins_registry_partition_oracle.json` is unchanged. Besides the
+  pre-PR-2 row cleanup `_delete_legacy_seg_rows`, the `basins_seg_shp` crosswalk
+  source and `parse_seg_shp_crosswalk`, the only remaining `_seg_` code is the
+  caller-less id producer `workers/model_registry/basins_geometry.py::_stable_segment_id`. `get_river_segment` (detail) and
+  `core.river_segment_crosswalk` writing are unchanged.
+- Left after #2907, reported and not removed: the trigram index
+  `river_segment_id_trgm_idx` (migration 000052, ADR 0004) lost its only
+  consumer, the list search's `lower(rs.river_segment_id) LIKE` arm, and is now
+  an orphan index; dropping it is a separate DB change. The helpers
+  `_stable_segment_id` and `_deduplicate_pending_segment_ids` in
+  `workers/model_registry/basins_geometry.py` have no caller; deleting them needs
+  that 1432-line file split first (it is not a large-file guard exclusion), tracked
+  by #3081.

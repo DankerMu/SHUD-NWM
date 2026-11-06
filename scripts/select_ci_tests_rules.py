@@ -2975,6 +2975,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "tests/fixtures/basins_registry_partition_additions.json",
         ("tests/test_select_ci_tests.py",),
     ),
+    PathTestRule(
+        # #2907: its sibling retirements ledger, the one channel that retires or
+        # rewrites a FROZEN #1913 definition, is the same kind of meta-suite-only
+        # guard input and needs the same exact route.
+        "tests/fixtures/basins_registry_partition_retirements.json",
+        ("tests/test_select_ci_tests.py",),
+    ),
     # #2317: the two FROZEN partition oracles the #2183 ledger sits beside —
     # the #1913 basins-registry and #1948 QHH-bootstrap partition snapshots.
     # Each is read only by the meta-suite, whose self-digest guards are the only

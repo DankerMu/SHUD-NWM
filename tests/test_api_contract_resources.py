@@ -507,15 +507,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class _RiverSegmentDetailStore(_ModelRegistryStore):
-    """Answers the detail read for any id; ``list_calls`` records a list read."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.list_calls = 0
-
-    def list_river_segments(self, **_kwargs: Any) -> dict[str, Any]:
-        self.list_calls += 1
-        return {"type": "FeatureCollection", "features": [], "total": 0, "feature_total": 0, "limit": 1, "offset": 0}
+    """Answers the detail read for any id (the store has no list read since #2907)."""
 
     def get_river_segment(
         self, *, basin_version_id: str, river_network_version_id: str, segment_id: str
@@ -555,7 +547,6 @@ def test_river_segment_list_endpoint_is_retired_and_not_served() -> None:
     if isinstance(body, dict):
         assert body.get("status") != "ok"
         assert "data" not in body
-    assert store.list_calls == 0
 
 
 def test_river_segment_list_is_absent_from_the_published_openapi_and_generated_types() -> None:
