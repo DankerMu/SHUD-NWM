@@ -2665,6 +2665,8 @@ def test_select_tests_maps_autopipeline_script_without_core_smoke_fallback() -> 
         # #1647: the `_connect` bounds + stats-guard flag parser suite, added to
         # the same rule for the same reason (no same-name fallback finds it).
         "tests/test_node27_autopipeline_connection_bounds.py",
+        # #3062: the AUTOPIPE_MAX_CYCLE_AGE_DAYS cycle floor suite, same rule.
+        "tests/test_node27_autopipeline_cycle_floor.py",
         "tests/test_node27_autopipeline_handoff.py",
         "tests/test_node27_autopipeline_preflight.py",
         # #2590: the published re-parse decline suite, same rule.
