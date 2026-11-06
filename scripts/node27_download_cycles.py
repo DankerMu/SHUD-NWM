@@ -673,6 +673,16 @@ def _env_with_grib_toolchain(env: dict[str, str]) -> dict[str, str]:
     return prepared
 
 
+def _timeout_output_text(value: bytes | str | None) -> str:
+    # CPython's TimeoutExpired keeps the captured output as bytes even when the
+    # run used text=True (#3075).
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
 def _bounded_text(value: str, *, limit: int = 4096) -> str:
     safe = redact_text(value)
     if len(safe) <= limit:
@@ -728,8 +738,8 @@ def run_source_download(source: str, cycle_time: str, env: dict[str, str]) -> So
             return_code=124,
             command=command,
             result={"error_code": "DOWNLOAD_TIMEOUT"},
-            stdout_tail=_bounded_text(error.stdout or ""),
-            stderr_tail=_bounded_text(error.stderr or ""),
+            stdout_tail=_bounded_text(_timeout_output_text(error.stdout)),
+            stderr_tail=_bounded_text(_timeout_output_text(error.stderr)),
         )
 
     parsed_result: dict[str, Any] | None = None
