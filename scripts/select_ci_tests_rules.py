@@ -155,11 +155,16 @@ ANY_RATCHET_TEST = "tests/test_any_ratchet.py"
 
 # entropy-burndown task 2.1a: the status-vocabulary parity suite. It imports and
 # pins the canonical status-set objects of modules across the five production
-# roots (and task 2.1b adds a duplicate-literal scan over the same roots), so
-# every Python change there routes to it SUPPLEMENTALLY in the #1656 shape: no
-# `matched`, no stop-rule participation, so a `stop_on_match` owner of the
-# changed path cannot shadow it.
+# roots, so every Python change there routes to it SUPPLEMENTALLY in the #1656
+# shape: no `matched`, no stop-rule participation, so a `stop_on_match` owner of
+# the changed path cannot shadow it.
 STATUS_VOCAB_PARITY_TEST = "tests/test_status_vocab_parity.py"
+
+# entropy-burndown task 2.1b (split out by #3026): the duplicate status literal
+# scan. It AST-scans every tracked Python file under the same five roots against
+# tests/status_literal_allowlist.json, so it rides the parity suite's additive
+# loop and owns the allowlist row.
+STATUS_LITERAL_SCAN_TEST = "tests/test_status_literal_scan.py"
 
 # entropy-burndown task 3.1: the time/identity helper consolidation ceiling. It
 # counts module-level local re-definitions of the canonical time/identity helpers
@@ -2994,9 +2999,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # ceiling-only PR would otherwise select nothing.
     PathTestRule("tests/any_ratchet_ceiling.json", (ANY_RATCHET_TEST,)),
     # entropy-burndown task 2.1b: the status-literal allowlist is data read only by
-    # the status-vocabulary parity suite; an allowlist-only PR (2.2-2.4 delete
-    # entries) would otherwise select nothing.
-    PathTestRule("tests/status_literal_allowlist.json", (STATUS_VOCAB_PARITY_TEST,)),
+    # the duplicate status literal scan (#3026); an allowlist-only PR (2.2-2.4
+    # delete entries) would otherwise select nothing.
+    PathTestRule("tests/status_literal_allowlist.json", (STATUS_LITERAL_SCAN_TEST,)),
     # entropy-burndown task 3.1: the time-helper ceiling and allowlist are data read
     # only by the consolidation test; a ceiling- or allowlist-only PR (3.2-3.5
     # lower the ceiling / adjudicate entries) would otherwise select nothing.
