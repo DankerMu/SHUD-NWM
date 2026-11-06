@@ -60,6 +60,14 @@ AUTOPIPE_EXCLUDE_BASINS=zhaochen_hhy
 # list the old baseline AND all its direct-grid variants from the retired
 # basin_version_id. Empty preserves the existing scope. Set before deactivation.
 AUTOPIPE_EXCLUDE_MODEL_IDS=
+# #3062: cycle floor for the automatic tick. Runs whose cycle is older than
+# (now UTC - this many days, truncated to the hour) are dropped before seed
+# identity and ingest, and counted in the summary as skipped_older_than_floor.
+# Production keeps 14 (two weeks). Unset or empty = no floor (pre-#3062
+# behaviour); anything other than a positive integer blocks the tick at
+# preflight. Cycles outside the window are ingested manually with
+# scripts/node27_autopipeline.py --only-cycle YYYYMMDDHH, which bypasses the floor.
+AUTOPIPE_MAX_CYCLE_AGE_DAYS=14
 OUTPUT_PARSER_BATCH_SIZE=10000
 AUTOPIPE_LOG_FILE=/home/nwm/autopipe-logs/autopipe.log
 AUTOPIPE_LOCK_PATH=/tmp/autopipe.cron.lock

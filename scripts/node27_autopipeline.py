@@ -37,6 +37,15 @@ Object-store / DB env (same contract as the per-run scripts)::
 versions from both run ingest and inventory seeding while allowing replacement
 models for the same basin. Include the retired baseline and every direct-grid
 variant; model ids are case-sensitive and are not basin slugs or patterns.
+
+``AUTOPIPE_MAX_CYCLE_AGE_DAYS`` (#3062) is a cycle floor for the automatic tick:
+a positive integer N drops every run whose cycle is earlier than
+``floor_cycle = (now_utc - N days)`` truncated to the hour (a run AT the floor
+cycle is kept) before phase 1 seed identity and before ingest. Unset or empty
+means no floor (the historical behaviour); any other value (non-digit, ``0``)
+blocks the tick at preflight. An explicit ``--only-cycle`` bypasses the floor:
+it is the operator channel for manually ingesting cycles outside the window.
+The summary reports ``cycle_floor`` and ``skipped_older_than_floor``.
 """
 
 # ruff: noqa: E402
@@ -55,6 +64,7 @@ import tempfile
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit
@@ -65,6 +75,7 @@ if str(REPO_ROOT) not in sys.path:
 
 import psycopg2
 
+from packages.common.contracts.time_normalization import utc_now
 from packages.common.forcing_domain_handoff_apply import (
     APPLY_MODE as OBJECT_STORE_HANDOFF_MODE,
 )
@@ -128,6 +139,7 @@ INGEST_STAGE_SHAPE = (
     "publish_status",
 )
 LIBPQ_AMBIENT_ENV_FORBIDDEN_REASON = "LIBPQ_AMBIENT_ENV_FORBIDDEN"
+MAX_CYCLE_AGE_DAYS_ENV = "AUTOPIPE_MAX_CYCLE_AGE_DAYS"
 LIBPQ_CONNECTION_ENV_KEYS = frozenset(
     {
         "PGAPPNAME",
@@ -274,6 +286,26 @@ def _path_preflight(env_var: str, raw_value: str | None) -> tuple[dict[str, Any]
             )
         ]
     return evidence, []
+
+
+def _max_cycle_age_days(raw_value: str | None) -> tuple[int | None, list[dict[str, str]]]:
+    """Parse ``AUTOPIPE_MAX_CYCLE_AGE_DAYS`` (#3062): unset/empty = no floor.
+
+    Only plain ASCII digits with a value >= 1 are accepted; ``int()`` alone would
+    also take ``+14``, ``1_4`` or full-width digits from a hand-edited env file.
+    """
+    raw = (raw_value or "").strip()
+    if not raw:
+        return None, []
+    if re.fullmatch(r"[0-9]+", raw) is None or int(raw) < 1:
+        return None, [
+            _preflight_blocker(
+                f"{MAX_CYCLE_AGE_DAYS_ENV}_INVALID",
+                MAX_CYCLE_AGE_DAYS_ENV,
+                f"{MAX_CYCLE_AGE_DAYS_ENV} must be a positive integer number of days, or unset for no cycle floor.",
+            )
+        ]
+    return int(raw), []
 
 
 def _database_username_class(username: str | None) -> str:
@@ -675,6 +707,7 @@ def _preflight_ingest_config(
     blockers.extend(work_root_blockers)
     log_root, log_root_blockers = _path_preflight("AUTOPIPE_LOG_ROOT", env.get("AUTOPIPE_LOG_ROOT"))
     blockers.extend(log_root_blockers)
+    blockers.extend(_max_cycle_age_days(env.get(MAX_CYCLE_AGE_DAYS_ENV))[1])
 
     return redact_payload(
         {
@@ -738,6 +771,25 @@ def _emit_json_summary(summary: dict[str, Any]) -> None:
 # --------------------------------------------------------------------------- #
 # run discovery
 # --------------------------------------------------------------------------- #
+def _cycle_floor(max_age_days: int | None, *, only_cycle: str | None) -> dict[str, int | str | bool | None]:
+    """The #3062 cycle floor for this tick (``floor_cycle`` is YYYYMMDDHH or None).
+
+    ``applied`` is False when no floor is configured or when an explicit
+    ``--only-cycle`` bypasses it; ``bypassed_by_only_cycle`` is True only in the
+    latter case, so an unset floor never reads as a bypass.
+    """
+    if max_age_days is None:
+        return {"days": None, "floor_cycle": None, "applied": False, "bypassed_by_only_cycle": False}
+    floor_cycle = (utc_now() - timedelta(days=max_age_days)).strftime("%Y%m%d%H")
+    bypassed = bool(only_cycle)
+    return {
+        "days": max_age_days,
+        "floor_cycle": floor_cycle,
+        "applied": not bypassed,
+        "bypassed_by_only_cycle": bypassed,
+    }
+
+
 def _discover_runs(object_store_root: Path, sources: tuple[str, ...]) -> list[dict[str, str]]:
     runs_dir = object_store_root / "runs"
     out: list[dict[str, str]] = []
@@ -2507,7 +2559,10 @@ def main(argv: list[str] | None = None) -> int:
         "--only-cycle",
         default=None,
         metavar="YYYYMMDDHH",
-        help="Restrict ingest to one exact UTC forecast cycle.",
+        help=(
+            "Restrict ingest to one exact UTC forecast cycle. Bypasses the "
+            f"{MAX_CYCLE_AGE_DAYS_ENV} cycle floor (manual ingest of older cycles)."
+        ),
     )
     parser.add_argument(
         "--direct-grid-only",
@@ -2586,6 +2641,16 @@ def main(argv: list[str] | None = None) -> int:
         if re.fullmatch(r"\d{10}", args.only_cycle) is None:
             parser.error("--only-cycle must use the exact UTC format YYYYMMDDHH")
         runs = [r for r in runs if r["cycle"] == args.only_cycle]
+    # #3062: drop runs older than the cycle floor before any manifest-reading
+    # scope filter, phase 1 seed identity, or ingest sees them. Zero-padded
+    # YYYYMMDDHH strings compare in time order; a run at the floor is kept.
+    cycle_floor = _cycle_floor(_max_cycle_age_days(env.get(MAX_CYCLE_AGE_DAYS_ENV))[0], only_cycle=args.only_cycle)
+    skipped_older_than_floor = 0
+    if cycle_floor["applied"]:
+        floor_cycle = str(cycle_floor["floor_cycle"])
+        in_window = [r for r in runs if r["cycle"] >= floor_cycle]
+        skipped_older_than_floor = len(runs) - len(in_window)
+        runs = in_window
     if args.direct_grid_only:
         runs = [r for r in runs if r["run_family"] == "direct_grid"]
     if args.only_basin:
@@ -2939,6 +3004,8 @@ def main(argv: list[str] | None = None) -> int:
         "excluded_model_ids": sorted(excluded_model_ids),
         "excluded_model_runs": excluded_model_runs,
         "discovered_runs": len(runs),
+        "cycle_floor": cycle_floor,
+        "skipped_older_than_floor": skipped_older_than_floor,
         "basins": basins,
         "basin_slugs": [seed_identities[basin].get("basin_slug") for basin in basins],
         "seed": {

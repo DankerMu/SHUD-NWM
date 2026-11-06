@@ -490,6 +490,11 @@ Node-27 ingest role:
   it only to the value `infra/env/node27-timeseries-retention.env` carries: it
   lets the display coverage refresh lower populated rows whose valid-time end
   is older than the display watermark minus that window. Unset = no relaxation.
+- `AUTOPIPE_MAX_CYCLE_AGE_DAYS` ships as `14` (#3062): the tick drops runs whose
+  cycle is older than now UTC minus that many days (truncated to the hour) and
+  counts them as `skipped_older_than_floor`. Unset/empty = no floor; a value
+  that is not a positive integer blocks the tick at preflight. Older cycles are
+  ingested manually with `--only-cycle YYYYMMDDHH`, which bypasses the floor.
 
 Node-27 download role:
 
