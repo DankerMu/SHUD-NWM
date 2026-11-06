@@ -1,7 +1,7 @@
 # direct-grid-variant-registration Specification
 
 ## Purpose
-TBD - created by archiving change source-specific-model-variant-routing. Update Purpose after archive.
+Govern how a direct-grid model variant is registered next to its legacy IDW baseline: a new inactive `core.model_instance` row shared by sources with the same canonical grid, the legacy row kept immutable, the `met.met_station` cell-station mirror written with `active_flag` false, and provisioning that is dry-run by default, leaves a succession receipt, and refuses an unsafe output registry directory.
 
 ## Requirements
 
@@ -80,7 +80,10 @@ The registration surface SHALL retain the basin's legacy IDW `core.model_instanc
 
 ### Requirement: Registration writes the met.met_station cell-station mirror with active_flag false
 
-The registration surface SHALL write the `met.met_station` cell-station mirror rows for the variant with `active_flag` explicitly set to `false`, using `station_id = "<mapping_asset_identity>::cell:<grid_cell_id>"`, with `station_role='direct_grid_cache'` and the derived-cache identity `properties_json` shape that the runtime producer's mirror writer (`workers/forcing_producer/store.py:ensure_direct_grid_met_stations`) requires, SHALL fail closed on a `station_id` collision whose bound identity differs, and SHALL NOT write any other `met.*` runtime-producer rows (§8.1).
+The registration surface SHALL write the `met.met_station` cell-station mirror rows for the variant with `active_flag` explicitly set to `false`, using
+`station_id = "<mapping_asset_identity>::cell:<grid_cell_id>"`, with `station_role='direct_grid_cache'` and the derived-cache identity `properties_json` shape
+that the runtime producer's mirror writer (`workers/forcing_producer/store.py:ensure_direct_grid_met_stations`) requires, SHALL fail closed on a `station_id`
+collision whose bound identity differs, and SHALL NOT write any other `met.*` runtime-producer rows (§8.1).
 
 #### Scenario: Mirror rows are written inactive with the mapping-asset station identity
 
@@ -93,7 +96,11 @@ The registration surface SHALL write the `met.met_station` cell-station mirror r
 
 - **WHEN** the registration surface writes a mirror row for a variant
 - **THEN** the row sets `station_role='direct_grid_cache'`, never the `'forcing_proxy'` column default (`db/migrations/000005_met.sql:53`)
-- **THEN** the row's `properties_json` carries the derived-cache identity fields the runtime producer's conditional upsert predicate requires — `derived_cache: true`, `forcing_mapping_mode: 'direct_grid'`, `binding_checksum`, `model_input_package_id`, `grid_signature`, `contract_grid_id`, and `grid_id` — plus the binding-derived fields `binding_uri`, `sp_att_path`, `sp_att_checksum`, `grid_cell_id`, `shud_forcing_index`, and `forcing_filename` (the object-store station-series read path resolves stations by `forcing_filename`), matching `workers/forcing_producer/store.py:ensure_direct_grid_met_stations` (lines 347-379)
+- **THEN** the row's `properties_json` carries the derived-cache identity fields the runtime producer's conditional upsert predicate requires —
+  `derived_cache: true`, `forcing_mapping_mode: 'direct_grid'`, `binding_checksum`, `model_input_package_id`, `grid_signature`, `contract_grid_id`, and
+  `grid_id` — plus the binding-derived fields `binding_uri`, `sp_att_path`, `sp_att_checksum`, `grid_cell_id`, `shud_forcing_index`, and `forcing_filename` (the
+  object-store station-series read path resolves stations by `forcing_filename`), matching `workers/forcing_producer/store.py:ensure_direct_grid_met_stations`
+  (lines 347-379)
 - **THEN** a subsequent direct-grid production run's mirror upsert recognizes these rows as the same derived direct-grid cache binding and reconciles them instead of failing closed with its collision error.
 
 #### Scenario: Mirror rows are bound to the canonical grid snapshot
@@ -110,7 +117,7 @@ The registration surface SHALL write the `met.met_station` cell-station mirror r
 
 #### Scenario: The mirror never lands active at registration
 
-- **WHEN** registration completes and the station-MVT query runs `met.met_station WHERE basin_version_id=… AND active_flag=true`
+- **WHEN** registration completes and the active station set `met.met_station WHERE basin_version_id=… AND active_flag=true` is read
 - **THEN** none of the newly registered variant's mirror rows are returned, because they are `active_flag=false`
 - **THEN** the mirror rows remain `active_flag=false` across a subsequent pre-cutover direct-grid production run, because the producer's mirror maintenance preserves the registration-owned flag (see the `fixed-station-forcing-production` delta in this change)
 - **THEN** the shadow-window display shows a single station track, not mixed legacy and direct-grid stations.

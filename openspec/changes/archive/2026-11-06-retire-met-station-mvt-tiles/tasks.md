@@ -30,5 +30,7 @@
 - [x] E2 `uv run python scripts/select_ci_tests.py --base-ref origin/master` selection passes; `uv run ruff check .` passes.
 - [x] E3 `cd apps/frontend && pnpm check:api-types && pnpm typecheck && pnpm test` pass.
 - [x] E4 `openspec validate retire-met-station-mvt-tiles --strict --no-interactive` passes.
-- [ ] E5 node-27 live receipt after merge (orchestrator): the tile URL answers router 404 and
+- [x] E5 node-27 live receipt after merge (orchestrator): the tile URL answers router 404 and
   `/api/v1/met/stations?basin_version_id=basins_qhh_vbasins` still returns stations.
+  Done 2026-11-06 on node-27 `cee8dbef8`: before `MVT_SOURCE_IDENTITY_NOT_FOUND`, after 404
+  `{"detail":"Not found"}`; met/stations and river-network tiles unchanged (#2773 comment).

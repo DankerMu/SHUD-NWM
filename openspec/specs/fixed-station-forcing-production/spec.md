@@ -1,7 +1,7 @@
 # fixed-station-forcing-production Specification
 
 ## Purpose
-TBD - created by archiving change m23-qhh-22-production-automation. Update Purpose after archive.
+Specify per-cycle meteorological forcing production for a basin's fixed (and direct-grid cell) stations: which stations are targeted, how station timeseries and the SHUD forcing package are produced and persisted, how output semantics and units are pinned to `producer_version`, and how station identity, handoff provenance and staging stay basin-neutral, fail closed, and never overwrite registration-owned state such as `active_flag`.
 
 ## Requirements
 
@@ -88,13 +88,17 @@ its manifest unit is caught by a guard test.
 
 ### Requirement: Direct-grid mirror maintenance preserves the registration-owned active_flag
 
-The runtime producer's direct-grid `met.met_station` mirror maintenance SHALL NOT set `active_flag=true` on either plane: the DB-plane upsert (`workers/forcing_producer/store.py:ensure_direct_grid_met_stations`) and the DB-free file plane's station-inventory handoff (`workers/forcing_producer/file_store.py:_handoff_station_rows` → `station_inventory.json` → the `met.met_station` ingest) SHALL preserve an existing row's current `active_flag` on conflict-update — never escalating `false`→`true` — and SHALL insert fresh mirror rows with `active_flag=false`. Mirror activation belongs exclusively to the cutover station-flag flip (Change 8); the writers' fail-closed derived-cache collision predicate is retained unchanged.
+The runtime producer's direct-grid `met.met_station` mirror maintenance SHALL NOT set `active_flag=true` on either plane: the DB-plane upsert
+(`workers/forcing_producer/store.py:ensure_direct_grid_met_stations`) and the DB-free file plane's station-inventory handoff
+(`workers/forcing_producer/file_store.py:_handoff_station_rows` → `station_inventory.json` → the `met.met_station` ingest) SHALL preserve an existing row's
+current `active_flag` on conflict-update — never escalating `false`→`true` — and SHALL insert fresh mirror rows with `active_flag=false`. Mirror activation
+belongs exclusively to the cutover station-flag flip (Change 8); the writers' fail-closed derived-cache collision predicate is retained unchanged.
 
 #### Scenario: A pre-cutover production run leaves the mirror inactive
 
 - **WHEN** a direct-grid forcing production run executes against a registered-but-inactive variant whose registration wrote the mirror rows with `active_flag=false`
 - **THEN** after the run every one of the variant's mirror rows still has `active_flag=false`
-- **THEN** the shadow-window station-MVT query (`active_flag=true`) still returns only the legacy station track, so pre-cutover production cannot create a mixed display.
+- **THEN** the shadow-window active station set (`active_flag=true`) still holds only the legacy station track, so pre-cutover production cannot create a mixed display.
 
 #### Scenario: The producer upsert never escalates active_flag
 
