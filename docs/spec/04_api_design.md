@@ -53,7 +53,7 @@ GET /api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/foreca
 GET /api/v1/met/stations?basin_version_id=&model_id=
 # 当传入 model_id 时，返回该 model 通过 interp_weight 实际使用的代站集合；
 # met_station 表本身不含 model_id 字段，关联通过 interp_weight 表实现。
-GET /api/v1/met/stations/{station_id}/series?forcing_version_id=&variables=PRCP,TEMP,RH,wind,Rn,Press
+GET /api/v1/met/stations/{station_id}/series?model_id=&source_id=&cycle_time=&variables=PRCP,TEMP,RH,wind,Rn,Press
 GET /api/v1/runs/{run_id}
 GET /api/v1/runs?basin_id=&source=&cycle_time=&status=
 GET /api/v1/pipeline/status?source=&cycle_time=

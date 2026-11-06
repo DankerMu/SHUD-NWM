@@ -912,7 +912,6 @@ def test_missing_required_filter_reuses_existing_details_shape(tmp_path: Path) -
     assert error.value.code == "MISSING_REQUIRED_FILTER"
     assert error.value.details == {
         "required_alternatives": [
-            ["forcing_version_id"],
             ["model_id", "source_id", "cycle_time"],
         ]
     }

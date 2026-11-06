@@ -10,10 +10,8 @@ import {
   DEFAULT_CYCLE,
   RETAINED_OUT_CYCLE,
   station,
-  forcingVersionFor,
   getSeriesQuery,
   apiGetCalls,
-  sourceFromQuery,
   mockLatestProducts,
   mockSeriesBySource,
   originalViewport,
@@ -90,8 +88,8 @@ describe('M11StationForcingPopup', () => {
         variables: [...HYDRO_MET_STATION_VARIABLES],
         limit: HYDRO_MET_STATION_SERIES_API_TUPLE_LIMIT,
       }))
-      const source = sourceFromQuery(query)
-      expect(query.forcing_version_id).toBe(forcingVersionFor(source))
+      // #3058: the series route keys on the tuple only; forcing_version_id is no longer a query parameter.
+      expect(query).not.toHaveProperty('forcing_version_id')
     }
 
     expect(HYDRO_MET_STATION_VARIABLES).toEqual(['PRCP', 'TEMP', 'RH', 'wind', 'Rn'])

@@ -3517,7 +3517,6 @@ async def test_met_station_series_forcing_version_alone_returns_missing_required
     assert body["error"]["code"] == "MISSING_REQUIRED_FILTER"
     assert body["error"]["details"] == {
         "required_alternatives": [
-            ["forcing_version_id"],
             ["model_id", "source_id", "cycle_time"],
         ]
     }

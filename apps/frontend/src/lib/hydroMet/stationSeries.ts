@@ -165,7 +165,6 @@ export async function loadHydroMetStationSeries({
       params: {
         path: { station_id: stationId },
         query: {
-          forcing_version_id: product.forcing_version_id,
           model_id: product.model_id,
           source_id: product.source_id,
           cycle_time: product.cycle_time,

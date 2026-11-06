@@ -53,17 +53,6 @@ def _station_series_parameters() -> list[dict[str, Any]]:
             "schema": {"type": "string"},
         },
         {
-            "name": "forcing_version_id",
-            "in": "query",
-            "required": False,
-            "schema": {"type": "string", "minLength": 1},
-            "deprecated": True,
-            "description": (
-                "Deprecated compatibility parameter. The disk-only route ignores this value when "
-                "model_id, source_id, and cycle_time are supplied; by itself it no longer selects DB-backed series."
-            ),
-        },
-        {
             "name": "model_id",
             "in": "query",
             "required": False,

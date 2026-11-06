@@ -160,7 +160,8 @@ def test_finalizer_leaves_pydantic_native_anyof_null_untouched() -> None:
     # FastAPI/Pydantic's own anyOf-null unions (e.g. the station-series
     # variables query parameter) must not be rewritten by the finalizer.
     pre_finalized = _pre_finalized_runtime_schema()
-    variables = pre_finalized["paths"]["/api/v1/met/stations/{station_id}/series"]["get"]["parameters"][5]["schema"]
+    parameters = pre_finalized["paths"]["/api/v1/met/stations/{station_id}/series"]["get"]["parameters"]
+    variables = next(parameter for parameter in parameters if parameter["name"] == "variables")["schema"]
     assert variables == {
         "oneOf": [
             {"type": "string"},
@@ -170,7 +171,9 @@ def test_finalizer_leaves_pydantic_native_anyof_null_untouched() -> None:
 
     finalized = copy.deepcopy(pre_finalized)
     openapi_patching._finalize_openapi_schema(finalized)
-    assert finalized["paths"]["/api/v1/met/stations/{station_id}/series"]["get"]["parameters"][5]["schema"] == variables
+    finalized_parameters = finalized["paths"]["/api/v1/met/stations/{station_id}/series"]["get"]["parameters"]
+    finalized_variables = next(parameter for parameter in finalized_parameters if parameter["name"] == "variables")
+    assert finalized_variables["schema"] == variables
 
 
 def test_finalizer_rejects_unsupported_nullable_shapes() -> None:

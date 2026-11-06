@@ -697,7 +697,7 @@ curl -sS "$NHMS_API_BASE_URL/met/stations?model_id=<model_id>&limit=20" \
 ### 11.3 station-series API
 
 ```bash
-curl -sS "$NHMS_API_BASE_URL/met/stations/<station_id>/series?forcing_version_id=<forcing_version_id>&variables=PRCP,TEMP,RH,wind,Rn,Press&limit=2000" \
+curl -sS "$NHMS_API_BASE_URL/met/stations/<station_id>/series?model_id=<model_id>&source_id=<source_id>&cycle_time=<cycle_time>&variables=PRCP,TEMP,RH,wind,Rn,Press&limit=2000" \
   | tee "$MVP_E2E_EVIDENCE_ROOT/api_station_series.json"
 ```
 

@@ -201,7 +201,6 @@ def test_station_series_missing_model_id_returns_missing_required_filter_via_obj
     assert error.code == "MISSING_REQUIRED_FILTER"
     assert error.details == {
         "required_alternatives": [
-            ["forcing_version_id"],
             ["model_id", "source_id", "cycle_time"],
         ]
     }

@@ -87,7 +87,6 @@ def test_station_series_openapi_and_generated_types_include_store_contract() -> 
     assert operation["operationId"] == "getMetStationSeries"
     assert set(parameters) == {
         "station_id",
-        "forcing_version_id",
         "model_id",
         "source_id",
         "cycle_time",
@@ -104,10 +103,8 @@ def test_station_series_openapi_and_generated_types_include_store_contract() -> 
     }
     assert "PRCP, TEMP, RH, wind, and Rn" in parameters["variables"]["description"]
     assert "Press" not in parameters["variables"]["description"]
-    for name in ("forcing_version_id", "model_id", "source_id"):
+    for name in ("model_id", "source_id"):
         assert parameters[name]["schema"] == {"type": "string", "minLength": 1}
-    assert parameters["forcing_version_id"]["deprecated"] is True
-    assert "disk-only route ignores this value" in parameters["forcing_version_id"]["description"]
     assert parameters["limit"]["schema"] == {
         "type": "integer",
         "minimum": 1,
@@ -147,7 +144,6 @@ def test_station_series_openapi_and_generated_types_include_store_contract() -> 
     assert missing_required_filter["message"] == STATION_SERIES_MISSING_REQUIRED_FILTER_MESSAGE
     assert missing_required_filter["details"] == {
         "required_alternatives": [
-            ["forcing_version_id"],
             ["model_id", "source_id", "cycle_time"],
         ]
     }
@@ -192,7 +188,8 @@ def test_station_series_openapi_and_generated_types_include_store_contract() -> 
     operation_start = generated_types.index("getMetStationSeries:")
     list_runs_start = generated_types.index("list_state_snapshots_api_v1_state_snapshots_get:")
     operation_types = generated_types[operation_start:list_runs_start]
-    assert "forcing_version_id?: string;" in operation_types
+    query_types = operation_types[operation_types.index("query?: {") : operation_types.index("header?: never;")]
+    assert "forcing_version_id" not in query_types
     assert "model_id?: string;" in operation_types
     assert "source_id?: string;" in operation_types
     assert "cycle_time?: string;" in operation_types
