@@ -140,7 +140,7 @@ def test_status_cell_is_the_pinned_literal_and_agrees_with_the_effective_column(
 
 @pytest.mark.parametrize("key", sorted(EXPECTED_STATUS))
 def test_example_value_matches_the_status_cell(rows: list[DriftRow], key: str) -> None:
-    # parse_env_template drops the trailing `# ...` commentary three of these lines carry.
+    # parse_env_template keeps a trailing `# ...` in the value, as systemd EnvironmentFile= does (#2970).
     example = parse_env_template(TEMPLATE.read_text(encoding="utf-8"))
     assert key in example, f"{key} is not in {TEMPLATE.name}"
     row = _row(rows, key)
