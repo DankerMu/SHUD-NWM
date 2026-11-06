@@ -46,6 +46,7 @@ from scripts.select_ci_tests_rules import (
     QHH_CYCLE_SBATCH,  # noqa: F401
     QHH_DIAGNOSTIC_README,  # noqa: F401
     SQLALCHEMY_URL_HELPER_TEST,  # noqa: F401
+    STATUS_LITERAL_SCAN_TEST,
     STATUS_VOCAB_PARITY_TEST,
     SUPPORT_MODULE_TEST_RULES,
     TIME_HELPER_CONSOLIDATION_TEST,
@@ -531,6 +532,8 @@ def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -
     for path in changed:
         if path.endswith(".py") and _any_path_matches([path], STATUS_VOCAB_PARITY_ROOTS):
             selected.add(STATUS_VOCAB_PARITY_TEST)
+            # #3026: the duplicate-literal scan reads the same file walk.
+            selected.add(STATUS_LITERAL_SCAN_TEST)
 
     # entropy-burndown task 3.1: supplemental time-helper consolidation routing,
     # same additive shape as the #1656 loop (no `matched`, no stop rules, no

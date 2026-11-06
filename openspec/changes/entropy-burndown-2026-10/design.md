@@ -182,7 +182,7 @@ and `Literal` aliases derive from the tuples. `tests/test_status_vocab_parity.py
 literal pinned from its canonical site at `f7be77f22`; `PIPELINE_JOB_STATUS_ORDER == schemas/pipeline_job.schema.json`
 enum (ordered); `HYDRO_RUN_STATUSES == schemas/run_status.schema.json` enum and ⊇ the migration-folded `hydro.run_status`
 enum minus `frequency_done` (reusing the folding helper of `tests/test_hydro_status_set_parity.py`, the #1581 oracle, so
-there is one folding implementation); `CYCLE_STATUSES ==` folded `met.cycle_status`; the duplicate-literal scan (excluding `status_vocab.py` itself) with an allowlist keyed by `file` + sorted literal
+there is one folding implementation); `CYCLE_STATUSES ==` folded `met.cycle_status`. `tests/test_status_literal_scan.py` (split out of the parity suite by #3026) runs the duplicate-literal scan (excluding `status_vocab.py` itself) with an allowlist keyed by `file` + sorted literal
 members and a reason (`pending-migration | distinct-vocabulary | not-a-status-set`) whose exit condition is "no
 `pending-migration` entry"; the initial hit list is produced by running the widened scan at introduction and
 adjudicating every hit. `normalize_qc_verdict` is read-side only: receipt writers and validators keep their spelling
@@ -192,7 +192,7 @@ Alternative rejected: eight union sets (Stage 2 draft) — four review findings 
 
 ### D3 (2.1a) risk contract
 
-- **Change surface**: new `packages/common/status_vocab.py`; four rebinds in `services/orchestrator/scheduler_state_types.py` (`:48`, `:57`, `:58`, `:60`); `tests/test_status_vocab_parity.py` (canonical pins, site types, `run_status` schema, two DB folds, `pipeline_job` schema modulo `_PENDING_PUBLIC_DELTA`); one additive helper in `tests/test_hydro_status_set_parity.py`; selector routing rows.
+- **Change surface**: new `packages/common/status_vocab.py`; four rebinds in `services/orchestrator/scheduler_state_types.py` (`:48`, `:57`, `:58`, `:60`); `tests/test_status_vocab_parity.py` (canonical pins, site types, `run_status` schema, two DB folds, `pipeline_job` schema modulo `_PENDING_PUBLIC_DELTA`); `tests/test_status_literal_scan.py` (the task 2.1b duplicate-literal scan, split out of the parity suite by #3026); one additive helper in `tests/test_hydro_status_set_parity.py`; selector routing rows.
 - **Must preserve**: every canonical site's object type and identity (`set` sites stay mutable `set`s, the `DURABLE_HYDRO_SUCCESS_STATUSES` mutation probe stays green, `ACTIVE_HYDRO_STATUSES` identity across its six sites); no schema, OpenAPI or generated-type change; the 11-value `OPS_JOB_STATUS_ENUM` parity in `tests/test_api_contract_pipeline_ops.py` stays green.
 - **Must add**: the vocabulary objects as frozensets / ordered tuples / `Literal` aliases; `normalize_qc_verdict` (read-side, unwired); the parity test; the `.py` additive selector loop and the `db/migrations`, `run_status.schema.json` and `status_vocab.py` routing rows.
 - **Governing invariant**: one named set per site purpose, never a union; the vocabulary never changes membership at any site (2.1a changes no consumer).
