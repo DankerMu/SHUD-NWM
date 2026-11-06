@@ -8,6 +8,7 @@ through the public CLI with an explicit reason; only disposable mechanics stay.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -37,6 +38,18 @@ class ProductionShapedHost(Host):
             row = {"source": "/dev/mapper/vg-home", "fstype": "ext4", "target": "/home", "options": "rw"}
             return SimpleNamespace(returncode=0, stdout=json.dumps({"filesystems": [row]}), stderr="")
         raise MigrationError("unexpected host command in retired production path")
+
+    def durable_workspace(self, path: Path) -> list[int]:
+        # pytest's tmp_path is under /tmp on Linux CI, which the real check
+        # rejects as ephemeral before the retirement gate is reached. Keep the
+        # owner/0700 identity and the findmnt durability probe; drop only the
+        # /tmp root rule, which says nothing about the retirement contract.
+        identity = path_identity(path)
+        if identity[2] != os.getuid() or identity[4] != 0o700:
+            raise MigrationError("workspace must already exist, owned by operator, mode 0700")
+        if self.filesystem(path)["fstype"] in {"tmpfs", "ramfs", "overlay", "aufs"}:
+            raise MigrationError("workspace filesystem is not durable")
+        return identity
 
     def non_probe_commands(self) -> list[list[str]]:
         return [argv for argv in self.commands if argv[0] != FINDMNT]
