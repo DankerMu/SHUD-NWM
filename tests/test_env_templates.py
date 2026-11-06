@@ -65,15 +65,29 @@ def parse_env_template(text: str) -> dict[str, str]:
     values: dict[str, str] = {}
     for raw in text.splitlines():
         line = raw.strip()
-        if not line or line.startswith("#"):
+        # systemd ignores only whole-line `#` / `;` comments ...
+        if not line or line.startswith(("#", ";")):
             continue
         key, separator, value = line.partition("=")
         if not separator:
             continue
-        # Trailing `# ...` commentary is how this template annotates values.
-        value = value.split("#", 1)[0].strip()
-        values[key.strip()] = value
+        # ... so a trailing `# ...` is part of the exported value (#2970).
+        values[key.strip()] = value.strip()
     return values
+
+
+# The issue #2970 acceptance grep: any `#` after an assignment's `=`.
+INLINE_COMMENT_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=[^#]*#")
+ENV_EXAMPLES = sorted((REPO_ROOT / "infra" / "env").glob("*.example"))
+
+
+def inline_comment_lines(text: str) -> list[str]:
+    """Return ``lineno: line`` for every assignment whose value carries a ``#``."""
+    return [
+        f"{lineno}: {raw}"
+        for lineno, raw in enumerate(text.splitlines(), start=1)
+        if INLINE_COMMENT_PATTERN.match(raw.strip())
+    ]
 
 
 def check_template(required: dict[str, str | None], values: dict[str, str]) -> list[str]:
@@ -183,3 +197,34 @@ def test_the_runbook_states_the_same_pinned_terminal_stage() -> None:
 
     assert "NHMS_ORCHESTRATOR_TERMINAL_STAGE=forecast_state_save_qc" in runbook
     assert "NHMS_REQUIRE_FORECAST_WARM_START=true" in runbook
+
+
+def test_env_examples_are_discovered() -> None:
+    assert TEMPLATE in ENV_EXAMPLES, ENV_EXAMPLES
+
+
+@pytest.mark.parametrize("example", ENV_EXAMPLES, ids=lambda path: path.name)
+def test_env_example_assignments_carry_no_inline_comment(example: Path) -> None:
+    """#2970: systemd ``EnvironmentFile=`` exports a trailing ``# ...`` as part
+    of the value, so every annotation must be a whole-line comment."""
+    assert inline_comment_lines(example.read_text(encoding="utf-8")) == []
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        pytest.param("NHMS_SCHEDULER_TIMING_LEVEL=stage    # pass|stage|candidate", id="spaced"),
+        pytest.param("NHMS_SCHEDULER_EVIDENCE_MAX_MB=512#cap", id="unspaced"),
+        pytest.param("  NHMS_SCHEDULER_EVIDENCE_RETENTION_DAYS=90 # days", id="indented"),
+    ],
+)
+def test_the_inline_comment_guard_bites(line: str) -> None:
+    text = f"# header\nNHMS_A=1\n{line}\n# NHMS_B=2  # a commented-out assignment is fine\n"
+
+    assert inline_comment_lines(text) == [f"3: {line}"]
+
+
+def test_parse_env_template_keeps_a_trailing_comment_like_systemd() -> None:
+    text = "# whole-line comment\n; also a comment\nNHMS_SCHEDULER_TIMING_LEVEL=stage  # pass|stage\n"
+
+    assert parse_env_template(text) == {"NHMS_SCHEDULER_TIMING_LEVEL": "stage  # pass|stage"}
