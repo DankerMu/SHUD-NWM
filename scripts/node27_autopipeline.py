@@ -64,7 +64,7 @@ import tempfile
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit
@@ -75,6 +75,7 @@ if str(REPO_ROOT) not in sys.path:
 
 import psycopg2
 
+from packages.common.contracts.time_normalization import utc_now
 from packages.common.forcing_domain_handoff_apply import (
     APPLY_MODE as OBJECT_STORE_HANDOFF_MODE,
 )
@@ -770,11 +771,6 @@ def _emit_json_summary(summary: dict[str, Any]) -> None:
 # --------------------------------------------------------------------------- #
 # run discovery
 # --------------------------------------------------------------------------- #
-def _utc_now() -> datetime:
-    """Wall clock for the cycle floor; a module seam so tests can pin it."""
-    return datetime.now(UTC)
-
-
 def _cycle_floor(max_age_days: int | None, *, only_cycle: str | None) -> dict[str, int | str | bool | None]:
     """The #3062 cycle floor for this tick (``floor_cycle`` is YYYYMMDDHH or None).
 
@@ -784,7 +780,7 @@ def _cycle_floor(max_age_days: int | None, *, only_cycle: str | None) -> dict[st
     """
     if max_age_days is None:
         return {"days": None, "floor_cycle": None, "applied": False, "bypassed_by_only_cycle": False}
-    floor_cycle = (_utc_now() - timedelta(days=max_age_days)).strftime("%Y%m%d%H")
+    floor_cycle = (utc_now() - timedelta(days=max_age_days)).strftime("%Y%m%d%H")
     bypassed = bool(only_cycle)
     return {
         "days": max_age_days,

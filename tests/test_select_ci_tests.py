@@ -2671,6 +2671,8 @@ def test_select_tests_maps_autopipeline_script_without_core_smoke_fallback() -> 
         "tests/test_node27_autopipeline_preflight.py",
         # #2590: the published re-parse decline suite, same rule.
         "tests/test_node27_autopipeline_published_reparse.py",
+        # #3052: the fresh-DB seed identity suite, same rule.
+        "tests/test_node27_autopipeline_seed_identity.py",
         "tests/test_node27_connection_attribution.py",
         "tests/test_node27_connection_attribution_delegated.py",
         # #2757: the basin retirement tool imports `_basin_key_set` from this

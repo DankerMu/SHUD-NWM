@@ -34,7 +34,7 @@ OLD_OTHER_BASIN = "fcst_gfs_2026061512_basins_heihe_shud"
 
 def _pin_clock(monkeypatch: pytest.MonkeyPatch, now: datetime = NOW) -> None:
     # raising=False: the red run against pre-#3062 source must fail on behaviour, not on a missing seam.
-    monkeypatch.setattr(autopipe, "_utc_now", lambda: now, raising=False)
+    monkeypatch.setattr(autopipe, "utc_now", lambda: now)
 
 
 def _ingested_run_ids(summary: dict[str, object]) -> list[str]:
