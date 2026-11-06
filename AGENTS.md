@@ -26,8 +26,11 @@ Do not hand-edit this file.
 - 22 的 `/ghdc/data/nwm/` 与 27 的 `/home/ghdc/nwm/` 是同一份 NFS，零延迟无需 rsync；basin 源数据在 `/home/ghdc/nwm/Basins`。
 - node-27 的 readonly 是 **role-level**（`nhms_display_ro` 无 INSERT/UPDATE/DELETE），不是 standby 副本。
 - 生产 display API + 前端公网入口：`https://test.nwm.ac.cn`（27 反代对外，无需 SSH 隧穿）。
-- node-27 DB 热数据在 `pg_default`（2026-11-05 换盘后 fresh initdb 重建：宿主 `/home/nwm/nhms-primary/pgdata`，容器 bind `/home/postgres/pgdata/data`；原 14T `/dev/md0` 已退役，`/data/GHDC` 现只是根卷上的目录）；工作集峰值必须对配置 PGDATA 的实际目标设备余量判定（该设备现即 `/home` LV，与 pytest 临时文件等共用余量），冷层仍未启用；容量核查一律 `df -h / /home` + `psql` 实测，不引用文档里的历史数字（`/` 也要看：#1765 的 `/tmp/pytest-of-nwm` 把根卷塞满过，node-27 上跑 pytest 前先
-  `mkdir -p /home/nwm/tmp && export TMPDIR=/home/nwm/tmp`）。容器 `nhms-db` 由裸 `docker run` 创建（无 compose/systemd unit），重建流程与存储分层历史见 `docs/runbooks/tier-node27-timeseries-storage.md` 与 ADR 0002。
+- node-27 DB 热数据在 `pg_default`（2026-11-05 换盘后 fresh initdb 重建：宿主 `/home/nwm/nhms-primary/pgdata`，容器 bind `/home/postgres/pgdata/data`；原 14T `/dev/md0` 已退役，`/data/GHDC` 现只是根卷上的目录）。
+  - 工作集峰值必须对配置 PGDATA 的实际目标设备余量判定（该设备现即 `/home` LV，与 pytest 临时文件等共用余量），冷层仍未启用。
+  - 容量核查一律 `df -h / /home` + `psql` 实测，不引用文档里的历史数字（`/` 也要看：#1765 的 `/tmp/pytest-of-nwm` 把根卷塞满过）。
+  - node-27 上跑 pytest 前先 `mkdir -p /home/nwm/tmp && export TMPDIR=/home/nwm/tmp`。
+  - 容器 `nhms-db` 由裸 `docker run` 创建（无 compose/systemd unit），重建流程与存储分层历史见 `docs/runbooks/tier-node27-timeseries-storage.md` 与 ADR 0002。
 
 ### 验证 oracle 路由（改了什么 -> 在哪验）
 
@@ -51,18 +54,28 @@ Do not hand-edit this file.
 ### 远端同步纪律（ff-only，绝不吞 stash）
 
 - 两端工作树共享、可能有未提交内容；pull 前先 `git status --porcelain` 把关，用 `git pull --ff-only`，**绝不自动 `git stash pop`**（吞掉冲突会静默丢工作）。
-- ff 合并可能因 **untracked 同名文件**中止。处置：先确认内容与 master 一致（`diff` 为 0 / 备份到 `~/NWM-presync-backup-<date>/`），再清理冲突 untracked 后 ff；**绝不动** gitignored 数据/证据目录（`artifacts/`、`.nhms-*`、`data/Basins/` 等），有价值的本地证据先 `git stash push -- <file>` 保全。
+- ff 合并可能因 **untracked 同名文件**中止。处置：先确认内容与 master 一致（`diff` 为 0 / 备份到 `~/NWM-presync-backup-<date>/`），再清理冲突 untracked 后 ff。
+  - **绝不动** gitignored 数据/证据目录（`artifacts/`、`.nhms-*`、`data/Basins/` 等），有价值的本地证据先 `git stash push -- <file>` 保全。
 - 远端投送脚本/SQL 用 `ssh 'cat > file' < local`，不要靠嵌套引号传 SQL（单引号会被吃、`$` 会被远端展开）；长作业 `{ setsid nohup ... & }` 分离并把输出写文件。
 
 ### 环境隔离原则
 
-**不同步** `.venv/`、`node_modules/`、`.nhms-*`、`pgdata/`、`minio-data/`、`infra/env/compute.env`；两端系统不同（macOS vs Ubuntu），运行环境各自初始化。`.env.example` 和 `infra/env/*.example` 是模板可同步，实际 `.env` / `compute.env` 不同步。Linux 端首次初始化与迁移后验证清单见 `docs/runbooks/two-node-deployment-overview.md`。
+- **不同步** `.venv/`、`node_modules/`、`.nhms-*`、`pgdata/`、`minio-data/`、`infra/env/compute.env`；两端系统不同（macOS vs Ubuntu），运行环境各自初始化。
+- `.env.example` 和 `infra/env/*.example` 是模板可同步，实际 `.env` / `compute.env` 不同步。
+- Linux 端首次初始化与迁移后验证清单见 `docs/runbooks/two-node-deployment-overview.md`。
 
 ## 开发环境约定
 
 - **Python 一律用 `uv`**（`uv run`、`uv pip`），禁止裸 `python` / `python3` / `pip`；装依赖 `uv sync --all-extras --dev`。node-27 上需 `export PATH=$HOME/.local/bin:$PATH`。
-- 仓库默认解释器是 Python 3.11，由根 `.python-version` 钉住（与 CI 的 `python-version: "3.11"` 同源）；`pyproject.toml` 的支持范围仍是 `requires-python >=3.11`。日常安装/运行照旧 `uv sync --all-extras --dev` / `uv run`。显式跨版本行为核查用 `uv run --python <version> ...`（例：`uv run --python 3.14 python -V`）。
-- **node-22 例外（长期保持 3.12.7）**：按 #1831 的运维决定（2026-10-05），`/scratch/frd_muziyao/NWM` 的活动 checkout 长期保持 Python 3.12.7，原计划向 3.11 pin 的切换已取消（共享 `.venv` 被在线服务占用，而仓库 pin 是 3.11——**禁止** `uv sync`，也禁止裸 `uv run` / 任何会隐式重建环境的 `uv run` 变体，否则 uv 会在 3.11 pin 下自动删除并重建 3.12 的 `.venv`，已实测会打断成半拆状态；**系统 Python 也不是替代**）。必须执行的活动操作使用 checked-in wrapper 或精确活动解释器 `/scratch/frd_muziyao/NWM/.venv/bin/python`（控制台入口用 `-m`）；解释器缺失即 fail-closed，绝不触发环境创建。若需只读 Python 观察，只用已验证的 `uv run --no-sync ...`——它执行的是活动的 3.12.7 环境、**不代表 3.11 pin 生效**；`--active` 并非安全替代（同样会重建）。更换 node-22 的解释器或重建该 `.venv`，须有新的、明确的运维决定并单独立 issue。该 pin 不含任何 Slurm 运行时验证。
+- 仓库默认解释器是 Python 3.11，由根 `.python-version` 钉住（与 CI 的 `python-version: "3.11"` 同源）；`pyproject.toml` 的支持范围仍是 `requires-python >=3.11`。
+  - 日常安装/运行照旧 `uv sync --all-extras --dev` / `uv run`。显式跨版本行为核查用 `uv run --python <version> ...`（例：`uv run --python 3.14 python -V`）。
+- **node-22 例外（长期保持 3.12.7）**：#1831；**禁止** `uv sync`、裸 `uv run` 及其隐式重建变体；**系统 Python 也不是替代**；只读观察只用 `uv run --no-sync ...`，`--active` 并非安全替代。细则：
+  - 按 #1831 的运维决定（2026-10-05），`/scratch/frd_muziyao/NWM` 的活动 checkout 长期保持 Python 3.12.7，原计划向 3.11 pin 的切换已取消：
+    - 共享 `.venv` 被在线服务占用，而仓库 pin 是 3.11——**禁止** `uv sync`，也禁止裸 `uv run` / 任何会隐式重建环境的 `uv run` 变体，
+    - 否则 uv 会在 3.11 pin 下自动删除并重建 3.12 的 `.venv`，已实测会打断成半拆状态；**系统 Python 也不是替代**。
+  - 必须执行的活动操作使用 checked-in wrapper 或精确活动解释器 `/scratch/frd_muziyao/NWM/.venv/bin/python`（控制台入口用 `-m`）；解释器缺失即 fail-closed，绝不触发环境创建。
+  - 若需只读 Python 观察，只用已验证的 `uv run --no-sync ...`——它执行的是活动的 3.12.7 环境、**不代表 3.11 pin 生效**；`--active` 并非安全替代（同样会重建）。
+  - 更换 node-22 的解释器或重建该 `.venv`，须有新的、明确的运维决定并单独立 issue。该 pin 不含任何 Slurm 运行时验证。
 - 前端：`cd apps/frontend && pnpm install && pnpm test && pnpm build`；Linux 端用 `corepack pnpm`（版本以 `package.json` 的 `packageManager` 为准）。
 
 ## Issue 驱动开发
@@ -81,7 +94,12 @@ Do not hand-edit this file.
 ## PR 规范
 
 - 分支命名 `feat/issue-<N>-<short-desc>`；PR body 含变更摘要、测试证据、Evidence Floor 覆盖声明、偏离记录；合并前通过 issue 指定的全部验证命令。
-- 跨 PR 轮次上限记忆 `.review-gate-issues.json` 只经 `scripts/review_gate.py` 写：`fix_gate.py open --pr <PR>` 旁跑 `uv run python scripts/review_gate.py check --issue <N> --pr <PR>`（exit 2 = 该 issue 已在别的 PR 撞过硬停，先要用户决定）；该 issue 的 PR **每次关闭**都跑 `uv run python scripts/review_gate.py record --issue <N> --pr <PR> --rounds <R> --outcome <OUTCOME>`（`merged` 在 post-merge archive commit 里；`superseded-by-split` / `abandoned` / `descoped` 在跑 `fix_gate.py close` 时一并 commit；fix_gate 在该 PR 锁过必加 `--ceiling`，否则后继 PR 的 `check` 查不到）。loop-log 审计按需 `uv run python scripts/governance/loop_log_audit.py`。
+- 跨 PR 轮次上限记忆 `.review-gate-issues.json` 只经 `scripts/review_gate.py` 写：
+  - `fix_gate.py open --pr <PR>` 旁跑 `uv run python scripts/review_gate.py check --issue <N> --pr <PR>`（exit 2 = 该 issue 已在别的 PR 撞过硬停，先要用户决定）。
+  - 该 issue 的 PR **每次关闭**都跑 `uv run python scripts/review_gate.py record --issue <N> --pr <PR> --rounds <R> --outcome <OUTCOME>`：
+    - `merged` 在 post-merge archive commit 里；`superseded-by-split` / `abandoned` / `descoped` 在跑 `fix_gate.py close` 时一并 commit。
+    - fix_gate 在该 PR 锁过必加 `--ceiling`，否则后继 PR 的 `check` 查不到。
+- loop-log 审计按需 `uv run python scripts/governance/loop_log_audit.py`。
 
 ### CI 成本纪律（避免重复跑 / 单一终态推送）
 
@@ -91,11 +109,20 @@ Do not hand-edit this file.
 
 ### CI 门控要点
 
-规则以 `.github/workflows/ci.yml`（+ `governance.yml`：report-only 审计 job，外加不按路径 scope、每个 PR / master push 都跑的 `Production Topology Hard Gate` job；`floating-resolve-report.yml` 是每周定时 + 手动触发的浮动依赖解析报告车道，只报告、不门控合并）为准；下面只是读结果时必须知道的五条：
+规则以 `.github/workflows/ci.yml`（+ `governance.yml`）为准：
+
+- `governance.yml`：report-only 审计 job，外加不按路径 scope、每个 PR / master push 都跑的 `Production Topology Hard Gate` job。
+- `floating-resolve-report.yml` 是每周定时 + 手动触发的浮动依赖解析报告车道，只报告、不门控合并。
+
+下面只是读结果时必须知道的五条：
 
 - **按路径 scope**：`changes` job 先判改动区，纯前端/纯 docs PR 不跑后端 pytest；`real-db-integration`（显示名 "SQL Migration Dry Run"）有独立且窄得多的 `database` filter，且 PR 上还要求非 draft。
-- **PR 上后端只跑定向测试**：`unit-test-targeted`（显示名 "Unit Tests"）按本 PR diff 由 `scripts/select_ci_tests.py` 选文件；选不出时降级为 `--collect-only` 冒烟（**零断言执行**，step summary 会标注）。全量 `unit-test`（"Unit Tests (full)"）只在 push master 或手动 `workflow_dispatch` 跑，且是 matrix 分片：`scripts/ci/shard_tests.py` 把全部测试文件切成互不相交、合起来完整的若干片，job 显示为 "Unit Tests (full) (<片号>)"，**每一片都绿才算全量通过**；分片数与每片 `timeout-minutes` 以 `ci.yml` 为准，`full-regression-watch.yml` 按片盯失败与耗时余量。
-- **前端 mocked Playwright 车道是 matrix 分片**：不在 `frontend-build`（"Frontend Build"）里，而是 `frontend-e2e` 用 Playwright 原生 `--shard` 切成互不相交、合起来完整的若干片，job 显示为 "Frontend E2E (mocked) (<片号>)"，**每一片都绿才算车道通过**；分片数与每片 `timeout-minutes` 以 `ci.yml` 为准，spec 变多时加片而不是抬超时。
+- **PR 上后端只跑定向测试**：`unit-test-targeted`（显示名 "Unit Tests"）按本 PR diff 由 `scripts/select_ci_tests.py` 选文件；选不出时降级为 `--collect-only` 冒烟（**零断言执行**，step summary 会标注）。
+  - 全量 `unit-test`（"Unit Tests (full)"）只在 push master 或手动 `workflow_dispatch` 跑，且是 matrix 分片。
+  - `scripts/ci/shard_tests.py` 把全部测试文件切成互不相交、合起来完整的若干片，job 显示为 "Unit Tests (full) (<片号>)"，**每一片都绿才算全量通过**。
+  - 分片数与每片 `timeout-minutes` 以 `ci.yml` 为准，`full-regression-watch.yml` 按片盯失败与耗时余量。
+- **前端 mocked Playwright 车道是 matrix 分片**：不在 `frontend-build`（"Frontend Build"）里，而是 `frontend-e2e` 用 Playwright 原生 `--shard` 切成互不相交、合起来完整的若干片。
+  - job 显示为 "Frontend E2E (mocked) (<片号>)"，**每一片都绿才算车道通过**；分片数与每片 `timeout-minutes` 以 `ci.yml` 为准，spec 变多时加片而不是抬超时。
 - **PR 绿 ≠ 全量 pytest 通过**：全量回归是 merge 后 master run 才跑的**事后**发现；迭代 oracle 仍是 node-27 真实 DB，不是 CI。
 - **draft -> ready 不触发新 run**（`on.pull_request` 未声明 `types:`）；要让 draft 期间跳过的 job 真跑起来，必须再推一个 commit 或 close/reopen。
 
