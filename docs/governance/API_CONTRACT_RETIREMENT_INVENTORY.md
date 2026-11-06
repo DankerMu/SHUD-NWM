@@ -306,5 +306,5 @@ the #411 evidence snapshot and are not rewritten.
   an orphan index; dropping it is a separate DB change. The helpers
   `_stable_segment_id` and `_deduplicate_pending_segment_ids` in
   `workers/model_registry/basins_geometry.py` have no caller; deleting them needs
-  that 1432-line file split first (it is not a large-file guard exclusion), tracked
+  that 1440-line file split first (it is not a large-file guard exclusion), tracked
   by #3081.

@@ -56,8 +56,9 @@
 
 `_partition_retirement_violations(oracle, retirements, additions, run_git, *, config)` where `config`
 carries the schema id, the partition owner set, the retained-core path and the database authority, so
-the #1948 QHH-bootstrap partition can call it with its own config later (it is not wired there in this
-change; no rule reads a `REGISTRY_PARTITION_*` global directly). Rules, each a named violation:
+no rule reads a `REGISTRY_PARTITION_*` global directly. It still reads oracle rows in the #1913 list
+shape (`[owner, source, ast, markers, args, decorators, monkeypatch]`); the #1948 QHH-bootstrap oracle
+stores rows as dicts, so adopting the checker there needs a row adapter (not wired in this change). Rules, each a named violation:
 
 - `schema`, `missing_key`, `field_shape` (int issue, 40-hex base_commit, action ∈ {retire, rewrite},
   non-empty reason string);

@@ -55,7 +55,7 @@
   both unchanged; delete the four QHH `test_segment_slice_*` definitions named in the proposal.
 - [x] 3.2 Delete `list_river_segments`, its private helpers left without callers, the four
   `RIVER_SEGMENT_COLLECTION_*` constants and re-exports. **Deviation (2026-11-06):** `_stable_segment_id`
-  stays — `workers/model_registry/basins_geometry.py` is 1432 lines and not a large-file guard exclusion, so
+  stays — `workers/model_registry/basins_geometry.py` is 1440 lines and not a large-file guard exclusion, so
   any edit is rejected by the pre-commit hook; its deletion moves to #3081 together with the file split and
   `_deduplicate_pending_segment_ids`.
 - [x] 3.3 Delete the four river cases in `tests/test_list_search_contract.py` (keep the file and station
@@ -79,7 +79,7 @@
   workers services` only `_delete_legacy_seg_rows` / `basins_seg_shp` / `parse_seg_shp_crosswalk` (plus `_stable_segment_id`, #3081);
   `git diff --exit-code origin/master -- tests/fixtures/basins_registry_partition_oracle.json .large-file-guard.json`;
   every touched test file < 1000 lines; `openspec validate retire-river-segments-store --strict --no-interactive`.
-- [ ] 4.2 node-27, on the frozen PR head, isolated temporary database and role derived from `:55432`
+- [x] 4.2 node-27, on the frozen PR head, isolated temporary database and role derived from `:55432`
   (procedure: `openspec/changes/archive/2026-09-05-partition-basins-registry-import-tests/tasks.md`
   node-27 proof; DB and role dropped afterwards; production DB untouched; no credential in evidence):
   (a) the combined registry auth/DB/QHH + QHH-bootstrap scheduler selection with integration enabled and

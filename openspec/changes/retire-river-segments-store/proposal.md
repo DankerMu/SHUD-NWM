@@ -40,7 +40,7 @@ the guards evaluate `oracle − retirements ∪ additions`.
 - Delete `list_river_segments`, `_list_river_segment_rnv_ids`, `_has_segment_crosswalk_for_rnv`,
   `_list_river_segments_segment_slice`, `_reach_row_to_legacy_feature` (and any helper left without a
   caller), the four `RIVER_SEGMENT_COLLECTION_*` constants and their `model_registry.py` re-exports,
-  (`_stable_segment_id` was in scope but is deferred to #3081: its 1432-line host file is not a
+  (`_stable_segment_id` was in scope but is deferred to #3081: its 1440-line host file is not a
   large-file guard exclusion and must be split first).
 - Delete the four river cases in `tests/test_list_search_contract.py` (file stays; station cases
   remain) and the three store-level list budget tests in `tests/test_model_registration.py`, and the
@@ -58,8 +58,8 @@ the guards evaluate `oracle − retirements ∪ additions`.
 
 ## Impact
 
-- Code: `packages/common/{model_registry_river_segments,model_registry_contracts,model_registry}.py`,
-  `workers/model_registry/basins_geometry.py`.
+- Code: `packages/common/{model_registry_river_segments,model_registry_contracts,model_registry}.py`
+  (`workers/model_registry/basins_geometry.py` untouched; see #3081).
 - Tests: `tests/test_basins_registry_import_{db,qhh}.py`, `tests/test_list_search_contract.py`,
   `tests/test_model_registration.py`, `tests/test_api_contract_resources.py`,
   `tests/test_select_ci_tests.py` (#1913 guard section), new ledger fixture, selector routing.
