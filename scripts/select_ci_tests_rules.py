@@ -3791,6 +3791,8 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_autopipeline_cycle_floor.py",
             # #3052: fresh-DB seed identity (direct-grid baseline, slug dir resolution).
             "tests/test_node27_autopipeline_seed_identity.py",
+            # #3057: inventory-only seeds never take the basin's active flag.
+            "tests/test_node27_autopipeline_inventory_activation.py",
             "tests/test_pipeline_job_provenance_publisher.py",
             "tests/test_pipeline_job_provenance_importer.py",
             "tests/test_pipeline_job_provenance_copyback.py",

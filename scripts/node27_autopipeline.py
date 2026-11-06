@@ -742,7 +742,13 @@ def _ingest_evidence(preflight: dict[str, Any]) -> dict[str, Any]:
 
 
 def _empty_seed_summary() -> dict[str, Any]:
-    return {"seeded": [], "already_seeded": [], "failed": [], "details": []}
+    return {
+        "seeded": [],
+        "already_seeded": [],
+        "activation_skipped_other_active": [],
+        "failed": [],
+        "details": [],
+    }
 
 
 def _empty_runs_summary() -> dict[str, Any]:
@@ -1459,6 +1465,30 @@ def _activate_model(database_url: str, model_id: str) -> int:
         conn.close()
 
 
+def _active_sibling_model_id(database_url: str, model_id: str) -> str | None:
+    """The model currently holding the active flag on ``model_id``'s basin version."""
+    conn = _connect(database_url)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT active_sibling.model_id
+                FROM core.model_instance model
+                JOIN core.model_instance active_sibling
+                  ON active_sibling.basin_version_id = model.basin_version_id
+                 AND active_sibling.active_flag = true
+                WHERE model.model_id = %s
+                ORDER BY active_sibling.model_id
+                LIMIT 1
+                """,
+                (model_id,),
+            )
+            row = cur.fetchone()
+            return str(row[0]) if row and row[0] else None
+    finally:
+        conn.close()
+
+
 def _model_river_network_version_id(database_url: str, model_id: str) -> str | None:
     conn = _connect(database_url)
     try:
@@ -1477,24 +1507,38 @@ def _model_river_network_version_id(database_url: str, model_id: str) -> str | N
         conn.close()
 
 
-def _ensure_seeded_basin_display_ready(database_url: str, model_id: str) -> dict[str, Any]:
+def _ensure_seeded_basin_display_ready(
+    database_url: str, model_id: str, *, activate: bool = True,
+) -> dict[str, Any]:
     """Make an existing imported basin visible to display consumers.
 
     ``core.basin`` being present only proves the generic registry import ran at
     least once. Display still needs the model active and output reaches carrying
     geometry; older seed passes can leave both incomplete.
+
+    ``activate=False`` (inventory-only basin, #3057) only backfills geometry:
+    the active flag is reserved for the model a run brings (a direct-grid
+    variant), which `_activate_model` cannot claim once a sibling holds it.
+    When activation is attempted but another sibling already holds the flag,
+    ``activation_skipped_other_active`` names that sibling instead of letting
+    the 0-row activation pass silently.
     """
     rnv_id = _model_river_network_version_id(database_url, model_id)
     if not rnv_id:
         raise ValueError(f"model_instance missing or incomplete for {model_id}")
     geom_rows = _backfill_output_geometry(database_url, rnv_id)
-    activated = _activate_model(database_url, model_id)
-    return {
+    activated = _activate_model(database_url, model_id) if activate else 0
+    result: dict[str, object] = {
         "model_id": model_id,
         "river_network_version_id": rnv_id,
         "output_geometry_backfilled": geom_rows,
         "model_activated_rows": activated,
     }
+    if activate and activated == 0:
+        active_model_id = _active_sibling_model_id(database_url, model_id)
+        if active_model_id != model_id:
+            result["activation_skipped_other_active"] = active_model_id
+    return result
 
 
 def _backfill_output_geometry(database_url: str, river_network_version_id: str) -> int:
@@ -2714,9 +2758,16 @@ def main(argv: list[str] | None = None) -> int:
     for basin in basins:
         identity = seed_identities[basin]
         basin_slug = identity.get("basin_slug") or basin
+        # #3057: only a run's model may claim the basin's active flag. An
+        # inventory-only basin (no run in this tick's scope) never activates
+        # its baseline -- once a baseline holds the flag, `_activate_model`
+        # cannot hand it to the direct-grid variant the first run brings.
+        run_backed = identity.get("identity_source") == "run_manifest"
         if _basin_seeded(database_url, identity["basin_id"]):
             try:
-                display_ready = _ensure_seeded_basin_display_ready(database_url, identity["model_id"])
+                display_ready = _ensure_seeded_basin_display_ready(
+                    database_url, identity["model_id"], activate=run_backed,
+                )
             except Exception as exc:  # noqa: BLE001 - record + continue, isolate failure
                 seed_results.append(
                     {
@@ -2771,14 +2822,15 @@ def main(argv: list[str] | None = None) -> int:
             )
         # A direct-grid basin seeds its baseline INACTIVE: only the variant may
         # carry the basin's active flag, and it becomes display-ready here once
-        # provisioned (until then the basin fails closed at display_ready).
+        # provisioned (until then the basin fails closed at display_ready). An
+        # inventory-only basin seeds INACTIVE too (#3057, see `run_backed`).
         result = _seed_basin(
             basin=seed_identity.get("basin_slug") or basin_slug,
             identity=seed_identity,
             database_url=database_url,
             basins_root=basins_root,
             env=env,
-            activate=not direct_grid,
+            activate=run_backed and not direct_grid,
         )
         if direct_grid and result["outcome"] == "seeded":
             try:
@@ -3011,6 +3063,15 @@ def main(argv: list[str] | None = None) -> int:
         "seed": {
             "seeded": [s["basin"] for s in seed_results if s["outcome"] == "seeded"],
             "already_seeded": [s["basin"] for s in seed_results if s["outcome"] == "already_seeded"],
+            "activation_skipped_other_active": [
+                {
+                    "basin": s["basin"],
+                    "model_id": s.get("model_id"),
+                    "active_model_id": s["activation_skipped_other_active"],
+                }
+                for s in seed_results
+                if "activation_skipped_other_active" in s
+            ],
             "failed": [{"basin": s["basin"], "stage": s.get("stage"), "error": s.get("error")} for s in seed_failed],
             "details": seed_results,
         },
