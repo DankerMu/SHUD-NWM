@@ -494,3 +494,34 @@ def test_wrapper_and_env_contract_do_not_source_display_env() -> None:
     assert "55433" in env_example
     assert "scripts/node27_download_once.sh" in service
     assert "OnUnitActiveSec=30min" in timer
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr"),
+    [
+        pytest.param(b"partial progress\n", b"f000.grib2: 100%\xe2\x96\x88\n", id="bytes"),
+        pytest.param(None, None, id="none"),
+        pytest.param("text out", "text err", id="str"),
+    ],
+)
+def test_download_timeout_yields_structured_failure_not_a_crash(
+    monkeypatch: pytest.MonkeyPatch, stdout: bytes | str | None, stderr: bytes | str | None
+) -> None:
+    """#3075: CPython's TimeoutExpired carries BYTES output even under text=True."""
+
+    def time_out(command, **kwargs):
+        raise downloader.subprocess.TimeoutExpired(command, kwargs["timeout"], output=stdout, stderr=stderr)
+
+    monkeypatch.setattr(downloader.subprocess, "run", time_out)
+
+    result = downloader.run_source_download(
+        "IFS", "2026-10-13T00:00:00Z", {"NODE27_DOWNLOAD_COMMAND_TIMEOUT_SECONDS": "5"}
+    )
+
+    assert result.status == "failed"
+    assert result.return_code == 124
+    assert result.result == {"error_code": "DOWNLOAD_TIMEOUT"}
+    assert isinstance(result.stdout_tail, str) and isinstance(result.stderr_tail, str)
+    if stderr is not None:
+        assert "f000.grib2" in result.stderr_tail or "text err" in result.stderr_tail
+    json.dumps(result.as_dict())
