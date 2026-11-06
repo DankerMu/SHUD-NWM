@@ -2629,7 +2629,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             continue
         inventory_identity = seed_identities.get(basin_key, {})
-        merged_identity: dict[str, Any] = {
+        merged_identity = {
             **inventory_identity,
             **run_identity,
             "basin_key": basin_key,
