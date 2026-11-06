@@ -20344,6 +20344,8 @@ REGISTRY_PARTITION_GUARD_PROVENANCE_SHA256 = "5c06fad8ba8f488d8bfc836e747cd7af64
 REGISTRY_PARTITION_GUARD_HOOK_PATH = ".claude/hooks/large-file-guard/large-file-guard.sh"
 # Mirrored from the hook; `_registry_assert_hook_default_exclude_literals` keeps
 # the mirror honest. Effective exclusions = configured `exclude` + this list.
+# The hook is a local-only install since #3080 (gitignored), so this literal is
+# authoritative; the drift comparison only runs where the hook is installed.
 REGISTRY_PARTITION_GUARD_DEFAULT_EXCLUDE: tuple[str, ...] = (
     "*.lock",
     "package-lock.json",
@@ -22299,22 +22301,98 @@ def _registry_hook_excludes_path(path: str, pattern: str) -> bool:
     return fnmatch.fnmatch(path, pattern) or fnmatch.fnmatch(os.path.basename(path), pattern)
 
 
-def _registry_assert_hook_default_exclude_literals() -> None:
-    """Keep the mirrored DEFAULT_EXCLUDE list honest against the hook source."""
-    hook = Path(REGISTRY_PARTITION_GUARD_HOOK_PATH).read_text(encoding="utf-8")
+def _registry_assert_hook_default_exclude_literals(hook_path: str | Path = REGISTRY_PARTITION_GUARD_HOOK_PATH) -> None:
+    """Keep the mirrored DEFAULT_EXCLUDE list honest against the hook source.
+
+    The hook is a local-only install since #3080 (gitignored, absent on CI
+    checkouts). When it is absent the mirrored literal is authoritative and the
+    drift comparison is skipped; it only runs where the hook is installed.
+    """
+    path = Path(hook_path)
+    if not path.exists():
+        return
+    hook = path.read_text(encoding="utf-8")
     expected = (
         "DEFAULT_EXCLUDE = [\n" + "".join(f'    "{item}",\n' for item in REGISTRY_PARTITION_GUARD_DEFAULT_EXCLUDE) + "]"
     )
     assert expected in hook, (
-        f"{REGISTRY_PARTITION_GUARD_HOOK_PATH} DEFAULT_EXCLUDE drifted from "
-        f"{list(REGISTRY_PARTITION_GUARD_DEFAULT_EXCLUDE)}"
+        f"{hook_path} DEFAULT_EXCLUDE drifted from {list(REGISTRY_PARTITION_GUARD_DEFAULT_EXCLUDE)}"
     )
 
 
-def _registry_effective_guard_exclusions(guard: dict[str, Any]) -> tuple[str, ...]:
+def _registry_effective_guard_exclusions(
+    guard: dict[str, Any], *, hook_path: str | Path = REGISTRY_PARTITION_GUARD_HOOK_PATH
+) -> tuple[str, ...]:
     """Configured ``exclude`` plus the hook's DEFAULT_EXCLUDE, in that order."""
-    _registry_assert_hook_default_exclude_literals()
+    _registry_assert_hook_default_exclude_literals(hook_path)
     return tuple(list(guard.get("exclude", [])) + list(REGISTRY_PARTITION_GUARD_DEFAULT_EXCLUDE))
+
+
+def test_registry_partition_hook_default_exclude_absent_hook_uses_mirrored_literal(tmp_path: Path) -> None:
+    missing = tmp_path / "large-file-guard.sh"
+    guard = {"exclude": ["docs/**", "*.csv"]}
+
+    _registry_assert_hook_default_exclude_literals(missing)
+    assert _registry_effective_guard_exclusions(guard, hook_path=missing) == (
+        "docs/**",
+        "*.csv",
+        "*.lock",
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "*.min.*",
+        "*.svg",
+        "*.map",
+        "*.snap",
+        "dist/**",
+        "build/**",
+        "vendor/**",
+        "node_modules/**",
+    )
+
+
+_REGISTRY_HOOK_FIXTURE_TEMPLATE = "#!/usr/bin/env bash\npython3 - <<'PY'\nDEFAULT_EXCLUDE = [\n{items}]\nPY\n"
+
+
+def test_registry_partition_hook_default_exclude_matching_hook_passes(tmp_path: Path) -> None:
+    hook = tmp_path / "large-file-guard.sh"
+    hook.write_text(
+        _REGISTRY_HOOK_FIXTURE_TEMPLATE.format(
+            items="".join(
+                f'    "{item}",\n'
+                for item in (
+                    "*.lock",
+                    "package-lock.json",
+                    "pnpm-lock.yaml",
+                    "yarn.lock",
+                    "*.min.*",
+                    "*.svg",
+                    "*.map",
+                    "*.snap",
+                    "dist/**",
+                    "build/**",
+                    "vendor/**",
+                    "node_modules/**",
+                )
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    _registry_assert_hook_default_exclude_literals(hook)
+
+
+def test_registry_partition_hook_default_exclude_drifted_hook_fails(tmp_path: Path) -> None:
+    hook = tmp_path / "large-file-guard.sh"
+    hook.write_text(
+        _REGISTRY_HOOK_FIXTURE_TEMPLATE.format(
+            items="".join(f'    "{item}",\n' for item in ("*.lock", "package-lock.json", "*.parquet"))
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(AssertionError, match="DEFAULT_EXCLUDE drifted from"):
+        _registry_assert_hook_default_exclude_literals(hook)
 
 
 def _registry_exclusion_matches(paths: Sequence[str], exclusions: Sequence[str]) -> tuple[tuple[str, str], ...]:
