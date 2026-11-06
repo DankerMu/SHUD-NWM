@@ -5248,6 +5248,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_node27_pgdata_migrate.py",
             "tests/test_node27_pgdata_migrate_oracle.py",
+            "tests/test_node27_pgdata_relocation_retired.py",
         ),
         stop_on_match=True,
     ),
@@ -5256,6 +5257,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_node27_pgdata_migrate.py",
             "tests/test_node27_pgdata_migrate_oracle.py",
+            "tests/test_node27_pgdata_relocation_retired.py",
         ),
         stop_on_match=True,
     ),
@@ -5264,6 +5266,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_node27_pgdata_migrate.py",
             "tests/test_node27_pgdata_migrate_oracle.py",
+            "tests/test_node27_pgdata_relocation_retired.py",
         ),
         stop_on_match=True,
     ),
@@ -5275,6 +5278,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "tests/test_node27_pgdata_migrate_oracle.py",
         ("tests/test_node27_pgdata_migrate_oracle.py",),
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "tests/test_node27_pgdata_relocation_retired.py",
+        ("tests/test_node27_pgdata_relocation_retired.py",),
         stop_on_match=True,
     ),
     PathTestRule(

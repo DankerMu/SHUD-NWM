@@ -212,14 +212,17 @@ def test_select_tests_routes_node27_pgdata_relocation_producers_to_focused_consu
         "packages/common/node27_pgdata_host.py": {
             "tests/test_node27_pgdata_migrate.py",
             "tests/test_node27_pgdata_migrate_oracle.py",
+            "tests/test_node27_pgdata_relocation_retired.py",
         },
         "packages/common/node27_pgdata_migrate.py": {
             "tests/test_node27_pgdata_migrate.py",
             "tests/test_node27_pgdata_migrate_oracle.py",
+            "tests/test_node27_pgdata_relocation_retired.py",
         },
         "scripts/node27_pgdata_migrate.py": {
             "tests/test_node27_pgdata_migrate.py",
             "tests/test_node27_pgdata_migrate_oracle.py",
+            "tests/test_node27_pgdata_relocation_retired.py",
         },
         "packages/common/node27_pgdata_command.py": {
             "tests/test_node27_pgdata_command.py",

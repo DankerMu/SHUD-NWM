@@ -24,6 +24,7 @@ import psycopg2
 from packages.common.node27_pgdata_container import PINNED_IMAGE_ID, normalize_raw_inspect, serialize_container_argv
 from packages.common.node27_pgdata_host import (
     DOCKER,
+    PRODUCTION_RELOCATION_RETIRED,
     ROLE,
     Host,
     MigrationError,
@@ -37,6 +38,7 @@ from packages.common.node27_pgdata_host import (
 from packages.common.node27_timeseries_lifecycle_lock import timeseries_lifecycle_lock
 from packages.common.safe_fs import SafeFilesystemError, open_directory_no_follow, stat_no_follow
 
+# Frozen #2240 production identity, inert since #3059: production runs refuse with PRODUCTION_RELOCATION_RETIRED.
 DEFAULTS = {
     "source_container": "nhms-db",
     "source_pgdata": "/home/nwm/nhms-pgdata",
@@ -116,7 +118,7 @@ def _disposable_identity(workspace: Path, config: dict[str, Any]) -> Path | None
 
 
 def _validate_paths(workspace: Path, config: dict[str, Any], raw: dict[str, Any]) -> None:
-    _disposable_identity(workspace, config)
+    require(_disposable_identity(workspace, config) is not None, PRODUCTION_RELOCATION_RETIRED)
     source, target = (Path(config[key]) for key in ("source_pgdata", "target_pgdata"))
     for path in (workspace, source, target):
         require(
@@ -195,14 +197,6 @@ def _validate_paths(workspace: Path, config: dict[str, Any], raw: dict[str, Any]
         )
         for mount in mounts:
             require(Path(mount["Source"]).is_relative_to(root), "disposable mount escapes owned root")
-    else:
-        require(
-            snapshot.name == "nhms-db"
-            and source == Path("/home/nwm/nhms-pgdata")
-            and target.is_relative_to("/data/GHDC")
-            and target != Path("/data/GHDC"),
-            "production source/target identity differs",
-        )
     require(type(config["reserve_bytes"]) is int and config["reserve_bytes"] > 0, "reserve must be positive")
     require(
         type(config["drain_timeout"]) is int and 1 <= config["drain_timeout"] <= 86400, "drain timeout is out of bounds"
@@ -416,15 +410,17 @@ class Migration:
         # SQL connection or journal write occurs on the default path.
         state = self.load(overrides) if self.workspace.exists() else None
         config = _config(overrides, None if state is None else state["config"])
-        _disposable_identity(self.workspace, config)
+        disposable = _disposable_identity(self.workspace, config) is not None
         observations: dict[str, Any] = {
             "action": "plan",
             "mutation": False,
             "stage": None if state is None else state["stage"],
             "writes_released": False if state is None else state["writes_released"],
             "scope": "isolated-mechanics-only" if config["disposable_root"] else "production-planning",
-            "blockers": [],
+            "blockers": [] if disposable else [PRODUCTION_RELOCATION_RETIRED],
         }
+        if not disposable:
+            return observations
         try:
             raw = self.host.inspect(config["source_container"] if state is None else state["original_id"])
             observations["source_running"] = raw["State"]["Running"]
@@ -457,30 +453,30 @@ class Migration:
         initial = self.load(overrides)
         initial_config = _config(overrides, None if initial is None else initial["config"])
         root = _disposable_identity(self.workspace, initial_config)
-        lock = timeseries_lifecycle_lock() if root is None else timeseries_lifecycle_lock(root / "lifecycle.lock")
-        with lock:
+        # The closed table is judged on the pre-lock state; the locked reload must equal it.
+        if action == "prepare":
+            require(initial is None, "prepare requires a new workspace; interrupted intent cannot replay")
+        else:
+            require(initial is not None, "action requires durable operation state")
+            stage, released = initial["stage"], initial["writes_released"]
+            allowed = (
+                (action == "copy" and stage == "prepared" and not released)
+                or (action == "activate" and stage == "copy_verified" and not released)
+                or (action == "rollback" and stage in PRE_RELEASE and not released)
+                or (
+                    action == "release"
+                    and ((stage == "activated_readonly" and not released) or (stage == "release_intent" and released))
+                )
+            )
+            require(allowed, "state/action pair refused; marked release is forward-only")
+        require(root is not None, PRODUCTION_RELOCATION_RETIRED)
+        with timeseries_lifecycle_lock(root / "lifecycle.lock"):
             state = self.load(overrides)
             require(state == initial, "operation state changed before lifecycle lock")
             config = _config(overrides, None if state is None else state["config"])
             if action == "prepare":
-                require(state is None, "prepare requires a new workspace; interrupted intent cannot replay")
                 self.prepare(config)
             else:
-                require(state is not None, "action requires durable operation state")
-                stage = state["stage"]
-                allowed = (
-                    (action == "copy" and stage == "prepared" and not state["writes_released"])
-                    or (action == "activate" and stage == "copy_verified" and not state["writes_released"])
-                    or (action == "rollback" and stage in PRE_RELEASE and not state["writes_released"])
-                    or (
-                        action == "release"
-                        and (
-                            (stage == "activated_readonly" and not state["writes_released"])
-                            or (stage == "release_intent" and state["writes_released"])
-                        )
-                    )
-                )
-                require(allowed, "state/action pair refused; marked release is forward-only")
                 getattr(self, action)()
             state = self.state
             return {

@@ -394,7 +394,10 @@ cutover until the 14T volume was lost. **2026-11-05:** that volume is retired an
 the cluster was rebuilt by fresh initdb at `/home/nwm/nhms-primary/pgdata`, so
 this procedure has no live source/target pair; `scripts/node27_pgdata_migrate.py`'s
 production identity gate (source `/home/nwm/nhms-pgdata`, target under
-`/data/GHDC`) no longer matches node-27. Do not repeat the relocation. This source correction claims neither deployment
+`/data/GHDC`) no longer matches node-27. Do not repeat the relocation. Since #3059 the CLI enforces this: without
+`--disposable-root`, `plan` reports `production PGDATA relocation is retired ...` as its only blocker (read-only, exit 0)
+and every mutating action exits 2 with that reason before the lifecycle lock; only disposable mechanics remain runnable.
+The commands below are history until the tool is re-contracted. This source correction claims neither deployment
 of #2273 nor production PASS. The image observed for that migration was
 `sha256:ad39c4fbc5c44557db1e16af10ec11e3ab12d0a472374f39aaba06ad9ca2640e`
 (PostgreSQL 15.2 / TimescaleDB 2.10.2). The actual hostname observed for this
@@ -4979,7 +4982,14 @@ tag is gone/cold — and then expect and record the benign `_ref`-only drift.
    `timescale/timescaledb-ha@sha256:a8e3322e…` (non-empty, so the fallback is
    real on this host).
 
-3. Recreate with the full mount set, from the pinned image:
+3. Recreate with the full mount set, from the pinned image. The required flag
+   set is owned by
+   [`node-27-database-container-operations.md` §4](node-27-database-container-operations.md#4-容器重建);
+   this command matches it flag for flag, and on any conflict that section wins
+   (#3060). `-p 127.0.0.1:55432:5432` keeps PostgreSQL off the public NICs,
+   `--shm-size=1g` replaces Docker's 64M `/dev/shm`, and
+   `--stop-signal=SIGINT` plus `--stop-timeout=300` give a clean fast shutdown
+   instead of a SIGKILL into crash recovery:
 
    ```bash
    docker run -d \
@@ -4987,7 +4997,10 @@ tag is gone/cold — and then expect and record the benign `_ref`-only drift.
      --restart unless-stopped \
      --user 1005:1005 \
      --env-file "$ENVFILE" \
-     -p 55432:5432 \
+     -p 127.0.0.1:55432:5432 \
+     --shm-size=1g \
+     --stop-signal=SIGINT \
+     --stop-timeout=300 \
      -v /home/nwm/nhms-primary/pgdata:/home/postgres/pgdata/data \
      -v /home/nwm/nhms-evidence:/var/lib/postgresql/evidence \
      -v /home/nwm/nhms-tablespace-ghdc-stub:/home/postgres/pgdata/tablespaces/ghdc \
@@ -5064,6 +5077,11 @@ tag is gone/cold — and then expect and record the benign `_ref`-only drift.
 
    # (d) Display is live.
    curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/healthz
+
+   # (e) The container-operations §4 acceptance: /dev/shm is 1.0G and the
+   #     port is published on loopback only.
+   docker exec -i nhms-db df -h /dev/shm
+   docker inspect nhms-db --format '{{json .HostConfig.PortBindings}}'
    ```
 
    Expect (before 2026-11-05): one row (`?column? = 1`) from the
@@ -5074,8 +5092,9 @@ tag is gone/cold — and then expect and record the benign `_ref`-only drift.
    query to list only `pg_default` and `pg_global`. Then: `--check` exit `0` on the
    tag path (on the `$IMAGE`/`$IMAGE_DIGEST` branches an
    `nhms_db_image_ref`-only drift is the expected, recorded outcome — any
-   other drifted key: stop, §4.4); the `HostConfig` diff showing only the
-   intended third mount; and `200` from the display API. Then restart the
+   other drifted key: stop, §4.4); the `HostConfig` diff empty (before
+   2026-11-05: only the intended third mount); `200` from the display API;
+   `/dev/shm` at `1.0G` and every `HostIp` equal to `127.0.0.1`. Then restart the
    timers stopped in step 1, and delete
    `/home/nwm/nhms-db-hostconfig-$TS.json` (it is spec-only, no credentials,
    but there is no reason to accumulate them).

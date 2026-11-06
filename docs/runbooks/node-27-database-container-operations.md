@@ -114,6 +114,8 @@ shred -u /tmp/nhms-db.env
 必须带上的参数（每一条都对应上面一个坑）：
 `--user 1005:1005`、三个 bind mount、`-p 127.0.0.1:55432:5432`、`--shm-size=1g`、
 `--stop-signal=SIGINT`、`--stop-timeout=300`、`--restart unless-stopped`、命令 `postgres`。
+这组参数是 `nhms-db` 重建的唯一权威；`tier-node27-timeseries-storage.md` §4.3.3 的完整 `docker run`
+命令须与之逐参数一致，两处冲突时以本节为准（#3060）。
 
 重建后的验收：启动日志是 `database system was shut down at ...`；
 `docker exec -i nhms-db df -h /dev/shm` 显示 1.0G；
