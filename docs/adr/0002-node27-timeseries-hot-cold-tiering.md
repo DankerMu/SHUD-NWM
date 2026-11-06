@@ -174,7 +174,7 @@ expand–contract pair:
   identity-normalization functions (`:100-101`) and the routing column (`:106`).
   Applied on node-27 2026-09-19 16:06:50–16:07:35 CST, rc=0, ledger 60 → 61,
   in a 67 s quiet window. Receipt:
-  [`receipts/2026-09-19-i9-contract-window/README.md`](../../openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-19-i9-contract-window/README.md).
+  [`receipts/2026-09-19-i9-contract-window/README.md`](../../openspec/changes/archive/2026-11-05-timeseries-narrow-store-expand-contract/receipts/2026-09-19-i9-contract-window/README.md).
 
 ### The delivered geometry and compression configuration (measured after 000060)
 
@@ -829,7 +829,7 @@ chunk interval; `000060` dropped the legacy table on 2026-09-19. The live
 settings are therefore a **two**-column segmentby, not the three-column list
 this subsection anticipated — `river_network_version_key` is not in it. See
 "Amendment (2026-09-19)" and
-[`receipts/2026-09-19-i9-contract-window/README.md`](../../openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-19-i9-contract-window/README.md).
+[`receipts/2026-09-19-i9-contract-window/README.md`](../../openspec/changes/archive/2026-11-05-timeseries-narrow-store-expand-contract/receipts/2026-09-19-i9-contract-window/README.md).
 
 The engine constraint stated here survives the change of mechanism: TimescaleDB
 2.10 requires segmentby ∪ orderby to cover every unique/primary-key column, so

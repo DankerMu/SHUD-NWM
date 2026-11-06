@@ -1,0 +1,90 @@
+# timeseries-store-expand-contract Specification
+
+## Purpose
+Governs the two-stage expand / contract migration of the timeseries fact tables: DDL order and fail-closed gates, the transitional ownership of `_legacy` tables in the lifecycle lanes and catalog pins, receipt schemas, the rollback sequence, maintenance-window ordering and the node-27 live-receipt gate.
+
+## Requirements
+
+### Requirement: The expand migration SHALL rename in place and create the narrow table without decompressing or rebuilding anything
+
+The river expand migration SHALL, in one transaction: rename `hydro.river_timeseries` to `hydro.river_timeseries_legacy`; create the narrow `hydro.river_timeseries` in the order `CREATE TABLE` (primary key and both foreign keys inline) → `create_hypertable(..., chunk_time_interval => interval '1 day', create_default_indexes => false)` → the two secondary indexes → `ALTER TABLE ... SET (timescaledb.compress, compress_segmentby, compress_orderby)` → `ALTER TABLE ... OWNER TO` the ingest write role; add `hydro.hydro_run.timeseries_store` with default `narrow` and backfill `legacy` by the parse-fact predicate `parsed_at IS NOT NULL OR status IN ('parsed','published')` (legacy remnants outside it are the accepted transitional state of `timeseries-narrow-store`; no row-level probe of the legacy table). It MUST NOT decompress any chunk, MUST NOT create an index on the legacy table, MUST NOT alter the legacy table's compression settings, MUST NOT re-run migration `000047`, and MUST be idempotent on re-run.
+
+#### Scenario: Idempotent re-run
+- **WHEN** the expand migration is applied twice
+- **THEN** the second application changes nothing and exits successfully
+
+#### Scenario: Legacy table untouched and statements are metadata-only
+- **WHEN** the expand migration is applied on a database whose river hypertable has compressed chunks
+- **THEN** every chunk keeps its compression state, the legacy table keeps its primary key, indexes, compression settings and owner, and the node-27 receipt records per-statement wall time with no statement exceeding a metadata operation
+
+#### Scenario: Compression setting is the last schema DDL
+- **WHEN** the migration text is read
+- **THEN** `timescaledb.compress` is set after every constraint and index statement on the narrow table, and a test pins that order
+
+### Requirement: Lifecycle lanes and catalog-pinning tools SHALL cover the legacy table until it is dropped, without a second code change
+
+The compression runner, the retention runner, the compression supervisor's current-state validation, the capture tool's hypertable keys and the autopipeline statistics guard SHALL derive their hypertable set as each canonical table plus its `_legacy` sibling when that sibling exists in `timescaledb_information.hypertables`; per-table expectations SHALL be asserted per table (key-shaped settings on the canonical table, text-shaped settings on the legacy table). Both tables SHALL be compressed under the same lag and dropped under the same retention window. The compression receipt schema SHALL accept `_legacy` keys in `per_table_totals` as optional, and the retention receipt SHALL carry `legacy_chunks` per legacy table. When the legacy table no longer exists the tools MUST proceed with the canonical table only.
+
+#### Scenario: Both tables in one tick
+- **WHEN** a compression tick runs while `hydro.river_timeseries_legacy` exists with an eligible chunk and `hydro.river_timeseries` has an eligible one-day chunk
+- **THEN** the receipt lists chunks from both hypertables under the per-tick bound, validates against the schema, and the supervisor's validation accepts the mixed catalog
+
+#### Scenario: Legacy gone
+- **WHEN** the legacy table has been dropped
+- **THEN** a tick, the supervisor validation and the statistics guard run cleanly with no reference to the legacy name, and the retention receipt omits `legacy_chunks`
+
+#### Scenario: Pre-expand catalogs keep current text-shaped D3 expectations
+- **WHEN** `timescaledb_information.hypertables` lists only the two canonical names
+- **THEN** compression/retention/supervisor/capture/autopipeline consume exactly those two keys, supervisor `validate_current_d3` accepts today's text-shaped `compression_settings` rows, and no `_legacy` name appears in the rendered set
+
+#### Scenario: A sibling that is not a hypertable is ignored
+- **WHEN** `hydro.river_timeseries_legacy` exists as an ordinary table but not in `timescaledb_information.hypertables`
+- **THEN** the discovered set still contains only the two canonical hypertables
+
+#### Scenario: River sibling does not flip forcing expectations
+- **WHEN** only `hydro.river_timeseries_legacy` exists as a hypertable
+- **THEN** river canonical expectations become key-shaped and the sibling stays text-shaped, while `met.forcing_station_timeseries` keeps today's text-shaped settings
+
+### Requirement: Rollback before the contract SHALL be an executable reverse sequence with a recorded intermediate state
+
+While the legacy table exists, the runbook SHALL provide the reverse sequence: stop timers and the API/parser units → `ALTER TABLE hydro.river_timeseries RENAME TO hydro.river_timeseries_narrow_rollback` → `ALTER TABLE hydro.river_timeseries_legacy RENAME TO hydro.river_timeseries` → deploy the pre-change code → `UPDATE hydro.hydro_run SET timeseries_store = 'legacy'` → start. The state "store is `legacy` while narrow rows for that run still exist in the renamed narrow table" is an allowed rollback state: those rows are invisible to every read path and are either reattached by the explicit post-D12 re-forward transition (change `node27-post-d12-reforward`, which preserves both OIDs and the ledger and never reruns the expand migration) or removed by dropping the renamed narrow table before any from-scratch expand attempt.
+
+#### Scenario: Rollback rehearsal on a throwaway cluster
+- **WHEN** the reverse sequence is executed after a narrow run was parsed
+- **THEN** the legacy run is readable and re-parseable by the pre-change code, the previously narrow run is re-parsed into the (again canonical) text table, and the renamed narrow table drops cleanly
+
+### Requirement: The contract migration SHALL refuse while any legacy-routed run is inside the retention window, and code SHALL stop reading the routing column before it is dropped
+
+The river contract SHALL first count `hydro.hydro_run` rows routed `legacy` whose `end_time` is later than now minus the deployment's configured retention window, and MUST raise, changing nothing, when that count is non-zero. In-window legacy runs are brought to the narrow store by the reparse backfill (change `node27-river-narrow-reparse-backfill`, #2382); legacy-routed runs outside the window keep route `legacy` and their remaining legacy chunks are dropped with the table, the same visibility loss retention imposes; their `run_display_coverage` rows SHALL stay frozen at their last populated values by the #1446 overwrite guard and SHALL never be zeroed or deleted by the contract. When the count is zero it SHALL drop the legacy table regardless of its remaining chunk count, drop `hydro.cutover_river_identity_normalization()` and `hydro.verify_river_identity_normalization()`, and drop `hydro.hydro_run.timeseries_store`. The contract window SHALL deploy the code that no longer references `timeseries_store` before applying the migration.
+
+#### Scenario: In-window legacy run refused
+- **WHEN** the contract migration runs while one legacy-routed run has `end_time` inside the retention window
+- **THEN** it raises naming the run count and the catalog is unchanged
+
+#### Scenario: Clean contract
+- **WHEN** the contract migration runs after the reparse backfill (or retention) leaves zero in-window legacy-routed runs, legacy chunks may remain, and the routing-free code is deployed
+- **THEN** the legacy table, both functions and the routing column are gone and `tests/test_migrations.py` pins the final three-index shape
+
+### Requirement: Contract SHALL remove every transitional aid and the legacy read variant
+
+After the contract batch, no file in the repository SHALL contain the marker `transitional compressed-chunk pushdown aid, remove with #1342`; the renderer SHALL accept only the narrow store; `scripts/node27_river_identity_backfill.py` and its tests SHALL be deleted; `tests/test_river_ts_dual_write_integration.py` SHALL be deleted or re-pinned as a narrow-write integration; the cleanup oracles SHALL assert that no fact-table SQL references any text identity column.
+
+#### Scenario: Marker census is zero
+- **WHEN** `grep -rn "remove with #1342" --include=*.py --include=*.sql .` runs after the contract batch
+- **THEN** it returns nothing
+
+#### Scenario: Oracle rejects a reintroduced text predicate
+- **WHEN** a registered reader adds `rt.run_id = %s` to its template
+- **THEN** the cleanup oracle fails naming the call site
+
+### Requirement: Rollout and contract SHALL each be gated by node-27 live receipts
+
+The river rollout SHALL not be declared complete without a node-27 receipt recording: expand migration wall time per statement; the first narrow chunk's size after one full cycle; the per-segment EXPLAIN gate and the probe before/after plans (`timeseries-narrow-store`); registry counts (active/runnable/selected/excluded); one compression tick and one retention tick covering both tables; the governance receipt with the working-set fields; `/` clicks on SHJ-NJ, one medium and one small network with both source curves rendered and identities not crossed (screenshot evidence); the display read-only boundary deny-write receipt; `/ops` reachable. The contract SHALL not run before the #2382 reparse backfill receipts are archived, a read-only count shows zero legacy-routed runs inside the retention window, and no query-shape regression is recorded (user decision 2026-09-15 recorded in #2382/#1988; replaces the fourteen consecutive daily receipts plus `legacy_chunks = 0`); this is the entry gate of the contract issue, not a task of the rollout issue.
+
+#### Scenario: Contract precondition
+- **WHEN** an operator prepares the contract window
+- **THEN** the runbook checklist requires the archived reparse backfill receipts, a zero in-window legacy-route count and no shape regression before the migration may be applied
+
+#### Scenario: Maintenance window order
+- **WHEN** the expand window runs
+- **THEN** the order is: timers stopped → API and parser units stopped → `git pull --ff-only` → `migrate.py` → units started → timers started, and the receipt records that no request was served between the rename and the restart

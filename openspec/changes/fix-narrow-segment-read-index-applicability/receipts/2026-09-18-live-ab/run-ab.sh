@@ -15,7 +15,7 @@ case "${DATABASE_URL:-}" in
 esac
 
 PY=/home/nwm/NWM/.venv/bin/python
-R=/home/nwm/NWM/openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-17-i8-explain-gate
+R=/home/nwm/NWM/openspec/changes/archive/2026-11-05-timeseries-narrow-store-expand-contract/receipts/2026-09-17-i8-explain-gate
 
 for arm in base:/home/nwm/tmp/2451-base head:/home/nwm/tmp/2451-wt; do
   name="${arm%%:*}"; tree="${arm#*:}"

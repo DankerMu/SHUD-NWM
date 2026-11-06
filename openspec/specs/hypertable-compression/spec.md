@@ -761,42 +761,64 @@ The supervisor checkpoint and its live-evidence verifier counterpart SHALL judge
 ### Requirement: The compression per-tick bound MUST be a capacity-derived target consistent across template, live env, and receipts
 
 The per-tick bound SHALL be a decided capacity target derived from
-measured inputs (steady-state terminal-chunk arrival rate, the
-retention-window backlog ceiling, and the relation between observed
-per-chunk compression duration and the wrapper wall — the wall bounds
-the WHOLE tick, so the bound is a throughput ceiling, not a redeemable
-single-tick capacity; catch-up under backlog follows the runbook's
-catch-up recipe rather than relying on the bound), not an arbitrary
-default or an unrecorded live retune: the
+measured inputs (the chunk time interval of every governed hypertable
+and the resulting steady-state terminal-chunk arrival rate — one chunk
+per canonical hypertable per interval, so one-day chunks on the two
+canonical tables arrive at two per day, while a transitional `_legacy`
+sibling is a write-frozen finite backlog of seven-day chunks with zero
+steady-state arrival and is modelled as such; the retention-window
+backlog ceiling; and the relation between observed per-chunk
+compression duration and the wrapper wall — the wall bounds the WHOLE
+tick, so the bound is a throughput ceiling, not a redeemable single-tick
+capacity, and the worst mixed tick of one legacy seven-day chunk plus
+narrow one-day chunks MUST be measured and stated; catch-up under
+backlog follows the runbook's catch-up recipe rather than relying on
+the bound), not an arbitrary default or an unrecorded live retune: the
 committed env template SHALL carry the target value with a comment
 identifying it as a capacity conclusion and pointing at the recorded
 derivation in the operator runbook, the deployed node-27 env SHALL carry
 the same value, and every receipt echoes the effective bound via its
-existing `per_tick_bound` field. The variable remains mandatory in the
-compression env (an env without it is refused); the in-code default, equal to
-the target, serves only direct unassembled invocations that read no env.
+existing `per_tick_bound` field. The variable remains mandatory with no
+in-code default. A change of any governed hypertable's chunk time
+interval SHALL invalidate the derivation and require the template,
+runbook and live env to be re-pinned in the same change.
 
 #### Scenario: Template carries the pinned capacity target
 
 - **WHEN** `infra/env/node27-timeseries-compression.example` is read
 - **THEN** it SHALL contain the uncommented line
-  `NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=2` with a
-  capacity-conclusion comment, and an enforced test SHALL pin that exact
-  assignment line so silent drift back to a stale value fails CI
+  `NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=4` with a
+  capacity-conclusion comment re-derived for one-day chunks (two
+  canonical arrivals per day under a 4-chunk bound; 4 × ≈7.5 min narrow
+  chunks inside the 65-minute wrapper wall), and an enforced test SHALL
+  pin that exact assignment line so silent drift back to a stale value
+  fails CI
+
+#### Scenario: Template lag assignment matches the live lag
+
+- **WHEN** the same template is read
+- **THEN** its uncommented `NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS`
+  assignment equals the live two-day value (172800) and no comment
+  describes the lag as "one chunk width"
 
 #### Scenario: Runbook records the dual-constraint derivation, not just the number
 
 - **WHEN** the operator runbook's per-tick capacity section is read
 - **THEN** it SHALL state BOTH capacity constraints — the throughput
   relation (bound × daily tick cadence versus steady-state chunk
-  arrival) AND the wrapper-wall relation (the summed duration of
-  selected chunks must fit the whole-tick wall, cross-referencing the
-  catch-up recipe for backlog scenarios) — plus the measured inputs
-  behind the current target, the derivation's invalidation conditions,
-  and an explicit conclusion on timer cadence (no frequency change
-  required: terminal-chunk count is time-partitioned and insensitive to
-  ingest volume) so the next retune starts from the formula instead of
-  incident-scene guesswork
+  arrival, with the chunk interval of each governed hypertable as an
+  explicit input and the legacy sibling modelled as a finite backlog)
+  AND the wrapper-wall relation (the summed duration of selected chunks
+  must fit the whole-tick wall, including the measured worst mixed
+  legacy-plus-narrow tick, cross-referencing the catch-up recipe and the
+  pre-expand "compress the legacy backlog first under bound 1" recipe)
+  — plus the measured inputs behind the current target, the
+  derivation's invalidation conditions (chunk-interval change listed
+  among them), and an explicit conclusion on timer cadence (one-day
+  chunks raise arrival from two per week to two per day; the daily tick
+  still covers it under bound 4, so no frequency change is required) so
+  the next retune starts from the formula instead of incident-scene
+  guesswork
 
 #### Scenario: Live bound matches the target and is receipt-proven
 
@@ -805,6 +827,12 @@ the target, serves only direct unassembled invocations that read no env.
   receipt of any mode SHALL echo `per_tick_bound` equal to that value,
   and an enforce-mode receipt SHALL prove the clean outcome under that
   bound (the dry-run outcome field is constant and carries no signal)
+
+#### Scenario: Chunk interval change without re-derivation is caught
+
+- **WHEN** a migration changes a governed hypertable's chunk time interval
+  and the template's bound comment still cites the previous interval
+- **THEN** the enforced template test fails naming the stale derivation
 
 ### Requirement: Compression receipts MUST record the effective timeout/wall budget chain
 
@@ -1243,10 +1271,9 @@ identity gate is introduced. The three-key criterion of
 - **WHEN** forcing handoff 因任何非 `HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED`
   的原因失败（含通用异常路径与 `HANDOFF_APPLY_SQL_FAILURE`），且其 reason codes
   不含非失败的 skip 码 `HANDOFF_APPLY_COMPRESSION_FENCE_BUSY`（#2713
-  压缩/ingest fence 被 chunk DDL 持有或排队）——它使 `_process_run` 返回
-  `outcome="skipped"`、不写 decline 行、不计入 tick rc（另一个 skip 码
-  `HANDOFF_APPLY_LEGACY_STORE_REFUSED` 已于 2026-10-11 随 #1993 移除，现按普通
-  失败处理；见 `openspec/glossary.md` 的 "routing column" 条目）
+  压缩/ingest fence 被 chunk DDL 持有或排队）——它 `_process_run` 返回
+  `outcome="skipped"`、不写 decline 行、不计入 tick rc。`HANDOFF_APPLY_LEGACY_STORE_REFUSED`
+  已随 #1993 第一刀删除，不再是 skip 码
 - **THEN** `_process_run` 返回 `outcome="failed"`，`ops.ingest_recompute_decline`
   不新增任何行，进程 `rc == 1`，该 run 在下个 tick 仍进入 pending
 

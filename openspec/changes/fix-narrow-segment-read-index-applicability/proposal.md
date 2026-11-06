@@ -44,7 +44,7 @@ falls out of the `Index Cond` into a `Filter` and the node reads **every segment
 chunk's slice.
 
 Measured on node-27 (2026-09-17, read-only; receipt
-`openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-17-i8-explain-gate/`):
+`openspec/changes/archive/2026-11-05-timeseries-narrow-store-expand-contract/receipts/2026-09-17-i8-explain-gate/`):
 
 | shape | offending node | `Rows Removed / Actual` | node shared hits |
 |---|---|---|---|
@@ -107,7 +107,7 @@ between C1 and C2 before either is committed to, across the full condition cross
   `apps/api/routes/hydro_display.py:1123-1164` (MVT source-identity existence probe),
   `services/tiles/mvt.py:702-730` (`valid_times_for_layer` named-identity discovery), and
   `packages/common/display_coverage.py:139-160` (per-run coverage refresh scan). Its purpose is stated
-  at `openspec/changes/timeseries-narrow-store-expand-contract/design.md:57`.
+  at `openspec/changes/archive/2026-11-05-timeseries-narrow-store-expand-contract/design.md:57`.
 - **No identity predicate is dropped.** `basin_version_key` and `river_network_version_key` are
   logically redundant once `run_key` and `river_segment_key` are bound — `hydro.hydro_run` has one
   `basin_version_id` per run (`db/migrations/000006_hydro.sql:2-6`) and `core.river_segment` one

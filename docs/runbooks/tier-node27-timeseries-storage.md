@@ -215,7 +215,7 @@ this paragraph).** `000058`'s
 3-day interval was set on the *then-canonical, text-identity*
 `hydro.river_timeseries` — the table `000059` renamed to
 `hydro.river_timeseries_legacy` and `000060` dropped on 2026-09-19 (receipt
-[`receipts/2026-09-19-i9-contract-window/README.md`](../../openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-19-i9-contract-window/README.md);
+[`receipts/2026-09-19-i9-contract-window/README.md`](../../openspec/changes/archive/2026-11-05-timeseries-narrow-store-expand-contract/receipts/2026-09-19-i9-contract-window/README.md);
 see "legacy store" in `openspec/glossary.md`).
 The live river store is the narrow table created by `000059` with
 `chunk_time_interval => interval '1 day'` (`000059:28-30`), measured after the
@@ -3653,7 +3653,7 @@ Newest-first compresses chunks with ~19 days of life left.
 out of eligible chunks, with a bound-1 override as the remedy. It became
 structurally impossible on 2026-09-19, when `000060` dropped the legacy table
 (receipt
-[`receipts/2026-09-19-i9-contract-window/README.md`](../../openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-19-i9-contract-window/README.md);
+[`receipts/2026-09-19-i9-contract-window/README.md`](../../openspec/changes/archive/2026-11-05-timeseries-narrow-store-expand-contract/receipts/2026-09-19-i9-contract-window/README.md);
 see "legacy store" in `openspec/glossary.md`);
 the compression lane now walks only `hydro.river_timeseries` and `met.*`. Its
 detection SQL named `river_timeseries_legacy` in an `IN`-list, which is now
@@ -5540,7 +5540,7 @@ its window has executed):
 `hydro.river_timeseries_legacy` and created a new key-only, one-day
 `hydro.river_timeseries` beside it; `000060` dropped the legacy table, both
 functions and `hydro.hydro_run.timeseries_store`. Window receipt:
-[`receipts/2026-09-19-i9-contract-window/README.md`](../../openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-19-i9-contract-window/README.md).
+[`receipts/2026-09-19-i9-contract-window/README.md`](../../openspec/changes/archive/2026-11-05-timeseries-narrow-store-expand-contract/receipts/2026-09-19-i9-contract-window/README.md).
 Glossary: "legacy store" and "routing column" in `openspec/glossary.md`.
 
 Read on only for the engine facts: the 2.10.2 DDL refusals under
@@ -5717,7 +5717,7 @@ distinguished in `stop.stage`:
 same statement. This is not an annotation problem — the sequence has no valid
 execution path and is retained only as the record of the design that
 expand–contract replaced (§4.10; receipt
-[`receipts/2026-09-19-i9-contract-window/README.md`](../../openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-19-i9-contract-window/README.md)).
+[`receipts/2026-09-19-i9-contract-window/README.md`](../../openspec/changes/archive/2026-11-05-timeseries-narrow-store-expand-contract/receipts/2026-09-19-i9-contract-window/README.md)).
 The measured costs below are still true of TimescaleDB 2.10.2.
 
 There is **no work that can be done ahead of the window.** With
@@ -6358,13 +6358,13 @@ Archive status:
 authorize a production window, release a CAPACITY HOLD, or certify production
 PASS. Parent execution on node-27 passed all five disposable R1–R5 rows at NEW
 SHA `3f4d5f9ee275cb12afb1b8eb8dd0919e3bd7e7fb`; production 5.2 remains pending.
-The [rehearsal receipt](../../openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-12-i8-rollback/receipt.json),
+The [rehearsal receipt](../../openspec/changes/archive/2026-11-05-timeseries-narrow-store-expand-contract/receipts/2026-09-12-i8-rollback/receipt.json),
 raw transcript, manifest and exact driver are archived together in
 `receipts/2026-09-12-i8-rollback/` under the shared change. Keep #1987 and 5.2
 open; do not archive the shared OpenSpec change.
 Scope is river expand `000059_river_timeseries_narrow_expand.sql`, not forcing
 expand or river contract. Governing references are design D7/D11/D12 and fixture
-`openspec/changes/timeseries-narrow-store-expand-contract/fixtures/I8-1987.md`.
+`openspec/changes/archive/2026-11-05-timeseries-narrow-store-expand-contract/fixtures/I8-1987.md`.
 
 #### 4.10.1 GO record and pre-expand backlog
 
@@ -6591,7 +6591,7 @@ fire immediately; never `enable --now` the whole family by default.
 
 Archive status:
 - status: historical baseline
-- current_authority: db/migrations/000060_river_timeseries_contract.sql; openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-19-i9-contract-window/README.md
+- current_authority: db/migrations/000060_river_timeseries_contract.sql; openspec/changes/archive/2026-11-05-timeseries-narrow-store-expand-contract/receipts/2026-09-19-i9-contract-window/README.md
 - superseded_by: none
 - status_since: 2026-09-19
 - archive_scope: section
@@ -6602,7 +6602,7 @@ gone: `000060_river_timeseries_contract.sql` dropped
 `hydro.river_timeseries_legacy` (`:97`) and `hydro.hydro_run.timeseries_store`
 (`:106`) on node-27 on 2026-09-19, 16:06:50–16:07:35 CST, rc=0, ledger 60 → 61
 (receipt
-[`receipts/2026-09-19-i9-contract-window/README.md`](../../openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-19-i9-contract-window/README.md);
+[`receipts/2026-09-19-i9-contract-window/README.md`](../../openspec/changes/archive/2026-11-05-timeseries-narrow-store-expand-contract/receipts/2026-09-19-i9-contract-window/README.md);
 post-state `to_regclass('hydro.river_timeseries_legacy') -> None`). The rename
 pair below has nothing to rename back to, and the `UPDATE … SET
 timeseries_store = 'legacy'` targets a dropped column. The section's own closing
@@ -6694,7 +6694,7 @@ On node-27, set `DOCS_REPO` to the checkout containing this receipt archive,
 then copy and verify the executable bytes before invocation:
 
 ```bash
-cp "$DOCS_REPO/openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-12-i8-rollback/rehearse_river_rollback.py.txt" \
+cp "$DOCS_REPO/openspec/changes/archive/2026-11-05-timeseries-narrow-store-expand-contract/receipts/2026-09-12-i8-rollback/rehearse_river_rollback.py.txt" \
   /home/nwm/tmp/i8-1987/rehearse_river_rollback.py
 printf '%s  %s\n' \
   162ce696b9ee50fb2075e9ea79a849cf31d77eb1d5ce00035c9eea8f8affbcb2 \
@@ -6975,14 +6975,14 @@ them describe history. The procedure below is kept as the record of how it was r
 | Execution receipt | |
 |---|---|
 | applied on node-27 | 2026-11-06T00:39:35Z, `/home/nwm/NWM` at `594912c7b` (synced from `b0831d6ce` in the same window), ledger `000066_forcing_timeseries_contract.sql` = 1 row |
-| receipt | [`receipts/2026-11-06-i14-forcing-contract-window/README.md`](../../openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-11-06-i14-forcing-contract-window/README.md) |
+| receipt | [`receipts/2026-11-06-i14-forcing-contract-window/README.md`](../../openspec/changes/archive/2026-11-05-timeseries-narrow-store-expand-contract/receipts/2026-11-06-i14-forcing-contract-window/README.md) |
 
 Governing references: fixture
-`openspec/changes/timeseries-narrow-store-expand-contract/fixtures/I14-1993-task82.md`
+`openspec/changes/archive/2026-11-05-timeseries-narrow-store-expand-contract/fixtures/I14-1993-task82.md`
 (D0, D5, D6), spec `specs/forcing-narrow-store/spec.md` requirement "The forcing
 contract SHALL mirror the river contract", and the river precedent
 (`000060_river_timeseries_contract.sql`, receipt
-[`receipts/2026-09-19-i9-contract-window/README.md`](../../openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-19-i9-contract-window/README.md)).
+[`receipts/2026-09-19-i9-contract-window/README.md`](../../openspec/changes/archive/2026-11-05-timeseries-narrow-store-expand-contract/receipts/2026-09-19-i9-contract-window/README.md)).
 
 #### 4.12.1 What the migration will do
 
@@ -7125,10 +7125,10 @@ option that keeps `000066` unapplied.
    ```bash
    cd /home/nwm/nwm-2785-verify
    DATABASE_URL=... PYTHONPATH=$PWD .venv/bin/python \
-     openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-10-11-i14-forcing-shape-gate/probe.py \
+     openspec/changes/archive/2026-11-05-timeseries-narrow-store-expand-contract/receipts/2026-10-11-i14-forcing-shape-gate/probe.py \
      --out /home/nwm/tmp/forcing-shape-gate.json
    .venv/bin/python \
-     openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-10-11-i14-forcing-shape-gate/gate.py \
+     openspec/changes/archive/2026-11-05-timeseries-narrow-store-expand-contract/receipts/2026-10-11-i14-forcing-shape-gate/gate.py \
      /home/nwm/tmp/forcing-shape-gate.json
    ```
 
@@ -7151,7 +7151,7 @@ option that keeps `000066` unapplied.
    the exit code non-zero. Do not read the exit code as the verdict on the
    other seven: readers 1–7 are each judged by their own `PASS` line. The
    2026-10-12 measurement is recorded in
-   [`receipts/2026-10-11-i14-forcing-shape-gate/README.md`](../../openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-10-11-i14-forcing-shape-gate/README.md):
+   [`receipts/2026-10-11-i14-forcing-shape-gate/README.md`](../../openspec/changes/archive/2026-11-05-timeseries-narrow-store-expand-contract/receipts/2026-10-11-i14-forcing-shape-gate/README.md):
    7 `PASS`, reader 8 `FAIL`, gate line
    `SHAPE GATE: RED (8 expected, 1 violating, 0 incomplete)`, exit 1. Whether
    reader 8 is accepted as a documented exception is the **owner's decision and
