@@ -659,18 +659,20 @@ done < "$PIN_DIR/pins.tsv"
 
 ## 主机容量纪律（每次上 27 干活之前，#1765）
 
-- [ ] 容量核查三个挂载点一起看，**`/` 不能漏**：
+- [ ] 容量核查 `/` 与 `/home` 一起看，**`/` 不能漏**：
 
   ```bash
-  df -h / /home /data/GHDC
+  df -h / /home
   ```
 
   `/` 只有几十 GB 且以前无人自动看守：一次跨两天的 pytest 用
   `/tmp/pytest-of-nwm` 把它塞满，直接阻塞了当时 PR 的 live
-  receipt。当前宿主 PGDATA 是 `/data/GHDC/nhms-primary/pgdata`，容器 bind 仍为
-  `/home/postgres/pgdata/data`；工作集峰值须比较配置目标的实际设备与可用字节，不能借用独立
-  `/home` telemetry，目标不可用时也不能回退到 `/home`。 `/home`
-  保留旧副本及临时文件等 residual use，不是当前 PGDATA；冷层仍未启用。Issue
+  receipt。2026-11-05 换盘后（14T `/dev/md0` 退役，`/data/GHDC` 现只是 `/` 上的目录）
+  当前宿主 PGDATA 是 `/home/nwm/nhms-primary/pgdata`，容器 bind 仍为
+  `/home/postgres/pgdata/data`；工作集峰值须比较配置目标的实际设备与可用字节（该设备现即
+  `/home` LV），不能用独立 `/home` telemetry 冒充，目标不可用时也不能回退到它。`/home`
+  上的旧副本 `/home/nwm/nhms-pgdata` 及临时文件等 residual use 与 PGDATA 共用余量，
+  但不是当前 PGDATA；冷层仍未启用。Issue
   #2273 的源码修正不表示旧 pinned
   runtime 已部署修正或服务健康，I8 前须取得批准的目标容量证据（口径见
   `docs/runbooks/current-production-ops.md`）。

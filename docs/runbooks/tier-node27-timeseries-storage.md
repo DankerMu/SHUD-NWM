@@ -6,6 +6,31 @@ delivered under `openspec/changes/tier-node27-timeseries-storage`, plus the
 **write-path least-privilege roles (§9)** these lanes run as
 (`openspec/changes/node27-write-path-roles`, #1774).
 
+## Current PGDATA location (2026-11-05 rebuild)
+
+The 14T `/dev/md0` volume formerly mounted at `/data/GHDC` is gone (disk
+replaced 2026-11-05) and will not be reused. `/data/GHDC` is no longer a
+mountpoint: it is a plain directory on the root LV `/`, holding only an 8K
+residue directory `/data/GHDC/nhms-primary/pgdata`. The cluster was rebuilt by a
+**fresh initdb, not a restore**; `nhms-db` (same timescaledb-ha pg15 image, same
+`docker run` flags) now binds:
+
+| Host | Container |
+|---|---|
+| `/home/nwm/nhms-primary/pgdata` | `/home/postgres/pgdata/data` (PGDATA) |
+| `/home/nwm/nhms-tablespace-ghdc-stub` | `/home/postgres/pgdata/tablespaces/ghdc` (empty stub) |
+| `/home/nwm/nhms-evidence` | `/var/lib/postgresql/evidence` |
+
+Only `pg_default` and `pg_global` exist; there is no `ghdc` tablespace. The old
+container is kept, exited with restart=no, as `nhms-db-lost14t-20261105`
+(evidence only, not a rollback target). PGDATA now shares the `/home` LV with
+temporary-test residue and other residual use: working-set capacity is still
+judged against the device that actually holds PGDATA, and that device is now
+`/home`. Capacity checks are `df -h / /home` plus `psql`. Every
+`/data/GHDC/nhms-primary/pgdata` or `/data/GHDC/...` tablespace path below that
+describes the live cluster is history from before 2026-11-05 (ADR 0002 Revision
+2026-11-05).
+
 ## Current authority: selective-cold retirement and 2026-09-16 handoff
 
 The #1891/#1895 selective-cold source retirement is implemented. Production
@@ -231,7 +256,9 @@ This section is immutable history plus current policy. Runnable
 removed; git history preserves them. Do not recreate `ghdc`.
 
 **Current live fact:** hot storage is `pg_default` on
-`/data/GHDC/nhms-primary/pgdata` (host; container bind `/home/postgres/pgdata/data`).
+`/home/nwm/nhms-primary/pgdata` (host; container bind `/home/postgres/pgdata/data`)
+since the 2026-11-05 fresh-initdb rebuild; no `ghdc` tablespace exists (the
+container keeps an empty stub bind, see "Current PGDATA location" above).
 The #1891/#1895 selective-cold source retirement is implemented: no current
 repository command, env template, receipt schema, or role grant activates it.
 R5.2 committed the 2026-09-16 effective-maintenance handoff; it does not
@@ -362,8 +389,12 @@ NHMS_RUN_NODE27_DOCKER=1 uv run pytest -q -m 'integration and timescaledb_210 an
 
 **Historical #2240 activation context, not a new migration instruction.** The
 then-source was `/home/nwm/nhms-pgdata`, bound to `/home/postgres/pgdata/data` in
-`nhms-db`; the user-confirmed current host target is `/data/GHDC/nhms-primary/pgdata`.
-Do not repeat the relocation. This source correction claims neither deployment
+`nhms-db`; the #2240 target was `/data/GHDC/nhms-primary/pgdata`, live from that
+cutover until the 14T volume was lost. **2026-11-05:** that volume is retired and
+the cluster was rebuilt by fresh initdb at `/home/nwm/nhms-primary/pgdata`, so
+this procedure has no live source/target pair; `scripts/node27_pgdata_migrate.py`'s
+production identity gate (source `/home/nwm/nhms-pgdata`, target under
+`/data/GHDC`) no longer matches node-27. Do not repeat the relocation. This source correction claims neither deployment
 of #2273 nor production PASS. The image observed for that migration was
 `sha256:ad39c4fbc5c44557db1e16af10ec11e3ab12d0a472374f39aaba06ad9ca2640e`
 (PostgreSQL 15.2 / TimescaleDB 2.10.2). The actual hostname observed for this
@@ -400,8 +431,8 @@ directory. Do not install or rebuild the shared environment during the window.
 Issues #1891/#1895 exclude **entire PGDATA** relocation and now require selective-cold
 code retirement. The withdrawn cold rollout below does not authorize this procedure.
 Do not execute its G0–G8 installation/move sequence for #2240, add a cold bind,
-enable cold residency, or revive the retired archive. Re-admitting the historically failed RAID requires fresh
-hardware evidence even though it is currently mounted.
+enable cold residency, or revive the retired archive. The historically failed RAID is no
+longer mounted: the 14T `/dev/md0` was removed on 2026-11-05 and is not to be reused.
 
 ### A. Review and isolated proof, before a production window
 
@@ -468,7 +499,8 @@ This hold is current operator-owned state, not a permanent CLI prerequisite.
 If a later window has a different separately authorized hold state, freeze
 that fresh state rather than manufacturing this historical hold.
 
-The now-current target is **`/data/GHDC/nhms-primary/pgdata`**.
+The #2240 target was **`/data/GHDC/nhms-primary/pgdata`** (superseded 2026-11-05;
+see "Current PGDATA location" at the top).
 The following records the #2240 fresh-target provisioning rules, not work to
 repeat on the migrated target: `/data/GHDC` was root-owned `0:0`, mode 0755,
 not an admissible operator-owned immediate parent. Before that separately approved
@@ -725,8 +757,10 @@ pins remain.
 
 The deployed governance env must name the exact verified current target in
 `NODE27_GOVERNANCE_PGDATA_ROOT`; inspect that value without printing private env
-contents. The template now names `/data/GHDC/nhms-primary/pgdata`, but changing
-source/template does not change the deployed env or OLD pinned comparator.
+contents. The template now names `/home/nwm/nhms-primary/pgdata` (2026-11-05
+rebuild; the deployed env was changed to the same value by the operator, backup
+`.bak-pre-2t-pgdata-20261105`), but changing source/template does not change the
+deployed env or OLD pinned comparator.
 Preserve private mode and runtime pins; do not install the new checkout's units.
 Restore the original env value only as part of the corresponding pre-write
 PGDATA rollback, never while the migrated target remains the live cluster.
@@ -4841,11 +4875,19 @@ That is a residue constraint, not authorization to recreate `ghdc`.
 The former #1891 successor bind (`nhms_cold`) is withdrawn; neither #1894's
 historical installer nor this recreation recipe authorizes adding it.
 
+**2026-11-05:** the cluster was rebuilt by fresh initdb on `/home` after the 14T
+`/dev/md0` was retired (see "Current PGDATA location" at the top). There is no
+`ghdc` catalog entry any more; the third bind is an empty stub kept only so the
+container spec stays identical. The binds to carry over are now:
+
 | Host | Container |
 |---|---|
-| `/data/GHDC/nhms-primary/pgdata` | `/home/postgres/pgdata/data` |
+| `/home/nwm/nhms-primary/pgdata` | `/home/postgres/pgdata/data` |
 | `/home/nwm/nhms-evidence` | `/var/lib/postgresql/evidence` |
-| `/data/GHDC/nwm-archive/nhms-tablespace` | `/home/postgres/pgdata/tablespaces/ghdc` |
+| `/home/nwm/nhms-tablespace-ghdc-stub` | `/home/postgres/pgdata/tablespaces/ghdc` |
+
+Never point a bind at `/data/GHDC/...`: that path is now a plain directory on
+the root LV, and an empty PGDATA bind there would start an empty cluster.
 
 Never type the DB password: carry the environment over from the running
 container into a `0600` file and delete it once `docker run` has read it.
@@ -4946,9 +4988,9 @@ tag is gone/cold — and then expect and record the benign `_ref`-only drift.
      --user 1005:1005 \
      --env-file "$ENVFILE" \
      -p 55432:5432 \
-     -v /data/GHDC/nhms-primary/pgdata:/home/postgres/pgdata/data \
+     -v /home/nwm/nhms-primary/pgdata:/home/postgres/pgdata/data \
      -v /home/nwm/nhms-evidence:/var/lib/postgresql/evidence \
-     -v /data/GHDC/nwm-archive/nhms-tablespace:/home/postgres/pgdata/tablespaces/ghdc \
+     -v /home/nwm/nhms-tablespace-ghdc-stub:/home/postgres/pgdata/tablespaces/ghdc \
      timescale/timescaledb-ha:pg15-latest postgres
    rm -f "$ENVFILE"
    ```
@@ -5024,9 +5066,12 @@ tag is gone/cold — and then expect and record the benign `_ref`-only drift.
    curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/healthz
    ```
 
-   Expect: one row (`?column? = 1`) from the `ghdc`-resident chunk — a
-   `could not open file` error here means the mount is wrong; `ghdc` at
-   `/home/postgres/pgdata/tablespaces/ghdc`; `--check` exit `0` on the
+   Expect (before 2026-11-05): one row (`?column? = 1`) from the
+   `ghdc`-resident chunk — a `could not open file` error here means the mount
+   is wrong; `ghdc` at `/home/postgres/pgdata/tablespaces/ghdc`. Since the
+   2026-11-05 fresh initdb there is no `ghdc` tablespace or
+   `_hyper_3_10_chunk`: skip the chunk read, and expect the `pg_tablespace`
+   query to list only `pg_default` and `pg_global`. Then: `--check` exit `0` on the
    tag path (on the `$IMAGE`/`$IMAGE_DIGEST` branches an
    `nhms_db_image_ref`-only drift is the expected, recorded outcome — any
    other drifted key: stop, §4.4); the `HostConfig` diff showing only the
@@ -6354,8 +6399,9 @@ Re-inventory, do not infer live state from historical receipts:
   missing original artifacts, an unexpected sibling, or incomplete backup is
   NO-GO. Archive baseline curve SQL/API and identity-probe miss plans before
   expand, with tool SHA and request identities.
-- Current PGDATA is `/data/GHDC/nhms-primary/pgdata`, bound at
-  `/home/postgres/pgdata/data`. #2273 is the prerequisite source/contract repair:
+- Current PGDATA (at this window) was `/data/GHDC/nhms-primary/pgdata`, bound at
+  `/home/postgres/pgdata/data`; since 2026-11-05 it is
+  `/home/nwm/nhms-primary/pgdata` (see the top of this runbook). #2273 is the prerequisite source/contract repair:
   corrected source binds capacity to that configured target, but the old
   deployed pinned runtime still cannot certify it with its `/home` comparator.
   Require the approved #2273 exact-head read-only receipt with resolved target,
@@ -6760,7 +6806,7 @@ pass a DSN in argv. `plan` and `verify` also run under the display read-only rol
 
 1. `plan --receipt-dir D`: candidates by status, estimated rows, newest/oldest
    cycle, legacy route counts (in/out of window), and compressed narrow chunks
-   overlapping the range. Check `df -h / /home /data/GHDC` against ≈179 B/row
+   overlapping the range. Check `df -h / /home` against ≈179 B/row
    uncompressed.
 2. Pilot: `run --go <token> --limit 20 --concurrency 4 --deadline <UTC+2h>`.
    The unit holds the lifecycle mutex. Compression (exit 2) and retention
@@ -8449,9 +8495,11 @@ before a receipt exists.
      df -h / /home
      ```
 
-     `/home` carries temporary-test residue and other residual filesystem use,
-     not the current host PGDATA at `/data/GHDC/nhms-primary/pgdata`. The bound
-     that makes temporary retention safe is the policy above, not volume size.
+     Since 2026-11-05 `/home` also holds the current host PGDATA
+     (`/home/nwm/nhms-primary/pgdata`), so temporary-test residue and other
+     residual filesystem use there compete directly with the DB working set.
+     The bound that makes temporary retention safe is the policy above, not
+     volume size.
 
      **Separate `/home` telemetry from PGDATA working-set capacity.**
      In `scripts/node27_resource_governance.py`, `AuditThresholds.home_free_warn_bytes`

@@ -86,12 +86,20 @@ docker exec -i -e PGOPTIONS='-c max_parallel_maintenance_workers=0' nhms-db \
 
 ## 4. 容器重建
 
-PGDATA 是 **bind mount**（宿主 `/data/GHDC/nhms-primary/pgdata` → 容器 `/home/postgres/pgdata/data`），所以重建容器不动数据；保留的 `/home/nwm/nhms-pgdata` 不是当前 cluster。工作集容量须绑定配置目标的实际设备与可用字节，不能借用 `/home`；此修正不启用冷层。
+PGDATA 是 **bind mount**，所以重建容器不动数据。2026-11-05 换盘后（原 14T `/dev/md0` 已退役，`/data/GHDC` 现只是根卷上的目录）cluster 由 fresh initdb 重建，当前三个 bind 是：
+
+| 宿主机路径 | 容器路径 |
+|---|---|
+| `/home/nwm/nhms-primary/pgdata` | `/home/postgres/pgdata/data`（PGDATA） |
+| `/home/nwm/nhms-tablespace-ghdc-stub` | `/home/postgres/pgdata/tablespaces/ghdc`（空 stub，catalog 只有 `pg_default`/`pg_global`） |
+| `/home/nwm/nhms-evidence` | `/var/lib/postgresql/evidence` |
+
+旧容器 `nhms-db-lost14t-20261105`（exited，restart=no）只是证据，不能拿来回滚；保留的 `/home/nwm/nhms-pgdata` 也不是当前 cluster。工作集容量须绑定配置目标的实际设备与可用字节（该设备现即 `/home` LV）；此修正不启用冷层。
 重建前先按 §1 干净停机，并把旧容器 `docker rename` 留作回滚参照而不是直接 `rm`。
 
 **镜像用 ID 而不是 tag。** `timescale/timescaledb-ha:pg15-latest` 是移动标签，
 用 tag 重建可能静默换掉 PostgreSQL / TimescaleDB 小版本。当前 ID 见
-`docker inspect nhms-db-pre1770 --format '{{.Image}}'`。
+`docker inspect nhms-db --format '{{.Image}}'`（2026-11-05 重建沿用同一 timescaledb-ha pg15 镜像）。
 
 口令等容器级环境变量从旧容器导出，不要手抄：
 

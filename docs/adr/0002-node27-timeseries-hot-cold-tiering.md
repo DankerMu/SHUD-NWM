@@ -33,6 +33,11 @@ applied**: Decision 4's forcing segmentby/orderby list is superseded for the
 narrow table now, and for the whole forcing plane when `000066` is applied — see
 "Amendment (2026-10-11)" below)
 
+Revision: 2026-11-05 (the 14T `/dev/md0` volume at `/data/GHDC` is retired;
+PGDATA was rebuilt by fresh initdb at `/home/nwm/nhms-primary/pgdata` — see
+"Revision 2026-11-05" below, which supersedes the live-PGDATA path statements of
+the 2026-09-14 and 2026-09-10 amendments)
+
 ## Status
 
 Accepted, as amended below. **Current selective-cold direction: repository source
@@ -1167,3 +1172,41 @@ unchanged business content, SQL1+20 P95 <=300 ms / buffers <=5000, API1+20
 P95 <=500 ms, browser1+20 P95 <2 s, controlled ingest and a natural serialized
 tick remain required. The executable maintenance and phase-specific recovery
 procedure is in the runbook's **#2240 whole-PGDATA relocation** section.
+
+## Revision 2026-11-05 — 14T volume retired; PGDATA rebuilt on `/home`
+
+The 14T `/dev/md0` volume that was mounted at `/data/GHDC` is gone (disk
+replaced 2026-11-05); the user decided it will not be used again. `/data/GHDC`
+is no longer a mountpoint, only a directory on the root LV `/`, holding an 8K
+residue directory `/data/GHDC/nhms-primary/pgdata`.
+
+The cluster was rebuilt on 2026-11-05 by a **fresh initdb, not a restore**.
+Container `nhms-db` (same timescaledb-ha pg15 image, recreated with the same
+`docker run` flags) binds host `/home/nwm/nhms-primary/pgdata` ->
+`/home/postgres/pgdata/data`, `/home/nwm/nhms-tablespace-ghdc-stub` ->
+`/home/postgres/pgdata/tablespaces/ghdc` (empty stub; only `pg_default` and
+`pg_global` exist) and `/home/nwm/nhms-evidence` ->
+`/var/lib/postgresql/evidence`. The previous container is kept, exited with
+restart=no, as `nhms-db-lost14t-20261105` (evidence, not a rollback target).
+The deployed `NODE27_GOVERNANCE_PGDATA_ROOT` was changed to
+`/home/nwm/nhms-primary/pgdata` on node-27. The repository template now carries
+the same value.
+
+This supersedes, as current state only, the live-PGDATA path recorded in the
+2026-09-14 amendment and the recommended `/data/GHDC/nhms-primary/pgdata` target
+of the 2026-09-10 amendment. Those records stay unchanged as history.
+Consequences:
+
+- PGDATA now shares the `/home` filesystem. The rule that working-set capacity
+  is judged against the device that actually holds PGDATA stands; that device
+  is now `/home`. Capacity checks are `df -h / /home` plus `psql`. `/` stays in
+  the list because pytest temporary files filled it before (#1765).
+- No `ghdc` residue exists any more. The 2026-08-06 overflow, the retired
+  archive lane (Revision 2026-08-11) and the withdrawn `nhms_cold` successor
+  remain history. None of them may be recreated on the new layout.
+- The #2240 whole-PGDATA relocation tooling has no live source/target pair.
+  Its production identity gate (source `/home/nwm/nhms-pgdata`, target under
+  `/data/GHDC`) does not match node-27 and must not be run until it is
+  separately re-contracted.
+- Code that still samples `/data/GHDC` as a separate filesystem now observes
+  the root LV. Correcting it is outside this revision.

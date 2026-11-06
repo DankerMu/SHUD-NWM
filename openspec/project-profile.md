@@ -77,7 +77,7 @@ Active profile for `codex-codeagent-workflow`. It supplements
 - Auth/RBAC + OpenAPI security -> focused policy/route/no-side-effect tests + runtime/static drift check -> enforcement and documented security sets match with no secret material.
 - JSON Schema/examples -> CI `check-jsonschema` metaschema/example loop -> every example validates against its named schema.
 - OpenSpec -> `openspec validate <change> --strict --no-interactive` -> strict-valid change.
-- DB migration/Timescale behavior -> node-27 isolated real-DB pytest/catalog query -> captured exact-head evidence; never run migration tests against production `nhms`. Live host PGDATA is `/data/GHDC/nhms-primary/pgdata` (container `/home/postgres/pgdata/data`), per operator update 2026-09-12. Production activation is a separate maintenance-window action.
+- DB migration/Timescale behavior -> node-27 isolated real-DB pytest/catalog query -> captured exact-head evidence; never run migration tests against production `nhms`. Live host PGDATA is `/home/nwm/nhms-primary/pgdata` (container `/home/postgres/pgdata/data`), per operator update 2026-11-05 (fresh initdb after the 14T `/dev/md0` at `/data/GHDC` was retired; the 2026-09-12 location `/data/GHDC/nhms-primary/pgdata` is history). Production activation is a separate maintenance-window action.
 - Physical PGDATA tooling -> exact-image disposable node-27 copy/rebind/rollback oracle; actual production hardware/performance and cutover remain separately authorized live gates
 - node-27 alerting lane (script + systemd unit) -> targeted pytest through the injected
   observation seam plus a node-27 live receipt (read-only run against the production DSN,
