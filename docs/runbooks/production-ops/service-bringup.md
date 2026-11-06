@@ -60,6 +60,14 @@ tail -n 160 /home/nwm/autopipe-logs/autopipe.log
   `AUTOPIPE_RUN_WORKERS`、`AUTOPIPE_COVERAGE_WORKERS` 和
   `AUTOPIPE_EXCLUDE_BASINS`。当前生产值分别为 `2`、`2`、
   `zhaochen_hhy`；worker 上限为 8，未经下一轮真实 cycle 压测不得继续上调。
+- 周期下限 `AUTOPIPE_MAX_CYCLE_AGE_DAYS`（#3062，生产值 `14`）：autopipe 直接从 ingest
+  env 读取（wrapper 不传参）。周期早于 `now_utc - N 天`（截到整点，等于下限的周期保留）的 run 在
+  phase 1 seed 身份和入库之前就被过滤，summary 里 `cycle_floor`
+  （`days`/`floor_cycle`/`applied`/`bypassed_by_only_cycle`）与 `skipped_older_than_floor`
+  给出取值和计数，`discovered_runs` 是过滤后的数量。未设置或为空 = 不设下限（#3062 之前的行为）；
+  非正整数（`abc`、`0`、`14.5`）在 preflight 阶段 fail closed（`AUTOPIPE_MAX_CYCLE_AGE_DAYS_INVALID`，rc=2）。
+  2 周以外的周期由运维手动入库：显式传 `--only-cycle YYYYMMDDHH` 时不应用下限
+  （summary 中 `bypassed_by_only_cycle=true`）。
 - `OUTPUT_PARSER_BATCH_SIZE=10000` 将河段时序批量写入页从默认 1,000 行提升为
   10,000 行，减少数据库往返；这不改变事务边界或最终 publish 语义。
 - `coverage backstop (--all --skip-fresh)` 可刷新或跳过 display coverage；

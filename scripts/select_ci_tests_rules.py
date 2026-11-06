@@ -3787,6 +3787,8 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # #1647: the `_connect` bounds and the stats-guard flag parser live
             # in their own suite, which the same-name fallback cannot find.
             "tests/test_node27_autopipeline_connection_bounds.py",
+            # #3062: the AUTOPIPE_MAX_CYCLE_AGE_DAYS cycle floor, asserted through full ticks.
+            "tests/test_node27_autopipeline_cycle_floor.py",
             "tests/test_pipeline_job_provenance_publisher.py",
             "tests/test_pipeline_job_provenance_importer.py",
             "tests/test_pipeline_job_provenance_copyback.py",
