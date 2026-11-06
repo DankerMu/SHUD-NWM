@@ -1,0 +1,3 @@
+t|t|t|1
+forcing_station_timeseries_narrow_pkey
+forcing_ts_version_variable_time_key_idx

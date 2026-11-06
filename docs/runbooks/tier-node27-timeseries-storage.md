@@ -227,7 +227,7 @@ text-identity `met.forcing_station_timeseries` to
 `met.forcing_station_timeseries_legacy` and created the narrow table under the
 canonical name with a **1-day** interval (`000061:255-257`). The 3-day geometry
 below therefore describes the `_legacy` sibling only, and only until the forcing
-contract drops it: migration `000066`, **not yet executed** — see §4.12. Do not
+contract dropped it: migration `000066`, **executed 2026-11-06** — see §4.12. Do not
 read 3 days as the narrow forcing store's geometry.
 
 Migration `000058_hot_timeseries_chunk_interval_3d.sql` sets the interval for
@@ -6858,7 +6858,7 @@ dropping a legacy chunk locks the relations a canonical writer holds; a separate
 legacy key would leave that cycle open (node-27 still carries
 `met.forcing_station_timeseries_legacy` chunks that both lanes reach). The
 forcing legacy sibling is transitional: the forcing contract, migration
-`000066` (§4.12, not yet executed), drops it, after which the forcing family
+`000066` (§4.12, executed 2026-11-06), dropped it; the forcing family now
 has one member as the river family has had since `000060`.
 
 - every production ingest write transaction on `hydro.river_timeseries` or
@@ -6964,19 +6964,18 @@ them only while holding the lifecycle flock
 (`/tmp/nhms-node27-timeseries-lifecycle.lock`, e.g. `flock -n` around the
 `psql` call) or with the compression and retention timers stopped.
 
-### 4.12 Forcing contract: migration `000066` (`#1993`) — NOT YET EXECUTED
+### 4.12 Forcing contract: migration `000066` (`#1993`) — EXECUTED 2026-11-06
 
-**Status: NOT YET EXECUTED on node-27.** `db/migrations/000066_forcing_timeseries_contract.sql`
-is merged code, not applied state. Everything below is a procedure still to be
-carried out, on the owner's word only. Until the execution receipt below is
-filled in, node-27 still has `met.forcing_station_timeseries_legacy` and
-`met.forcing_version.timeseries_store`, and every passage of this runbook that
-describes them describes the live catalog.
+**Status: EXECUTED on node-27, 2026-11-06T00:39:35Z**, owner-approved, on the
+fresh cluster rebuilt 2026-11-05 (the legacy table held 32 kB, zero rows; every
+timer was already off). node-27 no longer has `met.forcing_station_timeseries_legacy`
+or `met.forcing_version.timeseries_store`; passages of this runbook that describe
+them describe history. The procedure below is kept as the record of how it was run.
 
 | Execution receipt | |
 |---|---|
-| applied on node-27 | *pending — not yet executed* |
-| receipt | *pending — to be archived under `openspec/changes/timeseries-narrow-store-expand-contract/receipts/` and linked here* |
+| applied on node-27 | 2026-11-06T00:39:35Z, `/home/nwm/NWM` at `594912c7b` (synced from `b0831d6ce` in the same window), ledger `000066_forcing_timeseries_contract.sql` = 1 row |
+| receipt | [`receipts/2026-11-06-i14-forcing-contract-window/README.md`](../../openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-11-06-i14-forcing-contract-window/README.md) |
 
 Governing references: fixture
 `openspec/changes/timeseries-narrow-store-expand-contract/fixtures/I14-1993-task82.md`

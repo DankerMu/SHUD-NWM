@@ -1,0 +1,4 @@
+gate1 0
+gate4 0
+legacy_size 32 kB
+drain locks=0 idle_in_tx=0
