@@ -2452,6 +2452,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # SQL and the route cache keys), so it sits on that rule too. Its
             # own entry, so the #1597 "eight below" census stays true.
             "tests/test_mvt_run_and_river_network_geometry_identity.py",
+            # #2773: guard-derived — the station-tile retirement suite imports
+            # get_hydro_display_session from apps.api.routes.hydro_display at file
+            # level, so it is a one-hop importer here through that module.
+            "tests/test_met_station_mvt_route_retired.py",
             # #2017: the coordinate-budget harness imports
             # postgis_tile_sql / collection_coordinate_limit / MVT_MAX_COORDINATES
             # from services.tiles.mvt at module level, so its suite is a DIRECT
@@ -2551,6 +2555,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # _run_source_version plus the route cache keys, so it is a DIRECT
             # non-gated importer (and on the services/tiles/mvt.py rule too).
             "tests/test_mvt_run_and_river_network_geometry_identity.py",
+            # #2773: guard-derived — the station-tile retirement suite imports
+            # get_hydro_display_session from this module at file level (it pins
+            # that the retired `/api/v1/tiles/met-stations/...` route stays gone),
+            # so it is a DIRECT non-gated importer.
+            "tests/test_met_station_mvt_route_retired.py",
             "tests/test_display_mvt_cold_admission.py",
             "tests/test_node27_connection_attribution.py",
             "tests/test_node27_connection_attribution_delegated.py",

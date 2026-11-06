@@ -209,6 +209,9 @@ API_CONTRACT_HELPERS_CONSUMER_TESTS: tuple[str, ...] = (
     # data-source/cycle/station fixtures and `_RetryGateway`).
     "tests/test_response_model_preservation.py",
     "tests/test_response_model_preservation_pipeline.py",
+    # #2773: the station-tile retirement suite drives `/api/v1/met/stations`
+    # through `_DataSourceStore` / `_assert_success_envelope`.
+    "tests/test_met_station_mvt_route_retired.py",
 )
 
 # #1611 partitioned tests/test_scheduler_state_index_copyback_replay.py (1378
@@ -1636,14 +1639,14 @@ HYDRO_DISPLAY_MVT_SCALING_FACADE_TESTS: tuple[str, ...] = tuple(
 # ONE tuple, carried whole by both display rules (`services/tiles/mvt.py` and the
 # `apps/api/routes/hydro_display*.py` glob), so each route still selects the 15
 # cases it selected before the split. This is deliberately wider than the
-# derived closure: only the `_atomic` partition imports
-# `apps.api.routes.hydro_display` (for `_station_source_version`, whose on-disk
-# body in hydro_display_identity.py it structurally locks), while the `_mvt_set`
-# partition's `_mvt_station_set` is a model of exactly that row-selection
-# predicate and imports no display module. A predicate edit that the lock
-# catches must also run the model that mirrors it. The `_atomic` partition is
-# therefore the anti-vacuity anchor in tests/test_select_ci_tests.py; the
-# tracked-tree guard there pins exactly two suites + one helper.
+# derived closure: neither partition imports a display module any more. The
+# `_atomic` partition used to import `apps.api.routes.hydro_display` for
+# `_station_source_version`, whose body it structurally locked; that query went
+# with the retired station tile route (#2773 item 4). Both partitions still lock
+# the station-flag flip, and the `_mvt_set` partition's `_mvt_station_set`
+# models the `basin_version_id + active_flag=true` set the flip maintains, so
+# the display rules keep carrying them by hand. The tracked-tree guard in
+# tests/test_select_ci_tests.py pins exactly two suites + one helper.
 DIRECT_GRID_DISPLAY_CUTOVER_FLIP_HELPERS_PATH = "tests/direct_grid_display_cutover_flip_helpers.py"
 DIRECT_GRID_DISPLAY_CUTOVER_FLIP_ATOMIC_TEST = "tests/test_direct_grid_display_cutover_flip_atomic.py"
 DIRECT_GRID_DISPLAY_CUTOVER_FLIP_TESTS: tuple[str, ...] = (

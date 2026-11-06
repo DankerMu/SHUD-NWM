@@ -438,20 +438,10 @@ _MASTER_SIBLING_TILE_BASES: dict[str, dict[str, Any]] = {
         "x": 13,
         "y": 6,
     },
-    "met-stations": {
-        "layer_id": "met-stations",
-        "source_id": "bv_a",
-        "source_version": "met-stations-digest",
-        "valid_time": None,
-        "z": 4,
-        "x": 13,
-        "y": 6,
-    },
 }
 _MASTER_SIBLING_CACHE_KEYS = {
     "river-network-national": "6db92a86bbbfd96f2cbedefd292dc63fb073a8a65e6717f534dfff34033d962c",
     "river-network": "d78922eaed1befeb60f8976ce374d5c62dda1bddd7fb8f93a09ad7ab672a2685",
-    "met-stations": "2f0b7cc7e02c6e99114b9700254c92fc7068ecbd3cc8ac93d33edf0055561d99",
 }
 
 
@@ -467,7 +457,7 @@ def test_in_range_instant_spellings_keep_the_cache_key_master_computes(spelling:
 
 @pytest.mark.parametrize("layer", sorted(_MASTER_SIBLING_TILE_BASES))
 def test_valid_time_less_sibling_layers_keep_the_cache_key_master_computes(layer: str) -> None:
-    """Task 3.8, digest half: the three `valid_time=None` layers are untouched.
+    """Task 3.8, digest half: the `valid_time=None` layers are untouched.
 
     `canonical_mvt_time(None)` returns before either guarded branch, so the new
     failure path cannot be reached from them at all -- pinned rather than argued.
@@ -482,21 +472,19 @@ def test_valid_time_less_sibling_layers_keep_the_cache_key_master_computes(layer
          f"/{_NATIONAL_TILE_X}/{_NATIONAL_TILE_Y}.pbf"),
         ("river-network", f"/api/v1/tiles/river-network/bv_a/{_NATIONAL_TILE_Z}"
          f"/{_NATIONAL_TILE_X}/{_NATIONAL_TILE_Y}.pbf"),
-        ("met-stations", f"/api/v1/tiles/met-stations/bv_a/{_NATIONAL_TILE_Z}"
-         f"/{_NATIONAL_TILE_X}/{_NATIONAL_TILE_Y}.pbf"),
     ],
 )
 def test_valid_time_less_sibling_tile_routes_still_answer_the_same_bytes(
     layer: str, url: str, monkeypatch: Any, tmp_path: Any
 ) -> None:
-    """Task 3.8, response half: the three sibling routes take no instant at all."""
+    """Task 3.8, response half: the sibling routes take no instant at all."""
     session = _NationalRouteSession()
     response, captured = _request_national_identity_tile(url, session, monkeypatch, tmp_path)
 
     assert response.status_code == 200, response.text
     assert response.content == b"pbf-bytes"
     assert captured[0].valid_time is None
-    assert captured[0].layer_id == ("met-stations" if layer == "met-stations" else "river-network")
+    assert captured[0].layer_id == "river-network"
 
 
 @pytest.mark.parametrize("instant", _OUT_OF_UTC_RANGE_INSTANTS)

@@ -1244,24 +1244,6 @@ def postgis_tile_sql(layer: str) -> str:
             LEFT JOIN core.basin_version bv
               ON bv.basin_version_key = sv.basin_version_key
         """
-    elif layer == "met-stations":
-        required_property_checks = {
-            "station_id": "station_id IS NULL OR station_id::text = ''",
-            "basin_version_id": "basin_version_id IS NULL OR basin_version_id::text = ''",
-            "station_role": "station_role IS NULL OR station_role::text = ''",
-            "active_flag": "active_flag IS NULL",
-        }
-        source_cte = """
-            SELECT ms.station_id,
-                   ms.basin_version_id,
-                   COALESCE(ms.station_name, '') AS station_name,
-                   ms.station_role,
-                   ms.active_flag,
-                   ms.geom
-            FROM met.met_station ms
-            WHERE ms.basin_version_id = :basin_version_id
-              AND ms.active_flag = true
-        """
     else:
         raise ValueError(f"Unsupported tile layer: {layer}")
     invalid_property_count_sql = " + ".join(
@@ -1526,21 +1508,10 @@ def _mvt_public_tile_columns(layer: str) -> tuple[str, ...]:
             "valid_time",
             "mvt_geom",
         )
-    if layer == "met-stations":
-        return (
-            "station_id",
-            "basin_version_id",
-            "station_name",
-            "station_role",
-            "active_flag",
-            "mvt_geom",
-        )
     raise ValueError(f"Unsupported tile layer: {layer}")
 
 
 def _mvt_tile_order_by(layer: str) -> str:
-    if layer == "met-stations":
-        return "station_id"
     return "river_network_version_id, river_segment_id"
 
 
@@ -2568,7 +2539,6 @@ def _source_layer_id(layer: str) -> str:
         "river-network-national": "river_network",
         "hydro": "hydro",
         "hydro-national": "hydro",
-        "met-stations": "met_stations",
     }[layer]
 
 
@@ -2866,7 +2836,7 @@ def _ensure_tile_layer(session: Session, tile: TileInput) -> bool:
     values = {
         "layer_id": tile.layer_id,
         "layer_type": metadata["layer_type"],
-        "source_run_id": None if tile.layer_id in {"river-network", "met-stations"} else tile.source_id,
+        "source_run_id": None if tile.layer_id == "river-network" else tile.source_id,
         "source_product_id": tile.source_id,
         "source_version": tile.source_version,
         "variable": metadata.get("variable"),
@@ -2917,14 +2887,6 @@ def _cache_layer_metadata(tile: TileInput) -> dict[str, Any]:
             "variable": None,
             "fallback_available": False,
         }
-    if tile.layer_id == "met-stations":
-        return {
-            "layer_type": "meteorological_station",
-            "tile_uri_template": "/api/v1/tiles/met-stations/{basin_version_id}/{z}/{x}/{y}.pbf",
-            "maplibre_source_layer": "met_stations",
-            "variable": None,
-            "fallback_available": False,
-        }
     if tile.layer_id == "discharge":
         variable = "q_down"
         return {
@@ -2957,11 +2919,7 @@ def _cache_layer_metadata(tile: TileInput) -> dict[str, Any]:
     return {
         "layer_type": "mvt",
         "tile_uri_template": f"/api/v1/tiles/{tile.layer_id}/{{z}}/{{x}}/{{y}}.pbf",
-        "maplibre_source_layer": (
-            _source_layer_id(tile.layer_id)
-            if tile.layer_id in {"river-network", "met-stations"}
-            else tile.layer_id
-        ),
+        "maplibre_source_layer": tile.layer_id,
         "variable": None,
         "fallback_available": False,
     }

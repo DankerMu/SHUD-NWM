@@ -273,7 +273,7 @@ def test_national_discharge_query_version_is_pinned_to_the_literal_the_spec_name
 
 
 def test_sibling_tile_layers_carry_no_source_or_cycle_bind() -> None:
-    for layer in ("hydro", "river-network-national", "river-network", "met-stations"):
+    for layer in ("hydro", "river-network-national", "river-network"):
         layer_sql = postgis_tile_sql(layer)
         assert ":source" not in layer_sql, layer
         assert ":cycle" not in layer_sql, layer

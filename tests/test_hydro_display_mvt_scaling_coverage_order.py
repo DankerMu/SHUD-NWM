@@ -288,7 +288,6 @@ def test_runtime_openapi_documents_both_424_codes_on_the_canonical_national_rout
     siblings = (
         "/api/v1/tiles/river-network-national/{z}/{x}/{y}.pbf",
         "/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf",
-        "/api/v1/tiles/met-stations/{basin_version_id}/{z}/{x}/{y}.pbf",
         "/api/v1/tiles/hydro-national/{variable}/{valid_time}/{z}/{x}/{y}.pbf",
         "/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf",
     )

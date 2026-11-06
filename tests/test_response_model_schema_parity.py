@@ -247,7 +247,8 @@ def test_every_unmodelled_business_route_is_annotated_to_return_a_response() -> 
     unmodelled = [route for route in _business_routes() if route.response_model is None]
     unannotated = sorted(route.path for route in unmodelled if not returns_response_object(route))
     assert not unannotated, unannotated
-    assert len(unmodelled) == 8, sorted(route.path for route in unmodelled)
+    # 8 until #2773 retired `GET /api/v1/tiles/met-stations/{bv}/{z}/{x}/{y}.pbf`.
+    assert len(unmodelled) == 7, sorted(route.path for route in unmodelled)
 
 
 def test_parity_rule_reds_on_a_renamed_property_a_required_drift_and_a_lost_null() -> None:

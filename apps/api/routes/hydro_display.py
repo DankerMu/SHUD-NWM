@@ -1,4 +1,4 @@
-"""Hydro display read-only API: the router, its nine route handlers and the engine.
+"""Hydro display read-only API: the router, its eight route handlers and the engine.
 
 Implementation bodies were split out to `hydro_display_constants.py`,
 `hydro_display_models.py`, `hydro_display_instants.py`, `hydro_display_catalog.py`,
@@ -17,7 +17,7 @@ testing nothing, because a re-export does NOT preserve `monkeypatch.setattr`):
   `hydro_display_postgis.py`.
 - Patch `hydro_display_postgis` for `_fetch_postgis_tile_bytes`.
   `river_network_national_mvt_tile` below calls it through the
-  `hydro_display_postgis` module object so that route and the four
+  `hydro_display_postgis` module object so that route and the three
   `_fetch_*_tile_bytes` wrappers share ONE patch target. The name is still
   re-exported here because scripts and suites read it, but the facade binding is
   read-only: patching it here is inert.
@@ -70,7 +70,6 @@ from apps.api.routes.hydro_display_constants import TILE_Y_DESCRIPTION as TILE_Y
 from apps.api.routes.hydro_display_identity import (
     _require_hydro_mvt_source_identity,
     _require_run_source_identity,
-    _station_source_version,
 )
 from apps.api.routes.hydro_display_instants import (
     Rfc3339Instant,
@@ -94,7 +93,6 @@ from apps.api.routes.hydro_display_postgis import (
     _fetch_hydro_mvt_tile_bytes,
     _fetch_hydro_national_mvt_tile_bytes,
     _fetch_river_network_mvt_tile_bytes,
-    _fetch_station_mvt_tile_bytes,
     _validate_supported_hydro_variable,
 )
 from apps.api.routes.hydro_display_postgis import _fetch_postgis_tile_bytes as _fetch_postgis_tile_bytes
@@ -685,37 +683,6 @@ def river_network_mvt_tile(
         lambda: _fetch_river_network_mvt_tile_bytes(
             session, basin_version_id=basin_version_id, z=z, x=x, y=y
         ),
-    )
-
-
-@router.get(
-    "/api/v1/tiles/met-stations/{basin_version_id}/{z}/{x}/{y}.pbf",
-    responses=MVT_ROUTE_RESPONSES,
-    response_class=Response,
-    operation_id="getMetStationTile",
-)
-def met_station_mvt_tile(
-    basin_version_id: str,
-    z: int,
-    x: int,
-    y: int,
-    session: Session = Depends(get_hydro_display_session),
-) -> Response:
-    validate_identifier(basin_version_id, "basin_version_id")
-    validate_xyz(z, x, y)
-    tile_input = TileInput(
-        layer_id="met-stations",
-        source_id=basin_version_id,
-        source_version=_station_source_version(session, basin_version_id),
-        valid_time=None,
-        z=z,
-        x=x,
-        y=y,
-    )
-    return _cached_or_generated_mvt_response(
-        session,
-        tile_input,
-        lambda: _fetch_station_mvt_tile_bytes(session, basin_version_id=basin_version_id, z=z, x=x, y=y),
     )
 
 

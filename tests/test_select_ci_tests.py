@@ -2348,6 +2348,11 @@ def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
         "tests/test_hydro_display_mvt_scaling_instants.py",
         "tests/test_hydro_display_mvt_scaling_national_routes.py",
         "tests/test_hydro_display_mvt_scaling_national_sql.py",
+        # #2773: guard-derived entry, synced from the selector's own output per
+        # the procedure above — the station-tile retirement suite imports
+        # apps.api.routes.hydro_display at file level, so the closure guard puts
+        # it on this rule as a one-hop importer.
+        "tests/test_met_station_mvt_route_retired.py",
         "tests/test_migrations.py",
         # #2716: guard-derived entry, synced from the selector's own output per
         # the procedure above — the DB tile-cache write-privilege suite imports
@@ -3640,10 +3645,11 @@ def test_direct_grid_display_cutover_flip_partition_tracked_tree_is_exactly_two_
         targets = set(rule_for(pattern).tests)
         assert partitions <= targets, f"{pattern} lost partition(s): {sorted(partitions - targets)}"
 
-    # The closure registries anchor on `_atomic` because it alone holds the
-    # module-scope facade import; read it from the source, not the tuple.
-    assert "_station_source_version" in _names_imported_from(atomic, "apps.api.routes.hydro_display")
-    assert atomic in _non_gated_top_level_importer_tests("apps.api.routes.hydro_display")
+    # #2773: `_atomic` no longer imports the facade -- the `_station_source_version`
+    # lock it held went with the retired station tile route -- so the closure
+    # registries anchor on another direct importer. The display rules above still
+    # carry both partitions by hand; read the import from the source, not the tuple.
+    assert not _names_imported_from(atomic, "apps.api.routes.hydro_display")
 
     # #1561: the importer index walks SUITES only, so the helper's own import of
     # tests.test_variant_activation_cutover routes nothing; each partition must
@@ -6109,13 +6115,14 @@ GUARDED_MODULE_CLOSURES: tuple[tuple[str, str, str], ...] = (
     # scripts/select_ci_tests.py) carries the derived direct UNION one-hop
     # non-gated importer closure; this entry makes the closure guard derive it
     # from the tracked tree, so a new importer suite reddens the guard.
-    # #2527: the flip monolith is two partitions; only `_atomic` still imports
-    # `_station_source_version` from the facade at module scope, so it is the
-    # known member.
+    # #2773: the flip `_atomic` partition stopped importing the facade when the
+    # station tile route (and `_station_source_version`) was retired, so the
+    # known member is the geometry-identity suite, a module-scope importer that
+    # carries the real `_run_row` / `_river_network_source_version` SQL.
     (
         "apps/api/routes/hydro_display.py",
         "apps.api.routes.hydro_display",
-        "tests/test_direct_grid_display_cutover_flip_atomic.py",
+        "tests/test_mvt_run_and_river_network_geometry_identity.py",
     ),
     # #2026: the two owner modules split out of the facade that tests import
     # DIRECTLY, because their patch targets moved with their whole consumer set
@@ -13360,8 +13367,8 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
     # here means the base partition stopped importing the shared stores, which
     # would mean the doubles were duplicated back into the partitions.
     ("tests/api_contract_helpers.py", "tests/test_api_contract.py"),
-    # #2527: the station-flag flip harness. Anchored on `_atomic`, the partition
-    # the hydro_display closure registries also pin.
+    # #2527: the station-flag flip harness. Anchored on `_atomic`, which imports
+    # it at module scope.
     (DIRECT_GRID_DISPLAY_CUTOVER_FLIP_HELPERS_PATH, DIRECT_GRID_DISPLAY_CUTOVER_FLIP_ATOMIC_TEST),
     # I1 #1980: the river read-template register. The golden equivalence
     # oracle anchors the raw corpus.
@@ -16195,9 +16202,6 @@ def test_hydro_display_rule_covers_its_derived_importer_closure() -> None:
 
     # Anti-vacuity: one known direct and one known one-hop member must be in
     # the derived set, so a derivation that collapses to silence reds here.
-    # #2527: `_atomic` is the flip partition holding the module-scope
-    # `from apps.api.routes.hydro_display import _station_source_version`.
-    assert "tests/test_direct_grid_display_cutover_flip_atomic.py" in required
     assert "tests/test_openapi_31_contract.py" in required
     # #2156 (D-2): the geometry-identity suite is a direct importer carrying the
     # real _run_row / _river_network_source_version SQL; pinned by name so its

@@ -443,7 +443,6 @@ _DETAIL_LAYER_IDS = {
     "river-network": "river-network",
     "hydro": "discharge",
     "hydro-national": "discharge",
-    "met-stations": "met-stations",
 }
 
 

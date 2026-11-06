@@ -17,14 +17,9 @@ Path 1 — station-series endpoint required-filter contract
     "active-model" fallback lives on this route.
 
 Path 2 — MVT tile cache key derivation
-    ``apps/api/routes/hydro_display_identity.py::_station_source_version`` derives
-    the tile cache key exclusively from the ``active_flag=true`` station
-    source identity — the SQL literal references no ``model_id`` column
-    and the key self-invalidates when the SUB-1 flip flips
-    ``active_flag``. The runtime lock is parametrized across the SQLite
-    dev branch and the PostGIS prod branch, and across a row-filtered
-    swap (Case A) and a same-count identity swap (Case B) — the latter
-    catches constant-digest evasions that would still pass Case A.
+    Retired (#2773 item 4). The station vector-tile route and its
+    ``_station_source_version`` cache key were removed, so no station tile
+    cache key exists to pin a ``model_id``.
 
 Path 3 — explicit historical ``(cycle, model_id)`` route
     Covered by SUB-5's
@@ -63,7 +58,6 @@ import inspect
 import re
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -71,7 +65,6 @@ from apps.api.routes import data_sources as data_sources_module
 from apps.api.routes import forecast as forecast_module
 from apps.api.routes.data_sources import get_met_station_series
 from apps.api.routes.forecast import get_qhh_latest_product
-from apps.api.routes.hydro_display import _station_source_version
 from packages.common.forecast_store import ForecastStoreError
 from packages.common.object_store_forcing import (
     PsycopgStationLookup,
@@ -302,223 +295,11 @@ def test_forecast_latest_product_route_has_no_server_side_active_model_default_f
 # =========================================================================
 # Path 2 — MVT tile cache key derivation
 # =========================================================================
-
-
-def test_station_source_version_sql_does_not_reference_model_id() -> None:
-    """(P2) ``_station_source_version`` SQL literal references no ``model_id`` column.
-
-    The tile cache key is derived from station inventory identity alone
-    (``station_id, basin_version_id, station_name, station_role,
-    active_flag, geom, created_at``). Adding a ``model_id`` predicate or
-    projected column would pin the tile key to a captured ``model_id``
-    and break the flip's self-invalidation contract (SUB-1 test 7 covers
-    the sibling ``basin_version_id + active_flag=true`` invariant; this
-    test adds the "no ``model_id`` reference" positive claim).
-
-    Case-insensitive matching guards against an uppercase-mutated
-    ``MODEL_ID`` column reference (PostgreSQL folds unquoted identifiers
-    to lowercase at parse time, so an uppercase form would compile but
-    would evade a case-sensitive substring check).
-    """
-    raw_source = inspect.getsource(_station_source_version)
-
-    # Positive anchors run against the RAW source so a rename hiding in
-    # unusual formatting cannot slip past.
-    assert "met.met_station" in raw_source, (
-        "expected _station_source_version to query met.met_station "
-        "(SUT anchor moved?)"
-    )
-    assert "basin_version_id = :basin_version_id" in raw_source, (
-        "expected _station_source_version to key on basin_version_id "
-        "(SUT anchor moved?)"
-    )
-
-    # Negative predicate on executable source only — strip docstrings +
-    # ``#`` comments so a defensive comment like
-    # ``# tile cache key omits model_id on purpose`` cannot trip the
-    # check (Phase 4 test-coverage review Fold 6).
-    executable_source = _strip_comments_and_docstrings(raw_source)
-    assert re.search(r"model_id", executable_source, re.IGNORECASE) is None, (
-        "_station_source_version must not reference model_id — the tile "
-        "cache key is derived from station inventory identity alone "
-        "(SUB-6 §3.1: 'MVT tile cache key derived from active_flag=true "
-        "station source identity so it self-invalidates on flip')"
-    )
-
-
-class _FakeSessionResult:
-    """Minimal ``session.execute(...)`` result stub returning fixed rows."""
-
-    def __init__(self, rows: list[dict[str, Any]]) -> None:
-        self._rows = rows
-
-    def mappings(self) -> "_FakeSessionResult":
-        return self
-
-    def all(self) -> list[dict[str, Any]]:
-        return list(self._rows)
-
-
-class _FakeDialect:
-    def __init__(self, name: str) -> None:
-        self.name = name
-
-
-class _FakeBind:
-    """Minimal ``session.get_bind()`` returning a dialect stub.
-
-    Parametrized so the same fake can drive both the SQLite dev branch
-    (``dialect.name == "sqlite"``) and the PostGIS prod branch of
-    ``_station_source_version``. The SQL text differs between branches
-    but the fake ``execute`` returns the constructor-supplied rows
-    verbatim, so the test author is responsible for supplying rows that
-    already reflect the branch's WHERE-clause filtering.
-    """
-
-    def __init__(self, dialect_name: str = "sqlite") -> None:
-        self.dialect = _FakeDialect(dialect_name)
-
-
-class _FakeSession:
-    """In-memory ``sqlalchemy.orm.Session`` seam for ``_station_source_version``.
-
-    The SUT calls ``session.get_bind().dialect.name`` (routes SQLite vs
-    PostGIS) and ``session.execute(text(...), params).mappings().all()``.
-    We satisfy both surfaces and return the constructor-supplied rows.
-    """
-
-    def __init__(self, rows: list[dict[str, Any]], dialect_name: str = "sqlite") -> None:
-        self._rows = rows
-        self._dialect_name = dialect_name
-
-    def get_bind(self) -> _FakeBind:
-        return _FakeBind(self._dialect_name)
-
-    def execute(self, _stmt: Any, _params: Any) -> _FakeSessionResult:
-        return _FakeSessionResult(self._rows)
-
-
-def _station_row(
-    *,
-    station_id: str,
-    active_flag: int,
-    basin_version_id: str = HISTORICAL_BASIN_VERSION_ID,
-) -> dict[str, Any]:
-    return {
-        "station_id": station_id,
-        "basin_version_id": basin_version_id,
-        "station_name": f"{station_id} name",
-        "station_role": "forcing_grid",
-        "active_flag": active_flag,
-        "geom": "0101000020e6100000",  # opaque hex placeholder; identity-relevant only
-        "created_at": datetime(2026, 5, 1, 0, tzinfo=UTC),
-    }
-
-
-@pytest.mark.parametrize("dialect_name", ["sqlite", "postgresql"])
-@pytest.mark.parametrize(
-    ("scenario", "pre_rows_factory", "post_rows_factory", "expected_pre_len", "expected_post_len"),
-    [
-        pytest.param(
-            "row_filtered_flip",
-            lambda: [
-                _station_row(station_id="alpha", active_flag=1),
-                _station_row(station_id="beta", active_flag=1),
-            ],
-            # Post-flip: "beta" was flipped to inactive; the SUT WHERE
-            # clause filters ``active_flag = 1`` (SQLite) / ``= true``
-            # (PostGIS), so the fake ``execute`` MUST already reflect
-            # the WHERE-filtered rows — post-set is just [alpha].
-            lambda: [
-                _station_row(station_id="alpha", active_flag=1),
-            ],
-            2,
-            1,
-            id="case_a_row_filtered",
-        ),
-        pytest.param(
-            "same_count_identity_swap",
-            lambda: [
-                _station_row(station_id="alpha", active_flag=1),
-                _station_row(station_id="beta", active_flag=1),
-            ],
-            # Same row count, different station identity — the real
-            # production cutover swap where a beta station is deactivated
-            # AND a gamma station is activated in the same flip. A
-            # constant-digest mutation (e.g. hashing only
-            # ``basin_version_id``) would still pass Case A because the
-            # ``:<len>`` suffix would differ, but MUST NOT pass Case B:
-            # only the digest carries the row identity change here.
-            lambda: [
-                _station_row(station_id="alpha", active_flag=1),
-                _station_row(station_id="gamma", active_flag=1),
-            ],
-            2,
-            2,
-            id="case_b_same_count_swap",
-        ),
-    ],
-)
-def test_station_source_version_key_self_invalidates_when_active_flag_flips(
-    dialect_name: str,
-    scenario: str,
-    pre_rows_factory: Any,
-    post_rows_factory: Any,
-    expected_pre_len: int,
-    expected_post_len: int,
-) -> None:
-    """(P2) Tile cache key changes when the station-source inventory flips.
-
-    Parametrized runtime lock covering:
-
-    * Case A — a ``beta`` station is deactivated; the WHERE clause drops
-      it from the projected row set. The row-count suffix differs on its
-      own, but so should the digest.
-    * Case B — a ``beta`` deactivation is paired with a ``gamma``
-      activation. The projected row count is unchanged; only the digest
-      encodes the identity change. This case catches constant-digest
-      evasions (e.g. a mutation to
-      ``hashlib.sha256(basin_version_id.encode()).hexdigest()[:16]``
-      that would still pass Case A).
-
-    Each case runs against BOTH the SQLite dev branch and the PostGIS
-    prod branch, closing the branch-coverage gap flagged in the Phase 4
-    test-coverage review.
-    """
-    pre_key = _station_source_version(
-        _FakeSession(pre_rows_factory(), dialect_name=dialect_name),  # type: ignore[arg-type]
-        HISTORICAL_BASIN_VERSION_ID,
-    )
-    post_key = _station_source_version(
-        _FakeSession(post_rows_factory(), dialect_name=dialect_name),  # type: ignore[arg-type]
-        HISTORICAL_BASIN_VERSION_ID,
-    )
-
-    assert pre_key != post_key, (
-        f"[{dialect_name}/{scenario}] expected tile cache key to change "
-        "when the station-source inventory flips (self-invalidates on "
-        "flip); a stable key would serve stale tiles across a cutover"
-    )
-
-    # Key format lock — ``met-stations:<digest>:<basin_version_id>:<len>``.
-    pre_parts = pre_key.split(":")
-    post_parts = post_key.split(":")
-    assert pre_parts[0] == "met-stations" == post_parts[0]
-    assert pre_parts[2] == HISTORICAL_BASIN_VERSION_ID == post_parts[2]
-    assert int(pre_parts[3]) == expected_pre_len
-    assert int(post_parts[3]) == expected_post_len
-
-    # Digest-segment lock — the substantive claim is that the digest
-    # itself carries the inventory identity, not that the length suffix
-    # happens to change. Even in Case B where the length is stable, the
-    # digest segment MUST differ; this catches a mutation that only
-    # varies the ``:<len>`` suffix.
-    assert pre_parts[1] != post_parts[1], (
-        f"[{dialect_name}/{scenario}] expected digest segment to differ; "
-        f"pre={pre_parts[1]} post={post_parts[1]}. A constant-digest "
-        "mutation would still pass Case A on row-count change but "
-        "silently serve stale tiles across a same-count identity swap."
-    )
+#
+# Retired with the station vector-tile route (#2773 item 4). The
+# ``/api/v1/tiles/met-stations/...`` route and its ``_station_source_version``
+# cache key are gone, so there is no station tile cache key left to pin to a
+# ``model_id``. Stations reach the map only through ``/api/v1/met/stations``.
 
 
 # =========================================================================

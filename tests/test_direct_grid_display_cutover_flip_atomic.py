@@ -27,11 +27,9 @@ pinned in ``openspec/changes/direct-grid-display-cutover/tasks.md``:
 * (6) Fresh-basin direct-grid activation with no previous active model
   no-ops with the audited skip reason ``no_previous_active_model`` and
   touches no station row.
-* (7) Static structural regression lock:
-  ``apps/api/routes/hydro_display_identity.py::_station_source_version`` still
-  filters only by ``basin_version_id + active_flag=true`` and does NOT
-  contain a ``model_id`` predicate (design §Decision 1 rejects the
-  ``model_id`` filter form).
+* (7) Retired (#2773 item 4): the static lock on the station-MVT source
+  query ``_station_source_version`` went with the station vector-tile route
+  it served; there is no such query left to lock.
 
 Scenarios (1)-(6) drive
 :meth:`packages.common.model_registry.PsycopgModelRegistryStore.model_lifecycle_operation`
@@ -39,21 +37,13 @@ end-to-end via a ``_HarnessStore`` subclass (the pattern from
 ``tests/test_variant_activation_cutover.py`` +
 ``tests/test_state_clone_index_publish.py``) so the real preflight →
 hook-dispatch → transition → audit path exercises the flip hook exactly
-as production will. Scenario (7) is a pure source-inspection test — it
-reads ``apps/api/routes/hydro_display_identity.py`` from disk and asserts SQL
-substrings on the ``_station_source_version`` function body. Its
-``Path(__file__).resolve().parents[1]`` repo-root resolution holds because this
-partition sits directly under ``tests/`` exactly as the monolith did.
+as production will.
 """
 
 from __future__ import annotations
 
-import inspect
-from pathlib import Path
-
 import pytest
 
-from apps.api.routes.hydro_display import _station_source_version
 from packages.common.station_set_flip import (
     SKIP_REASON_NO_PREVIOUS_ACTIVE_MODEL,
     SKIP_REASON_TARGET_NOT_DIRECT_GRID,
@@ -515,65 +505,6 @@ def test_no_previous_active_model_no_ops_with_no_previous_active_model_skip_reas
     # "hook no-op vs whole-op abort" distinction.
     assert ("direct_grid_m1", "active", True) in store._state_updates
     assert store._transactions[-1]["committed"] is True
-
-
-# ============================================================================
-# (7) Station-MVT source query byte-unchanged (static structural regression lock)
-# ============================================================================
-
-
-def test_station_mvt_source_query_unchanged() -> None:
-    """§1.1 evidence: ``_station_source_version`` still filters ONLY on
-    ``basin_version_id + active_flag=true`` and contains NO ``model_id``
-    predicate.
-
-    Design §Decision 1 rejects the ``model_id`` filter form: single-track
-    visibility is delivered by row selection at the flip hook, not by
-    adding a ``model_id`` filter to the MVT source query. This test is
-    a static structural regression lock — it reads
-    ``apps/api/routes/hydro_display_identity.py::_station_source_version`` from
-    disk (via :func:`inspect.getsource`), plus reads the file itself
-    for redundancy, and asserts the query bodies still shape the
-    invariant.
-    """
-
-    # Source of truth #1: the function's actual runtime source.
-    function_source = inspect.getsource(_station_source_version)
-    # Source of truth #2: the on-disk file. Redundant with the runtime
-    # source, but the on-disk read catches a future refactor that
-    # renames / relocates the function to a place ``inspect`` still
-    # dereferences — the file path is pinned by design.
-    # Resolve the on-disk path relative to this test file so pytest can
-    # be invoked from any working directory (repo root, subdir, or an
-    # unrelated cwd used by CI). ``parents[1]`` is the repo root:
-    # ``tests/test_direct_grid_display_cutover_flip.py`` -> ``parents[0]``
-    # is ``tests/`` and ``parents[1]`` is the repo root.
-    repo_root = Path(__file__).resolve().parents[1]
-    # #2026: the definition moved to the identity owner module when the facade was
-    # split; the facade only re-exports it, so reading the facade here would make
-    # the `def ...` assertion vacuous-by-absence rather than a structural lock.
-    disk_source = (repo_root / "apps/api/routes/hydro_display_identity.py").read_text(
-        encoding="utf-8"
-    )
-    assert "def _station_source_version" in disk_source
-
-    # Positive structural predicates: both required filters are present.
-    assert "basin_version_id = :basin_version_id" in function_source
-    # PostGIS branch (production).
-    assert "AND active_flag = true" in function_source
-    # SQLite branch (local test / dev fallback).
-    assert "AND active_flag = 1" in function_source
-
-    # Negative structural predicate: NO ``model_id`` predicate is added.
-    # This is the design-pinned invariant — Decision 1 rejected the
-    # ``model_id`` filter form; a future refactor that introduces one
-    # would break the single-track flip design and this test would fail.
-    lowered = function_source.lower()
-    assert "model_id" not in lowered, (
-        "Design §Decision 1 rejects adding a model_id predicate to the "
-        "station-MVT source query; single-track visibility is delivered by "
-        "the SUB-1 flip hook's row selection, not by the query."
-    )
 
 
 # ============================================================================
