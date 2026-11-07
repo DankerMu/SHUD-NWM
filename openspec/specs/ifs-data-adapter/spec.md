@@ -208,10 +208,9 @@ THEN RH = exp(17.625×10/253.04) / exp(17.625×20/263.04) ≈ 0.525（容差 1e-
 #### Scenario: 降水转换（tp → prcp_rate_or_amount）
 
 WHEN 处理 IFS `tp`（总降水，累积，单位 m）
-THEN 执行累积差分得到步长降水量（mm/step）
-AND 单位从 m 转为 mm（× 1000），不在 canonical 阶段转 mm/day（mm/day 由 forcing 阶段处理）
-AND 负差分处理：|Δ| < 0.01 mm → 0（quality_flag=ok）；|Δ| ≥ 0.01 mm → 0（quality_flag=warning_negative_precip）；≥3 连续负值 → error_precip_accumulation
-AND `lineage_json` 记录 `{"accumulation_type": "since_cycle", "unit_conversion": "m_to_mm", "step_hours": 3}`
+THEN 执行累积差分得到步长降水量，单位从 m 转为 mm（× 1000），再按实际步长换算为 mm/day（× 24 / step_hours）
+AND 负差分处理按 canonical-conversion「IFS precipitation de-accumulation tolerance follows GRIB quantisation」：|Δ| < max(PRECIP_NEGATIVE_NOISE_TOLERANCE_MM, 前后两条 GRIB 量化步长之和) → 0（quality_flag=ok）；达到该容差 → 0（quality_flag=warning_negative_precip）；≥3 连续负值 → error_precip_accumulation
+AND `lineage_json` 记录 `{"accumulation_type": "since_cycle", "unit_conversion": "m_to_mm_day", "step_hours": 3}`
 
 #### Scenario: 降水转换数值验证
 
