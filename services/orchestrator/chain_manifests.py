@@ -74,6 +74,7 @@ __all__ = (
     "build_forecast_runtime_manifest",
     "build_model_run_assembly",
     "build_reindexed_manifest",
+    "gateway_wire_entries",
     "prepare_forecast_runtime_manifests",
     "production_stage_for",
     "reindexed_manifest_entries",
@@ -175,6 +176,16 @@ class ChainManifestOrchestrator(Protocol):
     ) -> None: ...
 
 
+def gateway_wire_entries(entries: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Shallow copies of ``entries`` without ``state_evidence`` (#3095).
+
+    The candidate's state evidence is orchestrator-only and unbounded; nothing past the
+    Slurm gateway boundary reads it, so it never goes on the wire or into an index file.
+    """
+
+    return [{key: value for key, value in entry.items() if key != "state_evidence"} for entry in entries]
+
+
 def build_cycle_stage_manifest(
     orchestrator: ChainManifestOrchestrator,
     stage: StageDefinition,
@@ -229,7 +240,7 @@ def build_cycle_stage_manifest(
         ),
         "total_basins": len(context.all_basins),
         "active_basins": len(context.active_basins),
-        "manifest_index": manifest_index_entries,
+        "manifest_index": gateway_wire_entries(manifest_index_entries),
         "model_runs": [
             model_run_stage_evidence(stage.stage, entry, cycle_id=context.cycle_id)
             for entry in manifest_index_entries
@@ -283,7 +294,7 @@ def build_cycle_stage_manifest(
             "quality_states": quality_states,
             "residual_blockers": cycle_residual_blockers(manifest_index_entries),
         }
-        manifest["basins"] = list(context.active_basins)
+        manifest["basins"] = gateway_wire_entries(context.active_basins)
         manifest["quality_states"] = quality_states
     return manifest
 
