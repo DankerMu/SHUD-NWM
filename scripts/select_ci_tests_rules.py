@@ -2816,6 +2816,18 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ("tests/test_node27_raw_retention_copyback_mutex.py",),
     ),
     PathTestRule(
+        # #3087: the runner's lane vocabulary and env parsing (forcing lane,
+        # strict FORCING_DAYS parser and floor), split out of
+        # scripts/node27_raw_retention.py by responsibility. No same-name suite
+        # exists, so without this row a lanes-only diff reaches none of the
+        # runner's oracles.
+        "scripts/node27_raw_retention_lanes.py",
+        (
+            "tests/test_node27_raw_retention.py",
+            "tests/test_node27_raw_retention_copyback_mutex.py",
+        ),
+    ),
+    PathTestRule(
         # I1 #1980 river_ts_render: the shared per-store renderer. It owns the
         # text-identity vocabulary and the table-scoped attribution every oracle
         # in the group now imports, so a diff to it can blunt all of them at once

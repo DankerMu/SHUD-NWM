@@ -334,7 +334,9 @@ ssh -p 32099 nwm@210.77.77.27 \
        retention 记成 `unparseable_run_cycle` 跳过；`forcing/**` 引用树与 extra object 旁的
        backup 不在任何 retention 目标里——node-22 对 copyback root 只按 `runs_only_roots` 扫
        `runs/`（`raw|canonical|forcing/<source>/<cycle>` 只在 primary root 上扫，`services/orchestrator/retention.py`），
-       node-27 `scripts/node27_raw_retention.py` 明确不碰 `forcing`、`runs`。下一次 copyback 直接 promote、不看它。
+       node-27 `scripts/node27_raw_retention.py` 不碰 `runs`；它的 `forcing` 车道（#3087）只删
+       `forcing/<gfs|ifs>/<10 位 cycle>` 真目录，backup 是点开头的名字，记 `unparseable_cycle_name`
+       跳过。下一次 copyback 直接 promote、不看它。
      - **处置**（node-22、账号 `frd_muziyao`，即 copyback root 属主；node-22 是 NFS client，
        `flock` 与所有写者互斥。**从 node-22 做**，node-27 本地 `flock` 与之不互斥）：全程持
        batch mutex，期间不在这个 copyback root 下做别的。锁文件可能已被上文「属主不对的孤儿」
@@ -497,7 +499,7 @@ preflight-blocked 的 tick 一次都不取、也不建锁文件。summary schema
 | unit | 作用域 / 身份 | `NODE27_RAW_RETENTION_LANES` | env | summary 目录 | 失败告警 |
 |---|---|---|---|---|---|
 | `nhms-node27-raw-retention.{service,timer}` | nwm user unit，`nwm`(1005) | `raw,precip-cache` | `/home/nwm/NWM/infra/env/node27-raw-retention.env` | `/home/nwm/node27-raw-retention-logs/` | `OnFailure=nhms-node27-unit-failure-alert@%n.service`（user journal） |
-| `nhms-node27-canonical-retention.{service,timer}` | 系统 unit，`User=frd_muziyao`(1103) | `canonical` | `/etc/nhms/node27-canonical-retention.env`（安装脚本生成） | `/var/log/nhms-node27-canonical-retention/`（0755，nwm 可读） | `OnFailure=nhms-node27-system-unit-failure-alert@%n.service`（以 nwm + `systemd-journal` 跑同一个 handler，`NHMS_UNIT_FAILURE_JOURNAL_SCOPE=system` 读 system journal） |
+| `nhms-node27-canonical-retention.{service,timer}` | 系统 unit，`User=frd_muziyao`(1103) | `canonical,forcing`（#3087） | `/etc/nhms/node27-canonical-retention.env`（安装脚本生成） | `/var/log/nhms-node27-canonical-retention/`（0755，nwm 可读） | `OnFailure=nhms-node27-system-unit-failure-alert@%n.service`（以 nwm + `systemd-journal` 跑同一个 handler，`NHMS_UNIT_FAILURE_JOURNAL_SCOPE=system` 读 system journal） |
 
 - 两个 timer 都是 `03:35:00 UTC`，同一条 cutoff 规则（同一 display watermark、同一
   `NODE27_RAW_RETENTION_DAYS`），一个 cycle 的 canonical 镜像和它的 PNG 缓存在同一天到龄，
@@ -514,9 +516,25 @@ preflight-blocked 的 tick 一次都不取、也不建锁文件。summary schema
   summary 都适用；安装前 nwm unit 的到龄 canonical `lock_unsafe` 让它恒红（已知 #2360 形态）。
 - 容量：canonical 镜像 14 天两个源实测 3.7 GiB，对 `/home` 余量无压力——判定时仍以
   `df -h` 实测为准。
+- **forcing 车道（#3087，owner 决定 2026-11-07：`forcing/` 保留 30 天）**：目标是
+  `<object-store>/forcing/<段>/<YYYYMMDDHH>`，段是 producer 写的小写 `gfs`/`ifs`（不是 canonical 的
+  `IFS`）；只列真目录，符号链接、普通文件不列不删；非 10 位 cycle 名记 `unparseable_cycle_name`。
+  cutoff 独立：`display_watermark - NODE27_RAW_RETENTION_FORCING_DAYS`（默认 30），summary 里是
+  `forcing_root`/`forcing_retention_days`/`forcing_cutoff`（`cutoff`/`retention_days` 仍只属于另三条车道）。
+  每棵树与 canonical 一样持 copyback batch mutex、共用同一 pass 预算（canonical 先取）。
+  - 下限 fail-closed：`FORCING_DAYS` 非纯数字 / ≤0 / <14 → preflight `forcing_retention_days`
+    blocker（`not_an_integer`/`must_be_positive`/`below_floor`，带 `value`、`floor: 14`），rc=2，两个
+    unit 都一个字节不删——同一份 env 喂两个 unit，所以**不论是否选了 forcing 都检查**。
+    14 = `max(NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS + 1, AUTOPIPE_MAX_CYCLE_AGE_DAYS)` = `max(13, 14)`：
+    ingest 读 forcing handoff，forcing 必须活得比 autopipe cycle 下限久。调高 autopipe 下限时先调高这里。
+  - 身份：`forcing/` 各层属主都是 `frd_muziyao`（2026-11-07 实测 `find forcing -mindepth 1 ! -user frd_muziyao`
+    为 0），nwm 不在其组里删不动，所以只在系统 unit 跑；nwm env 的 `LANES` 含 `forcing` 会被安装脚本拒绝。
+    部署前重做这条 `find` 前置检查：外人属主的子目录会让 `rmtree` 删一半。
+  - 未设 `LANES` 时仍只选 raw/canonical/precip-cache，forcing 不探测、不取锁、不记 `skipped[]`；
+    设了 `LANES` 但没选 forcing 时记一条 `{"key": "forcing", "reason": "lane_not_selected"}`。
 
 **一次性安装（运维 sudo）**。前提（按顺序）：先在 nwm env 加 `NODE27_RAW_RETENTION_LANES=raw,precip-cache`（安装脚本强制
-检查这一行，缺失或含 `canonical` 即拒绝），repo 已 `git pull --ff-only`；再以 nwm 装 repo 的 nwm unit 并 reload：
+检查这一行，缺失或含 `canonical`、`forcing` 即拒绝），repo 已 `git pull --ff-only`；再以 nwm 装 repo 的 nwm unit 并 reload：
 `install -m 0644 /home/nwm/NWM/infra/systemd/nhms-node27-raw-retention.service ~/.config/systemd/user/ && systemctl --user daemon-reload`，
 `diff ~/.config/systemd/user/nhms-node27-raw-retention.service /home/nwm/NWM/infra/systemd/nhms-node27-raw-retention.service` 无输出、
 `systemctl --user show -p OnFailure nhms-node27-raw-retention.service` 列出 `nhms-node27-unit-failure-alert@` 模板；然后：
@@ -533,15 +551,15 @@ sudo /home/nwm/NWM/scripts/node27_canonical_retention_install.sh
 import 探针通过），任一不过就
 rc≠0 退出、什么都不写。然后：生成 `/etc/nhms/node27-canonical-retention.env`（从 nwm env 去掉
 `LANES`/`LOG_ROOT`/`LOCK_PATH`/`LOG_FILE`/`SUMMARY_PATH`/`BOOTSTRAP_LOG` 行，追加
-`LANES=canonical`、`LOG_ROOT=/var/log/nhms-node27-canonical-retention`、
+`LANES=canonical,forcing`（`NODE27_RAW_RETENTION_FORCING_DAYS` 不是 per-unit 键，原样带过去）、`LOG_ROOT=/var/log/nhms-node27-canonical-retention`、
 `LOCK_PATH=/run/nhms-node27-canonical-retention/raw-retention.lock`；属主 `frd_muziyao`、`600`；
 不打印任何值）→ `install -m 0644` 三份系统 unit 到 `/etc/systemd/system/` → `daemon-reload` →
 `enable --now` timer → 同步 `start` 一次 service，打印 `User,Result,ExecMainStatus`、timer 状态、
-最新 summary 的 `lanes`/`counts`/`copyback_lock_failures` 和锁文件 `%A %U`；service
+最新 summary 的 `lanes`/`cutoff`/`forcing_cutoff`/`counts`/`copyback_lock_failures` 和锁文件 `%A %U`；service
 `Result` 不是 `success` 就 rc≠0。
 
 **改了 nwm raw-retention env 之后必须重跑同一条 sudo 命令**：系统 unit 的 env 是安装时的快照，
-不会跟着变（比较两份 summary 的 `retention_days`、`sources`，不等就重跑安装脚本）。
+不会跟着变（比较两份 summary 的 `retention_days`、`forcing_retention_days`、`sources`，不等就重跑安装脚本）。
 
 **回滚**（回到"canonical 不删"的状态；锁文件不动）：
 
@@ -582,7 +600,7 @@ ssh -p 32099 nwm@210.77.77.27 '
 ```
 
 期望：两段都没有 `RED`、命令 rc=0（任一段 `RED` 则 rc=1）；nwm summary `lanes=["precip-cache","raw"]`、canonical summary
-`lanes=["canonical"]`；`copyback_lock_failures` 全 0；锁文件仍是 `-rw------- frd_muziyao`。
+`lanes=["canonical","forcing"]`；`copyback_lock_failures` 全 0；锁文件仍是 `-rw------- frd_muziyao`。
 判据本体与各退出码含义见 `infra/env/node27-raw-retention.example`（测试直接抽取那份 `jq`
 程序执行）。
 

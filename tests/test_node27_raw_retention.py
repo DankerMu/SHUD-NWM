@@ -1620,9 +1620,12 @@ def test_unset_lanes_summary_differs_from_the_pre_2360_shape_only_by_lanes(
         "raw_root",
         "canonical_root",
         "precip_cache_root",
+        "forcing_root",
         "sources",
         "retention_days",
         "cutoff",
+        "forcing_retention_days",
+        "forcing_cutoff",
         "enabled",
         "dry_run",
         "anchor",
@@ -1670,6 +1673,7 @@ def test_the_canonical_unit_prunes_only_canonical(tmp_path: Path) -> None:
     assert _keys(result["deleted"]) == ["canonical/IFS/2026060100"]
     assert result["skipped"] == [
         {"key": "raw", "reason": "lane_not_selected"},
+        {"key": "forcing", "reason": "lane_not_selected"},
         {"key": "precip-cache", "reason": "lane_not_selected"},
     ]
     assert result["failed"] == []
@@ -1690,7 +1694,10 @@ def test_the_nwm_unit_lanes_leave_canonical_untouched(tmp_path: Path) -> None:
 
     assert result["lanes"] == ["precip-cache", "raw"]
     assert _keys(result["deleted"]) == ["raw/gfs/2026060100", "precip-cache/IFS/2026060100"]
-    assert result["skipped"] == [{"key": "canonical", "reason": "lane_not_selected"}]
+    assert result["skipped"] == [
+        {"key": "canonical", "reason": "lane_not_selected"},
+        {"key": "forcing", "reason": "lane_not_selected"},
+    ]
     assert aged["canonical"].is_dir()
     assert not aged["raw"].exists()
     assert not aged["precip-cache"].exists()
@@ -1901,3 +1908,234 @@ def test_documented_operator_check_loop_exits_nonzero_when_either_unit_is_red(tm
     assert result.returncode != 0
     assert f"RED: {canonical_dir}" in result.stdout
     assert f"RED: {nwm_dir}" not in result.stdout
+
+
+# --- #3087: the opt-in forcing lane --------------------------------------------
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_NOV7 = datetime(2026, 11, 7, tzinfo=UTC)
+
+
+def _write_forcing_cycle(root: Path, segment: str, cycle: str) -> Path:
+    """One copied-back forcing package (`forcing/<segment>/<cycle>/<bv>/<model>/`)."""
+    package = root / "forcing" / segment / cycle / "bv-1" / "shud"
+    package.mkdir(parents=True)
+    (package / "forcing.csv").write_text("time,prcp\n", encoding="utf-8")
+    return root / "forcing" / segment / cycle
+
+
+def _forcing_days_config(
+    monkeypatch: pytest.MonkeyPatch, store: Path, *, lanes: str | None, days: str | None
+) -> Any:
+    if days is None:
+        monkeypatch.delenv("NODE27_RAW_RETENTION_FORCING_DAYS", raising=False)
+    else:
+        monkeypatch.setenv("NODE27_RAW_RETENTION_FORCING_DAYS", days)
+    return _config_for_env(monkeypatch, store, lanes)
+
+
+@pytest.mark.parametrize(("days", "expected"), [(None, 30), ("", 30), ("  ", 30), ("14", 14), (" 45 ", 45)])
+def test_forcing_days_env_is_parsed_strictly_into_the_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, days: str | None, expected: int
+) -> None:
+    config, blockers = _forcing_days_config(monkeypatch, tmp_path, lanes="forcing", days=days)
+
+    assert blockers == []
+    assert config.lanes == frozenset({"forcing"})
+    assert config.forcing_retention_days == expected
+
+
+@pytest.mark.parametrize(
+    ("days", "reason"),
+    [
+        ("13", "below_floor"),
+        ("1", "below_floor"),
+        ("0", "must_be_positive"),
+        ("00", "must_be_positive"),
+        ("abc", "not_an_integer"),
+        ("-30", "not_an_integer"),
+        ("+30", "not_an_integer"),
+        ("3_0", "not_an_integer"),
+        ("30.0", "not_an_integer"),
+        ("３０", "not_an_integer"),  # full-width "30": int() would accept it
+    ],
+)
+def test_a_forcing_period_below_the_floor_blocks_every_lane(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    days: str,
+    reason: str,
+) -> None:
+    """Spec scenario "a forcing period below the floor", with forcing NOT selected."""
+    store = tmp_path / "store"
+    cache = tmp_path / "cache"
+    summary_path = tmp_path / "summaries" / "raw-retention.json"
+    aged = _three_aged_lanes(store, cache)
+    forcing = _write_forcing_cycle(store, "gfs", "2026010100")
+    _production_env(monkeypatch, store=store, cache=cache, summary_path=summary_path)
+    monkeypatch.setenv("NODE27_RAW_RETENTION_LANES", "raw,precip-cache")
+    monkeypatch.setenv("NODE27_RAW_RETENTION_FORCING_DAYS", days)
+
+    exit_code, payload = _production_tick(capsys)
+
+    assert exit_code == 2
+    assert payload["status"] == "preflight_blocked"
+    assert payload["blockers"] == [
+        {"field": "forcing_retention_days", "reason": reason, "value": days, "floor": 14}
+    ]
+    assert payload["counts"] == {"planned": 0, "deleted": 0, "skipped": 0, "failed": 0}
+    assert all(path.is_dir() for path in aged.values())
+    assert forcing.is_dir()
+    assert json.loads(summary_path.read_text(encoding="utf-8")) == payload
+
+
+def test_the_forcing_floor_literal_tracks_the_display_lookback_and_the_autopipe_floor() -> None:
+    """Drift pin: 14 == max(NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS + 1, AUTOPIPE_MAX_CYCLE_AGE_DAYS)."""
+    import re
+
+    from scripts import node27_raw_retention_lanes as lanes
+    from services.tiles.mvt import NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS
+
+    ingest = (_REPO_ROOT / "infra" / "env" / "node27-ingest.example").read_text(encoding="utf-8")
+    autopipe = [int(value) for value in re.findall(r"(?m)^AUTOPIPE_MAX_CYCLE_AGE_DAYS=([0-9]+)$", ingest)]
+    assert len(autopipe) == 1, autopipe
+
+    floor = lanes.FORCING_RETENTION_FLOOR_DAYS
+    assert floor == max(NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS + 1, autopipe[0]) == 14
+    assert lanes.DEFAULT_FORCING_RETENTION_DAYS >= floor
+
+
+def test_unset_lanes_never_reach_the_forcing_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """MODIFIED scenario "unset selects every lane": aged forcing trees exist, and the
+    run is exactly the legacy three lanes -- no forcing target, skip or probe."""
+    store = tmp_path / "store"
+    cache = tmp_path / "cache"
+    aged = _three_aged_lanes(store, cache)
+    forcing = _write_forcing_cycle(store, "gfs", "2026010100")
+    config, blockers = _forcing_days_config(monkeypatch, store, lanes=None, days=None)
+    assert blockers == [] and config is not None
+    config = dataclasses.replace(config, precip_cache_root=cache, sources=frozenset({"gfs", "ifs"}))
+    probed: list[Path] = []
+    real_resolve = node27_raw_retention._resolve_lane_root
+
+    def recording_resolve(root: Path, **kwargs: Any) -> Any:
+        probed.append(root)
+        return real_resolve(root, **kwargs)
+
+    monkeypatch.setattr(node27_raw_retention, "_resolve_lane_root", recording_resolve)
+
+    result = node27_raw_retention.run_retention(config, now=datetime(2026, 6, 27, 12, tzinfo=UTC))
+
+    assert _keys(result["deleted"]) == [
+        "raw/gfs/2026060100",
+        "canonical/IFS/2026060100",
+        "precip-cache/IFS/2026060100",
+    ]
+    assert result["skipped"] == []
+    assert store / "forcing" not in probed
+    assert all(not path.exists() for path in aged.values())
+    assert forcing.is_dir()
+
+
+def test_canonical_and_forcing_lanes_collect_forcing_ahead_of_the_precip_cache_return(tmp_path: Path) -> None:
+    """The installer's `canonical,forcing` selection, with the cache root unconfigured."""
+    store = tmp_path / "store"
+    cache = tmp_path / "cache"
+    aged = _three_aged_lanes(store, cache)
+    forcing = [_write_forcing_cycle(store, "gfs", "2026060100"), _write_forcing_cycle(store, "ifs", "2026060100")]
+
+    targets, skipped = node27_raw_retention.collect_targets(
+        _lanes_config(store, lanes={"canonical", "forcing"}, cache=None), now=_NOV7
+    )
+
+    assert [(target.key, target.reason) for target in targets] == [
+        ("canonical/IFS/2026060100", "canonical_cycle_aged_out"),
+        ("forcing/gfs/2026060100", "forcing_cycle_aged_out"),
+        ("forcing/ifs/2026060100", "forcing_cycle_aged_out"),
+    ]
+    assert [target.path for target in targets[1:]] == forcing
+    assert skipped == [
+        {"key": "raw", "reason": "lane_not_selected"},
+        {"key": "precip-cache", "reason": "lane_not_selected"},
+    ]
+    assert aged["raw"].is_dir()
+
+
+def test_the_forcing_lane_uses_its_own_cutoff(tmp_path: Path) -> None:
+    """Legacy lanes keep `retention_days`; forcing keeps `forcing_retention_days`."""
+    store = tmp_path / "store"
+    raw = _write_raw_cycle(store, "gfs", "2026101000")  # 28 days before the reference: aged at 14
+    forcing = _write_forcing_cycle(store, "gfs", "2026101000")  # inside the 30-day window
+    config = dataclasses.replace(
+        _lanes_config(store, lanes={"raw", "forcing"}, cache=None), forcing_retention_days=30
+    )
+
+    result = node27_raw_retention.run_retention(config, now=_NOV7)
+
+    assert (result["cutoff"], result["forcing_cutoff"]) == ("2026-10-24T00:00:00Z", "2026-10-08T00:00:00Z")
+    assert _keys(result["deleted"]) == ["raw/gfs/2026101000"]
+    assert {"key": "forcing/gfs/2026101000", "reason": "within_retention_window"} in result["skipped"]
+    assert not raw.exists()
+    assert forcing.is_dir()
+
+
+def test_an_unmappable_source_retires_only_itself_in_the_forcing_lane(tmp_path: Path) -> None:
+    store = tmp_path / "store"
+    aged = _write_forcing_cycle(store, "gfs", "2026060100")
+    config = dataclasses.replace(
+        _lanes_config(store, lanes={"forcing"}, cache=None), sources=frozenset({"gfs", "era9"})
+    )
+
+    result = node27_raw_retention.run_retention(config, now=_NOV7)
+
+    assert {"key": "forcing/era9", "reason": "source_unmappable"} in result["skipped"]
+    assert _keys(result["deleted"]) == ["forcing/gfs/2026060100"]
+    assert not aged.exists()
+
+
+def test_a_symlinked_forcing_root_is_unsafe_and_reaches_the_operator_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The jq check keys on `*_unsafe`, so it covers the forcing lane unchanged."""
+    store = tmp_path / "store"
+    cache = tmp_path / "cache"
+    summary_path = tmp_path / "summaries" / "raw-retention.json"
+    store.mkdir()
+    real_forcing = tmp_path / "real-forcing"
+    aged = _write_forcing_cycle(real_forcing, "gfs", "2026010100")
+    (store / "forcing").symlink_to(real_forcing / "forcing", target_is_directory=True)
+    _production_env(monkeypatch, store=store, cache=cache, summary_path=summary_path)
+    monkeypatch.setenv("NODE27_RAW_RETENTION_LANES", "forcing")
+    monkeypatch.delenv("NODE27_RAW_RETENTION_FORCING_DAYS", raising=False)
+
+    exit_code, payload = _production_tick(capsys)
+
+    assert exit_code == 0
+    assert [entry for entry in payload["skipped"] if entry["key"] == "forcing"] == [
+        {
+            "key": "forcing",
+            "reason": "forcing_root_unsafe",
+            "path": str(store / "forcing"),
+            "detail": "path_is_symlink",
+        }
+    ]
+    assert payload["planned"] == []
+    assert aged.is_dir()
+    if shutil.which("jq") is None:
+        pytest.skip("jq is not installed; it is present on node-27")
+    check = subprocess.run(["jq", "-e", _documented_operator_jq_program(), str(summary_path)], capture_output=True)
+    assert check.returncode == 1
+
+
+def test_disabled_summaries_also_carry_the_forcing_fields(tmp_path: Path) -> None:
+    disabled = node27_raw_retention.run_retention(
+        dataclasses.replace(_config(tmp_path), enabled=False), now=_NOV7
+    )
+
+    assert disabled["execution_mode"] == "disabled"
+    assert disabled["forcing_root"] == str(tmp_path / "forcing")
+    assert disabled["forcing_retention_days"] == 30
+    assert disabled["forcing_cutoff"] == "2026-10-08T00:00:00Z"
+    assert disabled["lanes"] == _ALL_LANES_SORTED
+    assert node27_raw_retention.SCHEMA_VERSION == "nhms.node27_raw_retention.production.v5"
