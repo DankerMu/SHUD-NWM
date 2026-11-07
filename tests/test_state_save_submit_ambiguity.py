@@ -18,6 +18,8 @@ candidate-state decision.
 
 from __future__ import annotations
 
+import json
+import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -79,8 +81,11 @@ def _gateway_answers(monkeypatch: pytest.MonkeyPatch, status_code: int, payload:
     return calls
 
 
-def _hlj_cohort_context(orchestrator: Any) -> CycleOrchestrationContext:
+def _hlj_cohort_context(
+    orchestrator: Any, *, state_evidence: dict[str, Any] | None = None
+) -> CycleOrchestrationContext:
     cycle_time = _dt("2026-09-22T12:00:00Z")
+    candidate_state = {} if state_evidence is None else {"state_evidence": state_evidence}
     basins = orchestrator._normalize_cycle_basins(
         [
             {
@@ -91,6 +96,7 @@ def _hlj_cohort_context(orchestrator: Any) -> CycleOrchestrationContext:
                 "run_id": f"fcst_ifs_{_CYCLE}_{_MODEL_ID}",
                 "model_package_uri": "s3://nhms/models/basins_hlj/package/",
                 "model_package_checksum": "sha256:hlj",
+                **candidate_state,
             }
         ],
         "IFS",
@@ -536,3 +542,114 @@ def test_gateway_client_default_timeout_outlasts_an_array_submit() -> None:
     from services.orchestrator.chain import HttpSlurmGatewayClient
 
     assert HttpSlurmGatewayClient("http://127.0.0.1:8090").timeout == 60.0
+
+
+# #3095: the candidate's ``state_evidence`` (unbounded ``pipeline_events``) must not cross the
+# gateway boundary or land in a manifest index file; the in-process basins keep it.
+_PUBLISH = M3_STAGES[5]
+
+
+def _state_evidence(event_count: int) -> dict[str, Any]:
+    return {
+        "restart_stage": "state_save_qc",
+        "pipeline_events": [
+            {"event_type": "submission", "entity_id": f"job_{index}", "status_to": "submission_failed"}
+            for index in range(event_count)
+        ],
+    }
+
+
+def _gateway_records(monkeypatch: pytest.MonkeyPatch, status_code: int, payload: dict[str, Any]) -> list[Any]:
+    """Like ``_gateway_answers``, but keep the JSON body of every gateway request."""
+
+    bodies: list[Any] = []
+
+    class _HttpClient:
+        def __enter__(self) -> _HttpClient:
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+            bodies.append(kwargs.get("json"))
+            return httpx.Response(status_code, json=payload)
+
+    monkeypatch.setattr(httpx, "Client", lambda **_kwargs: _HttpClient())
+    return bodies
+
+
+def _submit_with_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, event_count: int
+) -> tuple[Any, CycleOrchestrationContext, dict[str, Any]]:
+    bodies = _gateway_records(monkeypatch, 422, {"error": {"code": "VALIDATION_ERROR"}})
+    orchestrator, _repository = _hlj_orchestrator(tmp_path)
+    context = _hlj_cohort_context(orchestrator, state_evidence=_state_evidence(event_count))
+    assert len(context.active_basins[0]["state_evidence"]["pipeline_events"]) == event_count
+    orchestrator._submit_and_wait_cycle_stage(_STATE_SAVE_QC, context)
+    assert len(bodies) == 1
+    return orchestrator, context, bodies[0]
+
+
+def test_gateway_wire_entries_drops_only_state_evidence_and_copies() -> None:
+    from services.orchestrator.chain_manifests import gateway_wire_entries
+
+    entries = [
+        {"task_id": 0, "run_id": "r0", "state_evidence": _state_evidence(2), "model_run_assembly": {"a": 1}},
+        {"task_id": 1, "run_id": "r1"},
+    ]
+    snapshot = json.dumps(entries, sort_keys=True)
+
+    projected = gateway_wire_entries(entries)
+
+    assert projected == [
+        {"task_id": 0, "run_id": "r0", "model_run_assembly": {"a": 1}},
+        {"task_id": 1, "run_id": "r1"},
+    ]
+    assert json.dumps(entries, sort_keys=True) == snapshot
+    assert all(copy is not entry for copy, entry in zip(projected, entries, strict=True))
+
+
+def test_array_submit_wire_and_index_file_carry_no_state_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    orchestrator, context, body = _submit_with_evidence(tmp_path, monkeypatch, event_count=3)
+
+    assert body["tasks"], "the array submit carried no tasks"
+    assert all("state_evidence" not in task for task in body["tasks"])
+    assert body["manifest"]["manifest_index"]
+    assert all("state_evidence" not in entry for entry in body["manifest"]["manifest_index"])
+    assert "state_evidence" not in json.dumps(body)
+    index_path = Path(orchestrator.config.workspace_root) / "runs" / context.run_id / "input"
+    index_bytes = (index_path / "state_save_qc_manifest_index.json").read_bytes()
+    assert b"state_evidence" not in index_bytes
+    assert json.loads(index_bytes) == body["tasks"]
+    # The orchestrator's in-memory basins keep the full evidence.
+    assert context.active_basins[0]["state_evidence"] == _state_evidence(3)
+
+
+def test_wire_tasks_do_not_grow_with_recorded_pipeline_events(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Same root for both runs so the workspace/object-store URIs in the tasks match too.
+    root = tmp_path / "cycle"
+    _orch_one, _ctx_one, one = _submit_with_evidence(root, monkeypatch, event_count=1)
+    shutil.rmtree(root)
+    _orch_many, _ctx_many, many = _submit_with_evidence(root, monkeypatch, event_count=500)
+
+    assert json.dumps(one["tasks"], sort_keys=True) == json.dumps(many["tasks"], sort_keys=True)
+    assert json.dumps(one["manifest"]["manifest_index"], sort_keys=True) == json.dumps(
+        many["manifest"]["manifest_index"], sort_keys=True
+    )
+
+
+def test_publish_stage_manifest_basins_carry_no_state_evidence(tmp_path: Path) -> None:
+    orchestrator, _repository = _hlj_orchestrator(tmp_path)
+    context = _hlj_cohort_context(orchestrator, state_evidence=_state_evidence(2))
+
+    manifest = orchestrator._build_cycle_stage_manifest(_PUBLISH, context)
+
+    assert manifest["basins"] and all("state_evidence" not in basin for basin in manifest["basins"])
+    assert all("state_evidence" not in entry for entry in manifest["manifest_index"])
+    assert len(manifest["quality_states"]) == len(manifest["basins"])
+    assert context.active_basins[0]["state_evidence"] == _state_evidence(2)

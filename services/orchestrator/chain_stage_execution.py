@@ -16,6 +16,7 @@ from services.orchestrator.accepted_submit_identity import (
 )
 from services.orchestrator.chain_array_accounting import settled_cohort_master
 from services.orchestrator.chain_config import SubmitDisposition
+from services.orchestrator.chain_manifests import gateway_wire_entries
 from services.orchestrator.chain_types import (
     ArrayAggregation,
     CycleOrchestrationContext,
@@ -408,7 +409,7 @@ def submit_and_wait_cycle_stage(
         if stage.stage == "forecast":
             stage_manifest = orchestrator._build_cycle_stage_manifest(stage, context)
         if stage.is_array:
-            tasks = orchestrator._reindexed_manifest_entries(context.active_basins)
+            tasks = gateway_wire_entries(orchestrator._reindexed_manifest_entries(context.active_basins))
             manifest_index_path = orchestrator._write_cycle_manifest_index(context, stage, tasks)
             stage_manifest["manifest_index_path"] = str(manifest_index_path)
             # Array submission must carry the durable execution comment so
