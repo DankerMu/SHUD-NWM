@@ -478,7 +478,10 @@ def test_the_nwm_unit_lanes_exclude_canonical_and_never_touch_the_lock(
     assert exit_code == 0
     assert payload["lanes"] == ["precip-cache", "raw"]
     assert _keys(payload["deleted"]) == ["raw/gfs/2026060100", "precip-cache/IFS/2026060100"]
-    assert payload["skipped"] == [{"key": "canonical", "reason": "lane_not_selected"}]
+    assert payload["skipped"] == [
+        {"key": "canonical", "reason": "lane_not_selected"},
+        {"key": "forcing", "reason": "lane_not_selected"},
+    ]
     assert payload["failed"] == []
     assert payload["copyback_lock_failures"] == ZERO_LOCK_FAILURES
     assert not raw.exists()
@@ -631,3 +634,173 @@ def test_ef15_a_writer_committing_into_a_planned_tree_before_acquisition_does_no
     assert _keys(result["deleted"]) == expected_keys
     assert result["failed"] == []
     assert not planned_tree.exists()
+
+
+# --- #3087: the forcing lane removes under the same mutex ----------------------
+
+FORCING_ARGS = ["--sources", "gfs,ifs", "--reference-time", "2026-11-07T00:00:00Z"]
+
+
+def _forcing_cycle(root: Path, segment: str, cycle: str) -> Path:
+    """One copied-back forcing package in the producer's layout
+    (`forcing/<segment>/<cycle>/<basin_version_id>/<model_id>/...`)."""
+    package = root / "forcing" / segment / cycle / "bv-1" / "shud"
+    package.mkdir(parents=True)
+    (package / "forcing.csv").write_text("time,prcp\n", encoding="utf-8")
+    return root / "forcing" / segment / cycle
+
+
+def _forcing_env(monkeypatch: pytest.MonkeyPatch, *, store: Path, lanes: str) -> None:
+    _production_env(monkeypatch, store=store)
+    monkeypatch.setenv("NODE27_RAW_RETENTION_LANES", lanes)
+    monkeypatch.setenv("NODE27_RAW_RETENTION_FORCING_DAYS", "30")
+
+
+def test_an_aged_forcing_cycle_is_removed_under_the_mutex(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Spec scenario "an aged forcing cycle is removed under the mutex"."""
+    store = _store(tmp_path)
+    aged = [_forcing_cycle(store, "gfs", "2026100612"), _forcing_cycle(store, "ifs", "2026100612")]
+    in_window = _forcing_cycle(store, "gfs", "2026101000")
+    not_a_cycle = store / "forcing" / "gfs" / "tmp"
+    not_a_cycle.mkdir()
+    elsewhere = tmp_path.resolve() / "elsewhere" / "2026100100"
+    elsewhere.mkdir(parents=True)
+    (elsewhere / "keep.txt").write_text("outside the lane", encoding="utf-8")
+    link = store / "forcing" / "ifs" / "2026100100"
+    link.symlink_to(elsewhere, target_is_directory=True)
+    readme = store / "forcing" / "ifs" / "README"
+    readme.write_text("not a cycle", encoding="utf-8")
+    _forcing_env(monkeypatch, store=store, lanes="forcing")
+    events: list[tuple[Any, ...]] = []
+    _record_lock_calls(monkeypatch, events)
+    real_rmtree = node27_raw_retention.shutil.rmtree
+
+    def observing_rmtree(path: Any, *args: Any, **kwargs: Any) -> None:
+        events.append(("rmtree", Path(path).relative_to(store).as_posix(), _probe_from_another_process(store)))
+        real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(node27_raw_retention.shutil, "rmtree", observing_rmtree)
+
+    exit_code, payload = _main(capsys, FORCING_ARGS)
+
+    assert exit_code == 0
+    assert payload["lanes"] == ["forcing"]
+    assert payload["forcing_root"] == str(store / "forcing")
+    assert payload["forcing_retention_days"] == 30
+    assert payload["forcing_cutoff"] == "2026-10-08T00:00:00Z"
+    assert _keys(payload["planned"]) == ["forcing/gfs/2026100612", "forcing/ifs/2026100612"]
+    assert [(entry["source"], entry["reason"]) for entry in payload["planned"]] == [
+        ("gfs", "forcing_cycle_aged_out"),
+        ("ifs", "forcing_cycle_aged_out"),
+    ]
+    assert _keys(payload["deleted"]) == _keys(payload["planned"])
+    assert payload["skipped"] == [
+        {"key": "raw", "reason": "lane_not_selected"},
+        {"key": "canonical", "reason": "lane_not_selected"},
+        {"key": "forcing/gfs/2026101000", "reason": "within_retention_window"},
+        {"key": "forcing/gfs/tmp", "reason": "unparseable_cycle_name"},
+        {"key": "precip-cache", "reason": "lane_not_selected"},
+    ]
+    assert payload["failed"] == []
+    assert payload["copyback_lock_failures"] == ZERO_LOCK_FAILURES
+    assert events == [
+        ("acquire", str(store), "posix"),
+        ("rmtree", "forcing/gfs/2026100612", "held"),
+        ("release", "posix"),
+        ("acquire", str(store), "posix"),
+        ("rmtree", "forcing/ifs/2026100612", "held"),
+        ("release", "posix"),
+    ]
+    assert all(not tree.exists() for tree in aged)
+    assert (in_window / "bv-1" / "shud" / "forcing.csv").is_file()
+    assert not_a_cycle.is_dir()
+    assert link.is_symlink() and (elsewhere / "keep.txt").is_file()
+    assert readme.is_file()
+    listed = json.dumps([payload[name] for name in ("planned", "deleted", "skipped", "failed")])
+    assert "2026100100" not in listed and "README" not in listed
+
+
+def test_a_forcing_cycle_behind_a_held_mutex_stays_and_main_exits_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Spec scenario "the copyback mutex is held elsewhere"."""
+    store = _store(tmp_path)
+    tree = _forcing_cycle(store, "gfs", "2026100612")
+    _forcing_env(monkeypatch, store=store, lanes="forcing")
+    monkeypatch.setattr(node27_raw_retention, "DEFAULT_RETENTION_COPYBACK_LOCK_WAIT_BUDGET_SECONDS", 0.3, raising=False)
+
+    holder = _start_holder(store)
+    try:
+        exit_code, payload = _main(capsys, FORCING_ARGS)
+    finally:
+        _stop(holder)
+
+    assert exit_code == 1
+    assert [(entry["key"], entry["lock_failure"]) for entry in payload["failed"]] == [
+        ("forcing/gfs/2026100612", "lock_timeout")
+    ]
+    assert payload["deleted"] == []
+    assert payload["copyback_lock_failures"] == {"lock_timeout": 1, "lock_unsafe": 0, "lock_budget_exhausted": 0}
+    assert (tree / "bv-1" / "shud" / "forcing.csv").is_file()
+
+
+@pytest.mark.parametrize("lock_mode", [0o644, 0o000], ids=["unsafe-mode", "unopenable"])
+def test_a_forcing_cycle_behind_an_unsafe_lock_is_lock_unsafe_and_main_exits_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], lock_mode: int
+) -> None:
+    """The forcing twin of EF-12: a lock file the runner may not use keeps the
+    aged forcing cycle on disk as a `lock_unsafe` failure, never a plain rmtree."""
+    if lock_mode == 0o000 and os.geteuid() == 0:
+        pytest.skip("root opens any file mode, so the denial cannot be simulated")
+    store = _store(tmp_path)
+    tree = _forcing_cycle(store, "gfs", "2026100612")
+    lock_file = store / COPYBACK_BATCH_LOCK_NAME
+    lock_file.write_bytes(b"")
+    os.chmod(lock_file, lock_mode)
+    _forcing_env(monkeypatch, store=store, lanes="forcing")
+    try:
+        exit_code, payload = _main(capsys, FORCING_ARGS)
+    finally:
+        os.chmod(lock_file, 0o600)
+
+    assert exit_code == 1
+    assert [(entry["key"], entry["lock_failure"]) for entry in payload["failed"]] == [
+        ("forcing/gfs/2026100612", "lock_unsafe")
+    ]
+    assert payload["failed"][0]["error_type"] == "CopybackLockError"
+    assert payload["deleted"] == []
+    assert payload["copyback_lock_failures"] == {"lock_timeout": 0, "lock_unsafe": 1, "lock_budget_exhausted": 0}
+    assert (tree / "bv-1" / "shud" / "forcing.csv").is_file()
+
+
+def test_canonical_draws_on_the_shared_budget_before_forcing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """D5: one pass budget for both locked lanes, canonical first."""
+    store = _store(tmp_path)
+    canonical = _canonical_cycle(store, "IFS", "2026100612")
+    forcing = _forcing_cycle(store, "ifs", "2026100612")
+    events: list[tuple[Any, ...]] = []
+    _record_lock_calls(monkeypatch, events)
+    config = node27_raw_retention.RawRetentionConfig(
+        object_store_root=store,
+        retention_days=14,
+        sources=frozenset({"ifs"}),
+        summary_path=None,
+        lanes=frozenset({"canonical", "forcing"}),
+    )
+
+    holder = _start_holder(store)
+    try:
+        result = node27_raw_retention.run_retention(
+            config, now=datetime(2026, 11, 7, tzinfo=UTC), copyback_lock_wait_budget_seconds=0.5
+        )
+    finally:
+        _stop(holder)
+
+    assert [(entry["key"], entry["lock_failure"]) for entry in result["failed"]] == [
+        ("canonical/IFS/2026100612", "lock_timeout"),
+        ("forcing/ifs/2026100612", "lock_budget_exhausted"),
+    ]
+    assert [event for event in events if event[0] == "acquire"] == [("acquire", str(store), "posix")]
+    assert canonical.is_dir() and forcing.is_dir()

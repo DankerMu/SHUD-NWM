@@ -20,8 +20,10 @@ Safety posture (never-break-userspace):
 - Individual deletion failures are recorded and do not abort the pass.
 - Additional run-workspace roots (issue #1318) are swept ``runs/``-only under
   their own window, behind a default-off gate. Their cycle-scoped prefixes are
-  never touched: the copyback root's ``forcing/`` tree is node-27's live
-  disk-only display serving surface.
+  never touched here: the copyback root's ``forcing/`` tree is node-27's live
+  disk-only display serving surface, and its retention owner is node-27's
+  opt-in ``forcing`` lane in ``scripts/node27_raw_retention.py`` (issue #3087),
+  which removes it under this same batch mutex.
 - Root admission is shared between the primary and additional roots (issues
   #1616/#1617): an explicitly blank primary is rejected as
   ``primary_root_blank`` and a relative one as ``primary_root_not_absolute``

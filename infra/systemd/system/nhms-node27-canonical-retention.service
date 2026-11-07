@@ -1,11 +1,15 @@
 [Unit]
-Description=NHMS node-27 retention: canonical precipitation mirror, run as the copyback root owner
+Description=NHMS node-27 retention: canonical precipitation mirror and copied-back forcing, run as the copyback root owner
 # #2360: SYSTEM unit (not an nwm user unit). The canonical lane removes every
 # canonical/<S>/<cycle> under `<object-store>/.nhms-copyback-batch.lock`, which
 # is `0600` owned by the copyback root's owner (frd_muziyao, uid 1103); the
-# lock contract is not relaxed, so this lane runs as that uid. The raw and
-# precip-cache lanes stay in the nwm user unit nhms-node27-raw-retention.service
-# (the PNG cache root is nwm-owned). Both units use one cutoff rule.
+# lock contract is not relaxed, so this lane runs as that uid. #3087: the
+# forcing lane (forcing/<gfs|ifs>/<cycle>, own NODE27_RAW_RETENTION_FORCING_DAYS
+# cutoff, floor 14) runs here too, under the same lock; frd_muziyao owns
+# forcing/ at every depth. LANES=canonical,forcing is set by the generated env.
+# The raw and precip-cache lanes stay in the nwm user unit
+# nhms-node27-raw-retention.service (the PNG cache root is nwm-owned).
+# Canonical shares that unit's cutoff rule.
 # Installed by scripts/node27_canonical_retention_install.sh (operator, sudo),
 # which also generates the env file below from the nwm raw-retention env; rerun
 # it after any change to that env. Rollback: docs/runbooks/current-production-ops.md

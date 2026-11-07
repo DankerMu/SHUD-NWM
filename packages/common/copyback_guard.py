@@ -75,7 +75,8 @@ COPYBACK_LOCK_TIMEOUT_ENV = "NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS"
 #     time under the scheduler lease;
 #   - each concurrent operator `cleanup` on node-22 (`cli._run_cleanup`), which
 #     takes no scheduler lease and no cross-process guard of its own;
-#   - node-27 raw retention (`scripts/node27_raw_retention.py`, canonical lane),
+#   - node-27 raw retention (`scripts/node27_raw_retention.py`, canonical and
+#     forcing lanes, #3087),
 #     at most one per checkout when started through its wrapper, whose
 #     `flock -n` on `NODE27_RAW_RETENTION_LOCK_PATH` serialises it; a direct
 #     CLI call bypasses that.
@@ -95,7 +96,9 @@ COPYBACK_LOCK_TIMEOUT_ENV = "NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS"
 # `containment_root` and `missing_ok`). The protection is therefore
 # scale-dependent -- on how big and how many the removed trees are -- not
 # structural, so a retention pass growing past today's measured shape is a real
-# way for a writer to exhaust this deadline.
+# way for a writer to exhaust this deadline. The node-27 forcing lane (#3087)
+# already holds longer per tree than canonical: one forcing cycle is ~4.5 GB
+# against ~2.2 GB for a canonical cohort, so roughly twice the hold per removal.
 #
 # `flock` is per open file description, so the scheduler's same-process
 # execution-unit threads contend exactly as separate hosts would. Exceeding the

@@ -36,7 +36,8 @@ guard 的 `acquire_copyback_batch_lock` / `release_copyback_batch_lock` / `copyb
 - **导出 root 的主机（node-27）：`posix`**，即 `fcntl.lockf(LOCK_EX | LOCK_NB)`；busy 为
   `EAGAIN` 或 `EACCES`，两者都当作「被持有」。身份检查、先拒后建、deadline、错误类型与
   `flock` 完全一致。
-- 唯一的 `posix` 调用方是 `scripts/node27_raw_retention.py`，只在 canonical lane 取锁。
+- 唯一的 `posix` 调用方是 `scripts/node27_raw_retention.py`，只在 canonical 与 forcing（#3087）
+  两条 lane 取锁。
 
 ## 权衡
 

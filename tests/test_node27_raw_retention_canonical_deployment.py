@@ -439,7 +439,7 @@ def test_the_generated_env_drops_per_unit_keys_and_sets_the_canonical_lane(tmp_p
         "NODE27_RAW_RETENTION_SOURCES": "GFS,IFS",
         "NODE27_RAW_RETENTION_DAYS": "14",
         "NHMS_MVT_FILE_CACHE_DIR": "/home/nwm/.cache/nhms/mvt",
-        "NODE27_RAW_RETENTION_LANES": "canonical",
+        "NODE27_RAW_RETENTION_LANES": "canonical,forcing",
         "NODE27_RAW_RETENTION_LOG_ROOT": "/var/log/nhms-node27-canonical-retention",
         "NODE27_RAW_RETENTION_LOCK_PATH": "/run/nhms-node27-canonical-retention/raw-retention.lock",
     }
@@ -456,7 +456,7 @@ def test_the_generated_env_drops_per_unit_keys_and_sets_the_canonical_lane(tmp_p
         text=True,
         timeout=60,
     )
-    assert sourced.stdout.strip() == "canonical|/var/log/nhms-node27-canonical-retention|unset"
+    assert sourced.stdout.strip() == "canonical,forcing|/var/log/nhms-node27-canonical-retention|unset"
 
 
 def test_the_generated_env_survives_a_source_that_is_only_per_unit_keys(tmp_path: Path) -> None:
@@ -468,7 +468,7 @@ def test_the_generated_env_survives_a_source_that_is_only_per_unit_keys(tmp_path
 
     assert result.returncode == 0, result.stderr
     assert _assignments(result.stdout) == [
-        ("NODE27_RAW_RETENTION_LANES", "canonical"),
+        ("NODE27_RAW_RETENTION_LANES", "canonical,forcing"),
         ("NODE27_RAW_RETENTION_LOG_ROOT", "/var/log/nhms-node27-canonical-retention"),
         ("NODE27_RAW_RETENTION_LOCK_PATH", "/run/nhms-node27-canonical-retention/raw-retention.lock"),
     ]
@@ -479,3 +479,46 @@ def test_an_unreadable_source_env_fails_the_render(tmp_path: Path) -> None:
 
     assert result.returncode != 0
     assert "NODE27_RAW_RETENTION_LANES=canonical" not in result.stdout
+
+
+# --- #3087: the system unit also owns the forcing lane -------------------------
+
+
+def test_the_generated_env_selects_canonical_and_forcing_and_passes_forcing_days_through(tmp_path: Path) -> None:
+    """D7: LANES is per-unit and rewritten; FORCING_DAYS is not, so both units read one value."""
+    source = _nwm_env(tmp_path, _GOOD_NWM_ENV + "NODE27_RAW_RETENTION_FORCING_DAYS=45\n")
+
+    result = _render(source)
+
+    assert result.returncode == 0, result.stderr
+    pairs = _assignments(result.stdout)
+    assert [value for key, value in pairs if key == "NODE27_RAW_RETENTION_LANES"] == ["canonical,forcing"]
+    assert [value for key, value in pairs if key == "NODE27_RAW_RETENTION_FORCING_DAYS"] == ["45"]
+    sourced = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'set -a; . /dev/stdin; printf "%s|%s\\n" '
+            '"$NODE27_RAW_RETENTION_LANES" "$NODE27_RAW_RETENTION_FORCING_DAYS"',
+        ],
+        input=result.stdout,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert sourced.stdout.strip() == "canonical,forcing|45"
+
+
+@pytest.mark.parametrize("lanes", ["raw,forcing", "forcing", "raw,precip-cache,forcing"])
+def test_the_installer_refuses_an_nwm_env_that_selects_forcing(tmp_path: Path, lanes: str) -> None:
+    """nwm owns nothing under `forcing/`; the lane belongs to the frd_muziyao unit."""
+    env = _nwm_env(
+        tmp_path,
+        f"NODE27_RAW_RETENTION_OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store\nNODE27_RAW_RETENTION_LANES={lanes}\n",
+    )
+
+    result, record = _run_check(tmp_path, "check_source_env", env)
+
+    assert result.returncode != 0
+    assert "may name only raw / precip-cache" in result.stderr
+    assert not record.exists(), record.read_text(encoding="utf-8")

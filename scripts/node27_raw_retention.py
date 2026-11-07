@@ -1,27 +1,29 @@
 #!/usr/bin/env python
 """Retention cleanup for node-27-owned raw bundles, canonical precipitation
-mirrors and their rendered PNG cache.
+mirrors, their rendered PNG cache and copied-back forcing packages.
 
-This script targets exactly three lanes, all on ONE cutoff in ONE run:
+The three legacy lanes share ONE cutoff in ONE run; the opt-in forcing lane
+(#3087) has its own (`NODE27_RAW_RETENTION_FORCING_DAYS`, same anchor):
 
     <object-store-root>/raw/<source>/<YYYYMMDDHH>
     <object-store-root>/canonical/<storage-source>/<YYYYMMDDHH>
     <precip-cache-root>/precip/<storage-source>/<YYYYMMDDHH>
+    <object-store-root>/forcing/<lower-case segment>/<YYYYMMDDHH>
 
 A cycle's canonical mirror directory and its PNG cache directory therefore live
 and die together (issue #2011): the display API cannot keep serving rendered
 precipitation for a cycle whose mirror is gone.
 
-Each canonical cycle is removed while holding the object-store copyback batch
-mutex (`packages.common.copyback_guard`), because on node-27 the object-store
-root IS the shared copyback root that node-22 writers promote `canonical/` trees
-into. The raw and PNG-cache lanes are not locked: no mutex writer promotes into
-them.
+Each canonical and forcing cycle is removed while holding the object-store
+copyback batch mutex (`packages.common.copyback_guard`), because on node-27 the
+object-store root IS the shared copyback root that node-22 writers promote
+`canonical/` and `forcing/` trees into. The raw and PNG-cache lanes are not
+locked: no mutex writer promotes into them.
 
 It deliberately does not touch `canonical/<storage-source>/grid/**` (grid
 definitions cannot be regenerated on node-27), anything under the precipitation
-cache root outside `precip/` (the MVT tile cache is a sibling there), forcing,
-runs, or published products. Production retention deletes aged directories after
+cache root outside `precip/` (the MVT tile cache is a sibling there), runs, or
+published products. Production retention deletes aged directories after
 safety preflight and emits bounded JSON evidence for operator review.
 
 Two environment gates exist for staged rollout and rollback and default to the
@@ -31,9 +33,9 @@ display watermark, not the pipeline frontier; every summary discloses that
 choice and its residual risk in its ``anchor`` block (issue #1407).
 
 ``NODE27_RAW_RETENTION_LANES`` (issue #2360) selects a subset of
-``raw,canonical,precip-cache``; unset means all three. node-27 runs the
-canonical lane in a system unit as the copyback root's owner and the other two
-in the ``nwm`` user unit, both on the same cutoff rule.
+``raw,canonical,precip-cache,forcing``; unset means the legacy three, never
+forcing. node-27 runs canonical and forcing in a system unit as the copyback
+root's owner and raw + precip-cache in the ``nwm`` user unit.
 """
 
 from __future__ import annotations
@@ -46,7 +48,7 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from packages.common.copyback_guard import (
     DEFAULT_RETENTION_COPYBACK_LOCK_WAIT_BUDGET_SECONDS,
@@ -60,30 +62,37 @@ from packages.common.copyback_guard import (
 from packages.common.display_watermark import fetch_display_watermark
 from packages.common.source_identity import normalize_source_id
 
+# Lane vocabulary and env parsing (split out by responsibility, #3087).
+from scripts.node27_raw_retention_lanes import (
+    CANONICAL_LANE_KEY,
+    CANONICAL_LANE_REASON,
+    COPYBACK_LOCKED_REASONS,
+    DEFAULT_FORCING_RETENTION_DAYS,
+    DEFAULT_LANES,
+    FORCING_DAYS_ENV,
+    FORCING_LANE_KEY,
+    FORCING_LANE_REASON,
+    GRID_DIR_NAME,
+    LANE_NOT_SELECTED_REASON,
+    PRECIP_CACHE_LANE_KEY,
+    PRECIP_CACHE_LANE_REASON,
+    RAW_LANE_KEY,
+    RAW_LANE_REASON,
+    _env_flag,
+    _env_int,
+    _forcing_retention_days,
+    _forcing_segment,
+    _parse_cycle_name,
+    _split_lanes,
+    _split_sources,
+)
+
 # `services.precip.constants` is deliberately stdlib-only (its own docstring
 # pins that), so naming the cache env here costs no numpy/netCDF4 import.
 from services.precip.constants import FILE_CACHE_DIR_ENV
 
 SCHEMA_VERSION = "nhms.node27_raw_retention.production.v5"
 DEFAULT_RETENTION_DAYS = 14
-DEFAULT_SOURCES = ("gfs", "ifs")
-CYCLE_NAME_LENGTH = 10
-
-# Lane identity: (target key prefix, `planned[].reason`).
-RAW_LANE_KEY = "raw"
-RAW_LANE_REASON = "raw_cycle_aged_out"
-CANONICAL_LANE_KEY = "canonical"
-CANONICAL_LANE_REASON = "canonical_cycle_aged_out"
-PRECIP_CACHE_LANE_KEY = "precip-cache"
-PRECIP_CACHE_LANE_REASON = "precip_cache_aged_out"
-# `NODE27_RAW_RETENTION_LANES` vocabulary (#2360): the lane key prefixes above.
-# Unset selects all three, which is the pre-#2360 run byte for byte.
-ALL_LANES = frozenset({RAW_LANE_KEY, CANONICAL_LANE_KEY, PRECIP_CACHE_LANE_KEY})
-LANE_NOT_SELECTED_REASON = "lane_not_selected"
-# The one directory name under `canonical/<S>/` that is never a cycle: grid
-# definitions are not reproducible from node-27, so they are pinned out of the
-# target set explicitly instead of relying on `_parse_cycle_name` alone.
-GRID_DIR_NAME = "grid"
 
 # Anchor disclosure (issue #1407 / design D4). This process keeps the display
 # watermark as its cutoff anchor instead of the pipeline frontier used by the
@@ -139,7 +148,9 @@ class RawRetentionConfig:
     # canonical lane runs in its own system unit as the copyback root's owner
     # and the nwm user unit runs raw + precip-cache; an unselected lane is one
     # `lane_not_selected` skip and is never probed, listed or locked.
-    lanes: frozenset[str] = ALL_LANES
+    lanes: frozenset[str] = DEFAULT_LANES
+    # `NODE27_RAW_RETENTION_FORCING_DAYS` (#3087): the forcing lane's own cutoff.
+    forcing_retention_days: int = DEFAULT_FORCING_RETENTION_DAYS
 
 
 @dataclass(frozen=True)
@@ -150,58 +161,6 @@ class RetentionTarget:
     cycle_time: datetime
     size_bytes: int
     reason: str
-
-
-def _env_int(name: str, *, default: int) -> int:
-    value = os.getenv(name)
-    if value is None or value.strip() == "":
-        return default
-    try:
-        parsed = int(value.strip())
-    except ValueError:
-        return default
-    return parsed if parsed > 0 else default
-
-
-def _env_flag(name: str, *, default: bool) -> bool:
-    value = os.getenv(name)
-    if value is None or value.strip() == "":
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _split_sources(raw: str | None) -> frozenset[str]:
-    values = raw if raw not in (None, "") else ",".join(DEFAULT_SOURCES)
-    sources = {item.strip().lower() for item in str(values).split(",") if item.strip()}
-    return frozenset(sources or DEFAULT_SOURCES)
-
-
-def _split_lanes(raw: str | None) -> tuple[frozenset[str] | None, dict[str, Any] | None]:
-    """The selected lanes, or the `lanes` preflight blocker.
-
-    Unset is all three lanes. A set value is fail-closed: exact names only, and
-    a value that trims to nothing is refused rather than read as "all" -- a
-    blank line in the env file must not silently widen a canonical-only unit.
-    """
-    if raw is None:
-        return ALL_LANES, None
-    names = [item.strip() for item in raw.split(",")]
-    lanes = frozenset(name for name in names if name)
-    if not lanes:
-        return None, {"field": "lanes", "reason": "empty"}
-    unknown = sorted(lanes - ALL_LANES)
-    if unknown:
-        return None, {"field": "lanes", "reason": "unknown_lane", "value": unknown}
-    return lanes, None
-
-
-def _parse_cycle_name(name: str) -> datetime | None:
-    if len(name) != CYCLE_NAME_LENGTH or not name.isdigit():
-        return None
-    try:
-        return datetime.strptime(name, "%Y%m%d%H").replace(tzinfo=UTC)
-    except ValueError:
-        return None
 
 
 def _dir_size(path: Path) -> tuple[int, OSError | None]:
@@ -293,8 +252,11 @@ def config_from_env(args: argparse.Namespace) -> tuple[RawRetentionConfig | None
     lanes, lanes_blocker = _split_lanes(os.getenv("NODE27_RAW_RETENTION_LANES"))
     if lanes_blocker is not None:
         blockers.append(lanes_blocker)
+    forcing_days, forcing_blocker = _forcing_retention_days(os.getenv(FORCING_DAYS_ENV))
+    if forcing_blocker is not None:
+        blockers.append(forcing_blocker)
 
-    if blockers or resolved_root is None or lanes is None:
+    if blockers or resolved_root is None or lanes is None or forcing_days is None:
         return None, blockers
     return (
         RawRetentionConfig(
@@ -310,6 +272,7 @@ def config_from_env(args: argparse.Namespace) -> tuple[RawRetentionConfig | None
             dry_run=_env_flag("NODE27_RAW_RETENTION_PLAN_ONLY", default=False),
             precip_cache_root=precip_cache_root,
             lanes=lanes,
+            forcing_retention_days=forcing_days,
         ),
         [],
     )
@@ -499,9 +462,11 @@ def _collect_mapped_lane(
     skip_prefix: str,
     reason: str,
     cutoff: datetime,
+    segment: Callable[[str], str] = normalize_source_id,
 ) -> tuple[list[RetentionTarget], list[dict[str, Any]]]:
-    """Canonical / PNG-cache lane: enumerate CONFIGURED sources through
-    `normalize_source_id`, never the directory names found on disk.
+    """Canonical / PNG-cache / forcing lane: enumerate CONFIGURED sources through
+    `segment` (`normalize_source_id`; forcing lower-cases it), never the
+    directory names found on disk.
 
     That direction is the constructive guarantee that no `canonical/ifs/...` or
     `precip-cache/ifs/...` path can be produced from the lower-case configured
@@ -516,7 +481,7 @@ def _collect_mapped_lane(
     targets: list[RetentionTarget] = []
     for source in sorted(config.sources):
         try:
-            storage_source = normalize_source_id(source)
+            storage_source = segment(source)
         except ValueError:
             # `_split_sources` accepts arbitrary free text from the env file; an
             # unmappable entry retires itself, never the run.
@@ -591,16 +556,19 @@ def _collect_mapped_lane(
 
 
 def collect_targets(config: RawRetentionConfig, *, now: datetime) -> tuple[list[RetentionTarget], list[dict[str, Any]]]:
-    """The three lanes of one retention run, on ONE cutoff.
+    """The lanes of one retention run: raw -> canonical -> forcing -> precip-cache.
 
-    Raw, canonical and PNG-cache targets are collected together so a cycle's
-    mirror directory and its rendered PNGs are removed by the same tick.
-    With `NODE27_RAW_RETENTION_LANES` two units split the lanes (#2360); both
-    keep this one cutoff rule, so the pair still ages out on the same date.
+    Raw, canonical and PNG-cache targets share ONE cutoff and are collected
+    together so a cycle's mirror directory and its rendered PNGs are removed by
+    the same tick. With `NODE27_RAW_RETENTION_LANES` two units split the lanes
+    (#2360); both keep this one cutoff rule, so the pair still ages out on the
+    same date. The forcing lane (#3087) has its own cutoff on the same anchor.
     A lane outside `config.lanes` is recorded in its usual position and its
-    root is never touched.
+    root is never touched -- except forcing under the legacy default lane set,
+    which records nothing so an unset variable stays the pre-#3087 run.
     """
     cutoff = now.astimezone(UTC) - timedelta(days=config.retention_days)
+    forcing_cutoff = now.astimezone(UTC) - timedelta(days=config.forcing_retention_days)
     skipped: list[dict[str, Any]] = []
     targets: list[RetentionTarget] = []
 
@@ -638,6 +606,31 @@ def collect_targets(config: RawRetentionConfig, *, now: datetime) -> tuple[list[
         )
         targets.extend(lane_targets)
         skipped.extend(lane_skipped)
+
+    # Before the precip-cache early returns, so `canonical,forcing` collects it.
+    if FORCING_LANE_KEY in config.lanes:
+        forcing_root, forcing_blocker = _resolve_lane_root(
+            config.object_store_root / "forcing", key=FORCING_LANE_KEY, prefix="forcing"
+        )
+        if forcing_blocker is not None:
+            skipped.append(forcing_blocker)
+        elif forcing_root is not None:
+            # The producer writes `forcing/<lower-case segment>/...`, so IFS is
+            # `ifs` here but `IFS` under canonical. A `grid` dir would read
+            # `grid_definitions_preserved`; none exists under forcing.
+            lane_targets, lane_skipped = _collect_mapped_lane(
+                config,
+                lane_root=forcing_root,
+                key_prefix=FORCING_LANE_KEY,
+                skip_prefix="forcing",
+                reason=FORCING_LANE_REASON,
+                cutoff=forcing_cutoff,
+                segment=_forcing_segment,
+            )
+            targets.extend(lane_targets)
+            skipped.extend(lane_skipped)
+    elif config.lanes != DEFAULT_LANES:
+        skipped.append({"key": FORCING_LANE_KEY, "reason": LANE_NOT_SELECTED_REASON})
 
     if PRECIP_CACHE_LANE_KEY not in config.lanes:
         # Checked before the unconfigured-root branch: an unselected lane says
@@ -699,17 +692,17 @@ def _target_payload(target: RetentionTarget) -> dict[str, Any]:
 
 
 @dataclass
-class _CanonicalLockBudget:
-    """The pass-level acquisition budget every canonical removal draws on."""
+class _CopybackLockBudget:
+    """The pass-level acquisition budget every canonical/forcing removal draws on."""
 
     budget_seconds: float
     remaining_seconds: float
 
 
-def _remove_canonical_under_copyback_mutex(
-    target: Path, *, copyback_root: Path, budget: _CanonicalLockBudget
+def _remove_under_copyback_mutex(
+    target: Path, *, copyback_root: Path, budget: _CopybackLockBudget
 ) -> None:
-    """Hold the copyback batch mutex for exactly this one canonical `rmtree`.
+    """Hold the copyback batch mutex for exactly this one canonical/forcing `rmtree`.
 
     `posix`, not `flock`: this process runs on the host that exports the
     copyback root, where a local `flock` does not exclude the NFS clients'
@@ -752,6 +745,7 @@ def run_retention(
     started_at = now.astimezone(UTC)
     reference_time = (reference_time or started_at).astimezone(UTC)
     cutoff = reference_time - timedelta(days=config.retention_days)
+    forcing_cutoff = reference_time - timedelta(days=config.forcing_retention_days)
     base = {
         "schema_version": SCHEMA_VERSION,
         "started_at": started_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -762,12 +756,16 @@ def run_retention(
         "precip_cache_root": (
             None if config.precip_cache_root is None else str(config.precip_cache_root)
         ),
+        "forcing_root": str(config.object_store_root / "forcing"),
         "sources": sorted(config.sources),
         # Which lanes this run owns (#2360): on node-27 two units write
         # summaries, and this field says which one wrote it.
         "lanes": sorted(config.lanes),
         "retention_days": config.retention_days,
         "cutoff": cutoff.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        # #3087, additive (SCHEMA_VERSION unchanged): the forcing lane's cutoff.
+        "forcing_retention_days": config.forcing_retention_days,
+        "forcing_cutoff": forcing_cutoff.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "enabled": config.enabled,
         "dry_run": config.dry_run,
         "anchor": _anchor_disclosure(reference_time),
@@ -797,11 +795,12 @@ def run_retention(
             if copyback_lock_wait_budget_seconds is None
             else copyback_lock_wait_budget_seconds
         )
-        lock_budget = _CanonicalLockBudget(budget_seconds=budget_seconds, remaining_seconds=budget_seconds)
+        lock_budget = _CopybackLockBudget(budget_seconds=budget_seconds, remaining_seconds=budget_seconds)
+        # Canonical targets precede forcing ones, so canonical keeps budget priority.
         for target, payload in zip(targets, planned, strict=True):
             try:
-                if target.reason == CANONICAL_LANE_REASON:
-                    _remove_canonical_under_copyback_mutex(
+                if target.reason in COPYBACK_LOCKED_REASONS:
+                    _remove_under_copyback_mutex(
                         target.path, copyback_root=config.object_store_root, budget=lock_budget
                     )
                 else:
@@ -809,9 +808,10 @@ def run_retention(
             except CopybackLockError as error:
                 # Timeout, unsafe/unopenable lock file, or a spent pass budget:
                 # the tree is kept for the next tick. `lock_unsafe` is what a
-                # canonical lane run by anyone but the copyback root's owner
-                # gets, because the lock file is `0600` owned by it; on node-27
-                # that lane runs in its own unit as that owner (#2360).
+                # canonical/forcing lane run by anyone but the copyback root's
+                # owner gets, because the lock file is `0600` owned by it; on
+                # node-27 those lanes run in their own unit as that owner
+                # (#2360, #3087).
                 failed.append(
                     {
                         **payload,

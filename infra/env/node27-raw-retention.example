@@ -2,8 +2,8 @@
 #
 # Copy to /home/nwm/NWM/infra/env/node27-raw-retention.env on node-27, set mode
 # 0600, and install infra/systemd/nhms-node27-raw-retention.{service,timer} as
-# user units for nwm. The canonical lane runs in a separate SYSTEM unit
-# generated from THIS file (see NODE27_RAW_RETENTION_LANES below); rerun
+# user units for nwm. The canonical and forcing lanes run in a separate SYSTEM
+# unit generated from THIS file (see NODE27_RAW_RETENTION_LANES below); rerun
 # `sudo /home/nwm/NWM/scripts/node27_canonical_retention_install.sh` after
 # every change here.
 
@@ -65,9 +65,13 @@ NODE27_RAW_RETENTION_DAYS=14
 # `precip_cache_root_unconfigured` and raw + canonical are still pruned.
 NHMS_MVT_FILE_CACHE_DIR=/home/nwm/.cache/nhms/mvt
 
-# Lane selection (#2360). Comma-separated subset of `raw`, `canonical`,
-# `precip-cache` (exact lowercase names, no spaces).
-# Unset = all three lanes, exactly the pre-#2360 run. A value that is empty
+# Lane selection (#2360; `forcing` #3087). Comma-separated subset of `raw`,
+# `canonical`, `precip-cache`, `forcing` (exact lowercase names, no spaces).
+# Unset = raw, canonical and precip-cache, exactly the pre-#3087 run: forcing is
+# never selected, probed or locked then, and records no `skipped[]` entry. When
+# the variable IS set, an unselected forcing lane is one `lane_not_selected`
+# entry like any other (the legacy three spelled out explicitly are read as
+# unset and record none). A value that is empty
 # after trimming, or names anything else, is a preflight blocker
 # (`{"field": "lanes"}`, rc=2) and NOTHING is deleted. A lane left out is one
 # `{"key": <lane>, "reason": "lane_not_selected"}` entry in `skipped[]`; its
@@ -78,14 +82,38 @@ NHMS_MVT_FILE_CACHE_DIR=/home/nwm/.cache/nhms/mvt
 #   - this nwm USER unit nhms-node27-raw-retention.service: `raw,precip-cache`
 #     (the line below). The PNG cache root is nwm-owned, so these two stay here.
 #   - SYSTEM unit nhms-node27-canonical-retention.service, User=frd_muziyao (the
-#     copyback root's owner): `canonical`. Its env
+#     copyback root's owner, and the owner of forcing/ at every depth):
+#     `canonical,forcing`. Its env
 #     /etc/nhms/node27-canonical-retention.env is GENERATED from this file by
 #     scripts/node27_canonical_retention_install.sh, which drops this file's
 #     LANES / LOG_ROOT / LOCK_PATH / LOG_FILE / SUMMARY_PATH / BOOTSTRAP_LOG
-#     lines and appends LANES=canonical, LOG_ROOT=/var/log/nhms-node27-canonical-retention
+#     lines and appends LANES=canonical,forcing, LOG_ROOT=/var/log/nhms-node27-canonical-retention
 #     and LOCK_PATH=/run/nhms-node27-canonical-retention/raw-retention.lock. It is
 #     a snapshot: rerun the installer after every edit of this file.
+#     The installer refuses a LANES line here that names canonical or forcing.
 NODE27_RAW_RETENTION_LANES=raw,precip-cache
+
+# Forcing lane retention (#3087; owner decision 2026-11-07: forcing/ keeps 30
+# days). The lane prunes <object-store>/forcing/<segment>/<YYYYMMDDHH>, where
+# <segment> is the forcing producer's lower-case spelling (`gfs`, `ifs` -- NOT
+# the canonical `IFS`), on its OWN cutoff: display watermark minus this value.
+# It does not change NODE27_RAW_RETENTION_DAYS or `cutoff`; the summary carries
+# `forcing_root`, `forcing_retention_days` and `forcing_cutoff` separately.
+# Every forcing tree is removed under the copyback batch lock described below,
+# on the same pass budget as canonical (canonical first).
+# Unset or blank = 30. Anything else must be plain ASCII digits.
+# FLOOR 14 (fail-closed): = max(NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS + 1,
+# AUTOPIPE_MAX_CYCLE_AGE_DAYS) = max(12 + 1, 14). Display station-series reads
+# forcing back to the lookback, and node-27 ingest reads the forcing handoff
+# for every cycle inside AUTOPIPE_MAX_CYCLE_AGE_DAYS
+# (infra/env/node27-ingest.example), so raise this BEFORE raising that one.
+# A non-digit value, 0, or a value below 14 is a preflight blocker
+# (`{"field": "forcing_retention_days", "reason": "not_an_integer" |
+# "must_be_positive" | "below_floor", "value": ..., "floor": 14}`, rc=2) in BOTH
+# units -- checked whether or not the unit selects forcing, because this one
+# file feeds both -- and NOTHING is deleted. The key is not per-unit, so the
+# installer copies it into the system unit's env unchanged.
+NODE27_RAW_RETENTION_FORCING_DAYS=30
 
 # HOW TO READ THIS UNIT (issue #2011; node-27 observations 2026-09-06, local
 # reproductions marked as such; the canonical lane's permission model is #2100;
@@ -101,9 +129,11 @@ NODE27_RAW_RETENTION_LANES=raw,precip-cache
 # root's owner (frd_muziyao, uid 1103), and the lock identity contract is
 # deliberately not relaxed. The canonical lane therefore runs as that owner in
 # the system unit nhms-node27-canonical-retention.service
-# (NODE27_RAW_RETENTION_LANES=canonical), and this nwm (uid 1005) unit does not
-# select it -- it records `canonical` / `lane_not_selected` and never opens the
-# lock. Before that split (#2360) this unit selected all three lanes and every
+# (NODE27_RAW_RETENTION_LANES=canonical,forcing), and this nwm (uid 1005) unit
+# does not select it -- it records `canonical` / `lane_not_selected` (and the
+# same for `forcing`) and never opens the lock. The forcing lane (#3087) takes
+# the same lock per forcing/<segment>/<cycle> tree: node-22 copyback promotes
+# forcing/ packages under it too. Before that split (#2360) this unit selected all three lanes and every
 # aged canonical cycle ended in `failed[]` with `lock_failure: "lock_unsafe"`,
 # rc=1 on every such tick. Seeing `lock_unsafe` again now means the lane is run
 # by the wrong account (a LANES line lost here, or the system unit's User=
