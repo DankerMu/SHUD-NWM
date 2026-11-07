@@ -1109,9 +1109,22 @@ def test_bundle_entries_open_cfgrib_with_entry_specific_filter(
         }
     )
 
+    packing_read_keys = ["binaryScaleFactor", "decimalScaleFactor", "bitsPerValue", "packingType"]
     assert record.native_variable == "tmp2m"
+    # The fake attrs carry no packing keys, so the step stays unknown.
+    assert record.quantization_step is None
     assert calls[0]["kwargs"]["engine"] == "cfgrib"
-    assert calls[0]["kwargs"]["backend_kwargs"] == {"filter_by_keys": {"shortName": "t2m"}, "indexpath": ""}
+    assert calls[0]["kwargs"]["backend_kwargs"] == {
+        "filter_by_keys": {"shortName": "t2m"},
+        "indexpath": "",
+        "read_keys": packing_read_keys,
+    }
+
+    # #3090: the default branch (no filter metadata) gets the same packing read_keys.
+    converter._read_record_with_xarray(
+        {"local_key": local_key, "variable": "tmp2m", "forecast_hour": 3, "metadata": {}}
+    )
+    assert calls[1]["kwargs"]["backend_kwargs"] == {"indexpath": "", "read_keys": packing_read_keys}
 
 
 @pytest.mark.grib

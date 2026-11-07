@@ -14,6 +14,11 @@ from typing import Any, Protocol
 from packages.common.met_store import PsycopgMetStore
 from packages.common.object_store import LocalObjectStore, ObjectStoreError, sha256_bytes
 from packages.common.source_identity import normalize_source_id
+from workers.canonical_converter.grib_packing import (
+    GRIB_PACKING_READ_KEYS,
+    negative_noise_tolerance_mm,
+    quantization_step_from_attrs,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -62,11 +67,14 @@ def _repository_from_env() -> CanonicalRepository | None:
 # 以免夜间 shortwave 产品被 forcing 当不可用剔除;超阈值的负值仍标 warn 供诊断。
 IFS_SHORTWAVE_NEGATIVE_TOLERANCE_W_M2 = _float_env("IFS_SHORTWAVE_NEGATIVE_TOLERANCE_W_M2", 1.0)
 
-# 累积降水去累积的负 delta 噪声容差(mm/步)。IFS tp(米,GRIB 16-bit 打包)的量化步长
-# ≈1000×2⁻¹⁶=0.0153mm,会让晚时次(累积量大)出现伪负 delta;原 0.01mm 阈值比量化步长还
-# 小,把量化噪声误判为 warning_negative_precip → 被 forcing(只收 quality_flag==ok)剔除致缺产品。
-# SHUD 模型自身对 precip<0 即钳 0 并量化到 4 位,故亚阈值负值与 0 等价。默认 0.1mm 覆盖
-# IFS tp 量化步长和 GFS APCP 常见 1/16mm 量化噪声;超阈值的负值仍标 warn 供诊断。
+# 累积降水去累积的负 delta 噪声容差下限(mm/步)。GRIB simple packing 的量化步长 2^E/10^D
+# 会让单调累积量去累积后出现恰为 -1 步长的伪负 delta。IFS tp 自 cycle 2026102012 起由 16-bit
+# 改为 12-bit 打包,步长从 0.0038–0.0305mm 增至 0.0153–0.2441mm 且随累积量增大,固定 0.1mm
+# 已盖不住,伪负 delta 被判 warning_negative_precip → 被 forcing 当不可用剔除致缺产品。
+# 故本值只是下限:IFS tp 实际容差 = max(本值, 前后两条记录的 GRIB 量化步长之和,mm),
+# 步长由 reader 从 GRIB packing 键推导(grib_packing.py,#3090);步长未知(netcdf4 回退、
+# 常量场、非 grid_simple 打包)时退回本值。GFS APCP 仍只用本值(覆盖其常见 1/16mm 量化噪声)。
+# SHUD 模型自身对 precip<0 即钳 0,故亚阈值负值与 0 等价;超阈值的负值仍标 warning 供诊断。
 PRECIP_NEGATIVE_NOISE_TOLERANCE_MM = _float_env("PRECIP_NEGATIVE_NOISE_TOLERANCE_MM", 0.1)
 
 VARIABLE_MAPPING: dict[str, str] = {
@@ -293,6 +301,9 @@ class RawRecord:
     latitudes: tuple[float, ...] = ()
     shape: tuple[int, ...] = ()
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    # GRIB quantisation step 2^E/10^D in native units; set only after a successful
+    # cfgrib open, None when unknown (netcdf4 fallback, constant field, other packing).
+    quantization_step: float | None = None
 
 
 @dataclass(frozen=True)
@@ -941,6 +952,8 @@ def convert_ifs_precipitation_with_metadata(
     forecast_hour: int | None = None,
     previous_forecast_hour: int | None = None,
     consecutive_negative_count: int = 0,
+    quantization_step_m: float | None = None,
+    previous_quantization_step_m: float | None = None,
 ) -> tuple[UnitConversionResult, int, float]:
     current = tuple(float(value) for value in values_m)
     previous = (
@@ -954,9 +967,15 @@ def convert_ifs_precipitation_with_metadata(
     deltas_mm = tuple(
         (current_value - previous_value) * 1000.0 for current_value, previous_value in zip(current, previous)
     )
-    # 容差用 PRECIP_NEGATIVE_NOISE_TOLERANCE_MM 覆盖 IFS tp 的 GRIB 量化步长(≈0.0153mm),
-    # 否则量化噪声被判 significant→warning_negative_precip→被 forcing 当不可用剔除致缺产品。
-    _tol = PRECIP_NEGATIVE_NOISE_TOLERANCE_MM
+    # 容差 = max(PRECIP_NEGATIVE_NOISE_TOLERANCE_MM, 前后两条 tp 的 GRIB 量化步长之和),tp 单位为 m
+    # 故步长 ×1000 转 mm;步长全未知时即为下限本身,行为与 anomaly 字段均与 #3090 前逐字节一致。
+    previous_step_mm = 1000.0 * previous_quantization_step_m if previous_quantization_step_m is not None else None
+    current_step_mm = 1000.0 * quantization_step_m if quantization_step_m is not None else None
+    step_known = previous_step_mm is not None or current_step_mm is not None
+    _tol = negative_noise_tolerance_mm(PRECIP_NEGATIVE_NOISE_TOLERANCE_MM, previous_step_mm, current_step_mm)
+    tolerance_audit: dict[str, Any] = (
+        {"tolerance_mm": _tol, "quantization_step_mm": [previous_step_mm, current_step_mm]} if step_known else {}
+    )
     small_negatives = tuple(delta for delta in deltas_mm if -_tol < delta < 0.0)
     significant_negatives = tuple(delta for delta in deltas_mm if delta <= -_tol)
     anomalies: list[dict[str, Any]] = []
@@ -971,6 +990,7 @@ def convert_ifs_precipitation_with_metadata(
                 "previous_forecast_hour": previous_forecast_hour,
                 "negative_count": len(small_negatives),
                 "min_delta_mm": min(small_negatives),
+                **tolerance_audit,
             }
         )
     if significant_negatives:
@@ -986,6 +1006,7 @@ def convert_ifs_precipitation_with_metadata(
                 "negative_count": len(significant_negatives),
                 "min_delta_mm": min(significant_negatives),
                 "consecutive_negative_count": next_consecutive_negative_count,
+                **tolerance_audit,
             }
         )
 
@@ -1463,7 +1484,10 @@ class CanonicalConverter:
         cfgrib_error: Exception | None = None
         try:
             expected_native_variable = str(entry["variable"])
-            backend_kwargs = _cfgrib_backend_kwargs(entry, expected_native_variable)
+            backend_kwargs = {
+                **_cfgrib_backend_kwargs(entry, expected_native_variable),
+                "read_keys": list(GRIB_PACKING_READ_KEYS),
+            }
             try:
                 dataset = xr.open_dataset(file_path, engine="cfgrib", backend_kwargs=backend_kwargs)
             except Exception as _cfgrib_err:
@@ -1477,6 +1501,11 @@ class CanonicalConverter:
             data_variable = self._select_data_variable(dataset, expected_native_variable, local_key)
             data_array = dataset[data_variable]
             values = tuple(float(value) for value in data_array.values.ravel().tolist())
+            quantization_step = (
+                quantization_step_from_attrs(_mapping_value(getattr(data_array, "attrs", None)))
+                if cfgrib_error is None
+                else None
+            )
             return RawRecord(
                 source_file=self.object_store.uri_for_key(local_key),
                 native_variable=expected_native_variable,
@@ -1486,6 +1515,7 @@ class CanonicalConverter:
                 latitudes=_coord_values_by_name(dataset, ("lat", "latitude")),
                 shape=tuple(int(size) for size in getattr(data_array.values, "shape", ())),
                 metadata=dict(_mapping_value(entry.get("metadata"))),
+                quantization_step=quantization_step,
             )
         except Exception as error:
             detail = f"Failed to parse raw file {local_key}: {error}"
@@ -2541,6 +2571,10 @@ class IFSCanonicalConverter(CanonicalConverter):
                         if previous_precipitation is not None
                         else None,
                         consecutive_negative_count=consecutive_negative_precipitation,
+                        quantization_step_m=precipitation.quantization_step,
+                        previous_quantization_step_m=previous_precipitation.quantization_step
+                        if previous_precipitation is not None
+                        else None,
                     )
                 )
                 if not precipitation_conversion.anomalies or precipitation_conversion.quality_flag == "ok":

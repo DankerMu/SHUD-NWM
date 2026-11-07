@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import importlib
 import json
 import math
@@ -276,6 +277,145 @@ def test_ifs_precip_grib_quantization_noise_stays_ok() -> None:
     assert result.values == pytest.approx((0.0,))
     assert result.quality_flag == "ok"
     assert count == 0
+
+
+# #3090: IFS tp is 12-bit simple-packed from cycle 2026102012; with E=-13, D=0 the
+# quantisation step is 2^-13 m = 0.1220703125 mm, above the 0.1 mm env floor.
+TP_12BIT_STEP_M = 2.0**-13
+
+
+def test_ifs_precip_one_step_artefact_with_known_steps_stays_ok() -> None:
+    result, count, _ = convert_ifs_precipitation_with_metadata(
+        [0.002 - TP_12BIT_STEP_M],
+        [0.002],
+        forecast_hour=51,
+        previous_forecast_hour=48,
+        quantization_step_m=TP_12BIT_STEP_M,
+        previous_quantization_step_m=TP_12BIT_STEP_M,
+    )
+
+    assert result.values == (0.0,)
+    assert result.quality_flag == "ok"
+    assert count == 0
+    assert result.anomalies == (
+        {
+            "type": "small_negative_ifs_precipitation_delta",
+            "forecast_hour": 51,
+            "previous_forecast_hour": 48,
+            "negative_count": 1,
+            "min_delta_mm": -0.1220703125,
+            "tolerance_mm": 0.244140625,
+            "quantization_step_mm": [0.1220703125, 0.1220703125],
+        },
+    )
+
+
+def test_ifs_precip_three_step_regression_with_known_steps_is_flagged() -> None:
+    result, count, _ = convert_ifs_precipitation_with_metadata(
+        [0.002 - 3 * TP_12BIT_STEP_M],
+        [0.002],
+        forecast_hour=51,
+        previous_forecast_hour=48,
+        quantization_step_m=TP_12BIT_STEP_M,
+        previous_quantization_step_m=TP_12BIT_STEP_M,
+    )
+
+    assert result.values == (0.0,)
+    assert result.quality_flag == "warning_negative_precip"
+    assert count == 1
+    (anomaly,) = result.anomalies
+    assert anomaly["type"] == "negative_ifs_precipitation_delta"
+    assert anomaly["tolerance_mm"] == 0.244140625
+    assert anomaly["quantization_step_mm"] == [0.1220703125, 0.1220703125]
+    assert anomaly["consecutive_negative_count"] == 1
+
+
+def test_ifs_precip_without_steps_keeps_env_floor_and_anomaly_dict() -> None:
+    # No packing info (synthetic records, netcdf4 fallback): the env floor alone applies,
+    # so the -0.122 mm delta is significant and the anomaly dict is the pre-#3090 one.
+    result, count, step_hours = convert_ifs_precipitation_with_metadata(
+        [0.002 - TP_12BIT_STEP_M],
+        [0.002],
+        forecast_hour=51,
+        previous_forecast_hour=48,
+    )
+
+    assert result.values == (0.0,)
+    assert result.quality_flag == "warning_negative_precip"
+    assert count == 1
+    assert step_hours == 3.0
+    assert result.anomalies == (
+        {
+            "type": "negative_ifs_precipitation_delta",
+            "forecast_hour": 51,
+            "previous_forecast_hour": 48,
+            "negative_count": 1,
+            "min_delta_mm": -0.1220703125,
+            "consecutive_negative_count": 1,
+        },
+    )
+
+
+def test_ifs_precip_first_lead_counts_only_the_current_step() -> None:
+    # First lead: the previous accumulation is an exact 0, so only the current step counts.
+    # A -0.11 mm "delta" from 0 is unphysical, but it pins the tolerance: 0.122 mm > 0.1 floor.
+    result, _, _ = convert_ifs_precipitation_with_metadata(
+        [-0.00011],
+        None,
+        forecast_hour=3,
+        quantization_step_m=TP_12BIT_STEP_M,
+    )
+
+    assert result.quality_flag == "ok"
+    (anomaly,) = result.anomalies
+    assert anomaly["type"] == "small_negative_ifs_precipitation_delta"
+    assert anomaly["tolerance_mm"] == max(0.1, 1000.0 * TP_12BIT_STEP_M)
+    assert anomaly["quantization_step_mm"] == [None, 0.1220703125]
+
+    # A current step below the floor leaves the floor in force, and is still audited.
+    small_step_m = 2.0**-18
+    floored, _, _ = convert_ifs_precipitation_with_metadata(
+        [-0.00011], None, forecast_hour=3, quantization_step_m=small_step_m
+    )
+    assert floored.quality_flag == "warning_negative_precip"
+    assert floored.anomalies[0]["tolerance_mm"] == 0.1
+    assert floored.anomalies[0]["quantization_step_mm"] == [None, 1000.0 * small_step_m]
+
+
+def test_ifs_manifest_with_step_bearing_tp_records_keeps_one_step_lead_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = FakeCanonicalRepository()
+    _, manifest = build_ifs_manifest(
+        tmp_path,
+        forecast_hours=(3, 6),
+        overrides={("tp", 3): [0.003], ("tp", 6): [0.003 - TP_12BIT_STEP_M]},
+    )
+    converter = build_converter(tmp_path, repository=repository)
+    read_record = converter._read_record
+
+    def read_record_with_tp_step(entry: dict[str, Any]) -> Any:
+        # The netcdf4 test fixtures carry no GRIB packing; give tp the 12-bit step a
+        # successful cfgrib open of a real IFS tp message would report.
+        record = read_record(entry)
+        if record.native_variable == "tp":
+            return dataclasses.replace(record, quantization_step=TP_12BIT_STEP_M)
+        return record
+
+    monkeypatch.setattr(converter, "_read_record", read_record_with_tp_step)
+
+    result = converter.convert_manifest(manifest)
+
+    assert result.status == "canonical_ready"
+    precipitation = repository.products["IFS_2026050100_prcp_rate_or_amount_f006"]
+    assert precipitation["quality_flag"] == "ok"
+    anomalies = precipitation["lineage_json"]["conversion_params"]["anomalies"]
+    assert [anomaly["type"] for anomaly in anomalies] == ["small_negative_ifs_precipitation_delta"]
+    assert anomalies[0]["tolerance_mm"] == 0.244140625
+    assert anomalies[0]["quantization_step_mm"] == [0.1220703125, 0.1220703125]
+    first_lead = repository.products["IFS_2026050100_prcp_rate_or_amount_f003"]
+    assert first_lead["quality_flag"] == "ok"
+    assert "anomalies" not in first_lead["lineage_json"]["conversion_params"]
 
 
 def test_radiation_cumulative_diff_to_w_m2(tmp_path: Path) -> None:
