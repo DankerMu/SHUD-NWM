@@ -7400,7 +7400,7 @@ def test_db_free_scheduler_status_sync_blocks_without_default_db_orchestrator(
     monkeypatch.setattr(scheduler_module, "_orchestrator_repository_from_env", fail_db_orchestrator_factory)
     monkeypatch.setattr(
         "services.orchestrator.chain.HttpSlurmGatewayClient",
-        lambda _url: _FailingSlurmGatewayClient(status_error_code="SLURM_STATUS_SYNC_FAILED"),
+        lambda _url, **_kwargs: _FailingSlurmGatewayClient(status_error_code="SLURM_STATUS_SYNC_FAILED"),
     )
 
     result = ProductionScheduler.from_env(
@@ -7460,7 +7460,7 @@ def test_db_free_scheduler_cancel_blocks_without_default_db_orchestrator(
     monkeypatch.setattr(scheduler_module, "_orchestrator_repository_from_env", fail_db_orchestrator_factory)
     monkeypatch.setattr(
         "services.orchestrator.chain.HttpSlurmGatewayClient",
-        lambda _url: _FailingSlurmGatewayClient(cancel_error_code="SLURM_CANCEL_FAILED"),
+        lambda _url, **_kwargs: _FailingSlurmGatewayClient(cancel_error_code="SLURM_CANCEL_FAILED"),
     )
 
     result = ProductionScheduler.from_env(

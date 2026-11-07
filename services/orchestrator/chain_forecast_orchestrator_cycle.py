@@ -111,7 +111,9 @@ class ForecastOrchestratorCycleMixin:
         self.config = config
         self.repository = repository
         self.state_manager = state_manager
-        self.slurm_client = slurm_client or _chain.HttpSlurmGatewayClient(config.slurm_gateway_url)
+        self.slurm_client = slurm_client or _chain.HttpSlurmGatewayClient(
+            config.slurm_gateway_url, timeout=config.slurm_gateway_timeout_seconds
+        )
         self.object_store = object_store or _chain.LocalObjectStore(
             config.object_store_root, config.object_store_prefix
         )

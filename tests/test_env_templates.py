@@ -175,6 +175,22 @@ def test_the_guard_bites_on_a_missing_key(
     assert "NHMS_ORCHESTRATOR_TERMINAL_STAGE: missing from the template" in violations
 
 
+def test_the_template_gateway_timeout_is_the_node22_value_and_loads(
+    template_values: dict[str, str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#3094: node-22 runs a 300 s gateway client timeout; the documented value
+    must be one the strict loader accepts, not one that fails the pass."""
+    from services.orchestrator.chain import OrchestratorConfig
+
+    assert template_values["SLURM_GATEWAY_CLIENT_TIMEOUT_SECONDS"] == "300"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(
+        "SLURM_GATEWAY_CLIENT_TIMEOUT_SECONDS", template_values["SLURM_GATEWAY_CLIENT_TIMEOUT_SECONDS"]
+    )
+
+    assert OrchestratorConfig.from_env().slurm_gateway_timeout_seconds == 300.0
+
+
 def test_the_template_carries_no_database_selector(template_values: dict[str, str]) -> None:
     """The DB-free gate refuses to start if a libpq selector is inherited, so
     the template that rebuilds this env must not introduce one."""

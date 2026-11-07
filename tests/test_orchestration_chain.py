@@ -2739,6 +2739,125 @@ def test_sibling_poll_interval_configs_are_untouched_by_the_orchestrator_floor(
     assert poll_field.default == slurm_validation_module.DEFAULT_POLL_INTERVAL_SECONDS
 
 
+# ---------------------------------------------------------------------------
+# #3094: the gateway client timeout is configurable via
+# ``SLURM_GATEWAY_CLIENT_TIMEOUT_SECONDS``.  Unset/blank keeps the 60 s default
+# (#2733); anything that is not a finite number > 0 fails closed instead of
+# silently falling back, because a typo that lands on 60 s re-creates #3094.
+# ---------------------------------------------------------------------------
+
+GATEWAY_TIMEOUT_ENV = "SLURM_GATEWAY_CLIENT_TIMEOUT_SECONDS"
+
+
+@pytest.mark.parametrize("raw", [None, "", "   "], ids=["unset", "empty", "blank"])
+def test_orchestrator_config_from_env_gateway_timeout_defaults_to_60_when_unset_or_blank(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    raw: str | None,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    if raw is None:
+        monkeypatch.delenv(GATEWAY_TIMEOUT_ENV, raising=False)
+    else:
+        monkeypatch.setenv(GATEWAY_TIMEOUT_ENV, raw)
+
+    config = OrchestratorConfig.from_env()
+
+    assert config.slurm_gateway_timeout_seconds == 60.0
+    assert isinstance(config.slurm_gateway_timeout_seconds, float)
+
+
+@pytest.mark.parametrize("raw", ["300", " 300 ", "300.0"])
+def test_orchestrator_config_from_env_reads_gateway_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    raw: str,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(GATEWAY_TIMEOUT_ENV, raw)
+
+    config = OrchestratorConfig.from_env()
+
+    assert config.slurm_gateway_timeout_seconds == 300.0
+    assert isinstance(config.slurm_gateway_timeout_seconds, float)
+
+
+@pytest.mark.parametrize("raw", ["abc", "0", "-5", "nan", "inf", "-inf"])
+def test_orchestrator_config_from_env_rejects_invalid_gateway_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    raw: str,
+) -> None:
+    """Fail closed, never clamp: unlike the poll interval floor (#1671)."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(GATEWAY_TIMEOUT_ENV, raw)
+
+    with pytest.raises(ValueError) as excinfo:
+        OrchestratorConfig.from_env()
+
+    assert GATEWAY_TIMEOUT_ENV in str(excinfo.value)
+
+
+def test_orchestrator_config_gateway_timeout_defaults_to_60_and_coerces_to_float(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Direct construction (test harnesses) never reads the env and keeps 60 s."""
+    monkeypatch.setenv(GATEWAY_TIMEOUT_ENV, "300")
+
+    default = OrchestratorConfig(
+        workspace_root=tmp_path / "workspace",
+        object_store_root=tmp_path / "object-store",
+    )
+    explicit_int = OrchestratorConfig(
+        workspace_root=tmp_path / "workspace",
+        object_store_root=tmp_path / "object-store",
+        slurm_gateway_timeout_seconds=300,
+    )
+
+    assert default.slurm_gateway_timeout_seconds == 60.0
+    assert explicit_int.slurm_gateway_timeout_seconds == 300.0
+    assert isinstance(explicit_int.slurm_gateway_timeout_seconds, float)
+
+
+def test_forecast_orchestrator_builds_gateway_client_with_configured_timeout(tmp_path: Path) -> None:
+    config = OrchestratorConfig(
+        workspace_root=tmp_path / "workspace",
+        object_store_root=tmp_path / "object-store",
+        slurm_gateway_url="http://gateway.test",
+        slurm_gateway_timeout_seconds=300,
+    )
+
+    orchestrator = ForecastOrchestrator(config=config, repository=FakeCycleRepository())
+
+    assert orchestrator.slurm_client.timeout == 300.0
+
+
+def test_forecast_orchestrator_from_env_default_builds_60_second_gateway_client(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv(GATEWAY_TIMEOUT_ENV, raising=False)
+
+    orchestrator = ForecastOrchestrator(config=OrchestratorConfig.from_env(), repository=FakeCycleRepository())
+
+    assert orchestrator.slurm_client.timeout == 60.0
+
+
+def test_forecast_orchestrator_keeps_an_injected_gateway_client_verbatim(tmp_path: Path) -> None:
+    injected = FakeCycleSlurmClient()
+    config = OrchestratorConfig(
+        workspace_root=tmp_path / "workspace",
+        object_store_root=tmp_path / "object-store",
+        slurm_gateway_timeout_seconds=300,
+    )
+
+    orchestrator = ForecastOrchestrator(config=config, repository=FakeCycleRepository(), slurm_client=injected)
+
+    assert orchestrator.slurm_client is injected
+
+
 def test_orchestrator_config_rejects_unknown_terminal_stage(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="NHMS_ORCHESTRATOR_TERMINAL_STAGE"):
         OrchestratorConfig(
