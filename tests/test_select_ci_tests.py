@@ -460,7 +460,10 @@ G1_PASS_B_READER_EDGES: dict[str, frozenset[str]] = {
     ),
     # The commented window key + MUST-equal note, and the real cron wrapper's
     # strict-source pass-through of it (#2504 D6).
-    "infra/env/node27-ingest.example": frozenset({"tests/test_node27_autopipeline_preflight.py"}),
+    # #3087: and the forcing floor drift pin reads AUTOPIPE_MAX_CYCLE_AGE_DAYS here.
+    "infra/env/node27-ingest.example": frozenset(
+        {"tests/test_node27_autopipeline_preflight.py", "tests/test_node27_raw_retention.py"}
+    ),
     # The shared retention-window resolver's cross-consumer agreement pin.
     "packages/common/storage.py": frozenset(
         {"tests/test_storage.py", "tests/test_node27_timeseries_retention.py"}
@@ -2396,6 +2399,10 @@ def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
         # file level, so the closure guard puts it on this rule as a DIRECT
         # importer.
         "tests/test_node27_mvt_prewarm.py",
+        # #3087: hand-added reader edge, NOT guard-derived — the forcing floor
+        # drift pin imports NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS from this
+        # module inside its test body, out of the closure guard's sight.
+        "tests/test_node27_raw_retention.py",
         # #2017: same guard-derived provenance, synced from the selector's own
         # output — the coordinate-budget harness imports postgis_tile_sql,
         # collection_coordinate_limit and MVT_MAX_COORDINATES from this module
@@ -2938,6 +2945,23 @@ def test_precip_tree_module_selects_the_prewarm_reader_suite(module: str) -> Non
         STATUS_VOCAB_PARITY_PATH,
         TIME_HELPER_CONSOLIDATION_PATH,
     ]
+
+
+@pytest.mark.parametrize("source", ["infra/env/node27-ingest.example", "services/tiles/mvt.py"])
+def test_forcing_floor_inputs_select_the_raw_retention_suite(source: str) -> None:
+    """#3087 — the two inputs of the forcing-floor drift pin must route to it.
+
+    `tests/test_node27_raw_retention.py::test_the_forcing_floor_literal_tracks_the_display_lookback_and_the_autopipe_floor`
+    reads `AUTOPIPE_MAX_CYCLE_AGE_DAYS` from the ingest env template and imports
+    `NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS` from `services.tiles.mvt` inside the test body.
+    Neither path's same-name derivation nor the file-level importer closure reaches that
+    suite, so without the two rule entries a PR raising either value above the 14-day
+    floor would be green here and red only on master. Membership, not full-list equality,
+    so this pin owns only the #3087 edge (same shape as the #2191 leg above).
+    """
+    assert Path(source).exists()
+
+    assert "tests/test_node27_raw_retention.py" in select_tests([source], repo_root=Path("."))
 
 
 def test_precip_route_rule_stays_without_the_prewarm_suite() -> None:

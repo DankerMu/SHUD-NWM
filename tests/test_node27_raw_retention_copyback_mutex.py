@@ -746,6 +746,35 @@ def test_a_forcing_cycle_behind_a_held_mutex_stays_and_main_exits_one(
     assert (tree / "bv-1" / "shud" / "forcing.csv").is_file()
 
 
+@pytest.mark.parametrize("lock_mode", [0o644, 0o000], ids=["unsafe-mode", "unopenable"])
+def test_a_forcing_cycle_behind_an_unsafe_lock_is_lock_unsafe_and_main_exits_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], lock_mode: int
+) -> None:
+    """The forcing twin of EF-12: a lock file the runner may not use keeps the
+    aged forcing cycle on disk as a `lock_unsafe` failure, never a plain rmtree."""
+    if lock_mode == 0o000 and os.geteuid() == 0:
+        pytest.skip("root opens any file mode, so the denial cannot be simulated")
+    store = _store(tmp_path)
+    tree = _forcing_cycle(store, "gfs", "2026100612")
+    lock_file = store / COPYBACK_BATCH_LOCK_NAME
+    lock_file.write_bytes(b"")
+    os.chmod(lock_file, lock_mode)
+    _forcing_env(monkeypatch, store=store, lanes="forcing")
+    try:
+        exit_code, payload = _main(capsys, FORCING_ARGS)
+    finally:
+        os.chmod(lock_file, 0o600)
+
+    assert exit_code == 1
+    assert [(entry["key"], entry["lock_failure"]) for entry in payload["failed"]] == [
+        ("forcing/gfs/2026100612", "lock_unsafe")
+    ]
+    assert payload["failed"][0]["error_type"] == "CopybackLockError"
+    assert payload["deleted"] == []
+    assert payload["copyback_lock_failures"] == {"lock_timeout": 0, "lock_unsafe": 1, "lock_budget_exhausted": 0}
+    assert (tree / "bv-1" / "shud" / "forcing.csv").is_file()
+
+
 def test_canonical_draws_on_the_shared_budget_before_forcing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """D5: one pass budget for both locked lanes, canonical first."""
     store = _store(tmp_path)

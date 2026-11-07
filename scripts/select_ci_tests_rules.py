@@ -2445,6 +2445,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # sorted, so it is INTERPOSED among them by position only and the
             # #1597 census stays true.
             "tests/test_node27_mvt_prewarm.py",
+            # #3087: hand-added reader edge, not guard-derived -- the forcing
+            # floor drift pin
+            # (`test_the_forcing_floor_literal_tracks_the_display_lookback_and_the_autopipe_floor`)
+            # imports NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS from this module
+            # inside the test body, which the file-level importer closure never
+            # sees, so a lookback change must reach it through this row.
+            "tests/test_node27_raw_retention.py",
             # #2156 (D-2): guard-derived, not hand-curated — the run/river-
             # network geometry-identity suite imports TileInput, cache_key and
             # display_ready_run from services.tiles.mvt at file level, so it is
@@ -4461,7 +4468,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # libpq-ambient filter lets it through; the globs matching this path
         # (write-roles DSN scan, docker runtime pin) never read that line.
         "infra/env/node27-ingest.example",
-        ("tests/test_node27_autopipeline_preflight.py",),
+        (
+            "tests/test_node27_autopipeline_preflight.py",
+            # #3087: the forcing floor drift pin
+            # (`test_the_forcing_floor_literal_tracks_the_display_lookback_and_the_autopipe_floor`)
+            # reads AUTOPIPE_MAX_CYCLE_AGE_DAYS from this template, so raising
+            # it above the floor must red there in the PR lane.
+            "tests/test_node27_raw_retention.py",
+        ),
     ),
     PathTestRule(
         # #2504 D6: `configured_retention_window_days` is shared by the

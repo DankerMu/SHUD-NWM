@@ -2006,14 +2006,18 @@ def test_the_forcing_floor_literal_tracks_the_display_lookback_and_the_autopipe_
     assert lanes.DEFAULT_FORCING_RETENTION_DAYS >= floor
 
 
-def test_unset_lanes_never_reach_the_forcing_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """MODIFIED scenario "unset selects every lane": aged forcing trees exist, and the
-    run is exactly the legacy three lanes -- no forcing target, skip or probe."""
+@pytest.mark.parametrize("lanes", [None, "raw,canonical,precip-cache"], ids=["unset", "written-out"])
+def test_unset_or_written_out_default_lanes_never_reach_the_forcing_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lanes: str | None
+) -> None:
+    """MODIFIED requirement: the default lanes, "unset or written out", are exactly
+    the legacy three -- aged forcing trees exist, and there is no forcing target,
+    no `forcing` skip entry and no probe of the forcing root."""
     store = tmp_path / "store"
     cache = tmp_path / "cache"
     aged = _three_aged_lanes(store, cache)
     forcing = _write_forcing_cycle(store, "gfs", "2026010100")
-    config, blockers = _forcing_days_config(monkeypatch, store, lanes=None, days=None)
+    config, blockers = _forcing_days_config(monkeypatch, store, lanes=lanes, days=None)
     assert blockers == [] and config is not None
     config = dataclasses.replace(config, precip_cache_root=cache, sources=frozenset({"gfs", "ifs"}))
     probed: list[Path] = []

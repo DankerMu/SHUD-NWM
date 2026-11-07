@@ -330,13 +330,17 @@ ssh -p 32099 nwm@210.77.77.27 \
        时为 `null`）。target 可能是 `runs/<run_id>`、run 引用的对象树，或一个 extra object 文件。
      - **含义**：`backup_path` 里是 target 的**旧内容**，而且很可能是唯一一份。target 要么
        不存在（回滚 rename 失败），要么已被别的东西占住（没有尝试回滚）。
-     - **没有任何东西会回收它**，两条 lane 分开看：`runs/` 下的 backup 是点开头的名字，node-22
-       retention 记成 `unparseable_run_cycle` 跳过；`forcing/**` 引用树与 extra object 旁的
-       backup 不在任何 retention 目标里——node-22 对 copyback root 只按 `runs_only_roots` 扫
-       `runs/`（`raw|canonical|forcing/<source>/<cycle>` 只在 primary root 上扫，`services/orchestrator/retention.py`），
-       node-27 `scripts/node27_raw_retention.py` 不碰 `runs`；它的 `forcing` 车道（#3087）只删
-       `forcing/<gfs|ifs>/<10 位 cycle>` 真目录，backup 是点开头的名字，记 `unparseable_cycle_name`
-       跳过。下一次 copyback 直接 promote、不看它。
+     - **没有任何东西会单独回收它**，分开看：`runs/` 下的 backup 是点开头的名字，node-22
+       retention 记成 `unparseable_run_cycle` 跳过；extra object 旁的 backup 不在任何 retention
+       目标里——node-22 对 copyback root 只按 `runs_only_roots` 扫 `runs/`
+       （`raw|canonical|forcing/<source>/<cycle>` 只在 primary root 上扫，`services/orchestrator/retention.py`），
+       node-27 `scripts/node27_raw_retention.py` 不碰 `runs`。`forcing/**` 引用树的 target 是
+       `forcing/<seg>/<cycle>/<basin>/<model>`，所以 backup `.<model>.copyback-<hex>.backup` 落在
+       `forcing/<seg>/<cycle>/<basin>/` **里面**：node-27 `forcing` 车道（#3087，选中时）删到龄
+       cycle 时把它连同整个 cycle 一起 `rmtree`，summary 里不单列；窗口内的 cycle 车道不往下走，
+       backup 原样留着。所以 forcing backup 的处置期限约为「display watermark −
+       `NODE27_RAW_RETENTION_FORCING_DAYS`」（即该 cycle 落到 summary `forcing_cutoff` 之前），过期
+       就随 cycle 被删、旧内容不可恢复。下一次 copyback 直接 promote、不看它。
      - **处置**（node-22、账号 `frd_muziyao`，即 copyback root 属主；node-22 是 NFS client，
        `flock` 与所有写者互斥。**从 node-22 做**，node-27 本地 `flock` 与之不互斥）：全程持
        batch mutex，期间不在这个 copyback root 下做别的。锁文件可能已被上文「属主不对的孤儿」
@@ -572,6 +576,11 @@ sudo rm -f /etc/systemd/system/nhms-node27-canonical-retention.service \
 sudo systemctl daemon-reload
 # 再从 /home/nwm/NWM/infra/env/node27-raw-retention.env 删掉 NODE27_RAW_RETENTION_LANES 行。
 ```
+
+同一套步骤也停掉 `forcing` 删除（`forcing` 只在这个系统 unit 里选中，`nwm` unit 不选）。只想暂停
+`forcing`、canonical 照删：把 nwm env 里的 `NODE27_RAW_RETENTION_FORCING_DAYS` 调大（反方向调到
+14 天下限以下会让整轮 `preflight_blocked`），再重跑
+`sudo /home/nwm/NWM/scripts/node27_canonical_retention_install.sh`，让系统 unit 的 env 快照拿到新值。
 
 删掉 `LANES` 行后 nwm unit 回到三车道：每个到龄 canonical cycle 又会记 `lock_unsafe`、tick
 rc=1、经 `OnFailure=` 告警——这是回滚后的已知形态，不是新故障。
