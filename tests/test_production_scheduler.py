@@ -37800,6 +37800,75 @@ def test_source_mismatch_orchestrator_rebuild_propagates_env_poll_interval_floor
     assert captured["config"].poll_interval_seconds == 1.0
 
 
+# ---------------------------------------------------------------------------
+# #3094: both ``_default_orchestrator_for`` rebuilds must carry the configured
+# gateway client timeout.  A dropped field silently rebuilds at the 60 s
+# default, which is exactly the bug.  Same branch-isolation shape as the #1671
+# pair above.
+# ---------------------------------------------------------------------------
+
+
+def test_slurm_enabled_orchestrator_rebuild_propagates_env_gateway_timeout(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    _roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "gateway-timeout-slurm")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_ENABLED", "true")
+    monkeypatch.setenv("SLURM_GATEWAY_CLIENT_TIMEOUT_SECONDS", "300")
+    monkeypatch.delenv("FORECAST_SOURCE_ID", raising=False)
+    repository = scheduler_module.FileOrchestrationJournalRepository(paths["NHMS_SCHEDULER_JOURNAL_ROOT"])
+    captured: dict[str, Any] = {}
+
+    class CapturingForecastOrchestrator:
+        def __init__(self, **kwargs: Any) -> None:
+            captured["config"] = kwargs["config"]
+
+    monkeypatch.setattr(scheduler_module, "ForecastOrchestrator", CapturingForecastOrchestrator)
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(),
+        registry=object(),
+        adapters={},
+        active_repository=repository,
+    )
+
+    scheduler._default_orchestrator_for("gfs", state_manager=None)
+
+    # Proof the slurm rebuild branch ran (only it threads the scheduler's user).
+    assert captured["config"].reconcile_slurm_user == "scheduler-user"
+    assert captured["config"].source_id == "gfs"
+    assert captured["config"].slurm_gateway_timeout_seconds == 300.0
+
+
+def test_source_mismatch_orchestrator_rebuild_propagates_env_gateway_timeout(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    _roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "gateway-timeout-mismatch")
+    monkeypatch.delenv("NHMS_PRODUCTION_SLURM_ENABLED", raising=False)
+    monkeypatch.setenv("SLURM_GATEWAY_CLIENT_TIMEOUT_SECONDS", "300")
+    monkeypatch.setenv("FORECAST_SOURCE_ID", "gfs")
+    repository = scheduler_module.FileOrchestrationJournalRepository(paths["NHMS_SCHEDULER_JOURNAL_ROOT"])
+    captured: dict[str, Any] = {}
+
+    class CapturingForecastOrchestrator:
+        def __init__(self, **kwargs: Any) -> None:
+            captured["config"] = kwargs["config"]
+
+    monkeypatch.setattr(scheduler_module, "ForecastOrchestrator", CapturingForecastOrchestrator)
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(),
+        registry=object(),
+        adapters={},
+        active_repository=repository,
+    )
+
+    scheduler._default_orchestrator_for("ifs", state_manager=None)
+
+    # Proof the mismatch rebuild ran: ``from_env`` produced ``gfs``.
+    assert captured["config"].source_id == "IFS"
+    assert captured["config"].slurm_gateway_timeout_seconds == 300.0
+
+
 def _compact_json_bytes(payload: Mapping[str, Any]) -> bytes:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
 
@@ -44872,7 +44941,7 @@ def test_db_free_scheduler_fake_slurm_submission_writes_file_journal_without_dat
     def fail_db_factory(*_args: Any, **_kwargs: Any) -> None:
         pytest.fail("DB-free fake Slurm submission must not construct DB-backed state")
 
-    monkeypatch.setattr("services.orchestrator.chain.HttpSlurmGatewayClient", lambda _url: fake_slurm)
+    monkeypatch.setattr("services.orchestrator.chain.HttpSlurmGatewayClient", lambda _url, **_kwargs: fake_slurm)
     monkeypatch.setattr(
         "services.orchestrator.scheduler._slurm_preflight",
         lambda _config: {"status": "ready", "enabled": True, "blockers": [], "checks": {}},

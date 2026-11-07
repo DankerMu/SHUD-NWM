@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -11,6 +12,7 @@ from packages.common.contracts.time_normalization import format_cycle_time, pars
 from packages.common.python_runtime import validated_target_python_runtime
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator.chain_runtime_utils import _format_time
+from services.orchestrator.chain_slurm_client import DEFAULT_GATEWAY_TIMEOUT_SECONDS
 from services.orchestrator.chain_stages import STAGES, terminal_stage_names
 from services.orchestrator.chain_types import OrchestratorError
 
@@ -79,6 +81,7 @@ class OrchestratorConfig:
     object_store_root: Path | str
     object_store_prefix: str = ""
     slurm_gateway_url: str = "http://localhost:8000"
+    slurm_gateway_timeout_seconds: float = DEFAULT_GATEWAY_TIMEOUT_SECONDS
     templates_dir: Path | str | None = None
     poll_interval_seconds: float = 30.0
     job_timeout_seconds: float = 3600.0
@@ -113,6 +116,7 @@ class OrchestratorConfig:
         # consumers hand it straight to ``time.sleep``, so a ``str`` or ``int``
         # stored verbatim would surface as a ``TypeError`` at the poll site.
         object.__setattr__(self, "poll_interval_seconds", float(self.poll_interval_seconds))
+        object.__setattr__(self, "slurm_gateway_timeout_seconds", float(self.slurm_gateway_timeout_seconds))
         object.__setattr__(self, "scenario_id_explicit", self.scenario_id is not None)
         if self.scenario_id is None:
             object.__setattr__(self, "scenario_id", scenario_for_source(self.source_id))
@@ -148,6 +152,11 @@ class OrchestratorConfig:
             object_store_root=os.getenv("OBJECT_STORE_ROOT", workspace_root),
             object_store_prefix=os.getenv("OBJECT_STORE_PREFIX", ""),
             slurm_gateway_url=os.getenv("SLURM_GATEWAY_URL", "http://localhost:8000"),
+            # #3094: strict, no clamp -- a typo silently falling back to 60 s
+            # re-creates the re-submit loop on a slow array submit.
+            slurm_gateway_timeout_seconds=_env_positive_seconds(
+                "SLURM_GATEWAY_CLIENT_TIMEOUT_SECONDS", default=DEFAULT_GATEWAY_TIMEOUT_SECONDS
+            ),
             # #1671: the one-second minimum Slurm poll interval is enforced HERE,
             # on the only construction path that reads the deployment environment,
             # rather than unconditionally in ``__post_init__``.  Flooring in
@@ -186,6 +195,19 @@ def _env_flag(name: str, *, default: bool) -> bool:
     if normalized in {"0", "false", "f", "no", "n", "off"}:
         return False
     raise ValueError(f"{name} must be a boolean value.")
+
+
+def _env_positive_seconds(name: str, *, default: float) -> float:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    try:
+        seconds = float(value.strip())
+    except ValueError:
+        seconds = math.nan
+    if not (math.isfinite(seconds) and seconds > 0):
+        raise ValueError(f"{name} must be a finite number of seconds greater than 0.")
+    return seconds
 
 
 def _normalized_optional_identity(value: object) -> str | None:
