@@ -45,9 +45,9 @@ receipt text.
 - Layer catalog and MVT metadata must follow the backend `/api/v1/layers` and
   API type contracts. If an API/OpenAPI contract changes, regenerate and check
   `apps/frontend/src/api/types.ts` instead of hand-editing generated shapes.
-- Station-MVT remains a separate backend issue when the current authority says
-  it is still open. Do not treat station overlay UI, mocked fixtures, or old MVT
-  receipts as closure proof for that endpoint.
+- The station MVT tile route (`/api/v1/tiles/met-stations/...`) was retired by
+  #2773 item 4 (PR #3071); stations come from `/api/v1/met/stations`. Do not
+  reintroduce a station tile source or treat old station-MVT receipts as current.
 
 ## Live Versus Mocked Evidence
 
@@ -68,7 +68,7 @@ receipt text.
   unavailable node-27 display as `BLOCKED`, not as a mocked PASS.
 - Live MVT claims must distinguish current live PostGIS MVT, static river
   GeoJSON display, 424 retry behavior, river-network low-zoom budget limits,
-  and the still-separate station-MVT scope described by the runbook.
+  and the retired station-MVT route (#2773, PR #3071).
 
 ## Display Readonly Boundary
 

@@ -82,11 +82,10 @@ transaction cursor:
 
 Invariant: after commit, exactly ONE target's mirror set is
 ``active_flag=true`` and every other row of the ``basin_version`` is
-``active_flag=false``. The station-MVT source query
-(``apps/api/routes/hydro_display_identity.py::_station_source_version``) stays
-byte-for-byte unchanged; single-track visibility is delivered by row
-selection, not by adding a ``model_id`` filter to the query
-(design §Decision 1 rejected alternative).
+``active_flag=false``. Single-track visibility was delivered by row selection,
+not by a ``model_id`` filter in the station-MVT source query (design §Decision 1
+rejected alternative); that query and its route were retired by #2773 item 4
+(PR #3071), and no production code registers this hook.
 
 Fail-closed guarantee
 ---------------------

@@ -601,7 +601,7 @@ river-network/<bv> z6/49/24           http=413  353 bytes      (低 zoom 整流�
   `NHMS_MVT_FILE_CACHE_DIR` 文件缓存。denied-write live 验证只应用于非缓存控制/业务写。
   当前进程处于哪种模式由启动后首个冷 miss 的权限探测决定，改授权后必须重启 display API
   （见 "[MVT DB 缓存写入模式判定](#mvt-db-缓存写入模式判定issue-2716)"）。
-- **station-MVT**：#342 仍是独立 open backend issue，不属于 #343 的 live MVT closure。
+- **station-MVT**：站点矢量瓦片路由 `GET /api/v1/tiles/met-stations/{basin_version_id}/{z}/{x}/{y}.pbf` 已由 #2773 第 4 项（PR #3071，2026-11-06）下线，旧 URL 返回 404；站点列表走 `/api/v1/met/stations`。
 
 ## 相关
 
