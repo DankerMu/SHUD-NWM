@@ -28,5 +28,7 @@
   - add a `resource_profile=` kwarg to `_hlj_cohort_context`; `_submit_with_evidence` asserts on `state_evidence`, so new wire tests pass both;
   - wire capture: gateway tasks, `manifest_index` and the written index file carry no station table; `binding_uri` / `binding_checksum` kept; in-process basins intact;
   - publish stage manifest `basins` carry no station table.
-- [ ] 2.1 Ruff, targeted pytest locally, and node-27 targeted pytest.
-- [ ] 3.1 node-22 receipt (post-merge).
+- [x] 2.1 Ruff, targeted pytest locally, and node-27 targeted pytest.
+  - Local: ruff clean; the four Evidence Floor suites 622 passed, 1 skipped. node-27, PR head `a4317d0e0`, detached worktree: `3422 passed, 1 skipped in 674.97s` (PR #3100 comment).
+- [x] 3.1 node-22 receipt (post-merge).
+  - Deployed `69dc8d34c` on 2026-11-08T02:07Z. First post-deploy cycle `2026-10-17T12Z`: 65-task forecast index 5.95 MB -> 0.78 MB, forcing 5.93 MB -> 0.76 MB; index-write to gateway `201` 7–8 s -> 2 s; 0 entries carry `station_bindings`/`stations`, `binding_uri` and `package_checksum` kept 65/65. Receipt in the PR #3100 comment.

@@ -40,7 +40,7 @@
 - [x] 4.1 `uv run ruff check .`
 - [x] 4.2 `uv run pytest -q tests/test_node27_raw_retention.py tests/test_node27_raw_retention_copyback_mutex.py tests/test_node27_raw_retention_canonical_deployment.py tests/test_copyback_guard.py tests/test_retention_extra_roots.py` + selector-chosen set
 - [x] 4.3 `openspec validate add-node27-forcing-retention-lane --strict --no-interactive`
-- [ ] 4.4 node-27 live receipt (post-merge deploy):
+- [x] 4.4 node-27 live receipt (post-merge deploy): done 2026-11-08T02:17Z, receipt in the PR #3088 comment (forcing lane selected, 38 in-window cycles kept, 0 forcing deleted because the pre-10-08 backlog was removed by hand, failed 0, station-series 200 in-window / 404 `STATION_FORCING_FILE_NOT_FOUND` for a deleted cycle).
   - pre-check: `find forcing -mindepth 1 ! -user frd_muziyao | wc -l` = 0 at every depth (rmtree needs write on basin/model subdirs; a foreign-owned subdir leaves a half-deleted cycle);
   - rerun the installer, then `systemctl start nhms-node27-canonical-retention.service`;
   - from the summary JSON: `forcing_cutoff`, the `deleted[]` keys starting with `forcing/`, and the kept cycles all match `ls forcing/<S>`; `failed[]` is empty; record one forcing removal's lock hold time;
