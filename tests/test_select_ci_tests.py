@@ -11620,8 +11620,9 @@ def test_every_pinned_node_id_resolves_to_an_existing_test_function() -> None:
 # pipeline.py, station_set_flip.py and model_registry.py) and derives direct
 # importers UNION a ONE-HOP module extension — or direct importers only for a
 # DIRECT_ONLY_GUARDED_MODULES member (pipeline.py, model_registry.py). This
-# guard owns every tracked module under the TEN audited
-# directory paths (workers/mapping_builder joined in #1711) and derives DIRECT
+# guard owns every tracked module under the ELEVEN audited
+# directory paths (workers/mapping_builder joined in #1711,
+# workers/canonical_converter in #3093) and derives DIRECT
 # importers only — those directories hold ~150 modules, so one-hop here would
 # grow the PR lane without a bound anyone chose. The two domains overlap on
 # services/slurm_gateway and neither subsumes the other; each keeps its own
@@ -11638,6 +11639,9 @@ DIRECTORY_RULE_AUDIT_PATHS: tuple[str, ...] = (
     # package-wide rule, so future module/importer growth is dispositioned
     # instead of silently falling out of the PR lane.
     "workers/mapping_builder",
+    # #3093: the canonical converter package joined with its explicit-tuple
+    # package rule; its out-of-package importers are dispositioned below.
+    "workers/canonical_converter",
     "services/orchestrator",
     "services/slurm_gateway",
     "services/tile_publisher",
@@ -11948,6 +11952,42 @@ INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
         "workers/model_registry/__init__.py",
         "tests/test_forcing_read_path_store_routing.py",
     ): "edge-consumer",
+    # -- #3093: workers/canonical_converter out-of-package importers ---------
+    # The `workers/canonical_converter/**` rule carries only the package's own
+    # suites (the #1711 convention). Joining DIRECTORY_RULE_AUDIT_PATHS made the
+    # guard derive these nine pairs; each suite is selected from the surface it
+    # actually tests. Two of them were CORE_SMOKE members that a converter-only
+    # PR used to reach by fallback (test_orchestration_chain.py and
+    # test_production_scheduler.py); readiness behaviour is covered by
+    # tests/test_canonical_converter.py and tests/test_ifs_canonical.py instead.
+    #
+    # The slurm array contract imports `cli` (hence the package) of every
+    # array-job entry point; same reason as the five directory pairs above.
+    ("workers/canonical_converter/__init__.py", "tests/test_slurm_array_contract.py"): "edge-consumer",
+    ("workers/canonical_converter/cli.py", "tests/test_slurm_array_contract.py"): "edge-consumer",
+    # The source-identity suite drives `cli._convert` to assert the source id
+    # survives end to end; its subject is source identity across the producer
+    # and orchestrator, and it is owned by `workers/forcing_producer/**` (as
+    # the chain.py pair above is).
+    ("workers/canonical_converter/__init__.py", "tests/test_source_identity.py"): "edge-consumer",
+    ("workers/canonical_converter/cli.py", "tests/test_source_identity.py"): "edge-consumer",
+    # The two forcing end-to-end suites drive converter.py as one stage of the
+    # producer pipeline and are owned by `workers/forcing_producer/**`.
+    ("workers/canonical_converter/converter.py", "tests/test_e2e.py"): "edge-consumer",
+    ("workers/canonical_converter/converter.py", "tests/test_ifs_forecast_integration.py"): "edge-consumer",
+    # A scheduler-refresh partition (SCHEDULER_REFRESH_TESTS): it reads
+    # `required_standard_variables_for_source` to build the readiness variable
+    # set it cross-checks the refreshed catalog against. Its subject is the
+    # catalog derivation, and it is selected by the scheduler-refresh rules.
+    ("workers/canonical_converter/converter.py", "tests/test_scheduler_refresh_catalog_derivation.py"): "edge-consumer",
+    # A scheduler suite owned by `services/orchestrator/**`, like the
+    # shud_runtime and slurm_gateway/config.py pairs above.
+    ("workers/canonical_converter/converter.py", "tests/test_production_scheduler.py"): "edge-consumer",
+    # The same 596s capped PR-lane run as the slurm_gateway/config.py
+    # runtime-budget pair above (killed at 47% of 306 items, ~21 min
+    # extrapolated); `services/orchestrator/**` carries it for the
+    # orchestrator's own modules, and a converter PR cannot afford it.
+    ("workers/canonical_converter/converter.py", "tests/test_orchestration_chain.py"): "runtime-budget",
 }
 
 
@@ -15980,6 +16020,72 @@ def test_mapping_builder_rule_reds_when_a_suite_is_dropped(
     assert any("test_mapping_builder_integration.py" in v for v in violations), (
         f"expected a named mapping-builder suite violation, got {violations}"
     )
+
+
+# #3093: the canonical-converter package rule. The suite set is not derivable
+# from a tree glob, so these pins (not a tree-derived equality) anchor it. The
+# expected set is written out from the issue, not read from the rule table.
+CANONICAL_CONVERTER_PACKAGE_SUITES: frozenset[str] = frozenset(
+    {
+        "tests/test_canonical_converter.py",
+        "tests/test_ifs_canonical.py",
+        "tests/test_era5_canonical.py",
+        "tests/test_e2e_ifs.py",
+        "tests/test_ifs_adapter.py",
+        "tests/test_gfs_adapter.py",
+        "tests/test_era5_adapter.py",
+        "tests/test_grib_packing_reader.py",
+    }
+)
+
+
+def _canonical_converter_suite_violations(selected: set[str], *, module: str) -> list[str]:
+    """Name each converter/adapter package suite ``module``'s selection drops."""
+    return [
+        f"{module}: missing canonical-converter suite {suite}"
+        for suite in sorted(CANONICAL_CONVERTER_PACKAGE_SUITES - selected)
+    ]
+
+
+def test_canonical_converter_only_diff_selects_the_package_suites() -> None:
+    # #3093: before the rule, converter.py had no row and no same-name suite, so
+    # a converter-only PR fell to CORE_SMOKE_TESTS and ran none of these.
+    module = "workers/canonical_converter/converter.py"
+    selected = set(select_tests([module], repo_root=Path(".")))
+
+    violations = _canonical_converter_suite_violations(selected, module=module)
+    assert not violations, "canonical-converter suite violations:\n  " + "\n  ".join(violations)
+    # The rule sets `matched`, so the unknown-backend fallback no longer fires:
+    # the selection is replaced, not merely grown.
+    assert not set(CORE_SMOKE_TESTS) & selected, f"{module}: still falls back to CORE_SMOKE_TESTS"
+
+
+def test_canonical_converter_grib_packing_diff_selects_packing_and_reader_suites() -> None:
+    # #3093: the same-name derivation supplies tests/test_grib_packing.py; the
+    # package rule supplies the reader suite, which is collection-only in the PR
+    # lane (all three tests are `grib`-marked and skip without NHMS_RUN_GRIB).
+    module = "workers/canonical_converter/grib_packing.py"
+    selected = set(select_tests([module], repo_root=Path(".")))
+
+    assert "tests/test_grib_packing.py" in selected
+    assert "tests/test_grib_packing_reader.py" in selected
+    violations = _canonical_converter_suite_violations(selected, module=module)
+    assert not violations, "canonical-converter suite violations:\n  " + "\n  ".join(violations)
+
+
+def test_canonical_converter_cli_diff_selects_package_suites_without_edge_consumers() -> None:
+    # #3093: cli.py is imported at module scope by the slurm array contract and
+    # the source-identity suite, both owned by other surfaces' rules
+    # (`services/slurm_gateway/**`, `workers/forcing_producer/**`) and
+    # dispositioned as `edge-consumer`. The package rule must not carry them.
+    module = "workers/canonical_converter/cli.py"
+    selected = set(select_tests([module], repo_root=Path(".")))
+
+    violations = _canonical_converter_suite_violations(selected, module=module)
+    assert not violations, "canonical-converter suite violations:\n  " + "\n  ".join(violations)
+    edge_consumers = {"tests/test_slurm_array_contract.py", "tests/test_source_identity.py"}
+    leaked = sorted(edge_consumers & selected)
+    assert not leaked, f"{module}: selection carries edge consumers {leaked}"
 
 
 def test_state_clone_hook_and_node22_script_select_their_irregular_suites() -> None:
