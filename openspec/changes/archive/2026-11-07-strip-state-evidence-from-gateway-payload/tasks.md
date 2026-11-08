@@ -29,5 +29,8 @@
   - the projection unit;
   - the wire capture of tasks, manifest_index and the index file, with in-process basins intact;
   - N=1 vs N=500 byte identity.
-- [ ] 2.1 Ruff, targeted pytest locally, and node-27 targeted pytest.
-- [ ] 3.1 node-22 receipt (post-merge).
+- [x] 2.1 Ruff, targeted pytest locally, and node-27 targeted pytest.
+  - node-27, PR head `a969355f9`, detached worktree: `3413 passed, 1 skipped in 639.82s` (PR #3097 comment).
+- [x] 3.1 node-22 receipt (post-merge).
+  - Deployed `26cdb802b` on 2026-11-07T17:49Z. The first post-deploy cycle, `2026-10-16T00Z`, had 0 of 12 stage index files carrying `state_evidence`.
+  - 65-task forecast index: 9.86/9.46 MB before deploy (10-15T12), 5.95 MB after. Index-write to gateway `201`: 51/42 s before, 7/8 s after. Receipt in the PR #3097 comment.

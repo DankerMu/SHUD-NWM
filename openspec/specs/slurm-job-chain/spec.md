@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change m1-gfs-forecast-loop. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: Stage template definition
 
 The job chain orchestrator SHALL define exactly 5 sbatch templates, one per pipeline stage. Each template MUST specify the script path, resource requirements, environment variables, and output/error log paths. Templates MUST be parameterized by cycle_time, basin_id, and run_id.
@@ -444,3 +446,37 @@ stage; raw-manifest repair belongs to scheduler admission only.
 - **THEN** the first submission SHALL be `convert` and no `download_retry_1`
   SHALL be minted
 
+### Requirement: The Slurm gateway client timeout SHALL be configurable and fail closed
+
+The production orchestrator's `HttpSlurmGatewayClient` timeout SHALL come from `SLURM_GATEWAY_CLIENT_TIMEOUT_SECONDS` when that variable is set and non-blank. When it is unset or blank, the timeout SHALL be 60 seconds.
+
+A set value that is not a finite number greater than zero SHALL make configuration loading raise an error naming the variable. Such a value SHALL NOT fall back to the default and SHALL NOT be clamped.
+
+Every rebuild of the orchestrator configuration on the scheduler path SHALL carry the configured timeout.
+
+#### Scenario: The default timeout is unchanged
+- **WHEN** `SLURM_GATEWAY_CLIENT_TIMEOUT_SECONDS` is unset or blank
+- **THEN** the orchestrator's gateway client timeout is 60 seconds
+
+#### Scenario: A configured timeout reaches the scheduler's gateway client
+- **WHEN** `SLURM_GATEWAY_CLIENT_TIMEOUT_SECONDS=300`
+- **AND** the scheduler builds its default orchestrator with Slurm execution enabled, for the configured source or for a different one
+- **THEN** that orchestrator's gateway client timeout is 300 seconds
+
+#### Scenario: An invalid timeout fails closed
+- **WHEN** `SLURM_GATEWAY_CLIENT_TIMEOUT_SECONDS` is `abc`, `0`, `-5`, `nan` or `inf`
+- **THEN** loading the orchestrator configuration raises an error whose message names `SLURM_GATEWAY_CLIENT_TIMEOUT_SECONDS`
+
+### Requirement: Gateway-bound task payloads SHALL NOT carry candidate state evidence
+
+The orchestrator SHALL remove the `state_evidence` key from every manifest entry it sends to the Slurm gateway and from every manifest index file it writes. This covers the array `tasks`, the stage manifest's `manifest_index`, and the publish stage's `basins`. The orchestrator's in-memory basins SHALL keep `state_evidence` unchanged.
+
+#### Scenario: An array submission carries no state evidence
+- **WHEN** the orchestrator submits an array stage for basins whose candidates carry `state_evidence`
+- **THEN** no `tasks[*]` entry and no `manifest.manifest_index[*]` entry sent to the gateway contains `state_evidence`
+- **AND** the written `<stage>_manifest_index.json` contains no `state_evidence`
+- **AND** the orchestrator's active basins still carry their `state_evidence`
+
+#### Scenario: The wire payload does not grow with recorded events
+- **WHEN** two otherwise identical candidates carry 1 and 500 `state_evidence.pipeline_events` entries
+- **THEN** their serialized gateway task entries are byte-identical

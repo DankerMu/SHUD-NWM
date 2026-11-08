@@ -36,5 +36,10 @@
 - [x] 1.5 Document the key in `infra/env/compute.scheduler-dbfree.env.example`:
   - the key is a bare assignment `SLURM_GATEWAY_CLIENT_TIMEOUT_SECONDS=300`;
   - the rationale goes in full-line comments only, since `tests/test_env_templates.py:207` forbids inline `#` (#2970).
-- [ ] 2.1 Ruff, targeted pytest locally, and node-27 targeted pytest.
-- [ ] 3.1 node-22 deployment and recovery receipt (post-merge, owner-confirmed).
+- [x] 2.1 Ruff, targeted pytest locally, and node-27 targeted pytest.
+  - node-27, PR head `03566bacf`, detached worktree: `3512 passed, 1 skipped in 608.79s` (PR #3096 comment).
+- [x] 3.1 node-22 deployment and recovery receipt (post-merge, owner-confirmed).
+  - node-22 synced to `bd058b230`, `SLURM_GATEWAY_CLIENT_TIMEOUT_SECONDS=300` set in `compute.scheduler-dbfree.env`.
+  - The 130 `2026-10-15T00Z` runs were recovered with `scripts/node22_manual_retry_failed_runs.py`.
+  - Recovery pass `scheduler_2026110713_4660f6447199`: `submitted`, 130 `final_candidate_success`, 0 `STATE_SAVE_SUBMIT_AMBIGUOUS`, 0 `permanently_failed` (arrays 115400, 115417).
+  - node-27 ingested the cycle 132/132 `ingested parsed`.
