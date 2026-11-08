@@ -18,6 +18,7 @@ candidate-state decision.
 
 from __future__ import annotations
 
+import copy
 import json
 import shutil
 from datetime import UTC, datetime
@@ -82,10 +83,15 @@ def _gateway_answers(monkeypatch: pytest.MonkeyPatch, status_code: int, payload:
 
 
 def _hlj_cohort_context(
-    orchestrator: Any, *, state_evidence: dict[str, Any] | None = None
+    orchestrator: Any,
+    *,
+    state_evidence: dict[str, Any] | None = None,
+    resource_profile: dict[str, Any] | None = None,
 ) -> CycleOrchestrationContext:
     cycle_time = _dt("2026-09-22T12:00:00Z")
-    candidate_state = {} if state_evidence is None else {"state_evidence": state_evidence}
+    candidate_state: dict[str, Any] = {} if state_evidence is None else {"state_evidence": state_evidence}
+    if resource_profile is not None:
+        candidate_state["resource_profile"] = resource_profile
     basins = orchestrator._normalize_cycle_basins(
         [
             {
@@ -580,11 +586,17 @@ def _gateway_records(monkeypatch: pytest.MonkeyPatch, status_code: int, payload:
 
 
 def _submit_with_evidence(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, event_count: int
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    event_count: int,
+    resource_profile: dict[str, Any] | None = None,
 ) -> tuple[Any, CycleOrchestrationContext, dict[str, Any]]:
     bodies = _gateway_records(monkeypatch, 422, {"error": {"code": "VALIDATION_ERROR"}})
     orchestrator, _repository = _hlj_orchestrator(tmp_path)
-    context = _hlj_cohort_context(orchestrator, state_evidence=_state_evidence(event_count))
+    context = _hlj_cohort_context(
+        orchestrator, state_evidence=_state_evidence(event_count), resource_profile=resource_profile
+    )
     assert len(context.active_basins[0]["state_evidence"]["pipeline_events"]) == event_count
     orchestrator._submit_and_wait_cycle_stage(_STATE_SAVE_QC, context)
     assert len(bodies) == 1
@@ -653,3 +665,179 @@ def test_publish_stage_manifest_basins_carry_no_state_evidence(tmp_path: Path) -
     assert all("state_evidence" not in entry for entry in manifest["manifest_index"])
     assert len(manifest["quality_states"]) == len(manifest["basins"])
     assert context.active_basins[0]["state_evidence"] == _state_evidence(2)
+
+
+# #3099: the direct-grid station binding table (``station_bindings`` / alias ``stations``) must
+# not cross the gateway boundary either; workers read the binding object at ``binding_uri``.
+_DIRECT_GRID_KEPT = {
+    "binding_uri": "s3://nhms/direct_grid/basins_hlj/bindings.json",
+    "binding_checksum": "sha256:binding",
+    "grid_id": "ifs_0p25",
+    "grid_signature": "sha256:grid",
+    "sp_att_path": "input/basins_hlj/basins_hlj.sp.att",
+    "sp_att_checksum": "sha256:spatt",
+    "model_input_package_id": "pkg_hlj",
+    "z_policy": "nearest_cell_elevation",
+    "applicable_source_ids": ["IFS"],
+    "coordinate_reference_system": "EPSG:4326",
+    "forcing_mapping_mode": "direct_grid",
+}
+
+
+def _station_bindings(count: int) -> list[dict[str, Any]]:
+    return [
+        {"station_id": f"st_{index}", "grid_row": index, "grid_col": index + 1, "elevation_m": 100.0 + index}
+        for index in range(count)
+    ]
+
+
+def _direct_grid_resource_profile(count: int = 3, *, alias: bool = False) -> dict[str, Any]:
+    stations = {"stations": _station_bindings(count)} if alias else {"station_bindings": _station_bindings(count)}
+    return {
+        "package_checksum": "sha256:package",
+        "cpus_per_task": 4,
+        "canonical_grid_snapshot": {"grid_id": "ifs_0p25"},
+        "direct_grid_forcing": {**_DIRECT_GRID_KEPT, **stations},
+    }
+
+
+def _assert_no_station_table(entry: Any) -> None:
+    direct_grid = entry["resource_profile"]["direct_grid_forcing"]
+    assert "station_bindings" not in direct_grid
+    assert "stations" not in direct_grid
+    assert direct_grid == _DIRECT_GRID_KEPT
+    assert entry["resource_profile"]["package_checksum"] == "sha256:package"
+
+
+def test_gateway_wire_entries_drops_station_table_and_keeps_siblings() -> None:
+    from services.orchestrator.chain_manifests import gateway_wire_entries
+
+    both = _direct_grid_resource_profile(2)
+    both["direct_grid_forcing"]["stations"] = _station_bindings(2)
+    entries = [
+        {
+            "task_id": 0,
+            "run_id": "r0",
+            "state_evidence": _state_evidence(2),
+            "resource_profile": _direct_grid_resource_profile(4),
+        },
+        {"task_id": 1, "run_id": "r1", "resource_profile": _direct_grid_resource_profile(2, alias=True)},
+        {"task_id": 2, "run_id": "r2", "resource_profile": both},
+    ]
+    before = copy.deepcopy(entries)
+    profiles = [entry["resource_profile"] for entry in entries]
+    direct_grids = [profile["direct_grid_forcing"] for profile in profiles]
+    station_list = entries[0]["resource_profile"]["direct_grid_forcing"]["station_bindings"]
+
+    projected = gateway_wire_entries(entries)
+
+    for wire, entry in zip(projected, entries, strict=True):
+        assert "state_evidence" not in wire
+        _assert_no_station_table(wire)
+        assert wire["resource_profile"] is not entry["resource_profile"]
+        assert wire["resource_profile"]["direct_grid_forcing"] is not entry["resource_profile"]["direct_grid_forcing"]
+        assert wire["resource_profile"]["cpus_per_task"] == 4
+        # Sibling resource_profile keys stay the same object (shallow copy).
+        wire_profile, entry_profile = wire["resource_profile"], entry["resource_profile"]
+        assert wire_profile["canonical_grid_snapshot"] is entry_profile["canonical_grid_snapshot"]
+        assert set(wire["resource_profile"]) == set(entry["resource_profile"])
+        assert {key: value for key, value in wire.items() if key != "resource_profile"} == {
+            key: value for key, value in entry.items() if key not in {"resource_profile", "state_evidence"}
+        }
+    # No mutation of the shared input mappings or the station list.
+    assert entries == before
+    assert [entry["resource_profile"] for entry in entries] == profiles
+    assert all(entry["resource_profile"] is profile for entry, profile in zip(entries, profiles, strict=True))
+    assert all(
+        profile["direct_grid_forcing"] is direct_grid
+        for profile, direct_grid in zip(profiles, direct_grids, strict=True)
+    )
+    assert entries[0]["resource_profile"]["direct_grid_forcing"]["station_bindings"] is station_list
+    assert station_list == _station_bindings(4)
+
+
+@pytest.mark.parametrize(
+    "resource_profile",
+    [
+        pytest.param("missing", id="no-resource-profile"),
+        pytest.param("not-a-mapping", id="non-mapping-resource-profile"),
+        pytest.param({"package_checksum": "sha256:package"}, id="no-direct-grid-forcing"),
+        pytest.param(
+            {"package_checksum": "sha256:package", "direct_grid_forcing": ["x"]}, id="non-mapping-direct-grid"
+        ),
+        pytest.param(
+            {"package_checksum": "sha256:package", "direct_grid_forcing": dict(_DIRECT_GRID_KEPT)},
+            id="direct-grid-without-station-table",
+        ),
+    ],
+)
+def test_gateway_wire_entries_passes_through_entries_without_a_station_table(resource_profile: Any) -> None:
+    from services.orchestrator.chain_manifests import gateway_wire_entries
+
+    entry: dict[str, Any] = {"task_id": 0, "run_id": "r0", "state_evidence": _state_evidence(1)}
+    if resource_profile != "missing":
+        entry["resource_profile"] = resource_profile
+    before = copy.deepcopy(entry)
+
+    (wire,) = gateway_wire_entries([entry])
+
+    assert wire == {key: value for key, value in before.items() if key != "state_evidence"}
+    if resource_profile != "missing":
+        assert wire["resource_profile"] is entry["resource_profile"]
+    assert entry == before
+
+
+def test_array_submit_wire_and_index_file_carry_no_station_table(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    orchestrator, context, body = _submit_with_evidence(
+        tmp_path, monkeypatch, event_count=2, resource_profile=_direct_grid_resource_profile(5)
+    )
+
+    assert body["tasks"], "the array submit carried no tasks"
+    for task in body["tasks"]:
+        _assert_no_station_table(task)
+    assert body["manifest"]["manifest_index"]
+    for entry in body["manifest"]["manifest_index"]:
+        _assert_no_station_table(entry)
+    assert "station_bindings" not in json.dumps(body)
+    index_path = Path(orchestrator.config.workspace_root) / "runs" / context.run_id / "input"
+    index_bytes = (index_path / "state_save_qc_manifest_index.json").read_bytes()
+    assert b"station_bindings" not in index_bytes
+    assert b"st_0" not in index_bytes
+    assert json.loads(index_bytes) == body["tasks"]
+    # The orchestrator's in-memory basins keep the full station table.
+    direct_grid = context.active_basins[0]["resource_profile"]["direct_grid_forcing"]
+    assert direct_grid["station_bindings"] == _station_bindings(5)
+
+
+def test_wire_tasks_do_not_grow_with_the_station_table(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "cycle"
+    _o1, _c1, one = _submit_with_evidence(
+        root, monkeypatch, event_count=1, resource_profile=_direct_grid_resource_profile(1)
+    )
+    shutil.rmtree(root)
+    _o2, _c2, many = _submit_with_evidence(
+        root, monkeypatch, event_count=1, resource_profile=_direct_grid_resource_profile(1140)
+    )
+
+    assert json.dumps(one["tasks"], sort_keys=True) == json.dumps(many["tasks"], sort_keys=True)
+
+
+def test_publish_stage_manifest_basins_carry_no_station_table(tmp_path: Path) -> None:
+    orchestrator, _repository = _hlj_orchestrator(tmp_path)
+    context = _hlj_cohort_context(
+        orchestrator, state_evidence=_state_evidence(2), resource_profile=_direct_grid_resource_profile(3, alias=True)
+    )
+
+    manifest = orchestrator._build_cycle_stage_manifest(_PUBLISH, context)
+
+    assert manifest["basins"]
+    for basin in manifest["basins"]:
+        assert "state_evidence" not in basin
+        _assert_no_station_table(basin)
+    for entry in manifest["manifest_index"]:
+        _assert_no_station_table(entry)
+    assert context.active_basins[0]["resource_profile"]["direct_grid_forcing"]["stations"] == _station_bindings(3)

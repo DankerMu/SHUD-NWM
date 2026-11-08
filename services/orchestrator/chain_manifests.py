@@ -176,14 +176,43 @@ class ChainManifestOrchestrator(Protocol):
     ) -> None: ...
 
 
-def gateway_wire_entries(entries: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Shallow copies of ``entries`` without ``state_evidence`` (#3095).
+_DIRECT_GRID_WIRE_DROPPED_KEYS = frozenset({"station_bindings", "stations"})
 
-    The candidate's state evidence is orchestrator-only and unbounded; nothing past the
-    Slurm gateway boundary reads it, so it never goes on the wire or into an index file.
+
+def gateway_wire_entries(entries: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Shallow copies of ``entries`` for the Slurm gateway wire and manifest index files.
+
+    Two orchestrator-only fields are dropped because nothing past the gateway boundary
+    reads them and both scale without bound:
+
+    - ``state_evidence``, the candidate's state evidence (#3095);
+    - ``resource_profile.direct_grid_forcing.station_bindings`` and its alias ``stations``,
+      the basin's full direct-grid station binding table (#3099). Workers read the
+      binding object at ``binding_uri`` instead; every other key is kept.
+
+    Copy-on-write: the input entries and their nested mappings are shared with the
+    orchestrator's basins and are never mutated. Absent or non-mapping
+    ``resource_profile`` / ``direct_grid_forcing`` blocks pass through as the same object.
     """
 
-    return [{key: value for key, value in entry.items() if key != "state_evidence"} for entry in entries]
+    return [_gateway_wire_entry(entry) for entry in entries]
+
+
+def _gateway_wire_entry(entry: Mapping[str, Any]) -> dict[str, Any]:
+    wire = {key: value for key, value in entry.items() if key != "state_evidence"}
+    resource_profile = wire.get("resource_profile")
+    if not isinstance(resource_profile, Mapping):
+        return wire
+    direct_grid = resource_profile.get("direct_grid_forcing")
+    if not isinstance(direct_grid, Mapping) or _DIRECT_GRID_WIRE_DROPPED_KEYS.isdisjoint(direct_grid):
+        return wire
+    wire["resource_profile"] = {
+        **resource_profile,
+        "direct_grid_forcing": {
+            key: value for key, value in direct_grid.items() if key not in _DIRECT_GRID_WIRE_DROPPED_KEYS
+        },
+    }
+    return wire
 
 
 def build_cycle_stage_manifest(
