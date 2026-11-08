@@ -1,4 +1,43 @@
 {
   "schema": "basins-registry-partition-additions/v1",
-  "additions": []
+  "additions": [
+    {
+      "issue": 3081,
+      "base_commit": "8ae73d0e48b7c41799b7032fa9e64eac46615398",
+      "owner": "tests/test_basins_registry_import_parser.py",
+      "name": "test_parser_enforces_domain_point_limit",
+      "row": [
+        "tests/test_basins_registry_import_parser.py",
+        "3f04de405e7d41834bc1f68cbbf1b65bdd3057dfa3dcb56147a690aa0c4e3212",
+        "0e910ef8ea38ed1a7c4a128ea5d4e137457bb5566e9e99d9df25473994037577",
+        "",
+        "298c8b353b028274be5f763c26fc0a14528ec22c547b09fa74d0fe57f76121d9",
+        "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "6ba759fcede8a320b6ac816b8bfc85d27c0de8fca98a4edca6736e72b2a63071"
+      ],
+      "nodes": [
+        "test_parser_enforces_domain_point_limit"
+      ],
+      "integration_nodes": []
+    },
+    {
+      "issue": 3081,
+      "base_commit": "8ae73d0e48b7c41799b7032fa9e64eac46615398",
+      "owner": "tests/test_basins_registry_import_parser.py",
+      "name": "test_parser_enforces_river_point_limit",
+      "row": [
+        "tests/test_basins_registry_import_parser.py",
+        "a191a519b20f631a8d1c9560ba8bf939fdce6d767d38f33d961d6433eebbc07c",
+        "a8a14679312d7833efc7b5329bc495fb0e1c2f12ae4f5ce114b55cef8fd2f016",
+        "",
+        "298c8b353b028274be5f763c26fc0a14528ec22c547b09fa74d0fe57f76121d9",
+        "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "6ba759fcede8a320b6ac816b8bfc85d27c0de8fca98a4edca6736e72b2a63071"
+      ],
+      "nodes": [
+        "test_parser_enforces_river_point_limit"
+      ],
+      "integration_nodes": []
+    }
+  ]
 }
