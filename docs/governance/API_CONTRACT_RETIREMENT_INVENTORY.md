@@ -312,3 +312,34 @@ the #411 evidence snapshot and are not rewritten.
   exclusion). The file's other caller-less helpers (`_raw_segment_key`,
   `_mapped_downstream_segment_id`, `_optional_text`, `_shud_segment_count`) moved
   unchanged and are not removed.
+
+### `GET /api/v1/tiles/met-stations/{basin_version_id}/{z}/{x}/{y}.pbf` — retired by #2773 item 4
+
+- Status: removed by PR #3071 (merged 2026-11-06). Owner decision on #2773
+  (2026-11-06, restated 2026-11-08): retire the path, do not register the
+  station-set flip hook and do not switch the query to latest-run stations.
+  This record was added afterwards; the retirement itself is recorded in the
+  archived change `openspec/changes/archive/2026-11-06-retire-met-station-mvt-tiles/`
+  and `openspec/specs/station-mvt-tiles/spec.md`.
+- What was removed: the route `met_station_mvt_tile` (`getMetStationTile`), its
+  only helpers (`_station_source_version`, `_station_active_flag`,
+  `_fetch_station_mvt_tile_bytes`), the `met-stations` branch of
+  `services/tiles/mvt.py`, its OpenAPI path and the generated frontend type.
+  No shim, no `410`, no deprecation header: the path answers `404`
+  `{"detail": "Not found"}`, same treatment as #2866 above.
+- Why: the query listed stations by `met.met_station.active_flag = true`, but no
+  production code registers the flip hook (`packages/common/station_set_flip.py`),
+  so every Direct Grid station is `active_flag = false` (28,926 of 28,926 on
+  node-27, 2026-11-08) and the route returned `MVT_SOURCE_IDENTITY_NOT_FOUND`
+  for every basin. The frontend never called it.
+- Unchanged: `GET /api/v1/met/stations` (station list), the `met-stations` entry
+  of `/api/v1/layers` (it never advertised a tile URL), river and hydro MVT tiles.
+- External-consumer basis: same owner ruling as #2866 (no external API users);
+  it covers this endpoint only.
+- Replacement for clients: `GET /api/v1/met/stations`.
+- Rollback: revert PR #3071; no data or schema was touched.
+- Left, reported and not removed: `packages/common/station_set_flip.py` (only
+  tests and archived rehearsal evidence import it) and the index
+  `met_station_active_basin_station_idx` (migration 000033), whose only reader
+  was this route.
+- Contract evidence: `tests/test_met_station_mvt_route_retired.py`.
