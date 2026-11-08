@@ -1683,6 +1683,50 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         MAPPING_BUILDER_TESTS,
     ),
     PathTestRule(
+        # #3093: every module under workers/canonical_converter/ is owned by this
+        # one directory rule. Before it the package had no row and no same-name
+        # suite for converter.py / cli.py / __init__.py, so a converter-only PR
+        # fell to the unknown-backend CORE_SMOKE fallback and none of the
+        # converter or adapter suites ran until the post-merge master shards.
+        # Deliberately NOT a stop rule, like the #1711 `workers/mapping_builder/**`
+        # row: the same-name derivation still adds tests/test_grib_packing.py for
+        # grib_packing.py. A match here sets `matched`, so a converter-only diff
+        # no longer selects CORE_SMOKE_TESTS at all; the two CORE_SMOKE suites
+        # that import the converter are dispositioned in the meta-suite.
+        #
+        # Same edge-consumer convention as #1711: the rule carries ONLY the
+        # package's own suites. Importer suites outside the package (the slurm
+        # array contract, source identity, scheduler, e2e and orchestration-chain
+        # suites) are owned by their own surfaces' rules and are dispositioned as
+        # `edge-consumer` / `runtime-budget` pairs in tests/test_select_ci_tests.py's
+        # INTENTIONAL_RULE_GAP_EXCLUSIONS; the directory is in
+        # DIRECTORY_RULE_AUDIT_PATHS so a new static importer must be answered.
+        #
+        # Unlike #1711 the suite set cannot be derived from a tree glob (the
+        # suites are named after sources and adapters, not the package), so this
+        # is an explicit tuple anchored by the meta-suite's dry-run pins, with no
+        # tree-derived equality assertion. Five of these suites reach the
+        # package through module-level `importlib.import_module` and
+        # tests/test_era5_adapter.py through a function-body one; the
+        # importer-gap guard sees neither, so the tuple is their only route.
+        #
+        # tests/test_grib_packing_reader.py is collection-only in the PR lane:
+        # all three tests are `@pytest.mark.grib` and skip without NHMS_RUN_GRIB
+        # (3 collected / 3 skipped / 0 passed). It stays here as an import and
+        # collection check of the reader against grib_packing.py.
+        "workers/canonical_converter/**",
+        (
+            "tests/test_canonical_converter.py",
+            "tests/test_ifs_canonical.py",
+            "tests/test_era5_canonical.py",
+            "tests/test_e2e_ifs.py",
+            "tests/test_ifs_adapter.py",
+            "tests/test_gfs_adapter.py",
+            "tests/test_era5_adapter.py",
+            "tests/test_grib_packing_reader.py",
+        ),
+    ),
+    PathTestRule(
         # #1711: state_clone_hook.py's suite name is deliberately not same-name
         # derivable (no tests/test_state_clone_hook.py; its consumer suite is
         # the cutover-hook suite). Explicit irregular mapping.
