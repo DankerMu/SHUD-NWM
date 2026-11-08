@@ -2143,3 +2143,146 @@ def test_disabled_summaries_also_carry_the_forcing_fields(tmp_path: Path) -> Non
     assert disabled["forcing_cutoff"] == "2026-10-08T00:00:00Z"
     assert disabled["lanes"] == _ALL_LANES_SORTED
     assert node27_raw_retention.SCHEMA_VERSION == "nhms.node27_raw_retention.production.v5"
+
+
+# ---------------------------------------------------------------------------
+# #3089: both retention periods are capped at 3650 days. Above the cap the run
+# is a preflight block with a receipt, not an `OverflowError` traceback from
+# `reference_time - timedelta(days=...)`. The cap is spelled as a literal here
+# (the spec's number), not read back from the module under test.
+# ---------------------------------------------------------------------------
+_CEILING = 3650
+
+
+def _ceiling_tick(capsys: pytest.CaptureFixture[str], *extra: str) -> tuple[int, dict[str, Any]]:
+    exit_code = node27_raw_retention.main(["--sources", "gfs,ifs", "--reference-time", "2026-06-27T12:00:00Z", *extra])
+    return exit_code, json.loads(capsys.readouterr().out)
+
+
+def _assert_blocked_with_receipt(
+    exit_code: int,
+    payload: dict[str, Any],
+    summary_path: Path,
+    blocker: dict[str, Any],
+    survivors: list[Path],
+) -> None:
+    assert exit_code == 2
+    assert payload["status"] == "preflight_blocked"
+    assert payload["blockers"] == [blocker]
+    assert payload["counts"] == {"planned": 0, "deleted": 0, "skipped": 0, "failed": 0}
+    assert all(path.is_dir() for path in survivors)
+    assert json.loads(summary_path.read_text(encoding="utf-8")) == payload
+
+
+def test_a_forcing_period_at_the_ceiling_is_accepted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config, blockers = _forcing_days_config(monkeypatch, tmp_path, lanes="forcing", days=str(_CEILING))
+
+    assert blockers == []
+    assert config.forcing_retention_days == _CEILING
+
+
+@pytest.mark.parametrize("days", ["3651", "1000000", " 1000000 "])
+def test_a_forcing_period_above_the_ceiling_blocks_every_lane_with_a_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    days: str,
+) -> None:
+    """Spec scenario "a huge forcing period", with forcing selected."""
+    store = tmp_path / "store"
+    cache = tmp_path / "cache"
+    summary_path = tmp_path / "summaries" / "raw-retention.json"
+    aged = _three_aged_lanes(store, cache)
+    forcing = _write_forcing_cycle(store, "gfs", "2026010100")
+    _production_env(monkeypatch, store=store, cache=cache, summary_path=summary_path)
+    monkeypatch.setenv("NODE27_RAW_RETENTION_LANES", "raw,canonical,precip-cache,forcing")
+    monkeypatch.setenv("NODE27_RAW_RETENTION_FORCING_DAYS", days)
+
+    exit_code, payload = _ceiling_tick(capsys)
+
+    _assert_blocked_with_receipt(
+        exit_code,
+        payload,
+        summary_path,
+        {"field": "forcing_retention_days", "reason": "above_ceiling", "value": days, "floor": 14, "ceiling": 3650},
+        [*aged.values(), forcing],
+    )
+
+
+@pytest.mark.parametrize("source", ["env", "cli"])
+def test_a_raw_period_at_the_ceiling_is_accepted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str) -> None:
+    monkeypatch.delenv("NODE27_RAW_RETENTION_FORCING_DAYS", raising=False)
+    monkeypatch.setenv("NODE27_RAW_RETENTION_OBJECT_STORE_ROOT", str(tmp_path))
+    argv: list[str] = []
+    if source == "env":
+        monkeypatch.setenv("NODE27_RAW_RETENTION_DAYS", str(_CEILING))
+    else:
+        monkeypatch.delenv("NODE27_RAW_RETENTION_DAYS", raising=False)
+        argv = ["--retention-days", str(_CEILING)]
+
+    config, blockers = node27_raw_retention.config_from_env(node27_raw_retention.build_parser().parse_args(argv))
+
+    assert blockers == []
+    assert config.retention_days == _CEILING
+
+
+@pytest.mark.parametrize("days", [3651, 1000000])
+@pytest.mark.parametrize("source", ["env", "cli"])
+def test_a_raw_period_above_the_ceiling_blocks_with_a_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    source: str,
+    days: int,
+) -> None:
+    """Spec scenario "a huge raw period", from `NODE27_RAW_RETENTION_DAYS` or `--retention-days`."""
+    store = tmp_path / "store"
+    cache = tmp_path / "cache"
+    summary_path = tmp_path / "summaries" / "raw-retention.json"
+    aged = _three_aged_lanes(store, cache)
+    forcing = _write_forcing_cycle(store, "gfs", "2026010100")
+    _production_env(monkeypatch, store=store, cache=cache, summary_path=summary_path)
+    monkeypatch.delenv("NODE27_RAW_RETENTION_FORCING_DAYS", raising=False)
+    monkeypatch.setenv("NODE27_RAW_RETENTION_LANES", "raw,canonical,precip-cache,forcing")
+    extra: tuple[str, ...] = ()
+    if source == "env":
+        monkeypatch.setenv("NODE27_RAW_RETENTION_DAYS", str(days))
+    else:
+        extra = ("--retention-days", str(days))
+
+    exit_code, payload = _ceiling_tick(capsys, *extra)
+
+    _assert_blocked_with_receipt(
+        exit_code,
+        payload,
+        summary_path,
+        {"field": "retention_days", "reason": "above_ceiling", "value": days, "ceiling": 3650},
+        [*aged.values(), forcing],
+    )
+
+
+def test_both_periods_at_the_ceiling_run_to_completion_and_keep_everything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Spec scenario "the ceiling itself": preflight passes and the run ends normally."""
+    store = tmp_path / "store"
+    cache = tmp_path / "cache"
+    summary_path = tmp_path / "summaries" / "raw-retention.json"
+    aged = _three_aged_lanes(store, cache)
+    forcing = _write_forcing_cycle(store, "gfs", "2026010100")
+    _production_env(monkeypatch, store=store, cache=cache, summary_path=summary_path)
+    monkeypatch.setenv("NODE27_RAW_RETENTION_LANES", "raw,canonical,precip-cache,forcing")
+    monkeypatch.setenv("NODE27_RAW_RETENTION_FORCING_DAYS", str(_CEILING))
+
+    exit_code, payload = _ceiling_tick(capsys, "--retention-days", str(_CEILING))
+
+    assert exit_code == 0
+    assert payload["status"] != "preflight_blocked"
+    assert payload["retention_days"] == _CEILING
+    assert payload["forcing_retention_days"] == _CEILING
+    assert payload["cutoff"] == "2016-06-29T12:00:00Z"
+    assert payload["forcing_cutoff"] == "2016-06-29T12:00:00Z"
+    assert payload["planned"] == []
+    assert payload["deleted"] == []
+    assert all(path.is_dir() for path in [*aged.values(), forcing])
+    assert json.loads(summary_path.read_text(encoding="utf-8")) == payload

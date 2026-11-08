@@ -78,6 +78,7 @@ from scripts.node27_raw_retention_lanes import (
     PRECIP_CACHE_LANE_REASON,
     RAW_LANE_KEY,
     RAW_LANE_REASON,
+    RETENTION_DAYS_CEILING,
     _env_flag,
     _env_int,
     _forcing_retention_days,
@@ -232,6 +233,15 @@ def config_from_env(args: argparse.Namespace) -> tuple[RawRetentionConfig | None
     retention_days = args.retention_days or _env_int("NODE27_RAW_RETENTION_DAYS", default=DEFAULT_RETENTION_DAYS)
     if retention_days <= 0:
         blockers.append({"field": "retention_days", "reason": "must_be_positive", "value": retention_days})
+    elif retention_days > RETENTION_DAYS_CEILING:
+        blockers.append(
+            {
+                "field": "retention_days",
+                "reason": "above_ceiling",
+                "value": retention_days,
+                "ceiling": RETENTION_DAYS_CEILING,
+            }
+        )
 
     summary_value = args.summary_path or os.getenv("NODE27_RAW_RETENTION_SUMMARY_PATH") or ""
     summary_path = Path(summary_value).expanduser() if summary_value.strip() else None
