@@ -297,14 +297,18 @@ the #411 evidence snapshot and are not rewritten.
   assert the imported rows directly, four retired); the oracle
   `tests/fixtures/basins_registry_partition_oracle.json` is unchanged. Besides the
   pre-PR-2 row cleanup `_delete_legacy_seg_rows`, the `basins_seg_shp` crosswalk
-  source and `parse_seg_shp_crosswalk`, the only remaining `_seg_` code is the
-  caller-less id producer `workers/model_registry/basins_geometry.py::_stable_segment_id`. `get_river_segment` (detail) and
+  source and `parse_seg_shp_crosswalk`, the only remaining `_seg_` code was the
+  caller-less id producer `workers/model_registry/basins_geometry.py::_stable_segment_id`,
+  deleted by #3081. `get_river_segment` (detail) and
   `core.river_segment_crosswalk` writing are unchanged.
 - Left after #2907, reported and not removed: the trigram index
   `river_segment_id_trgm_idx` (migration 000052, ADR 0004) lost its only
   consumer, the list search's `lower(rs.river_segment_id) LIKE` arm, and is now
-  an orphan index; dropping it is a separate DB change. The helpers
+  an orphan index; dropping it is a separate DB change. The caller-less helpers
   `_stable_segment_id` and `_deduplicate_pending_segment_ids` in
-  `workers/model_registry/basins_geometry.py` have no caller; deleting them needs
-  that 1440-line file split first (it is not a large-file guard exclusion), tracked
-  by #3081.
+  `workers/model_registry/basins_geometry.py` were deleted by #3081, which first
+  split that 1440-line file into `basins_geometry.py`, `basins_geometry_shapes.py`
+  and `basins_geometry_types.py` (each under the large-file guard limit, no new
+  exclusion). The file's other caller-less helpers (`_raw_segment_key`,
+  `_mapped_downstream_segment_id`, `_optional_text`, `_shud_segment_count`) moved
+  unchanged and are not removed.

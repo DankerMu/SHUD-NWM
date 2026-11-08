@@ -259,6 +259,46 @@ def test_parser_enforces_resource_limits(tmp_path: Path, monkeypatch: pytest.Mon
     assert error.value.details["resource"] == "features"
 
 
+def test_parser_enforces_domain_point_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The default fixture's domain ring has 5 points (closed square) and is
+    # parsed before the river, so a limit of 4 trips the domain geometry.
+    _, input_dir, _, _, model_id = _write_registry_fixture(tmp_path)
+    inventory = discover_basins_inventory(tmp_path / "basins")
+    model = inventory["models"][0]
+    monkeypatch.setattr(basins_geometry, "MAX_BASINS_GIS_POINTS", 4)
+
+    with pytest.raises(basins_geometry.BasinsGeometryError) as error:
+        parse_basins_geometry(
+            model_id=model_id,
+            input_dir=input_dir,
+            shud_input_name="alias-a",
+            required_files=model["required_files"],
+        )
+
+    assert error.value.error_code == "BASINS_REGISTRY_RESOURCE_LIMIT_EXCEEDED"
+    assert error.value.details["resource"] == "points"
+
+
+def test_parser_enforces_river_point_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Three reaches give 6 river points against the 5-point domain: the domain
+    # passes a limit of 5 (5 is not > 5) and the river geometry trips it.
+    _, input_dir, _, _, model_id = _write_registry_fixture(tmp_path, sp_segment_count=3)
+    inventory = discover_basins_inventory(tmp_path / "basins")
+    model = inventory["models"][0]
+    monkeypatch.setattr(basins_geometry, "MAX_BASINS_GIS_POINTS", 5)
+
+    with pytest.raises(basins_geometry.BasinsGeometryError) as error:
+        parse_basins_geometry(
+            model_id=model_id,
+            input_dir=input_dir,
+            shud_input_name="alias-a",
+            required_files=model["required_files"],
+        )
+
+    assert error.value.error_code == "BASINS_REGISTRY_RESOURCE_LIMIT_EXCEEDED"
+    assert error.value.details["resource"] == "points"
+
+
 def test_parser_enforces_shud_evidence_resource_limits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _, input_dir, _, _, model_id = _write_registry_fixture(tmp_path)
     inventory = discover_basins_inventory(tmp_path / "basins")
