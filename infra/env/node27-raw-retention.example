@@ -34,6 +34,9 @@ NODE27_RAW_RETENTION_SOURCES=GFS,IFS
 # The spec's remedy is to RAISE this value, never to lower the lookback. The
 # inequality is enforced by the node-27 deployment receipt (copyback task 4.6 /
 # #2016), not by a check in the script.
+# CEILING 3650 (issue #3089): a value above 3650 (env or `--retention-days`) is
+# a preflight blocker (`{"field": "retention_days", "reason": "above_ceiling",
+# "value": ..., "ceiling": 3650}`, rc=2) and NOTHING is deleted.
 NODE27_RAW_RETENTION_DAYS=14
 
 # Display-side rendered-PNG cache root (issue #2011). Retention prunes
@@ -111,7 +114,11 @@ NODE27_RAW_RETENTION_LANES=raw,precip-cache
 # (`{"field": "forcing_retention_days", "reason": "not_an_integer" |
 # "must_be_positive" | "below_floor", "value": ..., "floor": 14}`, rc=2) in BOTH
 # units -- checked whether or not the unit selects forcing, because this one
-# file feeds both -- and NOTHING is deleted. The key is not per-unit, so the
+# file feeds both -- and NOTHING is deleted.
+# CEILING 3650 (issue #3089): a value above 3650 is the same blocker with
+# `{"field": "forcing_retention_days", "reason": "above_ceiling", "value": ...,
+# "floor": 14, "ceiling": 3650}` (rc=2, NOTHING deleted). To pause the forcing
+# lane, set 3650, not a larger number. The key is not per-unit, so the
 # installer copies it into the system unit's env unchanged.
 NODE27_RAW_RETENTION_FORCING_DAYS=30
 

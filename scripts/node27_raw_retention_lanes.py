@@ -43,6 +43,10 @@ DEFAULT_FORCING_RETENTION_DAYS = 30
 # ingest reads the forcing handoff inside the autopipe cycle floor. A literal so
 # this module imports neither; a drift test pins it against both sources.
 FORCING_RETENTION_FLOOR_DAYS = 14
+# Upper bound for BOTH retention periods (#3089): an unbounded value made
+# `reference_time - timedelta(days=...)` raise OverflowError -- a traceback and
+# no summary. 3650 days (10 years) is far above any operational value.
+RETENTION_DAYS_CEILING = 3650
 LANE_NOT_SELECTED_REASON = "lane_not_selected"
 # The one directory name under `canonical/<S>/` that is never a cycle: grid
 # definitions are not reproducible from node-27, so they are pinned out of the
@@ -110,6 +114,14 @@ def _forcing_retention_days(raw_value: str | None) -> tuple[int | None, dict[str
         reason = "must_be_positive"
     elif int(raw) < FORCING_RETENTION_FLOOR_DAYS:
         reason = "below_floor"
+    elif int(raw) > RETENTION_DAYS_CEILING:
+        return None, {
+            "field": "forcing_retention_days",
+            "reason": "above_ceiling",
+            "value": raw_value,
+            "floor": FORCING_RETENTION_FLOOR_DAYS,
+            "ceiling": RETENTION_DAYS_CEILING,
+        }
     else:
         return int(raw), None
     return None, {

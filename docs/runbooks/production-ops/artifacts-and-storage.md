@@ -531,6 +531,10 @@ preflight-blocked 的 tick 一次都不取、也不建锁文件。summary schema
     unit 都一个字节不删——同一份 env 喂两个 unit，所以**不论是否选了 forcing 都检查**。
     14 = `max(NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS + 1, AUTOPIPE_MAX_CYCLE_AGE_DAYS)` = `max(13, 14)`：
     ingest 读 forcing handoff，forcing 必须活得比 autopipe cycle 下限久。调高 autopipe 下限时先调高这里。
+  - 上限（#3089）：`FORCING_DAYS` >3650 → 同一 blocker 的 `above_ceiling`（带 `value`、`floor: 14`、
+    `ceiling: 3650`）；`NODE27_RAW_RETENTION_DAYS` / `--retention-days` >3650 → `retention_days` blocker
+    `above_ceiling`（带 `value`、`ceiling: 3650`）。都是 rc=2、写 `preflight_blocked` summary、一个字节不删，
+    不再是 `OverflowError` traceback 且没有 summary。
   - 身份：`forcing/` 各层属主都是 `frd_muziyao`（2026-11-07 实测 `find forcing -mindepth 1 ! -user frd_muziyao`
     为 0），nwm 不在其组里删不动，所以只在系统 unit 跑；nwm env 的 `LANES` 含 `forcing` 会被安装脚本拒绝。
     部署前重做这条 `find` 前置检查：外人属主的子目录会让 `rmtree` 删一半。
@@ -578,8 +582,8 @@ sudo systemctl daemon-reload
 ```
 
 同一套步骤也停掉 `forcing` 删除（`forcing` 只在这个系统 unit 里选中，`nwm` unit 不选）。只想暂停
-`forcing`、canonical 照删：把 nwm env 里的 `NODE27_RAW_RETENTION_FORCING_DAYS` 调大（反方向调到
-14 天下限以下会让整轮 `preflight_blocked`），再重跑
+`forcing`、canonical 照删：把 nwm env 里的 `NODE27_RAW_RETENTION_FORCING_DAYS` 调大，但**不得超过
+3650**（推荐直接设 `3650`；超过 3650 或调到 14 天下限以下都会让整轮 `preflight_blocked`），再重跑
 `sudo /home/nwm/NWM/scripts/node27_canonical_retention_install.sh`，让系统 unit 的 env 快照拿到新值。
 
 删掉 `LANES` 行后 nwm unit 回到三车道：每个到龄 canonical cycle 又会记 `lock_unsafe`、tick
