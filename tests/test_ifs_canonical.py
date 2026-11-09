@@ -382,6 +382,115 @@ def test_ifs_precip_first_lead_counts_only_the_current_step() -> None:
     assert floored.anomalies[0]["quantization_step_mm"] == [None, 1000.0 * small_step_m]
 
 
+# #3109: IFS cycle 2026102300 f012 had 81 cells with delta exactly -0.1220703125 mm on
+# steps [0.06103515625, 0.06103515625] mm (2^-14 m each), i.e. exactly -tolerance.
+TP_2026102300_STEP_M = 2.0**-14
+
+
+def _convert_with_2026102300_steps(delta_steps: float) -> tuple[Any, int]:
+    result, count, _ = convert_ifs_precipitation_with_metadata(
+        [0.002 - delta_steps * TP_2026102300_STEP_M],
+        [0.002],
+        forecast_hour=12,
+        previous_forecast_hour=9,
+        quantization_step_m=TP_2026102300_STEP_M,
+        previous_quantization_step_m=TP_2026102300_STEP_M,
+    )
+    return result, count
+
+
+def test_ifs_precip_delta_exactly_at_known_step_tolerance_stays_ok() -> None:
+    result, count = _convert_with_2026102300_steps(2)
+
+    assert result.values == (0.0,)
+    assert result.quality_flag == "ok"
+    assert count == 0
+    assert result.anomalies == (
+        {
+            "type": "small_negative_ifs_precipitation_delta",
+            "forecast_hour": 12,
+            "previous_forecast_hour": 9,
+            "negative_count": 1,
+            "min_delta_mm": -0.1220703125,
+            "tolerance_mm": 0.1220703125,
+            "quantization_step_mm": [0.06103515625, 0.06103515625],
+        },
+    )
+
+
+def test_ifs_precip_rounding_noise_outward_of_bound_is_small() -> None:
+    tol = 0.1220703125
+    delta = -tol * (1 + 1e-12)
+    assert delta < -tol
+
+    # Outward perturbation through the public conversion (dyadic inputs cannot hit the
+    # exact literal, so the delta is checked to land strictly outside -tol): ok + small.
+    result, count, _ = convert_ifs_precipitation_with_metadata(
+        [0.002 - 2 * TP_2026102300_STEP_M * (1 + 1e-12)],
+        [0.002],
+        forecast_hour=12,
+        previous_forecast_hour=9,
+        quantization_step_m=TP_2026102300_STEP_M,
+        previous_quantization_step_m=TP_2026102300_STEP_M,
+    )
+    (anomaly,) = result.anomalies
+    assert anomaly["min_delta_mm"] < -tol
+    assert result.quality_flag == "ok"
+    assert count == 0
+    assert anomaly["type"] == "small_negative_ifs_precipitation_delta"
+
+    # The exact literal -tol*(1+1e-12) through the classifier itself.
+    small, significant = converter_module._split_ifs_precip_negatives((delta,), tol, step_known=True)
+    assert small == (delta,)
+    assert significant == ()
+
+
+@pytest.mark.parametrize(
+    ("delta_steps", "min_delta_mm"),
+    [(2.5, -0.152587890625), (3, -0.18310546875)],
+)
+def test_ifs_precip_delta_beyond_known_step_tolerance_is_flagged(delta_steps: float, min_delta_mm: float) -> None:
+    result, count = _convert_with_2026102300_steps(delta_steps)
+
+    assert result.values == (0.0,)
+    assert result.quality_flag == "warning_negative_precip"
+    assert count == 1
+    assert result.anomalies == (
+        {
+            "type": "negative_ifs_precipitation_delta",
+            "forecast_hour": 12,
+            "previous_forecast_hour": 9,
+            "negative_count": 1,
+            "min_delta_mm": min_delta_mm,
+            "consecutive_negative_count": 1,
+            "tolerance_mm": 0.1220703125,
+            "quantization_step_mm": [0.06103515625, 0.06103515625],
+        },
+    )
+
+
+def test_ifs_precip_without_steps_delta_at_env_floor_stays_significant() -> None:
+    # No step known: the bound stays exclusive, so a delta of exactly -floor is significant.
+    assert converter_module.PRECIP_NEGATIVE_NOISE_TOLERANCE_MM == 0.1
+    result, count, _ = convert_ifs_precipitation_with_metadata(
+        [0.0001], [0.0002], forecast_hour=12, previous_forecast_hour=9
+    )
+
+    assert result.values == (0.0,)
+    assert result.quality_flag == "warning_negative_precip"
+    assert count == 1
+    assert result.anomalies == (
+        {
+            "type": "negative_ifs_precipitation_delta",
+            "forecast_hour": 12,
+            "previous_forecast_hour": 9,
+            "negative_count": 1,
+            "min_delta_mm": -0.1,
+            "consecutive_negative_count": 1,
+        },
+    )
+
+
 def test_ifs_manifest_with_step_bearing_tp_records_keeps_one_step_lead_ready(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
