@@ -579,8 +579,10 @@ def test_classify_respects_per_tick_bound() -> None:
 
 
 # #2425: compression and DB retention derive their cutoffs from ONE display
-# watermark W: compression lag 2 d, retention window 21 d. Both values are the
-# production ones, spelled out here instead of read from either runner.
+# watermark W: compression lag 2 d, retention window 21 d. Both were the
+# production values when #2425 landed (node-27 runs a 30 d window since #3106,
+# 2026-11-09); the fixture keeps 21 because only window > lag matters to the
+# disjointness it pins. Spelled out here instead of read from either runner.
 _RETENTION_WINDOW = timedelta(days=21)
 _LAG_SECONDS = 2 * 86400
 

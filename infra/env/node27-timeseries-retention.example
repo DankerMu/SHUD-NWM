@@ -20,11 +20,13 @@ NODE27_TIMESERIES_RETENTION_REPO=/home/nwm/NWM
 # it cannot `COPY ... FROM PROGRAM`. Never put the superuser `nhms` here.
 DATABASE_URL=postgresql://nhms_ingest_rw:REPLACE_ME_PW@127.0.0.1:55432/nhms
 # The same connection is queried read-only first for the latest displayable
-# forecast cycle; the 14-day window is relative to that business-time watermark.
+# forecast cycle; the 30-day window is relative to that business-time watermark.
 
-# Drop-window size in days. Default 14 = spec §Window and mechanism.
+# Drop-window size in days. Default 30 (#3106, owner decision 2026-11-09; was
+# 14 = spec §Window and mechanism). node-27's live env runs the same 30 since
+# 2026-11-09, so this template and the box agree.
 # Chunks whose entire range is older than the watermark-relative window are eligible.
-NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=14
+NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=30
 
 # Maximum number of chunks dropped per timer tick. Default 5 (matches
 # compression sibling per-tick bound).

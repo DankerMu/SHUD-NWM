@@ -38,6 +38,12 @@ PGDATA was rebuilt by fresh initdb at `/home/nwm/nhms-primary/pgdata` — see
 "Revision 2026-11-05" below, which supersedes the live-PGDATA path statements of
 the 2026-09-14 and 2026-09-10 amendments)
 
+Policy amendment: 2026-11-09 (DB retention window 30 days, #3106; owner
+decision aligning with the 30-day `forcing/` and `runs/` object retention
+of #3087. Code default, committed env template and node-27 live env are all 30,
+superseding the 14-day window of the 2026-07-21 policy amendment; the
+watermark anchoring of the 2026-07-21 clarification is unchanged)
+
 ## Status
 
 Accepted, as amended below. **Current selective-cold direction: repository source

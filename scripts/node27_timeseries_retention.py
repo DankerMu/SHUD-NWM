@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """TimescaleDB retention runner for node-27 (issue #855 §6.1 + §6.2).
 
-Drops chunks strictly older than a configurable window (default 14 d) from
+Drops chunks strictly older than a configurable window (default 30 d) from
 the two D3 detail hypertables ``hydro.river_timeseries`` and
 ``met.forcing_station_timeseries``.
 
@@ -605,7 +605,7 @@ DropChunk = Callable[["RetentionConfig", ChunkRow], None]
 
 # SQL: catalog-only enumeration of the two D3 hypertables.
 # H3 divergence from #851 compression sibling: retention MUST NOT filter
-# `is_compressed = false` — compressed chunks older than 14 d are exactly
+# `is_compressed = false` — compressed chunks older than the window are exactly
 # the retention target, so both compressed and uncompressed chunks are
 # enumerated. Predicate is `range_end <= %s` (H7 non-strict), which differs
 # from compression's strict `<`: a chunk with `range_end == cutoff` has all

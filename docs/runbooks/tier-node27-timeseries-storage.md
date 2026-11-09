@@ -183,13 +183,18 @@ What that means for an operator today:
   retention runner's tests, its env template and the ADR, so the retired §3
   and §7 slots stay empty rather than being reused.
 
-Current policy (effective 2026-07-21): DB retention uses a spec-default
-14-day eligibility window. That default is what the committed env template
-ships (`NODE27_TIMESERIES_RETENTION_WINDOW_DAYS`); the value that actually
-runs is whatever the machine's env file holds — node-27's DB retention window
-was `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=21` as of 2026-08-01. Read the
-live value on the box before quoting a day count anywhere (§8.1 step 2 shows
-the grep). Compression remains earlier at 7 days. Both ages are measured from
+Current policy (effective 2026-07-21; window amended 2026-11-09 by #3106):
+DB retention uses a 30-day eligibility window. The code default
+(`DEFAULT_RETENTION_WINDOW_DAYS`), the committed env template
+(`NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=30`) and node-27's live env all
+hold 30 since 2026-11-09 (the template/default was 14 and the live value 21
+before that). The value that actually runs is still whatever the machine's
+env file holds: read the live value on the box before quoting a day count
+anywhere (§8.1 step 2 shows the grep). node-27's retention timer was disabled
+from the 2026-11-05 disk-swap rebuild until #3106 re-enabled it on
+2026-11-09. Compression runs earlier: the live lag is
+`NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS=172800` (2 days; the 7-day value
+quoted in older sections is historical — read the live env). Both ages are measured from
 the latest forecast cycle accepted by the node-27 display catalog, not from
 the server wall clock. The historical 30/45-day receipts in the committed
 evidence tree are audit evidence only, not commands for new runs.
@@ -3644,11 +3649,13 @@ arrival.
 chunks newest `range_end` first; the hypertable order stays
 `(schema, name)`, which since 2026-09-19 is `hydro.river_timeseries` →
 `met.*` — `hydro.river_timeseries_legacy` was a member of that walk until
-`000060` dropped it (see "legacy store" in `openspec/glossary.md`). Compression cutoff is `W − 2 d` and DB retention's is `W − 21 d` on
+`000060` dropped it (see "legacy store" in `openspec/glossary.md`). Compression cutoff is `W − 2 d` and DB retention's is `W − 30 d` (since
+2026-11-09, #3106; `W − 21 d` when the 2026-09-16/17 counts below were taken) on
 the same display watermark W, so retention's drop set is always the OLDEST
 prefix of compression's eligible set; oldest-first spent the slots on chunks
 retention dropped the same day (2026-09-16: 4 of 4; 2026-09-17: 3 of 4).
-Newest-first compresses chunks with ~19 days of life left.
+Newest-first compresses chunks with ~28 days of life left (~19 at the old
+21-day window).
 
 **Retired risk: the legacy giant chunk (#1988).** This block described a
 `rc=124` trajectory in which slot 2 selected the uncompressed 558 GB chunk
@@ -3756,7 +3763,11 @@ template/live drift is resolved.
    measured pair, and the `≥281 GB` onset threshold below as correspondingly
    optimistic.
 
-Measured inputs (node-27, read-only, 2026-08-14 unless noted):
+Measured inputs (node-27, read-only, 2026-08-14 unless noted). **The
+arrival-rate, per-chunk-cost and chunk-count bullets below are 2026-08-14
+measurements under the then-live 7-day chunk geometry and are historical;
+the live geometry is 1 day (see the Backlog-ceiling bullet), so do not
+reuse their 2/week arrival or 268–409 GB per-chunk figures for sizing.**
 
 - **Arrival rate = 2/week.** Both hot hypertables use a 7-day
   `chunk_time_interval` with aligned range boundaries
@@ -3769,15 +3780,28 @@ Measured inputs (node-27, read-only, 2026-08-14 unless noted):
   the wall constraint above is **back-solved from this single observation**
   (1836 − 1456); it is not an independent measurement of the non-compress
   legs, and a second measured pair should be used to confirm or replace it.
-- **Backlog ceiling ≤6 chunks — CONDITIONAL, not physical.** The DB retention
-  window bounds uncompressed stock at ≤3 per table, hence ≤6 for the lane. The
-  window in force is the **live 21 days**, not the committed template's 14
-  (that drift is recorded in "Current policy (effective 2026-07-21)" near the
-  top of this runbook, the `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS`
-  paragraph). The retention timer was only enabled on 2026-08-14 (`#1369`), so
-  the convergence to the steady stock is not yet observed. **If that timer is
-  disabled or the window is changed, this premise fails** and the bound must
-  be re-derived from the formula above.
+- **Backlog ceiling — CONDITIONAL, not physical (re-derived 2026-11-09,
+  #3106).** Uncompressed stock is bounded by the compression cutoff, not by
+  the DB retention window: a chunk stays uncompressed from the newest forecast
+  valid time (W + forecast horizon) back to `W − 2 d` (compression lag), so
+  with the current **1-day** `chunk_time_interval` on both hot tables ("Three-day
+  chunk geometry" near the top of this runbook) the steady stock is about
+  `(2 d + forecast horizon) / 1 d` chunks per hot table (in principle; only
+  river is measured below). The DB retention window
+  (30 days since 2026-11-09) does not enter: it is longer than the 2-day lag,
+  so retention only ever drops chunks that were already compression-eligible.
+  **The bound holds only while the compression timer runs and keeps up**; if
+  compression stalls, the retention window becomes the only cap on
+  uncompressed stock, and the 21 → 30 day change raises that worst case by
+  about 9 chunks per hot table at 1-day geometry. On
+  2026-11-09 the `10-18` river chunk was already compression-eligible but not
+  yet compressed — a small backlog. Measured live 2026-11-09: **10** river
+  uncompressed chunks (`10-18`..`10-27`), 1-day `chunk_time_interval` for both
+  hot tables. The DB retention timer was disabled 2026-11-05..2026-11-09
+  (disk-swap rebuild) and re-enabled 2026-11-09 by #3106; neither moves this
+  bound. *Historical derivation:* the former "≤6 chunks" ceiling (≤3 per
+  table) assumed 7-day chunks, the then-live 21-day window and the retention
+  timer enabled 2026-08-14 (`#1369`); it does not describe current geometry.
 - **Per-chunk cost.** Steady-state `hydro.river_timeseries` chunks measure
   268–409 GB → 1608–2454 s each at ~6.0 s/GB (§4.5). Therefore `3 river + 1
   forcing ≈ 3 × (1608…2454) + 76 + 380 = 5280–7818 s`, which **exceeds the
@@ -3842,8 +3866,9 @@ of these change:
 
 - `chunk_time_interval` on either hot hypertable (moves the arrival rate).
 - A third hot hypertable joins the lane (moves the arrival rate).
-- The DB retention timer is disabled, or its window changes (kills the ≤6
-  backlog ceiling premise).
+- The compression timer is disabled or stops keeping up, or the compression
+  lag changes (moves the backlog-ceiling bound; the old ≤6 premise tied to the
+  DB retention timer/window is historical, see "Backlog ceiling" above).
 - The wrapper wall / timeout budget changes, including a temporary §4.5
   override window (moves the wall constraint).
 - **A backlog forms — ≥2 river chunks eligible in one tick** (paragraph
@@ -7431,9 +7456,9 @@ The retention runner
 strictly older than the drop window from the two D3
 detail hypertables `hydro.river_timeseries` and
 `met.forcing_station_timeseries` via TimescaleDB `drop_chunks`. The window
-width is `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` (spec default 14 d;
-21 d on node-27 as of 2026-08-01) — always read the live value off the box
-rather than assuming the default.
+width is `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` (default 30 d; template
+and node-27 live both 30 d since 2026-11-09, #3106) — always read the live
+value off the box rather than assuming the default.
 
 **The lane runs in exactly one mode: archive gate `disabled` (#1370).**
 `NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE=disabled` is REQUIRED; unset, empty,
@@ -7499,14 +7524,14 @@ commented placeholder; run it only after the two manual receipts in §8.4
 
    **If that env file already exists — and it DOES on node-27 — edit it in
    place; do not re-copy the example.** The example ships
-   `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=14` uncommented (the spec
-   default), while node-27 runs `21` (as of 2026-08-01 — see this runbook's
-   opening policy banner).
-   Re-copying therefore silently reverts the live window 21 → 14, and a
-   narrower window means an extra 7 days of data become deletion candidates
-   — irreversibly, with no refusal to catch it once the archive gate is
-   `disabled`. Verify the value after ANY edit and treat a surprise `14` as
-   a stop-the-bringup event:
+   `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=30` uncommented (the code
+   default), and node-27 runs `30` too (both since 2026-11-09, #3106 — see
+   this runbook's opening policy banner), so a re-copy no longer moves the
+   window; it still overwrites the box's `DATABASE_URL`, enforce toggle and
+   any lock-path override. A narrower window means extra days of data become
+   deletion candidates — irreversibly, with no refusal to catch it once the
+   archive gate is `disabled`. Verify the value after ANY edit and treat any
+   value other than `30` as a stop-the-bringup event:
 
    ```
    grep -n NODE27_TIMESERIES_RETENTION_WINDOW_DAYS \
@@ -7780,8 +7805,8 @@ Cross-check the cutoff itself before trusting the listing: the query inherits
 the receipt's `cutoff` (= watermark − window), so a mis-set window silently
 widens every row here. Confirm the receipt's `window_days` equals the LIVE
 `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` in the env file — read it, never
-type a remembered number (§8.1 step 2 shows the grep; node-27 ran 21 d as of
-2026-08-01) — and that the receipt's `reference_time` is the display
+type a remembered number (§8.1 step 2 shows the grep; node-27 runs 30 d since
+2026-11-09, #3106) — and that the receipt's `reference_time` is the display
 watermark, not a wall clock. Note also that boundary-partial chunks are
 listed like any other candidate: nothing defers them (§8.5).
 
@@ -7987,12 +8012,13 @@ Two guardrails enforce this:
 # 1. Prime env (once per node-27, then owned by operators).
 # FIRST-TIME INSTALL ONLY — the `cp` is guarded, exactly as in §8.1 step 2.
 # On node-27 the env file ALREADY EXISTS: edit it in place, never re-copy the
-# example over it. The example ships
-# NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=14 while the box runs 21, so an
-# overwrite silently reverts the live window 21 -> 14 and turns 7 more days of
-# data into deletion candidates — irreversibly, and nothing is left that could
-# refuse the drop. Re-grep the window after ANY edit (§8.1 step 2) and treat a
-# surprise 14 as a stop-the-work event.
+# example over it. The example and the box both run
+# NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=30 since 2026-11-09 (#3106), but an
+# overwrite still clobbers the box's DATABASE_URL / enforce / lock settings,
+# and any narrower window turns more data into deletion candidates —
+# irreversibly, and nothing is left that could refuse the drop. Re-grep the
+# window after ANY edit (§8.1 step 2) and treat any value other than 30 as a
+# stop-the-work event.
 test -e /home/nwm/NWM/infra/env/node27-timeseries-retention.env \
   || cp /home/nwm/NWM/infra/env/node27-timeseries-retention.example \
         /home/nwm/NWM/infra/env/node27-timeseries-retention.env
