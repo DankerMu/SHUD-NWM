@@ -74,6 +74,10 @@ IFS_SHORTWAVE_NEGATIVE_TOLERANCE_W_M2 = _float_env("IFS_SHORTWAVE_NEGATIVE_TOLER
 # 故本值只是下限:IFS tp 实际容差 = max(本值, 前后两条记录的 GRIB 量化步长之和,mm),
 # 步长由 reader 从 GRIB packing 键推导(grib_packing.py,#3090);步长未知(netcdf4 回退、
 # 常量场、非 grid_simple 打包)时退回本值。GFS APCP 仍只用本值(覆盖其常见 1/16mm 量化噪声)。
+# 边界语义(#3109):步长已知时容差是闭区间,delta >= -tol*(1+1e-9) 记 small(噪声),只有更负
+# 才算 significant。实测 IFS 2026102300 f012 有 81 个格点 delta 恰为 -0.1220703125mm,步长
+# [0.06103515625, 0.06103515625],恰等于 -tol,原开区间把它判 warning 致整条 cycle forcing 失败。
+# 步长未知(容差即本值)及 GFS 两条路径仍用开区间:delta <= -tol 即 significant,行为不变。
 # SHUD 模型自身对 precip<0 即钳 0,故亚阈值负值与 0 等价;超阈值的负值仍标 warning 供诊断。
 PRECIP_NEGATIVE_NOISE_TOLERANCE_MM = _float_env("PRECIP_NEGATIVE_NOISE_TOLERANCE_MM", 0.1)
 
@@ -945,6 +949,26 @@ def compute_ifs_relative_humidity_values(
     return tuple(compute_ifs_relative_humidity(float(t), float(td)) for t, td in zip(temperature_c, dewpoint_c))
 
 
+# 步长已知时容差为闭区间上界,留 1e-9 相对余量吸收浮点舍入(不加绝对余量),#3109。
+_IFS_PRECIP_TOLERANCE_RELATIVE_SLACK = 1e-9
+
+
+def _split_ifs_precip_negatives(
+    deltas_mm: tuple[float, ...], tolerance_mm: float, *, step_known: bool
+) -> tuple[tuple[float, ...], tuple[float, ...]]:
+    """Split negative deltas into (small, significant); each negative lands in exactly one."""
+    if step_known:
+        bound = -tolerance_mm * (1.0 + _IFS_PRECIP_TOLERANCE_RELATIVE_SLACK)
+        return (
+            tuple(delta for delta in deltas_mm if bound <= delta < 0.0),
+            tuple(delta for delta in deltas_mm if delta < bound),
+        )
+    return (
+        tuple(delta for delta in deltas_mm if -tolerance_mm < delta < 0.0),
+        tuple(delta for delta in deltas_mm if delta <= -tolerance_mm),
+    )
+
+
 def convert_ifs_precipitation_with_metadata(
     values_m: tuple[float, ...] | list[float],
     previous_values_m: tuple[float, ...] | list[float] | None = None,
@@ -969,6 +993,7 @@ def convert_ifs_precipitation_with_metadata(
     )
     # 容差 = max(PRECIP_NEGATIVE_NOISE_TOLERANCE_MM, 前后两条 tp 的 GRIB 量化步长之和),tp 单位为 m
     # 故步长 ×1000 转 mm;步长全未知时即为下限本身,行为与 anomaly 字段均与 #3090 前逐字节一致。
+    # 步长已知时 -tol 本身算 small(闭区间,#3109),见 _split_ifs_precip_negatives。
     previous_step_mm = 1000.0 * previous_quantization_step_m if previous_quantization_step_m is not None else None
     current_step_mm = 1000.0 * quantization_step_m if quantization_step_m is not None else None
     step_known = previous_step_mm is not None or current_step_mm is not None
@@ -976,8 +1001,7 @@ def convert_ifs_precipitation_with_metadata(
     tolerance_audit: dict[str, Any] = (
         {"tolerance_mm": _tol, "quantization_step_mm": [previous_step_mm, current_step_mm]} if step_known else {}
     )
-    small_negatives = tuple(delta for delta in deltas_mm if -_tol < delta < 0.0)
-    significant_negatives = tuple(delta for delta in deltas_mm if delta <= -_tol)
+    small_negatives, significant_negatives = _split_ifs_precip_negatives(deltas_mm, _tol, step_known=step_known)
     anomalies: list[dict[str, Any]] = []
     next_consecutive_negative_count = 0
     quality_flag = "ok"

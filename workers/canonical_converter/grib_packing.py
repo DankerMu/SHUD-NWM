@@ -63,8 +63,15 @@ def negative_noise_tolerance_mm(floor_mm: float, *steps_mm: float | None) -> flo
 
     A difference of two quantised values can miss by up to ``(s_prev + s_curr) / 2``;
     the sum gives a 2x margin, so a pure one-step artefact (``delta == -step`` on
-    equal steps) stays below the ``delta <= -tolerance`` significance test. With no
-    known step the floor is returned unchanged, whatever its value.
+    equal steps) is well inside the bound. With no known step the floor is returned
+    unchanged, whatever its value.
+
+    When a step is known the caller treats the result as an inclusive bound (#3109):
+    ``delta >= -tolerance * (1 + 1e-9)`` is noise and only a more negative delta is
+    significant. IFS cycle 2026102300 f012 had 81 cells at exactly ``-0.1220703125`` mm
+    with steps ``[0.06103515625, 0.06103515625]``, i.e. ``delta == -tolerance``, which
+    the old exclusive bound flagged. With no known step the caller keeps the exclusive
+    ``delta <= -tolerance`` significance test.
     """
     known_steps = [step for step in steps_mm if step is not None]
     if not known_steps:
