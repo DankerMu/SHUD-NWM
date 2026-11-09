@@ -192,7 +192,9 @@ before that). The value that actually runs is still whatever the machine's
 env file holds: read the live value on the box before quoting a day count
 anywhere (§8.1 step 2 shows the grep). node-27's retention timer was disabled
 from the 2026-11-05 disk-swap rebuild until #3106 re-enabled it on
-2026-11-09. Compression remains earlier at 7 days. Both ages are measured from
+2026-11-09. Compression runs earlier: the live lag is
+`NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS=172800` (2 days; the 7-day value
+quoted in older sections is historical — read the live env). Both ages are measured from
 the latest forecast cycle accepted by the node-27 display catalog, not from
 the server wall clock. The historical 30/45-day receipts in the committed
 evidence tree are audit evidence only, not commands for new runs.
@@ -3761,7 +3763,11 @@ template/live drift is resolved.
    measured pair, and the `≥281 GB` onset threshold below as correspondingly
    optimistic.
 
-Measured inputs (node-27, read-only, 2026-08-14 unless noted):
+Measured inputs (node-27, read-only, 2026-08-14 unless noted). **The
+arrival-rate, per-chunk-cost and chunk-count bullets below are 2026-08-14
+measurements under the then-live 7-day chunk geometry and are historical;
+the live geometry is 1 day (see the Backlog-ceiling bullet), so do not
+reuse their 2/week arrival or 268–409 GB per-chunk figures for sizing.**
 
 - **Arrival rate = 2/week.** Both hot hypertables use a 7-day
   `chunk_time_interval` with aligned range boundaries
@@ -3784,7 +3790,10 @@ Measured inputs (node-27, read-only, 2026-08-14 unless noted):
   river is measured below). The DB retention window
   (30 days since 2026-11-09) does not enter: it is longer than the 2-day lag,
   so retention only ever drops chunks that were already compression-eligible.
-  **The bound holds only while the compression timer runs and keeps up**; on
+  **The bound holds only while the compression timer runs and keeps up**; if
+  compression stalls, the retention window becomes the only cap on
+  uncompressed stock, and the 21 → 30 day change raises that worst case by
+  about 9 chunks per hot table at 1-day geometry. On
   2026-11-09 the `10-18` river chunk was already compression-eligible but not
   yet compressed — a small backlog. Measured live 2026-11-09: **10** river
   uncompressed chunks (`10-18`..`10-27`), 1-day `chunk_time_interval` for both
