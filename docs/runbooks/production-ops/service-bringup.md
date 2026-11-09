@@ -94,9 +94,10 @@ tail -n 160 /home/nwm/autopipe-logs/autopipe.log
   （`--expired-rescan-hours` 可调），每个过期行至多每 24 h 重扫一次；JSON 报告的 `expired_cutoff`
   写明本次用的 cutoff（`null` = 未放宽）。
 - **fail-closed**：放宽只在刷新进程自己的 env 里有窗口变量、且 watermark 可读时生效。autopipe cron
-  source 的是 `infra/env/node27-ingest.env`，2026-09-23 实测它**没有**这个变量（它在
-  `node27-timeseries-retention.env`，现网值 21）——没设就与 #2504 之前完全一致。启用是部署动作：把
-  `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` 以与 retention env **相同的值**写进 `node27-ingest.env`
+  source 的是 `infra/env/node27-ingest.env`；2026-11-09 起 node-27 的 `node27-ingest.env` 已设
+  `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=30`，与 `node27-timeseries-retention.env` 相等（#3106；
+  此前 2026-09-23 实测 ingest env 没有这个变量、retention env 为 21）。没设就与 #2504 之前完全一致。
+  新部署启用是部署动作：把该变量以与 retention env **相同的值**写进 `node27-ingest.env`
   （更小的值会放开 retention 还没 drop 的那段）。
 - **部署顺序：先在 autopipe flock 之外手跑一次首轮收敛，再往 `node27-ingest.env` 写窗口变量。**
   第一次带窗口的 `--all --skip-fresh` 要把当时所有过期 populated 行各重扫一次（2026-09-23 只读审计

@@ -82,7 +82,9 @@ NHMS_DISPLAY_COVERAGE_REFRESH_STATEMENT_TIMEOUT_MS=900000
 # equal NODE27_TIMESERIES_RETENTION_WINDOW_DAYS in
 # infra/env/node27-timeseries-retention.env (the value retention actually runs):
 # a smaller value here relaxes the #1446 guard for a band whose chunks retention
-# has not dropped. Unset (the shipped default, and today's node-27 state) = no
-# relaxation at all, exactly the pre-#2504 guard; there is deliberately no
-# fallback to the code default. Setting it on node-27 is a deployment step.
+# has not dropped. Unset (the shipped default) = no relaxation at all, exactly
+# the pre-#2504 guard; there is deliberately no fallback to the code default.
+# Setting it is a deployment step: since 2026-11-09 node-27's node27-ingest.env
+# sets NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=30, equal to the retention env
+# (#3106).
 # NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=

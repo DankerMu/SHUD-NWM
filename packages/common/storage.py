@@ -33,7 +33,9 @@ class ObjectPrefixPattern:
 # sides cannot drift. It is NEVER a fallback for an unreadable window source:
 # the runner refuses those itself, and the env extractor that used to mirror
 # that refusal on this side retired with its last caller (#1395).
-DEFAULT_RETENTION_WINDOW_DAYS = 14
+# 30 days since #3106 (owner decision 2026-11-09; was 14). The committed
+# `infra/env/node27-timeseries-retention.example` ships this same value.
+DEFAULT_RETENTION_WINDOW_DAYS = 30
 
 #: The retention window's one env spelling (#2504 D6). Read by the retention
 #: runner (from `infra/env/node27-timeseries-retention.env`) and by the display

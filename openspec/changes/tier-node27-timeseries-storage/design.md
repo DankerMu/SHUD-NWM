@@ -2013,7 +2013,7 @@ Retention emits structured refusal codes; byte-identical across code (`scripts/n
 Byte-identical across code default lookup, `infra/env/node27-timeseries-retention.example`, runbook §8.1, this fixture.
 
 - `DATABASE_URL` — Postgres writer role DSN for the retention runner.
-- `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` — default `14`.
+- `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` — default `14`. *(superseded by #3106: default 30)*
 - `NODE27_TIMESERIES_RETENTION_PER_TICK_BOUND` — default `5` (matches compression sibling).
 - `NODE27_TIMESERIES_RETENTION_COMPLETENESS_RECEIPT_PATH` — absolute.
 - `NODE27_TIMESERIES_RETENTION_DRILL_RECEIPT_PATH` — absolute.

@@ -1837,9 +1837,10 @@ INGEST_ENV_EXAMPLE = REPO_ROOT / "infra" / "env" / "node27-ingest.example"
 
 def test_ingest_env_example_documents_the_retention_window_commented_out() -> None:
     """#2504 D6: the coverage refresh reads the window from the env the cron
-    sources. The template ships it COMMENTED: an active copy of a default that
-    differs from the live retention window (21 on node-27 today) would relax the
-    #1446 guard for a band whose chunks retention has not dropped."""
+    sources. The template ships it COMMENTED: an active copy of a value that
+    differs from the deployment's live retention window (node-27 sets 30 in both
+    envs since 2026-11-09, #3106) would relax the #1446 guard for a band whose
+    chunks retention has not dropped."""
     from packages.common.storage import RETENTION_WINDOW_ENV
 
     text = INGEST_ENV_EXAMPLE.read_text(encoding="utf-8")

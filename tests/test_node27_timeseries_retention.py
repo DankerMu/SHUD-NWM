@@ -483,7 +483,7 @@ def _base_env(tmp_path: Path, **overrides: str | None) -> dict[str, str]:
 def test_config_parse_happy_path(tmp_path: Path) -> None:
     env = _base_env(tmp_path)
     config = retention.config_from_args(_args(), env)
-    assert config.window_days == 14
+    assert config.window_days == 30
     assert config.per_tick_bound == 5
     assert config.archive_gate == "disabled"
     assert config.enforce is False
@@ -502,13 +502,27 @@ def test_window_default_is_drift_locked_to_the_shared_constant() -> None:
     equality with the shared constant in `packages.common.storage`.
 
     Honest limit (#1229 round-1 review B4): `is` cannot prove import identity
-    for 14, which CPython interns as a small int, so the identity assertion
-    below degenerates to value equality and a re-hardcoded local copy would
-    still pass. The real protection is directional: changing the shared
-    constant while this runner keeps a hardcoded literal turns this test red.
+    for 30 (the default since #3106; 14 before it), which CPython interns as a
+    small int, so the identity assertion below degenerates to value equality
+    and a re-hardcoded local copy would still pass. The real protection is
+    directional: changing the shared constant while this runner keeps a
+    hardcoded literal turns this test red.
     """
     assert retention._DEFAULT_WINDOW_DAYS is DEFAULT_RETENTION_WINDOW_DAYS
-    assert DEFAULT_RETENTION_WINDOW_DAYS == 14
+    assert DEFAULT_RETENTION_WINDOW_DAYS == 30
+
+
+def test_env_example_window_equals_the_shared_default() -> None:
+    """#3106: the committed template ships exactly one UNCOMMENTED window
+    assignment and its value is the shared default, so re-copying the template
+    onto a box running the policy value cannot silently narrow the window.
+    """
+    text = _ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
+    values = re.findall(
+        r"^NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=(.*)$", text, flags=re.MULTILINE
+    )
+    assert len(values) == 1, values
+    assert int(values[0]) == DEFAULT_RETENTION_WINDOW_DAYS
 
 
 @pytest.mark.parametrize(
@@ -524,7 +538,7 @@ def test_window_resolution_for_missing_or_empty_env_is_unchanged(
     """#1227 row (j): moving the default constant's home changed no runner behavior."""
     config = retention.config_from_args(_args(), _base_env(tmp_path, **override))
 
-    assert config.window_days == 14
+    assert config.window_days == 30
 
 
 def test_config_enforce_env_toggles(tmp_path: Path) -> None:
