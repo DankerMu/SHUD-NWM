@@ -15,15 +15,15 @@ Must preserve: 无步长路径和 GFS 路径的 anomaly dict 与 flag 逐字节�
   - 无步长时 delta 恰为 −0.1（等于 floor）仍判 significant。
 
 ## 2. 上线与恢复（合并后）
-- [ ] 2.1 node-22 ff-only pull（禁止 `uv sync` 和裸 `uv run`）
-- [ ] 2.2 实测前置状态（2026-11-09）：
+- [x] 2.1 node-22 ff-only pull（禁止 `uv sync` 和裸 `uv run`）
+- [x] 2.2 实测前置状态（2026-11-09）：
   - forcing 行（两个 cohort master：`cycle_ifs_2026102300_convert_dg_8a34ed2ba8f8dd22f2716405569628a9`、`cycle_ifs_2026102300_convert_cohort_71f624007af5`）已是 `permanently_failed`、`retry_count=3`，自然 pass 不会再碰它们；
   - raw `raw/IFS/2026102300/` 仍在（53 个 grib，带 manifest）。
 
   按 `docs/runbooks/node22-control-plane-manual-recovery.md` 的 "permanent_failure" 一节处理。失败在 forcing 阶段时，marker 会从 convert 重跑整条链。步骤：
   - (a) **不 mv canonical**：marker 会从 convert 整链重跑，converter 发现 checksum 变化后会原子重写 f012 和 catalog（`converter.py:1943-1963`、`:1423-1457`）；mv 反而会把恢复引到要求 raw manifest 的零行分支，多一个阻塞点；
   - (b) `scripts/node22_manual_retry_failed_runs.py` 先不带 `--execute` 预览两个 run id，确认 restart 从 convert 开始，再加 `--execute`；下一个 pass 里，该候选的 `state_evidence` 应为 `manual_retry_requested`，且从 convert 重启，不是 blocked。
-- [ ] 2.3 下一个 pass 重跑后：
+- [x] 2.3 下一个 pass 重跑后：
   - catalog 中 f012 为 `ok`，anomaly 是 small 并带审计字段；
   - IFS forcing 成功（sacct）；
   - IFS forecast 完成；
@@ -33,3 +33,8 @@ Must preserve: 无步长路径和 GFS 路径的 anomaly dict 与 flag 逐字节�
 - `uv run pytest -q tests/test_ifs_canonical.py tests/test_grib_packing_reader.py tests/test_canonical_converter.py`，加上 selector 选出的测试集
 - `uv run ruff check .`
 - 2.3 的线上证据贴到 #3109
+
+## 偏离记录（2026-11-09 上线）
+- 2.2 的 marker 不够用：下一个 pass 在 canonical readiness 就拦下了该 cycle（`missing_canonical_leads`，因为 catalog 仍记着旧的 f012 flag），没走到 manual-retry 分支。实际改为单独提交一个 Slurm 作业重跑 converter（作业 133327，需要在计算节点设好 `NHMS_GRIB_ENV_ROOT` 下的 `PATH` / `LD_LIBRARY_PATH`）。
+- canonical 就绪后 forecast 候选被拦为 `forcing_version_row_absent`，改用 exact-cycle missing-forcing repair（`node22-run-cycle-once.sh --source IFS --repair-missing-forcing`）补出 forcing。执行时需要先停 scheduler timer 并等 pass 结束，还要加载 `secrets/slurm-gateway.env`。
+- 线上证据：#3109 issuecomment-6752477749。

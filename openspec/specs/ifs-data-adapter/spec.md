@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change m4-ifs-multi-source. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: IFS 数据源注册
 
 系统 SHALL 满足「IFS 数据源注册」要求。
@@ -209,7 +211,7 @@ THEN RH = exp(17.625×10/253.04) / exp(17.625×20/263.04) ≈ 0.525（容差 1e-
 
 WHEN 处理 IFS `tp`（总降水，累积，单位 m）
 THEN 执行累积差分得到步长降水量，单位从 m 转为 mm（× 1000），再按实际步长换算为 mm/day（× 24 / step_hours）
-AND 负差分处理按 canonical-conversion「IFS precipitation de-accumulation tolerance follows GRIB quantisation」：|Δ| < max(PRECIP_NEGATIVE_NOISE_TOLERANCE_MM, 前后两条 GRIB 量化步长之和) → 0（quality_flag=ok）；达到该容差 → 0（quality_flag=warning_negative_precip）；≥3 连续负值 → error_precip_accumulation
+AND 负差分处理按 canonical-conversion「IFS precipitation de-accumulation tolerance follows GRIB quantisation」：噪声界与比较方向（含步长已知时的闭区间边界，#3109）以该 requirement 为准；小于等于噪声界的负差分 → 0（quality_flag=ok）；超出噪声界 → 0（quality_flag=warning_negative_precip）；≥3 连续负值 → error_precip_accumulation
 AND `lineage_json` 记录 `{"accumulation_type": "since_cycle", "unit_conversion": "m_to_mm_day", "step_hours": 3}`
 
 #### Scenario: 降水转换数值验证
@@ -243,8 +245,6 @@ THEN 每个 (variable, forecast_hour) 组合在 `met.canonical_met_product` 中�
 AND `source_id` = `"IFS"`，`grid_id` = `"ifs_0p25"`
 AND `met.forecast_cycle` status 更新为 `"canonical_ready"`
 
----
-
 ### Requirement: IFS CLI 入口
 
 系统 SHALL 满足「IFS CLI 入口」要求。
@@ -262,4 +262,3 @@ AND 成功后 forecast_cycle status = `"raw_complete"`
 WHEN 执行 `nhms-canonical convert --source-id IFS --cycle-time 2026050100`
 THEN 加载 IFS manifest，执行 canonical 转换
 AND 成功后 forecast_cycle status = `"canonical_ready"`
-
