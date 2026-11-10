@@ -31,10 +31,18 @@ Must preserve：见 design.md（CLI、参数顺序、repair flag 语义、stdout
   - `stuck-detection.md` 约 :217-221 的 `timer_stopped` 处置：照 `recalibration-and-archive.md:243` 的先例，写明"wrapper 持有 timer 期间报 `timer_stopped` 属预期，start 之前先确认没有 wrapper 在跑（`pgrep -f node22-run-cycle-once`）"。
 
 ## 2. 上线（合并后）
-- [ ] 2.1 node-22 先查 `git status --porcelain`，再 `git pull --ff-only`（禁止 `uv sync`、裸 `uv run`）
-- [ ] 2.2 对一个已完成的 cycle 实跑 `--plan`。日志应依次出现 `timer_stopped` → `service_inactive` → `timer_restored`；状态不是 `lock_contended`；跑完后 timer 为 active。日志贴到 #3113
+- [x] 2.1 node-22 先查 `git status --porcelain`，再 `git pull --ff-only`（禁止 `uv sync`、裸 `uv run`）
+- [x] 2.2 对一个已完成的 cycle 实跑 `--plan`。日志应依次出现 `timer_stopped` → `service_inactive` → `timer_restored`；状态不是 `lock_contended`；跑完后 timer 为 active。日志贴到 #3113
 
 ## Evidence Floor
 - `uv run pytest -q tests/test_production_scheduler.py -k node22_exact_cycle_wrapper`，加上 selector 选出的测试集
 - `uv run ruff check .`
 - 2.2 的 node-22 日志
+
+## 上线记录（2026-11-10）
+- 2.1：node-22 部署到 `887914edb`。
+- 2.2：线上 `--plan`（cycle 2026-10-24T00）：
+  - 事件依次为 `timer_stopped`（17:42:28Z）→ `service_inactive waited=9445` → `timer_restored`（20:33:08Z）；
+  - plan 结果为 `planned` / `planning_only`，没有 `lock_contended`；
+  - 结束后 timer 为 active。
+- 证据：#3113 issuecomment-6779267938。
