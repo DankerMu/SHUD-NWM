@@ -11,9 +11,11 @@ import os
 import pwd
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -14941,6 +14943,7 @@ def test_node22_exact_cycle_wrapper_scopes_missing_forcing_repair_to_explicit_fl
         "NHMS_NODE22_REPO": str(fake_repo),
         "NHMS_NODE22_SCHEDULER_ENV": str(env_file),
         "CAPTURE": str(capture),
+        **_node22_wrapper_inactive_timer_env(tmp_path),
     }
     script = Path(__file__).parents[1] / "scripts/ops/node22-run-cycle-once.sh"
 
@@ -15032,12 +15035,17 @@ def test_node22_exact_cycle_wrapper_repair_runs_authority_preflight_without_db_f
     env_file = tmp_path / "scheduler.env"
     env_file.write_text("\n".join(env_lines) + "\n", encoding="utf-8")
     script = Path(__file__).parents[1] / "scripts/ops/node22-run-cycle-once.sh"
+    secret_file = tmp_path / "slurm-gateway.env"
+    if mode == "--submit":
+        secret_file.write_text("SLURM_GATEWAY_SERVICE_TOKEN=wrapper-test-token\n", encoding="utf-8")
     env = {
         **os.environ,
         "NHMS_NODE22_REPO": str(fake_repo),
         "NHMS_NODE22_SCHEDULER_ENV": str(env_file),
         "NHMS_TEST_REAL_PYTHON": sys.executable,
         "PYTHONPATH": str(Path(__file__).parents[1]),
+        **_node22_wrapper_inactive_timer_env(tmp_path),
+        "NHMS_NODE22_GATEWAY_SECRET_ENV": str(secret_file),
     }
 
     completed = subprocess.run(
@@ -15068,6 +15076,515 @@ def test_node22_exact_cycle_wrapper_repair_runs_authority_preflight_without_db_f
     assert "alternate-ready-object-store" not in rendered
     assert "alternate-ready-object-store" not in completed.stdout
     assert "/ghdc/data/nwm/object-store" not in rendered
+
+
+_NODE22_WRAPPER = Path(__file__).parents[1] / "scripts/ops/node22-run-cycle-once.sh"
+_NODE22_DROPIN_DIR = Path(__file__).parents[1] / "infra/systemd/node22/nhms-compute-scheduler.service.d"
+_NODE22_TIMER = "nhms-compute-scheduler.timer"
+_NODE22_SERVICE = "nhms-compute-scheduler.service"
+_NODE22_PY_OUTPUT = '{"status": "fake-python"}\n'
+
+# Fake systemctl: records every call, answers `is-active` from per-unit state
+# sequences (the last line is sticky) and mimics real exit codes: only
+# active/reloading return 0, every other state returns 3, and `!fail` means
+# "exit 1 with no output" (the undeterminable case).
+_FAKE_NODE22_SYSTEMCTL = r"""#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FAKE_SYSTEMCTL_DIR/calls"
+answer() {
+  case "$1" in
+    '!fail') exit 1 ;;
+    active|reloading) printf '%s\n' "$1"; exit 0 ;;
+    *) printf '%s\n' "$1"; exit 3 ;;
+  esac
+}
+next_state() {
+  first="$(head -n 1 "$1")"
+  if [ "$(( $(wc -l < "$1") ))" -gt 1 ]; then
+    tail -n +2 "$1" > "$1.next"
+    mv "$1.next" "$1"
+  fi
+  printf '%s' "$first"
+}
+case "${1:-}" in
+  is-active)
+    case "${2:-}" in
+      *.timer) answer "$(next_state "$FAKE_SYSTEMCTL_DIR/timer.states")" ;;
+      *.service)
+        state="$(next_state "$FAKE_SYSTEMCTL_DIR/service.states")"
+        touch "$FAKE_SYSTEMCTL_DIR/service.polled"
+        answer "$state"
+        ;;
+    esac
+    ;;
+  stop) exit "$(cat "$FAKE_SYSTEMCTL_DIR/stop.rc")" ;;
+  start) exit "$(cat "$FAKE_SYSTEMCTL_DIR/start.rc")" ;;
+esac
+exit 64
+"""
+
+# Fake python: snapshots what it can see, writes its pid last (readiness
+# marker), then either exits with the configured code or `exec sleep`s so a
+# signal reaches the process whose pid was recorded.
+_FAKE_NODE22_PYTHON = r"""#!/usr/bin/env bash
+printf '%s\n' "$@" > "$FAKE_PY_DIR/argv"
+printf '%s\n' "${SLURM_GATEWAY_SERVICE_TOKEN-<unset>}" > "$FAKE_PY_DIR/token"
+printf '%s\n' "${NHMS_PYTHON_VENV_BIN-<unset>}" > "$FAKE_PY_DIR/venv_bin"
+cat "$FAKE_SYSTEMCTL_DIR/calls" > "$FAKE_PY_DIR/systemctl_calls_at_start" 2>/dev/null || true
+printf '%s\n' "$$" > "$FAKE_PY_DIR/pid.tmp"
+mv "$FAKE_PY_DIR/pid.tmp" "$FAKE_PY_DIR/pid"
+if [ "$(cat "$FAKE_PY_DIR/mode")" = sleep ]; then
+  exec sleep 60
+fi
+printf '{"status": "fake-python"}\n'
+exit "$(cat "$FAKE_PY_DIR/rc")"
+"""
+
+
+def _write_fake_node22_systemctl(
+    root: Path,
+    *,
+    timer_states: Sequence[str],
+    service_states: Sequence[str] = ("inactive",),
+    stop_rc: int = 0,
+    start_rc: int = 0,
+) -> dict[str, str]:
+    root.mkdir(parents=True)
+    fake = root / "systemctl"
+    fake.write_text(_FAKE_NODE22_SYSTEMCTL, encoding="utf-8")
+    fake.chmod(0o755)
+    (root / "timer.states").write_text("".join(f"{state}\n" for state in timer_states), encoding="utf-8")
+    (root / "service.states").write_text("".join(f"{state}\n" for state in service_states), encoding="utf-8")
+    (root / "stop.rc").write_text(f"{stop_rc}\n", encoding="utf-8")
+    (root / "start.rc").write_text(f"{start_rc}\n", encoding="utf-8")
+    return {"NHMS_NODE22_SYSTEMCTL": str(fake), "FAKE_SYSTEMCTL_DIR": str(root)}
+
+
+def _node22_wrapper_inactive_timer_env(tmp_path: Path) -> dict[str, str]:
+    """Hermetic env for the legacy wrapper tests: timer inactive, no secret file."""
+    return {
+        **_write_fake_node22_systemctl(tmp_path / "fake-systemctl", timer_states=("inactive",)),
+        "NHMS_NODE22_GATEWAY_SECRET_ENV": str(tmp_path / "absent-slurm-gateway.env"),
+    }
+
+
+@dataclass(frozen=True)
+class _Node22WrapperHarness:
+    repo: Path
+    env: dict[str, str]
+    systemctl_dir: Path
+    py_dir: Path
+
+    def systemctl_calls(self) -> list[str]:
+        calls = self.systemctl_dir / "calls"
+        return calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []
+
+    def systemctl_calls_at_python_start(self) -> list[str]:
+        return (self.py_dir / "systemctl_calls_at_start").read_text(encoding="utf-8").splitlines()
+
+    def python_ran(self) -> bool:
+        return (self.py_dir / "pid").exists()
+
+    def python_pid(self) -> int:
+        return int((self.py_dir / "pid").read_text(encoding="utf-8"))
+
+    def python_saw(self, name: str) -> str:
+        return (self.py_dir / name).read_text(encoding="utf-8").strip()
+
+
+def _node22_wrapper_harness(
+    tmp_path: Path,
+    *,
+    timer_states: Sequence[str] = ("active",),
+    service_states: Sequence[str] = ("inactive",),
+    stop_rc: int = 0,
+    start_rc: int = 0,
+    python_mode: str = "exit",
+    python_rc: int = 0,
+    secret: str | None = "SLURM_GATEWAY_SERVICE_TOKEN=wrapper-test-token\n",
+    wait_seconds: int = 30,
+) -> _Node22WrapperHarness:
+    repo = tmp_path / "node22-repo"
+    fake_python = repo / ".venv/bin/python"
+    fake_python.parent.mkdir(parents=True)
+    fake_python.write_text(_FAKE_NODE22_PYTHON, encoding="utf-8")
+    fake_python.chmod(0o755)
+    py_dir = tmp_path / "fake-python"
+    py_dir.mkdir()
+    (py_dir / "mode").write_text(f"{python_mode}\n", encoding="utf-8")
+    (py_dir / "rc").write_text(f"{python_rc}\n", encoding="utf-8")
+    env_file = tmp_path / "scheduler.env"
+    env_file.write_text("NHMS_TEST_SCHEDULER_ENV_LOADED=1\n", encoding="utf-8")
+    secret_file = tmp_path / "slurm-gateway.env"
+    if secret is not None:
+        secret_file.write_text(secret, encoding="utf-8")
+    systemctl_dir = tmp_path / "fake-systemctl"
+    inherited = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"NHMS_PYTHON_VENV_BIN", "SLURM_GATEWAY_SERVICE_TOKEN"} and not key.startswith("NHMS_NODE22_")
+    }
+    env = {
+        **inherited,
+        "NHMS_NODE22_REPO": str(repo),
+        "NHMS_NODE22_SCHEDULER_ENV": str(env_file),
+        "NHMS_NODE22_GATEWAY_SECRET_ENV": str(secret_file),
+        "NHMS_NODE22_TIMER_WAIT_SECONDS": str(wait_seconds),
+        "NHMS_NODE22_TIMER_POLL_SECONDS": "0.1",
+        "FAKE_PY_DIR": str(py_dir),
+        **_write_fake_node22_systemctl(
+            systemctl_dir,
+            timer_states=timer_states,
+            service_states=service_states,
+            stop_rc=stop_rc,
+            start_rc=start_rc,
+        ),
+    }
+    return _Node22WrapperHarness(repo=repo, env=env, systemctl_dir=systemctl_dir, py_dir=py_dir)
+
+
+def _node22_wrapper_command(*args: str, xtrace: bool = False) -> list[str]:
+    return ["bash", *(["-x"] if xtrace else []), str(_NODE22_WRAPPER), "--cycle-time", "2026-05-21T06:00:00Z", *args]
+
+
+def _default_signal_dispositions() -> None:
+    # bash cannot trap a signal that was already ignored on entry (pytest run under
+    # nohup or as a background job), so the child starts from default dispositions.
+    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, signal.SIG_DFL)
+
+
+def _run_node22_wrapper(
+    harness: _Node22WrapperHarness, *args: str, xtrace: bool = False
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        _node22_wrapper_command(*args, xtrace=xtrace),
+        check=False,
+        capture_output=True,
+        text=True,
+        env=harness.env,
+        timeout=60,
+    )
+
+
+def _signal_node22_wrapper(
+    harness: _Node22WrapperHarness,
+    signum: signal.Signals,
+    *,
+    ready: Path,
+    close_stderr: bool = False,
+) -> tuple[int, str, str]:
+    command = _node22_wrapper_command("--plan")
+    if close_stderr:
+        # exec keeps the wrapper's pid; the wrapper itself starts with fd 2 closed.
+        command = ["bash", "-c", 'exec 2>&-; exec bash "$0" "$@"', *command[1:]]
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=harness.env,
+        start_new_session=True,
+        preexec_fn=_default_signal_dispositions,
+    )
+    try:
+        deadline = time.monotonic() + 30
+        while not ready.exists():
+            if process.poll() is not None:
+                stdout, stderr = process.communicate()
+                pytest.fail(f"wrapper exited {process.returncode} before readiness: {stdout!r} {stderr!r}")
+            if time.monotonic() > deadline:
+                pytest.fail(f"readiness marker never appeared: {ready}")
+            time.sleep(0.05)
+        process.send_signal(signum)
+        stdout, stderr = process.communicate(timeout=30)
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+    return process.returncode, stdout, stderr
+
+
+def _assert_pid_gone(pid: int) -> None:
+    deadline = time.monotonic() + 5
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        if time.monotonic() > deadline:
+            os.kill(pid, signal.SIGKILL)
+            pytest.fail(f"fake python pid {pid} survived the wrapper")
+        time.sleep(0.05)
+
+
+def test_node22_exact_cycle_wrapper_pauses_active_timer_until_service_inactive(tmp_path: Path) -> None:
+    harness = _node22_wrapper_harness(
+        tmp_path,
+        timer_states=("active",),
+        service_states=("activating", "inactive"),
+    )
+
+    completed = _run_node22_wrapper(harness, "--plan")
+
+    assert completed.returncode == 0, completed.stderr
+    before_python = [
+        f"is-active {_NODE22_TIMER}",
+        f"stop {_NODE22_TIMER}",
+        f"is-active {_NODE22_SERVICE}",
+        f"is-active {_NODE22_SERVICE}",
+    ]
+    assert harness.systemctl_calls_at_python_start() == before_python
+    assert harness.systemctl_calls() == [*before_python, f"start {_NODE22_TIMER}"]
+    assert completed.stdout == _NODE22_PY_OUTPUT
+    events = [
+        line.split(" ", 3)[2] for line in completed.stderr.splitlines() if line.startswith("node22-run-cycle-once: ")
+    ]
+    assert events == ["timer_stopped", "service_inactive", "timer_restored"]
+    assert harness.python_saw("argv").splitlines() == [
+        "-m",
+        "services.orchestrator.cli",
+        "plan-production",
+        "--cycle-time",
+        "2026-05-21T06:00:00Z",
+        "--disable-backfill",
+        "--plan",
+    ]
+
+
+@pytest.mark.parametrize("timer_state", ["inactive", "failed", "unknown"])
+def test_node22_exact_cycle_wrapper_leaves_inactive_timer_untouched(tmp_path: Path, timer_state: str) -> None:
+    harness = _node22_wrapper_harness(tmp_path, timer_states=(timer_state,))
+
+    completed = _run_node22_wrapper(harness, "--submit")
+
+    assert completed.returncode == 0, completed.stderr
+    assert harness.systemctl_calls() == [f"is-active {_NODE22_TIMER}"]
+    assert harness.python_ran()
+    assert completed.stdout == _NODE22_PY_OUTPUT
+    assert "timer_left_inactive" in completed.stderr
+    assert "timer_restored" not in completed.stderr
+
+
+def test_node22_exact_cycle_wrapper_wait_timeout_restores_timer_without_running_python(tmp_path: Path) -> None:
+    harness = _node22_wrapper_harness(tmp_path, service_states=("activating",), wait_seconds=1)
+
+    completed = _run_node22_wrapper(harness, "--plan")
+
+    assert completed.returncode == 3, completed.stderr
+    assert "timer_wait_timeout" in completed.stderr
+    assert not harness.python_ran()
+    calls = harness.systemctl_calls()
+    assert calls[:2] == [f"is-active {_NODE22_TIMER}", f"stop {_NODE22_TIMER}"]
+    assert calls[-1] == f"start {_NODE22_TIMER}"
+    assert calls.count(f"start {_NODE22_TIMER}") == 1
+    assert completed.stdout == ""
+
+
+def test_node22_exact_cycle_wrapper_propagates_python_exit_code_after_restoring_timer(tmp_path: Path) -> None:
+    harness = _node22_wrapper_harness(tmp_path, python_rc=7)
+
+    completed = _run_node22_wrapper(harness, "--plan")
+
+    assert completed.returncode == 7, completed.stderr
+    assert harness.systemctl_calls()[-1] == f"start {_NODE22_TIMER}"
+    assert harness.systemctl_calls().count(f"start {_NODE22_TIMER}") == 1
+    assert completed.stdout == _NODE22_PY_OUTPUT
+
+
+@pytest.mark.parametrize(
+    ("python_rc", "expected_rc"),
+    [(0, 4), (7, 7)],
+    ids=("python-ok-becomes-4", "python-failure-kept"),
+)
+def test_node22_exact_cycle_wrapper_reports_failed_timer_restore(
+    tmp_path: Path, python_rc: int, expected_rc: int
+) -> None:
+    harness = _node22_wrapper_harness(tmp_path, python_rc=python_rc, start_rc=1)
+
+    completed = _run_node22_wrapper(harness, "--plan")
+
+    assert completed.returncode == expected_rc, completed.stderr
+    assert "timer_restore_failed" in completed.stderr
+    assert "systemctl --user start nhms-compute-scheduler.timer" in completed.stderr
+    assert harness.systemctl_calls().count(f"start {_NODE22_TIMER}") == 1
+    assert completed.stdout == _NODE22_PY_OUTPUT
+
+
+@pytest.mark.parametrize(
+    ("signum", "expected_rc"),
+    [(signal.SIGTERM, 143), (signal.SIGINT, 130)],
+    ids=("term", "int"),
+)
+def test_node22_exact_cycle_wrapper_forwards_signal_to_python_and_restores_timer(
+    tmp_path: Path, signum: signal.Signals, expected_rc: int
+) -> None:
+    harness = _node22_wrapper_harness(tmp_path, python_mode="sleep")
+
+    returncode, stdout, stderr = _signal_node22_wrapper(harness, signum, ready=harness.py_dir / "pid")
+
+    assert returncode == expected_rc, stderr
+    _assert_pid_gone(harness.python_pid())
+    assert harness.systemctl_calls()[-1] == f"start {_NODE22_TIMER}"
+    assert harness.systemctl_calls().count(f"start {_NODE22_TIMER}") == 1
+    assert "timer_restored" in stderr
+    assert stdout == ""
+
+
+def test_node22_exact_cycle_wrapper_hup_with_closed_stderr_still_restores_timer(tmp_path: Path) -> None:
+    harness = _node22_wrapper_harness(tmp_path, python_mode="sleep")
+
+    returncode, stdout, stderr = _signal_node22_wrapper(
+        harness, signal.SIGHUP, ready=harness.py_dir / "pid", close_stderr=True
+    )
+
+    assert returncode == 129
+    _assert_pid_gone(harness.python_pid())
+    assert harness.systemctl_calls()[-1] == f"start {_NODE22_TIMER}"
+    assert harness.systemctl_calls().count(f"start {_NODE22_TIMER}") == 1
+    assert "node22-run-cycle-once:" not in stderr
+    assert stdout == ""
+
+
+@pytest.mark.parametrize(
+    ("signum", "expected_rc"),
+    [(signal.SIGINT, 130), (signal.SIGTERM, 143)],
+    ids=("int", "term"),
+)
+def test_node22_exact_cycle_wrapper_signal_while_waiting_restores_timer_without_python(
+    tmp_path: Path, signum: signal.Signals, expected_rc: int
+) -> None:
+    harness = _node22_wrapper_harness(tmp_path, service_states=("activating",), wait_seconds=600)
+
+    returncode, stdout, stderr = _signal_node22_wrapper(harness, signum, ready=harness.systemctl_dir / "service.polled")
+
+    assert returncode == expected_rc, stderr
+    assert not harness.python_ran()
+    assert harness.systemctl_calls()[-1] == f"start {_NODE22_TIMER}"
+    assert harness.systemctl_calls().count(f"start {_NODE22_TIMER}") == 1
+    assert stdout == ""
+
+
+def test_node22_exact_cycle_wrapper_undeterminable_service_state_fails_closed(tmp_path: Path) -> None:
+    harness = _node22_wrapper_harness(tmp_path, service_states=("activating", "!fail"))
+
+    completed = _run_node22_wrapper(harness, "--plan")
+
+    assert completed.returncode == 2, completed.stderr
+    assert "service_state_undeterminable" in completed.stderr
+    assert not harness.python_ran()
+    assert harness.systemctl_calls() == [
+        f"is-active {_NODE22_TIMER}",
+        f"stop {_NODE22_TIMER}",
+        f"is-active {_NODE22_SERVICE}",
+        f"is-active {_NODE22_SERVICE}",
+        f"start {_NODE22_TIMER}",
+    ]
+
+
+def test_node22_exact_cycle_wrapper_timer_stop_failure_fails_closed(tmp_path: Path) -> None:
+    harness = _node22_wrapper_harness(tmp_path, stop_rc=1)
+
+    completed = _run_node22_wrapper(harness, "--plan")
+
+    assert completed.returncode == 2, completed.stderr
+    assert "timer_stop_failed rc=1" in completed.stderr
+    assert not harness.python_ran()
+    assert harness.systemctl_calls() == [
+        f"is-active {_NODE22_TIMER}",
+        f"stop {_NODE22_TIMER}",
+        f"start {_NODE22_TIMER}",
+    ]
+
+
+def test_node22_exact_cycle_wrapper_undeterminable_timer_state_fails_closed(tmp_path: Path) -> None:
+    harness = _node22_wrapper_harness(tmp_path, timer_states=("!fail",))
+
+    completed = _run_node22_wrapper(harness, "--plan")
+
+    assert completed.returncode == 2, completed.stderr
+    assert "timer_state_undeterminable" in completed.stderr
+    assert not harness.python_ran()
+    assert harness.systemctl_calls() == [f"is-active {_NODE22_TIMER}"]
+
+
+@pytest.mark.parametrize("secret_problem", ["missing", "unreadable", "malformed"])
+def test_node22_exact_cycle_wrapper_submit_refuses_unusable_gateway_secret(tmp_path: Path, secret_problem: str) -> None:
+    secret = None if secret_problem == "missing" else "SLURM_GATEWAY_SERVICE_TOKEN=sentinel-xyz\n"
+    if secret_problem == "malformed":
+        secret = "sentinel-xyz\n"
+    harness = _node22_wrapper_harness(tmp_path, secret=secret)
+    secret_path = Path(harness.env["NHMS_NODE22_GATEWAY_SECRET_ENV"])
+    if secret_problem == "unreadable":
+        if os.geteuid() == 0:
+            pytest.skip("root can read a mode-000 file")
+        secret_path.chmod(0)
+
+    completed = _run_node22_wrapper(harness, "--submit")
+
+    assert completed.returncode == 2, completed.stderr
+    assert str(secret_path) in completed.stderr
+    assert "sentinel-xyz" not in completed.stderr + completed.stdout
+    assert harness.systemctl_calls() == []
+    assert not harness.python_ran()
+    assert completed.stdout == ""
+
+
+def test_node22_exact_cycle_wrapper_plan_warns_on_missing_gateway_secret(tmp_path: Path) -> None:
+    harness = _node22_wrapper_harness(tmp_path, timer_states=("inactive",), secret=None)
+
+    completed = _run_node22_wrapper(harness, "--plan")
+
+    assert completed.returncode == 0, completed.stderr
+    assert "gateway_secret_env_unavailable" in completed.stderr
+    assert harness.env["NHMS_NODE22_GATEWAY_SECRET_ENV"] in completed.stderr
+    assert harness.python_ran()
+    assert harness.python_saw("token") == "<unset>"
+    assert completed.stdout == _NODE22_PY_OUTPUT
+
+
+@pytest.mark.parametrize("xtrace", [False, True], ids=("plain", "xtrace"))
+def test_node22_exact_cycle_wrapper_loads_gateway_secret_without_leaking_it(tmp_path: Path, xtrace: bool) -> None:
+    harness = _node22_wrapper_harness(
+        tmp_path,
+        timer_states=("inactive",),
+        secret="SLURM_GATEWAY_SERVICE_TOKEN=sentinel-xyz\n",
+    )
+
+    completed = _run_node22_wrapper(harness, "--submit", xtrace=xtrace)
+
+    assert completed.returncode == 0, completed.stderr
+    assert harness.python_saw("token") == "sentinel-xyz"
+    assert harness.python_saw("venv_bin") == f"{harness.repo}/.venv/bin"
+    assert "sentinel-xyz" not in completed.stdout
+    assert "sentinel-xyz" not in completed.stderr
+    assert completed.stdout == _NODE22_PY_OUTPUT
+
+
+def test_node22_exact_cycle_wrapper_defaults_match_tracked_systemd_dropins() -> None:
+    script = _NODE22_WRAPPER.read_text(encoding="utf-8")
+
+    def wrapper_default(name: str) -> str:
+        match = re.search(rf'\$\{{{name}:-([^}}"]+)\}}', script)
+        assert match is not None, name
+        return match.group(1)
+
+    environment_files = [
+        line.split("=", 1)[1]
+        for line in (_NODE22_DROPIN_DIR / "10-slurm-gateway-token.conf").read_text(encoding="utf-8").splitlines()
+        if line.startswith("EnvironmentFile=") and line.split("=", 1)[1]
+    ]
+    assert len(environment_files) == 2
+    repo_default = wrapper_default("NHMS_NODE22_REPO")
+    assert wrapper_default("NHMS_NODE22_SCHEDULER_ENV").replace("$REPO", repo_default) == environment_files[0]
+    assert wrapper_default("NHMS_NODE22_GATEWAY_SECRET_ENV") == environment_files[1]
+    assert wrapper_default("NHMS_NODE22_SYSTEMCTL") == "systemctl --user"
+    assert wrapper_default("NHMS_NODE22_SCHEDULER_TIMER") == _NODE22_TIMER
+    assert wrapper_default("NHMS_NODE22_SCHEDULER_SERVICE") == _NODE22_SERVICE
+
+    runtime_path = (_NODE22_DROPIN_DIR / "20-runtime-path.conf").read_text(encoding="utf-8")
+    venv_match = re.search(r"^Environment=NHMS_PYTHON_VENV_BIN=(\S+)$", runtime_path, re.MULTILINE)
+    assert venv_match is not None
+    assert wrapper_default("NHMS_PYTHON_VENV_BIN").replace("$REPO", repo_default) == venv_match.group(1)
 
 
 def test_exact_cycle_missing_forcing_repair_plan_previews_forcing_array_without_submission(

@@ -220,7 +220,13 @@ unit 仍退出 0，只是 `UnitFileState` 为空）：按下面第 2 档的恢�
 lane 现在不会再触发。合取项是**保守**写法，不是「timer 在飞时会 inactive」——
 实测 timer 在整趟 pass 期间**始终 `active`**（`SubState` 在 `running`/`waiting`
 间摆），`list-timers` 的 NEXT 显示 `-` 只是 active 期间不计 realtime next elapse。
-处置：查 journal 里 timer 最后一次状态跃迁，再按 §3.1 恢复。
+exact-cycle wrapper（`scripts/ops/node22-run-cycle-once.sh`）持有 timer 期间报
+`timer_stopped` 属预期：它会暂停 timer、等 pass 结束、跑完再自己恢复 timer（见
+[`known-issues-pipeline.md`](known-issues-pipeline.md#85-node-22-scheduler-stuck-after-missing-forcing-artifact)
+的 exact-cycle wrapper 说明）。
+处置：start 之前先确认没有 wrapper 在跑（`pgrep -f node22-run-cycle-once`）——有就等它
+退出，不要手工 start；没有 wrapper 在跑时，查 journal 里 timer 最后一次状态跃迁，再按
+§3.1 恢复（wrapper 被 SIGKILL/OOM 打断后 timer 会一直停着，也走这条）。
 
 ##### stall-scheduler-service-failed
 
