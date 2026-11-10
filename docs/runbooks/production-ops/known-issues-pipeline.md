@@ -153,6 +153,71 @@ Safe online mitigation:
 4. Restart scheduler from the latest merged code, not by hand-editing journal
    rows as a normal operating path.
 
+Exact-cycle wrapper runtime (`scripts/ops/node22-run-cycle-once.sh`, #3113).
+The wrapper serializes itself with the scheduler timer and loads the same
+environment as `nhms-compute-scheduler.service`; every exact-cycle invocation
+in this runbook and its siblings relies on this:
+
+- Environment: the scheduler env (`NHMS_NODE22_SCHEDULER_ENV`, default
+  `infra/env/compute.scheduler-dbfree.env`), the Slurm gateway secret env
+  (`NHMS_NODE22_GATEWAY_SECRET_ENV`, default
+  `/scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env`, the same file as
+  the tracked `10-slurm-gateway-token.conf` drop-in), and
+  `NHMS_PYTHON_VENV_BIN=<repo>/.venv/bin`. `--submit` refuses to run (exit 2,
+  timer untouched, planner not started) when the secret file is missing,
+  unreadable, or fails to load; `--plan` only warns. Secret values are never
+  printed.
+- Timer: when `nhms-compute-scheduler.timer` is active, the wrapper stops it,
+  waits until `nhms-compute-scheduler.service` reports `inactive`/`failed` (the
+  running pass finishes on its own; it is never killed), runs the planner, and
+  starts the timer again on exit — success, planner failure, wait timeout, INT,
+  TERM, HUP, or QUIT; a broken stderr pipe (SIGPIPE, e.g. an ssh drop without a
+  pty) only loses log lines. A timer that was already inactive is left
+  inactive. The wait is bounded by `NHMS_NODE22_TIMER_WAIT_SECONDS` (default
+  14400 = 4 h) and polls every `NHMS_NODE22_TIMER_POLL_SECONDS` (default 15).
+- stderr carries one `node22-run-cycle-once: <UTC ts> <event>` line per step
+  (`timer_stopped`, `service_inactive waited=<s>`, `timer_restored`, or
+  `timer_left_inactive`, plus failure events); stdout is planner output only.
+- Exit codes: the planner's own code; `2` for usage/env/secret errors, an
+  undeterminable timer or service state, or `timer_stop_failed`; `3` for
+  `timer_wait_timeout` (the planner never ran); `4` for `timer_restore_failed`
+  after a successful planner (the line carries the manual start command);
+  `129`/`130`/`131`/`143` on HUP/INT/QUIT/TERM (the signal is forwarded to the
+  planner — INT and QUIT as TERM — and the wrapper waits for it first).
+- Do not start the timer by hand while the wrapper runs: that re-opens the race
+  and one of the two runs ends in `lock_contended`. Do not pre-stop it by hand
+  either: the wrapper only waits for a running pass when it finds the timer
+  active, so with a pre-stopped timer and a pass still running the planner gets
+  `lock_contended`. While the wrapper holds the timer the stall probe reports
+  `timer_stopped`; that is expected (see
+  [`stuck-detection.md`](stuck-detection.md#stall-timer-stopped)).
+- Other runbooks that stop the timer by hand as a write window first check
+  that no wrapper is running, because the wrapper restarts the timer when it
+  exits. Use the anchored form `pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'`:
+  a bare `pgrep -f node22-run-cycle-once` also matches the shell that runs the
+  check (procps-ng on node-22 excludes only pgrep itself), so it always reports
+  a hit when run via `ssh host '...'` or `bash -c`.
+- If the wrapper exits while another procedure's systemd fence is installed, its
+  `start` is skipped by the fence condition but still returns 0, so the log says
+  `timer_restored` while the timer stays inactive until that fence is released.
+- Ctrl-C / TERM stops the planner without lease cleanup, so the first scheduler
+  pass after the timer is restored may report `lock_contended` once; later
+  passes reclaim the dead-pid lease. This is bounded and corrupts nothing.
+- A scheduler pass takes 1–3 h, so detach long runs from the terminal (an ssh
+  drop then cannot interrupt the run):
+
+  ```bash
+  cd /scratch/frd_muziyao/NWM
+  setsid nohup scripts/ops/node22-run-cycle-once.sh \
+    --cycle-time 2026-07-12T00:00:00Z \
+    --plan \
+    > "$HOME/cycle-once-2026071200-plan.log" 2>&1 &
+  ```
+
+- SIGKILL, OOM, power loss, or a node reboot cannot be trapped and leave the
+  timer stopped. Restore it by hand:
+  `systemctl --user start nhms-compute-scheduler.timer`.
+
 Exact-cycle missing-forcing regeneration (node-22 only):
 
 1. Confirm that the affected candidates are blocked only by

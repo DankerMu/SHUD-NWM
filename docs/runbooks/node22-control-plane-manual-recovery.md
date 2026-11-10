@@ -418,7 +418,11 @@ hydro run 已成功时，选择器对 hydro run id 一律拒绝（`no_retryable_
    反推出来的），再确认 `decision: would_mark`、`stage: state_save_qc`，然后追加 `--execute`。
 4. 下一趟自然 pass 会重跑该 cohort。若 cycle 已出调度窗口（例如 IFS 的旧 cycle），接着用
    `scripts/ops/node22-run-cycle-once.sh --cycle-time <YYYY-MM-DDTHH:MM:SSZ> --source <source> --basin-id <basin_id>`，
-   先 `--plan` 核对，再 `--submit`。
+   先 `--plan` 核对，再 `--submit`。该 wrapper 加载与 scheduler service 相同的环境（scheduler env、gateway secret、
+   `NHMS_PYTHON_VENV_BIN`；`--submit` 缺 secret 即 exit 2），timer 原本 active 时会自动暂停 timer、等在跑的 pass 结束后
+   再执行，退出时恢复 timer；执行期间不要手工启动 timer，长时间运行用 `setsid nohup` 脱离终端。退出码与 SIGKILL 后的人工恢复
+   见 [`production-ops/known-issues-pipeline.md`](production-ops/known-issues-pipeline.md#85-node-22-scheduler-stuck-after-missing-forcing-artifact)
+   的 exact-cycle wrapper 说明。
 
 实例（2026-09-23）：`basins_hlj` IFS 12Z 的 `state_save_qc` 提交收到 gateway 502 `SLURM_PARSE_ERROR`
 （作业其实已被 Slurm 接收并 COMPLETED），行被标成 `permanently_failed`。对 hydro run id

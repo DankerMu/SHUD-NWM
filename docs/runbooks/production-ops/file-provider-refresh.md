@@ -374,7 +374,7 @@ key allowlist；`NHMS_REGISTRY_CUTOVER_DECLARATION_PATH` **自 #1095 起在 allo
    一趟 refresh 在跑时，`start` 只是跟着那一趟返回），一律以新 receipt
    （`latest.json` 的 `started_at` 变新）为准。直接手工调用
    `scripts/scheduler_file_provider_refresh_once.sh` 走的是同一段等待，但等待结束后没有
-   `Before=` 的排队保护，仍须先停 scheduler timer。
+   `Before=` 的排队保护，仍须先停 scheduler timer（停之前先确认没有 `node22-run-cycle-once.sh` 在跑：`pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'` 为空）。
 4. 核对 receipt：`registry_classification.declared_cutovers` 覆盖本次
    `package_changed`，且 outcome 为 `published`（timer 路径的 ExecStart 不带
    `--dry-run`，见上述 unit 文件），reason 不是 `registry_cutover_undeclared` /
@@ -989,8 +989,16 @@ scripts/ops/node22-run-cycle-once.sh \
   --submit
 ```
 
-该脚本 source `infra/env/compute.scheduler-dbfree.env`，调用
-`plan-production --cycle-time ... --disable-backfill`。`--cycle-time` 固定单一
+该脚本加载与 `nhms-compute-scheduler.service` 相同的三项环境：scheduler env
+（`infra/env/compute.scheduler-dbfree.env`）、gateway secret
+（`/scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env`；`--submit` 时缺失或
+不可读直接 exit 2，`--plan` 只告警）以及 `NHMS_PYTHON_VENV_BIN`。timer 原本 active
+时，它先暂停 `nhms-compute-scheduler.timer`，等正在跑的 pass 自己结束（上限 4 小时），
+再调用 `plan-production --cycle-time ... --disable-backfill`，退出时（含失败、超时、
+INT/TERM/HUP/QUIT）恢复 timer；timer 原本没开则不碰它。执行期间不要手工启动 timer，长时间
+运行用 `setsid nohup ... > log 2>&1 &` 脱离终端；退出码与人工恢复命令见
+[`known-issues-pipeline.md`](known-issues-pipeline.md#85-node-22-scheduler-stuck-after-missing-forcing-artifact)
+的 exact-cycle wrapper 说明。`--cycle-time` 固定单一
 source cycle，避免恢复运行被更早的历史 backfill 缺口劫持；`--disable-backfill`
 只影响本次显式补跑，不改变 timer 的常规 backfill 策略。需要定向少数流域时可重复
 传 `--basin-id basins_xxx`；需要只补某个 source 时传 `--source gfs` 或
