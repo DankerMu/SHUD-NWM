@@ -447,6 +447,107 @@ def test_warn_canonical_product_with_checksum_is_forcing_usable() -> None:
     assert not canonical_product_is_forcing_usable({"quality_flag": "error_precip_accumulation", "checksum": "abc123"})
 
 
+def test_warning_negative_precip_canonical_product_with_checksum_is_forcing_usable() -> None:
+    assert canonical_product_is_forcing_usable({"quality_flag": "warning_negative_precip", "checksum": "abc123"})
+    assert not canonical_product_is_forcing_usable({"quality_flag": "warning_negative_precip", "checksum": ""})
+    assert not canonical_product_is_forcing_usable({"quality_flag": "warning_negative_precip", "checksum": "  "})
+    assert not canonical_product_is_forcing_usable({"quality_flag": "error_precip_accumulation", "checksum": "abc123"})
+
+
+def _ifs_cycle_with_flagged_precip_lead(
+    quality_flag: str,
+    *,
+    checksum: str | None = None,
+) -> dict[str, Any]:
+    cycle_time = parse_cycle_time("2026102300")
+    policy = {"source": "IFS", "forecast_hours": [0, 3, 6], "horizon": 6}
+    source_object = {"source": "IFS", "manifest_object_key": "raw/IFS/2026102300/manifest.json"}
+    rows = canonical_rows(
+        source_id="IFS",
+        cycle_time=cycle_time,
+        variables=(*IFS_REQUIRED_STANDARD_VARIABLES, "net_radiation"),
+        forecast_hours=(0, 3, 6),
+        policy_identity=policy,
+        source_object_identity=source_object,
+    )
+    flagged = next(row for row in rows if row["variable"] == "prcp_rate_or_amount" and row["lead_time_hours"] == 3)
+    flagged["quality_flag"] = quality_flag
+    if checksum is not None:
+        flagged["checksum"] = checksum
+    return {
+        "source_id": "IFS",
+        "cycle_time": cycle_time,
+        "products": rows,
+        "forecast_hours": (0, 3, 6),
+        "policy_identity": policy,
+        "source_object_identity": source_object,
+    }
+
+
+def test_canonical_readiness_accepts_single_ifs_warning_negative_precip_lead() -> None:
+    result = evaluate_canonical_readiness(**_ifs_cycle_with_flagged_precip_lead("warning_negative_precip"))
+
+    assert result.ready is True
+    assert result.evidence["status"] == "canonical_ready"
+    assert "reason" not in result.evidence
+    assert result.evidence["missing_leads"] == []
+    assert result.evidence["rejected_quality_flags"] == {}
+    assert result.evidence["accepted_warning_quality_flags"] == {"warning_negative_precip": 1}
+
+
+def test_canonical_readiness_accepted_warning_flags_count_warn_and_negative_precip() -> None:
+    kwargs = _ifs_cycle_with_flagged_precip_lead("warning_negative_precip")
+    warned = next(
+        row for row in kwargs["products"] if row["variable"] == "shortwave_down" and row["lead_time_hours"] == 6
+    )
+    warned["quality_flag"] = "warn"
+
+    result = evaluate_canonical_readiness(**kwargs)
+
+    assert result.ready is True
+    assert result.evidence["accepted_warning_quality_flags"] == {"warn": 1, "warning_negative_precip": 1}
+
+
+def test_canonical_readiness_accepted_warning_flags_empty_for_all_ok_cycle() -> None:
+    kwargs = _ifs_cycle_with_flagged_precip_lead("ok")
+
+    result = evaluate_canonical_readiness(**kwargs)
+
+    assert result.ready is True
+    assert result.evidence["accepted_warning_quality_flags"] == {}
+
+
+def test_canonical_readiness_still_blocks_ifs_error_precip_accumulation_lead() -> None:
+    result = evaluate_canonical_readiness(**_ifs_cycle_with_flagged_precip_lead("error_precip_accumulation"))
+
+    assert result.ready is False
+    assert result.evidence["status"] == "canonical_incomplete"
+    assert result.evidence["reason"] == "missing_canonical_leads"
+    assert result.evidence["rejected_quality_flags"] == {"error_precip_accumulation": 1}
+    assert result.evidence["accepted_warning_quality_flags"] == {}
+    assert result.evidence["missing_leads"][0]["lead_time_hours"] == 3
+    assert result.evidence["missing_leads"][0]["missing_variables"] == ["prcp_rate_or_amount"]
+
+
+def test_canonical_readiness_blocks_ifs_warning_negative_precip_lead_without_checksum() -> None:
+    result = evaluate_canonical_readiness(**_ifs_cycle_with_flagged_precip_lead("warning_negative_precip", checksum=""))
+
+    assert result.ready is False
+    assert result.evidence["reason"] == "missing_canonical_leads"
+    assert result.evidence["accepted_warning_quality_flags"] == {}
+    assert result.evidence["rejected_quality_flags"] == {}
+    assert result.evidence["checksum_missing_row_count"] == 1
+    assert result.evidence["checksum_missing_samples"] == [
+        {
+            "reason": "checksum_missing",
+            "variable": "prcp_rate_or_amount",
+            "quality_flag": "warning_negative_precip",
+            "lead_time_hours": 3,
+            "valid_time": "2026-10-23T03:00:00+00:00",
+        }
+    ]
+
+
 def test_canonical_readiness_rejects_missing_checksum_required_rows() -> None:
     cycle_time = parse_cycle_time("2026050700")
     policy = {"source": "gfs", "forecast_hours": [0, 3]}

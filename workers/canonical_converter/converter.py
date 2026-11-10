@@ -350,7 +350,11 @@ class CanonicalReadinessResult:
     evidence: dict[str, Any]
 
 
-FORCING_USABLE_CANONICAL_QUALITY_FLAGS = {"ok", "warn"}
+# #3112 owner 决定(2026-11-10,方案 B):降水 warning_negative_precip 仅为诊断信息,
+# 取值已按 max(0, delta) 截为 0,视为 forcing 可用;降水质量标记中只有 error_precip_accumulation
+# (连续 >=3 次负 delta)阻断,集合外的其它标记同样仍不可用。
+# 被接受的非 ok 标记经 readiness evidence 的 accepted_warning_quality_flags 计数审计。
+FORCING_USABLE_CANONICAL_QUALITY_FLAGS = {"ok", "warn", "warning_negative_precip"}
 
 
 def canonical_product_is_forcing_usable(product: Mapping[str, Any]) -> bool:
@@ -453,6 +457,11 @@ def evaluate_canonical_readiness(
             if len(checksum_missing_samples) < 10:
                 checksum_missing_samples.append(_readiness_rejected_row_sample(row, reason="checksum_missing"))
     usable_rows = [row for row in cycle_rows if canonical_product_is_forcing_usable(row)]
+    accepted_warning_quality_flags: dict[str, int] = {}
+    for row in usable_rows:
+        quality_flag = str(row.get("quality_flag") or "ok")
+        if quality_flag != "ok":
+            accepted_warning_quality_flags[quality_flag] = accepted_warning_quality_flags.get(quality_flag, 0) + 1
     expected_hours = sorted(
         {int(hour) for hour in forecast_hours}
         if forecast_hours is not None
@@ -563,6 +572,7 @@ def evaluate_canonical_readiness(
         "row_count": len(usable_rows),
         "candidate_row_count": len(cycle_rows),
         "rejected_quality_flags": rejected_quality_flags,
+        "accepted_warning_quality_flags": accepted_warning_quality_flags,
         "rejected_quality_samples": rejected_quality_samples,
         "checksum_missing_row_count": checksum_missing_row_count,
         "checksum_missing_samples": checksum_missing_samples,
