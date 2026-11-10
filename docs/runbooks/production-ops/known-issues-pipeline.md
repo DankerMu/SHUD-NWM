@@ -191,6 +191,15 @@ in this runbook and its siblings relies on this:
   `lock_contended`. While the wrapper holds the timer the stall probe reports
   `timer_stopped`; that is expected (see
   [`stuck-detection.md`](stuck-detection.md#stall-timer-stopped)).
+- Other runbooks that stop the timer by hand as a write window first check
+  that no wrapper is running, because the wrapper restarts the timer when it
+  exits. Use the anchored form `pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'`:
+  a bare `pgrep -f node22-run-cycle-once` also matches the shell that runs the
+  check (procps-ng on node-22 excludes only pgrep itself), so it always reports
+  a hit when run via `ssh host '...'` or `bash -c`.
+- If the wrapper exits while another procedure's systemd fence is installed, its
+  `start` is skipped by the fence condition but still returns 0, so the log says
+  `timer_restored` while the timer stays inactive until that fence is released.
 - Ctrl-C / TERM stops the planner without lease cleanup, so the first scheduler
   pass after the timer is restored may report `lock_contended` once; later
   passes reclaim the dead-pid lease. This is bounded and corrupts nothing.

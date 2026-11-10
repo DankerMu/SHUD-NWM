@@ -80,8 +80,8 @@ node-22 的共享 `.venv` 按 #1831 决定长期保持 3.12.7，**禁止** `uv s
 
 ```bash
 cd /scratch/frd_muziyao/NWM
-# 先确认没有 `node22-run-cycle-once.sh` 在跑（`pgrep -f node22-run-cycle-once` 为空）——它结束时会自动恢复 timer，会打穿本窗口
-pgrep -f node22-run-cycle-once                                 # 必须无输出
+# 先确认没有 `node22-run-cycle-once.sh` 在跑（`pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'` 为空）——它结束时会自动恢复 timer，会打穿本窗口
+pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'                                 # 必须无输出
 systemctl --user stop nhms-compute-scheduler.timer
 systemctl --user is-active nhms-compute-scheduler.service      # 等到不是 active/activating
 

@@ -6,7 +6,7 @@
 
 - In `--submit` mode it SHALL refuse to run (exit 2) when the secret file is missing or unreadable. In `--plan` mode it SHALL only warn.
 - When `nhms-compute-scheduler.timer` is active, it SHALL stop the timer and wait, with a bounded timeout, until the service is no longer running before invoking the planner.
-- It SHALL restart a timer it stopped on every exit path: success, planner failure, wait timeout, INT, TERM, or HUP; on a signal it SHALL forward the signal to the planner process and wait for it before exiting. It SHALL NOT start a timer that was inactive on entry.
+- It SHALL restart a timer it stopped on every exit path: success, planner failure, wait timeout, INT, TERM, HUP, or QUIT. On such a signal it SHALL forward TERM to the planner process (INT and QUIT cannot reach a background child of a non-interactive shell) and wait for it before exiting. A broken stderr pipe (SIGPIPE) SHALL NOT terminate it. It SHALL NOT start a timer that was inactive on entry.
 - It SHALL fail closed (exit 2) when the timer or service state cannot be determined, or when stopping the timer fails.
 - Secret values SHALL NOT appear in its stdout or stderr. Stdout SHALL carry only planner output.
 

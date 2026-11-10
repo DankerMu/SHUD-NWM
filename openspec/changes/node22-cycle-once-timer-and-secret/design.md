@@ -35,7 +35,7 @@ Must add/change:
      - `on_exit` 的**第一句**是 `rc=$?`，先保存原退出码，**然后**才 `set +e`。反过来写的话，`set +e` 会把 `$?` 覆盖成 0，python 退出 7 就会被吞成 0。恢复失败时按这个 `rc` 定退出码：原来是 0 就改成 4，否则保留原值。
      - `on_signal` 和 `on_exit`（在保存 `rc` 之后）都先 `set +e`（handler 内部的 `kill`、`wait`、stderr 写入都可能失败，不能让失败中止 handler）。`on_exit` 里 `start <timer>` 排在所有 stderr 写入之前：HUP 之后终端可能已关闭，stderr 写入会失败，但 timer 必须先恢复。
      - `on_signal` 只在 `PY_PID` 非空时转发信号。等待阶段收到信号时 python 还没启动，直接以 128+信号号退出，EXIT trap 恢复 timer。
-     - `on_signal` 收到 INT/TERM/HUP 时：先把同一个信号转发给 `$PY_PID`（非交互 bash 的后台子进程会忽略 SIGINT，所以 INT 要改为发 TERM），再 `wait "$PY_PID"`，然后以 128+信号号退出（INT=130、TERM=143、HUP=129）；EXIT trap 负责恢复 timer。
+     - `on_signal` 收到 INT/TERM/HUP/QUIT 时：先把同一个信号转发给 `$PY_PID`（非交互 bash 的后台子进程会忽略 SIGINT 和 SIGQUIT，所以 INT 和 QUIT 都改为发 TERM），再 `wait "$PY_PID"`，然后以 128+信号号退出（INT=130、TERM=143、HUP=129、QUIT=131）；EXIT trap 负责恢复 timer。
      - 正常结束时，以 python 的退出码退出。
 - 恢复：`start <timer>`。恢复失败时 stderr 写 `timer_restore_failed`，退出码不为 0（python 原本为 0 时改成 4）；同时在 stderr 打印人工恢复命令 `systemctl --user start nhms-compute-scheduler.timer`。
 - 所有 stderr 事件日志统一走一个不致命的 helper，例如 `log(){ printf 'node22-run-cycle-once: %s %s\n' "$(date -u +%FT%TZ)" "$*" >&2 || true; }`。主流程和 handler 都用它。stderr 已关闭（`2>&-`，例如 ssh 断线后）时写入失败只会被忽略，不会经 `set -e` 让主流程中途退出。
@@ -84,7 +84,7 @@ Non-goals:
 - 不轮换 secret。
 
 Review focus:
-1. trap 先于 stop 装好；在所有退出路径（含 INT/TERM/HUP、stop 失败、service 状态无法判定）上都恢复且只恢复一次；python 用 `&` + `wait` 启动，信号转发给它；`set -e` 不会绕过 trap；
+1. trap 先于 stop 装好；在所有退出路径（含 INT/TERM/HUP/QUIT、stop 失败、service 状态无法判定）上都恢复且只恢复一次；python 用 `&` + `wait` 启动，信号转发给它；`set -e` 不会绕过 trap；
 2. secret 不出现在 xtrace、日志或错误信息中；stderr 已关闭时，主流程的日志写入不会致命（log helper）；`on_exit` 先保存 `rc` 再 `set +e`；
 3. stdout 契约不变；
 4. 现有测试的断言没有被削弱；

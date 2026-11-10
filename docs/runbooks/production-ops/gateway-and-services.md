@@ -164,7 +164,7 @@ squeue -u "$USER" -o "%.18i %.20j %.2t %.10M %.10l %.6D %R"
 > [`recalibration-and-archive.md`](recalibration-and-archive.md) 的 5.7.1。
 > exact-cycle wrapper `scripts/ops/node22-run-cycle-once.sh` 也会自己停 / 启 timer（见
 > [`known-issues-pipeline.md`](known-issues-pipeline.md#85-node-22-scheduler-stuck-after-missing-forcing-artifact)）；
-> 本节的 rollout / rollback 在停 timer 之前都先确认它没在跑（`pgrep -f node22-run-cycle-once` 为空）。
+> 本节的 rollout / rollback 在停 timer 之前都先确认它没在跑（`pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'` 为空）。
 
 先用可逆的 runtime `ConditionPathExists` drop-in 围住调度器（2026-08-28 现场观察到
 `systemctl --user stop nhms-compute-scheduler.timer` 被另一个并发同用户维护会话
@@ -233,7 +233,7 @@ systemctl --user daemon-reload
 #    Precheck: no exact-cycle wrapper may be running (`pgrep -f
 #    node22-run-cycle-once` must be empty) — it restarts the timer when it
 #    exits and its planner would run inside this maintenance window.
-if pgrep -f node22-run-cycle-once >/dev/null; then
+if pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)' >/dev/null; then
   echo "rollout: node22-run-cycle-once.sh is running; wait for it to exit, then re-run this step" >&2
   exit 1
 fi
@@ -546,7 +546,7 @@ systemctl --user daemon-reload
 #    Precheck: no exact-cycle wrapper may be running (`pgrep -f
 #    node22-run-cycle-once` must be empty) — it restarts the timer when it
 #    exits and its planner would run inside this maintenance window.
-if pgrep -f node22-run-cycle-once >/dev/null; then
+if pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)' >/dev/null; then
   echo "rollback: node22-run-cycle-once.sh is running; wait for it to exit, then re-run this step" >&2
   exit 1
 fi

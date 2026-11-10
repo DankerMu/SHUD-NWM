@@ -224,7 +224,7 @@ exact-cycle wrapper（`scripts/ops/node22-run-cycle-once.sh`）持有 timer 期�
 `timer_stopped` 属预期：它会暂停 timer、等 pass 结束、跑完再自己恢复 timer（见
 [`known-issues-pipeline.md`](known-issues-pipeline.md#85-node-22-scheduler-stuck-after-missing-forcing-artifact)
 的 exact-cycle wrapper 说明）。
-处置：start 之前先确认没有 wrapper 在跑（`pgrep -f node22-run-cycle-once`）——有就等它
+处置：start 之前先确认没有 wrapper 在跑（`pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'`）——有就等它
 退出，不要手工 start；没有 wrapper 在跑时，查 journal 里 timer 最后一次状态跃迁，再按
 §3.1 恢复（wrapper 被 SIGKILL/OOM 打断后 timer 会一直停着，也走这条）。
 
@@ -421,7 +421,7 @@ fence 是 `prepare-file-journal-rollback` **有意**写下的暂停，但 runboo
 
 处置：打开最新一趟产物，读 `rollback_fence.reason` 与 `rollback_fence.receipt_id`。
 
-- `file_journal_rollback_fence_prepared`：先停 `nhms-compute-scheduler.timer`，确认旧 writer
+- `file_journal_rollback_fence_prepared`：先确认没有 `node22-run-cycle-once.sh` 在跑（`pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'` 为空），再停 `nhms-compute-scheduler.timer`，确认旧 writer
   已停，再用 `receipt_id` 按上面两份 runbook 执行 `complete-file-journal-rollforward`；成功
   receipt 落盘、fence 被消费后再恢复 timer。
 - `file_journal_rollback_fence_invalid`：fence / preparation receipt 校验失败或读不出，

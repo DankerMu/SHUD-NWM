@@ -7,7 +7,7 @@ Must preserve：见 design.md（CLI、参数顺序、repair flag 语义、stdout
 - Public API / CLI / script entry — selected：参数与 stdout 契约不变（现有测试 + 1.4 的 stdout 断言）
 - Auth / permissions / secrets — selected：secret 加载但不泄漏（1.4 的 sentinel 用例）；submit 缺 secret 时 fail-closed
 - Concurrency / shared state / ordering — selected：timer 停、等、恢复的顺序（1.4 的调用序列断言）
-- Error handling / rollback / partial outputs — selected：超时、python 失败、INT/TERM/HUP、stop 失败、service 状态无法判定时都恢复 timer（1.4）；SIGKILL 是 residual risk，靠 stall probe 兜底（design.md）
+- Error handling / rollback / partial outputs — selected：超时、python 失败、INT/TERM/HUP/QUIT、stop 失败、service 状态无法判定时都恢复 timer（1.4）；SIGKILL 是 residual risk，靠 stall probe 兜底（design.md）
 - Config / project setup — selected：默认路径与 tracked drop-in 一致（1.4 的 drift 用例）
 - Documentation / migration notes — selected：runbook 三处同步（1.5）
 - File IO / path safety — not selected：只读 secret 文件，不写文件
@@ -17,7 +17,7 @@ Must preserve：见 design.md（CLI、参数顺序、repair flag 语义、stdout
 
 ## 1. 实现
 - [x] 1.1 wrapper 加载 secret env（`NHMS_NODE22_GATEWAY_SECRET_ENV`），导出 `NHMS_PYTHON_VENV_BIN`；`--submit` 缺 secret 时 exit 2，`--plan` 缺 secret 时只告警
-- [x] 1.2 timer 协调，按 design.md 的步骤：先装 trap（EXIT/INT/TERM/HUP）→ 判定 timer 状态（无法判定则 exit 2）→ 置位后 stop（stop 失败则 exit 2）→ 有上限地轮询 service（无法判定则 exit 2，超时则 exit 3）→ python 以 `&` 启动并 `wait`，信号转发给它，INT/TERM/HUP 分别以 130/143/129 退出 → 恢复 timer（只恢复一次；恢复失败时退出码为 4，并打印人工恢复命令）
+- [x] 1.2 timer 协调，按 design.md 的步骤：先装 trap（EXIT/INT/TERM/HUP/QUIT）→ 判定 timer 状态（无法判定则 exit 2）→ 置位后 stop（stop 失败则 exit 2）→ 有上限地轮询 service（无法判定则 exit 2，超时则 exit 3）→ python 以 `&` 启动并 `wait`，信号转发给它，INT/TERM/HUP/QUIT 分别以 130/143/129 退出 → 恢复 timer（只恢复一次；恢复失败时退出码为 4，并打印人工恢复命令）
 - [x] 1.3 stderr 事件日志；stdout 只给 python
 - [x] 1.4 测试（`test_node22_exact_cycle_wrapper_*`）：design.md "Required evidence" 中的全部用例；假 systemctl 模拟真实 `is-active` 返回码（`activating` 返回 3）；现有两个测试只补环境注入
 - [x] 1.5 runbook：

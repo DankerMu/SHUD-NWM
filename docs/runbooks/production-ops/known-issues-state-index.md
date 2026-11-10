@@ -446,7 +446,7 @@ auto-retry 拒绝分支上的 `FileJournalRetryService.mark_permanently_failed`
 
 **人工恢复**（唯一支持的路径；顺序不可省）：
 
-1. 先确认没有 `node22-run-cycle-once.sh` 在跑（`pgrep -f node22-run-cycle-once` 为空）——它结束时会自动恢复 timer，会打穿本窗口。
+1. 先确认没有 `node22-run-cycle-once.sh` 在跑（`pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'` 为空）——它结束时会自动恢复 timer，会打穿本窗口。
    再 `systemctl --user stop nhms-compute-scheduler.timer`，确认
    `nhms-compute-scheduler.service` 为 `inactive`。
 2. 备份：把该 `job_id` 的 flat direct、by-cycle direct 和 anchor 三个文件拷到
@@ -605,8 +605,8 @@ set +a
   prune-retention > /tmp/prune-dryrun.json
 
 # 2) 审核（见下）后，冻结 writer 再 enforce
-# 先确认没有 `node22-run-cycle-once.sh` 在跑（`pgrep -f node22-run-cycle-once` 为空）——它结束时会自动恢复 timer，会打穿本窗口
-pgrep -f node22-run-cycle-once                              # 必须无输出
+# 先确认没有 `node22-run-cycle-once.sh` 在跑（`pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'` 为空）——它结束时会自动恢复 timer，会打穿本窗口
+pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'                              # 必须无输出
 systemctl --user stop nhms-compute-scheduler.timer
 systemctl --user is-active nhms-compute-scheduler.service   # 必须是 inactive 再往下
 /scratch/frd_muziyao/NWM/.venv/bin/python -m scripts.scheduler_state_index_repair \
