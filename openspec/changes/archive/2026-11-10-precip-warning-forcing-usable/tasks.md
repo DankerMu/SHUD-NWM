@@ -27,10 +27,17 @@ Must preserve：
   - producer 级（`tests/test_forcing_producer.py`，仿 `test_warn_precipitation_or_radiation_products_enter_forcing_with_quality_evidence`）：IFS 降水某时次为 `warning_negative_precip` 时，`result.status == "forcing_ready"`，`manifest["quality_flags"]["canonical_products"]` 与 lineage 含 `warning_negative_precip`；改为 `error_precip_accumulation` 时：`pytest.raises(ForcingProductionError, match="prcp_rate_or_amount")`，`repository.forcing_versions == {}`，`repository.timeseries == []`，`repository.cycle_updates[-1]["status"] == "failed_forcing"`（仿 `test_missing_canonical_product_blocks_generation`，`tests/test_forcing_producer.py:2543`）；且 fixture 中不得有其它 cycle 的 fallback 产品补上该时次（`producer.py:3715` 的 fallback 路径同样过滤）
 
 ## 2. 上线（合并后）
-- [ ] 2.1 **pull 之前**，用 `uv run --no-sync` 在 node-22 旧代码上只读列出 catalog 中含 `warning_negative_precip` 且仍为 `canonical_incomplete` 的 cycle，写进上线记录。必须在 pull 之前做：pull 之后下一个自然 pass 就会追溯放行这些 cycle 并触发补跑
-- [ ] 2.2 node-22 先查 `git status --porcelain`，再 `git pull --ff-only`（禁止 `uv sync`、裸 `uv run`）
-- [ ] 2.3 对历史 catalog 副本做只读 readiness 评估：把一个 f012 改成 `warning_negative_precip` 后应判 ready，`accepted_warning_quality_flags == {"warning_negative_precip": 1}`，`rejected_quality_flags == {}`；结果贴到 #3112
+- [x] 2.1 **pull 之前**，用 `uv run --no-sync` 在 node-22 旧代码上只读列出 catalog 中含 `warning_negative_precip` 且仍为 `canonical_incomplete` 的 cycle，写进上线记录。必须在 pull 之前做：pull 之后下一个自然 pass 就会追溯放行这些 cycle 并触发补跑
+- [x] 2.2 node-22 先查 `git status --porcelain`，再 `git pull --ff-only`（禁止 `uv sync`、裸 `uv run`）
+- [x] 2.3 对历史 catalog 副本做只读 readiness 评估：把一个 f012 改成 `warning_negative_precip` 后应判 ready，`accepted_warning_quality_flags == {"warning_negative_precip": 1}`，`rejected_quality_flags == {}`；结果贴到 #3112
 
 ## Evidence Floor
 - `uv run pytest -q tests/test_canonical_converter.py tests/test_ifs_canonical.py tests/test_forcing_producer.py`，加上 selector 选出的测试集
 - `uv run ruff check .`
+
+## 上线记录（2026-11-10）
+- 2.1 pull 前扫描：只有 IFS 2026102412 受影响（f066、f069 均为 `warning_negative_precip`，−4 个打包步长）。
+- 2.2 node-22 部署到 `a0cdecabd`。
+- 2.3 真实 catalog 评估：判为 `canonical_ready`，`accepted_warning_quality_flags` 为 `{"warn": 6, "warning_negative_precip": 2}`，`rejected_quality_flags` 为 `{}`。
+- 恢复：两个 cohort master 已打 manual-retry marker。
+- 证据：#3112 issuecomment-6759617033。
