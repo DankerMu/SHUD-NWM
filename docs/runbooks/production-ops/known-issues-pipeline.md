@@ -171,9 +171,10 @@ in this runbook and its siblings relies on this:
   waits until `nhms-compute-scheduler.service` reports `inactive`/`failed` (the
   running pass finishes on its own; it is never killed), runs the planner, and
   starts the timer again on exit — success, planner failure, wait timeout, INT,
-  TERM, or HUP. A timer that was already inactive is left inactive. The wait is
-  bounded by `NHMS_NODE22_TIMER_WAIT_SECONDS` (default 14400 = 4 h) and polls
-  every `NHMS_NODE22_TIMER_POLL_SECONDS` (default 15).
+  TERM, HUP, or QUIT; a broken stderr pipe (SIGPIPE, e.g. an ssh drop without a
+  pty) only loses log lines. A timer that was already inactive is left
+  inactive. The wait is bounded by `NHMS_NODE22_TIMER_WAIT_SECONDS` (default
+  14400 = 4 h) and polls every `NHMS_NODE22_TIMER_POLL_SECONDS` (default 15).
 - stderr carries one `node22-run-cycle-once: <UTC ts> <event>` line per step
   (`timer_stopped`, `service_inactive waited=<s>`, `timer_restored`, or
   `timer_left_inactive`, plus failure events); stdout is planner output only.
@@ -181,12 +182,18 @@ in this runbook and its siblings relies on this:
   undeterminable timer or service state, or `timer_stop_failed`; `3` for
   `timer_wait_timeout` (the planner never ran); `4` for `timer_restore_failed`
   after a successful planner (the line carries the manual start command);
-  `129`/`130`/`143` on HUP/INT/TERM (the signal is forwarded to the planner and
-  the wrapper waits for it first).
+  `129`/`130`/`131`/`143` on HUP/INT/QUIT/TERM (the signal is forwarded to the
+  planner — INT and QUIT as TERM — and the wrapper waits for it first).
 - Do not start the timer by hand while the wrapper runs: that re-opens the race
-  and one of the two runs ends in `lock_contended`. While the wrapper holds the
-  timer the stall probe reports `timer_stopped`; that is expected (see
+  and one of the two runs ends in `lock_contended`. Do not pre-stop it by hand
+  either: the wrapper only waits for a running pass when it finds the timer
+  active, so with a pre-stopped timer and a pass still running the planner gets
+  `lock_contended`. While the wrapper holds the timer the stall probe reports
+  `timer_stopped`; that is expected (see
   [`stuck-detection.md`](stuck-detection.md#stall-timer-stopped)).
+- Ctrl-C / TERM stops the planner without lease cleanup, so the first scheduler
+  pass after the timer is restored may report `lock_contended` once; later
+  passes reclaim the dead-pid lease. This is bounded and corrupts nothing.
 - A scheduler pass takes 1–3 h, so detach long runs from the terminal (an ssh
   drop then cannot interrupt the run):
 

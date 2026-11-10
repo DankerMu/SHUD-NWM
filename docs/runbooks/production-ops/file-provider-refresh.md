@@ -995,7 +995,7 @@ scripts/ops/node22-run-cycle-once.sh \
 不可读直接 exit 2，`--plan` 只告警）以及 `NHMS_PYTHON_VENV_BIN`。timer 原本 active
 时，它先暂停 `nhms-compute-scheduler.timer`，等正在跑的 pass 自己结束（上限 4 小时），
 再调用 `plan-production --cycle-time ... --disable-backfill`，退出时（含失败、超时、
-INT/TERM/HUP）恢复 timer；timer 原本没开则不碰它。执行期间不要手工启动 timer，长时间
+INT/TERM/HUP/QUIT）恢复 timer；timer 原本没开则不碰它。执行期间不要手工启动 timer，长时间
 运行用 `setsid nohup ... > log 2>&1 &` 脱离终端；退出码与人工恢复命令见
 [`known-issues-pipeline.md`](known-issues-pipeline.md#85-node-22-scheduler-stuck-after-missing-forcing-artifact)
 的 exact-cycle wrapper 说明。`--cycle-time` 固定单一

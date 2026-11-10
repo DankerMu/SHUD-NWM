@@ -41,6 +41,10 @@ Must add/change:
 - 所有 stderr 事件日志统一走一个不致命的 helper，例如 `log(){ printf 'node22-run-cycle-once: %s %s\n' "$(date -u +%FT%TZ)" "$*" >&2 || true; }`。主流程和 handler 都用它。stderr 已关闭（`2>&-`，例如 ssh 断线后）时写入失败只会被忽略，不会经 `set -e` 让主流程中途退出。
 - 每步向 stderr 写一行 `node22-run-cycle-once: <UTC ts> <event>`，event 取 `timer_stopped`、`service_inactive waited=<s>`、`timer_restored`、`timer_left_inactive`。stdout 只留给 python 输出，因为现有调用方会解析 stdout 最后一行的 JSON（`tests/test_production_scheduler.py:15061`）。
 
+- SIGPIPE：stderr 是读端已退出的管道时（例如无 pty 的 ssh 断开，或 `| head` 提前退出），写入会触发 SIGPIPE，默认动作会直接杀掉 wrapper 并跳过 EXIT trap。处理：与其它 trap 一起，在 stop 之前装 `trap ':' PIPE`。用 no-op handler，不用 `trap '' PIPE`，因为 SIG_IGN 会被子进程继承，而被捕获的信号在 exec 时会恢复默认。这样写入只返回 EPIPE，由 log helper 的 `|| true` 吸收，主流程照常往下走。
+- SIGQUIT：与 INT/TERM/HUP 同等处理，转发 TERM 给 planner，并以 131 退出。
+- INT 会转成 TERM 发给 planner。orchestrator 没有 SIGTERM handler，所以 lease 文件会留下；恢复后的第一个 pass 可能因此 `lock_contended` 一次，之后的 pass 会通过 dead-pid 探测收回 lease。这个影响有界，不会损坏数据。
+
 Residual risk（不能 trap 的路径）：SIGKILL、OOM、断电或节点重启会让 timer 一直停着。兜底是 stall probe（`nhms-node22-scheduler-stall-health`，每 15 分钟一次，报 `timer_stopped` 并触发 OnFailure 告警）；人工恢复命令是 `systemctl --user start nhms-compute-scheduler.timer`，写进 runbook。runbook 同时要求长时间运行用 `setsid nohup` 脱离终端，从而避开 ssh 断线。
 
 Governing invariant: 本次运行停掉的 timer，在 wrapper 结束时一定被恢复，不论正常退出、python 失败、等待超时还是收到 INT/TERM；timer 原本没开时，wrapper 不会启动它。secret 的值不出现在 stdout/stderr 中。
@@ -75,7 +79,7 @@ Required evidence（假 systemctl + 假 python）：
 Non-goals:
 - 不改 Python 侧锁语义，不改 unit 与 timer 定义；
 - 不处理两个手工 wrapper 并发运行（scheduler 锁已能拒绝第二个，返回 lock_contended）；
-- 不处理 wrapper 与 model succession 的互斥（succession 每步复查，发现调度器被中途启动就拒绝）；
+- 不处理 wrapper 与 model succession 及其它"手工 stop timer 作写入窗口"操作的互斥。说明：succession 只在**步与步之间**复查 timer 和 service，不是全程 fail-closed：`begin` 会把 wrapper 正持有的 timer 记成 `timer_was_active=false`；如果 wrapper 在 `refresh` 等长步中途恢复 timer，就会有 pass 跑进 succession 的冻结窗口，而 `finish` 之后 timer 会一直停着。缓解办法只在文档层面：所有把 plain `stop` 当写入栅栏的 runbook，都先要求 `pgrep -f node22-run-cycle-once` 为空。wrapper 写持有标记、让 succession 读取它，不在本次范围内；
 - 不修改 stall probe：wrapper 持有 timer 期间的 `timer_stopped` 告警属预期，靠 runbook 说明；
 - 不轮换 secret。
 

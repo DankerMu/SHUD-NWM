@@ -15249,7 +15249,7 @@ def _node22_wrapper_command(*args: str, xtrace: bool = False) -> list[str]:
 def _default_signal_dispositions() -> None:
     # bash cannot trap a signal that was already ignored on entry (pytest run under
     # nohup or as a background job), so the child starts from default dispositions.
-    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT, signal.SIGPIPE):
         signal.signal(signum, signal.SIG_DFL)
 
 
@@ -15412,8 +15412,8 @@ def test_node22_exact_cycle_wrapper_reports_failed_timer_restore(
 
 @pytest.mark.parametrize(
     ("signum", "expected_rc"),
-    [(signal.SIGTERM, 143), (signal.SIGINT, 130)],
-    ids=("term", "int"),
+    [(signal.SIGTERM, 143), (signal.SIGINT, 130), (signal.SIGQUIT, 131)],
+    ids=("term", "int", "quit"),
 )
 def test_node22_exact_cycle_wrapper_forwards_signal_to_python_and_restores_timer(
     tmp_path: Path, signum: signal.Signals, expected_rc: int
@@ -15447,8 +15447,8 @@ def test_node22_exact_cycle_wrapper_hup_with_closed_stderr_still_restores_timer(
 
 @pytest.mark.parametrize(
     ("signum", "expected_rc"),
-    [(signal.SIGINT, 130), (signal.SIGTERM, 143)],
-    ids=("int", "term"),
+    [(signal.SIGINT, 130), (signal.SIGTERM, 143), (signal.SIGQUIT, 131)],
+    ids=("int", "term", "quit"),
 )
 def test_node22_exact_cycle_wrapper_signal_while_waiting_restores_timer_without_python(
     tmp_path: Path, signum: signal.Signals, expected_rc: int
@@ -15462,6 +15462,41 @@ def test_node22_exact_cycle_wrapper_signal_while_waiting_restores_timer_without_
     assert harness.systemctl_calls()[-1] == f"start {_NODE22_TIMER}"
     assert harness.systemctl_calls().count(f"start {_NODE22_TIMER}") == 1
     assert stdout == ""
+
+
+@pytest.mark.parametrize("python_rc", [0, 7], ids=("python-ok", "python-failure"))
+def test_node22_exact_cycle_wrapper_broken_stderr_pipe_still_restores_timer(tmp_path: Path, python_rc: int) -> None:
+    harness = _node22_wrapper_harness(tmp_path, service_states=("activating",), python_rc=python_rc)
+    process = subprocess.Popen(
+        _node22_wrapper_command("--plan"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=harness.env,
+        start_new_session=True,
+        preexec_fn=_default_signal_dispositions,
+    )
+    try:
+        assert process.stderr is not None and process.stdout is not None
+        # Wait for the wrapper to hold the timer, then drop the stderr reader
+        # (an ssh disconnect without a pty): the next event write hits EPIPE.
+        assert "timer_stopped" in process.stderr.readline()
+        process.stderr.close()
+        states = harness.systemctl_dir / "service.states"
+        states.with_suffix(".flip").write_text("inactive\n", encoding="utf-8")
+        os.replace(states.with_suffix(".flip"), states)
+        stdout = process.stdout.read()
+        returncode = process.wait(timeout=60)
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+
+    assert returncode == python_rc
+    assert harness.python_ran()
+    assert stdout == _NODE22_PY_OUTPUT
+    assert harness.systemctl_calls()[-1] == f"start {_NODE22_TIMER}"
+    assert harness.systemctl_calls().count(f"start {_NODE22_TIMER}") == 1
 
 
 def test_node22_exact_cycle_wrapper_undeterminable_service_state_fails_closed(tmp_path: Path) -> None:

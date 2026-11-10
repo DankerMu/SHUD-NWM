@@ -41,7 +41,7 @@ Notes:
     started again on every exit path. An inactive timer is left alone.
   - Exit codes: planner exit code; 2 usage/env/secret/undeterminable unit state
     or timer stop failure; 3 wait timeout; 4 timer restore failed after a
-    successful planner; 129/130/143 on HUP/INT/TERM.
+    successful planner; 129/130/131/143 on HUP/INT/QUIT/TERM.
 USAGE
 }
 
@@ -174,7 +174,7 @@ RESTORED=0
 on_exit() {
   rc=$?
   set +e
-  trap '' INT TERM HUP
+  trap '' INT TERM HUP QUIT
   if [ "$TIMER_STOPPED" = 1 ] && [ "$RESTORED" = 0 ]; then
     RESTORED=1
     # start before any stderr write: after a hangup stderr may be gone.
@@ -199,7 +199,7 @@ on_exit() {
 on_signal() {
   local signame="$1" code="$2"
   set +e
-  trap '' INT TERM HUP
+  trap '' INT TERM HUP QUIT
   if [ -n "$SLEEP_PID" ]; then
     kill "$SLEEP_PID" 2>/dev/null
   fi
@@ -208,10 +208,11 @@ on_signal() {
     PY_PID=$!
   fi
   if [ -n "$PY_PID" ]; then
-    # Background children of a non-interactive bash ignore SIGINT: send TERM.
-    if [ "$signame" = INT ]; then
-      signame=TERM
-    fi
+    # Background children of a non-interactive bash ignore SIGINT, and QUIT
+    # would dump core: both are forwarded as TERM.
+    case "$signame" in
+      INT|QUIT) signame=TERM ;;
+    esac
     kill -s "$signame" "$PY_PID" 2>/dev/null
     wait "$PY_PID" 2>/dev/null
   fi
@@ -223,6 +224,12 @@ trap on_exit EXIT
 trap 'on_signal INT 130' INT
 trap 'on_signal TERM 143' TERM
 trap 'on_signal HUP 129' HUP
+trap 'on_signal QUIT 131' QUIT
+# No-op handler, not SIG_IGN: a write to a stderr pipe whose reader is gone
+# (ssh drop without a pty, `2>&1 | head`) must return EPIPE to the log helper
+# instead of killing the wrapper before the EXIT trap restores the timer.
+# A caught signal is reset to default on exec, so children keep SIGPIPE.
+trap ':' PIPE
 
 TIMER_STATE="$(unit_state "$TIMER")"
 case "$TIMER_STATE" in
