@@ -5007,6 +5007,52 @@ def test_warn_precipitation_or_radiation_products_enter_forcing_with_quality_evi
         assert lineage["quality_flags"]["canonical_products"] == ["ok", "warn"]
 
 
+def _build_ifs_repository_with_flagged_precip_lead(
+    tmp_path: Path,
+    quality_flag: str,
+) -> tuple[LocalObjectStore, FakeForcingRepository]:
+    store, repository = _build_repository(tmp_path, source_id="IFS")
+    products = []
+    for product in repository.products:
+        if product.variable == "pressure_surface":
+            product = dataclasses.replace(product, variable="surface_pressure")
+        if product.variable == "prcp_rate_or_amount" and product.lead_time_hours == 3:
+            product = _replace_product_quality(product, quality_flag)
+        products.append(product)
+    repository.products = tuple(products)
+    # Only the IFS cycle itself is in the catalog: no other cycle/source can backfill the flagged lead.
+    assert {product.source_id for product in repository.products} == {"IFS"}
+    assert {product.cycle_time for product in repository.products} == {parse_cycle_time("2026050700")}
+    return store, repository
+
+
+def test_ifs_warning_negative_precip_product_enters_forcing_with_quality_evidence(tmp_path: Path) -> None:
+    store, repository = _build_ifs_repository_with_flagged_precip_lead(tmp_path, "warning_negative_precip")
+    producer = _build_producer(tmp_path, repository, store)
+
+    result = producer.produce(source_id="IFS", cycle_time="2026050700", model_id="demo_model")
+
+    assert result.status == "forcing_ready"
+    assert result.forcing_version_id in repository.forcing_versions
+    package_root = tmp_path / result.forcing_package_uri.strip("/")
+    manifest = json.loads((package_root / "forcing_package.json").read_text(encoding="utf-8"))
+    assert manifest["quality_flags"]["canonical_products"] == ["ok", "warning_negative_precip"]
+    lineage = repository.forcing_versions[result.forcing_version_id]["lineage_json"]
+    assert lineage["quality_flags"]["canonical_products"] == ["ok", "warning_negative_precip"]
+
+
+def test_ifs_error_precip_accumulation_product_blocks_generation(tmp_path: Path) -> None:
+    store, repository = _build_ifs_repository_with_flagged_precip_lead(tmp_path, "error_precip_accumulation")
+    producer = _build_producer(tmp_path, repository, store)
+
+    with pytest.raises(ForcingProductionError, match="prcp_rate_or_amount"):
+        producer.produce(source_id="IFS", cycle_time="2026050700", model_id="demo_model")
+
+    assert repository.forcing_versions == {}
+    assert repository.timeseries == []
+    assert repository.cycle_updates[-1]["status"] == "failed_forcing"
+
+
 def test_streaming_field_read_retains_only_required_interpolation_cells(tmp_path: Path) -> None:
     store, repository = _build_repository(tmp_path)
     producer = _build_producer(tmp_path, repository, store)
