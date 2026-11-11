@@ -561,7 +561,7 @@ lag 未设、空串、非整数或负数时用 21 天、`default`，lag 仍由 r
 原样拒绝（exit 2，见下）。`retention_days_source` 每份 receipt 都有，只有 watch 连 repair
 模块都没导入成功的 exit 4 是 `null`；receipt 根不安全的 exit 2 也写推导值。各 lane 的
 `retention_days` 取自 repair summary，等于推导值；`schema_version` 仍是 v1（兼容性新增字段）。
-#3118 之前 watch 写死 21 天，lag ≥ 120 即每天 exit 2 `repair_retention_window_too_short`、
+在 #3118 之前，watch 写死 21 天，lag ≥ 120 即每天 exit 2 `repair_retention_window_too_short`、
 容量告警失明（2026-11-09 起 lag 294）。
 
 退出码（非 0 即 unit failed，这是 node-22 唯一的告警面）：
