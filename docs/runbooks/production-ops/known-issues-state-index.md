@@ -446,7 +446,8 @@ auto-retry 拒绝分支上的 `FileJournalRetryService.mark_permanently_failed`
 
 **人工恢复**（唯一支持的路径；顺序不可省）：
 
-1. 先确认没有 `node22-run-cycle-once.sh` 在跑（`pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'` 为空）——它结束时会自动恢复 timer，会打穿本窗口。
+1. 先确认没有 `node22-run-cycle-once.sh` 在跑（`pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'` 为空）——它结束时会自动恢复 timer，会打穿本窗口；
+   再确认 state-index 自动剪枝没在跑（`systemctl --user is-active nhms-scheduler-state-index-prune.service` 必须是 `inactive` 或 `failed`）——它结束时同样会恢复它停掉的 timer。
    再 `systemctl --user stop nhms-compute-scheduler.timer`，确认
    `nhms-compute-scheduler.service` 为 `inactive`。
 2. 备份：把该 `job_id` 的 flat direct、by-cycle direct 和 anchor 三个文件拷到
@@ -526,8 +527,9 @@ stderr（`infra/sbatch/save_state_snapshot*.sbatch` 的 `#SBATCH --error`），�
 （每条 +2 节点），copyback 会去掉这两个字段，shared 不带。2026-11-11 dry-run：同为 12,154 条，
 reference 252,205 vs destination 227,897 节点，差 24,308 = 2 × 12,154（另见下面"回弹与余量"）。
 
-这只是证据，不会让任何 reader / publisher 比原有硬上限更早失败。**`warning` 出现就跑本节
-流程**；每日由下面的"定时 capacity watch"做只读 dry-run，告警即 unit 失败。
+这只是证据，不会让任何 reader / publisher 比原有硬上限更早失败。`warning` 出现时由下面的
+"自动剪枝"（#3121，每日 06:30 UTC）在 scheduler pass 边界 enforce；"定时 capacity watch"
+仍每日做只读 dry-run，告警即 unit 失败；本节的人工"流程"保留作兜底。
 
 **定时 capacity watch（#2653）**：node-22 user 级
 `nhms-scheduler-state-index-capacity.timer`（每日 05:30 UTC，`RandomizedDelaySec=15m`，
@@ -606,7 +608,8 @@ cat /scratch/frd_muziyao/nhms-prod/workspace/state-index-repair/capacity-watch/l
 
 看 `status`、`exit_code`、`alerts[]`（每条 `lane` + `alert`）与 `error`。处置：
 
-- `capacity_warning`：按下面的"流程"跑人工 dry-run → 审核 → 冻结 writer → enforce；
+- `capacity_warning`：同一天 06:30 UTC 的"自动剪枝"会处理，先看它的 `latest.json`；它非 0
+  退出时，按它的退出码表处置，必要时按下面的"流程"人工 dry-run → 审核 → 冻结 writer → enforce；
 - `capacity_warning_unprunable`：剪完仍在 0.70 以上。按 receipt 顶层 `retention_days_source` 分流：
   - `default`：21 天窗口内的稳态已经顶到阈值——这是容量设计问题，**升级到 #2541**，
     不要反复 enforce；
@@ -620,15 +623,150 @@ cat /scratch/frd_muziyao/nhms-prod/workspace/state-index-repair/capacity-watch/l
   整数（`error.field=NHMS_SCHEDULER_CYCLE_LAG_HOURS`）或为负（`error.field=cycle_lag_hours`），
   修正后 `systemctl --user start` 重跑；exit 4：看 journal 里的 `error_type`，按代码缺陷处理。
 
-**Stage 2 决策：enforce 保持人工**（#2653）。0.70 告警到节点上限约 90k JSON 节点，
-按约 20.5 节点/条是约 4,400 条；两次 prune 间实测约 20 h 长 384 条，首次 prune 推算的
-窗口内速率约 275 条/天，即告警后约 **10-15 天**提前量。无人值守的 enforce 必须在 unit
-里停/启 `nhms-compute-scheduler.timer`（node-22 的 probe 与 timer 按 D4 先例只读，不做
-这件事），还要绕过 #2548 的人工审核门，并且要能在 exit 3 部分提交后自动恢复调度器
-timer。人工 enforce 实测约 5 分钟调度暂停（2026-09-28）。有约 10 天提前量、每天都会
-失败一次的 unit，自动化的风险收益不划算。窗口内稳态到 0.70 时触发的是
-`capacity_warning_unprunable`，那是 #2541 的容量设计问题，自动 enforce 也解决不了。
-当 stage 1 receipt 显示人工节奏变得繁重时再重新评估。
+**Stage 2 决策：自 #3121 起改为自动 enforce**。#2653 原定 enforce 保持人工，理由是告警后
+约 10-15 天提前量、人工 enforce 约 5 分钟调度暂停（2026-09-28）。2026-11-11 实测：追赶期
+（lag 294 → 窗口 29 天）剪完只降到 0.6967，约每 1–2 天就要剪一次，追赶结束后约 10 天一次，
+人工节奏过于频繁，owner 当日决定改为自动（D1–D4 按 issue 推荐）。下面的"流程"保留作兜底。
+窗口内稳态到 0.70 时触发的 `enforced_unprunable` 仍是 #2541 的容量设计问题，自动 enforce
+解决不了。
+
+**自动剪枝（#3121）**：node-22 user 级 `nhms-scheduler-state-index-prune.timer`（每日
+06:30 UTC，`RandomizedDelaySec=15m`，`Persistent=true`）触发 oneshot
+`nhms-scheduler-state-index-prune.service`，ExecStart 是精确解释器的
+`-m scripts.node22_state_index_auto_prune`。环境来自 `compute.scheduler-dbfree.env`（与 watch
+同一份），unit 另给出三个根：自身 receipt
+`/scratch/frd_muziyao/nhms-prod/workspace/state-index-repair/auto-prune`、repair archive
+`.../state-index-repair/archives`、repair receipt `.../state-index-repair/receipts`（与人工
+"流程"同一对根）。窗口与 watch 同源（直接复用 watch 的推导，见上表），阈值是
+`STATE_INDEX_CAPACITY_WARNING_THRESHOLD`（0.70），不新增配置。一次运行，不自动重试：
+
+1. dry-run（`provider_preimage_changed` 最多试 3 次）。没有 lane `capacity_before.warning`
+   → `skip`，exit 0。
+2. 预闸门（不碰 timer）：两 lane `checksum_valid=true`、`entry_count_before>0`，且**每个超
+   阈值的 lane** `removed_count>0`（没超阈值的 lane 允许为 0：exit 3 之后或只有一条 lane 有可剪
+   条目时，两 lane 不是镜像）。不满足 → `gate_failed_precheck`。
+3. 用上面"流程"里那条锚定 pgrep 查 `node22-run-cycle-once.sh`；在跑 → 不碰 timer，
+   `deferred_wrapper_running`。
+4. 冻结：`nhms-compute-scheduler.timer`、`nhms-scheduler-file-provider-refresh.timer` 只停原本
+   `active` 的（`inactive`/`failed` 不碰，其它值 exit 2）；等两个 service 空闲——`is-active`
+   为 `inactive`/`failed` **且** `systemctl --user show -p Job --value <svc>` 为空（排除已排队
+   未启动的 job）。上限 `NHMS_STATE_INDEX_AUTO_PRUNE_WAIT_SECONDS`（默认 18000 s = 5 h，小于
+   refresh-timer-health 的 8 h stopped dwell），轮询 `NHMS_STATE_INDEX_AUTO_PRUNE_POLL_SECONDS`
+   （默认 30 s）。
+5. 闸门：再查 wrapper、再查两个 service，最终 dry-run 用与预闸门相同的条件。
+6. enforce（锁内重新规划，语义同人工 enforce）。期间 SIGTERM/SIGINT/SIGHUP 只记录、不打断，
+   enforce 返回后照实写 receipt 再按 128+n 退出。
+7. 收尾：本次停掉的每个 timer 都 `start` 一次（收尾期间三种信号都忽略）；不是本次停掉的
+   timer 绝不 start。systemctl / pgrep 每次调用 60 s 超时，超时按"无法判定"处理。
+
+冻结窗口从停 timer 起算，是"在飞 pass 的剩余时间（等待上限 5 h）→ 闸门 → enforce → 恢复"，
+撞上长 pass 时可达数小时，不是几十秒；期间 stall probe 报 `timer_stopped` 属预期（见
+[`stuck-detection.md`](stuck-detection.md#stall-timer-stopped)）。
+unit 的 `TimeoutStartSec=21600` 大于等待上限加 enforce；超时由 `KillSignal=SIGTERM` 进入收尾，
+`TimeoutStopSec=300` 覆盖剩余 enforce（实测 14 s，按 60 s 计）+ 两次 start（各 60 s）+ 写
+receipt（10 s）。
+
+receipt（`nhms.scheduler.state_index_auto_prune_receipt.v1`）：auto-prune 根下
+`<UTC 时间戳>.json`（保留最新 30 份）与 `latest.json`，目录 0700、文件 0600，先打 stdout
+（进 journal）再落盘；根不存在或不是 owner-private 时不会创建，exit 2。顶层 `status`、
+`action`、`exit_code`、`retention_days`、`retention_days_source`、`cycle_lag_hours`、
+`warning_threshold`、`timers_stopped[]`、`timers_restored[]`、`timers_restore_failed[]`、
+`waited_seconds`、`gate`（`phase`、`passed`、`failures[]`，每 lane checksum、条目数、
+removed 数、`removed_state_ids_sha256`）、`enforce`（每 lane status、removed 数、
+`capacity_before/after`、digest、`digest_matches_gate`——不一致只记录，enforce 在锁内重新
+规划可能多剪几条）、`error`（`reason` 及 `field`/`unit`）、`signal`；**不含**
+`removed_state_ids` 与 `groups`，上限 1 MiB。
+
+退出码（非 0 即 unit failed，经 `OnFailure=` 发告警邮件）：
+
+| 码 | `action` | 含义与处置 |
+|---|---|---|
+| 0 | `skip` | 两 lane 都没到阈值，没碰 timer |
+| 0 | `enforced` | 已剪，两 lane 都回到阈值以下；timer 已恢复 |
+| 1 | `gate_failed_precheck` | 初次 dry-run 闸门失败，没碰 timer。看 `gate.failures[]`：`checksum_invalid` → 走 8.9；`lane_empty` / `lane_summary_missing` → 查根与挂载；`over_threshold_nothing_to_prune` → 窗口内无可剪，按下面 `enforced_unprunable` 分流 |
+| 1 | `deferred_wrapper_running` | wrapper 在跑：初查时没碰 timer；闸门复查时（`error.reason=wrapper_running_at_gate`）timer 已恢复。wrapper 结束后手动 start 本 service 重跑，或等次日 |
+| 1 | `gate_failed` | 冻结后的最终 dry-run 闸门失败，timer 已恢复；处置同 `gate_failed_precheck` |
+| 1 | `enforced_unprunable` | 已剪仍 ≥ 0.70。按顶层 `retention_days_source` 分流：`default` → 稳态顶到阈值，升级到 #2541，不要反复 enforce；`derived_from_cycle_lag` → 追赶期 lag 撑大了窗口，等 lag 回落后看下一份 receipt 再评估 |
+| 2 | `wait_timeout` | 等待上限内 service 没空闲，未 enforce，timer 已恢复；查 pass 为何超过 5 h |
+| 2 | `refused` | 看 `error.reason`：receipt 根问题（`receipt_root_*`）、`auto_prune_setting_invalid`、repair 拒绝（如 `repair_cycle_lag_unset`、`archive_root_*`、`receipt_root_*`）、`wrapper_state_undeterminable`、`timer_state_undeterminable`、`timer_stop_failed`、`service_state_undeterminable`、`service_busy_at_gate`。冻结之后的拒绝 timer 都已恢复 |
+| 3 | `enforce_incomplete` | 部分提交（见下面"exit 3 之后"）；`dry_run_incomplete` 是防御性映射，dry-run 不会写 |
+| 4 | `error` | 意外异常，看 journal 里的 `error_type`，按代码缺陷处理 |
+| 5 | 照实际流程填 | `status=timer_restore_failed`：本次停掉的 timer 至少一个没能恢复，覆盖其它退出码。journal 打印了人工命令，立即按下面"恢复 timer"处理 |
+| 128+n | `interrupted`，或信号到达时已得出的结果（enforce 期间、或进入收尾时收到） | 被信号结束（`signal` 字段）；`timers_restored[]` 是已恢复的 timer |
+
+receipt 写盘失败只把 exit 0 改成 2（stdout 上的 receipt 仍完整），非 0 的退出码不变。
+
+安装 / 启用（node-22，`frd_muziyao`；前提同 watch，先 `git status --porcelain` 再
+`git pull --ff-only`，禁止 `uv sync` 与裸 `uv run`；改单元前后各跑一次
+drift 探针，见 [`node22-control-plane-manual-recovery.md`](../node22-control-plane-manual-recovery.md)
+"改单元前后"一节）：
+
+```bash
+ssh -p 32099 frd_muziyao@210.77.77.22
+cd /scratch/frd_muziyao/NWM
+install -d -m 0700 /scratch/frd_muziyao/nhms-prod/workspace/state-index-repair/auto-prune
+install -m 0644 infra/systemd/nhms-scheduler-state-index-prune.service \
+  infra/systemd/nhms-scheduler-state-index-prune.timer ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now nhms-scheduler-state-index-prune.timer
+systemctl --user start nhms-scheduler-state-index-prune.service    # 首跑一次取 receipt
+systemctl --user is-active nhms-compute-scheduler.timer nhms-scheduler-file-provider-refresh.timer   # 跑完都应 active
+cat /scratch/frd_muziyao/nhms-prod/workspace/state-index-repair/auto-prune/latest.json
+```
+
+读失败的 unit：
+
+```bash
+systemctl --user status nhms-scheduler-state-index-prune.service
+journalctl --user -u nhms-scheduler-state-index-prune.service -n 100 --no-pager
+cat /scratch/frd_muziyao/nhms-prod/workspace/state-index-repair/auto-prune/latest.json
+```
+
+**恢复 timer**（exit 5，或 SIGKILL / OOM 打断后 receipt 没写出来）：journal 里每个本次停掉的
+timer 都有 `timer_stopped unit=<timer>`，已恢复的有 `timer_restored unit=<timer>`。只 start
+"停了但没恢复"的那些——原本就是 inactive 的 timer 不要 start：
+
+```bash
+journalctl --user -u nhms-scheduler-state-index-prune.service -n 200 --no-pager \
+  | grep -E 'timer_(stopped|restored|restore_failed|left_alone)'
+systemctl --user is-active nhms-scheduler-state-index-prune.service   # 必须是 inactive 或 failed（还在跑就等它自己恢复）
+pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'   # 必须无输出
+systemctl --user start nhms-compute-scheduler.timer               # 仅当它停了没恢复
+systemctl --user start nhms-scheduler-file-provider-refresh.timer # 仅当它停了没恢复
+```
+
+**exit 3 之后、或 SIGKILL 打断 enforce 之后**（两 lane 可能不一致：先写 reference、后写
+destination）：先按上面"恢复 timer"确认调度已恢复，再按下面"流程"的 env 与同一个 `N`
+重新 dry-run，比对两 lane 的 `entry_count_before` 与 `removed_count`。已剪完的 lane 是
+`nothing_to_prune`（planner 是不动点）；另一条仍有可剪时，按"流程"冻结 writer 再 enforce
+一次，**不要**用 reference 回填 destination。自动剪枝不会自动重试，次日的运行也只会在两 lane
+闸门都满足时才 enforce。比对命令（先按"流程"设好 env 与 `N`；`N` 也可取 auto-prune receipt 的
+`retention_days`）：
+
+```bash
+/scratch/frd_muziyao/NWM/.venv/bin/python -m scripts.scheduler_state_index_repair \
+  prune-retention --retention-days "$N" > /tmp/prune-after-exit3.json
+jq '.lanes | map_values({checksum_valid, entry_count_before, untouched_reason,
+  removed: .retention.removed_count, warning: .retention.capacity_before.warning})' /tmp/prune-after-exit3.json
+cat /scratch/frd_muziyao/nhms-prod/workspace/state-index-repair/receipts/latest.json   # enforce 写到哪一条 lane
+```
+
+**与人工写窗口的关系**：自动剪枝每日 06:30 UTC 触发（`RandomizedDelaySec=15m`，即最晚约
+06:45 才开始），会停、启 scheduler 与 provider-refresh timer。所以**任何停 scheduler timer 的人工
+写窗口**，停之前除了确认 wrapper 不在跑，还要确认 `systemctl --user is-active nhms-scheduler-state-index-prune.service` 必须是
+`inactive` 或 `failed`（oneshot 运行期间是 `activating`，收尾恢复 timer 时可能是 `deactivating`，都算在跑；
+脚本里要比对打印的状态而不是退出码）。窗口可能较长、会跨过 06:30–06:45 UTC 时，开窗时再
+`systemctl --user stop nhms-scheduler-state-index-prune.timer`，窗口结束、scheduler timer 恢复之后
+再 `systemctl --user start nhms-scheduler-state-index-prune.timer`——`Persistent=true` 会在
+start 时补跑错过的那一次。
+
+**与人工工具的关系**：人工"流程"开始前先确认自动剪枝没在跑（`systemctl --user is-active
+nhms-scheduler-state-index-prune.service` 必须是 `inactive` 或 `failed`）。recalibration clone
+（`scripts/node22_clone_direct_grid_cutover_states.py`）与 enforce 共用 `_update_lock`、是串行的，
+但它是一次性人工工具，**不要与自动剪枝同时跑**：clone 前先看
+`systemctl --user list-timers nhms-scheduler-state-index-prune.timer`，窗口会撞上 06:30 UTC
+就临时 `systemctl --user stop nhms-scheduler-state-index-prune.timer`，clone 完再 `start`。
+人工 copyback replay 与 enforce 同锁同 CAS，不冻结。
 
 **剪什么、留什么**（每 lane 各自按自己的 entry 规划，两份 index 不是镜像）：按
 已校验 identity key 的 `(model_id, 规范化 source_id)` 分组（`gfs` / `GFS` 同组），
@@ -682,6 +820,7 @@ echo "retention_days=$N"
   prune-retention --retention-days "$N" > /tmp/prune-dryrun.json
 
 # 2) 审核（见下）后，冻结 writer 再 enforce
+systemctl --user is-active nhms-scheduler-state-index-prune.service   # 必须是 inactive 或 failed（自动剪枝在跑就等它结束）
 # 先确认没有 `node22-run-cycle-once.sh` 在跑（`pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'` 为空）——它结束时会自动恢复 timer，会打穿本窗口
 pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'                              # 必须无输出
 systemctl --user stop nhms-compute-scheduler.timer

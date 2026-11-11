@@ -83,6 +83,32 @@ def test_state_index_capacity_watch_units_pin_the_module_entrypoint_and_schedule
     assert "uv" not in service.lower() and re.search(r"(?<![./])python3?(?:\s|$)", service) is None
 
 
+def test_state_index_auto_prune_units_pin_the_module_entrypoint_and_schedule() -> None:
+    # #3121: same `-m` module form as the watch. The unit additionally names the
+    # repair archive/receipt roots (enforce writes both) and the SIGTERM /
+    # timeout budget that lets the module restore the timers it stopped.
+    service = _read("infra/systemd/nhms-scheduler-state-index-prune.service")
+    timer = _read("infra/systemd/nhms-scheduler-state-index-prune.timer")
+    execstart = [line.strip() for line in service.splitlines() if line.strip().startswith("ExecStart=")]
+    assert execstart == [f"ExecStart={NODE22_VENV_PY} -m scripts.node22_state_index_auto_prune"]
+    receipts = "/scratch/frd_muziyao/nhms-prod/workspace/state-index-repair"
+    fields = (
+        "Type=oneshot", f"WorkingDirectory={NODE22_ACTIVE}",
+        f"EnvironmentFile={NODE22_ACTIVE}/infra/env/compute.scheduler-dbfree.env",
+        "Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin",
+        f"Environment=NHMS_STATE_INDEX_AUTO_PRUNE_RECEIPT_ROOT={receipts}/auto-prune",
+        f"Environment=NHMS_SCHEDULER_STATE_INDEX_REPAIR_ARCHIVE_ROOT={receipts}/archives",
+        f"Environment=NHMS_SCHEDULER_STATE_INDEX_REPAIR_RECEIPT_ROOT={receipts}/receipts",
+        "TimeoutStartSec=21600", "TimeoutStopSec=300", "KillSignal=SIGTERM",
+        "OnCalendar=*-*-* 06:30:00 UTC", "RandomizedDelaySec=15m", "Persistent=true",
+        "Unit=nhms-scheduler-state-index-prune.service", "WantedBy=default.target",
+    )
+    joined = f"{service}\n{timer}"
+    assert all(field in joined and field not in joined.replace(field, "", 1) for field in fields)
+    assert service.count("EnvironmentFile=") == 1
+    assert "uv" not in service.lower() and re.search(r"(?<![./])python3?(?:\s|$)", service) is None
+
+
 def test_slurm_gateway_unit_uses_exact_interpreter() -> None:
     unit = _read("infra/systemd/nhms-slurm-gateway.service")
     execstart = [line.strip() for line in unit.splitlines() if line.strip().startswith("ExecStart=")]
@@ -516,6 +542,8 @@ def test_sibling_scan_no_new_bare_uv_on_governed_node22_surfaces() -> None:
         "infra/systemd/nhms-scheduler-journal-retention.timer",
         "infra/systemd/nhms-scheduler-state-index-capacity.service",
         "infra/systemd/nhms-scheduler-state-index-capacity.timer",
+        "infra/systemd/nhms-scheduler-state-index-prune.service",
+        "infra/systemd/nhms-scheduler-state-index-prune.timer",
         "infra/systemd/nhms-slurm-gateway.service",
         # #1103: the index page plus every `production-ops/` sub-runbook, so a
         # bare `uv` added to a sub-runbook still reddens this scan.

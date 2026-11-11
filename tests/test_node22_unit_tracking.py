@@ -3,8 +3,8 @@
 `infra/systemd/node22/` holds byte-exact copies of the seven deployed files in
 the read-only receipt `docs/runbooks/receipts/2026-10-16-node22-live-units-snapshot.md`,
 and `infra/systemd/node22/MANIFEST.json` lists every file deployed on node-22
-(`{deployed_relative_path, tracked_path, sha256}`), including the twelve
-top-level oneshot units tracked at `infra/systemd/<name>`.
+(`{deployed_relative_path, tracked_path, sha256}`), including the fourteen
+top-level oneshot units tracked at `infra/systemd/<name>` (twelve until #3121).
 
 The rule logic lives in small module-level functions so the synthetic line
 cases at the bottom exercise exactly the code the real scan uses. Stdlib only,
@@ -50,6 +50,7 @@ TOP_LEVEL_ONESHOTS = tuple(
         "nhms-scheduler-file-provider-refresh",
         "nhms-scheduler-journal-retention",
         "nhms-scheduler-state-index-capacity",
+        "nhms-scheduler-state-index-prune",
     )
     for suffix in ("service", "timer")
 )

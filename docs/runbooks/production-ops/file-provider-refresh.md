@@ -374,7 +374,7 @@ key allowlist；`NHMS_REGISTRY_CUTOVER_DECLARATION_PATH` **自 #1095 起在 allo
    一趟 refresh 在跑时，`start` 只是跟着那一趟返回），一律以新 receipt
    （`latest.json` 的 `started_at` 变新）为准。直接手工调用
    `scripts/scheduler_file_provider_refresh_once.sh` 走的是同一段等待，但等待结束后没有
-   `Before=` 的排队保护，仍须先停 scheduler timer（停之前先确认没有 `node22-run-cycle-once.sh` 在跑：`pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'` 为空）。
+   `Before=` 的排队保护，仍须先停 scheduler timer（停之前先确认没有 `node22-run-cycle-once.sh` 在跑：`pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'` 为空；且 state-index 自动剪枝没在跑：`systemctl --user is-active nhms-scheduler-state-index-prune.service` 必须是 `inactive` 或 `failed`）。
 4. 核对 receipt：`registry_classification.declared_cutovers` 覆盖本次
    `package_changed`，且 outcome 为 `published`（timer 路径的 ExecStart 不带
    `--dry-run`，见上述 unit 文件），reason 不是 `registry_cutover_undeclared` /

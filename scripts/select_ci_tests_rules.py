@@ -201,6 +201,12 @@ NODE22_JOURNAL_RETENTION_TIMER = "infra/systemd/nhms-scheduler-journal-retention
 NODE22_STATE_INDEX_CAPACITY_SERVICE = "infra/systemd/nhms-scheduler-state-index-capacity.service"
 NODE22_STATE_INDEX_CAPACITY_TIMER = "infra/systemd/nhms-scheduler-state-index-capacity.timer"
 NODE22_STATE_INDEX_CAPACITY_WATCH_TEST = "tests/test_node22_state_index_capacity_watch.py"
+# #3121: the state-index auto-prune (prune-retention auto-enforce that stops and
+# restores the scheduler/provider-refresh timers) and its two units. Its suite
+# drives the module through fake systemctl/pgrep and pins both units' fields.
+NODE22_STATE_INDEX_PRUNE_SERVICE = "infra/systemd/nhms-scheduler-state-index-prune.service"
+NODE22_STATE_INDEX_PRUNE_TIMER = "infra/systemd/nhms-scheduler-state-index-prune.timer"
+NODE22_STATE_INDEX_AUTO_PRUNE_TEST = "tests/test_node22_state_index_auto_prune.py"
 NODE22_REPAIR_SCRIPT = "scripts/ops/node22_repair_placeholder_hydro_uris.py"
 LOOP_LOG_AUDIT_TEST = "tests/test_loop_log_audit_attribution.py"
 LINE_REFERENCE_TEST = "tests/test_entropy_audit_line_references.py"
@@ -3264,6 +3270,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # fields this module produces (`checksum_valid`,
             # `retention.entry_count_before`, `capacity_before/after.warning`).
             NODE22_STATE_INDEX_CAPACITY_WATCH_TEST,
+            # #3121 reader edge: the auto-prune gates on the same summary fields
+            # and imports `STATE_INDEX_CAPACITY_WARNING_THRESHOLD` /
+            # `minimum_state_index_retention_days`.
+            NODE22_STATE_INDEX_AUTO_PRUNE_TEST,
             # #1728: this module carries the connection-attribution injection
             # seam for nhms-api-state-snapshots (StateManager.from_env ->
             # PsycopgStateSnapshotRepository -> connect). MERGED here for the
@@ -4132,7 +4142,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # gone that derivation resolves to nothing, so it gets the explicit row.
     PathTestRule(
         NODE22_REFRESH_TIMER_HEALTH_OWNER_PATH,
-        NODE22_REFRESH_TIMER_HEALTH_TESTS,
+        # #3121 reader edge: the auto-prune suite pins its default wait below
+        # this probe's `DEFAULT_STOPPED_DWELL_HOURS`.
+        (*NODE22_REFRESH_TIMER_HEALTH_TESTS, NODE22_STATE_INDEX_AUTO_PRUNE_TEST),
     ),
     PathTestRule(
         "scripts/install_node22_refresh_timer_health.sh",
@@ -4962,17 +4974,43 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
+        # #3121: same shape as the watch's two unit rows.
+        NODE22_STATE_INDEX_PRUNE_SERVICE,
+        # The alert suite's wiring test reads this unit's `[Unit]` `OnFailure=` line.
+        (
+            *NODE22_ENTRYPOINT_INVARIANT_TESTS,
+            NODE22_STATE_INDEX_AUTO_PRUNE_TEST,
+            "tests/test_node22_unit_tracking.py",
+            "tests/test_node22_unit_failure_alert.py",
+        ),
+    ),
+    PathTestRule(
+        NODE22_STATE_INDEX_PRUNE_TIMER,
+        (
+            *NODE22_ENTRYPOINT_INVARIANT_TESTS,
+            NODE22_STATE_INDEX_AUTO_PRUNE_TEST,
+            "tests/test_node22_unit_tracking.py",
+        ),
+    ),
+    PathTestRule(
         # #2653: a PIN, not the only route -- the same-name derivation already
         # reaches the suite; this row survives a suite rename.
+        # #3121 reader edge: the auto-prune imports the watch's `_retention_window`.
         "scripts/node22_state_index_capacity_watch.py",
-        (NODE22_STATE_INDEX_CAPACITY_WATCH_TEST,),
+        (NODE22_STATE_INDEX_CAPACITY_WATCH_TEST, NODE22_STATE_INDEX_AUTO_PRUNE_TEST),
+    ),
+    PathTestRule(
+        # #3121: a PIN, as for the watch above.
+        "scripts/node22_state_index_auto_prune.py",
+        (NODE22_STATE_INDEX_AUTO_PRUNE_TEST,),
     ),
     PathTestRule(
         # #2653 reader edge: the watch calls `repair_state_index`, matches the
         # error classes and their `reason` strings, and reuses
         # `_private_directory`. Additive to the same-name repair suite.
+        # #3121: the auto-prune does the same (dry-run and enforce).
         "scripts/scheduler_state_index_repair.py",
-        (NODE22_STATE_INDEX_CAPACITY_WATCH_TEST,),
+        (NODE22_STATE_INDEX_CAPACITY_WATCH_TEST, NODE22_STATE_INDEX_AUTO_PRUNE_TEST),
     ),
     PathTestRule(
         # #2653 reader edge: the watch retries only this module's
@@ -4994,8 +5032,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (*CORE_SMOKE_TESTS, *NODE22_ENTRYPOINT_INVARIANT_TESTS),
     ),
     PathTestRule(
+        # #3121 reader edge: the auto-prune's anchored wrapper pgrep is pinned
+        # against this script's invocation shape.
         "scripts/ops/node22-run-cycle-once.sh",
-        ("tests/test_production_scheduler.py",),
+        ("tests/test_production_scheduler.py", NODE22_STATE_INDEX_AUTO_PRUNE_TEST),
     ),
     PathTestRule(
         # #1729 / #1480 / #2621: the runner is the executor the disposable-DB

@@ -476,7 +476,7 @@ def test_no_manifest_tracked_file_names_the_home_relative_checkout() -> None:
     assert offenders == []
 
 
-# --- scenario: six oneshots wired, long-running units untouched (#2914) -------
+# --- scenario: seven oneshots wired, long-running units untouched (#2914, #3121)
 
 SYSTEMD_ROOT = REPO_ROOT / "infra/systemd"
 ON_FAILURE_LINE = "OnFailure=nhms-node22-unit-failure-alert@%n.service"
@@ -487,8 +487,10 @@ WIRED_UNITS = (
     "nhms-scheduler-file-provider-refresh.service",
     "nhms-scheduler-journal-retention.service",
     "nhms-scheduler-state-index-capacity.service",
+    # #3121: the spec delta moves the exact set from six to seven.
+    "nhms-scheduler-state-index-prune.service",
 )
-# Paths the exact-six scan must actually reach, so "none of these is wired" is
+# Paths the exact-seven scan must actually reach, so "none of these is wired" is
 # a measured fact rather than a vacuous one (spec: gateway and `node22/**`).
 MUST_SCAN = (
     "nhms-slurm-gateway.service",
@@ -523,7 +525,7 @@ def test_wired_unit_carries_the_alert_line_once_in_unit_section(unit: str) -> No
     assert unit_section(text, "Service").count(ON_FAILURE_LINE) == 0, unit
 
 
-def test_exactly_the_six_oneshots_carry_the_alert_line() -> None:
+def test_exactly_the_seven_oneshots_carry_the_alert_line() -> None:
     scanned = {path.relative_to(SYSTEMD_ROOT).as_posix(): path for path in SYSTEMD_ROOT.rglob("*") if path.is_file()}
 
     assert set(MUST_SCAN) <= set(scanned), sorted(set(MUST_SCAN) - set(scanned))

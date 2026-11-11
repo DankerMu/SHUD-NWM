@@ -669,7 +669,7 @@ def test_node22_stall_reader_edge_rules_red_when_removed(monkeypatch: pytest.Mon
 
 # #2910 -- every route into the node-22 unit-tracking suite. The suite hashes
 # every file listed in `infra/systemd/node22/MANIFEST.json` (the `node22/`
-# copies and the twelve top-level oneshots), compares the `node22/` copies with
+# copies and the fourteen top-level oneshots, twelve until #3121), compares the `node22/` copies with
 # the snapshot receipt's sha256 table, and parses the `infra/env/README.md`
 # authority table for the `EnvironmentFile=` allowlist. Twelve of these paths
 # already had an exact row and gained the suite as an extra target; the last
@@ -688,6 +688,9 @@ NODE22_UNIT_TRACKING_APPENDED_EDGES: tuple[str, ...] = (
     "infra/systemd/nhms-scheduler-journal-retention.timer",
     "infra/systemd/nhms-scheduler-state-index-capacity.service",
     "infra/systemd/nhms-scheduler-state-index-capacity.timer",
+    # #3121: the auto-prune pair joined the manifest with its own exact rows.
+    "infra/systemd/nhms-scheduler-state-index-prune.service",
+    "infra/systemd/nhms-scheduler-state-index-prune.timer",
 )
 # pattern -> one representative changed path the pattern must route.
 NODE22_UNIT_TRACKING_NEW_ROWS: dict[str, str] = {
@@ -714,7 +717,7 @@ def test_node22_unit_tracking_reader_edges_select_the_suite(source: str) -> None
 def test_node22_unit_tracking_new_rules_red_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
     """The complement leg: drop exactly the three #2910 rows and their paths go dark.
 
-    The twelve appended edges are not in this set: their rows carry other
+    The fourteen appended edges are not in this set: their rows carry other
     owners too, so removing them would prove nothing about this suite.
     """
     from scripts import select_ci_tests
@@ -835,8 +838,8 @@ def test_node22_unit_failure_alert_new_rules_red_when_removed(monkeypatch: pytes
         )
 
 
-# #2914 -- the alert suite's wiring test reads the six wired node-22 oneshot
-# units (`[Unit]` `OnFailure=` line, exact-six set, manifest sha256). Each
+# #2914 -- the alert suite's wiring test reads the seven wired node-22 oneshot
+# units (`[Unit]` `OnFailure=` line, exact-seven set since #3121, manifest sha256). Each
 # already had an exact row carrying other owners; the suite was appended to
 # those rows, so the complement strips only that target, never the row.
 NODE22_UNIT_FAILURE_ALERT_WIRED_UNITS: tuple[str, ...] = (
@@ -846,6 +849,7 @@ NODE22_UNIT_FAILURE_ALERT_WIRED_UNITS: tuple[str, ...] = (
     "infra/systemd/nhms-scheduler-file-provider-refresh.service",
     "infra/systemd/nhms-scheduler-journal-retention.service",
     "infra/systemd/nhms-scheduler-state-index-capacity.service",
+    "infra/systemd/nhms-scheduler-state-index-prune.service",
 )
 
 
@@ -861,7 +865,7 @@ def test_node22_wired_units_select_the_alert_suite(source: str) -> None:
 
 
 def test_node22_wired_unit_alert_target_red_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The complement leg: strip the alert suite from exactly the six rows and the units go dark."""
+    """The complement leg: strip the alert suite from exactly the seven rows and the units go dark."""
     from scripts import select_ci_tests
 
     wired = set(NODE22_UNIT_FAILURE_ALERT_WIRED_UNITS)
@@ -4970,6 +4974,54 @@ def test_state_index_capacity_watch_units_and_wrapper_select_the_watch_suite() -
     assert "tests/test_scheduler_state_index_repair.py" in repair_selected
 
 
+def test_state_index_auto_prune_units_and_module_select_the_auto_prune_suite() -> None:
+    # #3121 frozen pins, same shape as the watch above: each unit selects the
+    # invariant owners, the auto-prune suite and the tracking suite; the
+    # `.service` alone is wired to the alert. The module, the watch helper it
+    # imports (`_retention_window`), the repair CLI it calls and the
+    # state_manager threshold all reach the suite.
+    suite = "tests/test_node22_state_index_auto_prune.py"
+    for unit, alert in (
+        ("infra/systemd/nhms-scheduler-state-index-prune.service", [NODE22_UNIT_FAILURE_ALERT_SUITE]),
+        ("infra/systemd/nhms-scheduler-state-index-prune.timer", []),
+    ):
+        assert select_tests([unit], repo_root=Path(".")) == [
+            "tests/test_node22_entrypoint_invariant.py",
+            "tests/test_node22_entrypoint_invariant_python_scan.py",
+            suite,
+            *alert,
+            NODE22_UNIT_TRACKING_SUITE,
+        ], unit
+    for source in (
+        "scripts/node22_state_index_auto_prune.py",
+        "scripts/node22_state_index_capacity_watch.py",
+        "scripts/scheduler_state_index_repair.py",
+        "scripts/node22_refresh_timer_health.py",
+        "packages/common/state_manager.py",
+        # The suite imports the #2548 `Lanes` fixture for its real-repair case.
+        "tests/test_state_index_retention.py",
+    ):
+        assert suite in select_tests([source], repo_root=Path(".")), source
+
+
+def test_state_index_auto_prune_wrapper_pattern_readers_select_the_auto_prune_suite() -> None:
+    # #3121 reader edges: the suite pins the anchored wrapper pgrep verbatim in
+    # known-issues-state-index 8.12 and matches it against the wrapper's
+    # invocation shape, so both the runbook and the wrapper script reach it.
+    suite = "tests/test_node22_state_index_auto_prune.py"
+    assert suite in PRODUCTION_OPS_RUNBOOK_TESTS
+    for path in (
+        "docs/runbooks/production-ops/known-issues-state-index.md",
+        "docs/runbooks/current-production-ops.md",
+        PRODUCTION_OPS_RUNBOOK_HELPERS_PATH,
+        "scripts/ops/node22-run-cycle-once.sh",
+    ):
+        assert suite in select_tests([path], repo_root=Path(".")), path
+    assert "tests/test_production_scheduler.py" in select_tests(
+        ["scripts/ops/node22-run-cycle-once.sh"], repo_root=Path(".")
+    )
+
+
 def test_node22_systemd_units_select_the_owner_without_collect_only() -> None:
     # #1571 local-repair: before the exact rules the two systemd units matched
     # no PATH_TEST_RULES entry and (being infra/** non-python) selected nothing
@@ -5098,6 +5150,8 @@ def test_generated_roots_and_unscoped_runbooks_select_exactly_the_hard_gate_node
         "tests/test_node22_refresh_timer_health_history.py",
         "tests/test_node22_refresh_timer_health_installer.py",
         "tests/test_node22_refresh_timer_health_runbook_and_env.py",
+        # #3121: pins the anchored wrapper pgrep in known-issues-state-index 8.12.
+        "tests/test_node22_state_index_auto_prune.py",
         "tests/test_node27_coverage_freshness_alert.py",
         "tests/test_python_environment_truth.py",
         "tests/test_role_boundary_static.py",
@@ -8213,6 +8267,8 @@ def test_select_tests_routes_docs_only_changes_to_exactly_the_hard_gate_node() -
         "tests/test_node22_refresh_timer_health_history.py",
         "tests/test_node22_refresh_timer_health_installer.py",
         "tests/test_node22_refresh_timer_health_runbook_and_env.py",
+        # #3121: the auto-prune suite pins the anchored wrapper pgrep in 8.12.
+        "tests/test_node22_state_index_auto_prune.py",
         # #2473: fourth literal reader -- the coverage freshness alert suite (§11 codes).
         "tests/test_node27_coverage_freshness_alert.py",
         # #2472/#2473 round 1: capacity-check and topology sentence readers.
@@ -8872,9 +8928,10 @@ def test_patched_facade_importer_index_still_steers_select_tests_after_the_impor
         # gave the sub-runbook tree the identical row. #2323 took both to 9:
         # `docs/runbooks/` is a production-topology scan root, so the hard-gate
         # node rides along. #2532 took both to 11: the probe suite is five
-        # partitions, three of which read the probe section.
-        ("docs/runbooks/current-production-ops.md", "11"),
-        ("docs/runbooks/production-ops/service-bringup.md", "11"),
+        # partitions, three of which read the probe section. #3121 took both
+        # to 12: the auto-prune suite pins the anchored wrapper pgrep in 8.12.
+        ("docs/runbooks/current-production-ops.md", "12"),
+        ("docs/runbooks/production-ops/service-bringup.md", "12"),
         # The discrimination boundary. A single-target selection that is NOT the
         # meta-guard suite must stay false — 15 rules in today's table select
         # exactly one file, so a flag that merely counted targets would arm the

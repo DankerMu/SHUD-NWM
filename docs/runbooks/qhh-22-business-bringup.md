@@ -386,7 +386,8 @@ systemctl --user enable --now nhms-scheduler-evidence-retention.timer
      [`current-production-ops.md`](current-production-ops.md) §8.11「#1760 scope gate 与既存分叉 job_id 行」；
      该 §8.11 的前置条件（journal root 必须是 realpath）见同文件 §8.10。
 
-     **禁止直接回退到 pre-inventory writer。** 支持的回滚必须先确认没有 `node22-run-cycle-once.sh` 在跑（`pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'` 为空，否则它结束时会自动恢复 timer），再停 timer/service，并用当前版本争用生产
+     **禁止直接回退到 pre-inventory writer。** 支持的回滚必须先确认没有 `node22-run-cycle-once.sh` 在跑（`pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'` 为空，否则它结束时会自动恢复 timer），
+     且 state-index 自动剪枝没在跑（`systemctl --user is-active nhms-scheduler-state-index-prune.service` 必须是 `inactive` 或 `failed`，理由相同），再停 timer/service，并用当前版本争用生产
      scheduler file lease、写 preparation receipt 和 rollback fence；命令失败时不得切换代码：
 
      ```bash
