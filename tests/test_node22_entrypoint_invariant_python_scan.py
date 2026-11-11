@@ -273,6 +273,8 @@ def test_node22_active_surfaces_have_no_bare_system_python() -> None:
         "infra/systemd/nhms-scheduler-journal-retention.timer",
         "infra/systemd/nhms-scheduler-state-index-capacity.service",
         "infra/systemd/nhms-scheduler-state-index-capacity.timer",
+        "infra/systemd/nhms-scheduler-state-index-prune.service",
+        "infra/systemd/nhms-scheduler-state-index-prune.timer",
         "infra/systemd/nhms-slurm-gateway.service",
         "scripts/ops/node22_repair_placeholder_hydro_uris.py",
     ]

@@ -669,7 +669,7 @@ def test_node22_stall_reader_edge_rules_red_when_removed(monkeypatch: pytest.Mon
 
 # #2910 -- every route into the node-22 unit-tracking suite. The suite hashes
 # every file listed in `infra/systemd/node22/MANIFEST.json` (the `node22/`
-# copies and the twelve top-level oneshots), compares the `node22/` copies with
+# copies and the fourteen top-level oneshots, twelve until #3121), compares the `node22/` copies with
 # the snapshot receipt's sha256 table, and parses the `infra/env/README.md`
 # authority table for the `EnvironmentFile=` allowlist. Twelve of these paths
 # already had an exact row and gained the suite as an extra target; the last
@@ -688,6 +688,9 @@ NODE22_UNIT_TRACKING_APPENDED_EDGES: tuple[str, ...] = (
     "infra/systemd/nhms-scheduler-journal-retention.timer",
     "infra/systemd/nhms-scheduler-state-index-capacity.service",
     "infra/systemd/nhms-scheduler-state-index-capacity.timer",
+    # #3121: the auto-prune pair joined the manifest with its own exact rows.
+    "infra/systemd/nhms-scheduler-state-index-prune.service",
+    "infra/systemd/nhms-scheduler-state-index-prune.timer",
 )
 # pattern -> one representative changed path the pattern must route.
 NODE22_UNIT_TRACKING_NEW_ROWS: dict[str, str] = {
@@ -714,7 +717,7 @@ def test_node22_unit_tracking_reader_edges_select_the_suite(source: str) -> None
 def test_node22_unit_tracking_new_rules_red_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
     """The complement leg: drop exactly the three #2910 rows and their paths go dark.
 
-    The twelve appended edges are not in this set: their rows carry other
+    The fourteen appended edges are not in this set: their rows carry other
     owners too, so removing them would prove nothing about this suite.
     """
     from scripts import select_ci_tests
@@ -835,8 +838,8 @@ def test_node22_unit_failure_alert_new_rules_red_when_removed(monkeypatch: pytes
         )
 
 
-# #2914 -- the alert suite's wiring test reads the six wired node-22 oneshot
-# units (`[Unit]` `OnFailure=` line, exact-six set, manifest sha256). Each
+# #2914 -- the alert suite's wiring test reads the seven wired node-22 oneshot
+# units (`[Unit]` `OnFailure=` line, exact-seven set since #3121, manifest sha256). Each
 # already had an exact row carrying other owners; the suite was appended to
 # those rows, so the complement strips only that target, never the row.
 NODE22_UNIT_FAILURE_ALERT_WIRED_UNITS: tuple[str, ...] = (
@@ -846,6 +849,7 @@ NODE22_UNIT_FAILURE_ALERT_WIRED_UNITS: tuple[str, ...] = (
     "infra/systemd/nhms-scheduler-file-provider-refresh.service",
     "infra/systemd/nhms-scheduler-journal-retention.service",
     "infra/systemd/nhms-scheduler-state-index-capacity.service",
+    "infra/systemd/nhms-scheduler-state-index-prune.service",
 )
 
 
@@ -861,7 +865,7 @@ def test_node22_wired_units_select_the_alert_suite(source: str) -> None:
 
 
 def test_node22_wired_unit_alert_target_red_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The complement leg: strip the alert suite from exactly the six rows and the units go dark."""
+    """The complement leg: strip the alert suite from exactly the seven rows and the units go dark."""
     from scripts import select_ci_tests
 
     wired = set(NODE22_UNIT_FAILURE_ALERT_WIRED_UNITS)
@@ -4968,6 +4972,36 @@ def test_state_index_capacity_watch_units_and_wrapper_select_the_watch_suite() -
         assert watch_suite in select_tests([source], repo_root=Path(".")), source
     repair_selected = select_tests(["scripts/scheduler_state_index_repair.py"], repo_root=Path("."))
     assert "tests/test_scheduler_state_index_repair.py" in repair_selected
+
+
+def test_state_index_auto_prune_units_and_module_select_the_auto_prune_suite() -> None:
+    # #3121 frozen pins, same shape as the watch above: each unit selects the
+    # invariant owners, the auto-prune suite and the tracking suite; the
+    # `.service` alone is wired to the alert. The module, the watch helper it
+    # imports (`_retention_window`), the repair CLI it calls and the
+    # state_manager threshold all reach the suite.
+    suite = "tests/test_node22_state_index_auto_prune.py"
+    for unit, alert in (
+        ("infra/systemd/nhms-scheduler-state-index-prune.service", [NODE22_UNIT_FAILURE_ALERT_SUITE]),
+        ("infra/systemd/nhms-scheduler-state-index-prune.timer", []),
+    ):
+        assert select_tests([unit], repo_root=Path(".")) == [
+            "tests/test_node22_entrypoint_invariant.py",
+            "tests/test_node22_entrypoint_invariant_python_scan.py",
+            suite,
+            *alert,
+            NODE22_UNIT_TRACKING_SUITE,
+        ], unit
+    for source in (
+        "scripts/node22_state_index_auto_prune.py",
+        "scripts/node22_state_index_capacity_watch.py",
+        "scripts/scheduler_state_index_repair.py",
+        "scripts/node22_refresh_timer_health.py",
+        "packages/common/state_manager.py",
+        # The suite imports the #2548 `Lanes` fixture for its real-repair case.
+        "tests/test_state_index_retention.py",
+    ):
+        assert suite in select_tests([source], repo_root=Path(".")), source
 
 
 def test_node22_systemd_units_select_the_owner_without_collect_only() -> None:

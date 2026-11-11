@@ -224,9 +224,16 @@ exact-cycle wrapper（`scripts/ops/node22-run-cycle-once.sh`）持有 timer 期�
 `timer_stopped` 属预期：它会暂停 timer、等 pass 结束、跑完再自己恢复 timer（见
 [`known-issues-pipeline.md`](known-issues-pipeline.md#85-node-22-scheduler-stuck-after-missing-forcing-artifact)
 的 exact-cycle wrapper 说明）。
+state-index 自动剪枝（`nhms-scheduler-state-index-prune.service`，每日 06:30 UTC，#3121）
+持有 timer 期间报一次 `timer_stopped` 同样属预期：它停调度器与 provider-refresh 的 timer、
+等 pass 结束后 enforce，再自己恢复它停掉的 timer，冻结窗口通常只有几十秒（见
+[`known-issues-state-index.md`](known-issues-state-index.md#812-state-index-容量与-prune-retention2548)
+的"自动剪枝"）。
 处置：start 之前先确认没有 wrapper 在跑（`pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'`）——有就等它
-退出，不要手工 start；没有 wrapper 在跑时，查 journal 里 timer 最后一次状态跃迁，再按
-§3.1 恢复（wrapper 被 SIGKILL/OOM 打断后 timer 会一直停着，也走这条）。
+退出，不要手工 start；再确认自动剪枝没在跑（`pgrep -u "$(id -u)" -f node22_state_index_auto_prune`
+为空）——有就等它自己恢复，不要手工 start。两者都不在跑时，查 journal 里 timer 最后一次状态
+跃迁，再按 §3.1 恢复（wrapper 或自动剪枝被 SIGKILL/OOM 打断后 timer 会一直停着，也走这条；
+自动剪枝只 start 它停掉的 timer，判断依据见它 journal 里的 `timer_stopped` / `timer_restored`）。
 
 ##### stall-scheduler-service-failed
 

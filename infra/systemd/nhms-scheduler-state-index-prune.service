@@ -1,0 +1,21 @@
+[Unit]
+Description=NHMS node-22 state-index prune-retention auto-enforce at the scheduler pass boundary
+OnFailure=nhms-node22-unit-failure-alert@%n.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/scratch/frd_muziyao/NWM
+EnvironmentFile=/scratch/frd_muziyao/NWM/infra/env/compute.scheduler-dbfree.env
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=NHMS_STATE_INDEX_AUTO_PRUNE_RECEIPT_ROOT=/scratch/frd_muziyao/nhms-prod/workspace/state-index-repair/auto-prune
+Environment=NHMS_SCHEDULER_STATE_INDEX_REPAIR_ARCHIVE_ROOT=/scratch/frd_muziyao/nhms-prod/workspace/state-index-repair/archives
+Environment=NHMS_SCHEDULER_STATE_INDEX_REPAIR_RECEIPT_ROOT=/scratch/frd_muziyao/nhms-prod/workspace/state-index-repair/receipts
+ExecStart=/scratch/frd_muziyao/NWM/.venv/bin/python -m scripts.node22_state_index_auto_prune
+StandardOutput=journal
+StandardError=journal
+# Above the 18000 s bounded wait plus enforce; SIGTERM on timeout lets the
+# module restore every timer it stopped before exiting.
+TimeoutStartSec=21600
+KillSignal=SIGTERM
+# From SIGTERM: remaining enforce (60 s) + one start per timer (2 x 60 s) + receipt (10 s) = 190 s.
+TimeoutStopSec=300

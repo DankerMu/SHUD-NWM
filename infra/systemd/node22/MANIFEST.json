@@ -92,6 +92,16 @@
       "sha256": "bd83115e3cb513ba9388a296bb38d49b0d608cd13bc2687aacbc2e2eaa9713be"
     },
     {
+      "deployed_relative_path": "nhms-scheduler-state-index-prune.service",
+      "tracked_path": "infra/systemd/nhms-scheduler-state-index-prune.service",
+      "sha256": "b1524f0ba48ce48a040c346651124a076ed7c3c4c5d83aae21e7119f7bcfdc60"
+    },
+    {
+      "deployed_relative_path": "nhms-scheduler-state-index-prune.timer",
+      "tracked_path": "infra/systemd/nhms-scheduler-state-index-prune.timer",
+      "sha256": "01a80802d7ebc6f162b4540e51cb43ed06dc2433643fe705a7c1f92bfc13b370"
+    },
+    {
       "deployed_relative_path": "nhms-slurm-gateway.service",
       "tracked_path": "infra/systemd/node22/nhms-slurm-gateway.service",
       "sha256": "56a54b2eff37d52002ecbb6b6dd02f143b3ad61941e9fd1971f7366a270b6afb"
