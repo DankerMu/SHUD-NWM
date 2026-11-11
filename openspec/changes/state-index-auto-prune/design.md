@@ -110,7 +110,7 @@
 - `tests/test_node22_entrypoint_invariant_python_scan.py:274` 的 governed 列表。
 - `scripts/select_ci_tests_rules.py:201-203`：按 watch 的写法，加入新的 script/unit/test 规则；同步 `tests/test_select_ci_tests.py`。
 - spec：`openspec/specs/node22-unit-failure-alert/spec.md` 把"恰好六个 oneshot"改为七个（本 change 带 MODIFIED delta）。
-- runbook：8.12（Stage 2 决策、安装/启用、退出码表、`timer_stopped` 期间的预期行为）；`stuck-detection.md` 的 `timer_stopped` 处置（auto-prune 持有 timer 时属预期，先 `pgrep -f node22_state_index_auto_prune` 再 start）。
+- runbook：8.12（Stage 2 决策、安装/启用、退出码表、`timer_stopped` 期间的预期行为）；`stuck-detection.md` 的 `timer_stopped` 处置（auto-prune 持有 timer 时属预期，先确认 `systemctl --user is-active nhms-scheduler-state-index-prune.service` 为 `inactive` 或 `failed` 再 start）。
 - 现有的 stall probe、cycle-once wrapper、watch 都不改。
 
 ## Must preserve

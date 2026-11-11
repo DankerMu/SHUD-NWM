@@ -185,9 +185,10 @@ in this runbook and its siblings relies on this:
   `129`/`130`/`131`/`143` on HUP/INT/QUIT/TERM (the signal is forwarded to the
   planner — INT and QUIT as TERM — and the wrapper waits for it first).
 - Precondition: the state-index auto-prune must not be running —
-  `systemctl --user is-active nhms-scheduler-state-index-prune.service` must not print `active` or
-  `activating` (it is a oneshot: `activating` while it runs; `inactive` and
-  `failed` both mean not running). It runs daily at 06:30 UTC with up to
+  `systemctl --user is-active nhms-scheduler-state-index-prune.service` must print `inactive` or
+  `failed` (it is a oneshot: `activating` while it runs and possibly
+  `deactivating` while it restores the timers on a stop; only `inactive` and
+  `failed` mean not running). It runs daily at 06:30 UTC with up to
   15 min jitter (#3121) and holds `nhms-compute-scheduler.timer` stopped for
   the remaining time of the in-flight pass (its wait is capped at 5 h) plus
   its gate and enforce — up to hours, not seconds. A wrapper started in that
@@ -204,7 +205,7 @@ in this runbook and its siblings relies on this:
   [`stuck-detection.md`](stuck-detection.md#stall-timer-stopped)).
 - Other runbooks that stop the timer by hand as a write window first check
   that no wrapper is running and that the state-index auto-prune is not
-  running (`systemctl --user is-active nhms-scheduler-state-index-prune.service` not `active`/`activating`),
+  running (`systemctl --user is-active nhms-scheduler-state-index-prune.service` must print `inactive` or `failed`),
   because both restart the timers they stopped when they exit. For the
   wrapper use the anchored form `pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'`:
   a bare `pgrep -f node22-run-cycle-once` also matches the shell that runs the

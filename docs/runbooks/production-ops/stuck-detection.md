@@ -232,7 +232,7 @@ state-index 自动剪枝（`nhms-scheduler-state-index-prune.service`，每日 0
 的"自动剪枝"）。
 处置：start 之前先确认没有 wrapper 在跑（`pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'`）——有就等它
 退出，不要手工 start；再确认自动剪枝没在跑（`systemctl --user is-active nhms-scheduler-state-index-prune.service`
-不是 `active`/`activating`）——在跑就等它自己恢复，不要手工 start。两者都不在跑时，查 journal 里 timer 最后一次状态
+必须是 `inactive` 或 `failed`）——在跑就等它自己恢复，不要手工 start。两者都不在跑时，查 journal 里 timer 最后一次状态
 跃迁，再按 §3.1 恢复（wrapper 或自动剪枝被 SIGKILL/OOM 打断后 timer 会一直停着，也走这条；
 自动剪枝只 start 它停掉的 timer，判断依据见它 journal 里的 `timer_stopped` / `timer_restored`）。
 
@@ -430,7 +430,7 @@ fence 是 `prepare-file-journal-rollback` **有意**写下的暂停，但 runboo
 处置：打开最新一趟产物，读 `rollback_fence.reason` 与 `rollback_fence.receipt_id`。
 
 - `file_journal_rollback_fence_prepared`：先确认没有 `node22-run-cycle-once.sh` 在跑（`pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'` 为空），
-  且 state-index 自动剪枝没在跑（`systemctl --user is-active nhms-scheduler-state-index-prune.service` 不是 `active`/`activating`），再停 `nhms-compute-scheduler.timer`，确认旧 writer
+  且 state-index 自动剪枝没在跑（`systemctl --user is-active nhms-scheduler-state-index-prune.service` 必须是 `inactive` 或 `failed`），再停 `nhms-compute-scheduler.timer`，确认旧 writer
   已停，再用 `receipt_id` 按上面两份 runbook 执行 `complete-file-journal-rollforward`；成功
   receipt 落盘、fence 被消费后再恢复 timer。
 - `file_journal_rollback_fence_invalid`：fence / preparation receipt 校验失败或读不出，

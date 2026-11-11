@@ -315,7 +315,7 @@ cd /scratch/frd_muziyao/NWM && .venv/bin/python -m scripts.node22_publish_merged
 cat "$NHMS_SCHEDULER_PROVIDER_STORE_ROOT/scheduler/succession/$SUCCESSION_ID/publish-dry-run.json"
 
 # 3) 先确认没有 `node22-run-cycle-once.sh` 在跑（`pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'` 为空）——它结束时会自动恢复 timer，会打穿本窗口；
-#    再确认 state-index 自动剪枝没在跑（`systemctl --user is-active nhms-scheduler-state-index-prune.service` 不是 `active`/`activating`）——它结束时同样会恢复它停掉的 timer；
+#    再确认 state-index 自动剪枝没在跑（`systemctl --user is-active nhms-scheduler-state-index-prune.service` 必须是 `inactive` 或 `failed`）——它结束时同样会恢复它停掉的 timer；
 #    调度器 timer 先停（systemctl --user stop nhms-compute-scheduler.timer），确认 service 不在跑，再 apply；
 #    参数与第 1 步逐字相同，只多一个 --apply。发布并跑完 refresh 之后再把 timer 恢复原状态
 systemctl --user is-active nhms-compute-scheduler.timer nhms-compute-scheduler.service || true

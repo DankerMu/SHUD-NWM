@@ -447,7 +447,7 @@ auto-retry 拒绝分支上的 `FileJournalRetryService.mark_permanently_failed`
 **人工恢复**（唯一支持的路径；顺序不可省）：
 
 1. 先确认没有 `node22-run-cycle-once.sh` 在跑（`pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'` 为空）——它结束时会自动恢复 timer，会打穿本窗口；
-   再确认 state-index 自动剪枝没在跑（`systemctl --user is-active nhms-scheduler-state-index-prune.service` 不是 `active`/`activating`）——它结束时同样会恢复它停掉的 timer。
+   再确认 state-index 自动剪枝没在跑（`systemctl --user is-active nhms-scheduler-state-index-prune.service` 必须是 `inactive` 或 `failed`）——它结束时同样会恢复它停掉的 timer。
    再 `systemctl --user stop nhms-compute-scheduler.timer`，确认
    `nhms-compute-scheduler.service` 为 `inactive`。
 2. 备份：把该 `job_id` 的 flat direct、by-cycle direct 和 anchor 三个文件拷到
@@ -729,7 +729,7 @@ timer 都有 `timer_stopped unit=<timer>`，已恢复的有 `timer_restored unit
 ```bash
 journalctl --user -u nhms-scheduler-state-index-prune.service -n 200 --no-pager \
   | grep -E 'timer_(stopped|restored|restore_failed|left_alone)'
-systemctl --user is-active nhms-scheduler-state-index-prune.service   # 不得是 active/activating（还在跑就等它自己恢复）
+systemctl --user is-active nhms-scheduler-state-index-prune.service   # 必须是 inactive 或 failed（还在跑就等它自己恢复）
 pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'   # 必须无输出
 systemctl --user start nhms-compute-scheduler.timer               # 仅当它停了没恢复
 systemctl --user start nhms-scheduler-file-provider-refresh.timer # 仅当它停了没恢复
@@ -753,15 +753,15 @@ cat /scratch/frd_muziyao/nhms-prod/workspace/state-index-repair/receipts/latest.
 
 **与人工写窗口的关系**：自动剪枝每日 06:30 UTC 触发（`RandomizedDelaySec=15m`，即最晚约
 06:45 才开始），会停、启 scheduler 与 provider-refresh timer。所以**任何停 scheduler timer 的人工
-写窗口**，停之前除了确认 wrapper 不在跑，还要确认 `systemctl --user is-active nhms-scheduler-state-index-prune.service` 不是
-`active`/`activating`（oneshot 运行期间是 `activating`；`inactive`/`failed` 都表示没在跑，
+写窗口**，停之前除了确认 wrapper 不在跑，还要确认 `systemctl --user is-active nhms-scheduler-state-index-prune.service` 必须是
+`inactive` 或 `failed`（oneshot 运行期间是 `activating`，收尾恢复 timer 时可能是 `deactivating`，都算在跑；
 脚本里要比对打印的状态而不是退出码）。窗口可能较长、会跨过 06:30–06:45 UTC 时，开窗时再
 `systemctl --user stop nhms-scheduler-state-index-prune.timer`，窗口结束、scheduler timer 恢复之后
 再 `systemctl --user start nhms-scheduler-state-index-prune.timer`——`Persistent=true` 会在
 start 时补跑错过的那一次。
 
 **与人工工具的关系**：人工"流程"开始前先确认自动剪枝没在跑（`systemctl --user is-active
-nhms-scheduler-state-index-prune.service` 不是 `active`/`activating`）。recalibration clone
+nhms-scheduler-state-index-prune.service` 必须是 `inactive` 或 `failed`）。recalibration clone
 （`scripts/node22_clone_direct_grid_cutover_states.py`）与 enforce 共用 `_update_lock`、是串行的，
 但它是一次性人工工具，**不要与自动剪枝同时跑**：clone 前先看
 `systemctl --user list-timers nhms-scheduler-state-index-prune.timer`，窗口会撞上 06:30 UTC
@@ -820,7 +820,7 @@ echo "retention_days=$N"
   prune-retention --retention-days "$N" > /tmp/prune-dryrun.json
 
 # 2) 审核（见下）后，冻结 writer 再 enforce
-systemctl --user is-active nhms-scheduler-state-index-prune.service   # 不得是 active/activating（自动剪枝在跑就等它结束）
+systemctl --user is-active nhms-scheduler-state-index-prune.service   # 必须是 inactive 或 failed（自动剪枝在跑就等它结束）
 # 先确认没有 `node22-run-cycle-once.sh` 在跑（`pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'` 为空）——它结束时会自动恢复 timer，会打穿本窗口
 pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'                              # 必须无输出
 systemctl --user stop nhms-compute-scheduler.timer
