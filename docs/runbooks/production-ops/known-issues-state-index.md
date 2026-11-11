@@ -479,9 +479,54 @@ fail-closed。2026-09-25 的 node-22 private index 是 9,950 条 / 203,581 个 J
 pass evidence 已是 4,526,683 / 5,000,000 B、含 384 个这种块）。字段：
 `entry_count/max_entries`、`json_nodes/max_json_nodes`、`index_bytes/max_bytes`、
 `utilization_ratio`（三者最大值）、`warning_threshold`（0.70）、`warning`。
-`warning` 为 true 时 `packages.common.state_manager` 每次加载打一条 WARNING
-（`... run the prune-retention repair (known-issues-state-index 8.12)`）。这只是
-证据，不会让任何 reader / publisher 比原有硬上限更早失败。**`warning` 出现就跑本节
+`warning` 为 true 时 `packages.common.state_manager` 每次发布、每次未缓存的加载各打
+一条 WARNING（缓存读取不打）。格式（#3118 起）：
+
+```text
+state snapshot index [local-path] index_fp=<8 hex> is at <x>% of a hard limit (entries a/b, json_nodes c/d, bytes e/f); run the prune-retention repair (known-issues-state-index 8.12)
+```
+
+`[local-path]` 是原有的脱敏标签（两份 index 都是它）；`index_fp` 是调用点**收到的
+index uri 字符串**的 `sha256(str(uri))[:8]`——纯字符串哈希，不 `resolve()`、不碰文件
+系统，行内不含任何路径。同一个文件换一种写法（尾斜杠、`..`、软链别名）就是另一个
+`index_fp`；evidence 与 publish 结果里的 `index` / `destination` 仍是 `[local-path]`，
+`capacity` 结构不变。把某个 uri 映射成日志里的标签（node-22，精确解释器，禁止 `uv run`）：
+
+```bash
+cd /scratch/frd_muziyao/NWM && /scratch/frd_muziyao/NWM/.venv/bin/python -c 'import sys; from packages.common.state_manager import state_index_log_label as f; print(f(sys.argv[1]))' "<uri>"
+```
+
+`<uri>` 按调用点填确切字符串（2026-11-11 读 node-22 `compute.scheduler-dbfree.env`：
+`OBJECT_STORE_ROOT=/scratch/frd_muziyao/nhms-prod/object-store`、
+`NHMS_OBJECT_STORE_COPYBACK_ROOT=/ghdc/data/nwm/object-store`、
+`NHMS_SCHEDULER_STATE_INDEX=/ghdc/data/nwm/object-store/scheduler/state-index/index-last.json`、
+`NHMS_SLURM_SCHEDULER_STATE_INDEX=/scratch/frd_muziyao/nhms-prod/object-store/scheduler/state-index/index-last.json`；
+两个根 `readlink -f` 都等于自身）：
+
+| index | 调用点 | 收到的 uri 字符串 | 当时的标签 |
+|---|---|---|---|
+| shared / destination | scheduler pass 的 reader（`services/orchestrator/scheduler_core.py` `_db_free_state_manager_from_config`、`_db_free_state_index_provider`） | `NHMS_SCHEDULER_STATE_INDEX` 原值（`ProductionSchedulerConfig` 只去首尾空白）：`/ghdc/data/nwm/object-store/scheduler/state-index/index-last.json` | `index_fp=a3335ab0` |
+| shared / destination | copyback 发布（`services/orchestrator/run_tree_copyback.py`：`Path(NHMS_OBJECT_STORE_COPYBACK_ROOT).resolve() / "scheduler/state-index/index-last.json"` 的 `str()`） | `/ghdc/data/nwm/object-store/scheduler/state-index/index-last.json` | `index_fp=a3335ab0` |
+| shared / destination | provider-refresh 的读取与发布（`scripts/scheduler_refresh/runner.py`，`compute.scheduler-provider-refresh.env` 的 `NHMS_SCHEDULER_STATE_INDEX` 去首尾空白） | 同上（2026-11-11 读数一致） | `index_fp=a3335ab0` |
+| private / reference | Slurm `state_save_qc` 作业里的 upsert / `set_usable_flag` 发布与读取（作业 env 的 `NHMS_SCHEDULER_STATE_INDEX` = `NHMS_SLURM_SCHEDULER_STATE_INDEX` 原值） | `/scratch/frd_muziyao/nhms-prod/object-store/scheduler/state-index/index-last.json` | `index_fp=f0e084bb` |
+| 任一 lane | `prune-retention --enforce` 发布（`resolve()` 后的根 + `scheduler/state-index/index-last.json`） | 同上两行（两根都是 realpath） | 同上 |
+
+env 一改（或根不再是 realpath），标签就跟着变；以命令现算为准，表里的值只是当时的读数。
+
+**private lane 的覆盖**（#3118 调查）：scheduler 进程（pass 与 copyback）只评估 shared 那份——
+它读的 `NHMS_SCHEDULER_STATE_INDEX` 就是 shared index；copyback merge 读 private
+source 时直接走 `read_provider_snapshot` + `_validate_state_snapshot_index`，**不做**
+capacity 评估，只在发布 destination 时打 WARNING。private 那份**会**被评估，但只在 Slurm
+`state_save_qc` 作业里（upsert / `set_usable_flag` 的发布与读取），WARNING 落在各作业自己的
+stderr（`infra/sbatch/save_state_snapshot*.sbatch` 的 `#SBATCH --error`），没有任何东西盯这些
+文件，scheduler journal 里也从不出现。所以调度日志里的 capacity WARNING 只会是 shared lane，
+**private lane 唯一的告警面是下面的每日 capacity watch**。
+两份 index 条目数相同时 private 的 `json_nodes` 也更高：state-save 的 upsert 与随后的
+`set_usable_flag` 都把读时注入的 `index_generated_at` / `object_evidence`（null）写回每个条目
+（每条 +2 节点），copyback 会去掉这两个字段，shared 不带。2026-11-11 dry-run：同为 12,154 条，
+reference 252,205 vs destination 227,897 节点，差 24,308 = 2 × 12,154（另见下面"回弹与余量"）。
+
+这只是证据，不会让任何 reader / publisher 比原有硬上限更早失败。**`warning` 出现就跑本节
 流程**；每日由下面的"定时 capacity watch"做只读 dry-run，告警即 unit 失败。
 
 **定时 capacity watch（#2653）**：node-22 user 级
@@ -499,6 +544,25 @@ receipt 每 lane 记 `checksum_valid`、`entry_count_before`、`removed_count`�
 `removed_state_ids_sha256`、`retention_days`、`cycle_lag_hours` 与完整
 `capacity_before/after`，**不含** `removed_state_ids` 与 `groups`。同一份 JSON 先打到
 stdout（进 journal）再落盘，所以落盘失败也不丢结论。
+
+**窗口按 lag 推导**（#3118）：watch 读 `NHMS_SCHEDULER_CYCLE_LAG_HOURS`，与 repair 用
+同一个 floor helper（`state_index_retention_floor_hours` / `minimum_state_index_retention_days`）：
+`retention_days = max(21, floor_hours // 24 + 1)`，`floor_hours = 336 + lag + 48`。它只会把
+窗口推宽到满足下面的"窗口下限"，不会绕过它。receipt 顶层 `retention_days_source`：
+
+| lag | floor_hours | retention_days | `retention_days_source` |
+|---|---|---|---|
+| 16 | 400 | 21 | `default` |
+| 119 | 503 | 21 | `default` |
+| 120 | 504 | 22 | `derived_from_cycle_lag` |
+| 294 | 678 | 29 | `derived_from_cycle_lag` |
+
+lag 未设、空串、非整数或负数时用 21 天、`default`，lag 仍由 repair 自己读同一个 env 并
+原样拒绝（exit 2，见下）。`retention_days_source` 每份 receipt 都有，只有 watch 连 repair
+模块都没导入成功的 exit 4 是 `null`；receipt 根不安全的 exit 2 也写推导值。各 lane 的
+`retention_days` 取自 repair summary，等于推导值；`schema_version` 仍是 v1（兼容性新增字段）。
+#3118 之前 watch 写死 21 天，lag ≥ 120 即每天 exit 2 `repair_retention_window_too_short`、
+容量告警失明（2026-11-09 起 lag 294）。
 
 退出码（非 0 即 unit failed，这是 node-22 唯一的告警面）：
 
@@ -543,13 +607,18 @@ cat /scratch/frd_muziyao/nhms-prod/workspace/state-index-repair/capacity-watch/l
 看 `status`、`exit_code`、`alerts[]`（每条 `lane` + `alert`）与 `error`。处置：
 
 - `capacity_warning`：按下面的"流程"跑人工 dry-run → 审核 → 冻结 writer → enforce；
-- `capacity_warning_unprunable`：剪完仍在 0.70 以上，说明 21 天窗口内的稳态已经顶到
-  阈值——这是容量设计问题，**升级到 #2541**，不要反复 enforce；
+- `capacity_warning_unprunable`：剪完仍在 0.70 以上。按 receipt 顶层 `retention_days_source` 分流：
+  - `default`：21 天窗口内的稳态已经顶到阈值——这是容量设计问题，**升级到 #2541**，
+    不要反复 enforce；
+  - `derived_from_cycle_lag`：是追赶期的 lag 把窗口撑大了（`lanes.<lane>.retention_days`
+    就是推导出的天数），不是稳态问题。等 lag 回落后看下一份 receipt 再评估；离硬上限
+    近、等不了时，按推导出的天数（不得更短，见"窗口下限"）走下面的"流程"人工 enforce；
 - `checksum_invalid`：走 8.9，修好前不要 prune；
 - `lane_empty` / `root_unavailable` / `provider_destination_missing`：根写错或 NFS 没挂，
   先查挂载与 env，别 enforce；
-- exit 2 的 `repair_cycle_lag_unset`：`compute.scheduler-dbfree.env` 缺 lag，补齐后
-  `systemctl --user start` 重跑；exit 4：看 journal 里的 `error_type`，按代码缺陷处理。
+- exit 2 的 `repair_cycle_lag_unset`：`compute.scheduler-dbfree.env` 缺 lag、lag 不是
+  整数（`error.field=NHMS_SCHEDULER_CYCLE_LAG_HOURS`）或为负（`error.field=cycle_lag_hours`），
+  修正后 `systemctl --user start` 重跑；exit 4：看 journal 里的 `error_type`，按代码缺陷处理。
 
 **Stage 2 决策：enforce 保持人工**（#2653）。0.70 告警到节点上限约 90k JSON 节点，
 按约 20.5 节点/条是约 4,400 条；两次 prune 间实测约 20 h 长 384 条，首次 prune 推算的
@@ -584,6 +653,10 @@ re-export）+ `cycle_lag_hours` + 48，否则 `repair_retention_window_too_short
 （evidence 带 `floor_hours`）。lag 取 `--cycle-lag-hours`，缺省读
 `NHMS_SCHEDULER_CYCLE_LAG_HOURS`；两者都没有（或非整数）→ `repair_cycle_lag_unset`。
 node-22 lag 16：下限 400 h，默认 21 天（504 h）通过，17 天是最小可用值。
+人工 enforce 的最小天数（与 watch 同一算法）：`floor_hours // 24 + 1`，即
+`(336 + lag + 48) // 24 + 1`；lag 294 → 678 // 24 + 1 = 29。lag ≥ 120 时默认 21 天会被拒，
+dry-run 与 enforce 都要显式带 `--retention-days <N>`（`N` 取该值或 watch receipt 里的
+`retention_days`，两步用同一个 `N`）。
 `--state-id/--run-id/...`、`--lane`、`--allow-missing-*` 对本操作一律拒绝。
 
 **流程**（node-22，provider 属主 `frd_muziyao`；根、archive、receipt 口径同 8.9）：

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import logging
 import os
@@ -1985,7 +1986,7 @@ class FileStateSnapshotIndexRepository:
             json_nodes=stats["json_nodes"],
             index_bytes=len(content),
         )
-        _warn_state_index_capacity(capacity, index=_state_index_uri_evidence(self.index_uri))
+        _warn_state_index_capacity(capacity, index_uri=self.index_uri)
         evidence = _state_index_evidence_safe(
             {
                 "status": "ready",
@@ -2038,7 +2039,7 @@ class FileStateSnapshotIndexRepository:
             json_nodes=stats["json_nodes"],
             index_bytes=len(content),
         )
-        _warn_state_index_capacity(capacity, index=_state_index_uri_evidence(self.index_uri))
+        _warn_state_index_capacity(capacity, index_uri=self.index_uri)
         evidence = _state_index_evidence_safe(
             {
                 "status": "ready",
@@ -2198,7 +2199,7 @@ def publish_state_snapshot_index(
     )
     if commit_observer is not None:
         commit_observer(committed)
-    _warn_state_index_capacity(capacity, index=_state_index_uri_evidence(destination_uri))
+    _warn_state_index_capacity(capacity, index_uri=destination_uri)
     return _state_index_evidence_safe(
         {
             "status": "published",
@@ -3318,6 +3319,23 @@ def _plan_state_index_repair(
     return plan
 
 
+def state_index_retention_floor_hours(cycle_lag_hours: int) -> int:
+    """Deepest scheduler warm-start lookback the prune window must strictly exceed (#2548, #3118).
+
+    The single source of the floor for the repair window check and the daily
+    capacity watch. ``cycle_lag_hours`` must already be a validated
+    non-negative ``int``; callers validate.
+    """
+
+    return MAX_LOOKBACK_HOURS + cycle_lag_hours + STATE_INDEX_RETENTION_STEP_BACK_HOURS
+
+
+def minimum_state_index_retention_days(cycle_lag_hours: int) -> int:
+    """Smallest whole number of days whose hours strictly exceed the floor (#3118)."""
+
+    return state_index_retention_floor_hours(cycle_lag_hours) // 24 + 1
+
+
 def _state_index_retention_window(*, retention_days: Any, cycle_lag_hours: Any) -> dict[str, Any]:
     """Validate the prune window against the deepest scheduler lookup (#2548).
 
@@ -3328,7 +3346,7 @@ def _state_index_retention_window(*, retention_days: Any, cycle_lag_hours: Any) 
         raise _state_index_repair_error("repair_cycle_lag_unset", field="cycle_lag_hours")
     if isinstance(retention_days, bool) or not isinstance(retention_days, int):
         raise _state_index_repair_error("repair_retention_days_invalid", field="retention_days")
-    floor_hours = MAX_LOOKBACK_HOURS + cycle_lag_hours + STATE_INDEX_RETENTION_STEP_BACK_HOURS
+    floor_hours = state_index_retention_floor_hours(cycle_lag_hours)
     window = {
         "retention_days": retention_days,
         "retention_hours": retention_days * 24,
@@ -4905,13 +4923,32 @@ def _state_index_capacity(*, entry_count: int, json_nodes: int, index_bytes: int
     }
 
 
-def _warn_state_index_capacity(capacity: Mapping[str, Any], *, index: str) -> None:
+def _state_index_fingerprint(uri: str | Path) -> str:
+    """Non-reversible 8-hex tag of the index uri string a call site received (#3118).
+
+    A pure string hash: no ``resolve()``, no filesystem access, cannot raise.
+    The same file reached through two spellings yields two tags by design.
+    """
+
+    return hashlib.sha256(str(uri).encode("utf-8")).hexdigest()[:8]
+
+
+def state_index_log_label(uri: str | Path) -> str:
+    """The capacity WARNING's index label: redacted kind plus ``index_fp`` (#3118).
+
+    Runbook 8.12 calls this to map a logged ``index_fp`` back to an index.
+    """
+
+    return f"{_state_index_uri_evidence(uri)} index_fp={_state_index_fingerprint(uri)}"
+
+
+def _warn_state_index_capacity(capacity: Mapping[str, Any], *, index_uri: str | Path) -> None:
     if capacity.get("warning"):
         logger.warning(
             "state snapshot index %s is at %.1f%% of a hard limit "
             "(entries %s/%s, json_nodes %s/%s, bytes %s/%s); run the prune-retention "
             "repair (known-issues-state-index 8.12)",
-            index,
+            state_index_log_label(index_uri),
             100.0 * float(capacity["utilization_ratio"]),
             capacity["entry_count"],
             capacity["max_entries"],

@@ -505,3 +505,160 @@ def test_receipt_is_bounded_and_rotation_keeps_newest_30(
     assert len(stamped) == 30
     assert old[0] not in names and old[1] in names  # only the oldest one rotated out
     assert "notes.txt" in names and "20260101T000000Z.json.bak" in names and "latest.json" in names
+
+
+# --- #3118 window derived from the scheduler cycle lag ----------------------
+#
+# Expected windows come from the design's boundary table (design.md §2): the
+# smallest whole day count whose hours strictly exceed 336 + lag + 48, never
+# below the 21-day default.
+
+
+@pytest.mark.parametrize(
+    ("lag", "days", "source"),
+    [
+        ("16", 21, "default"),
+        ("119", 21, "default"),
+        ("120", 22, "derived_from_cycle_lag"),
+        ("294", 29, "derived_from_cycle_lag"),
+    ],
+)
+def test_window_is_derived_from_cycle_lag_and_repair_still_reads_the_lag_itself(
+    lag: str,
+    days: int,
+    source: str,
+    watch_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv(repair.CYCLE_LAG_HOURS_ENV, lag)
+    calls = _fake_repair(monkeypatch, _summary())
+
+    code, verdict, _ = _run(capsys)
+
+    assert code == 0 and verdict["status"] == "healthy"
+    assert len(calls) == 1
+    assert calls[0]["retention_days"] == days
+    assert calls[0]["cycle_lag_hours"] is None  # the repair reads the same env itself
+    assert verdict["retention_days_source"] == source
+    assert verdict["schema_version"] == "nhms.scheduler.state_index_capacity_watch_receipt.v1"
+    assert _latest(watch_root)["retention_days_source"] == source
+
+
+@pytest.mark.parametrize(("lag", "days"), [("120", 22), ("294", 29)])
+def test_real_catch_up_lag_is_evaluated_not_refused(
+    lag: str,
+    days: int,
+    lanes: Lanes,
+    watch_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    entries = _prunable(lanes)
+    lanes.publish(entries, destination=entries[10:])
+    lanes.apply_env(monkeypatch)
+    monkeypatch.setenv(repair.CYCLE_LAG_HOURS_ENV, lag)
+    reference_before = lanes.reference_index.read_bytes()
+    destination_before = lanes.destination_index.read_bytes()
+
+    code, verdict, _ = _run(capsys)
+
+    assert code in (0, 1), verdict
+    assert verdict["status"] in ("healthy", "alert") and "error" not in verdict
+    assert verdict["retention_days_source"] == "derived_from_cycle_lag"
+    for name, count in (("reference", 81), ("destination", 71)):
+        lane = verdict["lanes"][name]
+        assert lane["retention_days"] == days and lane["cycle_lag_hours"] == int(lag)
+        assert lane["entry_count_before"] == count
+    assert lanes.reference_index.read_bytes() == reference_before
+    assert lanes.destination_index.read_bytes() == destination_before
+    assert _latest(watch_root) == verdict
+
+
+@pytest.mark.parametrize(
+    ("lag", "field"),
+    [
+        (None, "cycle_lag_hours"),
+        ("", "cycle_lag_hours"),
+        ("not-an-int", "NHMS_SCHEDULER_CYCLE_LAG_HOURS"),
+        ("-1", "cycle_lag_hours"),
+    ],
+)
+def test_real_invalid_cycle_lag_keeps_the_repair_refusal_exit_2(
+    lag: str | None,
+    field: str,
+    lanes: Lanes,
+    watch_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    entries = _prunable(lanes)
+    lanes.publish(entries)
+    lanes.apply_env(monkeypatch)
+    if lag is None:
+        monkeypatch.delenv(repair.CYCLE_LAG_HOURS_ENV)
+    else:
+        monkeypatch.setenv(repair.CYCLE_LAG_HOURS_ENV, lag)
+    before = _fs_fingerprint(lanes.root)
+
+    code, verdict, _ = _run(capsys)
+
+    assert code == 2  # never the watch's own exit 4
+    assert verdict["status"] == "refused" and verdict["exit_code"] == 2
+    assert verdict["error"] == {"reason": "repair_cycle_lag_unset", "field": field}
+    assert verdict["retention_days_source"] == "default"
+    assert _fs_fingerprint(lanes.root) == before
+    assert _latest(watch_root) == verdict
+
+
+def test_unsafe_receipt_root_receipt_carries_the_derived_source(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    calls = _fake_repair(monkeypatch, _summary())
+    monkeypatch.delenv(watch.RECEIPT_ROOT_ENV, raising=False)
+    monkeypatch.setenv(repair.CYCLE_LAG_HOURS_ENV, "294")
+
+    code, verdict, _ = _run(capsys)
+
+    assert code == 2 and verdict["status"] == "refused"
+    assert verdict["error"] == {"reason": "receipt_root_unset", "field": watch.RECEIPT_ROOT_ENV}
+    assert verdict["retention_days_source"] == "derived_from_cycle_lag"
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("outcome", "exit_code"),
+    [
+        (repair.RepairIncompleteError(PREIMAGE, {"field": "index"}, summary={}), 3),
+        (KeyError("lanes"), 4),
+    ],
+)
+def test_incomplete_and_unexpected_receipts_carry_the_derived_source(
+    outcome: BaseException,
+    exit_code: int,
+    watch_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv(repair.CYCLE_LAG_HOURS_ENV, "294")
+    calls = _fake_repair(monkeypatch, outcome)
+
+    code, verdict, _ = _run(capsys)
+
+    assert code == exit_code and verdict["status"] == "refused"
+    assert calls[0]["retention_days"] == 29
+    assert verdict["retention_days_source"] == "derived_from_cycle_lag"
+    assert _latest(watch_root) == verdict
+
+
+def test_import_failure_receipt_has_null_retention_days_source(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv(repair.CYCLE_LAG_HOURS_ENV, "294")
+    monkeypatch.delattr(sys.modules["scripts"], "scheduler_state_index_repair")
+    monkeypatch.setitem(sys.modules, "scripts.scheduler_state_index_repair", None)
+
+    code, verdict, _ = _run(capsys)
+
+    assert code == 4 and verdict["status"] == "refused"
+    assert "retention_days_source" in verdict and verdict["retention_days_source"] is None

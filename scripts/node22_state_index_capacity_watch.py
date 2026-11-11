@@ -12,6 +12,11 @@ Environment:
 
 * ``OBJECT_STORE_ROOT`` / ``NHMS_OBJECT_STORE_COPYBACK_ROOT`` / ``OBJECT_STORE_PREFIX``
   / ``NHMS_SCHEDULER_CYCLE_LAG_HOURS`` — as for the repair CLI
+* the prune window is ``max(21, floor_hours // 24 + 1)`` days, ``floor_hours``
+  from the repair's own floor helper and that lag (#3118); an unset or invalid
+  lag keeps 21 days and the repair refuses it. The receipt's top-level
+  ``retention_days_source`` is ``default`` or ``derived_from_cycle_lag``
+  (``null`` only when the repair module failed to import)
 * ``NHMS_STATE_INDEX_CAPACITY_WATCH_RECEIPT_ROOT`` — existing owner-private
   receipt directory (``--receipt-root`` overrides; never created here)
 
@@ -40,6 +45,8 @@ LANES = ("reference", "destination")
 PREIMAGE_CHANGED = "provider_preimage_changed"
 MAX_ATTEMPTS = 3
 RETRY_DELAY_SECONDS = 5
+SOURCE_DEFAULT = "default"
+SOURCE_DERIVED = "derived_from_cycle_lag"
 KEEP_RECEIPTS = 30
 LATEST_NAME = "latest.json"
 _RECEIPT_NAME = re.compile(r"^\d{8}T\d{6}Z\.json$")
@@ -56,10 +63,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         # Imported here so an import failure is exit 4, never an alert-shaped exit 1.
         from packages.common import safe_fs
+        from packages.common.state_manager import minimum_state_index_retention_days
         from scripts import scheduler_state_index_repair as repair
     except Exception as error:  # noqa: BLE001 - any import failure is a watch failure
-        return _publish(_refused(started, 4, _unexpected(error), attempts=0), None, None)
+        return _publish(_refused(started, 4, _unexpected(error), attempts=0, source=None), None, None)
     args = build_parser().parse_args(argv)
+    retention_days, source = _retention_window(repair, minimum_state_index_retention_days)
     root: Path | None = None
     attempts = 0
     try:
@@ -72,7 +81,7 @@ def main(argv: list[str] | None = None) -> int:
         while True:
             attempts += 1
             try:
-                summary = _dry_run(repair)
+                summary = _dry_run(repair, retention_days)
                 break
             except repair.RepairIncompleteError:
                 raise
@@ -81,17 +90,39 @@ def main(argv: list[str] | None = None) -> int:
                     raise
                 time.sleep(RETRY_DELAY_SECONDS)
     except repair.RepairIncompleteError as error:
-        receipt = _refused(started, 3, _error(error), attempts=attempts)
+        receipt = _refused(started, 3, _error(error), attempts=attempts, source=source)
     except repair.RepairCliError as error:
-        receipt = _refused(started, 2, _error(error), attempts=attempts)
+        receipt = _refused(started, 2, _error(error), attempts=attempts, source=source)
     except Exception as error:  # noqa: BLE001 - a programming error must not look like an alert
-        receipt = _refused(started, 4, _unexpected(error), attempts=attempts)
+        receipt = _refused(started, 4, _unexpected(error), attempts=attempts, source=source)
     else:
-        receipt = _evaluated(started, summary, attempts=attempts)
+        receipt = _evaluated(started, summary, attempts=attempts, source=source)
     return _publish(receipt, root, safe_fs)
 
 
-def _dry_run(repair: Any) -> dict[str, Any]:
+def _retention_window(repair: Any, minimum_days: Any) -> tuple[int, str]:
+    """Widen the default window to the repair's floor for the current lag (#3118).
+
+    Parses the lag exactly as the repair's ``_env_cycle_lag_hours`` does. An
+    unset, non-integer, or negative lag keeps the default and is left for the
+    repair (which reads the same env) to refuse with its own reason and field.
+    """
+
+    default_days = repair.DEFAULT_STATE_INDEX_RETENTION_DAYS
+    value = os.getenv(repair.CYCLE_LAG_HOURS_ENV, "").strip()
+    try:
+        lag = int(value)
+    except ValueError:
+        return default_days, SOURCE_DEFAULT
+    if lag < 0:
+        return default_days, SOURCE_DEFAULT
+    minimum = minimum_days(lag)
+    if minimum <= default_days:
+        return default_days, SOURCE_DEFAULT
+    return minimum, SOURCE_DERIVED
+
+
+def _dry_run(repair: Any, retention_days: int) -> dict[str, Any]:
     return repair.repair_state_index(
         operation="prune-retention",
         reference_root=None,
@@ -106,12 +137,12 @@ def _dry_run(repair: Any) -> dict[str, Any]:
         valid_time=None,
         allow_missing_reference=False,
         allow_missing_destination=False,
-        retention_days=repair.DEFAULT_STATE_INDEX_RETENTION_DAYS,
+        retention_days=retention_days,
         cycle_lag_hours=None,
     )
 
 
-def _evaluated(started: datetime, summary: dict[str, Any], *, attempts: int) -> dict[str, Any]:
+def _evaluated(started: datetime, summary: dict[str, Any], *, attempts: int, source: str) -> dict[str, Any]:
     lanes: dict[str, Any] = {}
     alerts: list[dict[str, str]] = []
     raw_lanes = summary.get("lanes") if isinstance(summary.get("lanes"), dict) else {}
@@ -148,17 +179,24 @@ def _evaluated(started: datetime, summary: dict[str, Any], *, attempts: int) -> 
             alerts.append({"lane": name, "alert": "lane_empty"})
     exit_code = 1 if alerts else 0
     return {
-        **_header(started, "alert" if alerts else "healthy", exit_code, attempts=attempts),
+        **_header(started, "alert" if alerts else "healthy", exit_code, attempts=attempts, source=source),
         "alerts": alerts,
         "lanes": lanes,
     }
 
 
-def _refused(started: datetime, exit_code: int, error: dict[str, Any], *, attempts: int) -> dict[str, Any]:
-    return {**_header(started, "refused", exit_code, attempts=attempts), "alerts": [], "lanes": None, "error": error}
+def _refused(
+    started: datetime, exit_code: int, error: dict[str, Any], *, attempts: int, source: str | None
+) -> dict[str, Any]:
+    return {
+        **_header(started, "refused", exit_code, attempts=attempts, source=source),
+        "alerts": [],
+        "lanes": None,
+        "error": error,
+    }
 
 
-def _header(started: datetime, status: str, exit_code: int, *, attempts: int) -> dict[str, Any]:
+def _header(started: datetime, status: str, exit_code: int, *, attempts: int, source: str | None) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
         "started_at": _format_utc_seconds(started),
@@ -166,6 +204,7 @@ def _header(started: datetime, status: str, exit_code: int, *, attempts: int) ->
         "status": status,
         "exit_code": exit_code,
         "attempts": attempts,
+        "retention_days_source": source,
     }
 
 
