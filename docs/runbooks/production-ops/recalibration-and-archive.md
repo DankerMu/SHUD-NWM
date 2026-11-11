@@ -43,7 +43,10 @@ RUN_TAG=huai-2026081512   # 流域 + --cutover-time；每次调用换一个，re
   --cutover-time 2026081512 \
   --receipt "$RECEIPT_DIR/$RUN_TAG-dry-run.json"
 
-# 2) 逐项核对 dry-run receipt 后再执行（--apply）
+# 2) 逐项核对 dry-run receipt 后再执行（--apply）。不要与 state-index 自动剪枝同时跑：
+#    systemctl --user is-active nhms-scheduler-state-index-prune.service 不得是 active/activating；
+#    会撞上 06:30–06:45 UTC 时先 systemctl --user stop nhms-scheduler-state-index-prune.timer，
+#    clone 完再 start（见 known-issues-state-index 8.12 "与人工工具的关系"）
 /scratch/frd_muziyao/NWM/.venv/bin/python -m scripts.node22_clone_direct_grid_cutover_states \
   ... 同上 ... --apply \
   --receipt "$RECEIPT_DIR/$RUN_TAG-apply.json"
@@ -239,7 +242,10 @@ cd /scratch/frd_muziyao/NWM && { setsid nohup .venv/bin/python -m scripts.node22
   （`--pass-wait-seconds`，默认 14400；超时算失败，同一条命令续等）。它**从不** stop / kill service，不 enable /
   disable / mask 任何 unit，不装 drop-in 围栏；取而代之的是 clone / publish / refresh / finish 每步动手前都复查
   timer 与 service 均未在跑，发现有人中途启动了调度器就拒绝、该步什么都不写。
-  `begin` 之前先确认没有 `node22-run-cycle-once.sh` 在跑（`pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'` 为空）——它结束时会自动恢复 timer，会打穿本窗口（`begin` 还会把它持有的 timer 记成 `timer_was_active=false`，`finish` 之后 timer 会一直停着）。
+  `begin` 之前先确认没有 `node22-run-cycle-once.sh` 在跑（`pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'` 为空）——它结束时会自动恢复 timer，会打穿本窗口（`begin` 还会把它持有的 timer 记成 `timer_was_active=false`，`finish` 之后 timer 会一直停着）；
+  再确认 state-index 自动剪枝没在跑（`systemctl --user is-active nhms-scheduler-state-index-prune.service` 不是 `active`/`activating`）——它结束时同样会恢复它停掉的 timer，与 wrapper 同理会让 `begin` 记成 `timer_was_active=false`。succession 会跨过 06:30–06:45 UTC 时按
+  [`known-issues-state-index.md`](known-issues-state-index.md#812-state-index-容量与-prune-retention2548)
+  的"与人工写窗口的关系"先停 `nhms-scheduler-state-index-prune.timer`，`finish` 之后再 start。
   这是第一个会停、启调度器 timer 的工具；`scripts/install_node22_scheduler_file_provider_refresh.sh` 仍把该 timer
   当受保护对象（那个安装器只断言自己没改动它）。succession 持有 timer 期间 stall probe 报 `timer_stopped` 属预期。
   `finish` 对 timer 做了什么写在 `step-finish.json` 与 apply 报告的 `timer_action` 里：`started`，或
@@ -349,6 +355,7 @@ cd /scratch/frd_muziyao/NWM && .venv/bin/python -m scripts.node22_publish_merged
 cat "$NHMS_SCHEDULER_PROVIDER_STORE_ROOT/scheduler/succession/$SUCCESSION_ID/publish-dry-run.json"
 
 # 3) 先确认没有 `node22-run-cycle-once.sh` 在跑（`pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'` 为空）——它结束时会自动恢复 timer，会打穿本窗口；
+#    再确认 state-index 自动剪枝没在跑（`systemctl --user is-active nhms-scheduler-state-index-prune.service` 不是 `active`/`activating`）——它结束时同样会恢复它停掉的 timer；
 #    调度器 timer 先停（systemctl --user stop nhms-compute-scheduler.timer），确认 service 不在跑，再 apply；
 #    参数与第 1 步逐字相同，只多一个 --apply。发布并跑完 refresh 之后再把 timer 恢复原状态
 systemctl --user is-active nhms-compute-scheduler.timer nhms-compute-scheduler.service || true

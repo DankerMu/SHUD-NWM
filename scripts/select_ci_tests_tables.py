@@ -991,6 +991,8 @@ PRODUCTION_OPS_RUNBOOK_TESTS: tuple[str, ...] = (
     *NODE22_ENTRYPOINT_INVARIANT_TESTS,
     PYTHON_ENVIRONMENT_TRUTH_TEST,
     "tests/test_role_boundary_static.py",
+    # #3121: pins the anchored wrapper pgrep verbatim in known-issues-state-index 8.12.
+    "tests/test_node22_state_index_auto_prune.py",
 )
 # The helper owns the production-ops surface set (index page plus the
 # sub-runbook tree, pinned by index/tree mutual agreement). Every reader above

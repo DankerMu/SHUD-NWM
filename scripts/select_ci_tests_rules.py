@@ -5032,8 +5032,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (*CORE_SMOKE_TESTS, *NODE22_ENTRYPOINT_INVARIANT_TESTS),
     ),
     PathTestRule(
+        # #3121 reader edge: the auto-prune's anchored wrapper pgrep is pinned
+        # against this script's invocation shape.
         "scripts/ops/node22-run-cycle-once.sh",
-        ("tests/test_production_scheduler.py",),
+        ("tests/test_production_scheduler.py", NODE22_STATE_INDEX_AUTO_PRUNE_TEST),
     ),
     PathTestRule(
         # #1729 / #1480 / #2621: the runner is the executor the disposable-DB

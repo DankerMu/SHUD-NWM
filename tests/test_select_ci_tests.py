@@ -5004,6 +5004,24 @@ def test_state_index_auto_prune_units_and_module_select_the_auto_prune_suite() -
         assert suite in select_tests([source], repo_root=Path(".")), source
 
 
+def test_state_index_auto_prune_wrapper_pattern_readers_select_the_auto_prune_suite() -> None:
+    # #3121 reader edges: the suite pins the anchored wrapper pgrep verbatim in
+    # known-issues-state-index 8.12 and matches it against the wrapper's
+    # invocation shape, so both the runbook and the wrapper script reach it.
+    suite = "tests/test_node22_state_index_auto_prune.py"
+    assert suite in PRODUCTION_OPS_RUNBOOK_TESTS
+    for path in (
+        "docs/runbooks/production-ops/known-issues-state-index.md",
+        "docs/runbooks/current-production-ops.md",
+        PRODUCTION_OPS_RUNBOOK_HELPERS_PATH,
+        "scripts/ops/node22-run-cycle-once.sh",
+    ):
+        assert suite in select_tests([path], repo_root=Path(".")), path
+    assert "tests/test_production_scheduler.py" in select_tests(
+        ["scripts/ops/node22-run-cycle-once.sh"], repo_root=Path(".")
+    )
+
+
 def test_node22_systemd_units_select_the_owner_without_collect_only() -> None:
     # #1571 local-repair: before the exact rules the two systemd units matched
     # no PATH_TEST_RULES entry and (being infra/** non-python) selected nothing
@@ -5132,6 +5150,8 @@ def test_generated_roots_and_unscoped_runbooks_select_exactly_the_hard_gate_node
         "tests/test_node22_refresh_timer_health_history.py",
         "tests/test_node22_refresh_timer_health_installer.py",
         "tests/test_node22_refresh_timer_health_runbook_and_env.py",
+        # #3121: pins the anchored wrapper pgrep in known-issues-state-index 8.12.
+        "tests/test_node22_state_index_auto_prune.py",
         "tests/test_node27_coverage_freshness_alert.py",
         "tests/test_python_environment_truth.py",
         "tests/test_role_boundary_static.py",
@@ -8247,6 +8267,8 @@ def test_select_tests_routes_docs_only_changes_to_exactly_the_hard_gate_node() -
         "tests/test_node22_refresh_timer_health_history.py",
         "tests/test_node22_refresh_timer_health_installer.py",
         "tests/test_node22_refresh_timer_health_runbook_and_env.py",
+        # #3121: the auto-prune suite pins the anchored wrapper pgrep in 8.12.
+        "tests/test_node22_state_index_auto_prune.py",
         # #2473: fourth literal reader -- the coverage freshness alert suite (§11 codes).
         "tests/test_node27_coverage_freshness_alert.py",
         # #2472/#2473 round 1: capacity-check and topology sentence readers.
@@ -8906,9 +8928,10 @@ def test_patched_facade_importer_index_still_steers_select_tests_after_the_impor
         # gave the sub-runbook tree the identical row. #2323 took both to 9:
         # `docs/runbooks/` is a production-topology scan root, so the hard-gate
         # node rides along. #2532 took both to 11: the probe suite is five
-        # partitions, three of which read the probe section.
-        ("docs/runbooks/current-production-ops.md", "11"),
-        ("docs/runbooks/production-ops/service-bringup.md", "11"),
+        # partitions, three of which read the probe section. #3121 took both
+        # to 12: the auto-prune suite pins the anchored wrapper pgrep in 8.12.
+        ("docs/runbooks/current-production-ops.md", "12"),
+        ("docs/runbooks/production-ops/service-bringup.md", "12"),
         # The discrimination boundary. A single-target selection that is NOT the
         # meta-guard suite must stay false — 15 rules in today's table select
         # exactly one file, so a flag that merely counted targets would arm the

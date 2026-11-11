@@ -23,7 +23,8 @@ Flow (one run, no retries):
    the repair call is never interrupted between its two lane CASes.
 7. Always: start again every timer this run stopped, exactly once, with all
    three signals ignored while doing so. A timer this run did not stop is
-   never started.
+   never started. A signal that arrives as the restore begins is only
+   recorded (exit ``128+n``, ``action`` keeps the flow's result).
 
 Environment:
 
@@ -132,6 +133,9 @@ class _Run:
         self.enforce: dict[str, object] | None = None
         self.signal: int | None = None
         self.deferring = False
+        # Set on entering the restore (or by the handler's own raise): from then
+        # on a signal is only recorded, so SystemExit is raised at most once.
+        self.closing = False
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -165,21 +169,32 @@ def main(argv: list[str] | None = None) -> int:
         root: Path | None = None
         exit_code, action, error = 4, "error", None
         try:
-            root = repair._private_directory(
-                os.getenv(RECEIPT_ROOT_ENV, ""), env=RECEIPT_ROOT_ENV, required=True, kind="receipt"
-            )
-            exit_code, action, error = _flow(run, repair, retention_days)
-        except _Abort as abort:
-            exit_code, action, error = abort.exit_code, abort.action, abort.error
-        except repair.RepairCliError as refusal:
-            exit_code, action, error = 2, "refused", _error(refusal)
-        except SystemExit as exit_:
-            exit_code, action = int(exit_.code or 0), "interrupted"
-        except Exception as unexpected:  # noqa: BLE001 - a programming error must not look like an alert
-            exit_code, action, error = 4, "error", _unexpected(unexpected)
-        finally:
-            _ignore_signals()
-            _restore_timers(run)
+            try:
+                root = repair._private_directory(
+                    os.getenv(RECEIPT_ROOT_ENV, ""), env=RECEIPT_ROOT_ENV, required=True, kind="receipt"
+                )
+                exit_code, action, error = _flow(run, repair, retention_days)
+            except _Abort as abort:
+                exit_code, action, error = abort.exit_code, abort.action, abort.error
+            except repair.RepairCliError as refusal:
+                exit_code, action, error = 2, "refused", _error(refusal)
+            except SystemExit as exit_:
+                exit_code, action = int(exit_.code or 0), "interrupted"
+            except Exception as unexpected:  # noqa: BLE001 - a programming error must not look like an alert
+                exit_code, action, error = 4, "error", _unexpected(unexpected)
+            finally:
+                # A plain store before any call: Python-level handlers only run at
+                # call / loop boundaries, so a signal from here on is only recorded
+                # and can neither skip the restore nor escape before the receipt.
+                run.closing = True
+                try:
+                    _ignore_signals()
+                finally:
+                    _restore_timers(run)
+        except SystemExit:
+            # The signal landed inside one of the except bodies above; the
+            # restore has run, the exit code comes from run.signal below.
+            action = "interrupted"
         if run.restore_failed:
             exit_code = 5
         elif run.signal is not None:
@@ -458,8 +473,9 @@ def _install_signal_handlers(run: _Run) -> dict[int, object]:
     def handler(signum: int, _frame: object) -> None:
         if run.signal is None:
             run.signal = signum
-        if run.deferring:
+        if run.deferring or run.closing:
             return
+        run.closing = True
         _ignore_signals()
         raise SystemExit(128 + signum)
 

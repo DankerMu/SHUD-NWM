@@ -164,7 +164,8 @@ squeue -u "$USER" -o "%.18i %.20j %.2t %.10M %.10l %.6D %R"
 > [`recalibration-and-archive.md`](recalibration-and-archive.md) 的 5.7.1。
 > exact-cycle wrapper `scripts/ops/node22-run-cycle-once.sh` 也会自己停 / 启 timer（见
 > [`known-issues-pipeline.md`](known-issues-pipeline.md#85-node-22-scheduler-stuck-after-missing-forcing-artifact)）；
-> 本节的 rollout / rollback 在停 timer 之前都先确认它没在跑（`pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'` 为空）。
+> 本节的 rollout / rollback 在停 timer 之前都先确认它没在跑（`pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'` 为空），
+> 且 state-index 自动剪枝没在跑（`systemctl --user is-active nhms-scheduler-state-index-prune.service` 不是 `active`/`activating`；它结束时同样会恢复它停掉的 timer）。
 
 先用可逆的 runtime `ConditionPathExists` drop-in 围住调度器（2026-08-28 现场观察到
 `systemctl --user stop nhms-compute-scheduler.timer` 被另一个并发同用户维护会话
@@ -237,6 +238,14 @@ if pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\
   echo "rollout: node22-run-cycle-once.sh is running; wait for it to exit, then re-run this step" >&2
   exit 1
 fi
+#    Same for the state-index auto-prune (#3121): it restores the timers it
+#    stopped when it exits. Compare the printed state, not the exit code.
+case "$(systemctl --user is-active nhms-scheduler-state-index-prune.service || true)" in
+  active|activating)
+    echo "rollout: state-index auto-prune is running; wait for it to exit, then re-run this step" >&2
+    exit 1
+    ;;
+esac
 #    Stop the timer: any later start attempt is now condition-skipped (no
 #    rearm race). A concurrent same-user session CANNOT rearm the timer before
 #    this step completes, and even a later direct start is a skipped no-op.
@@ -550,6 +559,14 @@ if pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\
   echo "rollback: node22-run-cycle-once.sh is running; wait for it to exit, then re-run this step" >&2
   exit 1
 fi
+#    Same for the state-index auto-prune (#3121): it restores the timers it
+#    stopped when it exits. Compare the printed state, not the exit code.
+case "$(systemctl --user is-active nhms-scheduler-state-index-prune.service || true)" in
+  active|activating)
+    echo "rollback: state-index auto-prune is running; wait for it to exit, then re-run this step" >&2
+    exit 1
+    ;;
+esac
 systemctl --user stop nhms-compute-scheduler.timer
 SCHEDULER_STATE="$(systemctl --user is-active nhms-compute-scheduler.service || true)"
 case "$SCHEDULER_STATE" in

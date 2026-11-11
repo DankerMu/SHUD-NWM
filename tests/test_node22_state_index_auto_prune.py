@@ -5,7 +5,8 @@ log) driven through three fakes only at system boundaries:
 
 * a fake ``systemctl`` executable injected via ``NHMS_NODE22_SYSTEMCTL``
   (state files per unit, a busy/queued-job countdown, stop/start failure
-  switches, and an optional ``kill -TERM $PPID`` on the first ``start``);
+  switches, and an optional ``kill -TERM $PPID`` on the first ``stop`` or
+  ``start``);
 * a fake ``pgrep`` executable injected via ``NHMS_STATE_INDEX_AUTO_PRUNE_PGREP``
   (exit codes popped from a queue, or a hang for the timeout case);
 * ``scripts.scheduler_state_index_repair.repair_state_index`` replaced with a
@@ -14,8 +15,11 @@ log) driven through three fakes only at system boundaries:
 All three append to one event log, so call order is one sequence. Expected
 values come from design.md (flow 1-7, Required evidence 1-19, the receipt and
 systemd sections) and the runbook's anchored wrapper pattern, never from the
-module. The real-signal cases (11, 15, 16) run the module in a subprocess with
-a small driver so a broken handler cannot take the pytest process down.
+module. Case 20 (a signal at the restore boundary or inside main's error
+branch) extends design invariant 1 "timer 必恢复"; it is not a numbered design
+case. The real-signal cases (11, 15, 16 and the subprocess half of 20) run the
+module in a subprocess with a small driver so a broken handler cannot take the
+pytest process down.
 """
 
 from __future__ import annotations
@@ -91,6 +95,10 @@ case "$verb" in
     exit 0
     ;;
   stop)
+    if [ -f "$D/kill-on-stop" ]; then
+      rm -f "$D/kill-on-stop"
+      kill -TERM "$PPID"
+    fi
     [ -f "$D/fail-stop/$unit" ] && exit 1
     echo inactive > "$D/state/$unit"
     exit 0
@@ -138,9 +146,16 @@ def note(line):
         handle.write(line + "\\n")
 
 
+dry_runs = [0]
+
+
 def fake_repair(**kwargs):
     note("repair enforce=%s" % kwargs["enforce"])
     outcome = queue.pop(0) if len(queue) > 1 else queue[0]
+    if not kwargs["enforce"]:
+        dry_runs[0] += 1
+        if cfg.get("kill_on_dry_run") == dry_runs[0]:
+            os.kill(os.getpid(), signal.SIGTERM)
     if kwargs["enforce"] and cfg.get("kill_during_enforce"):
         os.kill(os.getpid(), signal.SIGTERM)
         note("repair enforce returned")
@@ -717,7 +732,10 @@ def test_e16_second_sigterm_during_restore_cannot_skip_a_timer(h: Harness, tmp_p
 
 
 def test_e16_first_sigterm_during_restore_after_a_normal_run_cannot_skip_a_timer(h: Harness, tmp_path: Path) -> None:
-    # No earlier signal: only the SIG_IGN set on entering the restore protects the loop.
+    # No earlier signal. `run.deferring` is still True after enforce, so even
+    # without the restore's SIG_IGN the handler would not raise here; what this
+    # pins is that the signal is ignored (not recorded) once the restore began.
+    # The failing-gate variant below has `deferring` False.
     (h.dir / "kill-on-start").write_text("", encoding="utf-8")
 
     result = _subprocess_run(h, tmp_path, {"outcomes": [_summary(), _summary(), _enforced()]})
@@ -728,6 +746,118 @@ def test_e16_first_sigterm_during_restore_after_a_normal_run_cannot_skip_a_timer
     assert receipt["timers_restored"] == [SCHED_TIMER, REFRESH_TIMER]
     # Ignored by design while restoring: the run's own outcome stands.
     assert result.returncode == 0 and receipt["action"] == "enforced" and receipt["signal"] is None, result.stderr
+
+
+def test_e16_first_sigterm_during_restore_after_a_failed_gate_cannot_skip_a_timer(h: Harness, tmp_path: Path) -> None:
+    # Enforce never started, so `run.deferring` is False. What this pins is
+    # that a signal during the restore is ignored, not recorded: the run's own
+    # outcome (exit 1, no `signal`) stands and both timers are started.
+    (h.dir / "kill-on-start").write_text("", encoding="utf-8")
+    bad = _summary(reference=_lane("reference", warning=True, checksum_valid=False))
+
+    result = _subprocess_run(h, tmp_path, {"outcomes": [_summary(), bad, _enforced()]})
+
+    assert not (h.dir / "kill-on-start").exists(), "the fake never sent the signal"
+    assert h.verbs("start") == [SCHED_TIMER, REFRESH_TIMER]
+    assert "repair enforce=True" not in h.events()
+    receipt = h.latest()
+    assert receipt["timers_restored"] == [SCHED_TIMER, REFRESH_TIMER]
+    assert result.returncode == 1 and receipt["action"] == "gate_failed" and receipt["signal"] is None, result.stderr
+
+
+# --- 20. a signal at the restore boundary -------------------------------------
+
+
+def _kill_once_in(monkeypatch: pytest.MonkeyPatch, name: str) -> list[bool]:
+    """Wrap ``auto.<name>`` so its first call sends SIGTERM to this process first.
+
+    ``os.kill`` runs the Python-level handler before it returns, so the signal
+    lands exactly inside that call. The one-shot flag is set before the kill:
+    the handler may call the same function again.
+    """
+    real = getattr(auto, name)
+    fired = [False]
+
+    def wrapped(*args: Any) -> Any:
+        if not fired[0]:
+            fired[0] = True
+            os.kill(os.getpid(), signal.SIGTERM)
+        return real(*args)
+
+    monkeypatch.setattr(auto, name, wrapped)
+    return fired
+
+
+@pytest.mark.parametrize(("fail_start", "rc"), [(None, 143), (SCHED_TIMER, 5)], ids=["restored", "start_fails"])
+def test_e20_sigterm_entering_the_restore_still_restores_and_writes_the_receipt(
+    fail_start: str | None,
+    rc: int,
+    h: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Post-freeze gate failure: the flow returned, the restore is next.
+    if fail_start:
+        h.fail("start", fail_start)
+    bad = _summary(reference=_lane("reference", warning=True, checksum_valid=False))
+    _fake_repair(monkeypatch, h, _summary(), bad, _enforced())
+    fired = _kill_once_in(monkeypatch, "_ignore_signals")
+
+    code, receipt, _ = _run(capsys)
+
+    assert fired == [True]
+    assert code == rc and receipt["exit_code"] == rc
+    assert h.verbs("start") == [SCHED_TIMER, REFRESH_TIMER]
+    assert receipt["signal"] == "SIGTERM" and receipt["action"] == "gate_failed"
+    assert h.latest() == receipt
+
+
+@pytest.mark.parametrize(("fail_start", "rc"), [(None, 143), (SCHED_TIMER, 5)], ids=["restored", "start_fails"])
+def test_e20_sigterm_inside_an_error_branch_still_restores_and_writes_the_receipt(
+    fail_start: str | None,
+    rc: int,
+    h: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Post-freeze unexpected error: the signal lands while main classifies it.
+    if fail_start:
+        h.fail("start", fail_start)
+    _fake_repair(monkeypatch, h, _summary(), RuntimeError("boom"), _enforced())
+    fired = _kill_once_in(monkeypatch, "_unexpected")
+
+    code, receipt, _ = _run(capsys)
+
+    assert fired == [True]
+    assert code == rc and receipt["exit_code"] == rc
+    assert h.verbs("start") == [SCHED_TIMER, REFRESH_TIMER]
+    assert receipt["signal"] == "SIGTERM" and receipt["action"] == "interrupted"
+    assert h.latest() == receipt
+
+
+@pytest.mark.parametrize(
+    ("cfg", "kill_on_stop", "stops"),
+    [
+        ({"kill_on_dry_run": 2}, False, [SCHED_TIMER, REFRESH_TIMER]),
+        ({}, True, [SCHED_TIMER]),
+    ],
+    ids=["final_gate_dry_run", "first_stop"],
+)
+def test_e20_real_sigterm_after_freezing_restores_exactly_the_registered_timers(
+    cfg: dict[str, Any], kill_on_stop: bool, stops: list[str], h: Harness, tmp_path: Path
+) -> None:
+    if kill_on_stop:
+        (h.dir / "kill-on-stop").write_text("", encoding="utf-8")
+
+    result = _subprocess_run(h, tmp_path, {"outcomes": [_summary(), _summary(), _enforced()], **cfg})
+
+    assert result.returncode == 143, result.stderr
+    assert not (h.dir / "kill-on-stop").exists(), "the fake never sent the signal"
+    assert h.verbs("stop") == stops and h.verbs("start") == stops
+    assert "repair enforce=True" not in h.events()
+    receipt = h.latest()
+    assert receipt["exit_code"] == 143 and receipt["signal"] == "SIGTERM"
+    assert receipt["timers_stopped"] == stops and receipt["timers_restored"] == stops
 
 
 # --- 12. undeterminable service state -----------------------------------------

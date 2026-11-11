@@ -446,7 +446,8 @@ auto-retry 拒绝分支上的 `FileJournalRetryService.mark_permanently_failed`
 
 **人工恢复**（唯一支持的路径；顺序不可省）：
 
-1. 先确认没有 `node22-run-cycle-once.sh` 在跑（`pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'` 为空）——它结束时会自动恢复 timer，会打穿本窗口。
+1. 先确认没有 `node22-run-cycle-once.sh` 在跑（`pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'` 为空）——它结束时会自动恢复 timer，会打穿本窗口；
+   再确认 state-index 自动剪枝没在跑（`systemctl --user is-active nhms-scheduler-state-index-prune.service` 不是 `active`/`activating`）——它结束时同样会恢复它停掉的 timer。
    再 `systemctl --user stop nhms-compute-scheduler.timer`，确认
    `nhms-compute-scheduler.service` 为 `inactive`。
 2. 备份：把该 `job_id` 的 flat direct、by-cycle direct 和 anchor 三个文件拷到
@@ -658,8 +659,9 @@ cat /scratch/frd_muziyao/nhms-prod/workspace/state-index-repair/capacity-watch/l
 7. 收尾：本次停掉的每个 timer 都 `start` 一次（收尾期间三种信号都忽略）；不是本次停掉的
    timer 绝不 start。systemctl / pgrep 每次调用 60 s 超时，超时按"无法判定"处理。
 
-冻结窗口通常只是"pass 结束 → 闸门 → enforce → 恢复"的几十秒，期间 stall probe 可能报一次
-`timer_stopped`，属预期（见 [`stuck-detection.md`](stuck-detection.md#stall-timer-stopped)）。
+冻结窗口从停 timer 起算，是"在飞 pass 的剩余时间（等待上限 5 h）→ 闸门 → enforce → 恢复"，
+撞上长 pass 时可达数小时，不是几十秒；期间 stall probe 报 `timer_stopped` 属预期（见
+[`stuck-detection.md`](stuck-detection.md#stall-timer-stopped)）。
 unit 的 `TimeoutStartSec=21600` 大于等待上限加 enforce；超时由 `KillSignal=SIGTERM` 进入收尾，
 `TimeoutStopSec=300` 覆盖剩余 enforce（实测 14 s，按 60 s 计）+ 两次 start（各 60 s）+ 写
 receipt（10 s）。
@@ -690,7 +692,7 @@ removed 数、`removed_state_ids_sha256`）、`enforce`（每 lane status、remo
 | 3 | `enforce_incomplete` | 部分提交（见下面"exit 3 之后"）；`dry_run_incomplete` 是防御性映射，dry-run 不会写 |
 | 4 | `error` | 意外异常，看 journal 里的 `error_type`，按代码缺陷处理 |
 | 5 | 照实际流程填 | `status=timer_restore_failed`：本次停掉的 timer 至少一个没能恢复，覆盖其它退出码。journal 打印了人工命令，立即按下面"恢复 timer"处理 |
-| 128+n | `interrupted`，或 enforce 的实际结果 | 被信号结束（`signal` 字段）；`timers_restored[]` 是已恢复的 timer |
+| 128+n | `interrupted`，或信号到达时已得出的结果（enforce 期间、或进入收尾时收到） | 被信号结束（`signal` 字段）；`timers_restored[]` 是已恢复的 timer |
 
 receipt 写盘失败只把 exit 0 改成 2（stdout 上的 receipt 仍完整），非 0 的退出码不变。
 
@@ -727,7 +729,7 @@ timer 都有 `timer_stopped unit=<timer>`，已恢复的有 `timer_restored unit
 ```bash
 journalctl --user -u nhms-scheduler-state-index-prune.service -n 200 --no-pager \
   | grep -E 'timer_(stopped|restored|restore_failed|left_alone)'
-pgrep -u "$(id -u)" -f 'node22_state_index_auto_prune'   # 必须无输出（还在跑就等它自己恢复）
+systemctl --user is-active nhms-scheduler-state-index-prune.service   # 不得是 active/activating（还在跑就等它自己恢复）
 pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'   # 必须无输出
 systemctl --user start nhms-compute-scheduler.timer               # 仅当它停了没恢复
 systemctl --user start nhms-scheduler-file-provider-refresh.timer # 仅当它停了没恢复
@@ -748,6 +750,15 @@ jq '.lanes | map_values({checksum_valid, entry_count_before, untouched_reason,
   removed: .retention.removed_count, warning: .retention.capacity_before.warning})' /tmp/prune-after-exit3.json
 cat /scratch/frd_muziyao/nhms-prod/workspace/state-index-repair/receipts/latest.json   # enforce 写到哪一条 lane
 ```
+
+**与人工写窗口的关系**：自动剪枝每日 06:30 UTC 触发（`RandomizedDelaySec=15m`，即最晚约
+06:45 才开始），会停、启 scheduler 与 provider-refresh timer。所以**任何停 scheduler timer 的人工
+写窗口**，停之前除了确认 wrapper 不在跑，还要确认 `systemctl --user is-active nhms-scheduler-state-index-prune.service` 不是
+`active`/`activating`（oneshot 运行期间是 `activating`；`inactive`/`failed` 都表示没在跑，
+脚本里要比对打印的状态而不是退出码）。窗口可能较长、会跨过 06:30–06:45 UTC 时，开窗时再
+`systemctl --user stop nhms-scheduler-state-index-prune.timer`，窗口结束、scheduler timer 恢复之后
+再 `systemctl --user start nhms-scheduler-state-index-prune.timer`——`Persistent=true` 会在
+start 时补跑错过的那一次。
 
 **与人工工具的关系**：人工"流程"开始前先确认自动剪枝没在跑（`systemctl --user is-active
 nhms-scheduler-state-index-prune.service` 不是 `active`/`activating`）。recalibration clone

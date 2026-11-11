@@ -23,9 +23,9 @@
 ## 探针在冻结期间的反应
 
 - **stall probe**（每 15 分钟一次，判据是 timer 不是 active 且 service 空闲 → `timer_stopped`，exit 1，经 OnFailure 发邮件）：
-  - 冻结窗口只覆盖"pass 结束 → 闸门 → enforce → 恢复"这一段，通常是几十秒；
-  - 只有 pass 结束后 provider-refresh 还在跑时窗口才会变长。
-  - 接受偶发 1 次 `timer_stopped` 告警。runbook 的 `stuck-detection.md` 写明：先 `pgrep -f node22_state_index_auto_prune`，有在跑就属预期。不改 probe（non-goal）。
+  - auto-prune 持有 scheduler timer 的总时长 = 在飞 pass 剩余时间（上限 5h）+ 闸门 + enforce，可达数小时；
+  - 但 probe 只在 service 空闲时才报，所以会被它看到的只有"pass 结束 → 闸门 → enforce → 恢复"这一段，通常几十秒；只有 pass 结束后 provider-refresh 还在跑时，这一段才会变长。
+  - 接受偶发 1 次 `timer_stopped` 告警。runbook 的 `stuck-detection.md` 写明：先 `systemctl --user is-active nhms-scheduler-state-index-prune.service`，在跑就属预期。不改 probe（non-goal）。
 - **refresh-timer-health**（`DEFAULT_STOPPED_DWELL_HOURS=8`）：等待上限 5h 加 enforce 的分钟级耗时，远小于 8h，不会误报。等待上限的默认值必须小于 8h，由测试断言。
 
 ## 流程（`scripts/node22_state_index_auto_prune.py`，`main() -> int`）
