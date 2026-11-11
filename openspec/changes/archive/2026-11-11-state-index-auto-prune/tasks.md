@@ -25,9 +25,9 @@ Must preserve：见 design.md。
   - `stuck-detection.md` 的 `timer_stopped` 处置：自动剪枝持有 timer 时属预期。
 
 ## 2. 上线（合并后）
-- [ ] 2.1 node-22：先 `git status --porcelain`，再 `git pull --ff-only`（禁止 `uv sync` 和裸 `uv run`）
-- [ ] 2.2 `install -d -m 0700 /scratch/frd_muziyao/nhms-prod/workspace/state-index-repair/auto-prune`；复制 unit/timer；`daemon-reload`；`enable --now` timer；再跑 `scripts/node22_unit_drift_check.py`（精确解释器）确认没有漂移
-- [ ] 2.3 手动 `systemctl --user start nhms-scheduler-state-index-prune.service` 跑一次。预期：
+- [x] 2.1 node-22：先 `git status --porcelain`，再 `git pull --ff-only`（禁止 `uv sync` 和裸 `uv run`）
+- [x] 2.2 `install -d -m 0700 /scratch/frd_muziyao/nhms-prod/workspace/state-index-repair/auto-prune`；复制 unit/timer；`daemon-reload`；`enable --now` timer；再跑 `scripts/node22_unit_drift_check.py`（精确解释器）确认没有漂移
+- [x] 2.3 手动 `systemctl --user start nhms-scheduler-state-index-prune.service` 跑一次。预期：
   - 当时利用率低于 0.70 → `action=skip`，exit 0；
   - 否则 → `action=enforced`，exit 0；
   - 或者 `action=enforced_unprunable`，exit 1。这在 lag 294 时可能出现，因为 29 天的稳态就接近 0.70。按 runbook 视为 lag 撑大了窗口，等 lag 回落后再评估。
@@ -38,3 +38,8 @@ Must preserve：见 design.md。
 - `uv run pytest -q tests/test_node22_state_index_auto_prune.py tests/test_node22_entrypoint_invariant.py tests/test_node22_unit_tracking.py tests/test_node22_unit_failure_alert.py tests/test_node22_entrypoint_invariant_python_scan.py tests/test_select_ci_tests.py tests/test_node22_state_index_capacity_watch.py`，加上 selector 选出的测试集
 - `uv run ruff check .`
 - 2.3 的 node-22 receipt
+
+## 上线记录（2026-11-11）
+- 2.1：node-22 部署到 `c73b4ade5`。
+- 2.2：unit/timer 已安装并启用；drift check 显示新增的两个文件为 `same`。部署前就存在的 drift（6 个旧 oneshot 未接告警、模板缺失）不属于本 change。
+- 2.3：首跑结果为 `enforced_unprunable`，exit 1：29 天窗口，每条 lane 删 206 条，剪完 0.7004；两个 timer 都已恢复。证据见 #3121 的评论。
