@@ -28,8 +28,8 @@ Must preserve：见 design.md "Must preserve"。
   - private lane 的覆盖结论。
 
 ## 2. 上线（合并后）
-- [ ] 2.1 node-22 先查 `git status --porcelain`，再 `git pull --ff-only`（禁止 `uv sync` 和裸 `uv run`）
-- [ ] 2.2 记下 `compute.scheduler-dbfree.env` 里当时的 `NHMS_SCHEDULER_CYCLE_LAG_HOURS`，然后 `systemctl --user start nhms-scheduler-state-index-capacity.service`：
+- [x] 2.1 node-22 先查 `git status --porcelain`，再 `git pull --ff-only`（禁止 `uv sync` 和裸 `uv run`）
+- [x] 2.2 记下 `compute.scheduler-dbfree.env` 里当时的 `NHMS_SCHEDULER_CYCLE_LAG_HOURS`，然后 `systemctl --user start nhms-scheduler-state-index-capacity.service`：
   - lag 294：receipt 中 `retention_days=29`，`retention_days_source=derived_from_cycle_lag`；
   - lag 回到 16：`21`，`default`；
   - 两种情况 exit 都是 0 或 1，不能是 2。
@@ -39,3 +39,7 @@ Must preserve：见 design.md "Must preserve"。
 - `uv run pytest -q tests/test_node22_state_index_capacity_watch.py tests/test_state_index_retention.py tests/test_scheduler_state_index_repair.py`，加上 selector 选出的测试集
 - `uv run ruff check .`
 - 2.2 的 node-22 receipt（附 lag 值）
+
+## 上线记录（2026-11-11）
+- 2.1：node-22 部署到 `f487b30ae`。
+- 2.2：当时 lag 294。watch receipt 为 `healthy` / exit 0 / `retention_days_source=derived_from_cycle_lag`，两条 lane 都是 `retention_days=29`、utilization 0.696659，证据见 #3118 的评论。
