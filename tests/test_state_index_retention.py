@@ -15,9 +15,11 @@ from the planner under test. Every lock parent created here goes through
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import re
 import stat
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1114,3 +1116,150 @@ def test_renewal_evidence_carries_capacity(lanes: Lanes) -> None:
     assert capacity["index_bytes"] == len(lanes.reference_index.read_bytes())
     assert capacity["max_entries"] == state_manager_module.MAX_STATE_SNAPSHOT_INDEX_ENTRIES
     assert capacity["warning"] is False
+
+
+# --- #3118 single floor helper and distinguishable capacity WARNING ---------
+
+
+@pytest.mark.parametrize(("lag", "expected_days"), [(0, 17), (16, 17), (119, 21), (120, 22), (294, 29)])
+def test_minimum_retention_days_is_the_strict_boundary_of_the_repair_window(lag: int, expected_days: int) -> None:
+    # Independent oracle: the smallest whole day count whose hours strictly
+    # exceed 336 + lag + 48 (the #2548 floor), searched rather than divided.
+    floor = 336 + lag + 48
+    oracle = next(days for days in range(1, 400) if days * 24 > floor)
+    assert oracle == expected_days
+    assert state_manager_module.state_index_retention_floor_hours(lag) == floor
+    minimum = state_manager_module.minimum_state_index_retention_days(lag)
+    assert minimum == expected_days
+
+    window = state_manager_module._state_index_retention_window(retention_days=minimum, cycle_lag_hours=lag)
+    assert window["floor_hours"] == floor and window["retention_days"] == minimum
+    with pytest.raises(StateManagerError) as error_info:
+        state_manager_module._state_index_retention_window(retention_days=minimum - 1, cycle_lag_hours=lag)
+    assert getattr(error_info.value, "reason", "") == "repair_retention_window_too_short"
+    assert getattr(error_info.value, "field", "") == "retention_days"
+    assert error_info.value.evidence["floor_hours"] == floor
+
+
+def _expected_label(uri: str | Path) -> str:
+    # Design §3: redacted kind + the first 8 hex of sha256 over the uri string.
+    return f"[local-path] index_fp={hashlib.sha256(str(uri).encode('utf-8')).hexdigest()[:8]}"
+
+
+def _over_threshold_capacity() -> dict[str, Any]:
+    return state_manager_module._state_index_capacity(entry_count=90_000, json_nodes=10, index_bytes=10)
+
+
+def test_capacity_warnings_from_two_indexes_carry_distinct_fingerprints_and_no_path(
+    lanes: Lanes,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    entries = [
+        lanes.entry("m_f", "gfs", K_END - timedelta(days=day), generation_checksum=GEN_A) for day in range(0, 20)
+    ]
+    lanes.publish(entries)
+    # 20 / 25 = 0.80: at or above the 0.70 threshold, below the hard cap.
+    monkeypatch.setattr(state_manager_module, "MAX_STATE_SNAPSHOT_INDEX_ENTRIES", 25)
+    targets = (
+        (lanes.reference_index, lanes.reference_root),
+        (lanes.destination_index, lanes.destination_root),
+    )
+
+    published: list[dict[str, Any]] = []
+    evidence: list[dict[str, Any]] = []
+    with caplog.at_level(logging.WARNING, logger=state_manager_module.__name__):
+        for index_path, root in targets:
+            published.append(
+                publish_state_snapshot_index(
+                    entries,
+                    index_path,
+                    object_store_root=root,
+                    object_store_prefix=PREFIX,
+                    generated_at=NOW,
+                    verify_objects=False,
+                )
+            )
+        publish_messages = [record.getMessage() for record in caplog.records]
+        caplog.clear()
+        for index_path, root in targets:
+            repository = FileStateSnapshotIndexRepository(
+                str(index_path), object_store_root=root, object_store_prefix=PREFIX, now=NOW
+            )
+            evidence.append(repository.state_index_evidence())
+            repository.usable_state_history_evidence(model_id="m_f", source_id="gfs", before_time=NOW)
+        read_messages = [record.getMessage() for record in caplog.records]
+
+    # One warning per publish and one per uncached load (the cached snapshot serves later reads).
+    assert len(publish_messages) == 2 and len(read_messages) == 2
+    for messages in (publish_messages, read_messages):
+        fingerprints = [re.search(r"index_fp=([0-9a-f]{8}) ", message) for message in messages]
+        assert all(fingerprints)
+        assert fingerprints[0].group(1) != fingerprints[1].group(1)  # type: ignore[union-attr]
+        for message, (index_path, _root) in zip(messages, targets, strict=True):
+            label = state_manager_module.state_index_log_label(str(index_path))
+            assert label == _expected_label(index_path)
+            assert message.startswith(f"state snapshot index {label} is at 80.0% of a hard limit")
+            assert "run the prune-retention repair (known-issues-state-index 8.12)" in message
+            for fragment in (str(lanes.root), str(index_path), "index-last.json", "/state-index/", "object-store"):
+                assert fragment not in message
+    # Evidence and publish results keep the redacted label and the capacity shape.
+    for result in published:
+        assert result["destination"] == "[local-path]"
+        assert result["capacity"]["warning"] is True
+    for item in evidence:
+        assert item["index"] == "[local-path]"
+        assert set(item["capacity"]) == {
+            "entry_count",
+            "max_entries",
+            "json_nodes",
+            "max_json_nodes",
+            "index_bytes",
+            "max_bytes",
+            "utilization_ratio",
+            "warning_threshold",
+            "warning",
+        }
+
+
+def test_capacity_warning_label_is_computed_only_on_the_warning_branch(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    calls: list[Any] = []
+
+    def recording_fingerprint(uri: Any) -> str:
+        calls.append(uri)
+        return "0" * 8
+
+    monkeypatch.setattr(state_manager_module, "_state_index_fingerprint", recording_fingerprint)
+    quiet = state_manager_module._state_index_capacity(entry_count=1, json_nodes=1, index_bytes=1)
+    assert quiet["warning"] is False
+
+    with caplog.at_level(logging.WARNING, logger=state_manager_module.__name__):
+        state_manager_module._warn_state_index_capacity(quiet, index_uri="/x/index-last.json")
+        assert calls == [] and caplog.records == []
+        state_manager_module._warn_state_index_capacity(_over_threshold_capacity(), index_uri="/x/index-last.json")
+
+    assert calls == ["/x/index-last.json"]  # the patched helper is the one the warning uses
+    assert len(caplog.records) == 1 and "index_fp=00000000" in caplog.records[0].getMessage()
+
+
+def test_capacity_warning_label_never_touches_the_filesystem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    uri = tmp_path / "missing" / ".." / "scheduler/state-index/index-last.json"
+
+    def explode(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("resolve must not be called")
+
+    with caplog.at_level(logging.WARNING, logger=state_manager_module.__name__):
+        with monkeypatch.context() as patched:
+            patched.setattr(Path, "resolve", explode)
+            state_manager_module._warn_state_index_capacity(_over_threshold_capacity(), index_uri=uri)
+            label = state_manager_module.state_index_log_label(uri)
+
+    assert label == _expected_label(uri)
+    assert len(caplog.records) == 1
+    message = caplog.records[0].getMessage()
+    assert message.startswith(f"state snapshot index {label} is at 90.0% of a hard limit")
+    assert str(tmp_path) not in message
