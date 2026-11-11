@@ -672,10 +672,14 @@ NHMS_SCHEDULER_STATE_INDEX_REPAIR_ARCHIVE_ROOT=/scratch/frd_muziyao/nhms-prod/wo
 NHMS_SCHEDULER_STATE_INDEX_REPAIR_RECEIPT_ROOT=/scratch/frd_muziyao/nhms-prod/workspace/state-index-repair/receipts
 set +a
 : "${NHMS_SCHEDULER_CYCLE_LAG_HOURS:?lag 为空，停}"
+# 窗口天数 N：与 watch 同源，即 max(21, (336+lag+48)//24+1)；lag < 120 时 N=21，等同默认值。
+# dry-run 和 enforce 必须用同一个 N，否则 removed_state_ids_sha256 无法比对。
+N=$(( (336 + NHMS_SCHEDULER_CYCLE_LAG_HOURS + 48) / 24 + 1 )); [ "$N" -lt 21 ] && N=21
+echo "retention_days=$N"
 
 # 1) dry-run：不加锁、不写 archive/receipt/index；stdout 一行 JSON
 /scratch/frd_muziyao/NWM/.venv/bin/python -m scripts.scheduler_state_index_repair \
-  prune-retention > /tmp/prune-dryrun.json
+  prune-retention --retention-days "$N" > /tmp/prune-dryrun.json
 
 # 2) 审核（见下）后，冻结 writer 再 enforce
 # 先确认没有 `node22-run-cycle-once.sh` 在跑（`pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'` 为空）——它结束时会自动恢复 timer，会打穿本窗口
@@ -683,7 +687,7 @@ pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh
 systemctl --user stop nhms-compute-scheduler.timer
 systemctl --user is-active nhms-compute-scheduler.service   # 必须是 inactive 再往下
 /scratch/frd_muziyao/NWM/.venv/bin/python -m scripts.scheduler_state_index_repair \
-  prune-retention --enforce
+  prune-retention --retention-days "$N" --enforce
 systemctl --user start nhms-compute-scheduler.timer
 ```
 

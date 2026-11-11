@@ -69,7 +69,7 @@ def minimum_state_index_retention_days(cycle_lag_hours: int) -> int:
 
 ### Sibling callers（都经过上述三个调用点，自动获得指纹，无需改动）
 
-- `services/orchestrator/scheduler_core.py:76`、`:781`（scheduler private index 读）
+- `services/orchestrator/scheduler_core.py:76`、`:781`（scheduler 读 shared index，见 §3 的更正）
 - `scripts/scheduler_refresh/runner.py:259`、`:555`（provider refresh 读与发布）
 - `scripts/node22_clone_direct_grid_cutover_states.py:452`、`:458`、`:695`
 - `packages/common/state_manager.py:1940`、`:2518`（copyback 发布到 destination）、`:3018`（repair enforce 发布）
