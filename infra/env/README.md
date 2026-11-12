@@ -49,9 +49,10 @@ Do not use unprefixed `PUBLISHED_ARTIFACT_ROOT` as an app runtime variable.
 
 Which file a node-22 user systemd unit actually loads. Paths are on node-22
 under `/scratch/frd_muziyao/`. The first five rows were verified read-only on
-the live host 2026-09-02; the `nhms-node22-unit-failure-alert@.service` row is
-not deployed yet (未部署，见 OpenSpec `node22-config-hygiene` design Migration
-Plan).
+the live host 2026-09-02; the `nhms-node22-unit-failure-alert@.service` row was
+deployed 2026-11-12 (issue 3127; the env file sends through the SMTPS wrapper
+`scripts/node22_smtp_sendmail.sh`), receipt
+`docs/runbooks/receipts/2026-11-12-issue-3127-node22-unit-failure-alert-deploy.md`.
 
 | Unit (`systemctl --user`) | EnvironmentFile(s) loaded | Tracked template |
 |---|---|---|
