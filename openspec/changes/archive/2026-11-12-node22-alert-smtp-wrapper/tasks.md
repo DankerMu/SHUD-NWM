@@ -12,4 +12,4 @@
 
 ## 3. Post-merge (operator, archive PR)
 
-- [ ] 3.1 node-22 deploy receipt (template, env 0600, six wired units, daemon-reload, `systemd-analyze --user verify`, drift probe, one test mail with `SMTP-ACCEPTED`) under `docs/runbooks/receipts/`; `infra/env/README.md` row no longer "未部署".
+- [x] 3.1 node-22 deploy receipt (template, env 0600, six wired units, daemon-reload, `systemd-analyze --user verify`, drift probe, one test mail with `SMTP-ACCEPTED`) under `docs/runbooks/receipts/`; `infra/env/README.md` row no longer "未部署".
