@@ -788,14 +788,17 @@ def test_node22_unit_drift_probe_pin_red_when_removed(monkeypatch: pytest.Monkey
 # `infra/env/README.md` authority table for the template's `EnvironmentFile=`
 # and reads `MANIFEST.json` (template entry and every tracked file). The three
 # new files had no route to it; README and the `node22/*` glob gained it as an
-# extra target.
+# extra target. #3127 adds the SMTPS wrapper the suite executes by copy.
 NODE22_UNIT_FAILURE_ALERT_SUITE = "tests/test_node22_unit_failure_alert.py"
 # pattern -> one representative changed path the pattern must route.
 NODE22_UNIT_FAILURE_ALERT_NEW_ROWS: dict[str, str] = {
     "infra/systemd/nhms-node22-unit-failure-alert@.service": "infra/systemd/nhms-node22-unit-failure-alert@.service",
     "scripts/node22_unit_failure_alert_once.sh": "scripts/node22_unit_failure_alert_once.sh",
     "infra/env/node22-unit-failure-alert.example": "infra/env/node22-unit-failure-alert.example",
+    "scripts/node22_smtp_sendmail.sh": "scripts/node22_smtp_sendmail.sh",
 }
+NODE22_ALERT_SHIM = "scripts/node27_frontier_smtp_sendmail.py"
+NODE27_FRONTIER_SMTP_SENDMAIL_SUITE = "tests/test_node27_frontier_smtp_sendmail.py"
 
 
 @pytest.mark.parametrize(
@@ -820,7 +823,7 @@ def test_node22_unit_failure_alert_template_also_selects_the_tracking_suite() ->
 
 
 def test_node22_unit_failure_alert_new_rules_red_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The complement leg: drop exactly the three #2913 rows and their paths go dark.
+    """The complement leg: drop exactly the #2913 rows and the #3127 wrapper row; their paths go dark.
 
     README and the `node22/*` glob are not in this set: their rows carry other
     owners too, so removing them would prove nothing about this suite.
@@ -836,6 +839,34 @@ def test_node22_unit_failure_alert_new_rules_red_when_removed(monkeypatch: pytes
         assert NODE22_UNIT_FAILURE_ALERT_SUITE not in select_tests([source], repo_root=Path(".")), (
             f"{source} still reaches the alert suite without the {pattern} row"
         )
+
+
+def test_node22_alert_shim_selects_the_alert_suite_additively() -> None:
+    """#3127: the wrapper's `SHIM` constant names the node-27 shim, so a shim change reaches the alert suite.
+
+    The node-27 suite arrives by same-name derivation after the rule loop, so
+    its presence alone cannot prove the row is additive; the row object is
+    asserted directly.
+    """
+    rows = [rule for rule in PATH_TEST_RULES if rule.pattern == NODE22_ALERT_SHIM]
+    assert rows == [PathTestRule(NODE22_ALERT_SHIM, (NODE22_UNIT_FAILURE_ALERT_SUITE,))]
+    assert rows[0].stop_on_match is False
+
+    selected = select_tests([NODE22_ALERT_SHIM], repo_root=Path("."))
+    assert NODE22_UNIT_FAILURE_ALERT_SUITE in selected
+    assert NODE27_FRONTIER_SMTP_SENDMAIL_SUITE in selected
+
+
+def test_node22_alert_shim_row_red_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scripts import select_ci_tests
+
+    mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern != NODE22_ALERT_SHIM)
+    assert len(mutant) == len(PATH_TEST_RULES) - 1
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+
+    selected = select_tests([NODE22_ALERT_SHIM], repo_root=Path("."))
+    assert NODE22_UNIT_FAILURE_ALERT_SUITE not in selected
+    assert NODE27_FRONTIER_SMTP_SENDMAIL_SUITE in selected
 
 
 # #2914 -- the alert suite's wiring test reads the seven wired node-22 oneshot

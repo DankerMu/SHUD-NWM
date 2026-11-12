@@ -24,11 +24,14 @@ NHMS_ALERT_EMAIL_FROM=
 # has no default of its own: this example value is the only default.
 NHMS_FRONTIER_SENDMAIL=/usr/sbin/sendmail
 
-# --- SMTP shim channel. Read ONLY by an authenticated-SMTP sendmail shim, if
-# an operator points NHMS_FRONTIER_SENDMAIL at one; the handler never reads
-# them. This change does not deliver such a shim for node-22. If one is used,
-# invoke it through /scratch/frd_muziyao/NWM/.venv/bin/python, never through an
-# `env python3` shebang. Credentials are deposited by hand on node-22 only.
+# --- SMTP shim channel. Read ONLY by the authenticated-SMTP sendmail shim
+# scripts/node27_frontier_smtp_sendmail.py; the handler never reads them. For
+# the SMTPS path on node-22, point NHMS_FRONTIER_SENDMAIL at the wrapper
+# /scratch/frd_muziyao/NWM/scripts/node22_smtp_sendmail.sh (#3127), which runs
+# that shim through /scratch/frd_muziyao/NWM/.venv/bin/python, never through an
+# `env python3` shebang. The address part of NHMS_ALERT_EMAIL_FROM must equal
+# NHMS_SMTP_USER (a display name in front is fine); the shim exits 64 at config
+# time otherwise. Credentials are deposited by hand on node-22 only.
 NHMS_SMTP_HOST=
 NHMS_SMTP_PORT=
 NHMS_SMTP_USER=
