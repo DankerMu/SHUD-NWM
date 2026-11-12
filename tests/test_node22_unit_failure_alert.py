@@ -550,3 +550,170 @@ def test_manifest_sha256_of_wired_unit_matches_its_content(unit: str) -> None:
     entries = [entry for entry in load_manifest()["entries"] if entry["tracked_path"] == f"infra/systemd/{unit}"]
 
     assert [entry["sha256"] for entry in entries] == [sha256_hex(SYSTEMD_ROOT / unit)]
+
+
+# --- scenario: node-22 SMTPS transport wrapper (#3127) --------------------------
+#
+# `scripts/node22_smtp_sendmail.sh` execs the node-27 SMTPS shim under the exact
+# node-22 interpreter. Behaviour is exercised on a tmp copy whose `PY=` / `SHIM=`
+# constant lines are textually substituted with fakes (the wrapper has no
+# override knob). Every fake in PATH (`python3`, `python`, `uv`) touches a marker,
+# so a fallback interpreter would be caught.
+
+WRAPPER_PATH = REPO_ROOT / "scripts/node22_smtp_sendmail.sh"
+NODE22_CHECKOUT = "/scratch/frd_muziyao/NWM/"
+WRAPPER_PY_LINE = "PY=/scratch/frd_muziyao/NWM/.venv/bin/python"
+WRAPPER_SHIM_LINE = "SHIM=/scratch/frd_muziyao/NWM/scripts/node27_frontier_smtp_sendmail.py"
+WRAPPER_USAGE_RC = 64
+WRAPPER_FORBIDDEN_TOKENS = re.compile(r"python3|(?<![A-Za-z0-9_])uv(?![A-Za-z0-9_])|NHMS_SMTP_")
+# CRLF, a non-UTF-8 byte and no trailing newline: any re-encoding or line
+# discipline in the pass-through shows up as a byte mismatch.
+WRAPPER_STDIN = b"From: a@example.invalid\r\nTo: b@example.invalid\r\n\r\nbody \xff\xfe tail"
+DECOYS = ("python3", "python", "uv")
+
+
+def forbidden_wrapper_tokens(text: str) -> list[str]:
+    return WRAPPER_FORBIDDEN_TOKENS.findall(text)
+
+
+def _wrapper_copy(tmp_path: Path, *, py: Path, shim: Path) -> Path:
+    text = read_text(WRAPPER_PATH)
+    assert text.splitlines().count(WRAPPER_PY_LINE) == 1
+    assert text.splitlines().count(WRAPPER_SHIM_LINE) == 1
+    lines = [
+        f"PY={py}" if line == WRAPPER_PY_LINE else f"SHIM={shim}" if line == WRAPPER_SHIM_LINE else line
+        for line in text.splitlines()
+    ]
+    copy = tmp_path / "node22_smtp_sendmail.sh"
+    copy.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    copy.chmod(0o755)
+    return copy
+
+
+@pytest.fixture
+def transport(tmp_path: Path) -> Path:
+    """Fake interpreter (records argv/stdin/env, exits 69), a shim file and PATH decoys."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name in DECOYS:
+        _write_executable(bin_dir / name, f'printf "%s\\n" "{name}" >> "{tmp_path / "decoy.calls"}"\nexit 0\n')
+    _write_executable(
+        tmp_path / "fake-python",
+        f'printf "%s\\n" "$@" > "{tmp_path / "py.argv"}"\n'
+        f'cat > "{tmp_path / "py.stdin"}"\n'
+        f'printf "%s" "${{NHMS_SMTP_PASS-unset}}" > "{tmp_path / "py.env"}"\n'
+        "exit 69\n",
+    )
+    (tmp_path / "fake-shim.py").write_text("# never executed by the fake interpreter\n", encoding="utf-8")
+    return tmp_path
+
+
+def _run_wrapper(tmp_path: Path, wrapper: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
+    env = {
+        "PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin",
+        "NHMS_SMTP_PASS": "pass-through-sentinel",
+    }
+    # By path, not `bash <path>`: the copy's exec bit is part of the contract.
+    return subprocess.run(
+        [str(wrapper), *args], input=WRAPPER_STDIN, env=env, capture_output=True, timeout=60, check=False
+    )
+
+
+def _nothing_invoked(tmp_path: Path) -> bool:
+    return not (tmp_path / "py.argv").exists() and not (tmp_path / "decoy.calls").exists()
+
+
+def test_wrapper_is_tracked_executable_with_exact_constants() -> None:
+    text = read_text(WRAPPER_PATH)
+    lines = text.splitlines()
+
+    assert os.access(WRAPPER_PATH, os.X_OK)
+    assert lines[0] == "#!/usr/bin/env bash"
+    assert lines.count(WRAPPER_PY_LINE) == 1
+    assert lines.count(WRAPPER_SHIM_LINE) == 1
+    assert sum(line.startswith(("PY=", "SHIM=")) for line in lines) == 2
+    assert lines.count('exec "$PY" "$SHIM" "$@"') == 1
+    assert forbidden_wrapper_tokens(text) == []
+    staged = subprocess.run(
+        ["git", "ls-files", "-s", "--", "scripts/node22_smtp_sendmail.sh"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert staged.stdout.split()[:1] == ["100755"], staged.stdout
+
+
+def test_wrapper_shim_constant_names_a_tracked_file() -> None:
+    relative = WRAPPER_SHIM_LINE.removeprefix("SHIM=").removeprefix(NODE22_CHECKOUT)
+
+    assert relative == "scripts/node27_frontier_smtp_sendmail.py"
+    assert (REPO_ROOT / relative).is_file()
+    tracked = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", relative],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert tracked.returncode == 0, tracked.stderr
+
+
+def test_wrapper_token_rule_bites() -> None:
+    assert forbidden_wrapper_tokens("exec /usr/bin/env python3 x") == ["python3"]
+    assert forbidden_wrapper_tokens("exec uv run python x") == ["uv"]
+    assert forbidden_wrapper_tokens('echo "$NHMS_SMTP_PASS"') == ["NHMS_SMTP_"]
+    assert forbidden_wrapper_tokens("PY=/scratch/frd_muziyao/NWM/.venv/bin/python # uvloop") == []
+
+
+def test_wrapper_forwards_argv_stdin_env_and_exit_status(transport: Path) -> None:
+    shim = transport / "fake-shim.py"
+    wrapper = _wrapper_copy(transport, py=transport / "fake-python", shim=shim)
+
+    result = _run_wrapper(transport, wrapper, "-t", "-i")
+
+    assert result.returncode == 69
+    assert result.stdout == b""
+    assert result.stderr == b""
+    assert (transport / "py.argv").read_text(encoding="utf-8").splitlines() == [str(shim), "-t", "-i"]
+    assert (transport / "py.stdin").read_bytes() == WRAPPER_STDIN
+    assert (transport / "py.env").read_text(encoding="utf-8") == "pass-through-sentinel"
+    assert not (transport / "decoy.calls").exists()
+
+
+@pytest.mark.parametrize("interpreter", ("absent", "mode-0644"))
+def test_wrapper_without_usable_interpreter_fails_closed(transport: Path, interpreter: str) -> None:
+    py = transport / "fake-python"
+    if interpreter == "absent":
+        py = transport / "no-such-python"
+    else:
+        py.chmod(0o644)
+    wrapper = _wrapper_copy(transport, py=py, shim=transport / "fake-shim.py")
+
+    result = _run_wrapper(transport, wrapper, "-t", "-i")
+
+    assert result.returncode == WRAPPER_USAGE_RC
+    assert result.stdout == b""
+    assert result.stderr.decode() == f"node22-smtp-sendmail: INTERPRETER_MISSING path={py}\n"
+    assert _nothing_invoked(transport)
+
+
+def test_wrapper_without_shim_fails_closed(transport: Path) -> None:
+    shim = transport / "no-such-shim.py"
+    wrapper = _wrapper_copy(transport, py=transport / "fake-python", shim=shim)
+
+    result = _run_wrapper(transport, wrapper, "-t", "-i")
+
+    assert result.returncode == WRAPPER_USAGE_RC
+    assert result.stdout == b""
+    assert result.stderr.decode() == f"node22-smtp-sendmail: SHIM_MISSING path={shim}\n"
+    assert _nothing_invoked(transport)
+
+
+def test_example_points_the_smtps_path_at_the_wrapper() -> None:
+    text = read_text(EXAMPLE_PATH)
+    comments = " ".join(line.lstrip("# ").strip() for line in text.splitlines() if line.startswith("#"))
+
+    assert "/scratch/frd_muziyao/NWM/scripts/node22_smtp_sendmail.sh" in comments
+    assert "does not deliver" not in comments
+    assert "NHMS_ALERT_EMAIL_FROM must equal NHMS_SMTP_USER" in comments

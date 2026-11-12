@@ -4227,6 +4227,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "infra/env/node22-unit-failure-alert.example",
         ("tests/test_node22_unit_failure_alert.py",),
     ),
+    # #3127: the alert suite runs the SMTPS wrapper by copy and checks its SHIM constant names the node-27 shim.
+    PathTestRule(
+        "scripts/node22_smtp_sendmail.sh",
+        ("tests/test_node22_unit_failure_alert.py",),
+    ),
+    # Additive (no stop_on_match): the shim keeps its same-name tests/test_node27_frontier_smtp_sendmail.py.
+    PathTestRule(
+        "scripts/node27_frontier_smtp_sendmail.py",
+        ("tests/test_node22_unit_failure_alert.py",),
+    ),
     # #2918: a `.sh` has no same-name derivation; this row is the sweep's only route to its suite.
     PathTestRule(
         "scripts/ops/node22_env_backup_sweep.sh",
