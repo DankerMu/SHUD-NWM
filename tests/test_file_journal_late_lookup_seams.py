@@ -133,6 +133,54 @@ def test_discovered_files_walker_reads_through_the_facade_stat_primitives(
     assert counts == {"_stat_signature": 4, "stat_no_follow": 2, "list_directory_no_follow_limited": 1}
 
 
+def test_non_strict_discovery_walker_scans_through_the_facade_scan_primitive(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    directory = tmp_path / "d"
+    directory.mkdir()
+    (directory / "a.json").write_text("{}", encoding="utf-8")
+    (directory / "b.json").write_text("{}", encoding="utf-8")
+    counts: dict[str, int] = {}
+
+    def counting(name: str, real: Callable[..., object]) -> Callable[..., object]:
+        def proxy(*args: object, **kwargs: object) -> object:
+            counts[name] = counts.get(name, 0) + 1
+            return real(*args, **kwargs)
+
+        return proxy
+
+    monkeypatch.setattr(
+        file_orchestration_journal,
+        "stat_no_follow",
+        counting("stat_no_follow", file_orchestration_journal.stat_no_follow),
+    )
+    monkeypatch.setattr(
+        file_orchestration_journal,
+        "list_directory_no_follow_limited",
+        counting("list_directory_no_follow_limited", file_orchestration_journal.list_directory_no_follow_limited),
+    )
+    monkeypatch.setattr(
+        file_orchestration_journal,
+        "scan_directory_no_follow_limited",
+        counting("scan_directory_no_follow_limited", file_orchestration_journal.scan_directory_no_follow_limited),
+    )
+
+    found = list(
+        file_journal_paths._iter_discovered_files(
+            directory,
+            root=tmp_path,
+            suffix=".json",
+            recursive=False,
+            max_files=10,
+            max_depth=2,
+        )
+    )
+
+    assert found == [directory / "a.json", directory / "b.json"]
+    # One no-follow stat of the directory itself, one scan, and no per-entry stat or plain listing.
+    assert counts == {"stat_no_follow": 1, "scan_directory_no_follow_limited": 1}
+
+
 def test_retention_surface_walker_reads_through_the_facade_stat_primitives(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

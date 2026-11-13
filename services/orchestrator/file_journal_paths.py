@@ -4,9 +4,9 @@ Source-segment discovery and case-alias dedup, journal segment naming and
 lineage, path-derived identities, the bounded no-follow directory walkers, and
 the record/payload identity validators behind the file orchestration journal.
 The journal's error type and segment cap stay in the facade and are imported
-inside the functions that use them; the three names tests patch on the facade
-(the stat signature probe and the no-follow stat and listing primitives) are
-looked up on the facade module at call time by the walkers and the segment
+inside the functions that use them; the four names tests patch on the facade
+(the stat signature probe and the no-follow stat, listing and scan primitives)
+are looked up on the facade module at call time by the walkers and the segment
 lineage check.
 """
 
@@ -1087,6 +1087,9 @@ def _iter_discovered_files(
                 field=str(_relative_evidence(directory, root)),
                 evidence={"max_files": max_files},
             )
+        if not strict_disappearance:
+            yield from scan_non_strict(current, depth, remaining_entries)
+            return
         try:
             entry_names = file_orchestration_journal.list_directory_no_follow_limited(
                 current,
@@ -1157,6 +1160,65 @@ def _iter_discovered_files(
                     )
                 yield entry
         require_directory_unchanged()
+
+    def scan_non_strict(current: Path, depth: int, remaining_entries: int) -> Iterable[Path]:
+        # #3138: one no-follow descriptor chain per directory, every entry
+        # lstat'd relative to it, instead of one full chain per entry.  Same
+        # checks in the same order as the strict per-entry loop above.
+        nonlocal scanned_entries
+        try:
+            scanned = file_orchestration_journal.scan_directory_no_follow_limited(
+                current,
+                containment_root=root,
+                max_entries=remaining_entries,
+            )
+        except FileNotFoundError:
+            return
+        except (OSError, SafeFilesystemError) as error:
+            raise FileOrchestrationJournalError(
+                "file_journal_unreadable",
+                field=str(_relative_evidence(current, root)),
+                evidence={"error_type": type(error).__name__},
+            ) from error
+        if len(scanned) > remaining_entries:
+            raise FileOrchestrationJournalError(
+                "file_journal_file_limit_exceeded",
+                field=str(_relative_evidence(directory, root)),
+                evidence={"max_files": max_files},
+            )
+        scanned_entries += len(scanned)
+        for scanned_entry in sorted(scanned, key=lambda item: item.name):
+            entry_name = scanned_entry.name
+            if _SAFE_SEGMENT_RE.fullmatch(entry_name) is None:
+                raise FileOrchestrationJournalError(
+                    "file_journal_unsafe_path_segment",
+                    field=str(_relative_evidence(current / entry_name, root)),
+                )
+            entry = current / entry_name
+            entry_stat, error = scanned_entry.stat, scanned_entry.error
+            if entry_stat is None and error is None:
+                continue
+            if error is None and stat.S_ISLNK(entry_stat.st_mode):
+                error = SafeFilesystemError(f"Target file must not be a symlink: {entry}")
+            if error is not None:
+                raise FileOrchestrationJournalError(
+                    "file_journal_unsafe_scanned_entry",
+                    field=str(_relative_evidence(entry, root)),
+                    evidence={"error_type": type(error).__name__},
+                ) from error
+            mode = entry_stat.st_mode
+            if stat.S_ISDIR(mode):
+                if recursive:
+                    yield from walk(entry, depth + 1)
+                continue
+            if entry_name.endswith(suffix):
+                if not stat.S_ISREG(mode):
+                    raise FileOrchestrationJournalError(
+                        "file_journal_unsafe_scanned_entry",
+                        field=str(_relative_evidence(entry, root)),
+                        evidence={"entry_type": "not_regular_file"},
+                    )
+                yield entry
 
     yield from walk(directory, 0)
 

@@ -4,6 +4,7 @@ import errno
 import os
 import stat
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -464,6 +465,87 @@ def list_directory_no_follow_limited(
     if max_entries < 0:
         raise ValueError("max_entries must be non-negative")
     return _list_directory_no_follow(path, containment_root=containment_root, max_entries=max_entries)
+
+
+@dataclass(frozen=True)
+class ScannedEntry:
+    """One name of a no-follow directory scan.
+
+    ``stat`` is the ``lstat`` relative to the held directory descriptor, or
+    ``None`` when the name vanished (``error is None``) or could not be stat'd
+    (``error`` set, ``kind="io"``).  A symlink is returned with its own
+    ``lstat``; refusing it is the caller's decision.
+    """
+
+    name: str
+    stat: os.stat_result | None
+    error: SafeFilesystemError | None
+
+
+def scan_directory_no_follow_limited(
+    path: Path,
+    *,
+    max_entries: int,
+    containment_root: Path | None = None,
+) -> list[ScannedEntry]:
+    """List at most max_entries plus one sentinel name and lstat each relative to one held descriptor.
+
+    The directory is opened once through the same no-follow descriptor chain
+    ``list_directory_no_follow_limited`` uses, so the cost is one chain open per
+    directory instead of one per entry.  Whole-directory failures raise exactly
+    as ``list_directory_no_follow_limited`` does (``FileNotFoundError`` raw,
+    anything else ``SafeFilesystemError``); per-entry outcomes are returned.
+    After the stats the held descriptor is re-checked against the path: a
+    replaced directory raises ``SafeFilesystemError`` and a vanished one raises
+    ``FileNotFoundError``.
+    """
+
+    if max_entries < 0:
+        raise ValueError("max_entries must be non-negative")
+    target = _expand_path(path)
+    root, parts = _anchor_for(target, containment_root=containment_root)
+    root_fd = _open_directory_no_follow(root)
+    fd = root_fd
+    try:
+        for part in parts:
+            next_fd = _open_child_dir(fd, part, target)
+            if fd != root_fd:
+                os.close(fd)
+            fd = next_fd
+        names: list[str] = []
+        with os.scandir(fd) as entries:
+            for entry in entries:
+                names.append(entry.name)
+                if len(names) > max_entries:
+                    break
+        scanned: list[ScannedEntry] = []
+        for name in names:
+            try:
+                entry_stat = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                scanned.append(ScannedEntry(name=name, stat=None, error=None))
+                continue
+            except OSError as error:
+                wrapped = SafeFilesystemError(f"Failed to stat {target / name}: {error}", kind="io")
+                wrapped.__cause__ = error
+                scanned.append(ScannedEntry(name=name, stat=None, error=wrapped))
+                continue
+            scanned.append(ScannedEntry(name=name, stat=entry_stat, error=None))
+        try:
+            _verify_fd_matches_path(fd, target)
+        except SafeFilesystemError as error:
+            if isinstance(error.__cause__, FileNotFoundError):
+                raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(target)) from error
+            raise
+        return scanned
+    except FileNotFoundError:
+        raise
+    except OSError as error:
+        raise SafeFilesystemError(f"Failed to list directory {target}: {error}", kind="io") from error
+    finally:
+        if fd != root_fd:
+            os.close(fd)
+        os.close(root_fd)
 
 
 def _list_directory_no_follow(

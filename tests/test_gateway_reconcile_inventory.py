@@ -171,6 +171,7 @@ def test_active_reconcile_partition_finds_oldest_active_after_one_year_of_two_da
     read_calls: list[str] = []
     original_list_directory = journal_module.list_directory_no_follow_limited
     original_stat = journal_module.stat_no_follow
+    original_scan = journal_module.scan_directory_no_follow_limited
 
     def count_flat_history_reads(path: Any) -> Any:
         nonlocal flat_history_reads
@@ -202,6 +203,19 @@ def test_active_reconcile_partition_finds_oldest_active_after_one_year_of_two_da
         assert relative not in {"pipeline-jobs", "journal", "pipeline-jobs/by-cycle"}
         return original_list_directory(path, **kwargs)
 
+    def bounded_scan(path: Any, **kwargs: Any) -> Any:
+        # #3138: non-strict walks list and stat through this seam; the same
+        # forbidden directories and traps apply, but it need not be reached.
+        relative = str(path.relative_to(repository.root)) if path != repository.root else "."
+        directory_calls.append(relative)
+        if "by-cycle" in path.parts:
+            return virtual_candidate_history_walker()
+        assert relative not in {"pipeline-jobs", "journal", "pipeline-jobs/by-cycle"}
+        scanned = original_scan(path, **kwargs)
+        stat_calls.extend(f"{relative}/{entry.name}" for entry in scanned)
+        assert not any("terminal_history" in entry.name for entry in scanned)
+        return scanned
+
     def bounded_stat(path: Any, **kwargs: Any) -> Any:
         relative = str(path.relative_to(repository.root))
         stat_calls.append(relative)
@@ -224,6 +238,7 @@ def test_active_reconcile_partition_finds_oldest_active_after_one_year_of_two_da
     )
     monkeypatch.setattr(journal_module, "list_directory_no_follow_limited", bounded_list)
     monkeypatch.setattr(journal_module, "stat_no_follow", bounded_stat)
+    monkeypatch.setattr(journal_module, "scan_directory_no_follow_limited", bounded_scan)
     inflight = reopened.query_inflight_jobs()
 
     assert history_count == day_count * len(cycle_hours) * len(source_ids) == 1460
