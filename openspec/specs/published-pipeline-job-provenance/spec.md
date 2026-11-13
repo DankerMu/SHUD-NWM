@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change restore-display-job-provenance. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: Source-owned published job provenance
 
 The node-22 DB-free scheduler SHALL publish a bounded, versioned `pipeline_jobs.json` record for each selected run, derived from the real file journal and cross-checked against the run's immutable scientific manifest. The record SHALL bind source, cycle, run, model, job identity, job type, stage, Slurm identity and lifecycle timestamps to the run's manifest and SHALL contain no private filesystem paths, credentials, URIs, or unpinned user payloads. A journal read SHALL never create directories, take a journal write lock, mutate scheduler state, or invoke Slurm submission/cancel/retry APIs.
@@ -80,3 +82,17 @@ A bounded operator command SHALL explicitly backfill existing runs using the sam
 - **AND** node-27 imports the resulting rows without re-running the scientific pipeline
 - **AND** a later replay reports the row count as unchanged when evidence is identical
 
+### Requirement: Batch provenance publication SHALL replay the journal through one repository
+`publish_runs_pipeline_job_provenance` SHALL verify the journal root once and publish every run of the batch through a single `FileOrchestrationJournalRepository` bound to that root, so its stat-identity read cache serves repeated replays of the same cycle journal. Publication content, per-run failure isolation, lock scope and the summary shape SHALL be unchanged. A repository passed to the single-run publisher whose root differs from the verified journal root SHALL be refused with `JOURNAL_REPOSITORY_ROOT_MISMATCH`.
+
+#### Scenario: Same-cycle batch reads the journal from disk about once
+- **WHEN** a batch of three or more runs of the same cycle is published and the journal does not change during the batch
+- **THEN** the non-cached journal bytes read are about one cycle replay rather than one replay per run, and every run's published jobs equal what a fresh repository would export
+
+#### Scenario: A journal change during the batch is visible to later runs
+- **WHEN** a job row for a later run is appended to the cycle journal after an earlier run of the batch was published
+- **THEN** the later run's publication includes that row
+
+#### Scenario: A repository bound to another root is refused
+- **WHEN** the single-run publisher receives a repository whose root is not the verified journal root
+- **THEN** it raises `PipelineJobProvenanceError` with code `JOURNAL_REPOSITORY_ROOT_MISMATCH` and publishes nothing
