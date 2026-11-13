@@ -553,10 +553,19 @@ write any file under the provider store.
 
 #### Scenario: An enabled and active timer with no scheduled tick is detected
 
-- **WHEN** the refresh timer is `active` but reports no next-elapse time, or a
-  next-elapse time further away than the configured next-dwell threshold, and no
-  higher-precedence condition matches
+- **WHEN** the refresh timer is `active` with a `SubState` other than `running`
+  but reports no next-elapse time, or a next-elapse time further away than the
+  configured next-dwell threshold, and no higher-precedence condition matches
 - **THEN** the probe returns the `timer_not_scheduled` verdict and a non-zero exit status
+
+#### Scenario: A timer whose triggered refresh is still running is not graded unscheduled
+
+- **WHEN** the refresh timer is `active` with `SubState=running` (systemd leaves
+  the next elapse empty until the triggered refresh service finishes) and no
+  next-elapse time is reported
+- **THEN** the probe does not return the `timer_not_scheduled` verdict
+- **AND** the remaining signals are still graded, so an expired or stale manifest
+  or a timer that is not `enabled` still produces its non-healthy verdict
 
 #### Scenario: Manifest age is graded independently of systemd state
 
