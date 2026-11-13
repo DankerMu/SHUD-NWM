@@ -161,6 +161,106 @@ def test_r5_active_timer_with_next_beyond_the_dwell_is_not_scheduled(
 
 
 # ---------------------------------------------------------------------------
+# R4b -- a timer whose triggered refresh is still running (#3132)
+# ---------------------------------------------------------------------------
+# systemd leaves `NextElapseUSecRealtime` empty while the triggered service is
+# active (`SubState=running`, measured on node-22 2026-11-13); the ~2.7 h
+# 02:15Z refresh made the hourly probe false-alarm `timer_not_scheduled`.
+
+
+def test_r4b_running_timer_with_empty_next_elapse_and_fresh_manifest_is_ok(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    status, root, _log = _run(
+        tmp_path, monkeypatch, properties=_properties(sub_state="running", next_elapse="")
+    )
+
+    assert status == 0
+    assert _verdict(root) == "ok"
+
+
+def test_r4b_waiting_timer_with_empty_next_elapse_is_still_not_scheduled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exemption is `running` only; a waiting timer with no tick is the real fault."""
+    status, root, _log = _run(
+        tmp_path, monkeypatch, properties=_properties(sub_state="waiting", next_elapse="")
+    )
+
+    assert status != 0
+    assert _verdict(root) == "timer_not_scheduled"
+
+
+def test_r4b_running_timer_with_unparseable_next_elapse_is_not_unscheduled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    status, root, _log = _run(
+        tmp_path,
+        monkeypatch,
+        properties=_properties(sub_state="running", next_elapse="not-a-timestamp"),
+    )
+
+    assert status == 0
+    assert _verdict(root) == "ok"
+
+
+def test_r4b_running_timer_with_next_beyond_the_dwell_is_not_unscheduled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    status, root, _log = _run(
+        tmp_path,
+        monkeypatch,
+        properties=_properties(
+            sub_state="running", next_elapse=_systemd_timestamp(NOW + timedelta(hours=40))
+        ),
+    )
+
+    assert status == 0
+    assert _verdict(root) == "ok"
+
+
+def test_r4b_running_timer_with_stale_manifest_is_manifest_stale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    status, root, _log = _run(
+        tmp_path,
+        monkeypatch,
+        properties=_properties(sub_state="running", next_elapse=""),
+        receipt=_write_refresh_receipt(tmp_path, manifest_age_hours=130.0),
+    )
+
+    assert status != 0
+    assert _verdict(root) == "manifest_stale"
+
+
+def test_r4b_running_timer_with_expired_manifest_is_manifest_expired(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    status, root, _log = _run(
+        tmp_path,
+        monkeypatch,
+        properties=_properties(sub_state="running", next_elapse=""),
+        receipt=_write_refresh_receipt(tmp_path, manifest_age_hours=200.0),
+    )
+
+    assert status != 0
+    assert _verdict(root) == "manifest_expired"
+
+
+def test_r4b_running_but_disabled_timer_is_timer_not_enabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    status, root, _log = _run(
+        tmp_path,
+        monkeypatch,
+        properties=_properties(unit_file_state="disabled", sub_state="running", next_elapse=""),
+    )
+
+    assert status != 0
+    assert _verdict(root) == "timer_not_enabled"
+
+
+# ---------------------------------------------------------------------------
 # R6 / R7 / R7b -- manifest freshness and precedence
 # ---------------------------------------------------------------------------
 
