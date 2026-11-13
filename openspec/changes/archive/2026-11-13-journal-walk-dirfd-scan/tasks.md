@@ -17,5 +17,12 @@
   tests/test_gateway_reconcile*.py`.
 - [x] 1.5 `scripts/select_ci_tests.py` routing selects the walk/safe_fs suites for both changed files (verify; add
   rows only if missing).
-- [ ] 2.1 Post-merge (operator): node-22 ff-pull at a pass boundary; next pass receipt vs 2026110200 (qc → provenance
+- [x] 2.1 Post-merge (operator): node-22 ff-pull at a pass boundary; next pass receipt vs 2026110200 (qc → provenance
   IFS 12.8 / gfs 15.7 min; convert `dispatch_ms` ~434 s; pass entry → convert start ~25 min; wall 143 min).
+
+  Receipt 2026-11-13T16:40Z: node-22 ff-pull to 2ec644614 at the 14:43:39Z pass boundary; first pass on it,
+  cycle 2026110312 (`scheduler_2026111314_c1f355627cbb`), 14:43:39Z-16:34:41Z = 111 min (2026110200: 143 min).
+  - qc aggregated -> provenance published: IFS 27 s, gfs 23 s (2026110200: 12.8 min / 15.7 min).
+  - pass entry -> convert start 19.7 min (25.8 min); convert dispatch 53-81 s per stage (434 s); first forcing at
+    20.6 min (34 min).
+  - 0 failed / 0 ambiguous; no failed nhms unit.
