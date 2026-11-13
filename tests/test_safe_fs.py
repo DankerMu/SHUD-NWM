@@ -43,6 +43,7 @@ from packages.common.safe_fs import (
     read_bytes_durable_no_follow,
     read_bytes_limited_no_follow,
     rmtree_no_follow,
+    scan_directory_no_follow_limited,
     unlink_no_follow_durable,
 )
 from packages.common.safe_fs_publication import (
@@ -539,3 +540,220 @@ def test_durable_read_parent_recheck_failure_is_indeterminate(
     with pytest.raises(SafeFilesystemError) as raised:
         read_bytes_durable_no_follow(target, max_bytes=1024)
     assert raised.value.kind == "indeterminate"
+
+
+# --- scan_directory_no_follow_limited (#3138) ---------------------------------
+
+
+def _open_fds() -> set[str]:
+    return set(os.listdir("/dev/fd"))
+
+
+def _fake_entry_stat(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    action: object,
+) -> None:
+    """Intercept only the dir_fd-relative lstat of ``name``; everything else passes through."""
+
+    real_stat = os.stat
+
+    def fake(path: object, *args: object, dir_fd: int | None = None, **kwargs: object) -> os.stat_result:
+        if dir_fd is not None and path == name:
+            return action(dir_fd)  # type: ignore[operator]
+        return real_stat(path, *args, dir_fd=dir_fd, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("packages.common.safe_fs.os.stat", fake)
+
+
+def test_scan_returns_lstat_of_every_entry_relative_to_the_directory(tmp_path: Path) -> None:
+    directory = tmp_path / "d"
+    directory.mkdir()
+    (directory / "a.json").write_bytes(b"{}")
+    (directory / "sub").mkdir()
+    (directory / "link").symlink_to(directory / "a.json")
+    (directory / "dirlink").symlink_to(directory / "sub")
+
+    scanned = {entry.name: entry for entry in scan_directory_no_follow_limited(directory, max_entries=10)}
+
+    assert sorted(scanned) == ["a.json", "dirlink", "link", "sub"]
+    assert all(entry.error is None and entry.stat is not None for entry in scanned.values())
+    assert stat.S_ISREG(scanned["a.json"].stat.st_mode)
+    assert stat.S_ISDIR(scanned["sub"].stat.st_mode)
+    # Symlinks come back as links (lstat), never as their targets.
+    assert stat.S_ISLNK(scanned["link"].stat.st_mode)
+    assert stat.S_ISLNK(scanned["dirlink"].stat.st_mode)
+    assert scanned["a.json"].stat.st_ino == os.lstat(directory / "a.json").st_ino
+
+
+def test_scan_refuses_a_symlinked_ancestor(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    (real / "d").mkdir(parents=True)
+    (real / "d" / "a.json").write_bytes(b"{}")
+    (tmp_path / "alias").symlink_to(real)
+
+    # Type only: the symlinked component surfaces as ENOTDIR or ELOOP depending on the platform.
+    with pytest.raises(SafeFilesystemError):
+        scan_directory_no_follow_limited(tmp_path / "alias" / "d", max_entries=10)
+    with pytest.raises(SafeFilesystemError):
+        scan_directory_no_follow_limited(tmp_path / "alias" / "d", max_entries=10, containment_root=tmp_path)
+
+
+def test_scan_enforces_the_containment_root(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    with pytest.raises(SafeFilesystemError, match="containment root"):
+        scan_directory_no_follow_limited(outside, max_entries=10, containment_root=root)
+
+
+def test_scan_of_a_missing_directory_raises_raw_file_not_found(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError):
+        scan_directory_no_follow_limited(tmp_path / "missing", max_entries=10, containment_root=tmp_path)
+
+
+def test_scan_of_a_non_directory_is_a_safe_filesystem_error(tmp_path: Path) -> None:
+    (tmp_path / "file").write_bytes(b"x")
+
+    with pytest.raises(SafeFilesystemError):
+        scan_directory_no_follow_limited(tmp_path / "file", max_entries=10, containment_root=tmp_path)
+
+
+def test_scan_rejects_a_negative_limit(tmp_path: Path) -> None:
+    with pytest.raises(ValueError):
+        scan_directory_no_follow_limited(tmp_path, max_entries=-1)
+
+
+def test_scan_returns_vanished_and_failed_entries_without_raising(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    directory = tmp_path / "d"
+    directory.mkdir()
+    for name in ("a.json", "b.json", "c.json"):
+        (directory / name).write_bytes(b"{}")
+
+    def vanish(dir_fd: int) -> os.stat_result:
+        os.unlink("a.json", dir_fd=dir_fd)
+        raise FileNotFoundError("a.json")
+
+    real_stat = os.stat
+
+    def deny(path: object, *args: object, dir_fd: int | None = None, **kwargs: object) -> os.stat_result:
+        if dir_fd is not None and path == "b.json":
+            raise PermissionError(13, "denied", "b.json")
+        if dir_fd is not None and path == "a.json":
+            return vanish(dir_fd)
+        return real_stat(path, *args, dir_fd=dir_fd, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("packages.common.safe_fs.os.stat", deny)
+
+    scanned = {entry.name: entry for entry in scan_directory_no_follow_limited(directory, max_entries=10)}
+
+    assert scanned["a.json"].stat is None and scanned["a.json"].error is None
+    assert scanned["b.json"].stat is None
+    assert isinstance(scanned["b.json"].error, SafeFilesystemError)
+    assert scanned["b.json"].error.kind == "io"
+    assert isinstance(scanned["b.json"].error.__cause__, PermissionError)
+    assert scanned["c.json"].error is None and stat.S_ISREG(scanned["c.json"].stat.st_mode)
+
+
+def test_scan_sentinel_counts_vanished_names(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    directory = tmp_path / "d"
+    directory.mkdir()
+    for index in range(5):
+        (directory / f"{index}.json").write_bytes(b"{}")
+    real_stat = os.stat
+
+    def everything_vanishes(path: object, *args: object, dir_fd: int | None = None, **kwargs: object) -> object:
+        if dir_fd is not None:
+            raise FileNotFoundError(path)
+        return real_stat(path, *args, dir_fd=dir_fd, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("packages.common.safe_fs.os.stat", everything_vanishes)
+
+    scanned = scan_directory_no_follow_limited(directory, max_entries=2)
+
+    assert len(scanned) == 3
+    assert all(entry.stat is None and entry.error is None for entry in scanned)
+
+
+def test_scan_raises_when_the_directory_is_replaced_during_the_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    directory = tmp_path / "d"
+    directory.mkdir()
+    (directory / "a.json").write_bytes(b"{}")
+    real_stat = os.stat
+
+    def swap(dir_fd: int) -> os.stat_result:
+        result = real_stat("a.json", dir_fd=dir_fd, follow_symlinks=False)
+        directory.rename(tmp_path / "displaced")
+        directory.mkdir()
+        return result
+
+    _fake_entry_stat(monkeypatch, "a.json", swap)
+
+    with pytest.raises(SafeFilesystemError, match="changed") as raised:
+        scan_directory_no_follow_limited(directory, max_entries=10, containment_root=tmp_path)
+    assert not isinstance(raised.value, FileNotFoundError)
+
+
+def test_scan_raises_file_not_found_when_the_directory_vanishes_during_the_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    directory = tmp_path / "d"
+    directory.mkdir()
+    (directory / "a.json").write_bytes(b"{}")
+    real_stat = os.stat
+
+    def remove(dir_fd: int) -> os.stat_result:
+        result = real_stat("a.json", dir_fd=dir_fd, follow_symlinks=False)
+        (directory / "a.json").unlink()
+        directory.rmdir()
+        return result
+
+    _fake_entry_stat(monkeypatch, "a.json", remove)
+
+    with pytest.raises(FileNotFoundError):
+        scan_directory_no_follow_limited(directory, max_entries=10, containment_root=tmp_path)
+
+
+@pytest.mark.parametrize("shape", ["ok", "root_itself", "missing", "symlinked_ancestor", "replaced"])
+def test_scan_closes_every_descriptor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shape: str) -> None:
+    root = tmp_path / "root"
+    directory = root / "a" / "d"
+    directory.mkdir(parents=True)
+    (directory / "x.json").write_bytes(b"{}")
+    (root / "alias").symlink_to(root / "a")
+    target = {
+        "ok": directory,
+        "root_itself": root,
+        "missing": root / "a" / "missing",
+        "symlinked_ancestor": root / "alias" / "d",
+        "replaced": directory,
+    }[shape]
+    if shape == "replaced":
+        real_stat = os.stat
+
+        def swap(dir_fd: int) -> os.stat_result:
+            result = real_stat("x.json", dir_fd=dir_fd, follow_symlinks=False)
+            directory.rename(root / "a" / "displaced")
+            directory.mkdir()
+            return result
+
+        _fake_entry_stat(monkeypatch, "x.json", swap)
+    before = _open_fds()
+
+    try:
+        scan_directory_no_follow_limited(target, max_entries=10, containment_root=root)
+    except (FileNotFoundError, SafeFilesystemError):
+        assert shape in {"missing", "symlinked_ancestor", "replaced"}
+    else:
+        assert shape in {"ok", "root_itself"}
+
+    assert _open_fds() == before

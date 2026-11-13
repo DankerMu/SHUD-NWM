@@ -29,6 +29,7 @@ from packages.common.safe_fs import (
     list_directory_no_follow_limited,
     read_bytes_durable_no_follow,
     read_bytes_limited_no_follow,
+    scan_directory_no_follow_limited,
     stat_no_follow,
     unlink_no_follow,
     unlink_no_follow_durable,
@@ -776,6 +777,7 @@ __all__ = (
     "list_directory_no_follow_limited",
     "read_bytes_limited_no_follow",
     "reset_journal_read_counters",
+    "scan_directory_no_follow_limited",
     "stat_no_follow",
     "unlink_no_follow",
 )

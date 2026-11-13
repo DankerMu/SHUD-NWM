@@ -524,6 +524,15 @@
       },
       "cluster": "facade"
     },
+    "scan_directory_no_follow_limited": {
+      "binding": "import",
+      "callers": {
+        "paths": [
+          "_iter_discovered_files"
+        ]
+      },
+      "cluster": "facade"
+    },
     "stat_no_follow": {
       "binding": "import",
       "callers": {

@@ -20666,3 +20666,279 @@ def test_scheduler_reads_keep_failing_closed_on_the_row_the_listing_skips(tmp_pa
         "field": "pipeline-jobs/job_cycle_gfs_2026072000_forecast_retry_9.json",
         "evidence": {"error_type": "JSONDecodeError"},
     }
+
+
+# --- #3138 journal-walk-dirfd-scan: non-strict walks stat entries via one held dir fd ---------
+
+
+def _walk_discovered(
+    directory: Path,
+    *,
+    root: Path,
+    strict: bool = False,
+    recursive: bool = False,
+    max_files: int = 1000,
+) -> list[Path]:
+    from services.orchestrator import file_journal_paths
+
+    return list(
+        file_journal_paths._iter_discovered_files(
+            directory,
+            root=root,
+            suffix=".json",
+            recursive=recursive,
+            max_files=max_files,
+            max_depth=4,
+            strict_disappearance=strict,
+        )
+    )
+
+
+def _deep_journal_directory(tmp_path: Path, *, file_count: int) -> tuple[Path, Path]:
+    root = tmp_path / f"n{file_count}" / "l1" / "l2" / "l3" / "journal-root"
+    directory = root / "pipeline-jobs"
+    directory.mkdir(parents=True)
+    for index in range(file_count):
+        (directory / f"job_{index:05d}.json").write_bytes(b"{}")
+    return root, directory
+
+
+def _count_os_open_while_walking(
+    monkeypatch: pytest.MonkeyPatch,
+    directory: Path,
+    *,
+    root: Path,
+    strict: bool,
+) -> tuple[int, int]:
+    calls = 0
+    real_open = os.open
+
+    def counting_open(*args: Any, **kwargs: Any) -> int:
+        nonlocal calls
+        calls += 1
+        return real_open(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(safe_fs.os, "open", counting_open)
+        found = _walk_discovered(directory, root=root, strict=strict)
+    return calls, len(found)
+
+
+def _intercept_entry_lstat(monkeypatch: pytest.MonkeyPatch, action: Callable[[str, int], Any]) -> None:
+    """Route every dir_fd-relative lstat through ``action``; path-based stats pass through."""
+
+    real_stat = os.stat
+
+    def fake(path: Any, *args: Any, dir_fd: int | None = None, **kwargs: Any) -> Any:
+        if dir_fd is not None:
+            return action(path, dir_fd)
+        return real_stat(path, *args, dir_fd=dir_fd, **kwargs)
+
+    monkeypatch.setattr(safe_fs.os, "stat", fake)
+
+
+def test_non_strict_walk_directory_opens_do_not_grow_with_entry_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    small_root, small = _deep_journal_directory(tmp_path, file_count=3)
+    large_root, large = _deep_journal_directory(tmp_path, file_count=40)
+
+    small_opens, small_found = _count_os_open_while_walking(monkeypatch, small, root=small_root, strict=False)
+    large_opens, large_found = _count_os_open_while_walking(monkeypatch, large, root=large_root, strict=False)
+
+    assert (small_found, large_found) == (3, 40)
+    assert small_opens > 0
+    assert large_opens == small_opens
+
+
+def test_strict_walk_keeps_per_entry_no_follow_stat_cost(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    small_root, small = _deep_journal_directory(tmp_path, file_count=3)
+    large_root, large = _deep_journal_directory(tmp_path, file_count=40)
+
+    small_opens, small_found = _count_os_open_while_walking(monkeypatch, small, root=small_root, strict=True)
+    large_opens, large_found = _count_os_open_while_walking(monkeypatch, large, root=large_root, strict=True)
+
+    assert (small_found, large_found) == (3, 40)
+    assert large_opens > small_opens
+
+
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize(
+    ("link_name", "to_directory", "recursive"),
+    [
+        ("x.json", False, False),
+        ("other", False, False),
+        ("sub", True, False),
+        ("sub", True, True),
+    ],
+)
+def test_walk_refuses_a_symlink_entry(
+    tmp_path: Path,
+    strict: bool,
+    link_name: str,
+    to_directory: bool,
+    recursive: bool,
+) -> None:
+    directory = tmp_path / "journal"
+    directory.mkdir()
+    (directory / "a.json").write_bytes(b"{}")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "leak.json").write_bytes(b"{}")
+    (directory / link_name).symlink_to(outside if to_directory else outside / "leak.json")
+
+    with pytest.raises(FileOrchestrationJournalError) as raised:
+        _walk_discovered(directory, root=tmp_path, strict=strict, recursive=recursive)
+
+    assert raised.value.reason == "file_journal_unsafe_scanned_entry"
+    assert raised.value.field == f"journal/{link_name}"
+    assert raised.value.evidence == {"error_type": "SafeFilesystemError"}
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_walk_maps_a_per_entry_stat_error_to_unsafe_scanned_entry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    strict: bool,
+) -> None:
+    directory = tmp_path / "journal"
+    directory.mkdir()
+    for name in ("a.json", "b.json", "c.json"):
+        (directory / name).write_bytes(b"{}")
+    real_stat = os.stat
+
+    def deny_b(name: str, dir_fd: int) -> Any:
+        if name == "b.json":
+            raise PermissionError(errno.EACCES, "denied", name)
+        return real_stat(name, dir_fd=dir_fd, follow_symlinks=False)
+
+    _intercept_entry_lstat(monkeypatch, deny_b)
+
+    with pytest.raises(FileOrchestrationJournalError) as raised:
+        _walk_discovered(directory, root=tmp_path, strict=strict)
+
+    assert raised.value.reason == "file_journal_unsafe_scanned_entry"
+    assert raised.value.field == "journal/b.json"
+    assert raised.value.evidence == {"error_type": "SafeFilesystemError"}
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_walk_refuses_a_non_regular_suffix_match(tmp_path: Path, strict: bool) -> None:
+    directory = tmp_path / "journal"
+    directory.mkdir()
+    (directory / "a.json").write_bytes(b"{}")
+    os.mkfifo(directory / "fifo.json")
+    os.mkfifo(directory / "fifo.txt")
+
+    with pytest.raises(FileOrchestrationJournalError) as raised:
+        _walk_discovered(directory, root=tmp_path, strict=strict)
+
+    assert raised.value.reason == "file_journal_unsafe_scanned_entry"
+    assert raised.value.field == "journal/fifo.json"
+    assert raised.value.evidence == {"entry_type": "not_regular_file"}
+
+
+def test_walk_unsafe_segment_wins_over_a_later_entry_error(tmp_path: Path) -> None:
+    directory = tmp_path / "journal"
+    directory.mkdir()
+    (directory / "a b.json").write_bytes(b"{}")
+    (directory / "z.json").symlink_to(directory / "a b.json")
+
+    with pytest.raises(FileOrchestrationJournalError) as raised:
+        _walk_discovered(directory, root=tmp_path)
+
+    assert raised.value.reason == "file_journal_unsafe_path_segment"
+    assert raised.value.field == "journal/a b.json"
+
+
+@pytest.mark.parametrize(
+    ("strict", "expected"),
+    [(False, None), (True, "file_journal_reconcile_inventory_migration_invalid")],
+)
+def test_walk_entry_vanishing_mid_scan_keeps_the_strict_and_non_strict_outcomes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    strict: bool,
+    expected: str | None,
+) -> None:
+    directory = tmp_path / "journal"
+    directory.mkdir()
+    for name in ("a.json", "b.json", "c.json"):
+        (directory / name).write_bytes(b"{}")
+    real_stat = os.stat
+
+    def vanish_b(name: str, dir_fd: int) -> Any:
+        if name == "b.json":
+            os.unlink(name, dir_fd=dir_fd)
+            raise FileNotFoundError(errno.ENOENT, "vanished", name)
+        return real_stat(name, dir_fd=dir_fd, follow_symlinks=False)
+
+    _intercept_entry_lstat(monkeypatch, vanish_b)
+
+    if expected is None:
+        assert _walk_discovered(directory, root=tmp_path, strict=strict) == [
+            directory / "a.json",
+            directory / "c.json",
+        ]
+        return
+    with pytest.raises(FileOrchestrationJournalError) as raised:
+        _walk_discovered(directory, root=tmp_path, strict=strict)
+    assert raised.value.reason == expected
+    assert raised.value.field == "journal/b.json"
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_walk_entry_limit_counts_vanished_names(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    strict: bool,
+) -> None:
+    directory = tmp_path / "journal"
+    directory.mkdir()
+    for name in ("a.json", "b.json", "c.json"):
+        (directory / name).write_bytes(b"{}")
+
+    real_stat = os.stat
+
+    def every_file_vanishes(name: str, dir_fd: int) -> Any:
+        if name.endswith(".json"):
+            raise FileNotFoundError(errno.ENOENT, "vanished", name)
+        return real_stat(name, dir_fd=dir_fd, follow_symlinks=False)
+
+    _intercept_entry_lstat(monkeypatch, every_file_vanishes)
+
+    with pytest.raises(FileOrchestrationJournalError) as raised:
+        _walk_discovered(directory, root=tmp_path, strict=strict, max_files=2)
+
+    assert raised.value.reason == "file_journal_file_limit_exceeded"
+    assert raised.value.evidence == {"max_files": 2}
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_walk_yields_in_sorted_order_with_recursion_in_place(tmp_path: Path, strict: bool) -> None:
+    directory = tmp_path / "journal"
+    (directory / "m").mkdir(parents=True)
+    for name in ("c.json", "a.json", "z.txt"):
+        (directory / name).write_bytes(b"{}")
+    (directory / "m" / "b.json").write_bytes(b"{}")
+    (directory / "n.json").write_bytes(b"{}")
+
+    assert _walk_discovered(directory, root=tmp_path, strict=strict, recursive=True) == [
+        directory / "a.json",
+        directory / "c.json",
+        directory / "m" / "b.json",
+        directory / "n.json",
+    ]
+    assert _walk_discovered(directory, root=tmp_path, strict=strict, recursive=False) == [
+        directory / "a.json",
+        directory / "c.json",
+        directory / "n.json",
+    ]
+
+
+def test_non_strict_walk_of_a_missing_directory_yields_nothing(tmp_path: Path) -> None:
+    assert _walk_discovered(tmp_path / "journal", root=tmp_path) == []
