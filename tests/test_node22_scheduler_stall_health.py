@@ -1857,6 +1857,37 @@ def test_f10_reaching_the_enumeration_bound_is_probe_failed_not_a_silent_truncat
     assert _verdict(receipts) == "probe_failed"
 
 
+def test_f10c_a_catch_up_sized_evidence_root_is_graded_under_the_default_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #3120: the old 4096 default blinded the probe on a catch-up burst.
+
+    node-22 measured 6185 entries, every one inside the 90-day retention
+    window.  With NO override the default must cover that volume; f10 keeps
+    proving that an explicit bound below the entry count still fails closed.
+    """
+
+    # No override reaches the probe: `_run` clears every probe variable and
+    # BASE_CONFIG does not carry this one.
+    assert probe.ENV_MAX_ENTRIES_SCANNED not in BASE_CONFIG
+    root = _evidence_root(tmp_path)
+    _healthy_passes(root)
+    # One more than the old default on its own; non-pass names, so each costs
+    # one directory entry and nothing else.
+    for index in range(4097):
+        name = f"filler-{index:05d}.txt"
+        assert not probe.is_terminal_pass_filename(name)
+        (root / name).touch()
+
+    status, receipts, _log = _run(tmp_path, monkeypatch, evidence_root=root)
+    receipt = _receipt(receipts)
+
+    assert status == 0
+    assert receipt["verdict"] == "ok"
+    assert not [row for row in receipt["errors"] if "more than" in row]
+    assert probe.DEFAULT_MAX_ENTRIES_SCANNED == 65536
+
+
 def test_f10b_every_damaged_artifact_is_listed_not_just_the_first(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
