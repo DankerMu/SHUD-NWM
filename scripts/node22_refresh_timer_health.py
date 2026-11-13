@@ -543,8 +543,13 @@ def grade(
     if unit_file_state != "enabled":
         return VERDICT_TIMER_NOT_ENABLED
 
-    # 5. Running, but with no tick coming inside the next-dwell.
-    if active_state == "active":
+    # 5. Active, but with no tick coming inside the next-dwell.  Exempt while
+    #    `SubState=running`: systemd leaves the next elapse empty until the
+    #    triggered refresh service finishes (#3132, the ~2.7 h 02:15Z run).
+    #    That blind spot is bounded: the service has its own `TimeoutStartSec`
+    #    and `OnFailure=`, and a refresh that never publishes is still caught
+    #    by manifest age (steps 2 and 6).
+    if active_state == "active" and properties.get("SubState", "") != "running":
         try:
             next_elapse = parse_systemd_timestamp(properties.get("NextElapseUSecRealtime", ""))
         except ValueError:

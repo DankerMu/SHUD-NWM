@@ -745,7 +745,7 @@ calendar event **不会**在重新 `start` 时补跑，所以既没有失败日�
 | 2 | `manifest_expired` | manifest 年龄 ≥ 168 小时——consumer 已经 fail closed，比任何 timer 事实都严重 |
 | 3 | `timer_stopped` | `ActiveState != active` 且已停超过 stopped-dwell。不带 `enabled` 谓词：`disabled` 且停着同样报这条 |
 | 4 | `timer_not_enabled` | `UnitFileState` 不是 `enabled`。此刻恰好 active 也算——它熬不过一次 reload 或重启 |
-| 5 | `timer_not_scheduled` | timer `active`，但 `NextElapseUSecRealtime` 为空、不可解析，或比 next-dwell 还远 |
+| 5 | `timer_not_scheduled` | timer `active`，但 `NextElapseUSecRealtime` 为空、不可解析，或比 next-dwell 还远。`SubState=running` 时豁免整条：被触发的 refresh service 仍在跑时 systemd 会把 next elapse 留空，这不是漏排期；该盲区有界——service 自带 `TimeoutStartSec` 与 `OnFailure=`，一直发布不出来的 refresh 仍由第 2、6 条 manifest 年龄抓住 |
 | 6 | `manifest_stale` | manifest 年龄 ≥ manifest-age 阈值（且 < 168）。两个 manifest 比较都是"等于即命中" |
 | 7 | `manifest_unavailable` | `latest.json` 与 history 回退都解不出 manifest 年龄。**排在 `ok` 之前、所有 timer 判决之后**：解不出的 manifest 不能说明 timer 的任何事，所以不许遮住 `timer_stopped`/`timer_not_enabled`/`timer_not_scheduled`；但它仍是缺失的证据，所以也到不了 `ok` |
 | 8 | `ok` | 以上都不命中 |
