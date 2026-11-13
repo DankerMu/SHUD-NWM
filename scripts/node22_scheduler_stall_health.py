@@ -255,12 +255,16 @@ HOUR_BUCKET_MARGIN = 12
 # (64 - 12 - 1) * 5 = 255 is not.  At the freeze's measured 6.1 minutes per
 # pass the prefix spans 505 minutes.
 DEFAULT_SCAN_LIMIT = 96
-# The evidence root held 309 entries when measured and grows.  Reaching this
-# bound is a REPORTED FACT, never a silent truncation: `os.scandir` returns
-# filesystem order, so a truncated listing makes "the lexically greatest names
-# are the highest hour buckets" false, and the margin argument above collapses
-# without a trace.
-DEFAULT_MAX_ENTRIES_SCANNED = 4096
+# Sized to the 90-day evidence retention volume (issue #3120): the root held
+# 6185 entries when measured 2026-11-13, all inside the retention window, at the
+# catch-up pass density (~150-245 entries/day vs ~15-25/day steady), so the
+# 90-day worst is ~245 x 90 = ~22k; the old 4096 left the probe `probe_failed`
+# on every tick.  A full listing stays cheap (`ls -f` of 6185 entries on the
+# node-22 NFS mount: 11 ms).  Reaching this bound is still a REPORTED FACT,
+# never a silent truncation: `os.scandir` returns filesystem order, so a
+# truncated listing makes "the lexically greatest names are the highest hour
+# buckets" false, and the margin argument above collapses without a trace.
+DEFAULT_MAX_ENTRIES_SCANNED = 65536
 
 # Chronic tracker subjects that cannot converge.  `ambiguous_fallback_match`
 # with reason class `comment_accounting_unproven` is written by

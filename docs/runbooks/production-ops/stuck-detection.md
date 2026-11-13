@@ -199,7 +199,9 @@ JSON/缺 `started_at`、tracker `schema_version` 不匹配或条目残缺、证�
 处置：读 receipt 的 `errors[]` 与 `evidence.unreadable[]` 定位到具体文件名；
 触顶那条说明证据根条目数超界，先确认 retention 作业
 （`scripts/node22_scheduler_evidence_retention.py` + 它那对 timer/service）还活着，
-再决定抬阈值还是清积压。**不要**因为看不懂就抬阈值
+再决定抬阈值还是清积压。默认上限自 issue 3120 起为 65536（原 4096）：2026-11 的触顶
+不是 retention 作业死了，而是 catch-up 期间每天 150-245 个产物的爆发（全部在 90 天
+保留窗内）。**不要**因为看不懂就抬阈值
 把它压成 `ok` —— 枚举触顶后排序余量论证失效，判级结果不可信。
 `errors[]` 里若是 `timer: systemctl returned no UnitFileState`，**通常意味着
 `nhms-compute-scheduler.timer` 的 unit 文件被删了**（`systemctl show` 对不存在的
