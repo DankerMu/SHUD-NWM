@@ -11,9 +11,14 @@ from packages.common.contracts.time_normalization import cycle_id_for
 from packages.common.object_store import LocalObjectStore
 from services.artifacts import published_log_uri
 from services.orchestrator.chain_types import OrchestratorError
+from services.orchestrator.file_journal_read_attribution import (
+    journal_read_attribution,
+    reset_journal_read_counters,
+)
 from services.orchestrator.file_orchestration_journal import (
     FILE_JOURNAL_READ_BLOCKED_STATUS,
     FILE_ORCHESTRATION_LATEST_SCHEMA_VERSION,
+    FileOrchestrationJournalRepository,
 )
 from services.orchestrator.pipeline_job_provenance import (
     PipelineJobProvenanceError,
@@ -782,3 +787,173 @@ def test_publisher_rejects_child_slurm_id_not_bound_to_array_task(tmp_path: Path
     )
     assert sidecar["jobs"][0]["log_uri"] is None
     assert not (published_root / "logs").exists()
+
+
+# --- #3135: one repository per publication batch --------------------------------
+
+IFS_THIRD_TASK_ID = 25
+IFS_THIRD_MODEL_ID = "dg_2e611766f8d1edb6e99a2ba1892e48e1"
+IFS_THIRD_RUN_ID = f"fcst_ifs_{IFS_CYCLE_STAMP}_{IFS_THIRD_MODEL_ID}"
+IFS_THIRD_JOB_ID = f"job_{IFS_THIRD_RUN_ID}_forecast_reconciled_{IFS_PARENT_JOB_ID}_{IFS_THIRD_TASK_ID}"
+IFS_BATCH_RUN_IDS = [IFS_SELECTED_RUN_ID, IFS_SECOND_RUN_ID, IFS_THIRD_RUN_ID]
+IFS_PUBLICATION_READ_TAG = "iter_publication_pipeline_jobs_by_cycle"
+
+
+def _third_forecast_job() -> dict[str, Any]:
+    return {
+        **_forecast_job(),
+        "job_id": IFS_THIRD_JOB_ID,
+        "run_id": IFS_THIRD_RUN_ID,
+        "array_task_id": IFS_THIRD_TASK_ID,
+        "model_id": IFS_THIRD_MODEL_ID,
+        "idempotency_key": f"{IFS_THIRD_RUN_ID}:forecast",
+    }
+
+
+def _seed_batch_manifests(object_root: Path) -> None:
+    _seed_manifest(object_root)
+    _seed_manifest(object_root, run_id=IFS_SECOND_RUN_ID, model_id=IFS_SECOND_MODEL_ID)
+    _seed_manifest(object_root, run_id=IFS_THIRD_RUN_ID, model_id=IFS_THIRD_MODEL_ID)
+
+
+def _publication_disk_bytes() -> int:
+    """Non-cached journal bytes read under the publication entrypoint."""
+
+    return sum(
+        int(row["bytes"])
+        for row in journal_read_attribution()["tags"]
+        if str(row["tag"]).split("|", 1)[0] == IFS_PUBLICATION_READ_TAG
+    )
+
+
+def _sidecar_bytes(object_root: Path, run_id: str) -> bytes:
+    return (object_root / "runs" / run_id / "input" / "pipeline_jobs.json").read_bytes()
+
+
+def test_batch_replays_a_same_cycle_journal_from_disk_about_once(tmp_path: Path) -> None:
+    journal_root = tmp_path / "journal"
+    fresh_root = tmp_path / "object-store-fresh"
+    batch_root = tmp_path / "object-store-batch"
+    fresh_published = tmp_path / "published-fresh"
+    batch_published = tmp_path / "published-batch"
+    for directory in (journal_root, fresh_root, batch_root, fresh_published, batch_published):
+        directory.mkdir()
+    _seed_ifs_journal(
+        journal_root,
+        jobs=[_forecast_job(), _second_forecast_job(), _third_forecast_job(), _cycle_scoped_convert_job()],
+    )
+    _seed_batch_manifests(fresh_root)
+    _seed_batch_manifests(batch_root)
+
+    # Old per-run behaviour: every run replays the cycle through a fresh repository.
+    reset_journal_read_counters()
+    per_run_bytes: list[int] = []
+    for run_id in IFS_BATCH_RUN_IDS:
+        before = _publication_disk_bytes()
+        fresh = publish_run_pipeline_job_provenance(
+            run_id=run_id,
+            journal_root=journal_root,
+            object_store_root=fresh_root,
+            published_artifact_root=fresh_published,
+            fetch_logs=lambda _job_id: _parent_array_response(include_sibling=False),
+        )
+        assert fresh["status"] == "published"
+        per_run_bytes.append(_publication_disk_bytes() - before)
+    one_replay = per_run_bytes[0]
+    assert one_replay > 0
+    assert per_run_bytes == [one_replay] * len(IFS_BATCH_RUN_IDS)
+
+    reset_journal_read_counters()
+    summary = publish_runs_pipeline_job_provenance(
+        run_ids=IFS_BATCH_RUN_IDS,
+        journal_root=journal_root,
+        object_store_root=batch_root,
+        published_artifact_root=batch_published,
+        fetch_logs=lambda _job_id: _parent_array_response(include_sibling=False),
+    )
+    batch_bytes = _publication_disk_bytes()
+
+    assert summary["status"] == "published"
+    assert summary["published"] == len(IFS_BATCH_RUN_IDS)
+    assert [item["job_count"] for item in summary["runs"]] == [2, 2, 2]
+    # About one cycle replay for the whole batch, not one per run.
+    assert batch_bytes < 2 * one_replay, (batch_bytes, one_replay)
+    for run_id in IFS_BATCH_RUN_IDS:
+        assert _sidecar_bytes(batch_root, run_id) == _sidecar_bytes(fresh_root, run_id)
+
+
+def test_shared_repository_sees_a_journal_append_between_runs(tmp_path: Path) -> None:
+    journal_root = tmp_path / "journal"
+    object_root = tmp_path / "object-store"
+    published_root = tmp_path / "published"
+    for directory in (journal_root, object_root, published_root):
+        directory.mkdir()
+    _seed_ifs_journal(journal_root, jobs=[_forecast_job(), _second_forecast_job()])
+    _seed_batch_manifests(object_root)
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    first = publish_run_pipeline_job_provenance(
+        run_id=IFS_SELECTED_RUN_ID,
+        journal_root=journal_root,
+        object_store_root=object_root,
+        published_artifact_root=published_root,
+        fetch_logs=lambda _job_id: _parent_array_response(include_sibling=False),
+        repository=repository,
+    )
+    assert first["status"] == "published"
+    # Unchanged journal: the shared repository serves the second run without disk reads.
+    reset_journal_read_counters()
+    second = publish_run_pipeline_job_provenance(
+        run_id=IFS_SECOND_RUN_ID,
+        journal_root=journal_root,
+        object_store_root=object_root,
+        published_artifact_root=published_root,
+        fetch_logs=lambda _job_id: _parent_array_response(include_sibling=False),
+        repository=repository,
+    )
+    assert second["status"] == "published"
+    assert _publication_disk_bytes() == 0
+    journal_file = journal_root / "journal" / "IFS" / f"{IFS_CYCLE_STAMP}.jsonl"
+    size_before = journal_file.stat().st_size
+    # Another cohort writer records the later run's job after the first publication.
+    _seed_ifs_journal(journal_root, jobs=[_forecast_job(), _second_forecast_job(), _third_forecast_job()])
+    assert journal_file.stat().st_size > size_before
+
+    reset_journal_read_counters()
+    later =publish_run_pipeline_job_provenance(
+        run_id=IFS_THIRD_RUN_ID,
+        journal_root=journal_root,
+        object_store_root=object_root,
+        published_artifact_root=published_root,
+        fetch_logs=lambda _job_id: _parent_array_response(include_sibling=False),
+        repository=repository,
+    )
+    sidecar = json.loads(_sidecar_bytes(object_root, IFS_THIRD_RUN_ID))
+
+    assert later["status"] == "published"
+    assert _publication_disk_bytes() > 0
+    assert later["job_count"] == 1
+    assert [job["job_id"] for job in sidecar["jobs"]] == [IFS_THIRD_JOB_ID]
+
+
+def test_publisher_refuses_a_repository_bound_to_another_root(tmp_path: Path) -> None:
+    journal_root = tmp_path / "journal"
+    other_root = tmp_path / "other-journal"
+    object_root = tmp_path / "object-store"
+    for directory in (journal_root, other_root, object_root):
+        directory.mkdir()
+    _seed_ifs_journal(journal_root)
+    _seed_ifs_journal(other_root)
+    _seed_manifest(object_root)
+
+    with pytest.raises(PipelineJobProvenanceError) as caught:
+        publish_run_pipeline_job_provenance(
+            run_id=IFS_SELECTED_RUN_ID,
+            journal_root=journal_root,
+            object_store_root=object_root,
+            fetch_logs=lambda _job_id: _parent_array_response(),
+            repository=FileOrchestrationJournalRepository(other_root),
+        )
+
+    assert caught.value.code == "JOURNAL_REPOSITORY_ROOT_MISMATCH"
+    assert not (object_root / "runs" / IFS_SELECTED_RUN_ID / "input" / "pipeline_jobs.json").exists()

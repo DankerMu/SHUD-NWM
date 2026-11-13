@@ -186,8 +186,13 @@ def publish_run_pipeline_job_provenance(
     fetch_logs: Callable[[str], Mapping[str, Any]] | None = None,
     include_cycle_scoped: bool = True,
     log_cache: _ParentArrayLogCache | None = None,
+    repository: FileOrchestrationJournalRepository | None = None,
 ) -> dict[str, Any]:
     """Publish one run's sidecar and any verified canonical logs.
+
+    ``repository`` lets a batch replay every run through one instance so its
+    stat-identity read cache serves the repeated cycle replay (#3135). It must
+    be bound to the verified journal root; ``None`` builds a fresh one.
 
     Journal reads never mkdir, take a journal write lock, or mutate source
     rows. The existing object-store mutex serializes each complete log/sidecar
@@ -199,13 +204,20 @@ def publish_run_pipeline_job_provenance(
         journal_root,
         setting="NHMS_SCHEDULER_JOURNAL_ROOT",
     )
+    if repository is not None and Path(repository.root) != verified_journal_root:
+        raise PipelineJobProvenanceError(
+            "JOURNAL_REPOSITORY_ROOT_MISMATCH",
+            "Journal repository is not bound to the verified journal root.",
+            {"run_id": safe_run_id},
+        )
     object_root = _require_existing_directory(object_store_root, field="object_store_root")
     try:
         with copyback_batch_lock(object_root):
             store = LocalObjectStore(root=object_root, object_store_prefix=object_store_prefix)
             manifest = _load_run_manifest(store, safe_run_id)
             identity = _identity_from_manifest(manifest, expected_run_id=safe_run_id)
-            repository = FileOrchestrationJournalRepository(verified_journal_root)
+            if repository is None:
+                repository = FileOrchestrationJournalRepository(verified_journal_root)
             jobs = _export_jobs_for_run(
                 repository,
                 identity=identity,
@@ -328,7 +340,7 @@ def publish_runs_pipeline_job_provenance(
             {"run_count": len(requested), "max_runs": MAX_PROVENANCE_RUNS_PER_BATCH},
         )
 
-    verify_journal_root_authority(journal_root, setting="NHMS_SCHEDULER_JOURNAL_ROOT")
+    verified_journal_root = verify_journal_root_authority(journal_root, setting="NHMS_SCHEDULER_JOURNAL_ROOT")
     object_root = _require_existing_directory(object_store_root, field="object_store_root")
     preflight_store = LocalObjectStore(root=object_root, object_store_prefix=object_store_prefix)
     for run_id in requested:
@@ -336,6 +348,8 @@ def publish_runs_pipeline_job_provenance(
 
     summaries: list[dict[str, Any]] = []
     log_cache = _ParentArrayLogCache(_bound_fetch_logs(slurm_client, fetch_logs))
+    # One repository for the whole batch: same-cycle runs share its read cache.
+    repository = FileOrchestrationJournalRepository(verified_journal_root)
     for run_id in requested:
         try:
             summaries.append(
@@ -349,6 +363,7 @@ def publish_runs_pipeline_job_provenance(
                     fetch_logs=fetch_logs,
                     include_cycle_scoped=include_cycle_scoped,
                     log_cache=log_cache,
+                    repository=repository,
                 )
             )
         except PipelineJobProvenanceError as error:
