@@ -216,6 +216,9 @@ def _run_cleanup(*, retention_days: int | None, dry_run: bool) -> dict[str, obje
         # copyback root -- the one whose removals must hold the copyback batch
         # mutex -- from the run-workspace root beside it.
         copyback_root=os.getenv("NHMS_OBJECT_STORE_COPYBACK_ROOT"),
+        # And the workspace root named again (#3142), for its root-level Slurm
+        # log lane; same gate and window as its runs/ lane.
+        slurm_log_root=os.getenv("WORKSPACE_ROOT"),
     )
     payload = result.to_dict()
     if frontier.status == "ok":

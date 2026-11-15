@@ -12,8 +12,9 @@ a patch aimed at the old target raises ``AttributeError`` instead of passing
 vacuously (design D1 of ``split-oversized-surfaces-batch``).
 
 ``_resolve_copyback_lock_root`` deliberately stayed behind: its only caller is
-``run_retention`` and it reaches back into ``retention``'s root-admission
-helpers, so moving it would close a top-level import cycle. The dependency runs
+``run_retention`` and it reaches back into the root-admission helpers (in
+``retention`` when this was written; in ``retention_root_admission`` since
+#3142), which this module does not otherwise depend on. The dependency runs
 one way only -- ``retention`` imports this module at runtime, this module needs
 ``retention`` for the ``RetentionResult`` annotation alone and takes it under
 ``TYPE_CHECKING``.

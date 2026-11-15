@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -682,6 +683,39 @@ def test_pass_forwards_both_configured_extra_roots(tmp_path: Path, monkeypatch) 
     # (3) physical: both were really reclaimed
     assert not (workspace / workspace_key).exists()
     assert not (copyback / copyback_key).exists()
+
+
+# --- #3142 2.9 -------------------------------------------------------------
+def test_pass_names_the_workspace_root_as_the_slurm_log_root(tmp_path: Path, monkeypatch) -> None:
+    """[#3142 2.9] The pass forwards ``slurm_log_root`` from ``WORKSPACE_ROOT``:
+    an aged, idle root-level ``<cycle_id>/`` beneath it is reclaimed and
+    attributed to it, while the copyback root's same-named directory is not.
+
+    Deleting the ``slurm_log_root`` argument from
+    ``scheduler_runtime._run_retention`` must make this test fail.
+    """
+    _seed_pass_env(monkeypatch)
+    store = tmp_path / "object-store"
+    store.mkdir()
+    workspace = (tmp_path / "workspace").resolve()
+    copyback = (tmp_path / "copyback").resolve()
+    idle = (NOW - timedelta(days=60)).timestamp()
+    for root in (workspace, copyback):
+        lane_file = _write(root, "gfs_2026010100/manifests/forcing_index_x.json")
+        for path in (lane_file, lane_file.parent, lane_file.parent.parent):
+            os.utime(path, (idle, idle))
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", str(copyback))
+
+    scheduler = _pass_scheduler(workspace_root=str(workspace), object_store_root=str(store))
+    payload = scheduler._run_retention(NOW)
+
+    assert payload["status"] == "completed"
+    assert [
+        (entry["root"], entry["key"], entry["reason"]) for entry in payload["deleted"]
+    ] == [(str(workspace), "gfs_2026010100", "slurm_log_cycle_aged_out")]
+    assert not (workspace / "gfs_2026010100").exists()
+    assert (copyback / "gfs_2026010100/manifests/forcing_index_x.json").is_file()
 
 
 # --- 5.4 -------------------------------------------------------------------

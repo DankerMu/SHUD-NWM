@@ -44,6 +44,12 @@ Safety posture (never-break-userspace):
   object store are not locked. A mutex failure is recorded like every other
   deletion failure and never aborts the pass, and one pass-level wait budget
   bounds how long a stuck holder can stall a sweep.
+- The scheduler workspace root, named by the caller's ``slurm_log_root`` and
+  admitted as an additional root, also carries a root-level Slurm log lane
+  (issue #3142, ``retention_slurm_log_lane``): direct children named as a
+  canonical run id or a ``gfs|ifs|era5`` cycle id, selected on the
+  additional-root window, below the frontier, and only when nothing in the tree
+  was modified within that window. No other root gets the lane.
 """
 
 from __future__ import annotations
@@ -66,19 +72,28 @@ from packages.common.copyback_guard import (
 # re-exported here, so a `monkeypatch.setattr(retention, ...)` aimed at a moved
 # seam raises instead of patching an attribute nothing reads (design D1).
 from services.orchestrator.retention_copyback_mutex import _CopybackLockBudget, _delete_entry
-from services.orchestrator.run_identity import parse_run_cycle
 
-# Per-cycle prefixes whose second path segment ({source}) contains cycle
-# directories named ``%Y%m%d%H``. Confirmed against worker key construction:
-#   raw/{source}/{cycle}/...        (workers/data_adapters/*_adapter.py)
-#   canonical/{source}/{cycle}/...  (workers/canonical_converter/converter.py)
-#   forcing/{source}/{cycle}/...    (workers/forcing_producer/producer.py)
-CYCLE_SCOPED_PREFIXES: tuple[str, ...] = ("raw", "canonical", "forcing")
-
-# ``runs/{run_id}/...`` holds per-run workspace artifacts (chain.py). Only the
-# canonical run-id shapes (``services.orchestrator.run_identity``) are admitted
-# here, e.g. ``fcst_gfs_2026051600_<model>``; anything else is preserved.
-RUNS_PREFIX = "runs"
+# Root admission and overlap classification live in the sibling module (moved
+# out of this file under the 1,000-line guard). The names below stay importable
+# from here because callers and tests import them from ``retention``.
+from services.orchestrator.retention_root_admission import (
+    CYCLE_NAME_LENGTH,  # noqa: F401 - re-export
+    CYCLE_SCOPED_PREFIXES,
+    EXTRA_ROOT_NOT_ABSOLUTE_REASON,
+    EXTRA_ROOT_UNEXPANDABLE_REASON,
+    PRIMARY_ROOT_BLANK_REASON,
+    PRIMARY_ROOT_NOT_ABSOLUTE_REASON,
+    PRIMARY_ROOT_UNEXPANDABLE_REASON,
+    ROOT_OVERLAP_REASON,  # noqa: F401 - re-export
+    RUNS_PREFIX,
+    _extract_run_cycle,
+    _parse_cycle_name,
+    _resolve_runs_only_roots,
+    _sanitize_root_candidate,
+    _silently_resolved_root,
+    _slurm_log_lane_root,
+)
+from services.orchestrator.retention_slurm_log_lane import collect_slurm_log_targets
 
 # Always-protected top-level prefixes (published display products).
 PROTECTED_PREFIXES: frozenset[str] = frozenset({"tiles", "states"})
@@ -86,8 +101,6 @@ PROTECTED_PREFIXES: frozenset[str] = frozenset({"tiles", "states"})
 # Static asset segment under a cycle-scoped source (e.g.
 # ``canonical/gfs/grid/gfs_0p25/grid.json``). Never treated as a cycle.
 STATIC_SEGMENTS: frozenset[str] = frozenset({"grid"})
-
-CYCLE_NAME_LENGTH = 10  # len("%Y%m%d%H")
 
 # Skip reason for artifacts that aged past the wall-clock cutoff but are at or
 # after the pipeline's active lower bound (issue #1307 / design D4). Named from
@@ -102,40 +115,9 @@ PIPELINE_FRONTIER_EXEMPT_REASON = "pipeline_frontier_exempt"
 # root produced nothing.
 RUNS_ROOT_SYMLINK_REASON = "runs_root_symlink_skipped"
 
-# Skip reason for an additional root whose configured value is relative (#1318
-# task 5.1). Resolving it would anchor a deletion surface to whatever working
-# directory the process happens to have been started in; recorded rather than
-# dropped silently because -- unlike an unset root -- it is a misconfiguration
-# somebody has to see.
-EXTRA_ROOT_NOT_ABSOLUTE_REASON = "extra_root_not_absolute"
-
-# Skip reason for an explicitly empty/whitespace primary root (#1616). The
-# value must be recorded BEFORE it can collapse into ``None`` in
-# ``ProductionSchedulerConfig`` normalization, so the receipt stays readable
-# instead of silently looking like an unset root.
-PRIMARY_ROOT_BLANK_REASON = "primary_root_blank"
-
-# Skip reason for a non-blank but relative primary root (#1616). Resolving it
-# would anchor the deletion surface to the process working directory (or, for
-# the pass, the scheduler workspace); recorded rather than dropped because it
-# is a misconfiguration somebody has to see.
-PRIMARY_ROOT_NOT_ABSOLUTE_REASON = "primary_root_not_absolute"
-
-# Skip reason for a root rejected because its potential canonical deletion
-# tree intersects an already-admitted root's (#1617). The equality-only dedup
-# of #1318 could not see ``A/runs/<canonical_run_id>`` beneath ``A``, so both
-# roots would scan and select the same subtree twice. Directory ancestry alone
-# is not overlap: only target-tree intersection (``runs/<canonical_run_id>``
-# everywhere, ``raw|canonical|forcing/<source>/<valid_cycle>`` on the primary)
-# rejects a root. The loser is recorded with ``conflicting_root`` naming the
-# accepted winner.
-ROOT_OVERLAP_REASON = "root_overlap"
-
-# Skip reasons for a root whose leading ``~user`` has no home directory (#2596):
-# ``expanduser()`` raises an errno-less ``RuntimeError`` there. The published root
-# guards every deletion, so when IT is unexpandable the pass plans nothing at all.
-PRIMARY_ROOT_UNEXPANDABLE_REASON = "primary_root_unexpandable"
-EXTRA_ROOT_UNEXPANDABLE_REASON = "extra_root_unexpandable"
+# The published root guards every deletion, so when its leading ``~user`` has no
+# home directory (#2596) the pass plans nothing at all; the primary/additional
+# siblings of this token live in ``retention_root_admission``.
 PUBLISHED_ROOT_UNEXPANDABLE_REASON = "published_root_unexpandable"
 
 # Total time ONE pass may spend *acquiring* the copyback batch mutex, across
@@ -313,34 +295,6 @@ def _env_int(name: str, *, default: int) -> int:
     return parsed if parsed > 0 else default
 
 
-def _parse_cycle_name(name: str) -> datetime | None:
-    """Parse a ``%Y%m%d%H`` cycle directory name, or None if not a cycle.
-
-    Scope note (intentional): retention only cleans **forecast cycles** named
-    ``%Y%m%d%H``. Reanalysis/reference ``date_key`` directories (``%Y-%m-%d``)
-    are deliberately out of scope and must be retained. Such names fail the
-    length/``isdigit`` checks below and are therefore never selected for
-    deletion. This is a design choice, not an oversight.
-    """
-    if len(name) != CYCLE_NAME_LENGTH or not name.isdigit():
-        return None
-    try:
-        return datetime.strptime(name, "%Y%m%d%H").replace(tzinfo=UTC)
-    except ValueError:
-        return None
-
-
-def _extract_run_cycle(run_id: str) -> datetime | None:
-    """Resolve the cycle of a canonical run id, or None (#1405).
-
-    Delegates to the shared canonical shapes so a deletion surface admits only
-    names the pipeline actually mints. The previous token scan took the first
-    ``_``-separated token that parsed as ``%Y%m%d%H``, which both accepted
-    stray non-run directories and could bind a run to the wrong timestamp.
-    """
-    return parse_run_cycle(run_id)
-
-
 def _dir_size(path: Path) -> int:
     total = 0
     for child in path.rglob("*"):
@@ -494,232 +448,6 @@ def _iter_dirs(parent: Path) -> list[Path]:
     return [entry for entry in entries if entry.is_dir() and not entry.is_symlink()]
 
 
-def _sanitize_root_candidate(
-    value: Path | str | None,
-    *,
-    reason_blank: str | None,
-    reason_not_absolute: str,
-    reason_unexpandable: str,
-) -> tuple[str | None, Path | None, str | None]:
-    """Shared pre-resolution root hygiene (issues #1616/#1617).
-
-    One admission path for both the primary root and every additional root, so
-    a blank or relative value can never reach ``Path()`` construction or
-    ``resolve()`` and derive a working-directory deletion surface. Returns
-    ``(raw, resolved, rejected_reason)``; exactly one of ``resolved`` /
-    ``rejected_reason`` is set.
-
-    - ``None`` -> ordinary unset no-op: neither resolved nor rejected.
-    - empty/whitespace -> rejected with ``reason_blank`` when the caller
-      supplies a token, otherwise a silent no-op. The primary lane freezes its
-      own token so an explicitly blank primary stays distinguishable from an
-      unset one even after config normalization collapsed it; the additional
-      lane keeps the #1318 contract that blank values are discarded silently.
-    - non-blank but still relative after ``expanduser()`` -> rejected with
-      ``reason_not_absolute`` (the ``extra_root_not_absolute`` token for
-      additional roots stays stable; the primary lane carries its own token).
-    - ``~user`` with no home directory -> rejected with ``reason_unexpandable``.
-    - otherwise -> resolved to an absolute path (``Path(value).expanduser()
-      .resolve()``).
-    """
-    if value is None:
-        return None, None, None
-    if isinstance(value, str):
-        value = value.strip()
-        if not value:
-            return value, None, reason_blank
-    try:
-        candidate = Path(value).expanduser()
-    except RuntimeError:
-        return str(value), None, reason_unexpandable
-    # A degenerate ``Path`` (``Path("")`` / whitespace-only) is blank too.
-    if isinstance(value, Path) and not str(value).strip():
-        return str(value), None, reason_blank
-    if not candidate.is_absolute():
-        return str(value), None, reason_not_absolute
-    return str(value), candidate.resolve(), None
-
-
-def _resolve_runs_only_roots(
-    values: Sequence[Path | str | None],
-    *,
-    primary: Path | None,
-) -> tuple[list[Path], list[dict[str, Any]]]:
-    """Resolve, sanitise and de-duplicate the additional ``runs/``-only roots.
-
-    Returns the resolved roots plus the skip entries for the values that were
-    discarded loudly; this function is where *all* additional-root path hygiene
-    lives, and neither caller validates a root before handing it over.
-
-    Hygiene (issue #1318 task 1.2): ``None``, empty and whitespace-only values
-    are discarded **before** ``Path()`` is ever constructed --
-    ``Path("").expanduser().resolve()`` is the process working directory, which
-    would drag ``<cwd>/runs`` into the deletion surface. Those discards stay
-    silent (no skip entry), and the decision is keyed on the value's shape
-    alone: this function sees only the values, never the deployment topology.
-    ``tests/test_retention_extra_roots.py`` pins exactly that shape rule --
-    ``test_unset_and_blank_additional_roots_are_discarded_silently`` (no root,
-    no skip entry) and
-    ``test_relative_additional_root_is_recorded_while_absolute_is_admitted``.
-    Unverified operational context, not pinned by those tests and not visible
-    here: ``NHMS_OBJECT_STORE_COPYBACK_ROOT`` is expected to be unset
-    (``None``) on deployments that are not db-free, which is why silence is the
-    chosen shape for an unset value.
-
-    A non-blank value that is still relative after ``expanduser()`` is discarded
-    **before** ``resolve()`` and recorded in ``skipped`` (task 5.1): resolving it
-    would anchor the deletion surface to the invocation working directory. The
-    value is stripped first, because ``NHMS_OBJECT_STORE_COPYBACK_ROOT`` reaches
-    here as the bare environment string -- surrounding whitespace included.
-
-    Overlap (issue #1617 / design D2): a root is rejected only when its
-    POTENTIAL deletion target tree intersects an already-admitted root's --
-    ``runs/<canonical_run_id>`` on every root, plus
-    ``raw|canonical|forcing/<source>/<valid_cycle>`` on the primary. Directory
-    ancestry outside those lanes is admitted (a parent workspace with a nested
-    child object-store stays fully swept). The primary root always wins; among
-    additional roots the first accepted configured root wins. The loser is
-    omitted from the resolved list and recorded in ``skipped`` with
-    ``reason=root_overlap`` and ``conflicting_root=<winner>``. Equal aliases
-    (path / symlink / trailing-slash) resolve to the same absolute path and
-    remain the #1318 silent dedup.
-    """
-    resolved: list[Path] = []
-    skipped: list[dict[str, Any]] = []
-    admitted: list[tuple[Path, bool]] = []
-    if primary is not None:
-        admitted.append((primary, True))
-    for value in values:
-        raw, candidate, rejected = _sanitize_root_candidate(
-            value,
-            # #1318 contract: an unset/blank additional root is a SILENT discard,
-            # keyed on the value's shape only (pinned by the two shape tests
-            # named in the docstring). Only the relative shape is a
-            # misconfiguration worth recording. That ``None`` is the usual value
-            # on non-db-free deployments is operational context, not verified here.
-            reason_blank=None,
-            reason_not_absolute=EXTRA_ROOT_NOT_ABSOLUTE_REASON,
-            reason_unexpandable=EXTRA_ROOT_UNEXPANDABLE_REASON,
-        )
-        if rejected is not None:
-            skipped.append(
-                {
-                    "key": RUNS_PREFIX,
-                    "root": str(raw),
-                    "reason": rejected,
-                }
-            )
-            continue
-        if candidate is None:
-            continue
-        if any(candidate == admitted_path for admitted_path, _is_primary in admitted):
-            continue
-        conflicting = _find_conflicting_root(candidate, admitted)
-        if conflicting is not None:
-            skipped.append(
-                {
-                    "key": RUNS_PREFIX,
-                    "root": str(candidate),
-                    "reason": ROOT_OVERLAP_REASON,
-                    "conflicting_root": str(conflicting),
-                }
-            )
-            continue
-        admitted.append((candidate, False))
-        resolved.append(candidate)
-    return resolved, skipped
-
-
-def _find_conflicting_root(
-    candidate: Path,
-    admitted: Sequence[tuple[Path, bool]],
-) -> Path | None:
-    """Return the admitted root whose potential deletion tree intersects the
-    candidate's, or None.
-
-    ``admitted`` is the list of already-accepted roots as ``(path, is_primary)``
-    pairs, in admission order (the primary first when configured). "Overlap"
-    means either root lies at or below the other root's POTENTIAL retention
-    deletion target -- the same canonical shapes the collectors can delete, so
-    admission cannot drift from the scan (issue #1617 / design D2):
-
-    - every root owns potential ``runs/<canonical_run_id>/**`` targets, and
-    - the primary additionally owns potential
-      ``raw|canonical|forcing/<source>/<valid_cycle>/**`` targets.
-
-    Directory ancestry outside those lanes is NOT overlap: a parent workspace
-    with a nested child object-store (``WORKSPACE_ROOT`` / ``OBJECT_STORE_ROOT``)
-    has disjoint ``runs/`` and cycle trees and both remain admitted. The
-    comparison is purely lexical on resolved absolute path components -- no
-    filesystem enumeration and no dependence on whether the target currently
-    exists or is within its window.
-    """
-    for admitted_path, admitted_is_primary in admitted:
-        if _potential_targets_intersect(
-            candidate,
-            is_primary=False,
-            other=admitted_path,
-            other_is_primary=admitted_is_primary,
-        ):
-            return admitted_path
-    return None
-
-
-def _potential_targets_intersect(
-    path: Path,
-    *,
-    is_primary: bool,
-    other: Path,
-    other_is_primary: bool,
-) -> bool:
-    """True when two resolved roots' potential deletion target trees intersect.
-
-    Both containment directions are checked with the same lane predicate: the
-    contained root's relative components are classified against the container's
-    target lanes (``runs/<canonical>`` always; cycle prefixes only for the
-    primary), because the primary's cycle lane is not shared by additional
-    roots.
-    """
-    try:
-        relative = path.relative_to(other).parts
-        if _parts_lie_in_potential_target(relative, primary=other_is_primary):
-            return True
-    except ValueError:
-        pass
-    try:
-        relative = other.relative_to(path).parts
-        if _parts_lie_in_potential_target(relative, primary=is_primary):
-            return True
-    except ValueError:
-        pass
-    return False
-
-
-def _parts_lie_in_potential_target(parts: tuple[str, ...], *, primary: bool) -> bool:
-    """Classify relative path components against a root's potential target lanes.
-
-    Mirrors the collectors exactly (no filesystem access):
-
-    - ``runs/<canonical_run_id>/...`` is a target on every root: ``parts[0]``
-      must be ``runs`` and ``parts[1]`` must parse as a canonical run id via the
-      shared ``_extract_run_cycle``. A root at ``A/runs`` or
-      ``A/runs/<not-a-canonical-id>`` is not inside a deletable run tree.
-    - ``raw|canonical|forcing/<source>/<valid_cycle>/...`` is a target on the
-      primary only: ``parts[0]`` must be a cycle-scoped prefix and ``parts[2]``
-      must parse as a ``%Y%m%d%H`` cycle via ``_parse_cycle_name`` (the source
-      segment is any directory name, matching ``_collect_cycle_targets``).
-      ``A/raw/gfs/not-a-cycle/...`` is not a deletable cycle tree, and the
-      static ``grid`` segment never parses as a cycle.
-    """
-    if len(parts) >= 2 and parts[0] == RUNS_PREFIX:
-        if _extract_run_cycle(parts[1]) is not None:
-            return True
-    if primary and len(parts) >= 3 and parts[0] in CYCLE_SCOPED_PREFIXES:
-        if _parse_cycle_name(parts[2]) is not None:
-            return True
-    return False
-
-
 def plan_retention(
     *,
     object_store_root: Path | str | None,
@@ -734,6 +462,7 @@ def plan_retention(
     extra_roots_cutoff: datetime | None = None,
     extra_roots_retention_days: int | None = None,
     extra_roots_enabled: bool = False,
+    slurm_log_root: Path | str | None = None,
 ) -> RetentionResult:
     """Build a retention plan (no deletion performed).
 
@@ -755,6 +484,11 @@ def plan_retention(
     ``extra_roots_enabled`` is recorded verbatim in the receipt; gating happens
     in :func:`run_retention`, which passes an empty root sequence when the gate
     is closed.
+
+    ``slurm_log_root`` names the scheduler workspace root (#3142). It selects
+    the root-level Slurm log lane only on the admitted additional root it
+    resolves to; a blank, relative, unadmitted, rejected or primary-equal value
+    selects nothing and records nothing. ``None`` keeps the plan unchanged.
     """
     bound = _normalize_bound(active_lower_bound)
     extra_cutoff = extra_roots_cutoff if extra_roots_cutoff is not None else cutoff
@@ -771,8 +505,11 @@ def plan_retention(
         reason_not_absolute=PRIMARY_ROOT_NOT_ABSOLUTE_REASON,
         reason_unexpandable=PRIMARY_ROOT_UNEXPANDABLE_REASON,
     )
+    # Equal to the primary it is deduplicated out of the additional roots, so it
+    # never collects; ``_potential_targets_intersect`` never flags a primary.
+    slurm_log_resolved = _silently_resolved_root(slurm_log_root)
     extra_roots, extra_root_skipped = _resolve_runs_only_roots(
-        runs_only_roots, primary=primary_root
+        runs_only_roots, primary=primary_root, slurm_log_root=slurm_log_resolved
     )
     result = RetentionResult(
         enabled=enabled,
@@ -823,6 +560,16 @@ def plan_retention(
             bound,
             reject_symlinked_runs_root=True,
         )
+        if extra_root == slurm_log_resolved:
+            lane_targets, lane_skipped = collect_slurm_log_targets(
+                extra_root,
+                extra_cutoff,
+                bound,
+                make_target=RetentionTarget,
+                frontier_exempt_entry=_frontier_exempt_entry,
+            )
+            extra_targets = [*extra_targets, *lane_targets]
+            extra_skipped = [*extra_skipped, *lane_skipped]
         result.skipped.extend(extra_skipped)
         _record_targets(result, extra_targets, extra_root, published_resolved)
     return result
@@ -887,6 +634,7 @@ def run_retention(
     runs_only_roots: Sequence[Path | str | None] = (),
     copyback_root: Path | str | None = None,
     copyback_lock_wait_budget_seconds: float = DEFAULT_COPYBACK_LOCK_WAIT_BUDGET_SECONDS,
+    slurm_log_root: Path | str | None = None,
 ) -> RetentionResult:
     """Plan and (when enabled and not dry-run) execute retention cleanup.
 
@@ -922,6 +670,13 @@ def run_retention(
     ``copyback_lock_wait_budget_seconds`` bounds the time ONE pass may spend
     acquiring that mutex in total (design D9); it exists for tests, and
     production uses the module default.
+
+    ``slurm_log_root`` names the scheduler workspace root (#3142), the same
+    value again as ``copyback_root`` names the copyback root. It is forwarded
+    to :func:`plan_retention` only with the gate open and only when it does
+    not resolve to the copyback root, so the copyback root never gets the
+    root-level Slurm log lane and ``None`` or a closed gate keeps the plan
+    unchanged key for key.
     """
     resolved = config or RetentionConfig.from_env()
     now_utc = now.astimezone(UTC)
@@ -940,6 +695,9 @@ def run_retention(
         extra_roots_cutoff=extra_cutoff,
         extra_roots_retention_days=resolved.extra_roots_retention_days,
         extra_roots_enabled=resolved.extra_roots_enabled,
+        slurm_log_root=_slurm_log_lane_root(slurm_log_root, copyback_root)
+        if resolved.extra_roots_enabled
+        else None,
     )
     if not resolved.enabled or resolved.dry_run:
         return result

@@ -11,6 +11,7 @@ fallback.
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -598,3 +599,34 @@ def test_cleanup_absolute_primary_still_works(env: dict[str, Path], tmp_path: Pa
     assert payload["skipped"] == []
     assert not aged.exists()
     assert any(entry["key"] == f"raw/gfs/{_cycle_name(NOW - timedelta(days=40))}" for entry in payload["deleted"])
+
+
+# ---------------------------------------------------------------------------
+# I8 (#3142) - the cleanup CLI names WORKSPACE_ROOT as the Slurm log root, so
+# its root-level Slurm log lane is planned like the pass plans it.
+# ---------------------------------------------------------------------------
+def test_cleanup_dry_run_lists_the_workspace_slurm_log_lane(
+    env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NHMS_RETENTION_EXTRA_ROOTS_ENABLED", "true")
+    monkeypatch.setenv("NHMS_RETENTION_EXTRA_ROOTS_DAYS", "7")
+    aged = NOW - timedelta(days=40)
+    lane = env["workspace"] / f"gfs_{_cycle_name(aged)}"
+    (lane / "manifests").mkdir(parents=True)
+    (lane / "manifests" / "forcing_index_x.json").write_bytes(b"x")
+    idle = (NOW - timedelta(days=30)).timestamp()
+    for path in (lane / "manifests" / "forcing_index_x.json", lane / "manifests", lane):
+        os.utime(path, (idle, idle))
+    _write_receipt(env["evidence_dir"], "pass-1", started_at=NOW, retention=_retention_block(None))
+
+    payload = cli._run_cleanup(retention_days=14, dry_run=True)
+
+    workspace = str(env["workspace"].resolve())
+    assert "frontier_blocker" not in payload
+    assert [
+        (entry["root"], entry["key"], entry["reason"])
+        for entry in payload["planned"]
+        if entry["root"] == workspace
+    ] == [(workspace, lane.name, "slurm_log_cycle_aged_out")]
+    assert payload["deleted"] == []
+    assert lane.is_dir()
