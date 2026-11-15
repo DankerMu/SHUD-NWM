@@ -431,7 +431,7 @@ SCHEDULER_REFRESH_RECEIPT_HELPER_TESTS: tuple[str, ...] = (
 # has no derived route at all; `services/orchestrator/**` would carry it, but
 # that rule is not where a reader looks for the mutex lane and a stop rule added
 # above it later would shadow it silently. The targets are this module's
-# requirement oracles plus the three sibling suites that monkeypatch it by name
+# requirement oracles plus the four sibling suites that monkeypatch it by name
 # (D1 moved their patch targets here in the same commit).
 # tests/test_select_ci_tests.py closes the corpus against the tracked tree
 # (exactly two suites + one helper), so a third partition or a leftover shim
@@ -447,6 +447,9 @@ RETENTION_COPYBACK_MUTEX_OWNER_TESTS: tuple[str, ...] = (
     "tests/test_retention.py",
     "tests/test_retention_copyback_lock_signal.py",
     "tests/test_retention_extra_roots.py",
+    # #3142: monkeypatches this module's `remove_tree_allow_symlinks` by name
+    # for the Slurm log lane's isolated-failure case.
+    "tests/test_retention_slurm_log_lane.py",
 )
 
 # #1644: the published OpenAPI contract's assertion-level suites. `openapi/**`

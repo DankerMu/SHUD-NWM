@@ -694,6 +694,8 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_retention_extra_roots.py",
             "tests/test_retention_pipeline_frontier.py",
             "tests/test_retention_root_admission.py",
+            # #3142: the Slurm log lane suite imports NOW/EXTRA_CONFIG/_write from here.
+            "tests/test_retention_slurm_log_lane.py",
             # #2596: a derived importer too (EXTRA_CONFIG/NOW/_pass_scheduler).
             "tests/test_retention_unexpandable_roots.py",
         ),
@@ -2864,6 +2866,28 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # flag, so that directory selection still accumulates beside it.
         RETENTION_COPYBACK_MUTEX_OWNER_PATH,
         RETENTION_COPYBACK_MUTEX_OWNER_TESTS,
+    ),
+    PathTestRule(
+        # #3142: retention.py's root-level Slurm log lane suite. Not a same-name
+        # suite of retention.py (that derivation reaches it only from the
+        # sibling retention_slurm_log_lane.py), and the broad
+        # `services/orchestrator/**` rule's target list is frozen by its own
+        # size pin. Path-exact with neither flag, carrying ONLY this suite, so
+        # the directory selection still accumulates beside it and the
+        # partition fracture pins on that rule stay load-bearing. DB-free,
+        # sub-second.
+        "services/orchestrator/retention.py",
+        ("tests/test_retention_slurm_log_lane.py",),
+    ),
+    PathTestRule(
+        # #3142: the root-admission owner split out of retention.py. Its
+        # same-name suite (tests/test_retention_root_admission.py) and the
+        # directory rule already reach it; this row adds the Slurm log lane
+        # suite, whose overlap cases (lane-nested roots) exercise this module's
+        # `_parts_lie_in_potential_target` lane branch. Path-exact with neither
+        # flag, same as the retention.py row above.
+        "services/orchestrator/retention_root_admission.py",
+        ("tests/test_retention_slurm_log_lane.py",),
     ),
     PathTestRule(
         # #2252: the node-27 canonical lane's copyback-mutex oracle. Not a

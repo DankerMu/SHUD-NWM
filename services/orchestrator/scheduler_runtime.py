@@ -2112,7 +2112,9 @@ def _run_retention(
 
     The scheduler workspace root and the object-store copyback root are
     forwarded as additional ``runs/``-only roots (issue #1318), and only when
-    ``NHMS_RETENTION_EXTRA_ROOTS_ENABLED`` is on.
+    ``NHMS_RETENTION_EXTRA_ROOTS_ENABLED`` is on. The workspace root is also
+    named as ``slurm_log_root`` (issue #3142), which adds its root-level Slurm
+    log lane under the same gate and window.
 
     Neither value arrives pre-validated, so neither is trusted here (task 5.6):
     the db-free topology preflight returns ``not_required`` outside db-free /
@@ -2170,6 +2172,10 @@ def _run_retention(
             # shared copyback root -- the one whose removals must hold the
             # copyback batch mutex -- from the run-workspace root beside it.
             copyback_root=self.config.object_store_copyback_root,
+            # And the workspace root named again (#3142): Slurm and the gateway
+            # write per-run logs and per-cycle manifests directly beneath it,
+            # which only the named root's root-level Slurm log lane reclaims.
+            slurm_log_root=os.getenv("WORKSPACE_ROOT"),
         )
     except Exception as error:  # noqa: BLE001 - cleanup must never abort scheduling
         return {"status": "error", "enabled": True, "error": str(error)}

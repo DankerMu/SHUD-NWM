@@ -449,6 +449,12 @@ jq -c 'select(.record_type == "pipeline_event"
   首次上线建议 `NHMS_RETENTION_DRY_RUN=true` 先看清理计划，确认后再设 false 真删。
   当前生产实例已真删（`DRY_RUN=false`，extra roots 14 天，node-27 forcing lane 14 天），与 example 的差异、
   删除收据和回滚见 `receipts/2026-11-15-catch-up-retention-cutover.md`。
+  自 #3142 起，`NHMS_RETENTION_EXTRA_ROOTS_ENABLED=true` 时 `WORKSPACE_ROOT` 除 `runs/` 外还回收根层
+  Slurm 日志目录：名字须是规范 run id（`fcst_|cycle_|analysis_…`）或网关 cycle id
+  `(gfs|ifs|era5)_<YYYYMMDDHH>`，按 `NHMS_RETENTION_EXTRA_ROOTS_DAYS` 窗口、低于 pass 前沿、且整棵树
+  （lstat、不跟链接）在窗口内无任何修改才删（target reason=`slurm_log_cycle_aged_out`）；窗口内有改动的
+  在飞/重试树记为 `slurm_log_recently_modified` 保留。`scheduler/`、`slurm-logs/`、`repairs/`、运维/探针目录、
+  符号链接与普通文件永不入选；copyback 根与主 object-store 根永不走此 lane。
 - 空间裁剪与网格基线：canonical/forcing 的网格是从 GRIB / `grid.json` 动态读取的，自动适应
   裁剪后的区域网格，无需改代码。但 `canonical/{source}/grid/{grid_id}/grid.json` 与
   `met.forcing_interp_weights`（按 grid_id 缓存）是按 grid_id 固定的网格基线：**全新部署**
