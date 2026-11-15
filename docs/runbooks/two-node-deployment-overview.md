@@ -447,6 +447,8 @@ jq -c 'select(.record_type == "pipeline_event"
   `retention.frontier.protected_count`。故追赶期可能保留超过 `NHMS_RETENTION_DAYS`
   的目录，方向恒为只多留、绝不多删。
   首次上线建议 `NHMS_RETENTION_DRY_RUN=true` 先看清理计划，确认后再设 false 真删。
+  当前生产实例已真删（`DRY_RUN=false`，extra roots 14 天，node-27 forcing lane 14 天），与 example 的差异、
+  删除收据和回滚见 `receipts/2026-11-15-catch-up-retention-cutover.md`。
 - 空间裁剪与网格基线：canonical/forcing 的网格是从 GRIB / `grid.json` 动态读取的，自动适应
   裁剪后的区域网格，无需改代码。但 `canonical/{source}/grid/{grid_id}/grid.json` 与
   `met.forcing_interp_weights`（按 grid_id 缓存）是按 grid_id 固定的网格基线：**全新部署**

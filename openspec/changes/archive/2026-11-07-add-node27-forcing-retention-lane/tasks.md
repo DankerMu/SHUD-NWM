@@ -45,4 +45,7 @@
   - rerun the installer, then `systemctl start nhms-node27-canonical-retention.service`;
   - from the summary JSON: `forcing_cutoff`, the `deleted[]` keys starting with `forcing/`, and the kept cycles all match `ls forcing/<S>`; `failed[]` is empty; record one forcing removal's lock hold time;
   - station-series returns 200 for an in-window cycle and 404 `STATION_FORCING_FILE_NOT_FOUND` for a deleted one.
-- [ ] 4.5 (post-catch-up, open) node-22 `runs/` 30-day sweep receipt from one scheduler pass after `NHMS_RETENTION_DRY_RUN=false` is restored.
+- [x] 4.5 (post-catch-up) node-22 `runs/` 30-day sweep receipt from one scheduler pass after `NHMS_RETENTION_DRY_RUN=false` is restored: done 2026-11-13.
+  - `DRY_RUN=false` flipped at 16:34:41Z; pass `scheduler_2026111316_65e6021baf5c` (extra roots at 30 days) deleted 17745 entries, failed 0, freed 1.28 TB.
+  - Extra roots then moved to 14 days (2026-11-14T06:46:56Z) and the node-27 forcing lane to 14 days.
+  - Receipts and rollback are in `docs/runbooks/receipts/2026-11-15-catch-up-retention-cutover.md`.
