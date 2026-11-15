@@ -10,7 +10,9 @@ per-cycle array manifests and logs.
 A child SHALL be selected only when all of these hold: its cycle is older than the additional-root cutoff; its cycle
 is below the pass frontier's active lower bound; and neither the directory nor any non-symlink descendant entry
 (examined with `lstat`, links never followed) has an mtime at or after that cutoff. A child that fails only the last condition SHALL be skipped as `slurm_log_recently_modified`
-without a size, because in-flight analysis, retry and resubmitted jobs can sit below the forecast frontier. A selected child SHALL be recorded with reason `slurm_log_cycle_aged_out`, the absolute root, and its
+without a size, because in-flight analysis, retry and resubmitted jobs can sit below the forecast frontier. A child
+whose tree cannot be fully read (an unreadable subtree or an entry vanishing mid-walk) SHALL be skipped the same way,
+fail-closed, because the unread part may hold the recent entry. A selected child SHALL be recorded with reason `slurm_log_cycle_aged_out`, the absolute root, and its
 root-relative name as the key. A child within the window SHALL be skipped as `within_retention_window`. A child at or
 above the frontier SHALL be skipped as `pipeline_frontier_exempt` without a size walk.
 

@@ -92,10 +92,10 @@ temporary workspace root W admitted as an additional root, with the gate open.
 
 ## 4. Verification / Evidence Floor
 
-- [ ] 4.1 `uv run ruff check .`
-- [ ] 4.2 `uv run pytest -q tests/test_retention*.py tests/test_cli_cleanup_frontier.py tests/test_production_scheduler.py tests/test_select_ci_tests.py`
+- [x] 4.1 `uv run ruff check .`
+- [x] 4.2 `uv run pytest -q tests/test_retention*.py tests/test_cli_cleanup_frontier.py tests/test_production_scheduler.py tests/test_select_ci_tests.py`
   plus the selector-chosen set. Run it locally and on node-27 in a temporary worktree.
-- [ ] 4.3 `openspec validate retention-workspace-slurm-log-lane --strict --no-interactive`
+- [x] 4.3 `openspec validate retention-workspace-slurm-log-lane --strict --no-interactive`
 - [ ] 4.4 node-22 post-merge receipt, in this order:
   - (1) ff deploy at a pass boundary;
   - (2) before the first post-deploy pass deletes anything, run an out-of-pass dry-run with the timer stopped.

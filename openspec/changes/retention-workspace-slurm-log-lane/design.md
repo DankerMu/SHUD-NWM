@@ -44,7 +44,9 @@ Must add/change:
   2. `cycle >= active_lower_bound` → `_frontier_exempt_entry`, with no size walk.
   3. Walk the tree once to get its size and newest mtime. The newest mtime covers the directory itself and every
      non-symlink descendant, using lstat and never following links. If the newest mtime is at or after the extra
-     cutoff → skip with `slurm_log_recently_modified`, without `size_bytes`.
+     cutoff → skip with `slurm_log_recently_modified`, without `size_bytes`. Any `OSError` during the walk (an
+     unreadable subtree, an entry vanishing mid-walk) is skipped the same way, fail-closed. The walk stops at the
+     first recent entry; the verdict is the same as computing the true newest mtime.
   4. Otherwise it becomes a target with reason `slurm_log_cycle_aged_out`, `key=<name>`, `root=W`, and `size_bytes`.
 - Why step 3 exists. `_retention_active_lower_bound` (`scheduler_runtime.py:2031-2079`) only covers the forecast
   pass's candidates and discovery window. Three kinds of in-flight jobs sit below it:
@@ -56,10 +58,16 @@ Must add/change:
   Their `<cycle_id>/manifests` are runtime inputs of array tasks (`NHMS_MANIFEST_INDEX`, `real_backend.py:1041`),
   and their log files are being written by Slurm. A running job touches its tree within the window. Using the
   additional-root cutoff as the mtime threshold keeps the guard on the same time base as the window.
-  Accepted residual risk, the same exposure the `runs/` lane already has: a non-array retry of an old run that is
-  still queued in Slurm. Its `<run_id>/logs` tree only has old mtimes, and the sbatch `mkdir -p` runs after Slurm
-  opens `--output`, so a pass during that queue wait can delete the tree. The case is rare, and its parity with
-  `runs/` is the reason it is accepted.
+  Accepted residual risks (review round 1 corrected the earlier "parity with `runs/`" wording: `fetch_logs` reads
+  `W/<run_id>/logs` and `W/<cycle_id>/array_logs`, never `W/runs/`, so these exposures are new, though narrow):
+  - a non-array retry of an old run still queued in Slurm. Its `<run_id>/logs` tree only has old mtimes, so a pass
+    during the queue wait can delete it. On node-22 (Slurm 23.11.4) Slurm creates the `--output` directory when the
+    job starts, so the job does not fail; only earlier attempts' logs in that directory are lost;
+  - a walk-to-delete TOCTOU within one pass: a resubmit of an aged, below-frontier cycle that writes a new manifest
+    index in that seconds-to-minutes gap. Locking W stays a non-goal;
+  - `persist_gateway_logs` (`chain_workspace.py:152-169`) for a terminal job whose logs were never persisted and
+    whose tree was reclaimed: it records an empty log and never re-fetches. Reachable only for orphaned jobs resumed
+    after more than the additional-root window; tracked as a follow-up issue.
 - Deletion goes through the same `_delete_entry` path as every other target on W. A failure is recorded and never
   aborts.
 - Overlap. On W only, `parts[0]` matching (a) or (b) is a potential target. The same closed set is used for (b).
@@ -89,7 +97,7 @@ Sibling surfaces:
   - `_ParentArrayLogCache` (`services/orchestrator/pipeline_job_provenance.py:132-140`).
   
   For terminal jobs below the frontier, the implementer audits each one's ENOENT behaviour and records it in the PR;
-  the expectation is parity with an already-deleted `runs/<run_id>`. `/jobs/{id}/logs` is unaffected because it reads
+  every consumer degrades without raising (see the residual risks above for `persist_gateway_logs`). `/jobs/{id}/logs` is unaffected because it reads
   the persisted `log_uri` (`apps/api/routes/pipeline.py:494-530`).
 - Entry points: the scheduler pass, and the cleanup CLI (dry-run by default; a frontier fail-closed forces dry-run).
 - Validators: root admission and overlap.
