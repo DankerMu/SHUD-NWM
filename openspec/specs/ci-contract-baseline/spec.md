@@ -323,7 +323,7 @@ Modules under the ten audited directory paths are additionally governed by the r
 - **WHEN** a PR changes only `packages/common/display_coverage.py` or only `services/slurm_gateway/real_backend.py`
 - **THEN** the selector output includes every non-gated top-level importer test suite of that module (for `real_backend`: `tests/test_real_slurm_gateway.py`, `tests/test_slurm_array_contract.py`, `tests/test_job_array.py`; for `display_coverage`: `tests/test_display_coverage_refresh.py`, `tests/test_display_coverage_parallel.py`, `tests/test_forecast_api.py`)
 - **WHEN** a PR changes only `services/tiles/mvt.py`
-- **THEN** the selector output includes every non-gated direct importer suite of `services.tiles.mvt` (including `tests/test_hhe_mvt_binding.py`, `tests/test_hydro_display_mvt_scaling.py`, `tests/test_node27_timeseries_compression_benchmark.py`, `tests/test_node27_timeseries_compression_live_evidence.py`) and every one-hop suite contributed by `apps/api/routes/hydro_display.py` (including `tests/test_direct_grid_display_cutover_history.py`, `tests/test_direct_grid_display_cutover_model_resolution.py`), and no core-smoke-only fallback suite; the station-flag flip partitions (`tests/test_direct_grid_display_cutover_flip_atomic.py`, `tests/test_direct_grid_display_cutover_flip_mvt_set.py`) import no display module since the station tile route was retired (#2773 item 4) and are carried by the `packages/common/station_set_flip.py` rule, not by the display rules
+- **THEN** the selector output includes every non-gated direct importer suite of `services.tiles.mvt` (including `tests/test_hhe_mvt_binding.py`, `tests/test_hydro_display_mvt_scaling.py`, `tests/test_node27_timeseries_compression_benchmark.py`, `tests/test_node27_timeseries_compression_live_evidence.py`) and every one-hop suite contributed by `apps/api/routes/hydro_display.py` (including `tests/test_direct_grid_display_cutover_history.py`, `tests/test_direct_grid_display_cutover_model_resolution.py`), and no core-smoke-only fallback suite
 - **WHEN** a PR changes only `apps/api/routes/hydro_display.py`
 - **THEN** the selector output includes its full non-gated direct union one-hop importer closure, including direct-grid cutover, display status, HHE/MVT, node-27 compression and attribution, OpenAPI, and runtime-mode suites
 
@@ -345,7 +345,7 @@ Modules under the ten audited directory paths are additionally governed by the r
 #### Scenario: Existing MVT closure remains an exact compatibility anchor
 
 - **WHEN** the selector and guarded-module registry change for this batch
-- **THEN** the `services/tiles/mvt.py` exact-set pin and guarded closure delivered by #1597 remain green without removing an existing direct or one-hop importer target; the station-flag flip partitions that #1597 also carried were removed by #3149, because they import no display module since the station tile route was retired
+- **THEN** the `services/tiles/mvt.py` exact-set pin and guarded closure delivered by #1597 remain green without removing an existing direct or one-hop importer target; the station-flag flip partitions that #1597 also carried were removed from the display rules by #3149 and deleted with the flip hook by #3164
 
 ### Requirement: Changed-test PRs MUST run the selector meta-guards
 

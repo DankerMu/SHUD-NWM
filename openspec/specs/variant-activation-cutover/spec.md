@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change source-specific-model-variant-routing. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: Cutover reuses the existing single-transaction activation lifecycle
 
 The cutover switch SHALL be the existing `POST /api/v1/models/{model_id}/lifecycle` `activate` operation executed by `model_lifecycle_operation`, reusing its single-transaction swap, `FOR UPDATE` concurrency safety, idempotency, and same-transaction audit, and SHALL NOT introduce a new per-`(basin, source)` routing table or a separate cutover state machine.
@@ -46,6 +48,7 @@ The cutover transaction SHALL execute an ordered sequence of pre-activation hook
 - **WHEN** the extension-point contract is defined by this change
 - **THEN** the registered hooks are empty/no-op and change no state
 - **THEN** the contract reserves ordered mount points for a fingerprint-gated state-clone hook (Change 5) and a `met.met_station.active_flag` flip hook (Change 8) without re-opening the lifecycle transaction.
+- **THEN** the `station_flag_flip` mount point stays reserved as a default no-op after its only consumer, the Change 8 station-flag flip hook, was retired by #3164; no production code registers a hook there.
 
 #### Scenario: Hooks do not run on the already-current path
 
@@ -102,4 +105,3 @@ The system SHALL exclude a `superseded` model from the scheduler dispatch candid
 - **WHEN** a model is superseded by a cutover
 - **THEN** its `core.model_instance` row and package remain immutable and available for historical products, fingerprint-gated state clone, and offline calibration-replay
 - **THEN** the superseded row is never deleted by the cutover.
-
