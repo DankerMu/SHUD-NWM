@@ -767,8 +767,11 @@ def space(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.Captur
     monkeypatch.setenv("DATABASE_URL", DATABASE_URL)
     monkeypatch.setenv("OBJECT_STORE_ROOT", str(built.object_store))
     monkeypatch.setenv(tool.SYSTEMCTL_ENV, str(script))
-    # Never the machine's /tmp/autopipe.cron.lock, whatever a test does to the env file.
-    monkeypatch.setenv("NODE27_AUTOPIPE_LOCK_PATH", str(tmp_path / "locks" / "process-env.lock"))
+    # Isolation from the machine's /tmp/autopipe.cron.lock: the helpers always write a non-empty AUTOPIPE_LOCK_PATH
+    # line under tmp_path, and an env file without one falls back to this process value (as cron does). An empty
+    # `AUTOPIPE_LOCK_PATH=` line resolves to that default lock, so a test must never write one into an env file
+    # the tool runs against.
+    monkeypatch.setenv("AUTOPIPE_LOCK_PATH", str(tmp_path / "locks" / "process-env.lock"))
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "tmp"))
     monkeypatch.setattr(psycopg2, "connect", database_.connect)
     monkeypatch.setattr(database, "PsycopgModelRegistryStore", store.factory)

@@ -565,7 +565,6 @@ services:
       NHMS_PUBLISHED_ARTIFACT_S3_BUCKET: ${NHMS_PUBLISHED_ARTIFACT_S3_BUCKET:-}
       NHMS_PUBLISHED_ARTIFACT_S3_PREFIX: ${NHMS_PUBLISHED_ARTIFACT_S3_PREFIX:-}
       NHMS_LOG_TAIL_MAX_BYTES: ${NHMS_LOG_TAIL_MAX_BYTES:-1048576}
-      NHMS_ARTIFACT_BACKEND: ${NHMS_ARTIFACT_BACKEND:-local}
     volumes:
       - type: bind
         source: ${NHMS_PUBLISHED_ARTIFACT_HOST_ROOT}
@@ -735,7 +734,6 @@ services:
       NHMS_PUBLISHED_ARTIFACT_S3_BUCKET: ${NHMS_PUBLISHED_ARTIFACT_S3_BUCKET:-}
       NHMS_PUBLISHED_ARTIFACT_S3_PREFIX: ${NHMS_PUBLISHED_ARTIFACT_S3_PREFIX:-}
       NHMS_LOG_TAIL_MAX_BYTES: ${NHMS_LOG_TAIL_MAX_BYTES:-1048576}
-      NHMS_ARTIFACT_BACKEND: ${NHMS_ARTIFACT_BACKEND:-local}
     volumes:
       - type: bind
         source: ${NHMS_PUBLISHED_ARTIFACT_HOST_ROOT}
@@ -797,7 +795,6 @@ services:
       NHMS_PUBLISHED_ARTIFACT_S3_BUCKET: ${NHMS_PUBLISHED_ARTIFACT_S3_BUCKET:-}
       NHMS_PUBLISHED_ARTIFACT_S3_PREFIX: ${NHMS_PUBLISHED_ARTIFACT_S3_PREFIX:-}
       NHMS_LOG_TAIL_MAX_BYTES: ${NHMS_LOG_TAIL_MAX_BYTES:-1048576}
-      NHMS_ARTIFACT_BACKEND: ${NHMS_ARTIFACT_BACKEND:-local}
     volumes:
       - "${NHMS_PUBLISHED_ARTIFACT_HOST_ROOT}:${NHMS_PUBLISHED_ARTIFACT_ROOT}:ro"
       - "/run/docker.sock:/run/docker.sock:ro"
@@ -1016,7 +1013,6 @@ services:
       NHMS_PUBLISHED_ARTIFACT_S3_BUCKET: ${NHMS_PUBLISHED_ARTIFACT_S3_BUCKET:-}
       NHMS_PUBLISHED_ARTIFACT_S3_PREFIX: ${NHMS_PUBLISHED_ARTIFACT_S3_PREFIX:-}
       NHMS_LOG_TAIL_MAX_BYTES: ${NHMS_LOG_TAIL_MAX_BYTES:-1048576}
-      NHMS_ARTIFACT_BACKEND: ${NHMS_ARTIFACT_BACKEND:-local}
     volumes:
       - type: bind
         source: ${NHMS_PUBLISHED_ARTIFACT_HOST_ROOT}
@@ -1360,7 +1356,6 @@ services:
       NHMS_PUBLISHED_ARTIFACT_S3_BUCKET: ${NHMS_PUBLISHED_ARTIFACT_S3_BUCKET:-}
       NHMS_PUBLISHED_ARTIFACT_S3_PREFIX: ${NHMS_PUBLISHED_ARTIFACT_S3_PREFIX:-}
       NHMS_LOG_TAIL_MAX_BYTES: ${NHMS_LOG_TAIL_MAX_BYTES:-1048576}
-      NHMS_ARTIFACT_BACKEND: ${NHMS_ARTIFACT_BACKEND:-local}
     volumes:
       - type: bind
         source: ${NHMS_PUBLISHED_ARTIFACT_HOST_ROOT}
@@ -1850,7 +1845,7 @@ def test_static_checker_rejects_unapproved_compute_scheduler_cycle_lag_interpola
     ("role", "omitted_key", "process_value"),
     [
         ("compute", "OBJECT_STORE_ROOT", "/scratch/frd_muziyao/ambient-object-store"),
-        ("display", "S3_ENDPOINT_URL", "https://ambient-object-store.internal.example"),
+        ("display", "OBJECT_STORE_PREFIX", "s3://ambient-object-store"),
     ],
 )
 def test_static_checker_rejects_custom_env_omitting_optional_compose_used_keys_with_ambient_env(
@@ -1939,10 +1934,10 @@ def test_static_checker_rejects_display_critical_env_alias_interpolation(
             "ambient-secret",
         ),
         (
-            "S3_ENDPOINT_URL",
-            "${DISPLAY_S3_ENDPOINT_URL:-https://object-store.internal.example}",
-            "DISPLAY_S3_ENDPOINT_URL",
-            "https://ambient-object-store.internal.example",
+            "OBJECT_STORE_PREFIX",
+            "${DISPLAY_OBJECT_STORE_PREFIX:-s3://nhms-prod}",
+            "DISPLAY_OBJECT_STORE_PREFIX",
+            "s3://ambient-object-store",
         ),
     ],
 )

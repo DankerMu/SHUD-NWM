@@ -140,7 +140,6 @@ cp .env.example .env
 |---|---|
 | `DATABASE_URL` | `postgresql://nhms:nhms_dev@localhost:5432/nhms` |
 | `S3_ENDPOINT_URL` | 本地 MinIO API，默认 `http://localhost:9000` |
-| `S3_BUCKET_NAME` | 默认 `nhms` |
 | `OBJECT_STORE_PREFIX` | 对象存储 URI 前缀，默认 `s3://nhms` |
 | `OBJECT_STORE_ROOT` | 本地/生产对象存储根路径 |
 | `WORKSPACE_ROOT` | 本地或 HPC 工作目录 |

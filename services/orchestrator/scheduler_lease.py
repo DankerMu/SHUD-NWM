@@ -613,7 +613,11 @@ def _postgres_advisory_lock_key(value: str) -> int:
 def _file_lock_guard_mode() -> str:
     configured = os.getenv(FILE_LEASE_GUARD_MODE_ENV)
     if configured is None:
-        configured = os.getenv(LEGACY_FILE_LOCK_GUARD_MODE_ENV, "flock")
+        # #3146: the legacy alias is retired. A config that carries only it (e.g. a
+        # restored env backup) is refused instead of silently defaulting to flock.
+        if os.getenv(LEGACY_FILE_LOCK_GUARD_MODE_ENV) is not None:
+            raise UnsafeSchedulerLockError(f"retired_lock_guard_mode_key:{FILE_LEASE_GUARD_MODE_ENV}")
+        configured = "flock"
     value = configured.strip().lower()
     if value in {"", "flock", "fcntl"}:
         return "flock"

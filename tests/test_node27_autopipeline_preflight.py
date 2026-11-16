@@ -1040,6 +1040,35 @@ def test_one_run_failure_isolated_after_valid_preflight(
     assert [detail["run_id"] for detail in summary["runs"]["details"]] == [RUN_QHH, RUN_QHH_NEXT]
 
 
+# #3146: the wrapper's lock path reads only AUTOPIPE_LOCK_PATH; the NODE27_AUTOPIPE_LOCK_PATH alias is retired.
+# Evaluates the script's own LOCK= line in bash, so no lock file is opened.
+@pytest.mark.parametrize(
+    ("environ", "expected"),
+    [
+        (
+            {"AUTOPIPE_LOCK_PATH": "/from/env.lock", "NODE27_AUTOPIPE_LOCK_PATH": "/retired/alias.lock"},
+            "/from/env.lock",
+        ),
+        ({"NODE27_AUTOPIPE_LOCK_PATH": "/retired/alias.lock"}, "/tmp/autopipe.cron.lock"),
+        ({"AUTOPIPE_LOCK_PATH": ""}, "/tmp/autopipe.cron.lock"),
+        ({}, "/tmp/autopipe.cron.lock"),
+    ],
+)
+def test_wrapper_lock_path_reads_only_autopipe_lock_path(environ: dict[str, str], expected: str) -> None:
+    lock_lines = [line for line in WRAPPER.read_text(encoding="utf-8").splitlines() if line.startswith("LOCK=")]
+    assert len(lock_lines) == 1, lock_lines
+
+    proc = subprocess.run(
+        ["bash", "-c", f'{lock_lines[0]}\nprintf %s "$LOCK"'],
+        env={"PATH": os.environ["PATH"], **environ},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert proc.stdout == expected
+
+
 def test_wrapper_contract_has_ingest_env_without_writer_default_or_display_env_source() -> None:
     script = WRAPPER.read_text(encoding="utf-8")
 
@@ -1100,7 +1129,7 @@ def test_wrapper_missing_ingest_env_blocks_before_python_and_backstop(tmp_path: 
         "NODE27_AUTOPIPE_REPO": str(fake_repo),
         "NODE27_AUTOPIPE_ENV_FILE": str(tmp_path / "missing-node27-ingest.env"),
         "NODE27_AUTOPIPE_BOOTSTRAP_LOG": str(log),
-        "NODE27_AUTOPIPE_LOCK_PATH": str(tmp_path / "autopipe.lock"),
+        "AUTOPIPE_LOCK_PATH": str(tmp_path / "autopipe.lock"),
     }
     env.pop("NODE27_AUTOPIPE_ALLOW_AMBIENT_ENV", None)
 

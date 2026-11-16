@@ -138,13 +138,9 @@ NHMS_PUBLISHED_ARTIFACT_URI_PREFIX=published://
 NHMS_PUBLISHED_ARTIFACT_S3_BUCKET=nhms-prod
 NHMS_PUBLISHED_ARTIFACT_S3_PREFIX=published
 NHMS_LOG_TAIL_MAX_BYTES=1048576
-NHMS_ARTIFACT_BACKEND=local
 OBJECT_STORE_PREFIX=s3://nhms-prod
-S3_ENDPOINT_URL=https://object-store.internal.example
-S3_BUCKET_NAME=nhms-prod
 AWS_ACCESS_KEY_ID=<readonly-key-placeholder>
 AWS_SECRET_ACCESS_KEY=<readonly-secret-placeholder>
-CORS_ALLOWED_ORIGINS=https://display.internal.example
 ```
 
 27 禁止设置或挂载，且要与 `infra/docker/entrypoint.sh` 和
@@ -599,11 +595,7 @@ docker compose --env-file "$CHECKOUT_ROOT/infra/env/display.env" -f "$CHECKOUT_R
     NHMS_PUBLISHED_ARTIFACT_S3_BUCKET \
     NHMS_PUBLISHED_ARTIFACT_S3_PREFIX \
     NHMS_LOG_TAIL_MAX_BYTES \
-    NHMS_ARTIFACT_BACKEND \
-    OBJECT_STORE_PREFIX \
-    S3_ENDPOINT_URL \
-    S3_BUCKET_NAME \
-    CORS_ALLOWED_ORIGINS
+    OBJECT_STORE_PREFIX
   do
     value="$(printenv "$key" 2>/dev/null || true)"
     printf "%s=%s\n" "$key" "${value:-<unset>}"

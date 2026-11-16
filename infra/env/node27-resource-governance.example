@@ -5,7 +5,10 @@
 # infra/systemd/nhms-node27-resource-governance.{service,timer} as user units
 # for nwm.
 
-NODE27_RESOURCE_GOVERNANCE_REPO_ROOT=/home/nwm/NWM
+# Read by scripts/node27_resource_governance.py (--repo-root default). The
+# wrapper's own NODE27_RESOURCE_GOVERNANCE_REPO (default /home/nwm/NWM) locates
+# this env file, so it can be set only through the unit's Environment=.
+NODE27_GOVERNANCE_REPO_ROOT=/home/nwm/NWM
 NODE27_GOVERNANCE_OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store
 NODE27_GOVERNANCE_PGDATA_ROOT=/home/nwm/nhms-primary/pgdata
 # Current host PGDATA since the 2026-11-05 rebuild (fresh initdb after the 14T
@@ -38,5 +41,6 @@ NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS=172800
 # Archive-lane observability was removed in #1370: the archive lane is
 # permanently retired (ADR 0002 Revision 2026-08-11), so the audit no longer
 # reports an archive root or free-space bands, and NHMS_ARCHIVE_ROOT /
-# NHMS_ARCHIVE_FREE_SPACE_{WARN,REFUSE}_BYTES are not read. A deployed env
+# NODE27_GOVERNANCE_ARCHIVE_ROOT / NHMS_ARCHIVE_FREE_SPACE_{WARN,REFUSE}_BYTES are
+# retired names that nothing reads. A deployed env
 # file that still carries them is harmless — the keys are simply ignored.

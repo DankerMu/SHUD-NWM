@@ -51,7 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--object-store-root",
-        default=os.environ.get("OBJECT_STORE_ROOT") or os.environ.get("NHMS_OBJECT_STORE_ROOT"),
+        default=os.environ.get("OBJECT_STORE_ROOT"),
         help="Object-store filesystem root. Defaults to OBJECT_STORE_ROOT.",
     )
     parser.add_argument(

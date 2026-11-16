@@ -665,6 +665,25 @@ def test_backfill_cli_rejects_mixed_publish_and_import_modes() -> None:
     assert caught.value.code == 2
 
 
+def test_backfill_cli_object_store_root_reads_only_object_store_root(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # #3146: the NHMS_OBJECT_STORE_ROOT fallback is retired; OBJECT_STORE_ROOT is the one name.
+    monkeypatch.delenv("OBJECT_STORE_ROOT", raising=False)
+    monkeypatch.setenv("NHMS_OBJECT_STORE_ROOT", "/alias-object-store")
+
+    argv = ["--import-only", "--run-id", IFS_RUN_ID]
+    assert provenance_backfill.build_parser().parse_args(argv).object_store_root is None
+    with pytest.raises(SystemExit) as caught:
+        provenance_backfill.main(argv)
+    assert caught.value.code == 2
+    assert "OBJECT_STORE_ROOT or --object-store-root is required" in capsys.readouterr().err
+
+    monkeypatch.setenv("OBJECT_STORE_ROOT", "/object-store")
+    assert provenance_backfill.build_parser().parse_args(argv).object_store_root == "/object-store"
+
+
 def test_backfill_cli_reports_invalid_symlink_journal_root_as_bounded_json(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
