@@ -112,7 +112,7 @@ Every reader of the river fact table SHALL keep one store-parameterized SQL temp
 - **AND** the metadata SELECT carries the actual route while unchanged sibling metadata consumers and public route parameters retain their contracts
 
 #### Scenario: Forecast segment discovery combines routed facts below its semantic operators
-- **WHEN** any of the eight forecast-store segment queries may see runs from both stores
+- **WHEN** any of the seven forecast-store segment queries may see runs from both stores
 - **THEN** each fact-source branch is rendered for and bound to its authoritative run store, legacy aids remain only in legacy, common projections and named parameters are shared, and the single outer latest-cycle, maximum-time, distinct winner, window and ordering logic operates on the combined rows without duplicated aggregates or limits
 - **AND** equivalent data in either store yields field-identical forecast/analysis/hindcast responses and unchanged lineage; a selected scenario/cycle is not mistaken for a unique run's store
 

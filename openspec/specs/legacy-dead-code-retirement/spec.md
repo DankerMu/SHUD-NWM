@@ -1,7 +1,7 @@
 # legacy-dead-code-retirement Specification
 
 ## Purpose
-TBD - created by archiving change governance-2-legacy-dead-code-retirement. Update Purpose after archive.
+Keep legacy, diagnostic and dead code from passing as live behaviour. Each legacy or diagnostic path carries an explicit status. Code that an audit finds unreferenced, or referenced only by its own tests, is retired or kept with a recorded reason, so that every production call path, protocol conformance, governed compatibility name and living-spec obligation survives.
 
 ## Requirements
 
@@ -143,3 +143,18 @@ SHALL remain for a deleted forwarder.
   search finds no reference to it other than its definition
 - **THEN** the helper and anything that becomes unused through its removal are deleted, every touched module still
   imports, and the existing tests pass unmodified
+
+### Requirement: Test-only production helpers are retired or justified
+
+A production symbol that an entropy audit finds referenced only by its own tests SHALL be retired, together with the
+tests whose only subject it is, unless it is required by a protocol, an abstract interface, a governed compatibility
+list or a Requirement of a living capability spec, is used by a shared test harness to drive live production code,
+or is a deliberate public, safety or operator API. A retained symbol SHALL carry a recorded keep reason. Retiring
+a symbol SHALL NOT remove coverage of live behaviour.
+
+#### Scenario: a legacy helper only its own tests use is retired
+
+- **WHEN** a helper in `services/`, `packages/`, `workers/` or `scripts/` has no production caller, is not declared by
+  any protocol, compatibility list or living spec Requirement, is not used by a shared test harness, and is referenced only by tests that exercise it alone
+- **THEN** the helper and those tests are deleted, every touched module still imports, and the remaining suites,
+  including the compatibility guards, pass
