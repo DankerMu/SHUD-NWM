@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from scripts.basin_retirement import autopipe
+from scripts.basin_retirement import autopipe, envfile
 from tests.node27_retire_basin_helpers import (
     DATABASE_URL,
     STEPS,
@@ -338,7 +338,7 @@ def test_the_same_round_is_not_accepted_once_the_lock_is_free(space: Space) -> N
 
 
 def test_the_lock_path_is_the_env_files_line_when_there_is_one(space: Space) -> None:  # noqa: F811
-    process_lock = Path(os.environ["NODE27_AUTOPIPE_LOCK_PATH"])
+    process_lock = Path(os.environ["AUTOPIPE_LOCK_PATH"])
     assert process_lock != space.autopipe_lock
 
     # The lock of the process environment is held, the one the env file names is not: the round counts.
@@ -352,13 +352,11 @@ def test_the_lock_path_is_the_env_files_line_when_there_is_one(space: Space) -> 
     assert not space.autopipe_lock.exists()
 
 
-@pytest.mark.parametrize("line", ["", "AUTOPIPE_LOCK_PATH=\n"])
 def test_without_a_line_in_the_env_file_the_lock_path_is_the_process_environments(
     space: Space,  # noqa: F811
-    line: str,
 ) -> None:
-    process_lock = Path(os.environ["NODE27_AUTOPIPE_LOCK_PATH"])
-    space.write_env(space.env_text().replace(f"AUTOPIPE_LOCK_PATH={space.autopipe_lock}\n", line))
+    process_lock = Path(os.environ["AUTOPIPE_LOCK_PATH"])
+    space.write_env(space.env_text().replace(f"AUTOPIPE_LOCK_PATH={space.autopipe_lock}\n", ""))
 
     with held_flock(space.autopipe_lock), held_flock(process_lock) as holder:
         space.monkeypatch.setattr(autopipe, "sleep", lambda _seconds: release_flock(holder))
@@ -368,6 +366,25 @@ def test_without_a_line_in_the_env_file_the_lock_path_is_the_process_environment
     waited = space.receipt("exclude")["autopipe_round"]
     assert waited["lock_path_probed"] == str(process_lock)
     assert len(waited["rounds_skipped_while_lock_held"]) == 1
+
+
+# #3146: resolved exactly as scripts/node27_autopipe_cron.sh resolves `${AUTOPIPE_LOCK_PATH:-/tmp/autopipe.cron.lock}`
+# after sourcing the env file; the retired NODE27_AUTOPIPE_LOCK_PATH alias is never read.  Pure: no lock file touched.
+@pytest.mark.parametrize(
+    ("content", "environ", "expected"),
+    [
+        (b"AUTOPIPE_LOCK_PATH=/from/file.lock\n", {"AUTOPIPE_LOCK_PATH": "/from/process.lock"}, "/from/file.lock"),
+        (b"AUTOPIPE_LOCK_PATH=\n", {"AUTOPIPE_LOCK_PATH": "/from/process.lock"}, envfile.DEFAULT_AUTOPIPE_LOCK_PATH),
+        (b"OTHER=1\n", {"AUTOPIPE_LOCK_PATH": "/from/process.lock"}, "/from/process.lock"),
+        (b"OTHER=1\n", {"AUTOPIPE_LOCK_PATH": ""}, envfile.DEFAULT_AUTOPIPE_LOCK_PATH),
+        (b"OTHER=1\n", {"NODE27_AUTOPIPE_LOCK_PATH": "/retired/alias.lock"}, envfile.DEFAULT_AUTOPIPE_LOCK_PATH),
+        (b"OTHER=1\n", {}, envfile.DEFAULT_AUTOPIPE_LOCK_PATH),
+    ],
+)
+def test_autopipe_lock_path_resolves_like_the_cron_script(
+    content: bytes, environ: dict[str, str], expected: str
+) -> None:
+    assert envfile.autopipe_lock_path(content, environ) == expected
 
 
 UNRELIABLE_ANSWERS: list[tuple[dict[str, Any], str]] = [

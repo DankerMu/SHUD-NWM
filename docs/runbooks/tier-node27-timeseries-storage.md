@@ -1471,6 +1471,10 @@ Archive status:
 | `INSTALL_REQUIRED` | `S` | installer `--install-required-bytes` |
 | `ROLLBACK_HEADROOM` | `2*E` | installer `--rollback-headroom-bytes` |
 
+> **Retired env names (#3146).** No code, wrapper or template reads the
+> `NODE27_COLD_RESIDENCY_*` keys named here any more; the cold-residency lane they configured is
+> retired. They are kept only as the record of this superseded procedure; do not set them.
+
 All four are short canonical decimal byte strings produced by checked
 arithmetic: the census refuses on a negative, zero, out-of-range, or
 overflowing value rather than rounding, truncating, or defaulting, and each is
@@ -1988,6 +1992,10 @@ place, never re-copy the example over the deployed file, and never echo the file
 | `NODE27_COLD_RESIDENCY_RECEIPT_PATH` | overridden per invocation in G6; the file value stays the lane default |
 | `NODE27_COLD_RESIDENCY_DEVICE_IDENTITY` | **unset** until after G5; then `RUNNER_DEVICE_IDENTITY` only |
 
+> **Retired env names (#3146).** No code, wrapper or template reads the
+> `NODE27_COLD_RESIDENCY_*` keys named here any more; the cold-residency lane they configured is
+> retired. They are kept only as the record of this superseded procedure; do not set them.
+
 Neither reserve, the bound, the UID/GID pair, nor the device identity has a
 Python, wrapper, or example-template default. The installer's `--recovery-path`
 authority file is authored only by the installer itself, mode 0600, inside
@@ -2454,7 +2462,8 @@ Then write the runner-side identity and the live cold lag into the env
 file through the same lossless rewrite owner G4 used. Comments, blanks,
 commented optional keys, unrelated assignments and `DATABASE_URL` bytes stay;
 `NODE27_COLD_RESIDENCY_DEVICE_IDENTITY` and
-`NODE27_COLD_RESIDENCY_LAG_SECONDS` are inserted once. The lag is the already
+`NODE27_COLD_RESIDENCY_LAG_SECONDS` (both retired names since #3146: nothing reads them any more) are
+inserted once. The lag is the already
 sourced live `NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS` (read the box, never
 the committed template or a systemd child fallback). Never a `sed` comment
 swap or assignment-only rebuild:
@@ -5624,6 +5633,10 @@ re-run — every block is idempotent (a re-applied `ADD COLUMN IF NOT EXISTS
 ... IDENTITY` is a 0.563 ms no-op, measured). Apply at low peak.
 
 #### 4.6.2 Backfill (routine, online)
+
+> **Retired env names (#3146).** `scripts/node27_river_identity_backfill.py` no longer exists, so
+> nothing reads the `NODE27_RIVER_IDENTITY_BACKFILL_*` keys below (`..._RECEIPT_PATH`, `..._LOCK_PATH`,
+> `..._BATCH_PAGES`, `..._LOCK_TIMEOUT_MS`, `..._DURATION_WALL_MS`). They are kept as history; do not set them.
 
 ```bash
 # Dry-run FIRST, always. Reports per-chunk rows/bytes/pending counts, the batch

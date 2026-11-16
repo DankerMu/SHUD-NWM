@@ -314,8 +314,7 @@ def _has_terminal_completion_stage_success(jobs: list[dict[str, Any]]) -> bool:
 def _run_manifest_initial_state_for_run(run_id: str) -> dict[str, Any] | None:
     if not run_id or "/" in run_id or "\\" in run_id:
         return None
-    primary_root = os.getenv("OBJECT_STORE_ROOT") or os.getenv("NHMS_OBJECT_STORE_ROOT")
-    roots = (primary_root, os.getenv("NHMS_OBJECT_STORE_COPYBACK_ROOT"))
+    roots = (os.getenv("OBJECT_STORE_ROOT"), os.getenv("NHMS_OBJECT_STORE_COPYBACK_ROOT"))
     seen: set[str] = set()
     for root_value in roots:
         root_text = str(root_value or "").strip()

@@ -438,6 +438,10 @@ the fifth (`node27-resource-governance.env`) carries the service-level
 override `NODE27_GOVERNANCE_ARCHIVE_ROOT` set to the same value. All five repo
 `.example` templates set `NHMS_ARCHIVE_ROOT`.
 
+> **Retired env names (#3146).** That is the 2026-08-01 deployed state, kept as history. The archive
+> lane is retired (Revision 2026-08-11): no code, wrapper or template reads `NHMS_ARCHIVE_ROOT` or
+> `NODE27_GOVERNANCE_ARCHIVE_ROOT` any more, and no template sets them.
+
 ### Premise correction (the original description was wrong from day one)
 
 Decision item 1's original "shared volume" path wording named a node-27 path

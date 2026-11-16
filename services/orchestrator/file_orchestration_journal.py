@@ -12387,14 +12387,14 @@ class FileOrchestrationJournalRepository:
 def _file_lock_guard_mode() -> str:
     configured = os.getenv(FILE_JOURNAL_LOCK_GUARD_MODE_ENV)
     if configured is None:
-        legacy = os.getenv(LEGACY_FILE_LOCK_GUARD_MODE_ENV)
-        if legacy is not None and legacy.strip().lower() in {"atomic", "none", "off", "disabled"}:
+        # #3146: the legacy alias is retired. A config that carries only it (e.g. a
+        # restored env backup) is refused instead of silently defaulting to flock.
+        if os.getenv(LEGACY_FILE_LOCK_GUARD_MODE_ENV) is not None:
             raise SafeFilesystemError(
-                f"{LEGACY_FILE_LOCK_GUARD_MODE_ENV}={legacy.strip()} does not prove a "
-                "cross-process journal guard; configure "
-                f"{FILE_JOURNAL_LOCK_GUARD_MODE_ENV}=flock explicitly"
+                f"retired_lock_guard_mode_key: {LEGACY_FILE_LOCK_GUARD_MODE_ENV} is no longer read; "
+                f"configure {FILE_JOURNAL_LOCK_GUARD_MODE_ENV}=flock explicitly"
             )
-        configured = legacy if legacy is not None else "flock"
+        configured = "flock"
     value = configured.strip().lower()
     if value in {"", "flock", "fcntl"}:
         return "flock"

@@ -433,7 +433,7 @@ Display role, node 27:
   process environment overrides for any approved compose interpolation variable
   are static failures when the process value differs from the env-file value.
   This covers mount roots, image/tag/user/port variables, `DATABASE_URL`,
-  `NHMS_AUTH_MODE`, published artifact metadata, object-store/CORS settings,
+  `NHMS_AUTH_MODE`, published artifact metadata, object-store settings,
   and role/safety flags. Display audited runtime env keys must be literal
   values or interpolate through their same canonical env key; null imports and
   alias variables such as `DISPLAY_DATABASE_URL` are rejected.
@@ -541,11 +541,11 @@ Node-27 resource governance role:
 
 ## compute.scheduler-dbfree.env live-drift classification (2026-10-16)
 
-The live node-22 `compute.scheduler-dbfree.env` lacks the seven keys below that
-`compute.scheduler-dbfree.env.example` carries. None of them is required: each
-row states what the loader applies when only that key is absent (legacy aliases
-included). "effective value when unset" comes from the loader source, not from
-the example:
+At classification time the live node-22 `compute.scheduler-dbfree.env` lacked
+the seven keys below that `compute.scheduler-dbfree.env.example` carries. None of
+them is required: each row states what the loader applies when only that key is
+absent (no legacy alias is honoured; see the note under the table). "effective
+value when unset" comes from the loader source, not from the example:
 
 - `NHMS_SCHEDULER_LEASE_GUARD_MODE`: `_file_lock_guard_mode()` in
   `services/orchestrator/scheduler_lease.py`.
@@ -558,21 +558,34 @@ the example:
   `config_from_env` in `scripts/node22_scheduler_evidence_retention.py` (the
   evidence-retention unit, not the scheduler).
 
-This classification changes no live value. If an operator does set a key, the
-line must be a bare `KEY=value`: systemd `EnvironmentFile=` treats only
-whole-line comments as comments, so a trailing `# ...` becomes part of the value.
+The classification itself changes no live value; a row whose key has since been
+set live carries that bare assignment as its operator action. If an operator does
+set a key, the line must be a bare `KEY=value`: systemd `EnvironmentFile=` treats
+only whole-line comments as comments, so a trailing `# ...` becomes part of the
+value.
 `tests/test_node22_scheduler_env_drift_table.py` checks every row against the
 loaders and the example.
 
 | key | status | effective value when unset | operator action |
 | --- | --- | --- | --- |
-| `NHMS_SCHEDULER_LEASE_GUARD_MODE` | optional, example differs (example: atomic, default: flock) | `flock` | 保持未设置；记录差异、另行决策，并核对 live 文件是否带 `scheduler_lease.py` 读取的 legacy 旧键（它在主键缺失时生效） |
+| `NHMS_SCHEDULER_LEASE_GUARD_MODE` | optional, example differs (example: atomic, default: flock) | `flock` | `NHMS_SCHEDULER_LEASE_GUARD_MODE=atomic` |
 | `NHMS_SCHEDULER_RECONCILE_ABSENCE_SECONDS` | optional (effective default: 300) | `300` | 保持未设置 |
 | `NHMS_SCHEDULER_IDENTITY_BLOCKED_STREAK_LIMIT` | optional (effective default: 3) | `3` | 保持未设置 |
 | `NHMS_SCHEDULER_NO_PROGRESS_CIRCUIT_PASSES` | optional (effective default: 3) | `3` | 保持未设置 |
 | `NHMS_SCHEDULER_TIMING_LEVEL` | optional (effective default: stage) | `stage` | 保持未设置 |
 | `NHMS_SCHEDULER_EVIDENCE_RETENTION_DAYS` | optional (effective default: 90) | `90` | 保持未设置 |
 | `NHMS_SCHEDULER_EVIDENCE_MAX_MB` | optional (effective default: 512) | `512` | 保持未设置 |
+
+Note (#3146, set live 2026-11-16): the live lease guard used to come from the
+legacy `NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE=atomic` line, which
+`scheduler_lease.py` honoured while the primary key was unset. At a pass
+boundary that line was replaced in `compute.scheduler-dbfree.env` and
+`compute.replay.env` by `NHMS_SCHEDULER_LEASE_GUARD_MODE=atomic`, so the lease
+stays `atomic` and the journal stays `flock`. Both readers
+(`scheduler_lease.py` and `file_orchestration_journal.py`) no longer honour the
+legacy key: a config that sets it while the reader's primary key is unset (for
+example a restored `.bak-*` copy) fails closed with an error naming the primary
+key. When the primary key is set, the legacy line is ignored.
 
 ## Backup copies
 

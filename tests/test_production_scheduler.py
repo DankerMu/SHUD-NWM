@@ -24170,23 +24170,54 @@ def test_file_journal_explicit_flock_mode_uses_cross_process_flock(
     assert calls == [fcntl.LOCK_EX, fcntl.LOCK_UN]
 
 
-def test_legacy_atomic_guard_is_not_reinterpreted_for_shared_journal(
+# #3146: the legacy alias is retired for both readers; a legacy-only config is refused
+# whatever its value (a legacy-only ``flock`` used to be accepted by the journal).
+@pytest.mark.parametrize("legacy", ["atomic", "flock"])
+def test_legacy_only_guard_alias_is_refused_for_shared_journal(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    legacy: str,
 ) -> None:
     from services.orchestrator.chain_types import OrchestratorError
 
     monkeypatch.delenv("NHMS_SCHEDULER_JOURNAL_LOCK_GUARD_MODE", raising=False)
-    monkeypatch.setenv("NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE", "atomic")
+    monkeypatch.setenv("NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE", legacy)
     repository = scheduler_module.FileOrchestrationJournalRepository(tmp_path / "journal")
     repository._ensure_root_unlocked()
 
-    with pytest.raises(OrchestratorError, match="cycle lock"):
+    with pytest.raises(OrchestratorError, match="cycle lock") as excinfo:
         with repository._cycle_file_lock_unlocked(
             source_id="gfs",
             cycle_time=_dt("2026-05-21T12:00:00Z"),
         ):
-            raise AssertionError("unsupported legacy alias must fail before journal writes")
+            raise AssertionError("retired legacy alias must fail before journal writes")
+    assert "retired_lock_guard_mode_key" in str(excinfo.value.__cause__)
+
+
+def test_legacy_only_guard_alias_makes_the_scheduler_pass_lock_contended(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("NHMS_SCHEDULER_LEASE_GUARD_MODE", raising=False)
+    monkeypatch.setenv("NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE", "atomic")
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), evidence_dir=tmp_path / "evidence")
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+    )
+
+    result = scheduler.run_once()
+
+    reason = "retired_lock_guard_mode_key:NHMS_SCHEDULER_LEASE_GUARD_MODE"
+    assert result.status == "lock_contended"
+    assert result.evidence["lock"]["reason"] == reason
+    assert not Path(config.lock_path).exists()
+    # node-22 runs DB-free: its lock evidence goes through the safe-code filter, which must keep the reason intact.
+    from services.orchestrator.scheduler_runtime import _db_free_lock_evidence
+
+    db_free = SimpleNamespace(db_free_required=True)
+    assert _db_free_lock_evidence(db_free, {"acquired": False, "reason": reason})["reason"] == reason
 
 
 def test_distinct_lease_and_journal_guard_envs_have_independent_semantics(

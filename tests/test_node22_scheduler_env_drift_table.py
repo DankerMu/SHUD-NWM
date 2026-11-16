@@ -1,7 +1,8 @@
 """#2917 -- the node-22 scheduler env live-drift table matches the loaders.
 
 ``infra/env/README.md`` classifies the seven keys the live node-22
-``compute.scheduler-dbfree.env`` lacks. Each row states the value the loader
+``compute.scheduler-dbfree.env`` lacked at classification time (#3146 has since
+set the lease key live). Each row states the value the loader
 applies when only that key is absent. These cases parse the table out of the
 real README and call the real loaders with that key removed from the process
 environment, so a changed loader default (or a hand-edited table cell) reds
@@ -13,6 +14,7 @@ from __future__ import annotations
 import dataclasses
 import importlib
 import re
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -206,12 +208,65 @@ def test_operator_action_is_a_bare_assignment_or_keep_unset(rows: list[DriftRow]
     assert "example" not in action.lower(), "never tell operators to copy a template line"
 
 
-def test_lease_action_records_and_defers_without_setting_the_legacy_key(rows: list[DriftRow]) -> None:
+def test_lease_action_is_the_live_assignment_and_never_names_the_legacy_key(rows: list[DriftRow]) -> None:
+    # #3146 set the key live on node-22 to the example value; the legacy alias is retired.
     action = _row(rows, "NHMS_SCHEDULER_LEASE_GUARD_MODE").action
-    assert action.startswith(KEEP_UNSET)
-    assert "另行决策" in action
-    assert "legacy" in action
+    assert action == "`NHMS_SCHEDULER_LEASE_GUARD_MODE=atomic`"
     assert LEGACY_LEASE_KEY not in action
+
+
+def test_lease_live_set_note_sits_under_the_table() -> None:
+    section = "\n".join(drift_section(README.read_text(encoding="utf-8")))
+    note = section.split(HEADER_ROW, 1)[1]
+    assert "#3146" in note and "2026-11-16" in note
+    assert "`NHMS_SCHEDULER_LEASE_GUARD_MODE=atomic`" in note
+    assert LEGACY_LEASE_KEY in note
+
+
+# #3146 reader matrix for the lease guard: primary set / legacy only / both / neither.
+@pytest.mark.parametrize(
+    ("primary", "legacy", "expected"),
+    [
+        ("atomic", None, "atomic"),
+        ("flock", None, "flock"),
+        ("atomic", "flock", "atomic"),
+        ("flock", "atomic", "flock"),
+        (None, None, "flock"),
+    ],
+)
+def test_lease_guard_mode_reader_matrix(
+    monkeypatch: pytest.MonkeyPatch, primary: str | None, legacy: str | None, expected: str
+) -> None:
+    for key, value in (("NHMS_SCHEDULER_LEASE_GUARD_MODE", primary), (LEGACY_LEASE_KEY, legacy)):
+        if value is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, value)
+
+    assert scheduler_lease._file_lock_guard_mode() == expected
+
+
+@pytest.mark.parametrize("legacy", ["atomic", "flock", ""])
+def test_lease_guard_mode_legacy_only_fails_closed_naming_the_primary_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, legacy: str
+) -> None:
+    monkeypatch.delenv("NHMS_SCHEDULER_LEASE_GUARD_MODE", raising=False)
+    monkeypatch.setenv(LEGACY_LEASE_KEY, legacy)
+
+    with pytest.raises(scheduler_lease.UnsafeSchedulerLockError) as excinfo:
+        scheduler_lease._file_lock_guard_mode()
+    reason = "retired_lock_guard_mode_key:NHMS_SCHEDULER_LEASE_GUARD_MODE"
+    assert excinfo.value.reason == reason
+    assert "NHMS_SCHEDULER_LEASE_GUARD_MODE" in str(excinfo.value)
+
+    # The lease refuses to acquire: no lock file and no guard file is created.
+    lock_path = tmp_path / "scheduler.lock"
+    lease = scheduler_lease.FileSchedulerLease(lock_path, ttl_seconds=10, workspace_root=tmp_path)
+    acquired = lease.acquire(pass_id="p1", started_at=datetime(2026, 11, 16, 12, tzinfo=UTC))
+    assert acquired["acquired"] is False
+    assert acquired["reason"] == reason
+    assert not lock_path.exists()
+    assert not lock_path.with_name(f"{lock_path.name}.guard").exists()
 
 
 def test_required_rows_have_a_recovery_runbook_step(rows: list[DriftRow]) -> None:

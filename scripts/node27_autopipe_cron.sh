@@ -179,7 +179,7 @@ if [ "$INGEST_ENV_STRICT_SOURCE" = "1" ]; then
 fi
 
 LOG="${AUTOPIPE_LOG_FILE:-$AUTOPIPE_LOG_ROOT/autopipe.log}"
-LOCK="${AUTOPIPE_LOCK_PATH:-${NODE27_AUTOPIPE_LOCK_PATH:-/tmp/autopipe.cron.lock}}"
+LOCK="${AUTOPIPE_LOCK_PATH:-/tmp/autopipe.cron.lock}"
 
 # Non-blocking lock: if a previous run is still going, skip this tick.
 exec 9>"$LOCK"

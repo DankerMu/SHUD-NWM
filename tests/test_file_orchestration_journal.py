@@ -8484,6 +8484,98 @@ def test_run_manifest_initial_state_falls_back_to_copyback_after_local_retention
     }
 
 
+def test_run_manifest_initial_state_ignores_the_retired_nhms_object_store_root_alias(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3146: only the repo-wide OBJECT_STORE_ROOT names the primary object-store root."""
+    from services.orchestrator.chain_repository_state import _run_manifest_initial_state_for_run
+
+    run_id = "fcst_gfs_2026081112_model_a"
+    alias_root = tmp_path / "alias-object-store"
+    _write_json(
+        alias_root / f"runs/{run_id}/input/manifest.json",
+        {"initial_state": {"state_id": "state_from_alias_root", "quality": "fresh"}},
+    )
+    monkeypatch.delenv("OBJECT_STORE_ROOT", raising=False)
+    monkeypatch.delenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", raising=False)
+    monkeypatch.setenv("NHMS_OBJECT_STORE_ROOT", str(alias_root))
+
+    assert _run_manifest_initial_state_for_run(run_id) is None
+
+
+# #3146 reader matrix for the journal guard (primary set / legacy only / both / neither), driven through the
+# repository's cycle lock so the facade's private reader is not imported here.
+_JOURNAL_GUARD_KEY = "NHMS_SCHEDULER_JOURNAL_LOCK_GUARD_MODE"
+_LEGACY_GUARD_KEY = "NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE"
+
+
+def _set_guard_env(monkeypatch: pytest.MonkeyPatch, primary: str | None, legacy: str | None) -> None:
+    for key, value in ((_JOURNAL_GUARD_KEY, primary), (_LEGACY_GUARD_KEY, legacy)):
+        if value is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, value)
+
+
+def _hold_cycle_lock(tmp_path: Path) -> None:
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    repository._ensure_root_unlocked()
+    with repository._cycle_file_lock_unlocked(source_id="gfs", cycle_time=_dt("2026-05-21T12:00:00Z")):
+        pass
+
+
+@pytest.mark.parametrize(
+    ("primary", "legacy"),
+    [("flock", None), ("fcntl", None), ("flock", "atomic"), ("flock", "flock"), (None, None)],
+)
+def test_journal_lock_guard_mode_reader_matrix_resolves_flock(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, primary: str | None, legacy: str | None
+) -> None:
+    import fcntl
+
+    _set_guard_env(monkeypatch, primary, legacy)
+    calls: list[int] = []
+    real_flock = fcntl.flock
+
+    def recording_flock(fd: int, operation: int) -> None:
+        calls.append(operation)
+        real_flock(fd, operation)
+
+    monkeypatch.setattr(fcntl, "flock", recording_flock)
+
+    _hold_cycle_lock(tmp_path)
+
+    assert calls == [fcntl.LOCK_EX, fcntl.LOCK_UN]
+
+
+@pytest.mark.parametrize("legacy", ["flock", "atomic", ""])
+def test_journal_lock_guard_mode_legacy_only_fails_closed_naming_the_primary_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, legacy: str
+) -> None:
+    _set_guard_env(monkeypatch, None, legacy)
+
+    with pytest.raises(OrchestratorError, match="cycle lock") as excinfo:
+        _hold_cycle_lock(tmp_path)
+
+    cause = excinfo.value.__cause__
+    assert isinstance(cause, safe_fs.SafeFilesystemError)
+    assert str(cause).startswith("retired_lock_guard_mode_key:")
+    assert f"{_JOURNAL_GUARD_KEY}=flock" in str(cause)
+
+
+@pytest.mark.parametrize("primary", ["atomic", "none", "off", "disabled"])
+def test_journal_lock_guard_mode_still_refuses_unsafe_primary_values(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, primary: str
+) -> None:
+    _set_guard_env(monkeypatch, primary, None)
+
+    with pytest.raises(OrchestratorError, match="cycle lock") as excinfo:
+        _hold_cycle_lock(tmp_path)
+
+    assert f"Unsupported {_JOURNAL_GUARD_KEY}" in str(excinfo.value.__cause__)
+
+
 def test_full_identity_accessor_ignores_run_manifest_only_identity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

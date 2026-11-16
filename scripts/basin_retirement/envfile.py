@@ -34,7 +34,6 @@ from scripts.node27_autopipeline import _basin_key_set
 
 EXCLUDE_NAME = "AUTOPIPE_EXCLUDE_BASINS"
 LOCK_PATH_NAME = "AUTOPIPE_LOCK_PATH"
-LOCK_PATH_PROCESS_ENV = "NODE27_AUTOPIPE_LOCK_PATH"
 DEFAULT_AUTOPIPE_LOCK_PATH = "/tmp/autopipe.cron.lock"
 REQUIRED_MODE = 0o600
 
@@ -221,9 +220,11 @@ def autopipe_lock_path(content: bytes, environ: Mapping[str, str]) -> str:
             f"it has {len(plain)} such lines and {assignments} lines assigning {LOCK_PATH_NAME} in any form. "
             "Which lock file the autopipe holds cannot be told."
         )
-    if plain and plain[0][1]:
-        return plain[0][1].decode("ascii")
-    return environ.get(LOCK_PATH_PROCESS_ENV) or DEFAULT_AUTOPIPE_LOCK_PATH
+    # As the cron script resolves it (#3146 retired the NODE27_AUTOPIPE_LOCK_PATH alias): the env file's line
+    # wins over the process environment, and an empty value means the default.
+    if plain:
+        return plain[0][1].decode("ascii") or DEFAULT_AUTOPIPE_LOCK_PATH
+    return environ.get(LOCK_PATH_NAME) or DEFAULT_AUTOPIPE_LOCK_PATH
 
 
 def _ensure_backup(backup: Path, content: bytes) -> str:
