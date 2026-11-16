@@ -1981,6 +1981,10 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_file_orchestration_migration.py",
         "tests/test_forcing_submit_ambiguity.py",
         "tests/test_forecast_cohort_projection_restart_stage.py",
+        # #3144: the log-tree-absent suite rides the broad orchestrator
+        # directory rule (chain_workspace.py and chain_stage_execution.py
+        # importer route). DB-free, ~1.5s.
+        "tests/test_gateway_log_tree_absent.py",
         "tests/test_gateway_reconcile_binding_provenance.py",
         "tests/test_gateway_reconcile_claimant_exclusivity.py",
         # #2655: the SubmitLine exact-key fallback-bind suite rides the broad
@@ -2194,6 +2198,16 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_warm_start_chaining.py",
     } <= set(selected)
 
+
+
+def test_chain_workspace_change_alone_selects_the_log_tree_absent_suite() -> None:
+    # #3144: chain_workspace.py owns persist_gateway_logs and
+    # try_publish_log_for_advertise, whose log-tree-absent gate the suite pins.
+    # The module has no narrow rule, so it must reach the suite through the
+    # broad orchestrator directory rule on its own, not only via chain.py.
+    selected = select_tests(["services/orchestrator/chain_workspace.py"], repo_root=Path("."))
+
+    assert "tests/test_gateway_log_tree_absent.py" in selected
 
 def test_released_reservation_recovery_module_selects_its_exact_suites() -> None:
     # #1748 recovery-CLI helper extraction: the new recovery-CLI helper module is owned by a stop

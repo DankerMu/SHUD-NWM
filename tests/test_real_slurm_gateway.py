@@ -5686,3 +5686,46 @@ def test_fetch_logs_bound_array_master_with_task_logs_only_in_shared_lane_report
     assert response.array_task_logs is not None
     assert response.array_task_logs[0]["stdout"] == "task 0 stdout"
     assert response.log_tree_present is True
+
+
+def test_fetch_logs_bound_array_master_with_empty_stored_log_dir_reports_tree_present(monkeypatch, tmp_path) -> None:
+    # Pins the stored array log dir as a job-specific directory: it exists but
+    # holds no task logs yet, so neither a log file nor array task logs are found
+    # and only the directory branch can answer present.
+    gateway = _production_gateway(tmp_path)
+    _no_slurm_calls(monkeypatch)
+    index_path = _write_array_manifest_index(
+        tmp_path / "workspace" / "cycle_001" / "manifests" / "forecast_index_20260508T120000.json",
+        ("run_alpha", "model_alpha"),
+    )
+    gateway._jobs["12345"] = _bound_record(
+        "12345",
+        "run_alpha",
+        {"run_id": "run_alpha", "cycle_id": "cycle_001", "manifest_index_path": str(index_path)},
+    )
+    stored_log_dir = tmp_path / "workspace" / "cycle_001" / "array_logs" / index_path.stem
+    stored_log_dir.mkdir(parents=True)
+
+    response = gateway.fetch_logs("12345")
+
+    assert not (tmp_path / "workspace" / "run_alpha").exists()
+    assert not (tmp_path / "workspace" / "logs").exists()
+    assert response.logs == ""
+    assert response.array_task_logs is None
+    assert response.log_tree_present is True
+
+
+def test_fetch_logs_bound_job_with_run_log_dir_but_no_out_yet_reports_tree_present(monkeypatch, tmp_path) -> None:
+    # Pins ``<run_id>/logs`` as a job-specific directory: the lane exists but the
+    # job has written no ``.out`` yet.
+    gateway = _gateway(tmp_path)
+    _no_slurm_calls(monkeypatch)
+    gateway._jobs["12345"] = _bound_record("12345", "run_001")
+    (tmp_path / "workspace" / "run_001" / "logs").mkdir(parents=True)
+
+    response = gateway.fetch_logs("12345")
+
+    assert not (tmp_path / "workspace" / "logs").exists()
+    assert response.logs == ""
+    assert response.array_task_logs is None
+    assert response.log_tree_present is True

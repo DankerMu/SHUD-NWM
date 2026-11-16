@@ -1936,6 +1936,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # and file_orchestration_journal.py pairs ride CHAIN_IMPORTER_TESTS and
             # FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS. DB-free, sub-second.
             "tests/test_state_save_submit_ambiguity.py",
+            # #3144: the log-tree-absent suite. Its subject is the
+            # persist_gateway_logs / try_publish_log_for_advertise gate in
+            # chain_workspace.py and the resume publication branches of
+            # chain_stage_execution.py; neither is stop-rule owned, so this
+            # directory rule is their route. Its chain.py pair rides
+            # CHAIN_IMPORTER_TESTS and its slurm_gateway pair the
+            # services/slurm_gateway/** rule. DB-free, ~1.5s.
+            "tests/test_gateway_log_tree_absent.py",
             # #2624: the #2348 response-model preservation oracle. Its pipeline
             # half drives apps/api/routes/pipeline.py, which runs persistence.py's
             # `PipelineStore`, public_evidence.py's `_public_evidence` /
