@@ -367,14 +367,17 @@ The scheduler's end-of-pass retention SHALL be able to reclaim aged `runs/`
 workspaces under run-workspace roots other than the object-store root — the
 scheduler workspace root and the object-store copyback root — using an
 independent retention window, while leaving every non-`runs/` prefix on those
-additional roots untouched.
+additional roots untouched, except the root-level Slurm log lane on the scheduler
+workspace root defined by "Retention reclaims aged root-level Slurm log directories
+on the scheduler workspace root".
 
 Additional-root coverage SHALL be gated by an explicit enablement switch whose
 default is disabled, so that adopting this capability is an operational decision
 separate from shipping it. When the switch is disabled, the retention plan SHALL
 be identical, key for key, to the plan produced before this capability existed.
 
-Additional roots SHALL be swept `runs/`-only. Cycle-scoped prefixes (`raw`,
+Additional roots SHALL be swept `runs/`-only, except that the scheduler workspace
+root additionally carries the root-level Slurm log lane. Cycle-scoped prefixes (`raw`,
 `canonical`, `forcing`) on an additional root SHALL NOT be selected for deletion
 under any configuration, because the copyback root's `forcing/` tree is the
 node-27 display API's live disk-only serving surface: its queryable window is
@@ -395,7 +398,9 @@ root, and the existing `extra_root_not_absolute` reason remains stable.
 The admitted resolved root set SHALL contain no duplicate or pair whose potential
 retention target trees intersect. Every root's potential targets include
 `runs/<canonical_run_id>/**`; the primary root's potential targets additionally
-include `raw|canonical|forcing/<source>/<valid_cycle>/**`. A root at or below one
+include `raw|canonical|forcing/<source>/<valid_cycle>/**`; the scheduler workspace
+root named as the Slurm log root additionally includes `<canonical_run_id>/**` and
+`(gfs|ifs|era5)_<valid_cycle>/**` directly beneath it. A root at or below one
 of another root's potential target trees SHALL conflict even when the target is
 not currently expired or present. Directory ancestry outside those lanes SHALL
 NOT conflict: a parent workspace and child object-store with disjoint `runs/` and
@@ -550,8 +555,9 @@ that cleanup never aborts scheduling SHALL all apply unchanged.
 
 - **WHEN** additional-root coverage is enabled and an additional root's `runs/`
   entry is a symbolic link pointing outside that root
-- **THEN** retention skips that root with a recorded reason and selects nothing
-- **AND** no path outside the resolved root appears in the plan or is removed.
+- **THEN** retention skips that root's `runs/` lane with a recorded reason and selects no `runs/` entry
+- **AND** no path outside the resolved root appears in the plan or is removed
+- **AND** on the scheduler workspace root, the root-level Slurm log lane is evaluated independently.
 
 #### Scenario: descendant links are unlinked without following
 
@@ -563,7 +569,8 @@ that cleanup never aborts scheduling SHALL all apply unchanged.
 
 - **WHEN** additional-root coverage is enabled and a configured admitted
   additional root does not exist, or exists without a `runs/` directory
-- **THEN** retention records no targets for it and raises nothing
+- **THEN** retention records no `runs/` targets for it and raises nothing; a missing root records no targets at all
+- **AND** an existing scheduler workspace root without `runs/` still has its root-level Slurm log lane evaluated
 - **AND** the scheduling pass completes normally.
 
 ### Requirement: Reconciliation-pending candidates are partial non-success evidence
@@ -1715,3 +1722,71 @@ The raw-manifest repair channel and the downstream-retry-after-raw-repair channe
 
 - **WHEN** the same candidate's error code is not a forcing-input code, or its failed stage is not a native SHUD stage
 - **THEN** the raw-repair channel's retry decision is unchanged
+
+### Requirement: Retention reclaims aged root-level Slurm log directories on the scheduler workspace root
+
+When the additional-root retention gate is enabled and the scheduler workspace root is admitted as an additional
+root, retention SHALL also select direct children of that root whose names are canonical run ids or gateway cycle
+ids (`gfs|ifs|era5` followed by `_<YYYYMMDDHH>`, the closed set the gateway can emit). These are the directories that hold the Slurm gateway's per-run logs and
+per-cycle array manifests and logs.
+
+A child SHALL be selected only when all of these hold: its cycle is older than the additional-root cutoff; its cycle
+is below the pass frontier's active lower bound; and neither the directory nor any non-symlink descendant entry
+(examined with `lstat`, links never followed) has an mtime at or after that cutoff. A child that fails only the last condition SHALL be skipped as `slurm_log_recently_modified`
+without a size, because in-flight analysis, retry and resubmitted jobs can sit below the forecast frontier. A child
+whose tree cannot be fully read (an unreadable subtree or an entry vanishing mid-walk) SHALL be skipped the same way,
+fail-closed, because the unread part may hold the recent entry. A selected child SHALL be recorded with reason `slurm_log_cycle_aged_out`, the absolute root, and its
+root-relative name as the key. A child within the window SHALL be skipped as `within_retention_window`. A child at or
+above the frontier SHALL be skipped as `pipeline_frontier_exempt` without a size walk.
+
+Every other direct child of that root SHALL NOT be selected under any configuration. This includes `runs`,
+operational directories, names that only resemble a lane shape, symlinks, and regular files. Retention SHALL NOT
+follow a symlinked child. The lane SHALL apply to no other root, and SHALL NOT run when the workspace root resolves
+to the copyback root or the primary root. The lane SHALL NOT depend on the state of the workspace root's `runs/`
+entry. With the gate closed, or with no scheduler workspace
+root named, the retention plan SHALL be identical key for key to the plan produced before this lane existed. The
+receipt schema version SHALL remain `nhms.production_scheduler.retention.v2`.
+
+#### Scenario: aged Slurm log directories are reclaimed on the workspace root
+
+- **GIVEN** additional-root retention is enabled with a 14-day window and the workspace root W is admitted
+- **AND** W contains `cycle_gfs_2026010100_convert_cohort_ab12/`, `fcst_ifs_2026010100_m1/` and `gfs_2026010100/`,
+  all below the frontier
+- **WHEN** the pass runs retention with deletion enabled
+- **THEN** all three directories are removed, each recorded with reason `slurm_log_cycle_aged_out`, `root=W` and its
+  name as `key`
+
+#### Scenario: operational and look-alike names are never selected
+
+- **GIVEN** W also contains `scheduler/`, `slurm-logs/`, `repairs/`, `runs/`, `onboarding-19-20260921/`,
+  `GFS_2026010100/`, `gfs_2026010100x/`, `reset_2026070115/`, `backup_2026010100/`, `cmfd_2026010100/`,
+  `manual_reconvert_gfs_2026062700/`, a regular file `gfs_2026010100`, and a symlink `ifs_2026010100` pointing
+  outside W
+- **WHEN** retention runs
+- **THEN** none of them appears among the targets, all of them still exist, and the symlink's target is untouched
+
+#### Scenario: in-flight cycles keep their logs
+
+- **GIVEN** `gfs_<cycle>/` under W whose cycle is older than the window but at or above the frontier
+- **WHEN** retention runs
+- **THEN** it is skipped as `pipeline_frontier_exempt`, carries no `size_bytes`, and still exists
+
+#### Scenario: a recently touched tree below the frontier is kept
+
+- **GIVEN** `analysis_era5_2026010100_2026010200_m/` under W, whose cycle is aged and below the frontier, but whose
+  `logs/9.out` was modified within the window
+- **WHEN** retention runs
+- **THEN** it is skipped as `slurm_log_recently_modified` and still exists
+
+#### Scenario: the lane applies only to the scheduler workspace root
+
+- **GIVEN** the gate is open, with workspace root W, copyback root C (not W) and primary root P all admitted
+- **AND** each of them holds aged lane-shaped directories at its root level
+- **WHEN** retention runs
+- **THEN** `slurm_log_cycle_aged_out` targets appear only under W
+- **AND** the lane-shaped directories under C and P still exist and are absent from the plan
+
+#### Scenario: no lane without a named, admitted, non-aliased workspace root
+
+- **WHEN** the gate is closed, or no workspace root is named, or it resolves to the copyback root, or it is rejected at admission
+- **THEN** no `slurm_log_cycle_aged_out` target is planned, and the plan equals the plan produced without the lane

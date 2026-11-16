@@ -96,7 +96,7 @@ temporary workspace root W admitted as an additional root, with the gate open.
 - [x] 4.2 `uv run pytest -q tests/test_retention*.py tests/test_cli_cleanup_frontier.py tests/test_production_scheduler.py tests/test_select_ci_tests.py`
   plus the selector-chosen set. Run it locally and on node-27 in a temporary worktree.
 - [x] 4.3 `openspec validate retention-workspace-slurm-log-lane --strict --no-interactive`
-- [ ] 4.4 node-22 post-merge receipt, in this order:
+- [x] 4.4 node-22 post-merge receipt, in this order:
   - (1) ff deploy at a pass boundary;
   - (2) before the first post-deploy pass deletes anything, run an out-of-pass dry-run with the timer stopped.
     Invocation: `set -a; . /scratch/frd_muziyao/NWM/infra/env/compute.scheduler-dbfree.env; set +a;`
@@ -108,3 +108,16 @@ temporary workspace root W admitted as an additional root, with the gate open.
     listing the oldest lane directory's cycle and mtime against the cutoff;
   - (4) restore the timer. In the next deleting pass's receipt, the lane entries show `failed=0`, and the listed
     directories are gone.
+  - Receipt (2026-11-15T18:54Z–2026-11-16T02:25Z, node-22):
+    - (1) timer stopped 18:54:33Z, service inactive 18:58:13Z, ff deploy `2ec644614 -> b2fc70547`, timer restored
+      18:58:37Z (trap). Artefacts: `/scratch/frd_muziyao/nhms-prod/tmp/receipt-3142/`.
+    - (2) out-of-pass dry-run rc=0, stderr empty: `dry_run=true`, extra roots `[workspace, object-store]` at 14 d
+      (cutoff 2026-11-01T18:58:23Z), frontier `2026-11-13T12:00Z` (`receipt:window_floor`). Planned 0, failed 0; no
+      entry outside shape (a)/(b), no operational name.
+    - (3) count 0. The lane ran on W only: 246 `slurm_log_recently_modified` skips, all `root=W`. 408 lane-shaped
+      dirs on W; the oldest, `cycle_gfs_2026101212_convert_cohort_2844328ef58d` (cycle 2026101212), has dir mtime
+      2026-11-06T13:18:28Z ≥ cutoff, because catch-up re-touched these trees on 2026-11-06. They age out from about
+      2026-11-20T13Z.
+    - (4) the deleting passes after the deploy (`scheduler_2026111601_*` … `scheduler_2026111602_1e5bb8d40c57`, checkout
+      at `b2fc70547`) show `dry_run=false`, counts `deleted=0 failed=0 planned=0`, and 252 lane recency skips each. No
+      lane directory is listed for deletion yet, so the first real lane deletion is expected after 2026-11-20.
