@@ -2302,6 +2302,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_slurm_route_contract.py",
             "tests/test_slurm_route_security_contract.py",
             "tests/test_real_slurm_gateway.py",
+            # #3144: the log-tree-absent suite imports the gateway models and
+            # routes a real backend's fetch_logs into the orchestrator.
+            "tests/test_gateway_log_tree_absent.py",
             "tests/test_slurm_array_contract.py",
             "tests/test_job_array.py",
         ),

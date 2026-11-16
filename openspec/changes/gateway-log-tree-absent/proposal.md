@@ -19,7 +19,7 @@ non-array job can now get a permanent 0-byte `log_uri`: the persisted state repo
 1. **Gateway contract** (additive): `SlurmLogsResponse.log_tree_present: bool = True`.
    - "Bound" means `_submission_metadata_complete(record)`, not the local `run_id`, which falls back to `job_id`
      (~:536) and is never empty. The rule in `real_backend.fetch_logs`:
-     - **bound record**: `False` only when no candidate log file exists AND every job-specific log directory is
+     - **bound record**: `False` only when no candidate log file exists, no array task logs are found, AND every job-specific log directory is
        absent. Those directories are the stored array log dir, `W/<run_id>/logs` and the manifest `run_id` lane; the
        shared `W/logs` fallback does not count. An array master with an intact tree, which never writes
        `<job_id>.out`, stays `True`.

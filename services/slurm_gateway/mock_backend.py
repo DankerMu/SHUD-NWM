@@ -195,6 +195,7 @@ class MockSlurmGateway(SlurmGateway):
                 run_id=job.run_id,
                 logs=self._build_logs(job),
                 complete=complete,
+                log_tree_present=True,
             )
 
     def reset(self, request: ResetRequest | None = None) -> ResetResponse:

@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import threading
@@ -5487,3 +5488,201 @@ def test_exclude_nodes_override_rejects_injection(tmp_path: Path, malicious_excl
     )
     with pytest.raises(ConfigurationError):
         gateway.resolve_resource_profile("any_model")
+
+
+# --- Log tree absent signal (#3144) -----------------------------------------
+#
+# ``fetch_logs`` answers ``logs=""`` both for an empty log and for a deleted log
+# tree; ``log_tree_present`` tells them apart.  A bound record (submission
+# metadata names a ``run_id``) is absent only when no candidate log file exists
+# and every job-specific directory is gone; an unbound record (sacct rebuild
+# after a gateway restart) is present only when a log is actually found.
+
+
+def _bound_record(job_id: str, run_id: str, manifest: dict[str, object] | None = None) -> SlurmJobRecord:
+    now = datetime.now(UTC)
+    return SlurmJobRecord(
+        job_id=job_id,
+        run_id=run_id,
+        model_id="model_001",
+        status=SlurmJobStatus.SUCCEEDED,
+        submitted_at=now,
+        updated_at=now,
+        finished_at=now,
+        manifest=dict(manifest or {}),
+    )
+
+
+def _no_slurm_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("subprocess.run should not be called"))
+
+
+def test_fetch_logs_bound_job_with_deleted_run_log_tree_reports_tree_absent(monkeypatch, tmp_path) -> None:
+    gateway = _gateway(tmp_path)
+    _no_slurm_calls(monkeypatch)
+    gateway._jobs["12345"] = _bound_record("12345", "run_001")
+    run_tree = tmp_path / "workspace" / "run_001"
+    (run_tree / "logs").mkdir(parents=True)
+    (run_tree / "logs" / "12345.out").write_text("gone soon", encoding="utf-8")
+    # The shared fallback lane outlives the run tree; it is not this job's tree.
+    shared = tmp_path / "workspace" / "logs"
+    shared.mkdir(parents=True)
+    (shared / "99999.out").write_text("another job", encoding="utf-8")
+    shutil.rmtree(run_tree)
+
+    response = gateway.fetch_logs("12345")
+
+    assert response.log_tree_present is False
+    assert response.logs == ""
+    assert response.metadata_complete is True
+    assert response.model_dump(mode="json")["log_tree_present"] is False
+
+
+def test_fetch_logs_bound_job_with_existing_empty_log_reports_tree_present(monkeypatch, tmp_path) -> None:
+    gateway = _gateway(tmp_path)
+    _no_slurm_calls(monkeypatch)
+    gateway._jobs["12345"] = _bound_record("12345", "run_001")
+    log_dir = tmp_path / "workspace" / "run_001" / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "12345.out").write_text("", encoding="utf-8")
+
+    response = gateway.fetch_logs("12345")
+
+    assert response.logs == ""
+    assert response.log_tree_present is True
+
+
+def test_fetch_logs_intact_array_master_without_own_out_reports_tree_present(monkeypatch, tmp_path) -> None:
+    gateway = _production_gateway(tmp_path)
+    _no_slurm_calls(monkeypatch)
+    index_path = _write_array_manifest_index(
+        tmp_path / "workspace" / "cycle_001" / "manifests" / "forecast_index_20260508T120000.json",
+        ("run_alpha", "model_alpha"),
+    )
+    gateway._jobs["12345"] = _bound_record(
+        "12345",
+        "run_alpha",
+        {"run_id": "run_alpha", "cycle_id": "cycle_001", "manifest_index_path": str(index_path)},
+    )
+    log_dir = tmp_path / "workspace" / "cycle_001" / "array_logs" / index_path.stem
+    log_dir.mkdir(parents=True)
+    (log_dir / "12345_0.out").write_text("alpha stdout", encoding="utf-8")
+
+    response = gateway.fetch_logs("12345")
+
+    assert not (log_dir / "12345.out").exists()
+    assert not (tmp_path / "workspace" / "run_alpha").exists()
+    assert response.logs == ""
+    assert response.log_tree_present is True
+
+
+def test_fetch_logs_bound_array_master_with_deleted_stored_log_dir_reports_tree_absent(
+    monkeypatch, tmp_path
+) -> None:
+    gateway = _production_gateway(tmp_path)
+    _no_slurm_calls(monkeypatch)
+    index_path = _write_array_manifest_index(
+        tmp_path / "workspace" / "cycle_001" / "manifests" / "forecast_index_20260508T120000.json",
+        ("run_alpha", "model_alpha"),
+    )
+    gateway._jobs["12345"] = _bound_record(
+        "12345",
+        "run_alpha",
+        {"run_id": "run_alpha", "cycle_id": "cycle_001", "manifest_index_path": str(index_path)},
+    )
+    array_logs = tmp_path / "workspace" / "cycle_001" / "array_logs"
+    (array_logs / index_path.stem).mkdir(parents=True)
+    (array_logs / index_path.stem / "12345_0.out").write_text("alpha stdout", encoding="utf-8")
+    shutil.rmtree(array_logs)
+
+    response = gateway.fetch_logs("12345")
+
+    assert response.logs == ""
+    assert response.array_task_logs is None
+    assert response.log_tree_present is False
+
+
+def test_fetch_logs_bound_job_with_manifest_run_lane_present_reports_tree_present(monkeypatch, tmp_path) -> None:
+    gateway = _gateway(tmp_path)
+    _no_slurm_calls(monkeypatch)
+    gateway._jobs["12345"] = _bound_record("12345", "run_001", {"run_id": "leader_run"})
+    (tmp_path / "workspace" / "leader_run" / "logs").mkdir(parents=True)
+
+    response = gateway.fetch_logs("12345")
+
+    assert not (tmp_path / "workspace" / "run_001").exists()
+    assert response.logs == ""
+    assert response.log_tree_present is True
+
+
+def test_fetch_logs_unbound_record_after_restart_with_discoverable_log_reports_tree_present(
+    monkeypatch, tmp_path
+) -> None:
+    gateway = _gateway(tmp_path)
+    _completed_sacct_run(monkeypatch)
+    log_dir = tmp_path / "workspace" / "other_run" / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "12345.out").write_text("discovered stdout", encoding="utf-8")
+
+    response = gateway.fetch_logs("12345")
+
+    assert gateway._jobs["12345"].run_id == ""
+    assert response.metadata_complete is False
+    assert response.logs == "discovered stdout"
+    assert response.log_tree_present is True
+
+
+def test_fetch_logs_unbound_record_after_restart_with_deleted_tree_reports_tree_absent(
+    monkeypatch, tmp_path
+) -> None:
+    gateway = _gateway(tmp_path)
+    _completed_sacct_run(monkeypatch)
+    other = tmp_path / "workspace" / "other_run" / "logs"
+    other.mkdir(parents=True)
+    (other / "99999.out").write_text("another job", encoding="utf-8")
+
+    response = gateway.fetch_logs("12345")
+
+    assert gateway._jobs["12345"].run_id == ""
+    assert response.metadata_complete is False
+    assert response.logs == ""
+    assert response.array_task_logs is None
+    assert response.log_tree_present is False
+
+
+def test_mock_gateway_logs_report_tree_present(tmp_path) -> None:
+    del tmp_path
+    gateway = MockSlurmGateway(SlurmGatewaySettings(backend="mock"))
+    submitted = gateway.submit_job(SubmitJobRequest(job_type="smoke", run_id="run_001", model_id="model_001"))
+
+    response = gateway.fetch_logs(submitted.job_id)
+
+    assert response.model_dump(mode="json")["log_tree_present"] is True
+
+
+def test_fetch_logs_bound_array_master_with_task_logs_only_in_shared_lane_reports_tree_present(
+    monkeypatch, tmp_path
+) -> None:
+    gateway = _production_gateway(tmp_path)
+    _no_slurm_calls(monkeypatch)
+    index_path = _write_array_manifest_index(
+        tmp_path / "workspace" / "cycle_001" / "manifests" / "forecast_index_20260508T120000.json",
+        ("run_alpha", "model_alpha"),
+    )
+    gateway._jobs["12345"] = _bound_record(
+        "12345",
+        "run_alpha",
+        {"run_id": "run_alpha", "cycle_id": "cycle_001", "manifest_index_path": str(index_path)},
+    )
+    shared = tmp_path / "workspace" / "logs"
+    shared.mkdir(parents=True)
+    (shared / "12345_0.out").write_text("task 0 stdout", encoding="utf-8")
+
+    response = gateway.fetch_logs("12345")
+
+    assert not (tmp_path / "workspace" / "cycle_001" / "array_logs").exists()
+    assert not (tmp_path / "workspace" / "run_alpha").exists()
+    assert response.logs == ""
+    assert response.array_task_logs is not None
+    assert response.array_task_logs[0]["stdout"] == "task 0 stdout"
+    assert response.log_tree_present is True

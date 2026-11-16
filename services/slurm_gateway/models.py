@@ -136,6 +136,10 @@ class SlurmLogsResponse(BaseModel):
     truncated: bool = False
     metadata_complete: bool = True
     array_task_logs: list[dict[str, Any]] | None = None
+    # ``False`` only when the job's log tree is known to be gone (#3144); an
+    # empty ``logs`` with ``True`` is a genuinely empty log.  Older gateways omit
+    # the field, so consumers must read a missing value as present.
+    log_tree_present: bool = True
 
 
 class SlurmBinaryProbe(BaseModel):

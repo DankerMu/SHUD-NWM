@@ -25,9 +25,9 @@ The `fetch_logs` method SHALL read job output and error logs from the configured
 
 #### Scenario: A deleted job log tree is reported as absent, not as an empty log
 
-- **WHEN** `fetch_logs` is called for a job whose submission metadata binds a `run_id`, no candidate log file exists, and every job-specific log directory is absent: the stored array log directory, `workspace/{run_id}/logs`, and the manifest `run_id` lane, but not the shared `workspace/logs` fallback
+- **WHEN** `fetch_logs` is called for a job whose submission metadata binds a `run_id`, no candidate log file exists, no array task logs are found, and every job-specific log directory is absent: the stored array log directory, `workspace/{run_id}/logs`, and the manifest `run_id` lane, but not the shared `workspace/logs` fallback
 - **THEN** the response MUST carry `log_tree_present: false` with empty `logs`
 - **AND** for a job without that binding (for example a record rebuilt from sacct after a gateway restart), `log_tree_present` MUST be `true` only when a log file or array task logs are actually found
-- **AND** when a candidate log file exists, or the job-specific tree is intact (including an array master whose `<job_id>.out` is never written), the response MUST carry `log_tree_present: true`, so an empty log or an intact tree is never mistaken for a deleted one
+- **AND** when a candidate log file exists, array task logs are found, or the job-specific tree is intact (including an array master whose `<job_id>.out` is never written), the response MUST carry `log_tree_present: true`, so an empty log or an intact tree is never mistaken for a deleted one
 
 ---
