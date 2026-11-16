@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change m23-qhh-22-production-automation. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: Real SHUD executable preflight
 The production runtime SHALL reject stub executables and validate the configured SHUD binary before submitting work.
 
@@ -25,6 +27,16 @@ The production runtime SHALL reject stub executables and validate the configured
 - **WHEN** SHUD runtime starts for QHH
 - **THEN** it verifies required project input files, generated forcing files, workspace paths, and manifest identities before execution
 - **AND** failures are recorded as pre-submit blockers.
+
+#### Scenario: A symlink to a multi-call binary is rejected regardless of host layout
+- **WHEN** `SHUD_EXECUTABLE` names a file called `shud` whose realpath leaf is a known stub, a `gnu`-prefixed stub (as on Ubuntu 26.04, where `/bin/true` resolves to `gnutrue`), or a multi-call utility binary (`coreutils`, `busybox`, `toybox`)
+- **THEN** preflight fails with `SHUD_EXECUTABLE_STUB_REJECTED` before any probe runs
+- **AND** the verdict does not depend on how the host lays out `/bin/true`.
+
+#### Scenario: argv[0] echo is not SHUD identity
+- **WHEN** a probe's output mentions `shud` only because the binary echoes its own argv[0] (for example GNU `true --help` printing `Usage: <argv0> ...`)
+- **THEN** the output does not count as SHUD identity, because identity requires the SHUD banner phrase (`Simulator for Hydrologic Unstructured Domains`)
+- **AND** the real SHUD binary, whose no-argument banner contains that phrase, still reports the identity signal as present.
 
 ### Requirement: Node-22 Slurm submission path
 SHUD production execution SHALL use a working node-22 Slurm gateway or host submission path with health and accounting receipts.
@@ -56,4 +68,3 @@ The runtime SHALL distinguish successful SHUD completion, failed execution, canc
 - **WHEN** Slurm reports failure, cancellation, timeout, missing logs, missing outputs, or unparseable runtime status
 - **THEN** the pipeline records a typed failure or blocker
 - **AND** parse/publish stages do not claim success.
-
