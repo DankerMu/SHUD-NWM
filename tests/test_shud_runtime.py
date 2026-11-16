@@ -6995,8 +6995,8 @@ def test_shared_preflight_no_arg_probe_runs_in_isolated_cwd(tmp_path: Path, monk
 
 
 # Variant binary: a no-argument call prints a non-empty banner that contains NONE
-# of the recognized SHUD identity tokens (no 'shud', no 'simulator for hydrologic',
-# no 'hydrologic unstructured domains'), exits 0; flags report "Unknown option".
+# of the recognized SHUD identity tokens (no 'simulator for hydrologic', no
+# 'hydrologic unstructured domains'), exits 0; flags report "Unknown option".
 # This models a real/variant solver whose banner wording is simply not in the token
 # list -- it must NOT be falsely rejected (never-break-userspace).
 _UNRECOGNIZED_BANNER_SCRIPT = (
@@ -7051,15 +7051,23 @@ def test_shared_preflight_rejects_silent_stub(tmp_path: Path) -> None:
 
 
 def test_shared_preflight_rejects_realpath_stub_symlink(tmp_path: Path) -> None:
-    """A symlink named ``shud`` pointing at /bin/true is rejected by the
+    """A symlink named ``shud`` whose realpath leaf is ``true`` is rejected by the
     basename/realpath stub branch (independent of the version probe).
+
+    The target is built under ``tmp_path`` rather than using the host's
+    ``/bin/true``: on Ubuntu 26.04 that resolves to ``gnutrue``, so the host
+    layout must not decide what this test exercises.
     """
 
     import packages.common.shud_preflight as preflight
 
+    target = tmp_path / "bin" / "true"
+    target.parent.mkdir()
+    target.write_text(_SILENT_STUB_SCRIPT, encoding="utf-8")
+    target.chmod(0o755)
     link = tmp_path / "shud"
     try:
-        link.symlink_to("/bin/true")
+        link.symlink_to(target)
     except OSError as exc:  # pragma: no cover - platform without symlink support
         pytest.skip(f"symlink creation is not supported: {exc}")
 
@@ -7067,6 +7075,64 @@ def test_shared_preflight_rejects_realpath_stub_symlink(tmp_path: Path) -> None:
 
     assert result.ok is False
     assert any(b["error_code"] == "SHUD_EXECUTABLE_STUB_REJECTED" for b in result.blockers)
+
+
+# Models the argv[0] echo of GNU ``true`` as observed on Ubuntu 26.04 (2026-11-16):
+# silent and exit 0 with no args, while ``--help`` prints its usage line with argv[0]
+# in it. Every other call is silent and exits 0. That echo is what made a
+# ``shud -> /bin/true`` symlink report identity through the bare ``shud`` token.
+_ARGV0_ECHO_STUB_SCRIPT = (
+    "#!/bin/sh\n"
+    'if [ "$1" = "--help" ]; then\n'
+    '  echo "Usage: $0 [ignored command line arguments]"\n'
+    "fi\n"
+    "exit 0\n"
+)
+
+
+@pytest.mark.parametrize("leaf", ["gnutrue", "gnufalse", "coreutils", "busybox", "toybox"])
+def test_shared_preflight_rejects_renamed_or_multicall_stub_symlink(tmp_path: Path, leaf: str) -> None:
+    """A ``shud`` symlink whose realpath leaf is a ``gnu``-prefixed stub (Ubuntu
+    26.04 ``/bin/true -> gnutrue``) or a multi-call utility binary is rejected
+    as a stub before any probe runs, whatever the target prints.
+    """
+
+    import packages.common.shud_preflight as preflight
+
+    target = tmp_path / "bin" / leaf
+    target.parent.mkdir()
+    target.write_text(_ARGV0_ECHO_STUB_SCRIPT, encoding="utf-8")
+    target.chmod(0o755)
+    link = tmp_path / "shud"
+    try:
+        link.symlink_to(target)
+    except OSError as exc:  # pragma: no cover - platform without symlink support
+        pytest.skip(f"symlink creation is not supported: {exc}")
+
+    result = preflight.check_shud_executable(str(link), probe_libraries=False)
+
+    assert result.ok is False
+    assert [b["error_code"] for b in result.blockers] == ["SHUD_EXECUTABLE_STUB_REJECTED"]
+    assert "version_signal" not in result.checks
+
+
+def test_shared_preflight_argv0_echo_is_not_shud_identity(tmp_path: Path) -> None:
+    """A binary named ``shud`` whose only mention of ``shud`` is its own argv[0]
+    echoed in usage text is not SHUD identity: the output is non-empty but
+    unrecognized, so the signal is ``inconclusive`` (tolerated, not blocked).
+    """
+
+    import packages.common.shud_preflight as preflight
+
+    binary = tmp_path / "shud"
+    binary.write_text(_ARGV0_ECHO_STUB_SCRIPT, encoding="utf-8")
+    binary.chmod(0o755)
+
+    result = preflight.check_shud_executable(str(binary), probe_libraries=False)
+
+    assert result.checks["version_signal"] == "inconclusive"
+    assert result.ok is True
+    assert result.blockers == []
 
 
 def test_shared_preflight_unknown_signal_when_probes_cannot_run(

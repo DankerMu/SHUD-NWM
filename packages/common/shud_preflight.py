@@ -29,16 +29,26 @@ from packages.common.redaction import redact_text
 
 # Basenames / realpath leaves that are never a real SHUD solver. ``true``/``false``
 # are the canonical stubs called out by the spec; the rest are common no-op shims.
-STUB_EXECUTABLE_BASENAMES = frozenset({"true", "false", ":", "echo", "cat", "noop", "stub"})
+# ``coreutils``/``busybox``/``toybox`` are multi-call utility binaries: a ``shud``
+# symlink into one of them runs some coreutil, never SHUD. Hosts rename or multicall
+# these stubs, so the realpath leaf is not always ``true``: on Ubuntu 26.04 (observed
+# 2026-11-16) ``/bin/true`` resolves to ``/usr/bin/gnutrue``, and ``false``/``echo``/
+# ``cat`` resolve into the uutils multicall tree. ``_is_stub_basename`` therefore also
+# treats a ``gnu``-prefixed stub name (``gnutrue``, ``gnufalse``, ...) as a stub.
+STUB_EXECUTABLE_BASENAMES = frozenset(
+    {"true", "false", ":", "echo", "cat", "noop", "stub", "coreutils", "busybox", "toybox"}
+)
 
 # Tokens that a genuine SHUD identity banner is expected to emit. The real
 # compiled SHUD binary rejects ``--version``/``--help`` ("Unknown option") and
 # only prints its banner when invoked with NO arguments, e.g.:
 #   "Simulator for Hydrologic Unstructured Domains v2.0  2022"
 #   "./shud [-0gv] ... <project_name>"
-# so the matcher must align to "simulator FOR hydrologic" (not "of") and to the
-# "./shud" usage line.
-SHUD_IDENTITY_TOKENS = ("shud", "simulator for hydrologic", "hydrologic unstructured domains")
+# so the matcher must align to "simulator FOR hydrologic" (not "of"). The bare word
+# "shud" is deliberately NOT a token: any binary that echoes its argv[0] in usage
+# text (e.g. GNU ``true --help`` -> "Usage: /path/shud [ignored command line
+# arguments]") would otherwise report identity just because it was invoked as ``shud``.
+SHUD_IDENTITY_TOKENS = ("simulator for hydrologic", "hydrologic unstructured domains")
 
 # Bounded external-probe timeout (seconds). Kept small so a hung binary cannot
 # stall the scheduler pass.
@@ -86,7 +96,10 @@ def _resolve_executable_path(executable: str) -> str | None:
 
 def _is_stub_basename(path: str) -> bool:
     name = Path(path).name.lower()
-    return name in STUB_EXECUTABLE_BASENAMES
+    if name in STUB_EXECUTABLE_BASENAMES:
+        return True
+    # Renamed GNU stubs, e.g. Ubuntu 26.04's ``/bin/true -> gnutrue``.
+    return name.startswith("gnu") and name[3:] in STUB_EXECUTABLE_BASENAMES
 
 
 def check_shud_executable(
