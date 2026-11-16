@@ -82,8 +82,8 @@ non-array job can now get a permanent 0-byte `log_uri`: the persisted state repo
   - an unbound job loses its log.
 
 ## Evidence Floor
-- [ ] E1 `uv run ruff check --no-cache .`
-- [ ] E2 Tests. Each new behaviour test is red on the old code; record it.
+- [x] E1 `uv run ruff check --no-cache .`
+- [x] E2 Tests. Each new behaviour test is red on the old code; record it.
   - Gateway (`tests/test_real_slurm_gateway.py`, excluded from the large-file guard):
     - a bound non-array job with its `W/<run_id>/logs` deleted returns `log_tree_present False` and `logs ""`;
     - the same tree with an existing empty `.out` returns `True`;
@@ -103,9 +103,9 @@ non-array job can now get a permanent 0-byte `log_uri`: the persisted state repo
     - `persist_gateway_logs` returns `False` only on skip and `None` when written.
   - Selector set for the diff, plus `tests/test_real_slurm_gateway.py`, `tests/test_gateway.py`, the
     chain_workspace and log-publication suites, and `tests/test_orchestration_chain.py`, all green locally.
-- [ ] E3 The same set passes in a node-27 temporary worktree.
+- [x] E3 The same set passes in a node-27 temporary worktree.
 - [ ] E4 After merge: node-22 is pulled at a pass boundary and the gateway restarted. `/api/v1/slurm/health` returns
   200 before and after. A live read-only `fetch_logs` of a recent terminal job whose log file exists carries
   `log_tree_present: true` with non-empty logs. **This proves only deployment and serialization**; the `False` paths
   (bound with dirs gone, unbound with nothing found) are covered by unit tests alone.
-- [ ] E5 `openspec validate gateway-log-tree-absent --strict --no-interactive`.
+- [x] E5 `openspec validate gateway-log-tree-absent --strict --no-interactive`.
