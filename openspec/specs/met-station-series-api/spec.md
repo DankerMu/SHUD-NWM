@@ -10,6 +10,7 @@ are governed by `docs/adr/0001-station-forcing-history-api-boundary.md` and
 require a future explicit archive/history API change.
 
 ## Requirements
+
 ### Requirement: Station forcing series route
 
 The system SHALL expose a bounded station forcing time-series route for
@@ -82,3 +83,60 @@ helpers, FastAPI routes, OpenAPI, frontend generated types, and tests.
 - **WHEN** long-term historical station-series access or `met.forcing_station_timeseries` cleanup is implemented
 - **THEN** that work SHALL follow `docs/adr/0001-station-forcing-history-api-boundary.md`
 - **AND** this spec SHALL remain aligned with `object-store-station-series-read` until DB-backed history is explicitly reintroduced by a future change.
+
+### Requirement: DB-backed station series helper is legacy internal surface
+
+`PsycopgForecastStore.station_series()` SHALL be treated as a legacy/internal
+DB-backed helper retained for historical contract tests and ADR 0001
+archive/history design material. The current public display route SHALL NOT
+call it.
+
+#### Scenario: production code does not call legacy helper
+
+- **WHEN** production Python code under `apps/`, `packages/`, `services/`, or
+  `workers/` is inspected
+- **THEN** no production call site outside `packages/common/forecast_store.py`
+  SHALL invoke `.station_series(`
+- **AND** the public FastAPI station-series route SHALL continue to call the
+  object-store reader instead of the DB-backed helper
+
+#### Scenario: legacy helper remains explicit until historical API decision
+
+- **WHEN** tests exercise `PsycopgForecastStore.station_series()`
+- **THEN** that coverage SHALL be understood as preserving a legacy/internal DB
+  contract, not as evidence that the current public route falls back to DB
+  history
+- **AND** any reintroduction of DB-backed historical station-series access SHALL
+  follow `docs/adr/0001-station-forcing-history-api-boundary.md` and land as a
+  future explicit API change rather than a silent fallback from the direct-disk
+  route
+
+### Requirement: Historical station forcing access is explicit archive surface
+
+Long-term station forcing history, if implemented, SHALL be exposed through a
+separate archive/history API surface or an explicit opt-in mode. It SHALL NOT be
+a silent fallback from the current retained-disk station-series route.
+
+#### Scenario: retained disk route keeps disk miss semantics
+
+- **WHEN** the current public station-series route resolves a disk path outside
+  the retained object-store window
+- **THEN** it SHALL return `STATION_FORCING_FILE_NOT_FOUND`
+- **AND** it SHALL NOT read DB/archive rows to mask the missing disk artifact
+
+#### Scenario: future archive surface exposes provenance
+
+- **WHEN** a future archive/history station-series API returns samples
+- **THEN** it SHALL expose provenance that distinguishes archive/DB data from
+  retained display CSV data
+- **AND** that provenance SHALL include source id, cycle time, model id,
+  forcing version id, storage source, and freshness or retention class
+
+#### Scenario: future archive errors remain distinct from disk errors
+
+- **WHEN** a future archive/history selector cannot resolve DB/archive data
+- **THEN** it SHALL use DB/archive-specific errors such as
+  `FORCING_VERSION_NOT_FOUND`, `FORCING_VERSION_NOT_FINALIZED`,
+  `FORCING_VERSION_FILTER_CONFLICT`, or `STATION_NOT_IN_FORCING_VERSION`
+- **AND** it SHALL NOT reuse `STATION_FORCING_FILE_NOT_FOUND` for DB/archive
+  selector failures

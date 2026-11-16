@@ -1,0 +1,49 @@
+# Tasks: scheduler-temp-root-self-create
+
+## 1. Preflight + creation
+
+- [x] 1.1 Admit a missing `temp_root` on the runtime-root preflight's
+  `allow_create` arm; keep `runtime_root` and every other root `must_exist`.
+  Evidence floor: `tests/test_production_scheduler.py::test_no_flag_invalid_env_roots_block_before_registry_adapter_or_submit`
+  still blocks workspace/object-store/runtime/lock/evidence roots with
+  `SCHEDULER_ROOT_<FIELD>_NOT_FOUND`.
+- [x] 1.2 Create the admitted `temp_root` (no-follow parent pin, final
+  component only, mode 0700) in both `run_once` runtime-root preflight sites
+  (db-free pre-lock, db-backed post-lock), before the `blocked` branch; record
+  `checks.temp_root.created`; a creation failure blocks with
+  `SCHEDULER_ROOT_TEMP_ROOT_<REASON>`.
+  Evidence floor: `test_no_flag_missing_temp_root_is_created_0700_and_the_pass_proceeds`,
+  `test_db_free_pass_creates_missing_temp_root_with_redacted_created_evidence`,
+  `test_temp_root_creation_race_outcomes_fail_closed_through_the_preflight_verdict`,
+  `test_temp_root_creation_acts_only_on_a_ready_creatable_missing_verdict` pass;
+  the first two are red on the pre-change source.
+- [x] 1.3 Refusals keep their codes and create nothing (parent missing,
+  outside approved roots, parent symlink out of approved roots, dangling
+  symlink, parent swapped to a symlink after config).
+  Evidence floor: `test_no_flag_refused_missing_temp_root_still_blocks_and_creates_nothing`,
+  `test_temp_root_whose_parent_became_a_symlink_after_config_is_refused_and_not_created` pass.
+- [x] 1.4 Bounded evidence keeps `checks.temp_root.created`.
+  Evidence floor: `test_bounded_evidence_keeps_the_temp_root_created_proof` passes.
+
+## 2. Docs + verification floor
+
+- [x] 2.1 `docs/runbooks/two-node-production-e2e-plan.md` states the temp_root
+  self-create rule and the unchanged fail-closed roots.
+- [x] 2.2 `openspec validate scheduler-temp-root-self-create --strict --no-interactive` PASS.
+- [x] 2.3 `uv run ruff check .` PASS; `uv run pytest -q tests/test_any_ratchet.py` PASS.
+- [x] 2.4 Selector-routed pytest files for the changed sources PASS locally.
+- [x] 2.5 node-22 live acceptance (deferred to the post-catch-up node-22 sync
+  window; node-22's 3.12 venv is never `uv sync`ed): delete the temp root, run
+  one pass, observe no `preflight_blocked` and `created=true` in evidence.
+  - Evidence (2026-11-16 live drill, owner-approved): at a pass boundary (timer stopped 05:04:44Z, service inactive
+    05:38:05Z) `NHMS_SCHEDULER_TEMP_ROOT=/scratch/frd_muziyao/nhms-prod/tmp` was moved aside (absent), one pass ran
+    and finished `success` (05:45:16Z); evidence `scheduler_2026111605_9eed2c80046d.json`: `status=planned`,
+    `root_preflight.status=ready`, `checks.temp_root` = `{allow_create: true, created: true, contained: true,
+    writable: true, symlink: false}`, `failed_count=0`; the directory was recreated (`drwx------`), the timer was
+    restored (`active`). Drill log `/scratch/frd_muziyao/drill-tmproot-20261116.log`.
+  - Status (2026-11-16): the fix is deployed, but the acceptance drill has not been run.
+    - node-22 is at `b2fc70547`, which contains `49905a363` (PR #3067; #3061 closed 2026-11-06).
+    - Pass `scheduler_2026110709_b9afada00930` shows `root_preflight.checks.temp_root.allow_create=true`.
+    - The last `scheduler_root_preflight_blocked` pass was on 2026-11-06. The 3 passes blocked on 2026-11-07 are `slurm_gateway_orchestration`, not root-blocked.
+    - 0 of 1570 November pass artifacts carry `temp_root.created`, so no pass has yet self-created the directory.
+    - Unblocks when an operator deletes `NHMS_SCHEDULER_TEMP_ROOT` on node-22 and lets one pass run, or a natural deletion is observed. The owner may otherwise waive.

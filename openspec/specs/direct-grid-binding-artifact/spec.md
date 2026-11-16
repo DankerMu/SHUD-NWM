@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change forcing-mapping-asset-build. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: Binding and manifest match the existing parser contract
 The mapping builder SHALL emit a direct-grid binding and manifest whose fields satisfy the existing contract parser in `workers/forcing_producer/direct_grid_contract.py` exactly, placed in the `resource_profile.direct_grid_forcing` nested section.
 
@@ -60,7 +62,8 @@ The mapping builder SHALL set station coordinates equal to the registered cell c
 #### Scenario: x/y are recomputable and z follows the approved policy
 - **WHEN** the builder sets station `x`, `y`, and `z`
 - **THEN** `x` and `y` are recomputable from `longitude`/`latitude` and the model CRS
-- **THEN** `z` follows the `z_policy` approved by the solver audit in change `cmfd-direct-grid-platform-readiness`.
+- **THEN** `z` follows the `z_policy` recorded in the `z_policy` verdict evidence file of change `direct-grid-build-enablement` (the authoritative narrow solver-audit verdict, whose value is one of `sentinel`, `model_dem_at_cell_center`, or `canonical_orography`), committed at `openspec/changes/direct-grid-build-enablement/evidence/z-policy-solver-audit-verdict.md` and living, after that change archives, at the same file under the archive relocation `openspec/changes/archive/<archive-date>-direct-grid-build-enablement/evidence/z-policy-solver-audit-verdict.md`
+- **THEN** the builder resolves that verdict through its pinned SHA-256 constant (fail closed on checksum or verdict-value mismatch, per the `z-policy-verdict` capability), so the pinned file — not any path-supplied substitute — is the sole `z_policy` authority, superseding the descoped `cmfd-direct-grid-platform-readiness` (Epic #886) solver audit that was intentionally removed and never produced a verdict.
 
 ### Requirement: Mapping stage does not emit runtime-producer artifacts
 The mapping builder SHALL NOT emit any artifact that belongs to the runtime forcing producer (§8.1).
@@ -71,4 +74,3 @@ The mapping builder SHALL NOT emit any artifact that belongs to the runtime forc
 - **THEN** no per-station weather CSVs are produced
 - **THEN** no `met.interp_weight`, `met.met_station`, or `met.forcing_version` database rows are written
 - **THEN** no cycle lineage is produced, because those belong to the runtime producer.
-

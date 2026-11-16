@@ -2,22 +2,40 @@
 
 ## Purpose
 TBD - created by archiving change m20-production-multibasin-continuous-automation. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: Database-backed candidate state
 
-The scheduler SHALL persist candidate and stage state in database-backed pipeline/hydro/met records and events, not only local filesystem state files.
+The scheduler SHALL persist candidate and stage state in database-backed or
+DB-free file-backed pipeline/hydro/met records and events, not only local
+filesystem state files. Candidate selection SHALL treat the strongest terminal
+cycle/stage/copyback evidence as authoritative for skip decisions when weaker
+legacy rows are stale.
 
 #### Scenario: terminal success skip
 
-WHEN a scan finds an existing pipeline job or hydro run for the same source/cycle/model/scenario in a terminal successful state
+WHEN a scan finds an existing pipeline job, forecast cycle, stage/copyback
+record, or hydro run for the same source/cycle/model/scenario in a terminal
+successful state
 THEN it skips the candidate and records the terminal-state reason.
 
 #### Scenario: hydro durable terminal skip
 
 WHEN a scan finds an existing hydro run in `succeeded`, `parsed`, or `published`
 THEN the candidate is treated as terminal successful
-AND native SHUD, parse, publish, Slurm submission, and orchestrator execution are not resubmitted by default
+AND native SHUD, parse, publish, Slurm submission, and orchestrator execution are
+not resubmitted by default
 AND the skip evidence records the durable hydro status that caused the skip.
+
+#### Scenario: completed cycle overrides stale hydro created row
+
+WHEN a scan finds the forecast cycle complete and terminal stage/copyback
+evidence for a candidate but an older hydro row still has status `created`
+THEN the candidate is treated as terminal successful
+AND the scheduler records the stale-row evidence
+AND it MUST NOT submit forcing, forecast, parse, state-save, or copyback work for
+that candidate by default.
 
 #### Scenario: active job skip
 
@@ -27,13 +45,25 @@ AND skips resubmission while the job remains active.
 
 ### Requirement: Resumable downstream failures
 
-The scheduler SHALL resume from durable successful stage outputs instead of re-running expensive upstream stages unnecessarily, subject to the permanence judgement of `job-retry-mechanism`: for a downstream failure whose genuinely recorded error code — one recorded by the failing stage itself: its own failed job row, or the candidate/run-level failure fields; stale codes left by recovered stages or by retry-history keys (`last_error`, `previous_error`) are not evidence for this judgement — classifies as permanent, defaults non-transient under the unknown-code clause, or has exhausted its retry budget, the downstream-resume channel refuses to resume, and absent another legitimate channel claim (e.g. a genuinely changed model package) the candidate falls to the permanent-failure guard.
+The scheduler SHALL resume from durable successful stage outputs instead of re-running expensive upstream stages unnecessarily, subject to the permanence judgement of `job-retry-mechanism`: for a downstream failure whose genuinely recorded error code — one recorded by the failing stage itself: its own failed job row, or the candidate/run-level failure fields; stale codes left by recovered stages or by retry-history keys (`last_error`, `previous_error`) are not evidence for this judgement — classifies as permanent, defaults non-transient under the unknown-code clause, or has exhausted its retry budget, the downstream-resume channel refuses to resume, and absent another legitimate channel claim (e.g. a genuinely changed model package) the candidate falls to the permanent-failure guard. Before resuming downstream
+stages, it SHALL verify that required upstream artifacts referenced by the
+candidate state still exist in the configured object-store/copyback roots.
 
 #### Scenario: parse failed after SHUD success
 
 WHEN SHUD output exists and the hydro run status indicates SHUD completed but parse or display publication failed with a recorded transient error code within budget, or with no recorded error code (the reader-synthesized placeholder domain, outside its refused classifiers), and the state does not explicitly mark the failure permanent (top-level `permanent: true`)
 THEN retry starts from parse or publication
 AND does not rerun native SHUD unless configured to force rerun.
+
+#### Scenario: missing forcing package blocks downstream forecast resume
+
+WHEN historical state says forcing or forecast succeeded but the
+`forcing_package_uri` tree required by a downstream forecast resume is missing
+from the configured object-store/copyback root
+THEN the candidate is blocked with stable artifact recovery evidence or
+restarted from the upstream forcing stage according to policy
+AND the scheduler MUST NOT submit the forecast stage directly
+AND the error MUST NOT be collapsed into generic `NODE_FAILURE`.
 
 #### Scenario: recorded non-transient downstream failure is guarded, not resumed
 
@@ -85,4 +115,3 @@ WHEN the Slurm cancellation contract is unavailable, returns an error, or does n
 THEN the scheduler records cancellation proof-gap evidence in `ops.pipeline_event.details` or scheduler evidence
 AND preserves local job state instead of fabricating cancellation success
 AND does not submit replacement work in the same scheduler pass.
-
