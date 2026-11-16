@@ -2,8 +2,8 @@
 
 ### Requirement: Zero-reference production symbols are removed
 
-A function, class, method, compatibility forwarder or script in production code that has no reference anywhere in
-the repository SHALL be deleted. "Anywhere" covers production code, tests, deployment units, CI, string/dynamic
+A function, class, method, compatibility forwarder or script in production code that an entropy audit identifies as
+having no reference anywhere in the repository SHALL be deleted once that finding is re-verified. "Anywhere" covers production code, tests, deployment units, CI, string/dynamic
 dispatch, monkeypatch targets and packaging entry points. A compatibility forwarder SHALL be deleted only after its
 inventory's removal condition is met; its name SHALL be removed from the inventory rows, and no stale inventory name
 SHALL remain for a deleted forwarder.

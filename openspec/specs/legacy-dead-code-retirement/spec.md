@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change governance-2-legacy-dead-code-retirement. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: Legacy and diagnostic paths have explicit status
 
 Every governed historical path SHALL be classified as `production`, `diagnostic`, `test-only`, or `archived` before deletion or relocation.
@@ -126,3 +128,18 @@ CI jobs SHALL NOT remain indefinitely disabled by conditions such as `&& false`.
 - **WHEN** governance scans automatic PR/push workflow files after #366
 - **THEN** no automatic CI job for M15 visual evidence is disabled behind `&& false`
 - **AND** any retained M15 visual evidence command is reachable only from an explicit manual workflow
+
+### Requirement: Zero-reference production symbols are removed
+
+A function, class, method, compatibility forwarder or script in production code that an entropy audit identifies as
+having no reference anywhere in the repository SHALL be deleted once that finding is re-verified. "Anywhere" covers production code, tests, deployment units, CI, string/dynamic
+dispatch, monkeypatch targets and packaging entry points. A compatibility forwarder SHALL be deleted only after its
+inventory's removal condition is met; its name SHALL be removed from the inventory rows, and no stale inventory name
+SHALL remain for a deleted forwarder.
+
+#### Scenario: an unreferenced helper is deleted without behaviour change
+
+- **WHEN** a helper is defined in `services/`, `packages/`, `workers/`, `apps/api/` or `scripts/` and a whole-repo
+  search finds no reference to it other than its definition
+- **THEN** the helper and anything that becomes unused through its removal are deleted, every touched module still
+  imports, and the existing tests pass unmodified

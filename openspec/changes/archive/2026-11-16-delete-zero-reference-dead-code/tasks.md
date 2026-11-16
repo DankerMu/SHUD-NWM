@@ -45,8 +45,11 @@
 - [x] 2.3 These pass, and must be run explicitly, because a `docs/**`-only change does not open the backend lane:
   - `uv run pytest -q "tests/test_entropy_audit_report_contract.py::test_compatibility_facade_guard_current_repo_passes_with_inventories"`;
   - `uv run pytest -q "tests/test_entropy_audit_baseline_writer_summary.py::test_entropy_baseline_writer_preserves_v1_trend_semantics_for_current_repo"`.
-- [ ] 2.4 The selector-chosen set for the diff (`scripts/select_ci_tests.py`) plus `tests/test_select_ci_tests.py` pass,
+- [x] 2.4 The selector-chosen set for the diff (`scripts/select_ci_tests.py`) plus `tests/test_select_ci_tests.py` pass,
   locally and in a node-27 temp worktree.
+  - Evidence: local 15669 passed / 88 skipped; node-27 temp worktree (origin/master...HEAD selection, 331 files +
+    selector tests) 15665 passed / 92 skipped / 0 failed (55 min). CI full sharded dispatch 43816876267: only
+    `test_shared_preflight_rejects_realpath_stub_symlink` fails, identical to master since `b2fc70547` (#3153).
 - [x] 2.5 An import smoke of every touched module succeeds (27 modules: the 26 from #3147 plus
   `services.orchestrator.scheduler`; add any further module the iteration touches):
   `uv run python -c "import importlib,sys; [importlib.import_module(m) for m in sys.argv[1:]]" packages.common.request_auth packages.common.slurm_env packages.common.node27_pgdata_workload_io packages.common.node27_pgdata_workload_plan packages.common.node27_pgdata_workload_query packages.common.node27_timeseries_compression_budget packages.common.model_registry_lifecycle_support packages.common.state_manager apps.api.openapi_patching_parameters scripts.node27_timeseries_compression scripts.node27_timeseries_compression_supervisor services.orchestrator.file_orchestration_journal services.orchestrator.pipeline_job_provenance services.orchestrator.reconcile services.orchestrator.scheduler_core services.orchestrator.scheduler_timing services.production_closure.met_validation services.production_closure.slurm_validation services.production_closure.two_node_e2e_evidence services.tile_publisher.publisher workers.canonical_converter.converter workers.forcing_producer.producer workers.model_registry.basins_calibration_overrides workers.model_registry.basins_geometry workers.model_registry.basins_geometry_shapes workers.shud_runtime.runtime services.orchestrator.scheduler`.
