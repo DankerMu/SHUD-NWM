@@ -48,7 +48,7 @@
   - The `allowlist_state` counts of the `findings[]` entries with `check_id == "placeholder-path-token"` are
     unchanged.
   - `--mode hard-gate` exits 0 with `hard_gate_status == "pass"` and `hard_gate_failing_count == 0`.
-- [ ] 2.3 The selector-chosen set for the diff passes, plus these suites:
+- [x] 2.3 The selector-chosen set for the diff passes, plus these suites:
   - `tests/test_select_ci_tests.py`;
   - `tests/test_entropy_audit*.py`;
   - `tests/test_openapi*.py`;
@@ -58,5 +58,9 @@
 
   Run them locally and in a node-27 temp worktree.
 - [x] 2.4 `git diff --stat -- openapi/ apps/frontend/` is empty.
-- [ ] 2.5 If 1.5 deletes the member, check node-27 display `/health` 200 and `/api/v1/layers` after the deploy.
-  Otherwise mark this not applicable, because no API code changes.
+- [x] 2.5 1.5 deleted the member, so API code changed. Verified live on node-27 without a production deploy: a
+  side display API runs from a temp worktree of the branch, on port 18149, with the production `display.env` (role
+  `display_readonly`) and a private MVT cache dir. `/health` returns 200 on both that instance and production :8080,
+  and the `/api/v1/layers` `data` is identical on both (all four layers, `met-stations` field for field). The side
+  instance, its cache and the worktree were removed afterwards. Deploying production :8080 is a separate decision,
+  because the node-27 checkout lags `origin/master` by many commits.

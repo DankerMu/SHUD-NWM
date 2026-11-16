@@ -33,4 +33,4 @@ Modules under the ten audited directory paths are additionally governed by the r
 #### Scenario: Existing MVT closure remains an exact compatibility anchor
 
 - **WHEN** the selector and guarded-module registry change for this batch
-- **THEN** the `services/tiles/mvt.py` exact-set pin and guarded closure delivered by #1597 remain green without removing an existing MVT target
+- **THEN** the `services/tiles/mvt.py` exact-set pin and guarded closure delivered by #1597 remain green without removing an existing direct or one-hop importer target; the station-flag flip partitions that #1597 also carried were removed by #3149, because they import no display module since the station tile route was retired

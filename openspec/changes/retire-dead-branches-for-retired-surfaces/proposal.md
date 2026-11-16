@@ -6,7 +6,7 @@ The round-3 entropy audit (2026-11-16) flagged code branches and defaults tied t
 retired:
 - the river-segments list route (#2866);
 - the station tile route (#2773 item 4);
-- `workers/sbatch_templates/` (#363);
+- the legacy `workers/` sbatch-template directory (#363);
 - the 14T `/data/GHDC` PGDATA target (#3059).
 
 Each one has to be proven unreachable before it is deleted, or kept with a recorded reason.
@@ -42,7 +42,7 @@ Each one has to be proven unreachable before it is deleted, or kept with a recor
      `source_version` for the met-stations layer is proven never to reach any response or SQL. If that cannot be
      proven, KEEP it with the reason recorded.
 3. **Legacy sbatch path: KEEP.**
-   - There is no fallback code: `template_dir` defaults to `infra/sbatch`, and the `workers/sbatch_templates` directory
+   - There is no fallback code: `template_dir` defaults to `infra/sbatch`, and the legacy template directory
      does not exist.
    - The docstring mention is a retirement note that the entropy audit allowlists on purpose.
    - `RETIRED_ACTIVE_TREE_PREFIXES` is a fail-closed guard.
