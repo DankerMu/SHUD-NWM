@@ -62,9 +62,6 @@
     "run_tree_copyback.py:117-136": 1,
     "scheduler_generation.py:1057": 1
   },
-  "packages/common/station_set_flip.py": {
-    "packages/common/model_registry.py:272": 1
-  },
   "scripts/cite_check.py": {
     "`:652": 1,
     "`:806": 1,

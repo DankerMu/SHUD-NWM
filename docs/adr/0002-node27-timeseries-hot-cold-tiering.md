@@ -594,7 +594,7 @@ Runbook — the single operator entrypoint for all sections below:
 
 | Sub-issue | Scope | Code | Receipt schema | Runbook |
 |---|---|---|---|---|
-| #846 | Storage-source foundation | `packages/common/runtime_storage_source.py` | — | §1 |
+| #846 | Storage-source foundation | `packages/common/storage.py` (#846 put the archive-root, overlap and manifest-binding helpers there; #1370 removed them, so the module now keeps only object-path validation and the retention-window parser. No `runtime_storage_source.py` ever existed; corrected by #3164) | — | §1 |
 | #849 | Product archive mover + inventory audit systemd + capacity guards | `scripts/node27_product_archive.py`, `scripts/node27_storage_inventory_audit.py` | [`schemas/archive_completeness_receipt.schema.json`](../../schemas/archive_completeness_receipt.schema.json) | Install / Operation / Rollback (top of runbook) |
 | #850 | DB-export salvage exporter + manual restore | `scripts/node27_db_export_salvage.py` | [`schemas/db_export_salvage_receipt.schema.json`](../../schemas/db_export_salvage_receipt.schema.json) | §3 (including §3.2 manual restore) |
 | #851 | Hypertable compression migration + runner | `db/migrations/000047_hypertable_compression_settings.sql`, `scripts/node27_timeseries_compression.py` | [`schemas/timeseries_compression_receipt.schema.json`](../../schemas/timeseries_compression_receipt.schema.json) | §4 (including §4.3 decompress procedure) |

@@ -1,24 +1,24 @@
 # Tasks — round3-found-followups (#3164)
 
 ## 1. z_policy tests (D1)
-- [ ] 1.1 Rewrite the two red tests in `tests/test_mapping_builder_z_policy_verdict.py` to accept the archive
+- [x] 1.1 Rewrite the two red tests in `tests/test_mapping_builder_z_policy_verdict.py` to accept the archive
   relocation. Production is unchanged.
 
 ## 2. Retire station_set_flip (D2)
-- [ ] 2.1 Delete `packages/common/station_set_flip.py`, `tests/test_direct_grid_display_cutover_flip_{atomic,mvt_set}.py`
+- [x] 2.1 Delete `packages/common/station_set_flip.py`, `tests/test_direct_grid_display_cutover_flip_{atomic,mvt_set}.py`
   and `tests/direct_grid_display_cutover_flip_helpers.py`.
-- [ ] 2.2 Remove the selector rules, tables, splat, re-exports and their `tests/test_select_ci_tests.py` pins.
-- [ ] 2.3 Remove the `line_reference_baseline.json` and `full_test_durations.json` keys.
-- [ ] 2.4 History suite: drop the import, the Claim 4 test, and the Claim 4 docstring text.
-- [ ] 2.5 Comment-only refresh in the `model_registry*` files about the unconsumed `station_flag_flip` slot.
-- [ ] 2.6 Docs: glossary :39 and inventory :330/:340.
-- [ ] 2.7 Re-target the two full-mode pins to display_coverage, change the guarded-sources count from 9 to 8, and fix
+- [x] 2.2 Remove the selector rules, tables, splat, re-exports and their `tests/test_select_ci_tests.py` pins.
+- [x] 2.3 Remove the `line_reference_baseline.json` and `full_test_durations.json` keys.
+- [x] 2.4 History suite: drop the import, the Claim 4 test, and the Claim 4 docstring text.
+- [x] 2.5 Comment-only refresh in the `model_registry*` files about the unconsumed `station_flag_flip` slot.
+- [x] 2.6 Docs: glossary :39 and inventory :330/:340.
+- [x] 2.7 Re-target the two full-mode pins to display_coverage, change the guarded-sources count from 9 to 8, and fix
   the stale rules comment at :2453-2456.
 
 ## 3. Stall reason (D4)
-- [ ] 3.1 Add `PassRecord.lock_reason` and the receipt field `lock_contended_reason`.
-- [ ] 3.3 Add the reason triage to the `stuck-detection.md` §stall-lock-contended-persistent runbook section.
-- [ ] 3.2 Tests in `tests/test_node22_scheduler_stall_health.py`:
+- [x] 3.1 Add `PassRecord.lock_reason` and the receipt field `lock_contended_reason`.
+- [x] 3.3 Add the reason triage to the `stuck-detection.md` §stall-lock-contended-persistent runbook section.
+- [x] 3.2 Tests in `tests/test_node22_scheduler_stall_health.py`:
   - the reason is carried for a config-refused streak;
   - a null reason is recorded as null;
   - a non-string reason is recorded as null and is not probe-failed;
@@ -26,18 +26,18 @@
   - the verdict, exit code and anchor are unchanged.
 
 ## 4. Lease fd (D5)
-- [ ] 4.1 Resolve the mode before opening the fd in `_guarded`, and add the no-leak regression test.
+- [x] 4.1 Resolve the mode before opening the fd in `_guarded`, and add the no-leak regression test.
 
 ## 5. Umask-independent test (D6)
-- [ ] 5.1 Change `tests/test_node22_env_backup_sweep.py::test_script_static_contract` to check the git index mode
+- [x] 5.1 Change `tests/test_node22_env_backup_sweep.py::test_script_static_contract` to check the git index mode
   and X_OK.
 
 ## 6. Docs (D7)
-- [ ] 6.1 `infra/env/README.md` compute.env note.
-- [ ] 6.2 Line references in `docs/spec/03_database_design.md`.
-- [ ] 6.3 The ADR 0002 :597 module path.
-- [ ] 6.4 ROLE_BOUNDARY gains precip and basemap.
-- [ ] 6.5 Unresolved spec names in the qhh checklist and the inventory.
+- [x] 6.1 `infra/env/README.md` compute.env note.
+- [x] 6.2 Line references in `docs/spec/03_database_design.md`.
+- [x] 6.3 The ADR 0002 :597 module path.
+- [x] 6.4 ROLE_BOUNDARY gains precip and basemap.
+- [x] 6.5 Unresolved spec names in the qhh checklist and the inventory.
 
 ## Evidence Floor
 - [ ] E1 `uv run ruff check .` clean; `uv run ruff format --check` on the touched .py files.

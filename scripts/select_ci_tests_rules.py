@@ -37,8 +37,6 @@ from scripts.select_ci_tests_tables import (
     DATA_ADAPTERS_DIRECTORY_TESTS,
     DIRECT_GRID_CONTRACT_CANONICAL_PATH,
     DIRECT_GRID_CONTRACT_IMPORTER_TESTS,
-    DIRECT_GRID_DISPLAY_CUTOVER_FLIP_HELPERS_PATH,
-    DIRECT_GRID_DISPLAY_CUTOVER_FLIP_TESTS,
     DIRECT_GRID_SURFACE_TESTS,
     ENTROPY_AUDIT_HELPERS_PATH,
     ENTROPY_AUDIT_OWNER_PATH,
@@ -472,15 +470,6 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         # so the routed set IS the derived closure.
         "tests/hydro_display_mvt_helpers.py",
         HYDRO_DISPLAY_MVT_SCALING_TESTS,
-    ),
-    PathTestRule(
-        # #2527: the station-flag flip harness both flip partitions share -- the
-        # `met.met_station` fake, the fake cursor / transaction, the
-        # `_FlipHarnessStore` that drives the real lifecycle path, the audit
-        # recorder and the model / mirror factories. Both partitions import it at
-        # module scope, so the routed set IS the derived closure.
-        DIRECT_GRID_DISPLAY_CUTOVER_FLIP_HELPERS_PATH,
-        DIRECT_GRID_DISPLAY_CUTOVER_FLIP_TESTS,
     ),
     PathTestRule(
         # #2074: the single home of the six mock stores, the retry gateway double
@@ -2450,10 +2439,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # (`test_mvt_national_identity_probe{,_cycles,_digest}_integration.py`),
             # each with the module-level `integration` mark, so all three stay
             # out under the same ruling.
-            # #3149: the two #2527 flip partitions are no longer carried here.
-            # Neither imports a display module, and the station MVT layer
-            # `_mvt_set` modelled went with the retired station tile route
-            # (#2773 item 4); they ride the station_set_flip.py rule instead.
+            # #3149 dropped the two #2527 station-flag flip partitions from
+            # this closure (neither imported a display module); #3164 deleted
+            # them together with the flip hook.
             "tests/test_direct_grid_display_cutover_history.py",
             "tests/test_direct_grid_display_cutover_model_resolution.py",
             "tests/test_hhe_mvt_binding.py",
@@ -5575,19 +5563,6 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             ),
         )
         for path in CONNECTION_ATTRIBUTION_STORE_PATHS
-    ),
-    PathTestRule(
-        # #2612: the station-flag flip hook. Its direct non-gated importer suites
-        # (the `_atomic` flip partition and the cutover history suite; the
-        # selector suite's GUARDED_MODULE_CLOSURES derives them, one-hop adds
-        # none) plus the `_mvt_set` partition, which reaches this module only
-        # through tests/direct_grid_display_cutover_flip_helpers.py -- an edge the
-        # guard cannot derive, so it is pinned by name there.
-        "packages/common/station_set_flip.py",
-        (
-            *DIRECT_GRID_DISPLAY_CUTOVER_FLIP_TESTS,
-            "tests/test_direct_grid_display_cutover_history.py",
-        ),
     ),
     PathTestRule(
         # A #1728 connection-attribution store (see CONNECTION_ATTRIBUTION_STORE_PATHS)

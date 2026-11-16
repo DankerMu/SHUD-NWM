@@ -137,8 +137,9 @@ rg --files apps/frontend/e2e | sort
   latest-product is called once; map popup tests mock `fetchHydroMetLatestProduct`.
 - E2E/mocked evidence: current `apps/frontend/e2e` specs do not contain an
   explicit `latest-product` string, but broad mocked `page.route('**/api/v1/**')`
-  handlers remain in `preview-deeplink.spec.ts`, `monitoring.spec.ts`,
-  `m15-visual-conformance.spec.ts`, and `m11-routes.spec.ts`. Historical
+  handlers remain in `preview-deeplink.spec.ts`, `monitoring.mocked.spec.ts`,
+  `m15-visual-conformance.spec.ts`, and `m11-routes.mocked.spec.ts` (the last
+  through `e2e/support/layerCatalog.mocked.ts`; spec names refreshed by #3164). Historical
   `docs/runbooks/qhh-mvp-smoke-evidence.md` records mocked `/api/v1/**`
   hydro-met evidence that proved latest-product bootstrap.
 - Docs/runbook references: current runbooks and plans include
@@ -177,9 +178,13 @@ rg --files apps/frontend/e2e | sort
 - Frontend test evidence: `apps/frontend/src/pages/hydroMet/__tests__/bootstrap.test.ts`
   asserts generated forecast-series calls; `apps/frontend/src/stores/__tests__/overviewDataSourceSelection.test.ts`
   contains many forecast-series path assertions.
-- E2E/mocked evidence: `apps/frontend/e2e/m11-routes.spec.ts:276` and
-  `apps/frontend/e2e/m15-visual-conformance.spec.ts:563` branch on URL
-  pathnames ending with `/forecast-series`.
+- E2E/mocked evidence: at the time of this record
+  `apps/frontend/e2e/m11-routes.spec.ts:276` and
+  `apps/frontend/e2e/m15-visual-conformance.spec.ts:563` branched on URL
+  pathnames ending with `/forecast-series`. Refreshed by #3164: `m11-routes.spec.ts`
+  is now `m11-routes.mocked.spec.ts` and neither file carries that branch any
+  more; the current branch is `apps/frontend/e2e/support/curveSheet.mocked.ts`
+  (used by the curve-sheet mocked specs).
 - Docs/runbook references: `docs/runbooks/qhh-backend-smoke.md`,
   `docs/runbooks/qhh-mvp-production-like-e2e-checklist.md`,
   `docs/runbooks/qhh-mvp-smoke-evidence.md`,
@@ -327,8 +332,8 @@ the #411 evidence snapshot and are not rewritten.
   No shim, no `410`, no deprecation header: the path answers `404`
   `{"detail": "Not found"}`, same treatment as #2866 above.
 - Why: the query listed stations by `met.met_station.active_flag = true`, but no
-  production code registers the flip hook (`packages/common/station_set_flip.py`),
-  so every Direct Grid station is `active_flag = false` (28,926 of 28,926 on
+  production code registered the station-flag flip hook (the module was
+  deleted in #3164), so every Direct Grid station is `active_flag = false` (28,926 of 28,926 on
   node-27, 2026-11-08) and the route returned `MVT_SOURCE_IDENTITY_NOT_FOUND`
   for every basin. The frontend never called it.
 - Unchanged: `GET /api/v1/met/stations` (station list), the `met-stations` entry
@@ -337,8 +342,9 @@ the #411 evidence snapshot and are not rewritten.
   it covers this endpoint only.
 - Replacement for clients: `GET /api/v1/met/stations`.
 - Rollback: revert PR #3071; no data or schema was touched.
-- Left, reported and not removed: `packages/common/station_set_flip.py` (only
-  tests and archived rehearsal evidence import it) and the index
-  `met_station_active_basin_station_idx` (migration 000033), whose only reader
-  was this route.
+- Left, reported and not removed: the station-flag flip hook module (only
+  tests and archived rehearsal evidence imported it; #3164 deleted it with its
+  tests and selector rules) and the index `met_station_active_basin_station_idx`
+  (migration 000033), whose only reader was this route. The index is still
+  kept, because dropping it needs a node-27 DB write.
 - Contract evidence: `tests/test_met_station_mvt_route_retired.py`.

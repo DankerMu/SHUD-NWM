@@ -38,14 +38,12 @@ Claim 3 — flow-product resolution is orthogonal to ``met.met_station.active_fl
     resolution that dispatches into forecast_store) MUST also not join
     ``met.met_station``.
 
-Claim 4 — flip is UPDATE-only, deletes/hides no historical row
-    ``packages/common/station_set_flip.py::build_station_flag_flip_hook``
-    issues ONLY two ``UPDATE met.met_station SET active_flag = ...``
-    statements and MUST NOT contain ``DELETE`` / ``TRUNCATE``, and MUST
-    NOT write to ``hydro.river_timeseries`` / ``hydro.hydro_run`` /
-    ``met.forcing_station_timeseries``. This is the byte-level lock that
-    proves "the flip deletes/hides no historical record" (spec scenario:
-    "flip does not delete or hide historical products").
+Claim 4 — retired (#3164)
+    This claim locked the station-flag flip hook as UPDATE-only. No
+    production code ever registered that hook, so #3164 deleted it, and
+    the claim went with it: a hook that does not exist cannot delete or
+    hide a historical row. The ``station_flag_flip`` pre-activation mount
+    point stays a reserved no-op slot until #3165 removes it.
 """
 
 from __future__ import annotations
@@ -68,7 +66,6 @@ from packages.common.object_store_forcing import (
     raise_station_not_found,
     read_station_forcing_csv,
 )
-from packages.common.station_set_flip import build_station_flag_flip_hook
 
 # --- pre-cutover / M0 legacy identity fixtures ----------------------------
 #
@@ -400,83 +397,4 @@ def test_hydro_display_flow_product_route_sql_does_not_join_met_station() -> Non
         assert re.search(r"active_flag", source, re.IGNORECASE) is None, (
             f"{resolver.__qualname__} must not reference active_flag — it "
             "resolves by flow-plane keys alone"
-        )
-
-
-# --- Claim 4: flip is UPDATE-only, deletes/hides no historical row --------
-
-
-def test_station_flag_flip_sut_is_update_only_no_delete_or_history_writes() -> None:
-    """The flip hook writes ONLY ``UPDATE met.met_station`` — no DELETE, no history writes.
-
-    Spec scenario "flip does not delete or hide historical products":
-    ``packages/common/station_set_flip.py`` MUST NOT contain any
-    ``DELETE`` / ``TRUNCATE`` / ``INSERT INTO``, and every
-    ``UPDATE <schema>.<table>`` write in the module MUST target only
-    ``met.met_station``. The hook has exactly TWO named module-level SQL
-    constants — ``_TURN_OFF_ALL_SQL`` (deterministic turn-off) and
-    ``_TURN_ON_TARGET_SQL`` (target-identity turn-on) — both of which
-    ``UPDATE met.met_station SET active_flag = ...``.
-
-    Asserting on the WHOLE SUT module (``inspect.getfile``) closes the
-    hole where a helper defined outside the closure could sneak in a
-    forbidden write.
-    """
-    module_source = Path(inspect.getfile(build_station_flag_flip_hook)).read_text(
-        encoding="utf-8"
-    )
-
-    # Positive anchor: the two module-level SQL constants exist. Anchor
-    # on the identifier NAMES (not on the ``UPDATE met.met_station SET
-    # active_flag = ...`` string). Rationale: the SUT module docstring
-    # cites the ``UPDATE met.met_station SET active_flag = ...`` shape
-    # verbatim as documentation, so a text-match anchor would remain
-    # green even if the SQL literals were moved out of the module
-    # constants. The identifier-presence anchor names the module surface
-    # directly and breaks if either constant is renamed or inlined.
-    # Uses ``\b`` word-boundary matching so a suffix-append rename (e.g.
-    # ``_TURN_OFF_ALL_SQL_LEGACY``) does NOT silently match the prefix.
-    assert re.search(r"\b_TURN_OFF_ALL_SQL\b", module_source) is not None, (
-        "expected _TURN_OFF_ALL_SQL module-level SQL constant in "
-        "station_set_flip.py (deterministic turn-off identifier moved?)"
-    )
-    assert re.search(r"\b_TURN_ON_TARGET_SQL\b", module_source) is not None, (
-        "expected _TURN_ON_TARGET_SQL module-level SQL constant in "
-        "station_set_flip.py (target-identity turn-on identifier moved?)"
-    )
-
-    # Byte-level forbidden-token lock: SQL keywords/tokens that would let
-    # the flip delete or hide historical rows. Case-insensitive to guard
-    # against silent lowercasing during a refactor.
-    forbidden_sql_tokens = (
-        r"\bDELETE\b",
-        r"\bTRUNCATE\b",
-        r"\bINSERT\s+INTO\b",
-    )
-    for token_pattern in forbidden_sql_tokens:
-        assert re.search(token_pattern, module_source, re.IGNORECASE) is None, (
-            f"forbidden SQL token matched in station_set_flip.py: {token_pattern!r} "
-            "— the flip must never delete/truncate/insert (UPDATE-only)"
-        )
-
-    # UPDATE whitelist: every ``UPDATE <schema>.<table>`` write in the
-    # module MUST target only ``met.met_station``. Rationale: a blacklist
-    # (``hydro.river_timeseries`` / ``hydro.hydro_run`` /
-    # ``met.forcing_station_timeseries``) is silent on ``UPDATE
-    # met.canonical_met_product``, ``UPDATE met.forcing_version``,
-    # ``UPDATE core.model_lifecycle_audit``, or any other history-plane
-    # table. The whitelist proves ONLY ``met.met_station`` is written.
-    update_targets = re.findall(
-        r"\bUPDATE\s+([a-z_]+\.[a-z_]+)", module_source, re.IGNORECASE
-    )
-    assert update_targets, (
-        "expected at least one 'UPDATE <schema>.<table>' write in "
-        "station_set_flip.py (SUT structure moved?)"
-    )
-    for target in update_targets:
-        assert target.lower() == "met.met_station", (
-            f"station_set_flip.py must not UPDATE {target} — only "
-            "'UPDATE met.met_station' is permitted (the flip writes only "
-            "the station active_flag; touching any other table would "
-            "delete/hide historical rows or write history-plane state)"
         )

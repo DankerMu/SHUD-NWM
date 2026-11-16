@@ -258,9 +258,11 @@ PreActivationHook = Callable[[Any, ModelActivationContext], None]
 
 # Ordered mount points reserved for later changes in this Epic.
 # Order is declaration order in this tuple: ``state_clone`` (Change 5,
-# fingerprint-gated state clone) runs before ``station_flag_flip``
-# (Change 8, `met.met_station.active_flag` atomic flip). Both mount here
-# WITHOUT re-opening the lifecycle transaction (D7).
+# fingerprint-gated state clone) runs before ``station_flag_flip``. Both
+# mount here WITHOUT re-opening the lifecycle transaction (D7).
+# ``station_flag_flip`` has had no consumer since #3164 deleted the Change 8
+# flip hook (no production code ever registered it); the slot stays a
+# reserved default no-op until #3165 removes it.
 PRE_ACTIVATION_HOOK_MOUNT_POINTS: tuple[str, ...] = ("state_clone", "station_flag_flip")
 
 

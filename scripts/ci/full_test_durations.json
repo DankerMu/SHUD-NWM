@@ -43,8 +43,6 @@
  "tests/test_copyback_guard_primitive.py": 0.628,
  "tests/test_data_adapter_resolution.py": 0.018,
  "tests/test_direct_grid_display_cutover_b4_leak.py": 0.016,
- "tests/test_direct_grid_display_cutover_flip_atomic.py": 0.014,
- "tests/test_direct_grid_display_cutover_flip_mvt_set.py": 0.006,
  "tests/test_direct_grid_display_cutover_history.py": 0.018,
  "tests/test_direct_grid_display_cutover_model_resolution.py": 0.031,
  "tests/test_direct_grid_e2e.py": 0.108,

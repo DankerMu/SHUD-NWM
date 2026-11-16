@@ -24220,6 +24220,37 @@ def test_legacy_only_guard_alias_makes_the_scheduler_pass_lock_contended(
     assert _db_free_lock_evidence(db_free, {"acquired": False, "reason": reason})["reason"] == reason
 
 
+def _open_fd_count() -> int:
+    fd_dir = "/proc/self/fd" if os.path.isdir("/proc/self/fd") else "/dev/fd"
+    return len(os.listdir(fd_dir))
+
+
+def test_a_refused_guard_mode_leaks_no_lock_parent_fd(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # #3164: `_guarded` used to open the lock parent directory before resolving the
+    # guard mode, so a retired-key-only config raised with that fd still open and
+    # every refused pass leaked one. The lock parent really exists here, so the old
+    # order really opens it.
+    from services.orchestrator.scheduler_lease import UnsafeSchedulerLockError
+
+    monkeypatch.delenv("NHMS_SCHEDULER_LEASE_GUARD_MODE", raising=False)
+    monkeypatch.setenv("NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE", "atomic")
+    lock_parent = tmp_path / "locks"
+    lock_parent.mkdir()
+    lease = FileSchedulerLease(lock_parent / "scheduler.lock", ttl_seconds=10)
+
+    before = _open_fd_count()
+    with pytest.raises(UnsafeSchedulerLockError) as excinfo:
+        with lease._guarded():
+            raise AssertionError("a refused guard mode must fail before the guarded body runs")
+    after = _open_fd_count()
+
+    assert excinfo.value.reason == "retired_lock_guard_mode_key:NHMS_SCHEDULER_LEASE_GUARD_MODE"
+    assert after == before
+
+
 def test_distinct_lease_and_journal_guard_envs_have_independent_semantics(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

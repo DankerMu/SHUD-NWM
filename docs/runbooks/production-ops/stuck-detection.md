@@ -297,9 +297,27 @@ state-index 自动剪枝（`nhms-scheduler-state-index-prune.service`，每日 0
 连续才是形状：证据根现存三份人工清锁凭据
 （`stale-lock-clear-issue882-20260706T072555Z.json` 等），说明这事发生过至少三次。
 这档其它信号都覆盖不到 —— 产物照常新鲜、没有阻塞候选、tracker 也不长。
-处置：按 [`../node22-control-plane-manual-recovery.md`](../node22-control-plane-manual-recovery.md)
-的人工处置流程核对锁主，再决定是否清锁，并照既有形状把凭据落成
-`stale-lock-clear-<issue>-<ts>.json`；**探针自己绝不清锁**。
+处置：先读 receipt 的 `signals.lock_contended_reason`（#3164）。租约守卫因配置拒绝
+时写的也是同一个 `lock_contended` 状态，只有这个字段能把它和普通争用分开；它只取
+**最新一趟**的 `lock.reason`，最新一趟不是 `lock_contended` 时为 null，不影响判定、
+退出码与锚点：
+
+- `retired_lock_guard_mode_key:<KEY>` —— 调度器 env 里只剩已退役的旧键
+  （`NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE`，#3146），守卫 fail-closed。在调度器 env
+  里设上报文点名的 `<KEY>`（当前即 `NHMS_SCHEDULER_LEASE_GUARD_MODE`），在 pass 边界
+  生效；**不要清锁**，锁并没有被占。
+- `unsafe_lock_guard_mode` —— `NHMS_SCHEDULER_LEASE_GUARD_MODE` 的值不认识。改成
+  `atomic` 或 `flock`，同样在 pass 边界生效；也不要清锁。
+- 其它非 null 值（如 `unsafe_lock_symlink`、`unsafe_lock_parent_directory`、
+  `unsafe_lock_not_regular_file`、`unsafe_lock_too_large`、`unsafe_lock_not_scheduler_owned`）
+  —— 租约守卫因锁路径本身不安全而拒绝，也不是普通争用。按
+  [`../node22-control-plane-manual-recovery.md`](../node22-control-plane-manual-recovery.md)
+  检查锁文件与其父目录的实际形状，确认后再处置；不要盲目清锁。
+- null —— 普通争用，按 [`../node22-control-plane-manual-recovery.md`](../node22-control-plane-manual-recovery.md)
+  的人工处置流程核对锁主，再决定是否清锁，并照既有形状把凭据落成
+  `stale-lock-clear-<issue>-<ts>.json`。
+
+**探针自己绝不清锁**。
 
 ##### stall-scheduler-root-blocked
 

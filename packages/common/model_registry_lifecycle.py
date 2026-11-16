@@ -330,14 +330,16 @@ class _ModelLifecycleMixin:
                 # the audit-row insert (fail-closed, D7). Hooks fire only
                 # for the three activation-class operations that produce
                 # a real swap; ``deactivate``/``supersede``/``deprecate``
-                # skip hooks because no clone/flip target exists.
+                # skip hooks because no clone target exists. (The
+                # ``station_flag_flip`` slot has no consumer since #3164;
+                # its removal is tracked by #3165.)
                 #
                 # Additional gate: skip when the target is already
                 # current — that path returns ``already_current`` from
                 # ``_apply_model_lifecycle_transition`` with no state
                 # mutation (mirrors the check at
                 # ``_apply_model_lifecycle_transition:2266-2268``), so
-                # there is nothing for a clone/flip hook to act on.
+                # there is nothing for a hook to act on.
                 # The ``rollback_version`` already-current path is the
                 # idempotent-rollback-retry short-circuit above, which
                 # returned before reaching this point.

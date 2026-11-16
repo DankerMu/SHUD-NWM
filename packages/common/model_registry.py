@@ -185,8 +185,9 @@ class PsycopgModelRegistryStore(
     def __post_init__(self) -> None:
         # Seed the ordered pre-activation hook chain (§2.1). Each reserved
         # mount point starts as a no-op so existing lifecycle behavior is
-        # preserved byte-for-byte until Change 5 (state clone) or Change 8
-        # (station flag flip) registers a real hook. Bypasses the frozen
+        # preserved byte-for-byte until a real hook is registered (Change 5
+        # state clone). The ``station_flag_flip`` slot has no consumer since
+        # #3164 deleted its hook; #3165 tracks its removal. Bypasses the frozen
         # constraint via ``object.__setattr__`` because hook membership is
         # instance-scoped runtime state, not part of dataclass identity.
         object.__setattr__(

@@ -30,6 +30,7 @@ from workers.mapping_builder.binding import (
     ZPolicyCellMissingError,
 )
 from workers.mapping_builder.z_policy_verdict import (
+    ARCHIVE_VERDICT_GLOB,
     DEFAULT_VERDICT_PATH,
     EXPECTED_VERDICT_FILE_SHA256,
     EXPECTED_VERDICT_VALUE,
@@ -108,8 +109,33 @@ class _IdentityProjection:
 # --- verdict resolution ----------------------------------------------------
 
 
+def _is_committed_verdict_location(path: pathlib.Path) -> bool:
+    """True iff ``path`` is the active-change file or its archive relocation.
+
+    The resolver anchors on the discovered repo root, so a legitimate
+    resolution is absolute and is either ``_REPO_ROOT / DEFAULT_VERDICT_PATH``
+    (change still active) or a path under ``_REPO_ROOT`` whose relative form
+    matches ``ARCHIVE_VERDICT_GLOB`` part for part (change archived). Any
+    other path -- a cwd-relative one, a stray copy elsewhere in the tree -- is
+    not a committed verdict location.
+    """
+    if path == _REPO_ROOT / DEFAULT_VERDICT_PATH:
+        return True
+    try:
+        relative = pathlib.PurePosixPath(path.relative_to(_REPO_ROOT).as_posix())
+    except ValueError:
+        return False
+    pattern = pathlib.PurePosixPath(ARCHIVE_VERDICT_GLOB)
+    return len(relative.parts) == len(pattern.parts) and relative.match(ARCHIVE_VERDICT_GLOB)
+
+
 def test_resolve_verdict_pinned_default_path_matches_checksum(monkeypatch):
-    """Happy path: default active-change file matches the pinned SHA-256 + value."""
+    """Happy path: the committed evidence file matches the pinned SHA-256 + value.
+
+    The file lives at ``DEFAULT_VERDICT_PATH`` while the change is active and
+    under ``ARCHIVE_VERDICT_GLOB`` once OpenSpec archives it; the resolver
+    accepts both, and so does this test. The checksum stays the authority.
+    """
     monkeypatch.chdir(_REPO_ROOT)
 
     resolution = resolve_verdict()
@@ -118,10 +144,25 @@ def test_resolve_verdict_pinned_default_path_matches_checksum(monkeypatch):
     assert resolution.sampler_rule_id == SAMPLER_RULE_ID
     assert resolution.override_used is False
     assert resolution.override_path is None
-    # Resolver anchors on the discovered repo root, not on cwd, so the
-    # resolved path is absolute (repo root joined with the relative
-    # DEFAULT_VERDICT_PATH constant).
-    assert resolution.resolved_path == _REPO_ROOT / DEFAULT_VERDICT_PATH
+    assert resolution.resolved_path.is_absolute()
+    assert _is_committed_verdict_location(resolution.resolved_path), resolution.resolved_path
+
+
+def test_committed_verdict_location_rejects_other_paths(tmp_path):
+    """The location predicate itself refuses any non-committed path."""
+    archived = (
+        _REPO_ROOT
+        / "openspec/changes/archive/2026-01-01-direct-grid-build-enablement/evidence"
+        / "z-policy-solver-audit-verdict.md"
+    )
+    assert _is_committed_verdict_location(_REPO_ROOT / DEFAULT_VERDICT_PATH)
+    assert _is_committed_verdict_location(archived)
+    assert not _is_committed_verdict_location(DEFAULT_VERDICT_PATH)
+    assert not _is_committed_verdict_location(tmp_path / "z-policy-solver-audit-verdict.md")
+    assert not _is_committed_verdict_location(
+        _REPO_ROOT / "openspec/changes/archive/x-other-change/evidence/z-policy-solver-audit-verdict.md"
+    )
+    assert not _is_committed_verdict_location(_REPO_ROOT / "vendor" / ARCHIVE_VERDICT_GLOB.replace("*", "2026-01-01"))
 
 
 def test_resolve_verdict_works_from_arbitrary_cwd(tmp_path, monkeypatch):
@@ -213,7 +254,7 @@ def test_verdict_resolution_record_includes_override_flag_and_path(tmp_path, mon
     ``override_path`` reflect the caller's choice.
     """
     monkeypatch.chdir(_REPO_ROOT)
-    committed_bytes = DEFAULT_VERDICT_PATH.read_bytes()
+    committed_bytes = resolve_verdict().resolved_path.read_bytes()
     override_target = tmp_path / "custom-verdict.md"
     override_target.write_bytes(committed_bytes)
 

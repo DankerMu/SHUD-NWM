@@ -685,6 +685,134 @@ def test_v9_a_run_of_lock_contended_passes_is_its_own_verdict(
     assert _verdict(receipts) == "lock_contended_persistent"
 
 
+# #3164: `signals.lock_contended_reason`. The scheduler lease refuses on
+# configuration with the SAME `lock_contended` status ordinary contention
+# writes (`scheduler_lease.py` acquire -> `scheduler_runtime.py`), so the
+# reason the lease wrote is the only thing that tells the two apart. The lock
+# block below is the DB-free safe-code shape the runtime writes.
+RETIRED_KEY_LOCK_REASON = "retired_lock_guard_mode_key:NHMS_SCHEDULER_LEASE_GUARD_MODE"
+LOCK_CONTENDED_ANCHOR = "#stall-lock-contended-persistent"
+
+
+def _lock_block(reason: object = None, *, with_reason: bool = True) -> dict[str, object]:
+    lock: dict[str, object] = {
+        "acquired": False,
+        "contention": True,
+        "lock_path": "[local-path]",
+        "lock_type": "file",
+        "existing_lock": {"raw": None},
+    }
+    if with_reason:
+        lock["reason"] = reason
+    return lock
+
+
+def _lock_contended_run(root: Path, lock: object, *, count: int = 2) -> None:
+    for index in range(count):
+        minutes = 5 + index * 10
+        payload = _pass_payload(started_at=NOW - timedelta(minutes=minutes), status="lock_contended", counts=False)
+        payload["lock"] = lock
+        _write_pass(root, _pass_name(minutes, f"{index:012x}"), payload)
+
+
+def _run_in(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, lock: object) -> tuple[int, dict]:
+    base = tmp_path / name
+    base.mkdir()
+    root = _evidence_root(base)
+    _lock_contended_run(root, lock)
+    status, receipts, _log = _run(base, monkeypatch, evidence_root=root)
+    return status, _receipt(receipts)
+
+
+def test_v9b_a_config_refused_lease_names_its_reason_beside_the_streak(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    status, receipt = _run_in(tmp_path, monkeypatch, "refused", _lock_block(RETIRED_KEY_LOCK_REASON))
+
+    assert status == 1
+    assert receipt["verdict"] == "lock_contended_persistent"
+    assert receipt["exit_code"] == 1
+    assert receipt["runbook"].endswith(LOCK_CONTENDED_ANCHOR)
+    assert receipt["signals"]["lock_contended_streak"] == 2
+    assert receipt["signals"]["lock_contended_reason"] == (
+        "retired_lock_guard_mode_key:NHMS_SCHEDULER_LEASE_GUARD_MODE"
+    )
+
+
+def test_v9c_ordinary_contention_records_a_null_reason_and_the_same_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    refused_status, refused = _run_in(tmp_path, monkeypatch, "refused", _lock_block(RETIRED_KEY_LOCK_REASON))
+    status, receipt = _run_in(tmp_path, monkeypatch, "contended", _lock_block(with_reason=False))
+
+    assert status == refused_status == 1
+    assert receipt["signals"]["lock_contended_reason"] is None
+    # The reason is informational only: verdict, exit code, anchor, streak and
+    # every other signal are exactly what the config-refused run produced.
+    for key in ("verdict", "exit_code", "runbook", "passes"):
+        assert receipt[key] == refused[key], key
+    other = {key: value for key, value in receipt["signals"].items() if key != "lock_contended_reason"}
+    refused_other = {key: value for key, value in refused["signals"].items() if key != "lock_contended_reason"}
+    assert other == refused_other
+
+
+@pytest.mark.parametrize(
+    "lock",
+    [
+        _lock_block(None),
+        _lock_block(42),
+        _lock_block(["unsafe_lock_guard_mode"]),
+        _lock_block({"code": "unsafe_lock_guard_mode"}),
+        "unsafe_lock_guard_mode",
+        None,
+    ],
+    ids=["null-reason", "int-reason", "list-reason", "object-reason", "lock-is-a-string", "lock-is-null"],
+)
+def test_v9d_a_non_string_reason_is_null_and_never_probe_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock: object
+) -> None:
+    status, receipt = _run_in(tmp_path, monkeypatch, "odd", lock)
+
+    assert status == 1
+    assert receipt["verdict"] == "lock_contended_persistent"
+    assert receipt["runbook"].endswith(LOCK_CONTENDED_ANCHOR)
+    assert receipt["evidence"]["unreadable"] == []
+    assert receipt["signals"]["lock_contended_reason"] is None
+
+
+def test_v9e_the_reason_is_null_when_the_newest_pass_is_not_lock_contended(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _evidence_root(tmp_path)
+    # Older config-refused passes, then a newest pass that submitted work.
+    for index, minutes in enumerate((15, 25)):
+        payload = _pass_payload(started_at=NOW - timedelta(minutes=minutes), status="lock_contended", counts=False)
+        payload["lock"] = _lock_block(RETIRED_KEY_LOCK_REASON)
+        _write_pass(root, _pass_name(minutes, f"{index:012x}"), payload)
+    _write_pass(
+        root,
+        _pass_name(5, "0000000000ff"),
+        _pass_payload(started_at=NOW - timedelta(minutes=5), status="submitted", submitted=2),
+    )
+
+    status, receipts, _log = _run(tmp_path, monkeypatch, evidence_root=root)
+    receipt = _receipt(receipts)
+
+    assert status == 0
+    assert receipt["verdict"] == "ok"
+    assert receipt["signals"]["lock_contended_streak"] == 0
+    assert "lock_contended_reason" in receipt["signals"]
+    assert receipt["signals"]["lock_contended_reason"] is None
+
+
+def test_v9f_the_reason_is_clipped_like_every_other_evidence_string(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _status, receipt = _run_in(tmp_path, monkeypatch, "long", _lock_block("r" * 300))
+
+    assert receipt["signals"]["lock_contended_reason"] == "r" * 256
+
+
 def test_v10_sustained_blocked_work_is_submission_stalled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
