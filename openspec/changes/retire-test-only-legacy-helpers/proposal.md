@@ -22,8 +22,9 @@ Each row in #3148 gets one of two verdicts, and the evidence is recorded in the 
   compatibility surface, named by a requirement in `openspec/specs/**`, used by a shared test harness or fake to
   drive a live production protocol, or is a deliberate public or safety API or an operator tool.
 
-Some modules stay imported by production even after their helpers go. For those (`persistence.py`, `retry.py`,
-`reservation.py`) only the unused functions are deleted. Whole modules stay unless they become empty.
+Some modules stay imported by production even after their helpers go. For those (`persistence.py`,
+`reservation.py`) only the unused functions are deleted. `retry.py` ends up unchanged, because its only candidate,
+`expire_stale_retries`, is kept (see tasks.md, Deviations). Whole modules stay unless they become empty.
 
 No production call path changes.
 

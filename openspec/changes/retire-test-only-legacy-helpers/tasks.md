@@ -34,7 +34,7 @@
 ## 2. Tests / verification (each expected to pass)
 
 - [x] 2.1 `uv run ruff check .` is clean.
-- [ ] 2.2 Affected suites. The file set is the union of:
+- [x] 2.2 Affected suites. The file set is the union of:
   - `rg -l '\b<sym>\b' tests` for every symbol touched;
   - every importer of `tests/gateway_reconcile_helpers.py`;
   - `tests/test_gateway_reconcile_idempotency_barrier.py` and the reservation lifecycle tests.
@@ -43,7 +43,7 @@
 - [x] 2.3 The compatibility and facade guards pass:
   - `uv run pytest -q "tests/test_entropy_audit_report_contract.py::test_compatibility_facade_guard_current_repo_passes_with_inventories"`;
   - every test that reads `chain_compat_static` (`rg -l chain_compat_static tests`).
-- [ ] 2.4 The selector-chosen set for the diff, plus `tests/test_select_ci_tests.py`, passes locally and in a node-27
+- [x] 2.4 The selector-chosen set for the diff, plus `tests/test_select_ci_tests.py`, passes locally and in a node-27
   temp worktree (backend oracle; real DB).
 - [x] 2.5 An import smoke of every touched module, with `services.orchestrator.scheduler` imported first, then
   `apps.api.main` and `scripts.node22_manual_retry_failed_runs`.
@@ -64,7 +64,7 @@
   Both symbols and their tests stay unchanged in this change.
 - Review round 1 (PR #3156): `RetryService.expire_stale_retries` flips from RETIRE to KEEP. It is the only
   implementation of retry-execution-contract "Stale pending retry is detected": the spec describes the behaviour
-  without naming the method. It is restored with its two tests. Its missing production wiring is tracked separately.
+  without naming the method. It is restored with its two tests. Its missing production wiring is tracked in #3157.
 - `timeseries-narrow-store`: the forecast-store segment-query count in the living Requirement changes from eight to
   seven (MODIFIED delta), because `_latest_issue_time` is retired.
 - Mechanical deviations, with details in the PR #3156 evidence table:
