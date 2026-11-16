@@ -20,7 +20,8 @@
 
 ## 2. Direct-Grid Producer Path
 
-- [ ] 2.1 Add direct-grid mode resolution to `workers/forcing_producer/producer.py` while keeping existing IDW behavior unchanged for legacy assets.
+- [x] 2.1 Add direct-grid mode resolution to `workers/forcing_producer/producer.py` while keeping existing IDW behavior unchanged for legacy assets.
+  - Evidence (2026-11-16 hygiene): delivered by #541 (CLOSED 2026-06-18, task 1.2): `workers/forcing_producer/producer.py:910-937` `_resolve_forcing_mapping_contract` returns `None` (IDW path) for absent/`idw`, the contract for `direct_grid`, and raises on unsupported modes; pinned by `tests/test_forcing_producer.py:4470` / `:4570` (`test_direct_grid_contract_*_fails_closed`). Live: all 132 candidates of node-22 pass `scheduler_2026111516_d110193be735` are direct-grid `dg_*` variants. The IDW path remains covered by the absent/explicit-`idw` producer tests.
 - [x] 2.2 (#543) Check and update persistence compatibility for direct-grid mappings, including `met.interp_weight.method='direct_grid'`, `weight=1.0`, replacement semantics, indexes/constraints, and integration tests.
   - Required evidence: migration/DDL tests prove `met.interp_weight` can represent `method='direct_grid'`, `weight=1.0`, `grid_cell_id`, and `grid_signature` without narrowing existing IDW rows or downstream membership joins.
   - Required evidence: store tests prove `load_interp_weights` round-trips direct-grid rows with `method`, `weight`, `grid_cell_id`, and `grid_signature` intact.
@@ -53,11 +54,13 @@
   - Required evidence: generated direct-grid rows/components stop at a stable #546 package/lineage boundary; #545 does not write SHUD packages, ready forcing versions, station timeseries, lineage/idempotency freshness, or runtime staging.
   - Required evidence: existing absent/explicit `idw` row generation and package output tests still pass unchanged.
   - Non-goal for #545: no SHUD package writes for direct-grid success, no direct-grid forcing lineage/idempotency freshness, no runtime staging validation, and no deeper NetCDF/xarray lazy indexed-read optimization beyond using the existing required-cell retention hook.
-- [ ] 2.5 Use direct-grid required `grid_cell_id`s to limit retained canonical values in the existing `_read_canonical_field` path; defer deeper NetCDF/xarray lazy indexed-read optimization to a separate performance task if profiling shows it is needed.
+- [x] 2.5 Use direct-grid required `grid_cell_id`s to limit retained canonical values in the existing `_read_canonical_field` path; defer deeper NetCDF/xarray lazy indexed-read optimization to a separate performance task if profiling shows it is needed.
+  - Evidence (2026-11-16 hygiene): delivered by #545 (CLOSED 2026-06-18, task 2.4): `workers/forcing_producer/producer.py:1570-1625` `_read_canonical_field(required_grid_cell_ids=...)` retains only required cells and fails closed on missing ones; caller `:1769`/`:1787` passes `_required_grid_cell_ids_by_source_grid(weights)` (`:3723`); pinned by `tests/test_forcing_producer.py:3280` `test_producer_direct_grid_reads_only_required_bound_grid_cells`. Deeper lazy indexed read remains explicitly deferred per this task's own wording.
 
 ## 3. Persistence, Lineage, and Compatibility
 
-- [ ] 3.1 Extend repository/store interfaces to load direct-grid mapping metadata from authoritative model asset manifests, allowing database mirrors only as derived cache.
+- [x] 3.1 Extend repository/store interfaces to load direct-grid mapping metadata from authoritative model asset manifests, allowing database mirrors only as derived cache.
+  - Evidence (2026-11-16 hygiene): delivered by #540 (CLOSED 2026-06-18, task 1.1) + #544 mirror-as-cache (task 2.3): single parser `packages/common/contracts/direct_grid.py:104` `load_forcing_mapping_contract_from_manifest` (docstring `:113`: does not consult DB mirror tables); both stores route through it — `workers/forcing_producer/store.py:456-491` (registered model-asset profile) and `workers/forcing_producer/file_store.py:216`; mirror rows stay derived cache (`tests/test_direct_grid_variant_registration.py:1172` / `:1225` mirror-collision fail-closed).
 - [x] 3.2 (#546) Write SHUD `.tsd.forc` and per-station CSV packages for direct-grid rows, keeping SHUD CSV columns to `Precip`, `Temp`, `RH`, `Wind`, and `RN` while persisting pressure only outside the SHUD CSV contract.
   - Required evidence: producer tests prove successful direct-grid production writes the standard SHUD package, package manifest, debug CSV, and per-station `shud/*.csv` files using contract `shud_forcing_index`/coordinates/filenames.
   - Required evidence: tests prove per-station SHUD CSV files contain `Precip`, `Temp`, `RH`, `Wind`, and `RN` only, while `Press` remains in `met.forcing_station_timeseries` and lineage/metadata when generated.

@@ -1051,7 +1051,7 @@ Order is load-bearing:
   Test rows:
   - Input: resource-governance audit run (systemctl mocked).
     Expected: receipt includes compression service/timer states.
-- [ ] 4.5 node-27 live: apply the migration and run the initial
+- [x] 4.5 node-27 live: apply the migration and run the initial
   terminal-chunk compression.
   Evidence floor: committed receipt with per-table before/after totals
   (acceptance: combined on-disk size of the two hypertables strictly
@@ -1215,6 +1215,15 @@ Order is load-bearing:
   fsync failure, reader/publisher concurrency and a two-process same-byte inode
   swap; only the persisted identity record, never in-memory state, may authorize
   later reconciliation.
+  - Superseded (2026-11-16 hygiene): the v3 controlled replay this task waited on can no longer be run.
+    - It was bound to the pre-2026-11-05 cluster's database identity and mutation SHA. That cluster was discarded by the fresh initdb (ADR 0002 "Revision 2026-11-05").
+    - ADR 0002 Amendment 2026-09-16 records the installed replay unit as `absent-approved`, with source and templates retained, and says the handoff claims no "v3 replay PASS". #1069 was closed COMPLETED on 2026-07-17. No repo document explicitly withdraws the v3-terminal requirement, so the owner should confirm this verdict.
+    - The capability itself runs in production. On 2026-11-16 node-27 (read-only) showed:
+      - migration ledger at `000066`;
+      - `compression_enabled=t` on `hydro.river_timeseries` and `met.forcing_station_timeseries`;
+      - 29 of 40 chunks compressed on each;
+      - `nhms-node27-timeseries-compression.timer` active, last tick 2026-11-16 12:25 CST.
+    - The historical v1/v2 receipts above remain history and are not relabelled PASS.
 
 ## 5. Archive rebuild drill (`archive-rebuild-drill`)
 

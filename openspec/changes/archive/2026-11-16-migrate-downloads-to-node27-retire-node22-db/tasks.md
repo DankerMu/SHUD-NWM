@@ -47,9 +47,15 @@
 
 ## 3. Production Download Ownership
 
-- [ ] 3.1 Promote node-27 download into cron/autopipeline source-cycle ownership.
+- [x] 3.1 Promote node-27 download into cron/autopipeline source-cycle ownership.
   Evidence floor: bounded production pass selects allowed UTC `00,12` cycles,
   handles already-complete cycles idempotently, and records per-source status.
+  - Evidence (2026-11-16 hygiene): node-27 user unit `nhms-node27-download.timer` runs every 30 min (last run 2026-11-16 12:35 CST) → `nhms-node27-download.service` → `scripts/node27_download_once.sh`. `/home/nwm/node27-download-logs/last-summary.json` records:
+    - `cycle_time_selection=automatic`, `cycle_hours=[0,12]`, cycle 2026-11-15T12:00Z;
+    - per-source details: GFS 397 files and IFS 424 files, both `already_done` with 0 bytes written (idempotent);
+    - `processed=2`, `failed=0`, `blockers=[]`.
+
+    node-27 `met.forecast_cycle` holds `raw_complete` rows with `s3://nhms/raw/<src>/<cycle>/manifest.json` for gfs and IFS, 2026111400 through 2026111512.
 
 ## 4. Node-22 NFS Raw Manifest Scheduler Bridge
 
@@ -98,7 +104,7 @@
   records node-22 runtime env activation, Slurm compute-node read proof
   (`/ghdc` fails, `/scratch` succeeds), GFS/IFS raw staging smoke checks, and
   the restarted compute API / scheduler pass.
-- [ ] 4.6 Record live GFS and IFS end-to-end receipts through the NFS handoff.
+- [x] 4.6 Record live GFS and IFS end-to-end receipts through the NFS handoff.
   Evidence floor: public latest-product advances for both sources from
   node-27-downloaded raw cycles after node-22 scheduler observes the NFS raw
   manifest, stages raw to compute-visible object-store, and starts downstream
@@ -106,6 +112,15 @@
   Latest status: the 2026-06-27 node-22 scheduler pass exited successfully but
   produced `candidate_count=0`, so it did not yet satisfy the end-to-end
   handoff evidence floor.
+  - Evidence (2026-11-16 hygiene): live chain for cycle 2026111500, both sources:
+    - node-27 download wrote `raw_complete` + NFS manifests (see 3.1).
+    - node-22 `infra/env/compute.scheduler-dbfree.env` sets `NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST=true` and `NHMS_SCHEDULER_STAGE_NFS_RAW_TO_OBJECT_STORE=true` (manifest root `/ghdc/data/nwm/object-store`, stage root `/scratch/frd_muziyao/nhms-prod/object-store`).
+    - The staged `raw/gfs/2026111500/manifest.json` was written 2026-11-15T16:12:01Z and `raw/IFS/2026111500/manifest.json` at 16:11:57Z (stage directories hold 58 / 54 files). Both writes fall inside pass `scheduler_2026111516_d110193be735` (started 16:05:11Z).
+    - That pass ran convert→forcing→forecast→state_save_qc for 66+66 models: `counts.submitted_count=132`, `adapter_download_called=false`, 0 `model_run_failures`. Its top-level status is `resource_limit_blocked`, even though `counts.submitted_count=132`. `download_source_cycle` appears in 0 of 1570 November pass artifacts.
+    - node-27 `hydro.hydro_run` holds 66 `published` per source for 2026-11-15T00Z.
+    - Public `https://test.nwm.ac.cn/api/v1/layers/discharge/cycles?source={gfs,ifs}` lists 2026-11-15T00:00Z as newest for both sources.
+
+    Caveat: the bounded pass artifact for this cycle no longer carries the `node27_nfs_raw_manifest` marker (last seen 2026-11-10, `scheduler_2026111020_6de07c19f6b6.json`). The NFS gate is proven here by required-gate env plus staged manifests, not by that marker.
 - [x] 4.7 Retire the active node-22 production download stage and Slurm job
   mapping.
   Evidence floor: active forecast stages and gateway defaults no longer expose
@@ -179,9 +194,10 @@
   OpenSpec, ruff, focused tests, docs lint, and live receipts pass.
   Evidence: #837 receipt
   `docs/runbooks/receipts/2026-06-29-node22-db-retirement-stop.md`.
-- [ ] 7.4 Record full post-retirement GFS/IFS end-to-end receipts.
+- [x] 7.4 Record full post-retirement GFS/IFS end-to-end receipts.
   Evidence floor: post-retirement cycles complete through node-27 download,
   node-22 NFS-gated scheduling, downstream compute, node-27 ingest, and public
   display for both GFS and IFS.
   Latest status: pending with task 4.6; #837 stop evidence is necessary but not
   sufficient for this full E2E floor.
+  - Evidence (2026-11-16 hygiene): post-retirement daily production runs end to end; for cycles 2026111300 through 2026111500 node-27 `hydro.hydro_run` shows 66 `published` per source (gfs and IFS) per cycle. The full chain for 2026111500 is recorded under 4.6: node-27 download → node-22 NFS-gated db-free scheduling (`DATABASE_URL` count 0 in `compute.scheduler-dbfree.env` and `slurm-gateway.env`) → downstream compute → node-27 ingest → public display.

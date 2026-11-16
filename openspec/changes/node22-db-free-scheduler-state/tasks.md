@@ -592,3 +592,12 @@ Scenario evidence rows for section 5:
   comment recovery, one 18-task array, shared-NFS downstream copyback, no native
   SHUD resubmission for `state_save_qc`, and no scheduler `DATABASE_URL`, with
   explicit rollback receipt.
+  - Status (2026-11-16): the local, CI and PR #1113 parts are merged (#1112 closed 2026-07-24). The node-22 bounded timeout-injection drill and its rollback receipt were never run: PR #1113's live checkbox is unticked and no receipt is committed.
+    - Natural live evidence exists but does not replace the injection floor:
+      - pass `scheduler_2026110705_6fd404d41856` recorded a real forecast cohort `submit_result_ambiguous`;
+      - pass `scheduler_2026110707_b29bb2f19234` recovered it through `reconciliation_source=slurm_exact_comment` with `matched_bound` to Slurm job 113188;
+      - a sibling reservation in that same pass stayed `accounting_unavailable`;
+      - the node-22 scheduler env has `DATABASE_URL` count 0;
+      - daily 66-basin publishing proves shared-NFS copyback.
+    - The "one 18-task array" shape is stale: the registry is now 66 basins.
+    - Unblocks when the owner either authorises the injection drill or accepts the natural 2026-11-07 recovery as a waiver.

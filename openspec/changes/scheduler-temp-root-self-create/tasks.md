@@ -35,3 +35,9 @@
 - [ ] 2.5 node-22 live acceptance (deferred to the post-catch-up node-22 sync
   window; node-22's 3.12 venv is never `uv sync`ed): delete the temp root, run
   one pass, observe no `preflight_blocked` and `created=true` in evidence.
+  - Status (2026-11-16): the fix is deployed, but the acceptance drill has not been run.
+    - node-22 is at `b2fc70547`, which contains `49905a363` (PR #3067; #3061 closed 2026-11-06).
+    - Pass `scheduler_2026110709_b9afada00930` shows `root_preflight.checks.temp_root.allow_create=true`.
+    - The last `scheduler_root_preflight_blocked` pass was on 2026-11-06. The 3 passes blocked on 2026-11-07 are `slurm_gateway_orchestration`, not root-blocked.
+    - 0 of 1570 November pass artifacts carry `temp_root.created`, so no pass has yet self-created the directory.
+    - Unblocks when an operator deletes `NHMS_SCHEDULER_TEMP_ROOT` on node-22 and lets one pass run, or a natural deletion is observed. The owner may otherwise waive.

@@ -56,24 +56,27 @@ Fixture level：expanded。风险包：
 
 ## 3. 生产执行（node-27）
 
-- [ ] 3.1 处置前 receipt：
+- [x] 3.1 处置前 receipt：
   - audit（预期 exit 0，16 个 extra，active 均为 0）；
   - 公网默认、display、manifest 三方集合落盘；
   - 只读 `grep` node-22 本地注册表副本，看补登的 5 个流域是否仍在其中（不写 node-22）。
-- [ ] 3.2 停写入 timer（node-27 没有 TimescaleDB 压缩/保留策略作业，只有 user systemd timer）：
+  - Superseded (2026-11-16 hygiene): 2026-11-05 node-27 fresh initdb rebuilt `core.basin` from the node-22 live registry only, so the 16 extras / 7 rename leftovers no longer exist. #2621 closed 2026-11-06 (close comment: default `/basins` 66 = display 66 = manifest 66, evidence-only 0); node-27 read-only 2026-11-16 `SELECT count(*) FROM core.basin` = 66. Pre-initdb dry-runs never completed (md0 I/O faults, #2621 comments 2026-09-30 / 2026-10-11).
+- [x] 3.2 停写入 timer（node-27 没有 TimescaleDB 压缩/保留策略作业，只有 user systemd timer）：
   1. `systemctl --user list-timers --all --no-pager` 落 receipt；
   2. `systemctl --user stop nhms-node27-timeseries-compression.timer nhms-node27-timeseries-retention.timer nhms-node27-autopipe.timer`；
   3. `systemctl --user is-active` 对应三个 `.service` 都是 `inactive`（在跑就等，不 kill）；
   4. 通过 runner 跑删除 dry-run（新的 `--copy-dir`，`--set nhms.manifest_basins=…`），NOTICE、各步耗时和 hypertable 探测耗时都作为 receipt 落盘；
   5. `systemctl --user start` 这三个 timer，再记一次 `list-timers`。
-- [ ] 3.3 **停下来请 owner 确认** dry-run receipt。确认后按顺序执行：
+  - Superseded (2026-11-16 hygiene): no deletion target survives the 2026-11-05 fresh initdb (see 3.1; #2621 closed 2026-11-06), so the dry-run has nothing to lock or probe.
+- [x] 3.3 **停下来请 owner 确认** dry-run receipt。确认后按顺序执行：
   1. 同 3.2 的 1–3：记 `list-timers`、停三个 timer、确认三个 service `inactive`；
   2. 用新的 `--copy-dir` 执行 `--apply`，`--set nhms.probe_timeout_s` 取 dry-run 实测最大值 ×2；
   3. `systemctl --user start` 三个 timer；
   4. 启动后的 `list-timers` 记入 receipt；
   5. 把 copy 目录复制一份离开 node-27。
+  - Superseded (2026-11-16 hygiene): apply is moot; the 7 rename-leftover rows were not carried into the 2026-11-05 fresh-initdb cluster (see 3.1; #2621 closed 2026-11-06).
 - 如果 dry-run 的探测超时，停下报告 owner，不自行放宽。
-- [ ] 3.4 处置后 receipt（删前也记一份同口径的，逐项对比）：
+- [x] 3.4 处置后 receipt（删前也记一份同口径的，逐项对比）：
   - audit（预期 exit 0，9 个 extra）；
   - 公网默认 57、display 48、manifest 48；默认 57 要在 display API 目录缓存（`apps/api/display_cache.py`，TTL 60 s、stale 最长 600 s）过期后读：隔 ≥ 60 s 读两次，读到 57 再记；
   - `/api/v1/basins/<删除项>/versions` 返回 404；
@@ -81,6 +84,7 @@ Fixture level：expanded。风险包：
   - seed 源目录中没有 `DNZH-*`/`xinan*`；
   - `object-store/runs/` 下目标 run 目录数（2026-09-29 实测 14 个 `fcst_{gfs,ifs}_2026091700_dg_<目标 dg 模型>`）与 `scheduler/state-index/index-last.json` 中目标模型条目数（实测 14 条，均 usable）删前删后不变；
   - `AUTOPIPE_EXCLUDE_BASINS` 未改动：与 `infra/env/node27-ingest.env.bak-onboarding19-rename-20260922` 的 diff 删前删后一致，恰好是追加的 7 个 id（它们挡住上面的 run 目录，必须保留，不是死配置）。
+  - Superseded (2026-11-16 hygiene): no rename leftovers remain; the 2026-11-05 fresh initdb removed them, not a deletion run: #2621 close comment 2026-11-06 records default 66 / display 66 / manifest 66; node-27 `core.basin` = 66 on 2026-11-16. The 57/48/48 numbers are pre-initdb history.
 
 ## 4. 文档
 
@@ -89,7 +93,8 @@ Fixture level：expanded。风险包：
   - 「退役行保留」与「改名残影可按门禁删除」的区分；
   - 补登 §7.x：2026-08-25 `neiliuqu` 退役；2026-09-22 onboarding-19（SHJ 三子流域并入 `basins_shj`、`xinanjiang_upstream` 退出，published run 已 superseded，`AUTOPIPE_EXCLUDE_BASINS`、`Basins-retired/onboarding19-20260922`、manifest `.pre-onboarding-19-*` 备份）；2026-09-29 改名残影删除记录。
 - [x] 4.2 `docs/runbooks/production-ops/service-bringup.md:650-690` 的 baseline 清单标为历史快照。
-- [ ] 4.3 #1729 追加评论：第 3 条验收项的口径统一。
+- [x] 4.3 #1729 追加评论：第 3 条验收项的口径统一。
+  - Evidence (2026-11-16 hygiene): #1729 comment 2026-09-30T01:59:11Z「第 3 条验收项的口径统一（#2621 owner 裁决，PR #2697）」.
 - [x] 4.4 #2644：`openspec/glossary.md` 新增 `model_id` 词条，内容包括：
   - 基础包 id `<basin>_shud`，来源 `workers/model_registry/basins_registry_rows.py:473` 的 `_shud_riv_` 拼接（行号依 #2644 原文，另附符号名）；
   - direct-grid variant `dg_<32hex>`，来源 `workers/model_registry/direct_grid_variant_registration.py::_mint_model_id`；
@@ -100,12 +105,18 @@ Fixture level：expanded。风险包：
 
 ## 5. 验证
 
-- [ ] 5.1 `uv run ruff check .`；`openspec validate basin-catalog-semantics-and-rename-leftovers --strict --no-interactive`。
-- [ ] 5.2 node-27 真实 DB pytest：新测试，外加 `tests/test_model_registry*.py` 中与 `list_basins` 相关的用例，以及 selector 测试。
-- [ ] 5.3 前端 `runbookContract.test.ts`：只读取 `node-27-bringup-checklist.md` 和 `tier-node27-timeseries-storage.md`。本批如果没改这两个文件，就标为不适用。
+- [x] 5.1 `uv run ruff check .`；`openspec validate basin-catalog-semantics-and-rename-leftovers --strict --no-interactive`。
+  - Evidence (2026-11-16 hygiene): PR #2697 (merge `72a1c76a3`) body records both passing; re-run locally 2026-11-16 on `chore/openspec-hygiene-archive`: ruff "All checks passed!", strict validate "is valid".
+- [x] 5.2 node-27 真实 DB pytest：新测试，外加 `tests/test_model_registry*.py` 中与 `list_basins` 相关的用例，以及 selector 测试。
+  - Evidence (2026-11-16 hygiene): PR #2697 body: node-27 PR head `12a93c9ad`, detached worktree, `TMPDIR=/home/nwm/tmp`, throwaway DB — integration 47 passed; 17 related files 993 passed / 47 skipped / 0 failed.
+- [x] 5.3 前端 `runbookContract.test.ts`：只读取 `node-27-bringup-checklist.md` 和 `tier-node27-timeseries-storage.md`。本批如果没改这两个文件，就标为不适用。
+  - Evidence (2026-11-16 hygiene): not applicable — PR #2697 file list touches neither `node-27-bringup-checklist.md` nor `tier-node27-timeseries-storage.md`.
 
 ## Evidence Floor
 
-- [ ] ruff、openspec validate
-- [ ] node-27 真实 DB pytest（`TMPDIR=/home/nwm/tmp`）
-- [ ] node-27 处置前后三方集合 receipt、删除 dry-run 与 commit receipt
+- [x] ruff、openspec validate
+  - Evidence (2026-11-16 hygiene): see 5.1.
+- [x] node-27 真实 DB pytest（`TMPDIR=/home/nwm/tmp`）
+  - Evidence (2026-11-16 hygiene): see 5.2.
+- [x] node-27 处置前后三方集合 receipt、删除 dry-run 与 commit receipt
+  - Superseded (2026-11-16 hygiene): disposition made moot by the 2026-11-05 fresh initdb (see 3.1–3.4; #2621 closed 2026-11-06 with default/display/manifest = 66/66/66).

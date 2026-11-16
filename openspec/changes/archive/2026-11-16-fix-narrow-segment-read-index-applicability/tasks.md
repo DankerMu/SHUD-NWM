@@ -203,12 +203,13 @@ Three deviations from what the Verify clauses above expected, recorded rather th
 
 ## 5. C3 admission (only if §2.2 selects C3)
 
-- [ ] 5.1 C3 rebuilds an index on a 504 GB hypertable, and `CREATE INDEX CONCURRENTLY` is refused on it
+- [x] 5.1 C3 rebuilds an index on a 504 GB hypertable, and `CREATE INDEX CONCURRENTLY` is refused on it
   (`db/migrations/000051_river_ts_surrogate_key_read_index.sql:67-74`), so the rebuild is a plain
   `CREATE INDEX` holding a SHARE lock. Produce a maintenance-window plan with a measured duration
   estimate from a throwaway cluster, an abort criterion, and a rollback receipt in the shape of
   `db/migrations/000049_...`. Verify: the plan is reviewed and the window is separately authorised by
   the user before any production execution. **No production execution without an explicit GO.**
+  - Superseded (2026-11-16 hygiene): conditional task not triggered — §2.2 selected **C1**, not C3 (§3.1 implemented C1; §4 results: "C1 changes no index"). No C3 rebuild was ever planned or executed.
 
 ## 6. Close out
 
