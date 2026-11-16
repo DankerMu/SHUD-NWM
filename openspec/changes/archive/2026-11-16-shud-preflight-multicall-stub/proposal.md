@@ -68,7 +68,7 @@ is not affected today; it will be after an upgrade.
   - `check_shud_executable(<real SHUD_EXECUTABLE>)` returns `ok=True` and `version_signal=present`, and the real
     binary's realpath leaf is not a stub name;
   - no `uv sync`, no bare `uv run`. — node-22 live, with the branch copy loaded from `~/tmp/3153` via `.venv/bin/python -I`: `ok=True`, `version_signal=present`, `blockers=[]`, real leaf is not a stub. The production checkout has 0 tracked changes, HEAD unchanged.
-- [ ] E5 Pre-merge 26.04 proof: the PR "Unit Tests" log shows `Image: ubuntu-26.04` and that
-  `tests/test_shud_runtime.py` actually executed (not the `--collect-only` smoke).
-- [ ] E6 After merge, master "Unit Tests (full)" is green on every shard (run URL).
+- [x] E5 Pre-merge 26.04 proof: the PR "Unit Tests" log shows `Image: ubuntu-26.04` and that
+  `tests/test_shud_runtime.py` actually executed (not the `--collect-only` smoke). — PR #3169 'Unit Tests' job 133497396793 ran on `Image: ubuntu-26.04`. The selector picked `tests/test_shud_runtime.py` and executed it for real: `4561 passed, 1 skipped in 781.24s`, not the collect-only smoke.
+- [x] E6 After merge, master "Unit Tests (full)" is green on every shard (run URL). — master run 43926300522 (1bd970431): `Unit Tests (full)` shards 1–4 all success. This is the first fully green full regression since b2fc70547. node-22 ff-pulled a910932c8 -> 1bd970431 at a pass boundary (18:12:53Z) with the lease/journal guard modes unchanged and the timer restored.
 - [x] E7 `openspec validate shud-preflight-multicall-stub --strict --no-interactive`. — valid.
