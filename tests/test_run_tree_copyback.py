@@ -32,7 +32,7 @@ from packages.common.state_manager import (
 )
 from services.orchestrator import run_tree_copyback as run_tree_copyback_module
 from services.orchestrator.run_tree_copyback import RunTreeCopybackError, copyback_run_trees
-from tests.provider_mode_helpers import make_directory_with_explicit_mode
+from tests.provider_mode_helpers import make_directory_with_explicit_mode, write_provider_destination
 from tests.test_state_manager import _LockReleaseSeam
 
 
@@ -342,20 +342,10 @@ def test_state_index_copyback_ignores_derived_entry_evidence_for_same_identity(t
     )
     source_index = object_root / "scheduler/state-index/index-last.json"
     destination_index = copyback_root / "scheduler/state-index/index-last.json"
-    publish_state_snapshot_index(
-        [source_entry],
-        source_index,
-        object_store_root=object_root,
-        object_store_prefix="s3://nhms",
-        generated_at=datetime(2026, 6, 27, 3, tzinfo=UTC),
-    )
-    publish_state_snapshot_index(
-        [destination_entry],
-        destination_index,
-        object_store_root=copyback_root,
-        object_store_prefix="s3://nhms",
-        generated_at=datetime(2026, 6, 27, 2, tzinfo=UTC),
-    )
+    # Legacy (pre-#3123) indexes that persisted the read-time fields are seeded as raw
+    # bytes: the publisher no longer writes them, and this test is about the read-side strip.
+    _write_raw_state_index(source_index, [source_entry], generated_at="2026-06-27T03:00:00Z")
+    _write_raw_state_index(destination_index, [destination_entry], generated_at="2026-06-27T02:00:00Z")
 
     summary = copyback_run_trees(
         object_store_root=object_root,
@@ -373,6 +363,68 @@ def test_state_index_copyback_ignores_derived_entry_evidence_for_same_identity(t
     assert merge["checkpoint_reused_count"] == 0
     payload = json.loads(destination_index.read_text(encoding="utf-8"))
     assert payload["entries"] == [base_entry]
+
+
+def test_state_index_copyback_reads_legacy_destination_fields_as_the_same_entry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3123: the copyback read-side strip still matters for legacy destinations.
+
+    The source entry belongs to the run being copied back (post-#3123 clean
+    shape); the shared destination is a legacy file whose entry for the same
+    identity still persists the read-time fields.  Read with the strip, both
+    are the same entry: nothing wins, so no checkpoint is touched.  Without
+    the strip they differ, the authoritative source entry "wins", and its
+    checkpoint is copied/reused for an entry the destination already has.
+    """
+
+    run_id = "fcst_gfs_2026062700_basins_heihe_shud"
+    object_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    _write_run(object_root, run_id)
+    content = _valid_state_bytes(b"legacy-same")
+    state_uri = LocalObjectStore(object_root, "s3://nhms").write_bytes_atomic(
+        "states/gfs/model_a/legacy/state.cfg.ic", content
+    )
+    LocalObjectStore(copyback_root, "s3://nhms").write_bytes_atomic("states/gfs/model_a/legacy/state.cfg.ic", content)
+    source_entry = {**_state_entry("legacy-state", state_uri, content, "2026-06-27T01:00:00Z"), "run_id": run_id}
+    legacy_destination_entry = {
+        **source_entry,
+        "index_generated_at": "2026-06-27T02:00:00Z",
+        "object_evidence": None,
+    }
+    source_index = object_root / "scheduler/state-index/index-last.json"
+    destination_index = copyback_root / "scheduler/state-index/index-last.json"
+    _write_raw_state_index(source_index, [source_entry], generated_at="2026-06-27T03:00:00Z")
+    _write_raw_state_index(destination_index, [legacy_destination_entry], generated_at="2026-06-27T02:00:00Z")
+    checkpoint_state_ids: list[str] = []
+    real_copy_checkpoint = state_manager_module._copyback_state_checkpoint
+
+    def record_checkpoint(entry: dict[str, object], **kwargs: object) -> str:
+        checkpoint_state_ids.append(str(entry.get("state_id")))
+        return real_copy_checkpoint(entry, **kwargs)
+
+    monkeypatch.setattr(state_manager_module, "_copyback_state_checkpoint", record_checkpoint)
+
+    summary = copyback_run_trees(
+        object_store_root=object_root,
+        copyback_root=copyback_root,
+        run_ids=[run_id],
+        extra_object_keys=["scheduler/state-index/index-last.json"],
+    )
+
+    assert summary is not None
+    merge = summary["extra_objects"][0]["merge"]
+    assert merge["source_entry_count"] == 1
+    assert merge["merged_entry_count"] == 1
+    assert checkpoint_state_ids == []
+    assert (
+        merge["checkpoint_copied_count"],
+        merge["checkpoint_reused_count"],
+        merge["checkpoint_replaced_count"],
+    ) == (0, 0, 0)
+    assert json.loads(destination_index.read_text(encoding="utf-8"))["entries"] == [source_entry]
 
 
 def test_state_index_copyback_scopes_source_entries_and_materializes_clone(tmp_path: Path) -> None:
@@ -1174,6 +1226,21 @@ def _valid_state_bytes(seed: bytes) -> bytes:
         "2\t0.1\t0.1\t0.1\t0.1\t0.1\n"
         "1\t0.5\n"
     ).encode()
+
+
+def _write_raw_state_index(path: Path, entries: list[dict[str, object]], *, generated_at: str) -> None:
+    """Write a state index as raw bytes with an independently computed checksum."""
+
+    payload: dict[str, object] = {
+        "schema_version": "nhms.scheduler.file_state_snapshot_index.v1",
+        "generated_at": generated_at,
+        "entries": entries,
+    }
+    body = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    payload["checksum"] = f"sha256:{sha256_bytes(body)}"
+    make_directory_with_explicit_mode(path.parent)
+    write_provider_destination(path, json.dumps(payload, sort_keys=True, indent=2) + "\n")
+    assert json.loads(path.read_text(encoding="utf-8"))["entries"] == entries
 
 
 def _state_entry(state_id: str, uri: str, content: bytes, valid_time: str) -> dict[str, object]:

@@ -3279,6 +3279,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # the per-pass validation cost pin, live in this module.
             "tests/test_state_index_retention.py",
             "tests/test_state_index_upsert_cost.py",
+            # #3123: the single writer drops the read-time injected fields.
+            "tests/test_state_index_read_time_fields.py",
+            # #3123: the copyback merge and the repair read-back still strip those
+            # fields from legacy files (`_copyback_raw_entries`); these two suites
+            # are what reds when that read-side strip is removed.
+            "tests/test_run_tree_copyback.py",
+            "tests/test_scheduler_state_index_repair.py",
             # #2653 reader edge: the capacity watch grades the dry-run summary
             # fields this module produces (`checksum_valid`,
             # `retention.entry_count_before`, `capacity_before/after.warning`).

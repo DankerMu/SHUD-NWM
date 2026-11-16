@@ -338,6 +338,9 @@ NHMS_SCHEDULER_REGISTRY_MANIFEST
 NHMS_SCHEDULER_CANONICAL_READINESS_INDEX
 NHMS_SCHEDULER_JOURNAL_ROOT
 NHMS_SCHEDULER_STATE_INDEX
+# Private state index for Slurm state_save_qc; without it the job falls back
+# to NHMS_SCHEDULER_STATE_INDEX and rewrites the shared lane (#3123).
+NHMS_SLURM_SCHEDULER_STATE_INDEX
 
 # Scheduler no-flag business validation requires these roots and the
 # approved-root policy.

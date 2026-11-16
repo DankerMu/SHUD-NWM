@@ -41,7 +41,7 @@ from packages.common.state_manager import (
 from scripts import scheduler_state_index_repair as repair
 from services.orchestrator import scheduler_generation as generation
 from services.orchestrator.scheduler_generation import TransitionDecision
-from tests.provider_mode_helpers import make_directory_with_explicit_mode
+from tests.provider_mode_helpers import make_directory_with_explicit_mode, write_provider_destination
 
 PREFIX = "s3://nhms"
 NOW = datetime(2026, 7, 21, tzinfo=UTC)
@@ -155,18 +155,21 @@ class Lanes:
         return _entry(model_id, source_id, valid_time, state_uri=self.state_uri, checksum=self.checksum, **kwargs)
 
     def publish(self, reference: list[dict[str, Any]], destination: list[dict[str, Any]] | None = None) -> None:
-        for index_path, root, entries in (
-            (self.reference_index, self.reference_root, reference),
-            (self.destination_index, self.destination_root, reference if destination is None else destination),
+        # Raw bytes, not `publish_state_snapshot_index`: since #3123 the writer drops the
+        # read-time fields, and SHAPES 16/19/20 must reach disk to test the prune's strip.
+        for index_path, entries in (
+            (self.reference_index, reference),
+            (self.destination_index, reference if destination is None else destination),
         ):
-            publish_state_snapshot_index(
-                entries,
-                index_path,
-                object_store_root=root,
-                object_store_prefix=PREFIX,
-                generated_at=NOW,
-                verify_objects=False,
-            )
+            payload: dict[str, Any] = {
+                "schema_version": "nhms.scheduler.file_state_snapshot_index.v1",
+                "generated_at": _iso(NOW),
+                "entries": entries,
+            }
+            body = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+            payload["checksum"] = f"sha256:{sha256_bytes(body)}"
+            write_provider_destination(index_path, json.dumps(payload, sort_keys=True, indent=2) + "\n")
+            assert json.loads(index_path.read_text(encoding="utf-8"))["entries"] == entries
 
     def entries(self, lane: str) -> list[dict[str, Any]]:
         path = self.reference_index if lane == "reference" else self.destination_index

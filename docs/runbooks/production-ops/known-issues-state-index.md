@@ -522,10 +522,14 @@ capacity 评估，只在发布 destination 时打 WARNING。private 那份**会*
 stderr（`infra/sbatch/save_state_snapshot*.sbatch` 的 `#SBATCH --error`），没有任何东西盯这些
 文件，scheduler journal 里也从不出现。所以调度日志里的 capacity WARNING 只会是 shared lane，
 **private lane 唯一的告警面是下面的每日 capacity watch**。
-两份 index 条目数相同时 private 的 `json_nodes` 也更高：state-save 的 upsert 与随后的
-`set_usable_flag` 都把读时注入的 `index_generated_at` / `object_evidence`（null）写回每个条目
-（每条 +2 节点），copyback 会去掉这两个字段，shared 不带。2026-11-11 dry-run：同为 12,154 条，
-reference 252,205 vs destination 227,897 节点，差 24,308 = 2 × 12,154（另见下面"回弹与余量"）。
+读时注入的 `index_generated_at` / `object_evidence` 现在不再落盘（#3123）：唯一的写入口
+`publish_state_snapshot_index` 在算 checksum 之前去掉这两个字段，upsert、`set_usable_flag`、
+provider-refresh 续期、copyback、repair、prune 都经它发布；读时仍在内存里注入。两份 index
+条目数相同时，private 与 shared 的形状一致（copyback 形状，约 18.5 节点 / 条）。仍带这两个
+字段的旧文件照常通过校验，下一次任意发布后即干净，无需迁移。
+历史（#3123 之前）：state-save 的 upsert 与随后的 `set_usable_flag` 把这两个字段（`object_evidence`
+为 null）写回每个条目（每条 +2 节点），copyback 去掉它们、shared 不带。2026-11-11 dry-run：同为
+12,154 条，reference 252,205 vs destination 227,897 节点，差 24,308 = 2 × 12,154（另见下面"回弹与余量"）。
 
 这只是证据，不会让任何 reader / publisher 比原有硬上限更早失败。`warning` 出现时由下面的
 "自动剪枝"（#3121，每日 06:30 UTC）在 scheduler pass 边界 enforce；"定时 capacity watch"
@@ -882,13 +886,15 @@ unusable 行），已剪的 reference 必然是 `nothing_to_prune`，只剪 dest
 有一部分来自去掉读时注入的两个字段，不只是剪条目。对剪完的副本再跑一次 dry-run：
 两 lane 都是 `nothing_to_prune`。
 
-**reference lane 的回弹与余量**（同一副本实测）：repair 发布的是不含
-`index_generated_at` / `object_evidence` 的条目；reference lane 的下一次
-`upsert_state_snapshot` 会把这两个字段重新注入每一条。实测剪完 5,772 条 /
+**reference lane 的回弹与余量**：
+#3123 之后不再回弹：任何发布都不写回 `index_generated_at` / `object_evidence`，两 lane 都是
+copyback 形状（18.5 节点、1,048 B / 条），余量按此算：字节上限约 16,010 条（余量约
+10,200 条、约 53 天），0.70 约 11,200 条（约 28 天）。
+历史（#3123 之前，不再成立；同一副本实测）：repair 发布的是不含这两个字段的条目，但 reference lane 的下一次
+`upsert_state_snapshot` 会把它们重新注入每一条。实测剪完 5,772 条 /
 106,639 节点 / 6,048,768 B（0.361），一次 upsert 后 5,773 条 / 118,202 节点 /
-6,569,110 B（0.394）——每条约 +2.0 节点、+90 B。所以 reference 的余量按回弹后的形状
+6,569,110 B（0.394）——每条约 +2.0 节点、+90 B。当时 reference 的余量按回弹后的形状
 算：约 20.5 节点、1,138 B / 条，节点上限约在 14,652 条、字节上限约在 14,744 条触顶，
 即剪完后还能再长约 8,900 条，按 192 条/天约 46 天；到 0.70 再次告警约在 10,256 条，
-约 4,500 条、约 23 天。shared lane 由 copyback 写入、不回弹（18.5 节点、1,048 B / 条）：
-字节上限约 16,010 条（余量约 10,200 条、约 53 天），0.70 约 11,200 条（约 28 天）。
+约 4,500 条、约 23 天；shared lane 由 copyback 写入、不回弹，即上面的现行数字。
 这些是"不再剪"的上限；实际节奏按 `warning` 触发重跑。
