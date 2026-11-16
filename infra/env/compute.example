@@ -38,7 +38,9 @@ UV_CACHE_DIR=/tmp/nhms-uv-cache
 # Compute API / archived rollback DB placeholder. The scheduler-once compose
 # service does not inherit DATABASE_URL in DB-free mode; keep this only for
 # compute-api or an explicit archived rollback drill. Node-22 :55433 is stopped
-# and is not an active business DB.
+# and is not an active business DB. Production node-22 connects to no DB and
+# must NOT set DATABASE_URL; this value is for an explicit archived rollback
+# drill or isolated E2E only.
 DATABASE_URL=postgresql://nhms_control_rw:change-me@db.internal.example:5432/nhms
 
 WORKSPACE_ROOT=/scratch/frd_muziyao/nhms-prod/workspace

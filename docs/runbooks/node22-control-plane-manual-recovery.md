@@ -142,15 +142,16 @@ receipt 字段：`evidence_root`（**实际扫描的** root，按上面那条自
     不是整数（`true` 也**不算**整数）、`allowed_cycle_hours_utc` 不是整数序列，**都算**。
     分界线：**字段在、值收窄 → `scope_narrowed`**（运维自己下的指令）；**字段不在 →
     `scope_unknown`**（读不到，缺的字段不会被当成空默认值）。
-    这些字段是写入器**无条件**写出的（`services/orchestrator/scheduler_evidence.py:248-253` 是
-    四键 dict 字面量，同文件 `:268` 写 `sources: list(config.sources)`、`:270-276` 写五键
-    `cycle_window`、`:293-297` 写 `runtime_config` 且此后从不被覆盖；
-    `services/orchestrator/scheduler_runtime.py:1346-1350` 写 `counts`，`:1394-1402` 的 if/else
+    这些字段是写入器**无条件**写出的（`services/orchestrator/scheduler_evidence.py::base_evidence`
+    里 `operator_filters` 是四键 dict 字面量，同一函数写 `sources: list(config.sources)`、五键
+    `cycle_window` 和 `runtime_config` 且此后从不被覆盖；
+    `services/orchestrator/scheduler_runtime.py::run_once` 里写 `counts` 的 dict 字面量，以及
+    `if self.config.backfill_enabled:` 的 if/else
     两条腿都写 `backfill` 且都带 `enabled`），所以线上真出现 `scope_unknown`，说明这份 pass 文件
     被截断或被外部改过——**属于要查的异常，不是正常状态**，按异常上报而不是只等下一趟。
   - `no_models_evaluated`——`counts.selected_model_count == 0`：这趟 pass **一个模型都没求值**，
     既不是范围收窄（没有任何运维指令），也不是读不到（值是明确的零）。可达且不需要任何运维操作：
-    db-free 注册表清单允许 `models: []`（`services/orchestrator/scheduler_file_providers.py:883-940`
+    db-free 注册表清单允许 `models: []`（`services/orchestrator/scheduler_file_providers.py::_validate_registry_manifest`
     只校验 schema/新鲜度/校验和/上限，**没有下限**），清单非空但被
     `services/orchestrator/scheduler_models.py:137-145` 全部排除（inactive / not_runnable /
     not_shud_model / 元数据不全 / 重复身份）同样落到零模型，而 registry 仍是 `ready`。
@@ -192,7 +193,7 @@ receipt 字段：`evidence_root`（**实际扫描的** root，按上面那条自
   代码默认 `(0, 12)`）跑出来的 pass，没列出待办只说明**这个子集里**没有；尤其 breaker 释放的条目
   **只在 backfill 腿产生**，一趟关掉 backfill 的 pass 结构性看不见它；同理零宽时间窗（`lookback 0`，
   `--cycle-time` 也会把它设成 0）对**所有更旧的 cycle 全盲**，而 breaker 释放按构造坐在最旧那侧
-  （`services/orchestrator/scheduler_discovery.py:824-832`）；cycle 小时集合则直接在
+  （`services/orchestrator/scheduler_discovery.py::_select_backfill_source_cycles` 的 §8.7 quarantine breaker 循环）；cycle 小时集合则直接在
   `discover_cycles` 里把不在集合内的 cycle 过滤掉。`--source` 与 cycle 小时判的都是**覆盖**不是
   相等：`--source gfs --source IFS --source ERA5` 确实把 gfs/IFS 都看过了，算范围完整；
   `allowed_cycle_hours_utc = [0, 6, 12, 18]` 同理把默认的 0/12 都看过了。只有子集才算收窄。
@@ -268,8 +269,8 @@ receipt 字段：`evidence_root`（**实际扫描的** root，按上面那条自
     `manual_retry_required`，**从不写** `attempt` / `retry_limit`；
   - sink 拒绝臂（`blocked_operator_reentry_restart_stage_refused`）的 `retry_policy` 是
     `{"automatic_retry_allowed": false, "manual_retry_required": true, **_OPERATOR_REENTRY_POLICY}`
-    （`services/orchestrator/scheduler_candidates.py:1673-1678`），而 `_OPERATOR_REENTRY_POLICY`
-    （`:2665-2668`）**只有两个字符串键、不含任何数字键**，所以 `attempt` / `retry_limit` /
+    （`services/orchestrator/scheduler_candidates.py::_refuse_confirmed_candidates_off_forecast`），而 `_OPERATOR_REENTRY_POLICY`
+    （同文件模块级常量）**只有两个字符串键、不含任何数字键**，所以 `attempt` / `retry_limit` /
     `occurrences` **三个全是 `null`**。这一臂本来也不走 `confirm-operator-reentry`（见第二步的表）。
 
   receipt 把缺的那些渲染成 `null`。这里的 `null` 意思是**这一臂从来没写过这些字段**，不是
@@ -616,8 +617,9 @@ bash /scratch/frd_muziyao/NWM/scripts/ops/node22_env_backup_sweep.sh --env-dir /
   forcing 缺失，它返回 `work_item_count: 0`（receipt 字段在 `:705` / `:715`），而这个形状与
   `--forcing-root` 指错、NFS 没挂、环境不对**在条目数上分不开**——所以先读 receipt 的
   `coverage`，见 `current-production-ops.md` §3.1.1。非改名成因是真实存在的：retention 会删除
-  primary root 下的 `forcing/<source>/<cycle>/...`（`services/orchestrator/retention.py:75`、
-  `:684-687`），即 fail-stop 生效之后 forcing 仍可能在带内消失。
+  primary root 下的 `forcing/<source>/<cycle>/...`（`services/orchestrator/retention_root_admission.py::CYCLE_SCOPED_PREFIXES`、
+  `services/orchestrator/retention.py::_collect_cycle_targets`，primary-only 规则见
+  `services/orchestrator/retention_root_admission.py::_parts_lie_in_potential_target`），即 fail-stop 生效之后 forcing 仍可能在带内消失。
 
   **改名集为空时的升级路径**：回补脚本不是通道，`--repair-missing-forcing` 也不是。只能**带外**
   把 forecast 之前的那份输入修好（重新产出该模型的 forcing 包并落进 object store；或修好

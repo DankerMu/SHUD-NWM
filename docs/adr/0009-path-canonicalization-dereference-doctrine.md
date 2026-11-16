@@ -375,8 +375,7 @@ errno-less `RuntimeError`。即**两条臂在 ≤3.12 上都抛、在 3.13+ 上�
 4. 8 个核心 root 字段的前置探针（`scheduler_preflight.py:634`、`scheduler_runtime_roots.py::_scheduler_root_check` 的 `path.lstat()`）
    挂在默认关闭的开关上（`slurm_execution_enabled` / `require_runtime_roots`）。
    这**不**构成错位——`lock_path` 与 `evidence_dir` 在使用点真的落到内核
-   （`services/orchestrator/scheduler_lease.py:252` `os.open` 与 `:271`
-   `os.stat(..., follow_symlinks=False)`、`services/orchestrator/scheduler_evidence.py:912`
-   `open_evidence_directory`），
+   （`services/orchestrator/scheduler_lease.py::FileSchedulerLease._acquire_locked` 的 `os.open` 与
+   `os.stat(..., follow_symlinks=False)`、`services/orchestrator/scheduler_evidence.py::open_evidence_directory`），
    phantom 值在那里是响亮的 ELOOP。关掉开关的代价是「配置错误表现为运行期 ELOOP
    而不是 preflight blocker」，属**可诊断性**降级，而那正是该开关存在的意义。

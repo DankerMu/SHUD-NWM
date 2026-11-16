@@ -211,7 +211,7 @@ ORDER BY 1;
 gap 却还在涨。**分支 B 差集为空并不证明覆盖行在**：它的分子语句根本不 JOIN
 `hydro.run_display_coverage`，所以一个"有可展示 run、却没有覆盖行"的网络在 B 里照样
 是空差集——那正是 §11.1 点名的 `no_coverage_row` rc=0 静默路径
-（`scripts/node27_autopipeline.py:2207-2209`）。因此走到这里有两种落点：要么覆盖行缺失
+（`scripts/node27_autopipeline.py::_process_run` 里记 `no_coverage_row` 的分支）。因此走到这里有两种落点：要么覆盖行缺失
 或为零，要么覆盖行确实在、而 `services/tiles/mvt.py` 的**覆盖窗矩形校验**
 （`_national_coverage_window`）或 **3h 相位校验**（`_national_cycle_valid_times`）把该
 cycle 丢掉了。后两处都是 fail-closed 的：任一网络的行不过关，整条 cycle 就不进列表。

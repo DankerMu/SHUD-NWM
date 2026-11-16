@@ -50,7 +50,7 @@ These helpers are direct dependencies of the diagnostic entrypoints above and re
 | `scripts/seed_qhh_forcing_stations.py` | `scripts/run_qhh_cycle.sh`, `scripts/run_qhh_backend_smoke.sh`. | Seed standard QHH forcing stations from `qhh.tsd.forc` for diagnostic forcing production. |
 | `scripts/seed_qhh_shud_output_segments.py` | `scripts/run_qhh_cycle.sh`, `scripts/run_qhh_backend_smoke.sh`. | Seed QHH SHUD output river identities so parser rows align with `.sp.riv` output order. |
 | `scripts/summarize_qhh_smoke_results.py` | `scripts/run_qhh_cycle.sh`, `scripts/run_qhh_backend_smoke.sh`. | Write QHH diagnostic result summary artifacts from run, timeseries, and QC rows. |
-| `scripts/publish_qhh_display_products.py` | `scripts/run_qhh_cycle.sh`, `scripts/run_qhh_backend_smoke.sh`. | Publish QHH diagnostic display products and evidence artifacts after result parsing. |
+| `scripts/publish_qhh_display_products.py` (removed — absent from the tree since at least `af49ced22`; historical row) | None today: `scripts/run_qhh_cycle.sh` and `scripts/run_qhh_backend_smoke.sh` now call the `nhms-orchestrator publish-qdown` CLI at this step. | Publish QHH diagnostic display products and evidence artifacts after result parsing. |
 
 ## Out-of-Chain Helper
 

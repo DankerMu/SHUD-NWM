@@ -602,7 +602,7 @@ forecast 照submit，1~2 秒死在 `ARTIFACT_NOT_FOUND`（#1816 重发 8 流域�
 > `main` 的 `resolve_renames → probe_coverage → discover_work` 流水线在 `:648-651`）。
 > - **改名集非空**（该模型的 forcing 确实以另一个 model id 存在）：用下面的回补脚本。
 > - **改名集为空**（不是改名造成的缺失——例如 retention 在 fail-stop 生效之后删掉了
->   `forcing/<source>/<cycle>/...`，见 `services/orchestrator/retention.py:75` 与 `:684-687`）：
+>   `forcing/<source>/<cycle>/...`，见 `services/orchestrator/retention_root_admission.py::CYCLE_SCOPED_PREFIXES`、`services/orchestrator/retention.py::_collect_cycle_targets` 与 `services/orchestrator/retention_root_admission.py::_parts_lie_in_potential_target`，cycle-scoped 目标仅限 primary）：
 >   回补脚本**不是通道**，它会返回 `work_item_count: 0`（receipt 字段在 `:705` / `:715`），
 >   而这个形状与 `--forcing-root` 指错 / NFS 没挂在条目数上**分不开**（本文 §3.1.1 就是为此要求
 >   先读 `coverage`）。**升级路径：带外**重新产出该模型的 forcing 包并落进 object store

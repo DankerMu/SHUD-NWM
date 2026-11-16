@@ -211,7 +211,7 @@ even if the host date is later.
 - Design record: `openspec/changes/tier-node27-timeseries-storage/design.md`
   (frozen; its cold-tier fixtures describe the retired lane)
 - Architecture record: `docs/adr/0002-node27-timeseries-hot-cold-tiering.md`
-- Display carve-out: `docs/adr/0001-display-timeseries-carveout.md`
+- Display carve-out (ADR 0001): [`docs/adr/0001-station-forcing-history-api-boundary.md`](../adr/0001-station-forcing-history-api-boundary.md)
 
 ## Three-day chunk geometry (#2210; requires migration rollout)
 
@@ -3451,7 +3451,7 @@ Retention consults no receipt produced by the other two timers — the
 archive-completeness freshness dependency that once ordered this table died
 with the archive lane (#1370). Cold residency does not get its own timer:
 the 04:25 compression oneshot runs compression first, then
-`scripts/node27_cold_residency_once.sh --enforce`. The lifecycle mutex
+`scripts/node27_cold_residency_once.sh --enforce` (retired in 998433e16, #1895). The lifecycle mutex
 `/tmp/nhms-node27-timeseries-lifecycle.lock` is acquired before any
 lane-local flock. Catalog location, container bind and host path have
 fixed production defaults; `NODE27_COLD_RESIDENCY_DEVICE_IDENTITY` has
@@ -4726,8 +4726,9 @@ prevent).
 
 Decompress the `met` AND `hydro` chunks covering the window together: a partial
 decompress (met decompressed, river still compressed) lets the forcing handoff
-succeed and then trips the parse-stage guard at
-`workers/output_parser/parser.py:976` instead, which `#1781` deliberately does
+succeed and then trips the parse-stage guard in
+`workers/output_parser/parser.py::PsycopgOutputParserRepository.upsert_river_timeseries`
+(its `check_batch_targets_uncompressed` call) instead, which `#1781` deliberately does
 NOT terminal-state — that failure stays a plain `rc=1` retry, so a half-drained
 window trades one loop for another.
 
@@ -6833,7 +6834,8 @@ empty legacy table satisfies that gate.
 #### 4.10.6 Reparse in-window legacy runs into the narrow store (#2382)
 
 After the re-forward, runs parsed before T0 stay routed `legacy`. The runner
-`scripts/node27_river_narrow_reparse_backfill.py` reparses each in-window
+`scripts/node27_river_narrow_reparse_backfill.py` (deleted in bd06c6ddc, #2500;
+this subsection is the historical procedure) reparsed each in-window
 `published`/`superseded` run from its SHUD `.rivqdown`. Each run is one
 transaction: row lock, route flip, parser write, count check, commit (design:
 `openspec/changes/node27-river-narrow-reparse-backfill/design.md`). Runs outside
@@ -7319,9 +7321,10 @@ a DSN that has not been identified.
    `DATABASE_URL` (the `nhms_download_rw` DSN of
    `infra/env/node27-download.example`), `nhms-gfs` / `nhms-ifs download` build
    their adapter with `PsycopgMetStore.from_env()`
-   (`workers/data_adapters/gfs_adapter.py:420`, `ifs_adapter.py`), and that store
+   (`workers/data_adapters/gfs_adapter.py::GFSAdapter.from_env`, `ifs_adapter.py::IFSAdapter.from_env`), and that store
    writes `met.data_source` and `met.forecast_cycle`
-   (`packages/common/met_store.py:71,120,204`). It does **not** write
+   (`packages/common/met_store.py::PsycopgMetStore.ensure_data_source`,
+   `::upsert_forecast_cycle`, `::update_forecast_cycle`). It does **not** write
    `met.forcing_version`, `met.met_station` or either forcing fact table, so it
    does not contend for a lock `000066` takes; it is paused because fixture D6
    pauses every `met` writer for the window and the pause costs one skipped
@@ -7485,7 +7488,7 @@ Related documents:
   today, this section and #1370 are the authority.
 - Architecture record:
   [`docs/adr/0002-node27-timeseries-hot-cold-tiering.md`](../adr/0002-node27-timeseries-hot-cold-tiering.md).
-- Display carve-out: `docs/adr/0001-display-timeseries-carveout.md`. The
+- Display carve-out (ADR 0001): [`docs/adr/0001-station-forcing-history-api-boundary.md`](../adr/0001-station-forcing-history-api-boundary.md). The
   runner is never imported by `apps/api/**` or `apps/frontend/**`.
 
 ### 8.1 Install (node-27, `nwm` user)
@@ -8864,10 +8867,10 @@ scan and fails if a lane grows a requirement this table does not cover.
 | Unit (systemd) | Entrypoint | Measured DB requirement | Role |
 |---|---|---|---|
 | `nhms-node27-autopipe.service` | `scripts/node27_autopipeline.py` | DML across `core`/`met`/`hydro`/`ops`/`map`; **`ANALYZE` on frontier chunks and on authority tables** → ownership. No `compress_chunk`/`drop_chunks`/policy calls, no runtime `CREATE TABLE`/`CREATE INDEX`/`TRUNCATE`/`REFRESH MATERIALIZED VIEW` | `nhms_ingest_rw` |
-| `nhms-node27-download.service` | `scripts/node27_download_once.sh` → `node27_download_cycles.py` → `nhms-gfs`/`nhms-ifs download` | DML on `met.data_source` and `met.forecast_cycle` only: the wrapper requires `DATABASE_URL` when it sources its env file (`scripts/node27_download_once.sh:76-78`), and the adapters write through `PsycopgMetStore` (`workers/data_adapters/gfs_adapter.py:420`, `ifs_adapter.py:335` → `packages/common/met_store.py:71,120,204`). There is no SQL text under `workers/data_adapters/` itself; the `met.*` forcing DML is applied from the ingest lane | `nhms_download_rw` (DML on `met` only) |
-| `nhms-node27-timeseries-compression.service` (compression leg) | `scripts/node27_timeseries_compression.py:595` | `compress_chunk(regclass)` → ownership; read-only watermark query | `nhms_ingest_rw` |
+| `nhms-node27-download.service` | `scripts/node27_download_once.sh` → `node27_download_cycles.py` → `nhms-gfs`/`nhms-ifs download` | DML on `met.data_source` and `met.forecast_cycle` only: the wrapper requires `DATABASE_URL` when it sources its env file (`scripts/node27_download_once.sh:76-78`), and the adapters write through `PsycopgMetStore` (`workers/data_adapters/gfs_adapter.py::GFSAdapter.from_env`, `ifs_adapter.py::IFSAdapter.from_env` → `packages/common/met_store.py::PsycopgMetStore.ensure_data_source` / `::upsert_forecast_cycle` / `::update_forecast_cycle`). There is no SQL text under `workers/data_adapters/` itself; the `met.*` forcing DML is applied from the ingest lane | `nhms_download_rw` (DML on `met` only) |
+| `nhms-node27-timeseries-compression.service` (compression leg) | `scripts/node27_timeseries_compression.py::_default_compress_chunk` | `compress_chunk(regclass)` → ownership; read-only watermark query | `nhms_ingest_rw` |
 | Withdrawn cold-residency leg (source retirement complete; R3 removed cold grant/positive audit from repository source; not a deployment instruction) | `scripts/node27_cold_residency.py` → `packages/common/compressed_chunk_cold_residency.py` | Historical `ALTER TABLE/INDEX … SET TABLESPACE nhms_cold` and tablespace `CREATE`; source retirement does not authorize live `REVOKE`/`DROP` | historical `nhms_ingest_rw` requirement only |
-| `nhms-node27-timeseries-retention.service` | `scripts/node27_timeseries_retention.py:851` | `drop_chunks(...)` → ownership | `nhms_ingest_rw` |
+| `nhms-node27-timeseries-retention.service` | `scripts/node27_timeseries_retention.py::_default_drop_chunk` | `drop_chunks(...)` → ownership | `nhms_ingest_rw` |
 | `nhms-node27-timeseries-compression-replay.service` (`Type=oneshot`, no timer — operator-triggered, not a recurring lane) | `scripts/node27_timeseries_compression_supervisor.py:101-128,143,331-380` | `pg_dump`, two `migration_apply` steps (`psql --file <migration>`), `docker exec nhms-db pg_restore` — **migration-class DDL** — plus a `decompress` leg (`scripts/node27_timeseries_decompression_replay.py:194`, `decompress_chunk` → hypertable ownership) and, in the same `EXPECTED_COMMAND_SEQUENCE` (`:117-128`), `compression_dry_run` and `compression_enforce`. The exception is scoped by **"one-shot migration-class unit"**, not by which calls it makes: the compression legs are the same ones the recurring lane runs as `nhms_ingest_rw`; the `migration_apply` steps are what that role structurally cannot carry | **`nhms` (documented exception)** |
 | archive-rebuild drill (retired lane, #1370; no unit, no template in `infra/env/`) | — | `POSTGRES_ADMIN_URL` against the `postgres` database, `CREATEDB` for `nhms_archive_drill` | **`nhms` (documented exception)** |
 
@@ -8898,22 +8901,22 @@ lane's quiescence checks
 (`node27_timeseries_compression_supervisor.py:1281,1311`,
 `node27_timeseries_compression_capture.py:338-340`) keep the superuser;
 `node27_resource_governance_collection.collect_postgres`, `node27_external_contract_snapshot.py:115`
-and `node27_river_identity_backfill.py:289` belong to lanes with no converted
-template. On `pg_toast` specifically, `compressed_chunk_cold_residency.py` models
+and `node27_river_identity_backfill.py:289` (deleted in bd06c6ddc, #2500) belong to lanes with no converted
+template. On `pg_toast` specifically, `compressed_chunk_cold_residency.py` (retired in 92b1cfbb8, #1895) models
 TOAST members for classification but never names them in SQL — `_lock_sql` is fed
 by `lockable_heaps()` (`relkind == "r"`, TOAST heaps are `'t'`) and `_move_sql` by
 `origin_shell_members()`; the TOAST relocation rides the
 `decompress_chunk`/`compress_chunk` rewrite. The one direct
 `ALTER TABLE pg_toast.… SET TABLESPACE`
-(`compressed_chunk_cold_probe/scenarios.py:80-83`) runs against the probe's own
+(`compressed_chunk_cold_probe/scenarios.py:80-83`, retired in 92b1cfbb8, #1895) ran against the probe's own
 disposable cluster as that cluster's superuser. Therefore **no
 `GRANT USAGE ON SCHEMA pg_toast` and no `GRANT pg_read_all_stats` is granted.**
 `test_converted_lanes_do_not_read_superuser_gated_catalogs` fails the suite if a
 converted lane later grows one of these reads.
 
 The one-time `CREATE TABLESPACE nhms_cold` (#1894) stays superuser by nature and
-lives in the install/probe paths (`node27_cold_tablespace_engine.py:201`,
-`compressed_chunk_cold_probe/shell.py:319`), not in the recurring unit.
+lived in the install/probe paths (`node27_cold_tablespace_engine.py:201`,
+`compressed_chunk_cold_probe/shell.py:319`; both retired in 92b1cfbb8, #1895), not in the recurring unit.
 
 ### 9.3 Provision (staged: additive first, ownership second)
 
