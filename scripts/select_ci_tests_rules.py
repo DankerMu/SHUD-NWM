@@ -1202,6 +1202,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         stop_on_match=True,
     ),
     PathTestRule(
+        # #3155: the error type and path helpers split out of safe_fs.py keep
+        # its closure. A literal rule, not a FILE_JOURNAL_READ_STATE_PATH_PATTERNS
+        # entry, because that tuple is indexed positionally.
+        "packages/common/safe_fs_paths.py",
+        (*FILE_JOURNAL_READ_STATE_TESTS, "tests/test_safe_fs.py", *C4_PRODUCTION_ACCEPTANCE_TESTS),
+        stop_on_match=True,
+    ),
+    PathTestRule(
         # The dedicated no-clobber publication owner is used by archive
         # publication and restore. It needs both its filesystem contract and
         # the two journal-retention behavioral partitions.

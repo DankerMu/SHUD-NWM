@@ -433,7 +433,7 @@ def _underlying_error_text(error: BaseException) -> str:
     """Render a wrapped filesystem failure the way the existing PrearmError sites do.
 
     ``SafeFilesystemError`` is a ``RuntimeError`` subclass, NOT an ``OSError``
-    (``packages/common/safe_fs.py:10``), so it carries no ``strerror`` and is
+    (``packages.common.safe_fs_paths.SafeFilesystemError``), so it carries no ``strerror`` and is
     rendered by type name instead.
     """
 
