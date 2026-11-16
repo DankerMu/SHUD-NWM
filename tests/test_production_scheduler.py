@@ -56617,7 +56617,7 @@ def test_unreadable_warm_start_env_takes_strict_path_and_fails_loudly(
     cycle = fixture.cycle(_WARM_START_TOGGLE_CANDIDATE_CYCLE)
     # Fixture guard: the D8.9 preflight really does see a completed pipeline,
     # so the shortcut is genuinely reachable and this test cannot pass vacuously.
-    assert fixture.scheduler._candidate_pipeline_already_complete(candidate) is True
+    assert scheduler_generation_gate_module.candidate_pipeline_already_complete(fixture.scheduler, candidate) is True
     monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "false")
     monkeypatch.setenv("FORECAST_HORIZON_HOURS", "abc")
 
@@ -56786,8 +56786,8 @@ def test_unreadable_warm_start_env_fails_backfill_predecessor_closed(
     # Fixture guard: without a journal-complete PREDECESSOR the pre-fix gate
     # would already fail closed and this lock would spin on nothing.
     assert (
-        fixture.scheduler._candidate_pipeline_already_complete(
-            fixture.candidate(_WARM_START_TOGGLE_PREDECESSOR_CYCLE)
+        scheduler_generation_gate_module.candidate_pipeline_already_complete(
+            fixture.scheduler, fixture.candidate(_WARM_START_TOGGLE_PREDECESSOR_CYCLE)
         )
         is True
     )

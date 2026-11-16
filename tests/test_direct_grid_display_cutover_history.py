@@ -317,7 +317,6 @@ def test_psycopg_station_lookup_sql_does_not_filter_active_flag() -> None:
 
 
 _FORECAST_STORE_FLOW_PRODUCT_METHODS = (
-    PsycopgForecastStore._latest_issue_time,
     PsycopgForecastStore._per_source_latest_cycles,
     PsycopgForecastStore._latest_analysis_issue_time,
     PsycopgForecastStore._fetch_analysis_segment_rows,

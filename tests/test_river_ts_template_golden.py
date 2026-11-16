@@ -108,6 +108,7 @@ def test_the_golden_covers_exactly_the_registered_entries() -> None:
         "parser:replace_chain_probe",
         "parser:replace_chain_window",
         *(f"forecast_store:{label}" for label in FORECAST_STORE_SEGMENT_BLOCKS),
+        "forecast_store:latest_issue_time",  # record-only; its reader was retired by #3148
         "forecast_store:segment_identity_predicates",
         "forecast_store:latest_product_fallback",
     }

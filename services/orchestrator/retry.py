@@ -5,12 +5,12 @@ import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from errno import ENOENT
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from sqlalchemy import func, inspect, select, text, update
+from sqlalchemy import func, inspect, select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from packages.common import status_vocab as _vocab
@@ -700,55 +700,6 @@ class RetryService:
         self.store.session.commit()
         self.store.session.refresh(retry_job)
         return retry_job
-
-    def expire_stale_retries(self, max_age_seconds: int) -> list[PipelineJob]:
-        cutoff = datetime.now(UTC) - timedelta(seconds=max_age_seconds)
-        statement = (
-            select(PipelineJob)
-            .where(PipelineJob.status == "pending")
-            .where(PipelineJob.retry_count > 0)
-            .where(PipelineJob.slurm_job_id.is_(None))
-            .where(PipelineJob.created_at < cutoff)
-            .order_by(PipelineJob.created_at.asc())
-        )
-        candidates = list(self.store.session.scalars(statement))
-        expired: list[PipelineJob] = []
-        for job in candidates:
-            status_from = job.status
-            finished_at = datetime.now(UTC)
-            result = self.store.session.execute(
-                update(PipelineJob)
-                .where(PipelineJob.job_id == job.job_id)
-                .where(PipelineJob.status == "pending")
-                .values(
-                    status="failed",
-                    error_code="RETRY_STALE_PENDING",
-                    error_message=f"Pending retry exceeded max age of {max_age_seconds} seconds.",
-                    finished_at=finished_at,
-                    updated_at=finished_at,
-                )
-            )
-            if result.rowcount != 1:
-                continue
-            self.store.insert_event(
-                entity_type="pipeline_job",
-                entity_id=job.job_id,
-                event_type="retry_expired",
-                status_from=status_from,
-                status_to="failed",
-                message="Pending retry expired before Slurm submission.",
-                details={
-                    "run_id": job.run_id,
-                    "max_age_seconds": max_age_seconds,
-                    "error_code": "RETRY_STALE_PENDING",
-                },
-                commit=False,
-            )
-            expired.append(job)
-        self.store.session.commit()
-        for job in expired:
-            self.store.session.refresh(job)
-        return expired
 
     def submission_runtime_root_resolution(self, job_id: str) -> dict[str, Any] | None:
         statement = (

@@ -324,12 +324,15 @@ def test_standalone_enabled_schema_exact_six_schemes_from_shared_owner() -> None
 
 
 def test_standalone_enabled_schema_mutations_have_exact_bearer_first_lists() -> None:
-    from packages.common.openapi_auth_security import slurm_mutation_security_alternatives
-
     app = create_gateway_app(SlurmGatewaySettings(backend="mock", allow_internal_reset=True))
     spec = app.openapi()
 
-    expected = slurm_mutation_security_alternatives()
+    expected = [
+        {"SlurmServiceBearer": []},
+        {"DevRoleHeader": []},
+        {"DevBearerToken": []},
+        {"InternalLiveProof": [], "LiveUserID": [], "LiveUserRoles": []},
+    ]
     for method, path in sorted(SLURM_MUTATION_PATHS):
         operation = spec["paths"][path][method.lower()]
         assert operation["security"] == expected, (method, path)

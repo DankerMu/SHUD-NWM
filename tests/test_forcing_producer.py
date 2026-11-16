@@ -3118,10 +3118,6 @@ def test_producer_direct_grid_enforces_max_timestep_count_before_row_generation(
         "workers.forcing_producer.producer.compute_idw_weights",
         lambda **_kwargs: pytest.fail("direct-grid limit failure must not call compute_idw_weights"),
     )
-    monkeypatch.setattr(
-        "workers.forcing_producer.producer.ForcingProducer._stop_at_direct_grid_package_boundary",
-        lambda *_args, **_kwargs: pytest.fail("direct-grid limit failure must not reach package boundary"),
-    )
     store = LocalObjectStore(tmp_path)
     products = _write_canonical_products(store, forecast_hours=(0, 3, 6))
     contract = parse_direct_grid_forcing_contract(_direct_grid_manifest_for_default_grid(), source_id="GFS")
@@ -3165,10 +3161,6 @@ def test_producer_direct_grid_enforces_max_timeseries_row_count_before_row_gener
     monkeypatch.setattr(
         "workers.forcing_producer.producer.compute_idw_weights",
         lambda **_kwargs: pytest.fail("direct-grid limit failure must not call compute_idw_weights"),
-    )
-    monkeypatch.setattr(
-        "workers.forcing_producer.producer.ForcingProducer._stop_at_direct_grid_package_boundary",
-        lambda *_args, **_kwargs: pytest.fail("direct-grid limit failure must not reach package boundary"),
     )
     store = LocalObjectStore(tmp_path)
     products = _write_canonical_products(store, forecast_hours=(0, 3, 6))
@@ -5313,20 +5305,6 @@ def _assert_direct_grid_value_failure_without_ready_outputs(
     assert not (tmp_path / "forcing").exists()
     assert repository.cycle_updates[-1]["status"] == "failed_forcing"
     assert repository.cycle_updates[-1]["error_code"] == "FORCING_FAILED"
-
-
-def _capture_direct_grid_package_boundary(
-    monkeypatch: pytest.MonkeyPatch,
-    captured: dict[str, Any],
-) -> None:
-    def stop_at_boundary(self: ForcingProducer, **kwargs: Any) -> None:
-        captured.update(kwargs)
-        raise ForcingProductionError("issue #546 package/lineage boundary")
-
-    monkeypatch.setattr(
-        "workers.forcing_producer.producer.ForcingProducer._stop_at_direct_grid_package_boundary",
-        stop_at_boundary,
-    )
 
 
 def _build_repository(

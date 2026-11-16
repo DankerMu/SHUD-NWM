@@ -2472,51 +2472,6 @@ def test_manual_retry_rejects_older_failure_when_latest_truth_succeeded() -> Non
         assert _events(store) == []
 
 
-def test_expire_stale_retries_allows_new_retry() -> None:
-    with _store() as store:
-        _create_job(store, job_id="job_failed", run_id="run_1", status="failed", error_code="NODE_FAILURE")
-        pending = _create_job(
-            store,
-            job_id="job_pending",
-            run_id="run_1",
-            status="pending",
-            error_code=None,
-            retry_count=1,
-        )
-        pending.slurm_job_id = None
-        pending.created_at = datetime(2026, 5, 1, tzinfo=UTC)
-        store.session.add(pending)
-        store.session.commit()
-        gateway = _RecordingGateway(job_id="slurm_retry_1")
-        service = RetryService(store, RetryConfig(max_retries=3))
-
-        expired = service.expire_stale_retries(max_age_seconds=1)
-        retry = service.attempt_manual_retry("run_1", gateway=gateway, trusted_internal=True)
-
-        assert [job.job_id for job in expired] == ["job_pending"]
-        assert expired[0].status == "failed"
-        assert expired[0].error_code == "RETRY_STALE_PENDING"
-        assert retry.status == "submitted"
-        assert retry.job_id != "job_pending"
-        assert _events(store)[0].event_type == "retry_expired"
-
-
-def test_expire_stale_retries_ignores_non_retry_pending_jobs() -> None:
-    with _store() as store:
-        pending = _create_job(store, job_id="job_pending", run_id="run_1", status="pending", error_code=None)
-        pending.slurm_job_id = None
-        pending.created_at = datetime(2026, 5, 1, tzinfo=UTC)
-        store.session.add(pending)
-        store.session.commit()
-        service = RetryService(store, RetryConfig(max_retries=3))
-
-        expired = service.expire_stale_retries(max_age_seconds=1)
-
-        assert expired == []
-        store.session.refresh(pending)
-        assert pending.status == "pending"
-
-
 def test_audit_event_auto() -> None:
     with _store() as store:
         job = _create_job(store, error_code="STORAGE_WRITE_FAILED")

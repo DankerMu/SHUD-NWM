@@ -13,8 +13,13 @@ from packages.common.best_available import (
     BestAvailableSelection,
     ForcingInputSelection,
     fallback_order_for_valid_time,
-    source_priority,
 )
+
+
+def source_priority(source_id: str) -> int:
+    # Python mirror of the SQL priority CASE in packages/common/best_available.py, kept for the fake (#3148).
+    priorities = {"ERA5": 100, "CLDAS": 90, "GFS": 10}
+    return priorities.get(source_id.upper(), 0)
 
 
 class FakeBestAvailableRepository:

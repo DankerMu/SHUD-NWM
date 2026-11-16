@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from services.orchestrator.persistence import (
-    RESERVATION_ACTIVE_STATUSES,
+    RESERVATION_ACTIVE_STATUSES,  # noqa: F401 -- re-export; identity pinned by tests/test_status_vocab_parity.py
     RESERVED_STATUS,
 )
 
@@ -87,12 +87,6 @@ def idempotency_key_from_comment(comment: str | None) -> str | None:
     if comment.startswith(SLURM_COMMENT_PREFIX):
         return comment[len(SLURM_COMMENT_PREFIX) :]
     return None
-
-
-def reservation_is_active(status: str | None) -> bool:
-    """True when an existing reservation must NOT be re-submitted."""
-
-    return status in RESERVATION_ACTIVE_STATUSES
 
 
 @dataclass(frozen=True)

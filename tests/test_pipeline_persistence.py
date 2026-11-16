@@ -115,7 +115,6 @@ def test_pipeline_event_append_and_bidirectional_queries() -> None:
 
         assert event.event_id == 1
         assert event.details == {"slurm_job_id": "124"}
-        assert store.query_jobs_by_slurm_id("124").job_id == "job_forecast"
         assert [job.job_id for job in store.query_jobs_by_run("run_1")] == ["job_download", "job_forecast"]
         assert [job.job_id for job in store.query_jobs_by_cycle("gfs_2026050100")] == [
             "job_download",

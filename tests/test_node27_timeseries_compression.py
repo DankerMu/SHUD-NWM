@@ -147,7 +147,6 @@ def test_compress_timeout_preserves_outer_cleanup_budgets(tmp_path: Path) -> Non
     assert compression._CLEANUP_MARGIN_SECONDS is COMPRESSION_CLEANUP_MARGIN_SECONDS
     assert compression._SYSTEMD_MARGIN_SECONDS == 40
     # The exact admission boundary is the shared 300-second cleanup contract.
-    assert compression._ceil_div(config.compress_timeout_ms, 1000) == 3_600
     assert config.wrapper_wall_seconds == 3_600 + COMPRESSION_CLEANUP_MARGIN_SECONDS
     # Leg 2: service wall must sit strictly above wrapper + 40 s systemd margin.
     # Equality at wrapper+40 is refused; the committed default is 3941.

@@ -39,7 +39,7 @@ compressed chunk:
 ===========================  ==========================================
 group                        allowed text fact columns
 ===========================  ==========================================
-A, eight segment blocks      river_segment_id, river_network_version_id,
+A, seven segment blocks      river_segment_id, river_network_version_id,
                              variable
 A9, latest-product fallback  run_id, river_network_version_id, variable
 B, publisher discovery       variable
@@ -447,7 +447,7 @@ class _CaptureCursor:
     """Records every rendered statement; returns nothing, like an empty table.
 
     Rendering by execution rather than by reading source is what makes these
-    assertions non-vacuous: the eight segment blocks interpolate a scenario /
+    assertions non-vacuous: the seven segment blocks interpolate a scenario /
     identity filter, and the fallback's heavy statement only exists after the
     header prefetch has run.
     """
@@ -489,10 +489,6 @@ def _segment_block_executions() -> dict[str, tuple[str, Any]]:
         assert len(cursor.statements) == 1, label
         rendered[label] = cursor.executed[0]
 
-    capture(
-        "latest_issue_time",
-        lambda cursor: store._latest_issue_time(cursor, **_IDENTITY, scenario_filter=_NO_FILTER),
-    )
     capture(
         "per_source_latest_cycles",
         lambda cursor: store._per_source_latest_cycles(
@@ -565,7 +561,7 @@ PUSHED_SCENARIO_FILTER = forecast_store._scenario_filter(["GFS"])
 def _pushed_segment_block_executions() -> dict[str, tuple[str, Any]]:
     """The three pushed variants of the forecast segment-block owners (#2417).
 
-    Kept OUT of ``_segment_block_executions``: that register is the eight
+    Kept OUT of ``_segment_block_executions``: that register is the seven
     execution owners of the shared segment source, and its default rendering is
     the un-pushed baseline. These are the same owners driven the way
     ``forecast_series`` drives them in production, which is the only rendering
@@ -789,9 +785,9 @@ def test_forecast_store_pushed_segment_blocks_still_execute_exactly_one_statemen
         call(cursor)
         assert len(cursor.statements) == 1, label
         assert "FROM hydro.hydro_run h\n" not in cursor.statements[0], label
-    # The eight un-pushed owners are asserted the same way by the shared capture
+    # The seven un-pushed owners are asserted the same way by the shared capture
     # helper, which refuses any owner that issues more than one statement.
-    assert len(_segment_block_executions()) == 8
+    assert len(_segment_block_executions()) == 7
     assert len(_pushed_segment_block_executions()) == 3
 
 
@@ -814,7 +810,7 @@ def test_forecast_store_deliberately_spanning_branches_push_nothing_that_pins_a_
         assert "AND h.scenario_id = 'analysis_true_field'" in _fact_branch(rendered[label]), label
 
 
-#: The seven segment blocks that inline ``_segment_rows_source_sql()``. #2424 D1
+#: The six segment blocks that inline ``_segment_rows_source_sql()``. #2424 D1
 #: moved ``per_source_latest_cycles`` off that shared source onto its own
 #: correlated membership probe, whose identity spelling is pinned below and in
 #: ``tests/test_latest_cycle_discovery_shape.py``; it stays a segment block, so
@@ -824,7 +820,7 @@ LATEST_CYCLE_DISCOVERY_BLOCK = "per_source_latest_cycles"
 
 def _source_row_block_statements() -> dict[str, str]:
     rendered = _segment_block_statements()
-    assert len(rendered) == 8
+    assert len(rendered) == 7
     assert LATEST_CYCLE_DISCOVERY_BLOCK in rendered
     return {label: sql for label, sql in rendered.items() if label != LATEST_CYCLE_DISCOVERY_BLOCK}
 
@@ -839,10 +835,10 @@ def test_forecast_store_segment_blocks_carry_no_text_pushdown_aid() -> None:
     with the aid). The narrow table segments by ``river_segment_key`` instead, so
     that column is gone and the predicate would now raise ``column
     river_segment_id does not exist``. The requirement flipped sign; it did not
-    disappear, which is why it is still asserted over all eight.
+    disappear, which is why it is still asserted over every block.
     """
     rendered = _segment_block_statements()
-    assert len(rendered) == 8
+    assert len(rendered) == 7
     for label, sql in rendered.items():
         assert "rt.river_segment_id" not in sql, label
         if label == LATEST_CYCLE_DISCOVERY_BLOCK:
@@ -925,7 +921,7 @@ def test_forecast_store_segment_blocks_resolve_identity_through_the_authority_ta
     from tests.test_latest_cycle_discovery_shape import assert_latest_cycle_discovery
 
     rendered = _source_row_block_statements()
-    assert len(rendered) == 7
+    assert len(rendered) == 6
     for label, sql in rendered.items():
         _assert_segment_block_identity_predicates(sql, label)
     discovery, parameters = _segment_block_executions()[LATEST_CYCLE_DISCOVERY_BLOCK]
@@ -940,7 +936,7 @@ def test_the_identity_predicate_pin_reddens_if_the_c1_spelling_is_reverted() -> 
     symmetric rewrite of a conjunct leaves it silent — its silence is not evidence
     the spelling survived. This pin is the one that bites, and this case is the
     proof that it does: reverting exactly C1's substitution, on every one of the
-    seven source-row blocks and on #2424's discovery probe, must make it RED. If
+    six source-row blocks and on #2424's discovery probe, must make it RED. If
     this ever passes, the pin above has been weakened to something a plain ``=``
     also satisfies.
     """
@@ -957,7 +953,7 @@ def test_the_identity_predicate_pin_reddens_if_the_c1_spelling_is_reverted() -> 
         with pytest.raises(AssertionError):
             assert_latest_cycle_discovery(unguarded, parameters)
     rendered = _source_row_block_statements()
-    assert len(rendered) == 7
+    assert len(rendered) == 6
     for label, sql in rendered.items():
         reverted = sql.replace(" IS NOT DISTINCT FROM (", " = (")
         assert reverted != sql, label
@@ -1131,7 +1127,6 @@ def test_forecast_store_segment_blocks_bind_every_placeholder_they_grew() -> Non
     scenarios = forecast_store._scenario_filter(["GFS"])
     identity = forecast_store._run_identity_filter(run_id="run_a", model_id="model_a")
     calls = (
-        ("latest_issue_time", lambda cursor: store._latest_issue_time(cursor, **_IDENTITY, scenario_filter=scenarios)),
         (
             "per_source_latest_cycles",
             lambda cursor: store._per_source_latest_cycles(

@@ -199,16 +199,6 @@ def _validate_manifest_entry(entry: Any, task_id: int, manifest_index_path: str)
     return result
 
 
-def load_manifest_index(manifest_index_path: str) -> list[dict[str, Any]]:
-    data = _read_manifest_index_list(manifest_index_path)
-    if not data:
-        raise ManifestValidationError(
-            "Manifest index is empty.",
-            {"manifest_index_path": manifest_index_path},
-        )
-    return [_validate_manifest_entry(entry, index, manifest_index_path) for index, entry in enumerate(data)]
-
-
 def manifest_task_identities(manifest_index_path: str) -> dict[int, tuple[str, str]]:
     """Return proven ``task_id -> (model_id, run_id)`` pairs from one bounded index read.
 

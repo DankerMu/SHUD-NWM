@@ -88,15 +88,6 @@ class SmartEvidence:
     blockers: tuple[str, ...]
 
 
-@dataclass(frozen=True)
-class RootStorageHealth:
-    raid: RaidEvidence
-    smart: tuple[SmartEvidence, ...]
-    members: tuple[str, ...]
-    healthy: bool
-    blockers: tuple[str, ...]
-
-
 def _iso(value: datetime) -> str:
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
@@ -314,35 +305,3 @@ def parse_smart_evidence(path: Path, *, device: str, policy: EvidencePolicy, now
         blockers=blockers,
     )
 
-
-def verify_root_storage_evidence(
-    mdadm_path: Path,
-    smart_paths: Mapping[str, Path],
-    *,
-    policy: EvidencePolicy,
-    now: datetime,
-) -> RootStorageHealth:
-    raid = parse_mdadm_evidence(mdadm_path, policy=policy, now=now)
-    smart: list[SmartEvidence] = []
-    blockers = list(raid.blockers)
-    for member in raid.members:
-        path = smart_paths.get(member)
-        if path is None:
-            blockers.append(f"SMART evidence missing for {member}")
-            continue
-        try:
-            observed = parse_smart_evidence(path, device=member, policy=policy, now=now)
-        except ValueError as error:
-            blockers.append(str(error))
-            continue
-        smart.append(observed)
-        blockers.extend(observed.blockers)
-    if len(smart) != 2:
-        blockers.append("exactly two descriptor-bound SMART observations are required")
-    return RootStorageHealth(
-        raid=raid,
-        smart=tuple(smart),
-        members=raid.members,
-        healthy=raid.healthy and len(smart) == 2 and all(item.status == "PASS" for item in smart) and not blockers,
-        blockers=tuple(dict.fromkeys(blockers)),
-    )

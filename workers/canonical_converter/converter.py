@@ -1223,17 +1223,6 @@ def _ifs_step_hours(forecast_hour: int | None, previous_forecast_hour: int | Non
     return float(max(1, forecast_hour - previous_forecast_hour))
 
 
-def compute_time_axis(cycle_time: str | datetime, forecast_hours: list[int]) -> list[dict[str, Any]]:
-    parsed_cycle_time = parse_cycle_time(cycle_time)
-    return [
-        {
-            "valid_time": parsed_cycle_time + timedelta(hours=forecast_hour),
-            "lead_time_hours": forecast_hour,
-        }
-        for forecast_hour in forecast_hours
-    ]
-
-
 class CanonicalConverter:
     def __init__(
         self,
@@ -1485,17 +1474,6 @@ class CanonicalConverter:
             )
         except (OSError, ObjectStoreError, ValueError) as error:
             raise CanonicalConversionError(f"Failed to write canonical product catalog {key}: {error}") from error
-
-    def _read_records(self, entries: list[dict[str, Any]]) -> list[RawRecord]:
-        records: list[RawRecord] = []
-        for entry in entries:
-            native_variable = entry["variable"]
-            standard_variable = map_variable(native_variable, self.config.variable_mapping)
-            if standard_variable is None:
-                LOGGER.warning("Skipping unmapped variable %s from %s", native_variable, entry["local_key"])
-                continue
-            records.append(self._read_record(entry))
-        return records
 
     def _read_record(self, entry: Mapping[str, Any]) -> RawRecord:
         return self._read_record_with_xarray(entry)

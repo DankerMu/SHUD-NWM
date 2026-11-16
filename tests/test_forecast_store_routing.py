@@ -20,12 +20,10 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from packages.common import forecast_store
 from packages.common.forecast_store import ForecastStoreError
 from tests.river_ts_template_registry import AID_MARKER_TAG, FORECAST_STORE_EXECUTIONS
 from tests.test_forecast_api import SqlCaptureForecastStore, _qhh_candidate_row
 from tests.test_latest_cycle_discovery_shape import assert_latest_cycle_discovery
-from tests.test_river_ts_text_identity_cleanup import _CaptureCursor
 
 GFS = datetime(2026, 9, 1, 6, tzinfo=UTC)
 IFS = datetime(2026, 9, 1, tzinfo=UTC)
@@ -136,11 +134,6 @@ PROJECTION = "SELECT rt.run_key, rt.river_network_version_key, rt.valid_time, rt
 # PROJECTION to count and no outer clause of this kind. Its shape is pinned
 # whole by `assert_latest_cycle_discovery` (test_latest_cycle_discovery_shape).
 OUTER_CLAUSES = {
-    "latest_issue_time": (
-        "SELECT h.cycle_time",
-        "WHERE h.cycle_time IS NOT NULL",
-        "ORDER BY h.cycle_time DESC LIMIT 1",
-    ),
     "latest_analysis_issue_time": (
         "SELECT h.end_time",
         "WHERE h.scenario_id = 'analysis_true_field'",
@@ -282,16 +275,6 @@ def test_each_registered_execution_reads_one_fact_table_before_one_outer_selecti
         assert params["run_types"] == ["hindcast"]
         assert params["start_time"] == datetime(2026, 5, 11, tzinfo=UTC)
         assert params["end_time"] == datetime(2026, 5, 14, tzinfo=UTC)
-    if owner == "latest_issue_time":
-        cursor = _CaptureCursor([[{"cycle_time": GFS}]])
-        selected = forecast_store.PsycopgForecastStore("postgresql://unit-test")._latest_issue_time(
-            cursor,
-            **IDENTITY,
-            scenario_filter=forecast_store._scenario_filter(["GFS"]),
-        )
-        assert selected == datetime(2026, 9, 1, 6, tzinfo=UTC)
-        assert len(cursor.executed) == 1
-        assert_narrow_fact_read(*cursor.executed[0])
 
 
 def test_latest_product_reads_one_narrow_river_cte_and_preserves_public_response():
