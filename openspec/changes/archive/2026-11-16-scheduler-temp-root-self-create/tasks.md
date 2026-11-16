@@ -32,9 +32,15 @@
 - [x] 2.2 `openspec validate scheduler-temp-root-self-create --strict --no-interactive` PASS.
 - [x] 2.3 `uv run ruff check .` PASS; `uv run pytest -q tests/test_any_ratchet.py` PASS.
 - [x] 2.4 Selector-routed pytest files for the changed sources PASS locally.
-- [ ] 2.5 node-22 live acceptance (deferred to the post-catch-up node-22 sync
+- [x] 2.5 node-22 live acceptance (deferred to the post-catch-up node-22 sync
   window; node-22's 3.12 venv is never `uv sync`ed): delete the temp root, run
   one pass, observe no `preflight_blocked` and `created=true` in evidence.
+  - Evidence (2026-11-16 live drill, owner-approved): at a pass boundary (timer stopped 05:04:44Z, service inactive
+    05:38:05Z) `NHMS_SCHEDULER_TEMP_ROOT=/scratch/frd_muziyao/nhms-prod/tmp` was moved aside (absent), one pass ran
+    and finished `success` (05:45:16Z); evidence `scheduler_2026111605_9eed2c80046d.json`: `status=planned`,
+    `root_preflight.status=ready`, `checks.temp_root` = `{allow_create: true, created: true, contained: true,
+    writable: true, symlink: false}`, `failed_count=0`; the directory was recreated (`drwx------`), the timer was
+    restored (`active`). Drill log `/scratch/frd_muziyao/drill-tmproot-20261116.log`.
   - Status (2026-11-16): the fix is deployed, but the acceptance drill has not been run.
     - node-22 is at `b2fc70547`, which contains `49905a363` (PR #3067; #3061 closed 2026-11-06).
     - Pass `scheduler_2026110709_b9afada00930` shows `root_preflight.checks.temp_root.allow_create=true`.

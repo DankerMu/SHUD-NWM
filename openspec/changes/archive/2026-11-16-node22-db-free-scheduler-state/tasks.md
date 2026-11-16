@@ -585,7 +585,8 @@ Scenario evidence rows for section 5:
   visibility probes have executable stdout/stderr/row/time/reap bounds and
   assert child reap on byte, row, and timeout exits.
 
-- [ ] 9.6 Complete local, CI, and node-22 live verification.
+- [x] 9.6 Complete local, CI, and node-22 live verification.
+  - Waived (owner decision 2026-11-16): the injection drill is replaced by the natural live recovery of 2026-11-07 (pass `…110707_b29bb2f19234`, exact Slurm comment match to job 113188) recorded in the status note below; local and CI parts were merged with PR #1113.
   Evidence floor: the issue-targeted pytest command, `uv run ruff check .`, and
   strict OpenSpec validation pass; CI is green at the frozen PR SHA; node-22
   injects a bounded accepted-submit response timeout and proves automatic exact

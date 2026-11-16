@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change governance-4-entropy-automation. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: Entropy audit produces repeatable reports
 
 The repository SHALL provide a script that scans entropy signals and emits both machine-readable JSON and human-readable Markdown reports.
@@ -120,3 +122,13 @@ with a mirror — SHALL be unchanged.
   surface holds no database, whether the trigger is the rollback wording or a
   database token that survives that assertion
 
+### Requirement: The stale-display-route check SHALL skip archived changes
+`_check_stale_route_tokens` SHALL not scan paths under `openspec/changes/archive/`; `_path_is_route_authority_expanded_scope` SHALL keep its treatment of `docs/archived/` and `docs/runbooks/`. The report's `skipped_path_families` list (a flat list of strings consumed by `write_entropy_baseline.py`) SHALL gain the entry `openspec/changes/archive (stale-display-route-token only)`.
+
+#### Scenario: Archived change is not a finding
+- **WHEN** an archived change under `openspec/changes/archive/` mentions a retired display route
+- **THEN** the report contains no `stale-display-route-token` finding for that path
+
+#### Scenario: Active change still is
+- **WHEN** a non-archived change under `openspec/changes/` mentions a retired display route without an archive marker
+- **THEN** the report contains a `stale-display-route-token` finding for it

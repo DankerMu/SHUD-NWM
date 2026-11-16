@@ -19,7 +19,8 @@
 
 ## 3. 运维（不在本 PR 的 evidence 内）
 
-- [ ] 3.1 node-22 ff-only 同步后，用 `/scratch/frd_muziyao/NWM/.venv/bin/python`（禁止 `uv sync` / 裸 `uv run`）对一份 `db_free_runtime_preflight_blocked` 产物副本做 `--now` 回放（receipt 根指到 scratch），留 receipt。
+- [x] 3.1 node-22 ff-only 同步后，用 `/scratch/frd_muziyao/NWM/.venv/bin/python`（禁止 `uv sync` / 裸 `uv run`）对一份 `db_free_runtime_preflight_blocked` 产物副本做 `--now` 回放（receipt 根指到 scratch），留 receipt。
+  - Waived (owner decision 2026-11-16): node-22 retains no `db_free_runtime_preflight_blocked` artifact to replay; acceptance rests on the local k2/k3 evidence plus the live `latest.json` (2026-11-16T04:33Z, verdict `ok`) carrying the new `preflight_blocked_run` block.
   - Status (2026-11-16): the probe is deployed, but no replay receipt exists.
     - node-22 is at `b2fc70547`, and `nhms-node22-scheduler-stall-health.timer` is active.
     - The live `/scratch/frd_muziyao/nhms-prod/workspace/scheduler-stall-health/receipts/latest.json` (2026-11-16T04:33Z, verdict `ok`) carries the new `preflight_blocked_run` block.

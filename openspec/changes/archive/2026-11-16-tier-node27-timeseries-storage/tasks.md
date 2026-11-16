@@ -1215,7 +1215,7 @@ Order is load-bearing:
   fsync failure, reader/publisher concurrency and a two-process same-byte inode
   swap; only the persisted identity record, never in-memory state, may authorize
   later reconciliation.
-  - Superseded (2026-11-16 hygiene): the v3 controlled replay this task waited on can no longer be run.
+  - Superseded (2026-11-16 hygiene): the v3 controlled replay this task waited on can no longer be run. Owner confirmed superseded on 2026-11-16.
     - It was bound to the pre-2026-11-05 cluster's database identity and mutation SHA. That cluster was discarded by the fresh initdb (ADR 0002 "Revision 2026-11-05").
     - ADR 0002 Amendment 2026-09-16 records the installed replay unit as `absent-approved`, with source and templates retained, and says the handoff claims no "v3 replay PASS". #1069 was closed COMPLETED on 2026-07-17. No repo document explicitly withdraws the v3-terminal requirement, so the owner should confirm this verdict.
     - The capability itself runs in production. On 2026-11-16 node-27 (read-only) showed:
