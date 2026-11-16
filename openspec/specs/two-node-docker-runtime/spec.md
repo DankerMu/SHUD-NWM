@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change m22-two-node-docker-readonly-display. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: One app image with role-specific startup
 
 The Docker runtime SHALL build one default application image that can start role-specific commands through environment configuration.
@@ -270,3 +272,16 @@ widens to future tests nor re-judges that one.
   unlink/rmdir set), and the suite's pass/skip distribution is
   unchanged on hosts where the test is skipped
 
+### Requirement: Display compose port env key is canonical
+
+The display compose configuration SHALL use `NHMS_DISPLAY_API_PORT` as the only
+display API host-port interpolation key, and the display env template SHALL
+define the same key with the production-compatible default `8080`.
+
+#### Scenario: compose and display env share the same port key
+
+- **WHEN** the two-node docker runtime static checker validates the display
+  compose file and display env template
+- **THEN** it SHALL find `NHMS_DISPLAY_API_PORT` in both artifacts
+- **AND** it SHALL reject alternate display port interpolation aliases that are
+  absent from the display env template
