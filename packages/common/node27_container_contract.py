@@ -249,14 +249,16 @@ def validated_probe_target(target: str) -> str:
 # container-side path prefix every forensic container dump path must live
 # inside.  Repo-side is the DECISION of where dumps must live; the mount layout
 # it is drawn over is measured (``docker inspect nhms-db``, re-measured
-# 2026-08-06), and that output determines exactly this much (its ``.Mounts``
+# 2026-11-16), and that output determines exactly this much (its ``.Mounts``
 # for the binds, its ``Config.Env`` ``PGDATA`` for which directory is the DB's
-# own data directory): the container carries three host bind mounts, of which
-# the only one landing under this prefix is ``/home/nwm/nhms-evidence`` ->
-# ``/var/lib/postgresql/evidence`` (RW), while the DB's own data directory is
-# ``/home/nwm/nhms-pgdata`` -> ``/home/postgres/pgdata/data`` and the third is
-# the ``ghdc`` tablespace ``/data/GHDC/nwm-archive/nhms-tablespace`` ->
-# ``/home/postgres/pgdata/tablespaces/ghdc`` (added 2026-08-06) -- both outside
+# own data directory): the container carries three host bind mounts, all RW, of
+# which the only one landing under this prefix is ``/home/nwm/nhms-evidence`` ->
+# ``/var/lib/postgresql/evidence``, while the DB's own data directory
+# (``PGDATA=/home/postgres/pgdata/data``) is ``/home/nwm/nhms-primary/pgdata``
+# -> ``/home/postgres/pgdata/data`` and the third is a stub bind
+# ``/home/nwm/nhms-tablespace-ghdc-stub`` ->
+# ``/home/postgres/pgdata/tablespaces/ghdc`` (``pg_tablespace`` lists only
+# ``pg_default`` and ``pg_global``, so no tablespace lives there) -- both outside
 # this prefix, so the conclusion below is unchanged.  So the host-writable region inside the prefix is that
 # ``evidence`` SUBTREE.  Nothing is claimed here about what the prefix path
 # itself is or is not -- that inspect output cannot determine it.
@@ -309,13 +311,17 @@ def container_dump_path_within_mount(value: str) -> bool:
       can create the link and name it through its container path.  That is the
       same actor class the pinned-plan boundary already assumes, not a stronger
       one.  Measured node-27 container shape (``docker inspect nhms-db``,
-      re-measured 2026-08-06 — three binds since the ``ghdc`` tablespace
-      mount; its ``.Mounts`` for the binds, its ``Config.Env`` ``PGDATA``
-      for which directory is the DB's data directory): the only bind mount
-      landing under this prefix is host ``/home/nwm/nhms-evidence`` -> container
-      ``/var/lib/postgresql/evidence`` (RW), i.e. the host-writable region is a
-      SUBTREE of the prefix this predicate spans, and the DB data directory is a
-      separate mount outside it (``/home/postgres/pgdata/data``).  What this
+      re-measured 2026-11-16 — three RW binds; its ``.Mounts`` for the binds,
+      its ``Config.Env`` ``PGDATA`` for which directory is the DB's data
+      directory): the only bind mount landing under this prefix is host
+      ``/home/nwm/nhms-evidence`` -> container ``/var/lib/postgresql/evidence``
+      (RW), i.e. the host-writable region is a SUBTREE of the prefix this
+      predicate spans.  The DB data directory is a separate mount outside it
+      (host ``/home/nwm/nhms-primary/pgdata`` -> container
+      ``/home/postgres/pgdata/data``), as is the stub bind
+      ``/home/nwm/nhms-tablespace-ghdc-stub`` ->
+      ``/home/postgres/pgdata/tablespaces/ghdc`` (``pg_tablespace`` lists only
+      ``pg_default`` and ``pg_global``).  What this
       predicate closes is the pure-string traversal, which needs no filesystem
       foothold at all; a planted symlink stays open.
     * ``/var/lib/postgresql/..\\x00/etc`` (Python escape form) is ADMITTED:

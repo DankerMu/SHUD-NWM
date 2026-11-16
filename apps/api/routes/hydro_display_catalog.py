@@ -148,7 +148,7 @@ def _default_layer_catalog(
                         else national_hydro_source_version
                         if layer_id == "discharge"
                         else river_network_source_version
-                        if layer_id in {"river-network", "met-stations"}
+                        if layer_id == "river-network"
                         else source_version
                     ),
                     basin_version_id=basin_version_id,

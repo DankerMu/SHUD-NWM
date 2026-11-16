@@ -2429,18 +2429,19 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # here; an mvt.py diff that quietly drops a predicate pairing must
             # not reach CI green without them.
             "tests/test_river_ts_read_path_surrogate_keys.py",
-            # #1597: the eight below are DERIVED by the #1455 importer-closure
+            # #1597: the entries below are DERIVED by the #1455 importer-closure
             # guard in tests/test_select_ci_tests.py
             # (test_guarded_module_rules_cover_their_non_gated_importer_closure,
             # now covering services.tiles.mvt), not hand-curated — the guard
             # owns the required set, so a future importer reds it here
-            # instead of silently falling out of the PR lane. Of the eight
-            # added entries, four are direct non-gated importers that assert
+            # instead of silently falling out of the PR lane. #1597 added
+            # eight; seven remain since #3149 dropped the flip suite. Four are
+            # direct non-gated importers that assert
             # the postgis_tile_sql() output shape (hhe_mvt_binding,
             # hydro_display_mvt_scaling, the two node27_timeseries_compression
-            # suites); the three direct_grid_display_cutover_* suites plus
-            # test_openapi_31_contract.py are the one-hop additions via
-            # apps/api/routes/hydro_display.py and
+            # suites); the direct_grid_display_cutover_{history,model_resolution}
+            # suites plus test_openapi_31_contract.py are the one-hop additions
+            # via apps/api/routes/hydro_display.py and
             # apps/api/openapi_patching.py respectively. The two
             # `integration`-marked importers stay out per the #1447 ruling:
             # they auto-skip without NHMS_RUN_INTEGRATION (tests/conftest.py),
@@ -2449,9 +2450,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # (`test_mvt_national_identity_probe{,_cycles,_digest}_integration.py`),
             # each with the module-level `integration` mark, so all three stay
             # out under the same ruling.
-            # #2527: the flip suite is two partitions; the row carries both
-            # (see DIRECT_GRID_DISPLAY_CUTOVER_FLIP_TESTS for why both).
-            *DIRECT_GRID_DISPLAY_CUTOVER_FLIP_TESTS,
+            # #3149: the two #2527 flip partitions are no longer carried here.
+            # Neither imports a display module, and the station MVT layer
+            # `_mvt_set` modelled went with the retired station tile route
+            # (#2773 item 4); they ride the station_set_flip.py rule instead.
             "tests/test_direct_grid_display_cutover_history.py",
             "tests/test_direct_grid_display_cutover_model_resolution.py",
             "tests/test_hhe_mvt_binding.py",
@@ -2564,9 +2566,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # #1672: hydro_display.py joins GUARDED_MODULE_CLOSURES and its rule is
         # extended to the current mechanically derived direct UNION one-hop
         # non-gated importer closure (tests/test_select_ci_tests.py derives the
-        # required set from the tracked tree, never frozen). The three cutover
-        # suites (four files since #2527 split the flip suite in two; only its
-        # `_atomic` partition is a derived importer), display status-only, HHE/MVT, node-27 compression and
+        # required set from the tracked tree, never frozen). The two cutover
+        # suites (history and model_resolution; #3149 dropped the #2527 flip
+        # partitions, which import no display module since #2773), display
+        # status-only, HHE/MVT, node-27 compression and
         # attribution suites are direct importers; the 3.1-contract and
         # runtime-mode suites are the one-hop contributions via
         # apps/api/openapi_patching.py and apps/api/route_registry.py. The two
@@ -2596,11 +2599,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # suite imports get_hydro_display_session from this module at file
             # level, so it is a direct non-gated importer.
             "tests/test_api_errors_logging.py",
-            # #2527: the flip suite is two partitions; the row carries both.
-            # Only `_atomic` is a derived direct importer of this family; the
-            # `_mvt_set` partition rides along as the model of the predicate
-            # `_atomic` locks (see DIRECT_GRID_DISPLAY_CUTOVER_FLIP_TESTS).
-            *DIRECT_GRID_DISPLAY_CUTOVER_FLIP_TESTS,
+            # #3149: the two #2527 flip partitions are no longer carried here
+            # (see the services/tiles/mvt.py rule above); neither imports this
+            # family since #2773.
             "tests/test_direct_grid_display_cutover_history.py",
             "tests/test_direct_grid_display_cutover_model_resolution.py",
             "tests/test_display_publish_status_only.py",
