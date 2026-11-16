@@ -13,9 +13,10 @@ one PR and **retire `station_set_flip`**. The owner also confirmed that the node
    changed to accept the archive relocation that production already resolves (`ARCHIVE_VERDICT_GLOB`): assert that
    the resolved path equals `DEFAULT_VERDICT_PATH` or matches `ARCHIVE_VERDICT_GLOB`, and read the bytes from the
    resolved path. Production code is unchanged.
-2. **Retire `station_set_flip` (decision A).** No production code registers the hook, so it never ran. The one
-   production reader of `active_flag`, `workers/forcing_producer/store.py::load_met_stations`, selects the legacy set
-   and excludes inactive mirrors, so deleting the hook changes no behaviour. Delete:
+2. **Retire `station_set_flip` (decision A).** No production code registers the hook, so it never ran. The production
+   readers of `active_flag` (`workers/forcing_producer/store.py::load_met_stations`, which selects the legacy set, and
+   `packages/common/object_store_forcing.py`, which desensitizes the 404 details) do not depend on the hook, so
+   deleting it changes no behaviour. Delete:
    - `packages/common/station_set_flip.py`;
    - its suites `tests/test_direct_grid_display_cutover_flip_atomic.py` and `..._flip_mvt_set.py`, and
      `tests/direct_grid_display_cutover_flip_helpers.py`;
