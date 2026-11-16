@@ -91,13 +91,13 @@ group by rnv.river_network_version_id, rnv.segment_count;
 
 - `output_segment_count` **不是** `core.river_network_version` 的列（`db/migrations/` 里
   也没有任何表带这个列名）。它是 JSON / receipt 字段：导入 receipt、
-  `core.model_instance.resource_profile`（由 `packages/common/forecast_store.py:268`、
-  `packages/common/display_coverage.py:86` 读取），以及调度器 file-registry /
-  candidate / chain manifest（`services/orchestrator/scheduler_file_providers.py:1061-1104`
+  `core.model_instance.resource_profile`（由 `packages/common/forecast_store.py::_QHH_LATEST_CANDIDATE_RUNS_SQL`、
+  `packages/common/display_coverage.py::_CANDIDATE_RUNS_SQL` 等读取），以及调度器 file-registry /
+  candidate / chain manifest（`services/orchestrator/scheduler_file_providers.py::_normalize_registry_model`
   等）。值同样等于 `.sp.riv` reach 数。按列名去查库只会得到 `column does not exist`。
 - 已经正确过滤的现成 oracle，可直接抄谓词：
-  `workers/model_registry/basins_registry_import.py:610-620`（reach 行幂等守卫）、
-  `tests/test_real_database_integration.py:448-453`（reach 行几何断言）、
+  `workers/model_registry/basins_registry_rows.py::_ensure_river_segments`（reach 行幂等守卫）、
+  `tests/test_real_database_integration.py::test_no_cross_gap_invariant_holds_after_ingest`（reach 行几何断言）、
   `tests/test_basins_registry_import_qhh.py::test_pr2_contract_reach_rows_single_part_and_crosswalk_count`
   （真实库里钉住 `total_rows == 2 × segment_count`）。
 - `workers/output_parser/parser.py::load_river_segments`（`:820-838`）是

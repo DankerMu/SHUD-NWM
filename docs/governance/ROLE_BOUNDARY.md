@@ -128,7 +128,7 @@ Representative active paths:
 - `apps/api/main.py` when `NHMS_SERVICE_ROLE=display_readonly`.
 - Readonly API routes in `apps/api/routes/forecast.py`,
   `apps/api/routes/models.py`, `apps/api/routes/pipeline.py`,
-  `apps/api/routes/flood_alerts.py`, `apps/api/routes/best_available.py`,
+  `apps/api/routes/hydro_display.py`, `apps/api/routes/best_available.py`,
   `apps/api/routes/data_sources.py`, and
   `apps/api/routes/state_snapshots.py`.
 - Frontend display assets under `apps/frontend`.

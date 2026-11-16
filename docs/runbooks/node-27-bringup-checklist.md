@@ -306,7 +306,7 @@ C2 证的是**读**边界（`nhms_display_ro`
 > producer/validator/private
 > publisher/binder 已由 #2123 合并，其输入分类优先级由 #2130 晋升为权威规格。独立 C4 判定执行
 > `test:e2e:live-c4-display`：以 `/` strict 单页地图 + `/ops` 为准，
-> `/hydro-met -> /` 仅作旧别名 redirect smoke。`e2e/monitoring.spec.ts`
+> `/hydro-met -> /` 仅作旧别名 redirect smoke。`e2e/monitoring.mocked.spec.ts`
 > 不是 C4 替代品；撤回 #1895 rollout 不删除或重新分配这些独立展示职责。
 
 - [ ] 既有 display owner 在其批准窗口以真实 node-27 backend 执行

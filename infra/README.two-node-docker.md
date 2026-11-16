@@ -28,7 +28,7 @@
 
 | 节点 | 角色 | 能力 | 禁止事项 |
 | --- | --- | --- | --- |
-| 22 | `compute_control` | compute-api writer DB/rollback env、DB-free scheduler-once、writable workspace、writable published artifacts、writable shared object-store mirror、Slurm/Gateway 访问 | 不暴露公网控制入口；scheduler-once 不继承 `DATABASE_URL` |
+| 22 | `compute_control` | compute-api writer DB/rollback env（仅 design intent / 隔离 E2E；生产 node-22 不连任何 DB）、DB-free scheduler-once、writable workspace、writable published artifacts、writable shared object-store mirror、Slurm/Gateway 访问 | 不暴露公网控制入口；scheduler-once 不继承 `DATABASE_URL` |
 | 27 | `display_readonly` | readonly DB、readonly published artifacts、readonly shared object-store mirror、FastAPI/frontend display、`/ops` 只读诊断 | 不挂 Slurm/Munge、workspace、Basins、Docker socket，不配置 Gateway URL，不写业务终态 |
 
 共享面只允许是 PostgreSQL、published artifacts 和只读 shared object-store mirror。27 不能通过挂载 22 私有 workspace、`.nhms-runs`、private `/scratch` 或 mock Gateway 来完成生产验收。
@@ -332,7 +332,9 @@ Linux Docker 上如果 `compute-api` 的 `DATABASE_URL` 指向 22 host 上的 DB
 `scheduler-once` 不会继承该变量。如果本地 E2E 的 PostgreSQL 本身也是 Docker 容器，优先把该 DB
 容器加入 `nhms-compute_default` 网络，并在未提交的 `infra/env/compute.env` 中使用 DB 容器名和容器端口，例如
 `postgresql://<user>:<redacted>@nhms-22-e2e-db:5432/nhms`。不要为了本机测试把明文 DSN 写入 checked-in
-example，也不要把测试 DB 产物放进仓库。
+example，也不要把测试 DB 产物放进仓库。以上 `compute-api` `DATABASE_URL` 只适用于隔离 E2E
+或显式 archived rollback 演练（design intent）；生产 node-22 不连任何 DB，不得设置该变量（见
+[`docs/runbooks/node22-db-retirement-runbook.md`](../docs/runbooks/node22-db-retirement-runbook.md)）。
 
 22 scheduler-once 手工执行：
 
@@ -782,7 +784,7 @@ cd "$CHECKOUT_ROOT"
 | Evidence | 记录内容 | PASS 边界 |
 | --- | --- | --- |
 | `docker-preflight/` | DockerRootDir、cache/space、TMPDIR、evidence root | 只证明 Docker 环境可继续，不证明 E2E |
-| `22-compute/` | compute compose config/up/ps/logs、DB-free scheduler-once、compute-api writer DB/rollback env、published artifact write | 只证明 22 compute lane；scheduler proof 必须显示无 `DATABASE_URL` |
+| `22-compute/` | compute compose config/up/ps/logs、DB-free scheduler-once、compute-api writer DB/rollback env（仅隔离 E2E；生产 node-22 不连任何 DB）、published artifact write | 只证明 22 compute lane；scheduler proof 必须显示无 `DATABASE_URL` |
 | `27-display/` | display compose config/up/ps/logs、runtime config、readonly mount | 只证明 27 display lane |
 | `db/` | readonly DB role、`current_user`、permission probes、redacted DSN | 真实 readonly DB 缺失时 BLOCKED |
 | `api/` | health、runtime config、models、stations、latest-product、ops/jobs/logs | strict identity 缺失时不得 PASS |

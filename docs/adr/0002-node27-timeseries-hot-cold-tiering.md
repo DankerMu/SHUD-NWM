@@ -593,12 +593,21 @@ Runbook — the single operator entrypoint for all sections below:
 | #846 | Storage-source foundation | `packages/common/runtime_storage_source.py` | — | §1 |
 | #849 | Product archive mover + inventory audit systemd + capacity guards | `scripts/node27_product_archive.py`, `scripts/node27_storage_inventory_audit.py` | [`schemas/archive_completeness_receipt.schema.json`](../../schemas/archive_completeness_receipt.schema.json) | Install / Operation / Rollback (top of runbook) |
 | #850 | DB-export salvage exporter + manual restore | `scripts/node27_db_export_salvage.py` | [`schemas/db_export_salvage_receipt.schema.json`](../../schemas/db_export_salvage_receipt.schema.json) | §3 (including §3.2 manual restore) |
-| #851 | Hypertable compression migration + runner | `db/migrations/000047_hypertable_compression.sql`, `scripts/node27_timeseries_compression.py` | [`schemas/timeseries_compression_receipt.schema.json`](../../schemas/timeseries_compression_receipt.schema.json) | §4 (including §4.3 decompress procedure) |
+| #851 | Hypertable compression migration + runner | `db/migrations/000047_hypertable_compression_settings.sql`, `scripts/node27_timeseries_compression.py` | [`schemas/timeseries_compression_receipt.schema.json`](../../schemas/timeseries_compression_receipt.schema.json) | §4 (including §4.3 decompress procedure) |
 | #852 | Fail-closed compressed-chunk write guard | `packages/common/timescale_write_guard.py` + wired at 3 write paths | — (in-process exception) | §4.3 |
 | #853 | Compression systemd + governance registration | `infra/systemd/nhms-node27-timeseries-compression.{service,timer}` | — | §4 install / cadence / rollback |
 | #854 | Archive rebuild drill (isolated staging) | `scripts/node27_archive_rebuild_drill.py` | [`schemas/archive_rebuild_drill_receipt.schema.json`](../../schemas/archive_rebuild_drill_receipt.schema.json) | §7 (including §7.5 coverage rule + §7.6 recovery) |
 | #855 | Gated retention runner (`drop_chunks`) + systemd | `scripts/node27_timeseries_retention.py`, `infra/systemd/nhms-node27-timeseries-retention.{service,timer}` | [`schemas/timeseries_retention_receipt.schema.json`](../../schemas/timeseries_retention_receipt.schema.json) | §8 (including §8.5 dry-run semantics + §8.6 recovery + §8.7 salvage cross-link) |
 | #856 | Node-27 live dry-run + first enforce | committed receipts under [`docs/runbooks/receipts/tier-node27-timeseries-storage/`](../runbooks/receipts/tier-node27-timeseries-storage/) | consumes retention schema | §8.4 how to run |
+
+Note (2026-11-16): the #849, #850 and #854 rows are historical. Their scripts
+(`scripts/node27_product_archive.py`, `scripts/node27_storage_inventory_audit.py`,
+`scripts/node27_db_export_salvage.py`, `scripts/node27_archive_rebuild_drill.py`)
+and the `archive_completeness_receipt` / `archive_rebuild_drill_receipt` schemas
+were deleted with the archive lane in ebb9cac20 (#1370 / #1381; see Revision
+2026-08-11 below), and the runbook sections they point at were removed with
+them. `schemas/db_export_salvage_receipt.schema.json` is also absent; the
+available history records no deletion commit for it.
 
 The two gate receipts consumed by retention enforce are the audit's
 archive-completeness receipt (from the archive/audit section at the top

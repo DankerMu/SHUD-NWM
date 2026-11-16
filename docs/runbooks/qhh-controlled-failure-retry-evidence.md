@@ -21,13 +21,13 @@ deterministic 模式只使用测试数据库、mocked Slurm gateway fixture 和 
 uv run pytest -q tests/test_monitoring_api.py tests/test_retry_cancel_consistency.py
 
 cd apps/frontend
-corepack pnpm test:e2e -- monitoring.spec.ts --project=mocked-regression-chromium --workers=1
+corepack pnpm test:e2e -- monitoring.mocked.spec.ts --project=mocked-regression-chromium --workers=1
 ```
 
 重点覆盖：
 
 - `tests/test_monitoring_api.py::test_qhh_like_controlled_failure_retry_evidence_propagates_one_formal_identity`
-- `apps/frontend/e2e/monitoring.spec.ts` 中 `/ops` controlled failure lifecycle 测试
+- `apps/frontend/e2e/monitoring.mocked.spec.ts` 中 `/ops` controlled failure lifecycle 测试
 
 deterministic 证据证明：
 

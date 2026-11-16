@@ -351,9 +351,11 @@ predecessor 始终没有记录）。这类 stall **不能**用补 state 解决�
   `state_snapshot_index_model_package_checksum_mismatch`、
   `state_snapshot_index_object_missing`），`operator_action_required` 因此
   仍为 `true`。
-- 跨 pass 的 no-progress circuit breaker（自动识别"连续 N 个 pass 零进展"
-  并升级告警）尚未落地；在它落地之前，上面的 stall 识别特征需要人工
-  按 pass evidence 判读。
+- 跨 pass 的 no-progress circuit 已由 #1118 落地，但**只观测**：同一主体连续
+  `NHMS_SCHEDULER_NO_PROGRESS_CIRCUIT_PASSES`（默认 3）个完整 pass 报同一理由时，
+  只在 pass evidence 写 `no_progress_circuit` 块并打一条 WARNING，不改调度、不停重试；
+  对外出口是停摆探针（`production-ops/stuck-detection.md` §6.1 / §6.2）。上面的
+  stall 识别特征仍需人工按 pass evidence 判读。
 
 ## `journal_predecessor_identity_quarantine_breaker_engaged`
 
@@ -439,7 +441,7 @@ lineage 匹配、manifest 却一直缺失的重跑仍没有自己的 retry budge
    §8.7 的一次性偏好重置按设计回退到不带 lineage 的查找，于是**合法地**又记录了
    stale token；重跑晚于该条目发布（条目是重跑跑完之后才进 index 的）表现完全
    相同。这条路径**不留任何 operator 可见痕迹**：回退成功即 `init_state_rejection_code`
-   为 `null`（钉在 `tests/test_warm_start_chaining.py:2617`）。所以这一支要核的
+   为 `null`（钉在 `tests/test_warm_start_chaining.py::test_quarantine_rerun_resets_the_preference_when_the_preferred_entry_is_rejected`）。所以这一支要核的
    不只是"存在 + usable_flag"，还要核该条目与当代 generation 的**兼容性**
    （`model_package_checksum` / lineage 约束）以及它的发布时间是否晚于重跑；
    都对得上再回到写侧（run manifest / state 记录链路）排查。**没有**：这就是
@@ -684,15 +686,15 @@ state_evidence.retry_policy = {automatic_retry_allowed: false, manual_retry_requ
      **带外修好 forecast 之前的那份输入**——补齐该 cycle 的 canonical 行（或修好
      canonical readiness index 的身份），不要试图让它从 convert 跑。
    - `forcing`：见 `--repair-missing-forcing` 与确认物互斥那条（见下面的相关文档）。
-   - `null` / 缺失 / `fresh_full_chain: true`：run manifest 的**顶层** `restart_stage`
-     会是空的，但这**不等于** chain 会整条从头跑——`_restart_stage_from_basins`
-     （`services/orchestrator/chain_runtime_utils.py:319-336`）顶层缺失时会回退读
-     basin 内嵌的 `state_evidence.restart_stage` / `restart_from_stage`
-     （`:326-331`），manifest 把这份 evidence 一起带上了
-     （`services/orchestrator/scheduler_candidate_manifest.py:234`）。也就是说这类候选
-     顶层与内嵌两个字段互相矛盾，chain 实际会从内嵌那个阶段起跑；只有两者都不给阶段时
-     才真的从头跑。sink 正是在这种矛盾上判 `None` 并**正向比较拒掉**，不让 chain 有机会
-     按哪一个跑。处置不变：同样带外先修输入。
+   - `null` / 缺失 / `fresh_full_chain: true`：sink 比较的是 run manifest **顶层**
+     `restart_stage` 会携带的值（`services/orchestrator/scheduler_candidates.py::_candidate_effective_restart_stage`），
+     这几种情形下它是 `None`。chain 原先在顶层缺失时回退读 basin 内嵌的
+     `state_evidence.restart_stage` / `restart_from_stage`，这条回退已由 #2416 退役：
+     `services/orchestrator/chain_runtime_utils.py::_restart_stage_from_basins` 现在只读顶层键。
+     manifest 对 fresh full-chain 候选不写该键，其余情形可能写入一个下游阶段的
+     `restart_from_stage` 回退值（`services/orchestrator/scheduler_candidate_manifest.py::_manifest_restart_stage`），
+     chain 会从那里起跑。sink 的比较是正向的（`== "forecast"`），`None` 一律拒掉——
+     只会多拒、不会误放。处置不变：同样带外先修输入。
    - 更晚的阶段（`state_save_qc` / `parse` 等）：来自失败态重导出，同样不是本次授权覆盖的范围。
      `state_save_qc` 失败而 forecast 已成功的候选，人工出口是 manual-retry marker 打在 **cohort master id** 上
      （不是 hydro run id，也不是 `confirm-operator-reentry`）；自有 forecast 产出可证明时只从 `state_save_qc`

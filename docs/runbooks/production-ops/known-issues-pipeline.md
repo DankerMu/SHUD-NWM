@@ -426,7 +426,9 @@ Exact-cycle missing-forcing regeneration (node-22 only):
      at `:420-421`; the `resolve_renames → probe_coverage → discover_work` pipeline
      in `main` at `:648-651`).
    - **Any other cause** (e.g. retention deleted `forcing/<source>/<cycle>/...`
-     under the primary root — `services/orchestrator/retention.py:75`, `:684-687`):
+     under the primary root — `services/orchestrator/retention_root_admission.py::CYCLE_SCOPED_PREFIXES`,
+     `services/orchestrator/retention.py::_collect_cycle_targets`, and the primary-only rule in
+     `services/orchestrator/retention_root_admission.py::_parts_lie_in_potential_target`):
      that tool is **not** the channel. It returns `work_item_count: 0` (receipt
      fields at `:705` / `:715`), a shape §3.1.1 itself calls indistinguishable
      from a misconfigured `--forcing-root` / unmounted NFS by item count alone.

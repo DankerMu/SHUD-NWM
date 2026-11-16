@@ -200,7 +200,7 @@ forcing 采用原始 qhh/rSHUD 站点表：
 
 ### API/frontend 展示数据产品
 
-后端结果解析完成后，脚本继续执行 `scripts/publish_qhh_display_products.py`，把 qhh run 推到 API/frontend 可发现状态：
+后端结果解析完成后，脚本当时继续执行 `scripts/publish_qhh_display_products.py`，把 qhh run 推到 API/frontend 可发现状态（下列为该次复测记录的结果）。该 helper 已不在仓库中（至少自 `af49ced22` 起缺失）；现在 `scripts/run_qhh_backend_smoke.sh` 与 `scripts/run_qhh_cycle.sh` 在这一步调用 `uv run nhms-orchestrator publish-qdown --cycle-id <cycle_id>`：
 
 - model lifecycle：`basins_qhh_shud` 为 active。
 - scenario：标准化为 `forecast_gfs_deterministic`，前端默认 GFS 查询可直接命中。

@@ -606,6 +606,6 @@ river-network/<bv> z6/49/24           http=413  353 bytes      (低 zoom 整流�
 ## 相关
 
 - 图层目录：`/api/v1/layers`（`map.tile_layer` 注册 + 代码 metadata）
-- 端点：`apps/api/routes/flood_alerts.py`（river-network / hydro-national tile 路由、`_require_live_postgis_mvt`）
+- 端点：`apps/api/routes/hydro_display.py`（river-network / hydro-national tile 路由）、`apps/api/routes/hydro_display_postgis.py`（PostGIS MVT 取瓦片）、`apps/api/routes/hydro_display_catalog.py::_require_live_postgis_mvt`
 - 预算门：`services/tiles/mvt.py`（`MVT_MAX_BYTES`、percent_rank/simplify 分级）
 - 静态河网底图：`scripts/geo/build_national_river_geo.py`、`apps/frontend/src/pages/m11/useNationalBasinGeo.ts`

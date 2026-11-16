@@ -12,7 +12,7 @@ on maintainer override.
 
 The subagent-workflow review loop rotates additional reviewer lenses into
 follow-up (post-fix) cross-review rounds instead of re-running only the
-round-1 lens mix. `scripts/loop_log_audit.py` (the cross-run accountability
+round-1 lens mix. `scripts/governance/loop_log_audit.py` (the cross-run accountability
 audit over `docs/review-loop-log.jsonl`) tracks whether later-round verified
 catches come from the pinned-core round-1 lenses or from rotated-in lenses,
 and flags a keep/cut decision once the attribution sample reaches ~8
