@@ -64,6 +64,12 @@
   - `docs/review-loop-log.jsonl`;
   - the dated snapshot `docs/governance/entropy-audit-2026-10-16.snapshot.json`;
   - this change. — the remaining hits are intentional: `openspec/specs/{ci-contract-baseline:326,ci-test-selector-routing:12/29/32}`, rewritten by this change's deltas at archive, and `orchestrator-structural-burndown:917`, the batch-2 historical split record.
-- [ ] E7 After merge: master full regression fails only `#3153 test_shared_preflight_rejects_realpath_stub_symlink`.
+- [x] E7 After merge: master full regression fails only `#3153 test_shared_preflight_rejects_realpath_stub_symlink`.
   The node-22 pull at a pass boundary shows failed_count=0. The node-27 pull plus display restart shows `/health` 200
-  and `/api/v1/layers` unchanged.
+  and `/api/v1/layers` unchanged. — Master run 43909630427 (a910932c8): the only failure is
+  `tests/test_shud_runtime.py::test_shared_preflight_rejects_realpath_stub_symlink` in shard 2 (#3153); the z_policy
+  tests are green. node-27: ff-pulled to a910932c8 (7 commits), display restarted, `/health` 200 locally and publicly,
+  `/api/v1/layers` data identical, frontend 200. node-22: the first attempt aborted safely after the 30 min boundary
+  wait (the pass ran long on Slurm arrays; timer restored). The retry with a 3 h wait ff-pulled db9de9a27 -> a910932c8
+  at 17:44:57Z with the lease/journal guard modes unchanged (`atomic`/`flock`). The first post-pull pass
+  `scheduler_2026111617_5a0e2d082527` reports `planned`, `failed_count=0`, `lock.acquired=true`; 0 failed units.
