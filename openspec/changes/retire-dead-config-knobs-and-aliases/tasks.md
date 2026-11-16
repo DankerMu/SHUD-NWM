@@ -11,7 +11,7 @@
 
 ## 0. Pre-code live migration (orchestrator, node-22)
 
-- [ ] 0.1 Before the code changes, at a node-22 scheduler pass boundary:
+- [x] 0.1 Before the code changes, at a node-22 scheduler pass boundary:
   1. stop `nhms-compute-scheduler.timer`, and wait for `nhms-compute-scheduler.service` to go inactive;
   2. back `compute.scheduler-dbfree.env` and `compute.replay.env` up to `~/NWM-presync-backup-<UTC date>/infra-env/`,
      mode preserved;
@@ -27,6 +27,19 @@
 
   Do not use `uv run` on node-22. Note in the receipt that `compute.replay.env` has no consumer, and that the other
   four dbfree-env units do not read the guards.
+
+  **Receipt (2026-11-16):**
+  - Before: both files resolved lease=`atomic` and journal=`flock`, with the legacy key and the JOURNAL key present.
+  - 11:16:03Z: the timer was stopped. At 11:20:13Z the service reached `inactive`, which was the pass boundary.
+  - Backups: `~/NWM-presync-backup-20261116/infra-env/*.bak-issue3146-20261116T111603Z`, mode 600.
+  - The key-name diff shows exactly one line per file changed from `NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE` to
+    `NHMS_SCHEDULER_LEASE_GUARD_MODE`, at dbfree line 106 and replay line 99. Line counts are unchanged (143 and 128)
+    and the mode is still 600.
+  - After: both files resolve lease=`atomic` and journal=`flock`. The timer was restored at 11:20:15Z.
+  - The next pass's `/proc/<MainPID>/environ` carried only `NHMS_SCHEDULER_JOURNAL_LOCK_GUARD_MODE` and
+    `NHMS_SCHEDULER_LEASE_GUARD_MODE`.
+  - Seven post-migration passes, 11:20Z to 12:02Z, all had systemd `Result=success`, evidence `status=planned`,
+    `counts.failed_count=0`, `partial=0`, `blocked=0` and `lock.acquired=true` with no reason.
 
 ## 1. Implementation (implementer)
 
@@ -112,10 +125,36 @@
 - [ ] 3.1 node-22: after the checkout is ff-only pulled at a pass boundary, confirm the next pass with the 0.1 method:
   lease `atomic` and journal `flock`, and the pass summary shows `failed=0`.
 - [ ] 3.2 node-27:
-  - Back up `display.env` and remove the four dead keys. Nothing reads them, so no restart is needed.
+  - Back up `node27-resource-governance.env` and do the governance rename now. The value is the same, and the
+    deployed `2710f5a79` default is equal to it.
+  - **Edit `display.env` only after node-27 is redeployed with this change.** The deployed `2710f5a79` C1 validator
+    still interpolates the four keys, so removing them earlier would make it report
+    `DISPLAY_INTERPOLATION_ENV_MISSING`. Runtime is unaffected either way. The redeploy is an owner decision.
+  - Then back up `display.env` and remove the four dead keys. Nothing reads them, so no restart is needed.
   - Back up `node27-resource-governance.env` and replace `NODE27_RESOURCE_GOVERNANCE_REPO_ROOT` with
     `NODE27_GOVERNANCE_REPO_ROOT` (same value).
   - Diff by key name.
   - Run `env -i bash -c 'set -a; . display.env'`; it must exit 0.
   - Check `/health` returns 200.
   - Check that the next governance run is not `BLOCKED rc=2` and that its summary `repo_root` is `/home/nwm/NWM`.
+
+## Deviations
+
+- The `LEGACY_*` guard constants are kept, because the fail-closed refusal needs them. So
+  `tests/fixtures/file_journal_cluster_map.json` is unchanged; it was listed in 1.2.
+- A legacy guard key set to `""` is refused as well. The test is "is the key set", not "is it non-empty".
+- `envfile.py`: an empty `AUTOPIPE_LOCK_PATH=` line resolves to the default, as cron's `${AUTOPIPE_LOCK_PATH:-…}`
+  does. The process environment is consulted only when the line is absent. The proposal's "never directly to the
+  default" holds for the absent-line case only.
+- The drift test `test_lease_action_records_and_defers…` is renamed to
+  `test_lease_action_is_the_live_assignment_and_never_names_the_legacy_key`, and a note-under-table assertion is added.
+- The journal reader matrix is exercised through the repository cycle lock, not module-private names; the facade
+  guard requires this.
+- `infra/env/README.md` ~:436 is edited: "object-store/CORS settings" becomes "object-store settings".
+- Review round 1 P2: `S3_BUCKET_NAME` is also removed from the dev path, where it has no reader. The
+  `legacy-dead-code-retirement` requirement is narrowed so that fail-closed applies to safety-deciding aliases only.
+- The lease refusal surfaces as `lock_contended` with
+  `lock.reason=retired_lock_guard_mode_key:NHMS_SCHEDULER_LEASE_GUARD_MODE`. This is the same path as the existing
+  `unsafe_lock_guard_mode`, and the stall probe alerts on it as `lock_contended_persistent`. Rolling back by restoring
+  a pre-#3146 `.bak` env under the new code stops the scheduler until the LEASE key is set. That is the intended
+  fail-closed behaviour.

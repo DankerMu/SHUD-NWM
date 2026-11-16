@@ -215,9 +215,15 @@ def test_lease_action_is_the_live_assignment_and_never_names_the_legacy_key(rows
     assert LEGACY_LEASE_KEY not in action
 
 
+def note_under_table(section: list[str]) -> str:
+    """The text after the table's last row, up to the next heading (``drift_section`` already stops there)."""
+    rows = [index for index, line in enumerate(section) if line.strip().startswith("|")]
+    assert rows, "drift section has no table"
+    return "\n".join(section[rows[-1] + 1 :])
+
+
 def test_lease_live_set_note_sits_under_the_table() -> None:
-    section = "\n".join(drift_section(README.read_text(encoding="utf-8")))
-    note = section.split(HEADER_ROW, 1)[1]
+    note = note_under_table(drift_section(README.read_text(encoding="utf-8")))
     assert "#3146" in note and "2026-11-16" in note
     assert "`NHMS_SCHEDULER_LEASE_GUARD_MODE=atomic`" in note
     assert LEGACY_LEASE_KEY in note

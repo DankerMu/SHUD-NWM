@@ -6,8 +6,9 @@ A configuration key that is templated, set in a live env file or documented as l
 surface it is templated for. Otherwise it SHALL be removed from that surface, and from the live env files after a
 backup. A legacy alias SHALL be removed only after every live env file that sets it has been migrated to a key with
 the same effective value. When an alias stands for more than one primary key, the migration SHALL preserve the
-effective value of each. After removal, a reader that sees only the retired alias SHALL fail closed and name the
-primary key.
+effective value of each. After removal, a reader of an alias that decides safety behaviour (such as a lock or lease
+guard mode) SHALL fail closed when it sees only the retired alias, and SHALL name the primary key. A reader of any
+other retired alias MAY ignore it and apply the primary key's default.
 
 #### Scenario: a legacy guard alias is retired without changing live behaviour
 

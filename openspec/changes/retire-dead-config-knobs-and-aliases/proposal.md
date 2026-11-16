@@ -33,9 +33,10 @@ A stale config name misleads operators. A legacy alias can quietly decide live b
      key in the env file is circular.
    - The Python reads `NODE27_GOVERNANCE_REPO_ROOT`, and the wrapper does not pass `--repo-root`.
    - The template's `NODE27_RESOURCE_GOVERNANCE_REPO_ROOT` is read by nothing.
-4. **`S3_ENDPOINT_URL` and `S3_BUCKET_NAME` are not dead everywhere.** `.env.example`, `infra/docker-compose.dev.yml`
-   and `db/seeds/seed_demo.py` use them for the local dev MinIO seed. They are dead only on the display deployment
-   surface: `infra/compose.display.yml`, `infra/env/display.example`, `infra/README.two-node-docker.md` and the
+4. **`S3_ENDPOINT_URL` is not dead everywhere.** `db/seeds/seed_demo.py` reads it, together with `AWS_*`, for the
+   local dev MinIO seed, so it stays in `.env.example`, `infra/docker-compose.dev.yml` and the `README.md` local-dev
+   table. `S3_BUCKET_NAME` has no reader anywhere, since the seed takes its buckets from `S3_PLACEHOLDER_OBJECTS`, so it
+   is removed from the dev path as well. On the display deployment surface both are dead: `infra/compose.display.yml`, `infra/env/display.example`, `infra/README.two-node-docker.md` and the
    two-node validator.
 
 ## What

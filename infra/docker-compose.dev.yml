@@ -79,7 +79,6 @@ services:
     environment:
       DATABASE_URL: postgresql://nhms:nhms_dev@db:5432/nhms
       S3_ENDPOINT_URL: http://minio:9000
-      S3_BUCKET_NAME: nhms
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin
       GFS_NOMADS_BASE_URL: https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod
