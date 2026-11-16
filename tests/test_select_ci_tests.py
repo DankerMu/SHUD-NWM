@@ -52,9 +52,6 @@ from scripts.select_ci_tests import (
     DIRECT_GRID_CONTRACT_CANONICAL_PATH,
     DIRECT_GRID_CONTRACT_IMPORTER_TESTS,
     DIRECT_GRID_CONTRACT_TESTS,
-    DIRECT_GRID_DISPLAY_CUTOVER_FLIP_ATOMIC_TEST,
-    DIRECT_GRID_DISPLAY_CUTOVER_FLIP_HELPERS_PATH,
-    DIRECT_GRID_DISPLAY_CUTOVER_FLIP_TESTS,
     DIRECT_GRID_E2E_TESTS,
     DIRECT_GRID_SURFACE_TESTS,
     ENTROPY_AUDIT_HELPERS_PATH,
@@ -3691,78 +3688,6 @@ def test_node22_refresh_timer_health_partition_tracked_tree_is_exactly_five_suit
     assert derived == partitions, sorted(derived ^ partitions)
 
 
-def test_direct_grid_display_cutover_flip_partition_tracked_tree_is_exactly_two_suites_and_one_helper() -> None:
-    # #2527: two collectible partitions plus one non-collectible helper is a
-    # floor, not a preference. A third partition, a leftover compatibility shim
-    # for the deleted 1814-line monolith, or the helper renamed into a
-    # `test_*.py` suite all redden here. Expected membership is the selector's
-    # own tuple, never a glob result -- the glob is the MUTANT side.
-    #
-    # Both corpus filters are PREFIXES on the file NAME, so neither sweeps in the
-    # sibling cutover suites (tests/test_direct_grid_display_cutover_history.py,
-    # ..._model_resolution.py, ..._b4_leak.py); the suite prefix also catches a
-    # resurrected monolith.
-    partitions = set(DIRECT_GRID_DISPLAY_CUTOVER_FLIP_TESTS)
-    helper = DIRECT_GRID_DISPLAY_CUTOVER_FLIP_HELPERS_PATH
-    atomic = DIRECT_GRID_DISPLAY_CUTOVER_FLIP_ATOMIC_TEST
-    tracked = set(_tracked_python_files("tests"))
-
-    assert len(partitions) == 2, sorted(partitions)
-    assert atomic in partitions
-    assert partitions <= tracked, sorted(partitions - tracked)
-    assert helper in tracked
-    assert not Path("tests/test_direct_grid_display_cutover_flip.py").exists(), (
-        "the pre-#2527 monolith is back; it would duplicate all 15 cases and "
-        "no display rule routes it"
-    )
-    suite_corpus = {
-        path for path in tracked if PurePosixPath(path).name.startswith("test_direct_grid_display_cutover_flip")
-    }
-    assert suite_corpus == partitions, sorted(suite_corpus ^ partitions)
-    helper_corpus = {
-        path for path in tracked if PurePosixPath(path).name.startswith("direct_grid_display_cutover_flip")
-    }
-    assert helper_corpus == {helper}, sorted(helper_corpus ^ {helper})
-    assert all(is_test_suite_path(path) for path in partitions)
-    assert not is_test_suite_path(helper)
-    for owner in partitions:
-        assert "integration" not in PurePosixPath(owner).name
-
-    def rule_for(pattern: str, table: tuple[PathTestRule, ...] = PATH_TEST_RULES) -> PathTestRule:
-        return next(rule for rule in table if rule.pattern == pattern)
-
-    # The station-flag flip hook's rule carries the WHOLE corpus.
-    flip_targets = set(rule_for("packages/common/station_set_flip.py").tests)
-    assert partitions <= flip_targets, sorted(partitions - flip_targets)
-
-    # #3149: the display rules that carried the monolith no longer carry any
-    # partition by hand. #2773 retired the station tile route, and with it the
-    # `_station_source_version` lock `_atomic` held and the station MVT layer
-    # `_mvt_set` modelled, so neither partition imports a display module; read
-    # the imports from the source, not the tuple.
-    for pattern in ("services/tiles/mvt.py", "apps/api/routes/hydro_display*.py"):
-        targets = set(rule_for(pattern).tests)
-        assert not partitions & targets, f"{pattern} still carries {sorted(partitions & targets)}"
-    for owner in partitions:
-        assert not _names_imported_from(owner, "apps.api.routes.hydro_display"), owner
-        assert not _names_imported_from(owner, "services.tiles.mvt"), owner
-
-    # #1561: the importer index walks SUITES only, so the helper's own import of
-    # tests.test_variant_activation_cutover routes nothing; each partition must
-    # carry that edge itself for a change to that suite to reach it.
-    for owner in partitions:
-        assert _names_imported_from(owner, "tests.test_variant_activation_cutover"), owner
-    cutover_selected = set(select_tests(["tests/test_variant_activation_cutover.py"], repo_root=Path(".")))
-    assert partitions <= cutover_selected, sorted(partitions - cutover_selected)
-
-    # The helper's support rule is only honest if it equals what the tracked
-    # tree derives.
-    helper_targets = set(rule_for(helper, SUPPORT_MODULE_TEST_RULES).tests)
-    assert helper_targets == partitions, sorted(helper_targets ^ partitions)
-    derived = _derived_support_module_importers([helper])[helper]
-    assert derived == partitions, sorted(derived ^ partitions)
-
-
 def test_scheduler_refresh_package_tracked_tree_is_exactly_ten_modules() -> None:
     # #1099 replaced the 3639-line refresh runner with ten owner modules behind a
     # re-export facade kept at the historical path. Ten is a floor, not a
@@ -6247,7 +6172,8 @@ GUARDED_MODULE_CLOSURES: tuple[tuple[str, str, str], ...] = (
     # but kept the base path as one of them, so this anti-vacuity anchor still
     # names a real direct importer of services.tiles.mvt (the base partition
     # holds the postgis_tile_sql shape and #2030 budget cases). #2074 left the
-    # registry membership unchanged (then 6, now 9 after #2576/#2612) — the
+    # registry membership unchanged (then 6; 9 after #2576/#2612; 8 since #3164
+    # retired the station-flag flip hook) — the
     # partitions are TEST files, not guarded
     # modules, and they are routed by the services/tiles/mvt.py and
     # apps/api/routes/hydro_display*.py rules in scripts/select_ci_tests.py plus
@@ -6298,12 +6224,6 @@ GUARDED_MODULE_CLOSURES: tuple[tuple[str, str, str], ...] = (
         "apps.api.routes.pipeline",
         "tests/test_retry_cancel_consistency.py",
     ),
-    # #2612: the station-flag flip hook. FULL mode: its one-hop adds no suite.
-    (
-        "packages/common/station_set_flip.py",
-        "packages.common.station_set_flip",
-        "tests/test_direct_grid_display_cutover_history.py",
-    ),
     # #2612: the model registry facade. Direct-only mode.
     (
         "packages/common/model_registry.py",
@@ -6323,8 +6243,9 @@ GUARDED_MODULE_CLOSURES: tuple[tuple[str, str, str], ...] = (
 #     `_ok`-style helpers and the router);
 #   * packages.common.model_registry 25 (mostly scheduler suites, through
 #     services/orchestrator/scheduler.py).
-# packages.common.station_set_flip adds 0 (its one one-hop module is an openspec
-# evidence script with no importer suite), so it stays in full mode.
+# packages.common.display_coverage adds 0 (its single one-hop module,
+# scripts/node27_refresh_coverage.py, has no non-gated top-level importer
+# suite), so it stays in full mode.
 # test_direct_only_guarded_modules_meet_the_one_hop_decision_rule keeps this set
 # honest against the tree.
 DIRECT_ONLY_GUARDED_MODULES: frozenset[str] = frozenset(
@@ -6574,18 +6495,19 @@ def _guarded_closure_entry(source_path: str) -> tuple[str, str, str]:
 def test_direct_only_guarded_modules_meet_the_one_hop_decision_rule() -> None:
     # D0: the mode is a measured decision, not a waiver. Every direct-only member
     # is a guarded module whose one-hop really adds >= the threshold of non-direct
-    # suites; a full-mode member under the threshold would be the right call for
-    # station_set_flip, so it is pinned there explicitly.
+    # suites; a full-mode member under the threshold is the right call for
+    # display_coverage, so the reverse direction is pinned there explicitly.
+    # (#3164 re-targeted this pin from the retired station-flag flip hook.)
     guarded_modules = {module for _, module, _ in GUARDED_MODULE_CLOSURES}
     assert DIRECT_ONLY_GUARDED_MODULES <= guarded_modules
     for module in sorted(DIRECT_ONLY_GUARDED_MODULES):
         added = _one_hop_importer_tests(module) - _non_gated_top_level_importer_tests(module)
         assert len(added) >= DIRECT_ONLY_ONE_HOP_THRESHOLD, (module, len(added), sorted(added))
-    flip = "packages.common.station_set_flip"
-    assert flip in guarded_modules
-    assert flip not in DIRECT_ONLY_GUARDED_MODULES
-    flip_added = _one_hop_importer_tests(flip) - _non_gated_top_level_importer_tests(flip)
-    assert len(flip_added) < DIRECT_ONLY_ONE_HOP_THRESHOLD, sorted(flip_added)
+    full_mode = "packages.common.display_coverage"
+    assert full_mode in guarded_modules
+    assert full_mode not in DIRECT_ONLY_GUARDED_MODULES
+    full_mode_added = _one_hop_importer_tests(full_mode) - _non_gated_top_level_importer_tests(full_mode)
+    assert len(full_mode_added) < DIRECT_ONLY_ONE_HOP_THRESHOLD, sorted(full_mode_added)
 
 
 def test_guarded_closure_reds_when_a_direct_only_module_leaves_the_mode() -> None:
@@ -6625,7 +6547,7 @@ def test_guarded_closure_reds_when_a_direct_importer_leaves_a_direct_only_rule(
 
 @pytest.mark.parametrize(
     "source_path",
-    ["packages/common/station_set_flip.py", "packages/common/model_registry.py", "apps/api/routes/pipeline.py"],
+    ["packages/common/display_coverage.py", "packages/common/model_registry.py", "apps/api/routes/pipeline.py"],
 )
 def test_guarded_closure_reds_on_a_new_importer_without_a_rule_change(source_path: str) -> None:
     # Spec scenario "New importer without a rule": a synthetic non-gated suite
@@ -11707,9 +11629,10 @@ def test_every_pinned_node_id_resolves_to_an_existing_test_function() -> None:
 # with a reason token.
 #
 # DOMAIN SPLIT vs test_guarded_module_rules_cover_their_non_gated_importer_closure
-# above: that guard owns the nine GUARDED_MODULE_CLOSURES modules (#1672 added
+# above: that guard owns the eight GUARDED_MODULE_CLOSURES modules (#1672 added
 # apps/api/routes/hydro_display.py, #2026 its two owner modules, #2576/#2612
-# pipeline.py, station_set_flip.py and model_registry.py) and derives direct
+# pipeline.py and model_registry.py; #2612's station-flag flip hook entry left
+# with the hook in #3164) and derives direct
 # importers UNION a ONE-HOP module extension — or direct importers only for a
 # DIRECT_ONLY_GUARDED_MODULES member (pipeline.py, model_registry.py). This
 # guard owns every tracked module under the ELEVEN audited
@@ -13560,9 +13483,6 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
     # here means the base partition stopped importing the shared stores, which
     # would mean the doubles were duplicated back into the partitions.
     ("tests/api_contract_helpers.py", "tests/test_api_contract.py"),
-    # #2527: the station-flag flip harness. Anchored on `_atomic`, which imports
-    # it at module scope.
-    (DIRECT_GRID_DISPLAY_CUTOVER_FLIP_HELPERS_PATH, DIRECT_GRID_DISPLAY_CUTOVER_FLIP_ATOMIC_TEST),
     # I1 #1980: the river read-template register. The golden equivalence
     # oracle anchors the raw corpus.
     ("tests/river_ts_template_registry.py", "tests/test_river_ts_template_golden.py"),
@@ -16454,7 +16374,7 @@ def test_mapping_builder_joins_the_directory_audit_without_new_gaps() -> None:
     assert not offenders, "directory-rule importer gaps undispositioned:\n  " + "\n  ".join(offenders)
 
 
-def test_guarded_module_closures_registry_has_nine_members() -> None:
+def test_guarded_module_closures_registry_has_eight_members() -> None:
     # #1672: hydro_display joins GUARDED_MODULE_CLOSURES. The existing guard
     # test derives the required importer set from the tree, so this asserts the
     # membership directly (the guard body in
@@ -16465,16 +16385,16 @@ def test_guarded_module_closures_registry_has_nine_members() -> None:
     # them at file level, so the closure guard could only be vacuous on them;
     # the selector glob covers them. Pinning 6 rather than "the split happened"
     # is what makes a silently dropped owner-module entry red.
-    # #2576/#2612 added pipeline.py, station_set_flip.py and model_registry.py:
-    # 6 -> 9.
+    # #2576/#2612 added pipeline.py, the station-flag flip hook and
+    # model_registry.py: 6 -> 9. #3164 deleted the flip hook and its entry:
+    # 9 -> 8.
     guarded_sources = {source_path for source_path, _, _ in GUARDED_MODULE_CLOSURES}
     assert "apps/api/routes/hydro_display.py" in guarded_sources
     assert "apps/api/routes/hydro_display_postgis.py" in guarded_sources
     assert "apps/api/routes/hydro_display_catalog.py" in guarded_sources
     assert "apps/api/routes/pipeline.py" in guarded_sources
-    assert "packages/common/station_set_flip.py" in guarded_sources
     assert "packages/common/model_registry.py" in guarded_sources
-    assert len(GUARDED_MODULE_CLOSURES) == 9
+    assert len(GUARDED_MODULE_CLOSURES) == 8
 
 
 def test_hydro_display_rule_covers_its_derived_importer_closure() -> None:
@@ -16633,65 +16553,6 @@ def test_model_registry_owner_modules_route_like_the_facade() -> None:
         assert set(select_tests([owner], repo_root=Path("."))) == expected, owner
         assert owner in INTEGRATION_TRIGGER_SOURCES, f"{owner} missing from INTEGRATION_TRIGGER_SOURCES"
         assert any(fnmatch.fnmatch(owner, pattern) for pattern in patterns), f"{owner} opens no real-DB lane"
-
-
-_CUTOVER_FLIP_PARTS = (
-    "tests/test_direct_grid_display_cutover_flip_atomic.py",
-    "tests/test_direct_grid_display_cutover_flip_mvt_set.py",
-)
-
-
-@pytest.mark.parametrize(
-    "source",
-    [
-        "packages/common/model_registry.py",
-        "packages/common/model_registry_public.py",
-        "packages/common/station_set_flip.py",
-    ],
-)
-def test_cutover_flip_parts_ride_the_registry_and_station_flip_owners(source: str) -> None:
-    # #2612 AC 2: both flip partitions for the facade, one owner, and the flip
-    # hook. The `_mvt_set` edge runs only through
-    # tests/direct_grid_display_cutover_flip_helpers.py (a `tests/` helper outside
-    # the guard's one-hop domain), so no derivation can re-supply it: this literal
-    # is its only pin. Literal paths, not DIRECT_GRID_DISPLAY_CUTOVER_FLIP_TESTS,
-    # so production and expectation cannot move together.
-    helpers = _parse_tracked("tests/direct_grid_display_cutover_flip_helpers.py")
-    helper_imports = _top_level_imported_module_names("tests/direct_grid_display_cutover_flip_helpers.py", helpers)
-    assert {"packages.common.model_registry", "packages.common.station_set_flip"} <= helper_imports
-    mvt_set = "tests/test_direct_grid_display_cutover_flip_mvt_set.py"
-    assert "tests.direct_grid_display_cutover_flip_helpers" in _top_level_imported_module_names(
-        mvt_set, _parse_tracked(mvt_set)
-    )
-
-    selected = set(select_tests([source], repo_root=Path(".")))
-
-    assert set(_CUTOVER_FLIP_PARTS) <= selected, sorted(selected)
-
-
-def test_station_set_flip_selects_its_importers_and_keeps_its_prior_picks() -> None:
-    # #2612: the hook's direct importers (incl. the cutover history suite) plus
-    # both flip partitions; the #1744 core-smoke baseline and the supplemental
-    # scans it already had are untouched. #2920 adds the import layering guard
-    # (packages/** root).
-    selected = select_tests(["packages/common/station_set_flip.py"], repo_root=Path("."))
-
-    assert selected == sorted(
-        {
-            *CORE_SMOKE_TESTS,
-            *_CUTOVER_FLIP_PARTS,
-            "tests/test_direct_grid_display_cutover_history.py",
-            INVARIANT_SUITE_PATH,
-            WRITE_SURFACE_SCAN_PATH,
-            FAMILY_GUARD_PATH,
-            RESOLVE_SURFACE_GUARD_PATH,
-            IMPORT_LAYERING_GUARD_PATH,
-            ANY_RATCHET_PATH,
-            STATUS_LITERAL_SCAN_PATH,
-            STATUS_VOCAB_PARITY_PATH,
-            TIME_HELPER_CONSOLIDATION_PATH,
-        }
-    )
 
 
 def test_model_registry_facade_selects_its_direct_importers_and_keeps_its_prior_picks() -> None:

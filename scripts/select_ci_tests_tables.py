@@ -1634,29 +1634,6 @@ HYDRO_DISPLAY_MVT_SCALING_FACADE_TESTS: tuple[str, ...] = tuple(
     }
 )
 
-# #2527 partitioned tests/test_direct_grid_display_cutover_flip.py (1814 lines,
-# 15 cases) into these two collectible suites plus one non-collectible helper.
-# The monolith is GONE with no compatibility shim, so every rule site that named
-# it by hand was re-pointed; a rule target that no longer exists is only a
-# WARNING here, so a forgotten site would have dropped the station-flag flip lock
-# out of the PR lane in silence.
-#
-# ONE tuple, carried whole by the `packages/common/station_set_flip.py` rule and
-# the helper's support rule. The display rules (`services/tiles/mvt.py` and the
-# `apps/api/routes/hydro_display*.py` glob) no longer carry it (#3149): neither
-# partition imports a display module any more. The `_atomic` partition used to
-# import `apps.api.routes.hydro_display` for `_station_source_version`, whose
-# body it structurally locked, and `_mvt_set`'s `_mvt_station_set` modelled the
-# station MVT layer; both went with the retired station tile route (#2773 item
-# 4). The tracked-tree guard in tests/test_select_ci_tests.py pins exactly two
-# suites + one helper.
-DIRECT_GRID_DISPLAY_CUTOVER_FLIP_HELPERS_PATH = "tests/direct_grid_display_cutover_flip_helpers.py"
-DIRECT_GRID_DISPLAY_CUTOVER_FLIP_ATOMIC_TEST = "tests/test_direct_grid_display_cutover_flip_atomic.py"
-DIRECT_GRID_DISPLAY_CUTOVER_FLIP_TESTS: tuple[str, ...] = (
-    DIRECT_GRID_DISPLAY_CUTOVER_FLIP_ATOMIC_TEST,
-    "tests/test_direct_grid_display_cutover_flip_mvt_set.py",
-)
-
 # #2490 partitioned three oversized suites with no behaviour change. Each
 # original path stays one partition (openspec/specs/ci-contract-baseline/spec.md
 # pins the retention base path), and every rule that selected an original path
@@ -1746,9 +1723,6 @@ RESPONSE_MODEL_PRESERVATION_TESTS: tuple[str, ...] = (
 # tests/test_basins_registry_import_db.py is included although all 5 of its tests
 # are function-level `integration` (the guard filters file-level marks only);
 # that costs 5 skips, not a new exemption ledger.
-# The two cutover-flip partitions are listed on top of the derived set: they
-# reach this module only through tests/direct_grid_display_cutover_flip_helpers.py,
-# a `tests/` helper the guard's one-hop domain cannot see, and #2612 requires them.
 MODEL_REGISTRY_IMPORTER_TESTS: tuple[str, ...] = (
     "tests/test_basins_registry_import_db.py",
     "tests/test_basins_registry_import_qhh.py",
@@ -1764,7 +1738,6 @@ MODEL_REGISTRY_IMPORTER_TESTS: tuple[str, ...] = (
     "tests/test_state_clone_cutover_hook.py",
     "tests/test_state_clone_index_publish.py",
     "tests/test_variant_activation_cutover.py",
-    *DIRECT_GRID_DISPLAY_CUTOVER_FLIP_TESTS,
 )
 # #2010 precipitation raster service. The suite is the ONLY oracle for
 # `services/precip/**` (window resolution, accumulation, PNG structure, file

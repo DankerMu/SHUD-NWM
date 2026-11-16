@@ -653,7 +653,17 @@ def test_script_static_contract() -> None:
     assert "umask 077" in text
     for forbidden in ("rm ", "systemctl", "jq", "python", "realpath -m", "declare -A", "mapfile"):
         assert forbidden not in text, forbidden
-    assert stat.S_IMODE(SCRIPT.stat().st_mode) == 0o755
+    # The committed mode, not the checkout's: umask applies at checkout, so a
+    # umask 0002 worktree gives 0o775 for the same 100755 blob (#3164).
+    index = subprocess.run(
+        ["git", "ls-files", "-s", "--", SCRIPT.relative_to(REPO_ROOT).as_posix()],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert index.stdout.split(maxsplit=1)[:1] == ["100755"], index.stdout
+    assert os.access(SCRIPT, os.X_OK)
     syntax = subprocess.run(["bash", "-n", str(SCRIPT)], capture_output=True, text=True, check=False)
     assert syntax.returncode == 0, syntax.stderr
 

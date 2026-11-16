@@ -90,6 +90,11 @@ Notes:
   Values in it — including basin roots and scheduler model/basin filters — are
   **not** the production scheduler's configuration and must not be quoted as
   such.
+  The `DATABASE_URL` it still carries on node-22 is the same superseded
+  compose-lane value: no node-22 unit or container loads this file, so the key
+  reaches no running process and does not breach the DB-free gate. It is kept,
+  not scrubbed, by owner decision (#3164); do not copy it into any env file a
+  unit does load.
 
   It is not unreferenced, though. Who else names it:
 

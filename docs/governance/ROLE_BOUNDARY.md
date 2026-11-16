@@ -129,8 +129,14 @@ Representative active paths:
 - Readonly API routes in `apps/api/routes/forecast.py`,
   `apps/api/routes/models.py`, `apps/api/routes/pipeline.py`,
   `apps/api/routes/hydro_display.py`, `apps/api/routes/best_available.py`,
-  `apps/api/routes/data_sources.py`, and
-  `apps/api/routes/state_snapshots.py`.
+  `apps/api/routes/data_sources.py`,
+  `apps/api/routes/state_snapshots.py`, `apps/api/routes/precip.py`, and
+  `apps/api/routes/basemap.py` (all registered unconditionally by
+  `apps/api/route_registry.py`). `precip.py` serves two GET routes under
+  `/api/v1/precip/*` that are DB-free: they read the precipitation mirror
+  through `NHMS_PRECIP_MIRROR_ROOT` and cache rendered PNGs under
+  `NHMS_MVT_FILE_CACHE_DIR/precip/`. `basemap.py` is the GET-only Tianditu
+  tile proxy described under allowed mutations below.
 - Frontend display assets under `apps/frontend`.
 - Display deployment inputs `infra/compose.display.yml`,
   `infra/env/display.example`, `infra/systemd/nhms-display-compose.service`,
@@ -149,6 +155,10 @@ Allowed mutations:
   `NHMS_TIANDITU_KEY`, cached as files under
   `NHMS_MVT_FILE_CACHE_DIR/basemap/`. This is a display-local tile cache, not a
   database write, producer output, or control-plane capability.
+- Cache rendered precipitation PNGs (`/api/v1/precip/*`, #2010) under
+  `NHMS_MVT_FILE_CACHE_DIR/precip/`. The source mirror under
+  `NHMS_PRECIP_MIRROR_ROOT` is only read; like the basemap cache this is a
+  display-local file cache, not a database or producer write.
 
 Forbidden capabilities:
 

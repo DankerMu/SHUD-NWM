@@ -51,6 +51,9 @@ if str(_REPO_ROOT) not in sys.path:
 _EVIDENCE_DIR = Path(__file__).resolve().parent
 
 import psycopg  # noqa: E402
+from packages.common.station_set_flip import (  # noqa: E402
+    build_station_flag_flip_hook,
+)
 from psycopg.rows import dict_row  # noqa: E402
 
 from packages.common.model_registry import (  # noqa: E402
@@ -62,9 +65,6 @@ from packages.common.state_clone_hook import (  # noqa: E402
     STATE_CLONE_APPROVAL_ACTION,
     STATE_CLONE_SPIN_UP_DISTORTION_ANNOUNCEMENT_MARKER,
     build_state_clone_cutover_hook,
-)
-from packages.common.station_set_flip import (  # noqa: E402
-    build_station_flag_flip_hook,
 )
 
 # The MVT source-identity computer used for the before/after capture.

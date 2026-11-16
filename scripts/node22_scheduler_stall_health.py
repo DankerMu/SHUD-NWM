@@ -890,6 +890,7 @@ class PassRecord:
         "blocked_candidate_count",
         "cycle_keys",
         "execution_boundary",
+        "lock_reason",
     )
 
     def __init__(
@@ -903,6 +904,7 @@ class PassRecord:
         blocked_candidate_count: int | None,
         cycle_keys: frozenset[str] = frozenset(),
         execution_boundary: str | None = None,
+        lock_reason: str | None = None,
     ) -> None:
         self.name = name
         self.started_at = started_at
@@ -914,6 +916,20 @@ class PassRecord:
         # `None` when the artifact has no such key or a non-string value: a
         # legacy artifact is graded exactly as before, never probe-failed.
         self.execution_boundary = execution_boundary
+        # The pass's `lock.reason`, `None` when absent or not a string.  The
+        # scheduler lease writes one only when the guard refuses on
+        # configuration (`unsafe_lock_guard_mode`,
+        # `retired_lock_guard_mode_key:<KEY>`); ordinary contention carries
+        # none.  Informational only: it never grades a pass (#3164).
+        self.lock_reason = lock_reason
+
+
+def _lock_reason_or_none(payload: dict[str, Any]) -> str | None:
+    lock = payload.get("lock")
+    if not isinstance(lock, dict):
+        return None
+    reason = lock.get("reason")
+    return reason if isinstance(reason, str) else None
 
 
 def _count_or_none(counts: Any, key: str) -> int | None:
@@ -1128,6 +1144,7 @@ def read_pass_record(path: Path) -> PassRecord:
         blocked_candidate_count=blocked,
         cycle_keys=pass_cycle_keys(payload),
         execution_boundary=boundary if isinstance(boundary, str) else None,
+        lock_reason=_lock_reason_or_none(payload),
     )
 
 
@@ -1757,6 +1774,12 @@ def _clip(value: str) -> str:
     return value[:MAX_SIGNAL_LENGTH]
 
 
+def _newest_lock_contended_reason(records: list[PassRecord]) -> str | None:
+    if not records or records[0].status != STATUS_LOCK_CONTENDED or records[0].lock_reason is None:
+        return None
+    return _clip(records[0].lock_reason)
+
+
 def _clip_list(values: list[Any]) -> tuple[list[Any], int]:
     if len(values) <= MAX_RECEIPT_LIST_ENTRIES:
         return values, 0
@@ -1923,6 +1946,12 @@ def build_receipt(
             "resource_limit_pass_names_truncated": limit_names_truncated,
             "limit_lookback_minutes": config.limit_lookback_minutes,
             "lock_contended_streak": lock_contended_streak(records, window=config.streak_window),
+            # Why the newest pass was refused the lease, when it was (#3164):
+            # a config refusal (`retired_lock_guard_mode_key:<KEY>`,
+            # `unsafe_lock_guard_mode`) and ordinary contention write the same
+            # `lock_contended` status but need different remedies.  Null when
+            # the newest pass is not lock-contended or names no reason.
+            "lock_contended_reason": _newest_lock_contended_reason(records),
             "lock_passes": config.lock_passes,
             "no_submission_streak": no_submission_streak,
             "no_submission_neutral_skipped": neutral_skipped,

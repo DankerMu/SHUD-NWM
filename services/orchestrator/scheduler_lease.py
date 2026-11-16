@@ -404,8 +404,12 @@ class FileSchedulerLease:
                 "_open_regular_guard_file",
                 _open_regular_guard_file,
             )
+            # #3164: resolve the mode first. It can raise (an unsafe value or a
+            # retired-key-only config), and raising after the parent fd is
+            # open would leak it.
+            mode = _file_lock_guard_mode()
             parent_fd = open_lock_parent_directory(self.lock_path.parent, self.workspace_root)
-            if _file_lock_guard_mode() == "atomic":
+            if mode == "atomic":
                 try:
                     yield parent_fd
                 finally:
