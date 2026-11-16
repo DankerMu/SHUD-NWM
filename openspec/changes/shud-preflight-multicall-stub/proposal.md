@@ -56,19 +56,19 @@ is not affected today; it will be after an upgrade.
   production consumer. The failure to rule out is real SHUD being rejected.
 
 ## Evidence Floor
-- [ ] E0 The ubuntu-26.04 layout observation above is recorded in this proposal.
-- [ ] E1 `uv run ruff check --no-cache .`
-- [ ] E2 Local selection for the diff, plus `tests/test_shud_runtime.py`, `tests/test_production_scheduler.py`,
-  `tests/test_production_slurm_validation.py` and `tests/test_path_canonicalization_family_guard.py`, all green.
-- [ ] E3 The same set passes in a node-27 temporary worktree.
-- [ ] E4 node-22 live, read-only, pre-merge, production checkout untouched:
+- [x] E0 The ubuntu-26.04 layout observation above is recorded in this proposal. — done above (`docker run --platform linux/amd64 ubuntu:26.04`, 2026-11-16).
+- [x] E1 `uv run ruff check --no-cache .` — `All checks passed!`.
+- [x] E2 Local selection for the diff, plus `tests/test_shud_runtime.py`, `tests/test_production_scheduler.py`,
+  `tests/test_production_slurm_validation.py` and `tests/test_path_canonicalization_family_guard.py`, all green. — the four named files: 2537 passed. Rest of the selector set: 2107 passed, 1 skipped. Red-on-old (only `shud_preflight.py` reverted): the 5 parametrized leaves and the argv0-echo test fail (`6 failed, 1 passed`; the passing one is the rewritten host-independent 1.1 test, which the old leaf `true` guard also rejects).
+- [x] E3 The same set passes in a node-27 temporary worktree. — node-27 at 104e9dc50, under umask 0002: 18 files, 4656 passed, 0 leftover `nhms_it_*` DBs.
+- [x] E4 node-22 live, read-only, pre-merge, production checkout untouched:
   - `git -C /scratch/frd_muziyao/NWM show origin/<branch>:packages/common/shud_preflight.py > ~/tmp/3153/packages/common/shud_preflight.py`,
     plus `redaction.py` and the package `__init__` files exported the same way;
   - run with `/scratch/frd_muziyao/NWM/.venv/bin/python -I`, `sys.path.insert(0, ~/tmp/3153)`;
   - `check_shud_executable(<real SHUD_EXECUTABLE>)` returns `ok=True` and `version_signal=present`, and the real
     binary's realpath leaf is not a stub name;
-  - no `uv sync`, no bare `uv run`.
+  - no `uv sync`, no bare `uv run`. — node-22 live, with the branch copy loaded from `~/tmp/3153` via `.venv/bin/python -I`: `ok=True`, `version_signal=present`, `blockers=[]`, real leaf is not a stub. The production checkout has 0 tracked changes, HEAD unchanged.
 - [ ] E5 Pre-merge 26.04 proof: the PR "Unit Tests" log shows `Image: ubuntu-26.04` and that
   `tests/test_shud_runtime.py` actually executed (not the `--collect-only` smoke).
 - [ ] E6 After merge, master "Unit Tests (full)" is green on every shard (run URL).
-- [ ] E7 `openspec validate shud-preflight-multicall-stub --strict --no-interactive`.
+- [x] E7 `openspec validate shud-preflight-multicall-stub --strict --no-interactive`. — valid.
