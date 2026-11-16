@@ -114,17 +114,29 @@
 - [x] 2.1 `uv run ruff check .` is clean.
 - [x] 2.2 `uv run pytest -q tests/test_env_templates.py tests/test_node22_scheduler_env_drift_table.py tests/test_node22_env_backup_sweep.py`,
   plus the reader-matrix tests from 1.2.
-- [ ] 2.3 The selector-chosen set for the diff, plus the validator and ops-validation suites, passes locally and in a
+- [x] 2.3 The selector-chosen set for the diff, plus the validator and ops-validation suites, passes locally and in a
   node-27 temp worktree.
-- [ ] 2.4 Reader proof for each removed key and alias: zero hits outside docs, archives and receipts, on master and on
+  Receipt: node-27 temp worktree at `c968a6a41`, 179 files, with integration: 10469 passed, 1 failed, 4 skipped. The failure
+  is `test_script_static_contract`: node-27's umask 0002 turns the 0755 mode into 0775, which is environmental. Rerun
+  at the final `d382a17e8` with `umask 022`: 653 passed, 2 skipped.
+- [x] 2.4 Reader proof for each removed key and alias: zero hits outside docs, archives and receipts, on master and on
   the deployed node-27 and node-22 checkouts. The output is attached to the PR. For `S3_ENDPOINT_URL` and
   `S3_BUCKET_NAME` the zero-hit rule is scoped to the display deployment surface; the dev-seed hits are expected.
-
+  Receipt: master has zero runtime readers (all three review seats). Both deployed checkouts are now `db9de9a27`, the
+  same as master, so the deployed proof equals the master proof. Remaining hits are the expected ones: the dev seed's
+  `S3_ENDPOINT_URL`, the two `LEGACY_*` refusal constants and the ops-evidence checklist.
 ## 3. Post-merge live steps (orchestrator)
 
-- [ ] 3.1 node-22: after the checkout is ff-only pulled at a pass boundary, confirm the next pass with the 0.1 method:
+- [x] 3.1 node-22: after the checkout is ff-only pulled at a pass boundary, confirm the next pass with the 0.1 method:
   lease `atomic` and journal `flock`, and the pass summary shows `failed=0`.
-- [ ] 3.2 node-27:
+  Receipt (2026-11-16):
+  - 13:14:58Z: the timer was stopped. At 13:21:09Z the service reached `inactive`, the pass boundary.
+  - The checkout was pulled ff-only from `b2fc70547` to `db9de9a27`. `uv.lock` was unchanged and no sync was run.
+  - Probe with the new code: lease=`atomic` and journal=`flock` for both env files.
+  - 13:21:16Z: the timer was restored.
+  - The first pass on the new code, `scheduler_2026111613_6ef2ac1d845d`, started at 13:21:17Z: `status=planned`,
+    `failed_count=0`, `partial=0`, `blocked=0`, `lock.acquired=true`, systemd `Finished`.
+- [x] 3.2 node-27:
   - Back up `node27-resource-governance.env` and do the governance rename now. The value is the same, and the
     deployed `2710f5a79` default is equal to it.
   - **Edit `display.env` only after node-27 is redeployed with this change.** The deployed `2710f5a79` C1 validator
@@ -137,7 +149,16 @@
   - Run `env -i bash -c 'set -a; . display.env'`; it must exit 0.
   - Check `/health` returns 200.
   - Check that the next governance run is not `BLOCKED rc=2` and that its summary `repo_root` is `/home/nwm/NWM`.
-
+  Receipt (2026-11-16, owner approved the node-27 redeploy):
+  - 13:14:33Z: `/home/nwm/NWM` was pulled ff-only from `2710f5a79` to `db9de9a27`, 50 commits.
+    `nhms-display-api.service` was restarted and is active. Local and public `/health` both return 200, the role is
+    `display_readonly`, the `/api/v1/layers` data is identical before and after, and the frontend root returns 200.
+  - 13:15:06Z: both files were backed up to `~/NWM-presync-backup-20261116/infra-env/`.
+  - `display.env`: the four keys were removed, 52 lines to 48, mode 600, and it sources with rc 0.
+  - `node27-resource-governance.env`: the key was renamed to `NODE27_GOVERNANCE_REPO_ROOT`, whose value equals the
+    default.
+  - A manual governance run, `resource-governance-20261116T131518Z`, returned `done rc=0`, not BLOCKED, with
+    `repo_root.path=/home/nwm/NWM` and `status=ok`.
 ## Deviations
 
 - The `LEGACY_*` guard constants are kept, because the fail-closed refusal needs them. So
