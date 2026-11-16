@@ -341,7 +341,7 @@ class _SqliteCycleRepository:
         return [_job_record(job) for job in self.store.query_jobs_by_run(run_id)]
 
     def query_pipeline_job_by_slurm_id(self, slurm_job_id: str) -> dict[str, Any] | None:
-        job = self.store.query_jobs_by_slurm_id(slurm_job_id)
+        job = self.store.session.scalars(select(PipelineJob).where(PipelineJob.slurm_job_id == slurm_job_id)).first()
         return _job_record(job) if job is not None else None
 
     def insert_pipeline_event(

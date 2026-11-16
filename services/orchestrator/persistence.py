@@ -216,10 +216,6 @@ class PipelineStore:
         )
         return list(self.session.scalars(statement))
 
-    def query_jobs_by_slurm_id(self, slurm_job_id: str) -> PipelineJob | None:
-        statement = select(PipelineJob).where(PipelineJob.slurm_job_id == slurm_job_id)
-        return self.session.scalars(statement).first()
-
     def query_inflight_jobs(self) -> list[PipelineJob]:
         """Durable in-flight jobs for restart reconcile.
 

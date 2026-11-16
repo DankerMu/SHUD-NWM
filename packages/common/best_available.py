@@ -390,11 +390,6 @@ def quality_flag_for_source(source_id: str) -> str:
     return "best_available_realtime" if source_id.upper() == "ERA5" else "best_available_degraded"
 
 
-def source_priority(source_id: str) -> int:
-    priorities = {"ERA5": 100, "CLDAS": 90, "GFS": 10}
-    return priorities.get(source_id.upper(), 0)
-
-
 def _selection_row_response(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "forcing_version_id": row["forcing_version_id"],

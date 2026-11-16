@@ -1195,15 +1195,6 @@ def test_manifest_entry_rejects_path_traversal_manifest_path(tmp_path):
         load_manifest_entry(str(path), 0)
 
 
-def test_load_manifest_index_returns_all_entries_within_bounds(tmp_path):
-    from packages.common.manifest_index import load_manifest_index
-
-    entries = load_manifest_index(str(_manifest_index(tmp_path)))
-
-    assert [entry["run_id"] for entry in entries] == ["run_001", "run_002"]
-    assert [entry["model_id"] for entry in entries] == ["model_001", "model_002"]
-
-
 def test_manifest_validation_returns_valid_entry(tmp_path):
     entry = load_manifest_entry(str(_manifest_index(tmp_path)), 0)
 

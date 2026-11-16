@@ -13,7 +13,6 @@ from packages.common.node27_pgdata_evidence import (
     EvidencePolicy,
     parse_mdadm_evidence,
     parse_smart_evidence,
-    verify_root_storage_evidence,
 )
 
 NOW = datetime(2026, 8, 31, 12, 0, tzinfo=UTC)
@@ -100,12 +99,13 @@ def test_healthy_raid_and_two_descriptor_bound_smart_passes_are_admitted(tmp_pat
         for device in MEMBERS
     }
 
-    health = verify_root_storage_evidence(raid, smart, policy=policy, now=NOW)
+    parsed = parse_mdadm_evidence(raid, policy=policy, now=NOW)
+    observed = [parse_smart_evidence(smart[device], device=device, policy=policy, now=NOW) for device in parsed.members]
 
-    assert health.healthy is True
-    assert health.members == MEMBERS
-    assert {item.device for item in health.smart} == set(MEMBERS)
-    assert all(item.status == "PASS" for item in health.smart)
+    assert parsed.healthy is True
+    assert parsed.members == MEMBERS
+    assert {item.device for item in observed} == set(MEMBERS)
+    assert all(item.status == "PASS" for item in observed)
 
 
 @pytest.mark.parametrize(
@@ -158,9 +158,10 @@ def test_smart_requires_each_parsed_member_to_explicitly_pass(
         MEMBERS[1]: _smart_file(tmp_path, MEMBERS[1], second),
     }
 
-    health = verify_root_storage_evidence(raid, smart, policy=policy, now=NOW)
+    assert parse_mdadm_evidence(raid, policy=policy, now=NOW).healthy is True
+    observed = [parse_smart_evidence(smart[device], device=device, policy=policy, now=NOW) for device in MEMBERS]
 
-    assert health.healthy is expected
+    assert all(item.status == "PASS" for item in observed) is expected
 
 
 def test_descriptor_binding_rejects_stale_wrong_mode_wrong_command_and_subject(tmp_path: Path) -> None:

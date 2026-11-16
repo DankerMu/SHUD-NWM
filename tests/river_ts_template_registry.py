@@ -27,7 +27,7 @@ is what lets four PRs touch this file without colliding on one tuple.
 Executed forecast statements
 ---------------------------
 
-``FORECAST_STORE_EXECUTIONS`` captures all eight segment queries plus the
+``FORECAST_STORE_EXECUTIONS`` captures all seven segment queries plus the
 known-run latest-product fallback, separately from the 14 raw ``REGISTRY``
 inputs. Composed executed SQL is never passed wholesale to the renderer.
 The capture harness remains in ``tests/test_river_ts_text_identity_cleanup.py``.
@@ -241,10 +241,9 @@ DISPLAY_COVERAGE_ENTRIES: tuple[TemplateEntry, ...] = (
 # packages/common/forecast_store.py
 # ---------------------------------------------------------------------------
 
-#: The eight segment-scoped blocks, keyed exactly as the capture harness keys
+#: The seven segment-scoped blocks, keyed exactly as the capture harness keys
 #: them so a renamed method is red here rather than silently unregistered.
 FORECAST_STORE_SEGMENT_BLOCKS: tuple[str, ...] = (
-    "latest_issue_time",
     "per_source_latest_cycles",
     "latest_analysis_issue_time",
     "analysis_segment_rows",

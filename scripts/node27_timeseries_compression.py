@@ -310,12 +310,6 @@ def _parse_positive_int(raw: str | None, *, name: str, minimum: int) -> int:
     return value
 
 
-def _ceil_div(numerator: int, denominator: int) -> int:
-    """Exact integer ceiling division — no float rounding on the budget chain."""
-
-    return -(-numerator // denominator)
-
-
 def config_from_args(args: argparse.Namespace, env: Mapping[str, str] | None = None) -> CompressionConfig:
     """Strict env + CLI parse. No truthiness fallback. Fails closed on bad shape."""
     env = os.environ if env is None else env

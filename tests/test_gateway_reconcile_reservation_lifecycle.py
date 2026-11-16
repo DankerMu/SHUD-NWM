@@ -44,7 +44,7 @@ def test_reservation_written_before_submit_and_queryable() -> None:
 def test_overlapping_pass_does_not_double_submit() -> None:
     """An overlapping pass sees the reservation and skips, even before sacct."""
 
-    from services.orchestrator.reservation import reservation_is_active, reserve_candidate
+    from services.orchestrator.reservation import reserve_candidate
 
     store = _store_repo()
     key = "gfs:cyc:basin:forcing"
@@ -61,7 +61,7 @@ def test_overlapping_pass_does_not_double_submit() -> None:
 
     # Pass 2: query candidate_state BEFORE any sacct row exists.
     state = store.query_candidate_state(key)
-    assert reservation_is_active(state["status"]) is True
+    assert state["status"] == "reserved"
 
     # If pass 2 still calls reserve (race), it reuses the existing row.
     second = reserve_candidate(store, idempotency_key=key, job_id="job_pass2", **common)

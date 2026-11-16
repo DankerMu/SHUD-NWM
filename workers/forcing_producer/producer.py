@@ -936,26 +936,6 @@ class ForcingProducer:
             raise ForcingProductionError(f"Unsupported forcing_mapping_mode {mode!r}.")
         return contract
 
-    def _stop_at_direct_grid_package_boundary(
-        self,
-        *,
-        contract: DirectGridForcingContract,
-        rows: Sequence[ForcingTimeseriesRow],
-        components: Sequence[ForcingComponent],
-    ) -> None:
-        if not rows:
-            raise ForcingProductionError(
-                f"Direct-grid contract {contract.binding_checksum!r} generated no station value rows."
-            )
-        if not components:
-            raise ForcingProductionError(
-                f"Direct-grid contract {contract.binding_checksum!r} generated no forcing components."
-            )
-        raise ForcingProductionError(
-            "Direct-grid rows/components generated; stopping at the issue #546 package/lineage boundary for "
-            f"contract {contract.binding_checksum!r}."
-        )
-
     def _materialize_direct_grid_mappings(
         self,
         *,

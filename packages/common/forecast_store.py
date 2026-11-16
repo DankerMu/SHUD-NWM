@@ -1016,33 +1016,6 @@ class PsycopgForecastStore:
             run_keys.append(int(run_key))
         return _ResolvedRuns(tuple(run_keys))
 
-    def _latest_issue_time(
-        self,
-        cursor: Any,
-        *,
-        basin_version_id: str,
-        segment_id: str,
-        river_network_version_id: str,
-        scenario_filter: "_ScenarioFilter",
-    ) -> datetime | None:
-        row = self._fetch_optional(
-            cursor,
-            f"""
-            SELECT h.cycle_time
-            FROM {_segment_rows_source_sql()} rt
-            JOIN hydro.hydro_run h ON h.run_key = rt.run_key
-            WHERE h.cycle_time IS NOT NULL
-              {scenario_filter.sql}
-            ORDER BY h.cycle_time DESC
-            LIMIT 1
-            """,
-            {
-                **_segment_identity_params(basin_version_id, segment_id, river_network_version_id),
-                **scenario_filter.params,
-            },
-        )
-        return _ensure_utc(row["cycle_time"]) if row is not None else None
-
     def _per_source_latest_cycles(
         self,
         cursor: Any,

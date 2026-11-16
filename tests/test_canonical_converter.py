@@ -22,7 +22,6 @@ CanonicalConverterConfig = converter_module.CanonicalConverterConfig
 GFS_REQUIRED_STANDARD_VARIABLES = converter_module.GFS_REQUIRED_STANDARD_VARIABLES
 IFS_REQUIRED_STANDARD_VARIABLES = converter_module.IFS_REQUIRED_STANDARD_VARIABLES
 VARIABLE_MAPPING = converter_module.VARIABLE_MAPPING
-compute_time_axis = converter_module.compute_time_axis
 convert_units = converter_module.convert_units
 convert_units_with_metadata = converter_module.convert_units_with_metadata
 convert_era5_precipitation_with_metadata = converter_module.convert_era5_precipitation_with_metadata
@@ -819,15 +818,6 @@ def test_gfs_rh2m_clamps_supersaturation_to_unit_range() -> None:
     assert convert_units("rh2m", [105.0, -2.0, 50.0]) == pytest.approx((1.0, 0.0, 0.5))
 
 
-def test_time_axis_is_monotonic() -> None:
-    axis = compute_time_axis("2026050700", [0, 3, 6, 9])
-
-    valid_times = [item["valid_time"] for item in axis]
-    assert valid_times == sorted(valid_times)
-    assert [item["lead_time_hours"] for item in axis] == [0, 3, 6, 9]
-    assert valid_times[2].isoformat() == "2026-05-07T06:00:00+00:00"
-
-
 def test_conversion_writes_lineage_json_with_required_keys(tmp_path: Path) -> None:
     repository = FakeCanonicalRepository()
     _, manifest = build_raw_manifest(tmp_path)
@@ -928,15 +918,10 @@ def test_conversion_is_idempotent_on_rerun(tmp_path: Path) -> None:
     assert len(repository.products) == 14
 
 
-def test_convert_manifest_streams_without_reading_all_records(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_convert_manifest_streams_without_reading_all_records(tmp_path: Path) -> None:
     repository = FakeCanonicalRepository()
     _, manifest = build_raw_manifest(tmp_path)
     converter = build_converter(tmp_path, repository=repository)
-
-    def forbidden_read_records(_entries: list[dict[str, Any]]) -> list[Any]:
-        raise AssertionError("_read_records must not be used by convert_manifest")
-
-    monkeypatch.setattr(converter, "_read_records", forbidden_read_records)
 
     result = converter.convert_manifest(manifest)
 

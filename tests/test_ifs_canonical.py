@@ -613,17 +613,10 @@ def test_ifs_shortwave_negative_delta_writes_warn_product_with_lineage(tmp_path:
     assert anomalies[0]["type"] == "negative_ifs_shortwave_delta"
 
 
-def test_ifs_convert_manifest_streams_by_group_without_read_records(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_ifs_convert_manifest_streams_by_group(tmp_path: Path) -> None:
     repository = FakeCanonicalRepository()
     _, manifest = build_ifs_manifest(tmp_path, forecast_hours=(0, 3))
     converter = build_converter(tmp_path, repository=repository)
-
-    def forbidden_read_records(_entries: list[dict[str, Any]]) -> list[Any]:
-        raise AssertionError("_read_records must not be used by convert_manifest")
-
-    monkeypatch.setattr(converter, "_read_records", forbidden_read_records)
 
     result = converter.convert_manifest(manifest)
 

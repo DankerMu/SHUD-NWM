@@ -65,13 +65,6 @@ def identity_security_alternatives() -> list[dict[str, list[str]]]:
     return copy.deepcopy(list(_IDENTITY_SECURITY_ALTERNATIVES))
 
 
-def slurm_mutation_security_alternatives() -> list[dict[str, list[str]]]:
-    """Fresh copies of the exact four Slurm mutation alternatives (bearer first)."""
-    bearer_first: list[dict[str, list[str]]] = [{SLURM_SERVICE_BEARER: []}]
-    bearer_first.extend(identity_security_alternatives())
-    return bearer_first
-
-
 def dev_role_header_scheme() -> dict[str, Any]:
     return {
         "type": "apiKey",

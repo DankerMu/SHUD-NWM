@@ -790,11 +790,6 @@ class ProductionScheduler:
     def _load_cutover_declaration(self) -> _scheduler.Any:
         return _generation_gate.load_cutover_declaration(self)
 
-    def _candidate_pipeline_already_complete(
-        self, candidate: _scheduler.SchedulerCandidate
-    ) -> bool:
-        return _generation_gate.candidate_pipeline_already_complete(self, candidate)
-
     def _strict_warm_start_for_candidate(
         self, candidate: _scheduler.SchedulerCandidate, cycle: _scheduler.SchedulerSourceCycle
     ) -> dict[str, _scheduler.Any] | None:
