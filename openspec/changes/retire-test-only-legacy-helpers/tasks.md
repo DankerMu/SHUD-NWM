@@ -62,3 +62,17 @@
   - `prove_named_entry_absent_durable` is in `packages/common/safe_fs.py`.
 
   Both symbols and their tests stay unchanged in this change.
+- Review round 1 (PR #3156): `RetryService.expire_stale_retries` flips from RETIRE to KEEP. It is the only
+  implementation of retry-execution-contract "Stale pending retry is detected": the spec describes the behaviour
+  without naming the method. It is restored with its two tests. Its missing production wiring is tracked separately.
+- `timeseries-narrow-store`: the forecast-store segment-query count in the living Requirement changes from eight to
+  seven (MODIFIED delta), because `_latest_issue_time` is retired.
+- Mechanical deviations, with details in the PR #3156 evidence table:
+  - D1: the cascade deletion of `RootStorageHealth`.
+  - D4: the `_latest_issue_time` SQL census. Its counts go from 8 to 7 and from 7 to 6, and the historical golden is
+    untouched.
+  - D5: verbatim moves into test fakes: `source_priority` goes to `tests/test_best_available.py`, and the
+    `query_jobs_by_slurm_id` select goes to `tests/test_e2e_m3.py`.
+  - D6: narrowed tests that keep their live assertions.
+  - D7: `reservation.RESERVATION_ACTIVE_STATUSES` is kept as a `noqa: F401` re-export, because
+    `tests/test_status_vocab_parity.py` pins its identity.
