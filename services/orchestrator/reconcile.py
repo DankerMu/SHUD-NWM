@@ -403,10 +403,6 @@ def default_comment_storage_probe(slurm_bin_path: str = "") -> Callable[[], bool
     return _probe
 
 
-def _accounting_store_flags_allow_comment(stdout: str) -> bool:
-    return _accounting_store_flags_classify(stdout) is True
-
-
 def _accounting_store_flags_classify(stdout: str) -> bool | None:
     """Tri-state classification of ``AccountingStoreFlags`` in ``scontrol`` output.
 
@@ -3531,27 +3527,6 @@ def _callable_accepts_keyword(callable_value: Callable[..., Any], name: str) -> 
     return any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters) or any(
         parameter.name == name for parameter in parameters
     )
-
-
-def _query_comment_accounting(
-    comment_query: CommentSacctQuerier,
-    idempotency_key: str,
-    *,
-    expected_user: str,
-    expected_account: str,
-    submission_attempt_started_at: datetime | None = None,
-) -> SacctRecord | Sequence[SacctRecord] | None:
-    """Compatibility wrapper for direct adapter callers."""
-
-    if _comment_query_accepts_scope(comment_query):
-        kwargs: dict[str, Any] = {
-            "expected_user": expected_user or None,
-            "expected_account": expected_account or None,
-        }
-        if submission_attempt_started_at is not None and _comment_query_accepts_attempt_anchor(comment_query):
-            kwargs["submission_attempt_started_at"] = submission_attempt_started_at
-        return comment_query(idempotency_key, **kwargs)
-    return comment_query(idempotency_key)
 
 
 def _job_submission_attempt(job: Any) -> int:

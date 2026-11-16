@@ -1891,22 +1891,6 @@ class FileStateSnapshotIndexRepository:
         base_key = _state_index_base_key(model_id=model_id, source_id=source_id, valid_time=valid_time)
         return [entry for key, entry in entries.items() if key[:3] == base_key]
 
-    def _first_entry_for_base_key(
-        self,
-        entries: Mapping[tuple[str, str, str, str, str], dict[str, Any]],
-        *,
-        model_id: str,
-        source_id: str,
-        valid_time: datetime,
-    ) -> dict[str, Any] | None:
-        matches = self._entries_for_base_key(entries, model_id=model_id, source_id=source_id, valid_time=valid_time)
-        if not matches:
-            return None
-        return sorted(matches, key=lambda entry: str(entry.get("state_id") or ""))[0]
-
-    def _load_snapshots(self) -> dict[tuple[str, str, str, str, str], StateSnapshot]:
-        return {key: _state_snapshot_from_index_entry(entry) for key, entry in self._load_entries().items()}
-
     def _load_snapshots_for_lookup(self) -> dict[tuple[str, str, str, str, str], StateSnapshot]:
         entries = self._load_entries_for_update() if self.create_missing else self._load_entries()
         return {key: _state_snapshot_from_index_entry(entry) for key, entry in entries.items()}

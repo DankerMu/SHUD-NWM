@@ -1678,13 +1678,6 @@ def _requested_negative_fixture_check(
     }
 
 
-def _forcing_qc_rows_by_variable(rows: Sequence[ForcingTimeseriesRow]) -> dict[str, list[ForcingTimeseriesRow]]:
-    grouped: dict[str, list[ForcingTimeseriesRow]] = {}
-    for row in rows:
-        grouped.setdefault(row.variable, []).append(row)
-    return grouped
-
-
 def _continuity_check(
     valid_times: Sequence[datetime],
     *,

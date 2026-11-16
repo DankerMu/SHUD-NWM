@@ -31,7 +31,6 @@ from packages.common.model_registry_contracts import (
 from packages.common.model_registry_preflight_rules import _canonical_lifecycle_state, _model_audit_reference
 from packages.common.model_registry_public import (
     REDACTED_REASON,
-    _basins_lineage_details,
     _model_public_projection,
     _sanitize_audit_uri,
 )
@@ -479,63 +478,6 @@ class _LifecycleSupportMixin:
             ),
         )
         return int(cursor.fetchone()["log_id"])
-
-    def _insert_model_activation_audit(
-        self,
-        cursor: Any,
-        *,
-        current: Mapping[str, Any],
-        updated: Mapping[str, Any],
-        active: bool,
-        policy_decision: PolicyDecision,
-        request_id: str | None,
-    ) -> None:
-        details = audit_record(
-            policy_decision,
-            request_id=request_id,
-            previous_state={"active": bool(current["active_flag"])},
-            new_state={"active": bool(active)},
-            payload={
-                "basin_version_id": updated["basin_version_id"],
-                "river_network_version_id": updated["river_network_version_id"],
-                "mesh_version_id": updated["mesh_version_id"],
-                "model_package_uri": _sanitize_audit_uri(updated["model_package_uri"]),
-            },
-        )
-        details.update(
-            {
-            "previous_active": bool(current["active_flag"]),
-            "active": bool(active),
-            "basin_version_id": updated["basin_version_id"],
-            "river_network_version_id": updated["river_network_version_id"],
-            "mesh_version_id": updated["mesh_version_id"],
-            "model_package_uri": _sanitize_audit_uri(updated["model_package_uri"]),
-            }
-        )
-        basins_lineage = _basins_lineage_details(updated.get("resource_profile"))
-        if basins_lineage:
-            details["basins_lineage"] = basins_lineage
-        details = redact_audit_payload(details)
-        cursor.execute(
-            """
-            INSERT INTO ops.audit_log (
-                actor,
-                actor_role,
-                action,
-                entity_type,
-                entity_id,
-                details
-            )
-            VALUES (%s, %s, %s, 'model_instance', %s, %s)
-            """,
-            (
-                policy_decision.actor_id,
-                ",".join(policy_decision.roles),
-                policy_decision.action_id,
-                updated["model_id"],
-                self._json(details),
-            ),
-        )
 
     def _record_state_clone_refusal_audit(
         self,

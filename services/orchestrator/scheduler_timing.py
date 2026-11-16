@@ -143,9 +143,6 @@ class StageSpan:
     def stage_started_ms_from_pass_entry(self) -> float:
         return self._stage_start_ms
 
-    def set_build_candidates_ms(self, value: float) -> None:
-        self._record["build_candidates_ms"] = float(value)
-
     def set_dispatch_ms(self, value: float) -> None:
         self._record["dispatch_ms"] = float(value)
 

@@ -9,7 +9,6 @@ canonical published logs. Importer (node-27) projects that sidecar into
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
@@ -31,7 +30,6 @@ from packages.common.safe_fs import (
     SafeFilesystemError,
     atomic_write_bytes_no_follow,
     read_bytes_limited_no_follow,
-    stat_no_follow,
     verify_directory_no_follow,
 )
 from packages.common.source_identity import normalize_source_id
@@ -1907,15 +1905,3 @@ def _format_utc(value: datetime) -> str:
     if utc.microsecond:
         return utc.isoformat(timespec="microseconds").replace("+00:00", "Z")
     return utc.isoformat(timespec="seconds").replace("+00:00", "Z")
-
-
-def sidecar_digest(payload: Mapping[str, Any]) -> str:
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def read_sidecar_bytes_no_follow(path: Path, *, containment_root: Path) -> bytes:
-    """Read a sidecar without following symlinks. Used by importer path checks."""
-
-    stat_no_follow(path, containment_root=containment_root)
-    return read_bytes_limited_no_follow(path, max_bytes=MAX_SIDECAR_BYTES, containment_root=containment_root)

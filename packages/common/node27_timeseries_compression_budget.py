@@ -82,9 +82,6 @@ class CompressionServiceBudget:
     service_wall_seconds: int
     systemd_margin_seconds: int = SYSTEMD_MARGIN_SECONDS
 
-    def required_service_wall_seconds(self) -> int:
-        return self.wrapper_wall_seconds + self.systemd_margin_seconds + 1
-
 
 @dataclass(frozen=True)
 class ResolvedCompressionBudget:
@@ -453,14 +450,3 @@ def resolve_runner_budget(env: Mapping[str, str]) -> ResolvedCompressionBudget:
     if ASSEMBLY_MARKER_KEY in env:
         return _assembled_runner_budget(env)
     return _direct_runner_budget(env)
-
-
-def budget_literals() -> dict[str, int]:
-    """Expose defaults for parity tests and documentation generators."""
-
-    return {
-        "wrapper_wall_seconds": COMPRESSION_WRAPPER_WALL_SECONDS,
-        "service_wall_seconds": SERVICE_WALL_SECONDS,
-        "systemd_margin_seconds": SYSTEMD_MARGIN_SECONDS,
-        "compression_cleanup_margin_seconds": COMPRESSION_CLEANUP_MARGIN_SECONDS,
-    }

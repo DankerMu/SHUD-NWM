@@ -59,10 +59,6 @@ def read_configured_service_token(env: Mapping[str, str] | None = None) -> str |
     return raw
 
 
-def service_token_configured(env: Mapping[str, str] | None = None) -> bool:
-    return read_configured_service_token(env) is not None
-
-
 def service_bearer_matches(request: Any, env: Mapping[str, str] | None = None) -> bool:
     """Constant-time comparison of ``Authorization: Bearer ...`` to the token.
 

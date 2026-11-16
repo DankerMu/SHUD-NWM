@@ -85,10 +85,6 @@ def reserved_slurm_env_reason(key: str) -> str | None:
     return None
 
 
-def is_reserved_slurm_env_key(key: str) -> bool:
-    return reserved_slurm_env_reason(key) is not None
-
-
 def secret_bearing_url_reason(value: str) -> str | None:
     """Return why a URL-shaped env value carries a secret, or None when safe."""
 

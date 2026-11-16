@@ -150,10 +150,6 @@ def overrides_for_basin(
     return tuple(override for override in overrides if override.basin_slug == basin_slug)
 
 
-def declared_basin_slugs(overrides: Iterable[CalibrationOverride]) -> tuple[str, ...]:
-    return tuple(sorted({override.basin_slug for override in overrides}))
-
-
 def apply_calibration_overrides_for_basin(
     *,
     isolated_root: str | Path,

@@ -2087,13 +2087,6 @@ def _copyback_path_component_label(key: str) -> str:
     return _copyback_tree_label(key)
 
 
-def _run_id_from_product_key(key: str) -> str:
-    parts = PurePosixPath(key).parts
-    if not _is_run_tree_key(parts):
-        raise ValueError(f"Unsupported object-store copyback tree key: {key!r}")
-    return parts[1]
-
-
 def _configured_path_no_resolve(path: Path | str) -> Path:
     configured = Path(path).expanduser()
     return configured if configured.is_absolute() else Path.cwd() / configured

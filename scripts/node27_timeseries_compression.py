@@ -310,24 +310,6 @@ def _parse_positive_int(raw: str | None, *, name: str, minimum: int) -> int:
     return value
 
 
-def _parse_positive_int_with_default(
-    env: Mapping[str, str], name: str, *, default: int, minimum: int
-) -> int:
-    """Budget-chain knobs are optional: unset OR empty falls back to the default.
-
-    This is deliberately looser than the mandatory ``LAG_SECONDS`` /
-    ``PER_TICK_BOUND`` semantics and deliberately identical to the shell
-    ``${VAR:-3900}`` the wrapper uses — both sides must treat the empty string
-    the same way or the single source of truth drifts. Anything else present
-    goes through the same strict ``_parse_positive_int`` and fails closed.
-    """
-
-    raw = env.get(name)
-    if raw is None or raw == "":
-        return default
-    return _parse_positive_int(raw, name=name, minimum=minimum)
-
-
 def _ceil_div(numerator: int, denominator: int) -> int:
     """Exact integer ceiling division — no float rounding on the budget chain."""
 

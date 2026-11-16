@@ -4574,14 +4574,6 @@ def _last_lines(text: str, count: int) -> str:
     return "\n".join(text.splitlines()[-count:])
 
 
-def _subprocess_output_text(value: str | bytes | None) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace")
-    return value
-
-
 def _as_runtime_error(error: Exception) -> SHUDRuntimeError:
     if isinstance(error, SHUDRuntimeError):
         return error

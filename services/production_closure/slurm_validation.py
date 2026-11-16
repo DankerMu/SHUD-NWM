@@ -1759,24 +1759,6 @@ def _is_controlled_failure_outcome(record: dict[str, Any]) -> bool:
     return state == "FAILED" and exit_code not in (0, None)
 
 
-def _submitted_task_row_blockers(
-    records: list[dict[str, Any]],
-    *,
-    expected_task_ids: set[int],
-) -> list[dict[str, Any]]:
-    observed = {int(record["task_id"]) for record in records if record.get("task_id") is not None}
-    missing = sorted(expected_task_ids - observed)
-    if not missing:
-        return []
-    return [
-        {
-            "error_code": "SLURM_ARRAY_TASK_ACCOUNTING_MISSING",
-            "field": "sacct",
-            "missing_task_ids": ",".join(str(task_id) for task_id in missing),
-        }
-    ]
-
-
 def _slurm_config_inspection() -> dict[str, Any]:
     result = _run_command(["scontrol", "show", "config"])
     result["stdout"] = _allowlisted_slurm_config(str(result.get("stdout", "")))
