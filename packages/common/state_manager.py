@@ -83,6 +83,10 @@ MAX_STATE_SNAPSHOT_INDEX_ENTRIES = 100_000
 DEFAULT_STATE_SNAPSHOT_INDEX_MAX_AGE_HOURS = 168
 MAX_STATE_SNAPSHOT_INDEX_JSON_DEPTH = 64
 MAX_STATE_SNAPSHOT_INDEX_JSON_NODES = 300_000
+# Validation injects these into every entry on read (in-memory evidence only).
+# They are never persisted: the single writer drops them, and the copyback /
+# repair readers still drop them from legacy files that carry them (#3123).
+_STATE_INDEX_READ_TIME_FIELDS = ("index_generated_at", "object_evidence")
 STATE_INDEX_CONTROL_OBJECT_PREFIXES = frozenset({"logs", "manifests", "products", "runs"})
 # One validation pass's ``LocalObjectStore`` per (root, prefix); see
 # ``_state_index_object_store``.
@@ -2145,7 +2149,7 @@ def publish_state_snapshot_index(
     payload: dict[str, Any] = {
         "schema_version": FILE_STATE_SNAPSHOT_INDEX_SCHEMA_VERSION,
         "generated_at": _format_optional_time(generated),
-        "entries": [dict(entry) for entry in entries],
+        "entries": [_without_read_time_fields(entry) for entry in entries],
     }
     payload["checksum"] = f"sha256:{_payload_checksum(payload)}"
     content = _canonical_json_bytes(payload, pretty=True)
@@ -2625,15 +2629,17 @@ def _copyback_raw_entries(
     for key, raw in zip(validated, raw_entries, strict=True):
         if not isinstance(raw, Mapping):
             raise _state_index_error("state_snapshot_index_entry_not_object", field="entries[]")
-        entry = dict(raw)
         # These fields are injected by validation for in-memory evidence and
         # can be regenerated from the provider header/object on every read.
         # They are not state identity or lineage and must not create a merge
-        # conflict or leak stale provider evidence into the next index.
-        entry.pop("index_generated_at", None)
-        entry.pop("object_evidence", None)
-        normalized[key] = entry
+        # conflict or leak stale provider evidence into the next index.  The
+        # writer no longer persists them (#3123), but legacy files still do.
+        normalized[key] = _without_read_time_fields(raw)
     return normalized
+
+
+def _without_read_time_fields(entry: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in entry.items() if key not in _STATE_INDEX_READ_TIME_FIELDS}
 
 
 def repair_state_snapshot_index(
