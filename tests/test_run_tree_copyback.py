@@ -342,8 +342,11 @@ def test_state_index_copyback_ignores_derived_entry_evidence_for_same_identity(t
     )
     source_index = object_root / "scheduler/state-index/index-last.json"
     destination_index = copyback_root / "scheduler/state-index/index-last.json"
-    # Legacy (pre-#3123) indexes that persisted the read-time fields are seeded as raw
-    # bytes: the publisher no longer writes them, and this test is about the read-side strip.
+    # Legacy (pre-#3123) indexes carrying the read-time fields, seeded as raw bytes. This
+    # pins that an unrelated-run source entry is scoped out (nothing copied) and that the
+    # republished destination drops the fields; since #3123 the writer alone guarantees
+    # the latter. The read-side strip guard is
+    # test_state_index_copyback_reads_legacy_destination_fields_as_the_same_entry.
     _write_raw_state_index(source_index, [source_entry], generated_at="2026-06-27T03:00:00Z")
     _write_raw_state_index(destination_index, [destination_entry], generated_at="2026-06-27T02:00:00Z")
 

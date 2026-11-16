@@ -545,6 +545,9 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             # `make_directory_with_explicit_mode`.
             "tests/test_state_index_upsert_cost.py",
             "tests/test_state_index_retention.py",
+            # #3123: pre-creates the state-index parents and writes raw legacy
+            # index bytes through `write_provider_destination`.
+            "tests/test_state_index_read_time_fields.py",
         ),
     ),
     PathTestRule(
@@ -3282,8 +3285,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # #3123: the single writer drops the read-time injected fields.
             "tests/test_state_index_read_time_fields.py",
             # #3123: the copyback merge and the repair read-back still strip those
-            # fields from legacy files (`_copyback_raw_entries`); these two suites
-            # are what reds when that read-side strip is removed.
+            # fields from legacy files (`_copyback_raw_entries`). Removing that
+            # strip reds test_run_tree_copyback.py (copyback) and
+            # test_state_index_retention.py above (repair read-back); the repair
+            # suite seeds through the publisher and is plain coverage here.
             "tests/test_run_tree_copyback.py",
             "tests/test_scheduler_state_index_repair.py",
             # #2653 reader edge: the capacity watch grades the dry-run summary
