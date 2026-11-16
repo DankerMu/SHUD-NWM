@@ -618,10 +618,6 @@ def _placeholder_path_allowlist_reason(
         return "governance inventory documents retired placeholder paths"
     if line_no is not None and _line_has_complete_archive_status_marker(line_no, archive_status_markers):
         return COMPLETE_ARCHIVE_STATUS_ALLOWLIST_REASON
-    if relative_path.startswith("openspec/changes/governance-2-legacy-dead-code-retirement/"):
-        return "governed completed OpenSpec evidence documents retired placeholder paths"
-    if relative_path.startswith("openspec/changes/governance-5-e1-entropy-baseline-burndown/"):
-        return "governed Governance-5 E1 fixture evidence documents retired placeholder paths"
     if (
         relative_path == "services/slurm_gateway/config.py"
         and token == "workers/sbatch_templates"

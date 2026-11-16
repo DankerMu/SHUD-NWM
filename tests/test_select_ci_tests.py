@@ -2359,17 +2359,17 @@ def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
         # MVT_FILE_CACHE_DIR_ENV from services.tiles.mvt.
         "tests/test_basemap_proxy.py",
         # #1597: the closure guard (direct UNION one hop over
-        # services.tiles.mvt) put these eight in the rule. This pin is the
+        # services.tiles.mvt) put eight suites in the rule; seven remain since
+        # #3149 dropped the flip suite. This pin is the
         # complement of the guard — the guard forbids missing suites, the pin
         # forbids extra ones — so it is updated from the selector's own output,
-        # never hand-assembled. The three cutover suites and
+        # never hand-assembled. The two cutover suites and
         # test_openapi_31_contract.py are the one-hop contributions through
         # apps/api/routes/hydro_display.py and
         # apps/api/openapi_patching.py respectively.
-        # #2527: the flip suite is two partitions, both carried by the rule
-        # (synced from the selector's own output).
-        "tests/test_direct_grid_display_cutover_flip_atomic.py",
-        "tests/test_direct_grid_display_cutover_flip_mvt_set.py",
+        # #3149: the two #2527 flip partitions are no longer carried by this
+        # rule; they import no display module (synced from the selector's own
+        # output).
         "tests/test_direct_grid_display_cutover_history.py",
         "tests/test_direct_grid_display_cutover_model_resolution.py",
         # I1 #1980: mvt.py's six river read templates are registered and
@@ -3731,17 +3731,21 @@ def test_direct_grid_display_cutover_flip_partition_tracked_tree_is_exactly_two_
     def rule_for(pattern: str, table: tuple[PathTestRule, ...] = PATH_TEST_RULES) -> PathTestRule:
         return next(rule for rule in table if rule.pattern == pattern)
 
-    # Every route that carried the monolith carries the WHOLE corpus, so each
-    # still selects the 15 cases it selected before the split.
+    # The station-flag flip hook's rule carries the WHOLE corpus.
+    flip_targets = set(rule_for("packages/common/station_set_flip.py").tests)
+    assert partitions <= flip_targets, sorted(partitions - flip_targets)
+
+    # #3149: the display rules that carried the monolith no longer carry any
+    # partition by hand. #2773 retired the station tile route, and with it the
+    # `_station_source_version` lock `_atomic` held and the station MVT layer
+    # `_mvt_set` modelled, so neither partition imports a display module; read
+    # the imports from the source, not the tuple.
     for pattern in ("services/tiles/mvt.py", "apps/api/routes/hydro_display*.py"):
         targets = set(rule_for(pattern).tests)
-        assert partitions <= targets, f"{pattern} lost partition(s): {sorted(partitions - targets)}"
-
-    # #2773: `_atomic` no longer imports the facade -- the `_station_source_version`
-    # lock it held went with the retired station tile route -- so the closure
-    # registries anchor on another direct importer. The display rules above still
-    # carry both partitions by hand; read the import from the source, not the tuple.
-    assert not _names_imported_from(atomic, "apps.api.routes.hydro_display")
+        assert not partitions & targets, f"{pattern} still carries {sorted(partitions & targets)}"
+    for owner in partitions:
+        assert not _names_imported_from(owner, "apps.api.routes.hydro_display"), owner
+        assert not _names_imported_from(owner, "services.tiles.mvt"), owner
 
     # #1561: the importer index walks SUITES only, so the helper's own import of
     # tests.test_variant_activation_cutover routes nothing; each partition must
