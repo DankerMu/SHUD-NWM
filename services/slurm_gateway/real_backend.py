@@ -534,7 +534,8 @@ class RealSlurmGateway(SlurmGateway):
         metadata_complete = self._submission_metadata_complete(record)
 
         run_id = record.run_id if record and record.run_id else job_id
-        log_path = self._resolve_log_path(job_id, run_id, record)
+        candidates, job_log_dirs = self._log_candidates(job_id, run_id, record)
+        log_path, log_file_found = self._resolve_log_path(candidates)
         logs = ""
         truncated = False
         if log_path is not None:
@@ -550,6 +551,12 @@ class RealSlurmGateway(SlurmGateway):
             truncated=truncated,
             metadata_complete=metadata_complete,
             array_task_logs=array_task_logs,
+            log_tree_present=self._log_tree_present(
+                metadata_complete=metadata_complete,
+                log_file_found=log_file_found,
+                job_log_dirs=job_log_dirs,
+                array_task_logs=array_task_logs,
+            ),
         )
 
     @staticmethod
@@ -1527,16 +1534,31 @@ class RealSlurmGateway(SlurmGateway):
             return SlurmJobStatus.FAILED
         return status
 
-    def _resolve_log_path(self, job_id: str, run_id: str, record: SlurmJobRecord | None) -> Path | None:
+    def _log_candidates(
+        self,
+        job_id: str,
+        run_id: str,
+        record: SlurmJobRecord | None,
+    ) -> tuple[list[Path], list[Path]]:
+        """Return the ordered ``.out`` candidates and the job-specific log dirs.
+
+        The job-specific dirs are the stored array log dir, ``<run_id>/logs`` and
+        the manifest ``run_id`` lane.  The shared ``logs`` fallback and the
+        discovered lanes are not: their presence says nothing about this job's
+        own tree (#3144).
+        """
         workspace_dir = Path(self.settings.workspace_dir).expanduser().resolve()
         candidates: list[Path] = []
+        job_log_dirs: list[Path] = []
         discover_unbound = self._record_lacks_log_binding(record)
-        if record is not None:
-            stored_log_dir = self._stored_array_log_dir(record, workspace_dir)
-            if stored_log_dir is not None:
-                candidates.append(stored_log_dir / f"{job_id}.out")
+        stored_log_dir = self._stored_array_log_dir(record, workspace_dir) if record is not None else None
+        if stored_log_dir is not None:
+            candidates.append(stored_log_dir / f"{job_id}.out")
+            job_log_dirs.append(stored_log_dir)
         if run_id:
-            candidates.append(workspace_dir / run_id / "logs" / f"{job_id}.out")
+            run_log_dir = workspace_dir / run_id / "logs"
+            candidates.append(run_log_dir / f"{job_id}.out")
+            job_log_dirs.append(run_log_dir)
         candidates.append(workspace_dir / "logs" / f"{job_id}.out")
         if discover_unbound:
             candidates.extend(self._discover_neutral_array_logs(job_id, "out", array_tasks=False))
@@ -1544,21 +1566,46 @@ class RealSlurmGateway(SlurmGateway):
         if record is not None:
             manifest_run_id = str(record.manifest.get("run_id") or "").strip()
             if manifest_run_id and manifest_run_id != run_id:
-                candidates.insert(0, workspace_dir / manifest_run_id / "logs" / f"{job_id}.out")
+                manifest_log_dir = workspace_dir / manifest_run_id / "logs"
+                candidates.insert(0, manifest_log_dir / f"{job_id}.out")
+                job_log_dirs.append(manifest_log_dir)
         if "_" in job_id:
             master_job_id, task_id = job_id.rsplit("_", maxsplit=1)
             if task_id.isdigit():
-                if record is not None:
-                    stored_log_dir = self._stored_array_log_dir(record, workspace_dir)
-                    if stored_log_dir is not None:
-                        candidates.append(stored_log_dir / f"{master_job_id}_{task_id}.out")
+                if stored_log_dir is not None:
+                    candidates.append(stored_log_dir / f"{master_job_id}_{task_id}.out")
                 if run_id:
                     candidates.append(workspace_dir / run_id / "logs" / f"{master_job_id}_{task_id}.out")
                 candidates.append(workspace_dir / "logs" / f"{master_job_id}_{task_id}.out")
+        return candidates, job_log_dirs
+
+    def _resolve_log_path(self, candidates: Sequence[Path]) -> tuple[Path | None, bool]:
+        """Return the path to read and whether it is an existing log file.
+
+        Without a hit the first candidate is still returned so the read reports
+        an empty log, but that fallback is not evidence of a log (#3144): an
+        intact array master never writes its own ``.out`` either.
+        """
         for candidate in candidates:
             if self._log_path_exists(candidate):
-                return candidate
-        return candidates[0] if candidates else None
+                return candidate, True
+        return (candidates[0] if candidates else None), False
+
+    def _log_tree_present(
+        self,
+        *,
+        metadata_complete: bool,
+        log_file_found: bool,
+        job_log_dirs: Sequence[Path],
+        array_task_logs: list[dict[str, Any]] | None,
+    ) -> bool:
+        # Logs actually found always mean present.  Beyond that, a bound record
+        # names its own tree, which is gone only when every job-specific
+        # directory is; an unbound record (a sacct rebuild after a gateway
+        # restart) has no tree of its own to stat.
+        if log_file_found or array_task_logs is not None:
+            return True
+        return metadata_complete and any(self._log_path_exists(log_dir) for log_dir in job_log_dirs)
 
     def _collect_array_task_logs(
         self,

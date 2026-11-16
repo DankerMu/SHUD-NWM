@@ -4,7 +4,7 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Literal, Mapping
 
 from packages.common.redaction import redact_payload
 from packages.common.safe_fs import (
@@ -125,10 +125,14 @@ def try_publish_log_for_advertise(
     if not publication.should_persist_logs:
         return DisplayLogPublicationAttempt(advertised_uri=publication.advertised_uri)
     try:
-        orchestrator._persist_gateway_logs(slurm_job_id, publication.candidate_uri)
+        persisted = orchestrator._persist_gateway_logs(slurm_job_id, publication.candidate_uri)
     except Exception as exc:
         publish_error = orchestrator._log_persistence_error(publication.candidate_uri, exc)
         return DisplayLogPublicationAttempt(advertised_uri=None, error=publish_error)
+    if persisted is False:
+        # The gateway reported the job's log tree gone: nothing was written, so
+        # nothing is advertised and a later pass may fetch it again (#3144).
+        return DisplayLogPublicationAttempt(advertised_uri=None)
     return DisplayLogPublicationAttempt(advertised_uri=publication.candidate_uri)
 
 
@@ -160,8 +164,17 @@ def persist_gateway_logs(
     atomic_write_bytes: Callable[..., Path] = atomic_write_bytes_no_follow,
     safe_filesystem_error_cls: type[Exception] = SafeFilesystemError,
     artifact_log_error_cls: type[Exception] = ArtifactLogError,
-) -> None:
+) -> Literal[False] | None:
+    """Publish the gateway log of ``slurm_job_id`` under ``log_uri``.
+
+    Returns ``None`` once written.  Returns ``False``, writing nothing, only when
+    the gateway reports ``log_tree_present`` as exactly ``False`` (#3144): a
+    deleted log tree is not an empty log.  A missing or non-bool value, as from
+    an older gateway, means present.
+    """
     logs = coerce_mapping(orchestrator.slurm_client.fetch_logs(slurm_job_id))
+    if logs.get("log_tree_present") is False:
+        return False
     content = str(logs.get("logs", ""))
     try:
         published_path = orchestrator._published_log_path(log_uri)

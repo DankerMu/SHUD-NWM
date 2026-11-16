@@ -1155,6 +1155,11 @@ CHAIN_IMPORTER_TESTS: tuple[str, ...] = (
     "tests/test_orchestrator.py",
     "tests/test_partial_success.py",
     "tests/test_pipeline_logs_artifacts.py",
+    # #3144: the log-tree-absent suite top-level-imports the chain facade
+    # (ForecastOrchestrator, M3_STAGES) and drives the resume stage loop
+    # through it. Stop-rule owned module, so the addition rides this at-site
+    # tuple. DB-free, ~1.5s.
+    "tests/test_gateway_log_tree_absent.py",
     # #2584: the ambiguous state_save_qc submit suite top-level-imports the
     # chain facade (ForecastOrchestrator, HttpSlurmGatewayClient) and drives the
     # real stage loop through it. Stop-rule owned module, so the addition rides

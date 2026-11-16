@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 
 class ForecastOrchestratorRuntimeMixin:
     def trigger_forecast(
@@ -261,7 +263,7 @@ class ForecastOrchestratorRuntimeMixin:
 
         return chain_forecast_templates.render_stage_template(self, stage, context)
 
-    def _persist_gateway_logs(self, slurm_job_id: str, log_uri: str) -> None:
+    def _persist_gateway_logs(self, slurm_job_id: str, log_uri: str) -> Literal[False] | None:
         return _chain.chain_workspace.persist_gateway_logs(
             self,
             slurm_job_id,
