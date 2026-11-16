@@ -1494,17 +1494,6 @@ class ForcingProducer:
             weights_by_source_grid[(source_id, grid_id)] = computed
         return weights_by_source_grid
 
-    def _read_fields(
-        self,
-        products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
-    ) -> dict[str, dict[datetime, CanonicalField]]:
-        fields: dict[str, dict[datetime, CanonicalField]] = {}
-        for variable, products_for_variable in products_by_variable.items():
-            fields[variable] = {}
-            for valid_time, product in products_for_variable.items():
-                fields[variable][valid_time] = self._read_canonical_field(product)
-        return fields
-
     def _grid_points_by_source_grid_from_products(
         self,
         products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
@@ -3659,18 +3648,6 @@ def _optional_int(value: Any) -> int | None:
     if value in (None, ""):
         return None
     return int(value)
-
-
-def _max_product_lead_hours(
-    products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
-    cycle_time: datetime,
-) -> int | None:
-    lead_hours = [
-        _product_lead_hours(product, cycle_time)
-        for products_for_variable in products_by_variable.values()
-        for product in products_for_variable.values()
-    ]
-    return max(lead_hours) if lead_hours else None
 
 
 def _product_lead_hours(product: CanonicalProduct, cycle_time: datetime) -> int:

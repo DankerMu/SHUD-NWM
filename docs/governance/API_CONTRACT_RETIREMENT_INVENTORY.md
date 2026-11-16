@@ -309,9 +309,8 @@ the #411 evidence snapshot and are not rewritten.
   `workers/model_registry/basins_geometry.py` were deleted by #3081, which first
   split that 1440-line file into `basins_geometry.py`, `basins_geometry_shapes.py`
   and `basins_geometry_types.py` (each under the large-file guard limit, no new
-  exclusion). The file's other caller-less helpers (`_raw_segment_key`,
-  `_mapped_downstream_segment_id`, `_optional_text`, `_shud_segment_count`) moved
-  unchanged and are not removed.
+  exclusion). The file's other caller-less helpers moved unchanged; #3147 later deleted
+  them as zero-reference dead code.
 
 ### `GET /api/v1/tiles/met-stations/{basin_version_id}/{z}/{x}/{y}.pbf` — retired by #2773 item 4
 

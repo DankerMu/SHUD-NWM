@@ -473,38 +473,6 @@ def _normalize_attr_name(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(name).strip().lower())
 
 
-def _raw_segment_key(value: Any) -> str | None:
-    text = _optional_text(value)
-    if text is None:
-        return None
-    number = _optional_float(text)
-    if number is not None and number.is_integer():
-        return str(int(number))
-    normalized = text.strip().lower()
-    return normalized or None
-
-
-def _mapped_downstream_segment_id(
-    value: Any,
-    *,
-    raw_id: Any,
-    river_segment_id: str,
-    raw_to_segment_id: dict[str, str],
-    segment_ids: set[str],
-) -> str | None:
-    key = _raw_segment_key(value)
-    raw_key = _raw_segment_key(raw_id)
-    if key in (None, "0", "-1") or key == raw_key:
-        return None
-    mapped = raw_to_segment_id.get(key)
-    if mapped is not None and mapped != river_segment_id:
-        return mapped
-    text = _optional_text(value)
-    if text in segment_ids and text != river_segment_id:
-        return text
-    return None
-
-
 def _optional_int(value: Any) -> int | None:
     try:
         return int(float(value))
@@ -520,12 +488,6 @@ def _optional_float(value: Any) -> float | None:
     if not math.isfinite(result):
         return None
     return result
-
-
-def _optional_text(value: Any) -> str | None:
-    if value in (None, ""):
-        return None
-    return str(value)
 
 
 def _approximate_length_m(points: list[tuple[float, float]]) -> float:

@@ -709,12 +709,6 @@ class ProductionScheduler:
         evidence.setdefault("accepted_horizon", _scheduler._accepted_horizon_from_hours(forecast_hours))
         return _scheduler._evidence_safe(evidence)
 
-    def _db_free_strict_warm_start_required(self) -> bool:
-        return bool(
-            self.config.db_free_required
-            and _scheduler.OrchestratorConfig.from_env().require_forecast_warm_start
-        )
-
     def _db_free_strict_warm_start_required_for(
         self,
         candidate: _scheduler.SchedulerCandidate,
@@ -795,39 +789,6 @@ class ProductionScheduler:
 
     def _load_cutover_declaration(self) -> _scheduler.Any:
         return _generation_gate.load_cutover_declaration(self)
-
-    def _evaluate_transition_decision(
-        self,
-        candidate: _scheduler.SchedulerCandidate,
-        cycle: _scheduler.SchedulerSourceCycle,
-        *,
-        required_lead_hours: int,
-        package_checksum: str | None,
-    ) -> _generation.TransitionEvaluation | None:
-        return _generation_gate.evaluate_transition_decision(
-            self,
-            candidate,
-            cycle,
-            required_lead_hours=required_lead_hours,
-            package_checksum=package_checksum,
-        )
-
-    def _legacy_strict_warm_start_evidence(
-        self,
-        candidate: _scheduler.SchedulerCandidate,
-        *,
-        required_lead_hours: int,
-        package_checksum: str | None,
-    ) -> dict[str, _scheduler.Any] | None:
-        return _generation_gate.legacy_strict_warm_start_evidence(
-            self,
-            candidate,
-            required_lead_hours=required_lead_hours,
-            package_checksum=package_checksum,
-        )
-
-    def _forecast_warm_start_env_enabled(self) -> bool | None:
-        return _generation_gate.forecast_warm_start_env_enabled(self)
 
     def _candidate_pipeline_already_complete(
         self, candidate: _scheduler.SchedulerCandidate

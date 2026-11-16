@@ -272,9 +272,6 @@ class HardWall:
             raise HardWallExpired(f"hard wall expired before {label}")
         return value
 
-    def bounded_milliseconds(self, configured_ms: int, label: str) -> int:
-        return max(1, min(configured_ms, int(self.remaining(label) * 1000)))
-
     def reserving(self, seconds: float, label: str) -> HardWall:
         """Return a child wall that leaves time for terminal publication."""
 

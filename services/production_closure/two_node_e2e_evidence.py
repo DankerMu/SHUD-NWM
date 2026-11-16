@@ -977,36 +977,6 @@ def _manual_ops_lane_helpers() -> ManualOpsLaneEvaluationHelpers[LaneEvaluation]
     )
 
 
-
-def _final_status(
-    lanes: Mapping[str, LaneEvaluation],
-    source_scope_results: Mapping[str, Mapping[str, Any]],
-    scope: Mapping[str, Any],
-) -> str:
-    return two_node_e2e_final_aggregation.final_status(lanes, source_scope_results, scope)
-
-
-def _collect_blockers_and_findings(
-    lanes: Mapping[str, LaneEvaluation],
-    source_scope_results: Mapping[str, Mapping[str, Any]],
-    scope: Mapping[str, Any],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    return two_node_e2e_final_aggregation.collect_blockers_and_findings(
-        lanes,
-        source_scope_results,
-        scope,
-        helpers=_final_aggregation_helpers(),
-    )
-
-
-def _metadata_summary(
-    doc: EvidenceDocument | None,
-    metadata: Mapping[str, Any],
-    metadata_lane: LaneEvaluation,
-) -> dict[str, Any]:
-    return two_node_e2e_final_aggregation.metadata_summary(doc, metadata, metadata_lane)
-
-
 def _find_first_json(run_dir: Path, candidates: Sequence[str]) -> EvidenceDocument | None:
     for relative in candidates:
         path = run_dir / relative
@@ -2665,20 +2635,6 @@ def _producer_text_identity_conflicts(
     return conflicts
 
 
-def _producer_record_text_mentions_identity(record: Mapping[str, Any], field: str, expected: str | None) -> bool:
-    if not expected:
-        return False
-    for _parent, key, nested, _depth in _walk_evidence_values(record):
-        if key not in PRODUCER_TEXT_IDENTITY_KEYS or not isinstance(nested, str):
-            continue
-        parsed_values = _identity_values_from_text(nested)
-        if any(_producer_identity_value_matches(field, item, expected) for item in parsed_values.get(field, [])):
-            return True
-        if field == "check" and _producer_text_mentions_check(nested, expected):
-            return True
-    return False
-
-
 def _producer_identity_text_items(
     value: Any,
     *,
@@ -3094,27 +3050,6 @@ def _producer_value_text_mentions_check(value: Any, target_check: str) -> bool:
     return False
 
 
-def _producer_value_mentions_scope(value: Any, *, source: str, check: str) -> bool:
-    source_name = _source_name(source)
-    for _parent, _key, nested, _depth in _walk_evidence_values(value):
-        if not isinstance(nested, Mapping):
-            continue
-        if not _looks_like_evidence_record(nested):
-            continue
-        nested_source = _source_name(nested.get("source") or nested.get("source_id"))
-        nested_check = str(
-            nested.get("check")
-            or nested.get("check_name")
-            or nested.get("name")
-            or nested.get("route")
-            or nested.get("operation")
-            or ""
-        ).strip()
-        if nested_source == source_name and nested_check == check:
-            return True
-    return False
-
-
 def _recursive_current_run_blockers(
     value: Any,
     evidence_run_id: str,
@@ -3383,16 +3318,6 @@ def _logs_check_published_artifact_blockers(
             "response.",
         )
     ]
-
-
-def _log_uri_values(value: Any) -> list[str]:
-    values: list[str] = []
-    seen: set[str] = set()
-    for _evidence_key, uri in _log_uri_entries(value):
-        if uri not in seen:
-            values.append(uri)
-            seen.add(uri)
-    return values
 
 
 def _log_uri_entries(value: Any) -> list[tuple[str, str]]:

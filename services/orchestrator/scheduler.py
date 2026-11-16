@@ -476,12 +476,6 @@ def _cycle_hours_for_sources(sources: Sequence[str]) -> set[int]:
     return hours
 
 
-def _fetch_scheduler_model_detail(registry: ModelRegistryReader, model_id: str) -> Mapping[str, Any]:
-    from services.orchestrator import scheduler_models
-
-    return scheduler_models.fetch_scheduler_model_detail(registry, model_id)
-
-
 def _coerce_registered_model(row: Mapping[str, Any]) -> RegisteredSchedulerModel | dict[str, Any]:
     from services.orchestrator import scheduler_models
 
@@ -494,51 +488,6 @@ def _active_model_duplicate_exclusions(rows: Sequence[Mapping[str, Any]]) -> dic
     return scheduler_models.active_model_duplicate_exclusions(rows)
 
 
-def _active_model_identity_groups(
-    rows: Sequence[Mapping[str, Any]],
-    value_getter: Callable[[Mapping[str, Any]], str | None],
-) -> dict[str, set[int]]:
-    from services.orchestrator import scheduler_models
-
-    return scheduler_models.active_model_identity_groups(rows, value_getter)
-
-
-def _active_model_model_id(row: Mapping[str, Any]) -> str | None:
-    from services.orchestrator import scheduler_models
-
-    return scheduler_models.active_model_model_id(row)
-
-
-def _active_model_package_uri(row: Mapping[str, Any]) -> str | None:
-    from services.orchestrator import scheduler_models
-
-    return scheduler_models.active_model_package_uri(row)
-
-
-def _active_model_package_checksum(row: Mapping[str, Any]) -> str | None:
-    from services.orchestrator import scheduler_models
-
-    return scheduler_models.active_model_package_checksum(row)
-
-
-def _has_package_specific_checksum_context(row: Mapping[str, Any], resource_profile: Mapping[str, Any]) -> bool:
-    from services.orchestrator import scheduler_models
-
-    return scheduler_models.has_package_specific_checksum_context(row, resource_profile)
-
-
-def _model_duplicate_identity_value_for_evidence(field: str, value: str) -> str:
-    from services.orchestrator import scheduler_models
-
-    return scheduler_models.model_duplicate_identity_value_for_evidence(field, value)
-
-
-def _resource_profile_summary(resource_profile: Mapping[str, Any]) -> dict[str, Any]:
-    from services.orchestrator import scheduler_models
-
-    return scheduler_models.resource_profile_summary(resource_profile)
-
-
 def _coerce_output_segment_count(resource_profile: Mapping[str, Any], *, fallback: Any = None) -> int | None:
     from services.orchestrator import scheduler_models
 
@@ -549,12 +498,6 @@ def _mapping_value(value: Any) -> Mapping[str, Any]:
     from services.orchestrator import scheduler_models
 
     return scheduler_models.mapping_value(value)
-
-
-def _model_exclusion(row: Mapping[str, Any], reason: str) -> dict[str, Any]:
-    from services.orchestrator import scheduler_models
-
-    return scheduler_models.model_exclusion(row, reason)
 
 
 def _matches_filters(

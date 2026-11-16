@@ -10687,13 +10687,6 @@ class FileOrchestrationJournalRepository:
             _validate_accepted_submit_evidence(row)
         return row
 
-    def _write_pipeline_job(self, row: Mapping[str, Any], *, exclusive_direct: bool) -> dict[str, Any] | None:
-        source_id = _source_id_from_job(row)
-        cycle_time = _cycle_time_from_job(row)
-        model_id = _optional_safe_identity(row, "model_id")
-        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
-            return self._write_pipeline_job_unlocked(row, exclusive_direct=exclusive_direct, model_id=model_id)
-
     def _project_committed_pipeline_job_write(
         self,
         row: Mapping[str, Any],

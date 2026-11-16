@@ -18,7 +18,6 @@ from packages.common.node27_pgdata_workload_types import PgdataWorkloadError, re
 from packages.common.redaction import redact_text
 from packages.common.safe_fs import (
     SafeFilesystemError,
-    atomic_write_bytes_no_follow,
     read_bytes_durable_no_follow,
     stat_no_follow,
     unlink_no_follow,
@@ -505,11 +504,3 @@ def publish_measurement_output(path: Path, document: Mapping[str, Any]) -> None:
             )
         _unlink_owned_stage(stage, staged_identity)
         refuse("measurement output could not be published", code="OUTPUT_PUBLISH_FAILED", stage="io")
-
-
-def replace_measurement_output(path: Path, document: Mapping[str, Any]) -> None:
-    """Internal helper for tests that need a durable replace; CLI never clobbers."""
-
-    target = require_absolute_path(path, code="OUTPUT_PATH_INVALID")
-    encoded = encode_evidence(document)
-    atomic_write_bytes_no_follow(target, encoded, mode=0o600, require_durable_replace=True)

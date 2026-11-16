@@ -200,28 +200,6 @@ def forecast_series_query(
     )
 
 
-def forecast_series_url(
-    *,
-    origin: str,
-    basin_version_id: str,
-    segment_id: str,
-    river_network_version_id: str,
-    run_id: str,
-    model_id: str,
-    issue_time: str,
-    source: str,
-) -> str:
-    path = forecast_series_path(basin_version_id=basin_version_id, segment_id=segment_id)
-    query = forecast_series_query(
-        river_network_version_id=river_network_version_id,
-        run_id=run_id,
-        model_id=model_id,
-        issue_time=issue_time,
-        source=source,
-    )
-    return f"{origin}{path}?{query}"
-
-
 def _copy_binding_value(value: Any, *, error_code: str) -> Any:
     if isinstance(value, datetime):
         return value

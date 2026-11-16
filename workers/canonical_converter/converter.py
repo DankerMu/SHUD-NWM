@@ -399,10 +399,6 @@ def required_standard_variables_for_source(source_id: str) -> tuple[str, ...]:
         raise CanonicalConversionError(f"Unsupported canonical readiness source: {source_id}") from error
 
 
-def canonical_readiness_source_is_supported(source_id: str) -> bool:
-    return normalize_source_id(source_id) in REQUIRED_STANDARD_VARIABLES_BY_SOURCE
-
-
 def expected_converter_version(source_id: str) -> str:
     """Return the current canonical converter_version for a source.
 
@@ -1594,16 +1590,6 @@ class CanonicalConverter:
                 f"{expected_native_variable}, matched {matches}."
             )
         )
-
-    def _group_records(self, records: list[RawRecord]) -> dict[str, list[RawRecord]]:
-        grouped: dict[str, list[RawRecord]] = {}
-        for record in records:
-            standard_variable = map_variable(record.native_variable, self.config.variable_mapping)
-            if standard_variable is None:
-                LOGGER.warning("Skipping unmapped variable %s from %s", record.native_variable, record.source_file)
-                continue
-            grouped.setdefault(standard_variable, []).append(record)
-        return grouped
 
     def _entries_by_standard_variable(self, entries: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
         grouped: dict[str, list[dict[str, Any]]] = {}

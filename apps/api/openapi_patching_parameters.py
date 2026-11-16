@@ -31,10 +31,6 @@ def _run_id_query_parameter(*, required: bool) -> dict[str, Any]:
     }
 
 
-def _model_id_query_parameter(*, required: bool) -> dict[str, Any]:
-    return {"name": "model_id", "in": "query", "required": required, "schema": {"type": "string"}}
-
-
 def _strict_model_id_query_parameter(*, required: bool) -> dict[str, Any]:
     return {
         "name": "model_id",

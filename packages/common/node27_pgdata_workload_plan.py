@@ -160,15 +160,6 @@ def _relation_basename(node: Mapping[str, Any]) -> str:
     return str(node.get("Relation Name") or "").split(".")[-1]
 
 
-def _node_predicate_text(node: Mapping[str, Any]) -> str:
-    parts: list[str] = []
-    for key in ("Index Cond", "Filter", "Recheck Cond", "Chunk Quals", "Chunk Qual"):
-        value = node.get(key)
-        if value:
-            parts.append(str(value))
-    return " ".join(parts).lower()
-
-
 def _index_cond_text(node: Mapping[str, Any]) -> str:
     parts: list[str] = []
     for key in ("Index Cond", "Bitmap Index Cond", "Recheck Cond", "Chunk Quals", "Chunk Qual"):

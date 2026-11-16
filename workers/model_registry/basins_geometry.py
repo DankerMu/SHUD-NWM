@@ -528,18 +528,6 @@ def _shud_count_header(path: Path, expected_checksums: dict[str, str] | None) ->
     )
 
 
-def _shud_segment_count(path: Path, expected_checksums: dict[str, str] | None) -> tuple[int, str]:
-    header, digest = _shud_count_header(path, expected_checksums)
-    count = header["count"]
-    if count is None:
-        raise BasinsGeometryError(
-            "BASINS_REGISTRY_SHUD_PARSE_FAILED",
-            "SHUD river evidence did not contain a valid segment count.",
-            path=str(path),
-        )
-    return count, digest
-
-
 def _layer_checksum_from_snapshot(layer: _LayerSnapshot) -> str:
     digest = hashlib.sha256()
     for suffix in SHAPEFILE_REQUIRED_SUFFIXES:
