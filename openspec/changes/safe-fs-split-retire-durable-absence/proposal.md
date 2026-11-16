@@ -73,14 +73,14 @@ Result: `safe_fs.py` is about 958 lines and `safe_fs_paths.py` about 110. Neithe
 standard. Risk packs: refactor-move, test-only-retire.
 
 ## Evidence Floor
-- [ ] E1 `uv run ruff check --no-cache .`
-- [ ] E2 AST move proof against `origin/master`. The proof script, its output and the command are written to a
+- [x] E1 `uv run ruff check --no-cache .`
+- [x] E2 AST move proof against `origin/master`. The proof script, its output and the command are written to a
   file and the result goes in the PR body.
   - Every top-level def, class and assignment of the old `safe_fs.py` appears with an identical AST dump in exactly one
     of `safe_fs.py` and `safe_fs_paths.py`.
   - The only allowed differences are the retired `prove_named_entry_absent_durable` and the import lines.
   - The set of names reachable as `safe_fs.X` equals the old set minus the retired one.
-- [ ] E3 Tests, all green locally:
+- [x] E3 Tests, all green locally:
   - `select_tests` over the union of `packages/common/safe_fs.py`, `packages/common/safe_fs_paths.py` and
     `packages/common/safe_fs_publication.py`, plus the selector set for the diff;
   - `tests/test_safe_fs.py`, `tests/test_safe_fs_lock.py` and `tests/test_select_ci_tests.py`;
@@ -89,9 +89,9 @@ standard. Risk packs: refactor-move, test-only-retire.
 
   New files are added with `git add -N` before the local selector run. The new selector assertion is red before the
   rule edit.
-- [ ] E4 The same set passes in a node-27 temporary worktree.
-- [ ] E5 `wc -l` shows both files at or under 1000 lines, `.large-file-guard.json` is unchanged, and the entropy hard
+- [x] E4 The same set passes in a node-27 temporary worktree.
+- [x] E5 `wc -l` shows both files at or under 1000 lines, `.large-file-guard.json` is unchanged, and the entropy hard
   gate has `hard_gate_failing_count 0`.
-- [ ] E6 Outside `openspec/changes/archive/`, a grep for `prove_named_entry_absent_durable` has zero hits in code, tests and
+- [x] E6 Outside `openspec/changes/archive/`, a grep for `prove_named_entry_absent_durable` has zero hits in code, tests and
   `openspec/specs`.
-- [ ] E7 `openspec validate safe-fs-split-retire-durable-absence --strict --no-interactive`.
+- [x] E7 `openspec validate safe-fs-split-retire-durable-absence --strict --no-interactive`.
