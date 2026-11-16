@@ -173,3 +173,19 @@ surface SHALL be updated to the current measured state.
   occur in the tree
 - **THEN** the branch, the tests that exist only for it and any reason mapping it alone produced are deleted, and the
   audit's budget-counted finding count and allowlisted/unallowlisted split are unchanged
+
+### Requirement: Configuration names have a reader, and retired aliases are migrated before removal
+
+A configuration key that is templated, set in a live env file or documented as live SHALL have a reader on the
+surface it is templated for. Otherwise it SHALL be removed from that surface, and from the live env files after a
+backup. A legacy alias SHALL be removed only after every live env file that sets it has been migrated to a key with
+the same effective value. When an alias stands for more than one primary key, the migration SHALL preserve the
+effective value of each. After removal, a reader of an alias that decides safety behaviour (such as a lock or lease
+guard mode) SHALL fail closed when it sees only the retired alias, and SHALL name the primary key. A reader of any
+other retired alias MAY ignore it and apply the primary key's default.
+
+#### Scenario: a legacy guard alias is retired without changing live behaviour
+
+- **WHEN** a retired guard alias is the effective source of a live guard mode on a production node
+- **THEN** the live env gains the primary key with the same value before the reader drops the alias, the next
+  production pass resolves the same guard modes, and a configuration carrying only the alias is refused
