@@ -887,7 +887,7 @@ unusable 行），已剪的 reference 必然是 `nothing_to_prune`，只剪 dest
 两 lane 都是 `nothing_to_prune`。
 
 **reference lane 的回弹与余量**：
-#3123 之后不再回弹：任何发布都不写回 `index_generated_at` / `object_evidence`，两 lane 都是
+自 #3123 起不再回弹：任何发布都不写回 `index_generated_at` / `object_evidence`，两 lane 都是
 copyback 形状（18.5 节点、1,048 B / 条），按此算的上限与条目数无关：字节上限约 16,010 条，
 0.70 告警线约 11,200 条。剩余余量必须用 prune-retention dry-run 的 `capacity_before`
 （实时 `entry_count` / `json_nodes` / `index_bytes`）现算，不要沿用下面的历史数字。
