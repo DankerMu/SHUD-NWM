@@ -33,6 +33,7 @@ publisher stub are in ``tests/variant_activation_cutover_helpers.py``.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import pytest
@@ -49,6 +50,7 @@ from tests.variant_activation_cutover_helpers import (
     BASIN_VERSION_ID,
     _decision,
     _HarnessStore,
+    install_two_mount_hook_chain,
     two_models,
     variant_direct_grid_profile,
 )
@@ -58,13 +60,16 @@ from tests.variant_activation_cutover_helpers import (
 
 def test_hooks_ordered_run_in_declared_order_before_swap(
     two_models: list[dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The hook chain fires in ``PRE_ACTIVATION_HOOK_MOUNT_POINTS`` order.
 
-    Registered spies record the mount-point name; the swap runs only
-    after both hooks return (verified by asserting the swap happened
-    AFTER the hooks did).
+    The production chain has one mount point, so the case runs on the
+    test-only two-entry chain (#3165). Registered spies record the
+    mount-point name; the swap runs only after both hooks return
+    (verified by asserting the swap happened AFTER the hooks did).
     """
+    chain = install_two_mount_hook_chain(monkeypatch)
     store = _HarnessStore(two_models)
     call_log: list[tuple[str, ModelActivationContext, int]] = []
 
@@ -76,8 +81,8 @@ def test_hooks_ordered_run_in_declared_order_before_swap(
 
         return _hook
 
-    store.register_pre_activation_hook("state_clone", _spy("state_clone"))
-    store.register_pre_activation_hook("station_flag_flip", _spy("station_flag_flip"))
+    for mount_point in chain:
+        store.register_pre_activation_hook(mount_point, _spy(mount_point))
 
     result = store.model_lifecycle_operation(
         "direct_grid_m1",
@@ -88,7 +93,7 @@ def test_hooks_ordered_run_in_declared_order_before_swap(
 
     assert result["status"] == "allowed"
     # Two hooks fired, in declared order.
-    assert [entry[0] for entry in call_log] == list(PRE_ACTIVATION_HOOK_MOUNT_POINTS)
+    assert [entry[0] for entry in call_log] == list(chain)
     # Both hooks saw ZERO state updates — the swap fires AFTER the last hook.
     assert [entry[2] for entry in call_log] == [0, 0]
     # Post-condition: the swap did fire (2 updates: supersede legacy, activate direct).
@@ -138,16 +143,19 @@ def test_hooks_empty_default_preserves_lifecycle_behavior(
 
 def test_hook_raises_aborts_whole_transaction(
     two_models: list[dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A raising hook rolls the whole transaction back — no partial state.
 
     Locks §2.1 scenario "A raising hook aborts the whole transaction":
-    the raising hook fires at ``state_clone``; the second hook must NOT
-    fire; the target does NOT activate; the prior active is NOT
-    superseded; no ``outcome IN ('allowed','rollback')`` audit row is
-    written; and the transaction context manager sees the exception at
-    exit (committed=False).
+    the raising hook fires at ``state_clone``; the second hook, on the
+    test-only two-entry chain (#3165), must NOT fire; the target does
+    NOT activate; the prior active is NOT superseded; no
+    ``outcome IN ('allowed','rollback')`` audit row is written; and the
+    transaction context manager sees the exception at exit
+    (committed=False).
     """
+    _first, second = install_two_mount_hook_chain(monkeypatch)
     store = _HarnessStore(two_models)
 
     class _HookAbort(RuntimeError):
@@ -162,7 +170,7 @@ def test_hook_raises_aborts_whole_transaction(
         second_hook_calls.append((cursor, ctx))
 
     store.register_pre_activation_hook("state_clone", _raise)
-    store.register_pre_activation_hook("station_flag_flip", _second_spy)
+    store.register_pre_activation_hook(second, _second_spy)
 
     with pytest.raises(_HookAbort, match="test-hook injected fail-closed abort"):
         store.model_lifecycle_operation(
@@ -205,15 +213,14 @@ def test_single_transaction_swap_and_audit(
     """
     store = _HarnessStore(two_models)
 
-    # Also register spy hooks so we can verify the sequence:
-    # hooks-before-swap AND both-on-the-same-cursor.
+    # Also register a spy hook so we can verify the sequence:
+    # hook-before-swap AND hook-on-the-same-cursor.
     seen_cursors: list[Any] = []
 
     def _spy_cursor(cursor: Any, _ctx: ModelActivationContext) -> None:
         seen_cursors.append(cursor)
 
     store.register_pre_activation_hook("state_clone", _spy_cursor)
-    store.register_pre_activation_hook("station_flag_flip", _spy_cursor)
 
     result = store.model_lifecycle_operation(
         "direct_grid_m1",
@@ -227,8 +234,8 @@ def test_single_transaction_swap_and_audit(
     assert len(store._transactions) == 1
     assert store._transactions[0]["committed"] is True
     committed_cursor = store._transactions[0]["cursor"]
-    # Both hooks saw the SAME cursor as the transaction cursor.
-    assert seen_cursors == [committed_cursor, committed_cursor]
+    # The hook saw the SAME cursor as the transaction cursor.
+    assert seen_cursors == [committed_cursor]
     # Two lifecycle-state updates: legacy -> superseded, then direct -> active.
     assert store._state_updates == [
         ("legacy_m0", "superseded", False),
@@ -264,7 +271,6 @@ def test_hooks_skipped_when_blocked(
         return _hook
 
     store.register_pre_activation_hook("state_clone", _spy("state_clone"))
-    store.register_pre_activation_hook("station_flag_flip", _spy("station_flag_flip"))
 
     result = store.model_lifecycle_operation(
         "direct_grid_m1",
@@ -305,7 +311,6 @@ def test_hooks_skipped_when_already_current(
         return _hook
 
     store.register_pre_activation_hook("state_clone", _spy("state_clone"))
-    store.register_pre_activation_hook("station_flag_flip", _spy("station_flag_flip"))
 
     result = store.model_lifecycle_operation(
         "direct_grid_m1",
@@ -347,7 +352,6 @@ def test_hooks_skipped_on_deactivate(
         return _hook
 
     store.register_pre_activation_hook("state_clone", _spy("state_clone"))
-    store.register_pre_activation_hook("station_flag_flip", _spy("station_flag_flip"))
 
     result = store.model_lifecycle_operation(
         "legacy_m0",
@@ -422,3 +426,24 @@ def test_register_pre_activation_hook_rejects_unknown_mount_point(
 
     with pytest.raises(InvalidPayloadError, match="Unknown pre-activation mount point"):
         store.register_pre_activation_hook("misspelled_mount", _hook)
+
+
+def test_register_pre_activation_hook_rejects_retired_station_flag_flip_mount_point(
+    two_models: list[dict[str, Any]],
+) -> None:
+    """#3165: the retired ``station_flag_flip`` slot is an unknown mount point.
+
+    The chain is the single ``state_clone`` mount; registering on the
+    retired name raises, names the valid mount points, and installs no
+    hook.
+    """
+    store = _HarnessStore(two_models)
+
+    def _hook(_cursor: Any, _ctx: ModelActivationContext) -> None:
+        return None
+
+    expected = "Unknown pre-activation mount point: 'station_flag_flip'; valid mount points are ('state_clone',)"
+    with pytest.raises(InvalidPayloadError, match=re.escape(expected)):
+        store.register_pre_activation_hook("station_flag_flip", _hook)
+    assert store._pre_activation_hooks == {"state_clone": _default_no_op_hook}
+    assert PRE_ACTIVATION_HOOK_MOUNT_POINTS == ("state_clone",)

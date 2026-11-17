@@ -11,6 +11,7 @@ module: pytest does not collect it.
   partition that requests ``two_models`` must import BOTH names, because pytest
   resolves a fixture's own dependencies by name in the requesting module.
 * ``_ManifestPublisherStub`` records the post-commit manifest publisher calls.
+* ``install_two_mount_hook_chain`` swaps in a test-only two-entry hook chain.
 """
 
 from __future__ import annotations
@@ -300,6 +301,27 @@ def two_models(variant_direct_grid_profile: dict[str, Any]) -> list[dict[str, An
             resource_profile=variant_direct_grid_profile,
         ),
     ]
+
+
+# --- test-only two-entry hook chain -----------------------------------------
+
+# The production chain has one mount point (``state_clone``, #3165), which makes
+# a declared-order assertion or a "no later hook runs" assertion vacuous. The
+# ordering, abort and repeat cases install this tuple instead. Registration
+# validation and dispatch both read the binding in
+# ``packages.common.model_registry_lifecycle_support``, and dispatch falls back
+# to the default no-op for a mount point ``__post_init__`` did not seed. The
+# partitions' own imported ``PRE_ACTIVATION_HOOK_MOUNT_POINTS`` is NOT patched,
+# so their assertions compare against this tuple.
+TWO_MOUNT_HOOK_CHAIN: tuple[str, ...] = ("state_clone", "second_mount")
+
+
+def install_two_mount_hook_chain(monkeypatch: pytest.MonkeyPatch) -> tuple[str, ...]:
+    monkeypatch.setattr(
+        "packages.common.model_registry_lifecycle_support.PRE_ACTIVATION_HOOK_MOUNT_POINTS",
+        TWO_MOUNT_HOOK_CHAIN,
+    )
+    return TWO_MOUNT_HOOK_CHAIN
 
 
 # --- post-commit manifest publisher stub ---------------------------------

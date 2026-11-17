@@ -14,10 +14,7 @@ from typing import Any
 
 import pytest
 
-from packages.common.model_registry import (
-    PRE_ACTIVATION_HOOK_MOUNT_POINTS,
-    ModelActivationContext,
-)
+from packages.common.model_registry import ModelActivationContext
 from services.orchestrator.scheduler_file_providers import FileSchedulerModelRegistry
 from tests.variant_activation_cutover_helpers import (
     BASIN_ID,
@@ -26,6 +23,7 @@ from tests.variant_activation_cutover_helpers import (
     _HarnessStore,
     _ManifestPublisherStub,
     _RecordingCursor,
+    install_two_mount_hook_chain,
     two_models,
     variant_direct_grid_profile,
 )
@@ -364,6 +362,7 @@ def test_concurrent_activation_leaves_exactly_one_active_and_stable_loser(
 
 def test_repeat_already_current_no_second_transition_no_hook_no_manifest_no_audit(
     two_models: list[dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """§2.4: repeat activate of the already-current target is a true no-op.
 
@@ -382,7 +381,11 @@ def test_repeat_already_current_no_second_transition_no_hook_no_manifest_no_audi
          * NO additional ``outcome IN ('allowed','rollback')`` audit
            row (an already-current audit row MAY be appended, but that
            has a distinct outcome and is not a second "success" row).
+
+    The hooks run on the test-only two-entry chain (#3165), so "fired
+    once, in declared order" is not satisfied by a single mount.
     """
+    chain = install_two_mount_hook_chain(monkeypatch)
     store = _HarnessStore(two_models)
     publisher = _ManifestPublisherStub()
     store.register_post_commit_manifest_publisher(publisher)
@@ -395,8 +398,8 @@ def test_repeat_already_current_no_second_transition_no_hook_no_manifest_no_audi
 
         return _hook
 
-    store.register_pre_activation_hook("state_clone", _spy("state_clone"))
-    store.register_pre_activation_hook("station_flag_flip", _spy("station_flag_flip"))
+    for mount_point in chain:
+        store.register_pre_activation_hook(mount_point, _spy(mount_point))
 
     # --- Call 1: real transition -------------------------------------
     result_1 = store.model_lifecycle_operation(
@@ -412,7 +415,7 @@ def test_repeat_already_current_no_second_transition_no_hook_no_manifest_no_audi
         ("direct_grid_m1", "active", True),
     ]
     # Both hooks fired exactly once, in declared order.
-    assert hook_calls == list(PRE_ACTIVATION_HOOK_MOUNT_POINTS)
+    assert hook_calls == list(chain)
     # Manifest publisher fired exactly once.
     assert publisher.call_count == 1
     # Exactly one ``allowed``/``rollback`` audit row.
