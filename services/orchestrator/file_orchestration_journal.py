@@ -5832,10 +5832,11 @@ class FileOrchestrationJournalRepository:
             # best-effort discipline as ``_record_permanent_failure_mark_failure``:
             # the evidence write exists to keep the terminal from being silent,
             # never to turn a correct durable release into a raise.  The catch
-            # spans the filesystem/OS class too: the private-recovery side write
-            # raises ``SafeFilesystemError``/``OSError``, which ``reconcile.py``'s
-            # enclosing ``except FileOrchestrationJournalError`` would NOT catch
-            # -- it would abort the whole reconcile pass.
+            # spans the filesystem/OS class too: ``_append_journal_record_unlocked``
+            # and ``_materialize_latest_unlocked`` write through the safe-filesystem
+            # layer and raise ``SafeFilesystemError``/``OSError``, which
+            # ``reconcile.py``'s enclosing ``except FileOrchestrationJournalError``
+            # would NOT catch -- it would abort the whole reconcile pass.
             try:
                 self._append_pipeline_job_event_unlocked(
                     row,

@@ -44,7 +44,10 @@ issue 说「从未在家族层裁定过一次」——**这句是对的**。
 > 「…and nothing unsafe is admitted (dangling entries fail `is_dir()`/existence checks downstream)」
 
 即：容忍之所以成立，是因为**下游会挡**。立场 A 不是推翻这条原则，而是发现自己那条腿
-（提交 manifest）**没有下游**，于是同一条原则给出了相反结论。三个立场是一条原则的三个实例。
+**没有能挡住环路的下游**：`scheduler_config/db_free.py::_db_free_loop_filtered_realpath` 的产物直接进
+containment 裁决（`_path_is_relative_to(resolved, root)`），词法折叠后的环路产物在那里可能被判为界内，
+其后的 `parent.lstat()`/存在性闸门只会把它误报成「尚未创建」，而不是报出环路（#1626）。
+于是同一条原则给出了相反结论。三个立场是一条原则的三个实例。
 
 **所以本 ADR 做的是两件事，不是一件**：把这条已经存在的原则搬到新站点作者会看见的位置；
 以及**首次在家族层把它裁定下来**——给出可判定的判据、对全部在管站点逐一定性、
