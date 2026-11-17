@@ -1691,6 +1691,21 @@ RESPONSE_MODEL_PRESERVATION_TESTS: tuple[str, ...] = (
     "tests/test_response_model_preservation.py",
     "tests/test_response_model_preservation_pipeline.py",
 )
+# #3165 partitioned tests/test_variant_activation_cutover.py (1770 lines) into
+# three collectible suites plus one non-collectible helper. The base path keeps
+# the pre-activation hook cases and stays the GUARDED_MODULE_CLOSURES known
+# member for the model registry facade; `_manifest` holds the post-commit
+# manifest re-publish cases and `_dispatch` the dispatch-set, retirement and
+# concurrency cases. All three import the helper and the facade at module scope.
+# ONE tuple, carried whole by every rule that named the monolith, by each
+# partition's changed-test redirect and by the helper's support-module row, so a
+# diff that selected the monolith before the split still selects all 32 cases.
+VARIANT_ACTIVATION_CUTOVER_HELPERS_PATH = "tests/variant_activation_cutover_helpers.py"
+VARIANT_ACTIVATION_CUTOVER_TESTS: tuple[str, ...] = (
+    "tests/test_variant_activation_cutover.py",
+    "tests/test_variant_activation_cutover_dispatch.py",
+    "tests/test_variant_activation_cutover_manifest.py",
+)
 # #2612: the model registry facade's DIRECT non-gated importer suites (the
 # selector suite's GUARDED_MODULE_CLOSURES derives this set from the tracked tree
 # in direct-only mode and reds on a new importer). Merged into the rule the
@@ -1714,7 +1729,7 @@ MODEL_REGISTRY_IMPORTER_TESTS: tuple[str, ...] = (
     "tests/test_replay_lineage.py",
     "tests/test_state_clone_cutover_hook.py",
     "tests/test_state_clone_index_publish.py",
-    "tests/test_variant_activation_cutover.py",
+    *VARIANT_ACTIVATION_CUTOVER_TESTS,
 )
 # #2010 precipitation raster service. The suite is the ONLY oracle for
 # `services/precip/**` (window resolution, accumulation, PNG structure, file

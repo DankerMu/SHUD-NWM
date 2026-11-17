@@ -129,6 +129,8 @@ from scripts.select_ci_tests_tables import (
     SUCCESSION_RECEIPT_TESTS,
     THREAD_EXCEPTION_POLICY_TESTS,
     TIME_NORMALIZATION_CONTRACT_PATH,
+    VARIANT_ACTIVATION_CUTOVER_HELPERS_PATH,
+    VARIANT_ACTIVATION_CUTOVER_TESTS,
     PathTestRule,
 )
 
@@ -310,6 +312,24 @@ CHANGED_TEST_FILE_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "tests/test_node27_pgdata_workload_server_identity.py",
         NODE27_PGDATA_WORKLOAD_TESTS,
+        stop_on_match=True,
+    ),
+    # #3165: the variant activation cutover monolith is three partitions. A diff
+    # to any one of them runs all three, as a diff to the monolith ran all 32
+    # cases. No suite imports a partition, so the redirect drops no importer.
+    PathTestRule(
+        "tests/test_variant_activation_cutover.py",
+        VARIANT_ACTIVATION_CUTOVER_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "tests/test_variant_activation_cutover_dispatch.py",
+        VARIANT_ACTIVATION_CUTOVER_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "tests/test_variant_activation_cutover_manifest.py",
+        VARIANT_ACTIVATION_CUTOVER_TESTS,
         stop_on_match=True,
     ),
 
@@ -582,6 +602,14 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         # suite. All five partitions import it at module scope.
         BASIN_RETIREMENT_HELPERS_PATH,
         BASIN_RETIREMENT_TESTS,
+    ),
+    PathTestRule(
+        # #3165: the in-memory `_HarnessStore`, the `two_models` /
+        # `variant_direct_grid_profile` fixtures and the manifest publisher stub
+        # of the variant activation cutover suite. All three partitions import it
+        # at module scope.
+        VARIANT_ACTIVATION_CUTOVER_HELPERS_PATH,
+        VARIANT_ACTIVATION_CUTOVER_TESTS,
     ),
     PathTestRule(
         # #2532: the node-22 refresh-timer probe suite's shared fakes (the fake
@@ -2303,7 +2331,8 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_source_cycle_raw_manifest.py",
             "tests/test_source_scoped_dispatch.py",
             "tests/test_state_clone.py",
-            "tests/test_variant_activation_cutover.py",
+            # #3165: the variant activation cutover suite is three partitions.
+            *VARIANT_ACTIVATION_CUTOVER_TESTS,
             "tests/test_e2e_m3.py",
         ),
     ),
