@@ -13,6 +13,7 @@ the published-document and generated-type cases stayed on
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import yaml
@@ -464,7 +465,12 @@ def test_pipeline_stage_contract_exposes_formal_job_evidence_and_ops_statuses() 
     assert OPS_JOB_STATUS_ENUM == persisted_statuses
     assert basin_result["properties"]["status"]["enum"] == persisted_statuses
     assert schemas["PipelineJob"]["properties"]["status"]["enum"] == persisted_statuses
-    assert schemas["RetryRunResult"]["properties"]["status"]["enum"] == ["submitted"]
+    # #3179: the retry route is a 409 stub; no success schema or 2xx is published.
+    assert "RetryRunResult" not in schemas
+    retry_operation = spec["paths"]["/api/v1/runs/{run_id}/retry"]["post"]
+    assert retry_operation["operationId"] == "retryRun"
+    assert not [status for status in retry_operation["responses"] if status.startswith("2")]
+    assert retry_operation["responses"]["409"] == {"$ref": "#/components/responses/ControlPlaneManualActionRequired"}
     assert schemas["PipelineStage"]["properties"]["basin_results"]["maxItems"] == (
         pipeline_routes.PIPELINE_STAGE_BASIN_RESULTS_LIMIT
     )
@@ -493,11 +499,12 @@ def test_pipeline_stage_contract_exposes_formal_job_evidence_and_ops_statuses() 
     assert '"skipped"' in basin_result_types
     assert '"submission_failed"' in basin_result_types
     assert '"permanently_failed"' in basin_result_types
-    retry_start = generated_types.index("RetryRunResult:")
-    runtime_config_start = generated_types.index("RuntimeConfig:")
-    retry_types = generated_types[retry_start:runtime_config_start]
-    assert 'status: "submitted";' in retry_types
-    assert '"submission_failed"' not in retry_types
+    assert "RetryRunResult" not in generated_types
+    retry_run_start = generated_types.index("    retryRun: {")
+    retry_run_end = generated_types.index("\n    };\n", retry_run_start)
+    retry_run_types = generated_types[retry_run_start:retry_run_end]
+    assert '409: components["responses"]["ControlPlaneManualActionRequired"];' in retry_run_types
+    assert not re.search(r"^\s+2\d\d: ", retry_run_types, re.MULTILINE), retry_run_types
 
 
 def test_production_identity_status_schema_examples_match_contract_constants() -> None:

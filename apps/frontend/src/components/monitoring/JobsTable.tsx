@@ -1,9 +1,8 @@
-import { ArrowDown, ArrowUp, ArrowUpDown, CheckCircle2, ChevronLeft, ChevronRight, ClipboardCopy, RotateCcw, Square, Terminal } from 'lucide-react'
+import { ArrowDown, ArrowUp, ArrowUpDown, CheckCircle2, ChevronLeft, ChevronRight, ClipboardCopy, Square, Terminal } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { client } from '@/api/client'
 import { getApiErrorMessage } from '@/api/response'
-import type { components } from '@/api/types'
 import { JobFilters } from '@/components/monitoring/JobFilters'
 import { LogModal } from '@/components/monitoring/LogModal'
 import {
@@ -37,9 +36,7 @@ import {
 type SortKey = 'submitted_at' | 'duration_seconds'
 type SortDirection = 'asc' | 'desc'
 
-const retryableStatuses = new Set(['failed', 'submission_failed', 'permanently_failed', 'partially_failed'])
 const activeStatuses = new Set(['pending', 'queued', 'submitted', 'running'])
-type OperatorHeaderRole = components['parameters']['UserRole']
 
 function statusClass(status: string) {
   if (status === 'succeeded') return 'border-emerald-200 bg-emerald-50 text-emerald-700'
@@ -63,7 +60,6 @@ interface JobsTableProps {
   displayEnabled?: boolean
   fetchEnabled?: boolean
   logControlsEnabled?: boolean
-  retryControlsEnabled?: boolean
   strictIdentity?: MonitoringStrictIdentity | null
   unavailableReason?: string | null
 }
@@ -78,7 +74,6 @@ export function JobsTable({
   displayEnabled,
   fetchEnabled = true,
   logControlsEnabled = true,
-  retryControlsEnabled,
   strictIdentity = null,
   unavailableReason = null,
 }: JobsTableProps) {
@@ -104,9 +99,8 @@ export function JobsTable({
   const pageSize = filters.pageSize ?? 12
   const sortKey = filters.sortBy ?? 'submitted_at'
   const sortDirection = filters.sortOrder ?? 'desc'
-  const retryActionsEnabled = retryControlsEnabled ?? actionsEnabled
   const cancelActionsEnabled = cancelControlsEnabled ?? actionsEnabled
-  const controlsVisible = logControlsEnabled || retryActionsEnabled || cancelActionsEnabled || diagnosticsEnabled
+  const controlsVisible = logControlsEnabled || cancelActionsEnabled || diagnosticsEnabled
   const manualRecoveryGuidance = diagnosticsDisplayReadonly
     ? '失败诊断用于交给 22 compute-control 节点处理；在 27 display_readonly 页面只做只读查看和本地通知标记，不写入数据库或审计 API。'
     : '失败诊断用于交给 22 compute-control 节点处理；当前运维页面复制诊断和本地通知标记不写入数据库或审计 API。'
@@ -139,10 +133,7 @@ export function JobsTable({
     if (!visibleJobs.some((job) => job.job_id === logJobId)) setLogJobId(null)
   }, [logJobId, visibleJobs])
 
-  const retryActionRole = fetchEnabled && retryActionsEnabled && canUseDevRoleActions(role) ? role : null
   const cancelActionRole = fetchEnabled && cancelActionsEnabled && canUseDevRoleActions(role) ? role : null
-  const retryHeaderRole = retryActionRole as OperatorHeaderRole | null
-  const cancelHeaderRole = cancelActionRole as OperatorHeaderRole | null
 
   const copyDiagnostic = async (job: PipelineJob) => {
     const diagnostic = buildDiagnosticPayload(job, {
@@ -172,11 +163,13 @@ export function JobsTable({
     void requestJobs({ ...filters, sortBy: key, sortOrder: nextDirection, page: 1, pageSize }).catch(() => undefined)
   }
 
-  const runAction = async (job: PipelineJob, action: 'retry' | 'cancel') => {
+  // #3179: cancel is the only run action. Failed-run recovery is the node-22
+  // manual-repair marker lane, not a page control; `POST .../retry` is a 409 stub.
+  const runAction = async (job: PipelineJob, action: 'cancel') => {
     if (!job.run_id) return
     if (!fetchEnabled) return
-    const operatorHeaderRole = action === 'retry' ? retryHeaderRole : cancelHeaderRole
-    if (!operatorHeaderRole) return
+    const operatorRole = cancelActionRole
+    if (!operatorRole) return
 
     const actionKey = `${action}:${job.run_id}`
     if (pendingActionRef.current) return
@@ -184,21 +177,20 @@ export function JobsTable({
     pendingActionRef.current = actionKey
     setPendingAction(actionKey)
     try {
-      const path = action === 'retry' ? '/api/v1/runs/{run_id}/retry' : '/api/v1/runs/{run_id}/cancel'
-      const { error } = await client.POST(path, {
-        params: {
-          path: { run_id: job.run_id },
-          header: { 'X-User-Role': operatorHeaderRole },
-        },
+      // The cancel operation does not declare the dev role header, so it is
+      // sent as a plain request header (same wire header as before #3179).
+      const { error } = await client.POST('/api/v1/runs/{run_id}/cancel', {
+        params: { path: { run_id: job.run_id } },
+        headers: { 'X-User-Role': operatorRole },
       })
       if (error) {
         throw error
       }
 
-      toast({ title: action === 'retry' ? '重试已提交' : '取消请求已提交' })
+      toast({ title: '取消请求已提交' })
     } catch (error) {
       toast({
-        title: action === 'retry' ? '重试失败' : '取消失败',
+        title: '取消失败',
         description: getApiErrorMessage(error, '操作失败'),
         variant: 'destructive',
       })
@@ -321,17 +313,6 @@ export function JobsTable({
                                 {notified ? '已通知' : '标记已通知'}
                               </Button>
                             </>
-                          ) : null}
-                          {retryActionRole && retryableStatuses.has(job.status) && job.run_id ? (
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              disabled={Boolean(pendingAction)}
-                              onClick={() => void runAction(job, 'retry')}
-                            >
-                              <RotateCcw className="size-3.5" />
-                              重试
-                            </Button>
                           ) : null}
                           {cancelActionRole && activeStatuses.has(job.status) && job.run_id ? (
                             <Button

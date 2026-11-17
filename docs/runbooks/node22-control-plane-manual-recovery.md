@@ -452,6 +452,10 @@ service 或 gateway，所以 node-22 没有 `DATABASE_URL` 时也是这个 409�
 marker 车道：它在 cycle 写锁内写 `manual_repair_requested` marker，不在进程内写 `pending` 行，也不在进程内 sbatch，
 由 scheduler 下一趟 pass 铸出并提交 retry job。
 
+自 #3179 起 `/ops` 与 `/monitoring` 的作业表没有重试控件（任何角色、任何服务模式），页面不会发出这个请求；
+发布的 OpenAPI `retryRun` 只声明 409（及 4XX/5XX），没有 2xx 和成功 schema。路由本身作为 409 stub 保留，
+供旧调用方与 deny-write probe 得到同样的 401/403/409。看到失败行后，按上一节在 node-22 打 marker。
+
 **历史遗留行**：退役前的 API 手动重试先提交一条 `pending` retry 行，再调用 sbatch。两步之间进程被杀、OOM 或重启，
 会留下一条 `status = pending`、`retry_count > 0`、`slurm_job_id` 为空、`manual_retry_marker = true` 的行（job id
 通常是 `<run_id>_retry_active`）。新代码不会再产生这种行，但历史行可能仍在。它写在哪里决定了它挡住什么：

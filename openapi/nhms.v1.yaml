@@ -1692,7 +1692,10 @@ paths:
     post:
       tags:
       - runs
-      summary: Retry a failed or cancelled run
+      summary: 'Retired manual retry: always 409 CONTROL_PLANE_MANUAL_ACTION_REQUIRED'
+      description: Submits, enqueues and records nothing (#3157/#3179). Failed-run recovery
+        is the node-22 manual-repair marker lane (scripts/node22_manual_retry_failed_runs.py,
+        runbook node22-control-plane-manual-recovery).
       operationId: retryRun
       parameters:
       - name: run_id
@@ -1710,19 +1713,6 @@ paths:
           - model_admin
           - sys_admin
       responses:
-        '200':
-          description: Retry request accepted
-          content:
-            application/json:
-              schema:
-                allOf:
-                - $ref: '#/components/schemas/SuccessEnvelope'
-                - type: object
-                  required:
-                  - data
-                  properties:
-                    data:
-                      $ref: '#/components/schemas/RetryRunResult'
         '409':
           $ref: '#/components/responses/ControlPlaneManualActionRequired'
         4XX:
@@ -5810,41 +5800,6 @@ components:
           maxLength: 512
         content:
           type: string
-    RetryRunResult:
-      type: object
-      required:
-      - job_id
-      - pipeline_job_id
-      - run_id
-      - retry_count
-      - status
-      - slurm_job_id
-      - execution_status
-      properties:
-        job_id:
-          type: string
-        pipeline_job_id:
-          type: string
-          description: Alias of job_id for pipeline-control clients.
-        run_id:
-          type:
-          - string
-          - 'null'
-        retry_count:
-          type: integer
-          minimum: 0
-        status:
-          type: string
-          enum:
-          - submitted
-        slurm_job_id:
-          type:
-          - string
-          - 'null'
-        execution_status:
-          type: string
-          enum:
-          - submitted
     QueueDepth:
       type: object
       required:

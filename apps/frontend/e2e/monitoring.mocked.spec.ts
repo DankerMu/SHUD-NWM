@@ -108,46 +108,36 @@ test.describe('monitoring page', () => {
     await expect(page.getByRole('dialog')).toContainText('forecast stderr: model failed')
   })
 
-  test('shows retry for dev override operator and sends the role header', async ({ page }) => {
-    const retryRequests: Array<{ method: string; pathname: string; role: string | null }> = []
+  test('no retry button for dev override operator', async ({ page }) => {
+    const apiRequests: Array<{ method: string; pathname: string }> = []
     await openMonitoringAsOperator(page, {
-      onRetryRequest: (request) => {
-        retryRequests.push({
-          method: request.method(),
-          pathname: new URL(request.url()).pathname,
-          role: request.headers()['x-user-role'] ?? null,
-        })
+      onApiRequest: (request) => {
+        apiRequests.push({ method: request.method(), pathname: new URL(request.url()).pathname })
       },
     })
 
-    const retryButton = page.getByRole('row', { name: /run-failed/ }).getByRole('button', { name: /重试/ })
-    await expect(retryButton).toBeVisible()
-    await retryButton.click()
-
-    await expect.poll(() => retryRequests).toEqual([
-      { method: 'POST', pathname: '/api/v1/runs/run-failed/retry', role: 'operator' },
-    ])
-    await expect(page.getByRole('listitem').filter({ hasText: '重试已提交' })).toBeVisible()
-
-    await setRole(page, 'viewer')
-
-    await expect(page.getByText('权限不足')).toBeVisible()
+    // #3179: failed-run recovery is the node-22 marker lane; the page offers no retry.
+    const failedRow = page.getByRole('row', { name: /run-failed/ })
+    await expect(failedRow).toContainText('failed')
+    await expect(failedRow.getByRole('button', { name: /查看日志/ })).toBeVisible()
+    await expect(page.getByRole('row', { name: /run-running/ }).getByRole('button', { name: /取消/ })).toBeVisible()
     await expect(page.getByRole('button', { name: /重试/ })).toHaveCount(0)
+
+    await failedRow.getByRole('button', { name: /查看日志/ }).click()
+    await expect(page.getByRole('dialog')).toContainText('作业日志 job-failed')
+    expect(apiRequests.filter((call) => call.pathname.endsWith('/retry'))).toEqual([])
   })
 
-  test('proves the /ops controlled failure log and retry lifecycle', async ({ page }) => {
-    const retryRequests: Array<{ method: string; pathname: string; role: string | null }> = []
+  test('proves the /ops controlled failure log and marker-lane recovery lifecycle', async ({ page }) => {
+    const apiRequests: Array<{ method: string; pathname: string }> = []
     const opsApi = await mockControlledOpsApi(page, {
-      onRetryRequest: (request) => {
-        retryRequests.push({
-          method: request.method(),
-          pathname: new URL(request.url()).pathname,
-          role: request.headers()['x-user-role'] ?? null,
-        })
+      onApiRequest: (request) => {
+        apiRequests.push({ method: request.method(), pathname: new URL(request.url()).pathname })
       },
     })
+    const opsUrl = `/ops?source=gfs&cycle=${encodeURIComponent(controlledCycleTime)}`
 
-    await page.goto(`/ops?source=gfs&cycle=${encodeURIComponent(controlledCycleTime)}`)
+    await page.goto(opsUrl)
     await expect(page.getByText('权限不足')).toBeVisible()
     await expect(page.getByRole('button', { name: /重试/ })).toHaveCount(0)
 
@@ -161,6 +151,7 @@ test.describe('monitoring page', () => {
     await expect(failedRow).toContainText('forecast')
     await expect(failedRow).toContainText('failed')
     await expect(failedRow).toContainText('slurm_qhh_forecast_failed_2100')
+    await expect(page.getByRole('button', { name: /预报.*failed/ })).toBeVisible()
 
     await failedRow.getByRole('button', { name: /查看日志/ }).click()
     await expect(page.getByRole('dialog')).toContainText(`作业日志 ${controlledFailedJobId}`)
@@ -169,25 +160,32 @@ test.describe('monitoring page', () => {
     await page.keyboard.press('Escape')
     await expect(page.getByRole('dialog')).toHaveCount(0)
 
-    await failedRow.getByRole('button', { name: /重试/ }).click()
-    await expect.poll(() => retryRequests).toEqual([
-      { method: 'POST', pathname: `/api/v1/runs/${controlledRunId}/retry`, role: 'operator' },
-    ])
-    await expect.poll(() => opsApi.retrySubmitted()).toBe(true)
-    await expect(page.getByRole('listitem').filter({ hasText: '重试已提交' })).toBeVisible()
+    // #3179: the authorized operator gets no retry control on the failed row.
+    await expect(failedRow.getByRole('button', { name: /查看日志/ })).toBeVisible()
+    await expect(page.getByRole('button', { name: /重试/ })).toHaveCount(0)
 
-    const retryRow = page.getByRole('row', { name: new RegExp(controlledRetryJobId) })
-    await expect(retryRow).toBeVisible()
-    await expect(retryRow).toContainText('succeeded')
-    await expect(retryRow).toContainText('slurm_retry')
-    await expect(retryRow).toContainText('2')
+    // Recovery happens off-page through the node-22 manual-repair marker lane
+    // (scripts/node22_manual_retry_failed_runs.py); the page only observes it.
+    opsApi.recoverViaMarkerLane()
+    await page.reload()
+    await setRole(page, 'operator')
+    await expect(page.getByRole('heading', { name: '内部诊断' })).toBeVisible()
+
+    const recoveredRow = page.getByRole('row', { name: new RegExp(controlledRetryJobId) })
+    await expect(recoveredRow).toBeVisible()
+    await expect(recoveredRow).toContainText('succeeded')
+    await expect(recoveredRow).toContainText('slurm_retry')
+    await expect(recoveredRow).toContainText('2')
+    await expect(page.getByRole('row', { name: new RegExp(controlledFailedJobId) })).toContainText('failed')
     await expect(currentStateField).toContainText('failed_run')
     await expect(page.getByRole('button', { name: /预报.*succeeded/ })).toBeVisible()
     await expect(page.getByText('qhh_sibling_cycle_forecast_failed')).toHaveCount(0)
+    await expect(page.getByRole('button', { name: /重试/ })).toHaveCount(0)
     expect(opsApi.observedJobsQueries.length).toBeGreaterThan(0)
     for (const query of opsApi.observedJobsQueries) {
       expect(query).toEqual({ source: 'GFS', cycle: controlledCycleTime })
     }
+    expect(apiRequests.filter((call) => call.pathname.endsWith('/retry'))).toEqual([])
 
     await setRole(page, 'viewer')
     await expect(page.getByText('权限不足')).toBeVisible()
@@ -232,8 +230,8 @@ test.describe('monitoring page', () => {
 
     await expect.poll(() => origins.map((call) => call.pathname)).toContain('/api/v1/metrics/stage-duration')
     await expect.poll(() => origins.map((call) => call.pathname)).toContain('/api/v1/metrics/success-rate')
-    await page.getByRole('row', { name: /run-failed/ }).getByRole('button', { name: /重试/ }).click()
     await page.getByRole('row', { name: /run-running/ }).getByRole('button', { name: /取消/ }).click()
+    await expect.poll(() => origins.map((call) => call.pathname)).toContain('/api/v1/runs/run-running/cancel')
 
     const expectedPaths = new Set([
       '/api/v1/pipeline/status',
@@ -242,7 +240,6 @@ test.describe('monitoring page', () => {
       '/api/v1/metrics/stage-duration',
       '/api/v1/metrics/success-rate',
       '/api/v1/jobs',
-      '/api/v1/runs/run-failed/retry',
       '/api/v1/runs/run-running/cancel',
     ])
     for (const path of expectedPaths) {

@@ -28,7 +28,6 @@ from apps.api.openapi_patching_ops_schemas import (
     _pipeline_job_schema,
     _pipeline_stage_schema,
     _pipeline_status_schema,
-    _retry_run_result_schema,
 )
 from apps.api.openapi_patching_parameters import (
     _cycle_time_query_parameter,
@@ -58,7 +57,6 @@ def _patch_pipeline_openapi(schema: dict) -> None:
     schemas["PipelineJob"] = _pipeline_job_schema()
     schemas["PipelineJobPage"] = _pipeline_job_page_schema()
     schemas["JobLogs"] = _job_logs_schema()
-    schemas["RetryRunResult"] = _retry_run_result_schema()
     schemas["QueueDepth"] = _queue_depth_schema()
     schemas["StageDurationMetric"] = _stage_duration_metric_schema()
     schemas["SuccessRateMetric"] = _success_rate_metric_schema()
@@ -210,7 +208,12 @@ def _patch_pipeline_openapi(schema: dict) -> None:
         "/api/v1/runs/{run_id}/retry",
         "post",
         operation_id="retryRun",
-        summary="Retry a failed or cancelled run",
+        summary="Retired manual retry: always 409 CONTROL_PLANE_MANUAL_ACTION_REQUIRED",
+        operation_description=(
+            "Submits, enqueues and records nothing (#3157/#3179). Failed-run recovery is the node-22 "
+            "manual-repair marker lane (scripts/node22_manual_retry_failed_runs.py, runbook "
+            "node22-control-plane-manual-recovery)."
+        ),
         tags=["runs"],
         parameters=[
             {"name": "run_id", "in": "path", "required": True, "schema": {"type": "string"}},
@@ -221,8 +224,11 @@ def _patch_pipeline_openapi(schema: dict) -> None:
                 "schema": {"type": "string", "enum": ["operator", "model_admin", "sys_admin"]},
             },
         ],
-        data_schema={"$ref": "#/components/schemas/RetryRunResult"},
-        description="Retry request accepted",
+        # #3179: every request is refused (409 after auth), so the operation
+        # declares no success response; path, operationId, parameters and
+        # `security` stay for existing callers and the deny-write probes.
+        data_schema=None,
+        description=None,
         extra_responses={"409": {"$ref": "#/components/responses/ControlPlaneManualActionRequired"}},
     )
     # The metrics routes are plain `_ok()` handlers (routes/pipeline.py:750/795),
@@ -291,29 +297,37 @@ def _patch_pipeline_operation(
     summary: str,
     tags: list[str],
     parameters: list[dict[str, Any]],
-    data_schema: dict[str, Any],
-    description: str,
+    data_schema: dict[str, Any] | None,
+    description: str | None,
     strict_identity: bool = False,
     job_identity: bool = False,
     extra_responses: dict[str, dict[str, Any]] | None = None,
+    operation_description: str | None = None,
 ) -> None:
     operation = schema.get("paths", {}).get(path, {}).get(method)
     if not operation:
         return
     operation["operationId"] = operation_id
     operation["summary"] = summary
+    if operation_description is not None:
+        operation["description"] = operation_description
     operation["tags"] = tags
     operation["parameters"] = parameters
-    response_schema = (
-        _ops_success_response_schema(data_schema, job_identity=job_identity)
-        if strict_identity
-        else _success_response_schema(data_schema)
-    )
-    operation["responses"] = {
-        "200": {
+    # `data_schema=None` opts out of a success response: the rebuilt `responses`
+    # carries no "200", which also drops the default one FastAPI generated.
+    success: dict[str, Any] = {}
+    if data_schema is not None:
+        response_schema = (
+            _ops_success_response_schema(data_schema, job_identity=job_identity)
+            if strict_identity
+            else _success_response_schema(data_schema)
+        )
+        success["200"] = {
             "description": description,
             "content": {"application/json": {"schema": response_schema}},
-        },
+        }
+    operation["responses"] = {
+        **success,
         **(extra_responses or {}),
         "4XX": {"$ref": "#/components/responses/Error"},
         "5XX": {"$ref": "#/components/responses/Error"},

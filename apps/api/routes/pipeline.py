@@ -7,7 +7,7 @@ from collections.abc import Generator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
-from typing import Any, Literal
+from typing import Any, Literal, NoReturn
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -25,7 +25,6 @@ from apps.api.response_models.pipeline import (
     PipelineStageListEnvelope,
     PipelineStatusEnvelope,
     QueueDepthEnvelope,
-    RetryRunResultEnvelope,
     StageDurationMetricListEnvelope,
     SuccessRateMetricListEnvelope,
 )
@@ -550,18 +549,16 @@ def job_logs(
     )
 
 
-@router.post(
-    "/runs/{run_id}/retry",
-    response_model=RetryRunResultEnvelope,
-    response_model_exclude_unset=True,
-)
+@router.post("/runs/{run_id}/retry", response_model=None)
 def retry_run(
     run_id: str,
     _policy_decision: PolicyDecision = Depends(require_retry_lane_retired),
-) -> dict[str, Any]:
+) -> NoReturn:
     # #3157: unreachable while the dependency raises; kept so an override of
-    # that dependency cannot reopen a success return.  ``response_model`` stays
-    # so the generated OpenAPI is unchanged until the operation is removed (#3179).
+    # that dependency cannot reopen a success return.  #3179: the route stays as
+    # the documented 409 manual-action stub for existing callers and deny-write
+    # probes, but it has no success model and the published ``retryRun``
+    # operation declares no 2xx response.
     raise _retry_lane_retired_error(_validated_run_id(run_id))
 
 

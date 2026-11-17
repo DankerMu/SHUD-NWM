@@ -321,7 +321,6 @@ export function MonitoringPage({ mode = 'monitoring' }: MonitoringPageProps) {
             displayEnabled={isOperationalDataReady && hasVisibleJobsPayload}
             fetchEnabled={isOperationalDataReady}
             logControlsEnabled={isOperationalDataReady}
-            retryControlsEnabled={controlMutationsEnabled && isOperationalDataReady}
             strictIdentity={visibleStrictIdentity}
             unavailableReason={dataUnavailableReason ?? jobsPayloadUnavailableReason}
           />
