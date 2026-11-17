@@ -122,8 +122,8 @@ was deleted in #3147, and the live parser is `_index_comment_sacct_matches` (`:1
 expanded. Risk packs: refactor-move, monkeypatch-target, selector-routing, test-only-retire.
 
 ## Evidence Floor
-- [ ] E1 `uv run ruff check --no-cache .`
-- [ ] E2 AST move proof against `origin/master`. The script and its output go in the scratchpad; the result goes in
+- [x] E1 `uv run ruff check --no-cache .`
+- [x] E2 AST move proof against `origin/master`. The script and its output go in the scratchpad; the result goes in
   the PR body.
   - Every top-level def, class and assignment of the old `reconcile.py` appears with an identical `ast.dump`, and its
     source segment with the leading comment is byte-identical, in exactly one leaf. The exception is the two retired
@@ -131,11 +131,11 @@ expanded. Risk packs: refactor-move, monkeypatch-target, selector-routing, test-
   - The allowed differences are import lines and `LOGGER` assignments using the explicit name.
   - The import surface (What 2) is reachable as `reconcile.X`, and each name is the leaf object.
   - The import graph of the partition is acyclic, and no leaf imports the facade.
-- [ ] E3 Patch-target table (`design.md`) re-derived after the change by an AST scan of `tests/`, `services/`,
+- [x] E3 Patch-target table (`design.md`) re-derived after the change by an AST scan of `tests/`, `services/`,
   `packages/`, `scripts/`, `workers/` and `apps/`, covering string targets, `monkeypatch.setattr(module, ...)`, aliases
   and direct assignment. Every patched name resolves on the module its callers read, and the scan output is recorded.
   At least one moved-caller patch is mutation-checked: patching the facade instead of the leaf turns its test red.
-- [ ] E4 Tests, all green locally:
+- [x] E4 Tests, all green locally:
   - the selector set for the diff;
   - every test file that references `services.orchestrator.reconcile` (34 today; `git grep -l` recorded);
   - every test file the change edits;
@@ -149,10 +149,10 @@ expanded. Risk packs: refactor-move, monkeypatch-target, selector-routing, test-
     leaves), `tests/test_status_literal_scan.py` and `tests/test_entropy_audit_line_references.py`.
 
   New files get `git add -N` before the local selector run.
-- [ ] E5 The same set passes in a node-27 temporary worktree.
-- [ ] E6 `wc -l services/orchestrator/reconcile*.py`: every module is at or under 1000 lines except `reconcile_reserved.py`,
+- [x] E5 The same set passes in a node-27 temporary worktree.
+- [x] E6 `wc -l services/orchestrator/reconcile*.py`: every module is at or under 1000 lines except `reconcile_reserved.py`,
   which is the only `services/orchestrator/reconcile*.py` entry in `.large-file-guard.json`. The other new entries
   are exactly the four pre-existing oversized test suites named under Non-goals. The entropy hard gate has `hard_gate_failing_count 0`.
-- [ ] E7 Outside `openspec/changes/archive/` and this change, `_parse_comment_sacct_rows` and `_parse_comment_sacct_matches` have
+- [x] E7 Outside `openspec/changes/archive/` and this change, `_parse_comment_sacct_rows` and `_parse_comment_sacct_matches` have
   zero hits.
-- [ ] E8 `openspec validate reconcile-module-split --strict --no-interactive`.
+- [x] E8 `openspec validate reconcile-module-split --strict --no-interactive`.
