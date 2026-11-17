@@ -1,19 +1,10 @@
 # production-state-machine-contract Specification
 
 ## Purpose
-TBD - created by archiving change m7-second-review-remediation. Update Purpose after archive.
+Keep pipeline status transitions valid against the PostgreSQL schema and aligned with the published status schema
+and OpenAPI, for cancel and automatic retry.
+
 ## Requirements
-### Requirement: PostgreSQL-valid retry status transitions
-Manual and automatic retry operations SHALL write only statuses accepted by production PostgreSQL enum-backed tables.
-
-#### Scenario: Manual retry updates hydro run with valid enum value
-- **WHEN** an operator retries a failed run through `POST /api/v1/runs/{run_id}/retry`
-- **THEN** every status written to `hydro.hydro_run.status` MUST be present in `hydro.run_status` as defined by migrations
-- **AND** retry queue state MUST remain visible through `ops.pipeline_job.status` and pipeline events
-
-#### Scenario: Retry status contract is tested against migrations
-- **WHEN** tests validate retry status transitions
-- **THEN** they MUST inspect or exercise the production migration enum values instead of relying only on SQLite `TEXT` columns
 
 ### Requirement: PostgreSQL-valid cancel status transitions
 Cancel operations SHALL write only statuses accepted by production PostgreSQL enum-backed tables.
@@ -40,3 +31,9 @@ The schema and OpenAPI contracts SHALL include every externally visible status t
 - **WHEN** a remediation maps retry or cancel to an existing enum value
 - **THEN** OpenAPI and API response documentation MUST describe how queue/cancel detail is exposed without adding a new domain status
 
+### Requirement: PostgreSQL-valid automatic retry status transitions
+Automatic retry operations SHALL write only statuses accepted by production PostgreSQL enum-backed tables.
+
+#### Scenario: Retry status contract is tested against migrations
+- **WHEN** tests validate retry status transitions
+- **THEN** they MUST inspect or exercise the production migration enum values instead of relying only on SQLite `TEXT` columns

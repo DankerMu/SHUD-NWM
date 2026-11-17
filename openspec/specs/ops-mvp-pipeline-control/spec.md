@@ -1,8 +1,11 @@
 # ops-mvp-pipeline-control Specification
 
 ## Purpose
-TBD - created by archiving change m21-qhh-hydro-met-ops-mvp. Update Purpose after archive.
+Define the ops MVP entry point and its formal, pipeline-backed stage and job status, within the orchestrator
+boundary.
+
 ## Requirements
+
 ### Requirement: Ops MVP entry
 
 The frontend SHALL expose an operations MVP entry focused on QHH pipeline status, jobs, logs, and retry controls.
@@ -39,7 +42,7 @@ The operations MVP SHALL read stage, job, log, and retry state from formal backe
 #### Scenario: Retry failed run
 - **WHEN** a job or run is in `failed`, `submission_failed`, `partially_failed`, or `permanently_failed` state and the operator is authorized
 - **THEN** the page shows a restart action that calls `POST /api/v1/runs/{run_id}/retry`
-- **AND** after success it refreshes status, stages, and jobs.
+- **AND** the endpoint answers `409 CONTROL_PLANE_MANUAL_ACTION_REQUIRED`; the page surfaces that error and does not claim a retry was submitted.
 
 #### Scenario: Authorization gate
 - **WHEN** a non-operator opens `/ops`
@@ -59,4 +62,4 @@ The operations MVP SHALL treat qhh diagnostic scripts as reproduction evidence o
 #### Scenario: Controlled failure evidence
 - **WHEN** MVP readiness is validated
 - **THEN** a controlled failed QHH run or stage is visible as failed in `/ops`
-- **AND** retry creates new job/pipeline evidence and transitions through submitted/running to succeeded or a documented terminal failure.
+- **AND** a manual-repair marker recorded for it (`scripts/node22_manual_retry_failed_runs.py`) leads the scheduler to create new job/pipeline evidence that transitions through submitted/running to succeeded or a documented terminal failure.

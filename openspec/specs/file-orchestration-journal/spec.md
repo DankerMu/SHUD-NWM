@@ -1,7 +1,8 @@
 # file-orchestration-journal Specification
 
 ## Purpose
-TBD - created by archiving change node22-db-free-scheduler-state. Update Purpose after archive.
+Let the node-22 scheduler run DB-free on a file-backed orchestration journal that is contract-tested against the
+database semantics, including exactly-once reconciliation of accepted forecast cohort submissions.
 
 ## Requirements
 
@@ -111,11 +112,7 @@ by `PsycopgOrchestratorRepository`.
 - **AND** retry attempts, retry-limit exhaustion, manual repair markers, and
   permanent-failure state are represented in append-only file journal records.
 - **AND** manual repair markers that unblock scheduler retry decisions require
-  the same `pipeline.retry_run` policy evidence as manual retry execution
-- **AND** manual retry submission preserves DB-compatible source selection,
-  terminal-success guards, active-retry conflict guards, download-source-cycle
-  manifest fields, runtime-root evidence, and hydro-run reset-to-pending
-  semantics.
+  `pipeline.retry_run` policy evidence.
 
 #### Scenario: Historical scheduler state migrates into append-only journal
 
