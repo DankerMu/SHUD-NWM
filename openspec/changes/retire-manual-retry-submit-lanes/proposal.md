@@ -114,8 +114,8 @@ so it has no such window.
 expanded. Risk packs: api-contract, spec-retirement, test-reseed, operator-runbook.
 
 ## Evidence Floor
-- [ ] E1 `uv run ruff check --no-cache .`
-- [ ] E2 Tests, all green locally:
+- [x] E1 `uv run ruff check --no-cache .` — PR 1: all checks passed.
+- [x] E2 Tests, all green locally:
   - the selector set for the diff;
   - `tests/test_retry.py`, `tests/test_retry_cancel_consistency.py`, `tests/test_file_orchestration_journal.py`,
     `tests/test_monitoring_api.py`, `tests/test_file_journal_read_blocked_consumers.py` and
@@ -128,14 +128,18 @@ expanded. Risk packs: api-contract, spec-retirement, test-reseed, operator-runbo
     script tests and `tests/test_select_ci_tests.py`.
 
   The new pins are red on the old code. The per-test delete/reseed/trim table is recorded.
-- [ ] E3 The same set passes in a node-27 temporary worktree.
-- [ ] E4 `git diff origin/master -- openapi/ apps/frontend/src/api/types.ts` is empty. Frontend `pnpm test` and
+  — PR 1: 174 files, 10430 passed / 3 env skips locally; pins 6 failed / 3 passed on the old code, 9 passed after;
+  doc-consumer re-run after the review fixes 3459 passed. Table in the PR body.
+- [x] E3 The same set passes in a node-27 temporary worktree. — PR 1 at 0c976db65: 10433 passed, 0 leftover
+  `nhms_it_*` DBs; C2 readonly boundary validator PASS (`deny_write` and `read_routes`).
+- [x] E4 `git diff origin/master -- openapi/ apps/frontend/src/api/types.ts` is empty. Frontend `pnpm test` and
   `check:api-types` pass locally, or the PR records why the frontend lane is untouched.
-- [ ] E5 Outside `openspec/changes/archive/`, this change and the absence-pin test, a grep for
+  — PR 1: diff empty; no frontend file changed (the retry button goes in #3179).
+- [x] E5 Outside `openspec/changes/archive/`, this change and the absence-pin test, a grep for
   `def attempt_manual_retry|\.attempt_manual_retry\(` has zero hits. Docstrings and comments that describe the retired
   method as live are rewritten:
   - `file_orchestration_journal.py:13413,13449` and `scheduler_state_failure.py:315`;
   - `tests/test_hydro_run_attempt_triage.py:24`, including its stale `pipeline.py` line references.
 
-  The entropy hard gate has `hard_gate_failing_count 0`.
-- [ ] E6 `openspec validate retire-manual-retry-submit-lanes --strict --no-interactive`
+  The entropy hard gate has `hard_gate_failing_count 0`. — PR 1: 0 hits; hard gate 0.
+- [x] E6 `openspec validate retire-manual-retry-submit-lanes --strict --no-interactive` — valid.
