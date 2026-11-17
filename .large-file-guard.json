@@ -144,7 +144,6 @@
     "services/production_closure/e2e_validation.py",
     "scripts/validate_two_node_docker_runtime.py",
     "services/orchestrator/file_journal_candidates.py",
-    "services/orchestrator/file_journal_paths.py",
-    "tests/test_gateway_reconcile_file_cohort_identity.py"
+    "services/orchestrator/file_journal_paths.py"
   ]
 }
