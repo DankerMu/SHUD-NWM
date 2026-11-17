@@ -130,6 +130,8 @@ from scripts.select_ci_tests import (
     THREAD_EXCEPTION_POLICY_TESTS,
     TIME_NORMALIZATION_CONTRACT_PATH,
     TIMESCALE_WRITE_GUARD_INVARIANT_TEST,
+    VARIANT_ACTIVATION_CUTOVER_HELPERS_PATH,
+    VARIANT_ACTIVATION_CUTOVER_TESTS,
     PathTestRule,
     is_test_suite_path,
     main,
@@ -2196,7 +2198,11 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         STATUS_LITERAL_SCAN_PATH,
         STATUS_VOCAB_PARITY_PATH,
         TIME_HELPER_CONSOLIDATION_PATH,
+        # #3165: the variant activation cutover suite is three partitions; the
+        # directory rule carries all of them.
         "tests/test_variant_activation_cutover.py",
+        "tests/test_variant_activation_cutover_dispatch.py",
+        "tests/test_variant_activation_cutover_manifest.py",
         "tests/test_warm_start_chaining.py",
     ]
     assert {
@@ -13622,6 +13628,10 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
     # strict fake database, the fake registry store, the fake `systemctl`); the
     # apply partition is the full-chain one.
     (BASIN_RETIREMENT_HELPERS_PATH, "tests/test_node27_retire_basin_apply.py"),
+    # #3165: every variant activation cutover partition builds its store on the
+    # helper's `_HarnessStore`; the base path is the GUARDED_MODULE_CLOSURES
+    # known member, so it anchors here too.
+    (VARIANT_ACTIVATION_CUTOVER_HELPERS_PATH, "tests/test_variant_activation_cutover.py"),
     # #1102: the shared fixture surface of the seven publisher partitions. The
     # calibration-overrides partition anchors it because it is the one that names
     # the most of that surface (the declaration builders, both published-bytes
@@ -16674,11 +16684,88 @@ def test_model_registry_facade_selects_its_direct_importers_and_keeps_its_prior_
         "tests/test_state_clone_cutover_hook.py",
         "tests/test_state_clone_index_publish.py",
         "tests/test_variant_activation_cutover.py",
+        # #3165: the two partitions split out of the base path also import the
+        # facade at module scope.
+        "tests/test_variant_activation_cutover_dispatch.py",
+        "tests/test_variant_activation_cutover_manifest.py",
         "tests/test_node27_connection_attribution.py",
         "tests/test_node27_connection_attribution_delegated.py",
         "tests/test_response_model_preservation.py",
         "tests/test_response_model_preservation_pipeline.py",
     } <= selected
+
+
+# ---------------------------------------------------------------------------
+# #3165: the variant activation cutover corpus
+#
+# tests/test_variant_activation_cutover.py (1770 lines) was split into three
+# partitions plus one helper. Every route that selected the monolith must select
+# all three partitions, a diff to any partition must run its siblings, and the
+# helper must run every partition.
+# ---------------------------------------------------------------------------
+
+# Production paths that selected the monolith before the split, one per route:
+# the facade (MODEL_REGISTRY_IMPORTER_TESTS), an owner module (the facade's
+# selection, #2617), the dispatch partition's own import (the broad
+# `services/orchestrator/**` rule) and an orchestrator module that reaches it
+# only through that directory rule.
+VARIANT_ACTIVATION_CUTOVER_ROUTE_SOURCES: tuple[str, ...] = (
+    "packages/common/model_registry.py",
+    "packages/common/model_registry_lifecycle_support.py",
+    "services/orchestrator/scheduler_file_providers.py",
+    "services/orchestrator/retention.py",
+)
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [*VARIANT_ACTIVATION_CUTOVER_TESTS, VARIANT_ACTIVATION_CUTOVER_HELPERS_PATH],
+)
+def test_variant_activation_cutover_partition_or_helper_diff_selects_every_partition(changed: str) -> None:
+    selected = set(select_tests([changed], repo_root=Path(".")))
+
+    assert set(VARIANT_ACTIVATION_CUTOVER_TESTS) <= selected, sorted(set(VARIANT_ACTIVATION_CUTOVER_TESTS) - selected)
+
+
+@pytest.mark.parametrize("changed", VARIANT_ACTIVATION_CUTOVER_ROUTE_SOURCES)
+def test_variant_activation_cutover_monolith_routes_select_every_partition(changed: str) -> None:
+    selected = set(select_tests([changed], repo_root=Path(".")))
+
+    assert set(VARIANT_ACTIVATION_CUTOVER_TESTS) <= selected, sorted(set(VARIANT_ACTIVATION_CUTOVER_TESTS) - selected)
+
+
+def test_variant_activation_cutover_tracked_tree_is_exactly_three_suites_and_one_helper() -> None:
+    # A fourth partition, a leftover copy of the monolith under another name, or
+    # the helper renamed into a `test_*.py` suite all redden here. Expected
+    # membership is the selector's own tuple; the tracked-tree glob is the
+    # mutant side. The prefix filter is on the file name, so it sees exactly the
+    # `tests/test_variant_activation_cutover*.py` corpus.
+    partitions = set(VARIANT_ACTIVATION_CUTOVER_TESTS)
+    helper = VARIANT_ACTIVATION_CUTOVER_HELPERS_PATH
+    tracked = set(_tracked_python_files("tests"))
+    corpus = {
+        path for path in tracked if PurePosixPath(path).name.startswith("test_variant_activation_cutover")
+    }
+
+    assert len(partitions) == 3, sorted(partitions)
+    assert corpus == partitions, sorted(corpus ^ partitions)
+    assert helper in tracked
+    assert all(is_test_suite_path(path) for path in partitions)
+    assert not is_test_suite_path(helper)
+
+    # Every rule that carries one partition carries all three, so the count
+    # above cannot be satisfied by files some route forgot.
+    carriers = [
+        rule
+        for rule in (*PATH_TEST_RULES, *CHANGED_TEST_FILE_RULES, *SUPPORT_MODULE_TEST_RULES)
+        if partitions & set(rule.tests)
+    ]
+    assert carriers, "no selector rule carries the variant activation cutover corpus"
+    for rule in carriers:
+        assert partitions <= set(rule.tests), (rule.pattern, sorted(partitions - set(rule.tests)))
+    redirected = {rule.pattern for rule in CHANGED_TEST_FILE_RULES if partitions <= set(rule.tests)}
+    assert redirected == partitions, sorted(redirected ^ partitions)
+    assert any(rule.pattern == helper for rule in SUPPORT_MODULE_TEST_RULES)
 
 
 INFRA_SBATCH_TEMPLATE_READERS = frozenset(

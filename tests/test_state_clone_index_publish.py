@@ -459,7 +459,7 @@ def test_a_index_entry_ready_for_every_source_in_scope(tmp_path: Path) -> None:
 # post-commit tail — with in-memory overrides so the state-index +
 # manifest publishers fire from the REAL tail dispatch under a real
 # ``activate`` transition. Adapted from
-# ``tests/test_variant_activation_cutover.py::_HarnessStore``.
+# ``tests/variant_activation_cutover_helpers.py::_HarnessStore``.
 # ============================================================================
 
 
@@ -485,7 +485,7 @@ def _harness_model_row(
 ) -> dict[str, Any]:
     """Return a model row shaped like ``_fetch_model_lifecycle_row`` output.
 
-    Mirrors ``tests/test_variant_activation_cutover.py::_model_row`` —
+    Mirrors ``tests/variant_activation_cutover_helpers.py::_model_row`` —
     every field ``_activation_safety_evidence`` and
     ``_build_model_operation_preflight`` inspect is populated so
     preflight lands ``status='ready'`` for the harnessed activation.
@@ -530,7 +530,7 @@ def _default_two_models_for_harness() -> list[dict[str, Any]]:
     """Legacy IDW active baseline + inactive direct-grid variant.
 
     Mirrors the ``two_models`` fixture in
-    ``tests/test_variant_activation_cutover.py``. The direct-grid
+    ``tests/variant_activation_cutover_helpers.py``. The direct-grid
     variant carries ``applicable_source_ids=[SOURCE_GFS, SOURCE_IFS]``
     so ``_extract_source_scope`` returns a scope the state-index
     publisher will iterate over.
