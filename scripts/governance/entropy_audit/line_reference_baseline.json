@@ -79,8 +79,7 @@
   },
   "scripts/node22_scheduler_stall_health.py": {
     "`:1505": 1,
-    "scheduler_runtime.py:834": 1,
-    "services/orchestrator/reconcile.py:2564": 1
+    "scheduler_runtime.py:834": 1
   },
   "scripts/node27_frontier_stall_alert.py": {
     "scripts/node27_timeseries_compression.py:119": 1,
@@ -209,7 +208,6 @@
   },
   "services/orchestrator/scheduler_evidence_payload.py": {
     "`:592": 1,
-    "reconcile.py:1076-1087": 1,
     "scheduler_candidate_execution_evidence.py:293-325": 1,
     "scheduler_execution.py:165-168": 1,
     "scheduler_execution.py:743-754": 1,

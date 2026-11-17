@@ -93,7 +93,20 @@ was deleted in #3147, and the live parser is `_index_comment_sacct_matches` (`:1
   targets `reconcile_inflight` and no longer reaches the other two. That test never exercised them. The spec's
   imported-name rule covers this, and it is recorded as a deviation.
 - Deviation from the issue text, which asks for "each 1000 lines or fewer": `reconcile_reserved.py` is guard-excluded,
-  because it holds the indivisible function. A follow-up issue is filed.
+  because it holds the indivisible function. Follow-up: #3176.
+- Deviation, found during implementation: four test suites were already over the guard on master and not excluded.
+  Each carries a moved-caller patch that must be retargeted, and the guard counts staged totals, so the change
+  cannot be committed without touching them. They are added to `.large-file-guard.json`; follow-up #3177 partitions
+  them and removes the entries.
+
+  | suite | lines on master |
+  |---|---|
+  | `tests/test_gateway_reconcile_claimant_exclusivity.py` | 3433 |
+  | `tests/test_gateway_reconcile_binding_provenance.py` | 2298 |
+  | `tests/test_forcing_submit_ambiguity.py` | 1209 |
+  | `tests/test_gateway_reconcile_file_cohort_identity.py` | 1140 |
+
+  The production-module rule (exactly one `services/orchestrator/reconcile*.py` exclusion) is unaffected.
 
 ## Must preserve
 - Every name reachable as `services.orchestrator.reconcile.X` on `origin/master` stays reachable, except the two
@@ -134,7 +147,8 @@ expanded. Risk packs: refactor-move, monkeypatch-target, selector-routing, test-
   New files get `git add -N` before the local selector run.
 - [ ] E5 The same set passes in a node-27 temporary worktree.
 - [ ] E6 `wc -l services/orchestrator/reconcile*.py`: every module is at or under 1000 lines except `reconcile_reserved.py`,
-  which is the single new `.large-file-guard.json` entry. The entropy hard gate has `hard_gate_failing_count 0`.
+  which is the only `services/orchestrator/reconcile*.py` entry in `.large-file-guard.json`. The other new entries
+  are exactly the four pre-existing oversized test suites named under Non-goals. The entropy hard gate has `hard_gate_failing_count 0`.
 - [ ] E7 Outside `openspec/changes/archive/` and this change, `_parse_comment_sacct_rows` and `_parse_comment_sacct_matches` have
   zero hits.
 - [ ] E8 `openspec validate reconcile-module-split --strict --no-interactive`.

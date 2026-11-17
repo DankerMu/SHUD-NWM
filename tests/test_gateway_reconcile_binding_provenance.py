@@ -107,7 +107,7 @@ def _incomplete_projection(repository: Any, job_id: str) -> tuple[list[dict[str,
 def _fallback_querier(monkeypatch: pytest.MonkeyPatch, *, rows: str, query_end: datetime) -> Any:
     from services.orchestrator import reconcile as reconcile_module
 
-    monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", lambda command: rows)
+    monkeypatch.setattr("services.orchestrator.reconcile_comment_sacct._bounded_sacct_stdout", lambda command: rows)
     return reconcile_module.default_comment_sacct_querier(
         global_visibility_probe=lambda: True,
         comment_storage_probe=lambda: False,

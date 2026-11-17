@@ -2370,6 +2370,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # #1564: the split demote suites are one-hop members via
         # services/orchestrator/reconcile.py (see #1455 above) and are not
         # covered by either slurm_gateway rule, so they join this narrow rule.
+        # #3155: reconcile.py is now a facade over services/orchestrator/
+        # reconcile_*.py. The facade keeps its file-level real_backend import
+        # and the leaves that use real_backend import it too, so every suite
+        # below that imports the facade stays a one-hop member, and
+        # test_reconcile_sacct_parse.py is one through reconcile_comment_sacct.py.
         "services/slurm_gateway/real_backend.py",
         (
             "tests/test_production_e2e_validation.py",

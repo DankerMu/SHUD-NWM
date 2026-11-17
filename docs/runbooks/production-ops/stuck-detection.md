@@ -680,9 +680,9 @@ ambiguous_fallback_match:comment_accounting_unproven
 ```
 
 **为什么这条不能自动收敛**：该 reason 由
-`services/orchestrator/reconcile.py:2564` 写出 —— 当 name-window fallback 匹配到
+`services.orchestrator.reconcile_reserved.reconcile_reserved_unbound_jobs` 写出 —— 当 name-window fallback 匹配到
 两个及以上 owned in-window master 时，控制器无法证明 forcing identity
-（`reconcile.py:763`），durable reason 落为 `comment_accounting_unproven`。
+（`services.orchestrator.reconcile_sacct_probe._query_forcing_controller_identity`），durable reason 落为 `comment_accounting_unproven`。
 根因是**本 Slurm 集群不存 `job_comment`**（#1116），exact-comment 对账因此
 unproven；出处见 [`../failed-basin-retry.md`](../failed-basin-retry.md) `:343-350`
 （该 durable outcome 类「没有自动出口」，held 行保持 `reserved`、之后每趟都失败直到被处置）

@@ -25,8 +25,8 @@ def _identity_blocked_master(tmp_path: Any, name: str, *, started_at: datetime) 
 
     ``with_runtime_rows=False`` breaks the cohort runtime identity, so
     ``_accepted_submit_reconcile_job`` is False while ``file_forecast_cohort`` is
-    True -- exactly the ``reconcile.py:1387-1401`` writer site that records
-    ``identity_mismatch_blocked`` every pass without moving the row.
+    True -- exactly the ``services.orchestrator.reconcile_reserved.reconcile_reserved_unbound_jobs``
+    writer site that records ``identity_mismatch_blocked`` every pass without moving the row.
     """
 
     return _file_cohort_repository(

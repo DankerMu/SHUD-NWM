@@ -36,8 +36,7 @@ def test_comment_sacct_global_zero_is_unavailable_without_visibility_proof(
 
     calls: list[list[str]] = []
     monkeypatch.setattr(
-        reconcile_module,
-        "_bounded_sacct_stdout",
+        "services.orchestrator.reconcile_comment_sacct._bounded_sacct_stdout",
         lambda command: calls.append(list(command)) or "",
     )
     query = reconcile_module.default_comment_sacct_querier(
@@ -57,8 +56,7 @@ def test_comment_sacct_legacy_global_query_does_not_require_visibility_probe(
 
     calls: list[list[str]] = []
     monkeypatch.setattr(
-        reconcile_module,
-        "_bounded_sacct_stdout",
+        "services.orchestrator.reconcile_comment_sacct._bounded_sacct_stdout",
         lambda command: calls.append(list(command)) or "",
     )
     query = reconcile_module.default_comment_sacct_querier(
@@ -232,7 +230,7 @@ def test_global_accounting_visibility_probe_requires_controller_and_slurmdbd_pri
         value = controller_private_data if str(command[0]).endswith("scontrol") else slurmdbd_private_data
         return f"PrivateData = {value}\n" if value is not None else ""
 
-    monkeypatch.setattr(reconcile_module, "_bounded_visibility_stdout", run)
+    monkeypatch.setattr("services.orchestrator.reconcile_sacct_probe._bounded_visibility_stdout", run)
     assert reconcile_module.default_global_accounting_visibility_probe("/opt/slurm/bin")() is expected
     assert commands == [
         ["/opt/slurm/bin/scontrol", "show", "config"],
@@ -253,7 +251,7 @@ def test_global_accounting_visibility_probe_fails_closed_but_checks_both_when_on
             raise reconcile_module.ReconcileQueryUnavailable("controller config unavailable")
         return "PrivateData = none\n"
 
-    monkeypatch.setattr(reconcile_module, "_bounded_visibility_stdout", run)
+    monkeypatch.setattr("services.orchestrator.reconcile_sacct_probe._bounded_visibility_stdout", run)
     assert reconcile_module.default_global_accounting_visibility_probe()() is False
     assert commands == [["scontrol", "show", "config"], ["sacctmgr", "show", "config"]]
 
@@ -299,7 +297,7 @@ def test_comment_storage_probe_requires_job_comment_in_accounting_store_flags(
         config = "PrivateData = none\nClusterName = qhh\n"
         return config if flags_line is None else f"{config}{flags_line}\n"
 
-    monkeypatch.setattr(reconcile_module, "_bounded_visibility_stdout", run)
+    monkeypatch.setattr("services.orchestrator.reconcile_sacct_probe._bounded_visibility_stdout", run)
     with caplog.at_level(logging.WARNING, logger=_RECONCILE_MODULE_LOGGER):
         assert reconcile_module.default_comment_storage_probe("/opt/slurm/bin")() is expected
     assert commands == [["/opt/slurm/bin/scontrol", "show", "config"]]
@@ -323,7 +321,7 @@ def test_comment_storage_probe_swallows_an_unrunnable_probe_with_a_distinct_warn
         commands.append(list(command))
         raise reconcile_module.ReconcileQueryUnavailable("controller config unavailable")
 
-    monkeypatch.setattr(reconcile_module, "_bounded_visibility_stdout", run)
+    monkeypatch.setattr("services.orchestrator.reconcile_sacct_probe._bounded_visibility_stdout", run)
     with caplog.at_level(logging.WARNING, logger=_RECONCILE_MODULE_LOGGER):
         assert reconcile_module.default_comment_storage_probe()() is None
     assert commands == [["scontrol", "show", "config"]]
@@ -354,8 +352,7 @@ def test_comment_sacct_refuses_every_scope_when_comment_storage_is_unproven(
 
     calls: list[list[str]] = []
     monkeypatch.setattr(
-        reconcile_module,
-        "_bounded_sacct_stdout",
+        "services.orchestrator.reconcile_comment_sacct._bounded_sacct_stdout",
         lambda command: calls.append(list(command)) or "",
     )
     query = reconcile_module.default_comment_sacct_querier(
@@ -381,8 +378,7 @@ def test_comment_storage_probe_runs_once_per_querier_instance(
 
     calls: list[list[str]] = []
     monkeypatch.setattr(
-        reconcile_module,
-        "_bounded_sacct_stdout",
+        "services.orchestrator.reconcile_comment_sacct._bounded_sacct_stdout",
         lambda command: calls.append(list(command)) or "",
     )
     probes = 0
@@ -415,7 +411,7 @@ def test_comment_storage_gate_outranks_visibility_but_not_the_contract_version_c
 ) -> None:
     from services.orchestrator import reconcile as reconcile_module
 
-    monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", lambda _command: "")
+    monkeypatch.setattr("services.orchestrator.reconcile_comment_sacct._bounded_sacct_stdout", lambda _command: "")
     probes = 0
 
     def storage_probe() -> bool:
@@ -459,13 +455,11 @@ def test_reserved_row_stays_reserved_on_a_cluster_that_does_not_store_comments(
     # accounting stores the row but drops the sbatch --comment, so the comment
     # index can never see it.
     monkeypatch.setattr(
-        reconcile_module,
-        "_bounded_sacct_stdout",
+        "services.orchestrator.reconcile_comment_sacct._bounded_sacct_stdout",
         lambda _command: "72001|nhms_forecast|RUNNING|0:0||scheduler|account\n",
     )
     monkeypatch.setattr(
-        reconcile_module,
-        "_bounded_visibility_stdout",
+        "services.orchestrator.reconcile_sacct_probe._bounded_visibility_stdout",
         lambda _command: "PrivateData = none\nAccountingStoreFlags    = (null)\n",
     )
 
@@ -506,8 +500,7 @@ def test_comment_storing_cluster_still_binds_and_still_demotes_past_grace(
     )
     comment = str(matched_repository.get_accepted_submit_pipeline_job(pipeline_job_id)["slurm_comment"])
     monkeypatch.setattr(
-        reconcile_module,
-        "_bounded_sacct_stdout",
+        "services.orchestrator.reconcile_comment_sacct._bounded_sacct_stdout",
         lambda _command: f"72001|nhms_forecast|RUNNING|0:0|{comment}|||\n",
     )
     bound = reconcile_module.reconcile_reserved_unbound_jobs(
@@ -527,7 +520,7 @@ def test_comment_storing_cluster_still_binds_and_still_demotes_past_grace(
         created_at=query_end - timedelta(days=1),
         member_count=1,
     )
-    monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", lambda _command: "")
+    monkeypatch.setattr("services.orchestrator.reconcile_comment_sacct._bounded_sacct_stdout", lambda _command: "")
     absent = reconcile_module.reconcile_reserved_unbound_jobs(
         absent_repository,
         comment_query=reconcile_module.default_comment_sacct_querier(
@@ -551,7 +544,7 @@ def test_global_accounting_visibility_process_bounds_stdout_and_stderr(
 
     from services.orchestrator import reconcile as reconcile_module
 
-    monkeypatch.setattr(reconcile_module, "MAX_VISIBILITY_PROBE_BYTES", 64)
+    monkeypatch.setattr("services.orchestrator.reconcile_sacct_probe.MAX_VISIBILITY_PROBE_BYTES", 64)
     command = [
         sys.executable,
         "-c",
@@ -569,7 +562,7 @@ def test_global_accounting_visibility_process_timeout_is_bounded(
 
     from services.orchestrator import reconcile as reconcile_module
 
-    monkeypatch.setattr(reconcile_module, "COMMENT_SACCT_VISIBILITY_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr("services.orchestrator.reconcile_sacct_probe.COMMENT_SACCT_VISIBILITY_TIMEOUT_SECONDS", 0.05)
     with pytest.raises(reconcile_module.ReconcileQueryUnavailable, match="timed out"):
         reconcile_module._bounded_visibility_stdout(
             [sys.executable, "-c", "import time; time.sleep(10)"],
@@ -610,7 +603,7 @@ def test_visibility_probe_times_out_when_pipes_never_close(
 ) -> None:
     from services.orchestrator import reconcile as reconcile_module
 
-    monkeypatch.setattr(reconcile_module, "COMMENT_SACCT_VISIBILITY_TIMEOUT_SECONDS", 0.5)
+    monkeypatch.setattr("services.orchestrator.reconcile_sacct_probe.COMMENT_SACCT_VISIBILITY_TIMEOUT_SECONDS", 0.5)
     with _pipes_never_closed(2, returncode=returncode) as child:
         _popen_returning(monkeypatch, child)
         started = time.monotonic()
@@ -636,16 +629,19 @@ def test_round8_visibility_probe_saturation_and_timeout_reap_actual_child_pid(
 
     pid_path = tmp_path / f"{boundary}-{stream_fd}.pid"
     if boundary == "bytes":
-        monkeypatch.setattr(reconcile_module, "MAX_VISIBILITY_PROBE_BYTES", 64)
+        monkeypatch.setattr("services.orchestrator.reconcile_sacct_probe.MAX_VISIBILITY_PROBE_BYTES", 64)
         body = f"os.write({stream_fd}, b'x' * 4096)"
         expected_error = reconcile_module.ReconcileQuerySaturated
     elif boundary == "rows":
-        monkeypatch.setattr(reconcile_module, "MAX_VISIBILITY_PROBE_BYTES", 1024 * 1024)
-        monkeypatch.setattr(reconcile_module, "MAX_VISIBILITY_PROBE_ROWS", 2)
+        monkeypatch.setattr("services.orchestrator.reconcile_sacct_probe.MAX_VISIBILITY_PROBE_BYTES", 1024 * 1024)
+        monkeypatch.setattr("services.orchestrator.reconcile_sacct_probe.MAX_VISIBILITY_PROBE_ROWS", 2)
         body = f"os.write({stream_fd}, b'x\\n' * 64)"
         expected_error = reconcile_module.ReconcileQuerySaturated
     else:
-        monkeypatch.setattr(reconcile_module, "COMMENT_SACCT_VISIBILITY_TIMEOUT_SECONDS", 0.05)
+        monkeypatch.setattr(
+            "services.orchestrator.reconcile_sacct_probe.COMMENT_SACCT_VISIBILITY_TIMEOUT_SECONDS",
+            0.05,
+        )
         body = "time.sleep(10)"
         expected_error = reconcile_module.ReconcileQueryUnavailable
     script = (
@@ -716,7 +712,7 @@ def test_comment_sacct_production_cadence_pages_are_independently_bounded_and_ca
         scope_pages[scope] += 1
         return page_rows(page_index)
 
-    monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", bounded)
+    monkeypatch.setattr("services.orchestrator.reconcile_comment_sacct._bounded_sacct_stdout", bounded)
     query = reconcile_module.default_comment_sacct_querier(
         global_visibility_probe=lambda: True,
         comment_storage_probe=lambda: True,
@@ -779,7 +775,7 @@ def test_comment_sacct_session_freezes_advancing_clock_window_for_all_keys_and_s
             return f"17667_0|nhms_forecast|RUNNING|0:0|nhms_idem:{late_key}|scheduler|account\n"
         return ""
 
-    monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", bounded)
+    monkeypatch.setattr("services.orchestrator.reconcile_comment_sacct._bounded_sacct_stdout", bounded)
     with _pinned_local_timezone("Asia/Shanghai"):
         query = reconcile_module.default_comment_sacct_querier(
             global_visibility_probe=lambda: True,

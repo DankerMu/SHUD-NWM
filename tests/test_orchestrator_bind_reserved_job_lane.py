@@ -111,7 +111,7 @@ def _held_production_shape(
         def _saturated(_command: Any, **_kwargs: Any) -> str:
             raise reconcile_module.ReconcileQuerySaturated("rows")
 
-        monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", _saturated)
+        monkeypatch.setattr("services.orchestrator.reconcile_comment_sacct._bounded_sacct_stdout", _saturated)
         query = reconcile_module.default_comment_sacct_querier(
             global_visibility_probe=lambda: True, comment_storage_probe=lambda: False, now=lambda: query_end
         )

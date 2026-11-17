@@ -64,7 +64,10 @@ Representative active paths:
   artifact endpoints.
 - `services/orchestrator/cli.py`, `services/orchestrator/scheduler.py`,
   `services/orchestrator/chain.py`, `services/orchestrator/retry.py`,
-  `services/orchestrator/reconcile.py`, and `services/orchestrator/persistence.py`.
+  `services/orchestrator/reconcile.py` (a facade over the
+  `services/orchestrator/reconcile_*.py` leaves: records, identity,
+  sacct_probe, comment_sacct, comment_proof, inflight, reserved_support and
+  reserved), and `services/orchestrator/persistence.py`.
 - `workers/data_adapters`, `workers/forcing_producer`,
   `workers/canonical_converter`, `workers/shud_runtime`,
   `workers/output_parser`, `workers/flood_frequency`, and

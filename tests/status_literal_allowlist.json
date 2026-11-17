@@ -42,7 +42,7 @@
   {"file": "services/orchestrator/persistence.py", "members": ["reservation_lost", "submission_failed"], "reason": "distinct-vocabulary"},
   {"file": "services/orchestrator/persistence.py", "members": ["running", "submitted"], "reason": "distinct-vocabulary"},
   {"file": "services/orchestrator/pipeline_job_provenance.py", "members": ["cancelled", "complete", "failed", "partially_failed", "pending", "permanently_failed", "published", "queued", "reserved", "running", "skipped", "submission_failed", "submitted", "succeeded"], "reason": "distinct-vocabulary"},
-  {"file": "services/orchestrator/reconcile.py", "members": ["cancelled", "failed", "partially_failed", "succeeded"], "reason": "distinct-vocabulary"},
+  {"file": "services/orchestrator/reconcile_inflight.py", "members": ["cancelled", "failed", "partially_failed", "succeeded"], "reason": "distinct-vocabulary"},
   {"file": "services/orchestrator/retry.py", "members": ["cancelled", "failed", "partially_failed"], "reason": "distinct-vocabulary"},
   {"file": "services/orchestrator/retry.py", "members": ["parsed", "published", "succeeded"], "reason": "distinct-vocabulary"},
   {"file": "services/orchestrator/retry.py", "members": ["pending", "submission_failed"], "reason": "distinct-vocabulary"},

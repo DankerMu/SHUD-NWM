@@ -123,10 +123,9 @@ def _commentless_forcing_query(
             return "AccountingStoreFlags = (null)\n"
         return controller_stdout
 
-    monkeypatch.setattr(reconcile_module, "_bounded_visibility_stdout", controller)
+    monkeypatch.setattr("services.orchestrator.reconcile_sacct_probe._bounded_visibility_stdout", controller)
     monkeypatch.setattr(
-        reconcile_module,
-        "_bounded_sacct_stdout",
+        "services.orchestrator.reconcile_comment_sacct._bounded_sacct_stdout",
         lambda _command: pytest.fail("comment-less forcing controller proof must not query sacct"),
     )
     return (
@@ -171,8 +170,7 @@ def test_real_http_forcing_ambiguity_persists_identity_and_blocks_renamed_restar
 
     monkeypatch.setattr(httpx, "Client", lambda **_kwargs: _HttpClient())
     monkeypatch.setattr(
-        reconcile_module,
-        "_bounded_visibility_stdout",
+        "services.orchestrator.reconcile_sacct_probe._bounded_visibility_stdout",
         lambda command: (
             "AccountingStoreFlags = (null)\n"
             if list(command)[-2:] == ["show", "config"]
@@ -277,8 +275,7 @@ def test_commentless_controller_identity_resumes_original_forcing_through_normal
         reconcile_slurm_account="account",
     )
     monkeypatch.setattr(
-        reconcile_module,
-        "_bounded_visibility_stdout",
+        "services.orchestrator.reconcile_sacct_probe._bounded_visibility_stdout",
         lambda command: (
             "AccountingStoreFlags = (null)\n"
             if list(command)[-2:] == ["show", "config"]
@@ -331,8 +328,7 @@ def test_commentless_controller_identity_resumes_original_forcing_through_normal
     assert bound["reconciliation_decision"] == "matched_bound"
     inflight_commands: list[list[str]] = []
     monkeypatch.setattr(
-        reconcile_module,
-        "_bounded_sacct_stdout",
+        "services.orchestrator.reconcile_comment_sacct._bounded_sacct_stdout",
         lambda command: inflight_commands.append(list(command))
         or f"{original_job_id}|nhms_forcing|RUNNING|0:0||scheduler|account\n",
     )
@@ -483,10 +479,9 @@ def test_boundary_controller_identity_continues_before_next_global_reconcile(
 
     monkeypatch.setattr(httpx, "Client", lambda **_kwargs: _HttpClient())
     monkeypatch.setenv("SLURM_GATEWAY_SLURM_BIN_PATH", "/opt/slurm/bin")
-    monkeypatch.setattr(reconcile_module, "_bounded_visibility_stdout", controller)
+    monkeypatch.setattr("services.orchestrator.reconcile_sacct_probe._bounded_visibility_stdout", controller)
     monkeypatch.setattr(
-        reconcile_module,
-        "_bounded_sacct_stdout",
+        "services.orchestrator.reconcile_comment_sacct._bounded_sacct_stdout",
         lambda _command: pytest.fail("comment-less boundary discovery must not query sacct"),
     )
     orchestrator = _orchestrator(tmp_path / "orchestrator", repository, client, terminal_stage="forecast")
@@ -616,8 +611,7 @@ def test_comment_storing_accounting_binds_current_forcing_attempt_token(
     )
     commands: list[list[str]] = []
     monkeypatch.setattr(
-        reconcile_module,
-        "_bounded_sacct_stdout",
+        "services.orchestrator.reconcile_comment_sacct._bounded_sacct_stdout",
         lambda command: commands.append(list(command))
         or f"2001_0|nhms_forcing|RUNNING|0:0|{held.slurm_comment}|scheduler|account\n",
     )
@@ -859,8 +853,7 @@ def test_permitted_reclaim_persists_current_attempt_task_mapping_before_post(
 
     monkeypatch.setattr(httpx, "Client", lambda **_kwargs: _HttpClient())
     monkeypatch.setattr(
-        reconcile_module,
-        "_bounded_visibility_stdout",
+        "services.orchestrator.reconcile_sacct_probe._bounded_visibility_stdout",
         lambda command: (
             "AccountingStoreFlags = (null)\n"
             if list(command)[-2:] == ["show", "config"]

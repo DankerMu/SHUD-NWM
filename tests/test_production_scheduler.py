@@ -21939,7 +21939,7 @@ def test_bounded_evidence_retains_inflight_error_when_only_the_inflight_segment_
 def test_bounded_evidence_keeps_inflight_identity_mismatch_outcomes() -> None:
     """#1797: `identity_mismatch_blocked` is written into the `inflight` lane.
 
-    `reconcile_inflight_jobs` (`reconcile.py:1076-1087`) is the producer, so an
+    `services.orchestrator.reconcile_inflight.reconcile_inflight_jobs` is the producer, so an
     acceptance check asking "did this pass record an identity mismatch?" reads the
     `inflight` lane.  Dropping the lane on the bounded path made a discarded lane
     indistinguishable from an empty one and falsely satisfied that check.
@@ -37644,10 +37644,12 @@ def _incident_scheduler_evidence_payload(
             # Rows mirror the sole producer (scheduler_runtime.py:1515-1538): every key is
             # emitted per row, None where the ReservationReconcileOutcome field is unset.
             # Actions/values are producer-verified — journal_quarantined is the only
-            # producer of quarantine_reason/quarantine_field (reconcile.py:1713-1722, oracle
+            # producer of quarantine_reason/quarantine_field
+            # (services.orchestrator.reconcile_reserved.reconcile_reserved_unbound_jobs, oracle
             # values from the real-scheduler assertions at :29101-29102); query_unavailable
-            # is the producer of reconciliation_reason_class (reconcile.py:1448-1452 with
-            # ReconcileQueryUnavailable.reason_class at :128); bound is reconcile.py:1692-1704.
+            # is the producer of reconciliation_reason_class (the same function, with
+            # services.orchestrator.reconcile_records.ReconcileQueryUnavailable.reason_class);
+            # bound is the same function's bind branch.
             "outcomes": [
                 {
                     "job_id": "job_poisoned",
@@ -59258,8 +59260,7 @@ def _reserved_unbound_scheduler_for_fallback(
     from services.orchestrator import reconcile as reconcile_module
 
     monkeypatch.setattr(
-        reconcile_module,
-        "_bounded_sacct_stdout",
+        "services.orchestrator.reconcile_comment_sacct._bounded_sacct_stdout",
         lambda _command: rows,
     )
     scheduler = _RealProductionScheduler(
@@ -59318,9 +59319,7 @@ def test_reserved_unbound_fallback_bounded_pass_reason_survives_scheduler_eviden
     """#1565 Fix (scheduler lane): a fallback byte-budget failure surfaces
     ``bounded_output_bytes_saturated`` as PASS evidence while the durable held
     reason stays ``comment_accounting_unproven``."""
-    from services.orchestrator import reconcile as reconcile_module
-
-    monkeypatch.setattr(reconcile_module, "MAX_COMMENT_SACCT_BYTES", 8)
+    monkeypatch.setattr("services.orchestrator.reconcile_comment_sacct.MAX_COMMENT_SACCT_BYTES", 8)
     scheduler, repository, job_id = _reserved_unbound_scheduler_for_fallback(
         tmp_path,
         monkeypatch,
@@ -59414,8 +59413,7 @@ def _assert_reserved_unbound_ordinary_keeps_durable_reason(
     from services.orchestrator import reconcile as reconcile_module
 
     monkeypatch.setattr(
-        reconcile_module,
-        "_bounded_sacct_stdout",
+        "services.orchestrator.reconcile_comment_sacct._bounded_sacct_stdout",
         lambda _command: (
             "72001|nhms_forecast|COMPLETED|0:0||scheduler|account|2026-07-12T01:00:00\n"
         ),
