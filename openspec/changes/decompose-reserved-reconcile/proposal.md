@@ -138,7 +138,10 @@ expanded. Seats: correctness, test evidence + spec compliance, invariant/state m
   - capability probe eager, or uncached per row;
   - `fallback_basis` dropped from the quarantine outcome;
   - the `:860` raise caught per row;
-  - the `_reserved_record_identity_matches` call site moved off `reconcile_reserved` (the `:1563` patch test goes red);
+  - the `_reserved_record_identity_matches` call site moved off `reconcile_reserved`. This is caught by the pin test
+    `test_a_fallback_unique_master_with_an_invalid_slurm_id_past_the_identity_seam_is_held_as_no_match`, not by the
+    `:1563` patch test. That test stays green under the mutation, because the real identity gate rejects the same row
+    with the same visible outcome, so it cannot tell whether the patch took effect;
   - two phase helpers swapped in order.
 
   Each mutation is mapped to the test that catches it, and that test is green on the unchanged code.
