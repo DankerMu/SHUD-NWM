@@ -114,15 +114,14 @@ OUT_OF_SCOPE_ROUTES: dict[str, str] = {
     "GET /{full_path:path}": "SPA static fallback (HTML), not JSON",
     "services.slurm_gateway.routes": "internal slurm gateway, separate auth plane and contract",
 }
-# #3157: routes that keep their `response_model` (so the generated OpenAPI stays
-# byte-identical) but can no longer return a success body: every request that
-# reaches the handler is refused, so there is no successful serialisation for
-# this oracle to capture.  The model is still asserted below; the operation and
-# its schema are removed by #3179.
+# #3157/#3179: routes kept as a documented refusal. Every request that reaches
+# the handler is refused, so there is no successful serialisation for this
+# oracle to capture; #3179 removed the success model and the published 2xx,
+# which is asserted below.
 FAIL_CLOSED_ROUTES: dict[str, str] = {
     "POST /api/v1/runs/{run_id}/retry": (
         "#3157: always 409 CONTROL_PLANE_MANUAL_ACTION_REQUIRED after auth; "
-        "RetryRunResultEnvelope kept only for OpenAPI stability"
+        "#3179: no response model and no 2xx response in the published operation"
     ),
 }
 # Routes already modelled before #2348 (layers / precip): outside this oracle.
@@ -782,14 +781,20 @@ def test_every_json_route_is_sampled() -> None:
     # routes left out are exactly the documented out-of-scope set.
     assert unmodelled_routes(app.routes, in_scope) == set(OUT_OF_SCOPE_ROUTES)
     # The fail-closed exemption is narrow: each exempted route is a real business
-    # route that still carries its typed response model (OpenAPI stays unchanged).
+    # route with no response model, and its operation publishes no 2xx (#3179).
     business_routes = {
         f"{sorted(route.methods)[0]} {route.path}": route
         for route in app.routes
         if isinstance(route, APIRoute) and route.endpoint.__module__.startswith("apps.api.routes.")
     }
     assert set(FAIL_CLOSED_ROUTES) <= set(business_routes), sorted(set(FAIL_CLOSED_ROUTES) - set(business_routes))
-    assert all(_is_response_model(business_routes[key].response_model) for key in FAIL_CLOSED_ROUTES)
+    assert all(business_routes[key].response_model is None for key in FAIL_CLOSED_ROUTES)
+    app.openapi_schema = None
+    operations = app.openapi()["paths"]
+    for key in FAIL_CLOSED_ROUTES:
+        method, path = key.split(" ", 1)
+        responses = operations[path][method.lower()]["responses"]
+        assert not [status for status in responses if status.startswith("2")], (key, sorted(responses))
 
 
 def test_completeness_exemption_requires_a_response_annotation() -> None:
