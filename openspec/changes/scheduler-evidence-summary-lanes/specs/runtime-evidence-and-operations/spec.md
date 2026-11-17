@@ -68,7 +68,7 @@ both; producer-to-fixture synchronisation is a separate obligation.
 - THEN the writer MAY summarize terminal `skipped_candidates` to their bounded identity/reason rows and replace retention entry lists with their existing count/frontier summary
 - AND non-terminal skipped candidates retain their complete evidence
 - AND the pass status remains its computed non-blocked status, no `limit` block is introduced, and `evidence_compaction` records the normal-detail projection
-- AND if that projection still exceeds the bound, the non-blocking candidate-list summary applies, then the status-preserving lane projection, and only if that still exceeds the bound does the fail-closed bounded fallback apply, unchanged except that its `limit` block MAY carry `lane_bytes`.
+- AND if that projection still exceeds the bound, the non-blocking candidate-list summary applies, and only if that still exceeds the bound does the fail-closed bounded fallback apply, unchanged except that its `limit` block MAY carry `lane_bytes`.
 
 #### Scenario: terminal limit compaction remains the fail-closed floor
 
@@ -81,20 +81,13 @@ both; producer-to-fixture synchronisation is a separate obligation.
 - THEN the candidate lists (including non-terminal skipped candidates) are replaced by the bounded candidate summary rows, every other top-level field (including `status`, `source_cycles` and `model_run_evidence`) is kept verbatim, `evidence_compaction.mode` is `non_blocking_summary` with the admission record nested under `admission` when present, no `limit` block is introduced, and the artifact is within the bound
 - AND a summary that fits with indent-2 is written with indent-2, byte-identical to the pre-change writer
 
-#### Scenario: Lane projection keeps a long submitted pass non-blocking
-
-- WHEN the candidate-list summary still exceeds the bound, serialized either way, and projecting the size-growing lanes (`model_run_evidence` first) makes it fit
-- THEN the artifact keeps the true `status` and has no `limit` block, and `evidence_compaction.mode` stays `non_blocking_summary`, with `summarized_fields` naming the candidate lists and every projected lane
-- AND every `model_run_evidence` row is retained, so the submitted row count still equals `counts.submitted_count`
-- AND each retained row keeps the identity keys, the `candidate_identity` block, `hydro_run.run_id`, the forcing version identity and the status evidence from which the readiness reader derives the same status values as from the full row, and a row carrying `error_code` keeps every bounded failure key
-- AND the readiness validator reports no submitted-count mismatch, missing-field or identity-mismatch finding for it, and `list-operator-actions` reads it as evaluating with the same answer as for the full pass.
-
 #### Scenario: A summary that still exceeds the bound falls back fail-closed
 
-- WHEN the lane projection still exceeds the bound
+- WHEN the candidate-list summary still exceeds the bound serialized with indent-2 and compact, or the pass has no candidate lists to summarize
 - THEN the bounded fallback applies with `status: resource_limit_blocked`, `limit.reason: evidence_size_limit_exceeded` and `limit.pre_limit_status`
-- AND `limit.lane_bytes` lists at most ten top-level keys of the status-preserving projection, with their indent-2 serialized byte counts in descending order, so the overflowing lane is readable from the artifact
-- AND `limit.lane_bytes` is added only when the already-fitted fallback product still carries `limit.pre_limit_status` and still fits in the same serialization with it, so the product without `lane_bytes` is unchanged and a product reduced to the reason-only `limit` floor never carries it.
+- AND `limit.lane_bytes` lists at most ten top-level keys of the candidate-list summary payload — or, when there are no candidate lists, of the payload handed to that tier — each with its value serialized on its own with indent-2 as UTF-8 bytes, ordered by bytes descending then key ascending, so the overflowing lane is readable from the artifact
+- AND `limit.lane_bytes` is added only when the already-fitted fallback product still carries `limit.pre_limit_status` and still fits in the same serialization with it, so the product without `lane_bytes` is unchanged and a product reduced to the reason-only `limit` floor never carries it
+- AND when the payload being bounded is itself a fallback product whose `limit` already carries `lane_bytes`, that attribution is carried through rather than re-measured from the product's own lanes, so a re-bounding never replaces the original overflow attribution.
 
 #### Scenario: the cause of a failed pass survives the bounded fallback
 

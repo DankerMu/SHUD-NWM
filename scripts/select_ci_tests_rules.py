@@ -1462,6 +1462,12 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # importer derivation, so this stop rule is its only route for this
             # module. DB-free, ~20 tests in ~20s.
             "tests/test_scheduler_evidence_decidability.py",
+            # #3170, same footing: the summary-lanes suite runs a REAL 132-candidate
+            # `run_once` pass and asserts the post-write status this module puts
+            # into SchedulerPassResult (compact candidate-list summary keeps it
+            # `submitted`). Module-scope-import-free, so this stop rule is its
+            # only route for this module. DB-free, ~21 tests in ~18s.
+            "tests/test_scheduler_evidence_summary_lanes.py",
             # #2405 adds the fourth at-site target on the same grounds: this
             # module registers the lease heartbeat's touch path on the
             # reservation it just reserved, and the reservation-lease suite is
@@ -2169,6 +2175,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # site, per this rule's #1455 note above. DB-free, ~20 tests in ~20s
             # (one real breaker `run_once()` pass, module-scoped).
             "tests/test_scheduler_evidence_decidability.py",
+            # #3170: the status-preserving tiers after the candidate-list summary
+            # (compact retry, `limit.lane_bytes`) and their golden byte identity.
+            # Module-scope-import-free like the decidability suite above, so this
+            # directory rule is its route for scheduler_evidence_payload.py,
+            # scheduler_evidence.py and operator_action_listing.py. DB-free,
+            # 21 tests in ~18s (one real 132-candidate `run_once()` pass, twice).
+            "tests/test_scheduler_evidence_summary_lanes.py",
             # #2405: the reservation-lease suite, on the same footing and for the
             # same reason -- named after none of its modules and importing
             # nothing at module scope. This directory rule is its route for
@@ -2820,6 +2833,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         stop_on_match=True,
     ),
     PathTestRule(
+        # #3170: the summary-lanes suite asserts this validator's
+        # `_scheduler_evidence_errors` reads a compact candidate-list summary
+        # pass exactly like the full pass. Function-local import, so no importer
+        # derivation reaches it; additive (no stop), the directory rule below
+        # still runs for this module.
+        "services/production_closure/readiness_scheduler_evidence.py",
+        ("tests/test_scheduler_evidence_summary_lanes.py",),
+    ),
+    PathTestRule(
         # #1455: the directory's 25 importer gaps collapse onto four suites, all
         # of which are production-closure suites that other rules happened to own
         # (real_backend.py, forcing_producer, the readonly-db script). The
@@ -3135,6 +3157,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # by its own test; there is no generic `tests/fixtures/*.json` row, so a
     # map-only PR would otherwise select nothing.
     PathTestRule("tests/fixtures/file_journal_cluster_map.json", ("tests/test_file_journal_cluster_map.py",)),
+    # #3170: the origin/master writer bytes the summary-lanes suite compares
+    # against; data read only by that suite, so a re-capture would otherwise
+    # select nothing.
+    PathTestRule(
+        "tests/fixtures/scheduler_evidence_golden_3170.json",
+        ("tests/test_scheduler_evidence_summary_lanes.py",),
+    ),
     # #2920: the import layering allowlist is data read only by the guard; as
     # data it reaches no other rule, so an allowlist-only PR would select nothing.
     PathTestRule("tests/import_layering_allowlist.json", (IMPORT_LAYERING_GUARD_TEST,)),
@@ -4321,7 +4350,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # with. It adds no target the derivation would not have added.
     PathTestRule(
         "scripts/node22_scheduler_stall_health.py",
-        ("tests/test_node22_scheduler_stall_health.py",),
+        (
+            "tests/test_node22_scheduler_stall_health.py",
+            # #3170: the summary-lanes suite reads a writer-produced compact
+            # summary pass through `read_pass_record` / `classify_pass` and the
+            # `pass_limit_blocked` window; it imports the probe inside its
+            # function bodies, so no importer derivation reaches it.
+            "tests/test_scheduler_evidence_summary_lanes.py",
+        ),
     ),
     # The D4 parity edge. The probe is stdlib-only by design (it is staged and
     # run from outside the deployed checkout), so it carries its own copy of

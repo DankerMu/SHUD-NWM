@@ -1643,6 +1643,9 @@ def test_select_tests_maps_file_journal_read_state_without_whole_legacy_suites()
             # and it has no module-scope imports, so no importer derivation can
             # reach it.
             "tests/test_scheduler_evidence_decidability.py",
+            # #3170's at-site addition, same footing: the summary-lanes suite
+            # asserts the `run_once` status this module writes back.
+            "tests/test_scheduler_evidence_summary_lanes.py",
             # #2405's at-site addition to the same stop rule: the
             # reservation-lease suite is the oracle for the touch-path
             # registration this module performs, and is equally
@@ -2140,6 +2143,8 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         # #2564: the heartbeat-mtime x evidence-retention cross suite, on the
         # same footing (module-scope-import-free).
         "tests/test_scheduler_evidence_retention_reservation_mtime.py",
+        # #3170: the summary-lanes suite, on the same footing.
+        "tests/test_scheduler_evidence_summary_lanes.py",
         "tests/test_scheduler_generation.py",
         # #2666: the held-reservation block suite rides the broad orchestrator
         # directory rule (accepted_submit_identity.py, chain_stages.py and
@@ -13414,6 +13419,8 @@ def test_scheduler_runtime_selects_the_copyback_mutex_suite() -> None:
         # closure pin reads this module's `run_once` status literals; none has
         # module-scope imports, so the at-site extension is their only route.
         "tests/test_scheduler_evidence_decidability.py",
+        # #3170: the summary-lanes suite, at site for the same reason.
+        "tests/test_scheduler_evidence_summary_lanes.py",
         "tests/test_scheduler_journal_retention_archive.py",
         "tests/test_scheduler_journal_retention_planning.py",
         "tests/test_source_cycle_raw_manifest.py",
@@ -23841,6 +23848,30 @@ def test_evidence_decidability_suite_is_selected_by_every_writer_and_reader_it_p
     ):
         assert Path(module).is_file(), module
         assert "tests/test_scheduler_evidence_decidability.py" in select_tests([module], repo_root=Path("."))
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "services/orchestrator/scheduler_evidence_payload.py",
+        "services/orchestrator/scheduler_evidence.py",
+        "services/orchestrator/scheduler_runtime.py",
+        "services/orchestrator/operator_action_listing.py",
+        "services/production_closure/readiness_scheduler_evidence.py",
+        "scripts/node22_scheduler_stall_health.py",
+        "tests/fixtures/scheduler_evidence_golden_3170.json",
+    ],
+)
+def test_summary_lanes_suite_is_selected_by_its_writer_readers_and_golden(path: str) -> None:
+    # #3170: the summary-lanes suite is named after none of its modules and is
+    # module-scope-import-free, so no importer derivation reaches it. The
+    # orchestrator directory rule routes the writer halves and the listing
+    # reader; scheduler_runtime.py (the pass writer whose `run_once` status the
+    # suite asserts) rides that module's stop rule at site; the readiness
+    # validator and the node-22 stall probe each get an explicit row; a path
+    # rule routes the golden.
+    assert Path(path).is_file(), path
+    assert "tests/test_scheduler_evidence_summary_lanes.py" in select_tests([path], repo_root=Path("."))
 
 
 def test_reservation_lease_suite_is_selected_by_every_writer_and_reader_it_pins() -> None:
