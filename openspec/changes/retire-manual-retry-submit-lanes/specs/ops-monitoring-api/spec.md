@@ -66,7 +66,7 @@ The API SHALL keep the `POST /api/v1/runs/{run_id}/retry` endpoint but it SHALL 
 #### Scenario: Unauthorized user
 
 - **WHEN** a user without `operator`, `model_admin`, or `sys_admin` role sends `POST /api/v1/runs/{run_id}/retry`
-- **THEN** the API SHALL return HTTP 403 with `{"request_id": "...", "status": "error", "error": {"code": "FORBIDDEN", "message": "operator+ role required"}}`
+- **THEN** the API SHALL return HTTP 403 with error code `RBAC_FORBIDDEN` (the shared RBAC refusal; 401 `AUTH_REQUIRED` when unauthenticated)
 - **AND** it does not reveal the manual recovery details intended only for authorized operators.
 
 #### Scenario: Authentication and authorization precede the manual-action error

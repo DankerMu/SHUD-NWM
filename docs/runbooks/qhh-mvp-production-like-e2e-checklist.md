@@ -1154,7 +1154,8 @@ operator: <redacted id>
 - [ ] `/hydro-met` 连目标后端展示 station 曲线和 river flow 曲线。
 - [ ] `/ops` 连目标后端展示 stages、jobs 和 logs。
 - [ ] 至少一次受控失败在 `/ops` 可见。
-- [ ] retry API 可创建 retry job，且终态有证据。
+- [ ] 手动修复标记（`scripts/node22_manual_retry_failed_runs.py` → `record_manual_repair`）后，scheduler mint 的 retry job
+      终态有证据；`POST /api/v1/runs/{run_id}/retry` 返回 409 `CONTROL_PLANE_MANUAL_ACTION_REQUIRED`（#3157）。
 - [ ] 所有证据标注 deterministic、mocked、production-like 或 live。
 - [ ] summary 明确 `final_production_readiness_claimed=false`。
 

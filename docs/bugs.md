@@ -394,9 +394,14 @@ retest_command: |-
   set -euo pipefail
   curl -fsS "$SLURM_GATEWAY_URL/api/v1/slurm/health" |
     jq -e '(.backend? // "slurm") == "slurm" and (.healthy? // true) == true'
-  job_id="$(curl -fsS -X POST "$API_BASE_URL/api/v1/runs/$RUN_ID/retry" \
-    -H "X-User-Role: operator" |
-    jq -er '.data.slurm_job_id | select(test("^[0-9]+(_[0-9]+)?$"))')"
+  # The API retry route is retired (#3157, always 409 CONTROL_PLANE_MANUAL_ACTION_REQUIRED).
+  # On node-22, mark the run; the next scheduler pass mints and submits the retry.
+  /scratch/frd_muziyao/NWM/.venv/bin/python scripts/node22_manual_retry_failed_runs.py \
+    --journal-root "$JOURNAL_ROOT" --run-id "$RUN_ID" \
+    --reason "BUG-20260527-013 retest" --requested-by "$OPERATOR" --execute
+  # After that pass has submitted it:
+  job_id="$(curl -fsS "$API_BASE_URL/api/v1/jobs?run_id=$RUN_ID&sort_by=submitted_at&sort_order=desc&limit=50" |
+    jq -er '[.data.items[] | .slurm_job_id | select(. != null and test("^[0-9]+(_[0-9]+)?$"))] | first')"
   curl -fsS "$SLURM_GATEWAY_URL/api/v1/slurm/jobs/$job_id" |
     jq -e --arg job_id "$job_id" '.job_id == $job_id'
   sacct -j "$job_id" --noheader --format=JobID,State | rg -n "$job_id"

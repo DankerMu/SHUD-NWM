@@ -85,7 +85,7 @@ so it has no such window.
    `pending` row with no `slurm_job_id`, the supported marker path, and the side effects of `POST /runs/{id}/cancel` on
    such a row (it also cancels the hydro_run and forecast_cycle, and can orphan a real Slurm job in the
    submit-succeeded / unrecorded sub-window).
-7. **Spec.** Deltas in 11 capabilities. `retry-runtime-roots` is retired whole: every requirement concerns the submit
+7. **Spec.** Deltas in 10 capabilities. `retry-runtime-roots` is retired whole: every requirement concerns the submit
    lane, so `.openspec.yaml` sets `retire_capabilities: true`. Each requirement is classified by reachability from the
    two retired methods and the route's success path, not by the word "manual", because the marker lane survives.
 
@@ -119,7 +119,7 @@ expanded. Risk packs: api-contract, spec-retirement, test-reseed, operator-runbo
   - the selector set for the diff;
   - `tests/test_retry.py`, `tests/test_retry_cancel_consistency.py`, `tests/test_file_orchestration_journal.py`,
     `tests/test_monitoring_api.py`, `tests/test_file_journal_read_blocked_consumers.py` and
-    `tests/test_retry_runtime_root_blocked_reads.py`;
+    `tests/test_retry_route_fail_closed.py` (`tests/test_retry_runtime_root_blocked_reads.py` is deleted);
   - `tests/test_file_orchestration_migration.py`, `tests/test_cohort_member_charge.py`,
     `tests/test_hydro_run_attempt_triage.py`, `tests/test_api_contract*.py`, `tests/test_e2e_m3.py`,
     `tests/test_response_model_preservation.py` and `tests/test_response_model_preservation_pipeline.py`;

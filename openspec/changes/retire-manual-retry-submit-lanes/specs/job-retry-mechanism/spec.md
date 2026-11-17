@@ -56,7 +56,7 @@
 
 ### Requirement: Public job error messages SHALL render local paths and URIs
 
-**Reason**: The first sentence and scenario "Gateway error with absolute path in retry 503" bind the retry route `submission_failed` 503 body, which no longer exists. The job/basin result rendering is carried over under a new name.
+**Reason**: The first sentence and scenario "Gateway error with absolute path in retry 503" bind the retry route `submission_failed` 503 body, which no longer exists. The clause that pipeline events keep raw text, its scenario "Persisted event keeps raw text", and the sentence that the database and file-journal lanes render the same text identically were pinned only by the deleted retry-503 tests (the retired lanes were the pinned writers of those events), so they are removed rather than carried as unpinned MUSTs. The job/basin result rendering and the raw persisted job row are carried over under a new name.
 
 **Migration**: See ADDED "Public job error messages SHALL render local paths and URIs on pipeline job payloads".
 
@@ -291,18 +291,17 @@ The file-journal retry service SHALL derive every automatic retry attempt from t
 The system SHALL render public job error messages through the shared renderer. Job/basin
 result payloads returned by pipeline routes (job listings, stage summaries, and the cancel response) SHALL render `error_message` through the shared public
 evidence renderer: secrets become `[redacted]`, absolute local paths `[local-path]`, URIs
-`[uri]`/`[object-uri]`, while surrounding words are kept. Persisted job rows and pipeline events keep raw text.
-The database and file-journal lanes SHALL produce the same public rendering for the same text.
+`[uri]`/`[object-uri]`, while surrounding words are kept. Persisted job rows keep raw text.
 
 #### Scenario: Gateway error with absolute path in a job listing
 
 - **WHEN** a job whose recorded error is `sbatch: error: cannot open /srv/nhms/workspace/run-42/job.sbatch for writing` is returned by a pipeline job listing
 - **THEN** `error_message` equals `sbatch: error: cannot open [local-path] for writing` and the body contains no workspace or object-store root
 
-#### Scenario: Persisted event keeps raw text
+#### Scenario: Persisted job row keeps raw text
 
-- **WHEN** the same failure is recorded
-- **THEN** the persisted pipeline event `message` and `details.error_message` still contain the raw path
+- **WHEN** the same job is read back from the store
+- **THEN** its persisted `error_message` still contains the raw path
 
 ### Requirement: DB-free scheduler retry manifests preserve runtime mode
 

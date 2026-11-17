@@ -43,7 +43,8 @@ deterministic 证据证明：
   和 fixture Slurm metadata），代表 scheduler mint 的结果。
 - retry job lifecycle 在 deterministic fixture 中推进到 `running` 后 `succeeded`，并记录 explicit job/stage terminal outcome。
 - post-retry `/api/v1/pipeline/status` 的 `job_counts` 反映新增的 succeeded retry job 和历史 failed job；`current_state` 仍来自 `met.forecast_cycle.current_state` 的持久化值，除非正式 scheduler/orchestrator producer 另行更新，不因 retry job 成功而自动变为 cycle `complete`。
-- `/ops` 能看到 failed row、backend logs route 内容、retry request、刷新后的 retry job row 和 succeeded job/stage terminal outcome；cycle current_state 仍保持后端持久化状态。注意：`apps/frontend/e2e/monitoring.mocked.spec.ts` 的 mocked fixture 仍按退役前的成功响应 mock 这次 retry request；真实 API 现在返回 409，`JobsTable` retry 按钮与该 operation 的移除见 #3179。
+- `/ops` 能看到 failed row、backend logs route 内容、retry request、刷新后的 retry job row 和 succeeded job/stage terminal outcome；cycle current_state 仍保持后端持久化状态。
+  注意：`apps/frontend/e2e/monitoring.mocked.spec.ts` 的 mocked fixture 仍按退役前的成功响应 mock 这次 retry request；真实 API 现在返回 409，`JobsTable` retry 按钮与该 operation 的移除见 #3179。
 
 ## artifact root
 
@@ -86,5 +87,6 @@ live 模式只有在真实依赖实际执行并记录 receipt 后才可标注为
 1. 使用 `nhms-pipeline plan-production --plan` 作为正式 scheduler/orchestrator 入口。
 2. 记录真实 `source_id`、`cycle_time`、`cycle_id`、`run_id`、failed `job_id`、`stage`、`slurm_job_id` 和 bounded `log_uri`。
 3. 通过公开 API 验证 status/stages/jobs/logs，不读取 qhh diagnostic state JSON。
-4. 在 node-22 用 `scripts/node22_manual_retry_failed_runs.py` 记录 manual repair marker（见 [`node22-control-plane-manual-recovery.md`](node22-control-plane-manual-recovery.md)），并记录 scheduler 铸出的 retry job/event、Slurm metadata、job/stage 终态和 cycle current_state 是否由正式 producer 更新。API `POST /runs/{run_id}/retry` 只返回 409 `CONTROL_PLANE_MANUAL_ACTION_REQUIRED`，不作为 live retry 入口。
+4. 在 node-22 用 `scripts/node22_manual_retry_failed_runs.py` 记录 manual repair marker（见 [`node22-control-plane-manual-recovery.md`](node22-control-plane-manual-recovery.md)），并记录 scheduler 铸出的 retry job/event、Slurm metadata、job/stage 终态和 cycle current_state 是否由正式 producer 更新。
+   API `POST /runs/{run_id}/retry` 只返回 409 `CONTROL_PLANE_MANUAL_ACTION_REQUIRED`，不作为 live retry 入口。
 5. 如果 live Slurm/QHH 任一步 unavailable，记录具体 unavailable reason；不要把 deterministic 结果提升为 live readiness。

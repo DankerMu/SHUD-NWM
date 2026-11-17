@@ -440,7 +440,9 @@ WHERE cycle_id = '<source>_<YYYYMMDDHH>';
 - `met.forecast_cycle.manifest_uri` 是否缺失、指向错误 source/cycle，或 cycle status 未回到 raw-ready 状态。
 - candidate evidence 是否被 row limit 截断；必要时提高只读诊断查询 limit，不要直接修改历史 job/event 行。
 
-修复方式是通过既有 retry API 重新提交同一 `run_id`，让系统写入新的 retry job/event 和 manifest 证据；
+修复方式是在 node-22 用 `scripts/node22_manual_retry_failed_runs.py`（`FileJournalRetryService.record_manual_repair`）
+为同一 `run_id` 记录手动修复标记，由下一个 scheduler pass mint 新的 retry job/event 和 manifest 证据；
+`POST /api/v1/runs/{run_id}/retry` 已退役（#3157），恒返回 409 `CONTROL_PLANE_MANUAL_ACTION_REQUIRED`，不会提交。
 不要把旧 failed job 改成 `succeeded`，也不要删除 `permanently_failed` 行。旧失败需要保留用于审计，成功 retry
 负责 supersede 它。
 
