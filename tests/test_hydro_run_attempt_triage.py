@@ -21,8 +21,8 @@ both ways a same-``run_id`` rerun stages a later attempt:
 
 Scope of the verdict: on these two rerun paths the active-and-stale state is not
 reachable, and the lag exists only on non-active terminal rows.  One historical
-path is NOT exercised here: the file-lane manual retry submit method (via
-``_create_pending_manual_retry_job``) of a per-model ``fcst_`` run id reset a
+path is NOT exercised here: the file-lane manual retry submit method (via its
+pending-row creator, removed with it) of a per-model ``fcst_`` run id reset a
 failed hydro row to ``pending`` at the old attempt, and nothing finalized that row
 when the manual job ended.  #3157 retired that method; it never had a production
 caller (the API route now answers 409 ``CONTROL_PLANE_MANUAL_ACTION_REQUIRED``

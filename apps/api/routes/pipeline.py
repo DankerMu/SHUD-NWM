@@ -49,7 +49,7 @@ from services.artifacts import (
 )
 from services.orchestrator.persistence import PipelineJob, PipelineStore
 from services.orchestrator.public_evidence import _public_evidence, _public_message
-from services.orchestrator.retry import RetryConfig, RetryError, RetryService
+from services.orchestrator.retry import RetryConfig, RetryService
 from services.slurm_gateway.config import SlurmGatewaySettings, get_settings
 from services.slurm_gateway.gateway import SlurmGateway, SlurmGatewayError
 
@@ -893,15 +893,6 @@ def _public_slurm_gateway_api_error(error: SlurmGatewayError) -> ApiError:
     )
 
 
-def _api_error(error: RetryError) -> ApiError:
-    return ApiError(
-        status_code=error.status_code,
-        code=error.code,
-        message=_safe_redacted_text(error.message),
-        details=_safe_redacted_payload(error.details),
-    )
-
-
 def _is_unproven_slurm_cancel_error(error: SlurmGatewayError) -> bool:
     code = error.code.lower()
     message = error.message.lower()
@@ -922,10 +913,9 @@ def _raw_slurm_gateway_error(error: SlurmGatewayError) -> dict[str, Any]:
     #2308: this is deliberately NOT the response shape. ``[local-path]`` is a
     wire rendering, not something an event owes its readers -- what the event
     owes them is the command vector and stderr an operator can act on. (The
-    sibling ``gateway_response.manifest`` subtree stays raw for the same reason
-    plus one more: that shape is what retry's runtime-root recovery reads back
-    off persisted ``submission`` events, ``retry.py``'s
-    ``_event_runtime_root_candidates``.)
+    sibling ``gateway_response.manifest`` subtree stays raw for the same reason;
+    the manual-retry runtime-root recovery that also read it back off persisted
+    ``submission`` events was removed in #3157.)
     """
 
     return {

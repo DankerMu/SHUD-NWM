@@ -473,14 +473,12 @@ def test_unproven_cancellation_renders_manifest_roots_on_the_wire_and_keeps_them
     ``manifest`` carries ``workspace_dir`` / ``object_store_root`` /
     ``manifest_index_path`` / ``array_log_dir`` for an array submission
     (``services/slurm_gateway/real_backend.py``'s ``submit_job_array``), so the
-    wire copy has host paths to render.  The persisted copy must stay raw:
-    retry's runtime-root recovery reads exactly that subtree
-    (``services/orchestrator/retry.py``'s ``_event_runtime_root_candidates``,
-    path ``("gateway_response", "manifest")``) through ``_mapping_at`` /
-    ``_has_runtime_root_field`` -- the two readers this test calls.  (That
-    scan's row filter is ``event_type == "submission"``, so it does not reach
-    this route's cancellation events; the readers are still the real recovery
-    code, and the rendered copy asserted below is what they could not use.)
+    wire copy has host paths to render.  The persisted copy must stay raw (path
+    ``("gateway_response", "manifest")``), checked here through ``_mapping_at`` /
+    ``_has_runtime_root_field``, the two retry.py runtime-root readers this test
+    calls.  (The manual-retry runtime-root recovery that read this subtree back off
+    ``submission`` events was removed in #3157; the rendered copy asserted below
+    is what it could not have used.)
     """
 
     index_path = f"{_GATEWAY_WORKSPACE_ROOT}/runs/run_array_roots/input/manifest_index_20260522T010203040506.json"

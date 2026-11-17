@@ -72,8 +72,8 @@ CLUSTERS = (
 )
 EXTRACTION_ORDER = CLUSTERS[1:]
 BINDINGS = ("def", "class", "assign", "import")
-# The nine patched names whose placement task 5.0 fixes, plus the two classes
-# that never move.
+# The patched names whose placement task 5.0 fixes (nine then; #3157 removed the
+# file lane's manual-retry id allocator), plus the two classes that never move.
 FACADE_PINNED = frozenset(
     {
         "_utcnow",
@@ -84,7 +84,6 @@ FACADE_PINNED = frozenset(
         "_iter_jsonl_files",
         "_released_candidate_cycle_scope",
         "_cycle_scope_from_job_id",
-        "_next_file_manual_retry_job_id_for_run",
         "FileOrchestrationJournalRepository",
         "FileJournalRetryService",
     }

@@ -41,21 +41,19 @@ from services.orchestrator.accepted_submit_identity import (
 )
 from services.orchestrator.chain_source_cycle import _datetime_sort_key
 from services.orchestrator.file_journal_candidates import _strip_redaction_placeholders
-from services.orchestrator.file_journal_paths import _require_model_id, _require_source_cycle, _safe_segment
+from services.orchestrator.file_journal_paths import _safe_segment
 from services.orchestrator.file_journal_primitives import (
     _normalize_file_source_id,
     _required_safe_identity,
     _safe_identity_text,
 )
-from services.orchestrator.file_journal_replay import _require_schema, _validate_json_complexity
+from services.orchestrator.file_journal_replay import _validate_json_complexity
 from services.orchestrator.public_evidence import _public_evidence, _public_message
 from services.orchestrator.retry import (
     _DB_FREE_RUNTIME_FIELDS,
     _RUNTIME_ROOT_FIELDS,
     _has_runtime_root_field,
     _mapping_at,
-    _runtime_root_contract_from_error,
-    _runtime_root_resolution_from_error,
     _safe_error_message,
 )
 from services.orchestrator.retry_identity import RETRY_JOB_ID_MARKER, effective_retry_attempt, split_retry_job_identity
@@ -268,40 +266,6 @@ def _private_runtime_root_recovery_path(
     )
 
 
-def _validate_private_runtime_root_recovery_record(
-    row: Mapping[str, Any],
-    *,
-    source_id: str,
-    cycle_time: datetime,
-    model_id: str | None,
-    event: Mapping[str, Any],
-) -> None:
-    _require_schema(row, FILE_ORCHESTRATION_PRIVATE_RECOVERY_SCHEMA_VERSION)
-    if row.get("record_type") != _PRIVATE_RUNTIME_ROOT_RECOVERY_RECORD_TYPE:
-        from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalError
-        raise FileOrchestrationJournalError("file_journal_record_type_mismatch", field="record_type")
-    _require_source_cycle(row, source_id=source_id, cycle_time=cycle_time)
-    if model_id not in (None, ""):
-        _require_model_id(row, str(model_id), required=False)
-    for identity_field in ("entity_type", "entity_id", "event_type", "event_id", "status_from", "status_to"):
-        if _private_event_identity_value(row.get(identity_field)) != _private_event_identity_value(
-            event.get(identity_field)
-        ):
-            from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalError
-            raise FileOrchestrationJournalError(
-                "file_journal_event_mismatch",
-                field=identity_field,
-                evidence={
-                    "expected": _private_event_identity_value(event.get(identity_field))[:80],
-                    "actual": _private_event_identity_value(row.get(identity_field))[:80],
-                },
-            )
-    event_created_at = _private_event_identity_value(event.get("created_at"))
-    if event_created_at and _private_event_identity_value(row.get("event_created_at")) != event_created_at:
-        from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalError
-        raise FileOrchestrationJournalError("file_journal_event_mismatch", field="event_created_at")
-
-
 #: Fixed non-secret token for EVERY caught projection-warning exception.  The
 #: fixture only requires the warning to name the failed projection; projection
 #: and model_id already do that.  A constant (never a hash or any other
@@ -335,10 +299,6 @@ def _projection_error_type(error: Exception) -> str:
     """
     del error
     return _PROJECTION_WARNING_FALLBACK_TOKEN
-
-
-def _private_event_identity_value(value: Any) -> str:
-    return "" if value in (None, "") else str(value)
 
 
 def _strip_internal_fields(value: Any) -> Any:
@@ -835,61 +795,6 @@ def _file_auto_retry_job_can_be_reused(job: Mapping[str, Any]) -> bool:
     if job.get("slurm_job_id") not in (None, "") or job.get("array_task_id") not in (None, ""):
         return False
     return str(job.get("status") or "") in {"pending", "submission_failed"}
-
-
-def _file_retry_gateway_payload(value: Any) -> dict[str, Any]:
-    if isinstance(value, Mapping):
-        payload = dict(value)
-    else:
-        model_dump = getattr(value, "model_dump", None)
-        if callable(model_dump):
-            payload = dict(model_dump(mode="json"))
-        elif hasattr(value, "__dict__"):
-            payload = dict(value.__dict__)
-        else:
-            raise TypeError(f"Expected mapping-like Slurm submission payload, got {type(value).__name__}")
-    status = payload.get("status")
-    status_value = getattr(status, "value", status)
-    if status_value is not None:
-        payload["status"] = status_value
-    return payload
-
-
-def _file_retry_gateway_time(value: Any) -> datetime | None:
-    if value in (None, ""):
-        return None
-    return _coerce_cycle_or_iso_datetime(value, field="gateway_time")
-
-
-def _manual_retry_submission_failure_details(
-    error: Exception,
-    *,
-    error_code: str,
-    error_message: str,
-) -> dict[str, Any]:
-    details: dict[str, Any] = {
-        "trigger": "manual",
-        "error_code": error_code,
-        "error_message": error_message,
-    }
-    # #2306: handed over UNRENDERED.  ``insert_pipeline_event`` routes through
-    # ``_append_validated_record_unlocked``, which strips caller-supplied
-    # ``[object-uri]``/``[uri]`` placeholders FIRST and only then renders the
-    # whole ``details`` tree through ``_public_pipeline_event_payload``.
-    # Pre-rendering here inverted that layering: the strip met the journal's own
-    # deliberate placeholders and nulled them, so a URI-shaped runtime root
-    # reached the 503 as ``present: true, value: null`` while the database lane
-    # sent ``[object-uri]``/``[uri]``.  ``_runtime_root_resolution_from_error`` /
-    # ``_runtime_root_contract_from_error`` already return ``_redacted_mapping``
-    # output (secrets and URL credentials gone, roots otherwise raw), which is
-    # exactly the input the strip is meant to see.
-    runtime_root_resolution = _runtime_root_resolution_from_error(error)
-    if runtime_root_resolution is not None:
-        details["runtime_root_resolution"] = runtime_root_resolution
-    runtime_root_contract = _runtime_root_contract_from_error(error)
-    if runtime_root_contract is not None:
-        details["runtime_root_contract"] = runtime_root_contract
-    return details
 
 
 def _file_retry_job_truth_sort_key(row: Mapping[str, Any]) -> tuple[Any, ...]:

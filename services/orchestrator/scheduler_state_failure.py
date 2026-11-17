@@ -315,8 +315,9 @@ def _state_error_code(state: Mapping[str, Any]) -> str | None:
 #: ``mark_permanently_failed`` in retry.py -- the retired (#3157) manual-retry
 #: submit lane wrote them too, and its historical events still carry them -- and
 #: ``FileJournalRetryService.schedule_auto_retry`` / ``mark_permanently_failed``
-#: / ``_mark_master_permanently_failed`` / ``record_manual_repair`` /
-#: ``_create_pending_manual_retry_job`` in file_orchestration_journal.py), and
+#: / ``_mark_master_permanently_failed`` / ``record_manual_repair`` in
+#: file_orchestration_journal.py, whose retired (#3157) pending-row creator wrote
+#: them too), and
 #: ``previous_error`` means, by definition, the error of the PREVIOUS attempt.
 _RECORDED_FAILURE_CODE_KEYS = ("error_code", "reason_code", "failure_reason")
 #: The ``hydro_run`` statuses whose journal write CLEARS the row's error code.
@@ -1548,8 +1549,8 @@ def _realpath_or_none(text: str) -> Path | None:
     # scheduler_state_failure.py:1401 runs immediately after this ENOENT admission, and
     # openspec/specs/job-retry-mechanism/spec.md:1585-1589 already makes it a SHALL that
     # a null-reason "absent" verdict arise only after the path was actually probed. The
-    # lane is described elsewhere as a recorded residual (retry.py's
-    # _db_free_selector_allowed_roots note, and the #1365 D4 note at :1390); that wording
+    # lane is described elsewhere as a recorded residual (the db-free selector note in
+    # retry.py, removed in #3157, and the #1365 D4 note at :1390); that wording
     # stands, but the admission itself is a clause 1 instance, not a fail-open.
     expanded = os.path.expanduser(text)
     try:

@@ -3408,57 +3408,6 @@ def test_file_journal_manual_repair_suffix_only_target_emits_next_durable_attemp
     assert decision.evidence["manual_retry"]["new_attempt"] == 88
 
 
-def test_file_journal_pending_manual_retry_suffix_only_target_emits_next_durable_attempt(tmp_path: Path) -> None:
-    """#1577 round-1 (cand-st-02): the pending manual-retry writer uses the corrected attempt.
-
-    A suffix-only ``_retry_87`` target (persisted count 0) produced a pending row, marker
-    event, idempotency key, and failure payload all claiming attempt 1.  The producer now
-    derives N+1 through ``effective_retry_attempt``, so every one of those bytes carries 88.
-    The non-suffixed count-3 control keeps the pre-existing 3 -> 4 contract.
-    """
-
-    repository, service = _suffix_only_failed_forecast_journal(
-        tmp_path / "journal-pending-suffix",
-        job_id="job_fcst_gfs_2026052106_model_a_forecast_retry_87",
-        retry_count=0,
-    )
-
-    result = service._create_pending_manual_retry_job("fcst_gfs_2026052106_model_a")
-
-    assert result.public_job.retry_count == 88
-    assert result.public_job.previous_job_id == "job_fcst_gfs_2026052106_model_a_forecast_retry_87"
-    assert result.private_snapshot["retry_count"] == 88
-    assert result.private_snapshot["idempotency_key"] == "manual_retry:fcst_gfs_2026052106_model_a:88"
-    event_payloads = _jsonl_payloads(repository, "pipeline_event")
-    marker_event = next(
-        payload
-        for payload in event_payloads
-        if payload.get("entity_id") == result.public_job.job_id
-        and payload.get("event_type") == "retry"
-    )
-    assert marker_event["details"]["retry_count"] == 88
-    assert marker_event["details"]["failure"]["attempt"] == 88
-    assert marker_event["details"]["previous_job_id"] == "job_fcst_gfs_2026052106_model_a_forecast_retry_87"
-
-    # Non-suffixed persistence-count contract stays 3 -> 4.
-    plain_repository, plain_service = _suffix_only_failed_forecast_journal(
-        tmp_path / "journal-pending-plain",
-        job_id="job_fcst_gfs_2026052106_model_a_forecast",
-        retry_count=3,
-    )
-    plain = plain_service._create_pending_manual_retry_job("fcst_gfs_2026052106_model_a")
-    assert plain.public_job.retry_count == 4
-    plain_event = next(
-        payload
-        for payload in _jsonl_payloads(plain_repository, "pipeline_event")
-        if payload.get("entity_id") == plain.public_job.job_id
-        and payload.get("event_type") == "retry"
-    )
-    assert plain_event["details"]["retry_count"] == 4
-    assert plain_event["details"]["failure"]["attempt"] == 4
-    assert plain.private_snapshot["idempotency_key"] == "manual_retry:fcst_gfs_2026052106_model_a:4"
-
-
 _MARKER_RECORD_CYCLE_TIME = _dt("2026-05-21T06:00:00Z")
 
 
@@ -13330,59 +13279,6 @@ def test_cancelled_master_keeps_cancellation_while_evidence_refreshes(
 # --- J10: the manual-retry round-trip residue ----------------------------
 
 
-def test_manual_retry_round_trip_keeps_the_real_log_uri(
-    tmp_path: Path,
-) -> None:
-    """#1592 J10 (design D8, restated round 2): the real URI SURVIVES.
-
-    ``_record_manual_retry_submission_success`` reads a PUBLIC row and writes it
-    straight back, so ``log_uri`` arrives as ``[object-uri]``.  D8 originally
-    claimed the durable residue as ``None`` -- "the only honest never
-    published".  Round 2 supersedes that: a placeholder is a WITHHELD value, and
-    the honest resolution of a withheld field is the value the row already
-    carries, not an erasure.  ``upsert_pipeline_job`` resolves it against the
-    persisted row, so the real ``s3://`` URI stays durable.
-
-    The geometry is UNIT-CONSTRUCTED, not flow reachable: the full file-lane
-    manual retry submit flow (retired by #3157) minted its pending row with an explicit
-    ``log_uri=None`` (``_create_pending_manual_retry_job``), so it cannot reach
-    this laundering step.  The round-trip helper is therefore called directly,
-    and the reachability claim is kept at "unit-constructed" rather than
-    promoted to "production reachable".
-    """
-
-    cycle_time = _dt("2026-06-28T00:00:00Z")
-    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
-    record = _pipeline_reservation_record(cycle_time, job_id="job_manual_retry_round_trip")
-    repository.reserve_pipeline_job(record)
-    repository.bind_pipeline_job_reservation(record["idempotency_key"], slurm_job_id="4242")
-    repository.update_pipeline_job_status(
-        record["job_id"],
-        "failed",
-        error_code="NODE_FAILURE",
-        error_message="node failed",
-        finished_at=cycle_time,
-        log_uri=_REAL_MASTER_LOG_URI,
-    )
-    assert _direct_row_payload(repository, record["job_id"])["log_uri"] == _REAL_MASTER_LOG_URI
-    assert repository.get_pipeline_job(record["job_id"])["log_uri"] == _LAUNDERED_URI
-    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
-
-    trusted_snapshot = repository._pipeline_job_for_id_unlocked(record["job_id"])
-    assert trusted_snapshot is not None
-    service._record_manual_retry_submission_success(
-        record["job_id"],
-        {"job_id": "7007", "status": "submitted"},
-        trusted_snapshot,
-    )
-
-    durable = _durable_pipeline_job_payloads(repository.root, record["job_id"])[-1]
-    assert durable["status"] == "submitted"
-    assert durable["log_uri"] == _REAL_MASTER_LOG_URI
-    assert _direct_row_payload(repository, record["job_id"])["log_uri"] == _REAL_MASTER_LOG_URI
-    assert _LAUNDERED_URI not in _raw_journal_text(repository)
-
-
 # --- J13-J20: every other write leg that admits caller evidence ----------
 #
 # Round-2 fix pass.  Putting the anti-laundering strip at the record
@@ -16208,63 +16104,6 @@ def test_attested_released_row_is_not_a_manual_retry_source(
     assert service._manual_retry_source_for_run(str(record["run_id"])) == (None, None)
 
 
-def test_manual_retry_clone_cannot_inherit_operator_attestation(
-    tmp_path: Path,
-) -> None:
-    """#1804: a manual-retry successor is a fresh, unattested attempt.
-
-    An attested released row is deliberately forced through the clone seam
-    (``_manual_retry_source_for_run`` is the ONLY controlled seam) to prove the
-    successor clears ``operator_recovery_attested_at`` even when a caller
-    explicitly supplies the attested predecessor.  The source row retains its
-    attestation unchanged, the successor keeps ``previous_job_id`` and the
-    bounded lineage, and the downstream ``_operator_recovery_attested``
-    predicate refuses the successor.
-    """
-
-    from services.orchestrator.chain_forecast_orchestrator_cycle import _operator_recovery_attested
-
-    repository, record = _attested_released_master(tmp_path, member_count=2)
-    job_id = str(record["job_id"])
-    run_id = str(record["run_id"])
-    attested_source = repository._pipeline_job_for_id_unlocked(job_id)
-    assert attested_source is not None
-    attested_at = attested_source[journal_module.OPERATOR_RECOVERY_ATTESTATION_FIELD]
-    assert attested_at not in (None, "")
-    assert attested_source["status"] == "reservation_lost"
-    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
-    # Control ONLY the source-selection seam: the producer re-reads the durable
-    # private row and writes the clone exactly as production would.
-    service._manual_retry_source_for_run = lambda _run_id: (dict(attested_source), None)
-
-    result = service._create_pending_manual_retry_job(run_id)
-
-    retry_job_id = str(result.public_job.job_id)
-    successor = result.private_snapshot
-    assert successor["job_id"] == retry_job_id
-    assert successor[journal_module.OPERATOR_RECOVERY_ATTESTATION_FIELD] in (None, "")
-    assert "accepted_submit_contract_version" not in successor
-    assert successor["previous_job_id"] == job_id
-    assert successor["init_state_identities"] == attested_source.get("init_state_identities") or []
-    assert successor["init_state_identities"] == []
-    assert _operator_recovery_attested(successor) is False
-    # The durable successor carries no attestation on either write surface.
-    persisted = repository.get_pipeline_job(retry_job_id)
-    assert persisted[journal_module.OPERATOR_RECOVERY_ATTESTATION_FIELD] in (None, "")
-    assert _direct_row_payload(repository, retry_job_id)[
-        journal_module.OPERATOR_RECOVERY_ATTESTATION_FIELD
-    ] in (None, "")
-    assert _durable_pipeline_job_payloads(repository.root, retry_job_id)[-1][
-        journal_module.OPERATOR_RECOVERY_ATTESTATION_FIELD
-    ] in (None, "")
-    assert _operator_recovery_attested(persisted) is False
-    # The source row is untouched: the attestation stays on the released row.
-    assert (
-        repository._pipeline_job_for_id_unlocked(job_id)[journal_module.OPERATOR_RECOVERY_ATTESTATION_FIELD]
-        == attested_at
-    )
-
-
 _RECOVER_COMMAND = "recover-released-identity-blocked-reservation"
 
 
@@ -17041,90 +16880,6 @@ def _lineage_assert_no_placeholders(rendered: str) -> None:
         assert placeholder not in rendered
 
 
-def _lineage_pending_manual_retry_row(tmp_path: Path) -> tuple[FileOrchestrationJournalRepository, str]:
-    """Marker-free failed row plus its pending manual retry row with real lineage."""
-
-    identities = [_cohort_init_state_identity(0)]
-    identities[0] = {**identities[0], "model_id": "model_a"}
-    repository = _lineage_marker_free_failed_row(
-        tmp_path,
-        job_id="job_lineage_pending",
-        init_state_identities=identities,
-    )
-    pending = repository._pipeline_job_for_id_unlocked("job_lineage_pending")
-    assert pending is not None
-    retry_job_id = "fcst_gfs_2026072000_model_a_retry_active"
-    pending_retry = {
-        **pending,
-        "job_id": retry_job_id,
-        "status": "pending",
-        "slurm_job_id": None,
-        "submitted_at": None,
-        "started_at": None,
-        "finished_at": None,
-        "exit_code": None,
-        "retry_count": 1,
-        "manual_retry_marker": True,
-        "previous_job_id": "job_lineage_pending",
-        "idempotency_key": "manual_retry:fcst_gfs_2026072000_model_a:1",
-        "candidate_id": None,
-        "error_code": None,
-        "error_message": None,
-        "log_uri": None,
-        "updated_at": "2026-07-20T00:10:00Z",
-    }
-    pending_retry.pop("accepted_submit_contract_version", None)
-    written = repository.upsert_pipeline_job(pending_retry)
-    assert written is not None
-    return repository, retry_job_id
-
-
-def test_file_manual_retry_submission_success_update_cannot_launder_durable_lineage(
-    tmp_path: Path,
-) -> None:
-    """#1604 D2 second write phase: the submission-success update is private.
-
-    The pending retry row carries real durable lineage; the update path used to
-    read the PUBLIC projection (placeholder lineage) and write it back.  Even
-    after deliberately re-corrupting the direct file's lineage with the
-    placeholder and running the success update, the durable lineage must stay
-    the real mapping -- ``upsert_pipeline_job`` treats a placeholder as a
-    withheld value against the durable row.
-    """
-
-    repository, retry_job_id = _lineage_pending_manual_retry_row(tmp_path)
-    real_lineage = [_cohort_init_state_identity(0)]
-    real_lineage[0] = {**real_lineage[0], "model_id": "model_a"}
-    durable = _durable_pipeline_job_payloads(repository.root, retry_job_id)[-1]
-    assert durable["init_state_identities"] == real_lineage
-    direct_path = repository.root / "pipeline-jobs" / f"{retry_job_id}.json"
-    direct_record = json.loads(direct_path.read_text(encoding="utf-8"))
-    direct_record["payload"]["init_state_identities"] = [
-        {**real_lineage[0], "init_state_uri": "[object-uri]"}
-    ]
-    direct_path.write_text(json.dumps(direct_record, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-
-    trusted_snapshot = repository._pipeline_job_for_id_unlocked(retry_job_id)
-    assert trusted_snapshot is not None
-    assert trusted_snapshot["init_state_identities"] == real_lineage
-    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
-    updated = service._record_manual_retry_submission_success(
-        retry_job_id,
-        {"job_id": "7161", "status": "submitted"},
-        trusted_snapshot,
-    )
-
-    assert updated["status"] == "submitted"
-    after = _durable_pipeline_job_payloads(repository.root, retry_job_id)[-1]
-    assert after["status"] == "submitted"
-    assert after["init_state_identities"] == real_lineage
-    assert _direct_row_payload(repository, retry_job_id)["init_state_identities"] == real_lineage
-    rendered = _lineage_jsonl_text(repository) + json.dumps(
-        _direct_row_payload(repository, retry_job_id), sort_keys=True
-    )
-    _lineage_assert_no_placeholders(rendered)
-
-
 def _lineage_cross_cycle_failed_row(tmp_path: Path) -> tuple[FileOrchestrationJournalRepository, Path]:
     """A July failed row whose job id NAMES June: public scan sees it, probe cannot.
 
@@ -17513,43 +17268,6 @@ def test_file_auto_retry_first_hop_and_retry_of_retry_bind_durable_predecessor(
     )
     assert first_event["details"]["previous_job_id"] == "job_auto_chain"
     assert second_event["details"]["previous_job_id"] == str(first_full.job_id)
-
-
-def test_file_manual_retry_producer_result_carries_trusted_private_snapshot(
-    tmp_path: Path,
-) -> None:
-    """The producer result carries the exact private row; no reread needed.
-
-    ``_create_pending_manual_retry_job`` returns a frozen result with BOTH the
-    caller-facing public retry namespace (existing semantics) and a copy of the
-    strict-validated private ``retry_row`` actually written under the cycle
-    lock.  The private snapshot's lineage is exact (no placeholder), the
-    accepted-submit marker is absent, and ``previous_job_id`` is already bound
-    -- so the file-lane submit method (retired by #3157; this producer goes with
-    its dead closure) had everything it needed without a new lock-outside
-    durable lookup.
-    """
-
-    original_lineage = _lineage_auto_retry_identities()
-    repository = _lineage_marker_free_failed_row(
-        tmp_path,
-        job_id="job_producer_snapshot",
-        init_state_identities=original_lineage,
-    )
-    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
-    result = service._create_pending_manual_retry_job("fcst_gfs_2026072000_model_a")
-
-    assert result.public_job.status == "pending"
-    assert result.public_job.manual_retry_marker is True
-    snapshot = result.private_snapshot
-    assert snapshot["init_state_identities"] == original_lineage
-    assert "accepted_submit_contract_version" not in snapshot
-    assert snapshot["previous_job_id"] == "job_producer_snapshot"
-    assert snapshot["status"] == "pending"
-    # The strict boundary already accepted the snapshot's lineage; a malformed
-    # durable predecessor would have failed the producer before this result.
-    strict = journal_module._strict_retry_init_state_identities(snapshot.get("init_state_identities"))
-    assert strict == original_lineage
 
 
 def test_file_auto_retry_full_row_and_narrow_snapshot_inherit_durable_lineage(
@@ -18345,11 +18063,11 @@ def test_reconcile_scan_aborts_at_a_legacy_divergent_anchor_and_never_yields_pas
 
 
 def _db_shaped_runtime_root_evidence() -> dict[str, Any]:
-    """A literal of what ``retry._runtime_root_resolution_evidence`` constructs.
+    """A literal of the database lane's runtime-root resolution evidence shape.
 
-    A literal rather than a call into the constructor: the pins below are about
-    the RENDERER, so the input must stay fixed even if the constructor grows a
-    field.  The ``source`` values carry ``:`` separators on purpose -- that is
+    A literal rather than a call into a constructor (the retry.py constructor was
+    removed in #3157): the pins below are about the RENDERER, so the input must
+    stay fixed.  The ``source`` values carry ``:`` separators on purpose -- that is
     the branch of ``_sanitize_public_text_token`` a second rendering pass would
     re-enter, which is what makes the idempotency pin non-trivial.
     """

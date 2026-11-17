@@ -29,7 +29,7 @@
 
 ## PR 2 — dead closure (closes #3157)
 
-- [ ] 2.1 Compute the dead closure left by PR 1: every function, method, class, constant and module-level name in
+- [x] 2.1 Compute the dead closure left by PR 1: every function, method, class, constant and module-level name in
   `apps/api/routes/pipeline.py`, `services/orchestrator/retry.py` and `services/orchestrator/file_orchestration_journal.py`
   (and any module they alone feed) that is reachable only from the deleted methods or from other members of the
   closure. Start from the PR 1 list (`pipeline._api_error`; `submission_runtime_root_resolution` on both lanes;
@@ -40,13 +40,13 @@
   `_file_retry_previous_job_*`, `_next_file_manual_retry_job_id_for_run` and its pending-row creator) and confirm each
   member with a repo-wide reference scan (attribute access, `getattr` strings, monkeypatch targets, `__all__`, facade
   re-exports, fixtures such as `tests/fixtures/file_journal_cluster_map.json`). A name with any live reference stays.
-- [ ] 2.2 Delete the closure, `expire_stale_retries` and its two tests, the dead allocator monkeypatch in
+- [x] 2.2 Delete the closure, `expire_stale_retries` and its two tests, the dead allocator monkeypatch in
   `tests/test_file_journal_read_blocked_consumers.py`, and any test that exercises only closure members. Imports that
   become unused go too.
-- [ ] 2.3 Rewrite the `services/orchestrator/public_evidence.py` module docstring so it no longer names the retry 503 as a
+- [x] 2.3 Rewrite the `services/orchestrator/public_evidence.py` module docstring so it no longer names the retry 503 as a
   consumer, and any other docstring/comment that names a deleted member as live. The recovery runbook line that says
   `expire_stale_retries` has no production caller is reworded to say the expiry path was removed (PR 2).
-- [ ] 2.4 Selector, `__all__`, facade-surface tests, cluster map and status-literal allowlist follow the deletions.
+- [x] 2.4 Selector, `__all__`, facade-surface tests, cluster map and status-literal allowlist follow the deletions.
 
 ## PR 2 Evidence Floor
 
