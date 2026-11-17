@@ -68,12 +68,12 @@ both; producer-to-fixture synchronisation is a separate obligation.
 - THEN the writer MAY summarize terminal `skipped_candidates` to their bounded identity/reason rows and replace retention entry lists with their existing count/frontier summary
 - AND non-terminal skipped candidates retain their complete evidence
 - AND the pass status remains its computed non-blocked status, no `limit` block is introduced, and `evidence_compaction` records the normal-detail projection
-- AND if that projection still exceeds the bound, the non-blocking summary tier applies, and only if that still exceeds the bound does the existing fail-closed bounded fallback apply unchanged.
+- AND if that projection still exceeds the bound, the non-blocking candidate-list summary applies, then the status-preserving lane projection, and only if that still exceeds the bound does the fail-closed bounded fallback apply, unchanged except that its `limit` block MAY carry `lane_bytes`.
 
 #### Scenario: terminal limit compaction remains the fail-closed floor
 
 - WHEN even the summarized-and-dropped payload exceeds the bound and the existing terminal limit-compaction tier rewrites the `limit` block to its reason-only form
-- THEN `limit.pre_limit_status`, `limit.candidate_lists`, `limit.source_cycles` and `limit.model_run_failures` are permitted to disappear with the rest of the compacted `limit` block, preserving the pre-existing fail-closed behavior unchanged.
+- THEN `limit.pre_limit_status`, `limit.candidate_lists`, `limit.source_cycles`, `limit.model_run_failures` and `limit.lane_bytes` are permitted to disappear with the rest of the compacted `limit` block, preserving the pre-existing fail-closed behavior unchanged.
 
 #### Scenario: Candidate-heavy evidence is summarized before fail-closed fallback
 
@@ -94,7 +94,7 @@ both; producer-to-fixture synchronisation is a separate obligation.
 - WHEN the lane projection still exceeds the bound
 - THEN the bounded fallback applies with `status: resource_limit_blocked`, `limit.reason: evidence_size_limit_exceeded` and `limit.pre_limit_status`
 - AND `limit.lane_bytes` lists at most ten top-level keys of the status-preserving projection, with their indent-2 serialized byte counts in descending order, so the overflowing lane is readable from the artifact
-- AND `limit.lane_bytes` is shed before every pre-existing bounded floor field and may disappear with the rest of `limit` at the terminal limit-compaction tier.
+- AND `limit.lane_bytes` is added only when the already-fitted fallback product still fits in the same serialization with it, so the product without `lane_bytes` is unchanged; it may disappear with the rest of `limit` at the terminal limit-compaction tier.
 
 #### Scenario: the cause of a failed pass survives the bounded fallback
 

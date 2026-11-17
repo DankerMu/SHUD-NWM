@@ -19,7 +19,8 @@ Consequences:
 - The stall probe answers `pass_limit_blocked` for about two hours after each such pass.
 - The probe's shape classifier does not count the 132 submits as progress.
 - `list-operator-actions` reads the pass as non-evaluating.
-- Readiness reads it as review-blocked.
+- The readiness validator, applied to the parsed payload, reads it as review-blocked. The readiness file reader also has
+  a separate 256 KiB cap, which this change does not touch (design.md, Residual risk).
 
 The fallback keeps no per-lane size, so the artifact cannot say which lane overflowed. The #1905 design
 (`openspec/changes/archive/2026-09-22-operator-action-decidability/design.md:12`) recorded this as a known residue.
@@ -100,16 +101,33 @@ production_contract), size-bound (hard bound and fail-closed floor).
 - [ ] E2 Triage: a local reconstruction of a 132-candidate submitted pass, built from writer-produced rows plus a
   production-sized `retention` block, ranks the top-level lanes by indent-2 bytes after the admission projection and the
   candidate-list summary. The ranking table and the reconstruction script are recorded in design.md / the PR.
+  Expected output at the production bound `MAX_EVIDENCE_BYTES = 5_000_000`:
+  - on `origin/master`, the reconstruction exceeds the bound at tier 4a (indent-2) and tier 4b (compact), and each
+    size is recorded;
+  - on the new code, tier 5 writes it with `status: submitted`, and its size is recorded.
+
+  If the reconstruction does not overflow at the production bound, report that as a finding rather than tuning the
+  input until it does.
 - [ ] E3 Tests, red on the old code where they assert new behaviour:
   - a ≥132-row `model_run_evidence` pass with a reduced `max_evidence_bytes` that overflows the candidate summary but
     fits the lane projection is `submitted` in the artifact, in `SchedulerPassResult.status` and on the CLI;
     `evidence_compaction.mode == "non_blocking_summary"`, `summarized_fields` names the projected lanes, there is no
     `limit`, and `submitted_count` equals the number of model-run rows;
   - an indent-overflow / compact-fit summary is written compact with the true status;
-  - the lane-projected artifact passes `readiness_scheduler_evidence` with no mismatch, missing or identity finding, and
-    `list-operator-actions` reads it as evaluating with output equivalent to the full pass;
+  - `readiness_scheduler_evidence._scheduler_evidence_errors(projected) == _scheduler_evidence_errors(full)`, following
+    `tests/test_scheduler_evidence_decidability.py:463-474`, for two passes:
+    - a `submitted` pass;
+    - a non-submitted pass whose rows carry `error_code`, partial and `execution_attempted`;
+  - `list-operator-actions` reads the lane-projected pass as evaluating, with output equivalent to the full pass;
+  - the stall probe's `classify_pass` returns `SHAPE_PROGRESS` with `submitted == 132` for the lane-projected artifact,
+    and the pass does not enter the `pass_limit_blocked` window (`scripts/node22_scheduler_stall_health.py:1561`);
   - a lane projection that still overflows falls back to `resource_limit_blocked` with `limit.pre_limit_status` and the
-    bounded lane attribution, and the existing #1168 / #1797 / #2402 / #2570 fallback tests stay green;
+    bounded lane attribution;
+  - the fallback product with `limit.lane_bytes` removed is byte-identical to the `origin/master` fallback product;
+  - adding `lane_bytes` never switches the serialization from indent-2 to compact;
+  - the `lane_bytes` measure (each value serialized on its own, indent-2, UTF-8 bytes) is pinned;
+  - the existing #1168 / #1797 / #2402 / #2570 fallback tests stay green, or the test is listed as a deviation where
+    tier 4b/5 now fits its payload;
   - within-limit, admission-only and indent-fit summary passes are byte-identical to `origin/master` output (golden
     comparison).
 - [ ] E4 The issue's verification set passes locally and in a node-27 temporary worktree:

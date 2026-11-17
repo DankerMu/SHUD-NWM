@@ -20,26 +20,65 @@ status- or readiness-bearing reader consumes, and it never drops rows those read
      projected lanes, in a stable order; the admission record stays nested under `admission`.
 6. Fail-closed fallback (`_call_bounded_evidence_payload` → `_fit_bounded_evidence_payload`). Unchanged, except that
    `limit` gains `lane_bytes` (What 3).
-   - `lane_bytes` is computed from the tier-5 payload when tier 5 ran, otherwise from the tier-4 payload.
-   - Format: a list of at most 10 `{"key", "bytes"}` rows, by indent-2 bytes descending, then key ascending.
-   - It is a bounded-field addition: `_fit_bounded_evidence_payload` may shed it before any existing floor field, and
-     the terminal limit-compaction tier removes it with the rest of `limit`.
+   - **Source.** The most-projected status-preserving payload the writer tried: the tier-5 payload when tier 5 ran;
+     otherwise the tier-4 payload; otherwise, when `_non_blocking_summary_payload` returned `None` because there are
+     no candidate lists, the payload handed to tier 4 (the admission projection when it ran, else the payload after
+     tier 2).
+   - **Measure.** Each top-level value is serialized on its own as
+     `json.dumps(value, indent=2, sort_keys=True).encode("utf-8")`, and its length is recorded. This is not the value's
+     nested contribution inside the document. A test pins this definition.
+   - **Format.** A list of at most 10 `{"key": str, "bytes": int}` rows, sorted by bytes descending, then key
+     ascending.
+   - **Placement.** The writer adds it after `_fit_bounded_evidence_payload` has produced the fitted fallback product,
+     and keeps it only if that product, with `lane_bytes` added, still fits in the same serialization (indent-2 or
+     compact) the product already used. Otherwise it is omitted.
+     - The `BoundedEvidencePayloadCallback` signature does not change, and neither does the output of the
+       `scheduler_compat_runtime._bounded_evidence_payload` shim. The circuit stays "first thing shed at every layer"
+       (`openspec/specs/production-scheduler-orchestration/spec.md:218-224`).
+     - So the fallback product with `limit.lane_bytes` removed is byte-identical to the `origin/master` product. The
+       exact `limit ==` assertions at `tests/test_production_scheduler.py:21139,23151` keep holding once they ignore
+       `lane_bytes`, or stay unchanged when it is omitted.
+     - The terminal limit-compaction tier removes it with the rest of `limit`.
 
-Tiers 1–4a are left untouched, so every artifact that fits today in those tiers is byte-identical. A golden test
-compares the new writer's output with the `origin/master` writer's output for a within-limit pass, an admission-only
-pass and an indent-fit summary pass. The old writer is pinned by bytes captured from `origin/master` into a fixture, not
-by importing old code.
+Tiers 1–4a are left untouched, so every artifact that fits today in those tiers is byte-identical.
+- **Golden test.** It compares the new writer's output with bytes captured from the `origin/master` writer (stored as a
+  fixture, not by importing old code) for three passes: a within-limit pass, an admission-only pass and an indent-fit
+  summary pass.
+  - Paths: it calls `_serialized_evidence_within_limit` directly with a fixed `artifact_path` (or uses a db-free config,
+    which renders `[local-path]`). Outside db-free mode, `artifact_path_evidence` embeds the tmp path
+    (`scheduler_evidence.py:496`).
+- **Existing tests.** Tier 4b or tier 5 may now fit a payload that an existing test expects to fall back (for example
+  the 2,600-byte incident payload in `tests/test_scheduler_evidence_decidability.py:358`). Each such test is listed as
+  a deviation, and its bound is lowered or its intent restated. None is silently re-labelled as still green.
+
+Tier 5 runs for every pass status, not just `submitted`.
+
+## Keys tier 5 keeps verbatim
+
+Tier 5 never projects these keys, because status-, alerting- or decidability-bearing readers consume them:
+- `status` and `counts`. Do not reuse the fallback's `_compact_counts`: the stall probe's `classify_pass`
+  (`scripts/node22_scheduler_stall_health.py:944-1023`) reads `submitted_count` / `blocked_candidate_count` /
+  `skipped_candidate_count`.
+- `progress_guard`. Without it, the probe classifies the pass `SHAPE_NEUTRAL`.
+- `started_at`, `finished_at` and `execution_boundary`.
+- `source_cycles`, and the scope keys `backfill`, `operator_filters`, `filters`, `sources`, `cycle_window` and
+  `runtime_config`. `operator_action_listing` uses them for decidability and scope completeness. The sibling spec
+  `openspec/specs/production-scheduler-orchestration/spec.md:1008` requires a `non_blocking_summary` pass to be "read
+  exactly as the same pass written in full".
+- `readiness`, `review_contract`, `schema_version` and `pass_id`.
 
 ## Lane projections (tier 5)
 
 The final set comes from the task 1.1 ranking. `model_run_evidence` is the expected leader.
 
-- **`model_run_evidence`**: the readers are `services/production_closure/readiness_scheduler_evidence.py` and
-  `services/orchestrator/operator_action_listing.py`. Keep every row, so `submitted_count` still equals the number of
+- **`model_run_evidence`**: the reader is `services/production_closure/readiness_scheduler_evidence.py`.
+  `operator_action_listing` does not read this lane. Keep every row, so `submitted_count` still equals the number of
   submitted rows (readiness :917-923, :1074-1076). Per row, keep:
   - identity: `candidate_id`, `source_id`, `cycle_time_utc` / `cycle_id`, `model_id`, `scenario_id`, `run_id`,
     `forcing_version_id`, and the `candidate_identity` block (readiness :671-678, :681-697);
-  - nested `hydro_run.run_id`, and `forcing` / `forcing_version.forcing_version_id` (readiness :739-747);
+  - nested `hydro_run.run_id`, `run.run_id`, the id fallbacks `hydro_run.id` / `run.id` / `forcing.id` /
+    `forcing_version.id`, and `forcing` / `forcing_version.forcing_version_id` (readiness :739-763);
+  - `execution_attempted` (readiness :980-992);
   - status evidence `status` / `outcome` / `result` / `state` / `candidate_outcome` / `submitted`, plus one projection
     from which the readiness status-collection code (:1091-1121) derives the same status-value set as from the full
     row. `stage_statuses` and `stage_evidence` carry the same payload, so the projection keeps one of them;
@@ -60,11 +99,20 @@ The final set comes from the task 1.1 ranking. `model_run_evidence` is the expec
 - `services/production_closure/readiness_scheduler_evidence.py`: model-run row validation and the submitted count.
 - `services/orchestrator/operator_action_listing.py:86-91, 605-606`: a pass with no `limit` is evaluating. Use the
   equivalence table in `tests/test_scheduler_evidence_decidability.py`.
-- `scripts/node22_scheduler_stall_health.py:1015-1020, 1561`: reads top-level `status`; unchanged reader.
+- `scripts/node22_scheduler_stall_health.py`: `classify_pass` (:944-1023) reads `status`, the `counts` fields and
+  `progress_guard`; the `pass_limit_blocked` window check is at :1561. The reader does not change.
 - `services/orchestrator/production_contract.py:379`: reads top-level `status`.
 - `services/orchestrator/retention_frontier.py`: bounded by `MAX_EVIDENCE_BYTES`; unchanged.
 - The CLI and `SchedulerPassResult.status`: they reflect the written status, so a lane-projected pass returns
   `submitted`.
+
+## Residual risk
+
+The readiness file reader caps scheduler evidence at `MAX_SCHEDULER_EVIDENCE_BYTES = 256 KiB` (readiness :41,
+:304-311). In production, a multi-megabyte lane-projected artifact is therefore still refused as
+`PRODUCTION_READINESS_SCHEDULER_EVIDENCE_TOO_LARGE` when readiness reads the file. The claim that readiness reads such a
+pass consistently holds for the validator applied to the parsed payload (`_scheduler_evidence_errors`), which is what E3
+tests. Raising that cap is out of scope.
 
 ## Triage method (task 1.1)
 
