@@ -69,6 +69,10 @@ _UNRECOGNIZED_CANDIDATE_SUMMARY_ERROR = "unrecognized_candidate_shape"
 #: "this is NOT a size fallback" on the absence of ``limit``, so the mode is an
 #: operator/diagnostic marker, not a status.
 _NON_BLOCKING_SUMMARY_MODE = "non_blocking_summary"
+#: #3170: how many top-level lanes ``limit.lane_bytes`` names on a size
+#: fallback.  The fallback otherwise keeps no per-lane size, so the artifact
+#: could not say which lane overflowed; ten rows are a few hundred bytes.
+_LANE_BYTES_LIMIT = 10
 #: #2402: the reader's own key spellings for a breaker-released source cycle
 #: (``operator_action_listing._pass_actions``).  ``cycle_time_utc`` rather than
 #: ``cycle_time``: that is the only spelling the released leg is read by.
@@ -235,36 +239,44 @@ def _serialized_evidence_within_limit(
     # already projected, and it records the admission record nested rather than
     # overwriting it.  If it still does not fit, the fail-closed fallback below
     # remains authoritative.
+    summary_source = admission_compacted if admission_compacted is not None else payload
     summarized_payload = _non_blocking_summary_payload(
-        admission_compacted if admission_compacted is not None else payload,
+        summary_source,
         max_evidence_bytes=context.max_evidence_bytes,
     )
     if summarized_payload is not None:
-        serialized = _serialize_evidence_json_if_within_limit(
-            summarized_payload,
-            max_evidence_bytes=context.max_evidence_bytes,
-        )
-        if serialized is not None:
-            return summarized_payload, serialized
+        # #3170: indent-2 first, so a summary that fits today is byte-identical;
+        # then compact, exactly like every fallback tier.  Indent-2 costs about a
+        # third more bytes on a 132-candidate pass (triage: 4.41 MB vs 2.93 MB),
+        # and rewriting the status over whitespace is the costliest possible trade.
+        for compact in (False, True):
+            serialized = _serialize_evidence_json_if_within_limit(
+                summarized_payload,
+                max_evidence_bytes=context.max_evidence_bytes,
+                compact=compact,
+            )
+            if serialized is not None:
+                return summarized_payload, serialized
 
     bounded_payload = _call_bounded_evidence_payload(context, payload, reason="evidence_size_limit_exceeded")
     bounded_payload = _fit_bounded_evidence_payload(
         bounded_payload,
         max_evidence_bytes=context.max_evidence_bytes,
     )
-    serialized = _serialize_evidence_json_if_within_limit(
-        bounded_payload,
-        max_evidence_bytes=context.max_evidence_bytes,
-    )
-    if serialized is not None:
-        return bounded_payload, serialized
-    serialized = _serialize_evidence_json_if_within_limit(
-        bounded_payload,
-        max_evidence_bytes=context.max_evidence_bytes,
-        compact=True,
-    )
-    if serialized is not None:
-        return bounded_payload, serialized
+    for compact in (False, True):
+        serialized = _serialize_evidence_json_if_within_limit(
+            bounded_payload,
+            max_evidence_bytes=context.max_evidence_bytes,
+            compact=compact,
+        )
+        if serialized is not None:
+            return _with_lane_bytes(
+                bounded_payload,
+                serialized,
+                lane_source=summarized_payload if summarized_payload is not None else summary_source,
+                max_evidence_bytes=context.max_evidence_bytes,
+                compact=compact,
+            )
 
     raise _scheduler_evidence.SchedulerEvidenceWriteError(
         "evidence_size_limit_exceeded",
@@ -273,6 +285,60 @@ def _serialized_evidence_within_limit(
             "max_evidence_bytes": context.max_evidence_bytes,
         },
     )
+
+
+def _lane_bytes(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The largest top-level lanes of ``payload``, each value measured on its own (#3170).
+
+    Each value is serialized alone as indent-2 sorted JSON and its UTF-8 length
+    recorded -- not its nested contribution inside the document -- so the number
+    is reproducible from the value without re-serializing the whole pass.
+    """
+
+    rows = [
+        {"key": str(key), "bytes": len(_serialize_evidence_json(value).encode("utf-8"))}
+        for key, value in payload.items()
+    ]
+    rows.sort(key=lambda row: (-row["bytes"], row["key"]))
+    return rows[:_LANE_BYTES_LIMIT]
+
+
+def _with_lane_bytes(
+    bounded_payload: dict[str, Any],
+    serialized: str,
+    *,
+    lane_source: Mapping[str, Any],
+    max_evidence_bytes: int,
+    compact: bool,
+) -> tuple[dict[str, Any], str]:
+    """Attach ``limit.lane_bytes`` to an ALREADY FITTED fallback product, or leave it as is.
+
+    Added only while ``limit`` still carries ``pre_limit_status`` -- the terminal
+    limit-compaction floor's reason-only ``limit`` never carries a diagnostic --
+    and only if the product still fits in the serialization it already used, so
+    an indent-2 product never turns compact for it and the product without it is
+    exactly what the writer produced before #3170.
+    """
+
+    limit = bounded_payload.get("limit")
+    if not isinstance(limit, Mapping) or "pre_limit_status" not in limit:
+        return bounded_payload, serialized
+    # Re-bounding (the writer replaces the caller's mapping in place, so a
+    # second write can start from a fallback product): the attribution the
+    # source already carries names the ORIGINAL overflow, so it is carried
+    # through rather than re-measured on the product's own small lanes.
+    source_limit = lane_source.get("limit")
+    prior_rows = source_limit.get("lane_bytes") if isinstance(source_limit, Mapping) else None
+    rows = list(prior_rows) if isinstance(prior_rows, list) else _lane_bytes(lane_source)
+    attributed = {**bounded_payload, "limit": {**limit, "lane_bytes": rows}}
+    attributed_serialized = _serialize_evidence_json_if_within_limit(
+        attributed,
+        max_evidence_bytes=max_evidence_bytes,
+        compact=compact,
+    )
+    if attributed_serialized is None:
+        return bounded_payload, serialized
+    return attributed, attributed_serialized
 
 
 def _fit_bounded_evidence_payload(

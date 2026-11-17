@@ -289,6 +289,11 @@ state-index 自动剪枝（`nhms-scheduler-state-index-prune.service`，每日 0
 `signals.resource_limit_passes_in_window` 是总数），在证据根下逐个打开，
 读 `limit` 块，转
 [`../scheduler-dbfree-typed-reasons.md`](../scheduler-dbfree-typed-reasons.md)。
+写入方在回退前先把候选列表摘要（`evidence_compaction.mode: non_blocking_summary`，
+保留真实 status）依次按 indent-2、compact 各试一次（#3170），两种都放不下才回退。
+回退产物的 `limit.lane_bytes`（#3170）列出摘要载荷里最大的至多 10 个顶层键及其
+单独 indent-2 序列化字节数，按字节降序，据此判断是哪条 lane 撑爆了 5 MB。
+`limit` 被末级压缩到只剩 `reason` 时没有该键。
 
 ##### stall-lock-contended-persistent
 
