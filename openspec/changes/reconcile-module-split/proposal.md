@@ -108,8 +108,9 @@ was deleted in #3147, and the live parser is `_index_comment_sacct_matches` (`:1
 
   The production-module rule (exactly one `services/orchestrator/reconcile*.py` exclusion) is unaffected. Three of the
   suites are gateway-reconcile partitions. `gateway-reconcile-test-partitioning` says "without adding a guard
-  exemption", so that requirement gets a MODIFIED delta. It names the three temporary exemptions until #3177 and the pre-existing
-  `test_gateway_reconcile_comment_accounting.py` exemption from #2674.
+  exemption", so that requirement gets a MODIFIED delta. It names the three temporary exemptions until #3177, the pre-existing
+  `test_gateway_reconcile_comment_accounting.py` exemption from #2674, and the already-oversized but untouched
+  `test_gateway_reconcile_inventory.py` (1083 lines), which #3177 also covers.
 
 ## Must preserve
 - Every name reachable as `services.orchestrator.reconcile.X` on `origin/master` stays reachable, except the two
