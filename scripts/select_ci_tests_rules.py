@@ -1159,6 +1159,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # #2744: the canonical/mirror comparison bounds its reads by the
             # shared registry bound; the capacity suite fails if it stops.
             "tests/test_scheduler_registry_capacity.py",
+            # #3157 PR 2: this module builds the DB-free automatic forecast
+            # retry's Slurm manifest; the pin asserts its DB-free selectors on
+            # the live retry path. DB-free, ~2s.
+            "tests/test_db_free_auto_retry_manifest.py",
         ),
         stop_on_match=True,
     ),
@@ -2259,6 +2263,12 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # #3157: the retry route's fail-closed pins, including the absence
             # of `RetryService.attempt_manual_retry`. DB-free, ~2s.
             "tests/test_retry_route_fail_closed.py",
+            # #3157 PR 2: the DB-free automatic forecast retry pin. It drives the
+            # real ForecastOrchestrator retry minting
+            # (chain_forecast_orchestrator_cycle.py), the stage loop and
+            # FileJournalRetryService, and top-level-imports retry.py and
+            # retry_identity.py. DB-free, ~2s.
+            "tests/test_db_free_auto_retry_manifest.py",
             "tests/test_run_identity.py",
             "tests/test_run_tree_copyback.py",
             # #2237: run_tree_copyback.py's backup lifecycle oracle. Sub-second.

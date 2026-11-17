@@ -27,7 +27,6 @@ from __future__ import annotations
 import ast
 import inspect
 import json
-import logging
 import subprocess
 import sys
 from pathlib import Path
@@ -41,8 +40,6 @@ _RUN_ID = "fcst_gfs_2026072000_model_a"
 _CYCLE_ID = "gfs_2026072000"
 _CYCLE_ISO = "2026-07-20T00:00:00+00:00"
 _JOB_ID = "job_fcst_gfs_2026072000_model_a_forecast"
-_JOURNAL_LOGGER = "services.orchestrator.file_orchestration_journal"
-
 # The motivating refusal: the whole-tree replay budget (#1953).  Reason and
 # field are journal tokens, and every classified refusal below must carry these
 # exact two rather than a derived identity fault of the consumer's own making.
@@ -141,15 +138,6 @@ def _refuse_job_id_reads(monkeypatch: pytest.MonkeyPatch, repository: Any) -> No
         raise _blocked_fault()
 
     monkeypatch.setattr(repository, "_pipeline_job_for_id_unlocked", _refuse)
-
-
-class _SuccessGateway:
-    def __init__(self) -> None:
-        self.requests: list[Any] = []
-
-    def submit_job(self, request: Any) -> Any:
-        self.requests.append(request)
-        return {"job_id": "551234", "status": "submitted"}
 
 
 # --- 1. the discriminator (design D1) -------------------------------------
@@ -304,17 +292,12 @@ def test_blocked_by_run_read_refuses_with_retry_evidence_invalid(
     _root, repository, service = _seeded_journal(tmp_path)
     _refuse_scoped_job_records(monkeypatch, repository)
 
-    with pytest.raises(journal.RetryEvidenceInvalidError) as pending_error:
-        service._create_pending_manual_retry_job(_RUN_ID)
-    assert pending_error.value.details["run_id"] == _RUN_ID
-    assert pending_error.value.details["journal_reason"] == _BLOCK_REASON
-    assert pending_error.value.details["journal_field"] == _BLOCK_FIELD
-
     # #3157: the selector's surviving public entry is the node-22 marker lane.
     with pytest.raises(journal.RetryEvidenceInvalidError) as repair_error:
         service.record_manual_repair(_RUN_ID, trusted_internal=True)
     assert repair_error.value.code == "RETRY_EVIDENCE_INVALID"
     assert repair_error.value.status_code == 409
+    assert repair_error.value.details["run_id"] == _RUN_ID
     assert repair_error.value.details["journal_reason"] == _BLOCK_REASON
     assert repair_error.value.details["journal_field"] == _BLOCK_FIELD
 
@@ -322,17 +305,17 @@ def test_blocked_by_run_read_refuses_with_retry_evidence_invalid(
 def test_blocked_by_run_read_writes_nothing_and_never_allocates_a_retry_id(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Tasks 2.3 and 2.6's zero-write half, plus 3.6's allocator-unreachable pin."""
+    """Tasks 2.3 and 2.6's zero-write half.
+
+    3.6's allocator-unreachable pin went with the file lane's manual-retry id
+    allocator, which #3157 removed.
+    """
 
     journal = _journal()
     root, repository, service = _seeded_journal(tmp_path)
     before = _tree_bytes(root)
     assert before, "the fixture must have seeded durable bytes for the diff to mean anything"
 
-    def _unreachable_allocator(*_args: Any, **_kwargs: Any) -> str:
-        raise AssertionError("the selector refuses first: the retry-id allocator is unreachable")
-
-    monkeypatch.setattr(journal, "_next_file_manual_retry_job_id_for_run", _unreachable_allocator)
     _refuse_scoped_job_records(monkeypatch, repository)
 
     with pytest.raises(journal.RetryEvidenceInvalidError):
@@ -471,7 +454,7 @@ def test_node22_operator_cli_reports_the_blocked_read_as_a_refused_receipt(
     ] == []
 
 
-# --- 3. #2387 -- the chain retry classifier and the provenance readers ------
+# --- 3. #2387 -- the chain retry classifier ---------------------------------
 
 
 def _cycle_harness(tmp_path: Path, repository: Any, retry_service: Any) -> Any:
@@ -665,31 +648,6 @@ def test_the_guard_not_the_identity_sanitizer_carries_the_no_write_guarantee(
     assert durable["status"] == "failed"
     assert durable["status"] != "permanently_failed"
     assert repository.get_pipeline_job(f"{_JOB_ID}_retry_1") is None
-
-
-def test_provenance_readers_degrade_with_a_warning_and_the_sibling_is_unchanged(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """Task 3.4: empty batch / ``None`` plus the journal reason and field in the log."""
-
-    _root, repository, service = _seeded_journal(tmp_path)
-    _refuse_job_id_reads(monkeypatch, repository)
-
-    with caplog.at_level(logging.WARNING, logger=_JOURNAL_LOGGER):
-        assert service._file_retry_previous_job_id(_JOB_ID) is None
-        batch = service._file_retry_event_runtime_root_candidates(_JOB_ID, candidate_budget=4)
-        # The correct precedent for the degrade shape, untouched by this change:
-        # it already recognises the marker and returns ``None`` without a warning
-        # of its own on that branch.
-        assert service.submission_runtime_root_resolution(_JOB_ID) is None
-
-    assert batch.candidates == []
-    assert batch.event_candidate_returned_count == 0
-    messages = [record.getMessage() for record in caplog.records if record.name == _JOURNAL_LOGGER]
-    assert len(messages) == 2
-    for message in messages:
-        assert _BLOCK_REASON in message
-        assert _BLOCK_FIELD in message
 
 
 # --- 3.6 sibling surfaces that must keep their current verdicts -------------

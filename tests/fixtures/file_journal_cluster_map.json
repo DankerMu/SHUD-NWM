@@ -129,8 +129,6 @@
       "TERMINAL_PIPELINE_STATUSES",
       "_ACCEPTED_RUNTIME_TRANSITIONS",
       "_ACCEPTED_SUBMIT_MASTER_JOB_ID_RE",
-      "_ARRAY_MANUAL_RETRY_JOB_TYPES",
-      "_ARRAY_MANUAL_RETRY_MANIFEST_INDEX_NAMES",
       "_ATOMIC_TEMP_NONCE_RE",
       "_CANDIDATE_JOB_ID_RE",
       "_CycleRows",
@@ -145,7 +143,6 @@
       "_OPERATOR_BIND_SLURM_ID_RE",
       "_OperatorBindAudit",
       "_PIPELINE_JOB_UPSERT_MUTABLE_FIELDS",
-      "_PendingManualRetryResult",
       "_RECONCILE_INVENTORY_DIRECTORY",
       "_RECONCILE_INVENTORY_MIGRATION_MARKER",
       "_RECONCILE_INVENTORY_MIGRATION_SCHEMA_VERSION",
@@ -158,7 +155,6 @@
       "_RECONCILE_INVENTORY_TEMP_RE",
       "_RECONCILE_MIGRATION_TEMP_RE",
       "_RUNTIME_ROOT_EVENT_CANDIDATE_PATHS",
-      "_RUNTIME_ROOT_SAME_RUN_JOB_SCAN_LIMIT",
       "_RecordBudget",
       "_RetentionDiscoveryBudget",
       "_SLURM_MASTER_PART_RE",
@@ -170,20 +166,17 @@
       "_cycle_scope_from_job_id",
       "_emit_reclaim_projection_warning",
       "_file_lock_guard_mode",
-      "_file_manual_retry_array_tasks",
       "_filter_cycle_rows_for_model",
       "_is_legacy_unversioned_reserved_forecast_master",
       "_iter_jsonl_files",
       "_iter_regular_json_files",
-      "_next_file_manual_retry_job_id_for_run",
       "_probe_containment_failure",
       "_refuse_legacy_unversioned_reserved_forecast_master",
       "_refuse_legacy_unversioned_reserved_forecast_master_record",
       "_released_candidate_cycle_scope",
       "_released_reservation_recovery_command",
       "_signature_has_containment_fault",
-      "_stat_signature",
-      "_submit_file_manual_retry_job"
+      "_stat_signature"
     ],
     "paths": [
       "_CYCLE_RUN_ID_RE",
@@ -312,8 +305,6 @@
       "_file_auto_retry_job_can_be_reused",
       "_file_journal_real_slurm_job_id",
       "_file_reconcile_namespace",
-      "_file_retry_gateway_payload",
-      "_file_retry_gateway_time",
       "_file_retry_job_int",
       "_file_retry_job_record",
       "_file_retry_job_text",
@@ -326,14 +317,12 @@
       "_journal_record_for_write",
       "_json_bytes",
       "_json_default",
-      "_manual_retry_submission_failure_details",
       "_mapping_value",
       "_next_current_master_retry_identity",
       "_operator_evidence_text",
       "_operator_owner_evidence_text",
       "_optional_format_datetime",
       "_optional_mapping_value",
-      "_private_event_identity_value",
       "_private_runtime_root_recovery_path",
       "_private_runtime_root_recovery_record",
       "_projection_error_reason",
@@ -348,8 +337,7 @@
       "_strict_retry_init_state_identities",
       "_strict_utc_datetime",
       "_strip_internal_fields",
-      "_validate_accepted_submit_evidence",
-      "_validate_private_runtime_root_recovery_record"
+      "_validate_accepted_submit_evidence"
     ]
   },
   "module": "services/orchestrator/file_orchestration_journal.py",
@@ -419,15 +407,6 @@
       "callers": {
         "facade": [
           "FileOrchestrationJournalRepository"
-        ]
-      },
-      "cluster": "facade"
-    },
-    "_next_file_manual_retry_job_id_for_run": {
-      "binding": "def",
-      "callers": {
-        "facade": [
-          "FileJournalRetryService"
         ]
       },
       "cluster": "facade"
@@ -509,8 +488,7 @@
           "_run_manifest_model_package_identity"
         ],
         "facade": [
-          "FileOrchestrationJournalRepository",
-          "_file_manual_retry_array_tasks"
+          "FileOrchestrationJournalRepository"
         ]
       },
       "cluster": "facade"

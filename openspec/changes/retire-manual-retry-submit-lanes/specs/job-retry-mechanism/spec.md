@@ -76,7 +76,7 @@
 
 **Reason**: Scenario "manual forecast retry runs without database url" is pinned by `tests/test_retry.py::test_manual_forecast_retry_preserves_db_free_runtime_contract`, which drives `RetryService.attempt_manual_retry` (retired); a requirement cannot drop a scenario in place, so the requirement is re-added under a new name without it. All other scenarios are carried over verbatim.
 
-**Migration**: See ADDED "DB-free scheduler retry manifests preserve runtime mode". No test pins the marker -> scheduler mint path for this scenario, so the spec does not claim it; the surviving scenarios cover the scheduler retry manifests.
+**Migration**: See ADDED "DB-free scheduler retry manifests preserve runtime mode". No test pins the marker -> scheduler mint path for this scenario, so the spec does not claim it; the surviving scenarios cover the scheduler retry manifests. PR 2 re-pins "automatic forecast retry runs without database url" on the live path (`tests/test_db_free_auto_retry_manifest.py`); its evidence clause is restated to what that path records: the live path does not populate `previous_job_id` on the retry row and records no DB-free-mode field in the journal (both are carried by the retry identity and the submitted manifest), keeps `retry_count` at 0 with the attempt in `submission_attempt`, and keeps member model ids in `cohort_members`.
 
 
 ## MODIFIED Requirements
@@ -316,8 +316,11 @@ same runtime repository and backend selectors as initial scheduler submissions.
   `scheduler_db_free_required=true` and the canonical file backend selectors
   needed by the SHUD runtime
 - **AND** the retry MUST be runnable without `DATABASE_URL`
-- **AND** retry evidence MUST record the prior job id, new Slurm job id, stage,
-  model id, source/cycle identity, retry attempt, and DB-free runtime mode.
+- **AND** the retry's journal identity (`<prior>_retry_<N>` job id, idempotency key and
+  Slurm comment) MUST identify the prior job and the retry attempt, the retry row MUST
+  carry the stage, source/cycle identity, member model ids and an incremented
+  `submission_attempt`, and its `submission` event MUST record the new Slurm job id;
+  the DB-free runtime mode is evidenced by the submitted manifest.
 
 #### Scenario: missing upstream forcing blocks downstream retry
 

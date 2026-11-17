@@ -69,8 +69,8 @@ and ``apps/``.  That key was chosen over a code-shape matcher on purpose (ADR
 0009 "普查"): a shape matcher encodes the shape its author guessed, and the one
 written for this family missed the site whose re-check sits in a second ``try``
 after the handler, then -- once loosened -- misread a strict call on the other
-arm of the same function as a re-check, and missed
-``retry.py::_local_runtime_root_safety`` entirely.  Keyed by call site the set
+arm of the same function as a re-check, and missed retry.py's local
+runtime-root safety site (removed in #3157) entirely.  Keyed by call site the set
 is shape-independent: rewriting a site, adding or removing an errno split, or
 moving the fallback into a helper does not move the set; only ADDING or
 DELETING a site does.

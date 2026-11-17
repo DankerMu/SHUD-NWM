@@ -85,7 +85,8 @@ so it has no such window.
    `pending` row with no `slurm_job_id`, the supported marker path, and the side effects of `POST /runs/{id}/cancel` on
    such a row (it also cancels the hydro_run and forecast_cycle, and can orphan a real Slurm job in the
    submit-succeeded / unrecorded sub-window).
-7. **Spec.** Deltas in 10 capabilities. `retry-runtime-roots` is retired whole: every requirement concerns the submit
+7. **Spec.** Deltas in 10 capabilities (PR 1), plus `orchestrator-structural-burndown` in PR 2, whose cluster-map
+   `patched` count drops from nineteen to eighteen with the deleted allocator. `retry-runtime-roots` is retired whole: every requirement concerns the submit
    lane, so `.openspec.yaml` sets `retire_capabilities: true`. Each requirement is classified by reachability from the
    two retired methods and the route's success path, not by the word "manual", because the marker lane survives.
 

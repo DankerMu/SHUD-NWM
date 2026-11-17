@@ -1305,6 +1305,10 @@ FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     # `FileJournalRetryService.attempt_manual_retry` stays retired; the journal
     # is stop-rule owned, so the route rides this at-site tuple. DB-free, ~2s.
     "tests/test_retry_route_fail_closed.py",
+    # #3157 PR 2: the DB-free automatic forecast retry pin drives
+    # `FileJournalRetryService` and reopens the journal to read the retry
+    # evidence; the journal is stop-rule owned. DB-free, ~2s.
+    "tests/test_db_free_auto_retry_manifest.py",
     "tests/test_forcing_submit_ambiguity.py",
     # #1581: the journal's completed-pipeline probes decide on its own
     # `COMPLETED_HYDRO_STATUSES` from-import binding, which the parity lock

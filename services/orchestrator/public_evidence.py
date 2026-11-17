@@ -1,15 +1,13 @@
 """Public rendering for operator-visible evidence payloads.
 
-One renderer, two consumers.  The manual-retry route
-(``POST /runs/{run_id}/retry``) answers a ``submission_failed`` attempt with a
-structured 503 whose ``details.runtime_root_resolution`` is produced by
-whichever lane served the retry: ``RetryService`` (database, reads the persisted
-event and renders on the way out) or ``FileJournalRetryService`` (file journal,
-renders once at write time and returns the persisted mapping unchanged).  Both
-must put the SAME public shape on the wire -- absolute local roots as
-``[local-path]``, URIs as ``[uri]``/``[object-uri]``, secrets as ``[redacted]``
--- so they share this code instead of each owning a copy (openspec change
-``retry-runtime-root-evidence-public-shape``, #1961 + #1965).
+One renderer for the operator-visible evidence of the pipeline routes
+(``apps/api/routes/pipeline.py``: gateway errors, cancellation gaps), the file
+journal's public event details and rows (``file_orchestration_journal.py`` and
+its ``file_journal_*`` siblings) and the file-orchestration migration receipt.
+All of them must put the SAME public shape on the wire -- absolute local roots
+as ``[local-path]``, URIs as ``[uri]``/``[object-uri]``, secrets as
+``[redacted]`` -- so they share this code instead of each owning a copy (openspec
+change ``retry-runtime-root-evidence-public-shape``, #1961 + #1965).
 
 Why a leaf module rather than a home in either lane: this code used to live in
 ``file_orchestration_journal.py``, which ``retry.py`` cannot import (the journal
@@ -35,8 +33,7 @@ from urllib.parse import urlparse
 from packages.common.redaction import is_sensitive_key, redact_payload
 from services.orchestrator.scheduler_state_common import _format_utc
 
-# Same pattern as ``services.orchestrator.retry._URI_STYLE_RE`` (which accepts
-# such a value as a runtime root without local-path safety checks).
+# A value that opens with a URI scheme (``<scheme>://``).
 _SCHEME_ANCHORED_URI_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 
 

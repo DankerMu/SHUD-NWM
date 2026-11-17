@@ -671,34 +671,6 @@ def test_floors_round_trip_and_are_first_write_frozen(tmp_path: Path) -> None:
     assert repository.get_accepted_submit_pipeline_job(str(record["job_id"]))[RETRY_ATTEMPT_FLOORS_FIELD] == floors
 
 
-def test_manual_retry_clone_does_not_carry_floors(tmp_path: Path) -> None:
-    """The manual-retry pending clone is a fresh row: stale floors never cross the clone boundary."""
-
-    from services.orchestrator.file_orchestration_journal import (
-        FileJournalRetryService,
-        FileOrchestrationJournalRepository,
-    )
-    from services.orchestrator.retry import RetryConfig
-
-    floors = [{"model_id": "model_0", "attempt": 0}, {"model_id": "model_1", "attempt": 1}]
-    record = _master_record(job_suffix="_retry_2", floors=floors)
-    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
-    _projected_charges(tmp_path, record, outcome="failed")
-    assert repository.get_pipeline_job(str(record["job_id"]))["status"] == "failed"
-    assert repository.get_accepted_submit_pipeline_job(str(record["job_id"]))[RETRY_ATTEMPT_FLOORS_FIELD] == floors
-
-    service = FileJournalRetryService(repository, RetryConfig(max_retries=5, backoff_schedule=[0]))
-    # The clone boundary itself (the public entry adds only the gateway submit on top).
-    pending = service._create_pending_manual_retry_job(str(record["run_id"]))
-
-    clone = pending.private_snapshot
-    assert clone["previous_job_id"] == record["job_id"]
-    assert clone["manual_retry_marker"] is True
-    assert clone[RETRY_ATTEMPT_FLOORS_FIELD] == []
-    durable = FileOrchestrationJournalRepository(repository.root).get_pipeline_job(str(clone["job_id"]))
-    assert durable[RETRY_ATTEMPT_FLOORS_FIELD] == []
-
-
 # ---------------------------------------------------------------------------
 # The charge rule and the normaliser (pure)
 # ---------------------------------------------------------------------------

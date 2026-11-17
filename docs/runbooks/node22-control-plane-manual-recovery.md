@@ -479,7 +479,8 @@ marker 车道：它在 cycle 写锁内写 `manual_repair_requested` marker，不
      - 同一 run 其他带 `slurm_job_id` 的 active 行会被真实 `scancel`；
      - 在上面那个"sbatch 成功、未记账"子窗口里，cancel 只改本地状态，**不会**取消 Slurm 上的真实作业。如果
        第 1 步没有排除这个子窗口，cancel 会把该作业留成孤儿。
-     这是带副作用的 workaround，不是自动过期；`expire_stale_retries` 没有生产调用方，不要手工调用它。
+     这是带副作用的 workaround，不是自动过期；原先那条从未接入生产的 stale-pending 过期路径已随 #3157 PR 2
+     删除，仓内没有可替代它的过期入口。
    - **文件车道**：本文没有验证过任何 operator CLI 能清理这种行（`demote-reserved-job` / `bind-reserved-job`
      针对的是 accepted-submit reservation，不是手动重试的 `pending` 行）。手改 journal、抹掉 durable 证据是禁止的；
      保留证据并上报。

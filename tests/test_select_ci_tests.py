@@ -1511,11 +1511,16 @@ def test_select_tests_maps_orchestrator_manifest_surface_without_whole_slow_suit
     # validates this module's real builder output, so it rides the stop rule.
     # #2744: the registry capacity suite fails if the canonical/mirror
     # comparison stops bounding its reads by the shared registry bound.
+    # #3157 PR 2: the DB-free automatic forecast retry pin asserts this
+    # builder's DB-free selectors on the live retry resubmission, so it rides
+    # the stop rule too (whole file, 1 test in ~2s, DB-free).
     manifest_contract = "tests/test_run_manifest_schema_contract.py"
+    db_free_retry_pin = "tests/test_db_free_auto_retry_manifest.py"
     assert selected == sorted(
         {
             *ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
             manifest_contract,
+            db_free_retry_pin,
             "tests/test_scheduler_registry_capacity.py",
             "tests/test_orchestrator_first_import.py",
             WRITE_SURFACE_SCAN_PATH,
@@ -1540,6 +1545,7 @@ def test_select_tests_maps_orchestrator_manifest_surface_without_whole_slow_suit
         STATUS_VOCAB_PARITY_PATH,
         TIME_HELPER_CONSOLIDATION_PATH,
         manifest_contract,
+        db_free_retry_pin,
         "tests/test_scheduler_registry_capacity.py",
         "tests/test_orchestrator_first_import.py",
     }
@@ -1725,6 +1731,23 @@ def test_select_tests_routes_the_pipeline_route_to_the_retry_http_oracle() -> No
         "services/orchestrator/file_orchestration_journal.py",
     ):
         assert "tests/test_retry_route_fail_closed.py" in select_tests([source], repo_root=Path(".")), source
+
+
+def test_select_tests_routes_the_live_db_free_retry_path_to_its_manifest_pin() -> None:
+    """#3157 PR 2: `tests/test_db_free_auto_retry_manifest.py` pins the DB-free
+    automatic forecast retry manifest on the live path (chain retry minting, the
+    stage loop's manifest builder, `FileJournalRetryService`), so a diff to any
+    module on that path selects it."""
+
+    for source in (
+        "services/orchestrator/chain_manifests.py",
+        "services/orchestrator/chain_forecast_orchestrator_cycle.py",
+        "services/orchestrator/chain_stage_execution.py",
+        "services/orchestrator/file_orchestration_journal.py",
+        "services/orchestrator/retry.py",
+        "services/orchestrator/retry_identity.py",
+    ):
+        assert "tests/test_db_free_auto_retry_manifest.py" in select_tests([source], repo_root=Path(".")), source
 
 
 def test_select_tests_routes_every_read_blocked_sentinel_source_to_its_coupling_pin() -> None:
@@ -1932,6 +1955,10 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         # forcing_submit_identity.py, scheduler_state_types.py and the package
         # __init__). ~3s.
         "tests/test_convert_cohort_members.py",
+        # #3157 PR 2: the DB-free automatic forecast retry pin rides the broad
+        # orchestrator directory rule (retry.py / retry_identity.py importer
+        # gaps and the live chain retry path). 1 test in ~2s, DB-free.
+        "tests/test_db_free_auto_retry_manifest.py",
         "tests/test_e2e_m3.py",
         # #1953: the full-tree budget contract rides the broad orchestrator
         # directory rule — that route closes the importer gaps of
