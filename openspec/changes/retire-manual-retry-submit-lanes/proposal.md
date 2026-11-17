@@ -1,0 +1,117 @@
+# retire-manual-retry-submit-lanes (#3157, PR 1 of 2)
+
+Closes #3157 together with PR 2 (dead-helper removal). The owner chose **(b)** on 2026-11-16.
+
+## Why
+`RetryService.attempt_manual_retry` (DB lane, `services/orchestrator/retry.py:556-701`) and
+`FileJournalRetryService.attempt_manual_retry` (file lane, `services/orchestrator/file_orchestration_journal.py:13054-13122`)
+both commit a `pending` manual-retry row before they submit to Slurm. A crash between the two steps leaves a row that
+blocks every later retry of the run. The only expiry path, `expire_stale_retries`, has no production caller, so the
+living MUST "Stale pending retry is detected" (`retry-execution-contract`) has no implementation.
+
+Both lanes are unreachable in the current production topology:
+- node-27 is `display_readonly` and answers the route with 409 `CONTROL_PLANE_MANUAL_ACTION_REQUIRED`;
+- node-22's `compute_control` has no `DATABASE_URL`, so `get_pipeline_store` raises 500 `DATABASE_URL_MISSING`;
+- the file lane has no production caller (test `dependency_overrides` only).
+
+The supported operator recovery is the marker lane, `FileJournalRetryService.record_manual_repair`. It is driven by
+`scripts/node22_manual_retry_failed_runs.py` and minted by the scheduler. It never writes a `pending` row in-process,
+so it has no such window.
+
+## What
+1. **Route fails closed.** `POST /api/v1/runs/{run_id}/retry` keeps its path, operation and dependency order:
+   - 400 `INVALID_RUN_ID`;
+   - RBAC 401/403 (`pipeline.retry_run`);
+   - the existing display_readonly 409.
+
+   It then **always** raises 409 `CONTROL_PLANE_MANUAL_ACTION_REQUIRED`, the code the operation already declares in
+   OpenAPI, from a dependency that runs **before** anything constructs a DB session, `RetryService` or gateway. The
+   `details` carry `run_id`, a `suggested_action` naming `scripts/node22_manual_retry_failed_runs.py` / the
+   `record_manual_repair` marker, and `recovery_runbook=node22-control-plane-manual-recovery`. As a result,
+   compute_control without `DATABASE_URL` answers 409, not 500.
+
+   The display suggestion text for `retry` (`_manual_action_suggestion`) stops pointing at "the compute_control API"
+   and points at the runbook and script.
+2. **Delete both `attempt_manual_retry` methods**, the `ManualRetryService` protocol, and the route's success and 503
+   branches (`_retry_execution_status`, the `submission_failed` handling, `get_retry_execution_context`'s
+   service/gateway wiring).
+
+   The helpers they leave dead are removed in PR 2. PR 1 keeps them so that this diff is the contract change only;
+   ruff will flag nothing because they stay referenced or private. **Surviving code is not touched:**
+   - the marker lane (`record_manual_repair`, `_manual_retry_source_for_run`, `RetryConflictError`,
+     `RetryNotFoundError`, `RetryEvidenceInvalidError`);
+   - auto retry (`schedule_auto_retry` and the scheduler auto/permanent paths);
+   - the cancel route;
+   - `MANUAL_RETRY_SOURCE_STATUSES` and `MANUAL_RETRY_DURABLE_SUCCESS_STATUSES`.
+3. **OpenAPI and the frontend are unchanged.** `openapi/nhms.v1.yaml`, `apps/frontend/src/api/types.ts` and
+   `check:api-types` stay byte-identical. The operation still declares its 200 schema, now unreachable; removing the
+   operation, the schema and the `JobsTable` retry button is the follow-up issue filed with this PR. The button now
+   shows the 409 error toast in every mode; it already did on display.
+4. **Tests.** Classify every test that reaches either `attempt_manual_retry` or the route's success path:
+   - **delete** a test whose subject is the retired submit lane or the route's success/503 behaviour;
+   - **reseed** a test that only uses `attempt_manual_retry` to set up a surviving subject (cancel consistency, cohort
+     charge, read-blocked consumers, marker lane, auto retry) by writing the rows directly;
+   - add **pins**: the route returns the stable 409 for compute_control with and without `DATABASE_URL`; RBAC 401/403
+     and the display 409 still come first; no `pipeline_job` / event / journal / hydro write and no `submit_job`
+     happens; both `attempt_manual_retry` attributes are absent.
+
+   The per-test table is recorded in the PR.
+5. **Selector and governance:**
+   - the six pinned `tests/test_retry.py::test_retry_api_file_lane_*` node ids
+     (`scripts/select_ci_tests_tables.py:1434-1463`) and the rule entries naming deleted tests
+     (`scripts/select_ci_tests_rules.py:2090,2134,5522-5536`) follow the deletions;
+   - `tests/fixtures/file_journal_cluster_map.json` and `tests/status_literal_allowlist.json` are updated if their
+     subjects change.
+6. **Docs.** Runbooks that tell operators to retry through the API point at the marker lane instead:
+   - `docs/runbooks/qhh-controlled-failure-retry-evidence.md:37`;
+   - `qhh-continuous.md:401`;
+   - `two-node-production-e2e-plan.md:784`;
+   - `infra/README.two-node-docker.md:659,699`;
+   - `docs/spec/04_api_design.md:162`.
+
+   `docs/runbooks/node22-control-plane-manual-recovery.md` gains the acceptance-criteria section: how to handle a
+   `pending` row with no `slurm_job_id`, the supported marker path, and the side effects of `POST /runs/{id}/cancel` on
+   such a row (it also cancels the hydro_run and forecast_cycle, and can orphan a real Slurm job in the
+   submit-succeeded / unrecorded sub-window).
+7. **Spec.** Deltas in 11 capabilities. `retry-runtime-roots` is retired whole: every requirement concerns the submit
+   lane, so `.openspec.yaml` sets `retire_capabilities: true`. Each requirement is classified by reachability from the
+   two retired methods and the route's success path, not by the word "manual", because the marker lane survives.
+
+## Decisions taken under the owner's delegation
+- **Button and operation:** the `JobsTable` retry button and the OpenAPI operation stay for now (no userspace break in
+  this PR); they are removed in a follow-up issue.
+- **Retired capability:** `retry-runtime-roots` is retired, not left as an empty shell.
+- **Mixed requirements** become REMOVED plus ADDED under a new name that keeps the surviving behaviour. MODIFIED is
+  used only where a scenario survives intact.
+- **`expire_stale_retries`** and its two tests go in PR 2. #3156 kept it only as the implementation of the stale-pending
+  MUST, and this PR removes that requirement.
+
+## Must preserve
+- **Marker lane:** behaviour, events and errors of `record_manual_repair`, `scripts/node22_manual_retry_failed_runs.py`
+  and the scheduler mint.
+- **Auto retry and cancel route:** behaviour unchanged.
+- **Display contract:** RBAC and the display 409 contract (`display-control-mutation-guard`), and the two-node E2E
+  evidence that expects display retry to return 409 `CONTROL_PLANE_MANUAL_ACTION_REQUIRED`.
+- **API surface:** OpenAPI and the frontend types stay byte-identical.
+
+## Fixture level
+expanded. Risk packs: api-contract, spec-retirement, test-reseed, operator-runbook.
+
+## Evidence Floor
+- [ ] E1 `uv run ruff check --no-cache .`
+- [ ] E2 Tests, all green locally:
+  - the selector set for the diff;
+  - `tests/test_retry.py`, `tests/test_retry_cancel_consistency.py`, `tests/test_file_orchestration_journal.py`,
+    `tests/test_monitoring_api.py` and `tests/test_file_journal_read_blocked_consumers.py`;
+  - `tests/test_cohort_member_charge.py`, `tests/test_hydro_run_attempt_triage.py`, `tests/test_api_contract*.py`,
+    `tests/test_e2e_m3.py`, `tests/test_response_model_preservation_pipeline.py` and `tests/test_slurm_gateway_auth*.py`;
+  - `tests/test_slurm_gateway_openapi_security.py`, `tests/test_two_node_e2e_evidence.py`, the node-22 manual-retry
+    script tests and `tests/test_select_ci_tests.py`.
+
+  The new pins are red on the old code. The per-test delete/reseed table is recorded.
+- [ ] E3 The same set passes in a node-27 temporary worktree.
+- [ ] E4 `git diff origin/master -- openapi/ apps/frontend/src/api/types.ts` is empty. Frontend `pnpm test` and
+  `check:api-types` pass locally, or the PR records why the frontend lane is untouched.
+- [ ] E5 A grep for `attempt_manual_retry` outside `openspec/changes/archive/` and this change has zero hits in code and
+  tests. The entropy hard gate has `hard_gate_failing_count 0`.
+- [ ] E6 `openspec validate retire-manual-retry-submit-lanes --strict --no-interactive`
