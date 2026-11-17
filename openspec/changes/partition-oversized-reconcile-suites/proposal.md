@@ -189,19 +189,19 @@ expanded, with design.md. Legacy compatibility is an expanded trigger, and the p
 
 ## Evidence Floor
 
-- [ ] E1 Lint, line counts and guard entries:
+- [x] E1 Lint, line counts and guard entries:
   - `uv run ruff check --no-cache .` passes;
   - `git diff --check` is clean;
   - the entropy hard gate reports `hard_gate_failing_count 0`;
   - `wc -l` is ≤1000 on every new or touched test or support module that is not guard-exempt;
   - `.large-file-guard.json` has lost exactly the five entries and gained none;
   - ruff is red on `_claimant_replay_handoff` and `_inventory_crash_migration` without their moved `BLE001` entries.
-- [ ] E2 Collection identity. Baseline at the branch point, under Python 3.11: per suite, the `--collect-only -q`
+- [x] E2 Collection identity. Baseline at the branch point, under Python 3.11: per suite, the `--collect-only -q`
   suffix set and the per-definition fingerprint multiset. On each suite's pure-move commit:
   - the suffix set is equal to the baseline;
   - the fingerprint multiset is equal to the baseline, every definition exactly once;
   - the old suffix → new node id TSV is recorded, with no duplicates and no misses.
-- [ ] E3 Selector equivalence. For every path tracked on master, `select_tests([path])` is computed before and after.
+- [x] E3 Selector equivalence. For every path tracked on master, `select_tests([path])` is computed before and after.
   The only allowed difference is each old base path expanding to the base plus its partitions. The other allowed
   differences are listed:
   - (a) A diff to the claimant base no longer selects exactly these three through the importer closure
@@ -231,18 +231,18 @@ expanded, with design.md. Legacy compatibility is an expanded trigger, and the p
       binding tuples ∪ {`submitline_exact`, `reserved_pins`};
     - the tracked `tests/test_forcing_submit_ambiguity*.py` set equals the fsa tuple;
     - so an untupled extra file goes red.
-- [ ] E4 Mutation reds (each restored):
+- [x] E4 Mutation reds (each restored):
   - one test dropped from a partition: E2 suffix identity red;
   - a stray test added to a partition: E2 suffix identity red;
   - a helper copied into two partitions: E2 fingerprint multiset red;
   - one partition removed from a rule: E3 pin red;
   - an extra `tests/test_gateway_reconcile_claimant_extra.py` (collectible, one trivial test) added and tracked:
     tracked-tree guard red.
-- [ ] E5 Locally and in a node-27 temporary worktree:
+- [x] E5 Locally and in a node-27 temporary worktree:
   - `tests/test_gateway_reconcile_*.py` and `tests/test_forcing_submit_ambiguity*.py`;
   - the three collectible cross-file importers, and the collectible consumers of
     `tests/orchestrator_bind_reserved_job_helpers.py`;
   - `tests/test_select_ci_tests.py`;
   - the selector set for the diff. New partitions are `git add`ed before the selector suite runs, because the importer-closure
   derivation reads tracked files only.
-- [ ] E6 `openspec validate partition-oversized-reconcile-suites --strict --no-interactive`.
+- [x] E6 `openspec validate partition-oversized-reconcile-suites --strict --no-interactive`.

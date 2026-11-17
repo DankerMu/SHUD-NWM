@@ -23,4 +23,4 @@
 - [x] 1.4 Evidence: E3 selector equivalence over every tracked path with the allowed differences, E4 mutation reds,
   E1 line counts and the ruff reds.
 - [x] 1.5 Run E1 and E5 locally (orchestrator: node-27 temporary worktree half of E5).
-- [ ] 1.6 E6: `openspec validate partition-oversized-reconcile-suites --strict --no-interactive`.
+- [x] 1.6 E6: `openspec validate partition-oversized-reconcile-suites --strict --no-interactive`.
