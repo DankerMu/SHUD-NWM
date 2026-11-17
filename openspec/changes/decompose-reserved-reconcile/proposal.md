@@ -19,43 +19,73 @@ double-submit safety, and one unreviewable body is the riskiest place for it.
 ## What
 
 1. **Pin commit (unchanged production code).**
-   - Measure line coverage of `reconcile_reserved.py` under the issue's verification set on master. Every one of the 27
-     `outcomes.append` exits, and both escaping raises (`:860` accepted-submit commit API unavailable, `:977` forcing
-     bind API unavailable), must be hit.
-   - Each exit that is not hit gets a characterization test that is green on the old code.
-   - Add a recording-store write-order test: for rows that write more than once, it asserts the ordered call trace (the
-     `submit_outcome is None` transition at `:225`/`:243`, then the accounting query, then the record / commit / permit /
-     bind writes).
-   - The new tests go in a new file under 1000 lines, with selector routing.
+   - Coverage tool: the repo does not depend on coverage, and `uv.lock` must not change. Use
+     `uv run --with pytest-cov pytest --cov=services.orchestrator.reconcile_reserved --cov-branch --cov-context=test …`
+     locally or on node-27, never on node-22.
+   - Measure statement and branch coverage of `:155-1066` under the issue's verification set on master. Record the
+     exit → test map for all 27 outcome producers (24 `ReservationReconcileOutcome(` + 3 `_identity_blocked_outcome(`)
+     and both escaping raises (`:860`, `:977`). List every unhit branch (for example `:994`, the False side of `:782`,
+     an accepted-submit row reaching `:785`). Each gets a characterization test that is green on the old code.
+   - Every E4 mutation needs a test that is green on the old code and red under the mutation. The tests that do not
+     exist today are added here:
+     - a non-caching fake querier with a counting `capability()` over at least two eligible rows (the default querier
+       caches, `reconcile_comment_sacct.py:332-345`, so it cannot catch a per-row re-probe);
+     - a clock that advances per row across the grace boundary (no current test varies the reconcile `now`);
+     - assertions on the `:860` and `:977` escaping messages;
+     - the quarantine `fallback_match_basis` on the `:496`-path journal fault (only the commit path is covered today,
+       `tests/test_gateway_reconcile_submitline_exact.py:403`).
+   - A recording-store write-order test asserts the ordered call trace of multi-write rows. The trace includes the
+     `submit_outcome is None` transition (`:225`/`:243`), the querier's `capability()` and query calls,
+     `forecast_cohort_runtime_identity_matches`, and the record / commit / permit / bind writes. Constraint: recording
+     must not change which branches run.
+     - `_callable_accepts_keyword` inspects signatures (`reconcile_records.py:363-370`).
+     - `getattr` probes optional APIs (`:185`, `:643`, `:761`, `:858`, `:975`).
+     - So use subclasses with exact signatures, or `functools.wraps`; never a `**kwargs` or `__getattr__` proxy.
+   - The new tests go in a new `tests/test_gateway_reconcile_<topic>.py` file under 1000 lines, so the issue's glob
+     covers it, with selector routing.
 2. **Move commit (behaviour-preserving decomposition).**
    - Extract the per-row body into `_reconcile_one_reserved_unbound_job(job, *, context, row) -> ReservationReconcileOutcome`.
    - The pass context carries `store`, `comment_query`, `grace`, `accepted_submit_grace`,
      `identity_blocked_streak_limit`, `now` (still a callable), `bind_only`, the three `target_*` pins, and the lazy
-     at-most-once capability provider.
-   - The row state carries `fallback_basis` out of the `try`.
+     at-most-once capability provider. The provider object itself is passed to `_accepted_submit_reconcile_job`; it is
+     never evaluated first.
+   - The row state carries `fallback_basis` out of the `try`. The outer loop keeps the `idempotency_key` local that the
+     quarantine `LOGGER.warning` and the quarantine outcome use (`:1048-1060`).
    - Phase helpers are verbatim slices of the original body, in original order. Each helper unpacks the context into
      the original local names, so the moved text is identical up to indentation.
-   - Only two rewrites are allowed:
-     - `outcomes.append(X); continue` → `return X`;
-     - `fallback_basis = …` → `row.fallback_basis = …`.
+   - The allowed line changes:
+     - `outcomes.append(X)` followed by `continue` → `return X`. This also covers `:1009`, the final bound append,
+       which is not followed by `continue`.
+     - `fallback_basis = …` → `fallback_basis = row.fallback_basis = …`. The reads at `:515`, `:565`, `:852`, `:897`,
+       `:953`, `:968` and `:1044` stay unchanged.
+     - helper `def` lines, `return None` fall-throughs, packing and unpacking of the context and per-row facts, and the
+       per-row dispatch lines.
+   - The vocabulary closure (`tests/test_operator_action_listing_held_reservations.py:108-157`) resolves a local
+     `action` only through a plain `ast.Assign` in the same `FunctionDef`. So the `action = …` assignments at `:384`
+     and `:928` stay in the same helper as the `ReservationReconcileOutcome(action=action)` that uses them, without an
+     annotation. The constructor keeps its plain name.
    - Shared blocks keep their guards verbatim. The confirmed-absent block (`:708-823`) is shared, and its
      `update_job_status` `else` (`:785`) is reachable by an accepted-submit row whose store lacks
      `permit_pipeline_job_retry`.
-   - No exit is added, removed or merged. No defensive branch is added.
+   - No outcome producer is added, removed or merged. No defensive branch is added.
 3. **Module layout.**
    - `reconcile_reserved.py` comes down to ≤1000 lines, and its `.large-file-guard.json` entry is removed in the commit
      where it first fits.
    - The call site of the patched seam `_reserved_record_identity_matches` stays in `reconcile_reserved.py`
      (`tests/test_gateway_reconcile_comment_accounting.py:1563` patches it there). That means the identity-gate phase
      stays in that module.
-   - Seam-free phases may move to the existing `reconcile_reserved_support.py` (382 lines), or to a new
-     `services/orchestrator/reconcile_<topic>.py` leaf.
+   - The seam-free phases go to a new leaf `services/orchestrator/reconcile_reserved_phases.py`. Adding them to
+     `reconcile_reserved_support.py` (382 lines) would take it past 1000 lines. The new leaf goes into the sorted
+     `RECONCILE_PARTITION_LEAVES` (`tests/test_select_ci_tests.py:12457-12466`, with the drift guard at `:12549` and the
+     superset rule at `:12554-12558`) and into every selector rule that names the reserved leaves, with a
+     red-before-green pin.
    - Any module that ends up holding `ReservationReconcileOutcome(...)` calls or reconcile logging must match
      `reconcile*.py` (the held-reservation vocabulary pin globs it, `tests/test_operator_action_listing_held_reservations.py:36-41`)
      and use the `services.orchestrator.reconcile` logger (`tests/test_reconcile_partition_logger.py`).
    - The facade `services/orchestrator/reconcile.py:144-147` keeps re-exporting both names. Leaves never import the
      facade.
-4. **Spec.** MODIFY `orchestrator-reconcile-module-partition`: no partition module is excluded from the guard.
+4. **Spec.** In `orchestrator-reconcile-module-partition`, REMOVED + ADDED, because a MODIFIED block cannot replace
+   the exemption scenario. The restated requirement allows no partition module to be excluded from the guard.
 
 ## Non-goals
 
@@ -73,8 +103,9 @@ double-submit safety, and one unreviewable body is the riskiest place for it.
 - The order of store and journal writes within a row and across rows.
 - Per-row `FileOrchestrationJournalError` quarantine, carrying `fallback_match_basis` when it was classified before
   the fault; one row's fault does not abort the others.
-- `ReconcileQueryUnavailable` from the accounting query is handled per row (`query_unavailable`). The one raised
-  from the commit or bind step (`:860`, `:977`) still escapes the whole function.
+- `ReconcileQueryUnavailable` raised inside the accounting query (`:249-287`) is handled per row
+  (`query_unavailable`). Any `ReconcileQueryUnavailable` raised outside that span still escapes the whole function:
+  `:860`, `:977`, and any raised by a store committer or binder.
 - The capability probe is lazy, runs at most once per invocation, and never runs for an empty selection or for rows
   that exit before lane selection.
 - `now()` is called at the same points (deferral checks, `_identity_blocked_outcome`), never snapshotted.
@@ -89,12 +120,19 @@ expanded. Seats: correctness, test evidence + spec compliance, invariant/state m
 ## Evidence Floor
 
 - [ ] E1 `uv run ruff check --no-cache .`; `git diff --check`; entropy hard gate `hard_gate_failing_count 0`;
-  `wc -l services/orchestrator/reconcile*.py` all ≤1000; no `reconcile*` entry in `.large-file-guard.json`.
-- [ ] E2 Pin commit: the coverage report on unchanged code shows all 27 exits and both escaping raises hit (the
-  exit → test map is recorded). The new characterization and write-order tests are green on the unchanged code.
-- [ ] E3 Move commit: a normalized body diff (dedent, then compare the original body with the concatenated phase
-  helpers) lists every changed line, and each changed line is one of the two allowed rewrites or a context unpack. The
-  exit count is 27 before and after.
+  `wc -l services/orchestrator/reconcile*.py` all ≤1000; no `services/orchestrator/reconcile*.py` entry in
+  `.large-file-guard.json` (the existing `tests/test_gateway_reconcile_*.py` entries stay).
+- [ ] E2 Pin commit, on unchanged code:
+  - the coverage report (command in What 1) shows all 27 outcome producers and both escaping raises hit, and the
+    exit → test map is recorded;
+  - every remaining unhit branch of `:155-1066` is listed with a reason;
+  - the new characterization, write-order and mutation-target tests are green.
+- [ ] E3 Move commit:
+  - a normalized body diff (dedent, then compare the original body with the concatenated phase helpers) lists every
+    changed line, and each is one of the allowed changes in What 2;
+  - the outcome producers number 27 before and after (24 `ReservationReconcileOutcome(` + 3
+    `_identity_blocked_outcome(`); after the move, 26 are reached by `return` and the quarantine one by the outer
+    `except`.
 - [ ] E4 Mutation reds (each restored afterwards), from design.md "Hazards":
   - `now` snapshotted once;
   - capability probe eager, or uncached per row;
@@ -102,6 +140,8 @@ expanded. Seats: correctness, test evidence + spec compliance, invariant/state m
   - the `:860` raise caught per row;
   - the `_reserved_record_identity_matches` call site moved off `reconcile_reserved` (the `:1563` patch test goes red);
   - two phase helpers swapped in order.
+
+  Each mutation is mapped to the test that catches it, and that test is green on the unchanged code.
 - [ ] E5 The issue's verification set passes locally and in a node-27 temporary worktree:
   `tests/test_gateway_reconcile_*.py`, `tests/test_orchestrator_bind_reserved_job_*.py`,
   `tests/test_orchestrator_demote_*.py`, `tests/test_forcing_submit_ambiguity.py`, `tests/test_production_scheduler.py`,

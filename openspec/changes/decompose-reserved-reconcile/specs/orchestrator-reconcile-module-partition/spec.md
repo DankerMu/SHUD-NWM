@@ -23,7 +23,7 @@ per-row journal quarantine, the escaping exceptions and the lazy at-most-once co
 
 Splitting SHALL NOT remove from `services.orchestrator.reconcile` any top-level name that `reconcile.py` itself
 defined before the split, unless the change retires that name explicitly. Names that `reconcile.py` merely imported are
-not part of that surface, except where What 2 of the change keeps them. Classes SHALL be single objects regardless of
+not part of that surface, except where What 2 of #3155 keeps them. Classes SHALL be single objects regardless of
 import path.
 
 Leaf modules SHALL NOT import the facade. Every name that is patched or reassigned as a module attribute SHALL be
