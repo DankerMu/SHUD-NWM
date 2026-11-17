@@ -37,7 +37,7 @@ from services.orchestrator import cli
 from services.orchestrator import scheduler as scheduler_module
 from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
 from services.orchestrator.operator_action_listing_held import _held_job_is_forecast_master
-from tests.test_gateway_reconcile_claimant_exclusivity import _fallback_querier, _fallback_row
+from tests.gateway_reconcile_claimant_exclusivity_helpers import _fallback_querier, _fallback_row
 from tests.test_orchestration_chain import _orchestrator
 from tests.test_real_slurm_gateway import _pinned_local_timezone
 from tests.test_scheduler_held_reservation_block import (

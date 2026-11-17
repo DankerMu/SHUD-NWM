@@ -148,7 +148,6 @@
     "services/orchestrator/file_journal_paths.py",
     "tests/test_forcing_submit_ambiguity.py",
     "tests/test_gateway_reconcile_binding_provenance.py",
-    "tests/test_gateway_reconcile_claimant_exclusivity.py",
     "tests/test_gateway_reconcile_file_cohort_identity.py"
   ]
 }

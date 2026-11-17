@@ -28,14 +28,14 @@ from services.orchestrator.accepted_submit_identity import (
     ACCEPTED_SUBMIT_CONTRACT_VERSION,
     AcceptedSubmitTransition,
 )
-from tests.gateway_reconcile_helpers import (
-    _append_cohort_placeholders,
-    _file_cohort_repository,
-)
-from tests.test_gateway_reconcile_claimant_exclusivity import (
+from tests.gateway_reconcile_claimant_exclusivity_helpers import (
     _fallback_querier,
     _fallback_row,
     _second_master_reservation_record,
+)
+from tests.gateway_reconcile_helpers import (
+    _append_cohort_placeholders,
+    _file_cohort_repository,
 )
 from tests.test_real_slurm_gateway import _pinned_local_timezone
 
