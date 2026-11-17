@@ -19,4 +19,4 @@
   (What 4). Update the pinned oracles (What 5).
 - [x] 1.4 Docs (What 6).
 - [x] 1.5 Evidence: E1-E4 and E7 locally.
-- [ ] 1.6 E5 on node-27 (orchestrator), E6.
+- [x] 1.6 E5 on node-27 (orchestrator), E6.

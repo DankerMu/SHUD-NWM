@@ -2,7 +2,7 @@
 
 ### Requirement: Ops MVP entry
 
-The frontend SHALL expose an operations MVP entry focused on QHH pipeline status, jobs, logs, and cancel controls. It has no retry control; failed-run recovery is the node-22 manual-repair marker lane (#3179).
+The frontend SHALL expose an operations MVP entry focused on QHH pipeline status, jobs, and logs. It has no retry control and no cancel control (cancel lives on `/monitoring`); failed-run recovery is the node-22 manual-repair marker lane (#3179).
 
 #### Scenario: Ops navigation entry
 - **WHEN** the app shell renders for an authorized operator

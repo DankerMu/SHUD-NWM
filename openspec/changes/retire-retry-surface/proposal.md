@@ -161,7 +161,7 @@ owner decision.
 
 ## Evidence Floor
 
-- [ ] E1 Lint and leftover references:
+- [x] E1 Lint and leftover references:
   - `uv run ruff check --no-cache .` passes, `git diff --check` is clean, and the entropy hard gate reports
     `hard_gate_failing_count 0`;
   - `git grep -n RetryRunResult -- ':!openspec/changes/archive' ':!docs/review-loop-log.jsonl'` hits only:
@@ -169,21 +169,21 @@ owner decision.
     - this change's `openspec/changes/retire-retry-surface/**`;
     - historical `docs/plans/**` or `IMPLEMENTATION_PLAN.md`, if present;
   - `git grep -n -E "retryControlsEnabled|retryableStatuses|retrySubmitted" -- apps/frontend` is empty.
-- [ ] E2 Backend, local:
+- [x] E2 Backend, local:
   - `uv run pytest -q tests/test_monitoring_api.py tests/test_retry_route_fail_closed.py
     tests/test_api_contract_pipeline_ops.py tests/test_api_contract.py tests/test_openapi_drift.py
     tests/test_response_model_preservation.py tests/test_response_model_schema_parity.py
     tests/test_slurm_gateway_openapi_security.py tests/test_slurm_gateway_auth.py tests/test_auth_policy_matrix.py
     tests/test_two_node_e2e_evidence.py tests/test_retry_cancel_consistency.py`;
   - plus the selector set for the diff.
-- [ ] E3 Frontend, local, in `apps/frontend`: `pnpm typecheck`, `pnpm test`, `pnpm build`, `pnpm check:api-types`,
+- [x] E3 Frontend, local, in `apps/frontend`: `pnpm typecheck`, `pnpm test`, `pnpm build`, `pnpm check:api-types`,
   `pnpm test:e2e:mocked-regression e2e/monitoring.mocked.spec.ts`.
-- [ ] E4 Mutation reds, each restored:
+- [x] E4 Mutation reds, each restored:
   - re-adding a retry button to `JobsTable` makes the new "no retry button" unit case and the e2e replacement red;
   - re-adding a `200` to `retryRun` makes the contract test and the preservation inversion red;
   - breaking the cancel duplicate-click guard makes the rewritten `:267` case red;
   - dropping `refreshSelectedContext` from `runAction`'s `finally` makes the rewritten error-path case red.
-- [ ] E5 node-27, in a temporary detached worktree, with `NHMS_RUN_INTEGRATION=1` and `NHMS_INTEGRATION_DATABASE_URL`
+- [x] E5 node-27, in a temporary detached worktree, with `NHMS_RUN_INTEGRATION=1` and `NHMS_INTEGRATION_DATABASE_URL`
   pointing at the node-27 PG (creds from the container env, never printed):
   - the E2 pytest set passes;
   - the deny-write probe set passes: `tests/test_two_node_e2e_evidence.py`, `tests/test_retry_route_fail_closed.py`,
@@ -191,6 +191,6 @@ owner decision.
   - the expectation is that a display-readonly retry `POST` answers `409 CONTROL_PLANE_MANUAL_ACTION_REQUIRED` with
     `display_mode=display_readonly`, and no gateway, session or retry service is constructed;
   - `leftover_it_dbs=0`.
-- [ ] E6 `openspec validate retire-retry-surface --strict --no-interactive`.
-- [ ] E7 Docs: `git grep -n -i -E "重试按钮|retry button|click(s)? retry|点击.{0,4}重试|/retry" -- docs/runbooks/node22-control-plane-manual-recovery.md docs/runbooks/qhh-continuous.md docs/runbooks/qhh-controlled-failure-retry-evidence.md docs/runbooks/qhh-mvp-production-like-e2e-checklist.md`
+- [x] E6 `openspec validate retire-retry-surface --strict --no-interactive`.
+- [x] E7 Docs: `git grep -n -i -E "重试按钮|retry button|click(s)? retry|点击.{0,4}重试|/retry" -- docs/runbooks/node22-control-plane-manual-recovery.md docs/runbooks/qhh-continuous.md docs/runbooks/qhh-controlled-failure-retry-evidence.md docs/runbooks/qhh-mvp-production-like-e2e-checklist.md`
   hits only lines that say the UI has no retry, or that describe the 409 stub.
