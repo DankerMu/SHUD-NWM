@@ -6,7 +6,9 @@ entrypoints return when a read is refused: PRESENT, non-terminal, marked by
 selector) and #2387 (the chain stage-result retry classifier and the two
 runtime-root provenance readers) are two consumer ends of that ONE family, so
 they live in one module against ONE discriminator: a later producer-side change
-must not be able to satisfy one end and silently break the other.
+must not be able to satisfy one end and silently break the other.  #3157 retired
+the API retry submit lane, so the selector is driven here through its surviving
+public entry, the node-22 manual-repair marker lane ``record_manual_repair``.
 
 Governing invariant (design D1): a refused journal read is never reported as an
 answer about the work.  Each consumer owes the row exactly one of two
@@ -139,17 +141,6 @@ def _refuse_job_id_reads(monkeypatch: pytest.MonkeyPatch, repository: Any) -> No
         raise _blocked_fault()
 
     monkeypatch.setattr(repository, "_pipeline_job_for_id_unlocked", _refuse)
-
-
-class _UnreachableGateway:
-    """Any gateway call at all is a zero-write violation on a refusal path."""
-
-    def __init__(self) -> None:
-        self.requests: list[Any] = []
-
-    def submit_job(self, request: Any) -> Any:
-        self.requests.append(request)
-        raise AssertionError("a refused journal read must not reach the Slurm gateway")
 
 
 class _SuccessGateway:
@@ -319,12 +310,13 @@ def test_blocked_by_run_read_refuses_with_retry_evidence_invalid(
     assert pending_error.value.details["journal_reason"] == _BLOCK_REASON
     assert pending_error.value.details["journal_field"] == _BLOCK_FIELD
 
-    with pytest.raises(journal.RetryEvidenceInvalidError) as attempt_error:
-        service.attempt_manual_retry(_RUN_ID, _UnreachableGateway(), trusted_internal=True)
-    assert attempt_error.value.code == "RETRY_EVIDENCE_INVALID"
-    assert attempt_error.value.status_code == 409
-    assert attempt_error.value.details["journal_reason"] == _BLOCK_REASON
-    assert attempt_error.value.details["journal_field"] == _BLOCK_FIELD
+    # #3157: the selector's surviving public entry is the node-22 marker lane.
+    with pytest.raises(journal.RetryEvidenceInvalidError) as repair_error:
+        service.record_manual_repair(_RUN_ID, trusted_internal=True)
+    assert repair_error.value.code == "RETRY_EVIDENCE_INVALID"
+    assert repair_error.value.status_code == 409
+    assert repair_error.value.details["journal_reason"] == _BLOCK_REASON
+    assert repair_error.value.details["journal_field"] == _BLOCK_FIELD
 
 
 def test_blocked_by_run_read_writes_nothing_and_never_allocates_a_retry_id(
@@ -342,12 +334,10 @@ def test_blocked_by_run_read_writes_nothing_and_never_allocates_a_retry_id(
 
     monkeypatch.setattr(journal, "_next_file_manual_retry_job_id_for_run", _unreachable_allocator)
     _refuse_scoped_job_records(monkeypatch, repository)
-    gateway = _UnreachableGateway()
 
     with pytest.raises(journal.RetryEvidenceInvalidError):
-        service.attempt_manual_retry(_RUN_ID, gateway, trusted_internal=True)
+        service.record_manual_repair(_RUN_ID, trusted_internal=True)
 
-    assert gateway.requests == []
     assert _tree_bytes(root) == before
     assert [
         record
@@ -370,7 +360,7 @@ def test_refused_durable_run_read_takes_the_same_classified_boundary(
     monkeypatch.setattr(repository, "_hydro_run_for", _refuse)
 
     with pytest.raises(journal.RetryEvidenceInvalidError) as error:
-        service.attempt_manual_retry(_RUN_ID, _UnreachableGateway(), trusted_internal=True)
+        service.record_manual_repair(_RUN_ID, trusted_internal=True)
     assert error.value.details["journal_reason"] == "file_journal_unsafe_identity"
     assert error.value.details["journal_field"] == "run_id"
 
@@ -399,7 +389,7 @@ def test_absence_conflict_and_selection_stay_three_distinguishable_answers(
     )
     assert empty_service._manual_retry_source_for_run(_RUN_ID) == (None, None)
     with pytest.raises(journal.RetryNotFoundError):
-        empty_service.attempt_manual_retry(_RUN_ID, _UnreachableGateway(), trusted_internal=True)
+        empty_service.record_manual_repair(_RUN_ID, trusted_internal=True)
 
     _root, _repository, active_service = _seeded_journal(
         tmp_path / "active", jobs=[_pipeline_job_record(status="running", finished_at=None, error_code=None)]
@@ -407,7 +397,7 @@ def test_absence_conflict_and_selection_stay_three_distinguishable_answers(
     _selected, active_job = active_service._manual_retry_source_for_run(_RUN_ID)
     assert active_job is not None and active_job["job_id"] == _JOB_ID
     with pytest.raises(journal.RetryConflictError):
-        active_service.attempt_manual_retry(_RUN_ID, _UnreachableGateway(), trusted_internal=True)
+        active_service.record_manual_repair(_RUN_ID, trusted_internal=True)
 
     # A durable-success run still answers "nothing to retry", unchanged.
     _root, success_repository, success_service = _seeded_journal(
@@ -419,49 +409,6 @@ def test_absence_conflict_and_selection_stay_three_distinguishable_answers(
         lambda run_id: {"run_id": run_id, "status": sorted(journal.MANUAL_RETRY_DURABLE_SUCCESS_STATUSES)[0]},
     )
     assert success_service._manual_retry_source_for_run(_RUN_ID) == (None, None)
-
-
-def test_route_answers_409_retry_evidence_invalid_for_a_blocked_read(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Task 2.6: the operator gets a classified 409, not a 404 and not a traceback."""
-
-    from fastapi.testclient import TestClient
-
-    from apps.api.main import app
-    from apps.api.routes import pipeline as pipeline_routes
-    from packages.common.auth_policy import trusted_internal_policy_decision
-
-    root, repository, service = _seeded_journal(tmp_path)
-    _refuse_scoped_job_records(monkeypatch, repository)
-    context = pipeline_routes._RetryExecutionContext(
-        policy_decision=trusted_internal_policy_decision(
-            "pipeline.retry_run",
-            target_type="pipeline_run",
-            target_id=_RUN_ID,
-            actor_id="trusted-internal:test",
-            roles=("sys_admin",),
-        ),
-        service=service,
-        gateway=_UnreachableGateway(),  # type: ignore[arg-type]
-    )
-    app.dependency_overrides[pipeline_routes.get_retry_execution_context] = lambda: context
-    monkeypatch.setenv("ALLOW_DEV_ROLE_HEADER", "true")
-    try:
-        response = TestClient(app).post(f"/api/v1/runs/{_RUN_ID}/retry", headers={"X-User-Role": "operator"})
-    finally:
-        app.dependency_overrides.pop(pipeline_routes.get_retry_execution_context, None)
-
-    assert response.status_code == 409
-    error = response.json()["error"]
-    assert error["code"] == "RETRY_EVIDENCE_INVALID"
-    assert error["details"]["run_id"] == _RUN_ID
-    assert error["details"]["journal_reason"] == _BLOCK_REASON
-    assert error["details"]["journal_field"] == _BLOCK_FIELD
-    rendered = json.dumps(response.json())
-    assert "Traceback" not in rendered
-    assert str(root) not in rendered
-    assert "full_tree_replay" not in rendered
 
 
 def test_node22_operator_cli_reports_the_blocked_read_as_a_refused_receipt(
@@ -743,121 +690,6 @@ def test_provenance_readers_degrade_with_a_warning_and_the_sibling_is_unchanged(
     for message in messages:
         assert _BLOCK_REASON in message
         assert _BLOCK_FIELD in message
-
-
-def _arm_predecessor_refusal_after_mint(
-    monkeypatch: pytest.MonkeyPatch, repository: Any, service: Any
-) -> dict[str, bool]:
-    """Refuse the PREDECESSOR's by-id read only once the pending retry row exists.
-
-    The refusal must land after ``_create_pending_manual_retry_job`` (which reads
-    the same id through the same private method) and must not touch the retry
-    row's own id, which ``update_pipeline_job_status`` reads on both outcomes.
-    """
-
-    state = {"armed": False}
-    real_read = repository._pipeline_job_for_id_unlocked
-
-    def _read(job_id: str, *args: Any, **kwargs: Any) -> Any:
-        if state["armed"] and str(job_id) == _JOB_ID:
-            raise _blocked_fault()
-        return real_read(job_id, *args, **kwargs)
-
-    monkeypatch.setattr(repository, "_pipeline_job_for_id_unlocked", _read)
-
-    real_mint = service._create_pending_manual_retry_job
-
-    def _mint(run_id: str) -> Any:
-        minted = real_mint(run_id)
-        state["armed"] = True
-        return minted
-
-    monkeypatch.setattr(service, "_create_pending_manual_retry_job", _mint)
-    return state
-
-
-def test_blocked_predecessor_read_no_longer_poisons_the_recorded_submission(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """Task 3.5, against the CORRECTED premise; outcome flipped by #2567.
-
-    The issue's "unclassified 500" is stale: the provenance walk runs inside
-    ``attempt_manual_retry``'s ``except Exception``, AFTER the pending retry row
-    is minted.  Before #2387 the refusal was caught, ``_retry_submission_error_code``
-    found no ``.code`` on ``FileOrchestrationJournalError`` and fell back to
-    ``SBATCH_SUBMISSION_FAILED`` -- blaming a gateway that was never called.
-    #2387 made the walk skip the unreadable candidate with a warning, which then
-    submitted with the CURRENT environment's roots (200).  #2567 flips that
-    outcome on purpose: a blocked read means provenance is unknown, so the
-    environment is not consulted and the attempt ends with the governed
-    ``RETRY_RUNTIME_ROOTS_UNRESOLVED`` (503, ``submission_failed``) carrying
-    ``blocked_reads`` -- still never the fabricated gateway code.
-    """
-
-    from fastapi.testclient import TestClient
-
-    from apps.api.main import app
-    from apps.api.routes import pipeline as pipeline_routes
-    from packages.common.auth_policy import trusted_internal_policy_decision
-
-    root, repository, service = _seeded_journal(tmp_path)
-    workspace_root = (tmp_path / "roots" / "workspace").resolve()
-    object_store_root = (tmp_path / "roots" / "object-store").resolve()
-    workspace_root.mkdir(parents=True)
-    object_store_root.mkdir(parents=True)
-    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace_root))
-    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
-
-    gateway = _UnreachableGateway()
-    _arm_predecessor_refusal_after_mint(monkeypatch, repository, service)
-    context = pipeline_routes._RetryExecutionContext(
-        policy_decision=trusted_internal_policy_decision(
-            "pipeline.retry_run",
-            target_type="pipeline_run",
-            target_id=_RUN_ID,
-            actor_id="trusted-internal:test",
-            roles=("sys_admin",),
-        ),
-        service=service,
-        gateway=gateway,  # type: ignore[arg-type]
-    )
-    app.dependency_overrides[pipeline_routes.get_retry_execution_context] = lambda: context
-    monkeypatch.setenv("ALLOW_DEV_ROLE_HEADER", "true")
-    try:
-        with caplog.at_level(logging.WARNING, logger=_JOURNAL_LOGGER):
-            response = TestClient(app).post(f"/api/v1/runs/{_RUN_ID}/retry", headers={"X-User-Role": "operator"})
-    finally:
-        app.dependency_overrides.pop(pipeline_routes.get_retry_execution_context, None)
-
-    assert response.status_code == 503, response.json()
-    error = response.json()["error"]
-    assert error["code"] == "RETRY_RUNTIME_ROOTS_UNRESOLVED"
-    resolution = error["details"]["runtime_root_resolution"]
-    assert resolution["candidate_counts"]["blocked_reads"] >= 1
-    assert resolution["resolved"] == {}
-    assert gateway.requests == [], "a blocked provenance read must not submit with the environment's roots"
-
-    # The durable retry row: the governed unresolved code, no fabricated gateway
-    # code, no identity-fault message recorded against it.
-    retry_row = repository.get_pipeline_job(str(error["details"]["job_id"]))
-    assert retry_row is not None
-    assert retry_row["status"] == "submission_failed"
-    assert retry_row["error_code"] == "RETRY_RUNTIME_ROOTS_UNRESOLVED"
-
-    submission_events = [
-        record
-        for record in _journal_records(root, "pipeline_event")
-        if str(record.get("event_type") or "") == "submission"
-    ]
-    assert len(submission_events) == 1
-    for event in submission_events:
-        assert event["details"]["error_code"] == "RETRY_RUNTIME_ROOTS_UNRESOLVED"
-        assert event["details"]["runtime_root_resolution"]["candidate_counts"]["blocked_reads"] >= 1
-        assert "SBATCH_SUBMISSION_FAILED" not in json.dumps(event)
-        assert "file_journal_missing_identity" not in json.dumps(event)
-
-    messages = [record.getMessage() for record in caplog.records if record.name == _JOURNAL_LOGGER]
-    assert any(_BLOCK_REASON in message and _BLOCK_FIELD in message for message in messages)
 
 
 # --- 3.6 sibling surfaces that must keep their current verdicts -------------

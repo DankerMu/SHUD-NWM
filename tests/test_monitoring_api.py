@@ -19,7 +19,6 @@ from apps.api.main import app, create_app
 from apps.api.routes import pipeline as pipeline_routes
 from packages.common.contracts.time_normalization import cycle_id_for
 from services.orchestrator.persistence import Base, PipelineEvent, PipelineJob, PipelineStore
-from services.orchestrator.retry import RetryConfig, RetryService
 from services.slurm_gateway.gateway import SlurmGatewayError
 
 GENERIC_RETRY_JOB_TYPE = "forecast_qhh_stage"
@@ -733,54 +732,37 @@ def test_qhh_like_controlled_failure_retry_evidence_propagates_one_formal_identi
         assert run_id in logs["content"]
         assert cycle_id in logs["content"]
 
-        assert retry_response.status_code == 200
-        retry_data = retry_response.json()["data"]
-        assert retry_data["run_id"] == run_id
-        assert retry_data["job_id"] == f"{run_id}_retry_active"
-        assert retry_data["pipeline_job_id"] == retry_data["job_id"]
-        assert retry_data["retry_count"] == 2
-        assert retry_data["status"] == "submitted"
-        assert retry_data["execution_status"] == "submitted"
-        assert retry_data["slurm_job_id"] == "slurm_retry"
+        # #3157: the API retry lane is retired -- the operator's POST is refused with
+        # the stable manual-action 409 and writes nothing.
+        _assert_retired_retry_manual_action(retry_response, run_id=run_id)
+        assert gateway.submissions == []
+        assert _events(store) == []
+        assert [job.job_id for job in store.query_jobs_by_run(run_id)] == [
+            "qhh_controlled_download",
+            "qhh_controlled_convert",
+            "qhh_controlled_forcing",
+            failed_job_id,
+        ]
 
-        retry_job = store.get_job(retry_data["job_id"])
-        assert retry_job is not None
-        assert retry_job.run_id == run_id
-        assert retry_job.cycle_id == cycle_id
-        assert retry_job.stage == "forecast"
-        assert retry_job.status == "submitted"
-        assert retry_job.retry_count == 2
-        assert retry_job.slurm_job_id == "slurm_retry"
-        assert retry_job.manual_retry_marker is True
-        assert len(gateway.submissions) == 1
-        submitted = gateway.submissions[0]
-        assert submitted.run_id == run_id
-        assert submitted.model_id == "basins_qhh_shud"
-        assert submitted.manifest["cycle_id"] == cycle_id
-        assert submitted.manifest["stage"] == "forecast"
-        assert submitted.manifest["pipeline_job_id"] == retry_job.job_id
-        assert submitted.manifest["retry_count"] == 2
-        assert submitted.manifest["manual_retry_marker"] is True
-
-        events = _events(store)
-        assert [event.event_type for event in events] == ["retry", "submission"]
-        retry_event = events[0]
-        assert retry_event.entity_id == retry_job.job_id
-        assert retry_event.status_from == "failed"
-        assert retry_event.status_to == "pending"
-        assert retry_event.details["trigger"] == "manual"
-        assert retry_event.details["previous_job_id"] == failed_job_id
-        assert retry_event.details["previous_error"] == "NODE_FAILURE"
-        assert retry_event.details["retry_count"] == 2
-        assert retry_event.details["slurm_job_id"] is None
-        assert retry_event.details["manual_retry_marker"] is True
-        submission_event = events[1]
-        assert submission_event.entity_id == retry_job.job_id
-        assert submission_event.status_from == "pending"
-        assert submission_event.status_to == "submitted"
-        assert submission_event.details["trigger"] == "manual"
-        assert submission_event.details["slurm_job_id"] == "slurm_retry"
-        assert submission_event.details["gateway_status"] == "submitted"
+        # Reseed: the retry job the supported marker lane's scheduler mint produces,
+        # written directly, so the identity propagation below still has a retry row.
+        retry_job = _create_job(
+            store,
+            job_id=f"{run_id}_retry_active",
+            run_id=run_id,
+            cycle_id=cycle_id,
+            job_type="forecast_qhh_stage",
+            slurm_job_id="slurm_retry",
+            model_id="basins_qhh_shud",
+            stage="forecast",
+            status="submitted",
+            submitted_at=cycle_time + timedelta(minutes=41),
+            error_code=None,
+        )
+        retry_job.retry_count = 2
+        retry_job.manual_retry_marker = True
+        store.session.add(retry_job)
+        store.session.commit()
 
         running_at = cycle_time + timedelta(minutes=42)
         succeeded_at = cycle_time + timedelta(minutes=50)
@@ -1880,8 +1862,8 @@ def test_retry_rbac() -> None:
             allowed = client.post("/api/v1/runs/run_retry/retry", headers={"X-User-Role": "operator"})
             denied = client.post("/api/v1/runs/run_retry/retry", headers={"X-User-Role": "viewer"})
 
-        assert allowed.status_code == 200
-        assert allowed.json()["data"]["status"] == "submitted"
+        _assert_retired_retry_manual_action(allowed, run_id="run_retry")
+        assert [job.job_id for job in store.query_jobs_by_run("run_retry")] == ["job_retry"]
         assert denied.status_code == 403
         assert denied.json()["error"]["code"] == "RBAC_FORBIDDEN"
         assert denied.json()["error"]["details"]["policy_decision"]["action_id"] == "pipeline.retry_run"
@@ -1922,106 +1904,17 @@ def test_retry_all_operator_style_roles_are_allowed() -> None:
             with _client(store, allow_dev_role_header=True) as client:
                 response = client.post(f"/api/v1/runs/run_retry_{role}/retry", headers={"X-User-Role": role})
 
-            assert response.status_code == 200
-            data = response.json()["data"]
-            assert data["run_id"] == f"run_retry_{role}"
-            assert data["status"] == "submitted"
-            decision = response.json()["auth_policy_decisions"][0]
-            assert decision["action_id"] == "pipeline.retry_run"
-            assert decision["decision"] == "allow"
-            assert decision["roles"] == [role]
-            retry_jobs = [job for job in store.query_jobs_by_run(f"run_retry_{role}") if job.status == "submitted"]
-            assert len(retry_jobs) == 1
+            # Every operator-style role passes RBAC and reaches the retired lane's 409.
+            _assert_retired_retry_manual_action(response, run_id=f"run_retry_{role}")
+            assert [job.job_id for job in store.query_jobs_by_run(f"run_retry_{role}")] == [f"job_retry_{role}"]
+            assert _events(store) == []
 
 
-def test_retry_accepts_ops_mvp_failed_source_states_and_records_metadata() -> None:
-    failed_statuses = ["failed", "submission_failed", "partially_failed", "permanently_failed"]
-    for status in failed_statuses:
-        with _store() as store:
-            failed_job = _create_job(
-                store,
-                job_id=f"job_retry_{status}",
-                run_id=f"run_retry_{status}",
-                job_type=GENERIC_RETRY_JOB_TYPE,
-                stage="forecast",
-                status=status,
-                error_code="SBATCH_SUBMISSION_FAILED" if status == "submission_failed" else "NODE_FAILURE",
-            )
-            failed_job.retry_count = 1
-            store.session.add(failed_job)
-            store.session.commit()
-            with _client(store, allow_dev_role_header=True) as client:
-                response = client.post(f"/api/v1/runs/run_retry_{status}/retry", headers={"X-User-Role": "operator"})
-
-            assert response.status_code == 200
-            data = response.json()["data"]
-            assert data["run_id"] == f"run_retry_{status}"
-            assert data["retry_count"] == 2
-            assert data["status"] == "submitted"
-            assert data["execution_status"] == "submitted"
-            retry_jobs = [job for job in store.query_jobs_by_run(f"run_retry_{status}") if job.retry_count == 2]
-            assert len(retry_jobs) == 1
-            retry_job = retry_jobs[0]
-            assert retry_job.status == "submitted"
-            assert retry_job.stage == "forecast"
-            retry_event = next(event for event in _events(store) if event.event_type == "retry")
-            assert retry_event.entity_id == retry_job.job_id
-            assert retry_event.status_from == status
-            assert retry_event.details["trigger"] == "manual"
-            assert retry_event.details["manual_retry_marker"] is True
-            assert retry_event.details["retry_count"] == 2
-            assert retry_event.details["previous_job_id"] == f"job_retry_{status}"
-            assert retry_event.details["failure"]["manual_retry_marker"] is True
-
-
-def test_retry_accepts_partial_failed_job_when_later_publish_succeeded_and_run_failed() -> None:
-    with _store_with_hydro() as store:
-        _insert_hydro_run(store, "cycle_gfs_qhh", status="failed")
-        base_time = _cycle_time()
-        partial = _create_job(
-            store,
-            job_id="job_parse_partial",
-            run_id="cycle_gfs_qhh",
-            job_type="parse_qhh_stage",
-            stage="parse",
-            status="partially_failed",
-            error_code="PARSE_FAILED",
-            submitted_at=base_time,
-            started_at=base_time,
-            finished_at=base_time + timedelta(minutes=3),
-        )
-        partial.updated_at = base_time + timedelta(minutes=3)
-        publish = _create_job(
-            store,
-            job_id="job_publish_succeeded",
-            run_id="cycle_gfs_qhh",
-            job_type="publish_qhh_stage",
-            stage="publish",
-            status="succeeded",
-            error_code=None,
-            submitted_at=base_time + timedelta(minutes=10),
-            started_at=base_time + timedelta(minutes=10),
-            finished_at=base_time + timedelta(minutes=12),
-        )
-        publish.updated_at = base_time + timedelta(minutes=12)
-        store.session.add_all([partial, publish])
-        store.session.commit()
-        with _client(store, allow_dev_role_header=True) as client:
-            response = client.post("/api/v1/runs/cycle_gfs_qhh/retry", headers={"X-User-Role": "operator"})
-
-        assert response.status_code == 200
-        data = response.json()["data"]
-        assert data["run_id"] == "cycle_gfs_qhh"
-        assert data["status"] == "submitted"
-        retry_jobs = [job for job in store.query_jobs_by_run("cycle_gfs_qhh") if job.job_id.endswith("_retry_active")]
-        assert len(retry_jobs) == 1
-        retry_job = retry_jobs[0]
-        assert retry_job.stage == "parse"
-        retry_event = next(event for event in _events(store) if event.event_type == "retry")
-        assert retry_event.details["previous_job_id"] == "job_parse_partial"
-
-
-def test_retry_dev_token_defaults_operator_only_when_role_header_absent(monkeypatch: Any) -> None:
+def test_dev_token_defaults_operator_only_when_role_header_absent(monkeypatch: Any) -> None:
+    # #3157: the retry route answers every authorized caller with a 409, whose error
+    # envelope carries no audit block, so the role-defaulting audit is read off the
+    # cancel route, which shares the same `require_action` path.  The retry half
+    # pins that the defaulted operator passes RBAC there too.
     monkeypatch.setenv("NHMS_DEV_AUTH_TOKEN", "dev-token")
     with _store() as store:
         _create_job(
@@ -2033,13 +1926,19 @@ def test_retry_dev_token_defaults_operator_only_when_role_header_absent(monkeypa
             status="failed",
         )
         with _client(store) as client:
-            response = client.post(
+            retry_response = client.post(
                 "/api/v1/runs/run_retry_dev_token/retry",
                 headers={"Authorization": "Bearer dev-token"},
             )
+            response = client.post(
+                "/api/v1/runs/run_retry_dev_token/cancel",
+                headers={"Authorization": "Bearer dev-token"},
+            )
 
+        _assert_retired_retry_manual_action(retry_response, run_id="run_retry_dev_token")
         assert response.status_code == 200
         decision = response.json()["auth_policy_decisions"][0]
+        assert decision["action_id"] == "pipeline.cancel_run"
         assert decision["decision"] == "allow"
         assert decision["roles"] == ["operator"]
         assert decision["role_mapping_result"]["raw_roles_input_present"] is False
@@ -2087,27 +1986,26 @@ def test_retry_dev_token_rejects_blank_role_header_without_operator_promotion(mo
         assert store.get_job("job_retry_blank_role").status == "failed"
 
 
-def test_allowed_retry_records_canonical_audit_evidence() -> None:
+def test_allowed_control_mutation_records_canonical_audit_evidence() -> None:
+    # #3157: read off cancel -- the retired retry route has no success envelope.
     with _store() as store:
         _create_job(
             store,
-            job_id="job_retry_audit",
-            run_id="run_retry_audit",
-            job_type=GENERIC_RETRY_JOB_TYPE,
-            stage="forecast",
-            status="failed",
-            error_code="SLURM_TIMEOUT",
+            job_id="job_cancel_audit",
+            run_id="run_cancel_audit",
+            status="running",
+            slurm_job_id="slurm_cancel_audit",
         )
         with _client(store, allow_dev_role_header=True) as client:
             response = client.post(
-                "/api/v1/runs/run_retry_audit/retry",
-                headers={"X-User-Role": "operator", "X-Request-ID": "req-retry-audit"},
+                "/api/v1/runs/run_cancel_audit/cancel",
+                headers={"X-User-Role": "operator", "X-Request-ID": "req-cancel-audit"},
             )
 
         assert response.status_code == 200
         auth_audit = response.json()["auth_policy_decisions"]
-        assert auth_audit[0]["request_id"] == "req-retry-audit"
-        assert auth_audit[0]["action_id"] == "pipeline.retry_run"
+        assert auth_audit[0]["request_id"] == "req-cancel-audit"
+        assert auth_audit[0]["action_id"] == "pipeline.cancel_run"
         assert auth_audit[0]["decision"] == "allow"
         assert auth_audit[0]["roles"] == ["operator"]
         assert auth_audit[0]["execution_mode"] == "backend_route_executed"
@@ -2230,10 +2128,18 @@ def test_spoofed_live_headers_do_not_authorize_retry(monkeypatch: Any) -> None:
         assert store.get_job("job_spoofed_live").status == "failed"
 
 
-def test_trusted_test_live_proof_allows_retry_with_provider_metadata(monkeypatch: Any) -> None:
+def test_trusted_test_live_proof_allows_control_mutation_with_provider_metadata(monkeypatch: Any) -> None:
+    # #3157: the live-proof actor reaches the retired retry lane's 409 (auth passed);
+    # the provider-metadata audit is read off cancel, which still has a success envelope.
     monkeypatch.setenv("AUTH_BACKEND", "oidc")
     monkeypatch.setenv("NHMS_TRUSTED_LIVE_PROOF_MODE", "test_internal")
     monkeypatch.setenv("NHMS_INTERNAL_LIVE_PROOF_TOKEN", "proof-token")
+    live_headers = {
+        "X-NHMS-Internal-Live-Proof": "proof-token",
+        "X-Live-User-ID": "alice",
+        "X-Live-User-Roles": "operator",
+        "X-Live-Provider": "test-oidc",
+    }
     with _store() as store:
         _create_job(
             store,
@@ -2244,16 +2150,10 @@ def test_trusted_test_live_proof_allows_retry_with_provider_metadata(monkeypatch
             status="failed",
         )
         with _client(store) as client:
-            response = client.post(
-                "/api/v1/runs/run_trusted_live/retry",
-                headers={
-                    "X-NHMS-Internal-Live-Proof": "proof-token",
-                    "X-Live-User-ID": "alice",
-                    "X-Live-User-Roles": "operator",
-                    "X-Live-Provider": "test-oidc",
-                },
-            )
+            retry_response = client.post("/api/v1/runs/run_trusted_live/retry", headers=live_headers)
+            response = client.post("/api/v1/runs/run_trusted_live/cancel", headers=live_headers)
 
+        _assert_retired_retry_manual_action(retry_response, run_id="run_trusted_live")
         assert response.status_code == 200
         audit = response.json()["auth_policy_decisions"][0]
         assert audit["execution_mode"] == "live_proof"
@@ -2568,24 +2468,6 @@ async def _asgi_post(path: str, *, headers: dict[str, bytes]) -> Any:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         return await client.post(path, headers=headers)
-
-
-def test_retry_service_direct_call_requires_policy_evidence() -> None:
-    with _store() as store:
-        _create_job(store, job_id="job_direct_retry", run_id="run_direct_retry", status="failed")
-        service = RetryService(store, RetryConfig(max_retries=3))
-        gateway = _MockGateway()
-
-        try:
-            service.attempt_manual_retry("run_direct_retry", gateway=gateway)
-        except Exception as error:
-            assert getattr(error, "code") == "AUTH_REQUIRED"
-            assert getattr(error, "details")["no_mutation_expected"] is True
-        else:
-            raise AssertionError("direct retry without policy evidence should fail")
-
-        assert gateway.submissions == []
-        assert [job.job_id for job in store.query_jobs_by_run("run_direct_retry")] == ["job_direct_retry"]
 
 
 def test_metrics_stage_duration() -> None:
@@ -3261,6 +3143,19 @@ def _dependency_forbidden(message: str) -> Any:
         raise AssertionError(message)
 
     return dependency
+
+
+def _assert_retired_retry_manual_action(response: Any, *, run_id: str) -> None:
+    """#3157: an authorized retry reaches the route and is refused with the stable manual-action 409."""
+
+    assert response.status_code == 409, response.text
+    body = response.json()
+    assert body["error"]["code"] == "CONTROL_PLANE_MANUAL_ACTION_REQUIRED"
+    details = body["error"]["details"]
+    assert details["run_id"] == run_id
+    assert details["recovery_runbook"] == "node22-control-plane-manual-recovery"
+    assert "scripts/node22_manual_retry_failed_runs.py" in details["suggested_action"]
+    assert "display_mode" not in details
 
 
 def _manual_action_details_absent(body: dict[str, Any]) -> bool:

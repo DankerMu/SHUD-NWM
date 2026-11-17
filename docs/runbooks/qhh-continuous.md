@@ -391,27 +391,15 @@ LIMIT 20;
    export NHMS_PUBLISHED_ARTIFACT_URI_PREFIX=published://
    ```
 
-2. 确认 `$OBJECT_STORE_ROOT` 可写，且不是 `$WORKSPACE_ROOT`。如果当前 API 返回
-   `RETRY_RUNTIME_ROOTS_UNRESOLVED` 或 `RETRY_RUNTIME_ROOTS_SECRET_BEARING`，先修正环境变量或原始
-   submission evidence；不要通过 DB update 绕过 fail-closed guard。
-   `RETRY_RUNTIME_ROOTS_UNRESOLVED` 且 `details.runtime_root_resolution.candidate_counts.blocked_reads` 存在（>0）
-   时是另一类成因（file-journal 车道，#2566/#2567）：重试追溯原次提交根时 journal 读被拒（例如记录预算越限、记录
-   不可读），来历未知。此时环境根**不会**被读取或采用（旧行为是静默用当前环境根提交并返回 200），DB-free 选择器也只从
-   记录的来历取，只有 `NHMS_SCHEDULER_DB_FREE_REQUIRED` 这一模式开关仍生效。改环境变量解决不了它：先按 journal 读被拒的
-   日志告警（`manual retry ... blocked: reason=... field=...`）修复 journal 读，再对同一 `run_id` 重发手动重试。
-   没有 `blocked_reads` 键的证据与此前逐字节一致。
-   如果返回 `RETRY_RUNTIME_ROOTS_UNSAFE`，按 `details.runtime_root_resolution.rejected[].reason` 分两类处置：
-   - `relative_local_root` / `parent_traversal_local_root` / `resolves_to_workspace_dir`：同上，修正环境变量或原始
-     submission evidence（root 必须是绝对路径、不含 `..`；object store 不得与 workspace **同一路径**——含
-     symlink 别名等值，子目录是允许的）。
-   - `unresolvable_local_root`：**不是**环境变量拼写问题——root 路径本身有 symlink loop / EACCES /
-     ESTALE / ENOTDIR 一类解析故障。在**跑 retry API 的那台主机上** `readlink -f "$ROOT"` 并逐层
-     `ls -ld` 复现内核判决，修好挂载/链接/权限后对同一 `run_id` 重发手动重试即可（该失败不永久化）。
-     单纯 ENOENT（root 尚未创建）不会命中本码；例外：`<missing>/../<loop>` 形态首查虽 ENOENT，
-     但非 strict 回退值仍带环，照拒（此时 `readlink -f` 不报错，需逐层 `ls -ld` 找环分量）。
-3. 通过既有 retry API 对同一 `run_id` 重新发起手动重试。新的 retry submission event 应包含
-   `runtime_root_resolution.resolved.object_store_root.value=$OBJECT_STORE_ROOT` 且
-   `same_as_workspace=false`。
+2. 确认 `$OBJECT_STORE_ROOT` 可写，且不是 `$WORKSPACE_ROOT`（object store 不得与 workspace **同一路径**——含
+   symlink 别名等值，子目录是允许的；root 必须是绝对路径、不含 `..`）。不要通过 DB update 绕过 fail-closed guard。
+   历史 retry event 里可能留有 `RETRY_RUNTIME_ROOTS_UNRESOLVED` / `RETRY_RUNTIME_ROOTS_SECRET_BEARING` /
+   `RETRY_RUNTIME_ROOTS_UNSAFE`：这些码只由已退役的 API 手动重试提交车道产生（#3157），现在的路由不会再返回它们，
+   只把它们当作历史证据保留。
+3. 通过 node-22 marker 车道对同一 `run_id` 重新发起手动重试：`scripts/node22_manual_retry_failed_runs.py` 经
+   `FileJournalRetryService.record_manual_repair` 写 `manual_repair_requested` marker，由 scheduler 在下一轮铸出并提交
+   retry job（流程与处置见 [`node22-control-plane-manual-recovery.md`](node22-control-plane-manual-recovery.md)）。
+   `POST /api/v1/runs/{run_id}/retry` 只返回 409 `CONTROL_PLANE_MANUAL_ACTION_REQUIRED`，不再提交任何作业。
 4. 只在 corrected retry 完成并确认 `$OBJECT_STORE_ROOT/raw/<SOURCE>/<YYYYMMDDHH>/manifest.json`
    存在后，再将旧 workspace-root raw bundle 作为证据归档或按保留策略清理。不要把旧 bundle
    复制到 object store 来制造成功状态。

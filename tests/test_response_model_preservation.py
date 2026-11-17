@@ -114,6 +114,17 @@ OUT_OF_SCOPE_ROUTES: dict[str, str] = {
     "GET /{full_path:path}": "SPA static fallback (HTML), not JSON",
     "services.slurm_gateway.routes": "internal slurm gateway, separate auth plane and contract",
 }
+# #3157: routes that keep their `response_model` (so the generated OpenAPI stays
+# byte-identical) but can no longer return a success body: every request that
+# reaches the handler is refused, so there is no successful serialisation for
+# this oracle to capture.  The model is still asserted below; the operation and
+# its schema are removed by #3179.
+FAIL_CLOSED_ROUTES: dict[str, str] = {
+    "POST /api/v1/runs/{run_id}/retry": (
+        "#3157: always 409 CONTROL_PLANE_MANUAL_ACTION_REQUIRED after auth; "
+        "RetryRunResultEnvelope kept only for OpenAPI stability"
+    ),
+}
 # Routes already modelled before #2348 (layers / precip): outside this oracle.
 PRE_MODELLED_ROUTES = frozenset(
     {
@@ -716,7 +727,7 @@ def _in_scope_route_objects() -> dict[str, APIRoute]:
         if not isinstance(route, APIRoute) or not route.endpoint.__module__.startswith("apps.api.routes."):
             continue
         key = f"{sorted(route.methods)[0]} {route.path}"
-        if route.response_model is None or key in PRE_MODELLED_ROUTES:
+        if route.response_model is None or key in PRE_MODELLED_ROUTES or key in FAIL_CLOSED_ROUTES:
             continue
         routes[key] = route
     return routes
@@ -735,7 +746,7 @@ def unmodelled_routes(routes: list[Any], modelled: set[str]) -> set[str]:
             continue
         key = f"{sorted(route.methods)[0]} {route.path}"
         module = route.endpoint.__module__
-        if key in modelled or key in PRE_MODELLED_ROUTES:
+        if key in modelled or key in PRE_MODELLED_ROUTES or key in FAIL_CLOSED_ROUTES:
             continue
         if module.startswith("apps.api.routes.") and route.response_model is None and returns_response_object(route):
             continue  # binary tiles / PNG / basemap proxy: return a Response object
@@ -759,8 +770,9 @@ def test_every_json_route_is_sampled() -> None:
 
     sampled = set().union(*(sample.routes for sample in (*SAMPLES.values(), *PIPELINE_SAMPLES.values())))
     in_scope = _in_scope_json_routes()
-    # 35 #2348 routes minus the river-segment list retired by #2866.
-    assert len(in_scope) == 34, sorted(in_scope)
+    # 35 #2348 routes minus the river-segment list retired by #2866, minus the
+    # retry route #3157 made fail-closed (`FAIL_CLOSED_ROUTES`).
+    assert len(in_scope) == 33, sorted(in_scope)
     assert sampled == in_scope, {"unsampled": sorted(in_scope - sampled), "unknown": sorted(sampled - in_scope)}
     # ...and each is typed by an `apps.api.response_models` model, not by the
     # implicit `dict[str, Any]` FastAPI infers from the return annotation.
@@ -769,6 +781,15 @@ def test_every_json_route_is_sampled() -> None:
     # Every business route module's JSON route carries a response model, and the
     # routes left out are exactly the documented out-of-scope set.
     assert unmodelled_routes(app.routes, in_scope) == set(OUT_OF_SCOPE_ROUTES)
+    # The fail-closed exemption is narrow: each exempted route is a real business
+    # route that still carries its typed response model (OpenAPI stays unchanged).
+    business_routes = {
+        f"{sorted(route.methods)[0]} {route.path}": route
+        for route in app.routes
+        if isinstance(route, APIRoute) and route.endpoint.__module__.startswith("apps.api.routes.")
+    }
+    assert set(FAIL_CLOSED_ROUTES) <= set(business_routes), sorted(set(FAIL_CLOSED_ROUTES) - set(business_routes))
+    assert all(_is_response_model(business_routes[key].response_model) for key in FAIL_CLOSED_ROUTES)
 
 
 def test_completeness_exemption_requires_a_response_annotation() -> None:

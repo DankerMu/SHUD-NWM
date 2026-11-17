@@ -2129,17 +2129,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # rule is its route for them. Its journal pair IS stop-rule owned
             # and rides FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS, per this
             # rule's #1455 note above. Every import is function-local, so no
-            # importer derivation can reach it. DB-free, 17 tests in ~1s.
+            # importer derivation can reach it. DB-free, 15 tests in ~1s.
             "tests/test_file_journal_read_blocked_consumers.py",
-            # #2566/#2567/#2600: the runtime-root blocked-read suite (subject:
-            # retry.py's candidate batch + evidence renderer, imported
-            # function-locally) and the manual-retry restart-point suite (subject:
+            # #2600: the manual-retry restart-point suite (subject:
             # scheduler_state_failure.py / scheduler_state_decision.py /
             # scheduler_candidates.py; top-level importer gaps on the package
-            # __init__ and scheduler_candidate_manifest.py close here). Their
+            # __init__ and scheduler_candidate_manifest.py close here). Its
             # scheduler.py / file_orchestration_journal.py pairs ride the stop-rule
-            # tuples. DB-free, together ~6s.
-            "tests/test_retry_runtime_root_blocked_reads.py",
+            # tuples. DB-free, ~5s. (#3157 deleted the runtime-root blocked-read
+            # suite that shared this row: its subject was the retired submit lane.)
             "tests/test_manual_retry_failed_stage_restart.py",
             # #1186: the operator-action listing suite top-level-imports
             # `services.orchestrator` itself and scheduler_evidence_payload.py
@@ -2258,6 +2256,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_retention_unexpandable_roots.py",
             "tests/test_retry.py",
             "tests/test_retry_cancel_consistency.py",
+            # #3157: the retry route's fail-closed pins, including the absence
+            # of `RetryService.attempt_manual_retry`. DB-free, ~2s.
+            "tests/test_retry_route_fail_closed.py",
             "tests/test_run_identity.py",
             "tests/test_run_tree_copyback.py",
             # #2237: run_tree_copyback.py's backup lifecycle oracle. Sub-second.
@@ -5536,22 +5537,19 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_pipeline_ops_identity_envelope.py",
             # #2348: the eleven ops routes' handler objects vs their models.
             *RESPONSE_MODEL_PRESERVATION_TESTS,
-            # #2385/#2387: the read-blocked sentinel suite drives
-            # `POST /runs/{run_id}/retry` through TestClient for both consumer
-            # ends -- the 409 `RETRY_EVIDENCE_INVALID` refusal body and the
-            # recorded-failure delta on the provenance walk -- so a change to
-            # this route's except table or its 503 assembly must run it.
-            "tests/test_file_journal_read_blocked_consumers.py",
+            # #3157: the retry route's fail-closed contract -- the stable
+            # manual-action 409 for every service role, the 400/401/403/display
+            # 409 order before it, no store/service/gateway in its dependency
+            # graph, and both `attempt_manual_retry` lanes absent. It replaces
+            # #2568's tests/test_retry.py as the route's HTTP-level oracle (that
+            # suite no longer imports or drives this module).
+            "tests/test_retry_route_fail_closed.py",
             # #2308: the ONLY oracle for the cancel side's two-shape invariant --
             # the gateway error rendered on the response body and left raw in the
             # persisted `slurm_cancellation_gap` / `cancel_failed` event, asserted
             # in one test. The broad `apps/api/**` rule buys the three generic API
             # suites, none of which call `cancel_run`.
             "tests/test_retry_cancel_consistency.py",
-            # #2568: the ONLY HTTP-level oracle for `POST /runs/{run_id}/retry`
-            # (whole file: the route's 409/503 bodies, the file-lane render and the
-            # recorded submission event are all driven through TestClient here).
-            "tests/test_retry.py",
             # #2576: this module is in the selector suite's GUARDED_MODULE_CLOSURES
             # (direct-only mode), so the rule carries its whole DIRECT non-gated
             # importer set, derived from the tracked tree. The two direct importers

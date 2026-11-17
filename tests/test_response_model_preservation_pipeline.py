@@ -21,7 +21,6 @@ import pytest
 import tests.test_monitoring_api as monitoring
 import tests.test_retry_cancel_consistency as cancels
 from packages.common.contracts.time_normalization import cycle_id_for
-from tests.api_contract_helpers import _RetryGateway
 from tests.test_response_model_preservation import Sample, SampleEnv, ok, run_sample
 
 OPERATOR = {"X-User-Role": "operator"}
@@ -102,20 +101,6 @@ class _ListJobsGateway:
         return [SimpleNamespace(status=status) for status in ("running", "pending", "submitted", "failed")]
 
 
-def _retry(env: SampleEnv) -> None:
-    with monitoring._store() as store:
-        monitoring._create_job(
-            store,
-            job_id="job_retry",
-            run_id="run_retry",
-            job_type=monitoring.GENERIC_RETRY_JOB_TYPE,
-            stage="forecast",
-            status="failed",
-        )
-        with monitoring._client(store, _RetryGateway(), allow_dev_role_header=True) as client:
-            ok(client.post("/api/v1/runs/run_retry/retry", headers=OPERATOR))
-
-
 def _cancel_store(store: Any, run_id: str, *, cycle_status: str = "forecast_running", jobs: dict[str, str]) -> None:
     cancels._insert_hydro_run(store, run_id, status="running")
     cancels._insert_forecast_cycle(store, f"cycle_{run_id}", status=cycle_status)
@@ -176,7 +161,6 @@ PIPELINE_SAMPLES: dict[str, Sample] = {
             {"GET /api/v1/metrics/stage-duration", "GET /api/v1/metrics/success-rate", "GET /api/v1/queue/depth"}
         ),
     ),
-    "retry": Sample(_retry, frozenset({"POST /api/v1/runs/{run_id}/retry"})),
     "cancel_clean_terminal_partial_blocked_unproven_idempotent": Sample(
         _cancel, frozenset({"POST /api/v1/runs/{run_id}/cancel"})
     ),

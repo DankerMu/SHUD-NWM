@@ -303,8 +303,6 @@ from services.orchestrator.retry import (
     RetryConflictError,
     RetryError,
     RetryNotFoundError,
-    _attach_retry_runtime_root_contract,
-    _attach_retry_runtime_root_resolution,
     _candidate_batch_db_free_required,
     _event_details_is_manual_retry_submission,
     _has_runtime_root_field,
@@ -714,7 +712,6 @@ __all__ = (
     "_RECONCILE_INVENTORY_SCHEMA_VERSION",
     "_RECONCILE_INVENTORY_TEMP_RE",
     "_REPLAY_ORDER_FIELD",
-    "_RUNTIME_ROOT_SAME_RUN_JOB_SCAN_LIMIT",
     "_RecordBudget",
     "_RetentionDiscoveryBudget",
     "_SAFE_SEGMENT_RE",
@@ -762,7 +759,6 @@ __all__ = (
     "_relative_evidence",
     "_released_candidate_cycle_scope",
     "_released_identity_blocked_row",
-    "_runtime_root_env_candidate",
     "_safe_segment",
     "_settled_incarnation_matches_candidate",
     "_source_id_from_job",
@@ -13051,76 +13047,6 @@ class FileJournalRetryService:
         )
         return _public_scheduler_row(row)
 
-    def attempt_manual_retry(
-        self,
-        run_id: str,
-        gateway: Any | None = None,
-        *,
-        policy_decision: PolicyDecision | None = None,
-        trusted_internal: bool = False,
-    ) -> SimpleNamespace:
-        if trusted_internal:
-            policy_decision = trusted_internal_policy_decision(
-                "pipeline.retry_run",
-                target_type="pipeline_run",
-                target_id=run_id,
-                actor_id="trusted-internal:file-journal-retry-service",
-                roles=("sys_admin",),
-            )
-        decision = require_policy_evidence(
-            policy_decision,
-            action_id="pipeline.retry_run",
-            target_type="pipeline_run",
-            target_id=run_id,
-        )
-        if decision.decision != "allow":
-            raise RetryError(
-                decision.reason_code,
-                decision.reason,
-                {"run_id": run_id, "policy_decision": decision.to_dict(), "no_mutation_expected": True},
-            )
-        if gateway is None:
-            raise RetryError(
-                "RETRY_EXECUTION_UNAVAILABLE",
-                "No Slurm gateway available for retry submission.",
-                {"run_id": run_id},
-            )
-
-        pending = self._create_pending_manual_retry_job(run_id)
-        retry_job = pending.public_job
-        # Trusted PRE-SUBMIT private snapshot: carried out of the lock-held
-        # producer (no new lock-outside durable read), strictly validated
-        # again defensively before any gateway side effect.  This defensive
-        # failure converges onto the same 409 boundary as the producer's own
-        # evidence rejection (D4) instead of a generic 500.
-        trusted_pending_snapshot = pending.private_snapshot
-        try:
-            _strict_retry_init_state_identities(trusted_pending_snapshot.get(INIT_STATE_IDENTITY_FIELD))
-        except FileOrchestrationJournalError as error:
-            raise RetryEvidenceInvalidError(
-                run_id, reason=str(error.reason), field=str(error.field)
-            ) from error
-        runtime_root_resolution: dict[str, Any] | None = None
-        runtime_root_contract: dict[str, str] | None = None
-        try:
-            request, runtime_root_resolution, runtime_root_contract = self._manual_retry_submission_request(retry_job)
-            submitted = _submit_file_manual_retry_job(gateway, request)
-        except Exception as error:
-            if runtime_root_resolution is not None:
-                _attach_retry_runtime_root_resolution(error, runtime_root_resolution)
-            if runtime_root_contract is not None:
-                _attach_retry_runtime_root_contract(error, runtime_root_contract)
-            updated = self._record_manual_retry_submission_failure(retry_job.job_id, error)
-            return _file_retry_namespace(updated)
-        updated = self._record_manual_retry_submission_success(
-            retry_job.job_id,
-            submitted,
-            trusted_pending_snapshot,
-            runtime_root_resolution=runtime_root_resolution,
-            runtime_root_contract=runtime_root_contract,
-        )
-        return _file_retry_namespace(updated)
-
     def _manual_retry_submission_request(
         self,
         retry_job: SimpleNamespace,
@@ -13409,12 +13335,13 @@ class FileJournalRetryService:
             # #2387: degrade like the sibling ``submission_runtime_root_resolution``.
             # Without this branch ``_source_id_from_job`` raises
             # ``file_journal_missing_identity`` on the sentinel's empty
-            # ``cycle_id``, and because the whole provenance walk runs inside
-            # ``attempt_manual_retry``'s ``except Exception`` -- AFTER the pending
-            # retry row is minted -- that fault is recorded as a
-            # ``submission_failed`` row carrying a fabricated
-            # ``SBATCH_SUBMISSION_FAILED`` blamed on a gateway that was never
-            # called.  The warning is the discriminator, as it is for the sibling.
+            # ``cycle_id``.  The provenance walk ran inside the file-lane manual
+            # retry submit method's ``except Exception`` -- AFTER the pending retry
+            # row was minted -- so that fault was recorded as a fabricated
+            # ``SBATCH_SUBMISSION_FAILED``.  #3157 retired that submit method; this
+            # reader no longer has a production caller and is removed with the
+            # rest of that dead closure.  The warning is the discriminator, as it
+            # is for the sibling.
             reason, field = _blocked_query_job_fault(job)
             LOGGER.warning(
                 "manual retry predecessor lookup blocked: reason=%s field=%s",
@@ -13445,9 +13372,11 @@ class FileJournalRetryService:
     def submission_runtime_root_resolution(self, job_id: str) -> dict[str, Any] | None:
         """Runtime-root evidence from ``job_id``'s latest ``submission`` event.
 
-        The manual-retry seam ``POST /runs/{run_id}/retry`` reads this AFTER
-        ``attempt_manual_retry`` returned a ``submission_failed`` row, to attach
-        ``details.runtime_root_resolution`` to its structured 503.  Mirrors the
+        The retired (#3157) manual-retry route read this after the file-lane submit
+        method returned a ``submission_failed`` row, to attach
+        ``details.runtime_root_resolution`` to its structured 503; the route now
+        always answers 409 ``CONTROL_PLANE_MANUAL_ACTION_REQUIRED`` and this reader
+        has no production caller (removed with that dead closure).  Mirrors the
         database lane (``RetryService.submission_runtime_root_resolution``):
         latest-first over the job's own ``submission`` events, first Mapping
         ``details["runtime_root_resolution"]`` wins, ``None`` when there is none.

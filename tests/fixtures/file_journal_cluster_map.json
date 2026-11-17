@@ -441,15 +441,6 @@
       },
       "cluster": "facade"
     },
-    "_runtime_root_env_candidate": {
-      "binding": "import",
-      "callers": {
-        "facade": [
-          "FileJournalRetryService"
-        ]
-      },
-      "cluster": "facade"
-    },
     "_stat_signature": {
       "binding": "def",
       "callers": {
