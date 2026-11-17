@@ -123,29 +123,29 @@ issue against `origin/master@172394407`.
 
 ## Evidence Floor
 
-- [ ] E1 Lint and deletion checks:
+- [x] E1 Lint and deletion checks:
   - `uv run ruff check --no-cache .` passes, `git diff --check` is clean, and the entropy hard gate reports
     `hard_gate_failing_count 0`;
   - `git grep -n -w -E "_private_runtime_root_recovery_record|_private_runtime_root_recovery_path|_write_pipeline_event_private_recovery_unlocked|_runtime_root_recovery_candidate_records|_runtime_root_recovery_candidate_value|_PRIVATE_RUNTIME_ROOT_RECOVERY_RECORD_TYPE|FILE_ORCHESTRATION_PRIVATE_RECOVERY_SCHEMA_VERSION|_RUNTIME_ROOT_EVENT_CANDIDATE_PATHS|_RUNTIME_ROOT_FIELDS|_DB_FREE_REQUIRED_FIELD|_DB_FREE_SELECTOR_FIELDS|_DB_FREE_RUNTIME_FIELDS|_PENDING_JOB_STATUSES" -- ':!openspec' ':!docs/review-loop-log.jsonl' ':!docs/adr'`
     is empty, except for test-local helpers deliberately named the same (list them);
   - `git grep -n -w -E "_mapping_at|_has_runtime_root_field" -- services` is empty;
   - `.large-file-guard.json` has lost exactly the two entries.
-- [ ] E2 Byte-identity of the journal tree:
+- [x] E2 Byte-identity of the journal tree:
   - on master and on HEAD, with `_utcnow` pinned to a fixed instant, append the exact event from
     `tests/test_file_orchestration_journal.py:2663` (same `details`, same identities) into a fresh journal root;
   - compare the full file tree under the root. The only path difference is `private/runtime-root-recovery/**`, which
     exists only on master. Every other file (journal jsonl, `latest/`, direct rows) is byte-equal;
   - the public rows returned by the read API are equal.
-- [ ] E3 Local:
+- [x] E3 Local:
   - the issue set: `uv run pytest -q tests/test_file_orchestration_journal.py tests/test_file_orchestration_journal_facade.py tests/test_file_journal_cluster_map.py`;
   - plus `tests/test_file_journal_late_lookup_seams.py`, `tests/test_status_vocab_parity.py`, the ADR census guard test,
     and the selector set for the diff.
-- [ ] E4 Mutation reds, each restored:
+- [x] E4 Mutation reds, each restored:
   - the upsert merge assigns `incoming["error_message"]` directly → the new pin is red;
   - the private recovery write is re-added → the rewritten `:2663` test is red.
-- [ ] E5 node-27 temporary worktree: the E3 set with the real-DB integration env, `leftover_it_dbs=0`.
-- [ ] E6 `openspec validate retire-retry-residue --strict --no-interactive`.
-- [ ] E7 Failure-path classification. The PR body lists each of the four deleted raise sites with a verdict, checked in
+- [x] E5 node-27 temporary worktree: the E3 set with the real-DB integration env, `leftover_it_dbs=0`.
+- [x] E6 `openspec validate retire-retry-residue --strict --no-interactive`.
+- [x] E7 Failure-path classification. The PR body lists each of the four deleted raise sites with a verdict, checked in
   code and, where reachable, by a test:
   - `entity_id`: still rejected earlier by `_validate_event_identity` → `_required_safe_identity`
     (`file_journal_paths.py:677`), via `_validate_outgoing_record`. Unchanged.

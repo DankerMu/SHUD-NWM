@@ -17,4 +17,4 @@
 - [x] 1.3 Refresh the ADR 0009 census from the guard's computed set (What 4).
 - [x] 1.4 Add the upsert placeholder `error_message` pin (What 5).
 - [x] 1.5 Evidence: E1-E4 locally.
-- [ ] 1.6 E5 on node-27 (orchestrator), E6, and the E7 classification in the PR body.
+- [x] 1.6 E5 on node-27 (orchestrator), E6, and the E7 classification in the PR body.
