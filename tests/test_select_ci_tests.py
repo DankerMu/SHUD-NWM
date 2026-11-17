@@ -6225,6 +6225,22 @@ GUARDED_MODULE_CLOSURES: tuple[tuple[str, str, str], ...] = (
     # "derived no non-gated top-level importer suites" anti-vacuity assertion
     # fail. They are routed by the `apps/api/routes/hydro_display*.py` glob in
     # scripts/select_ci_tests.py instead.
+    #
+    # #3167: packages/common/shud_preflight.py stays out for the same structural
+    # reason. Every suite that imports it does so inside a function
+    # (tests/test_shud_runtime.py, tests/test_production_slurm_validation.py,
+    # tests/test_production_scheduler.py), so its derived direct non-gated
+    # importer set is empty, and `_guarded_module_closure_offenders` asserts a
+    # non-empty direct set BEFORE it branches on DIRECT_ONLY_GUARDED_MODULES:
+    # neither the full mode nor the direct-only mode can hold it. Its behaviour
+    # suites are routed by an explicit PathTestRule instead. For information only
+    # (not a criterion), measured with this file's own helpers: 0 direct, and
+    # `_one_hop_importer_tests` yields 15 non-gated suites through 3 one-hop
+    # modules (workers/shud_runtime/runtime.py,
+    # services/orchestrator/scheduler_preflight.py,
+    # services/production_closure/slurm_validation.py). Residual: the derivation
+    # reads module-scope imports only, so a function-body importer stays
+    # invisible to every closure guard.
     (
         "apps/api/routes/hydro_display_postgis.py",
         "apps.api.routes.hydro_display_postgis",
@@ -15181,6 +15197,23 @@ def test_family_guard_routing_is_set_union_over_every_derived_root() -> None:
     # Live state: the same positive oracle the mutant test uses reports nothing.
     live_violations = _family_guard_roots_violations(_family_guard_roots(), probe="services/brand_new_thing.py")
     assert not live_violations, f"live routing of {FAMILY_GUARD_PATH} has violations: {live_violations}"
+
+
+def test_shud_preflight_routes_its_behaviour_suites_on_top_of_the_additive_guards() -> None:
+    # #3167: no rule routed the shared SHUD executable preflight, and it has no
+    # same-name suite, so a preflight-only PR got core smoke plus the additive
+    # guards and missed the two suites that assert its realpath / stub / identity /
+    # inconclusive behaviour (both import it inside functions, which no importer
+    # derivation sees). The explicit rule must ADD them, not displace the family
+    # guard, the resolve-surface guard or the #1744 path-B core-smoke baseline.
+    selected = set(select_tests(["packages/common/shud_preflight.py"], repo_root=Path(".")))
+
+    behaviour_suites = {"tests/test_shud_runtime.py", "tests/test_production_slurm_validation.py"}
+    missing = sorted(behaviour_suites - selected)
+    assert not missing, f"packages/common/shud_preflight.py does not select its behaviour suites {missing}"
+    assert FAMILY_GUARD_PATH in selected
+    assert RESOLVE_SURFACE_GUARD_PATH in selected
+    assert set(CORE_SMOKE_TESTS) <= selected, sorted(set(CORE_SMOKE_TESTS) - selected)
 
 
 def test_family_guard_routing_reds_when_a_root_is_dropped(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -3431,6 +3431,22 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ("tests/test_hydro_status_set_parity.py",),
     ),
     PathTestRule(
+        # #3167: the shared SHUD executable preflight (`check_shud_executable`).
+        # No rule covered it and it has no same-name suite, so a preflight-only
+        # diff got core smoke plus the additive family/resolve-surface guards and
+        # none of its behaviour assertions. Both targets import the module only
+        # inside functions, which no importer derivation sees: the shared
+        # `test_shared_preflight_*` family (realpath, stub, identity,
+        # inconclusive) and the stub rejections through the slurm_validation
+        # caller. The scheduler_preflight caller's cases live in
+        # tests/test_production_scheduler.py, which core smoke already carries.
+        "packages/common/shud_preflight.py",
+        (
+            "tests/test_shud_runtime.py",
+            "tests/test_production_slurm_validation.py",
+        ),
+    ),
+    PathTestRule(
         "packages/common/state_cli.py",
         (
             "tests/test_state_manager.py",
