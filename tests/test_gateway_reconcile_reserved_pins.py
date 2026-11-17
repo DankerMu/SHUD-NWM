@@ -599,9 +599,15 @@ def test_the_capability_probe_never_runs_for_an_empty_selection_or_rows_that_exi
     # bind_only exits a non-forcing row before lane selection.
     early = _Querier({}, trace)
     outcomes = _reconcile(_Store([_accepted_job("gfs"), _accepted_job("ifs")], trace), early, bind_only=True)
-    assert [(outcome.action, outcome.reconciliation_reason_class) for outcome in outcomes] == [
-        ("query_unavailable", "comment_accounting_unproven"),
-        ("query_unavailable", "comment_accounting_unproven"),
+    assert [vars(outcome) for outcome in outcomes] == [
+        _expected(
+            job_id=job_id,
+            idempotency_key=key,
+            action="query_unavailable",
+            status="reserved",
+            reconciliation_reason_class="comment_accounting_unproven",
+        )
+        for job_id, key in ((GFS_JOB, GFS_KEY), (IFS_JOB, IFS_KEY))
     ]
     assert early.capability_calls == 0
     assert ("capability",) not in trace
