@@ -13292,9 +13292,9 @@ def test_upsert_round_trip_of_a_public_row_keeps_the_real_log_uri(
     persisted row (``_resolved_caller_evidence``), so the real ``s3://`` URI
     stays durable.
 
-    #3157 PR 2: this was pinned through the retired manual-retry helper
-    ``_record_manual_retry_submission_success``; the surviving entry it asserted
-    on is ``upsert_pipeline_job`` itself, which is what is driven here.
+    #3157 PR 2: the test this replaces entered through the retired manual-retry
+    success writer, which upserted the PRIVATE row and so never fed a placeholder
+    into the merge; this one drives ``upsert_pipeline_job`` with the public row.
     """
 
     cycle_time = _dt("2026-06-28T00:00:00Z")
