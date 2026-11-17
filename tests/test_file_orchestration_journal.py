@@ -13276,7 +13276,56 @@ def test_cancelled_master_keeps_cancellation_while_evidence_refreshes(
         assert candidate["native_shud_resubmitted"] is False
 
 
-# --- J10: the manual-retry round-trip residue ----------------------------
+# --- J10: a public row round-tripped through upsert keeps the real URI ---
+
+
+def test_upsert_round_trip_of_a_public_row_keeps_the_real_log_uri(
+    tmp_path: Path,
+) -> None:
+    """#1592 J10 (design D8, restated round 2): the real URI SURVIVES.
+
+    A caller that reads the PUBLIC row and writes it back through
+    ``upsert_pipeline_job`` hands in ``log_uri`` as ``[object-uri]``.  A
+    placeholder is a WITHHELD value, and the honest resolution of a withheld
+    field is the value the row already carries, not an erasure:
+    ``upsert_pipeline_job`` resolves each carried mutable field against the
+    persisted row (``_resolved_caller_evidence``), so the real ``s3://`` URI
+    stays durable.
+
+    #3157 PR 2: this was pinned through the retired manual-retry helper
+    ``_record_manual_retry_submission_success``; the surviving entry it asserted
+    on is ``upsert_pipeline_job`` itself, which is what is driven here.
+    """
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    record = _pipeline_reservation_record(cycle_time, job_id="job_public_round_trip")
+    repository.reserve_pipeline_job(record)
+    repository.bind_pipeline_job_reservation(record["idempotency_key"], slurm_job_id="4242")
+    repository.update_pipeline_job_status(
+        record["job_id"],
+        "failed",
+        error_code="NODE_FAILURE",
+        error_message="node failed",
+        finished_at=cycle_time,
+        log_uri=_REAL_MASTER_LOG_URI,
+    )
+    assert _direct_row_payload(repository, record["job_id"])["log_uri"] == _REAL_MASTER_LOG_URI
+    public_row = repository.get_pipeline_job(record["job_id"])
+    assert public_row is not None
+    assert public_row["log_uri"] == _LAUNDERED_URI
+
+    repository.upsert_pipeline_job({**public_row, "status": "submitted", "slurm_job_id": "7007"})
+
+    durable = _durable_pipeline_job_payloads(repository.root, record["job_id"])[-1]
+    assert durable["status"] == "submitted"
+    assert durable["slurm_job_id"] == "7007"
+    assert durable["log_uri"] == _REAL_MASTER_LOG_URI
+    assert (durable["error_code"], durable["error_message"]) == ("NODE_FAILURE", "node failed")
+    direct = _direct_row_payload(repository, record["job_id"])
+    assert direct["log_uri"] == _REAL_MASTER_LOG_URI
+    assert (direct["error_code"], direct["error_message"]) == ("NODE_FAILURE", "node failed")
+    assert _LAUNDERED_URI not in _raw_journal_text(repository)
 
 
 # --- J13-J20: every other write leg that admits caller evidence ----------

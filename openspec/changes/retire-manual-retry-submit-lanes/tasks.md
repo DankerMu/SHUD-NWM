@@ -54,7 +54,9 @@
 - [ ] E8 AST evidence: for each edited source module, the set of top-level/class-level definitions on HEAD equals the
   set on `origin/master` minus the deleted closure, and every surviving definition's source text is byte-identical
   (except docstring/comment edits named in 2.3). A repo-wide `git grep -w` for every deleted name returns only
-  `openspec/changes/archive/`, this change directory and git history.
+  `openspec/changes/archive/`, this change directory, same-name definitions in other modules, historical records
+  (`docs/review-loop-log.jsonl`, the ADR 0009 census snapshot, quoted historical error codes) and REMOVED requirements
+  in living specs that this change's archive drops.
 - [ ] E9 Tests green locally and in a node-27 temporary worktree: the selector set for the diff plus
   `tests/test_retry.py`, `tests/test_retry_cancel_consistency.py`, `tests/test_file_orchestration_journal.py`,
   `tests/test_file_orchestration_journal_facade.py`, `tests/test_file_journal_read_blocked_consumers.py`,
