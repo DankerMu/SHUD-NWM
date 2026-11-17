@@ -106,7 +106,9 @@ was deleted in #3147, and the live parser is `_index_comment_sacct_matches` (`:1
   | `tests/test_forcing_submit_ambiguity.py` | 1209 |
   | `tests/test_gateway_reconcile_file_cohort_identity.py` | 1140 |
 
-  The production-module rule (exactly one `services/orchestrator/reconcile*.py` exclusion) is unaffected.
+  The production-module rule (exactly one `services/orchestrator/reconcile*.py` exclusion) is unaffected. Three of the
+  suites are gateway-reconcile partitions. `gateway-reconcile-test-partitioning` says "without adding a guard
+  exemption", so that requirement gets a MODIFIED delta naming the three temporary exemptions until #3177.
 
 ## Must preserve
 - Every name reachable as `services.orchestrator.reconcile.X` on `origin/master` stays reachable, except the two

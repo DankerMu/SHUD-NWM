@@ -2218,6 +2218,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # carried the undivided monolith before the split.
             *PUBLISH_SCHEDULER_REGISTRY_TESTS,
             "tests/test_scheduler_registry_capacity.py",
+            # #3155: the reconcile partition's logger-name pin. It imports the
+            # reconcile modules only at call time, so no importer derivation
+            # reaches it; this directory rule is what routes every
+            # services/orchestrator/reconcile*.py change to it. DB-free, sub-second.
+            "tests/test_reconcile_partition_logger.py",
             "tests/test_reconcile_sacct_parse.py",
             "tests/test_replay_lineage.py",
             "tests/test_retention.py",

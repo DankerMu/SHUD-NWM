@@ -2099,6 +2099,8 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         # `services/orchestrator/__init__.py`, scheduler_candidates.py,
         # scheduler_discovery.py and scheduler_state_types.py. 7 tests in ~13s.
         "tests/test_quarantine_identity_authority.py",
+        # #3155: the reconcile partition's logger-name pin rides the directory rule.
+        "tests/test_reconcile_partition_logger.py",
         "tests/test_reconcile_sacct_parse.py",
         "tests/test_replay_lineage.py",
         RESOLVE_SURFACE_GUARD_PATH,
@@ -12459,6 +12461,12 @@ RECONCILE_PARTITION_LEAVES: tuple[str, ...] = (
     "services/orchestrator/reconcile_reserved_support.py",
     "services/orchestrator/reconcile_sacct_probe.py",
 )
+# The suites every reconcile partition change must select: the LOW-2 parser
+# suite and the partition's logger-name pin.
+RECONCILE_PARTITION_FLOOR_SUITES: tuple[str, ...] = (
+    "tests/test_reconcile_sacct_parse.py",
+    "tests/test_reconcile_partition_logger.py",
+)
 
 POSITIVE_SELECTION_FLOOR: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
@@ -12492,9 +12500,9 @@ POSITIVE_SELECTION_FLOOR: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("services/slurm_gateway/gateway.py", ("tests/test_retry_cancel_consistency.py",)),
     ("services/orchestrator/persistence.py", ("tests/test_pipeline_persistence.py",)),
     ("services/orchestrator/retry.py", ("tests/test_retry.py",)),
-    ("services/orchestrator/reconcile.py", ("tests/test_reconcile_sacct_parse.py",)),
+    ("services/orchestrator/reconcile.py", RECONCILE_PARTITION_FLOOR_SUITES),
     # #3155: each reconcile leaf carries the facade's floor row.
-    *((leaf, ("tests/test_reconcile_sacct_parse.py",)) for leaf in RECONCILE_PARTITION_LEAVES),
+    *((leaf, RECONCILE_PARTITION_FLOOR_SUITES) for leaf in RECONCILE_PARTITION_LEAVES),
     ("services/orchestrator/scheduler_generation.py", ("tests/test_scheduler_generation.py",)),
     ("services/orchestrator/scheduler_timing.py", ("tests/test_scheduler_timing.py",)),
     ("services/orchestrator/replay_lineage.py", ("tests/test_replay_lineage.py",)),
@@ -12539,10 +12547,10 @@ def test_reconcile_leaf_change_selects_the_reconcile_facade_suites() -> None:
         "RECONCILE_PARTITION_LEAVES drifted from the tree", on_disk
     )
     facade = set(select_tests(["services/orchestrator/reconcile.py"], repo_root=Path(".")))
-    assert "tests/test_reconcile_sacct_parse.py" in facade
+    assert set(RECONCILE_PARTITION_FLOOR_SUITES) <= facade
     for leaf in RECONCILE_PARTITION_LEAVES:
         selected = set(select_tests([leaf], repo_root=Path(".")))
-        assert "tests/test_reconcile_sacct_parse.py" in selected, leaf
+        assert set(RECONCILE_PARTITION_FLOOR_SUITES) <= selected, leaf
         missing = sorted(facade - selected)
         assert not missing, f"{leaf}: a leaf-only change drops reconcile.py suites {missing}"
 
