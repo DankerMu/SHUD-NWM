@@ -43,7 +43,7 @@ The monitoring page SHALL display a job list table in the center area with colum
 
 - **WHEN** a user with `operator+` role clicks the "Retry" button on a failed job row
 - **THEN** the frontend SHALL call `POST /api/v1/runs/{run_id}/retry` and display an error toast carrying the API error message, because the endpoint answers `409 CONTROL_PLANE_MANUAL_ACTION_REQUIRED` and submits nothing
-- **THEN** the frontend MUST NOT show a success confirmation or claim that a new retry job was submitted
+- **THEN** because the endpoint never answers with success, the page only ever reaches its error path for this action; the success toast it still contains is unreachable until #3179 removes the button
 
 #### Scenario: View Logs action from table
 

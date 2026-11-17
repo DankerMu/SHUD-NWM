@@ -14,8 +14,8 @@ FastAPI resolves sub-dependencies first, so the order 400 → 401/403 → displa
 ordering code. `get_retry_service`, `get_pipeline_store` and `get_slurm_gateway` are **not** in the retry route's
 graph any more. That is what turns compute_control without `DATABASE_URL` from 500 into the stable 409.
 
-`get_pipeline_store` and `get_slurm_gateway` stay, because the cancel route uses them. `get_retry_service` goes if it
-has no other user.
+`get_pipeline_store` and `get_slurm_gateway` stay, because the cancel route uses them. `get_retry_service` also stays,
+because the node-27 C2 read-only probe and four tests reference it.
 
 The display 409 and the retired 409 share the code. They differ in `details`:
 - **display:** keeps `display_mode` and the existing keys;
@@ -34,6 +34,8 @@ A test is classified by its **subject**, the behaviour its assertions pin, not b
 | route success / 202 / response shape | delete; replaced by the fail-closed pins |
 | cancel consistency, cohort charge, read-blocked consumers, marker lane, auto retry, scheduler mint, job-list rendering | reseed: write the `pipeline_job` / journal rows the old call produced directly, then keep the assertions |
 | RBAC / display 409 / OpenAPI security on the retry operation | keep; adjust only if the success path was part of the setup |
+| one test with both a marker-lane arm and a retired-method arm | trim: drop the retired arm, keep the marker arm |
+| response-model sample of the retry route | delete; the route gets a documented `FAIL_CLOSED_ROUTES` exemption |
 
 `expire_stale_retries` and its two tests stay in PR 1. They are dead after this change, and PR 2 removes them together
 with the rest of the closure.

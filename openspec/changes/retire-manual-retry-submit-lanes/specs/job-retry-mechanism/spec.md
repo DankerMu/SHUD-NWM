@@ -76,7 +76,7 @@
 
 **Reason**: Scenario "manual forecast retry runs without database url" is pinned by `tests/test_retry.py::test_manual_forecast_retry_preserves_db_free_runtime_contract`, which drives `RetryService.attempt_manual_retry` (retired); a requirement cannot drop a scenario in place, so the requirement is re-added under a new name without it. All other scenarios are carried over verbatim.
 
-**Migration**: See ADDED "DB-free scheduler retry manifests preserve runtime mode". If the owner verifies that the marker -> scheduler mint path satisfies the manual scenario, a MODIFIED in-place rewrite of that scenario is the cheaper alternative.
+**Migration**: See ADDED "DB-free scheduler retry manifests preserve runtime mode". No test pins the marker -> scheduler mint path for this scenario, so the spec does not claim it; the surviving scenarios cover the scheduler retry manifests.
 
 
 ## MODIFIED Requirements

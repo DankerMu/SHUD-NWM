@@ -8,7 +8,7 @@
 
 ### Requirement: Control-plane tests cover database state alignment
 
-**Reason**: Scenario "Retry integration test detects pending deadlock" requires a test of a retry that "creates a pending job without submission"; that test target was the retired manual route. Judgement call: the cancel scenario is carried over; if the owner prefers to keep the retry scenario for the auto-retry placeholder, drop this pair and keep the requirement unchanged.
+**Reason**: Scenario "Retry integration test detects pending deadlock" requires a test of a retry that "creates a pending job without submission"; that test target was the retired manual route. The cancel scenario is carried over unchanged. The retry scenario is dropped because no surviving lane creates a pending job without submission in-process; the marker lane writes a marker and the scheduler mints and submits in one pass.
 
 **Migration**: See ADDED "Control-plane tests cover cancel state alignment".
 
