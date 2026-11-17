@@ -5,7 +5,7 @@
 | Pack | Selected | Reason / mapping |
 |---|---|---|
 | Resource limits / large input / discovery | yes | hard 5 MB bound and fail-closed floor: E2, E3 fallback + byte-identity tests |
-| Schema / columns / units / field names | yes | `model_run_evidence` row projection and `limit.lane_bytes` shape: E3 readiness-errors equality, lane_bytes measure pin |
+| Schema / columns / units / field names | yes | `limit.lane_bytes` shape (the `model_run_evidence` row projection is deferred with task 1.3): E3 lane_bytes measure pin, readiness-errors equality |
 | Legacy compatibility / examples | yes | tiers 1–4a byte-identical: E3 golden test |
 | Error handling / rollback / partial outputs | yes | `SchedulerEvidenceWriteError` and the terminal floor unchanged: E3 fallback tests |
 | Operator alerting lanes / observer-observed predicate parity | yes | stall probe `classify_pass` and `pass_limit_blocked`, `list-operator-actions` evaluating: E3 probe and decidability tests; E6 live |

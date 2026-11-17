@@ -98,8 +98,9 @@ production_contract), size-bound (hard bound and fail-closed floor).
   - the real node-22 task-row shape is recorded next to it, and the non-reproduction is reported as a finding; the
     input was not tuned to overflow.
 - [ ] E3 Tests, red on the old code where they assert new behaviour:
-  - a real 132-candidate submitted pass (the triage reconstruction) written with `max_evidence_bytes` between its
-    tier 4b and tier 4a sizes is `submitted` in the artifact, in `SchedulerPassResult.status` and on the CLI; it is
+  - a real 132-candidate submitted pass (a 66 × 2 `run_once` with the existing stage-evidence fake orchestrator; unlike
+    the triage reconstruction it injects no `retention`, so tier 3 does not run) written with `max_evidence_bytes`
+    between its tier 4b and tier 4a sizes is `submitted` in the artifact, in `SchedulerPassResult.status` and on the CLI; it is
     written compact, `evidence_compaction.mode == "non_blocking_summary"`, there is no `limit`, and `submitted_count`
     equals the number of model-run rows;
   - `readiness_scheduler_evidence._scheduler_evidence_errors(compact_summary) == _scheduler_evidence_errors(full)`,

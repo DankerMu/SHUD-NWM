@@ -625,9 +625,19 @@ def test_readiness_reads_the_compact_summary_pass_exactly_like_the_full_pass(
 
     persisted = json.loads(long_submitted_pass.tier_path.read_text(encoding="utf-8"))
     full_errors = readiness_scheduler_evidence._scheduler_evidence_errors(long_submitted_pass.full)
+    tier_errors = readiness_scheduler_evidence._scheduler_evidence_errors(persisted)
 
+    # The verdict, not only the error lists (two empty lists would compare equal
+    # on a blocked pass too): the reader's status for the compact-summary pass is
+    # the full pass's, and it is ``passed`` -- never review-blocked.
+    readiness_status = readiness_scheduler_evidence._scheduler_readiness_status
+    full_verdict = readiness_status(long_submitted_pass.full, errors=full_errors)
+    tier_verdict = readiness_status(persisted, errors=tier_errors)
+    assert (tier_verdict, full_verdict) == ("passed", "passed")
+    assert persisted["status"] not in readiness_scheduler_evidence.SCHEDULER_REVIEW_BLOCKED_STATUSES
+    assert persisted["status"] in readiness_scheduler_evidence.SCHEDULER_REVIEW_PASSED_STATUSES
+    assert full_errors == tier_errors == []
     assert persisted["status"] == "submitted"
-    assert readiness_scheduler_evidence._scheduler_evidence_errors(persisted) == full_errors
     assert not [
         error
         for error in full_errors
@@ -648,10 +658,13 @@ def test_list_operator_actions_reads_the_compact_summary_pass_as_evaluating(
         passes=6,
     )
 
-    assert json.loads(long_submitted_pass.tier_path.read_text(encoding="utf-8"))["status"] == "submitted"
-    assert tier_exit == full_exit
-    assert tier_receipt["operator_actions"] == full_receipt["operator_actions"]
+    # Pinned values, not only agreement: this pass has no operator action, so
+    # an evaluating read answers ``exit 0`` with an empty action list; a size
+    # fallback would answer ``exit 3`` (undecidable).
+    assert (tier_exit, full_exit) == (0, 0)
+    assert tier_receipt["operator_actions"] == full_receipt["operator_actions"] == []
     assert tier_receipt["non_evaluating_passes"] == full_receipt["non_evaluating_passes"] == []
+    assert json.loads(long_submitted_pass.tier_path.read_text(encoding="utf-8"))["status"] == "submitted"
 
 
 def test_the_stall_probe_counts_the_compact_summary_pass_as_progress(long_submitted_pass: SimpleNamespace) -> None:
