@@ -341,6 +341,15 @@ NHMS_SCHEDULER_STATE_INDEX
 # Private state index for Slurm state_save_qc; without it the job falls back
 # to NHMS_SCHEDULER_STATE_INDEX and rewrites the shared lane (#3123).
 NHMS_SLURM_SCHEDULER_STATE_INDEX
+# Private registry manifest (worker mirror) for Slurm jobs; without it the job
+# falls back to NHMS_SCHEDULER_REGISTRY_MANIFEST. The manifest context requires
+# its generation to match the shared manifest (#3171).
+NHMS_SLURM_SCHEDULER_REGISTRY_MANIFEST
+# Deliberately NOT required: NHMS_SLURM_SCHEDULER_CANONICAL_READINESS_INDEX
+# stays unset. No producer maintains a private readiness index (provider
+# refresh publishes only the shared one) and no Slurm entry point of the
+# node-22 chain reads it; unset, jobs fall back to the shared
+# NHMS_SCHEDULER_CANONICAL_READINESS_INDEX that refresh keeps current (#3171).
 
 # Scheduler no-flag business validation requires these roots and the
 # approved-root policy.
