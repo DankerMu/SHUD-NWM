@@ -2715,6 +2715,78 @@ def test_pipeline_event_public_surfaces_redact_runtime_root_recovery_details(tmp
     assert not (journal_root / "private" / "runtime-root-recovery").exists()
 
 
+def test_historical_event_with_an_unsafe_event_id_is_still_rejected_before_any_byte(tmp_path: Path) -> None:
+    """#3183 E7: deleting the private recovery write does not open this input.
+
+    The deleted writer used ``event_id`` as a path segment, so an id failing
+    ``_safe_segment`` raised there.  The write path rejects the same id first:
+    ``_validate_outgoing_record`` replays the record, and the record/payload
+    identity match checks ``event_id`` as a safe identity (the same predicate).
+    The historical-import entry is the only one that takes a caller ``event_id``.
+    """
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    repository = FileOrchestrationJournalRepository(journal_root)
+    repository.reserve_pipeline_job(_pipeline_reservation_record(cycle_time, job_id="job_unsafe_event_id"))
+    journal_path = journal_root / "journal/gfs/2026062800.jsonl"
+    before = journal_path.read_bytes()
+
+    with pytest.raises(FileOrchestrationJournalError) as error:
+        repository.append_historical_pipeline_event(
+            {
+                "event_id": "evt:1/2",
+                "entity_type": "pipeline_job",
+                "entity_id": "job_unsafe_event_id",
+                "event_type": "submission",
+                "status_from": "reserved",
+                "status_to": "submitted",
+                "details": {"runtime_root_contract": {"workspace_dir": "/srv/nhms/workspace"}},
+            }
+        )
+
+    assert (error.value.reason, error.value.field) == ("file_journal_unsafe_identity", "event_id")
+    assert journal_path.read_bytes() == before
+    assert not (journal_root / "private").exists()
+
+
+def test_event_whose_raw_runtime_root_value_exceeds_the_byte_limit_is_appended_rendered(tmp_path: Path) -> None:
+    """#3183 E7: the one byte-limit input class the deleted write alone rejected.
+
+    The private record carried the RAW runtime-root value, so a value larger
+    than the journal byte limit failed there.  The journal line carries only
+    the rendered ``[local-path]``, so the event now appends; the raw value is
+    persisted nowhere.  The append and latest-view byte limits still apply to
+    what is actually written.
+    """
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    max_bytes = 64 * 1024
+    raw_workspace = "/srv/nhms/" + "w" * (max_bytes + 1)
+    repository = FileOrchestrationJournalRepository(journal_root, max_bytes=max_bytes)
+    repository.reserve_pipeline_job(_pipeline_reservation_record(cycle_time, job_id="job_oversized_root"))
+
+    inserted = repository.insert_pipeline_event(
+        entity_type="pipeline_job",
+        entity_id="job_oversized_root",
+        event_type="submission",
+        status_from="reserved",
+        status_to="submitted",
+        details={"runtime_root_contract": {"workspace_dir": raw_workspace}},
+    )
+
+    assert inserted["details"] == {"runtime_root_contract": {"workspace_dir": "[local-path]"}}
+    lines = (journal_root / "journal/gfs/2026062800.jsonl").read_text(encoding="utf-8").splitlines()
+    event_records = [json.loads(line) for line in lines if json.loads(line)["record_type"] == "pipeline_event"]
+    assert [record["payload"]["details"] for record in event_records] == [
+        {"runtime_root_contract": {"workspace_dir": "[local-path]"}}
+    ]
+    rendered = "\n".join(path.read_text(encoding="utf-8") for path in journal_root.rglob("*") if path.is_file())
+    assert raw_workspace not in rendered
+    assert not (journal_root / "private").exists()
+
+
 def test_pipeline_event_public_surfaces_redact_message_text(tmp_path: Path) -> None:
     cycle_time = _dt("2026-06-28T00:00:00Z")
     journal_root = tmp_path / "journal"
@@ -13285,6 +13357,112 @@ def test_upsert_round_trip_of_a_public_row_keeps_the_real_log_uri(
     assert direct["log_uri"] == _REAL_MASTER_LOG_URI
     assert (direct["error_code"], direct["error_message"]) == ("NODE_FAILURE", "node failed")
     assert _LAUNDERED_URI not in _raw_journal_text(repository)
+
+
+# --- #3183: the error_message keep-merge of upsert_pipeline_job -----------
+#
+# Spec pipeline-job-persistence, "Display redaction placeholders SHALL NOT
+# reach durable journal state through any write path": a withheld value never
+# changes durable state.  ``error_message`` is one of the unconditionally
+# merged mutable fields, so a public row round-tripped through
+# ``upsert_pipeline_job`` hands the placeholder back in and the merge must
+# resolve it to the value the row already carries.  Only the first case
+# discriminates the keep-merge: in the other two the write-boundary strip in
+# ``_journal_record_for_write`` would produce the same durable value even
+# without it.
+
+_URI_VALUED_ERROR_MESSAGES = (
+    pytest.param(
+        "s3://nhms/logs/cycle_gfs_2026062800/job_public_error_round_trip.log",
+        "[object-uri]",
+        id="object-uri",
+    ),
+    pytest.param(
+        "https://logs.example.org/nhms/job_public_error_round_trip.log",
+        "[uri]",
+        id="uri",
+    ),
+)
+
+
+def _bound_job_for_error_round_trip(tmp_path: Path) -> tuple[Any, dict[str, Any]]:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    record = _pipeline_reservation_record(cycle_time, job_id="job_public_error_round_trip")
+    repository.reserve_pipeline_job(record)
+    repository.bind_pipeline_job_reservation(record["idempotency_key"], slurm_job_id="4242")
+    return repository, record
+
+
+@pytest.mark.parametrize(("real_error_message", "placeholder"), _URI_VALUED_ERROR_MESSAGES)
+def test_upsert_round_trip_of_a_public_row_keeps_the_real_error_message(
+    tmp_path: Path, real_error_message: str, placeholder: str
+) -> None:
+    repository, record = _bound_job_for_error_round_trip(tmp_path)
+    job_id = str(record["job_id"])
+    repository.update_pipeline_job_status(
+        job_id,
+        "failed",
+        error_code="NODE_FAILURE",
+        error_message=real_error_message,
+        finished_at=_dt("2026-06-28T00:00:00Z"),
+    )
+    assert _direct_row_payload(repository, job_id)["error_message"] == real_error_message
+    public_row = repository.get_pipeline_job(job_id)
+    assert public_row is not None
+    assert public_row["error_message"] == placeholder
+
+    repository.upsert_pipeline_job({**public_row, "status": "submitted", "slurm_job_id": "7007"})
+
+    durable = _durable_pipeline_job_payloads(repository.root, job_id)[-1]
+    assert (durable["status"], durable["slurm_job_id"]) == ("submitted", "7007")
+    assert durable["error_message"] == real_error_message
+    direct = _direct_row_payload(repository, job_id)
+    assert (direct["status"], direct["slurm_job_id"]) == ("submitted", "7007")
+    assert direct["error_message"] == real_error_message
+    assert placeholder not in _raw_journal_text(repository)
+
+
+@pytest.mark.parametrize(("_real_error_message", "placeholder"), _URI_VALUED_ERROR_MESSAGES)
+def test_upsert_placeholder_error_message_with_nothing_persisted_stays_none(
+    tmp_path: Path, _real_error_message: str, placeholder: str
+) -> None:
+    repository, record = _bound_job_for_error_round_trip(tmp_path)
+    job_id = str(record["job_id"])
+    public_row = repository.get_pipeline_job(job_id)
+    assert public_row is not None
+    assert public_row.get("error_message") is None
+
+    repository.upsert_pipeline_job({**public_row, "status": "submitted", "error_message": placeholder})
+
+    durable = _durable_pipeline_job_payloads(repository.root, job_id)[-1]
+    assert durable["status"] == "submitted"
+    assert durable["error_message"] is None
+    assert _direct_row_payload(repository, job_id)["error_message"] is None
+    assert placeholder not in _raw_journal_text(repository)
+
+
+@pytest.mark.parametrize(("real_error_message", "placeholder"), _URI_VALUED_ERROR_MESSAGES)
+def test_upsert_error_message_with_an_embedded_placeholder_is_kept_verbatim(
+    tmp_path: Path, real_error_message: str, placeholder: str
+) -> None:
+    repository, record = _bound_job_for_error_round_trip(tmp_path)
+    job_id = str(record["job_id"])
+    repository.update_pipeline_job_status(
+        job_id,
+        "failed",
+        error_code="NODE_FAILURE",
+        error_message=real_error_message,
+        finished_at=_dt("2026-06-28T00:00:00Z"),
+    )
+    public_row = repository.get_pipeline_job(job_id)
+    assert public_row is not None
+    embedded = f"upload to {placeholder} failed"
+
+    repository.upsert_pipeline_job({**public_row, "error_message": embedded})
+
+    assert _durable_pipeline_job_payloads(repository.root, job_id)[-1]["error_message"] == embedded
+    assert _direct_row_payload(repository, job_id)["error_message"] == embedded
 
 
 # --- J13-J20: every other write leg that admits caller evidence ----------
