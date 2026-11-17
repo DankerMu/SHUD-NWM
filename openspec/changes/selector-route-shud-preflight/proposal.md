@@ -57,11 +57,11 @@ minimal. Risk pack: CI routing (test selection).
 
 ## Evidence Floor
 
-- [ ] E1 `uv run ruff check --no-cache .`; `git diff --check`.
-- [ ] E2 `uv run pytest -q tests/test_select_ci_tests.py` passes, and the new routing pin is red before the rule is added.
-- [ ] E3 `uv run python scripts/select_ci_tests.py --changed-file <file containing packages/common/shud_preflight.py>`
+- [x] E1 `uv run ruff check --no-cache .`; `git diff --check`.
+- [x] E2 `uv run pytest -q tests/test_select_ci_tests.py` passes, and the new routing pin is red before the rule is added.
+- [x] E3 `uv run python scripts/select_ci_tests.py --changed-file <file containing packages/common/shud_preflight.py>`
   lists `tests/test_shud_runtime.py` and `tests/test_production_slurm_validation.py`, and its selection is a superset of
   the `origin/master` selection for the same input. The routing pin also asserts `CORE_SMOKE_TESTS ⊆ selection`.
-- [ ] E4 The "does not join `GUARDED_MODULE_CLOSURES`" decision is recorded, citing the structural reason, the
+- [x] E4 The "does not join `GUARDED_MODULE_CLOSURES`" decision is recorded, citing the structural reason, the
   precedent and the measured one-hop count (for information only).
-- [ ] E5 `openspec validate selector-route-shud-preflight --strict --no-interactive`.
+- [x] E5 `openspec validate selector-route-shud-preflight --strict --no-interactive`.
