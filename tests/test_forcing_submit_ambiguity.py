@@ -1,10 +1,15 @@
+"""Forcing submit ambiguity: persisted identity, commentless controller resume and reclaim.
+
+#3177 moved the member-reservation and retry cases to
+``tests/test_forcing_submit_ambiguity_reservation.py``; the cycle constants and
+forcing fixtures both modules use are in ``tests/forcing_submit_ambiguity_helpers.py``.
+"""
+
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
-from threading import Barrier
 from typing import Any
 
 import httpx
@@ -12,76 +17,25 @@ import pytest
 
 from services.orchestrator import reconcile as reconcile_module
 from services.orchestrator.accepted_submit_identity import AcceptedSubmitTransition
-from services.orchestrator.chain import (
-    M3_STAGES,
-    CycleOrchestrationContext,
-    HttpSlurmGatewayClient,
-    OrchestratorError,
-)
+from services.orchestrator.chain import M3_STAGES, HttpSlurmGatewayClient, OrchestratorError
 from services.orchestrator.file_orchestration_journal import (
     FileOrchestrationJournalRepository,
 )
-from services.orchestrator.reconcile import (
-    RESERVATION_ABSENCE_GRACE,
-    CommentAccountingResult,
-    reconcile_reserved_unbound_jobs,
-)
-from services.orchestrator.reservation import reserve_candidate
+from services.orchestrator.reconcile import CommentAccountingResult, reconcile_reserved_unbound_jobs
 from services.orchestrator.scheduler_candidate_execution_evidence import (
     _pipeline_result_slurm_submit_called,
 )
 from services.orchestrator.scheduler_evidence import UNKNOWN_AFTER_ATTEMPT
-from tests.test_orchestration_chain import (
-    FakeCycleSlurmClient,
-    _basins,
-    _dt,
-    _orchestrator,
+from tests.forcing_submit_ambiguity_helpers import (
+    _CYCLE,
+    _CYCLE_ID,
+    _CYCLE_TIME,
+    _expected_forcing_attempt_comment,
+    _forcing_basins,
+    _forcing_context,
+    _reserve_forcing,
 )
-
-_CYCLE = "2026050100"
-_CYCLE_TIME = _dt("2026-05-01T00:00:00Z")
-_CYCLE_ID = f"gfs_{_CYCLE}"
-
-
-def _expected_forcing_attempt_comment(idempotency_key: str, submission_attempt: int) -> str:
-    return f"nhms_forcing_attempt:{idempotency_key}:a{submission_attempt}"
-
-
-def _forcing_basins(count: int, *, orchestration_run_id: str) -> list[dict[str, Any]]:
-    basins = _basins(count)
-    for index, basin in enumerate(basins):
-        basin.update(
-            {
-                "run_id": f"fcst_gfs_{_CYCLE}_model_{index}",
-                "candidate_id": (
-                    f"gfs:2026-05-01T00:00:00Z:model_{index}:forecast_gfs_deterministic"
-                ),
-                "orchestration_run_id": orchestration_run_id,
-                "restart_stage": "forcing",
-                "state_evidence": {"restart_stage": "forcing"},
-                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
-                "model_package_checksum": f"sha256:model-{index}",
-            }
-        )
-    return basins
-
-
-def _forcing_context(
-    orchestrator: Any,
-    basins: list[dict[str, Any]],
-    *,
-    run_id: str,
-) -> CycleOrchestrationContext:
-    normalized = orchestrator._normalize_cycle_basins(basins, "gfs", _CYCLE_TIME)
-    return CycleOrchestrationContext(
-        source_id="gfs",
-        cycle_time=_CYCLE_TIME,
-        cycle_id=_CYCLE_ID,
-        run_id=run_id,
-        all_basins=normalized,
-        active_basins=list(normalized),
-        restart_stage="forcing",
-    )
+from tests.test_orchestration_chain import FakeCycleSlurmClient, _orchestrator
 
 
 def _controller_forcing_rows(
@@ -901,302 +855,3 @@ def test_permitted_reclaim_persists_current_attempt_task_mapping_before_post(
     assert len(requests) == 2
     assert sent_task_models == ["model_1", "model_0"]
     assert durable_task_models == sent_task_models
-
-
-def _forcing_members(model_ids: tuple[str, ...]) -> list[dict[str, Any]]:
-    return [
-        {
-            "array_task_id": index,
-            "candidate_id": f"gfs:2026-05-01T00:00:00Z:{model_id}:forecast_gfs_deterministic",
-            "run_id": f"fcst_gfs_{_CYCLE}_{model_id}",
-            "model_id": model_id,
-            "basin_id": f"basin_{model_id}",
-            "scenario_id": "forecast_gfs_deterministic",
-            "restart_stage": "forcing",
-        }
-        for index, model_id in enumerate(model_ids)
-    ]
-
-
-def _reserve_forcing(
-    repository: FileOrchestrationJournalRepository,
-    *,
-    suffix: str,
-    model_ids: tuple[str, ...],
-    expected_user: str | None = None,
-    expected_account: str | None = None,
-    submission_attempt_started_at: Any = _CYCLE_TIME,
-):
-    run_id = f"cycle_gfs_{_CYCLE}_forcing_{suffix}"
-    idempotency_key = f"{run_id}:forcing"
-    return reserve_candidate(
-        repository,
-        idempotency_key=idempotency_key,
-        job_id=f"job_{run_id}",
-        run_id=run_id,
-        cycle_id=_CYCLE_ID,
-        job_type="produce_forcing_array",
-        model_id=None,
-        stage="forcing",
-        candidate_id=run_id,
-        reservation_evidence={
-            "slurm_comment": _expected_forcing_attempt_comment(idempotency_key, 1),
-            "cohort_members": _forcing_members(model_ids),
-            "restart_stage": "forcing",
-            "submission_attempt": 1,
-            "submission_attempt_started_at": submission_attempt_started_at,
-            "slurm_ownership_required": bool(expected_user and expected_account),
-            "expected_slurm_user": expected_user,
-            "expected_slurm_account": expected_account,
-        },
-    )
-
-
-def test_forcing_member_reservation_is_atomic_across_keys_and_leaves_disjoint_work_eligible(
-    tmp_path: Path,
-) -> None:
-    root = tmp_path / "journal"
-    barrier = Barrier(2)
-
-    class _BarrierRepository(FileOrchestrationJournalRepository):
-        def reserve_pipeline_job(self, record: dict[str, Any]) -> dict[str, Any] | None:
-            barrier.wait()
-            return super().reserve_pipeline_job(record)
-
-    def reserve_overlapping(suffix: str):
-        repository = _BarrierRepository(root)
-        return _reserve_forcing(
-            repository,
-            suffix=suffix,
-            model_ids=("model_0", "model_1"),
-        )
-
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        outcomes = list(pool.map(reserve_overlapping, ("convert_cohort", "forcing_cohort")))
-
-    admitted = [outcome for outcome in outcomes if outcome.created]
-    blocked = [outcome for outcome in outcomes if not outcome.created]
-    assert len(admitted) == 1
-    assert len(blocked) == 1
-    assert blocked[0].blocking_job_id == admitted[0].job_id
-    assert _reserve_forcing(
-        FileOrchestrationJournalRepository(root),
-        suffix="disjoint",
-        model_ids=("model_2",),
-    ).created
-
-
-def test_forcing_ambiguity_retries_only_after_coverage_proves_absence(tmp_path: Path) -> None:
-    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
-    reservation = _reserve_forcing(
-        repository,
-        suffix="absence",
-        model_ids=("model_0",),
-    )
-    transition = repository.transition_pipeline_job_submit_evidence(
-        reservation.job_id,
-        AcceptedSubmitTransition.timeout(),
-        expected_submission_attempt=reservation.submission_attempt,
-        expected_statuses=("reserved",),
-        require_unbound=True,
-        error_code="SLURM_PARSE_ERROR",
-        error_message="Gateway response was empty after submission.",
-    )
-    assert transition.committed
-    held = repository.query_reserved_unbound_jobs()[0]
-    anchor = held.submission_attempt_started_at
-
-    def unexpected_query(*_args: Any, **_kwargs: Any) -> CommentAccountingResult:
-        pytest.fail("a changed attempt must not reach accounting")
-
-    assert (
-        reconcile_reserved_unbound_jobs(
-            repository,
-            comment_query=unexpected_query,
-            target_job_id=reservation.job_id,
-            target_submission_attempt=reservation.submission_attempt + 1,
-            target_submission_attempt_started_at=anchor,
-            target_slurm_comment=held.slurm_comment,
-            bind_only=True,
-        )
-        == []
-    )
-    boundary_absence = reconcile_reserved_unbound_jobs(
-        repository,
-        comment_query=lambda _key, **_kwargs: CommentAccountingResult(
-            (),
-            scope="global",
-            coverage_start=anchor,
-            coverage_end=anchor,
-            coverage_complete=True,
-        ),
-        now=lambda: anchor + RESERVATION_ABSENCE_GRACE + timedelta(seconds=1),
-        target_job_id=reservation.job_id,
-        target_submission_attempt=reservation.submission_attempt,
-        target_submission_attempt_started_at=anchor,
-        target_slurm_comment=held.slurm_comment,
-        bind_only=True,
-    )[0]
-    assert boundary_absence.action == "absence_unconfirmed"
-    assert repository.get_pipeline_job(reservation.job_id)["status"] == "reserved"
-
-
-    def token_without_scope(
-        _key: str,
-        *,
-        forcing_exact_comment: str | None = None,
-        forcing_current_attempt_comment: bool = False,
-    ) -> CommentAccountingResult:
-        del forcing_exact_comment, forcing_current_attempt_comment
-        return CommentAccountingResult(
-            (),
-            scope="global",
-            coverage_start=anchor,
-            coverage_end=anchor,
-            coverage_complete=True,
-        )
-
-    unsupported_adapter = reconcile_reserved_unbound_jobs(
-        repository,
-        comment_query=token_without_scope,
-        now=lambda: anchor + RESERVATION_ABSENCE_GRACE + timedelta(seconds=1),
-    )[0]
-    assert unsupported_adapter.action == "query_unavailable"
-    assert repository.get_pipeline_job(reservation.job_id)["status"] == "reserved"
-
-
-    incomplete = reconcile_reserved_unbound_jobs(
-        repository,
-        comment_query=lambda _key, **_kwargs: CommentAccountingResult(
-            (),
-            scope="global",
-            coverage_start=anchor,
-            coverage_end=anchor,
-            coverage_complete=False,
-        ),
-        now=lambda: anchor + timedelta(seconds=1),
-    )[0]
-    assert incomplete.action == "absence_unconfirmed"
-    assert repository.get_pipeline_job(reservation.job_id)["status"] == "reserved"
-
-    young_absence = reconcile_reserved_unbound_jobs(
-        repository,
-        comment_query=lambda _key, **_kwargs: CommentAccountingResult(
-            (),
-            scope="global",
-            coverage_start=anchor,
-            coverage_end=anchor,
-            coverage_complete=True,
-        ),
-        now=lambda: anchor + timedelta(seconds=1),
-    )[0]
-    assert young_absence.action == "absence_unconfirmed"
-    held_after_young_absence = repository.get_pipeline_job(reservation.job_id)
-    assert held_after_young_absence is not None
-    assert held_after_young_absence["status"] == "reserved"
-    assert repository.reclaim_pipeline_job_reservation(dict(held_after_young_absence)) is None
-
-    proven_absent = reconcile_reserved_unbound_jobs(
-        repository,
-        comment_query=lambda _key, **_kwargs: CommentAccountingResult(
-            (),
-            scope="global",
-            coverage_start=anchor,
-            coverage_end=anchor,
-            coverage_complete=True,
-        ),
-        now=lambda: anchor + RESERVATION_ABSENCE_GRACE + timedelta(seconds=1),
-    )[0]
-    assert proven_absent.action == "absence_retry_permitted"
-    assert repository.get_pipeline_job(reservation.job_id)["status"] == "reservation_lost"
-
-    retried = _reserve_forcing(
-        repository,
-        suffix="absence",
-        model_ids=("model_0",),
-    )
-    assert retried.created
-    assert retried.submission_attempt == 2
-    reopened = repository.get_pipeline_job(reservation.job_id)
-    assert reopened is not None
-    assert reopened["submit_outcome"] is None
-    assert reopened["reconciliation_decision"] is None
-    assert reopened["slurm_comment"] == _expected_forcing_attempt_comment(
-        retried.idempotency_key,
-        retried.submission_attempt,
-    )
-
-
-def test_sparse_historical_forcing_failure_does_not_block_a_new_successful_attempt(tmp_path: Path) -> None:
-    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
-    historical_job_id = f"job_cycle_gfs_{_CYCLE}_forcing_historical"
-    repository.append_historical_pipeline_job(
-        {
-            "job_id": historical_job_id,
-            "run_id": f"cycle_gfs_{_CYCLE}_forcing_historical",
-            "cycle_id": _CYCLE_ID,
-            "job_type": "produce_forcing_array",
-            "model_id": None,
-            "stage": "forcing",
-            "status": "permanently_failed",
-            "slurm_job_id": None,
-            "error_code": "SLURM_PARSE_ERROR",
-        }
-    )
-
-    replacement = _reserve_forcing(repository, suffix="replacement", model_ids=("model_0",))
-
-    assert replacement.created
-    assert repository.bind_pipeline_job_reservation(
-        replacement.idempotency_key,
-        slurm_job_id="3001",
-    ) is not None
-    _previous, completed = repository.update_pipeline_job_status(replacement.job_id, "succeeded")
-    assert completed["status"] == "succeeded"
-    historical = repository.get_pipeline_job(historical_job_id)
-    assert historical is not None
-    assert historical["status"] == "permanently_failed"
-
-
-def test_real_http_forcing_rejection_keeps_rejected_semantics_without_ambiguity(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class _HttpClient:
-        def __enter__(self) -> _HttpClient:
-            return self
-
-        def __exit__(self, *_args: Any) -> None:
-            return None
-
-        def request(self, method: str, path: str, *, json: Any = None) -> httpx.Response:
-            del method, path, json
-            return httpx.Response(422, json={"error": {"code": "VALIDATION_ERROR"}})
-
-    monkeypatch.setattr(httpx, "Client", lambda **_kwargs: _HttpClient())
-    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
-    run_id = f"cycle_gfs_{_CYCLE}_forcing_rejection"
-    orchestrator = _orchestrator(
-        tmp_path,
-        repository,
-        HttpSlurmGatewayClient("http://gateway.test"),
-        terminal_stage="forecast",
-    )
-    context = _forcing_context(
-        orchestrator,
-        _forcing_basins(1, orchestration_run_id=run_id),
-        run_id=run_id,
-    )
-
-    result, aggregation = orchestrator._submit_and_wait_cycle_stage(M3_STAGES[1], context)
-
-    assert aggregation is None
-    assert result.status == "submission_failed"
-    assert result.error_code == "VALIDATION_ERROR"
-    durable = repository.get_pipeline_job(result.pipeline_job_id)
-    assert durable is not None
-    assert durable["status"] == "submission_failed"
-    assert durable.get("submit_outcome") is None
-    assert durable["slurm_job_id"] is None
-    assert durable["cohort_members"]
-    assert repository.query_reserved_unbound_jobs() == []
