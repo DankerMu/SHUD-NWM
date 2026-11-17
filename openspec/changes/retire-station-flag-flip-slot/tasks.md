@@ -21,4 +21,4 @@
   (two-entry local tuple for the ordering and abort cases), add the unknown-mount case, and update the comments.
 - [x] 1.4 Evidence: the E3 mutations, the selector pins and the tracked-tree guard red, and every file within the E1
   line rule.
-- [ ] 1.5 File the follow-up issue: state-clone wiring (What 5) and the stale "Change 8 owns the flip" comments.
+- [x] 1.5 File the follow-up issue: state-clone wiring (What 5) and the stale "Change 8 owns the flip" comments.

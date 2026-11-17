@@ -109,17 +109,17 @@ public surface (the mount-point tuple, the unknown-mount rejection), docs/spec.
 
 ## Evidence Floor
 
-- [ ] E1 `uv run ruff check --no-cache .`; `git diff --check`; entropy hard gate `hard_gate_failing_count 0`; the three
+- [x] E1 `uv run ruff check --no-cache .`; `git diff --check`; entropy hard gate `hard_gate_failing_count 0`; the three
   partitions, the helper module, and every touched file not already in the `.large-file-guard.json` exclude list are
   under 1000 lines; `.large-file-guard.json` is unchanged.
-- [ ] E2 The split lands as a pure-move commit before the item-2 rewrite. On that commit:
+- [x] E2 The split lands as a pure-move commit before the item-2 rewrite. On that commit:
   - `pytest --collect-only -q` over the three partitions gives exactly the `::test_name[param-id]` suffix set of the
     base path before the split (the file part of a node id changes with the partition);
   - a per-definition fingerprint (AST dump plus sha256 of every top-level def and class, with decorators) of the base
     file before the split equals the union over the partitions and the helper module.
 
   The item-2 commit's node-id diff lists only the rewritten or added tests, and each is named in the PR.
-- [ ] E3 Tests:
+- [x] E3 Tests:
   - the selector set for the diff, `tests/test_variant_activation_cutover*.py`, `tests/test_select_ci_tests.py`,
     `tests/test_state_clone_cutover_hook.py`, `tests/test_legacy_reactivation_guard.py` and
     `tests/test_state_clone_index_publish.py` pass locally and in a node-27 temporary worktree;
@@ -128,5 +128,5 @@ public surface (the mount-point tuple, the unknown-mount rejection), docs/spec.
     the helper module is present (template: `tests/test_select_ci_tests.py:12726`), red when a fourth partition is added;
   - mutations, each red: dispatch order reversed; dispatch swallows a raising hook and keeps going (raising at the
     end); the unknown-mount case run against the old two-entry tuple.
-- [ ] E4 `openspec validate retire-station-flag-flip-slot --strict --no-interactive`.
-- [ ] E5 The state-clone wiring finding is recorded in the PR, and its issue is filed.
+- [x] E4 `openspec validate retire-station-flag-flip-slot --strict --no-interactive`.
+- [x] E5 The state-clone wiring finding is recorded in the PR, and its issue is filed.
