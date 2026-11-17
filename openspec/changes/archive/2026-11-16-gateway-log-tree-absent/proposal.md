@@ -104,8 +104,12 @@ non-array job can now get a permanent 0-byte `log_uri`: the persisted state repo
   - Selector set for the diff, plus `tests/test_real_slurm_gateway.py`, `tests/test_gateway.py`, the
     chain_workspace and log-publication suites, and `tests/test_orchestration_chain.py`, all green locally.
 - [x] E3 The same set passes in a node-27 temporary worktree.
-- [ ] E4 After merge: node-22 is pulled at a pass boundary and the gateway restarted. `/api/v1/slurm/health` returns
+- [x] E4 After merge: node-22 is pulled at a pass boundary and the gateway restarted. `/api/v1/slurm/health` returns
   200 before and after. A live read-only `fetch_logs` of a recent terminal job whose log file exists carries
   `log_tree_present: true` with non-empty logs. **This proves only deployment and serialization**; the `False` paths
   (bound with dirs gone, unbound with nothing found) are covered by unit tests alone.
+  — receipt: node-22 ff-pulled to 5988ef56b at a pass boundary, gateway restarted 2026-11-16T22:24Z; health 200
+  before and after (re-checked 2026-11-17T04:15:46Z). First terminal job submitted after the restart, 159793
+  (`succeeded`, bound `cycle_gfs_2026111612_convert_dg_…`), read-only `GET /jobs/159793/logs` → HTTP 200,
+  `log_tree_present: true`, stdout 47 bytes.
 - [x] E5 `openspec validate gateway-log-tree-absent --strict --no-interactive`.
