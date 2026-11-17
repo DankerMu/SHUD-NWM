@@ -170,7 +170,7 @@ def test_default_comment_accounting_requires_full_attempt_coverage_but_still_bin
         commands.append(command)
         return ""
 
-    monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", empty_page)
+    monkeypatch.setattr("services.orchestrator.reconcile_comment_sacct._bounded_sacct_stdout", empty_page)
     outcome = reconcile_module.reconcile_reserved_unbound_jobs(
         repository,
         comment_query=reconcile_module.default_comment_sacct_querier(
@@ -220,7 +220,7 @@ def test_default_comment_accounting_requires_full_attempt_coverage_but_still_bin
     matched = matched_repository.get_accepted_submit_pipeline_job(pipeline_job_id)
     comment = str(matched["slurm_comment"])
     row = f"72001|nhms_forecast|RUNNING|0:0|{comment}|||\n"
-    monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", lambda _command: row)
+    monkeypatch.setattr("services.orchestrator.reconcile_comment_sacct._bounded_sacct_stdout", lambda _command: row)
     bound = reconcile_module.reconcile_reserved_unbound_jobs(
         matched_repository,
         comment_query=reconcile_module.default_comment_sacct_querier(
@@ -450,9 +450,9 @@ def test_versioned_accounting_saturation_is_public_bounded_unavailable_evidence(
     from services.orchestrator import scheduler_runtime
 
     repository = _file_cohort_repository(tmp_path, member_count=1)
-    monkeypatch.setattr(reconcile_module, "MAX_COMMENT_SACCT_ROWS", max_rows)
-    monkeypatch.setattr(reconcile_module, "MAX_COMMENT_SACCT_BYTES", max_bytes)
-    monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", lambda _command: payload)
+    monkeypatch.setattr("services.orchestrator.reconcile_comment_sacct.MAX_COMMENT_SACCT_ROWS", max_rows)
+    monkeypatch.setattr("services.orchestrator.reconcile_comment_sacct.MAX_COMMENT_SACCT_BYTES", max_bytes)
+    monkeypatch.setattr("services.orchestrator.reconcile_comment_sacct._bounded_sacct_stdout", lambda _command: payload)
     query_end = datetime(2026, 7, 12, 0, 1, tzinfo=UTC)
     outcome = reconcile_module.reconcile_reserved_unbound_jobs(
         repository,
@@ -517,56 +517,60 @@ def test_legacy_custom_comment_adapter_remains_callable_but_cannot_prove_version
     assert legacy.action == "legacy_unversioned_read_only"
 
 
-def test_parse_comment_sacct_rows_resolves_array_master() -> None:
+def test_index_comment_sacct_matches_resolves_array_master() -> None:
     """Real (non-mock) parse of multi-row sacct output: an array stage stamped
     with the idempotency --comment reconciles back to its BARE master id. Array
-    element rows (``<master>_<task>``) normalize to ``<master>``, ``.batch`` step
-    sub-rows are skipped, and an unrelated Comment never false-matches.
+    element rows (``<master>_<task>``) normalize to ``<master>``, a ``.batch``
+    step sub-row folds into that master without replacing its fields, and an
+    unrelated Comment never false-matches.
     """
 
-    from services.orchestrator.reconcile import _parse_comment_sacct_rows
+    from services.orchestrator.reconcile import _index_comment_sacct_matches
     from services.slurm_gateway.real_backend import SLURM_JOB_ID_RE
 
     stdout = (
         "77042_0|stageA|RUNNING|0:0|nhms_idem:K\n"
         "77042_1|stageA|RUNNING|0:0|nhms_idem:K\n"
-        "77042.batch|batch|RUNNING|0:0|nhms_idem:K\n"
+        "77042.batch|batch|COMPLETED|0:0|nhms_idem:K\n"
         "99999|other|RUNNING|0:0|nhms_idem:OTHER\n"
     )
 
-    record = _parse_comment_sacct_rows(stdout, "nhms_idem:K")
+    index = _index_comment_sacct_matches(stdout)
 
-    assert record is not None
+    (record,) = index["nhms_idem:K"]
     assert isinstance(record, SacctRecord)
     assert record.slurm_job_id == "77042"  # array element → bare master id.
+    # The step row folded into the master: job name and state are the master row's.
+    assert (record.job_name, record.raw_state) == ("stageA", "RUNNING")
     # The normalized id must pass the master/single-job id shape guard.
     assert SLURM_JOB_ID_RE.fullmatch("77042")
+    assert [other.slurm_job_id for other in index["nhms_idem:OTHER"]] == ["99999"]
 
 
-def test_parse_comment_sacct_rows_single_job() -> None:
+def test_index_comment_sacct_matches_single_job() -> None:
     """A single (non-array) job with a matching Comment passes through unchanged;
-    its ``.batch`` step sub-row is skipped.
+    its ``.batch`` step sub-row folds into it without replacing its fields.
     """
 
-    from services.orchestrator.reconcile import _parse_comment_sacct_rows
+    from services.orchestrator.reconcile import _index_comment_sacct_matches
 
     stdout = (
         "88001|stage|RUNNING|0:0|nhms_idem:K\n"
-        "88001.batch|batch|RUNNING|0:0|nhms_idem:K\n"
+        "88001.batch|batch|COMPLETED|0:0|nhms_idem:K\n"
     )
 
-    record = _parse_comment_sacct_rows(stdout, "nhms_idem:K")
+    (record,) = _index_comment_sacct_matches(stdout)["nhms_idem:K"]
 
-    assert record is not None
     assert record.slurm_job_id == "88001"  # no "_" → original id, untouched.
+    assert (record.job_name, record.raw_state) == ("stage", "RUNNING")
 
 
-def test_parse_comment_sacct_rows_no_match_returns_none() -> None:
-    """No row's Comment equals the target → None, the authoritative
-    confirmed-absent answer that crash-recovery reconcile relies on.
+def test_index_comment_sacct_matches_no_match_leaves_comment_unindexed() -> None:
+    """No row's Comment equals the target → the target is not indexed, the
+    authoritative confirmed-absent answer that crash-recovery reconcile relies on.
     """
 
-    from services.orchestrator.reconcile import _parse_comment_sacct_rows
+    from services.orchestrator.reconcile import _index_comment_sacct_matches
 
     stdout = (
         "12345|stage|RUNNING|0:0|nhms_idem:OTHER\n"
@@ -574,7 +578,10 @@ def test_parse_comment_sacct_rows_no_match_returns_none() -> None:
         "67890_0|stage|RUNNING|0:0|nhms_idem:DIFFERENT\n"
     )
 
-    assert _parse_comment_sacct_rows(stdout, "nhms_idem:K") is None
+    index = _index_comment_sacct_matches(stdout)
+
+    assert "nhms_idem:K" not in index
+    assert sorted(index) == ["nhms_idem:DIFFERENT", "nhms_idem:OTHER"]
 
 
 def test_comment_sacct_querier_scans_once_and_reaps_oversized_stream(
@@ -594,7 +601,7 @@ def test_comment_sacct_querier_scans_once_and_reaps_oversized_stream(
             "17668|nhms_forecast|PENDING|0:0|nhms_idem:key-b|scheduler|account\n"
         )
 
-    monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", bounded)
+    monkeypatch.setattr("services.orchestrator.reconcile_comment_sacct._bounded_sacct_stdout", bounded)
     query = reconcile_module.default_comment_sacct_querier(
         global_visibility_probe=lambda: True,
         comment_storage_probe=lambda: True,
@@ -640,9 +647,9 @@ def test_comment_sacct_querier_scans_once_and_reaps_oversized_stream(
         processes.append(FakeProcess())
         return processes[-1]
 
-    monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", original_bounded)
+    monkeypatch.setattr("services.orchestrator.reconcile_comment_sacct._bounded_sacct_stdout", original_bounded)
     monkeypatch.setattr(reconcile_module.subprocess, "Popen", popen)
-    monkeypatch.setattr(reconcile_module, "MAX_COMMENT_SACCT_BYTES", 128)
+    monkeypatch.setattr("services.orchestrator.reconcile_comment_sacct.MAX_COMMENT_SACCT_BYTES", 128)
     with pytest.raises(reconcile_module.ReconcileQueryUnavailable):
         reconcile_module.default_comment_sacct_querier(
             global_visibility_probe=lambda: True,
@@ -730,8 +737,7 @@ def _fallback_querier(
 
     commands: list[list[str]] = []
     monkeypatch.setattr(
-        reconcile_module,
-        "_bounded_sacct_stdout",
+        "services.orchestrator.reconcile_comment_sacct._bounded_sacct_stdout",
         lambda command: commands.append(list(command)) or rows,
     )
     query = reconcile_module.default_comment_sacct_querier(
@@ -828,15 +834,14 @@ def test_comment_storing_cluster_exact_comment_lane_never_reads_submitline(
         row = f"72001|nhms_forecast|RUNNING|0:0|{comment}|scheduler|account\n"
         commands: list[list[str]] = []
         monkeypatch.setattr(
-            reconcile_module,
-            "_bounded_sacct_stdout",
+            "services.orchestrator.reconcile_comment_sacct._bounded_sacct_stdout",
             lambda command: commands.append(list(command)) or row,
         )
 
         def _forbidden(*_args: Any, **_kwargs: Any) -> Any:
             raise AssertionError("comment-storing lane must not parse SubmitLine")
 
-        monkeypatch.setattr(reconcile_module, "_parse_fallback_sacct_rows", _forbidden)
+        monkeypatch.setattr("services.orchestrator.reconcile_comment_sacct._parse_fallback_sacct_rows", _forbidden)
         outcome = reconcile_module.reconcile_reserved_unbound_jobs(
             repository,
             comment_query=reconcile_module.default_comment_sacct_querier(
@@ -1317,8 +1322,7 @@ def test_fallback_does_not_run_when_ownership_is_incomplete(
     )
     commands: list[list[str]] = []
     monkeypatch.setattr(
-        reconcile_module,
-        "_bounded_sacct_stdout",
+        "services.orchestrator.reconcile_comment_sacct._bounded_sacct_stdout",
         lambda command: commands.append(list(command)) or "",
     )
     query = reconcile_module.default_comment_sacct_querier(
@@ -1357,8 +1361,7 @@ def test_fallback_unknown_capability_stays_query_free(
     )
     commands: list[list[str]] = []
     monkeypatch.setattr(
-        reconcile_module,
-        "_bounded_sacct_stdout",
+        "services.orchestrator.reconcile_comment_sacct._bounded_sacct_stdout",
         lambda command: commands.append(list(command)) or "",
     )
     query = reconcile_module.default_comment_sacct_querier(
@@ -1446,11 +1449,10 @@ def test_fallback_bounded_failure_keeps_pass_reason_but_holds_tuple_as_unproven(
         expected_account="account",
     )
     pipeline_job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
-    monkeypatch.setattr(reconcile_module, "MAX_COMMENT_SACCT_BYTES", max_bytes)
-    monkeypatch.setattr(reconcile_module, "MAX_COMMENT_SACCT_ROWS", max_rows)
+    monkeypatch.setattr("services.orchestrator.reconcile_comment_sacct.MAX_COMMENT_SACCT_BYTES", max_bytes)
+    monkeypatch.setattr("services.orchestrator.reconcile_comment_sacct.MAX_COMMENT_SACCT_ROWS", max_rows)
     monkeypatch.setattr(
-        reconcile_module,
-        "_bounded_sacct_stdout",
+        "services.orchestrator.reconcile_comment_sacct._bounded_sacct_stdout",
         lambda _command: payload,
     )
     query = reconcile_module.default_comment_sacct_querier(
@@ -1498,7 +1500,7 @@ def test_fallback_process_failure_keeps_pass_reason_but_holds_tuple_as_unproven(
     def failing_page(_command: Any) -> str:
         raise reconcile_module.ReconcileQueryUnavailable("sacct query returned 2")
 
-    monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", failing_page)
+    monkeypatch.setattr("services.orchestrator.reconcile_comment_sacct._bounded_sacct_stdout", failing_page)
     query = reconcile_module.default_comment_sacct_querier(
         global_visibility_probe=lambda: True,
         comment_storage_probe=lambda: False,
@@ -1558,8 +1560,7 @@ def test_fallback_final_bind_guard_rejects_present_but_different_comment(
         # change/regression): the final bind guard must still refuse
         # present-but-different before commit is ever invoked.
         monkeypatch.setattr(
-            reconcile_module,
-            "_reserved_record_identity_matches",
+            "services.orchestrator.reconcile_reserved._reserved_record_identity_matches",
             lambda *_args, **_kwargs: True,
         )
 

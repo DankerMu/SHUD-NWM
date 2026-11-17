@@ -11891,7 +11891,6 @@ def test_file_journal_forcing_gateway_failure_stays_ambiguous_and_unbound(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from services.orchestrator import reconcile as reconcile_module
     from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
     from services.orchestrator.reconcile import reconcile_inflight_jobs
 
@@ -11918,8 +11917,7 @@ def test_file_journal_forcing_gateway_failure_stays_ambiguous_and_unbound(
     repository = FileOrchestrationJournalRepository(tmp_path / "journal")
     orchestrator = _orchestrator(tmp_path, repository, _AcceptedForcingTimeoutClient())
     monkeypatch.setattr(
-        reconcile_module,
-        "_bounded_visibility_stdout",
+        "services.orchestrator.reconcile_sacct_probe._bounded_visibility_stdout",
         lambda command: (
             "AccountingStoreFlags = (null)\n"
             if list(command)[-2:] == ["show", "config"]

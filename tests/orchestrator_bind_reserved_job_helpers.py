@@ -13,7 +13,7 @@ hand-written post-state:
 
 Both leave the durable held tuple ``slurm_exact_comment`` /
 ``accounting_unavailable`` / ``comment_accounting_unproven``
-(``reconcile.py`` ``_record_file_reconciliation``), which is what the operator
+(``reconcile_reserved_support._record_file_reconciliation``), which is what the operator
 bind accepts.  Timestamps follow the node-22 production shape of #2655: the
 fixture anchor is ``2026-07-12T00:00:13Z`` and the arrays are accepted about two
 minutes later.
@@ -92,7 +92,7 @@ def held_repository(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shape: str 
         def _saturated(_command: Any, **_kwargs: Any) -> str:
             raise reconcile_module.ReconcileQuerySaturated("rows")
 
-        monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", _saturated)
+        monkeypatch.setattr("services.orchestrator.reconcile_comment_sacct._bounded_sacct_stdout", _saturated)
         query = reconcile_module.default_comment_sacct_querier(
             global_visibility_probe=lambda: True,
             comment_storage_probe=lambda: False,

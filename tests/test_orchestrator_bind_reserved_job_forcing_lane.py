@@ -128,8 +128,7 @@ def _held_forcing_shape(
     )
     # The pass itself only records the ambiguity; nothing in it may prove absence.
     monkeypatch.setattr(
-        reconcile_module,
-        "_bounded_visibility_stdout",
+        "services.orchestrator.reconcile_sacct_probe._bounded_visibility_stdout",
         lambda command: "AccountingStoreFlags = (null)\n" if list(command)[-2:] == ["show", "config"] else "",
     )
     orchestrator.orchestrate_cycle("gfs", _CYCLE, _cohort_basins(candidates))
@@ -159,15 +158,13 @@ def _restart_reconcile(
     repository: Any, monkeypatch: pytest.MonkeyPatch, controller_stdout: str, query_end: datetime
 ) -> Any:
     monkeypatch.setattr(
-        reconcile_module,
-        "_bounded_visibility_stdout",
+        "services.orchestrator.reconcile_sacct_probe._bounded_visibility_stdout",
         lambda command: (
             "AccountingStoreFlags = (null)\n" if list(command)[-2:] == ["show", "config"] else controller_stdout
         ),
     )
     monkeypatch.setattr(
-        reconcile_module,
-        "_bounded_sacct_stdout",
+        "services.orchestrator.reconcile_comment_sacct._bounded_sacct_stdout",
         lambda _command: pytest.fail("comment-less forcing reconcile must not query sacct"),
     )
     query = reconcile_module.default_comment_sacct_querier("/opt/slurm/bin", now=lambda: query_end)
@@ -180,8 +177,7 @@ def _single_record_foreign_owner(repository: Any, monkeypatch: pytest.MonkeyPatc
 
     comment = _master(repository, "forcing")["slurm_comment"]
     monkeypatch.setattr(
-        reconcile_module,
-        "_bounded_sacct_stdout",
+        "services.orchestrator.reconcile_comment_sacct._bounded_sacct_stdout",
         lambda _command: f"9001_0|nhms_forcing|RUNNING|0:0|{comment}|intruder|account\n",
     )
     query = reconcile_module.default_comment_sacct_querier(

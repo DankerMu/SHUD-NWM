@@ -2099,6 +2099,8 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         # `services/orchestrator/__init__.py`, scheduler_candidates.py,
         # scheduler_discovery.py and scheduler_state_types.py. 7 tests in ~13s.
         "tests/test_quarantine_identity_authority.py",
+        # #3155: the reconcile partition's logger-name pin rides the directory rule.
+        "tests/test_reconcile_partition_logger.py",
         "tests/test_reconcile_sacct_parse.py",
         "tests/test_replay_lineage.py",
         RESOLVE_SURFACE_GUARD_PATH,
@@ -6285,9 +6287,11 @@ DIRECT_ONLY_ONE_HOP_THRESHOLD = 10
 DISPLAY_COVERAGE_GATED_IMPORTER = "tests/test_display_coverage_residual_debt_integration.py"
 
 # Anti-vacuity floor for the one-hop extension (#1455): this suite pins the
-# sacct parsing constants that services/orchestrator/reconcile.py consumes, and
-# reconcile.py is what imports real_backend at file level — the suite itself
-# never names real_backend, so a direct-importer-only derivation cannot see it.
+# live comment-sacct row parser `_index_comment_sacct_matches` and the sacct
+# constants it consumes. Since #3155 it imports that parser from
+# services/orchestrator/reconcile_comment_sacct.py, the reconcile leaf that
+# imports real_backend at file level — the suite itself never names
+# real_backend, so a direct-importer-only derivation cannot see it.
 REAL_BACKEND_ONE_HOP_MEMBER = "tests/test_reconcile_sacct_parse.py"
 
 
@@ -6453,8 +6457,8 @@ def test_one_hop_extension_reaches_suites_no_direct_importer_scan_can_see() -> N
     # Anti-vacuity + coverage for the hop itself: without it this suite is
     # invisible to the guard (it imports reconcile, not real_backend) and a
     # real_backend-only PR never runs the sacct parsing assertions its
-    # constants feed. Derived, never frozen: if reconcile.py stops importing
-    # real_backend at file level, this reddens rather than rotting green.
+    # constants feed. Derived, never frozen: if reconcile_comment_sacct.py stops
+    # importing real_backend at file level, this reddens rather than rotting green.
     module = "services.slurm_gateway.real_backend"
 
     assert REAL_BACKEND_ONE_HOP_MEMBER not in _non_gated_top_level_importer_tests(module)
@@ -12442,6 +12446,28 @@ def test_disposition_guard_reds_when_a_redirect_no_longer_reaches_the_suite() ->
 # same-subject suites are pinned instead (test_pipeline_persistence.py for
 # persistence.py; test_reconcile_sacct_parse.py for reconcile.py, which is the
 # suite the #1486 one-hop closure already ties to reconcile.py).
+# #3155: services/orchestrator/reconcile.py is a compatibility facade over these
+# leaves, which now hold every line a reconcile.py PR used to change. Literal on
+# purpose: the guard below derives the leaf set from the tree and reds when a
+# leaf is added or removed without updating this tuple, so the floor rows and
+# the facade-equivalence pin cannot silently miss a leaf.
+RECONCILE_PARTITION_LEAVES: tuple[str, ...] = (
+    "services/orchestrator/reconcile_comment_proof.py",
+    "services/orchestrator/reconcile_comment_sacct.py",
+    "services/orchestrator/reconcile_identity.py",
+    "services/orchestrator/reconcile_inflight.py",
+    "services/orchestrator/reconcile_records.py",
+    "services/orchestrator/reconcile_reserved.py",
+    "services/orchestrator/reconcile_reserved_support.py",
+    "services/orchestrator/reconcile_sacct_probe.py",
+)
+# The suites every reconcile partition change must select: the LOW-2 parser
+# suite and the partition's logger-name pin.
+RECONCILE_PARTITION_FLOOR_SUITES: tuple[str, ...] = (
+    "tests/test_reconcile_sacct_parse.py",
+    "tests/test_reconcile_partition_logger.py",
+)
+
 POSITIVE_SELECTION_FLOOR: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         "services/tile_publisher/publisher.py",
@@ -12474,7 +12500,9 @@ POSITIVE_SELECTION_FLOOR: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("services/slurm_gateway/gateway.py", ("tests/test_retry_cancel_consistency.py",)),
     ("services/orchestrator/persistence.py", ("tests/test_pipeline_persistence.py",)),
     ("services/orchestrator/retry.py", ("tests/test_retry.py",)),
-    ("services/orchestrator/reconcile.py", ("tests/test_reconcile_sacct_parse.py",)),
+    ("services/orchestrator/reconcile.py", RECONCILE_PARTITION_FLOOR_SUITES),
+    # #3155: each reconcile leaf carries the facade's floor row.
+    *((leaf, RECONCILE_PARTITION_FLOOR_SUITES) for leaf in RECONCILE_PARTITION_LEAVES),
     ("services/orchestrator/scheduler_generation.py", ("tests/test_scheduler_generation.py",)),
     ("services/orchestrator/scheduler_timing.py", ("tests/test_scheduler_timing.py",)),
     ("services/orchestrator/replay_lineage.py", ("tests/test_replay_lineage.py",)),
@@ -12506,6 +12534,25 @@ POSITIVE_SELECTION_FLOOR: tuple[tuple[str, tuple[str, ...]], ...] = (
     (RETENTION_COPYBACK_MUTEX_OWNER_PATH, RETENTION_COPYBACK_MUTEX_OWNER_TESTS),
     ("scripts/node27_raw_retention.py", ("tests/test_node27_raw_retention_copyback_mutex.py",)),
 )
+
+
+def test_reconcile_leaf_change_selects_the_reconcile_facade_suites() -> None:
+    # #3155: a PR that touches only one reconcile leaf must run what a
+    # reconcile.py PR ran before the split — the LOW-2 parser suite and every
+    # other suite the facade path selects. The leaves ride the
+    # `services/orchestrator/**` directory rule by glob; this pins that no
+    # narrower rule or stop rule ever shadows a leaf.
+    on_disk = sorted(path.as_posix() for path in Path("services/orchestrator").glob("reconcile_*.py"))
+    assert list(RECONCILE_PARTITION_LEAVES) == on_disk, (
+        "RECONCILE_PARTITION_LEAVES drifted from the tree", on_disk
+    )
+    facade = set(select_tests(["services/orchestrator/reconcile.py"], repo_root=Path(".")))
+    assert set(RECONCILE_PARTITION_FLOOR_SUITES) <= facade
+    for leaf in RECONCILE_PARTITION_LEAVES:
+        selected = set(select_tests([leaf], repo_root=Path(".")))
+        assert set(RECONCILE_PARTITION_FLOOR_SUITES) <= selected, leaf
+        missing = sorted(facade - selected)
+        assert not missing, f"{leaf}: a leaf-only change drops reconcile.py suites {missing}"
 
 
 @pytest.mark.parametrize(

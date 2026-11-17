@@ -939,11 +939,8 @@ def test_file_cohort_terminal_identity_reason_tokens_are_exact_and_zero_write(
             # member_ids comprehension raises, hitting the defensive
             # ``cohort_members_unparsable`` site.
             record_template["cohort_members"] = [{"array_task_id": "not-an-int"}]
-            from services.orchestrator import reconcile as reconcile_module
-
             monkeypatch.setattr(
-                reconcile_module,
-                "forecast_cohort_identity_is_valid",
+                "services.orchestrator.reconcile_inflight.forecast_cohort_identity_is_valid",
                 lambda _identity: True,
             )
         record_template["slurm_job_id"] = "17667"

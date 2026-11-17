@@ -268,7 +268,7 @@ DEFAULT_MAX_ENTRIES_SCANNED = 65536
 
 # Chronic tracker subjects that cannot converge.  `ambiguous_fallback_match`
 # with reason class `comment_accounting_unproven` is written by
-# `services/orchestrator/reconcile.py:2564` when two or more owned in-window
+# `services.orchestrator.reconcile_reserved.reconcile_reserved_unbound_jobs` when two or more owned in-window
 # masters match and the controller never proves forcing identity -- this Slurm
 # cluster does not return `job_comment`, so exact-comment accounting is
 # permanently unproven and the count only ever grows (measured 1300 / 1198

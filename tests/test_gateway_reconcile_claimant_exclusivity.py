@@ -60,8 +60,7 @@ def _fallback_querier(
 
     commands: list[list[str]] = []
     monkeypatch.setattr(
-        reconcile_module,
-        "_bounded_sacct_stdout",
+        "services.orchestrator.reconcile_comment_sacct._bounded_sacct_stdout",
         lambda command: commands.append(list(command)) or rows,
     )
     query = reconcile_module.default_comment_sacct_querier(

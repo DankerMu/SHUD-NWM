@@ -31,7 +31,13 @@ from services.orchestrator.operator_action_listing_held import (
 )
 from tests.test_operator_action_listing import _permanent_failure_row, _run, _write_pass
 
-_RECONCILE = Path(__file__).resolve().parents[1] / "services" / "orchestrator" / "reconcile.py"
+# #3155: reconcile.py is a facade over the ``reconcile_<topic>`` leaves; the
+# producer vocabulary is spread across them (constants in ``reconcile_records``,
+# ``ReservationReconcileOutcome(...)`` calls in ``reconcile_reserved_support`` and
+# ``reconcile_reserved``), so the closure pin reads every partition module.
+_RECONCILE_PARTITION = sorted(
+    (Path(__file__).resolve().parents[1] / "services" / "orchestrator").glob("reconcile*.py")
+)
 _STARTED = datetime(2026, 7, 12, 12, tzinfo=UTC)
 _JOB = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
 _FORCING_JOB = "job_cycle_gfs_2026071200_convert_cohort_36e4f7b9bf80_forcing"
@@ -100,11 +106,15 @@ def _held(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _reserved_unbound_action_vocabulary() -> set[str]:
-    """Every ``action`` a ``ReservationReconcileOutcome`` can carry, read from reconcile.py source."""
+    """Every ``action`` a ``ReservationReconcileOutcome`` can carry, read from the reconcile partition source."""
 
-    tree = ast.parse(_RECONCILE.read_text(encoding="utf-8"))
+    assert len(_RECONCILE_PARTITION) > 1, f"reconcile partition not found: {_RECONCILE_PARTITION}"
+    trees = [ast.parse(path.read_text(encoding="utf-8")) for path in _RECONCILE_PARTITION]
+    # One constant table merged across the partition: a constant defined in one
+    # module is read by name in another.
     constants = {
         target.id: node.value.value
+        for tree in trees
         for node in tree.body
         if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
         for target in node.targets
@@ -132,7 +142,7 @@ def _reserved_unbound_action_vocabulary() -> set[str]:
 
     vocabulary: set[str] = set()
     calls = 0
-    for function in ast.walk(tree):
+    for function in (node for tree in trees for node in ast.walk(tree)):
         if not isinstance(function, ast.FunctionDef):
             continue
         for call in ast.walk(function):

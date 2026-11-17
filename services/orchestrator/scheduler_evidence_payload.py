@@ -106,7 +106,7 @@ _BOUNDED_MODEL_RUN_FAILURE_KEYS = (
 # and either can be the only one present, so the compact block must keep both.
 _BOUNDED_RESTART_RECONCILE_KEYS = ("status", "reserved_unbound_error", "inflight_error")
 # #1797: the same symmetry applies to the outcome rows.  `identity_mismatch_blocked` is
-# produced by `reconcile_inflight_jobs` (reconcile.py:1076-1087) and lands in `inflight`,
+# produced by `services.orchestrator.reconcile_inflight.reconcile_inflight_jobs` and lands in `inflight`,
 # so compacting only `reserved_unbound` deleted the lane the streak guard below exists to
 # protect, and a discarded lane reads exactly like a lane with no outcomes.
 _BOUNDED_RESTART_RECONCILE_LANES = ("inflight", "reserved_unbound")

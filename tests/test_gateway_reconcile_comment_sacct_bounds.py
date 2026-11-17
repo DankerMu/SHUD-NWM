@@ -46,7 +46,7 @@ def _rendered_page_bounds(monkeypatch: pytest.MonkeyPatch) -> tuple[list[str], i
         commands.append(list(command))
         return ""
 
-    monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", bounded)
+    monkeypatch.setattr("services.orchestrator.reconcile_comment_sacct._bounded_sacct_stdout", bounded)
     reconcile_module.default_comment_sacct_querier(
         global_visibility_probe=lambda: True,
         comment_storage_probe=lambda: True,
@@ -115,7 +115,7 @@ def test_comment_sacct_global_collision_is_detected_across_separate_pages(
             return f"17668_0|nhms_forecast|RUNNING|0:0|nhms_idem:{target}|foreign|other\n"
         return ""
 
-    monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", bounded)
+    monkeypatch.setattr("services.orchestrator.reconcile_comment_sacct._bounded_sacct_stdout", bounded)
     proof = reconcile_module._query_comment_accounting_proof(
         reconcile_module.default_comment_sacct_querier(
             global_visibility_probe=lambda: True,
@@ -138,10 +138,10 @@ def test_comment_sacct_rejects_any_single_page_over_its_bound(
 ) -> None:
     from services.orchestrator import reconcile as reconcile_module
 
-    monkeypatch.setattr(reconcile_module, "MAX_COMMENT_SACCT_ROWS", 2)
-    monkeypatch.setattr(reconcile_module, "MAX_COMMENT_SACCT_BYTES", 8)
+    monkeypatch.setattr("services.orchestrator.reconcile_comment_sacct.MAX_COMMENT_SACCT_ROWS", 2)
+    monkeypatch.setattr("services.orchestrator.reconcile_comment_sacct.MAX_COMMENT_SACCT_BYTES", 8)
     payload = "\n\n\n" if boundary == "row" else "123456789"
-    monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", lambda _command: payload)
+    monkeypatch.setattr("services.orchestrator.reconcile_comment_sacct._bounded_sacct_stdout", lambda _command: payload)
 
     with pytest.raises(reconcile_module.ReconcileQuerySaturated, match="bounded output") as error:
         reconcile_module.default_comment_sacct_querier(
@@ -165,7 +165,7 @@ def test_bounded_sacct_rejects_max_newlines_plus_unterminated_row(
         encoding="utf-8",
     )
     executable.chmod(0o755)
-    monkeypatch.setattr(reconcile_module, "MAX_COMMENT_SACCT_ROWS", 20_000)
+    monkeypatch.setattr("services.orchestrator.reconcile_comment_sacct.MAX_COMMENT_SACCT_ROWS", 20_000)
 
     with pytest.raises(reconcile_module.ReconcileQueryUnavailable, match="bounded output"):
         reconcile_module._bounded_sacct_stdout([str(executable)])
@@ -187,7 +187,7 @@ def test_comment_sacct_querier_proves_owner_candidate_against_global_scope(
         owned = "17667|nhms_forecast|RUNNING|0:0|nhms_idem:key|scheduler|account\n"
         return owned + foreign if "--allusers" in command else foreign + owned
 
-    monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", bounded)
+    monkeypatch.setattr("services.orchestrator.reconcile_comment_sacct._bounded_sacct_stdout", bounded)
     proof = reconcile_module._query_comment_accounting_proof(
         reconcile_module.default_comment_sacct_querier(
             global_visibility_probe=lambda: True,
@@ -220,7 +220,7 @@ def test_comment_sacct_global_overlimit_after_owner_candidate_fails_closed(
             raise reconcile_module.ReconcileQueryUnavailable("sacct query exceeded bounded output")
         return "17667|nhms_forecast|RUNNING|0:0|nhms_idem:key|scheduler|account\n"
 
-    monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", bounded)
+    monkeypatch.setattr("services.orchestrator.reconcile_comment_sacct._bounded_sacct_stdout", bounded)
 
     with pytest.raises(reconcile_module.ReconcileQueryUnavailable, match="bounded output"):
         reconcile_module._query_comment_accounting_proof(
@@ -250,7 +250,7 @@ def test_inflight_sacct_querier_uses_shared_bounded_stream_reader(
         commands.append(list(command))
         return "17667|nhms_forecast|RUNNING|0:0|nhms_idem:key|scheduler|account\n"
 
-    monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", bounded)
+    monkeypatch.setattr("services.orchestrator.reconcile_comment_sacct._bounded_sacct_stdout", bounded)
 
     record = reconcile_module.default_sacct_querier()("17667")
 
@@ -297,14 +297,19 @@ esac
     executable.chmod(0o755)
     monkeypatch.setenv("FAKE_SACCT_BOUNDARY", boundary)
     monkeypatch.setenv("FAKE_SACCT_TERMINATED_PATH", str(terminated_path))
-    monkeypatch.setattr(reconcile_module, "MAX_COMMENT_SACCT_BYTES", 128 if boundary == "byte" else 1_000_000)
-    monkeypatch.setattr(reconcile_module, "MAX_COMMENT_SACCT_ROWS", 2 if boundary == "row" else 10_000)
+    monkeypatch.setattr(
+        "services.orchestrator.reconcile_comment_sacct.MAX_COMMENT_SACCT_BYTES",
+        128 if boundary == "byte" else 1_000_000,
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.reconcile_comment_sacct.MAX_COMMENT_SACCT_ROWS",
+        2 if boundary == "row" else 10_000,
+    )
     # For byte/row the wall clock is only a safety net: saturation ends the read in
     # milliseconds, and the oracle below is the saturation reason itself (#2478).  The
     # wall_time leg's oracle *is* the timeout, so its deadline stays short (#2107).
     monkeypatch.setattr(
-        reconcile_module,
-        "COMMENT_SACCT_TIMEOUT_SECONDS",
+        "services.orchestrator.reconcile_comment_sacct.COMMENT_SACCT_TIMEOUT_SECONDS",
         1.0 if boundary == "wall_time" else 30.0,
     )
     caplog.set_level(logging.WARNING, logger=reconcile_module.__name__)

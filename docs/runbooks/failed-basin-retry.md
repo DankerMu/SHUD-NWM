@@ -42,8 +42,9 @@ migrates the row to `reservation_lost` with `reconciliation_decision =
 identity_mismatch_released`.
 
 When the exit is disabled (`<= 0`), the counter is not merely unused: it freezes at its
-**current** value (`reconcile.py:2067` writes `streak = current` when the exit is off, so
-it reads `0` only for rows that never counted — a row that reached `2` while the exit was
+**current** value (`services.orchestrator.reconcile_reserved_support._identity_blocked_outcome` writes
+`streak = current` when the exit is off, so it reads `0` only for rows that never counted —
+a row that reached `2` while the exit was
 enabled keeps reporting `2` after disabling), so the streak is **not** a no-progress
 diagnostic in that mode. Count the repeated `identity_mismatch_blocked` action rows across
 passes instead.
