@@ -256,14 +256,12 @@ class ModelActivationContext:
 PreActivationHook = Callable[[Any, ModelActivationContext], None]
 
 
-# Ordered mount points reserved for later changes in this Epic.
-# Order is declaration order in this tuple: ``state_clone`` (Change 5,
-# fingerprint-gated state clone) runs before ``station_flag_flip``. Both
-# mount here WITHOUT re-opening the lifecycle transaction (D7).
-# ``station_flag_flip`` has had no consumer since #3164 deleted the Change 8
-# flip hook (no production code ever registered it); the slot stays a
-# reserved default no-op until #3165 removes it.
-PRE_ACTIVATION_HOOK_MOUNT_POINTS: tuple[str, ...] = ("state_clone", "station_flag_flip")
+# Ordered pre-activation mount points; dispatch order is declaration order in
+# this tuple. The chain has one mount point, ``state_clone`` (Change 5,
+# fingerprint-gated state clone), which runs WITHOUT re-opening the lifecycle
+# transaction (D7). #3165 removed the ``station_flag_flip`` slot after #3164
+# deleted its only consumer, so registering on it is rejected as unknown.
+PRE_ACTIVATION_HOOK_MOUNT_POINTS: tuple[str, ...] = ("state_clone",)
 
 
 def _default_no_op_hook(cursor: Any, ctx: ModelActivationContext) -> None:  # noqa: ARG001

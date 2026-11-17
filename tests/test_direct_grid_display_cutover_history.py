@@ -42,8 +42,8 @@ Claim 4 — retired (#3164)
     This claim locked the station-flag flip hook as UPDATE-only. No
     production code ever registered that hook, so #3164 deleted it, and
     the claim went with it: a hook that does not exist cannot delete or
-    hide a historical row. The ``station_flag_flip`` pre-activation mount
-    point stays a reserved no-op slot until #3165 removes it.
+    hide a historical row. #3165 then removed its ``station_flag_flip``
+    pre-activation mount point.
 """
 
 from __future__ import annotations

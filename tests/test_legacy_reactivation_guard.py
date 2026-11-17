@@ -10,7 +10,7 @@ history. Classification uses ONE classifier delegated to
 History is APPEND-ONLY (``ops.audit_log`` records of successful
 activation-class transitions + the currently-active model classifier).
 
-The harness follows the SUB-5 pattern (``tests/test_variant_activation_cutover.py``):
+The harness follows the SUB-5 pattern (``tests/variant_activation_cutover_helpers.py``):
 subclass :class:`PsycopgModelRegistryStore` with an in-memory
 ``_transaction()`` / audit log / model_instance table, so the real
 ``model_lifecycle_operation`` flows unchanged — preflight, hook dispatch,
