@@ -1,8 +1,11 @@
 # published-artifact-log-reader Specification
 
 ## Purpose
-TBD - created by archiving change m22-two-node-docker-readonly-display. Update Purpose after archive.
+Let the read-only display plane read job logs only through display-readable URIs the compute side publishes,
+rejecting private or unsafe URIs and returning stable error codes.
+
 ## Requirements
+
 ### Requirement: Published artifact log reader
 
 The system SHALL read job logs through a published artifact reader instead of directly resolving 22 private workspace paths on display nodes.
@@ -47,6 +50,11 @@ The compute-control production path SHALL write job log URIs that display readon
 - **THEN** it is treated as display-readable only if the bucket and prefix are explicitly allowlisted as a published log namespace
 - **AND** private workspace or unallowlisted object-store URIs remain rejected.
 
+#### Scenario: An unavailable log is not published as an empty log
+- **WHEN** the compute side persists or advertises a job log and the gateway reports `log_tree_present: false`
+- **THEN** it MUST NOT write a log object or record `ops.pipeline_job.log_uri`; the URI stays unset and a later pass may fetch it again
+- **AND** a response without `log_tree_present`, from an older gateway, MUST be treated as present, and a genuinely empty existing log file is still written and recorded as before
+
 ### Requirement: Private and unsafe log URIs rejected
 
 The log reader SHALL reject private compute paths and unsafe URI forms.
@@ -89,4 +97,3 @@ Job log failures SHALL map to stable API error codes that do not depend on local
 - **WHEN** a published log is larger than `NHMS_LOG_TAIL_MAX_BYTES`
 - **THEN** the API returns only the bounded tail content
 - **AND** the response indicates truncation or bounded read behavior where the existing log schema allows it.
-

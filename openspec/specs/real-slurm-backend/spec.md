@@ -1,7 +1,8 @@
 # real-slurm-backend Specification
 
 ## Purpose
-TBD - created by archiving change m3-slurm-nationalization. Update Purpose after archive.
+Define the real Slurm implementation of the SlurmGateway ABC: template-whitelisted sbatch submission, sacct
+status and listing, scancel, workspace log reads, and sinfo health.
 
 ## Requirements
 
@@ -140,6 +141,13 @@ The `fetch_logs` method SHALL read job output and error logs from the configured
 - **WHEN** `fetch_logs` is called for a job in `RUNNING` status
 - **THEN** the system MUST read the current content of the log file (partial output)
 - **THEN** a field `complete` MUST be `false`
+
+#### Scenario: A deleted job log tree is reported as absent, not as an empty log
+
+- **WHEN** `fetch_logs` is called for a job whose submission metadata binds a `run_id`, no candidate log file exists, no array task logs are found, and every job-specific log directory is absent: the stored array log directory, `workspace/{run_id}/logs`, and the manifest `run_id` lane, but not the shared `workspace/logs` fallback
+- **THEN** the response MUST carry `log_tree_present: false` with empty `logs`
+- **AND** for a job without that binding (for example a record rebuilt from sacct after a gateway restart), `log_tree_present` MUST be `true` only when a log file or array task logs are actually found
+- **AND** when a candidate log file exists, array task logs are found, or the job-specific tree is intact (including an array master whose `<job_id>.out` is never written), the response MUST carry `log_tree_present: true`, so an empty log or an intact tree is never mistaken for a deleted one
 
 ---
 

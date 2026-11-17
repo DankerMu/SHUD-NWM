@@ -340,7 +340,7 @@ Modules under the ten audited directory paths are additionally governed by the r
 #### Scenario: one-hop importer suites are selected
 
 - **WHEN** a PR changes only `services/slurm_gateway/real_backend.py`
-- **THEN** the selector output includes the non-gated top-level importer suites of the modules that import `real_backend` at top level (including `tests/test_reconcile_sacct_parse.py`, which pins the sacct parsing constants consumed by `services/orchestrator/reconcile.py`), and the guard derives this one-hop set from the tree without recursing further
+- **THEN** the selector output includes the non-gated top-level importer suites of the modules that import `real_backend` at top level (including `tests/test_reconcile_sacct_parse.py`, which pins the live comment-sacct row parser `_index_comment_sacct_matches` of `services/orchestrator/reconcile_comment_sacct.py`, a module that imports `real_backend` at top level), and the guard derives this one-hop set from the tree without recursing further
 
 #### Scenario: Existing MVT closure remains an exact compatibility anchor
 

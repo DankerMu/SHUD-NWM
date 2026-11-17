@@ -82,7 +82,9 @@ its next publish. There is no migration.
   (`tests/test_state_*.py` touching the index, `tests/test_file_state_snapshot_index*.py` if present), all green
   locally. — red-on-old for all 7 new tests (json_nodes `(56, 50) == (50, 50)`). Copyback read-side-strip guard mutation: red (`['legacy-state'] == []`) with the strip removed, green when restored. Local: 6592 passed / 4 skipped (selection + named suites), then 1218 + 274 passed after the fix pass with the new file tracked.
 - [x] E3 The same set passes in a node-27 temporary worktree. — node-27 under umask 0002: 46 files at 880b79bea gave 5856 passed and 1 failed (selector support-module closure; fixed in 3f6f155ec). Rerun of the 5 affected files at 3f6f155ec: 1293 passed, 0 leftover DBs.
-- [ ] E4 node-22, read-only, after merge and pull (receipt in the archive PR). After the first `state_save_qc`
+- [x] E4 node-22, read-only, after merge and pull (receipt in the archive PR). After the first `state_save_qc`
   upsert under the new code, count the private index entries that carry either key, using
   `/scratch/frd_muziyao/NWM/.venv/bin/python -I -c` (no `uv run`, no `uv sync`). The result must be 0.
+  — receipt: node-22 at 5988ef56b; the private index republished 2026-11-17T04:27:53Z (daily file-provider refresh
+  after the scheduler pass) holds 9672 entries, 0 carrying either key.
 - [x] E5 `openspec validate state-index-strip-read-time-fields --strict --no-interactive`. — valid.
