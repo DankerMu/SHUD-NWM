@@ -1814,6 +1814,7 @@ def test_select_tests_routes_the_shared_lock_opener_and_its_callers() -> None:
     assert {
         "tests/test_safe_fs_lock.py",
         "tests/test_forcing_submit_ambiguity.py",
+        "tests/test_forcing_submit_ambiguity_reservation.py",  # #3177 partition
         "tests/test_file_orchestration_journal.py",
         "tests/test_scheduler_refresh_provider_atomic.py",
         "tests/test_safe_fs.py",
@@ -1877,6 +1878,7 @@ def test_select_tests_keeps_standalone_changed_test_file_whole_file_selection() 
         "tests/test_select_ci_tests.py",
         "tests/test_e2e_m3.py",
         "tests/test_forcing_submit_ambiguity.py",
+        "tests/test_forcing_submit_ambiguity_reservation.py",  # #3177 partition
         "tests/test_pipeline_logs_artifacts.py",
     } <= selected
 
@@ -1983,13 +1985,21 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_file_orchestration_journal_read_cache.py",
         "tests/test_file_orchestration_migration.py",
         "tests/test_forcing_submit_ambiguity.py",
+        "tests/test_forcing_submit_ambiguity_reservation.py",  # #3177 partition
         "tests/test_forecast_cohort_projection_restart_stage.py",
         # #3144: the log-tree-absent suite rides the broad orchestrator
         # directory rule (chain_workspace.py and chain_stage_execution.py
         # importer route). DB-free, ~1.5s.
         "tests/test_gateway_log_tree_absent.py",
+        # #3177: both suites are four partitions each.
         "tests/test_gateway_reconcile_binding_provenance.py",
+        "tests/test_gateway_reconcile_binding_provenance_legacy.py",
+        "tests/test_gateway_reconcile_binding_provenance_normalizer.py",
+        "tests/test_gateway_reconcile_binding_provenance_replay.py",
         "tests/test_gateway_reconcile_claimant_exclusivity.py",
+        "tests/test_gateway_reconcile_claimant_incarnation.py",
+        "tests/test_gateway_reconcile_claimant_replay_handoff.py",
+        "tests/test_gateway_reconcile_claimant_stale_authority.py",
         # #3176: the reserved-unbound decomposition pins ride the broad
         # orchestrator directory rule (reconcile.py / accepted_submit_identity.py
         # importer gaps; every reconcile leaf reaches it here). DB-free, 19
@@ -11729,15 +11739,20 @@ DIRECTORY_RULE_AUDIT_PATHS: tuple[str, ...] = (
 RULE_GAP_REASON_TOKENS: frozenset[str] = frozenset({"fn-gated", "redirect", "edge-consumer", "runtime-budget"})
 
 # Every collectible gateway-reconcile partition (#1809 replaced the 14k-line
-# monolith with these 23 flat modules). Single source for the per-partition
-# runtime-budget dispositions below and the selector governance pins.
+# monolith with 23 flat modules; #3177 split comment_accounting,
+# file_cohort_identity and inventory further, for 27). Single source for the
+# per-partition runtime-budget dispositions below and the selector governance
+# pins.
 GATEWAY_RECONCILE_PARTITIONS: tuple[str, ...] = (
     "tests/test_gateway_reconcile_comment_accounting.py",
     "tests/test_gateway_reconcile_comment_capability.py",
+    "tests/test_gateway_reconcile_comment_fallback_bind.py",
+    "tests/test_gateway_reconcile_comment_fallback_guard.py",
     "tests/test_gateway_reconcile_comment_sacct_bounds.py",
     "tests/test_gateway_reconcile_file_cohort_authority.py",
     "tests/test_gateway_reconcile_file_cohort_comment.py",
     "tests/test_gateway_reconcile_file_cohort_identity.py",
+    "tests/test_gateway_reconcile_file_cohort_identity_terminal.py",
     "tests/test_gateway_reconcile_file_cohort_projection.py",
     "tests/test_gateway_reconcile_file_submit_barrier.py",
     "tests/test_gateway_reconcile_grace_guard.py",
@@ -11746,6 +11761,7 @@ GATEWAY_RECONCILE_PARTITIONS: tuple[str, ...] = (
     "tests/test_gateway_reconcile_identity_release.py",
     "tests/test_gateway_reconcile_inflight_identity.py",
     "tests/test_gateway_reconcile_inventory.py",
+    "tests/test_gateway_reconcile_inventory_crash_migration.py",
     "tests/test_gateway_reconcile_master_transitions.py",
     "tests/test_gateway_reconcile_reservation_lifecycle.py",
     "tests/test_gateway_reconcile_round10.py",
@@ -11760,7 +11776,7 @@ GATEWAY_RECONCILE_PARTITIONS: tuple[str, ...] = (
 # The #1452 audit's verdicts, made checkable. 211 pairs derived at d02b4edb;
 # the reasoned remainder is dominated by #1809's per-partition runtime-budget
 # dispositions (46 pairs: 23 gateway-reconcile partitions x reconcile.py /
-# persistence.py) on top of the #1452 verdicts (45 edge-consumer, 7 redirect,
+# persistence.py; #3177 grew the authority to 27 partitions) on top of the #1452 verdicts (45 edge-consumer, 7 redirect,
 # 2 runtime-budget, 0 fn-gated) — #1443 added the
 # scale_validation.py -> read-path shape-pin pair at the end of the table.
 # Keys are per-pair on purpose — a wildcard would blunt exactly the staleness
@@ -11877,8 +11893,10 @@ INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
     # filename coincidence. What actually keeps them off a reconcile.py PR is
     # the lane cost, against a ~5 min per-module line the orchestrator rule's
     # own targets already spend most of. Only the partitions that
-    # file-level-import each module derive as gaps (8 for reconcile.py, 4 for
-    # persistence.py); the dispositions stay per-partition either way.
+    # file-level-import each module derive as gaps (12 for reconcile.py, 4 for
+    # persistence.py, as of #3177); the dispositions stay per-partition either
+    # way, so a partition that loses the file-level import joins the exclusion
+    # tuple below instead of inheriting its base's disposition.
     **{
         ("services/orchestrator/persistence.py", partition): "runtime-budget"
         for partition in GATEWAY_RECONCILE_PARTITIONS
@@ -11896,10 +11914,17 @@ INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
         if partition
         not in (
             "tests/test_gateway_reconcile_comment_capability.py",
+            # #3177: the fallback_bind lane uses no `SacctRecord`, so unlike its
+            # base it does not file-level-import reconcile.py; neither does the
+            # file_cohort_identity terminal lane (no `SacctRecord` /
+            # `reconcile_inflight_jobs` at file level) nor either inventory lane.
+            "tests/test_gateway_reconcile_comment_fallback_bind.py",
             "tests/test_gateway_reconcile_file_cohort_authority.py",
+            "tests/test_gateway_reconcile_file_cohort_identity_terminal.py",
             "tests/test_gateway_reconcile_file_submit_barrier.py",
             "tests/test_gateway_reconcile_identity_invariants.py",
             "tests/test_gateway_reconcile_inventory.py",
+            "tests/test_gateway_reconcile_inventory_crash_migration.py",
             "tests/test_gateway_reconcile_master_transitions.py",
             "tests/test_gateway_reconcile_round10.py",
             "tests/test_gateway_reconcile_store_reset.py",
@@ -13254,10 +13279,15 @@ def test_file_journal_sibling_glob_rule_red_when_removed(monkeypatch: pytest.Mon
 # production cannot move the pin.
 _FILE_JOURNAL_FACADE_PATCHER_TESTS: tuple[str, ...] = (
     "tests/test_gateway_reconcile_claimant_exclusivity.py",
+    # #3177: the claimant suite is four partitions.
+    "tests/test_gateway_reconcile_claimant_incarnation.py",
+    "tests/test_gateway_reconcile_claimant_replay_handoff.py",
+    "tests/test_gateway_reconcile_claimant_stale_authority.py",
     "tests/test_gateway_reconcile_file_cohort_comment.py",
     "tests/test_gateway_reconcile_file_submit_barrier.py",
     "tests/test_gateway_reconcile_identity_release.py",
     "tests/test_gateway_reconcile_inventory.py",
+    "tests/test_gateway_reconcile_inventory_crash_migration.py",  # #3177 partition
     "tests/test_gateway_reconcile_round10.py",
     "tests/test_gateway_reconcile_writer_launch.py",
     "tests/test_gateway_reconcile_writer_quiescence.py",
@@ -13632,6 +13662,13 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
     # helper's `_HarnessStore`; the base path is the GUARDED_MODULE_CLOSURES
     # known member, so it anchors here too.
     (VARIANT_ACTIVATION_CUTOVER_HELPERS_PATH, "tests/test_variant_activation_cutover.py"),
+    # #3177: the shared-helper modules of the re-partitioned suites. Each anchors
+    # on its suite's base path, a file-level importer; the comment-accounting
+    # base uses neither fallback helper, so that module anchors on fallback_bind.
+    ("tests/gateway_reconcile_claimant_exclusivity_helpers.py", "tests/test_gateway_reconcile_claimant_exclusivity.py"),
+    ("tests/gateway_reconcile_binding_provenance_helpers.py", "tests/test_gateway_reconcile_binding_provenance.py"),
+    ("tests/gateway_reconcile_comment_accounting_helpers.py", "tests/test_gateway_reconcile_comment_fallback_bind.py"),
+    ("tests/forcing_submit_ambiguity_helpers.py", "tests/test_forcing_submit_ambiguity.py"),
     # #1102: the shared fixture surface of the seven publisher partitions. The
     # calibration-overrides partition anchors it because it is the one that names
     # the most of that surface (the declaration builders, both published-bytes
@@ -16768,6 +16805,182 @@ def test_variant_activation_cutover_tracked_tree_is_exactly_three_suites_and_one
     assert any(rule.pattern == helper for rule in SUPPORT_MODULE_TEST_RULES)
 
 
+# ---------------------------------------------------------------------------
+# #3177: six oversized suites re-partitioned
+#
+# Each base path keeps its first lane; every rule, table and pin that named a
+# base also names its partitions, and each shared-helper support module routes
+# to its collectible consumers. Spelled as LITERALS (#1827) so a rename in the
+# selector cannot move the pin.
+# ---------------------------------------------------------------------------
+
+CLAIMANT_EXCLUSIVITY_SUITES: tuple[str, ...] = (
+    "tests/test_gateway_reconcile_claimant_exclusivity.py",
+    "tests/test_gateway_reconcile_claimant_incarnation.py",
+    "tests/test_gateway_reconcile_claimant_stale_authority.py",
+    "tests/test_gateway_reconcile_claimant_replay_handoff.py",
+)
+BINDING_PROVENANCE_SUITES: tuple[str, ...] = (
+    "tests/test_gateway_reconcile_binding_provenance.py",
+    "tests/test_gateway_reconcile_binding_provenance_normalizer.py",
+    "tests/test_gateway_reconcile_binding_provenance_replay.py",
+    "tests/test_gateway_reconcile_binding_provenance_legacy.py",
+)
+COMMENT_ACCOUNTING_SUITES: tuple[str, ...] = (
+    "tests/test_gateway_reconcile_comment_accounting.py",
+    "tests/test_gateway_reconcile_comment_fallback_bind.py",
+    "tests/test_gateway_reconcile_comment_fallback_guard.py",
+)
+FORCING_SUBMIT_AMBIGUITY_SUITES: tuple[str, ...] = (
+    "tests/test_forcing_submit_ambiguity.py",
+    "tests/test_forcing_submit_ambiguity_reservation.py",
+)
+FILE_COHORT_IDENTITY_SUITES: tuple[str, ...] = (
+    "tests/test_gateway_reconcile_file_cohort_identity.py",
+    "tests/test_gateway_reconcile_file_cohort_identity_terminal.py",
+)
+INVENTORY_SUITES: tuple[str, ...] = (
+    "tests/test_gateway_reconcile_inventory.py",
+    "tests/test_gateway_reconcile_inventory_crash_migration.py",
+)
+REPARTITIONED_SUITES: tuple[tuple[str, ...], ...] = (
+    CLAIMANT_EXCLUSIVITY_SUITES,
+    BINDING_PROVENANCE_SUITES,
+    COMMENT_ACCOUNTING_SUITES,
+    FORCING_SUBMIT_AMBIGUITY_SUITES,
+    FILE_COHORT_IDENTITY_SUITES,
+    INVENTORY_SUITES,
+)
+
+# The collectible consumers of tests/orchestrator_bind_reserved_job_helpers.py
+# (its own route). That non-collectible module imports `_fallback_querier` /
+# `_fallback_row` from the claimant helper, so the claimant helper routes them too.
+_BIND_RESERVED_JOB_HELPER_CONSUMERS: tuple[str, ...] = (
+    "tests/test_orchestrator_bind_reserved_job_cas.py",
+    "tests/test_orchestrator_bind_reserved_job_cli.py",
+    "tests/test_operator_action_listing_held_reservations.py",
+    "tests/test_orchestrator_bind_reserved_job_forcing.py",
+    "tests/test_orchestrator_demote_reserved_job_forcing.py",
+)
+REPARTITION_SUPPORT_MODULE_ROUTES: dict[str, frozenset[str]] = {
+    "tests/gateway_reconcile_claimant_exclusivity_helpers.py": frozenset(
+        {
+            *CLAIMANT_EXCLUSIVITY_SUITES,
+            # The three collectible cross-file importers of the claimant helpers.
+            "tests/test_gateway_reconcile_submitline_exact.py",
+            "tests/test_orchestrator_bind_reserved_job_cas.py",
+            "tests/test_orchestrator_bind_reserved_job_lane.py",
+            *_BIND_RESERVED_JOB_HELPER_CONSUMERS,
+        }
+    ),
+    "tests/gateway_reconcile_binding_provenance_helpers.py": frozenset(BINDING_PROVENANCE_SUITES),
+    "tests/gateway_reconcile_comment_accounting_helpers.py": frozenset(
+        {
+            "tests/test_gateway_reconcile_comment_fallback_bind.py",
+            "tests/test_gateway_reconcile_comment_fallback_guard.py",
+        }
+    ),
+    "tests/forcing_submit_ambiguity_helpers.py": frozenset(FORCING_SUBMIT_AMBIGUITY_SUITES),
+}
+
+# One changed path per route that selected each base before the split (the
+# #3177 E3 before-set): a directory rule, the shared fixture modules, the
+# journal facade's patcher table, CHAIN_IMPORTER_TESTS, the narrow lock and
+# real_backend rules, and the importer closure of a changed suite.
+REPARTITION_ROUTE_SOURCES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("services/orchestrator/retention.py", CLAIMANT_EXCLUSIVITY_SUITES),
+    ("services/orchestrator/file_orchestration_journal.py", CLAIMANT_EXCLUSIVITY_SUITES),
+    ("tests/gateway_reconcile_helpers.py", CLAIMANT_EXCLUSIVITY_SUITES),
+    ("tests/test_real_slurm_gateway.py", CLAIMANT_EXCLUSIVITY_SUITES),
+    ("services/orchestrator/retention.py", BINDING_PROVENANCE_SUITES),
+    ("tests/gateway_reconcile_helpers.py", BINDING_PROVENANCE_SUITES),
+    ("tests/test_real_slurm_gateway.py", BINDING_PROVENANCE_SUITES),
+    ("services/slurm_gateway/app.py", COMMENT_ACCOUNTING_SUITES),
+    ("tests/file_journal_legacy_seed_helpers.py", COMMENT_ACCOUNTING_SUITES),
+    ("tests/gateway_reconcile_helpers.py", COMMENT_ACCOUNTING_SUITES),
+    ("services/orchestrator/retention.py", FORCING_SUBMIT_AMBIGUITY_SUITES),
+    ("services/orchestrator/chain.py", FORCING_SUBMIT_AMBIGUITY_SUITES),
+    ("services/orchestrator/file_orchestration_journal.py", FORCING_SUBMIT_AMBIGUITY_SUITES),
+    ("packages/common/safe_fs_lock.py", FORCING_SUBMIT_AMBIGUITY_SUITES),
+    ("services/slurm_gateway/real_backend.py", FORCING_SUBMIT_AMBIGUITY_SUITES),
+    ("tests/test_orchestration_chain.py", FORCING_SUBMIT_AMBIGUITY_SUITES),
+    ("services/slurm_gateway/app.py", FILE_COHORT_IDENTITY_SUITES),
+    ("tests/gateway_reconcile_helpers.py", FILE_COHORT_IDENTITY_SUITES),
+    ("services/slurm_gateway/app.py", INVENTORY_SUITES),
+    ("services/orchestrator/file_journal_context.py", INVENTORY_SUITES),
+    ("tests/file_journal_legacy_seed_helpers.py", INVENTORY_SUITES),
+    ("tests/gateway_reconcile_helpers.py", INVENTORY_SUITES),
+)
+
+
+@pytest.mark.parametrize(
+    ("changed", "suites"),
+    REPARTITION_ROUTE_SOURCES,
+    ids=[f"{changed}->{suites[0]}" for changed, suites in REPARTITION_ROUTE_SOURCES],
+)
+def test_repartitioned_suite_routes_select_every_partition(changed: str, suites: tuple[str, ...]) -> None:
+    selected = set(select_tests([changed], repo_root=Path(".")))
+
+    assert set(suites) <= selected, sorted(set(suites) - selected)
+
+
+@pytest.mark.parametrize("helper", sorted(REPARTITION_SUPPORT_MODULE_ROUTES))
+def test_repartition_support_module_selects_exactly_its_consumers(helper: str) -> None:
+    # The route plus the meta-guard rider, nothing else: a route never names a
+    # non-collectible module, and a consumer missing from it is not reached by
+    # any importer closure (support modules are not in the suite importer index).
+    selected = set(select_tests([helper], repo_root=Path(".")))
+
+    assert selected == REPARTITION_SUPPORT_MODULE_ROUTES[helper] | {SELECTOR_META_GUARD_TEST}, sorted(
+        selected ^ (REPARTITION_SUPPORT_MODULE_ROUTES[helper] | {SELECTOR_META_GUARD_TEST})
+    )
+    assert all(is_test_suite_path(path) for path in REPARTITION_SUPPORT_MODULE_ROUTES[helper])
+
+
+def test_repartitioned_suites_are_carried_whole_by_every_rule() -> None:
+    # A rule that carries one member of a re-partitioned suite carries all of
+    # them, so a later edit cannot drop a single partition from one route.
+    rules = (*PATH_TEST_RULES, *CHANGED_TEST_FILE_RULES, *SUPPORT_MODULE_TEST_RULES)
+    for suites in REPARTITIONED_SUITES:
+        members = set(suites)
+        carriers = [rule for rule in rules if members & set(rule.tests)]
+        assert carriers, f"no selector rule carries {suites[0]}"
+        for rule in carriers:
+            if rule.pattern in REPARTITION_SUPPORT_MODULE_ROUTES:
+                continue  # a support module routes only the partitions that import it
+            assert members <= set(rule.tests), (rule.pattern, sorted(members - set(rule.tests)))
+
+
+def test_repartitioned_suites_match_the_tracked_tree_exactly() -> None:
+    # The tuples are compared against the TRACKED tree by exact path, not by a
+    # glob: `test_gateway_reconcile_comment_*` also matches comment_capability and
+    # comment_sacct_bounds. An untupled extra partition, a leftover copy of a
+    # base, or a support module renamed into a `test_*.py` suite reddens here.
+    tracked = set(_tracked_python_files("tests"))
+    top_level = {path for path in tracked if PurePosixPath(path).parent == PurePosixPath("tests")}
+    gateway = {path for path in top_level if PurePosixPath(path).name.startswith("test_gateway_reconcile_")}
+    forcing = {path for path in top_level if PurePosixPath(path).name.startswith("test_forcing_submit_ambiguity")}
+
+    authority = set(GATEWAY_RECONCILE_PARTITIONS)
+    for suites in (COMMENT_ACCOUNTING_SUITES, FILE_COHORT_IDENTITY_SUITES, INVENTORY_SUITES):
+        assert set(suites) <= authority, sorted(set(suites) - authority)
+    for suites in (CLAIMANT_EXCLUSIVITY_SUITES, BINDING_PROVENANCE_SUITES):
+        assert not set(suites) & authority, sorted(set(suites) & authority)
+    expected_gateway = (
+        authority
+        | set(CLAIMANT_EXCLUSIVITY_SUITES)
+        | set(BINDING_PROVENANCE_SUITES)
+        | {"tests/test_gateway_reconcile_submitline_exact.py", "tests/test_gateway_reconcile_reserved_pins.py"}
+    )
+    assert gateway == expected_gateway, sorted(gateway ^ expected_gateway)
+    assert forcing == set(FORCING_SUBMIT_AMBIGUITY_SUITES), sorted(forcing ^ set(FORCING_SUBMIT_AMBIGUITY_SUITES))
+    for suites in REPARTITIONED_SUITES:
+        assert all(is_test_suite_path(path) for path in suites), suites
+    for helper in REPARTITION_SUPPORT_MODULE_ROUTES:
+        assert helper in tracked, helper
+        assert not is_test_suite_path(helper), helper
+
+
 INFRA_SBATCH_TEMPLATE_READERS = frozenset(
     {
         "tests/test_analysis_pipeline.py",
@@ -18063,8 +18276,8 @@ def test_gateway_reconcile_helper_rules_select_their_partitions_exactly() -> Non
     # `_file_cohort_repository` from the gateway helper at file level; the four
     # split-demote suites import the demote helper at file level, and the public
     # operator-recovery chain suite at function scope, so the derived AST scan
-    # sees none of them). They join the 22 partitions in the gateway-helper-only
-    # exact selection.
+    # sees none of them). They join the 26 partitions (22 from #1809, four more
+    # from #3177) in the gateway-helper-only exact selection.
     #
     # #1850: the two accepted-submit-identity suites are derived importers of
     # the gateway helper and join the exact selection with it; the support
@@ -18077,11 +18290,18 @@ def test_gateway_reconcile_helper_rules_select_their_partitions_exactly() -> Non
     } | {
         # #1850: the two accepted-submit-identity suites are direct top-level
         # importers of this helper, but they are NOT members of the frozen
-        # GATEWAY_RECONCILE_PARTITIONS authority (that tuple is the 23-partition
+        # GATEWAY_RECONCILE_PARTITIONS authority (that tuple is the 27-partition
         # reconcile/persistence disposition authority), so they are listed
         # explicitly here.
         "tests/test_gateway_reconcile_binding_provenance.py",
         "tests/test_gateway_reconcile_claimant_exclusivity.py",
+        # #3177: each of the two is four partitions, all importing the helper.
+        "tests/test_gateway_reconcile_binding_provenance_legacy.py",
+        "tests/test_gateway_reconcile_binding_provenance_normalizer.py",
+        "tests/test_gateway_reconcile_binding_provenance_replay.py",
+        "tests/test_gateway_reconcile_claimant_incarnation.py",
+        "tests/test_gateway_reconcile_claimant_replay_handoff.py",
+        "tests/test_gateway_reconcile_claimant_stale_authority.py",
         # #2655: the SubmitLine exact-key suite imports the helper the same way.
         "tests/test_gateway_reconcile_submitline_exact.py",
         # #3176: so do the reserved-unbound decomposition pins.

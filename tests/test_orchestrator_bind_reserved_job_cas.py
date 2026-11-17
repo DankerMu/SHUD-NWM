@@ -33,6 +33,10 @@ from services.orchestrator.file_orchestration_journal import (
     FileOrchestrationJournalError,
     FileOrchestrationJournalRepository,
 )
+from tests.gateway_reconcile_claimant_exclusivity_helpers import (
+    _fallback_querier,
+    _second_master_reservation_record,
+)
 from tests.gateway_reconcile_helpers import (
     _append_cohort_placeholders,
     _commit_name_window_fallback_bind,
@@ -59,10 +63,6 @@ from tests.orchestrator_bind_reserved_job_helpers import (
     held_row,
     journal_bytes,
     journal_records,
-)
-from tests.test_gateway_reconcile_claimant_exclusivity import (
-    _fallback_querier,
-    _second_master_reservation_record,
 )
 from tests.test_real_slurm_gateway import _pinned_local_timezone
 

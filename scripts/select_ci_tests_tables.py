@@ -1145,6 +1145,7 @@ CHAIN_IMPORTER_TESTS: tuple[str, ...] = (
     "tests/test_e2e_m3.py",
     "tests/test_file_orchestration_journal.py",
     "tests/test_forcing_submit_ambiguity.py",
+    "tests/test_forcing_submit_ambiguity_reservation.py",  # #3177 partition
     # #1581: chain.py aliases DURABLE_HYDRO_SUCCESS_STATUSES as
     # COMPLETED_HYDRO_STATUSES and the parity lock asserts that alias IS the
     # shared object; a chain-only edit that rebinds it must run this suite.
@@ -1310,6 +1311,7 @@ FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     # evidence; the journal is stop-rule owned. DB-free, ~2s.
     "tests/test_db_free_auto_retry_manifest.py",
     "tests/test_forcing_submit_ambiguity.py",
+    "tests/test_forcing_submit_ambiguity_reservation.py",  # #3177 partition
     # #1581: the journal's completed-pipeline probes decide on its own
     # `COMPLETED_HYDRO_STATUSES` from-import binding, which the parity lock
     # pins as the one shared object. Stop-rule owned module, so the addition
@@ -1444,10 +1446,15 @@ FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     "tests/test_file_journal_late_lookup_seams.py",  # #2944 (task 5.4): facade patches reach moved siblings
     # #3028: function-body facade import + facade-global patch, so importer derivation misses them. ~30s.
     "tests/test_gateway_reconcile_claimant_exclusivity.py",
+    # #3177: the claimant suite is four partitions.
+    "tests/test_gateway_reconcile_claimant_incarnation.py",
+    "tests/test_gateway_reconcile_claimant_replay_handoff.py",
+    "tests/test_gateway_reconcile_claimant_stale_authority.py",
     "tests/test_gateway_reconcile_file_cohort_comment.py",
     "tests/test_gateway_reconcile_file_submit_barrier.py",
     "tests/test_gateway_reconcile_identity_release.py",
     "tests/test_gateway_reconcile_inventory.py",
+    "tests/test_gateway_reconcile_inventory_crash_migration.py",  # #3177 partition
     "tests/test_gateway_reconcile_round10.py",
     "tests/test_gateway_reconcile_writer_launch.py",
     "tests/test_gateway_reconcile_writer_quiescence.py",

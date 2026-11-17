@@ -29,8 +29,8 @@ from typing import Any
 import pytest
 
 from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+from tests.gateway_reconcile_claimant_exclusivity_helpers import _fallback_querier, _fallback_row
 from tests.gateway_reconcile_helpers import _file_cohort_repository
-from tests.test_gateway_reconcile_claimant_exclusivity import _fallback_querier, _fallback_row
 
 JOB_ID = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
 KEY = "cycle_gfs_2026071200_forecast_fixture:forecast"
