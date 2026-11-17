@@ -1,7 +1,9 @@
 # variant-activation-cutover Specification
 
 ## Purpose
-TBD - created by archiving change source-specific-model-variant-routing. Update Purpose after archive.
+Specify how a model variant becomes the active model for its basin: activation reuses the single-transaction
+lifecycle and its ordered pre-activation hook chain, every dispatch-set-changing transition re-publishes the
+scheduler registry manifest, and a superseded model permanently leaves the dispatch candidate set.
 
 ## Requirements
 
@@ -26,35 +28,6 @@ The cutover switch SHALL be the existing `POST /api/v1/models/{model_id}/lifecyc
 - **WHEN** the cutover selects which model a basin runs
 - **THEN** the active model is resolved through the existing lifecycle active-model authority and the partial unique index on `basin_version_id`
 - **THEN** no separate per-`(basin, source)` routing table is created or consulted.
-
-### Requirement: Activation runs ordered pre-activation extension-point hooks inside the transaction
-
-The cutover transaction SHALL execute an ordered sequence of pre-activation hooks inside the same database transaction before the supersede+activate swap, and this change SHALL define only the hook contract and register empty/no-op hooks, implementing neither state clone nor station flag flip.
-
-#### Scenario: Hooks run in declared order before the swap
-
-- **WHEN** a variant activation begins
-- **THEN** the registered pre-activation hooks run in their declared, stable order, each receiving the transaction cursor and the activation context (basin_version_id, previous active model, target model, source scope)
-- **THEN** the supersede+activate swap runs only after all hooks return successfully.
-
-#### Scenario: A raising hook aborts the whole transaction
-
-- **WHEN** any pre-activation hook raises during activation
-- **THEN** the entire lifecycle transaction rolls back with no model made active and no model superseded
-- **THEN** the scheduler registry manifest is not re-published, so there is no "activated but hooks not run" intermediate state.
-
-#### Scenario: This change ships empty hooks with mount points reserved for later changes
-
-- **WHEN** the extension-point contract is defined by this change
-- **THEN** the registered hooks are empty/no-op and change no state
-- **THEN** the contract reserves ordered mount points for a fingerprint-gated state-clone hook (Change 5) and a `met.met_station.active_flag` flip hook (Change 8) without re-opening the lifecycle transaction.
-- **THEN** the `station_flag_flip` mount point stays reserved as a default no-op after its only consumer, the Change 8 station-flag flip hook, was retired by #3164; no production code registers a hook there.
-
-#### Scenario: Hooks do not run on the already-current path
-
-- **WHEN** an activation request targets a model that is already the scope's active model (the idempotent already-current short-circuit)
-- **THEN** the pre-activation hooks are NOT executed, because no supersede+activate swap occurs and there is no state change for a clone or flip hook to act on
-- **THEN** the operation returns a stable already-current result with no second activation-success audit row and no duplicate transition.
 
 ### Requirement: Dispatch-set-changing lifecycle transitions re-publish the scheduler registry manifest
 
@@ -105,3 +78,45 @@ The system SHALL exclude a `superseded` model from the scheduler dispatch candid
 - **WHEN** a model is superseded by a cutover
 - **THEN** its `core.model_instance` row and package remain immutable and available for historical products, fingerprint-gated state clone, and offline calibration-replay
 - **THEN** the superseded row is never deleted by the cutover.
+
+### Requirement: Activation runs the ordered pre-activation hook chain inside the transaction
+
+The cutover transaction SHALL execute the ordered pre-activation hook chain inside the same database transaction,
+before the supersede+activate swap, without re-opening the lifecycle transaction. The chain's mount points SHALL be
+`PRE_ACTIVATION_HOOK_MOUNT_POINTS = ("state_clone",)`, dispatched in declared order. Each mount point SHALL start as a
+default no-op that changes no state. Registering a hook on any other mount point, including the retired
+`station_flag_flip`, SHALL be rejected.
+
+#### Scenario: Hooks run in declared order before the swap
+
+- **WHEN** a variant activation begins
+- **THEN** the registered pre-activation hooks run in their declared, stable order, each receiving the transaction
+  cursor and the activation context (basin_version_id, previous active model, target model, source scope)
+- **THEN** the supersede+activate swap runs only after all hooks return successfully.
+
+#### Scenario: A raising hook aborts the whole transaction
+
+- **WHEN** any pre-activation hook raises during activation
+- **THEN** no later hook runs, and the entire lifecycle transaction rolls back with no model made active and no model
+  superseded
+- **THEN** the scheduler registry manifest is not re-published, so there is no "activated but hooks not run"
+  intermediate state.
+
+#### Scenario: Default hooks change no state
+
+- **WHEN** no hook has been registered on a mount point
+- **THEN** that mount point's default hook is a no-op and the lifecycle behaves exactly as it does without the chain.
+
+#### Scenario: The retired station-flag mount point is rejected
+
+- **WHEN** a caller registers a hook on `station_flag_flip` or any other name outside `PRE_ACTIVATION_HOOK_MOUNT_POINTS`
+- **THEN** registration raises, naming the valid mount points, and no hook is installed.
+
+#### Scenario: Hooks do not run on the already-current path
+
+- **WHEN** an activation request targets a model that is already the scope's active model (the idempotent
+  already-current short-circuit)
+- **THEN** the pre-activation hooks are NOT executed, because no supersede+activate swap occurs and there is no state
+  change for a hook to act on
+- **THEN** the operation returns a stable already-current result with no second activation-success audit row and no
+  duplicate transition.

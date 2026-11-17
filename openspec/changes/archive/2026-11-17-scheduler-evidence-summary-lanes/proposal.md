@@ -127,8 +127,22 @@ production_contract), size-bound (hard bound and fail-closed floor).
   `tests/test_operator_action_listing.py`, plus the selector set for the diff. The new test file is selected when the
   writer, the scheduler runtime, the readiness reader, the stall probe or the operator-action listing changes.
 - [x] E5 `openspec validate scheduler-evidence-summary-lanes --strict --no-interactive`.
-- [ ] E6 After merge and a node-22 pull at a pass boundary, the next 132-submit pass either:
+- [x] E6 After merge and a node-22 pull at a pass boundary, the next 132-submit pass either:
   - has `status: submitted` and `evidence_compaction.mode: non_blocking_summary`, and the stall probe does not report
     `pass_limit_blocked` for it — #3170 closes with this receipt in the archive PR; or
   - falls back with `limit.lane_bytes` naming the overflowing lanes — tier 5 is then implemented under #3170 from
     those numbers and the deferred design.
+
+## E6 receipt (2026-11-17, node-22 production)
+
+The first branch applies. Pass `scheduler_2026111716_d8558cb73d84` ran 16:06:09Z → 17:30:07Z, after #3185 was deployed
+at `db3011905` at the 13:41Z pass boundary.
+
+- Result: `status: submitted`, 132/132 submitted, `execution_boundary: slurm_gateway_orchestration`.
+- Compaction: `evidence_compaction.mode: non_blocking_summary` (candidates, blocked_candidates and skipped_candidates
+  summarized). There is no `limit`.
+- The artifact was written compact, at 3,531,194 B. The same payload at indent-2 is 5,061,536 B, above
+  `MAX_EVIDENCE_BYTES`, so tier 4b is what kept the true status.
+- After the pass, `nhms-node22-scheduler-stall-health` reported `verdict=ok`, with no `pass_limit_blocked`.
+- Tier 5 stays deferred. #3170 was closed with this receipt
+  (https://github.com/DankerMu/SHUD-NWM/issues/3170#issuecomment-6956142085).

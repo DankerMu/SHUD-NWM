@@ -6,18 +6,19 @@ while the facade keeps the full import surface, so callers, monkeypatch targets 
 
 ## Requirements
 
-### Requirement: The restart-reconcile module SHALL be partitioned under the large-file guard without changing its import surface
+### Requirement: The restart-reconcile module SHALL be partitioned under the large-file guard with no exclusion and without changing its import surface
 
 `services/orchestrator/reconcile.py` SHALL be a compatibility facade over cohesive leaf modules
 `services/orchestrator/reconcile_<topic>.py`. Every module of the partition SHALL be at or under the large-file guard's
-1000-line limit without a guard exclusion, except the single module that holds `reconcile_reserved_unbound_jobs`.
-That function is one indivisible body over 1000 lines. Apart from imports and `LOGGER`, its module SHALL hold no other
-top-level definitions except helpers whose only caller is that function and that tests patch as module attributes. It SHALL be the only
-`services/orchestrator/reconcile*.py` entry in `.large-file-guard.json`.
+1000-line limit without a guard exclusion. `reconcile_reserved_unbound_jobs` SHALL delegate each reserved row to a
+per-row function composed of ordered phase helpers, so that no single function body forces an exclusion. That
+decomposition SHALL preserve, for every input, the ordered outcome list, the order of store and journal writes, the
+per-row journal quarantine, the escaping exceptions and the lazy at-most-once comment-capability probe. No
+`services/orchestrator/reconcile*.py` entry SHALL exist in `.large-file-guard.json`.
 
 Splitting SHALL NOT remove from `services.orchestrator.reconcile` any top-level name that `reconcile.py` itself
 defined before the split, unless the change retires that name explicitly. Names that `reconcile.py` merely imported are
-not part of that surface, except where What 2 of the change keeps them. Classes SHALL be single objects regardless of
+not part of that surface, except where What 2 of #3155 keeps them. Classes SHALL be single objects regardless of
 import path.
 
 Leaf modules SHALL NOT import the facade. Every name that is patched or reassigned as a module attribute SHALL be
@@ -49,7 +50,15 @@ Every module of the partition that logs SHALL use the logger named `services.orc
 - **WHEN** any partition module emits a warning
 - **THEN** the record's logger name is `services.orchestrator.reconcile`
 
-#### Scenario: Only the indivisible function is exempt
+#### Scenario: No partition module is exempt
 - **WHEN** `.large-file-guard.json` and the line counts of `services/orchestrator/reconcile*.py` are inspected
-- **THEN** exactly one partition module is excluded and it is the one that holds `reconcile_reserved_unbound_jobs`
-- **AND** every other partition module is at or under 1000 lines
+- **THEN** no partition module is excluded, because `reconcile_reserved_unbound_jobs` has been decomposed
+- **AND** every partition module, including the one that holds `reconcile_reserved_unbound_jobs`, is at or under 1000
+  lines
+
+#### Scenario: The decomposed reserved reconcile behaves as the monolithic body did
+- **WHEN** a reserved-unbound pass runs over rows that reach each of the per-row exits, including a journal fault
+  after a fallback classification and an unavailable commit or bind API
+- **THEN** the ordered outcomes, the ordered store and journal calls, the quarantine outcome's `fallback_match_basis`
+  and the escaping exception are the same as before the decomposition
+- **AND** the comment-capability probe runs at most once and never for an empty selection
