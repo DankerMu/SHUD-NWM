@@ -242,24 +242,3 @@ def test_journal_record_constructor_reads_through_the_facade_clock(monkeypatch: 
 
     assert len(calls) == 1
     assert record["created_at"] == "2030-01-02T03:04:05Z"
-
-
-def test_private_recovery_record_constructor_reads_through_the_facade_clock(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[object] = []
-
-    def clock_stub() -> datetime:
-        calls.append(None)
-        return datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC)
-
-    monkeypatch.setattr(file_orchestration_journal, "_utcnow", clock_stub)
-
-    record = file_journal_retry_helpers._private_runtime_root_recovery_record(
-        {"event_id": "e1", "entity_id": "job_x", "details": {"workspace_dir": "runs/r"}},
-        source_id="gfs",
-        cycle_time=datetime(2026, 1, 1, tzinfo=UTC),
-        model_id=None,
-    )
-
-    assert len(calls) == 1
-    assert record["created_at"] == "2030-01-02T03:04:05Z"
-    assert record["candidates"] == [{"path": ["details"], "value": {"workspace_dir": "runs/r"}}]

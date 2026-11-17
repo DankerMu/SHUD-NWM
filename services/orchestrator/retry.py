@@ -76,24 +76,6 @@ TERMINAL_SUCCESS_RETRY_STATUSES = set(_vocab.PIPELINE_JOB_SUCCESS)
 MANUAL_RETRY_DURABLE_SUCCESS_STATUSES = {"succeeded", "parsed", "published"}
 PARTIAL_OR_FAILED_HYDRO_STATUSES = {"failed", "cancelled", "partially_failed"}
 REUSABLE_AUTO_RETRY_STATUSES = {"pending", "submission_failed"}
-_RUNTIME_ROOT_FIELDS = (
-    "workspace_dir",
-    "object_store_root",
-    "object_store_prefix",
-    "published_artifact_root",
-    "published_artifact_uri_prefix",
-)
-_DB_FREE_REQUIRED_FIELD = "scheduler_db_free_required"
-_DB_FREE_SELECTOR_FIELDS = (
-    "scheduler_allowed_roots",
-    "scheduler_registry_backend",
-    "scheduler_registry_manifest",
-    "scheduler_canonical_readiness_backend",
-    "scheduler_canonical_readiness_index",
-    "scheduler_state_index_backend",
-    "scheduler_state_index",
-)
-_DB_FREE_RUNTIME_FIELDS = (_DB_FREE_REQUIRED_FIELD, *_DB_FREE_SELECTOR_FIELDS)
 
 
 def is_transient_error(error_code: str | None) -> bool:
@@ -431,16 +413,3 @@ def _auto_retry_job_can_be_reused(retry_job: PipelineJob) -> bool:
 def _safe_error_message(message: str) -> str:
     redacted = redact_payload(message)
     return redacted if isinstance(redacted, str) else str(redacted)
-
-
-def _mapping_at(details: Mapping[str, Any], path: tuple[str, ...]) -> Mapping[str, Any] | None:
-    value: Any = details
-    for key in path:
-        if not isinstance(value, Mapping):
-            return None
-        value = value.get(key)
-    return value if isinstance(value, Mapping) else None
-
-
-def _has_runtime_root_field(value: Mapping[str, Any]) -> bool:
-    return any(field in value for field in (*_RUNTIME_ROOT_FIELDS, *_DB_FREE_RUNTIME_FIELDS))

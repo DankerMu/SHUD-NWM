@@ -1,15 +1,14 @@
-"""File-journal retry, recovery-record and accepted-submit helpers.
+"""File-journal retry and accepted-submit helpers.
 
-The journal record constructor and its JSON encoding, the private runtime-root
-recovery record, the projection-warning and durable-error redaction tokens,
-operator evidence text, the tolerant/strict datetime and retry-lineage
-coercions, the accepted-submit evidence adapters, restart-reconcile and
-rollback-quiescence predicates, and the retry job/gateway value readers behind
-the file orchestration journal.  The journal's error type, schema version, JSON
-complexity bounds, runtime-root event paths and terminal status set stay in the
-facade and are imported inside the functions that use them; the record clock
-``_utcnow``, which tests patch on the facade, is looked up on the facade module
-at call time by the two record constructors.
+The journal record constructor and its JSON encoding, the projection-warning
+and durable-error redaction tokens, operator evidence text, the tolerant/strict
+datetime and retry-lineage coercions, the accepted-submit evidence adapters,
+restart-reconcile and rollback-quiescence predicates, and the retry job/gateway
+value readers behind the file orchestration journal.  The journal's error type,
+schema version and terminal status set stay in the facade and are imported
+inside the functions that use them; the record clock ``_utcnow``, which tests
+patch on the facade, is looked up on the facade module at call time by the
+record constructor.
 """
 
 from __future__ import annotations
@@ -17,12 +16,10 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from packages.common.contracts.time_normalization import format_cycle_time, parse_cycle_time
-from packages.common.slurm_env import secret_manifest_value_reason
+from packages.common.contracts.time_normalization import parse_cycle_time
 from services.orchestrator.accepted_submit_identity import (
     INIT_STATE_IDENTITY_FIELD,
     MAX_FORECAST_COHORT_MEMBERS,
@@ -41,26 +38,14 @@ from services.orchestrator.accepted_submit_identity import (
 )
 from services.orchestrator.chain_source_cycle import _datetime_sort_key
 from services.orchestrator.file_journal_candidates import _strip_redaction_placeholders
-from services.orchestrator.file_journal_paths import _safe_segment
 from services.orchestrator.file_journal_primitives import (
     _normalize_file_source_id,
-    _required_safe_identity,
     _safe_identity_text,
 )
-from services.orchestrator.file_journal_replay import _validate_json_complexity
 from services.orchestrator.public_evidence import _public_evidence, _public_message
-from services.orchestrator.retry import (
-    _DB_FREE_RUNTIME_FIELDS,
-    _RUNTIME_ROOT_FIELDS,
-    _has_runtime_root_field,
-    _mapping_at,
-    _safe_error_message,
-)
+from services.orchestrator.retry import _safe_error_message
 from services.orchestrator.retry_identity import RETRY_JOB_ID_MARKER, effective_retry_attempt, split_retry_job_identity
 from services.orchestrator.scheduler_state import _ensure_utc, _format_utc
-
-FILE_ORCHESTRATION_PRIVATE_RECOVERY_SCHEMA_VERSION = "nhms.scheduler.file_orchestration_private_recovery.v1"
-_PRIVATE_RUNTIME_ROOT_RECOVERY_RECORD_TYPE = "pipeline_event_runtime_root_recovery"
 
 
 def _next_current_master_retry_identity(current: Mapping[str, Any]) -> tuple[str, int]:
@@ -171,99 +156,6 @@ def _public_pipeline_event_payload(payload: Mapping[str, Any]) -> dict[str, Any]
     if "message" in row:
         row["message"] = _public_message(row.get("message"))
     return row
-
-
-def _private_runtime_root_recovery_record(
-    payload: Mapping[str, Any],
-    *,
-    source_id: str,
-    cycle_time: datetime,
-    model_id: str | None,
-) -> dict[str, Any] | None:
-    details = payload.get("details") if isinstance(payload.get("details"), Mapping) else {}
-    candidates = _runtime_root_recovery_candidate_records(details)
-    if not candidates:
-        return None
-    event_id = payload.get("event_id")
-    if event_id in (None, ""):
-        return None
-    entity_id = _required_safe_identity(payload, "entity_id")
-    from services.orchestrator import file_orchestration_journal
-    record: dict[str, Any] = {
-        "schema_version": FILE_ORCHESTRATION_PRIVATE_RECOVERY_SCHEMA_VERSION,
-        "record_type": _PRIVATE_RUNTIME_ROOT_RECOVERY_RECORD_TYPE,
-        "source_id": _normalize_file_source_id(source_id, field="source_id"),
-        "cycle_time": _format_utc(cycle_time),
-        "entity_type": str(payload.get("entity_type") or "pipeline_job"),
-        "entity_id": entity_id,
-        "event_type": str(payload.get("event_type") or ""),
-        "event_id": str(event_id),
-        "status_from": payload.get("status_from"),
-        "status_to": payload.get("status_to"),
-        "event_created_at": payload.get("created_at"),
-        "created_at": _format_utc(file_orchestration_journal._utcnow()),
-        "candidates": candidates,
-    }
-    if model_id not in (None, ""):
-        record["model_id"] = _safe_identity_text(str(model_id), field="model_id")
-    from services.orchestrator.file_orchestration_journal import (
-        MAX_FILE_JOURNAL_JSON_DEPTH,
-        MAX_FILE_JOURNAL_JSON_NODES,
-    )
-    _validate_json_complexity(
-        record,
-        field="private_runtime_root_recovery",
-        max_nodes=MAX_FILE_JOURNAL_JSON_NODES,
-        max_depth=MAX_FILE_JOURNAL_JSON_DEPTH,
-    )
-    return record
-
-
-def _runtime_root_recovery_candidate_records(details: Mapping[str, Any]) -> list[dict[str, Any]]:
-    candidates: list[dict[str, Any]] = []
-    from services.orchestrator.file_orchestration_journal import _RUNTIME_ROOT_EVENT_CANDIDATE_PATHS
-    for path in _RUNTIME_ROOT_EVENT_CANDIDATE_PATHS:
-        candidate = _mapping_at(details, path)
-        if candidate and _has_runtime_root_field(candidate):
-            value = _runtime_root_recovery_candidate_value(candidate)
-            if value:
-                candidates.append({"path": list(path), "value": value})
-    if _has_runtime_root_field(details):
-        value = _runtime_root_recovery_candidate_value(details)
-        if value:
-            candidates.append({"path": ["details"], "value": value})
-    return candidates
-
-
-def _runtime_root_recovery_candidate_value(candidate: Mapping[str, Any]) -> dict[str, Any]:
-    values: dict[str, Any] = {}
-    for root_field in (*_RUNTIME_ROOT_FIELDS, *_DB_FREE_RUNTIME_FIELDS):
-        if root_field not in candidate:
-            continue
-        value = _strip_internal_fields(candidate[root_field])
-        if isinstance(value, str) and secret_manifest_value_reason(value) is not None:
-            continue
-        values[root_field] = value
-    return values
-
-
-def _private_runtime_root_recovery_path(
-    root: Path,
-    *,
-    source_id: str,
-    cycle_time: datetime,
-    entity_id: str,
-    event_id: str,
-) -> Path:
-    return (
-        root
-        / "private"
-        / "runtime-root-recovery"
-        / _safe_segment(_normalize_file_source_id(source_id, field="source_id"))
-        / format_cycle_time(cycle_time)
-        / _safe_segment(entity_id)
-        / f"{_safe_segment(event_id)}.json"
-    )
 
 
 #: Fixed non-secret token for EVERY caught projection-warning exception.  The

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -16,12 +17,7 @@ from sqlalchemy.pool import StaticPool
 from apps.api.main import app, create_app
 from apps.api.routes import pipeline as pipeline_routes
 from services.orchestrator.persistence import Base, PipelineEvent, PipelineJob, PipelineStore
-from services.orchestrator.retry import (
-    RetryConfig,
-    RetryService,
-    _has_runtime_root_field,
-    _mapping_at,
-)
+from services.orchestrator.retry import RetryConfig, RetryService
 from services.slurm_gateway.gateway import SlurmGatewayError
 
 HYDRO_RUN_STATUS_ENUM = {
@@ -474,11 +470,11 @@ def test_unproven_cancellation_renders_manifest_roots_on_the_wire_and_keeps_them
     ``manifest_index_path`` / ``array_log_dir`` for an array submission
     (``services/slurm_gateway/real_backend.py``'s ``submit_job_array``), so the
     wire copy has host paths to render.  The persisted copy must stay raw (path
-    ``("gateway_response", "manifest")``), checked here through ``_mapping_at`` /
-    ``_has_runtime_root_field``, the two retry.py runtime-root readers this test
-    calls.  (The manual-retry runtime-root recovery that read this subtree back off
-    ``submission`` events was removed in #3157; the rendered copy asserted below
-    is what it could not have used.)
+    ``("gateway_response", "manifest")``), checked here through the test-local
+    ``_mapping_at`` / ``_has_runtime_root_field`` assertion helpers.  (The
+    manual-retry runtime-root recovery that read this subtree back off
+    ``submission`` events was removed in #3157, and its retry.py readers in
+    #3183; the rendered copy asserted below is what it could not have used.)
     """
 
     index_path = f"{_GATEWAY_WORKSPACE_ROOT}/runs/run_array_roots/input/manifest_index_20260522T010203040506.json"
@@ -1268,6 +1264,38 @@ def _has_active_pipeline(store: PipelineStore, *, source_id: str, cycle_time: da
         row["hydro_status"] in active_hydro_statuses or (row["job_status"] or "pending") not in terminal_job_statuses
         for row in rows
     )
+
+
+# The runtime-root and DB-free runtime field names the retired manual-retry
+# runtime-root recovery looked for (#3157/#3183).  Assertion vocabulary only.
+_RUNTIME_ROOT_OR_DB_FREE_FIELDS = (
+    "workspace_dir",
+    "object_store_root",
+    "object_store_prefix",
+    "published_artifact_root",
+    "published_artifact_uri_prefix",
+    "scheduler_db_free_required",
+    "scheduler_allowed_roots",
+    "scheduler_registry_backend",
+    "scheduler_registry_manifest",
+    "scheduler_canonical_readiness_backend",
+    "scheduler_canonical_readiness_index",
+    "scheduler_state_index_backend",
+    "scheduler_state_index",
+)
+
+
+def _mapping_at(details: Mapping[str, Any], path: tuple[str, ...]) -> Mapping[str, Any] | None:
+    value: Any = details
+    for key in path:
+        if not isinstance(value, Mapping):
+            return None
+        value = value.get(key)
+    return value if isinstance(value, Mapping) else None
+
+
+def _has_runtime_root_field(value: Mapping[str, Any]) -> bool:
+    return any(field in value for field in _RUNTIME_ROOT_OR_DB_FREE_FIELDS)
 
 
 def _events(store: PipelineStore) -> list[PipelineEvent]:
