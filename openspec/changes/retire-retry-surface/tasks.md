@@ -12,11 +12,11 @@
 | Schema / columns / units / field names | no | no DB or payload schema; `retry_count` column unchanged |
 | Others | no | no IO, config, concurrency or migration change. The runtime change is the frontend control removal plus the contract patch, both covered above |
 
-- [ ] 1.1 Frontend: remove the retry control and its prop at every caller (What 1).
-- [ ] 1.2 `JobsTable.test.tsx`: move the shared-path cases onto cancel and add the no-retry case (What 2). Rework the
+- [x] 1.1 Frontend: remove the retry control and its prop at every caller (What 1).
+- [x] 1.2 `JobsTable.test.tsx`: move the shared-path cases onto cancel and add the no-retry case (What 2). Rework the
   mocked e2e with marker-lane recovery (What 3).
-- [ ] 1.3 API contract: handler shape, schema and model removal, patch opt-out, static yaml, regenerated types
+- [x] 1.3 API contract: handler shape, schema and model removal, patch opt-out, static yaml, regenerated types
   (What 4). Update the pinned oracles (What 5).
-- [ ] 1.4 Docs (What 6).
-- [ ] 1.5 Evidence: E1-E4 and E7 locally.
+- [x] 1.4 Docs (What 6).
+- [x] 1.5 Evidence: E1-E4 and E7 locally.
 - [ ] 1.6 E5 on node-27 (orchestrator), E6.
