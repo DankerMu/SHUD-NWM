@@ -1842,6 +1842,18 @@ def test_select_tests_routes_the_shared_lock_opener_and_its_callers() -> None:
     } <= evidence_retention
 
 
+def test_select_tests_routes_the_safe_fs_paths_leaf_like_its_safe_fs_siblings() -> None:
+    # #3155: the error type and path helpers split out of safe_fs.py keep the
+    # safe_fs closure -- the journal read-state partitions, the safe_fs contract
+    # suite and the C4 acceptance suite -- through their own stop rule, exactly
+    # like the safe_fs_publication.py leaf.
+    leaf = select_tests(["packages/common/safe_fs_paths.py"], repo_root=Path("."))
+    expected = {*FILE_JOURNAL_READ_STATE_TESTS, "tests/test_safe_fs.py", *C4_PRODUCTION_ACCEPTANCE_TESTS}
+
+    assert expected <= set(leaf), sorted(expected - set(leaf))
+    assert leaf == select_tests(["packages/common/safe_fs_publication.py"], repo_root=Path("."))
+
+
 def test_select_tests_maps_known_slow_manifest_test_file_changes_with_surface_changes_to_focused_nodes() -> None:
     selected = select_tests(
         ["services/orchestrator/chain_types.py", "tests/test_orchestration_chain.py"],
@@ -23621,6 +23633,7 @@ def test_c4_production_acceptance_owners_select_their_suite() -> None:
         "scripts/node27_c4_production_acceptance.py",
         "packages/common/node27_pgdata_command.py",
         "packages/common/safe_fs.py",
+        "packages/common/safe_fs_paths.py",
         "packages/common/safe_fs_publication.py",
         "packages/common/evidence_io.py",
     ):

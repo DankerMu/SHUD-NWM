@@ -20,6 +20,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 _PREFLIGHT = _ROOT / "scripts" / "node27_timeseries_budget_preflight.py"
 _BUDGET_MODULE = _ROOT / "packages/common/node27_timeseries_compression_budget.py"
 _SAFE_FS_MODULE = _ROOT / "packages/common/safe_fs.py"
+_SAFE_FS_PATHS_MODULE = _ROOT / "packages/common/safe_fs_paths.py"
 _TIMEOUT_PATH = "/usr/bin/timeout"
 _SECRET_DSN = "postgresql://alice:super-secret-password@127.0.0.1:55432/nhms?signed=very-secret-token"
 
@@ -107,6 +108,7 @@ def _install_preflight(repo_root: Path, *, timeout_path: Path | None = None) -> 
         _BUDGET_MODULE.read_text(encoding="utf-8"), encoding="utf-8"
     )
     (common / "safe_fs.py").write_text(_SAFE_FS_MODULE.read_text(encoding="utf-8"), encoding="utf-8")
+    (common / "safe_fs_paths.py").write_text(_SAFE_FS_PATHS_MODULE.read_text(encoding="utf-8"), encoding="utf-8")
 
 
 def _install_runner(repo_root: Path, *, name: str | None = None) -> Path:

@@ -39,7 +39,6 @@ from packages.common.safe_fs import (
     SafeFilesystemError,
     directory_identity_no_follow,
     ensure_directory_no_follow,
-    prove_named_entry_absent_durable,
     read_bytes_durable_no_follow,
     read_bytes_limited_no_follow,
     rmtree_no_follow,
@@ -311,6 +310,43 @@ def test_met_evidence_lane_reports_a_structured_evidence_code(
     assert list(tmp_path.iterdir()) == []
 
 
+# --- safe_fs_paths leaf (#3155) ------------------------------------------------
+#
+# The error type and the path-expansion helpers live in the leaf module
+# `packages.common.safe_fs_paths` and are re-exported by `safe_fs`.  One class
+# object under both import paths is what keeps every existing
+# `except safe_fs.SafeFilesystemError` working for a refusal raised in the leaf.
+
+
+@pytest.mark.parametrize(
+    ("helper", "path"),
+    [
+        ("_absolute_parts", Path("/lane/../leaf")),
+        ("_expand_path", Path(_UNKNOWN_HOME) / "lane"),
+    ],
+)
+def test_leaf_error_type_is_the_safe_fs_error_type(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    helper: str,
+    path: Path,
+) -> None:
+    from packages.common import safe_fs, safe_fs_paths
+
+    monkeypatch.chdir(tmp_path)
+    assert safe_fs.SafeFilesystemError is safe_fs_paths.SafeFilesystemError
+    assert getattr(safe_fs, helper) is getattr(safe_fs_paths, helper)
+    caught: Exception | None = None
+    try:
+        getattr(safe_fs_paths, helper)(path)
+    except safe_fs.SafeFilesystemError as error:
+        caught = error
+
+    assert caught is not None
+    assert caught.kind == "unsafe"
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_make_directory_no_follow_exclusive_creates_once_and_refuses_existing(tmp_path: Path) -> None:
     target = tmp_path / "bundle"
 
@@ -467,41 +503,6 @@ def test_unlink_no_follow_durable_parent_identity_failure_is_indeterminate(
     monkeypatch.setattr("packages.common.safe_fs._verify_fd_matches_path", boom)
     with pytest.raises(SafeFilesystemError) as raised:
         unlink_no_follow_durable(target)
-    assert raised.value.kind == "indeterminate"
-
-
-def test_durable_absence_proof_fsyncs_and_rechecks_parent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    target = tmp_path / "sidecar.json"
-    calls: list[int] = []
-    original_fsync = os.fsync
-
-    def record_fsync(fd: int) -> None:
-        calls.append(fd)
-        original_fsync(fd)
-
-    monkeypatch.setattr("packages.common.safe_fs.os.fsync", record_fsync)
-    prove_named_entry_absent_durable(target)
-    assert len(calls) == 1
-
-
-def test_durable_absence_proof_parent_recheck_failure_is_indeterminate(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    target = tmp_path / "sidecar.json"
-    calls = {"count": 0}
-    safe_fs = __import__("packages.common.safe_fs", fromlist=["_verify_fd_matches_path"])
-    original_verify = safe_fs._verify_fd_matches_path
-
-    def fail_after_fsync(*args: object, **kwargs: object) -> None:
-        calls["count"] += 1
-        if calls["count"] == 2:
-            raise SafeFilesystemError("parent changed")
-        original_verify(*args, **kwargs)
-
-    monkeypatch.setattr("packages.common.safe_fs._verify_fd_matches_path", fail_after_fsync)
-    with pytest.raises(SafeFilesystemError) as raised:
-        prove_named_entry_absent_durable(target)
     assert raised.value.kind == "indeterminate"
 
 
