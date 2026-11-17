@@ -41,6 +41,8 @@ The following external/live steps were not executed by #214 and remain blockers 
 - live QHH SHUD runtime receipt tied to formal pipeline persistence.
 - live `/hydro-met` browser run against the target backend.
 - live `/ops` retry/cancel run with target IdP/operator identity.
+  UI retry is retired (#3179): `/ops` has no retry control, so the retry half of this receipt is the node-22
+  manual-repair marker lane (`scripts/node22_manual_retry_failed_runs.py`, runbook `node22-control-plane-manual-recovery`).
 - live alert sink, rollback, nationwide MVT/PBF and final production readiness receipts.
 
 ## Claim rules

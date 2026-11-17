@@ -208,7 +208,12 @@ def _patch_pipeline_openapi(schema: dict) -> None:
         "/api/v1/runs/{run_id}/retry",
         "post",
         operation_id="retryRun",
-        summary="Retry a failed or cancelled run",
+        summary="Retired manual retry: always 409 CONTROL_PLANE_MANUAL_ACTION_REQUIRED",
+        operation_description=(
+            "Submits, enqueues and records nothing (#3157/#3179). Failed-run recovery is the node-22 "
+            "manual-repair marker lane (scripts/node22_manual_retry_failed_runs.py, runbook "
+            "node22-control-plane-manual-recovery)."
+        ),
         tags=["runs"],
         parameters=[
             {"name": "run_id", "in": "path", "required": True, "schema": {"type": "string"}},
@@ -297,12 +302,15 @@ def _patch_pipeline_operation(
     strict_identity: bool = False,
     job_identity: bool = False,
     extra_responses: dict[str, dict[str, Any]] | None = None,
+    operation_description: str | None = None,
 ) -> None:
     operation = schema.get("paths", {}).get(path, {}).get(method)
     if not operation:
         return
     operation["operationId"] = operation_id
     operation["summary"] = summary
+    if operation_description is not None:
+        operation["description"] = operation_description
     operation["tags"] = tags
     operation["parameters"] = parameters
     # `data_schema=None` opts out of a success response: the rebuilt `responses`

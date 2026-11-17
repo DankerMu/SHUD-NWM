@@ -458,7 +458,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Retry a failed or cancelled run */
+        /**
+         * Retired manual retry: always 409 CONTROL_PLANE_MANUAL_ACTION_REQUIRED
+         * @description Submits, enqueues and records nothing (#3157/#3179). Failed-run recovery is the node-22 manual-repair marker lane (scripts/node22_manual_retry_failed_runs.py, runbook node22-control-plane-manual-recovery).
+         */
         post: operations["retryRun"];
         delete?: never;
         options?: never;
