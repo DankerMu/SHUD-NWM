@@ -230,27 +230,3 @@ def _runtime_config_schema() -> dict:
             "display_readonly": {"type": "boolean"},
         },
     }
-
-
-def _retry_run_result_schema() -> dict:
-    return {
-        "type": "object",
-        "required": [
-            "job_id",
-            "pipeline_job_id",
-            "run_id",
-            "retry_count",
-            "status",
-            "slurm_job_id",
-            "execution_status",
-        ],
-        "properties": {
-            "job_id": {"type": "string"},
-            "pipeline_job_id": {"type": "string", "description": "Alias of job_id for pipeline-control clients."},
-            "run_id": {"type": "string", "nullable": True},
-            "retry_count": {"type": "integer", "minimum": 0},
-            "status": {"type": "string", "enum": ["submitted"]},
-            "slurm_job_id": {"type": "string", "nullable": True},
-            "execution_status": {"type": "string", "enum": ["submitted"]},
-        },
-    }

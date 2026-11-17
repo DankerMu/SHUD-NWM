@@ -5,8 +5,9 @@ The published ``openapi/nhms.v1.yaml`` keeps its hand-written data schemas
 owners), while the wire is now shaped by ``apps/api/response_models``. The two
 are independent sources, so nothing but this test stops them drifting apart.
 
-For every modelled JSON route (the 34 surviving #2348 routes -- #2866 retired
-the river-segment list -- plus the four display routes modelled earlier) the
+For every modelled JSON route (the 33 surviving #2348 routes -- #2866 retired
+the river-segment list, #3179 the retry route's success model -- plus the four
+display routes modelled earlier) the
 model's serialization JSON schema is compared with
 the published ``data`` schema (or the response root for the bare routes), and
 the ops ``identity`` envelope member with ``OpsStrictIdentity``:
@@ -23,8 +24,9 @@ the ops ``identity`` envelope member with ``OpsStrictIdentity``:
 
 from __future__ import annotations
 
+import typing
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import pytest
 import yaml
@@ -235,16 +237,44 @@ def test_envelopes_declare_only_the_published_envelope_members() -> None:
             assert set(model.model_fields) - ENVELOPE_KEYS <= {"identity"}, model
 
 
-def test_route_table_is_the_34_plus_4_modelled_routes() -> None:
-    # 35 + 4 = 39 until #2866 retired `GET /api/v1/basin-versions/{bv}/river-segments`.
-    assert len(ROUTES) == 38, sorted(ROUTES)
+# #3179: business routes kept only as a documented refusal. The handler can only
+# raise (`-> NoReturn`, `response_model=None`) and its published operation
+# declares no 2xx, so there is no success schema to compare.
+RETIRED_STUB_ROUTES: dict[str, str] = {
+    "POST /api/v1/runs/{run_id}/retry": (
+        "#3179: 409 CONTROL_PLANE_MANUAL_ACTION_REQUIRED stub kept for existing callers and "
+        "deny-write probes; recovery is the node-22 manual-repair marker lane"
+    ),
+}
+
+
+def _route_key(route: APIRoute) -> str:
+    return f"{sorted(route.methods)[0]} {route.path}"
+
+
+def test_route_table_is_the_33_plus_4_modelled_routes() -> None:
+    # 35 + 4 = 39 until #2866 retired `GET /api/v1/basin-versions/{bv}/river-segments`;
+    # 38 until #3179 (2026-11-17) dropped the retry route's success model.
+    assert len(ROUTES) == 37, sorted(ROUTES)
 
 
 def test_every_unmodelled_business_route_is_annotated_to_return_a_response() -> None:
     # `response_model is None` is also what FastAPI yields for an UNANNOTATED
     # handler, which this suite would otherwise skip without a comparison: only
     # a `-> Response` handler (tiles / PNG / basemap proxy) may stay unmodelled.
-    unmodelled = [route for route in _business_routes() if route.response_model is None]
+    business = {_route_key(route): route for route in _business_routes()}
+    # The retired-stub exemption is exactly the named routes, and each one is a
+    # raise-only `-> NoReturn` handler with no response model: an unannotated
+    # JSON route cannot hide behind it.
+    assert set(RETIRED_STUB_ROUTES) == {"POST /api/v1/runs/{run_id}/retry"}
+    for key in RETIRED_STUB_ROUTES:
+        assert business[key].response_model is None, key
+        assert typing.get_type_hints(business[key].endpoint).get("return") is NoReturn, key
+    unmodelled = [
+        route
+        for key, route in business.items()
+        if route.response_model is None and key not in RETIRED_STUB_ROUTES
+    ]
     unannotated = sorted(route.path for route in unmodelled if not returns_response_object(route))
     assert not unannotated, unannotated
     # 8 until #2773 retired `GET /api/v1/tiles/met-stations/{bv}/{z}/{x}/{y}.pbf`.

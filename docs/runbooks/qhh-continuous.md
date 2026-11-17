@@ -399,7 +399,8 @@ LIMIT 20;
 3. 通过 node-22 marker 车道对同一 `run_id` 重新发起手动重试：`scripts/node22_manual_retry_failed_runs.py` 经
    `FileJournalRetryService.record_manual_repair` 写 `manual_repair_requested` marker，由 scheduler 在下一轮铸出并提交
    retry job（流程与处置见 [`node22-control-plane-manual-recovery.md`](node22-control-plane-manual-recovery.md)）。
-   `POST /api/v1/runs/{run_id}/retry` 只返回 409 `CONTROL_PLANE_MANUAL_ACTION_REQUIRED`，不再提交任何作业。
+   `POST /api/v1/runs/{run_id}/retry` 只返回 409 `CONTROL_PLANE_MANUAL_ACTION_REQUIRED`，不再提交任何作业；
+   `/ops` 作业表也没有重试控件（#3179），不要在页面上找重试入口。
 4. 只在 corrected retry 完成并确认 `$OBJECT_STORE_ROOT/raw/<SOURCE>/<YYYYMMDDHH>/manifest.json`
    存在后，再将旧 workspace-root raw bundle 作为证据归档或按保留策略清理。不要把旧 bundle
    复制到 object store 来制造成功状态。

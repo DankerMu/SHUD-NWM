@@ -59,7 +59,8 @@ run_id: `qhh-mvp-e2e-20260527T004907Z`
 1. 修复 Slurm Gateway HTTP 404，使 `plan-production --model-id basins_qhh_shud --basin-id basins_qhh` 能提交真实 download job。
 2. 对齐 QHH segment universe 和 q_down valid-time metadata，使 latest-product 对 GFS/IFS 至少一个源返回 200。
 3. 统一 cycle/run identity，使 `/ops` 能查到历史和新 run 的 jobs/stages/logs。
-4. 为正式 failed job 写入可读 `log_uri`，再用浏览器完成 log/retry/cancel live receipt。
+4. 为正式 failed job 写入可读 `log_uri`，再用浏览器完成 log/cancel live receipt；retry receipt 经 node-22 marker 车道
+   （`scripts/node22_manual_retry_failed_runs.py`）采集，`/ops` 自 #3179 起没有重试控件。
 5. 新增无 `page.route` 的 live frontend E2E specs，保留现有 mocked specs 作为回归测试。
 
 ## 1. 文档目的
@@ -202,7 +203,7 @@ uv run pytest -q tests/test_monitoring_api.py tests/test_retry_cancel_consistenc
 
 - [ ] 代码 lint 通过。
 - [ ] latest-product、station-series、forecast-series 合同测试通过。
-- [ ] pipeline/jobs/logs/retry/cancel 相关测试通过。
+- [ ] pipeline、jobs、logs、retry 409 stub、cancel 相关测试通过。
 - [ ] 测试失败时记录失败文件、失败用例和失败原因。
 
 ### 5.2 OpenSpec / OpenAPI / 前端类型
@@ -844,7 +845,7 @@ corepack pnpm test:e2e -- m11-river-open.mocked.spec.ts m11-routes.mocked.spec.t
 
 检查项：
 
-- [ ] 非 operator 角色不能执行 retry/cancel。
+- [ ] 非 operator 角色不能执行 cancel。
 - [ ] operator/model_admin/sys_admin 可以看到运维控件。
 - [ ] source/cycle selector 正确。
 - [ ] stage cards 显示当前周期各阶段。
@@ -852,8 +853,9 @@ corepack pnpm test:e2e -- m11-river-open.mocked.spec.ts m11-routes.mocked.spec.t
 - [ ] 点击日志按钮能打开 log modal。
 - [ ] queue depth 显示。
 - [ ] success-rate 和 stage-duration 显示或明确 unavailable。
-- [ ] failed/submission_failed/permanently_failed job 显示 retry 入口。
-- [ ] succeeded/running job 不显示误导性 retry。
+- [ ] 任何角色、任何状态的 job 行都没有重试控件（#3179）；failed/submission_failed/permanently_failed 的恢复走
+      node-22 marker 车道（`scripts/node22_manual_retry_failed_runs.py`，见
+      [`node22-control-plane-manual-recovery.md`](node22-control-plane-manual-recovery.md)）。
 - [ ] 页面不会混入其他 cycle 的 jobs。
 
 ### 13.2 自动浏览器检查
@@ -870,7 +872,7 @@ corepack pnpm test:e2e -- monitoring.mocked.spec.ts --project=mocked-regression-
 
 - [ ] 若使用 mock，证据标注 mocked。
 - [ ] 若使用 live API，记录 operator identity、source、cycle_time、run_id。
-- [ ] failed row、log modal、retry request、retry job 终态都有证据。
+- [ ] failed row、log modal、无重试控件、marker 车道恢复后刷新出的 retry job 终态都有证据。
 - [ ] 截图或 trace 存档。
 
 ## 14. 受控失败、retry 和 cancel E2E
@@ -1194,7 +1196,7 @@ operator: <redacted id>
 8. 执行 backend API curl 检查。
 9. 执行 `/hydro-met` 浏览器检查。
 10. 执行 `/ops` 浏览器检查。
-11. 构造受控失败并执行 retry/cancel。
+11. 构造受控失败；执行 cancel（§14.4），retry 经 node-22 marker 车道执行。
 12. 收集证据、填写 summary、列出 blockers。
 
 ## 22. 维护规则

@@ -226,7 +226,6 @@ describe('C4 production DOM helpers', () => {
         diagnosticsEnabled={true}
         diagnosticsDisplayReadonly={true}
         logControlsEnabled={true}
-        retryControlsEnabled={false}
         cancelControlsEnabled={false}
         fetchEnabled={true}
         displayEnabled={true}

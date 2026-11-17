@@ -458,7 +458,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Retry a failed or cancelled run */
+        /**
+         * Retired manual retry: always 409 CONTROL_PLANE_MANUAL_ACTION_REQUIRED
+         * @description Submits, enqueues and records nothing (#3157/#3179). Failed-run recovery is the node-22 manual-repair marker lane (scripts/node22_manual_retry_failed_runs.py, runbook node22-control-plane-manual-recovery).
+         */
         post: operations["retryRun"];
         delete?: never;
         options?: never;
@@ -1864,18 +1867,6 @@ export interface components {
             job_id: string;
             log_uri: string;
             content: string;
-        };
-        RetryRunResult: {
-            job_id: string;
-            /** @description Alias of job_id for pipeline-control clients. */
-            pipeline_job_id: string;
-            run_id: string | null;
-            retry_count: number;
-            /** @enum {string} */
-            status: "submitted";
-            slurm_job_id: string | null;
-            /** @enum {string} */
-            execution_status: "submitted";
         };
         QueueDepth: {
             running: number;
@@ -3595,17 +3586,6 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Retry request accepted */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["RetryRunResult"];
-                    };
-                };
-            };
             409: components["responses"]["ControlPlaneManualActionRequired"];
             "4XX": components["responses"]["Error"];
             "5XX": components["responses"]["Error"];

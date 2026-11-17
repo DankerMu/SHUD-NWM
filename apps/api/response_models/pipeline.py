@@ -128,16 +128,6 @@ class JobLogs(OpenModel):
     content: str
 
 
-class RetryRunResult(OpenModel):
-    job_id: str
-    pipeline_job_id: str
-    run_id: str | None
-    retry_count: int
-    status: str
-    slurm_job_id: str | None
-    execution_status: str
-
-
 class CancellationGap(OpenModel):
     """``_slurm_cancellation_gap_payload`` (``error``) or
     ``_unproven_slurm_cancellation_payload`` (``gateway_response``)."""
@@ -234,10 +224,6 @@ class PipelineJobPageEnvelope(_OpsEnvelope):
 class JobLogsEnvelope(_OpsEnvelope):
     identity: OpsLogIdentity | None = None
     data: JobLogs
-
-
-class RetryRunResultEnvelope(OkEnvelope):
-    data: RetryRunResult
 
 
 class CancelRunResultEnvelope(OkEnvelope):

@@ -134,7 +134,6 @@ export const controlledRetryJobId = `${controlledRunId}_retry_active`
 export interface MonitoringApiMockOptions {
   /** 日志接口返回的正文；缺省为各 mock 原有的短日志（既有断言依赖缺省值）。 */
   logContent?: string
-  onRetryRequest?: (request: Request) => void
   onCancelRequest?: (request: Request) => void
   onApiRequest?: (request: Request) => void
 }
@@ -198,10 +197,6 @@ export async function mockMonitoringApi(page: Page, options: MonitoringApiMockOp
         content: options.logContent ?? 'forecast stderr: model failed',
       })
     }
-    if (url.pathname === '/api/v1/runs/run-failed/retry' && request.method() === 'POST') {
-      options.onRetryRequest?.(request)
-      return fulfill(route, { job_id: 'job-failed-retry', run_id: 'run-failed', retry_count: 1, status: 'pending' })
-    }
     if (url.pathname === '/api/v1/runs/run-running/cancel' && request.method() === 'POST') {
       options.onCancelRequest?.(request)
       return fulfill(route, {
@@ -231,7 +226,7 @@ export async function mockMonitoringApi(page: Page, options: MonitoringApiMockOp
   })
 }
 
-function controlledStatus(retrySubmitted: boolean) {
+function controlledStatus(recovered: boolean) {
   return {
     cycle_id: controlledCycleId,
     source: 'GFS',
@@ -239,13 +234,13 @@ function controlledStatus(retrySubmitted: boolean) {
     current_state: 'failed_run',
     started_at: '2026-05-21T00:00:00Z',
     updated_at: '2026-05-21T00:36:00Z',
-    job_counts: retrySubmitted
+    job_counts: recovered
       ? { succeeded: 4, failed: 1, running: 0, pending: 0 }
       : { succeeded: 3, failed: 1, running: 0, pending: 0 },
   }
 }
 
-function controlledStages(retrySubmitted: boolean) {
+function controlledStages(recovered: boolean) {
   const successStages = [
     { stage: 'download', display_status: 'succeeded', status: 'succeeded', duration_seconds: 240 },
     { stage: 'convert', display_status: 'succeeded', status: 'succeeded', duration_seconds: 300 },
@@ -260,15 +255,15 @@ function controlledStages(retrySubmitted: boolean) {
     basin_results: [],
   }))
 
-  const forecastJob = retrySubmitted ? controlledRetryJob() : controlledFailedJob()
+  const forecastJob = recovered ? controlledRetryJob() : controlledFailedJob()
   return [
     ...successStages,
     {
       stage: 'forecast',
-      display_status: retrySubmitted ? 'succeeded' : 'failed',
-      status: retrySubmitted ? 'succeeded' : 'failed',
-      duration_seconds: retrySubmitted ? 480 : 300,
-      basin_progress: { completed: retrySubmitted ? 1 : 0, total: 1, failed: retrySubmitted ? 0 : 1 },
+      display_status: recovered ? 'succeeded' : 'failed',
+      status: recovered ? 'succeeded' : 'failed',
+      duration_seconds: recovered ? 480 : 300,
+      basin_progress: { completed: recovered ? 1 : 0, total: 1, failed: recovered ? 0 : 1 },
       basin_results_limit: 50,
       basin_results_total: 1,
       basin_results_returned: 1,
@@ -326,8 +321,13 @@ function controlledRetryJob() {
   }
 }
 
+/**
+ * `/ops` 受控失败 fixture。#3179 起页面没有重试控件：恢复走 node-22 manual-repair marker 车道
+ * （`scripts/node22_manual_retry_failed_runs.py`），由 scheduler 铸出并跑完 retry job。
+ * `recoverViaMarkerLane()` 把 mock 翻到该车道跑完后的后端状态；页面要刷新才会看到。
+ */
 export async function mockControlledOpsApi(page: Page, options: MonitoringApiMockOptions = {}) {
-  let retrySubmitted = false
+  let recovered = false
   const observedJobsQueries: Array<{ source: string | null; cycle: string | null }> = []
 
   await page.route('**/api/v1/**', async (route) => {
@@ -339,12 +339,12 @@ export async function mockControlledOpsApi(page: Page, options: MonitoringApiMoc
     if (url.pathname === '/api/v1/pipeline/status') {
       expect(url.searchParams.get('source')).toBe('GFS')
       expect(url.searchParams.get('cycle_time')).toBe(controlledCycleTime)
-      return fulfill(route, controlledStatus(retrySubmitted))
+      return fulfill(route, controlledStatus(recovered))
     }
     if (url.pathname === '/api/v1/pipeline/stages') {
       expect(url.searchParams.get('source')).toBe('GFS')
       expect(url.searchParams.get('cycle_time')).toBe(controlledCycleTime)
-      return fulfill(route, controlledStages(retrySubmitted))
+      return fulfill(route, controlledStages(recovered))
     }
     if (url.pathname === '/api/v1/queue/depth') return fulfill(route, { running: 0, pending: 0, idle: 2 })
     if (url.pathname === '/api/v1/metrics/stage-duration') return fulfill(route, stageDurationMetrics)
@@ -356,25 +356,12 @@ export async function mockControlledOpsApi(page: Page, options: MonitoringApiMoc
         content: options.logContent ?? `controlled qhh forecast failure\nrun_id=${controlledRunId}\nstage=forecast\nreason=NODE_FAILURE`,
       })
     }
-    if (url.pathname === `/api/v1/runs/${controlledRunId}/retry` && request.method() === 'POST') {
-      options.onRetryRequest?.(request)
-      retrySubmitted = true
-      return fulfill(route, {
-        job_id: controlledRetryJobId,
-        pipeline_job_id: controlledRetryJobId,
-        run_id: controlledRunId,
-        retry_count: 2,
-        status: 'submitted',
-        execution_status: 'submitted',
-        slurm_job_id: 'slurm_retry',
-      })
-    }
     if (url.pathname === '/api/v1/jobs') {
       observedJobsQueries.push({
         source: url.searchParams.get('source'),
         cycle: url.searchParams.get('cycle_time'),
       })
-      const items = retrySubmitted
+      const items = recovered
         ? [controlledRetryJob(), controlledFailedJob()]
         : [controlledFailedJob()]
       return fulfill(route, {
@@ -390,7 +377,9 @@ export async function mockControlledOpsApi(page: Page, options: MonitoringApiMoc
 
   return {
     observedJobsQueries,
-    retrySubmitted: () => retrySubmitted,
+    recoverViaMarkerLane: () => {
+      recovered = true
+    },
   }
 }
 

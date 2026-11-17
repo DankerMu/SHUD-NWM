@@ -1,17 +1,17 @@
 # QHH controlled failure and retry evidence
 
-最后更新：2026-11-16
+最后更新：2026-11-17
 
 ## 范围
 
-本 runbook 对应 GitHub issue #213 / M21-10。目标是证明一个受控的 QHH-like failed run identity 能从正式 pipeline persistence 贯穿到公开 ops API、`/ops` UI、authorized retry、retry job/event 记录和 job/stage 终态结果。
+本 runbook 对应 GitHub issue #213 / M21-10。目标是证明一个受控的 QHH-like failed run identity 能从正式 pipeline persistence 贯穿到公开 ops API、`/ops` UI、node-22 marker 车道恢复（#3179 起 `/ops` 没有重试控件）、retry job/event 记录和 job/stage 终态结果。
 
 这条证据不读取 `.nhms-runs/qhh-continuous` 诊断 state JSON，不伪造 live Slurm/QHH proof，也不声明 final production readiness。
 
 ## #214 evidence boundary
 
 Issue #214 的统一 evidence matrix 见 [`qhh-mvp-smoke-evidence.md`](qhh-mvp-smoke-evidence.md)。
-本文只作为 `/ops` controlled failure/retry 的 deterministic evidence 入口；它证明 mocked browser/API fixture 与正式 pipeline persistence identity 的连通性，不证明 live Slurm submit/accounting、live QHH SHUD runtime、live GFS/IFS download 或 final production readiness。
+本文只作为 `/ops` controlled failure 与 marker 车道恢复的 deterministic evidence 入口；它证明 mocked browser/API fixture 与正式 pipeline persistence identity 的连通性，不证明 live Slurm submit/accounting、live QHH SHUD runtime、live GFS/IFS download 或 final production readiness。
 
 ## deterministic evidence
 
@@ -27,7 +27,7 @@ corepack pnpm test:e2e -- monitoring.mocked.spec.ts --project=mocked-regression-
 重点覆盖：
 
 - `tests/test_monitoring_api.py::test_qhh_like_controlled_failure_retry_evidence_propagates_one_formal_identity`
-- `apps/frontend/e2e/monitoring.mocked.spec.ts` 中 `/ops` controlled failure lifecycle 测试
+- `apps/frontend/e2e/monitoring.mocked.spec.ts` 中 `proves the /ops controlled failure log and marker-lane recovery lifecycle`
 
 deterministic 证据证明：
 
@@ -43,8 +43,10 @@ deterministic 证据证明：
   和 fixture Slurm metadata），代表 scheduler mint 的结果。
 - retry job lifecycle 在 deterministic fixture 中推进到 `running` 后 `succeeded`，并记录 explicit job/stage terminal outcome。
 - post-retry `/api/v1/pipeline/status` 的 `job_counts` 反映新增的 succeeded retry job 和历史 failed job；`current_state` 仍来自 `met.forecast_cycle.current_state` 的持久化值，除非正式 scheduler/orchestrator producer 另行更新，不因 retry job 成功而自动变为 cycle `complete`。
-- `/ops` 能看到 failed row、backend logs route 内容、retry request、刷新后的 retry job row 和 succeeded job/stage terminal outcome；cycle current_state 仍保持后端持久化状态。
-  注意：`apps/frontend/e2e/monitoring.mocked.spec.ts` 的 mocked fixture 仍按退役前的成功响应 mock 这次 retry request；真实 API 现在返回 409，`JobsTable` retry 按钮与该 operation 的移除见 #3179。
+- `/ops` 能看到 failed row 和 backend logs route 内容；授权 operator 也看不到重试控件，页面不发出任何 retry 请求（#3179）。
+  mocked e2e 随后用 `opsApi.recoverViaMarkerLane()` 把 mock 翻到 marker 车道跑完后的后端状态，刷新页面后断言同一
+  `run_id` 的 succeeded retry job row（`slurm_retry`、`retry_count=2`）、succeeded forecast stage、仍保持后端持久化值的
+  cycle current_state，以及 jobs 查询始终限定在选中 source/cycle。恢复本身发生在页面之外（node-22 marker 车道）。
 
 ## artifact root
 
