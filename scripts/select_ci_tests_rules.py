@@ -783,8 +783,11 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_file_orchestration_journal.py",
             "tests/test_gateway_reconcile_comment_accounting.py",
             "tests/test_gateway_reconcile_comment_capability.py",
+            "tests/test_gateway_reconcile_comment_fallback_bind.py",  # #3177 partition
+            "tests/test_gateway_reconcile_comment_fallback_guard.py",  # #3177 partition
             "tests/test_gateway_reconcile_file_cohort_comment.py",
             "tests/test_gateway_reconcile_inventory.py",
+            "tests/test_gateway_reconcile_inventory_crash_migration.py",  # #3177 partition
             "tests/test_gateway_reconcile_master_transitions.py",
             "tests/test_gateway_reconcile_writer_receipts.py",
             "tests/test_orchestrator_bind_reserved_job_cas.py",
@@ -793,7 +796,8 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         # #1809: the shared store/cohort/identity fixtures extracted from the
-        # gateway-reconcile monolith. The 22 file-level importing partitions are
+        # gateway-reconcile monolith. The 26 file-level importing partitions (22 from
+        # #1809, four more from #3177) are
         # named exactly (derived-set members, all sub-second to import);
         # store_reset is not a consumer — its shells build duck-typed stores and
         # import nothing here. The five demote/chain suites below are the known
@@ -811,10 +815,13 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_gateway_reconcile_comment_accounting.py",
             "tests/test_gateway_reconcile_comment_capability.py",
+            "tests/test_gateway_reconcile_comment_fallback_bind.py",  # #3177 partition
+            "tests/test_gateway_reconcile_comment_fallback_guard.py",  # #3177 partition
             "tests/test_gateway_reconcile_comment_sacct_bounds.py",
             "tests/test_gateway_reconcile_file_cohort_authority.py",
             "tests/test_gateway_reconcile_file_cohort_comment.py",
             "tests/test_gateway_reconcile_file_cohort_identity.py",
+            "tests/test_gateway_reconcile_file_cohort_identity_terminal.py",  # #3177 partition
             "tests/test_gateway_reconcile_file_cohort_projection.py",
             "tests/test_gateway_reconcile_file_submit_barrier.py",
             "tests/test_gateway_reconcile_grace_guard.py",
@@ -823,6 +830,7 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_gateway_reconcile_identity_release.py",
             "tests/test_gateway_reconcile_inflight_identity.py",
             "tests/test_gateway_reconcile_inventory.py",
+            "tests/test_gateway_reconcile_inventory_crash_migration.py",  # #3177 partition
             "tests/test_gateway_reconcile_master_transitions.py",
             "tests/test_gateway_reconcile_reservation_lifecycle.py",
             "tests/test_gateway_reconcile_round10.py",
@@ -837,6 +845,13 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             # than riding the closure guard as a rule-gap exclusion.
             "tests/test_gateway_reconcile_binding_provenance.py",
             "tests/test_gateway_reconcile_claimant_exclusivity.py",
+            # #3177: both suites are four partitions each.
+            "tests/test_gateway_reconcile_binding_provenance_legacy.py",
+            "tests/test_gateway_reconcile_binding_provenance_normalizer.py",
+            "tests/test_gateway_reconcile_binding_provenance_replay.py",
+            "tests/test_gateway_reconcile_claimant_incarnation.py",
+            "tests/test_gateway_reconcile_claimant_replay_handoff.py",
+            "tests/test_gateway_reconcile_claimant_stale_authority.py",
             # #2655: the SubmitLine exact-key fallback-bind suite top-level-imports
             # this helper the same way; 20 tests in ~1.5s, DB-free.
             "tests/test_gateway_reconcile_submitline_exact.py",
@@ -862,6 +877,60 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             # #2682: the forcing absence-exit suite reaches it through the same
             # file-level bind helper import.
             "tests/test_orchestrator_demote_reserved_job_forcing.py",
+        ),
+    ),
+    PathTestRule(
+        # #3177: the helpers shared by the four claimant-exclusivity partitions.
+        # The submitline-exact and bind-reserved-job CAS/lane suites import them
+        # at file level too. tests/orchestrator_bind_reserved_job_helpers.py
+        # imports `_fallback_querier` / `_fallback_row` from here, a
+        # support-to-support edge the derived AST scan cannot see, so its
+        # collectible consumers (that module's own route) are listed as well.
+        "tests/gateway_reconcile_claimant_exclusivity_helpers.py",
+        (
+            "tests/test_gateway_reconcile_claimant_exclusivity.py",
+            "tests/test_gateway_reconcile_claimant_incarnation.py",
+            "tests/test_gateway_reconcile_claimant_replay_handoff.py",
+            "tests/test_gateway_reconcile_claimant_stale_authority.py",
+            "tests/test_gateway_reconcile_submitline_exact.py",
+            "tests/test_orchestrator_bind_reserved_job_cas.py",
+            "tests/test_orchestrator_bind_reserved_job_lane.py",
+            # Via tests/orchestrator_bind_reserved_job_helpers.py.
+            "tests/test_orchestrator_bind_reserved_job_cli.py",
+            "tests/test_operator_action_listing_held_reservations.py",
+            "tests/test_orchestrator_bind_reserved_job_forcing.py",
+            "tests/test_orchestrator_demote_reserved_job_forcing.py",
+        ),
+    ),
+    PathTestRule(
+        # #3177: the field-name constants and projection/fallback/sibling helpers
+        # shared by the four binding-provenance partitions, all file-level
+        # importers.
+        "tests/gateway_reconcile_binding_provenance_helpers.py",
+        (
+            "tests/test_gateway_reconcile_binding_provenance.py",
+            "tests/test_gateway_reconcile_binding_provenance_legacy.py",
+            "tests/test_gateway_reconcile_binding_provenance_normalizer.py",
+            "tests/test_gateway_reconcile_binding_provenance_replay.py",
+        ),
+    ),
+    PathTestRule(
+        # #3177: the comment-accounting suite's own `_fallback_row` /
+        # `_fallback_querier`, imported at file level by its two fallback
+        # partitions (the base does not use them).
+        "tests/gateway_reconcile_comment_accounting_helpers.py",
+        (
+            "tests/test_gateway_reconcile_comment_fallback_bind.py",
+            "tests/test_gateway_reconcile_comment_fallback_guard.py",
+        ),
+    ),
+    PathTestRule(
+        # #3177: the cycle constants and forcing fixtures shared by the two
+        # forcing submit ambiguity modules, both file-level importers.
+        "tests/forcing_submit_ambiguity_helpers.py",
+        (
+            "tests/test_forcing_submit_ambiguity.py",
+            "tests/test_forcing_submit_ambiguity_reservation.py",
         ),
     ),
     PathTestRule(
@@ -1267,6 +1336,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_safe_fs_lock.py",
             "tests/test_forcing_submit_ambiguity.py",
+            "tests/test_forcing_submit_ambiguity_reservation.py",  # #3177 partition
             "tests/test_file_orchestration_journal.py",
             "tests/test_scheduler_refresh_provider_atomic.py",
             "tests/test_safe_fs.py",
@@ -1971,6 +2041,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # sub-second fixtures beside the gateway-reconcile lane they join.
             "tests/test_gateway_reconcile_binding_provenance.py",
             "tests/test_gateway_reconcile_claimant_exclusivity.py",
+            # #3177: both suites are four partitions each.
+            "tests/test_gateway_reconcile_binding_provenance_legacy.py",
+            "tests/test_gateway_reconcile_binding_provenance_normalizer.py",
+            "tests/test_gateway_reconcile_binding_provenance_replay.py",
+            "tests/test_gateway_reconcile_claimant_incarnation.py",
+            "tests/test_gateway_reconcile_claimant_replay_handoff.py",
+            "tests/test_gateway_reconcile_claimant_stale_authority.py",
             # #2655: the SubmitLine exact-key fallback-bind suite top-level-imports
             # accepted_submit_identity.py like its claimant-exclusivity sibling.
             # DB-free, 20 tests in ~1.5s.
@@ -1980,6 +2057,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # leaf reaches them through this rule. DB-free, 19 tests in ~0.3s.
             "tests/test_gateway_reconcile_reserved_pins.py",
             "tests/test_forcing_submit_ambiguity.py",
+            "tests/test_forcing_submit_ambiguity_reservation.py",  # #3177 partition
             # #2584: the ambiguous state_save_qc submit suite. Its subject is the
             # submit-failure branch of chain_stage_execution.py and the
             # recorded/origin error-code split in chain_forecast_submission.py;
@@ -2352,10 +2430,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # partition replaces the deleted single target here, sorted.
             "tests/test_gateway_reconcile_comment_accounting.py",
             "tests/test_gateway_reconcile_comment_capability.py",
+            "tests/test_gateway_reconcile_comment_fallback_bind.py",  # #3177 partition
+            "tests/test_gateway_reconcile_comment_fallback_guard.py",  # #3177 partition
             "tests/test_gateway_reconcile_comment_sacct_bounds.py",
             "tests/test_gateway_reconcile_file_cohort_authority.py",
             "tests/test_gateway_reconcile_file_cohort_comment.py",
             "tests/test_gateway_reconcile_file_cohort_identity.py",
+            "tests/test_gateway_reconcile_file_cohort_identity_terminal.py",  # #3177 partition
             "tests/test_gateway_reconcile_file_cohort_projection.py",
             "tests/test_gateway_reconcile_file_submit_barrier.py",
             "tests/test_gateway_reconcile_grace_guard.py",
@@ -2364,6 +2445,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_gateway_reconcile_identity_release.py",
             "tests/test_gateway_reconcile_inflight_identity.py",
             "tests/test_gateway_reconcile_inventory.py",
+            "tests/test_gateway_reconcile_inventory_crash_migration.py",  # #3177 partition
             "tests/test_gateway_reconcile_master_transitions.py",
             "tests/test_gateway_reconcile_reservation_lifecycle.py",
             "tests/test_gateway_reconcile_round10.py",
@@ -2451,6 +2533,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_production_slurm_validation.py",
             "tests/test_reconcile_sacct_parse.py",
             "tests/test_forcing_submit_ambiguity.py",
+            "tests/test_forcing_submit_ambiguity_reservation.py",  # #3177 partition
             "tests/test_orchestrator_demote_cli_security.py",
             "tests/test_orchestrator_demote_core_cas.py",
             "tests/test_orchestrator_demote_projection_faults.py",
