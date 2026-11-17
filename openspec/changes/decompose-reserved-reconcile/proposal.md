@@ -119,21 +119,21 @@ expanded. Seats: correctness, test evidence + spec compliance, invariant/state m
 
 ## Evidence Floor
 
-- [ ] E1 `uv run ruff check --no-cache .`; `git diff --check`; entropy hard gate `hard_gate_failing_count 0`;
+- [x] E1 `uv run ruff check --no-cache .`; `git diff --check`; entropy hard gate `hard_gate_failing_count 0`;
   `wc -l services/orchestrator/reconcile*.py` all ≤1000; no `services/orchestrator/reconcile*.py` entry in
   `.large-file-guard.json` (the existing `tests/test_gateway_reconcile_*.py` entries stay).
-- [ ] E2 Pin commit, on unchanged code:
+- [x] E2 Pin commit, on unchanged code:
   - the coverage report (command in What 1) shows all 27 outcome producers and both escaping raises hit, and the
     exit → test map is recorded;
   - every remaining unhit branch of `:155-1066` is listed with a reason;
   - the new characterization, write-order and mutation-target tests are green.
-- [ ] E3 Move commit:
+- [x] E3 Move commit:
   - a normalized body diff (dedent, then compare the original body with the concatenated phase helpers) lists every
     changed line, and each is one of the allowed changes in What 2;
   - the outcome producers number 27 before and after (24 `ReservationReconcileOutcome(` + 3
     `_identity_blocked_outcome(`); after the move, 26 are reached by `return` and the quarantine one by the outer
     `except`.
-- [ ] E4 Mutation reds (each restored afterwards), from design.md "Hazards":
+- [x] E4 Mutation reds (each restored afterwards), from design.md "Hazards":
   - `now` snapshotted once;
   - capability probe eager, or uncached per row;
   - `fallback_basis` dropped from the quarantine outcome;
@@ -145,9 +145,9 @@ expanded. Seats: correctness, test evidence + spec compliance, invariant/state m
   - two phase helpers swapped in order.
 
   Each mutation is mapped to the test that catches it, and that test is green on the unchanged code.
-- [ ] E5 The issue's verification set passes locally and in a node-27 temporary worktree:
+- [x] E5 The issue's verification set passes locally and in a node-27 temporary worktree:
   `tests/test_gateway_reconcile_*.py`, `tests/test_orchestrator_bind_reserved_job_*.py`,
   `tests/test_orchestrator_demote_*.py`, `tests/test_forcing_submit_ambiguity.py`, `tests/test_production_scheduler.py`,
   `tests/test_reconcile_partition_logger.py`, `tests/test_operator_action_listing_held_reservations.py`, the new pin
   file, and the selector set for the diff.
-- [ ] E6 `openspec validate decompose-reserved-reconcile --strict --no-interactive`.
+- [x] E6 `openspec validate decompose-reserved-reconcile --strict --no-interactive`.
