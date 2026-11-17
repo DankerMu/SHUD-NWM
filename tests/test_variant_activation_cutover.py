@@ -115,7 +115,7 @@ def test_hooks_empty_default_preserves_lifecycle_behavior(
 
     Locks the "no-behavior-change" invariant: exactly one audit row,
     the target activates, the prior active is superseded, and no
-    external mutation happens on either hook mount point.
+    external mutation happens on any hook mount point.
     """
     store = _HarnessStore(two_models)
     # Sanity: default hooks are exactly the module-level no-op.
@@ -332,7 +332,7 @@ def test_hooks_skipped_when_already_current(
 def test_hooks_skipped_on_deactivate(
     two_models: list[dict[str, Any]],
 ) -> None:
-    """``deactivate`` never runs hooks — no swap → no clone/flip target.
+    """``deactivate`` never runs hooks — no swap → no clone target.
 
     Uses the sys_admin missing-active override with a non-empty reason
     so the deactivate reaches the transition site (per D5 the override
@@ -363,7 +363,7 @@ def test_hooks_skipped_on_deactivate(
     )
 
     assert result["status"] == "allowed"
-    # Hooks did NOT fire — this is a deactivate, no clone/flip target.
+    # Hooks did NOT fire — this is a deactivate, no clone target.
     assert hook_calls == []
     # State updated once (legacy_m0 -> inactive).
     assert store._state_updates == [("legacy_m0", "inactive", False)]

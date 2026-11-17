@@ -1699,7 +1699,7 @@ RESPONSE_MODEL_PRESERVATION_TESTS: tuple[str, ...] = (
 # concurrency cases. All three import the helper and the facade at module scope.
 # ONE tuple, carried whole by every rule that named the monolith, by each
 # partition's changed-test redirect and by the helper's support-module row, so a
-# diff that selected the monolith before the split still selects all 32 cases.
+# diff that selected the monolith before the split still selects all 33 cases.
 VARIANT_ACTIVATION_CUTOVER_HELPERS_PATH = "tests/variant_activation_cutover_helpers.py"
 VARIANT_ACTIVATION_CUTOVER_TESTS: tuple[str, ...] = (
     "tests/test_variant_activation_cutover.py",
