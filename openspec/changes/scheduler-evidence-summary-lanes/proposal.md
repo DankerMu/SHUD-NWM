@@ -125,6 +125,8 @@ production_contract), size-bound (hard bound and fail-closed floor).
     bounded lane attribution;
   - the fallback product with `limit.lane_bytes` removed is byte-identical to the `origin/master` fallback product;
   - adding `lane_bytes` never switches the serialization from indent-2 to compact;
+  - a payload that reaches the terminal floor keeps `limit == {"reason": "evidence_size_limit_exceeded"}` in the artifact
+    written through `write_evidence`;
   - the `lane_bytes` measure (each value serialized on its own, indent-2, UTF-8 bytes) is pinned;
   - the existing #1168 / #1797 / #2402 / #2570 fallback tests stay green, or the test is listed as a deviation where
     tier 4b/5 now fits its payload;

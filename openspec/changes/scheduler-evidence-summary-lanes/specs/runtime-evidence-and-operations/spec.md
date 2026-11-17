@@ -94,7 +94,7 @@ both; producer-to-fixture synchronisation is a separate obligation.
 - WHEN the lane projection still exceeds the bound
 - THEN the bounded fallback applies with `status: resource_limit_blocked`, `limit.reason: evidence_size_limit_exceeded` and `limit.pre_limit_status`
 - AND `limit.lane_bytes` lists at most ten top-level keys of the status-preserving projection, with their indent-2 serialized byte counts in descending order, so the overflowing lane is readable from the artifact
-- AND `limit.lane_bytes` is added only when the already-fitted fallback product still fits in the same serialization with it, so the product without `lane_bytes` is unchanged; it may disappear with the rest of `limit` at the terminal limit-compaction tier.
+- AND `limit.lane_bytes` is added only when the already-fitted fallback product still carries `limit.pre_limit_status` and still fits in the same serialization with it, so the product without `lane_bytes` is unchanged and a product reduced to the reason-only `limit` floor never carries it.
 
 #### Scenario: the cause of a failed pass survives the bounded fallback
 

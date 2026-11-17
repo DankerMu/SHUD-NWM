@@ -32,13 +32,17 @@ status- or readiness-bearing reader consumes, and it never drops rows those read
    - **Placement.** The writer adds it after `_fit_bounded_evidence_payload` has produced the fitted fallback product,
      and keeps it only if that product, with `lane_bytes` added, still fits in the same serialization (indent-2 or
      compact) the product already used. Otherwise it is omitted.
+     - **Terminal-floor exclusion.** The terminal limit-compaction tier runs inside `_fit_bounded_evidence_payload`.
+       When it has cut `limit` down to the reason-only form, the writer does not add `lane_bytes`. The writer adds it
+       only while `limit` still carries `pre_limit_status`. This keeps the reason-only floor of "Bounded-evidence
+       last-line invariants" intact, and a diagnostic never outlives the true status.
      - The `BoundedEvidencePayloadCallback` signature does not change, and neither does the output of the
        `scheduler_compat_runtime._bounded_evidence_payload` shim. The circuit stays "first thing shed at every layer"
        (`openspec/specs/production-scheduler-orchestration/spec.md:218-224`).
      - So the fallback product with `limit.lane_bytes` removed is byte-identical to the `origin/master` product. The
        exact `limit ==` assertions at `tests/test_production_scheduler.py:21139,23151` keep holding once they ignore
        `lane_bytes`, or stay unchanged when it is omitted.
-     - The terminal limit-compaction tier removes it with the rest of `limit`.
+     - When the terminal limit-compaction tier ran, `lane_bytes` is never added.
 
 Tiers 1–4a are left untouched, so every artifact that fits today in those tiers is byte-identical.
 - **Golden test.** It compares the new writer's output with bytes captured from the `origin/master` writer (stored as a
@@ -66,6 +70,8 @@ Tier 5 never projects these keys, because status-, alerting- or decidability-bea
   `openspec/specs/production-scheduler-orchestration/spec.md:1008` requires a `non_blocking_summary` pass to be "read
   exactly as the same pass written in full".
 - `readiness`, `review_contract`, `schema_version` and `pass_id`.
+- `execution_mode`, `no_mutation_proof`, `freshness` / `stale` and `final_production_readiness_claimed`, which
+  readiness reads.
 
 ## Lane projections (tier 5)
 
