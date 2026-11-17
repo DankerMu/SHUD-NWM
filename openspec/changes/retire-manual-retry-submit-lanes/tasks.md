@@ -50,17 +50,22 @@
 
 ## PR 2 Evidence Floor
 
-- [ ] E7 `uv run ruff check --no-cache .`; entropy hard gate `hard_gate_failing_count 0`.
-- [ ] E8 AST evidence: for each edited source module, the set of top-level/class-level definitions on HEAD equals the
+- [x] E7 `uv run ruff check --no-cache .`; entropy hard gate `hard_gate_failing_count 0`. — pass; 0.
+- [x] E8 AST evidence: for each edited source module, the set of top-level/class-level definitions on HEAD equals the
   set on `origin/master` minus the deleted closure, and every surviving definition's source text is byte-identical
   (except docstring/comment edits named in 2.3). A repo-wide `git grep -w` for every deleted name returns only
   `openspec/changes/archive/`, this change directory, same-name definitions in other modules, historical records
   (`docs/review-loop-log.jsonl`, the ADR 0009 census snapshot, quoted historical error codes) and REMOVED requirements
   in living specs that this change's archive drops.
-- [ ] E9 Tests green locally and in a node-27 temporary worktree: the selector set for the diff plus
+  — AST: removed set equals the 103-name closure, survivors identical except the 2.3 docstring/comment edits;
+  grep: 0 unclassified hits at 9ccb6a5a9.
+- [x] E9 Tests green locally and in a node-27 temporary worktree: the selector set for the diff plus
   `tests/test_retry.py`, `tests/test_retry_cancel_consistency.py`, `tests/test_file_orchestration_journal.py`,
   `tests/test_file_orchestration_journal_facade.py`, `tests/test_file_journal_read_blocked_consumers.py`,
   `tests/test_monitoring_api.py`, `tests/test_retry_route_fail_closed.py`, `tests/test_api_contract*.py`,
   `tests/test_response_model_preservation*.py` and `tests/test_select_ci_tests.py`.
-- [ ] E10 `git diff origin/master -- openapi/ apps/frontend/src/api/types.ts` is empty;
-  `openspec validate retire-manual-retry-submit-lanes --strict --no-interactive`.
+  — 157 files: local 8637 passed / 3 skipped; node-27 at f9dd24aad 8642 passed, 0 leftover `nhms_it_*` DBs. The
+  review fixes after it (one re-pinned upsert test, two docstrings) ran locally: journal suite 644 passed / 2 skipped,
+  new DB-free pin 1 passed; the upsert pin is red under the keep-merge mutation.
+- [x] E10 `git diff origin/master -- openapi/ apps/frontend/src/api/types.ts` is empty;
+  `openspec validate retire-manual-retry-submit-lanes --strict --no-interactive`. — empty; valid.
