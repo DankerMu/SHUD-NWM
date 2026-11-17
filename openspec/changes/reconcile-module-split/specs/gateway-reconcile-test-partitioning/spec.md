@@ -11,7 +11,7 @@ remain equivalent.
 
 When the gateway-reconcile corpus was partitioned, no guard exemption was added. Since then:
 - `tests/test_gateway_reconcile_comment_accounting.py` was exempted by #2674.
-- Three more suites have grown past the guard: `tests/test_gateway_reconcile_binding_provenance.py`,
+- Three more suites are now past the guard: `tests/test_gateway_reconcile_binding_provenance.py`,
   `tests/test_gateway_reconcile_claimant_exclusivity.py` and `tests/test_gateway_reconcile_file_cohort_identity.py`.
   They carry a temporary `.large-file-guard.json` exemption until they are re-partitioned under the same
   collection-identity rules (#3177).
@@ -26,8 +26,8 @@ No gateway-reconcile exemption SHALL be added beyond these four.
 #### Scenario: Every new module satisfies the guard
 
 - **WHEN** line counts are measured for every new collectible and non-collectible gateway-reconcile module
-- **THEN** each new module's count is at most 1,000, and `.large-file-guard.json` contains no gateway-reconcile exemption
-  beyond the four named above
+- **THEN** each new module's count is at most 1,000 except the four exempted suites named above, and `.large-file-guard.json`
+  contains no gateway-reconcile exemption beyond those four
 
 #### Scenario: The complete split suite preserves all oracles
 
