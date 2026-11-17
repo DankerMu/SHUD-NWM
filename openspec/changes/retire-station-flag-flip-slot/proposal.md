@@ -113,7 +113,8 @@ public surface (the mount-point tuple, the unknown-mount rejection), docs/spec.
   partitions, the helper module, and every touched file not already in the `.large-file-guard.json` exclude list are
   under 1000 lines; `.large-file-guard.json` is unchanged.
 - [ ] E2 The split lands as a pure-move commit before the item-2 rewrite. On that commit:
-  - `pytest --collect-only -q` over the three partitions gives exactly the node ids of the base path before the split;
+  - `pytest --collect-only -q` over the three partitions gives exactly the `::test_name[param-id]` suffix set of the
+    base path before the split (the file part of a node id changes with the partition);
   - a per-definition fingerprint (AST dump plus sha256 of every top-level def and class, with decorators) of the base
     file before the split equals the union over the partitions and the helper module.
 
