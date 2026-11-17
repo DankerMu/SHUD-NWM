@@ -49,14 +49,7 @@ from services.artifacts import (
 )
 from services.orchestrator.persistence import PipelineJob, PipelineStore
 from services.orchestrator.public_evidence import _public_evidence, _public_message
-from services.orchestrator.retry import (
-    ManualRetryService,
-    RetryConfig,
-    RetryConflictError,
-    RetryError,
-    RetryNotFoundError,
-    RetryService,
-)
+from services.orchestrator.retry import RetryConfig, RetryError, RetryService
 from services.slurm_gateway.config import SlurmGatewaySettings, get_settings
 from services.slurm_gateway.gateway import SlurmGateway, SlurmGatewayError
 
@@ -93,13 +86,6 @@ class _StageStats:
     status_counts: dict[str, int] = field(default_factory=dict)
     started_at: datetime | None = None
     finished_at: datetime | None = None
-
-
-@dataclass(frozen=True)
-class _RetryExecutionContext:
-    policy_decision: PolicyDecision
-    service: ManualRetryService
-    gateway: SlurmGateway
 
 
 @dataclass(frozen=True)
@@ -195,12 +181,18 @@ def require_cancel_control_action(
     return policy_decision
 
 
-def get_retry_execution_context(
+def require_retry_lane_retired(
     policy_decision: PolicyDecision = Depends(require_retry_control_action),
-    service: ManualRetryService = Depends(get_retry_service),
-    gateway: SlurmGateway = Depends(get_slurm_gateway),
-) -> _RetryExecutionContext:
-    return _RetryExecutionContext(policy_decision=policy_decision, service=service, gateway=gateway)
+) -> PolicyDecision:
+    """#3157: the retry route submits nothing; every caller that gets this far is refused.
+
+    Runs after run-id validation, RBAC and the display_readonly 409, and before
+    anything could construct a DB session, retry service or Slurm gateway --
+    none of those is in this route's dependency graph -- so a compute_control
+    API without ``DATABASE_URL`` answers this 409 instead of a 500.
+    """
+
+    raise _retry_lane_retired_error(policy_decision.target_id)
 
 
 def get_cancel_execution_context(
@@ -252,9 +244,26 @@ def _display_readonly(request: Request) -> bool:
     return bool(getattr(runtime_config, "display_readonly", False))
 
 
+def _retry_lane_retired_error(run_id: str) -> ApiError:
+    return ApiError(
+        status_code=409,
+        code=_CONTROL_PLANE_MANUAL_ACTION_REQUIRED,
+        message="Control-plane retry is a manual node-22 action; this API does not submit retries.",
+        details={
+            "run_id": run_id,
+            "suggested_action": _manual_action_suggestion("retry"),
+            "recovery_runbook": "node22-control-plane-manual-recovery",
+        },
+    )
+
+
 def _manual_action_suggestion(control_action: str) -> str:
     if control_action == "retry":
-        return "Ask a node 22 operator to rerun this run from the compute_control API or runbook."
+        return (
+            "Ask a node 22 operator to record a manual repair for this run with "
+            "scripts/node22_manual_retry_failed_runs.py (FileJournalRetryService.record_manual_repair); "
+            "the scheduler mints the retry."
+        )
     if control_action == "cancel":
         return "Ask a node 22 operator to stop this run from the compute_control API or runbook."
     return "Ask a node 22 operator to handle this control-plane action from the compute_control runbook."
@@ -550,68 +559,12 @@ def job_logs(
 )
 def retry_run(
     run_id: str,
-    request: Request,
-    context: _RetryExecutionContext = Depends(get_retry_execution_context),
+    _policy_decision: PolicyDecision = Depends(require_retry_lane_retired),
 ) -> dict[str, Any]:
-    run_id = _validated_run_id(run_id)
-
-    try:
-        retry_gateway = context.gateway if callable(getattr(context.gateway, "submit_job", None)) else None
-        if retry_gateway is None:
-            raise ApiError(
-                status_code=503,
-                code="RETRY_EXECUTION_UNAVAILABLE",
-                message="Retry execution path unavailable.",
-                details={"run_id": run_id},
-            )
-        job = context.service.attempt_manual_retry(
-            run_id,
-            gateway=retry_gateway,
-            policy_decision=context.policy_decision,
-        )
-    except RetryConflictError as error:
-        raise _api_error(error) from error
-    except RetryNotFoundError as error:
-        raise _api_error(error) from error
-    except RetryError as error:
-        raise _api_error(error) from error
-
-    if job.status == "submission_failed":
-        # #1975: gateway stderr carries absolute sbatch paths; render them the
-        # way the sibling ``runtime_root_resolution`` does.  The persisted
-        # job row and pipeline event keep the raw text.
-        error_message = _public_error_message(job.error_message or "Retry submission failed.")
-        details = {
-            "run_id": job.run_id,
-            "job_id": job.job_id,
-            "pipeline_job_id": job.job_id,
-            "status": job.status,
-            "slurm_job_id": job.slurm_job_id,
-            "error_code": job.error_code,
-            "error_message": error_message,
-        }
-        runtime_root_resolution = context.service.submission_runtime_root_resolution(job.job_id)
-        if runtime_root_resolution is not None:
-            details["runtime_root_resolution"] = runtime_root_resolution
-        raise ApiError(
-            status_code=503,
-            code=job.error_code or "RETRY_SUBMISSION_FAILED",
-            message=error_message,
-            details=details,
-        )
-
-    return _ok(
-        request,
-        {
-            "job_id": job.job_id,
-            "pipeline_job_id": job.job_id,
-            "run_id": job.run_id,
-            "retry_count": job.retry_count,
-            "status": job.status,
-            "slurm_job_id": job.slurm_job_id,
-            "execution_status": _retry_execution_status(job.status),
-        },
-    )
+    # #3157: unreachable while the dependency raises; kept so an override of
+    # that dependency cannot reopen a success return.  ``response_model`` stays
+    # so the generated OpenAPI is unchanged until the operation is removed (#3179).
+    raise _retry_lane_retired_error(_validated_run_id(run_id))
 
 
 @router.post(
@@ -947,14 +900,6 @@ def _api_error(error: RetryError) -> ApiError:
         message=_safe_redacted_text(error.message),
         details=_safe_redacted_payload(error.details),
     )
-
-
-def _retry_execution_status(status: str) -> str:
-    if status == "pending":
-        return "queued"
-    if status == "submitted":
-        return "submitted"
-    return status
 
 
 def _is_unproven_slurm_cancel_error(error: SlurmGatewayError) -> bool:

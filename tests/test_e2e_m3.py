@@ -100,7 +100,7 @@ def test_e2e_m3_partial_success_continues_to_publish(tmp_path: Path, monkeypatch
         assert publish["display_status"] == "succeeded"
 
 
-def test_e2e_m3_retry_chain_and_manual_conflict(tmp_path: Path, monkeypatch: Any) -> None:
+def test_e2e_m3_retry_chain(tmp_path: Path, monkeypatch: Any) -> None:
     monkeypatch.setattr(chain_module.time, "sleep", lambda _seconds: None)
     with _store() as store:
         repository = _SqliteCycleRepository(store)
@@ -119,33 +119,6 @@ def test_e2e_m3_retry_chain_and_manual_conflict(tmp_path: Path, monkeypatch: Any
         assert len(retry_jobs) == 1
         assert retry_jobs[0].stage == "convert"
         assert retry_jobs[0].status == "succeeded"
-
-        store.create_job(
-            job_id="manual_failed",
-            run_id="manual_conflict",
-            cycle_id=result.cycle_id,
-            job_type="convert_canonical",
-            slurm_job_id="manual_1",
-            model_id="model_0",
-            stage="convert",
-            status="failed",
-        )
-        store.create_job(
-            job_id="manual_pending",
-            run_id="manual_conflict",
-            cycle_id=result.cycle_id,
-            job_type="convert_canonical",
-            slurm_job_id=None,
-            model_id="model_0",
-            stage="convert",
-            status="pending",
-        )
-
-        with _client(store) as client:
-            response = client.post("/api/v1/runs/manual_conflict/retry", headers={"X-User-Role": "operator"})
-
-        assert response.status_code == 409
-        assert response.json()["error"]["code"] == "RETRY_CONFLICT"
 
         retry_events = list(
             store.session.scalars(

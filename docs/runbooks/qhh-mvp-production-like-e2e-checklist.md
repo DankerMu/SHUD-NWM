@@ -905,6 +905,10 @@ corepack pnpm test:e2e -- monitoring.mocked.spec.ts --project=mocked-regression-
 
 ### 14.3 retry API 检查
 
+`POST /runs/{run_id}/retry` 是 fail-closed 人工处置端点（#3157）：它不提交、不排队、不写任何状态，人工重试走
+node-22 marker 车道（`scripts/node22_manual_retry_failed_runs.py` → `FileJournalRetryService.record_manual_repair`，见
+[`node22-control-plane-manual-recovery.md`](node22-control-plane-manual-recovery.md)）。
+
 ```bash
 curl -sS -X POST "$NHMS_API_BASE_URL/runs/<failed_run_id>/retry" \
   -H "X-User-Role: operator" \
@@ -913,12 +917,12 @@ curl -sS -X POST "$NHMS_API_BASE_URL/runs/<failed_run_id>/retry" \
 
 检查项：
 
-- [ ] operator 可发起 retry。
-- [ ] viewer/未授权用户不能发起 retry。
-- [ ] retry 返回 pipeline_job_id 或 job_id。
-- [ ] retry_count 增加。
-- [ ] 新 job 状态进入 submitted/running/succeeded 或明确 submission_failed。
-- [ ] 若 Slurm submission_failed，返回稳定 error_code。
+- [ ] operator 调用返回 409 `CONTROL_PLANE_MANUAL_ACTION_REQUIRED`，`details` 含 `run_id`、`suggested_action`（指向
+  `scripts/node22_manual_retry_failed_runs.py`）和 `recovery_runbook=node22-control-plane-manual-recovery`。
+- [ ] viewer/未授权用户先得到 401/403，不泄露上述人工处置细节。
+- [ ] 调用前后 `ops.pipeline_job` / `ops.pipeline_event` / `hydro.hydro_run` 无变化，Gateway 无提交。
+- [ ] 经 marker 车道重试时：新 retry job 的 retry_count 增加，状态进入 submitted/running/succeeded 或明确
+  submission_failed（带稳定 error_code）。
 - [ ] 成功 retry 不覆盖原失败证据。
 - [ ] 成功 retry 不删除 sibling success output。
 
@@ -1150,7 +1154,8 @@ operator: <redacted id>
 - [ ] `/hydro-met` 连目标后端展示 station 曲线和 river flow 曲线。
 - [ ] `/ops` 连目标后端展示 stages、jobs 和 logs。
 - [ ] 至少一次受控失败在 `/ops` 可见。
-- [ ] retry API 可创建 retry job，且终态有证据。
+- [ ] 手动修复标记（`scripts/node22_manual_retry_failed_runs.py` → `record_manual_repair`）后，scheduler mint 的 retry job
+      终态有证据；`POST /api/v1/runs/{run_id}/retry` 返回 409 `CONTROL_PLANE_MANUAL_ACTION_REQUIRED`（#3157）。
 - [ ] 所有证据标注 deterministic、mocked、production-like 或 live。
 - [ ] summary 明确 `final_production_readiness_claimed=false`。
 

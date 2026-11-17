@@ -719,10 +719,15 @@ def test_authorized_live_proof_request_reaches_retry(monkeypatch: pytest.MonkeyP
                 },
             )
 
-    assert response.status_code == 200
-    assert response.json()["data"]["status"] == "submitted"
-    assert len(gateway.submissions) == 1
-    assert gateway.submissions[0].run_id == "run_live_contract"
+    # #3157: the live-proof actor passes auth and reaches the route, which now
+    # always answers the stable manual-action 409 and submits nothing.
+    assert response.status_code == 409, response.text
+    error = response.json()["error"]
+    assert error["code"] == "CONTROL_PLANE_MANUAL_ACTION_REQUIRED"
+    assert error["details"]["run_id"] == "run_live_contract"
+    assert error["details"]["recovery_runbook"] == "node22-control-plane-manual-recovery"
+    assert "display_mode" not in error["details"]
+    assert gateway.submissions == []
 
 
 def test_authorized_live_proof_request_reaches_cancel(monkeypatch: pytest.MonkeyPatch) -> None:

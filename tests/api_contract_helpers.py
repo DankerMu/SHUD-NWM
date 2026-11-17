@@ -27,7 +27,6 @@ from packages.common.forecast_store import (
     _data_source_response,
     _station_response,
 )
-from tests.test_monitoring_api import _MockGateway
 
 PIPELINE_JOB_SCHEMA_PATH = Path(__file__).resolve().parents[1] / "schemas" / "pipeline_job.schema.json"
 
@@ -179,18 +178,6 @@ def _assert_schema_value_shape(schema: dict[str, Any], value: Any, *, path: str)
             assert value >= schema["minimum"], path
         if schema.get("maximum") is not None:
             assert value <= schema["maximum"], path
-
-
-class _RetryGateway(_MockGateway):
-    def submit_job(self, request: Any) -> dict[str, Any]:
-        return {
-            "job_id": "slurm_retry_contract",
-            "run_id": request.run_id,
-            "model_id": request.model_id,
-            "status": "submitted",
-            "submitted_at": "2026-05-15T00:00:00Z",
-            "updated_at": "2026-05-15T00:00:00Z",
-        }
 
 
 class _RunStore:

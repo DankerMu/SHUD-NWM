@@ -1301,6 +1301,10 @@ RELEASED_RESERVATION_RECOVERY_TESTS: tuple[str, ...] = (
 
 FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     "tests/test_file_orchestration_journal_read_cache.py",
+    # #3157: the retry route's fail-closed pins assert that
+    # `FileJournalRetryService.attempt_manual_retry` stays retired; the journal
+    # is stop-rule owned, so the route rides this at-site tuple. DB-free, ~2s.
+    "tests/test_retry_route_fail_closed.py",
     "tests/test_forcing_submit_ambiguity.py",
     # #1581: the journal's completed-pipeline probes decide on its own
     # `COMPLETED_HYDRO_STATUSES` from-import binding, which the parity lock
@@ -1418,49 +1422,13 @@ FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     # consumer ends key on, the manual-retry source selector's refusal and the
     # two runtime-root provenance readers' degrade. Every import is
     # function-local, so no importer derivation reaches it; this stop-rule site
-    # is its route for the journal. DB-free, 17 tests in ~1s.
+    # is its route for the journal. DB-free, 15 tests in ~1s.
     "tests/test_file_journal_read_blocked_consumers.py",
-    # #2566/#2567: the runtime-root walk's blocked-read accounting and
-    # environment exclusion live in this module (`_file_retry_runtime_root_candidates`,
-    # `_resolve_file_retry_runtime_roots`); the suite imports the service
-    # function-locally, so this stop-rule site is its journal route. #2600: the
-    # manual-retry restart-point suite top-level-imports this repository and
-    # `FileJournalRetryService` (the marker writer). DB-free, together ~6s.
-    "tests/test_retry_runtime_root_blocked_reads.py",
+    # #2600: the manual-retry restart-point suite top-level-imports this
+    # repository and `FileJournalRetryService` (the marker writer). DB-free, ~5s.
+    # (#3157 deleted the runtime-root blocked-read suite that shared this row:
+    # its whole subject was the retired file-lane submit method.)
     "tests/test_manual_retry_failed_stage_restart.py",
-    # #2306: the file lane's manual-retry root evidence is rendered ONCE, in
-    # this module -- `_manual_retry_submission_failure_details` and
-    # `_record_manual_retry_submission_success` -- and its oracles outside the
-    # journal's own same-name suite are these six tests in tests/test_retry.py,
-    # whose bare name appears solely on the broad `services/orchestrator/**`
-    # rule that this stop rule shadows. The suite has no top-level journal
-    # import either, so no importer derivation reaches it: this at-site tuple is
-    # the journal's only route to them.
-    # Not all six discriminate the render.
-    # `..._db_free_runtime_evidence_values_survive_the_single_render` stays
-    # GREEN under a pure revert of the #2306 writer-side pre-render -- its
-    # values are `[local-path]`/`file`/`true`, which the anti-laundering strip
-    # never touched -- so it rides as the requirement oracle for the
-    # `db_free_runtime.resolved.*.value` clause rewritten in the same commit,
-    # not as a render-once discriminator; likewise
-    # `..._local_root_event_bytes_are_unchanged_by_the_single_render`, the
-    # byte-identity guard whose literal was captured from pre-change source and
-    # is green on both sides by construction (fixture task 5.1b). They route
-    # because a journal-only PR must run the clause's oracles, not because they
-    # bite on the revert.
-    # Node ids rather than the whole file -- not a runtime argument (the whole
-    # suite is DB-free, 175 tests in 2.23s; these six run in 0.86s) but a
-    # subject one: the other 169 are the retry route's own contract and already
-    # route through `services/orchestrator/retry.py`'s same-name row, so the
-    # journal's rule stays at what the journal decides. The
-    # `test_production_scheduler.py::` node ids on the scheduler_runtime.py rule
-    # are the same shape.
-    "tests/test_retry.py::test_retry_api_file_lane_503_renders_uri_roots_like_the_database_lane",
-    "tests/test_retry.py::test_retry_api_file_lane_uri_roots_stay_public_placeholders_and_reach_private_recovery",
-    "tests/test_retry.py::test_retry_api_file_lane_successful_submission_event_renders_uri_roots_once",
-    "tests/test_retry.py::test_retry_api_file_lane_local_root_event_bytes_are_unchanged_by_the_single_render",
-    "tests/test_retry.py::test_retry_api_file_lane_503_classifies_whitespace_bearing_uri_roots_whole",
-    "tests/test_retry.py::test_retry_api_file_lane_db_free_runtime_evidence_values_survive_the_single_render",
     # #2938 (entropy-burndown task 5.0): the cluster map test parses this module's
     # top-level definitions and their callers, so a journal edit that adds,
     # renames or moves a definition must redden it on the PR. Stop-rule owned

@@ -8,13 +8,12 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from errno import ENOENT
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol
 
 from sqlalchemy import func, inspect, select, text, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from packages.common import status_vocab as _vocab
-from packages.common.auth_policy import PolicyDecision, require_policy_evidence, trusted_internal_policy_decision
 from packages.common.redaction import redact_payload
 from packages.common.slurm_env import secret_manifest_value_reason
 from packages.common.source_identity import normalize_source_id
@@ -330,35 +329,6 @@ class RetrySubmitter(Protocol):
         raise NotImplementedError
 
 
-@runtime_checkable
-class ManualRetryService(Protocol):
-    """The manual-retry seam ``POST /runs/{run_id}/retry`` depends on.
-
-    Both concrete lanes -- :class:`RetryService` (database) and
-    ``FileJournalRetryService`` (file journal) -- satisfy this structurally, so
-    the route can stay lane-agnostic.  #1945: the file lane carried
-    ``attempt_manual_retry`` but not ``submission_runtime_root_resolution``, and
-    a real submission failure died at the route's evidence read with
-    ``AttributeError`` -- the unclassified HTTP 500 the retry spec forbids.
-
-    The declared shapes are the ROUTE's call shapes, not the full concrete
-    signatures: both lanes also accept a keyword-only ``trusted_internal`` flag
-    the route never passes.  ``runtime_checkable`` ``isinstance`` checks
-    attribute presence only, which is precisely #1945's failure mode; signature
-    drift has no automatic oracle here (CI runs no mypy).
-
-    ``submission_runtime_root_resolution`` returns the PUBLIC-rendered evidence
-    mapping on every lane -- no absolute local root text, URIs and secrets as
-    placeholders -- because the route attaches it verbatim to a 503 body
-    (openspec change ``retry-runtime-root-evidence-public-shape``, #1961/#1965);
-    the persisted event details each lane reads from keep the real values.
-    """
-
-    def attempt_manual_retry(self, run_id: str, gateway: Any = None, *, policy_decision: Any = None) -> Any: ...
-
-    def submission_runtime_root_resolution(self, job_id: str) -> dict[str, Any] | None: ...
-
-
 @dataclass(frozen=True)
 class _RuntimeRootResolution:
     manifest_fields: dict[str, str]
@@ -552,154 +522,6 @@ class RetryService:
         )
         warn_unknown_error_code(auto_retry_skipped)
         return job
-
-    def attempt_manual_retry(
-        self,
-        run_id: str,
-        gateway: RetrySubmitter | None = None,
-        *,
-        policy_decision: PolicyDecision | None = None,
-        trusted_internal: bool = False,
-    ) -> PipelineJob:
-        if trusted_internal:
-            policy_decision = trusted_internal_policy_decision(
-                "pipeline.retry_run",
-                target_type="pipeline_run",
-                target_id=run_id,
-                actor_id="trusted-internal:retry-service",
-                roles=("sys_admin",),
-            )
-        decision = require_policy_evidence(
-            policy_decision,
-            action_id="pipeline.retry_run",
-            target_type="pipeline_run",
-            target_id=run_id,
-        )
-        if decision.decision != "allow":
-            raise RetryError(
-                decision.reason_code,
-                decision.reason,
-                {
-                    "run_id": run_id,
-                    "policy_decision": decision.to_dict(),
-                    "no_mutation_expected": True,
-                },
-            )
-        if gateway is None:
-            raise RetryError(
-                "RETRY_EXECUTION_UNAVAILABLE",
-                "No Slurm gateway available for retry submission.",
-                {"run_id": run_id},
-            )
-
-        has_hydro_run_table = _has_hydro_run_table(self.store)
-        with self.store.session.begin_nested():
-            lock_statement = (
-                select(PipelineJob)
-                .where(PipelineJob.run_id == run_id)
-                .order_by(PipelineJob.submitted_at.asc(), PipelineJob.created_at.asc())
-                .with_for_update()
-            )
-            locked_jobs = list(self.store.session.scalars(lock_statement))
-            if not locked_jobs:
-                raise RetryNotFoundError(run_id)
-
-            durable_run_status = _hydro_run_status(self.store, run_id) if has_hydro_run_table else None
-            if durable_run_status in MANUAL_RETRY_DURABLE_SUCCESS_STATUSES:
-                raise RetryNotFoundError(run_id)
-
-            jobs = _jobs_by_truth_time(self.store.query_jobs_by_run(run_id))
-            active_job = next((job for job in jobs if job.status in ACTIVE_RETRY_STATUSES), None)
-            if active_job is not None:
-                raise RetryConflictError(run_id, active_job)
-
-            latest_truth_job = jobs[-1]
-            failed_job = _retry_source_job_for_run(jobs, durable_run_status=durable_run_status)
-            if latest_truth_job.status in TERMINAL_SUCCESS_RETRY_STATUSES and failed_job is None:
-                raise RetryNotFoundError(run_id)
-            if failed_job is None:
-                raise RetryNotFoundError(run_id)
-
-            status_from = failed_job.status
-            previous_error = failed_job.error_code or ("cancelled" if failed_job.status == "cancelled" else None)
-            next_retry_count = failed_job.retry_count + 1
-            classification = classify_failure(
-                previous_error,
-                attempt=next_retry_count,
-                retry_limit=self.config.max_retries,
-                manual=True,
-            )
-            retry_job = self._create_pending_manual_retry_job(failed_job, run_id=run_id)
-            retry_job.retry_count = next_retry_count
-            self.store.session.add(retry_job)
-            self.store.insert_event(
-                entity_type="pipeline_job",
-                entity_id=retry_job.job_id,
-                event_type="retry",
-                status_from=status_from,
-                status_to="pending",
-                details={
-                    "trigger": "manual",
-                    "retry_count": next_retry_count,
-                    "previous_error": previous_error,
-                    "previous_job_id": failed_job.job_id,
-                    "slurm_job_id": retry_job.slurm_job_id,
-                    "manual_retry_marker": True,
-                    "prior_failure_reason": previous_error,
-                    "failure": classification,
-                },
-                commit=False,
-            )
-            submission_job = _RetrySubmissionJob(
-                job_id=retry_job.job_id,
-                run_id=retry_job.run_id,
-                cycle_id=retry_job.cycle_id,
-                job_type=retry_job.job_type,
-                model_id=self._resolve_retry_model_id(retry_job),
-                stage=retry_job.stage,
-                retry_count=retry_job.retry_count,
-                previous_job_id=failed_job.job_id,
-            )
-            retry_job_id = retry_job.job_id
-            retry_run_id = failed_job.run_id
-
-        self.store.session.commit()
-
-        try:
-            submitted_result = self._submit_retry_job(submission_job, gateway)
-        except Exception as error:
-            with self.store.session.begin_nested():
-                retry_job = self._locked_retry_job(retry_job_id)
-                self._record_retry_submission_failure(retry_job, error)
-            self.store.session.commit()
-            self.store.session.refresh(retry_job)
-            return retry_job
-
-        with self.store.session.begin_nested():
-            retry_job = self._locked_retry_job(retry_job_id)
-            self._record_retry_submission_success(
-                retry_job,
-                submitted_result.payload,
-                runtime_root_resolution=submitted_result.runtime_root_resolution,
-                runtime_root_contract=submitted_result.runtime_root_contract,
-            )
-            if retry_run_id and has_hydro_run_table and retry_job.status in {"submitted", "running"}:
-                self.store.session.execute(
-                    text(
-                        """
-                        UPDATE hydro.hydro_run
-                        SET status = 'pending',
-                            error_code = NULL,
-                            error_message = NULL
-                        WHERE run_id = :run_id
-                          AND status IN ('failed', 'cancelled')
-                        """
-                    ),
-                    {"run_id": retry_run_id},
-                )
-        self.store.session.commit()
-        self.store.session.refresh(retry_job)
-        return retry_job
 
     def expire_stale_retries(self, max_age_seconds: int) -> list[PipelineJob]:
         cutoff = datetime.now(UTC) - timedelta(seconds=max_age_seconds)

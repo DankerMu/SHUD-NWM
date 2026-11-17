@@ -1027,8 +1027,6 @@ def test_node22_unit_files_select_their_owner_suites(unit: str, owners: frozense
     assert "tests/test_node27_timeseries_retention.py" not in selected, f"{unit} pulled in the node-27 sibling lane pin"
 
 
-
-
 def test_select_tests_includes_changed_test_file(tmp_path: Path) -> None:
     test_path = tmp_path / "tests" / "test_example.py"
     test_path.parent.mkdir()
@@ -1694,49 +1692,6 @@ def test_select_tests_routes_the_file_journal_to_the_retry_mint_floor_suite() ->
     assert "tests/test_retry_mint_floor.py" in selected
 
 
-def test_select_tests_routes_the_file_journal_to_its_manual_retry_root_render_oracles() -> None:
-    """#2306: the file lane's manual-retry root evidence is rendered in the JOURNAL.
-
-    `_manual_retry_submission_failure_details` and
-    `_record_manual_retry_submission_success` own the single render at the event
-    boundary, and its oracles outside the journal's own same-name suite are six
-    tests in `tests/test_retry.py` -- a file the journal's stop rule shadows (the
-    broad `services/orchestrator/**` rule is the only place that name appears)
-    and which has no top-level journal import, so neither routing nor importer
-    derivation reached them.
-
-    Not all six discriminate the render.
-    `..._db_free_runtime_evidence_values_survive_the_single_render` is the
-    requirement oracle for the fixture's `db_free_runtime.resolved.*.value`
-    clause and is green on BOTH sides of the #2306 production edit -- its values
-    are `[local-path]`/`file`/`true`, which the anti-laundering strip never
-    touched -- so it rides as the clause's oracle, not as a render-once
-    discriminator; the same holds for
-    `..._local_root_event_bytes_are_unchanged_by_the_single_render`, the
-    byte-identity guard whose literal was captured from pre-change source
-    (fixture task 5.1b). A journal-only PR must run the clause's oracles
-    regardless of which of them bite on a revert.
-
-    Node ids, not the whole file: the other 169 tests there are the retry
-    route's own subject and already route through `services/orchestrator/retry.py`'s
-    same-name row. The negative half of this pin is what keeps that true.
-    """
-
-    selected = select_tests(["services/orchestrator/file_orchestration_journal.py"], repo_root=Path("."))
-
-    for node_id in (
-        "tests/test_retry.py::test_retry_api_file_lane_503_renders_uri_roots_like_the_database_lane",
-        "tests/test_retry.py::test_retry_api_file_lane_uri_roots_stay_public_placeholders_and_reach_private_recovery",
-        "tests/test_retry.py::test_retry_api_file_lane_successful_submission_event_renders_uri_roots_once",
-        "tests/test_retry.py::test_retry_api_file_lane_local_root_event_bytes_are_unchanged_by_the_single_render",
-        "tests/test_retry.py::test_retry_api_file_lane_503_classifies_whitespace_bearing_uri_roots_whole",
-        "tests/test_retry.py::test_retry_api_file_lane_db_free_runtime_evidence_values_survive_the_single_render",
-    ):
-        assert node_id in selected, node_id
-
-    assert "tests/test_retry.py" not in selected
-
-
 def test_select_tests_routes_the_cancel_route_to_its_rendered_versus_raw_oracle() -> None:
     """#2308: the cancel route's only oracle for rendered-on-wire / raw-in-event.
 
@@ -1759,13 +1714,17 @@ def test_select_tests_routes_the_cancel_route_to_its_rendered_versus_raw_oracle(
 
 
 def test_select_tests_routes_the_pipeline_route_to_the_retry_http_oracle() -> None:
-    """#2568: `tests/test_retry.py` is the only HTTP-level oracle for
-    `POST /runs/{run_id}/retry`, so a route-only diff selects the whole file
-    (not the six journal-render node ids the journal owner selects)."""
+    """#3157 (was #2568): `tests/test_retry_route_fail_closed.py` is the HTTP-level
+    oracle for the fail-closed `POST /runs/{run_id}/retry`, so a route-only diff
+    selects it; so do the two modules whose retired `attempt_manual_retry` it pins
+    absent."""
 
-    selected = select_tests(["apps/api/routes/pipeline.py"], repo_root=Path("."))
-
-    assert "tests/test_retry.py" in selected
+    for source in (
+        "apps/api/routes/pipeline.py",
+        "services/orchestrator/retry.py",
+        "services/orchestrator/file_orchestration_journal.py",
+    ):
+        assert "tests/test_retry_route_fail_closed.py" in select_tests([source], repo_root=Path(".")), source
 
 
 def test_select_tests_routes_every_read_blocked_sentinel_source_to_its_coupling_pin() -> None:
@@ -1774,10 +1733,11 @@ def test_select_tests_routes_every_read_blocked_sentinel_source_to_its_coupling_
     Its whole point is that a later change cannot satisfy one end and silently
     break the other, so every source it pins has to route to it -- the journal
     (producer row, discriminator, selector, provenance readers), the chain
-    classifier, the operator CLI that consumes the selector's new refusal, and
-    the retry route whose 409 and 503 bodies it drives. Every import in the
-    suite is function-local, so no importer derivation reaches it and these four
-    rules are its only routes.
+    classifier and the operator CLI that consumes the selector's new refusal.
+    (#3157: the suite no longer drives the retry route, which can no longer
+    reach the journal, so the route's rule dropped it.) Every import in the
+    suite is function-local, so no importer derivation reaches it and these
+    three rules are its only routes.
     """
 
     suite = "tests/test_file_journal_read_blocked_consumers.py"
@@ -1785,7 +1745,6 @@ def test_select_tests_routes_every_read_blocked_sentinel_source_to_its_coupling_
         "services/orchestrator/file_orchestration_journal.py",
         "services/orchestrator/chain_forecast_execution.py",
         "scripts/node22_manual_retry_failed_runs.py",
-        "apps/api/routes/pipeline.py",
     ):
         assert suite in select_tests([source], repo_root=Path(".")), source
 
@@ -2133,10 +2092,9 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         # #2404: the retry-mint-floor suite rides the broad orchestrator
         # directory rule (its imports are all function-local). 6 tests in ~3s.
         "tests/test_retry_mint_floor.py",
-        # #2566/#2567: the runtime-root blocked-read suite rides the broad
-        # orchestrator directory rule for retry.py (its service imports are all
-        # function-local). Sub-second.
-        "tests/test_retry_runtime_root_blocked_reads.py",
+        # #3157: the retry route's fail-closed pins include the absence of both
+        # `attempt_manual_retry` lanes, so retry.py's selection carries them.
+        "tests/test_retry_route_fail_closed.py",
         # #2185: services/** is a river-segment write-surface root, so the scan
         # rides every source under it — a supplemental rider, not a rule target.
         WRITE_SURFACE_SCAN_PATH,
@@ -2211,7 +2169,6 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_scheduler_backfill.py",
         "tests/test_warm_start_chaining.py",
     } <= set(selected)
-
 
 
 def test_chain_workspace_change_alone_selects_the_log_tree_absent_suite() -> None:
@@ -2833,8 +2790,6 @@ def test_select_tests_maps_autopipeline_script_without_core_smoke_fallback() -> 
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 
 
-
-
 def test_select_tests_maps_pipeline_job_provenance_owners_to_real_suites() -> None:
     all_provenance_tests = {
         "tests/test_pipeline_job_provenance_publisher.py",
@@ -2862,8 +2817,6 @@ def test_select_tests_maps_pipeline_job_provenance_owners_to_real_suites() -> No
         "services/production_closure/readonly_db_route_smoke.py",
     ):
         assert envelope in set(select_tests([source], repo_root=Path("."))), source
-
-
 
 
 def test_select_tests_maps_a_migration_to_the_node27_write_roles_guard() -> None:
@@ -4428,7 +4381,6 @@ def test_review_gate_issue_memory_backend_filter_entry_reds_when_removed_or_move
     moved_to_docs = deleted.replace("            docs:\n", "            docs:\n" + literal)
     assert literal in moved_to_docs
     assert literal not in _backend_filter_block(moved_to_docs)
-
 
 
 def test_review_gate_cli_selects_both_memory_suites() -> None:
@@ -6557,21 +6509,24 @@ def test_guarded_closure_reds_when_a_direct_importer_leaves_a_direct_only_rule(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # D0 mode, mutation: a direct-only rule still has to carry every direct
-    # importer. Stripping #2568's tests/test_retry.py from the pipeline rule reds
-    # the guard naming it.
+    # importer. Stripping #3157's tests/test_retry_route_fail_closed.py (it took
+    # over from #2568's tests/test_retry.py as the route's direct-importing HTTP
+    # oracle) from the pipeline rule reds the guard naming it.
     from dataclasses import replace
+
+    pin = "tests/test_retry_route_fail_closed.py"
 
     def strip(rule: PathTestRule) -> PathTestRule:
         if rule.pattern != "apps/api/routes/pipeline.py":
             return rule
-        assert "tests/test_retry.py" in rule.tests
-        return replace(rule, tests=tuple(test for test in rule.tests if test != "tests/test_retry.py"))
+        assert pin in rule.tests
+        return replace(rule, tests=tuple(test for test in rule.tests if test != pin))
 
     monkeypatch.setattr(_prod_module, "PATH_TEST_RULES", tuple(strip(rule) for rule in PATH_TEST_RULES))
     entry = _guarded_closure_entry("apps/api/routes/pipeline.py")
 
     assert _guarded_module_closure_offenders(closures=[entry]) == [
-        "apps/api/routes/pipeline.py: rule misses apps.api.routes.pipeline importer suites ['tests/test_retry.py']"
+        f"apps/api/routes/pipeline.py: rule misses apps.api.routes.pipeline importer suites ['{pin}']"
     ]
 
 
@@ -15932,8 +15887,6 @@ def _shared_baseline_violations(
     return [f"{source}: shared baseline lost {target}" for target in contract if target not in selected]
 
 
-
-
 def test_shared_library_sources_retain_the_full_core_smoke_baseline() -> None:
     # #1744 path B: every packages/common/** source selects its narrow targets
     # AND the complete core-smoke baseline — a narrow rule can never silently
@@ -17874,7 +17827,6 @@ def test_readonly_validator_cli_rule_reds_when_removed(monkeypatch: pytest.Monke
     assert not set(READONLY_DB_VALIDATION_TESTS) <= selected
 
 
-
 def test_demote_helper_rule_selects_public_chain_consumer_exactly() -> None:
     # #1564 Round 2 selector gap: the shared demote fixture gained a NEW consumer
     # through a local (function-scope) import in tests/test_orchestration_chain.py,
@@ -18287,7 +18239,6 @@ def test_tree_mutation_offenders_passes_the_legal_lookalikes() -> None:
     source = "monkeypatch.setattr(target, value)\ncache[key] = tree\noffenders.append(offender)\n"
 
     assert _tree_mutation_offenders(ast.parse(source)) == []
-
 
 
 # ---------------------------------------------------------------------------
@@ -23671,7 +23622,6 @@ def test_registry_partition_live_commands_name_all_seven_suites() -> None:
     # passes exactly the two frozen cases (proven in the execution-semantics row above).
 
 
-
 def test_c4_production_acceptance_owners_select_their_suite() -> None:
     expected = set(C4_PRODUCTION_ACCEPTANCE_TESTS)
     for producer in (
@@ -23774,7 +23724,6 @@ def test_pgdata_workload_forecast_store_keeps_prior_consumers() -> None:
     assert "tests/test_node27_pgdata_workload_plan.py" in selected
     assert "tests/test_node27_pgdata_workload_io.py" in selected
     assert set(CORE_SMOKE_TESTS) <= selected
-
 
 
 @pytest.mark.parametrize(

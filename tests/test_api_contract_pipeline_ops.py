@@ -32,11 +32,9 @@ from tests.api_contract_helpers import (
     _assert_success_envelope,
     _parameter_names,
     _persisted_pipeline_job_statuses,
-    _RetryGateway,
     _RunStore,
 )
 from tests.test_monitoring_api import (
-    GENERIC_RETRY_JOB_TYPE,
     _client,
     _create_job,
     _cycle_time,
@@ -561,36 +559,6 @@ def test_stage_duration_metrics_contract_uses_success_envelope() -> None:
     assert isinstance(metric["date"], str)
     assert isinstance(metric["average_duration_seconds"], float)
     assert isinstance(metric["job_count"], int)
-
-
-def test_retry_contract_documents_pipeline_job_and_execution_status_fields() -> None:
-    with _store() as store:
-        _create_job(
-            store,
-            job_id="job_retry_contract",
-            run_id="run_retry_contract",
-            job_type=GENERIC_RETRY_JOB_TYPE,
-            stage="forecast",
-            status="failed",
-        )
-        with _client(store, _RetryGateway(), allow_dev_role_header=True) as client:
-            response = client.post("/api/v1/runs/run_retry_contract/retry", headers={"X-User-Role": "operator"})
-
-    assert response.status_code == 200
-    data = _assert_success_envelope(response.json())
-    assert set(data) == {
-        "job_id",
-        "pipeline_job_id",
-        "run_id",
-        "retry_count",
-        "status",
-        "slurm_job_id",
-        "execution_status",
-    }
-    assert data["pipeline_job_id"] == data["job_id"]
-    assert data["run_id"] == "run_retry_contract"
-    assert data["execution_status"] == "submitted"
-    assert data["slurm_job_id"] == "slurm_retry_contract"
 
 
 def test_cancel_contract_documents_cancelled_jobs_and_slurm_failures() -> None:

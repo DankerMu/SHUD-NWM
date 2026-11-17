@@ -391,12 +391,33 @@ evidence:
   - tests/test_monitoring_api.py
 retest_command: |-
   # Preconditions: gateway and API are already running against a real Slurm backend.
+  # Env: RUN_ID (fcst_<source>_<cycle>_<model>), SOURCE, CYCLE_TIME, MODEL_ID (the strict
+  # identity GET /api/v1/jobs requires once run_id is given), PREV_JOB_ID (the failed job),
+  # JOURNAL_ROOT and OPERATOR (node-22 marker lane).
   set -euo pipefail
   curl -fsS "$SLURM_GATEWAY_URL/api/v1/slurm/health" |
     jq -e '(.backend? // "slurm") == "slurm" and (.healthy? // true) == true'
-  job_id="$(curl -fsS -X POST "$API_BASE_URL/api/v1/runs/$RUN_ID/retry" \
-    -H "X-User-Role: operator" |
-    jq -er '.data.slurm_job_id | select(test("^[0-9]+(_[0-9]+)?$"))')"
+  # The API retry route is retired (#3157, always 409 CONTROL_PLANE_MANUAL_ACTION_REQUIRED).
+  # On node-22, mark the run; the next scheduler pass mints and submits the retry.
+  cd /scratch/frd_muziyao/NWM
+  .venv/bin/python scripts/node22_manual_retry_failed_runs.py \
+    --journal-root "$JOURNAL_ROOT" --run-id "$RUN_ID" \
+    --reason "BUG-20260527-013 retest" --requested-by "$OPERATOR" --execute
+  # Wait (up to 6h) for a retry job other than the failed one to carry a live Slurm id.
+  job_id=""
+  for _ in $(seq 1 72); do
+    job_id="$(curl -fsS -G "$API_BASE_URL/api/v1/jobs" \
+      --data-urlencode "source=$SOURCE" --data-urlencode "cycle_time=$CYCLE_TIME" \
+      --data-urlencode "run_id=$RUN_ID" --data-urlencode "model_id=$MODEL_ID" \
+      --data-urlencode "sort_by=submitted_at" --data-urlencode "sort_order=desc" \
+      --data-urlencode "limit=50" |
+      jq -r --arg prev "$PREV_JOB_ID" '[.data.items[]
+        | select(.job_id != $prev and (.retry_count // 0) > 0)
+        | .slurm_job_id | select(. != null and test("^[0-9]+(_[0-9]+)?$"))] | first // empty')"
+    [ -n "$job_id" ] && break
+    sleep 300
+  done
+  [ -n "$job_id" ]
   curl -fsS "$SLURM_GATEWAY_URL/api/v1/slurm/jobs/$job_id" |
     jq -e --arg job_id "$job_id" '.job_id == $job_id'
   sacct -j "$job_id" --noheader --format=JobID,State | rg -n "$job_id"

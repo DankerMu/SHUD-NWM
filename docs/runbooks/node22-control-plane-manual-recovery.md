@@ -1,7 +1,8 @@
 # node-22 Control-Plane Manual Recovery Runbook
 
-display API 在 `display_readonly` 模式下对控制面动作返回 409，payload 的
-`recovery_runbook` 指向本文（slug `node22-control-plane-manual-recovery`，
+display API 在 `display_readonly` 模式下对控制面动作返回 409；`POST /api/v1/runs/{run_id}/retry`
+自 #3157 起在**所有**服务角色上都返回 409 `CONTROL_PLANE_MANUAL_ACTION_REQUIRED`。两者 payload 的
+`recovery_runbook` 都指向本文（slug `node22-control-plane-manual-recovery`，
 `apps/api/routes/pipeline.py`）。DB-free scheduler 在六类终态决策上写
 `retry_policy.manual_retry_required: true`，本文给出"怎么找到它们"和"每一类走哪个
 入口"。
@@ -440,6 +441,49 @@ hydro run 已成功时，选择器对 hydro run id 一律拒绝（`no_retryable_
   永久标记前中断）时，reason 才是 `retry_limit_exhausted`。
 - 被证明拒绝或未进入 gateway 边界：保留原始错误码，按该码照旧分类；非 transient 码（如 `SLURM_PARSE_ERROR`）同样是
   `permanently_failed` / `permanent_failure_guard`。
+
+### API retry 已退役；无 `slurm_job_id` 的 `pending` 手动重试行（#3157）
+
+`POST /api/v1/runs/{run_id}/retry` 不再提交任何作业：在 400 `INVALID_RUN_ID`、401/403 鉴权和 display_readonly
+409 之后，compute_control / dev_monolith / display_readonly 一律返回 409 `CONTROL_PLANE_MANUAL_ACTION_REQUIRED`，
+`details` 含 `run_id`、`suggested_action`（指向 `scripts/node22_manual_retry_failed_runs.py` /
+`record_manual_repair`）和 `recovery_runbook=node22-control-plane-manual-recovery`；不连 DB、不构造 retry
+service 或 gateway，所以 node-22 没有 `DATABASE_URL` 时也是这个 409，而不是 500。受支持的人工重试**只有**上一节的
+marker 车道：它在 cycle 写锁内写 `manual_repair_requested` marker，不在进程内写 `pending` 行，也不在进程内 sbatch，
+由 scheduler 下一趟 pass 铸出并提交 retry job。
+
+**历史遗留行**：退役前的 API 手动重试先提交一条 `pending` retry 行，再调用 sbatch。两步之间进程被杀、OOM 或重启，
+会留下一条 `status = pending`、`retry_count > 0`、`slurm_job_id` 为空、`manual_retry_marker = true` 的行（job id
+通常是 `<run_id>_retry_active`）。新代码不会再产生这种行，但历史行可能仍在。它写在哪里决定了它挡住什么：
+
+- **DB 车道**（`ops.pipeline_job`）：唯一的生产写入方是 DB 版 `RetryService.attempt_manual_retry`，只可能出现在带
+  `DATABASE_URL` 的 compute_control / dev_monolith 上（例如回滚演练或隔离 E2E；node-22 生产不连 DB）。marker
+  脚本读的是 file journal，**看不到**这条行，所以它不挡 marker 车道；API retry 也已退役，没有东西再因它返回
+  `RETRY_CONFLICT`。它挡住的是同一 DB 环境里读 `ops.pipeline_job` 的 active 判定：`pending` 属于 active 集合，
+  这些判定会一直把该 run 当作在飞。
+- **文件车道**（file journal）：文件车道的孪生提交方法从未有生产调用方（只能经测试的 dependency override 到达），
+  生产 journal 里不应出现这种行。如果真的遇到，它会挡住 marker 车道：`pending` 属于 active 集合，该 run 的
+  marker 预览会被拒（`decision: refused`、`reason: run_active`、`job_id` 即这条行）。
+
+处置：
+
+1. **先确认 Slurm 侧没有对应作业**。还有一个更窄的子窗口：sbatch 已成功、记账前进程退出。此时行仍是
+   `pending` 且没有 slurm id，但 Slurm 上已经有真实作业在跑，提交请求也不带显式幂等键。按 `run_id`、提交时间和该
+   run 的工作目录在 `squeue` / `sacct` 中查找。找到在跑的作业时，**等它结束**，不要动这条行，再按其终态处理；
+   没法证明不存在时，同样停下来上报，不要猜。
+2. **证明 Slurm 侧没有作业后**：
+   - **DB 车道**：唯一的 API 出口是同一 DB 环境上的 `POST /api/v1/runs/{run_id}/cancel`。它对 `slurm_job_id`
+     为空的 active 行跳过 gateway，直接把行改成 `cancelled`，active 判定随之放行。**副作用**：
+     - 没有 cancellation gap 时，cancel 还会把该 run 的 `hydro.hydro_run` 置为 `cancelled`，并把第一条带 `cycle_id`
+       的 active 行所属的 `met.forecast_cycle` 置为 `cancelled`（两者已是终态时保留原状），并写 `cancel` 事件；
+     - 同一 run 其他带 `slurm_job_id` 的 active 行会被真实 `scancel`；
+     - 在上面那个"sbatch 成功、未记账"子窗口里，cancel 只改本地状态，**不会**取消 Slurm 上的真实作业。如果
+       第 1 步没有排除这个子窗口，cancel 会把该作业留成孤儿。
+     这是带副作用的 workaround，不是自动过期；`expire_stale_retries` 没有生产调用方，不要手工调用它。
+   - **文件车道**：本文没有验证过任何 operator CLI 能清理这种行（`demote-reserved-job` / `bind-reserved-job`
+     针对的是 accepted-submit reservation，不是手动重试的 `pending` 行）。手改 journal、抹掉 durable 证据是禁止的；
+     保留证据并上报。
+3. 之后要重跑这个 run，一律走上一节的 marker 车道：先预览，确认 `decision: would_mark` 后再 `--execute`。
 
 ### 两类 completed-skip fail-stop：`confirm-operator-reentry`
 

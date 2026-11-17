@@ -20,18 +20,17 @@ both ways a same-``run_id`` rerun stages a later attempt:
   is ``succeeded``, which no release entrypoint may touch at any attempt.
 
 Scope of the verdict: on these two rerun paths the active-and-stale state is not
-reachable, and the lag exists only on non-active terminal rows.  One path is NOT
-exercised here: ``FileJournalRetryService.attempt_manual_retry`` (via
-``_create_pending_manual_retry_job``) of a per-model ``fcst_`` run id resets a
-failed hydro row to ``pending`` at the old attempt, and nothing finalizes that row
-when the manual job ends.  That entry has no production caller: the API's manual
-retry wires the database ``RetryService`` (``apps/api/routes/pipeline.py:159-163``,
-called at ``:581``), ``scripts/node22_manual_retry_failed_runs.py`` only reads the
-retry source for its preview (``:194``) and writes ``record_manual_repair``
-(``:257``), and the scheduler wires the file service for inline auto-retry only
-(``services/orchestrator/scheduler_core.py:96``).  If that state ever arises, the
-last test pins what the release entrypoints do with it: an active row at another
-attempt is never released.
+reachable, and the lag exists only on non-active terminal rows.  One historical
+path is NOT exercised here: the file-lane manual retry submit method (via
+``_create_pending_manual_retry_job``) of a per-model ``fcst_`` run id reset a
+failed hydro row to ``pending`` at the old attempt, and nothing finalized that row
+when the manual job ended.  #3157 retired that method; it never had a production
+caller (the API route now answers 409 ``CONTROL_PLANE_MANUAL_ACTION_REQUIRED``
+without constructing any retry service, ``scripts/node22_manual_retry_failed_runs.py``
+only reads the retry source for its preview and writes ``record_manual_repair``,
+and the scheduler wires the file service for inline auto-retry only).  If a row
+left by that path is ever met, the last test pins what the release entrypoints do
+with it: an active row at another attempt is never released.
 """
 
 from __future__ import annotations

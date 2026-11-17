@@ -18,7 +18,6 @@ from apps.api.routes import pipeline as pipeline_routes
 from services.orchestrator.persistence import Base, PipelineEvent, PipelineJob, PipelineStore
 from services.orchestrator.retry import (
     RetryConfig,
-    RetryNotFoundError,
     RetryService,
     _has_runtime_root_field,
     _mapping_at,
@@ -88,76 +87,6 @@ def _scancel_path_bearing_error(status_code: int, code: str, run_id: str) -> Slu
             },
         },
     )
-
-
-def test_characterization_manual_retry_writes_pending_to_hydro_run() -> None:
-    with _store() as store:
-        _insert_hydro_run(store, "run_retry", status="failed")
-        _create_job(store, job_id="job_failed", run_id="run_retry", status="failed", error_code="NODE_FAILURE")
-        gateway = _MockGateway()
-        service = RetryService(store, RetryConfig(max_retries=3))
-
-        retry = service.attempt_manual_retry("run_retry", gateway=gateway, trusted_internal=True)
-
-        assert retry.status == "submitted"
-        assert _hydro_status(store, "run_retry") == "pending"
-        assert store.get_job(retry.job_id).status == "submitted"
-
-
-def test_manual_retry_response_includes_execution_status() -> None:
-    with _store() as store:
-        _insert_hydro_run(store, "run_retry_api", status="failed")
-        _create_job(store, job_id="job_failed", run_id="run_retry_api", status="failed", error_code="NODE_FAILURE")
-        service = RetryService(store, RetryConfig(max_retries=3))
-        with _client(store, retry_service=service) as client:
-            response = client.post("/api/v1/runs/run_retry_api/retry", headers=_operator_headers())
-
-        assert response.status_code == 200
-        data = response.json()["data"]
-        assert data["job_id"] == data["pipeline_job_id"]
-        assert data["slurm_job_id"] == "slurm_retry"
-        assert data["execution_status"] == "submitted"
-        assert data["status"] == "submitted"
-
-
-@pytest.mark.parametrize("active_status", ["pending", "queued", "submitted", "running"])
-def test_duplicate_retry_returns_conflict(active_status: str) -> None:
-    with _store() as store:
-        _create_job(store, job_id="job_failed", run_id="run_conflict", status="failed")
-        _create_job(store, job_id=f"job_{active_status}", run_id="run_conflict", status=active_status)
-        service = RetryService(store, RetryConfig(max_retries=3))
-        with _client(store, retry_service=service) as client:
-            response = client.post("/api/v1/runs/run_conflict/retry", headers=_operator_headers())
-
-        assert response.status_code == 409
-        assert response.json()["error"]["code"] == "RETRY_CONFLICT"
-        assert response.json()["error"]["details"]["active_job_id"] == f"job_{active_status}"
-        assert response.json()["error"]["details"]["active_status"] == active_status
-
-
-def test_retry_event_records_trigger_and_previous_error() -> None:
-    with _store() as store:
-        failed = _create_job(
-            store,
-            job_id="job_failed",
-            run_id="run_retry_event",
-            status="failed",
-            error_code="SBATCH_SUBMISSION_FAILED",
-        )
-        gateway = _MockGateway()
-        service = RetryService(store, RetryConfig(max_retries=3))
-
-        retry = service.attempt_manual_retry("run_retry_event", gateway=gateway, trusted_internal=True)
-
-        event = _events(store)[0]
-        assert event.entity_id == retry.job_id
-        assert event.details["trigger"] == "manual"
-        assert event.details["previous_job_id"] == failed.job_id
-        assert event.details["previous_error"] == "SBATCH_SUBMISSION_FAILED"
-        assert event.details["slurm_job_id"] is None
-        assert event.details["manual_retry_marker"] is True
-        assert event.details["prior_failure_reason"] == "SBATCH_SUBMISSION_FAILED"
-        assert event.details["failure"]["manual_retry_marker"] is True
 
 
 def test_characterization_cancel_writes_cancelled_to_forecast_cycle() -> None:
@@ -791,59 +720,6 @@ def test_cancelled_run_does_not_block_active_guard() -> None:
         assert _has_active_pipeline(store, source_id="gfs", cycle_time=_cycle_time(), model_id="model_a") is False
 
 
-def test_cancelled_run_manual_retry_submits_marker_and_pending_hydro() -> None:
-    with _store() as store:
-        _insert_hydro_run(store, "run_retry_cancelled", status="cancelled")
-        cancelled = _create_job(
-            store,
-            job_id="job_cancelled",
-            run_id="run_retry_cancelled",
-            cycle_id="cycle_retry_cancelled",
-            status="cancelled",
-            error_code=None,
-        )
-        cancelled.retry_count = 2
-        store.session.add(cancelled)
-        store.session.commit()
-        gateway = _MockGateway()
-        service = RetryService(store, RetryConfig(max_retries=3))
-
-        retry = service.attempt_manual_retry("run_retry_cancelled", gateway=gateway, trusted_internal=True)
-
-        assert retry.status == "submitted"
-        assert retry.retry_count == 3
-        assert _hydro_status(store, "run_retry_cancelled") == "pending"
-        assert _hydro_status(store, "run_retry_cancelled") in HYDRO_RUN_STATUS_ENUM
-        events = _events(store)
-        retry_event = next(event for event in events if event.event_type == "retry")
-        assert retry_event.status_from == "cancelled"
-        assert retry_event.details["manual_retry_marker"] is True
-        assert retry_event.details["previous_job_id"] == "job_cancelled"
-        assert retry_event.details["previous_error"] == "cancelled"
-        assert retry_event.details["prior_failure_reason"] == "cancelled"
-        assert retry_event.details["retry_count"] == 3
-        assert gateway.submissions
-
-
-def test_retry_status_is_valid_hydro_enum() -> None:
-    with _store() as store:
-        _insert_hydro_run(store, "run_retry_valid_enum", status="failed")
-        _create_job(
-            store,
-            job_id="job_retry_valid_enum",
-            run_id="run_retry_valid_enum",
-            status="failed",
-            error_code="NODE_FAILURE",
-        )
-        gateway = _MockGateway()
-        service = RetryService(store, RetryConfig(max_retries=3))
-
-        service.attempt_manual_retry("run_retry_valid_enum", gateway=gateway, trusted_internal=True)
-
-        assert _hydro_status(store, "run_retry_valid_enum") == "pending"
-        assert _hydro_status(store, "run_retry_valid_enum") in HYDRO_RUN_STATUS_ENUM
-
-
 def test_cancel_status_is_valid_cycle_enum() -> None:
     with _store() as store:
         _insert_hydro_run(store, "run_cancel_valid_cycle", status="running")
@@ -880,61 +756,6 @@ def test_cancel_status_is_valid_hydro_enum() -> None:
         assert response.status_code == 200
         assert _hydro_status(store, "run_cancel_valid_hydro") == "cancelled"
         assert _hydro_status(store, "run_cancel_valid_hydro") in HYDRO_RUN_STATUS_ENUM
-
-
-@pytest.mark.parametrize("hydro_status", ["succeeded", "parsed", "published"])
-def test_retry_preserves_terminal_hydro_status(hydro_status: str) -> None:
-    with _store() as store:
-        run_id = f"run_retry_terminal_{hydro_status}"
-        _insert_hydro_run(store, run_id, status=hydro_status)
-        failed = _create_job(
-            store,
-            job_id=f"job_retry_terminal_{hydro_status}",
-            run_id=run_id,
-            status="failed",
-            error_code="NODE_FAILURE",
-        )
-        failed.updated_at = datetime(2026, 5, 1, 6, 20, tzinfo=UTC)
-        store.session.add(failed)
-        store.session.commit()
-        gateway = _MockGateway()
-        service = RetryService(store, RetryConfig(max_retries=3))
-
-        with pytest.raises(RetryNotFoundError):
-            service.attempt_manual_retry(run_id, gateway=gateway, trusted_internal=True)
-
-        assert gateway.submissions == []
-        assert _hydro_status(store, run_id) == hydro_status
-        assert _hydro_status(store, run_id) in HYDRO_RUN_STATUS_ENUM
-        assert [job.job_id for job in store.query_jobs_by_run(run_id)] == [failed.job_id]
-        assert _events(store) == []
-
-
-def test_retry_api_rejects_terminal_hydro_status_without_mutation() -> None:
-    with _store() as store:
-        _insert_hydro_run(store, "run_retry_terminal_api", status="published")
-        _create_job(
-            store,
-            job_id="job_retry_terminal_api",
-            run_id="run_retry_terminal_api",
-            status="failed",
-            error_code="NODE_FAILURE",
-        )
-        gateway = _MockGateway()
-        service = RetryService(store, RetryConfig(max_retries=3))
-
-        with _client(store, gateway=gateway, retry_service=service) as client:
-            response = client.post("/api/v1/runs/run_retry_terminal_api/retry", headers=_operator_headers())
-
-        assert response.status_code == 404
-        assert response.json()["error"]["code"] == "RETRY_NOT_FOUND"
-        assert response.json()["error"]["details"]["run_id"] == "run_retry_terminal_api"
-        assert gateway.submissions == []
-        assert _hydro_status(store, "run_retry_terminal_api") == "published"
-        assert [job.job_id for job in store.query_jobs_by_run("run_retry_terminal_api")] == [
-            "job_retry_terminal_api"
-        ]
-        assert _events(store) == []
 
 
 def test_display_retry_manual_action_does_not_mutate_pipeline_or_terminal_state(
@@ -980,43 +801,6 @@ def test_display_retry_manual_action_does_not_mutate_pipeline_or_terminal_state(
         assert _hydro_status(store, "run_display_retry_state") == "failed"
         assert _cycle_status(store, "cycle_display_retry_state") == "failed_run"
         assert _events(store) == []
-
-
-def test_manual_retry_uses_partial_failure_despite_later_success_when_hydro_run_failed() -> None:
-    with _store() as store:
-        _insert_hydro_run(store, "run_partial_then_publish", status="failed")
-        base_time = _cycle_time()
-        partial = _create_job(
-            store,
-            job_id="job_parse_partial",
-            run_id="run_partial_then_publish",
-            status="partially_failed",
-            error_code="NODE_FAILURE",
-        )
-        partial.stage = "parse"
-        partial.updated_at = base_time + timedelta(minutes=5)
-        succeeded = _create_job(
-            store,
-            job_id="job_publish_success",
-            run_id="run_partial_then_publish",
-            status="succeeded",
-            error_code=None,
-        )
-        succeeded.stage = "publish"
-        succeeded.updated_at = base_time + timedelta(minutes=10)
-        store.session.add_all([partial, succeeded])
-        store.session.commit()
-        gateway = _MockGateway()
-        service = RetryService(store, RetryConfig(max_retries=3))
-
-        retry = service.attempt_manual_retry("run_partial_then_publish", gateway=gateway, trusted_internal=True)
-
-        assert retry.status == "submitted"
-        assert retry.stage == "parse"
-        assert retry.job_id == "run_partial_then_publish_retry_active"
-        event = next(event for event in _events(store) if event.event_type == "retry")
-        assert event.details["previous_job_id"] == "job_parse_partial"
-        assert gateway.submissions
 
 
 def test_cancel_preserves_terminal_hydro_run() -> None:
@@ -1178,45 +962,6 @@ def test_cancel_auth_rbac_denied_paths_make_no_gateway_or_state_writes(
         assert _events(store) == []
 
 
-def test_retry_authorized_compute_control_submits_via_gateway() -> None:
-    with _store() as store:
-        _insert_hydro_run(store, "run_retry_compute", status="failed")
-        _insert_forecast_cycle(store, "cycle_retry_compute", status="failed_run")
-        _create_job(
-            store,
-            job_id="job_retry_compute",
-            run_id="run_retry_compute",
-            cycle_id="cycle_retry_compute",
-            status="failed",
-            error_code="NODE_FAILURE",
-        )
-        gateway = _MockGateway()
-        service = RetryService(store, RetryConfig(max_retries=3))
-        app = create_app(_compute_env())
-        app.dependency_overrides[pipeline_routes.get_pipeline_store] = lambda: store
-        app.dependency_overrides[pipeline_routes.get_slurm_gateway] = lambda: gateway
-        app.dependency_overrides[pipeline_routes.get_retry_service] = lambda: service
-
-        previous = os.environ.get("ALLOW_DEV_ROLE_HEADER")
-        os.environ["ALLOW_DEV_ROLE_HEADER"] = "true"
-        try:
-            with TestClient(app) as client:
-                response = client.post(
-                    "/api/v1/runs/run_retry_compute/retry",
-                    headers=_operator_headers(),
-                )
-        finally:
-            if previous is None:
-                os.environ.pop("ALLOW_DEV_ROLE_HEADER", None)
-            else:
-                os.environ["ALLOW_DEV_ROLE_HEADER"] = previous
-
-        assert response.status_code == 200
-        assert response.json()["data"]["status"] == "submitted"
-        assert gateway.submissions
-        assert _hydro_status(store, "run_retry_compute") == "pending"
-
-
 def test_cancel_authorized_compute_control_cancels_via_gateway() -> None:
     with _store() as store:
         _insert_hydro_run(store, "run_cancel_compute", status="running")
@@ -1253,17 +998,6 @@ def test_cancel_authorized_compute_control_cancels_via_gateway() -> None:
         assert gateway.cancelled == ["slurm_cancel_compute"]
         assert store.get_job("job_cancel_compute").status == "cancelled"
         assert _hydro_status(store, "run_cancel_compute") == "cancelled"
-
-
-def test_retry_nonexistent_run_raises_not_found_without_enum_write() -> None:
-    with _store() as store:
-        gateway = _MockGateway()
-        service = RetryService(store, RetryConfig(max_retries=3))
-
-        with pytest.raises(RetryNotFoundError):
-            service.attempt_manual_retry("run_missing", gateway=gateway, trusted_internal=True)
-
-        assert _events(store) == []
 
 
 def test_enum_sets_match_migration() -> None:
@@ -1570,6 +1304,17 @@ def _assert_policy_error_response(
     assert audit["decision"] == policy_decision["decision"]
 
 
+# #3157: retry points at the node-22 marker lane; cancel keeps the compute_control wording.
+_DISPLAY_SUGGESTED_ACTIONS = {
+    "retry": (
+        "Ask a node 22 operator to record a manual repair for this run with "
+        "scripts/node22_manual_retry_failed_runs.py (FileJournalRetryService.record_manual_repair); "
+        "the scheduler mints the retry."
+    ),
+    "cancel": "Ask a node 22 operator to stop this run from the compute_control API or runbook.",
+}
+
+
 def _assert_display_manual_action_error(
     response: Any,
     *,
@@ -1588,10 +1333,7 @@ def _assert_display_manual_action_error(
     assert body["error"]["details"] == {
         "run_id": run_id,
         "display_mode": "display_readonly",
-        "suggested_action": (
-            f"Ask a node 22 operator to {'rerun' if control_action == 'retry' else 'stop'} this run from "
-            "the compute_control API or runbook."
-        ),
+        "suggested_action": _DISPLAY_SUGGESTED_ACTIONS[control_action],
         "recovery_runbook": "node22-control-plane-manual-recovery",
     }
 

@@ -15,7 +15,6 @@ from services.orchestrator import scheduler as scheduler_module
 from services.orchestrator import scheduler_state_manual_retry as scheduler_state_manual_retry_module
 from services.orchestrator import scheduler_state_rows as scheduler_state_rows_module
 from services.orchestrator.file_orchestration_journal import (
-    FileJournalRetryService,
     FileOrchestrationJournalError,
     FileOrchestrationJournalRepository,
 )
@@ -25,7 +24,6 @@ from services.orchestrator.file_orchestration_migration import (
     import_historical_scheduler_state,
     write_migration_receipt,
 )
-from services.orchestrator.retry import RetryConfig
 from services.orchestrator.scheduler_state_failure import (
     _downstream_retry_evidence,
     _manual_retry_state_evidence,
@@ -1602,7 +1600,7 @@ def test_historical_event_ids_do_not_collide_across_models(tmp_path: Path) -> No
     assert {event["event_id"] for event in cycle_rows.pipeline_events} >= {3, 8, inserted["event_id"]}
 
 
-def test_historical_pipeline_event_runtime_roots_are_redacted_but_retry_recoverable(
+def test_historical_pipeline_event_runtime_roots_are_redacted_on_import(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1644,28 +1642,12 @@ def test_historical_pipeline_event_runtime_roots_are_redacted_but_retry_recovera
     raw_journal = (journal_root / "journal/gfs/2026062800.jsonl").read_text(encoding="utf-8")
     state = _candidate_state(repository, cycle_time=cycle_time, model_id="model_a")
 
-    class Gateway:
-        def __init__(self) -> None:
-            self.requests: list[Any] = []
-
-        def submit_job(self, request: Any) -> dict[str, Any]:
-            self.requests.append(request)
-            return {"job_id": "7010", "status": "submitted"}
-
-    gateway = Gateway()
-    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
-    retried = service.attempt_manual_retry("cycle_gfs_2026062800", gateway, trusted_internal=True)
-
     assert str(workspace_root) not in raw_journal
     assert str(object_store_root) not in raw_journal
     assert object_store_prefix not in raw_journal
     assert "[local-path]" in raw_journal
     assert "[object-uri]" in raw_journal
     assert str(workspace_root) not in json.dumps(state, sort_keys=True)
-    assert retried.status == "submitted"
-    assert gateway.requests[0].manifest["workspace_dir"] == str(workspace_root)
-    assert gateway.requests[0].manifest["object_store_root"] == str(object_store_root)
-    assert gateway.requests[0].manifest["object_store_prefix"] == object_store_prefix
 
 
 def test_write_migration_receipt_rejects_outside_root_and_symlink_target(tmp_path: Path) -> None:
