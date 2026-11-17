@@ -204,6 +204,14 @@ def test_the_template_carries_no_database_selector(template_values: dict[str, st
     assert present == []
 
 
+def test_the_template_leaves_the_private_readiness_index_unset(template_values: dict[str, str]) -> None:
+    """#3171: no producer maintains a private canonical readiness index, so a
+    rebuilt env must fall back to the shared index that provider refresh keeps
+    current instead of pointing jobs at an unmaintained private copy."""
+    assert "NHMS_SLURM_SCHEDULER_CANONICAL_READINESS_INDEX" not in template_values
+    assert "NHMS_SCHEDULER_CANONICAL_READINESS_INDEX" in template_values
+
+
 def test_the_runbook_states_the_same_pinned_terminal_stage() -> None:
     """#2075 acceptance: README, runbook and template stay mutually consistent."""
     # #1103 split the runbook into an index page plus `production-ops/`

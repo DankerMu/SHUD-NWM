@@ -76,8 +76,8 @@ minimal. Risk pack: config / project setup.
 
 ## Evidence Floor
 
-- [ ] E1 `uv run ruff check --no-cache .`; `git diff --check`.
-- [ ] E2 `uv run pytest -q tests/test_env_templates.py tests/test_node22_scheduler_env_drift_table.py` passes, and the
+- [x] E1 `uv run ruff check --no-cache .`; `git diff --check`.
+- [x] E2 `uv run pytest -q tests/test_env_templates.py tests/test_node22_scheduler_env_drift_table.py` passes, and the
   required-keys check fails when `NHMS_SLURM_SCHEDULER_REGISTRY_MANIFEST` is removed from the template (red shown on a
   scratch copy). The private-over-shared precedence is already pinned by `tests/test_orchestration_chain.py:1925-1936`,
   `tests/test_job_array.py:269-271`, `tests/test_slurm_array_contract.py:358-360` and
@@ -85,7 +85,7 @@ minimal. Risk pack: config / project setup.
   parses the template with `parse_env_template` and asserts `NHMS_SLURM_SCHEDULER_CANONICAL_READINESS_INDEX` is absent;
   it is shown red when the key is added to a scratch copy. The template documents the absence only in whole-line `#`
   comments, which the parser skips.
-- [ ] E3 Read-only node-22 receipt (in this proposal, Why): the template's registry value equals the live value; the
+- [x] E3 Read-only node-22 receipt (in this proposal, Why): the template's registry value equals the live value; the
   private and shared registry manifests are identical; the private readiness index is stale; `compute.host.env` sets
   only the shared keys.
-- [ ] E4 `openspec validate env-template-slurm-private-lanes --strict --no-interactive`.
+- [x] E4 `openspec validate env-template-slurm-private-lanes --strict --no-interactive`.
