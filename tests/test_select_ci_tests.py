@@ -12466,6 +12466,7 @@ RECONCILE_PARTITION_LEAVES: tuple[str, ...] = (
     "services/orchestrator/reconcile_inflight.py",
     "services/orchestrator/reconcile_records.py",
     "services/orchestrator/reconcile_reserved.py",
+    "services/orchestrator/reconcile_reserved_phases.py",
     "services/orchestrator/reconcile_reserved_support.py",
     "services/orchestrator/reconcile_sacct_probe.py",
 )

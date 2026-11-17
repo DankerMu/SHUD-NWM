@@ -40,6 +40,7 @@ def test_logger_discovery_covers_the_known_logging_modules() -> None:
         "services.orchestrator.reconcile_comment_sacct",
         "services.orchestrator.reconcile_inflight",
         "services.orchestrator.reconcile_reserved",
+        "services.orchestrator.reconcile_reserved_phases",
         "services.orchestrator.reconcile_sacct_probe",
     }
 

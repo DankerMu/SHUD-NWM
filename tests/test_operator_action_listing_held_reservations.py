@@ -33,8 +33,9 @@ from tests.test_operator_action_listing import _permanent_failure_row, _run, _wr
 
 # #3155: reconcile.py is a facade over the ``reconcile_<topic>`` leaves; the
 # producer vocabulary is spread across them (constants in ``reconcile_records``,
-# ``ReservationReconcileOutcome(...)`` calls in ``reconcile_reserved_support`` and
-# ``reconcile_reserved``), so the closure pin reads every partition module.
+# ``ReservationReconcileOutcome(...)`` calls in ``reconcile_reserved_support``,
+# ``reconcile_reserved_phases`` (#3176) and ``reconcile_reserved``), so the
+# closure pin reads every partition module.
 _RECONCILE_PARTITION = sorted(
     (Path(__file__).resolve().parents[1] / "services" / "orchestrator").glob("reconcile*.py")
 )

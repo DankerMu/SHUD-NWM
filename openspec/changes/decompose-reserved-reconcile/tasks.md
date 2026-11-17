@@ -13,15 +13,15 @@
 | Documentation / migration notes | yes | spec REMOVED + ADDED: E6 |
 | Others | no | no schema, config, IO path or display change |
 
-- [ ] 1.1 Pin commit (unchanged production code):
+- [x] 1.1 Pin commit (unchanged production code):
   - run the verification set with `--with pytest-cov` branch coverage on `reconcile_reserved.py`, and record the
     exit → test map and the unhit branches;
   - add characterization tests for unhit exits and branches, the mutation-target tests (non-caching counting
     querier, advancing clock, `:860`/`:977` messages, `:496`-path quarantine basis), and the exact-signature recording
     write-order test, all in a new `tests/test_gateway_reconcile_<topic>.py` under 1000 lines with selector routing;
   - all of it is green on unchanged code.
-- [ ] 1.2 Move commit: decompose per design.md, as verbatim slices in original order with only the allowed changes
+- [x] 1.2 Move commit: decompose per design.md, as verbatim slices in original order with only the allowed changes
   (proposal What 2). Add `reconcile_reserved_phases.py` to `RECONCILE_PARTITION_LEAVES` and to the selector rules.
   Remove the `.large-file-guard.json` entry once the module is ≤1000 lines.
-- [ ] 1.3 Evidence: normalized body diff (E3), exit counts, E4 mutation reds, selector pins for any new module.
-- [ ] 1.4 Run E1 and E5 locally.
+- [x] 1.3 Evidence: normalized body diff (E3), exit counts, E4 mutation reds, selector pins for any new module.
+- [x] 1.4 Run E1 and E5 locally.

@@ -18,7 +18,7 @@ mismatch. If accounting has no matching/verifiable row, the candidate is marked
 This module is the compatibility facade: the implementation lives in the
 ``services.orchestrator.reconcile_<topic>`` leaves (records, identity,
 sacct_probe, comment_sacct, comment_proof, inflight, reserved_support,
-reserved), and every name re-exported here is the leaf object. Leaves never
+reserved_phases, reserved), and every name re-exported here is the leaf object. Leaves never
 import this facade. Patch a name on the leaf that reads it, except names
 production resolves through this facade at call time.
 """
