@@ -13,6 +13,7 @@ from services.orchestrator.accepted_submit_identity import (
     AcceptedSubmitTransition,
     forecast_cohort_identity_is_valid,
 )
+from services.orchestrator.reconcile_comment_proof import _CommentAccountingProof
 from services.orchestrator.reconcile_identity import (
     _accepted_submit_versioned_job,
     _file_cohort_runtime_identity_matches,
@@ -21,6 +22,8 @@ from services.orchestrator.reconcile_identity import (
 from services.orchestrator.reconcile_records import (
     IDENTITY_MISMATCH_RELEASED_ACTION,
     RESERVATION_LOST_STATUS,
+    CommentSacctQuerier,
+    SacctRecord,
     _as_utc_datetime,
     _callable_accepts_keyword,
     _strict_utc_datetime,
@@ -120,6 +123,48 @@ class ReservationReconcileOutcome:
     # that classified at least one remaining master, including a bind. Never
     # persisted on the durable row.
     fallback_match_basis: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _ReservedPassContext:
+    """Pass-wide inputs of one ``reconcile_reserved_unbound_jobs`` invocation.
+
+    ``now`` stays a callable: every deferral check reads the clock. The
+    ``pass_comment_capability`` provider is lazy and runs at most once per
+    invocation; it is handed to ``_accepted_submit_reconcile_job`` unevaluated.
+    """
+
+    store: Any
+    comment_query: CommentSacctQuerier
+    grace: timedelta
+    accepted_submit_grace: timedelta | None
+    identity_blocked_streak_limit: int | None
+    now: Callable[[], datetime]
+    bind_only: bool
+    target_submission_attempt: int | None
+    target_submission_attempt_started_at: datetime | str | None
+    target_slurm_comment: str | None
+    pass_comment_capability: Callable[[], bool | None]
+
+
+@dataclass(slots=True)
+class _ReservedRowState:
+    """One reserved row's facts that cross reserved-reconcile phase boundaries.
+
+    ``fallback_basis`` is set where a fallback is classified, before any journal
+    write that can raise, so the caller's journal quarantine can carry it (#2655).
+    """
+
+    idempotency_key: str
+    fallback_basis: str | None = None
+    forcing_submit_reconcile: bool = False
+    accepted_submit_reconcile: bool = False
+    trusted_submit_reconcile: bool = False
+    attempt_anchor: datetime | None = None
+    proof: _CommentAccountingProof | None = None
+    forcing_reconciliation_source: str | None = None
+    record: SacctRecord | None = None
+    fallback_unique: bool = False
 
 
 def _job_submission_attempt(job: Any) -> int:

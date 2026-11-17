@@ -840,6 +840,9 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             # #2655: the SubmitLine exact-key fallback-bind suite top-level-imports
             # this helper the same way; 20 tests in ~1.5s, DB-free.
             "tests/test_gateway_reconcile_submitline_exact.py",
+            # #3176: the reserved-unbound decomposition pins top-level-import this
+            # helper the same way; 19 tests in ~0.3s, DB-free.
+            "tests/test_gateway_reconcile_reserved_pins.py",
             # The five ultimate consumers via the demote helper (see above).
             "tests/test_orchestrator_demote_cli_security.py",
             "tests/test_orchestrator_demote_core_cas.py",
@@ -1972,6 +1975,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # accepted_submit_identity.py like its claimant-exclusivity sibling.
             # DB-free, 20 tests in ~1.5s.
             "tests/test_gateway_reconcile_submitline_exact.py",
+            # #3176: the reserved-unbound decomposition pins top-level-import the
+            # reconcile facade and accepted_submit_identity.py; every reconcile
+            # leaf reaches them through this rule. DB-free, 19 tests in ~0.3s.
+            "tests/test_gateway_reconcile_reserved_pins.py",
             "tests/test_forcing_submit_ambiguity.py",
             # #2584: the ambiguous state_save_qc submit suite. Its subject is the
             # submit-failure branch of chain_stage_execution.py and the
@@ -2455,6 +2462,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # #2682: the forcing absence-exit suite is a one-hop member the same
             # way (top-level reconcile.py import for the absence grace).
             "tests/test_orchestrator_demote_reserved_job_forcing.py",
+            # #3176: the reserved-unbound decomposition pins top-level-import the
+            # reconcile.py facade the same way; unlike the #1809 partitions they
+            # are not on the `services/slurm_gateway/**` list. DB-free, ~0.3s.
+            "tests/test_gateway_reconcile_reserved_pins.py",
         ),
     ),
     PathTestRule(

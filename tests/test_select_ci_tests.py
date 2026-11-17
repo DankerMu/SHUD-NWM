@@ -1990,6 +1990,11 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_gateway_log_tree_absent.py",
         "tests/test_gateway_reconcile_binding_provenance.py",
         "tests/test_gateway_reconcile_claimant_exclusivity.py",
+        # #3176: the reserved-unbound decomposition pins ride the broad
+        # orchestrator directory rule (reconcile.py / accepted_submit_identity.py
+        # importer gaps; every reconcile leaf reaches it here). DB-free, 19
+        # tests in ~0.3s.
+        "tests/test_gateway_reconcile_reserved_pins.py",
         # #2655: the SubmitLine exact-key fallback-bind suite rides the broad
         # orchestrator directory rule (accepted_submit_identity.py importer gap).
         # DB-free, 20 tests in ~1.5s.
@@ -12467,6 +12472,7 @@ RECONCILE_PARTITION_LEAVES: tuple[str, ...] = (
     "services/orchestrator/reconcile_inflight.py",
     "services/orchestrator/reconcile_records.py",
     "services/orchestrator/reconcile_reserved.py",
+    "services/orchestrator/reconcile_reserved_phases.py",
     "services/orchestrator/reconcile_reserved_support.py",
     "services/orchestrator/reconcile_sacct_probe.py",
 )
@@ -18078,6 +18084,8 @@ def test_gateway_reconcile_helper_rules_select_their_partitions_exactly() -> Non
         "tests/test_gateway_reconcile_claimant_exclusivity.py",
         # #2655: the SubmitLine exact-key suite imports the helper the same way.
         "tests/test_gateway_reconcile_submitline_exact.py",
+        # #3176: so do the reserved-unbound decomposition pins.
+        "tests/test_gateway_reconcile_reserved_pins.py",
     } | {
         "tests/test_orchestrator_demote_cli_security.py",
         "tests/test_orchestrator_demote_core_cas.py",
