@@ -1,8 +1,11 @@
 # display-control-mutation-guard Specification
 
 ## Purpose
-TBD - created by archiving change m22-two-node-docker-readonly-display. Update Purpose after archive.
+Keep the read-only display plane from mutating pipeline state: display retry and cancel fail closed without side
+effects or gateway calls, while the compute-control plane keeps cancel and refuses retry.
+
 ## Requirements
+
 ### Requirement: Display retry and cancel fail closed
 
 In `display_readonly` mode, retry and cancel endpoints SHALL return a stable manual-action error instead of executing control-plane behavior.
@@ -46,20 +49,6 @@ Display-mode retry and cancel guards SHALL complete without calling gateway depe
 - **AND** it does not insert pipeline events for submitted/cancelled state
 - **AND** it does not update hydro, met, forecast cycle, or pipeline terminal status.
 
-### Requirement: Compute control preserves existing behavior
-
-The compute control and dev monolith roles SHALL preserve the existing retry/cancel behavior and authorization checks.
-
-#### Scenario: Compute retry still submits
-- **WHEN** an authorized caller posts retry on a compute-control API and the retry target is valid
-- **THEN** the existing retry service can submit through the configured gateway
-- **AND** the returned job and retry metadata preserve the current API contract.
-
-#### Scenario: Compute cancel still records proven cancellation
-- **WHEN** an authorized caller posts cancel on a compute-control API and the gateway returns proven cancellation
-- **THEN** active jobs can transition to cancelled according to the existing cancellation contract
-- **AND** unproven cancellation gaps still preserve local state.
-
 ### Requirement: Display queue depth does not use gateway
 
 Display readonly queue-depth behavior SHALL not construct or call the Slurm gateway.
@@ -78,3 +67,17 @@ Display readonly queue-depth behavior SHALL not construct or call the Slurm gate
 - **WHEN** `/api/v1/queue/depth` is requested in compute-control or dev monolith mode
 - **THEN** existing gateway-backed queue behavior can remain available according to configuration.
 
+### Requirement: Compute control preserves cancel behavior and fails retry closed
+
+The compute control and dev monolith roles SHALL preserve the existing cancel behavior and authorization checks, and SHALL answer retry with the same stable manual-action error as display mode instead of submitting work.
+
+#### Scenario: Compute retry fails closed
+- **WHEN** an authorized caller posts retry on a compute-control or dev-monolith API
+- **THEN** the API returns HTTP `409` with code `CONTROL_PLANE_MANUAL_ACTION_REQUIRED` in the standard API error envelope, including when no `DATABASE_URL` is configured
+- **AND** no retry service, database session, or Slurm gateway is constructed and no `submit_job` call is made
+- **AND** the response does not claim a new job was submitted.
+
+#### Scenario: Compute cancel still records proven cancellation
+- **WHEN** an authorized caller posts cancel on a compute-control API and the gateway returns proven cancellation
+- **THEN** active jobs can transition to cancelled according to the existing cancellation contract
+- **AND** unproven cancellation gaps still preserve local state.

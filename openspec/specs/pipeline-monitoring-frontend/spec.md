@@ -151,16 +151,14 @@ The monitoring page SHALL display a job list table in the center area with colum
 #### Scenario: Retry action from table
 
 - **WHEN** a user with `operator+` role clicks the "Retry" button on a failed job row
-- **THEN** the frontend SHALL call `POST /api/v1/runs/{run_id}/retry` and display a confirmation toast on success or an error toast on failure
-- **THEN** the table SHALL refresh to show the newly submitted retry job
+- **THEN** the frontend SHALL call `POST /api/v1/runs/{run_id}/retry` and display an error toast carrying the API error message, because the endpoint answers `409 CONTROL_PLANE_MANUAL_ACTION_REQUIRED` and submits nothing
+- **THEN** because the endpoint never answers with success, the page only ever reaches its error path for this action; the success toast it still contains is unreachable until #3179 removes the button
 
 #### Scenario: View Logs action from table
 
 - **WHEN** a user clicks the "View Logs" button on any job row
 - **THEN** the frontend SHALL open a modal or side panel displaying the log content from `GET /api/v1/jobs/{job_id}/logs`
 - **THEN** long log content SHALL be displayed in a monospaced scrollable container with line numbers
-
----
 
 ### Requirement: Right Trends Panel
 

@@ -1,41 +1,11 @@
 # job-retry-mechanism Specification
 
 ## Purpose
-TBD - created by archiving change m3-slurm-nationalization. Update Purpose after archive.
+Define how failed pipeline jobs are retried: orchestrator-driven automatic retry with backoff, retry scope and
+guards, permanent-failure marking, audit evidence, and the node-22 manual-repair marker lane that lets the scheduler
+mint a retry.
 
 ## Requirements
-
-### Requirement: Manual Retry via API
-
-The system SHALL support manual retry of failed runs through the monitoring API.
-
-#### Scenario: Operator triggers manual retry
-
-- **WHEN** a user with `operator`, `model_admin`, or `sys_admin` role sends `POST /api/v1/runs/{run_id}/retry`
-- **THEN** the system SHALL:
-  1. Identify the most recent `pipeline_job` records for the given `run_id` with `status` = `failed`
-  2. For each failed job, create a new `pipeline_job` record with:
-     - A new `job_id` (UUID)
-     - The same `run_id` as the original job
-     - A new `slurm_job_id` (assigned by Slurm upon submission)
-     - `retry_count` incremented by 1 from the failed job's `retry_count`
-     - `status` set to `submitted`
-  3. Submit the new job to Slurm via `sbatch`
-  4. Append a `pipeline_event` with `details_json` containing `{"trigger": "manual", "previous_job_id": "<failed_job_id>", "retry_count": <N>}`
-
-#### Scenario: Manual retry allowed after max auto-retries exhausted
-
-- **WHEN** a job has exhausted all automatic retries (i.e., `retry_count >= max_retries`) and a user with `operator+` role sends a manual retry
-- **THEN** the system SHALL accept the retry request and create a new job (operator override)
-- **THEN** the `pipeline_event.details_json` SHALL include `{"trigger": "manual_override", "note": "exceeded max_retries"}`
-
-#### Scenario: Manual retry preserves run_id
-
-- **WHEN** a manual retry is triggered for a `run_id`
-- **THEN** the new `pipeline_job` SHALL use the same `run_id` as the original failed job
-- **THEN** the new `pipeline_job` SHALL receive a new `slurm_job_id` from the fresh `sbatch` submission
-
----
 
 ### Requirement: Automatic Retry by Orchestrator
 
@@ -128,15 +98,13 @@ Each retry attempt MUST be logged to `ops.pipeline_event` for audit traceability
 
 #### Scenario: Manual retry event logged
 
-- **WHEN** a user triggers a manual retry via the API
+- **WHEN** an operator records a manual repair through `FileJournalRetryService.record_manual_repair`
 - **THEN** a `pipeline_event` record SHALL be appended with:
   - `details_json` containing:
     - `trigger` — `"manual"`
-    - `operator_id` — the authenticated user's ID
+    - `requested_by` — the requesting operator's identifier, when one was supplied
     - `previous_job_id` — the failed job's `job_id`
     - `retry_count` — the current retry attempt number
-
----
 
 ### Requirement: Retry Guard — Non-Transient Error Exclusion
 
@@ -229,10 +197,8 @@ When all automatic retries are exhausted, the job MUST be marked as permanently 
 #### Scenario: Permanently failed job does not block manual retry
 
 - **WHEN** a job is in `permanently_failed` status
-- **THEN** the job SHALL still be eligible for manual retry via `POST /api/v1/runs/{run_id}/retry` (operator override)
+- **THEN** the job SHALL still be eligible for manual retry through the file-journal manual-repair marker lane (`FileJournalRetryService.record_manual_repair`, operator override)
 - **THEN** the operator override SHALL reset the context but preserve the full retry history in `pipeline_event`
-
----
 
 ### Requirement: Retry Identity — Same run_id, New slurm_job_id
 
@@ -257,23 +223,6 @@ Retry jobs SHALL maintain continuity with the original run while obtaining fresh
 - **THEN** the relationship between original and retry jobs SHALL be traceable via `pipeline_event.details_json.previous_job_id`
 
 ---
-
-### Requirement: Concurrent Retry Protection
-
-The system SHALL prevent duplicate retry jobs from being created for the same run.
-
-#### Scenario: Concurrent manual retry requests for same run_id
-
-- **WHEN** two operators simultaneously send `POST /api/v1/runs/{run_id}/retry` for the same `run_id`
-- **THEN** only one retry job SHALL be created and submitted to Slurm
-- **THEN** the second request SHALL receive HTTP 409 with `{"request_id": "...", "status": "error", "error": {"code": "RETRY_ALREADY_IN_PROGRESS", "message": "A retry for this run is already in progress"}}`
-- **THEN** the system SHALL enforce this via a database unique constraint or optimistic lock on `(run_id, status NOT IN terminal_states)`
-
-#### Scenario: Auto-retry skipped when manual retry already active
-
-- **WHEN** the Orchestrator's auto-retry scheduler fires for a failed job but a manual retry for the same `run_id` has already been submitted (status = `submitted` or `running`)
-- **THEN** the Orchestrator SHALL detect the existing active retry and skip the auto-retry
-- **THEN** a `pipeline_event` SHALL be appended with `details_json` containing `{"auto_retry_skipped": true, "reason": "manual_retry_already_active", "active_job_id": "<existing_retry_job_id>"}`
 
 ### Requirement: Missing upstream artifacts SHALL demote failure-state retries to a stable repair-eligible blocker
 
@@ -1635,92 +1584,6 @@ so the two legs read as a matched pair.
   `local_artifact_path_unresolvable`, keeping path faults distinguishable from
   root faults
 
-### Requirement: Retry Runtime-Root Safety Survives Symlink Loops
-
-The retry submission path SHALL normalize local runtime roots (`workspace_dir`, `object_store_root`, `published_artifact_root`) without relying on symlink-loop-unsafe resolution, SHALL return the same safety verdict on every supported CPython version, and SHALL never let a fault inside that normalization (tilde expansion, canonicalization, or its fallback) escape the safety helper as an exception.
-
-A root that fails strict resolution with `ENOENT` is re-admitted through
-non-strict realpath normalization only after a loop-filtering re-check: the
-fallback value is strictly re-resolved, and only a second `ENOENT` (the root
-genuinely does not exist yet — a not-yet-created directory or an unmounted
-share) or a clean strict re-resolution (a `<missing>/../<real>` form) keeps
-the admitted verdict, byte-compatible with the pre-change resolved value. A fallback that still fails for any other reason — including
-the `<missing>/../<loop>` phantom form whose fallback retains a symlink loop
-— is rejected. A root that fails strict resolution for any reason other than
-`ENOENT` (a symlink loop, a permission fault, a stale file handle, a
-non-directory component) is likewise rejected. Every rejection arising from
-strict resolution or its fallback uses the existing reason
-`unresolvable_local_root`; the non-absolute arm keeps its existing
-`relative_local_root` / `parent_traversal_local_root` reasons. Every
-rejection feeds the existing unsafe-rejection wiring. Rejection is
-per-candidate: the rejected root SHALL
-NOT enter that candidate's resolved set, comparable-roots overlap baseline,
-or submission-manifest contribution, and the rejection SHALL be recorded in
-the evidence's bounded `rejected` list — or accounted in the rejection
-counters when the evidence cap elides the entry; when no complete candidate
-remains, the submission fails with the structured error code
-`RETRY_RUNTIME_ROOTS_UNSAFE` — absent a higher-precedence secret-bearing
-rejection, which keeps its existing `RETRY_RUNTIME_ROOTS_SECRET_BEARING`
-code. A value whose tilde expansion cannot be
-completed (an unknown user home) SHALL fail closed through the existing
-non-absolute rejection arm instead of raising.
-
-#### Scenario: A symlink-loop runtime root never escapes as an exception
-
-- **GIVEN** a retry candidate whose `workspace_dir`, `object_store_root`, or
-  `published_artifact_root` is a symlink loop, or a value whose tilde
-  expansion cannot resolve a home directory
-- **WHEN** the retry submission path (the DB manual-retry leg or the db-free
-  journal leg) resolves its runtime roots
-- **THEN** the safety helper returns a fail-closed verdict without raising on
-  any supported CPython version, the rejection is recorded in the
-  `runtime_root_resolution` evidence naming the rejected field and reason,
-  and when no other complete candidate resolves the submission fails with
-  error code `RETRY_RUNTIME_ROOTS_UNSAFE` — never the degraded
-  `SBATCH_SUBMISSION_FAILED` attribution
-
-#### Scenario: A loop root never enters the manifest or the overlap baseline
-
-- **GIVEN** a retry candidate with a symlink-loop local runtime root
-- **WHEN** that candidate's runtime roots are resolved on any supported
-  CPython version
-- **THEN** the loop root is absent from that candidate's resolved root set,
-  absent from its submission-manifest contribution, and absent from the
-  comparable-roots baseline that feeds the workspace/object-store overlap
-  guard — the `unresolvable_local_root` rejection is recorded instead
-
-#### Scenario: A not-yet-created root keeps its admitted semantics
-
-- **GIVEN** a retry candidate whose local runtime root fails strict
-  resolution with `ENOENT` and whose non-strict fallback also strictly
-  re-resolves to `ENOENT` (a not-yet-created directory, an unmounted share)
-  or resolves cleanly (a `<missing>/../<real>` form)
-- **WHEN** the candidate's runtime roots are resolved
-- **THEN** the root stays admitted with verdict "ok" and a value
-  byte-compatible with the pre-change resolved value, and no rejection is
-  emitted
-
-#### Scenario: A phantom loop-carrying root is rejected on every version
-
-- **GIVEN** a retry candidate whose local runtime root is a
-  `<missing>/../<loop>` form — strict resolution fails with `ENOENT` at the
-  missing component, but the non-strict fallback still contains a symlink
-  loop
-- **WHEN** the candidate's runtime roots are resolved
-- **THEN** the loop-filtering re-check rejects the root with
-  `unresolvable_local_root` on every supported CPython version — the
-  admitted-root arm never returns a loop-carrying value into the manifest or
-  the overlap baseline
-
-#### Scenario: A permission-fault root is rejected like a loop root
-
-- **GIVEN** a retry candidate whose local runtime root fails strict
-  resolution with an errno other than `ENOENT` (for example `EACCES` on an
-  untraversable parent)
-- **WHEN** the candidate's runtime roots are resolved
-- **THEN** the root is rejected with `unresolvable_local_root` exactly as a
-  symlink loop is, on every supported CPython version
-
 ### Requirement: Local Artifact Path Tilde Expansion Never Raises
 
 The failure-state local artifact guard SHALL expand a leading tilde in a
@@ -1878,59 +1741,6 @@ channel (a re-ingestion re-records it).
 - **THEN** the produced evidence is byte-for-byte identical to the
   pre-change behavior for both the present and the absent manifest cases
 
-### Requirement: DB-free selector and object-store probe lanes survive unexpandable tildes
-
-The db-free selector adjudicators and the object-store probe lane SHALL
-never let a home-directory-determination failure escape as a bare
-RuntimeError. Specifically: (a) the db-free selector allowed-roots and
-selector-path adjudicators SHALL treat an unexpandable tilde value as an
-ordinary relative path and return their existing structured rejections
-through the existing non-absolute arms; (b) constructing a local object
-store with an unexpandable tilde root SHALL raise the domain
-`ObjectStoreError` from within the constructor's existing error-conversion
-boundary — never a bare RuntimeError and never a literal `~…` directory
-created on disk — so the unified artifact probe and the sidecar provenance
-tier, which already catch `ObjectStoreError`, keep producing their existing
-distinguishable fail-closed attributions instead of crashing the scheduling
-pass. Expandable and tilde-free values keep their existing behavior
-byte-for-byte in all these lanes, with one recorded acceptance: a
-`.`-prefixed value whose first surviving component is a tilde (the `./~/x`
-class) moves from expand-and-admit to the relative-path rejection at the
-str-input sites — a fail-closed direction pinned as an explicit carve-out
-in the byte-compatibility tests.
-
-#### Scenario: unexpandable tilde in db-free selector values yields structured rejections
-
-WHEN a db-free runtime-manifest allowed-roots entry or selector path value
-is `~nosuchuser/…` (or a plain `~/…` with no determinable home directory)
-THEN the adjudicators return their existing relative-path rejection shapes
-(`db_free_allowed_root_*` / `db_free_selector_path_*` families) without any
-exception escaping
-
-#### Scenario: unexpandable tilde object-store root converts to the domain error
-
-WHEN a local object store is constructed with an unexpandable tilde root
-THEN the constructor raises `ObjectStoreError` (not a bare RuntimeError)
-and creates no directory for the literal tilde value
-
-#### Scenario: probe lanes keep their fail-closed attributions under a tilde root
-
-WHEN the configured object-store root is an unexpandable tilde value and a
-candidate's artifact probe or forcing-sidecar provenance runs
-THEN the unified artifact probe returns the existing probe-error
-missing-status attribution and the sidecar tier returns its existing
-unreadable attribution — the scheduling pass continues and evidence is
-written
-
-#### Scenario: expandable and tilde-free values keep their behavior
-
-WHEN selector values or the object-store root have no tilde or expand
-normally
-THEN adjudication results and constructor behavior are byte-for-byte
-identical to the pre-change behavior, except the recorded `./~/x`
-acceptance (that class now takes the fail-closed relative-path rejection
-at the str-input sites)
-
 ### Requirement: Released identity-blocked reservation rows SHALL remain outside automatic retry classification
 
 A pipeline-job row produced by identity-blocked reservation release (`status="reservation_lost"`, `identity_mismatch_released` sub-shape) SHALL carry no `error_code` — the reservation writes that seed the row, including the reclaim re-seed of a lost reservation, SHALL keep setting `error_code` to null, and the release transition SHALL NOT introduce one — and `should_auto_retry`/`classify_failure` SHALL therefore evaluate it as non-retriable. Tests SHALL pin both the written row shape (driving the real reserve-then-release sequence — and the real reserve-permit-reclaim-release sequence — not a hand-built row) and the `should_auto_retry` verdict, so that any future edit stamping a transient error code onto the reservation, reclaim, or release writes fails the pin instead of silently opening a duplicate-submission route. This requirement governs only the automatic-retry classification decision: the reservation reclaim predicate and the reconcile-verified retry shortcut (the two reclaim doors that the existing "Lost reservations are not mark sources" requirement keeps open) are explicitly unaffected.
@@ -1998,143 +1808,6 @@ A retry-attempt claim that originates in a candidate's persisted `manual_retry` 
   `decision` nor a `reason` key
 - **THEN** the claim is dropped exactly as one without an active decision, and
   the derivation falls through to the next free attempt
-
-### Requirement: DB-free selector containment survives symlink loops at both the root and the path level
-
-The db-free retry submission lane SHALL normalize its selector containment
-bases (the `NHMS_SCHEDULER_ALLOWED_ROOTS` entries and their equivalent
-profile sources) **and** the selector path values judged against them without
-relying on symlink-loop-unsafe resolution, SHALL return the same verdict on
-every supported CPython version, and SHALL never let a fault inside that
-normalization escape the adjudicator as an exception. Neither level may reach
-`Path.resolve()` in either form: the non-strict form stopped raising on
-symlink loops in CPython 3.13+, and the strict form raises an errno-less
-`RuntimeError` on 3.12 and earlier, so neither is a usable loop predicate on
-the supported interpreter range. Normalization SHALL go through
-`os.path.realpath`, whose strict form raises `OSError` carrying an errno on
-every supported version.
-
-At **both** levels a value that fails strict resolution with `ENOENT` keeps
-its existing admitted semantics — a configured root may legitimately point at
-a not-yet-created directory or an unmounted share, and a selector path is
-deliberately not existence-checked at submission time — but that admission
-SHALL be loop-filtered rather than errno-scoped alone: the non-strict
-fallback value is strictly re-resolved, and only a second `ENOENT` (the
-target genuinely does not exist yet) or a clean strict re-resolution (a
-`<missing>/../<real>` form) keeps the admitted verdict. A fallback that still
-fails for any other reason — including the `<missing>/../<loop>` phantom
-form, whose strict resolution stops at the missing component but whose
-fallback still carries a symlink loop — SHALL be rejected. This loop-filtered
-admission is deliberately the same doctrine the runtime-root lane already
-carries and deliberately **not** the admitted-phantom residual recorded for
-the local artifact guard: the selector path level consumes the selector root
-level's output, so a bare fallback at either level would reproduce at the
-next level the very containment fail-open the other level rejects.
-
-A value that fails strict resolution for any reason other than `ENOENT` (a
-symlink loop, a permission fault, a stale file handle, a non-directory
-component) SHALL likewise be rejected, and a value that cannot be resolved at
-all because it is not a valid path string (an embedded NUL, which raises
-`ValueError` rather than `OSError`) SHALL fall into the same rejection rather
-than escaping. Rejections SHALL use the lane's existing reasons —
-`db_free_allowed_root_unresolvable` at the root level and
-`db_free_selector_path_unresolvable` at the path level — with no new reason
-vocabulary and no change to the rejection record shape or to the
-adjudicators' signatures. Rejection remains per-value: a rejected root SHALL
-NOT enter the containment bases, and the existing cascade SHALL be preserved
-— when every configured root is rejected the path-level adjudicator still
-reports `db_free_allowed_roots_missing`, and a path that **resolves cleanly**
-yet lies outside the surviving bases still reports
-`db_free_selector_path_outside_allowed_roots`. Resolution now precedes the
-containment comparison, so a value that is *both* unresolvable and outside the
-bases SHALL report the resolution reason rather than the containment one: that
-re-ordering is deliberate — an unresolvable value has no trustworthy location
-to compare against — and it changes the reported reason only within the
-already-rejected class, never a verdict from admitted to rejected or back.
-
-Values that resolve cleanly, and values whose strict resolution fails with
-`ENOENT` and whose fallback re-resolves cleanly or to a second `ENOENT`,
-SHALL keep their existing verdicts and their existing resolved values
-byte-for-byte. Because both db-free legs (the retry submission leg and the
-file-orchestration journal leg) consume the same pair of adjudicators, this
-requirement governs both.
-
-#### Scenario: A phantom loop-carrying selector root is rejected on every version
-
-- **GIVEN** a db-free allowed-roots entry of the `<missing>/../<loop>` form —
-  strict resolution fails with `ENOENT` at the missing component, but the
-  non-strict fallback still resolves onto a symlink loop
-- **WHEN** the db-free selector allowed-roots adjudicator normalizes it
-- **THEN** no root is admitted and exactly one
-  `db_free_allowed_root_unresolvable` rejection is recorded, on every
-  supported CPython version — the same verdict the direct loop form already
-  receives, so one physical target can no longer draw two opposite verdicts
-
-#### Scenario: A not-yet-created selector root keeps its admitted semantics
-
-- **GIVEN** a db-free allowed-roots entry that fails strict resolution with
-  `ENOENT` and whose non-strict fallback either strictly re-resolves to a
-  second `ENOENT` (a not-yet-created directory, an unmounted share) or
-  resolves cleanly (a `<missing>/../<real>` form)
-- **WHEN** the adjudicator normalizes it
-- **THEN** the root stays admitted with a value byte-compatible with the
-  pre-change resolved value and no rejection is emitted
-
-#### Scenario: A symlink-loop selector path is rejected instead of lexically admitted
-
-- **GIVEN** a db-free selector path value that is a symlink loop, or lies
-  under one, while every configured allowed root resolves cleanly
-- **WHEN** the selector path adjudicator judges it
-- **THEN** it is rejected with the existing
-  `db_free_selector_path_unresolvable` reason on every supported CPython
-  version — the value never reaches the resolved selector fields or the
-  submission manifest through a purely lexical containment comparison, and no
-  `RuntimeError` escapes to the submission path's broad exception handler,
-  so the structured rejection evidence is preserved instead of the attribution
-  degrading to `SBATCH_SUBMISSION_FAILED`
-
-#### Scenario: A phantom loop-carrying selector path is rejected
-
-- **GIVEN** a db-free selector path of the `<missing>/../<loop>` form lying
-  lexically under a cleanly resolving allowed root
-- **WHEN** the selector path adjudicator judges it
-- **THEN** the loop-filtered re-check rejects it with
-  `db_free_selector_path_unresolvable` — the path level carries the same
-  admission doctrine as the root level it consumes
-
-#### Scenario: A not-yet-created selector path stays admitted
-
-- **GIVEN** a db-free selector path under a cleanly resolving allowed root
-  whose final components do not exist yet
-- **WHEN** the selector path adjudicator judges it
-- **THEN** no rejection is produced and the normalized value is byte-identical
-  to the pre-change resolved value — submission-time adjudication still
-  performs no existence check
-
-#### Scenario: An unrepresentable selector value is rejected rather than raising
-
-- **GIVEN** a db-free allowed-roots entry or selector path value carrying an
-  embedded NUL, for which resolution raises `ValueError` rather than `OSError`
-- **WHEN** the corresponding adjudicator normalizes it
-- **THEN** it takes the lane's existing `*_unresolvable` rejection and no
-  exception escapes the adjudicator
-
-#### Scenario: An unresolvable out-of-root value reports the resolution reason
-
-- **GIVEN** a db-free selector path that is a symlink loop and that also lies
-  outside every configured allowed root
-- **WHEN** the selector path adjudicator judges it
-- **THEN** it reports `db_free_selector_path_unresolvable` rather than
-  `db_free_selector_path_outside_allowed_roots`, while a cleanly resolving
-  out-of-root value keeps the containment reason unchanged
-
-#### Scenario: The all-roots-rejected cascade is preserved
-
-- **GIVEN** a db-free configuration in which every configured allowed root is
-  rejected by the root-level adjudicator
-- **WHEN** a selector path is judged against the resulting empty bases
-- **THEN** the path-level adjudicator reports the existing
-  `db_free_allowed_roots_missing` reason, unchanged
 
 ### Requirement: The single consulted permanence refusal source MUST have format-insensitive regression coverage
 
@@ -2603,81 +2276,6 @@ The file-journal reclaim predicate and the forecast-cycle reconcile-verified ret
 - **WHEN** an operator-demoted row is presented to reclaim with a stale attempt, stale anchor, mismatched immutable cohort identity, bound Slurm job id, non-null reason class, or matched job id
 - **THEN** reclaim returns no reservation and writes nothing
 
-### Requirement: File-journal retry attempts preserve durable warm-start lineage without claiming accepted-submit authority
-
-The file-journal retry service SHALL derive every retry attempt from the private durable predecessor row. A manual or automatic retry attempt SHALL preserve that row's bounded `init_state_identities` exactly, SHALL identify the predecessor through `previous_job_id`, and SHALL NOT carry `accepted_submit_contract_version` because a retry attempt is not the authoritative accepted-submit row. Public redaction placeholders such as `[object-uri]`, `[local-path]`, and `[redacted]` MUST NOT be persisted as retry lineage.
-
-#### Scenario: Contract-current candidate manual retry preserves lineage
-
-- **WHEN** a failed contract-current forecast candidate with a real durable `init_state_identities` mapping is manually retried
-- **THEN** the new durable retry row SHALL be created and submitted with the same bounded mapping, `previous_job_id` SHALL identify the candidate, and `accepted_submit_contract_version` SHALL be absent
-- **THEN** neither the direct payload nor its journal record SHALL contain a public redaction placeholder in the mapping
-
-#### Scenario: Contract-current master manual retry preserves lineage
-
-- **WHEN** a failed or partially failed contract-current forecast master with real durable lineage is manually retried
-- **THEN** the new durable retry row SHALL be created and submitted with that lineage and without `accepted_submit_contract_version`
-- **THEN** accepted-submit candidate/master structural validation SHALL NOT reject the retry identity
-
-#### Scenario: Successful manual submission update remains private
-
-- **WHEN** a pending manual retry row with real durable lineage is updated after Slurm submission
-- **THEN** the service SHALL update the private durable row and preserve the lineage exactly
-- **THEN** no value obtained only from the public scheduler projection SHALL be written back
-
-#### Scenario: Concurrent manual retry has one durable winner
-
-- **WHEN** two callers synchronously attempt manual retry for the same failed `run_id`
-- **THEN** exactly one caller SHALL create one retry payload and one retry event
-- **THEN** the other caller SHALL receive the existing `RetryConflictError` result without creating a second payload or event
-
-#### Scenario: Selected public source disappears before private rebind
-
-- **WHEN** public retry selection identifies a failed source but the private durable lookup for that `job_id` returns no row
-- **THEN** the service SHALL raise `RetryNotFoundError`
-- **THEN** no retry payload, journal record, or retry event SHALL be written
-
-#### Scenario: Automatic retry inherits durable predecessor lineage
-
-- **WHEN** `schedule_auto_retry` receives either a full row or a narrow production snapshot for a failed job whose durable row has non-empty `init_state_identities`
-- **THEN** the new durable retry payload and journal record SHALL inherit the durable predecessor mapping exactly
-- **THEN** a predecessor that genuinely has no mapping SHALL produce `[]` without crashing
-
-#### Scenario: Full-row and narrow-snapshot automatic retry agree
-
-- **WHEN** automatic retry is invoked once with a full durable-row input and once with a narrow production snapshot for equivalent failed jobs whose private durable predecessors carry the same non-empty mapping
-- **THEN** both retry attempts SHALL persist the same inherited mapping in their direct payload and corresponding journal record
-- **THEN** a predecessor with genuinely empty lineage SHALL still persist `[]`
-
-#### Scenario: Legacy and sibling behavior remains compatible
-
-- **WHEN** marker-free or non-forecast failed rows with real durable lineage are manually retried
-- **THEN** their existing eligibility, retry identity, and status behavior SHALL remain unchanged
-- **THEN** their direct retry payload and corresponding journal record SHALL inherit the exact mapping without `[object-uri]`, `[local-path]`, or `[redacted]`
-- **WHEN** an existing failed row with a non-empty mapping is marked permanently failed
-- **THEN** that sibling path SHALL retain its existing mapping
-
-### Requirement: Invalid file-journal retry evidence has a structured API boundary
-
-File-journal identity or evidence validation failures encountered while creating a manual retry SHALL fail before a retry row is written and SHALL be exposed as a stable `RetryError` family result. A refused file-journal read encountered while selecting the manual-retry source — whether it surfaces as the marked read-blocked row or as a typed journal fault raised by the selector's durable read — SHALL take the same boundary and SHALL carry the journal's `reason` and `field` in safe details. The monitoring API SHALL return HTTP 409 with code `RETRY_EVIDENCE_INVALID` and safe details rather than an unclassified HTTP 500 or a `RETRY_NOT_FOUND` answer.
-
-#### Scenario: Invalid retry evidence is rejected before mutation
-
-- **WHEN** private durable retry source evidence cannot satisfy file-journal normalization
-- **THEN** manual retry SHALL raise `RetryError` code `RETRY_EVIDENCE_INVALID` with the affected `run_id` and stable journal field/code in safe details
-- **THEN** no pending retry payload or retry event SHALL be written
-
-#### Scenario: A refused source read takes the same boundary
-
-- **WHEN** the manual-retry source selection reads a refused journal lane rather than an invalid row
-- **THEN** the same `RETRY_EVIDENCE_INVALID` result SHALL be raised with the journal `reason` and `field`, and no retry row, marker event or gateway request SHALL be produced
-
-#### Scenario: Monitoring API maps invalid retry evidence
-
-- **WHEN** `POST /api/v1/runs/{run_id}/retry` encounters that retry evidence error
-- **THEN** the response SHALL have status 409 and `error.code == "RETRY_EVIDENCE_INVALID"`
-- **THEN** the response SHALL not expose secrets, private URIs, or a raw runtime traceback
-
 ### Requirement: Candidate-aware attempt reads SHALL apply one authority domain to rows and carried floors
 
 When a scheduler decision has candidate identity and reads a canonical stage attempt from a raw cycle-wide candidate-state projection, the system SHALL apply the same candidate-authority predicate to both the in-window `pipeline_jobs` row scan and the carried `stage_retry_attempt_floors` contributors before spending the candidate's retry budget. A bare source-cycle run row authoritative for all candidates in that cycle SHALL remain eligible, while a suffixed execution-cohort row or foreign-model row that proves no candidate authority SHALL contribute neither its row attempt nor its carried floor. The scoped read SHALL be copy-on-read and SHALL NOT mutate the raw projected state. Candidate-agnostic consumers and the flat top-level `retry_count` channel remain unchanged.
@@ -2713,7 +2311,7 @@ A shared-cycle aggregate's top-level source-cycle download failure SHALL be reco
 
 ### Requirement: Geometry-B manual retry minting SHALL recover stage from exact marker-floor lineage
 
-When candidate row truncation leaves `_candidate_failed_stage` unresolved but an adopted manual-retry marker targets a row represented by an authoritative `stage_retry_attempt_floor_sources` contributor, only the manual retry gate/evidence lane SHALL recover a canonical stage, and only from an exact target-identifier match between the newest adopted marker and a contributor. The ordinary candidate decision state SHALL retain its existing shared-cycle pipeline-surface strip; a separate manual-retry view built by the same authority filter MAY carry only a minimal lineage capsule (that newest marker plus the one matching canonical stage's already-narrowed floor and sources) across that strip. It SHALL NOT restore the truncated row, any top-level stage/status/retry field, unrelated floors/events, or an older matching marker when the newest adopted marker does not match. A recorded marker `failed_stage`, when present, SHALL agree with the contributor stage after both are interpreted through canonical downstream-stage identity; the floor-source mapping key itself SHALL use the canonical spelling emitted by the projection producer and an alias-spelled or non-canonical hand-shaped key SHALL NOT authorize recovery. Marker target identity consists of event `entity_id` and recorded `previous_job_id` / `failed_job_id`; contributor identity consists of its own `job_id` / `pipeline_job_id` / `entity_id`. Contributor predecessor/reference fields and marker `details.job_id` SHALL NOT authorize recovery. The system SHALL use that canonical stage's carried attempt as `previous_attempt` and mint `new_attempt = previous_attempt + 1`; the manual override SHALL remain allowed regardless of the automatic retry limit. Both file-journal manual-retry writers SHALL derive their marker/pending attempt as `effective_retry_attempt(target_job_id, target_retry_count) + 1`, so a suffix-only target cannot emit a stale attempt-one claim that overrides the recovered floor. Projection visibility SHALL remain unchanged: the failed row stays outside `pipeline_jobs`, top-level `failed_stage`/`stage`/`restart_stage` stay empty, and `_failed_stage` plus `_candidate_failed_stage` remain unresolved. If lineage is absent, foreign, stale, non-canonical, maps to multiple disagreeing stages, or belongs only to an older marker behind a newer unmatched adopted marker, the manual lane SHALL fail closed rather than guess.
+When candidate row truncation leaves `_candidate_failed_stage` unresolved but an adopted manual-retry marker targets a row represented by an authoritative `stage_retry_attempt_floor_sources` contributor, only the manual retry gate/evidence lane SHALL recover a canonical stage, and only from an exact target-identifier match between the newest adopted marker and a contributor. The ordinary candidate decision state SHALL retain its existing shared-cycle pipeline-surface strip; a separate manual-retry view built by the same authority filter MAY carry only a minimal lineage capsule (that newest marker plus the one matching canonical stage's already-narrowed floor and sources) across that strip. It SHALL NOT restore the truncated row, any top-level stage/status/retry field, unrelated floors/events, or an older matching marker when the newest adopted marker does not match. A recorded marker `failed_stage`, when present, SHALL agree with the contributor stage after both are interpreted through canonical downstream-stage identity; the floor-source mapping key itself SHALL use the canonical spelling emitted by the projection producer and an alias-spelled or non-canonical hand-shaped key SHALL NOT authorize recovery. Marker target identity consists of event `entity_id` and recorded `previous_job_id` / `failed_job_id`; contributor identity consists of its own `job_id` / `pipeline_job_id` / `entity_id`. Contributor predecessor/reference fields and marker `details.job_id` SHALL NOT authorize recovery. The system SHALL use that canonical stage's carried attempt as `previous_attempt` and mint `new_attempt = previous_attempt + 1`; the manual override SHALL remain allowed regardless of the automatic retry limit. The file-journal manual-repair marker writer SHALL derive its marker attempt as `effective_retry_attempt(target_job_id, target_retry_count) + 1`, so a suffix-only target cannot emit a stale attempt-one claim that overrides the recovered floor. Projection visibility SHALL remain unchanged: the failed row stays outside `pipeline_jobs`, top-level `failed_stage`/`stage`/`restart_stage` stay empty, and `_failed_stage` plus `_candidate_failed_stage` remain unresolved. If lineage is absent, foreign, stale, non-canonical, maps to multiple disagreeing stages, or belongs only to an older marker behind a newer unmatched adopted marker, the manual lane SHALL fail closed rather than guess.
 
 #### Scenario: Geometry B mints the next durable attempt without changing visibility
 
@@ -2723,7 +2321,7 @@ When candidate row truncation leaves `_candidate_failed_stage` unresolved but an
 #### Scenario: Producer-shaped marker uses the durable suffix attempt
 
 - **WHEN** the target failed job records attempt `N` only in its trailing `_retry_N` identity suffix while its persisted `retry_count` is zero
-- **THEN** both the manual-repair marker writer and pending manual-retry writer record attempt `N+1` through `effective_retry_attempt`, and neither emits an attempt-one claim
+- **THEN** the manual-repair marker writer records attempt `N+1` through `effective_retry_attempt` and does not emit an attempt-one claim
 
 #### Scenario: Ordinary shared-cycle consumers stay stripped
 
@@ -2786,31 +2384,6 @@ A duplicate-submission skip established by the reservation gate SHALL likewise r
 - **THEN** their existing identities, attempt/anchor derivation, statuses, event output, and submit counts remain unchanged
 - **AND** PostgreSQL repository behavior and non-reservation file-journal writer failure semantics remain outside this containment change.
 
-### Requirement: Operator recovery attestations do not cross retry-attempt boundaries
-
-The file-journal manual-retry service SHALL treat `operator_recovery_attested_at` as authority bound to the exact released source row. A newly created manual-retry row SHALL NOT inherit that attestation, even if a future caller or test explicitly selects an attested `reservation_lost/identity_mismatch_released` source. `reservation_lost` SHALL remain outside `MANUAL_RETRY_SOURCE_STATUSES`, and the downstream operator-recovery predicate SHALL independently require the released status and exact authority tuple. The dedicated typed recovery API, the attested source row, ordinary failed-row manual retry, and bounded retry lineage SHALL remain unchanged.
-
-#### Scenario: Released reservation is not a generic manual-retry source
-
-- **WHEN** manual-retry source selection observes an attested row with `status=reservation_lost` and `reconciliation_decision=identity_mismatch_released`
-- **THEN** it SHALL NOT select that row as a manual-retry source, because `reservation_lost` remains outside `MANUAL_RETRY_SOURCE_STATUSES`
-
-#### Scenario: Forced source cannot transfer the attestation
-
-- **WHEN** an attested released row is explicitly supplied to the manual-retry clone seam independent of normal source selection
-- **THEN** the new persisted retry row SHALL have `operator_recovery_attested_at` cleared, SHALL identify the original through `previous_job_id`, and SHALL preserve the existing bounded retry lineage contract
-- **AND** the original source row SHALL retain its attestation unchanged
-
-#### Scenario: Retry successor cannot satisfy the operator-recovery predicate
-
-- **WHEN** the downstream `_operator_recovery_attested` predicate evaluates the new manual-retry successor
-- **THEN** it SHALL return false because the successor is an unattested distinct attempt and is not a released row
-
-#### Scenario: Dedicated recovery remains the sole attestation writer
-
-- **WHEN** `recover_released_identity_blocked_reservation` receives an eligible current-contract released master and exact attempt expectations
-- **THEN** it SHALL retain its existing typed behavior and remain the sole writer of `operator_recovery_attested_at`
-
 ### Requirement: Projection-only repaired annotations SHALL remain outside durable manual-repair marker authority
 
 The file-journal manual-repair writer SHALL continue to derive marker target details only from durable pipeline-job rows. Projection-only `repair_status` and `active_blocker` annotations SHALL NOT be recomputed in the marker write path, added implicitly to the closed durable pipeline-row schema, or treated as durable facts. Existing marker gate-contract keys SHALL remain readable when a synthetic or legacy marker explicitly carries them, but the production writer SHALL NOT claim to produce those values.
@@ -2837,71 +2410,6 @@ When a target is already annotated repaired only on a projection copy at marker-
 - **WHEN** existing durable or legacy manual-retry markers are evaluated without any state-index repair operation
 - **THEN** their marker bytes, attempt derivation, row-present and row-absent decisions, and sanitizer behavior remain unchanged
 
-### Requirement: File-journal manual retry submission failures surface through the route's structured 503
-
-The pipeline retry route SHALL treat the file-journal retry lane and the database retry lane through one service seam: both lanes SHALL provide `attempt_manual_retry` and `submission_runtime_root_resolution`, and the route SHALL depend only on that seam. When a file-journal manual retry attempt ends in `submission_failed`, the route SHALL respond HTTP 503 with `error.code` equal to the recorded submission error code, a redacted `error_message`, and `details.status`, `details.run_id`, and `details.job_id` — never an unclassified HTTP 500. When the recorded submission event carries `runtime_root_resolution`, the response SHALL carry the persisted (already public-scrubbed) mapping unchanged under `details.runtime_root_resolution`; when the event carries none, the key SHALL be absent. A typed journal read fault while reading that evidence SHALL leave the key absent and the 503 intact. The response SHALL contain no traceback, journal path, or journal root text.
-
-#### Scenario: File-lane submission failure with resolved runtime roots
-
-- **WHEN** a manual retry on the file lane resolves runtime roots and the gateway submission raises
-- **THEN** the route responds 503 with `error.code == "SBATCH_SUBMISSION_FAILED"` (or the gateway's own code), `details.status == "submission_failed"`, and `details.runtime_root_resolution` equal to the persisted submission event's `runtime_root_resolution`
-
-#### Scenario: File-lane submission failure without runtime-root evidence
-
-- **WHEN** a manual retry on the file lane resolves no runtime roots and the gateway submission raises
-- **THEN** the route responds 503 with the same code and status fields and `details` has no `runtime_root_resolution` key
-
-#### Scenario: Evidence read fault after the failure was recorded
-
-- **WHEN** the failure has been recorded and the route's evidence read raises a typed journal error
-- **THEN** the route still responds 503 with the failure's code and status, `details` has no `runtime_root_resolution` key, and the body carries no traceback
-
-#### Scenario: Both lanes satisfy the seam
-
-- **WHEN** the database retry service and the file-journal retry service are checked against the shared service protocol
-- **THEN** both satisfy it without lane-specific adaptation
-
-### Requirement: Manual-retry runtime-root evidence renders one public shape on both lanes
-
-The `details.runtime_root_resolution` mapping carried by the retry route's `submission_failed` 503 SHALL have one public shape regardless of which retry lane produced it. Every scalar that is an absolute local path SHALL be rendered as `[local-path]`, every URI as `[uri]` or `[object-uri]`, and the response body SHALL contain no absolute local root text. Each `resolved.*` entry SHALL remain a mapping carrying `present`, `source` and the rendered `value` (plus `same_as_workspace` on `object_store_root` when both roots resolved); the public renderer SHALL recurse into mapping values under path-shaped keys instead of replacing them, while scalar values under those keys SHALL still render as `[local-path]`. The database lane SHALL apply that rendering when it reads the evidence for the response and SHALL leave the persisted event details unchanged; the file-journal lane SHALL apply it when it persists the evidence and SHALL return the persisted mapping unchanged.
-
-A URI-valued root SHALL render as `[uri]`/`[object-uri]` on both lanes and SHALL NOT be reduced to `null` on either. The file-journal lane SHALL therefore render its manual-retry submission events — both the failure event and the successful-submission event — at the journal's own event boundary, after the durable anti-laundering strip that turns caller-supplied `[uri]`/`[object-uri]` placeholders into `null`, and SHALL NOT pre-render the evidence before writing it. No value the rendering reaches SHALL be reduced to `null` by that strip, `rejected[].value` and `db_free_runtime.resolved.*.value` included; the db-free selector's own resolved values are local paths or fixed tokens by construction, so for them the requirement is that they survive the single render unchanged. The anti-laundering guarantee for caller-supplied placeholders on non-event records and round-tripped rows SHALL remain unchanged, and no raw root text SHALL appear in the public event. Secret redaction SHALL keep precedence over path rendering. Historical file-journal events that persisted a bare `[local-path]` string, or a `null` value, for a root entry SHALL be returned as recorded.
-
-#### Scenario: Database lane 503 carries no absolute roots
-
-- **WHEN** a database-lane manual retry resolves real `workspace_dir` and `object_store_root` values and the gateway submission raises
-- **THEN** the 503 body contains neither root's text, `resolved.workspace_dir.value == "[local-path]"`, `resolved.object_store_root` is a mapping with `present`, `source`, `value == "[local-path]"` and `same_as_workspace`, and the persisted submission event still carries the real values
-
-#### Scenario: Rejected URI candidates are placeholders on the wire
-
-- **WHEN** a database-lane manual retry rejects a URL-valued candidate and the attempt ends in `submission_failed`
-- **THEN** the 503 body's `rejected[].value` for that candidate is `[uri]` while the persisted event keeps the credential-stripped URL
-
-#### Scenario: File lane keeps provenance for every resolved root
-
-- **WHEN** a file-journal manual retry resolves `workspace_dir` and `object_store_root` and the submission is recorded
-- **THEN** the persisted `runtime_root_resolution.resolved.object_store_root` is a mapping with `present is True`, a non-empty `source` and `value == "[local-path]"`, `resolved.workspace_dir` is unchanged in shape and value, and `runtime_root_contract.object_store_root` is still the scalar `[local-path]`
-
-#### Scenario: File lane renders a URI-shaped root as a placeholder, not null
-
-- **WHEN** a file-journal manual retry resolves a URI-shaped root such as `s3://` or `https://` and the submission fails
-- **THEN** the persisted event and the 503 body carry `[object-uri]`/`[uri]` for that entry with `present is True`, never `null`; `rejected[].value` carries its placeholder rather than `null`; every `db_free_runtime.resolved.*.value` survives the render unchanged and is never `null`; and the raw URI text appears nowhere in the public event or the response
-
-#### Scenario: Both lanes satisfy the same shape assertions
-
-- **WHEN** the same shape assertions are applied to the database lane's and the file-journal lane's 503 `runtime_root_resolution`, including the URI-shaped root case
-- **THEN** both pass with no lane-specific allowance for a withheld `null`, and the file-journal response still equals its persisted event mapping
-
-#### Scenario: Caller-supplied placeholders are still not laundered
-
-- **WHEN** a caller round-trips a public row carrying `[object-uri]`/`[uri]` into a durable journal write on a non-event record
-- **THEN** that value SHALL still be persisted as `null`, exactly as before
-
-#### Scenario: Historical bare-string root entries pass through
-
-- **WHEN** a file-journal submission event recorded before this change carries `resolved.object_store_root` as the bare string `[local-path]`
-- **THEN** the route returns that entry as recorded and the 503 stays intact
-
 ### Requirement: Automatic public-cycle retry identity uses the selected stage snapshot
 
 When an automatic public-cycle retry decision selects a predecessor from a jobs snapshot, the replacement retry identity SHALL be derived from that same snapshot. A later repository read SHALL NOT advance the replacement suffix independently of the selected predecessor's retry decision. Concurrent passes using the same snapshot and retry permission SHALL derive the same replacement identity so that the existing atomic reservation permits at most one gateway submission.
@@ -2923,24 +2431,6 @@ The explicit context retry-attempt precedence, existing stage/prefix/suffix hand
 - **WHEN** a valid explicit context retry attempt is present, or the caller retries a terminal stage after upstream refresh (the chain carries no raw-manifest download door; raw-manifest repair belongs to scheduler admission)
 - **THEN** explicit attempt precedence and existing retry eligibility/suffix rules are preserved, while automatic suffix computation uses the same selected jobs snapshot
 - **AND** operator-demoted recovery continues reusing its old master key through the existing reclaim transition
-
-### Requirement: Public job error messages SHALL render local paths and URIs
-
-The system SHALL render public job error messages through the shared renderer. The manual-retry `submission_failed` 503 body (`error.message`, `details.error_message`) and job/basin
-result payloads returned by pipeline routes (job listings, stage summaries, and the cancel response) SHALL render `error_message` through the shared public
-evidence renderer: secrets become `[redacted]`, absolute local paths `[local-path]`, URIs
-`[uri]`/`[object-uri]`, while surrounding words are kept. Persisted job rows and pipeline events keep raw text.
-The database and file-journal lanes SHALL produce the same public rendering for the same text.
-
-#### Scenario: Gateway error with absolute path in retry 503
-
-- **WHEN** retry submission fails with `sbatch: error: cannot open /srv/nhms/workspace/run-42/job.sbatch for writing`
-- **THEN** `error.message` and `details.error_message` equal `sbatch: error: cannot open [local-path] for writing` and the body contains no workspace or object-store root
-
-#### Scenario: Persisted event keeps raw text
-
-- **WHEN** the same failure is recorded
-- **THEN** the persisted pipeline event `message` and `details.error_message` still contain the raw path
 
 ### Requirement: Scheme-anchored URIs containing whitespace SHALL classify whole
 
@@ -3054,74 +2544,6 @@ Every scheduler retry decision whose budget reads the `forecast` stage-scoped at
 - **WHEN** a cohort's membership changes between passes so its `..._forecast_cohort_<digest>` run_id changes
 - **THEN** the per-model stage-scoped attempt still advances with each submitted retry and the budget still demotes the candidate at the retry limit
 
-### Requirement: Retry-lane consumers of a read-blocked journal row SHALL refuse or degrade, never answer about the work
-
-The file journal's query entrypoints synthesise one row for a refused read, marked by `file_journal.status == "blocked"` and carrying the fault's `reason` and `field`. That row SHALL remain PRESENT and non-terminal so the duplicate-submission and active-cycle guards keep refusing, and its shape — field set, `job_id` defaults, marker keys, reason token, status literal — SHALL NOT change.
-
-Five retry-lane consumers SHALL identify that row by the `file_journal.status == "blocked"` marker — never by comparing `job_id`, and never by the status literal where the marker is available — and SHALL take exactly one of two treatments: refuse with the lane's stable classified error carrying the journal's `reason` and `field`, or return the lane's "no evidence" value while logging that `reason` and `field`. None of them SHALL translate the row into a claim about the run or the job — neither "this run has nothing to retry", nor a retry/permanent-failure classification, nor an identity fault.
-
-The five are: the manual-retry source selector and the chain stage-result retry classifier, which SHALL refuse — the latter with a classified `FILE_JOURNAL_READ_BLOCKED` error rather than by returning no decision — and the two runtime-root provenance readers and the runtime-root walk's own same-run companion read, which SHALL degrade to their empty result with a warning. Every such degrade SHALL be counted, and the runtime-root resolution evidence SHALL carry `candidate_counts.blocked_reads` whenever the count is non-zero, so a blocked read is never byte-identical to genuinely absent provenance (evidence without a blocked read is unchanged). When any runtime-root provenance read of an attempt was blocked, runtime roots SHALL be required for that attempt whatever its job type, and no root or selector value SHALL be taken from the current environment: roots and db-free selectors SHALL resolve only from recorded provenance, while the environment's db-free policy switch (`NHMS_SCHEDULER_DB_FREE_REQUIRED`), which is a mode flag and not a root value, SHALL still make the db-free selectors required. Otherwise the attempt SHALL end with the classified `RETRY_RUNTIME_ROOTS_UNRESOLVED` outcome carrying `blocked_reads`, never a submission rooted in, or reading roots from, the current environment. Downstream consumers reached only through those entries keep their existing indirect fail-closed behaviour and are out of scope. A consumer reading a mapping that carries no `file_journal` marker SHALL treat it as a normal row. Operator entrypoints built on the manual-retry source selector SHALL report the refusal as a decidable receipt outcome rather than an uncaught error.
-
-#### Scenario: Manual-retry source selection on an unreadable by-run read
-
-- **WHEN** the by-run pipeline-job read is refused by a typed journal fault while a manual retry is attempted for that run
-- **THEN** the attempt SHALL raise the `RETRY_EVIDENCE_INVALID` family error carrying the run id and the journal `reason`/`field`, SHALL NOT raise `RETRY_NOT_FOUND`, and SHALL write no retry row, no marker event and no gateway request
-
-#### Scenario: The run's durable read is refused inside the same selector
-
-- **WHEN** the selector's durable hydro-run read raises a typed journal fault
-- **THEN** the same classified `RETRY_EVIDENCE_INVALID` error SHALL surface instead of an unclassified error escaping the retry lane
-
-#### Scenario: Genuine absence and genuine conflict stay distinguishable
-
-- **WHEN** the same run has no retryable job at all, or has an active job, with no journal fault
-- **THEN** the lane SHALL still answer `RETRY_NOT_FOUND` and `RETRY_CONFLICT` respectively, so "nothing to retry", "busy" and "unreadable" remain three distinct answers
-
-#### Scenario: Chain stage-result retry classification on an unreadable by-id read
-
-- **WHEN** a failed stage result's pipeline-job read is refused and the retry service is the file-journal lane
-- **THEN** the classifier SHALL raise a classified `FILE_JOURNAL_READ_BLOCKED` error carrying the journal reason, SHALL NOT construct a pipeline job from the row, SHALL NOT call the failed-job handler, and the escaping error's reason SHALL be the journal's own refusal reason rather than a derived identity fault
-
-#### Scenario: Safety does not depend on the blocked row omitting identity
-
-- **WHEN** the same classification path receives a blocked row that carries a real `run_id` and `cycle_id`, as the by-run and by-cycle lanes mint it
-- **THEN** no `permanently_failed` status, no replacement retry row and no durable change SHALL be written, and the refusal SHALL still be the classified journal-blocked error
-
-#### Scenario: Runtime-root provenance readers degrade instead of poisoning the recorded failure
-
-- **WHEN** the predecessor-job read or the event-scan read behind the manual-retry route is refused by a typed journal fault, after the pending retry row has been minted
-- **THEN** those readers SHALL return an empty candidate batch and no predecessor respectively and SHALL log the journal `reason` and `field`, and the attempt SHALL NOT be recorded as a gateway submission failure whose code and message were derived from that refused read
-
-#### Scenario: The operator CLI reports the refusal as a receipt outcome
-
-- **WHEN** the node-22 manual-retry operator entrypoint previews a run whose by-run read is refused
-- **THEN** it SHALL emit a refused decision naming the journal read as the reason, with the journal `reason` and `field`, and SHALL NOT terminate with an uncaught error or a "no retryable failed job" verdict
-
-#### Scenario: The blocked row keeps its load-bearing guards
-
-- **WHEN** the unchanged blocked row reaches the duplicate-submission guard, the active-job predicate or the auto-retry reuse predicate
-- **THEN** each SHALL return the same verdict it returns today — conflict, active, and not reusable — and the retry-id allocator SHALL be unreachable for a blocked read because the selector refuses first
-
-#### Scenario: A blocked same-run companion read is not "no companion job"
-
-- **WHEN** the runtime-root walk's same-run by-run read returns the blocked row
-- **THEN** the walk logs the journal `reason`/`field`, contributes no companion candidate, and the persisted resolution evidence carries `blocked_reads >= 1`, unlike a run that genuinely has no companion download job
-
-#### Scenario: A blocked provenance read never falls back to the environment root
-
-- **WHEN** a provenance read of a manual retry of any job type (download or not, db-free-required or not) is blocked, no recorded candidate resolves, and the current-environment candidate would be complete
-- **THEN** no submission is made with the environment root, the attempt ends with `RETRY_RUNTIME_ROOTS_UNRESOLVED`, and its evidence carries `blocked_reads >= 1`
-
-#### Scenario: Genuinely absent provenance keeps the environment fallback
-
-- **WHEN** no provenance read was blocked and the job simply has no submission event
-- **THEN** the environment candidate is used exactly as before and the evidence carries no `blocked_reads` key
-
-#### Scenario: The db-free policy still binds under a blocked read
-
-- **WHEN** a provenance read is blocked, the environment requires db-free execution, and the only recorded candidate carries complete roots but no db-free selector
-- **THEN** no submission is made and the attempt ends with `RETRY_RUNTIME_ROOTS_UNRESOLVED` carrying `blocked_reads`
-
 ### Requirement: A held reservation SHALL block the candidate-state retry decision
 
 The DB-free candidate-state decision SHALL return `skip` with reason `active_duplicate_pipeline` whenever any pipeline row present in the candidate's provider-filtered state is a held reservation, whatever the row's stage and whatever its cohort membership annotation (`member`, `unwitnessed`, or `incomplete`). Attribution SHALL NOT be restricted to the stages that the cohort-member attribution gate recognizes. A held reservation is a row whose status is `reserved` and which has no real Slurm binding. The block SHALL be evaluated before any hydro-placeholder supersession, completed-upstream-stage resume, terminal-success, failure-policy, or manual-retry branch. It SHALL apply regardless of the reservation's reconcile reason class, because an ambiguous submit may already have been accepted by Slurm, and resubmitting it would run the same runs twice in the same run directories. The decision evidence SHALL carry `decision: skip_active`, `active_status: reserved`, and the held rows. Rows excluded from the candidate by recorded cohort membership (`non_member`) SHALL NOT block. Once restart reconcile binds the row or releases it, the block SHALL no longer apply and the pre-existing decisions SHALL be unchanged.
@@ -3158,9 +2580,137 @@ The DB-free candidate-state decision SHALL return `skip` with reason `active_dup
 - **WHEN** the held row is released to `reservation_lost`
 - **THEN** the decision SHALL equal the pre-change decision for that released row
 
-### Requirement: DB-free retry manifests preserve runtime mode
+### Requirement: Surviving retry-lane consumers of a read-blocked journal row SHALL refuse, never answer about the work
 
-Retry submissions for node-22 DB-free scheduler operation SHALL preserve the
+The file journal's query entrypoints synthesise one row for a refused read, marked by `file_journal.status == "blocked"` and carrying the fault's `reason` and `field`. That row SHALL remain PRESENT and non-terminal so the duplicate-submission and active-cycle guards keep refusing, and its shape — field set, `job_id` defaults, marker keys, reason token, status literal — SHALL NOT change.
+
+Two retry-lane consumers SHALL identify that row by the `file_journal.status == "blocked"` marker — never by comparing `job_id`, and never by the status literal where the marker is available — and SHALL refuse with the lane's stable classified error carrying the journal's `reason` and `field`. Neither of them SHALL translate the row into a claim about the run or the job — neither "this run has nothing to retry", nor a retry/permanent-failure classification, nor an identity fault.
+
+The two are: the manual-retry source selector (shared by the node-22 manual-repair marker lane `FileJournalRetryService.record_manual_repair`) and the chain stage-result retry classifier, the latter refusing with a classified `FILE_JOURNAL_READ_BLOCKED` error rather than by returning no decision. Downstream consumers reached only through those entries keep their existing indirect fail-closed behaviour and are out of scope. A consumer reading a mapping that carries no `file_journal` marker SHALL treat it as a normal row. Operator entrypoints built on the manual-retry source selector SHALL report the refusal as a decidable receipt outcome rather than an uncaught error.
+
+#### Scenario: Manual-retry source selection on an unreadable by-run read
+
+- **WHEN** the by-run pipeline-job read is refused by a typed journal fault while a manual repair is recorded for that run through `record_manual_repair`
+- **THEN** the attempt SHALL raise the `RETRY_EVIDENCE_INVALID` family error carrying the run id and the journal `reason`/`field`, SHALL NOT raise `RETRY_NOT_FOUND`, and SHALL write no retry row and no marker event
+
+#### Scenario: The run's durable read is refused inside the same selector
+
+- **WHEN** the selector's durable hydro-run read raises a typed journal fault
+- **THEN** the same classified `RETRY_EVIDENCE_INVALID` error SHALL surface instead of an unclassified error escaping the retry lane
+
+#### Scenario: Genuine absence and genuine conflict stay distinguishable
+
+- **WHEN** the same run has no retryable job at all, or has an active job, with no journal fault
+- **THEN** the lane SHALL still answer `RETRY_NOT_FOUND` and `RETRY_CONFLICT` respectively, so "nothing to retry", "busy" and "unreadable" remain three distinct answers
+
+#### Scenario: Chain stage-result retry classification on an unreadable by-id read
+
+- **WHEN** a failed stage result's pipeline-job read is refused and the retry service is the file-journal lane
+- **THEN** the classifier SHALL raise a classified `FILE_JOURNAL_READ_BLOCKED` error carrying the journal reason, SHALL NOT construct a pipeline job from the row, SHALL NOT call the failed-job handler, and the escaping error's reason SHALL be the journal's own refusal reason rather than a derived identity fault
+
+#### Scenario: Safety does not depend on the blocked row omitting identity
+
+- **WHEN** the same classification path receives a blocked row that carries a real `run_id` and `cycle_id`, as the by-run and by-cycle lanes mint it
+- **THEN** no `permanently_failed` status, no replacement retry row and no durable change SHALL be written, and the refusal SHALL still be the classified journal-blocked error
+
+#### Scenario: The operator CLI reports the refusal as a receipt outcome
+
+- **WHEN** the node-22 manual-retry operator entrypoint previews a run whose by-run read is refused
+- **THEN** it SHALL emit a refused decision naming the journal read as the reason, with the journal `reason` and `field`, and SHALL NOT terminate with an uncaught error or a "no retryable failed job" verdict
+
+#### Scenario: The blocked row keeps its load-bearing guards
+
+- **WHEN** the unchanged blocked row reaches the duplicate-submission guard, the active-job predicate or the auto-retry reuse predicate
+- **THEN** each SHALL return the same verdict it returns today — conflict, active, and not reusable — and the retry-id allocator SHALL be unreachable for a blocked read because the selector refuses first
+
+### Requirement: Object-store probe lanes survive unexpandable tildes
+
+The object-store probe lane SHALL never let a home-directory-determination failure escape as a bare
+RuntimeError: constructing a local object store with an unexpandable tilde root SHALL raise the domain
+`ObjectStoreError` from within the constructor's existing error-conversion
+boundary — never a bare RuntimeError and never a literal `~…` directory
+created on disk — so the unified artifact probe and the sidecar provenance
+tier, which already catch `ObjectStoreError`, keep producing their existing
+distinguishable fail-closed attributions instead of crashing the scheduling
+pass. Expandable and tilde-free roots keep their existing behavior
+byte-for-byte.
+
+#### Scenario: unexpandable tilde object-store root converts to the domain error
+
+WHEN a local object store is constructed with an unexpandable tilde root
+THEN the constructor raises `ObjectStoreError` (not a bare RuntimeError)
+and creates no directory for the literal tilde value
+
+#### Scenario: probe lanes keep their fail-closed attributions under a tilde root
+
+WHEN the configured object-store root is an unexpandable tilde value and a
+candidate's artifact probe or forcing-sidecar provenance runs
+THEN the unified artifact probe returns the existing probe-error
+missing-status attribution and the sidecar tier returns its existing
+unreadable attribution — the scheduling pass continues and evidence is
+written
+
+#### Scenario: expandable and tilde-free object-store roots keep their behavior
+
+WHEN the object-store root has no tilde or expands normally
+THEN constructor behavior is byte-for-byte identical to the pre-change
+behavior
+
+### Requirement: File-journal automatic retry attempts preserve durable warm-start lineage without claiming accepted-submit authority
+
+The file-journal retry service SHALL derive every automatic retry attempt from the private durable predecessor row. An automatic retry attempt SHALL preserve that row's bounded `init_state_identities` exactly, SHALL identify the predecessor through `previous_job_id`, and SHALL NOT carry `accepted_submit_contract_version` because a retry attempt is not the authoritative accepted-submit row. Public redaction placeholders such as `[object-uri]`, `[local-path]`, and `[redacted]` MUST NOT be persisted as retry lineage.
+
+#### Scenario: Automatic retry inherits durable predecessor lineage
+
+- **WHEN** `schedule_auto_retry` receives either a full row or a narrow production snapshot for a failed job whose durable row has non-empty `init_state_identities`
+- **THEN** the new durable retry payload and journal record SHALL inherit the durable predecessor mapping exactly
+- **THEN** a predecessor that genuinely has no mapping SHALL produce `[]` without crashing
+
+#### Scenario: Full-row and narrow-snapshot automatic retry agree
+
+- **WHEN** automatic retry is invoked once with a full durable-row input and once with a narrow production snapshot for equivalent failed jobs whose private durable predecessors carry the same non-empty mapping
+- **THEN** both retry attempts SHALL persist the same inherited mapping in their direct payload and corresponding journal record
+- **THEN** a predecessor with genuinely empty lineage SHALL still persist `[]`
+
+#### Scenario: Permanent-failure marking retains the existing mapping
+
+- **WHEN** an existing failed row with a non-empty mapping is marked permanently failed
+- **THEN** that sibling path SHALL retain its existing mapping
+
+### Requirement: Released reservations are not a manual-retry source and recovery remains the sole attestation writer
+
+`reservation_lost` SHALL remain outside `MANUAL_RETRY_SOURCE_STATUSES`, and the downstream operator-recovery predicate SHALL independently require the released status and exact authority tuple. `operator_recovery_attested_at` SHALL remain authority bound to the exact released source row. The dedicated typed recovery API and the attested source row SHALL remain unchanged.
+
+#### Scenario: Released reservation is not a generic manual-retry source
+
+- **WHEN** manual-retry source selection observes an attested row with `status=reservation_lost` and `reconciliation_decision=identity_mismatch_released`
+- **THEN** it SHALL NOT select that row as a manual-retry source, because `reservation_lost` remains outside `MANUAL_RETRY_SOURCE_STATUSES`
+
+#### Scenario: Dedicated recovery remains the sole attestation writer
+
+- **WHEN** `recover_released_identity_blocked_reservation` receives an eligible current-contract released master and exact attempt expectations
+- **THEN** it SHALL retain its existing typed behavior and remain the sole writer of `operator_recovery_attested_at`
+
+### Requirement: Public job error messages SHALL render local paths and URIs on pipeline job payloads
+
+The system SHALL render public job error messages through the shared renderer. Job/basin
+result payloads returned by pipeline routes (job listings, stage summaries, and the cancel response) SHALL render `error_message` through the shared public
+evidence renderer: secrets become `[redacted]`, absolute local paths `[local-path]`, URIs
+`[uri]`/`[object-uri]`, while surrounding words are kept. Persisted job rows keep raw text.
+
+#### Scenario: Gateway error with absolute path in a job listing
+
+- **WHEN** a job whose recorded error is `sbatch: error: cannot open /srv/nhms/workspace/run-42/job.sbatch for writing` is returned by a pipeline job listing
+- **THEN** `error_message` equals `sbatch: error: cannot open [local-path] for writing` and the body contains no workspace or object-store root
+
+#### Scenario: Persisted job row keeps raw text
+
+- **WHEN** the same job is read back from the store
+- **THEN** its persisted `error_message` still contains the raw path
+
+### Requirement: DB-free scheduler retry manifests preserve runtime mode
+
+Scheduler retry submissions for node-22 DB-free scheduler operation SHALL preserve the
 same runtime repository and backend selectors as initial scheduler submissions.
 
 #### Scenario: automatic forecast retry runs without database url
@@ -3171,18 +2721,11 @@ same runtime repository and backend selectors as initial scheduler submissions.
   `scheduler_db_free_required=true` and the canonical file backend selectors
   needed by the SHUD runtime
 - **AND** the retry MUST be runnable without `DATABASE_URL`
-- **AND** retry evidence MUST record the prior job id, new Slurm job id, stage,
-  model id, source/cycle identity, retry attempt, and DB-free runtime mode.
-
-#### Scenario: manual forecast retry runs without database url
-
-- **WHEN** an operator manually retries a failed forecast task in DB-free
-  scheduler mode
-- **THEN** the submitted Slurm manifest MUST include the same DB-free runtime
-  selectors as automatic retry
-- **AND** the retry MUST be runnable without `DATABASE_URL`
-- **AND** retry evidence MUST record the prior job id, new Slurm job id, stage,
-  model id, source/cycle identity, retry attempt, and manual retry marker.
+- **AND** the retry's journal identity (`<prior>_retry_<N>` job id, idempotency key and
+  Slurm comment) MUST identify the prior job and the retry attempt, the retry row MUST
+  carry the stage, source/cycle identity, member model ids and an incremented
+  `submission_attempt`, and its `submission` event MUST record the new Slurm job id;
+  the DB-free runtime mode is evidenced by the submitted manifest.
 
 #### Scenario: missing upstream forcing blocks downstream retry
 
