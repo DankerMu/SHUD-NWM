@@ -21,7 +21,7 @@ except OSError as error:
 **部分解析**的产物——环路被词法折叠进了结果。于是「兜底产物要不要再做一次严格复查」
 成了每个站点各自的选择，而仓内并存三种写了理由的相反做法：
 
-- **立场 A（复查）**：`services/orchestrator/retry.py::_local_runtime_root_safety` 等。
+- **立场 A（复查）**：`services/orchestrator/scheduler_config/db_free.py::_db_free_loop_filtered_realpath`。
 - **立场 B（有意容忍）**：`services/orchestrator/scheduler_preflight.py::_preflight_allowed_roots` 等。
 - **立场 C（已裁定并接受为残留）**：`services/orchestrator/scheduler_state_failure.py::_realpath_or_none`。
 
@@ -111,20 +111,17 @@ fail-open 有**两种**形状：
 权威取「**调用了 `os.path.realpath` 的 (模块, 函数) 对**」，覆盖 `services/`、`workers/`、
 `packages/`、`apps/` 四棵树。选它而不选代码形状，是因为形状匹配器编码的是作者猜的形状：
 「`try` 内 strict + handler 内非 strict」这一形漏掉 handler 之后才复查的写法；
-放宽之后又会把同一函数另一条臂的 strict 调用误判成复查，连 issue 自己列为立场 A
-头号站点的 `retry.py::_local_runtime_root_safety` 都漏在集合外。按调用点取集合则形状无关：站点被重写、
+放宽之后又会把同一函数另一条臂的 strict 调用误判成复查，连 issue 自己当年列为立场 A
+头号站点的那个函数（`retry.py::_local_runtime_root_safety`，已随 #3157 删除）都漏在集合外。按调用点取集合则形状无关：站点被重写、
 errno 分流被增删、兜底被挪进 helper，集合都不动，只有**新增或删除站点**才动。
 
-该集合当前 **19** 个成员。逐行处置如下——这是**本 SHA 的快照，供读者对照**；
+该集合当前 **16** 个成员（守卫 `tests/test_path_canonicalization_family_guard.py` 的 `_authority_set()` 实算）。逐行处置如下——这是 **`f1d17703f` 的快照，供读者对照**；
 承重的是下面那条守卫与各站点自己的从句标记，不是这张表。
 表内联于此、而不是留在 change 目录里由 ADR 指过去：ADR 是长期件，change 目录会被归档，
 指过去就是一条要等归档才存在、且依赖日期 slug 恰好正确的死指针。
 
 | 成员 | 立场 | 依据从句 | 解引用/基底证据 |
 |---|---|---|---|
-| `retry.py::_db_free_selector_allowed_roots` | A 已复查 | — | #1400/#1626 |
-| `retry.py::_db_free_selector_path_rejection` | A 已复查 | — | #1400/#1626 |
-| `retry.py::_local_runtime_root_safety` | A 已复查 | — | #1401：manifest 腿无下游 |
 | `scheduler_config/db_free.py::_db_free_loop_filtered_realpath` | A 已复查 | — | #1626 |
 | `scheduler_config/db_free.py::_db_free_allowed_roots_and_blockers` | B | 1 | 下游 blocker 阶梯 |
 | `scheduler_config/db_free.py::_db_free_path_identity` | B | 1 | **守卫白名单第 3 项**（无 strict 臂）。**config 提供的那一侧**操作数以 `canonical_root_blocker is None` / `raw_root_blocker is None` 为前提（`services/orchestrator/scheduler_config/config.py:792`/`:806`/`:818`），blocker 来自 `_db_free_path_check` 的真探针（`_db_free_path_check` 内的 `parent.lstat()`、`path.exists()`、`is_symlink()/is_dir()` 四处真探针）。另一侧是模块常量（`services/orchestrator/scheduler_config/config.py:788-790` 无门调用），**从未被探测** |
@@ -142,8 +139,8 @@ errno 分流被增删、兜底被挪进 helper，集合都不动，只有**新�
 | `journal_scope_census.py::_require_output_outside_root` | B | **2** | **守卫白名单第 1 项**（无 strict 臂）。见「已知限制」3；非 ENOENT-兜底形状，issue 表未收 |
 | `shud_preflight.py::check_shud_executable` | B | 1 | **守卫白名单第 2 项**（无 strict 臂）。`_is_stub_basename(real)`（`shud_preflight.py:164`）判 stub 后，该可执行文件随即真的被执行 |
 
-**全部 19 个成员**都在自己的函数体内写有处置标记：15 个走 admit 的写
-`ADR 0009 clause N`，4 个立场 A（表中 `A 已复查`，本就做 loop-filtered 复查、不走非严格 admit）
+**全部 16 个成员**都在自己的函数体内写有处置标记：15 个走 admit 的写
+`ADR 0009 clause N`，1 个立场 A（表中 `A 已复查`，本就做 loop-filtered 复查、不走非严格 admit）
 写 `ADR 0009 loop-filtered`。**立场 A 成员同样要写标记**——义务是「记录处置」而不是
 「记录从句」，因为「谁在 admit」是对 handler 形状的判断，而本家族的全部教训就是
 形状推断编码的是作者猜的形状，守卫不该去猜。**立场 A 不是豁免**：一个写了 loop-filtered
