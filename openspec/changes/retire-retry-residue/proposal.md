@@ -149,9 +149,10 @@ issue against `origin/master@172394407`.
   code and, where reachable, by a test:
   - `entity_id`: still rejected earlier by `_validate_event_identity` → `_required_safe_identity`
     (`file_journal_paths.py:677`), via `_validate_outgoing_record`. Unchanged.
-  - `event_id`: the write path checks only `_optional_text` (`file_journal_paths.py:676`). A historical event whose
-    `event_id` fails `_safe_segment` and that carries runtime-root fields is now appended. A test pins this, and the
-    PR states why it is harmless: replay keys on `event_id` and never uses it as a path segment.
+  - `event_id`: unchanged. The fixture first assumed only `_optional_text` guarded it. In fact
+    `_validate_outgoing_record` → `_require_record_payload_identity_match` checks it with `_optional_safe_identity`
+    (`file_journal_paths.py:406-409`, `:413`), which uses the same predicate as `_safe_segment`, so an unsafe `event_id`
+    is still rejected before any byte. A preservation test pins this, and it is green on master too.
   - Complexity and byte limits: the verdict comes from the limits that `_journal_record_for_write`,
     `_append_journal_record_unlocked` and `_materialize_latest_unlocked` still enforce.
   - Filesystem faults: the remaining `SafeFilesystemError` sources are `_append_journal_record_unlocked` and

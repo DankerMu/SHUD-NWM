@@ -30,3 +30,16 @@ Patched seams follow two rules:
 #### Scenario: Annotation-only back references
 - **WHEN** a moved module needs a facade-resident name (e.g. `FileOrchestrationJournalRepository`, `FileOrchestrationJournalError`) only in annotations
 - **THEN** it imports it under `TYPE_CHECKING` and no import cycle is introduced
+
+## REMOVED Requirements
+
+### Requirement: The journal retry helpers SHALL NOT keep an uncalled duplicate of the runtime-root predicate
+
+**Reason**: #3183 deleted the write-only private runtime-root recovery lane, and with it the only production user of
+`retry._has_runtime_root_field`. The predicate itself is deleted from `services/orchestrator/retry.py`, so
+`file_journal_retry_helpers.py` can no longer "use" it.
+
+**Migration**: Nothing to migrate. `file_journal_retry_helpers.py` defines no runtime-root predicate at all. The cluster
+map still has no entry for `_mapping_has_runtime_root_fields`, which `tests/test_file_journal_cluster_map.py` keeps
+enforcing, because the map must equal the module's definitions.
+
