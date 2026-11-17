@@ -87,8 +87,8 @@ production_contract), size-bound (hard bound and fail-closed floor).
 
 ## Evidence Floor
 
-- [ ] E1 `uv run ruff check --no-cache .`; `git diff --check`; entropy hard gate `hard_gate_failing_count 0`.
-- [ ] E2 Triage: a local reconstruction of a 132-candidate submitted pass, built from writer-produced rows plus a
+- [x] E1 `uv run ruff check --no-cache .`; `git diff --check`; entropy hard gate `hard_gate_failing_count 0`.
+- [x] E2 Triage: a local reconstruction of a 132-candidate submitted pass, built from writer-produced rows plus a
   production-sized `retention` block, ranks the top-level lanes by indent-2 bytes after the admission projection and the
   candidate-list summary. The ranking table and the reconstruction script are recorded in design.md / the PR.
   Measured at the production bound `MAX_EVIDENCE_BYTES = 5_000_000` (design.md, "Triage result"):
@@ -97,7 +97,7 @@ production_contract), size-bound (hard bound and fail-closed floor).
   - on the new code it is again written at tier 3 (4,987,233 B);
   - the real node-22 task-row shape is recorded next to it, and the non-reproduction is reported as a finding; the
     input was not tuned to overflow.
-- [ ] E3 Tests, red on the old code where they assert new behaviour:
+- [x] E3 Tests, red on the old code where they assert new behaviour:
   - a real 132-candidate submitted pass (a 66 × 2 `run_once` with the existing stage-evidence fake orchestrator; unlike
     the triage reconstruction it injects no `retention`, so tier 3 does not run) written with `max_evidence_bytes`
     between its tier 4b and tier 4a sizes is `submitted` in the artifact, in `SchedulerPassResult.status` and on the CLI; it is
@@ -121,12 +121,12 @@ production_contract), size-bound (hard bound and fail-closed floor).
     tier 4b now fits its payload;
   - within-limit, admission-only and indent-fit summary passes are byte-identical to `origin/master` output (golden
     comparison).
-- [ ] E4 The issue's verification set passes locally and in a node-27 temporary worktree:
+- [x] E4 The issue's verification set passes locally and in a node-27 temporary worktree:
   `tests/test_scheduler_evidence_decidability.py`, the `tests/test_production_scheduler.py` evidence-limit subset,
   `tests/test_node22_scheduler_stall_health.py`, `tests/test_production_readiness_validation.py`,
   `tests/test_operator_action_listing.py`, plus the selector set for the diff. The new test file is selected when the
   writer, the scheduler runtime, the readiness reader, the stall probe or the operator-action listing changes.
-- [ ] E5 `openspec validate scheduler-evidence-summary-lanes --strict --no-interactive`.
+- [x] E5 `openspec validate scheduler-evidence-summary-lanes --strict --no-interactive`.
 - [ ] E6 After merge and a node-22 pull at a pass boundary, the next 132-submit pass either:
   - has `status: submitted` and `evidence_compaction.mode: non_blocking_summary`, and the stall probe does not report
     `pass_limit_blocked` for it — #3170 closes with this receipt in the archive PR; or
