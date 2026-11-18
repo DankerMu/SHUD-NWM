@@ -314,6 +314,23 @@ describe('C4 live lane', () => {
     })
   })
 
+  it('fails FORBIDDEN_CONTROL when /ops shows a role selector', async () => {
+    const state = makeC4FakePageState({
+      homeResponses: homeResponses(),
+      opsObservation: { ...defaultC4OpsObservation(), headingObserved: true, roleSelectorCount: 1 },
+      opsResponsesFor: (url) => opsResponses(url.includes('IFS') ? 'IFS' : 'GFS'),
+      logResponsesFor: logResponses,
+    })
+    const result = await runC4DisplayLane({ config: config(), page: makeC4FakePage(state) }, defaultFetch())
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('role selector on ops must fail')
+    expect(result.terminal.failure).toEqual({
+      code: 'FORBIDDEN_CONTROL',
+      stage: 'ops',
+      message: 'role selector is visible on display_readonly /ops',
+    })
+  })
+
   it('fails missing jobs, wrong-source jobs, and forbidden slurm control', async () => {
     const missingJobs = makeC4FakePageState({
       homeResponses: homeResponses(),
