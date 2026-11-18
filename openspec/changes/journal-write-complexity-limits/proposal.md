@@ -108,6 +108,11 @@ latest-view offset.
 ## Must preserve
 
 - Every record that round-trips today still writes and reads, byte-identically.
+  - **Recorded deviation:** `pipeline_job` carries headroom 1 for the latest view, so a job record whose depth is exactly
+    `max_json_depth` is now refused. A master job never enters a latest view, and the same holds for a model-less job in
+    a cycle with no latest view, so for these records the refusal is stricter than strictly necessary. Per-row refinement
+    was rejected (KISS): at the default limit of 64 against real records of depth ≤ 10, this boundary is unreachable in
+    practice.
 - Write ordering and locking are unchanged; a refusal leaves the journal tree byte-identical, with zero bytes written.
 - Existing journal content that is already on disk is still readable and restorable: restore lanes are not checked.
 
