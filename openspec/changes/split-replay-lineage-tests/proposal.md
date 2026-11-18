@@ -71,14 +71,16 @@ Any behavior change; other oversized suites.
 - [x] E1 Collection identity: `uv run pytest --collect-only -q tests/test_replay_lineage.py` on master vs
   `tests/test_replay_lineage.py tests/test_replay_lineage_lifecycle_guard.py` on the branch; the sorted suffixes after
   `::` diff to empty (14 cases).
-- [ ] E2 After `git add` of the new files (the selector guards derive from `git ls-files` and silently pass on untracked
+- [x] E2 After `git add` of the new files (the selector guards derive from `git ls-files` and silently pass on untracked
   files): `uv run pytest -q tests/test_replay_lineage.py tests/test_replay_lineage_lifecycle_guard.py tests/test_select_ci_tests.py tests/test_ci_shard_tests.py`
-  green; `uv run ruff check --no-cache .`; `uv run ruff format --check` on touched files.
+  green; `uv run ruff check --no-cache .`; no new format drift: `uv run ruff format --diff` on the moved code matches
+  master's output (the repo has no format gate and the master file already fails `ruff format --check`; reformatting
+  would break byte-equivalence of moved code).
 - [x] E3 `wc -l tests/test_replay_lineage*.py tests/replay_lineage_helpers.py` all ≤ 1000; `.large-file-guard.json`
   has no replay-lineage entry; `git grep -n -e "SUB-4 hook" -e "atomic-cutover transaction committed" tests/` empty.
 - [x] E4 For each of `services/orchestrator/replay_lineage.py`, `packages/common/model_registry.py`,
   `packages/common/model_registry_lifecycle_support.py`, `tests/replay_lineage_helpers.py`:
   `printf '%s\n' <path> > "$TMPDIR/c" && uv run python scripts/select_ci_tests.py --changed-file "$TMPDIR/c"` lists both
   partitions; for the helper the output is exactly the two partitions plus `tests/test_select_ci_tests.py`.
-- [ ] E5 `openspec validate split-replay-lineage-tests --strict --no-interactive`. No node-27 run needed: the moved
+- [x] E5 `openspec validate split-replay-lineage-tests --strict --no-interactive`. No node-27 run needed: the moved
   tests use in-memory fakes only (no real DB); recorded in the PR.
