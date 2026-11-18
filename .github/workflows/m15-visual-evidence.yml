@@ -23,7 +23,11 @@ concurrency:
 jobs:
   m15-visual-evidence:
     name: Historical M15 Mocked Visual Evidence
-    # Pinned with ci.yml frontend-e2e: Playwright 1.59 has no chromium for ubuntu26.04.
+    # Pinned to 24.04 on purpose; do not unpin by analogy with ci.yml frontend-e2e
+    # (#3198). This job checks out inputs.evidence_sha, an arbitrary historical
+    # commit, and installs that commit's lockfile. SHAs from before #3198 carry
+    # Playwright 1.59, which has no chromium for ubuntu26.04. Unpin only when the
+    # 24.04 image is retired or pre-#3198 evidence SHAs no longer need replay.
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
