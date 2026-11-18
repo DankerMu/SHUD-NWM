@@ -1,7 +1,6 @@
 """Lifecycle support methods of ``PsycopgModelRegistryStore``: the
-post-commit publishers, the prior-state / rollback-history reads, and the
-lifecycle / activation audit writes (#2617 split of
-``packages.common.model_registry``).
+prior-state / rollback-history reads and the lifecycle / activation audit
+writes (#2617 split of ``packages.common.model_registry``).
 
 A plain mixin: no fields and no dunders. ``PsycopgModelRegistryStore`` in
 ``packages.common.model_registry`` is the only class that composes it.
@@ -15,12 +14,7 @@ from typing import Any
 from packages.common.auth_policy import PolicyDecision, audit_record, redact_audit_payload
 from packages.common.model_registry_contracts import (
     ModelLifecycleOperation,
-    PostCommitManifestPublisher,
-    PostCommitPublishContext,
-    PostCommitStateIndexPublisher,
     _classify_forcing_mapping_mode,
-    _default_no_op_manifest_publisher,
-    _default_no_op_state_index_publisher,
     _json_mapping,
 )
 from packages.common.model_registry_preflight_rules import _canonical_lifecycle_state, _model_audit_reference
@@ -31,81 +25,7 @@ from packages.common.model_registry_public import (
 
 
 class _LifecycleSupportMixin:
-    """Post-commit publishers, prior-state reads and audit writes."""
-
-    def register_post_commit_manifest_publisher(
-        self, publisher: PostCommitManifestPublisher
-    ) -> None:
-        """Register the post-commit manifest publisher (§2.2).
-
-        Overrides the default no-op with a real callable that receives
-        every committed dispatch-set-changing transition. Production
-        wiring binds this to
-        ``services.orchestrator.scheduler_file_providers.publish_scheduler_registry_manifest``;
-        tests bind a recording stub. Only one publisher is supported —
-        the post-commit tail is a single seam, not an ordered chain.
-        """
-        object.__setattr__(self, "_post_commit_manifest_publisher", publisher)
-
-    def _dispatch_post_commit_manifest_publish(
-        self, publish_context: PostCommitPublishContext
-    ) -> None:
-        """Invoke the post-commit manifest publisher.
-
-        Called AFTER the lifecycle transaction commits, so the manifest
-        reflects the committed DB state and never fires on a rolled-back
-        transaction (preflight-blocked / audit-persistence failure). A raising publisher propagates — the transition is
-        already committed, so surfacing the failure to the caller is the
-        correct behavior; the operator sees the divergence between DB
-        and manifest immediately instead of silently.
-        """
-        publisher: PostCommitManifestPublisher = getattr(
-            self, "_post_commit_manifest_publisher", _default_no_op_manifest_publisher
-        )
-        publisher(publish_context)
-
-    def register_post_commit_state_index_publisher(
-        self, publisher: PostCommitStateIndexPublisher
-    ) -> None:
-        """Register the post-commit state-index publisher (SUB-6 §3.3).
-
-        Overrides the default no-op with a real callable that receives
-        every committed dispatch-set-changing transition. Production
-        wiring binds this to
-        :func:`packages.common.state_clone_index_publisher.build_default_state_index_publisher`;
-        tests bind a recording / raising stub. Only one publisher is
-        supported — the post-commit tail is a single seam per role, not
-        an ordered chain.
-
-        Ordering invariant enforced by the post-commit tail: the state-
-        index publisher fires BEFORE the manifest publisher. A raising
-        state-index publisher propagates BEFORE the manifest fires so
-        the previous manifest remains the compute-plane authority
-        (node-22, DB-free) and never routes to ``M1`` while the file
-        state index still lacks ``M1``'s successor checkpoint (D7 fact
-        anchor A-i).
-        """
-        object.__setattr__(self, "_post_commit_state_index_publisher", publisher)
-
-    def _dispatch_post_commit_state_index_publish(
-        self, publish_context: PostCommitPublishContext
-    ) -> None:
-        """Invoke the post-commit state-index publisher.
-
-        Called AFTER the lifecycle transaction commits and BEFORE
-        :meth:`_dispatch_post_commit_manifest_publish`. A raising
-        publisher propagates so the caller's post-commit tail short-
-        circuits BEFORE the manifest re-publish — the previous manifest
-        stays the compute-plane authority, node-22 never observes
-        ``M1``-active in the manifest without the successor checkpoint
-        on the index.
-        """
-        publisher: PostCommitStateIndexPublisher = getattr(
-            self,
-            "_post_commit_state_index_publisher",
-            _default_no_op_state_index_publisher,
-        )
-        publisher(publish_context)
+    """Prior-state reads and audit writes."""
 
     def _fetch_model_lifecycle_row(self, cursor: Any, model_id: str, *, for_update: bool) -> dict[str, Any] | None:
         lock_clause = "FOR UPDATE" if for_update else ""

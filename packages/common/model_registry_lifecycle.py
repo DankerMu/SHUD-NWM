@@ -27,11 +27,8 @@ from packages.common.model_registry_contracts import (
     ModelLifecycleOperation,
     ModelLifecycleState,
     ModelRegistryError,
-    PostCommitPublishContext,
     _classify_forcing_mapping_mode,
-    _extract_source_scope,
     _json_mapping,
-    _should_publish_manifest_after_commit,
 )
 from packages.common.model_registry_preflight_rules import (
     _activation_safety_evidence,
@@ -169,18 +166,6 @@ class _ModelLifecycleMixin:
         )
         if decision.decision != "allow":
             raise ModelRegistryError(decision.reason)
-
-        # §2.2 (Epic #961) post-commit manifest re-publish trigger.
-        # ``publish_context`` is set inside the transaction ONLY on the
-        # committed successful-transition path. Blocked/already-current/
-        # audit-persistence-failed paths either early-return before setting
-        # it or roll the transaction back before setting it, so the publisher
-        # never fires on a non-committed transaction. The publisher is
-        # invoked AFTER the ``with self._transaction()`` block exits
-        # successfully (below the try) so the manifest reflects the
-        # committed DB state, matching the tasks.md §2.2 "uniform
-        # post-commit tail" contract.
-        publish_context: PostCommitPublishContext | None = None
 
         try:
             with self._transaction() as cursor:
@@ -337,25 +322,6 @@ class _ModelLifecycleMixin:
                         ),
                         audit_error,
                     ) from audit_error
-                # §2.2: stage the post-commit manifest re-publish
-                # AFTER audit persistence has succeeded but BEFORE the
-                # ``with self._transaction()`` block exits, so a raised
-                # audit-persistence error rolls back the transaction and
-                # skips publish (``publish_context`` stays None). The
-                # actual publisher call runs below the try/except, after
-                # the transaction commits.
-                if _should_publish_manifest_after_commit(
-                    operation=operation,
-                    transition_outcome=transition["outcome"],
-                    model=model,
-                    current_active_before=current_active,
-                ):
-                    publish_context = PostCommitPublishContext(
-                        basin_version_id=str(model["basin_version_id"]),
-                        target_model_id=str(transition["model"]["model_id"]),
-                        source_scope=_extract_source_scope(transition["model"]),
-                        operation_type=operation,
-                    )
                 result: dict[str, Any] = {
                     "status": transition["outcome"],
                     "operation": operation,
@@ -371,24 +337,6 @@ class _ModelLifecycleMixin:
         except ModelLifecycleAuditPersistenceError as error:
             return error.result
 
-        # §2.2 + SUB-6 (§3.3) post-commit tail: fire publishers ONLY on
-        # a committed dispatch-set-changing transition. All non-
-        # committing paths (preflight-blocked / already-current /
-        # audit-persistence-failed) either early-returned above or left
-        # ``publish_context`` as None because the trigger was set only
-        # right before the successful return.
-        #
-        # Ordering invariant (D7 fact anchor A-i): the state-index
-        # publisher runs FIRST. A raise here holds back the manifest re-
-        # publish — the previous manifest remains the compute-plane
-        # authority (node-22, DB-free) so node-22 never observes
-        # ``M1``-active in the manifest without ``M1``'s successor
-        # checkpoint on the file state index. The manifest publisher
-        # runs SECOND only after the state-index publisher returns
-        # without raising.
-        if publish_context is not None:
-            self._dispatch_post_commit_state_index_publish(publish_context)
-            self._dispatch_post_commit_manifest_publish(publish_context)
         return result
 
     def _build_model_operation_preflight(

@@ -671,33 +671,28 @@ def _delete_issue_1739_clone_rows(
             cursor.execute("DELETE FROM hydro.state_snapshot WHERE state_id = ANY(%s)", (list(state_ids),))
 
 
-def test_real_clone_row_readers_disagree_about_a_null_fingerprint_row(
+def test_real_earliest_clone_row_reader_admits_a_null_fingerprint_row_over_a_later_sibling(
     integration_database_url: str,
 ) -> None:
-    """#1739 / design D1+D2, executed: the relaxed predicate and its asymmetry.
+    """#1739 / design D1, executed: the relaxed predicate and its ordering.
 
     `get_earliest_clone_row_for_model_source` dropped `clone_gate_fingerprint IS
     NOT NULL` (#1739: the fingerprint records WHICH gate admitted a clone, never
-    WHETHER the identity exists) while the publisher's
-    `get_latest_clone_row_for_model_source` kept it (D2: the publisher wrote that
-    fingerprint itself moments earlier, so non-NULL is a cheap self-check). The
-    two statements carried the byte-identical condition, so a revert of either —
-    or an "alignment" of the wrong one — has to be caught by something that runs
-    the SQL. Until this test the only assertion that reacted to the revert was a
-    text pin over the statement string, and the stub-repository behaviour test
-    replaces the reader, so it proves the DOWNSTREAM half only.
+    WHETHER the identity exists), so a revert has to be caught by something that
+    runs the SQL. The text pin over the statement string does not run it, and the
+    stub-repository behaviour test replaces the reader, so it proves the
+    DOWNSTREAM half only.
 
-    One fixture pins three claims at once:
+    One fixture pins two claims at once:
 
     * the #1739 ruling — the NULL-fingerprint clone row IS admitted by the
       earliest reader;
-    * the D2 asymmetry — the same row is NOT admitted by the publisher's reader;
     * the ordering ruled by change `lineage-scoped-cycle-completion` D4 (NOT
       this change's own D4, which is about not caching failures) — with a
-      second, fingerprinted clone row at a later
-      `valid_time`, `earliest` still answers the NULL-fingerprint row (ASC) and
-      `latest` answers the other one (DESC). A backdated re-activation must not
-      retroactively move `t*` later.
+      second, fingerprinted clone row at a later `valid_time`, `earliest` still
+      answers the NULL-fingerprint row (ASC), and the resolver chain resolves
+      `t*` from it. A latest-first read must not be the resolution source: a
+      backdated re-activation must not retroactively move `t*` later.
 
     The seeded it126 `STATE_ID` row is a decoy, but a NARROWER one than it looks:
     it sits at an EARLIER `valid_time` under the same pair with no clone
@@ -736,15 +731,6 @@ def test_real_clone_row_readers_disagree_about_a_null_fingerprint_row(
         assert earliest.clone_gate_fingerprint is None
         assert earliest.cloned_from_model_id == _ISSUE_1739_PREDECESSOR_MODEL_ID
 
-        # D2: the publisher's reader still requires the fingerprint, so for it
-        # this pair has no clone row at all.
-        assert (
-            repository.get_latest_clone_row_for_model_source(
-                model_id=MODEL_ID, source_id=SOURCE_ID
-            )
-            is None
-        )
-
         _insert_issue_1739_clone_row(
             integration_database_url,
             state_id=_ISSUE_1739_FINGERPRINTED_STATE_ID,
@@ -757,12 +743,6 @@ def test_real_clone_row_readers_disagree_about_a_null_fingerprint_row(
         )
         assert earliest_with_sibling is not None
         assert earliest_with_sibling.state_id == _ISSUE_1739_NULL_FINGERPRINT_STATE_ID
-
-        latest = repository.get_latest_clone_row_for_model_source(
-            model_id=MODEL_ID, source_id=SOURCE_ID
-        )
-        assert latest is not None
-        assert latest.state_id == _ISSUE_1739_FINGERPRINTED_STATE_ID
 
         # The whole DB-plane chain, end to end: real SQL -> real row -> resolver.
         cutover = scheduler_lineage.resolve_lineage_cutover(

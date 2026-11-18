@@ -83,8 +83,11 @@ lifecycle 通道 deactivate。
 
   跑之前 `env -u NHMS_AUTH_MODE -u AUTH_BACKEND`，只 source
   `infra/env/node27-ingest.env`（`display.env` 里的 `NHMS_AUTH_MODE=production`
-  会把 CLI 证据路径判成 `release_blocked`）。deactivate 不做任何继任者提升，
-  manifest / state-index post-commit publisher 生产上未挂载（默认 no-op），无调度侧副作用。
+  会把 CLI 证据路径判成 `release_blocked`）。deactivate 不做任何继任者提升。
+  model lifecycle 操作从不改变 node-22 的 dispatch set：它不向调度 file plane 发布任何东西
+  （registry manifest 与 state index 都不发布，#3204 已退役相应 seam），file plane 只由
+  node-22 工具发布（见 [`recalibration-and-archive.md`](recalibration-and-archive.md) 的
+  succession / 合并 manifest 发布流程），因此本操作无调度侧副作用。
 - 不要动 `core.basin_version`（其 `active_flag` 由 importer 恒置 false，对计算面无权威、
   展示面只是「默认选中版本」的选择器，全 false 时是 no-op；
   权威归属见 [`docs/spec/03_database_design.md` §5.2 / §5.5 的 `active_flag` 注记](../../spec/03_database_design.md#52-corebasin_version)），

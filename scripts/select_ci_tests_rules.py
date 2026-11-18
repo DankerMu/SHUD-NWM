@@ -313,9 +313,10 @@ CHANGED_TEST_FILE_RULES: tuple[PathTestRule, ...] = (
         NODE27_PGDATA_WORKLOAD_TESTS,
         stop_on_match=True,
     ),
-    # #3165: the variant activation cutover monolith is three partitions. A diff
-    # to any one of them runs all three, as a diff to the monolith ran all 32
-    # cases. No suite imports a partition, so the redirect drops no importer.
+    # #3165: the variant activation cutover monolith is two partitions (#3204
+    # retired the third, `_manifest`, with the lifecycle publisher seams). A
+    # diff to either runs both. No suite imports a partition, so the redirect
+    # drops no importer.
     PathTestRule(
         "tests/test_variant_activation_cutover.py",
         VARIANT_ACTIVATION_CUTOVER_TESTS,
@@ -323,11 +324,6 @@ CHANGED_TEST_FILE_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         "tests/test_variant_activation_cutover_dispatch.py",
-        VARIANT_ACTIVATION_CUTOVER_TESTS,
-        stop_on_match=True,
-    ),
-    PathTestRule(
-        "tests/test_variant_activation_cutover_manifest.py",
         VARIANT_ACTIVATION_CUTOVER_TESTS,
         stop_on_match=True,
     ),
@@ -603,10 +599,9 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         BASIN_RETIREMENT_TESTS,
     ),
     PathTestRule(
-        # #3165: the in-memory `_HarnessStore`, the `two_models` /
-        # `variant_direct_grid_profile` fixtures and the manifest publisher stub
-        # of the variant activation cutover suite. All three partitions import it
-        # at module scope.
+        # #3165: the in-memory `_HarnessStore` and the `two_models` /
+        # `variant_direct_grid_profile` fixtures of the variant activation
+        # cutover suite. Both partitions import it at module scope.
         VARIANT_ACTIVATION_CUTOVER_HELPERS_PATH,
         VARIANT_ACTIVATION_CUTOVER_TESTS,
     ),

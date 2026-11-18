@@ -1701,12 +1701,12 @@ RESPONSE_MODEL_PRESERVATION_TESTS: tuple[str, ...] = (
     "tests/test_response_model_preservation_pipeline.py",
 )
 # #3165 partitioned tests/test_variant_activation_cutover.py (1770 lines) into
-# three collectible suites plus one non-collectible helper. The base path keeps
-# the single-transaction and helper-predicate cases and stays the
-# GUARDED_MODULE_CLOSURES known member for the model registry facade; `_manifest`
-# holds the post-commit manifest re-publish cases and `_dispatch` the
-# dispatch-set, retirement and concurrency cases. All three import the helper at
-# module scope; the base path and `_manifest` also import the facade (#3189 took
+# collectible suites plus one non-collectible helper; #3204 deleted the
+# publisher partition, leaving two. The base path keeps the
+# single-transaction, no-file-plane-publish and rollback cases and stays the
+# GUARDED_MODULE_CLOSURES known member for the model registry facade; `_dispatch`
+# holds the dispatch-set, retirement and concurrency cases. Both import the
+# helper at module scope; only the base path also imports the facade (#3189 took
 # `_dispatch`'s only facade import with the activation hook chain).
 # ONE tuple, carried whole by every rule that named the monolith, by each
 # partition's changed-test redirect and by the helper's support-module row, so a
@@ -1715,7 +1715,6 @@ VARIANT_ACTIVATION_CUTOVER_HELPERS_PATH = "tests/variant_activation_cutover_help
 VARIANT_ACTIVATION_CUTOVER_TESTS: tuple[str, ...] = (
     "tests/test_variant_activation_cutover.py",
     "tests/test_variant_activation_cutover_dispatch.py",
-    "tests/test_variant_activation_cutover_manifest.py",
 )
 # #2612: the model registry facade's DIRECT non-gated importer suites (the
 # selector suite's GUARDED_MODULE_CLOSURES derives this set from the tracked tree
@@ -1738,7 +1737,6 @@ MODEL_REGISTRY_IMPORTER_TESTS: tuple[str, ...] = (
     "tests/test_node27_connection_attribution.py",
     "tests/test_qhh_production_bootstrap_scheduler.py",
     "tests/test_replay_lineage.py",
-    "tests/test_state_clone_index_publish.py",
     *VARIANT_ACTIVATION_CUTOVER_TESTS,
 )
 # #2010 precipitation raster service. The suite is the ONLY oracle for

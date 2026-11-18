@@ -127,7 +127,6 @@
     "tests/test_mapping_builder_integration.py",
     "tests/test_scheduler_backfill_predecessor.py",
     "tests/test_state_clone.py",
-    "tests/test_state_clone_index_publish.py",
     "tests/test_state_index_retention.py",
     "tests/test_warm_start_chaining.py",
     "workers/data_adapters/era5_adapter.py",

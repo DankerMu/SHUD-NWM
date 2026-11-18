@@ -2209,11 +2209,10 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         STATUS_LITERAL_SCAN_PATH,
         STATUS_VOCAB_PARITY_PATH,
         TIME_HELPER_CONSOLIDATION_PATH,
-        # #3165: the variant activation cutover suite is three partitions; the
-        # directory rule carries all of them.
+        # #3165: the variant activation cutover suite is two partitions (#3204);
+        # the directory rule carries both.
         "tests/test_variant_activation_cutover.py",
         "tests/test_variant_activation_cutover_dispatch.py",
-        "tests/test_variant_activation_cutover_manifest.py",
         "tests/test_warm_start_chaining.py",
     ]
     assert {
@@ -16722,13 +16721,11 @@ def test_model_registry_facade_selects_its_direct_importers_and_keeps_its_prior_
         "tests/test_model_registry_list_basins.py",
         "tests/test_qhh_production_bootstrap_scheduler.py",
         "tests/test_replay_lineage.py",
-        "tests/test_state_clone_index_publish.py",
         "tests/test_variant_activation_cutover.py",
-        # #3165: the two partitions split out of the base path ride the same
-        # tuple (VARIANT_ACTIVATION_CUTOVER_TESTS); `_manifest` imports the
-        # facade at module scope, `_dispatch` no longer does (#3189).
+        # #3165: the partition split out of the base path rides the same tuple
+        # (VARIANT_ACTIVATION_CUTOVER_TESTS); `_dispatch` no longer imports the
+        # facade (#3189).
         "tests/test_variant_activation_cutover_dispatch.py",
-        "tests/test_variant_activation_cutover_manifest.py",
         "tests/test_node27_connection_attribution.py",
         "tests/test_node27_connection_attribution_delegated.py",
         "tests/test_response_model_preservation.py",
@@ -16740,9 +16737,10 @@ def test_model_registry_facade_selects_its_direct_importers_and_keeps_its_prior_
 # #3165: the variant activation cutover corpus
 #
 # tests/test_variant_activation_cutover.py (1770 lines) was split into three
-# partitions plus one helper. Every route that selected the monolith must select
-# all three partitions, a diff to any partition must run its siblings, and the
-# helper must run every partition.
+# partitions plus one helper; #3204 deleted the publisher partition,
+# leaving two. Every route that selected the monolith must select both
+# partitions, a diff to either partition must run its sibling, and the helper
+# must run both.
 # ---------------------------------------------------------------------------
 
 # Production paths that selected the monolith before the split, one per route:
@@ -16775,8 +16773,8 @@ def test_variant_activation_cutover_monolith_routes_select_every_partition(chang
     assert set(VARIANT_ACTIVATION_CUTOVER_TESTS) <= selected, sorted(set(VARIANT_ACTIVATION_CUTOVER_TESTS) - selected)
 
 
-def test_variant_activation_cutover_tracked_tree_is_exactly_three_suites_and_one_helper() -> None:
-    # A fourth partition, a leftover copy of the monolith under another name, or
+def test_variant_activation_cutover_tracked_tree_is_exactly_two_suites_and_one_helper() -> None:
+    # A third partition, a leftover copy of the monolith under another name, or
     # the helper renamed into a `test_*.py` suite all redden here. Expected
     # membership is the selector's own tuple; the tracked-tree glob is the
     # mutant side. The prefix filter is on the file name, so it sees exactly the
@@ -16788,13 +16786,13 @@ def test_variant_activation_cutover_tracked_tree_is_exactly_three_suites_and_one
         path for path in tracked if PurePosixPath(path).name.startswith("test_variant_activation_cutover")
     }
 
-    assert len(partitions) == 3, sorted(partitions)
+    assert len(partitions) == 2, sorted(partitions)
     assert corpus == partitions, sorted(corpus ^ partitions)
     assert helper in tracked
     assert all(is_test_suite_path(path) for path in partitions)
     assert not is_test_suite_path(helper)
 
-    # Every rule that carries one partition carries all three, so the count
+    # Every rule that carries one partition carries both, so the count
     # above cannot be satisfied by files some route forgot.
     carriers = [
         rule

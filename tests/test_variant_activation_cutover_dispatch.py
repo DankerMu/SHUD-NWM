@@ -1,9 +1,8 @@
 """Unit tests for §2.3 permanent retirement and §2.4 concurrency + idempotency (Epic #961 SUB-7, #968).
 
 Partition of ``tests/test_variant_activation_cutover.py`` (#3165). The
-in-memory harness, the ``two_models`` / ``variant_direct_grid_profile``
-fixtures and ``_ManifestPublisherStub`` are in
-``tests/variant_activation_cutover_helpers.py``.
+in-memory harness and the ``two_models`` / ``variant_direct_grid_profile``
+fixtures are in ``tests/variant_activation_cutover_helpers.py``.
 """
 
 from __future__ import annotations
@@ -20,7 +19,6 @@ from tests.variant_activation_cutover_helpers import (
     BASIN_VERSION_ID,
     _decision,
     _HarnessStore,
-    _ManifestPublisherStub,
     _RecordingCursor,
     two_models,
     variant_direct_grid_profile,
@@ -196,8 +194,8 @@ def test_retired_not_destroyed_superseded_row_retained_after_cutover(
 # Locks Epic #961 tasks.md §2.4: the cutover is safe under two
 # racing activation requests for the same
 # ``(basin_id, basin_version_id)`` scope, and repeating a completed
-# activation is a true no-op — no duplicate transition, no manifest
-# re-publish, no second ``allowed``/``rollback`` audit row.
+# activation is a true no-op — no duplicate transition and no second
+# ``allowed``/``rollback`` audit row.
 #
 # The production authority is the ``FOR UPDATE`` scope lock acquired at
 # ``packages/common/model_registry.py`` line 1786 (via
@@ -357,7 +355,7 @@ def test_concurrent_activation_leaves_exactly_one_active_and_stable_loser(
     ]
 
 
-def test_repeat_already_current_no_second_transition_no_manifest_no_audit(
+def test_repeat_already_current_no_second_transition_no_audit(
     two_models: list[dict[str, Any]],
 ) -> None:
     """§2.4: repeat activate of the already-current target is a true no-op.
@@ -365,20 +363,17 @@ def test_repeat_already_current_no_second_transition_no_manifest_no_audit(
     Contract locked (per tasks.md §2.4 "Cutover is concurrency-safe
     and idempotent"):
 
-      1. First call: successful transition — manifest publisher fires
-         once, one ``outcome IN ('allowed','rollback')`` audit row
-         appended, ``active_flag=True`` on the target.
+      1. First call: successful transition — one
+         ``outcome IN ('allowed','rollback')`` audit row appended,
+         ``active_flag=True`` on the target.
       2. Second call (same target, now already-active):
          * returns ``already_current``,
          * ``_state_updates`` unchanged (no duplicate supersede+activate),
-         * manifest publisher ``call_count`` unchanged (no re-publish),
          * NO additional ``outcome IN ('allowed','rollback')`` audit
            row (an already-current audit row MAY be appended, but that
            has a distinct outcome and is not a second "success" row).
     """
     store = _HarnessStore(two_models)
-    publisher = _ManifestPublisherStub()
-    store.register_post_commit_manifest_publisher(publisher)
 
     # --- Call 1: real transition -------------------------------------
     result_1 = store.model_lifecycle_operation(
@@ -393,8 +388,6 @@ def test_repeat_already_current_no_second_transition_no_manifest_no_audit(
         ("legacy_m0", "superseded", False),
         ("direct_grid_m1", "active", True),
     ]
-    # Manifest publisher fired exactly once.
-    assert publisher.call_count == 1
     # Exactly one ``allowed``/``rollback`` audit row.
     first_success_rows = [
         row for row in store.audit_rows if row["outcome"] in {"allowed", "rollback"}
@@ -404,7 +397,6 @@ def test_repeat_already_current_no_second_transition_no_manifest_no_audit(
     # Snapshot post-call-1 state so the assertions below are anchored
     # to the exact evidence signatures, not to hardcoded counts.
     state_updates_after_1 = list(store._state_updates)
-    publisher_calls_after_1 = publisher.call_count
     success_audit_after_1 = len(first_success_rows)
 
     # --- Call 2: idempotent already-current path ---------------------
@@ -418,9 +410,6 @@ def test_repeat_already_current_no_second_transition_no_manifest_no_audit(
 
     # No duplicate supersede+activate transition.
     assert store._state_updates == state_updates_after_1
-    # No manifest re-publish (already-current is not a
-    # dispatch-set-changing commit; see SUB-6 predicate).
-    assert publisher.call_count == publisher_calls_after_1
     # No additional ``outcome IN ('allowed','rollback')`` audit row.
     # An already-current audit row MAY have been appended, but it has
     # a distinct outcome — the spec's "no second activation-success

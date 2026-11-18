@@ -41,7 +41,6 @@ from packages.common.auth_policy import trusted_internal_policy_decision
 from packages.common.contracts.direct_grid import load_forcing_mapping_contract_from_manifest
 from packages.common.model_registry import (
     ModelLifecycleOperation,
-    PostCommitPublishContext,
     PsycopgModelRegistryStore,
     _classify_forcing_mapping_mode,
 )
@@ -259,7 +258,6 @@ class _HarnessStore(PsycopgModelRegistryStore):
         object.__setattr__(self, "audit_rows", [])
         object.__setattr__(self, "_transactions", [])
         object.__setattr__(self, "_state_updates", [])
-        object.__setattr__(self, "publisher_calls", [])
 
     # ---- transaction plumbing --------------------------------------------
 
@@ -415,17 +413,6 @@ def _decision(action_id: str, target_id: str, *, roles: tuple[str, ...] = ("sys_
     )
 
 
-def _publisher_stub(store: _HarnessStore) -> list[PostCommitPublishContext]:
-    """Register a recording publisher; return the list callers can inspect."""
-    contexts: list[PostCommitPublishContext] = []
-
-    def _record(ctx: PostCommitPublishContext) -> None:
-        contexts.append(ctx)
-
-    store.register_post_commit_manifest_publisher(_record)
-    return contexts
-
-
 def _preflight_blocker_codes(result: Mapping[str, Any]) -> list[str]:
     preflight = result.get("preflight") or {}
     return [blocker["code"] for blocker in (preflight.get("blockers") or [])]
@@ -565,8 +552,7 @@ def test_activate_legacy_refused_on_direct_grid_history_basin() -> None:
     Setup: a basin with a direct-grid currently-active row (arms the
     guard via ``current_active`` classifier) and a separate legacy row.
     Requesting ``activate`` on the legacy row must land ``blocked`` with
-    the ``LEGACY_REACTIVATION_BLOCKED`` code — no state transition, no
-    manifest re-publish.
+    the ``LEGACY_REACTIVATION_BLOCKED`` code and no state transition.
     """
     store = _HarnessStore(
         [
@@ -574,8 +560,6 @@ def test_activate_legacy_refused_on_direct_grid_history_basin() -> None:
             _legacy_model("legacy_m0", active_flag=False, lifecycle_state="inactive"),
         ]
     )
-    publisher_contexts = _publisher_stub(store)
-
     result = store.model_lifecycle_operation(
         "legacy_m0",
         operation="activate",
@@ -587,8 +571,6 @@ def test_activate_legacy_refused_on_direct_grid_history_basin() -> None:
     assert "LEGACY_REACTIVATION_BLOCKED" in _preflight_blocker_codes(result)
     # No state transition.
     assert store._state_updates == []
-    # No manifest re-publish.
-    assert publisher_contexts == []
     # The direct-grid model stays active; the legacy target stays inactive.
     assert store._models["direct_current"]["lifecycle_state"] == "active"
     assert store._models["legacy_m0"]["lifecycle_state"] == "inactive"
@@ -607,8 +589,6 @@ def test_switch_legacy_refused_on_direct_grid_history_basin() -> None:
             _legacy_model("legacy_m0", active_flag=False, lifecycle_state="inactive"),
         ]
     )
-    publisher_contexts = _publisher_stub(store)
-
     result = store.model_lifecycle_operation(
         "legacy_m0",
         operation="switch_version",
@@ -619,7 +599,6 @@ def test_switch_legacy_refused_on_direct_grid_history_basin() -> None:
     assert result["status"] == "blocked"
     assert "LEGACY_REACTIVATION_BLOCKED" in _preflight_blocker_codes(result)
     assert store._state_updates == []
-    assert publisher_contexts == []
 
 
 def test_rollback_restored_legacy_refused_when_previous_is_legacy() -> None:
@@ -642,8 +621,6 @@ def test_rollback_restored_legacy_refused_when_previous_is_legacy() -> None:
             ),
         ]
     )
-    publisher_contexts = _publisher_stub(store)
-
     result = store.model_lifecycle_operation(
         "current_direct",
         operation="rollback_version",
@@ -655,9 +632,8 @@ def test_rollback_restored_legacy_refused_when_previous_is_legacy() -> None:
     assert result["status"] == "blocked"
     blockers = _preflight_blocker_codes(result)
     assert "LEGACY_REACTIVATION_BLOCKED" in blockers
-    # No state transition, no manifest re-publish.
+    # No state transition.
     assert store._state_updates == []
-    assert publisher_contexts == []
     # Both models retain their pre-op state — the refusal is inert on state.
     assert store._models["current_direct"]["lifecycle_state"] == "active"
     assert store._models["restored_previous"]["lifecycle_state"] == "superseded"
@@ -843,8 +819,6 @@ def test_direct_to_direct_allowed_on_direct_history_basin() -> None:
             ),
         ]
     )
-    publisher_contexts = _publisher_stub(store)
-
     result = store.model_lifecycle_operation(
         "direct_v2",
         operation="activate",
@@ -856,10 +830,9 @@ def test_direct_to_direct_allowed_on_direct_history_basin() -> None:
     # No legacy-reactivation blocker fired.
     assert "LEGACY_REACTIVATION_BLOCKED" not in _preflight_blocker_codes(result)
     assert "DIRECT_GRID_CONTRACT_INVALID" not in _preflight_blocker_codes(result)
-    # Real swap happened; publisher fired once.
+    # Real swap happened.
     assert store._models["direct_v1"]["lifecycle_state"] == "superseded"
     assert store._models["direct_v2"]["lifecycle_state"] == "active"
-    assert len(publisher_contexts) == 1
 
 
 def test_malformed_direct_contract_refused_with_distinct_blocker_code() -> None:
@@ -881,8 +854,6 @@ def test_malformed_direct_contract_refused_with_distinct_blocker_code() -> None:
             ),
         ]
     )
-    publisher_contexts = _publisher_stub(store)
-
     result = store.model_lifecycle_operation(
         "direct_broken",
         operation="activate",
@@ -896,9 +867,8 @@ def test_malformed_direct_contract_refused_with_distinct_blocker_code() -> None:
     # And crucially NOT the legacy-reactivation code — the distinction
     # is load-bearing per §3.1 evidence line 3.
     assert "LEGACY_REACTIVATION_BLOCKED" not in blocker_codes
-    # No state transition, no publish.
+    # No state transition.
     assert store._state_updates == []
-    assert publisher_contexts == []
 
 
 # ============================================================================
@@ -965,8 +935,6 @@ def test_no_history_unaffected_13_live_basin_safety() -> None:
             _legacy_model("legacy_candidate", active_flag=False, lifecycle_state="inactive"),
         ]
     )
-    publisher_contexts = _publisher_stub(store)
-
     # activate on the legacy candidate (via switch_version, since a
     # currently-active exists).
     result = store.model_lifecycle_operation(
@@ -979,8 +947,6 @@ def test_no_history_unaffected_13_live_basin_safety() -> None:
     assert _preflight_blocker_codes(result) == []
     assert store._models["legacy_candidate"]["lifecycle_state"] == "active"
     assert store._models["legacy_active"]["lifecycle_state"] == "superseded"
-    # Publisher DID fire for this real swap — behavior is unchanged.
-    assert len(publisher_contexts) == 1
 
 
 # ============================================================================

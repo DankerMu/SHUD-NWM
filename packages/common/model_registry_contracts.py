@@ -1,6 +1,5 @@
 """Model registry contracts: error types, lifecycle literals and constants,
-river-segment payload budgets, id/geometry helpers, the post-commit publish
-context dataclass with its default no-op publishers, and the lifecycle helpers
+river-segment payload budgets, id/geometry helpers, and the lifecycle helpers
 used by ``model_lifecycle_operation`` (#2617 split of
 ``packages.common.model_registry``).
 
@@ -12,8 +11,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from collections.abc import Mapping
 from typing import Any, Literal
 
 from packages.common.contracts.direct_grid import (
@@ -174,141 +172,6 @@ def _format_point(point: Any) -> str:
     if not isinstance(point, list | tuple) or len(point) < 2:
         raise InvalidPayloadError("Geometry point must contain longitude and latitude.")
     return f"{float(point[0]):.12g} {float(point[1]):.12g}"
-
-
-@dataclass(frozen=True)
-class PostCommitPublishContext:
-    """Context payload delivered to the post-commit manifest publisher.
-
-    §2.2 (Epic #961, `source-specific-model-variant-routing`) wires
-    `services.orchestrator.scheduler_file_providers.publish_scheduler_registry_manifest`
-    as the uniform post-commit tail of every successful dispatch-set-changing
-    lifecycle transition. This frozen container carries the committed
-    state a publisher needs to reconcile the scheduler manifest with the
-    DB. The publisher runs AFTER the lifecycle transaction commits — a
-    rolled-back transaction (for example an audit persistence failure)
-    never surfaces here, so the manifest can never diverge from the
-    committed DB state.
-
-    Fields:
-        basin_version_id: The scope whose active model changed.
-        target_model_id: The model row the transition landed on. For
-            ``activate``/``switch_version`` this is the newly-active
-            model; for ``rollback_version`` it is the restored previous
-            model; for ``deactivate`` it is the model that was flipped
-            inactive (the operation's target).
-        source_scope: Normalized ``applicable_source_ids`` extracted from
-            ``target_model.resource_profile.direct_grid_forcing`` when
-            the target carries a direct-grid contract; ``None`` for a
-            legacy IDW model. Kept as a tuple so callbacks cannot mutate
-            the scope.
-        operation_type: The lifecycle operation that triggered the
-            publish — one of ``activate``, ``switch_version``,
-            ``rollback_version``, or ``deactivate`` (only when the
-            deactivate removed the currently-active model via the
-            sys_admin missing-active override).
-    """
-
-    basin_version_id: str
-    target_model_id: str
-    source_scope: tuple[str, ...] | None
-    operation_type: ModelLifecycleOperation
-
-
-PostCommitManifestPublisher = Callable[[PostCommitPublishContext], None]
-
-
-def _default_no_op_manifest_publisher(ctx: PostCommitPublishContext) -> None:  # noqa: ARG001
-    """Default publisher: no-op.
-
-    Preserves prior lifecycle behavior byte-for-byte until the production
-    wiring registers the real
-    ``publish_scheduler_registry_manifest`` bridge. Tests can register a
-    recording stub via
-    :meth:`PsycopgModelRegistryStore.register_post_commit_manifest_publisher`.
-    """
-    return None
-
-
-# Epic #982 SUB-6 (§3.3) — state clone index publisher seam. Runs on the
-# post-commit tail BEFORE the manifest publisher; a raise here holds
-# back the manifest re-publish so node-22 (DB-free) never observes
-# ``M1``-active in the manifest without ``M1``'s successor checkpoint on
-# the file state index (D7 fact anchor A-i).
-PostCommitStateIndexPublisher = Callable[[PostCommitPublishContext], None]
-
-
-def _default_no_op_state_index_publisher(  # noqa: ARG001
-    ctx: PostCommitPublishContext,
-) -> None:
-    """Default state-index publisher: no-op.
-
-    Preserves prior lifecycle behavior byte-for-byte until the production
-    wiring registers the real
-    :func:`packages.common.state_clone_index_publisher.build_default_state_index_publisher`
-    bridge. Tests bind a recording / raising stub via
-    :meth:`PsycopgModelRegistryStore.register_post_commit_state_index_publisher`.
-    """
-    return None
-
-
-def _should_publish_manifest_after_commit(
-    *,
-    operation: ModelLifecycleOperation,
-    transition_outcome: str,
-    model: Mapping[str, Any],
-    current_active_before: Mapping[str, Any] | None,
-) -> bool:
-    """Predicate: does this committed transition change the dispatch set?
-
-    Dispatch-set-changing operations that MUST re-publish the manifest:
-      * ``activate`` / ``switch_version`` / ``rollback_version`` whose
-        transition landed on the ``allowed`` or ``rollback`` outcome
-        (already-current returns ``already_current`` and no re-publish).
-      * ``deactivate`` when the model being deactivated WAS the currently
-        active model at the start of the transaction and the transition
-        landed on ``allowed`` — the §11.2 step-4 pause-production lever,
-        committed via the sys_admin missing-active override.
-
-    Non-dispatch-set-changing operations that MUST NOT re-publish:
-      * ``supersede`` / ``deprecate`` addressed at the currently-active
-        model are preflight-blocked by ``MISSING_ACTIVE_RISK``
-        (`_build_model_operation_preflight:2312-2324`), never reach the
-        transition, and therefore never reach this predicate. If a
-        future preflight change ever admits such an operation, this
-        predicate leaves them un-published unless explicitly added.
-      * A ``deactivate`` on a non-current model (e.g. an already
-        superseded/deprecated row) does not change the active dispatch
-        target and therefore returns False.
-      * Any transition with outcome ``already_current`` — no state
-        changed, nothing to re-publish.
-    """
-    if operation in {"activate", "switch_version", "rollback_version"}:
-        return transition_outcome in {"allowed", "rollback"}
-    if operation == "deactivate":
-        return (
-            transition_outcome == "allowed"
-            and current_active_before is not None
-            and str(current_active_before.get("model_id")) == str(model.get("model_id"))
-        )
-    return False
-
-
-def _extract_source_scope(target_model: Mapping[str, Any]) -> tuple[str, ...] | None:
-    """Read ``applicable_source_ids`` from the target's direct-grid contract.
-
-    Returns the ids as a tuple (immutable), preserving declaration order.
-    Returns ``None`` when the target is a legacy IDW model with no
-    ``direct_grid_forcing`` block.
-    """
-    resource_profile = _json_mapping(target_model.get("resource_profile"))
-    direct_grid = resource_profile.get("direct_grid_forcing")
-    if not isinstance(direct_grid, Mapping):
-        return None
-    source_ids = direct_grid.get("applicable_source_ids")
-    if not isinstance(source_ids, (list, tuple)):
-        return None
-    return tuple(str(source_id) for source_id in source_ids)
 
 
 ForcingMappingClassification = Literal["direct_grid", "invalid_direct_grid", "legacy"]
