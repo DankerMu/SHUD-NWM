@@ -1716,6 +1716,16 @@ VARIANT_ACTIVATION_CUTOVER_TESTS: tuple[str, ...] = (
     "tests/test_variant_activation_cutover.py",
     "tests/test_variant_activation_cutover_dispatch.py",
 )
+# #3210 partitioned tests/test_replay_lineage.py (1015 lines) into the resolver
+# base and the lifecycle-guard partition plus one non-collectible helper holding
+# the reader fakes and fixture constants both import. ONE tuple, carried whole
+# by every rule that named the monolith and by the helper's support-module row,
+# so a diff that selected the monolith before the split still selects every case.
+REPLAY_LINEAGE_HELPERS_PATH = "tests/replay_lineage_helpers.py"
+REPLAY_LINEAGE_TESTS: tuple[str, ...] = (
+    "tests/test_replay_lineage.py",
+    "tests/test_replay_lineage_lifecycle_guard.py",
+)
 # #2612: the model registry facade's DIRECT non-gated importer suites (the
 # selector suite's GUARDED_MODULE_CLOSURES derives this set from the tracked tree
 # in direct-only mode and reds on a new importer). Merged into the rule the
@@ -1736,7 +1746,7 @@ MODEL_REGISTRY_IMPORTER_TESTS: tuple[str, ...] = (
     "tests/test_model_registry_list_basins.py",
     "tests/test_node27_connection_attribution.py",
     "tests/test_qhh_production_bootstrap_scheduler.py",
-    "tests/test_replay_lineage.py",
+    *REPLAY_LINEAGE_TESTS,
     *VARIANT_ACTIVATION_CUTOVER_TESTS,
 )
 # #2010 precipitation raster service. The suite is the ONLY oracle for

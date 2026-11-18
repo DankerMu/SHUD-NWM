@@ -96,6 +96,8 @@ from scripts.select_ci_tests_tables import (
     RECALIBRATION_CLI_FIXTURES_TESTS,
     REGION_CONTRACT_PATH,
     RELEASED_RESERVATION_RECOVERY_TESTS,
+    REPLAY_LINEAGE_HELPERS_PATH,
+    REPLAY_LINEAGE_TESTS,
     RESPONSE_MODEL_PRESERVATION_TESTS,
     RETENTION_COPYBACK_MUTEX_HELPERS_PATH,
     RETENTION_COPYBACK_MUTEX_OWNER_PATH,
@@ -604,6 +606,12 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         # cutover suite. Both partitions import it at module scope.
         VARIANT_ACTIVATION_CUTOVER_HELPERS_PATH,
         VARIANT_ACTIVATION_CUTOVER_TESTS,
+    ),
+    PathTestRule(
+        # #3210: the shared reader fakes and fixture constants of the replay
+        # lineage suite. Both partitions import it at module scope.
+        REPLAY_LINEAGE_HELPERS_PATH,
+        REPLAY_LINEAGE_TESTS,
     ),
     PathTestRule(
         # #2532: the node-22 refresh-timer probe suite's shared fakes (the fake
@@ -2342,7 +2350,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # services/orchestrator/reconcile*.py change to it. DB-free, sub-second.
             "tests/test_reconcile_partition_logger.py",
             "tests/test_reconcile_sacct_parse.py",
-            "tests/test_replay_lineage.py",
+            # #3210: the replay lineage suite is physically partitioned; the
+            # broad orchestrator rule carries both partitions, as it carried
+            # the monolith.
+            *REPLAY_LINEAGE_TESTS,
             "tests/test_retention.py",
             # #1872: the retention corpus is physically partitioned; the
             # production owner rule must select every collectible partition so
