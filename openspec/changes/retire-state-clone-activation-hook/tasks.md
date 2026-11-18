@@ -14,4 +14,4 @@
 - [x] 1.3 Selector tables/pins, durations, large-file guard, ADR note.
 - [x] 1.4 Part 2 comment rewording.
 - [x] 1.5 E1-E4 locally.
-- [ ] 1.6 E5 on node-27 (orchestrator), E6, E7.
+- [x] 1.6 E5 on node-27 (orchestrator), E6, E7.

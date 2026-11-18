@@ -172,10 +172,10 @@ the archive PR.
     `tests/test_direct_grid_display_cutover_history.py`;
   - the basin-retirement suites importing `node27_retire_basin_helpers`, `tests/test_select_ci_tests.py`;
   - the selector set for the diff.
-- [ ] E5 node-27 temporary worktree: the E4 set plus the selector set, with the real-DB integration env,
+- [x] E5 node-27 temporary worktree: the E4 set plus the selector set, with the real-DB integration env,
   `leftover_it_dbs=0`.
-- [ ] E6 `openspec validate retire-state-clone-activation-hook --strict --no-interactive`.
-- [ ] E7 The PR body names:
+- [x] E6 `openspec validate retire-state-clone-activation-hook --strict --no-interactive`.
+- [x] E7 The PR body names:
   - the scope beyond the issue's list;
   - the dropped guarantee;
   - the filed post-commit-tail issue;
