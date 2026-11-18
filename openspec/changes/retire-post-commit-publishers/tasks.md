@@ -13,4 +13,4 @@
 - [x] 1.2 Test dispositions per the table (moves keep assertions; new absence test).
 - [x] 1.3 Selector/guard/durations/pyproject; runbooks.
 - [x] 1.4 E1-E4 locally.
-- [ ] 1.5 E5 on node-27 (orchestrator), E6, E7.
+- [x] 1.5 E5 on node-27 (orchestrator), E6, E7.

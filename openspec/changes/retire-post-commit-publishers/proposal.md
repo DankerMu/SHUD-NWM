@@ -84,7 +84,9 @@ clone rows that `state_clone_index_publisher.py` reads.
     `scripts/select_ci_tests_tables.py:1705-1709` ("three partitions", "`_manifest` also imports").
 - `scripts/ci/full_test_durations.json`; `.large-file-guard.json` (the publish-test entry); the per-file-ignore for the
   manifest file in `pyproject.toml`.
-- `docs/runbooks/production-ops/file-provider-refresh.md:13`: drop "model lifecycle" from the writers list. Check the
+- `docs/runbooks/production-ops/file-provider-refresh.md:13`: drop "model lifecycle" from the writers list. The file is
+  1008 lines on master, so it is added to the `.large-file-guard.json` exclude list, following the existing runbook and ADR
+  entries. Check the
   `expected_preimage` paragraph after it too.
 - `docs/runbooks/production-ops/operating-scope.md:86-87`: state that a lifecycle transition never moves node-22's
   dispatch set, and that the file plane is published by node-22 tooling.
@@ -104,6 +106,10 @@ clone rows that `state_clone_index_publisher.py` reads.
   - "Both persistence planes SHALL normalise cloned_from_model_id identically before judging it" drops its last sentence
     about the publisher's latest-clone-row reader.
 - `atomic-cutover-transaction`: no change; #3189 already removed the index-publish requirement.
+- `scheduler-registry-refresh`: "Every file-provider writer participates in one fail-safe transaction" is REMOVED and
+  re-ADDED as "Every scheduler file-provider writer participates in one fail-safe transaction". The new text drops the
+  non-existent "lifecycle" lock writer, and the scenario is renamed "Timer and manual writers contend". This came from
+  the invariant review seat.
 - **Non-goal:** the "no manifest re-publish" mentions in `legacy-reactivation-guard`, `model-version-switch-rollback`
   and `direct-grid-variant-registration` stay. They remain true statements.
 
@@ -141,11 +147,11 @@ clone rows that `state_clone_index_publisher.py` reads.
   - `tests/test_legacy_reactivation_guard.py`, `tests/test_scheduler_lineage.py`, `tests/test_model_registration.py`;
   - `tests/test_state_manager*.py`, `tests/test_select_ci_tests.py`;
   - the selector set for the diff.
-- [ ] E5 node-27 temporary worktree: the E4 set plus the selector set plus `tests/test_real_database_integration.py`
+- [x] E5 node-27 temporary worktree: the E4 set plus the selector set plus `tests/test_real_database_integration.py`
   and `tests/test_model_activation_audit_integration.py` (the only remaining committed `rollback_version` coverage),
   with the real-DB integration env, `leftover_it_dbs=0`.
-- [ ] E6 `openspec validate retire-post-commit-publishers --strict --no-interactive`.
-- [ ] E7 The PR body names:
+- [x] E6 `openspec validate retire-post-commit-publishers --strict --no-interactive`.
+- [x] E7 The PR body names:
   - the orphan reader deletion, which goes beyond the issue's list;
   - the issue's stale spec reference (`atomic-cutover-transaction` was already handled by #3189);
   - the archive-PR Purpose task;

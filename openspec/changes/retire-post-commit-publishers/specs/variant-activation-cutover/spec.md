@@ -9,8 +9,8 @@ node-22's registry manifest, and so its dispatch set, changes only through the o
 `docs/runbooks/production-ops/recalibration-and-archive.md`:
 - node-27 `scripts/provision_direct_grid_scheduler_registry.py` writes the DB rows and a staging registry, never the
   canonical manifest;
-- node-22 `scripts/node22_model_succession.py` runs copyback, preflight, begin, clone, publish, refresh and finish, or,
-  with `--kind remove_basin`, removes manifest rows;
+- node-22 `scripts/node22_model_succession.py` runs the steps of its `--kind`: `recalibration`, `cold_start`,
+  `add_basin` or `remove_basin` (runbook §5.7–§5.7.4);
 - the merged publish goes through `scripts/node22_publish_merged_scheduler_registry.py`.
 
 The node-22 scheduler and its refresh timer keep maintaining the state index themselves; that is unrelated to the
