@@ -223,6 +223,7 @@ from services.orchestrator.file_journal_replay import (
     _record_type,
     _require_schema,
     _upsert_by_key,
+    _validate_json_complexity,
     _with_latest_replay_order,
     _with_replay_order,
 )
@@ -337,6 +338,24 @@ MAX_FILE_JOURNAL_DISCOVERED_FILES = 100_000
 MAX_FILE_JOURNAL_SCAN_DEPTH = 32
 MAX_FILE_JOURNAL_JSON_DEPTH = 64
 MAX_FILE_JOURNAL_JSON_NODES = 300_000
+#: #3197: extra JSON depth ``latest/<source>/<cycle>/<model>.json`` adds around a
+#: record's payload, per record type.  A write checks its record against
+#: ``max_json_depth`` minus this value, so the latest view that embeds it still
+#: reads back under the same limit.  Measured (task 1.1 of
+#: openspec/changes/journal-write-complexity-limits, table in its design.md) with
+#: a fresh reader at the exact limit: the jsonl line and the direct row are the
+#: record (offset 0); the latest view keeps the four single-row slots at the
+#: record's depth (offset 0) and puts jobs and events one level deeper, as list
+#: elements of ``pipeline_jobs`` / ``pipeline_events`` (offset 1).  Constant per
+#: type because the view replaces whole rows and adds no nesting inside them.
+_LATEST_VIEW_DEPTH_HEADROOM: Mapping[str, int] = {
+    "hydro_run": 0,
+    "forecast_cycle": 0,
+    "forcing_version": 0,
+    "model_context": 0,
+    "pipeline_job": 1,
+    "pipeline_event": 1,
+}
 MAX_FILE_JOURNAL_CYCLE_ROWS_CACHE_ENTRIES = 512
 #: Total attempts (initial plus retries) the journal's cached read chokepoint
 #: makes against a mid-open atomic replacement of the file it is reading.  An
@@ -622,6 +641,8 @@ __all__ = (
     "MAX_FILE_JOURNAL_DISCOVERED_FILES",
     "MAX_FILE_JOURNAL_IDENTITY_RETRY_ATTEMPTS",
     "MAX_FILE_JOURNAL_JSON_BYTES",
+    "MAX_FILE_JOURNAL_JSON_DEPTH",
+    "MAX_FILE_JOURNAL_JSON_NODES",
     "MAX_FILE_JOURNAL_READ_CACHE_BYTES",
     "MAX_FILE_JOURNAL_READ_CACHE_ENTRIES",
     "MAX_FILE_JOURNAL_RECORDS",
@@ -680,6 +701,7 @@ __all__ = (
     "_file_retry_job_record",
     "_file_retry_job_truth_sort_key",
     "_format_utc",
+    "_historical_pipeline_event_row",
     "_is_blocked_query_job",
     "_is_legacy_unversioned_reserved_forecast_master",
     "_iter_jsonl_files",
@@ -693,7 +715,10 @@ __all__ = (
     "_names_same_directory",
     "_next_current_master_retry_identity",
     "_normalize_file_source_id",
+    "_optional_safe_identity",
+    "_outgoing_record_payload",
     "_parse_cycle_time_field",
+    "_pipeline_event_entity_type",
     "_public_evidence",
     "_public_scheduler_row",
     "_reconcile_inventory_row_kind",
@@ -701,6 +726,8 @@ __all__ = (
     "_relative_evidence",
     "_released_candidate_cycle_scope",
     "_released_identity_blocked_row",
+    "_required_safe_identity",
+    "_required_source_id",
     "_safe_segment",
     "_settled_incarnation_matches_candidate",
     "_source_id_from_job",
@@ -708,6 +735,7 @@ __all__ = (
     "_stat_signature",
     "_validate_accepted_submit_evidence",
     "_validate_pipeline_job_identity",
+    "_validate_record_complexity",
     "_validated_git_writer_generation",
     "accepted_submit_row_kind",
     "journal_read_attribution",
@@ -726,6 +754,76 @@ class FileOrchestrationJournalError(RuntimeError):
         self.reason = reason
         self.field = field
         self.evidence = dict(evidence or {})
+
+
+def _validate_record_complexity(
+    record: Mapping[str, Any],
+    *,
+    record_type: str,
+    max_json_depth: int,
+    max_json_nodes: int,
+) -> None:
+    """#3197: refuse a built journal record the same-limit reader would refuse.
+
+    The one write-side complexity predicate, shared by the outgoing-record
+    validator and the historical-import pre-scan.  Depth leaves the record
+    type's latest-view headroom; nodes bound the record itself, which is what
+    its jsonl line and direct row hold.  The latest view's node count also
+    counts its wrapper and the cycle's other rows, so it stays a read-side
+    limit.
+    """
+
+    _validate_json_complexity(
+        record,
+        field=record_type,
+        max_nodes=max_json_nodes,
+        max_depth=max_json_depth - _LATEST_VIEW_DEPTH_HEADROOM[record_type],
+    )
+
+
+def _outgoing_record_payload(record_type: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+    """The payload ``_append_validated_record_unlocked`` hands the record constructor.
+
+    Caller-boundary strip: this sees the RAW payload, before the public
+    event rendering below.  For pipeline_event this is the only
+    anti-laundering layer there is -- ``_journal_record_for_write``
+    deliberately skips events so it cannot erase that rendering's
+    intentional placeholders (#1592 design D2b).  Do not remove it.
+    #3197: the historical-import pre-scan builds its records through this
+    same function, so it judges the payload the writer will write.
+    """
+
+    payload = _strip_redaction_placeholders(payload)
+    payload = _redact_durable_error_message_fields(record_type, payload)
+    if record_type == "pipeline_event":
+        payload = _public_pipeline_event_payload(payload)
+    return payload
+
+
+def _historical_pipeline_event_row(
+    record: Mapping[str, Any],
+    *,
+    entity_type: str,
+    entity_id: str,
+) -> dict[str, Any]:
+    """The event row ``append_historical_pipeline_event`` writes for ``record``.
+
+    #3197: shared with the historical-import pre-scan.  ``event_id`` is kept
+    as given; the writer assigns one when it is empty.
+    """
+
+    return {
+        "event_id": record.get("event_id"),
+        "entity_type": entity_type,
+        "entity_id": entity_id,
+        "event_type": str(record["event_type"]),
+        "status_from": record.get("status_from"),
+        "status_to": record.get("status_to"),
+        "message": record.get("message"),
+        "details": dict(record.get("details") or {}),
+        "created_at": _optional_format_datetime(record.get("created_at"), field="created_at")
+        or _format_utc(_utcnow()),
+    }
 
 
 class RetryEvidenceInvalidError(RetryError):
@@ -6873,18 +6971,7 @@ class FileOrchestrationJournalRepository:
             )
         except OrchestratorError:
             return None
-        row = {
-            "event_id": record.get("event_id"),
-            "entity_type": entity_type,
-            "entity_id": entity_id,
-            "event_type": str(record["event_type"]),
-            "status_from": record.get("status_from"),
-            "status_to": record.get("status_to"),
-            "message": record.get("message"),
-            "details": dict(record.get("details") or {}),
-            "created_at": _optional_format_datetime(record.get("created_at"), field="created_at")
-            or _format_utc(_utcnow()),
-        }
+        row = _historical_pipeline_event_row(record, entity_type=entity_type, entity_id=entity_id)
         with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
             rows = self._cycle_rows(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
             event_id = row.get("event_id")
@@ -10459,8 +10546,10 @@ class FileOrchestrationJournalRepository:
             return dict(rows.hydro_run)
         return None
 
+    # #3197: static (it reads no instance state) so the historical-import
+    # pre-scan can build the row before any repository or journal root exists.
+    @staticmethod
     def _pipeline_job_row(
-        self,
         record: Mapping[str, Any],
         *,
         validate_accepted_submit: bool = True,
@@ -10987,12 +11076,17 @@ class FileOrchestrationJournalRepository:
             model_id=model_id,
             sequence=sequence,
         )
+        # #3197: unchecked for complexity on purpose.  This rebuilds a derived
+        # direct row from a record already in the journal and appends nothing;
+        # the direct row is the record (depth offset 0), so the latest-view
+        # headroom would refuse a record the direct reader accepts.
         self._validate_outgoing_record(
             record,
             source_id=source_id,
             cycle_time=cycle_time,
             record_type="pipeline_job",
             model_id=model_id,
+            check_complexity=False,
         )
         # Writes the direct file then syncs the anchor (removes it for a
         # settled row). If the direct write raises, the sync never runs and
@@ -11126,15 +11220,9 @@ class FileOrchestrationJournalRepository:
         materialize_model_id: str | None = None,
         sequence: int | None = None,
     ) -> None:
-        # Caller-boundary strip: this sees the RAW payload, before the public
-        # event rendering below.  For pipeline_event this is the only
-        # anti-laundering layer there is -- ``_journal_record_for_write``
-        # deliberately skips events so it cannot erase that rendering's
-        # intentional placeholders (#1592 design D2b).  Do not remove it.
-        payload = _strip_redaction_placeholders(payload)
-        payload = _redact_durable_error_message_fields(record_type, payload)
-        if record_type == "pipeline_event":
-            payload = _public_pipeline_event_payload(payload)
+        # Caller-boundary strip and public event rendering (#1592 design D2b);
+        # see ``_outgoing_record_payload``.  Do not remove it.
+        payload = _outgoing_record_payload(record_type, payload)
         record_sequence = sequence or self._next_sequence_unlocked(source_id=source_id, cycle_time=cycle_time)
         record = _journal_record_for_write(
             record_type,
@@ -11167,6 +11255,7 @@ class FileOrchestrationJournalRepository:
         cycle_time: datetime,
         record_type: str,
         model_id: str | None,
+        check_complexity: bool = True,
     ) -> None:
         """The one write-side validator every journal lane runs before its first byte.
 
@@ -11177,6 +11266,13 @@ class FileOrchestrationJournalRepository:
         semantics and a historical row that pre-dates the gate is never turned
         into a replay fault.  It runs BEFORE that call so the reason token is
         deterministic when a row diverges in more than one field.
+
+        #3197: it last checks the record against this instance's read limits
+        (``_validate_record_complexity``), so no lane appends a record whose
+        own files or latest-view depth its reader would refuse.  The check
+        runs after the identity checks, which keep their tokens.  Only the
+        derived-direct restore lane passes ``check_complexity=False``: it
+        rewrites an existing record and appends nothing.
         """
 
         self._require_job_id_cycle_scope(record, record_type=record_type)
@@ -11189,6 +11285,13 @@ class FileOrchestrationJournalRepository:
             expected_record_type=record_type,
             expected_model_id=model_id,
         )
+        if check_complexity:
+            _validate_record_complexity(
+                record,
+                record_type=record_type,
+                max_json_depth=self.max_json_depth,
+                max_json_nodes=self.max_json_nodes,
+            )
 
     def _require_job_id_cycle_scope(self, record: Mapping[str, Any], *, record_type: str) -> None:
         """Reject a pipeline-job row whose ``job_id`` contradicts its own scope.

@@ -137,6 +137,7 @@
       "_GENERIC_VERSIONED_RECONCILIATION_DECISIONS",
       "_JournalProbeContainmentError",
       "_LATEST_REPLAY_ORDER_SENTINEL",
+      "_LATEST_VIEW_DEPTH_HEADROOM",
       "_LEGACY_ACTIVE_RECONCILE_DIRECTORY",
       "_OPERATOR_BIND_COMMIT_REFUSALS",
       "_OPERATOR_BIND_FORCING_ARRAY_SPEC_RE",
@@ -166,16 +167,19 @@
       "_emit_reclaim_projection_warning",
       "_file_lock_guard_mode",
       "_filter_cycle_rows_for_model",
+      "_historical_pipeline_event_row",
       "_is_legacy_unversioned_reserved_forecast_master",
       "_iter_jsonl_files",
       "_iter_regular_json_files",
+      "_outgoing_record_payload",
       "_probe_containment_failure",
       "_refuse_legacy_unversioned_reserved_forecast_master",
       "_refuse_legacy_unversioned_reserved_forecast_master_record",
       "_released_candidate_cycle_scope",
       "_released_reservation_recovery_command",
       "_signature_has_containment_fault",
-      "_stat_signature"
+      "_stat_signature",
+      "_validate_record_complexity"
     ],
     "paths": [
       "_CYCLE_RUN_ID_RE",
@@ -431,7 +435,8 @@
       "callers": {
         "facade": [
           "FileJournalRetryService",
-          "FileOrchestrationJournalRepository"
+          "FileOrchestrationJournalRepository",
+          "_historical_pipeline_event_row"
         ],
         "retry_helpers": [
           "_journal_record_for_write"

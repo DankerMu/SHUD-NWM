@@ -31,10 +31,23 @@ from packages.common.rollback_execution_binding import (
 from packages.common.safe_fs import SafeFilesystemError, atomic_write_bytes_no_follow, ensure_directory_no_follow
 from services.orchestrator.chain_types import OrchestratorError
 from services.orchestrator.file_orchestration_journal import (
+    MAX_FILE_JOURNAL_JSON_DEPTH,
+    MAX_FILE_JOURNAL_JSON_NODES,
     FileOrchestrationJournalError,
     FileOrchestrationJournalRepository,
+    _cycle_time_from_job,
+    _historical_pipeline_event_row,
     _is_legacy_unversioned_reserved_forecast_master,
+    _journal_record_for_write,
+    _optional_safe_identity,
+    _outgoing_record_payload,
+    _parse_cycle_time_field,
+    _pipeline_event_entity_type,
     _public_evidence,
+    _required_safe_identity,
+    _required_source_id,
+    _source_id_from_job,
+    _validate_record_complexity,
     _validated_git_writer_generation,
 )
 from services.orchestrator.journal_root_authority import verify_journal_root_authority
@@ -1340,6 +1353,10 @@ def import_historical_scheduler_state(
                 "file_journal_legacy_unversioned_reserved_forecast_master",
                 field="accepted_submit_contract_version",
             )
+    # #3197, same placement and reason as the #2674 gate above: refuse a history
+    # holding a record over the journal's JSON complexity limits before the
+    # first append -- no journal root, zero bytes -- instead of part-way through.
+    _refuse_over_complex_historical_rows(cycles=cycles, runs=runs, jobs=jobs, events=events)
     # #1955 D2, deliberately AFTER the row-limit gate rather than at the lane's
     # first statement: this is the one create-capable lane, and the over-limit
     # refusal is pinned to leave no journal root behind at all.  It is still
@@ -1557,6 +1574,141 @@ def _fetch_rows_limited(cursor: Any, *, relation: str) -> list[dict[str, Any]]:
         rows.extend(dict(row) for row in batch)
         if len(rows) > limit:
             _raise_relation_row_limit(relation, limit)
+
+
+#: What a historical row's record builder may raise.  A row the pre-scan cannot
+#: build is left to its writer, which raises or skips it exactly as before #3197.
+_HISTORICAL_BUILD_ERRORS = (FileOrchestrationJournalError, OrchestratorError, KeyError, TypeError, ValueError)
+
+
+def _refuse_over_complex_historical_rows(
+    *,
+    cycles: list[dict[str, Any]],
+    runs: list[dict[str, Any]],
+    jobs: list[dict[str, Any]],
+    events: list[dict[str, Any]],
+) -> None:
+    """#3197: refuse the import whole if any record it would append is over the limits.
+
+    Each record is built the way its writer builds it -- strip, redact, and for
+    an event the public rendering -- and judged by the journal's own write-side
+    predicate (``_validate_record_complexity``) at the limits of the default
+    repository the import writes through.  So a value that only redaction
+    collapses still imports.  Rows the import skips are not scanned; the skip
+    predicates and the imported-id sets are the import loop's own.  What only
+    the writer knows is filled in with a value of the same shape: the sequence
+    (a scalar), an empty ``event_id`` (the writer assigns a scalar one), and an
+    event's target ``model_id``, taken from the job row being imported.  A row
+    already in the journal is still scanned; its writer would return early.
+    """
+
+    built: list[tuple[str, dict[str, Any]]] = []
+    imported_cycle_ids: set[str] = set()
+    for row in cycles:
+        if _unsupported_forecast_cycle_reason(row) is not None:
+            continue
+        if row.get("cycle_id") not in (None, ""):
+            imported_cycle_ids.add(str(row.get("cycle_id")))
+        try:
+            built.append(
+                _historical_record(
+                    "forecast_cycle",
+                    _outgoing_record_payload("forecast_cycle", row),
+                    source_id=_required_source_id(row, "source_id"),
+                    cycle_time=_parse_cycle_time_field(row, "cycle_time"),
+                    model_id=None,
+                )
+            )
+        except _HISTORICAL_BUILD_ERRORS:
+            continue
+    for row in runs:
+        if _unsupported_run_reason(row) is not None:
+            continue
+        try:
+            built.append(
+                _historical_record(
+                    "hydro_run",
+                    _outgoing_record_payload("hydro_run", row),
+                    source_id=_required_source_id(row, "source_id"),
+                    cycle_time=_parse_cycle_time_field(row, "cycle_time"),
+                    model_id=_required_safe_identity(row, "model_id"),
+                )
+            )
+        except _HISTORICAL_BUILD_ERRORS:
+            continue
+    imported_job_ids: set[str] = set()
+    event_targets: dict[str, tuple[str, datetime, str | None]] = {}
+    for row in jobs:
+        if _unsupported_job_reason(row) is not None:
+            continue
+        if row.get("job_id") not in (None, ""):
+            imported_job_ids.add(str(row.get("job_id")))
+        try:
+            # ``_write_pipeline_job_unlocked`` hands this row (error message
+            # redacted, ``source_id`` re-set to the same value) to the record
+            # constructor, which redacts again.
+            job = FileOrchestrationJournalRepository._pipeline_job_row(dict(row))
+            target = (_source_id_from_job(job), _cycle_time_from_job(job), _optional_safe_identity(job, "model_id"))
+            built.append(
+                _historical_record("pipeline_job", job, source_id=target[0], cycle_time=target[1], model_id=target[2])
+            )
+        except _HISTORICAL_BUILD_ERRORS:
+            continue
+        event_targets.setdefault(str(job["job_id"]), target)
+    for row in events:
+        if (
+            _unsupported_event_reason(row, imported_job_ids=imported_job_ids, imported_cycle_ids=imported_cycle_ids)
+            is not None
+        ):
+            continue
+        try:
+            entity_type = _pipeline_event_entity_type(row.get("entity_type") or "pipeline_job")
+            entity_id = _required_safe_identity(row, "entity_id")
+            if entity_type == "forecast_cycle":
+                source_id, cycle_time = _source_cycle_from_cycle_id(entity_id)
+                model_id = None
+            else:
+                source_id, cycle_time, model_id = event_targets[entity_id]
+            event = _historical_pipeline_event_row(row, entity_type=entity_type, entity_id=entity_id)
+            if event["event_id"] in (None, ""):
+                event["event_id"] = 0
+            built.append(
+                _historical_record(
+                    "pipeline_event",
+                    _outgoing_record_payload("pipeline_event", event),
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    model_id=model_id,
+                )
+            )
+        except _HISTORICAL_BUILD_ERRORS:
+            continue
+    for record_type, record in built:
+        _validate_record_complexity(
+            record,
+            record_type=record_type,
+            max_json_depth=MAX_FILE_JOURNAL_JSON_DEPTH,
+            max_json_nodes=MAX_FILE_JOURNAL_JSON_NODES,
+        )
+
+
+def _historical_record(
+    record_type: str,
+    payload: Mapping[str, Any],
+    *,
+    source_id: str,
+    cycle_time: datetime,
+    model_id: str | None,
+) -> tuple[str, dict[str, Any]]:
+    record = _journal_record_for_write(
+        record_type,
+        payload,
+        source_id=source_id,
+        cycle_time=cycle_time,
+        model_id=model_id,
+        sequence=0,
+    )
+    return record_type, record
 
 
 def _unsupported_forecast_cycle_reason(row: Mapping[str, Any]) -> str | None:

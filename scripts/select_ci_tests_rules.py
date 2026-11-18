@@ -1416,6 +1416,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # E7 cases pin the import pre-scan that fails closed before the
             # journal root is created. DB-free, ~1s.
             "tests/test_file_journal_legacy_unversioned_reserved_guard.py",
+            # #3197: the write-complexity suite top-level-imports this module;
+            # its import cases pin the complexity pre-scan that refuses before
+            # the journal root is created. DB-free, ~4s.
+            "tests/test_file_journal_write_complexity.py",
         ),
         stop_on_match=True,
     ),
