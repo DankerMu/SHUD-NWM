@@ -256,8 +256,6 @@ from services.orchestrator.file_journal_retry_helpers import (
     _operator_owner_evidence_text,
     _optional_format_datetime,
     _optional_mapping_value,
-    _private_runtime_root_recovery_path,
-    _private_runtime_root_recovery_record,
     _projection_error_reason,
     _projection_error_type,
     _public_pipeline_event_payload,
@@ -521,16 +519,6 @@ _PIPELINE_JOB_UPSERT_MUTABLE_FIELDS = (
     SLURM_BINDING_SOURCE_FIELD,
     SLURM_ACCOUNTING_SUBMITTED_AT_FIELD,
     "native_shud_resubmitted",
-)
-_RUNTIME_ROOT_EVENT_CANDIDATE_PATHS = (
-    ("runtime_root_contract",),
-    ("submission_manifest",),
-    ("submitted_manifest",),
-    ("request_manifest",),
-    ("slurm_submission_manifest",),
-    ("manifest",),
-    ("gateway_response", "manifest"),
-    ("slurm", "manifest"),
 )
 _SUPPORTED_PIPELINE_EVENT_ENTITY_TYPES = {"pipeline_job", "forecast_cycle"}
 TERMINAL_PIPELINE_STATUSES = set(PIPELINE_JOB_TERMINAL)
@@ -5844,10 +5832,11 @@ class FileOrchestrationJournalRepository:
             # best-effort discipline as ``_record_permanent_failure_mark_failure``:
             # the evidence write exists to keep the terminal from being silent,
             # never to turn a correct durable release into a raise.  The catch
-            # spans the filesystem/OS class too: the private-recovery side write
-            # raises ``SafeFilesystemError``/``OSError``, which ``reconcile.py``'s
-            # enclosing ``except FileOrchestrationJournalError`` would NOT catch
-            # -- it would abort the whole reconcile pass.
+            # spans the filesystem/OS class too: ``_append_journal_record_unlocked``
+            # and ``_materialize_latest_unlocked`` write through the safe-filesystem
+            # layer and raise ``SafeFilesystemError``/``OSError``, which
+            # ``reconcile.py``'s enclosing ``except FileOrchestrationJournalError``
+            # would NOT catch -- it would abort the whole reconcile pass.
             try:
                 self._append_pipeline_job_event_unlocked(
                     row,
@@ -11144,7 +11133,6 @@ class FileOrchestrationJournalRepository:
         # intentional placeholders (#1592 design D2b).  Do not remove it.
         payload = _strip_redaction_placeholders(payload)
         payload = _redact_durable_error_message_fields(record_type, payload)
-        private_recovery_payload = dict(payload) if record_type == "pipeline_event" else None
         if record_type == "pipeline_event":
             payload = _public_pipeline_event_payload(payload)
         record_sequence = sequence or self._next_sequence_unlocked(source_id=source_id, cycle_time=cycle_time)
@@ -11163,13 +11151,6 @@ class FileOrchestrationJournalRepository:
             record_type=record_type,
             model_id=model_id,
         )
-        if private_recovery_payload is not None:
-            self._write_pipeline_event_private_recovery_unlocked(
-                private_recovery_payload,
-                source_id=source_id,
-                cycle_time=cycle_time,
-                model_id=model_id,
-            )
         self._append_journal_record_unlocked(source_id=source_id, cycle_time=cycle_time, record=record)
         if materialize_model_id is not None:
             self._materialize_latest_unlocked(
@@ -11177,33 +11158,6 @@ class FileOrchestrationJournalRepository:
                 cycle_time=cycle_time,
                 model_id=materialize_model_id,
             )
-
-    def _write_pipeline_event_private_recovery_unlocked(
-        self,
-        payload: Mapping[str, Any],
-        *,
-        source_id: str,
-        cycle_time: datetime,
-        model_id: str | None,
-    ) -> None:
-        record = _private_runtime_root_recovery_record(
-            payload,
-            source_id=source_id,
-            cycle_time=cycle_time,
-            model_id=model_id,
-        )
-        if record is None:
-            return
-        path = _private_runtime_root_recovery_path(
-            self.root,
-            source_id=source_id,
-            cycle_time=cycle_time,
-            entity_id=str(record["entity_id"]),
-            event_id=str(record["event_id"]),
-        )
-        content = _json_bytes(record)
-        self._require_within_byte_limit(content, path)
-        self._atomic_write_bytes_unlocked(path, content)
 
     def _validate_outgoing_record(
         self,

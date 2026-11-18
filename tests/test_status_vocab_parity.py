@@ -326,7 +326,6 @@ _CANONICAL_SITES: tuple[tuple[str, ModuleType, str, type, frozenset[str] | tuple
     ("PIPELINE_JOB_SUCCESS", chain_repository_state, "TERMINAL_PIPELINE_SUCCESS_STATUSES", set, _SUCCESS),
     ("PIPELINE_JOB_SUCCESS", retry, "TERMINAL_SUCCESS_RETRY_STATUSES", set, _SUCCESS),
     ("PIPELINE_JOB_ACTIVE", pipeline_route, "_ACTIVE_JOB_STATUSES", set, _ACTIVE),
-    ("PIPELINE_JOB_PENDING", pipeline_route, "_PENDING_JOB_STATUSES", set, _PENDING),
     ("PIPELINE_JOB_FAILED_UI", pipeline_route, "_FAILED_JOB_STATUSES", set, _FAILED_UI),
     ("FAILED_PIPELINE_STATUSES", scheduler_state_types, "FAILED_PIPELINE_STATUSES", set, _FAILED_PIPELINE),
     ("FAILED_PIPELINE_STATUSES", chain, "FAILED_PIPELINE_STATUSES", set, _FAILED_PIPELINE),
@@ -588,13 +587,12 @@ def test_pipeline_route_sites_rebind_the_vocabulary() -> None:
     """Task 2.2: the public tuple is the ordered vocabulary tuple, the buckets `set` copies.
 
     The tuple feeds the published OpenAPI enum in order, so it must be the
-    vocabulary tuple itself; the five route buckets stay fresh mutable sets.
+    vocabulary tuple itself; the four route buckets stay fresh mutable sets.
     """
 
     assert pipeline_route.PIPELINE_JOB_STATUS_VALUES is vocab.PIPELINE_JOB_STATUS_ORDER
     for site_name, vocab_name in (
         ("_ACTIVE_JOB_STATUSES", "PIPELINE_JOB_ACTIVE"),
-        ("_PENDING_JOB_STATUSES", "PIPELINE_JOB_PENDING"),
         ("_FAILED_JOB_STATUSES", "PIPELINE_JOB_FAILED_UI"),
         ("_TERMINAL_HYDRO_STATUSES", "HYDRO_RUN_TERMINAL_UI"),
         ("_TERMINAL_CYCLE_STATUSES", "CYCLE_TERMINAL_UI"),

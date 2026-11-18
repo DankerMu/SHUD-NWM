@@ -57748,8 +57748,8 @@ def test_release_signal_failure_keeps_the_release_and_leaves_a_trace(tmp_path: P
 def test_release_signal_filesystem_failure_keeps_the_release_and_leaves_a_trace(tmp_path: Path) -> None:
     """#1748 P1 -- the filesystem/OS class too, which escapes reconcile's handler.
 
-    ``_write_pipeline_event_private_recovery_unlocked`` writes through
-    ``_atomic_write_bytes_unlocked``, whose faults are
+    ``_append_journal_record_unlocked`` and ``_materialize_latest_unlocked``
+    write through the safe-filesystem layer, whose faults are
     ``SafeFilesystemError``/``OSError`` -- neither is a
     ``FileOrchestrationJournalError``, so ``reconcile.py``'s enclosing handler
     would not catch them and the whole reconcile pass would abort.

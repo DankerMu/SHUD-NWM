@@ -154,7 +154,6 @@
       "_RECONCILE_INVENTORY_SCHEMA_VERSION",
       "_RECONCILE_INVENTORY_TEMP_RE",
       "_RECONCILE_MIGRATION_TEMP_RE",
-      "_RUNTIME_ROOT_EVENT_CANDIDATE_PATHS",
       "_RecordBudget",
       "_RetentionDiscoveryBudget",
       "_SLURM_MASTER_PART_RE",
@@ -288,10 +287,8 @@
       "_with_replay_order"
     ],
     "retry_helpers": [
-      "FILE_ORCHESTRATION_PRIVATE_RECOVERY_SCHEMA_VERSION",
       "MAX_OPERATOR_CHECKED_BY_LENGTH",
       "MAX_OPERATOR_VERIFICATION_NOTE_LENGTH",
-      "_PRIVATE_RUNTIME_ROOT_RECOVERY_RECORD_TYPE",
       "_PROJECTION_WARNING_FALLBACK_TOKEN",
       "_RETRY_LINEAGE_PLACEHOLDER_TOKENS",
       "_accepted_submit_attempt_anchor",
@@ -323,16 +320,12 @@
       "_operator_owner_evidence_text",
       "_optional_format_datetime",
       "_optional_mapping_value",
-      "_private_runtime_root_recovery_path",
-      "_private_runtime_root_recovery_record",
       "_projection_error_reason",
       "_projection_error_type",
       "_public_pipeline_event_payload",
       "_reconcile_inventory_row_kind",
       "_redact_durable_error_message_fields",
       "_retry_lineage_contains_placeholder",
-      "_runtime_root_recovery_candidate_records",
-      "_runtime_root_recovery_candidate_value",
       "_settled_incarnation_matches_candidate",
       "_strict_retry_init_state_identities",
       "_strict_utc_datetime",
@@ -441,8 +434,7 @@
           "FileOrchestrationJournalRepository"
         ],
         "retry_helpers": [
-          "_journal_record_for_write",
-          "_private_runtime_root_recovery_record"
+          "_journal_record_for_write"
         ]
       },
       "cluster": "facade"
