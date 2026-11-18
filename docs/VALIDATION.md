@@ -581,11 +581,21 @@ lane that produced them:
   `page.route('**/api/v1/**')` are allowed. Receipts from this lane are visual
   evidence only and must not be cited as live receipts or live
   `display_readonly` proof.
-- `live-display`: live display_readonly browser proof against explicit runtime
-  frontend and API bindings. Broad API mocks such as
-  `page.route('**/api/v1/**')` are not allowed and cannot produce live display
-  receipts. Only this lane may produce live `display_readonly` receipts. The
-  live lanes stay out of automatic CI; their oracle is node-27.
+- `live-c4-display`: live display_readonly browser proof for `/` plus strict
+  GFS/IFS `/ops` against explicit runtime frontend and API bindings. API mocks
+  are not allowed: the static guard rejects broad `page.route('**/api/v1/**')`
+  mocks and any direct `page`/`context` `route` or `routeFromHAR` call in
+  `e2e/live-c4-display.spec.ts`. This lane can produce the C4 live
+  `display_readonly` receipt.
+- `live-river-click`: live `/` river-click GFS+IFS P95 proof against explicit
+  runtime frontend and API bindings. Broad API mocks such as
+  `page.route('**/api/v1/**')` are not allowed in `e2e/live-display.spec.ts`.
+  This lane can produce only the river-click live receipt, not a `/ops` or
+  `/monitoring` receipt.
+- The live lanes stay out of automatic CI; their oracle is node-27. The
+  original two-URL `/monitoring` live lane was retired by #3202: `/monitoring`
+  is not open to `display_readonly`, so that lane could never PASS on the
+  public deployment.
 
 ```bash
 cd apps/frontend
@@ -593,34 +603,37 @@ corepack pnpm test:e2e
 corepack pnpm run test:e2e:mocked-regression
 ```
 
-Live display_readonly browser evidence must use the dedicated live profile. It
-requires both runtime URLs and has no local dev-server or
-`https://api.example.test` fallback. A passing live receipt requires the browser
+Live display_readonly `/` + `/ops` browser evidence must use the dedicated C4
+profile. It requires the five env keys below and has no local dev-server or
+`https://api.example.test` fallback. A passing C4 receipt requires the browser
 page itself to fetch `/api/v1/runtime/config` from the configured API binding
-and receive `service_role` exactly `display_readonly`, then fetch at least one
-monitoring read API from that same binding. The runtime config body is the only
-live response body parsed for evidence and must fit the bounded evidence size;
-monitoring read API evidence records URL/status only. Both distinct API origins
-and same-origin `/api` proxy deployments are valid when
-`PLAYWRIGHT_LIVE_API_BASE_URL` names the expected API origin.
+and receive `service_role` exactly `display_readonly`, then load `/ops` for the
+current GFS and IFS identities with their status, stages, jobs and job logs.
 
 ```bash
 cd apps/frontend
 PLAYWRIGHT_LIVE_BASE_URL=https://display.example.internal \
 PLAYWRIGHT_LIVE_API_BASE_URL=https://api.example.internal \
-  corepack pnpm run test:e2e:live-display
+PLAYWRIGHT_LIVE_C4_BASIN_ID=<current-basin-id> \
+PLAYWRIGHT_LIVE_C4_SEGMENT_ID=<current-segment-id> \
+PLAYWRIGHT_LIVE_C4_RECEIPT_PATH=/absolute/private/nhms-frontend-c4-live-evidence-<run>.json \
+  corepack pnpm run test:e2e:live-c4-display
 ```
 
-If either `PLAYWRIGHT_LIVE_BASE_URL` or `PLAYWRIGHT_LIVE_API_BASE_URL` is
-missing, or either URL includes username/password userinfo,
-`test:e2e:live-display` exits before browser execution with
-`Live display Playwright profile BLOCKED` or a live display profile URL error.
+The kept live configs do not exit when a URL is missing or malformed: they
+substitute a `http://127.0.0.1:0` placeholder base URL, and their globalSetup
+owner classifies the config before any browser work. A missing
+`PLAYWRIGHT_LIVE_BASE_URL` or `PLAYWRIGHT_LIVE_API_BASE_URL` with a safe receipt
+path publishes one `REQUIRED_ENV_MISSING` `BLOCKED` receipt; a missing receipt
+path is a `BLOCKED` diagnostic with no file; a malformed URL (including
+username/password userinfo) or an invalid pin is a `CONFIG_INVALID` `FAIL`.
 Do not supply credentials through URL userinfo. Record unavailable live runtime
 as `BLOCKED`, not `PASS`. RBAC `权限不足`, page-visible runtime config
-unavailability, any browser request to `/api/v1/slurm/*`, or retry/cancel
-mutations also cannot be recorded as a live `PASS`. Live-display specs must not
-register broad `page.route('**/api/v1/**')` mocks; those mocks are allowed only
-in mocked regression, preview, or visual evidence lanes. Do not use
+unavailability, visible role selector or retry/cancel controls, any browser
+request to `/api/v1/slurm/*`, or a non-GET/HEAD request to the API origin also
+cannot be recorded as a live `PASS`. Live specs must not register broad
+`page.route('**/api/v1/**')` mocks; those mocks are allowed only in mocked
+regression, preview, or visual evidence lanes. Do not use
 `--project=chromium` for mocked evidence; use
 `--project=mocked-regression-chromium`.
 

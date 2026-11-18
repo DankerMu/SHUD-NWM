@@ -280,6 +280,40 @@ describe('C4 live lane', () => {
     expect(result.terminal.failure?.code).toBe('PERMISSION_DENIED')
   })
 
+  it('fails OPS_UNAVAILABLE when /ops shows runtime config unavailable', async () => {
+    const state = makeC4FakePageState({
+      homeResponses: homeResponses(),
+      opsObservation: { ...defaultC4OpsObservation(), runtimeUnavailable: true },
+      opsResponsesFor: (url) => opsResponses(url.includes('IFS') ? 'IFS' : 'GFS'),
+      logResponsesFor: logResponses,
+    })
+    const result = await runC4DisplayLane({ config: config(), page: makeC4FakePage(state) }, defaultFetch())
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('runtime-unavailable ops must fail')
+    expect(result.terminal.failure).toEqual({
+      code: 'OPS_UNAVAILABLE',
+      stage: 'ops',
+      message: 'runtime config is unavailable on /ops',
+    })
+  })
+
+  it('fails FORBIDDEN_CONTROL when /ops shows a retry or cancel control', async () => {
+    const state = makeC4FakePageState({
+      homeResponses: homeResponses(),
+      opsObservation: { ...defaultC4OpsObservation(), headingObserved: true, retryCancelControlCount: 1 },
+      opsResponsesFor: (url) => opsResponses(url.includes('IFS') ? 'IFS' : 'GFS'),
+      logResponsesFor: logResponses,
+    })
+    const result = await runC4DisplayLane({ config: config(), page: makeC4FakePage(state) }, defaultFetch())
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('retry/cancel control on ops must fail')
+    expect(result.terminal.failure).toEqual({
+      code: 'FORBIDDEN_CONTROL',
+      stage: 'ops',
+      message: 'retry or cancel control is visible on display_readonly /ops',
+    })
+  })
+
   it('fails missing jobs, wrong-source jobs, and forbidden slurm control', async () => {
     const missingJobs = makeC4FakePageState({
       homeResponses: homeResponses(),
@@ -670,6 +704,29 @@ describe('C4 live lane', () => {
     expect(result.ok).toBe(false)
     if (result.ok) throw new Error('contradictory runtime config must fail')
     expect(result.terminal.failure?.code).toBe('RUNTIME_CONFIG_INVALID')
+  })
+
+  it('fails home with RUNTIME_CONFIG_INVALID when a 200 runtime body names a non-display service role', async () => {
+    const state = makeC4FakePageState({
+      homeResponses: [
+        {
+          url: 'https://api.example.test/api/v1/runtime/config',
+          status: 200,
+          body: { data: { service_role: 'compute_control', display_readonly: true } },
+        },
+        homeResponses()[1],
+      ],
+    })
+
+    const result = await runC4DisplayLane({ config: config(), page: makeC4FakePage(state) }, defaultFetch())
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('non-display service role must fail')
+    expect(result.terminal.failure).toEqual({
+      code: 'RUNTIME_CONFIG_INVALID',
+      stage: 'home',
+      message: 'runtime config is not display_readonly',
+    })
   })
 
   it('fails home with RUNTIME_CONFIG_INVALID when runtime config completionError is set', async () => {

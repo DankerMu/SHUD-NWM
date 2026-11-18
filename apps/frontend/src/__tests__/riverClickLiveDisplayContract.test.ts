@@ -11,14 +11,10 @@ const PASS_LIVE_SPEC = [
 ].join('\n')
 
 describe('river-click live display static contract', () => {
-  it('keeps the dedicated river-click command/profile separate from the two-URL monitoring lane', async () => {
+  it('keeps the dedicated river-click command/profile and keeps the retired two-URL monitoring lane absent', async () => {
     const pkg = JSON.parse(readFileSync(path.resolve(__dirname, '../../package.json'), 'utf8'))
-    expect(pkg.scripts['test:e2e:live-display']).toMatch(/playwright-live-display\.sh/)
-    expect(pkg.scripts['test:e2e:live-display']).not.toMatch(/river-click/)
+    expect(pkg.scripts['test:e2e:live-display']).toBeUndefined()
     expect(pkg.scripts['test:e2e:live-river-click']).toMatch(/playwright-live-river-click\.sh|playwright\.live-river-click\.config/)
-    const monitoringConfig = readFileSync(path.resolve(__dirname, '../../playwright.live-display.config.ts'), 'utf8')
-    expect(monitoringConfig).not.toMatch(/playwright\.live-display\.global-setup/)
-    expect(monitoringConfig).not.toMatch(/PLAYWRIGHT_LIVE_RIVER_CLICK_RECEIPT_PATH/)
     const riverConfig = readFileSync(path.resolve(__dirname, '../../playwright.live-river-click.config.ts'), 'utf8')
     expect(riverConfig).toMatch(/playwright\.live-display\.global-setup/)
     expect(riverConfig).toMatch(/workers:\s*1/)
@@ -47,27 +43,6 @@ describe('river-click live display static contract', () => {
       expect(assertRiverClickLiveDisplayContract(e2eDir)).toEqual([path.join(e2eDir, 'live-display.spec.ts')])
     } finally {
       rmSync(root, { recursive: true, force: true })
-    }
-  })
-
-  it('does not abort a two-URL monitoring-only invocation at config import', async () => {
-    const previous = { ...process.env }
-    vi.resetModules()
-    try {
-      process.env.PLAYWRIGHT_LIVE_BASE_URL = 'https://display.example.test'
-      process.env.PLAYWRIGHT_LIVE_API_BASE_URL = 'https://api.example.test'
-      delete process.env.PLAYWRIGHT_LIVE_RIVER_BASIN_ID
-      delete process.env.PLAYWRIGHT_LIVE_RIVER_SEGMENT_ID
-      delete process.env.PLAYWRIGHT_LIVE_RIVER_CLICK_RECEIPT_PATH
-      const config = await import('../../playwright.live-display.config')
-      expect(config.default.globalSetup).toBeUndefined()
-      expect(config.default.use?.baseURL).toBe('https://display.example.test')
-      expect(config.default.metadata).toMatchObject({
-        evidenceLane: 'live-display-readonly',
-        requiredEnv: ['PLAYWRIGHT_LIVE_BASE_URL', 'PLAYWRIGHT_LIVE_API_BASE_URL'],
-      })
-    } finally {
-      process.env = previous
     }
   })
 

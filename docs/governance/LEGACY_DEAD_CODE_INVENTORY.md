@@ -269,13 +269,17 @@ path.
   without reopening it. The no-broad-mock guard #365 scoped is implemented and
   active: `assertLiveDisplaySpecsDoNotMockApis` in
   `apps/frontend/playwright.config.helpers.ts` runs at load of
-  `apps/frontend/playwright.live-display.config.ts` and fails the live profile if
-  any `e2e/live-display.spec.ts` registers a broad `page.route('**/api/v1/**')`
-  mock (`liveDisplaySpecPattern` + `findBroadApiRouteMocks`). The node-27 live
-  display lane is `apps/frontend/e2e/live-display.spec.ts` (profile
-  `live-display-readonly`, script `test:e2e:live-display`), which requires both
-  `PLAYWRIGHT_LIVE_BASE_URL` and `PLAYWRIGHT_LIVE_API_BASE_URL` and records
-  unavailable runtime as `BLOCKED`, never `PASS` (see `docs/VALIDATION.md`). The
+  `apps/frontend/playwright.live-river-click.config.ts` and fails the live profile
+  if any `e2e/live-display.spec.ts` registers a broad `page.route('**/api/v1/**')`
+  mock (`liveDisplaySpecPattern` + `findBroadApiRouteMocks`). That spec now holds
+  only the `@live-river-click` lane (profile `live-river-click`, script
+  `test:e2e:live-river-click`); its two-URL `/monitoring` lane was retired by
+  #3202. The node-27 live `display_readonly` `/` + `/ops` lane is
+  `apps/frontend/e2e/live-c4-display.spec.ts` (script `test:e2e:live-c4-display`,
+  guarded by `assertC4LiveSpecsDoNotMockApis`). Both kept lanes require
+  `PLAYWRIGHT_LIVE_BASE_URL` and `PLAYWRIGHT_LIVE_API_BASE_URL` plus their own
+  pins and receipt path, and record unavailable runtime as `BLOCKED`, never
+  `PASS` (see `docs/VALIDATION.md`). The
   `test-only` specs classified above (`forecast`, `flood-alerts`, `hydro-met`,
   `m11-routes`, `m15-visual-conformance`, `meteorology`, `monitoring`, and the
   preview `preview-deeplink`) stay deterministic mocked regression — under

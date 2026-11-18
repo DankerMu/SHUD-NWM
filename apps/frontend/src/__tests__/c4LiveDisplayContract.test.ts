@@ -7,17 +7,11 @@ import { execFileSync } from 'node:child_process'
 import { assertC4LiveSpecsDoNotMockApis, isC4LiveSpecFile } from '../../playwright.config.helpers'
 
 describe('C4 live display profile separation', () => {
-  it('keeps the dedicated C4 command/profile separate from monitoring and river-click', async () => {
+  it('keeps the dedicated C4 command/profile separate from river-click and keeps the retired monitoring lane absent', async () => {
     const pkg = JSON.parse(readFileSync(path.resolve(__dirname, '../../package.json'), 'utf8'))
-    expect(pkg.scripts['test:e2e:live-display']).toMatch(/playwright-live-display\.sh/)
-    expect(pkg.scripts['test:e2e:live-display']).not.toMatch(/c4/)
+    expect(pkg.scripts['test:e2e:live-display']).toBeUndefined()
     expect(pkg.scripts['test:e2e:live-river-click']).toMatch(/playwright-live-river-click\.sh/)
     expect(pkg.scripts['test:e2e:live-c4-display']).toMatch(/playwright-live-c4-display\.sh/)
-
-    const monitoringConfig = readFileSync(path.resolve(__dirname, '../../playwright.live-display.config.ts'), 'utf8')
-    expect(monitoringConfig).toMatch(/grep: \/@live-monitoring\//)
-    expect(monitoringConfig).not.toMatch(/live-c4-display/)
-    expect(monitoringConfig).not.toMatch(/playwright\.live-display\.global-setup/)
 
     const riverConfig = readFileSync(path.resolve(__dirname, '../../playwright.live-river-click.config.ts'), 'utf8')
     expect(riverConfig).toMatch(/grep: \/@live-river-click\//)
@@ -54,7 +48,7 @@ describe('C4 live display profile separation', () => {
     }
   })
 
-  it('lists the five required C4 env keys and does not abort monitoring-only config import', async () => {
+  it('lists the five required C4 env keys', async () => {
     const previous = { ...process.env }
     vi.resetModules()
     try {
@@ -63,9 +57,6 @@ describe('C4 live display profile separation', () => {
       delete process.env.PLAYWRIGHT_LIVE_C4_BASIN_ID
       delete process.env.PLAYWRIGHT_LIVE_C4_SEGMENT_ID
       delete process.env.PLAYWRIGHT_LIVE_C4_RECEIPT_PATH
-      const monitoring = await import('../../playwright.live-display.config')
-      expect(monitoring.default.globalSetup).toBeUndefined()
-      expect(monitoring.default.grep?.toString()).toContain('live-monitoring')
 
       const c4 = await import('../../playwright.live-c4-display.config')
       expect(c4.default.workers).toBe(1)
@@ -83,7 +74,7 @@ describe('C4 live display profile separation', () => {
     }
   })
 
-  it('Playwright C4 profile lists the C4 test and the monitoring/river profiles do not', () => {
+  it('Playwright C4 profile lists the C4 test and the river-click profile does not', () => {
     const frontendDir = path.resolve(__dirname, '../..')
     const { chmodSync, mkdtempSync, realpathSync, rmSync } = require('node:fs') as typeof import('node:fs')
     const parent = realpathSync(mkdtempSync(path.join(tmpdir(), 'nhms-c4-list-')))
@@ -130,13 +121,10 @@ describe('C4 live display profile separation', () => {
       expect(c4).not.toMatch(/@live-monitoring/)
       expect(c4).not.toMatch(/@live-river-click/)
 
-      const monitoring = list('playwright.live-display.config.ts')
-      expect(monitoring).toMatch(/@live-monitoring/)
-      expect(monitoring).not.toMatch(/@live-c4-display/)
-
       const river = list('playwright.live-river-click.config.ts')
       expect(river).toMatch(/@live-river-click/)
       expect(river).not.toMatch(/@live-c4-display/)
+      expect(river).not.toMatch(/@live-monitoring/)
     } finally {
       rmSync(parent, { recursive: true, force: true })
     }
