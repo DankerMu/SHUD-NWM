@@ -1,8 +1,12 @@
 # monitoring-migration Specification
 
 ## Purpose
-TBD - created by archiving change m35-frontend-modernization. Update Purpose after archive.
+Define the modernized monitoring page: its layout, summary bar, seven-stage pipeline cards with per-basin failure
+expansion, the filtered and paginated jobs table with its log modal and cancel action (no retry action), the trend
+charts, and visibility-aware auto-polling.
+
 ## Requirements
+
 ### Requirement: Monitoring page layout
 The system SHALL render the monitoring page with a responsive layout: three columns (stages | jobs | trends) above 1200px, two columns (stages+jobs | trends below) between 800-1200px, single column below 800px.
 
@@ -58,15 +62,16 @@ The system SHALL display a modal dialog when the user clicks "查看日志" on a
 - **THEN** the modal MUST display an error message instead of staying in "loading" state
 
 ### Requirement: Retry and cancel actions
-The system SHALL render retry buttons for failed jobs and cancel buttons for active jobs, using the actual user role in the X-User-Role header.
+The system SHALL render cancel buttons for active jobs, using the actual user role in the X-User-Role header. It SHALL NOT render a retry button for any job (#3179); failed-run recovery is the node-22 manual-repair marker lane.
 
 #### Scenario: Retry with actual role
-- **WHEN** the user with role "operator" clicks retry on a failed job
-- **THEN** the request MUST include header `X-User-Role: operator` (not a hard-coded value)
+- **WHEN** the user with role "operator" views a failed job, or clicks cancel on an active job
+- **THEN** no retry button is rendered for the failed job
+- **AND** the cancel request MUST include header `X-User-Role: operator` (not a hard-coded value)
 
 #### Scenario: Viewer cannot retry
 - **WHEN** the user role is "viewer"
-- **THEN** retry and cancel buttons MUST NOT be rendered
+- **THEN** cancel buttons MUST NOT be rendered, and no retry button exists for any role
 
 ### Requirement: Trend panel with charts
 The system SHALL display two ECharts line charts: 7-day average stage duration (one line per stage) and cycle success rate over time.
@@ -85,4 +90,3 @@ The system SHALL poll pipeline status, stages, and jobs every 10 seconds, pausin
 #### Scenario: Manual refresh
 - **WHEN** the user clicks the refresh button
 - **THEN** all monitoring data MUST be re-fetched immediately regardless of the polling timer
-

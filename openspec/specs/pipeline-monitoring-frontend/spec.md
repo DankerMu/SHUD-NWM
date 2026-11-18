@@ -12,7 +12,7 @@ The pipeline monitoring page SHALL be accessible only to users with authorized r
 #### Scenario: Authorized user accesses monitoring page
 
 - **WHEN** a user with `operator`, `model_admin`, or `sys_admin` role navigates to the monitoring page
-- **THEN** the page SHALL render the full monitoring dashboard including all interactive controls (retry, cancel)
+- **THEN** the page SHALL render the full monitoring dashboard including its interactive controls (cancel); no retry control is rendered for any role (#3179)
 
 #### Scenario: Unauthorized user attempts access
 
@@ -22,9 +22,7 @@ The pipeline monitoring page SHALL be accessible only to users with authorized r
 #### Scenario: Retry and cancel actions require operator+ role
 
 - **WHEN** a user with `viewer` or `contributor` role somehow reaches the monitoring page
-- **THEN** the retry and cancel action buttons MUST NOT be rendered
-
----
+- **THEN** the cancel action button MUST NOT be rendered, and no retry action is rendered for this or any other role
 
 ### Requirement: Top Summary Bar
 
@@ -125,7 +123,7 @@ The monitoring page SHALL display a job list table in the center area with colum
   - `slurm_job_id` — Slurm-assigned job identifier
   - `submitted_at` — formatted as `YYYY-MM-DD HH:mm:ss`
   - `duration` — formatted as `Xm Ys` or `--` if not finished
-  - `actions` — containing "View Logs" button and, for failed jobs, a "Retry" button
+  - `actions` — containing the "View Logs" button and, where authorized, the cancel control; there is no "Retry" button
 
 #### Scenario: Filter by status
 
@@ -150,9 +148,9 @@ The monitoring page SHALL display a job list table in the center area with colum
 
 #### Scenario: Retry action from table
 
-- **WHEN** a user with `operator+` role clicks the "Retry" button on a failed job row
-- **THEN** the frontend SHALL call `POST /api/v1/runs/{run_id}/retry` and display an error toast carrying the API error message, because the endpoint answers `409 CONTROL_PLANE_MANUAL_ACTION_REQUIRED` and submits nothing
-- **THEN** because the endpoint never answers with success, the page only ever reaches its error path for this action; the success toast it still contains is unreachable until #3179 removes the button
+- **WHEN** an authorized operator views a `failed`, `submission_failed`, `partially_failed` or `permanently_failed` job row
+- **THEN** the table SHALL NOT render a "Retry" button and SHALL NOT issue `POST /api/v1/runs/{run_id}/retry`
+- **AND** failed-run recovery is the node-22 manual-repair marker lane (`scripts/node22_manual_retry_failed_runs.py`, runbook `node22-control-plane-manual-recovery`), not a page action
 
 #### Scenario: View Logs action from table
 

@@ -38,7 +38,7 @@ The system SHALL configure Playwright with baseURL pointing to the Vite dev serv
 - **THEN** Playwright MUST launch a browser and execute all `*.spec.ts` files under `e2e/`
 
 ### Requirement: Monitoring page E2E test
-The system SHALL have a Playwright E2E test covering: page load, stages rendering, failure expansion, jobs filtering, log modal, retry action, permission denial for viewer role.
+The system SHALL have a Playwright E2E test covering: page load, stages rendering, failure expansion, jobs filtering, log modal, the absence of a retry action, permission denial for viewer role.
 
 #### Scenario: E2E monitoring happy path
 - **WHEN** the Playwright test navigates to `/monitoring` with mocked API responses

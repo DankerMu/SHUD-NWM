@@ -1016,13 +1016,6 @@ For every module under `services/orchestrator` discovered from disk, importing i
 - **WHEN** a fixed split module's back-import of its facade is moved above a definition the facade imports from it
 - **THEN** the first-import guard fails and names that module
 
-### Requirement: The journal retry helpers SHALL NOT keep an uncalled duplicate of the runtime-root predicate
-`services/orchestrator/file_journal_retry_helpers.py` SHALL use `retry._has_runtime_root_field` and SHALL NOT define `_mapping_has_runtime_root_fields`. The journal cluster map SHALL NOT list it.
-
-#### Scenario: Cluster map matches the module
-- **WHEN** `tests/test_file_journal_cluster_map.py` runs
-- **THEN** it passes with no `retry_helpers` entry for `_mapping_has_runtime_root_fields`
-
 ### Requirement: The journal cluster map SHALL be a checked-in artifact before any extraction
 `tests/fixtures/file_journal_cluster_map.json` SHALL assign every top-level definition of `services/orchestrator/file_orchestration_journal.py` to exactly one of `facade`, `context`, `read_attribution`, `primitives`, `replay`, `candidates`, `paths`, `retry_helpers`, and SHALL list, for every name that any test monkeypatches on the facade (found by searching `tests/` for `file_orchestration_journal.<name>` patch targets and for `setattr(<alias>, "<name>"`), its cluster and the clusters of all its call sites. A test SHALL fail when a top-level definition is unassigned, assigned twice, or when a patched name is assigned to a cluster other than `facade` while one of its call sites is assigned elsewhere without the late-lookup rule below.
 
@@ -1054,7 +1047,7 @@ Patched seams follow two rules:
 - **THEN** the stub's call count is greater than zero
 
 #### Scenario: Retry-helper callers of the facade clock
-- **WHEN** a test patches `file_orchestration_journal._utcnow` with a counting stub and calls the moved `_journal_record_for_write` or `_private_runtime_root_recovery_record` in `file_journal_retry_helpers.py`
+- **WHEN** a test patches `file_orchestration_journal._utcnow` with a counting stub and calls the moved `_journal_record_for_write` in `file_journal_retry_helpers.py` (`_private_runtime_root_recovery_record` was deleted with its write-only lane by #3183)
 - **THEN** the stub's call count is greater than zero and the record's `created_at` is the stub's value
 
 #### Scenario: Annotation-only back references

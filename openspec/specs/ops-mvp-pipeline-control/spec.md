@@ -8,7 +8,7 @@ boundary.
 
 ### Requirement: Ops MVP entry
 
-The frontend SHALL expose an operations MVP entry focused on QHH pipeline status, jobs, logs, and retry controls.
+The frontend SHALL expose an operations MVP entry focused on QHH pipeline status, jobs, and logs. It has no retry control and no cancel control (cancel lives on `/monitoring`); failed-run recovery is the node-22 manual-repair marker lane (#3179).
 
 #### Scenario: Ops navigation entry
 - **WHEN** the app shell renders for an authorized operator
@@ -41,12 +41,12 @@ The operations MVP SHALL read stage, job, log, and retry state from formal backe
 
 #### Scenario: Retry failed run
 - **WHEN** a job or run is in `failed`, `submission_failed`, `partially_failed`, or `permanently_failed` state and the operator is authorized
-- **THEN** the page shows a restart action that calls `POST /api/v1/runs/{run_id}/retry`
-- **AND** the endpoint answers `409 CONTROL_PLANE_MANUAL_ACTION_REQUIRED`; the page surfaces that error and does not claim a retry was submitted.
+- **THEN** the page shows no restart action and does not call `POST /api/v1/runs/{run_id}/retry`
+- **AND** recovery runs through the node-22 manual-repair marker lane (`scripts/node22_manual_retry_failed_runs.py`).
 
 #### Scenario: Authorization gate
 - **WHEN** a non-operator opens `/ops`
-- **THEN** mutating controls such as retry and cancel are hidden or disabled according to existing RBAC behavior
+- **THEN** mutating controls such as cancel are hidden or disabled according to existing RBAC behavior
 - **AND** direct retry or cancel API calls by a non-operator are rejected by the backend according to existing authorization rules
 - **AND** the page does not bypass production authentication requirements beyond documented internal MVP dev-role overrides.
 
@@ -55,8 +55,8 @@ The operations MVP SHALL read stage, job, log, and retry state from formal backe
 The operations MVP SHALL treat qhh diagnostic scripts as reproduction evidence only and use the formal backend scheduler/orchestrator path for operational status.
 
 #### Scenario: Formal scheduler source
-- **WHEN** the MVP operations page displays run status or retry actions
-- **THEN** its data comes from backend pipeline status, jobs, logs, and retry APIs tied to `ops.pipeline_job` or equivalent orchestrator persistence
+- **WHEN** the MVP operations page displays run status or cancel actions
+- **THEN** its data comes from backend pipeline status, jobs, logs, and cancel APIs tied to `ops.pipeline_job` or equivalent orchestrator persistence
 - **AND** it does not depend on `.nhms-runs/qhh-continuous` state JSON files as the production control source.
 
 #### Scenario: Controlled failure evidence

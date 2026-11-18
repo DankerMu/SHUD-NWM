@@ -1,8 +1,12 @@
 # display-readonly-ops-ui Specification
 
 ## Purpose
-TBD - created by archiving change m22-two-node-docker-readonly-display. Update Purpose after archive.
+Define how `/ops` behaves on the read-only display node (`display_readonly`): it renders as a diagnostic surface with
+no control requests, binds runs by strict identity, hands off to the latest published product on the single map, offers
+role-neutral diagnostic copy, and reads job logs only from published log artifacts.
+
 ## Requirements
+
 ### Requirement: Ops display mode is read-only
 
 The `/ops` frontend SHALL render as a read-only diagnostic surface when the service role is `display_readonly`.
@@ -19,7 +23,7 @@ The `/ops` frontend SHALL render as a read-only diagnostic surface when the serv
 
 #### Scenario: Compute mode can retain controls
 - **WHEN** `/ops` or monitoring renders in `compute_control` or `dev_monolith` mode and the user is authorized
-- **THEN** existing retry/cancel controls can remain available according to RBAC
+- **THEN** the existing cancel control can remain available according to RBAC; no retry control exists in any mode (#3179)
 - **AND** existing monitoring tests remain valid for non-display roles.
 
 #### Scenario: Display queue depth degradation
@@ -114,4 +118,3 @@ The display readonly `/ops` page SHALL view logs through the backend job logs en
 - **WHEN** a job log is missing, unsupported, or access denied
 - **THEN** the log modal displays the stable backend error reason
 - **AND** the diagnostic payload still includes safe job identity for manual investigation.
-
