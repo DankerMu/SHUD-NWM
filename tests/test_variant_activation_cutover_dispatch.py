@@ -14,7 +14,6 @@ from typing import Any
 
 import pytest
 
-from packages.common.model_registry import ModelActivationContext
 from services.orchestrator.scheduler_file_providers import FileSchedulerModelRegistry
 from tests.variant_activation_cutover_helpers import (
     BASIN_ID,
@@ -23,7 +22,6 @@ from tests.variant_activation_cutover_helpers import (
     _HarnessStore,
     _ManifestPublisherStub,
     _RecordingCursor,
-    install_two_mount_hook_chain,
     two_models,
     variant_direct_grid_profile,
 )
@@ -198,9 +196,8 @@ def test_retired_not_destroyed_superseded_row_retained_after_cutover(
 # Locks Epic #961 tasks.md §2.4: the cutover is safe under two
 # racing activation requests for the same
 # ``(basin_id, basin_version_id)`` scope, and repeating a completed
-# activation is a true no-op — no duplicate transition, no second hook
-# fire, no manifest re-publish, no second ``allowed``/``rollback``
-# audit row.
+# activation is a true no-op — no duplicate transition, no manifest
+# re-publish, no second ``allowed``/``rollback`` audit row.
 #
 # The production authority is the ``FOR UPDATE`` scope lock acquired at
 # ``packages/common/model_registry.py`` line 1786 (via
@@ -360,46 +357,28 @@ def test_concurrent_activation_leaves_exactly_one_active_and_stable_loser(
     ]
 
 
-def test_repeat_already_current_no_second_transition_no_hook_no_manifest_no_audit(
+def test_repeat_already_current_no_second_transition_no_manifest_no_audit(
     two_models: list[dict[str, Any]],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """§2.4: repeat activate of the already-current target is a true no-op.
 
     Contract locked (per tasks.md §2.4 "Cutover is concurrency-safe
     and idempotent"):
 
-      1. First call: successful transition — pre-activation hooks
-         fire once, manifest publisher fires once, one
-         ``outcome IN ('allowed','rollback')`` audit row appended,
-         ``active_flag=True`` on the target.
+      1. First call: successful transition — manifest publisher fires
+         once, one ``outcome IN ('allowed','rollback')`` audit row
+         appended, ``active_flag=True`` on the target.
       2. Second call (same target, now already-active):
          * returns ``already_current``,
          * ``_state_updates`` unchanged (no duplicate supersede+activate),
-         * pre-activation hook counter unchanged (no second fire),
          * manifest publisher ``call_count`` unchanged (no re-publish),
          * NO additional ``outcome IN ('allowed','rollback')`` audit
            row (an already-current audit row MAY be appended, but that
            has a distinct outcome and is not a second "success" row).
-
-    The hooks run on the test-only two-entry chain (#3165), so "fired
-    once, in declared order" is not satisfied by a single mount.
     """
-    chain = install_two_mount_hook_chain(monkeypatch)
     store = _HarnessStore(two_models)
     publisher = _ManifestPublisherStub()
     store.register_post_commit_manifest_publisher(publisher)
-
-    hook_calls: list[str] = []
-
-    def _spy(name: str) -> Any:
-        def _hook(_cursor: Any, _ctx: ModelActivationContext) -> None:
-            hook_calls.append(name)
-
-        return _hook
-
-    for mount_point in chain:
-        store.register_pre_activation_hook(mount_point, _spy(mount_point))
 
     # --- Call 1: real transition -------------------------------------
     result_1 = store.model_lifecycle_operation(
@@ -414,8 +393,6 @@ def test_repeat_already_current_no_second_transition_no_hook_no_manifest_no_audi
         ("legacy_m0", "superseded", False),
         ("direct_grid_m1", "active", True),
     ]
-    # Both hooks fired exactly once, in declared order.
-    assert hook_calls == list(chain)
     # Manifest publisher fired exactly once.
     assert publisher.call_count == 1
     # Exactly one ``allowed``/``rollback`` audit row.
@@ -427,7 +404,6 @@ def test_repeat_already_current_no_second_transition_no_hook_no_manifest_no_audi
     # Snapshot post-call-1 state so the assertions below are anchored
     # to the exact evidence signatures, not to hardcoded counts.
     state_updates_after_1 = list(store._state_updates)
-    hook_calls_after_1 = list(hook_calls)
     publisher_calls_after_1 = publisher.call_count
     success_audit_after_1 = len(first_success_rows)
 
@@ -442,9 +418,6 @@ def test_repeat_already_current_no_second_transition_no_hook_no_manifest_no_audi
 
     # No duplicate supersede+activate transition.
     assert store._state_updates == state_updates_after_1
-    # No second pre-activation hook fire (the already-current gate at
-    # ``model_lifecycle_operation`` short-circuits the hook chain).
-    assert hook_calls == hook_calls_after_1
     # No manifest re-publish (already-current is not a
     # dispatch-set-changing commit; see SUB-6 predicate).
     assert publisher.call_count == publisher_calls_after_1

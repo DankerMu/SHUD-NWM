@@ -1,7 +1,7 @@
 """Lifecycle support methods of ``PsycopgModelRegistryStore``: the
-pre-activation hook chain and post-commit publishers, the prior-state /
-rollback-history reads, and the lifecycle / activation / refusal audit writes
-(#2617 split of ``packages.common.model_registry``).
+post-commit publishers, the prior-state / rollback-history reads, and the
+lifecycle / activation audit writes (#2617 split of
+``packages.common.model_registry``).
 
 A plain mixin: no fields and no dunders. ``PsycopgModelRegistryStore`` in
 ``packages.common.model_registry`` is the only class that composes it.
@@ -14,16 +14,11 @@ from typing import Any
 
 from packages.common.auth_policy import PolicyDecision, audit_record, redact_audit_payload
 from packages.common.model_registry_contracts import (
-    PRE_ACTIVATION_HOOK_MOUNT_POINTS,
-    InvalidPayloadError,
-    ModelActivationContext,
     ModelLifecycleOperation,
     PostCommitManifestPublisher,
     PostCommitPublishContext,
     PostCommitStateIndexPublisher,
-    PreActivationHook,
     _classify_forcing_mapping_mode,
-    _default_no_op_hook,
     _default_no_op_manifest_publisher,
     _default_no_op_state_index_publisher,
     _json_mapping,
@@ -31,51 +26,12 @@ from packages.common.model_registry_contracts import (
 from packages.common.model_registry_preflight_rules import _canonical_lifecycle_state, _model_audit_reference
 from packages.common.model_registry_public import (
     REDACTED_REASON,
-    _model_public_projection,
     _sanitize_audit_uri,
 )
 
 
 class _LifecycleSupportMixin:
-    """Activation hooks, post-commit publishers, prior-state reads and audit writes."""
-
-    def register_pre_activation_hook(self, mount_point: str, hook: PreActivationHook) -> None:
-        """Register a hook at a reserved mount point (§2.1).
-
-        Raises ``InvalidPayloadError`` for an unknown mount point so a
-        typo cannot silently install a hook that never fires.
-        """
-        if mount_point not in PRE_ACTIVATION_HOOK_MOUNT_POINTS:
-            raise InvalidPayloadError(
-                f"Unknown pre-activation mount point: {mount_point!r}; "
-                f"valid mount points are {PRE_ACTIVATION_HOOK_MOUNT_POINTS}"
-            )
-        # ``_pre_activation_hooks`` is a mutable dict on the instance
-        # (seeded in ``__post_init__``); mutating it is compatible with
-        # the ``frozen=True`` dataclass because we mutate the dict, not
-        # reassign the field.
-        self._pre_activation_hooks[mount_point] = hook
-
-    def _dispatch_pre_activation_hooks(
-        self,
-        cursor: Any,
-        activation_context: ModelActivationContext,
-    ) -> None:
-        """Run the ordered hook chain inside the lifecycle transaction.
-
-        Iterates ``PRE_ACTIVATION_HOOK_MOUNT_POINTS`` in declared order;
-        a raising hook propagates so the whole transaction rolls back
-        (fail-closed, no "activated but hooks not run" intermediate
-        state — D7).
-        """
-        # Defensive lookup: instances constructed via unusual paths that
-        # skip ``__post_init__`` still get the default chain.
-        hooks: Mapping[str, PreActivationHook] = getattr(
-            self, "_pre_activation_hooks", {}
-        )
-        for mount_point in PRE_ACTIVATION_HOOK_MOUNT_POINTS:
-            hook = hooks.get(mount_point, _default_no_op_hook)
-            hook(cursor, activation_context)
+    """Post-commit publishers, prior-state reads and audit writes."""
 
     def register_post_commit_manifest_publisher(
         self, publisher: PostCommitManifestPublisher
@@ -87,8 +43,7 @@ class _LifecycleSupportMixin:
         wiring binds this to
         ``services.orchestrator.scheduler_file_providers.publish_scheduler_registry_manifest``;
         tests bind a recording stub. Only one publisher is supported —
-        the post-commit tail is a single seam, not an ordered chain
-        (contrast with the pre-activation hook chain).
+        the post-commit tail is a single seam, not an ordered chain.
         """
         object.__setattr__(self, "_post_commit_manifest_publisher", publisher)
 
@@ -99,8 +54,7 @@ class _LifecycleSupportMixin:
 
         Called AFTER the lifecycle transaction commits, so the manifest
         reflects the committed DB state and never fires on a rolled-back
-        transaction (preflight-blocked / hook-aborted / audit-persistence
-        failure). A raising publisher propagates — the transition is
+        transaction (preflight-blocked / audit-persistence failure). A raising publisher propagates — the transition is
         already committed, so surfacing the failure to the caller is the
         correct behavior; the operator sees the divergence between DB
         and manifest immediately instead of silently.
@@ -478,105 +432,3 @@ class _LifecycleSupportMixin:
             ),
         )
         return int(cursor.fetchone()["log_id"])
-
-    def _record_state_clone_refusal_audit(
-        self,
-        *,
-        activation_context: ModelActivationContext,
-        refusal: Any,
-        policy_decision: PolicyDecision,
-        request_id: str | None,
-        operation: ModelLifecycleOperation,
-        preflight: Mapping[str, Any],
-    ) -> dict[str, Any]:
-        """Persist the state-clone refusal audit record on a fresh tx.
-
-        SUB-5 task 3.2: the pre-activation clone hook refused a source
-        with no ``cold_start_approval`` covering it, so the lifecycle
-        transaction rolled back. This helper opens a fresh transaction
-        and writes an ``ops.audit_log`` row whose ``action`` is the
-        stable code ``state_clone_cold_start_approval_required`` and
-        whose ``details`` name the blocked ``(basin_version_id,
-        source_id)`` scope and the refusal cause; the row survives the
-        prior rollback because it is written on a NEW transaction (not
-        an autonomous sub-transaction, which PostgreSQL does not
-        support).
-
-        The returned result mirrors the shape of the ``blocked``
-        activation return so downstream callers key uniformly off
-        ``status`` and ``audit_reference``; the stable error code is
-        also surfaced under ``error.code`` for API consumers.
-
-        ``refusal`` is typed loosely as ``Any`` to avoid a module-level
-        import cycle from ``state_clone_hook`` — the caller resolves the
-        exception type locally and passes the instance in.
-        """
-        from packages.common.state_clone import (
-            STATE_CLONE_COLD_START_APPROVAL_REQUIRED,
-        )
-
-        target_model = activation_context.target_model
-        target_model_id = str(target_model.get("model_id"))
-        details = {
-            "basin_version_id": activation_context.basin_version_id,
-            "source_id": getattr(refusal, "source_id", None),
-            "refusal_scope": getattr(refusal, "refusal_scope", None),
-            "refusal_code": getattr(
-                refusal, "refusal_code", STATE_CLONE_COLD_START_APPROVAL_REQUIRED
-            ),
-            "target_model_id": target_model_id,
-            "operation": operation,
-            "request_id": request_id,
-        }
-        details = redact_audit_payload(details)
-
-        with self._transaction() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO ops.audit_log (
-                    actor,
-                    actor_role,
-                    action,
-                    entity_type,
-                    entity_id,
-                    details
-                )
-                VALUES (%s, %s, %s, 'model_instance', %s, %s)
-                RETURNING log_id
-                """,
-                (
-                    policy_decision.actor_id,
-                    ",".join(policy_decision.roles),
-                    STATE_CLONE_COLD_START_APPROVAL_REQUIRED,
-                    target_model_id,
-                    self._json(details),
-                ),
-            )
-            audit_id = int(cursor.fetchone()["log_id"])
-
-        return {
-            "status": "refused",
-            "operation": operation,
-            "model": _model_public_projection(target_model),
-            "preflight": preflight,
-            "error": {
-                "code": STATE_CLONE_COLD_START_APPROVAL_REQUIRED,
-                "message": (
-                    f"state clone refused for source_id="
-                    f"{getattr(refusal, 'source_id', None)!r} "
-                    f"scope={getattr(refusal, 'refusal_scope', None)!r}; "
-                    "explicit cold-start approval required "
-                    "(docs §11.3 clause 2)."
-                ),
-                "details": {
-                    "basin_version_id": activation_context.basin_version_id,
-                    "source_id": getattr(refusal, "source_id", None),
-                    "refusal_scope": getattr(refusal, "refusal_scope", None),
-                },
-            },
-            "audit_reference": {
-                "entity_type": "model_instance",
-                "entity_id": target_model_id,
-                "log_id": audit_id,
-            },
-        }

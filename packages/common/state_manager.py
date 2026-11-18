@@ -897,9 +897,9 @@ class PsycopgStateSnapshotRepository:
 
         Shadow-proof filter (SUB-6 Round-1 fold): rows written by SHUD
         forecast / save-state paths (``clone_gate_fingerprint IS NULL``)
-        are excluded. Only rows produced by the state-clone hook
-        (``clone_gate_fingerprint IS NOT NULL``, populated by SUB-2's
-        write path) are considered. This isolates clone rows unambiguously
+        are excluded. Only clone rows (``clone_gate_fingerprint IS NOT
+        NULL``, populated by SUB-2's core clone write path in
+        ``packages/common/state_clone.py``) are considered. This isolates clone rows unambiguously
         so a re-activation with a backdated ``t*`` cannot be shadowed by
         prior forecast/save-state rows at higher ``valid_time`` values
         under the same ``(model_id, source_id)`` pair — the publisher
@@ -927,9 +927,9 @@ class PsycopgStateSnapshotRepository:
         the file state index; the DB's write-side
         ``upsert_state_snapshot`` is the source of truth.
 
-        Returns ``None`` when no clone row exists for the pair —
-        approved cold-start (SUB-5 task 3.2), hook-skipped fresh basin,
-        or legacy target — so the caller skips publish for that source
+        Returns ``None`` when no clone row exists for the pair — cold
+        start, fresh basin, or legacy target — so the caller skips
+        publish for that source
         (never fabricates an index entry).
         """
         row = self._fetch_optional(
@@ -1739,8 +1739,8 @@ class FileStateSnapshotIndexRepository:
 
         Answers "when did ``model_id`` come into existence for ``source_id``?"
         from clone provenance the index already carries: an entry with
-        ``cloned_from_model_id`` set was written by the state-clone hook, and
-        its ``valid_time`` is the cutover instant ``t*``.
+        ``cloned_from_model_id`` set was written by the clone CLI, and its
+        ``valid_time`` is the cutover instant ``t*``.
 
         Resolution rules (change ``lineage-scoped-cycle-completion``, D2/D4):
 
@@ -4101,7 +4101,7 @@ def _clone_entries_for_model_source(
     """Clone-provenance entries for one ``(model_id, source_id)``, EARLIEST first.
 
     ``cloned_from_model_id`` carries the db-free shadow-proof filter: only the
-    state-clone hook writes it, so forecast / save-state entries can never
+    clone CLI writes it, so forecast / save-state entries can never
     shadow a clone written at a backdated ``t*``.
 
     On the fingerprint axis the two planes now AGREE: #1739 ruled

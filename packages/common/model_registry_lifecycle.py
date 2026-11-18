@@ -21,21 +21,17 @@ from packages.common.auth_policy import (
 )
 from packages.common.model_registry_contracts import (
     MODEL_LIFECYCLE_ACTIONS,
-    ColdStartApprovalInput,
     InvalidPayloadError,
     MissingResourceError,
-    ModelActivationContext,
     ModelLifecycleAuditPersistenceError,
     ModelLifecycleOperation,
     ModelLifecycleState,
     ModelRegistryError,
     PostCommitPublishContext,
-    _build_activation_result_approval_block,
     _classify_forcing_mapping_mode,
     _extract_source_scope,
     _json_mapping,
     _should_publish_manifest_after_commit,
-    _would_be_already_current,
 )
 from packages.common.model_registry_preflight_rules import (
     _activation_safety_evidence,
@@ -149,7 +145,6 @@ class _ModelLifecycleMixin:
         previous_model_id: str | None = None,
         override_missing_active: bool = False,
         reason: str | None = None,
-        cold_start_approval: ColdStartApprovalInput | None = None,
     ) -> dict[str, Any]:
         if operation not in MODEL_LIFECYCLE_ACTIONS:
             raise InvalidPayloadError(f"Unsupported model lifecycle operation: {operation}")
@@ -178,26 +173,14 @@ class _ModelLifecycleMixin:
         # §2.2 (Epic #961) post-commit manifest re-publish trigger.
         # ``publish_context`` is set inside the transaction ONLY on the
         # committed successful-transition path. Blocked/already-current/
-        # hook-aborted paths either early-return before setting it or
-        # roll the transaction back before setting it, so the publisher
+        # audit-persistence-failed paths either early-return before setting
+        # it or roll the transaction back before setting it, so the publisher
         # never fires on a non-committed transaction. The publisher is
         # invoked AFTER the ``with self._transaction()`` block exits
         # successfully (below the try) so the manifest reflects the
         # committed DB state, matching the tasks.md §2.2 "uniform
         # post-commit tail" contract.
         publish_context: PostCommitPublishContext | None = None
-
-        # SUB-5 task 3.2: hoisted so the outside-tx state-clone refusal
-        # handler can read the target model / basin scope after the
-        # lifecycle transaction has rolled back.
-        activation_context: ModelActivationContext | None = None
-
-        # Local import to avoid a module-level cycle: ``state_clone_hook``
-        # imports :class:`ColdStartApprovalInput` and
-        # :class:`ModelActivationContext` from this module, so importing
-        # the hook at module scope would deadlock. The specific exception
-        # type is stable and light — resolving it once per call is fine.
-        from packages.common.state_clone_hook import StateCloneCutoverRefusedError
 
         try:
             with self._transaction() as cursor:
@@ -324,45 +307,6 @@ class _ModelLifecycleMixin:
                         "audit_reference": {"entity_type": "model_instance", "entity_id": model_id, "log_id": audit_id},
                     }
 
-                # §2.1: run the ordered pre-activation hook chain inside
-                # the same transaction, BEFORE the supersede+activate
-                # swap, so a raising hook rolls back both the swap and
-                # the audit-row insert (fail-closed, D7). Hooks fire only
-                # for the three activation-class operations that produce
-                # a real swap; ``deactivate``/``supersede``/``deprecate``
-                # skip hooks because no clone target exists.
-                #
-                # Additional gate: skip when the target is already
-                # current — that path returns ``already_current`` from
-                # ``_apply_model_lifecycle_transition`` with no state
-                # mutation (mirrors the check at
-                # ``_apply_model_lifecycle_transition:2266-2268``), so
-                # there is nothing for a hook to act on.
-                # The ``rollback_version`` already-current path is the
-                # idempotent-rollback-retry short-circuit above, which
-                # returned before reaching this point.
-                if operation in {"activate", "switch_version", "rollback_version"} and not _would_be_already_current(
-                    model, operation
-                ):
-                    hook_target = previous if operation == "rollback_version" else model
-                    if hook_target is None:
-                        # rollback_version without a previous model is a
-                        # preflight blocker (ROLLBACK_HISTORY_MISSING),
-                        # so this branch is unreachable. Guard for the
-                        # invariant so a future preflight refactor cannot
-                        # silently pass None into a hook.
-                        raise InvalidPayloadError(
-                            "rollback_version reached the hook dispatch site with no previous_model."
-                        )
-                    activation_context = ModelActivationContext(
-                        basin_version_id=str(hook_target["basin_version_id"]),
-                        previous_active_model=(dict(current_active) if current_active is not None else None),
-                        target_model=dict(hook_target),
-                        source_scope=_extract_source_scope(hook_target),
-                        cold_start_approval=cold_start_approval,
-                    )
-                    self._dispatch_pre_activation_hooks(cursor, activation_context)
-
                 transition = self._apply_model_lifecycle_transition(
                     cursor,
                     model=model,
@@ -424,49 +368,15 @@ class _ModelLifecycleMixin:
                     "preflight": preflight,
                     "audit_reference": {"entity_type": "model_instance", "entity_id": model_id, "log_id": audit_id},
                 }
-                # SUB-5 task 3.2: if an explicit cold-start approval
-                # covered any source actually in scope, surface the
-                # approval + spin-up-distortion-announcement obligation
-                # marker on the activation result so the operator sees
-                # the same obligation clause that landed on the audit
-                # record inside the hook.
-                approval_block = _build_activation_result_approval_block(
-                    activation_context
-                )
-                if approval_block is not None:
-                    result["cold_start_approval"] = approval_block
         except ModelLifecycleAuditPersistenceError as error:
             return error.result
-        except StateCloneCutoverRefusedError as refusal:
-            # SUB-5 task 3.2: the state-clone hook refused a source
-            # without an approval covering it. The lifecycle transaction
-            # has already rolled back on the raised exception (via the
-            # ``_PsycopgTransaction.__exit__`` path), so the refusal
-            # audit record is written on a FRESH transaction below —
-            # PostgreSQL does not support autonomous transactions, so an
-            # in-tx write would have been discarded along with the
-            # supersede + activate swap.
-            if activation_context is None:  # pragma: no cover - defensive
-                # A refusal can only be raised from
-                # ``_dispatch_pre_activation_hooks``, which runs after
-                # ``activation_context`` is bound. Guard defensively so
-                # a future refactor cannot silently strip the invariant.
-                raise
-            return self._record_state_clone_refusal_audit(
-                activation_context=activation_context,
-                refusal=refusal,
-                policy_decision=decision,
-                request_id=request_id,
-                operation=operation,
-                preflight=preflight,
-            )
 
         # §2.2 + SUB-6 (§3.3) post-commit tail: fire publishers ONLY on
         # a committed dispatch-set-changing transition. All non-
-        # committing paths (preflight-blocked / already-current / hook-
-        # aborted / audit-persistence-failed) either early-returned
-        # above or left ``publish_context`` as None because the trigger
-        # was set only right before the successful return.
+        # committing paths (preflight-blocked / already-current /
+        # audit-persistence-failed) either early-returned above or left
+        # ``publish_context`` as None because the trigger was set only
+        # right before the successful return.
         #
         # Ordering invariant (D7 fact anchor A-i): the state-index
         # publisher runs FIRST. A raise here holds back the manifest re-

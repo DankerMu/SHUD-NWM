@@ -3584,7 +3584,6 @@ def _patch_lifecycle_store_with_raw_mesh_rows(
     *,
     preflight_status: str = "ready",
     audit_error: Exception | None = None,
-    hook_error: Exception | None = None,
 ) -> dict[str, dict[str, Any]]:
     rows = {
         "candidate_model": _lifecycle_row_with_raw_mesh_properties("candidate_model", active=False),
@@ -3632,10 +3631,6 @@ def _patch_lifecycle_store_with_raw_mesh_rows(
             raise audit_error
         return 99
 
-    def dispatch_hooks(*_args: object, **_kwargs: object) -> None:
-        if hook_error is not None:
-            raise hook_error
-
     monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: FakeTransaction())
     monkeypatch.setattr(PsycopgModelRegistryStore, "_lock_basin_version_scope", lambda *_args: None)
     monkeypatch.setattr(
@@ -3653,7 +3648,6 @@ def _patch_lifecycle_store_with_raw_mesh_rows(
     monkeypatch.setattr(PsycopgModelRegistryStore, "_update_model_lifecycle_state", update_lifecycle_state)
     monkeypatch.setattr(PsycopgModelRegistryStore, "_build_model_operation_preflight", preflight)
     monkeypatch.setattr(PsycopgModelRegistryStore, "_insert_model_lifecycle_audit", insert_audit)
-    monkeypatch.setattr(PsycopgModelRegistryStore, "_dispatch_pre_activation_hooks", dispatch_hooks)
     return rows
 
 
@@ -3675,24 +3669,16 @@ def test_model_public_projection_drops_raw_mesh_properties() -> None:
         ("candidate_model", "allowed", "allowed"),
         ("current_active", "already_current", "already_current"),
         ("candidate_model", "blocked", "blocked"),
-        ("candidate_model", "refused", "refused"),
         ("candidate_model", "audit_persistence_failure", "blocked"),
     ],
 )
 def test_model_lifecycle_operation_outcomes_carry_no_raw_mesh_properties(
     monkeypatch: pytest.MonkeyPatch, model_id: str, scenario: str, expected_status: str
 ) -> None:
-    from packages.common.state_clone_hook import StateCloneCutoverRefusedError
-
     _patch_lifecycle_store_with_raw_mesh_rows(
         monkeypatch,
         preflight_status="blocked" if scenario == "blocked" else "ready",
         audit_error=RuntimeError("audit insert failed") if scenario == "audit_persistence_failure" else None,
-        hook_error=(
-            StateCloneCutoverRefusedError(source_id="gfs", refusal_scope="missing_approval")
-            if scenario == "refused"
-            else None
-        ),
     )
     store = PsycopgModelRegistryStore("postgresql://example")
     decision = evaluate_policy(

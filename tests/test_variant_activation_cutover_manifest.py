@@ -14,7 +14,6 @@ from typing import Any
 import pytest
 
 from packages.common.model_registry import (
-    ModelActivationContext,
     ModelLifecycleOperation,
     _default_no_op_manifest_publisher,
     _should_publish_manifest_after_commit,
@@ -39,8 +38,8 @@ from tests.variant_activation_cutover_helpers import (
 # (``activate`` / ``switch_version`` / ``rollback_version`` / a
 # ``deactivate`` that removes the currently-active model via the
 # sys_admin missing-active override). Re-publish MUST NOT fire on
-# preflight-blocked, hook-aborted, already-current, or supersede-of-
-# active (blocked by MISSING_ACTIVE_RISK) paths.
+# preflight-blocked, audit-persistence-rolled-back, already-current, or
+# supersede-of-active (blocked by MISSING_ACTIVE_RISK) paths.
 #
 # Test taxonomy (function names include the ``-k`` selector tokens the
 # tasks.md evidence line pins):
@@ -259,7 +258,7 @@ def test_manifest_not_republished_when_preflight_blocked(
 ) -> None:
     """A preflight-blocked activate must NOT invoke the publisher.
 
-    Same poison as SUB-5's ``test_hooks_skipped_when_blocked``: point
+    Same poison as ``test_preflight_blocked_activation_writes_blocked_audit_and_no_state_update``: point
     the target's ``model_package_uri`` at an unsupported scheme so
     ``OBJECT_URI_PREFIX_INVALID`` fires. The transaction never commits
     the transition — the publisher must stay untouched.
@@ -280,36 +279,36 @@ def test_manifest_not_republished_when_preflight_blocked(
     assert stub.call_count == 0
 
 
-def test_manifest_not_republished_when_pre_activation_hook_raises(
+def test_manifest_not_republished_when_audit_persistence_fails(
     two_models: list[dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A raising pre-activation hook rolls back — the publisher must NOT fire.
+    """An audit-persistence failure rolls back — the publisher must NOT fire.
 
-    The hook raises BEFORE the transition commits (SUB-5 fail-closed
-    invariant), so the transaction rolls back and the publisher, which
-    is staged only AFTER audit persistence succeeds inside the same
-    transaction, is never reached.
+    The audit insert raises AFTER the transition ran inside the same
+    transaction, so the lifecycle operation surfaces the
+    ``LIFECYCLE_AUDIT_PERSISTENCE_FAILED`` blocked result, the transaction
+    rolls back, and the publisher, which is staged only AFTER audit
+    persistence succeeds, is never reached.
     """
     store = _HarnessStore(two_models)
     stub = _ManifestPublisherStub()
     store.register_post_commit_manifest_publisher(stub)
 
-    class _HookAbort(RuntimeError):
-        pass
+    def _raise(*_args: Any, **_kwargs: Any) -> int:
+        raise RuntimeError("test-injected audit insert failure")
 
-    def _raise(_cursor: Any, _ctx: ModelActivationContext) -> None:
-        raise _HookAbort("test-hook injected fail-closed abort")
+    monkeypatch.setattr(store, "_insert_model_lifecycle_audit", _raise)
 
-    store.register_pre_activation_hook("state_clone", _raise)
+    result = store.model_lifecycle_operation(
+        "direct_grid_m1",
+        operation="activate",
+        policy_decision=_decision("models.activate", "direct_grid_m1"),
+        request_id="req-manifest-audit-fails",
+    )
 
-    with pytest.raises(_HookAbort):
-        store.model_lifecycle_operation(
-            "direct_grid_m1",
-            operation="activate",
-            policy_decision=_decision("models.activate", "direct_grid_m1"),
-            request_id="req-manifest-hook-raises",
-        )
-
+    assert result["status"] == "blocked"
+    assert result["preflight"]["blockers"][-1]["code"] == "LIFECYCLE_AUDIT_PERSISTENCE_FAILED"
     # Transaction rolled back — publisher never invoked.
     assert stub.call_count == 0
     # Belt-and-braces: also assert the transaction context saw the raise.

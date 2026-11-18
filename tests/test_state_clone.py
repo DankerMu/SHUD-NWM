@@ -679,9 +679,8 @@ def test_clone_scope_is_single_source_only(
 ) -> None:
     """Per-source scope: cloning for source_A must not touch source_B rows.
 
-    spec.md pins "The clone executes per source across the activation source
-    scope" — the SUB-2 function takes ONE source_id and the caller (SUB-4)
-    iterates. Seed two qualified `(M0, source, t*)` snapshots differing only
+    The SUB-2 function takes ONE source_id and its caller (the node-22 clone
+    CLI) iterates per basin/source unit. Seed two qualified `(M0, source, t*)` snapshots differing only
     on source_id; invoke the clone with source_A; assert only the source_A
     (M1, source_A, t*) row appears and source_B remains a single (M0) row
     with no (M1) row created and no repository upsert touching source_B.
@@ -1311,10 +1310,10 @@ def test_fix_forward_unequal_fingerprint_routes_to_cold_start_approval_not_clone
         **kwargs,
     )
 
-    # This is the cold-start approval route: stable code fires and NO row
-    # is written. The operator must supply an explicit ColdStartApprovalInput
-    # (SUB-5 §3.2) at the activation-request level for the cutover to
-    # proceed — the clone plane cannot silently splice mismatched cores.
+    # The refusal carries the stable code and NO row is written: the clone
+    # plane cannot silently splice mismatched cores. Activating the candidate
+    # anyway is a cold start by omission, and the §11.3 spin-up-distortion
+    # announcement is the operator's obligation.
     assert result.refused is True
     assert result.cloned_row is None
     assert result.refusal_code == STATE_CLONE_COLD_START_APPROVAL_REQUIRED

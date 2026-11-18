@@ -122,7 +122,6 @@ from scripts.select_ci_tests_tables import (
     SELECTOR_META_GUARD_TEST,
     SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,
     SQL_SHAPE_ORACLE_TESTS,
-    STATE_CLONE_HOOK_TESTS,
     STATE_INDEX_COPYBACK_REPLAY_HELPERS_PATH,
     STATE_INDEX_COPYBACK_REPLAY_OWNER_PATH,
     STATE_INDEX_COPYBACK_REPLAY_TESTS,
@@ -1784,11 +1783,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # instead of silently falling out of the PR lane.
         #
         # The rule carries ONLY the mapping-builder package suites. rewrite.py's
-        # three non-gated importer suites OUTSIDE the package (tests/test_state_clone.py,
-        # tests/test_state_clone_cutover_hook.py, tests/test_state_clone_recalibration.py)
-        # are deliberately NOT carried here: each already has an independent
-        # owning surface (services/orchestrator/**, the state_clone_hook and
-        # data_adapters/base rules, the node22-clone-script rule), so routing
+        # two non-gated importer suites OUTSIDE the package (tests/test_state_clone.py,
+        # tests/test_state_clone_recalibration.py) are deliberately NOT carried
+        # here: each already has an independent owning surface
+        # (services/orchestrator/**, the node22-clone-script rule), so routing
         # them on every mapping-builder change would contaminate the lane. They
         # are dispositioned as `edge-consumer` pairs in
         # tests/test_select_ci_tests.py's INTENTIONAL_RULE_GAP_EXCLUSIONS.
@@ -1848,13 +1846,6 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_era5_adapter.py",
             "tests/test_grib_packing_reader.py",
         ),
-    ),
-    PathTestRule(
-        # #1711: state_clone_hook.py's suite name is deliberately not same-name
-        # derivable (no tests/test_state_clone_hook.py; its consumer suite is
-        # the cutover-hook suite). Explicit irregular mapping.
-        "packages/common/state_clone_hook.py",
-        STATE_CLONE_HOOK_TESTS,
     ),
     PathTestRule(
         # #1711: the node-22 clone script's four suites are the recalibration
@@ -3446,6 +3437,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_state_manager.py",
             "tests/test_state_qc.py",
+            # #3189: the only static pin on `PsycopgStateSnapshotRepository.
+            # upsert_state_snapshot`'s `clone_gate_kind` column, VALUES arity and
+            # param tuple (moved here with the deleted activation-time clone
+            # suite); not same-name derivable from this module.
+            "tests/test_state_manager_clone_upsert.py",
             # #2348: `state_snapshot_to_dict` builds the state-snapshot payload
             # the preservation oracle compares with master.
             *RESPONSE_MODEL_PRESERVATION_TESTS,

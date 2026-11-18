@@ -64,3 +64,58 @@ def test_file_index_satisfies_state_clone_lookup_protocol(tmp_path: Path) -> Non
         source_id="gfs",
         before_time=datetime(2026, 7, 6, 12, tzinfo=UTC),
     ) == snapshot
+
+
+def _upsert_sql_fragments(source: str) -> tuple[str, str, str, str]:
+    """Split the ``upsert_state_snapshot`` SQL body into its four column-bearing parts.
+
+    Returns ``(insert_column_list, values_clause, do_update_set, params_tuple)``
+    sliced out of the module source text, so the check reads the SQL the
+    repository actually emits rather than a copy maintained by the test.
+    """
+
+    # Anchor on the SQL itself: `state_manager.py` also declares the method on
+    # a Protocol and on the file-index repository, neither of which emits SQL.
+    start = source.index("INSERT INTO hydro.state_snapshot")
+    end = source.index("return _snapshot_from_row(row)", start)
+    body = source[start:end]
+    insert_columns = body[
+        body.index("INSERT INTO hydro.state_snapshot") : body.index("VALUES (")
+    ]
+    values_clause = body[body.index("VALUES (") : body.index("ON CONFLICT")]
+    do_update = body[body.index("DO UPDATE SET") : body.index("RETURNING *")]
+    params = body[body.index("RETURNING *") :]
+    return insert_columns, values_clause, do_update, params
+
+
+def test_state_snapshot_upsert_sql_names_clone_gate_kind_with_matching_arity() -> None:
+    """The ``hydro.state_snapshot`` upsert SQL carries ``clone_gate_kind`` consistently.
+
+    ``state_manager.py::PsycopgStateSnapshotRepository.upsert_state_snapshot`` is
+    the single copy of the INSERT ... ON CONFLICT statement (#3189 deleted the
+    second copy with the activation-time clone path; ADR 0005). It must name
+    ``clone_gate_kind`` exactly once in the INSERT column list, once in the
+    ``DO UPDATE SET`` list and once in the parameter tuple, with a ``VALUES``
+    placeholder count matching the INSERT column count.
+    """
+
+    source = Path("packages/common/state_manager.py").read_text(encoding="utf-8")
+    insert_columns, values_clause, do_update, params = _upsert_sql_fragments(source)
+    assert insert_columns.count("clone_gate_kind") == 1
+    assert do_update.count("clone_gate_kind = EXCLUDED.clone_gate_kind") == 1
+    assert params.count("snapshot.clone_gate_kind") == 1
+
+    # VALUES arity must match the INSERT column count: a column added without
+    # its placeholder is a runtime SQL error, and a placeholder added without
+    # its parameter shifts every later value.
+    columns = [
+        line.strip().rstrip(",")
+        for line in insert_columns.splitlines()
+        if line.strip()
+        and not line.strip().startswith("INSERT INTO")
+        and line.strip() not in ("(", ")")
+    ]
+    assert columns[-1] == "clone_gate_kind"
+    assert values_clause.count("%s") == len(columns), len(columns)
+    # And the params tuple carries one `snapshot.<attr>` per column.
+    assert params.count("snapshot.") == len(columns), len(columns)

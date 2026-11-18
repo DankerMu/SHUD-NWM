@@ -440,7 +440,6 @@
  "tests/test_start_display_api_restart_anchor.py": 20.694,
  "tests/test_state_clone.py": 0.681,
  "tests/test_state_clone_baseline_cutover_cli.py": 0.557,
- "tests/test_state_clone_cutover_hook.py": 0.544,
  "tests/test_state_clone_index_publish.py": 0.184,
  "tests/test_state_clone_recalibration.py": 1.085,
  "tests/test_state_clone_recalibration_cli.py": 0.567,

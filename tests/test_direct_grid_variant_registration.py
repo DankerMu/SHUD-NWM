@@ -293,9 +293,9 @@ class _FakeCursor:
         ) = parameters
         # `active_flag=false` MUST appear literally in the INSERT column list —
         # never as a bound parameter — to match the precedent set by
-        # `basins_registry_import._ensure_model_instance` and to make the
-        # lifecycle owner (Change 8 activation flip) the sole authority for
-        # `true`. Assert here so a future edit that flips it to a parameter
+        # `basins_registry_import._ensure_model_instance`; mirror activation is
+        # outside the producer and no production code path sets `true`. Assert
+        # here so a future edit that flips it to a parameter
         # trips this test rather than silently drifting.
         normalized_stmt = " ".join(statement.split()).lower()
         assert ", false," in normalized_stmt, (
@@ -343,7 +343,8 @@ class _FakeCursor:
         * ``active_flag=false`` is a LITERAL (never bound), matching the
           §D2 flag ownership boundary.
         * ``active_flag`` MUST NOT appear in the ``DO UPDATE SET`` list —
-          it stays owned by registration until Change 8's cutover flip.
+          an existing value is preserved (no production code path sets
+          ``active_flag=true``).
         * ``grid_snapshot_id`` MUST appear in both the SET list and the
           WHERE predicate (SUB-2 discriminator FK).
         """
@@ -983,7 +984,8 @@ def test_mirror_inactive_rows_written_with_explicit_false_flag(
     """Every mirror row lands with ``active_flag=False`` set explicitly.
 
     Locks the §D2 flag ownership boundary: registration owns the ``False``
-    landing; Change 8's cutover owns the flip to ``True``. If a future edit
+    landing; mirror activation is outside the producer and no production
+    code path sets ``active_flag=true``. If a future edit
     ever binds ``active_flag`` from user input or defaults to the column's
     ``true``, this test fires.
     """
@@ -1682,7 +1684,8 @@ def test_idempotent_different_binding_checksum_new_row_prior_mirror_retained(
 # After #965, none of these paths may:
 #   * insert `active_flag=true` on a fresh mirror row, or
 #   * escalate an existing row's `active_flag` from `false` to `true`.
-# Mirror activation belongs exclusively to Change 8's cutover flip. The
+# Mirror activation is outside the producer: no production code path sets
+# `active_flag=true`. The
 # fail-closed derived-cache collision predicate is retained unchanged.
 #
 # Test infrastructure:
@@ -1838,7 +1841,7 @@ def _seed_registered_mirror(
     `forcing_mapping_mode:'direct_grid'`, etc.) so a subsequent producer upsert
     hits the DO UPDATE path (identity matches, WHERE predicate returns TRUE).
     ``active_flag`` defaults to ``False`` (fresh registration) but callers may
-    seed ``True`` to simulate the post-cutover state (Change 8 flip).
+    seed ``True`` to simulate a row already active in the DB.
     """
 
     contract = _producer_contract(payload)
@@ -1929,7 +1932,7 @@ def test_producer_preserves_registration_flag_false_on_registered_variant_pre_cu
 
 
 def test_producer_preserves_registration_flag_true_stays_true() -> None:
-    """A row already flipped `true` by Change 8's cutover stays `true`.
+    """A row already `true` in the DB stays `true`.
 
     Locks the "never de-escalates" half of §D2 flag preservation: after the
     cutover flip, subsequent producer runs must not silently reset a live
