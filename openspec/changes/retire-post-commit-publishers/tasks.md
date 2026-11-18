@@ -11,6 +11,6 @@
 
 - [x] 1.1 Production deletions 1-6, preserving the must-preserve list.
 - [x] 1.2 Test dispositions per the table (moves keep assertions; new absence test).
-- [ ] 1.3 Selector/guard/durations/pyproject; runbooks.
-- [ ] 1.4 E1-E4 locally.
+- [x] 1.3 Selector/guard/durations/pyproject; runbooks.
+- [x] 1.4 E1-E4 locally.
 - [ ] 1.5 E5 on node-27 (orchestrator), E6, E7.

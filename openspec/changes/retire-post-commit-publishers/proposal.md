@@ -120,7 +120,7 @@ clone rows that `state_clone_index_publisher.py` reads.
 ## Evidence Floor
 
 - [x] E1 `uv run ruff check --no-cache .`; `git diff --check`; entropy hard gate `hard_gate_failing_count 0`.
-- [ ] E2 Zero hits for:
+- [x] E2 Zero hits for:
 
   ```
   git grep -nwE "register_post_commit_manifest_publisher|register_post_commit_state_index_publisher|_dispatch_post_commit_manifest_publish|_dispatch_post_commit_state_index_publish|_post_commit_manifest_publisher|_post_commit_state_index_publisher|_default_no_op_manifest_publisher|_default_no_op_state_index_publisher|PostCommitPublishContext|PostCommitManifestPublisher|PostCommitStateIndexPublisher|_should_publish_manifest_after_commit|_extract_source_scope|build_default_state_index_publisher|StateIndexPublishFailedError|state_clone_index_publisher|get_latest_clone_row_for_model_source|_ManifestPublisherStub|test_state_clone_index_publish|test_variant_activation_cutover_manifest|_LatestOnlyCloneRowRepo|_publisher_stub|_RollbackReadyHarnessStore|_AllowedDeactivateHarnessStore|test_real_clone_row_readers_disagree_about_a_null_fingerprint_row|test_db_plane_never_consults_the_publishers_latest_row_reader" -- . ':!openspec' ':!docs/review-loop-log.jsonl'

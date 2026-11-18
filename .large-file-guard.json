@@ -42,6 +42,7 @@
     "scripts/node22_scheduler_stall_health.py",
     "tests/test_node22_scheduler_stall_health.py",
     "docs/runbooks/qhh-mvp-production-like-e2e-checklist.md",
+    "docs/runbooks/production-ops/file-provider-refresh.md",
     "packages/common/state_manager.py",
     "services/orchestrator/file_orchestration_journal.py",
     "services/orchestrator/scheduler_candidates.py",
