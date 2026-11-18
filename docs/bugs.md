@@ -360,19 +360,24 @@ evidence:
   - docs/VALIDATION.md
   - docs/governance/LEGACY_DEAD_CODE_INVENTORY.md
   - apps/frontend/playwright.config.ts
-  - apps/frontend/playwright.live-display.config.ts
+  - apps/frontend/playwright.live-river-click.config.ts
+  - apps/frontend/playwright.live-c4-display.config.ts
   - apps/frontend/e2e/live-display.spec.ts
+  - apps/frontend/e2e/live-c4-display.spec.ts
   - apps/frontend/src/__tests__/playwrightConfig.test.ts
 retest_command: >-
   cd apps/frontend && corepack pnpm test -- playwrightConfig.test.ts
 ```
 
 The mocked specs are now explicitly named `mocked-regression-chromium`.
-The live-display profile requires `PLAYWRIGHT_LIVE_BASE_URL` and
-`PLAYWRIGHT_LIVE_API_BASE_URL`, rejects username/password userinfo, and has a
-static guard against broad `page.route('**/api/v1/**')` mocks in live specs.
-Current local live runtime remains `BLOCKED` when those env vars or a real
-display_readonly runtime are absent; that is not a live PASS.
+The live profiles (`live-river-click` and `live-c4-display`) require
+`PLAYWRIGHT_LIVE_BASE_URL` and `PLAYWRIGHT_LIVE_API_BASE_URL`, reject
+username/password userinfo, and have static guards against broad
+`page.route('**/api/v1/**')` mocks in live specs. Current local live runtime
+remains `BLOCKED` when those env vars or a real display_readonly runtime are
+absent; that is not a live PASS. The original two-URL `/monitoring` live
+profile was retired by #3202; its no-broad-mock guard now runs on the
+river-click config.
 
 ### BUG-20260527-013: Retry/cancel produced mock Slurm job IDs, not live Slurm receipts
 
@@ -443,12 +448,17 @@ evidence:
 retest_command: >-
   cd apps/frontend && PLAYWRIGHT_LIVE_BASE_URL="$DISPLAY_URL"
   PLAYWRIGHT_LIVE_API_BASE_URL="$API_BASE_URL"
-  corepack pnpm run test:e2e:live-display -- --grep "@ops"
+  PLAYWRIGHT_LIVE_C4_BASIN_ID="$C4_BASIN_ID"
+  PLAYWRIGHT_LIVE_C4_SEGMENT_ID="$C4_SEGMENT_ID"
+  PLAYWRIGHT_LIVE_C4_RECEIPT_PATH="$C4_RECEIPT_PATH"
+  corepack pnpm run test:e2e:live-c4-display
 ```
 
 Open follow-up #386 covers stale failed-stage evidence after successful manual
 retry. The browser still needs a live display_readonly receipt showing stable
 log unavailable feedback and no hidden retry/cancel mutation from node-27.
+The retest is the C4 `/ops` check, because the earlier two-URL live lane was
+retired by #3202.
 
 ## 2026-06-20 Display bootstrap decoupling (Epic #579)
 

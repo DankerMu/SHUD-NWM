@@ -54,15 +54,17 @@ receipt text.
 - Vitest, mocked Playwright, preview, and visual lanes are regression evidence.
   They may use simulated API responses and broad `page.route('**/api/v1/**')`
   mocks only in lanes documented as mocked, preview, or visual evidence.
-- Node-27 live display proof must come from the `live-display` lane with
-  explicit `PLAYWRIGHT_LIVE_BASE_URL` and `PLAYWRIGHT_LIVE_API_BASE_URL`
-  bindings, no broad API mocks, and a runtime config response whose
-  `service_role` is `display_readonly`.
-- A `live-display` receipt proves only the browser route or routes it actually
-  visited and the API calls it records. Current route authority requires `/`
-  plus `/ops`; if the live profile covers `/monitoring` or only a subset of the
-  required routes, record the uncovered route as separate live evidence or as
-  `BLOCKED`/`PARTIAL`, not inferred PASS.
+- Node-27 live display proof for `/` plus `/ops` must come from the
+  `test:e2e:live-c4-display` lane with explicit `PLAYWRIGHT_LIVE_BASE_URL` and
+  `PLAYWRIGHT_LIVE_API_BASE_URL` bindings, no API mocks, and a runtime config
+  response whose `service_role` is `display_readonly`. The `/` river-click P95
+  metric comes only from the `test:e2e:live-river-click` lane, which also
+  forbids broad API mocks. The two-URL `/monitoring` lane was retired by #3202.
+- A live receipt proves only the browser route or routes it actually visited
+  and the API calls it records. Current route authority requires `/` plus
+  `/ops`; if a live profile covers only a subset of the required routes, record
+  the uncovered route as separate live evidence or as `BLOCKED`/`PARTIAL`, not
+  inferred PASS.
 - Local `pnpm test`, `pnpm build`, screenshots, and mocked route assertions do
   not satisfy node-27 live display receipts. Record missing live URLs or an
   unavailable node-27 display as `BLOCKED`, not as a mocked PASS.

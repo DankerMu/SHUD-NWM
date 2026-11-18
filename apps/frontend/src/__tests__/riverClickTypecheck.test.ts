@@ -56,7 +56,6 @@ describe('river-click Node/Playwright typecheck gate (static wiring)', () => {
     expect(include).toContain('e2e/live-display.spec.ts')
     expect(include).toContain('src/lib/riverClickEvidence/**/*.ts')
     expect(include).toContain('playwright.config.helpers.ts')
-    expect(include).toContain('playwright.live-display.config.ts')
     expect(include).toContain('playwright.live-river-click.config.ts')
     expect(include).toContain('scripts/river-click-receipt-binder-core.d.mts')
     expect(tsconfig.compilerOptions.types).toContain('node')

@@ -696,9 +696,9 @@ curl -i "${DISPLAY_API_BASE_URL}/api/v1/jobs/<job_id>/logs?source=GFS&cycle_time
 ### 7.6 浏览器 E2E
 
 要求新增或使用无 API mock 的浏览器测试。现有含 `page.route('**/api/v1/**')` 的测试只能算 mocked regression。
-生产级 display_readonly 浏览器证据使用 `cd apps/frontend && PLAYWRIGHT_LIVE_BASE_URL=<27 frontend> PLAYWRIGHT_LIVE_API_BASE_URL=<27 api> corepack pnpm run test:e2e:live-display`。
-缺少 `PLAYWRIGHT_LIVE_BASE_URL` 或 `PLAYWRIGHT_LIVE_API_BASE_URL` 时该 lane 记为 `BLOCKED`，不能用默认 mocked regression lane 补为 live receipt；两个 URL 都不得通过 username/password userinfo 携带凭据。
-live receipt 还必须证明浏览器页面实际从配置的 API binding 读取 `service_role` 严格等于 `display_readonly` 的有界 runtime config 和监控只读 API。监控只读 API 证据只记录 URL/status，不解析响应体。RBAC `权限不足`、runtime config 不可用、任何 `/api/v1/slurm/*` 浏览器请求、retry/cancel mutation 都不能算 PASS。
+生产级 display_readonly 浏览器证据（`/` + `/ops`）使用 C4 lane：`cd apps/frontend && PLAYWRIGHT_LIVE_BASE_URL=<27 frontend> PLAYWRIGHT_LIVE_API_BASE_URL=<27 api> PLAYWRIGHT_LIVE_C4_BASIN_ID=<current-basin-id> PLAYWRIGHT_LIVE_C4_SEGMENT_ID=<current-segment-id> PLAYWRIGHT_LIVE_C4_RECEIPT_PATH=/absolute/private/nhms-frontend-c4-live-evidence-<run>.json corepack pnpm run test:e2e:live-c4-display`（完整步骤见 `node-27-bringup-checklist.md` C4 节）。
+在任何浏览器工作之前，C4 globalSetup owner 对配置分类：缺 `PLAYWRIGHT_LIVE_BASE_URL` 或 `PLAYWRIGHT_LIVE_API_BASE_URL` 时写一份 `REQUIRED_ENV_MISSING` `BLOCKED` receipt；缺 receipt 路径时只输出 `BLOCKED` 诊断、不写文件；pin 非法、URL 畸形（含 userinfo）记为 `CONFIG_INVALID` `FAIL`。这些结果都不能用默认 mocked regression lane 补为 live receipt；两个 URL 都不得通过 username/password userinfo 携带凭据。
+live receipt 还必须证明浏览器页面实际从配置的 API binding 读取 `service_role` 严格等于 `display_readonly` 的有界 runtime config，并读到 strict identity 的 `/ops` status/stages/jobs/logs。RBAC `权限不足`、runtime config 不可用、可见 retry/cancel 控件、任何 `/api/v1/slurm/*` 浏览器请求或目标 API origin 上的非 GET/HEAD 请求都不能算 PASS。旧 `/monitoring` 两 URL lane 已由 #3202 退役（`/monitoring` 不对 `display_readonly` 开放，该 lane 在公网部署上不可能 PASS）。
 
 当前 route authority：`/` 是 active single-map display proof，`/ops` 是 active operational display proof。
 `/hydro-met -> /` 可作为单独的旧别名重定向 smoke；`/forecast`、`/meteorology`、

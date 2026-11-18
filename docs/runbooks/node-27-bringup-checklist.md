@@ -439,7 +439,8 @@ click 只能人工截图、无法纳入 C4 自动 receipt：
       **不带** `LD_LIBRARY_PATH` 启动 chromium exit 0、master
       `test:e2e:mocked-regression` → 19 passed。临时 `~/pwdeps` userspace
       hack 已清除。live browser lane（含本节 popup live click、
-      `e2e/live-display.spec.ts`）的浏览器前提已就绪。
+      `e2e/live-display.spec.ts` 现仅承载的 river-click lane；其中旧 `/monitoring`
+      lane 已由 #3202 退役，`/ops` live 证据归 C4 lane）的浏览器前提已就绪。
 - [ ] 上述就绪后：station popup（forcing 序列）的 live 点击截图 + 断言仍在
       **#389** 未闭（river
       popup 的流量/起报时间 live 点击已由 C4-river-click 节承接，#1970 交付、display

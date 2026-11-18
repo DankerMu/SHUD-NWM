@@ -26,7 +26,6 @@
     "playwright.live-display.global-setup.ts",
     "playwright.live-c4-display.global-setup.ts",
     "playwright.config.helpers.ts",
-    "playwright.live-display.config.ts",
     "playwright.live-river-click.config.ts",
     "playwright.live-c4-display.config.ts",
     "playwright.private-receipt-publication.ts",

@@ -2918,7 +2918,7 @@ rows, source-scoped registry completeness, and the G1 valid-times baseline.  Thi
 proves the current published display chain without claiming node-22 scheduling or
 a generic twelve-lane bundle.  This rollout waives nothing in C1-C4.  The dedicated
 C4 display receipt lane and independent #1970 river-click P95 lane are executable fences below. The legacy
-monitoring lane is not a C4 substitute. C4 invokes the five-key lane with the
+monitoring lane was retired by #3202 and was never a C4 substitute. C4 invokes the five-key lane with the
 current frontend/API origins and current C4 basin/segment pins, then accepts
 only its current-run PASS receipt through schema and PASS-only binder. Draft
 2020-12 schema validation covers the representable receipt structure and
@@ -3115,7 +3115,7 @@ uv run --no-sync python scripts/node27_issue1895_publication_current_bind.py \
 Any G7 failure is a trigger row: stop, keep everything quiesced, preserve
 topology. The river-click `p95_ms < 2000` gate is the merged #1970 lane and
 its PASS-only binder above; it is not faked by a curl/plan proxy and is not
-satisfied by the legacy monitoring lane.
+satisfied by the legacy monitoring lane, which was retired by #3202.
 
 ### G8 — Preliminary GO, natural tick, evidence, closure
 

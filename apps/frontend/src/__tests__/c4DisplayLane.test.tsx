@@ -280,6 +280,40 @@ describe('C4 live lane', () => {
     expect(result.terminal.failure?.code).toBe('PERMISSION_DENIED')
   })
 
+  it('fails OPS_UNAVAILABLE when /ops shows runtime config unavailable', async () => {
+    const state = makeC4FakePageState({
+      homeResponses: homeResponses(),
+      opsObservation: { ...defaultC4OpsObservation(), runtimeUnavailable: true },
+      opsResponsesFor: (url) => opsResponses(url.includes('IFS') ? 'IFS' : 'GFS'),
+      logResponsesFor: logResponses,
+    })
+    const result = await runC4DisplayLane({ config: config(), page: makeC4FakePage(state) }, defaultFetch())
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('runtime-unavailable ops must fail')
+    expect(result.terminal.failure).toEqual({
+      code: 'OPS_UNAVAILABLE',
+      stage: 'ops',
+      message: 'runtime config is unavailable on /ops',
+    })
+  })
+
+  it('fails FORBIDDEN_CONTROL when /ops shows a retry or cancel control', async () => {
+    const state = makeC4FakePageState({
+      homeResponses: homeResponses(),
+      opsObservation: { ...defaultC4OpsObservation(), headingObserved: true, retryCancelControlCount: 1 },
+      opsResponsesFor: (url) => opsResponses(url.includes('IFS') ? 'IFS' : 'GFS'),
+      logResponsesFor: logResponses,
+    })
+    const result = await runC4DisplayLane({ config: config(), page: makeC4FakePage(state) }, defaultFetch())
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('retry/cancel control on ops must fail')
+    expect(result.terminal.failure).toEqual({
+      code: 'FORBIDDEN_CONTROL',
+      stage: 'ops',
+      message: 'retry or cancel control is visible on display_readonly /ops',
+    })
+  })
+
   it('fails missing jobs, wrong-source jobs, and forbidden slurm control', async () => {
     const missingJobs = makeC4FakePageState({
       homeResponses: homeResponses(),
