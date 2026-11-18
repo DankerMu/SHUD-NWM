@@ -18,4 +18,4 @@
   unchecked-by-design comments on the restore lanes.
 - [x] 1.3 Historical-import pre-scan (What 5). Runbook line and cluster map as needed (What 6, What 8).
 - [x] 1.4 E3 tests, E4 mutations, E1 and local E5.
-- [ ] 1.5 E5 on node-27 (orchestrator), E6, and the What 7 classification in the PR.
+- [x] 1.5 E5 on node-27 (orchestrator), E6, and the What 7 classification in the PR.

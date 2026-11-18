@@ -145,8 +145,8 @@ latest-view offset.
   - collapse the per-type mapping to a single constant, 0 and then 1; each must turn a test red;
   - drop the historical-import pre-scan;
   - apply the check on the restore lane too, which makes the restore test red.
-- [ ] E5 Local: `uv run pytest -q tests/test_file_orchestration_journal.py tests/test_file_orchestration_journal_facade.py tests/test_file_journal_cluster_map.py`
+- [x] E5 Local: `uv run pytest -q tests/test_file_orchestration_journal.py tests/test_file_orchestration_journal_facade.py tests/test_file_journal_cluster_map.py`
   plus the historical-import suite and the selector set for the diff. node-27 temporary worktree: the same set with the
   real-DB integration env, `leftover_it_dbs=0`.
-- [ ] E6 `openspec validate journal-write-complexity-limits --strict --no-interactive`. The PR lists the What 7
+- [x] E6 `openspec validate journal-write-complexity-limits --strict --no-interactive`. The PR lists the What 7
   classification and the Non-goals residual.
