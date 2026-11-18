@@ -622,10 +622,7 @@ jobs:
     name: Frontend E2E (mocked)
     needs: changes
     if: needs.changes.outputs.frontend == 'true'
-    # Pinned: `ubuntu-latest` moved to 26.04, where Playwright 1.59 cannot
-    # install chromium ("Playwright does not support chromium on
-    # ubuntu26.04-x64"). Unpin when @playwright/test supports 26.04.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     # #2844: the mocked-regression Playwright lane ran serially (one worker)
     # inside `Frontend Build` and grew with every spec: 15m24s for 470 tests,
     # with that job's timeout raised twice (10 -> 20 -> 30). It is now a matrix

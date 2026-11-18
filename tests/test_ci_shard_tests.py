@@ -382,6 +382,31 @@ def test_mocked_lane_is_a_single_dimension_matrix_whose_shards_do_not_cancel_eac
     assert type(job["timeout-minutes"]) is int
 
 
+# --- runner images of the Playwright jobs (#3198) ------------------------------------------
+
+M15_WORKFLOW = Path(".github/workflows/m15-visual-evidence.yml")
+M15_PIN = "    runs-on: ubuntu-24.04\n"
+
+
+def test_mocked_lane_runs_on_the_floating_ubuntu_image() -> None:
+    # The lockfile's Playwright supports ubuntu-latest (26.04); a re-pin would hide the next drift.
+    assert _frontend_job("frontend-e2e")["runs-on"] == "ubuntu-latest"
+
+
+def test_m15_replay_stays_pinned_to_24_04_with_the_evidence_sha_reason() -> None:
+    text = M15_WORKFLOW.read_text(encoding="utf-8")
+    assert yaml.safe_load(text)["jobs"]["m15-visual-evidence"]["runs-on"] == "ubuntu-24.04"
+
+    # Comments are lost by yaml.safe_load: read the comment block directly above the pin.
+    assert text.count(M15_PIN) == 1
+    comment: list[str] = []
+    for line in reversed(text[: text.index(M15_PIN)].splitlines()):
+        if not line.lstrip().startswith("#"):
+            break
+        comment.append(line)
+    assert "evidence_sha" in "\n".join(comment)
+
+
 def test_mocked_lane_shard_total_comes_from_the_matrix_so_the_shards_cover_the_lane() -> None:
     # `--shard=k/N` is complete and disjoint only when N is the number of jobs
     # that run; `strategy.job-total` is that number, a literal could drift.
