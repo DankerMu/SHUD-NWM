@@ -57,7 +57,7 @@ The deterministic mocked-regression lane SHALL execute automatically in CI on ev
 and SHALL fail the run when any of its tests fails. The lane SHALL NOT be configured with test retries:
 this project has no recorded flakiness for it, and a retry would convert a real failure into a green run.
 
-This requirement governs only the mocked lane. The `live-display` and `live-river-click` lanes bind to a real
+This requirement governs only the mocked lane. The `live-c4-display` and `live-river-click` lanes bind to a real
 runtime and keep node-27 as their oracle; the M15 visual-conformance lane stays manually dispatched under the
 existing governance decision. A change that is not matched by the `frontend` filter SHALL NOT pay the lane's cost. A change that IS matched pays
 it even when it touches no frontend source — the filter also covers the OpenAPI contract directory — and that cost

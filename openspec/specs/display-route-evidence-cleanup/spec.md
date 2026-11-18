@@ -1,8 +1,10 @@
 # display-route-evidence-cleanup Specification
 
 ## Purpose
-TBD - created by archiving change governance-5-e2-display-route-evidence-cleanup. Update Purpose after archive.
+Keep display route authority and its evidence current: `/` and `/ops` are the active display proofs, legacy redirects stay until explicitly retired, mocked e2e regression stays separate from node-27 live proof (C4 and river-click lanes), and historical visual evidence keeps its provenance.
+
 ## Requirements
+
 ### Requirement: Display route authority is current
 
 Current docs SHALL describe `/` as the active display map entrypoint and describe pre-M26 display paths as compatibility redirects or historical references.
@@ -40,7 +42,7 @@ Display evidence docs SHALL distinguish deterministic mocked regression specs fr
 - **THEN** docs and config classify it as mocked regression evidence rather than live node-27 proof
 
 #### Scenario: live display spec is executed
-- **WHEN** `test:e2e:live-display` runs against node-27
+- **WHEN** a live display evidence lane (`test:e2e:live-c4-display` or `test:e2e:live-river-click`) runs against node-27
 - **THEN** it does not rely on broad API mocks and uses explicit live base URL configuration
 
 ### Requirement: Old frontend page retirement is staged on node-27
