@@ -1381,6 +1381,11 @@ FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     # `_write_pipeline_job_unlocked` entry refusal and its record-level append
     # funnels, driven through every public writer. DB-free, ~46 tests in ~1s.
     "tests/test_file_journal_legacy_unversioned_reserved_guard.py",
+    # #3197: the write-complexity suite's subject is this module's
+    # `_validate_outgoing_record` complexity check, its per-type latest-view
+    # headroom and the restore lane's opt-out, driven through the public
+    # writers. DB-free, 13 tests in ~4s.
+    "tests/test_file_journal_write_complexity.py",
     # #1953: the whole-tree budget contract is ABOUT this module — the read
     # lane its `_RecordBudget` tags, and the synthetic blocked row the five
     # query entrypoints return when the budget refuses. Its static pins read

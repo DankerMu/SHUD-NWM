@@ -184,6 +184,9 @@ def verify_and_restore(
                     raise RetentionFailure("stage_clobber")
                 if archive_owner._entry_state(destination, root=journal) != "absent":
                     raise RetentionFailure("restore_clobber")
+            # #3197: deliberately no write-side JSON complexity check.  Restore
+            # rewrites archived journal bytes verbatim; a check here could only
+            # refuse journal content that was already on disk and readable.
             for relative, content in staged_content:
                 atomic_write_bytes_no_follow(
                     stage / relative,
