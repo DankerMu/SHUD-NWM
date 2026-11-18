@@ -899,35 +899,6 @@ The selector SHALL expose a `collection_smoke_required` GitHub output whose prov
 - **WHEN** a test-owned controlled fixture starts a descendant and the bounded probe times out
 - **THEN** the probe returns a named timeout violation and no process in its new process group remains alive
 
-### Requirement: Irregular source and package routes MUST select their owned suites
-
-The targeted selector SHALL map every tracked module under `workers/mapping_builder/**` to every tracked `tests/test_mapping_builder_*.py` suite, map `packages/common/state_clone_hook.py` to `tests/test_state_clone_cutover_hook.py`, map `scripts/node22_clone_direct_grid_cutover_states.py` to all four state-clone suites it owns (`tests/test_state_clone_recalibration.py`, `tests/test_state_clone_recalibration_cli.py`, `tests/test_state_clone_recalibration_cli_validation.py`, and `tests/test_state_clone_baseline_cutover_cli.py`), map `tests/state_clone_recalibration_fixtures.py` to all four direct consumers of that shared fixture (`tests/test_state_clone_recalibration.py`, both recalibration CLI modules, and `tests/test_state_clone_baseline_cutover_cli.py`), and map `tests/state_clone_recalibration_cli_fixtures.py` to exactly the two recalibration CLI modules (`tests/test_state_clone_recalibration_cli.py` and `tests/test_state_clone_recalibration_cli_validation.py`, NOT `tests/test_state_clone_baseline_cutover_cli.py`). Variable package sets SHALL be derived from the tracked tree where the naming/domain is stable, while intentionally irregular file-to-suite names remain explicit.
-
-#### Scenario: Mapping-builder package selects all package suites
-
-- **WHEN** any one of the eight tracked `workers/mapping_builder/*.py` modules changes
-- **THEN** the output includes all eight tracked `tests/test_mapping_builder_*.py` suites, and the directory importer-gap guard covers the package
-
-#### Scenario: State-clone hook selects its irregular suite
-
-- **WHEN** a PR changes only `packages/common/state_clone_hook.py`
-- **THEN** the output includes `tests/test_state_clone_cutover_hook.py`
-
-#### Scenario: Node-22 clone script selects all four owned state-clone suites
-
-- **WHEN** a PR changes only `scripts/node22_clone_direct_grid_cutover_states.py`
-- **THEN** the output includes `tests/test_state_clone_recalibration.py`, `tests/test_state_clone_recalibration_cli.py`, `tests/test_state_clone_recalibration_cli_validation.py`, and `tests/test_state_clone_baseline_cutover_cli.py`
-
-#### Scenario: Recalibration shared fixture selects every direct consumer
-
-- **WHEN** a PR changes only `tests/state_clone_recalibration_fixtures.py`
-- **THEN** the output includes `tests/test_state_clone_recalibration.py`, `tests/test_state_clone_recalibration_cli.py`, `tests/test_state_clone_recalibration_cli_validation.py`, and `tests/test_state_clone_baseline_cutover_cli.py`
-
-#### Scenario: Recalibration CLI helper selects both recalibration CLI modules only
-
-- **WHEN** a PR changes only `tests/state_clone_recalibration_cli_fixtures.py`
-- **THEN** the output includes `tests/test_state_clone_recalibration_cli.py` and `tests/test_state_clone_recalibration_cli_validation.py`, and does NOT include `tests/test_state_clone_baseline_cutover_cli.py`
-
 ### Requirement: Integration-owned production sources MUST trigger real-database CI
 
 The CI `database` paths filter SHALL match every production source surface in the finite integration-trigger registry defined by this change: `packages/common/forecast_store.py`, `packages/common/display_coverage.py`, `services/tiles/mvt.py`, `apps/api/routes/hydro_display.py`, `apps/api/main.py`, `scripts/node27_autopipeline.py`, `workers/output_parser/parser.py`, `packages/common/timescale_write_guard.py`, `packages/common/object_store.py`, `packages/common/model_registry.py`, every `packages/common/model_registry_*.py` owner module the #2617 split produced (matched by a `packages/common/model_registry_*.py` pattern kept beside the original literal), `packages/common/grid_registry_store.py`, `workers/grid_registry/**`, `workers/model_registry/**`, `workers/forcing_producer/**`, and `services/orchestrator/scheduler.py`. The selector contract suite SHALL parse the `database:` filter and mechanically assert that each registered path or tracked member of a registered root matches at least one filter pattern; a workflow change SHALL self-select that contract suite. Matching the filter SHALL open the existing `real-db-integration` job, whose named command has the closed argv shape `pytest -vv -rs -m <one marker expression token>` with no additional options or paths and selects `integration and not timescaledb_210` with its PostgreSQL/Timescale service and dedicated `NHMS_INTEGRATION_DATABASE_URL`: ordinary integration items SHALL execute, while the node-27-only PostgreSQL 15.2 / TimescaleDB 2.10.2 marker SHALL be deselected. The job SHALL expose node-level pass/skip/deselection evidence with pytest `-vv -rs`; this routing change SHALL NOT alter its dedicated DSN, service, job gate, or ordinary integration selection. One full-workflow positive job-contract helper SHALL validate those properties and the named step's effective execution context: step-level environment SHALL NOT replace either integration gate variable, a step condition SHALL NOT disable the command, step/job error-continuation policy SHALL NOT make a failing integration command non-blocking, and direct or inherited custom shell/working-directory metadata SHALL NOT alter the audited root-checkout command semantics. Deletion or effective blanking/opt-out of the dedicated integration context, removal of ordinary `integration`, failure to exclude `timescaledb_210`, or any extra suite-command option/path SHALL produce a named contract violation rather than a green job that runs the wrong oracle set.
@@ -1657,3 +1628,27 @@ existing canonicalisation family-guard selection. A selector pin MUST fail when 
 
 - **WHEN** the `packages/common/shud_preflight.py` rule is removed from `scripts/select_ci_tests_rules.py`
 - **THEN** the routing pin in `tests/test_select_ci_tests.py` fails
+
+### Requirement: Irregular source and package routes MUST select their owned state-clone and mapping-builder suites
+
+The targeted selector SHALL map every tracked module under `workers/mapping_builder/**` to every tracked `tests/test_mapping_builder_*.py` suite, map `scripts/node22_clone_direct_grid_cutover_states.py` to all four state-clone suites it owns (`tests/test_state_clone_recalibration.py`, `tests/test_state_clone_recalibration_cli.py`, `tests/test_state_clone_recalibration_cli_validation.py`, and `tests/test_state_clone_baseline_cutover_cli.py`), map `tests/state_clone_recalibration_fixtures.py` to all four direct consumers of that shared fixture (`tests/test_state_clone_recalibration.py`, both recalibration CLI modules, and `tests/test_state_clone_baseline_cutover_cli.py`), and map `tests/state_clone_recalibration_cli_fixtures.py` to exactly the two recalibration CLI modules (`tests/test_state_clone_recalibration_cli.py` and `tests/test_state_clone_recalibration_cli_validation.py`, NOT `tests/test_state_clone_baseline_cutover_cli.py`). Variable package sets SHALL be derived from the tracked tree where the naming/domain is stable, while intentionally irregular file-to-suite names remain explicit.
+
+#### Scenario: Mapping-builder package selects all package suites
+
+- **WHEN** any one of the eight tracked `workers/mapping_builder/*.py` modules changes
+- **THEN** the output includes all eight tracked `tests/test_mapping_builder_*.py` suites, and the directory importer-gap guard covers the package
+
+#### Scenario: Node-22 clone script selects all four owned state-clone suites
+
+- **WHEN** a PR changes only `scripts/node22_clone_direct_grid_cutover_states.py`
+- **THEN** the output includes `tests/test_state_clone_recalibration.py`, `tests/test_state_clone_recalibration_cli.py`, `tests/test_state_clone_recalibration_cli_validation.py`, and `tests/test_state_clone_baseline_cutover_cli.py`
+
+#### Scenario: Recalibration shared fixture selects every direct consumer
+
+- **WHEN** a PR changes only `tests/state_clone_recalibration_fixtures.py`
+- **THEN** the output includes `tests/test_state_clone_recalibration.py`, `tests/test_state_clone_recalibration_cli.py`, `tests/test_state_clone_recalibration_cli_validation.py`, and `tests/test_state_clone_baseline_cutover_cli.py`
+
+#### Scenario: Recalibration CLI helper selects both recalibration CLI modules only
+
+- **WHEN** a PR changes only `tests/state_clone_recalibration_cli_fixtures.py`
+- **THEN** the output includes `tests/test_state_clone_recalibration_cli.py` and `tests/test_state_clone_recalibration_cli_validation.py`, and does NOT include `tests/test_state_clone_baseline_cutover_cli.py`

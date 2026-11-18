@@ -1,13 +1,13 @@
 # fingerprint-gated-state-clone Specification
 
 ## Purpose
-TBD - created by archiving change mapping-variant-state-compatibility. Update Purpose after archive.
+Define the fingerprint-gated state clone. A `(M0, source, t*)` warm-state row is cloned into `(M1, source, t*)` only when the hydrologic-core (or state-compatibility) fingerprints match. The clone records `cloned_from` provenance and refuses fail-closed, with a stable code and an audit record. Its production caller is the node-22 clone CLI.
 
 ## Requirements
 
 ### Requirement: Fingerprint-gated state clone at cutover
 
-At cutover the mechanism SHALL clone the latest qualified `(M0, source, t*)` snapshot row in `hydro.state_snapshot` into a `(M1, source, t*)` row, and SHALL do so only when the `M0` package and the `M1` package have an equal `hydrologic_core_fingerprint`. A source snapshot is **qualified** only when it is usable (`usable_flag=true`), QC-passing, carries a valid `checksum`, is the `+12h` successor checkpoint (`lead_hours = 12`), and its `valid_time` equals the cutover cycle boundary `t*` that `M1`'s first strict cycle warm-starts from (docs §Gate G10 condition 4: snapshot valid time must satisfy runtime time consistency with the run start); a stale snapshot (`valid_time < t*`, e.g. after failed final `M0` cycles) is NOT qualified. The physical SHUD state file SHALL NOT be copied. The fingerprint equality gate SHALL reuse `workers/mapping_builder/rewrite.py::verify_hydrologic_core_fingerprint_equal` and SHALL NOT reimplement the fingerprint rule.
+At cutover the mechanism SHALL clone the latest qualified `(M0, source, t*)` snapshot row in the caller-supplied state repository into a `(M1, source, t*)` row. For the clone CLI that repository is the scheduler file state index; the core also accepts the DB `hydro.state_snapshot` repository. The clone SHALL run only when the `M0` package and the `M1` package have an equal `hydrologic_core_fingerprint`. A source snapshot is **qualified** only when it is usable (`usable_flag=true`), QC-passing, carries a valid `checksum`, is the `+12h` successor checkpoint (`lead_hours = 12`), and its `valid_time` equals the cutover cycle boundary `t*` that `M1`'s first strict cycle warm-starts from (docs §Gate G10 condition 4: snapshot valid time must satisfy runtime time consistency with the run start); a stale snapshot (`valid_time < t*`, e.g. after failed final `M0` cycles) is NOT qualified. The physical SHUD state file SHALL NOT be copied. The fingerprint equality gate SHALL reuse `workers/mapping_builder/rewrite.py::verify_hydrologic_core_fingerprint_equal` and SHALL NOT reimplement the fingerprint rule.
 
 The clone row's full column disposition is pinned so no lineage-checked column is left to guesswork:
 
@@ -18,7 +18,7 @@ The clone row's full column disposition is pinned so no lineage-checked column i
 #### Scenario: Equal fingerprint clones the row without copying the state file
 
 - **WHEN** a cutover clones `(M0, source, t*)` into `(M1, source, t*)` and the `M0` and `M1` `hydrologic_core_fingerprint` are equal
-- **THEN** a new `hydro.state_snapshot` row is created keyed `(M1, source, t*)`
+- **THEN** a new state row is created in the caller-supplied state repository, keyed `(M1, source, t*)`
 - **THEN** the clone row's `state_uri` and `checksum` equal the source row's, and no physical state file is copied
 - **THEN** the clone row's `model_package_version` and `model_package_checksum` equal the `M1` package version and the `M1` package checksum
 - **THEN** `source_id`, `valid_time`, `cycle_id`, `lead_hours`, `usable_flag`, and `original_shud_filename` equal the source row's values.
@@ -27,7 +27,7 @@ The clone row's full column disposition is pinned so no lineage-checked column i
 
 - **WHEN** a cutover attempts to clone `(M0, source, t*)` into `(M1, source, t*)` and the `M0` and `M1` `hydrologic_core_fingerprint` are not equal
 - **THEN** the clone is refused fail-closed and no `(M1, source, t*)` row is written
-- **THEN** the refusal surfaces the stable error code `state_clone_cold_start_approval_required` plus an `ops.audit_log` record naming the blocked `(basin_version_id, source_id)` scope and the fingerprint-inequality cause, degrading the path to the explicit cold-start approval route defined by `atomic-cutover-transaction` (§11.3)
+- **THEN** the refusal surfaces the stable error code `state_clone_cold_start_approval_required` plus an audit record, through the caller's audit recorder, naming `m0_model_id`, `m1_model_id`, `source_id`, `cutover_valid_time` and the refusal scope. The fingerprint-inequality cause is among them. In `baseline_cutover` the caller may proceed only by declaring the basin cold (§11.3)
 - **THEN** no partial state row and no physical file mutation are produced.
 
 #### Scenario: Clone row satisfies the existing strict warm-start validator for M1
@@ -39,31 +39,15 @@ The clone row's full column disposition is pinned so no lineage-checked column i
 
 #### Scenario: No qualified source snapshot fails closed
 
-- **WHEN** an engaged clone step (per the `atomic-cutover-transaction` applicability predicate) finds no usable, QC-passing `(M0, source, t*)` source snapshot for a source in scope and no approved cold-start input covers that source
-- **THEN** the clone is refused fail-closed with no `(M1, source, t*)` row written and the whole activation transaction rolls back
+- **WHEN** a clone call finds no usable, QC-passing `(M0, source, t*)` source snapshot for its source
+- **THEN** the clone is refused fail-closed with no `(M1, source, t*)` row written
 - **THEN** the failure surfaces the stable error code `state_clone_cold_start_approval_required` and a recorded audit blocker, not a silent no-op.
 
 #### Scenario: A stale latest snapshot is not qualified
 
 - **WHEN** at cutover the newest usable `(M0, source)` snapshot has `valid_time < t*` (for example because `M0`'s final cycles failed)
-- **THEN** the snapshot does not qualify (docs §Gate G10 condition 4) and the clone is refused fail-closed exactly as in the missing-source case, routing to the explicit cold-start approval route
+- **THEN** the snapshot does not qualify (docs §Gate G10 condition 4) and the clone is refused fail-closed exactly as in the missing-source case, so in `baseline_cutover` the caller may proceed only by declaring the basin cold
 - **THEN** no clone row with a stale `valid_time` is ever written for `M1`, so `M1`'s first strict cycle can never be pointed at a checkpoint the strict `valid_time == cycle_time` selection would reject.
-
-### Requirement: The clone executes per source across the activation source scope
-
-The clone step SHALL enumerate every source in the activation context's source scope — the target variant's normalized `resource_profile.direct_grid_forcing.applicable_source_ids`, as supplied by the Change 4 hook context — and SHALL execute the fingerprint-gated clone once per source, producing one `(M1, source, t*)` row per source (GFS-driven and IFS-driven states at the same model/valid_time are distinct rows under the `(model_id, COALESCE(source_id,''), valid_time)` key). When any source in scope lacks a qualified `(M0, source, t*)` snapshot, the whole transaction SHALL roll back fail-closed unless an approved cold-start input explicitly covers that source (per `atomic-cutover-transaction`).
-
-#### Scenario: Dual-source cutover clones one row per source
-
-- **WHEN** a cutover activates an `M1` variant whose `applicable_source_ids` is `[gfs, ifs]` and qualified `(M0, gfs, t*)` and `(M0, ifs, t*)` snapshots both exist with equal fingerprints
-- **THEN** two clone rows are written — `(M1, gfs, t*)` and `(M1, ifs, t*)` — each preserving its own source row's lineage
-- **THEN** both rows commit atomically with the activation.
-
-#### Scenario: One source missing a qualified snapshot rolls back the whole cutover
-
-- **WHEN** the same dual-source cutover finds a qualified `(M0, gfs, t*)` snapshot but no qualified `(M0, ifs, t*)` snapshot, and no approved cold-start input covers `ifs`
-- **THEN** the whole transaction rolls back: no clone row is written for either source and `M1` is not activated
-- **THEN** the refusal's audit record names the blocking source (`ifs`), so the operator can either repair `M0`'s `ifs` state or re-request with an explicit per-source cold-start approval.
 
 ### Requirement: Fingerprint gate inputs are pinned to package and evidence authorities
 

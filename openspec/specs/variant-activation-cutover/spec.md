@@ -1,9 +1,10 @@
 # variant-activation-cutover Specification
 
 ## Purpose
-Specify how a model variant becomes the active model for its basin: activation reuses the single-transaction
-lifecycle and its ordered pre-activation hook chain, every dispatch-set-changing transition re-publishes the
-scheduler registry manifest, and a superseded model permanently leaves the dispatch candidate set.
+Specify how a model variant becomes the active model for its basin:
+- activation reuses the single-transaction lifecycle and runs no pre-activation hook (retired by #3189);
+- every dispatch-set-changing transition re-publishes the scheduler registry manifest;
+- a superseded model permanently leaves the dispatch candidate set.
 
 ## Requirements
 
@@ -31,7 +32,7 @@ The cutover switch SHALL be the existing `POST /api/v1/models/{model_id}/lifecyc
 
 ### Requirement: Dispatch-set-changing lifecycle transitions re-publish the scheduler registry manifest
 
-The lifecycle operation SHALL re-publish the scheduler registry manifest via `publish_scheduler_registry_manifest` after ANY successful transition that changes the dispatch candidate set — `activate`, `switch_version`, `rollback_version`, and a `deactivate` that removes the currently active model — and SHALL NOT re-publish when an operation is blocked by preflight, rolled back by a raising hook, or returns already-current without a state change. The trigger SHALL sit on the uniform post-commit tail of the lifecycle operation so that, as defensive future-proofing, any other active-removing transition ever admitted past preflight re-publishes under the same rule without new wiring — a standalone `supersede` addressed at the currently active model is such a transition, and today it never commits (preflight blocks it with `MISSING_ACTIVE_RISK`; the missing-active override is supported for `deactivate` only); supersession of the prior active model inside an `activate`/`switch_version`/`rollback_version` swap is covered by that swap's single re-publish.
+The lifecycle operation SHALL re-publish the scheduler registry manifest via `publish_scheduler_registry_manifest` after ANY successful transition that changes the dispatch candidate set — `activate`, `switch_version`, `rollback_version`, and a `deactivate` that removes the currently active model — and SHALL NOT re-publish when an operation is blocked by preflight, rolled back (for example by an audit-persistence failure), or returns already-current without a state change. The trigger SHALL sit on the uniform post-commit tail of the lifecycle operation so that, as defensive future-proofing, any other active-removing transition ever admitted past preflight re-publishes under the same rule without new wiring — a standalone `supersede` addressed at the currently active model is such a transition, and today it never commits (preflight blocks it with `MISSING_ACTIVE_RISK`; the missing-active override is supported for `deactivate` only); supersession of the prior active model inside an `activate`/`switch_version`/`rollback_version` swap is covered by that swap's single re-publish.
 
 #### Scenario: Manifest is re-published on successful activation
 
@@ -47,7 +48,7 @@ The lifecycle operation SHALL re-publish the scheduler registry manifest via `pu
 
 #### Scenario: A blocked, rolled-back, or already-current operation does not re-publish
 
-- **WHEN** an operation is blocked by a preflight blocker, aborted by a raising pre-activation hook, or returns already-current without a state change
+- **WHEN** an operation is blocked by a preflight blocker, rolled back by an audit-persistence failure, or returns already-current without a state change
 - **THEN** the scheduler registry manifest is not re-published
 - **THEN** the previously published manifest remains the authority for the compute plane.
 
@@ -78,45 +79,3 @@ The system SHALL exclude a `superseded` model from the scheduler dispatch candid
 - **WHEN** a model is superseded by a cutover
 - **THEN** its `core.model_instance` row and package remain immutable and available for historical products, fingerprint-gated state clone, and offline calibration-replay
 - **THEN** the superseded row is never deleted by the cutover.
-
-### Requirement: Activation runs the ordered pre-activation hook chain inside the transaction
-
-The cutover transaction SHALL execute the ordered pre-activation hook chain inside the same database transaction,
-before the supersede+activate swap, without re-opening the lifecycle transaction. The chain's mount points SHALL be
-`PRE_ACTIVATION_HOOK_MOUNT_POINTS = ("state_clone",)`, dispatched in declared order. Each mount point SHALL start as a
-default no-op that changes no state. Registering a hook on any other mount point, including the retired
-`station_flag_flip`, SHALL be rejected.
-
-#### Scenario: Hooks run in declared order before the swap
-
-- **WHEN** a variant activation begins
-- **THEN** the registered pre-activation hooks run in their declared, stable order, each receiving the transaction
-  cursor and the activation context (basin_version_id, previous active model, target model, source scope)
-- **THEN** the supersede+activate swap runs only after all hooks return successfully.
-
-#### Scenario: A raising hook aborts the whole transaction
-
-- **WHEN** any pre-activation hook raises during activation
-- **THEN** no later hook runs, and the entire lifecycle transaction rolls back with no model made active and no model
-  superseded
-- **THEN** the scheduler registry manifest is not re-published, so there is no "activated but hooks not run"
-  intermediate state.
-
-#### Scenario: Default hooks change no state
-
-- **WHEN** no hook has been registered on a mount point
-- **THEN** that mount point's default hook is a no-op and the lifecycle behaves exactly as it does without the chain.
-
-#### Scenario: The retired station-flag mount point is rejected
-
-- **WHEN** a caller registers a hook on `station_flag_flip` or any other name outside `PRE_ACTIVATION_HOOK_MOUNT_POINTS`
-- **THEN** registration raises, naming the valid mount points, and no hook is installed.
-
-#### Scenario: Hooks do not run on the already-current path
-
-- **WHEN** an activation request targets a model that is already the scope's active model (the idempotent
-  already-current short-circuit)
-- **THEN** the pre-activation hooks are NOT executed, because no supersede+activate swap occurs and there is no state
-  change for a hook to act on
-- **THEN** the operation returns a stable already-current result with no second activation-success audit row and no
-  duplicate transition.
