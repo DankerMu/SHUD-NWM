@@ -321,11 +321,11 @@ The dedicated `live-river-click` Playwright profile SHALL run the river-click
 receipt producer. The new test SHALL remain in `e2e/live-display.spec.ts` so the
 existing exact live-spec matcher and broad `page.route('**/api/v1/**')` mock
 prohibition cover it. The dedicated profile SHALL use one worker and zero
-retries. The new metric SHALL visit only viewer-accessible `/`; the existing
-`/monitoring` test SHALL remain unchanged on the two-URL `live-display`
-profile, and this issue SHALL add no `/ops` visit or claim. A two-URL
-monitoring-only invocation SHALL NOT run river-click `globalSetup` or infer a
-`/` PASS. The node-27 display runbook SHALL invoke `test:e2e:live-river-click`.
+retries. The new metric SHALL visit only viewer-accessible `/` and SHALL add no `/ops` visit or claim. The legacy
+two-URL `/monitoring` (`@live-monitoring`) lane and its `live-display` profile are retired by #3202, because
+`/monitoring` is not open to `display_readonly` and that lane could never PASS on the public deployment. The C4 lane
+(`test:e2e:live-c4-display`) is the live `display_readonly` `/ops` browser evidence. The node-27 display runbook SHALL
+invoke `test:e2e:live-river-click`.
 
 Focused Node publisher/unit tests MAY import the Node owner and write only their
 private temporary fixtures. React/component tests and mocked browser specs SHALL

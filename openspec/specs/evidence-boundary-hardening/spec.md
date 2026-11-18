@@ -1,8 +1,10 @@
 # evidence-boundary-hardening Specification
 
 ## Purpose
-TBD - created by archiving change governance-6-entropy-structural-burndown. Update Purpose after archive.
+Harden the boundary between mocked regression and live evidence: current runbooks follow the active route authority, historical MVP runbooks are marked as such, mock detection covers multiline route registrations, artifact ownership wording matches the audit, and the display runtime rejects compute-only copyback authority.
+
 ## Requirements
+
 ### Requirement: Current runbooks follow M26 route authority
 
 Current runbooks SHALL describe `/` as the active display entrypoint and SHALL
@@ -69,14 +71,14 @@ operator, retry, cancel, and single-map routing checks SHALL NOT be accepted as
   gate-eligible drift
 
 #### Scenario: live display profile runs
-- **WHEN** `corepack pnpm run test:e2e:live-display` executes
+- **WHEN** `corepack pnpm run test:e2e:live-c4-display` or `corepack pnpm run test:e2e:live-river-click` executes
 - **THEN** it uses explicit live base URLs, has no local-dev or
   `https://api.example.test` fallback, and rejects broad API route mocks in
   live-labelled specs
 
 #### Scenario: validation docs describe evidence lanes
 - **WHEN** `docs/VALIDATION.md` describes frontend evidence profiles
-- **THEN** mocked-regression, preview, visual, and live-display lanes state
+- **THEN** mocked-regression, preview, visual, live-c4-display, and live-river-click lanes state
   whether API mocks are allowed and whether the lane can produce live receipts
 
 ### Requirement: Broad mock detection covers multiline registrations

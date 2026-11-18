@@ -3,7 +3,7 @@
 ## Purpose
 Specify how a model variant becomes the active model for its basin:
 - activation reuses the single-transaction lifecycle and runs no pre-activation hook (retired by #3189);
-- every dispatch-set-changing transition re-publishes the scheduler registry manifest;
+- a lifecycle transition publishes nothing to the scheduler file plane; the node-22 file-provider refresh lane republishes it (post-commit publishers retired by #3204);
 - a superseded model permanently leaves the dispatch candidate set.
 
 ## Requirements
@@ -30,34 +30,6 @@ The cutover switch SHALL be the existing `POST /api/v1/models/{model_id}/lifecyc
 - **THEN** the active model is resolved through the existing lifecycle active-model authority and the partial unique index on `basin_version_id`
 - **THEN** no separate per-`(basin, source)` routing table is created or consulted.
 
-### Requirement: Dispatch-set-changing lifecycle transitions re-publish the scheduler registry manifest
-
-The lifecycle operation SHALL re-publish the scheduler registry manifest via `publish_scheduler_registry_manifest` after ANY successful transition that changes the dispatch candidate set — `activate`, `switch_version`, `rollback_version`, and a `deactivate` that removes the currently active model — and SHALL NOT re-publish when an operation is blocked by preflight, rolled back (for example by an audit-persistence failure), or returns already-current without a state change. The trigger SHALL sit on the uniform post-commit tail of the lifecycle operation so that, as defensive future-proofing, any other active-removing transition ever admitted past preflight re-publishes under the same rule without new wiring — a standalone `supersede` addressed at the currently active model is such a transition, and today it never commits (preflight blocks it with `MISSING_ACTIVE_RISK`; the missing-active override is supported for `deactivate` only); supersession of the prior active model inside an `activate`/`switch_version`/`rollback_version` swap is covered by that swap's single re-publish.
-
-#### Scenario: Manifest is re-published on successful activation
-
-- **WHEN** a variant activation commits successfully
-- **THEN** `publish_scheduler_registry_manifest` re-emits the registry manifest to NFS
-- **THEN** the node-22 DB-free scheduler passively consumes the new active model through its `list_models(active=True)` read, with no direct database connection.
-
-#### Scenario: Every dispatch-set-changing operation re-publishes, not only activate
-
-- **WHEN** a `switch_version` or `rollback_version` swaps the active model, or a `deactivate` removes the currently active model (the §11.2 step-4 pause-production lever, committed via the sys_admin missing-active override)
-- **THEN** the manifest is re-published exactly once after that successful commit, so node-22 never keeps serving a dispatch candidate set the database no longer has
-- **THEN** a transition that does not change the dispatch candidate set (e.g. deprecating an already-inactive model) does not require a re-publish.
-
-#### Scenario: A blocked, rolled-back, or already-current operation does not re-publish
-
-- **WHEN** an operation is blocked by a preflight blocker, rolled back by an audit-persistence failure, or returns already-current without a state change
-- **THEN** the scheduler registry manifest is not re-published
-- **THEN** the previously published manifest remains the authority for the compute plane.
-
-#### Scenario: Supersede addressed at the active model is preflight-blocked today and re-publishes nothing
-
-- **WHEN** a standalone `supersede` operation addresses the scope's currently active model
-- **THEN** preflight blocks the operation with `MISSING_ACTIVE_RISK` (no override path admits it — the missing-active override is supported for `deactivate` only), no state transition occurs, and the manifest is not re-published
-- **THEN** if such an active-removing transition is ever admitted past preflight, the uniform post-commit trigger re-publishes for it under this requirement without new wiring.
-
 ### Requirement: Permanent retirement — a superseded model exits the dispatch candidate set
 
 The system SHALL exclude a `superseded` model from the scheduler dispatch candidate set by filtering `lifecycle_state == 'active'`, and this behavior SHALL be locked by a regression test; a superseded model SHALL be retained as immutable lineage rather than destroyed.
@@ -79,3 +51,36 @@ The system SHALL exclude a `superseded` model from the scheduler dispatch candid
 - **WHEN** a model is superseded by a cutover
 - **THEN** its `core.model_instance` row and package remain immutable and available for historical products, fingerprint-gated state clone, and offline calibration-replay
 - **THEN** the superseded row is never deleted by the cutover.
+
+### Requirement: A model lifecycle transition SHALL NOT publish the scheduler file plane
+
+The DB model lifecycle operation SHALL publish nothing to the node-22 scheduler file plane: neither the registry manifest
+nor the state index, on any outcome. A committed transition alone therefore does not change node-22's dispatch set.
+
+node-22's registry manifest, and so its dispatch set, changes only through the operator procedure in
+`docs/runbooks/production-ops/recalibration-and-archive.md`:
+- node-27 `scripts/provision_direct_grid_scheduler_registry.py` writes the DB rows and a staging registry, never the
+  canonical manifest;
+- node-22 `scripts/node22_model_succession.py` runs the steps of its `--kind`: `recalibration`, `cold_start`,
+  `add_basin` or `remove_basin` (runbook §5.7–§5.7.4);
+- the merged publish goes through `scripts/node22_publish_merged_scheduler_registry.py`.
+
+The node-22 scheduler and its refresh timer keep maintaining the state index themselves; that is unrelated to the
+lifecycle operation.
+
+#### Scenario: A committed activation publishes nothing
+
+- **WHEN** an `activate`, `switch_version`, `rollback_version`, or active-removing `deactivate` commits
+- **THEN** the lifecycle operation returns its result without invoking any manifest or state-index publisher, and the
+  model registry store exposes no post-commit publisher registration
+
+#### Scenario: Supersede addressed at the active model is preflight-blocked and changes nothing
+
+- **WHEN** a standalone `supersede` addresses the scope's currently active model
+- **THEN** preflight blocks it with `MISSING_ACTIVE_RISK` and no state transition occurs
+
+#### Scenario: An audit-persistence failure rolls the transition back
+
+- **WHEN** the lifecycle audit insert fails after the transition
+- **THEN** the result is `blocked` with the last blocker `LIFECYCLE_AUDIT_PERSISTENCE_FAILED` and the transaction is
+  not committed

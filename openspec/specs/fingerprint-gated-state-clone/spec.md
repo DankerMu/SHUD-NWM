@@ -198,11 +198,9 @@ normalisation into the loaded index snapshot, so a scheduling pass resolves
 lineage from data it has already loaded and performs no additional read. On the
 database plane the resolution source SHALL be an **earliest**-clone-row read
 under the model's own `model_id`, ordered `(valid_time, created_at)` ascending
-— the model's existence-start. The publisher's descending reader
-(`get_latest_clone_row_for_model_source`) SHALL NOT be the resolution source:
-its ordering serves mirroring the just-committed row, not answering an
-existence question, and reusing it would let a backdated re-activation
-retroactively exclude cycles the identity actually ran.
+— the model's existence-start. A latest-first (descending) read SHALL NOT be the resolution source, because a
+backdated re-activation would then retroactively exclude cycles the identity
+actually ran.
 
 Lineage admission SHALL be keyed on `cloned_from_model_id` alone — present,
 non-empty, and different from the row's own `model_id`. `clone_gate_fingerprint`
@@ -384,7 +382,7 @@ but cannot restore the overwritten one.
 
 ### Requirement: Both persistence planes SHALL normalise cloned_from_model_id identically before judging it
 
-"Present, non-empty, and different from the row's own `model_id`" SHALL be judged on `cloned_from_model_id` with surrounding whitespace removed, where whitespace is exactly the set of characters Python's `str.isspace()` accepts. The comparison with `model_id` SHALL use the raw `model_id`. On the DB plane this SHALL be enforced by the SQL predicate of the earliest-clone-row reader, so that `LIMIT 1` never selects a row the file plane would skip. The resolver's own normalisation SHALL stay as defence in depth. The publisher's latest-clone-row reader is not governed by this requirement.
+"Present, non-empty, and different from the row's own `model_id`" SHALL be judged on `cloned_from_model_id` with surrounding whitespace removed, where whitespace is exactly the set of characters Python's `str.isspace()` accepts. The comparison with `model_id` SHALL use the raw `model_id`. On the DB plane this SHALL be enforced by the SQL predicate of the earliest-clone-row reader, so that `LIMIT 1` never selects a row the file plane would skip. The resolver's own normalisation SHALL stay as defence in depth.
 
 #### Scenario: A whitespace-only parent does not mask a later clone row
 
