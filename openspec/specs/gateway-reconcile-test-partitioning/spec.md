@@ -6,44 +6,6 @@ Define the repository contract for physically partitioning the gateway-reconcile
 
 ## Requirements
 
-### Requirement: Gateway reconcile tests remain complete under physical partitioning
-
-The repository SHALL partition the gateway-reconcile test corpus into collectible modules whose
-individual line counts do not exceed the configured 1,000-line guard, without adding a guard
-exemption or retaining a collectible compatibility shim. Every pre-partition pytest case SHALL be
-collected exactly once after partitioning: the module prefix may change, but the complete
-`::test_name[param-id]` suffix set, test bodies, decorators, fixtures, and assertion oracles MUST
-remain equivalent.
-
-When the gateway-reconcile corpus was partitioned (#1809), every partition module was within the guard and no exemption
-was added. Several suites have since grown past 1,000 lines. Re-partitioning them under the same collection-identity
-rules is tracked by #3177:
-- `tests/test_gateway_reconcile_comment_accounting.py`
-- `tests/test_gateway_reconcile_binding_provenance.py`
-- `tests/test_gateway_reconcile_claimant_exclusivity.py`
-- `tests/test_gateway_reconcile_file_cohort_identity.py`
-- `tests/test_gateway_reconcile_inventory.py`
-
-The only gateway-reconcile suites that `.large-file-guard.json` exempts SHALL be `comment_accounting` (exempted by #2674)
-and the temporary exemptions for `binding_provenance`, `claimant_exclusivity` and `file_cohort_identity`. No other
-gateway-reconcile exemption SHALL be added.
-
-#### Scenario: Collection identity is preserved one-to-one
-
-- **WHEN** the pre-partition and post-partition suites are collected with pytest
-- **THEN** both yield 538 unique case suffixes after the first `::`, their sorted suffix sets are byte-identical, and every old suffix maps to exactly one new full node ID
-
-#### Scenario: Every new module satisfies the guard
-
-- **WHEN** the gateway-reconcile entries of `.large-file-guard.json` are listed
-- **THEN** they are a subset of the four suites named above
-- **AND** every gateway-reconcile module over 1,000 lines is one of the five suites named above
-
-#### Scenario: The complete split suite preserves all oracles
-
-- **WHEN** pytest runs all `tests/test_gateway_reconcile_*.py` modules together
-- **THEN** all 538 cases pass without changed assertions, skipped cases, duplicate collection, or production-source modifications
-
 ### Requirement: Targeted CI preserves gateway-reconcile ownership after partitioning
 
 The targeted-test selector SHALL replace the deleted monolithic target in the existing
@@ -98,3 +60,30 @@ The real-process sacct bound test SHALL assert, for its byte and row legs, that 
 
 - **WHEN** the fake sacct times out before it produces any output
 - **THEN** the byte or row leg fails on the saturation-reason assertion
+
+### Requirement: Gateway reconcile tests stay within the line guard without exemptions
+
+The repository SHALL keep every collectible `tests/test_gateway_reconcile_*.py` module, and every gateway-reconcile
+support module, at or below the configured 1,000-line guard. `.large-file-guard.json` SHALL contain no
+gateway-reconcile entry, and no collectible compatibility shim SHALL remain. When a suite is re-partitioned, every
+pre-partition pytest case SHALL be collected exactly once afterwards. The module prefix may change, but the complete
+`::test_name[param-id]` suffix set, test bodies, decorators, fixtures and assertion oracles MUST stay equivalent. A
+shared private helper SHALL move to a non-collectible support module, and no partition SHALL import another partition.
+
+#### Scenario: Collection identity is preserved one-to-one
+
+- **WHEN** a suite and its partitions are collected with pytest before and after a re-partition
+- **THEN** the sorted unique case suffixes after the first `::` are byte-identical, and every old suffix maps to exactly
+  one new full node ID
+
+#### Scenario: Every gateway-reconcile module satisfies the guard
+
+- **WHEN** the line counts of `tests/test_gateway_reconcile_*.py` and the gateway-reconcile support modules are listed
+- **THEN** each is at most 1,000
+- **AND** `.large-file-guard.json` lists none of them
+
+#### Scenario: The complete split suite preserves all oracles
+
+- **WHEN** pytest runs all `tests/test_gateway_reconcile_*.py` modules together
+- **THEN** every case passes without changed assertions, skipped cases, duplicate collection or production-source
+  modifications
