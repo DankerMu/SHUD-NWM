@@ -18,8 +18,8 @@ production deadlock:
   collapse into the same ``None``, which memoized a transient read error as a
   permanent "no lineage" for the rest of the process;
 - the db-free plane reads the already-loaded index and issues no extra read;
-- the DB plane uses its own ASC read — reusing the publisher's ``DESC``
-  reader is the defect D3 names by hand.
+- the DB plane uses its own ASC read — a latest-first (``DESC``) read as
+  the resolution source is the defect D3 names by hand.
 """
 
 from __future__ import annotations
@@ -568,20 +568,6 @@ class _EarliestCloneRowRepo:
         return self.row
 
 
-class _LatestOnlyCloneRowRepo:
-    """A repo exposing ONLY the publisher's ``DESC`` reader (D3: must not be used)."""
-
-    def __init__(self, row: StateSnapshot | None) -> None:
-        self.row = row
-        self.calls: list[tuple[str, str]] = []
-
-    def get_latest_clone_row_for_model_source(
-        self, *, model_id: str, source_id: str
-    ) -> StateSnapshot | None:
-        self.calls.append((model_id, source_id))
-        return self.row
-
-
 def _clone_snapshot(valid_time: str) -> StateSnapshot:
     return StateSnapshot(
         state_id="state_db_clone",
@@ -620,7 +606,7 @@ def test_db_plane_missing_gate_fingerprint_still_resolves_lineage() -> None:
     dropped somewhere below.  It drives a stub, so **no SQL executes here** and
     this is NOT an oracle for the predicate itself; the executing oracle is
     ``tests/test_real_database_integration.py``'s
-    ``test_real_clone_row_readers_disagree_about_a_null_fingerprint_row``.
+    ``test_real_earliest_clone_row_reader_admits_a_null_fingerprint_row_over_a_later_sibling``.
     Still worth its own seam, because a text-shape assertion alone cannot tell
     "the predicate was relaxed" from "the predicate was relaxed and something
     else re-imposed it".
@@ -638,17 +624,6 @@ def test_db_plane_missing_gate_fingerprint_still_resolves_lineage() -> None:
     # Byte-identical to the file plane's answer for the same row shape
     # (``test_clone_entry_without_a_gate_fingerprint_still_confers_lineage``).
     assert cutover.cutover_time == _dt("2026-08-21T12:00:00Z")
-
-
-def test_db_plane_never_consults_the_publishers_latest_row_reader() -> None:
-    repo = _LatestOnlyCloneRowRepo(_clone_snapshot("2026-08-22T00:00:00Z"))
-
-    cutover = scheduler_lineage.resolve_lineage_cutover(
-        repo, model_id="model_a_prime", source_id="gfs"
-    )
-
-    assert cutover is None
-    assert repo.calls == []
 
 
 def test_db_plane_self_referential_clone_row_confers_no_lineage() -> None:
@@ -753,8 +728,7 @@ def test_earliest_clone_row_query_is_ascending_and_clone_scoped(monkeypatch: Any
       later on exactly the rows the two planes disagree about, and silently
       re-diverge this reader from the file plane's
       ``_clone_entries_for_model_source`` — which has never read the
-      fingerprint.  The publisher's DESC sibling keeps the filter on purpose
-      (design D2); see the test below.
+      fingerprint.
 
     Without explicit absence assertions either regression keeps every other
     test in this suite green.
@@ -798,35 +772,6 @@ def test_trim_set_is_exactly_what_argumentless_str_strip_removes() -> None:
 
     assert STR_STRIP_WHITESPACE == computed
     assert len(STR_STRIP_WHITESPACE) == 29
-
-
-def test_publisher_latest_clone_row_query_keeps_the_fingerprint_filter(monkeypatch: Any) -> None:
-    """Design D2: the asymmetry between the two readers is deliberate.
-
-    ``get_earliest_clone_row_for_model_source`` and
-    ``get_latest_clone_row_for_model_source`` carried the byte-identical string
-    ``clone_gate_fingerprint IS NOT NULL``, and #1739 removed it from exactly
-    one of them.  Until this test the publisher's reader had no text oracle at
-    all, so "tidying up" the sibling — or editing the wrong one of two
-    near-identical functions — would have been caught by nothing.
-
-    The DESC reader answers a different question: "which row did I just
-    commit?".  The publisher wrote that row's ``clone_gate_fingerprint`` itself
-    in the same transaction (``_build_clone_row`` takes it as a required
-    ``str``), so requiring non-NULL is a cheap self-check — a row without one
-    is not the row it just wrote.  Relaxing it buys nothing and would let the
-    publisher mirror a foreign row into the file state index.
-    """
-    captured = _captured_statement(monkeypatch)
-    repo = PsycopgStateSnapshotRepository("postgresql://unused/db")
-
-    assert (
-        repo.get_latest_clone_row_for_model_source(model_id="model_a_prime", source_id="gfs")
-        is None
-    )
-    assert "clone_gate_fingerprint IS NOT NULL" in captured["statement"]
-    assert "ORDER BY valid_time DESC, created_at DESC" in captured["statement"]
-    assert captured["parameters"] == ("model_a_prime", "gfs")
 
 
 def test_lineage_scoped_out_record_names_predecessor_and_cutover() -> None:

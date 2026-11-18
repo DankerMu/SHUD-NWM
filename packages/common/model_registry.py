@@ -2,8 +2,8 @@
 
 ``PsycopgModelRegistryStore`` is composed here from the plain mixins in the
 ``packages.common.model_registry_*`` owner modules (#2617 physical split); the
-dataclass fields, ``__post_init__``, ``from_env``, ``_transaction`` and the
-psycopg2 connection (``_PsycopgTransaction``) stay in this module. Every
+dataclass fields, ``from_env``, ``_transaction`` and the psycopg2 connection
+(``_PsycopgTransaction``) stay in this module. Every
 module-level name the owner modules define is re-exported here by identity.
 """
 
@@ -53,8 +53,6 @@ from packages.common.model_registry_contracts import (
     InvalidPayloadError,
     InvalidReferenceError,
     ModelRegistryError,
-    _default_no_op_manifest_publisher,
-    _default_no_op_state_index_publisher,
 )
 from packages.common.model_registry_contracts import ForcingMappingClassification as ForcingMappingClassification
 from packages.common.model_registry_contracts import MissingResourceError as MissingResourceError
@@ -63,21 +61,14 @@ from packages.common.model_registry_contracts import (
 )
 from packages.common.model_registry_contracts import ModelLifecycleOperation as ModelLifecycleOperation
 from packages.common.model_registry_contracts import ModelLifecycleState as ModelLifecycleState
-from packages.common.model_registry_contracts import PostCommitManifestPublisher as PostCommitManifestPublisher
-from packages.common.model_registry_contracts import PostCommitPublishContext as PostCommitPublishContext
-from packages.common.model_registry_contracts import PostCommitStateIndexPublisher as PostCommitStateIndexPublisher
 from packages.common.model_registry_contracts import RiverSegmentGeoJsonBudgetError as RiverSegmentGeoJsonBudgetError
 from packages.common.model_registry_contracts import _classify_forcing_mapping_mode as _classify_forcing_mapping_mode
 from packages.common.model_registry_contracts import _declares_direct_grid_intent as _declares_direct_grid_intent
 from packages.common.model_registry_contracts import _escape_like as _escape_like
-from packages.common.model_registry_contracts import _extract_source_scope as _extract_source_scope
 from packages.common.model_registry_contracts import _format_point as _format_point
 from packages.common.model_registry_contracts import _json_mapping as _json_mapping
 from packages.common.model_registry_contracts import _linestring_to_wkt as _linestring_to_wkt
 from packages.common.model_registry_contracts import _multipolygon_to_wkt as _multipolygon_to_wkt
-from packages.common.model_registry_contracts import (
-    _should_publish_manifest_after_commit as _should_publish_manifest_after_commit,
-)
 from packages.common.model_registry_contracts import build_versioned_id as build_versioned_id
 from packages.common.model_registry_contracts import geometry_to_wkt as geometry_to_wkt
 from packages.common.model_registry_lifecycle import _ModelLifecycleMixin
@@ -172,32 +163,6 @@ class PsycopgModelRegistryStore(
     # #1728: the calling surface (route module) names the connection; the store
     # itself hard-codes nothing and defaults to the pre-#1728 unnamed behaviour.
     application_name: str | None = None
-
-    def __post_init__(self) -> None:
-        # Seed the post-commit manifest publisher (§2.2). Starts as a
-        # no-op so existing lifecycle behavior is byte-for-byte preserved
-        # until production wiring registers the real
-        # ``publish_scheduler_registry_manifest`` bridge. Bypasses the frozen
-        # constraint via ``object.__setattr__`` because the publisher is
-        # instance-scoped runtime state, not part of dataclass identity.
-        object.__setattr__(
-            self,
-            "_post_commit_manifest_publisher",
-            _default_no_op_manifest_publisher,
-        )
-        # SUB-6 (§3.3): seed the post-commit state-index publisher. Runs
-        # BEFORE the manifest publisher on the post-commit tail so a
-        # raising index publisher holds back the manifest re-publish —
-        # node-22 (DB-free) never observes ``M1``-active without ``M1``'s
-        # successor checkpoint on the file state index (D7 fact anchor
-        # A-i). Defaults to no-op so the byte-for-byte-preserved
-        # lifecycle behavior stays intact until production wiring
-        # registers the real publisher.
-        object.__setattr__(
-            self,
-            "_post_commit_state_index_publisher",
-            _default_no_op_state_index_publisher,
-        )
 
     @classmethod
     def from_env(cls, *, application_name: str | None = None) -> PsycopgModelRegistryStore:

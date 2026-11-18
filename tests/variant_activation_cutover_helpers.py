@@ -11,7 +11,6 @@ module: pytest does not collect it.
 * ``variant_direct_grid_profile`` and ``two_models`` are pytest fixtures. A
   partition that requests ``two_models`` must import BOTH names, because pytest
   resolves a fixture's own dependencies by name in the requesting module.
-* ``_ManifestPublisherStub`` records the post-commit manifest publisher calls.
 """
 
 from __future__ import annotations
@@ -24,7 +23,6 @@ import pytest
 from packages.common.auth_policy import trusted_internal_policy_decision
 from packages.common.model_registry import (
     ModelLifecycleOperation,
-    PostCommitPublishContext,
     PsycopgModelRegistryStore,
 )
 
@@ -207,9 +205,9 @@ class _HarnessStore(PsycopgModelRegistryStore):
         basin_version_id: str,  # noqa: ARG002
         current_active: Mapping[str, Any] | None,  # noqa: ARG002
     ) -> dict[str, Any] | None:
-        # SUB-5/6/7 cutover + manifest tests do not exercise the §3.1
+        # SUB-5/7 cutover and dispatch tests do not exercise the §3.1
         # legacy-reactivation guard; keep the guard disarmed here so
-        # this harness stays scoped to the SUB-5/6/7 contracts. The
+        # this harness stays scoped to the SUB-5/7 contracts. The
         # dedicated §3.1 test file (`test_legacy_reactivation_guard.py`)
         # overrides this method with a real history predicate.
         return None
@@ -272,11 +270,7 @@ def _decision(action_id: str, target_id: str) -> Any:
 
 @pytest.fixture
 def variant_direct_grid_profile() -> dict[str, Any]:
-    """A direct-grid ``resource_profile`` extras dict for the target model.
-
-    Locks the source-scope extraction path used by the post-commit publish
-    context.
-    """
+    """A direct-grid ``resource_profile`` extras dict for the target model."""
     return {
         "canonical_grid_key": "canonical_key_grid_a_v1",
         "direct_grid_forcing": {
@@ -304,26 +298,3 @@ def two_models(variant_direct_grid_profile: dict[str, Any]) -> list[dict[str, An
             resource_profile=variant_direct_grid_profile,
         ),
     ]
-
-
-# --- post-commit manifest publisher stub ---------------------------------
-
-
-class _ManifestPublisherStub:
-    """Recording stub for the post-commit manifest publisher.
-
-    Captures every :class:`PostCommitPublishContext` the seam hands over,
-    plus a call counter for the ``exactly-once`` assertion. A single
-    stub instance can be reused across a parametrized test because
-    each parametrization instantiates a fresh store + stub pair.
-    """
-
-    def __init__(self) -> None:
-        self.contexts: list[PostCommitPublishContext] = []
-
-    @property
-    def call_count(self) -> int:
-        return len(self.contexts)
-
-    def __call__(self, ctx: PostCommitPublishContext) -> None:
-        self.contexts.append(ctx)

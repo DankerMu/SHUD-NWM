@@ -218,10 +218,6 @@ class StateSnapshotRepository(Protocol):
 
     def get_latest_usable_state(self, *, model_id: str, before_time: datetime) -> StateSnapshot | None: ...
 
-    def get_latest_clone_row_for_model_source(
-        self, *, model_id: str, source_id: str
-    ) -> StateSnapshot | None: ...
-
     def get_earliest_clone_row_for_model_source(
         self, *, model_id: str, source_id: str
     ) -> StateSnapshot | None: ...
@@ -885,82 +881,18 @@ class PsycopgStateSnapshotRepository:
         )
         return _snapshot_from_row(row) if row is not None else None
 
-    def get_latest_clone_row_for_model_source(
-        self, *, model_id: str, source_id: str
-    ) -> StateSnapshot | None:
-        """Return the newest CLONE ``hydro.state_snapshot`` row for a ``(model_id, source_id)`` pair.
-
-        Read-only consumer added for Epic #982 SUB-6 §3.3: the state-clone
-        index publisher walks the committed clone rows for the newly-
-        activated ``M1`` scope and republishes each into the scheduler
-        file state index.
-
-        Shadow-proof filter (SUB-6 Round-1 fold): rows written by SHUD
-        forecast / save-state paths (``clone_gate_fingerprint IS NULL``)
-        are excluded. Only clone rows (``clone_gate_fingerprint IS NOT
-        NULL``, populated by SUB-2's core clone write path in
-        ``packages/common/state_clone.py``) are considered. This isolates clone rows unambiguously
-        so a re-activation with a backdated ``t*`` cannot be shadowed by
-        prior forecast/save-state rows at higher ``valid_time`` values
-        under the same ``(model_id, source_id)`` pair — the publisher
-        would otherwise upsert the stale forecast row into the file state
-        index and ``strict_warm_start_evidence(M1, source, t*)`` would
-        miss because the index key uses the stale ``valid_time``.
-
-        #1739 removed that same ``clone_gate_fingerprint IS NOT NULL``
-        condition from :meth:`get_earliest_clone_row_for_model_source` and
-        DELIBERATELY left it here; do not "align" the two. The two readers
-        answer different questions. The earliest reader answers "when did this
-        identity come into existence?" — an existence question whose answer
-        scopes cycles out of completion scoring, so a wrong NO hides a real
-        gap and the predicate must be wide. This reader answers "which row did
-        I just commit?", and the publisher wrote that row's
-        ``clone_gate_fingerprint`` itself moments earlier in the same write
-        path (``_build_clone_row`` takes it as a required ``str``), so
-        requiring non-NULL is a cheap self-check: a row without one is not the
-        row this publisher just wrote. Relaxing it buys nothing and would let
-        the publisher mirror a foreign row into the file state index.
-
-        Among clone rows the newest by ``(valid_time, created_at)`` is
-        the just-committed clone row. No usable-flag / lineage filter:
-        the publisher's job is to mirror the DB clone row verbatim into
-        the file state index; the DB's write-side
-        ``upsert_state_snapshot`` is the source of truth.
-
-        Returns ``None`` when no clone row exists for the pair — cold
-        start, fresh basin, or legacy target — so the caller skips
-        publish for that source
-        (never fabricates an index entry).
-        """
-        row = self._fetch_optional(
-            """
-            SELECT *
-            FROM hydro.state_snapshot
-            WHERE model_id = %s
-              AND source_id = %s
-              AND clone_gate_fingerprint IS NOT NULL
-            ORDER BY valid_time DESC, created_at DESC
-            LIMIT 1
-            """,
-            (model_id, source_id),
-        )
-        return _snapshot_from_row(row) if row is not None else None
-
     def get_earliest_clone_row_for_model_source(
         self, *, model_id: str, source_id: str
     ) -> StateSnapshot | None:
         """Return the EARLIEST clone row for a ``(model_id, source_id)`` pair (#1735).
 
-        The scheduler's lineage-scoped completion filter asks a different
-        question from the index publisher above: not "which clone row did we
-        just commit?" but "when did this ``model_id`` come into existence for
-        this source?".  That is the model's existence-start, so the ordering
-        is ``(valid_time, created_at) ASC`` — deliberately the opposite of
-        :meth:`get_latest_clone_row_for_model_source`, which serves the
-        publisher's mirror-the-just-committed-row job.  Reusing the ``DESC``
-        reader here would let a backdated re-activation retroactively scope
-        the identity out of cycles it actually ran (change
-        ``lineage-scoped-cycle-completion`` D4).
+        The scheduler's lineage-scoped completion filter asks "when did this
+        ``model_id`` come into existence for this source?".  That is the
+        model's existence-start, so the ordering is ``(valid_time,
+        created_at) ASC``.  A latest-first (descending) read must not be the
+        resolution source: it would let a backdated re-activation
+        retroactively scope the identity out of cycles it actually ran
+        (change ``lineage-scoped-cycle-completion`` D4).
 
         Lineage admission keys on ``cloned_from_model_id`` ALONE (#1739):
         present, non-empty, and different from the row's own ``model_id``, all
@@ -976,10 +908,7 @@ class PsycopgStateSnapshotRepository:
         stuck gap.  The shadow-proof purpose the fingerprint filter used to
         serve here survives the relaxation: the SHUD forecast / save-state
         write paths populate neither clone column, so the surviving
-        ``cloned_from_model_id`` conditions keep rejecting their rows.  The publisher's
-        :meth:`get_latest_clone_row_for_model_source` KEEPS the fingerprint
-        filter on purpose — see its docstring; the asymmetry is a ruling, not
-        an oversight.
+        ``cloned_from_model_id`` conditions keep rejecting their rows.
 
         A row naming ITSELF as its own predecessor is rejected: the spec
         defines lineage as a clone from a *predecessor* model, and an identity

@@ -244,7 +244,8 @@ def resolve_lineage_cutover(
       repository, which reads the already-loaded (cached) index snapshot and
       issues no additional read.
     - **DB**: ``get_earliest_clone_row_for_model_source`` — the earliest-row
-      read, NOT the publisher's ``DESC`` reader (D3/D4).
+      read; a latest-first (descending) read is never the resolution source
+      (D3/D4).
 
     Returns ``None`` — "resolved, no lineage" — for a provider that is
     ``None``, blank arguments, a provider exposing neither accessor, an index

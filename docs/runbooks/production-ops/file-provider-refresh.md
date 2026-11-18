@@ -10,7 +10,7 @@ Registry、canonical readiness 和 state index 的 consumer freshness 上限均�
 timer 每日从权威内容完整重验并重发三个 provider，scheduler consumer 仍然只读、
 fail closed。direct-grid 生产模式下 timer 重发当前已验证 registry；
 `publish_scheduler_file_registry.py` 只负责 baseline staging，不能直写 canonical。
-它与 timer、model lifecycle、readiness/state writer 共用同一个 destination-derived
+它与 timer、readiness/state writer 共用同一个 destination-derived
 lock（CLI 在 commit 时短暂持有），但 **CLI 不传 `expected_preimage`**：`main()` 从不
 populate 该参数，expected-preimage 检查只由 refresh runner 自身的
 registry/worker-mirror/readiness/state lane（含回滚路径）与 `state_manager` 的
