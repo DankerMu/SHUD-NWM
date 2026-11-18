@@ -706,6 +706,29 @@ describe('C4 live lane', () => {
     expect(result.terminal.failure?.code).toBe('RUNTIME_CONFIG_INVALID')
   })
 
+  it('fails home with RUNTIME_CONFIG_INVALID when a 200 runtime body names a non-display service role', async () => {
+    const state = makeC4FakePageState({
+      homeResponses: [
+        {
+          url: 'https://api.example.test/api/v1/runtime/config',
+          status: 200,
+          body: { data: { service_role: 'compute_control', display_readonly: true } },
+        },
+        homeResponses()[1],
+      ],
+    })
+
+    const result = await runC4DisplayLane({ config: config(), page: makeC4FakePage(state) }, defaultFetch())
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('non-display service role must fail')
+    expect(result.terminal.failure).toEqual({
+      code: 'RUNTIME_CONFIG_INVALID',
+      stage: 'home',
+      message: 'runtime config is not display_readonly',
+    })
+  })
+
   it('fails home with RUNTIME_CONFIG_INVALID when runtime config completionError is set', async () => {
     const state = makeC4FakePageState({
       homeResponses: [

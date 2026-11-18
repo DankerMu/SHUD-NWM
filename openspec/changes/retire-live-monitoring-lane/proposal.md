@@ -125,6 +125,6 @@ Tested today, in `src/__tests__/c4DisplayLane.test.tsx`:
     lists `@live-river-click`;
   - the same command with `--config playwright.live-c4-display.config.ts` lists `@live-c4-display`.
 - [x] E4 `git diff master -- apps/frontend/src/App.tsx` is empty.
-- [ ] E5 `openspec validate retire-live-monitoring-lane --strict --no-interactive`. The PR records:
+- [x] E5 `openspec validate retire-live-monitoring-lane --strict --no-interactive`. The PR records:
   - the C4 negative-contract coverage: the 3 existing tests plus the 2 added ones;
   - that no node-27 run is needed, because a lane is being retired.

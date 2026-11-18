@@ -12,4 +12,4 @@
 - [x] 1.2 Contract test edits (What 4), including the two new C4 negative-contract tests in `c4DisplayLane.test.tsx`.
 - [x] 1.3 Docs (What 5).
 - [x] 1.4 E1-E4 locally.
-- [ ] 1.5 E5 (orchestrator).
+- [x] 1.5 E5 (orchestrator).
