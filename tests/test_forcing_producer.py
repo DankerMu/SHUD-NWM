@@ -6065,8 +6065,9 @@ def test_store_ensures_direct_grid_met_station_mirror_rows_before_interp_weights
     assert "ON CONFLICT (station_id) DO UPDATE SET" in station_insert[1]
     # §D2 (§1.4): the direct-grid mirror upsert lands rows inactive (`false` literal
     # in the VALUES template) and MUST NOT touch `active_flag` in DO UPDATE SET.
-    # Mirror activation ownership belongs to registration (`false` land) and
-    # Change 8's cutover flip (`true`); the producer preserves whichever is in place.
+    # Registration owns the `false` landing; mirror activation is outside the
+    # producer (no production code path sets `active_flag=true`), and the producer
+    # preserves whichever value is in place.
     set_clause = station_insert[1].split("DO UPDATE SET", 1)[1].split("WHERE", 1)[0]
     assert "active_flag" not in set_clause, (
         "direct-grid producer DO UPDATE SET must not touch active_flag (§D2)"

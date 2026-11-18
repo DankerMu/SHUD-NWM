@@ -13,8 +13,8 @@ activation-class transitions + the currently-active model classifier).
 The harness follows the SUB-5 pattern (``tests/variant_activation_cutover_helpers.py``):
 subclass :class:`PsycopgModelRegistryStore` with an in-memory
 ``_transaction()`` / audit log / model_instance table, so the real
-``model_lifecycle_operation`` flows unchanged — preflight, hook dispatch,
-transition, audit — over synthetic basins/models with no live TimescaleDB.
+``model_lifecycle_operation`` flows unchanged — preflight, transition,
+audit — over synthetic basins/models with no live TimescaleDB.
 
 The ``-k`` selectors on each test name track the tasks.md evidence lines:
 
@@ -245,7 +245,7 @@ class _HarnessStore(PsycopgModelRegistryStore):
     """In-memory registry store for §3.1 / §3.2 guard tests.
 
     Overrides DB-touching helpers so the real ``model_lifecycle_operation``
-    (preflight, hook dispatch, transition, audit) runs unchanged over an
+    (preflight, transition, audit) runs unchanged over an
     in-memory ``self._models`` map and ``self.audit_rows`` list. The
     ``_fetch_direct_grid_activation_history`` override applies the SAME
     classifier as production (``_classify_forcing_mapping_mode``) so the

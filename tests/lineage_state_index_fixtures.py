@@ -11,7 +11,7 @@ suite publishes REAL index entries through the production
 drifting copies — and so no suite has to import a sibling test module just to
 reach a builder.
 
-Entries are built the way the state-clone hook writes them: clone provenance
+Entries are built the way the clone CLI writes them: clone provenance
 (``cloned_from_model_id`` / ``clone_gate_fingerprint`` / ``clone_gate_kind``)
 rides as pass-through fields, which is exactly what
 ``_normalize_state_index_entry``'s ``{**row, ...}`` preserves.
@@ -68,7 +68,7 @@ def index_entry(
 ) -> dict[str, Any]:
     """One index row; a clone row when ``cloned_from_model_id`` is given.
 
-    ``usable_flag`` defaults to how the clone hook writes a fresh row, but is
+    ``usable_flag`` defaults to how the clone CLI writes a fresh row, but is
     settable because a clone row is MUTABLE after birth: ``run_qc`` and
     ``mark_init_state_corrupted`` flip it to ``False`` on any ``state_id``,
     and the clone row is exactly the init state the first post-cutover cycle

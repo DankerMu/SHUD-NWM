@@ -514,7 +514,6 @@ class FakeRegistryStore:
         previous_model_id: str | None = None,
         override_missing_active: bool = False,
         reason: str | None = None,
-        cold_start_approval: Any = None,
     ) -> dict[str, Any]:
         assert trusted_internal is False, "the tool must pass its own policy decision, never trusted_internal"
         call = {

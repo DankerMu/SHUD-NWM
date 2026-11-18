@@ -6,12 +6,12 @@ module: pytest does not collect it.
 
 * ``_HarnessStore`` is a :class:`PsycopgModelRegistryStore` whose DB-touching
   helpers are in-memory, so the real ``model_lifecycle_operation`` flow
-  (preflight, hook dispatch, transition, audit) runs unchanged.
+  (preflight, transition, audit) runs unchanged. Its two write helpers record
+  the cursor they were handed in ``_write_cursors``.
 * ``variant_direct_grid_profile`` and ``two_models`` are pytest fixtures. A
   partition that requests ``two_models`` must import BOTH names, because pytest
   resolves a fixture's own dependencies by name in the requesting module.
 * ``_ManifestPublisherStub`` records the post-commit manifest publisher calls.
-* ``install_two_mount_hook_chain`` swaps in a test-only two-entry hook chain.
 """
 
 from __future__ import annotations
@@ -134,11 +134,11 @@ class _FakeTransaction:
 
 
 class _HarnessStore(PsycopgModelRegistryStore):
-    """In-memory PsycopgModelRegistryStore for §2.1 hook-contract tests.
+    """In-memory PsycopgModelRegistryStore for the activation cutover tests.
 
     Overrides the DB-touching helpers so the real
-    ``model_lifecycle_operation`` — preflight, hook dispatch, transition,
-    audit — runs unchanged over ``self._models`` and ``self.audit_rows``.
+    ``model_lifecycle_operation`` — preflight, transition, audit — runs
+    unchanged over ``self._models`` and ``self.audit_rows``.
     """
 
     def __init__(self, models: list[Mapping[str, Any]]) -> None:
@@ -149,6 +149,8 @@ class _HarnessStore(PsycopgModelRegistryStore):
         object.__setattr__(self, "_transactions", [])
         object.__setattr__(self, "_current_cursor", None)
         object.__setattr__(self, "_state_updates", [])  # (model_id, lifecycle_state, active_flag)
+        # ("state_update" | "audit", cursor) per write-helper call, in call order.
+        object.__setattr__(self, "_write_cursors", [])
 
     # ---- transaction plumbing --------------------------------------------
 
@@ -205,7 +207,7 @@ class _HarnessStore(PsycopgModelRegistryStore):
         basin_version_id: str,  # noqa: ARG002
         current_active: Mapping[str, Any] | None,  # noqa: ARG002
     ) -> dict[str, Any] | None:
-        # SUB-5/6/7 hook + manifest tests do not exercise the §3.1
+        # SUB-5/6/7 cutover + manifest tests do not exercise the §3.1
         # legacy-reactivation guard; keep the guard disarmed here so
         # this harness stays scoped to the SUB-5/6/7 contracts. The
         # dedicated §3.1 test file (`test_legacy_reactivation_guard.py`)
@@ -214,9 +216,8 @@ class _HarnessStore(PsycopgModelRegistryStore):
 
     # ---- write helpers ---------------------------------------------------
 
-    def _update_model_lifecycle_state(
-        self, cursor: Any, model_id: str, lifecycle_state: str  # noqa: ARG002
-    ) -> dict[str, Any]:
+    def _update_model_lifecycle_state(self, cursor: Any, model_id: str, lifecycle_state: str) -> dict[str, Any]:
+        self._write_cursors.append(("state_update", cursor))
         row = self._models[model_id]
         row["lifecycle_state"] = lifecycle_state
         row["active_flag"] = lifecycle_state == "active"
@@ -225,7 +226,7 @@ class _HarnessStore(PsycopgModelRegistryStore):
 
     def _insert_model_lifecycle_audit(
         self,
-        cursor: Any,  # noqa: ARG002
+        cursor: Any,
         *,
         model: Mapping[str, Any],
         updated: Mapping[str, Any],
@@ -237,6 +238,7 @@ class _HarnessStore(PsycopgModelRegistryStore):
         previous_model: Mapping[str, Any] | None,
         reason: str | None,
     ) -> int:
+        self._write_cursors.append(("audit", cursor))
         entry = {
             "action": policy_decision.action_id,
             "actor": policy_decision.actor_id,
@@ -272,7 +274,8 @@ def _decision(action_id: str, target_id: str) -> Any:
 def variant_direct_grid_profile() -> dict[str, Any]:
     """A direct-grid ``resource_profile`` extras dict for the target model.
 
-    Locks the source-scope extraction path used by the hook context.
+    Locks the source-scope extraction path used by the post-commit publish
+    context.
     """
     return {
         "canonical_grid_key": "canonical_key_grid_a_v1",
@@ -301,27 +304,6 @@ def two_models(variant_direct_grid_profile: dict[str, Any]) -> list[dict[str, An
             resource_profile=variant_direct_grid_profile,
         ),
     ]
-
-
-# --- test-only two-entry hook chain -----------------------------------------
-
-# The production chain has one mount point (``state_clone``, #3165), which makes
-# a declared-order assertion or a "no later hook runs" assertion vacuous. The
-# ordering, abort and repeat cases install this tuple instead. Registration
-# validation and dispatch both read the binding in
-# ``packages.common.model_registry_lifecycle_support``, and dispatch falls back
-# to the default no-op for a mount point ``__post_init__`` did not seed. The
-# partitions' own imported ``PRE_ACTIVATION_HOOK_MOUNT_POINTS`` is NOT patched,
-# so their assertions compare against this tuple.
-TWO_MOUNT_HOOK_CHAIN: tuple[str, ...] = ("state_clone", "second_mount")
-
-
-def install_two_mount_hook_chain(monkeypatch: pytest.MonkeyPatch) -> tuple[str, ...]:
-    monkeypatch.setattr(
-        "packages.common.model_registry_lifecycle_support.PRE_ACTIVATION_HOOK_MOUNT_POINTS",
-        TWO_MOUNT_HOOK_CHAIN,
-    )
-    return TWO_MOUNT_HOOK_CHAIN
 
 
 # --- post-commit manifest publisher stub ---------------------------------

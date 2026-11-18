@@ -40,16 +40,6 @@ from packages.common.model_registry_contracts import EVIDENCE_ONLY_BASIN_GROUP a
 from packages.common.model_registry_contracts import MODEL_LIFECYCLE_ACTIONS as MODEL_LIFECYCLE_ACTIONS
 from packages.common.model_registry_contracts import MODEL_LIFECYCLE_STATES as MODEL_LIFECYCLE_STATES
 from packages.common.model_registry_contracts import (
-    PRE_ACTIVATION_HOOK_MOUNT_POINTS,
-    DuplicateResourceError,
-    InvalidPayloadError,
-    InvalidReferenceError,
-    ModelRegistryError,
-    _default_no_op_hook,
-    _default_no_op_manifest_publisher,
-    _default_no_op_state_index_publisher,
-)
-from packages.common.model_registry_contracts import (
     RIVER_SEGMENT_DETAIL_MAX_SERIALIZED_BYTES as RIVER_SEGMENT_DETAIL_MAX_SERIALIZED_BYTES,
 )
 from packages.common.model_registry_contracts import (
@@ -58,10 +48,16 @@ from packages.common.model_registry_contracts import (
 from packages.common.model_registry_contracts import (
     SELECTED_SEGMENT_GEOMETRY_MAX_DIMENSIONS as SELECTED_SEGMENT_GEOMETRY_MAX_DIMENSIONS,
 )
-from packages.common.model_registry_contracts import ColdStartApprovalInput as ColdStartApprovalInput
+from packages.common.model_registry_contracts import (
+    DuplicateResourceError,
+    InvalidPayloadError,
+    InvalidReferenceError,
+    ModelRegistryError,
+    _default_no_op_manifest_publisher,
+    _default_no_op_state_index_publisher,
+)
 from packages.common.model_registry_contracts import ForcingMappingClassification as ForcingMappingClassification
 from packages.common.model_registry_contracts import MissingResourceError as MissingResourceError
-from packages.common.model_registry_contracts import ModelActivationContext as ModelActivationContext
 from packages.common.model_registry_contracts import (
     ModelLifecycleAuditPersistenceError as ModelLifecycleAuditPersistenceError,
 )
@@ -70,11 +66,7 @@ from packages.common.model_registry_contracts import ModelLifecycleState as Mode
 from packages.common.model_registry_contracts import PostCommitManifestPublisher as PostCommitManifestPublisher
 from packages.common.model_registry_contracts import PostCommitPublishContext as PostCommitPublishContext
 from packages.common.model_registry_contracts import PostCommitStateIndexPublisher as PostCommitStateIndexPublisher
-from packages.common.model_registry_contracts import PreActivationHook as PreActivationHook
 from packages.common.model_registry_contracts import RiverSegmentGeoJsonBudgetError as RiverSegmentGeoJsonBudgetError
-from packages.common.model_registry_contracts import (
-    _build_activation_result_approval_block as _build_activation_result_approval_block,
-)
 from packages.common.model_registry_contracts import _classify_forcing_mapping_mode as _classify_forcing_mapping_mode
 from packages.common.model_registry_contracts import _declares_direct_grid_intent as _declares_direct_grid_intent
 from packages.common.model_registry_contracts import _escape_like as _escape_like
@@ -86,7 +78,6 @@ from packages.common.model_registry_contracts import _multipolygon_to_wkt as _mu
 from packages.common.model_registry_contracts import (
     _should_publish_manifest_after_commit as _should_publish_manifest_after_commit,
 )
-from packages.common.model_registry_contracts import _would_be_already_current as _would_be_already_current
 from packages.common.model_registry_contracts import build_versioned_id as build_versioned_id
 from packages.common.model_registry_contracts import geometry_to_wkt as geometry_to_wkt
 from packages.common.model_registry_lifecycle import _ModelLifecycleMixin
@@ -183,22 +174,12 @@ class PsycopgModelRegistryStore(
     application_name: str | None = None
 
     def __post_init__(self) -> None:
-        # Seed the ordered pre-activation hook chain (§2.1). Each mount point
-        # starts as a no-op so existing lifecycle behavior is preserved
-        # byte-for-byte until a real hook is registered (Change 5 state
-        # clone). Bypasses the frozen constraint via ``object.__setattr__``
-        # because hook membership is instance-scoped runtime state, not part
-        # of dataclass identity.
-        object.__setattr__(
-            self,
-            "_pre_activation_hooks",
-            {name: _default_no_op_hook for name in PRE_ACTIVATION_HOOK_MOUNT_POINTS},
-        )
         # Seed the post-commit manifest publisher (§2.2). Starts as a
         # no-op so existing lifecycle behavior is byte-for-byte preserved
         # until production wiring registers the real
-        # ``publish_scheduler_registry_manifest`` bridge. Same
-        # frozen-dataclass rationale as the pre-activation hook chain.
+        # ``publish_scheduler_registry_manifest`` bridge. Bypasses the frozen
+        # constraint via ``object.__setattr__`` because the publisher is
+        # instance-scoped runtime state, not part of dataclass identity.
         object.__setattr__(
             self,
             "_post_commit_manifest_publisher",

@@ -27,7 +27,7 @@ Two orthogonal authorities determine the cutover:
   ``M1`` identity plus the ``M0`` identity (from
   ``details -> 'previous_model' ->> 'model_id'``).
 * ``hydro.state_snapshot`` clone rows (``clone_gate_fingerprint IS NOT
-  NULL``) carry the cutover ``t*`` by construction (SUB-4 hook writes
+  NULL``) carry the cutover ``t*`` by construction (the core clone writes
   them at ``t*``). ``t*`` = the single shared ``valid_time`` across all
   clone rows for ``M1``.
 
@@ -246,10 +246,10 @@ def resolve_replay_lineage(
     cutover_valid_time = clone_reader.get_cutover_valid_time_for_model(m1_model_id)
     if cutover_valid_time is None:
         # Audit says direct-grid was activated but no clone rows exist.
-        # This should not happen under the SUB-4 hook (clone rows are
-        # written in the same transaction as activation). Raise so the
-        # caller can distinguish "no cutover" from "cutover audit exists
-        # but state was mutated out-of-band".
+        # Activation itself writes no clone row (#3189), so the DB-plane
+        # cutover state was never transferred or was mutated out-of-band.
+        # Raise so the caller can distinguish "no cutover" from "cutover
+        # audit exists but no clone rows back it".
         raise ReplayLineageError(
             "audit reader identified direct-grid activation but no clone "
             f"rows exist for m1_model_id={m1_model_id!r} in "
@@ -419,9 +419,9 @@ class PsycopgReplayLineageCloneReader:
     :class:`ReplayLineageAmbiguityError` when clone rows carry
     disagreeing ``valid_time`` values.
 
-    The ``clone_gate_fingerprint IS NOT NULL`` filter isolates rows
-    written by the SUB-4 state-clone hook from SHUD
-    forecast / save-state rows (which never populate
+    The ``clone_gate_fingerprint IS NOT NULL`` filter isolates clone
+    rows written by the core clone (``packages/common/state_clone.py``)
+    from SHUD forecast / save-state rows (which never populate
     ``clone_gate_fingerprint``), so post-cutover forecast rows at
     higher ``valid_time`` values cannot spuriously widen the DISTINCT
     set.

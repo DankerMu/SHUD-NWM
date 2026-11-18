@@ -11,9 +11,8 @@ index row is duplicated with ``M1`` model identity + package version.
 
 Spec authority
 --------------
-``openspec/changes/mapping-variant-state-compatibility/specs/fingerprint-gated-state-clone/spec.md``
-requirements ``Fingerprint-gated state clone at cutover``,
-``The clone executes per source across the activation source scope``, and
+``openspec/specs/fingerprint-gated-state-clone/spec.md`` requirements
+``Fingerprint-gated state clone at cutover`` and
 ``Fingerprint gate inputs are pinned to package and evidence authorities``.
 
 Refusal contract

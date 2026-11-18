@@ -24,24 +24,24 @@ the successor first, then the manifest names it active. A publish
 failure keeps the previous manifest as the compute-plane authority so
 node-22 is never routed to ``M1`` without ``M1``'s successor checkpoint.
 
-Cold-start route interaction (SUB-5)
-------------------------------------
-A source covered by an explicit cold-start approval (SUB-5 task 3.2)
-gets NO clone row committed under ``(M1, source_id)`` at ``t*``. This
-publisher iterates ``ctx.source_scope`` and does a lookup per source; a
-``None`` return means "no clone committed" (approved cold-start OR
-hook-skipped fresh basin OR legacy target). The publisher SKIPS such
-sources — it never fabricates an index entry.
+Cold-start interaction
+----------------------
+A cold-started source has NO clone row under ``(M1, source_id)`` at
+``t*``. This publisher iterates ``ctx.source_scope`` and does a lookup
+per source; a ``None`` return means "no clone committed" (cold start,
+fresh basin, or legacy target). The publisher SKIPS such sources — it
+never fabricates an index entry. #3189 retired the in-transaction
+activation clone, which was the only production writer of the DB clone
+rows read here; whether this seam stays is tracked in #3204.
 
 Byte-boundary
 -------------
-Read-only consumer of the SUB-2/3/4/5 clone-write side. Does not touch
-``packages/common/state_clone.py`` or ``packages/common/state_clone_hook.py``;
-they stay byte-frozen. Uses
+Read-only consumer of the SUB-2 clone-write side. Does not touch
+``packages/common/state_clone.py``. Uses
 :meth:`packages.common.state_manager.PsycopgStateSnapshotRepository.get_latest_clone_row_for_model_source`
 — the newly-added minimal read method — to fetch the committed clone
 row for each source without needing to thread ``cutover_valid_time``
-through the hook path.
+through the activation path.
 
 Shadow-proof lookup (SUB-6 Round-1 fold): the read method filters by
 ``clone_gate_fingerprint IS NOT NULL`` so prior SHUD forecast /

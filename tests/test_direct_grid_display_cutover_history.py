@@ -43,7 +43,7 @@ Claim 4 — retired (#3164)
     production code ever registered that hook, so #3164 deleted it, and
     the claim went with it: a hook that does not exist cannot delete or
     hide a historical row. #3165 then removed its ``station_flag_flip``
-    pre-activation mount point.
+    activation mount point, and #3189 retired the activation hook chain.
 """
 
 from __future__ import annotations

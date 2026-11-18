@@ -1,7 +1,7 @@
 """Model registry contracts: error types, lifecycle literals and constants,
-river-segment payload budgets, id/geometry helpers, the cold-start approval /
-activation / post-commit context dataclasses with their default no-op hooks,
-and the lifecycle helpers used by ``model_lifecycle_operation`` (#2617 split of
+river-segment payload budgets, id/geometry helpers, the post-commit publish
+context dataclass with its default no-op publishers, and the lifecycle helpers
+used by ``model_lifecycle_operation`` (#2617 split of
 ``packages.common.model_registry``).
 
 ``packages.common.model_registry`` stays the stable import path and re-exports
@@ -177,99 +177,6 @@ def _format_point(point: Any) -> str:
 
 
 @dataclass(frozen=True)
-class ColdStartApprovalInput:
-    """Explicit cold-start approval carried on an activation request.
-
-    Epic #982 SUB-5 (``mapping-variant-state-compatibility`` task 3.2):
-    an operator with sys_admin authority may override a fingerprint
-    refusal by naming the exact ``covered_source_ids`` they authorize
-    to cold-start alongside a human-legible ``reason``. The approval
-    is unconditional grant for the named sources — the state-clone hook
-    skips the fingerprint gate for each covered source and records the
-    approval in ``ops.audit_log`` in the SAME transaction as the
-    supersede + activate swap, so no covered cutover can ship without
-    the audit obligation.
-
-    The approval carries the spin-up-distortion public-announcement
-    obligation (docs §11.3 clause 3) via the marker literal on the audit
-    record and the activation result; that literal is written by the
-    hook and by :meth:`PsycopgModelRegistryStore.model_lifecycle_operation`
-    respectively and is imported from ``packages.common.state_clone_hook``
-    so both sites stay in lockstep.
-
-    Fields:
-        approver: Human-legible identity of the operator granting the
-            approval — surfaces on the audit record.
-        reason: Free-text justification the operator supplied. Stored
-            verbatim; never redacted (approvals are auditable evidence,
-            not sensitive payload).
-        covered_source_ids: Exact tuple of ``source_id``s this approval
-            covers. A source outside this tuple is NOT covered — the
-            fingerprint gate still runs and can still refuse. Approvals
-            never widen beyond their named sources.
-    """
-
-    approver: str
-    reason: str
-    covered_source_ids: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class ModelActivationContext:
-    """Context payload delivered to every pre-activation hook.
-
-    §2.1 (Epic #961, `source-specific-model-variant-routing`) defines the
-    ordered pre-activation extension-point contract. Hooks receive this
-    frozen container inside the lifecycle transaction, before the
-    supersede+activate swap runs; a raising hook aborts the whole
-    transaction.
-
-    Fields:
-        basin_version_id: The scope (`core.model_instance.basin_version_id`)
-            whose active model is being swapped.
-        previous_active_model: The row that will be superseded (or ``None``
-            when no prior active model exists for the scope).
-        target_model: The row that will become active as a result of the
-            transition. For ``rollback_version`` this is the RESTORED
-            ``previous_model``, not the addressed model, matching the
-            preflight's own ``restored_model`` semantics (D5).
-        source_scope: Normalized ``applicable_source_ids`` extracted from
-            ``target_model.resource_profile.direct_grid_forcing`` when the
-            target carries a direct-grid contract; ``None`` for a legacy
-            IDW model. Kept as a tuple so hooks cannot mutate the scope.
-        cold_start_approval: Optional explicit cold-start approval
-            (SUB-5 task 3.2). When present, the state-clone hook skips
-            the fingerprint gate for the sources named in
-            ``cold_start_approval.covered_source_ids`` and records the
-            approval on the activation cursor. ``None`` means no
-            approval — every source in ``source_scope`` runs the
-            fingerprint gate unchanged.
-    """
-
-    basin_version_id: str
-    previous_active_model: Mapping[str, Any] | None
-    target_model: Mapping[str, Any]
-    source_scope: tuple[str, ...] | None
-    cold_start_approval: ColdStartApprovalInput | None = None
-
-
-PreActivationHook = Callable[[Any, ModelActivationContext], None]
-
-
-# Ordered pre-activation mount points; dispatch order is declaration order in
-# this tuple. The chain has one mount point, ``state_clone`` (Change 5,
-# fingerprint-gated state clone), which runs WITHOUT re-opening the lifecycle
-# transaction (D7). #3165 removed the ``station_flag_flip`` slot after #3164
-# deleted its only consumer, so registering on it is rejected as unknown.
-PRE_ACTIVATION_HOOK_MOUNT_POINTS: tuple[str, ...] = ("state_clone",)
-
-
-def _default_no_op_hook(cursor: Any, ctx: ModelActivationContext) -> None:  # noqa: ARG001
-    """Default hook: no-op. Preserves prior lifecycle behavior byte-for-byte."""
-    return None
-
-
-@dataclass(frozen=True)
 class PostCommitPublishContext:
     """Context payload delivered to the post-commit manifest publisher.
 
@@ -279,7 +186,7 @@ class PostCommitPublishContext:
     lifecycle transition. This frozen container carries the committed
     state a publisher needs to reconcile the scheduler manifest with the
     DB. The publisher runs AFTER the lifecycle transaction commits — a
-    rolled-back transaction (raising hook, audit persistence failure)
+    rolled-back transaction (for example an audit persistence failure)
     never surfaces here, so the manifest can never diverge from the
     committed DB state.
 
@@ -387,72 +294,6 @@ def _should_publish_manifest_after_commit(
     return False
 
 
-def _build_activation_result_approval_block(
-    activation_context: ModelActivationContext | None,
-) -> dict[str, Any] | None:
-    """Return the ``cold_start_approval`` result block, or ``None``.
-
-    SUB-5 task 3.2: when the activation carries an explicit approval
-    covering at least one source in scope, the activation result must
-    surface the approver + reason + covered sources plus the
-    spin-up-distortion-announcement obligation marker (docs §11.3
-    clause 3) so the caller sees the same obligation clause that
-    landed on the audit record inside the hook.
-
-    Returns ``None`` — i.e. the activation result carries NO obligation
-    marker — whenever the state-clone hook would have skipped BEFORE
-    reaching its per-source approval-consumption loop. The hook takes a
-    skip path (``no_previous_active_model`` or ``target_not_direct_grid``)
-    when ``previous_active_model is None`` OR ``source_scope is None``,
-    and in both cases no ``record_approval`` audit call fires. Mirroring
-    those short-circuits here keeps the result-side marker in lockstep
-    with the audit-record side: no marker on the result unless the hook
-    actually consumed the approval on the audit stream (fold-at-intro
-    from Epic #982 SUB-5 round-1 correctness review).
-
-    Also returns ``None`` when the approval was absent OR when none of
-    the covered sources intersect the actual ``source_scope`` (a stray
-    approval that covers no in-scope source records no obligation on
-    the result — the hook never fires ``record_approval`` in that case
-    either, so the two sites stay symmetric).
-    """
-    if activation_context is None:
-        return None
-    approval = activation_context.cold_start_approval
-    if approval is None:
-        return None
-    # Symmetry with the state-clone hook's applicability predicates
-    # (packages/common/state_clone_hook.py::_hook): the hook records a
-    # skip WITHOUT invoking ``record_approval`` when the previous active
-    # model is absent (fresh basin) or the target is not direct-grid.
-    # Emitting the marker here in either case would attach an obligation
-    # clause to the activation result with no matching audit row.
-    if activation_context.previous_active_model is None:
-        return None
-    if activation_context.source_scope is None:
-        return None
-    scope = activation_context.source_scope
-    covered_in_scope = tuple(
-        source_id for source_id in scope if source_id in approval.covered_source_ids
-    )
-    if not covered_in_scope:
-        return None
-    # Local import mirrors :meth:`_record_state_clone_refusal_audit` — the
-    # marker literal lives with the hook so both sites stay in lockstep.
-    from packages.common.state_clone_hook import (
-        STATE_CLONE_SPIN_UP_DISTORTION_ANNOUNCEMENT_MARKER,
-    )
-
-    return {
-        "approver": approval.approver,
-        "reason": approval.reason,
-        "covered_source_ids": list(covered_in_scope),
-        "spin_up_distortion_announcement_obligation": (
-            STATE_CLONE_SPIN_UP_DISTORTION_ANNOUNCEMENT_MARKER
-        ),
-    }
-
-
 def _extract_source_scope(target_model: Mapping[str, Any]) -> tuple[str, ...] | None:
     """Read ``applicable_source_ids`` from the target's direct-grid contract.
 
@@ -544,28 +385,6 @@ def _declares_direct_grid_intent(resource_profile: Mapping[str, Any]) -> bool:
         if isinstance(section, Mapping) and section.get("forcing_mapping_mode") == DIRECT_GRID_MODE:
             return True
     return False
-
-
-def _would_be_already_current(
-    model: Mapping[str, Any],
-    operation: ModelLifecycleOperation,
-) -> bool:
-    """Mirror ``_apply_model_lifecycle_transition``'s already-current check.
-
-    Kept in sync with the swap logic (§2.1 hooks skip when no swap will
-    occur). For ``activate``/``switch_version`` an already-active target
-    short-circuits at ``_apply_model_lifecycle_transition:2266-2268``.
-    For ``rollback_version``, the idempotent-rollback-retry short-circuit
-    upstream in ``model_lifecycle_operation`` handles the already-current
-    return path, so this predicate stays False for rollback (any rollback
-    that reaches the hook site is a real swap).
-    """
-    if operation not in {"activate", "switch_version"}:
-        return False
-    lifecycle_state = str(
-        model.get("lifecycle_state") or ("active" if model.get("active_flag") else "inactive")
-    )
-    return lifecycle_state == "active" and bool(model.get("active_flag"))
 
 
 def _json_mapping(value: Any) -> dict[str, Any]:

@@ -744,8 +744,8 @@ def _upsert_met_stations(cursor: Any, stations: Sequence[Mapping[str, Any]]) -> 
     # §D2 flag ownership: `active_flag` is intentionally OMITTED from the row tuple.
     # The INSERT template lands a literal `false` (fresh mirror rows land inactive) and
     # the ON CONFLICT DO UPDATE never assigns it, so an existing row's `active_flag`
-    # is preserved — registration owns `false`, Change 8's cutover owns the flip to
-    # `true`.
+    # is preserved — registration owns `false`; mirror activation is outside the
+    # producer, and no production code path sets `active_flag=true`.
     rows = [
         (
             station["station_id"],
@@ -762,8 +762,9 @@ def _upsert_met_stations(cursor: Any, stations: Sequence[Mapping[str, Any]]) -> 
     if not rows:
         return
     tolerance_sql = f"{STATION_COORDINATE_TOLERANCE:.12f}"
-    # §D2 mirror flag ownership: registration owns the `false` landing and Change 8's
-    # cutover owns the flip to `true`. The ingest apply MUST land fresh rows inactive
+    # §D2 mirror flag ownership: registration owns the `false` landing; mirror
+    # activation is outside the producer, and no production code path sets
+    # `active_flag=true`. The ingest apply MUST land fresh rows inactive
     # (literal `false` in the VALUES template) and MUST NOT treat `active_flag` as an
     # identity conflict on DO UPDATE — otherwise a post-cutover reingest whose payload
     # still carries `false` would collide with a legitimate `true` in the DB. Every
@@ -1153,9 +1154,10 @@ def _row_value(row: Any, key: str, index: int) -> Any:
 
 def _station_rows_compatible(existing: Mapping[str, Any], station: Mapping[str, Any]) -> bool:
     # §D2 flag ownership: `active_flag` is intentionally EXCLUDED from the identity
-    # compatibility check. Registration owns the `false` landing and Change 8's cutover
-    # owns the flip to `true`; a post-cutover reingest whose payload still carries
-    # `false` MUST NOT be rejected as an identity conflict against a legitimate `true`.
+    # compatibility check. Registration owns the `false` landing; mirror activation is
+    # outside the producer and no production code path sets `active_flag=true`, but a
+    # reingest whose payload still carries `false` MUST NOT be rejected as an identity
+    # conflict against a `true` already in the DB.
     # Every other identity term stays intact so legacy `forcing_proxy` handoffs continue
     # to fail closed on real drift (basin/name/coords/elevation/role).
     common_identity_matches = (

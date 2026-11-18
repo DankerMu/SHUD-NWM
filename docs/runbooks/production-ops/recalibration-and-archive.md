@@ -100,8 +100,12 @@ RUN_TAG=huai-2026081512   # 流域 + --cutover-time；每次调用换一个，re
     修好被拒那对后补跑（`--pairs` 只写剩下的对，receipt 换新路径），要么显式决定让已写
     入的对生效。dry-run（不带 `--apply`）中途被拒则两份索引都没动，同样不产出 receipt。
   审计记录里带 `missing_category`/`missing_relative_path`/`missing_side` 时，说明某个
-  hydrologic-core 文件只存在于一侧（新增或删除都算面不相等），按该路径定位后再决定是修
-  包还是走冷启动 + approval。
+  hydrologic-core 文件只存在于一侧（新增或删除都算面不相等），按该路径定位后再决定：
+  - 修包后重跑；
+  - 或者（**仅** `baseline_cutover` 模式）把该流域声明为冷流域（cold basin）；
+  - 否则就是遗漏式冷启动（cold start by omission）：激活本身不再有 approval 输入
+    （#3189 已退役激活时的 state-clone 路径），§11.3 的 spin-up 失真告知义务由操作员
+    承担。
 - **mirror 写失败**（canonical 已写成功）：工具非零退出，receipt 里该对的
   `state_index_outcomes.canonical.outcome=written` 而
   `...mirror.outcome=not_written` 并带错误文本，顶层同时是

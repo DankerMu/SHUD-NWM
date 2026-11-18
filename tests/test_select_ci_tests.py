@@ -1333,11 +1333,12 @@ def test_select_tests_maps_time_normalization_contract_to_base_helper_owners() -
             TIME_HELPER_CONSOLIDATION_PATH,
         }
     )
-    # 10 directory + 5 base-helper + 1 warm-start chaining + 4 core-smoke
+    # 10 directory + 4 base-helper + 1 warm-start chaining + 4 core-smoke
     # (test_production_scheduler.py is already a directory target) + 9 guards
     # (task 3.1 added the time-helper consolidation ceiling, #3026 the
-    # split-out status-literal scan).
-    assert len(selected) == 29
+    # split-out status-literal scan; #3189 deleted the fifth base-helper
+    # suite, the activation-time clone suite).
+    assert len(selected) == 28
 
 
 def test_time_normalization_contract_row_red_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -11859,9 +11860,7 @@ INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
     # from the adapters. Each is selected by the rule that owns its own surface,
     # which is where a regression in it would be investigated. Pulling them into
     # `workers/data_adapters/**` would put the orchestrator's journal and
-    # scheduler suites on every GFS/IFS/ERA5 adapter PR. The one importer with NO
-    # owning rule anywhere, tests/test_state_clone_cutover_hook.py, is not here:
-    # it gets a narrow `workers/data_adapters/base.py` rule instead.
+    # scheduler suites on every GFS/IFS/ERA5 adapter PR.
     ("workers/data_adapters/base.py", "tests/test_file_orchestration_journal.py"): "edge-consumer",
     ("workers/data_adapters/base.py", "tests/test_scheduler_backfill_predecessor.py"): "edge-consumer",
     ("workers/data_adapters/base.py", "tests/test_source_scoped_dispatch.py"): "edge-consumer",
@@ -16111,11 +16110,10 @@ def test_mapping_builder_rule_does_not_carry_state_clone_suites() -> None:
     # state-clone suites. The rewrite.py importer pairs are dispositioned as
     # `edge-consumer` (they have independent owning surfaces); carrying them
     # here would violate the issue's explicit exclusion of tests/test_state_clone.py.
-    # The three state-clone suites are all absent from the rule's targets.
+    # The two state-clone suites are both absent from the rule's targets.
     mapping_builder_rule = next(rule for rule in PATH_TEST_RULES if rule.pattern == "workers/mapping_builder/**")
     state_clone_suites = {
         "tests/test_state_clone.py",
-        "tests/test_state_clone_cutover_hook.py",
         "tests/test_state_clone_recalibration.py",
     }
     assert not state_clone_suites & set(mapping_builder_rule.tests), (
@@ -16246,12 +16244,9 @@ def test_canonical_converter_cli_diff_selects_package_suites_without_edge_consum
     assert not leaked, f"{module}: selection carries edge consumers {leaked}"
 
 
-def test_state_clone_hook_and_node22_script_select_their_irregular_suites() -> None:
-    # #1711 irregular mappings: the hook and the node-22 clone script have
-    # suite names that are deliberately NOT same-name derivable.
-    hook = select_tests(["packages/common/state_clone_hook.py"], repo_root=Path("."))
-    assert "tests/test_state_clone_cutover_hook.py" in hook
-
+def test_node22_clone_script_selects_its_irregular_suites() -> None:
+    # #1711 irregular mapping: the node-22 clone script has suite names that
+    # are deliberately NOT same-name derivable.
     script = select_tests(["scripts/node22_clone_direct_grid_cutover_states.py"], repo_root=Path("."))
     # The node-22 clone script owns all four state-clone suites: the
     # recalibration core, both recalibration CLI modules (end-to-end and the
@@ -16261,10 +16256,19 @@ def test_state_clone_hook_and_node22_script_select_their_irregular_suites() -> N
     assert "tests/test_state_clone_recalibration_cli_validation.py" in script
     assert "tests/test_state_clone_baseline_cutover_cli.py" in script
 
-    # Neither irregular source may drag the unrelated tests/test_state_clone.py
-    # (it belongs to the broad services/orchestrator/** rule, not these rules).
-    assert "tests/test_state_clone.py" not in hook
+    # The irregular source may not drag the unrelated tests/test_state_clone.py
+    # (it belongs to the broad services/orchestrator/** rule, not this rule).
     assert "tests/test_state_clone.py" not in script
+
+
+def test_state_manager_selects_the_clone_upsert_sql_pin() -> None:
+    # #3189: the `clone_gate_kind` column / VALUES arity / param-tuple pin on
+    # `PsycopgStateSnapshotRepository.upsert_state_snapshot` moved into
+    # tests/test_state_manager_clone_upsert.py, whose name is not same-name
+    # derivable from state_manager.py. A diff to the SQL must run it.
+    selected = select_tests(["packages/common/state_manager.py"], repo_root=Path("."))
+
+    assert "tests/test_state_manager_clone_upsert.py" in selected
 
 
 def test_provision_script_and_registration_module_select_the_dry_run_suite() -> None:
@@ -16718,11 +16722,11 @@ def test_model_registry_facade_selects_its_direct_importers_and_keeps_its_prior_
         "tests/test_model_registry_list_basins.py",
         "tests/test_qhh_production_bootstrap_scheduler.py",
         "tests/test_replay_lineage.py",
-        "tests/test_state_clone_cutover_hook.py",
         "tests/test_state_clone_index_publish.py",
         "tests/test_variant_activation_cutover.py",
-        # #3165: the two partitions split out of the base path also import the
-        # facade at module scope.
+        # #3165: the two partitions split out of the base path ride the same
+        # tuple (VARIANT_ACTIVATION_CUTOVER_TESTS); `_manifest` imports the
+        # facade at module scope, `_dispatch` no longer does (#3189).
         "tests/test_variant_activation_cutover_dispatch.py",
         "tests/test_variant_activation_cutover_manifest.py",
         "tests/test_node27_connection_attribution.py",

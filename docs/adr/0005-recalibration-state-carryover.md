@@ -246,3 +246,18 @@ reports the matcher's state-index key (`valid_time` = candidate cycle,
 `cycle_id` = producing cycle), and §8.6
 `services/orchestrator/scheduler_backfill_predecessor.py` derives the
 predecessor cycle from it.
+
+## Addendum: #3189 — one upsert SQL copy, not two (2026-11-18)
+
+Supersedes the Consequences bullet on "Both independently maintained copies of
+the upsert SQL". #3189 retired the in-transaction activation clone (never
+registered in production) and deleted
+`packages/common/state_clone_hook.py` with its
+`_CursorBoundStateSnapshotRepository`, so the second copy is gone.
+`packages/common/state_manager.py::PsycopgStateSnapshotRepository.upsert_state_snapshot`
+is now the only `hydro.state_snapshot` upsert. The lockstep test shrank with it
+to a single-copy pin in `tests/test_state_manager_clone_upsert.py`: the
+`clone_gate_kind` column in the INSERT list, the `DO UPDATE SET` list and the
+parameter tuple, and the `VALUES` arity. State carry-over at a cutover is done by
+`scripts/node22_clone_direct_grid_cutover_states.py`, which writes the file state
+index rather than `hydro.state_snapshot`.

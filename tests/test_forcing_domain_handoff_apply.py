@@ -567,8 +567,8 @@ def test_apply_preserves_existing_active_flag_true_when_payload_carries_false() 
     match misses it; this functional apply test catches it.
 
     Post-#965 the runtime producer's file-plane emits `active_flag=false` per
-    `station_inventory.json` row. Post-Change 8 cutover, the DB row for the same
-    station identity has `active_flag=true`. The ingest apply MUST (a) succeed
+    `station_inventory.json` row. Suppose the DB row for the same station
+    identity already has `active_flag=true`. The ingest apply MUST (a) succeed
     (NOT raise `REASON_APPLY_STATION_CONFLICT`), and (b) leave the existing DB
     row's `active_flag` untouched — the ON CONFLICT DO UPDATE never assigns it
     (#2300: it does not even fire for a compatible row), and `active_flag` is
@@ -586,7 +586,7 @@ def test_apply_preserves_existing_active_flag_true_when_payload_carries_false() 
         row["active_flag"] = False
 
     connection = _FakeConnection()
-    # Station 0 (qhh_forc_001): post-Change 8 cutover state — flipped to True in DB.
+    # Station 0 (qhh_forc_001): already True in DB.
     existing_true = copy.deepcopy(envelope["parsed"]["met.met_station"][0])
     existing_true["active_flag"] = True
     existing_true["geom"] = {

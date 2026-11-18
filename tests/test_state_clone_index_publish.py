@@ -600,11 +600,8 @@ class _HarnessStore(PsycopgModelRegistryStore):
     Overrides the DB-touching helpers so the real
     ``model_lifecycle_operation`` — preflight, transition, audit,
     ``publish_context`` staging, and post-commit tail dispatch — runs
-    unchanged over ``self._models`` and ``self.audit_rows``. Pre-
-    activation hooks are LEFT AT DEFAULT (no-op) so the harness stays
-    scoped to §3.3 post-commit-tail invariants; the state_clone hook
-    itself is covered by its own suite in
-    ``tests/test_state_clone_cutover_hook.py``.
+    unchanged over ``self._models`` and ``self.audit_rows``, scoped to
+    §3.3 post-commit-tail invariants.
     """
 
     def __init__(self, models: list[Mapping[str, Any]]) -> None:
@@ -1002,15 +999,14 @@ def test_c_holdback_at_sut_tail_manifest_never_called_on_state_index_raise() -> 
 def test_d_approved_cold_start_source_gets_no_fabricated_entry() -> None:
     """A source without a committed clone row is skipped, not fabricated.
 
-    Evidence (d): the SUB-5 explicit cold-start approval route commits
-    ``M1`` active with NO clone row for the covered sources. The
-    SUB-6 publisher lookup returns ``None`` for those sources and
-    MUST skip them entirely — an index entry pointing at a state URI
-    that doesn't exist would trigger a warm-start-evidence false-
-    positive on node-22.
+    Evidence (d): a cold-started source has NO clone row under ``M1``
+    when ``M1`` commits active. The SUB-6 publisher lookup returns
+    ``None`` for such a source and MUST skip it entirely — an index
+    entry pointing at a state URI that doesn't exist would trigger a
+    warm-start-evidence false-positive on node-22.
     """
-    # Only ``gfs`` has a committed clone row. ``ifs`` was cold-start-
-    # approved so no row lives in the state_snapshot table.
+    # Only ``gfs`` has a committed clone row. ``ifs`` was cold-started
+    # so no row lives in the state_snapshot table.
     gfs_snapshot = _make_clone_snapshot(
         source_id=SOURCE_GFS,
         state_uri="file:///dev/null/gfs",
@@ -1049,7 +1045,7 @@ def test_d_approved_cold_start_source_gets_no_fabricated_entry() -> None:
 #      have clone_gate_fingerprint=NULL.
 #   3. M1 -> M0 rollback.
 #   4. M0 -> M1 re-activation at t*_new < max(t_forecast_i).
-#   5. State-clone hook writes fresh clone (M1, gfs, t*_new). This
+#   5. The core clone writes fresh clone (M1, gfs, t*_new). This
 #      row coexists with the prior forecast rows because ON CONFLICT
 #      is on (model_id, source_id, valid_time).
 #   6. Publisher looks up (M1, gfs) — WITHOUT the filter, the newest
@@ -1172,8 +1168,7 @@ def test_legacy_target_source_scope_none_is_a_no_op() -> None:
 
     The publisher must not iterate over ``None`` and must not touch
     the file index when the target is a legacy-mapping model — Change
-    4's ``_extract_source_scope`` returns ``None`` for that path and
-    the hook records a ``target_not_direct_grid`` skip.
+    4's ``_extract_source_scope`` returns ``None`` for that path.
     """
     state_snapshot_repo = _FakeStateSnapshotRepo(rows={})
     recording_file_index = _RecordingFileIndex()

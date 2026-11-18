@@ -37,8 +37,8 @@ Contract:
   column default applies (matches `basins_registry_import._ensure_model_instance`
   precedent).
 * Each mirror row lands `active_flag=false` (literal, NOT bound and NOT in
-  the DO UPDATE SET list — mirror activation is Change 8's cutover flip and
-  the flag stays owned by registration until then) with `station_role=
+  the DO UPDATE SET list — mirror activation is outside the producer and no
+  production code path sets `active_flag=true`) with `station_role=
   'direct_grid_cache'` (overriding the ``'forcing_proxy'`` column default per
   db/migrations/000005_met.sql:53). The `grid_snapshot_id` FK column added
   by db/migrations/000043 is populated on every mirror row and is part of
@@ -564,9 +564,10 @@ def _insert_variant_row(
 # Docs §7.4 (fail-closed on `station_id` reuse across bound identity) and
 # design.md §D2 (registration owns `active_flag`) are the load-bearing
 # invariants — note that `active_flag` is a LITERAL `false` on INSERT and
-# is INTENTIONALLY absent from the DO UPDATE SET list so an already-flipped
-# mirror (Change 8 cutover leg) stays `true` while every other identity
-# field is refreshed.
+# is INTENTIONALLY absent from the DO UPDATE SET list so an existing
+# mirror's `active_flag` is preserved (a `true` row stays `true`; mirror
+# activation is outside the producer and no production code path sets it)
+# while every other identity field is refreshed.
 _MIRROR_INSERT_SQL = """
 INSERT INTO met.met_station (
     station_id,
@@ -630,9 +631,10 @@ def _upsert_direct_grid_mirror(
     EXCEPT for two registration-owned differences:
 
     * `active_flag` is `false` (literal on INSERT, NOT in DO UPDATE SET) —
-      the runtime producer's `active_flag=true` on insert / `SET active_flag =
-      true` on update is Change 8's cutover flip and stays with the runtime,
-      not registration (§D2 flag ownership).
+      the runtime producer's former `active_flag=true` on insert / `SET
+      active_flag = true` on update is gone: mirror activation is outside the
+      producer and no production code path sets `active_flag=true` (§D2 flag
+      ownership).
     * `grid_snapshot_id` is populated on the mirror row and included in the
       DO UPDATE SET + WHERE — SUB-2 discriminator FK that ties the mirror to
       its canonical grid snapshot so a stale-snapshot re-registration fails

@@ -497,14 +497,12 @@ MAPPING_BUILDER_TESTS: tuple[str, ...] = (
     "tests/test_mapping_builder_z_policy_verdict.py",
 )
 
-# #1711: irregular file-to-suite mappings whose suite names are deliberately NOT
-# same-name derivable. state_clone_hook.py has no tests/test_state_clone_hook.py
-# (its consumer suite is the cutover-hook suite), and the node-22 clone script
-# has no tests/test_node22_clone_direct_grid_cutover_states.py (its four suites
-# are the recalibration core, the recalibration CLI end-to-end, the recalibration
-# CLI validation split, and the baseline-cutover CLI suite). Kept as explicit
-# constants so the rule site and the meta-tests read one authority.
-STATE_CLONE_HOOK_TESTS: tuple[str, ...] = ("tests/test_state_clone_cutover_hook.py",)
+# #1711: irregular file-to-suite mapping whose suite names are deliberately NOT
+# same-name derivable. The node-22 clone script has no
+# tests/test_node22_clone_direct_grid_cutover_states.py (its four suites are the
+# recalibration core, the recalibration CLI end-to-end, the recalibration CLI
+# validation split, and the baseline-cutover CLI suite). Kept as an explicit
+# constant so the rule site and the meta-tests read one authority.
 NODE22_CLONE_CUTOVER_STATES_TESTS: tuple[str, ...] = (
     "tests/test_state_clone_recalibration.py",
     "tests/test_state_clone_recalibration_cli.py",
@@ -1079,7 +1077,6 @@ DATA_ADAPTERS_DIRECTORY_TESTS: tuple[str, ...] = (
 )
 
 DATA_ADAPTERS_BASE_HELPER_TESTS: tuple[str, ...] = (
-    "tests/test_state_clone_cutover_hook.py",
     "tests/test_scheduler_journal_retention_archive.py",
     "tests/test_pipeline_job_provenance_importer.py",
     "tests/test_pipeline_job_provenance_publisher.py",
@@ -1705,13 +1702,15 @@ RESPONSE_MODEL_PRESERVATION_TESTS: tuple[str, ...] = (
 )
 # #3165 partitioned tests/test_variant_activation_cutover.py (1770 lines) into
 # three collectible suites plus one non-collectible helper. The base path keeps
-# the pre-activation hook cases and stays the GUARDED_MODULE_CLOSURES known
-# member for the model registry facade; `_manifest` holds the post-commit
-# manifest re-publish cases and `_dispatch` the dispatch-set, retirement and
-# concurrency cases. All three import the helper and the facade at module scope.
+# the single-transaction and helper-predicate cases and stays the
+# GUARDED_MODULE_CLOSURES known member for the model registry facade; `_manifest`
+# holds the post-commit manifest re-publish cases and `_dispatch` the
+# dispatch-set, retirement and concurrency cases. All three import the helper at
+# module scope; the base path and `_manifest` also import the facade (#3189 took
+# `_dispatch`'s only facade import with the activation hook chain).
 # ONE tuple, carried whole by every rule that named the monolith, by each
 # partition's changed-test redirect and by the helper's support-module row, so a
-# diff that selected the monolith before the split still selects all 33 cases.
+# diff that selected the monolith before the split still selects every case.
 VARIANT_ACTIVATION_CUTOVER_HELPERS_PATH = "tests/variant_activation_cutover_helpers.py"
 VARIANT_ACTIVATION_CUTOVER_TESTS: tuple[str, ...] = (
     "tests/test_variant_activation_cutover.py",
@@ -1739,7 +1738,6 @@ MODEL_REGISTRY_IMPORTER_TESTS: tuple[str, ...] = (
     "tests/test_node27_connection_attribution.py",
     "tests/test_qhh_production_bootstrap_scheduler.py",
     "tests/test_replay_lineage.py",
-    "tests/test_state_clone_cutover_hook.py",
     "tests/test_state_clone_index_publish.py",
     *VARIANT_ACTIVATION_CUTOVER_TESTS,
 )
