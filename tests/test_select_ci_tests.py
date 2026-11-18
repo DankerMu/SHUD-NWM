@@ -2109,7 +2109,9 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         # #3155: the reconcile partition's logger-name pin rides the directory rule.
         "tests/test_reconcile_partition_logger.py",
         "tests/test_reconcile_sacct_parse.py",
+        # #3210: the replay lineage suite's two partitions ride the directory rule together.
         "tests/test_replay_lineage.py",
+        "tests/test_replay_lineage_lifecycle_guard.py",
         RESOLVE_SURFACE_GUARD_PATH,
         # #2624: the preservation oracle drives persistence.py, public_evidence.py
         # and retry.py un-faked through apps/api/routes/pipeline.py.
@@ -12543,7 +12545,10 @@ POSITIVE_SELECTION_FLOOR: tuple[tuple[str, tuple[str, ...]], ...] = (
     *((leaf, RECONCILE_PARTITION_FLOOR_SUITES) for leaf in RECONCILE_PARTITION_LEAVES),
     ("services/orchestrator/scheduler_generation.py", ("tests/test_scheduler_generation.py",)),
     ("services/orchestrator/scheduler_timing.py", ("tests/test_scheduler_timing.py",)),
-    ("services/orchestrator/replay_lineage.py", ("tests/test_replay_lineage.py",)),
+    (
+        "services/orchestrator/replay_lineage.py",
+        ("tests/test_replay_lineage.py", "tests/test_replay_lineage_lifecycle_guard.py"),
+    ),
     (
         "services/orchestrator/retention.py",
         (
@@ -13667,6 +13672,9 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
     ("tests/gateway_reconcile_binding_provenance_helpers.py", "tests/test_gateway_reconcile_binding_provenance.py"),
     ("tests/gateway_reconcile_comment_accounting_helpers.py", "tests/test_gateway_reconcile_comment_fallback_bind.py"),
     ("tests/forcing_submit_ambiguity_helpers.py", "tests/test_forcing_submit_ambiguity.py"),
+    # #3210: both replay lineage partitions import the shared reader fakes; the
+    # base path anchors, as for #3177.
+    ("tests/replay_lineage_helpers.py", "tests/test_replay_lineage.py"),
     # #1102: the shared fixture surface of the seven publisher partitions. The
     # calibration-overrides partition anchors it because it is the one that names
     # the most of that surface (the declaration builders, both published-bytes
@@ -16721,6 +16729,8 @@ def test_model_registry_facade_selects_its_direct_importers_and_keeps_its_prior_
         "tests/test_model_registry_list_basins.py",
         "tests/test_qhh_production_bootstrap_scheduler.py",
         "tests/test_replay_lineage.py",
+        # #3210: the lifecycle-guard partition rides the same tuple (REPLAY_LINEAGE_TESTS).
+        "tests/test_replay_lineage_lifecycle_guard.py",
         "tests/test_variant_activation_cutover.py",
         # #3165: the partition split out of the base path rides the same tuple
         # (VARIANT_ACTIVATION_CUTOVER_TESTS); `_dispatch` no longer imports the
@@ -16845,6 +16855,12 @@ INVENTORY_SUITES: tuple[str, ...] = (
     "tests/test_gateway_reconcile_inventory.py",
     "tests/test_gateway_reconcile_inventory_crash_migration.py",
 )
+# #3210: the replay lineage suite, split into the resolver base and the
+# lifecycle-guard partition plus one non-collectible helper.
+REPLAY_LINEAGE_SUITES: tuple[str, ...] = (
+    "tests/test_replay_lineage.py",
+    "tests/test_replay_lineage_lifecycle_guard.py",
+)
 REPARTITIONED_SUITES: tuple[tuple[str, ...], ...] = (
     CLAIMANT_EXCLUSIVITY_SUITES,
     BINDING_PROVENANCE_SUITES,
@@ -16852,6 +16868,7 @@ REPARTITIONED_SUITES: tuple[tuple[str, ...], ...] = (
     FORCING_SUBMIT_AMBIGUITY_SUITES,
     FILE_COHORT_IDENTITY_SUITES,
     INVENTORY_SUITES,
+    REPLAY_LINEAGE_SUITES,
 )
 
 # The collectible consumers of tests/orchestrator_bind_reserved_job_helpers.py
@@ -16883,6 +16900,7 @@ REPARTITION_SUPPORT_MODULE_ROUTES: dict[str, frozenset[str]] = {
         }
     ),
     "tests/forcing_submit_ambiguity_helpers.py": frozenset(FORCING_SUBMIT_AMBIGUITY_SUITES),
+    "tests/replay_lineage_helpers.py": frozenset(REPLAY_LINEAGE_SUITES),
 }
 
 # One changed path per route that selected each base before the split (the
@@ -16912,6 +16930,14 @@ REPARTITION_ROUTE_SOURCES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("services/orchestrator/file_journal_context.py", INVENTORY_SUITES),
     ("tests/file_journal_legacy_seed_helpers.py", INVENTORY_SUITES),
     ("tests/gateway_reconcile_helpers.py", INVENTORY_SUITES),
+    # #3210: the resolver's own module (the directory rule and the importer
+    # closure), the model registry facade and an owner module
+    # (MODEL_REGISTRY_IMPORTER_TESTS), and an orchestrator module that reaches
+    # the suite only through the `services/orchestrator/**` directory rule.
+    ("services/orchestrator/replay_lineage.py", REPLAY_LINEAGE_SUITES),
+    ("packages/common/model_registry.py", REPLAY_LINEAGE_SUITES),
+    ("packages/common/model_registry_lifecycle_support.py", REPLAY_LINEAGE_SUITES),
+    ("services/orchestrator/retention.py", REPLAY_LINEAGE_SUITES),
 )
 
 
