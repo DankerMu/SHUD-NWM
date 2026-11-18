@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD - created by archiving change c4-live-display-readiness. Update Purpose
+Define the independent, gated, no-mock C4 browser lane that proves the node-27 public display (`/` and `/ops`) under `display_readonly`: required inputs, a complete bounded read-only proof whose negative contracts (permission, runtime, forbidden controls, Slurm or mutating requests) block PASS, and the private closed-set receipt acceptance chain.
 after archive.
 
 ## Requirements
@@ -57,6 +57,12 @@ error、permission/runtime 错误、超时、Slurm 请求或非 GET/HEAD 控制�
 - **WHEN** 导航产生非必需 ERR_ABORTED，而 required identity 请求均完成
 - **THEN** 正常取消不单独使 C4 失败
 - **AND** 同一执行中任一 required 请求失败或控制请求出现仍阻止 PASS
+
+#### Scenario: 只读 /ops 出现禁用控件
+
+- **WHEN** display_readonly `/ops` 标题已观察到，且 observer 计到 role selector 或 retry/cancel 控件
+- **THEN** C4 以 `FORBIDDEN_CONTROL`（stage `ops`）结束为非 PASS
+- **AND** role selector 与 retry/cancel 两条分支各有一条负向测试钉住其 code、stage 与 message
 
 ### Requirement: 私有闭集证据接受链
 
