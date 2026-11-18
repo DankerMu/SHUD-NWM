@@ -70,16 +70,27 @@ images will eventually be retired.
   the lockfile diff is limited to Playwright packages.
 - [x] E2 Local: `pnpm exec playwright install chromium`, then the full mocked lane `pnpm test:e2e:mocked-regression`
   passes.
-- [ ] E3 CI: `Frontend E2E (mocked)`, all shards, green on `ubuntu-latest` (26.04), with an install log showing chromium
+- [x] E3 CI: `Frontend E2E (mocked)`, all shards, green on `ubuntu-latest` (26.04), with an install log showing chromium
   1248.
-- [ ] E4 node-27, in a temporary worktree:
+- [x] E4 node-27, in a temporary worktree:
   - `corepack pnpm install --frozen-lockfile`, then `corepack pnpm exec playwright install chromium`;
   - `ldd` on the 1248 `chrome` and `chrome-headless-shell` binaries shows no `not found`;
   - the **full** `corepack pnpm test:e2e:mocked-regression` passes, including the WebGL/MapLibre specs, on node-27
     without a GPU;
   - a read-only `test:e2e:live-display` run passes, with both `PLAYWRIGHT_LIVE_BASE_URL` and `PLAYWRIGHT_LIVE_API_BASE_URL` set (`https://test.nwm.ac.cn`);
   - `df -h / /home` before and after.
-- [ ] E5 Before merge:
+  - **Result** (HEAD `14e9257cb`):
+    - Playwright 1.64.1; `ldd` reports 0 `not found` for both 1248 binaries;
+    - the full mocked lane: **799 passed** (33.4m);
+    - `df` on `/` is unchanged at 26G free, and `/home` free space did not shrink;
+    - `.links` lists the temporary worktree's 1.64.1 and the active tree's 1.59.1.
+  - **Recorded deviation (pre-existing, #3202):** `test:e2e:live-display` fails with
+    `RBAC 权限不足 page state`. It fails identically on master `1a4b82f6f` (Playwright 1.59.1, chromium 1217) in a
+    temporary worktree, so the upgrade did not cause it.
+    - `/monitoring` is not open to `display_readonly` (`App.tsx:72-79`; spec `ops-display-downgrade`), so the legacy
+      `@live-monitoring` lane's contract cannot pass on the public deployment.
+    - Tracked in #3202 and not fixed here.
+- [x] E5 Before merge:
   - `openspec validate playwright-ubuntu-2604-support --strict --no-interactive`;
   - `m15-visual-evidence` dispatched twice from the branch, once with `evidence_sha` = the PR head and once with a
     pre-upgrade SHA (`1a4b82f6f…`, in full), both green on `ubuntu-24.04`, with both run URLs in the PR;

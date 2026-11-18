@@ -11,5 +11,5 @@
 - [x] 1.1 Upgrade `@playwright/test` to `^1.64.1` (lockfile 1.64.1) and update the lockfile (What 1).
 - [x] 1.2 Unpin `ci.yml` `frontend-e2e`; rewrite the m15 pin comment; add the runner-image guard to `tests/test_ci_shard_tests.py` (What 2, What 3, What 5).
 - [x] 1.3 E1 and E2 locally.
-- [ ] 1.4 E3, E4 and E5 (orchestrator).
+- [x] 1.4 E3, E4 and E5 (orchestrator).
 - [ ] 1.5 E6 after merge (orchestrator), recorded in the archive PR.
