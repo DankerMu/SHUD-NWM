@@ -56,5 +56,5 @@ writes the file state index directly.
 
 **Reason**: The clone no longer runs inside activation (#3189), so there is no shared transaction.
 
-**Migration**: Atomicity now holds per basin/source unit of the clone CLI; see `fingerprint-gated-state-clone`
+**Migration**: The clone CLI is fail-closed per basin/source unit, with durable abort evidence; see `fingerprint-gated-state-clone`
 "File-index clone invocations preserve durable abort evidence and primary errors".

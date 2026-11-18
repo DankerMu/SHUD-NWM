@@ -84,8 +84,9 @@ def test_single_transaction_swap_and_audit(
         ("legacy_m0", "superseded", False),
         ("direct_grid_m1", "active", True),
     ]
-    # Exactly ONE audit row with ``outcome='allowed'``.
+    # Exactly ONE audit row with ``outcome='allowed'``, for the activation.
     assert [row["outcome"] for row in store.audit_rows] == ["allowed"]
+    assert store.audit_rows[0]["operation"] == "activate"
     # Nothing else reached the cursor: the activation writes no
     # ``hydro.state_snapshot`` row (or any other raw statement).
     assert committed_cursor.statements == []

@@ -22,9 +22,11 @@ Direct-grid is a one-way channel (user explicit decision, grill 2026-07-09). The
 - **THEN** the forward clone proceeds through the fingerprint gate
 - **THEN** the mechanism exposes no symmetric reverse operation.
 
-### Requirement: Fix-forward state continuity routes by fingerprint
+## ADDED Requirements
 
-A fix-forward `M1→M1′` SHALL reuse the same `hydrologic_core_fingerprint` gate. When the fix only changes `FORC`/binding the fingerprint is unchanged and the clone SHALL proceed; when the fingerprint differs the candidate is NOT a fix-forward but a new model, and it SHALL NOT be cloned. The refusal carries the stable code and writes no row. No production carrier performs fix-forward clones: the clone CLI's modes are `baseline_cutover` and `recalibration`. Activating such a candidate anyway is a cold start by omission, and the §11.3 spin-up-distortion announcement is the operator's obligation.
+### Requirement: Fix-forward state continuity is gated by fingerprint
+
+A fix-forward `M1→M1′` SHALL reuse the same `hydrologic_core_fingerprint` gate. When the fix only changes `FORC`/binding the fingerprint is unchanged and the clone SHALL proceed; when the fingerprint differs the candidate is NOT a fix-forward but a new model, and it SHALL NOT be cloned. The refusal carries the stable code and writes no row. No production carrier performs M1→M1′ fix-forward clones: the clone CLI's modes are `baseline_cutover` (M0→M1) and `recalibration`. Activating such a candidate anyway is a cold start by omission, and the §11.3 spin-up-distortion announcement is the operator's obligation.
 
 #### Scenario: Fingerprint-equal fix-forward clones through the same gate
 
@@ -32,8 +34,17 @@ A fix-forward `M1→M1′` SHALL reuse the same `hydrologic_core_fingerprint` ga
 - **THEN** the state clone `(M1, source, t*) → (M1′, source, t*)` proceeds through the same fingerprint gate
 - **THEN** the `cloned_from` provenance records `M1` as the source and the gating fingerprint value.
 
-#### Scenario: Fingerprint-unequal candidate is routed to cold-start plus approval
+#### Scenario: Fingerprint-unequal candidate is refused and can only start cold
 
 - **WHEN** a candidate labeled fix-forward has a `hydrologic_core_fingerprint` that differs from the active model's
 - **THEN** the mechanism refuses to clone, classifies the candidate as a new model, writes no state row, and surfaces the stable error code `state_clone_cold_start_approval_required` plus an audit record naming the blocked scope
 - **THEN** if the candidate is activated anyway it starts cold (no cloned state), and the spin-up-distortion announcement is the operator's obligation (§11.3).
+
+## REMOVED Requirements
+
+### Requirement: Fix-forward state continuity routes by fingerprint
+
+**Reason**: Its scenario title and body routed a fingerprint-unequal candidate to the cold-start approval input, which
+#3189 deletes. It is restated under a new name with a renamed scenario.
+
+**Migration**: See the ADDED requirement "Fix-forward state continuity is gated by fingerprint".
