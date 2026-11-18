@@ -21,7 +21,7 @@ The sibling retry/cancel branch got its negative test in #3202 (PR #3208); this 
    `headingObserved: true, roleSelectorCount: 1` (retry/cancel count stays 0).
 2. Assert `result.ok === false` and `result.terminal.failure` toEqual
    `{code: 'FORBIDDEN_CONTROL', stage: 'ops', message: 'role selector is visible on display_readonly /ops'}`.
-3. Spec delta: one added scenario on the C4 bounded-readonly requirement.
+3. Spec delta: MODIFIED the C4 bounded-readonly requirement (full copy) to add one scenario.
 
 ## Must preserve
 
@@ -38,5 +38,5 @@ Any production code change; the C4 runtime/observer.
   `corepack pnpm vitest run src/__tests__/c4DisplayLane.test.tsx -t 'role selector'` → 1 failed; restore, then
   `git diff --exit-code master -- apps/frontend/playwright.c4-display-lane.ts`.
 - [x] E2 `cd apps/frontend && corepack pnpm test && corepack pnpm check:types && corepack pnpm typecheck`.
-- [ ] E3 `openspec validate c4-role-selector-negative-test --strict --no-interactive`. No node-27 run (test-only, no
+- [x] E3 `openspec validate c4-role-selector-negative-test --strict --no-interactive`. No node-27 run (test-only, no
   runtime change).
