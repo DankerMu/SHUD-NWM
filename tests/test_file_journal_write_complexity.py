@@ -404,18 +404,52 @@ def _history(event_details: Mapping[str, Any]) -> dict[str, list[dict[str, Any]]
     }
 
 
-@pytest.mark.parametrize("key", ["object_store_root", "ordinary"])
-def test_historical_import_holding_one_over_limit_record_writes_nothing(tmp_path: Path, key: str) -> None:
-    """A runtime-root-shaped key (``*_root``: the public renderer recurses into a mapping
-    under it) and an ordinary key carry an over-limit structure the same way."""
+def _history_with_deep_carrier(carrier: str, deep: Any) -> dict[str, list[dict[str, Any]]]:
+    """``_history`` with ``deep`` under one row of the ``carrier`` relation.  Every
+    carrier sits behind at least one row the import would already have appended."""
 
+    if carrier.startswith("pipeline_event:"):
+        return _history({carrier.split(":", 1)[1]: deep})
+    history = _history({"trigger": "manual"})
+    if carrier == "forecast_cycle":
+        history["forecast_cycles"][0]["probe"] = deep
+    elif carrier == "hydro_run":
+        history["hydro_runs"][0]["probe"] = deep
+    elif carrier == "pipeline_job":
+        history["pipeline_jobs"][1]["exit_code"] = deep
+    else:
+        raise AssertionError(carrier)
+    return history
+
+
+@pytest.mark.parametrize(
+    ("carrier", "record_type"),
+    [
+        # A runtime-root-shaped key (``*_root``: the public renderer recurses into a
+        # mapping under it) and an ordinary key carry an over-limit structure the same way.
+        ("pipeline_event:object_store_root", "pipeline_event"),
+        ("pipeline_event:ordinary", "pipeline_event"),
+        ("pipeline_job", "pipeline_job"),
+        ("hydro_run", "hydro_run"),
+        ("forecast_cycle", "forecast_cycle"),
+    ],
+)
+def test_historical_import_holding_one_over_limit_record_writes_nothing(
+    tmp_path: Path,
+    carrier: str,
+    record_type: str,
+) -> None:
     journal_root = tmp_path / "journal"
     deep = _nest(FileOrchestrationJournalRepository(journal_root).max_json_depth)
 
     with pytest.raises(FileOrchestrationJournalError) as error:
-        import_historical_scheduler_state(journal_root=journal_root, cutoff_time=CYCLE, **_history({key: deep}))
+        import_historical_scheduler_state(
+            journal_root=journal_root,
+            cutoff_time=CYCLE,
+            **_history_with_deep_carrier(carrier, deep),
+        )
 
-    _assert_depth_refused(error, "pipeline_event")
+    _assert_depth_refused(error, record_type)
     assert not journal_root.exists()
 
 

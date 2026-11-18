@@ -100,8 +100,10 @@ latest-view offset.
   - Residual risk, recorded, in two steps:
     1. A write whose record is within `max_nodes` succeeds, but `_atomic_write_json_unlocked` does not check what it
        writes, so it can produce a latest view over `max_nodes`.
-    2. The next write for that model reads the view through `_cycle_rows` (`:7178-7196`), so that write appends and then
-       raises.
+    2. From then on, every later write to that cycle, for any model, reads the cycle's latest views at sequence allocation
+       (`_next_sequence_unlocked` → `_latest_replay_sequences_unlocked`) and is refused with
+       `file_journal_json_node_limit_exceeded` before any byte. Reads of the cycle are blocked as well. Nothing is
+       half-appended; the operator repair is to fix that cycle's latest view.
   - With `max_nodes = 300_000` and a wrapper of about 16 nodes, only a cycle already near the limit can hit it.
 - Changing the limits themselves, the read side, or any record format.
 
