@@ -59,26 +59,24 @@ packaged IC 的规范路径 `<package>/<模型名>.cfg.ic`，写错就是 IC 探
 (b) 是唯一在册的约束，一次性的 root `setfacl` 修复只是补救、不是机制。
 
 **6. 率定更新原地覆盖，但必须通知平台。**
-只改参数、不改 mesh/river/IC 的率定更新可以原地覆盖同一目录。
-但**平台需要在覆盖前后各做一次动作**：包重新发布 + 状态延续克隆（`state_compatibility` 门，见 §5.7）。
-不通知就覆盖 = 新包与旧状态之间没有克隆行，`REQUIRE_FORECAST_WARM_START=true` 下
-下一个 cycle 直接 `state_clone_cold_start_approval_required` 停摆。
+只改参数、不改 mesh/river/IC 的率定更新可以原地覆盖同一目录，但**覆盖本身不会让任何东西生效**，必须通知平台走
+recalibration succession（机制见 [`recalibration-and-archive.md`](recalibration-and-archive.md) 的 5.7 / 5.7.1，
+本页不复述）。两种真实风险都是**静默**的，不会报错，调度器也不会停下：
 
-平台侧执行这一步时**顺序是硬的，且要留证**：先写克隆行、再发布 manifest。
-反过来会在 `REQUIRE_FORECAST_WARM_START=true` 下 stall 一个 cycle。判定顺序一律看两份
-receipt 的 `generated_at`，**不要看 `manifest-last.json.bak-*` 的 mtime**——备份是保留源
-时间戳的拷贝，mtime 反映的是上一次发布，不是本次。#1698 的实测形状可照抄：
+- **不通知就覆盖 → 率定静默不生效。** 调度器只运行 object store 里按内容寻址发布的包；direct-grid 下 provider
+  refresh 不重扫 `Basins/`，只把上一份 canonical 的 models 原样续发（`scripts/scheduler_refresh/runner.py`
+  的 `previous_models_snapshot` 续发路径）。旧包照常运行，新参数不进入任何 cycle。
+- **先发布、后克隆 → warm state 静默切断。** 新包 `M1′` 是新的内容派生 `model_id`，没有克隆行就没有任何
+  generation 的 state 历史，走 first-cycle 分支：packaged IC 合格时被放行为 `PACKAGED_IC_BOOTSTRAP`，预报从包内
+  IC 起步、过程线断一刀；只有 packaged IC 不可读或不合格时才 block 为 `first_cycle_initial_state_undecided`
+  （`services/orchestrator/scheduler_generation.py` 的 first-cycle 分支；分析见 5.7.1）。这条判定与
+  `NHMS_REQUIRE_FORECAST_WARM_START` 的取值无关。
 
-```text
-receipts/<basin>-<cutover>-apply.json   generated_at 2026-08-22T06:42:07Z
-                                        cloned_pair_count 2 / dry_run false /
-                                        invocation_outcome complete
-receipts/manifest-publish-<N>.json      generated_at 2026-08-22T07:02:41Z
-                                        introduced_model_ids == 预期新身份集合
-```
-
-即克隆先于发布约 20 分钟。**不要把 provider refresh 的时序当兜底**——它只是碰巧
-掩盖过顺序错误，不是保护机制。
+平台侧在 provision `M1′` 之后一律用 `scripts/node22_model_succession.py --kind recalibration` 按固定顺序完成 copyback →
+preflight → begin（停 timer）→ clone → publish → refresh → finish（timer 原为 active 才复启）。它按步落回执 `<回执根>/<succession-id>/step-<步名>.json`，上一步回执缺失时本步拒绝，**先克隆、后发布由代码
+强制**；克隆与发布工具各自的回执（`clone-apply.json` / `publish-apply.json` 等）落在同一目录，判序看这里。
+只有 succession 被 hard stop 后**单独**运行 merged publisher（`scripts/node22_publish_merged_scheduler_registry.py`）时，
+它不检查克隆回执，顺序才靠操作员保证。**不要把 provider refresh 当兜底**：它是纯续发，不会把 `M1′` 发进 manifest。
 
 **7. 改 mesh / river / IC 视为新版本，不是更新。**
 这三者进 8 面指纹；变了就不是同一个模型，状态不可延续，必须冷启动或走新 id。
