@@ -1,4 +1,4 @@
-"""``LocalObjectStore`` refuses FIFOs and symlinked roots, key parents and parent swaps.
+"""``LocalObjectStore`` bounds limited reads and refuses FIFOs, symlinked roots, key parents and parent swaps.
 
 The store resolves every key through the no-follow primitives in
 ``packages.common.safe_fs``; these cases pin that a symlink or a FIFO anywhere on
@@ -15,6 +15,37 @@ import pytest
 
 from packages.common import safe_fs
 from packages.common.object_store import LocalObjectStore, ObjectStoreError
+
+
+def test_local_object_store_read_bytes_limited_uses_bounded_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = LocalObjectStore(tmp_path)
+    key = "runs/m10_148_bounded/input/manifest.json"
+    store.write_bytes_atomic(key, b"abcdef")
+    path = store.resolve_path(key)
+    read_sizes: list[int] = []
+    original_os_read = safe_fs.os.read
+
+    def fake_os_read(fd: int, size: int) -> bytes:
+        read_sizes.append(size)
+        return original_os_read(fd, size)
+
+    original_read_bytes = type(path).read_bytes
+
+    def forbidden_read_bytes(self: Path) -> bytes:
+        if self != path:
+            return original_read_bytes(self)
+        raise AssertionError("read_bytes() must not be used for limited reads")
+
+    monkeypatch.setattr(safe_fs.os, "read", fake_os_read)
+    monkeypatch.setattr(type(path), "read_bytes", forbidden_read_bytes)
+
+    with pytest.raises(ObjectStoreError):
+        store.read_bytes_limited(key, max_bytes=5)
+
+    assert read_sizes == [6]
 
 
 @pytest.mark.parametrize("operation", ["read_bytes_limited", "iter_bytes", "size_and_checksum"])
