@@ -15,11 +15,15 @@ Commands:
       Idempotent per (issue, pr): an identical re-run changes nothing, a
       differing one replaces that pair's record. `--ceiling` adds P to
       `ceilingPrs` once (fix_gate.py locked on P). `gateEntries` is never
-      touched; new entries start at 0. Run it only for a non-merged close
-      (`superseded-by-split`, `abandoned` or `descoped`, committed when
-      `fix_gate.py close` runs) or when fix_gate.py locked on P (`--ceiling`,
-      any outcome). A `merged` close without `--ceiling` carries no decision:
-      it exits 0, says it was not recorded, and writes nothing.
+      touched; new entries start at 0. Run it only for:
+        - a non-merged close (`superseded-by-split`, `abandoned` or
+          `descoped`), committed on the default branch when
+          `fix_gate.py close` runs, with `--ceiling` if fix_gate.py locked
+          on P;
+        - a `merged` close of a PR fix_gate.py locked on, with `--ceiling`,
+          committed in that PR's last push before the merge.
+      A `merged` close without `--ceiling` carries no decision: it exits 0,
+      says it was not recorded, and writes nothing.
       --issue and --pr must be positive; the mutated memory is validated
       before it is written.
   check --issue N [--issue M ...] [--pr P]

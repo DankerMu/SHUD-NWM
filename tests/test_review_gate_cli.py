@@ -188,9 +188,12 @@ def test_record_never_touches_gate_entries_and_new_entries_start_at_zero(tmp_pat
 
 def test_clean_merge_is_not_recorded_and_leaves_the_file_bytes_unchanged(tmp_path: Path, capsys) -> None:
     # D1: a `merged` close without `--ceiling` carries no escalation decision.
-    path = write_memory(tmp_path, {"issues": {"5": entry(gate_entries=1, closed=[
-        {"pr": 8, "outcome": "abandoned", "rounds": 2},
-    ])}})
+    # The bare top-level `7` is foldable, so any re-save of the loaded history
+    # would fold it and change the bytes: unchanged bytes prove no write.
+    path = write_memory(tmp_path, {
+        "issues": {"5": entry(gate_entries=1, closed=[{"pr": 8, "outcome": "abandoned", "rounds": 2}])},
+        "7": entry(closed=[{"pr": 70, "outcome": "descoped", "rounds": 1}]),
+    })
     before = path.read_bytes()
 
     assert run(tmp_path, "record", "--issue", "5", "--issue", "6", "--pr", "9", "--rounds", "1",
