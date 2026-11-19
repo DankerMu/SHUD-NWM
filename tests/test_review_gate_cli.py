@@ -55,14 +55,14 @@ def test_unambiguous_bare_key_is_folded_into_issues(tmp_path: Path, capsys) -> N
         "1800": entry(closed=[{"pr": 1810, "outcome": "merged", "rounds": 1}]),
     })
 
-    assert run(tmp_path, "record", "--issue", "1900", "--pr", "1910", "--rounds", "1", "--outcome", "merged") == 0
+    assert run(tmp_path, "record", "--issue", "1900", "--pr", "1910", "--rounds", "1", "--outcome", "abandoned") == 0
 
     history = read_memory(tmp_path)
     assert list(history) == ["issues"]
     assert history["issues"] == {
         "1736": same,
         "1800": entry(closed=[{"pr": 1810, "outcome": "merged", "rounds": 1}]),
-        "1900": entry(closed=[{"pr": 1910, "outcome": "merged", "rounds": 1}]),
+        "1900": entry(closed=[{"pr": 1910, "outcome": "abandoned", "rounds": 1}]),
     }
     err = capsys.readouterr().err
     assert "folded bare top-level key '1736'" in err
@@ -82,7 +82,9 @@ def test_conflicting_bare_key_refuses_every_subcommand_and_prints_both_records(
     tmp_path: Path, capsys, argv: tuple[str, ...]
 ) -> None:
     # The real pre-#2469 shape (`d1e86d70a^`): bare `1660` with gateEntries 1
-    # beside issues["1660"] with gateEntries 0 - no safe automatic winner.
+    # beside issues["1660"] with gateEntries 0 - no safe automatic winner. The
+    # `record` param is a ceiling-less `merged` on purpose: the clean-merge
+    # no-op still loads through the guard first, so it refuses too.
     closed = [{"outcome": "merged", "pr": 1696, "rounds": 2}]
     path = write_memory(tmp_path, {
         "issues": {"1660": {"ceilingPrs": [], "closed": closed, "gateEntries": 0}},
@@ -144,7 +146,7 @@ def test_record_never_persists_what_the_loader_refuses(tmp_path: Path, capsys) -
     # history before saving, so an unloadable key never reaches disk.
     path = write_memory(tmp_path, {"issues": {"5": entry()}})
     before = path.read_bytes()
-    args = argparse.Namespace(root=tmp_path, issue=[-5], pr=7, rounds=1, outcome="merged", ceiling=False)
+    args = argparse.Namespace(root=tmp_path, issue=[-5], pr=7, rounds=1, outcome="abandoned", ceiling=False)
 
     with pytest.raises(review_gate.MalformedMemory, match=r"issues\[-5\]: issue key must be a decimal"):
         review_gate.cmd_record(args)
@@ -154,18 +156,18 @@ def test_record_never_persists_what_the_loader_refuses(tmp_path: Path, capsys) -
 
 def test_record_is_idempotent_per_issue_and_pr_and_replaces_a_differing_close(tmp_path: Path) -> None:
     write_memory(tmp_path, {"issues": {}})
-    argv = ("record", "--issue", "5", "--issue", "6", "--pr", "9", "--rounds", "2", "--outcome", "merged")
+    argv = ("record", "--issue", "5", "--issue", "6", "--pr", "9", "--rounds", "2", "--outcome", "descoped")
 
     assert run(tmp_path, *argv) == 0
     first = (tmp_path / ".review-gate-issues.json").read_bytes()
     assert run(tmp_path, *argv) == 0
     assert (tmp_path / ".review-gate-issues.json").read_bytes() == first
-    assert read_memory(tmp_path)["issues"]["5"] == entry(closed=[{"pr": 9, "outcome": "merged", "rounds": 2}])
+    assert read_memory(tmp_path)["issues"]["5"] == entry(closed=[{"pr": 9, "outcome": "descoped", "rounds": 2}])
 
-    assert run(tmp_path, "record", "--issue", "5", "--pr", "9", "--rounds", "3", "--outcome", "descoped") == 0
+    assert run(tmp_path, "record", "--issue", "5", "--pr", "9", "--rounds", "3", "--outcome", "abandoned") == 0
     issues = read_memory(tmp_path)["issues"]
-    assert issues["5"]["closed"] == [{"pr": 9, "outcome": "descoped", "rounds": 3}]
-    assert issues["6"]["closed"] == [{"pr": 9, "outcome": "merged", "rounds": 2}]
+    assert issues["5"]["closed"] == [{"pr": 9, "outcome": "abandoned", "rounds": 3}]
+    assert issues["6"]["closed"] == [{"pr": 9, "outcome": "descoped", "rounds": 2}]
 
 
 def test_record_never_touches_gate_entries_and_new_entries_start_at_zero(tmp_path: Path) -> None:
@@ -182,6 +184,45 @@ def test_record_never_touches_gate_entries_and_new_entries_start_at_zero(tmp_pat
         {"pr": 1696, "outcome": "merged", "rounds": 2},
         {"pr": 1700, "outcome": "merged", "rounds": 1},
     ]
+
+
+def test_clean_merge_is_not_recorded_and_leaves_the_file_bytes_unchanged(tmp_path: Path, capsys) -> None:
+    # D1: a `merged` close without `--ceiling` carries no escalation decision.
+    path = write_memory(tmp_path, {"issues": {"5": entry(gate_entries=1, closed=[
+        {"pr": 8, "outcome": "abandoned", "rounds": 2},
+    ])}})
+    before = path.read_bytes()
+
+    assert run(tmp_path, "record", "--issue", "5", "--issue", "6", "--pr", "9", "--rounds", "1",
+               "--outcome", "merged") == 0
+
+    assert path.read_bytes() == before
+    out = capsys.readouterr().out.splitlines()
+    assert out == [
+        "review_gate: issue #5 PR #9 merged without a ceiling: not recorded",
+        "review_gate: issue #6 PR #9 merged without a ceiling: not recorded",
+    ]
+
+
+def test_clean_merge_leaves_a_missing_memory_file_missing(tmp_path: Path, capsys) -> None:
+    path = tmp_path / ".review-gate-issues.json"
+
+    assert run(tmp_path, "record", "--issue", "1", "--pr", "2", "--rounds", "1", "--outcome", "merged") == 0
+
+    assert not path.exists()
+    assert "not recorded" in capsys.readouterr().out
+
+
+def test_merge_that_hit_the_ceiling_is_recorded(tmp_path: Path) -> None:
+    # D2: `merged --ceiling` behaves exactly as before the clean-merge no-op.
+    write_memory(tmp_path, {"issues": {}})
+
+    assert run(tmp_path, "record", "--issue", "4", "--pr", "50", "--rounds", "3", "--outcome", "merged",
+               "--ceiling") == 0
+
+    assert read_memory(tmp_path)["issues"]["4"] == entry(
+        ceiling=[50], closed=[{"pr": 50, "outcome": "merged", "rounds": 3}]
+    )
 
 
 def test_ceiling_is_added_once(tmp_path: Path) -> None:

@@ -198,16 +198,16 @@ def test_mutant_out_of_vocabulary_outcome_names_cause_and_remedy() -> None:
     # G-3b: the failure text must hand the reader the historical cause and the
     # tracked writer's real `record` invocation directly.
     history = copy.deepcopy(load_review_gate_issue_memory())
-    history["issues"]["1736"]["closed"][0]["outcome"] = "closed"
+    history["issues"]["1205"]["closed"][0]["outcome"] = "closed"
 
     violations = review_gate_issue_memory_violations(history)
 
     assert violations, "an out-of-vocabulary outcome must be a violation"
     message = "\n".join(violations)
-    assert "issues[1736].closed[0].outcome='closed'" in message, message
+    assert "issues[1205].closed[0].outcome='closed'" in message, message
     assert "cmd_close" in message, message
     assert RECORD_COMMAND in message, message
-    assert "issue 1736 / PR 1751" in message, message
+    assert "issue 1205 / PR 1286" in message, message
 
 
 def test_mutant_entry_missing_ceiling_prs_is_a_violation() -> None:
@@ -215,7 +215,7 @@ def test_mutant_entry_missing_ceiling_prs_is_a_violation() -> None:
     # notices that the ceiling list — the field escalation actually reads — is
     # gone.
     history = copy.deepcopy(load_review_gate_issue_memory())
-    del history["issues"]["1660"]["ceilingPrs"]
+    del history["issues"]["1205"]["ceilingPrs"]
 
     violations = review_gate_issue_memory_violations(history)
 
@@ -231,7 +231,7 @@ def test_gate_entries_must_be_a_real_int(gate_entries: object) -> None:
     # bool is an int subclass, so `isinstance` would let `True` through as a
     # gate-entry count; the guard uses an exact type check.
     history = copy.deepcopy(load_review_gate_issue_memory())
-    history["issues"]["1660"]["gateEntries"] = gate_entries
+    history["issues"]["1205"]["gateEntries"] = gate_entries
 
     violations = review_gate_issue_memory_violations(history)
 

@@ -74,7 +74,8 @@
 
 ## Issue 驱动开发
 
-- 每个 issue 的验证标准写在 `openspec/changes/<change>/tasks.md` 的 **Evidence Floor**；具体验证命令以该 issue body 的 `Verification:` 字段为准。
+- 有 OpenSpec change 时验证标准写在 `openspec/changes/<change>/tasks.md` 的 **Evidence Floor**；没有时即 issue body 的 `Verification:`，不跑 `openspec validate`。具体验证命令以该 issue body 的 `Verification:` 字段为准。
+- 仅当产品行为或既有 capability spec 变化时才写 OpenSpec change；test-only / CI-only / docs-only / deletion-only issue 以 issue body 为 fixture。
 - 跨窗口优先级**以 GitHub open issues 为准**，本文件不再维护优先项清单（历来是 stale 高发区）。
 
 ## 文档更新要求
@@ -88,11 +89,12 @@
 ## PR 规范
 
 - 分支命名 `feat/issue-<N>-<short-desc>`；PR body 含变更摘要、测试证据、Evidence Floor 覆盖声明、偏离记录；合并前通过 issue 指定的全部验证命令。
+- OpenSpec change 在实现 PR 的最后一推里归档（`openspec archive <change> --yes`），不另开 merge 后的归档 PR。
 - 跨 PR 轮次上限记忆 `.review-gate-issues.json` 只经 `scripts/review_gate.py` 写：
   - `fix_gate.py open --pr <PR>` 旁跑 `uv run python scripts/review_gate.py check --issue <N> --pr <PR>`（exit 2 = 该 issue 已在别的 PR 撞过硬停，先要用户决定）。
-  - 该 issue 的 PR **每次关闭**都跑 `uv run python scripts/review_gate.py record --issue <N> --pr <PR> --rounds <R> --outcome <OUTCOME>`：
-    - `merged` 在 post-merge archive commit 里；`superseded-by-split` / `abandoned` / `descoped` 在跑 `fix_gate.py close` 时一并 commit。
-    - fix_gate 在该 PR 锁过必加 `--ceiling`，否则后继 PR 的 `check` 查不到。
+  - 仅下列两种关闭跑 `uv run python scripts/review_gate.py record --issue <N> --pr <PR> --rounds <R> --outcome <OUTCOME>`，干净 merge 不记录：
+    - 非 `merged` 关闭（`superseded-by-split` / `abandoned` / `descoped`），在跑 `fix_gate.py close` 时一并 commit；
+    - fix_gate 在该 PR 锁过（任何 outcome），必加 `--ceiling`，否则后继 PR 的 `check` 查不到。
 - loop-log 审计按需 `uv run python scripts/governance/loop_log_audit.py`。
 
 ### CI 成本纪律（避免重复跑 / 单一终态推送）

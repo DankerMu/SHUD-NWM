@@ -110,3 +110,11 @@ Active profile for `codex-codeagent-workflow`. It supplements
 - `forecast window`, `GFS`, `ERA5`, `IFS`, `CDS`, `ECMWF`
 - `run_manifest`, `qc_result`, `provider snapshot`
 - `.sp.riv`, `.sp.rivseg`, `iRiv`, `source_identity`, `BASINS_RIVSEG_MAPPING_*`
+
+## Workflow overrides
+
+These override the installed `subagent-workflow` defaults for this repository (#3218).
+
+- Phase 0 writes an OpenSpec change only when product behaviour or an existing capability spec changes. Test-only, CI-only, docs-only and deletion-only issues use the issue body (`Verification:`) as the fixture, and the fixture review reads the issue body.
+- Phase 4 archives the change (`openspec archive <change> --yes`) in the implementation PR's final push; there is no post-merge archive PR.
+- `uv run python scripts/review_gate.py record` runs only for a non-`merged` close or when `fix_gate.py` locked on that PR (`--ceiling`, any outcome); a clean merge records nothing. The `check` rule is unchanged.
