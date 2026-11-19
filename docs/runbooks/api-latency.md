@@ -8,20 +8,13 @@
 ## Commands
 
 ```bash
-uv run nhms-production validate-scale --evidence-root artifacts/production-closure --run-id api-latency-check
-uv run pytest -q tests/test_api_contract*.py tests/test_production_scale_validation.py
+uv run pytest -q tests/test_api_contract*.py
 ```
-
-## Expected Evidence
-
-- `scale/query_latency_evidence.json` records p95 samples, thresholds, and query plan hashes.
-- `ops/monitoring_alerts.json` records the breached API p95 threshold.
 
 ## Recovery Steps
 
 1. Inspect recent query plans, cache status, and object-store latency.
 2. Reduce oversized bbox or long time-range requests if they are driving the breach.
-3. Re-run scale validation after remediation.
 
 ## water-level dead variant 22s cold path (已移除, 2026-06-20)
 

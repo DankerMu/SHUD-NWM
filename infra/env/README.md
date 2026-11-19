@@ -116,9 +116,9 @@ Notes:
     `tests/test_two_node_docker_runtime.py`,
     `tests/test_two_node_docker_runbook_environment_invariant.py`,
     `tests/test_role_boundary_static.py`,
-    `tests/test_slurm_gateway_deployment_contract.py`,
-    `tests/test_two_node_e2e_evidence.py`, and `tests/test_production_scheduler.py`,
-    plus
+    `tests/test_slurm_gateway_deployment_contract.py`, and
+    `tests/test_production_scheduler.py` (a since-deleted two-node e2e evidence
+    test, removed by #3221, also named it), plus
     `scripts/validate_two_node_docker_runtime.py:5374`, which uses the template
     as the default `--compute-env` for the static check.
     `tests/test_two_node_docker_source_trust.py` is **not** in that set (it reads

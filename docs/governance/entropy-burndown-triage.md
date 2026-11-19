@@ -230,8 +230,8 @@ evidence snapshot for #768.
 |---|---:|---:|---:|---|
 | `services/orchestrator/scheduler.py` | 6328 | 6815 | +487 | `mandatory-governance` |
 | `services/orchestrator/chain.py` | 6956 | 8222 | +1266 | `mandatory-governance` |
-| `services/production_closure/two_node_e2e_evidence.py` | 9098 | 4526 | -4572 | `mandatory-governance` |
-| `services/production_closure/readiness_validation.py` | 3517 | 1193 | -2324 | `mandatory-governance` |
+| two-node e2e evidence aggregator (deleted by #3221) | 9098 | 4526 | -4572 | `mandatory-governance` |
+| readiness validation aggregator (deleted by #3221) | 3517 | 1193 | -2324 | `mandatory-governance` |
 | `apps/api/main.py` | 2069 | 339 | -1730 | below current report threshold |
 | `apps/frontend/src/components/map/M11MapLibreSurface.tsx` | 1499 | 354 | -1145 | below current report threshold |
 
@@ -318,7 +318,7 @@ requirements for runtime behavior changes.
 | Frontend map/API type successor gate | #766 / PR #825 | `cd apps/frontend && corepack pnpm build` | PASS, Vite build completed |
 | Scheduler group | #720 / PR #779 | `uv run pytest -q tests/test_production_scheduler.py tests/test_scheduler_backfill.py tests/test_gateway_reconcile_*.py` | PASS, 641 tests |
 | Chain group | #731 / PR #790 | `uv run pytest -q tests/test_orchestration_chain.py tests/test_retry_cancel_consistency.py tests/test_real_database_integration.py` | PASS, 239 tests, 7 skipped |
-| Two-node and readiness groups | #744 / PR #803; #755 / PR #814 | `uv run pytest -q tests/test_two_node_e2e_evidence.py tests/test_production_readiness_validation.py` | PASS, 1181 tests, 2 skipped |
+| Two-node and readiness groups | #744 / PR #803; #755 / PR #814 | the two lanes' test files (deleted by #3221 with the lanes) | PASS, 1181 tests, 2 skipped |
 | API bootstrap group | #760 / PR #819 | `uv run pytest -q tests/test_static_serving.py tests/test_runtime_mode.py tests/test_api.py tests/test_role_boundary_static.py tests/test_monitoring_api.py tests/test_openapi_drift.py` | PASS, 240 tests |
 
 The local `pnpm` wrapper failure is a workstation dependency-approval boundary,

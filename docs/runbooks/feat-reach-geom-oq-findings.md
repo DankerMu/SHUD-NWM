@@ -142,7 +142,7 @@ path that currently keys on `river_segment_id`**. Three mitigation paths exist:
 - `services/tiles/mvt.py` `resolve_tile_layer_identity()` (survey-time name; current counterpart `_ensure_tile_layer()`) — emits `tile_uri_template`
 - [`apps/frontend/src/components/map/M11MapLibreSurface.tsx:620`](../../apps/frontend/src/components/map/M11MapLibreSurface.tsx#L620) — `buildMvtTileUrlTemplate(metadata, replacements)` consumes the metadata to build MapLibre vector source `tiles: [...]`
 - [`apps/frontend/src/lib/mvtLayerMetadata.ts:84-88`](../../apps/frontend/src/lib/mvtLayerMetadata.ts#L84-L88) — `metadataMatchesRun()` checks `source_refs.river_network_version_id` staleness
-- [`services/production_closure/scale_validation.py:56`](../../services/production_closure/scale_validation.py#L56) — `MVT_ENDPOINT_REFERENCES` exercises the route as a live performance check
+- the scale-validation lane's `MVT_ENDPOINT_REFERENCES` (survey-time consumer; the lane was deleted by #3221) — exercised the route as a live performance check
 - [`tests/test_flood_alerts_api.py`](../../tests/test_flood_alerts_api.py) lines 1845, 1943, 2032, 2076, 2229, 2284, 2868, 3457, 3486, 3721, 5265 — FastAPI TestClient GET calls against the live route handler
 
 **Implication for PR scope:** must extend PR 6 (#566) audit scope to:

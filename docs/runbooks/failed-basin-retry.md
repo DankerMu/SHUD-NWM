@@ -8,15 +8,8 @@
 ## Commands
 
 ```bash
-uv run nhms-production validate-slurm --evidence-root artifacts/production-closure --run-id failed-basin-retry-check --fake-slurm
-uv run pytest -q tests/test_shud_runtime.py tests/test_production_slurm_validation.py
+uv run pytest -q tests/test_shud_runtime.py
 ```
-
-## Expected Evidence
-
-- `slurm/array_partial_success.json` keeps successful sibling outputs immutable.
-- `slurm/retry_cancel.json` records retry status and cancellation semantics.
-- `ops/monitoring_alerts.json` records the breached retry threshold.
 
 ## Recovery Steps
 

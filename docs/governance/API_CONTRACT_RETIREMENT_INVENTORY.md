@@ -121,8 +121,7 @@ rg --files apps/frontend/e2e | sort
   unsupported-source behavior; `tests/test_openapi_drift.py` checks runtime vs
   static OpenAPI; `tests/test_readonly_db_validation.py` maps readonly route
   validation to `latest_product`; `tests/test_runtime_mode.py` includes it in
-  display-safe route coverage; `tests/test_two_node_e2e_evidence.py` records
-  two-node evidence route identity.
+  display-safe route coverage.
 - Frontend consumer evidence: `apps/frontend/src/pages/hydroMet/bootstrap.ts:57`
   calls `client.GET('/api/v1/mvp/qhh/latest-product', ...)` for full bootstrap,
   and `apps/frontend/src/pages/hydroMet/bootstrap.ts:75` calls the same route
@@ -168,8 +167,7 @@ rg --files apps/frontend/e2e | sort
 - Backend/test consumers: `tests/test_forecast_api.py`,
   `tests/test_api_contract.py`, `tests/test_openapi_drift.py`,
   `tests/test_e2e.py`, `tests/test_e2e_ifs.py`, `tests/test_hindcast.py`,
-  `tests/test_flood_alerts_api.py`, `tests/test_real_database_integration.py`,
-  and `tests/test_production_e2e_validation.py`.
+  `tests/test_flood_alerts_api.py`, and `tests/test_real_database_integration.py`.
 - Frontend consumer evidence: `apps/frontend/src/stores/forecast.ts:377`,
   `apps/frontend/src/stores/overviewData.ts:908`,
   `apps/frontend/src/stores/overviewData.ts:917`, and

@@ -79,13 +79,11 @@ Search `B1` found active backend surfaces:
 - Active contract and store tests: `tests/test_api_contract.py`,
   `tests/test_forecast_api.py`, `tests/test_openapi_drift.py`,
   `tests/test_runtime_mode.py`, `tests/test_readonly_db_validation.py`,
-  `tests/test_two_node_e2e_evidence.py`, `tests/test_model_registry_list_basins.py`,
+  `tests/test_model_registry_list_basins.py`,
   `tests/test_real_basin_discovery_integration.py`, and related integration
   tests assert current compatibility behavior.
 - Production validation evidence: `services/production_closure/readonly_db_validation.py`
-  probes `/api/v1/mvp/qhh/latest-product` as a display read route, and
-  `services/production_closure/two_node_e2e_evidence.py` recognizes
-  `latest-product` path aliases when validating producer evidence.
+  probes `/api/v1/mvp/qhh/latest-product` as a display read route.
 
 These are active-contract dependencies, not backend consumers of a
 removal-candidate replacement. Under #412, there is no selected replacement for
@@ -102,15 +100,8 @@ Search `B2` found active backend surfaces:
   `tests/test_forecast_api.py`, `tests/test_api_contract.py`,
   `tests/test_openapi_drift.py`, `tests/test_e2e.py`, `tests/test_e2e_ifs.py`,
   `tests/test_hindcast.py`, `tests/test_flood_alerts_api.py`,
-  `tests/test_real_database_integration.py`, and
-  `tests/test_production_e2e_validation.py` cover the canonical route or its
-  store behavior.
-- Production validation evidence:
-  `services/production_closure/e2e_validation.py` builds the canonical
-  `/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series`
-  query for deterministic API contract evidence, and
-  `services/production_closure/scale_validation.py` records the same canonical
-  endpoint for scale validation.
+  and `tests/test_real_database_integration.py` cover the canonical route or
+  its store behavior.
 
 These are active canonical-contract dependencies. #412 explicitly retains this
 route and assigns documentation alignment or future deferral to #415/#416, so

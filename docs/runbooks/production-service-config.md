@@ -21,25 +21,11 @@ source_adapters: GFS_CONFIG, IFS_CONFIG, ERA5_CONFIG, CLDAS_RESTRICTED_REASON
 workspace_roots: RUN_WORKSPACE_ROOT, SHARED_LOG_ROOT, ARTIFACT_RETENTION_POLICY
 ```
 
-## Validation Command
-
-```bash
-NHMS_RUN_PRODUCTION_CLOSURE=1 uv run nhms-production validate-ops \
-  --evidence-root artifacts/production-closure \
-  --run-id production-service-config-check
-```
-
-## Expected Evidence
-
-- `ops/config_validation.json` records each service, required settings, template source, blockers, and this template reference.
-- `ops/summary.json` remains `release_blocked` until live auth, alert, rollback, and dependency evidence are accepted.
-
 ## Recovery Steps
 
 1. Replace deterministic fallback values with production deployment values.
 2. Fix unsafe root/path values and remove credential-shaped material from config.
-3. Re-run ops validation and review blockers before release approval.
 
 ## Residual Risks
 
-Config validation proves shape and safety only. It does not prove live backend auth, live alert sink delivery, or live rollback execution.
+This template lists required settings only. It does not prove live backend auth, live alert sink delivery, or live rollback execution.

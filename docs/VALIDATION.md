@@ -106,7 +106,6 @@ Focused M18 model asset lifecycle checks:
 ```bash
 openspec validate --all --strict --no-interactive  # m18-model-asset-operations is archived; its specs are promoted
 uv run pytest -q tests/test_model_registration.py tests/test_model_activation_audit_integration.py
-uv run pytest -q tests/test_production_ops_validation.py tests/test_production_object_store_validation.py
 uv run pytest -q tests/test_api_contract*.py tests/test_auth_policy_matrix.py
 cd apps/frontend && corepack pnpm test
 cd apps/frontend && corepack pnpm build
@@ -115,18 +114,7 @@ cd apps/frontend && corepack pnpm build
 M18 mutates registry lifecycle state only. Supported operations are activate,
 deactivate, switch version, rollback version, supersede, and deprecate, guarded
 by M17 action ids and preflight/audit evidence. It does not upload arbitrary
-model packages or delete/upload production object-store assets. Production ops
-validation includes deterministic model lifecycle drills for bad activation,
-rollback, blocked deactivation, and idempotent repeat without live credentials.
-
-Focused M19 production-readiness proof checks:
-
-```bash
-openspec validate --all --strict --no-interactive  # m19-production-readiness-proof is archived; its specs are promoted
-uv run pytest -q tests/test_production_readiness_validation.py
-uv run pytest -q tests/test_production_ops_validation.py tests/test_production_object_store_validation.py tests/test_production_slurm_validation.py tests/test_production_met_validation.py tests/test_production_e2e_validation.py tests/test_production_scale_validation.py
-uv run ruff check .
-```
+model packages or delete/upload production object-store assets.
 
 ## Real Slurm Smoke
 
@@ -187,140 +175,13 @@ empty. This only proves Slurm submission/accounting/log retrieval works; SHUD
 solver runtime, job arrays, retry behavior, and production-scale logs still need
 separate validation.
 
-The six M10 production-closure lanes below are current validation owned by the child
-document [docs/validation/production-closure.md](validation/production-closure.md): their current procedure, commands and acceptance
-evidence live there. Each heading stays in this matrix as a link stub so its original
-anchor slug keeps resolving.
-
-## M10 #147 Production Slurm Closure
-
-Current procedure, commands and acceptance evidence for this lane: [docs/validation/production-closure.md#m10-147-production-slurm-closure](validation/production-closure.md#m10-147-production-slurm-closure).
-
-## M10 #148 Production Object Store Closure
-
-Current procedure, commands and acceptance evidence for this lane: [docs/validation/production-closure.md#m10-148-production-object-store-closure](validation/production-closure.md#m10-148-production-object-store-closure).
-
-## M10 Live Meteorology Ingestion + QC Closure
-
-Current procedure, commands and acceptance evidence for this lane: [docs/validation/production-closure.md#m10-live-meteorology-ingestion--qc-closure](validation/production-closure.md#m10-live-meteorology-ingestion--qc-closure).
-
-## M10 #150 Staging End-to-End Forecast/Analysis Closure
-
-Current procedure, commands and acceptance evidence for this lane: [docs/validation/production-closure.md#m10-150-staging-end-to-end-forecastanalysis-closure](validation/production-closure.md#m10-150-staging-end-to-end-forecastanalysis-closure).
-
-## M10 National Scale / MVT Performance Closure
-
-Current procedure, commands and acceptance evidence for this lane: [docs/validation/production-closure.md#m10-national-scale--mvt-performance-closure](validation/production-closure.md#m10-national-scale--mvt-performance-closure).
-
-## M10 Production Ops / Security / Runbook Closure
-
-Current procedure, commands and acceptance evidence for this lane: [docs/validation/production-closure.md#m10-production-ops--security--runbook-closure](validation/production-closure.md#m10-production-ops--security--runbook-closure).
-
-## M19 Production Readiness Proof
-
-Issue #181 adds a consolidated `nhms-production validate-readiness` lane. It is
-a release-review report generator: default runs are deterministic and ingest
-receipts only. The command does not execute a live IdP, alert sink, backend
-mutation, rollback drill, Slurm workload, object-store operation,
-weather/source download, or real-national-data scan.
-
-```bash
-NHMS_RUN_PRODUCTION_CLOSURE=1 uv run nhms-production validate-readiness \
-  --evidence-root artifacts/production-closure \
-  --run-id local-181-production-readiness
-```
-
-Optional deterministic producer summaries can be supplied with
-`--slurm-evidence-root`, `--object-store-evidence-root`,
-`--source-evidence-root`, `--e2e-evidence-root`, and `--mvt-evidence-root`.
-
-Optional live proof receipts are supplied as JSON strings or files:
-`--auth-proof` / `--auth-proof-file`, `--alert-proof` /
-`--alert-proof-file`, `--rollback-proof` / `--rollback-proof-file`,
-`--slurm-proof` / `--slurm-proof-file`, `--object-store-proof` /
-`--object-store-proof-file`, `--source-proof` / `--source-proof-file`,
-`--e2e-proof` / `--e2e-proof-file`, `--mvt-proof` /
-`--mvt-proof-file`, and `--target-env-proof` /
-`--target-env-proof-file`. Receipt payloads are normalized into bounded raw
-validation data before path/secret redaction, then redacted before writing
-evidence; malformed or oversized receipts become stable `release_blocked`
-evidence and never print tracebacks or raw secrets.
-
-Live proof receipt acceptance is intentionally stricter than a placeholder
-`accepted=true` flag. Every accepted receipt must use schema
-`nhms.production_readiness.live_proof.v1`, bind to the expected readiness
-surface, current readiness `run_id`, target environment, and live proof
-execution mode, and include semantic artifact/evidence references. Empty
-containers, blank strings, `[null]`, and null-only mappings are not evidence.
-Auth receipts must also include provider issuer/provider identity metadata,
-role mapping with at least one role mapped to concrete actions/roles, and
-allowed/denied coverage for every canonical protected action. Alert receipts
-must include sink id/name/url/channel metadata plus delivery id, timestamp, and
-result with delivered/passed status. Rollback receipts must include meaningful
-preconditions, command or drill identity/command metadata, and an executed
-result. Slurm/object-store/source/E2E/MVT dependency receipts must name the
-expected dependency and bind to the producer contract: producer issue, producer
-schema, producer run ID, producer artifact/path/ref, checksum or receipt ID,
-target environment, and live proof mode. Top-level producer binding fields and
-nested `provenance` binding fields are validated as one canonical receipt
-contract: when both surfaces provide dependency, producer issue/schema/run ID,
-artifact ref/path/URI, checksum, or receipt ID, they must agree after bounded
-raw normalization and before public redaction, so distinct path-like aliases
-cannot be collapsed into the same redacted token. Within either surface, every
-supplied alias in a binding group is also validated; for example,
-`producer_artifact_ref`, `summary_ref`,
-`artifact_path`, and `artifact_uri` must all normalize to the same artifact
-binding when more than one is present. The checksum/receipt-id alias group is
-treated the same way. Sibling or contradictory nested provenance is a release
-blocker even if a higher-priority top-level field is otherwise valid. When a
-deterministic producer `summary.json` is supplied, every provided top-level and
-nested provenance run ID, artifact ref, and checksum binding must also match
-that consumed summary.
-The deterministic producer `summary.json` alone does not satisfy live proof.
-Target-environment receipts must include a concrete environment/config
-identifier and meaningful target configuration metadata. Wrong schema, wrong
-surface, stale run ID, deterministic mode, sibling dependency issue/schema/name,
-contradictory provenance, missing target, missing
-provenance/artifacts/checksum/ref/run ID, malformed JSON, over-size JSON, or
-deeply nested JSON remains `release_blocked` with redacted bounded evidence.
-
-Evidence is written under
-`artifacts/production-closure/<run_id>/readiness/`:
-
-- `preflight.json`: configured producer summary roots, receipt presence, and
-  the no-live-side-effect fast-CI policy.
-- `live_proof_receipts.json`: redacted, bounded receipt metadata and payloads.
-- `readiness_items.json`: canonical readiness items with `surface`, `status`,
-  `execution_mode`, `required_for_final`, `artifact_refs`, `residual_risk`,
-  `removal_criteria`, `exclusions`, and `live_proof_accepted`.
-- `release_blockers.json`: blocker id, surface, status, owner/action,
-  residual risk, removal criteria, and artifact references.
-- `environment.json`: redacted command environment and runtime metadata.
-- `summary.json`: final interpretation, `final_production_readiness_claimed`,
-  release blockers, and scoped exclusions.
-
-Status values are `passed`, `failed`, `blocked`, `not_executed`, and
-`release_blocked`. Execution modes are `deterministic`, `policy_simulated`,
-`backend_route_executed`, `dry_run_sink`, `simulated_drill`, `live_proof`, and
-`not_executed`. Deterministic items can pass and still leave
-`final_production_readiness_claimed=false`; final readiness is true only when
-every required live proof item is `passed` with `live_proof_accepted=true`.
-Missing live IdP, alert sink, rollback, Slurm/object-store/source/E2E/MVT, or
-target-environment config receipts are release blockers, not deterministic
-failures.
-
-CLDAS and incomplete real national data are explicit M19 scoped exclusions.
-They are recorded as `not_executed` exclusions rather than failed deterministic
-checks and do not satisfy live proof.
-
 ## M20 Production Scheduler Automation
 
 Issues #192-#196 move the qhh GFS/IFS proof from basin-specific scripts into
 the backend production scheduler. The scheduler evidence is operator-facing
 review evidence for discovery, dry-run planning, Slurm preflight, submitted or
 blocked candidates, task/accounting summaries, and readiness interpretation. It
-does not replace M19 live proof receipts and must not by itself set
-`final_production_readiness_claimed=true`.
+must not by itself set `final_production_readiness_claimed=true`.
 
 Fast scheduler dry-run validation is non-mutating. It reads registry and
 pipeline state through `DATABASE_URL`, discovers GFS/IFS cycle candidates, writes
@@ -419,61 +280,12 @@ secret-shaped model/package/output evidence before submission. A preflight
 blocker produces scheduler evidence with `submitted_count=0` and no active
 Slurm job.
 
-Readiness validation remains M19-style. A fast readiness report can be generated
-alongside scheduler evidence:
-
-```bash
-NHMS_RUN_PRODUCTION_CLOSURE=1 uv run nhms-production validate-readiness \
-  --evidence-root artifacts/production-closure \
-  --run-id local-m20-scheduler-readiness \
-  --scheduler-evidence-root "$WORKSPACE_ROOT/.nhms-workspace/scheduler/evidence" \
-  --force
-```
-
-This report writes `readiness/summary.json`,
-`readiness/readiness_items.json`, `readiness/release_blockers.json`, and
-`readiness/live_proof_receipts.json`. `--scheduler-evidence-root` ingests the
-scheduler artifacts produced under the local fast workspace;
-`--scheduler-evidence-file` can be used instead when review is pinned to one
-artifact path. Omitting both scheduler evidence options intentionally produces an
-M19-only readiness report.
-Deterministic scheduler evidence is useful for release review and can be
-referenced from live-proof receipt provenance, but fast evidence alone remains
-non-final. The final readiness live-proof boundary is unchanged:
-`final_production_readiness_claimed=true` requires accepted target environment
-live receipts for the required M19 surfaces, with matching schema, run id, target
-environment, producer artifact/ref/checksum, and live execution mode. Malformed,
-oversized, stale, identity-mismatched, or deterministic-only scheduler evidence
-is interpreted as blocked or release-blocked review evidence, not final
-production readiness.
-
 Focused fast commands for #196 documentation and evidence review:
 
 ```bash
-uv run pytest -q tests/test_production_scheduler.py tests/test_production_readiness_validation.py
+uv run pytest -q tests/test_production_scheduler.py
 uv run ruff check .
 openspec validate --all --strict --no-interactive  # m20-production-multibasin-continuous-automation is archived; its specs are promoted
-NHMS_RUN_PRODUCTION_CLOSURE=1 uv run nhms-production validate-readiness \
-  --evidence-root artifacts/production-closure \
-  --run-id local-m20-scheduler-readiness \
-  --scheduler-evidence-root "$WORKSPACE_ROOT/.nhms-workspace/scheduler/evidence" \
-  --force
-```
-
-## Legacy Production Ops Fast Regression Commands
-
-Local #152 verification uses these fast regression commands:
-
-```bash
-# m10-production-closure is archived (name no longer resolves); validate its promoted capability spec.
-openspec validate production-ops-readiness --type spec --strict --no-interactive
-uv run ruff check services/production_closure tests/test_production_ops_validation.py
-# Ruff does not lint Markdown. docs/VALIDATION.md, docs/runbooks/api-latency.md and
-# docs/runbooks/tile-publish-error.md are covered by the CI Markdown Lint form below;
-# progress.md is outside that CI glob (docs/**/*.md) and has no lint gate.
-npx --yes markdownlint-cli2@0.17.2 --config .markdownlint.yaml "docs/**/*.md"
-uv run pytest -q tests/test_production_ops_validation.py
-uv run pytest -q tests/test_production_ops_validation.py tests/test_production_scale_validation.py tests/test_production_e2e_validation.py tests/test_production_object_store_validation.py tests/test_production_met_validation.py tests/test_production_slurm_validation.py
 ```
 
 ## Opt-In Real Basins Smoke
