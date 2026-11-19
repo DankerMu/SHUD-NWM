@@ -332,8 +332,7 @@ private temporary fixtures. React/component tests and mocked browser specs SHALL
 not import it or emit a live receipt. Screenshots, traces, local builds, mocked
 responses, `/monitoring`, and `/ops` SHALL not satisfy or imply the `/` click
 metric. Existing frontend `pnpm test`/build ownership, the static live no-mock
-guard, and the root schema/example loop SHALL cover this change; frontend files
-SHALL not be routed through backend `scripts/select_ci_tests.py`. Node-27 live
+guard, and the root schema/example loop SHALL cover this change. Node-27 live
 execution belongs to this capability: after the frontend build carrying it is
 deployed, the runbook SHALL produce one receipt per pin for three current product
 river networks - the largest, one near the median, and the smallest by segment

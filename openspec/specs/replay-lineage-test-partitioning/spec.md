@@ -1,11 +1,11 @@
 # replay-lineage-test-partitioning Specification
 
 ## Purpose
-Keep the replay-lineage pytest corpus within the 1,000-line guard as a resolver partition and a lifecycle-guard partition, preserving collection identity, shared fixtures in a non-collectible support module, and targeted-CI selection of every partition.
+Keep the replay-lineage pytest corpus within the 1,000-line guard as a resolver partition and a lifecycle-guard partition, preserving collection identity and shared fixtures in a non-collectible support module.
 
 ## Requirements
 
-### Requirement: Replay lineage tests stay within the line guard with collection identity preserved
+### Requirement: Replay lineage tests SHALL stay within the line guard with collection identity preserved
 
 The repository SHALL keep every collectible `tests/test_replay_lineage*.py` module, and any replay-lineage test support
 module, at or below the configured 1,000-line guard, with no `.large-file-guard.json` entry for them. The partition
@@ -25,18 +25,6 @@ rows are written by the explicit clone tooling, not by model activation.
 
 - **WHEN** `wc -l` runs over `tests/test_replay_lineage*.py` and the support module
 - **THEN** every file is at or below 1,000 lines and `.large-file-guard.json` names none of them
-
-#### Scenario: Targeted CI selects every partition
-
-- **WHEN** targeted selection runs for a production path that previously selected `tests/test_replay_lineage.py`
-  (`services/orchestrator/replay_lineage.py`, the `services/orchestrator/**` directory rule, or a model-registry owner
-  module)
-- **THEN** every replay-lineage partition is selected
-
-#### Scenario: Support-module changes execute assertions
-
-- **WHEN** the replay-lineage support module is the changed path
-- **THEN** the selector returns both partitions plus `tests/test_select_ci_tests.py`, never the support module itself
 
 #### Scenario: No retired-hook narrative remains
 

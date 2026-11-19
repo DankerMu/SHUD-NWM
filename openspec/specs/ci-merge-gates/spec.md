@@ -49,9 +49,9 @@ Comments and docstrings in shipped Python code SHALL NOT gain new `file.py:N` or
 - **WHEN** a comment contains `EPSG:4326` or a `host:5432` URL
 - **THEN** the gate reports nothing
 
-### Requirement: The master full regression runs as complete, disjoint shards
+### Requirement: The full regression runs on pull requests and master pushes as complete, disjoint shards
 
-The `Unit Tests (full)` job SHALL run as a matrix of shards whose test-file sets are computed at run time by a deterministic partition of every test file pytest collects under `tests/`. The union of the shards SHALL equal that file set and the shards SHALL be pairwise disjoint; an empty shard SHALL fail. Each shard SHALL keep the marker expression `not e2e and not grib and not integration` and the locked install, SHALL NOT cancel its siblings on failure, and SHALL have a timeout no greater than the previous single-job timeout.
+The `Unit Tests (full)` job SHALL run on every manual `workflow_dispatch`, and on every pull request and every push to master whose diff has a path outside `apps/frontend/`. The `Unit Tests (full)` job SHALL run as a matrix of shards whose test-file sets are computed at run time by a deterministic partition of every test file pytest collects under `tests/`. The union of the shards SHALL equal that file set and the shards SHALL be pairwise disjoint; an empty shard SHALL fail. Each shard SHALL keep the marker expression `not e2e and not grib and not integration` and the locked install, SHALL NOT cancel its siblings on failure, and SHALL have a timeout no greater than the previous single-job timeout.
 
 #### Scenario: New test file
 - **WHEN** a test file absent from the duration table is added
@@ -60,6 +60,10 @@ The `Unit Tests (full)` job SHALL run as a matrix of shards whose test-file sets
 #### Scenario: Partition completeness
 - **WHEN** the partition is computed for the repository tree
 - **THEN** every collected test file appears in exactly one shard regardless of the order files are listed in
+
+#### Scenario: Only a frontend-only diff skips the regression
+- **WHEN** a pull request or master push changes only paths under `apps/frontend/`
+- **THEN** the `Unit Tests (full)` job is skipped, while a diff that changes only `docs/` or `openspec/` runs every shard
 
 ### Requirement: Floating dependency resolution is reported weekly and never gates a merge
 
@@ -92,16 +96,7 @@ The CI workflow SHALL run every `*.test.mjs` file located directly in `scripts/_
 - **WHEN** the job runs and no `*.test.mjs` file exists directly in `scripts/__tests__/`
 - **THEN** the job fails instead of reporting zero tests as a pass
 
-### Requirement: The frontend CI filter entries SHALL be pinned by a meta-test
-
-The `frontend` paths-filter block of the CI workflow SHALL contain the entries for the workflow file itself, the frontend app tree and the OpenAPI tree, and a selector meta-test SHALL fail when any of them is removed from that block or moved to another filter block.
-
-#### Scenario: An entry leaves the frontend block
-
-- **WHEN** the workflow-file entry is deleted from the `frontend` filter block or moved under another filter block
-- **THEN** the meta-test for the frontend filter fails
-
-### Requirement: Workflow files SHALL be linted on pull requests that change them
+### Requirement: Workflow files SHALL be linted by actionlint on pull requests that change them
 
 The CI workflow SHALL run a pinned actionlint over every file under `.github/workflows/` in a job gated by a `workflows` path filter that matches `.github/workflows/**`. The job SHALL NOT run on pull requests that leave the workflow files untouched and SHALL NOT be a dependency of any other job.
 
@@ -109,8 +104,3 @@ The CI workflow SHALL run a pinned actionlint over every file under `.github/wor
 
 - **WHEN** a pull request changes any file under `.github/workflows/`
 - **THEN** the Workflow Lint job runs and fails the pull request if actionlint reports a finding
-
-#### Scenario: The filter entry is lost
-
-- **WHEN** the `.github/workflows/**` entry is removed from the `workflows` filter block or moved under another filter
-- **THEN** a meta-test in the targeted backend suite fails

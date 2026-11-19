@@ -2,33 +2,9 @@
 
 ## Purpose
 
-Define the repository contract for physically partitioning the gateway-reconcile pytest corpus while preserving collection identity, assertion oracles, targeted-CI ownership, helper bindings, and executable compatibility references.
+Define the repository contract for physically partitioning the gateway-reconcile pytest corpus while preserving collection identity, assertion oracles, helper bindings, and executable compatibility references.
 
 ## Requirements
-
-### Requirement: Targeted CI preserves gateway-reconcile ownership after partitioning
-
-The targeted-test selector SHALL replace the deleted monolithic target in the existing
-`services/slurm_gateway/**` rule with every collectible gateway-reconcile partition. It SHALL
-preserve the prior selection boundary: the partitions remain selected for Slurm-gateway and
-real-backend changes, remain excluded from `services/orchestrator/reconcile.py` and
-`services/orchestrator/persistence.py` selections under the recorded runtime budget, and
-support-module paths select collectible consumers rather than themselves.
-
-#### Scenario: Slurm gateway changes select every partition
-
-- **WHEN** targeted selection runs for a representative `services/slurm_gateway/**` path or `services/slurm_gateway/real_backend.py`
-- **THEN** every gateway-reconcile partition is present, the deleted monolith is absent, and all previously selected non-monolith targets remain present
-
-#### Scenario: Runtime-budget exclusions remain narrow
-
-- **WHEN** targeted selection runs for `services/orchestrator/reconcile.py` or `services/orchestrator/persistence.py`
-- **THEN** no gateway-reconcile partition is selected and each derived importer gap remains dispositioned as `runtime-budget`
-
-#### Scenario: Support-module changes execute assertions
-
-- **WHEN** a gateway-reconcile support module is the changed path
-- **THEN** the selector returns its routed collectible consumer suites plus `tests/test_select_ci_tests.py`, never the support module itself, and does not add the oversized production-scheduler suite
 
 ### Requirement: Moved gateway-reconcile dependencies retain their owning context
 
@@ -41,7 +17,7 @@ Shared helpers, monkeypatch targets, source-inspection tests, import-order-sensi
 
 #### Scenario: Compatibility consumers and documentation resolve moved tests
 
-- **WHEN** selector, entropy, demotion, production-scheduler, active OpenSpec, compatibility-inventory,
+- **WHEN** entropy, demotion, production-scheduler, active OpenSpec, compatibility-inventory,
   canonical owner-reference, and failed-basin runbook checks run
 - **THEN** every imported helper, executable command path, current owner reference, and documented
   node ID resolves to a tracked new module and the stale accepted-decision comment names both
