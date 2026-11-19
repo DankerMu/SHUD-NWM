@@ -446,6 +446,10 @@ jq -c 'select(.record_type == "pipeline_event"
   `retention.skipped` 中、reason=`pipeline_frontier_exempt`，数量见
   `retention.frontier.protected_count`。故追赶期可能保留超过 `NHMS_RETENTION_DAYS`
   的目录，方向恒为只多留、绝不多删。
+  自 #3223 起，scheduler pass evidence 的 `retention.skipped` 不再逐条列出 reason=`within_retention_window`
+  的条目（`retention.skipped_omits` 标明省略的 reason），改由 `retention.skipped_summary` 按
+  `{root, reason, count}` 汇总全部 skip（计数之和等于 `retention.counts.skipped`，超限压缩后仍保留）；
+  其余 reason（含 `pipeline_frontier_exempt`）照旧逐条列出，独立 cleanup CLI 的 receipt 仍列全部条目。
   首次上线建议 `NHMS_RETENTION_DRY_RUN=true` 先看清理计划，确认后再设 false 真删。
   当前生产实例已真删（`DRY_RUN=false`，extra roots 14 天，node-27 forcing lane 14 天），与 example 的差异、
   删除收据和回滚见 `receipts/2026-11-15-catch-up-retention-cutover.md`。

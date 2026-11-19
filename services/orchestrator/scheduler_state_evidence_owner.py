@@ -55,10 +55,22 @@ def _bounded_active_slurm_jobs(
         )
     return bounded
 
-def _candidate_state_evidence(candidate: SchedulerCandidateLike, state: Mapping[str, Any]) -> dict[str, Any]:
+def _candidate_state_evidence(
+    candidate: SchedulerCandidateLike,
+    state: Mapping[str, Any],
+    *,
+    event_evidence: bool = True,
+) -> dict[str, Any]:
+    """The decision evidence of one candidate state.
+
+    ``event_evidence=False`` (#3223) leaves the ``pipeline_events`` key out and
+    never builds its redacted per-event copy; every other key is unchanged.
+    Only completion scoring asks for that: it reads the decision's reason and a
+    few non-event fields, never publishes the evidence, and no ladder branch
+    reads the copy back.
+    """
     state = _bounded_candidate_state(state)
     jobs = [_job_state_evidence(job) for job in _state_jobs(state)]
-    events = [_evidence_safe(event) for event in _state_events(state)]
     identity_validation = _candidate_state_identity_validation(candidate, state)
     evidence = {
         "candidate_identity": {
@@ -80,37 +92,42 @@ def _candidate_state_evidence(candidate: SchedulerCandidateLike, state: Mapping[
         },
         "production_identity_validation": identity_validation,
         "pipeline_jobs": jobs,
-        "pipeline_events": events,
-        "hydro_run": _optional_mapping_state(
-            state.get("hydro_run"),
-            defaults={
-                "run_id": state.get("run_id") or candidate.run_id,
-                "status": _state_status(state, "hydro_status", "hydro_run_status"),
-                "output_uri": _state_output_uri(state),
-                "error_code": state.get("hydro_error_code"),
-                "error_message": state.get("hydro_error_message"),
-            },
-        ),
-        "forcing_version": _optional_mapping_state(
-            state.get("forcing_version"),
-            defaults={
-                "forcing_version_id": state.get("forcing_version_id") or candidate.forcing_version_id,
-                "status": _state_status(state, "forcing_status", "forcing_version_status"),
-            },
-        ),
-        "forecast_cycle": _optional_mapping_state(
-            state.get("forecast_cycle"),
-            defaults={
-                "cycle_id": state.get("cycle_id") or candidate.cycle_id,
-                "status": _state_status(state, "cycle_status", "forecast_cycle_status"),
-            },
-        ),
-        "manual_retry": _manual_retry_payload(state),
-        "retry": {
-            "attempt": _state_retry_attempt(state),
-            "retry_limit": _state_retry_limit(state),
-        },
     }
+    if event_evidence:
+        evidence["pipeline_events"] = [_evidence_safe(event) for event in _state_events(state)]
+    evidence.update(
+        {
+            "hydro_run": _optional_mapping_state(
+                state.get("hydro_run"),
+                defaults={
+                    "run_id": state.get("run_id") or candidate.run_id,
+                    "status": _state_status(state, "hydro_status", "hydro_run_status"),
+                    "output_uri": _state_output_uri(state),
+                    "error_code": state.get("hydro_error_code"),
+                    "error_message": state.get("hydro_error_message"),
+                },
+            ),
+            "forcing_version": _optional_mapping_state(
+                state.get("forcing_version"),
+                defaults={
+                    "forcing_version_id": state.get("forcing_version_id") or candidate.forcing_version_id,
+                    "status": _state_status(state, "forcing_status", "forcing_version_status"),
+                },
+            ),
+            "forecast_cycle": _optional_mapping_state(
+                state.get("forecast_cycle"),
+                defaults={
+                    "cycle_id": state.get("cycle_id") or candidate.cycle_id,
+                    "status": _state_status(state, "cycle_status", "forecast_cycle_status"),
+                },
+            ),
+            "manual_retry": _manual_retry_payload(state),
+            "retry": {
+                "attempt": _state_retry_attempt(state),
+                "retry_limit": _state_retry_limit(state),
+            },
+        }
+    )
     repaired_stage = state.get("repaired_stage_evidence")
     if isinstance(repaired_stage, Mapping):
         evidence["repaired_stage_evidence"] = _evidence_safe(dict(repaired_stage))

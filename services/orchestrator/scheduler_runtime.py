@@ -18,7 +18,7 @@ from services.orchestrator.file_orchestration_journal import (
     journal_read_attribution,
     reset_journal_read_counters,
 )
-from services.orchestrator.retention import RetentionConfig, run_retention
+from services.orchestrator.retention import WITHIN_RETENTION_WINDOW_REASON, RetentionConfig, run_retention
 from services.orchestrator.scheduler_lease import lease_heartbeat_interval_seconds
 from services.orchestrator.scheduler_timing import SchedulerPassTiming
 
@@ -2180,11 +2180,47 @@ def _run_retention(
     except Exception as error:  # noqa: BLE001 - cleanup must never abort scheduling
         return {"status": "error", "enabled": True, "error": str(error)}
     payload = result.to_dict()
+    _project_pass_evidence_retention_skips(payload)
     payload["status"] = "completed"
     if forced_dry_run:
         payload["forced_dry_run_by_scheduler"] = True
         payload["forced_dry_run_reason"] = force_dry_run_reason or "scheduler_dry_run"
     return payload
+
+
+#: Skip reasons pass evidence counts instead of listing (#3223).
+_PASS_EVIDENCE_OMITTED_SKIP_REASONS = (WITHIN_RETENTION_WINDOW_REASON,)
+
+
+def _project_pass_evidence_retention_skips(payload: dict[str, object]) -> None:
+    """Project a retention receipt's ``skipped`` list for scheduler pass evidence, in place.
+
+    Within-window skips are one entry per retained key -- thousands per pass and
+    most of each evidence file -- and say nothing an operator acts on, so pass
+    evidence counts them instead (#3223): ``skipped`` keeps every other entry in
+    receipt order, ``skipped_summary`` holds one ``{root, reason, count}`` row per
+    root and reason over ALL skips (first-seen order; the counts sum to
+    ``counts.skipped``), and ``skipped_omits`` names the reasons left out of the
+    list. ``counts`` and every other key are untouched, and the standalone
+    receipt (``RetentionResult.to_dict``) keeps listing every entry.
+    """
+
+    skipped = payload.get("skipped")
+    if not isinstance(skipped, list):
+        return
+    summary: dict[tuple[object, object], int] = {}
+    listed: list[object] = []
+    for entry in skipped:
+        root = entry.get("root") if isinstance(entry, Mapping) else None
+        reason = entry.get("reason") if isinstance(entry, Mapping) else None
+        summary[(root, reason)] = summary.get((root, reason), 0) + 1
+        if reason not in _PASS_EVIDENCE_OMITTED_SKIP_REASONS:
+            listed.append(entry)
+    payload["skipped"] = listed
+    payload["skipped_summary"] = [
+        {"root": root, "reason": reason, "count": count} for (root, reason), count in summary.items()
+    ]
+    payload["skipped_omits"] = list(_PASS_EVIDENCE_OMITTED_SKIP_REASONS)
 
 
 def _write_prelock_blocked_evidence(

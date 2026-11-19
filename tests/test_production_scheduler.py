@@ -41618,7 +41618,7 @@ def _cohort_full_identity_repository(
 
 
 def _published_hydro_candidate_state_decision(
-    candidate: Any, state: Mapping[str, Any] | None
+    candidate: Any, state: Mapping[str, Any] | None, *, event_evidence: bool = True
 ) -> Any:
     return scheduler_state_decision_module._candidate_state_decision(
         candidate,
@@ -41637,6 +41637,7 @@ def _published_hydro_candidate_state_decision(
                 "output_uri": f"s3://nhms/runs/{candidate.run_id}/output/",
             },
         },
+        event_evidence=event_evidence,
     )
 
 

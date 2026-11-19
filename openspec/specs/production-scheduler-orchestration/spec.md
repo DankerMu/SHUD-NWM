@@ -461,6 +461,12 @@ resolved additional roots. Entry keys remain root-relative, so the root field di
 identically named runs across roots. Root-admission failures SHALL be represented
 in the existing skipped evidence without weakening the v2 contract.
 
+In scheduler pass evidence the skipped list SHALL NOT repeat the entries whose reason is `within_retention_window`:
+those are attributed through `skipped_summary`, one row `{root, reason, count}` per root and reason over all skipped
+entries, whose counts sum to `counts.skipped`, and the block SHALL name the omitted reason in `skipped_omits`. Every
+skipped entry with any other reason SHALL stay listed with its root. The standalone retention receipt SHALL keep
+listing every entry.
+
 The additional-root block SHALL survive scheduler evidence size compaction, so a
 pass large enough to have its per-entry retention detail stripped still discloses
 which window governed the additional roots. Deletion failures on an additional
@@ -613,6 +619,14 @@ that cleanup never aborts scheduling SHALL all apply unchanged.
 - **THEN** retention records no `runs/` targets for it and raises nothing; a missing root records no targets at all
 - **AND** an existing scheduler workspace root without `runs/` still has its root-level Slurm log lane evaluated
 - **AND** the scheduling pass completes normally.
+
+#### Scenario: Pass evidence summarises the within-window skips
+
+- **WHEN** a scheduler pass's retention skips many keys because they are within the retention window, some across two roots, and one because its cycle name is unparseable
+- **THEN** pass evidence `retention.skipped` holds the unparseable entry with its root and no `within_retention_window` entry
+- **AND** `retention.skipped_summary` holds one row per root and reason whose counts sum to `retention.counts.skipped`
+- **AND** `retention.skipped_omits` is `["within_retention_window"]`
+- **AND** the standalone retention receipt of the same plan lists every skipped entry
 
 ### Requirement: Reconciliation-pending candidates are partial non-success evidence
 
@@ -1831,3 +1845,31 @@ receipt schema version SHALL remain `nhms.production_scheduler.retention.v2`.
 
 - **WHEN** the gate is closed, or no workspace root is named, or it resolves to the copyback root, or it is rejected at admission
 - **THEN** no `slurm_log_cycle_aged_out` target is planned, and the plan equals the plan produced without the lane
+
+### Requirement: Completion scoring SHALL decide through the candidate-state ladder without building per-event evidence
+
+When cycle completion scoring consults candidate state, it SHALL obtain each in-scope model's decision from the same
+candidate-state decision ladder the submitting path uses, so the terminal decisions that ladder returns decide the
+verdict exactly as before.
+Because completion scoring neither reads nor publishes the per-event evidence listing, it SHALL request the decision
+without that listing: the decision's evidence SHALL then omit `pipeline_events` altogether and SHALL be otherwise
+identical. The submitting path SHALL keep requesting the full evidence.
+
+#### Scenario: The decision is the same with and without the event listing
+
+- **WHEN** the ladder is evaluated twice for the same candidate and the same candidate state, once with and once
+  without the event evidence listing
+- **THEN** both decisions have the same `action` and `reason`
+- **AND** the evidence of the second equals the evidence of the first with the `pipeline_events` key removed
+
+#### Scenario: Completion scoring does not sanitise events
+
+- **WHEN** a cycle whose candidates carry pipeline events is scored for completion
+- **THEN** the decision evidence completion scoring receives carries no `pipeline_events` key
+- **AND** the verdict equals the verdict the full-evidence decision would produce, including for a cycle that scores
+  `complete` because a recalibrated model is scoped out by its lineage cutover
+
+#### Scenario: Submission still publishes the event listing
+
+- **WHEN** a candidate is evaluated on the submitting path
+- **THEN** its decision evidence carries `pipeline_events` as before

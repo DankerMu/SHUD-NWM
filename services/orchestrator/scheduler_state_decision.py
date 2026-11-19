@@ -66,16 +66,27 @@ from services.orchestrator.scheduler_state_types import (
 def _candidate_state_decision(
     candidate: SchedulerCandidateLike,
     raw_state: Mapping[str, Any] | None,
+    *,
+    event_evidence: bool = True,
 ) -> CandidateStateDecision | None:
     """Emit the candidate-state decision, tagged with the forcing provenance tier.
 
     The artifact guard observes the provenance tier even when it does not block,
     so the tier is threaded out through ``forcing_provenance`` and merged into the
     decision that is ultimately emitted -- blocked or not (#1203, AC-4).
+
+    ``event_evidence=False`` (#3223) returns the same decision without the
+    ``pipeline_events`` evidence key (see ``_candidate_state_evidence``). Only
+    completion scoring passes it; the submitting path keeps the default.
     """
 
     forcing_provenance: dict[str, Any] = {}
-    decision = _candidate_state_decision_evaluated(candidate, raw_state, forcing_provenance)
+    decision = _candidate_state_decision_evaluated(
+        candidate,
+        raw_state,
+        forcing_provenance,
+        event_evidence=event_evidence,
+    )
     if decision is None or not forcing_provenance or "forcing_provenance" in decision.evidence:
         return decision
     return CandidateStateDecision(
@@ -89,6 +100,8 @@ def _candidate_state_decision_evaluated(
     candidate: SchedulerCandidateLike,
     raw_state: Mapping[str, Any] | None,
     forcing_provenance: dict[str, Any],
+    *,
+    event_evidence: bool = True,
 ) -> CandidateStateDecision | None:
     def _record_forcing_provenance(annotation: Mapping[str, Any] | None) -> None:
         if annotation and not forcing_provenance:
@@ -97,7 +110,7 @@ def _candidate_state_decision_evaluated(
     if raw_state is None:
         return None
     state = _bounded_candidate_state(raw_state)
-    evidence = _candidate_state_evidence(candidate, state)
+    evidence = _candidate_state_evidence(candidate, state, event_evidence=event_evidence)
     if _candidate_state_has_identity_mismatch(evidence):
         return CandidateStateDecision(
             "blocked",
