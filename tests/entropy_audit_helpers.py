@@ -8,8 +8,7 @@ the memoized ``build_report`` accessor) and its private helper tail (line
 verbatim so every partition imports one owner instead of copying them.
 
 The filename deliberately does not start with ``test_``: pytest must not collect
-it, and ``scripts/select_ci_tests.py`` routes it through
-``SUPPORT_MODULE_TEST_RULES`` rather than the ``tests/**`` suite branch.
+it.
 
 Design D1 note for the monkeypatch surface: none of the names patched by the
 partitions live here. Every ``monkeypatch.setattr`` target is a real

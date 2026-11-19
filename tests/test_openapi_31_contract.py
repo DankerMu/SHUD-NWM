@@ -19,7 +19,7 @@ from apps.api.routes import pipeline as pipeline_routes
 COMPOSED_NULLABLE_PATH = ("components", "schemas", "Layer", "properties", "metadata")
 
 # The exact pinned openapi-typescript package the generated-type assertions run
-# with. Must be resolvable on the hosted runner (targeted Unit Tests job has no
+# with. Must be resolvable on the hosted runner (the Unit Tests (full) job has no
 # pnpm install / node_modules), so the seam is `npx --yes <exact-pin>` and never
 # a local `node_modules/.bin` binary.
 OPENAPI_TYPESCRIPT_PACKAGE = "openapi-typescript@7.13.0"
@@ -40,7 +40,7 @@ def _generator_function_source() -> str:
 
 
 def test_generator_seam_is_hosted_runner_resolvable_exact_pin() -> None:
-    # The targeted Unit Tests job has no pnpm install / node_modules, so the
+    # The Unit Tests (full) job has no pnpm install / node_modules, so the
     # generated-type seam must be `npx --yes <exact-version>` — never a local
     # `node_modules/.bin` binary, and never a bare unversioned `npx
     # openapi-typescript` (which drifts with latest). Both generated-type

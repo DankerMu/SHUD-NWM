@@ -42,8 +42,7 @@ from typing import Any
 import pytest
 
 # Every service / suite import is function-local (the ``tests/test_retry_mint_floor.py``
-# convention): a module-scope import would join this file to other suites' pinned
-# importer closures in ``scripts/select_ci_tests.py``.  Its CI routes are explicit rows.
+# convention).
 
 _CYCLE = "2026050100"
 _MODELS = ("model_0", "model_1")

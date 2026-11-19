@@ -14,9 +14,7 @@ Two writer tiers and one reader consequence are pinned here:
   marker, and the reader lists those models and reports the pass with reason
   ``size_fallback_source_cycles_summarized``.
 
-Every ``services.*`` / ``tests.*`` import is function-local on purpose: the new
-file must not join the frozen top-level importer set of
-``tests.test_production_scheduler`` (``tests/test_select_ci_tests.py``).
+Every ``services.*`` / ``tests.*`` import is function-local.
 """
 
 from __future__ import annotations

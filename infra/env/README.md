@@ -117,19 +117,12 @@ Notes:
     `tests/test_two_node_docker_runbook_environment_invariant.py`,
     `tests/test_role_boundary_static.py`,
     `tests/test_slurm_gateway_deployment_contract.py`,
-    `tests/test_two_node_e2e_evidence.py`, `tests/test_production_scheduler.py`,
-    and `tests/test_select_ci_tests.py`, plus
+    `tests/test_two_node_e2e_evidence.py`, and `tests/test_production_scheduler.py`,
+    plus
     `scripts/validate_two_node_docker_runtime.py:5374`, which uses the template
     as the default `--compute-env` for the static check.
     `tests/test_two_node_docker_source_trust.py` is **not** in that set (it reads
     `compute.env`, not the template).
-  - **On CI the authority is `scripts/select_ci_tests.py`**, where two rules match
-    `infra/env/compute.example`: the `infra/env/**` glob (`:2301-2304` →
-    `tests/test_two_node_docker_runtime.py`) and the exact-path rule
-    (`:2314-2317` → `tests/test_slurm_gateway_deployment_contract.py`, the
-    `SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST` constant at `:496`). The other
-    consumer files are not selected for this path,
-    so a green PR here does not exercise them — run the grep set locally.
 - `compute.host.env` is untracked with no committed template. That gap is
   recorded, not fixed, by #1694.
 - 部署的单元体与 drop-in 的逐字节副本在 `infra/systemd/node22/`（`MANIFEST.json`，收据 `docs/runbooks/receipts/2026-10-16-node22-live-units-snapshot.md`），本表仍是 EnvironmentFile 权威，`tests/test_node22_unit_tracking.py` 以本表校验那些文件的 `EnvironmentFile=`

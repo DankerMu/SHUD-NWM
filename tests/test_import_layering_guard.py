@@ -36,10 +36,6 @@ list fails, and an entry whose import no longer exists in that file's AST
 surface: a module the guard cannot parse is a module whose imports it cannot
 see.
 
-``scripts/select_ci_tests.py`` routes every changed ``*.py`` under the roots in
-``_SCAN_ROOTS`` to this module (``IMPORT_LAYERING_GUARD_ROOTS``); a selector
-meta-test parses ``_SCAN_ROOTS`` out of this file and asserts the two agree.
-
 Task 1.3 adds a second, independent check: the contract check.  It scans every
 ``*.py`` under ``_CONTRACT_SCAN_ROOTS`` (all six roots, tests included) and
 fails on any use of a retired contract module (``_RETIRED_MODULES``) or of a

@@ -511,7 +511,7 @@ skip 成 `active_duplicate_pipeline`、0 提交、0 阻塞，旧口径把它们�
 （`scheduler_runtime._RETENTION_TERMINAL_SKIP_REASONS`：`completed_duplicate_pipeline` /
 `terminal_hydro_success` / `terminal_completed_cycle` / `terminal_pipeline_success` /
 `duplicate_candidate_identity`）；探针是 stdlib-only，带的是字面量拷贝，由 parity 用例
-钉死、并由 `scripts/select_ci_tests.py` 在改 `scheduler_runtime.py` 的 PR 上选中。
+钉死；改 `scheduler_runtime.py` 的 PR 跑全量 pytest 时一并执行。
 判定与调度器同向 fail-safe（**未知即在飞**）：集合外的任何 reason（含以后新增的）、
 没有 `reason` 的行、不是对象的行、`skipped_candidates` 不是列表、
 `skipped_candidate_count > 0` 而列表缺失或行数少于 count，全部算在飞；

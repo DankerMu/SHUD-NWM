@@ -122,13 +122,7 @@ def _stop(observer: Any, background: _Background, pid: int) -> None:
 
 
 def _registry_fixture(tmp_path: Path, basin_slug: str) -> tuple[Path, Path]:
-    """Inventory + package manifest of one valid Basins model, as the registry suites build it.
-
-    Imported in the function body on purpose: the #1913 registry-partition oracle
-    freezes the set of suites that import the helper at module scope
-    (tests/test_select_ci_tests.py), and a body import does not make this file
-    one of them.
-    """
+    """Inventory + package manifest of one valid Basins model, as the registry suites build it."""
     from tests.basins_registry_import_helpers import _write_registry_fixture
 
     _, _, inventory_path, manifest_path, _model_id = _write_registry_fixture(tmp_path, basin_slug=basin_slug)

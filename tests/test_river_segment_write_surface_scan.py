@@ -62,8 +62,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PRODUCTION_DIRS = ("apps", "services", "workers", "packages", "scripts", "db")
-# Directories whose `*.sql` files are scanned as statement text. Mirrored by
-# scripts/select_ci_tests.py (a meta-guard parses this binding).
+# Directories whose `*.sql` files are scanned as statement text.
 SQL_DIRS = ("db",)
 
 BACKFILL_MODULE = "workers/model_registry/basins_registry_import.py"

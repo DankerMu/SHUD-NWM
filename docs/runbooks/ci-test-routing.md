@@ -39,8 +39,10 @@ default-skip, run only when the matching env flag is set.
 
 ## CI exclusion
 
-The `unit-test` job (`Unit Tests (full)`) is a matrix of shards, not one pytest
-process. The shard count is the length of the `matrix.shard` list in
+The `unit-test` job (`Unit Tests (full)`) runs on pull requests and master
+pushes whose diff has a path outside `apps/frontend/` (docs- and openspec-only
+diffs included), and on every manual `workflow_dispatch`. It is a matrix of
+shards, not one pytest process. The shard count is the length of the `matrix.shard` list in
 `.github/workflows/ci.yml`. Each shard lists its own test files and runs only
 those:
 
@@ -55,13 +57,13 @@ So pure CI never collects e2e/grib/integration tests. The shards are disjoint
 and together cover every test file pytest collects, so the full lane is green
 only when **every** shard is green.
 
-To reproduce one shard locally, run the commands below (4 is the shard count in
+To reproduce one shard locally, run the commands below (6 is the shard count in
 `ci.yml` today; `mapfile` needs bash 4 or newer, so not the stock macOS
 `/bin/bash`). `--no-sync` runs the environment that is already installed and never rebuilds
 it, like the node-27 lane below:
 
 ```bash
-uv run --no-sync python scripts/ci/shard_tests.py --shard N --total 4 > shard-files.txt
+uv run --no-sync python scripts/ci/shard_tests.py --shard N --total 6 > shard-files.txt
 mapfile -t shard_files < shard-files.txt
 uv run --no-sync pytest "${shard_files[@]}" -q --tb=short --durations=25 -m "not e2e and not grib and not integration"
 ```

@@ -1486,9 +1486,7 @@ def test_dropping_precip_router_from_business_routers_unregisters_both_public_ro
     `apps/api/route_registry.py` is a composition owner: it imports `precip_router` into
     `_BUSINESS_ROUTERS` and `register_role_aware_routes` walks that tuple to
     `include_router` each entry. That module is why the two published endpoints exist at
-    all, and it is now routed to this suite by `scripts/select_ci_tests.py`; that selector
-    edge is only justified if this suite actually fails when the edge is cut, so both legs
-    live here.
+    all, and this suite must actually fail when the edge is cut, so both legs live here.
 
     ROUTE-TABLE MEMBERSHIP, NOT HTTP 404. A 404 on these paths is also produced by the SPA
     fallback in `apps/api/startup_wiring.py` for any unmatched `api/`-prefixed path, and by

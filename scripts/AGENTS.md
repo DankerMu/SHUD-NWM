@@ -8,7 +8,6 @@ there.
 ## Required Reading
 
 - `docs/runbooks/ci-test-routing.md`
-- `openspec/specs/ci-test-selector-routing/spec.md`
 - `openspec/specs/python-environment-truth/spec.md`
 - `scripts/diagnostic/qhh/README.md`
 
@@ -27,10 +26,8 @@ Follow them there; do not restate or reinterpret them in a script header.
 - The `node27_*` and `node22_*` filename prefixes name the host a script
   targets. Host roles come from the three-node table in root `CLAUDE.md`;
   check it before adding or renaming a host-scoped script.
-- `scripts/select_ci_tests.py` is the PR test selector. Adding a test file,
-  a new importer of a guarded owner, or a new owner module needs a matching
-  rule there; `tests/test_select_ci_tests.py` fails when a guarded owner gains
-  an unrouted importer. Marker routing (`e2e`, `grib`) is described in
+- Pull requests run the full sharded pytest suite, so a new test file needs
+  no CI wiring. Marker routing (`e2e`, `grib`) is described in
   `docs/runbooks/ci-test-routing.md`.
 - `scripts/ci/` holds CI-only tooling (`scripts/ci/shard_tests.py` partitions
   the full regression, `scripts/ci/full_regression_watch.py` watches it).
@@ -81,15 +78,5 @@ uv run pytest -q tests/test_entropy_audit_*.py
 openspec validate --all --strict --no-interactive
 ```
 
-When the selector changes, run its meta-suite:
-
-```bash
-uv run pytest -q tests/test_select_ci_tests.py
-```
-
-For any other script, ask the selector which suites own the changed path and
-run them:
-
-```bash
-printf '%s\n' scripts/node27_raw_retention.py | uv run python scripts/select_ci_tests.py
-```
+For a changed script, run the test suites that name it (find them with
+`git grep -l <script name> -- tests/`).

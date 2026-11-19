@@ -119,11 +119,9 @@ from tests.test_sql_shape_helpers import (
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # The register: every production file whose ``hydro.river_timeseries`` SQL this
-# oracle owns. Module-level rather than local to the register test because two
-# other guards derive from it — the statement census below, and
-# ``tests/test_select_ci_tests.py``'s wiring meta-test, which asserts that a diff
-# to each of these paths selects THIS file in the CI lane. A new registered file
-# therefore cannot be added without also being wired and censused.
+# oracle owns. Module-level rather than local to the register test because the
+# statement census below derives from it. A new registered file therefore cannot
+# be added without also being censused.
 REGISTERED_SOURCES: tuple[str, ...] = (
     "packages/common/forecast_store.py",
     "services/tile_publisher/publisher.py",
@@ -1427,12 +1425,6 @@ def test_autopipeline_ingest_criterion_touches_no_fact_table() -> None:
 
 def test_autopipeline_ingest_criterion_is_authority_state_first() -> None:
     """#1674: 'published' is complete on its own; 'parsed' needs a parse timestamp.
-
-    Sits beside the #1442 shape pin rather than in a new file because
-    ``scripts/select_ci_tests.py`` maps the autopipeline script to exactly this
-    oracle (``test_select_ci_tests.py`` asserts that set by equality), so a new
-    file would either never run on the PR that changes the script or redden the
-    selector's own guard.
 
     The negatives are the load-bearing half. ``COALESCE`` would mean someone
     gave ``parsed_at`` a fallback, and ``updated_at`` would mean that fallback

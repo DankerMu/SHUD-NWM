@@ -77,10 +77,7 @@ MUTATION_VERBS = re.compile(
 )
 
 # The libpq selector set the node-22 units clear.  Written out literally rather
-# than read from the precedent probe's unit file: reading that path from this
-# suite would create a reader edge `infra/systemd/nhms-node22-refresh-timer-
-# health.service` -> this suite that `scripts/select_ci_tests.py` does not
-# route, and that file's rule is pinned to an exact target set.
+# than read from the precedent probe's unit file.
 PG_ENVIRONMENT_VARIABLES = (
     "DATABASE_URL",
     "PIPELINE_DATABASE_URL",
@@ -2467,9 +2464,8 @@ def test_e5_the_terminal_skip_reasons_equal_the_schedulers_own() -> None:
     """#2662: the probe's "is this candidate finished" predicate IS the scheduler's.
 
     The probe cannot import the set (D4), so it carries a literal; this is the
-    pin that keeps the literal from drifting, and `scripts/select_ci_tests.py`
-    routes `scheduler_runtime.py` here so it runs on the diff that would drift
-    it.  A reason added to the scheduler's set but not here would make the
+    pin that keeps the literal from drifting; the full pytest suite of every PR
+    runs it, including the diff that would drift it.  A reason added to the scheduler's set but not here would make the
     probe read finished work as in-flight (a false alarm after the gate); one
     removed there but kept here would read in-flight work as finished, which
     is the #2655 blind spot again.
@@ -4099,7 +4095,6 @@ def test_j11_the_root_blocked_boundary_is_the_literal_the_scheduler_writes() -> 
 
     The literal also appears as the pre-lock `lock.reason`, so the pin matches
     the writer's `execution_boundary` key/value text, not the bare string.
-    `scripts/select_ci_tests.py` routes `scheduler_runtime.py` to this node id.
     """
 
     writer = (Path(__file__).resolve().parents[1] / "services" / "orchestrator" / "scheduler_runtime.py").read_text()
@@ -4651,11 +4646,7 @@ def _assert_guardless_preflight_parity(source: str) -> None:
 
 
 def test_k9_every_guardless_preflight_boundary_the_scheduler_writes_is_graded_or_exempt() -> None:
-    """Observer/observed parity over the whole boundary set (D4 again).
-
-    `scripts/select_ci_tests.py` routes `scheduler_runtime.py` to this node id,
-    so the diff that adds a guard-less boundary runs it.
-    """
+    """Observer/observed parity over the whole boundary set (D4 again)."""
 
     _assert_guardless_preflight_parity(WRITER_SOURCE.read_text())
     assert not set(probe.PREFLIGHT_BLOCKED_BOUNDARY_VERDICTS) & EXEMPT_GUARDLESS_PREFLIGHT_BOUNDARIES

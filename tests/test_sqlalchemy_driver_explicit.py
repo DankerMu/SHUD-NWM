@@ -22,8 +22,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # Scanned trees, walked whole, plus the one shared test helper that builds a
-# real PostgreSQL engine. scripts/select_ci_tests.py mirrors this binding in
-# SQLALCHEMY_DRIVER_GUARD_ROOTS / SQLALCHEMY_DRIVER_GUARD_FILES.
+# real PostgreSQL engine.
 SCAN_ROOTS: tuple[str, ...] = ("apps", "packages", "services", "workers", "scripts")
 SCAN_FILES: tuple[str, ...] = ("tests/integration_helpers.py",)
 PRUNED_DIRECTORIES: frozenset[str] = frozenset(

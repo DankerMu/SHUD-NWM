@@ -31,11 +31,6 @@ sorted by ``(file, name)``, registering only definitions that KEEP a matching
 name because they are a different concept or a patch seam (a helper renamed out
 of the rule needs no entry).  Every entry must name a module-level definition
 that still exists, or it is stale and fails.
-
-``scripts/select_ci_tests.py`` routes every changed ``*.py`` under the roots in
-``_SCAN_ROOTS`` to this module (``TIME_HELPER_CONSOLIDATION_ROOTS``) and both
-JSON files to it as well; a selector meta-test parses ``_SCAN_ROOTS`` out of
-this file and asserts the two agree.
 """
 
 from __future__ import annotations

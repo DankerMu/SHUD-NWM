@@ -5,7 +5,7 @@ Partition 7 of 7 of the former monolith ``tests/test_basins_registry_import.py``
 and issue #566 contracts share the ``tests/fixtures/basins/qhh-sample`` fixture, and
 because their four integration nodes are one ci.yml ``database:`` path.  #2907 retired
 the four segment-slice cases that observed the deleted store list read path, through
-``tests/fixtures/basins_registry_partition_retirements.json``.  That fixture's sample
+the partition retirements ledger (deleted by #3219).  The QHH fixture's sample
 constants and loaders moved to the non-collectible
 ``tests/basins_registry_import_helpers.py`` so this file stays under the 1,000-line
 structural limit.

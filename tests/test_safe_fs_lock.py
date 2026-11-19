@@ -10,8 +10,7 @@ test's own ``dir_fd``.  The threaded ``Barrier`` test drives the scheduler lease
 guard-file site directly -- it has no in-process registry, so origin/master
 reproduces the race there on macOS only.
 
-Every ``services.*`` import is function-local, so this file joins no frozen
-top-level importer set (``tests/test_select_ci_tests.py``).
+Every ``services.*`` import is function-local.
 """
 
 from __future__ import annotations

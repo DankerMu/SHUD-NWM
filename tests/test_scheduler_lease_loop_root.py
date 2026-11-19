@@ -9,8 +9,7 @@ reports ``acquired=False`` and evidence preparation raises its typed
 ``unsafe_evidence_directory``.  This file is also run once under
 ``uv run --python 3.14`` (tasks.md 2.2).
 
-Every ``services.*`` import is function-local, so this file joins no frozen
-top-level importer set (``tests/test_select_ci_tests.py``).
+Every ``services.*`` import is function-local.
 """
 
 from __future__ import annotations

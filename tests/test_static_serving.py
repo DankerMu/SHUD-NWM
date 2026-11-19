@@ -1,6 +1,6 @@
 """Static mounts must serve real built assets and honor HTTP revalidation.
 
-Skipped when no frontend build is present (CI backend gate does not build the SPA).
+Skipped when no frontend build is present (the CI pytest jobs do not build the SPA).
 """
 
 from __future__ import annotations

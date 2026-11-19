@@ -2177,8 +2177,7 @@ def test_bounded_candidate_summary_retains_every_retry_policy_key_including_fals
 
 
 #: The orchestrator package on disk.  The pins below READ these files with ``ast``
-#: and never import them: the listing surface is db-free on purpose, and importing
-#: the writers here would add importer pairs to the CI selector's directory rules.
+#: and never import them: the listing surface is db-free on purpose.
 _ORCHESTRATOR_DIR = Path(__file__).resolve().parents[1] / "services" / "orchestrator"
 #: EVERY module of the orchestrator package, derived rather than listed (R2-05).
 #: The previous two-name literal made the closure pin below unclosed one level up:

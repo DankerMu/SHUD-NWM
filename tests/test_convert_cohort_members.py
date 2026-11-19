@@ -113,7 +113,6 @@ class _RuntimeWithHook(FakeCycleSlurmClient):
         self.hook_result: Any = None
 
     def get_job_status(self, job_id: str) -> dict[str, Any]:
-        # Function-local: ``chain_types`` is stop-rule owned in scripts/select_ci_tests.py.
         from services.orchestrator.chain_types import OrchestratorError
 
         status = super().get_job_status(job_id)

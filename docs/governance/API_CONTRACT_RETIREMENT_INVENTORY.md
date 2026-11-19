@@ -297,10 +297,10 @@ the #411 evidence snapshot and are not rewritten.
   `PsycopgModelRegistryStore.list_river_segments`, its legacy / segment-slice
   helpers, the four `RIVER_SEGMENT_COLLECTION_*` budgets (and their
   `packages.common.model_registry` re-exports) are deleted. The frozen #1913 registry-import partition tests that observed import
-  results through the store were recorded in the retirements ledger
-  `tests/fixtures/basins_registry_partition_retirements.json` (two rewritten to
-  assert the imported rows directly, four retired); the oracle
-  `tests/fixtures/basins_registry_partition_oracle.json` is unchanged. Besides the
+  results through the store were recorded in the partition retirements ledger
+  (two rewritten to assert the imported rows directly, four retired); the
+  partition oracle was unchanged (#3219 later deleted both fixtures with the
+  only suite that read them). Besides the
   pre-PR-2 row cleanup `_delete_legacy_seg_rows`, the `basins_seg_shp` crosswalk
   source and `parse_seg_shp_crosswalk`, the only remaining `_seg_` code was the
   caller-less id producer `workers/model_registry/basins_geometry.py::_stable_segment_id`,

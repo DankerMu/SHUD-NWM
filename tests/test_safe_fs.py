@@ -19,11 +19,7 @@ tests/test_forcing_copyback_backfill.py, plus the POSIX same-superblock
 argument recorded in the change proposal.
 
 The file also carries safe_fs's **directory-mode determinism** cases (#1513) --
-see the section comment below.  Those live here rather than beside the
-provider_atomic coverage in tests/test_scheduler_refresh_provider_atomic.py
-because scripts/select_ci_tests.py routes packages/common/safe_fs.py to THIS
-suite and not to that one, so a safe_fs-only change would otherwise never run
-them in the PR lane.
+see the section comment below.
 """
 
 from __future__ import annotations

@@ -14,9 +14,7 @@ hours back -- past the retention safety window (3600 s), far inside the 90-day
 age window -- so only the byte budget decides what goes, and ``max_bytes`` is one
 byte under the root's total so the size pass deletes exactly one file.
 
-Every ``services.*`` / ``tests.*`` import is function-local on purpose: this file
-must not join the frozen top-level importer set of
-``tests.test_production_scheduler`` (``tests/test_select_ci_tests.py``).
+Every ``services.*`` / ``tests.*`` import is function-local.
 """
 
 from __future__ import annotations

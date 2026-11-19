@@ -144,9 +144,8 @@ def test_dropping_the_precip_openapi_patch_drifts_runtime_schema_from_static_yam
     `_patch_precip_openapi(schema)`, which pops the generated `PrecipIndexResponse`
     component and rewrites the index operation's 200 response onto the shared
     `allOf: [SuccessEnvelope, {data}]` envelope that the hand-maintained
-    `openapi/nhms.v1.yaml` carries. `main.py` is now routed to this suite by
-    `scripts/select_ci_tests.py`; that selector edge is only justified if this suite
-    actually fails when the call site disappears, so both legs live here.
+    `openapi/nhms.v1.yaml` carries. This suite must actually fail when the call site
+    disappears, so both legs live here.
 
     TWO LOCATIONS COMPARED INDIVIDUALLY, NOT WHOLE-DOCUMENT EQUALITY. The patch touches
     exactly two places, so exactly those two are asserted: the negative leg then names the

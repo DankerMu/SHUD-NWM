@@ -8826,9 +8826,8 @@ the same gadget are covered by detection only, in the same audit:
   too (`DEFAULT upper('x')` → exit 3, measured). A migration that starts
   referencing a new function therefore has to extend the allow-list in
   `db/roles/node27_write_roles.sql`; a unit test derives the expected set from
-  `db/migrations/**`, and `scripts/select_ci_tests.py` maps `db/migrations/*.sql`
-  (at any depth) to that suite, so the failure lands on the migration's own PR and not on the
-  live audit.
+  `db/migrations/**` (at any depth) and runs in the PR's full pytest suite, so the failure
+  lands on the migration's own PR and not on the live audit.
   Implementation note for whoever edits it: `pg_depend` records **nothing** for
   pinned catalog functions, so the sweep reads the stored parse trees (`adbin` /
   `conbin` / `ev_action`) directly;
@@ -9317,9 +9316,8 @@ starts referencing a function the allow-list does not carry makes **this**
 invocation exit 3 on a perfectly legitimate catalog. That is deliberate and
 fail-closed, but it must not be discovered in the maintenance window — the unit
 test that derives the expected set from `db/migrations/**` is what moves the
-failure to CI, and `scripts/select_ci_tests.py` carries the
-`db/migrations/*.sql` → `tests/test_node27_write_roles.py` row that makes the
-PR-scoped selector actually run it, so a migration PR that adds a `DEFAULT`,
+failure to CI, and the PR's full pytest suite runs
+`tests/test_node27_write_roles.py`, so a migration PR that adds a `DEFAULT`,
 `CHECK`, generated column or trigger function reddens there first. If this audit ever reports
 `-- not on the migration allow-list` for something a migration legitimately
 introduced, extend the array in `db/roles/node27_write_roles.sql`, re-run the

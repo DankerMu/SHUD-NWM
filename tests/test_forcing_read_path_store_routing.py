@@ -33,15 +33,9 @@ from packages.common.forcing_ts_render import FORCING_TABLE, render_forcing_ts_s
 from scripts import reset_qhh_smoke_db
 from tests.forcing_ts_template_registry import FORCING_REGISTRY, REPO_ROOT, entry_by_key
 
-# AT MODULE SCOPE ON PURPOSE, and the scope is the whole point rather than a
-# style preference. Reader #2 is driven through four private helpers of
-# ``tests/test_qhh_latest_fallback_pushdown.py``, which is a member of river's
-# ``SQL_SHAPE_ORACLE_TESTS``. ``select_ci_tests._build_suite_importer_index``
-# inverts MODULE-LEVEL import edges only, so while this import sat inside
-# ``_executed_latest_product`` a PR renaming ``_fallback_statements`` over there
-# did not select this suite and went red on the post-merge master run instead.
-# Hoisting it is what makes the dependency visible to the selector; it is also
-# the shape that file already uses for its own cross-suite helper import
+# Reader #2 is driven through four private helpers of
+# ``tests/test_qhh_latest_fallback_pushdown.py``; the module-scope import is the
+# shape that file already uses for its own cross-suite helper import
 # (``from tests.test_sql_shape_helpers import outer_predicates``).
 from tests.test_qhh_latest_fallback_pushdown import (
     _HEADER_ROW,

@@ -1,12 +1,8 @@
 """Tile SQL shape and the ``#2030`` budget-truncation signal (hydro MVT scaling).
 
 One partition of the original ``tests/test_hydro_display_mvt_scaling.py``
-(#2074). This file keeps the original path because three registries pin it:
-``openspec/specs/ci-contract-baseline/spec.md``, the
-``infra/systemd/nhms-display-api.service`` rule in ``scripts/select_ci_tests.py``
-(whose only reader is ``test_systemd_workers_receive_shared_file_cache_default``
-below) and the ``services/tiles/mvt.py`` closure anchor in
-``tests/test_select_ci_tests.py``. Shared doubles live in
+(#2074). This file keeps the original path because
+``openspec/specs/ci-contract-baseline/spec.md`` pins it. Shared doubles live in
 ``tests/hydro_display_mvt_helpers.py``.
 """
 
