@@ -14,12 +14,14 @@ import ast
 import functools
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from services.orchestrator import cli, scheduler_evidence_payload
+from tests.test_env_templates import TEMPLATE, parse_env_template
 
 _EVIDENCE_ROOT_ENV = "NHMS_SCHEDULER_EVIDENCE_ROOT"
 
@@ -2509,6 +2511,32 @@ def test_the_help_text_names_every_decision_and_every_non_evaluating_reason() ->
     # no longer discovers.  Enumeration only, as above: the prose is not asserted.
     assert "discovery retraction" in help_text
     assert "Four known boundaries" in help_text
+
+
+def test_the_help_text_states_the_time_window_boundary_without_production_values() -> None:
+    """#3225: the window numbers live in the env template, not in the help.
+
+    The help quoted ``lookback_hours=32 with cycle_lag_hours=16`` and went stale the
+    day production changed the lag.  The boundary itself stays -- it names the
+    evidence fields and both knobs -- but no production value may be spelled.  The
+    template is parsed so this test fails loudly if the two keys ever leave it.
+    """
+
+    from services.orchestrator import operator_action_listing
+
+    help_text = operator_action_listing.LIST_OPERATOR_ACTIONS_HELP
+    values = parse_env_template(TEMPLATE.read_text())
+    lookback = int(values["NHMS_SCHEDULER_LOOKBACK_HOURS"])
+    lag = int(values["NHMS_SCHEDULER_CYCLE_LAG_HOURS"])
+    assert lookback > 0 and lag >= 0
+
+    for name in ("cycle_window.start_time_utc", "cycle_window.end_time_utc", "lookback_hours", "cycle_lag_hours"):
+        assert name in help_text, name
+    assert re.search(r"(lookback_hours|cycle_lag_hours)\s*=\s*\d", help_text) is None
+    assert re.search(r"production \d+", help_text) is None
+    assert f"{lag}h lag" not in help_text
+    # The degenerate window stays the one judged narrowing.
+    assert "--lookback-hours 0" in help_text
 
 
 def _only_string_tuple_literal(node: ast.AST, where: str) -> tuple[str, ...]:
