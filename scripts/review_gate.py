@@ -15,9 +15,15 @@ Commands:
       Idempotent per (issue, pr): an identical re-run changes nothing, a
       differing one replaces that pair's record. `--ceiling` adds P to
       `ceilingPrs` once (fix_gate.py locked on P). `gateEntries` is never
-      touched; new entries start at 0. Run it on every close of an issue's PR:
-      `merged` in the post-merge archive commit; `superseded-by-split`,
-      `abandoned` or `descoped` committed when `fix_gate.py close` runs.
+      touched; new entries start at 0. Run it only for:
+        - a non-merged close (`superseded-by-split`, `abandoned` or
+          `descoped`), committed on the default branch when
+          `fix_gate.py close` runs, with `--ceiling` if fix_gate.py locked
+          on P;
+        - a `merged` close of a PR fix_gate.py locked on, with `--ceiling`,
+          committed in that PR's last push before the merge.
+      A `merged` close without `--ceiling` carries no decision: it exits 0,
+      says it was not recorded, and writes nothing.
       --issue and --pr must be positive; the mutated memory is validated
       before it is written.
   check --issue N [--issue M ...] [--pr P]
@@ -90,7 +96,7 @@ def load_history(root: Path) -> dict:
     """The memory as `{"issues": {...}}`, folded and validated.
 
     Raises MalformedMemory on a conflicting bare key or a malformed entry. A
-    fold is reported on stderr and persisted by the next `record`.
+    fold is reported on stderr and persisted by the next persisting `record`.
     """
     path = history_path(root)
     if not path.is_file():
@@ -128,6 +134,12 @@ def save_history(root: Path, history: dict) -> None:
 
 def cmd_record(args: argparse.Namespace) -> int:
     history = load_history(args.root)
+    if args.outcome == "merged" and not args.ceiling:
+        # A clean merge carries no escalation decision (`check` reads only
+        # `ceilingPrs`), so it is not persisted; the file is left untouched.
+        for issue in args.issue:
+            print(f"review_gate: issue #{issue} PR #{args.pr} merged without a ceiling: not recorded")
+        return 0
     for issue in args.issue:
         entry = history["issues"].setdefault(str(issue), {"ceilingPrs": [], "gateEntries": 0, "closed": []})
         new = {"pr": args.pr, "outcome": args.outcome, "rounds": args.rounds}
