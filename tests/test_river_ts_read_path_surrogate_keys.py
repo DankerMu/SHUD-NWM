@@ -80,6 +80,7 @@ MVT_SOURCE = (REPO_ROOT / "services" / "tiles" / "mvt.py").read_text(encoding="u
 HYDRO_DISPLAY_SOURCE = (REPO_ROOT / "apps" / "api" / "routes" / "hydro_display_identity.py").read_text(
     encoding="utf-8"
 )
+MIGRATIONS_DIR = REPO_ROOT / "db" / "migrations"
 
 
 # The four authority resolutions, verbatim. Any switched surface that binds a
@@ -824,6 +825,39 @@ def test_coverage_scan_parameters_keep_their_text_semantics() -> None:
     header_sql = display_coverage._SCAN_HEADER_SQL
     for text_column in ("run_id", "basin_version_id", "river_network_version_id"):
         assert f"            {text_column},\n" in header_sql, text_column
+
+
+# ---------------------------------------------------------------------------
+# migration-chain index names the read path rides
+# ---------------------------------------------------------------------------
+
+
+def test_hydro_map_plan_fixture_names_indexes_that_the_migration_chain_creates() -> None:
+    """The two indexes the switched river read path rides are created by the migration chain.
+
+    The plan fixture this test once cross-checked was deleted with its lane (#3221); the
+    migration-chain half stays: the key-ordered fact index and core.river_segment's
+    surrogate-key unique constraint index must both be derivable from ``db/migrations``.
+    """
+    migrations = "\n".join(path.read_text(encoding="utf-8") for path in sorted(MIGRATIONS_DIR.glob("*.sql")))
+
+    # Index names the migration chain really produces: the ones it names
+    # explicitly, plus PostgreSQL's implicit `<table>_<column>_key` for each
+    # UNIQUE column the chain adds (the constraint index carries no name of
+    # its own in the SQL, so it has to be derived rather than grepped).
+    creatable = set(re.findall(r"CREATE (?:UNIQUE )?INDEX(?: CONCURRENTLY)?(?: IF NOT EXISTS)? (\w+)", migrations))
+    creatable |= {
+        f"{table}_{column}_key"
+        for _schema, table, column in re.findall(
+            r"ALTER TABLE\s+([a-z_]+)\.([a-z_]+)\s+ADD COLUMN IF NOT EXISTS\s+(\w+)"
+            r"\s+INTEGER GENERATED ALWAYS AS IDENTITY UNIQUE",
+            migrations,
+        )
+    }
+    assert "river_ts_selected_identity_key_valid_time_idx" in creatable
+    # The segment join rides core.river_segment's surrogate-key unique
+    # constraint, created by 000050's `... IDENTITY UNIQUE` column.
+    assert "river_segment_river_segment_key_key" in creatable
 
 
 # ---------------------------------------------------------------------------
