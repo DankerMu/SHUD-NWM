@@ -20,7 +20,7 @@
       "target": "Stage large decomposition of services/orchestrator/scheduler.py and services/orchestrator/chain.py"
     }
   ],
-  "commit": "1c07d766ff15",
+  "commit": "74e85e8d9f6c",
   "high_spread_patterns": [
     {
       "axis": "legacy/dead-code",
@@ -71,7 +71,7 @@
       "governance_faces": [
         "docs alignment"
       ],
-      "module_count": 18,
+      "module_count": 17,
       "modules": [
         "CLAUDE.md",
         "README.md",
@@ -88,12 +88,11 @@
         "openspec/qhh-latest-display-product",
         "openspec/qhh-latest-product-identity",
         "openspec/qhh-mvp-smoke-readiness",
-        "openspec/readonly-db-and-e2e-evidence",
         "openspec/single-map-shell-routing",
         "progress.md"
       ],
-      "occurrence_count": 123,
-      "occurrences": 123,
+      "occurrence_count": 122,
+      "occurrences": 122,
       "pattern": "stale-display-route-token",
       "roles": [
         "display_readonly"
@@ -127,35 +126,35 @@
       "node_modules",
       "openspec/changes/archive (stale-display-route-token only)"
     ],
-    "source_report_generated_at": "2026-11-19T15:51:37+00:00",
+    "source_report_generated_at": "2026-11-19T16:55:50+00:00",
     "source_report_mode": "report-only",
     "source_report_schema": "governance-4a.entropy-report.v1",
     "summary_counts": {
       "by_allowlist_state": {
-        "allowlisted": 211,
+        "allowlisted": 210,
         "unallowlisted": 37
       },
       "by_budget_count": {
         "budget_counted": 37,
-        "not_budget_counted": 211
+        "not_budget_counted": 210
       },
       "by_check_id": {
         "broad-e2e-api-mock": 14,
         "openapi-frontend-types-delegated": 1,
         "openapi-frontend-types-signal": 1,
         "placeholder-path-token": 109,
-        "stale-display-route-token": 123
+        "stale-display-route-token": 122
       },
       "by_gate_eligibility": {
         "gate_eligible": 0,
-        "not_gate_eligible": 248
+        "not_gate_eligible": 247
       },
       "by_priority": {
         "P2": 51,
-        "P3": 197
+        "P3": 196
       },
       "by_role": {
-        "display_readonly": 137,
+        "display_readonly": 136,
         "shared_contract": 111
       }
     }
@@ -575,29 +574,6 @@
         "score": "low"
       }
     },
-    "openspec/readonly-db-and-e2e-evidence": {
-      "behavior": {
-        "score": "low"
-      },
-      "context": {
-        "score": "low"
-      },
-      "control": {
-        "score": "low"
-      },
-      "file_count": 0,
-      "finding_count": 1,
-      "priority": "P3",
-      "protocol": {
-        "score": "low"
-      },
-      "semantics": {
-        "score": "low"
-      },
-      "structure": {
-        "score": "low"
-      }
-    },
     "openspec/single-map-shell-routing": {
       "behavior": {
         "score": "low"
@@ -723,14 +699,14 @@
     "budget_counted_count": 37,
     "check_family_count": 5,
     "gate_eligible_count": 0,
-    "governance_finding_count": 248,
+    "governance_finding_count": 247,
     "modules_with_high_entropy": 2,
     "overall_trend": "baseline",
     "total_instruction_files": 15,
-    "total_modules": 24,
-    "total_source_files": 4834,
+    "total_modules": 23,
+    "total_source_files": 4822,
     "total_test_files": 852
   },
-  "timestamp": "2026-11-19T15:51:17Z",
+  "timestamp": "2026-11-19T16:55:30Z",
   "version": 1
 }
