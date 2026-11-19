@@ -865,7 +865,8 @@ node-22 的回填深度是 `NHMS_SCHEDULER_LOOKBACK_HOURS + NHMS_SCHEDULER_CYCLE
 `range_end < MAX(cycle_time) - NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS` 的 chunk，
 其中 `MAX(cycle_time)` 是展示水位（`scripts/node27_timeseries_compression.py` 的
 `_classify`，生产 lag 172800 s = 48 h）。二者之和必须 ≤ 压缩 lag：生产取
-`LOOKBACK=32` + `LAG=16` = 48 h。旧值 96 + 16 = 112 h 时，新流域冷启动从 ~4.7 天前的
+`LOOKBACK=32` + `LAG=10` = 42 h，留 6 h 余量（#3225 把 lag 从 16 h 降到 10 h 之前二者之和恰等于
+48 h）。旧值 96 + 16 = 112 h 时，新流域冷启动从 ~4.7 天前的
 cycle 开始逐 cycle 追赶，旧 cycle 的河段时序落进已压缩 chunk，parser guard 以
 `OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED` 拒写，autopipe 每 tick 重试并 `rc=1`；同时全国径流
 图层按交集规则（`services/tiles/mvt.py::national_discharge_cycles`）在新河网追平前整体熄灭。
@@ -876,9 +877,11 @@ cycle 开始逐 cycle 追赶，旧 cycle 的河段时序落进已压缩 chunk，
 `state_snapshot_index_prior_checkpoint_missing_after_history` / `BLOCK_PREDECESSOR_PENDING`
 永久阻塞并占住该 source 的单一回填槽。先让追赶完成，再改值。
 
-代价：超过 48 h 的计算中断不再能由调度器自行补回（与 node-27 侧“超过 lag 的中断必须先
-解压”同一边界，见 `tier-node27-timeseries-storage.md` §4.3.2.1）。恢复时按该节先解压受影响
-chunk，再临时调大 `NHMS_SCHEDULER_LOOKBACK_HOURS` 覆盖中断跨度，追平后改回 32，并在追平前
+代价：超过 48 h 的计算中断不再能由调度器自行补回。窗口两端都按 cycle 小时（生产 `[0, 12]`）向下
+取整，`LOOKBACK=32` 实际跨 36 h，一个 cycle 从 `C + LAG` 进窗、在窗里停留 36 + 12 = 48 h，与 lag
+无关；中断开始后第一个进窗的 cycle 至少还能在窗里待 48 h。这个 48 h 与 node-27 侧“超过 lag 的中断
+必须先解压”的边界（见 `tier-node27-timeseries-storage.md` §4.3.2.1）同值，所以恢复时按该节先解压
+受影响 chunk，再临时调大 `NHMS_SCHEDULER_LOOKBACK_HOURS` 覆盖中断跨度，追平后改回 32，并在追平前
 保持 `nhms-node27-timeseries-compression.timer` 停止。
 
 #### 3.1.3 DB-free scheduler 的受支持回滚/前滚
