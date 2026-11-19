@@ -1,6 +1,6 @@
 """The governance workflow runs the entropy hard gate on every change (#2602).
 
-ci.yml's `backend` path filter skips both pytest jobs for docs-, openspec- and
+ci.yml's path filter used to skip pytest for docs-, openspec- and
 instructions-only changes, so the pytest node that asserts zero hard-gate
 findings never ran for exactly the changes most likely to introduce a
 production-topology finding. ``governance.yml`` has no path filter; a separate

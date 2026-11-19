@@ -162,13 +162,13 @@ def test_every_failed_shard_is_named_on_its_own_line() -> None:
 
 
 def test_all_shards_success_passes_with_a_notice() -> None:
-    assert len(_shard_names()) == 4
+    assert len(_shard_names()) == 6
 
     code, line = watch.check_run(_run_api(_shards()), REPO, RUN_ID)
 
     assert code == 0
     assert line.startswith("::notice title=Unit Tests (full) success::sha=abc123")
-    assert line.endswith("shards=4")
+    assert line.endswith("shards=6")
 
 
 def test_a_single_success_job_under_the_old_name_is_not_the_full_regression() -> None:
@@ -193,7 +193,7 @@ def test_missing_shard_fails_naming_it() -> None:
 
 
 @pytest.mark.parametrize(
-    "renamed", ["Unit Tests (full) (shard 2)", "Unit Tests (full) (5)", "Unit Tests (full) (2, 3.11)"]
+    "renamed", ["Unit Tests (full) (shard 2)", "Unit Tests (full) (7)", "Unit Tests (full) (2, 3.11)"]
 )
 def test_renamed_or_undeclared_shard_job_fails(renamed: str) -> None:
     jobs = _shards()
@@ -267,7 +267,7 @@ def test_skipped_shards_with_one_missing_fail_naming_the_missing_shard() -> None
     code, line = watch.check_run(_run_api(jobs), REPO, RUN_ID)
 
     assert code == 1
-    assert "missing=Unit Tests (full) (4)" in line
+    assert "missing=Unit Tests (full) (6)" in line
 
 
 def test_absent_full_job_fails_as_broken_wiring() -> None:
@@ -444,9 +444,9 @@ def test_margin_respects_the_api_call_cap_and_reports_n() -> None:
     assert capped.calls == watch.API_CALL_CAP == 60
     assert "cap of 60" in note
     # A run whose last shard failed is not a successful run: no shard of it is sampled.
-    assert [len(durations) for durations in per_shard.values()] == [(60 - 2) // 5] * 4
+    assert [len(durations) for durations in per_shard.values()] == [(60 - 2) // 5] * 6
     lines = watch.margin_lines(per_shard, 60, note)
-    assert len(lines) == 4
+    assert len(lines) == 6
     for name, line in zip(_shard_names(), lines, strict=True):
         assert line.startswith(f"::warning title={name} margin::P95=")
         assert f"(n={(60 - 2) // 5})" in line and "cap of 60" in line
@@ -466,7 +466,7 @@ def test_margin_ignores_runs_that_carry_the_old_single_job() -> None:
         assert durations == pytest.approx([10 + run_id / 100 for run_id in odd_runs])
     text = watch.margin(watch.CappedFetch(api), REPO, 30, datetime(2026, 10, 1, tzinfo=UTC))
     assert all(line.startswith("::notice ") and "(n=20)" in line for line in text.splitlines())
-    assert len(text.splitlines()) == 4
+    assert len(text.splitlines()) == 6
 
 
 def test_margin_with_only_unsharded_runs_reports_no_successful_runs() -> None:
@@ -489,6 +489,8 @@ def test_margin_warns_for_the_one_shard_whose_p95_exceeds_80_percent_of_the_shar
         "::notice title=Unit Tests (full) (2)",
         "::warning title=Unit Tests (full) (3)",
         "::notice title=Unit Tests (full) (4)",
+        "::notice title=Unit Tests (full) (5)",
+        "::notice title=Unit Tests (full) (6)",
     }
     assert "> 80% of 30min (n=20)" in kinds["::warning title=Unit Tests (full) (3)"]
 
@@ -542,7 +544,7 @@ def test_shard_names_are_read_from_the_ci_matrix() -> None:
     assert list(job["strategy"]["matrix"]) == ["shard"]
     assert type(job["timeout-minutes"]) is int
     assert watch.full_job_shard_names() == _shard_names()
-    assert watch.full_job_shard_names() == tuple(f"Unit Tests (full) ({value})" for value in (1, 2, 3, 4))
+    assert watch.full_job_shard_names() == tuple(f"Unit Tests (full) ({value})" for value in (1, 2, 3, 4, 5, 6))
 
 
 def _ci_copy(tmp_path: Path, mutate: Any) -> Path:

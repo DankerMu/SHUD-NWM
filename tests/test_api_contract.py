@@ -11,12 +11,9 @@ rather than route behaviour through a client:
 - the display layer catalog / tile control plane and its static-vs-runtime
   no-drift comparisons.
 
-The path is deliberately retained rather than renamed: `openapi/**` selection,
-`PRECIP_SURFACE_TESTS`, the `services/tiles/mvt.py` and
-`apps/api/routes/hydro_display*.py` `PathTestRule` entries, the
-`apps/api/routes/hydro_display_catalog.py` row of `GUARDED_MODULE_CLOSURES` and
-`openspec/specs/api-contract-convergence/spec.md` all pin this literal string,
-and this partition is the one that keeps the assertions each of them names.
+The path is deliberately retained rather than renamed:
+`openspec/specs/api-contract-convergence/spec.md` pins this literal string, and
+this partition is the one that keeps the assertions it names.
 
 Route-behaviour cases live in `tests/test_api_contract_pipeline_ops.py` and
 `tests/test_api_contract_resources.py`; the shared doubles live in
@@ -42,7 +39,7 @@ from tests.api_contract_helpers import (
 )
 
 # The exact pinned openapi-typescript package for the generated-type byte
-# comparison. Runs via `npx --yes <exact-pin>` so the hosted targeted Unit Tests
+# comparison. Runs via `npx --yes <exact-pin>` so the hosted Unit Tests (full)
 # job (no pnpm install) can resolve it without a local node_modules.
 OPENAPI_TYPESCRIPT_PACKAGE = "openapi-typescript@7.13.0"
 

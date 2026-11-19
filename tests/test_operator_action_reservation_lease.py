@@ -16,9 +16,7 @@ writer) is an orphan, ordered by ``reserved_at`` against the newest evaluating
 and scope-complete pass's payload ``started_at`` -- NEVER by file mtimes, which
 the heartbeat now moves.
 
-Every ``services.*`` / ``tests.*`` import is function-local on purpose: this file
-must not join the frozen top-level importer set of
-``tests.test_production_scheduler`` (``tests/test_select_ci_tests.py``).
+Every ``services.*`` / ``tests.*`` import is function-local.
 """
 
 from __future__ import annotations

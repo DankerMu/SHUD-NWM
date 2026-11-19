@@ -1205,9 +1205,8 @@ def test_the_migration_side_of_the_allow_list_is_exactly_what_the_tree_derives()
     exit 3 on a perfectly legitimate catalog. This derivation is what moves
     that failure to development time: it re-reads `db/migrations/**` and
     requires every function those migrations put into a swept expression to be
-    allow-listed already. `scripts/select_ci_tests.py` carries the
-    `db/migrations/*.sql` -> this suite row that makes the PR-scoped selector
-    run it (`db/**` alone only buys tests/test_migrations.py).
+    allow-listed already. A migration PR runs it as part of the full pytest
+    suite.
 
     Scope matches the sweep exactly: `DEFAULT`, `CHECK (...)`,
     `GENERATED ALWAYS AS (...)`, `EXECUTE FUNCTION`, plus `SERIAL`/`BIGSERIAL`

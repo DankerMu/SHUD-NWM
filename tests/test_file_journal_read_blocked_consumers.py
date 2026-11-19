@@ -15,11 +15,6 @@ answer about the work.  Each consumer owes the row exactly one of two
 treatments -- refuse with the lane's classified error carrying the journal
 ``reason``/``field``, or degrade to the lane's "no evidence" value and log that
 ``reason``/``field``.
-
-Every import is function-local on purpose.  ``scripts/select_ci_tests`` derives
-its importer index from module-level statements only, so a top-level journal or
-chain import here would enlarge that index; this module is routed by explicit
-rules instead (see ``tests/test_select_ci_tests.py``).
 """
 
 from __future__ import annotations

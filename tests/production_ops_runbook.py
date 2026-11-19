@@ -10,8 +10,7 @@ introduce, so the surface set lives in one owner instead of being re-derived by
 each reader.
 
 The filename deliberately does not start with ``test_``: pytest must not
-collect it, and ``scripts/select_ci_tests.py`` routes it through
-``SUPPORT_MODULE_TEST_RULES`` rather than the ``tests/**`` suite branch.
+collect it.
 """
 
 from __future__ import annotations

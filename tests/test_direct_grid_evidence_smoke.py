@@ -23,10 +23,8 @@ at test-body time is a second layer. Do NOT hoist _gate_or_skip() to module
 scope or a session fixture without also verifying that conftest's marker
 auto-skip still runs first.
 
-CI scope note: this file lives under tests/**, which triggers the CI backend
-paths-filter. The targeted-selection fallback in scripts/select_ci_tests.py
-runs `pytest -q` against this file, which collect + immediate-skip via the
-marker auto-skip — expected and cheap.
+CI scope note: the full unit job deselects this file's marker, so CI only
+collects it — expected and cheap.
 
 See openspec/changes/cmfd-direct-grid-platform-readiness/evidence/synthetic-package/README.md
 for the package this smoke consumes.

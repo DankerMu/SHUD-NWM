@@ -40,9 +40,9 @@ precedent probe ``scripts/node22_refresh_timer_health.py`` (OpenSpec change
   ``services/orchestrator/scheduler_evidence.py``.  The duplication is pinned
   by a parity test that asserts the constants themselves (a predicate later
   narrowed to a stricter name shape would still classify any fixed sample of
-  names alike while this copy silently grew permissive), and that test is
-  routed in ``scripts/select_ci_tests.py`` so it runs on the very diff that
-  could break parity.
+  names alike while this copy silently grew permissive), and that test runs
+  in the full pytest suite of every PR, so it runs on the very diff that could
+  break parity.
 
 Liveness comes from systemd, never from artifact age.  A healthy pass on this
 lane has been measured at 193 minutes, so the newest completed artifact's age
@@ -132,8 +132,8 @@ MAX_TRACKER_BYTES = 4 * 1024 * 1024
 # and anything added after this list was written -- is in-flight.  The probe
 # claims to watch "is the frontier advancing", so its predicate must be the
 # scheduler's own and not a second opinion.  A parity test pins this literal to
-# that set and `scripts/select_ci_tests.py` routes `scheduler_runtime.py` to
-# it, so drift reds on the diff that causes it.
+# that set and runs in every PR's full pytest suite, so drift reds on the diff
+# that causes it.
 TERMINAL_SKIP_REASONS = frozenset(
     {
         "completed_duplicate_pipeline",
@@ -402,8 +402,7 @@ STATUS_RESOURCE_LIMIT_BLOCKED = "resource_limit_blocked"
 STATUS_LOCK_CONTENDED = "lock_contended"
 #: The `execution_boundary` the DB-free pre-lock root preflight writes
 #: (`services/orchestrator/scheduler_runtime.py`).  A literal copy, pinned to
-#: the writer's source by a parity test that `scripts/select_ci_tests.py`
-#: routes from that module.
+#: the writer's source by a parity test.
 ROOT_BLOCKED_EXECUTION_BOUNDARY = "scheduler_root_preflight_blocked"
 #: Every guard-less pre-candidate ``preflight_blocked`` boundary whose artifact
 #: lands, mapped to the verdict of its remedy class (issue #2969).  These

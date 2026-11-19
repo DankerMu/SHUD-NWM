@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Partition the test files of the master full regression into shards (#2710).
+"""Partition the test files of the full regression into shards (#2710).
 
-``Unit Tests (full)`` runs as a matrix in ``.github/workflows/ci.yml``; each
-matrix job runs the files this script prints for its shard::
+``Unit Tests (full)`` runs as a matrix in ``.github/workflows/ci.yml`` on pull
+requests and master pushes; each matrix job runs the files this script prints
+for its shard::
 
-    python scripts/ci/shard_tests.py --shard 2 --total 4 > shard-files.txt
+    python scripts/ci/shard_tests.py --shard 2 --total 6 > shard-files.txt
 
 The file set is listed from disk at run time with pytest's own collection rule
 (``testpaths`` / ``python_files`` / ``norecursedirs`` of ``pyproject.toml``,

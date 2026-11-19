@@ -10,8 +10,7 @@ redden any test.
 This pin reads the writer sources as TEXT and parses them with ``ast``.  It
 never imports them -- the listing surface is db-free and importer-free on
 purpose (``operator_action_listing`` imports two names from the scheduler
-package and nothing else), and importing the writers from here would also add
-importer pairs to the CI selector's directory rules.  Same shape as the A1
+package and nothing else).  Same shape as the A1
 decision closure in ``tests/test_operator_action_listing.py``.
 
 WHAT THIS PIN COVERS (set membership, both directions):

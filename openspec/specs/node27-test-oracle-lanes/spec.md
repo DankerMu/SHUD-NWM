@@ -5,17 +5,6 @@ Keep node-27 test oracles honest. Oversized suites are split without changing wh
 
 ## Requirements
 
-### Requirement: Oversized test suites are split without changing the collected set
-The three test files `tests/test_mvt_national_identity_probe_integration.py`, `tests/test_river_ts_read_path_surrogate_keys_integration.py` and `tests/test_node27_mvt_cache_retention.py` SHALL be split into files that are each under 1000 lines. `.large-file-guard.json` SHALL NOT exempt them. The set of collected test node suffixes, markers and skip outcomes SHALL be identical before and after the split.
-
-#### Scenario: Collect-only parity
-- **WHEN** `pytest --collect-only -q` runs on master and on the split branch, in the default configuration, with integration enabled, and with `-m integration`
-- **THEN** the multiset of `::<name>[params]` node suffixes is identical in every configuration
-
-#### Scenario: Selector still routes every part
-- **WHEN** a change touches an owner path that previously selected one of the split files
-- **THEN** the CI test selector selects every file split from it, and the PR-lane exclusion of the national identity probe applies to every part
-
 ### Requirement: Real-disk forcing suite derives its cycle from the live store
 `tests/test_object_store_forcing_real_disk.py` SHALL select, at run time, the newest cycle for which all four basin/source combinations are present in `OBJECT_STORE_ROOT`. A combination SHALL be resolved per cycle from the store and the database, not named in the suite: its model is the single `dg_*` directory of that basin version and source in the cycle, and its station is one that `met.interp_weight` holds for that model and whose forcing file exists in the cycle. Every time the suite asserts SHALL be derived from that cycle. When no such cycle exists, the suite SHALL fail with an explicit diagnostic rather than skip.
 
@@ -75,3 +64,10 @@ Every test carrying `@pytest.mark.grib` SHALL read at least one GRIB2 payload th
 #### Scenario: macOS host with a symlinked `/home`
 - **WHEN** `test_cli_configured_paths_and_duplicate_device_labels` runs on a host where `/home` resolves to `/System/Volumes/Data/home`
 - **THEN** all three parameters pass and the home filesystem still shares the working-set device identity
+
+### Requirement: Oversized test suites SHALL be split without changing the collected set
+The three test files `tests/test_mvt_national_identity_probe_integration.py`, `tests/test_river_ts_read_path_surrogate_keys_integration.py` and `tests/test_node27_mvt_cache_retention.py` SHALL be split into files that are each under 1000 lines. `.large-file-guard.json` SHALL NOT exempt them. The set of collected test node suffixes, markers and skip outcomes SHALL be identical before and after the split.
+
+#### Scenario: Collect-only parity
+- **WHEN** `pytest --collect-only -q` runs on master and on the split branch, in the default configuration, with integration enabled, and with `-m integration`
+- **THEN** the multiset of `::<name>[params]` node suffixes is identical in every configuration

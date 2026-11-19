@@ -51,9 +51,8 @@ producer/binder 成功不代替它，也不代替独立的生产部署证明。
     receipt 仍须在 node-27 实机产出，是上线的实质；m25 交付的是"功能在代码层就绪"，不等于"已在 27 实机验证上线"。
   - 可扩展性（新流域零代码改动出现）已有真 DB 集成断言（`tests/test_real_basin_discovery_integration.py`），但其作为上线 receipt 仍以 node-27
     cross-plane live（C3）为准。
-- **CI**：纯前端/docs 子 PR 按路径 scope 跳过后端 pytest；迭代标
-  **draft**（定向快速通道）、合并前转 **ready**（全量门）。约定见
-  `CLAUDE.md`「CI 范围与门控」。
+- **CI**：只改 `apps/frontend/**` 的子 PR 跳过后端 pytest，其余 PR（含纯 docs）都跑全量分片 pytest；
+  真实 DB dry run 在 PR 上要求非 draft。约定见 `CLAUDE.md`「CI 门控要点」。
 
 ### M26 统一地图展示（2026-06-07，EPIC #336 已关闭）
 

@@ -27,17 +27,9 @@ Round-1 cross-review found the first version of this oracle silently broken:
 its ``(\\s*SELECT`` probe also matched CTE openers (``x AS (SELECT ...)``) and
 derived tables, so it deleted whole query bodies and five negative pins went
 green against unswitched master source. An oracle that nothing tests is not an
-oracle. It therefore lives here as ``test_*.py`` so that:
-
-* the full-suite run collects its self-tests (a plain ``sql_shape_helpers.py``
-  matches neither ``python_files`` pattern and would never run in ``pytest
-  tests/``), and
-* a change to it self-selects in ``scripts/select_ci_tests.py`` and exits 0
-  with real assertions instead of exit-5 "no tests ran".
-
-Its three consumer test files are additionally mapped in that script's
-``CHANGED_TEST_FILE_RULES``, so a helper-only diff still runs the pins that
-depend on it.
+oracle. It therefore lives here as ``test_*.py`` so that the full-suite run
+collects its self-tests (a plain ``sql_shape_helpers.py`` matches neither
+``python_files`` pattern and would never run in ``pytest tests/``).
 
 Stripping rule
 --------------

@@ -7159,10 +7159,7 @@ def test_plan_author_rejects_relative_paths_for_every_guarded_label(label: str) 
 # --------------------------------------------------------------------------- #
 
 # The predicate is exercised through the verifier module's by-name binding rather than
-# through a direct `node27_container_contract` import: this suite is the pinned
-# TRANSITIVE-ONLY member of the contract's CI dependent closure
-# (tests/test_select_ci_tests.py's anti-vacuity floor), so a direct import line here
-# would quietly demote that floor to a grep-findable one.  The binding is the same
+# through a direct `node27_container_contract` import.  The binding is the same
 # function object either way, and the drift guard below asserts both gate planes hold
 # exactly that object.
 

@@ -712,9 +712,9 @@ ORDER BY 1, 2, 3;
 -- is untrusted.  The list must be EXTENDED when a migration starts
 -- referencing a new function, and that is test-enforced:
 -- tests/test_node27_write_roles.py re-derives the migration-side set from
--- db/migrations/**, and scripts/select_ci_tests.py maps db/migrations/*.sql (at
--- any depth) to that suite, so a new reference reddens a unit test on the
--- migration's own PR rather than the live audit on node-27.
+-- db/migrations/** (at any depth), and the PR runs the full pytest suite, so a
+-- new reference reddens a unit test on the migration's own PR rather than the
+-- live audit on node-27.
 --
 -- Ten entries today, all derived.  T7's first `--roles-only` run against the
 -- PRODUCTION catalog (the receipt read `138 expression(s)/trigger(s) scanned,

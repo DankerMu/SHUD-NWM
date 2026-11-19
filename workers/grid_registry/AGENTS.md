@@ -85,7 +85,7 @@ openspec validate --all --strict --no-interactive
 ```
 
 For input-record, writer, drift, stability, eligibility, or bbox changes, run
-the focused set (the directory has no selector rule):
+the focused set:
 
 ```bash
 uv run pytest -q tests/test_grid_drift_lifecycle.py tests/test_grid_stability_verification.py tests/test_shared_binding_eligibility.py tests/test_grid_registry_bbox.py

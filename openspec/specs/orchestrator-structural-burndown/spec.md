@@ -3,9 +3,7 @@
 ## Purpose
 Keep the orchestrator, scheduler and test corpora below the 1,000-line structural guard by splitting
 oversized modules and test files without behaviour drift: extractions preserve mutation fences, patch
-seams and CLI facades, and every physically partitioned test corpus stays complete against a frozen,
-tracked oracle whose only change channels are audited ledgers (additions, retirements) and named
-transitions, never a re-capture.
+seams and CLI facades, and every physically partitioned test corpus keeps its collection identity.
 
 ## Requirements
 
@@ -314,42 +312,6 @@ large-file guard, and no replacement module SHALL receive an exclusion.
   `path_modes.py` or `db_free.py` makes that test fail before the mutation is
   reverted.
 
-### Requirement: Retention tests remain complete under physical partitioning
-
-The repository SHALL partition the retention pytest corpus into four collectible
-modules and at most one non-collectible local helper whose individual line counts
-are below 1,000, without adding a guard exclusion or retaining a collectible
-compatibility shim. Every pre-partition case SHALL be collected exactly once after
-partitioning: the module prefix may change, but all 120 unique
-`::test_name[param-id]` suffixes, test bodies, decorators, fixtures, parameter
-values/IDs, monkeypatch targets, and assertion oracles MUST remain equivalent.
-`tests/test_retention.py` SHALL remain the same-name suite for the production
-retention owner.
-
-#### Scenario: collection identity and oracles are preserved one-to-one
-
-- **WHEN** the original monolith and all four post-partition files are collected
-- **THEN** each side yields exactly 120 unique suffixes after the first `::`, their
-  sorted suffix files are byte-identical, and every original test body/decorator
-  fingerprint maps to exactly one post-partition definition
-- **AND** running the four files passes all 120 cases without changed assertions,
-  skips, duplicates, production-source modifications, or helper collection.
-
-#### Scenario: targeted CI owns every retention partition
-
-- **WHEN** targeted selection runs for `services/orchestrator/retention.py`
-- **THEN** all four retention partitions and the previously selected independent
-  retention-frontier suite are present
-- **AND** removing any partition from the owner route makes the selector contract
-  test fail.
-
-#### Scenario: the final exception is removed without replacement
-
-- **WHEN** line counts and `.large-file-guard.json` are evaluated after partitioning
-- **THEN** every collectible/helper file is below 1,000 lines,
-  `tests/test_retention.py` is absent from exclusions, no replacement exclusion is
-  added, and every unrelated exclusion and the threshold remain unchanged.
-
 ### Requirement: Basins package facade split preserves runtime and artifact contracts
 
 The repository SHALL split `workers.model_registry.basins_package` into the six
@@ -474,294 +436,6 @@ provenance and pin the two exact replacement hashes plus all unchanged hashes.
   exclusion exists, the guard digest is unchanged, and a normal verified commit passes
   the hook.
 
-### Requirement: Basins package publication tests remain complete under physical partitioning
-
-The repository SHALL retain every case from the frozen Basins package publication baseline
-while extending the current corpus to exactly seven collectible modules and one
-non-collectible helper, each below 1,000 lines, without changing
-`.large-file-guard.json` or retaining a collectible compatibility shim. The six original
-partitions SHALL still contain all 88 unique baseline `::test_name[param-id]` suffixes and
-all 80 normalized baseline test bodies, decorators, fixture arguments, parameter values/IDs,
-assertions, skips and monkeypatch targets exactly once. The seventh owner,
-`tests/test_basins_package_publication_rivseg.py`, SHALL contain only additive issue #1903
-mapping tests and SHALL import `tests.basins_package_helpers` at module scope.
-
-#### Scenario: frozen collection identity and additive tests are both preserved
-
-- **WHEN** the baseline monolith, the six baseline partitions, and the seven current suites
-  are collected and fingerprinted
-- **THEN** the six baseline owners yield exactly the frozen 88 unique suffixes and 80
-  one-to-one normalized definitions without dropped, duplicated, renamed or weakened cases
-- **AND** the seventh owner collects the finite issue #1903 scenario matrix exactly once
-- **AND** executing all seven files preserves the baseline pass/skip semantics and adds real
-  mapping assertions
-- **AND** `tests/basins_package_helpers.py` collects no tests.
-
-#### Scenario: production-owner selection reaches every publication partition
-
-- **WHEN** targeted selection runs for a changed file under `workers/model_registry/**`
-- **THEN** all seven publication partitions remain in the existing model-registry owner set
-  alongside its prior consumers
-- **AND** removing any one of the seven partition edges—including retained core, which is
-  not same-name-derived from the production owner—makes the selector contract RED before
-  the edge is restored.
-
-#### Scenario: helper-only selection reaches every consumer
-
-- **WHEN** only `tests/basins_package_helpers.py` changes
-- **THEN** targeted selection includes exactly all seven publication partitions and
-  `tests/test_basins_package.py`, plus the selector's existing meta-guard rider
-- **AND** each collectible partition imports the helper at module scope and the historical
-  sibling helper import remains valid
-- **AND** deleting any of the eight required helper-consumer edges makes the selector
-  contract RED.
-
-#### Scenario: structural guard and current validation commands match the extended layout
-
-- **WHEN** the eight Python outputs, root/child current validation matrices, guard
-  configuration and documentation authority are evaluated
-- **THEN** every changed/new text source is strictly below 1,000 lines, the guard threshold
-  and exclusion list are byte-identical, and an ordinary commit passes the hook
-- **AND** the heading-bounded baseline M10 #147–#152 family remains under
-  `docs/validation/production-closure.md`, with documentation changes limited to retargeting
-  current publication commands to seven suites and the existing moved self-lint paths
-- **AND** all six original root heading texts and anchor slugs remain byte-identical as links
-  resolving to matching child headings, both post-split documentation files remain below
-  1,000 lines, and both paths remain current validation authority
-- **AND** the live M9 closeout, #148 regression and opt-in Basins smoke commands execute all
-  seven suites, the moved real-smoke node still runs, and historical M9 result bullets plus
-  archived evidence remain unchanged
-- **AND** the structural diff changes no frozen baseline test definition, production
-  database filter, or unrelated #1912 owner contract.
-
-### Requirement: QHH production-bootstrap tests remain complete under physical partitioning
-
-The repository SHALL partition the QHH production-bootstrap pytest corpus into exactly
-three collectible modules and one non-collectible helper whose individual line counts are
-below 1,000, without changing `.large-file-guard.json` or retaining a collectible
-compatibility shim. Every baseline case SHALL be collected exactly once after partitioning:
-module prefixes may change, but all 66 unique `::test_name[param-id]` suffixes, all 50 test
-definitions and all 12 support functions plus four constants MUST remain equivalent.
-
-#### Scenario: collection identity and test oracles are preserved one-to-one
-
-- **WHEN** the baseline monolith and all three post-partition suites are collected and
-  fingerprinted
-- **THEN** each side yields exactly 66 unique identical sorted node suffixes, 50 one-to-one
-  test definitions and 16 one-to-one helper members
-- **AND** executing the three files preserves 55 passed / 11 skipped default semantics and
-  55 passed / 11 deselected non-integration semantics without dropped, duplicated, renamed
-  or weakened cases
-- **AND** `tests/qhh_production_bootstrap_helpers.py` collects no tests, its fixture symbol is
-  imported directly at scheduler-owner module scope, and removing that import constructs a
-  fixture-not-found RED before the import is restored.
-
-#### Scenario: historical BUG-008 command remains biting
-
-- **WHEN** BUG-008's three-file `-k output_segment_count` command is executed after the
-  partition
-- **THEN** it passes exactly eight nodes with QHH / registry / production-scheduler
-  ownership 5 / 2 / 1
-- **AND** the historical QHH path remains a real suite owning all five QHH suffixes rather
-  than a compatibility shim or zero-collection placeholder
-- **AND** the ledger command and historical evidence remain byte-identical.
-
-#### Scenario: production-owner and helper-only selection reach every partition
-
-- **WHEN** targeted selection runs for a changed model-registry production owner
-- **THEN** all three QHH bootstrap partitions remain in the existing owner set alongside
-  every prior consumer
-- **AND** removing any one of the three edges with a non-same-name probe makes the selector
-  contract RED before the edge is restored
-- **AND** a helper-only change selects exactly the three module-scope consumers plus the
-  existing selector meta rider, and deleting any helper edge makes RED.
-
-#### Scenario: integration ownership remains bound to the real-database lane
-
-- **WHEN** integration markers and the CI `database:` block are evaluated after partitioning
-- **THEN** all eleven integration nodes remain together in
-  `tests/test_qhh_production_bootstrap_scheduler.py`, while retained/state owners contain
-  none
-- **AND** the historical database literal is replaced by the scheduler owner and the
-  DB-support helper is a second exact database trigger, while retained/state owners are absent
-- **AND** a helper-only diff opens the real-database job rather than merely selecting tests
-  that skip without the integration environment
-- **AND** deleting either scheduler/helper exact edge leaves no surviving exact or glob
-  pattern that matches that path
-- **AND** neither chosen filename contains `integration`, so existing integration globs
-  cannot rescue either required exact edge
-- **AND** frozen-final-SHA node-27 evidence executes all eleven nodes as PASSED in an
-  isolated temporary database and cleans it without production DB/display mutation.
-
-#### Scenario: structural guard and current commands match the new layout
-
-- **WHEN** the four Python outputs, guard configuration and current scheduler compatibility
-  commands are evaluated
-- **THEN** every output is strictly below 1,000 lines, the baseline guard blob retains its
-  frozen digest, the guard stays outside the #1948 PR-visible change set, its active
-  threshold remains 1,000, no QHH replacement exclusion exists, and an ordinary commit
-  passes the wired hook
-- **AND** each current focused command names the actual owner and collects at least one
-  intended node
-- **AND** the structural diff contains no production code, registry split, BUG-008 history,
-  archived evidence or #1903 behavior.
-
-### Requirement: Basins registry-import tests remain complete under physical partitioning
-
-The repository SHALL keep the Basins registry-import pytest corpus at exactly seven
-collectible modules and one non-collectible helper whose individual line counts are below
-1,000, without changing `.large-file-guard.json` or retaining a collectible compatibility
-shim. Every case in the frozen `3c29698f…` baseline SHALL remain collected exactly once: all
-96 unique `::test_name[param-id]` suffixes and all 94 test definitions, decorators, fixture
-arguments, parameter values/IDs, assertions, skips, markers, and monkeypatch targets remain
-equivalent, except definitions retired or rewritten through the tracked retirements ledger
-`tests/fixtures/basins_registry_partition_retirements.json` (#2907). That ledger SHALL be the only
-channel for removing or rewriting a frozen definition: the oracle file stays byte-identical, and every
-guard compares the tree against the frozen oracle with the retirements ledger applied (a retired
-definition and all of its frozen nodes removed, a rewritten definition compared against its ledgered
-row with its frozen nodes and markers unchanged) and then united with the #2183 additions ledger.
-
-The helper SHALL retain its exact 19-function, one-class, four-constant member inventory.
-Issue #1903 may change only `_make_valid_model`'s `.sp.rivseg` synthetic row construction so
-the declared segment block is complete and distributes rows deterministically over actual
-reach IDs. That transition SHALL be independently bound to the merge-base
-`27dc6aab…` helper blob. The tracked partition oracle may update only the
-`_make_valid_model` source/AST row, helper aggregate/self digests, and explicit transition
-metadata; every test-definition, owner, marker, consumer-route, database-authority, count,
-and execution row remains frozen. A self-consistent whole-helper recapture without the
-before-blob allowlist SHALL fail.
-
-#### Scenario: Collection identity and test oracles are preserved one-to-one
-
-- **WHEN** the baseline monolith and all seven post-partition suites are collected,
-  fingerprinted, and executed without integration opt-in
-- **THEN** the baseline yields exactly 96 unique sorted node suffixes and 94 normalized test
-  definitions, with the retained core, parser, CLI, security, auth, DB, and QHH owners holding 18,
-  13, 5, 20, 11, 5, and 22 test functions, and the post-partition side yields exactly that frozen set
-  minus the ledgered retirements and united with the additions ledger, one-to-one (after #2907: 92
-  suffixes, 90 definitions, QHH 18 functions, every other owner unchanged)
-- **AND** default execution yields the frozen 78 passed and 18 skipped, and non-integration
-  execution the frozen 78 passed, one skipped, and 17 deselected, each adjusted by the ledgered
-  retirements (a retired non-integration node leaves `passed`, a retired integration node leaves
-  `skipped` or `deselected`) and by the additions ledger (after #2907: 77 passed / 15 skipped and
-  77 passed / 1 skipped / 14 deselected); the helper collects no tests
-- **AND** the retained-core BUG-008 command passes exactly the two `output_segment_count`
-  cases, and no retirement may name a retained-core definition
-- **AND** effective counts are derived from the frozen oracle and the two ledgers, never restated
-  as free literals, and frozen digests are compared on the reconstructed frozen set (observed minus
-  additions, with ledgered retired entries restored).
-
-#### Scenario: Registry helper transition is independently bounded
-
-- **WHEN** the current helper is compared to its merge-base `27dc6aab…` blob member by member
-- **THEN** the same 19 functions, one class and four constants exist
-- **AND** only `_make_valid_model` differs, only its `.sp.rivseg` row construction changes,
-  and its signature, `.sp.riv` construction, shapefile construction, forcing fixture, and
-  all other statements remain equivalent
-- **AND** deleting the transition allowlist, changing another helper member, or regenerating
-  every oracle digest around an unrelated helper mutation makes the proof RED.
-
-#### Scenario: Helper ownership and two-level QHH consumption remain explicit
-
-- **WHEN** imports of `tests/basins_registry_import_helpers.py` are derived from tracked
-  module ASTs
-- **THEN** the seven registry owners and the four publish-registry partitions
-  `tests/test_publish_registry_{calibration_overrides,package_contexts,radiation_repair,refresh_lane}.py`
-  are its eleven direct collectible importers
-- **AND** `tests/qhh_production_bootstrap_helpers.py` and `tests/publish_registry_helpers.py` are its
-  only non-collectible support importers, while QHH-bootstrap A, B, and C import that QHH helper rather than the registry
-  helper directly
-- **AND** the two D-to-registry imports remain the only QHH-helper transition, with all QHH
-  rows, 66 nodes, owners, markers, and execution summaries unchanged and the QHH oracle
-  self-digest valid
-- **AND** no collectible registry suite remains imported as a support module.
-
-#### Scenario: Helper-only and production-owner selection reach every required suite
-
-- **WHEN** only `tests/basins_registry_import_helpers.py` changes
-- **THEN** targeted selection includes exactly the eight direct collectible importers plus
-  all three QHH-bootstrap suites and the selector's existing meta-guard rider
-- **AND** deleting any one of the eleven routed suite edges makes that suite absent before
-  the edge is restored
-- **WHEN** targeted selection runs for a changed `workers/model_registry/**` production file
-  whose same-name derivation cannot supply a registry partition
-- **THEN** all seven registry partitions remain in the existing model-registry owner set
-  alongside all unrelated baseline targets
-- **AND** removing any one of the seven registry-owner edges makes the contract RED without
-  being rescued by same-name derivation.
-
-#### Scenario: Integration markers remain bound to the exact combined database authority
-
-- **WHEN** the frozen 17 registry integration suffixes, minus the ledgered retired integration
-  nodes, and the CI `database:` block are evaluated
-- **THEN** the frozen map of five auth cases to `tests/test_basins_registry_import_auth.py`, five
-  DB cases to `tests/test_basins_registry_import_db.py`, and seven QHH/crosswalk cases to
-  `tests/test_basins_registry_import_qhh.py` holds after subtracting the ledgered retirements
-  (after #2907: 5 / 5 / 4)
-- **AND** the exact relevant database authority is the six registry paths for helper, core,
-  auth, DB, QHH, and reingest united with the QHH helper and scheduler-owner paths
-- **AND** parser, CLI, security, and QHH-bootstrap A/B paths are absent, and no broad registry
-  glob substitutes for an exact path
-- **AND** removing any one of the eight exact paths leaves that path unmatched while the
-  other seven remain matched and unrelated future database patterns remain permitted.
-
-#### Scenario: Node-27 executes all affected integration cases rather than skipping them
-
-- **WHEN** the frozen final SHA is checked on node-27 with integration enabled against an
-  isolated temporary database derived from node-27's local PostgreSQL `:55432`
-- **THEN** the combined registry auth/DB/QHH and QHH-bootstrap scheduler selection contains
-  exactly 28 nodes minus the ledgered retired integration nodes
-- **AND** every remaining node except the real-Basins smoke reports PASSED, including every
-  non-retired registry-QHH node, the ledgered rewrite
-  `test_registry_import_creates_idempotent_inactive_rows` and all eleven QHH-bootstrap nodes, while only the explicitly disabled real-Basins import smoke reports
-  SKIPPED
-- **AND** the temporary database and role are removed, production DB/display identity is
-  unchanged, no real-Basins ingest gate is enabled for this combined selection, and no credential
-  enters public evidence
-- **AND** a ledgered rewrite of the real-Basins smoke is proven by a separate run of that single
-  test on the same SHA and isolated database with the real-Basins gate enabled and `data/Basins`
-  provided read-only, which reports it PASSED
-- **AND** node-22 is not accessed for this database proof and remains DB-free.
-
-#### Scenario: Structural guard and current commands match the maintained layout
-
-- **WHEN** the eight registry test/helper outputs, selector routes, database filter, current
-  validation commands, controlled helper transition and guard configuration are evaluated
-- **THEN** every registry test/helper file is strictly below 1,000 lines, the guard remains
-  enabled at 1,000 lines with no registry exclusion, and the issue change set contains no
-  guard edit
-- **AND** an ordinary commit passes the wired hook, live full-registry commands execute all
-  seven suites, and the BUG-008 retained-core command remains valid
-- **AND** historical and archived evidence remains unchanged; partition changes are limited to
-  the controlled `_make_valid_model` fixture transition, oracle evidence, and ledgered
-  retirements/rewrites, with no registry import SQL/schema/geometry/auth behaviour or Basins
-  real-fixture byte change; deleting caller-less store read paths and id producers that no import
-  path reaches (#2907) is not such a change.
-
-#### Scenario: A ledgered retirement or rewrite passes every partition guard
-
-- **WHEN** a frozen definition is deleted (or rewritten) and one retirements-ledger record names its
-  issue, 40-hex base commit, owner, name, action, reason, frozen nodes and integration nodes (and, for
-  a rewrite, the new 7-field row whose first field is the owner)
-- **THEN** the collection, integration, owner-count, definitions/digests, execution and database-proof
-  guards all pass, and the oracle file is byte-identical to its tracked content.
-
-#### Scenario: An unledgered or malformed retirement stays RED by name
-
-- **WHEN** a frozen definition is deleted or rewritten without a ledger record
-- **THEN** the definitions guard fails and names `<partition>::<name>`
-- **WHEN** a ledger record names a definition that is not a frozen oracle row or that belongs to the
-  retained core, changes a rewrite row field other than source, AST or monkeypatch digest, lists nodes
-  that differ from the frozen nodes, duplicates a name, overlaps an additions record, or carries a base
-  commit that does not resolve, is not an ancestor of HEAD, or whose owner blob does not define the name
-- **THEN** the ledger checker, which reads only the oracle, the two ledgers and git history,
-  reports one named `ledger.<rule>` violation for that record
-- **WHEN** a `retire` record names a definition the tree still defines, or a `rewrite` record's row
-  differs from the tree's observed row
-- **THEN** the definitions guard fails and names `<partition>::<name>`, printing the observed row
-- **AND** the retirements ledger path routes targeted selection to the partition meta-suite, and
-  removing that route makes the routing contract RED.
-
 ### Requirement: Guard exclusion burndown removes ten oversized surfaces without replacement
 
 The repository SHALL split the ten guard-excluded oversized surfaces named by this
@@ -803,40 +477,6 @@ remain in the original module SHALL keep their existing patch target unchanged.
 - **AND** the original module does not expose the relocated name, so a patch aimed
   at the stale target raises instead of passing vacuously.
 
-### Requirement: Copyback replay and retention mutex corpora partition without drift
-
-The repository SHALL partition the scheduler state-index copyback replay suite and
-the retention copyback-mutex corpus into collectible modules below 1,000 lines, with
-shared definitions confined to non-collectible helpers and no collectible
-compatibility shim. The retention copyback-mutex lane SHALL move to its own owner
-module while `services/orchestrator/retention.py` retains the planner. Copyback
-mutex semantics, budget semantics, and deletion selection SHALL be unchanged.
-
-#### Scenario: collection identity survives partitioning
-
-- **WHEN** the replay and mutex corpora are collected after partitioning
-- **THEN** the sorted `::test_name[param-id]` suffix sets equal the pre-split
-  baselines of 32 and 25 exactly, with no additions, losses, duplicates or skips
-- **AND** assertions, decorators, fixtures and parameter IDs are unchanged.
-
-#### Scenario: targeted selection follows the retention owner split
-
-- **WHEN** targeted selection runs for `services/orchestrator/retention.py` or for
-  the extracted copyback-mutex owner
-- **THEN** every retention partition, including the newly split files, is selected
-- **AND** the selector contract tests pass.
-
-#### Scenario: an orphaned partition cannot hide behind same-name derivation
-
-- **WHEN** a corpus is partitioned into suites that have no same-named production
-  source, so same-name derivation no longer routes them and a vanished rule target
-  only emits a warning
-- **THEN** the partition is routed by an explicit `PathTestRule` that enumerates every
-  new suite, and a tracked-tree guard asserts the corpus is exactly the intended
-  number of collectible suites plus non-collectible helpers
-- **AND** adding a surplus partition, leaving a compatibility shim, or turning a
-  helper into a suite turns that guard red.
-
 ### Requirement: Scheduler registry refresh surfaces split behind stable CLI facades
 
 The repository SHALL split the scheduler file-provider refresh script, the registry
@@ -854,9 +494,7 @@ semantics SHALL be equivalent to the pre-split owners.
 #### Scenario: both refresh corpora collect identically
 
 - **WHEN** the refresh and publish suites are collected after partitioning
-- **THEN** the sorted suffix sets equal the pre-split baselines of 315 and 59
-- **AND** every new partition is named by an explicit `PathTestRule` rather than
-  inferred from a same-name source pair.
+- **THEN** the sorted suffix sets equal the pre-split baselines of 315 and 59.
 
 ### Requirement: Entropy audit enforcement and its corpus split without report drift
 
@@ -908,8 +546,7 @@ inbound reference and anchor SHALL still resolve.
 - **WHEN** the references to `current-production-ops.md` are resolved after the split
 - **THEN** every referencing file still resolves, the anchor
   `#311-pipeline-job-provenance-sidecar-and-recovery-2420` still resolves, and
-  markdown lint passes
-- **AND** the targeted selector routes the document's new paths.
+  markdown lint passes.
 
 ### Requirement: Guard exclusion burndown batch 2 retires three exclusions and unfreezes two model-registry owners
 
@@ -960,26 +597,6 @@ disposition markers SHALL stay inside their member function bodies.
 - **THEN** the only `UPDATE core.river_segment` and `geometry_generation` write
   remain in `basins_registry_import.py` and the only upsert in
   `qhh_production_bootstrap.py`, with the scan constants unchanged.
-
-### Requirement: Refresh-timer and cutover-flip corpora partition without drift
-
-The repository SHALL partition the node-22 refresh-timer health suite into collectible
-modules below 1,000 lines with shared definitions in non-collectible helpers, SHALL route
-every partition through an explicit `PathTestRule`, and SHALL guard the corpus's exact
-tracked partition set. The direct-grid display cutover-flip corpus that this requirement
-also partitioned was deleted together with the station-flag flip hook by #3164, so its
-partitions, its helper, its routing and its tracked-tree guard are retired with it.
-
-#### Scenario: collection identity survives partitioning
-
-- **WHEN** the refresh-timer corpus is collected after partitioning
-- **THEN** the sorted `::test_name[param-id]` suffix set equals the pre-split
-  baseline exactly, with no additions, losses, duplicates or skips.
-
-#### Scenario: a partition disappears from the tracked tree
-
-- **WHEN** one partition file is removed or a compatibility shim is added
-- **THEN** the tracked-tree guard in `tests/test_select_ci_tests.py` fails.
 
 ### Requirement: Model registry store splits behind a stable facade without drift
 
@@ -1064,3 +681,102 @@ After the last extraction, the facade's `__all__` SHALL contain only names with 
 #### Scenario: Unlisted external read detected
 - **WHEN** a non-sibling module imports `file_orchestration_journal._bar` and `__all__` does not list `_bar`
 - **THEN** the re-export hygiene test fails naming `_bar`
+
+### Requirement: Retention tests SHALL remain complete under physical partitioning
+
+The repository SHALL partition the retention pytest corpus into four collectible
+modules and at most one non-collectible local helper whose individual line counts
+are below 1,000, without adding a guard exclusion or retaining a collectible
+compatibility shim. Every pre-partition case SHALL be collected exactly once after
+partitioning: the module prefix may change, but all 120 unique
+`::test_name[param-id]` suffixes, test bodies, decorators, fixtures, parameter
+values/IDs, monkeypatch targets, and assertion oracles MUST remain equivalent.
+`tests/test_retention.py` SHALL remain the same-name suite for the production
+retention owner.
+
+#### Scenario: collection identity and oracles are preserved one-to-one
+
+- **WHEN** the original monolith and all four post-partition files are collected
+- **THEN** each side yields exactly 120 unique suffixes after the first `::`, their
+  sorted suffix files are byte-identical, and every original test body/decorator
+  fingerprint maps to exactly one post-partition definition
+- **AND** running the four files passes all 120 cases without changed assertions,
+  skips, duplicates, production-source modifications, or helper collection.
+
+#### Scenario: the final exception is removed without replacement
+
+- **WHEN** line counts and `.large-file-guard.json` are evaluated after partitioning
+- **THEN** every collectible/helper file is below 1,000 lines,
+  `tests/test_retention.py` is absent from exclusions, no replacement exclusion is
+  added, and every unrelated exclusion and the threshold remain unchanged.
+
+### Requirement: Basins package publication tests SHALL remain complete under physical partitioning
+
+The repository SHALL retain every case from the frozen Basins package publication baseline
+while extending the current corpus to exactly seven collectible modules and one
+non-collectible helper, each below 1,000 lines, without changing
+`.large-file-guard.json` or retaining a collectible compatibility shim. The six original
+partitions SHALL still contain all 88 unique baseline `::test_name[param-id]` suffixes and
+all 80 normalized baseline test bodies, decorators, fixture arguments, parameter values/IDs,
+assertions, skips and monkeypatch targets exactly once. The seventh owner,
+`tests/test_basins_package_publication_rivseg.py`, SHALL contain only additive issue #1903
+mapping tests and SHALL import `tests.basins_package_helpers` at module scope.
+
+#### Scenario: frozen collection identity and additive tests are both preserved
+
+- **WHEN** the baseline monolith, the six baseline partitions, and the seven current suites
+  are collected and fingerprinted
+- **THEN** the six baseline owners yield exactly the frozen 88 unique suffixes and 80
+  one-to-one normalized definitions without dropped, duplicated, renamed or weakened cases
+- **AND** the seventh owner collects the finite issue #1903 scenario matrix exactly once
+- **AND** executing all seven files preserves the baseline pass/skip semantics and adds real
+  mapping assertions
+- **AND** `tests/basins_package_helpers.py` collects no tests.
+
+#### Scenario: structural guard and current validation commands match the extended layout
+
+- **WHEN** the eight Python outputs, root/child current validation matrices, guard
+  configuration and documentation authority are evaluated
+- **THEN** every changed/new text source is strictly below 1,000 lines, the guard threshold
+  and exclusion list are byte-identical, and an ordinary commit passes the hook
+- **AND** the heading-bounded baseline M10 #147–#152 family remains under
+  `docs/validation/production-closure.md`, with documentation changes limited to retargeting
+  current publication commands to seven suites and the existing moved self-lint paths
+- **AND** all six original root heading texts and anchor slugs remain byte-identical as links
+  resolving to matching child headings, both post-split documentation files remain below
+  1,000 lines, and both paths remain current validation authority
+- **AND** the live M9 closeout, #148 regression and opt-in Basins smoke commands execute all
+  seven suites, the moved real-smoke node still runs, and historical M9 result bullets plus
+  archived evidence remain unchanged
+- **AND** the structural diff changes no frozen baseline test definition, production
+  database filter, or unrelated #1912 owner contract.
+
+### Requirement: Copyback replay and retention mutex corpora SHALL partition without drift
+
+The repository SHALL partition the scheduler state-index copyback replay suite and
+the retention copyback-mutex corpus into collectible modules below 1,000 lines, with
+shared definitions confined to non-collectible helpers and no collectible
+compatibility shim. The retention copyback-mutex lane SHALL move to its own owner
+module while `services/orchestrator/retention.py` retains the planner. Copyback
+mutex semantics, budget semantics, and deletion selection SHALL be unchanged.
+
+#### Scenario: collection identity survives partitioning
+
+- **WHEN** the replay and mutex corpora are collected after partitioning
+- **THEN** the sorted `::test_name[param-id]` suffix sets equal the pre-split
+  baselines of 32 and 25 exactly, with no additions, losses, duplicates or skips
+- **AND** assertions, decorators, fixtures and parameter IDs are unchanged.
+
+### Requirement: Refresh-timer and cutover-flip corpora SHALL partition without drift
+
+The repository SHALL partition the node-22 refresh-timer health suite into collectible
+modules below 1,000 lines with shared definitions in non-collectible helpers.
+The direct-grid display cutover-flip corpus that this requirement
+also partitioned was deleted together with the station-flag flip hook by #3164, so its
+partitions, its helper, its routing and its tracked-tree guard are retired with it.
+
+#### Scenario: collection identity survives partitioning
+
+- **WHEN** the refresh-timer corpus is collected after partitioning
+- **THEN** the sorted `::test_name[param-id]` suffix set equals the pre-split
+  baseline exactly, with no additions, losses, duplicates or skips.

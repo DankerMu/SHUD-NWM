@@ -6,9 +6,7 @@ output-segment/resource-profile, digest/canonical-geometry, import-core and
 pre-migration schema contracts, including both ``output_segment_count`` cases named
 by BUG-20260527-008.  Shared test support lives in the non-collectible
 ``tests/basins_registry_import_helpers.py``; the parser, CLI, security, auth, DB and
-QHH families moved to their own partitions, which
-``scripts/select_ci_tests.py``'s ``BASINS_REGISTRY_IMPORT_TESTS`` routes as one
-corpus.
+QHH families moved to their own partitions.
 """
 
 from __future__ import annotations

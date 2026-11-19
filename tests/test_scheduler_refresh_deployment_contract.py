@@ -2,15 +2,12 @@
 
 Partition (#1101 partition of the 9614-line / 315-case
 tests/test_scheduler_file_provider_refresh.py). This is the partition that
-`read_text`s tracked deployment paths, so it is the CI selector's owner suite
-for all five of them: `infra/systemd/nhms-scheduler-file-provider-refresh`
+`read_text`s tracked deployment paths, so it is the owner suite for all five
+of them: `infra/systemd/nhms-scheduler-file-provider-refresh`
 `.service` / `.timer`,
 `infra/env/compute.scheduler-provider-refresh.env.example`,
 `scripts/scheduler_file_provider_refresh_once.sh` and
-`scripts/install_node22_scheduler_file_provider_refresh.sh`
-(`scripts/select_ci_tests.py` routes each of those paths here, and
-`tests/test_select_ci_tests.py` derives the edge from the literal reads below
-rather than trusting the rule).
+`scripts/install_node22_scheduler_file_provider_refresh.sh`.
 
 It also owns the euid-owned lock-parent preflight, the database/relative-path
 config refusals, the env-file loader, the installer enable/restore lifecycle

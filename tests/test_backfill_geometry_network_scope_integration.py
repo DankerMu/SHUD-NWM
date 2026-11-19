@@ -1,18 +1,12 @@
 """Output-geometry backfill: the write side must stay inside one river network version.
 
 Issue #2158.  This contract lives in its own file rather than in
-``tests/test_basins_registry_import_db.py`` because #1913 froze the entire test
-inventory of the seven ``tests/test_basins_registry_import*.py`` partitions in
-``tests/fixtures/basins_registry_partition_oracle.json`` -- node counts,
-per-definition AST digests and execution-semantics counts are equality
-assertions (``tests/test_select_ci_tests.py:14486/14497/14512/14588``), so
-adding one test there reddens four guards, and those guards forbid
-regenerating the baseline from the object under test.  The file name stays
-clear of the ``test_basins_registry_import`` and ``qhh_production_bootstrap``
-corpora and carries ``integration`` so ``.github/workflows/ci.yml``'s
-``database`` filter (``tests/*integration*.py``) opens the lane; the
-``real-db-integration`` job runs the whole tree under
-``-m "integration and not timescaledb_210"``, so no selector row is needed.
+``tests/test_basins_registry_import_db.py`` because, when it was written, #1913's
+frozen inventory of the seven ``tests/test_basins_registry_import*.py``
+partitions forbade adding a test there (#3219 deleted that oracle).  The file
+name carries ``integration`` so ``.github/workflows/ci.yml``'s ``database``
+filter (``tests/*integration*.py``) opens the lane; the ``real-db-integration``
+job runs the whole tree under ``-m "integration and not timescaledb_210"``.
 """
 
 from __future__ import annotations

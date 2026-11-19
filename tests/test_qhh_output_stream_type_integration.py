@@ -18,10 +18,8 @@ blank numeric dbf cell) is "no Type" to both the backfill and the check, so it
 never blocks the seed.
 
 Real DB only: ``stream_type`` is a STORED generated column (000048). Runs on a
-per-test throwaway database. File name stays clear of the frozen
-``qhh_production_bootstrap`` test corpus (its partition oracle pins that name
-set) and carries ``integration`` for ci.yml's ``database`` filter; no selector
-row is needed.
+per-test throwaway database. File name carries ``integration`` for ci.yml's
+``database`` filter.
 """
 
 from __future__ import annotations

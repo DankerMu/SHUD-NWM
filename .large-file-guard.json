@@ -66,14 +66,11 @@
     "services/orchestrator/chain_runtime_utils.py",
     "services/orchestrator/scheduler_candidate_execution_evidence.py",
     "services/production_closure/readiness_scheduler_evidence.py",
-    "scripts/select_ci_tests_tables.py",
-    "scripts/select_ci_tests_rules.py",
     "services/tile_publisher/publisher.py",
     "tests/test_canonical_precip_copyback_backfill.py",
     "tests/test_forcing_copyback_backfill.py",
     "tests/test_run_tree_copyback.py",
     "tests/test_state_manager.py",
-    "tests/test_select_ci_tests.py",
     "tests/test_operator_action_listing.py",
     "tests/test_tile_publisher.py",
     "workers/mapping_builder/rewrite.py",
@@ -141,6 +138,7 @@
     "services/production_closure/e2e_validation.py",
     "scripts/validate_two_node_docker_runtime.py",
     "services/orchestrator/file_journal_candidates.py",
-    "services/orchestrator/file_journal_paths.py"
+    "services/orchestrator/file_journal_paths.py",
+    "db/roles/node27_write_roles.sql"
   ]
 }

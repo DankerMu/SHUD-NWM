@@ -76,8 +76,7 @@ uv run pytest -q tests/test_entropy_audit_*.py
 openspec validate --all --strict --no-interactive
 ```
 
-For registration, package, import, or reingest changes, run the focused set
-(the selector rule for this directory owns a wider set of suites):
+For registration, package, import, or reingest changes, run the focused set:
 
 ```bash
 uv run pytest -q tests/test_model_registration.py tests/test_model_registry_basin_versions.py tests/test_model_registry_list_basins.py tests/test_basins_registry_import.py

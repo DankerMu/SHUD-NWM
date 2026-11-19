@@ -105,7 +105,7 @@ jobs:
   # openspec- and instructions-only changes are gated too: the job is the
   # docs-only backstop, while the pytest node
   # test_entropy_audit_current_repo_hard_gate_has_zero_production_topology_findings
-  # remains the backend-lane check. No --structural-base-ref: structural checks
+  # remains the check inside the pytest suite. No --structural-base-ref: structural checks
   # are not hard-gate ids. The workflow-level concurrency (cancel-in-progress)
   # can cancel an older master push run; the newer run still gates the tree at
   # its own SHA, so a red result is attributed to the newer SHA. Accepted.

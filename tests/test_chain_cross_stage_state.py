@@ -36,8 +36,6 @@ _FRESH_FULL_CHAIN = {"required": True, "mode": "full_chain"}
 
 
 def _manifest(state_evidence: dict[str, Any], **extra: Any) -> dict[str, Any]:
-    # Function-local on purpose: a module-scope import would grow the frozen
-    # direct-importer anchor of test_production_scheduler.py (test_select_ci_tests).
     from tests.test_production_scheduler import _scheduler_candidate_fixture
 
     candidate = replace(_scheduler_candidate_fixture(), state_evidence=state_evidence)

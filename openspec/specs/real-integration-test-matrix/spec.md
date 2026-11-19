@@ -1,7 +1,7 @@
 # real-integration-test-matrix Specification
 
 ## Purpose
-TBD - created by archiving change issue-126-real-integration-test-matrix. Update Purpose after archive.
+Define the layered real-integration test matrix: real database migrations and real-schema API smoke, a deterministic worker-chain smoke, a Slurm gateway smoke on fake binaries, and the hygiene rules (portable hermetic oracles, stoppable daemons, no unhandled worker-thread exceptions) that keep those lanes trustworthy.
 
 ## Requirements
 
@@ -437,39 +437,6 @@ This requirement governs only `test_lease_heartbeat_advances_then_detects_takeov
 - **WHEN** repository-wide `PytestUnhandledThreadExceptionWarning`, pytest timeout, or cancellation policy is considered
 - **THEN** this change does not edit that policy, dependency, or configuration because #1646 owns the shape-independent backstop
 
-### Requirement: Repository pytest MUST fail on unhandled worker-thread exceptions
-
-Repository pytest configuration SHALL treat `pytest.PytestUnhandledThreadExceptionWarning` as an error. The policy SHALL target that exact category, preserve unrelated warning behavior, retain the worker's original cause in failure output, and execute in local, targeted, full, and real-integration pytest lanes installed from the repository development dependencies. Changes to either the pytest configuration or dependency lock SHALL select and execute the dedicated semantic policy suite in PR CI.
-
-This repository-wide boundary is defense in depth. It SHALL NOT replace harness-owned exception capture, cause-before-result ordering, peer release, bounded joins/waits, cleanup, or whole-process terminability proof where an issue-specific harness contract requires those stronger outcomes.
-
-#### Scenario: Unhandled worker exception fails with its cause
-
-- **WHEN** a throwaway test starts and joins a worker that raises a unique `RuntimeError` while the test body otherwise returns normally under repository pytest configuration
-- **THEN** pytest exits nonzero and reports both the unique cause and `PytestUnhandledThreadExceptionWarning`
-- **AND** the same config with only the exact filter removed exits zero with a passing test plus that warning, proving the shipping policy is load-bearing
-
-#### Scenario: Unrelated warnings and baseline failures retain their behavior
-
-- **WHEN** a test emits an unrelated `UserWarning` under repository configuration
-- **THEN** the test remains passing with a warning rather than failing
-- **AND** repository configuration adds no broad all-warning error filter or custom thread-exception hook
-- **AND** final-head tracked tests and `conftest.py` files contain no explicit warning-filter override of this policy
-- **AND** ordinary pytest markers or executed Python warning-filter calls are documented as intentional, reviewable overrides rather than claimed to be statically impossible
-- **AND** a pre-existing non-thread-policy test failure is reported against its owning issue rather than suppressed, fixed out of scope, or counted as thread-warning debt
-
-#### Scenario: Config and lock changes execute the policy owner
-
-- **WHEN** `pyproject.toml` or `uv.lock` changes in a pull request
-- **THEN** the targeted selector includes the dedicated thread-exception policy suite and selector meta-guard while retaining its prior core-smoke ownership
-- **AND** final-head CI executes those assertions rather than reporting only a collect-only smoke
-
-#### Scenario: Existing harness contracts remain stronger
-
-- **WHEN** an issue-owned harness captures/re-raises a worker cause, releases peers, joins workers, cleans resources, or proves process termination
-- **THEN** those local assertions remain required and unchanged
-- **AND** a globally escalated warning cannot be used to waive a missing release, ordering, cleanup, or termination leg
-
 ### Requirement: Universal pytest timeout policy MUST be evidence-calibrated
 
 A universal per-test timeout plugin/configuration SHALL NOT be adopted from whole-job duration evidence. Before any future global timeout is enabled, the repository SHALL have per-test setup/body/teardown distributions for every affected marker lane, SHALL select and prove a timeout method against the required process-termination and teardown/reporting contract, and SHALL separately cover hangs that begin after a passing test's timer is canceled plus any child-process boundary. Until those prerequisites exist, issue-owned local protocol bounds and CI job-level timeouts remain the explicit hang backstops.
@@ -568,3 +535,30 @@ contributes nothing.
   consecutive names differ, that a name matches the declared `nhms_it_` plus
   32 hex-character shape, and that its suffix parses as a UUID — are retained,
   so the stub does not become the only thing under test
+
+### Requirement: Repository pytest MUST treat unhandled worker-thread exceptions as errors
+
+Repository pytest configuration SHALL treat `pytest.PytestUnhandledThreadExceptionWarning` as an error. The policy SHALL target that exact category, preserve unrelated warning behavior, retain the worker's original cause in failure output, and execute in local, full, and real-integration pytest lanes installed from the repository development dependencies.
+
+This repository-wide boundary is defense in depth. It SHALL NOT replace harness-owned exception capture, cause-before-result ordering, peer release, bounded joins/waits, cleanup, or whole-process terminability proof where an issue-specific harness contract requires those stronger outcomes.
+
+#### Scenario: Unhandled worker exception fails with its cause
+
+- **WHEN** a throwaway test starts and joins a worker that raises a unique `RuntimeError` while the test body otherwise returns normally under repository pytest configuration
+- **THEN** pytest exits nonzero and reports both the unique cause and `PytestUnhandledThreadExceptionWarning`
+- **AND** the same config with only the exact filter removed exits zero with a passing test plus that warning, proving the shipping policy is load-bearing
+
+#### Scenario: Unrelated warnings and baseline failures retain their behavior
+
+- **WHEN** a test emits an unrelated `UserWarning` under repository configuration
+- **THEN** the test remains passing with a warning rather than failing
+- **AND** repository configuration adds no broad all-warning error filter or custom thread-exception hook
+- **AND** final-head tracked tests and `conftest.py` files contain no explicit warning-filter override of this policy
+- **AND** ordinary pytest markers or executed Python warning-filter calls are documented as intentional, reviewable overrides rather than claimed to be statically impossible
+- **AND** a pre-existing non-thread-policy test failure is reported against its owning issue rather than suppressed, fixed out of scope, or counted as thread-warning debt
+
+#### Scenario: Existing harness contracts remain stronger
+
+- **WHEN** an issue-owned harness captures/re-raises a worker cause, releases peers, joins workers, cleans resources, or proves process termination
+- **THEN** those local assertions remain required and unchanged
+- **AND** a globally escalated warning cannot be used to waive a missing release, ordering, cleanup, or termination leg

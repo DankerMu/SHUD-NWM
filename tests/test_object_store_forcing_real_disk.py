@@ -50,8 +50,8 @@ def selection() -> Selection:
 
     Chosen at run time, once per module, AFTER the real-disk skip gate: node-27
     retention keeps a rolling window, so any pinned cycle eventually 404s every
-    case. Import time computes nothing -- the CI `--collect-only` smoke imports
-    this module without `OBJECT_STORE_ROOT`. The station of a model is asked of
+    case. Import time computes nothing -- CI collects this module without
+    `OBJECT_STORE_ROOT`. The station of a model is asked of
     `met.interp_weight` by `model_id` only, as the production list path does, on
     one read-only connection of this fixture's own; station metadata keeps going
     through `PsycopgStationLookup.from_env()`, which needs its dict-row cursor.

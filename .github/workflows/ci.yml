@@ -12,22 +12,21 @@ permissions:
 # PR runs share one group per PR number and cancel superseded runs when you push
 # repeatedly. Push-to-master and manual workflow_dispatch runs get a unique
 # github.run_id group instead: they must never cancel each other or replace a
-# same-group pending run, because the master full pytest is the only whole-repo
-# regression after the PR targeted lane (#1650).
+# same-group pending run, because each master full pytest run is the regression
+# record of the commit it ran on (#1650).
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # Path scoping: each job below runs only when its area changed, so a frontend-only or docs-only PR
-  # never pays the backend pytest or real-DB dry run, and a backend PR never pays the frontend build.
+  # Path scoping: each job below runs only when its area changed, so a frontend-only PR never pays
+  # the full pytest or real-DB dry run, and a backend PR never pays the frontend build.
   # master is unprotected (no required status checks), so a skipped job does not deadlock merge.
   changes:
     name: Detect changed areas
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      backend: ${{ steps.filter.outputs.backend }}
       database: ${{ steps.filter.outputs.database }}
       frontend: ${{ steps.filter.outputs.frontend }}
       docs: ${{ steps.filter.outputs.docs }}
@@ -36,81 +35,18 @@ jobs:
       node_tests: ${{ steps.filter.outputs.node_tests }}
       workflows: ${{ steps.filter.outputs.workflows }}
       all_files: ${{ steps.filter.outputs.all_files }}
+      pytest: ${{ steps.full_suite_gate.outputs.pytest }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
         id: filter
         with:
-          # The PR changed-file set IS the single authority for both paths-filter
-          # and targeted selection: the selector must never recompute a
-          # merge-base diff that can diverge after master changes while the PR
-          # is open (#1650 D3). The JSON listing plus the catch-all filter
-          # expose the complete set (not just backend_files — combination rules
-          # read non-backend paths too).
+          # The JSON listing plus the catch-all filter expose the complete
+          # changed-file set; the next step derives the `pytest` output from it.
           list-files: json
           filters: |
             all:
               - '**'
-            backend:
-              - '**/*.py'
-              - 'pyproject.toml'
-              - 'uv.lock'
-              - 'tests/**'
-              - 'packages/**'
-              - 'apps/api/**'
-              - 'services/**'
-              - 'workers/**'
-              - 'infra/**'
-              - 'schemas/**'
-              - 'db/**'
-              - 'scripts/validate_*.py'
-              - 'scripts/**/*.sh'
-              - '.github/workflows/ci.yml'
-              - 'openapi/**'
-              # #1571: exact no-lane producers whose environment oracles must
-              # start the targeted backend gate on producer-only PRs. The pin
-              # is a bare version file, the instruction source and QHH sbatch
-              # are markdown/shell, and the diagnostic README is docs-adjacent —
-              # none matched any backend pattern, so producer-only diffs did not
-              # start the targeted backend job. Exact literals only; `docs/**`
-              # stays excluded.
-              - '.python-version'
-              - 'instructions/agents/shared.md'
-              - 'scripts/run_qhh_cycle.sbatch'
-              - 'scripts/diagnostic/qhh/README.md'
-              - 'docs/runbooks/tier-node27-timeseries-storage.md'
-              # #1860: the checked-in calibration declaration is a non-Python
-              # producer whose package/publication consumers and selector
-              # meta-guard must run on a declaration-only PR. Exact literal
-              # only; other config files have different consumers.
-              - 'config/calibration_overrides.yaml'
-              # #2261: the committed review-gate round-ceiling memory. Its
-              # writes ride commits of their own (a non-merged close or a
-              # ceiling hit, #3218: docs/** + openspec/** + this JSON), which
-              # matched no backend pattern — so the structural guard over it
-              # never started the targeted gate. Exact literal only; no root
-              # `*.json` glob.
-              - '.review-gate-issues.json'
-              # #2477: the frozen review-loop ledger. `docs/**` is excluded, so
-              # a ledger-only diff matched no backend pattern and the real-log
-              # guard in the attribution suite never started the targeted
-              # gate. Exact literal only; no `docs/**` or `*.jsonl` glob.
-              - 'docs/review-loop-log.jsonl'
-              # #2044 / #2602: the two other workflows' meta-tests (the
-              # full-regression watcher wiring and the governance hard-gate job)
-              # live in the backend lane, but a workflow-only diff matched no
-              # backend pattern. Exact literals only; no `.github/**` glob.
-              - '.github/workflows/full-regression-watch.yml'
-              - '.github/workflows/governance.yml'
-              # #2648: the frozen hard-line-reference baseline. A JSON data file
-              # under scripts/ matched no backend pattern. Exact literal only.
-              - 'scripts/governance/entropy_audit/line_reference_baseline.json'
-              # #2709 / #2710: the floating-resolve report workflow's meta-test
-              # and the full-regression shard duration table's partition tests
-              # live in the backend lane; a workflow-only or JSON-only diff
-              # matched no backend pattern. Exact literals only.
-              - '.github/workflows/floating-resolve-report.yml'
-              - 'scripts/ci/full_test_durations.json'
             database:
               - 'db/**'
               - 'packages/common/migrate.py'
@@ -206,7 +142,7 @@ jobs:
               - 'schemas/examples/frontend_c4_live_evidence*.json'
               # #2844: this workflow defines the frontend jobs (build and the
               # sharded mocked-regression lane); a workflow-only PR that
-              # rewires them must run them. Exact literal, as under `backend`.
+              # rewires them must run them. Exact literal.
               - '.github/workflows/ci.yml'
             docs:
               - 'docs/**'
@@ -225,6 +161,23 @@ jobs:
             # PR that leaves them untouched does not pay for the lint.
             workflows:
               - '.github/workflows/**'
+      # #3219: the full pytest suite runs unless every changed path is under
+      # apps/frontend/ (docs and openspec are read by tests, so they count).
+      # The JSON arrives through env, never `${{ }}` in the script. Anything but
+      # one JSON array of strings fails this step instead of skipping the suite;
+      # the result is jq's printed boolean, not its exit status.
+      - name: Decide whether the full suite runs
+        id: full_suite_gate
+        env:
+          ALL_FILES_JSON: ${{ steps.filter.outputs.all_files }}
+        run: |
+          result="$(jq -r 'if type == "array" and all(.[]; type == "string") then any(.[]; startswith("apps/frontend/") | not) else error("all_files is not a JSON array of paths") end' <<< "$ALL_FILES_JSON")"
+          case "$result" in
+            true | false) ;;
+            *) echo "::error::all_files is not exactly one JSON array of paths"; exit 1 ;;
+          esac
+          echo "pytest=$result" >> "$GITHUB_OUTPUT"
+          echo "full suite runs: $result"
 
   markdown-lint:
     name: Markdown Lint
@@ -353,8 +306,7 @@ jobs:
 
   # Merge-gate database suite. PR and push runs are limited to migration, database,
   # integration-test, or dependency surfaces; workflow_dispatch remains an explicit
-  # real-DB dry-run escape hatch. Full unit pytest is reserved for push-to-master or
-  # manual workflow_dispatch; PRs run the focused unit-test job below.
+  # real-DB dry-run escape hatch. The full unit pytest is the `unit-test` job below.
   real-db-integration:
     name: SQL Migration Dry Run
     needs: changes
@@ -412,8 +364,7 @@ jobs:
     name: Unit Tests (full)
     needs: changes
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (needs.changes.outputs.backend == 'true' && github.event_name == 'push')
+      github.event_name == 'workflow_dispatch' || needs.changes.outputs.pytest == 'true'
     runs-on: ubuntu-latest
     # #2710: the single job ran 39-59 min against a 60-min wall and was killed
     # at it twice (2026-09-22, 2026-10-01). It is now a matrix: every shard runs
@@ -428,12 +379,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6]
     # 30 per shard; the old 60 was NOT raised. Measured 2026-10-04 on one full
     # local run (41.7 min as a single process, the same scale as the 39-59 min
-    # hosted runs): 2484 s of test time, 621 s (10.4 min) per shard. Projected
-    # 10-15 min per shard on a hosted runner, i.e. about half of this and far
-    # from the watcher's 80% line (24 min), which now applies to each shard.
+    # hosted runs): 2484 s of test time. #3219 removed a 334 s test file
+    # and went to 6 shards: about 369 s of test time per shard, far from the
+    # watcher's 80% line (24 min), which applies to each shard.
     # --durations=25 still names the slowest tests of every shard.
     timeout-minutes: 30
     steps:
@@ -468,123 +419,13 @@ jobs:
           test -s shard-files.txt
           echo "shard ${{ matrix.shard }} of ${{ strategy.job-total }}: $(wc -l < shard-files.txt) test files"
       - name: Run full unit test suite
-        # -q, not -v: nothing downstream parses this log, unit-test-targeted
-        # already uses -q, and -v prints a line per test across ~22k tests.
+        # -q, not -v: nothing downstream parses this log, and -v prints a
+        # line per test across ~22k tests.
         # --durations=25 is the instrument: it names the slowest tests in every
         # run, so a future slowdown is attributable instead of guessed at.
         run: |
           mapfile -t shard_files < shard-files.txt
           pytest "${shard_files[@]}" -q --tb=short --durations=25 -m "not e2e and not grib and not integration"
-
-  # PR merge gate: run a focused suite derived from changed files. The selector maps runtime
-  # modules/config surfaces to their owning tests and falls back to core smoke tests for unknown
-  # backend Python paths. Full unit tests still run on master and on manual workflow_dispatch.
-  unit-test-targeted:
-    name: Unit Tests
-    needs: changes
-    if: >-
-      needs.changes.outputs.backend == 'true' &&
-      github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    # 35: scheduler/orchestration PRs select the heaviest test files; the
-    # selected suite alone runs ~20 min on hosted runners (observed twice
-    # cancelled at the old 20-min cap with 0 failures at 83% progress).
-    timeout-minutes: 35
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - uses: astral-sh/setup-uv@v5
-      # #2573: install the locked set, never a floating resolve. A floating
-      # `pip install -e ".[dev]"` pulled eccodes 2.49 + eckitlib, whose bundled
-      # PROJ (loaded RTLD_GLOBAL) collided with pyproj's and crashed pytest at
-      # interpreter exit. `--locked` also fails if uv.lock is stale.
-      - name: Install dependencies
-        run: uv sync --locked --all-extras --dev
-      # The bare `pytest`/`python` below must resolve to the locked venv.
-      # $GITHUB_PATH is the only PATH change: job/workflow `env` is pinned.
-      - name: Put the locked venv on PATH
-        run: echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
-      - name: Prepare scratch evidence root
-        run: |
-          sudo mkdir -p /scratch/frd_muziyao
-          sudo chown "$USER:$(id -gn)" /scratch/frd_muziyao
-          chmod u+rwx /scratch/frd_muziyao
-      - name: Select targeted tests
-        id: targeted
-        env:
-          CHANGED_FILES_JSON: ${{ needs.changes.outputs.all_files }}
-        run: |
-          # Consume the paths-filter PR changed-file set (single authority, #1650
-          # D3). JSON is passed via env, never shell-interpolated/split, and
-          # converted with the runner-provided jq, never through uv: the locked
-          # venv is already on PATH, and a uv invocation would re-sync it.
-          # Empty JSON writes an empty changed-file list, which makes the
-          # selector select nothing and the count==0 branch below report
-          # collect-only smoke. GitHub path values never
-          # contain newlines, so the newline-separated selector seam is exact.
-          jq -r '.[]' <<< "$CHANGED_FILES_JSON" > .ci-changed-files.txt
-          python scripts/select_ci_tests.py --changed-file .ci-changed-files.txt --github-output "$GITHUB_OUTPUT"
-      - name: Run targeted tests
-        env:
-          TARGETED_TESTS_JSON: ${{ steps.targeted.outputs.tests_json }}
-        run: |
-          if [ "${{ steps.targeted.outputs.count }}" != "0" ]; then
-            python -c 'import json, os, subprocess; tests = json.loads(os.environ["TARGETED_TESTS_JSON"]); print("Targeted test files:"); [print(f"  {test}") for test in tests]; subprocess.run(["pytest", "-q", *tests], check=True)'
-            if [ "${{ steps.targeted.outputs.collection_smoke_required }}" = "true" ]; then
-              if [ "${{ steps.targeted.outputs.meta_guard_only }}" = "true" ]; then
-                echo "Selection collapsed to the selector meta-guard — also running collect-only smoke (import/syntax across suite)"
-                echo "::warning title=Unit Tests selection collapsed to the selector meta-guard::select_ci_tests.py mapped this diff to tests/test_select_ci_tests.py alone (deleted test file, tests/ support module, or a selector-development diff); that suite ran its assertions and the full-tree collect-only smoke ran in addition (issue #1454)"
-                {
-                  echo "## Unit Tests: selection collapsed to the selector meta-guard"
-                  echo ""
-                  echo "select_ci_tests.py mapped this PR diff to tests/test_select_ci_tests.py alone."
-                  echo "That suite ran its assertions; the full-tree collect-only smoke (import/syntax"
-                  echo "check across the whole suite) ran in addition, because a diff of this shape can"
-                  echo "break cross-test imports that the targeted run never touches."
-                } >> "$GITHUB_STEP_SUMMARY"
-              else
-                echo "Selector-development diff — also running collect-only smoke (import/syntax across suite)"
-                echo "::warning title=Unit Tests selector-development diff::select_ci_tests.py or its suite changed; the targeted selection ran its assertions and the full-tree collect-only smoke ran in addition (issue #1454)"
-                {
-                  echo "## Unit Tests: selector-development diff"
-                  echo ""
-                  echo "select_ci_tests.py or tests/test_select_ci_tests.py changed; the targeted selection"
-                  echo "ran its assertions and the full-tree collect-only smoke (import/syntax check across"
-                  echo "the whole suite) ran in addition, because a diff of this shape can break cross-test"
-                  echo "imports that the targeted run never touches."
-                } >> "$GITHUB_STEP_SUMMARY"
-              fi
-              # Redirect, never pipe: see the count == 0 branch below.
-              if pytest tests/ -q --collect-only > collect-only.log 2>&1; then
-                tail -n 5 collect-only.log
-              else
-                cat collect-only.log
-                exit 1
-              fi
-            fi
-          else
-            echo "No backend test files selected — running collect-only smoke (import/syntax across suite)"
-            echo "::warning title=Unit Tests executed 0 assertions::select_ci_tests.py mapped no test files for this diff; collect-only smoke verifies imports/syntax only (issue #1182)"
-            {
-              echo "## Unit Tests: collect-only smoke (0 assertions executed)"
-              echo ""
-              echo "select_ci_tests.py selected no backend test files for this PR diff."
-              echo "The suite was only collected (import/syntax check); no test assertions ran."
-            } >> "$GITHUB_STEP_SUMMARY"
-            # Redirect, never pipe: `bash -e` runs without pipefail, so piping
-            # pytest into tail would report the tail's exit code and turn a
-            # collection failure green. Collection output is ~12k lines.
-            if pytest tests/ -q --collect-only > collect-only.log 2>&1; then
-              tail -n 5 collect-only.log
-            else
-              cat collect-only.log
-              exit 1
-            fi
-          fi
 
   frontend-build:
     name: Frontend Build

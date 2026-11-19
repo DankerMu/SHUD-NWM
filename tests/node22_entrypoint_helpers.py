@@ -8,8 +8,7 @@ the node-22/node-27 root constants and the surface reader), moved here verbatim
 so both partitions import one owner instead of copying it.
 
 The filename deliberately does not start with ``test_``: pytest must not
-collect it, and ``scripts/select_ci_tests.py`` routes it through
-``SUPPORT_MODULE_TEST_RULES`` rather than the ``tests/**`` suite branch.
+collect it.
 """
 
 from __future__ import annotations

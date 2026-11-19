@@ -113,30 +113,6 @@
     "provider_atomic.py:97": 1,
     "safe_fs.py:138": 1
   },
-  "scripts/select_ci_tests_rules.py": {
-    "`:1111": 1,
-    "`:1553": 1,
-    "`:1964": 1,
-    "`:325": 1,
-    "`:495": 1,
-    "`:496": 1,
-    "apps/api/routes/models.py:429": 1,
-    "apps/api/routes/pipeline.py:32": 1,
-    "apps/api/routes/pipeline.py:33": 1,
-    "model_registry.py:152-155": 1,
-    "model_registry_public.py:21-31": 1,
-    "pipeline.py:40-49": 1,
-    "scripts/node27_mvt_prewarm.py:57": 1,
-    "tests/test_hydro_display_mvt_scaling.py:184-190": 1,
-    "tests/test_node27_autopipeline_preflight.py:19": 1,
-    "tests/test_node27_download_cycles.py:18": 1,
-    "tests/test_node27_download_cycles.py:19": 1,
-    "tests/test_node27_frontier_stall_alert.py:1427": 1,
-    "tests/test_node27_mvt_prewarm.py:17": 1,
-    "tests/test_node27_raw_retention.py:317-322": 1,
-    "tests/test_node27_timeseries_compression.py:31": 1,
-    "tests/test_node27_timeseries_compression_supervisor.py:1233-1238": 1
-  },
   "services/orchestrator/chain_stage_execution.py": {
     "packages/common/state_manager.py:394": 1
   },

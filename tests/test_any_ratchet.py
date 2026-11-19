@@ -32,11 +32,6 @@ Not counted: ``Any`` outside annotations (alias assignments such as
 ``X = Callable[..., Any]``, ``TypeAlias`` values, ``cast(Any, ...)``,
 ``isinstance``) and ``# type:`` comments.  Aliases are not expanded, so moving
 ``Any`` into an alias evades the count -- an accepted residual risk.
-
-``scripts/select_ci_tests.py`` routes every changed ``*.py`` under the roots in
-``_SCAN_ROOTS`` to this module (``ANY_RATCHET_ROOTS``) and the ceiling file to
-it as well; a selector meta-test parses ``_SCAN_ROOTS`` out of this file and
-asserts the two agree.
 """
 
 from __future__ import annotations

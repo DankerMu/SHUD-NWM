@@ -18386,8 +18386,6 @@ def test_public_evidence_recurses_into_mapping_values_under_path_shaped_keys() -
     # must take the sensitive branch, mapping value and scalar value alike.  If
     # the path branch ran first the mapping would be RECURSED into and its inner
     # ``value`` -- which no inner key marks sensitive -- would survive verbatim.
-    # In-body import: ``scripts/select_ci_tests`` derives its importer index from
-    # module-level statements only.
     from packages.common.redaction import is_sensitive_key
 
     assert is_sensitive_key("credential_path") and is_sensitive_key("secret_path")
@@ -18508,8 +18506,7 @@ def test_public_evidence_scalar_classifier_matches_file_provider_classifier() ->
     ``scheduler_file_providers._sanitize_file_provider_scalar`` stays where it is
     (``retry.py`` cannot import that module: providers -> scheduler_state ->
     retry), so the leaf carries a copy.  This is the pin that keeps the residual
-    duplicate honest.  Imported in-body: ``scripts/select_ci_tests`` builds its
-    importer index from module-level statements only.
+    duplicate honest.
     """
 
     from services.orchestrator import scheduler_file_providers as scheduler_file_providers_module

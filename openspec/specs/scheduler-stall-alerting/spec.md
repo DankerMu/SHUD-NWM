@@ -36,10 +36,7 @@ suffixes, and the writer's maximum evidence size — SHALL be pinned to the
 service-layer definitions by a parity test that asserts those constants
 themselves and not merely that a sample of names is classified alike, because a
 predicate later narrowed to a stricter name shape would still classify any fixed
-sample alike while the copy silently grew permissive. That parity test SHALL be
-routed in the repository's CI test selection so that it runs on a change to the
-service-layer definition; a parity test the selector cannot reach on the very
-diff that breaks parity is an after-the-fact detector, not a gate.
+sample alike while the copy silently grew permissive.
 
 The verdicts SHALL be evaluated in a fixed precedence order with the first
 matching condition winning: unreadable evidence, then the scheduler unit
@@ -466,7 +463,7 @@ The preflight-blocked run SHALL be the contiguous newest-first sequence, within 
 
 The receipt SHALL record `preflight_blocked_run` on every verdict with `passes`, `span_minutes`, `threshold_minutes`, `newest_boundary`, `remedy_verdict` (the table verdict of `newest_boundary`, or null for an empty run) and `boundary_passes` (the number of run members per boundary), so slot 10 can be re-derived from the receipt alone: it fires `remedy_verdict` when that is not null and `span_minutes >= threshold_minutes`.
 
-A parity test SHALL enumerate, from the writer source, every dict literal whose `status` is `preflight_blocked`, and SHALL assert that the boundaries of those without a `progress_guard` key equal the probe's table plus an explicit exemption set (`scheduler_timing_level_unrecognised`, whose artifact never lands), and that those with one equal the explicit guarded set (`scheduler_progress_guard_blocked`); a literal whose boundary cannot be read SHALL fail it. The repository's CI test selection SHALL route a change to the writer module to that test.
+A parity test SHALL enumerate, from the writer source, every dict literal whose `status` is `preflight_blocked`, and SHALL assert that the boundaries of those without a `progress_guard` key equal the probe's table plus an explicit exemption set (`scheduler_timing_level_unrecognised`, whose artifact never lands), and that those with one equal the explicit guarded set (`scheduler_progress_guard_blocked`); a literal whose boundary cannot be read SHALL fail it.
 
 #### Scenario: One hour of a sibling boundary raises its own verdict
 

@@ -75,13 +75,6 @@ uv run pytest -q tests/test_entropy_audit_*.py
 openspec validate --all --strict --no-interactive
 ```
 
-`packages/common` has no directory rule in the CI selector, so ask the selector
-which suites own the module you changed, then run them:
-
-```bash
-printf '%s\n' packages/common/safe_fs.py | uv run python scripts/select_ci_tests.py
-```
-
 For identity, filesystem-safety, and object-store root changes, a common
 focused set is:
 

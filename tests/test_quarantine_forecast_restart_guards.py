@@ -33,9 +33,7 @@ from services.orchestrator.scheduler_state_types import CandidateStateDecision
 
 # The scheduler-suite helpers (and the scheduler facade they wrap) are imported
 # function-locally, the same way ``tests/test_scheduler_generation.py`` reuses
-# them: a module-scope import would join this file to those suites' pinned
-# importer closures in ``scripts/select_ci_tests.py``.  This file's CI route is
-# the orchestrator directory rule, via the two module-scope imports above.
+# them.
 
 _MISSING_FORCING_REASONS = {"missing_forcing_package_uri", "forcing_version_row_absent"}
 _CYCLE_TIME = "2026-05-21T06:00:00Z"

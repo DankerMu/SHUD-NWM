@@ -1,4 +1,4 @@
-"""The sharded master full regression (#2710): partition and ci.yml wiring.
+"""The sharded full regression (#2710): partition and ci.yml wiring.
 
 ``Unit Tests (full)`` runs as a matrix; each shard runs the test files
 ``scripts/ci/shard_tests.py`` assigns to it. The partition must be complete and
@@ -281,11 +281,11 @@ def _step_run(name: str) -> str:
     return str(step["run"])
 
 
-def test_full_job_is_a_single_dimension_matrix_of_four_shards_that_do_not_cancel_each_other() -> None:
+def test_full_job_is_a_single_dimension_matrix_of_six_shards_that_do_not_cancel_each_other() -> None:
     strategy = _unit_test_job()["strategy"]
 
     assert strategy["fail-fast"] is False
-    assert strategy["matrix"] == {"shard": [1, 2, 3, 4]}
+    assert strategy["matrix"] == {"shard": [1, 2, 3, 4, 5, 6]}
     assert set(strategy) == {"fail-fast", "matrix"}
 
 
@@ -342,20 +342,17 @@ def test_full_job_keeps_its_gate_and_prerequisite_steps() -> None:
 
     assert job["needs"] == "changes"
     gate = " ".join(job["if"].split())
-    assert gate == (
-        "github.event_name == 'workflow_dispatch' || "
-        "(needs.changes.outputs.backend == 'true' && github.event_name == 'push')"
-    )
+    assert gate == "github.event_name == 'workflow_dispatch' || needs.changes.outputs.pytest == 'true'"
     assert job["steps"][0]["with"] == {"fetch-depth": 0}
     assert LOCKED_SYNC in runs
     assert 'echo "$PWD/.venv/bin" >> "$GITHUB_PATH"' in runs
     assert any("mkdir -p /scratch/frd_muziyao" in run for run in runs)
 
 
-def test_ci_yml_still_has_exactly_four_locked_installs() -> None:
+def test_ci_yml_still_has_exactly_three_locked_installs() -> None:
     text = CI_WORKFLOW.read_text(encoding="utf-8")
 
-    assert text.count(f"run: {LOCKED_SYNC}\n") == 4
+    assert text.count(f"run: {LOCKED_SYNC}\n") == 3
 
 
 # --- ci.yml wiring: the sharded mocked-regression Playwright lane (#2844) ---------------

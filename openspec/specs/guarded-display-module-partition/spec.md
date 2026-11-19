@@ -1,8 +1,10 @@
 # guarded-display-module-partition Specification
 
 ## Purpose
-TBD - created by archiving change split-guarded-display-modules. Update Purpose after archive.
+Keep the hand-written display modules split into smaller modules without changing behaviour: the display route facade keeps its patchable surface, the runtime OpenAPI schema is unchanged, migrated SQL and source-text assertions stay non-vacuous, and the frontend overview contract and store modules keep their exports.
+
 ## Requirements
+
 ### Requirement: Display route facade keeps its patchable module surface
 
 The system SHALL keep `apps.api.routes.hydro_display` behaving as the module that
@@ -69,25 +71,6 @@ introduce an exemption for any module created by their partitioning.
 - **WHEN** a commit modifies one of the previously exempt files
 - **THEN** the large-file guard permits it without consulting an exemption entry
 
-### Requirement: Targeted CI selection covers every new partition
-
-The system SHALL select every partition of a split test file and every owner
-module of a split source file in the pull-request targeted-test lane, so that
-partitioning does not reduce what the lane executes.
-
-#### Scenario: Every collectible partition replaces the single target
-
-- **GIVEN** a registry entry named a test file that is now partitioned
-- **WHEN** the selector runs against a diff touching the guarded module
-- **THEN** it selects every collectible partition of that file
-- **AND** the lane executes assertions rather than degrading to collection-only
-
-#### Scenario: New owner modules are inside the guarded closure
-
-- **WHEN** a new display owner module is imported by non-gated modules
-- **THEN** the guarded-module closure registry covers it
-- **AND** the closure guard reports no gap
-
 ### Requirement: Migrated SQL and source-text assertions stay non-vacuous
 
 The system SHALL keep every assertion that slices generated SQL by landmark, and
@@ -120,4 +103,3 @@ partitioning, with unchanged export names and signatures.
 - **THEN** every existing importer resolves the same exported names
 - **AND** no test file under `apps/frontend/src` is modified
 - **AND** typecheck, unit tests and production build pass
-
