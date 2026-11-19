@@ -2927,7 +2927,7 @@ def test_lineage_cutover_is_scoped_per_source(tmp_path: Path) -> None:
 
 
 def _published_hydro_candidate_state_decision(
-    candidate: Any, state: Mapping[str, Any] | None
+    candidate: Any, state: Mapping[str, Any] | None, *, event_evidence: bool = True
 ) -> Any:
     return _scheduler_state_decision._candidate_state_decision(
         candidate,
@@ -2946,6 +2946,7 @@ def _published_hydro_candidate_state_decision(
                 "output_uri": f"s3://nhms/runs/{candidate.run_id}/output/",
             },
         },
+        event_evidence=event_evidence,
     )
 
 

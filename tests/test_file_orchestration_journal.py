@@ -7549,7 +7549,7 @@ def _discovery_and_quarantine_harness(
         source_horizon_metadata=lambda discovery, adapter: {},
         candidate_factory=lambda *a, **k: candidate,
         candidate_state_provider_caller=lambda *a, **k: None,
-        candidate_state_decider=lambda candidate, state: None,
+        candidate_state_decider=lambda candidate, state, **_kwargs: None,
         required_lead_hours_for_candidate=lambda candidate, source_cycle: base_lead,
     )
     construction_context = scheduler_candidates_module.SchedulerCandidateConstructionContext(

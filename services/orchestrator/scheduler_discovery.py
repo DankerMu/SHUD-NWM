@@ -149,10 +149,9 @@ class SchedulerDiscoveryContext:
     source_horizon_metadata: Callable[[CycleDiscovery, CycleDiscoveryAdapter], dict[str, Any]]
     candidate_factory: Callable[..., SchedulerCandidateLike]
     candidate_state_provider_caller: Callable[..., Mapping[str, Any] | None]
-    candidate_state_decider: Callable[
-        [SchedulerCandidateLike, Mapping[str, Any] | None],
-        CandidateStateDecisionLike | None,
-    ]
+    # ``(candidate, state, *, event_evidence: bool)``: completion scoring always
+    # passes ``event_evidence=False`` (#3223), so a decider must accept it.
+    candidate_state_decider: Callable[..., CandidateStateDecisionLike | None]
     model_source_is_out_of_scope: Callable[[SchedulerModelLike, CycleDiscovery], bool] | None = None
     strict_warm_start_for_candidate: Callable[
         [SchedulerCandidateLike, SchedulerSourceCycle],
@@ -359,7 +358,10 @@ def _cycle_completion_verdict(
                 job_limit=context.config.candidate_state_job_limit,
                 event_limit=context.config.candidate_state_event_limit,
             )
-            decision = context.candidate_state_decider(candidate, state)
+            # #3223: completion scoring reads the reason and a few non-event
+            # fields, never the per-event copy, and never publishes this
+            # decision -- so it asks the ladder not to build that copy.
+            decision = context.candidate_state_decider(candidate, state, event_evidence=False)
             # #1775 D1: the terminal decision is evaluated BEFORE the strict /
             # successor admission early-returns.  Warm-start admission answers
             # "should this run be STARTED"; it must never veto the finding that
@@ -441,7 +443,7 @@ def _cycle_completion_verdict(
                 job_limit=context.config.candidate_state_job_limit,
                 event_limit=context.config.candidate_state_event_limit,
             )
-            decision = context.candidate_state_decider(candidate, state)
+            decision = context.candidate_state_decider(candidate, state, event_evidence=False)
             if decision is None or decision.reason not in {
                 "terminal_hydro_success",
                 "terminal_pipeline_success",
