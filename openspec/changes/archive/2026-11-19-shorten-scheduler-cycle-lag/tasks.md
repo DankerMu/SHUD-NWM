@@ -2,21 +2,23 @@
 
 ## 1. Repository
 
-- [ ] 1.1 `infra/env/compute.scheduler-dbfree.env.example`: `NHMS_SCHEDULER_CYCLE_LAG_HOURS=10`, with a comment giving
+- [x] 1.1 `infra/env/compute.scheduler-dbfree.env.example`: `NHMS_SCHEDULER_CYCLE_LAG_HOURS=10`, with a comment giving
       the rationale (measured completion, deferral of incomplete cycles, #3225) and the `LOOKBACK + LAG <= 48 h` bound.
-- [ ] 1.2 `services/orchestrator/operator_action_listing.py`: the production window values are quoted at three sites —
+- [x] 1.2 `services/orchestrator/operator_action_listing.py`: the production window values are quoted at three sites —
       `LIST_OPERATOR_ACTIONS_HELP` at `:310` ("lookback_hours=32 with cycle_lag_hours=16 ... the 16h lag") and `:312`
       ("production 32, code default 24"), and the docstring at `:733` ("production 32, code default 24"). All three
       state the window boundary without a production value. The code default (24) may stay: it is a code fact.
-- [ ] 1.3 Runbooks that quote the production lag. Sentences are rewritten, not number-swapped:
+- [x] 1.3 Runbooks that quote the production lag. Sentences are rewritten, not number-swapped:
       - `docs/runbooks/node22-control-plane-manual-recovery.md:208-209` (boundary (1) of exit 0);
       - `docs/runbooks/production-ops/recalibration-and-archive.md:311-313`: the release cutoff `t*` is `C + 10h`;
       - `docs/runbooks/tier-node27-timeseries-storage.md:4894-4898`: the dual constraint is `32 + 10 = 42 h <= 48 h`,
         no longer "aligned with" the compression lag; the advice for an outage longer than the window stays;
       - `docs/runbooks/production-ops/service-bringup.md:868`: same, `LOOKBACK=32` + `LAG=10` = 42 h <= 48 h;
       - `docs/runbooks/canonical-precip-mirror-backfill.md:139` ("默认 16").
+      - `docs/runbooks/production-ops/known-issues-state-index.md:797` ("node-22 lag 16：下限 400 h"; the file is
+        excluded from E3 for its worked-example table, so this line is listed here; found in review).
       Receipts under `docs/runbooks/receipts/` are history and stay as written.
-- [ ] 1.4 Tests:
+- [x] 1.4 Tests:
       - help text: parse `NHMS_SCHEDULER_LOOKBACK_HOURS` and `NHMS_SCHEDULER_CYCLE_LAG_HOURS` from the template with
         `tests.test_env_templates.parse_env_template`; assert `LIST_OPERATOR_ACTIONS_HELP` names
         `cycle_window.start_time_utc`, `cycle_window.end_time_utc`, `lookback_hours` and `cycle_lag_hours`, contains
@@ -31,13 +33,13 @@
         `selection_reason == "source_cycle_unavailable_does_not_consume_source_budget"`, and the audit row
         `gap_count == 1`, `unavailable_gap_count == 1`, `selected_count == 0`. A second case adds an older complete
         cycle is NOT required (completion needs a journal fixture); the one-cycle window is the claim under test.
-- [ ] 1.5 Receipt `docs/runbooks/receipts/2026-11-19-scheduler-cycle-lag-10h.md` with the measurement table, the
+- [x] 1.5 Receipt `docs/runbooks/receipts/2026-11-19-scheduler-cycle-lag-10h.md` with the measurement table, the
       node-22 apply log and the first passes under the new lag.
 
 ## 2. Production (orchestrator, node-22)
 
-- [ ] 2.1 Apply at a pass boundary with the `gap_count = 0` pre-check; backup outside the env dir.
-- [ ] 2.2 First pass under the new lag is `planned`/`ready`; the first eligible cycle is selected and submitted.
+- [x] 2.1 Apply at a pass boundary with the `gap_count = 0` pre-check; backup outside the env dir.
+- [x] 2.2 First pass under the new lag is `planned`/`ready`; the first eligible cycle is selected and submitted.
 
 ## Evidence Floor
 

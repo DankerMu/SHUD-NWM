@@ -794,7 +794,7 @@ generation 为 `str(model_package_checksum or "")`（无 checksum 即 `""` 这�
 re-export）+ `cycle_lag_hours` + 48，否则 `repair_retention_window_too_short`
 （evidence 带 `floor_hours`）。lag 取 `--cycle-lag-hours`，缺省读
 `NHMS_SCHEDULER_CYCLE_LAG_HOURS`；两者都没有（或非整数）→ `repair_cycle_lag_unset`。
-node-22 lag 16：下限 400 h，默认 21 天（504 h）通过，17 天是最小可用值。
+node-22 lag 10（#3225；此前 16、下限 400 h）：下限 394 h，默认 21 天（504 h）通过，17 天是最小可用值。
 人工 enforce 的最小天数（与 watch 同一算法）：`floor_hours // 24 + 1`，即
 `(336 + lag + 48) // 24 + 1`；lag 294 → 678 // 24 + 1 = 29。lag ≥ 120 时默认 21 天会被拒，
 dry-run 与 enforce 都要显式带 `--retention-days <N>`（`N` 取该值或 watch receipt 里的
