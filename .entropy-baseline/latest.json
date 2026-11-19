@@ -20,7 +20,7 @@
       "target": "Stage large decomposition of services/orchestrator/scheduler.py and services/orchestrator/chain.py"
     }
   ],
-  "commit": "74e85e8d9f6c",
+  "commit": "194a55553b2a",
   "high_spread_patterns": [
     {
       "axis": "legacy/dead-code",
@@ -126,7 +126,7 @@
       "node_modules",
       "openspec/changes/archive (stale-display-route-token only)"
     ],
-    "source_report_generated_at": "2026-11-19T16:55:50+00:00",
+    "source_report_generated_at": "2026-11-19T17:28:24+00:00",
     "source_report_mode": "report-only",
     "source_report_schema": "governance-4a.entropy-report.v1",
     "summary_counts": {
@@ -705,8 +705,8 @@
     "total_instruction_files": 15,
     "total_modules": 23,
     "total_source_files": 4822,
-    "total_test_files": 852
+    "total_test_files": 853
   },
-  "timestamp": "2026-11-19T16:55:30Z",
+  "timestamp": "2026-11-19T17:28:05Z",
   "version": 1
 }
