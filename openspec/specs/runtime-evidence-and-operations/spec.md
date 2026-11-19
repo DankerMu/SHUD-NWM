@@ -23,7 +23,7 @@ AND it does not download data, submit Slurm jobs, run SHUD, or mutate hydro/met 
 WHEN CI or PR validation runs
 THEN it uses deterministic fixtures and focused tests for discovery, idempotency, Slurm preflight/export, array partial states, and evidence formatting
 AND full live GFS/IFS/SHUD multi-cycle execution remains opt-in
-AND final production readiness remains false unless accepted live receipts satisfy the readiness proof contract.
+AND the scheduler evidence records `final_production_readiness_claimed=false`.
 
 #### Scenario: dry-run no mutation
 
@@ -64,7 +64,7 @@ both; producer-to-fixture synchronisation is a separate obligation.
 #### Scenario: candidate lists degrade to bounded summaries before being dropped
 
 - WHEN the bounded fallback payload is constructed
-- THEN `candidates`, `blocked_candidates`, and `skipped_candidates` are populated row-for-row with fixed-key summary rows carrying candidate identity (including the readiness-reader identity keys `source_id`, `cycle_time_utc`, `scenario_id`, and for admitted candidates `run_id` and `forcing_version_id`), status, reason, and the incident-critical candidate state-evidence subset (scheduler decision, missing-forcing repair status, journal-predecessor quarantined skip reason), each value passed through from the already-redacted source payload with keys absent from a row when the source value is absent or null
+- THEN `candidates`, `blocked_candidates`, and `skipped_candidates` are populated row-for-row with fixed-key summary rows carrying candidate identity (including the identity keys `source_id`, `cycle_time_utc`, `scenario_id`, and for admitted candidates `run_id` and `forcing_version_id`), status, reason, and the incident-critical candidate state-evidence subset (scheduler decision, missing-forcing repair status, journal-predecessor quarantined skip reason), each value passed through from the already-redacted source payload with keys absent from a row when the source value is absent or null
 - AND `limit.candidate_lists` is `summarized`
 - AND only if the summarized payload still exceeds the bound does the existing droppable tier empty the lists, progressively in field order and stopping as soon as the payload fits, so a partial drop can leave the later lists as summaries
 - AND `limit.candidate_lists` is set to `dropped` only when that tier empties a candidate list that still held rows; emptying an already-empty candidate list drops nothing and the marker stays `summarized`
@@ -621,7 +621,7 @@ The scheduler journal retention preflight (`config_from_env`) and the journal re
 
 Each scheduler pass SHALL emit structured evidence suitable for production operations and release review.
 
-The evidence SHALL distinguish execution modes from readiness claims. Deterministic, dry-run, simulated, or production-like scheduler evidence MAY support review and readiness lineage, but it SHALL NOT mark final production readiness true unless accepted live proof receipts satisfy the readiness proof contract.
+The evidence SHALL distinguish execution modes from readiness claims. Deterministic, dry-run, simulated, or production-like scheduler evidence MAY support review and readiness lineage, but it SHALL NOT mark final production readiness true: the scheduler always records `final_production_readiness_claimed=false`.
 
 #### Scenario: pass summary evidence
 
@@ -635,7 +635,7 @@ THEN evidence includes forcing station count, canonical product counts, SHUD out
 
 #### Scenario: bounded redacted evidence artifacts
 
-WHEN scheduler or readiness evidence is written or read
+WHEN scheduler evidence is written or read
 THEN the payload is bounded, redacted, and stored under the configured evidence or workspace root
 AND malformed, oversized, stale, mismatched, or unsafe evidence is recorded as blocked/release_blocked evidence rather than accepted success.
 

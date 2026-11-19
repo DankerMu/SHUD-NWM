@@ -102,3 +102,19 @@ them; their only static root is the `nhms-production` console script, which no p
   mentioned by any spec after this change.
 - Bring-up checklist C3 (cross-plane identity) has no validator behind it once the two-node e2e aggregator is gone; it is a
   live checklist item only. Whether it needs a tool is for #3231.
+
+## Added at PR review (#3232, round 1)
+
+- `production-ops-readiness`: "Monitoring and alerts cover closure risks" and "Runbooks and rollback drills are present" are
+  removed too. Their only implementation was the deleted `validate-ops` lane; the first names four metrics no live code
+  defines, the second rests on a runbook of `nhms-admin` commands that do not exist. Five runbooks go with them:
+  `docs/runbooks/rollback-drills.md`, `api-latency.md`, `object-store-failure.md`, `stale-analysis.md`,
+  `tile-publish-error.md`. The three alert runbooks `services/orchestrator/monitoring.py` links stay.
+- `runtime-evidence-and-operations`: four phrases that pointed at the retired readiness proof contract or the deleted
+  readiness reader are reworded in the main spec (the scheduler always records `final_production_readiness_claimed=false`).
+  Two of them sit in requirements this change did not otherwise touch, so those two edits were made in the main spec by hand.
+- Two producer assertions that lived inside fixture helpers of the deleted `tests/test_production_readiness_validation.py`
+  are re-homed as `tests/test_scheduler_pass_status_without_dispatch.py` (ledger section 3).
+- E2 (c) gains the bare sub-command pattern `validate-(ops|met|e2e|scale|slurm|object-store|readiness)` as a whole word; the
+  original pattern required the `nhms-production` prefix and missed `rollback-drills.md`.
+

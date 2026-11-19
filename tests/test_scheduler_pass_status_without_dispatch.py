@@ -9,8 +9,8 @@ producer-emitted pass evidence, pinning two branches of
 2. a pass where every candidate failed before any Slurm job id was assigned
    takes the ``any blocked/failed`` branch and reports ``preflight_blocked``.
 
-Re-homed by #3221 from the deleted ``tests/test_production_readiness_validation.py``,
-whose readiness-lane fixture helpers were the only tests of these branches.
+Re-homed by #3221 from the deleted readiness-lane test file, whose fixture
+helpers were the only tests of these branches.
 """
 
 from __future__ import annotations

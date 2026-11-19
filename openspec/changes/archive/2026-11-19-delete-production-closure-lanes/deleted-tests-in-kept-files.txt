@@ -29,3 +29,9 @@ tests/test_role_boundary_static.py::test_role_boundary_document_mentions_require
 tests/test_river_ts_text_identity_cleanup.py::test_the_register_covers_every_file_this_change_switched  # removed the services/production_closure/scale_validation.py unregistered list item
 tests/test_river_ts_read_path_surrogate_keys.py::test_hydro_map_plan_fixture_names_indexes_that_the_migration_chain_creates  # removed the plan-fixture half (services/production_closure/scale_validation.py QUERY_TARGETS); the two migration-chain `in creatable` assertions stay (D5/D10)
 tests/test_forcing_ts_template_census.py::test_the_declared_census_reproduces_the_fixture_baseline  # census row services/production_closure/two_node_e2e_readonly_db_lane.py: 2 removed (with its registry exemption row); arithmetic adds back ISSUE_3221_REMOVED_MENTIONS / _FILES
+
+== Section 3: producer assertions re-homed out of deleted fixture helpers (new id  # helper in tests/test_production_readiness_validation.py at master) ==
+
+tests/test_scheduler_pass_status_without_dispatch.py::test_zero_dispatch_reconciling_pass_reports_reconciling_with_no_submission  # _scheduler_reconciling_artifact (:4423-4453)
+tests/test_scheduler_pass_status_without_dispatch.py::test_all_candidates_failed_before_slurm_reports_preflight_blocked  # _scheduler_no_submission_failed_artifact (:4547-4575)
+

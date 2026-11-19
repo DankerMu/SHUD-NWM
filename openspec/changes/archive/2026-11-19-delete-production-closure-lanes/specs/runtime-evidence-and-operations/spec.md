@@ -16,7 +16,7 @@
 
 Each scheduler pass SHALL emit structured evidence suitable for production operations and release review.
 
-The evidence SHALL distinguish execution modes from readiness claims. Deterministic, dry-run, simulated, or production-like scheduler evidence MAY support review and readiness lineage, but it SHALL NOT mark final production readiness true unless accepted live proof receipts satisfy the readiness proof contract.
+The evidence SHALL distinguish execution modes from readiness claims. Deterministic, dry-run, simulated, or production-like scheduler evidence MAY support review and readiness lineage, but it SHALL NOT mark final production readiness true: the scheduler always records `final_production_readiness_claimed=false`.
 
 #### Scenario: pass summary evidence
 
@@ -30,7 +30,7 @@ THEN evidence includes forcing station count, canonical product counts, SHUD out
 
 #### Scenario: bounded redacted evidence artifacts
 
-WHEN scheduler or readiness evidence is written or read
+WHEN scheduler evidence is written or read
 THEN the payload is bounded, redacted, and stored under the configured evidence or workspace root
 AND malformed, oversized, stale, mismatched, or unsafe evidence is recorded as blocked/release_blocked evidence rather than accepted success.
 
