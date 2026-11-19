@@ -23,8 +23,9 @@ Broken down by calling line:
    itself, the state it reads and every other evidence field are unchanged, so the verdict is unchanged.
 2. The submitting path (`scheduler_candidates.py`) is not touched: its decisions and its published evidence stay
    byte-identical, `pipeline_events` included.
-3. Scheduler pass evidence records retention skips as per-reason counts plus a bounded sample of the skips that are
-   not the normal `within_retention_window` case, instead of one entry per key.
+3. Scheduler pass evidence stops listing the skips whose reason is `within_retention_window` one by one (11,124 of
+   11,420 entries and 1.76 of 1.84 MB in a production pass measured 2026-11-19); it records them as counts per root.
+   Every other skip stays listed as today.
 
 ## Fixture
 
@@ -44,20 +45,28 @@ Evidence floor: verdict/decision parity test incl. a recalibrated-model cycle; s
 - D1. One ladder, one switch. `_candidate_state_decision` gains an opt-out for the event evidence copy (keyword, default
   keeps today's behaviour). With the opt-out the key `pipeline_events` is **absent** from `decision.evidence`, not an
   empty list, so a reader cannot mistake "not built" for "no events". Nothing else in the evidence changes.
-- D2. Only `_cycle_completion_verdict` uses the opt-out. Its `context.candidate_state_decider` call passes it; test
-  doubles that take two positional arguments keep working (the implementer chooses how: a second context slot, or a
-  call that tolerates deciders without the keyword; no production decider may silently ignore it).
+- D2. Only `_cycle_completion_verdict` uses the opt-out, at both of its `context.candidate_state_decider` calls
+  (`scheduler_discovery.py:362` and `:444`). The keyword is passed unconditionally: no `TypeError` fallback, no
+  signature sniffing, so a decider cannot silently ignore it. The discovery and submit contexts are separate objects
+  bound to the same function (`scheduler_core.py:562`, `:942`), so the submit path keeps the default. The compat wrapper
+  already forwards `**kwargs` (`scheduler_state_compat.py:226-229`). The one two-argument decider double on the discovery
+  slot (`tests/test_file_orchestration_journal.py:7552`) is updated to accept the keyword.
 - D3. No cache, no new read path, no change to `candidate_state`, `_cycle_rows`, `_completion_scope`, the strict /
   successor providers or `_terminal_init_state_verdict`. #1567, #1661 and #1735 are preserved by not touching them.
-- D4. Retention in pass evidence: `counts` stays; `skipped` (the per-key list) is replaced by `skipped_by_reason`
-  (reason -> count, every reason present in the run) and `skipped_sample` (the first 50 skipped entries whose reason is
-  not `within_retention_window`, in the order retention produced them) plus `skipped_sample_omitted` (how many such
-  entries did not fit). `planned`, `deleted`, `failed`, `frontier`, `extra_roots`, `copyback_lock_failures` are unchanged.
-  The existing over-limit compaction keeps `skipped_by_reason` (a small scalar map) and may drop the sample.
-- D5. `RetentionResult` keeps the full list in memory (`frontier()` derives `protected_count` from it); only what the
-  scheduler writes into pass evidence is projected. A standalone retention receipt, if one exists, is out of scope and
-  must stay as it is: the implementer reports which callers of `to_dict()` exist.
-- D6. Out of scope, recorded on #3223 for #3227: the journal-side 37.5% (one read per cycle, raw state for verdicts),
-  and not re-scoring settled cycles at all.
+- D4. Retention in pass evidence (revised after fixture review: the first draft's 50-entry sample contradicted
+  "each exempted entry is recorded in the retention receipt's skipped list" and could crowd out abnormal skips).
+  `retention.skipped` keeps every skipped entry **except** those whose reason is `within_retention_window`; frontier
+  exemptions, protected static assets, symlinked roots, unparseable names, recently modified Slurm logs and
+  root-admission failures stay listed exactly as today. Two fields are added: `skipped_summary`, one row
+  `{root, reason, count}` per (root, reason) pair over **all** skips, whose counts sum to `counts.skipped`; and
+  `skipped_omits: ["within_retention_window"]`, so a reader can tell the list is partial. `schema_version` stays
+  `nhms.production_scheduler.retention.v2` (additive fields); `counts`, `planned`, `deleted`, `failed`, `frontier`,
+  `extra_roots`, `copyback_lock_failures` are unchanged. The existing over-limit compaction keeps `skipped_summary`
+  and `skipped_omits`.
+- D5. `RetentionResult` keeps the full list in memory (`frontier()` derives `protected_count` from it) and
+  `to_dict()` is unchanged: the standalone retention receipt (`services/orchestrator/cli.py:223`) keeps listing every
+  entry. Only what the scheduler writes into pass evidence is projected.
+- D6. Out of scope: the journal-side 37.5% (one read per cycle, no public sanitising of a state that is only
+  scored) and not re-scoring settled cycles at all. A follow-up performance issue is filed with the E6 numbers.
 
 design.md follows.
