@@ -75,3 +75,14 @@ Evidence floor: verdict/decision parity test incl. a recalibrated-model cycle; s
   scored) and not re-scoring settled cycles at all. A follow-up performance issue is filed with the E6 numbers.
 
 design.md follows.
+
+## Found during implementation
+
+- `missing_upstream_artifact` is not a reason the ladder returns; it is only the fallback text when a blocking
+  evidence mapping carries no `reason`. The parity matrix covers that branch through `forcing_version_row_absent`.
+- The keyword is `event_evidence: bool = True`. `SchedulerDiscoveryContext.candidate_state_decider` is now typed
+  `Callable[..., ...]` because completion scoring passes the keyword; the Any ratchet ceiling drops from 7635 to 7634.
+- `retention_slurm_log_lane.py` keeps the literal `within_retention_window` (it may not import `retention`); its
+  within-window skips are summarised like the others and pinned by the retention projection test.
+- The lineage case uses its own per-model repository: the existing backfill setup never reaches the decider.
+
