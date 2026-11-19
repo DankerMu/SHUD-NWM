@@ -3,7 +3,7 @@
 ### Requirement: Cross-plane pass gates
 
 **Reason**: The two-node E2E evidence lane that computed this verdict (`two_node_e2e_evidence`, `scripts/validate_two_node_e2e_evidence.py`) is deleted (#3221).
-**Migration**: None. The display read-only boundary stays specified by "Display readonly DB validation" (C2) and cross-plane identity by the C3 live check (`docs/runbooks/node-27-bringup-checklist.md`).
+**Migration**: None. The display read-only boundary stays specified by "Display readonly DB validation" (C2) and cross-plane identity remains item C3 of `docs/runbooks/node-27-bringup-checklist.md`, a live check with no validator behind it after this change.
 
 ### Requirement: Docker and E2E evidence location
 

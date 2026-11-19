@@ -51,8 +51,10 @@ them; their only static root is the `nhms-production` console script, which no p
   - Left as they are and handed to #3231: `infra/README.two-node-docker.md` (lines 789, 852 tell the operator to run the
     deleted `scripts/validate_two_node_e2e_evidence.py`), `tests/test_two_node_docker_runbook_environment_invariant.py`
     (pins that command text; it compares text only, so it stays green), `infra/docker/entrypoint.sh:43` (deny-list entry),
-    `tests/test_two_node_docker_runtime.py` (`:4244`, and the comment at `:36` naming the old workspace root). These four files
-    are exempt from E2.
+    `tests/test_two_node_docker_runtime.py` (`:4244`, and the comment at `:36` naming the old workspace root), and
+    `docs/runbooks/two-node-production-e2e-plan.md` (headed "historical / superseded M22 evidence plan"; its C2 command text
+    is pinned by the kept `tests/test_readonly_db_validation_routes.py`, and it still shows the deleted
+    `validate_two_node_e2e_evidence.py` commands). These five files are exempt from E2.
 
 ## Decisions
 
@@ -97,3 +99,5 @@ them; their only static root is the `nhms-production` console script, which no p
 
 - `production_mvt_readiness_claimed` (`services/tiles/mvt.py`, `apps/api/openapi_patching_display_schemas.py`) is no longer
   mentioned by any spec after this change.
+- Bring-up checklist C3 (cross-plane identity) has no validator behind it once the two-node e2e aggregator is gone; it is a
+  live checklist item only. Whether it needs a tool is for #3231.
