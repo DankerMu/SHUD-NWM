@@ -1,7 +1,8 @@
 name: Full Regression Watch
 
-# #2044: `Unit Tests (full)` runs only on master pushes, after the PR checks
-# were already green, so a wall-killed or failed full run turned nothing red.
+# #2044: a wall-killed or failed `Unit Tests (full)` run on a master push turned
+# nothing red after merge. Since #3219 PRs run the same job, but a master push
+# can still fail where its PR passed (master moved on since the PR ran).
 # This workflow inspects that job each time CI completes on master and fails
 # with the SHA and the run when it was cancelled or failed; the margin step
 # warns when the P95 of recent successful runs nears the job's timeout.

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Watch the master ``Unit Tests (full)`` shards of the CI workflow (#2044, #2710).
 
-The full suite runs only after merge, on master pushes. When it is cancelled at
-the wall, or fails, nothing else turns red: PR checks were already green. This
-watcher is run by ``.github/workflows/full-regression-watch.yml`` whenever CI
-completes on master and has two subcommands.
+The full suite runs on pull requests and again on master pushes (#3219). When a
+master push run is cancelled at the wall, or fails, nothing else turns red: the
+PR was already merged. This watcher is run by
+``.github/workflows/full-regression-watch.yml`` whenever CI completes on master
+and has two subcommands.
 
 The full regression is a matrix. "The full job" here means every shard job the
 ``unit-test`` matrix of ci.yml declares: the names ``Unit Tests (full) (<shard>)``

@@ -2,16 +2,17 @@
 
 A floating ``pip install -e ".[dev]"`` resolved eccodes 2.49 plus the
 ``eccodeslib``/``eckitlib`` wheels; eckit's bundled PROJ, loaded RTLD_GLOBAL,
-collided with pyproj's own PROJ and killed the targeted Unit Tests at
-interpreter exit after every test had passed. The jobs now run
+collided with pyproj's own PROJ and killed a pytest job at interpreter exit
+after every test had passed. The jobs now run
 ``uv sync --locked --all-extras --dev`` and put the venv on PATH through
-``$GITHUB_PATH`` only, because the existing selector pins forbid job- and
-workflow-level ``env`` overrides of PATH.
+``$GITHUB_PATH`` only; job- and workflow-level ``env`` overrides of PATH are
+forbidden.
 """
 
 from __future__ import annotations
 
 import copy
+import re
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +21,7 @@ import yaml
 
 CI_WORKFLOW_PATH = Path(".github/workflows/ci.yml")
 LOCKED_SYNC = "uv sync --locked --all-extras --dev"
-REQUIRED_PYTEST_JOBS = ("real-db-integration", "unit-test", "unit-test-targeted")
+REQUIRED_PYTEST_JOBS = ("real-db-integration", "unit-test")
 
 
 def _workflow() -> dict[str, Any]:
@@ -31,8 +32,13 @@ def _run_scripts(job: dict[str, Any]) -> list[str]:
     return [str(step.get("run", "")) for step in job.get("steps", []) if isinstance(step, dict)]
 
 
+# The word `pytest`, except as the key of a `key=value` pair: the `changes` job
+# writes its `pytest=<bool>` gate output (#3219) and installs nothing.
+_PYTEST_WORD = re.compile(r"(?<![\w.-])pytest(?![\w=-])")
+
+
 def _runs_pytest(job: dict[str, Any]) -> bool:
-    return any("pytest" in run for run in _run_scripts(job))
+    return any(_PYTEST_WORD.search(run) for run in _run_scripts(job))
 
 
 def _locked_install_violations(workflow: dict[str, Any]) -> list[str]:
@@ -66,6 +72,27 @@ def _locked_install_violations(workflow: dict[str, Any]) -> list[str]:
 
 def test_every_pytest_job_installs_from_the_lock_and_sets_path_via_github_path() -> None:
     assert _locked_install_violations(_workflow()) == []
+
+
+@pytest.mark.parametrize(
+    ("run", "expected"),
+    [
+        ("pytest -q", True),
+        ('cd tests && pytest "${files[@]}"', True),
+        ("python -m pytest tests/", True),
+        ('echo "pytest=$result" >> "$GITHUB_OUTPUT"', False),
+        ("rm -rf .pytest_cache", False),
+    ],
+)
+def test_a_pytest_job_is_one_whose_steps_name_pytest_as_a_word_not_an_output_key(run: str, expected: bool) -> None:
+    assert _runs_pytest({"steps": [{"run": run}]}) is expected
+
+
+def test_the_changes_job_gate_output_does_not_make_it_a_pytest_job() -> None:
+    changes = _workflow()["jobs"]["changes"]
+
+    assert any("pytest=" in run for run in _run_scripts(changes))
+    assert not _runs_pytest(changes)
 
 
 def test_lock_sync_runs_before_the_first_pytest_step() -> None:
