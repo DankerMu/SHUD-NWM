@@ -1,9 +1,7 @@
 """Tile SQL shape and the ``#2030`` budget-truncation signal (hydro MVT scaling).
 
 One partition of the original ``tests/test_hydro_display_mvt_scaling.py``
-(#2074). This file keeps the original path because
-``openspec/specs/ci-contract-baseline/spec.md`` pins it. Shared doubles live in
-``tests/hydro_display_mvt_helpers.py``.
+(#2074). Shared doubles live in ``tests/hydro_display_mvt_helpers.py``.
 """
 
 from __future__ import annotations
