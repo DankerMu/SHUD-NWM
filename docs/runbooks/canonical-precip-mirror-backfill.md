@@ -136,7 +136,9 @@ curl -s -o /dev/null -D - "http://127.0.0.1:8080/api/v1/precip/$S/$CYCLE/$VT.png
 
 `cycles` 端点与盘上镜像**同时**停在同一个周期，说明不是镜像断链，而是上游没产出。
 这时不要回填（没有源可填），去查 node-22 的 `nhms-compute-scheduler` pass 日志与 `.err`：
-`cycle_lag_hours`（默认 16）决定一个新周期最早什么时候进入候选窗口，未到窗口不产出是正常的。
+`cycle_lag_hours`（生产值见 `infra/env/compute.scheduler-dbfree.env.example`，#3225 起为 10；代码默认 0）
+决定一个新周期最早什么时候进入候选窗口，未到窗口不产出是正常的；进了窗口但 raw 数据未齐的周期会被推迟到数据齐后的
+第一趟 pass，同样不是故障。
 
 ## 6. 已知边界
 

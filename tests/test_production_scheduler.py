@@ -32404,6 +32404,61 @@ def test_backfill_skips_unavailable_gap_and_selects_oldest_available_for_warm_st
     assert audit["deferred_count"] == 1
 
 
+def test_backfill_defers_a_newest_cycle_whose_raw_data_is_not_ready(
+    tmp_path: Path,
+) -> None:
+    """#3225: a cycle inside the window but with incomplete raw data is deferred, not submitted.
+
+    The steady state a cycle lag close to the measured raw-data completion makes
+    reachable: the only gap is the newest cycle and node-22 reports it unavailable.
+    The pass builds nothing for it and does not count it as a blocked candidate; a
+    later pass picks it up once its data completes.
+    """
+
+    config = _config(
+        tmp_path,
+        now=_dt("2026-05-21T18:00:00Z"),
+        dry_run=False,
+        backfill_enabled=True,
+        max_cycles_per_source=1,
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={
+            "gfs": FakeAdapter(
+                "gfs",
+                [
+                    (
+                        "2026-05-21T12:00:00Z",
+                        False,
+                        {"reason": "nfs_raw_manifest_raw_files_missing", "retryable": True, "status": "invalid"},
+                    ),
+                ],
+            )
+        },
+        active_repository=FakeActiveRepository(active=False),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["status"] == "planned"
+    assert result.evidence["counts"]["candidate_count"] == 0
+    assert result.evidence["counts"]["blocked_candidate_count"] == 0
+    assert orchestrator.calls == []
+    entries = [item for item in result.evidence["source_cycles"] if item.get("cycle_id") == "gfs_2026052112"]
+    assert len(entries) == 1
+    assert entries[0]["selection_status"] == "not_selected"
+    assert entries[0]["selection_reason"] == "source_cycle_unavailable_does_not_consume_source_budget"
+    audit = next(item for item in result.evidence["backfill"]["audit"] if item["source_id"] == "gfs")
+    assert audit["gap_count"] == 1
+    assert audit["unavailable_gap_count"] == 1
+    assert audit["selected_count"] == 0
+
+
 def test_backfill_probe_failed_gap_keeps_retryable_evidence_and_does_not_consume_budget(
     tmp_path: Path,
 ) -> None:

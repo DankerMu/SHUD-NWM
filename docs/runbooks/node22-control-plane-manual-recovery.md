@@ -204,10 +204,11 @@ receipt 字段：`evidence_root`（**实际扫描的** root，按上面那条自
   既不清除也不拉响更早那趟隐藏 pass 的警报。**整窗口都是窄范围 pass 时结果是 `3`，不是 `0`**。
 - **`0` 的四条已知边界（已裁决，不是缺陷，但读 `0` 时必须知道）**：
   1. **时间窗**：`0` 断言的是「这趟 pass 在**它自己的**时间窗
-     `[cycle_window.start_time_utc, cycle_window.end_time_utc]` 内没有待办」。生产跑
-     `lookback_hours=32` + `cycle_lag_hours=16`，即最近 16 小时的 cycle 不落在任何窗口里。仓内
-     不存在可比的「完整时间窗」权威（生产 32、代码默认 24），所以窗口宽度本身不判收窄，只有零宽
-     那个退化值判。
+     `[cycle_window.start_time_utc, cycle_window.end_time_utc]` 内没有待办」。窗口止于 pass 时刻往前
+     `cycle_lag_hours`、再往前跨 `lookback_hours`；生产值以 `infra/env/compute.scheduler-dbfree.env.example`
+     为准（#3225 起 lookback 32 h、lag 10 h），即比 lag 更新的 cycle 不落在任何窗口里。仓内
+     不存在可比的「完整时间窗」权威（生产值与代码默认 lookback 24 并不一致），所以窗口宽度本身不判
+     收窄，只有零宽那个退化值判。
   2. **单槽**：backfill 腿每源每趟只求值**最旧的一个**未完成 cycle
      （`scheduler_discovery.py:836`），更新的 gap 记为
      `backfill_deferred_waiting_for_prior_cycle`。**不要读得比实际悲观**：`remaining_gaps` 是

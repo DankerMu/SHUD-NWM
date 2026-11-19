@@ -4891,11 +4891,12 @@ outside the lag window.
 预留膨胀空间（历史实测 ~400 G/周,先 `df -h /home`），追平后由
 compression timer 按 lag 自动重新压缩。
 
-node-22 侧的对偶约束（2026-09-22）：调度器回填深度 `NHMS_SCHEDULER_LOOKBACK_HOURS +
-NHMS_SCHEDULER_CYCLE_LAG_HOURS` 生产固定为 32 + 16 = 48 h，与本 lag 对齐，保证常态下
-回填（含新流域冷启动追赶）不会写进已压缩 chunk。超过 48 h 的中断恢复，除本节的先解压外，
-还须临时调大 node-22 的 lookback 覆盖中断跨度（否则中断前的 cycle 在窗外、下一个 cycle
-永久等待前驱），追平后改回 32。见 `production-ops/service-bringup.md` §3.1.1。
+node-22 侧的对偶约束（2026-09-22；#3225 调整 lag）：调度器回填深度 `NHMS_SCHEDULER_LOOKBACK_HOURS +
+NHMS_SCHEDULER_CYCLE_LAG_HOURS` 必须 ≤ 本 lag（48 h），生产取 32 + 10 = 42 h，留 6 h 余量（lag 取
+16 h 时二者之和恰等于 48 h），保证常态下回填（含新流域冷启动追赶）不会写进已压缩 chunk。
+超过 48 h 的中断恢复，除本节的先解压外，还须临时调大 node-22 的 lookback 覆盖中断跨度（否则
+中断前的 cycle 在窗外、下一个 cycle 永久等待前驱），追平后改回 32。见
+`production-ops/service-bringup.md` §3.1.1。
 
 #### 4.3.3 Recreating the `nhms-db` container (mount-critical)
 

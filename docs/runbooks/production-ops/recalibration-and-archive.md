@@ -308,9 +308,11 @@ cd /scratch/frd_muziyao/NWM && { setsid nohup .venv/bin/python -m scripts.node22
 **所以顺序不是"省一个 cycle"的优化，是正确性约束**；稳妥做法是整段 rollout 期间
 让 `nhms-compute-scheduler.timer` 处于 disabled，从结构上关掉这个放行窗口。
 
-**`t*` 怎么选**：pass evidence 的 `cycle_window` 实测 `cycle_lag_hours=16`、
-`end_time_utc = now − 16h`、cycle 步长 12h。所以 cycle `C` 进入调度窗口的时刻是 `C + 16h`，
-这就是发布截止时间。克隆行的 `valid_time` 必须**等于** `C` 本身（不是 `C − lead`）——
+**`t*` 怎么选**：lag 读最近一趟 pass evidence 的 `cycle_window.cycle_lag_hours`，生产配置
+`NHMS_SCHEDULER_CYCLE_LAG_HOURS` 自 #3225 起是 10，于是 `end_time_utc` 是 `now − 10h` 向下取整到
+cycle 边界、cycle 步长 12h。所以 cycle `C` 最早进入调度窗口的时刻是 `C + 10h`（raw 数据未齐时
+该 cycle 被推迟、实际更晚，但截止按最早算），这就是发布截止时间；evidence 读到的 lag 若不是 10，
+按实读值重算。克隆行的 `valid_time` 必须**等于** `C` 本身（不是 `C − lead`）——
 判据见 `packages/common/state_manager.py` 里 expected-predecessor key 的注释。
 
 **manifest 只能直接发布，没有闸可走。** 生产两个 env 都设了
