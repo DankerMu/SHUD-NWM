@@ -118,9 +118,8 @@ class _LeaseHeartbeat:
     def register_touch_path(self, path: Path | str) -> None:
         """Also refresh ``path``'s mtime on every successful renewal (#2405).
 
-        OPT-IN, and default off: the other two users of this class
-        (``file_orchestration_migration.py``, ``scripts/m24_lease_nfs_proof.py``)
-        hold no reservation to refresh.  ``run_once`` registers the pass's
+        OPT-IN, and default off: the other user of this class
+        (``file_orchestration_migration.py``) holds no reservation to refresh.  ``run_once`` registers the pass's
         ``*.pre_execution.json`` only AFTER the reservation is ``reserved`` --
         the heartbeat starts at pass start, when no such file exists yet.
         """

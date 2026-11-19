@@ -90,13 +90,7 @@ STRUCTURAL_HOTSPOT_MODULES: dict[str, dict[str, object]] = {
     },
     "services/production_closure": {
         "priority": "P1",
-        "structure": {
-            "score": "high",
-            "hotspots": [
-                "services/production_closure/two_node_e2e_evidence.py",
-                "services/production_closure/readiness_validation.py",
-            ],
-        },
+        "structure": {"score": "high"},
         "behavior": {"score": "medium"},
         "context": {"score": "medium"},
         "protocol": {"score": "medium"},

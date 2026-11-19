@@ -5,7 +5,7 @@ Pinned here:
 * tier 4b -- the candidate-list summary is retried COMPACT before the
   fail-closed fallback, so a pass whose indent-2 summary overflows but whose
   compact summary fits keeps its TRUE status (artifact, ``SchedulerPassResult``
-  and CLI) and is read by readiness, ``list-operator-actions`` and the node-22
+  and CLI) and is read by ``list-operator-actions`` and the node-22
   stall probe exactly like the same pass written in full;
 * ``limit.lane_bytes`` -- the fallback names the overflowing top-level lanes,
   added only after the fallback product is fitted, only while ``limit`` still
@@ -616,35 +616,6 @@ def test_a_long_submitted_pass_keeps_its_status_in_the_artifact_result_and_cli(
 
     assert payload["status"] == "submitted"
     assert payload["passes"][0]["status"] == "submitted"
-
-
-def test_readiness_reads_the_compact_summary_pass_exactly_like_the_full_pass(
-    long_submitted_pass: SimpleNamespace,
-) -> None:
-    from services.production_closure import readiness_scheduler_evidence
-
-    persisted = json.loads(long_submitted_pass.tier_path.read_text(encoding="utf-8"))
-    full_errors = readiness_scheduler_evidence._scheduler_evidence_errors(long_submitted_pass.full)
-    tier_errors = readiness_scheduler_evidence._scheduler_evidence_errors(persisted)
-
-    # The verdict, not only the error lists (two empty lists would compare equal
-    # on a blocked pass too): the reader's status for the compact-summary pass is
-    # the full pass's, and it is ``passed`` -- never review-blocked.
-    readiness_status = readiness_scheduler_evidence._scheduler_readiness_status
-    full_verdict = readiness_status(long_submitted_pass.full, errors=full_errors)
-    tier_verdict = readiness_status(persisted, errors=tier_errors)
-    assert (tier_verdict, full_verdict) == ("passed", "passed")
-    assert persisted["status"] not in readiness_scheduler_evidence.SCHEDULER_REVIEW_BLOCKED_STATUSES
-    assert persisted["status"] in readiness_scheduler_evidence.SCHEDULER_REVIEW_PASSED_STATUSES
-    assert full_errors == tier_errors == []
-    assert persisted["status"] == "submitted"
-    assert not [
-        error
-        for error in full_errors
-        if "submitted_count_model_run_evidence_mismatch" in error
-        or "_missing_" in error
-        or "_identity_mismatch" in error
-    ]
 
 
 def test_list_operator_actions_reads_the_compact_summary_pass_as_evaluating(

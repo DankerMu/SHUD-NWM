@@ -46,7 +46,6 @@ from services.orchestrator import (
     scheduler_candidates,
     scheduler_state_types,
 )
-from services.production_closure import readiness_item_contracts, readiness_validation, slurm_validation
 from services.slurm_gateway import real_backend
 from tests.test_hydro_status_set_parity import _fold_enum_members
 from workers.output_parser import parser
@@ -365,10 +364,8 @@ _CANONICAL_SITES: tuple[tuple[str, ModuleType, str, type, frozenset[str] | tuple
     ("CYCLE_TERMINAL_UI", pipeline_route, "_TERMINAL_CYCLE_STATUSES", set, _CYCLE_TERMINAL_UI),
     ("CYCLE_TERMINAL_UPSERT", met_store, "_TERMINAL_CYCLE_STATUSES", tuple, _CYCLE_TERMINAL_UPSERT),
     ("CYCLE_UPSERT_PRESERVED", met_store, "_UPSERT_PRESERVED_CYCLE_STATUSES", tuple, _CYCLE_UPSERT_PRESERVED),
-    ("SLURM_TERMINAL_STATES", slurm_validation, "TERMINAL_SLURM_STATES", set, _SLURM_TERMINAL),
     ("SLURM_TERMINAL_SUCCESS", run_qhh_continuous, "SLURM_TERMINAL_SUCCESS", set, _SLURM_SUCCESS),
     ("SLURM_TERMINAL_FAILURE", run_qhh_continuous, "SLURM_TERMINAL_FAILURE", set, _SLURM_FAILURE),
-    ("READINESS_ITEM_STATUSES", readiness_item_contracts, "STATUS_VALUES", frozenset, _READINESS_ITEM),
 )
 
 
@@ -556,21 +553,14 @@ def test_non_orchestrator_first_slice_sites_rebind_the_vocabulary() -> None:
 
 
 def test_non_orchestrator_follow_up_sites_rebind_the_vocabulary() -> None:
-    """Task 2.4 follow-up: the Slurm sites are `set` copies, the readiness set the frozenset itself.
-
-    `readiness_validation` re-exports `readiness_item_contracts.STATUS_VALUES`, so
-    both names must be the one vocabulary object.
-    """
+    """Task 2.4 follow-up: the Slurm sites are `set` copies of the vocabulary."""
 
     for site, vocabulary_value in (
-        (slurm_validation.TERMINAL_SLURM_STATES, vocab.SLURM_TERMINAL_STATES),
         (run_qhh_continuous.SLURM_TERMINAL_SUCCESS, vocab.SLURM_TERMINAL_SUCCESS),
         (run_qhh_continuous.SLURM_TERMINAL_FAILURE, vocab.SLURM_TERMINAL_FAILURE),
     ):
         assert type(site) is set
         assert site == vocabulary_value
-    assert readiness_item_contracts.STATUS_VALUES is vocab.READINESS_ITEM_STATUSES
-    assert readiness_validation.STATUS_VALUES is vocab.READINESS_ITEM_STATUSES
 
 
 def test_allowlist_has_no_pending_migration() -> None:

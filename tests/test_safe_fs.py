@@ -283,30 +283,6 @@ def test_environment_file_lane_reports_configuration_invalid(
     assert list(tmp_path.iterdir()) == []
 
 
-def test_met_evidence_lane_reports_a_structured_evidence_code(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # Escape surface B, spot check.  The end-to-end closure of #1622 is covered
-    # by tests/test_production_met_validation.py, which exercises
-    # `ProductionMetConfig.from_env` and `validate_met` directly; this spot
-    # check pins the writer's own containment-gate refusal.
-    from services.production_closure.met_validation import (
-        EvidenceWriter,
-        ProductionMetValidationError,
-    )
-
-    monkeypatch.chdir(tmp_path)
-    evidence_root = Path(_UNKNOWN_HOME) / "evidence"
-    writer = EvidenceWriter(evidence_root, evidence_root / "met")
-
-    with pytest.raises(ProductionMetValidationError) as excinfo:
-        writer.prepare()
-
-    assert excinfo.value.error_code.startswith("PRODUCTION_MET_EVIDENCE_")
-    assert list(tmp_path.iterdir()) == []
-
-
 # --- safe_fs_paths leaf (#3155) ------------------------------------------------
 #
 # The error type and the path-expansion helpers live in the leaf module

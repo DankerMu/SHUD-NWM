@@ -5,7 +5,6 @@ and validating that a configured SHUD binary is runnable before any Slurm
 submission or runtime invocation happens. It is reused by:
 
 - ``workers.shud_runtime.runtime`` (runtime-level guard before ``subprocess``),
-- ``services.production_closure.slurm_validation`` (offline preflight evidence),
 - ``services.orchestrator.scheduler`` (pass-level pre-submit gate).
 
 Every external probe (``--version``/``--help``, ``ldd``) is bounded by a timeout

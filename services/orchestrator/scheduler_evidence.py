@@ -30,9 +30,9 @@ UNKNOWN_AFTER_ATTEMPT = "unknown_after_attempt"
 #: pass writers emit ``f"{pass_id}.json"`` / ``f"{pass_id}.pre_execution.json"``
 #: with a ``scheduler_``-prefixed pass id (``scheduler_runtime.py``), and the
 #: no-progress tracker deliberately does NOT use the prefix so retention skips
-#: it.  Readiness root discovery and evidence retention both classify through
-#: this single predicate so a permanent tracker, temp files, or unrelated
-#: top-level JSON can never become pass evidence or consume the discovery cap.
+#: it.  Evidence retention classifies through this single predicate (the
+#: stall-health probe mirrors its constants) so a permanent tracker, temp files,
+#: or unrelated top-level JSON can never become pass evidence.
 SCHEDULER_PASS_EVIDENCE_PREFIX = "scheduler_"
 SCHEDULER_PASS_EVIDENCE_SUFFIXES = (".pre_execution.json", ".json")
 

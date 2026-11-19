@@ -17,12 +17,6 @@ import yaml
 
 from scripts import validate_two_node_docker_runtime as docker_runtime
 from services.orchestrator import source_cycle_raw_manifest
-from services.production_closure import (
-    two_node_e2e_docker_security,
-)
-from services.production_closure import (
-    two_node_e2e_evidence as e2e_evidence,
-)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -1280,49 +1274,6 @@ def test_static_checker_rejects_display_service_object_store_root(
 
     assert result.status == "FAIL"
     assert "DISPLAY_FORBIDDEN_ENV" in _codes(result)
-
-
-@pytest.mark.parametrize(
-    ("env_key", "value"),
-    [
-        ("NHMS_SCHEDULER_LOCK_ROOT", "/scratch/private/scheduler-locks"),
-        ("NHMS_SCHEDULER_LOCK_ROOT", ""),
-        ("NHMS_SCHEDULER_EVIDENCE_ROOT", "/scratch/private/scheduler-evidence"),
-        ("NHMS_SCHEDULER_EVIDENCE_ROOT", ""),
-        ("NHMS_SCHEDULER_RUNTIME_ROOT", "/scratch/private/scheduler-runtime"),
-        ("NHMS_SCHEDULER_RUNTIME_ROOT", ""),
-        ("NHMS_SCHEDULER_TEMP_ROOT", "/scratch/private/scheduler-temp"),
-        ("NHMS_SCHEDULER_TEMP_ROOT", ""),
-    ],
-)
-def test_two_node_e2e_evidence_rejects_display_scheduler_root_env(
-    env_key: str,
-    value: str,
-) -> None:
-    payload = {
-        "display_container_inspect": [
-            {
-                "Config": {
-                    "Env": [
-                        "NHMS_SERVICE_ROLE=display_readonly",
-                        f"{env_key}={value}",
-                    ]
-                }
-            }
-        ]
-    }
-
-    proofs = two_node_e2e_docker_security.docker_display_security_proofs(payload)
-    findings = two_node_e2e_docker_security._docker_proof_findings(
-        proofs,
-        helpers=e2e_evidence._docker_security_helpers(REPO_ROOT),
-    )
-
-    assert proofs["forbidden_env_hazard"] is True
-    assert {
-        (finding["code"], finding.get("capability"))
-        for finding in findings
-    } >= {("TWO_NODE_E2E_DOCKER_DISPLAY_FORBIDDEN_CAPABILITY", "forbidden_env_hazard")}
 
 
 def test_static_checker_rejects_display_hard_coded_compute_roots(tmp_path: Path) -> None:

@@ -306,8 +306,7 @@ def test_file_cohort_terminal_tasks_project_exact_success_failure_and_restart(
 
 
 def test_file_cohort_boot_fail_task_projects_failed_with_node_failure(tmp_path: Any) -> None:
-    # BOOT_FAIL is a Slurm terminal state (slurm_validation TERMINAL_SLURM_STATES has
-    # always enumerated it), but until it entered SLURM_STATE_MAP the cohort
+    # BOOT_FAIL is a Slurm terminal state, but until it entered SLURM_STATE_MAP the cohort
     # projection could not read it as terminal: the task stalled on
     # ``unverified`` and the whole cohort reported task_accounting_incomplete.
     repository = _file_cohort_repository(tmp_path, member_count=2)
@@ -367,9 +366,8 @@ def test_file_cohort_boot_fail_task_projects_failed_with_node_failure(tmp_path: 
 
 @pytest.mark.parametrize("raw_state", ["REVOKED", "SPECIAL_EXIT"])
 def test_file_cohort_unmapped_terminal_task_projects_failed(tmp_path: Any, raw_state: str) -> None:
-    # Same shape as the BOOT_FAIL case above: both states are enumerated by
-    # slurm_validation TERMINAL_SLURM_STATES, so a cohort carrying one of them must
-    # project a terminal task rather than stalling the whole cohort on
+    # Same shape as the BOOT_FAIL case above: both states are Slurm terminal
+    # states, so a cohort carrying one of them must project a terminal task rather than stalling the whole cohort on
     # task_accounting_incomplete.  The error code stays the generic unknown one --
     # SLURM_STATE_MAP registration is orthogonal to map_slurm_error_code.
     repository = _file_cohort_repository(tmp_path, member_count=2)

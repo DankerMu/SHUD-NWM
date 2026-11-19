@@ -531,7 +531,6 @@ def _check_apps_api_layer_inversion(root: Path) -> list[FindingSpec]:
     scan_roots = [root / "packages", root / "services", root / "workers"]
     scan_files = [
         root / "services" / "slurm_gateway" / "models.py",
-        root / "services" / "production_closure" / "ops_validation.py",
     ]
     findings: list[FindingSpec] = []
     for path in sorted({*list(_iter_python_files(root, scan_roots)), *[file for file in scan_files if file.exists()]}):

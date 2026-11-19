@@ -217,9 +217,9 @@ def _has_inflight_sibling(path: Path) -> bool:
 def _is_pass_evidence(name: str) -> bool:
     """Delegate to the ONE scheduler pass filename predicate (#1575).
 
-    Readiness root discovery and this retention script classify through the same
-    service-layer predicate so ``no-progress-tracker.json``, temp files, and
-    unrelated/unprefixed JSON are never pass evidence on either side.
+    This retention script classifies through the service-layer predicate so
+    ``no-progress-tracker.json``, temp files, and unrelated/unprefixed JSON are
+    never pass evidence.
     """
 
     return _scheduler_evidence.is_scheduler_pass_evidence_filename(name)

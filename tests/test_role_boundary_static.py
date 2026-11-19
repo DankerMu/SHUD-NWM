@@ -211,7 +211,6 @@ def test_api_import_scan_includes_layer_inversion_runtime_surfaces() -> None:
     }
 
     assert "services/slurm_gateway/models.py" in relative_sources
-    assert "services/production_closure/ops_validation.py" in relative_sources
     assert "services/tiles/mvt.py" in relative_sources
     assert "services/production_closure/readonly_db_validation.py" in relative_sources
 
@@ -288,7 +287,6 @@ def test_role_boundary_document_mentions_required_inventory_and_hard_gate() -> N
         "packages/common/auth_policy.py",
         "packages/common",
         "services/orchestrator",
-        "services/production_closure/ops_validation.py",
         "services/slurm_gateway/models.py",
         "workers/",
         "apps/api/main.py",

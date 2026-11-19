@@ -1,0 +1,31 @@
+Tests removed from, or edited inside, files that survive #3221.
+Files deleted whole (tasks.md 2.1) are not listed; their ids all go with them.
+
+== Section 1: removed test ids (id  # deleted module the test exercised) ==
+
+tests/test_identity_matching.py::test_the_two_node_lane_keeps_its_private_names_bound_to_the_shared_helper  # services/production_closure/two_node_e2e_evidence.py
+tests/test_river_ts_read_path_surrogate_keys.py::test_hydro_map_plan_fixture_names_indexes_that_the_migration_chain_creates  # services/production_closure/scale_validation.py (D5: asserts the lane's own static plan fixture QUERY_TARGETS)
+tests/test_river_ts_read_path_surrogate_keys.py::test_narrow_hydro_map_plan_uses_expand_contract_indexes  # services/production_closure/scale_validation.py (D5: asserts the lane's own HYDRO_MAP_PLAN_LINES_BY_STORE)
+tests/test_safe_fs.py::test_met_evidence_lane_reports_a_structured_evidence_code  # services/production_closure/met_validation.py
+tests/test_scheduler_evidence_summary_lanes.py::test_readiness_reads_the_compact_summary_pass_exactly_like_the_full_pass  # services/production_closure/readiness_scheduler_evidence.py
+tests/test_status_vocab_parity.py::test_canonical_site_keeps_its_members_and_type[READINESS_ITEM_STATUSES<-readiness_item_contracts.STATUS_VALUES]  # services/production_closure/readiness_item_contracts.py
+tests/test_status_vocab_parity.py::test_canonical_site_keeps_its_members_and_type[SLURM_TERMINAL_STATES<-slurm_validation.TERMINAL_SLURM_STATES]  # services/production_closure/slurm_validation.py
+tests/test_two_node_docker_runtime.py::test_two_node_e2e_evidence_rejects_display_scheduler_root_env[NHMS_SCHEDULER_EVIDENCE_ROOT-/scratch/private/scheduler-evidence]  # services/production_closure/two_node_e2e_docker_security.py, two_node_e2e_evidence.py
+tests/test_two_node_docker_runtime.py::test_two_node_e2e_evidence_rejects_display_scheduler_root_env[NHMS_SCHEDULER_EVIDENCE_ROOT-]  # services/production_closure/two_node_e2e_docker_security.py, two_node_e2e_evidence.py
+tests/test_two_node_docker_runtime.py::test_two_node_e2e_evidence_rejects_display_scheduler_root_env[NHMS_SCHEDULER_LOCK_ROOT-/scratch/private/scheduler-locks]  # services/production_closure/two_node_e2e_docker_security.py, two_node_e2e_evidence.py
+tests/test_two_node_docker_runtime.py::test_two_node_e2e_evidence_rejects_display_scheduler_root_env[NHMS_SCHEDULER_LOCK_ROOT-]  # services/production_closure/two_node_e2e_docker_security.py, two_node_e2e_evidence.py
+tests/test_two_node_docker_runtime.py::test_two_node_e2e_evidence_rejects_display_scheduler_root_env[NHMS_SCHEDULER_RUNTIME_ROOT-/scratch/private/scheduler-runtime]  # services/production_closure/two_node_e2e_docker_security.py, two_node_e2e_evidence.py
+tests/test_two_node_docker_runtime.py::test_two_node_e2e_evidence_rejects_display_scheduler_root_env[NHMS_SCHEDULER_RUNTIME_ROOT-]  # services/production_closure/two_node_e2e_docker_security.py, two_node_e2e_evidence.py
+tests/test_two_node_docker_runtime.py::test_two_node_e2e_evidence_rejects_display_scheduler_root_env[NHMS_SCHEDULER_TEMP_ROOT-/scratch/private/scheduler-temp]  # services/production_closure/two_node_e2e_docker_security.py, two_node_e2e_evidence.py
+tests/test_two_node_docker_runtime.py::test_two_node_e2e_evidence_rejects_display_scheduler_root_env[NHMS_SCHEDULER_TEMP_ROOT-]  # services/production_closure/two_node_e2e_docker_security.py, two_node_e2e_evidence.py
+
+== Section 2: tests edited in place, id unchanged (id  # what was removed) ==
+
+tests/test_status_vocab_parity.py::test_non_orchestrator_follow_up_sites_rebind_the_vocabulary  # removed the slurm_validation.TERMINAL_SLURM_STATES tuple and the two readiness_item_contracts / readiness_validation STATUS_VALUES assertions; the run_qhh_continuous rows stay
+tests/test_operator_action_reservation_lease.py::test_the_other_lease_heartbeat_callers_are_unchanged  # removed the scripts/m24_lease_nfs_proof.py list item; the file_orchestration_migration.py assertion stays
+tests/test_orchestration_chain.py::test_sibling_poll_interval_configs_are_untouched_by_the_orchestrator_floor  # removed the slurm_validation DEFAULT_POLL_INTERVAL_SECONDS / ProductionSlurmConfig block; the GFS/IFS adapter assertions stay
+tests/test_scheduler_evidence_decidability.py::test_a_summary_tier_submitted_pass_still_passes_the_readiness_reader  # removed the readiness_scheduler_evidence error/status assertions; non_blocking_summary and verbatim model_run_evidence stay; _live_scheduler_payload re-homed to tests/scheduler_pass_payload_helpers.py
+tests/test_role_boundary_static.py::test_api_import_scan_includes_layer_inversion_runtime_surfaces  # removed the services/production_closure/ops_validation.py membership assertion
+tests/test_role_boundary_static.py::test_role_boundary_document_mentions_required_inventory_and_hard_gate  # removed the services/production_closure/ops_validation.py required term
+tests/test_river_ts_text_identity_cleanup.py::test_the_register_covers_every_file_this_change_switched  # removed the services/production_closure/scale_validation.py unregistered list item
+tests/test_forcing_ts_template_census.py::test_the_declared_census_reproduces_the_fixture_baseline  # census row services/production_closure/two_node_e2e_readonly_db_lane.py: 2 removed (with its registry exemption row); arithmetic adds back ISSUE_3221_REMOVED_MENTIONS / _FILES
