@@ -108,6 +108,11 @@ STATIC_SEGMENTS: frozenset[str] = frozenset({"grid"})
 # issue's wording (``below_pipeline_frontier``) would read inverted here.
 PIPELINE_FRONTIER_EXEMPT_REASON = "pipeline_frontier_exempt"
 
+# Skip reason for an artifact whose cycle is not yet past its window's cutoff:
+# the bulk of every receipt. Scheduler pass evidence counts these per root
+# instead of listing them (#3223); the standalone receipt still lists them.
+WITHIN_RETENTION_WINDOW_REASON = "within_retention_window"
+
 # Skip reason for an additional root whose ``runs/`` entry is a symlink (#1318 /
 # design D6). ``runs_root.is_dir()`` follows symlinks, so a swapped ``runs/``
 # would point the enumeration -- and therefore the deletion surface -- outside
@@ -372,7 +377,7 @@ def _classify_cycle_dir(
     # Adjudication order (design D4): not-yet-expired first so the two skip
     # reasons stay distinguishable, frontier exemption second, deletion last.
     if cycle_time >= cutoff:
-        skipped.append({"key": key, "root": str(root), "reason": "within_retention_window"})
+        skipped.append({"key": key, "root": str(root), "reason": WITHIN_RETENTION_WINDOW_REASON})
         return
     if active_lower_bound is not None and cycle_time >= active_lower_bound:
         skipped.append(_frontier_exempt_entry(key, cycle_dir, cycle_time, root))
@@ -422,7 +427,7 @@ def _collect_run_targets(
         # run workspace whose cycle is still in flight keeps its SHUD
         # stdout/stderr readable for post-mortem.
         if cycle_time >= cutoff:
-            skipped.append({"key": key, "root": str(root), "reason": "within_retention_window"})
+            skipped.append({"key": key, "root": str(root), "reason": WITHIN_RETENTION_WINDOW_REASON})
             continue
         if active_lower_bound is not None and cycle_time >= active_lower_bound:
             skipped.append(_frontier_exempt_entry(key, run_dir, cycle_time, root))

@@ -1153,6 +1153,11 @@ def _compact_retention(value: Any) -> Any:
             # lock_budget_exhausted): the only lock-failure signal left once the
             # per-entry `failed` detail is compacted away.
             "copyback_lock_failures",
+            # Issue #3223: one row per (root, reason) over every skip -- a
+            # handful of rows -- plus the reasons the listed ``skipped`` omits.
+            # The per-root, per-reason skip counts must outlive the lists.
+            "skipped_summary",
+            "skipped_omits",
         ),
     )
     counts = value.get("counts")
