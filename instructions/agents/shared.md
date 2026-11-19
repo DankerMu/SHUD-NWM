@@ -94,7 +94,7 @@
   - `fix_gate.py open --pr <PR>` 旁跑 `uv run python scripts/review_gate.py check --issue <N> --pr <PR>`（exit 2 = 该 issue 已在别的 PR 撞过硬停，先要用户决定）。
   - 仅下列两种关闭跑 `uv run python scripts/review_gate.py record --issue <N> --pr <PR> --rounds <R> --outcome <OUTCOME>`，干净 merge 不记录：
     - 非 `merged` 关闭（`superseded-by-split` / `abandoned` / `descoped`），在跑 `fix_gate.py close` 时一并 commit；
-    - fix_gate 在该 PR 锁过（任何 outcome），必加 `--ceiling`，否则后继 PR 的 `check` 查不到。
+    - fix_gate 在该 PR 锁过（任何 outcome），必加 `--ceiling` 并随该 PR 的最后一推提交，否则后继 PR 的 `check` 查不到。
 - loop-log 审计按需 `uv run python scripts/governance/loop_log_audit.py`。
 
 ### CI 成本纪律（避免重复跑 / 单一终态推送）
