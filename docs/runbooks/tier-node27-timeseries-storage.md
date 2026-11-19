@@ -7129,8 +7129,8 @@ enforces them.
 
    pytest's throwaway-database fixtures are not affected.
    `integration_database_url` and `throwaway_database_url`
-   (`tests/conftest.py:199-240`) always create and drop a separate
-   `nhms_it_<uuid>` database (`:304-305`) on the server they are pointed at,
+   (`tests/conftest.py`) always create and drop a separate
+   `nhms_it_<uuid>` database (`_integration_database_name`) on the server they are pointed at,
    and that database, never the one named in the DSN, is what a test migrates;
    running the integration suite from the verify checkout stays allowed. That exemption covers those
    fixtures only, not a migrate entry point started by hand with the same DSN.

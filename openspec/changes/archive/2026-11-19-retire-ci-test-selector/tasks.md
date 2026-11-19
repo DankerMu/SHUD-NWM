@@ -37,5 +37,5 @@ The removal map with file:line for every item is `removal-map.md` in this change
 - [x] E6 On the PR: `Unit Tests (full) (1..6)` all green on the pull_request run; a `workflow_dispatch` run on the branch is green on every shard; no job named `Unit Tests` remains.
 - [x] E7 Gate proof from the new test and from run history: a frontend-only diff yields `pytest=false`, a docs-only diff `pytest=true`.
 - [x] E8 `CLAUDE.md` / `AGENTS.md` equal header + sources; instruction-guard reports nothing over the limits.
-- [x] E9 After merge: PR wall-time median and master red rate over two weeks recorded on #3219 (follow-up observation, not a merge gate).
-- [x] E10 After merge: the first master push run executes `Unit Tests (full) (1..6)` (not skipped) and the watcher reports success with 6 shards; recorded on #3219.
+- [ ] E9 (post-merge observation, pending when this change was archived) After merge: PR wall-time median and master red rate over two weeks recorded on #3219 (follow-up observation, not a merge gate).
+- [ ] E10 (post-merge observation, pending when this change was archived) After merge: the first master push run executes `Unit Tests (full) (1..6)` (not skipped) and the watcher reports success with 6 shards; recorded on #3219.
