@@ -64,8 +64,9 @@ them; their only static root is the `nhms-production` console script, which no p
   needed only by the docker validator moves into that script; nothing else is restored.
 - D3. A mixed test file keeps its live tests in place under the same file name; only when every remaining test would be about
   deleted code is the file deleted. Helpers that live tests import from a deleted test module move to a small `tests/*_helpers.py`.
-  One exception: `tests/test_production_object_store_validation.py` keeps 7 of 58 tests, none about the deleted lane
-  (`LocalObjectStore` / `safe_fs` symlink and FIFO refusals, one packager test). They move, bodies unchanged, to a test file
+  One exception: `tests/test_production_object_store_validation.py` keeps 8 of 58 tests, none about the deleted lane
+  (`LocalObjectStore` / `safe_fs` symlink and FIFO refusals, the bounded limited read, one packager test). They move, bodies unchanged
+  (the bounded-read test names `ObjectStoreError` from its real module instead of the lane's re-export), to a test file
   named for what they test (an existing object-store / safe_fs test file, or a new one); the old file is deleted.
 - D4. `tests/any_ratchet_ceiling.json` is set to the exact count the ratchet's own `count_any` reports on the final tree (the
   ratchet fails more than 5% below the ceiling; the fixture review's recount for this scope is 9372 - 1737 = 7635, the
@@ -90,7 +91,7 @@ them; their only static root is the `nhms-production` console script, which no p
   republication, and the sentence about a "recorded reconstruction limitation" (a verdict only the validator produced) is cut.
   The pre-migration material shape was pinned only through the validator
   (`tests/test_production_object_store_validation.py`, `test_forcing_material_of_every_schema_generation_matches_its_pinned_shape`
-  with `_historical_v1_forcing_material`); that test is re-homed with the 7 live tests, calling
+  with `_historical_v1_forcing_material`); that test is re-homed with the 8 live tests, calling
   `forcing_checksum_material_for_schema_version` directly.
 - D10. Inside a kept test, removal is as narrow as the reference: a parameter row, list item or single assertion that names
   deleted code goes; the test itself goes only when no assertion about live code remains.

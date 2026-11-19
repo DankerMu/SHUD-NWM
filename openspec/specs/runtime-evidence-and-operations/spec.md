@@ -8,40 +8,6 @@ diagnosis receipts that may cite it.
 
 ## Requirements
 
-### Requirement: Structured scheduler evidence
-
-Each scheduler pass SHALL emit structured evidence suitable for production operations and release review.
-
-The evidence SHALL distinguish execution modes from readiness claims. Deterministic, dry-run, simulated, or production-like scheduler evidence MAY support review and readiness lineage, but it SHALL NOT mark final production readiness true unless accepted live proof receipts satisfy the readiness proof contract.
-
-#### Scenario: pass summary evidence
-
-WHEN a scheduler pass finishes
-THEN evidence includes pass id, started/finished timestamps, execution mode, live proof receipt references when applicable, sources, cycle window, model count, candidate count, submitted count, skipped reasons, failed count, partial count, and artifact locations.
-
-#### Scenario: model-run evidence
-
-WHEN a model candidate reaches a terminal state
-THEN evidence includes forcing station count, canonical product counts, SHUD output URI, parsed row count, segment count, display product state, quality flags, Slurm job/accounting details, and residual blockers.
-
-#### Scenario: bounded redacted evidence artifacts
-
-WHEN scheduler or readiness evidence is written or read
-THEN the payload is bounded, redacted, and stored under the configured evidence or workspace root
-AND malformed, oversized, stale, mismatched, or unsafe evidence is recorded as blocked/release_blocked evidence rather than accepted success.
-
-#### Scenario: deterministic evidence consumed by readiness validation
-
-WHEN readiness validation consumes scheduler evidence from deterministic, dry-run, simulated, or production-like execution
-THEN the resulting readiness item is non-final deterministic review evidence
-AND `final_production_readiness_claimed` remains false unless every required live proof item is accepted.
-
-#### Scenario: live scheduler receipt binding
-
-WHEN scheduler evidence is presented as live production proof
-THEN the live receipt must bind to the readiness run id, target environment, producer artifact reference, checksum or receipt id, schema, and live execution mode
-AND stale, mismatched, or deterministic receipts remain release blockers.
-
 ### Requirement: Operations controls and validation
 
 The production automation SHALL expose or provide operator controls for dry-run planning, retry, cancellation, and fast validation without requiring full live multi-cycle reruns.
@@ -397,31 +363,6 @@ their existing normalized values byte-for-byte in all of these helpers.
 - **THEN** the resulting values and verdicts are byte-for-byte identical to
   the pre-change behavior
 
-### Requirement: Scheduler evidence root discovery admits only governed pass artifacts
-
-Readiness root discovery and scheduler pass-evidence retention SHALL use one shared pass filename contract. A discovered pass artifact SHALL have the governed `scheduler_` prefix and an accepted pass JSON suffix; non-pass state such as `no-progress-tracker.json`, temporary files, and unrelated top-level JSON SHALL NOT become readiness items, consume the bounded discovery cap, or enter pass-retention deletion selection. Runtime pass writers SHALL continue to emit names accepted by this predicate. Explicit single-file readiness input remains operator-selected and is outside root discovery.
-
-#### Scenario: Shared root excludes the permanent no-progress tracker
-
-- **WHEN** the configured scheduler evidence root contains `no-progress-tracker.json` beside valid passed and stable-blocked `scheduler_*.json` pass artifacts
-- **THEN** readiness root discovery returns and validates only the pass artifacts
-- **AND** the tracker creates no false blocked item and consumes none of the discovery cap
-
-#### Scenario: Temporary and unrelated JSON files do not consume the cap
-
-- **WHEN** a root contains temporary files, unprefixed JSON documents, and more governed pass artifacts than the configured discovery limit
-- **THEN** filtering occurs before ordering and capping, so the cap is filled only by governed pass artifacts in the existing deterministic order
-
-#### Scenario: Readiness and retention classify the same names
-
-- **WHEN** the same set of governed pass, pre-execution pass, tracker, temporary, and unrelated JSON names is presented to readiness discovery and pass-evidence retention
-- **THEN** both consumers agree on which names are scheduler pass artifacts, while each retains its existing operation-specific behavior after classification
-
-#### Scenario: Explicit single-file input remains available
-
-- **WHEN** an operator supplies one scheduler evidence file explicitly instead of a root
-- **THEN** readiness validates that selected file through the existing content contract without applying root-discovery filename filtering
-
 ### Requirement: The DB-free scheduler SHALL verify its journal root as a chain of real directories at construction and name the remedy when it is not
 
 The db-free scheduler SHALL verify the configured journal root
@@ -675,3 +616,35 @@ The scheduler journal retention preflight (`config_from_env`) and the journal re
 
 - **WHEN** `verify_journal_root_authority` refuses a root that is otherwise a real directory
 - **THEN** retention reports a `journal_root_*` blocker and does not proceed
+
+### Requirement: Scheduler passes emit structured evidence
+
+Each scheduler pass SHALL emit structured evidence suitable for production operations and release review.
+
+The evidence SHALL distinguish execution modes from readiness claims. Deterministic, dry-run, simulated, or production-like scheduler evidence MAY support review and readiness lineage, but it SHALL NOT mark final production readiness true unless accepted live proof receipts satisfy the readiness proof contract.
+
+#### Scenario: pass summary evidence
+
+WHEN a scheduler pass finishes
+THEN evidence includes pass id, started/finished timestamps, execution mode, live proof receipt references when applicable, sources, cycle window, model count, candidate count, submitted count, skipped reasons, failed count, partial count, and artifact locations.
+
+#### Scenario: model-run evidence
+
+WHEN a model candidate reaches a terminal state
+THEN evidence includes forcing station count, canonical product counts, SHUD output URI, parsed row count, segment count, display product state, quality flags, Slurm job/accounting details, and residual blockers.
+
+#### Scenario: bounded redacted evidence artifacts
+
+WHEN scheduler or readiness evidence is written or read
+THEN the payload is bounded, redacted, and stored under the configured evidence or workspace root
+AND malformed, oversized, stale, mismatched, or unsafe evidence is recorded as blocked/release_blocked evidence rather than accepted success.
+
+### Requirement: Scheduler pass-evidence retention admits only governed pass artifacts
+
+Scheduler pass-evidence retention SHALL classify file names through one shared pass filename contract. A pass artifact SHALL have the governed `scheduler_` prefix and an accepted pass JSON suffix; non-pass state such as `no-progress-tracker.json`, temporary files, and unrelated top-level JSON SHALL NOT enter pass-retention deletion selection. Runtime pass writers SHALL continue to emit names accepted by this predicate.
+
+#### Scenario: Retention classifies only governed names as pass artifacts
+
+- **WHEN** a set of governed pass, pre-execution pass, tracker, temporary, and unrelated JSON names is presented to pass-evidence retention
+- **THEN** only the governed pass and pre-execution pass names are classified as scheduler pass artifacts
+- **AND** the tracker, temporary, and unrelated files never enter deletion selection

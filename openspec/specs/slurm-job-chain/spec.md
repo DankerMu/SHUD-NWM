@@ -1,7 +1,8 @@
 # slurm-job-chain Specification
 
 ## Purpose
-TBD - created by archiving change m1-gfs-forecast-loop. Update Purpose after archive.
+
+How a forecast cycle runs as a chain of Slurm stages: stage templates and dependencies, job tracking and event logging, the end-to-end trigger, fail-closed terminal handling, duplicate-submission and reconciliation-pending deferral, retry and resume identity, and what a gateway-bound task payload may carry.
 
 ## Requirements
 
@@ -229,12 +230,6 @@ not only at the top-level stage result.
 - **THEN** a pass that submitted other work before the skip SHALL
   surface as a partial, review-visible pass rather than a fully
   successful one
-- **THEN** readiness validation SHALL recognize the skip status in
-  its pass-status vocabulary as a review-visible (blocked) state and
-  SHALL count the skipped candidate consistently with the producer's
-  partial accounting — without manufacturing a status-vocabulary or
-  partial-cardinality acceptance error, and without loosening the
-  compatibility rules that infer submission from model-run statuses
 
 #### Scenario: Unrecognized stage terminal fails closed
 

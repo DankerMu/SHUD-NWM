@@ -1,8 +1,11 @@
 # shud-model-package-publication Specification
 
 ## Purpose
-TBD - created by archiving change m9-basins-model-assets. Update Purpose after archive.
+
+How validated Basins models become immutable published packages: what a package contains and refuses, how historical forcing is represented without bulk duplication, that calibrated values are never rewritten, that stored package checksums stay reconstructable across manifest schema generations, and that river-segment reach mappings are validated before identity or output.
+
 ## Requirements
+
 ### Requirement: Valid Basins models are published as immutable packages
 
 The system SHALL publish each validated Basins SHUD model into an immutable object-store package containing runtime input files, selected calibration metadata, GIS sidecars, and a package manifest with checksums.
@@ -174,16 +177,16 @@ The receipt is the only recording seam that exists.)
 
 ### Requirement: Published package checksums stay reconstructable across schema generations
 
-Any component that reconstructs `package_checksum` from a stored manifest SHALL select the checksum material shape declared by that manifest's own `schema_version`, so manifests published before the forcing-identity migration continue to verify. Where the stored manifest does not carry enough evidence to reconstruct, the component SHALL report a recorded reconstruction limitation rather than a verification failure.
+Any component that reconstructs `package_checksum` from a stored manifest SHALL select the checksum material shape declared by that manifest's own `schema_version`, so manifests published before the forcing-identity migration continue to verify.
 
 #### Scenario: Pre-migration manifest still verifies
 
-- **WHEN** production-closure validation reconstructs `package_checksum` for a manifest published with the pre-migration schema version
+- **WHEN** Basins package republication against an existing manifest reconstructs `package_checksum` for a manifest published with the pre-migration schema version
 - **THEN** the reconstruction uses the pre-migration forcing material shape and the checksum matches the stored value
 
 #### Scenario: Post-migration manifest verifies with the reduced material
 
-- **WHEN** the same validation runs against a manifest published after the migration
+- **WHEN** the same republication runs against a manifest published after the migration
 - **THEN** the reconstruction uses the reduced forcing material and the checksum matches the stored value
 
 ### Requirement: Basins package publication validates river-segment reach mappings before identity or output
@@ -246,8 +249,7 @@ The mapping bytes used by source identity and publication SHALL be the same boun
 
 #### Scenario: Calibration and sibling package consumers remain unchanged
 
-- **WHEN** an otherwise valid package includes forcing and checked-in calibration declarations and is consumed by registry/QHH/object-store validation paths
+- **WHEN** an otherwise valid package includes forcing and checked-in calibration declarations and is consumed by registry/QHH paths
 - **THEN** validation changes no source bytes, identity/checksum shape, forcing policy, or calibration override
 - **AND** the exact seven-entry checked-in calibration declaration remains unchanged
 - **AND** existing downstream consumers keep accepting the valid package.
-

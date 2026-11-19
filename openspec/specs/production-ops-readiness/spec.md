@@ -5,16 +5,6 @@ Operator-facing readiness of the production deployment: the single-command displ
 
 ## Requirements
 
-### Requirement: Production configuration is validated before release
-
-The system SHALL provide production environment templates and validation checks for all deployable services.
-
-#### Scenario: Production config validates required services
-
-- **WHEN** production readiness validation runs
-- **THEN** API, orchestrator, Slurm gateway, tile publisher, frontend, database, object store, source adapters, and workspace roots are checked for required settings
-- **AND** missing or unsafe settings fail with stable error codes and no secret disclosure
-
 ### Requirement: Operator actions are backend gated and audited
 
 The system SHALL enforce or explicitly gate backend-side authorization for production-impacting actions.

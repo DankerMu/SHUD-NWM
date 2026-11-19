@@ -1,7 +1,8 @@
 # forcing-production Specification
 
 ## Purpose
-TBD - created by archiving change m1-gfs-forecast-loop. Update Purpose after archive.
+
+How basin forcing is produced from canonical meteorology: station definitions and interpolation weights, forcing variable generation, the files and timeseries rows written, their lineage, idempotent re-execution, and rejection of malformed GFS interval rows.
 
 ## Requirements
 
@@ -194,19 +195,3 @@ The forcing producer SHALL plan one row per GFS interval at the interval's start
 #### Scenario: Production-shaped input
 - **WHEN** interval products exist at forecast hours 3 and 6 only
 - **THEN** rows are planned at the cycle time and at hour 3, as before
-
-### Requirement: The validate-met deterministic lane mirrors the production GFS product set
-
-The deterministic GFS fixture of validate-met SHALL omit, at forecast hour 0, the variables the GFS adapter declares unavailable at f000, and the lane's forcing continuity expectation SHALL be the producer's interval row-time rule applied to the configured forecast hours, not to the products the producer consumed.
-
-#### Scenario: Default deterministic lane
-- **WHEN** validate-met runs its default deterministic lane for forecast hours 0 and 3
-- **THEN** the GFS manifest has no `apcp` or `dswrf` entry at f000, the forcing evidence holds one row time (the cycle time), continuity passes and the lane is not blocked
-
-#### Scenario: A canonical product is missing
-- **WHEN** the lane is configured for forecast hours 0, 3 and 6 and the canonical products of hour 6 are absent
-- **THEN** the continuity expectation still holds two row times and the check fails
-
-#### Scenario: No forecast hour above zero
-- **WHEN** validate-met is configured with forecast hours that contain no hour above 0
-- **THEN** the configuration is refused with `PRODUCTION_MET_FORECAST_HOURS_INVALID` before anything is written

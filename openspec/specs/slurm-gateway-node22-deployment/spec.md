@@ -1,7 +1,8 @@
 # slurm-gateway-node22-deployment Specification
 
 ## Purpose
-Define the standalone Slurm gateway deployed on node-22, together with the live evidence that proves it. This covers submit, poll-to-terminal and cancel-while-active receipts that are never collapsed into one unfalsifiable step, stale-job reconcile from a durable job-id source, and defence in depth for Slurm mutations.
+
+Define the standalone Slurm gateway deployed on node-22: the service itself, stale-job reconcile from a durable job-id source, defence in depth for Slurm mutations, and rollout or rollback that refuses while a scheduler pass is running.
 
 ## Requirements
 
@@ -37,20 +38,6 @@ live receipts only.
 - **WHEN** the same stage manifest is submitted via mock and real backends
 - **THEN** both yield the same submit→poll→terminal lifecycle and the same `infra/sbatch` template
   selection, and live use is gated on parity.
-
-### Requirement: Live submit and cancel receipts are produced on node-22
-The deployment SHALL emit distinct live receipts for a short job's terminal lifecycle and a long
-job's cancellation, with logs under the configured workspace root.
-
-#### Scenario: Short-job terminal receipt
-- **WHEN** an opt-in node-22 proof submits a short job
-- **THEN** the receipt records submit (job id), poll-to-terminal status, and the log root under the
-  workspace (not the system disk).
-
-#### Scenario: Long-job cancel receipt
-- **WHEN** an opt-in node-22 proof submits a long job and cancels it while active
-- **THEN** the receipt records submit, cancel-while-active, and the cancelled/accounting result
-- **AND** terminal-polling and cancellation are not conflated into one unfalsifiable step.
 
 ### Requirement: Stale-job reconcile uses a durable job-id source
 On restart, reconcile SHALL recover job identity from durable storage, not gateway memory.
@@ -98,16 +85,6 @@ The production Slurm gateway SHALL combine application-layer service authenticat
 - **WHEN** the DB-free scheduler resumes after gateway auth deployment
 - **THEN** its HTTP Slurm client attaches the service bearer to submit/cancel calls and gateway preflight remains healthy
 - **AND** health and read-only gateway requests do not carry the service token.
-
-### Requirement: The gateway proof cancel stage requires an observed RUNNING state
-
-The gateway live-proof emitter SHALL record the `submit_cancel` stage as PASS only if the long smoke job was observed in `running` before it was cancelled. If the job never reached `running` within the bounded wait, the emitter SHALL still cancel the job for cleanup, and SHALL then record the stage and the receipt as BLOCKED with `live_proof_accepted=false` and a blocker that names the last observed status.
-
-#### Scenario: A job that stays pending is cancelled for cleanup and the stage is BLOCKED
-
-- **WHEN** every bounded poll of the long job returns `pending`
-- **THEN** a cancel request is still sent for the job
-- **AND** the stage and the receipt are BLOCKED, `live_proof_accepted` is false, and the blocker contains `pending`
 
 ### Requirement: Gateway rollout and rollback refuse while a scheduler pass is running
 

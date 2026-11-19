@@ -73,19 +73,6 @@ flip the fingerprint and fail the guard test until the developer both bumps
 - **THEN** the recomputed fingerprint MUST equal the pinned `EXPECTED_FINGERPRINT`
 - **AND** `producer_version` MUST equal the pinned value (`m2.0`).
 
-### Requirement: OUTPUT_UNITS and manifest-unit keysets stay in lockstep
-
-The producer's `OUTPUT_UNITS` keyset SHALL equal the manifest's
-`REQUIRED_FORCING_VARIABLES` keyset, and every required forcing variable SHALL map
-to a non-empty manifest unit, so that adding an `OUTPUT_UNITS` key without wiring
-its manifest unit is caught by a guard test.
-
-#### Scenario: Keyset equality and non-empty manifest units
-
-- **WHEN** the guard test compares `set(OUTPUT_UNITS)` with `set(REQUIRED_FORCING_VARIABLES)`
-- **THEN** the two keysets MUST be equal
-- **AND** `package_manifest_unit(v)` MUST return a non-empty string for every required forcing variable.
-
 ### Requirement: Direct-grid mirror maintenance preserves the registration-owned active_flag
 
 The runtime producer's direct-grid `met.met_station` mirror maintenance SHALL NOT set `active_flag=true` on either plane: the DB-plane upsert
