@@ -18,7 +18,9 @@ Governing invariant: for the same journal state and model set, the set of cycles
 Sibling surfaces:
   - submit path deciders (`scheduler_candidates.py:347,810,1114`): must keep the default (full evidence);
   - `scheduler_state_compat.py`: the wrapper already forwards `**kwargs` (`:226-229`); no change expected;
-  - `tests/test_file_orchestration_journal.py:7552`: the only two-argument decider double on the discovery slot;
+  - two-argument decider doubles reachable from the discovery slot: `tests/test_file_orchestration_journal.py:7552`,
+    `_published_hydro_candidate_state_decision` in `tests/test_production_scheduler.py:41620` and
+    `tests/test_scheduler_backfill.py:2929`; a spy installed on `_scheduler._candidate_state_decision` must accept `**kwargs`;
   - `file_orchestration_migration.py`, `chain_repository.py` callers of `candidate_state`: untouched;
   - readers of pass-evidence `retention.skipped`: none in `services/`, `scripts/`, `apps/`, `packages/` (grep).
     Tests read it: `tests/test_production_scheduler.py:23797` filters for `pipeline_frontier_exempt` and keeps working

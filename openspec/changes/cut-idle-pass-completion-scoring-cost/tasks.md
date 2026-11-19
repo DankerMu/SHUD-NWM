@@ -8,12 +8,12 @@ File IO / path safety — not selected (no read path touched; D3). Others — no
 ## 1. Completion scoring without the per-event evidence copy
 
 - [ ] 1.1 Give `_candidate_state_decision` / `_candidate_state_evidence` the opt-out of D1 (default unchanged; key absent when opted out).
-- [ ] 1.2 Pass it unconditionally at both decider calls in `_cycle_completion_verdict` (`:362`, `:444`) and nowhere else (D2); update the two-argument double at `tests/test_file_orchestration_journal.py:7552`.
+- [ ] 1.2 Pass it unconditionally at both decider calls in `_cycle_completion_verdict` (`:362`, `:444`) and nowhere else (D2); update the two-argument doubles reachable from the discovery slot (`tests/test_file_orchestration_journal.py:7552`, `tests/test_production_scheduler.py:41620`, `tests/test_scheduler_backfill.py:2929`).
 - [ ] 1.3 Confirm by grep and by test that no ladder branch or helper reads `evidence["pipeline_events"]`.
 
 ## 2. Retention skips in pass evidence
 
-- [ ] 2.1 Project the retention block written into pass evidence as D4 says; `RetentionResult` keeps its list (D5).
+- [ ] 2.1 Project the retention block written into pass evidence as D4 says, in `_run_retention` after `result.to_dict()`; `RetentionResult` keeps its list (D5).
 - [ ] 2.2 `_compact_retention` keeps `skipped_summary` and `skipped_omits`.
 - [ ] 2.3 `RetentionResult.to_dict()` and the standalone receipt (`services/orchestrator/cli.py:223`) stay unchanged; report any other caller of `to_dict()`.
 

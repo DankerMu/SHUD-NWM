@@ -49,8 +49,10 @@ Evidence floor: verdict/decision parity test incl. a recalibrated-model cycle; s
   (`scheduler_discovery.py:362` and `:444`). The keyword is passed unconditionally: no `TypeError` fallback, no
   signature sniffing, so a decider cannot silently ignore it. The discovery and submit contexts are separate objects
   bound to the same function (`scheduler_core.py:562`, `:942`), so the submit path keeps the default. The compat wrapper
-  already forwards `**kwargs` (`scheduler_state_compat.py:226-229`). The one two-argument decider double on the discovery
-  slot (`tests/test_file_orchestration_journal.py:7552`) is updated to accept the keyword.
+  already forwards `**kwargs` (`scheduler_state_compat.py:226-229`). The two-argument decider doubles reachable from
+  the discovery slot — `tests/test_file_orchestration_journal.py:7552` and `_published_hydro_candidate_state_decision`
+  (`tests/test_production_scheduler.py:41620`, `tests/test_scheduler_backfill.py:2929`, installed by monkeypatching
+  `_scheduler._candidate_state_decision`, which `_discovery_context()` reads) — are updated to accept the keyword.
 - D3. No cache, no new read path, no change to `candidate_state`, `_cycle_rows`, `_completion_scope`, the strict /
   successor providers or `_terminal_init_state_verdict`. #1567, #1661 and #1735 are preserved by not touching them.
 - D4. Retention in pass evidence (revised after fixture review: the first draft's 50-entry sample contradicted
@@ -62,7 +64,10 @@ Evidence floor: verdict/decision parity test incl. a recalibrated-model cycle; s
   `skipped_omits: ["within_retention_window"]`, so a reader can tell the list is partial. `schema_version` stays
   `nhms.production_scheduler.retention.v2` (additive fields); `counts`, `planned`, `deleted`, `failed`, `frontier`,
   `extra_roots`, `copyback_lock_failures` are unchanged. The existing over-limit compaction keeps `skipped_summary`
-  and `skipped_omits`.
+  and `skipped_omits`. In compacted evidence `skipped_count` and `evidence_compaction.retention_entry_counts_compacted.skipped`
+  count the listed entries; `counts.skipped` stays the total. The projection lives in `_run_retention`
+  (`scheduler_runtime.py`, after `result.to_dict()`), not in `scheduler_evidence_payload.py`, so hand-built writer
+  payloads and their golden sizes are unaffected.
 - D5. `RetentionResult` keeps the full list in memory (`frontier()` derives `protected_count` from it) and
   `to_dict()` is unchanged: the standalone retention receipt (`services/orchestrator/cli.py:223`) keeps listing every
   entry. Only what the scheduler writes into pass evidence is projected.
