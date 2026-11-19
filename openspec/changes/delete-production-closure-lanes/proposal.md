@@ -51,7 +51,8 @@ them; their only static root is the `nhms-production` console script, which no p
   - Left as they are and handed to #3231: `infra/README.two-node-docker.md` (lines 789, 852 tell the operator to run the
     deleted `scripts/validate_two_node_e2e_evidence.py`), `tests/test_two_node_docker_runbook_environment_invariant.py`
     (pins that command text; it compares text only, so it stays green), `infra/docker/entrypoint.sh:43` (deny-list entry),
-    `tests/test_two_node_docker_runtime.py:4244`. These four files are the declared residual references of E2.
+    `tests/test_two_node_docker_runtime.py` (`:4244`, and the comment at `:36` naming the old workspace root). These four files
+    are exempt from E2.
 
 ## Decisions
 
@@ -81,9 +82,18 @@ them; their only static root is the `nhms-production` console script, which no p
   `workers/output_parser/parser.py`); the daemon lease heartbeat/compare-and-swap (`continuous-daemon-live-operation`) by
   `tests/test_production_scheduler.py`; the pass-evidence filename predicate (`runtime-evidence-and-operations`) by the
   retention and stall-health tests.
+- D9. `shud-model-package-publication` "Published package checksums stay reconstructable across schema generations" stays:
+  republication against an existing manifest (`workers/model_registry/basins_package_manifest.py`) still reconstructs the
+  checksum by the stored manifest's own `schema_version`. Its scenarios are re-worded from the deleted validator to
+  republication, and the sentence about a "recorded reconstruction limitation" (a verdict only the validator produced) is cut.
+  The pre-migration material shape was pinned only through the validator
+  (`tests/test_production_object_store_validation.py`, `test_forcing_material_of_every_schema_generation_matches_its_pinned_shape`
+  with `_historical_v1_forcing_material`); that test is re-homed with the 7 live tests, calling
+  `forcing_checksum_material_for_schema_version` directly.
+- D10. Inside a kept test, removal is as narrow as the reference: a parameter row, list item or single assertion that names
+  deleted code goes; the test itself goes only when no assertion about live code remains.
 
 ## Reported, not fixed here
 
-- `forcing_checksum_material_for_schema_version` keeps a pre-migration branch whose only caller with an old schema version
-  was the deleted object-store validation lane.
-- `production_mvt_readiness_claimed` (`apps/api/routes/mvt.py`, OpenAPI) is no longer mentioned by any spec after this change.
+- `production_mvt_readiness_claimed` (`services/tiles/mvt.py`, `apps/api/openapi_patching_display_schemas.py`) is no longer
+  mentioned by any spec after this change.

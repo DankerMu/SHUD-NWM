@@ -1,11 +1,18 @@
-## REMOVED Requirements
+## MODIFIED Requirements
 
 ### Requirement: Published package checksums stay reconstructable across schema generations
 
-**Reason**: The only component that reconstructed `package_checksum` from a stored manifest was the object-store validation lane (`object_store_validation_manifest`), deleted in #3221. Publication computes the checksum only at the current schema version.
-**Migration**: None.
+Any component that reconstructs `package_checksum` from a stored manifest SHALL select the checksum material shape declared by that manifest's own `schema_version`, so manifests published before the forcing-identity migration continue to verify.
 
-## MODIFIED Requirements
+#### Scenario: Pre-migration manifest still verifies
+
+- **WHEN** Basins package republication against an existing manifest reconstructs `package_checksum` for a manifest published with the pre-migration schema version
+- **THEN** the reconstruction uses the pre-migration forcing material shape and the checksum matches the stored value
+
+#### Scenario: Post-migration manifest verifies with the reduced material
+
+- **WHEN** the same republication runs against a manifest published after the migration
+- **THEN** the reconstruction uses the reduced forcing material and the checksum matches the stored value
 
 ### Requirement: Basins package publication validates river-segment reach mappings before identity or output
 
