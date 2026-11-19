@@ -30,6 +30,7 @@ from pathlib import Path
 
 import pytest
 
+from packages.common import safe_fs
 from packages.common.provider_atomic import provider_destination_lock
 from packages.common.safe_fs import (
     SafeFilesystemError,
@@ -754,3 +755,45 @@ def test_scan_closes_every_descriptor(tmp_path: Path, monkeypatch: pytest.Monkey
         assert shape in {"ok", "root_itself"}
 
     assert _open_fds() == before
+
+
+# --- safe_fs containment refusals --------------------------------------------
+
+
+@pytest.mark.parametrize("helper_name", ["unlink_no_follow", "rmtree_no_follow"])
+def test_safe_fs_rejects_parent_traversal_under_containment_root(
+    tmp_path: Path,
+    helper_name: str,
+) -> None:
+    root = tmp_path / "root"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    victim = outside / "victim.txt"
+    victim.write_text("external must remain\n", encoding="utf-8")
+
+    if helper_name == "unlink_no_follow":
+        with pytest.raises(safe_fs.SafeFilesystemError):
+            safe_fs.unlink_no_follow(root / ".." / "outside" / "victim.txt", containment_root=root)
+        assert victim.read_text(encoding="utf-8") == "external must remain\n"
+    else:
+        with pytest.raises(safe_fs.SafeFilesystemError):
+            safe_fs.rmtree_no_follow(root / ".." / "outside", containment_root=root)
+        assert victim.read_text(encoding="utf-8") == "external must remain\n"
+
+
+@pytest.mark.parametrize("case", ["parent", "root"])
+def test_safe_fs_ensure_directory_no_follow_rejects_uncontained_symlink_components(
+    tmp_path: Path,
+    case: str,
+) -> None:
+    external = tmp_path / "external"
+    external.mkdir()
+    symlink = tmp_path / "link"
+    symlink.symlink_to(external, target_is_directory=True)
+    target = symlink / "child" if case == "parent" else symlink
+
+    with pytest.raises(safe_fs.SafeFilesystemError):
+        safe_fs.ensure_directory_no_follow(target)
+
+    assert sorted(path.name for path in external.iterdir()) == []
