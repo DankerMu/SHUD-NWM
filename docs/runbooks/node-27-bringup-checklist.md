@@ -291,9 +291,9 @@ C2 证的是**读**边界（`nhms_display_ro`
       C3 的冷 rollout 已撤回，但独立 C4 生产接受所需的 reviewed-SHA/exact-byte
       digest 校验不能一起撤销：R1.6 必须将该最小职责迁交本清单 C4 的既有 display
       owner（**Bringup-C4 production
-      acceptance**）。不迁移 C3 其他已撤销的冷 baseline/完整周期检查，不保留整个旧链。通用 producer-complete
-      full-scope/twelve-lane aggregator 仍只接受完整 producer
-      bundle，不能用空目录或旧 C3 receipt 冒充。
+      acceptance**）。不迁移 C3 其他已撤销的冷 baseline/完整周期检查，不保留整个旧链。原通用
+      full-scope 两节点 e2e 聚合器已随 #3221 删除，C3 目前只有本清单条目、没有对应校验器；
+      不能用空目录或旧 C3 receipt 冒充。
 - [ ] GFS + IFS 双源都过 strict latest/series/ops/logs/browser 才算 cross-plane
       `PASS`；单源为 `PARTIAL`。
 

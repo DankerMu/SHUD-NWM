@@ -79,5 +79,5 @@ openspec validate --all --strict --no-interactive
 For producer, repository, CLI, or source-identity changes, run the focused set:
 
 ```bash
-uv run pytest -q tests/test_forcing_producer.py tests/test_forcing_producer_cli.py tests/test_production_met_validation.py tests/test_source_identity.py
+uv run pytest -q tests/test_forcing_producer.py tests/test_forcing_producer_cli.py tests/test_source_identity.py
 ```

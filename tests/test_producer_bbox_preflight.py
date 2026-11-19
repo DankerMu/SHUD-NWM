@@ -22,9 +22,8 @@ the pinned §3.1 contract:
    direct-grid repository write AND before the cache-hit early-return".
 7. Non-preflight :class:`ValueError` inside the outer try (e.g.
    :func:`_safe_path_component`'s ``ValueError("Invalid path component.")``)
-   MUST still be wrapped as :class:`ForcingProductionError` so callers such
-   as :mod:`services.production_closure.met_validation`, which only catch
-   :class:`ForcingProductionError`, still see the wrapped shape. The
+   MUST still be wrapped as :class:`ForcingProductionError` so callers that
+   only catch :class:`ForcingProductionError` still see the wrapped shape. The
    un-swallowed ValueError contract is narrowed to EXACTLY the preflight
    env_reader / finiteness gate via the private
    ``_PreflightValueErrorPropagate`` sentinel.
@@ -494,10 +493,8 @@ def test_safe_path_component_ValueError_inside_outer_try_is_still_wrapped_as_For
     ``_PreflightValueErrorPropagate`` sentinel. A ``ValueError`` from
     :func:`_safe_path_component` on ``resolved_basin_version_id`` inside the
     outer ``produce`` try block MUST still be wrapped as
-    :class:`ForcingProductionError` so downstream callers such as
-    :func:`services.production_closure.met_validation._run_forcing_production`,
-    which only catch :class:`ForcingProductionError`, keep observing the
-    wrapped shape. Regression against the previous broad
+    :class:`ForcingProductionError` so downstream callers that only catch
+    :class:`ForcingProductionError` keep observing the wrapped shape. Regression against the previous broad
     ``isinstance(error, ValueError) and not isinstance(error,
     DirectGridContractError)`` catch, which incidentally leaked the raw
     ``ValueError("Invalid path component.")``.

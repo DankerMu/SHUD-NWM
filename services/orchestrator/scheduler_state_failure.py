@@ -1203,9 +1203,7 @@ def _needs_package_manifest_witness(candidate: SchedulerCandidateLike, value: st
     because it "is an ``s3://`` uri in every tracked config and is therefore
     already stripped by the validator's own ``urlparse``".  That holds only for a
     BARE-BUCKET prefix.  With a path segment (``s3://nhms/nwm``) -- a shape
-    deliberately supported elsewhere
-    (``services/production_closure/object_store_validation.py`` ``_operational_prefix``
-    keeps ``parsed.path``) -- the validator saw the leftover prefix segment,
+    deliberately supported -- the validator saw the leftover prefix segment,
     rejected a physically present FILE key as prefix-shaped, and a witness was
     fabricated BENEATH the file (``<file>.nc/forcing_package.json``); the kernel's
     ``ENOTDIR`` came back as an ``ObjectStoreError`` (``stat_no_follow`` raises

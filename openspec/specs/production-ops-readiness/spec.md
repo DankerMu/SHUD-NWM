@@ -5,16 +5,6 @@ Operator-facing readiness of the production deployment: the single-command displ
 
 ## Requirements
 
-### Requirement: Production configuration is validated before release
-
-The system SHALL provide production environment templates and validation checks for all deployable services.
-
-#### Scenario: Production config validates required services
-
-- **WHEN** production readiness validation runs
-- **THEN** API, orchestrator, Slurm gateway, tile publisher, frontend, database, object store, source adapters, and workspace roots are checked for required settings
-- **AND** missing or unsafe settings fail with stable error codes and no secret disclosure
-
 ### Requirement: Operator actions are backend gated and audited
 
 The system SHALL enforce or explicitly gate backend-side authorization for production-impacting actions.
@@ -36,24 +26,6 @@ The system SHALL enforce or explicitly gate backend-side authorization for produ
 
 - **WHEN** full backend auth cannot be completed in this change
 - **THEN** the issue must emit a release-blocker artifact listing deferred actions, current fallback, required roles, residual risk, and the condition required to remove the gate
-
-### Requirement: Monitoring and alerts cover closure risks
-
-The system SHALL expose metrics and alert rules for production data, compute, object store, API, and publication failures.
-
-#### Scenario: Production closure alerts are testable
-
-- **WHEN** validation injects or observes source latency, Slurm queue backlog, basin failure, object-store write failure, stale analysis state, tile publication error, or API p95 breach
-- **THEN** the corresponding metric and alert rule identify severity, target, current value, threshold, and recommended operator action
-
-### Requirement: Runbooks and rollback drills are present
-
-The system SHALL document and verify rollback procedures for common production closure failures.
-
-#### Scenario: Rollback drill records outcome
-
-- **WHEN** a rollback drill is run for bad model activation, failed publish/import, failed source cycle, failed Slurm array, or bad tile release
-- **THEN** the runbook records commands, preconditions, expected evidence, recovery result, and residual risk
 
 ### Requirement: Display API restart is reproducible from a single command
 

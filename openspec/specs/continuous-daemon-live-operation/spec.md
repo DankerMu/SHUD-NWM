@@ -1,44 +1,29 @@
 # continuous-daemon-live-operation Specification
 
 ## Purpose
-TBD - created by archiving change m24-multibasin-continuous-daemon-live. Update Purpose after archive.
+
+How the continuously running scheduler holds its single-writer lease: renewal by heartbeat, and reclaim of a stale lease only through a compare-and-swap that refuses when the lease changed underneath it.
+
 ## Requirements
-### Requirement: Live receipt proves the m20/m23 chain ran via the generic scheduler
-m24 SHALL produce a node-22 live receipt proving the m20/m23 chain (download → canonical → forcing
-→ SHUD → parse → publish) was executed by the `services/orchestrator` scheduler/chain
-daemon — not diagnostic scripts — closing m23 Task 5.5/6.6 and m20's 0/33 live gap. (The chain and
-BLOCKED-dependency behavior are defined by m20/m23; m24 adds only the live proof of generic-path
-execution.)
 
-#### Scenario: Receipt binds daemon-mode generic execution
-- **WHEN** a daemon pass completes a fresh cycle on node-22
-- **THEN** the receipt records daemon mode, the generic scheduler command, the run identity tuple,
-  the gateway submission receipt, warm-start quality, and published manifest/log URIs
-- **AND** it evidences that `run_qhh_cycle.sh`/`run_qhh_continuous.py` were not invoked.
+### Requirement: Daemon lease renews by heartbeat and reclaims a stale lease only by compare-and-swap
 
-#### Scenario: Live dependency blocked
-- **WHEN** a required live dependency is unavailable
-- **THEN** the receipt reports `BLOCKED` with the exact dependency and evidence path
-- **AND** it does not claim business automation or production readiness passed.
+The file lease that prevents duplicate scheduler passes SHALL be renewed by heartbeat while a pass runs and SHALL be
+reclaimed only when it is stale, the staleness decision reconciling owner liveness first.
 
-### Requirement: Daemon lease has heartbeat and is proven on real NFS
-The daemon lease that prevents duplicate passes SHALL use heartbeat/renewal and reconcile owner
-liveness before stale reclaim, proven on the node-22 shared `/scratch` filesystem with two
-independent processes.
+#### Scenario: A renewed lease is never reclaimed
+- **WHEN** a pass outlives the lease TTL and its holder keeps renewing
+- **THEN** each renewal advances `heartbeat_seq` and the lock mtime, and a contender that finds the lock younger than the
+  TTL treats it as held
 
-#### Scenario: TTL expiry during a long pass does not double-submit
-- **WHEN** two independent processes contend for the lease on real `/scratch`, with the lease TTL
-  shorter than the pass duration
-- **THEN** the holder renews via heartbeat; the lease carries a token/generation (`lease_token`,
-  `heartbeat_seq`/mtime, owner pid-start or boot id), and a contender reclaims a stale lease only
-  via compare-and-swap on that token after reconciling host/pid, candidate reservation, and
-  `sacct`/`squeue` — if the token/heartbeat changed (holder just renewed), it must not unlink
-- **AND** the receipt shows a heartbeat crossing the TTL with the contender not reclaiming; no
-  candidate is double-submitted; the proof records the real filesystem type.
+#### Scenario: Staleness reconciles owner liveness
+- **WHEN** a contender finds a lock older than the TTL
+- **THEN** on the owner's host it probes the owner pid: a live owner is never reclaimed, a dead owner makes the lock stale
+- **AND** when the owner is on another host or cannot be probed, the lock is stale only after twice the TTL of silence
+- **AND** a stale lock that is not a scheduler-owned lease (owner, schema version, `lease_token`, pass id) is refused as
+  unsafe instead of reclaimed
 
-#### Scenario: Safe disable is live-proven (delta on m23 contract)
-- **WHEN** an operator disables the daemon (the safe-disable contract is m23
-  `compute-scheduler-operationalization`)
-- **THEN** the m24 receipt references that contract and additionally records the disable command,
-  pass id, `disabled_at`, last submit timestamp, and evidence that no submit occurred after disable
-- **AND** in-flight run evidence remains queryable.
+#### Scenario: Reclaim is a compare-and-swap on the lease token
+- **WHEN** a contender is about to reclaim a stale lease
+- **THEN** it re-reads the lock and unlinks it only if `lease_token` and `heartbeat_seq` are unchanged; if either changed
+  (the holder just renewed), it does not unlink and does not acquire

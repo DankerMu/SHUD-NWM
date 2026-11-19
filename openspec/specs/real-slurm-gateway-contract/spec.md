@@ -1,7 +1,8 @@
 # real-slurm-gateway-contract Specification
 
 ## Purpose
-TBD - created by archiving change m7-second-review-remediation. Update Purpose after archive.
+
+The contract of the gateway's real Slurm backend: structured submit, fixed templates or constrained script mode, stable retryable error codes, durable log lookup, timezone-aware accounting timestamps, a terminal-state map that covers the vocabulary, and accounting reads that neither truncate nor misplace their lookback window.
 
 ## Requirements
 
@@ -168,15 +169,14 @@ in kind.
 ### Requirement: Terminal state map covers the terminal-state vocabulary and empty states normalize safely
 
 `SLURM_STATE_MAP` SHALL contain every state that
-`services/production_closure/slurm_validation.py` `TERMINAL_SLURM_STATES`
+`packages/common/status_vocab.py` `SLURM_TERMINAL_STATES`
 enumerates (including `REVOKED` and `SPECIAL_EXIT`, mapped to FAILED), so the
 default-less file-cohort task projection cannot strand a cohort in
 `task_accounting_incomplete` on a terminal state; this registration is
 orthogonal to `map_slurm_error_code`, whose deliberately-unmapped verdict for
 these states (falling to `SLURM_JOB_FAILED`) is unchanged. State
 normalization SHALL treat empty or whitespace-only raw states as the existing
-`UNKNOWN` fallback instead of raising, in both the gateway and the
-production-closure sibling copy.
+`UNKNOWN` fallback instead of raising in the gateway.
 
 #### Scenario: REVOKED or SPECIAL_EXIT array task projects failed, cohort stays accountable
 
@@ -193,7 +193,7 @@ array-member aggregation) and no bare IndexError escapes the gateway contract
 
 #### Scenario: terminal-state vocabulary cannot drift apart again
 
-WHEN TERMINAL_SLURM_STATES gains a state absent from SLURM_STATE_MAP
+WHEN SLURM_TERMINAL_STATES gains a state absent from SLURM_STATE_MAP
 THEN a committed meta assertion fails
 
 ### Requirement: Default sacct lookback windows are rendered in the host's local wall clock

@@ -2713,9 +2713,9 @@ def test_orchestrator_config_coerces_explicit_poll_interval_to_float(
 def test_sibling_poll_interval_configs_are_untouched_by_the_orchestrator_floor(
     tmp_path: Path,
 ) -> None:
-    """The three same-named fields on other config classes are unaffected.
+    """The same-named fields on the adapter config classes are unaffected.
 
-    ``poll_interval_seconds`` exists on four unrelated dataclasses.  Only
+    ``poll_interval_seconds`` exists on several unrelated dataclasses.  Only
     ``OrchestratorConfig``'s ever floored, and this change moved only that one,
     so the siblings must still take an explicit value verbatim.  Asserted here
     so a reader can see they were considered rather than overlooked.
@@ -2725,18 +2725,6 @@ def test_sibling_poll_interval_configs_are_untouched_by_the_orchestrator_floor(
 
     assert GFSAdapterConfig(workspace_root=tmp_path, poll_interval_seconds=0).poll_interval_seconds == 0
     assert IFSAdapterConfig(workspace_root=tmp_path, poll_interval_seconds=0).poll_interval_seconds == 0
-
-    # The production-closure validation lane owns its own default and option
-    # parsing; it is a different class on a different tier and is not floored.
-    from services.production_closure import slurm_validation as slurm_validation_module
-
-    assert slurm_validation_module.DEFAULT_POLL_INTERVAL_SECONDS == 15.0
-    poll_field = next(
-        item
-        for item in dataclasses.fields(slurm_validation_module.ProductionSlurmConfig)
-        if item.name == "poll_interval_seconds"
-    )
-    assert poll_field.default == slurm_validation_module.DEFAULT_POLL_INTERVAL_SECONDS
 
 
 # ---------------------------------------------------------------------------

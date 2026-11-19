@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pytest
 
-from services.production_closure import two_node_e2e_evidence
 from services.production_closure.identity_matching import (
     cycle_time_identity_matches,
     normalized_cycle_time_identity,
@@ -46,7 +45,3 @@ def test_garbage_does_not_normalise_and_matches_only_itself(garbage: str) -> Non
     assert not cycle_time_identity_matches(garbage, "2026-09-24T12:00:00Z")
     assert not cycle_time_identity_matches("2026-09-24T12:00:00Z", garbage)
 
-
-def test_the_two_node_lane_keeps_its_private_names_bound_to_the_shared_helper() -> None:
-    assert two_node_e2e_evidence._cycle_time_identity_matches is cycle_time_identity_matches
-    assert two_node_e2e_evidence._normalized_cycle_time_identity is normalized_cycle_time_identity

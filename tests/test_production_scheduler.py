@@ -13199,8 +13199,7 @@ def test_file_kind_check_never_converts_a_present_verdict(
 
 
 #: A deployment prefix carrying a PATH SEGMENT rather than a bare bucket -- the
-#: #1397 trigger, and a shape supported elsewhere in the repo
-#: (``object_store_validation.py`` ``_operational_prefix`` keeps ``parsed.path``).
+#: #1397 trigger, and a shape the deployment config supports.
 _PATH_SEGMENT_OBJECT_STORE_PREFIX = "s3://nhms/nwm"
 
 #: A deployment prefix with NO ``s3://`` scheme at all.  Every tracked config sets

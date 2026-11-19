@@ -149,6 +149,10 @@ from tests.forcing_ts_template_registry import (
 # table and the DELETE with it (1 → 0): 37 non-renderer mentions plus the
 # renderer's one, across 11 files, and NOT ONE of them names the legacy table —
 # see :func:`test_no_python_source_names_the_dropped_legacy_forcing_table`.
+#
+# #3221 deleted the two-node e2e evidence lanes, and with them the readonly
+# lane's two expected-table-list mentions (name-only, no SQL): 35 non-renderer
+# mentions plus the renderer's one, across 10 files.
 # ---------------------------------------------------------------------------
 FORCING_TABLE_CENSUS: dict[str, int] = {
     "db/seeds/seed_demo.py": 3,
@@ -159,7 +163,6 @@ FORCING_TABLE_CENSUS: dict[str, int] = {
     "scripts/node27_autopipeline.py": 1,
     "scripts/node27_timeseries_compression_capture.py": 2,
     "scripts/node27_timeseries_compression_live_evidence.py": 1,
-    "services/production_closure/two_node_e2e_readonly_db_lane.py": 2,
     "workers/forcing_producer/file_store.py": 2,
     "workers/forcing_producer/store.py": 5,
 }
@@ -194,6 +197,13 @@ TASK_73_ADDED_MENTIONS = 1
 #: baseline arithmetic rather than folded into C3's measured numbers, so 47/38
 #: stay the fixed points they were measured as.
 ISSUE_2517_REMOVED_MENTIONS = 2
+
+#: Mentions and files #3221 REMOVED, declared for the same reason: deleting the
+#: two-node e2e evidence lanes took the readonly lane's two name-only
+#: expected-table-list mentions and their one file out of the tree. Added back
+#: in the baseline arithmetic so 15/47/38 stay fixed points.
+ISSUE_3221_REMOVED_MENTIONS = 2
+ISSUE_3221_REMOVED_FILES = 1
 
 #: The relation migration 000066 (task 8.2) drops. #1993's first cut left ONE
 #: mention of it under the discovery roots — the smoke reset's guarded DELETE —
@@ -483,7 +493,7 @@ def test_the_declared_census_reproduces_the_fixture_baseline() -> None:
     assert UNWIRED_READERS == ()
     assert len(FORCING_REGISTRY) == FIXTURE_BASELINE_READER_MENTIONS
     assert (
-        non_read_mentions - TASK_73_ADDED_MENTIONS + ISSUE_2517_REMOVED_MENTIONS
+        non_read_mentions - TASK_73_ADDED_MENTIONS + ISSUE_2517_REMOVED_MENTIONS + ISSUE_3221_REMOVED_MENTIONS
         == FIXTURE_BASELINE_EXEMPT_MENTIONS
     )
     assert declared == non_read_mentions + renderer_mentions
@@ -497,13 +507,14 @@ def test_the_declared_census_reproduces_the_fixture_baseline() -> None:
         - renderer_mentions
         - TASK_73_ADDED_MENTIONS
         + ISSUE_2517_REMOVED_MENTIONS
+        + ISSUE_3221_REMOVED_MENTIONS
         + len(FORCING_REGISTRY)
         == FIXTURE_BASELINE_MENTIONS
     )
     # All five reader files left the set (#2517 took the last one; the smoke
     # reset came back for #1993's bare legacy DELETE and left again with task
-    # 8.2) and the renderer module joined.
-    assert len(FORCING_TABLE_CENSUS) == FIXTURE_BASELINE_FILES - 5 + 1
+    # 8.2) and the renderer module joined; #3221 deleted the readonly lane file.
+    assert len(FORCING_TABLE_CENSUS) == FIXTURE_BASELINE_FILES - 5 + 1 - ISSUE_3221_REMOVED_FILES
     assert set(RENDERER_CONSTANTS) == {
         row for row in EXEMPT_MENTIONS if row.path == "packages/common/forcing_ts_render.py"
     }

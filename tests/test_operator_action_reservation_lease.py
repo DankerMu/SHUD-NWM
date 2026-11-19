@@ -560,12 +560,9 @@ def test_run_once_registers_the_touch_path_only_after_the_reservation_is_reserve
 
 
 def test_the_other_lease_heartbeat_callers_are_unchanged() -> None:
-    """3.3a: only ``run_once`` registers a touch path; the two other users do not."""
+    """3.3a: only ``run_once`` registers a touch path; the other user does not."""
 
-    for relative in (
-        "services/orchestrator/file_orchestration_migration.py",
-        "scripts/m24_lease_nfs_proof.py",
-    ):
+    for relative in ("services/orchestrator/file_orchestration_migration.py",):
         source = Path(relative).read_text(encoding="utf-8")
         assert "_LeaseHeartbeat" in source, relative
         assert "register_touch_path" not in source, relative

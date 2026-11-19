@@ -30,6 +30,7 @@ from pathlib import Path
 
 import pytest
 
+from packages.common import safe_fs
 from packages.common.provider_atomic import provider_destination_lock
 from packages.common.safe_fs import (
     SafeFilesystemError,
@@ -279,30 +280,6 @@ def test_environment_file_lane_reports_configuration_invalid(
         refresh._apply_environment_file(Path(_UNKNOWN_HOME) / "scheduler.env")
 
     assert excinfo.value.reason == "configuration_invalid"
-    assert list(tmp_path.iterdir()) == []
-
-
-def test_met_evidence_lane_reports_a_structured_evidence_code(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # Escape surface B, spot check.  The end-to-end closure of #1622 is covered
-    # by tests/test_production_met_validation.py, which exercises
-    # `ProductionMetConfig.from_env` and `validate_met` directly; this spot
-    # check pins the writer's own containment-gate refusal.
-    from services.production_closure.met_validation import (
-        EvidenceWriter,
-        ProductionMetValidationError,
-    )
-
-    monkeypatch.chdir(tmp_path)
-    evidence_root = Path(_UNKNOWN_HOME) / "evidence"
-    writer = EvidenceWriter(evidence_root, evidence_root / "met")
-
-    with pytest.raises(ProductionMetValidationError) as excinfo:
-        writer.prepare()
-
-    assert excinfo.value.error_code.startswith("PRODUCTION_MET_EVIDENCE_")
     assert list(tmp_path.iterdir()) == []
 
 
@@ -754,3 +731,45 @@ def test_scan_closes_every_descriptor(tmp_path: Path, monkeypatch: pytest.Monkey
         assert shape in {"ok", "root_itself"}
 
     assert _open_fds() == before
+
+
+# --- safe_fs containment refusals --------------------------------------------
+
+
+@pytest.mark.parametrize("helper_name", ["unlink_no_follow", "rmtree_no_follow"])
+def test_safe_fs_rejects_parent_traversal_under_containment_root(
+    tmp_path: Path,
+    helper_name: str,
+) -> None:
+    root = tmp_path / "root"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    victim = outside / "victim.txt"
+    victim.write_text("external must remain\n", encoding="utf-8")
+
+    if helper_name == "unlink_no_follow":
+        with pytest.raises(safe_fs.SafeFilesystemError):
+            safe_fs.unlink_no_follow(root / ".." / "outside" / "victim.txt", containment_root=root)
+        assert victim.read_text(encoding="utf-8") == "external must remain\n"
+    else:
+        with pytest.raises(safe_fs.SafeFilesystemError):
+            safe_fs.rmtree_no_follow(root / ".." / "outside", containment_root=root)
+        assert victim.read_text(encoding="utf-8") == "external must remain\n"
+
+
+@pytest.mark.parametrize("case", ["parent", "root"])
+def test_safe_fs_ensure_directory_no_follow_rejects_uncontained_symlink_components(
+    tmp_path: Path,
+    case: str,
+) -> None:
+    external = tmp_path / "external"
+    external.mkdir()
+    symlink = tmp_path / "link"
+    symlink.symlink_to(external, target_is_directory=True)
+    target = symlink / "child" if case == "parent" else symlink
+
+    with pytest.raises(safe_fs.SafeFilesystemError):
+        safe_fs.ensure_directory_no_follow(target)
+
+    assert sorted(path.name for path in external.iterdir()) == []

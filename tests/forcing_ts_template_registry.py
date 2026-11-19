@@ -379,7 +379,7 @@ NON_READ_MENTIONS: tuple[ExemptMentions, ...] = (
             "production one in the same change (fixture `I12-1991.md` R1)"
         ),
     ),
-    # -- lifecycle, capture and closure tooling ----------------------------
+    # -- lifecycle and capture tooling -------------------------------------
     ExemptMentions(
         path="scripts/node27_timeseries_compression_capture.py",
         count=2,
@@ -400,13 +400,6 @@ NON_READ_MENTIONS: tuple[ExemptMentions, ...] = (
         shape="lifecycle tooling",
         owner="name-only, no SQL",
         note="a row_counts lookup key in the pipeline summary (:2216)",
-    ),
-    ExemptMentions(
-        path="services/production_closure/two_node_e2e_readonly_db_lane.py",
-        count=2,
-        shape="readonly lane table list",
-        owner="name-only, no SQL",
-        note="the lane's expected-table lists (:72, :88)",
     ),
 )
 

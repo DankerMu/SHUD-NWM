@@ -191,9 +191,7 @@ class _PreflightValueErrorPropagate(RuntimeError):
     passed through *every* :class:`ValueError` inside the outer try block
     (e.g. :func:`_safe_path_component`'s ``ValueError("Invalid path
     component.")``). That leak would strip the ``ForcingProductionError``
-    wrapping expected by callers such as
-    :func:`services.production_closure.met_validation._run_forcing_production`
-    and mislabel bbox-preflight ``ValueError`` at
+    wrapping expected by callers and mislabel bbox-preflight ``ValueError`` at
     :mod:`workers.forcing_producer.cli` as ``INVALID_SOURCE_ID``. This marker
     restricts the "un-swallowed ValueError" contract to EXACTLY the preflight.
     """
@@ -861,8 +859,7 @@ class ForcingProducer:
             # ``_PreflightValueErrorPropagate`` — every other ValueError
             # inside the try block (e.g. ``_safe_path_component``'s
             # ``ValueError("Invalid path component.")``) stays wrapped as
-            # ``ForcingProductionError`` so downstream callers such as
-            # ``services.production_closure.met_validation`` still see the
+            # ``ForcingProductionError`` so downstream callers still see the
             # ``ForcingProductionError`` shape they catch.
             if isinstance(error, BboxMismatchError):
                 raise

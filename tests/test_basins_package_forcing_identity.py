@@ -15,6 +15,12 @@ import pytest
 import workers.model_registry.basins_package as basins_package
 from tests.basins_package_helpers import _make_valid_model, _object_store_env, _publish_identity_snapshot
 from workers.model_registry.basins_discovery import discover_basins_inventory, write_inventory
+from workers.model_registry.basins_package import (
+    BASINS_PACKAGE_SCHEMA_VERSION,
+    BASINS_PACKAGE_SCHEMA_VERSION_V1,
+    SUPPORTED_BASINS_PACKAGE_SCHEMA_VERSIONS,
+    forcing_checksum_material_for_schema_version,
+)
 
 
 def test_emptying_excluded_forcing_directory_does_not_move_package_identity(
@@ -180,3 +186,68 @@ def test_renaming_the_legacy_focing_directory_is_a_structural_identity_change(
     assert after["content_sha256"] == before["content_sha256"]
     assert after["source_sha256"] == before["source_sha256"]
     assert after["package_checksum"] == before["package_checksum"]
+
+
+# #1813: the pre-migration forcing material is written out literally here, not
+# derived from the packager.  A refactor that silently moved the historical
+# shape would keep a derived expectation green while every published manifest
+# stopped verifying.
+def _historical_v1_forcing_material(forcing: dict[str, object]) -> dict[str, object]:
+    return {
+        "policy": forcing.get("policy"),
+        "csv_count": forcing.get("csv_count"),
+        "byte_count": forcing.get("byte_count"),
+        "aggregate_checksum": forcing.get("aggregate_checksum"),
+        "payload_copied": forcing.get("payload_copied"),
+        "copied_file_count": forcing.get("copied_file_count"),
+        "copied_byte_count": forcing.get("copied_byte_count"),
+    }
+
+
+@pytest.mark.parametrize("schema_version", SUPPORTED_BASINS_PACKAGE_SCHEMA_VERSIONS)
+def test_forcing_material_of_every_schema_generation_matches_its_pinned_shape(schema_version: str) -> None:
+    """#1813 task 3.3: pin the material of every supported schema generation to a hand-authored expectation.
+
+    Republication against an existing manifest reconstructs its ``package_checksum`` through
+    ``forcing_checksum_material_for_schema_version`` keyed on the stored manifest's own ``schema_version``,
+    so there is no second implementation to compare against. What is worth guarding is the shape itself:
+    each generation's material is asserted against a literal written out here independently of the
+    production branch, so editing either branch of ``forcing_checksum_material_for_schema_version`` fails
+    this test. The v1 expectation is spelled out longhand (``_historical_v1_forcing_material``) rather
+    than derived because v1 material is what historical stored manifests are reconstructed from — getting
+    it wrong silently breaks checksum reconstruction of already-published packages.
+    """
+
+    forcing = {
+        "policy": "copied_explicitly",
+        "csv_count": 3,
+        "byte_count": 120,
+        "aggregate_checksum": "c" * 64,
+        "payload_copied": True,
+        "copied_file_count": 3,
+        "copied_byte_count": 120,
+    }
+
+    material = forcing_checksum_material_for_schema_version(forcing, schema_version)
+
+    if schema_version == BASINS_PACKAGE_SCHEMA_VERSION_V1:
+        assert material == _historical_v1_forcing_material(forcing)
+    else:
+        assert material == {"policy": "copied_explicitly", "payload_copied": True}
+
+
+def test_current_packager_material_carries_no_forcing_payload_evidence() -> None:
+    material = forcing_checksum_material_for_schema_version(
+        {
+            "policy": "excluded_by_default",
+            "csv_count": 9,
+            "byte_count": 1024,
+            "aggregate_checksum": "d" * 64,
+            "payload_copied": False,
+            "copied_file_count": 0,
+            "copied_byte_count": 0,
+        },
+        BASINS_PACKAGE_SCHEMA_VERSION,
+    )
+
+    assert material == {"policy": "excluded_by_default", "payload_copied": False}

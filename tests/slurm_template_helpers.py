@@ -1,9 +1,8 @@
 """Shared text helpers for judging rendered Slurm sbatch templates.
 
-Home of the single ``_join_line_continuations`` definition consumed by both
-``tests/test_slurm_array_contract.py`` and
-``tests/test_production_slurm_validation.py``; a private copy per test module
-would re-create exactly the drift issue #1272 is cleaning up.
+Home of the single ``_join_line_continuations`` definition consumed by
+``tests/test_slurm_array_contract.py``; a private copy per test module would
+re-create exactly the drift issue #1272 is cleaning up.
 """
 
 from __future__ import annotations

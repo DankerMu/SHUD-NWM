@@ -50,9 +50,9 @@ E, seed/smoke/helpers        none
 F, parser replace chain (3)  none
 ===========================  ==========================================
 
-Scope is exactly this issue's register. The display four (``mvt.py``,
-``hydro_display.py``, ``display_coverage.py``, ``production_closure``) are
-watched by ``tests/test_river_ts_read_path_surrogate_keys.py`` and are
+Scope is exactly this issue's register. The display three (``mvt.py``,
+``hydro_display.py``, ``display_coverage.py``) are watched by
+``tests/test_river_ts_read_path_surrogate_keys.py`` and are
 deliberately NOT re-asserted here, so #1341's grouped-comment style cannot be
 false-flagged by a second, differently-worded oracle. ``db/migrations/**`` reads
 the text columns by definition and is out of register too (so did
@@ -1803,7 +1803,7 @@ def test_the_register_covers_every_file_this_change_switched() -> None:
     """A file that leaves the register silently loses its oracle.
 
     Listed as paths rather than as a docstring so a rename is a failure here
-    rather than a quiet gap. The display four are deliberately absent — they are
+    rather than a quiet gap. The display three are deliberately absent — they are
     #1341's register, watched by tests/test_river_ts_read_path_surrogate_keys.py.
     """
     registered = tuple(tuple(path.split("/")) for path in REGISTERED_SOURCES)
@@ -1814,7 +1814,6 @@ def test_the_register_covers_every_file_this_change_switched() -> None:
         ("services", "tiles", "mvt.py"),
         ("apps", "api", "routes", "hydro_display.py"),
         ("packages", "common", "display_coverage.py"),
-        ("services", "production_closure", "scale_validation.py"),
     )
     for parts in unregistered:
         assert parts not in registered, "/".join(parts)

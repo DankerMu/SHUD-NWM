@@ -1,7 +1,8 @@
 # readonly-db-and-e2e-evidence Specification
 
 ## Purpose
-How the node-27 display is proven read-only and how that evidence is laid out: the readonly-DB validator's deny-write probes, its identity-bound display route smoke and self-consistent identity discovery, the per-source merge, and where Docker and E2E evidence bundles live.
+
+How the node-27 display is proven read-only and how that evidence is laid out: the readonly-DB validator's deny-write probes, its identity-bound display route smoke and self-consistent identity discovery, the per-source merge, and where Docker evidence bundles live.
 
 ## Requirements
 
@@ -70,54 +71,6 @@ The display service SHALL be validated with readonly database credentials for di
 - **AND** a simulated summary is never `PASS`, whatever its lane statuses
 - **AND** the per-source merge refuses a source bundle that is not `PASS`, and a merged summary's status is `BLOCKED` on any merge blocker while its lane statuses carry the worst verdict of the merged items
 
-### Requirement: Docker and E2E evidence location
-
-All project-created Docker smoke, codeagent review, and two-node E2E artifacts SHALL be written under the repository or `/scratch/frd_muziyao`.
-
-#### Scenario: Stage change review artifacts
-- **WHEN** OpenSpec review or planning agents produce output
-- **THEN** the output is saved under `artifacts/stage-change/m22-two-node-docker-readonly-display/` or `/scratch/frd_muziyao/...`
-- **AND** no project-created temporary evidence is written to the system disk by default.
-
-#### Scenario: Docker smoke artifacts
-- **WHEN** Docker build, compose config, or container security smoke tests run
-- **THEN** test logs and generated evidence are written under the repository `artifacts/` tree or `/scratch/frd_muziyao`
-- **AND** commands document any unavoidable Docker daemon cache usage separately.
-
-#### Scenario: Docker disk preflight
-- **WHEN** Docker build or compose smoke is about to run
-- **THEN** evidence records `docker version`, `docker compose version`, DockerRootDir from `docker info`, `docker system df`, and relevant `df -h`
-- **AND** low available space marks Docker smoke as `BLOCKED` before large build steps run.
-
-#### Scenario: Two-node E2E artifacts
-- **WHEN** a two-node E2E run is executed
-- **THEN** evidence uses `artifacts/two-node-e2e/<run_id>/` or an explicitly configured `/scratch/frd_muziyao/...` root
-- **AND** evidence separates compute control, display service, cross-plane, manual ops boundary, Docker, DB, API, browser, Slurm, and logs.
-
-### Requirement: Cross-plane pass gates
-
-The two-node Docker E2E SHALL only pass when display readonly boundaries and strict run identity are proven.
-
-#### Scenario: Display security gate
-- **WHEN** the 27 Docker display service is validated
-- **THEN** the evidence proves no Slurm route, no retry/cancel execution, no Slurm/Munge/Docker socket capability, readonly DB use, and readonly published artifact access
-- **AND** failure of any boundary marks display service E2E as fail.
-
-#### Scenario: Cross-plane run identity gate
-- **WHEN** cross-plane E2E is evaluated
-- **THEN** 27 latest-product, the current `/` display entrypoint, `/hydro-met -> /` only as a legacy redirect compatibility check when included, `/ops`, and job logs must point to the same `run_id/source/cycle_time/model_id` produced by 22
-- **AND** historical latest or mocked API data cannot satisfy the pass condition.
-
-#### Scenario: GFS and IFS pass scope
-- **WHEN** the two-node E2E plan includes both GFS and IFS for a run
-- **THEN** both sources must pass strict identity latest-product, series, ops, logs, and browser source-switch checks before cross-plane status is `PASS`
-- **AND** a single-source run is reported as reduced scope or `PARTIAL`, not full cross-plane `PASS`.
-
-#### Scenario: Manual ops boundary gate
-- **WHEN** retry/cancel behavior is validated
-- **THEN** 27 proves fail-closed read-only behavior and 22 proves any actual retry/cancel receipt
-- **AND** 27 only displays the resulting state and logs after 22 acts.
-
 ### Requirement: Reachable-roles probe MUST execute on a real PostgreSQL
 
 The statement the readonly-DB validation lane uses to discover the roles reachable by the tested login SHALL be
@@ -152,3 +105,22 @@ libpq-direct client, not only through a driver that applies form decoding of its
   idle-in-transaction timeouts
 - **AND** an automated test SHALL execute that connection against a real PostgreSQL, so reintroducing a
   form-encoded options value fails the suite instead of surfacing only as a connection `FATAL` on production
+
+### Requirement: Docker evidence location
+
+All project-created Docker smoke and codeagent review artifacts SHALL be written under the repository or `/scratch/frd_muziyao`.
+
+#### Scenario: Stage change review artifacts
+- **WHEN** OpenSpec review or planning agents produce output
+- **THEN** the output is saved under `artifacts/stage-change/m22-two-node-docker-readonly-display/` or `/scratch/frd_muziyao/...`
+- **AND** no project-created temporary evidence is written to the system disk by default.
+
+#### Scenario: Docker smoke artifacts
+- **WHEN** Docker build, compose config, or container security smoke tests run
+- **THEN** test logs and generated evidence are written under the repository `artifacts/` tree or `/scratch/frd_muziyao`
+- **AND** commands document any unavoidable Docker daemon cache usage separately.
+
+#### Scenario: Docker disk preflight
+- **WHEN** Docker build or compose smoke is about to run
+- **THEN** evidence records `docker version`, `docker compose version`, DockerRootDir from `docker info`, `docker system df`, and relevant `df -h`
+- **AND** low available space marks Docker smoke as `BLOCKED` before large build steps run.

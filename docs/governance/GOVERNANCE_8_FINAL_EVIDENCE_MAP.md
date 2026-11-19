@@ -17,8 +17,6 @@ authority for detailed owner/facade and lane contracts:
 
 - `docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md`
 - `docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md`
-- `docs/governance/TWO_NODE_E2E_EVIDENCE_LANE_INVENTORY.md`
-- `docs/governance/READINESS_VALIDATION_LANE_INVENTORY.md`
 - `docs/governance/STRUCTURAL_FILE_DISPOSITION_INVENTORY.md`
 - `docs/governance/entropy-burndown-triage.md`
 

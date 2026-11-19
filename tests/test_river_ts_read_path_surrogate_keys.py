@@ -50,7 +50,6 @@ import pytest
 
 from packages.common import display_coverage
 from packages.common.river_ts_render import fact_table_text_identity_columns, render_river_ts_sql
-from services.production_closure.scale_validation import HYDRO_MAP_PLAN_LINES_BY_STORE, QUERY_TARGETS
 from services.tiles.mvt import (
     _mvt_tile_order_by,
     _valid_times_any_source_template,
@@ -83,13 +82,6 @@ HYDRO_DISPLAY_SOURCE = (REPO_ROOT / "apps" / "api" / "routes" / "hydro_display_i
 )
 MIGRATIONS_DIR = REPO_ROOT / "db" / "migrations"
 
-
-def test_narrow_hydro_map_plan_uses_expand_contract_indexes() -> None:
-    plan = "\n".join(HYDRO_MAP_PLAN_LINES_BY_STORE["narrow"])
-    assert "river_ts_segment_time_key_idx on hydro.river_timeseries" in plan
-    assert "river_timeseries_run_valid_idx" not in plan
-    assert "variable =" not in plan
-    assert HYDRO_MAP_PLAN_LINES_BY_STORE["legacy"] == QUERY_TARGETS["hydro_map"]["plan_lines"]
 
 # The four authority resolutions, verbatim. Any switched surface that binds a
 # given identity must resolve it exactly this way — one primary-key point
@@ -836,27 +828,18 @@ def test_coverage_scan_parameters_keep_their_text_semantics() -> None:
 
 
 # ---------------------------------------------------------------------------
-# production closure static plan fixture
+# migration-chain index names the read path rides
 # ---------------------------------------------------------------------------
 
 
 def test_hydro_map_plan_fixture_names_indexes_that_the_migration_chain_creates() -> None:
-    """The static plan must name real indexes.
+    """The two indexes the switched river read path rides are created by the migration chain.
 
-    It named ``river_timeseries_run_valid_idx`` — an index no migration ever
-    created — which is how a fixture that nothing cross-checks rots. Checking
-    the names against the migration chain, not against a hardcoded string, is
-    what stops it happening again.
+    The plan fixture this test once cross-checked was deleted with its lane (#3221); the
+    migration-chain half stays: the key-ordered fact index and core.river_segment's
+    surrogate-key unique constraint index must both be derivable from ``db/migrations``.
     """
-    plan_lines = QUERY_TARGETS["hydro_map"]["plan_lines"]
-    plan_text = "\n".join(plan_lines)
     migrations = "\n".join(path.read_text(encoding="utf-8") for path in sorted(MIGRATIONS_DIR.glob("*.sql")))
-
-    assert "river_timeseries_run_valid_idx" not in plan_text
-    assert "river_ts_selected_identity_key_valid_time_idx" in plan_text
-    # The segment join now rides core.river_segment's surrogate-key unique
-    # constraint, created by 000050's `... IDENTITY UNIQUE` column.
-    assert "river_segment_river_segment_key_key" in plan_text
 
     # Index names the migration chain really produces: the ones it names
     # explicitly, plus PostgreSQL's implicit `<table>_<column>_key` for each
@@ -872,10 +855,9 @@ def test_hydro_map_plan_fixture_names_indexes_that_the_migration_chain_creates()
         )
     }
     assert "river_ts_selected_identity_key_valid_time_idx" in creatable
+    # The segment join rides core.river_segment's surrogate-key unique
+    # constraint, created by 000050's `... IDENTITY UNIQUE` column.
     assert "river_segment_river_segment_key_key" in creatable
-
-    for index_name in re.findall(r"Index Scan using (\w+) on", plan_text):
-        assert index_name in creatable, f"{index_name} is named by the plan fixture but no migration creates it"
 
 
 # ---------------------------------------------------------------------------

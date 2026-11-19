@@ -291,8 +291,7 @@ Verification oracle:
 
 - AST import scan over `packages/common`, `services/**`, and `workers/**`,
   including documented shared-contract Python files such as
-  `services/slurm_gateway/models.py` and the production-closure auth-policy
-  evidence surface `services/production_closure/ops_validation.py`.
+  `services/slurm_gateway/models.py`.
 - OpenAPI drift, migration, schema, and static route tests.
 - Review of generated/public artifacts before contract changes land.
 
@@ -310,8 +309,7 @@ Current guard tests:
 
 `#361` moved the API-independent auth policy contract to
 `packages/common/auth_policy.py`. Shared packages, service modules, workers,
-documented shared-contract Python files, and
-`services/production_closure/ops_validation.py` must have zero imports from
+and documented shared-contract Python files must have zero imports from
 `apps.api` or `apps.api.*`.
 
 The static gate normalizes parent-package spellings such as `import apps.api`,

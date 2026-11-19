@@ -357,85 +357,6 @@ idempotency, and cleanup MUST remain equivalent.
   exclusion exists, the guard digest is unchanged, and an ordinary verified commit
   passes the hook.
 
-### Requirement: Object-store validation facade split preserves runtime and evidence contracts
-
-The repository SHALL keep
-`services.production_closure.object_store_validation` split into the eight responsibility
-owners defined by its structural change. The historical facade and every owner MUST remain
-below 1,000 lines while `.large-file-guard.json` remains byte-identical. Every pre-split
-facade attribute, callable signature and dataclass shape MUST remain available: eight
-callable seams use runtime facade forwarding, other helpers use plain re-export, and
-module/class attribute patches observe the same authority objects. Standalone and packaged
-CLI behavior, result/blocker/redaction, path safety, runtime staging and cleanup remain
-equivalent.
-
-Issue #1903 SHALL make one controlled synthetic-fixture transition: only
-`alias-a.sp.riv` and `alias-a.sp.rivseg` change from their merge-base placeholder/truncated
-bytes to a complete valid two-reach/two-segment mapping. Every other fixture path, text byte,
-shapefile schema/record/geometry byte, function signature, and facade identity SHALL remain
-unchanged from merge-base `27dc6aab…`. Package/manifest/checksum identity changes only as a
-deterministic consequence of those two replacement payloads; it SHALL NOT be hand-pinned to
-unrelated new material. Tests SHALL retain the old two mapping hashes as before-blob
-provenance and pin the two exact replacement hashes plus all unchanged hashes.
-
-#### Scenario: existing callers import and validate through the facade
-
-- **WHEN** `slurm_validation`, readiness consumers or an existing test imports the
-  historical module and validates the deterministic object-store fixture
-- **THEN** all baseline names, signatures, dataclasses and class identities resolve
-  without an import cycle
-- **AND** evidence files, staged receipts, blocker ordering, redacted summary and object
-  effects retain baseline behavior
-- **AND** package/manifest/checksum movement is fully explained by the two controlled
-  mapping payloads and no other fixture byte.
-
-#### Scenario: synthetic fixture mapping transition is exact
-
-- **WHEN** the fixture generated at merge-base `27dc6aab…` is compared to the issue #1903
-  fixture
-- **THEN** the old `.sp.riv` hash
-  `debf08491b0e22a39c06502d0354b9ae14c169fbd581d2941b78ac61f7907863` and old
-  `.sp.rivseg` hash
-  `4eaccab2a297cdd5d09f13f193cb73c9048996dab9423340ce4092383188cb0f` are the only
-  replaced stable-text hashes
-- **AND** the replacement declares two reach rows with actual Index values `{1, 2}` and two
-  segment rows whose `iRiv` values are `{1, 2}`
-- **AND** an unrelated fixture-byte mutation makes the controlled-transition proof RED.
-
-#### Scenario: a historical dynamic dependency is patched
-
-- **WHEN** a test patches one of the eight governed facade callables and invokes the
-  existing high-level writer, package, verification, registry, staging or CLI path
-- **THEN** the direct/transitive coordinator forwards the facade's current runtime
-  binding rather than a stale leaf-local callable
-- **AND** shared module/class patches retain identity and the existing biting failure
-  or output oracle proves the real call path observed the patch.
-
-#### Scenario: unsafe or stale validation input retains fail-closed behavior
-
-- **WHEN** existing symlink, ancestor-swap, non-regular, oversized, stale-workspace,
-  tampered-after-verify, collision or pre-existing-object fixtures are validated
-- **THEN** the same typed error or blocker and redacted evidence boundary occurs
-- **AND** no external path, prior object or cleanup target not created by this run is
-  written, replaced or deleted.
-
-#### Scenario: standalone and packaged CLI contracts remain stable
-
-- **WHEN** operators invoke either
-  `python -m services.production_closure.object_store_validation` or
-  `nhms-production validate-object-store`
-- **THEN** click/argparse option, exit-code, stdout/stderr and redaction behavior remains
-  identical, including usage failures without a traceback
-- **AND** the existing production importer still resolves the historical public types
-  and `validate_object_store` entrypoint.
-
-#### Scenario: structural guard evaluates the finite owner set
-
-- **WHEN** the eight production files and guard configuration are evaluated
-- **THEN** each file is strictly below 1,000 lines, no ninth owner or replacement
-  exclusion exists, the guard digest is unchanged, and a normal verified commit passes
-  the hook.
-
 ### Requirement: Guard exclusion burndown removes ten oversized surfaces without replacement
 
 The repository SHALL split the ten guard-excluded oversized surfaces named by this
@@ -739,12 +660,6 @@ mapping tests and SHALL import `tests.basins_package_helpers` at module scope.
   configuration and documentation authority are evaluated
 - **THEN** every changed/new text source is strictly below 1,000 lines, the guard threshold
   and exclusion list are byte-identical, and an ordinary commit passes the hook
-- **AND** the heading-bounded baseline M10 #147–#152 family remains under
-  `docs/validation/production-closure.md`, with documentation changes limited to retargeting
-  current publication commands to seven suites and the existing moved self-lint paths
-- **AND** all six original root heading texts and anchor slugs remain byte-identical as links
-  resolving to matching child headings, both post-split documentation files remain below
-  1,000 lines, and both paths remain current validation authority
 - **AND** the live M9 closeout, #148 regression and opt-in Basins smoke commands execute all
   seven suites, the moved real-smoke node still runs, and historical M9 result bullets plus
   archived evidence remain unchanged

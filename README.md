@@ -9,7 +9,7 @@ SHUD-NWM（National Hydrological Modeling System, NHMS）把气象资料接入�
 - 后端主入口为 `apps/api`，基于 FastAPI 提供模型资产、预报、best-available、状态快照、流水线和 Slurm 网关等 API。
 - 前端主入口为 `apps/frontend`，基于 Vite、React、TypeScript、MapLibre、ECharts、Zustand 和 OpenAPI-generated types。
 - 业务链路已覆盖 GFS、IFS、ERA5 等资料适配，canonical 气象产品、forcing 生产、SHUD runtime、output parser、hydro display 产品发布和 pipeline 编排。
-- M10 production closure、M11 全国总览与流域钻取、M20 production scheduler automation 已形成 deterministic / production-like evidence lane。
+- M11 全国总览与流域钻取、M20 production scheduler automation 已形成 deterministic / production-like evidence lane。
 - MVP 最短路径聚焦 QHH/有限流域水文气象展示与运维监控：GFS 主源、IFS 并行源、河段流量 `q_down`、forcing 代站变量 `PRCP/TEMP/RH/wind/Rn/Press` 和 pipeline 运维闭环。
 - 默认 fast 验证不伪装最终生产就绪；live backend auth、live alert sink、live rollback、accepted live dependency proofs、真实对象存储与目标环境 Slurm/外部资料源证据仍是生产上线前边界。
 
@@ -28,7 +28,7 @@ SHUD-NWM（National Hydrological Modeling System, NHMS）把气象资料接入�
 4. **模型资产管理**：支持 Basins discovery、package publication、registry import、model version lineage、active/inactive 生命周期和只读前端资产页。
 5. **运行编排**：`services/orchestrator` 与 `services/slurm_gateway` 负责任务计划、依赖链、Slurm job/array、retry、cancel、partial success 和 evidence。
 6. **结果产品**：支持 SHUD output parse、hydro result 入库、display 产品发布、layer metadata 和 API/frontend 消费。
-7. **生产证据链**：`services/production_closure` 提供 Slurm、对象存储、气象/QC、staging E2E、全国规模性能、ops/security/readiness 等 opt-in validation lane。
+7. **生产证据链**：`services/production_closure` 保留 node-27 C2 只读 DB 边界校验（`scripts/validate_readonly_db_boundary.py`）与 C4 生产接受（`scripts/node27_c4_production_acceptance.py`）。
 
 ### 前端产品面
 
@@ -94,7 +94,7 @@ SHUD-NWM/
 ├── scripts/                         # 诊断、复现、QHH chain 脚本
 ├── services/
 │   ├── orchestrator/                # pipeline 编排
-│   ├── production_closure/          # production-like / opt-in 证据链
+│   ├── production_closure/          # C2 只读 DB 边界校验与 C4 生产接受
 │   ├── slurm_gateway/               # Slurm 网关
 │   ├── tile_publisher/              # 产品/瓦片发布
 │   └── tiles/                       # MVT / layer metadata 相关能力
@@ -246,16 +246,6 @@ uv run nhms-pipeline plan-production \
   --workspace-root .nhms-workspace
 ```
 
-Production readiness 汇总 lane 示例：
-
-```bash
-NHMS_RUN_PRODUCTION_CLOSURE=1 uv run nhms-production validate-readiness \
-  --evidence-root artifacts/production-closure \
-  --run-id local-scheduler-readiness \
-  --scheduler-evidence-root .nhms-workspace/scheduler/evidence \
-  --force
-```
-
 完整矩阵见 [`docs/VALIDATION.md`](docs/VALIDATION.md)。
 
 ## CLI 入口
@@ -273,7 +263,6 @@ NHMS_RUN_PRODUCTION_CLOSURE=1 uv run nhms-production validate-readiness \
 | `nhms-shud-runtime` | SHUD runtime adapter |
 | `nhms-parse` | SHUD output parse |
 | `nhms-pipeline` | pipeline / production scheduler 编排 |
-| `nhms-production` | production closure / readiness 证据链 |
 | `nhms-state` | 状态管理工具 |
 
 ## 数据与生产边界
