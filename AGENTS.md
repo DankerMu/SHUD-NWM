@@ -150,6 +150,8 @@ Do not hand-edit this file.
 
 根指令保持精简：只放**跨子树的纪律与路由**。操作细则下沉到 runbook / `SKILL.md` / pack `README.md`，历史考古下沉到 ADR；绝对数字（容量、行数、耗时）一律以实测为准，不写进本文件。子树需细化时就近新增 scoped 指令文件。
 
+文件行数不设机械门：`.large-file-guard.json` 已停用（#3220，豁免清单只增不减，已不构成约束），拆不拆由评审判断。
+
 ## Observable Completion
 
 完工附一行 `Execution Summary: agents=...; skills=...; tools=...; verification=...; limits=...`；保持事实、不展开隐藏推理。
