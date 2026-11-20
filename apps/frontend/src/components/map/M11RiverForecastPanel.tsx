@@ -16,7 +16,7 @@ import {
   type HydroMetRiverForecastSegmentIdentity,
 } from '@/lib/hydroMet/riverForecast'
 import type { HydroMetSource } from '@/lib/hydroMet/queryState'
-import type { ForecastData } from '@/stores/forecast'
+import type { ForecastData } from '@/lib/forecastData'
 import { fetchHydroMetLatestProduct, type QhhLatestProduct } from '@/stores/hydroMetBootstrap'
 
 type ForecastSeries = ForecastData['series'][number]

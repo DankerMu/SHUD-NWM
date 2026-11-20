@@ -6,7 +6,7 @@ import { useChartFollowsContainer } from '@/components/charts/useChartFollowsCon
 import { useChartZoomObserver, type ChartZoomWindow } from '@/components/charts/useChartZoomObserver'
 import { FORECAST_CHART_POINT_BUDGET, forecastPointBudgetMessage } from '@/lib/forecastRenderingBudget'
 import { formatUnitForDisplay } from '@/lib/format'
-import type { ForecastData } from '@/stores/forecast'
+import type { ForecastData } from '@/lib/forecastData'
 
 const IFS_SIX_DAY_LEAD_HOURS = 144
 const HOUR_MS = 60 * 60 * 1000

@@ -310,5 +310,14 @@ path.
   `src/components/map/MapView` (only referenced by `AppRoutes.test.tsx` + own test).
   `AppRoutes.test.tsx:12,214` retains #409-residual flood store/component imports
   (App no longer routes to flood) = test cruft. These stay because some siblings
-  (`components/forecast/*`, `charts/ForecastChart`, `stores/forecast`) remain live
-  in the single-map forecast popup chain; a focused dead-code sweep owns removal.
+  remain live in the single-map forecast popup chain; a focused dead-code sweep owns removal.
+- #3222 ran that sweep for the frontend by reachability from `src/main.tsx` over
+  non-test imports. Of the forecast siblings only `charts/ForecastChart` was live;
+  the forecast panel, its segment-info and scenario-selector components and the
+  forecast zustand store were not, and are deleted (the chart's data types moved to
+  `src/lib/forecastData.ts`). Also deleted: the unused shadcn tabs and dropdown-menu
+  components with their two Radix packages, the unused pagination hook, and the
+  shared latest-product hook and store that no popup used. The two evidence-lane
+  libraries (`src/lib/c4DisplayEvidence`, `src/lib/riverClickEvidence`) are
+  reachable only from the Playwright lanes and stay. Per-test dispositions are in
+  `deleted-tests.md` of the OpenSpec change `delete-unreachable-frontend-code`.

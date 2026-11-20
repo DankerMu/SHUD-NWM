@@ -3,7 +3,7 @@ import type { EChartsInstance } from 'echarts-for-react/lib/types'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ForecastChart } from '@/components/charts/ForecastChart'
-import type { ForecastData } from '@/stores/forecast'
+import type { ForecastData } from '@/lib/forecastData'
 
 const { coreProps } = vi.hoisted(() => ({ coreProps: vi.fn() }))
 

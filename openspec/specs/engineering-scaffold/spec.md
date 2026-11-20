@@ -1,8 +1,11 @@
 # engineering-scaffold Specification
 
 ## Purpose
-TBD - created by archiving change m35-frontend-modernization. Update Purpose after archive.
+The frontend build scaffold: the Vite project, Tailwind theme tokens, the shadcn/ui base components the application actually imports, OpenAPI-generated API types, the Zustand stores, RBAC routing and the dev proxy.
+
+
 ## Requirements
+
 ### Requirement: Vite project initialization
 The system SHALL initialize a Vite 6 + React 18 + TypeScript project under `apps/frontend/` with `pnpm` as the package manager.
 
@@ -18,7 +21,7 @@ The system SHALL configure Tailwind CSS v4 with theme tokens mapped from the exi
 - **THEN** the rendered colors MUST match the existing `--bg` and `--text` CSS variable values
 
 ### Requirement: shadcn/ui component library
-The system SHALL install shadcn/ui and generate base components: Button, Card, Table, Dialog, Badge, Select, Toast, Tabs, DropdownMenu.
+The system SHALL install shadcn/ui and generate the base components the application uses: Button, Card, Table, Dialog, Badge, Select, Toast. A generated component that no application module imports SHALL NOT be kept, and neither SHALL its Radix dependency.
 
 #### Scenario: Component availability
 - **WHEN** a page imports `<Button>` from `@/components/ui/button`
@@ -36,7 +39,7 @@ The system SHALL use `openapi-typescript` to generate TypeScript types from `ope
 - **THEN** `src/api/types.ts` is updated and any type mismatches cause TypeScript compilation errors
 
 ### Requirement: Zustand state management
-The system SHALL use Zustand stores for auth (role state), monitoring (stages/jobs/metrics), and forecast (selected segment/data).
+The system SHALL use Zustand stores for auth (role state) and monitoring (stages/jobs/metrics). Forecast series for the river popup are loaded by `src/lib/hydroMet/riverForecast.ts` and held by the popup component; there is no forecast store.
 
 #### Scenario: Store reactivity
 - **WHEN** the monitoring store's `stages` array is updated via `fetchAll()`
@@ -59,4 +62,3 @@ The system SHALL configure Vite dev server to proxy `/api/*` requests to `http:/
 #### Scenario: API proxy in development
 - **WHEN** the frontend calls `fetch('/api/v1/health')` during development
 - **THEN** the request MUST be proxied to the FastAPI backend on port 8000
-

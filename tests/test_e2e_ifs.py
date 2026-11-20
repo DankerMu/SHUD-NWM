@@ -178,14 +178,14 @@ async def test_ifs_api_multi_source_response_and_single_analysis_segment() -> No
 
 
 def test_frontend_ifs_chart_contract_handles_multi_source_metadata() -> None:
-    forecast_store = Path("apps/frontend/src/stores/forecast.ts").read_text(encoding="utf-8")
+    river_forecast = Path("apps/frontend/src/lib/hydroMet/riverForecast.ts").read_text(encoding="utf-8")
+    forecast_data = Path("apps/frontend/src/lib/forecastData.ts").read_text(encoding="utf-8")
     forecast_chart = Path("apps/frontend/src/components/charts/ForecastChart.tsx").read_text(encoding="utf-8")
 
-    assert "selectedScenarios.join(',')" in forecast_store
-    assert "available_lead_hours" in forecast_store
-    assert "source_id" in forecast_store
+    assert "available_lead_hours" in river_forecast
+    assert "source_id" in river_forecast
     assert "data?.series ?? []" in forecast_chart
-    assert "#2ca02c" in forecast_store
+    assert "#2ca02c" in forecast_data
     assert "#2ca02c" in forecast_chart
     assert "IFS_SIX_DAY_LEAD_HOURS = 144" in forecast_chart
     assert "IFS 6d" in forecast_chart

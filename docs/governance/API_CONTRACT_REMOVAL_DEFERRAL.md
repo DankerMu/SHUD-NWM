@@ -52,9 +52,8 @@ Representative results:
   canonical `forecast-series` path/operation at lines 228/236/2339 and
   `latest-product` path/operation at lines 279/287/2448.
 - Frontend generated-client usage remains in `apps/frontend/src`: canonical
-  `forecast-series` calls in `stores/forecast.ts` and
-  `lib/hydroMet/riverForecast.ts`, plus `latest-product` calls in
-  `pages/hydroMet/bootstrap.ts`.
+  `forecast-series` calls in `lib/hydroMet/riverForecast.ts`, plus `latest-product` calls in
+  `stores/hydroMetBootstrap.ts`.
 - Backend contract and OpenAPI drift coverage remains in
   `tests/test_api_contract.py` and `tests/test_openapi_drift.py`.
 - Deprecation marker search found no `deprecated: true`, `X-Deprecated`, or

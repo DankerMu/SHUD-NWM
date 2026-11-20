@@ -122,18 +122,18 @@ rg --files apps/frontend/e2e | sort
   static OpenAPI; `tests/test_readonly_db_validation.py` maps readonly route
   validation to `latest_product`; `tests/test_runtime_mode.py` includes it in
   display-safe route coverage.
-- Frontend consumer evidence: `apps/frontend/src/pages/hydroMet/bootstrap.ts:57`
-  calls `client.GET('/api/v1/mvp/qhh/latest-product', ...)` for full bootstrap,
-  and `apps/frontend/src/pages/hydroMet/bootstrap.ts:75` calls the same route
-  with `identity_only=true` for popup product identity. Current consumers fan
-  out through `apps/frontend/src/stores/hydroMetProductData.ts`,
+- Frontend consumer evidence: `apps/frontend/src/stores/hydroMetBootstrap.ts:72`
+  calls `client.GET('/api/v1/mvp/qhh/latest-product', ...)` with
+  `identity_only=true` for popup product identity; the full-bootstrap call at
+  `apps/frontend/src/stores/hydroMetBootstrap.ts:54` has had no production caller
+  since #3222 (only its own tests call it). Current consumers fan out through
   `apps/frontend/src/stores/stationLayerData.ts`,
   `apps/frontend/src/components/map/M11RiverForecastPanel.tsx`, and
   `apps/frontend/src/components/map/M11StationForcingPopup.tsx`.
 - Frontend test evidence: `apps/frontend/src/pages/hydroMet/__tests__/bootstrap.test.ts`
-  asserts direct latest-product calls and strict-identity behavior;
-  `apps/frontend/src/pages/m11/__tests__/useHydroMetProduct.test.tsx` asserts
-  latest-product is called once; map popup tests mock `fetchHydroMetLatestProduct`.
+  asserts direct latest-product calls and strict-identity behavior, and
+  (`bootstrap.test.ts:540`) that the identity-only latest-product is called once
+  per basin, source and cycle; map popup tests mock `fetchHydroMetLatestProduct`.
 - E2E/mocked evidence: current `apps/frontend/e2e` specs do not contain an
   explicit `latest-product` string, but broad mocked `page.route('**/api/v1/**')`
   handlers remain in `preview-deeplink.spec.ts`, `monitoring.mocked.spec.ts`,
@@ -168,14 +168,11 @@ rg --files apps/frontend/e2e | sort
   `tests/test_api_contract.py`, `tests/test_openapi_drift.py`,
   `tests/test_e2e.py`, `tests/test_e2e_ifs.py`, `tests/test_hindcast.py`,
   `tests/test_flood_alerts_api.py`, and `tests/test_real_database_integration.py`.
-- Frontend consumer evidence: `apps/frontend/src/stores/forecast.ts:377`,
-  `apps/frontend/src/stores/overviewData.ts:908`,
-  `apps/frontend/src/stores/overviewData.ts:917`, and
-  `apps/frontend/src/lib/hydroMet/riverForecast.ts:121` call the generated
-  `forecast-series` path.
+- Frontend consumer evidence: `apps/frontend/src/lib/hydroMet/riverForecast.ts:126` calls the generated
+  `forecast-series` path; it is the only production call site (checked 2026-11-20, #3222;
+  `stores/overviewData.ts` no longer calls it).
 - Frontend test evidence: `apps/frontend/src/pages/hydroMet/__tests__/bootstrap.test.ts`
-  asserts generated forecast-series calls; `apps/frontend/src/stores/__tests__/overviewDataSourceSelection.test.ts`
-  contains many forecast-series path assertions.
+  asserts the generated forecast-series call and its query (`:804`, `:847`).
 - E2E/mocked evidence: at the time of this record
   `apps/frontend/e2e/m11-routes.spec.ts:276` and
   `apps/frontend/e2e/m15-visual-conformance.spec.ts:563` branched on URL
@@ -244,7 +241,7 @@ rg --files apps/frontend/e2e | sort
   route. #411 found backend consumers for both active runtime routes, so no
   backend contraction can happen first.
 - #414: frontend/node-27 migration for current display/bootstrap consumers,
-  especially direct latest-product calls in `apps/frontend/src/pages/hydroMet/bootstrap.ts`.
+  especially direct latest-product calls in `apps/frontend/src/stores/hydroMetBootstrap.ts`.
 - #415: OpenAPI and generated type synchronization after #413/#414 evidence.
   Also owns documentation synchronization for stale forecast-series shorthand
   references.
@@ -265,7 +262,7 @@ the #411 evidence snapshot and are not rewritten.
   `RiverSegmentFeatureCollection` components (`openapi/nhms.v1.yaml`, the
   runtime patches, `apps/frontend/src/api/types.ts`), the response models that
   only it used, and its one frontend caller (`fetchHydroMetRiverSegments` in
-  `apps/frontend/src/pages/hydroMet/bootstrap.ts`, whose result no product code
+  `apps/frontend/src/stores/hydroMetBootstrap.ts`, whose result no product code
   consumed). No shim, no `410`, no deprecation header: the path answers `404`.
 - Why: its features carried a derived id `<model_id>_seg_<iRiv>_<iEle>` that is
   no row of `core.river_segment`; the detail and forecast-series endpoints

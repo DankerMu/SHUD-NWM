@@ -18,7 +18,7 @@ export function createForecastPointBudgetGuard(
   let sourcePointCount = 0
   let retainedPointCount = 0
   let sourceSeriesCount = 0
-  let retainedSeriesCount = 0
+  const retainedSeriesCount = 0
   let explicitSourcePointCount = false
   let explicitSourceSeriesCount = false
 
@@ -30,11 +30,6 @@ export function createForecastPointBudgetGuard(
     setSourceSeriesCount(count: number) {
       sourceSeriesCount = Math.max(0, count)
       explicitSourceSeriesCount = true
-    },
-    takeSeries<T>(points: readonly T[] | null | undefined): T[] | null {
-      if (retainedSeriesCount >= seriesBudget || retainedPointCount >= pointBudget) return null
-      retainedSeriesCount += 1
-      return this.take(points)
     },
     take<T>(points: readonly T[] | null | undefined): T[] {
       const source = Array.isArray(points) ? points : []

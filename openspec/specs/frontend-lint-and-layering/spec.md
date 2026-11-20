@@ -24,11 +24,15 @@ The `frontend-build` job in `.github/workflows/ci.yml` SHALL run `pnpm check:api
 - **THEN** the `frontend-build` job fails at `check:api-types`
 
 ### Requirement: `pages/` SHALL be a leaf layer
-`src/pages/hydroMet/bootstrap.ts` SHALL move to `src/stores/hydroMetBootstrap.ts` with identical exports; its seven production importers (`stores/hydroMetProductData.ts`, `stores/stationLayerData.ts`, `components/map/M11StationForcingPopup.tsx`, `components/map/M11RiverForecastPanel.tsx`, `pages/OverviewPage.tsx`, `pages/m11/useHydroMetProduct.ts`, `pages/m11/useStationLayer.ts`) SHALL import the new path, and the seven test files that `vi.mock` or import the old path plus `pages/hydroMet/__tests__/bootstrap.test.ts` (which imports it and reads the source by path; 15 files in all) SHALL be edited **only** in their path strings. No non-test file outside `src/pages` and `src/App.tsx` SHALL import from `src/pages`. `import-x/no-cycle` SHALL report zero cycles over `src/`.
+The hydro-met bootstrap SHALL live at `src/stores/hydroMetBootstrap.ts`; no module SHALL exist at `src/pages/hydroMet/bootstrap.ts`. No non-test file outside `src/pages` and `src/App.tsx` SHALL import from `src/pages`. `import-x/no-cycle` SHALL report zero cycles over `src/`.
 
 #### Scenario: No directory cycle remains
 - **WHEN** `pnpm lint` runs on `src/`
-- **THEN** `import-x/no-cycle` reports nothing and the vitest suites pass with no edits other than the path strings
+- **THEN** `import-x/no-cycle` reports nothing
+
+#### Scenario: The bootstrap is not reintroduced under pages
+- **WHEN** the source tree is listed
+- **THEN** `src/stores/hydroMetBootstrap.ts` exists and `src/pages/hydroMet/bootstrap.ts` does not
 
 ### Requirement: Status types SHALL be generated aliases with one failed-status set
 `src/lib/constants.ts` SHALL define `PipelineStatus` and `JobStatus` as aliases of the generated `components["schemas"]` types in `src/api/types.ts` and SHALL export one `FAILED_STATUSES` constant; `components/monitoring/BasinFailures.tsx` and `JobsTable.tsx` SHALL import it instead of defining their own sets. `FAILED_STATUSES` keeps its current members; whether `reservation_lost` joins it is out of scope.
