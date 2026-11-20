@@ -38247,7 +38247,8 @@ def test_config_helper_db_free_opt_in_runs_db_free_pass(
     tmp_path: Path,
 ) -> None:
     roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path)
-    # Only the helper opt-in may select DB-free mode in this pass.
+    # No env mode flag: DB-free is the only scheduler mode (#3255, R2b), so the
+    # pass runs DB-free without ``NHMS_SCHEDULER_DB_FREE_REQUIRED``.
     monkeypatch.delenv("NHMS_SCHEDULER_DB_FREE_REQUIRED")
     cycle_time = _dt("2026-05-21T12:00:00Z")
     repository = scheduler_module.FileOrchestrationJournalRepository(
