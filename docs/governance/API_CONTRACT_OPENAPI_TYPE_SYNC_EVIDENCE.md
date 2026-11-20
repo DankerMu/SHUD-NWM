@@ -115,10 +115,10 @@ This command proves active frontend generated-client usage of both retained
 routes, including calls where `client.GET(` and the route string are split
 across lines. Representative expected hits include:
 
-- Latest product: `apps/frontend/src/pages/hydroMet/bootstrap.ts:57` and
-  `apps/frontend/src/pages/hydroMet/bootstrap.ts:75`.
+- Latest product: `apps/frontend/src/stores/hydroMetBootstrap.ts:54` and
+  `apps/frontend/src/stores/hydroMetBootstrap.ts:72`.
 - Canonical forecast-series:
-  `apps/frontend/src/lib/hydroMet/riverForecast.ts:120`/`:121`.
+  `apps/frontend/src/lib/hydroMet/riverForecast.ts:125`/`:126`.
 
 `S5` backend contract test active path search:
 

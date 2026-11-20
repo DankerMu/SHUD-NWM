@@ -92,8 +92,8 @@ page that the single-map page replaced and that has not been routed since.
   bootstrap" call is a live consumer is corrected (see D8).
 - D6. Spec disposition (found in fixture review: live specs still required the deleted code).
   - `multi-source-comparison-ui`: REMOVED "Scenario 选择器控件", "数据请求参数传递", "IFS 数据不可用时的降级显示". The four
-    requirements about curve rendering, lead-hour annotation, issue-time info and API response metadata stay: `ForecastChart`
-    and the API implement them.
+    requirements about curve rendering, lead-hour annotation, issue-time info and API response metadata stay; how far
+    the live window implements them is not audited here (two known drifts are listed below).
   - `forecast-migration`: REMOVED "Forecast panel", "Forecast state management".
   - `engineering-scaffold`: MODIFIED "shadcn/ui component library" (Tabs, DropdownMenu dropped; unused generated
     components are not kept) and "Zustand state management" (no forecast store).
@@ -110,7 +110,9 @@ page that the single-map page replaced and that has not been routed since.
     the per-source degraded display of the river curve window (pinned by `M11RiverForecastPanel.test.tsx`) and
     "analysis appears once with several scenarios" (pinned by `tests/test_e2e_ifs.py`).
   - `multi-source-comparison-ui` "起报时刻信息增强" (a header line with issue time and sources) has no implementation in
-    the tree today, dead or live. That drift predates this change and is not touched; with the other specs of the
+    the tree today, dead or live; and "多源曲线渲染" specifies three curve colours and an analysis legend entry that
+    the live river window does not use (it draws two sources in its own colours and requests no analysis; found in
+    review). That drift predates this change and is not touched; with the other specs of the
     pre-single-map frontend (`forecast-frontend`, `national-overview-page`, …) it belongs to a spec triage of its own
     (reported on the issue).
 - D7. Dependencies: removing the two Radix packages changes `pnpm-lock.yaml` (frontend only; `uv.lock` is untouched).

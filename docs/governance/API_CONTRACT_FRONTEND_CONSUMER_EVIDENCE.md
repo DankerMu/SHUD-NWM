@@ -71,7 +71,7 @@ rg -n "/api/v1/river-segments/\{segment_id\}/forecast-series|/api/v1/river-segme
 
 Search `F1`/`F3` found active frontend consumers of the canonical active route:
 
-- Direct generated calls: `apps/frontend/src/pages/hydroMet/bootstrap.ts` calls
+- Direct generated calls: `apps/frontend/src/stores/hydroMetBootstrap.ts` calls
   `client.GET('/api/v1/mvp/qhh/latest-product', ...)` twice — `identity_only=true`
   popup product identity (the live consumer) and the full bootstrap, which has had
   no production caller since #3222 (only its own tests call it).
@@ -94,14 +94,13 @@ there is no #414 frontend migration to perform.
 
 Search `F2`/`F3` found active frontend consumers of the canonical route:
 
-- Generated calls: `apps/frontend/src/stores/overviewData.ts` (two call sites) and
-  `apps/frontend/src/lib/hydroMet/riverForecast.ts` call the generated
-  `forecast-series` path.
+- Generated calls: `apps/frontend/src/lib/hydroMet/riverForecast.ts` calls the generated
+  `forecast-series` path; it is the only production call site (checked 2026-11-20, #3222;
+  `stores/overviewData.ts` no longer calls it).
 - Generated type binding: `apps/frontend/src/api/types.ts` exposes the canonical
   `forecast-series` path entry.
 - Frontend test coverage: `apps/frontend/src/pages/hydroMet/__tests__/bootstrap.test.ts`
-  and `apps/frontend/src/stores/__tests__/overviewDataSourceSelection.test.ts` assert generated
-  forecast-series calls.
+  asserts the generated forecast-series call and its query.
 
 These are active canonical-contract dependencies. #412 explicitly retains this
 route and assigns documentation alignment / future deferral to #415/#416, so
@@ -120,9 +119,8 @@ marking remains #415/#416 documentation work.
 Issue #414 intentionally preserves the following frontend/display dependencies:
 
 - Generated client usage of `/api/v1/mvp/qhh/latest-product` in
-  `apps/frontend/src/pages/hydroMet/bootstrap.ts` and its store/popup fan-out.
+  `apps/frontend/src/stores/hydroMetBootstrap.ts` and its store/popup fan-out.
 - Generated client usage of the canonical `forecast-series` route in
-  `apps/frontend/src/stores/overviewData.ts` and
   `apps/frontend/src/lib/hydroMet/riverForecast.ts`.
 - Generated type bindings in `apps/frontend/src/api/types.ts` for both active
   contracts.

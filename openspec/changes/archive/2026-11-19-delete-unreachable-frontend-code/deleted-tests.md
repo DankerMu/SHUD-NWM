@@ -22,7 +22,7 @@ count. Files: 131 - 2 deleted + 1 new (`ForecastChartComparison.test.tsx`) = 130
 | `caps oversized forecast payloads during normalization` (:302) | store normaliser keeps `FORECAST_CHART_POINT_BUDGET` (10 000) points and reports `pointBudgetStatus.overBudget` | deleted | Dead: the store normaliser and the only producer of `pointBudgetStatus`. The live path caps each series at 480 points (`riverForecast.ts:331-334`): **gap, no vitest pin** (D9). |
 | `marks too many one-point series as over-budget and stops retaining extra series` (:341) | `takeSeries` stops at the series budget; `retainedSeriesCount` = budget, `overBudget` | deleted | Dead: `takeSeries` had the store as its only caller and is deleted (D8). The live analogue, the 8-series inspection limit (`riverForecast.ts:193-195`), is a **gap, no vitest pin** (new, not in D9). |
 | `fails locally instead of issuing an unscoped forecast request` (:375) | empty `riverNetworkVersionId` throws `缺少 river_network_version_id` and issues no GET | deleted | Dead in this form. Live: `river_network_version_id` is taken from the latest-product identity (`riverForecast.ts:134`), and `OverviewPage.tsx:601` opens no river window when the clicked feature lacks segment / basin-version / river-network-version id. `loadHydroMetRiverForecast` itself has no empty-id guard. The `OverviewPage.tsx:601` guard has **no vitest pin found** (new gap). |
-| `renders GFS and IFS curves with the comparison colors` (:391) | `ForecastChart` line colours / styles per series | re-homed to `src/components/charts/__tests__/ForecastChartComparison.test.tsx` | Assertions byte-identical (diffed against `git show HEAD:` :391-525). |
+| `renders GFS and IFS curves with the comparison colors` (:391) | `ForecastChart` line colours / styles per series | re-homed to `src/components/charts/__tests__/ForecastChartComparison.test.tsx` | Assertions byte-identical (diffed against `git show master:` :391-525). |
 | `shows the IFS 6d annotation when available lead hours are 144` (:424) | `IFS 6d` markLine at cycle + 144 h, data trimmed to it | re-homed (same file) | unchanged |
 | `renders an over-budget state instead of passing oversized forecast arrays to ECharts` (:451) | `pointBudgetStatus.overBudget` renders the status message and no ECharts | re-homed (same file) | unchanged; see "Symbols orphaned": no production code sets `pointBudgetStatus` any more |
 | `renders a degraded state for too many retained one-point series before building ECharts options` (:480) | same, series budget | re-homed (same file) | unchanged; same note |
@@ -73,9 +73,10 @@ to say so. No assertion changed.
 - 8-series inspection limit at `riverForecast.ts:193-195` (`HYDRO_MET_RIVER_FORECAST_SERIES_INSPECTION_LIMIT`): no vitest
   pin (new).
 - Spliced response shape (`segments` / `data` / `valid_time`, `riverForecast.ts:152`, `:287`, `:313`, `:375`): every
-  vitest fixture uses `series` / `points`; no pin (new; the removed Python `payload.segments` text check was the only,
-  store-side, reference).
-- `OverviewPage.tsx:601`: a river click whose feature lacks segment / basin-version / river-network-version id opens no
+  vitest fixture uses `series` / `points`. Not a gap on the live path: the API returns the `segments` shape only for
+  `include_analysis=true` (`packages/common/forecast_store.py:843`, `:866`) and the live request sends `false`
+  (`riverForecast.ts:140`), so this is a defensive branch the live request cannot reach (corrected in review).
+- `OverviewPage.tsx:602`: a river click whose feature lacks segment / basin-version / river-network-version id opens no
   window. No vitest pin found (new).
 - `fetchHydroMetLatestProduct` concurrent same-key dedupe: same code branch as the pinned sequential case
   (`bootstrap.test.ts:540`) but not pinned on its own (minor, new).
@@ -88,6 +89,11 @@ to say so. No assertion changed.
 - Spec gaps recorded in the REMOVED reasons (D6), unchanged here: per-source degraded display of the river window
   (test-pinned at `M11RiverForecastPanel.test.tsx:349`, no spec statement) and "analysis appears once with several
   scenarios" (pinned by `tests/test_e2e_ifs.py`).
+- Spec drift that predates this change and is not touched (found in review): `multi-source-comparison-ui` "多源曲线渲染"
+  still specifies an analysis curve `#2266cc`, GFS `#ef7d22`, IFS `#2ca02c` and a legend with "分析（ERA5）". The live
+  river window draws `#22d3ee` / `#34d399` labelled `GFS` / `IFS` (`M11RiverForecastPanel.tsx:36`), requests
+  `include_analysis: false` and draws no analysis curve; the only producer of the three specified colours was the
+  deleted store. `ForecastChart` passes colours through. With "起报时刻信息增强" this belongs to the frontend spec triage.
 
 ## Symbols orphaned by this change
 
