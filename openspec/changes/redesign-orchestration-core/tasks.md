@@ -176,13 +176,32 @@ Minimal mergeable slice: 4.1 alone (factory arms and adapters); 4.2 and 4.3 foll
 
 ## 5. R3 — Delete `PsycopgOrchestratorRepository`
 
-- [ ] 5.1 Test-only PR first. For each `CapturingRepository(PsycopgOrchestratorRepository)` test and the candidate-state tests (`tests/test_orchestration_chain.py:8283-10049`), record whether it asserts SQL text (to delete in 5.2) or candidate-state semantics. For each semantics case, confirm `chain_repository_state.py` covers it on the file-journal path (`file_orchestration_journal.py:2025`), and migrate it if not.
+- [x] 5.1 Test-only PR first. For each `CapturingRepository(PsycopgOrchestratorRepository)` test and the candidate-state tests (`tests/test_orchestration_chain.py:8283-10049`), record whether it asserts SQL text (to delete in 5.2) or candidate-state semantics. For each semantics case, confirm `chain_repository_state.py` covers it on the file-journal path (`file_orchestration_journal.py:2025`), and migrate it if not.
 - [ ] 5.2 Delete the Appendix C R3 symbols and their SQL-text tests, plus `tests/test_real_database_integration.py:339-502` (each test confirmed SQL-only on node-27). Keep the `OrchestratorRepository` protocol. Update the inventory text and tests.
 - [ ] 5.3 Add the Appendix D R3 spec deltas, including the MODIFIED `file-orchestration-journal` contract-test requirement already in this change. Update `docs/runbooks/node22-db-retirement-runbook.md:51`, which names the deleted class.
 - [ ] 5.4 Verification: node-27 real-DB suites that remain pass. On node-22, one idle pass and one submitting pass.
 
 Suggested fixture level: expanded - persistence layer deletion.
 Minimal mergeable slice: 5.1 as a test-only PR; then 5.2 + 5.3 + 5.4 as the deleting PR.
+
+Slice triage (R3-1, #3259, task 5.1):
+- Issue type: test. Fixture level: compact (agree): test-only, no production code. Blast radius: the in-scope test files and any file a migrated test is added to; a semantics case left only on the SQL repository would be lost when R3-2 deletes it.
+- Scope at b316e32e0 (re-grep `git grep -n PsycopgOrchestratorRepository -- tests`): every test that subclasses, instantiates or patches `PsycopgOrchestratorRepository`.
+  - Semantics carriers: `tests/test_orchestration_chain.py` (`CapturingRepository` at :4869, :8127, :8169, :8213, :8249, :8371, :8439, :8512, :8588, :8661, :9926, :10015, :10668; `_SourceCycleRetrySupersessionRepository` :8750 and its users; the instance at :11960; the candidate-state band :8246-10078; the facade/inventory asserts :923, :2348-2362, :12788-12943; the integration oracle :20280) and `tests/test_chain_repository_nfs_raw_manifest.py:48, :77` (NFS raw-manifest synthesis and the required-gap projection; R3-2 deletes the whole file).
+  - Also tabled with a one-line disposition each: `tests/test_real_database_integration.py:339-502` (3 tests), `tests/test_gateway_reconcile_reservation_lifecycle.py:280`, `tests/test_orchestrator_demote_reclaim_lifecycle.py:596-604`, `tests/test_production_scheduler.py:41221, 41225, 43952-43956, 45951, 45955`.
+- Per test, exactly one disposition, recorded in the PR body table (a test that mixes kinds gets one row per half):
+  - **delete (R3-2)**: it asserts SQL text, SQL parameters, the facade/export binding of the SQL class, or other behaviour that exists only in the SQL repository. Not deleted here. A parameter or SQL-text assertion that encodes a behaviour rule (a status set, a visibility predicate, e.g. `pending` counts as active at :8166) is split; its rule half needs covered-by or migrated-to. Every delete row cites the asserted line.
+  - **delete (journal-divergent)**: the journal's pre-projection step (`file_orchestration_journal.py:1937-2068`: foreign-model exclusion, cohort membership, compaction) gives a different answer on the same geometry by design. The row cites the journal rule's line and names the journal test that pins the journal's answer. Never covered-by.
+  - **covered-by `<test>`**: it asserts the semantics of an `OrchestratorRepository` method the file journal also implements (`candidate_state`: attempt/stage accounting, truncation, freshness window, supersession, retry/backoff projection, identity fields, ordering, NFS raw-manifest readiness; `has_active_pipeline` / `active_slurm_jobs`: the active status set and row visibility; `find_forcing_context`: package/station metadata), and a named test already drives the same method on `FileOrchestrationJournalRepository` through `candidate_state_from_rows` (`chain_repository_state.py:650`, called at `file_orchestration_journal.py:2025`) where applicable, on the same input geometry, asserting the same property. The row cites the covering test's seed lines and its assert line. The covering test must not construct, subclass or patch `PsycopgOrchestratorRepository`, must not be in the R3-2 delete set, and must not be `integration`-marked.
+  - **migrated-to `<test>`**: a semantics case with no such file-journal test. The new test seeds the same rows through the file journal (e.g. `append_historical_pipeline_job`, the journal write API) and asserts the same outputs on the same method. Each migrated test is mutation-checked against the shared projection or the file-journal path and fails under the mutation. It must not be `integration`-marked.
+  - **unaffected**: the test does not construct, subclass or patch the SQL class (e.g. :9306, :9457, :9570, :9621); it survives R3-2 unchanged. Listed only so the band is accounted for.
+- Must preserve: no production code change; no existing test is edited or deleted in this PR (deletions belong to R3-2), so the plain suite only grows.
+- Risk packs selected: Legacy compatibility (no lost semantics coverage → the table, the cited covering tests, mutation kills for migrations). Not selected: every other pack (test-only).
+- Required evidence:
+  1. The table: every in-scope test → delete | delete (journal-divergent) | covered-by | migrated-to | unaffected, with the line of the asserted property and, for covered-by, the covering test's seed and assert lines.
+  2. For each migrated test: green, and red under its mutation (the mutation reverted).
+  3. The new tests green; ruff; CI full suite.
+  4. `git diff --numstat <base>..HEAD -- tests` shows 0 deleted lines in every pre-existing test file, and the collected node count for each touched test file goes up or stays the same.
 
 ## 6. R4 — Delete the SQL `RetryService`
 
