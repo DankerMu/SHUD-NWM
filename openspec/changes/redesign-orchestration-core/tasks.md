@@ -1,5 +1,13 @@
 # Tasks
 
+## Evidence Floor
+
+Every slice PR, before merge:
+- `uv run ruff check . --no-cache` clean, and the CI full suite green (every `Unit Tests (full)` shard).
+- If the slice adds or edits a spec delta in this change: `openspec validate redesign-orchestration-core --strict --no-interactive` passes.
+- The node checks named in its task group's Verification task, at the D5 cadence.
+- The slice's task boxes are ticked in this file in the PR's final push.
+
 Order, dependencies and verification follow design.md D1–D5. Appendix C says which slice deletes each SQL-path symbol. Appendix D says which slice rewrites each main-spec passage. Every PR runs `uv run ruff check . --no-cache` and the CI full suite.
 
 ## 1. R1 — Retire the orchestrated analysis lane
@@ -9,19 +17,20 @@ Order, dependencies and verification follow design.md D1–D5. Appendix C says w
 - [ ] 1.3 Delete the Appendix C R1 symbols: `chain_analysis_orchestrator.py`, `chain_analysis.py`, `build_analysis_run_manifest`, `AnalysisPipelineAlreadyActiveError`, the analysis-only branches, and the compat/`__init__` bindings. Update the inventory text and the inventory-coupled tests that name them.
 - [ ] 1.4 Delete `tests/test_analysis_pipeline.py`, the `AnalysisOrchestrator` assertions in `tests/test_orchestration_chain.py` (:37, :13364, :13376, :13547, :13746, :14210), and the writer-receipt case at `tests/test_gateway_reconcile_writer_receipts.py:134`.
 - [ ] 1.5 CLI test: every remaining subcommand parses exactly as before, and `trigger-analysis` is an argparse usage error (exit 2).
-- [ ] 1.6 Triage the remaining `analysis-run-pipeline` requirements (`:25-86`) against the worker analysis branches (e.g. `workers/output_parser/parser.py`, `run_type='analysis'`). For each requirement, add a REMOVED delta or rewrite it as a worker-only requirement in this change.
+- [ ] 1.6 (separate PR after 1.1–1.5; spec-only) Triage the remaining `analysis-run-pipeline` requirements (`:25-86`) against the worker analysis branches (e.g. `workers/output_parser/parser.py`, `run_type='analysis'`). For each requirement, add a REMOVED delta or rewrite it as a worker-only requirement in this change.
 - [ ] 1.7 Verification: on node-22 after deploy, one idle pass and one submitting pass. `cli.py` is the scheduler unit's entrypoint.
 
 Suggested fixture level: expanded - removes a CLI subcommand on the scheduler's entrypoint module.
-Minimal mergeable slice: atomic - the subcommand, the only class it drives and that class's tests and orphans form one unreachable component; leaving any part keeps an import of a deleted module.
+Minimal mergeable slice: 1.1–1.5 + 1.7 (code deletion) - atomic: the subcommand, the only class it drives, its tests and orphans form one unreachable component; leaving any part keeps an import of a deleted module. 1.6 (spec triage) follows as its own spec-only PR.
 
 ## 2. R2a — Every test builds the scheduler explicitly in DB-free mode
 
-- [ ] 2.1 Retarget the test files that build `ProductionScheduler` / `ProductionSchedulerConfig` without the DB-free flag (24 files; most of the volume is in `tests/test_production_scheduler.py`). Each test passes explicit `adapters=`, file backend selectors and a journal root, and replaces the `_default_adapters` patches and the SQL-factory string patches (Appendix C, R2a row) with injected collaborators. One PR per file, or per group of small files. The flag still selects during these PRs, so each one is green on its own.
-- [ ] 2.2 Delete only the `db_free_required=False` arms of parametrized tests (e.g. `tests/test_production_scheduler.py:18327`, :19188). Tests that construct the scheduler with `ProductionScheduler.__new__` plus duck-typed configs (`tests/test_reconcile_sacct_parse.py:108`) set `db_free_required=True` explicitly.
+- [ ] 2.0 First, switch the shared scheduler test helpers that other test files import to explicit DB-free construction: the test `ProductionScheduler` subclass (`tests/test_production_scheduler.py:729`) and `_config` (`:37378`). This is a test-only PR.
+- [ ] 2.1 Retarget the test files that build `ProductionScheduler` / `ProductionSchedulerConfig` without the DB-free flag (24 files; most of the volume is in `tests/test_production_scheduler.py`). Each test passes explicit `adapters=`, file backend selectors and a journal root, and replaces the `_default_adapters` patches and the SQL-factory string patches (Appendix C, R2a row) with injected collaborators. One PR per file, or per group of small files. `tests/test_production_scheduler.py` (61,872 lines) is split into three contiguous line ranges. The flag still selects during these PRs, so each one is green on its own. Acceptance for each PR: every scheduler construction in its scope is explicitly DB-free. Tests that patch SQL factories with `pytest.fail` to prove they are unreachable in DB-free mode (e.g. `tests/test_production_scheduler.py:40702-40770`, `:45483-45516`) are reachability guards, not retarget targets. They stay, and the slice that deletes each guarded symbol (R2c/R3/R4) rewrites them. `tests/test_qhh_production_bootstrap_scheduler.py` (integration, PG registry) is not retargeted here; R2c-1 owns it.
+- [ ] 2.2 Delete only the `db_free_required=False` arms of parametrized tests (e.g. `tests/test_production_scheduler.py:18327`, :19188). Duck-typed configs (`getattr(config, "db_free_required", False)` consumers) used by tests set `db_free_required=True` explicitly.
 
 Suggested fixture level: compact - test-only.
-Minimal mergeable slice: one test file (start with `tests/test_file_orchestration_journal.py:6012-6175`, the smallest); every following file is its own PR, each green on its own.
+Minimal mergeable slice: 2.0 (shared helpers) first; then one test file or range per PR, each green on its own.
 
 ## 3. R2b — Flip: DB-free is the only scheduler mode
 
@@ -33,15 +42,15 @@ Minimal mergeable slice: one test file (start with `tests/test_file_orchestratio
   - with a selector unset, it blocks with `db_free_selector_missing` before the lock;
   - the gateway's Slurm export env built from a manifest with `NHMS_SCHEDULER_DB_FREE_REQUIRED` unset in the scheduler process still carries `NHMS_CANONICAL_DB_FREE=true`, `NHMS_FORCING_DB_FREE=true` and the file registry backend (`real_backend.py:1048-1075`).
 - [ ] 3.5 Add the Appendix D R2b spec deltas.
-- [ ] 3.6 Verification: on node-22, one idle pass and one submitting pass. The submitting pass's job env carries the DB-free worker switches, read from the job's env snapshot or sbatch script.
+- [ ] 3.6 Verification: on node-22, one idle pass and one submitting pass. The submitting pass's job env carries the DB-free worker switches, read from the job's env snapshot or sbatch script. On node-27, the integration-marked tests that construct the scheduler pass (`-m integration`, files that build `ProductionScheduler`).
 
 Suggested fixture level: expanded - production scheduler mode, the manifest contract and the cross-plane job env.
 Minimal mergeable slice: atomic - after group 2, the flip, the fail-closed arms and the manifest constant must land together, or a submitting pass could emit a manifest without the DB-free contract.
 
 ## 4. R2c — Delete the dead non-DB-free arms
 
-- [ ] 4.1 Delete `_default_adapters` with its re-export, and the SQL-factory arms in `scheduler_core.py` and `scheduler_adapters.py` with their `scheduler.py` re-exports (Appendix C, R2c row). Update the inventory text and tests that name them.
-- [ ] 4.2 Delete the SQL reconcile store, including its reset/dispose code, from `scheduler_runtime.py`. Delete `tests/test_gateway_reconcile_store_reset.py`.
+- [ ] 4.1 Delete `_default_adapters` with its re-export, and the SQL-factory arms in `scheduler_core.py` and `scheduler_adapters.py` with their `scheduler.py` re-exports (Appendix C, R2c row). Update the inventory text and tests that name them. Rewrite the DB-free reachability guards that name these symbols. Retire or retarget `tests/test_qhh_production_bootstrap_scheduler.py` (it proves scheduler visibility under a PostgreSQL registry, the arm this slice deletes); if it is retargeted to the file registry, run it on node-27.
+- [ ] 4.2 Delete the SQL reconcile store, including its reset/dispose code, from `scheduler_runtime.py`. Delete `tests/test_gateway_reconcile_store_reset.py` and `tests/test_reconcile_sacct_parse.py::test_reset_reconcile_store_disposes_dead_engine` (:101-115).
 - [ ] 4.3 Delete the PostgreSQL scheduler lease (`scheduler_core.py:241-250`, its `scheduler_lease.py` branch) and its tests (`PostgresSchedulerLease`, `_postgres_advisory_lock_key` in `tests/test_production_scheduler.py`).
 - [ ] 4.4 Add the Appendix D R2c spec deltas. Update `infra/env/README.md` (:169, :321), `docs/runbooks/two-node-deployment-overview.md:423`, `docs/runbooks/scheduler-dbfree-typed-reasons.md:4` and `docs/runbooks/production-service-config.md:14` so the variable is described as the job-env contract, not a mode switch. `docs/runbooks/node22-db-retirement-runbook.md:51` (names `PsycopgOrchestratorRepository`) is updated in R3. Templates keep the variable.
 - [ ] 4.5 Verification: on node-22, one idle pass and one submitting pass.
@@ -73,7 +82,7 @@ Minimal mergeable slice: atomic - the service, its provider, its aliases (`chain
 
 - [ ] 7.1 Switch the fixtures that seed rows through `create_job` / `reserve_job` / `reclaim_reservation` / `bind_reservation` (Appendix C, R5 row) to ORM inserts. This is a test-only PR.
 - [ ] 7.2 Delete the four methods. Test-only callers do not count as callers. Keep `update_job_status` and `insert_event` (cancel route).
-- [ ] 7.3 Verification: node-27 `tests/test_pipeline_persistence.py` on the real DB, and the C2 read-route receipt.
+- [ ] 7.3 Verification: node-27 C2 read-route receipt; node-22 one idle pass and one submitting pass (D5 deleting slice). `tests/test_pipeline_persistence.py` runs on SQLite, so CI covers it.
 
 Suggested fixture level: compact - deletion of unreferenced methods in one module plus fixture changes.
 Minimal mergeable slice: 7.1 first, test-only; then 7.2 + 7.3.
@@ -96,14 +105,14 @@ Minimal mergeable slice: atomic - one new test file.
 ## 9. T2 — `retry_identity.py` becomes the owner
 
 - [ ] 9.1 Id formatting. Add `retry_job_id(base, attempt)`, keeping the `max(attempt, 1)` clamp, and delegate the four hand-built sites that remain after R4 deletes `retry.py:~286`. Retarget their table rows.
-- [ ] 9.2 Attempt formulas. Add `next_stage_attempt`, `mint_attempt(..., is_occupied)`, `inline_retry_attempt`, `next_after_failure_master`, `next_after_failure_non_master` and `restart_stage_from_basins`, and delegate their call sites, including `:676-683` and `:750`. Row L becomes a plain-data row.
+- [ ] 9.2 Attempt formulas. Add `next_stage_attempt`, `mint_attempt(..., is_occupied)`, `inline_retry_attempt`, `next_after_failure_master`, `next_after_failure_non_master` and `restart_stage_from_basins`, and delegate every call site: `chain.py:863`, `chain_forecast_execution.py:573,625`, `chain_forecast_orchestrator_cycle.py:296,676-683,750`, `file_journal_retry_helpers.py:51-54`, `file_orchestration_journal.py:12432,12455-12459,12678`, `chain_runtime_utils.py:329,356`. Row L becomes a plain-data row.
 - [ ] 9.3 Stage attempt reads. Add `stage_attempt` and delegate `scheduler_state_rows.py:517-656` and the `_stage_job_sort_key` parser.
 - [ ] 9.4 Limit and status sets.
-  - The owner holds the default limit constant; `DEFAULT_RETRY_LIMIT` and `RetryConfig`'s default read it.
+  - The owner holds the default limit constant; `DEFAULT_RETRY_LIMIT` and `RetryConfig`'s default read it. `SlurmGatewaySettings.max_retries` keeps its literal default (the gateway must not import the orchestrator), and a parity test asserts that it equals the owner constant.
   - `NHMS_SCHEDULER_RETRY_LIMIT` and `SLURM_GATEWAY_MAX_RETRIES` keep their readers.
   - The two hard-coded status sets move to the owner unchanged.
-- [ ] 9.5 Add the AST guard (design.md D2) with an empty allowlist.
-- [ ] 9.6 File the behaviour-change issue for the non-master path and the status-set difference, citing the T1 rows it would edit.
+- [ ] 9.5 Add the AST guard (design.md D2) with an empty allowlist. It matches only `_retry_` / `RETRY_JOB_ID_MARKER` id construction, so other f-strings such as `f"manual_retry_{key}"` (`scheduler_state_manual_retry.py:914`) are not flagged.
+- [ ] 9.6 (after T1, independent of the guard) File the behaviour-change issue for the non-master path and the status-set difference, citing the T1 rows it would edit.
 - [ ] 9.7 Verification: per PR, CI. The T1 table's expected values are unchanged in every PR. node-22 batch passes per D5.
 
 Suggested fixture level: expanded - persisted retry identity in a shared state machine.
@@ -120,29 +129,30 @@ Minimal mergeable slice: 10.2 alone first (the guard is green today); then 10.1 
 
 ## 11. F2 — Delete installers and `_COMPAT_` tables
 
+- [ ] 11.0a Chain side, test-only first: delete the test assertions that only read `_CHAIN_*_COMPAT_*` tables (`tests/test_orchestration_chain.py`, `tests/test_file_journal_read_blocked_consumers.py:255-257`). Inventory-text tests stay for F3.
+- [ ] 11.0b Scheduler side, test-only first: delete the `_SCHEDULER_*_COMPAT_*` assertions, including `tests/test_production_scheduler.py:1086-1129`. Inventory-text tests (e.g. `:776-848`) stay for F3.
+- [ ] 11.0c Scheduler state-compat patch propagation: rewrite the propagation in `scheduler_state_compat.py:169-219` as an explicit owner function, with a test that a patch on the facade is seen by the `scheduler_state_*` owners. The installer still runs.
 - [ ] 11.1 Chain side.
   - Replace `globals().update(...)` at `chain.py:147-149,887-889` with explicit alias lines for every name the F1 guard requires.
   - Delete `chain_compat_static.py`, `chain_compat_runtime.py` and the chain-manifest forwarder self-check (`chain.py:~185-204`).
-  - Delete the test assertions that only read `_CHAIN_*_COMPAT_*` tables (`tests/test_orchestration_chain.py`, `tests/test_file_journal_read_blocked_consumers.py:255-257`).
 - [ ] 11.2 Scheduler side.
   - Do the same for `scheduler.py:230-234,238-292,686,688-690`: `scheduler_compat_runtime.py`, `scheduler_candidate_runtime.EXPORTS`, `install_scheduler_state_compat`.
-  - Keep any patch propagation from `scheduler_state_compat.py:169-219` as an explicit owner function.
-  - Delete `_SCHEDULER_*_COMPAT_*` assertions, including `tests/test_production_scheduler.py:1086-1129`.
+  - The installer is deleted; propagation runs through the owner function from 11.0c.
   - `scheduler_lease._scheduler_compat_function` (`scheduler_lease.py:46-54`) stays a late-binding lookup, renamed without "compat".
 - [ ] 11.3 Remove the deleted modules from `FIRST_IMPORT_ALLOWLIST` (`tests/test_orchestrator_first_import.py:38-67`) and the path strings in `tests/test_sqlalchemy_driver_explicit.py:120`, `tests/test_node27_connection_attribution*.py` and `tests/test_file_journal_full_tree_budget_contract.py:374`.
 - [ ] 11.4 Test: importing `chain` / `scheduler` leaves no `_COMPAT_` name in either namespace, and the F1 guard stays green.
-- [ ] 11.5 Add the Appendix D F2 spec deltas.
+- [ ] 11.5 Add the Appendix D F2 spec deltas for each side: chain side `chain-facade-deepening` and `import-layering-guard:23`; scheduler side `scheduler-facade-deepening` and `scheduler-discovery-evidence-owner-compat:31-40`.
 - [ ] 11.6 Verification: on node-22, one idle pass and one submitting pass per side.
 
 Suggested fixture level: expanded - legacy compatibility surface and import-time behaviour.
-Minimal mergeable slice: 11.1 (chain side) alone; 11.2 (scheduler side) follows; neither facade imports the other's compat modules.
+Minimal mergeable slice: 11.0a and 11.0b (test-only) first; 11.0c next; then 11.1 (chain side) and 11.2 (scheduler side), which are independent; neither facade imports the other's compat modules.
 
 ## 12. F3 — Delete the compatibility inventories and the facade guard
 
 - [ ] 12.1 Delete `docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md`, `docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md`, `scripts/governance/entropy_audit/facade_guard.py`, `COMPATIBILITY_FACADE_CONFIGS` (`schema.py:206-217`), and the helpers that use them (`scripts/governance/audit_repo_entropy.py:257-269,408,627,688-694`; `tests/entropy_audit_helpers.py:587,598`).
-- [ ] 12.2 Delete the facade-specific tests in `tests/test_entropy_audit_facade_guard_{forwarders,aliases}.py` and `tests/test_entropy_audit_instruction_inventory.py`.
+- [ ] 12.2 Delete the facade-specific tests in `tests/test_entropy_audit_facade_guard_{forwarders,aliases}.py`, `tests/test_entropy_audit_instruction_inventory.py`, `tests/test_entropy_audit_report_contract.py` and `tests/test_entropy_audit_structural_budget.py`, and the inventory-text tests (`tests/test_production_scheduler.py:776-848`, `tests/test_orchestration_chain.py:841`).
 - [ ] 12.3 Remove the `compatibility facade` glossary term (`schema.py:227` `required_glossary_terms`, `openspec/glossary.md:17`). Update `services/orchestrator/AGENTS.md` (regenerate it from `instructions/agents/` if it is generated), `docs/governance/entropy-budget.md`, `entropy-burndown-triage.md:247`, `STRUCTURAL_FILE_DISPOSITION_INVENTORY.md:163-164,229-230` and `GOVERNANCE_8_FINAL_EVIDENCE_MAP.md:18-19`.
-- [ ] 12.4 Add the REMOVED delta for `compatibility-facade-governance`. Confirm with `grep -rni "compatibility inventory\|COMPATIBILITY_INVENTORY\|facade guard" docs openspec/specs scripts tests services` that nothing cites them.
+- [ ] 12.4 Add the REMOVED delta for `compatibility-facade-governance` and the MODIFIED/REMOVED delta for `facade-shrink` ("Compatibility guard remains authoritative"). Confirm with `grep -rni "compatibility inventory\|COMPATIBILITY_INVENTORY\|facade guard" docs scripts tests services --exclude='*.jsonl'` that nothing cites them. `openspec/specs/` is excluded because the deltas reach the main specs only at archive, and append-only `*.jsonl` logs are history.
 - [ ] 12.5 Verification: CI only, with the entropy audit report-only job green.
 
 Suggested fixture level: compact - governance tooling and docs, no runtime code.
