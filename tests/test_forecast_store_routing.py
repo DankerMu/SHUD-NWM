@@ -438,9 +438,10 @@ def test_run_identity_is_resolved_once_in_forecast_series_and_never_for_a_bound_
     """#2417 tasks 2.1/2.2: one resolve per request, and none when run_id is bound.
 
     The bound shape is the D11 capture path — it has no database at capture time
-    — so its push has to be the in-SQL scalar sub-select. The unbound shape is
-    the live frontend one (`apps/frontend/src/stores/forecast.ts` never sends
-    `run_id`) and it resolves.
+    — so its push has to be the in-SQL scalar sub-select; the live frontend
+    caller (`apps/frontend/src/lib/hydroMet/riverForecast.ts`) also sends
+    `run_id`. The unbound shape is a caller that omits `run_id`, which the API
+    still accepts, and it resolves.
     """
     bound = SqlCaptureForecastStore(_target_rows() + [_forecast_rows()[:1]])
     bound.forecast_series(

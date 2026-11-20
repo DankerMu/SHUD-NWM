@@ -2,11 +2,11 @@ import { render } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ForecastChart } from '@/components/charts/ForecastChart'
-import type { ForecastData } from '@/stores/forecast'
+import type { ForecastData } from '@/lib/forecastData'
 
 /**
  * `ForecastChart` 的缩放配置在缺省 prop 下不变（openspec mobile-responsive-display task 4.7，用例 (k)）。
- * 字面值抄自改动前的源码，不读产品常量：桌面形态与 `ForecastPanel` 的配置逐字不变由它钉住。
+ * 字面值抄自改动前的源码，不读产品常量：桌面形态（缺省 prop）的配置逐字不变由它钉住。
  */
 
 const { coreProps } = vi.hoisted(() => ({ coreProps: vi.fn() }))
