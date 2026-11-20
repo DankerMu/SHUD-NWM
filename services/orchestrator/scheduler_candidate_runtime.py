@@ -575,7 +575,7 @@ def _evidence_reservation_blocked_payload(
     details: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     return _scheduler_evidence.evidence_reservation_blocked_payload(
-        config=config or type("SchedulerEvidenceConfigShim", (), {"scheduler_db_free_required": False})(),
+        config=config or type("SchedulerEvidenceConfigShim", (), {"scheduler_db_free_required": True})(),
         pass_id=pass_id,
         artifact_path=artifact_path,
         reason=reason,

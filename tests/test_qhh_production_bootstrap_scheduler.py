@@ -26,17 +26,45 @@ from tests.qhh_production_bootstrap_helpers import (
     _qhh_scheduler_ready_gfs_adapter,
     qhh_scheduler_canonical_readiness,
 )
-from tests.test_production_scheduler import FakeAdapter, _dt
+from tests.test_production_scheduler import FakeAdapter, _db_free_pass_env, _dt
 from workers.model_registry.qhh_production_bootstrap import (
     QhhProductionBootstrapError,
     bootstrap_qhh_production,
 )
 
 _QHH_SCHEDULER_REQUESTED_FIXTURES = (qhh_scheduler_canonical_readiness,)  # requested by argument name
+_QHH_SCHEDULER_NOW = "2026-05-21T12:00:00Z"
+
+
+def _db_free_scheduler_config(
+    monkeypatch: pytest.MonkeyPatch,
+    root: Path,
+    *,
+    model_id: str,
+) -> ProductionSchedulerConfig:
+    """The scheduler config these tests plan with, on the DB-free env (#3255, R2b).
+
+    The scheduler is always DB-free, so it needs the file selectors, the
+    approved roots and the journal root (`_db_free_pass_env`, rooted at
+    ``root``), and no ``DATABASE_URL`` in its env (``database_url_forbidden``).
+    The injected PostgreSQL model registry is what these tests are about; it
+    takes its URL explicitly, as does every bootstrap and assertion query here.
+    """
+
+    now = _dt(_QHH_SCHEDULER_NOW)
+    roots, _paths = _db_free_pass_env(monkeypatch, root, generated_at=now)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    return ProductionSchedulerConfig(
+        workspace_root=roots["workspace_root"],
+        model_ids=(model_id,),
+        now=now,
+        allowed_cycle_hours_utc=_QHH_SCHEDULER_FOUR_CYCLE_HOURS,
+    )
 
 
 @pytest.mark.integration
 def test_bootstrap_qhh_production_success_idempotent_and_scheduler_ready(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     integration_database_url: str,
     qhh_scheduler_canonical_readiness: Callable[[str], Any],
@@ -160,17 +188,13 @@ def test_bootstrap_qhh_production_success_idempotent_and_scheduler_ready(
 
     readiness_provider = qhh_scheduler_canonical_readiness(model_id)
     scheduler = ProductionScheduler(
-        ProductionSchedulerConfig(
-            workspace_root=tmp_path / "workspace",
-            model_ids=(model_id,),
-            now=_dt("2026-05-21T12:00:00Z"),
-            allowed_cycle_hours_utc=_QHH_SCHEDULER_FOUR_CYCLE_HOURS,
-        ),
+        _db_free_scheduler_config(monkeypatch, tmp_path / "workspace", model_id=model_id),
         registry=PsycopgModelRegistryStore(integration_database_url),
         adapters={"gfs": _qhh_scheduler_ready_gfs_adapter()},
         canonical_readiness_provider=readiness_provider,
     )
     result = scheduler.run_once()
+    assert result.status != "preflight_blocked", result.evidence.get("execution_boundary")
     reasons = {item["reason"] for item in result.evidence["model_discovery"]["exclusions"]}
     scheduler_candidate = next(item for item in result.evidence["candidates"] if item["model_id"] == model_id)
     assert scheduler_candidate["output_segment_count"] == 2
@@ -312,6 +336,7 @@ def test_bootstrap_station_failure_rolls_back_model_readiness(
     ],
 )
 def test_bootstrap_seed_failures_roll_back_rows_and_scheduler_visibility(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     integration_database_url: str,
     failure_flag: str,
@@ -364,16 +389,12 @@ def test_bootstrap_seed_failures_roll_back_rows_and_scheduler_visibility(
             output_count = int(cursor.fetchone()["count"])
 
     scheduler = ProductionScheduler(
-        ProductionSchedulerConfig(
-            workspace_root=tmp_path / f"workspace-{failure_point}",
-            model_ids=(model_id,),
-            now=_dt("2026-05-21T12:00:00Z"),
-            allowed_cycle_hours_utc=_QHH_SCHEDULER_FOUR_CYCLE_HOURS,
-        ),
+        _db_free_scheduler_config(monkeypatch, tmp_path / f"workspace-{failure_point}", model_id=model_id),
         registry=PsycopgModelRegistryStore(integration_database_url),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
     )
     result = scheduler.run_once()
+    assert result.status != "preflight_blocked", result.evidence.get("execution_boundary")
 
     assert active_count == 0
     assert station_count == 0
@@ -390,6 +411,7 @@ def test_bootstrap_seed_failures_roll_back_rows_and_scheduler_visibility(
     ],
 )
 def test_bootstrap_blocks_stale_qhh_sibling_rows_before_scheduler_visibility(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     integration_database_url: str,
     stale_kind: str,
@@ -487,16 +509,12 @@ def test_bootstrap_blocks_stale_qhh_sibling_rows_before_scheduler_visibility(
     assert exc_info.value.error_code == error_code
     assert exc_info.value.details["persistent_scheduler_visibility_removed"] is True
     scheduler = ProductionScheduler(
-        ProductionSchedulerConfig(
-            workspace_root=tmp_path / f"workspace-{stale_kind}",
-            model_ids=(model_id,),
-            now=_dt("2026-05-21T12:00:00Z"),
-            allowed_cycle_hours_utc=_QHH_SCHEDULER_FOUR_CYCLE_HOURS,
-        ),
+        _db_free_scheduler_config(monkeypatch, tmp_path / f"workspace-{stale_kind}", model_id=model_id),
         registry=PsycopgModelRegistryStore(integration_database_url),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
     )
     result = scheduler.run_once()
+    assert result.status != "preflight_blocked", result.evidence.get("execution_boundary")
     with psycopg_connection(integration_database_url) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
@@ -521,6 +539,7 @@ def test_bootstrap_blocks_stale_qhh_sibling_rows_before_scheduler_visibility(
 
 @pytest.mark.integration
 def test_bootstrap_blocks_unmarked_same_basin_active_forcing_grid_and_removes_scheduler_visibility(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     integration_database_url: str,
 ) -> None:
@@ -578,16 +597,12 @@ def test_bootstrap_blocks_unmarked_same_basin_active_forcing_grid_and_removes_sc
     assert exc_info.value.details["persistent_scheduler_visibility_removed"] is True
 
     scheduler = ProductionScheduler(
-        ProductionSchedulerConfig(
-            workspace_root=tmp_path / "workspace-unmarked-station",
-            model_ids=(model_id,),
-            now=_dt("2026-05-21T12:00:00Z"),
-            allowed_cycle_hours_utc=_QHH_SCHEDULER_FOUR_CYCLE_HOURS,
-        ),
+        _db_free_scheduler_config(monkeypatch, tmp_path / "workspace-unmarked-station", model_id=model_id),
         registry=PsycopgModelRegistryStore(integration_database_url),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
     )
     result = scheduler.run_once()
+    assert result.status != "preflight_blocked", result.evidence.get("execution_boundary")
     with psycopg_connection(integration_database_url) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
@@ -612,6 +627,7 @@ def test_bootstrap_blocks_unmarked_same_basin_active_forcing_grid_and_removes_sc
 
 @pytest.mark.integration
 def test_bootstrap_replaces_stale_run_scoped_resource_profile_and_scheduler_derives_current_identity(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     integration_database_url: str,
     qhh_scheduler_canonical_readiness: Callable[[str], Any],
@@ -662,17 +678,13 @@ def test_bootstrap_replaces_stale_run_scoped_resource_profile_and_scheduler_deri
 
     readiness_provider = qhh_scheduler_canonical_readiness(model_id)
     scheduler = ProductionScheduler(
-        ProductionSchedulerConfig(
-            workspace_root=tmp_path / "workspace-stale-profile",
-            model_ids=(model_id,),
-            now=_dt("2026-05-21T12:00:00Z"),
-            allowed_cycle_hours_utc=_QHH_SCHEDULER_FOUR_CYCLE_HOURS,
-        ),
+        _db_free_scheduler_config(monkeypatch, tmp_path / "workspace-stale-profile", model_id=model_id),
         registry=PsycopgModelRegistryStore(integration_database_url),
         adapters={"gfs": _qhh_scheduler_ready_gfs_adapter()},
         canonical_readiness_provider=readiness_provider,
     )
     result = scheduler.run_once()
+    assert result.status != "preflight_blocked", result.evidence.get("execution_boundary")
     candidate = next(item for item in result.evidence["candidates"] if item["model_id"] == model_id)
     with psycopg_connection(integration_database_url) as connection:
         with connection.cursor() as cursor:

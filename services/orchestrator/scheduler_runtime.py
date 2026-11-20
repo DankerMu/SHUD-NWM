@@ -20,6 +20,7 @@ from services.orchestrator.file_orchestration_journal import (
 )
 from services.orchestrator.retention import WITHIN_RETENTION_WINDOW_REASON, RetentionConfig, run_retention
 from services.orchestrator.scheduler_lease import lease_heartbeat_interval_seconds
+from services.orchestrator.scheduler_mode_invariant import SchedulerModeInvariantError
 from services.orchestrator.scheduler_timing import SchedulerPassTiming
 
 _VALID_TIMING_LEVELS = frozenset({"pass", "stage", "candidate"})
@@ -217,7 +218,9 @@ def _db_free_journal_mutation_blocked(
     mutation_requested: bool,
     repository: Any | None = None,
 ) -> bool:
-    if not (bool(getattr(config, "db_free_required", False)) and bool(mutation_requested)):
+    if not bool(getattr(config, "db_free_required", False)):
+        raise SchedulerModeInvariantError(site="scheduler_runtime:_db_free_journal_mutation_blocked")
+    if not bool(mutation_requested):
         return False
     return not bool(getattr(repository, "supports_writes", False))
 
@@ -383,6 +386,7 @@ def _write_new_regular_file(*args, **kwargs):
 
 def _db_free_lock_evidence(config: Any, value: Mapping[str, Any]) -> dict[str, Any]:
     if not getattr(config, "db_free_required", False):
+        raise SchedulerModeInvariantError(site="scheduler_runtime:_db_free_lock_evidence")
         return redact_payload(dict(value))
     return _db_free_safe_lock_result(value)
 
@@ -625,6 +629,10 @@ def run_once(self) -> SchedulerPassResult:
                 artifact_path=artifact_path,
             )
         db_free_required = bool(getattr(self.config, "db_free_required", False))
+        if not db_free_required:
+            # R2b: every later ``db_free_required`` branch in this pass reads this
+            # local, so their non-DB-free arms are dead below (R2c deletes them).
+            raise SchedulerModeInvariantError(site="scheduler_runtime:run_once")
         root_preflight = (
             _scheduler_prepared_runtime_root_preflight(self.config)
             if db_free_required
@@ -1869,6 +1877,7 @@ def _restart_reconcile_store(self) -> Any | None:
         if repository is not None and all(hasattr(repository, method) for method in required_methods):
             return repository
         return None
+    raise SchedulerModeInvariantError(site="scheduler_runtime:_restart_reconcile_store")
     database_url = (self.config.database_url or "").strip()
     if not database_url:
         return None
