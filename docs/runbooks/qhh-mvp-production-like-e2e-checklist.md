@@ -385,7 +385,7 @@ psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "
 select count(*) as station_count
 from met.met_station ms
 join core.basin_version bv on bv.basin_version_id = ms.basin_version_id
-where bv.basin_id = 'qhh' and ms.active_flag = true;
+where bv.basin_id = 'basins_qhh' and ms.active_flag = true;
 " | tee "$MVP_E2E_EVIDENCE_ROOT/qhh_station_count.log"
 
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "
@@ -393,7 +393,7 @@ select count(*) as segment_count
 from core.river_segment rs
 join core.river_network_version rnv on rnv.river_network_version_id = rs.river_network_version_id
 join core.basin_version bv on bv.basin_version_id = rnv.basin_version_id
-where bv.basin_id = 'qhh';
+where bv.basin_id = 'basins_qhh';
 " | tee "$MVP_E2E_EVIDENCE_ROOT/qhh_segment_count.log"
 ```
 

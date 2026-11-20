@@ -5,6 +5,11 @@ This file is the governed ledger for historical bugs discovered during the
 it is not a work queue by itself and this governance pass does not fix the
 bugs.
 
+**Closed to new entries (#3226, 2026-11-19).** New defects are filed as GitHub
+issues, not added here. Every entry left `open` names the GitHub issue that
+owns it; an entry closes when that issue's PR lands. The file stays as the
+historical record that runbooks, receipts and ADRs link to.
+
 ## Ledger Fields
 
 Each governed entry uses these machine-verifiable fields:
@@ -67,10 +72,17 @@ The root cause was local branch lag, not a missing source document.
 ### BUG-20260527-001: `psql` CLI was missing for checklist DB commands
 
 ```yaml
-status: open
+status: superseded
 owner_area: shared_contract
 github_issue: none
+superseded_by: >-
+  The checklist is frozen as historical M21 evidence (its header, M26 single-map
+  authority in docs/governance/DOC_STATUS.md). Current node-27 DB probes run the
+  client inside the database container (`docker exec nhms-db psql ...`, see
+  docs/runbooks/tier-node27-timeseries-storage.md), so no host `psql` is needed.
 evidence:
+  - docs/runbooks/qhh-mvp-production-like-e2e-checklist.md
+  - docs/runbooks/tier-node27-timeseries-storage.md
   - artifacts/mvp-e2e/qhh-mvp-e2e-20260527T004907Z/environment_cli_check.log
   - artifacts/mvp-e2e/qhh-mvp-e2e-20260527T004907Z/db/db_python_preflight.log
 retest_command: >-
@@ -78,18 +90,23 @@ retest_command: >-
   "select current_database(), current_user, now();"
 ```
 
-The Python/SQLAlchemy probe proved DB connectivity, but the checklist still
-depends on a system PostgreSQL client unless the DB probe is rewritten into a
-repository-managed `uv run` command.
+The Python/SQLAlchemy probe proved DB connectivity. The checklist's `psql`
+commands are kept as the 2026-05-27 record; live probes today go through the
+database container's own client (#3226 triage).
 
 ### BUG-20260527-002: Checklist queried `alembic_version`, but the repo uses `schema_migrations`
 
 ```yaml
-status: open
+status: resolved
 owner_area: shared_contract
 github_issue: none
+resolved_by: >-
+  No checklist command queries `alembic_version` any more; the only mention is
+  the 2026-05-27 status-table row that records this bug. The migration receipt
+  is `public.schema_migrations` (packages/common/migrate.py). Verified in #3226.
 evidence:
   - artifacts/mvp-e2e/qhh-mvp-e2e-20260527T004907Z/db/db_python_preflight.log
+  - docs/runbooks/qhh-mvp-production-like-e2e-checklist.md
   - packages/common/migrate.py
   - tests/integration_helpers.py
   - tests/test_real_database_integration.py
@@ -104,9 +121,13 @@ Alembic's `alembic_version`.
 ### BUG-20260527-003: Checklist SQL used `bv.basin_id='qhh'`, but QHH basin id is `basins_qhh`
 
 ```yaml
-status: open
+status: resolved
 owner_area: shared_contract
-github_issue: none
+github_issue: https://github.com/DankerMu/SHUD-NWM/issues/3226
+resolved_by: >-
+  #3226 changed the two section 7.3 queries of
+  docs/runbooks/qhh-mvp-production-like-e2e-checklist.md to
+  `bv.basin_id = 'basins_qhh'`.
 evidence:
   - artifacts/mvp-e2e/qhh-mvp-e2e-20260527T004907Z/db/qhh_baseline.log
   - artifacts/mvp-e2e/qhh-mvp-e2e-20260527T004907Z/db/qhh_schema_aware_counts.log
@@ -121,15 +142,19 @@ retest_command: |-
 ```
 
 `packages/common/forecast_store.py` keeps `QHH_BASIN_ID = "basins_qhh"`.
-The current checklist still contains the old `qhh` filter in section 7.3, so
-the ledger keeps this open rather than over-claiming a docs fix.
+Section 7.3 of the checklist now filters on that id (#3226).
 
 ### BUG-20260527-004: Unfiltered `plan-production --dry-run` selected non-QHH models
 
 ```yaml
-status: open
+status: superseded
 owner_area: compute_control
 github_issue: none
+superseded_by: >-
+  Not a defect: an unfiltered `plan-production` plans every active model by
+  design, and production planning is the node-22 scheduler timer, which is
+  meant to cover all active models. A QHH-only dry run passes `--model-id` and
+  `--basin-id` (the retest below). Triage in #3226.
 evidence:
   - artifacts/mvp-e2e/qhh-mvp-e2e-20260527T004907Z/scheduler_dry_run_compact_summary.json
   - services/orchestrator/cli.py
@@ -145,13 +170,20 @@ filters are explicitly provided.
 ### BUG-20260527-005: `plan-production --dry-run` had download side effects
 
 ```yaml
-status: open
+status: resolved
 owner_area: compute_control
 github_issue: none
+resolved_by: >-
+  Scheduler source discovery no longer downloads: the source adapter's
+  readiness check reads the NFS raw manifest
+  (services/orchestrator/scheduler_adapters.py `_readiness` ->
+  services/orchestrator/source_cycle_raw_manifest.py
+  `nfs_raw_manifest_readiness_from_env`). Verified by code reading in #3226.
 evidence:
   - artifacts/mvp-e2e/qhh-mvp-e2e-20260527T004907Z/scheduler_dry_run.log
   - artifacts/mvp-e2e/qhh-mvp-e2e-20260527T004907Z/scheduler_dry_run_compact_summary.json
-  - services/orchestrator/scheduler.py
+  - services/orchestrator/scheduler_adapters.py
+  - services/orchestrator/source_cycle_raw_manifest.py
 retest_command: |-
   set -euo pipefail
   dry_run_log="$(mktemp)"
@@ -161,7 +193,8 @@ retest_command: |-
 ```
 
 The old no-mutation proof covered execution candidates, not source discovery
-download/cache behavior.
+download/cache behavior. Discovery now only reads manifests written by the
+download lane, so a dry run has nothing to download.
 
 ### BUG-20260527-006: QHH-only `plan-production` hit Slurm Gateway HTTP 404
 
@@ -321,7 +354,7 @@ job/log receipt.
 ```yaml
 status: open
 owner_area: compute_control
-github_issue: none
+github_issue: https://github.com/DankerMu/SHUD-NWM/issues/3245
 evidence:
   - artifacts/mvp-e2e/qhh-mvp-e2e-20260527T004907Z/api/neg_cancel_missing_operator.json
   - artifacts/mvp-e2e/qhh-mvp-e2e-20260527T004907Z/api/neg_cancel_missing_viewer.json
@@ -345,7 +378,9 @@ The compute-control cancel route still starts from active jobs for a run. The
 fixed state is that operator cancel for a missing run returns a stable non-200
 error body, not HTTP 200 with empty `cancelled_jobs`. The display-readonly route
 correctly fails closed as manual action, but the operator missing-run semantics
-are not yet fixed by that display safety work.
+are not yet fixed by that display safety work. Confirmed still live in #3226
+(`apps/api/routes/pipeline.py` `cancel_run` returns `_ok` when no job exists);
+the fix is tracked in #3245.
 
 ### BUG-20260527-012: Default Playwright E2E specs were mocked regression, not live E2E
 
@@ -384,7 +419,7 @@ river-click config.
 ```yaml
 status: open
 owner_area: slurm_gateway
-github_issue: none
+github_issue: https://github.com/DankerMu/SHUD-NWM/issues/3246
 evidence:
   - artifacts/mvp-e2e/qhh-mvp-e2e-20260527T004907Z/api/api_retry_cycle_gfs_2026052618_operator.json
   - artifacts/mvp-e2e/qhh-mvp-e2e-20260527T004907Z/api/api_cancel_cycle_gfs_2026052618_operator.json
@@ -431,13 +466,21 @@ retest_command: |-
 `services/slurm_gateway/config.py` still defaults the gateway backend to
 `mock`. A live retry receipt must use the real Slurm backend, show an
 accounting-visible Slurm job id, and write back job/status/log/accounting.
+Production units set `SLURM_GATEWAY_BACKEND=slurm`, but nothing refuses the
+mock default in a production role, and `real`/`slurm` spellings disagree
+between the gateway and the scheduler; #3246 owns both.
 
 ### BUG-20260527-014: `/ops` browser feedback for logs and retry was incomplete
 
 ```yaml
-status: open
+status: superseded
 owner_area: display_readonly
 github_issue: https://github.com/DankerMu/SHUD-NWM/issues/386
+superseded_by: >-
+  #3179 removed the retry control from the /ops jobs table (retry is the
+  node-22 manual-repair marker lane; `POST .../retry` is a 409 stub), and #386
+  is closed. Log-unavailable feedback is checked by the C4 `/ops` live lane
+  below. Triage in #3226.
 evidence:
   - artifacts/mvp-e2e/qhh-mvp-e2e-20260527T004907Z/browser/ops-scheduler-failed.snapshot.txt
   - artifacts/mvp-e2e/qhh-mvp-e2e-20260527T004907Z/browser/ops-scheduler-failed.after-log.snapshot.txt
@@ -454,8 +497,9 @@ retest_command: >-
   corepack pnpm run test:e2e:live-c4-display
 ```
 
-Open follow-up #386 covers stale failed-stage evidence after successful manual
-retry. The browser still needs a live display_readonly receipt showing stable
+Issue #386 (stale failed-stage evidence after a successful manual retry) is closed,
+and the page no longer has a retry control to give feedback for (#3179).
+A re-check is a live display_readonly receipt showing stable
 log unavailable feedback and no hidden retry/cancel mutation from node-27.
 The retest is the C4 `/ops` check, because the earlier two-URL live lane was
 retired by #3202.
