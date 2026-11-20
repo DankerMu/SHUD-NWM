@@ -53,8 +53,10 @@ from typing import Any
 
 import pytest
 
+from packages.common.state_manager import publish_state_snapshot_index
 from services.orchestrator import scheduler as scheduler_module
 from services.orchestrator import scheduler_execution as scheduler_execution_module
+from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
 from services.orchestrator.scheduler import ProductionScheduler as _RealProductionScheduler
 from services.orchestrator.scheduler import ProductionSchedulerConfig
 from services.orchestrator.scheduler_execution import (
@@ -63,6 +65,7 @@ from services.orchestrator.scheduler_execution import (
     MISSING_SOURCE_DATA_FOR_CYCLE_ERROR_CODE,
     _missing_source_data_evidence,
 )
+from tests.provider_mode_helpers import make_directory_with_explicit_mode
 from workers.data_adapters.base import CycleDiscovery
 from workers.forcing_producer.producer import ForcingProductionError
 
@@ -74,8 +77,8 @@ GRID_SIGNATURE = "grid-signature-demo"
 
 class _NoopRegistry:
     """Registry stub -- these tests bypass registry entirely and pass models
-    directly into ``_build_candidates``. Prevents PsycopgModelRegistryStore
-    from being constructed from env."""
+    directly into ``_build_candidates``. Injected so the DB-free scheduler
+    does not build its file registry from an unset manifest path."""
 
     def list_models(self, **_kwargs: Any) -> dict[str, Any]:
         return {"items": [], "total": 0, "limit": 0, "offset": 0}
@@ -113,13 +116,29 @@ class _FakeForcingProducer:
         )
 
 
-class _TestProductionScheduler(_RealProductionScheduler):
-    """Minimal ProductionScheduler wrapper for candidate-assembly tests.
+class _BypassedCanonicalReadinessProvider:
+    """Explicit readiness collaborator for the DB-free scheduler.
 
-    Mirrors ``tests/test_production_scheduler.py``'s ProductionScheduler
-    wrapper: canonical-readiness is bypassed so a candidate that passes the
-    source-scope check flows through to the ``candidates`` list without
-    hitting the ``_UnavailableCanonicalReadinessProvider`` fallback.
+    ``_TestProductionScheduler._canonical_readiness_for_candidate`` bypasses
+    the provider, so reaching it means the bypass regressed.
+    """
+
+    def canonical_readiness(self, **_kwargs: Any) -> Mapping[str, Any]:
+        raise AssertionError(
+            "canonical readiness is bypassed by _TestProductionScheduler; the provider must not be consulted"
+        )
+
+
+class _TestProductionScheduler(_RealProductionScheduler):
+    """Minimal DB-free ProductionScheduler wrapper for candidate-assembly tests.
+
+    Every collaborator the DB-free scheduler would otherwise build from config
+    is injected: a no-op registry, no adapters, the file orchestration journal
+    on the config's (empty) journal root and a readiness provider that is
+    never consulted. Mirrors ``tests/test_production_scheduler.py``'s
+    ProductionScheduler wrapper: canonical-readiness is bypassed so a
+    candidate that passes the source-scope check flows through to the
+    ``candidates`` list.
     """
 
     def __init__(
@@ -134,8 +153,8 @@ class _TestProductionScheduler(_RealProductionScheduler):
             config,
             registry=registry if registry is not None else _NoopRegistry(),
             adapters=adapters or {},
-            active_repository=None,
-            canonical_readiness_provider=None,
+            active_repository=FileOrchestrationJournalRepository(str(config.scheduler_journal_root)),
+            canonical_readiness_provider=_BypassedCanonicalReadinessProvider(),
             forcing_producer=forcing_producer,
             orchestrator_factory=None,
             reconcile_store=_NoopReconcileStore(),
@@ -152,8 +171,23 @@ class _TestProductionScheduler(_RealProductionScheduler):
 
 
 def _config(tmp_path: Path, **overrides: Any) -> ProductionSchedulerConfig:
+    """Scheduler config plus the DB-free file roots these tests need.
+
+    The mode flag itself is passed explicitly at each call site. The helper
+    provisions what the DB-free scheduler reads on this path: an empty
+    orchestration journal root and an empty, freshly published state
+    snapshot index (no history, so the state-continuity gate admits the
+    first cycle).
+    """
+
+    object_store_root = make_directory_with_explicit_mode(tmp_path / "object-store")
+    state_index = make_directory_with_explicit_mode(object_store_root / "db-free") / "state-index.json"
+    publish_state_snapshot_index([], state_index, object_store_root=object_store_root, generated_at=NOW)
     values: dict[str, Any] = {
         "workspace_root": tmp_path,
+        "object_store_root": object_store_root,
+        "scheduler_journal_root": make_directory_with_explicit_mode(tmp_path / "journal"),
+        "scheduler_state_index": state_index,
         "sources": ("gfs",),
         "lookback_hours": 24,
         "cycle_lag_hours": 0,
@@ -284,7 +318,7 @@ def test_in_scope_dispatches_direct_grid_variant_lands_in_candidates(
     does not block an in-scope pairing.
     """
 
-    scheduler = _TestProductionScheduler(_config(tmp_path))
+    scheduler = _TestProductionScheduler(_config(tmp_path, scheduler_db_free_required=True))
 
     candidates, blocked, skipped, duplicate_exclusions, slurm_sync = scheduler._build_candidates(
         models=[
@@ -312,7 +346,7 @@ def test_in_scope_dispatches_legacy_idw_model_unaffected_by_source_scope_check(
     untouched by the source-scope precondition.
     """
 
-    scheduler = _TestProductionScheduler(_config(tmp_path))
+    scheduler = _TestProductionScheduler(_config(tmp_path, scheduler_db_free_required=True))
 
     candidates, blocked, _skipped, _duplicates, _slurm = scheduler._build_candidates(
         models=[_legacy_idw_model("model_legacy_a")],
@@ -335,7 +369,7 @@ def test_out_of_scope_pairing_is_excluded_before_candidate_creation(tmp_path: Pa
     fallback or a pass-blocking failure candidate.
     """
 
-    scheduler = _TestProductionScheduler(_config(tmp_path))
+    scheduler = _TestProductionScheduler(_config(tmp_path, scheduler_db_free_required=True))
     model = _direct_grid_model(
         model_id="model_direct_ifs_only",
         applicable_source_ids=["IFS"],
@@ -358,7 +392,7 @@ def test_source_scoped_variants_do_not_form_a_cartesian_product(
 ) -> None:
     """Two source-scoped variants and two cycles yield two, not four, tasks."""
 
-    scheduler = _TestProductionScheduler(_config(tmp_path))
+    scheduler = _TestProductionScheduler(_config(tmp_path, scheduler_db_free_required=True))
 
     candidates, blocked, _skipped, _duplicates, _slurm = scheduler._build_candidates(
         models=[
@@ -396,7 +430,7 @@ def test_boundary_not_producer_only_producer_never_called_for_out_of_scope(
     """
 
     producer = _FakeForcingProducer()
-    scheduler = _TestProductionScheduler(_config(tmp_path), forcing_producer=producer)
+    scheduler = _TestProductionScheduler(_config(tmp_path, scheduler_db_free_required=True), forcing_producer=producer)
     model = _direct_grid_model(
         model_id="model_direct_ifs_only",
         applicable_source_ids=["IFS"],
@@ -439,7 +473,7 @@ def test_malformed_direct_contract_still_blocked_under_distinct_reason(
     that would then fail deeper.
     """
 
-    scheduler = _TestProductionScheduler(_config(tmp_path))
+    scheduler = _TestProductionScheduler(_config(tmp_path, scheduler_db_free_required=True))
     # ``gfs`` is in scope, so the block cannot be the source-scope one --
     # any block MUST come from the shape check.
     model = _direct_grid_model(
@@ -474,7 +508,7 @@ def test_malformed_contract_remains_blocked_while_scope_mismatch_is_excluded(
 ) -> None:
     """Expected non-applicability is excluded; contract corruption blocks."""
 
-    scheduler = _TestProductionScheduler(_config(tmp_path))
+    scheduler = _TestProductionScheduler(_config(tmp_path, scheduler_db_free_required=True))
 
     _cands_scope, blocked_scope, *_ = scheduler._build_candidates(
         models=[
@@ -620,7 +654,7 @@ def test_missing_source_no_run_blocks_with_named_reason(
     """
 
     producer = _MissingSourceProducer(message=producer_message)
-    scheduler = _TestProductionScheduler(_config(tmp_path), forcing_producer=producer)
+    scheduler = _TestProductionScheduler(_config(tmp_path, scheduler_db_free_required=True), forcing_producer=producer)
     model = _direct_grid_model(
         model_id="model_direct_gfs_only",
         applicable_source_ids=["GFS"],
@@ -684,7 +718,7 @@ def test_missing_source_no_run_other_forcing_error_stays_generic(
     producer = _MissingSourceProducer(
         message="Forcing station_count 0 exceeds configured limit 1000.",
     )
-    scheduler = _TestProductionScheduler(_config(tmp_path), forcing_producer=producer)
+    scheduler = _TestProductionScheduler(_config(tmp_path, scheduler_db_free_required=True), forcing_producer=producer)
     model = _direct_grid_model(
         model_id="model_direct_gfs_only",
         applicable_source_ids=["GFS"],
@@ -715,7 +749,7 @@ def test_single_source_run_dispatches_requested_source_exactly_once(
     """
 
     producer = _RecordingSuccessProducer()
-    scheduler = _TestProductionScheduler(_config(tmp_path), forcing_producer=producer)
+    scheduler = _TestProductionScheduler(_config(tmp_path, scheduler_db_free_required=True), forcing_producer=producer)
     model = _direct_grid_model(
         model_id="model_direct_gfs_only",
         applicable_source_ids=["GFS"],
@@ -763,7 +797,7 @@ def test_midrun_splice_forbidden_no_retry_no_splice_hook(
     producer = _MissingSourceProducer(
         message="Missing required canonical products: T2:2025-01-01T00:00:00Z",
     )
-    scheduler = _TestProductionScheduler(_config(tmp_path), forcing_producer=producer)
+    scheduler = _TestProductionScheduler(_config(tmp_path, scheduler_db_free_required=True), forcing_producer=producer)
     model = _direct_grid_model(
         model_id="model_direct_gfs_only",
         applicable_source_ids=["GFS"],
@@ -914,7 +948,7 @@ def test_no_legacy_compat_producer_not_reinvoked_with_other_source(
     producer = _MissingSourceProducer(
         message="No canonical products are available.",
     )
-    scheduler = _TestProductionScheduler(_config(tmp_path), forcing_producer=producer)
+    scheduler = _TestProductionScheduler(_config(tmp_path, scheduler_db_free_required=True), forcing_producer=producer)
     model = _direct_grid_model(
         model_id="model_direct_gfs_only",
         applicable_source_ids=["GFS"],
@@ -958,7 +992,7 @@ def test_availability_is_display_concern_no_cross_source_merged_candidate(
         missing_message="No canonical products are available.",
     )
     scheduler = _TestProductionScheduler(
-        _config(tmp_path, sources=("gfs", "ifs")),
+        _config(tmp_path, scheduler_db_free_required=True, sources=("gfs", "ifs")),
         forcing_producer=producer,
     )
     model_a = _direct_grid_model(
@@ -1027,7 +1061,7 @@ def test_missing_source_no_run_preserves_base_forcing_blocked_evidence_shape(
     stay locked.
     """
 
-    scheduler = _TestProductionScheduler(_config(tmp_path))
+    scheduler = _TestProductionScheduler(_config(tmp_path, scheduler_db_free_required=True))
     model = _direct_grid_model(
         model_id="model_direct_gfs_only",
         applicable_source_ids=["GFS"],
