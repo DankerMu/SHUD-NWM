@@ -25617,8 +25617,11 @@ def test_database_host_classifier_conservatively_blocks_unsafe_numeric_or_malfor
 # (``scheduler_config/config.py:424-428``), which judges those two roots against
 # the same ``allowed_storage_roots`` before the Slurm preflight runs, so these
 # Slurm verdicts are reachable only with ``require_runtime_roots`` off.  The
-# DB-free refusals are pinned by ``test_no_flag_invalid_env_roots_block_before_registry_adapter_or_submit``
-# and ``test_no_flag_out_of_approved_roots_block_before_registry_adapter_or_submit``.
+# DB-free refusals are pinned by
+# ``test_db_free_unset_object_store_or_runtime_root_blocks_at_root_preflight_before_submit``
+# (MISSING), ``test_no_flag_invalid_env_roots_block_before_registry_adapter_or_submit``
+# (NOT_FOUND) and ``test_no_flag_out_of_approved_roots_block_before_registry_adapter_or_submit``
+# (OUT_OF_ROOT).
 @pytest.mark.parametrize(
     ("root_overrides", "expected_code"),
     [
@@ -25669,6 +25672,61 @@ def test_slurm_preflight_blocks_missing_out_of_root_or_not_visible_storage_roots
     assert result.status == "preflight_blocked"
     assert result.evidence["counts"]["submitted_count"] == 0
     assert expected_code in {blocker["code"] for blocker in evidence["slurm_preflight"]["blockers"]}
+    assert orchestrator.calls == []
+
+
+@pytest.mark.parametrize(
+    ("unset_root", "expected_code"),
+    [
+        ("object_store_root", "SCHEDULER_ROOT_OBJECT_STORE_ROOT_MISSING"),
+        ("runtime_root", "SCHEDULER_ROOT_RUNTIME_ROOT_MISSING"),
+    ],
+)
+def test_db_free_unset_object_store_or_runtime_root_blocks_at_root_preflight_before_submit(
+    tmp_path: Path,
+    monkeypatch: Any,
+    unset_root: str,
+    expected_code: str,
+) -> None:
+    """DB-free counterpart of the deleted ``SLURM_PREFLIGHT_*_ROOT_MISSING`` arms (#3251).
+
+    DB-free mode forces the scheduler root preflight, which requires both roots
+    (``scheduler_runtime_roots.py`` ``_scheduler_runtime_root_preflight``), so an
+    unset object-store or runtime root is refused there, with no submit.
+    """
+    allowed_root = tmp_path / "allowed"
+    roots = _db_free_slurm_roots(monkeypatch, allowed_root, generated_at=_dt("2026-05-21T12:00:00Z"))
+    root_kwargs: dict[str, Any] = {
+        "object_store_root": roots["object_store_root"],
+        "log_root": roots["log_root"],
+        "runtime_root": roots["runtime_root"],
+        unset_root: None,
+    }
+    orchestrator = FakeProductionOrchestrator()
+    config = _config(
+        roots["workspace_root"],
+        db_free=True,
+        now=_dt("2026-05-21T12:00:00Z"),
+        dry_run=False,
+        slurm_execution_enabled=True,
+        allowed_storage_roots=(allowed_root,),
+        **root_kwargs,
+    )
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert getattr(config, unset_root) is None
+    assert result.status == "preflight_blocked"
+    assert result.evidence["root_preflight"]["status"] == "blocked"
+    assert [blocker["code"] for blocker in result.evidence["root_preflight"]["blockers"]] == [expected_code]
+    assert result.evidence["root_preflight"]["checks"][unset_root]["configured"] is False
+    assert result.evidence["counts"]["submitted_count"] == 0
     assert orchestrator.calls == []
 
 
@@ -38620,6 +38678,60 @@ def test_db_free_accepted_submit_owner_exact_config_is_threaded_to_orchestrator(
     assert config.db_free_runtime_preflight()["status"] == "ready"
     assert captured["config"].reconcile_slurm_user == "scheduler-user"
     assert captured["config"].reconcile_slurm_account == "scheduler-account"
+
+
+def test_db_free_slurm_enabled_orchestrator_rebuild_carries_env_and_scheduler_fields(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """``slurm_execution_enabled`` rebuild in ``_default_orchestrator_for`` (#3251).
+
+    DB-free replacement for the deleted
+    ``test_slurm_preflight_ready_without_factory_uses_default_orchestrator_path``:
+    the Slurm rebuild must carry the ``OrchestratorConfig.from_env`` warm-start,
+    terminal-stage, gateway URL and ``OBJECT_STORE_PREFIX`` values plus the
+    scheduler's job-type templates.  Every expected value differs from the
+    ``OrchestratorConfig`` default, so a dropped kwarg fails here.
+    ``FORECAST_SOURCE_ID`` is unset and ``gfs`` requested, so the source-mismatch
+    rebuild is a no-op and only the Slurm branch is exercised.
+    """
+    _roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "slurm-rebuild-fields")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_ENABLED", "true")
+    monkeypatch.delenv("FORECAST_SOURCE_ID", raising=False)
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms/default")
+    monkeypatch.setenv("SLURM_GATEWAY_URL", "http://slurm-gateway.internal:8000")
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "true")
+    monkeypatch.setenv("NHMS_FORECAST_WARM_START_REQUIRED_FROM", "2026-06-27T00:00:00Z")
+    monkeypatch.setenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", "forecast_state_save_qc")
+    repository = scheduler_module.FileOrchestrationJournalRepository(paths["NHMS_SCHEDULER_JOURNAL_ROOT"])
+    captured: dict[str, Any] = {}
+
+    class CapturingForecastOrchestrator:
+        def __init__(self, **kwargs: Any) -> None:
+            captured["config"] = kwargs["config"]
+
+    monkeypatch.setattr(scheduler_module, "ForecastOrchestrator", CapturingForecastOrchestrator)
+    config = ProductionSchedulerConfig(slurm_job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES))
+    scheduler = ProductionScheduler(
+        config,
+        registry=object(),
+        adapters={},
+        active_repository=repository,
+    )
+
+    scheduler._default_orchestrator_for("gfs", state_manager=None)
+
+    assert config.db_free_required is True
+    assert config.slurm_execution_enabled is True
+    # Proof the slurm rebuild branch ran (only it threads the scheduler's user).
+    assert captured["config"].reconcile_slurm_user == "scheduler-user"
+    assert captured["config"].source_id == "gfs"
+    assert captured["config"].object_store_prefix == "s3://nhms/default"
+    assert captured["config"].slurm_gateway_url == "http://slurm-gateway.internal:8000"
+    assert captured["config"].require_forecast_warm_start is True
+    assert captured["config"].forecast_warm_start_required_from == _dt("2026-06-27T00:00:00Z")
+    assert captured["config"].terminal_stage == "forecast_state_save_qc"
+    assert captured["config"].slurm_job_type_templates == dict(DEFAULT_JOB_TYPE_TEMPLATES)
 
 
 # ---------------------------------------------------------------------------
