@@ -18,11 +18,13 @@ import psycopg2
 import pytest
 from psycopg2.extras import RealDictCursor
 
+from packages.common.contracts.time_normalization import cycle_id_for
 from packages.common.object_store import LocalObjectStore
 from services.artifacts import published_log_uri
 from services.orchestrator.pipeline_job_provenance import (
     PROVENANCE_SCHEMA_VERSION,
     PipelineJobProvenanceError,
+    import_discovered_pipeline_job_provenance,
     import_run_pipeline_job_provenance,
 )
 from tests.integration_helpers import (
@@ -132,11 +134,12 @@ def _seed_object_store(root: Path, sidecar: dict[str, Any] | None = None) -> Non
     store = LocalObjectStore(root=root)
     payload = sidecar or _sidecar()
     identity = payload["identity"]
+    run_id = identity["run_id"]
     store.write_bytes_atomic(
-        f"runs/{RUN_ID}/input/manifest.json",
+        f"runs/{run_id}/input/manifest.json",
         json.dumps(
             {
-                "run_id": RUN_ID,
+                "run_id": run_id,
                 "source_id": identity["source"],
                 "cycle_time": identity["cycle_time"],
                 "model_id": MODEL_ID,
@@ -145,14 +148,19 @@ def _seed_object_store(root: Path, sidecar: dict[str, Any] | None = None) -> Non
         ).encode("utf-8"),
     )
     store.write_bytes_atomic(
-        f"runs/{RUN_ID}/input/pipeline_jobs.json",
+        f"runs/{run_id}/input/pipeline_jobs.json",
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"),
     )
 
 
 
 
-def _seed_published_hydro_run(database_url: str) -> dict[str, Any]:
+def _seed_published_hydro_run(
+    database_url: str,
+    *,
+    run_id: str = RUN_ID,
+    cycle_time: datetime = CYCLE_TIME,
+) -> dict[str, Any]:
     with psycopg_connection(database_url) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
@@ -163,21 +171,21 @@ def _seed_published_hydro_run(database_url: str) -> dict[str, Any]:
                 ) VALUES (%s, 'forecast', 'issue2420', %s, %s, %s, %s, %s, %s, %s, 'published', %s, %s)
                 """,
                 (
-                    RUN_ID,
+                    run_id,
                     MODEL_ID,
                     BASIN_VERSION_ID,
                     FORCING_VERSION_ID,
                     SOURCE_ID,
-                    CYCLE_TIME,
-                    CYCLE_TIME,
-                    CYCLE_TIME + timedelta(hours=1),
-                    f"s3://nhms/runs/{RUN_ID}/input/manifest.json",
-                    f"s3://nhms/runs/{RUN_ID}/output/",
+                    cycle_time,
+                    cycle_time,
+                    cycle_time + timedelta(hours=1),
+                    f"s3://nhms/runs/{run_id}/input/manifest.json",
+                    f"s3://nhms/runs/{run_id}/output/",
                 ),
             )
             cursor.execute(
                 "SELECT status::text AS status, updated_at FROM hydro.hydro_run WHERE run_id = %s",
-                (RUN_ID,),
+                (run_id,),
             )
             row = cursor.fetchone()
     assert row is not None
@@ -507,4 +515,105 @@ def test_importer_real_postgres_overlapping_stale_import_keeps_newer_row(
     assert final["updated_at"] == datetime(2026, 5, 3, 0, 50, 0, 900000, tzinfo=UTC)
 
 
+# #3224: a discovered pass with an import-state file skips unchanged runs and
+# re-imports a run whose projected row was lost or replaced.
+SECOND_CYCLE_TIME = CYCLE_TIME + timedelta(hours=6)
+SECOND_RUN_ID = f"fcst_gfs_{SECOND_CYCLE_TIME.strftime('%Y%m%d%H')}_{MODEL_ID}"
+SECOND_JOB_ID = "it3224_forecast_50026_0"
+STATE_FILE_NAME = "pipeline-job-provenance-import-state.json"
 
+
+def _second_run_sidecar() -> dict[str, Any]:
+    return {
+        "schema_version": PROVENANCE_SCHEMA_VERSION,
+        "source_version": int(datetime(2026, 5, 3, 6, 40, tzinfo=UTC).timestamp()),
+        "identity": {
+            "source": "GFS",
+            "cycle_time": SECOND_CYCLE_TIME.isoformat().replace("+00:00", "Z"),
+            "run_id": SECOND_RUN_ID,
+            "model_id": MODEL_ID,
+        },
+        "jobs": [
+            {
+                **_forecast_job(updated_at="2026-05-03T06:40:00Z"),
+                "job_id": SECOND_JOB_ID,
+                "run_id": SECOND_RUN_ID,
+                "cycle_id": cycle_id_for("GFS", SECOND_CYCLE_TIME),
+                "slurm_job_id": "50026",
+                "created_at": "2026-05-03T06:05:00Z",
+            }
+        ],
+    }
+
+
+def _job_rows_with_xmin(database_url: str) -> dict[str, dict[str, Any]]:
+    with psycopg_connection(database_url) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT xmin::text AS row_xmin, * FROM ops.pipeline_job ORDER BY job_id")
+            return {row["job_id"]: dict(row) for row in cursor.fetchall()}
+
+
+def test_discovered_pass_with_state_skips_then_reimports_after_row_loss(
+    throwaway_database_url: str,
+    tmp_path: Path,
+) -> None:
+    apply_migrations_from_zero(throwaway_database_url)
+    _provision_pipeline_job_roles(throwaway_database_url)
+    seed_issue_126_data(throwaway_database_url)
+    _seed_published_hydro_run(throwaway_database_url)
+    _seed_published_hydro_run(throwaway_database_url, run_id=SECOND_RUN_ID, cycle_time=SECOND_CYCLE_TIME)
+    object_root = tmp_path / "object-store"
+    object_root.mkdir()
+    work_root = tmp_path / "autopipe-work"
+    work_root.mkdir()
+    state_path = work_root / STATE_FILE_NAME
+    log_uri = published_log_uri(source="gfs", cycle_time=CYCLE_TIME, run_id=RUN_ID, job_id=JOB_ID, stream="out")
+    _seed_object_store(object_root, _sidecar(jobs=[_forecast_job(log_uri=log_uri), _convert_job()]))
+    _seed_object_store(object_root, _second_run_sidecar())
+
+    def discovered_pass() -> dict[str, Any]:
+        return import_discovered_pipeline_job_provenance(
+            database_url=throwaway_database_url,
+            object_store_root=object_root,
+            run_ids=[RUN_ID, SECOND_RUN_ID],
+            connect=_connect_as_role("nhms_ingest_rw"),
+            state_path=state_path,
+        )
+
+    first = discovered_pass()
+    assert first["status"] == "imported"
+    assert first["imported"] == 2
+    assert first["skip_state"] == "empty"
+    assert first["skip_state_saved"] is True
+    after_first = _job_rows_with_xmin(throwaway_database_url)
+    assert set(after_first) == {JOB_ID, CONVERT_JOB_ID, SECOND_JOB_ID}
+
+    second = discovered_pass()
+    assert second["skip_state"] == "loaded"
+    assert second["skipped_unchanged"] == 2
+    assert second["runs"] == []
+    # No statement touched a row: every row version (xmin) is the one pass 1 wrote.
+    assert _job_rows_with_xmin(throwaway_database_url) == after_first
+
+    with psycopg_connection(throwaway_database_url) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("DELETE FROM ops.pipeline_job WHERE job_id = %s", (SECOND_JOB_ID,))
+    third = discovered_pass()
+    assert third["skipped_unchanged"] == 1
+    assert [(item["run_id"], item["status"], item["inserted"]) for item in third["runs"]] == [
+        (SECOND_RUN_ID, "imported", 1)
+    ]
+    assert SECOND_JOB_ID in _job_rows_with_xmin(throwaway_database_url)
+
+    with psycopg_connection(throwaway_database_url) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("UPDATE ops.pipeline_job SET log_uri = NULL WHERE job_id = %s", (JOB_ID,))
+    restored = _job_rows_with_xmin(throwaway_database_url)[JOB_ID]
+    assert restored["log_uri"] is None
+    assert restored["updated_at"] == after_first[JOB_ID]["updated_at"]
+    fourth = discovered_pass()
+    assert fourth["skipped_unchanged"] == 1
+    assert [(item["run_id"], item["status"], item["updated"]) for item in fourth["runs"]] == [
+        (RUN_ID, "imported", 1)
+    ]
+    assert _fetch_job(throwaway_database_url, JOB_ID)["log_uri"] == log_uri
