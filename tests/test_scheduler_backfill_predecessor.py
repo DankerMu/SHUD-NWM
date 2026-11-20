@@ -996,7 +996,9 @@ def test_emitted_predecessor_reblocks_with_operator_action_under_real_gate(
     }
 
     scheduler = ProductionScheduler(
-        ProductionSchedulerConfig(now=generated_at, allowed_cycle_hours_utc=(0, 12)),
+        ProductionSchedulerConfig(
+            now=generated_at, allowed_cycle_hours_utc=(0, 12), scheduler_db_free_required=True
+        ),
         registry=FakeRegistry([model]),
         adapters={},
         orchestrator_factory=lambda _source_id: pytest.fail(
@@ -1206,7 +1208,9 @@ def test_emitted_predecessor_admitted_when_self_heal_expected(
     }
 
     scheduler = ProductionScheduler(
-        ProductionSchedulerConfig(now=generated_at, allowed_cycle_hours_utc=(0, 12)),
+        ProductionSchedulerConfig(
+            now=generated_at, allowed_cycle_hours_utc=(0, 12), scheduler_db_free_required=True
+        ),
         registry=FakeRegistry([model]),
         adapters={},
         orchestrator_factory=lambda _source_id: pytest.fail(
@@ -1395,7 +1399,9 @@ def test_cutover_boundary_predecessor_admitted_despite_operator_action_flag(
     }
 
     scheduler = ProductionScheduler(
-        ProductionSchedulerConfig(now=generated_at, allowed_cycle_hours_utc=(0, 12)),
+        ProductionSchedulerConfig(
+            now=generated_at, allowed_cycle_hours_utc=(0, 12), scheduler_db_free_required=True
+        ),
         registry=FakeRegistry([model]),
         adapters={},
         orchestrator_factory=lambda _source_id: pytest.fail(
@@ -2175,7 +2181,9 @@ def test_missing_predecessor_manifest_is_not_reported_as_self_healing_under_real
         },
     }
     scheduler = ProductionScheduler(
-        ProductionSchedulerConfig(now=generated_at, allowed_cycle_hours_utc=(0, 12)),
+        ProductionSchedulerConfig(
+            now=generated_at, allowed_cycle_hours_utc=(0, 12), scheduler_db_free_required=True
+        ),
         registry=FakeRegistry([model]),
         adapters={},
         orchestrator_factory=lambda _source_id: pytest.fail("predecessor-pending cutover must not build orchestrator"),
