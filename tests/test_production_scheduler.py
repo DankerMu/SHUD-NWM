@@ -37375,7 +37375,14 @@ class CountingScheduler(ProductionScheduler):
             raise StopIteration
 
 
-def _config(tmp_path: Path, **kwargs: Any) -> ProductionSchedulerConfig:
+def _config(tmp_path: Path, *, db_free: bool | None = None, **kwargs: Any) -> ProductionSchedulerConfig:
+    # `db_free` only sets the mode flag; selectors, paths and the journal root
+    # still come from the env (e.g. `_set_db_free_scheduler_env`) or kwargs.
+    # Omitted, no key is written and the env-driven default decides.
+    if db_free is not None and "scheduler_db_free_required" in kwargs:
+        raise TypeError("_config: db_free and scheduler_db_free_required are mutually exclusive")
+    if db_free is not None:
+        kwargs["scheduler_db_free_required"] = db_free
     values = {
         "workspace_root": tmp_path,
         "sources": ("gfs",),
@@ -37860,6 +37867,72 @@ def _set_db_free_scheduler_env(monkeypatch: Any, root: Path) -> tuple[dict[str, 
             write_provider_destination(path)
         monkeypatch.setenv(key, str(path))
     return roots, paths
+
+
+# --- `_config(..., db_free=True)` opt-in (#3286, redesign-orchestration-core task 2.0) ---
+
+
+def test_config_helper_db_free_opt_in_selects_mode_without_env(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", raising=False)
+
+    config = _config(tmp_path, db_free=True)
+
+    assert config.scheduler_db_free_required is True
+
+
+def test_config_helper_db_free_default_follows_env(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", raising=False)
+    assert _config(tmp_path).scheduler_db_free_required is False
+
+    monkeypatch.setenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", "true")
+    assert _config(tmp_path).scheduler_db_free_required is True
+
+
+def test_config_helper_db_free_rejects_explicit_mode_flag_too(tmp_path: Path) -> None:
+    with pytest.raises(TypeError, match="mutually exclusive"):
+        _config(tmp_path, db_free=True, scheduler_db_free_required=False)
+
+
+def test_config_helper_db_free_opt_in_runs_db_free_pass(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    # Only the helper opt-in may select DB-free mode in this pass.
+    monkeypatch.delenv("NHMS_SCHEDULER_DB_FREE_REQUIRED")
+    cycle_time = _dt("2026-05-21T12:00:00Z")
+    repository = scheduler_module.FileOrchestrationJournalRepository(
+        paths["NHMS_SCHEDULER_JOURNAL_ROOT"]
+    )
+    scheduler = ProductionScheduler(
+        _config(
+            roots["workspace_root"],
+            db_free=True,
+            now=cycle_time,
+            sources=("gfs",),
+            allowed_cycle_hours_utc=(0, 12),
+            lookback_hours=0,
+            cycle_lag_hours=0,
+            max_cycles_per_source=1,
+            backfill_enabled=False,
+        ),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T12:00:00Z", True)])},
+        active_repository=repository,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.status != "preflight_blocked"
+    assert result.evidence["runtime_config"]["scheduler_db_free_required"] is True
+    assert result.evidence["runtime_config"]["db_free_runtime"]["required"] is True
+    assert result.evidence["lock"]["lock_type"] == "file"
 
 
 def test_db_free_runtime_preflight_requires_explicit_trusted_nfs_raw_manifest_root(
