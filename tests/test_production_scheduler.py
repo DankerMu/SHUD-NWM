@@ -46627,6 +46627,14 @@ def test_preflight_allowed_roots_dedupes_and_falls_back_to_workspace_root(tmp_pa
     assert fallback_blockers == []
 
 
+_STORAGE_ROOTS_OUT_OF_ROOT_CODES = {
+    "SLURM_PREFLIGHT_WORKSPACE_ROOT_OUT_OF_ROOT",
+    "SLURM_PREFLIGHT_OBJECT_STORE_ROOT_OUT_OF_ROOT",
+    "SLURM_PREFLIGHT_LOG_ROOT_OUT_OF_ROOT",
+    "SLURM_PREFLIGHT_RUNTIME_ROOT_OUT_OF_ROOT",
+}
+
+
 def test_slurm_preflight_admits_not_a_directory_allowed_root_lexically_through_real_db_free_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -46659,6 +46667,14 @@ def test_slurm_preflight_admits_not_a_directory_allowed_root_lexically_through_r
 
     preflight = scheduler_module._slurm_preflight(config)
 
+    # Mode-independent: the lexically admitted root is the only containment
+    # base and every storage root sits outside it, so each one falls
+    # OUT_OF_ROOT and the preflight stays blocked -- the unwalkable root never
+    # turns into a phantom base (``scheduler_preflight.py:665-672`` is lexical).
+    assert preflight["status"] == "blocked"
+    assert {
+        blocker["code"] for blocker in preflight["blockers"] if blocker["code"].endswith("_OUT_OF_ROOT")
+    } == _STORAGE_ROOTS_OUT_OF_ROOT_CODES
     assert scheduler_module._preflight_allowed_roots(config) == ((not_a_dir_root,), [])
     assert _ALLOWED_ROOTS_UNSAFE_CODE not in {blocker["code"] for blocker in preflight["blockers"]}
     assert preflight["checks"]["allowed_roots"] == ["[local-path]"]
@@ -46711,6 +46727,14 @@ def test_slurm_preflight_admits_symlink_ancestor_allowed_root_canonicalised_by_r
 
     preflight = scheduler_module._slurm_preflight(config)
 
+    # Mode-independent: the lexically admitted root is the only containment
+    # base and every storage root sits outside it, so each one falls
+    # OUT_OF_ROOT and the preflight stays blocked -- the unwalkable root never
+    # turns into a phantom base (``scheduler_preflight.py:665-672`` is lexical).
+    assert preflight["status"] == "blocked"
+    assert {
+        blocker["code"] for blocker in preflight["blockers"] if blocker["code"].endswith("_OUT_OF_ROOT")
+    } == _STORAGE_ROOTS_OUT_OF_ROOT_CODES
     assert scheduler_module._preflight_allowed_roots(config) == ((canonical_root,), [])
     assert _ALLOWED_ROOTS_UNSAFE_CODE not in {blocker["code"] for blocker in preflight["blockers"]}
     assert preflight["checks"]["allowed_roots"] == ["[local-path]"]
@@ -46802,6 +46826,14 @@ def test_slurm_preflight_admits_loop_behind_missing_allowed_root_lexically_built
 
     preflight = scheduler_module._slurm_preflight(config)
 
+    # Mode-independent: the lexically admitted root is the only containment
+    # base and every storage root sits outside it, so each one falls
+    # OUT_OF_ROOT and the preflight stays blocked -- the unwalkable root never
+    # turns into a phantom base (``scheduler_preflight.py:665-672`` is lexical).
+    assert preflight["status"] == "blocked"
+    assert {
+        blocker["code"] for blocker in preflight["blockers"] if blocker["code"].endswith("_OUT_OF_ROOT")
+    } == _STORAGE_ROOTS_OUT_OF_ROOT_CODES
     assert scheduler_module._preflight_allowed_roots(config) == ((loop,), [])
     assert _ALLOWED_ROOTS_UNSAFE_CODE not in {blocker["code"] for blocker in preflight["blockers"]}
     assert preflight["checks"]["allowed_roots"] == ["[local-path]"]
@@ -47145,10 +47177,17 @@ def test_scheduler_allowed_roots_reader_returns_the_pair_functions_roots(
     loop.symlink_to(loop)
     approved = tmp_path / "approved"
     approved.mkdir()
-    config = _AllowedRootsConfigStub(allowed_storage_roots=(loop, approved))
+    # The duplicate and the ENOENT `gone/../approved` spelling are material the
+    # pair function transforms (dedup, non-strict collapse), so a reader that
+    # re-derived from `config.allowed_storage_roots` could not pass.
+    approved_behind_missing = tmp_path / "gone" / ".." / "approved"
+    config = _AllowedRootsConfigStub(allowed_storage_roots=(loop, approved, approved, approved_behind_missing))
 
     roots, blockers = scheduler_module._scheduler_allowed_roots_and_blockers(config)
 
+    # Guard the discriminator itself: if the product ever equals the raw input
+    # the view assertion below is blind.
+    assert roots != tuple(config.allowed_storage_roots)
     assert scheduler_module._scheduler_allowed_roots(config) == roots
     # DB-free (#3252, rule (c)): the product is the lexically admitted loop and
     # the approved root, with no blocker (was: the loop dropped with a blocker).
