@@ -135,8 +135,7 @@ def test_chain_compatibility_inventory_guard_hook_seed_has_required_metadata() -
         "chain-manifest-forwarders": (
             "services.orchestrator.chain_manifests",
             "uv run pytest -q tests/test_orchestration_chain.py "
-            "tests/test_warm_start_chaining.py tests/test_analysis_pipeline.py "
-            "tests/test_production_scheduler.py",
+            "tests/test_warm_start_chaining.py tests/test_production_scheduler.py",
         ),
         "chain-reservation-facade": (
             "services.orchestrator.reservation",

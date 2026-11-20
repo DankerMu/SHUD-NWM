@@ -31,8 +31,8 @@ FORECAST_RUN_ID_RE = re.compile(r"^fcst_([^_]+)_(\d{10})_(.+)$")
 # for the consumer that needs an exact cohort id.
 CYCLE_COHORT_RUN_ID_RE = re.compile(r"^cycle_([^_]+)_(\d{10})(?:_.+)?$")
 # ``analysis_{source}_{start}_{end}_{model_id}`` — the cycle is the START
-# timestamp, matching the analysis lane's own ``cycle_time=start_time``
-# (chain_analysis.py).
+# timestamp, matching the retired orchestrated analysis lane's own
+# ``cycle_time=start_time`` (removed in #3248).
 ANALYSIS_RUN_ID_RE = re.compile(r"^analysis_([^_]+)_(\d{10})_(\d{10})_(.+)$")
 
 _CYCLE_GROUP = 2

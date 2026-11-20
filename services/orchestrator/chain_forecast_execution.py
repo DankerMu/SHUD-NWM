@@ -92,7 +92,6 @@ NESTED_RETRY_DEFER_STATUSES = frozenset(_NESTED_RETRY_DEFER_TERMINALS)
 _CANONICAL_PRECIP_MIRROR_HOOK_MESSAGE = "Canonical precipitation mirror ran after convert."
 _CANONICAL_PRECIP_MIRROR_RECOVERY_MESSAGE = "Canonical precipitation mirror recovered at chain exit."
 
-AnalysisRunContext = _chain.AnalysisRunContext
 ArrayAggregation = _chain.ArrayAggregation
 ArrayTaskResult = _chain.ArrayTaskResult
 CycleOrchestrationContext = _chain.CycleOrchestrationContext
@@ -1446,7 +1445,7 @@ def _copyback_extra_object_keys(object_store_root: str | Path, *, stage: str) ->
 def _submit_and_wait(
     self,
     stage: StageDefinition,
-    context: ForecastRunContext | AnalysisRunContext,
+    context: ForecastRunContext,
     *,
     first_stage: bool,
 ) -> StageRunResult:
@@ -1657,7 +1656,7 @@ def _submit_and_wait(
 def _build_stage_submission_manifest(
     self,
     stage: StageDefinition,
-    context: ForecastRunContext | AnalysisRunContext,
+    context: ForecastRunContext,
 ) -> dict[str, Any]:
     manifest = {
         "run_id": context.run_id,
@@ -1684,17 +1683,6 @@ def _build_stage_submission_manifest(
         "object_store_root": str(Path(self.config.object_store_root)),
         "object_store_prefix": self.config.object_store_prefix,
     }
-    if isinstance(context, AnalysisRunContext):
-        self._validate_analysis_template_context(context)
-        manifest.update(
-            {
-                "analysis_date": context.start_time.strftime("%Y-%m-%d"),
-                "analysis_start_time": _format_time(context.start_time),
-                "analysis_end_time": _format_time(context.end_time),
-                "analysis_date_range": f"{_format_time(context.start_time)}/{_format_time(context.end_time)}",
-                "era5_area": self.config.era5_area,
-            }
-        )
     return manifest
 
 
@@ -1702,7 +1690,7 @@ def _poll_until_terminal(
     self,
     *,
     stage: StageDefinition,
-    context: ForecastRunContext | AnalysisRunContext,
+    context: ForecastRunContext,
     pipeline_job_id: str,
     initial_job: dict[str, Any],
     initial_status: str,
@@ -1831,7 +1819,7 @@ def _record_stage_poll_timeout(
     self,
     *,
     stage: StageDefinition,
-    context: ForecastRunContext | AnalysisRunContext,
+    context: ForecastRunContext,
     pipeline_job_id: str,
     job: dict[str, Any],
     current_status: str,

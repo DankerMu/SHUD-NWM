@@ -131,7 +131,7 @@ def test_expired_canonical_run_workspaces_are_still_collected(tmp_path: Path, na
 
     planned = {entry["key"]: entry for entry in result.planned}
     assert planned[f"runs/{name}"]["reason"] == "run_cycle_aged_out"
-    # The analysis shape binds to its START timestamp, matching chain_analysis.
+    # The analysis shape binds to its START timestamp (the analysis cycle_time).
     assert planned[f"runs/{name}"]["cycle_time"] == (NOW - timedelta(days=20)).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )

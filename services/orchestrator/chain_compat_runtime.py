@@ -72,11 +72,6 @@ def install_chain_runtime_compat() -> dict[str, object]:
         {name: getattr(_chain.ForecastOrchestrator, name) for name in _CHAIN_RETRY_COMPAT_LOCAL_METHOD_NAMES}
     )
     del _chain_retry_init_code, _chain_retry_init_param_names
-    AnalysisOrchestrator = _chain.importlib.import_module(
-        "services.orchestrator.chain_analysis_orchestrator"
-    ).AnalysisOrchestrator
-    AnalysisOrchestrator.__module__ = _chain.__name__
-    _chain.__dict__["AnalysisOrchestrator"] = AnalysisOrchestrator
     _CHAIN_MANIFEST_COMPAT_FORECAST_METHOD_FACADE_MISSING = tuple(
         (
             name
@@ -88,33 +83,12 @@ def install_chain_runtime_compat() -> dict[str, object]:
         raise RuntimeError(
             f"chain manifest compatibility forecast methods missing from facade: {', '.join(_CHAIN_MANIFEST_COMPAT_FORECAST_METHOD_FACADE_MISSING)}"
         )
-    _CHAIN_MANIFEST_COMPAT_ANALYSIS_METHOD_FACADE_MISSING = tuple(
-        (
-            name
-            for name in _CHAIN_MANIFEST_COMPAT_ANALYSIS_METHOD_FORWARDER_NAMES
-            if not callable(getattr(AnalysisOrchestrator, name, None))
-        )
-    )
-    if _CHAIN_MANIFEST_COMPAT_ANALYSIS_METHOD_FACADE_MISSING:
-        raise RuntimeError(
-            f"chain manifest compatibility analysis methods missing from facade: {', '.join(_CHAIN_MANIFEST_COMPAT_ANALYSIS_METHOD_FACADE_MISSING)}"
-        )
     _CHAIN_MANIFEST_COMPAT_FORECAST_METHOD_FORWARDERS = _chain.MappingProxyType(
         {
             facade_name: getattr(_chain.chain_manifests, owner_name)
             for facade_name, owner_name in zip(
                 _CHAIN_MANIFEST_COMPAT_FORECAST_METHOD_FORWARDER_NAMES,
                 _CHAIN_MANIFEST_COMPAT_FORECAST_METHOD_OWNER_FUNCTION_NAMES,
-                strict=True,
-            )
-        }
-    )
-    _CHAIN_MANIFEST_COMPAT_ANALYSIS_METHOD_FORWARDERS = _chain.MappingProxyType(
-        {
-            facade_name: getattr(_chain.chain_manifests, owner_name)
-            for facade_name, owner_name in zip(
-                _CHAIN_MANIFEST_COMPAT_ANALYSIS_METHOD_FORWARDER_NAMES,
-                _CHAIN_MANIFEST_COMPAT_ANALYSIS_METHOD_OWNER_FUNCTION_NAMES,
                 strict=True,
             )
         }
@@ -501,15 +475,12 @@ def install_chain_runtime_compat() -> dict[str, object]:
         )
     del _chain_stage_execution_deps
     export_names = (
-        "AnalysisOrchestrator",
         "PsycopgOrchestratorRepository",
         "_CHAIN_ARRAY_ACCOUNTING_COMPAT_DEPENDENCY_BINDING_DRIFT",
         "_CHAIN_ARRAY_ACCOUNTING_COMPAT_METHOD_FACADE_MISSING",
         "_CHAIN_ARRAY_ACCOUNTING_COMPAT_METHOD_FORWARDERS",
         "_CHAIN_ARRAY_ACCOUNTING_COMPAT_TOP_LEVEL_FACADE_MISSING",
         "_CHAIN_ARRAY_ACCOUNTING_COMPAT_TOP_LEVEL_FORWARDERS",
-        "_CHAIN_MANIFEST_COMPAT_ANALYSIS_METHOD_FACADE_MISSING",
-        "_CHAIN_MANIFEST_COMPAT_ANALYSIS_METHOD_FORWARDERS",
         "_CHAIN_MANIFEST_COMPAT_DEPENDENCY_BINDING_DRIFT",
         "_CHAIN_MANIFEST_COMPAT_FORECAST_METHOD_FACADE_MISSING",
         "_CHAIN_MANIFEST_COMPAT_FORECAST_METHOD_FORWARDERS",

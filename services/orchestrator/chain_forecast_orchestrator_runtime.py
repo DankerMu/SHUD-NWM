@@ -62,7 +62,7 @@ class ForecastOrchestratorRuntimeMixin:
 
     def run_chain(
         self,
-        context: _chain.ForecastRunContext | _chain.AnalysisRunContext,
+        context: _chain.ForecastRunContext,
         *,
         stages: _chain.Sequence[_chain.StageDefinition] | None = None,
     ) -> _chain.PipelineResult:
@@ -122,7 +122,7 @@ class ForecastOrchestratorRuntimeMixin:
     def _submit_and_wait(
         self,
         stage: _chain.StageDefinition,
-        context: _chain.ForecastRunContext | _chain.AnalysisRunContext,
+        context: _chain.ForecastRunContext,
         *,
         first_stage: bool,
     ) -> _chain.StageRunResult:
@@ -131,32 +131,17 @@ class ForecastOrchestratorRuntimeMixin:
         return chain_forecast_execution._submit_and_wait(self, stage, context, first_stage=first_stage)
 
     def _build_stage_submission_manifest(
-        self, stage: _chain.StageDefinition, context: _chain.ForecastRunContext | _chain.AnalysisRunContext
+        self, stage: _chain.StageDefinition, context: _chain.ForecastRunContext
     ) -> dict[str, _chain.Any]:
         from services.orchestrator import chain_forecast_execution
 
         return chain_forecast_execution._build_stage_submission_manifest(self, stage, context)
 
-    def _validate_analysis_template_context(self, context: _chain.AnalysisRunContext) -> None:
-        for label, val in [
-            ("source_id", context.source_id),
-            ("model_id", context.model_id),
-            ("run_id", context.run_id),
-            ("basin_version_id", context.basin_version_id),
-            ("river_network_version_id", context.river_network_version_id),
-        ]:
-            if not _chain._SAFE_ID_RE.match(val):
-                raise _chain.OrchestratorError("UNSAFE_TEMPLATE_PARAM", f"{label} contains unsafe characters: {val!r}")
-        if context.basin_id and (not _chain._SAFE_ID_RE.match(context.basin_id)):
-            raise _chain.OrchestratorError("UNSAFE_TEMPLATE_PARAM", f"basin_id unsafe: {context.basin_id!r}")
-        if not _chain._SAFE_AREA_RE.match(self.config.era5_area):
-            raise _chain.OrchestratorError("UNSAFE_TEMPLATE_PARAM", f"era5_area unsafe: {self.config.era5_area!r}")
-
     def _poll_until_terminal(
         self,
         *,
         stage: _chain.StageDefinition,
-        context: _chain.ForecastRunContext | _chain.AnalysisRunContext,
+        context: _chain.ForecastRunContext,
         pipeline_job_id: str,
         initial_job: dict[str, _chain.Any],
         initial_status: str,
@@ -178,7 +163,7 @@ class ForecastOrchestratorRuntimeMixin:
         self,
         *,
         stage: _chain.StageDefinition,
-        context: _chain.ForecastRunContext | _chain.AnalysisRunContext,
+        context: _chain.ForecastRunContext,
         pipeline_job_id: str,
         job: dict[str, _chain.Any],
         current_status: str,
@@ -197,7 +182,7 @@ class ForecastOrchestratorRuntimeMixin:
         )
 
     def _before_stage_submit(
-        self, stage: _chain.StageDefinition, context: _chain.ForecastRunContext | _chain.AnalysisRunContext
+        self, stage: _chain.StageDefinition, context: _chain.ForecastRunContext
     ) -> None:
         if stage.stage in {"download_gfs", "download"}:
             self.repository.update_forecast_cycle_status(
@@ -211,7 +196,7 @@ class ForecastOrchestratorRuntimeMixin:
     def _after_stage_success(
         self,
         stage: _chain.StageDefinition,
-        context: _chain.ForecastRunContext | _chain.AnalysisRunContext,
+        context: _chain.ForecastRunContext,
         _terminal: dict[str, _chain.Any],
     ) -> None:
         self.repository.update_forecast_cycle_status(
@@ -225,7 +210,7 @@ class ForecastOrchestratorRuntimeMixin:
     def _after_stage_failure(
         self,
         stage: _chain.StageDefinition,
-        context: _chain.ForecastRunContext | _chain.AnalysisRunContext,
+        context: _chain.ForecastRunContext,
         terminal: dict[str, _chain.Any],
     ) -> None:
         error_code = terminal.get("error_code") or f"{stage.stage.upper()}_{terminal['status'].upper()}"
@@ -244,7 +229,7 @@ class ForecastOrchestratorRuntimeMixin:
     def _after_stage_status_change(
         self,
         _stage: _chain.StageDefinition,
-        _context: _chain.ForecastRunContext | _chain.AnalysisRunContext,
+        _context: _chain.ForecastRunContext,
         _status_from: str | None,
         _status_to: str,
         _job: dict[str, _chain.Any],
@@ -252,12 +237,12 @@ class ForecastOrchestratorRuntimeMixin:
         return None
 
     def _pipeline_event_target(
-        self, _context: _chain.ForecastRunContext | _chain.AnalysisRunContext, pipeline_job_id: str
+        self, _context: _chain.ForecastRunContext, pipeline_job_id: str
     ) -> tuple[str, str]:
         return ("pipeline_job", pipeline_job_id)
 
     def render_stage_template(
-        self, stage: _chain.StageDefinition, context: _chain.ForecastRunContext | _chain.AnalysisRunContext
+        self, stage: _chain.StageDefinition, context: _chain.ForecastRunContext
     ) -> str:
         from services.orchestrator import chain_forecast_templates
 
@@ -469,7 +454,7 @@ class ForecastOrchestratorRuntimeMixin:
         )
 
     def _write_run_manifest(
-        self, context: _chain.ForecastRunContext | _chain.AnalysisRunContext, manifest: dict[str, _chain.Any]
+        self, context: _chain.ForecastRunContext, manifest: dict[str, _chain.Any]
     ) -> None:
         _chain.chain_manifests.write_run_manifest(self, context, manifest)
 

@@ -131,7 +131,7 @@ def test_round12_rollback_commands_emit_verifiable_receipts(
         ("plan-production", "--submit", "--version"),
         ("plan-production", "--submit", "--workspace-root", str(workspace)),
         ("plan-production", "--submit", "--lock-path", str(workspace / "other.lock")),
-        ("trigger-analysis", "--submit"),
+        ("publish-tiles", "--submit"),
     ):
         invalid_argv = [*launch_prefix, *invalid_writer_args]
         if entrypoint == "click":

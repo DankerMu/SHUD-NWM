@@ -29,7 +29,7 @@ CYCLE = datetime(2026, 5, 16, 0, tzinfo=UTC)
     ids=["forecast", "forecast-underscored-model", "cohort", "cohort-with-suffix", "analysis"],
 )
 def test_canonical_shapes_resolve_to_the_cycle_at_the_canonical_position(run_id: str) -> None:
-    """The analysis shape binds to its START segment (chain_analysis cycle_time)."""
+    """The analysis shape binds to its START segment (the analysis cycle_time)."""
     assert parse_run_cycle(run_id) == CYCLE
 
 

@@ -990,51 +990,6 @@ def _format_time_or_none(value: datetime | None) -> str | None:
     return _format_time(value) if value is not None else None
 
 
-def parse_date_range(value: str | tuple[datetime, datetime]) -> tuple[datetime, datetime]:
-    if isinstance(value, tuple):
-        start_time, end_time = value
-        return _validated_date_range(_ensure_utc(start_time), _ensure_utc(end_time))
-
-    candidate = value.strip()
-    separators = ("..", "/", ",")
-    for separator in separators:
-        if separator in candidate:
-            left, right = candidate.split(separator, maxsplit=1)
-            return _validated_date_range(_parse_date_range_endpoint(left), _parse_date_range_endpoint(right))
-    raise OrchestratorError(
-        "INVALID_DATE_RANGE",
-        "date_range must use START/END, START..END, or START,END.",
-        {"date_range": value},
-    )
-
-
-def _parse_date_range_endpoint(value: str) -> datetime:
-    candidate = value.strip()
-    if len(candidate) == 10 and candidate[4] == "-" and candidate[7] == "-":
-        return datetime.fromisoformat(candidate).replace(tzinfo=UTC)
-    return parse_cycle_time(candidate)
-
-
-def _validated_date_range(start_time: datetime, end_time: datetime) -> tuple[datetime, datetime]:
-    start = _ensure_utc(start_time)
-    end = _ensure_utc(end_time)
-    if end <= start:
-        raise OrchestratorError(
-            "INVALID_DATE_RANGE",
-            "date_range end must be after start.",
-            {"start_time": _format_time(start), "end_time": _format_time(end)},
-        )
-    return start, end
-
-
-def _analysis_error_code(stage: StageDefinition, terminal: dict[str, Any]) -> str:
-    raw_code = terminal.get("error_code")
-    timeout_codes = {"TIMEOUT", "SLURM_TIMEOUT", "SLURM_JOB_TIMEOUT"}
-    if stage.stage == "analysis_run" and str(raw_code or "").upper() in timeout_codes:
-        return "SLURM_TIMEOUT"
-    return str(raw_code or f"{stage.stage.upper()}_{terminal['status'].upper()}")
-
-
 def _template_export_lines(context: Mapping[str, Any]) -> list[str]:
     export_fields = {
         "WORKSPACE_ROOT": context.get("workspace_dir", ""),

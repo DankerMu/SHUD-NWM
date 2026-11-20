@@ -109,36 +109,6 @@ class ForecastRunContext:
 
 
 @dataclass(frozen=True)
-class AnalysisRunContext:
-    run_id: str
-    source_id: str
-    cycle_id: str
-    cycle_time: datetime
-    model_id: str
-    basin_id: str | None
-    basin_version_id: str
-    river_network_version_id: str
-    segment_count: int
-    model_package_uri: str
-    forcing_version_id: str | None
-    forcing_package_uri: str | None
-    start_time: datetime
-    end_time: datetime
-    run_manifest_uri: str
-    output_uri: str
-    log_uri: str
-    forcing_package_manifest_uri: str | None = None
-    forcing_package_manifest_checksum: str | None = None
-    init_state_id: str | None = None
-    init_state_uri: str | None = None
-    init_state_valid_time: datetime | None = None
-    output_segment_count: int | None = None
-    # M24 section 2 Lane 2: restart cadence landing on T_{N+1} and forcing causality marker.
-    update_ic_step_minutes: int | None = None
-    forcing_causality: Mapping[str, Any] | None = None
-
-
-@dataclass(frozen=True)
 class StageRunResult:
     stage: str
     job_type: str
@@ -293,7 +263,6 @@ class ModelRunAssembly:
 
 
 __all__ = [
-    "AnalysisRunContext",
     "ArrayAggregation",
     "ArrayTaskResult",
     "CycleOrchestrationContext",

@@ -4,7 +4,6 @@ from pathlib import Path
 
 from services.orchestrator import chain as _chain
 
-AnalysisRunContext = _chain.AnalysisRunContext
 ForecastRunContext = _chain.ForecastRunContext
 OrchestratorError = _chain.OrchestratorError
 StageDefinition = _chain.StageDefinition
@@ -22,7 +21,7 @@ def _template_export_lines(*args, **kwargs):
     return getattr(_chain, "_template_export_lines")(*args, **kwargs)
 
 
-def render_stage_template(self, stage: StageDefinition, context: ForecastRunContext | AnalysisRunContext) -> str:
+def render_stage_template(self, stage: StageDefinition, context: ForecastRunContext) -> str:
     template_path = Path(self.config.templates_dir) / stage.template_name
     if not template_path.exists():
         repo_template_path = Path(__file__).resolve().parents[2] / "infra" / "sbatch" / stage.template_name
@@ -43,8 +42,6 @@ def render_stage_template(self, stage: StageDefinition, context: ForecastRunCont
         raise OrchestratorError("UNSAFE_TEMPLATE_PARAM", f"basin_id unsafe: {context.basin_id!r}")
     if hasattr(self.config, "era5_area") and not _SAFE_AREA_RE.match(self.config.era5_area):
         raise OrchestratorError("UNSAFE_TEMPLATE_PARAM", f"era5_area unsafe: {self.config.era5_area!r}")
-    if isinstance(context, AnalysisRunContext):
-        self._validate_analysis_template_context(context)
     run_manifest_path = self._workspace_path("runs", context.run_id, "input", "manifest.json")
     template_context = {
         "source_id": context.source_id,
@@ -65,7 +62,7 @@ def render_stage_template(self, stage: StageDefinition, context: ForecastRunCont
         "run_type": getattr(
             context,
             "run_type",
-            "analysis" if isinstance(context, AnalysisRunContext) else "forecast",
+            "forecast",
         ),
         "analysis_date": context.start_time.strftime("%Y-%m-%d"),
         "analysis_start_time": _format_time(context.start_time),
