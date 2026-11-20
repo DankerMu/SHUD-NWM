@@ -2047,6 +2047,26 @@ def test_wrapper_rotates_a_log_at_the_bound_and_keeps_bounded_generations(tmp_pa
     assert any("autopipe: done rc=0" in line for line in lines)
 
 
+def test_wrapper_rotation_removes_generations_above_a_lowered_keep(tmp_path: Path) -> None:
+    proc, log, _argv = _rotation_tick(
+        tmp_path,
+        settings={"AUTOPIPE_LOG_MAX_BYTES": "64", "AUTOPIPE_LOG_KEEP": "2"},
+        generations={
+            "": _OLD_LOG,
+            ".1": "generation one\n",
+            ".2": "generation two\n",
+            ".3": "generation three\n",
+            ".4": "generation four\n",
+        },
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert _generations(log) == {".1": _OLD_LOG, ".2": "generation one\n"}
+    assert not Path(f"{log}.3").exists()
+    assert not Path(f"{log}.4").exists()
+    assert _ROTATION_LINE.match(log.read_text(encoding="utf-8").splitlines()[0]) is not None
+
+
 @pytest.mark.parametrize(
     "max_bytes",
     [pytest.param("4096", id="under-the-bound"), pytest.param("0", id="zero-disables")],
@@ -2088,18 +2108,38 @@ def test_wrapper_falls_back_to_the_default_generation_count_for_an_invalid_keep(
     assert rotated.group(2) == "5"
 
 
-@pytest.mark.parametrize("max_bytes", ["-1", "abc"])
-def test_wrapper_falls_back_to_the_default_bound_for_an_invalid_max_bytes(tmp_path: Path, max_bytes: str) -> None:
-    proc, log, _argv = _rotation_tick(
-        tmp_path,
-        settings={"AUTOPIPE_LOG_MAX_BYTES": max_bytes, "AUTOPIPE_LOG_KEEP": "2"},
-        generations={"": _OLD_LOG},
-    )
+def _sparse_log(tmp_path: Path, size: int) -> None:
+    log_root = tmp_path / "autopipe-logs"
+    log_root.mkdir()
+    with (log_root / "autopipe.log").open("wb") as handle:
+        handle.truncate(size)
 
-    # The 64 MiB default applies, so a 105-byte log is not rotated.
+
+@pytest.mark.parametrize("max_bytes", ["-1", "abc"])
+@pytest.mark.parametrize(
+    ("size", "rotated"),
+    [pytest.param(67108864, True, id="at-the-default"), pytest.param(67108863, False, id="one-below-the-default")],
+)
+def test_wrapper_falls_back_to_the_default_bound_for_an_invalid_max_bytes(
+    tmp_path: Path, max_bytes: str, size: int, rotated: bool
+) -> None:
+    # Pinned from both sides: an invalid bound is neither "disabled" (the log at
+    # 64 MiB would stay) nor any smaller bound (the log one byte below would move).
+    _sparse_log(tmp_path, size)
+
+    proc, log, _argv = _rotation_tick(tmp_path, settings={"AUTOPIPE_LOG_MAX_BYTES": max_bytes})
+
     assert proc.returncode == 0, proc.stderr
-    assert _generations(log) == {}
-    assert log.read_text(encoding="utf-8").startswith(_OLD_LOG)
+    if rotated:
+        assert (log.parent / "autopipe.log.1").stat().st_size == size
+        match = _ROTATION_LINE.match(log.read_text(encoding="utf-8").splitlines()[0])
+        assert match is not None
+        assert match.groups() == (str(size), "5")
+    else:
+        assert _generations(log) == {}
+        appended = log.read_bytes()[size:].decode("utf-8").splitlines()
+        assert appended[0].endswith("autopipe: start")
+        assert not any("rotated log" in line for line in appended)
 
 
 def test_wrapper_rotates_at_the_default_bound_when_unset(tmp_path: Path) -> None:

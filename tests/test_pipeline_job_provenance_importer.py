@@ -1441,3 +1441,64 @@ def test_discovered_pass_without_state_path_imports_every_run_and_writes_no_file
     assert sorted(str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*")) == before
     assert sorted(os.listdir(Path.cwd())) == cwd_before
     connection.close()
+
+
+def test_discovered_pass_batches_the_row_read(
+    stateful: tuple[sqlite3.Connection, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection, object_root, state_path = stateful
+    second_forecast = {
+        **_forecast_job(),
+        "job_id": f"{IFS_JOB_ID}_retry",
+        "array_task_id": 24,
+        "log_uri": None,
+    }
+    jobs = [_forecast_job(), second_forecast, _convert_job()]
+    _seed_object_store(object_root, _sidecar(jobs=jobs, source_version=NEWER_SOURCE_VERSION))
+    monkeypatch.setattr(pipeline_job_provenance, "MAX_JOB_IDS_PER_ROW_READ", 2)
+
+    first = _pass(connection, object_root, [IFS_RUN_ID], state_path)
+    executed: list[str] = []
+    second = _pass(connection, object_root, [IFS_RUN_ID], state_path, executed=executed)
+
+    assert _by_run(first)[IFS_RUN_ID]["inserted"] == 3
+    assert len(_state(state_path)["runs"][IFS_RUN_ID]["jobs"]) == 3
+    assert second["skipped_unchanged"] == 1
+    reads = _presence_reads(executed)
+    assert reads == executed
+    assert len(reads) == 2  # ceil(3 / 2)
+    assert sorted(statement.count("%s") for statement in reads) == [1, 2]
+
+
+def test_discovered_pass_skips_a_zero_job_sidecar_without_a_connection(
+    stateful: tuple[sqlite3.Connection, Path, Path],
+) -> None:
+    connection, object_root, state_path = stateful
+    _seed_object_store(object_root, _sidecar(jobs=[], source_version=NEWER_SOURCE_VERSION))
+    connects: list[str] = []
+    inner = _connect_factory(connection)
+
+    def counting_connect(database_url: str, **kwargs: Any) -> _KeepAliveConnection:
+        connects.append(database_url)
+        return inner(database_url, **kwargs)
+
+    def discovered_pass() -> dict[str, Any]:
+        return import_discovered_pipeline_job_provenance(
+            database_url="sqlite://",
+            object_store_root=object_root,
+            run_ids=[IFS_RUN_ID],
+            connect=counting_connect,
+            state_path=state_path,
+        )
+
+    first = discovered_pass()
+    connects_after_first = len(connects)
+    second = discovered_pass()
+
+    assert _by_run(first)[IFS_RUN_ID]["status"] == "imported"
+    assert connects_after_first == 1  # the import itself; an empty read-back opens nothing
+    assert _state(state_path)["runs"][IFS_RUN_ID]["jobs"] == {}
+    assert second["skipped_unchanged"] == 1
+    assert second["runs"] == []
+    assert len(connects) == connects_after_first

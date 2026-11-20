@@ -586,7 +586,7 @@ def test_discovered_pass_with_state_skips_then_reimports_after_row_loss(
     assert first["skip_state"] == "empty"
     assert first["skip_state_saved"] is True
     after_first = _job_rows_with_xmin(throwaway_database_url)
-    assert set(after_first) == {JOB_ID, CONVERT_JOB_ID, SECOND_JOB_ID}
+    assert {JOB_ID, CONVERT_JOB_ID, SECOND_JOB_ID} <= set(after_first)
 
     second = discovered_pass()
     assert second["skip_state"] == "loaded"

@@ -828,6 +828,9 @@ def _ingest_tick_digest(summary: Mapping[str, object]) -> dict[str, object]:
         "quiet": _tick_is_quiet(summary),
         "discovered_runs": summary.get("discovered_runs"),
         "declines_active": summary.get("declines_active"),
+        # Carried for the operator reading an idle timer log; not part of `quiet`.
+        "cycle_floor": summary.get("cycle_floor"),
+        "skipped_older_than_floor": summary.get("skipped_older_than_floor"),
         "runs": {
             key: runs.get(key)
             for key in ("already_ingested", "published", "processed", "ingested", "skipped", "failed", "declined")

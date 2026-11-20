@@ -21,6 +21,22 @@ import tests.test_node27_autopipeline_handoff as handoff
 
 DIGEST_SCHEMA = "nhms.node27.ingest_tick_digest.v1"
 STATE_FILE_NAME = "pipeline-job-provenance-import-state.json"
+DIGEST_KEYS = {
+    "schema",
+    "status",
+    "return_code",
+    "quiet",
+    "discovered_runs",
+    "declines_active",
+    "cycle_floor",
+    "skipped_older_than_floor",
+    "runs",
+    "seed",
+    "job_provenance",
+    "stats_guard",
+    "object_store_root",
+    "ingest",
+}
 DIGEST_RUNS_KEYS = {"already_ingested", "published", "processed", "ingested", "skipped", "failed", "declined"}
 
 
@@ -83,6 +99,7 @@ def test_tick_mode_prints_exactly_one_digest_line_on_a_quiet_tick(
     assert digest["status"] == "completed"
     assert '"declines_active": 0' in lines[0]
     assert digest["discovered_runs"] == 1
+    assert set(digest) == DIGEST_KEYS
     assert set(digest["runs"]) == DIGEST_RUNS_KEYS
     assert digest["runs"]["already_ingested"] == 1
     assert digest["seed"] == {"seeded": 0, "already_seeded": 1, "failed": 0}
@@ -143,6 +160,26 @@ def _set(path: str, value: Any) -> Callable[[dict[str, Any]], None]:
         target[leaf] = value
 
     return apply
+
+
+def test_tick_digest_carries_the_cycle_floor_of_the_summary(quiet_summary: dict[str, Any]) -> None:
+    digest = autopipe._ingest_tick_digest(quiet_summary)
+
+    assert digest["quiet"] is True
+    assert digest["cycle_floor"] == quiet_summary["cycle_floor"]
+    assert digest["skipped_older_than_floor"] == quiet_summary["skipped_older_than_floor"]
+
+
+def test_tick_digest_cycle_floor_takes_no_part_in_the_quiet_predicate(quiet_summary: dict[str, Any]) -> None:
+    summary = copy.deepcopy(quiet_summary)
+    summary["cycle_floor"] = {"applied": True, "floor_cycle": "2026061900", "max_age_days": 14}
+    summary["skipped_older_than_floor"] = 3
+
+    digest = autopipe._ingest_tick_digest(summary)
+
+    assert digest["quiet"] is True
+    assert digest["cycle_floor"] == summary["cycle_floor"]
+    assert digest["skipped_older_than_floor"] == 3
 
 
 @pytest.mark.parametrize(
@@ -268,7 +305,7 @@ def test_progress_line_reports_zero_skipped_when_the_summary_has_no_such_key(
     assert "[job-provenance] imported 0, unavailable 0, failed 1, skipped_unchanged 0\n" in captured.err
 
 
-@pytest.mark.parametrize("blocked_by", ["missing-database-url", "database-url-argv"])
+@pytest.mark.parametrize("blocked_by", ["missing-database-url", "database-url-argv", "node22-url-argv"])
 def test_preflight_blocked_summary_is_printed_in_full_in_tick_mode(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], blocked_by: str
 ) -> None:
@@ -276,8 +313,10 @@ def test_preflight_blocked_summary_is_printed_in_full_in_tick_mode(
     extra: tuple[str, ...] = ()
     if blocked_by == "missing-database-url":
         monkeypatch.delenv("DATABASE_URL")
-    else:
+    elif blocked_by == "database-url-argv":
         extra = ("--database-url", handoff.NODE27_DATABASE_URL)
+    else:
+        extra = ("--node22-url", "postgresql://n22_user:n22-secret@210.77.77.22:55433/nhms")
 
     rc, out = _tick_stdout(capsys, object_store_root, *extra)
     document = json.loads(out)
@@ -297,12 +336,14 @@ def test_tick_mode_seed_only_pass_prints_a_digest(
     rc, out = _tick_stdout(capsys, object_store_root, "--seed-only")
     digest, _line, summary = _split_tick(out)
 
+    # A seed-only pass that seeds nothing is quiet: the digest line alone.
     assert rc == 0
     assert importer_calls == []
     assert digest["schema"] == DIGEST_SCHEMA
     assert digest["job_provenance"] == {"imported": 0, "unavailable": 0, "failed": 0, "skipped_unchanged": 0}
-    if summary is not None:
-        assert summary["runs"]["job_provenance"] == {"imported": 0, "unavailable": 0, "failed": 0, "runs": []}
+    assert digest["quiet"] is True
+    assert summary is None
+    assert out.count("\n") == 1
 
 
 def test_tick_mode_digest_of_the_importer_exception_fallback_is_not_quiet(

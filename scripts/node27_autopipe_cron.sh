@@ -212,6 +212,15 @@ rotate_log() {
     fi
   done
   rm -f "$LOG.$keep" || return 1
+  # Generations above KEEP (left by a lowered AUTOPIPE_LOG_KEEP) go too: scan
+  # upward until the first missing one; a non-regular entry is skipped.
+  i=$((keep + 1))
+  while [ -e "$LOG.$i" ] || [ -L "$LOG.$i" ]; do
+    if [ -f "$LOG.$i" ] && [ ! -L "$LOG.$i" ]; then
+      rm -f "$LOG.$i" || return 1
+    fi
+    i=$((i + 1))
+  done
   for ((i = keep - 1; i >= 1; i--)); do
     if [ -e "$LOG.$i" ] || [ -L "$LOG.$i" ]; then
       mv -f "$LOG.$i" "$LOG.$((i + 1))" || return 1
