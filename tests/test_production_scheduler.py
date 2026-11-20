@@ -18566,39 +18566,37 @@ _UNKNOWN_HOME_LOGS = "~nosuchuser_zz/logs"
 _UNKNOWN_HOME_WORKSPACE = "~nosuchuser_zz/workspace"
 
 
-def _unknown_home_config(workspace_root: Path, *, db_free_required: bool) -> Any:
-    return ProductionSchedulerConfig(
-        workspace_root=workspace_root,
-        allowed_storage_roots=(_UNKNOWN_HOME_ROOTS,),
-        log_root=_UNKNOWN_HOME_LOGS,
-        scheduler_db_free_required=db_free_required,
-    )
-
-
-def test_expanduser_residue_config_constructs_identically_on_both_database_arms(
+def test_expanduser_residue_config_constructs_on_the_db_free_construction(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    # The acceptance anchor is an EQUALITY of products, not the absence of an
-    # exception: "it stopped throwing" would stay green even if the throw were
-    # traded for a value anchored at the wrong base.
+    # R2b (#3255): there is one construction, the DB-free one, so the old
+    # two-arm equality is gone.  The anchor is the spelled-out product, not the
+    # absence of an exception: "it stopped throwing" would stay green even if
+    # the throw were traded for a value anchored at the wrong base.  The
+    # retired keyword ``scheduler_db_free_required=False`` is accepted and
+    # ignored, so it yields the same DB-free config.
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
     monkeypatch.chdir(tmp_path)
     _resolve_residue_env(monkeypatch, workspace_root)
-
-    db_backed = _unknown_home_config(workspace_root, db_free_required=False)
-    db_free = _unknown_home_config(workspace_root, db_free_required=True)
-
-    assert db_backed.allowed_storage_roots == db_free.allowed_storage_roots
-    assert db_backed.log_root == db_free.log_root
-    # The db-free arm's own product, spelled out: the tilde segment is kept
-    # verbatim, the allowed root is anchored at the cwd and the log root at
-    # workspace_root, so a base mix-up cannot hide behind the equality above.
+    monkeypatch.delenv("NHMS_SCHEDULER_DB_FREE_REQUIRED")
     canonical_cwd = Path(os.path.realpath(tmp_path))
     canonical_workspace = Path(os.path.realpath(workspace_root))
-    assert db_backed.allowed_storage_roots == (canonical_cwd / _UNKNOWN_HOME_ROOTS,)
-    assert db_backed.log_root == canonical_workspace / _UNKNOWN_HOME_LOGS
+
+    for keyword in ({}, {"scheduler_db_free_required": False}):
+        config = ProductionSchedulerConfig(
+            workspace_root=workspace_root,
+            allowed_storage_roots=(_UNKNOWN_HOME_ROOTS,),
+            log_root=_UNKNOWN_HOME_LOGS,
+            **keyword,
+        )
+
+        assert config.db_free_required is True, keyword
+        # The tilde segment is kept verbatim, the allowed root is anchored at
+        # the cwd and the log root at workspace_root.
+        assert config.allowed_storage_roots == (canonical_cwd / _UNKNOWN_HOME_ROOTS,), keyword
+        assert config.log_root == canonical_workspace / _UNKNOWN_HOME_LOGS, keyword
 
 
 def test_expanduser_residue_preserve_final_component_helper_matches_db_free_arm(
@@ -38224,12 +38222,16 @@ def test_config_helper_db_free_opt_in_selects_mode_without_env(
     assert config.scheduler_db_free_required is True
 
 
-def test_config_helper_db_free_default_follows_env(
+def test_config_helper_db_free_default_is_constant_whatever_the_env_says(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
+    # R2b (#3255): the env no longer selects the scheduler mode.
     monkeypatch.delenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", raising=False)
-    assert _config(tmp_path).scheduler_db_free_required is False
+    assert _config(tmp_path).scheduler_db_free_required is True
+
+    monkeypatch.setenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", "false")
+    assert _config(tmp_path).scheduler_db_free_required is True
 
     monkeypatch.setenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", "true")
     assert _config(tmp_path).scheduler_db_free_required is True
@@ -38245,7 +38247,8 @@ def test_config_helper_db_free_opt_in_runs_db_free_pass(
     tmp_path: Path,
 ) -> None:
     roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path)
-    # Only the helper opt-in may select DB-free mode in this pass.
+    # No env mode flag: DB-free is the only scheduler mode (#3255, R2b), so the
+    # pass runs DB-free without ``NHMS_SCHEDULER_DB_FREE_REQUIRED``.
     monkeypatch.delenv("NHMS_SCHEDULER_DB_FREE_REQUIRED")
     cycle_time = _dt("2026-05-21T12:00:00Z")
     repository = scheduler_module.FileOrchestrationJournalRepository(

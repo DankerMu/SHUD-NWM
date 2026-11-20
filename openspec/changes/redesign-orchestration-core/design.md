@@ -331,7 +331,7 @@ Each listed passage gets a MODIFIED or REMOVED delta in this change, added in th
 | Spec passage | Slice |
 |---|---|
 | `analysis-run-pipeline` remaining requirements (`:25-86`) after triage (task 1.6) | R1 |
-| `node22-dbfree-runtime` (already in this change); `slurm-array-runner-integration/spec.md:103` (db-backed configuration arm), if that arm is the scheduler mode | R2b |
+| `node22-dbfree-runtime` (already in this change); `slurm-array-runner-integration/spec.md` requirements "Configuration construction survives symlink loops in containment bases and parent segments" (`:71-135`, incl. the `:103` db-backed configuration arm, which is the scheduler mode) and "...survive an undeterminable home directory on both database arms" (`:137-159`) | R2b |
 | `pipeline-job-persistence/spec.md:10,12-14,42-44,83` ("PostgreSQL-backed scheduler mode"); `file-orchestration-journal/spec.md:309,650` (non-DB-free reconciliation) | R2c |
 | `file-orchestration-journal/spec.md:4-5` (Purpose), `:13`, `:48`, `:154`; `production-scheduler-orchestration/spec.md:729,759-761,772` (SQL probes); `job-retry-mechanism/spec.md:350,352,377,385-393` (DB-backed candidate-state projection) | R3 |
 | `file-orchestration-journal/spec.md:107-115` (`_retry_service_from_env`); `real-slurm-gateway-contract/spec.md:66,72,78` ("RetryService MUST ..."); `job-retry-mechanism/spec.md:1044` (markers written by the SQL retry service) | R4 |

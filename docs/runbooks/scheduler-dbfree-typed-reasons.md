@@ -1,8 +1,8 @@
 # Scheduler DB-Free Typed Reasons Runbook
 
-适用范围：node-22 上以 DB-free 模式运行的 production scheduler
-（`NHMS_SCHEDULER_DB_FREE_REQUIRED=true`，state / registry / journal /
-state-index 全部走 file backend）。node-22 不连任何活 DB，所有判定证据只
+适用范围：node-22 上的 production scheduler。自 #3255（R2b）起它只有
+DB-free 一种模式，与 `NHMS_SCHEDULER_DB_FREE_REQUIRED` 的取值无关；state /
+registry / journal / state-index 全部走 file backend。node-22 不连任何活 DB，所有判定证据只
 存在于 pass evidence JSON 与 file state-index 里，因此 typed reason 是唯一
 可靠的分诊入口。
 
@@ -861,6 +861,63 @@ run 在同一 run 目录里跑两遍（#2666：IFS 0925 12Z 的 57553 / 57637，
   scheduler owner，绝不手改 journal（2026-09-28 node-22 生产 journal 中此类行为 0）。
   **manual-retry marker 不是出口**：marker 不会越过 held 行，打了也只是等 reconcile。一趟大约只绑一行（见上一节），
   多行 held 时逐趟解冻，属预期。
+
+## `scheduler_non_db_free_arm_reached`（`SchedulerModeInvariantError`，#3255）
+
+### 含义
+
+R2b 之后 scheduler 只有 DB-free 一种模式：`ProductionSchedulerConfig` 把
+`scheduler_db_free_required` 固定为 `true`，`NHMS_SCHEDULER_DB_FREE_REQUIRED`
+不再选模式（`unset` / `false` / `true` 结果相同），构造参数
+`scheduler_db_free_required=False` 照收但被忽略。`scheduler_core.py` /
+`scheduler_runtime.py` 里残留的非 DB-free 分支（R2c 删除）一旦被走到，就抛
+`SchedulerModeInvariantError`（直接继承 `Exception`，不是 `ValueError` /
+`RuntimeError` / `OSError`），带两个字段：
+
+- `code`：固定 `scheduler_non_db_free_arm_reached`；
+- `site`：`<module>:<function>`，例如 `scheduler_runtime:run_once`、
+  `scheduler_core:__init__`、`scheduler_core:_default_orchestrator_for`。
+
+它不是 evidence 里的 blocker，而是异常，直接抛到调用方（`nhms-pipeline`
+CLI 以 traceback 退出），不写最终 pass evidence：
+
+- `scheduler_core:__init__` / `scheduler_core:from_env` /
+  `scheduler_runtime:run_once` 在拿锁之前抛；
+- `scheduler_core:_default_orchestrator_for` 在候选执行时抛，此时 pass 已持锁：
+  异常经 `scheduler_execution` 的并发结果原样重抛，`run_once` 的 `finally`
+  停心跳并释放锁。
+
+它也**不会**由运维 env 触发——env 设成 `false` 照样跑 DB-free。能触发它的只有代码缺陷：某个
+调用方传进来一个报告 `db_free_required=False` 的 config（duck-typed stub、
+被 patch 的属性），或一个 DB-free scheduler 在没有 journal repository 时去建
+orchestrator（`scheduler_core:_default_orchestrator_for`；以前这里会回落到
+`_orchestrator_repository_from_env()` 走 SQL，现在 fail closed）。
+
+### 与 selector / DATABASE_URL blocker 的区别
+
+backend selector 与 `DATABASE_URL` 的 fail-closed 不变，仍是 pass evidence
+里 `db_free_runtime.blockers[]` 的 typed blocker，在拿锁之前以
+`preflight_blocked` / `execution_boundary=db_free_runtime_preflight_blocked`
+结束 pass：
+
+| 现场 | blocker `code` |
+|---|---|
+| selector 未设置 | `db_free_selector_missing` |
+| selector 为空串 | `db_free_selector_blank` |
+| selector 为 `postgres` / `psycopg` 等 DB 值 | `db_free_selector_db_backed` |
+| selector 为其他非 `file` 值 | `db_free_selector_non_file` |
+| scheduler env 仍含 `DATABASE_URL` | `database_url_forbidden` |
+
+没有任何 selector 默认值被改成 `file`：缺哪个就按上表挡哪个。
+
+### 处置
+
+1. 不要去改 `NHMS_SCHEDULER_DB_FREE_REQUIRED`——它已不影响 scheduler 模式
+   （它仍是 manifest 与 Slurm 作业 env 的契约字段，模板里保留）。
+2. 记下 `site` 与触发它的命令 / 调用方，按代码缺陷立 issue 给 scheduler
+   owner；`scheduler_core:_default_orchestrator_for` 额外核对该 pass 是否本该
+   因 preflight 被挡（blocked pass 不建 journal repository）。
+3. 不要手改 journal 或回退到 DB 路径绕过；SQL 编排路径已退役（#3227）。
 
 ## 相关文档
 

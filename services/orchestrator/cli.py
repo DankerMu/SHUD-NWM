@@ -115,9 +115,11 @@ def _cleanup_frontier(*, now: datetime) -> tuple[FrontierReadResult, str | None]
     """Resolve the pipeline frontier for a manual cleanup (issue #1407).
 
     The evidence directory derivation is inside the guard on purpose: building
-    ``ProductionSchedulerConfig`` runs confinement checks that raise, and a
-    traceback here would be an unprotected-deletion decision made by an
-    exception. Any failure becomes a fail-closed ``unavailable`` result.
+    ``ProductionSchedulerConfig`` can still raise (the always-DB-free
+    construction hands confinement and symlink verdicts to the root preflight,
+    but a blank or malformed setting still aborts it), and a traceback here
+    would be an unprotected-deletion decision made by an exception. Any failure
+    becomes a fail-closed ``unavailable`` result.
 
     The directory is returned alongside the read (issue #1503) because the
     three commonest blocker reasons carry no receipt path, so the payload would

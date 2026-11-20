@@ -4,6 +4,7 @@ from services.orchestrator import scheduler as _scheduler
 from services.orchestrator import scheduler_generation as _generation
 from services.orchestrator import scheduler_generation_gate as _generation_gate
 from services.orchestrator import scheduler_lineage as _scheduler_lineage
+from services.orchestrator.scheduler_mode_invariant import SchedulerModeInvariantError
 
 # Issue #1081 §8.1: sentinel that separates "declaration not yet loaded" from
 # "loaded and returned ``None``" (env unset — no declaration configured).
@@ -116,6 +117,9 @@ class ProductionScheduler:
     ) -> None:
         self.config = config or _scheduler.ProductionSchedulerConfig()
         db_free_required = bool(getattr(self.config, "db_free_required", False))
+        if not db_free_required:
+            # R2b: every ``not db_free_required`` arm below is dead (R2c deletes them).
+            raise SchedulerModeInvariantError(site="scheduler_core:__init__")
         self._reconcile_store = reconcile_store
         self._reconcile_store_build_error: str | None = None
         self._reconcile_comment_query = reconcile_comment_query
@@ -210,6 +214,7 @@ class ProductionScheduler:
                     ),
                 )
             return cls(config=config)
+        raise SchedulerModeInvariantError(site="scheduler_core:from_env")
         if (
             config.require_runtime_roots
             and _scheduler._scheduler_lock_evidence_root_preflight(config)["status"] == "blocked"
@@ -237,6 +242,7 @@ class ProductionScheduler:
                 ttl_seconds=self.config.lock_ttl_seconds,
                 workspace_root=_scheduler.Path(self.config.workspace_root),
             )
+        raise SchedulerModeInvariantError(site="scheduler_core:_build_scheduler_lease")
         if self.config.scheduler_lock_backend == "postgres" and database_url:
             return _scheduler.PostgresSchedulerLease(
                 database_url,
@@ -455,6 +461,7 @@ class ProductionScheduler:
         if self.config.db_free_required:
             state_manager = _db_free_state_manager_from_config(self.config)
             return self._default_orchestrator_for(source_id, state_manager=state_manager)
+        raise SchedulerModeInvariantError(site="scheduler_core:_orchestrator_for")
         return self._default_orchestrator_for(source_id, state_manager=_scheduler.StateManager.from_env())
 
     def _cancel_orchestrator_for(self, source_id: str) -> _scheduler.ForecastOrchestrator:
@@ -462,11 +469,17 @@ class ProductionScheduler:
             return self.orchestrator_factory(source_id)
         if self.config.db_free_required:
             return self._default_orchestrator_for(source_id, state_manager=None)
+        raise SchedulerModeInvariantError(site="scheduler_core:_cancel_orchestrator_for")
         return self._default_orchestrator_for(source_id, state_manager=None)
 
     def _default_orchestrator_for(
         self, source_id: str, *, state_manager: _scheduler.Any | None
     ) -> _scheduler.ForecastOrchestrator:
+        if not self.config.db_free_required or self.active_repository is None:
+            # R2b: the ``_orchestrator_repository_from_env()`` / ``_retry_service_from_env()``
+            # components of the expressions below are dead (R2c deletes them). A DB-free
+            # scheduler without a journal repository refuses instead of falling back to SQL.
+            raise SchedulerModeInvariantError(site="scheduler_core:_default_orchestrator_for")
         config = _scheduler.OrchestratorConfig.from_env()
         if self.config.slurm_execution_enabled:
             config = _scheduler.OrchestratorConfig(
@@ -714,7 +727,7 @@ class ProductionScheduler:
         candidate: _scheduler.SchedulerCandidate,
     ) -> bool:
         if not self.config.db_free_required:
-            return False
+            raise SchedulerModeInvariantError(site="scheduler_core:_db_free_strict_warm_start_required_for")
         return _scheduler.OrchestratorConfig.from_env().strict_forecast_warm_start_required_for(
             candidate.cycle_time_utc
         )
@@ -736,6 +749,7 @@ class ProductionScheduler:
         if self.config.db_free_required:
             provider: _scheduler.Any | None = self._db_free_state_index_provider()
         else:
+            raise SchedulerModeInvariantError(site="scheduler_core:_lineage_provider")
             from packages.common.state_manager import PsycopgStateSnapshotRepository
 
             try:
@@ -794,7 +808,7 @@ class ProductionScheduler:
         self, candidate: _scheduler.SchedulerCandidate, cycle: _scheduler.SchedulerSourceCycle
     ) -> dict[str, _scheduler.Any] | None:
         if not self.config.db_free_required:
-            return None
+            raise SchedulerModeInvariantError(site="scheduler_core:_strict_warm_start_for_candidate")
         # D8.9 compat toggle: if the operator ran with strict warm-start OFF
         # and the journal already recognises a completed pipeline for this
         # cycle, defer to the pre-§8 terminal-skip path so admitting or
@@ -835,7 +849,7 @@ class ProductionScheduler:
     ) -> dict[str, _scheduler.Any] | None:
         del cycle
         if not self.config.db_free_required:
-            return None
+            raise SchedulerModeInvariantError(site="scheduler_core:_successor_warm_start_state_for_candidate")
         orchestrator_config = _scheduler.OrchestratorConfig.from_env()
         candidate_time = _scheduler._ensure_utc(candidate.cycle_time_utc)
         successor_time = self._next_allowed_cycle_time(candidate_time)

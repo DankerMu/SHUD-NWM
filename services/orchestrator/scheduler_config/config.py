@@ -107,7 +107,12 @@ class ProductionSchedulerConfig:
     require_runtime_roots: bool = field(default_factory=lambda: _scheduler._env_flag("NHMS_SCHEDULER_REQUIRE_ROOTS"))
     database_url: str | None = field(default_factory=lambda: os.getenv("DATABASE_URL"))
     database_url_configured: bool = field(default_factory=lambda: os.getenv("DATABASE_URL") is not None)
-    scheduler_db_free_required: bool = field(default_factory=lambda: _scheduler._env_flag(_DB_FREE_REQUIRED_ENV))
+    # R2b (#3255): DB-free is the only scheduler mode. The keyword is still
+    # accepted (the rollback/migration tool and older callers pass it) and
+    # ignored: ``__post_init__`` pins it to ``True``. ``_DB_FREE_REQUIRED_ENV``
+    # no longer selects the mode; it stays the job-env contract the manifest
+    # and the Slurm gateway carry to workers.
+    scheduler_db_free_required: bool = True
     scheduler_state_backend: str | None = field(default_factory=lambda: os.getenv("NHMS_SCHEDULER_STATE_BACKEND"))
     scheduler_registry_backend: str | None = field(
         default_factory=lambda: os.getenv("NHMS_SCHEDULER_REGISTRY_BACKEND")
@@ -272,7 +277,7 @@ class ProductionSchedulerConfig:
         # (issue #1616 / design D1). This runs first because every later branch
         # reads/writes the normalized form; the raw value feeds retention only.
         object.__setattr__(self, "_object_store_root_raw", self.object_store_root)
-        db_free_required = bool(self.scheduler_db_free_required)
+        db_free_required = True
         object.__setattr__(self, "scheduler_db_free_required", db_free_required)
         _scheduler._reject_blank_config_path(self.workspace_root, "workspace_root")
         _scheduler._reject_blank_config_path(self.lock_path, "lock_path")

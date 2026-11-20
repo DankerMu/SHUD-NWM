@@ -237,7 +237,9 @@ def build_cycle_stage_manifest(
         "object_store_prefix": orchestrator.config.object_store_prefix,
         "published_artifact_root": os.getenv("NHMS_PUBLISHED_ARTIFACT_ROOT", ""),
         "published_artifact_uri_prefix": os.getenv("NHMS_PUBLISHED_ARTIFACT_URI_PREFIX", "published://"),
-        "scheduler_db_free_required": os.getenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", ""),
+        # R2b (#3255): the scheduler is DB-free whatever its process env says, so every
+        # manifest carries the contract and the gateway exports the DB-free worker switches.
+        "scheduler_db_free_required": "true",
         "scheduler_allowed_roots": os.getenv("NHMS_SCHEDULER_ALLOWED_ROOTS", ""),
         "scheduler_registry_backend": os.getenv("NHMS_SCHEDULER_REGISTRY_BACKEND", ""),
         "scheduler_registry_manifest": _slurm_runtime_scheduler_path(
