@@ -165,6 +165,9 @@ ssh -p 32099 nwm@210.77.77.27
 grep -n 'coverage_refresh\|coverage backstop' /home/nwm/autopipe-logs/*.log | tail -40
 ```
 
+`autopipe.log` 按大小轮转（#3224），较早的几代是 `autopipe.log.1`（最新）… `.5`，`*.log` 匹配不到它们；
+要回看更早的 tick，把路径换成 `$(ls -tr /home/nwm/autopipe-logs/autopipe.log*)`（按时间从旧到新，`tail` 仍落在最新一段）。
+
 看到 `refresh_failed_rc<N>` 或 backstop 非零 rc，就是刷新腿在失败（`rc=3` 是 #1446 的
 拒绝守卫）。修完刷新后手工补跑 `scripts/node27_refresh_coverage.py`，下一 tick 自动闭环。补跑的命令、
 必须带的写角色 env 与 `rc=3` 时 `--force` 的纪律，都在下面分支 C 末尾的刷新块里；其它非零 rc 在本
@@ -314,7 +317,7 @@ dedup、也不发"恢复"邮件（口径见 §11.2 末尾那两行），此后�
 
 重算后判据仍不过关的，问题在上游产出（河段样本残缺 / 输出网格相位），刷新脚本修不了：
 本 runbook 没有对应的处置段，把 `run_id`、四个布尔列与跨行判定的实测值、以及
-`/home/nwm/autopipe-logs/*.log`（分支 A 用的同一批日志）里该 `run_id` 的 ingest / parse
+`/home/nwm/autopipe-logs/*.log`（分支 A 用的同一批日志，加上轮转出去的 `autopipe.log.1` … `.5`）里该 `run_id` 的 ingest / parse
 行留成证据，对 parse/output 侧开 issue。
 
 **退出 3 —— 库侧观测失败（`COVERAGE_FRESHNESS_OBSERVATION_FAILED`，`reason` 带 `(psycopg2.`）**

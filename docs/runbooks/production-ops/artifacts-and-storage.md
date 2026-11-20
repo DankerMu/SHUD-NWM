@@ -154,6 +154,16 @@ node-27 ingest wrapper/log:
 /home/nwm/autopipe-work/
 ```
 
+`autopipe.log` is rotated by the wrapper itself, under the tick lock, when it reaches
+`AUTOPIPE_LOG_MAX_BYTES` (default 64 MiB); `AUTOPIPE_LOG_KEEP` (default 5) older generations stay as
+`autopipe.log.1` (newest) … `.5`. It needs no manual truncation. `/home/nwm/autopipe-work/` also holds
+`pipeline-job-provenance-import-state.json`, the timer's record of which runs' job provenance is already
+projected. It is a cache: deleting it costs one full provenance pass on the next tick and nothing else, and a
+database restore needs no action on it (rows that are missing or differ are re-imported). A hand run of
+`node27_autopipeline.py` over the full run set (no `--only-basin`, `--only-cycle`, `--limit`, default
+`--sources`) reads and writes the same file: hold the timer's lock (`flock /tmp/autopipe.cron.lock …`) for such
+a run. A narrowed hand run does not touch it.
+
 node-22 compute workspace/log roots remain compute-side operational paths:
 
 ```text

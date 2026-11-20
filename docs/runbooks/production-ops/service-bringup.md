@@ -54,15 +54,19 @@ tail -n 160 /home/nwm/autopipe-logs/autopipe.log
 正常现象：
 
 - 日志中每 10 分钟出现 `autopipe: start` 与 `autopipe: done rc=0`。
-- JSON summary 包含 `object_store_root=/home/ghdc/nwm/object-store`、
-  discovered/ingested/already_ingested runs、seeded/already_seeded basins。
+- 每个 tick 先写一行 JSON digest（#3224）：`object_store_root=/home/ghdc/nwm/object-store`、ingest 角色与库的
+  host/port、discovered/ingested/already_ingested 等 run 计数、seeded/already_seeded 的 basin **个数**、
+  `job_provenance`（`skipped_unchanged` 应约等于 `discovered_runs`）、`cycle_floor`、`declines_active`、`quiet`。
+  完整的 JSON summary（含 basin 名单、逐 run 明细）只在该 tick 非 quiet 时跟在 digest 后面：空转的节点上
+  `tail` 只能看到 digest 行，这是正常的；要看完整 summary，等下一次有入库的 tick，或在持有 timer 锁的前提下
+  手动运行一次不带 `--summary-mode` 的 `node27_autopipeline.py`。
 - wrapper 固定传入 `--direct-grid-only`，并从 ingest env 读取
   `AUTOPIPE_RUN_WORKERS`、`AUTOPIPE_COVERAGE_WORKERS` 和
   `AUTOPIPE_EXCLUDE_BASINS`。当前生产值分别为 `2`、`2`、
   `zhaochen_hhy`；worker 上限为 8，未经下一轮真实 cycle 压测不得继续上调。
 - 周期下限 `AUTOPIPE_MAX_CYCLE_AGE_DAYS`（#3062，生产值 `14`）：autopipe 直接从 ingest
   env 读取（wrapper 不传参）。周期早于 `now_utc - N 天`（截到整点，等于下限的周期保留）的 run 在
-  phase 1 seed 身份和入库之前就被过滤，summary 里 `cycle_floor`
+  phase 1 seed 身份和入库之前就被过滤，digest 与 summary 里 `cycle_floor`
   （`days`/`floor_cycle`/`applied`/`bypassed_by_only_cycle`）与 `skipped_older_than_floor`
   给出取值和计数，`discovered_runs` 是过滤后的数量。未设置或为空 = 不设下限（#3062 之前的行为）；
   非正整数（`abc`、`0`、`14.5`）在 preflight 阶段 fail closed（`AUTOPIPE_MAX_CYCLE_AGE_DAYS_INVALID`，rc=2）。
