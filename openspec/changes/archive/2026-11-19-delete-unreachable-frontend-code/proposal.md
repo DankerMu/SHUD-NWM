@@ -82,11 +82,13 @@ page that the single-map page replaced and that has not been routed since.
   - `src/test/` is the vitest setup/support directory (`vitest.config.ts` `setupFiles`), excluded from the app bundle
     by reachability and from the Playwright typecheck by config. It stays.
 - D5. Governance docs are edited to stay true, not to re-argue their decisions: the `forecast-series` and
-  `latest-product` routes keep live frontend consumers (`lib/hydroMet/riverForecast.ts`, `stores/overviewData.ts`,
-  `stores/hydroMetBootstrap.ts`), so no API retirement status changes. A citation of a deleted test as evidence is
+  `latest-product` routes keep live frontend consumers (`lib/hydroMet/riverForecast.ts` for `forecast-series`,
+  `stores/hydroMetBootstrap.ts` for `latest-product`), so no API retirement status changes. (Corrected during
+  implementation: `stores/overviewData.ts`, which the inventories also cite, no longer calls `forecast-series`; that
+  staleness predates this change and is reported, not fixed here.) A citation of a deleted test as evidence is
   **replaced** by the live test that pins the same thing (the "latest-product called once" evidence at
   `API_CONTRACT_FRONTEND_CONSUMER_EVIDENCE.md:86` and `API_CONTRACT_RETIREMENT_INVENTORY.md:135` →
-  `stores/__tests__` bootstrap dedupe test, `bootstrap.test.ts:540`), not just removed; a claim that the "full
+  `src/pages/hydroMet/__tests__/bootstrap.test.ts:540`, which pins two sequential awaited calls sharing one request), not just removed; a claim that the "full
   bootstrap" call is a live consumer is corrected (see D8).
 - D6. Spec disposition (found in fixture review: live specs still required the deleted code).
   - `multi-source-comparison-ui`: REMOVED "Scenario 选择器控件", "数据请求参数传递", "IFS 数据不可用时的降级显示". The four
@@ -120,9 +122,10 @@ page that the single-map page replaced and that has not been routed since.
     (`hydroMetProductData.ts`). It is **not** deleted here: it has its own test suite and is cited as API-consumer
     evidence, so removing it is a decision about the `latest-product` consumer inventory. Reported as a follow-up.
 - D9. Coverage gaps on the live path that the deleted store tests never covered but resemble (reported, not fixed):
-  the 480-point cap at `riverForecast.ts:331-334` and the query `loadHydroMetRiverForecast` sends (`run_id`,
-  `river_network_version_id`, `issue_time`, `scenarios`) have no vitest pin; the mocked e2e partly gates the query
-  (`e2e/support/riverWindow.mocked.ts:388`). Sibling-segment identity is pinned (`riverForecast.test.ts:135`).
+  the 480-point cap at `riverForecast.ts:331-334` has no vitest pin. (Corrected during implementation: the query
+  `loadHydroMetRiverForecast` sends **is** pinned, `src/pages/hydroMet/__tests__/bootstrap.test.ts:804`/`:847`.)
+  Sibling-segment identity is pinned (`riverForecast.test.ts:135`). The full list, with the gaps found while
+  implementing, is in `deleted-tests.md`.
 
 ## Fixture
 

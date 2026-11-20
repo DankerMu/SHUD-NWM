@@ -1,39 +1,10 @@
 # multi-source-comparison-ui Specification
 
 ## Purpose
-TBD - created by archiving change m4-ifs-multi-source. Update Purpose after archive.
+How GFS and IFS forecast curves are drawn together for one river segment: curve colours and legend, the IFS short-horizon annotation, issue-time information and the multi-source metadata the API response carries. Source selection is not part of it: the river curve window always shows both sources.
+
+
 ## Requirements
-### Requirement: Scenario 选择器控件
-
-系统 SHALL 满足「Scenario 选择器控件」要求。
-
-前端提供 scenario 复选框组，控制预报曲线可见性。
-
-#### Scenario: 默认状态
-
-WHEN 用户打开河段预报详情页
-THEN 显示 scenario 选择器，包含 `☑ GFS ☐ IFS` 两个复选框
-AND 默认仅选中 GFS
-AND 仅请求并显示 GFS 预报曲线
-
-#### Scenario: 选中 IFS
-
-WHEN 用户勾选 IFS 复选框
-THEN 请求 API `?scenarios=GFS,IFS`（包含所有已选 scenario）
-AND 图表显示 GFS + IFS 两条预报曲线
-
-#### Scenario: 取消 GFS
-
-WHEN 用户取消 GFS 复选框，仅保留 IFS
-THEN 请求 API `?scenarios=IFS`
-AND 图表仅显示 IFS 预报曲线
-
-#### Scenario: 至少保留一个 scenario
-
-WHEN 用户尝试取消最后一个勾选的 scenario
-THEN 操作被阻止或自动恢复，保证至少有一个 scenario 被选中
-
----
 
 ### Requirement: 多源曲线渲染
 
@@ -63,11 +34,9 @@ AND 格式：`时间: 2026-05-03 06:00 | 分析: 920.1 m³/s | GFS: 1100.2 m³/s
 
 #### Scenario: 单 scenario 显示
 
-WHEN 只有一个 scenario 被选中（仅 GFS 或仅 IFS）
+WHEN 图表数据只含一个预报 scenario（仅 GFS 或仅 IFS）
 THEN 渲染行为与当前单曲线模式一致
 AND 不显示缺失 scenario 的图例项
-
----
 
 ### Requirement: IFS 06/18 周期可用时效标注
 
@@ -141,43 +110,3 @@ AND 不要求所有 source 使用同一 cycle_time
 AND response 中每个 series 的 cycle_time 可能不同
 
 ---
-
-### Requirement: 数据请求参数传递
-
-系统 SHALL 满足「数据请求参数传递」要求。
-
-前端 store 正确传递 scenarios 参数给 API。
-
-#### Scenario: 多 scenario 请求
-
-WHEN forecast store 发起 API 请求
-THEN URL query 参数 `scenarios` = 已选中的 scenario 列表，逗号分隔
-AND 值为大写源名称（`GFS`, `IFS`），不使用完整 scenario_id
-
-#### Scenario: include_analysis 与多源兼容
-
-WHEN `include_analysis=true` 且 scenarios 包含 GFS 和 IFS
-THEN API 返回 analysis + GFS forecast + IFS forecast 三组 series
-AND 分析数据仅出现一次（不因多 scenario 重复）
-
----
-
-### Requirement: IFS 数据不可用时的降级显示
-
-系统 SHALL 满足「IFS 数据不可用时的降级显示」要求。
-
-IFS 预报数据尚未到达时的前端行为。
-
-#### Scenario: IFS 数据未就绪
-
-WHEN 用户选中 IFS 但当前 cycle_time 无 IFS 预报数据
-THEN IFS 复选框旁显示灰色提示：`(暂无数据)`
-AND 图表仅显示 GFS 曲线
-AND 不显示错误弹窗
-
-#### Scenario: IFS 数据后续到达
-
-WHEN 用户已打开预报页且 IFS 数据随后到达
-THEN 用户手动刷新或切换 scenario 后可看到 IFS 曲线
-AND 不要求实时推送更新
-

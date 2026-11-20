@@ -20,7 +20,8 @@
       `src/components/charts/__tests__/ForecastChartComparison.test.tsx`; delete the ten store / selector cases and
       the `ScenarioSelector` render case.
 - [x] 2.2 Delete `src/pages/m11/__tests__/useHydroMetProduct.test.tsx` (fixture review: cases 2 and 3 test only the
-      deleted hook/store; case 1 goes through the live bootstrap, already covered by `bootstrap.test.ts`; case 4 is
+      deleted hook/store; case 1 goes through `loadHydroMetBootstrap`, which this change leaves without a non-test
+      caller (D8), and whose behaviour `bootstrap.test.ts` covers; case 4 is
       the hook store's own dedupe, the live dedupe is pinned at `bootstrap.test.ts:540`). Re-verify each claim and
       record it in the ledger.
 - [x] 2.3 Python source-text tests per D3: `tests/test_e2e.py` (~:700), `tests/test_e2e_ifs.py` (~:180);
@@ -34,7 +35,7 @@
       `API_CONTRACT_REMOVAL_DEFERRAL.md`, `API_CONTRACT_RETIREMENT_INVENTORY.md`,
       `LEGACY_DEAD_CODE_INVENTORY.md`: per D5 (no deleted path cited as a live consumer; deleted-test evidence
       replaced by the live test; line references corrected for the files this change touches).
-- [ ] 3.2 Spec deltas for four capabilities (orchestrator; D6).
+- [x] 3.2 Spec deltas for four capabilities (orchestrator; D6).
 
 ## Evidence Floor
 
