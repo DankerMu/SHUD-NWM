@@ -18,7 +18,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, Protocol, TypedDict
 from urllib.parse import urlsplit
 
 from packages.common.contracts.time_normalization import cycle_id_for, format_cycle_time, parse_cycle_time
@@ -159,6 +159,30 @@ class PipelineJobProvenanceError(RuntimeError):
         self.code = code
         self.message = message
         self.details = dict(details or {})
+
+
+class _DbCursor(Protocol):
+    """What the importer's new helpers use of a DB-API cursor."""
+
+    def __enter__(self) -> _DbCursor: ...
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> object: ...
+
+    def execute(self, sql: str, params: object = None) -> object: ...
+
+    def fetchone(self) -> Mapping[str, object] | Sequence[object] | None: ...
+
+
+class _DbConnection(Protocol):
+    """What the importer's new helpers use of a DB-API connection (one transaction per ``with``)."""
+
+    def __enter__(self) -> _DbConnection: ...
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> object: ...
+
+    def cursor(self) -> _DbCursor: ...
+
+    def close(self) -> object: ...
 
 
 class _ImportMarker(TypedDict):
@@ -497,7 +521,7 @@ def _import_read_sidecar(
     *,
     database_url: str,
     sidecar: _ReadSidecar,
-    connect: Callable[..., Any] | None = None,
+    connect: Callable[..., _DbConnection] | None = None,
 ) -> tuple[dict[str, str | int], list[str]]:
     """Import already-read sidecar bytes; also return the validated job ids."""
 
@@ -520,7 +544,7 @@ def _import_read_sidecar(
     return {**counts, "run_id": sidecar.run_id, "status": "imported"}, [str(job["job_id"]) for job in jobs]
 
 
-def _open_connection(database_url: str, *, connect: Callable[..., Any] | None = None) -> Any:
+def _open_connection(database_url: str, *, connect: Callable[..., _DbConnection] | None = None) -> _DbConnection:
     import psycopg2
     from psycopg2.extras import RealDictCursor
 
@@ -669,7 +693,7 @@ def _import_requested_pipeline_job_provenance(
     return _pass_summary(summaries)
 
 
-def _pass_summary(summaries: list[dict[str, str | int]]) -> dict[str, Any]:
+def _pass_summary(summaries: list[dict[str, str | int]]) -> dict[str, object]:
     failed = [item for item in summaries if item["status"] == "failed"]
     return {
         "status": "failed" if failed else "imported",
@@ -686,9 +710,9 @@ def _import_discovered_with_state(
     object_store_root: str | Path,
     requested: Sequence[str],
     object_store_prefix: str,
-    connect: Callable[..., Any] | None,
+    connect: Callable[..., _DbConnection] | None,
     state_path: Path,
-) -> dict[str, Any]:
+) -> dict[str, object]:
     loaded = _load_import_state(state_path)
     markers = loaded[0] if loaded is not None else {}
     skip_state = "loaded" if loaded is not None else "empty"
@@ -843,7 +867,7 @@ def _read_job_row_fingerprints(
     database_url: str,
     job_ids: Sequence[str],
     *,
-    connect: Callable[..., Any] | None = None,
+    connect: Callable[..., _DbConnection] | None = None,
 ) -> dict[str, str]:
     """Fingerprint the ``ops.pipeline_job`` rows of ``job_ids`` (read-only, no locks).
 

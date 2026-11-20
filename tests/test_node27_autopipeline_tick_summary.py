@@ -216,6 +216,58 @@ def test_autopipeline_hands_the_importer_a_state_path_under_the_work_root(
     assert list(importer_calls[0]["run_ids"]) == [handoff.RUN_A]
 
 
+@pytest.mark.parametrize(
+    "narrowing",
+    [
+        pytest.param(("--only-basin", "qhh"), id="only-basin"),
+        pytest.param(("--only-cycle", "2026062012"), id="only-cycle"),
+        pytest.param(("--limit", "1"), id="limit"),
+        pytest.param(("--sources", "gfs"), id="sources"),
+    ],
+)
+def test_autopipeline_withholds_the_state_path_on_a_narrowed_pass(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    narrowing: tuple[str, ...],
+) -> None:
+    object_store_root, importer_calls = _quiet_autopipe(monkeypatch, tmp_path)
+
+    rc, _summary = handoff._run_main(capsys, object_store_root, *narrowing)
+
+    assert rc == 0
+    assert len(importer_calls) == 1
+    assert list(importer_calls[0]["run_ids"]) == [handoff.RUN_A]
+    assert importer_calls[0].get("state_path") is None
+    assert importer_calls[0]["connect"] is autopipe._attributed_connect
+
+
+def test_progress_line_reports_the_skipped_provenance_count(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    object_store_root, _importer_calls = _quiet_autopipe(monkeypatch, tmp_path)
+
+    rc, captured = handoff._run_main_captured(capsys, object_store_root, "--progress")
+
+    assert rc == 0
+    assert "[job-provenance] imported 0, unavailable 0, failed 0, skipped_unchanged 1\n" in captured.err
+
+
+def test_progress_line_reports_zero_skipped_when_the_summary_has_no_such_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    object_store_root, _importer_calls = _quiet_autopipe(monkeypatch, tmp_path)
+
+    def boom(**_kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("importer exploded")
+
+    monkeypatch.setattr(autopipe, "import_discovered_pipeline_job_provenance", boom)
+    rc, captured = handoff._run_main_captured(capsys, object_store_root, "--progress")
+
+    assert rc == 0
+    assert "[job-provenance] imported 0, unavailable 0, failed 1, skipped_unchanged 0\n" in captured.err
+
+
 @pytest.mark.parametrize("blocked_by", ["missing-database-url", "database-url-argv"])
 def test_preflight_blocked_summary_is_printed_in_full_in_tick_mode(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], blocked_by: str
