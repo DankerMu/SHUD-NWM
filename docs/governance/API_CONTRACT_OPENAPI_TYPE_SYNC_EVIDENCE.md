@@ -118,7 +118,6 @@ across lines. Representative expected hits include:
 - Latest product: `apps/frontend/src/pages/hydroMet/bootstrap.ts:57` and
   `apps/frontend/src/pages/hydroMet/bootstrap.ts:75`.
 - Canonical forecast-series:
-  `apps/frontend/src/stores/forecast.ts:376`/`:377` and
   `apps/frontend/src/lib/hydroMet/riverForecast.ts:120`/`:121`.
 
 `S5` backend contract test active path search:

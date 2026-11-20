@@ -2,35 +2,35 @@
 
 ## 1. Delete
 
-- [ ] 1.1 Delete the eight unreachable files listed in proposal.md.
-- [ ] 1.2 Move `ForecastData`, `ForecastSeries`, `ForecastSeriesPoint` unchanged to `src/lib/forecastData.ts`; switch
+- [x] 1.1 Delete the eight unreachable files listed in proposal.md.
+- [x] 1.2 Move `ForecastData`, `ForecastSeries`, `ForecastSeriesPoint` unchanged to `src/lib/forecastData.ts`; switch
       the importers (`components/charts/ForecastChart.tsx`, `components/map/M11RiverForecastPanel.tsx`,
       `components/charts/__tests__/ForecastChartFillResize.test.tsx`, `ForecastChartZoomConfig.test.tsx`); delete
       `src/stores/forecast.ts`.
-- [ ] 1.3 Remove directories left empty (`src/components/forecast/`).
-- [ ] 1.4 Remove `@radix-ui/react-dropdown-menu` and `@radix-ui/react-tabs` from `apps/frontend/package.json` and
+- [x] 1.3 Remove directories left empty (`src/components/forecast/`).
+- [x] 1.4 Remove `@radix-ui/react-dropdown-menu` and `@radix-ui/react-tabs` from `apps/frontend/package.json` and
       regenerate `pnpm-lock.yaml` (frontend lock only; verify no other importer first).
-- [ ] 1.5 D8: delete `takeSeries` from `lib/forecastRenderingBudget.ts` if no non-test caller remains (it has no direct
+- [x] 1.5 D8: delete `takeSeries` from `lib/forecastRenderingBudget.ts` if no non-test caller remains (it has no direct
       test; the store cases that exercised it are deleted in 2.1). Leave `loadHydroMetBootstrap` and
       `isForecastPointOverBudget` alone (the latter was already callerless before this change: noted, not deleted).
 
 ## 2. Tests (per case, D3)
 
-- [ ] 2.1 `src/__tests__/ForecastComparison.test.tsx`: re-home the five `ForecastChart` render cases to
+- [x] 2.1 `src/__tests__/ForecastComparison.test.tsx`: re-home the five `ForecastChart` render cases to
       `src/components/charts/__tests__/ForecastChartComparison.test.tsx`; delete the ten store / selector cases and
       the `ScenarioSelector` render case.
-- [ ] 2.2 Delete `src/pages/m11/__tests__/useHydroMetProduct.test.tsx` (fixture review: cases 2 and 3 test only the
+- [x] 2.2 Delete `src/pages/m11/__tests__/useHydroMetProduct.test.tsx` (fixture review: cases 2 and 3 test only the
       deleted hook/store; case 1 goes through the live bootstrap, already covered by `bootstrap.test.ts`; case 4 is
       the hook store's own dedupe, the live dedupe is pinned at `bootstrap.test.ts:540`). Re-verify each claim and
       record it in the ledger.
-- [ ] 2.3 Python source-text tests per D3: `tests/test_e2e.py` (~:700), `tests/test_e2e_ifs.py` (~:180);
+- [x] 2.3 Python source-text tests per D3: `tests/test_e2e.py` (~:700), `tests/test_e2e_ifs.py` (~:180);
       `tests/test_forecast_store_routing.py:442` docstring rewritten to be true.
-- [ ] 2.4 `deleted-tests.md` in this change: one row per deleted or re-homed test case (file, name, what it asserted,
+- [x] 2.4 `deleted-tests.md` in this change: one row per deleted or re-homed test case (file, name, what it asserted,
       disposition, where the behaviour is pinned now or why it is dead), plus the D9 gaps.
 
 ## 3. Docs and spec
 
-- [ ] 3.1 `docs/governance/API_CONTRACT_FRONTEND_CONSUMER_EVIDENCE.md`, `API_CONTRACT_OPENAPI_TYPE_SYNC_EVIDENCE.md`,
+- [x] 3.1 `docs/governance/API_CONTRACT_FRONTEND_CONSUMER_EVIDENCE.md`, `API_CONTRACT_OPENAPI_TYPE_SYNC_EVIDENCE.md`,
       `API_CONTRACT_REMOVAL_DEFERRAL.md`, `API_CONTRACT_RETIREMENT_INVENTORY.md`,
       `LEGACY_DEAD_CODE_INVENTORY.md`: per D5 (no deleted path cited as a live consumer; deleted-test evidence
       replaced by the live test; line references corrected for the files this change touches).

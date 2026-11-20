@@ -122,18 +122,18 @@ rg --files apps/frontend/e2e | sort
   static OpenAPI; `tests/test_readonly_db_validation.py` maps readonly route
   validation to `latest_product`; `tests/test_runtime_mode.py` includes it in
   display-safe route coverage.
-- Frontend consumer evidence: `apps/frontend/src/pages/hydroMet/bootstrap.ts:57`
-  calls `client.GET('/api/v1/mvp/qhh/latest-product', ...)` for full bootstrap,
-  and `apps/frontend/src/pages/hydroMet/bootstrap.ts:75` calls the same route
-  with `identity_only=true` for popup product identity. Current consumers fan
-  out through `apps/frontend/src/stores/hydroMetProductData.ts`,
+- Frontend consumer evidence: `apps/frontend/src/pages/hydroMet/bootstrap.ts:75`
+  calls `client.GET('/api/v1/mvp/qhh/latest-product', ...)` with
+  `identity_only=true` for popup product identity; the full-bootstrap call at
+  `apps/frontend/src/pages/hydroMet/bootstrap.ts:57` has had no production caller
+  since #3222 (only its own tests call it). Current consumers fan out through
   `apps/frontend/src/stores/stationLayerData.ts`,
   `apps/frontend/src/components/map/M11RiverForecastPanel.tsx`, and
   `apps/frontend/src/components/map/M11StationForcingPopup.tsx`.
 - Frontend test evidence: `apps/frontend/src/pages/hydroMet/__tests__/bootstrap.test.ts`
-  asserts direct latest-product calls and strict-identity behavior;
-  `apps/frontend/src/pages/m11/__tests__/useHydroMetProduct.test.tsx` asserts
-  latest-product is called once; map popup tests mock `fetchHydroMetLatestProduct`.
+  asserts direct latest-product calls and strict-identity behavior, and
+  (`bootstrap.test.ts:540`) that the identity-only latest-product is called once
+  per basin, source and cycle; map popup tests mock `fetchHydroMetLatestProduct`.
 - E2E/mocked evidence: current `apps/frontend/e2e` specs do not contain an
   explicit `latest-product` string, but broad mocked `page.route('**/api/v1/**')`
   handlers remain in `preview-deeplink.spec.ts`, `monitoring.mocked.spec.ts`,
@@ -168,8 +168,7 @@ rg --files apps/frontend/e2e | sort
   `tests/test_api_contract.py`, `tests/test_openapi_drift.py`,
   `tests/test_e2e.py`, `tests/test_e2e_ifs.py`, `tests/test_hindcast.py`,
   `tests/test_flood_alerts_api.py`, and `tests/test_real_database_integration.py`.
-- Frontend consumer evidence: `apps/frontend/src/stores/forecast.ts:377`,
-  `apps/frontend/src/stores/overviewData.ts:908`,
+- Frontend consumer evidence: `apps/frontend/src/stores/overviewData.ts:908`,
   `apps/frontend/src/stores/overviewData.ts:917`, and
   `apps/frontend/src/lib/hydroMet/riverForecast.ts:121` call the generated
   `forecast-series` path.
