@@ -6055,11 +6055,6 @@ def test_db_free_scheduler_from_env_run_once_uses_file_journal_active_slurm_evid
         _latest_view(cycle_time=cycle_time, jobs=[_active_job(cycle_time)]),
     )
     monkeypatch.delenv("DATABASE_URL", raising=False)
-    monkeypatch.setattr(
-        scheduler_module,
-        "_default_adapters",
-        lambda: {"gfs": FakeAdapter("gfs", [(cycle_time.isoformat(), True)])},
-    )
 
     def fail_db_factory(*_args: Any, **_kwargs: Any) -> Any:
         raise AssertionError("DB-backed repository factory must not be called in DB-free read-side construction")
@@ -6103,11 +6098,6 @@ def test_db_free_scheduler_status_sync_blocks_without_default_db_orchestrator(
         _latest_view(cycle_time=cycle_time, jobs=[_active_job(cycle_time)]),
     )
     monkeypatch.delenv("DATABASE_URL", raising=False)
-    monkeypatch.setattr(
-        scheduler_module,
-        "_default_adapters",
-        lambda: {"gfs": FakeAdapter("gfs", [(cycle_time.isoformat(), True)])},
-    )
 
     def fail_db_orchestrator_factory(*_args: Any, **_kwargs: Any) -> Any:
         raise AssertionError("DB-free status sync must not construct the default DB-backed orchestrator")
@@ -6163,11 +6153,6 @@ def test_db_free_scheduler_cancel_blocks_without_default_db_orchestrator(
         _latest_view(cycle_time=cycle_time, jobs=[_active_job(cycle_time)]),
     )
     monkeypatch.delenv("DATABASE_URL", raising=False)
-    monkeypatch.setattr(
-        scheduler_module,
-        "_default_adapters",
-        lambda: {"gfs": FakeAdapter("gfs", [(cycle_time.isoformat(), True)])},
-    )
 
     def fail_db_orchestrator_factory(*_args: Any, **_kwargs: Any) -> Any:
         raise AssertionError("DB-free cancellation must not construct the default DB-backed orchestrator")
@@ -7536,7 +7521,7 @@ def _discovery_and_quarantine_harness(
     )
     source_cycle = DiscoverySourceCycle(discovery=discovery, horizon={})
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-06-28T12:00:00Z")),
+        _config(tmp_path, db_free=True, now=_dt("2026-06-28T12:00:00Z")),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={},
         active_repository=active_repository,
