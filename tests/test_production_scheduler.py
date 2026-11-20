@@ -90,7 +90,6 @@ from services.orchestrator.scheduler import (
     SCHEDULER_EVIDENCE_GITHUB_ISSUE,
     SCHEDULER_EVIDENCE_SCHEMA_VERSION,
     FileSchedulerLease,
-    PostgresSchedulerLease,
     ProductionSchedulerConfig,
     SchedulerEvidenceWriteError,
     SchedulerPassResult,
@@ -41680,6 +41679,7 @@ def _absence_tolerance_scheduler(
     strict_evidence: dict[str, Any] | None = None,
     hydro_status: str = "published",
     run_manifest_initial_state: dict[str, Any] | None = None,
+    db_free: bool | None = None,
 ) -> tuple[Any, CycleDiscovery, list[Any]]:
     """Cycle-completion verdict seam with the strict/successor providers pinned.
 
@@ -41688,6 +41688,9 @@ def _absence_tolerance_scheduler(
     (READY and naming one warm-start state by default; override with
     ``strict_evidence`` for the cold-start and not-ready shapes), and the
     successor-state evidence under test (ready / not ready / no verdict at all).
+    ``db_free=True`` (#3252) builds the scheduler explicitly DB-free; omitted,
+    ``_config`` writes no mode key and the env decides (the default importers
+    rely on).
     """
 
     model = _model("model_a", "basin_a")
@@ -41700,7 +41703,7 @@ def _absence_tolerance_scheduler(
         }
     )
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-07-20T12:00:00Z")),
+        _config(tmp_path, db_free=db_free, now=_dt("2026-07-20T12:00:00Z")),
         registry=FakeRegistry([model]),
         adapters={},
         active_repository=repository,
@@ -41750,6 +41753,7 @@ def test_cycle_completion_verdict_tolerates_absent_init_state_record_with_ready_
     scheduler, discovery, models = _absence_tolerance_scheduler(
         monkeypatch,
         tmp_path,
+        db_free=True,
         hydro_run={
             "run_id": "fcst_gfs_2026072000_model_a",
             "status": "published",
@@ -41769,6 +41773,7 @@ def test_cycle_completion_verdict_advances_after_packaged_ic_terminal_success(
     scheduler, discovery, models = _absence_tolerance_scheduler(
         monkeypatch,
         tmp_path,
+        db_free=True,
         hydro_run={
             "run_id": "fcst_gfs_2026072000_model_a",
             "status": "published",
@@ -41857,6 +41862,7 @@ def test_cycle_completion_verdict_init_state_record_truth_table(
     scheduler, discovery, models = _absence_tolerance_scheduler(
         monkeypatch,
         tmp_path,
+        db_free=True,
         hydro_run=dict(hydro_run),
         successor_state=successor_state,
     )
@@ -42004,6 +42010,7 @@ def test_cycle_completion_verdict_unverifiable_truth_table(
     scheduler, discovery, models = _absence_tolerance_scheduler(
         monkeypatch,
         tmp_path,
+        db_free=True,
         hydro_run=dict(hydro_run),
         successor_state=successor_state,
         strict_evidence=strict_evidence,
@@ -42030,6 +42037,7 @@ def test_cycle_completion_verdict_gaps_on_genuine_disagreement_when_strict_not_r
     ready_scheduler, discovery, models = _absence_tolerance_scheduler(
         monkeypatch,
         tmp_path,
+        db_free=True,
         hydro_run=conflicting,
         successor_state={"ready": True},
     )
@@ -42095,7 +42103,7 @@ def _cohort_full_identity_repository(
     repository = FileOrchestrationJournalRepository(journal_root)
     model = _model("model_a", "basin_a")
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-07-20T12:00:00Z")),
+        _config(tmp_path, db_free=True, now=_dt("2026-07-20T12:00:00Z")),
         registry=FakeRegistry([model]),
         adapters={},
         active_repository=repository,
@@ -42251,6 +42259,7 @@ def test_cycle_completion_verdict_no_accessor_and_legacy_hydro_paths_unchanged(
     scheduler, discovery, models = _absence_tolerance_scheduler(
         monkeypatch,
         tmp_path,
+        db_free=True,
         hydro_run={
             "run_id": "fcst_gfs_2026072000_model_a",
             "status": "published",
@@ -42272,6 +42281,7 @@ def test_cycle_completion_verdict_no_accessor_and_legacy_hydro_paths_unchanged(
     scheduler, discovery, models = _absence_tolerance_scheduler(
         monkeypatch,
         tmp_path,
+        db_free=True,
         hydro_run={
             "run_id": "fcst_gfs_2026072000_model_a",
             "status": "published",
@@ -42294,6 +42304,7 @@ def test_cycle_completion_verdict_no_accessor_and_legacy_hydro_paths_unchanged(
     scheduler, discovery, models = _absence_tolerance_scheduler(
         monkeypatch,
         tmp_path,
+        db_free=True,
         hydro_run={
             "run_id": "fcst_gfs_2026072000_model_a",
             "status": "published",
@@ -42332,6 +42343,7 @@ def test_cycle_completion_verdict_non_mapping_full_provider_falls_back_to_hydro_
         scheduler, discovery, models = _absence_tolerance_scheduler(
             monkeypatch,
             tmp_path,
+            db_free=True,
             hydro_run={
                 "run_id": "fcst_gfs_2026072000_model_a",
                 "status": "published",
@@ -42379,7 +42391,7 @@ def test_cycle_completion_verdict_direct_hydro_optional_field_conflict_stays_gap
 
     model = _model("model_a", "basin_a")
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-07-20T12:00:00Z")),
+        _config(tmp_path, db_free=True, now=_dt("2026-07-20T12:00:00Z")),
         registry=FakeRegistry([model]),
         adapters={},
         active_repository=repository,
@@ -42430,7 +42442,7 @@ def test_cycle_completion_verdict_direct_hydro_optional_field_conflict_stays_gap
     _write_json(matching_root / f"latest/gfs/{stamp}/model_a.json", matching)
     matching_repository = FileOrchestrationJournalRepository(matching_root)
     matching_scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-07-20T12:00:00Z")),
+        _config(tmp_path, db_free=True, now=_dt("2026-07-20T12:00:00Z")),
         registry=FakeRegistry([model]),
         adapters={},
         active_repository=matching_repository,
@@ -42490,6 +42502,7 @@ def test_cycle_completion_verdict_strict_not_ready_and_cold_start_never_call_acc
         scheduler, discovery, models = _absence_tolerance_scheduler(
             monkeypatch,
             tmp_path,
+            db_free=True,
             hydro_run=dict(_ABSENT_INIT_STATE_HYDRO_RUN),
             successor_state={"ready": True},
             strict_evidence=strict_evidence,
@@ -42637,6 +42650,7 @@ def test_cycle_completion_verdict_keeps_gating_non_terminal_candidates(
     scheduler, discovery, models = _absence_tolerance_scheduler(
         monkeypatch,
         tmp_path,
+        db_free=True,
         hydro_run={
             "run_id": "fcst_gfs_2026072000_model_a",
             "status": "failed",
@@ -42666,6 +42680,7 @@ def test_candidate_loop_skips_terminal_success_before_warm_admission(
     scheduler, discovery, models = _absence_tolerance_scheduler(
         monkeypatch,
         tmp_path,
+        db_free=True,
         hydro_run=dict(_MATCHING_INIT_STATE_HYDRO_RUN),
         successor_state={"ready": True},
         strict_evidence=dict(_NOT_READY_STRICT_EVIDENCE),
@@ -42748,6 +42763,7 @@ def test_candidate_loop_terminal_skip_exit_still_gates_on_successor_state(
     scheduler, discovery, models = _absence_tolerance_scheduler(
         monkeypatch,
         tmp_path,
+        db_free=True,
         hydro_run=dict(_MATCHING_INIT_STATE_HYDRO_RUN),
         successor_state=successor_state,
         strict_evidence=dict(_NOT_READY_STRICT_EVIDENCE),
@@ -42837,6 +42853,7 @@ def test_candidate_loop_terminal_skip_exit_still_gates_on_not_ready_reason_allow
     scheduler, discovery, models = _absence_tolerance_scheduler(
         monkeypatch,
         tmp_path,
+        db_free=True,
         hydro_run=dict(_MATCHING_INIT_STATE_HYDRO_RUN),
         successor_state={"ready": True},
         strict_evidence={"status": "blocked", "ready": False, "reason": not_ready_reason},
@@ -42872,6 +42889,7 @@ def test_cycle_completion_verdict_keeps_legacy_id_only_rows_completing(
     scheduler, discovery, models = _absence_tolerance_scheduler(
         monkeypatch,
         tmp_path,
+        db_free=True,
         hydro_run={
             "run_id": "fcst_gfs_2026072000_model_a",
             "status": "published",
@@ -42898,6 +42916,7 @@ def test_cycle_completion_verdict_gaps_when_strict_resolution_names_no_state(
     scheduler, discovery, models = _absence_tolerance_scheduler(
         monkeypatch,
         tmp_path,
+        db_free=True,
         hydro_run=dict(_ABSENT_INIT_STATE_HYDRO_RUN),
         successor_state={"ready": True},
     )
@@ -42937,6 +42956,7 @@ def test_cycle_completion_verdict_still_gates_on_journal_predecessor_identity(
     scheduler, discovery, models = _absence_tolerance_scheduler(
         monkeypatch,
         tmp_path,
+        db_free=True,
         hydro_run=dict(_ABSENT_INIT_STATE_HYDRO_RUN),
         successor_state={"ready": True},
         repository_factory=StaleLineageRepository,
@@ -43852,6 +43872,7 @@ def test_candidate_and_verdict_paths_agree_a_manifest_proven_id_only_row_is_curr
     scheduler, discovery, models = _absence_tolerance_scheduler(
         monkeypatch,
         tmp_path / "verdict",
+        db_free=True,
         hydro_run={
             "run_id": "fcst_gfs_2026072000_model_a",
             "status": "published",
@@ -43902,6 +43923,7 @@ def test_candidate_and_verdict_paths_agree_a_manifest_proven_id_only_row_is_curr
 
 def test_duplicate_pipeline_dedup_gates_are_kept_for_repositories_without_candidate_state(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
     """#1736 acceptance item 5: the three ``not callable(state_provider)`` gates are KEPT.
 
@@ -43943,9 +43965,11 @@ def test_duplicate_pipeline_dedup_gates_are_kept_for_repositories_without_candid
     ):
         assert getattr(repository_cls, "candidate_state", None) is None, repository_cls
 
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"))
+
     def _run(active_repository: Any) -> list[str]:
         scheduler = ProductionScheduler(
-            _config(tmp_path, now=_dt("2026-05-21T12:00:00Z")),
+            config,
             registry=FakeRegistry([_model("model_a", "basin_a")]),
             adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
             active_repository=active_repository,
@@ -45181,17 +45205,6 @@ def test_db_free_file_providers_refresh_between_scheduler_passes(
     monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
     policy_identity = {"source": "gfs", "forecast_hours": list(_gfs_default_forecast_hours())}
     source_object_identity = {"source": "gfs", "manifest_object_key": "raw/gfs/2026052112/manifest.json"}
-    monkeypatch.setattr(
-        "services.orchestrator.scheduler._default_adapters",
-        lambda: {
-            "gfs": FakeAdapter(
-                "gfs",
-                [("2026-05-21T12:00:00Z", True)],
-                policy_identity=policy_identity,
-                source_object_identity=source_object_identity,
-            )
-        },
-    )
     scheduler = _RealProductionScheduler.from_env(ProductionSchedulerConfig(now=_dt("2026-05-21T12:00:00Z")))
 
     first = scheduler.run_once()
@@ -45430,7 +45443,7 @@ def test_db_free_from_env_raw_ready_canonical_zero_submits_convert_without_downl
 ) -> None:
     roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
     cycle_time = _dt("2026-05-21T12:00:00Z")
-    fixture = _write_db_free_file_provider_fixtures(
+    _write_db_free_file_provider_fixtures(
         monkeypatch,
         roots,
         paths,
@@ -45443,17 +45456,6 @@ def test_db_free_from_env_raw_ready_canonical_zero_submits_convert_without_downl
     monkeypatch.setenv("NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST", "true")
     monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT", str(roots["object_store_root"]))
     monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
-    monkeypatch.setattr(
-        "services.orchestrator.scheduler._default_adapters",
-        lambda: {
-            "gfs": FakeAdapter(
-                "gfs",
-                [("2026-05-21T12:00:00Z", True)],
-                policy_identity=fixture["policy_identity"],
-                source_object_identity=fixture["source_object_identity"],
-            )
-        },
-    )
     orchestrator = FakeProductionOrchestrator()
     scheduler = _RealProductionScheduler(
         ProductionSchedulerConfig(
@@ -45519,7 +45521,7 @@ def test_db_free_from_env_raw_missing_blocks_canonical_zero_without_submission(
 ) -> None:
     roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
     cycle_time = _dt("2026-05-21T12:00:00Z")
-    fixture = _write_db_free_file_provider_fixtures(
+    _write_db_free_file_provider_fixtures(
         monkeypatch,
         roots,
         paths,
@@ -45531,17 +45533,6 @@ def test_db_free_from_env_raw_missing_blocks_canonical_zero_without_submission(
     monkeypatch.setenv("NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST", "true")
     monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT", str(roots["object_store_root"]))
     monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
-    monkeypatch.setattr(
-        "services.orchestrator.scheduler._default_adapters",
-        lambda: {
-            "gfs": FakeAdapter(
-                "gfs",
-                [("2026-05-21T12:00:00Z", True)],
-                policy_identity=fixture["policy_identity"],
-                source_object_identity=fixture["source_object_identity"],
-            )
-        },
-    )
     orchestrator = FakeProductionOrchestrator()
     scheduler = _RealProductionScheduler(
         ProductionSchedulerConfig(
@@ -45583,7 +45574,7 @@ def test_db_free_from_env_raw_invalid_blocks_without_submission(
 ) -> None:
     roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
     cycle_time = _dt("2026-05-21T12:00:00Z")
-    fixture = _write_db_free_file_provider_fixtures(
+    _write_db_free_file_provider_fixtures(
         monkeypatch,
         roots,
         paths,
@@ -45617,17 +45608,6 @@ def test_db_free_from_env_raw_invalid_blocks_without_submission(
     monkeypatch.setenv("NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST", "true")
     monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT", str(roots["object_store_root"]))
     monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
-    monkeypatch.setattr(
-        "services.orchestrator.scheduler._default_adapters",
-        lambda: {
-            "gfs": FakeAdapter(
-                "gfs",
-                [("2026-05-21T12:00:00Z", True)],
-                policy_identity=fixture["policy_identity"],
-                source_object_identity=fixture["source_object_identity"],
-            )
-        },
-    )
     orchestrator = FakeProductionOrchestrator()
     scheduler = _RealProductionScheduler(
         ProductionSchedulerConfig(
@@ -46161,6 +46141,8 @@ def test_db_free_runtime_root_run_once_blocks_before_lock(
     monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
     monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
     monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
+    # The DB-free counterparts too (#3252), so "blocks before the lock" is not vacuous.
+    _db_free_factories_fail(monkeypatch, "DB-free root preflight must block before registry/adapter/journal factories")
 
     result = ProductionScheduler.from_env(ProductionSchedulerConfig()).run_once()
     rendered = json.dumps(result.evidence, sort_keys=True)
@@ -46547,12 +46529,14 @@ _ALLOWED_ROOTS_UNSAFE_CODE = "SLURM_PREFLIGHT_ALLOWED_STORAGE_ROOTS_UNSAFE_PATH"
 def _allowed_roots_config(
     *roots: Path,
     workspace_root: Path,
-    db_free_required: bool = False,
+    db_free_required: bool = True,
 ) -> Any:
     """Stand-in exposing only the three attributes the seam reads.
 
     Keeps the errno lanes of the preflight seam hermetic and version-stable.
-    The end-to-end anchors below still run the real config.
+    The end-to-end anchors below still run the real config.  The mode is the
+    DB-free one the scheduler runs in (#3252); the database-backed drop arm
+    (``scheduler_preflight.py:559-568``) is no longer pinned here.
     """
 
     from types import SimpleNamespace
@@ -46564,29 +46548,12 @@ def _allowed_roots_config(
     )
 
 
-def test_preflight_allowed_roots_excludes_symlink_loop_root_with_blocker(tmp_path: Path) -> None:
-    # ELOOP is not absence: the root is dropped from the effective allowed roots
-    # and the reason is reported, instead of being admitted as a phantom
-    # containment base (non-strict resolution stopped raising on CPython 3.13+).
-    approved = tmp_path / "approved"
-    approved.mkdir()
-    loop = tmp_path / "allowed-loop"
-    loop.symlink_to(loop)
-    config = _allowed_roots_config(loop, approved, workspace_root=approved)
-
-    roots, blockers = scheduler_module._preflight_allowed_roots(config)
-
-    assert roots == (Path(os.path.realpath(approved)),)
-    assert str(loop) not in {str(root) for root in roots}
-    assert len(blockers) == 1
-    assert blockers[0]["code"] == _ALLOWED_ROOTS_UNSAFE_CODE
-    assert blockers[0]["field"] == "allowed_storage_roots"
-    assert blockers[0]["path"] == str(loop)
-
-
-def test_preflight_allowed_roots_excludes_not_a_directory_root_with_blocker(tmp_path: Path) -> None:
-    # errno binary pin: the verdict is "not ENOENT", not "only ELOOP". A regular
-    # file mid-path yields ENOTDIR on every supported CPython without symlinks.
+def test_preflight_allowed_roots_admits_not_a_directory_root_lexically_on_db_free(tmp_path: Path) -> None:
+    # errno binary pin: the lexical arm takes every errno that is not ENOENT,
+    # not "only ELOOP". A regular file mid-path yields ENOTDIR on every
+    # supported CPython without symlinks; DB-free admits it verbatim, in order,
+    # next to the resolved sibling (#3252, rule (c): was the database-backed
+    # drop-with-blocker verdict of ``scheduler_preflight.py:559-568``).
     approved = tmp_path / "approved"
     approved.mkdir()
     regular_file = tmp_path / "file.txt"
@@ -46596,18 +46563,14 @@ def test_preflight_allowed_roots_excludes_not_a_directory_root_with_blocker(tmp_
 
     roots, blockers = scheduler_module._preflight_allowed_roots(config)
 
-    assert roots == (Path(os.path.realpath(approved)),)
-    assert str(not_a_dir_root) not in {str(root) for root in roots}
-    assert len(blockers) == 1
-    assert blockers[0]["code"] == _ALLOWED_ROOTS_UNSAFE_CODE
-    assert blockers[0]["field"] == "allowed_storage_roots"
-    assert blockers[0]["path"] == str(not_a_dir_root)
+    assert roots == (not_a_dir_root, Path(os.path.realpath(approved)))
+    assert blockers == []
 
 
 def test_preflight_allowed_roots_keeps_db_free_lexical_fallback_for_symlink_loop(tmp_path: Path) -> None:
-    # Discriminator against the anchor above: the db-free arm keeps the PR #831
-    # lexical tolerance (an unmounted NFS root is legitimate configuration), so
-    # the same loop root is admitted and produces no blocker.
+    # The db-free arm keeps the PR #831 lexical tolerance (an unmounted NFS
+    # root is legitimate configuration), so a loop root is admitted and
+    # produces no blocker.
     loop = tmp_path / "allowed-loop"
     loop.symlink_to(loop)
     config = _allowed_roots_config(loop, workspace_root=tmp_path, db_free_required=True)
@@ -46618,15 +46581,11 @@ def test_preflight_allowed_roots_keeps_db_free_lexical_fallback_for_symlink_loop
     assert blockers == []
 
 
-@pytest.mark.parametrize("db_free_required", [False, True])
-def test_preflight_allowed_roots_admits_missing_root_without_blocker(
-    tmp_path: Path,
-    db_free_required: bool,
-) -> None:
-    # ENOENT keeps the pre-existing "legitimate missing root" semantics on both
-    # arms: admitted through the non-strict fallback, never a blocker.
+def test_preflight_allowed_roots_admits_missing_root_without_blocker(tmp_path: Path) -> None:
+    # ENOENT keeps the pre-existing "legitimate missing root" semantics:
+    # admitted through the non-strict fallback, never a blocker.
     missing = tmp_path / "not-created-yet"
-    config = _allowed_roots_config(missing, workspace_root=tmp_path, db_free_required=db_free_required)
+    config = _allowed_roots_config(missing, workspace_root=tmp_path)
 
     roots, blockers = scheduler_module._preflight_allowed_roots(config)
 
@@ -46668,44 +46627,15 @@ def test_preflight_allowed_roots_dedupes_and_falls_back_to_workspace_root(tmp_pa
     assert fallback_blockers == []
 
 
-def test_slurm_preflight_symlink_loop_allowed_root_blocks_with_root_cause_first(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # End-to-end assembly: the unresolvable root must not reach the evidence
-    # surface, and its blocker must sit at index 0 because the evidence consumer
-    # reads `blockers[0]` as the error code -- otherwise the cascaded
-    # `WORKSPACE_ROOT_OUT_OF_ROOT` buries the root cause.
-    roots = _slurm_roots(tmp_path)
-    monkeypatch.setattr(scheduler_module, "_default_gateway_probe", _healthy_gateway_probe)
-    loop = tmp_path / "allowed-loop"
-    loop.symlink_to(loop)
-    config = _gateway_config(
-        roots["workspace_root"],
-        slurm_gateway_url="http://gw-node22.internal:8000",
-        object_store_root=roots["object_store_root"],
-        log_root=roots["log_root"],
-        runtime_root=roots["runtime_root"],
-        allowed_storage_roots=(loop,),
-        slurm_job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
-    )
-    configured_loop = config.allowed_storage_roots[0]
-
-    preflight = scheduler_module._slurm_preflight(config)
-
-    assert preflight["status"] == "blocked"
-    assert preflight["blockers"][0]["code"] == _ALLOWED_ROOTS_UNSAFE_CODE
-    assert preflight["blockers"][0]["field"] == "allowed_storage_roots"
-    assert preflight["blockers"][0]["path"] == str(configured_loop)
-    assert preflight["checks"]["allowed_roots"] == []
-    # Fail-closed by construction: with no effective root left, every storage
-    # root falls out instead of being measured against a phantom base.
-    assert "SLURM_PREFLIGHT_WORKSPACE_ROOT_OUT_OF_ROOT" in {
-        blocker["code"] for blocker in preflight["blockers"]
-    }
+_STORAGE_ROOTS_OUT_OF_ROOT_CODES = {
+    "SLURM_PREFLIGHT_WORKSPACE_ROOT_OUT_OF_ROOT",
+    "SLURM_PREFLIGHT_OBJECT_STORE_ROOT_OUT_OF_ROOT",
+    "SLURM_PREFLIGHT_LOG_ROOT_OUT_OF_ROOT",
+    "SLURM_PREFLIGHT_RUNTIME_ROOT_OUT_OF_ROOT",
+}
 
 
-def test_slurm_preflight_not_a_directory_allowed_root_blocks_through_real_config(
+def test_slurm_preflight_admits_not_a_directory_allowed_root_lexically_through_real_db_free_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -46715,6 +46645,9 @@ def test_slurm_preflight_not_a_directory_allowed_root_blocks_through_real_config
     # layer. It cannot tell lexical pass-through from a realpath fallback,
     # because for this shape the two agree; the discriminating material is a
     # symlink ancestor, pinned by the B2 anchor in the #1347 section below.
+    # DB-free, the storage preflight admits it lexically and masks it in the
+    # evidence (#3252, rule (c): was the database-backed drop-with-blocker,
+    # ``scheduler_preflight.py:559-568``; masking ``scheduler_gateway.py:63-67``).
     roots = _slurm_roots(tmp_path)
     monkeypatch.setattr(scheduler_module, "_default_gateway_probe", _healthy_gateway_probe)
     regular_file = tmp_path / "file.txt"
@@ -46722,6 +46655,7 @@ def test_slurm_preflight_not_a_directory_allowed_root_blocks_through_real_config
     not_a_dir_root = regular_file / "root"
     config = _gateway_config(
         roots["workspace_root"],
+        db_free=True,
         slurm_gateway_url="http://gw-node22.internal:8000",
         object_store_root=roots["object_store_root"],
         log_root=roots["log_root"],
@@ -46733,62 +46667,23 @@ def test_slurm_preflight_not_a_directory_allowed_root_blocks_through_real_config
 
     preflight = scheduler_module._slurm_preflight(config)
 
+    # Mode-independent: the lexically admitted root is the only containment
+    # base and every storage root sits outside it, so each one falls
+    # OUT_OF_ROOT and the preflight stays blocked -- the unwalkable root never
+    # turns into a phantom base (``scheduler_preflight.py:665-672`` is lexical).
     assert preflight["status"] == "blocked"
-    assert preflight["blockers"][0]["code"] == _ALLOWED_ROOTS_UNSAFE_CODE
-    assert preflight["blockers"][0]["field"] == "allowed_storage_roots"
-    assert preflight["blockers"][0]["path"] == str(not_a_dir_root)
-    assert preflight["checks"]["allowed_roots"] == []
+    assert {
+        blocker["code"] for blocker in preflight["blockers"] if blocker["code"].endswith("_OUT_OF_ROOT")
+    } == _STORAGE_ROOTS_OUT_OF_ROOT_CODES
+    assert scheduler_module._preflight_allowed_roots(config) == ((not_a_dir_root,), [])
+    assert _ALLOWED_ROOTS_UNSAFE_CODE not in {blocker["code"] for blocker in preflight["blockers"]}
+    assert preflight["checks"]["allowed_roots"] == ["[local-path]"]
 
 
 # --- Issue #1347: the config layer stops adjudicating allowed storage roots ---
 
 
-def test_slurm_preflight_blocks_preexisting_loop_allowed_root_built_by_real_config(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """B1: production ordering -- the loop exists BEFORE the config is built.
-
-    The config layer no longer adjudicates -- every strict-resolution failure
-    is handed down as the non-strict realpath product, so construction survives
-    on every supported CPython and `_preflight_allowed_roots` owns the verdict.
-    For a self-loop directly under a canonical `tmp_path` that product equals
-    the configured value, so the equality assertion below is shape-coincidental
-    and proves nothing about which lane ran; lane discrimination is owned by
-    the B2 anchor.
-
-    Scope is the `_slurm_preflight` seam, NOT the run_once pass. The pass-level
-    residual (`_scheduler_allowed_roots`) was closed by issue #1348; the flipped
-    B8 anchor at the end of this section pins the fixed not-required contract,
-    and the #1348 section below pins the runtime-root preflight planes.
-    """
-
-    roots = _slurm_roots(tmp_path)
-    monkeypatch.setattr(scheduler_module, "_default_gateway_probe", _healthy_gateway_probe)
-    loop = tmp_path / "allowed-loop"
-    loop.symlink_to(loop)
-    config = _gateway_config(
-        roots["workspace_root"],
-        slurm_gateway_url="http://gw-node22.internal:8000",
-        object_store_root=roots["object_store_root"],
-        log_root=roots["log_root"],
-        runtime_root=roots["runtime_root"],
-        allowed_storage_roots=(loop,),
-        slurm_job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
-    )
-
-    assert config.allowed_storage_roots == (loop,)
-
-    preflight = scheduler_module._slurm_preflight(config)
-
-    assert preflight["status"] == "blocked"
-    assert preflight["blockers"][0]["code"] == _ALLOWED_ROOTS_UNSAFE_CODE
-    assert preflight["blockers"][0]["field"] == "allowed_storage_roots"
-    assert preflight["blockers"][0]["path"] == str(loop)
-    assert preflight["checks"]["allowed_roots"] == []
-
-
-def test_slurm_preflight_blocks_symlink_ancestor_allowed_root_canonicalised_by_realpath(
+def test_slurm_preflight_admits_symlink_ancestor_allowed_root_canonicalised_by_realpath(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -46800,7 +46695,9 @@ def test_slurm_preflight_blocks_symlink_ancestor_allowed_root_canonicalised_by_r
     (`.../realdir/file.txt/sub`). The config layer must produce the latter:
     one fallback for every strict failure, canonicalising instead of
     adjudicating. The value stays unresolvable, so the storage preflight still
-    owns the verdict and still drops the root.
+    owns the verdict: DB-free, it admits the canonical value lexically and
+    masks it in the evidence (#3252, rule (c): was the database-backed
+    drop-with-blocker, ``scheduler_preflight.py:559-568``).
     """
 
     roots = _slurm_roots(tmp_path)
@@ -46817,6 +46714,7 @@ def test_slurm_preflight_blocks_symlink_ancestor_allowed_root_canonicalised_by_r
 
     config = _gateway_config(
         roots["workspace_root"],
+        db_free=True,
         slurm_gateway_url="http://gw-node22.internal:8000",
         object_store_root=roots["object_store_root"],
         log_root=roots["log_root"],
@@ -46829,22 +46727,30 @@ def test_slurm_preflight_blocks_symlink_ancestor_allowed_root_canonicalised_by_r
 
     preflight = scheduler_module._slurm_preflight(config)
 
+    # Mode-independent: the lexically admitted root is the only containment
+    # base and every storage root sits outside it, so each one falls
+    # OUT_OF_ROOT and the preflight stays blocked -- the unwalkable root never
+    # turns into a phantom base (``scheduler_preflight.py:665-672`` is lexical).
     assert preflight["status"] == "blocked"
-    assert preflight["blockers"][0]["code"] == _ALLOWED_ROOTS_UNSAFE_CODE
-    assert preflight["blockers"][0]["field"] == "allowed_storage_roots"
-    assert preflight["blockers"][0]["path"] == str(canonical_root)
-    assert preflight["checks"]["allowed_roots"] == []
+    assert {
+        blocker["code"] for blocker in preflight["blockers"] if blocker["code"].endswith("_OUT_OF_ROOT")
+    } == _STORAGE_ROOTS_OUT_OF_ROOT_CODES
+    assert scheduler_module._preflight_allowed_roots(config) == ((canonical_root,), [])
+    assert _ALLOWED_ROOTS_UNSAFE_CODE not in {blocker["code"] for blocker in preflight["blockers"]}
+    assert preflight["checks"]["allowed_roots"] == ["[local-path]"]
 
 
 def test_slurm_preflight_admits_missing_allowed_root_built_by_real_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """B3 (database-backed arm): ENOENT keeps the historical canonicalisation.
+    """B3: ENOENT keeps the historical canonicalisation through the storage preflight.
 
     The non-strict `os.path.realpath` fallback reproduces the product of the
     old non-strict `Path.resolve()` verbatim, and a merely missing root is
-    never an allowed-roots blocker.
+    never an allowed-roots blocker. DB-free, the evidence masks the admitted
+    root (#3252, rule (c): ``scheduler_gateway.py:63-67``), so its identity is
+    asserted at the adjudication seam the evidence is built from.
     """
 
     roots = _slurm_roots(tmp_path)
@@ -46852,6 +46758,7 @@ def test_slurm_preflight_admits_missing_allowed_root_built_by_real_config(
     missing = tmp_path / "not-created-yet"
     config = _gateway_config(
         roots["workspace_root"],
+        db_free=True,
         slurm_gateway_url="http://gw-node22.internal:8000",
         object_store_root=roots["object_store_root"],
         log_root=roots["log_root"],
@@ -46865,7 +46772,8 @@ def test_slurm_preflight_admits_missing_allowed_root_built_by_real_config(
     preflight = scheduler_module._slurm_preflight(config)
 
     assert _ALLOWED_ROOTS_UNSAFE_CODE not in {blocker["code"] for blocker in preflight["blockers"]}
-    assert preflight["checks"]["allowed_roots"] == [str(Path(os.path.realpath(missing)))]
+    assert scheduler_module._preflight_allowed_roots(config) == ((Path(os.path.realpath(missing)),), [])
+    assert preflight["checks"]["allowed_roots"] == ["[local-path]"]
 
 
 def test_db_free_config_canonicalises_missing_allowed_root_unchanged(
@@ -46883,7 +46791,7 @@ def test_db_free_config_canonicalises_missing_allowed_root_unchanged(
     assert config.allowed_storage_roots == (Path(os.path.realpath(missing)),)
 
 
-def test_slurm_preflight_blocks_loop_behind_missing_allowed_root_built_by_real_config(
+def test_slurm_preflight_admits_loop_behind_missing_allowed_root_lexically_built_by_real_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -46893,8 +46801,9 @@ def test_slurm_preflight_blocks_loop_behind_missing_allowed_root_built_by_real_c
     config layer takes the non-strict realpath fallback, which collapses `..`
     onto the loop itself -- `Path.resolve()` would raise an errno-less
     RuntimeError there on <=3.12. Downstream the collapsed value is a real
-    loop, so the storage preflight reads ELOOP and drops it with a blocker;
-    that is the CPython 3.13+ behaviour of today, not a new rejection.
+    loop: the storage preflight reads ELOOP and, DB-free, admits it through
+    the PR #831 lexical arm (#3252, rule (c): was the database-backed
+    drop-with-blocker, ``scheduler_preflight.py:559-568``).
     """
 
     roots = _slurm_roots(tmp_path)
@@ -46904,6 +46813,7 @@ def test_slurm_preflight_blocks_loop_behind_missing_allowed_root_built_by_real_c
     loop_behind_missing = tmp_path / "gone" / ".." / "loopdir"
     config = _gateway_config(
         roots["workspace_root"],
+        db_free=True,
         slurm_gateway_url="http://gw-node22.internal:8000",
         object_store_root=roots["object_store_root"],
         log_root=roots["log_root"],
@@ -46916,11 +46826,17 @@ def test_slurm_preflight_blocks_loop_behind_missing_allowed_root_built_by_real_c
 
     preflight = scheduler_module._slurm_preflight(config)
 
+    # Mode-independent: the lexically admitted root is the only containment
+    # base and every storage root sits outside it, so each one falls
+    # OUT_OF_ROOT and the preflight stays blocked -- the unwalkable root never
+    # turns into a phantom base (``scheduler_preflight.py:665-672`` is lexical).
     assert preflight["status"] == "blocked"
-    assert preflight["blockers"][0]["code"] == _ALLOWED_ROOTS_UNSAFE_CODE
-    assert preflight["blockers"][0]["field"] == "allowed_storage_roots"
-    assert preflight["blockers"][0]["path"] == str(loop)
-    assert preflight["checks"]["allowed_roots"] == []
+    assert {
+        blocker["code"] for blocker in preflight["blockers"] if blocker["code"].endswith("_OUT_OF_ROOT")
+    } == _STORAGE_ROOTS_OUT_OF_ROOT_CODES
+    assert scheduler_module._preflight_allowed_roots(config) == ((loop,), [])
+    assert _ALLOWED_ROOTS_UNSAFE_CODE not in {blocker["code"] for blocker in preflight["blockers"]}
+    assert preflight["checks"]["allowed_roots"] == ["[local-path]"]
 
 
 def test_db_free_config_keeps_lexical_tolerance_for_preexisting_loop_allowed_root(
@@ -46977,6 +46893,7 @@ def test_slurm_preflight_admits_file_dotdot_directory_allowed_root_on_every_inte
 
     config = _gateway_config(
         roots["workspace_root"],
+        db_free=True,
         slurm_gateway_url="http://gw-node22.internal:8000",
         object_store_root=roots["object_store_root"],
         log_root=roots["log_root"],
@@ -46990,7 +46907,10 @@ def test_slurm_preflight_admits_file_dotdot_directory_allowed_root_on_every_inte
     preflight = scheduler_module._slurm_preflight(config)
 
     assert _ALLOWED_ROOTS_UNSAFE_CODE not in {blocker["code"] for blocker in preflight["blockers"]}
-    assert preflight["checks"]["allowed_roots"] == [str(canonical_root)]
+    # DB-free, the evidence masks the admitted root (#3252, rule (c):
+    # ``scheduler_gateway.py:63-67``); its identity is asserted at the seam.
+    assert scheduler_module._preflight_allowed_roots(config) == ((canonical_root,), [])
+    assert preflight["checks"]["allowed_roots"] == ["[local-path]"]
 
 
 def test_slurm_preflight_keeps_symlink_redirection_of_dotdot_allowed_root(
@@ -47024,6 +46944,7 @@ def test_slurm_preflight_keeps_symlink_redirection_of_dotdot_allowed_root(
 
     config = _gateway_config(
         roots["workspace_root"],
+        db_free=True,
         slurm_gateway_url="http://gw-node22.internal:8000",
         object_store_root=roots["object_store_root"],
         log_root=roots["log_root"],
@@ -47038,43 +46959,10 @@ def test_slurm_preflight_keeps_symlink_redirection_of_dotdot_allowed_root(
     preflight = scheduler_module._slurm_preflight(config)
 
     assert _ALLOWED_ROOTS_UNSAFE_CODE not in {blocker["code"] for blocker in preflight["blockers"]}
-    assert preflight["checks"]["allowed_roots"] == [str(canonical_root)]
-
-
-def test_scheduler_root_preflight_drops_preexisting_loop_allowed_root_without_raising(
-    tmp_path: Path,
-) -> None:
-    """B8, flipped by #1348: the not-required payload adjudicates, never raises.
-
-    This was the #1346 tripwire pinning the pass-level residual: the run_once
-    pass calls `_scheduler_lock_evidence_root_preflight` before
-    `_slurm_preflight`, and its not-required early-exit payload calls
-    `_scheduler_allowed_roots`, which used to canonicalise with a non-strict
-    `Path.resolve()` -- an errno-less RuntimeError escaping at pass level on
-    <=3.12, and a silently admitted phantom containment base on 3.13+.
-
-    The fixed contract (design D6) is version-independent: the loop root is
-    dropped from the shared adjudication product, so the payload's allowed-roots
-    evidence never lists it. That payload has no blocker channel and declares no
-    containment adjudication, so it emits no blocker -- the storage preflight
-    stays the blocker-bearing plane for this configuration -- and the
-    adjudication never escapes as an unhandled exception.
-    """
-
-    loop = tmp_path / "allowed-loop"
-    loop.symlink_to(loop)
-    config = _gateway_config(tmp_path, allowed_storage_roots=(loop,))
-
-    assert config.allowed_storage_roots == (loop,)
-    assert config.require_runtime_roots is False
-
-    preflight = scheduler_module._scheduler_lock_evidence_root_preflight(config)
-
-    assert preflight["status"] == "not_required"
-    assert preflight["required"] is False
-    assert preflight["blockers"] == []
-    assert preflight["allowed_roots"] == []
-    assert str(loop) not in preflight["allowed_roots"]
+    # DB-free, the evidence masks the admitted root (#3252, rule (c):
+    # ``scheduler_gateway.py:63-67``); its identity is asserted at the seam.
+    assert scheduler_module._preflight_allowed_roots(config) == ((canonical_root,), [])
+    assert preflight["checks"]["allowed_roots"] == ["[local-path]"]
 
 
 # --- Issue #1348: the runtime-root planes adopt the same errno split ---------
@@ -47087,7 +46975,6 @@ def test_scheduler_root_preflight_drops_preexisting_loop_allowed_root_without_ra
 # silently retargeting the arm under test.
 
 _SCHEDULER_ALLOWED_ROOTS_UNSAFE_CODE = "SCHEDULER_ROOT_ALLOWED_ROOTS_UNSAFE_PATH"
-_SCHEDULER_ALLOWED_ROOTS_MISSING_CODE = "SCHEDULER_ROOT_ALLOWED_ROOTS_MISSING"
 
 
 @dataclass(frozen=True)
@@ -47100,12 +46987,13 @@ class _AllowedRootsConfigStub:
     the seam its configured values directly is the only way to pin the four
     shapes uniformly; the faults on disk stay real and no resolution primitive
     is mocked. The real-config integration anchors further down (the preflight
-    arms, the dual-plane anchor and the repair-authority lane) are what keep
-    this surface honest.
+    arms and the dual-plane anchor) are what keep
+    this surface honest. The mode is the DB-free one the scheduler runs in
+    (#3252); the database-backed drop arms are no longer pinned here.
     """
 
     allowed_storage_roots: tuple[Path, ...]
-    scheduler_db_free_required: bool = False
+    scheduler_db_free_required: bool = True
     repair_missing_forcing: bool = False
 
     @property
@@ -47123,27 +47011,17 @@ def _allowed_root_errno(root: Path) -> int | None:
     return None
 
 
-def _scheduler_allowed_roots_unsafe_blocker(path: str) -> dict[str, Any]:
-    return {
-        "code": _SCHEDULER_ALLOWED_ROOTS_UNSAFE_CODE,
-        "field": "allowed_roots",
-        "reason": "unsafe_path",
-        "message": "Production scheduler allowed_roots is not a safe writable runtime root.",
-        "path": path,
-    }
-
-
 def _runtime_roots_config(
     tmp_path: Path,
     *,
     allowed_storage_roots: tuple[Path, ...],
     **kwargs: Any,
 ) -> ProductionSchedulerConfig:
-    """A database-backed config whose runtime-root arms actually adjudicate.
+    """An explicitly DB-free config (#3252) whose runtime-root arms actually adjudicate.
 
-    `require_runtime_roots=True` is mandatory here: without it both arms
-    early-exit to the not-required payload and every arm-level assertion below
-    would be vacuous.
+    `require_runtime_roots=True` is mandatory here (DB-free mode also forces
+    it): without it both arms early-exit to the not-required payload and every
+    arm-level assertion below would be vacuous.
     """
 
     roots = _slurm_roots(tmp_path)
@@ -47161,7 +47039,7 @@ def _runtime_roots_config(
         "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
     }
     values.update(kwargs)
-    return _gateway_config(roots["workspace_root"], **values)
+    return _gateway_config(roots["workspace_root"], db_free=True, **values)
 
 
 def _runtime_root_preflight_arm(arm: str) -> Any:
@@ -47173,54 +47051,10 @@ def _runtime_root_preflight_arm(arm: str) -> Any:
 # Site 1 (`_scheduler_allowed_roots_and_blockers`): the adjudication table.
 
 
-def test_scheduler_allowed_roots_drops_symlink_loop_root_on_database_backed_runtime(
-    tmp_path: Path,
-) -> None:
-    """ELOOP x database-backed: dropped, blocked, and the sibling root survives."""
-
-    loop = tmp_path / "allowed-loop"
-    loop.symlink_to(loop)
-    approved = tmp_path / "approved"
-    approved.mkdir()
-    assert _allowed_root_errno(loop) == errno.ELOOP
-
-    roots, blockers = scheduler_module._scheduler_allowed_roots_and_blockers(
-        _AllowedRootsConfigStub(allowed_storage_roots=(loop, approved))
-    )
-
-    assert roots == (approved,)
-    assert blockers == [_scheduler_allowed_roots_unsafe_blocker(str(loop))]
-
-
-def test_scheduler_allowed_roots_drops_not_a_directory_root_on_database_backed_runtime(
-    tmp_path: Path,
-) -> None:
-    """ENOTDIR x database-backed: the split is "not ENOENT", not "only ELOOP".
-
-    A regular file as an intermediate component needs no symlink at all, so this
-    row is reachable on every supported interpreter and pins that the verdict
-    follows the errno class rather than the ELOOP special case.
-    """
-
-    regular_file = tmp_path / "plain.txt"
-    regular_file.write_text("not a directory", encoding="utf-8")
-    not_a_dir_root = regular_file / "root"
-    assert _allowed_root_errno(not_a_dir_root) == errno.ENOTDIR
-
-    roots, blockers = scheduler_module._scheduler_allowed_roots_and_blockers(
-        _AllowedRootsConfigStub(allowed_storage_roots=(not_a_dir_root,))
-    )
-
-    assert roots == ()
-    assert blockers == [_scheduler_allowed_roots_unsafe_blocker(str(not_a_dir_root))]
-
-
-@pytest.mark.parametrize("db_free_required", [False, True])
 def test_scheduler_allowed_roots_admits_missing_root_without_blocker(
     tmp_path: Path,
-    db_free_required: bool,
 ) -> None:
-    """ENOENT x both runtime modes: the historical admitted semantics, pinned.
+    """ENOENT: the historical admitted semantics, pinned.
 
     A root that is merely missing (not created yet, NFS not mounted) is never
     unsafe, and the non-strict `os.path.realpath` fallback reproduces the
@@ -47231,22 +47065,17 @@ def test_scheduler_allowed_roots_admits_missing_root_without_blocker(
     assert _allowed_root_errno(missing) == errno.ENOENT
 
     roots, blockers = scheduler_module._scheduler_allowed_roots_and_blockers(
-        _AllowedRootsConfigStub(
-            allowed_storage_roots=(missing,),
-            scheduler_db_free_required=db_free_required,
-        )
+        _AllowedRootsConfigStub(allowed_storage_roots=(missing,))
     )
 
     assert roots == (Path(os.path.realpath(missing)),)
     assert blockers == []
 
 
-@pytest.mark.parametrize("db_free_required", [False, True])
 def test_scheduler_allowed_roots_absorbs_loop_behind_missing_root_through_enoent_arm(
     tmp_path: Path,
-    db_free_required: bool,
 ) -> None:
-    """`<missing>/../<loop>` x both modes: the ENOENT arm absorbs the shape.
+    """`<missing>/../<loop>`: the ENOENT arm absorbs the shape.
 
     Strict resolution stops at the missing `gone` component and reports ENOENT,
     so the ENOENT arm owns this shape; its non-strict fallback then collapses
@@ -47260,10 +47089,7 @@ def test_scheduler_allowed_roots_absorbs_loop_behind_missing_root_through_enoent
     assert _allowed_root_errno(loop_behind_missing) == errno.ENOENT
 
     roots, blockers = scheduler_module._scheduler_allowed_roots_and_blockers(
-        _AllowedRootsConfigStub(
-            allowed_storage_roots=(loop_behind_missing,),
-            scheduler_db_free_required=db_free_required,
-        )
+        _AllowedRootsConfigStub(allowed_storage_roots=(loop_behind_missing,))
     )
 
     assert roots == (Path(os.path.realpath(loop_behind_missing)),)
@@ -47318,10 +47144,14 @@ def test_scheduler_allowed_roots_db_free_lexical_arm_is_distinguishable_from_res
     assert blockers == []
 
 
-def test_scheduler_allowed_roots_preserves_order_and_dedups_around_dropped_root(
+def test_scheduler_allowed_roots_preserves_order_and_dedups_around_lexically_admitted_root(
     tmp_path: Path,
 ) -> None:
-    """Dropping an unsafe root must not disturb order or duplicate suppression."""
+    """Admitting an unresolvable root must not disturb order or duplicate suppression.
+
+    DB-free (#3252, rule (c)): the loop root is admitted lexically in place
+    instead of dropped (``scheduler_runtime_roots.py:540-548`` was the drop arm).
+    """
 
     first = tmp_path / "first"
     first.mkdir()
@@ -47331,11 +47161,11 @@ def test_scheduler_allowed_roots_preserves_order_and_dedups_around_dropped_root(
     loop.symlink_to(loop)
 
     roots, blockers = scheduler_module._scheduler_allowed_roots_and_blockers(
-        _AllowedRootsConfigStub(allowed_storage_roots=(second, loop, first, second))
+        _AllowedRootsConfigStub(allowed_storage_roots=(second, loop, first, second, loop))
     )
 
-    assert roots == (second, first)
-    assert blockers == [_scheduler_allowed_roots_unsafe_blocker(str(loop))]
+    assert roots == (second, loop, first)
+    assert blockers == []
 
 
 def test_scheduler_allowed_roots_reader_returns_the_pair_functions_roots(
@@ -47347,61 +47177,25 @@ def test_scheduler_allowed_roots_reader_returns_the_pair_functions_roots(
     loop.symlink_to(loop)
     approved = tmp_path / "approved"
     approved.mkdir()
-    config = _AllowedRootsConfigStub(allowed_storage_roots=(loop, approved))
+    # The duplicate and the ENOENT `gone/../approved` spelling are material the
+    # pair function transforms (dedup, non-strict collapse), so a reader that
+    # re-derived from `config.allowed_storage_roots` could not pass.
+    approved_behind_missing = tmp_path / "gone" / ".." / "approved"
+    config = _AllowedRootsConfigStub(allowed_storage_roots=(loop, approved, approved, approved_behind_missing))
 
     roots, blockers = scheduler_module._scheduler_allowed_roots_and_blockers(config)
 
+    # Guard the discriminator itself: if the product ever equals the raw input
+    # the view assertion below is blind.
+    assert roots != tuple(config.allowed_storage_roots)
     assert scheduler_module._scheduler_allowed_roots(config) == roots
-    assert blockers
+    # DB-free (#3252, rule (c)): the product is the lexically admitted loop and
+    # the approved root, with no blocker (was: the loop dropped with a blocker).
+    assert roots == (loop, approved)
+    assert blockers == []
 
 
 # Site 1 consumers: both runtime-root preflight arms.
-
-
-@pytest.mark.parametrize("arm", ["lock_evidence", "runtime"])
-def test_runtime_root_preflight_arms_drop_unsafe_allowed_root_with_structured_blocker(
-    tmp_path: Path,
-    arm: str,
-) -> None:
-    """Both arms drop the loop root, block, and never show it as an approved base."""
-
-    loop = tmp_path / "allowed-loop"
-    loop.symlink_to(loop)
-    config = _runtime_roots_config(tmp_path, allowed_storage_roots=(loop, tmp_path))
-    assert config.require_runtime_roots is True
-    assert config.db_free_required is False
-    assert config.allowed_storage_roots == (loop, tmp_path)
-
-    preflight = _runtime_root_preflight_arm(arm)(config)
-
-    assert preflight["status"] == "blocked"
-    assert preflight["blockers"][0] == _scheduler_allowed_roots_unsafe_blocker(str(loop))
-    assert preflight["allowed_roots"] == [str(tmp_path)]
-    assert preflight["checks"]["allowed_roots_policy"]["allowed_roots"] == [str(tmp_path)]
-    assert preflight["checks"]["allowed_roots_policy"]["non_empty"] is True
-
-
-@pytest.mark.parametrize("arm", ["lock_evidence", "runtime"])
-def test_runtime_root_preflight_arms_report_unsafe_before_missing_when_all_roots_drop(
-    tmp_path: Path,
-    arm: str,
-) -> None:
-    """Cause before consequence: "this root was dropped" precedes "no root left"."""
-
-    loop = tmp_path / "allowed-loop"
-    loop.symlink_to(loop)
-    config = _runtime_roots_config(tmp_path, allowed_storage_roots=(loop,))
-
-    preflight = _runtime_root_preflight_arm(arm)(config)
-
-    assert preflight["status"] == "blocked"
-    codes = [blocker["code"] for blocker in preflight["blockers"]]
-    assert codes[:2] == [
-        _SCHEDULER_ALLOWED_ROOTS_UNSAFE_CODE,
-        _SCHEDULER_ALLOWED_ROOTS_MISSING_CODE,
-    ]
-    assert preflight["allowed_roots"] == []
-    assert preflight["checks"]["allowed_roots_policy"]["non_empty"] is False
 
 
 @pytest.mark.parametrize("arm", ["lock_evidence", "runtime"])
@@ -47416,7 +47210,10 @@ def test_runtime_root_preflight_arms_adjudicate_allowed_roots_exactly_once(
     concurrent change between the two passes can publish a self-contradictory
     payload: a blocker saying a root was dropped next to a top-level
     `allowed_roots` that still lists it. Counting the adjudications pins the
-    single-pass property directly instead of trying to race it.
+    single-pass property directly instead of trying to race it. DB-free, the
+    loop root is admitted lexically and the payload masks both roots (#3252,
+    rule (c): was ``[str(tmp_path)]``), so the product itself is asserted at
+    the counted call.
     """
 
     loop = tmp_path / "allowed-loop"
@@ -47426,30 +47223,32 @@ def test_runtime_root_preflight_arms_adjudicate_allowed_roots_exactly_once(
     adjudications: list[Any] = []
 
     def counting_adjudicate(config_argument: Any) -> Any:
-        adjudications.append(config_argument)
-        return original_adjudicate(config_argument)
+        product = original_adjudicate(config_argument)
+        adjudications.append(product)
+        return product
 
     monkeypatch.setattr(scheduler_module, "_scheduler_allowed_roots_and_blockers", counting_adjudicate)
 
     preflight = _runtime_root_preflight_arm(arm)(config)
 
-    assert len(adjudications) == 1
+    assert adjudications == [((loop, tmp_path), [])]
     assert preflight["allowed_roots"] == preflight["checks"]["allowed_roots_policy"]["allowed_roots"]
-    assert preflight["allowed_roots"] == [str(tmp_path)]
+    assert preflight["allowed_roots"] == ["[local-path]", "[local-path]"]
 
 
-def test_storage_and_runtime_root_preflight_planes_agree_on_unsafe_allowed_root(
+def test_storage_and_runtime_root_preflight_planes_agree_on_lexically_admitted_allowed_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#1348 primary anchor: one run, one root, no contradiction between planes.
 
-    Before this change the same pass could emit
-    `slurm_preflight.checks.allowed_roots == [...]` with an UNSAFE_PATH blocker
-    while `runtime_root_preflight.checks.allowed_roots_policy.allowed_roots`
-    still listed the loop root with no blocker at all. Both planes are exercised
-    here in one process against one config, so the two evidence surfaces have to
-    reach the same verdict.
+    Before #1348 the same pass could emit `slurm_preflight.checks.allowed_roots`
+    with one verdict on a loop root while
+    `runtime_root_preflight.checks.allowed_roots_policy.allowed_roots` carried
+    another. Both planes are exercised here in one process against one config,
+    so the two evidence surfaces have to reach the same verdict. DB-free, that
+    verdict is the PR #831 lexical admission on every plane, with no unsafe
+    blocker anywhere (#3252, rule (c): was the database-backed drop verdict).
     """
 
     monkeypatch.setattr(scheduler_module, "_default_gateway_probe", _healthy_gateway_probe)
@@ -47462,32 +47261,28 @@ def test_storage_and_runtime_root_preflight_planes_agree_on_unsafe_allowed_root(
     runtime_preflight = scheduler_module._scheduler_runtime_root_preflight(config)
     lock_preflight = scheduler_module._scheduler_lock_evidence_root_preflight(config)
 
-    assert slurm_preflight["status"] == "blocked"
-    assert slurm_preflight["checks"]["allowed_roots"] == [str(tmp_path)]
-    storage_blocker = next(
-        blocker for blocker in slurm_preflight["blockers"] if blocker["code"] == _ALLOWED_ROOTS_UNSAFE_CODE
-    )
-    assert storage_blocker["path"] == str(loop)
+    # The two adjudication seams behind the planes produce the same roots...
+    assert scheduler_module._preflight_allowed_roots(config) == ((loop, tmp_path), [])
+    assert scheduler_module._scheduler_allowed_roots_and_blockers(config) == ((loop, tmp_path), [])
+    assert slurm_preflight["checks"]["allowed_roots"] == ["[local-path]", "[local-path]"]
+    assert _ALLOWED_ROOTS_UNSAFE_CODE not in {blocker["code"] for blocker in slurm_preflight["blockers"]}
     for preflight in (runtime_preflight, lock_preflight):
-        assert preflight["status"] == "blocked"
-        # Same effective allowed roots on both planes...
+        # ...and every plane publishes the same effective allowed roots, unblocked.
         assert preflight["allowed_roots"] == slurm_preflight["checks"]["allowed_roots"]
         assert preflight["checks"]["allowed_roots_policy"]["allowed_roots"] == (
             slurm_preflight["checks"]["allowed_roots"]
         )
-        # ...and each plane carries its own structured blocker for the same root.
-        runtime_blocker = next(
-            blocker
-            for blocker in preflight["blockers"]
-            if blocker["code"] == _SCHEDULER_ALLOWED_ROOTS_UNSAFE_CODE
-        )
-        assert runtime_blocker["path"] == storage_blocker["path"]
+        assert _SCHEDULER_ALLOWED_ROOTS_UNSAFE_CODE not in {blocker["code"] for blocker in preflight["blockers"]}
 
 
 def test_runtime_root_preflight_masks_unsafe_allowed_root_path_on_repair_runs(
     tmp_path: Path,
 ) -> None:
-    """Masking discipline: repair runs report `[local-path]`, never the real path."""
+    """Masking discipline: repair runs report `[local-path]`, never the real path.
+
+    DB-free (#3252, rule (c)), the loop root is admitted lexically instead of
+    dropped with a blocker, and both admitted roots are still masked.
+    """
 
     loop = tmp_path / "allowed-loop-secret-token"
     loop.symlink_to(loop)
@@ -47501,44 +47296,16 @@ def test_runtime_root_preflight_masks_unsafe_allowed_root_path_on_repair_runs(
         max_cycles_per_source=1,
         slurm_array_concurrency_bound=32,
     )
-    assert config.db_free_required is False
+    assert config.db_free_required is True
     assert config.repair_missing_forcing is True
 
     preflight = scheduler_module._scheduler_runtime_root_preflight(config)
     rendered = json.dumps(preflight, sort_keys=True)
 
-    assert preflight["blockers"][0]["code"] == _SCHEDULER_ALLOWED_ROOTS_UNSAFE_CODE
-    assert preflight["blockers"][0]["path"] == "[local-path]"
-    assert preflight["allowed_roots"] == ["[local-path]"]
+    assert _SCHEDULER_ALLOWED_ROOTS_UNSAFE_CODE not in {blocker["code"] for blocker in preflight["blockers"]}
+    assert preflight["allowed_roots"] == ["[local-path]", "[local-path]"]
     assert "secret-token" not in rendered
     assert str(loop) not in rendered
-
-
-@pytest.mark.parametrize("arm", ["lock_evidence", "runtime"])
-def test_runtime_root_preflight_not_required_payload_drops_unsafe_allowed_root(
-    tmp_path: Path,
-    arm: str,
-) -> None:
-    """D6: the not-required payload shares the verdict, emits nothing, never raises.
-
-    The flipped B8 anchor above pins the lock/evidence arm through the exact
-    production ordering; this covers the full runtime arm on the same config.
-    """
-
-    loop = tmp_path / "allowed-loop"
-    loop.symlink_to(loop)
-    approved = tmp_path / "approved"
-    approved.mkdir()
-    config = _gateway_config(tmp_path, allowed_storage_roots=(loop, approved))
-    assert config.require_runtime_roots is False
-    assert config.db_free_required is False
-
-    preflight = _runtime_root_preflight_arm(arm)(config)
-
-    assert preflight["status"] == "not_required"
-    assert preflight["blockers"] == []
-    assert preflight["allowed_roots"] == [str(approved)]
-    assert str(loop) not in preflight["allowed_roots"]
 
 
 # Site 2 (`_db_free_allowed_roots_and_blockers`): the db-free-lane containment bases.
@@ -47585,12 +47352,10 @@ def test_db_free_allowed_roots_keeps_lexical_tolerance_for_loop_root(
     assert blockers == []
 
 
-@pytest.mark.parametrize("db_free_required", [False, True])
 def test_db_free_allowed_roots_admits_missing_root_in_canonical_form(
     tmp_path: Path,
-    db_free_required: bool,
 ) -> None:
-    """ENOENT x both modes: canonical non-strict form, admitted, no blocker.
+    """ENOENT: canonical non-strict form, admitted, no blocker.
 
     `<missing>/../<realdir>` is the discriminating shape: a bare missing leaf is
     already its own canonical form, so it cannot tell "canonicalised" apart from
@@ -47608,10 +47373,7 @@ def test_db_free_allowed_roots_admits_missing_root_in_canonical_form(
     assert _allowed_root_errno(lexical_root) == errno.ENOENT
 
     roots, blockers = scheduler_config_module._db_free_allowed_roots_and_blockers(
-        _AllowedRootsConfigStub(
-            allowed_storage_roots=(lexical_root,),
-            scheduler_db_free_required=db_free_required,
-        )
+        _AllowedRootsConfigStub(allowed_storage_roots=(lexical_root,))
     )
 
     assert roots == (canonical_root,)
@@ -47619,114 +47381,42 @@ def test_db_free_allowed_roots_admits_missing_root_in_canonical_form(
     assert blockers == []
 
 
-def _repair_authority_config(
+def test_db_free_runtime_preflight_measures_raw_authority_roots_against_the_allowed_roots(
+    monkeypatch: Any,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    allowed_storage_roots: tuple[Path, ...],
-) -> ProductionSchedulerConfig:
-    """A database-backed repair-authority run, adapted from `_missing_forcing_repair_config`.
-
-    `db_free_runtime_preflight` runs here even though `scheduler_db_free_required`
-    is False, because `repair_missing_forcing` skips its not-required early exit
-    — and it adjudicates real containment for the copyback and raw-manifest
-    roots on that pass.
-    """
-
-    authority_root = tmp_path / "repair-raw-authority"
-    authority_root.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(
-        source_cycle_raw_manifest_module,
-        "NODE22_CANONICAL_NFS_RAW_AUTHORITY_ROOT",
-        authority_root,
-        raising=False,
-    )
-    return _config(
-        tmp_path,
-        now=_dt("2026-05-21T12:00:00Z"),
-        dry_run=True,
-        lookback_hours=0,
-        cycle_lag_hours=6,
-        max_cycles_per_source=1,
-        backfill_enabled=False,
-        repair_missing_forcing=True,
-        repair_missing_forcing_cycle_time=_dt("2026-05-21T06:00:00Z"),
-        slurm_array_concurrency_bound=32,
-        object_store_copyback_root=authority_root,
-        nfs_raw_manifest_root=authority_root,
-        nfs_raw_manifest_prefix="s3://nhms",
-        database_url="postgresql://nhms:secret@db.prod.example/nhms",
-        allowed_storage_roots=allowed_storage_roots,
-    )
-
-
-def test_db_free_runtime_preflight_blocks_unsafe_allowed_root_on_repair_authority_run(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Database-backed repair lane: the phantom containment base is eliminated.
+    """The copyback and raw-manifest roots are contained only by an approved root.
 
-    The lexical tolerance is a property of the db-free lane, not of a
-    database-backed run passing through it, so here the unresolvable root is
-    dropped and this lane's own blocker family records why. The copyback and
-    raw-manifest containment verdicts on the same pass are then decided against
-    the surviving approved root only.
+    DB-free (#3252) home of the containment verdicts the deleted database-backed
+    repair-authority anchors carried: inside the approved roots both roots read
+    ``contained``; with the object store dropped from
+    ``NHMS_SCHEDULER_ALLOWED_ROOTS`` both are reported outside the boundary,
+    fail-closed, with no raw path in the payload.
     """
 
-    loop = tmp_path / "authority-loop"
-    loop.symlink_to(loop)
-    config = _repair_authority_config(tmp_path, monkeypatch, allowed_storage_roots=(loop, tmp_path))
-    assert config.scheduler_db_free_required is False
-    assert config.repair_missing_forcing is True
+    roots, _paths = _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    authority_fields = ("NHMS_OBJECT_STORE_COPYBACK_ROOT", "NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT")
 
-    roots, blockers = scheduler_config_module._db_free_allowed_roots_and_blockers(config)
-    preflight = config.db_free_runtime_preflight()
+    inside = ProductionSchedulerConfig(scheduler_db_free_required=True).db_free_runtime_preflight()
 
-    assert roots == (tmp_path,)
-    assert loop not in roots
-    assert blockers == [
-        {
-            "code": "db_free_allowed_root_unsafe",
-            "field": "NHMS_SCHEDULER_ALLOWED_ROOTS",
-            "reason": "unsafe_path",
-            "message": (
-                "DB-free scheduler runtime field NHMS_SCHEDULER_ALLOWED_ROOTS "
-                "is not a safe all-file configuration."
-            ),
-            "path": "[local-path]",
+    for field in authority_fields:
+        assert inside["checks"][field]["contained"] is True
+        assert field not in {blocker["field"] for blocker in inside["blockers"]}
+
+    monkeypatch.setenv(
+        "NHMS_SCHEDULER_ALLOWED_ROOTS",
+        os.pathsep.join(str(roots[key]) for key in ("workspace_root", "published_root", "runtime_root", "temp_root")),
+    )
+    outside = ProductionSchedulerConfig(scheduler_db_free_required=True).db_free_runtime_preflight()
+    rendered = json.dumps(outside, sort_keys=True)
+
+    assert outside["status"] == "blocked"
+    for field in authority_fields:
+        assert outside["checks"][field]["contained"] is False
+        assert ("db_free_required_path_outside_boundary", field) in {
+            (blocker["code"], blocker["field"]) for blocker in outside["blockers"]
         }
-    ]
-    assert preflight["status"] == "blocked"
-    assert blockers[0] in preflight["blockers"]
-    assert preflight["checks"]["NHMS_OBJECT_STORE_COPYBACK_ROOT"]["contained"] is True
-    assert preflight["checks"]["NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT"]["contained"] is True
-    assert str(loop) not in json.dumps(preflight, sort_keys=True)
-
-
-def test_db_free_runtime_preflight_drops_every_containment_base_when_only_root_is_unsafe(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """With the loop as the only configured root the lane keeps no base at all.
-
-    Fail-closed: the copyback/raw-manifest roots are then reported outside the
-    boundary instead of being vouched for by a root the kernel cannot walk.
-    """
-
-    loop = tmp_path / "authority-loop"
-    loop.symlink_to(loop)
-    config = _repair_authority_config(tmp_path, monkeypatch, allowed_storage_roots=(loop,))
-
-    roots, blockers = scheduler_config_module._db_free_allowed_roots_and_blockers(config)
-    preflight = config.db_free_runtime_preflight()
-
-    assert roots == ()
-    assert [blocker["code"] for blocker in blockers] == ["db_free_allowed_root_unsafe"]
-    assert preflight["status"] == "blocked"
-    codes = [blocker["code"] for blocker in preflight["blockers"]]
-    assert codes[0] == "db_free_allowed_root_unsafe"
-    assert "db_free_required_path_outside_boundary" in codes
-    assert preflight["checks"]["NHMS_OBJECT_STORE_COPYBACK_ROOT"]["contained"] is False
+    assert str(roots["object_store_root"]) not in rendered
 
 
 def test_db_free_lanes_report_the_resolution_reason_for_out_of_root_loops(tmp_path: Path) -> None:
@@ -47885,21 +47575,29 @@ class _AssertNoSubmitOrchestrator:
         raise AssertionError("orchestrator must not run when SHUD preflight blocks submission")
 
 
-def _slurm_shud_scheduler(tmp_path: Path, *, shud_executable: str) -> tuple[Any, Any]:
-    roots = _slurm_roots(tmp_path)
+def _slurm_shud_scheduler(tmp_path: Path, monkeypatch: Any, *, shud_executable: str) -> tuple[Any, Any]:
+    # Explicitly DB-free (#3252). DB-free mode forbids a ``database_url``, so the
+    # credential the evidence must never carry moved from the database URL to
+    # the Slurm gateway URL's userinfo.
+    now = _dt("2026-05-21T12:00:00Z")
+    roots = _db_free_slurm_roots(monkeypatch, tmp_path, generated_at=now)
     orchestrator = _AssertNoSubmitOrchestrator()
     config = _config(
         roots["workspace_root"],
-        now=_dt("2026-05-21T12:00:00Z"),
+        db_free=True,
+        now=now,
         dry_run=False,
         slurm_execution_enabled=True,
-        database_url="postgresql://nhms:secret@db.prod.example/nhms",
+        slurm_gateway_url="http://nhms:secret-password@gw-node22.internal:8000",
         object_store_root=roots["object_store_root"],
         log_root=roots["log_root"],
         runtime_root=roots["runtime_root"],
         allowed_storage_roots=(tmp_path,),
         slurm_env={"SHUD_EXECUTABLE": shud_executable},
     )
+    assert "secret-password" in str(config.slurm_gateway_url)
+    # No HTTP probe whatever the ambient gateway backend is.
+    monkeypatch.setattr(scheduler_module, "_default_gateway_probe", _healthy_gateway_probe)
     scheduler = ProductionScheduler(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
@@ -47928,7 +47626,7 @@ def test_scheduler_slurm_preflight_blocks_stub_or_missing_shud_before_submit(
     # scheduler cannot fall back to a valid one set by the autouse fixture.
     if shud_executable == "":
         monkeypatch.delenv("SHUD_EXECUTABLE", raising=False)
-    scheduler, orchestrator = _slurm_shud_scheduler(tmp_path, shud_executable=shud_executable)
+    scheduler, orchestrator = _slurm_shud_scheduler(tmp_path, monkeypatch, shud_executable=shud_executable)
 
     result = scheduler.run_once()
 
@@ -47943,6 +47641,8 @@ def test_scheduler_slurm_preflight_blocks_stub_or_missing_shud_before_submit(
     model_run = result.evidence["model_run_evidence"][0]
     assert model_run["status"] == "preflight_blocked"
     assert model_run["submitted"] is False
+    # The gateway endpoint reaches the evidence; its credential does not.
+    assert "gw-node22.internal" in json.dumps(result.evidence)
     assert "secret" not in json.dumps(result.evidence)
 
 
@@ -47959,7 +47659,7 @@ def test_scheduler_slurm_preflight_does_not_leak_library_secrets(
     monkeypatch.setattr(preflight, "_missing_shared_libraries", lambda _resolved: ["libqhh-token.so.2"])
     monkeypatch.setattr(preflight, "_version_identity_signal", lambda _resolved: "present")
 
-    scheduler, orchestrator = _slurm_shud_scheduler(tmp_path, shud_executable=str(binary))
+    scheduler, orchestrator = _slurm_shud_scheduler(tmp_path, monkeypatch, shud_executable=str(binary))
 
     result = scheduler.run_once()
 
@@ -47969,19 +47669,23 @@ def test_scheduler_slurm_preflight_does_not_leak_library_secrets(
     library_blockers = [b for b in blockers if b["code"] == "SHUD_EXECUTABLE_LIBRARY_MISSING"]
     assert library_blockers
     assert library_blockers[0]["library"] == "libqhh-token.so.2"
+    # The gateway endpoint reaches the evidence; its credential does not.
+    assert "gw-node22.internal" in json.dumps(result.evidence)
     assert "password" not in json.dumps(result.evidence)
 
 
 # --- M23-7 (#258): node-22 Slurm gateway preflight ---------------------------
 
 
-def _gateway_config(tmp_path: Path, **kwargs: Any) -> ProductionSchedulerConfig:
-    defaults = {
-        "slurm_execution_enabled": True,
-        "database_url": "postgresql://nhms:secret@db.prod.example/nhms",
-    }
+def _gateway_config(tmp_path: Path, *, db_free: bool | None = None, **kwargs: Any) -> ProductionSchedulerConfig:
+    # ``db_free=True`` (#3252) builds the config explicitly DB-free and drops
+    # the ``database_url`` default (DB-free mode forbids one). Omitted, the
+    # database-backed defaults and the env-driven mode stay as they were.
+    defaults: dict[str, Any] = {"slurm_execution_enabled": True}
+    if not db_free:
+        defaults["database_url"] = "postgresql://nhms:secret@db.prod.example/nhms"
     defaults.update(kwargs)
-    return _config(tmp_path, **defaults)
+    return _config(tmp_path, db_free=db_free, **defaults)
 
 
 def _healthy_gateway_probe(_config: ProductionSchedulerConfig) -> dict[str, Any]:
@@ -47996,7 +47700,7 @@ def _healthy_gateway_probe(_config: ProductionSchedulerConfig) -> dict[str, Any]
 
 
 def test_slurm_gateway_check_healthy_records_mode_without_credentials(tmp_path: Path) -> None:
-    config = _gateway_config(tmp_path, slurm_gateway_url="https://user:pass@gw-node22.internal:8000")
+    config = _gateway_config(tmp_path, db_free=True, slurm_gateway_url="https://user:pass@gw-node22.internal:8000")
 
     checks, blockers = scheduler_module._slurm_gateway_check(config, probe=_healthy_gateway_probe)
 
@@ -48010,7 +47714,7 @@ def test_slurm_gateway_check_healthy_records_mode_without_credentials(tmp_path: 
 
 
 def test_slurm_gateway_check_unavailable_blocks(tmp_path: Path) -> None:
-    config = _gateway_config(tmp_path, slurm_gateway_url="http://gw-node22.internal:8000")
+    config = _gateway_config(tmp_path, db_free=True, slurm_gateway_url="http://gw-node22.internal:8000")
 
     def unhealthy(_config: ProductionSchedulerConfig) -> dict[str, Any]:
         return {"mode": "real", "healthy": False, "reason": "sinfo --version failed"}
@@ -48027,7 +47731,7 @@ def test_slurm_gateway_check_self_reference_blocks_with_real_backend(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(scheduler_module, "_slurm_gateway_backend", lambda: "real")
-    config = _gateway_config(tmp_path, slurm_gateway_url="http://localhost:8000", service_port=8000)
+    config = _gateway_config(tmp_path, db_free=True, slurm_gateway_url="http://localhost:8000", service_port=8000)
 
     checks, blockers = scheduler_module._slurm_gateway_check(config, probe=_healthy_gateway_probe)
 
@@ -48043,7 +47747,7 @@ def test_slurm_gateway_check_does_not_flag_colocated_mock_default(
 ) -> None:
     # never-break: the mock co-located dev convention (localhost:8000) is allowed.
     monkeypatch.setattr(scheduler_module, "_slurm_gateway_backend", lambda: "mock")
-    config = _gateway_config(tmp_path, slurm_gateway_url="http://localhost:8000", service_port=8000)
+    config = _gateway_config(tmp_path, db_free=True, slurm_gateway_url="http://localhost:8000", service_port=8000)
 
     _checks, blockers = scheduler_module._slurm_gateway_check(config, probe=_healthy_gateway_probe)
 
@@ -48051,7 +47755,7 @@ def test_slurm_gateway_check_does_not_flag_colocated_mock_default(
 
 
 def test_slurm_gateway_check_probe_exception_fails_safe(tmp_path: Path) -> None:
-    config = _gateway_config(tmp_path, slurm_gateway_url="http://gw-node22.internal:8000")
+    config = _gateway_config(tmp_path, db_free=True, slurm_gateway_url="http://gw-node22.internal:8000")
 
     def boom(_config: ProductionSchedulerConfig) -> dict[str, Any]:
         raise RuntimeError("slurm cli missing")
@@ -48071,6 +47775,7 @@ def test_slurm_preflight_ready_with_healthy_gateway_adds_no_blocker(
     monkeypatch.setattr(scheduler_module, "_default_gateway_probe", _healthy_gateway_probe)
     config = _gateway_config(
         roots["workspace_root"],
+        db_free=True,
         slurm_gateway_url="http://gw-node22.internal:8000",
         object_store_root=roots["object_store_root"],
         log_root=roots["log_root"],
@@ -48099,6 +47804,7 @@ def test_slurm_preflight_blocked_when_gateway_unavailable(
     monkeypatch.setattr(scheduler_module, "_default_gateway_probe", unhealthy)
     config = _gateway_config(
         roots["workspace_root"],
+        db_free=True,
         slurm_gateway_url="http://gw-node22.internal:8000",
         object_store_root=roots["object_store_root"],
         log_root=roots["log_root"],
@@ -48127,7 +47833,7 @@ def test_slurm_gateway_check_real_backend_remote_host_is_not_self_reference(
     # host (with or without scheme) must NOT be flagged as a self-reference,
     # even when the port matches the service's own listen port.
     monkeypatch.setattr(scheduler_module, "_slurm_gateway_backend", lambda: "real")
-    config = _gateway_config(tmp_path, slurm_gateway_url=gateway_url, service_port=8000)
+    config = _gateway_config(tmp_path, db_free=True, slurm_gateway_url=gateway_url, service_port=8000)
 
     checks, blockers = scheduler_module._slurm_gateway_check(config, probe=_healthy_gateway_probe)
 
@@ -48146,7 +47852,7 @@ def test_slurm_gateway_check_self_reference_blocks_schemeless_localhost(
     # mis-parsed ``localhost:`` as a scheme, returned host=None, and the guard
     # silently passed.
     monkeypatch.setattr(scheduler_module, "_slurm_gateway_backend", lambda: "real")
-    config = _gateway_config(tmp_path, slurm_gateway_url="localhost:8000", service_port=8000)
+    config = _gateway_config(tmp_path, db_free=True, slurm_gateway_url="localhost:8000", service_port=8000)
 
     checks, blockers = scheduler_module._slurm_gateway_check(config, probe=_healthy_gateway_probe)
 
@@ -48169,7 +47875,7 @@ def test_grib_env_check_valid_root_passes(tmp_path: Path, monkeypatch: pytest.Mo
     root = tmp_path / "nhms-grib"
     (root / "bin").mkdir(parents=True)
     (root / "lib").mkdir(parents=True)
-    config = _config(tmp_path, slurm_env={"NHMS_GRIB_ENV_ROOT": str(root)})
+    config = _config(tmp_path, db_free=True, slurm_env={"NHMS_GRIB_ENV_ROOT": str(root)})
 
     checks, blockers = scheduler_module._slurm_grib_env_check(config)
 
@@ -48182,7 +47888,7 @@ def test_grib_env_check_root_missing_bin_blocks(tmp_path: Path, monkeypatch: pyt
     _clear_grib_env(monkeypatch)
     root = tmp_path / "nhms-grib"
     (root / "lib").mkdir(parents=True)  # bin/ absent
-    config = _config(tmp_path, slurm_env={"NHMS_GRIB_ENV_ROOT": str(root)})
+    config = _config(tmp_path, db_free=True, slurm_env={"NHMS_GRIB_ENV_ROOT": str(root)})
 
     _checks, blockers = scheduler_module._slurm_grib_env_check(config)
 
@@ -48194,7 +47900,7 @@ def test_grib_env_check_root_missing_lib_blocks(tmp_path: Path, monkeypatch: pyt
     _clear_grib_env(monkeypatch)
     root = tmp_path / "nhms-grib"
     (root / "bin").mkdir(parents=True)  # lib/ absent
-    config = _config(tmp_path, slurm_env={"NHMS_GRIB_ENV_ROOT": str(root)})
+    config = _config(tmp_path, db_free=True, slurm_env={"NHMS_GRIB_ENV_ROOT": str(root)})
 
     _checks, blockers = scheduler_module._slurm_grib_env_check(config)
 
@@ -48208,6 +47914,7 @@ def test_grib_env_check_empty_root_with_system_eccodes_asserted_passes(
     _clear_grib_env(monkeypatch)
     config = _config(
         tmp_path,
+        db_free=True,
         slurm_env={"NHMS_GRIB_ENV_ROOT": "", "NHMS_GRIB_SYSTEM_ECCODES": "1"},
     )
 
@@ -48220,7 +47927,7 @@ def test_grib_env_check_empty_root_with_system_eccodes_asserted_passes(
 def test_grib_env_check_empty_root_without_assertion_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Default no-fence: empty root + nothing asserted -> no GRIB blocker.
     _clear_grib_env(monkeypatch)
-    config = _config(tmp_path, slurm_env={})
+    config = _config(tmp_path, db_free=True, slurm_env={})
 
     checks, blockers = scheduler_module._slurm_grib_env_check(config)
 
@@ -48237,6 +47944,7 @@ def test_grib_env_check_empty_root_nodes_lacking_eccodes_asserted_blocks(
     _clear_grib_env(monkeypatch)
     config = _config(
         tmp_path,
+        db_free=True,
         slurm_env={"NHMS_GRIB_ENV_ROOT": "", "NHMS_GRIB_SYSTEM_ECCODES": "false"},
     )
 
@@ -48249,7 +47957,7 @@ def test_grib_env_check_empty_root_nodes_lacking_eccodes_asserted_blocks(
 
 def test_grib_env_check_probe_exception_fails_safe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _clear_grib_env(monkeypatch)
-    config = _config(tmp_path, slurm_env={})
+    config = _config(tmp_path, db_free=True, slurm_env={})
 
     def boom(_config: ProductionSchedulerConfig) -> dict[str, Any]:
         raise RuntimeError("cannot reach compute node")
@@ -48268,6 +47976,7 @@ def test_slurm_preflight_surfaces_grib_blocker_end_to_end(tmp_path: Path, monkey
     monkeypatch.setattr(scheduler_module, "_default_gateway_probe", _healthy_gateway_probe)
     config = _gateway_config(
         roots["workspace_root"],
+        db_free=True,
         slurm_gateway_url="http://gw-node22.internal:8000",
         object_store_root=roots["object_store_root"],
         log_root=roots["log_root"],
@@ -48364,7 +48073,7 @@ def test_preflight_http_probes_configured_gateway_url(
     monkeypatch.setattr(gateway_module, "create_gateway", _boom)
     client = _install_fake_httpx(monkeypatch, response=_FakeHttpResponse(200, _healthy_health_payload()))
 
-    config = _gateway_config(tmp_path, slurm_gateway_url="http://gw-node22.internal:8081")
+    config = _gateway_config(tmp_path, db_free=True, slurm_gateway_url="http://gw-node22.internal:8081")
     result = scheduler_module._default_gateway_probe(config)
 
     assert client.last_url == "http://gw-node22.internal:8081/api/v1/slurm/health"
@@ -48381,7 +48090,7 @@ def test_preflight_http_probe_missing_binary_blocks(
     payload["binaries"]["sacct"] = {"resolved": True, "executable": False, "detail": "no sacct"}
     _install_fake_httpx(monkeypatch, response=_FakeHttpResponse(200, payload))
 
-    config = _gateway_config(tmp_path, slurm_gateway_url="http://gw-node22.internal:8081")
+    config = _gateway_config(tmp_path, db_free=True, slurm_gateway_url="http://gw-node22.internal:8081")
     result = scheduler_module._default_gateway_probe(config)
 
     assert result["healthy"] is False
@@ -48396,7 +48105,7 @@ def test_preflight_http_probe_unreachable_fails_safe(
 
     _install_fake_httpx(monkeypatch, raise_error=httpx.ConnectError("connection refused"))
 
-    config = _gateway_config(tmp_path, slurm_gateway_url="http://gw-node22.internal:8081")
+    config = _gateway_config(tmp_path, db_free=True, slurm_gateway_url="http://gw-node22.internal:8081")
     result = scheduler_module._default_gateway_probe(config)
 
     assert result["healthy"] is False
@@ -48409,7 +48118,7 @@ def test_preflight_http_probe_non_2xx_fails_safe(
 ) -> None:
     _install_fake_httpx(monkeypatch, response=_FakeHttpResponse(503, {"detail": "unavailable"}))
 
-    config = _gateway_config(tmp_path, slurm_gateway_url="http://gw-node22.internal:8081")
+    config = _gateway_config(tmp_path, db_free=True, slurm_gateway_url="http://gw-node22.internal:8081")
     result = scheduler_module._default_gateway_probe(config)
 
     assert result["healthy"] is False
@@ -48424,7 +48133,7 @@ def test_preflight_http_probe_legacy_status_only_fallback(
     # accepted via the legacy fallback.
     _install_fake_httpx(monkeypatch, response=_FakeHttpResponse(200, {"status": "ok", "backend": "mock"}))
 
-    config = _gateway_config(tmp_path, slurm_gateway_url="http://gw-node22.internal:8081")
+    config = _gateway_config(tmp_path, db_free=True, slurm_gateway_url="http://gw-node22.internal:8081")
     result = scheduler_module._default_gateway_probe(config)
 
     assert result["healthy"] is True
@@ -48442,6 +48151,7 @@ def test_unreachable_or_unhealthy_gateway_blocks_before_mutation(
     roots = _slurm_roots(tmp_path)
     config = _gateway_config(
         roots["workspace_root"],
+        db_free=True,
         slurm_gateway_url="http://gw-node22.internal:8081",
         object_store_root=roots["object_store_root"],
         log_root=roots["log_root"],
@@ -48461,7 +48171,7 @@ def test_unreachable_or_unhealthy_gateway_blocks_before_mutation(
 def test_slurm_gateway_check_healthy_but_not_submit_capable_blocks(tmp_path: Path) -> None:
     # A gateway that is healthy and has accounting but cannot submit must still
     # be blocked: submit capability is required before any submission.
-    config = _gateway_config(tmp_path, slurm_gateway_url="http://gw-node22.internal:8000")
+    config = _gateway_config(tmp_path, db_free=True, slurm_gateway_url="http://gw-node22.internal:8000")
 
     def healthy_no_submit(_config: ProductionSchedulerConfig) -> dict[str, Any]:
         return {
@@ -48568,12 +48278,13 @@ def test_concurrent_candidates_submits_overlap(tmp_path: Path) -> None:
         orchestrators.setdefault(source_id, _BarrierOrchestrator(barrier))
         return orchestrators[source_id]
 
-    config = _config(tmp_path, sources=("gfs", "IFS"), concurrent_submit_bound=4)
+    config = _config(tmp_path, db_free=True, sources=("gfs", "IFS"), concurrent_submit_bound=4)
     scheduler = ProductionScheduler(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", []), "IFS": FakeAdapter("IFS", [])},
         orchestrator_factory=_factory,
+        active_repository=_empty_file_journal(tmp_path),
     )
 
     candidates = [
@@ -48612,12 +48323,13 @@ def test_concurrent_candidates_submits_overlap(tmp_path: Path) -> None:
 
 def test_same_source_cycle_candidates_submit_as_one_multi_basin_cohort(tmp_path: Path) -> None:
     orchestrator = FakeProductionOrchestrator()
-    config = _config(tmp_path, sources=("gfs",), concurrent_submit_bound=2)
+    config = _config(tmp_path, db_free=True, sources=("gfs",), concurrent_submit_bound=2)
     scheduler = ProductionScheduler(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a"), _model("model_b", "basin_b")]),
         adapters={"gfs": FakeAdapter("gfs", [])},
         orchestrator_factory=lambda _source_id: orchestrator,
+        active_repository=_empty_file_journal(tmp_path),
     )
 
     candidates = [
@@ -48670,11 +48382,12 @@ def test_cross_source_slurm_cohorts_overlap_without_local_forcing(
     forcing_producer = FakeForcingProducer()
     orchestrator = _AdvancingOrchestrator()
     scheduler = ProductionScheduler(
-        _config(tmp_path, sources=("gfs", "IFS"), concurrent_submit_bound=2),
+        _config(tmp_path, db_free=True, sources=("gfs", "IFS"), concurrent_submit_bound=2),
         registry=FakeRegistry([_model("model_a", "basin_a"), _model("model_b", "basin_b")]),
         adapters={"gfs": FakeAdapter("gfs", []), "IFS": FakeAdapter("IFS", [])},
         forcing_producer=forcing_producer,
         orchestrator_factory=lambda _source_id: orchestrator,
+        active_repository=_empty_file_journal(tmp_path),
     )
     candidates = [
         _concurrency_candidate("gfs", "model_a", "basin_a"),
@@ -48717,12 +48430,13 @@ def test_concurrent_submit_bound_gt_one_dedupes_same_candidate_resubmit(tmp_path
             )
 
     orchestrator = _CountingOrchestrator()
-    config = _config(tmp_path, sources=("gfs",), concurrent_submit_bound=2)
+    config = _config(tmp_path, db_free=True, sources=("gfs",), concurrent_submit_bound=2)
     scheduler = ProductionScheduler(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [])},
         orchestrator_factory=lambda _source_id: orchestrator,
+        active_repository=_empty_file_journal(tmp_path),
     )
     candidate = _concurrency_candidate("gfs", "model_a", "basin_a")
 
@@ -48784,12 +48498,13 @@ def test_concurrent_submit_bound_one_keeps_sequential_evidence_order(tmp_path: P
                 candidate_outcomes=(),
             )
 
-    config = _config(tmp_path, sources=("gfs", "IFS"), concurrent_submit_bound=1)
+    config = _config(tmp_path, db_free=True, sources=("gfs", "IFS"), concurrent_submit_bound=1)
     scheduler = ProductionScheduler(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", []), "IFS": FakeAdapter("IFS", [])},
         orchestrator_factory=lambda _source_id: _SequentialProofOrchestrator(),
+        active_repository=_empty_file_journal(tmp_path),
     )
 
     candidates = [
@@ -48861,12 +48576,13 @@ def test_mixed_cohort_orchestrator_exception_keeps_sibling_cohort_evidence(tmp_p
         "gfs": _MixedOutcomeOrchestrator(raise_on_submit=True),
         "IFS": _MixedOutcomeOrchestrator(raise_on_submit=False),
     }
-    config = _config(tmp_path, sources=("gfs", "IFS"), concurrent_submit_bound=2)
+    config = _config(tmp_path, db_free=True, sources=("gfs", "IFS"), concurrent_submit_bound=2)
     scheduler = ProductionScheduler(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", []), "IFS": FakeAdapter("IFS", [])},
         orchestrator_factory=lambda source_id: orchestrators[source_id],
+        active_repository=_empty_file_journal(tmp_path),
     )
 
     candidates = [
@@ -48903,7 +48619,7 @@ def test_mixed_cohort_orchestrator_exception_keeps_sibling_cohort_evidence(tmp_p
     assert submitted["pipeline_run_id"] == "cycle_ifs_2026052106"
 
 
-def test_scheduler_pass_startup_reconciles_reserved_unbound_jobs(tmp_path: Path) -> None:
+def test_scheduler_pass_startup_reconciles_reserved_unbound_jobs(tmp_path: Path, monkeypatch: Any) -> None:
     """An executing scheduler pass MUST, at startup (after lock + root preflight,
     before planning/submitting), run reserved-unbound reconcile so a submit-crash
     reservation is bound back to its real slurm_job_id by the idempotency comment
@@ -48960,7 +48676,7 @@ def test_scheduler_pass_startup_reconciles_reserved_unbound_jobs(tmp_path: Path)
         return None
 
     scheduler = _RealProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         # No discoverable cycles: the pass still reaches the startup reconcile
         # hook (which runs before candidate discovery), so this isolates item 3.
@@ -49097,14 +48813,16 @@ def test_restart_reconcile_adapters_use_configured_slurm_binary_path(
     assert paths == [("comment", "/opt/slurm/bin"), ("job", "/opt/slurm/bin")]
 
 
-def test_scheduler_run_once_reconciles_real_file_journal_reservation(tmp_path: Path) -> None:
+def test_scheduler_run_once_reconciles_real_file_journal_reservation(tmp_path: Path, monkeypatch: Any) -> None:
     """Public pass seam complements the strict DB-free direct-reconcile oracle."""
     from services.orchestrator.reconcile import SacctRecord
     from services.orchestrator.reservation import slurm_comment_for
 
     cycle_time = _dt("2026-05-21T06:00:00Z")
     key = "gfs:gfs_2026052106:basin_a:forecast"
-    repository = scheduler_module.FileOrchestrationJournalRepository(tmp_path / "journal")
+    roots, paths = _db_free_pass_env(monkeypatch, tmp_path)
+    journal_root = paths["NHMS_SCHEDULER_JOURNAL_ROOT"]
+    repository = scheduler_module.FileOrchestrationJournalRepository(journal_root)
     repository.reserve_pipeline_job(
         {
             "job_id": "job_run_once_reserved",
@@ -49129,10 +48847,11 @@ def test_scheduler_run_once_reconciles_real_file_journal_reservation(tmp_path: P
 
     scheduler = _RealProductionScheduler(
         _config(
-            tmp_path,
+            roots["workspace_root"],
+            db_free=True,
             dry_run=False,
             scheduler_journal_backend="file",
-            scheduler_journal_root=tmp_path / "journal",
+            scheduler_journal_root=journal_root,
             database_url=None,
             database_url_configured=False,
         ),
@@ -49221,7 +48940,11 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
         ),
     )
 
-    root = tmp_path / "journal"
+    # Explicitly DB-free (#3252): every pass shares the env's workspace (its
+    # lock and evidence roots live there) and its journal root.
+    roots, paths = _db_free_pass_env(monkeypatch, tmp_path, generated_at=_dt("2026-05-21T12:00:00Z"))
+    workspace_root = roots["workspace_root"]
+    root = paths["NHMS_SCHEDULER_JOURNAL_ROOT"]
     models = [_model(f"model_{index}", f"basin_{index}") for index in range(18)]
     for model in models:
         model["model_package_checksum"] = f"sha256:model-{model['model_id']}"
@@ -49231,7 +48954,9 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
         }
     first_repository = scheduler_module.FileOrchestrationJournalRepository(root)
     chain_workspace = tmp_path / "chain-workspace"
-    chain_object_root = tmp_path / "chain-object-store"
+    # The chain writes where the DB-free copyback root (the env's object store)
+    # will look for the trees a resumed run references.
+    chain_object_root = roots["object_store_root"]
 
     class AcceptedForecastTimeoutClient(ImmediateTerminalSlurmClient):
         def __init__(self) -> None:
@@ -49282,7 +49007,8 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
     initial_orchestrator = real_orchestrator(first_repository, initial_client, terminal_stage="forecast")
     initial_scheduler = _RealProductionScheduler(
         _config(
-            tmp_path / "initial",
+            workspace_root,
+            db_free=True,
             sources=(source_id,),
             dry_run=False,
             now=_dt("2026-05-21T12:00:00Z"),
@@ -49347,7 +49073,7 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
 
     wrong_repository = scheduler_module.FileOrchestrationJournalRepository(root)
     wrong_scheduler = _RealProductionScheduler(
-        _config(tmp_path / "wrong", sources=(source_id,), dry_run=False),
+        _config(workspace_root, db_free=True, sources=(source_id,), dry_run=False),
         registry=FakeRegistry(models),
         adapters={},
         active_repository=wrong_repository,
@@ -49391,7 +49117,7 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
 
     partial_repository = scheduler_module.FileOrchestrationJournalRepository(root)
     partial_scheduler = _RealProductionScheduler(
-        _config(tmp_path / "partial", sources=(source_id,), dry_run=False),
+        _config(workspace_root, db_free=True, sources=(source_id,), dry_run=False),
         registry=FakeRegistry(models),
         adapters={},
         active_repository=partial_repository,
@@ -49479,7 +49205,7 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
 
     complete_repository = scheduler_module.FileOrchestrationJournalRepository(root)
     complete_scheduler = _RealProductionScheduler(
-        _config(tmp_path / "complete", sources=(source_id,), dry_run=False),
+        _config(workspace_root, db_free=True, sources=(source_id,), dry_run=False),
         registry=FakeRegistry(models),
         adapters={},
         active_repository=complete_repository,
@@ -49555,7 +49281,7 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
         # missing-forcing blocker the ``False`` arm exists to cover.
         _seed_recorded_forcing_packages(
             monkeypatch,
-            tmp_path / "recorded-forcing-object-store",
+            roots["object_store_root"],
             recorded_forcing_package_uri,
         )
         _record_journal_forcing_provenance(
@@ -49584,7 +49310,8 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
     )
     resumed_scheduler = _RealProductionScheduler(
         _config(
-            tmp_path / "resumed",
+            workspace_root,
+            db_free=True,
             sources=(source_id,),
             dry_run=False,
             now=_dt("2026-05-21T12:00:00Z"),
@@ -49785,7 +49512,7 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
     assert len(resumed_repository.get_pipeline_job(reserved.job_id)["candidate_projections"]) == 18
 
 
-def test_restart_reconcile_error_marks_final_mutation_proof_unknown(tmp_path: Path) -> None:
+def test_restart_reconcile_error_marks_final_mutation_proof_unknown(tmp_path: Path, monkeypatch: Any) -> None:
     from services.orchestrator.reconcile import SacctRecord
     from services.orchestrator.reservation import slurm_comment_for
 
@@ -49823,7 +49550,7 @@ def test_restart_reconcile_error_marks_final_mutation_proof_unknown(tmp_path: Pa
         return None
 
     scheduler = _RealProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [])},
         active_repository=FakeActiveRepository(active=False),
@@ -49908,7 +49635,7 @@ def test_restart_reconcile_mutation_is_recorded_when_later_reservation_blocks(
 
     monkeypatch.setattr(scheduler_module, "uuid4", lambda: type("FixedUUID", (), {"hex": suffix})())
     scheduler = _RealProductionScheduler(
-        _config(tmp_path, now=now, dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=now, dry_run=False),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
         active_repository=FakeActiveRepository(active=False),
@@ -49919,7 +49646,8 @@ def test_restart_reconcile_mutation_is_recorded_when_later_reservation_blocks(
         reconcile_sacct_query=lambda _slurm_job_id: None,
     )
     reservation_path = Path(scheduler.config.evidence_dir) / f"{pass_id}.pre_execution.json"
-    reservation_path.parent.mkdir(parents=True)
+    # The DB-free env already created the evidence root (#3252).
+    reservation_path.parent.mkdir(parents=True, exist_ok=True)
     reservation_path.write_text("existing reservation\n", encoding="utf-8")
 
     result = scheduler.run_once()
@@ -49983,7 +49711,7 @@ def test_concurrency_stays_within_configured_bound(tmp_path: Path) -> None:
                 candidate_outcomes=(),
             )
 
-    config = _config(tmp_path, sources=("gfs", "IFS", "ERA5"), concurrent_submit_bound=2)
+    config = _config(tmp_path, db_free=True, sources=("gfs", "IFS", "ERA5"), concurrent_submit_bound=2)
     scheduler = ProductionScheduler(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
@@ -49993,6 +49721,7 @@ def test_concurrency_stays_within_configured_bound(tmp_path: Path) -> None:
             "ERA5": FakeAdapter("ERA5", []),
         },
         orchestrator_factory=lambda _s: _CountingOrchestrator(),
+        active_repository=_empty_file_journal(tmp_path),
     )
 
     candidates = [
@@ -50062,6 +49791,7 @@ def test_repair_bound_32_dispatches_36_candidates_as_two_cross_source_slurm_coho
     scheduler = ProductionScheduler(
         _config(
             tmp_path,
+            db_free=True,
             sources=("gfs", "IFS"),
             concurrent_submit_bound=32,
             slurm_array_concurrency_bound=32,
@@ -50074,6 +49804,7 @@ def test_repair_bound_32_dispatches_36_candidates_as_two_cross_source_slurm_coho
         registry=FakeRegistry([_model("model_00", "basin_00")]),
         adapters={"gfs": FakeAdapter("gfs", []), "IFS": FakeAdapter("IFS", [])},
         orchestrator_factory=lambda _source_id: _Bound32Orchestrator(),
+        active_repository=_empty_file_journal(tmp_path),
     )
     candidates = [
         replace(
@@ -50189,9 +49920,10 @@ def _override_block(*model_ids: str) -> str:
 
 def _profile_split_scheduler(tmp_path: Path, **config: Any) -> ProductionScheduler:
     return ProductionScheduler(
-        _config(tmp_path, **config),
+        _config(tmp_path, db_free=True, **config),
         registry=FakeRegistry([_model("model_00", "basin_00")]),
         adapters={"gfs": FakeAdapter("gfs", [])},
+        active_repository=_empty_file_journal(tmp_path),
     )
 
 
@@ -50416,10 +50148,11 @@ def test_resource_profile_split_fails_closed_like_gateway_on_bad_profile_file(
             raise AssertionError("no cohort may be submitted when the profile file is unusable")
 
     scheduler = ProductionScheduler(
-        _config(tmp_path),
+        _config(tmp_path, db_free=True),
         registry=FakeRegistry([_model("model_00", "basin_00")]),
         adapters={"gfs": FakeAdapter("gfs", [])},
         orchestrator_factory=lambda _source_id: _RecordingOrchestrator(),
+        active_repository=_empty_file_journal(tmp_path),
     )
     with pytest.raises(ConfigurationError, match=message):
         scheduler._execute_candidates(candidates)
@@ -50451,10 +50184,11 @@ def test_resource_profile_split_is_recorded_in_pass_submission_evidence(
             str(_write_profiles(tmp_path, _override_block("hlj_dg", "unused_big"))),
         )
         scheduler = ProductionScheduler(
-            _config(tmp_path),
+            _config(tmp_path, db_free=True),
             registry=FakeRegistry([_model("model_00", "basin_00")]),
             adapters={"gfs": FakeAdapter("gfs", [])},
             orchestrator_factory=lambda _source_id: _NoopOrchestrator(),
+            active_repository=_empty_file_journal(tmp_path),
         )
         scheduler._execute_candidates(
             [_concurrency_candidate("gfs", model_id, f"basin_{model_id}") for model_id in ("model_a", "hlj_dg")]
@@ -50530,12 +50264,6 @@ def _read_lock(lock_path: Path) -> dict[str, Any]:
     return json.loads(lock_path.read_text(encoding="utf-8"))
 
 
-def test_scheduler_config_accepts_postgres_lock_backend(tmp_path: Path) -> None:
-    config = _config(tmp_path, scheduler_lock_backend="postgres")
-
-    assert config.scheduler_lock_backend == "postgres"
-
-
 def test_postgres_advisory_lock_key_uses_scheduler_compat_monkeypatch(
     monkeypatch: Any,
 ) -> None:
@@ -50563,48 +50291,6 @@ def test_postgres_advisory_lock_key_uses_scheduler_compat_monkeypatch(
     )
 
     assert patched_lease.lock_key == 123
-
-
-def test_postgres_lock_backend_does_not_touch_file_guard(monkeypatch: Any, tmp_path: Path) -> None:
-    config = _config(
-        tmp_path,
-        dry_run=False,
-        database_url="postgresql://nhms:secret@db.prod.example/nhms",
-        scheduler_lock_backend="postgres",
-    )
-    scheduler = ProductionScheduler(
-        config,
-        registry=FakeRegistry([_model("model_a", "basin_a")]),
-        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=FakeActiveRepository(active=False),
-        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
-        forcing_producer=FakeForcingProducer(),
-        orchestrator_factory=lambda _source_id: FakeProductionOrchestrator(expose_object_store=False),
-    )
-
-    def _unexpected_file_lock(self: Any, *, pass_id: str, started_at: datetime) -> dict[str, Any]:
-        del self, pass_id, started_at
-        raise AssertionError("postgres lock backend must not use the file guard")
-
-    def _contended_postgres_lock(self: Any, *, pass_id: str, started_at: datetime) -> dict[str, Any]:
-        del self, pass_id, started_at
-        return {
-            "acquired": False,
-            "contention": True,
-            "lock_path": str(config.lock_path),
-            "lock_type": "postgres_advisory",
-            "reason": "postgres_advisory_lock_contended",
-            "existing_lock": {"raw": None},
-        }
-
-    monkeypatch.setattr(FileSchedulerLease, "acquire", _unexpected_file_lock)
-    monkeypatch.setattr(PostgresSchedulerLease, "acquire", _contended_postgres_lock)
-
-    result = scheduler.run_once()
-
-    assert result.status == "lock_contended"
-    assert result.evidence["lock"]["lock_type"] == "postgres_advisory"
-    assert result.evidence["lock"]["reason"] == "postgres_advisory_lock_contended"
 
 
 def test_renew_bumps_heartbeat_seq_and_preserves_identity(tmp_path: Path) -> None:
@@ -51079,7 +50765,7 @@ def test_run_once_skips_submission_when_lease_lost_mid_pass(monkeypatch: Any, tm
         raise AssertionError("orchestrator must not be built after lease lost")
 
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
         active_repository=FakeActiveRepository(active=False),
@@ -51108,17 +50794,17 @@ def test_run_once_skips_submission_when_lease_lost_mid_pass(monkeypatch: Any, tm
     assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is False
 
 
-def test_run_once_does_not_fence_healthy_pass_when_lease_held(tmp_path: Path) -> None:
+def test_run_once_does_not_fence_healthy_pass_when_lease_held(tmp_path: Path, monkeypatch: Any) -> None:
     # Common path: lease held (heartbeat.lost stays False) -> the §4.2 guard
     # must NOT fence the pass; it proceeds past the guard into candidate
     # planning + orchestration. (expose_object_store=False keeps the fixture off
     # the env-fragile /tmp LocalObjectStore root so this stays deterministic.)
     orchestrator = FakeProductionOrchestrator(expose_object_store=False)
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=FakeActiveRepository(active=False),
+        active_repository=_db_free_journal_stand_in(FakeActiveRepository(active=False)),
         canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
         forcing_producer=FakeForcingProducer(),
         orchestrator_factory=lambda _source_id: orchestrator,
@@ -51176,6 +50862,7 @@ def _rotation_pad_job(cycle_time: datetime, *, error_message: str) -> dict[str, 
 
 def test_scheduler_run_once_rotates_a_full_cycle_journal_instead_of_parking(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
     """2.2 — the live node-22 incident geometry, end to end.
 
@@ -51190,7 +50877,8 @@ def test_scheduler_run_once_rotates_a_full_cycle_journal_instead_of_parking(
     cycle_time = _dt("2026-05-21T06:00:00Z")
     cycle_segment = format_cycle_time(cycle_time)
     key = "gfs:gfs_2026052106:basin_a:forecast"
-    journal_root = tmp_path / "journal"
+    roots, paths = _db_free_pass_env(monkeypatch, tmp_path)
+    journal_root = paths["NHMS_SCHEDULER_JOURNAL_ROOT"]
     repository = scheduler_module.FileOrchestrationJournalRepository(journal_root)
     repository.reserve_pipeline_job(
         {
@@ -51227,7 +50915,8 @@ def test_scheduler_run_once_rotates_a_full_cycle_journal_instead_of_parking(
 
     scheduler = _RealProductionScheduler(
         _config(
-            tmp_path,
+            roots["workspace_root"],
+            db_free=True,
             dry_run=False,
             scheduler_journal_backend="file",
             scheduler_journal_root=journal_root,
@@ -51321,6 +51010,7 @@ def _accepted_submit_reserved_cohort_row() -> Any:
 
 def test_restart_reconcile_quarantines_a_journal_error_row_and_resolves_the_rest(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
     """2.9 — one poisoned cycle must not abort the whole reserved-unbound pass.
 
@@ -51409,7 +51099,7 @@ def test_restart_reconcile_quarantines_a_journal_error_row_and_resolves_the_rest
         )
 
     scheduler = _RealProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [])},
         active_repository=FakeActiveRepository(active=False),
@@ -51517,7 +51207,11 @@ def test_identity_blocked_release_unwedges_pipeline_already_active(
     from services.orchestrator import chain_runtime_utils
     from tests.test_orchestration_chain import ImmediateTerminalSlurmClient
 
-    repository, record = _reserve_wedged_identity_blocked_master(tmp_path / "journal")
+    # Explicitly DB-free (#3252): the env's journal root and workspace.
+    roots, paths = _db_free_pass_env(monkeypatch, tmp_path, generated_at=_dt("2026-07-12T12:00:00Z"))
+    journal_root = paths["NHMS_SCHEDULER_JOURNAL_ROOT"]
+    chain_object_root = roots["object_store_root"]
+    repository, record = _reserve_wedged_identity_blocked_master(journal_root)
     run_id = str(record["run_id"])
     cycle_time = _dt("2026-07-12T00:00:00Z")
     # #2543: the wedged candidate is ``model_0``, a recorded member of the wedged
@@ -51534,7 +51228,7 @@ def test_identity_blocked_release_unwedges_pipeline_already_active(
     # #1365: "recorded AND existing" now means the package is physically there --
     # the probe no longer fail-opens on an unconfigured object-store root.
     _record_journal_forcing_provenance(
-        tmp_path / "journal",
+        journal_root,
         source_id="GFS",
         cycle_time=cycle_time,
         model_id="model_0",
@@ -51542,7 +51236,7 @@ def test_identity_blocked_release_unwedges_pipeline_already_active(
     )
     _seed_recorded_forcing_packages(
         monkeypatch,
-        tmp_path / "recorded-forcing-object-store",
+        roots["object_store_root"],
         "forcing/gfs/2026071200/basin_0_v1/model_0/forcing_package.json",
     )
     repository.upsert_pipeline_job(
@@ -51587,12 +51281,13 @@ def test_identity_blocked_release_unwedges_pipeline_already_active(
     def scheduler() -> Any:
         return _RealProductionScheduler(
             _config(
-                tmp_path,
+                roots["workspace_root"],
+                db_free=True,
                 dry_run=False,
                 now=_dt("2026-07-12T12:00:00Z"),
                 identity_blocked_streak_limit=3,
                 scheduler_journal_backend="file",
-                scheduler_journal_root=tmp_path / "journal",
+                scheduler_journal_root=journal_root,
                 database_url=None,
                 database_url_configured=False,
             ),
@@ -51603,15 +51298,18 @@ def test_identity_blocked_release_unwedges_pipeline_already_active(
             orchestrator_factory=lambda _source: scheduler_module.ForecastOrchestrator(
                 config=OrchestratorConfig(
                     workspace_root=tmp_path / "chain-workspace",
-                    object_store_root=tmp_path / "chain-object-store",
+                    object_store_root=chain_object_root,
                     object_store_prefix="s3://nhms",
                     poll_interval_seconds=0,
                     job_timeout_seconds=120,  # #1613
                     source_id="gfs",
+                    # DB-free (#3252): no DATABASE_URL, so the chain ends at
+                    # state_save_qc instead of the q_down display publish.
+                    terminal_stage="forecast_state_save_qc",
                 ),
                 repository=repository,
                 slurm_client=ImmediateTerminalSlurmClient(),
-                object_store=LocalObjectStore(tmp_path / "chain-object-store", "s3://nhms"),
+                object_store=LocalObjectStore(chain_object_root, "s3://nhms"),
             ),
             reconcile_store=repository,
             reconcile_comment_query=lambda _key: None,
@@ -54698,7 +54396,7 @@ def test_identity_blocked_convergence_facts_survive_bounded_evidence_and_proofs(
 # --- #1202: duplicate-submission skip on the evidence plane -----------------
 
 
-def test_duplicate_submission_skip_candidate_evidence_is_not_final_success(tmp_path: Path) -> None:
+def test_duplicate_submission_skip_candidate_evidence_is_not_final_success(tmp_path: Path, monkeypatch: Any) -> None:
     """Anchor 5(a) (#1202): a skipped cohort cycle must not read as candidate success.
 
     Pre-change the skip status matched none of
@@ -54722,7 +54420,7 @@ def test_duplicate_submission_skip_candidate_evidence_is_not_final_success(tmp_p
         ),
     )
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=now, dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=now, dry_run=False),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
         orchestrator_factory=lambda _source_id: orchestrator,
@@ -54751,6 +54449,7 @@ def test_duplicate_submission_skip_candidate_evidence_is_not_final_success(tmp_p
 
 def test_duplicate_submission_skips_key_is_scoped_to_cycle_derived_evidence_items(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
     """Anchor 5(b) (#1202): the key is present-and-empty on cycle items only.
 
@@ -54767,7 +54466,7 @@ def test_duplicate_submission_skips_key_is_scoped_to_cycle_derived_evidence_item
     }
     orchestrator = FakeProductionOrchestrator(expose_object_store=False)
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=now, dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=now, dry_run=False),
         registry=FakeRegistry([submitted_model, _model("model_b", "basin_b")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
         orchestrator_factory=lambda _source_id: orchestrator,
@@ -54830,7 +54529,7 @@ def _deferred_nested_retry_cycle_result(tmp_path: Path) -> PipelineResult:
     return orchestrator.orchestrate_cycle("gfs", cycle, cohort)
 
 
-def test_nested_retry_deferred_cycle_surfaces_skip_on_the_evidence_plane(tmp_path: Path) -> None:
+def test_nested_retry_deferred_cycle_surfaces_skip_on_the_evidence_plane(tmp_path: Path, monkeypatch: Any) -> None:
     """A5 (#1322): the nested defer is visible per-candidate, from a REAL cycle.
 
     Master's collapse advances the cycle on a partial terminal and reaches
@@ -54848,7 +54547,7 @@ def test_nested_retry_deferred_cycle_surfaces_skip_on_the_evidence_plane(tmp_pat
     cycle_result = _deferred_nested_retry_cycle_result(tmp_path)
     orchestrator = ReplayedCyclePipelineOrchestrator(cycle_result)
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=now, dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=now, dry_run=False),
         registry=FakeRegistry([_model("model_a", "basin_a"), _model("model_b", "basin_b")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
         orchestrator_factory=lambda _source_id: orchestrator,
@@ -54903,7 +54602,7 @@ def test_reconciliation_pending_statuses_are_non_success_but_not_failed(status: 
     assert _is_failed_model_run_status(status) is False
 
 
-def test_reconciling_cycle_candidate_is_partial_non_success_evidence(tmp_path: Path) -> None:
+def test_reconciling_cycle_candidate_is_partial_non_success_evidence(tmp_path: Path, monkeypatch: Any) -> None:
     """D1 (#1326): an active candidate under a ``reconciling`` cycle terminal.
 
     The cycle-derived item carries the reconciling status, contributes one
@@ -54926,7 +54625,7 @@ def test_reconciling_cycle_candidate_is_partial_non_success_evidence(tmp_path: P
         result_status="reconciling",
     )
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=now, dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=now, dry_run=False),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
         orchestrator_factory=lambda _source_id: orchestrator,
@@ -55100,7 +54799,11 @@ def _first_attempt_real_gateway_ambiguous_cycle_result(
     return result
 
 
-def _assert_first_attempt_ambiguity_unknown_everywhere(tmp_path: Path, cycle_result: PipelineResult) -> None:
+def _assert_first_attempt_ambiguity_unknown_everywhere(
+    tmp_path: Path,
+    monkeypatch: Any,
+    cycle_result: PipelineResult,
+) -> None:
     """Run the real ``ProductionScheduler`` pass and assert unknown at every layer.
 
     Shared by the fallback RuntimeError producer test and the real HTTP-gateway
@@ -55113,7 +54816,7 @@ def _assert_first_attempt_ambiguity_unknown_everywhere(tmp_path: Path, cycle_res
     now = _dt("2026-05-21T12:00:00Z")
     orchestrator = ReplayedCyclePipelineOrchestrator(cycle_result)
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=now, dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=now, dry_run=False),
         registry=FakeRegistry([_model("model_0", "basin_0"), _model("model_1", "basin_1")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T00:00:00Z", True)])},
         orchestrator_factory=lambda _source_id: orchestrator,
@@ -55174,6 +54877,7 @@ def _assert_first_attempt_ambiguity_unknown_everywhere(tmp_path: Path, cycle_res
 
 def test_first_attempt_gateway_ambiguity_keeps_submit_call_unknown_end_to_end(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
     """#1692: producer-proven gateway ambiguity is unknown, never proven-absent.
 
@@ -55196,6 +54900,7 @@ def test_first_attempt_gateway_ambiguity_keeps_submit_call_unknown_end_to_end(
 
     _assert_first_attempt_ambiguity_unknown_everywhere(
         tmp_path,
+        monkeypatch,
         _first_attempt_gateway_ambiguous_cycle_result(tmp_path),
     )
 
@@ -55259,11 +54964,12 @@ def test_first_attempt_real_gateway_origin_code_keeps_submit_call_unknown_end_to
         response_payload=response_payload,
         expected_origin_code=expected_origin_code,
     )
-    _assert_first_attempt_ambiguity_unknown_everywhere(tmp_path, cycle_result)
+    _assert_first_attempt_ambiguity_unknown_everywhere(tmp_path, monkeypatch, cycle_result)
 
 
 def test_token_only_pending_without_producer_provenance_remains_proven_no_submit(
-    tmp_path: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: Any,
 ) -> None:
     """#1692 control: a status token alone never manufactures unknown or positive facts.
 
@@ -55276,6 +54982,10 @@ def test_token_only_pending_without_producer_provenance_remains_proven_no_submit
     """
 
     now = _dt("2026-05-21T12:00:00Z")
+    # DB-free root preflight refuses secret-shaped path components
+    # (``scheduler_runtime_roots.py:389-411``), and this test's own ``tmp_path``
+    # name carries "token"; the DB-free roots live under a neutral base (#3252).
+    tmp_path = tmp_path_factory.mktemp("pending-without-provenance")
     orchestrator = FakeProductionOrchestrator(
         candidate_outcomes=(
             {
@@ -55308,7 +55018,7 @@ def test_token_only_pending_without_producer_provenance_remains_proven_no_submit
         candidate_outcomes=orchestrator.candidate_outcomes,
     )
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=now, dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=now, dry_run=False),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
         orchestrator_factory=lambda _source_id: orchestrator,
@@ -55337,6 +55047,7 @@ def test_token_only_pending_without_producer_provenance_remains_proven_no_submit
 
 def test_nested_pending_produced_artifact_retains_confirmed_submission_facts(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
     """D6 (#1326 Round 1): confirmed dispatch survives through the produced artifact.
 
@@ -55353,7 +55064,7 @@ def test_nested_pending_produced_artifact_retains_confirmed_submission_facts(
     cycle_result = _nested_pending_ambiguous_cycle_result(tmp_path)
     orchestrator = ReplayedCyclePipelineOrchestrator(cycle_result)
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=now, dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=now, dry_run=False),
         registry=FakeRegistry([_model("model_0", "basin_0"), _model("model_1", "basin_1")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T00:00:00Z", True)])},
         orchestrator_factory=lambda _source_id: orchestrator,
@@ -55456,6 +55167,7 @@ def _outer_pending_ambiguous_cycle_result(tmp_path: Path) -> PipelineResult:
 
 def test_outer_pending_produced_artifact_retains_confirmed_submission_facts(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
     """D6 (#1326 Round 2): OUTER retry ambiguity keeps the produced submission facts.
 
@@ -55473,7 +55185,7 @@ def test_outer_pending_produced_artifact_retains_confirmed_submission_facts(
     cycle_result = _outer_pending_ambiguous_cycle_result(tmp_path)
     orchestrator = ReplayedCyclePipelineOrchestrator(cycle_result)
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=now, dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=now, dry_run=False),
         registry=FakeRegistry([_model("model_0", "basin_0"), _model("model_1", "basin_1")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T00:00:00Z", True)])},
         orchestrator_factory=lambda _source_id: orchestrator,
@@ -55587,6 +55299,7 @@ def _multi_hop_pending_ambiguous_cycle_result(tmp_path: Path) -> PipelineResult:
 
 def test_multi_hop_produced_artifact_retains_confirmed_submission_facts(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
     """D6 (#1326 Round 2 depth): multi-hop retry keeps the produced submission facts.
 
@@ -55602,7 +55315,7 @@ def test_multi_hop_produced_artifact_retains_confirmed_submission_facts(
     cycle_result = _multi_hop_pending_ambiguous_cycle_result(tmp_path)
     orchestrator = ReplayedCyclePipelineOrchestrator(cycle_result)
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=now, dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=now, dry_run=False),
         registry=FakeRegistry([_model("model_0", "basin_0"), _model("model_1", "basin_1")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T00:00:00Z", True)])},
         orchestrator_factory=lambda _source_id: orchestrator,
@@ -55706,12 +55419,14 @@ def test_bounded_compaction_retains_no_submit_execution_proof() -> None:
     assert compacted["no_mutation_proof"]["slurm_submit_called"] is False
 
 
-def _no_progress_blocked_scheduler(tmp_path: Path, **config_kwargs: Any) -> ProductionScheduler:
+def _no_progress_blocked_scheduler(monkeypatch: Any, tmp_path: Path, **config_kwargs: Any) -> ProductionScheduler:
     """A fresh scheduler whose only candidate is blocked with a stable reason.
 
     The scheduler is a systemd one-shot, so every cross-pass test builds a NEW
     ``ProductionScheduler`` over the SAME workspace (hence the same evidence
-    root) instead of reusing one in-memory object.
+    root) instead of reusing one in-memory object. Explicitly DB-free (#3252):
+    every pass re-applies the same DB-free env rooted at ``tmp_path``, so the
+    evidence root (and the tracker) is ``tmp_path/workspace/evidence``.
     """
 
     cycle_time = _dt("2026-05-21T06:00:00Z")
@@ -55741,7 +55456,7 @@ def _no_progress_blocked_scheduler(tmp_path: Path, **config_kwargs: Any) -> Prod
         }
     )
     return ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), **config_kwargs),
+        _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), **config_kwargs),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={
             "gfs": FakeAdapter(
@@ -55755,16 +55470,17 @@ def _no_progress_blocked_scheduler(tmp_path: Path, **config_kwargs: Any) -> Prod
     )
 
 
-def _no_progress_blocked_pass(tmp_path: Path, **config_kwargs: Any) -> SchedulerPassResult:
-    return _no_progress_blocked_scheduler(tmp_path, **config_kwargs).run_once()
+def _no_progress_blocked_pass(monkeypatch: Any, tmp_path: Path, **config_kwargs: Any) -> SchedulerPassResult:
+    return _no_progress_blocked_scheduler(monkeypatch, tmp_path, **config_kwargs).run_once()
 
 
 def test_repeated_blocked_candidate_reason_opens_no_progress_circuit(
     tmp_path: Path,
+    monkeypatch: Any,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.WARNING)
-    results = [_no_progress_blocked_pass(tmp_path) for _ in range(3)]
+    results = [_no_progress_blocked_pass(monkeypatch, tmp_path) for _ in range(3)]
 
     blocks = [result.evidence["no_progress_circuit"] for result in results]
     assert [block["open"] for block in blocks[:2]] == [[], []]
@@ -55788,12 +55504,13 @@ def test_repeated_blocked_candidate_reason_opens_no_progress_circuit(
     assert f"last={results[2].evidence['pass_id']}" in warnings[0].getMessage()
 
 
-def _reserved_unbound_wedge_pass(tmp_path: Path, **config_kwargs: Any) -> SchedulerPassResult:
+def _reserved_unbound_wedge_pass(monkeypatch: Any, tmp_path: Path, **config_kwargs: Any) -> SchedulerPassResult:
     """One fresh pass whose only work is a reserved-unbound row that cannot be proven.
 
     Mirrors the #1116 wedge: the comment querier refuses (this cluster does not
     store job comments), so the row stays ``reserved`` and reappears, identical,
-    on every later pass.
+    on every later pass. Explicitly DB-free (#3252): the journal is the env's,
+    ``tmp_path/workspace/journal``.
     """
 
     from services.orchestrator.reconcile import ReconcileQueryUnavailable
@@ -55804,13 +55521,16 @@ def _reserved_unbound_wedge_pass(tmp_path: Path, **config_kwargs: Any) -> Schedu
             reason_class="comment_accounting_unproven",
         )
 
-    repository = scheduler_module.FileOrchestrationJournalRepository(tmp_path / "journal")
+    roots, paths = _db_free_pass_env(monkeypatch, tmp_path)
+    journal_root = paths["NHMS_SCHEDULER_JOURNAL_ROOT"]
+    repository = scheduler_module.FileOrchestrationJournalRepository(journal_root)
     scheduler = _RealProductionScheduler(
         _config(
-            tmp_path,
+            roots["workspace_root"],
+            db_free=True,
             dry_run=False,
             scheduler_journal_backend="file",
-            scheduler_journal_root=tmp_path / "journal",
+            scheduler_journal_root=journal_root,
             database_url=None,
             database_url_configured=False,
             **config_kwargs,
@@ -55883,6 +55603,12 @@ def _no_progress_observe(
 
 def _no_progress_tracker_path(tmp_path: Path) -> Path:
     return tmp_path / "scheduler" / "evidence" / scheduler_no_progress_module.STATE_FILENAME
+
+
+def _no_progress_pass_tracker_path(tmp_path: Path) -> Path:
+    """The tracker a DB-free pass over ``tmp_path`` writes: the env's evidence root (#3252)."""
+
+    return tmp_path / "workspace" / "evidence" / scheduler_no_progress_module.STATE_FILENAME
 
 
 def test_no_progress_candidate_adapter_reads_blocked_rows_only() -> None:
@@ -56081,11 +55807,12 @@ def test_absent_reconcile_source_preserves_the_reserved_unbound_streak(tmp_path:
 
 def test_healthy_pass_injects_an_empty_circuit_without_warning(
     tmp_path: Path,
+    monkeypatch: Any,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.DEBUG, logger="services.orchestrator.scheduler_no_progress")
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z")),
+        _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z")),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [])},
     )
@@ -56105,16 +55832,17 @@ def test_healthy_pass_injects_an_empty_circuit_without_warning(
 
 def test_early_exit_and_aborted_passes_never_touch_the_no_progress_tracker(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
-    first = _no_progress_blocked_pass(tmp_path)
-    second = _no_progress_blocked_pass(tmp_path)
+    first = _no_progress_blocked_pass(monkeypatch, tmp_path)
+    second = _no_progress_blocked_pass(monkeypatch, tmp_path)
     assert second.evidence["no_progress_circuit"]["tracked"] == 1
-    tracker = _no_progress_tracker_path(tmp_path)
+    tracker = _no_progress_pass_tracker_path(tmp_path)
     tracker_bytes = tracker.read_bytes()
 
     # (a) lock contention: the pass never holds the lease, so it must not share
     # the tracker file with the pass that does.
-    contended_scheduler = _no_progress_blocked_scheduler(tmp_path)
+    contended_scheduler = _no_progress_blocked_scheduler(monkeypatch, tmp_path)
     lock_path = Path(contended_scheduler.config.lock_path)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path.write_text(
@@ -56133,7 +55861,8 @@ def test_early_exit_and_aborted_passes_never_touch_the_no_progress_tracker(
 
     # (b) resource-limit abort via the intra-pass progress guard.
     aborted = ProductionScheduler(
-        _config(
+        _db_free_pass_config(
+            monkeypatch,
             tmp_path,
             now=_dt("2026-05-21T12:00:00Z"),
             dry_run=False,
@@ -56150,7 +55879,7 @@ def test_early_exit_and_aborted_passes_never_touch_the_no_progress_tracker(
     assert "no_progress_circuit" not in aborted.evidence
     assert tracker.read_bytes() == tracker_bytes
 
-    third = _no_progress_blocked_pass(tmp_path)
+    third = _no_progress_blocked_pass(monkeypatch, tmp_path)
 
     assert third.evidence["no_progress_circuit"]["open"][0]["consecutive_passes"] == 3
     assert third.evidence["no_progress_circuit"]["open"][0]["first_pass_id"] == first.evidence["pass_id"]
@@ -56158,6 +55887,7 @@ def test_early_exit_and_aborted_passes_never_touch_the_no_progress_tracker(
 
 def test_reserved_unbound_wedge_opens_the_no_progress_circuit(
     tmp_path: Path,
+    monkeypatch: Any,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """#1116 visibility: a deliberately non-convergent reserved row becomes legible."""
@@ -56165,9 +55895,10 @@ def test_reserved_unbound_wedge_opens_the_no_progress_circuit(
     from tests.gateway_reconcile_helpers import _file_cohort_repository
 
     caplog.set_level(logging.WARNING)
-    _file_cohort_repository(tmp_path, member_count=1)
+    # The wedged cohort sits in the DB-free env's journal, ``tmp_path/workspace/journal`` (#3252).
+    _file_cohort_repository(tmp_path / "workspace", member_count=1)
 
-    results = [_reserved_unbound_wedge_pass(tmp_path) for _ in range(3)]
+    results = [_reserved_unbound_wedge_pass(monkeypatch, tmp_path) for _ in range(3)]
 
     outcomes = results[2].evidence["restart_reconcile"]["reserved_unbound"]["outcomes"]
     assert outcomes[0]["reconciliation_reason_class"] == "comment_accounting_unproven"
@@ -56193,19 +55924,20 @@ def test_reserved_unbound_wedge_opens_the_no_progress_circuit(
 @pytest.mark.parametrize("threshold", [0, -1])
 def test_disabled_no_progress_circuit_is_byte_for_byte_the_old_behaviour(
     tmp_path: Path,
+    monkeypatch: Any,
     caplog: pytest.LogCaptureFixture,
     threshold: int,
 ) -> None:
     caplog.set_level(logging.DEBUG, logger="services.orchestrator.scheduler_no_progress")
 
-    results = [_no_progress_blocked_pass(tmp_path, no_progress_circuit_passes=threshold) for _ in range(3)]
+    results = [_no_progress_blocked_pass(monkeypatch, tmp_path, no_progress_circuit_passes=threshold) for _ in range(3)]
 
-    evidence_root = tmp_path / "scheduler" / "evidence"
+    evidence_root = tmp_path / "workspace" / "evidence"
     for result in results:
         assert "no_progress_circuit" not in result.evidence
         persisted = json.loads(Path(result.artifact_path or "").read_text(encoding="utf-8"))
         assert "no_progress_circuit" not in persisted
-    assert not _no_progress_tracker_path(tmp_path).exists()
+    assert not _no_progress_pass_tracker_path(tmp_path).exists()
     assert list(evidence_root.glob("*.tmp")) == []
     assert [record for record in caplog.records if record.name.endswith("scheduler_no_progress")] == []
 
@@ -56214,9 +55946,11 @@ def test_disabled_no_progress_circuit_stays_absent_on_the_compaction_path(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr("services.orchestrator.scheduler.MAX_EVIDENCE_BYTES", 2_400)
+    # 4_500, not 2_400: the DB-free core payload is about 4.2 KB, so a smaller
+    # budget fails the compacted write too instead of exercising compaction (#3252).
+    monkeypatch.setattr("services.orchestrator.scheduler.MAX_EVIDENCE_BYTES", 4_500)
 
-    result = _no_progress_blocked_pass(tmp_path, no_progress_circuit_passes=0)
+    result = _no_progress_blocked_pass(monkeypatch, tmp_path, no_progress_circuit_passes=0)
     persisted = json.loads(Path(result.artifact_path or "").read_text(encoding="utf-8"))
 
     assert result.status == "resource_limit_blocked"
@@ -56229,25 +55963,26 @@ def test_no_progress_circuit_threshold_comes_from_env_and_from_the_constructor(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    assert _config(tmp_path).no_progress_circuit_passes == 3
+    assert _config(tmp_path, db_free=True).no_progress_circuit_passes == 3
 
     monkeypatch.setenv("NHMS_SCHEDULER_NO_PROGRESS_CIRCUIT_PASSES", "5")
-    assert _config(tmp_path).no_progress_circuit_passes == 5
-    assert _config(tmp_path, no_progress_circuit_passes=2).no_progress_circuit_passes == 2
+    assert _config(tmp_path, db_free=True).no_progress_circuit_passes == 5
+    assert _config(tmp_path, db_free=True, no_progress_circuit_passes=2).no_progress_circuit_passes == 2
 
     monkeypatch.setenv("NHMS_SCHEDULER_NO_PROGRESS_CIRCUIT_PASSES", "0")
-    result = _no_progress_blocked_pass(tmp_path)
+    result = _no_progress_blocked_pass(monkeypatch, tmp_path)
     assert "no_progress_circuit" not in result.evidence
 
 
 def test_corrupt_tracker_state_resets_with_a_marker_without_failing_the_pass(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
-    first = _no_progress_blocked_pass(tmp_path)
-    tracker = _no_progress_tracker_path(tmp_path)
+    first = _no_progress_blocked_pass(monkeypatch, tmp_path)
+    tracker = _no_progress_pass_tracker_path(tmp_path)
     tracker.write_text('{"schema_version": "nhms.scheduler.no_pro', encoding="utf-8")
 
-    second = _no_progress_blocked_pass(tmp_path)
+    second = _no_progress_blocked_pass(monkeypatch, tmp_path)
 
     assert first.evidence["no_progress_circuit"]["state_reset"] == "missing"
     assert second.status == first.status
@@ -56260,23 +55995,23 @@ def test_corrupt_tracker_state_resets_with_a_marker_without_failing_the_pass(
     }
     # Counting restarted from the corrupt reset, and the file is valid again.
     assert json.loads(tracker.read_text(encoding="utf-8"))["entries"][0]["consecutive_passes"] == 1
-    third = _no_progress_blocked_pass(tmp_path)
+    third = _no_progress_blocked_pass(monkeypatch, tmp_path)
     assert "state_reset" not in third.evidence["no_progress_circuit"]
     assert third.evidence["no_progress_circuit"]["tracked"] == 1
 
 
-def test_enabled_healthy_pass_always_rewrites_the_tracker_file(tmp_path: Path) -> None:
+def test_enabled_healthy_pass_always_rewrites_the_tracker_file(tmp_path: Path, monkeypatch: Any) -> None:
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z")),
+        _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z")),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [])},
     )
 
     first = scheduler.run_once()
-    tracker = _no_progress_tracker_path(tmp_path)
+    tracker = _no_progress_pass_tracker_path(tmp_path)
     written = json.loads(tracker.read_text(encoding="utf-8"))
     second = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z")),
+        _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z")),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [])},
     ).run_once()
@@ -56287,7 +56022,7 @@ def test_enabled_healthy_pass_always_rewrites_the_tracker_file(tmp_path: Path) -
         "entries": [],
     }
     assert "state_reset" not in second.evidence["no_progress_circuit"]
-    assert list((tmp_path / "scheduler" / "evidence").glob("*.tmp")) == []
+    assert list((tmp_path / "workspace" / "evidence").glob("*.tmp")) == []
 
 
 def test_no_progress_open_entries_are_truncated_at_fifty(tmp_path: Path) -> None:
@@ -56495,21 +56230,22 @@ def test_stale_tracker_tmp_sibling_does_not_block_the_overwrite(tmp_path: Path) 
 @pytest.mark.parametrize("plant", ["dangling_symlink", "directory"])
 def test_tracker_write_failure_is_surfaced_and_self_heals(
     tmp_path: Path,
+    monkeypatch: Any,
     caplog: pytest.LogCaptureFixture,
     plant: str,
 ) -> None:
     """A tracker write that cannot land must never be silent (issue #1118 C1)."""
 
     caplog.set_level(logging.WARNING)
-    first = _no_progress_blocked_pass(tmp_path)
-    tracker = _no_progress_tracker_path(tmp_path)
+    first = _no_progress_blocked_pass(monkeypatch, tmp_path)
+    tracker = _no_progress_pass_tracker_path(tmp_path)
     stale_tmp = tracker.with_name(scheduler_no_progress_module.STATE_TMP_FILENAME)
     if plant == "dangling_symlink":
         stale_tmp.symlink_to(tracker.with_name("no-such-target.json"))
     else:
         stale_tmp.mkdir()
 
-    blocked = _no_progress_blocked_pass(tmp_path)
+    blocked = _no_progress_blocked_pass(monkeypatch, tmp_path)
 
     assert first.evidence["no_progress_circuit"]["tracked"] == 1
     assert blocked.evidence["no_progress_circuit"]["state_write_failed"] is True
@@ -56523,7 +56259,7 @@ def test_tracker_write_failure_is_surfaced_and_self_heals(
     assert json.loads(tracker.read_text(encoding="utf-8"))["entries"][0]["consecutive_passes"] == 1
     assert not stale_tmp.exists() and not stale_tmp.is_symlink()
 
-    recovered = _no_progress_blocked_pass(tmp_path)
+    recovered = _no_progress_blocked_pass(monkeypatch, tmp_path)
 
     # Counting resumes from the last durable value (1), not from the frozen pass.
     assert "state_write_failed" not in recovered.evidence["no_progress_circuit"]
@@ -56536,11 +56272,11 @@ def test_near_limit_pass_is_not_degraded_by_the_circuit_block(
 ) -> None:
     """The size gate itself must not see the marker's bytes (issue #1118 C3)."""
 
-    disabled = _no_progress_blocked_pass(tmp_path, no_progress_circuit_passes=0)
+    disabled = _no_progress_blocked_pass(monkeypatch, tmp_path, no_progress_circuit_passes=0)
     disabled_artifact = Path(disabled.artifact_path or "").read_bytes()
     monkeypatch.setattr("services.orchestrator.scheduler.MAX_EVIDENCE_BYTES", len(disabled_artifact) + 40)
 
-    enabled = _no_progress_blocked_pass(tmp_path)
+    enabled = _no_progress_blocked_pass(monkeypatch, tmp_path)
     enabled_artifact = json.loads(Path(enabled.artifact_path or "").read_text(encoding="utf-8"))
 
     # Per-pass identity only: pass id, lease token, clocks, artifact path.
@@ -56567,7 +56303,7 @@ def test_unexpected_observation_error_fails_open_without_failing_the_pass(
 
     monkeypatch.setattr(scheduler_no_progress_module, "observe_adapters", _boom)
 
-    result = _no_progress_blocked_pass(tmp_path)
+    result = _no_progress_blocked_pass(monkeypatch, tmp_path)
 
     assert result.status == "planned"
     assert result.evidence["blocked_candidates"][0]["reason"] == "missing_canonical_leads"
@@ -57924,12 +57660,15 @@ class _EarliestCloneRowLineageProvider:
 
 
 def _lineage_cohort_scheduler(
+    monkeypatch: Any,
     tmp_path: Path,
     *,
     cutover: datetime,
 ) -> Any:
+    # Explicitly DB-free (#3252): the candidate ladder reads the env's (empty)
+    # state snapshot index, so the cold start is decided by the lineage alone.
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T18:00:00Z")),
+        _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T18:00:00Z")),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
         active_repository=RawCandidateStateRepository({}),
@@ -57957,9 +57696,10 @@ def _lineage_cohort_cycle(cycle_time: str) -> Any:
 
 def test_build_candidates_suppresses_a_model_before_its_lineage_cutover(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
     """#1735 §3.1 / 5.1: no candidate for a cycle that predates the model's ``t*``."""
-    scheduler = _lineage_cohort_scheduler(tmp_path, cutover=_dt("2026-05-21T12:00:00Z"))
+    scheduler = _lineage_cohort_scheduler(monkeypatch, tmp_path, cutover=_dt("2026-05-21T12:00:00Z"))
 
     candidates, blocked, skipped, duplicate_exclusions, slurm_sync = scheduler._build_candidates(
         models=[scheduler_module._coerce_registered_model(_model("model_a", "basin_a"))],
@@ -57979,9 +57719,9 @@ def test_build_candidates_suppresses_a_model_before_its_lineage_cutover(
     assert skipped[0]["candidate_id"]
 
 
-def test_build_candidates_admits_a_model_at_its_lineage_cutover(tmp_path: Path) -> None:
+def test_build_candidates_admits_a_model_at_its_lineage_cutover(tmp_path: Path, monkeypatch: Any) -> None:
     """Strict boundary: ``C == t*`` is the model's own first cycle."""
-    scheduler = _lineage_cohort_scheduler(tmp_path, cutover=_dt("2026-05-21T06:00:00Z"))
+    scheduler = _lineage_cohort_scheduler(monkeypatch, tmp_path, cutover=_dt("2026-05-21T06:00:00Z"))
 
     candidates, blocked, skipped, _duplicates, _sync = scheduler._build_candidates(
         models=[scheduler_module._coerce_registered_model(_model("model_a", "basin_a"))],
@@ -57993,9 +57733,9 @@ def test_build_candidates_admits_a_model_at_its_lineage_cutover(tmp_path: Path) 
     assert skipped == []
 
 
-def test_build_candidates_without_lineage_is_unchanged(tmp_path: Path) -> None:
+def test_build_candidates_without_lineage_is_unchanged(tmp_path: Path, monkeypatch: Any) -> None:
     """A model with no clone row keeps today's admission byte-for-byte."""
-    scheduler = _lineage_cohort_scheduler(tmp_path, cutover=_dt("2026-05-21T12:00:00Z"))
+    scheduler = _lineage_cohort_scheduler(monkeypatch, tmp_path, cutover=_dt("2026-05-21T12:00:00Z"))
     scheduler._lineage_provider_cache = _EarliestCloneRowLineageProvider(
         model_id="model_z", source_id="gfs", valid_time=_dt("2026-05-21T12:00:00Z")
     )
@@ -59091,7 +58831,7 @@ def test_restart_reconcile_inflight_serializes_terminal_identity_reason(
         )
 
     scheduler = _RealProductionScheduler(
-        _config(tmp_path, dry_run=False, scheduler_journal_backend="file"),
+        _config(tmp_path, db_free=True, dry_run=False, scheduler_journal_backend="file"),
         registry=FakeRegistry([]),
         adapters={},
         active_repository=repository,
@@ -59196,7 +58936,7 @@ def test_restart_reconcile_inflight_blocked_reason_overrides_durable_reason(
         )
 
     scheduler = _RealProductionScheduler(
-        _config(tmp_path, dry_run=False, scheduler_journal_backend="file"),
+        _config(tmp_path, db_free=True, dry_run=False, scheduler_journal_backend="file"),
         registry=FakeRegistry([]),
         adapters={},
         active_repository=repository,
@@ -59295,7 +59035,7 @@ def test_restart_reconcile_inflight_success_preserves_durable_reason(
         )
 
     scheduler = _RealProductionScheduler(
-        _config(tmp_path, dry_run=False, scheduler_journal_backend="file"),
+        _config(tmp_path, db_free=True, dry_run=False, scheduler_journal_backend="file"),
         registry=FakeRegistry([]),
         adapters={},
         active_repository=repository,
@@ -59357,7 +59097,7 @@ def _reserved_unbound_scheduler_for_fallback(
         lambda _command: rows,
     )
     scheduler = _RealProductionScheduler(
-        _config(tmp_path, dry_run=False, scheduler_journal_backend="file"),
+        _config(tmp_path, db_free=True, dry_run=False, scheduler_journal_backend="file"),
         registry=FakeRegistry([]),
         adapters={},
         active_repository=repository,
@@ -59512,7 +59252,7 @@ def _assert_reserved_unbound_ordinary_keeps_durable_reason(
         ),
     )
     scheduler = _RealProductionScheduler(
-        _config(tmp_path, dry_run=False, scheduler_journal_backend="file"),
+        _config(tmp_path, db_free=True, dry_run=False, scheduler_journal_backend="file"),
         registry=FakeRegistry([]),
         adapters={},
         active_repository=repository,
@@ -59551,7 +59291,8 @@ def _reentry_pass(tmp_path: Path, root: Path, **kwargs: Any) -> tuple[Any, FakeP
     from tests.test_operator_reentry_confirmation import breaker_scheduler
 
     orchestrator = FakeProductionOrchestrator()
-    result = breaker_scheduler(tmp_path, root, orchestrator, **kwargs).run_once()
+    # Explicitly DB-free (#3252), over the env ``seed_breaker_journal(..., db_free=True)`` installed.
+    result = breaker_scheduler(tmp_path, root, orchestrator, db_free=True, **kwargs).run_once()
     return result, orchestrator
 
 
@@ -59585,7 +59326,7 @@ def test_breaker_reentry_confirmation_runs_once_then_the_breaker_reengages(
 
     # The whole lifecycle up to here is real: fresh run -> quarantine rerun
     # (provenance-stamped) re-recording the same stale token -> breaker engaged.
-    root = seed_breaker_journal(tmp_path, monkeypatch)
+    root = seed_breaker_journal(tmp_path, monkeypatch, db_free=True)
     stale = stale_token()
     live_query = {"source_id": "gfs", "cycle_time": _dt(BREAKER_CYCLE), "model_id": "model_a"}
 
@@ -59618,7 +59359,8 @@ def test_breaker_reentry_confirmation_runs_once_then_the_breaker_reengages(
     assert [basin["model_id"] for basin in basins] == ["model_a"]
 
     # 3. Mid-flight snapshot: the rerun is submitted but not terminal -> no second submission.
-    inflight_root = tmp_path / "inflight-journal"
+    # Inside the DB-free approved roots (the workspace), as the journal root must be.
+    inflight_root = tmp_path / "workspace" / "inflight-journal"
     shutil.copytree(root, inflight_root)
     inflight = real_rerun(
         tmp_path,
@@ -59626,6 +59368,7 @@ def test_breaker_reentry_confirmation_runs_once_then_the_breaker_reengages(
         basins,
         slurm_client=FakeCycleSlurmClient(never_terminal_stage="forecast"),
         job_timeout_seconds=0.3,
+        db_free=True,
     )
     assert inflight.status != "complete"
     assert FileOrchestrationJournalRepository(inflight_root).has_active_pipeline(**live_query)
@@ -59639,7 +59382,10 @@ def test_breaker_reentry_confirmation_runs_once_then_the_breaker_reengages(
         str(row["job_id"])
         for row in FileOrchestrationJournalRepository(root).query_pipeline_jobs_by_cycle("gfs_2026052100")
     }
-    assert real_rerun(tmp_path, root, basins, recorded_tokens={"model_a": recorded}).status == "complete"
+    assert (
+        real_rerun(tmp_path, root, basins, recorded_tokens={"model_a": recorded}, db_free=True).status
+        == "complete"
+    )
     reopened = FileOrchestrationJournalRepository(root)
     new_stamped_masters = [
         row
@@ -59696,7 +59442,7 @@ def test_breaker_reentry_confirmation_is_consumed_when_the_rerun_is_accepted_eve
     )
     from tests.test_orchestration_chain import FakeCycleSlurmClient
 
-    root = seed_breaker_journal(tmp_path, monkeypatch)
+    root = seed_breaker_journal(tmp_path, monkeypatch, db_free=True)
     live_query = {"source_id": "gfs", "cycle_time": _dt(BREAKER_CYCLE), "model_id": "model_a"}
 
     def stamped_master_ids(journal_root: Path) -> set[str]:
@@ -59719,7 +59465,8 @@ def test_breaker_reentry_confirmation_is_consumed_when_the_rerun_is_accepted_eve
     basins = [dict(basin) for basin in call["basins"]]
 
     # Accepted but not finished: the count already reads N+1.
-    inflight_root = tmp_path / "inflight-journal"
+    # Inside the DB-free approved roots (the workspace), as the journal root must be.
+    inflight_root = tmp_path / "workspace" / "inflight-journal"
     shutil.copytree(root, inflight_root)
     inflight = real_rerun(
         tmp_path,
@@ -59727,6 +59474,7 @@ def test_breaker_reentry_confirmation_is_consumed_when_the_rerun_is_accepted_eve
         basins,
         slurm_client=FakeCycleSlurmClient(never_terminal_stage="forecast"),
         job_timeout_seconds=0.3,
+        db_free=True,
     )
     assert inflight.status != "complete"
     assert FileOrchestrationJournalRepository(inflight_root).quarantine_rerun_count(**live_query) == 2
@@ -59737,6 +59485,7 @@ def test_breaker_reentry_confirmation_is_consumed_when_the_rerun_is_accepted_eve
         root,
         basins,
         slurm_client=FakeCycleSlurmClient(fail_stage="forecast", array_results_by_stage={"forecast": ["failed"]}),
+        db_free=True,
     )
     assert failed.status == "failed"
     reopened = FileOrchestrationJournalRepository(root)
@@ -59753,7 +59502,7 @@ def test_breaker_reentry_confirmation_is_consumed_when_the_rerun_is_accepted_eve
     # re-reads them as a completed-type skip (which the §8.7 quarantine would
     # rewrite).  Called directly -- bypassing discovery -- it is the ordinary
     # failure path, and it carries no re-entry confirmation.
-    candidates, blocked = _breaker_candidate_decisions(tmp_path, root)
+    candidates, blocked = _breaker_candidate_decisions(tmp_path, root, db_free=True)
     assert blocked == []
     (entry,) = candidates
     assert entry.state_evidence["decision"] == "retry_failed"
@@ -59791,7 +59540,7 @@ def test_breaker_reentry_confirms_only_the_named_model_of_a_mixed_cycle(
     from tests.test_operator_reentry_confirmation import breaker_confirm_argv, run_confirm, seed_breaker_journal
 
     models = ("model_a", "model_b")
-    root = seed_breaker_journal(tmp_path, monkeypatch, model_ids=models)
+    root = seed_breaker_journal(tmp_path, monkeypatch, model_ids=models, db_free=True)
     before, _ = _reentry_pass(tmp_path, root, model_ids=models)
     assert _breaker_released_cycles(before) == ["2026-05-21T00:00:00Z"]
     assert before.evidence["counts"]["submitted_count"] == 0
@@ -59823,7 +59572,7 @@ def test_breaker_reentry_without_the_models_own_forcing_lands_on_the_missing_for
 
     from tests.test_operator_reentry_confirmation import breaker_confirm_argv, run_confirm, seed_breaker_journal
 
-    root = seed_breaker_journal(tmp_path, monkeypatch)
+    root = seed_breaker_journal(tmp_path, monkeypatch, db_free=True)
     code, _receipt, _err = run_confirm(breaker_confirm_argv(root), capsys)
     assert code == 0
     # Remove every witness of THIS model's forcing: the package manifest and its sidecar.
@@ -60383,6 +60132,7 @@ def _plain_budget_scheduler(tmp_path: Path, root: Path) -> ProductionScheduler:
     return ProductionScheduler(
         _config(
             tmp_path,
+            db_free=True,
             **{
                 "now": _dt(_BUDGET_CYCLE),
                 "backfill_enabled": False,
@@ -60605,7 +60355,7 @@ def test_every_confirmed_retry_candidate_a_pass_emits_restarts_at_forecast(
 
     if family == "breaker":
         # The §8.7 quarantine breaker arm, on the non-strict lane.
-        breaker_root = seed_breaker_journal(tmp_path, monkeypatch)
+        breaker_root = seed_breaker_journal(tmp_path, monkeypatch, db_free=True)
         code, _receipt, _err = run_confirm(breaker_confirm_argv(breaker_root, pin=1), capsys)
         assert code == 0
         result, _orchestrator = _reentry_pass(tmp_path, breaker_root)
@@ -60829,7 +60579,7 @@ def test_sink_refuses_the_raw_manifest_convert_rewrite_on_the_breaker_arm(
         seed_breaker_journal,
     )
 
-    root = seed_breaker_journal(tmp_path, monkeypatch)
+    root = seed_breaker_journal(tmp_path, monkeypatch, db_free=True)
     code, receipt, _err = run_confirm(breaker_confirm_argv(root, pin=1), capsys)
     assert code == 0, receipt
     _arm_nfs_raw_manifest(monkeypatch, cycle_time=BREAKER_CYCLE)
@@ -60840,6 +60590,7 @@ def test_sink_refuses_the_raw_manifest_convert_rewrite_on_the_breaker_arm(
         tmp_path,
         root,
         orchestrator,
+        db_free=True,
         canonical_readiness_provider=_FreshZeroRowCanonicalReadinessProvider(),
     ).run_once()
 
@@ -60923,7 +60674,7 @@ def test_the_operator_path_out_of_a_sink_refusal_restarts_at_forecast_and_consum
         seed_breaker_journal,
     )
 
-    root = seed_breaker_journal(tmp_path, monkeypatch)
+    root = seed_breaker_journal(tmp_path, monkeypatch, db_free=True)
     live_query = {"source_id": "gfs", "cycle_time": _dt(BREAKER_CYCLE), "model_id": "model_a"}
     assert FileOrchestrationJournalRepository(root).quarantine_rerun_count(**live_query) == 1
     code, receipt, _err = run_confirm(breaker_confirm_argv(root, pin=1), capsys)
@@ -60936,6 +60687,7 @@ def test_the_operator_path_out_of_a_sink_refusal_restarts_at_forecast_and_consum
         root,
         FakeProductionOrchestrator(),
         canonical_readiness_provider=_FreshZeroRowCanonicalReadinessProvider(),
+        db_free=True,
     ).run_once()
     (refused,) = refused_result.evidence["blocked_candidates"]
     assert refused["state_evidence"]["decision"] == _SINK_REFUSAL_DECISION
@@ -60951,6 +60703,7 @@ def test_the_operator_path_out_of_a_sink_refusal_restarts_at_forecast_and_consum
         root,
         repaired_orchestrator,
         canonical_readiness_provider=_ReadyCanonicalReadinessProvider(),
+        db_free=True,
     ).run_once()
     assert repaired_result.evidence["blocked_candidates"] == []
     (admitted,) = repaired_result.evidence["candidates"]
@@ -60967,7 +60720,7 @@ def test_the_operator_path_out_of_a_sink_refusal_restarts_at_forecast_and_consum
     # 3. The reservation stamps it: the pinned count moves by exactly +1.
     (call,) = repaired_orchestrator.calls
     basins = [dict(basin) for basin in call["basins"]]
-    assert real_rerun(tmp_path, root, basins).status == "complete"
+    assert real_rerun(tmp_path, root, basins, db_free=True).status == "complete"
     assert FileOrchestrationJournalRepository(root).quarantine_rerun_count(**live_query) == 2
 
     # 4. The signature is spent: the original pin no longer matches.
@@ -61682,38 +61435,38 @@ def test_breaker_reentry_on_the_non_strict_lane_stays_blocked_with_the_repair_fl
         BREAKER_CYCLE,
         breaker_confirm_argv,
         breaker_scheduler,
+        db_free_cold_start_env,
         run_confirm,
         seed_breaker_journal,
     )
 
-    root = seed_breaker_journal(tmp_path, monkeypatch)
+    root = seed_breaker_journal(tmp_path, monkeypatch, db_free=True)
     code, receipt, _err = run_confirm(breaker_confirm_argv(root, pin=1), capsys)
     assert code == 0, receipt
     shutil.rmtree(tmp_path / "object-store" / "forcing")
-    # ``repair_missing_forcing`` turns on the db-free runtime preflight even on a
-    # database-backed lane (scheduler_config/config.py:709-710), which adjudicates
-    # the raw-manifest authority roots against the configured containment bases.
-    # Without them the pass never reaches candidate construction at all
-    # (``status: preflight_blocked``, zero source cycles) and the family would
-    # assert nothing.
+    # The db-free runtime preflight adjudicates the raw-manifest authority roots
+    # against the configured containment bases. The DB-free env (#3252) already
+    # points the copyback root, the NFS raw-manifest root and prefix, and the
+    # node-22 raw authority root at its object store, inside the approved roots;
+    # without the ready raw manifest the pass never reaches candidate
+    # construction at all (``status: preflight_blocked``, zero source cycles)
+    # and the family would assert nothing.
     object_store_root = Path(os.environ["OBJECT_STORE_ROOT"])
+    assert os.environ["NHMS_OBJECT_STORE_COPYBACK_ROOT"] == str(object_store_root)
+    assert os.environ["NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT"] == str(object_store_root)
     _write_db_free_raw_manifest_fixture({"object_store_root": object_store_root}, cycle_time=_dt(BREAKER_CYCLE))
-    monkeypatch.setenv("NHMS_SCHEDULER_ALLOWED_ROOTS", str(object_store_root))
-    monkeypatch.setenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", str(object_store_root))
-    monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT", str(object_store_root))
-    monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX", "s3://nhms")
-    monkeypatch.setattr(
-        source_cycle_raw_manifest_module,
-        "NODE22_CANONICAL_NFS_RAW_AUTHORITY_ROOT",
-        object_store_root,
-        raising=False,
-    )
+    # The repair pass runs at ``now=BREAKER_CYCLE``, before the env's state index
+    # was generated (``BREAKER_NOW``); a state index from after the pass's ``now``
+    # reads as no successor continuity and reopens the terminal row at
+    # ``state_save_qc``. Republish it, still empty, at the pass's ``now``.
+    db_free_cold_start_env(tmp_path, monkeypatch, generated_at=_dt(BREAKER_CYCLE))
 
     orchestrator = FakeProductionOrchestrator()
     scheduler = breaker_scheduler(
         tmp_path,
         root,
         orchestrator,
+        db_free=True,
         # ``repair_missing_forcing`` is validated as an exact-cycle, single-cycle,
         # backfill-disabled invocation, which the breaker fixture's own defaults
         # violate (scheduler_config/config.py:496-500).
@@ -62144,10 +61897,9 @@ def _scope_dimension_payloads(monkeypatch: Any, tmp_path: Path) -> list[dict[str
     key set the closure authority (the caller asserts it).
     """
 
-    roots = _scheduler_env_roots(tmp_path)
-    _set_scheduler_root_env(monkeypatch, roots)
-    monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
-    monkeypatch.setenv("NHMS_SCHEDULER_REQUIRE_ROOTS", "true")
+    # Explicitly DB-free (#3252): the full DB-free env, its approved roots and
+    # its journal; the passes' ``now`` is never before the state index.
+    roots, _paths = _db_free_pass_env(monkeypatch, tmp_path, generated_at=_dt("2026-05-21T12:00:00Z"))
     # `_slurm_preflight` runs `_storage_root_check` over four roots including
     # `log_root`, which `_scheduler_env_roots` does not make; put it UNDER the
     # workspace root so it is covered by NHMS_SCHEDULER_ALLOWED_ROOTS.
@@ -62164,8 +61916,8 @@ def _scope_dimension_payloads(monkeypatch: Any, tmp_path: Path) -> list[dict[str
             # before it returns `ready` rather than `blocked`; copied from the
             # already-passing db-free double at `:24246`.  A `blocked` preflight
             # rewrites the pass status to `preflight_blocked` and would take this
-            # leg straight back out of the evaluating set.
-            "database_url": "postgresql://nhms:secret@db.prod.example/nhms",
+            # leg straight back out of the evaluating set.  DB-free, the database
+            # check is ``not_required`` and a ``database_url`` is forbidden.
             "log_root": log_root,
             "slurm_env": {"NHMS_PROFILE": "prod/gfs_00", "NHMS_RUN_LABEL": "prod_gfs_00"},
             "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
@@ -62176,6 +61928,7 @@ def _scope_dimension_payloads(monkeypatch: Any, tmp_path: Path) -> list[dict[str
     for leg in legs:
         config = _config(
             roots["workspace_root"],
+            db_free=True,
             now=_dt("2026-05-21T12:00:00Z"),
             sources=("gfs", "IFS"),
             max_cycles_per_source=2,
