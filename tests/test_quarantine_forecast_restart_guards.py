@@ -636,11 +636,8 @@ def _apply_policy(
     cycle_time = _dt(_CYCLE_TIME)
     raw_root = tmp_path / "nfs-raw"
     readiness = _write_missing_forcing_repair_raw_manifest(raw_root, cycle_time=cycle_time)
-    # ``_missing_forcing_repair_config`` (tests/test_production_scheduler.py)
-    # takes no mode kwarg: the env selects DB-free explicitly.
-    monkeypatch.setenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", "true")
     config = _missing_forcing_repair_config(
-        tmp_path, monkeypatch, cycle_time=cycle_time, dry_run=True, raw_root=raw_root
+        tmp_path, monkeypatch, cycle_time=cycle_time, dry_run=True, raw_root=raw_root, db_free=True
     )
     candidate = replace(
         _scheduler_candidate_fixture(),
