@@ -148,7 +148,8 @@ docs or OpenSpec change rather than silently choosing a stale fact.
   validation matrices for implementation decisions.
 - High-impact node-27 MVT facts and display env/compose guidance were
   reconciled by #368.
-- `docs/bugs.md` is governed as a status ledger after #369 triage.
+- `docs/bugs.md` is governed as a status ledger after #369 triage and is closed
+  to new entries since #3226: new defects are GitHub issues.
 - `.agents`, `.codex`, `apps/frontend/artifacts`, and root `artifacts/`
   ownership policy is defined above by path family.
 - `docs/runbooks/tier-node27-timeseries-storage.md` is the **current

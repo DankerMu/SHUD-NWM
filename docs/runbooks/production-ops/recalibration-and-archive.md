@@ -112,7 +112,10 @@ RUN_TAG=huai-2026081512   # 流域 + --cutover-time；每次调用换一个，re
   `invocation_outcome=aborted` + `failed_pair.failure_kind=mirror_write_failed`。
   必须在 `t*` 之前修好 mirror；在
   `NHMS_REQUIRE_FORECAST_WARM_START=true` 下，未修好的后果是本轮停摆（fail-safe），
-  不是算错。
+  不是算错。这里的"停摆"指 scheduler 在建 candidate 时 warm-start 证据不成立，
+  把该 `(model_id, source_id)` 的 candidate 记为 `blocked`
+  （`services/orchestrator/scheduler_generation_gate.py` 的 state-continuity 判定），
+  不提交 Slurm 作业；看 scheduler pass 证据里的 blocked 原因，而不是去 `sacct` 找失败作业。
 - 调度**准入**侧零改动：克隆行带 `M1'` 的 `model_id` + `model_package_version` +
   `model_package_checksum`，`_validate_state_lineage` 按既有口径接收。
 - **rollout 不再重开 backfill 窗口**（#1735，2026-08-22 事故的修复）：`M1'` 是新的
