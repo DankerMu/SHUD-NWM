@@ -93,6 +93,10 @@ resident run_id=<run> first_error_code=<第一次失败的码> source=<failed|pu
    grep -n '<run_id>' /home/nwm/autopipe-logs/autopipe.log | tail -20
    ```
 
+   有 run 失败的 tick 不是 quiet tick，完整 summary（含该 run 的 `stage` / `error`）每趟都会写进日志。
+   日志按大小轮转（#3224）：这里搜不到更早的重试时，把路径换成
+   `$(ls -tr /home/nwm/autopipe-logs/autopipe.log*)`（`.1` 最新 … `.5` 最旧；按时间从旧到新，`tail` 仍落在最新一段）。
+
    DB 侧（第一次失败的码 + 最近一次被 register 续期的时间）：
 
    ```sql

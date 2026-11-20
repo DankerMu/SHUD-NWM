@@ -129,6 +129,12 @@ STATS_GUARD_MAX_CHUNKS = 3
 STATS_GUARD_TIMEOUT_MS = 120_000
 INGEST_SUMMARY_SCHEMA = "nhms.node27_ingest.autopipeline.v1"
 INGEST_PREFLIGHT_SCHEMA = "nhms.node27_ingest.preflight.v1"
+# #3224: `--summary-mode tick` prints this one-line digest per tick and the full
+# summary after it only when the tick is not quiet (_tick_is_quiet).
+INGEST_TICK_DIGEST_SCHEMA = "nhms.node27.ingest_tick_digest.v1"
+SUMMARY_MODES = ("full", "tick")
+# Under AUTOPIPE_WORK_ROOT: the discovered provenance pass's skip state.
+PIPELINE_JOB_PROVENANCE_STATE_FILE = "pipeline-job-provenance-import-state.json"
 PREFLIGHT_BLOCKED_RC = 2
 INGEST_STAGE_SHAPE = (
     "seed_registry",
@@ -772,6 +778,93 @@ def _empty_runs_summary() -> dict[str, Any]:
 def _emit_json_summary(summary: dict[str, Any]) -> None:
     json.dump(redact_payload(summary), sys.stdout, ensure_ascii=False, indent=2, sort_keys=True)
     sys.stdout.write("\n")
+
+
+def _source_tuple(value: str) -> tuple[str, ...]:
+    return tuple(s.strip().lower() for s in value.split(",") if s.strip())
+
+
+def _as_mapping(value: object) -> Mapping[str, object]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _entry_count(value: object) -> int:
+    return len(value) if isinstance(value, (list, tuple)) else 0
+
+
+def _tick_is_quiet(summary: Mapping[str, object]) -> bool:
+    """The pinned quiet predicate: a tick that did nothing and found nothing wrong."""
+
+    runs = _as_mapping(summary.get("runs"))
+    seed = _as_mapping(summary.get("seed"))
+    provenance = _as_mapping(runs.get("job_provenance"))
+    stats_guard = _as_mapping(summary.get("stats_guard"))
+    authority = _as_mapping(stats_guard.get("authority"))
+    declines_active = summary.get("declines_active")
+    return (
+        summary.get("return_code") == 0
+        and all(runs.get(key) == 0 for key in ("ingested", "skipped", "failed", "declined"))
+        and all(not seed.get(key) for key in ("seeded", "failed", "activation_skipped_other_active"))
+        and all(provenance.get(key) == 0 for key in ("imported", "unavailable", "failed"))
+        and type(declines_active) is int
+        and declines_active == 0
+        and stats_guard.get("status") in ("not_triggered", "skipped")
+        and authority.get("status") in ("completed", "skipped")
+        and not authority.get("analyzed")
+        and not authority.get("deferred")
+    )
+
+
+def _ingest_tick_digest(summary: Mapping[str, object]) -> dict[str, object]:
+    runs = _as_mapping(summary.get("runs"))
+    seed = _as_mapping(summary.get("seed"))
+    provenance = _as_mapping(runs.get("job_provenance"))
+    stats_guard = _as_mapping(summary.get("stats_guard"))
+    ingest = _as_mapping(summary.get("ingest"))
+    return {
+        "schema": INGEST_TICK_DIGEST_SCHEMA,
+        "status": summary.get("status"),
+        "return_code": summary.get("return_code"),
+        "quiet": _tick_is_quiet(summary),
+        "discovered_runs": summary.get("discovered_runs"),
+        "declines_active": summary.get("declines_active"),
+        # Carried for the operator reading an idle timer log; not part of `quiet`.
+        "cycle_floor": summary.get("cycle_floor"),
+        "skipped_older_than_floor": summary.get("skipped_older_than_floor"),
+        "runs": {
+            key: runs.get(key)
+            for key in ("already_ingested", "published", "processed", "ingested", "skipped", "failed", "declined")
+        },
+        "seed": {key: _entry_count(seed.get(key)) for key in ("seeded", "already_seeded", "failed")},
+        "job_provenance": {
+            "imported": provenance.get("imported"),
+            "unavailable": provenance.get("unavailable"),
+            "failed": provenance.get("failed"),
+            "skipped_unchanged": provenance.get("skipped_unchanged", 0),
+        },
+        "stats_guard": {
+            "status": stats_guard.get("status"),
+            "authority_status": _as_mapping(stats_guard.get("authority")).get("status"),
+        },
+        "object_store_root": summary.get("object_store_root"),
+        "ingest": {
+            "role": ingest.get("role"),
+            "stage_shape": ingest.get("stage_shape"),
+            "config_source": ingest.get("config_source"),
+            "database": _as_mapping(ingest.get("preflight")).get("database"),
+        },
+    }
+
+
+def _emit_final_summary(summary: dict[str, object], *, summary_mode: str) -> None:
+    """``full``: the pretty summary. ``tick``: the digest line, then the summary unless the tick is quiet."""
+
+    if summary_mode == "tick":
+        digest = _ingest_tick_digest(summary)
+        sys.stdout.write(json.dumps(redact_payload(digest), ensure_ascii=False, sort_keys=True) + "\n")
+        if digest["quiet"] is True:
+            return
+    _emit_json_summary(summary)
 
 
 # --------------------------------------------------------------------------- #
@@ -2633,12 +2726,21 @@ def main(argv: list[str] | None = None) -> int:
         help="Comma-separated exact, case-sensitive retired model ids excluded from seeding and ingest.",
     )
     parser.add_argument("--progress", action="store_true", help="Per-step progress to stderr.")
+    parser.add_argument(
+        "--summary-mode",
+        choices=SUMMARY_MODES,
+        default="full",
+        help=(
+            "full (default): one pretty-printed JSON summary. tick: one single-line JSON digest, then the full "
+            "summary only when the tick is not quiet (the timer's mode). Preflight exits always print in full."
+        ),
+    )
     args = parser.parse_args(raw_argv)
 
     if not 1 <= args.workers <= MAX_RUN_WORKERS:
         parser.error(f"--workers must be between 1 and {MAX_RUN_WORKERS}")
 
-    sources = tuple(s.strip().lower() for s in args.sources.split(",") if s.strip())
+    sources = _source_tuple(args.sources)
     excluded_basins = _basin_key_set(args.exclude_basins)
     excluded_model_ids = _model_id_set(args.exclude_model_ids)
 
@@ -2953,6 +3055,16 @@ def main(argv: list[str] | None = None) -> int:
     job_provenance = {"imported": 0, "unavailable": 0, "failed": 0, "runs": []}
     if not args.seed_only:
         provenance_run_ids = [r["run_id"] for r in runnable]
+        # #3224: the skip state is read and written only by a pass over the full
+        # run set. A narrowed hand run would drop the markers of every run it did
+        # not request and is not serialised with the timer by the tick lock. The
+        # standing exclusions (--exclude-*, --direct-grid-only) do not narrow.
+        full_run_set = (
+            not args.only_basin
+            and not args.only_cycle
+            and args.limit is None
+            and sources == _source_tuple(parser.get_default("sources"))
+        )
         if provenance_run_ids:
             try:
                 job_provenance = import_discovered_pipeline_job_provenance(
@@ -2961,6 +3073,7 @@ def main(argv: list[str] | None = None) -> int:
                     run_ids=provenance_run_ids,
                     object_store_prefix=object_store_prefix,
                     connect=_attributed_connect,
+                    state_path=Path(WORK_ROOT) / PIPELINE_JOB_PROVENANCE_STATE_FILE if full_run_set else None,
                 )
             except Exception as error:  # noqa: BLE001 - isolate provenance from hydro ingest
                 job_provenance = {
@@ -2977,7 +3090,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(
                     f"[job-provenance] imported {job_provenance.get('imported', 0)}"
                     f", unavailable {job_provenance.get('unavailable', 0)}"
-                    f", failed {job_provenance.get('failed', 0)}",
+                    f", failed {job_provenance.get('failed', 0)}"
+                    f", skipped_unchanged {job_provenance.get('skipped_unchanged', 0)}",
                     file=sys.stderr,
                     flush=True,
                 )
@@ -3112,7 +3226,7 @@ def main(argv: list[str] | None = None) -> int:
     rc = 0 if (not seed_failed and not by("failed")) else 1
     summary["status"] = "completed" if rc == 0 else "completed_with_failures"
     summary["return_code"] = rc
-    _emit_json_summary(summary)
+    _emit_final_summary(summary, summary_mode=args.summary_mode)
     return rc
 
 

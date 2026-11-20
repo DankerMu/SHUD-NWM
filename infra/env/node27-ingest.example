@@ -71,6 +71,14 @@ AUTOPIPE_MAX_CYCLE_AGE_DAYS=14
 OUTPUT_PARSER_BATCH_SIZE=10000
 AUTOPIPE_LOG_FILE=/home/nwm/autopipe-logs/autopipe.log
 AUTOPIPE_LOCK_PATH=/tmp/autopipe.cron.lock
+# #3224: optional size-bounded rotation of AUTOPIPE_LOG_FILE, done by the cron
+# wrapper under the tick lock before `autopipe: start`. A log of at least
+# AUTOPIPE_LOG_MAX_BYTES bytes becomes <log>.1 and older generations shift by
+# one, keeping at most AUTOPIPE_LOG_KEEP of them (<log>.1 newest). Unset or
+# invalid values use the defaults below; AUTOPIPE_LOG_MAX_BYTES=0 disables
+# rotation, AUTOPIPE_LOG_KEEP must be a positive integer.
+# AUTOPIPE_LOG_MAX_BYTES=67108864
+# AUTOPIPE_LOG_KEEP=5
 # Per-run display coverage materialization timeout. Direct-grid basins with
 # millions of river rows legitimately exceed the historical 90-second bound.
 NHMS_DISPLAY_COVERAGE_REFRESH_STATEMENT_TIMEOUT_MS=900000

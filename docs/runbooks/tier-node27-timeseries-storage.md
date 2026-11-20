@@ -4599,6 +4599,18 @@ WHERE format('%I.%I', chunk_schema, chunk_name) = :'target_chunk'
   grep -n '"stage": "forcing_handoff"' /home/nwm/autopipe-logs/autopipe.log | tail -20
   ```
 
+  How the log is laid out since #3224: every tick writes one single-line JSON
+  digest (it carries `"declines_active"`), and the full pretty-printed summary
+  follows it only when the tick was not quiet (a run ingested, failed, skipped
+  or declined; a basin seeded or failed; provenance imported, unavailable or
+  failed; an active decline; the statistics guard did, deferred or failed
+  anything). So the first grep sees every tick, the other two see exactly the
+  ticks that have something to show. The wrapper rotates the log at
+  `AUTOPIPE_LOG_MAX_BYTES` (default 64 MiB) and keeps `AUTOPIPE_LOG_KEEP`
+  (default 5) older generations as `autopipe.log.1` (newest) … `.5`; to look
+  further back, grep them oldest first so `tail` still ends at the newest:
+  `grep -o '"declines_active": [0-9]*' $(ls -tr /home/nwm/autopipe-logs/autopipe.log*) | tail -20`.
+
   Expected: `declines_active` flat (a rising value means runs are being
   terminal-stated right now), and no recent `forcing_handoff` failure whose
   run overlaps the window.
@@ -6012,7 +6024,10 @@ hypertable 根表与 `_timescaledb_internal` 下的 chunk **明确排除**（根
 **一并关闭两腿**（summary 两处都记 `skipped`）。
 
 **怎么读**：tick summary JSON 打到 stdout，落在
-`/home/nwm/autopipe-logs/autopipe.log`。修复腿在 `stats_guard.authority`：
+`/home/nwm/autopipe-logs/autopipe.log`。修复腿在 `stats_guard.authority`。#3224 之后每个 tick
+先写一行 digest，其中只有 `stats_guard.authority_status`；完整 summary（含下面的
+`stats_guard.authority` 明细）只在该 tick 非 quiet 时跟在 digest 后面——修复腿只要分析了表、
+有 `deferred` 或失败，这个 tick 就不是 quiet，明细一定在：
 
 ```jsonc
 "stats_guard": {

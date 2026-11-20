@@ -8,8 +8,18 @@
 # re-running every N minutes is safe and only does outstanding work.
 #
 # flock guards against overlapping runs (a long ingest must not be re-entered by
-# the next cron tick). All output (timestamped + the JSON summary) is appended
-# to AUTOPIPE_LOG_FILE.
+# the next cron tick). All output (timestamped lines + the ingest summary) is
+# appended to AUTOPIPE_LOG_FILE. The ingest runs with `--summary-mode tick`
+# (#3224): one single-line JSON digest per tick, followed by the full JSON
+# summary only when the tick ingested, skipped, failed, declined, seeded or
+# imported something, or has an active decline / statistics-guard work.
+#
+# Log rotation (#3224): once the lock is held and before `autopipe: start`, a
+# log of at least AUTOPIPE_LOG_MAX_BYTES bytes (default 67108864; 0 disables)
+# is moved to <log>.1, older generations shift by one and at most
+# AUTOPIPE_LOG_KEEP of them (default 5) are kept. Invalid values fall back to
+# the defaults. A tick that cannot take the lock never rotates, and a rotation
+# failure is logged and never changes the tick's exit code.
 #
 # Installed on node-27 by infra/systemd/nhms-node27-autopipe.{service,timer}.
 
@@ -181,6 +191,45 @@ fi
 LOG="${AUTOPIPE_LOG_FILE:-$AUTOPIPE_LOG_ROOT/autopipe.log}"
 LOCK="${AUTOPIPE_LOCK_PATH:-/tmp/autopipe.cron.lock}"
 
+# Size-bounded rotation; call only while holding the tick lock. Returns
+# non-zero on a failure, leaving $LOG in place (it is moved last).
+rotate_log() {
+  local max="${AUTOPIPE_LOG_MAX_BYTES:-}" keep="${AUTOPIPE_LOG_KEEP:-}" size i
+  case "$max" in ''|*[!0-9]*) max=67108864 ;; esac
+  case "$keep" in ''|*[!0-9]*) keep=5 ;; esac
+  max=$((10#$max))
+  keep=$((10#$keep))
+  [ "$keep" -ge 1 ] || keep=5
+  [ "$max" -gt 0 ] || return 0
+  { [ -f "$LOG" ] && [ ! -L "$LOG" ]; } || return 0
+  size=$(stat -c '%s' "$LOG" 2>/dev/null || stat -f '%z' "$LOG" 2>/dev/null || true)
+  case "$size" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$((10#$size))" -ge "$max" ] || return 0
+  # `mv` onto a directory would move the file INTO it; refuse instead.
+  for ((i = 1; i <= keep; i++)); do
+    if [ -d "$LOG.$i" ] && [ ! -L "$LOG.$i" ]; then
+      return 1
+    fi
+  done
+  rm -f "$LOG.$keep" || return 1
+  # Generations above KEEP (left by a lowered AUTOPIPE_LOG_KEEP) go too: scan
+  # upward until the first missing one; a non-regular entry is skipped.
+  i=$((keep + 1))
+  while [ -e "$LOG.$i" ] || [ -L "$LOG.$i" ]; do
+    if [ -f "$LOG.$i" ] && [ ! -L "$LOG.$i" ]; then
+      rm -f "$LOG.$i" || return 1
+    fi
+    i=$((i + 1))
+  done
+  for ((i = keep - 1; i >= 1; i--)); do
+    if [ -e "$LOG.$i" ] || [ -L "$LOG.$i" ]; then
+      mv -f "$LOG.$i" "$LOG.$((i + 1))" || return 1
+    fi
+  done
+  mv -f "$LOG" "$LOG.1" || return 1
+  echo "[$(ts)] autopipe: rotated log size_bytes=$size keep=$keep" >> "$LOG"
+}
+
 # Non-blocking lock: if a previous run is still going, skip this tick.
 exec 9>"$LOCK"
 if ! flock -n 9; then
@@ -188,6 +237,7 @@ if ! flock -n 9; then
   exit 0
 fi
 
+rotate_log || { rot_rc=$?; echo "[$(ts)] autopipe: log rotation failed rc=$rot_rc (non-fatal)" >> "$LOG"; }
 echo "[$(ts)] autopipe: start" >> "$LOG"
 START=$(date +%s)
 
@@ -204,7 +254,8 @@ PHASE_START=$(date +%s)
   --direct-grid-only \
   --workers "${AUTOPIPE_RUN_WORKERS:-1}" \
   --exclude-basins "${AUTOPIPE_EXCLUDE_BASINS:-}" \
-  --exclude-model-ids "${AUTOPIPE_EXCLUDE_MODEL_IDS:-}" >> "$LOG" 2>&1
+  --exclude-model-ids "${AUTOPIPE_EXCLUDE_MODEL_IDS:-}" \
+  --summary-mode tick >> "$LOG" 2>&1
 RC=$?
 PHASE_END=$(date +%s)
 echo "[$(ts)] autopipe: phase=ingest elapsed_sec=$((PHASE_END - PHASE_START))" >> "$LOG"

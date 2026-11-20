@@ -9,14 +9,16 @@ canonical published logs. Importer (node-27) projects that sidecar into
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, TypedDict
 from urllib.parse import urlsplit
 
 from packages.common.contracts.time_normalization import cycle_id_for, format_cycle_time, parse_cycle_time
@@ -115,6 +117,39 @@ ALLOWED_STAGES = frozenset(
 
 _CYCLE_SCOPED_STAGES = frozenset({"convert", "forcing", "state_save_qc", "download", "publish"})
 
+# #3224: the discovered pass may skip a run whose sidecar bytes and projected
+# rows are unchanged since the import that wrote its marker (design.md of
+# openspec change cheapen-idle-autopipe-tick). The state is an optimisation
+# only: any doubt about it sends the run through the ordinary import.
+IMPORT_STATE_SCHEMA = "nhms.node27.pipeline_job_provenance_import_state.v1"
+MAX_IMPORT_STATE_BYTES = 64 * 1024 * 1024
+MAX_JOB_IDS_PER_ROW_READ = 1000
+# The ops.pipeline_job columns the importer reads and writes; the row
+# fingerprint covers exactly these, timestamps as UTC ISO-8601 instants.
+PIPELINE_JOB_ROW_COLUMNS = (
+    "job_id",
+    "run_id",
+    "cycle_id",
+    "job_type",
+    "slurm_job_id",
+    "array_task_id",
+    "model_id",
+    "status",
+    "stage",
+    "submitted_at",
+    "started_at",
+    "finished_at",
+    "exit_code",
+    "retry_count",
+    "error_code",
+    "error_message",
+    "log_uri",
+    "created_at",
+    "updated_at",
+)
+_PIPELINE_JOB_TIMESTAMP_COLUMNS = frozenset({"submitted_at", "started_at", "finished_at", "created_at", "updated_at"})
+_SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
+
 
 class PipelineJobProvenanceError(RuntimeError):
     """Raised when a provenance publication or import cannot complete safely."""
@@ -124,6 +159,51 @@ class PipelineJobProvenanceError(RuntimeError):
         self.code = code
         self.message = message
         self.details = dict(details or {})
+
+
+class _DbCursor(Protocol):
+    """What the importer's new helpers use of a DB-API cursor."""
+
+    def __enter__(self) -> _DbCursor: ...
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> object: ...
+
+    def execute(self, sql: str, params: object = None) -> object: ...
+
+    def fetchone(self) -> Mapping[str, object] | Sequence[object] | None: ...
+
+
+class _DbConnection(Protocol):
+    """What the importer's new helpers use of a DB-API connection (one transaction per ``with``)."""
+
+    def __enter__(self) -> _DbConnection: ...
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> object: ...
+
+    def cursor(self) -> _DbCursor: ...
+
+    def close(self) -> object: ...
+
+
+class _ImportMarker(TypedDict):
+    """A run's entry in the import-state file."""
+
+    sidecar_sha256: str
+    jobs: dict[str, str]
+
+
+@dataclass(frozen=True)
+class _ReadSidecar:
+    """One run's sidecar bytes, read once; the digest and the import share them."""
+
+    run_id: str
+    store: LocalObjectStore
+    sidecar_key: str
+    raw: bytes
+
+    @property
+    def sha256(self) -> str:
+        return hashlib.sha256(self.raw).hexdigest()
 
 
 class _ParentArrayLogCache:
@@ -404,25 +484,67 @@ def import_run_pipeline_job_provenance(
     """
 
     safe_run_id = _require_safe_identity(run_id, field="run_id")
+    sidecar = _read_run_sidecar(
+        object_store_root=object_store_root,
+        run_id=safe_run_id,
+        object_store_prefix=object_store_prefix,
+    )
+    if sidecar is None:
+        return _unavailable_run_summary(safe_run_id)
+    result, _job_ids = _import_read_sidecar(database_url=database_url, sidecar=sidecar, connect=connect)
+    return result
+
+
+def _read_run_sidecar(
+    *,
+    object_store_root: str | Path,
+    run_id: str,
+    object_store_prefix: str,
+) -> _ReadSidecar | None:
+    """Read a run's sidecar bytes once; ``None`` when no sidecar is published."""
+
+    safe_run_id = _require_safe_identity(run_id, field="run_id")
     object_root = _require_existing_directory(object_store_root, field="object_store_root")
     store = LocalObjectStore(root=object_root, object_store_prefix=object_store_prefix)
     sidecar_key = sidecar_object_key(safe_run_id)
     if not store.exists(sidecar_key):
-        return {
-            "run_id": safe_run_id,
-            "status": "unavailable",
-            "reason": "sidecar_missing",
-            "inserted": 0,
-            "updated": 0,
-            "unchanged": 0,
-            "ignored_stale": 0,
-        }
-    sidecar = _load_sidecar(store, sidecar_key)
-    manifest = _load_run_manifest(store, safe_run_id)
-    identity = _identity_from_manifest(manifest, expected_run_id=safe_run_id)
-    _require_sidecar_matches_manifest(sidecar, identity)
-    jobs = [_validate_imported_job(job, sidecar_identity=sidecar["identity"]) for job in sidecar["jobs"]]
+        return None
+    return _ReadSidecar(
+        run_id=safe_run_id,
+        store=store,
+        sidecar_key=sidecar_key,
+        raw=_read_sidecar_bytes(store, sidecar_key),
+    )
 
+
+def _import_read_sidecar(
+    *,
+    database_url: str,
+    sidecar: _ReadSidecar,
+    connect: Callable[..., _DbConnection] | None = None,
+) -> tuple[dict[str, str | int], list[str]]:
+    """Import already-read sidecar bytes; also return the validated job ids."""
+
+    parsed = _load_sidecar(sidecar.store, sidecar.sidecar_key, raw=sidecar.raw)
+    manifest = _load_run_manifest(sidecar.store, sidecar.run_id)
+    identity = _identity_from_manifest(manifest, expected_run_id=sidecar.run_id)
+    _require_sidecar_matches_manifest(parsed, identity)
+    jobs = [_validate_imported_job(job, sidecar_identity=parsed["identity"]) for job in parsed["jobs"]]
+
+    connection = _open_connection(database_url, connect=connect)
+    try:
+        with connection:
+            with connection.cursor() as cursor:
+                hydro = _load_hydro_identity(cursor, sidecar.run_id)
+                _require_hydro_matches_sidecar(hydro, parsed["identity"])
+                _lock_projection_jobs(cursor, jobs)
+                counts = _project_jobs(cursor, jobs)
+    finally:
+        connection.close()
+    return {**counts, "run_id": sidecar.run_id, "status": "imported"}, [str(job["job_id"]) for job in jobs]
+
+
+def _open_connection(database_url: str, *, connect: Callable[..., _DbConnection] | None = None) -> _DbConnection:
     import psycopg2
     from psycopg2.extras import RealDictCursor
 
@@ -431,21 +553,32 @@ def import_run_pipeline_job_provenance(
         "fallback_application_name": "nhms-pipeline-job-provenance",
     }
     if connect is None:
-        connection = psycopg2.connect(database_url, **connect_kwargs)
-    else:
-        connection = connect(database_url, **connect_kwargs)
-    try:
-        with connection:
-            with connection.cursor() as cursor:
-                hydro = _load_hydro_identity(cursor, safe_run_id)
-                _require_hydro_matches_sidecar(hydro, sidecar["identity"])
-                _lock_projection_jobs(cursor, jobs)
-                result = _project_jobs(cursor, jobs)
-    finally:
-        connection.close()
-    result["run_id"] = safe_run_id
-    result["status"] = "imported"
-    return result
+        return psycopg2.connect(database_url, **connect_kwargs)
+    return connect(database_url, **connect_kwargs)
+
+
+def _unavailable_run_summary(run_id: str) -> dict[str, str | int]:
+    return {
+        "run_id": run_id,
+        "status": "unavailable",
+        "reason": "sidecar_missing",
+        "inserted": 0,
+        "updated": 0,
+        "unchanged": 0,
+        "ignored_stale": 0,
+    }
+
+
+def _failed_run_summary(run_id: str, error: Exception) -> dict[str, str | int]:
+    return {
+        "run_id": run_id,
+        "status": "failed",
+        "reason": error.code if isinstance(error, PipelineJobProvenanceError) else type(error).__name__,
+        "inserted": 0,
+        "updated": 0,
+        "unchanged": 0,
+        "ignored_stale": 0,
+    }
 
 
 def import_runs_pipeline_job_provenance(
@@ -485,13 +618,29 @@ def import_discovered_pipeline_job_provenance(
     run_ids: Sequence[str],
     object_store_prefix: str = "",
     connect: Callable[..., Any] | None = None,
+    state_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Project an unbounded discovered set through the existing 256-run cap."""
+    """Project an unbounded discovered set through the existing 256-run cap.
+
+    With ``state_path`` a run whose sidecar bytes and projected rows are
+    unchanged since its last committed import is skipped (counted in
+    ``skipped_unchanged``, not listed in ``runs``); every other run goes
+    through the ordinary per-run import. Without it every run is imported.
+    """
 
     requested = [_require_safe_identity(run_id, field="run_id") for run_id in run_ids]
     if len(set(requested)) != len(requested):
         raise PipelineJobProvenanceError("DUPLICATE_RUN_ID", "Each import run_id must be requested once.")
-    summaries: list[dict[str, Any]] = []
+    if state_path is not None:
+        return _import_discovered_with_state(
+            database_url=database_url,
+            object_store_root=object_store_root,
+            requested=requested,
+            object_store_prefix=object_store_prefix,
+            connect=connect,
+            state_path=Path(state_path),
+        )
+    summaries: list[dict[str, str | int]] = []
     for offset in range(0, len(requested), MAX_PROVENANCE_RUNS_PER_BATCH):
         chunk = requested[offset : offset + MAX_PROVENANCE_RUNS_PER_BATCH]
         if not chunk:
@@ -504,14 +653,7 @@ def import_discovered_pipeline_job_provenance(
             connect=connect,
         )
         summaries.extend(chunk_summary["runs"])
-    failed = [item for item in summaries if item["status"] == "failed"]
-    return {
-        "status": "failed" if failed else "imported",
-        "runs": summaries,
-        "imported": len([item for item in summaries if item["status"] == "imported"]),
-        "unavailable": len([item for item in summaries if item["status"] == "unavailable"]),
-        "failed": len(failed),
-    }
+    return {**_pass_summary(summaries), "skipped_unchanged": 0, "skip_state": "disabled"}
 
 
 def _import_requested_pipeline_job_provenance(
@@ -521,44 +663,37 @@ def _import_requested_pipeline_job_provenance(
     run_ids: Sequence[str],
     object_store_prefix: str = "",
     connect: Callable[..., Any] | None = None,
+    read_sidecars: Mapping[str, _ReadSidecar] | None = None,
+    imported_job_ids: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
-    summaries: list[dict[str, Any]] = []
+    summaries: list[dict[str, str | int]] = []
     for run_id in run_ids:
         try:
-            summaries.append(
-                import_run_pipeline_job_provenance(
+            if read_sidecars is None:
+                summaries.append(
+                    import_run_pipeline_job_provenance(
+                        database_url=database_url,
+                        object_store_root=object_store_root,
+                        run_id=run_id,
+                        object_store_prefix=object_store_prefix,
+                        connect=connect,
+                    )
+                )
+            else:
+                result, job_ids = _import_read_sidecar(
                     database_url=database_url,
-                    object_store_root=object_store_root,
-                    run_id=run_id,
-                    object_store_prefix=object_store_prefix,
+                    sidecar=read_sidecars[run_id],
                     connect=connect,
                 )
-            )
-        except PipelineJobProvenanceError as error:
-            summaries.append(
-                {
-                    "run_id": run_id,
-                    "status": "failed",
-                    "reason": error.code,
-                    "inserted": 0,
-                    "updated": 0,
-                    "unchanged": 0,
-                    "ignored_stale": 0,
-                }
-            )
+                if imported_job_ids is not None:
+                    imported_job_ids[run_id] = job_ids
+                summaries.append(result)
         except Exception as error:  # noqa: BLE001 - bounded per-run isolation
-            summaries.append(
-                {
-                    "run_id": run_id,
-                    "status": "failed",
-                    "reason": type(error).__name__,
-                    "inserted": 0,
-                    "updated": 0,
-                    "unchanged": 0,
-                    "ignored_stale": 0,
-                }
-            )
+            summaries.append(_failed_run_summary(run_id, error))
+    return _pass_summary(summaries)
 
+
+def _pass_summary(summaries: list[dict[str, str | int]]) -> dict[str, object]:
     failed = [item for item in summaries if item["status"] == "failed"]
     return {
         "status": "failed" if failed else "imported",
@@ -568,6 +703,215 @@ def _import_requested_pipeline_job_provenance(
         "failed": len(failed),
     }
 
+
+def _import_discovered_with_state(
+    *,
+    database_url: str,
+    object_store_root: str | Path,
+    requested: Sequence[str],
+    object_store_prefix: str,
+    connect: Callable[..., _DbConnection] | None,
+    state_path: Path,
+) -> dict[str, object]:
+    loaded = _load_import_state(state_path)
+    markers = loaded[0] if loaded is not None else {}
+    skip_state = "loaded" if loaded is not None else "empty"
+
+    # Each run's sidecar is read once, inside that run's failure isolation.
+    results: dict[str, dict[str, str | int]] = {}
+    read_sidecars: dict[str, _ReadSidecar] = {}
+    for run_id in requested:
+        try:
+            sidecar = _read_run_sidecar(
+                object_store_root=object_store_root,
+                run_id=run_id,
+                object_store_prefix=object_store_prefix,
+            )
+        except Exception as error:  # noqa: BLE001 - bounded per-run isolation
+            results[run_id] = _failed_run_summary(run_id, error)
+            continue
+        if sidecar is None:
+            results[run_id] = _unavailable_run_summary(run_id)
+        else:
+            read_sidecars[run_id] = sidecar
+
+    candidates = [
+        run_id
+        for run_id, sidecar in read_sidecars.items()
+        if run_id in markers and markers[run_id]["sidecar_sha256"] == sidecar.sha256
+    ]
+    skipped: set[str] = set()
+    if candidates:
+        try:
+            present = _read_job_row_fingerprints(
+                database_url,
+                sorted({job_id for run_id in candidates for job_id in markers[run_id]["jobs"]}),
+                connect=connect,
+            )
+        except Exception as error:  # noqa: BLE001 - a failed presence read skips nothing
+            LOGGER.warning("pipeline job provenance presence read failed; no run skipped: %s", type(error).__name__)
+            skip_state = "presence_check_failed"
+        else:
+            skipped = {
+                run_id
+                for run_id in candidates
+                if all(present.get(job_id) == fingerprint for job_id, fingerprint in markers[run_id]["jobs"].items())
+            }
+
+    to_import = [run_id for run_id in requested if run_id in read_sidecars and run_id not in skipped]
+    imported_job_ids: dict[str, list[str]] = {}
+    for offset in range(0, len(to_import), MAX_PROVENANCE_RUNS_PER_BATCH):
+        chunk_summary = _import_requested_pipeline_job_provenance(
+            database_url=database_url,
+            object_store_root=object_store_root,
+            run_ids=to_import[offset : offset + MAX_PROVENANCE_RUNS_PER_BATCH],
+            object_store_prefix=object_store_prefix,
+            connect=connect,
+            read_sidecars=read_sidecars,
+            imported_job_ids=imported_job_ids,
+        )
+        for item in chunk_summary["runs"]:
+            results[item["run_id"]] = item
+
+    # Rebuilt each pass: skipped runs keep their marker, runs imported in this
+    # pass get one from the rows read back after all imports, every other run
+    # (failed, unavailable, no longer requested) has none.
+    next_markers = {run_id: markers[run_id] for run_id in requested if run_id in skipped}
+    imported_runs = [run_id for run_id in to_import if results[run_id]["status"] == "imported"]
+    if imported_runs:
+        try:
+            recorded = _read_job_row_fingerprints(
+                database_url,
+                sorted({job_id for run_id in imported_runs for job_id in imported_job_ids[run_id]}),
+                connect=connect,
+            )
+        except Exception as error:  # noqa: BLE001 - unmarked runs are imported again next pass
+            LOGGER.warning(
+                "pipeline job provenance read-back failed; runs imported in this pass stay unmarked: %s",
+                type(error).__name__,
+            )
+        else:
+            for run_id in imported_runs:
+                job_ids = imported_job_ids[run_id]
+                if all(job_id in recorded for job_id in job_ids):
+                    next_markers[run_id] = {
+                        "sidecar_sha256": read_sidecars[run_id].sha256,
+                        "jobs": {job_id: recorded[job_id] for job_id in job_ids},
+                    }
+
+    saved = _save_import_state(state_path, next_markers, previous=loaded[1] if loaded is not None else None)
+    summaries = [results[run_id] for run_id in requested if run_id not in skipped]
+    return {
+        **_pass_summary(summaries),
+        "skipped_unchanged": len(skipped),
+        "skip_state": skip_state,
+        "skip_state_saved": saved,
+    }
+
+
+def _load_import_state(path: Path) -> tuple[dict[str, _ImportMarker], bytes] | None:
+    """Return ``(markers, raw bytes)``, or ``None`` for a missing or damaged file."""
+
+    try:
+        raw = read_bytes_limited_no_follow(path, max_bytes=MAX_IMPORT_STATE_BYTES)
+    except (OSError, SafeFilesystemError):
+        return None
+    if len(raw) > MAX_IMPORT_STATE_BYTES:
+        return None
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except ValueError:
+        return None
+    if not isinstance(payload, dict) or payload.get("schema") != IMPORT_STATE_SCHEMA:
+        return None
+    runs = payload.get("runs")
+    if not isinstance(runs, dict):
+        return None
+    markers: dict[str, _ImportMarker] = {}
+    for run_id, marker in runs.items():
+        if not isinstance(marker, dict):
+            return None
+        digest = marker.get("sidecar_sha256")
+        jobs = marker.get("jobs")
+        if not isinstance(digest, str) or _SHA256_HEX_RE.fullmatch(digest) is None or not isinstance(jobs, dict):
+            return None
+        if any(
+            not isinstance(job_id, str) or not isinstance(value, str) or _SHA256_HEX_RE.fullmatch(value) is None
+            for job_id, value in jobs.items()
+        ):
+            return None
+        markers[run_id] = {"sidecar_sha256": digest, "jobs": dict(jobs)}
+    return markers, raw
+
+
+def _save_import_state(path: Path, markers: Mapping[str, _ImportMarker], *, previous: bytes | None) -> bool:
+    """Write the state atomically when its content changed; ``False`` only on a failed write."""
+
+    payload = json.dumps(
+        {"schema": IMPORT_STATE_SCHEMA, "runs": markers},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    if payload == previous:
+        return True
+    try:
+        atomic_write_bytes_no_follow(path, payload, temp_suffix="tmp")
+    except (OSError, SafeFilesystemError) as error:
+        LOGGER.warning("pipeline job provenance import state was not saved: %s", type(error).__name__)
+        return False
+    return True
+
+
+def _read_job_row_fingerprints(
+    database_url: str,
+    job_ids: Sequence[str],
+    *,
+    connect: Callable[..., _DbConnection] | None = None,
+) -> dict[str, str]:
+    """Fingerprint the ``ops.pipeline_job`` rows of ``job_ids`` (read-only, no locks).
+
+    The one row read behind both sides of the skip comparison: the check at the
+    start of a pass and the marker recorded after its imports.
+    """
+
+    if not job_ids:
+        return {}
+    columns = ", ".join(PIPELINE_JOB_ROW_COLUMNS)
+    fingerprints: dict[str, str] = {}
+    connection = _open_connection(database_url, connect=connect)
+    try:
+        with connection:
+            with connection.cursor() as cursor:
+                for offset in range(0, len(job_ids), MAX_JOB_IDS_PER_ROW_READ):
+                    batch = list(job_ids[offset : offset + MAX_JOB_IDS_PER_ROW_READ])
+                    placeholders = ", ".join(["%s"] * len(batch))
+                    cursor.execute(
+                        f"SELECT {columns} FROM ops.pipeline_job WHERE job_id IN ({placeholders})",
+                        tuple(batch),
+                    )
+                    while (row := cursor.fetchone()) is not None:
+                        record = (
+                            dict(row)
+                            if isinstance(row, Mapping)
+                            else dict(zip(PIPELINE_JOB_ROW_COLUMNS, row, strict=True))
+                        )
+                        fingerprints[str(record["job_id"])] = _job_row_fingerprint(record)
+    finally:
+        connection.close()
+    return fingerprints
+
+
+def _job_row_fingerprint(row: Mapping[str, object]) -> str:
+    canonical: dict[str, object] = {}
+    for column in PIPELINE_JOB_ROW_COLUMNS:
+        value = row.get(column)
+        if column in _PIPELINE_JOB_TIMESTAMP_COLUMNS and value is not None:
+            timestamp = _timestamp_as_utc(value)
+            value = _format_utc(timestamp) if timestamp is not None else str(value)
+        canonical[column] = value
+    payload = json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _bound_fetch_logs(
@@ -1261,11 +1605,14 @@ def _encode_sidecar(sidecar: Mapping[str, Any]) -> bytes:
     return payload
 
 
-def _load_sidecar(store: LocalObjectStore, sidecar_key: str) -> dict[str, Any]:
+def _load_sidecar(store: LocalObjectStore, sidecar_key: str, *, raw: bytes | None = None) -> dict[str, Any]:
+    """Parse a sidecar; ``raw`` is bytes this pass already read from ``sidecar_key``."""
+
+    if raw is None:
+        raw = _read_sidecar_bytes(store, sidecar_key)
     try:
-        raw = store.read_bytes_limited(sidecar_key, max_bytes=MAX_SIDECAR_BYTES)
         payload = json.loads(raw.decode("utf-8"))
-    except (ObjectStoreError, OSError, SafeFilesystemError, UnicodeDecodeError, json.JSONDecodeError) as error:
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise PipelineJobProvenanceError(
             "SIDECAR_UNREADABLE",
             "Provenance sidecar could not be read.",
@@ -1309,6 +1656,17 @@ def _load_sidecar(store: LocalObjectStore, sidecar_key: str) -> dict[str, Any]:
         "identity": closed_identity,
         "jobs": [dict(job) for job in jobs],
     }
+
+
+def _read_sidecar_bytes(store: LocalObjectStore, sidecar_key: str) -> bytes:
+    try:
+        return store.read_bytes_limited(sidecar_key, max_bytes=MAX_SIDECAR_BYTES)
+    except (ObjectStoreError, OSError, SafeFilesystemError) as error:
+        raise PipelineJobProvenanceError(
+            "SIDECAR_UNREADABLE",
+            "Provenance sidecar could not be read.",
+            {"sidecar_key": sidecar_key},
+        ) from error
 
 
 def _require_sidecar_matches_manifest(sidecar: Mapping[str, Any], identity: Mapping[str, str]) -> None:

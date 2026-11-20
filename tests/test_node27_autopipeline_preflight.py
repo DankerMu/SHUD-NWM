@@ -1945,3 +1945,262 @@ def test_wrapper_strict_source_passes_the_retention_window_to_the_refresh(tmp_pa
     assert proc.returncode == 0, proc.stderr
     assert "BLOCKED" not in proc.stderr
     assert seen.read_text(encoding="utf-8") == "21"
+
+
+# ---------------------------------------------------------------------------
+# #3224: size-bounded log rotation under the tick lock, before `autopipe: start`,
+# and `--summary-mode tick` on the ingest invocation. Expected values are the
+# `node27-ingest-boundary` delta of openspec change cheapen-idle-autopipe-tick
+# (defaults 67108864 bytes / 5 generations, `0` disables, invalid -> default).
+# ---------------------------------------------------------------------------
+
+_ROTATION_LINE = re.compile(r"^\[[0-9TZ:-]+\] autopipe: rotated log size_bytes=(\d+) keep=(\d+)$")
+_OLD_LOG = "old tick output line\n" * 5  # 105 bytes: over a 64-byte bound, under the default
+
+
+def _rotation_tick(
+    tmp_path: Path,
+    *,
+    settings: dict[str, str] | None = None,
+    generations: dict[str, str] | None = None,
+    flock_rc: int = 0,
+) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
+    fake_repo = tmp_path / "repo"
+    scripts = fake_repo / "scripts"
+    python_bin = fake_repo / ".venv" / "bin" / "python"
+    object_store_root = tmp_path / "object-store"
+    basins_root = tmp_path / "Basins"
+    work_root = tmp_path / "autopipe-work"
+    log_root = tmp_path / "autopipe-logs"
+    for path in (scripts, python_bin.parent, object_store_root, basins_root, work_root, log_root):
+        path.mkdir(parents=True, exist_ok=True)
+    (scripts / "node27_autopipeline.py").write_text("# fake autopipeline\n", encoding="utf-8")
+    argv_capture = tmp_path / "argv.txt"
+    python_bin.write_text(
+        f"#!/bin/sh\nprintf '%s\\n' \"$@\" > {argv_capture}\necho 'this tick ingest output'\nexit 0\n",
+        encoding="utf-8",
+    )
+    python_bin.chmod(0o755)
+    log = log_root / "autopipe.log"
+    for suffix, content in (generations or {}).items():
+        Path(f"{log}{suffix}").write_text(content, encoding="utf-8")
+    env_file = tmp_path / "node27-ingest.env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "DATABASE_URL=postgresql://node27_writer:writer-secret@db.example/nhms",
+                "NHMS_NODE27_INGEST_ROLE=node27_data_plane_ingest",
+                f"OBJECT_STORE_ROOT={object_store_root}",
+                f"BASINS_ROOT={basins_root}",
+                f"AUTOPIPE_WORK_ROOT={work_root}",
+                f"AUTOPIPE_LOG_ROOT={log_root}",
+                f"AUTOPIPE_LOG_FILE={log}",
+                f"AUTOPIPE_LOCK_PATH={tmp_path / 'autopipe.lock'}",
+                "AUTOPIPE_MVT_PREWARM_ENABLED=0",
+                *(f"{key}={value}" for key, value in (settings or {}).items()),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    env_file.chmod(0o600)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "flock").write_text(f"#!/bin/sh\nexit {flock_rc}\n", encoding="utf-8")
+    (fake_bin / "flock").chmod(0o755)
+    env = {
+        **os.environ,
+        "NODE27_AUTOPIPE_REPO": str(fake_repo),
+        "NODE27_AUTOPIPE_ENV_FILE": str(env_file),
+        "NODE27_AUTOPIPE_BOOTSTRAP_LOG": str(tmp_path / "bootstrap.log"),
+        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+    }
+    for key in ("NODE27_AUTOPIPE_ALLOW_AMBIENT_ENV", "AUTOPIPE_LOG_MAX_BYTES", "AUTOPIPE_LOG_KEEP"):
+        env.pop(key, None)
+    proc = subprocess.run(["bash", str(WRAPPER)], env=env, capture_output=True, text=True, check=False)
+    return proc, log, argv_capture
+
+
+def _generations(log: Path) -> dict[str, str]:
+    return {
+        path.name[len(log.name) :]: path.read_text(encoding="utf-8")
+        for path in sorted(log.parent.iterdir())
+        if path.name.startswith(f"{log.name}.")
+    }
+
+
+def test_wrapper_rotates_a_log_at_the_bound_and_keeps_bounded_generations(tmp_path: Path) -> None:
+    proc, log, _argv = _rotation_tick(
+        tmp_path,
+        settings={"AUTOPIPE_LOG_MAX_BYTES": "64", "AUTOPIPE_LOG_KEEP": "2"},
+        generations={"": _OLD_LOG, ".1": "generation one\n", ".2": "generation two\n"},
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert _generations(log) == {".1": _OLD_LOG, ".2": "generation one\n"}
+    lines = log.read_text(encoding="utf-8").splitlines()
+    rotated = _ROTATION_LINE.match(lines[0])
+    assert rotated is not None, lines[0]
+    assert rotated.groups() == (str(len(_OLD_LOG.encode())), "2")
+    assert lines[1].endswith("autopipe: start")
+    assert "this tick ingest output" in lines
+    assert any("autopipe: done rc=0" in line for line in lines)
+
+
+def test_wrapper_rotation_removes_generations_above_a_lowered_keep(tmp_path: Path) -> None:
+    proc, log, _argv = _rotation_tick(
+        tmp_path,
+        settings={"AUTOPIPE_LOG_MAX_BYTES": "64", "AUTOPIPE_LOG_KEEP": "2"},
+        generations={
+            "": _OLD_LOG,
+            ".1": "generation one\n",
+            ".2": "generation two\n",
+            ".3": "generation three\n",
+            ".4": "generation four\n",
+        },
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert _generations(log) == {".1": _OLD_LOG, ".2": "generation one\n"}
+    assert not Path(f"{log}.3").exists()
+    assert not Path(f"{log}.4").exists()
+    assert _ROTATION_LINE.match(log.read_text(encoding="utf-8").splitlines()[0]) is not None
+
+
+@pytest.mark.parametrize(
+    "max_bytes",
+    [pytest.param("4096", id="under-the-bound"), pytest.param("0", id="zero-disables")],
+)
+def test_wrapper_leaves_a_log_under_the_bound_and_a_zero_bound_alone(tmp_path: Path, max_bytes: str) -> None:
+    proc, log, _argv = _rotation_tick(
+        tmp_path,
+        settings={"AUTOPIPE_LOG_MAX_BYTES": max_bytes, "AUTOPIPE_LOG_KEEP": "2"},
+        generations={"": _OLD_LOG, ".1": "generation one\n"},
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert _generations(log) == {".1": "generation one\n"}
+    text = log.read_text(encoding="utf-8")
+    assert text.startswith(_OLD_LOG)
+    assert "rotated log" not in text
+    assert text[len(_OLD_LOG) :].splitlines()[0].endswith("autopipe: start")
+
+
+@pytest.mark.parametrize("keep", ["0", "-1", "abc"])
+def test_wrapper_falls_back_to_the_default_generation_count_for_an_invalid_keep(tmp_path: Path, keep: str) -> None:
+    existing = {f".{index}": f"generation {index}\n" for index in range(1, 6)}
+    proc, log, _argv = _rotation_tick(
+        tmp_path,
+        settings={"AUTOPIPE_LOG_MAX_BYTES": "64", "AUTOPIPE_LOG_KEEP": keep},
+        generations={"": _OLD_LOG, **existing},
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert _generations(log) == {
+        ".1": _OLD_LOG,
+        ".2": "generation 1\n",
+        ".3": "generation 2\n",
+        ".4": "generation 3\n",
+        ".5": "generation 4\n",
+    }
+    rotated = _ROTATION_LINE.match(log.read_text(encoding="utf-8").splitlines()[0])
+    assert rotated is not None
+    assert rotated.group(2) == "5"
+
+
+def _sparse_log(tmp_path: Path, size: int) -> None:
+    log_root = tmp_path / "autopipe-logs"
+    log_root.mkdir()
+    with (log_root / "autopipe.log").open("wb") as handle:
+        handle.truncate(size)
+
+
+@pytest.mark.parametrize("max_bytes", ["-1", "abc"])
+@pytest.mark.parametrize(
+    ("size", "rotated"),
+    [pytest.param(67108864, True, id="at-the-default"), pytest.param(67108863, False, id="one-below-the-default")],
+)
+def test_wrapper_falls_back_to_the_default_bound_for_an_invalid_max_bytes(
+    tmp_path: Path, max_bytes: str, size: int, rotated: bool
+) -> None:
+    # Pinned from both sides: an invalid bound is neither "disabled" (the log at
+    # 64 MiB would stay) nor any smaller bound (the log one byte below would move).
+    _sparse_log(tmp_path, size)
+
+    proc, log, _argv = _rotation_tick(tmp_path, settings={"AUTOPIPE_LOG_MAX_BYTES": max_bytes})
+
+    assert proc.returncode == 0, proc.stderr
+    if rotated:
+        assert (log.parent / "autopipe.log.1").stat().st_size == size
+        match = _ROTATION_LINE.match(log.read_text(encoding="utf-8").splitlines()[0])
+        assert match is not None
+        assert match.groups() == (str(size), "5")
+    else:
+        assert _generations(log) == {}
+        appended = log.read_bytes()[size:].decode("utf-8").splitlines()
+        assert appended[0].endswith("autopipe: start")
+        assert not any("rotated log" in line for line in appended)
+
+
+def test_wrapper_rotates_at_the_default_bound_when_unset(tmp_path: Path) -> None:
+    log_root = tmp_path / "autopipe-logs"
+    log_root.mkdir()
+    with (log_root / "autopipe.log").open("wb") as handle:
+        handle.truncate(67108864)
+
+    proc, log, _argv = _rotation_tick(tmp_path)
+
+    assert proc.returncode == 0, proc.stderr
+    assert (log_root / "autopipe.log.1").stat().st_size == 67108864
+    rotated = _ROTATION_LINE.match(log.read_text(encoding="utf-8").splitlines()[0])
+    assert rotated is not None
+    assert rotated.groups() == ("67108864", "5")
+
+
+def test_wrapper_does_not_rotate_when_the_lock_is_held(tmp_path: Path) -> None:
+    proc, log, argv = _rotation_tick(
+        tmp_path,
+        settings={"AUTOPIPE_LOG_MAX_BYTES": "64", "AUTOPIPE_LOG_KEEP": "2"},
+        generations={"": _OLD_LOG, ".1": "generation one\n"},
+        flock_rc=1,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert _generations(log) == {".1": "generation one\n"}
+    text = log.read_text(encoding="utf-8")
+    assert text.startswith(_OLD_LOG)
+    assert text[len(_OLD_LOG) :].splitlines() == [
+        line for line in text[len(_OLD_LOG) :].splitlines() if "previous run still active, skipping tick" in line
+    ]
+    assert len(text[len(_OLD_LOG) :].splitlines()) == 1
+    assert not argv.exists()
+
+
+def test_wrapper_rotation_error_is_logged_and_never_fails_the_tick(tmp_path: Path) -> None:
+    log_root = tmp_path / "autopipe-logs"
+    (log_root / "autopipe.log.2").mkdir(parents=True)
+
+    proc, log, argv = _rotation_tick(
+        tmp_path,
+        settings={"AUTOPIPE_LOG_MAX_BYTES": "64", "AUTOPIPE_LOG_KEEP": "2"},
+        generations={"": _OLD_LOG, ".1": "generation one\n"},
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    text = log.read_text(encoding="utf-8")
+    assert text.startswith(_OLD_LOG)
+    after = text[len(_OLD_LOG) :].splitlines()
+    assert "autopipe: log rotation failed" in after[0]
+    assert "(non-fatal)" in after[0]
+    assert after[1].endswith("autopipe: start")
+    assert (log_root / "autopipe.log.1").read_text(encoding="utf-8") == "generation one\n"
+    assert argv.exists()
+
+
+def test_wrapper_passes_tick_summary_mode_to_the_ingest_invocation(tmp_path: Path) -> None:
+    proc, _log, argv_capture = _rotation_tick(tmp_path)
+
+    assert proc.returncode == 0, proc.stderr
+    argv = argv_capture.read_text(encoding="utf-8").splitlines()
+    assert argv[0].endswith("node27_autopipeline.py")
+    assert argv[argv.index("--summary-mode") + 1] == "tick"
