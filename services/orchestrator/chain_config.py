@@ -38,16 +38,6 @@ class PipelineAlreadyActiveError(OrchestratorError):
         )
 
 
-class AnalysisPipelineAlreadyActiveError(OrchestratorError):
-    def __init__(self, model_id: str, start_time: datetime, end_time: datetime) -> None:
-        super().__init__(
-            "ANALYSIS_PIPELINE_ALREADY_ACTIVE",
-            f"An active analysis pipeline already overlaps {model_id} "
-            f"{_format_time(start_time)}..{_format_time(end_time)}.",
-            {"model_id": model_id, "start_time": _format_time(start_time), "end_time": _format_time(end_time)},
-        )
-
-
 class SubmitDisposition(str, Enum):
     """Whether a failed submit is known not to have reached Slurm."""
 

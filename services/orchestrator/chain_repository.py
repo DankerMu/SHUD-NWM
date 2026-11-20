@@ -8,7 +8,6 @@ from typing import Any, Mapping
 from packages.common.contracts.time_normalization import cycle_id_for, format_cycle_time, parse_cycle_time
 from services.orchestrator import chain_array_accounting, chain_manifests, chain_repository_state, chain_runtime_utils
 from services.orchestrator.chain_types import (
-    AnalysisRunContext,
     ForcingContext,
     ForecastRunContext,
     ModelContext,
@@ -204,22 +203,6 @@ class PsycopgOrchestratorRepository:
             ),
         )
 
-    def has_active_analysis_run(self, *, model_id: str, start_time: datetime, end_time: datetime) -> bool:
-        row = self._fetch_optional(
-            """
-            SELECT 1 AS active
-            FROM hydro.hydro_run h
-            WHERE h.run_type = 'analysis'
-              AND h.model_id = %s
-              AND h.status NOT IN ('failed', 'cancelled', 'superseded')
-              AND h.start_time < %s
-              AND h.end_time > %s
-            LIMIT 1
-            """,
-            (model_id, end_time, start_time),
-        )
-        return row is not None
-
     def list_canonical_ready_cycles(self, *, source_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
         parameters: list[Any] = []
         source_filter = ""
@@ -354,7 +337,7 @@ class PsycopgOrchestratorRepository:
 
     def create_hydro_run(
         self,
-        context: ForecastRunContext | AnalysisRunContext,
+        context: ForecastRunContext,
         manifest: dict[str, Any],
     ) -> dict[str, Any]:
         init_state_id = getattr(context, "init_state_id", None) or manifest.get("initial_state", {}).get("state_id")

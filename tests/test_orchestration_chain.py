@@ -34,8 +34,6 @@ from services.orchestrator import chain_runtime_utils
 from services.orchestrator.chain import (
     M3_STAGES,
     TERMINAL_JOB_STATUSES,
-    AnalysisOrchestrator,
-    AnalysisRunContext,
     CycleOrchestrationContext,
     DisplayLogPublication,
     ForcingContext,
@@ -906,7 +904,6 @@ def test_chain_type_exports_preserve_legacy_identity_and_dataclass_contracts() -
         "ForcingContext",
         "InitialStateSelection",
         "ForecastRunContext",
-        "AnalysisRunContext",
         "StageRunResult",
         "PipelineResult",
         "ArrayTaskResult",
@@ -1028,37 +1025,6 @@ def test_chain_type_exports_preserve_legacy_identity_and_dataclass_contracts() -
                 ("init_state_quality", "cold_start_no_state"),
                 ("init_state_lineage", None),
                 ("output_segment_count", None),
-            ],
-        ),
-        "AnalysisRunContext": (
-            True,
-            True,
-            [
-                ("run_id", "required"),
-                ("source_id", "required"),
-                ("cycle_id", "required"),
-                ("cycle_time", "required"),
-                ("model_id", "required"),
-                ("basin_id", "required"),
-                ("basin_version_id", "required"),
-                ("river_network_version_id", "required"),
-                ("segment_count", "required"),
-                ("model_package_uri", "required"),
-                ("forcing_version_id", "required"),
-                ("forcing_package_uri", "required"),
-                ("start_time", "required"),
-                ("end_time", "required"),
-                ("run_manifest_uri", "required"),
-                ("output_uri", "required"),
-                ("log_uri", "required"),
-                ("forcing_package_manifest_uri", None),
-                ("forcing_package_manifest_checksum", None),
-                ("init_state_id", None),
-                ("init_state_uri", None),
-                ("init_state_valid_time", None),
-                ("output_segment_count", None),
-                ("update_ic_step_minutes", None),
-                ("forcing_causality", None),
             ],
         ),
         "StageRunResult": (
@@ -12827,7 +12793,6 @@ def test_chain_persistence_repository_compat_repository_retention_classification
     expected_protocol_method_names = (
         "has_active_orchestration",
         "has_active_pipeline",
-        "has_active_analysis_run",
         "load_model_context",
         "find_forcing_context",
         "ensure_forecast_cycle",
@@ -12855,7 +12820,6 @@ def test_chain_persistence_repository_compat_repository_retention_classification
         "has_completed_pipeline",
         "candidate_state",
         "active_slurm_jobs",
-        "has_active_analysis_run",
         "list_canonical_ready_cycles",
         "list_forecast_model_ids",
         "load_model_context",
@@ -13295,8 +13259,6 @@ def test_chain_manifest_compat_forwarders_match_owner_modules_and_inventory(monk
     top_level_owner_names = legacy_chain._CHAIN_MANIFEST_COMPAT_TOP_LEVEL_OWNER_FUNCTION_NAMES
     forecast_method_names = legacy_chain._CHAIN_MANIFEST_COMPAT_FORECAST_METHOD_FORWARDER_NAMES
     forecast_owner_names = legacy_chain._CHAIN_MANIFEST_COMPAT_FORECAST_METHOD_OWNER_FUNCTION_NAMES
-    analysis_method_names = legacy_chain._CHAIN_MANIFEST_COMPAT_ANALYSIS_METHOD_FORWARDER_NAMES
-    analysis_owner_names = legacy_chain._CHAIN_MANIFEST_COMPAT_ANALYSIS_METHOD_OWNER_FUNCTION_NAMES
 
     assert len(alias_names) == len(set(alias_names))
     assert set(alias_names) == {*chain_alias_names, *production_alias_names}
@@ -13306,19 +13268,16 @@ def test_chain_manifest_compat_forwarders_match_owner_modules_and_inventory(monk
     assert len(forecast_method_names) == len(set(forecast_method_names))
     assert len(forecast_owner_names) == len(set(forecast_owner_names))
     assert len(forecast_method_names) == len(forecast_owner_names)
-    assert len(analysis_method_names) == len(analysis_owner_names)
     assert legacy_chain._CHAIN_MANIFEST_COMPAT_ALIAS_OWNER_MISSING == ()
     assert legacy_chain._CHAIN_MANIFEST_COMPAT_ALIAS_FACADE_MISSING == ()
     assert legacy_chain._CHAIN_MANIFEST_COMPAT_OWNER_FUNCTION_MISSING == ()
     assert legacy_chain._CHAIN_MANIFEST_COMPAT_TOP_LEVEL_FACADE_MISSING == ()
     assert legacy_chain._CHAIN_MANIFEST_COMPAT_FORECAST_METHOD_FACADE_MISSING == ()
-    assert legacy_chain._CHAIN_MANIFEST_COMPAT_ANALYSIS_METHOD_FACADE_MISSING == ()
     assert legacy_chain._CHAIN_MANIFEST_COMPAT_DEPENDENCY_BINDING_DRIFT == ()
     assert set(legacy_chain._CHAIN_MANIFEST_COMPAT_OWNER_ALIASES) == set(alias_names)
     assert set(legacy_chain._CHAIN_MANIFEST_COMPAT_FACADE_ALIASES) == set(alias_names)
     assert set(legacy_chain._CHAIN_MANIFEST_COMPAT_TOP_LEVEL_FORWARDERS) == set(top_level_names)
     assert set(legacy_chain._CHAIN_MANIFEST_COMPAT_FORECAST_METHOD_FORWARDERS) == set(forecast_method_names)
-    assert set(legacy_chain._CHAIN_MANIFEST_COMPAT_ANALYSIS_METHOD_FORWARDERS) == set(analysis_method_names)
 
     for alias_name in chain_alias_names:
         assert legacy_chain._CHAIN_MANIFEST_COMPAT_OWNER_ALIASES[alias_name] is getattr(
@@ -13356,12 +13315,6 @@ def test_chain_manifest_compat_forwarders_match_owner_modules_and_inventory(monk
             owner_name,
         )
         assert callable(getattr(legacy_chain.ForecastOrchestrator, facade_name))
-    for facade_name, owner_name in zip(analysis_method_names, analysis_owner_names, strict=True):
-        assert legacy_chain._CHAIN_MANIFEST_COMPAT_ANALYSIS_METHOD_FORWARDERS[facade_name] is getattr(
-            chain_manifests,
-            owner_name,
-        )
-        assert callable(getattr(legacy_chain.AnalysisOrchestrator, facade_name))
 
     owner_callable_by_binding = {
         "build_model_run_assembly": chain_manifests.build_model_run_assembly,
@@ -13373,7 +13326,6 @@ def test_chain_manifest_compat_forwarders_match_owner_modules_and_inventory(monk
         "ForecastOrchestrator._build_forecast_runtime_manifest": chain_manifests.build_forecast_runtime_manifest,
         "ForecastOrchestrator._reindexed_manifest_entries": chain_manifests.reindexed_manifest_entries,
         "ForecastOrchestrator._build_run_manifest": chain_manifests.build_forecast_run_manifest,
-        "AnalysisOrchestrator._build_run_manifest": chain_manifests.build_analysis_run_manifest,
     }
     assert set(owner_callable_by_binding) == set(legacy_chain._CHAIN_MANIFEST_COMPAT_DEPENDENCY_BINDINGS)
     for binding_owner, bindings in legacy_chain._CHAIN_MANIFEST_COMPAT_DEPENDENCY_BINDINGS.items():
@@ -13544,11 +13496,9 @@ def test_chain_manifest_legacy_methods_delegate(monkeypatch) -> None:
     from services.orchestrator import chain_manifests, production_contract
 
     orchestrator = object.__new__(ForecastOrchestrator)
-    analysis_orchestrator = object.__new__(AnalysisOrchestrator)
     stage = object()
     cycle_context = object()
     run_context = object()
-    analysis_context = object()
     basin = {"run_id": "run-1"}
     basins = [basin]
     tasks = [{"task_id": 0}]
@@ -13559,7 +13509,6 @@ def test_chain_manifest_legacy_methods_delegate(monkeypatch) -> None:
     runtime_manifest = {"run_id": "run-1"}
     reindexed_entries = [{"task_id": 0, "run_id": "run-1"}]
     run_manifest = {"run_type": "forecast"}
-    analysis_manifest = {"run_type": "analysis"}
     calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
 
     def capture(name: str, result: Any = None) -> Any:
@@ -13606,27 +13555,15 @@ def test_chain_manifest_legacy_methods_delegate(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         chain_manifests,
-        "build_analysis_run_manifest",
-        capture("build_analysis_run_manifest", analysis_manifest),
-    )
-    monkeypatch.setattr(
-        chain_manifests,
         "write_run_manifest",
         capture("write_run_manifest"),
     )
     legacy_top_level_helpers = (
-        "ANALYSIS_SCENARIO_ID",
-        "DEFAULT_ERA5_REANALYSIS_LATENCY_MINUTES",
         "FORCING_CAUSALITY_CAUSAL",
-        "FORCING_CAUSALITY_DELAYED_REANALYSIS",
-        "_analysis_forcing_causality",
-        "_analysis_update_ic_step_minutes",
         "_assembly_payload_from_runtime_manifest",
         "_default_forcing_uri",
         "_directory_uri",
         "_display_contract",
-        "_ensure_segment_utc",
-        "_era5_reanalysis_latency_minutes",
         "_forecast_state_checkpoint_hours",
         "_has_uri_scheme",
         "_model_package_manifest_uri",
@@ -13670,7 +13607,6 @@ def test_chain_manifest_legacy_methods_delegate(monkeypatch) -> None:
     assert orchestrator._validate_forecast_runtime_manifest(manifest_path, manifest, task_index=3) is None
     assert orchestrator._reindexed_manifest_entries(basins) == reindexed_entries
     assert orchestrator._build_run_manifest(run_context) == run_manifest
-    assert analysis_orchestrator._build_run_manifest(analysis_context) == analysis_manifest
     assert orchestrator._write_run_manifest(run_context, manifest) is None
 
     assert [name for name, _args, _kwargs in calls] == [
@@ -13681,7 +13617,6 @@ def test_chain_manifest_legacy_methods_delegate(monkeypatch) -> None:
         "validate_forecast_runtime_manifest",
         "reindexed_manifest_entries",
         "build_forecast_run_manifest",
-        "build_analysis_run_manifest",
         "write_run_manifest",
     ]
     orchestrator_first_delegates = {
@@ -13730,11 +13665,6 @@ def test_chain_manifest_legacy_methods_delegate(monkeypatch) -> None:
     assert call_by_name["build_forecast_run_manifest"][1] == {
         "forecast_state_checkpoint_hours": chain_runtime._forecast_state_checkpoint_hours,
     }
-    assert call_by_name["build_analysis_run_manifest"][0] == (analysis_context,)
-    assert call_by_name["build_analysis_run_manifest"][1] == {
-        "analysis_forcing_causality": chain_runtime._analysis_forcing_causality,
-        "analysis_update_ic_step_minutes": chain_runtime._analysis_update_ic_step_minutes,
-    }
     assert call_by_name["write_run_manifest"][0][1:] == (run_context, manifest)
 
     binding_owner_to_call_name = {
@@ -13743,7 +13673,6 @@ def test_chain_manifest_legacy_methods_delegate(monkeypatch) -> None:
         "ForecastOrchestrator._build_forecast_runtime_manifest": "build_forecast_runtime_manifest",
         "ForecastOrchestrator._reindexed_manifest_entries": "reindexed_manifest_entries",
         "ForecastOrchestrator._build_run_manifest": "build_forecast_run_manifest",
-        "AnalysisOrchestrator._build_run_manifest": "build_analysis_run_manifest",
     }
     for binding_owner, call_name in binding_owner_to_call_name.items():
         _args, kwargs = call_by_name[call_name]
@@ -14119,98 +14048,6 @@ def test_forecast_manifest_assembly_keeps_aligned_cycle_configurations_unchanged
     assert manifest["runtime"]["state_checkpoint_hours"] == expected_hours
     assert manifest["runtime"]["update_ic_step_minutes"] == min(expected_hours) * 60
     assert site in {"run", "runtime"}
-
-
-def test_chain_manifest_build_analysis_run_manifest_direct_export(monkeypatch) -> None:
-    from services.orchestrator import chain as chain_runtime
-    from services.orchestrator import chain_manifests
-
-    monkeypatch.setattr(
-        chain_runtime,
-        "_analysis_forcing_causality",
-        lambda: {"type": "patched_analysis", "latency_minutes": 42},
-    )
-    monkeypatch.setattr(
-        chain_runtime,
-        "_analysis_update_ic_step_minutes",
-        lambda start_time, end_time: 240,
-    )
-    context = AnalysisRunContext(
-        run_id="analysis-run-1",
-        source_id="era5",
-        cycle_id="era5-2024010100",
-        cycle_time=datetime(2024, 1, 1, tzinfo=UTC),
-        model_id="shud-v1",
-        basin_id="basin-1",
-        basin_version_id="basin-v1",
-        river_network_version_id="river-v1",
-        segment_count=12,
-        output_segment_count=10,
-        model_package_uri="object://models/shud-v1",
-        forcing_version_id="era5-202401",
-        forcing_package_uri="object://forcing/era5-202401",
-        forcing_package_manifest_uri="object://forcing/era5-202401/forcing_package.json",
-        forcing_package_manifest_checksum="sha256:analysis-forcing-package",
-        start_time=datetime(2024, 1, 1, tzinfo=UTC),
-        end_time=datetime(2024, 1, 2, tzinfo=UTC),
-        run_manifest_uri="object://runs/analysis-run-1/input/manifest.json",
-        output_uri="object://runs/analysis-run-1/output/",
-        log_uri="object://runs/analysis-run-1/logs/",
-        init_state_id="state-1",
-        init_state_uri="object://states/state-1.nc",
-        init_state_valid_time=datetime(2024, 1, 1, tzinfo=UTC),
-    )
-
-    assert chain_manifests.build_analysis_run_manifest(context) == {
-        "run_id": "analysis-run-1",
-        "run_type": "analysis",
-        "scenario_id": "analysis_true_field",
-        "source_id": "era5",
-        "cycle_time": "2024-01-01T00:00:00Z",
-        "start_time": "2024-01-01T00:00:00Z",
-        "end_time": "2024-01-02T00:00:00Z",
-        "model": {
-            "model_id": "shud-v1",
-            "basin_version_id": "basin-v1",
-            "river_network_version_id": "river-v1",
-            "model_package_uri": "object://models/shud-v1",
-            "segment_count": 12,
-            "output_segment_count": 10,
-        },
-        "initial_state": {
-            "state_id": "state-1",
-            "ic_file_uri": "object://states/state-1.nc",
-            "valid_time": "2024-01-01T00:00:00Z",
-        },
-        "forcing": {
-            "forcing_version_id": "era5-202401",
-            "forcing_uri": "object://forcing/era5-202401",
-            "forcing_package_uri": "object://forcing/era5-202401",
-            "package_manifest_uri": "object://forcing/era5-202401/forcing_package.json",
-            "package_manifest_checksum": "sha256:analysis-forcing-package",
-        },
-        "forcing_causality": {
-            "mode": "delayed_reanalysis",
-            "latency_minutes": 7200,
-            "no_future_leak": True,
-        },
-        "runtime": {
-            "output_interval_minutes": 60,
-            "init_mode": 3,
-            "update_ic_step_minutes": 1440,
-        },
-        "outputs": {
-            "run_manifest_uri": "object://runs/analysis-run-1/input/manifest.json",
-            "output_uri": "object://runs/analysis-run-1/output/",
-            "log_uri": "object://runs/analysis-run-1/logs/",
-            "output_segment_count": 10,
-            "gis_segment_count": 12,
-        },
-    }
-    analysis_orchestrator = object.__new__(AnalysisOrchestrator)
-    legacy_manifest = analysis_orchestrator._build_run_manifest(context)
-    assert legacy_manifest["forcing_causality"] == {"type": "patched_analysis", "latency_minutes": 42}
-    assert legacy_manifest["runtime"]["update_ic_step_minutes"] == 240
 
 
 # --- M24 §3A: two-phase reserve -> bind through the real chain submit path ----

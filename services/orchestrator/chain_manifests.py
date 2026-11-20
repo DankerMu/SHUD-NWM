@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
@@ -45,7 +45,6 @@ from services.orchestrator.chain_manifest_contracts import (
     _tri_state,
 )
 from services.orchestrator.chain_types import (
-    AnalysisRunContext,
     CycleOrchestrationContext,
     ForecastRunContext,
     ModelRunAssembly,
@@ -60,15 +59,11 @@ from services.orchestrator.production_contract import (
 from services.orchestrator.scheduler_generation import PACKAGED_IC_QUALITY
 
 __all__ = (
-    "ANALYSIS_SCENARIO_ID",
-    "DEFAULT_ERA5_REANALYSIS_LATENCY_MINUTES",
     "FORCING_CAUSALITY_CAUSAL",
-    "FORCING_CAUSALITY_DELAYED_REANALYSIS",
     "ManifestValidationError",
     "PRODUCTION_CONTRACT_ID",
     "PRODUCTION_CONTRACT_SCHEMA_VERSION",
     "STATE_CHECKPOINT_HOURS_UNREACHABLE",
-    "build_analysis_run_manifest",
     "build_cycle_stage_manifest",
     "build_forecast_run_manifest",
     "build_forecast_runtime_manifest",
@@ -82,8 +77,6 @@ __all__ = (
     "validate_forecast_runtime_manifest",
     "write_cycle_manifest_index",
     "write_run_manifest",
-    "_analysis_forcing_causality",
-    "_analysis_update_ic_step_minutes",
     "_assembly_from_entry",
     "_assembly_payload_from_runtime_manifest",
     "_assembly_quality_states",
@@ -94,9 +87,7 @@ __all__ = (
     "_default_forcing_uri",
     "_directory_uri",
     "_display_contract",
-    "_ensure_segment_utc",
     "_ensure_utc",
-    "_era5_reanalysis_latency_minutes",
     "_first_optional_int",
     "_forecast_state_checkpoint_hours",
     "_format_time",
@@ -122,10 +113,7 @@ STATE_CHECKPOINT_HOURS_UNREACHABLE = "STATE_CHECKPOINT_HOURS_UNREACHABLE"
 #: Root ``schema_version`` of ``schemas/run_manifest.schema.json`` (#2539).
 RUN_MANIFEST_SCHEMA_VERSION = "1.0"
 
-ANALYSIS_SCENARIO_ID = "analysis_true_field"
-DEFAULT_ERA5_REANALYSIS_LATENCY_MINUTES = 5 * 24 * 60
 FORCING_CAUSALITY_CAUSAL = "causal"
-FORCING_CAUSALITY_DELAYED_REANALYSIS = "delayed_reanalysis"
 
 
 AssemblyBuilder = Callable[..., ModelRunAssembly]
@@ -468,9 +456,7 @@ def _require_reachable_state_checkpoint_hours(
     write frequency (an unrequested runtime behaviour change smuggled in as
     validation).
 
-    Both forecast manifest production sites call this; ``build_analysis_run_manifest``
-    deliberately does not, because analysis manifests declare no
-    ``state_checkpoint_hours`` and are outside this requirement.
+    Both forecast manifest production sites call this.
     """
 
     unreachable = [hour for hour in checkpoint_hours if (hour * 60) % update_ic_step_minutes != 0]
@@ -759,73 +745,9 @@ def build_forecast_run_manifest(
     return manifest
 
 
-def build_analysis_run_manifest(
-    context: AnalysisRunContext,
-    *,
-    analysis_forcing_causality: Callable[[], Mapping[str, Any]] | None = None,
-    analysis_update_ic_step_minutes: Callable[[datetime, datetime], int] | None = None,
-) -> dict[str, Any]:
-    analysis_forcing_causality = analysis_forcing_causality or _analysis_forcing_causality
-    analysis_update_ic_step_minutes = analysis_update_ic_step_minutes or _analysis_update_ic_step_minutes
-    return {
-        "run_id": context.run_id,
-        "run_type": "analysis",
-        "scenario_id": ANALYSIS_SCENARIO_ID,
-        "source_id": context.source_id,
-        "cycle_time": _format_time(context.cycle_time),
-        "start_time": _format_time(context.start_time),
-        "end_time": _format_time(context.end_time),
-        "model": {
-            "model_id": context.model_id,
-            "basin_version_id": context.basin_version_id,
-            "river_network_version_id": context.river_network_version_id,
-            "model_package_uri": context.model_package_uri,
-            "segment_count": context.segment_count,
-            "output_segment_count": (
-                context.output_segment_count if context.output_segment_count is not None else context.segment_count
-            ),
-        },
-        "initial_state": {
-            "state_id": context.init_state_id,
-            "ic_file_uri": context.init_state_uri,
-            "valid_time": _format_time_or_none(context.init_state_valid_time),
-        },
-        "forcing": _runtime_forcing_metadata(
-            {
-                "forcing_version_id": context.forcing_version_id,
-                "forcing_uri": context.forcing_package_uri,
-                "forcing_package_uri": context.forcing_package_uri,
-                "package_manifest_uri": context.forcing_package_manifest_uri,
-                "package_manifest_checksum": context.forcing_package_manifest_checksum,
-            }
-        ),
-        "forcing_causality": dict(
-            context.forcing_causality if context.forcing_causality is not None else analysis_forcing_causality()
-        ),
-        "runtime": {
-            "output_interval_minutes": 60,
-            "init_mode": 3 if context.init_state_id else 1,
-            "update_ic_step_minutes": (
-                context.update_ic_step_minutes
-                if context.update_ic_step_minutes is not None
-                else analysis_update_ic_step_minutes(context.start_time, context.end_time)
-            ),
-        },
-        "outputs": {
-            "run_manifest_uri": context.run_manifest_uri,
-            "output_uri": context.output_uri,
-            "log_uri": context.log_uri,
-            "output_segment_count": (
-                context.output_segment_count if context.output_segment_count is not None else context.segment_count
-            ),
-            "gis_segment_count": context.segment_count,
-        },
-    }
-
-
 def write_run_manifest(
     orchestrator: ChainManifestOrchestrator,
-    context: ForecastRunContext | AnalysisRunContext,
+    context: ForecastRunContext,
     manifest: dict[str, Any],
 ) -> None:
     content = json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8")
@@ -839,50 +761,6 @@ def write_run_manifest(
             f"Failed to write run manifest safely: {exc}",
             {"manifest_path": str(workspace_manifest), "run_id": context.run_id},
         ) from exc
-
-
-def _analysis_update_ic_step_minutes(start_time: datetime, end_time: datetime) -> int:
-    """Restart cadence (minutes) that writes a SHUD restart state exactly at ``end_time``."""
-
-    duration_seconds = (_ensure_segment_utc(end_time) - _ensure_segment_utc(start_time)).total_seconds()
-    if duration_seconds <= 0:
-        raise OrchestratorError(
-            "ANALYSIS_SEGMENT_INVALID_WINDOW",
-            "Analysis segment end_time must be after start_time.",
-            {"start_time": start_time.isoformat(), "end_time": end_time.isoformat()},
-        )
-    if duration_seconds % 60 != 0:
-        raise OrchestratorError(
-            "ANALYSIS_SEGMENT_NON_MINUTE_ALIGNED",
-            "Analysis segment length must be a whole number of minutes for restart cadence.",
-            {"duration_seconds": duration_seconds},
-        )
-    return int(duration_seconds // 60)
-
-
-def _analysis_forcing_causality(latency_minutes: int | None = None) -> dict[str, Any]:
-    resolved_latency = _era5_reanalysis_latency_minutes() if latency_minutes is None else int(latency_minutes)
-    return {
-        "mode": FORCING_CAUSALITY_DELAYED_REANALYSIS,
-        "latency_minutes": resolved_latency,
-        "no_future_leak": True,
-    }
-
-
-def _era5_reanalysis_latency_minutes() -> int:
-    raw = os.getenv("ERA5_REANALYSIS_LATENCY_MINUTES", "").strip()
-    if raw:
-        try:
-            value = int(raw)
-            if value > 0:
-                return value
-        except ValueError:
-            pass
-    return DEFAULT_ERA5_REANALYSIS_LATENCY_MINUTES
-
-
-def _ensure_segment_utc(value: datetime) -> datetime:
-    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
 def build_reindexed_manifest(

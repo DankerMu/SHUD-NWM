@@ -44,9 +44,6 @@ FIRST_IMPORT_ALLOWLIST: dict[str, str] = {
     "services.orchestrator.chain_compat_runtime": (
         "namespace copy of _chain.__dict__ at line 6; chain.py:889 calls install_chain_runtime_compat() mid-import"
     ),
-    "services.orchestrator.chain_analysis_orchestrator": (
-        "class base _chain.ForecastOrchestrator is read at definition time, and chain import takes the class"
-    ),
     "services.orchestrator.chain_forecast_orchestrator_cycle": (
         "chain.py:889 calls the mixin's _chain_stage_execution_dependencies() mid-import, which reads _chain"
     ),

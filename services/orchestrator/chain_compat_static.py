@@ -4,15 +4,10 @@ from __future__ import annotations
 from services.orchestrator import chain as _chain
 
 _CHAIN_MANIFEST_COMPAT_CHAIN_MANIFEST_ALIAS_NAMES = (
-    "ANALYSIS_SCENARIO_ID",
-    "DEFAULT_ERA5_REANALYSIS_LATENCY_MINUTES",
     "FORCING_CAUSALITY_CAUSAL",
-    "FORCING_CAUSALITY_DELAYED_REANALYSIS",
     "ManifestValidationError",
     "PRODUCTION_CONTRACT_ID",
     "PRODUCTION_CONTRACT_SCHEMA_VERSION",
-    "_analysis_forcing_causality",
-    "_analysis_update_ic_step_minutes",
     "_assembly_from_entry",
     "_assembly_payload_from_runtime_manifest",
     "_assembly_quality_states",
@@ -20,8 +15,6 @@ _CHAIN_MANIFEST_COMPAT_CHAIN_MANIFEST_ALIAS_NAMES = (
     "_default_forcing_uri",
     "_directory_uri",
     "_display_contract",
-    "_ensure_segment_utc",
-    "_era5_reanalysis_latency_minutes",
     "_forecast_state_checkpoint_hours",
     "_has_uri_scheme",
     "_model_package_manifest_uri",
@@ -107,8 +100,6 @@ _CHAIN_MANIFEST_COMPAT_FORECAST_METHOD_OWNER_FUNCTION_NAMES = (
     "build_forecast_run_manifest",
     "write_run_manifest",
 )
-_CHAIN_MANIFEST_COMPAT_ANALYSIS_METHOD_FORWARDER_NAMES = ("_build_run_manifest",)
-_CHAIN_MANIFEST_COMPAT_ANALYSIS_METHOD_OWNER_FUNCTION_NAMES = ("build_analysis_run_manifest",)
 _CHAIN_MANIFEST_COMPAT_DEPENDENCY_BINDINGS = _chain.MappingProxyType(
     {
         "build_model_run_assembly": (
@@ -141,10 +132,6 @@ _CHAIN_MANIFEST_COMPAT_DEPENDENCY_BINDINGS = _chain.MappingProxyType(
         "ForecastOrchestrator._build_run_manifest": (
             ("forecast_state_checkpoint_hours", "_forecast_state_checkpoint_hours"),
         ),
-        "AnalysisOrchestrator._build_run_manifest": (
-            ("analysis_forcing_causality", "_analysis_forcing_causality"),
-            ("analysis_update_ic_step_minutes", "_analysis_update_ic_step_minutes"),
-        ),
     }
 )
 _CHAIN_MANIFEST_COMPAT_OWNER_FUNCTION_NAMES = tuple(
@@ -152,7 +139,6 @@ _CHAIN_MANIFEST_COMPAT_OWNER_FUNCTION_NAMES = tuple(
         (
             *_CHAIN_MANIFEST_COMPAT_TOP_LEVEL_OWNER_FUNCTION_NAMES,
             *_CHAIN_MANIFEST_COMPAT_FORECAST_METHOD_OWNER_FUNCTION_NAMES,
-            *_CHAIN_MANIFEST_COMPAT_ANALYSIS_METHOD_OWNER_FUNCTION_NAMES,
         )
     )
 )
@@ -259,7 +245,6 @@ _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_CHAIN_LOCAL_CLASSIFICATIONS = _chain.Mappin
 _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_PROTOCOL_METHOD_NAMES = (
     "has_active_orchestration",
     "has_active_pipeline",
-    "has_active_analysis_run",
     "load_model_context",
     "find_forcing_context",
     "ensure_forecast_cycle",
@@ -287,7 +272,6 @@ _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_IMPLEMENTATION_METHOD_NAMES = (
     "has_completed_pipeline",
     "candidate_state",
     "active_slurm_jobs",
-    "has_active_analysis_run",
     "list_canonical_ready_cycles",
     "list_forecast_model_ids",
     "load_model_context",
@@ -390,7 +374,6 @@ _CHAIN_STAGE_CATALOG_COMPAT_REEXPORT_NAMES = (
     "stages_through",
 )
 _CHAIN_TYPE_COMPAT_REEXPORT_NAMES = (
-    "AnalysisRunContext",
     "ArrayAggregation",
     "ArrayTaskResult",
     "CycleOrchestrationContext",

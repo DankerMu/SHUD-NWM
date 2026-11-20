@@ -2,7 +2,6 @@
 three-way (scheduler basin / cycle-stage / forecast runtime) warm-start manifest wiring.
 
 Requirement-driven tests for ``cross-cycle-warm-start-chaining`` spec:
-- restart cadence (Update_IC_STEP) lands exactly on T_{N+1} for 6h/12h/24h segments
 - native ``*.cfg.ic.update`` -> canonical ``state.cfg.ic`` -> ``<project>.cfg.ic``
   materialization records the original SHUD filename and restamps the header
 - snapshot valid_time / IC header minute-time / run start three-way consistency
@@ -30,8 +29,6 @@ from services.orchestrator.chain import (
     ForecastOrchestrator,
     OrchestratorConfig,
     OrchestratorError,
-    _analysis_forcing_causality,
-    _analysis_update_ic_step_minutes,
     _check_three_way_time_consistency,
 )
 from tests.test_orchestrator import FakeOrchestratorRepository, FakeSlurmClient
@@ -100,66 +97,14 @@ def _write_witness_manifest(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("start", "end", "expected_minutes"),
-    [
-        ("2026-05-01T00:00:00Z", "2026-05-01T06:00:00Z", 360),  # 6h cycle
-        ("2026-05-01T00:00:00Z", "2026-05-01T12:00:00Z", 720),  # 12h cycle
-        ("2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", 1440),  # 24h cycle
-    ],
-)
-def test_update_ic_step_lands_on_next_cycle_init(start: str, end: str, expected_minutes: int) -> None:
-    # Cadence equals the full segment length so the restart write lands exactly on
-    # T_{N+1}, never the default 1440-minute day, never an earlier modulo boundary.
-    cadence = _analysis_update_ic_step_minutes(_dt(start), _dt(end))
-    assert cadence == expected_minutes
-    segment_minutes = int((_dt(end) - _dt(start)).total_seconds() // 60)
-    assert segment_minutes % cadence == 0
-    # A restart write at multiples of the cadence lands on the segment end.
-    assert segment_minutes // cadence == 1
-
-
-def test_update_ic_step_rejects_non_positive_window() -> None:
-    with pytest.raises(Exception):
-        _analysis_update_ic_step_minutes(_dt("2026-05-01T06:00:00Z"), _dt("2026-05-01T00:00:00Z"))
-
-
-def test_analysis_forcing_causality_marker_is_delayed_reanalysis_for_era5(monkeypatch: Any) -> None:
-    # The analysis segment is built from delayed ERA5 reanalysis (the only
-    # implementation), so the default marker MUST be delayed_reanalysis with a
-    # recorded latency -- never causal (which would over-claim no future leak from a
-    # real-time nowcast that does not exist yet).
-    from services.orchestrator import chain as chain_module
-
-    monkeypatch.delenv("ERA5_REANALYSIS_LATENCY_MINUTES", raising=False)
-    marker = _analysis_forcing_causality()
-    assert marker["mode"] == "delayed_reanalysis"
-    assert marker["mode"] != "causal"
-    assert marker["latency_minutes"] == chain_module.DEFAULT_ERA5_REANALYSIS_LATENCY_MINUTES
-    assert marker["latency_minutes"] > 0
-    assert marker["no_future_leak"] is True
-
-    # Explicit latency is recorded verbatim, still delayed_reanalysis.
-    explicit = _analysis_forcing_causality(latency_minutes=720)
-    assert explicit == {"mode": "delayed_reanalysis", "latency_minutes": 720, "no_future_leak": True}
-
-
-def test_analysis_forcing_causality_latency_is_env_overridable(monkeypatch: Any) -> None:
-    monkeypatch.setenv("ERA5_REANALYSIS_LATENCY_MINUTES", "4320")
-    marker = _analysis_forcing_causality()
-    assert marker == {"mode": "delayed_reanalysis", "latency_minutes": 4320, "no_future_leak": True}
-
-
 def test_future_causal_mode_carries_no_reanalysis_latency() -> None:
     # Semantic guard for the FUTURE real-time causal path: a true causal nowcast has
     # no future leak AND, by construction, no reanalysis latency. ERA5 today cannot
     # satisfy this; this asserts the reserved mode's contract so it is not conflated
     # with delayed_reanalysis.
-    from services.orchestrator.chain import FORCING_CAUSALITY_CAUSAL, FORCING_CAUSALITY_DELAYED_REANALYSIS
+    from services.orchestrator.chain import FORCING_CAUSALITY_CAUSAL
 
     assert FORCING_CAUSALITY_CAUSAL == "causal"
-    assert FORCING_CAUSALITY_DELAYED_REANALYSIS == "delayed_reanalysis"
-    assert FORCING_CAUSALITY_CAUSAL != FORCING_CAUSALITY_DELAYED_REANALYSIS
 
 
 # ---------------------------------------------------------------------------

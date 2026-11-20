@@ -34,7 +34,6 @@ from packages.common.state_lineage import (
 from packages.common.state_manager import StateManager, StateSnapshot
 from services.artifacts import ArtifactLogError, published_log_relative_path, published_log_uri
 from services.orchestrator import (
-    chain_analysis,  # noqa: F401
     chain_array_accounting,
     chain_config,
     chain_forecast_control,
@@ -67,7 +66,6 @@ from services.orchestrator.chain_stages import (
     M3_STAGES as M3_STAGES,
 )
 from services.orchestrator.chain_types import (
-    AnalysisRunContext,
     ArrayAggregation,
     ArrayTaskResult,
     CycleOrchestrationContext,
@@ -110,15 +108,10 @@ from workers.canonical_converter.converter import (
     expected_converter_version,  # noqa: F401
 )
 
-ANALYSIS_SCENARIO_ID = chain_manifests.ANALYSIS_SCENARIO_ID
-DEFAULT_ERA5_REANALYSIS_LATENCY_MINUTES = chain_manifests.DEFAULT_ERA5_REANALYSIS_LATENCY_MINUTES
 FORCING_CAUSALITY_CAUSAL = chain_manifests.FORCING_CAUSALITY_CAUSAL
-FORCING_CAUSALITY_DELAYED_REANALYSIS = chain_manifests.FORCING_CAUSALITY_DELAYED_REANALYSIS
 ManifestValidationError = chain_manifests.ManifestValidationError
 PRODUCTION_CONTRACT_ID = chain_manifests.PRODUCTION_CONTRACT_ID
 PRODUCTION_CONTRACT_SCHEMA_VERSION = chain_manifests.PRODUCTION_CONTRACT_SCHEMA_VERSION
-_analysis_forcing_causality = chain_manifests._analysis_forcing_causality
-_analysis_update_ic_step_minutes = chain_manifests._analysis_update_ic_step_minutes
 _assembly_from_entry = chain_manifests._assembly_from_entry
 _assembly_payload_from_runtime_manifest = chain_manifests._assembly_payload_from_runtime_manifest
 _assembly_quality_states = chain_manifests._assembly_quality_states
@@ -126,8 +119,6 @@ _cycle_residual_blockers = chain_manifests._cycle_residual_blockers
 _default_forcing_uri = chain_manifests._default_forcing_uri
 _directory_uri = chain_manifests._directory_uri
 _display_contract = chain_manifests._display_contract
-_ensure_segment_utc = chain_manifests._ensure_segment_utc
-_era5_reanalysis_latency_minutes = chain_manifests._era5_reanalysis_latency_minutes
 _forecast_state_checkpoint_hours = chain_manifests._forecast_state_checkpoint_hours
 _has_uri_scheme = chain_manifests._has_uri_scheme
 _model_package_manifest_uri = chain_manifests._model_package_manifest_uri
@@ -220,14 +211,6 @@ COMPLETED_HYDRO_STATUSES = DURABLE_HYDRO_SUCCESS_STATUSES
 TERMINAL_PIPELINE_SUCCESS_STATUSES = set(_vocab.PIPELINE_JOB_SUCCESS)
 FAILED_PIPELINE_STATUSES = set(_vocab.FAILED_PIPELINE_STATUSES)
 RAW_MANIFEST_READY_CYCLE_STATUSES = {"raw_complete", "canonical_ready", "forcing_ready", "complete", "published"}
-ANALYSIS_SOURCE_ID = "ERA5"
-# ERA5 reanalysis is published with a multi-day production delay; the analysis
-# segment is therefore built from *delayed reanalysis*, never a real-time causal
-# nowcast. We record a conservative default latency (5 days, ERA5T-style "initial
-# release" lag) so the causality marker is honest about how far the reanalysis
-# trails real time. Overridable via ERA5_REANALYSIS_LATENCY_MINUTES.
-# TODO(M24): source the exact per-cycle latency from the ERA5 download metadata
-# (publish_time - segment_end) once it is recorded; until then this is the floor.
 DEFAULT_CANDIDATE_STATE_JOB_LIMIT = 100
 DEFAULT_CANDIDATE_STATE_EVENT_LIMIT = 100
 MAX_CANDIDATE_STATE_TASK_RESULTS = 16
@@ -235,7 +218,6 @@ MAX_CANDIDATE_STATE_TASK_RESULTS = 16
 
 scenario_for_source = chain_config.scenario_for_source
 PipelineAlreadyActiveError = chain_config.PipelineAlreadyActiveError
-AnalysisPipelineAlreadyActiveError = chain_config.AnalysisPipelineAlreadyActiveError
 SlurmClientError = chain_config.SlurmClientError
 SlurmAccountingEvidenceGap = chain_config.SlurmAccountingEvidenceGap
 
@@ -259,7 +241,6 @@ OrchestratorConfig = chain_config.OrchestratorConfig
 _env_flag = chain_config._env_flag
 for _chain_config_class in (
     PipelineAlreadyActiveError,
-    AnalysisPipelineAlreadyActiveError,
     SlurmClientError,
     SlurmAccountingEvidenceGap,
     OrchestratorConfig,
@@ -387,9 +368,6 @@ class OrchestratorRepository(Protocol):
     def has_active_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
         raise NotImplementedError
 
-    def has_active_analysis_run(self, *, model_id: str, start_time: datetime, end_time: datetime) -> bool:
-        raise NotImplementedError
-
     def load_model_context(self, model_id: str) -> ModelContext:
         raise NotImplementedError
 
@@ -401,7 +379,7 @@ class OrchestratorRepository(Protocol):
 
     def create_hydro_run(
         self,
-        context: ForecastRunContext | AnalysisRunContext,
+        context: ForecastRunContext,
         manifest: dict[str, Any],
     ) -> dict[str, Any]:
         raise NotImplementedError
@@ -649,10 +627,6 @@ _parse_gateway_time = chain_runtime_utils._parse_gateway_time
 _ensure_utc = chain_runtime_utils._ensure_utc
 _format_time = chain_runtime_utils._format_time
 _format_time_or_none = chain_runtime_utils._format_time_or_none
-parse_date_range = chain_runtime_utils.parse_date_range
-_parse_date_range_endpoint = chain_runtime_utils._parse_date_range_endpoint
-_validated_date_range = chain_runtime_utils._validated_date_range
-_analysis_error_code = chain_runtime_utils._analysis_error_code
 _template_export_lines = chain_runtime_utils._template_export_lines
 _python_runtime_export_lines = chain_runtime_utils._python_runtime_export_lines
 _response_json_or_text = chain_runtime_utils._response_json_or_text

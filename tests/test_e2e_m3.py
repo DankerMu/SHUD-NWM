@@ -167,10 +167,6 @@ class _SqliteCycleRepository:
         del source_id, cycle_time, model_id
         return False
 
-    def has_active_analysis_run(self, *, model_id: str, start_time: datetime, end_time: datetime) -> bool:
-        del model_id, start_time, end_time
-        return False
-
     def ensure_forecast_cycle(self, *, source_id: str, cycle_time: datetime) -> dict[str, Any]:
         cycle_id = cycle_id_for(source_id, cycle_time)
         now = datetime.now(UTC)
