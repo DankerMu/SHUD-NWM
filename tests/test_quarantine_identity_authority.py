@@ -84,7 +84,7 @@ def _pass(tmp_path: Path, root: Path) -> tuple[Any, Any]:
     from tests.test_production_scheduler import FakeProductionOrchestrator
 
     orchestrator = FakeProductionOrchestrator()
-    return breaker_scheduler(tmp_path, root, orchestrator).run_once(), orchestrator
+    return breaker_scheduler(tmp_path, root, orchestrator, db_free=True).run_once(), orchestrator
 
 
 def _decisions(result: Any) -> list[tuple[str, str | None]]:
@@ -105,7 +105,7 @@ def _quarantine_rerun(
     """Run 1 records the stale X; the §8.7 quarantine rerun (same run_id) records ``token``."""
     from tests.test_operator_reentry_confirmation import real_rerun, seed_breaker_journal
 
-    root = seed_breaker_journal(tmp_path, monkeypatch, breaker_engaged=False)
+    root = seed_breaker_journal(tmp_path, monkeypatch, breaker_engaged=False, db_free=True)
     # Ordinary single run: the completed hydro row keeps priority, shape unchanged.
     assert _identity(root) == {"init_state_id": _stale()}
     result, orchestrator = _pass(tmp_path, root)
@@ -114,7 +114,7 @@ def _quarantine_rerun(
     basins = [dict(basin) for basin in call["basins"]]
     assert {basin["run_id"] for basin in basins} == {RUN_ID}
     status = real_rerun(
-        tmp_path, root, basins, recorded_tokens={"model_a": token}, slurm_client=slurm_client
+        tmp_path, root, basins, recorded_tokens={"model_a": token}, slurm_client=slurm_client, db_free=True
     ).status
     return root, status
 
@@ -229,12 +229,12 @@ def test_later_failed_rerun_does_not_hide_the_newest_converged_rerun(
     from tests.test_scheduler_terminal_recency import _FORECAST_FAILURE, _wallclock_slurm_client
 
     x, y = _stale(), _correct()
-    root = seed_breaker_journal(tmp_path, monkeypatch, breaker_engaged=False)
+    root = seed_breaker_journal(tmp_path, monkeypatch, breaker_engaged=False, db_free=True)
     result, orchestrator = _pass(tmp_path, root)
     assert _decisions(result) == [("candidates", QUARANTINE_DECISION)]
     (call,) = orchestrator.calls
     basins = [dict(basin) for basin in call["basins"]]
-    assert real_rerun(tmp_path, root, basins, recorded_tokens={"model_a": y}).status == "complete"
+    assert real_rerun(tmp_path, root, basins, recorded_tokens={"model_a": y}, db_free=True).status == "complete"
     assert _identity(root)["init_state_id"] == y  # type: ignore[index]
 
     failed = real_rerun(
@@ -243,6 +243,7 @@ def test_later_failed_rerun_does_not_hide_the_newest_converged_rerun(
         basins,
         recorded_tokens={"model_a": y},
         slurm_client=_wallclock_slurm_client(**_FORECAST_FAILURE),
+        db_free=True,
     )
     assert failed.status == "failed"
     masters = sorted(_masters(root).values(), key=lambda job: job["created_at"])
@@ -265,18 +266,18 @@ def test_sibling_model_later_submission_does_not_hide_the_converged_rerun(
 
     models = ("model_a", "model_b")
     correct = {model_id: stale_token(model_id, lead_hours=6) for model_id in models}
-    root = seed_breaker_journal(tmp_path, monkeypatch, model_ids=models, breaker_engaged=False)
+    root = seed_breaker_journal(tmp_path, monkeypatch, model_ids=models, breaker_engaged=False, db_free=True)
     orchestrator = FakeProductionOrchestrator()
-    breaker_scheduler(tmp_path, root, orchestrator, model_ids=models).run_once()
+    breaker_scheduler(tmp_path, root, orchestrator, model_ids=models, db_free=True).run_once()
     (call,) = orchestrator.calls
     basins = [dict(basin) for basin in call["basins"]]
     assert sorted(basin["model_id"] for basin in basins) == list(models)
-    assert real_rerun(tmp_path, root, basins, recorded_tokens=correct).status == "complete"
+    assert real_rerun(tmp_path, root, basins, recorded_tokens=correct, db_free=True).status == "complete"
     assert _identity(root)["init_state_id"] == correct["model_a"]  # type: ignore[index]
 
     # A later submission for model_b alone (newest master of the cycle).
     model_b_only = [basin for basin in basins if basin["model_id"] == "model_b"]
-    assert real_rerun(tmp_path, root, model_b_only, recorded_tokens=correct).status == "complete"
+    assert real_rerun(tmp_path, root, model_b_only, recorded_tokens=correct, db_free=True).status == "complete"
     newest = max(_masters(root).values(), key=lambda job: job["created_at"])
     assert [entry["model_id"] for entry in newest["init_state_identities"]] == ["model_b"]
 
@@ -305,7 +306,7 @@ def test_converged_rerun_clears_the_quarantine_without_engaging_the_breaker(
     assert repository.completed_pipeline_init_state_id_occurrences(**_query(), init_state_id=y) == 1
     assert repository.completed_pipeline_init_state_id_occurrences(**_query(), init_state_id=x) == 0
 
-    candidates, blocked = _breaker_candidate_decisions(tmp_path, root)
+    candidates, blocked = _breaker_candidate_decisions(tmp_path, root, db_free=True)
     assert (candidates, blocked) == ([], [])
 
     result, orchestrator = _pass(tmp_path, root)
@@ -326,7 +327,7 @@ def test_rerun_recording_the_stale_token_still_engages_the_breaker(
     )
 
     x = _stale()
-    root = seed_breaker_journal(tmp_path, monkeypatch, breaker_engaged=True)
+    root = seed_breaker_journal(tmp_path, monkeypatch, breaker_engaged=True, db_free=True)
     assert _identity(root)["init_state_id"] == x  # type: ignore[index]
     assert FileOrchestrationJournalRepository(root).completed_pipeline_init_state_id_occurrences(
         **_query(), init_state_id=x
@@ -339,7 +340,7 @@ def test_rerun_recording_the_stale_token_still_engages_the_breaker(
 
     # Candidate side through ``_build_candidates`` (run_once releases the slot of
     # a breaker-engaged cycle before candidate construction).
-    candidates, blocked = _breaker_candidate_decisions(tmp_path, root)
+    candidates, blocked = _breaker_candidate_decisions(tmp_path, root, db_free=True)
     assert candidates == []
     (entry,) = blocked
     assert entry.state_evidence["decision"] == BREAKER_DECISION
@@ -388,7 +389,7 @@ def test_discovery_scoring_reads_the_converged_identity(
     from tests.test_operator_reentry_confirmation import seed_breaker_journal
 
     x, y = _stale(), _correct()
-    before = seed_breaker_journal(tmp_path / "before", monkeypatch, breaker_engaged=False)
+    before = seed_breaker_journal(tmp_path / "before", monkeypatch, breaker_engaged=False, db_free=True)
     assert _stale_tokens(tmp_path / "before", before) == (x, y)
 
     root, status = _quarantine_rerun(tmp_path / "after", monkeypatch, token=y)

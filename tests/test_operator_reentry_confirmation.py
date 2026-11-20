@@ -65,11 +65,20 @@ def real_rerun(
     job_timeout_seconds: float = 120.0,
     terminal_stage: str | None = None,
     retry_service: Any | None = None,
+    db_free: bool = False,
 ) -> Any:
     """Run a scheduler handoff through the REAL forecast orchestrator + reservation path on ``root``.
 
     Each basin re-selects ``recorded_tokens[model_id]`` (default: its stale token),
     which is what the non-convergent §8.7 geometry does.  Only Slurm is faked.
+    ``db_free=True`` (a caller under :func:`db_free_cold_start_env`) also trims
+    two system boundaries that env sets, for the chain only: the NFS run-tree
+    copyback (``NHMS_OBJECT_STORE_COPYBACK_ROOT``; the staging tree holds no run
+    output to copy back) and the display mount (``NHMS_PUBLISHED_ARTIFACT_ROOT``,
+    which moves ``publish`` onto the control node, where it needs a
+    ``DATABASE_URL``).  With both unset the chain runs exactly as it does
+    without that env; omitted, the env is left alone (the default importers
+    rely on).
     ``retry_service`` (default none, the historical shape) wires the chain's
     inline stage-retry minting, as the production db-free orchestrator does
     with a ``FileJournalRetryService`` (``scheduler_core`` #2401).
@@ -102,7 +111,53 @@ def real_rerun(
         terminal_stage=terminal_stage,
         retry_service=retry_service,
     )
-    return orchestrator.orchestrate_cycle("gfs", _dt(BREAKER_CYCLE), handoff)
+    with pytest.MonkeyPatch.context() as patch:
+        if db_free:
+            patch.delenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", raising=False)
+            patch.delenv("NHMS_PUBLISHED_ARTIFACT_ROOT", raising=False)
+        return orchestrator.orchestrate_cycle("gfs", _dt(BREAKER_CYCLE), handoff)
+
+
+def db_free_cold_start_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, generated_at: datetime | None = None
+) -> Path:
+    """The full DB-free scheduler cold-start env, rooted at ``tmp_path``.
+
+    Used by the breaker geometry here and by the DB-free passes of the files
+    that import this module's fixtures.
+
+    ``_set_db_free_scheduler_env`` provides the file selectors, the runtime
+    roots (workspace ``tmp_path/workspace``; the object store is
+    ``tmp_path/object-store``, the one :func:`seed_breaker_journal` seeds) and
+    the provider paths.  On top of it, the state snapshot index is published
+    empty at ``generated_at`` (default ``BREAKER_NOW``; never after the pass's
+    ``now``): the cold-start shape, no strict warm-start or successor verdict,
+    so the journal alone decides.  The model/basin filters and warm-start
+    switches that env exports or a caller's env could carry are removed so the
+    registry's models are what the pass sees, as in the non-DB-free fixture.
+    Returns the (empty, created) journal root, ``tmp_path/workspace/journal``:
+    the DB-free preflight requires it inside the approved roots.
+    """
+
+    from packages.common.state_manager import publish_state_snapshot_index
+    from tests.test_production_scheduler import _set_db_free_scheduler_env
+
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    publish_state_snapshot_index(
+        [],
+        paths["NHMS_SCHEDULER_STATE_INDEX"],
+        object_store_root=roots["object_store_root"],
+        generated_at=generated_at or _dt(BREAKER_NOW),
+    )
+    for key in (
+        "NHMS_SCHEDULER_MODEL_IDS",
+        "NHMS_SCHEDULER_BASIN_IDS",
+        "NHMS_REQUIRE_FORECAST_WARM_START",
+        "NHMS_FORECAST_WARM_START_REQUIRED_FROM",
+        "NHMS_REGISTRY_CUTOVER_DECLARATION_PATH",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    return paths["NHMS_SCHEDULER_JOURNAL_ROOT"]
 
 
 def seed_breaker_journal(
@@ -112,6 +167,7 @@ def seed_breaker_journal(
     model_ids: tuple[str, ...] = ("model_a",),
     breaker_engaged: bool = True,
     recorded_tokens: dict[str, str] | None = None,
+    db_free: bool | None = None,
 ) -> Path:
     """Drive the REAL lifecycle to the §8.7 breaker on an initially empty journal.
 
@@ -123,12 +179,19 @@ def seed_breaker_journal(
     ``breaker_engaged=False`` stops after the fresh run (quarantine armed, breaker not).
     ``recorded_tokens`` (default: each model's stale token) is what the fresh run
     re-selects; a matching token leaves nothing for §8.7 to judge.
+    ``db_free=True`` first installs :func:`db_free_cold_start_env`, seeds its
+    journal root and drives the seeding passes through the DB-free scheduler;
+    omitted, the env decides and the journal is ``tmp_path/journal`` (the
+    default importers rely on).
     """
 
     from tests.test_production_scheduler import FakeProductionOrchestrator, _seed_recorded_forcing_packages
 
-    root = tmp_path / "journal"
-    root.mkdir(parents=True)
+    if db_free:
+        root = db_free_cold_start_env(tmp_path, monkeypatch)
+    else:
+        root = tmp_path / "journal"
+        root.mkdir(parents=True)
     object_store_root = tmp_path / "object-store"
     package_dirs = {model_id: f"forcing/gfs/2026052100/{_basin_id(model_id)}_v1/{model_id}" for model_id in model_ids}
     store = _seed_recorded_forcing_packages(
@@ -154,17 +217,21 @@ def seed_breaker_journal(
 
     def _submitted_basins(expected_decision: str | None) -> list[dict[str, Any]]:
         orchestrator = FakeProductionOrchestrator()
-        result = breaker_scheduler(tmp_path, root, orchestrator, model_ids=model_ids).run_once()
+        result = breaker_scheduler(tmp_path, root, orchestrator, model_ids=model_ids, db_free=db_free).run_once()
         assert result.evidence["counts"]["submitted_count"] == len(model_ids), result.evidence["counts"]
         decisions = [(item.get("state_evidence") or {}).get("decision") for item in result.evidence["candidates"]]
         assert decisions == [expected_decision] * len(model_ids), decisions
         (call,) = orchestrator.calls
         return [dict(basin) for basin in call["basins"]]
 
-    assert real_rerun(tmp_path, root, _submitted_basins(None), recorded_tokens=recorded_tokens).status == "complete"
+    rerun_env = {"db_free": True} if db_free else {}
+    assert (
+        real_rerun(tmp_path, root, _submitted_basins(None), recorded_tokens=recorded_tokens, **rerun_env).status
+        == "complete"
+    )
     if breaker_engaged:
         rerun_basins = _submitted_basins("retry_journal_predecessor_identity_mismatch")
-        assert real_rerun(tmp_path, root, rerun_basins).status == "complete"
+        assert real_rerun(tmp_path, root, rerun_basins, **rerun_env).status == "complete"
     return root
 
 
@@ -176,6 +243,7 @@ def breaker_scheduler(
     model_ids: tuple[str, ...] = ("model_a",),
     repository: Any | None = None,
     canonical_readiness_provider: Any = _BREAKER_CANONICAL_READINESS_PROVIDER_UNSET,
+    db_free: bool | None = None,
     **config_overrides: Any,
 ) -> Any:
     """A FRESH non-dry-run scheduler over a FRESH repository, backfill enabled, single cycle.
@@ -187,6 +255,11 @@ def breaker_scheduler(
     Round-4's ``breaker_repair_flag_on`` family overrides them here rather than
     forking a second copy of this fixture.  ``canonical_readiness_provider``
     defaults to the test subclass's OMITTED sentinel, exactly as before.
+
+    ``db_free=True`` builds the scheduler explicitly DB-free over the env that
+    :func:`db_free_cold_start_env` installed for the same ``tmp_path``: its
+    workspace root and ``root`` as the journal root.  Omitted, ``_config``
+    writes no mode key and the env decides (the default importers rely on).
     """
 
     from tests.test_production_scheduler import FakeAdapter, FakeRegistry, ProductionScheduler, _config, _model
@@ -194,10 +267,15 @@ def breaker_scheduler(
     provider_kwargs: dict[str, Any] = {}
     if canonical_readiness_provider is not _BREAKER_CANONICAL_READINESS_PROVIDER_UNSET:
         provider_kwargs["canonical_readiness_provider"] = canonical_readiness_provider
+    db_free_kwargs: dict[str, Any] = {}
+    if db_free:
+        db_free_kwargs = {"workspace_root": tmp_path / "workspace", "scheduler_journal_root": root}
     return ProductionScheduler(
         _config(
             tmp_path,
+            db_free=db_free,
             **{
+                **db_free_kwargs,
                 "now": _dt(BREAKER_NOW),
                 "dry_run": False,
                 "backfill_enabled": True,
@@ -282,7 +360,7 @@ def _confirmations(root: Path, *, model_id: str = "model_a", decision: str = BRE
 def test_dry_run_is_the_default_and_writes_no_journal_byte(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    root = seed_breaker_journal(tmp_path, monkeypatch)
+    root = seed_breaker_journal(tmp_path, monkeypatch, db_free=True)
     before = _tree_bytes(root)
 
     code, receipt, _err = run_confirm(breaker_confirm_argv(root, attest=False), capsys)
@@ -306,7 +384,7 @@ def test_dry_run_is_the_default_and_writes_no_journal_byte(
 def test_attest_records_a_dedicated_confirmation_event(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    root = seed_breaker_journal(tmp_path, monkeypatch)
+    root = seed_breaker_journal(tmp_path, monkeypatch, db_free=True)
 
     code, receipt, _err = run_confirm(breaker_confirm_argv(root), capsys)
 
@@ -337,7 +415,7 @@ def test_attest_records_a_dedicated_confirmation_event(
 def test_budget_confirmation_is_recorded_without_a_token(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    root = seed_breaker_journal(tmp_path, monkeypatch, breaker_engaged=False)
+    root = seed_breaker_journal(tmp_path, monkeypatch, breaker_engaged=False, db_free=True)
     argv = [
         "--journal-root", str(root), "--source-id", "gfs", "--cycle-time", BREAKER_CYCLE,
         "--model-id", "model_a", "--decision", BUDGET_DECISION, "--pin", "0",
@@ -379,7 +457,9 @@ def test_refused_preconditions_exit_two_and_write_nothing(
     leg: str,
     expected_reason: str,
 ) -> None:
-    root = seed_breaker_journal(tmp_path, monkeypatch, breaker_engaged=leg != "breaker_not_engaged")
+    root = seed_breaker_journal(
+        tmp_path, monkeypatch, breaker_engaged=leg != "breaker_not_engaged", db_free=True
+    )
     if leg == "cycle_time_malformed":
         # Non-blank (``required_argument_blank`` would win) and not parsable by
         # ``parse_cycle_time``: neither YYYYMMDDHH nor ISO-8601.
@@ -471,7 +551,7 @@ def test_blank_required_argument_exits_two(
     capsys: pytest.CaptureFixture[str],
     blank_flag: str,
 ) -> None:
-    root = seed_breaker_journal(tmp_path, monkeypatch)
+    root = seed_breaker_journal(tmp_path, monkeypatch, db_free=True)
     argv = breaker_confirm_argv(root)
     argv[argv.index(blank_flag) + 1] = "   "
     before = _tree_bytes(root)
@@ -503,7 +583,7 @@ def test_invalid_journal_root_is_a_typed_refusal(tmp_path: Path, capsys: pytest.
 def test_argparse_entrypoint_records_the_same_confirmation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    root = seed_breaker_journal(tmp_path, monkeypatch)
+    root = seed_breaker_journal(tmp_path, monkeypatch, db_free=True)
 
     capsys.readouterr()
     code = cli._argparse_main(["confirm-operator-reentry", *breaker_confirm_argv(root)])
@@ -519,12 +599,17 @@ def test_argparse_entrypoint_records_the_same_confirmation(
 # ---------------------------------------------------------------------------
 
 
-def _breaker_candidate_decisions(tmp_path: Path, root: Path) -> tuple[list[Any], list[Any]]:
-    """Candidate-side decision through ``_build_candidates`` (no discovery slot release)."""
+def _breaker_candidate_decisions(
+    tmp_path: Path, root: Path, *, db_free: bool | None = None
+) -> tuple[list[Any], list[Any]]:
+    """Candidate-side decision through ``_build_candidates`` (no discovery slot release).
+
+    ``db_free`` is forwarded to :func:`breaker_scheduler`; omitted, the env decides.
+    """
 
     from tests.test_production_scheduler import FakeProductionOrchestrator, _model
 
-    scheduler = breaker_scheduler(tmp_path, root, FakeProductionOrchestrator())
+    scheduler = breaker_scheduler(tmp_path, root, FakeProductionOrchestrator(), db_free=db_free)
     candidates, blocked, _skipped, _dup, _sync = scheduler._build_candidates(
         models=[scheduler_module._coerce_registered_model(_model("model_a", "basin_a"))],
         cycles=[
@@ -549,14 +634,14 @@ def test_confirmation_is_never_adopted_as_a_manual_retry_marker(
 ) -> None:
     from tests.test_production_scheduler import FakeProductionOrchestrator
 
-    root = seed_breaker_journal(tmp_path, monkeypatch)
+    root = seed_breaker_journal(tmp_path, monkeypatch, db_free=True)
     code, _receipt, _err = run_confirm(breaker_confirm_argv(root), capsys)
     assert code == 0
     # A second stamped rerun lands: occurrences 2, so the pin-1 confirmation is stale.
     confirmed_orchestrator = FakeProductionOrchestrator()
-    confirmed = breaker_scheduler(tmp_path, root, confirmed_orchestrator).run_once()
+    confirmed = breaker_scheduler(tmp_path, root, confirmed_orchestrator, db_free=True).run_once()
     assert confirmed.evidence["counts"]["submitted_count"] == 1
-    assert real_rerun(tmp_path, root, confirmed_orchestrator.calls[0]["basins"]).status == "complete"
+    assert real_rerun(tmp_path, root, confirmed_orchestrator.calls[0]["basins"], db_free=True).status == "complete"
 
     # Marker isolation itself is pinned by the exact stored shape in
     # ``test_attest_records_a_dedicated_confirmation_event`` (dedicated event
@@ -566,7 +651,7 @@ def test_confirmation_is_never_adopted_as_a_manual_retry_marker(
     # even an event type flipped to ``retry`` stays unadopted; verified by
     # mutation, then removed.  What remains is the decision the marker would
     # have changed.
-    candidates, blocked = _breaker_candidate_decisions(tmp_path, root)
+    candidates, blocked = _breaker_candidate_decisions(tmp_path, root, db_free=True)
     assert candidates == []
     (entry,) = blocked
     assert entry.state_evidence["decision"] == BREAKER_DECISION
@@ -591,7 +676,7 @@ def _insert_confirmation(repository: FileOrchestrationJournalRepository, **detai
 
 
 def test_accessor_filters_exactly_by_model_and_decision(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    root = seed_breaker_journal(tmp_path, monkeypatch, model_ids=("model_a", "model_b"))
+    root = seed_breaker_journal(tmp_path, monkeypatch, model_ids=("model_a", "model_b"), db_free=True)
     repository = FileOrchestrationJournalRepository(root)
     _insert_confirmation(repository, model_id="model_a", decision=BREAKER_DECISION, pin=1, request_id="a-breaker")
     _insert_confirmation(repository, model_id="model_b", decision=BREAKER_DECISION, pin=1, request_id="b-breaker")
@@ -619,7 +704,7 @@ def test_accessor_reads_through_terminal_forecast_cycle_status_and_past_the_even
 
     from services.orchestrator.scheduler_state_types import DEFAULT_CANDIDATE_STATE_EVENT_LIMIT
 
-    root = seed_breaker_journal(tmp_path, monkeypatch)
+    root = seed_breaker_journal(tmp_path, monkeypatch, db_free=True)
     repository = FileOrchestrationJournalRepository(root)
     _insert_confirmation(repository, model_id="model_a", decision=BREAKER_DECISION, pin=1, request_id="first")
     for index in range(DEFAULT_CANDIDATE_STATE_EVENT_LIMIT + 5):
@@ -640,7 +725,7 @@ def test_accessor_reads_through_terminal_forecast_cycle_status_and_past_the_even
 
 
 def test_accessor_returns_empty_on_an_unreadable_journal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    root = seed_breaker_journal(tmp_path, monkeypatch)
+    root = seed_breaker_journal(tmp_path, monkeypatch, db_free=True)
     repository = FileOrchestrationJournalRepository(root)
     _insert_confirmation(repository, model_id="model_a", decision=BREAKER_DECISION, pin=1, request_id="present")
     assert len(_confirmations(root)) == 1
@@ -705,12 +790,14 @@ def test_repository_without_the_accessor_keeps_the_breaker_fail_stop(
 
     from tests.test_production_scheduler import FakeProductionOrchestrator
 
-    root = seed_breaker_journal(tmp_path, monkeypatch)
+    root = seed_breaker_journal(tmp_path, monkeypatch, db_free=True)
     code, _receipt, _err = run_confirm(breaker_confirm_argv(root), capsys)
     assert code == 0
 
     orchestrator = FakeProductionOrchestrator()
-    result = breaker_scheduler(tmp_path, root, orchestrator, repository=repository_class(root)).run_once()
+    result = breaker_scheduler(
+        tmp_path, root, orchestrator, repository=repository_class(root), db_free=True
+    ).run_once()
 
     assert result.evidence["counts"]["submitted_count"] == 0
     assert orchestrator.calls == []

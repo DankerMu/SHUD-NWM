@@ -30,6 +30,7 @@ from tests.test_production_scheduler import (
     FakeCandidateStateRepository,
     FakeRegistry,
     _absence_tolerance_scheduler,
+    _AlwaysReadyCanonicalReadinessProvider,
     _config,
     _dt,
     _model,
@@ -116,6 +117,9 @@ def _truth_table_builder(
     **kwargs: object,
 ) -> Callable[[], tuple[ProductionScheduler, CycleDiscovery, list[object]]]:
     def build() -> tuple[ProductionScheduler, CycleDiscovery, list[object]]:
+        # ``_absence_tolerance_scheduler`` (tests/test_production_scheduler.py)
+        # takes no mode kwarg: the env selects DB-free explicitly.
+        monkeypatch.setenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", "true")
         scheduler, discovery, models = _absence_tolerance_scheduler(
             monkeypatch,
             tmp_path,
@@ -253,10 +257,11 @@ def _lineage_builder(
     def build() -> tuple[ProductionScheduler, CycleDiscovery, list[object]]:
         models = [_model("model_a", "basin_a"), _model("model_b", "basin_b")]
         scheduler = ProductionScheduler(
-            _config(tmp_path, now=_dt("2026-07-20T12:00:00Z")),
+            _config(tmp_path, db_free=True, now=_dt("2026-07-20T12:00:00Z")),
             registry=FakeRegistry(models),
             adapters={},
             active_repository=_PerModelStateRepository({"hydro_status": "published"}),
+            canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
         )
         monkeypatch.setattr(
             scheduler,
@@ -317,6 +322,8 @@ def test_recalibrated_model_scoped_out_by_lineage_keeps_its_verdict_without_the_
 def test_submitting_path_keeps_the_event_copy(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """The submit-path context binds the same decider and keeps the default."""
 
+    # ``_absence_tolerance_scheduler`` takes no mode kwarg: the env selects DB-free explicitly.
+    monkeypatch.setenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", "true")
     scheduler, discovery, models = _absence_tolerance_scheduler(
         monkeypatch,
         tmp_path,

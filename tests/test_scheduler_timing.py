@@ -625,7 +625,7 @@ def test_level_candidate_populates_all_layers() -> None:
 # --- 3.10 unknown level blocks pass with populated timing.pass ---------------
 
 
-def test_unknown_level_blocks_pass_with_timing_pass(tmp_path: Path) -> None:
+def test_unknown_level_blocks_pass_with_timing_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """spec.md L152 / D4: unknown level is fail-closed at pass entry.
 
     ``run_once`` normalises the raw string and validates against
@@ -638,7 +638,9 @@ def test_unknown_level_blocks_pass_with_timing_pass(tmp_path: Path) -> None:
     # a large shared fixture surface (FakeRegistry / FakeAdapter / etc.) that
     # we would otherwise redeclare here; keeping the import inside the test
     # scopes the coupling to the ``run_once`` integration cases (3.10, 3.16).
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
     from services.orchestrator.scheduler_config import ProductionSchedulerConfig
+    from tests.test_operator_reentry_confirmation import db_free_cold_start_env
     from tests.test_production_scheduler import (
         FakeAdapter,
         FakeRegistry,
@@ -647,8 +649,11 @@ def test_unknown_level_blocks_pass_with_timing_pass(tmp_path: Path) -> None:
         _model,
     )
 
+    # A real pass: the full DB-free env rooted at ``tmp_path``, over an empty file journal.
+    journal_root = db_free_cold_start_env(tmp_path, monkeypatch)
     config = ProductionSchedulerConfig(
-        workspace_root=tmp_path,
+        scheduler_db_free_required=True,
+        workspace_root=tmp_path / "workspace",
         sources=("gfs",),
         lookback_hours=24,
         cycle_lag_hours=0,
@@ -662,6 +667,7 @@ def test_unknown_level_blocks_pass_with_timing_pass(tmp_path: Path) -> None:
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FileOrchestrationJournalRepository(journal_root),
     )
     result = scheduler.run_once()
 
@@ -891,7 +897,7 @@ def test_instrumentation_overhead_bounded() -> None:
 # --- 3.16 evidence schema additive -------------------------------------------
 
 
-def test_evidence_schema_additive(tmp_path: Path) -> None:
+def test_evidence_schema_additive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """spec.md L15 / D3: adding the timing: block MUST NOT remove any pre-existing key.
 
     Consumers of ``SchedulerPassResult.evidence`` rely on top-level keys such
@@ -901,7 +907,9 @@ def test_evidence_schema_additive(tmp_path: Path) -> None:
     """
 
     # See test 3.10 for rationale on deferring these imports to the body.
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
     from services.orchestrator.scheduler_config import ProductionSchedulerConfig
+    from tests.test_operator_reentry_confirmation import db_free_cold_start_env
     from tests.test_production_scheduler import (
         FakeAdapter,
         FakeRegistry,
@@ -910,8 +918,11 @@ def test_evidence_schema_additive(tmp_path: Path) -> None:
         _model,
     )
 
+    # A real pass: the full DB-free env rooted at ``tmp_path``, over an empty file journal.
+    journal_root = db_free_cold_start_env(tmp_path, monkeypatch)
     config = ProductionSchedulerConfig(
-        workspace_root=tmp_path,
+        scheduler_db_free_required=True,
+        workspace_root=tmp_path / "workspace",
         sources=("gfs",),
         lookback_hours=24,
         cycle_lag_hours=0,
@@ -924,6 +935,7 @@ def test_evidence_schema_additive(tmp_path: Path) -> None:
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FileOrchestrationJournalRepository(journal_root),
     )
     result = scheduler.run_once()
 

@@ -459,7 +459,9 @@ def test_the_scheduler_pass_names_the_copyback_root_for_the_mutex(
     monkeypatch.setenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", str(copyback))
     observations = _observe_removals(monkeypatch, copyback)
 
-    scheduler = _pass_scheduler(workspace_root=str(workspace), object_store_root=str(store))
+    scheduler = _pass_scheduler(
+        db_free_journal_root=tmp_path / "journal", workspace_root=str(workspace), object_store_root=str(store)
+    )
     payload = scheduler._run_retention(NOW)
 
     assert payload["status"] == "completed"
@@ -484,6 +486,8 @@ def test_the_cleanup_cli_names_the_copyback_root_for_the_mutex(
     evidence_dir.mkdir(parents=True, exist_ok=True)
     workspace_key = _seed_run_workspace(workspace, now - timedelta(days=60))
     copyback_key = _seed_run_workspace(copyback, now - timedelta(days=70))
+    # The CLI builds its scheduler config from the env: DB-free, explicitly.
+    monkeypatch.setenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", "true")
     monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
     monkeypatch.setenv("NHMS_SCHEDULER_EVIDENCE_ROOT", str(evidence_dir))
     monkeypatch.setenv("OBJECT_STORE_ROOT", str(store))

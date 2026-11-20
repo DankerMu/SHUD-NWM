@@ -16,6 +16,7 @@ from services.orchestrator.retention import (
 from tests.retention_test_helpers import (
     NOW,
     _cycle_name,
+    _db_free_retention_scheduler,
     _keys,
     _reasons,
     _seed_cycle,
@@ -45,25 +46,15 @@ def _frontier_scheduler(
     adapters: dict | None = None,
     allowed_cycle_hours_utc: tuple[int, ...] = (0, 6, 12, 18),
 ):
-    """Scheduler whose discovery knobs are pinned (not inherited from env)."""
-    from services.orchestrator.scheduler import (
-        ProductionScheduler,
-        ProductionSchedulerConfig,
-        _BlockedModelRegistry,
-    )
-
-    config = ProductionSchedulerConfig(
+    """DB-free scheduler whose discovery knobs are pinned (not inherited from env)."""
+    return _db_free_retention_scheduler(
+        tmp_path / "journal",
+        adapters=adapters,
         workspace_root=str(tmp_path / "ws"),
         sources=sources,
         allowed_cycle_hours_utc=allowed_cycle_hours_utc,
         lookback_hours=lookback_hours,
         cycle_lag_hours=cycle_lag_hours,
-    )
-    return ProductionScheduler(
-        config=config,
-        registry=_BlockedModelRegistry(),
-        adapters=adapters or {},
-        active_repository=None,
     )
 
 

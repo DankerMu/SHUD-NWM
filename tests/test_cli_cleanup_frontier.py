@@ -65,12 +65,17 @@ def _retention_block(bound: datetime | None, source: str | None = "scheduler_pas
 
 @pytest.fixture
 def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
-    """Isolated workspace + evidence dir + object store wired through env."""
+    """Isolated workspace + evidence dir + object store wired through env.
+
+    The CLI builds its scheduler config from the env, so the env selects the
+    DB-free mode explicitly.
+    """
     workspace = tmp_path / "workspace"
     evidence_dir = workspace / "scheduler" / "evidence"
     evidence_dir.mkdir(parents=True)
     store = tmp_path / "object-store"
     store.mkdir()
+    monkeypatch.setenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", "true")
     monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
     monkeypatch.setenv("NHMS_SCHEDULER_EVIDENCE_ROOT", str(evidence_dir))
     monkeypatch.setenv("OBJECT_STORE_ROOT", str(store))
@@ -155,9 +160,10 @@ def test_cleanup_execute_with_unresolvable_evidence_dir_forces_dry_run(
     env: dict[str, Path], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     aged = _write_cycle(env["store"], "raw", "gfs", _cycle_name(NOW - timedelta(days=40)))
-    # An evidence root outside the workspace fails the confinement check inside
-    # ProductionSchedulerConfig.__post_init__.
-    monkeypatch.setenv("NHMS_SCHEDULER_EVIDENCE_ROOT", str(tmp_path / "elsewhere" / "evidence"))
+    # A blank workspace root fails ProductionSchedulerConfig.__post_init__'s
+    # blank-path check, so the evidence dir cannot be derived (in the DB-free
+    # mode an evidence root outside the workspace no longer fails construction).
+    monkeypatch.setenv("WORKSPACE_ROOT", "   ")
 
     payload = cli._run_cleanup(retention_days=14, dry_run=False)
 
@@ -381,7 +387,8 @@ def test_unresolved_evidence_dir_carries_the_key_as_an_explicit_null(
     env: dict[str, Path], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """The key stays present so the payload shape does not vary by reason."""
-    monkeypatch.setenv("NHMS_SCHEDULER_EVIDENCE_ROOT", str(tmp_path / "elsewhere" / "evidence"))
+    # Blank workspace root: the evidence dir derivation fails (see above).
+    monkeypatch.setenv("WORKSPACE_ROOT", "   ")
 
     payload = cli._run_cleanup(retention_days=14, dry_run=False)
 

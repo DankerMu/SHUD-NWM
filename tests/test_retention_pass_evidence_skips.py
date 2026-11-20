@@ -57,7 +57,9 @@ def _pass_retention(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[di
     store, workspace = _seed_skip_only_tree(tmp_path)
     monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
     monkeypatch.delenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", raising=False)
-    scheduler = _pass_scheduler(workspace_root=str(workspace), object_store_root=str(store))
+    scheduler = _pass_scheduler(
+        db_free_journal_root=tmp_path / "journal", workspace_root=str(workspace), object_store_root=str(store)
+    )
     payload = scheduler._run_retention(NOW, active_lower_bound=_BOUND, active_lower_bound_source="candidates")
     assert payload["status"] == "completed"
     return payload, store, workspace
@@ -124,8 +126,9 @@ def test_standalone_receipt_of_the_same_plan_still_lists_every_skip(
 def test_run_once_pass_evidence_carries_the_projected_retention_block(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from tests.test_operator_reentry_confirmation import db_free_cold_start_env
     from tests.test_production_scheduler import (
-        FakeActiveRepository,
         FakeAdapter,
         FakeForcingProducer,
         FakeProductionOrchestrator,
@@ -136,16 +139,21 @@ def test_run_once_pass_evidence_carries_the_projected_retention_block(
         _model,
     )
 
+    # A real pass: the full DB-free env rooted at ``tmp_path``, over an empty
+    # file journal.  Its object store is the seeded ``tmp_path/object-store``;
+    # the copyback root the DB-free preflight requires is that same root, so
+    # retention sweeps no additional copyback root (``extra_roots`` stays the
+    # workspace alone, as without the env).
+    journal_root = db_free_cold_start_env(tmp_path, monkeypatch, generated_at=NOW)
     _seed_pass_env(monkeypatch)
     store, workspace = _seed_skip_only_tree(tmp_path)
     monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
-    monkeypatch.delenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", raising=False)
     orchestrator = FakeProductionOrchestrator()
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=NOW, object_store_root=store),
+        _config(tmp_path / "workspace", db_free=True, now=NOW, object_store_root=store),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-06-03T06:00:00Z", True)])},
-        active_repository=FakeActiveRepository(active=False),
+        active_repository=FileOrchestrationJournalRepository(journal_root),
         canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
         forcing_producer=FakeForcingProducer(),
         orchestrator_factory=lambda _source_id: orchestrator,

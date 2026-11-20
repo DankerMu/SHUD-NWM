@@ -42,7 +42,7 @@ def _write_evidence(root: Path, payload: dict[str, Any], *, max_evidence_bytes: 
     from tests.test_production_scheduler import _config, _dt, _scheduler_evidence_test_context
 
     root.mkdir(parents=True, exist_ok=True)
-    config = _config(root, now=_dt("2026-05-21T12:00:00Z"))
+    config = _config(root, db_free=True, now=_dt("2026-05-21T12:00:00Z"))
     evidence_dir = Path(config.evidence_dir)
     evidence_dir.mkdir(parents=True, exist_ok=True)
     context = (
@@ -239,8 +239,8 @@ def breaker_pass_evidence(tmp_path_factory: pytest.TempPathFactory) -> dict[str,
 
     tmp_path = tmp_path_factory.mktemp("breaker_pass").resolve()
     with pytest.MonkeyPatch.context() as monkeypatch:
-        root = seed_breaker_journal(tmp_path, monkeypatch)
-        result = breaker_scheduler(tmp_path, root, FakeProductionOrchestrator()).run_once()
+        root = seed_breaker_journal(tmp_path, monkeypatch, db_free=True)
+        result = breaker_scheduler(tmp_path, root, FakeProductionOrchestrator(), db_free=True).run_once()
     evidence = json.loads(json.dumps(result.evidence))
     evidence["pass_id"] = _PASS_ID
     evidence["sources"] = ["gfs", "IFS"]
@@ -271,6 +271,8 @@ def test_non_blocking_summary_keeps_the_true_status_in_result_artifact_and_cli(
     """A candidate-heavy pass over the bound keeps its computed status, not ``resource_limit_blocked``."""
 
     from services.orchestrator import cli
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from tests.test_operator_reentry_confirmation import db_free_cold_start_env
     from tests.test_production_scheduler import (
         FakeAdapter,
         FakeRegistry,
@@ -283,11 +285,13 @@ def test_non_blocking_summary_keeps_the_true_status_in_result_artifact_and_cli(
     )
 
     def _pass(root: Path) -> Any:
-        root.mkdir(parents=True, exist_ok=True)
+        # A real pass: the full DB-free env, rooted at ``root`` (each pass its own).
+        journal_root = db_free_cold_start_env(root, monkeypatch)
         return ProductionScheduler(
-            _config(root, now=_dt("2026-05-21T12:00:00Z")),
+            _config(root / "workspace", db_free=True, now=_dt("2026-05-21T12:00:00Z")),
             registry=FakeRegistry([_model("model_a", "basin_a"), _model("model_b", "basin_b")]),
             adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+            active_repository=FileOrchestrationJournalRepository(journal_root),
         ).run_once()
 
     reference = _pass(tmp_path / "reference")
@@ -367,7 +371,7 @@ def test_a_summary_that_still_exceeds_the_bound_falls_back_fail_closed(tmp_path:
 
     root = tmp_path / "fallback"
     root.mkdir()
-    config = _config(root, now=_dt("2026-05-21T12:00:00Z"))
+    config = _config(root, db_free=True, now=_dt("2026-05-21T12:00:00Z"))
     evidence_dir = Path(config.evidence_dir)
     evidence_dir.mkdir(parents=True)
     evidence = _incident_scheduler_evidence_payload(_PASS_ID)
@@ -423,7 +427,7 @@ def test_the_summary_tier_nests_the_admission_record_it_ran_after(tmp_path: Path
     ]
     root = tmp_path / "admission"
     root.mkdir()
-    config = _config(root, now=_dt("2026-05-21T12:00:00Z"))
+    config = _config(root, db_free=True, now=_dt("2026-05-21T12:00:00Z"))
     evidence_dir = Path(config.evidence_dir)
     evidence_dir.mkdir(parents=True)
     max_evidence_bytes = _summary_tier_limit(evidence)
@@ -808,21 +812,35 @@ def test_the_fit_tier_sheds_the_candidate_lists_before_the_breaker_released_proj
 # ---------------------------------------------------------------------------
 
 
-def _backfill_pass(tmp_path: Path, *, backfill_enabled: bool, models: list[Any] | None = None) -> Any:
-    """A REAL ``run_once()`` pass over one source with backfill configured either way."""
+def _backfill_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    backfill_enabled: bool,
+    models: list[Any] | None = None,
+) -> Any:
+    """A REAL DB-free ``run_once()`` pass over one source with backfill configured either way.
 
+    The DB-free env is scoped to the pass, so a later ``_write_evidence`` under
+    its own root does not inherit the pass's evidence root.
+    """
+
+    from tests.test_operator_reentry_confirmation import db_free_cold_start_env
     from tests.test_production_scheduler import _dt
     from tests.test_scheduler_backfill import CompletionByCycleRepository, _build_scheduler
 
-    return _build_scheduler(
-        tmp_path,
-        now=_dt("2026-05-21T12:00:00Z"),
-        cycle_times=["2026-05-21T06:00:00Z", "2026-05-21T00:00:00Z"],
-        backfill_enabled=backfill_enabled,
-        max_cycles_per_source=1,
-        models=models,
-        active_repository=CompletionByCycleRepository(set()),
-    ).run_once()
+    with monkeypatch.context() as patch:
+        db_free_cold_start_env(tmp_path, patch)
+        return _build_scheduler(
+            tmp_path / "workspace",
+            db_free=True,
+            now=_dt("2026-05-21T12:00:00Z"),
+            cycle_times=["2026-05-21T06:00:00Z", "2026-05-21T00:00:00Z"],
+            backfill_enabled=backfill_enabled,
+            max_cycles_per_source=1,
+            models=models,
+            active_repository=CompletionByCycleRepository(set()),
+        ).run_once()
 
 
 @pytest.mark.parametrize(
@@ -835,6 +853,7 @@ def _backfill_pass(tmp_path: Path, *, backfill_enabled: bool, models: list[Any] 
 )
 def test_run_once_records_the_backfill_leg_discovery_executed(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     backfill_enabled: bool,
     models: list[Any] | None,
     expected_mode: str,
@@ -847,7 +866,7 @@ def test_run_once_records_the_backfill_leg_discovery_executed(
     produced its ``source_cycles``.
     """
 
-    result = _backfill_pass(tmp_path, backfill_enabled=backfill_enabled, models=models)
+    result = _backfill_pass(tmp_path, monkeypatch, backfill_enabled=backfill_enabled, models=models)
     persisted = json.loads(Path(result.artifact_path or "").read_text(encoding="utf-8"))
 
     assert result.evidence["backfill"]["enabled"] is backfill_enabled
@@ -855,10 +874,12 @@ def test_run_once_records_the_backfill_leg_discovery_executed(
     assert persisted["backfill"]["mode"] == expected_mode
 
 
-def test_a_zero_model_backfill_pass_records_legacy_and_stays_undecidable(tmp_path: Path) -> None:
+def test_a_zero_model_backfill_pass_records_legacy_and_stays_undecidable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """4.1: the read side (already armed) and the new write side on one artifact."""
 
-    result = _backfill_pass(tmp_path, backfill_enabled=True, models=[])
+    result = _backfill_pass(tmp_path, monkeypatch, backfill_enabled=True, models=[])
     evidence = json.loads(json.dumps(result.evidence))
     evidence["sources"] = ["gfs", "IFS"]
     root = _write_evidence(tmp_path / "zero_model", evidence)
@@ -872,10 +893,10 @@ def test_a_zero_model_backfill_pass_records_legacy_and_stays_undecidable(tmp_pat
     assert [item["reason"] for item in receipt["non_evaluating_passes"]] == ["no_models_evaluated"]
 
 
-def test_a_normal_backfill_pass_still_answers_zero(tmp_path: Path) -> None:
+def test_a_normal_backfill_pass_still_answers_zero(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """4.2: the 188/188 live shape gains one key and nothing else moves."""
 
-    result = _backfill_pass(tmp_path, backfill_enabled=True)
+    result = _backfill_pass(tmp_path, monkeypatch, backfill_enabled=True)
     evidence = json.loads(json.dumps(result.evidence))
     evidence["sources"] = ["gfs", "IFS"]
     root = _write_evidence(tmp_path / "normal", evidence)
@@ -887,7 +908,7 @@ def test_a_normal_backfill_pass_still_answers_zero(tmp_path: Path) -> None:
     assert (exit_code, receipt["operator_actions"], receipt["non_evaluating_passes"]) == (0, [], [])
 
 
-def test_a_writer_impossible_backfill_shape_is_scope_unknown(tmp_path: Path) -> None:
+def test_a_writer_impossible_backfill_shape_is_scope_unknown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """4.3: ``enabled`` true + ``mode`` legacy + models selected is a shape no writer emits.
 
     Only the zero-model pass runs the legacy leg with ``enabled`` true, and that
@@ -895,7 +916,7 @@ def test_a_writer_impossible_backfill_shape_is_scope_unknown(tmp_path: Path) -> 
     evidence, so the scope arms rather than answering.
     """
 
-    result = _backfill_pass(tmp_path, backfill_enabled=True)
+    result = _backfill_pass(tmp_path, monkeypatch, backfill_enabled=True)
     base = json.loads(json.dumps(result.evidence))
     base["sources"] = ["gfs", "IFS"]
     assert base["counts"]["selected_model_count"] > 0
@@ -926,8 +947,10 @@ def test_the_backfill_leg_entry_is_appended_once_per_call_on_both_legs(tmp_path:
     """
 
     from services.orchestrator import scheduler_runtime
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
     from services.orchestrator.operator_action_listing import _pass_actions
     from services.orchestrator.scheduler_evidence_payload import _bounded_breaker_released_source_cycles
+    from tests.provider_mode_helpers import make_directory_with_explicit_mode
     from tests.test_production_scheduler import FakeAdapter, FakeRegistry, ProductionScheduler, _config, _dt, _model
 
     for backfill_enabled, model_rows, expected_mode in (
@@ -936,10 +959,11 @@ def test_the_backfill_leg_entry_is_appended_once_per_call_on_both_legs(tmp_path:
         (False, [_model("model_a", "basin_a")], "legacy"),
     ):
         root = tmp_path / f"{expected_mode}_{backfill_enabled}_{len(model_rows)}"
-        root.mkdir(parents=True, exist_ok=True)
+        make_directory_with_explicit_mode(root / "journal")
         scheduler = ProductionScheduler(
             _config(
                 root,
+                db_free=True,
                 now=_dt("2026-05-21T12:00:00Z"),
                 sources=("gfs", "IFS"),
                 backfill_enabled=backfill_enabled,
@@ -950,6 +974,7 @@ def test_the_backfill_leg_entry_is_appended_once_per_call_on_both_legs(tmp_path:
                 "gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)]),
                 "IFS": FakeAdapter("IFS", [("2026-05-21T06:00:00Z", True)]),
             },
+            active_repository=FileOrchestrationJournalRepository(root / "journal"),
         )
         models = scheduler._discover_models()[0] if model_rows else ()
         _cycles, evidence = scheduler._discover_cycles(_dt("2026-05-21T12:00:00Z"), models=models)

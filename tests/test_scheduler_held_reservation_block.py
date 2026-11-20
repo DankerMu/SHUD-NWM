@@ -209,18 +209,36 @@ def _decision(repository: FileOrchestrationJournalRepository, candidate: Any) ->
     return decision
 
 
+def _empty_state_index(root: Path) -> Path:
+    """Publish an empty state snapshot index under ``root`` (the DB-free cold start)."""
+
+    from packages.common.state_manager import publish_state_snapshot_index
+    from tests.provider_mode_helpers import make_directory_with_explicit_mode
+
+    index = make_directory_with_explicit_mode(root / "db-free") / "state-index.json"
+    publish_state_snapshot_index([], index, object_store_root=root, generated_at=_NEXT_PASS)
+    return index
+
+
 def _scheduler(
     tmp_path: Path,
     repository: FileOrchestrationJournalRepository,
     raw_models: Sequence[dict[str, Any]],
     *,
     orchestrator: Any | None = None,
+    db_free: bool | None = None,
     **config: Any,
 ) -> Any:
+    # ``db_free`` is forwarded to ``_config``: omitted, the env decides and
+    # nothing else changes (what the importers rely on).  ``True`` also names a
+    # freshly published, empty state snapshot index (the cold-start shape: no
+    # state history, so the candidate-state decision is the gate under test).
     from tests.test_production_scheduler import FakeRegistry, ProductionScheduler, _config
 
+    if db_free:
+        config.setdefault("scheduler_state_index", _empty_state_index(tmp_path / "planner"))
     return ProductionScheduler(
-        _config(tmp_path / "planner", now=_NEXT_PASS, **config),
+        _config(tmp_path / "planner", db_free=db_free, now=_NEXT_PASS, **config),
         registry=FakeRegistry(list(raw_models)),
         adapters={},
         active_repository=FileOrchestrationJournalRepository(repository.root),
@@ -323,7 +341,7 @@ def test_held_ambiguous_forecast_submit_blocks_every_member_through_the_planner(
         assert decision.evidence.get("decision") != "retry_after_completed_stage"
         _assert_held_decision(decision, stage="forecast")
 
-    selected, blocked, skipped = _plan(_scheduler(tmp_path, repository, raw_models), raw_models)
+    selected, blocked, skipped = _plan(_scheduler(tmp_path, repository, raw_models, db_free=True), raw_models)
 
     assert selected == []
     assert blocked == []
@@ -343,9 +361,13 @@ def test_gateway_timeout_then_planner_pass_submits_no_second_forecast(
     forecast_masters_before = [row["job_id"] for row in _rows(repository, "forecast")]
     runtime = FakeCycleSlurmClient()
     orchestrator = _orchestrator(tmp_path / "second-pass", FileOrchestrationJournalRepository(repository.root), runtime)
-    scheduler = _scheduler(tmp_path, repository, raw_models, orchestrator=orchestrator, dry_run=False)
+    scheduler = _scheduler(tmp_path, repository, raw_models, orchestrator=orchestrator, dry_run=False, db_free=True)
 
-    selected, _blocked, _skipped = _plan(scheduler, raw_models)
+    selected, blocked, skipped = _plan(scheduler, raw_models)
+    # Fixture guard: the held reservation, not a missing DB-free input (e.g. the
+    # state snapshot index), is what keeps every member out of ``selected``.
+    assert blocked == []
+    assert {row["reason"] for row in skipped} == {"active_duplicate_pipeline"}
     scheduler._execute_candidates(selected)
 
     assert runtime.submissions == []
@@ -402,7 +424,7 @@ def test_terminal_hydro_success_with_a_held_row_is_in_flight_not_complete(
         assert decision.reason != "terminal_hydro_success"
         _assert_held_decision(decision, stage="parse")
 
-    scheduler = _scheduler(tmp_path, repository, raw_models, lookback_hours=0, cycle_lag_hours=0)
+    scheduler = _scheduler(tmp_path, repository, raw_models, lookback_hours=0, cycle_lag_hours=0, db_free=True)
     monkeypatch.setattr(scheduler, "_strict_warm_start_for_candidate", lambda _candidate, _cycle: None)
     monkeypatch.setattr(
         scheduler,
@@ -754,7 +776,7 @@ def test_reserved_row_with_a_real_slurm_binding_takes_the_active_job_path(
         assert (decision.action, decision.reason) == ("skip", "terminal_hydro_success")
         assert "held_reservations" not in decision.evidence
 
-    selected, blocked, skipped = _plan(_scheduler(tmp_path, repository, raw_models), raw_models)
+    selected, blocked, skipped = _plan(_scheduler(tmp_path, repository, raw_models, db_free=True), raw_models)
     assert (selected, blocked) == ([], [])
     assert {row["reason"] for row in skipped} == {"active_slurm_job"}
 
@@ -792,7 +814,7 @@ def test_held_skip_reason_survives_pre_write_size_pressure_compaction(
 
     repository, raw_models, candidates = _production_forecast_shape(monkeypatch, tmp_path)
     _selected, _blocked, skipped = _plan(
-        _scheduler(tmp_path, repository, raw_models, candidate_state_job_limit=1), raw_models
+        _scheduler(tmp_path, repository, raw_models, candidate_state_job_limit=1, db_free=True), raw_models
     )
     assert len(skipped) == len(candidates)
     for row in skipped:

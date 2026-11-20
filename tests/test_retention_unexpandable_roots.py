@@ -170,15 +170,13 @@ def test_the_pass_reports_an_unexpandable_raw_primary_as_completed(tmp_path: Pat
 
     _seed_pass_env(monkeypatch)
     workspace = _real(tmp_path) / "ws"
-    (workspace / "journal").mkdir(parents=True)
     monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
     raw = f"{_NO_USER}/store"
 
     scheduler = _pass_scheduler(
+        db_free_journal_root=workspace / "journal",
         workspace_root=str(workspace),
         object_store_root=raw,
-        scheduler_db_free_required=True,
-        scheduler_journal_root=str(workspace / "journal"),
     )
     payload = scheduler._run_retention(NOW)
 
@@ -194,6 +192,7 @@ def test_the_pass_sweeps_the_valid_primary_past_an_unexpandable_copyback_root(tm
     copyback = f"{_NO_USER}/copyback"
 
     scheduler = _pass_scheduler(
+        db_free_journal_root=_real(tmp_path) / "journal",
         workspace_root=str(_real(tmp_path) / "ws"),
         object_store_root=str(store),
         object_store_copyback_root=copyback,

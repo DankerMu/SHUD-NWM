@@ -15,6 +15,7 @@ from services.orchestrator.retention import (
 from tests.retention_test_helpers import (
     NOW,
     _cycle_name,
+    _db_free_retention_scheduler,
     _keys,
     _write,
 )
@@ -184,33 +185,15 @@ def test_plan_retention_handles_missing_root(tmp_path: Path) -> None:
 
 def test_scheduler_skips_retention_when_disabled(monkeypatch, tmp_path: Path) -> None:
     """NHMS_RETENTION_ENABLED=false => scheduler _run_retention is a no-op."""
-    from services.orchestrator.scheduler import (
-        ProductionScheduler,
-        ProductionSchedulerConfig,
-        _BlockedModelRegistry,
-    )
-
     monkeypatch.delenv("NHMS_RETENTION_ENABLED", raising=False)
-    config = ProductionSchedulerConfig(workspace_root=str(tmp_path / "ws"))
-    scheduler = ProductionScheduler(
-        config=config, registry=_BlockedModelRegistry(), adapters={}, active_repository=None
-    )
+    scheduler = _db_free_retention_scheduler(tmp_path / "journal", workspace_root=str(tmp_path / "ws"))
     payload = scheduler._run_retention(NOW)
     assert payload["status"] == "disabled"
     assert payload["enabled"] is False
 
 
 def _make_scheduler(tmp_path: Path):
-    from services.orchestrator.scheduler import (
-        ProductionScheduler,
-        ProductionSchedulerConfig,
-        _BlockedModelRegistry,
-    )
-
-    config = ProductionSchedulerConfig(workspace_root=str(tmp_path / "ws"))
-    return ProductionScheduler(
-        config=config, registry=_BlockedModelRegistry(), adapters={}, active_repository=None
-    )
+    return _db_free_retention_scheduler(tmp_path / "journal", workspace_root=str(tmp_path / "ws"))
 
 
 def test_scheduler_retention_exception_does_not_break_pass(monkeypatch, tmp_path: Path) -> None:
@@ -343,23 +326,15 @@ def test_states_prefix_protected_not_deleted(tmp_path: Path) -> None:
 
 
 def _make_scheduler_with_store(tmp_path: Path, *, dry_run: bool):
-    """Build a scheduler bound to a fresh object store + one expired cycle dir."""
-    from services.orchestrator.scheduler import (
-        ProductionScheduler,
-        ProductionSchedulerConfig,
-        _BlockedModelRegistry,
-    )
-
+    """Build a DB-free scheduler bound to a fresh object store + one expired cycle dir."""
     store = tmp_path / "object-store"
     old = _cycle_name(NOW - timedelta(days=20))
     expired = _write(store, f"raw/gfs/{old}/gfs.f000.nc").parent
-    config = ProductionSchedulerConfig(
+    scheduler = _db_free_retention_scheduler(
+        tmp_path / "journal",
         workspace_root=str(tmp_path / "ws"),
         object_store_root=str(store),
         dry_run=dry_run,
-    )
-    scheduler = ProductionScheduler(
-        config=config, registry=_BlockedModelRegistry(), adapters={}, active_repository=None
     )
     return scheduler, expired
 

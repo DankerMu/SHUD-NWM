@@ -223,6 +223,7 @@ def test_publish_qdown_click_failure_reports_failure_payload_and_nonzero_exit(
 # ---------------------------------------------------------------------------
 def _gateway_config(tmp_path: Path, *, url: str, service_port: int = 8000) -> ProductionSchedulerConfig:
     return ProductionSchedulerConfig(
+        scheduler_db_free_required=True,
         workspace_root=tmp_path,
         slurm_gateway_url=url,
         service_port=service_port,

@@ -39,11 +39,13 @@ _PASS_STARTED_AT = "2026-05-21T12:00:00Z"
 # ---------------------------------------------------------------------------
 
 
-def _evidence_context(root: Path) -> tuple[Any, Path]:
+def _evidence_context(root: Path, *, db_free: bool | None = None) -> tuple[Any, Path]:
+    # ``db_free`` is forwarded to ``_config``: omitted, the env decides (what
+    # ``_write_reservation``'s importers rely on); this file passes ``True``.
     from tests.test_production_scheduler import _config, _dt, _scheduler_evidence_test_context
 
     root.mkdir(parents=True, exist_ok=True)
-    config = _config(root, now=_dt(_PASS_STARTED_AT))
+    config = _config(root, db_free=db_free, now=_dt(_PASS_STARTED_AT))
     evidence_dir = Path(config.evidence_dir)
     evidence_dir.mkdir(parents=True, exist_ok=True)
     return _scheduler_evidence_test_context(config), evidence_dir
@@ -54,7 +56,7 @@ def _write_pass(root: Path, payload: dict[str, Any], *, mtime: float | None = No
 
     from services.orchestrator import scheduler_evidence
 
-    context, evidence_dir = _evidence_context(root)
+    context, evidence_dir = _evidence_context(root, db_free=True)
     scheduler_evidence.write_evidence(context, str(payload["pass_id"]), dict(payload))
     path = evidence_dir / f"{payload['pass_id']}.json"
     if mtime is not None:
@@ -70,13 +72,14 @@ def _write_reservation(
     started_at: str = _PASS_STARTED_AT,
     mtime: float | None = None,
     drop_lease: bool = False,
+    db_free: bool | None = None,
 ) -> Path:
     """Reserve through the REAL ``reserve_pre_execution_evidence``."""
 
     from services.orchestrator import scheduler_evidence
     from tests.test_production_scheduler import _dt
 
-    context, evidence_dir = _evidence_context(root)
+    context, evidence_dir = _evidence_context(root, db_free=db_free)
     payload = scheduler_evidence.reserve_pre_execution_evidence(
         context,
         pass_id,
@@ -105,6 +108,8 @@ def decidable_pass_evidence(tmp_path_factory: pytest.TempPathFactory) -> dict[st
     geometry and would otherwise be read ``scope_narrowed``.
     """
 
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from tests.test_operator_reentry_confirmation import db_free_cold_start_env
     from tests.test_production_scheduler import (
         FakeAdapter,
         FakeRegistry,
@@ -115,16 +120,20 @@ def decidable_pass_evidence(tmp_path_factory: pytest.TempPathFactory) -> dict[st
     )
 
     tmp_path = tmp_path_factory.mktemp("decidable_pass").resolve()
-    result = ProductionScheduler(
-        _config(
-            tmp_path,
-            now=_dt(_PASS_STARTED_AT),
-            backfill_enabled=True,
-            max_cycles_per_source=1,
-        ),
-        registry=FakeRegistry([_model("model_a", "basin_a")]),
-        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-    ).run_once()
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        journal_root = db_free_cold_start_env(tmp_path, monkeypatch)
+        result = ProductionScheduler(
+            _config(
+                tmp_path / "workspace",
+                db_free=True,
+                now=_dt(_PASS_STARTED_AT),
+                backfill_enabled=True,
+                max_cycles_per_source=1,
+            ),
+            registry=FakeRegistry([_model("model_a", "basin_a")]),
+            adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+            active_repository=FileOrchestrationJournalRepository(journal_root),
+        ).run_once()
     evidence = json.loads(json.dumps(result.evidence))
     evidence["sources"] = ["gfs", "IFS"]
     evidence["pass_id"] = _PASS_ID
@@ -179,6 +188,7 @@ def test_a_crashed_submit_pass_is_not_answered_by_an_older_pass(
         orphan_id,
         reserved_at="2026-05-21T12:30:00Z",
         mtime=_stale_mtime(),
+        db_free=True,
     )
 
     receipt, code = _listing(path.parent)
@@ -207,6 +217,7 @@ def test_an_in_flight_reservation_does_not_add_noise(
         tmp_path / "root",
         "scheduler_2026052113_inflight001",
         reserved_at="2026-05-21T13:00:00Z",
+        db_free=True,
     )
 
     assert _listing(path.parent) == before
@@ -228,6 +239,7 @@ def test_a_reservation_whose_terminal_artifact_exists_produces_nothing(
         _PASS_ID,
         reserved_at="2026-05-21T12:30:00Z",
         mtime=_stale_mtime(),
+        db_free=True,
     )
     path = _write_pass(tmp_path / "root", decidable_pass_evidence)
 
@@ -250,6 +262,7 @@ def test_a_legacy_reservation_without_a_lease_block_is_an_orphan(
         legacy_id,
         reserved_at="2026-05-21T12:30:00Z",
         drop_lease=True,
+        db_free=True,
     )
 
     receipt, code = _listing(path.parent)
@@ -293,11 +306,13 @@ def test_ordering_reads_reserved_at_against_started_at_not_file_mtimes(
         "scheduler_2026052112_between0001",
         reserved_at="2026-05-21T13:00:00Z",
         mtime=_stale_mtime(),
+        db_free=True,
     )
     _write_reservation(
         root,
         "scheduler_2026052111_before000001",
         reserved_at="2026-05-21T11:00:00Z",
+        db_free=True,
     )
 
     receipt, code = _listing(newest.parent)
@@ -333,6 +348,7 @@ def test_an_orphan_reservation_never_overrides_a_listed_action(
         "scheduler_2026052112_crashed0002",
         reserved_at="2026-05-21T12:30:00Z",
         mtime=_stale_mtime(),
+        db_free=True,
     )
 
     receipt, code = _listing(path.parent)
@@ -360,9 +376,9 @@ def test_the_reservation_payload_carries_its_lease(tmp_path: Path) -> None:
     from tests.test_production_scheduler import _config, _dt
 
     pass_id = "scheduler_2026052112_lease0000001"
-    path = _write_reservation(tmp_path / "root", pass_id, reserved_at=_PASS_STARTED_AT)
+    path = _write_reservation(tmp_path / "root", pass_id, reserved_at=_PASS_STARTED_AT, db_free=True)
     persisted = json.loads(path.read_text(encoding="utf-8"))
-    config = _config(tmp_path / "root", now=_dt(_PASS_STARTED_AT))
+    config = _config(tmp_path / "root", db_free=True, now=_dt(_PASS_STARTED_AT))
 
     assert persisted["lease"] == {
         "ttl_seconds": config.lock_ttl_seconds,
@@ -512,8 +528,9 @@ def test_run_once_registers_the_touch_path_only_after_the_reservation_is_reserve
     """
 
     from services.orchestrator import scheduler as scheduler_module
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from tests.test_operator_reentry_confirmation import db_free_cold_start_env
     from tests.test_production_scheduler import (
-        FakeActiveRepository,
         FakeAdapter,
         FakeProductionOrchestrator,
         FakeRegistry,
@@ -535,12 +552,14 @@ def test_run_once_registers_the_touch_path_only_after_the_reservation_is_reserve
     monkeypatch.setattr(scheduler_module, "_LeaseHeartbeat", _ObservingHeartbeat)
 
     def _run(root: Path, *, dry_run: bool) -> Any:
-        root.mkdir(parents=True, exist_ok=True)
+        # A real pass: the full DB-free env, rooted at ``root`` (each pass its own),
+        # over an empty file journal (no active work; the DB-free pass writes it).
+        journal_root = db_free_cold_start_env(root, monkeypatch)
         return ProductionScheduler(
-            _config(root, now=_dt(_PASS_STARTED_AT), dry_run=dry_run),
+            _config(root / "workspace", db_free=True, now=_dt(_PASS_STARTED_AT), dry_run=dry_run),
             registry=FakeRegistry([_model("model_a", "basin_a")]),
             adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-            active_repository=FakeActiveRepository(active=False),
+            active_repository=FileOrchestrationJournalRepository(journal_root),
             canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
             orchestrator_factory=lambda _source_id: FakeProductionOrchestrator(),
         ).run_once()
