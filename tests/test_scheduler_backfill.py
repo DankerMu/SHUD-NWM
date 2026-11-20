@@ -211,6 +211,30 @@ def _gfs_adapter(cycle_times: Sequence[str]) -> FakeAdapter:
     return FakeAdapter("gfs", [(ct, True) for ct in cycle_times])
 
 
+def _empty_file_journal(tmp_path: Path) -> FileOrchestrationJournalRepository:
+    """The DB-free active repository, injected: an empty file journal."""
+    journal_root = tmp_path / "journal"
+    make_directory_with_explicit_mode(journal_root)
+    return FileOrchestrationJournalRepository(journal_root)
+
+
+class _NoCompletionProviderRepository:
+    """Active repository exposing neither ``has_completed_pipeline`` nor ``candidate_state``.
+
+    A DB-free scheduler always has an active repository (the file journal), so
+    "no completion provider" is injected as a repository that answers only the
+    active-work probes.
+    """
+
+    def has_active_orchestration(self, *, source_id: str, cycle_time: datetime) -> bool:
+        del source_id, cycle_time
+        return False
+
+    def has_active_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
+        del source_id, cycle_time, model_id
+        return False
+
+
 def _build_scheduler(
     tmp_path: Path,
     *,
@@ -222,9 +246,13 @@ def _build_scheduler(
     active_repository: Any | None = None,
     models: Sequence[Mapping[str, Any]] | None = None,
     allowed_cycle_hours_utc: Sequence[int] = (0, 6, 12, 18),
+    db_free: bool | None = None,
 ) -> ProductionScheduler:
+    # `db_free` is forwarded to `_config` unchanged: omitted, the env-driven
+    # default decides (importers rely on that); this file passes `db_free=True`.
     config = _config(
         tmp_path,
+        db_free=db_free,
         now=now,
         sources=("gfs",),
         lookback_hours=lookback_hours,
@@ -283,9 +311,11 @@ def test_discover_cycles_honors_instance_monkeypatch_discover_source_window(
     now = _dt("2026-05-21T12:00:00Z")
     scheduler = _build_scheduler(
         tmp_path,
+        db_free=True,
         now=now,
         cycle_times=["2026-05-21T06:00:00Z"],
         backfill_enabled=False,
+        active_repository=_empty_file_journal(tmp_path),
     )
     fake_cycle_time = _dt("2026-05-21T00:00:00Z")
     called = False
@@ -330,10 +360,11 @@ def test_discover_cycles_honors_instance_monkeypatch_cycle_completion_status(
     now = _dt("2026-05-21T12:00:00Z")
     scheduler = _build_scheduler(
         tmp_path,
+        db_free=True,
         now=now,
         cycle_times=["2026-05-21T06:00:00Z"],
         backfill_enabled=True,
-        active_repository=None,
+        active_repository=_empty_file_journal(tmp_path),
     )
     selected_models = scheduler._discover_models()[0]
     calls: list[str] = []
@@ -365,8 +396,8 @@ def test_nfs_raw_manifest_required_discovery_does_not_probe_source_adapter(
     tmp_path: Path,
     monkeypatch: Any,
 ) -> None:
-    object_store_root = tmp_path / "object-store"
-    roots = {"object_store_root": object_store_root}
+    roots, _paths = _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    object_store_root = roots["object_store_root"]
     ready_cycle = _dt("2026-06-27T00:00:00Z")
     missing_cycle = _dt("2026-06-27T12:00:00Z")
     _write_db_free_raw_manifest_fixture(roots, source_id="IFS", cycle_time=ready_cycle)
@@ -374,7 +405,8 @@ def test_nfs_raw_manifest_required_discovery_does_not_probe_source_adapter(
     monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT", str(object_store_root))
     monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX", "s3://nhms")
     config = _config(
-        tmp_path,
+        roots["workspace_root"],
+        db_free=True,
         now=_dt("2026-06-27T18:00:00Z"),
         sources=("IFS",),
         allowed_cycle_hours_utc=(0, 12),
@@ -407,6 +439,7 @@ def test_legacy_adapter_typeerror_fallback_selects_row_and_source_cycle_evidence
     adapter = _LegacyTypeErrorFallbackAdapter("gfs", "2026-05-21T06:00:00Z")
     config = _config(
         tmp_path,
+        db_free=True,
         now=now,
         sources=("gfs",),
         lookback_hours=6,
@@ -444,10 +477,12 @@ def test_discover_cycles_filters_wrong_source_and_out_of_window_before_selection
     now = _dt("2026-05-21T12:00:00Z")
     scheduler = _build_scheduler(
         tmp_path,
+        db_free=True,
         now=now,
         cycle_times=[],
         lookback_hours=6,
         backfill_enabled=False,
+        active_repository=_empty_file_journal(tmp_path),
     )
     valid_time = _dt("2026-05-21T06:00:00Z")
     out_of_window_time = _dt("2026-05-21T00:00:00Z")
@@ -512,6 +547,7 @@ def test_backfill_selects_older_gap_over_newest_completed(tmp_path: Path) -> Non
     repo = CompletionByCycleRepository({("gfs", _dt("2026-05-21T06:00:00Z"))})
     scheduler = _build_scheduler(
         tmp_path,
+        db_free=True,
         now=now,
         cycle_times=cycle_times,
         backfill_enabled=True,
@@ -532,6 +568,7 @@ def test_allowed_cycle_hours_filter_before_completion_and_gap_accounting(
     now = _dt("2026-05-22T00:00:00Z")
     scheduler = _build_scheduler(
         tmp_path,
+        db_free=True,
         now=now,
         cycle_times=[
             "2026-05-21T00:00:00Z",
@@ -593,9 +630,11 @@ def test_allowed_cycle_hours_filter_before_dedupe_latest_source_collapse(
     now = _dt("2026-05-22T00:00:00Z")
     scheduler = _build_scheduler(
         tmp_path,
+        db_free=True,
         now=now,
         cycle_times=[],
         backfill_enabled=False,
+        active_repository=_empty_file_journal(tmp_path),
         max_cycles_per_source=8,
         allowed_cycle_hours_utc=(0, 12),
     )
@@ -664,6 +703,7 @@ def test_allowed_cycle_hours_filter_before_legacy_single_slot_latest_collapse(
     now = _dt("2026-05-22T00:00:00Z")
     scheduler = _build_scheduler(
         tmp_path,
+        db_free=True,
         now=now,
         cycle_times=[
             "2026-05-21T00:00:00Z",
@@ -672,6 +712,7 @@ def test_allowed_cycle_hours_filter_before_legacy_single_slot_latest_collapse(
             "2026-05-21T18:00:00Z",
         ],
         backfill_enabled=False,
+        active_repository=_empty_file_journal(tmp_path),
         max_cycles_per_source=1,
         allowed_cycle_hours_utc=(0, 12),
     )
@@ -699,9 +740,11 @@ def test_disallowed_cycle_hour_evidence_uses_gate_cycle_time_hour(
     now = _dt("2026-05-22T00:00:00Z")
     scheduler = _build_scheduler(
         tmp_path,
+        db_free=True,
         now=now,
         cycle_times=[],
         backfill_enabled=False,
+        active_repository=_empty_file_journal(tmp_path),
         max_cycles_per_source=1,
         allowed_cycle_hours_utc=(0, 12),
     )
@@ -745,6 +788,7 @@ def test_allowed_cycle_hours_explicit_four_cycle_compatibility(tmp_path: Path) -
     now = _dt("2026-05-21T18:00:00Z")
     scheduler = _build_scheduler(
         tmp_path,
+        db_free=True,
         now=now,
         cycle_times=[
             "2026-05-21T00:00:00Z",
@@ -753,6 +797,7 @@ def test_allowed_cycle_hours_explicit_four_cycle_compatibility(tmp_path: Path) -
             "2026-05-21T18:00:00Z",
         ],
         backfill_enabled=False,
+        active_repository=_empty_file_journal(tmp_path),
         max_cycles_per_source=4,
         allowed_cycle_hours_utc=(0, 6, 12, 18),
     )
@@ -783,6 +828,7 @@ def test_backfill_budget_cap_defers_excess_gaps(tmp_path: Path) -> None:
     repo = CompletionByCycleRepository(set())
     scheduler = _build_scheduler(
         tmp_path,
+        db_free=True,
         now=now,
         cycle_times=cycle_times,
         backfill_enabled=True,
@@ -816,6 +862,7 @@ def test_legacy_mode_keeps_newest_even_when_completed(tmp_path: Path) -> None:
     repo = CompletionByCycleRepository({("gfs", _dt("2026-05-21T06:00:00Z"))})
     scheduler = _build_scheduler(
         tmp_path,
+        db_free=True,
         now=now,
         cycle_times=cycle_times,
         backfill_enabled=False,
@@ -845,6 +892,7 @@ def test_backfill_enabled_with_empty_models_falls_back_to_legacy(tmp_path: Path)
     repo = CompletionByCycleRepository({("gfs", _dt("2026-05-21T06:00:00Z"))})
     scheduler = _build_scheduler(
         tmp_path,
+        db_free=True,
         now=now,
         cycle_times=cycle_times,
         backfill_enabled=True,
@@ -865,7 +913,9 @@ def test_backfill_enabled_with_empty_models_falls_back_to_legacy(tmp_path: Path)
 # ---------------------------------------------------------------------------
 # Requirement: audit evidence counts + run_once pass-level evidence.
 # ---------------------------------------------------------------------------
-def test_backfill_audit_counts_and_pass_evidence(tmp_path: Path) -> None:
+def test_backfill_audit_counts_and_pass_evidence(tmp_path: Path, monkeypatch: Any) -> None:
+    # A real pass: the full DB-free env (selectors, roots, journal root).
+    roots, _paths = _set_db_free_scheduler_env(monkeypatch, tmp_path)
     now = _dt("2026-05-21T18:00:00Z")
     cycle_times = [
         "2026-05-21T12:00:00Z",  # completed
@@ -874,7 +924,8 @@ def test_backfill_audit_counts_and_pass_evidence(tmp_path: Path) -> None:
     ]
     repo = CompletionByCycleRepository({("gfs", _dt("2026-05-21T12:00:00Z"))})
     scheduler = _build_scheduler(
-        tmp_path,
+        roots["workspace_root"],
+        db_free=True,
         now=now,
         cycle_times=cycle_times,
         backfill_enabled=True,
@@ -901,10 +952,13 @@ def test_backfill_audit_counts_and_pass_evidence(tmp_path: Path) -> None:
     assert backfill["audit"][0]["gap_count"] == 2
 
 
-def test_run_once_backfill_disabled_evidence(tmp_path: Path) -> None:
+def test_run_once_backfill_disabled_evidence(tmp_path: Path, monkeypatch: Any) -> None:
+    # A real pass: the full DB-free env (selectors, roots, journal root).
+    roots, _paths = _set_db_free_scheduler_env(monkeypatch, tmp_path)
     now = _dt("2026-05-21T12:00:00Z")
     scheduler = _build_scheduler(
-        tmp_path,
+        roots["workspace_root"],
+        db_free=True,
         now=now,
         cycle_times=["2026-05-21T06:00:00Z"],
         backfill_enabled=False,
@@ -929,11 +983,12 @@ def test_backfill_without_completion_provider_treats_all_as_gap(tmp_path: Path) 
     ]
     scheduler = _build_scheduler(
         tmp_path,
+        db_free=True,
         now=now,
         cycle_times=cycle_times,
         backfill_enabled=True,
         max_cycles_per_source=2,
-        active_repository=None,  # no has_completed_pipeline
+        active_repository=_NoCompletionProviderRepository(),
     )
     models = scheduler._discover_models()[0]
 
@@ -951,8 +1006,10 @@ def test_backfill_without_completion_provider_treats_all_as_gap(tmp_path: Path) 
 @pytest.mark.parametrize("completion_provider", ["false", "absent"])
 def test_candidate_state_completion_fallback_skips_complete_older_gap(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     completion_provider: str,
 ) -> None:
+    _set_db_free_cold_start_env(monkeypatch, tmp_path)
     now = _dt("2026-05-21T18:00:00Z")
     cycle_times = [
         "2026-05-21T12:00:00Z",
@@ -988,6 +1045,7 @@ def test_candidate_state_completion_fallback_skips_complete_older_gap(
         repo = CandidateStateOnlyRepository(repo._states)
     scheduler = _build_scheduler(
         tmp_path,
+        db_free=True,
         now=now,
         cycle_times=cycle_times,
         backfill_enabled=True,
@@ -995,6 +1053,7 @@ def test_candidate_state_completion_fallback_skips_complete_older_gap(
         active_repository=repo,
         models=models,
     )
+    _assert_repository_branches_decide_completion(scheduler, "2026-05-21T00:00:00Z")
     selected_models = scheduler._discover_models()[0]
     adapter = scheduler.adapters["gfs"]
     oldest = _discovery_for_time(adapter, "2026-05-21T00:00:00Z")
@@ -1017,7 +1076,9 @@ def test_candidate_state_completion_fallback_skips_complete_older_gap(
 
 def test_candidate_state_completion_fallback_mixed_state_keeps_oldest_gap_first(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _set_db_free_cold_start_env(monkeypatch, tmp_path)
     now = _dt("2026-05-21T18:00:00Z")
     cycle_times = [
         "2026-05-21T12:00:00Z",
@@ -1055,6 +1116,7 @@ def test_candidate_state_completion_fallback_mixed_state_keeps_oldest_gap_first(
     )
     scheduler = _build_scheduler(
         tmp_path,
+        db_free=True,
         now=now,
         cycle_times=cycle_times,
         backfill_enabled=True,
@@ -1062,6 +1124,8 @@ def test_candidate_state_completion_fallback_mixed_state_keeps_oldest_gap_first(
         active_repository=repo,
         models=models,
     )
+    _assert_repository_branches_decide_completion(scheduler, "2026-05-21T00:00:00Z")
+    _assert_repository_branches_decide_completion(scheduler, "2026-05-21T06:00:00Z")
     selected_models = scheduler._discover_models()[0]
     adapter = scheduler.adapters["gfs"]
     oldest = _discovery_for_time(adapter, "2026-05-21T00:00:00Z")
@@ -1100,6 +1164,7 @@ def test_cycle_completion_status_without_models_is_gap(tmp_path: Path) -> None:
     now = _dt("2026-05-21T12:00:00Z")
     scheduler = _build_scheduler(
         tmp_path,
+        db_free=True,
         now=now,
         cycle_times=["2026-05-21T06:00:00Z"],
         backfill_enabled=True,
@@ -1125,6 +1190,7 @@ def test_backfill_seven_day_window_spans_multiple_days(tmp_path: Path) -> None:
     repo = CompletionByCycleRepository(set())
     scheduler = _build_scheduler(
         tmp_path,
+        db_free=True,
         now=now,
         cycle_times=cycle_times,
         backfill_enabled=True,
@@ -1155,7 +1221,9 @@ def test_backfill_seven_day_window_spans_multiple_days(tmp_path: Path) -> None:
 # Requirement: CLI lookback env fallback.
 # ---------------------------------------------------------------------------
 def test_plan_production_lookback_env_fallback(tmp_path: Path, monkeypatch: Any) -> None:
-    workspace = tmp_path / "workspace"
+    # `_plan_production` takes no mode kwarg: the full DB-free env selects it.
+    roots, _paths = _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    workspace = roots["workspace_root"]
     workspace.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
     monkeypatch.setenv("NHMS_SCHEDULER_LOOKBACK_HOURS", "168")
@@ -1196,7 +1264,9 @@ def test_plan_production_lookback_env_fallback(tmp_path: Path, monkeypatch: Any)
 
 
 def test_plan_production_lookback_cli_arg_overrides_env(tmp_path: Path, monkeypatch: Any) -> None:
-    workspace = tmp_path / "workspace"
+    # `_plan_production` takes no mode kwarg: the full DB-free env selects it.
+    roots, _paths = _set_db_free_scheduler_env(monkeypatch, tmp_path)
+    workspace = roots["workspace_root"]
     workspace.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
     monkeypatch.setenv("NHMS_SCHEDULER_LOOKBACK_HOURS", "168")
@@ -1358,14 +1428,58 @@ def _breaker_engaged_masters(
 
 
 def _journal_backed_scheduler(tmp_path: Path, journal_root: Path) -> ProductionScheduler:
-    return _build_scheduler(
+    """DB-free scheduler over ``journal_root``; call ``_set_db_free_cold_start_env`` first."""
+    scheduler = _build_scheduler(
         tmp_path,
+        db_free=True,
         now=_dt(_IDENTITY_NOW),
         cycle_times=list(_IDENTITY_CYCLE_TIMES),
         backfill_enabled=True,
         max_cycles_per_source=len(_IDENTITY_CYCLE_TIMES),
         active_repository=FileOrchestrationJournalRepository(journal_root),
     )
+    _assert_repository_branches_decide_completion(scheduler, _IDENTITY_TARGET_CYCLE)
+    return scheduler
+
+
+def _set_db_free_cold_start_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The full DB-free env with a published state index that holds no history.
+
+    That is the production cold-start shape: the strict warm-start probe
+    (legacy leg: exact checkpoint missing, no usable history) and the successor
+    probe (no history) both answer ``None``, so ``cycle_completion_status``
+    falls through to the repository's own completion branches
+    (``has_completed_pipeline`` / ``candidate_state``) -- the subject of the
+    tests that use it.  ``_assert_repository_branches_decide_completion`` pins
+    that per scheduler.
+    """
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
+    _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=_dt(_IDENTITY_TARGET_CYCLE),
+        package_checksum=_DB_FREE_PACKAGE_CHECKSUM,
+        generated_at=_dt(_IDENTITY_NOW),
+        entries=[],
+    )
+
+
+def _assert_repository_branches_decide_completion(
+    scheduler: ProductionScheduler, cycle_time: str
+) -> None:
+    """Fixture guard, the mirror of ``_assert_strict_branch_decides_completion``:
+    neither the strict nor the successor probe answers for ``cycle_time``, so
+    the repository branches -- not a missing state index -- decide its verdict."""
+    assert scheduler.config.db_free_required is True
+    adapter = scheduler.adapters["gfs"]
+    discovery = _discovery_for_time(adapter, cycle_time)
+    horizon = dict(scheduler_module._source_horizon_metadata(discovery, adapter))
+    cycle = scheduler_module.SchedulerSourceCycle(discovery=discovery, horizon=horizon)
+    for model in scheduler._discover_models()[0]:
+        candidate = scheduler_module._candidate_for(discovery=discovery, model=model, horizon=horizon)
+        assert scheduler._strict_warm_start_for_candidate(candidate, cycle) is None
+        assert scheduler._successor_warm_start_state_for_candidate(candidate, cycle) is None
 
 
 def _completion_status(scheduler: ProductionScheduler, cycle_time: str) -> str:
@@ -1464,6 +1578,7 @@ def _db_free_strict_branch_scheduler(
     )
     scheduler = _build_scheduler(
         tmp_path,
+        db_free=True,
         now=_dt(_IDENTITY_NOW),
         cycle_times=list(_IDENTITY_CYCLE_TIMES),
         backfill_enabled=True,
@@ -1502,8 +1617,12 @@ def _assert_strict_branch_decides_completion(scheduler: ProductionScheduler) -> 
     assert successor["ready"] is True
 
 
-def test_stale_lineage_journal_entry_does_not_suppress_backfill(tmp_path: Path) -> None:
+def test_stale_lineage_journal_entry_does_not_suppress_backfill(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """§8.7: same base key + wrong lineage suffix -> not complete, backfill stands."""
+    _set_db_free_cold_start_env(monkeypatch, tmp_path)
     journal_root = tmp_path / "journal"
     stale_id = _init_state_id_for(_IDENTITY_TARGET_CYCLE, lead_hours=12)
     expected_id = _init_state_id_for(
@@ -1530,8 +1649,12 @@ def test_stale_lineage_journal_entry_does_not_suppress_backfill(tmp_path: Path) 
     assert entry_path.read_bytes() == before
 
 
-def test_matching_lineage_journal_entry_still_skips_completed_cycle(tmp_path: Path) -> None:
+def test_matching_lineage_journal_entry_still_skips_completed_cycle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The expected token keeps the pre-#1107 completed skip exactly as before."""
+    _set_db_free_cold_start_env(monkeypatch, tmp_path)
     journal_root = tmp_path / "journal"
     entry_path = _seed_completed_journal_cycle(
         journal_root,
@@ -1614,10 +1737,12 @@ def test_db_free_strict_branch_matching_lineage_still_reports_complete(
 )
 def test_no_judgement_shapes_preserve_completed_skip(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     leg: str,
     recorded_init_state_id: str | None,
 ) -> None:
     """Every non-mismatch shape keeps legacy skip behavior (P1-3 false-positive pin)."""
+    _set_db_free_cold_start_env(monkeypatch, tmp_path)
     journal_root = tmp_path / "journal"
     if leg == "earlier_valid_time_fallback":
         recorded_init_state_id = _init_state_id_for("2026-05-20T18:00:00Z", lead_hours=6)
@@ -1637,8 +1762,10 @@ def test_no_judgement_shapes_preserve_completed_skip(
 
 def test_quarantined_cycle_exits_quarantine_after_rerun_records_expected_identity(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """3.5(a): one re-run that records the expected token leaves the quarantine."""
+    _set_db_free_cold_start_env(monkeypatch, tmp_path)
     journal_root = tmp_path / "journal"
     _seed_completed_journal_cycle(
         journal_root,
@@ -1668,6 +1795,7 @@ def test_quarantined_cycle_exits_quarantine_after_rerun_records_expected_identit
 
 def test_rerun_reselecting_same_wrong_suffix_state_stays_quarantined(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """3.5(b) a re-run that re-selects the same wrong-suffix state stays
     quarantined and keeps occupying the source's single oldest-first backfill
@@ -1685,6 +1813,7 @@ def test_rerun_reselecting_same_wrong_suffix_state_stays_quarantined(
     bounded to one slot per source (see the proposal's Design decisions), so
     the shape is accepted rather than silently discovered in production.
     """
+    _set_db_free_cold_start_env(monkeypatch, tmp_path)
     journal_root = tmp_path / "journal"
     wrong_suffix_id = _init_state_id_for(_IDENTITY_TARGET_CYCLE, lead_hours=12)
     _seed_completed_journal_cycle(
@@ -1730,8 +1859,12 @@ def _discover_cycles_with_evidence(
     )
 
 
-def test_breaker_engaged_gap_releases_the_backfill_execution_slot(tmp_path: Path) -> None:
+def test_breaker_engaged_gap_releases_the_backfill_execution_slot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """E4: the next gap executes; the released cycle is evidence-only and still a gap."""
+    _set_db_free_cold_start_env(monkeypatch, tmp_path)
     journal_root = tmp_path / "journal"
     stale_id = _init_state_id_for(_IDENTITY_TARGET_CYCLE, lead_hours=12)
     expected_id = _init_state_id_for(
@@ -1781,6 +1914,7 @@ def test_breaker_engaged_gap_releases_the_backfill_execution_slot(tmp_path: Path
 @pytest.mark.parametrize("leg", ["defect_run_only", "unstamped_replacement"])
 def test_unstamped_recordings_keep_the_backfill_execution_slot(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     leg: str,
 ) -> None:
     """E4 (R1) control: without a stamped rerun the cycle keeps its slot.
@@ -1790,6 +1924,7 @@ def test_unstamped_recordings_keep_the_backfill_execution_slot(
     unrelated whitelisted resubmit.  Releasing the slot here would strand a
     cycle whose quarantine rerun has not even been attempted.
     """
+    _set_db_free_cold_start_env(monkeypatch, tmp_path)
     journal_root = tmp_path / "journal"
     stale_id = _init_state_id_for(_IDENTITY_TARGET_CYCLE, lead_hours=12)
     jobs = [_completed_submission_master(_IDENTITY_TARGET_CYCLE, stale_id)]
@@ -1816,7 +1951,10 @@ def test_unstamped_recordings_keep_the_backfill_execution_slot(
     )
 
 
-def test_mixed_gap_cycle_keeps_the_slot_for_its_incomplete_model(tmp_path: Path) -> None:
+def test_mixed_gap_cycle_keeps_the_slot_for_its_incomplete_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """E4 mixed leg: one breaker-engaged model must not starve a real one.
 
     ``model_b`` has no journal entry at all for cycle T, so the cycle is a gap
@@ -1824,6 +1962,7 @@ def test_mixed_gap_cycle_keeps_the_slot_for_its_incomplete_model(tmp_path: Path)
     ``model_b``'s real work permanently unexecuted, which is the opposite of
     the fail-toward-liveness the breaker is for.
     """
+    _set_db_free_cold_start_env(monkeypatch, tmp_path)
     journal_root = tmp_path / "journal"
     stale_id = _init_state_id_for(_IDENTITY_TARGET_CYCLE, lead_hours=12)
     _seed_completed_journal_cycle(
@@ -1834,6 +1973,7 @@ def test_mixed_gap_cycle_keeps_the_slot_for_its_incomplete_model(tmp_path: Path)
     )
     scheduler = _build_scheduler(
         tmp_path,
+        db_free=True,
         now=_dt(_IDENTITY_NOW),
         cycle_times=list(_IDENTITY_CYCLE_TIMES),
         backfill_enabled=True,
@@ -1841,6 +1981,8 @@ def test_mixed_gap_cycle_keeps_the_slot_for_its_incomplete_model(tmp_path: Path)
         active_repository=FileOrchestrationJournalRepository(journal_root),
         models=[_model("model_a", "basin_a"), _model("model_b", "basin_b")],
     )
+
+    _assert_repository_branches_decide_completion(scheduler, _IDENTITY_TARGET_CYCLE)
 
     selected, evidence = _discover_cycles_with_evidence(scheduler)
 
@@ -1851,7 +1993,7 @@ def test_mixed_gap_cycle_keeps_the_slot_for_its_incomplete_model(tmp_path: Path)
     )
 
 
-def test_partially_engaged_gap_cycle_keeps_the_slot(tmp_path: Path) -> None:
+def test_partially_engaged_gap_cycle_keeps_the_slot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """E4 (R1 / C1) partial engagement: a second model still owed a rerun keeps the slot.
 
     Both models are journal-completed with their OWN wrong-suffix token, so the
@@ -1864,6 +2006,7 @@ def test_partially_engaged_gap_cycle_keeps_the_slot(tmp_path: Path) -> None:
     slot" return into a skip releases this cycle, which the assertions below
     catch.
     """
+    _set_db_free_cold_start_env(monkeypatch, tmp_path)
     journal_root = tmp_path / "journal"
     stale_a = _init_state_id_for(_IDENTITY_TARGET_CYCLE, lead_hours=12)
     stale_b = _init_state_id_for(_IDENTITY_TARGET_CYCLE, lead_hours=12, model_id="model_b")
@@ -1915,6 +2058,7 @@ def test_partially_engaged_gap_cycle_keeps_the_slot(tmp_path: Path) -> None:
         )
     scheduler = _build_scheduler(
         tmp_path,
+        db_free=True,
         now=_dt(_IDENTITY_NOW),
         cycle_times=list(_IDENTITY_CYCLE_TIMES),
         backfill_enabled=True,
@@ -1923,6 +2067,7 @@ def test_partially_engaged_gap_cycle_keeps_the_slot(tmp_path: Path) -> None:
         models=[_model("model_a", "basin_a"), _model("model_b", "basin_b")],
     )
 
+    _assert_repository_branches_decide_completion(scheduler, _IDENTITY_TARGET_CYCLE)
     # Fixture guard: model_a IS engaged, model_b is not — otherwise this leg
     # would pass for the trivial reason that nothing was engaged at all.
     repository = FileOrchestrationJournalRepository(journal_root)
@@ -1973,6 +2118,11 @@ def _clear_backfill_env(monkeypatch: Any) -> None:
     monkeypatch.delenv("NHMS_SCHEDULER_BACKFILL_ENABLED", raising=False)
     monkeypatch.delenv("NHMS_SCHEDULER_LOOKBACK_HOURS", raising=False)
     monkeypatch.delenv("NHMS_SCHEDULER_MAX_CYCLES_PER_SOURCE", raising=False)
+    # DB-free completion scoring reads these (strict / successor warm-start
+    # probes, cutover declaration); a stray value would pick another branch.
+    monkeypatch.delenv("NHMS_REQUIRE_FORECAST_WARM_START", raising=False)
+    monkeypatch.delenv("NHMS_FORECAST_WARM_START_REQUIRED_FROM", raising=False)
+    monkeypatch.delenv("NHMS_REGISTRY_CUTOVER_DECLARATION_PATH", raising=False)
     yield
     os.environ.pop("NHMS_SCHEDULER_BACKFILL_ENABLED", None)
 
@@ -2089,6 +2239,7 @@ def _lineage_scheduler(
 
     scheduler = _build_scheduler(
         tmp_path,
+        db_free=True,
         now=_dt(_IDENTITY_NOW),
         cycle_times=list(cycle_times),
         backfill_enabled=True,
@@ -2106,40 +2257,61 @@ def _lineage_scheduler(
     return scheduler
 
 
-class _StubEarliestCloneRowRepository:
-    """A DB-plane provider shaped like ``PsycopgStateSnapshotRepository``'s reader."""
+def test_lineage_provider_is_constructed_once_and_memoized(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B2 case B: the lineage provider is built once and reused for later keys.
 
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, str]] = []
+    DB-free, ``_lineage_provider``'s construction arm builds the file
+    state-index repository (``_db_free_state_index_provider``), so construction
+    is counted on that class and the per-key reads on its
+    ``clone_lineage_signal``.  The cache is deliberately left unset so the
+    construction arm, not a pre-seeded provider, is the thing under test.
 
-    def get_earliest_clone_row_for_model_source(
-        self, *, model_id: str, source_id: str
-    ) -> Any:
-        self.calls.append((model_id, source_id))
-        return StateSnapshot(
-            state_id=f"state_db_clone_{model_id}",
-            model_id=model_id,
-            run_id="clone_run",
-            valid_time=_dt(_LINEAGE_CUTOVER),
-            state_uri=f"s3://nhms/states/{source_id}/{model_id}/state.cfg.ic",
-            checksum="sha256:" + "e" * 64,
-            usable_flag=True,
-            source_id=source_id,
-            cloned_from_model_id=f"{model_id}_legacy",
-            clone_gate_fingerprint="sha256:" + "d" * 64,
-            clone_gate_kind="state_compatibility",
-        )
-
-
-def _db_plane_lineage_scheduler(tmp_path: Path) -> ProductionScheduler:
-    """A scheduler on the DB plane with the lineage provider NOT pre-seeded.
-
-    Every other lineage test seeds ``_lineage_provider_cache`` and therefore
-    short-circuits before ``_lineage_provider``'s construction arm ever runs.
-    This one deliberately leaves it unset so that arm is the thing under test.
+    The two resolutions use DISTINCT ``(model_id, source_id)`` keys on purpose:
+    with the same key ``_lineage_cutover_cache`` short-circuits first and the
+    test would pass even with the provider memoization deleted.
     """
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
+    clone_entries: list[dict[str, Any]] = []
+    for model_id in ("model_a", "model_b"):
+        entry = _db_free_state_index_entry(
+            roots,
+            valid_time=_dt(_LINEAGE_CUTOVER),
+            producer_cycle_time=_dt(_LINEAGE_PRE_CUTOVER_CYCLE),
+            model_id=model_id,
+        )
+        entry["cloned_from_model_id"] = f"{model_id}_legacy"
+        entry["cloned_from_state_id"] = f"state_of_{model_id}_legacy"
+        entry["clone_gate_fingerprint"] = "sha256:" + "d" * 64
+        entry["clone_gate_kind"] = "state_compatibility"
+        clone_entries.append(entry)
+    _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=_dt(_LINEAGE_CUTOVER),
+        package_checksum=_DB_FREE_PACKAGE_CHECKSUM,
+        generated_at=_dt(_IDENTITY_NOW),
+        entries=clone_entries,
+    )
+    constructed: list[Any] = []
+    signal_calls: list[tuple[str, str]] = []
+    real_repository = scheduler_module.FileStateSnapshotIndexRepository
+
+    class _CountingStateIndexRepository(real_repository):  # type: ignore[misc, valid-type]
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            constructed.append(self)
+
+        def clone_lineage_signal(self, *, model_id: str, source_id: str) -> dict[str, Any]:
+            signal_calls.append((model_id, source_id))
+            return super().clone_lineage_signal(model_id=model_id, source_id=source_id)
+
+    monkeypatch.setattr(scheduler_module, "FileStateSnapshotIndexRepository", _CountingStateIndexRepository)
     scheduler = _build_scheduler(
         tmp_path,
+        db_free=True,
         now=_dt(_IDENTITY_NOW),
         cycle_times=list(_IDENTITY_CYCLE_TIMES),
         backfill_enabled=True,
@@ -2147,81 +2319,38 @@ def _db_plane_lineage_scheduler(tmp_path: Path) -> ProductionScheduler:
         active_repository=PerModelCompletionRepository(set()),
         models=[_model("model_a", "basin_a")],
     )
-    # Preconditions, not decoration: on the db-free plane the `else` arm is
-    # never reached, and a pre-seeded cache short-circuits above it.
-    assert scheduler.config.db_free_required is False
-    assert scheduler._lineage_provider_cache is None
-    return scheduler
+    # The construction arm's call, counted on the instance: the DB-free
+    # counterpart of ``PsycopgStateSnapshotRepository.from_env``.  (The file
+    # repository class is counted too, but ``_db_free_state_index_provider``
+    # memoizes on its own, so only this count sees the lineage memo.)
+    provider_builds: list[Any] = []
+    real_build = scheduler._db_free_state_index_provider
 
-
-def test_db_plane_provider_construction_failure_is_remembered(
-    tmp_path: Path, monkeypatch: Any
-) -> None:
-    """B2 case A: ``from_env`` raising ⇒ no lineage, and no retry per (model, cycle).
-
-    The two resolutions use DISTINCT ``(model_id, source_id)`` keys on purpose:
-    with the same key ``_lineage_cutover_cache`` short-circuits first and the
-    test would pass even with the provider memoization deleted.
-    """
-    monkeypatch.delenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", raising=False)
-    calls = 0
-
-    def _exploding_from_env() -> Any:
-        nonlocal calls
-        calls += 1
-        raise RuntimeError("DATABASE_URL is not set")
-
-    monkeypatch.setattr(
-        state_manager_module.PsycopgStateSnapshotRepository,
-        "from_env",
-        staticmethod(_exploding_from_env),
-        raising=True,
-    )
-    scheduler = _db_plane_lineage_scheduler(tmp_path)
-
-    assert scheduler._lineage_cutover_for_model_source("model_a", "gfs") is None
-    assert scheduler._lineage_provider_cache is False
-    assert calls == 1
-
-    # A DIFFERENT key: the cutover cache cannot answer, so the provider path is
-    # entered again — and must not re-attempt construction.
-    assert scheduler._lineage_cutover_for_model_source("model_b", "gfs") is None
-    assert calls == 1
-
-
-def test_db_plane_provider_is_constructed_once_and_memoized(
-    tmp_path: Path, monkeypatch: Any
-) -> None:
-    """B2 case B: a usable ``from_env`` is built once and reused for later keys."""
-    monkeypatch.delenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", raising=False)
-    provider = _StubEarliestCloneRowRepository()
-    calls = 0
-
-    def _stub_from_env() -> Any:
-        nonlocal calls
-        calls += 1
+    def _counting_build() -> Any:
+        provider = real_build()
+        provider_builds.append(provider)
         return provider
 
-    monkeypatch.setattr(
-        state_manager_module.PsycopgStateSnapshotRepository,
-        "from_env",
-        staticmethod(_stub_from_env),
-        raising=True,
-    )
-    scheduler = _db_plane_lineage_scheduler(tmp_path)
+    monkeypatch.setattr(scheduler, "_db_free_state_index_provider", _counting_build)
+    # Preconditions, not decoration: a pre-seeded cache short-circuits above
+    # the construction arm.
+    assert scheduler._lineage_provider_cache is None
+    assert constructed == []
 
     first = scheduler._lineage_cutover_for_model_source("model_a", "gfs")
-    assert calls == 1
-    assert scheduler._lineage_provider_cache is provider
+    assert len(provider_builds) == 1
+    assert constructed == provider_builds
+    assert scheduler._lineage_provider_cache is provider_builds[0]
     assert first is not None
     assert first.predecessor_model_id == "model_a_legacy"
     assert first.cutover_time == _dt(_LINEAGE_CUTOVER)
 
     second = scheduler._lineage_cutover_for_model_source("model_b", "gfs")
-    assert calls == 1
+    assert len(provider_builds) == 1
+    assert len(constructed) == 1
     assert second is not None
     assert second.predecessor_model_id == "model_b_legacy"
-    assert provider.calls == [("model_a", "gfs"), ("model_b", "gfs")]
+    assert signal_calls == [("model_a", "gfs"), ("model_b", "gfs")]
 
 
 _LINEAGE_WARN_LOGGER = "services.orchestrator.scheduler_lineage"
@@ -2273,6 +2402,7 @@ def _file_index_lineage_scheduler(tmp_path: Path, provider: Any) -> ProductionSc
     """A scheduler whose lineage provider is a REAL file state-index repository."""
     scheduler = _build_scheduler(
         tmp_path,
+        db_free=True,
         now=_dt(_IDENTITY_NOW),
         cycle_times=list(_IDENTITY_CYCLE_TIMES),
         backfill_enabled=True,
@@ -2284,8 +2414,8 @@ def _file_index_lineage_scheduler(tmp_path: Path, provider: Any) -> ProductionSc
     return scheduler
 
 
-def test_db_plane_lineage_read_failure_is_not_memoized_and_resolves_on_retry(
-    tmp_path: Path, monkeypatch: Any, caplog: pytest.LogCaptureFixture
+def test_earliest_clone_row_read_failure_is_not_memoized_and_resolves_on_retry(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """#1740: a raising read is a FAILURE — not cached, signalled, re-attempted.
 
@@ -2298,9 +2428,21 @@ def test_db_plane_lineage_read_failure_is_not_memoized_and_resolves_on_retry(
     All three obligations are pinned together because each alone is
     satisfiable without the fix: returning ``None`` (unchanged caller
     semantics), NOT caching, and emitting the signal.
+
+    The scheduler is DB-free with the earliest-clone-row reader injected as
+    its lineage provider: the non-memoization lives in
+    ``_lineage_cutover_for_model_source``, which does not depend on the mode.
     """
-    monkeypatch.delenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", raising=False)
-    scheduler = _db_plane_lineage_scheduler(tmp_path)
+    scheduler = _build_scheduler(
+        tmp_path,
+        db_free=True,
+        now=_dt(_IDENTITY_NOW),
+        cycle_times=list(_IDENTITY_CYCLE_TIMES),
+        backfill_enabled=True,
+        max_cycles_per_source=len(_IDENTITY_CYCLE_TIMES),
+        active_repository=PerModelCompletionRepository(set()),
+        models=[_model("model_a", "basin_a")],
+    )
     provider = _FlakyEarliestCloneRowRepository()
     scheduler._lineage_provider_cache = provider
     caplog.set_level(logging.WARNING, logger=_LINEAGE_WARN_LOGGER)
@@ -3048,6 +3190,7 @@ def test_full_cohort_identity_is_read_only_for_models_in_lineage_scope(
 
     scheduler = _build_scheduler(
         tmp_path,
+        db_free=True,
         now=_dt("2026-07-20T12:00:00Z"),
         cycle_times=["2026-07-20T00:00:00Z"],
         backfill_enabled=True,
@@ -3153,6 +3296,7 @@ def test_full_cohort_identity_conflict_of_an_in_scope_model_stays_gap(
     repository = FileOrchestrationJournalRepository(journal_root)
     scheduler = _build_scheduler(
         tmp_path,
+        db_free=True,
         now=_dt("2026-07-20T12:00:00Z"),
         cycle_times=["2026-07-20T00:00:00Z"],
         backfill_enabled=True,
@@ -3216,6 +3360,7 @@ def test_db_free_lineage_resolver_reads_the_published_state_index(
     )
     scheduler = _build_scheduler(
         tmp_path,
+        db_free=True,
         now=_dt(_IDENTITY_NOW),
         cycle_times=list(_IDENTITY_CYCLE_TIMES),
         backfill_enabled=True,
