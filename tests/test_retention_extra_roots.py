@@ -671,7 +671,9 @@ def test_pass_forwards_both_configured_extra_roots(tmp_path: Path, monkeypatch) 
     monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
     monkeypatch.setenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", str(copyback))
 
-    scheduler = _pass_scheduler(workspace_root=str(workspace), object_store_root=str(store))
+    scheduler = _pass_scheduler(
+        db_free_journal_root=tmp_path / "journal", workspace_root=str(workspace), object_store_root=str(store)
+    )
     payload = scheduler._run_retention(NOW)
 
     assert payload["status"] == "completed"
@@ -707,7 +709,9 @@ def test_pass_names_the_workspace_root_as_the_slurm_log_root(tmp_path: Path, mon
     monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
     monkeypatch.setenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", str(copyback))
 
-    scheduler = _pass_scheduler(workspace_root=str(workspace), object_store_root=str(store))
+    scheduler = _pass_scheduler(
+        db_free_journal_root=tmp_path / "journal", workspace_root=str(workspace), object_store_root=str(store)
+    )
     payload = scheduler._run_retention(NOW)
 
     assert payload["status"] == "completed"
@@ -735,7 +739,7 @@ def test_pass_does_not_sweep_a_defaulted_workspace_root(tmp_path: Path, monkeypa
     defaulted = cwd / ".nhms-workspace"
     defaulted_key = _seed_run_workspace(defaulted, NOW - timedelta(days=90))
 
-    scheduler = _pass_scheduler(object_store_root=str(store))
+    scheduler = _pass_scheduler(db_free_journal_root=tmp_path / "journal", object_store_root=str(store))
     payload = scheduler._run_retention(NOW)
 
     assert payload["status"] == "completed"

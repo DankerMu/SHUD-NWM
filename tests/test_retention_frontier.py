@@ -320,9 +320,15 @@ def test_unexpected_error_is_wrapped_not_raised(
 def test_evidence_dir_derivation_failure_is_unresolved(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``evidence_dir_unresolved`` is produced by the CLI wrapper layer (D1/N3)."""
-    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path / "workspace"))
-    monkeypatch.setenv("NHMS_SCHEDULER_EVIDENCE_ROOT", str(tmp_path / "outside" / "evidence"))
+    """``evidence_dir_unresolved`` is produced by the CLI wrapper layer (D1/N3).
+
+    A blank workspace root fails ``ProductionSchedulerConfig.__post_init__``'s
+    blank-path check, so the evidence dir cannot be derived; in the DB-free mode
+    an evidence root outside the workspace no longer fails construction.
+    """
+    monkeypatch.setenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", "true")
+    monkeypatch.setenv("WORKSPACE_ROOT", "   ")
+    monkeypatch.setenv("NHMS_SCHEDULER_EVIDENCE_ROOT", str(tmp_path / "workspace" / "evidence"))
 
     result, evidence_dir = cli._cleanup_frontier(now=NOW)
 

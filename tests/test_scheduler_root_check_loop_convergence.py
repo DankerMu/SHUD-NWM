@@ -303,8 +303,10 @@ def _set_root_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **overrides: 
     monkeypatch.setenv("NHMS_SCHEDULER_REQUIRE_ROOTS", "true")
     monkeypatch.setenv("NHMS_SCHEDULER_SOURCES", "gfs")
     monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
-    for key in ("NHMS_SCHEDULER_DB_FREE_REQUIRED", "NHMS_SCHEDULER_REPAIR_MISSING_FORCING"):
-        monkeypatch.delenv(key, raising=False)
+    # ``ProductionSchedulerConfig()`` / ``from_env`` read the mode from the env:
+    # DB-free, explicitly.
+    monkeypatch.setenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", "true")
+    monkeypatch.delenv("NHMS_SCHEDULER_REPAIR_MISSING_FORCING", raising=False)
     return roots
 
 
@@ -424,9 +426,9 @@ def test_run_once_with_a_loop_lock_root_writes_preflight_blocked_evidence(
     assert [blocker["code"] for blocker in written["root_preflight"]["blockers"]] == [
         f"SCHEDULER_ROOT_LOCK_ROOT_{reason}"
     ]
-    # The rendered lock root is the configured spelling on every interpreter: the
-    # strict realpath fails (ELOOP) and the non-strict fallback keeps the loop link.
-    assert written["resolved_runtime_roots"]["lock_root"]["path"] == str(lock_root)
-    assert written["resolved_runtime_roots"]["lock_path"]["path"] == str(
-        lock_root / Path(scheduler.config.lock_path).name
-    )
+    # The DB-free pass renders every resolved root evidence-safe
+    # (``scheduler_evidence.scheduler_resolved_runtime_roots``): the loop root is
+    # reported as the redaction sentinel, never resolved, on every interpreter.
+    assert scheduler.config.db_free_required is True
+    assert written["resolved_runtime_roots"]["lock_root"]["path"] == "[local-path]"
+    assert written["resolved_runtime_roots"]["lock_path"]["path"] == "[local-path]"

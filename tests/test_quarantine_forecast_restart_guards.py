@@ -379,6 +379,7 @@ def _db_free_strict_build(
     assert "run_manifest_initial_state" not in state
     scheduler = ProductionScheduler(
         ProductionSchedulerConfig(
+            scheduler_db_free_required=True,
             now=generated_at,
             allowed_cycle_hours_utc=(0, 6, 12, 18),
             # The repair window's own admission: exact, single-cycle, no backfill.
@@ -635,6 +636,9 @@ def _apply_policy(
     cycle_time = _dt(_CYCLE_TIME)
     raw_root = tmp_path / "nfs-raw"
     readiness = _write_missing_forcing_repair_raw_manifest(raw_root, cycle_time=cycle_time)
+    # ``_missing_forcing_repair_config`` (tests/test_production_scheduler.py)
+    # takes no mode kwarg: the env selects DB-free explicitly.
+    monkeypatch.setenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", "true")
     config = _missing_forcing_repair_config(
         tmp_path, monkeypatch, cycle_time=cycle_time, dry_run=True, raw_root=raw_root
     )

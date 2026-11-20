@@ -102,7 +102,59 @@ def _seed_pass_env(monkeypatch) -> None:
     monkeypatch.delenv("NHMS_RETENTION_EXTRA_ROOTS_DAYS", raising=False)
 
 
-def _pass_scheduler(**config_kwargs):
+class _UnconsultedCanonicalReadinessProvider:
+    """Readiness collaborator for a DB-free retention scheduler: ``_run_retention`` never asks it."""
+
+    def canonical_readiness(self, **_kwargs: Any) -> Any:
+        raise AssertionError("a retention-only scheduler must not consult canonical readiness")
+
+
+def _db_free_retention_scheduler(
+    journal_root: Path, *, adapters: dict[str, Any] | None = None, **config_kwargs: Any
+) -> Any:
+    """A scheduler built explicitly DB-free for ``_run_retention`` calls.
+
+    Every collaborator the DB-free scheduler would otherwise build from config
+    is injected: the blocked registry, ``adapters`` (default none), the file orchestration
+    journal on ``journal_root`` (created, and named as the config's journal
+    root) and a readiness provider that fails if consulted.  Callers put
+    ``journal_root`` outside every root the retention pass sweeps.
+    """
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from services.orchestrator.scheduler import (
+        ProductionScheduler,
+        ProductionSchedulerConfig,
+        _BlockedModelRegistry,
+    )
+    from tests.provider_mode_helpers import make_directory_with_explicit_mode
+
+    make_directory_with_explicit_mode(journal_root)
+    config = ProductionSchedulerConfig(
+        scheduler_db_free_required=True,
+        scheduler_journal_root=journal_root,
+        **config_kwargs,
+    )
+    return ProductionScheduler(
+        config=config,
+        registry=_BlockedModelRegistry(),
+        adapters=adapters or {},
+        active_repository=FileOrchestrationJournalRepository(journal_root),
+        canonical_readiness_provider=_UnconsultedCanonicalReadinessProvider(),
+    )
+
+
+def _pass_scheduler(*, db_free_journal_root: Path | None = None, **config_kwargs):
+    """A non-dry-run scheduler for ``_run_retention`` calls.
+
+    ``db_free_journal_root`` opts in to :func:`_db_free_retention_scheduler`;
+    omitted, the scheduler is built exactly as before and the env decides its
+    mode.
+    """
+
+    if db_free_journal_root is not None:
+        return _db_free_retention_scheduler(db_free_journal_root, dry_run=False, **config_kwargs)
+
     from services.orchestrator.scheduler import (
         ProductionScheduler,
         ProductionSchedulerConfig,

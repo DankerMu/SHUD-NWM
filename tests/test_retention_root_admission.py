@@ -175,7 +175,7 @@ def test_pass_raw_primary_blank_or_relative_is_never_scanned(
     monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path / "ws"))
     cwd, normalized_store = _seed_pass_raw_primary_old_trees(tmp_path, monkeypatch)
 
-    scheduler = _pass_scheduler(workspace_root=str(tmp_path / "ws"))
+    scheduler = _pass_scheduler(db_free_journal_root=tmp_path / "journal", workspace_root=str(tmp_path / "ws"))
     payload = scheduler._run_retention(NOW)
 
     expected_reason = (
@@ -205,6 +205,7 @@ def test_pass_explicit_blank_primary_is_rejected_not_swallowed(tmp_path: Path, m
     cwd, normalized_store = _seed_pass_raw_primary_old_trees(tmp_path, monkeypatch)
 
     scheduler = _pass_scheduler(
+        db_free_journal_root=tmp_path / "journal",
         workspace_root=str(tmp_path / "ws"),
         object_store_root="",
     )
@@ -232,6 +233,7 @@ def test_pass_explicit_relative_primary_is_rejected_not_workspace_anchored(
     cwd, normalized_store = _seed_pass_raw_primary_old_trees(tmp_path, monkeypatch)
 
     scheduler = _pass_scheduler(
+        db_free_journal_root=tmp_path / "journal",
         workspace_root=str(tmp_path / "ws"),
         object_store_root="relative/store",
     )
@@ -256,7 +258,9 @@ def test_absolute_configured_primary_still_works_in_a_pass(tmp_path: Path, monke
     old_cycle = _cycle_name(NOW - timedelta(days=20))
     expired = _write(store, f"raw/gfs/{old_cycle}/gfs.f000.nc").parent
 
-    scheduler = _pass_scheduler(workspace_root=str(tmp_path / "ws"), object_store_root=str(store))
+    scheduler = _pass_scheduler(
+        db_free_journal_root=tmp_path / "journal", workspace_root=str(tmp_path / "ws"), object_store_root=str(store)
+    )
     payload = scheduler._run_retention(NOW)
 
     assert payload["status"] == "completed"
@@ -558,7 +562,9 @@ def test_pass_admits_parent_workspace_and_child_object_store(
     monkeypatch.setenv("OBJECT_STORE_ROOT", str(store))
     monkeypatch.delenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", raising=False)
 
-    scheduler = _pass_scheduler(workspace_root=str(parent), object_store_root=str(store))
+    scheduler = _pass_scheduler(
+        db_free_journal_root=tmp_path / "journal", workspace_root=str(parent), object_store_root=str(store)
+    )
     payload = scheduler._run_retention(NOW)
 
     assert payload["status"] == "completed"

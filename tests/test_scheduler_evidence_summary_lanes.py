@@ -423,7 +423,7 @@ def test_the_terminal_floor_written_through_write_evidence_keeps_a_reason_only_l
     from services.orchestrator import scheduler_evidence
     from tests.test_production_scheduler import _config, _dt, _scheduler_evidence_test_context
 
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"))
+    config = _config(tmp_path, db_free=True, now=_dt("2026-05-21T12:00:00Z"))
     Path(config.evidence_dir).mkdir(parents=True)
     # ``write_evidence`` adds ``artifact_path`` (a required bounded field, kept
     # verbatim); the floor is compact, so the golden band moves by exactly the
@@ -495,8 +495,9 @@ def long_submitted_pass(tmp_path_factory: pytest.TempPathFactory) -> SimpleNames
     """
 
     scheduler_evidence_payload = _payload_writer()
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from tests.test_operator_reentry_confirmation import db_free_cold_start_env
     from tests.test_production_scheduler import (
-        FakeActiveRepository,
         FakeAdapter,
         FakeProductionOrchestratorWithStageEvidence,
         FakeRegistry,
@@ -507,14 +508,17 @@ def long_submitted_pass(tmp_path_factory: pytest.TempPathFactory) -> SimpleNames
         _model,
     )
 
-    def _pass(root: Path) -> Any:
-        root.mkdir(parents=True, exist_ok=True)
+    def _pass(root: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+        # A real pass: the full DB-free env, rooted at ``root`` (each pass its own),
+        # over an empty file journal (no active work; the DB-free pass writes it).
+        journal_root = db_free_cold_start_env(root, monkeypatch)
         orchestrator = FakeProductionOrchestratorWithStageEvidence()
         return ProductionScheduler(
             # ``backfill_enabled``: a pass without backfill is ``scope_narrowed``
             # and ``list-operator-actions`` could never read it as evaluating.
             _config(
-                root,
+                root / "workspace",
+                db_free=True,
                 now=_dt("2026-05-21T12:00:00Z"),
                 dry_run=False,
                 sources=_SOURCES,
@@ -525,7 +529,7 @@ def long_submitted_pass(tmp_path_factory: pytest.TempPathFactory) -> SimpleNames
                 [_model(f"model_{index:03d}", f"basin_{index:03d}") for index in range(_N_MODELS_PER_SOURCE)]
             ),
             adapters={source: FakeAdapter(source, [("2026-05-21T06:00:00Z", True)]) for source in _SOURCES},
-            active_repository=FakeActiveRepository(active=False),
+            active_repository=FileOrchestrationJournalRepository(journal_root),
             canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
             orchestrator_factory=lambda _source_id: orchestrator,
         ).run_once()
@@ -533,7 +537,7 @@ def long_submitted_pass(tmp_path_factory: pytest.TempPathFactory) -> SimpleNames
     tmp_path = tmp_path_factory.mktemp("long_pass").resolve()
     with pytest.MonkeyPatch.context() as monkeypatch:
         monkeypatch.setattr("services.orchestrator.scheduler.MAX_EVIDENCE_BYTES", 10**12)
-        reference = _pass(tmp_path / "full")
+        reference = _pass(tmp_path / "full", monkeypatch)
     full = json.loads(json.dumps(reference.evidence))
     assert full["status"] == "submitted"
     assert full["counts"]["submitted_count"] == 2 * _N_MODELS_PER_SOURCE == len(full["model_run_evidence"])
@@ -545,7 +549,7 @@ def long_submitted_pass(tmp_path_factory: pytest.TempPathFactory) -> SimpleNames
     bound = (indent_bytes + compact_bytes) // 2
     with pytest.MonkeyPatch.context() as monkeypatch:
         monkeypatch.setattr("services.orchestrator.scheduler.MAX_EVIDENCE_BYTES", bound)
-        tier = _pass(tmp_path / "tier")
+        tier = _pass(tmp_path / "tier", monkeypatch)
     return SimpleNamespace(
         full=full,
         full_root=Path(reference.artifact_path or "").parent,
@@ -598,6 +602,8 @@ def test_a_long_submitted_pass_keeps_its_status_in_the_artifact_result_and_cli(
             return [state.tier]
 
     monkeypatch.setattr(cli, "ProductionScheduler", FakeScheduler)
+    # ``_plan_production`` builds its config from the env: DB-free, explicitly.
+    monkeypatch.setenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", "true")
     payload = cli._plan_production(
         sources=_SOURCES,
         lookback_hours=24,

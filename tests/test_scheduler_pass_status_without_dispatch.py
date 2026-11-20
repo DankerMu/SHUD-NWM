@@ -19,9 +19,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from packages.common.contracts.time_normalization import cycle_id_for, format_cycle_time
 from services.orchestrator.chain import PipelineResult, StageRunResult
+from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
 from services.orchestrator.scheduler import ProductionScheduler
+from tests.test_operator_reentry_confirmation import db_free_cold_start_env
 from tests.test_production_scheduler import (
     FakeAdapter,
     FakeProductionOrchestrator,
@@ -121,16 +125,22 @@ class NoSubmissionFailedOrchestrator(FakeProductionOrchestrator):
         )
 
 
-def test_zero_dispatch_reconciling_pass_reports_reconciling_with_no_submission(tmp_path: Path) -> None:
+def test_zero_dispatch_reconciling_pass_reports_reconciling_with_no_submission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     orchestrator = _ZeroSubmissionReconcilingOrchestrator()
+    # A real DB-free pass: the full env rooted at ``tmp_path``, over an empty file journal.
+    journal_root = db_free_cold_start_env(tmp_path / "scheduler-workspace", monkeypatch)
     scheduler = ProductionScheduler(
         _scheduler_config(
-            tmp_path / "scheduler-workspace",
+            tmp_path / "scheduler-workspace" / "workspace",
+            db_free=True,
             now=_scheduler_dt("2026-05-21T12:00:00Z"),
             dry_run=False,
         ),
         registry=FakeRegistry([_scheduler_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FileOrchestrationJournalRepository(journal_root),
         canonical_readiness_provider=ReadyCanonicalReadinessProvider(),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
@@ -153,16 +163,22 @@ def test_zero_dispatch_reconciling_pass_reports_reconciling_with_no_submission(t
     assert result.artifact_path is not None
 
 
-def test_all_candidates_failed_before_slurm_reports_preflight_blocked(tmp_path: Path) -> None:
+def test_all_candidates_failed_before_slurm_reports_preflight_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     orchestrator = NoSubmissionFailedOrchestrator()
+    # A real DB-free pass: the full env rooted at ``tmp_path``, over an empty file journal.
+    journal_root = db_free_cold_start_env(tmp_path / "scheduler-workspace-no-submission-failed", monkeypatch)
     scheduler = ProductionScheduler(
         _scheduler_config(
-            tmp_path / "scheduler-workspace-no-submission-failed",
+            tmp_path / "scheduler-workspace-no-submission-failed" / "workspace",
+            db_free=True,
             now=_scheduler_dt("2026-05-21T12:00:00Z"),
             dry_run=False,
         ),
         registry=FakeRegistry([_scheduler_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FileOrchestrationJournalRepository(journal_root),
         canonical_readiness_provider=ReadyCanonicalReadinessProvider(),
         orchestrator_factory=lambda _source_id: orchestrator,
     )

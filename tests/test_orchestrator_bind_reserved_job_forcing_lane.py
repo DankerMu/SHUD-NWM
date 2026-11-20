@@ -360,7 +360,7 @@ def test_a_bound_held_forcing_master_projects_terminal_and_its_members_move_on_t
             "resume_after_completed_stage",
             "forecast",
         )
-    selected, blocked, skipped = _plan(_scheduler(tmp_path, repository, raw_models), raw_models)
+    selected, blocked, skipped = _plan(_scheduler(tmp_path, repository, raw_models, db_free=True), raw_models)
     assert (blocked, skipped) == ([], [])
     assert sorted(candidate.candidate_id for candidate in selected) == sorted(c.candidate_id for c in candidates)
     # Nothing in bind, reconcile or the decision reached the gateway.

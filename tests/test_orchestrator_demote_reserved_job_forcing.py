@@ -867,7 +867,7 @@ def test_a_held_forcing_master_with_no_job_is_released_and_reclaimed_as_attempt_
             oracle.evidence.get("restart_stage"),
         )
         assert (decision.action, decision.evidence.get("restart_stage")) == ("retry", "forcing")
-    selected, blocked, skipped = _plan(_scheduler(tmp_path, repository, raw_models), raw_models)
+    selected, blocked, skipped = _plan(_scheduler(tmp_path, repository, raw_models, db_free=True), raw_models)
     assert (blocked, skipped) == ([], [])
     assert sorted(candidate.candidate_id for candidate in selected) == sorted(c.candidate_id for c in candidates)
     # The exit, the decision and the plan reached the gateway zero times.

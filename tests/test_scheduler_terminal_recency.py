@@ -29,7 +29,9 @@ def _pass(tmp_path: Path, root: Path, model_ids: tuple[str, ...] = ("model_a",))
     from tests.test_production_scheduler import FakeProductionOrchestrator
 
     orchestrator = FakeProductionOrchestrator()
-    result = breaker_scheduler(tmp_path, root, orchestrator, model_ids=model_ids, retry_limit=_RETRY_LIMIT).run_once()
+    result = breaker_scheduler(
+        tmp_path, root, orchestrator, model_ids=model_ids, retry_limit=_RETRY_LIMIT, db_free=True
+    ).run_once()
     return result, orchestrator
 
 
@@ -91,6 +93,7 @@ def _drive_failing_reruns(
             recorded_tokens=recorded_tokens,
             slurm_client=client,
             retry_service=retry_service,
+            db_free=True,
         )
         assert failed.status == "failed"
         slurm_forecast += sum(1 for item in client.submissions if item.get("stage") == "forecast")
@@ -111,7 +114,7 @@ def test_failed_quarantine_rerun_reaches_the_failure_path_and_stops_at_the_budge
     from tests.test_operator_reentry_confirmation import seed_breaker_journal
 
     # Stale-token completed cycle; no operator confirmation; no completed stamped master.
-    root = seed_breaker_journal(tmp_path, monkeypatch, breaker_engaged=False)
+    root = seed_breaker_journal(tmp_path, monkeypatch, breaker_engaged=False, db_free=True)
 
     slurm_forecast, trace, blocked = _drive_failing_reruns(tmp_path, root, _RETRY_LIMIT + 4)
 
@@ -132,7 +135,7 @@ def test_terminal_run_manifest_missing_stops_refiring_after_a_newer_failure(
 ) -> None:
     from tests.test_operator_reentry_confirmation import seed_breaker_journal
 
-    root = seed_breaker_journal(tmp_path, monkeypatch, breaker_engaged=False)
+    root = seed_breaker_journal(tmp_path, monkeypatch, breaker_engaged=False, db_free=True)
     (tmp_path / "object-store" / "runs" / "fcst_gfs_2026052100_model_a" / "input" / "manifest.json").unlink()
 
     slurm_forecast, trace, blocked = _drive_failing_reruns(tmp_path, root, _RETRY_LIMIT + 3)
@@ -170,7 +173,7 @@ def test_unjudged_terminal_run_manifest_missing_retry_stops_refiring_after_a_new
     models = ("model_a", "model_b")
     matching = {"model_a": stale_token("model_a", lead_hours=6)}
     root = seed_breaker_journal(
-        tmp_path, monkeypatch, model_ids=models, breaker_engaged=False, recorded_tokens=matching
+        tmp_path, monkeypatch, model_ids=models, breaker_engaged=False, recorded_tokens=matching, db_free=True
     )
     (tmp_path / "object-store" / "runs" / "fcst_gfs_2026052100_model_a" / "input" / "manifest.json").unlink()
 
@@ -207,7 +210,7 @@ def test_failing_reruns_without_inline_retry_stay_within_the_forecast_budget(
     from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
     from tests.test_operator_reentry_confirmation import real_rerun, seed_breaker_journal
 
-    root = seed_breaker_journal(tmp_path, monkeypatch, breaker_engaged=False)
+    root = seed_breaker_journal(tmp_path, monkeypatch, breaker_engaged=False, db_free=True)
     slurm_forecast = 0
     trace: list[list[tuple[str, str | None]]] = []
     for _ in range(_RETRY_LIMIT + 3):
@@ -217,7 +220,7 @@ def test_failing_reruns_without_inline_retry_stay_within_the_forecast_budget(
             continue
         (call,) = orchestrator.calls
         client = _wallclock_slurm_client(**_FORECAST_FAILURE)
-        rerun = real_rerun(tmp_path, root, [dict(basin) for basin in call["basins"]], slurm_client=client)
+        rerun = real_rerun(tmp_path, root, [dict(basin) for basin in call["basins"]], slurm_client=client, db_free=True)
         assert rerun.status == "failed"
         slurm_forecast += sum(1 for item in client.submissions if item.get("stage") == "forecast")
 
@@ -253,11 +256,13 @@ def test_mixed_outcome_cohort_splits_into_terminal_skip_and_the_failure_path(
     from tests.test_production_scheduler import FakeProductionOrchestrator
 
     models = ("model_a", "model_b")
-    root = seed_breaker_journal(tmp_path, monkeypatch, model_ids=models, breaker_engaged=False)
+    root = seed_breaker_journal(tmp_path, monkeypatch, model_ids=models, breaker_engaged=False, db_free=True)
 
     def _cohort_pass() -> tuple[Any, list[tuple[str, str | None, str | None, str | None]]]:
         orchestrator = FakeProductionOrchestrator()
-        result = breaker_scheduler(tmp_path, root, orchestrator, model_ids=models, retry_limit=_RETRY_LIMIT).run_once()
+        result = breaker_scheduler(
+            tmp_path, root, orchestrator, model_ids=models, retry_limit=_RETRY_LIMIT, db_free=True
+        ).run_once()
         rows = [
             (key, item.get("model_id"), (item.get("state_evidence") or {}).get("decision"), item.get("reason"))
             for key in ("candidates", "blocked_candidates", "skipped_candidates")
@@ -274,6 +279,7 @@ def test_mixed_outcome_cohort_splits_into_terminal_skip_and_the_failure_path(
         [dict(basin) for basin in call["basins"]],
         recorded_tokens={model_id: stale_token(model_id, lead_hours=6) for model_id in models},
         slurm_client=_wallclock_slurm_client(array_results_by_stage={"forecast": ["succeeded", "failed"]}),
+        db_free=True,
     )
     assert rerun.status == "parsed_partial"
 
@@ -569,7 +575,7 @@ def _raw_decision_reasons(tmp_path: Path, root: Path, monkeypatch: pytest.Monkey
 
     with monkeypatch.context() as patch:
         patch.setattr(scheduler_module, "_candidate_state_decision", _spy)
-        _breaker_candidate_decisions(tmp_path, root)
+        _breaker_candidate_decisions(tmp_path, root, db_free=True)
     return reasons
 
 
@@ -607,13 +613,13 @@ def test_old_failure_marked_permanent_after_a_newer_success_stays_terminal(
 ) -> None:
     from tests.test_operator_reentry_confirmation import real_rerun, seed_breaker_journal
 
-    root = seed_breaker_journal(tmp_path, monkeypatch, breaker_engaged=False)
+    root = seed_breaker_journal(tmp_path, monkeypatch, breaker_engaged=False, db_free=True)
     basins = _quarantine_basins(tmp_path, root)
     # Failure F, then a forced replacement that SUCCEEDS, then F is re-labelled.
-    assert real_rerun(tmp_path, root, basins, slurm_client=_wallclock_slurm_client(**_FORECAST_FAILURE)).status == (
-        "failed"
-    )
-    assert real_rerun(tmp_path, root, basins, slurm_client=_wallclock_slurm_client()).status == "complete"
+    assert real_rerun(
+        tmp_path, root, basins, slurm_client=_wallclock_slurm_client(**_FORECAST_FAILURE), db_free=True
+    ).status == "failed"
+    assert real_rerun(tmp_path, root, basins, slurm_client=_wallclock_slurm_client(), db_free=True).status == "complete"
     _mark_rerun_master_permanently_failed(root)
 
     reasons = _raw_decision_reasons(tmp_path, root, monkeypatch)
@@ -627,12 +633,12 @@ def test_failed_rerun_marked_permanent_after_the_success_stays_non_terminal(
 ) -> None:
     from tests.test_operator_reentry_confirmation import real_rerun, seed_breaker_journal
 
-    root = seed_breaker_journal(tmp_path, monkeypatch, breaker_engaged=False)
+    root = seed_breaker_journal(tmp_path, monkeypatch, breaker_engaged=False, db_free=True)
     basins = _quarantine_basins(tmp_path, root)
     # #2401 shape: the rerun fails AFTER the success, its retry is declined, it is marked permanent.
-    assert real_rerun(tmp_path, root, basins, slurm_client=_wallclock_slurm_client(**_FORECAST_FAILURE)).status == (
-        "failed"
-    )
+    assert real_rerun(
+        tmp_path, root, basins, slurm_client=_wallclock_slurm_client(**_FORECAST_FAILURE), db_free=True
+    ).status == "failed"
     marked = _mark_rerun_master_permanently_failed(root)
 
     reasons = _raw_decision_reasons(tmp_path, root, monkeypatch)
