@@ -174,10 +174,12 @@ status: resolved
 owner_area: compute_control
 github_issue: none
 resolved_by: >-
-  Scheduler source discovery no longer downloads: the source adapter's
-  readiness check reads the NFS raw manifest
-  (services/orchestrator/scheduler_adapters.py `_readiness` ->
-  services/orchestrator/source_cycle_raw_manifest.py
+  In DB-free mode (`NHMS_SCHEDULER_DB_FREE_REQUIRED=true`, the only mode the
+  node-22 production scheduler runs) source discovery reads the NFS raw
+  manifest and downloads nothing
+  (services/orchestrator/scheduler_core.py adapter selection ->
+  services/orchestrator/scheduler_adapters.py `_db_free_default_adapters` /
+  `_readiness` -> services/orchestrator/source_cycle_raw_manifest.py
   `nfs_raw_manifest_readiness_from_env`). Verified by code reading in #3226.
 evidence:
   - artifacts/mvp-e2e/qhh-mvp-e2e-20260527T004907Z/scheduler_dry_run.log
@@ -187,14 +189,17 @@ evidence:
 retest_command: |-
   set -euo pipefail
   dry_run_log="$(mktemp)"
-  uv run nhms-pipeline plan-production --dry-run --source gfs \
+  NHMS_SCHEDULER_DB_FREE_REQUIRED=true uv run nhms-pipeline plan-production --dry-run --source gfs \
     --model-id basins_qhh_shud --basin-id basins_qhh 2>&1 | tee "$dry_run_log"
   ! rg -n "download|Downloading|GRIB" "$dry_run_log"
 ```
 
 The old no-mutation proof covered execution candidates, not source discovery
-download/cache behavior. Discovery now only reads manifests written by the
-download lane, so a dry run has nothing to download.
+download/cache behavior. In DB-free mode discovery only reads manifests written
+by the download lane, so a dry run has nothing to download. The non-DB-free
+mode still uses the worker GFS/IFS adapters (`_default_adapters`), whose
+availability probe contacts the upstream source; that mode belongs to the
+dormant SQL orchestration path that #3227 reviews.
 
 ### BUG-20260527-006: QHH-only `plan-production` hit Slurm Gateway HTTP 404
 
@@ -378,9 +383,13 @@ The compute-control cancel route still starts from active jobs for a run. The
 fixed state is that operator cancel for a missing run returns a stable non-200
 error body, not HTTP 200 with empty `cancelled_jobs`. The display-readonly route
 correctly fails closed as manual action, but the operator missing-run semantics
-are not yet fixed by that display safety work. Confirmed still live in #3226
-(`apps/api/routes/pipeline.py` `cancel_run` returns `_ok` when no job exists);
-the fix is tracked in #3245.
+are not yet fixed by that display safety work. In #3226 the 200 path was
+confirmed in code (`apps/api/routes/pipeline.py` `cancel_run` returns `_ok`
+when no job exists), but it is reachable only on a DB-backed compute API:
+production node-22 runs its compute API without `DATABASE_URL`, so an
+authorized cancel there fails at `get_pipeline_store` with 500
+`DATABASE_URL_MISSING`, and node-27 answers the manual-action 409. #3245 owns
+the decision (retire the route like retry, or return 404).
 
 ### BUG-20260527-012: Default Playwright E2E specs were mocked regression, not live E2E
 
