@@ -17,7 +17,7 @@ Order, dependencies and verification follow design.md D1–D5. Appendix C says w
 - [x] 1.3 Delete the Appendix C R1 symbols: `chain_analysis_orchestrator.py`, `chain_analysis.py`, `build_analysis_run_manifest`, `AnalysisPipelineAlreadyActiveError`, the analysis-only branches, and the compat/`__init__` bindings. Update the inventory text and the inventory-coupled tests that name them.
 - [x] 1.4 Delete `tests/test_analysis_pipeline.py`, the `AnalysisOrchestrator` assertions in `tests/test_orchestration_chain.py` (:37, :13364, :13376, :13547, :13746, :14210), and the writer-receipt case at `tests/test_gateway_reconcile_writer_receipts.py:134`.
 - [x] 1.5 CLI test: every remaining subcommand parses exactly as before, and `trigger-analysis` is an argparse usage error (exit 2).
-- [ ] 1.6 (separate PR after 1.1–1.5; spec-only) Triage the remaining `analysis-run-pipeline` requirements (`:25-86`) against the worker analysis branches (e.g. `workers/output_parser/parser.py`, `run_type='analysis'`). For each requirement, add a REMOVED delta or rewrite it as a worker-only requirement in this change.
+- [x] 1.6 (separate PR after 1.1–1.5; spec-only) Triage the remaining `analysis-run-pipeline` requirements (`:25-86`) against the worker analysis branches (e.g. `workers/output_parser/parser.py`, `run_type='analysis'`). For each requirement, add a REMOVED delta or rewrite it as a worker-only requirement in this change.
 - [ ] 1.7 Verification: on node-22 after deploy, one idle pass and one submitting pass. `cli.py` is the scheduler unit's entrypoint.
 
 Suggested fixture level: expanded - removes a CLI subcommand on the scheduler's entrypoint module.
