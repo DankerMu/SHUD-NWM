@@ -33,7 +33,7 @@ The operator rollback tool's historical export (`file_orchestration_migration.py
   - attempt floors;
   - the per-member charge (#2542);
   - the manual-claim gate (#1201).
-- Retry job ids are built by hand in five places:
+- Retry job ids are built by hand in five places (four after R4 deletes the `retry.py` one):
   - `chain_runtime_utils.py:448`
   - `file_journal_retry_helpers.py:55`
   - `chain_forecast_orchestrator_cycle.py:297`
@@ -69,7 +69,7 @@ The operator rollback tool's historical export (`file_orchestration_migration.py
 - What pins the facades in place:
   - `docs/governance/{CHAIN,SCHEDULER}_COMPATIBILITY_INVENTORY.md`;
   - `scripts/governance/entropy_audit/facade_guard.py` with `COMPATIBILITY_FACADE_CONFIGS` (`schema.py:206-217`);
-  - helpers in `audit_repo_entropy.py:257-269,408,627,688-694` and `tests/entropy_audit_helpers.py:587,598`;
+  - helpers in `scripts/governance/audit_repo_entropy.py:257-269,408,627,688-694` and `tests/entropy_audit_helpers.py:587,598`;
   - their tests;
   - about 370 `_COMPAT_` assertions in `tests/test_orchestration_chain.py` and `tests/test_production_scheduler.py`;
   - the `FIRST_IMPORT_ALLOWLIST` (`tests/test_orchestrator_first_import.py:38-67`).
@@ -330,9 +330,9 @@ Each listed passage gets a MODIFIED or REMOVED delta in this change, added in th
 | Spec passage | Slice |
 |---|---|
 | `analysis-run-pipeline` remaining requirements (`:25-86`) after triage (task 1.6) | R1 |
-| `node22-dbfree-runtime` (already in this change); `production-scheduler-orchestration/spec.md:284-300` (config split "environment defaults equivalent"); `slurm-array-runner-integration/spec.md:103` (db-backed configuration arm), if that arm is the scheduler mode | R2b |
+| `node22-dbfree-runtime` (already in this change); `slurm-array-runner-integration/spec.md:103` (db-backed configuration arm), if that arm is the scheduler mode | R2b |
 | `pipeline-job-persistence/spec.md:10,12-14,42-44,83` ("PostgreSQL-backed scheduler mode"); `file-orchestration-journal/spec.md:309,650` (non-DB-free reconciliation) | R2c |
 | `file-orchestration-journal/spec.md:4-5` (Purpose), `:13`, `:48`, `:154`; `production-scheduler-orchestration/spec.md:729,759-761,772` (SQL probes); `job-retry-mechanism/spec.md:350,352,377,385-393` (DB-backed candidate-state projection) | R3 |
 | `file-orchestration-journal/spec.md:107-115` (`_retry_service_from_env`); `real-slurm-gateway-contract/spec.md:66,72,78` ("RetryService MUST ..."); `job-retry-mechanism/spec.md:1044` (markers written by the SQL retry service) | R4 |
 | `scheduler-facade-deepening`, `chain-facade-deepening` (already in this change); `facade-shrink/spec.md:13-33`; `scheduler-discovery-evidence-owner-compat/spec.md:31-40`; `import-layering-guard/spec.md:23` | F2 |
-| `compatibility-facade-governance` (whole capability: REMOVED) | F3 |
+| `compatibility-facade-governance` (whole capability: REMOVED); `orchestrator-structural-burndown/spec.md:434-436` (mentions the compatibility inventories) | F3 |

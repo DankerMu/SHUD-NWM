@@ -26,7 +26,7 @@ Minimal mergeable slice: one test file (start with `tests/test_file_orchestratio
 ## 3. R2b — Flip: DB-free is the only scheduler mode
 
 - [ ] 3.1 `scheduler_db_free_required` becomes constant `True` (`scheduler_config/config.py:39,110`). The constructor parameter is still accepted and ignored. The evidence fields `scheduler_db_free_required` (`scheduler_evidence.py:912`) and `db_free_runtime.required` report `true`.
-- [ ] 3.2 Make the non-DB-free arms in `scheduler_core.py` and `scheduler_runtime.py` fail closed with a typed error if reached. The backend selectors keep their fail-closed handling (`unset` / blank / `postgres` → `db_free_selector_missing` / `db_free_selector_blank`, `scheduler_config/db_free.py:54-69`). No default flips to `file`.
+- [ ] 3.2 Make the non-DB-free arms in `scheduler_core.py` and `scheduler_runtime.py` fail closed with a typed error if reached. The backend selectors keep their fail-closed handling (unset → `db_free_selector_missing`, blank → `db_free_selector_blank`, `postgres`/`psycopg` → `db_free_selector_db_backed`, other → non-file; `scheduler_config/db_free.py:54-73`). No default flips to `file`.
 - [ ] 3.3 `chain_manifests.py:252` writes `scheduler_db_free_required: "true"` unconditionally. `scheduler_candidate_runtime.py:578` no longer forces `False`.
 - [ ] 3.4 Tests:
   - building the scheduler from env with the flag unset, `false` or `true`, and with the file selectors set, yields the file journal, the file retry service, the NFS manifest adapters and the file lock;
@@ -43,7 +43,7 @@ Minimal mergeable slice: atomic - after group 2, the flip, the fail-closed arms 
 - [ ] 4.1 Delete `_default_adapters` with its re-export, and the SQL-factory arms in `scheduler_core.py` and `scheduler_adapters.py` with their `scheduler.py` re-exports (Appendix C, R2c row). Update the inventory text and tests that name them.
 - [ ] 4.2 Delete the SQL reconcile store, including its reset/dispose code, from `scheduler_runtime.py`. Delete `tests/test_gateway_reconcile_store_reset.py`.
 - [ ] 4.3 Delete the PostgreSQL scheduler lease (`scheduler_core.py:241-250`, its `scheduler_lease.py` branch) and its tests (`PostgresSchedulerLease`, `_postgres_advisory_lock_key` in `tests/test_production_scheduler.py`).
-- [ ] 4.4 Add the Appendix D R2c spec deltas. Update `infra/env/README.md` (:169, :321) and `docs/runbooks/node22-db-retirement-runbook.md:51` so the variable is described as the job-env contract, not a mode switch. Templates keep the variable.
+- [ ] 4.4 Add the Appendix D R2c spec deltas. Update `infra/env/README.md` (:169, :321), `docs/runbooks/two-node-deployment-overview.md:423`, `docs/runbooks/scheduler-dbfree-typed-reasons.md:4` and `docs/runbooks/production-service-config.md:14` so the variable is described as the job-env contract, not a mode switch. `docs/runbooks/node22-db-retirement-runbook.md:51` (names `PsycopgOrchestratorRepository`) is updated in R3. Templates keep the variable.
 - [ ] 4.5 Verification: on node-22, one idle pass and one submitting pass.
 
 Suggested fixture level: expanded - the scheduler lease (concurrency) and the reconcile path.
@@ -53,7 +53,7 @@ Minimal mergeable slice: 4.1 alone (factory arms and adapters); 4.2 and 4.3 foll
 
 - [ ] 5.1 Test-only PR first. For each `CapturingRepository(PsycopgOrchestratorRepository)` test and the candidate-state tests (`tests/test_orchestration_chain.py:8283-10049`), record whether it asserts SQL text (to delete in 5.2) or candidate-state semantics. For each semantics case, confirm `chain_repository_state.py` covers it on the file-journal path (`file_orchestration_journal.py:2025`), and migrate it if not.
 - [ ] 5.2 Delete the Appendix C R3 symbols and their SQL-text tests, plus `tests/test_real_database_integration.py:339-502` (each test confirmed SQL-only on node-27). Keep the `OrchestratorRepository` protocol. Update the inventory text and tests.
-- [ ] 5.3 Add the Appendix D R3 spec deltas, including the MODIFIED `file-orchestration-journal` contract-test requirement already in this change.
+- [ ] 5.3 Add the Appendix D R3 spec deltas, including the MODIFIED `file-orchestration-journal` contract-test requirement already in this change. Update `docs/runbooks/node22-db-retirement-runbook.md:51`, which names the deleted class.
 - [ ] 5.4 Verification: node-27 real-DB suites that remain pass. On node-22, one idle pass and one submitting pass.
 
 Suggested fixture level: expanded - persistence layer deletion.
@@ -95,7 +95,7 @@ Minimal mergeable slice: atomic - one new test file.
 
 ## 9. T2 — `retry_identity.py` becomes the owner
 
-- [ ] 9.1 Id formatting. Add `retry_job_id(base, attempt)`, keeping the `max(attempt, 1)` clamp, and delegate the five hand-built sites to it. Retarget their table rows.
+- [ ] 9.1 Id formatting. Add `retry_job_id(base, attempt)`, keeping the `max(attempt, 1)` clamp, and delegate the four hand-built sites that remain after R4 deletes `retry.py:~286`. Retarget their table rows.
 - [ ] 9.2 Attempt formulas. Add `next_stage_attempt`, `mint_attempt(..., is_occupied)`, `inline_retry_attempt`, `next_after_failure_master`, `next_after_failure_non_master` and `restart_stage_from_basins`, and delegate their call sites, including `:676-683` and `:750`. Row L becomes a plain-data row.
 - [ ] 9.3 Stage attempt reads. Add `stage_attempt` and delegate `scheduler_state_rows.py:517-656` and the `_stage_job_sort_key` parser.
 - [ ] 9.4 Limit and status sets.
@@ -139,7 +139,7 @@ Minimal mergeable slice: 11.1 (chain side) alone; 11.2 (scheduler side) follows;
 
 ## 12. F3 — Delete the compatibility inventories and the facade guard
 
-- [ ] 12.1 Delete `docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md`, `docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md`, `scripts/governance/entropy_audit/facade_guard.py`, `COMPATIBILITY_FACADE_CONFIGS` (`schema.py:206-217`), and the helpers that use them (`audit_repo_entropy.py:257-269,408,627,688-694`; `tests/entropy_audit_helpers.py:587,598`).
+- [ ] 12.1 Delete `docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md`, `docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md`, `scripts/governance/entropy_audit/facade_guard.py`, `COMPATIBILITY_FACADE_CONFIGS` (`schema.py:206-217`), and the helpers that use them (`scripts/governance/audit_repo_entropy.py:257-269,408,627,688-694`; `tests/entropy_audit_helpers.py:587,598`).
 - [ ] 12.2 Delete the facade-specific tests in `tests/test_entropy_audit_facade_guard_{forwarders,aliases}.py` and `tests/test_entropy_audit_instruction_inventory.py`.
 - [ ] 12.3 Remove the `compatibility facade` glossary term (`schema.py:227` `required_glossary_terms`, `openspec/glossary.md:17`). Update `services/orchestrator/AGENTS.md` (regenerate it from `instructions/agents/` if it is generated), `docs/governance/entropy-budget.md`, `entropy-burndown-triage.md:247`, `STRUCTURAL_FILE_DISPOSITION_INVENTORY.md:163-164,229-230` and `GOVERNANCE_8_FINAL_EVIDENCE_MAP.md:18-19`.
 - [ ] 12.4 Add the REMOVED delta for `compatibility-facade-governance`. Confirm with `grep -rni "compatibility inventory\|COMPATIBILITY_INVENTORY\|facade guard" docs openspec/specs scripts tests services` that nothing cites them.
