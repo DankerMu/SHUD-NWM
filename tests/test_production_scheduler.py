@@ -44,6 +44,7 @@ from services.orchestrator import (
 )
 from services.orchestrator import scheduler_candidates as scheduler_candidates_module
 from services.orchestrator import scheduler_config as scheduler_config_module
+from services.orchestrator import scheduler_core as scheduler_core_module
 from services.orchestrator import scheduler_discovery as scheduler_discovery_module
 from services.orchestrator import scheduler_evidence as scheduler_evidence_module
 from services.orchestrator import scheduler_evidence_payload as scheduler_evidence_payload_module
@@ -859,6 +860,63 @@ def _db_free_pass_config(monkeypatch: Any, tmp_path: Path, **kwargs: Any) -> Pro
 
     roots, _paths = _db_free_pass_env(monkeypatch, tmp_path, generated_at=kwargs.get("now"))
     return _config(roots["workspace_root"], db_free=True, **kwargs)
+
+
+def _db_free_slurm_roots(monkeypatch: Any, root: Path, *, generated_at: datetime) -> dict[str, Path]:
+    """``_slurm_roots(root)``'s layout on the full DB-free env (`_db_free_pass_env`) (#3251).
+
+    The workspace, object-store, published, runtime and temp roots are the env's;
+    the Slurm log root is ``root/logs``. A submitting DB-free config takes them
+    with no ``database_url`` (DB-free mode forbids one).
+    """
+
+    roots, _paths = _db_free_pass_env(monkeypatch, root, generated_at=generated_at)
+    return {**roots, "log_root": make_directory_with_explicit_mode(root / "logs")}
+
+
+def _db_free_factories_return(
+    monkeypatch: Any,
+    *,
+    registry: Any,
+    adapters: Mapping[str, Any],
+    active_repository: Any | None = None,
+) -> None:
+    """Inject collaborators where no kwarg reaches the scheduler (#3251).
+
+    ``ProductionScheduler.from_env`` / ``cli._plan_production`` construct the
+    scheduler themselves; in DB-free mode it takes its registry, adapters and
+    active repository from these factories (``scheduler_core.py:118-137``), the
+    counterparts of the ``PsycopgModelRegistryStore.from_env`` /
+    ``_default_adapters`` / ``_active_repository_from_env`` patches these tests
+    used before.  Without ``active_repository`` the env's (empty) file journal
+    is the active repository.
+    """
+
+    monkeypatch.setattr(scheduler_core_module, "_db_free_file_registry_from_config", lambda _config: registry)
+    monkeypatch.setattr(scheduler_module, "_db_free_default_adapters", lambda _config: dict(adapters))
+    if active_repository is not None:
+        monkeypatch.setattr(
+            scheduler_core_module,
+            "_db_free_orchestration_repository_from_config",
+            lambda _config: active_repository,
+        )
+
+
+def _db_free_factories_fail(monkeypatch: Any, message: str) -> None:
+    """The DB-free registry, adapter and journal factories fail the test if reached (#3251).
+
+    The DB-free counterpart of the raising ``_unexpected_registry`` /
+    ``_unexpected_adapters`` / ``_active_repository_from_env`` patches, so a
+    "blocks before registry or adapter construction" assertion still proves
+    something in DB-free mode.
+    """
+
+    def fail(_config: Any) -> Any:
+        pytest.fail(message)
+
+    monkeypatch.setattr(scheduler_core_module, "_db_free_file_registry_from_config", fail)
+    monkeypatch.setattr(scheduler_module, "_db_free_default_adapters", fail)
+    monkeypatch.setattr(scheduler_core_module, "_db_free_orchestration_repository_from_config", fail)
 
 
 def _scheduler_inventory_text() -> str:
@@ -15111,7 +15169,7 @@ def test_node22_exact_cycle_wrapper_scopes_missing_forcing_repair_to_explicit_fl
 
 
 @pytest.mark.parametrize("mode", ["--plan", "--submit"], ids=("plan", "submit"))
-def test_node22_exact_cycle_wrapper_repair_runs_authority_preflight_in_db_free_mode(
+def test_node22_exact_cycle_wrapper_authority_preflight_refuses_alternate_raw_root_in_db_free_mode(
     tmp_path: Path,
     mode: str,
 ) -> None:
@@ -20561,8 +20619,12 @@ def test_candidate_stage_evidence_item_preserves_raw_status_and_projects_blocked
     assert unknown["production_status"] == "failed"
 
 
-def test_model_and_basin_filters_select_subset_and_record_excluded_runnable_count(tmp_path: Path) -> None:
-    config = _config(
+def test_model_and_basin_filters_select_subset_and_record_excluded_runnable_count(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    config = _db_free_pass_config(
+        monkeypatch,
         tmp_path,
         now=_dt("2026-05-21T12:00:00Z"),
         model_ids=("model_a",),
@@ -20589,8 +20651,10 @@ def test_model_and_basin_filters_select_subset_and_record_excluded_runnable_coun
     }
 
 
-def test_lock_contention_reports_without_candidates_or_submission(tmp_path: Path) -> None:
-    lock_path = tmp_path / "scheduler.lock"
+def test_lock_contention_reports_without_candidates_or_submission(tmp_path: Path, monkeypatch: Any) -> None:
+    now = _dt("2026-05-21T12:00:00Z")
+    roots, _paths = _db_free_pass_env(monkeypatch, tmp_path, generated_at=now)
+    lock_path = roots["workspace_root"] / "scheduler.lock"
     lock_path.write_text(
         json.dumps(
             {
@@ -20602,7 +20666,7 @@ def test_lock_contention_reports_without_candidates_or_submission(tmp_path: Path
         ),
         encoding="utf-8",
     )
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), lock_path=lock_path)
+    config = _config(roots["workspace_root"], db_free=True, now=now, lock_path=lock_path)
     scheduler = ProductionScheduler(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
@@ -20617,7 +20681,10 @@ def test_lock_contention_reports_without_candidates_or_submission(tmp_path: Path
     assert result.evidence["counts"]["submitted_count"] == 0
 
 
-def test_lock_contended_pass_evidence_on_disk_carries_no_candidate_lists_or_source_cycles(tmp_path: Path) -> None:
+def test_lock_contended_pass_evidence_on_disk_carries_no_candidate_lists_or_source_cycles(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
     """#2398 round 4: ``lock_contended`` is a pass that evaluated nothing.
 
     Pin the premise on the artifact the scheduler actually writes: the lock is
@@ -20626,7 +20693,9 @@ def test_lock_contended_pass_evidence_on_disk_carries_no_candidate_lists_or_sour
     so even with a ready source cycle and a runnable model nothing is listed.
     """
 
-    lock_path = tmp_path / "scheduler.lock"
+    now = _dt("2026-05-21T12:00:00Z")
+    roots, _paths = _db_free_pass_env(monkeypatch, tmp_path, generated_at=now)
+    lock_path = roots["workspace_root"] / "scheduler.lock"
     lock_path.write_text(
         json.dumps(
             {
@@ -20638,7 +20707,7 @@ def test_lock_contended_pass_evidence_on_disk_carries_no_candidate_lists_or_sour
         ),
         encoding="utf-8",
     )
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), lock_path=lock_path)
+    config = _config(roots["workspace_root"], db_free=True, now=now, lock_path=lock_path)
     scheduler = ProductionScheduler(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
@@ -20656,12 +20725,14 @@ def test_lock_contended_pass_evidence_on_disk_carries_no_candidate_lists_or_sour
     assert on_disk["source_cycles"] == []
 
 
-def test_oversized_existing_lock_is_rejected_without_full_read(tmp_path: Path) -> None:
-    lock_path = tmp_path / "scheduler.lock"
+def test_oversized_existing_lock_is_rejected_without_full_read(tmp_path: Path, monkeypatch: Any) -> None:
+    now = _dt("2026-05-21T12:00:00Z")
+    roots, _paths = _db_free_pass_env(monkeypatch, tmp_path, generated_at=now)
+    lock_path = roots["workspace_root"] / "scheduler.lock"
     with lock_path.open("wb") as handle:
         handle.truncate(MAX_LOCK_PAYLOAD_BYTES + 1)
     before_stat = lock_path.stat()
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), lock_path=lock_path)
+    config = _config(roots["workspace_root"], db_free=True, now=now, lock_path=lock_path)
     scheduler = ProductionScheduler(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
@@ -20685,8 +20756,8 @@ def test_oversized_existing_lock_is_rejected_without_full_read(tmp_path: Path) -
     assert after_stat.st_mtime_ns == before_stat.st_mtime_ns
 
 
-def test_dry_run_is_non_mutating_and_does_not_call_execution_clients(tmp_path: Path) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"))
+def test_dry_run_is_non_mutating_and_does_not_call_execution_clients(tmp_path: Path, monkeypatch: Any) -> None:
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"))
     adapter = FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])
     scheduler = ProductionScheduler(
         config,
@@ -20703,8 +20774,8 @@ def test_dry_run_is_non_mutating_and_does_not_call_execution_clients(tmp_path: P
     assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
 
 
-def test_unavailable_ifs_cycle_is_evidence_only_not_db_enum_mutation(tmp_path: Path) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), sources=("IFS",))
+def test_unavailable_ifs_cycle_is_evidence_only_not_db_enum_mutation(tmp_path: Path, monkeypatch: Any) -> None:
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), sources=("IFS",))
     scheduler = ProductionScheduler(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
@@ -20719,8 +20790,11 @@ def test_unavailable_ifs_cycle_is_evidence_only_not_db_enum_mutation(tmp_path: P
     assert result.evidence["source_cycles"][0]["db_cycle_status_written"] is None
 
 
-def test_duplicate_sources_and_cycles_emit_one_candidate_with_exclusion_evidence(tmp_path: Path) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), sources=("gfs", "gfs"))
+def test_duplicate_sources_and_cycles_emit_one_candidate_with_exclusion_evidence(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), sources=("gfs", "gfs"))
     duplicate_cycle = ("2026-05-21T06:00:00Z", True)
     scheduler = ProductionScheduler(
         config,
@@ -20736,13 +20810,28 @@ def test_duplicate_sources_and_cycles_emit_one_candidate_with_exclusion_evidence
     assert result.evidence["sources"] == ["gfs"]
 
 
-def test_explicit_paths_must_stay_under_workspace(tmp_path: Path) -> None:
-    outside = tmp_path.parent / "outside-scheduler.lock"
+def test_explicit_paths_must_stay_under_workspace(tmp_path: Path, monkeypatch: Any) -> None:
+    # Was a construction-time ValueError ("lock_path / evidence_dir must be under
+    # workspace_root").  DB-free construction hands the value down
+    # (``scheduler_config/path_modes.py:168-197``) and the lock/evidence root
+    # preflight refuses it before the lock, naming the field (#3251, rule (c)).
+    roots, _paths = _db_free_pass_env(monkeypatch, tmp_path)
+    workspace_root = roots["workspace_root"]
+    outside = tmp_path / "outside-scheduler.lock"
 
-    with pytest.raises(ValueError, match="lock_path must be under workspace_root"):
-        _config(tmp_path, lock_path=outside)
-    with pytest.raises(ValueError, match="evidence_dir must be under workspace_root"):
-        _config(tmp_path, evidence_dir=outside)
+    lock_config = _config(workspace_root, db_free=True, lock_path=outside)
+    evidence_config = _config(workspace_root, db_free=True, evidence_dir=outside)
+
+    assert lock_config.lock_path == outside
+    assert [
+        (blocker["code"], blocker["field"])
+        for blocker in scheduler_module._scheduler_lock_evidence_root_preflight(lock_config)["blockers"]
+    ] == [("SCHEDULER_ROOT_LOCK_ROOT_OUT_OF_WORKSPACE", "lock_root")]
+    assert evidence_config.evidence_dir == outside
+    assert [
+        (blocker["code"], blocker["field"])
+        for blocker in scheduler_module._scheduler_lock_evidence_root_preflight(evidence_config)["blockers"]
+    ] == [("SCHEDULER_ROOT_EVIDENCE_ROOT_OUT_OF_WORKSPACE", "evidence_root")]
 
 
 def test_scheduler_slurm_array_concurrency_bound_reads_env_and_clamps_positive(
@@ -20750,32 +20839,19 @@ def test_scheduler_slurm_array_concurrency_bound_reads_env_and_clamps_positive(
     tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("NHMS_SCHEDULER_SLURM_ARRAY_CONCURRENCY_BOUND", "32")
-    config = ProductionSchedulerConfig(workspace_root=tmp_path)
+    config = ProductionSchedulerConfig(workspace_root=tmp_path, scheduler_db_free_required=True)
     assert config.slurm_array_concurrency_bound == 32
     evidence = scheduler_module._scheduler_runtime_config_evidence(config)
     assert evidence["slurm_array_concurrency_bound"] == 32
 
     monkeypatch.setenv("NHMS_SCHEDULER_SLURM_ARRAY_CONCURRENCY_BOUND", "0")
-    assert ProductionSchedulerConfig(workspace_root=tmp_path).slurm_array_concurrency_bound == 1
-
-
-def test_fresh_default_workspace_runtime_paths_are_created_safely(
-    monkeypatch: Any,
-    tmp_path: Path,
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    config = ProductionSchedulerConfig(now=_dt("2026-05-21T12:00:00Z"))
-    scheduler = ProductionScheduler(config, registry=FakeRegistry([]), adapters={})
-
-    result = scheduler.run_once()
-
-    workspace_root = tmp_path / ".nhms-workspace"
-    assert result.status == "planned"
-    assert config.workspace_root == workspace_root.resolve()
-    assert Path(config.lock_path) == workspace_root.resolve() / "scheduler" / "production-scheduler.lock"
-    assert Path(config.evidence_dir) == workspace_root.resolve() / "scheduler" / "evidence"
-    assert Path(result.artifact_path or "").is_file()
-    assert (workspace_root / "scheduler" / "production-scheduler.lock.guard").is_file()
+    assert (
+        ProductionSchedulerConfig(
+            workspace_root=tmp_path,
+            scheduler_db_free_required=True,
+        ).slurm_array_concurrency_bound
+        == 1
+    )
 
 
 def test_plan_production_cli_uses_workspace_root_env_without_explicit_flag(
@@ -20829,6 +20905,7 @@ def test_plan_production_explicit_workspace_ignores_ambient_scheduler_lock_and_e
         def run_once(self) -> SimpleResult:
             return SimpleResult({"status": "planned"})
 
+    _db_free_pass_env(monkeypatch, tmp_path)
     explicit_workspace = tmp_path / "diagnostic-workspace"
     ambient_workspace = tmp_path / "ambient-production-workspace"
     explicit_workspace.mkdir()
@@ -20841,7 +20918,10 @@ def test_plan_production_explicit_workspace_ignores_ambient_scheduler_lock_and_e
     rc = cli.main(["plan-production", "--workspace-root", str(explicit_workspace)])
 
     assert rc == 0
-    assert captured["config"].require_runtime_roots is False
+    # Was ``is False`` (an explicit-workspace dry run): DB-free mode forces the
+    # runtime roots (``scheduler_config/config.py:424-428``) (#3251, rule (c)).
+    assert captured["config"].require_runtime_roots is True
+    assert captured["config"].db_free_required is True
     assert Path(captured["config"].lock_path) == (
         explicit_workspace.resolve() / "scheduler" / "production-scheduler.lock"
     )
@@ -21043,7 +21123,7 @@ def test_production_scheduler_config_rejects_blank_scheduler_paths(tmp_path: Pat
     kwargs[field_name] = ""
 
     with pytest.raises(ValueError, match=f"{field_name} must not be blank"):
-        ProductionSchedulerConfig(**kwargs)
+        ProductionSchedulerConfig(scheduler_db_free_required=True, **kwargs)
 
 
 @pytest.mark.parametrize("env_value", ["0,12", "12, 0,12"])
@@ -21054,7 +21134,7 @@ def test_scheduler_allowed_cycle_hours_env_parses_dedupes_and_emits_runtime_evid
 ) -> None:
     monkeypatch.setenv("NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC", env_value)
 
-    config = ProductionSchedulerConfig(workspace_root=tmp_path)
+    config = ProductionSchedulerConfig(workspace_root=tmp_path, scheduler_db_free_required=True)
     evidence = scheduler_module._scheduler_runtime_config_evidence(config)
 
     assert config.allowed_cycle_hours_utc == (0, 12)
@@ -21080,7 +21160,7 @@ def test_scheduler_allowed_cycle_hours_env_fails_closed(
     monkeypatch.setenv("NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC", env_value)
 
     with pytest.raises(ValueError, match=match):
-        ProductionSchedulerConfig(workspace_root=tmp_path)
+        ProductionSchedulerConfig(workspace_root=tmp_path, scheduler_db_free_required=True)
 
 
 @pytest.mark.parametrize("allowed_cycle_hours_utc", [(12.9,), (True,), ("12",)])
@@ -21092,46 +21172,73 @@ def test_scheduler_allowed_cycle_hours_direct_config_requires_int_not_bool(
         ProductionSchedulerConfig(
             workspace_root=tmp_path,
             allowed_cycle_hours_utc=allowed_cycle_hours_utc,
+            scheduler_db_free_required=True,
         )
 
 
 def test_scheduler_allowed_cycle_hours_default_is_00_12(tmp_path: Path, monkeypatch: Any) -> None:
     monkeypatch.delenv("NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC", raising=False)
 
-    config = ProductionSchedulerConfig(workspace_root=tmp_path)
+    config = ProductionSchedulerConfig(workspace_root=tmp_path, scheduler_db_free_required=True)
 
     assert config.allowed_cycle_hours_utc == (0, 12)
 
 
-def test_default_evidence_dir_symlink_cannot_escape_workspace(tmp_path: Path) -> None:
+def test_default_evidence_dir_symlink_cannot_escape_workspace(tmp_path: Path, monkeypatch: Any) -> None:
+    # Was a construction-time ValueError; DB-free construction hands the value
+    # down (``scheduler_config/path_modes.py:198-213``) and the lock/evidence
+    # root preflight refuses the escaping evidence dir before the lock (#3251,
+    # rule (c)).  The default evidence dir needs no evidence-root env.
+    roots, _paths = _db_free_pass_env(monkeypatch, tmp_path)
+    monkeypatch.delenv("NHMS_SCHEDULER_EVIDENCE_ROOT")
+    workspace_root = roots["workspace_root"]
     outside = tmp_path.parent / f"{tmp_path.name}-outside-evidence"
     outside.mkdir()
-    evidence_link = tmp_path / "scheduler" / "evidence"
+    evidence_link = workspace_root / "scheduler" / "evidence"
     evidence_link.parent.mkdir()
     evidence_link.symlink_to(outside, target_is_directory=True)
 
-    with pytest.raises(ValueError, match="evidence_dir must be under workspace_root"):
-        _config(tmp_path)
+    config = _config(workspace_root, db_free=True)
+    preflight = scheduler_module._scheduler_lock_evidence_root_preflight(config)
 
+    assert config.evidence_dir == evidence_link
+    assert [(blocker["code"], blocker["field"]) for blocker in preflight["blockers"]] == [
+        ("SCHEDULER_ROOT_EVIDENCE_ROOT_OUT_OF_WORKSPACE", "evidence_root")
+    ]
     assert list(outside.iterdir()) == []
 
 
-def test_explicit_evidence_dir_symlink_cannot_escape_workspace(tmp_path: Path) -> None:
+def test_explicit_evidence_dir_symlink_cannot_escape_workspace(tmp_path: Path, monkeypatch: Any) -> None:
+    # Was a construction-time ValueError; DB-free construction hands the value
+    # down (``scheduler_config/path_modes.py:198-213``) and the lock/evidence
+    # root preflight refuses the escaping evidence dir before the lock (#3251,
+    # rule (c)).
+    roots, _paths = _db_free_pass_env(monkeypatch, tmp_path)
+    workspace_root = roots["workspace_root"]
     outside = tmp_path.parent / f"{tmp_path.name}-explicit-outside-evidence"
     outside.mkdir()
-    evidence_link = tmp_path / "evidence-link"
+    evidence_link = workspace_root / "evidence-link"
     evidence_link.symlink_to(outside, target_is_directory=True)
 
-    with pytest.raises(ValueError, match="evidence_dir must be under workspace_root"):
-        _config(tmp_path, evidence_dir=evidence_link)
+    config = _config(workspace_root, db_free=True, evidence_dir=evidence_link)
+    preflight = scheduler_module._scheduler_lock_evidence_root_preflight(config)
 
+    assert config.evidence_dir == evidence_link
+    assert [(blocker["code"], blocker["field"]) for blocker in preflight["blockers"]] == [
+        ("SCHEDULER_ROOT_EVIDENCE_ROOT_OUT_OF_WORKSPACE", "evidence_root")
+    ]
     assert list(outside.iterdir()) == []
 
 
 def test_evidence_final_artifact_symlink_is_not_followed(tmp_path: Path) -> None:
     pass_id = "scheduler_20260521120000_fixed"
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"))
-    scheduler = ProductionScheduler(config, registry=FakeRegistry([]), adapters={})
+    config = _config(tmp_path, db_free=True, now=_dt("2026-05-21T12:00:00Z"))
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([]),
+        adapters={},
+        active_repository=_empty_file_journal(tmp_path),
+    )
     evidence_dir = Path(config.evidence_dir)
     evidence_dir.mkdir(parents=True)
     outside_target = tmp_path.parent / f"{tmp_path.name}-outside-evidence-target.json"
@@ -21151,8 +21258,13 @@ def test_evidence_final_artifact_symlink_is_not_followed(tmp_path: Path) -> None
 
 def test_evidence_existing_artifact_file_is_not_overwritten(tmp_path: Path) -> None:
     pass_id = "scheduler_20260521120000_fixed"
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"))
-    scheduler = ProductionScheduler(config, registry=FakeRegistry([]), adapters={})
+    config = _config(tmp_path, db_free=True, now=_dt("2026-05-21T12:00:00Z"))
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([]),
+        adapters={},
+        active_repository=_empty_file_journal(tmp_path),
+    )
     evidence_dir = Path(config.evidence_dir)
     evidence_dir.mkdir(parents=True)
     artifact_path = evidence_dir / f"{pass_id}.json"
@@ -21181,7 +21293,7 @@ def test_write_evidence_rejects_unsafe_artifact_names_before_escape(
 ) -> None:
     from services.orchestrator import scheduler_evidence
 
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"))
+    config = _config(tmp_path, db_free=True, now=_dt("2026-05-21T12:00:00Z"))
     evidence_dir = Path(config.evidence_dir)
     evidence_dir.mkdir(parents=True)
     context = _scheduler_evidence_test_context(config)
@@ -21208,8 +21320,13 @@ def test_write_evidence_rejects_unsafe_artifact_names_before_escape(
 
 def test_scheduler_write_evidence_shim_rejects_traversal_artifact_name(tmp_path: Path) -> None:
     pass_id = "../escaped_scheduler_shim"
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"))
-    scheduler = ProductionScheduler(config, registry=FakeRegistry([]), adapters={})
+    config = _config(tmp_path, db_free=True, now=_dt("2026-05-21T12:00:00Z"))
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([]),
+        adapters={},
+        active_repository=_empty_file_journal(tmp_path),
+    )
     evidence_dir = Path(config.evidence_dir)
     evidence_dir.mkdir(parents=True)
     escaped_path = tmp_path / "escaped_scheduler_shim.json"
@@ -21239,7 +21356,7 @@ def test_reserve_pre_execution_evidence_rejects_unsafe_artifact_names_before_esc
     from services.orchestrator import scheduler_evidence
 
     started_at = _dt("2026-05-21T12:00:00Z")
-    config = _config(tmp_path, now=started_at, dry_run=False)
+    config = _config(tmp_path, db_free=True, now=started_at, dry_run=False)
     evidence_dir = Path(config.evidence_dir)
     evidence_dir.mkdir(parents=True)
     context = _scheduler_evidence_test_context(config)
@@ -21321,8 +21438,13 @@ def test_scheduler_evidence_private_helper_compatibility_shims_delegate(
     assert "rawsecret" not in json.dumps(shim_payload, sort_keys=True)
     assert shim_payload["evidence_pre_execution"] == {"status": "reserved"}
 
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"))
-    scheduler = ProductionScheduler(config, registry=FakeRegistry([]), adapters={})
+    config = _config(tmp_path, db_free=True, now=_dt("2026-05-21T12:00:00Z"))
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([]),
+        adapters={},
+        active_repository=_empty_file_journal(tmp_path),
+    )
     pass_id = "scheduler_20260521120000_compat"
     base_from_method = scheduler._base_evidence(pass_id, config.now or _dt("2026-05-21T12:00:00Z"))
     base_from_module = scheduler_evidence.base_evidence(
@@ -22389,7 +22511,7 @@ def test_write_evidence_still_fails_closed_when_no_degradation_tier_fits(tmp_pat
     from services.orchestrator import scheduler_evidence
 
     pass_id = "scheduler_2026072612_fail_closed"
-    config = _config(tmp_path, now=_dt("2026-07-26T12:00:00Z"))
+    config = _config(tmp_path, db_free=True, now=_dt("2026-07-26T12:00:00Z"))
     evidence_dir = Path(config.evidence_dir)
     evidence_dir.mkdir(parents=True)
     context = _scheduler_evidence_test_context(config, max_evidence_bytes=1_100)
@@ -22408,7 +22530,7 @@ def test_within_limit_evidence_keeps_full_candidate_detail_without_limit_observa
     from services.orchestrator import scheduler_evidence
 
     pass_id = "scheduler_2026072612_within_limit"
-    config = _config(tmp_path, now=_dt("2026-07-26T12:00:00Z"))
+    config = _config(tmp_path, db_free=True, now=_dt("2026-07-26T12:00:00Z"))
     evidence_dir = Path(config.evidence_dir)
     evidence_dir.mkdir(parents=True)
     context = _scheduler_evidence_test_context(config)
@@ -22418,7 +22540,11 @@ def test_within_limit_evidence_keeps_full_candidate_detail_without_limit_observa
     artifact_path = scheduler_evidence.write_evidence(context, pass_id, evidence)
     persisted = json.loads(Path(artifact_path or "").read_text(encoding="utf-8"))
 
-    assert persisted == {**original, "artifact_path": str(evidence_dir / f"{pass_id}.json")}
+    # The artifact is the file at the returned path; its recorded ``artifact_path``
+    # is the DB-free evidence-safe value (``scheduler_evidence.py:493-496``; was
+    # the real path) (#3251, rule (c)).
+    assert artifact_path == evidence_dir / f"{pass_id}.json"
+    assert persisted == {**original, "artifact_path": "[local-path]"}
     assert "limit" not in persisted
     assert persisted["status"] == "submission_failed"
     assert persisted["candidates"][0]["state_evidence"]["missing_forcing_repair"]["status"] == "requested"
@@ -22429,7 +22555,7 @@ def test_write_evidence_persists_candidate_summaries_and_pre_limit_status(tmp_pa
     from services.orchestrator import scheduler_evidence
 
     pass_id = "scheduler_2026072612_bounded_summary_write"
-    config = _config(tmp_path, now=_dt("2026-07-26T12:00:00Z"))
+    config = _config(tmp_path, db_free=True, now=_dt("2026-07-26T12:00:00Z"))
     evidence_dir = Path(config.evidence_dir)
     evidence_dir.mkdir(parents=True)
     context = _scheduler_evidence_test_context(config, max_evidence_bytes=8_000)
@@ -22455,7 +22581,7 @@ def test_write_evidence_summarizes_injected_bounded_candidate_lists_before_dropp
     from services.orchestrator import scheduler_evidence
 
     pass_id = "scheduler_2026072612_injected_bounded"
-    config = _config(tmp_path, now=_dt("2026-07-26T12:00:00Z"))
+    config = _config(tmp_path, db_free=True, now=_dt("2026-07-26T12:00:00Z"))
     evidence_dir = Path(config.evidence_dir)
     evidence_dir.mkdir(parents=True)
 
@@ -22502,7 +22628,7 @@ def test_write_evidence_summarizes_injected_bounded_candidate_lists_before_dropp
     assert _BOUNDED_INCIDENT_VERBOSE_MARKER not in serialized.decode("utf-8")
 
 
-def _submission_failed_pass_evidence(tmp_path: Path) -> dict[str, Any]:
+def _submission_failed_pass_evidence(monkeypatch: Any, tmp_path: Path) -> dict[str, Any]:
     """A REAL pass whose unit chain died inside ``orchestrate_cycle`` (#2570).
 
     Not a hand-written row: the dispatch catch-all
@@ -22512,6 +22638,9 @@ def _submission_failed_pass_evidence(tmp_path: Path) -> dict[str, Any]:
     incident shape is exactly this: pass status ``submission_failed``, candidate
     rows still ``selected``, and the traceback nowhere else — the module imports
     no logging and never prints.
+
+    The pass runs DB-free on the full env rooted at ``tmp_path``; the env is
+    undone on return, so the caller's own configs see none of it (#3251).
     """
 
     class _ChainKillingOrchestrator(FakeProductionOrchestrator):
@@ -22524,13 +22653,14 @@ def _submission_failed_pass_evidence(tmp_path: Path) -> dict[str, Any]:
             self.calls.append({"source": source, "cycle_time": cycle_time, "basins": basins})
             raise RuntimeError("dictionary changed size during iteration")
 
-    scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
-        registry=FakeRegistry([_model("model_a", "basin_a")]),
-        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        orchestrator_factory=lambda _source_id: _ChainKillingOrchestrator(),
-    )
-    evidence = json.loads(json.dumps(scheduler.run_once().evidence))
+    with monkeypatch.context() as pass_env:
+        scheduler = ProductionScheduler(
+            _db_free_pass_config(pass_env, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+            registry=FakeRegistry([_model("model_a", "basin_a")]),
+            adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+            orchestrator_factory=lambda _source_id: _ChainKillingOrchestrator(),
+        )
+        evidence = json.loads(json.dumps(scheduler.run_once().evidence))
     failure_row = evidence["model_run_evidence"][0]
     assert evidence["status"] == "submission_failed"
     assert failure_row["error_code"] == "PRODUCTION_ORCHESTRATION_FAILED"
@@ -22538,7 +22668,12 @@ def _submission_failed_pass_evidence(tmp_path: Path) -> dict[str, Any]:
     return evidence
 
 
-def _output_uri_blocked_model_run_evidence(tmp_path: Path, *, model_count: int) -> list[dict[str, Any]]:
+def _output_uri_blocked_model_run_evidence(
+    monkeypatch: Any,
+    tmp_path: Path,
+    *,
+    model_count: int,
+) -> list[dict[str, Any]]:
     """REAL ``OUTPUT_URI_UNAVAILABLE`` rows: an ``error_code``, and no crash site.
 
     The same ``model_run_evidence`` list takes ``error_code`` rows from six
@@ -22547,16 +22682,22 @@ def _output_uri_blocked_model_run_evidence(tmp_path: Path, *, model_count: int) 
     earlier, tail-less kind, produced by the object-store lookup returning no
     URI, so the projection's cap is exercised against the shape the producer
     really emits rather than a hand-forged dict.
+
+    The pass runs DB-free on the full env rooted at ``tmp_path``, undone on
+    return (#3251).
     """
 
     orchestrator = FakeProductionOrchestrator(expose_object_store=False)
-    scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
-        registry=FakeRegistry([_model(f"model_{index:03d}", f"basin_{index:03d}") for index in range(model_count)]),
-        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        orchestrator_factory=lambda _source_id: orchestrator,
-    )
-    rows = json.loads(json.dumps(scheduler.run_once().evidence))["model_run_evidence"]
+    with monkeypatch.context() as pass_env:
+        scheduler = ProductionScheduler(
+            _db_free_pass_config(pass_env, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+            registry=FakeRegistry(
+                [_model(f"model_{index:03d}", f"basin_{index:03d}") for index in range(model_count)]
+            ),
+            adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+            orchestrator_factory=lambda _source_id: orchestrator,
+        )
+        rows = json.loads(json.dumps(scheduler.run_once().evidence))["model_run_evidence"]
     assert len(rows) == model_count
     assert all(row["error_code"] == "OUTPUT_URI_UNAVAILABLE" for row in rows)
     assert not any("error_traceback_tail" in row for row in rows)
@@ -22567,7 +22708,7 @@ def _compact_evidence_size(payload: Mapping[str, Any]) -> int:
     return len(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8"))
 
 
-def test_bounded_fallback_keeps_the_model_run_failure_cause(tmp_path: Path) -> None:
+def test_bounded_fallback_keeps_the_model_run_failure_cause(tmp_path: Path, monkeypatch: Any) -> None:
     """#2570: the fallback rebuilt the payload WITHOUT ``model_run_evidence``.
 
     Four node-22 passes landed as ``resource_limit_blocked`` with the crash site
@@ -22577,12 +22718,12 @@ def test_bounded_fallback_keeps_the_model_run_failure_cause(tmp_path: Path) -> N
     from services.orchestrator import scheduler_evidence
 
     pass_id = "scheduler_2026052112_model_run_failure_cause"
-    evidence = _submission_failed_pass_evidence(tmp_path / "pass")
+    evidence = _submission_failed_pass_evidence(monkeypatch, tmp_path / "pass")
     expected_row = evidence["model_run_evidence"][0]
     expected_tail = expected_row["error_traceback_tail"]
     max_evidence_bytes = _compact_evidence_size(evidence) // 2
 
-    config = _config(tmp_path / "write", now=_dt("2026-05-21T12:00:00Z"))
+    config = _config(tmp_path / "write", db_free=True, now=_dt("2026-05-21T12:00:00Z"))
     evidence_dir = Path(config.evidence_dir)
     evidence_dir.mkdir(parents=True)
     context = _scheduler_evidence_test_context(config, max_evidence_bytes=max_evidence_bytes)
@@ -22624,7 +22765,7 @@ def test_bounded_fallback_keeps_the_model_run_failure_cause(tmp_path: Path) -> N
     assert persisted["candidates"]
 
 
-def test_bounded_fallback_model_run_failure_projection_reports_its_overflow(tmp_path: Path) -> None:
+def test_bounded_fallback_model_run_failure_projection_reports_its_overflow(tmp_path: Path, monkeypatch: Any) -> None:
     """A cap that silently swallowed rows would repeat the bug at a smaller scale."""
 
     from services.orchestrator import scheduler_evidence
@@ -22634,7 +22775,7 @@ def test_bounded_fallback_model_run_failure_projection_reports_its_overflow(tmp_
     # at import time, which would leave "an overflow stays visible" -- the
     # actual claim -- never falsified.
     failed_count = 200
-    evidence = _submission_failed_pass_evidence(tmp_path / "pass")
+    evidence = _submission_failed_pass_evidence(monkeypatch, tmp_path / "pass")
     producer_row = evidence["model_run_evidence"][0]
     # One producer-written row per submitted candidate of the dead unit: the
     # incident pass carried 96 of them.  Only the identities vary.
@@ -22677,7 +22818,7 @@ def test_bounded_fallback_model_run_failure_projection_reports_its_overflow(tmp_
     ]
 
 
-def test_bounded_model_run_failure_cap_never_evicts_the_only_crash_site(tmp_path: Path) -> None:
+def test_bounded_model_run_failure_cap_never_evicts_the_only_crash_site(tmp_path: Path, monkeypatch: Any) -> None:
     """A cycle's worth of tail-less blocked rows must not crowd out the cause.
 
     ``OUTPUT_URI_UNAVAILABLE`` / ``RAW_INPUT_STAGING_FAILED`` rows are appended
@@ -22689,8 +22830,8 @@ def test_bounded_model_run_failure_cap_never_evicts_the_only_crash_site(tmp_path
 
     from services.orchestrator import scheduler_evidence
 
-    blocked_rows = _output_uri_blocked_model_run_evidence(tmp_path / "blocked", model_count=70)
-    evidence = _submission_failed_pass_evidence(tmp_path / "pass")
+    blocked_rows = _output_uri_blocked_model_run_evidence(monkeypatch, tmp_path / "blocked", model_count=70)
+    evidence = _submission_failed_pass_evidence(monkeypatch, tmp_path / "pass")
     crash_row = evidence["model_run_evidence"][0]
     assert crash_row["error_traceback_tail"]
     # The blocked rows alone already overflow the cap, and they come first.
@@ -22718,12 +22859,12 @@ def test_bounded_model_run_failure_cap_never_evicts_the_only_crash_site(tmp_path
     assert marker["retained"] == len(kept) < marker["failed_total"]
 
 
-def test_bounded_fallback_sheds_the_model_run_failure_projection_last(tmp_path: Path) -> None:
+def test_bounded_fallback_sheds_the_model_run_failure_projection_last(tmp_path: Path, monkeypatch: Any) -> None:
     """The failure cause outlives every other droppable field, then says it was cut."""
 
     from services.orchestrator import scheduler_evidence
 
-    evidence = _submission_failed_pass_evidence(tmp_path / "pass")
+    evidence = _submission_failed_pass_evidence(monkeypatch, tmp_path / "pass")
     incident = _incident_scheduler_evidence_payload("scheduler_2026052112_shed_order")
     evidence["candidates"] = incident["candidates"]
     evidence["blocked_candidates"] = incident["blocked_candidates"]
@@ -22806,12 +22947,15 @@ def test_bounded_fallback_omits_the_model_run_failure_key_when_nothing_failed() 
     assert "model_run_failures" not in succeeded["limit"]
 
 
-def test_bounded_fallback_reprojects_the_failure_cause_of_an_already_bounded_payload(tmp_path: Path) -> None:
+def test_bounded_fallback_reprojects_the_failure_cause_of_an_already_bounded_payload(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
     """A fallback product no longer has ``model_run_evidence``; its projection is the record."""
 
     from services.orchestrator import scheduler_evidence
 
-    evidence = _submission_failed_pass_evidence(tmp_path / "pass")
+    evidence = _submission_failed_pass_evidence(monkeypatch, tmp_path / "pass")
     bounded = scheduler_evidence.bounded_evidence_payload(
         evidence,
         reason="evidence_size_limit_exceeded",
@@ -23219,7 +23363,7 @@ def test_write_evidence_bounds_serialized_payload_before_artifact_creation(tmp_p
     from services.orchestrator import scheduler_evidence
 
     pass_id = "scheduler_20260521120000_bounded_write"
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"))
+    config = _config(tmp_path, db_free=True, now=_dt("2026-05-21T12:00:00Z"))
     evidence_dir = Path(config.evidence_dir)
     evidence_dir.mkdir(parents=True)
     context = _scheduler_evidence_test_context(config, max_evidence_bytes=2_200)
@@ -23232,7 +23376,11 @@ def test_write_evidence_bounds_serialized_payload_before_artifact_creation(tmp_p
     assert len(serialized) <= 2_200
     assert persisted["status"] == "resource_limit_blocked"
     assert persisted["limit"]["max_evidence_bytes"] == 2_200
-    assert persisted["artifact_path"] == str(evidence_dir / f"{pass_id}.json")
+    # The recorded ``artifact_path`` is the DB-free evidence-safe value
+    # (``scheduler_evidence.py:493-496``; was the real path), and the artifact is
+    # the file at the returned path (#3251, rule (c)).
+    assert artifact_path == evidence_dir / f"{pass_id}.json"
+    assert persisted["artifact_path"] == "[local-path]"
     required_core_keys = {
         "schema_version",
         "pass_id",
@@ -23282,7 +23430,7 @@ def test_write_evidence_fails_before_artifact_creation_when_bounded_core_cannot_
     from services.orchestrator import scheduler_evidence
 
     pass_id = "scheduler_20260521120000_tiny_limit"
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"))
+    config = _config(tmp_path, db_free=True, now=_dt("2026-05-21T12:00:00Z"))
     evidence_dir = Path(config.evidence_dir)
     evidence_dir.mkdir(parents=True)
     context = _scheduler_evidence_test_context(config, max_evidence_bytes=1_200)
@@ -23302,7 +23450,7 @@ def test_scheduler_evidence_context_accepts_exported_keyword_callbacks(tmp_path:
     from services.orchestrator import scheduler_evidence
 
     started_at = _dt("2026-05-21T12:00:00Z")
-    config = _config(tmp_path, now=started_at, dry_run=False)
+    config = _config(tmp_path, db_free=True, now=started_at, dry_run=False)
     evidence_dir = Path(config.evidence_dir)
     evidence_dir.mkdir(parents=True)
     context = scheduler_evidence.SchedulerEvidenceWriteContext(
@@ -23313,8 +23461,11 @@ def test_scheduler_evidence_context_accepts_exported_keyword_callbacks(tmp_path:
         # bytes to the fallback's limit block, so at 1_500 this payload now
         # reaches the terminal `_compact_limit` floor (reason only) instead of
         # the observability floor this test is about. The budget moves; the
-        # asserted shape does not.
-        max_evidence_bytes=1_700,
+        # asserted shape does not.  1_700 -> 1_500 (#3251): DB-free evidence
+        # records ``artifact_path`` as ``[local-path]``, a fixed 12 bytes instead
+        # of the real path, so at 1_700 the payload fits the non-blocking summary
+        # tier; the observability floor now spans 1_360..1_600 bytes.
+        max_evidence_bytes=1_500,
         bounded_evidence_payload=scheduler_evidence.bounded_evidence_payload,
         write_new_regular_file=scheduler_evidence.write_new_regular_file,
         require_evidence_artifact_available=scheduler_evidence.require_evidence_artifact_available,
@@ -23358,17 +23509,21 @@ def test_scheduler_evidence_context_accepts_exported_keyword_callbacks(tmp_path:
     assert persisted_reservation["status"] == "reserved"
     assert persisted_reservation["proof"] == "scheduler_evidence_directory_write_before_production_mutation"
     assert persisted_final["status"] == "resource_limit_blocked"
-    assert len(Path(artifact_path or "").read_bytes()) <= 1_700
+    assert len(Path(artifact_path or "").read_bytes()) <= 1_500
     assert persisted_final["limit"] == {
         "reason": "evidence_size_limit_exceeded",
-        "max_evidence_bytes": 1_700,
+        "max_evidence_bytes": 1_500,
         "pre_limit_status": "submitted",
         "candidate_lists": "dropped",
         "source_cycles": {"status": "summarized", "breaker_released_total": 0, "retained": 0},
     }
     assert persisted_final["evidence_pre_execution"]["status"] == "reserved"
     assert evidence["status"] == "resource_limit_blocked"
-    assert evidence["artifact_path"] == str(evidence_dir / f"{pass_id}.json")
+    # DB-free evidence records the evidence-safe ``artifact_path``
+    # (``scheduler_evidence.py:493-496``; was the real path); the artifact is
+    # the file at the returned path (#3251, rule (c)).
+    assert artifact_path == evidence_dir / f"{pass_id}.json"
+    assert evidence["artifact_path"] == "[local-path]"
 
     blocked_pass_id = f"{pass_id}_blocked"
     blocked_pre_execution_artifact = evidence_dir / f"{blocked_pass_id}.pre_execution.json"
@@ -23385,7 +23540,10 @@ def test_scheduler_evidence_context_accepts_exported_keyword_callbacks(tmp_path:
     assert blocked["status"] == "blocked"
     assert blocked["reason"] == "evidence_artifact_exists"
     assert blocked["error_code"] == "EVIDENCE_WRITE_PRECHECK_FAILED"
-    assert blocked["artifact_path"] == str(blocked_pre_execution_artifact)
+    # Evidence-safe in DB-free mode (``scheduler_evidence.py:493-496``; was the
+    # real path); the file it names is the one left untouched below (#3251,
+    # rule (c)).
+    assert blocked["artifact_path"] == "[local-path]"
     assert blocked_pre_execution_artifact.read_text(encoding="utf-8") == "existing pre-execution\n"
 
 
@@ -23427,10 +23585,10 @@ def test_non_dry_run_blocks_before_candidate_execution_when_evidence_reservation
 
     monkeypatch.setattr(scheduler_module, "_write_new_regular_file", fail_pre_execution_artifact)
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=FakeActiveRepository(active=False),
+        active_repository=_empty_file_journal(tmp_path / "workspace"),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -23455,15 +23613,15 @@ def test_non_dry_run_blocks_before_candidate_execution_when_final_evidence_artif
 
     monkeypatch.setattr(scheduler_module, "uuid4", lambda: type("FixedUUID", (), {"hex": "abcdef1234567890"})())
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=fixed_pass_started_at, dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=fixed_pass_started_at, dry_run=False),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=FakeActiveRepository(active=False),
+        active_repository=_empty_file_journal(tmp_path / "workspace"),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
     pass_id = "scheduler_2026052112_abcdef123456"
     evidence_dir = Path(scheduler.config.evidence_dir)
-    evidence_dir.mkdir(parents=True)
+    evidence_dir.mkdir(parents=True, exist_ok=True)
     (evidence_dir / f"{pass_id}.json").write_text("existing\n", encoding="utf-8")
 
     result = scheduler.run_once()
@@ -23505,14 +23663,14 @@ def test_pre_execution_blocked_final_runtime_error_returns_no_artifact(
     monkeypatch.setattr(scheduler_module, "uuid4", lambda: type("FixedUUID", (), {"hex": suffix})())
     monkeypatch.setattr(scheduler_module, "_write_new_regular_file", fail_final_evidence_artifact)
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=now, dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=now, dry_run=False),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=FakeActiveRepository(active=False),
+        active_repository=_empty_file_journal(tmp_path / "workspace"),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
     reservation_path = Path(scheduler.config.evidence_dir) / f"{pass_id}.pre_execution.json"
-    reservation_path.parent.mkdir(parents=True)
+    reservation_path.parent.mkdir(parents=True, exist_ok=True)
     reservation_path.write_text("existing reservation\n", encoding="utf-8")
 
     result = scheduler.run_once()
@@ -23523,7 +23681,11 @@ def test_pre_execution_blocked_final_runtime_error_returns_no_artifact(
     assert result.evidence["evidence_pre_execution"]["status"] == "blocked"
     assert result.evidence["evidence_pre_execution"]["reason"] == "evidence_artifact_exists"
     assert result.evidence["evidence_write_error"]["reason"] == "evidence_write_failed"
-    assert result.evidence["evidence_write_error"]["error"] == "forced final evidence failure"
+    # DB-free evidence records the error type, not its text
+    # (``scheduler_evidence.py:803-804``; was ``error == "forced final evidence
+    # failure"``) (#3251, rule (c)).
+    assert result.evidence["evidence_write_error"]["error_type"] == "RuntimeError"
+    assert "forced final evidence failure" not in json.dumps(result.evidence)
 
 
 def test_db_free_evidence_reservation_blocker_masks_artifact_path(
@@ -23740,7 +23902,8 @@ def test_normal_mutation_sees_pre_execution_reservation_before_forcing_and_submi
     suffix = "444455556666"
     pass_id = f"scheduler_{format_cycle_time(now)}_{suffix}"
     monkeypatch.setattr(scheduler_module, "uuid4", lambda: type("FixedUUID", (), {"hex": suffix})())
-    reservation_path = tmp_path / "scheduler" / "evidence" / f"{pass_id}.pre_execution.json"
+    # The DB-free env's evidence root (`_db_free_pass_env`).
+    reservation_path = tmp_path / "workspace" / "evidence" / f"{pass_id}.pre_execution.json"
     producer_observations: list[dict[str, Any]] = []
     submit_observations: list[dict[str, Any]] = []
 
@@ -23776,10 +23939,10 @@ def test_normal_mutation_sees_pre_execution_reservation_before_forcing_and_submi
     forcing_producer = ReservationCheckingForcingProducer()
     orchestrator = ReservationCheckingOrchestrator()
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=now, dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=now, dry_run=False),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=FakeActiveRepository(active=False),
+        active_repository=_empty_file_journal(tmp_path / "workspace"),
         canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
         forcing_producer=forcing_producer,
         orchestrator_factory=lambda _source_id: orchestrator,
@@ -23796,7 +23959,9 @@ def test_normal_mutation_sees_pre_execution_reservation_before_forcing_and_submi
     assert len(orchestrator.calls) == 1
     for evidence in (result.evidence, persisted):
         assert evidence["evidence_pre_execution"]["status"] == "reserved"
-        assert evidence["evidence_pre_execution"]["artifact_path"] == str(reservation_path)
+        # Evidence-safe in DB-free mode (``scheduler_evidence.py:412``; was the
+        # real path); the orchestrator saw the file itself above (#3251, rule (c)).
+        assert evidence["evidence_pre_execution"]["artifact_path"] == "[local-path]"
         assert evidence["evidence_pre_execution"]["proof"] == (
             "scheduler_evidence_directory_write_before_production_mutation"
         )
@@ -23812,17 +23977,27 @@ def test_cancel_active_slurm_blocks_before_cancel_when_final_evidence_artifact_e
     orchestrator = FakeProductionOrchestrator()
     monkeypatch.setattr(scheduler_module, "uuid4", lambda: type("FixedUUID", (), {"hex": "abcdef1234567890"})())
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=fixed_pass_started_at, dry_run=False, cancel_active_slurm=True),
+        _db_free_pass_config(
+            monkeypatch,
+            tmp_path,
+            now=fixed_pass_started_at,
+            dry_run=False,
+            cancel_active_slurm=True,
+        ),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=FakeSlurmActiveRepository(
-            active_jobs=[{"job_id": "job_forcing", "slurm_job_id": "7777", "stage": "forcing", "status": "running"}]
+        active_repository=_db_free_journal_stand_in(
+            FakeSlurmActiveRepository(
+                active_jobs=[
+                    {"job_id": "job_forcing", "slurm_job_id": "7777", "stage": "forcing", "status": "running"}
+                ]
+            )
         ),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
     pass_id = "scheduler_2026052112_abcdef123456"
     evidence_dir = Path(scheduler.config.evidence_dir)
-    evidence_dir.mkdir(parents=True)
+    evidence_dir.mkdir(parents=True, exist_ok=True)
     (evidence_dir / f"{pass_id}.json").write_text("existing\n", encoding="utf-8")
 
     result = scheduler.run_once()
@@ -23853,16 +24028,16 @@ def test_pre_execution_existing_regular_artifact_blocks_before_forcing_and_submi
     forcing_producer = FakeForcingProducer()
     orchestrator = FakeProductionOrchestrator()
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=now, dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=now, dry_run=False),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=FakeActiveRepository(active=False),
+        active_repository=_empty_file_journal(tmp_path / "workspace"),
         canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
         forcing_producer=forcing_producer,
         orchestrator_factory=lambda _source_id: orchestrator,
     )
     reservation_path = Path(scheduler.config.evidence_dir) / f"{pass_id}.pre_execution.json"
-    reservation_path.parent.mkdir(parents=True)
+    reservation_path.parent.mkdir(parents=True, exist_ok=True)
     reservation_path.write_text("existing reservation\n", encoding="utf-8")
 
     result = scheduler.run_once()
@@ -23880,7 +24055,9 @@ def test_pre_execution_existing_regular_artifact_blocks_before_forcing_and_submi
         assert evidence["evidence_pre_execution"]["status"] == "blocked"
         assert evidence["evidence_pre_execution"]["reason"] == "evidence_artifact_exists"
         assert evidence["evidence_pre_execution"]["error_code"] == "EVIDENCE_WRITE_PRECHECK_FAILED"
-        assert evidence["evidence_pre_execution"]["artifact_path"] == str(reservation_path)
+        # Evidence-safe in DB-free mode (``scheduler_evidence.py:493-496``; was
+        # the real path); the file is the one left untouched above (#3251, rule (c)).
+        assert evidence["evidence_pre_execution"]["artifact_path"] == "[local-path]"
         assert evidence["model_run_evidence"][0]["error_code"] == "EVIDENCE_WRITE_PRECHECK_FAILED"
         assert evidence["model_run_evidence"][0]["submitted"] is False
         assert evidence["model_run_evidence"][0]["mutation_occurred"] is False
@@ -23905,16 +24082,16 @@ def test_pre_execution_evidence_block_forces_retention_dry_run_before_deletion(
     forcing_producer = FakeForcingProducer()
     orchestrator = FakeProductionOrchestrator()
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=now, dry_run=False, object_store_root=object_store_root),
+        _db_free_pass_config(monkeypatch, tmp_path, now=now, dry_run=False, object_store_root=object_store_root),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=FakeActiveRepository(active=False),
+        active_repository=_empty_file_journal(tmp_path / "workspace"),
         canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
         forcing_producer=forcing_producer,
         orchestrator_factory=lambda _source_id: orchestrator,
     )
     reservation_path = Path(scheduler.config.evidence_dir) / f"{pass_id}.pre_execution.json"
-    reservation_path.parent.mkdir(parents=True)
+    reservation_path.parent.mkdir(parents=True, exist_ok=True)
     reservation_path.write_text("existing reservation\n", encoding="utf-8")
 
     result = scheduler.run_once()
@@ -23975,7 +24152,8 @@ def test_run_once_retention_exempts_in_flight_cycle_and_still_collects_older_one
     monkeypatch.delenv("NHMS_RETENTION_DAYS", raising=False)
     orchestrator = FakeProductionOrchestrator()
     scheduler = ProductionScheduler(
-        _config(
+        _db_free_pass_config(
+            monkeypatch,
             tmp_path,
             now=now,
             dry_run=False,
@@ -23985,7 +24163,7 @@ def test_run_once_retention_exempts_in_flight_cycle_and_still_collects_older_one
         ),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-07T06:00:00Z", True)])},
-        active_repository=FakeActiveRepository(active=False),
+        active_repository=_empty_file_journal(tmp_path / "workspace"),
         canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
         forcing_producer=FakeForcingProducer(),
         orchestrator_factory=lambda _source_id: orchestrator,
@@ -24040,16 +24218,20 @@ def test_pre_execution_symlink_artifact_blocks_before_status_sync_and_preserves_
 
     orchestrator = SyncMustNotRunOrchestrator()
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=now, dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=now, dry_run=False),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=FakeSlurmActiveRepository(
-            active_jobs=[{"job_id": "job_forcing", "slurm_job_id": "7777", "stage": "forcing", "status": "running"}]
+        active_repository=_db_free_journal_stand_in(
+            FakeSlurmActiveRepository(
+                active_jobs=[
+                    {"job_id": "job_forcing", "slurm_job_id": "7777", "stage": "forcing", "status": "running"}
+                ]
+            )
         ),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
     reservation_path = Path(scheduler.config.evidence_dir) / f"{pass_id}.pre_execution.json"
-    reservation_path.parent.mkdir(parents=True)
+    reservation_path.parent.mkdir(parents=True, exist_ok=True)
     outside_target = tmp_path.parent / f"{tmp_path.name}-pre-execution-outside-target.json"
     outside_target.write_text("keep outside\n", encoding="utf-8")
     reservation_path.symlink_to(outside_target)
@@ -24071,7 +24253,9 @@ def test_pre_execution_symlink_artifact_blocks_before_status_sync_and_preserves_
         assert evidence["evidence_pre_execution"]["status"] == "blocked"
         assert evidence["evidence_pre_execution"]["reason"] == "unsafe_evidence_artifact"
         assert evidence["evidence_pre_execution"]["error_code"] == "EVIDENCE_WRITE_PRECHECK_FAILED"
-        assert evidence["evidence_pre_execution"]["artifact_path"] == str(reservation_path)
+        # Evidence-safe in DB-free mode (``scheduler_evidence.py:493-496``; was
+        # the real path); the symlink itself is checked above (#3251, rule (c)).
+        assert evidence["evidence_pre_execution"]["artifact_path"] == "[local-path]"
         assert evidence["slurm_status_sync_proof"]["status"] == "preflight_blocked"
         assert evidence["slurm_status_sync_proof"]["sync_called"] is False
         assert evidence["model_run_evidence"][0]["error_code"] == "EVIDENCE_WRITE_PRECHECK_FAILED"
@@ -24090,11 +24274,15 @@ def test_pre_execution_non_regular_artifact_blocks_before_cancel(
     forcing_producer = FakeForcingProducer()
     orchestrator = FakeProductionOrchestrator()
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=now, dry_run=False, cancel_active_slurm=True),
+        _db_free_pass_config(monkeypatch, tmp_path, now=now, dry_run=False, cancel_active_slurm=True),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=FakeSlurmActiveRepository(
-            active_jobs=[{"job_id": "job_forcing", "slurm_job_id": "7777", "stage": "forcing", "status": "running"}]
+        active_repository=_db_free_journal_stand_in(
+            FakeSlurmActiveRepository(
+                active_jobs=[
+                    {"job_id": "job_forcing", "slurm_job_id": "7777", "stage": "forcing", "status": "running"}
+                ]
+            )
         ),
         forcing_producer=forcing_producer,
         orchestrator_factory=lambda _source_id: orchestrator,
@@ -24118,7 +24306,9 @@ def test_pre_execution_non_regular_artifact_blocks_before_cancel(
         assert evidence["evidence_pre_execution"]["status"] == "blocked"
         assert evidence["evidence_pre_execution"]["reason"] == "unsafe_evidence_artifact"
         assert evidence["evidence_pre_execution"]["error_code"] == "EVIDENCE_WRITE_PRECHECK_FAILED"
-        assert evidence["evidence_pre_execution"]["artifact_path"] == str(reservation_path)
+        # Evidence-safe in DB-free mode (``scheduler_evidence.py:493-496``; was
+        # the real path); the directory itself is checked above (#3251, rule (c)).
+        assert evidence["evidence_pre_execution"]["artifact_path"] == "[local-path]"
         assert evidence["model_run_evidence"] == []
         assert evidence["slurm_cancellation_proof"]["status"] == "preflight_blocked"
         cancellation = evidence["slurm_cancellation_evidence"][0]
@@ -24127,13 +24317,16 @@ def test_pre_execution_non_regular_artifact_blocks_before_cancel(
         assert cancellation["mutation_occurred"] is False
 
 
-def test_stale_unowned_lock_is_not_unlinked(tmp_path: Path) -> None:
-    lock_path = tmp_path / "scheduler.lock"
+def test_stale_unowned_lock_is_not_unlinked(tmp_path: Path, monkeypatch: Any) -> None:
+    now = _dt("2026-05-21T12:00:00Z")
+    roots, _paths = _db_free_pass_env(monkeypatch, tmp_path, generated_at=now)
+    lock_path = roots["workspace_root"] / "scheduler.lock"
     lock_path.write_text(json.dumps({"pass_id": "foreign"}), encoding="utf-8")
     os.utime(lock_path, (1, 1))
     config = _config(
-        tmp_path,
-        now=_dt("2026-05-21T12:00:00Z"),
+        roots["workspace_root"],
+        db_free=True,
+        now=now,
         lock_path=lock_path,
         lock_ttl_seconds=1,
     )
@@ -24151,14 +24344,17 @@ def test_stale_unowned_lock_is_not_unlinked(tmp_path: Path) -> None:
     assert json.loads(lock_path.read_text(encoding="utf-8")) == {"pass_id": "foreign"}
 
 
-def test_stale_lock_symlink_is_not_unlinked(tmp_path: Path) -> None:
-    target = tmp_path / "target.json"
+def test_stale_lock_symlink_is_not_unlinked(tmp_path: Path, monkeypatch: Any) -> None:
+    now = _dt("2026-05-21T12:00:00Z")
+    roots, _paths = _db_free_pass_env(monkeypatch, tmp_path, generated_at=now)
+    target = roots["workspace_root"] / "target.json"
     target.write_text("keep", encoding="utf-8")
-    lock_path = tmp_path / "scheduler.lock"
+    lock_path = roots["workspace_root"] / "scheduler.lock"
     lock_path.symlink_to(target)
     config = _config(
-        tmp_path,
-        now=_dt("2026-05-21T12:00:00Z"),
+        roots["workspace_root"],
+        db_free=True,
+        now=now,
         lock_path=lock_path,
         lock_ttl_seconds=1,
     )
@@ -24176,12 +24372,14 @@ def test_stale_lock_symlink_is_not_unlinked(tmp_path: Path) -> None:
     assert target.read_text(encoding="utf-8") == "keep"
 
 
-def test_lock_guard_symlink_is_not_opened_or_written(tmp_path: Path) -> None:
-    lock_path = tmp_path / "scheduler.lock"
+def test_lock_guard_symlink_is_not_opened_or_written(tmp_path: Path, monkeypatch: Any) -> None:
+    now = _dt("2026-05-21T12:00:00Z")
+    roots, _paths = _db_free_pass_env(monkeypatch, tmp_path, generated_at=now)
+    lock_path = roots["workspace_root"] / "scheduler.lock"
     outside_guard = tmp_path.parent / f"{tmp_path.name}-outside-guard"
     guard_path = lock_path.with_name(f"{lock_path.name}.guard")
     guard_path.symlink_to(outside_guard)
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), lock_path=lock_path)
+    config = _config(roots["workspace_root"], db_free=True, now=now, lock_path=lock_path)
     scheduler = ProductionScheduler(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
@@ -24294,7 +24492,7 @@ def test_legacy_only_guard_alias_makes_the_scheduler_pass_lock_contended(
 ) -> None:
     monkeypatch.delenv("NHMS_SCHEDULER_LEASE_GUARD_MODE", raising=False)
     monkeypatch.setenv("NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE", "atomic")
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), evidence_dir=tmp_path / "evidence")
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"))
     scheduler = ProductionScheduler(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
@@ -24547,18 +24745,22 @@ def test_scheduler_file_provider_object_store_cache_is_bounded(
     assert next(iter(roots.object_store_cache))[0] == "published"
 
 
-def test_lock_parent_symlink_is_rejected_at_acquire_without_outside_files(tmp_path: Path) -> None:
+def test_lock_parent_symlink_is_rejected_at_acquire_without_outside_files(tmp_path: Path, monkeypatch: Any) -> None:
     outside_locks = tmp_path.parent / f"{tmp_path.name}-outside-locks"
     outside_locks.mkdir()
-    config = _config(
-        tmp_path,
-        now=_dt("2026-05-21T12:00:00Z"),
-        evidence_dir=tmp_path / "evidence",
-    )
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"))
     lock_path = Path(config.lock_path)
-    lock_path.parent.mkdir()
-    lock_path.parent.rmdir()
-    lock_path.parent.symlink_to(outside_locks, target_is_directory=True)
+    real_acquire = FileSchedulerLease.acquire
+
+    def acquire_after_lock_root_swap(self: Any, *args: Any, **kwargs: Any) -> Any:
+        # DB-free mode checks the lock root before the lock (the root preflight
+        # refuses a symlinked one as ``SCHEDULER_ROOT_LOCK_ROOT_*``), so the
+        # swap lands after that check and before the acquire it races (#3251).
+        lock_path.parent.rmdir()
+        lock_path.parent.symlink_to(outside_locks, target_is_directory=True)
+        return real_acquire(self, *args, **kwargs)
+
+    monkeypatch.setattr(FileSchedulerLease, "acquire", acquire_after_lock_root_swap)
     scheduler = ProductionScheduler(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
@@ -24567,6 +24769,7 @@ def test_lock_parent_symlink_is_rejected_at_acquire_without_outside_files(tmp_pa
 
     result = scheduler.run_once()
 
+    assert lock_path.parent.is_symlink()
     assert result.status == "lock_contended"
     assert result.evidence["lock"]["reason"] == "unsafe_lock_parent_directory"
     assert not (outside_locks / lock_path.name).exists()
@@ -24605,12 +24808,18 @@ def test_scheduler_caps_reject_oversized_config_and_bound_candidate_work(
     monkeypatch: Any,
 ) -> None:
     with pytest.raises(ValueError, match="lookback_hours exceeds limit"):
-        _config(tmp_path, lookback_hours=scheduler_module.MAX_LOOKBACK_HOURS + 1)
+        _config(tmp_path, db_free=True, lookback_hours=scheduler_module.MAX_LOOKBACK_HOURS + 1)
     with pytest.raises(ValueError, match="source count exceeds limit"):
-        _config(tmp_path, sources=("gfs", "IFS", "a", "b", "c"))
+        _config(tmp_path, db_free=True, sources=("gfs", "IFS", "a", "b", "c"))
 
     monkeypatch.setattr(scheduler_module, "MAX_CANDIDATES", 10)
-    config = _config(tmp_path, now=_dt("2026-05-21T18:00:00Z"), sources=("gfs",), max_cycles_per_source=2)
+    config = _db_free_pass_config(
+        monkeypatch,
+        tmp_path,
+        now=_dt("2026-05-21T18:00:00Z"),
+        sources=("gfs",),
+        max_cycles_per_source=2,
+    )
     models = [_model(f"model_{index:05d}", "basin_a") for index in range(11)]
     scheduler = ProductionScheduler(
         config,
@@ -24641,8 +24850,11 @@ def test_scheduler_caps_reject_oversized_config_and_bound_candidate_work(
     ), sorted(artifact)
 
 
-def test_cycle_discovery_limit_blocks_before_candidate_or_duplicate_evidence(tmp_path: Path) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), lookback_hours=1)
+def test_cycle_discovery_limit_blocks_before_candidate_or_duplicate_evidence(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), lookback_hours=1)
     scheduler = ProductionScheduler(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
@@ -24665,9 +24877,13 @@ def test_evidence_size_fallback_status_agrees_across_result_artifact_and_cli(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
-    max_evidence_bytes = 2_400
+    # 2_400 -> 4_500 (#3251): DB-free evidence carries the DB-free runtime proof
+    # (``db_free_runtime``, selectors, journal attribution), so the bounded core
+    # needs ~4_200 bytes; 4_500 is the budget the DB-free bounded tests use. The
+    # budget moves; the asserted fallback shape does not.
+    max_evidence_bytes = 4_500
     monkeypatch.setattr("services.orchestrator.scheduler.MAX_EVIDENCE_BYTES", max_evidence_bytes)
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"))
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"))
     scheduler = ProductionScheduler(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
@@ -24722,21 +24938,18 @@ def test_bounded_evidence_preserves_no_flag_root_runtime_and_preflight_proof(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr("services.orchestrator.scheduler.MAX_EVIDENCE_BYTES", 2_400)
-    roots = _scheduler_env_roots(tmp_path)
-    _set_scheduler_root_env(monkeypatch, roots)
-    monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
-    monkeypatch.setattr(
-        "services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env",
-        lambda: FakeRegistry([_model("model_a", "basin_a")]),
-    )
-    monkeypatch.setattr(
-        "services.orchestrator.scheduler._default_adapters",
-        lambda: {"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-    )
-    monkeypatch.setattr(
-        "services.orchestrator.scheduler._active_repository_from_env",
-        lambda: FakeActiveRepository(active=False),
+    # 2_400 -> 4_500 (#3251): DB-free evidence carries the DB-free runtime proof
+    # (``db_free_runtime``, selectors, journal attribution), so the bounded core
+    # needs ~4_200 bytes; 4_500 is the budget the DB-free bounded tests use. The
+    # budget moves; the asserted fallback shape does not.
+    monkeypatch.setattr("services.orchestrator.scheduler.MAX_EVIDENCE_BYTES", 4_500)
+    # The full DB-free env (its journal root holds an empty file journal); the
+    # registry and adapters come in through the DB-free factories (#3251).
+    roots, _paths = _db_free_pass_env(monkeypatch, tmp_path, generated_at=_dt("2026-05-21T12:00:00Z"))
+    _db_free_factories_return(
+        monkeypatch,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
     )
     monkeypatch.setattr(
         "services.orchestrator.scheduler._now",
@@ -24758,13 +24971,20 @@ def test_bounded_evidence_preserves_no_flag_root_runtime_and_preflight_proof(
         lock_path=None,
         evidence_dir=None,
     )
-    persisted = json.loads(Path(payload["artifact_path"]).read_text(encoding="utf-8"))
+    # ``artifact_path`` is evidence-safe in DB-free mode; the artifact is the
+    # pass's file under the evidence root.
+    assert payload["artifact_path"] == "[local-path]"
+    persisted = json.loads(
+        (roots["evidence_root"] / f"{payload['pass_id']}.json").read_text(encoding="utf-8")
+    )
 
     assert payload["status"] == "resource_limit_blocked"
     assert persisted["status"] == "resource_limit_blocked"
     for evidence in (payload, persisted):
-        assert evidence["resolved_runtime_roots"]["workspace_root"]["path"] == str(roots["workspace_root"].resolve())
-        assert evidence["resolved_runtime_roots"]["evidence_root"]["path"] == str(roots["evidence_root"].resolve())
+        # Evidence-safe in DB-free mode (``scheduler_evidence.py:807-818``; was
+        # the resolved real path) (#3251, rule (c)); the file was read above.
+        assert evidence["resolved_runtime_roots"]["workspace_root"]["path"] == "[local-path]"
+        assert evidence["resolved_runtime_roots"]["evidence_root"]["path"] == "[local-path]"
         assert evidence["runtime_config"]["require_runtime_roots"] is True
         assert evidence["runtime_config"]["service_role"] == "compute_control"
         assert evidence["root_preflight"]["status"] == "ready"
@@ -24775,28 +24995,20 @@ def test_no_flag_resource_limit_evidence_retains_runtime_root_preflight_proof(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
-    roots = _scheduler_env_roots(tmp_path)
-    _set_scheduler_root_env(monkeypatch, roots)
-    monkeypatch.delenv("NHMS_SCHEDULER_MODEL_IDS")
-    monkeypatch.delenv("NHMS_SCHEDULER_BASIN_IDS")
-    monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
+    # The full DB-free env without model/basin filters (its journal root holds
+    # an empty file journal); the registry and adapters come in through the
+    # DB-free factories (#3251).
+    roots, _paths = _db_free_pass_env(monkeypatch, tmp_path, generated_at=_dt("2026-05-21T18:00:00Z"))
     monkeypatch.setattr(scheduler_module, "MAX_CANDIDATES", 10)
-    monkeypatch.setattr(
-        "services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env",
-        lambda: FakeRegistry([_model(f"model_{index:05d}", "basin_a") for index in range(11)]),
-    )
-    monkeypatch.setattr(
-        "services.orchestrator.scheduler._default_adapters",
-        lambda: {
+    _db_free_factories_return(
+        monkeypatch,
+        registry=FakeRegistry([_model(f"model_{index:05d}", "basin_a") for index in range(11)]),
+        adapters={
             "gfs": FakeAdapter(
                 "gfs",
                 [("2026-05-21T12:00:00Z", True)],
             )
         },
-    )
-    monkeypatch.setattr(
-        "services.orchestrator.scheduler._active_repository_from_env",
-        lambda: FakeActiveRepository(active=False),
     )
     monkeypatch.setattr(
         "services.orchestrator.scheduler._now",
@@ -24818,13 +25030,20 @@ def test_no_flag_resource_limit_evidence_retains_runtime_root_preflight_proof(
         lock_path=None,
         evidence_dir=None,
     )
-    persisted = json.loads(Path(payload["artifact_path"]).read_text(encoding="utf-8"))
+    # ``artifact_path`` is evidence-safe in DB-free mode; the artifact is the
+    # pass's file under the evidence root.
+    assert payload["artifact_path"] == "[local-path]"
+    persisted = json.loads(
+        (roots["evidence_root"] / f"{payload['pass_id']}.json").read_text(encoding="utf-8")
+    )
 
     assert payload["status"] == "resource_limit_blocked"
     assert payload["limit"]["reason"] == "candidate_limit_exceeded"
     for evidence in (payload, persisted):
-        assert evidence["resolved_runtime_roots"]["workspace_root"]["path"] == str(roots["workspace_root"].resolve())
-        assert evidence["resolved_runtime_roots"]["evidence_root"]["path"] == str(roots["evidence_root"].resolve())
+        # Evidence-safe in DB-free mode (``scheduler_evidence.py:807-818``; was
+        # the resolved real path) (#3251, rule (c)); the file was read above.
+        assert evidence["resolved_runtime_roots"]["workspace_root"]["path"] == "[local-path]"
+        assert evidence["resolved_runtime_roots"]["evidence_root"]["path"] == "[local-path]"
         assert evidence["runtime_config"]["require_runtime_roots"] is True
         assert evidence["runtime_config"]["service_role"] == "compute_control"
         assert evidence["root_preflight"]["status"] == "ready"
@@ -24839,7 +25058,11 @@ def test_bounded_evidence_preserves_pre_execution_reservation_proof(
     # ``slurm_submit_proven_absent`` on execution_write_proof, so the budget is
     # nudged up to keep the artifact fitting while asserting the same
     # evidence-pre-execution / status-sync survival facts.
-    monkeypatch.setattr("services.orchestrator.scheduler.MAX_EVIDENCE_BYTES", 2_700)
+    # 2_700 -> 4_500 (#3251): DB-free evidence carries the DB-free runtime proof
+    # (``db_free_runtime``, selectors, journal attribution), so the bounded core
+    # needs ~4_200 bytes; 4_500 is the budget the DB-free bounded tests use. The
+    # budget moves; the asserted fallback shape does not.
+    monkeypatch.setattr("services.orchestrator.scheduler.MAX_EVIDENCE_BYTES", 4_500)
 
     class SyncingRepository(CandidateAndActiveRepository):
         def __init__(self) -> None:
@@ -24890,10 +25113,10 @@ def test_bounded_evidence_preserves_pre_execution_reservation_proof(
             return [{"job_id": "job_forcing", "cycle_id": cycle_id, "slurm_job_id": "7777", "status": "failed"}]
 
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=repository,
+        active_repository=_db_free_journal_stand_in(repository),
         orchestrator_factory=lambda _source_id: SyncingOrchestrator(),
     )
 
@@ -24908,7 +25131,9 @@ def test_bounded_evidence_preserves_pre_execution_reservation_proof(
             "scheduler_evidence_directory_write_before_production_mutation"
         )
         assert evidence["slurm_status_sync_proof"]["protected_by_pre_execution_evidence"] is True
-        assert evidence["resolved_runtime_roots"]["workspace_root"]["path"] == str(tmp_path.resolve())
+        # Evidence-safe in DB-free mode (``scheduler_evidence.py:807-818``; was
+        # the resolved real path) (#3251, rule (c)).
+        assert evidence["resolved_runtime_roots"]["workspace_root"]["path"] == "[local-path]"
         assert evidence["runtime_config"]["dry_run"] is False
         assert evidence["runtime_config"]["slurm_array_concurrency_bound"] == 32
         # The writer MUST have fallen back to bounded compaction for this budget
@@ -24917,8 +25142,8 @@ def test_bounded_evidence_preserves_pre_execution_reservation_proof(
         assert evidence["limit"]["reason"] == "evidence_size_limit_exceeded"
 
 
-def test_duplicate_active_model_identity_is_rejected_before_candidates(tmp_path: Path) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"))
+def test_duplicate_active_model_identity_is_rejected_before_candidates(tmp_path: Path, monkeypatch: Any) -> None:
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"))
     scheduler = ProductionScheduler(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a"), _model("model_a", "basin_b")]),
@@ -24937,6 +25162,7 @@ def test_duplicate_active_model_identity_is_rejected_before_candidates(tmp_path:
 def test_duplicate_active_package_identity_is_rejected_before_candidates_and_submission(
     tmp_path: Path,
     duplicate_field: str,
+    monkeypatch: Any,
 ) -> None:
     package_uri_a = "s3://nhms/models/shared/package/"
     package_uri_b = package_uri_a if duplicate_field == "model_package_uri" else "s3://nhms/models/other/package/"
@@ -24955,7 +25181,7 @@ def test_duplicate_active_package_identity_is_rejected_before_candidates_and_sub
     model_a["model_package_uri"] = package_uri_a
     model_b["model_package_uri"] = package_uri_b
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
         registry=FakeRegistry([model_a, model_b]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
         orchestrator_factory=lambda _source_id: StrictNoSubmitOrchestrator(),
@@ -24973,6 +25199,7 @@ def test_duplicate_active_package_identity_is_rejected_before_candidates_and_sub
 
 def test_duplicate_active_package_checksum_uses_internal_projection_without_public_leak(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
     model_a = _model(
         "model_a",
@@ -24993,7 +25220,7 @@ def test_duplicate_active_package_checksum_uses_internal_projection_without_publ
         },
     )
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
         registry=RedactingRegistry([model_a, model_b]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
         orchestrator_factory=lambda _source_id: StrictNoSubmitOrchestrator(),
@@ -25012,6 +25239,7 @@ def test_duplicate_active_package_checksum_uses_internal_projection_without_publ
 
 def test_public_only_redacted_projection_cannot_checksum_dedupe_without_internal_path(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
     model_a = _model(
         "model_a",
@@ -25032,7 +25260,7 @@ def test_public_only_redacted_projection_cannot_checksum_dedupe_without_internal
         },
     )
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z")),
+        _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z")),
         registry=PublicOnlyRedactingRegistry([model_a, model_b]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
     )
@@ -25046,10 +25274,11 @@ def test_public_only_redacted_projection_cannot_checksum_dedupe_without_internal
 def test_incomplete_production_model_metadata_is_blocked_before_candidates(
     tmp_path: Path,
     missing_field: str,
+    monkeypatch: Any,
 ) -> None:
     model = _model("model_a", "basin_a")
     model.pop(missing_field)
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"))
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"))
     scheduler = ProductionScheduler(
         config,
         registry=FakeRegistry([model]),
@@ -25065,7 +25294,10 @@ def test_incomplete_production_model_metadata_is_blocked_before_candidates(
     assert result.evidence["counts"]["selected_model_count"] == 0
 
 
-def test_bootstrapped_qhh_model_is_scheduler_ready_without_metadata_exclusions(tmp_path: Path) -> None:
+def test_bootstrapped_qhh_model_is_scheduler_ready_without_metadata_exclusions(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
     model = {
         "model_id": "basins_qhh_shud",
         "basin_id": "basins_qhh",
@@ -25086,7 +25318,7 @@ def test_bootstrapped_qhh_model_is_scheduler_ready_without_metadata_exclusions(t
         },
     }
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), model_ids=("basins_qhh_shud",)),
+        _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), model_ids=("basins_qhh_shud",)),
         registry=FakeRegistry([model]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
     )
@@ -25098,7 +25330,10 @@ def test_bootstrapped_qhh_model_is_scheduler_ready_without_metadata_exclusions(t
     assert not {"not_shud_model", "not_runnable", "incomplete_model_metadata"} & excluded_reasons
 
 
-def test_qhh_project_name_propagates_from_resource_profile_to_runtime_manifest(tmp_path: Path) -> None:
+def test_qhh_project_name_propagates_from_resource_profile_to_runtime_manifest(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
     model = {
         "model_id": "basins_qhh_shud",
         "basin_id": "basins_qhh",
@@ -25116,14 +25351,23 @@ def test_qhh_project_name_propagates_from_resource_profile_to_runtime_manifest(t
             "shud_input_name": "qhh",
             "station_count": 2,
             "output_segment_count": 2,
-            "package_checksum": "package-sha",
+            # Longer than the 12-character ``package_checksum_prefix`` that DB-free
+            # candidate evidence carries by design (``scheduler_generation.py:1354``),
+            # so "not in the evidence" still means the full checksum (#3251).
+            "package_checksum": "package-sha-0123456789abcdef",
             "source_inventory_checksum": "inventory-sha",
             "display_capabilities": {"q_down": True, "tiles": True},
         },
     }
     orchestrator = FakeProductionOrchestrator()
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False, model_ids=("basins_qhh_shud",)),
+        _db_free_pass_config(
+            monkeypatch,
+            tmp_path,
+            now=_dt("2026-05-21T12:00:00Z"),
+            dry_run=False,
+            model_ids=("basins_qhh_shud",),
+        ),
         registry=FakeRegistry([model]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
         orchestrator_factory=lambda _source_id: orchestrator,
@@ -25154,9 +25398,9 @@ def test_qhh_project_name_propagates_from_resource_profile_to_runtime_manifest(t
     assert result.status == "submitted"
     assert submitted_basin["project_name"] == "qhh"
     assert submitted_basin["shud_input_name"] == "qhh"
-    assert submitted_basin["package_checksum"] == "package-sha"
+    assert submitted_basin["package_checksum"] == "package-sha-0123456789abcdef"
     assert submitted_basin["source_inventory_checksum"] == "inventory-sha"
-    assert "package-sha" not in json.dumps(result.evidence["candidates"])
+    assert "package-sha-0123456789abcdef" not in json.dumps(result.evidence["candidates"])
     assert "inventory-sha" not in json.dumps(result.evidence["candidates"])
     assert result.evidence["candidates"][0]["resource_profile"]["package_checksum"] == "[redacted]"
     assert result.evidence["candidates"][0]["resource_profile"]["source_inventory_checksum"] == "[redacted]"
@@ -25196,7 +25440,10 @@ def test_solver_parameters_propagate_from_resource_profile_to_runtime_manifest(t
     assert assembly.runtime["solver_parameters"] == {"MAX_SOLVER_STEP": 2}
 
 
-def test_qhh_output_segment_count_propagates_separately_from_gis_segment_count(tmp_path: Path) -> None:
+def test_qhh_output_segment_count_propagates_separately_from_gis_segment_count(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
     model = {
         "model_id": "basins_qhh_shud",
         "basin_id": "basins_qhh",
@@ -25218,7 +25465,13 @@ def test_qhh_output_segment_count_propagates_separately_from_gis_segment_count(t
     }
     orchestrator = FakeProductionOrchestrator()
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False, model_ids=("basins_qhh_shud",)),
+        _db_free_pass_config(
+            monkeypatch,
+            tmp_path,
+            now=_dt("2026-05-21T12:00:00Z"),
+            dry_run=False,
+            model_ids=("basins_qhh_shud",),
+        ),
         registry=FakeRegistry([model]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
         orchestrator_factory=lambda _source_id: orchestrator,
@@ -25299,8 +25552,8 @@ def test_runtime_manifest_assembly_uses_shud_output_count_not_gis_segment_count(
     assert shud_runtime_module._project_name(manifest) == "qhh"
 
 
-def test_active_duplicate_pipeline_is_skipped_before_submission(tmp_path: Path) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"))
+def test_active_duplicate_pipeline_is_skipped_before_submission(tmp_path: Path, monkeypatch: Any) -> None:
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"))
     active_repository = FakeActiveRepository(active=True)
     scheduler = ProductionScheduler(
         config,
@@ -25316,81 +25569,6 @@ def test_active_duplicate_pipeline_is_skipped_before_submission(tmp_path: Path) 
     assert result.evidence["counts"]["candidate_count"] == 1
     assert result.evidence["counts"]["skipped_candidate_count"] == 1
     assert result.evidence["counts"]["submitted_count"] == 0
-
-
-@pytest.mark.parametrize(
-    ("database_url", "expected_code"),
-    [
-        (None, "SLURM_PREFLIGHT_DATABASE_URL_MISSING"),
-        ("postgresql://nhms:secret@localhost/nhms", "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST"),
-        ("postgresql://nhms:secret@localhost./nhms", "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST"),
-        ("postgresql://nhms:secret@LOCALHOST/nhms", "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST"),
-        ("postgresql://nhms:secret@localhost.localdomain/nhms", "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST"),
-        ("postgresql://nhms:secret@localhost.localdomain./nhms", "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST"),
-        ("postgresql://nhms:secret@ip6-localhost/nhms", "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST"),
-        ("postgresql://nhms:secret@ip6-loopback/nhms", "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST"),
-        ("postgresql://nhms:secret@foo.localhost/nhms", "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST"),
-        ("postgresql://nhms:secret@127.0.0.1/nhms", "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST"),
-        ("postgresql://nhms:secret@127.1/nhms", "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST"),
-        ("postgresql://nhms:secret@2130706433/nhms", "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST"),
-        ("postgresql://nhms:secret@127.000.000.001/nhms", "SLURM_PREFLIGHT_DATABASE_URL_UNSAFE_HOST"),
-        ("postgresql://nhms:secret@0177.0.0.1/nhms", "SLURM_PREFLIGHT_DATABASE_URL_UNSAFE_HOST"),
-        ("postgresql://nhms:secret@[::1]/nhms", "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST"),
-        ("postgresql://nhms:secret@[0:0:0:0:0:0:0:1]/nhms", "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST"),
-        ("postgresql://nhms:secret@0.0.0.0/nhms", "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST"),
-        ("postgresql://nhms:secret@[::]/nhms", "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST"),
-        ("postgresql://nhms:secret@169.254.1.1/nhms", "SLURM_PREFLIGHT_DATABASE_URL_UNSAFE_HOST"),
-        ("postgresql://nhms:secret@[fe80::1]/nhms", "SLURM_PREFLIGHT_DATABASE_URL_UNSAFE_HOST"),
-        ("postgresql://nhms:secret@169.254.1/nhms", "SLURM_PREFLIGHT_DATABASE_URL_UNSAFE_HOST"),
-        ("postgresql://nhms:secret@169.254.257/nhms", "SLURM_PREFLIGHT_DATABASE_URL_UNSAFE_HOST"),
-        ("postgresql://nhms:secret@0xa9fe0101/nhms", "SLURM_PREFLIGHT_DATABASE_URL_UNSAFE_HOST"),
-        ("postgresql://nhms:secret@2851995905/nhms", "SLURM_PREFLIGHT_DATABASE_URL_UNSAFE_HOST"),
-        ("postgresql://nhms:secret@169.254.0x101/nhms", "SLURM_PREFLIGHT_DATABASE_URL_UNSAFE_HOST"),
-        ("postgresql://nhms:secret@bad::host/nhms", "SLURM_PREFLIGHT_DATABASE_URL_UNSAFE_HOST"),
-        ("postgresql://nhms:secret@[::1/nhms", "SLURM_PREFLIGHT_DATABASE_URL_UNSAFE_HOST"),
-        ("postgresql://nhms:secret@bad host/nhms", "SLURM_PREFLIGHT_DATABASE_URL_UNSAFE_HOST"),
-        ("postgresql://nhms:secret@9999999999/nhms", "SLURM_PREFLIGHT_DATABASE_URL_UNSAFE_HOST"),
-        ("sqlite:///tmp/nhms.db", "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST"),
-    ],
-)
-def test_slurm_preflight_blocks_missing_or_localhost_database_before_submission(
-    tmp_path: Path,
-    database_url: str | None,
-    expected_code: str,
-) -> None:
-    roots = _slurm_roots(tmp_path)
-    orchestrator = FakeProductionOrchestrator()
-    config = _config(
-        roots["workspace_root"],
-        now=_dt("2026-05-21T12:00:00Z"),
-        dry_run=False,
-        slurm_execution_enabled=True,
-        database_url=database_url,
-        object_store_root=roots["object_store_root"],
-        log_root=roots["log_root"],
-        runtime_root=roots["runtime_root"],
-        allowed_storage_roots=(tmp_path,),
-    )
-    scheduler = ProductionScheduler(
-        config,
-        registry=FakeRegistry([_model("model_a", "basin_a")]),
-        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        orchestrator_factory=lambda _source_id: orchestrator,
-    )
-
-    result = scheduler.run_once()
-
-    evidence = result.evidence["model_run_evidence"][0]
-    assert result.status == "preflight_blocked"
-    assert result.evidence["execution_boundary"] == "slurm_preflight_blocked"
-    assert result.evidence["counts"]["submitted_count"] == 0
-    assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is False
-    assert evidence["status"] == "preflight_blocked"
-    assert evidence["submitted"] is False
-    assert evidence["error_code"] == expected_code
-    assert expected_code in {blocker["code"] for blocker in evidence["slurm_preflight"]["blockers"]}
-    assert "secret" not in json.dumps(evidence)
-    assert orchestrator.calls == []
 
 
 @pytest.mark.parametrize(
@@ -25434,133 +25612,27 @@ def test_database_host_classifier_conservatively_blocks_unsafe_numeric_or_malfor
     assert scheduler_module._database_host_is_unsafe(host) is True
 
 
-@pytest.mark.parametrize(
-    "database_url",
-    [
-        "postgresql://nhms:secret@db.prod.example/nhms",
-        "postgresql://nhms:secret@203.0.113.10/nhms",
-        "postgresql://nhms:secret@10.0.0.5/nhms",
-    ],
-)
-def test_slurm_preflight_accepts_remote_database_without_db_blocker(
-    tmp_path: Path,
-    database_url: str,
-) -> None:
-    roots = _slurm_roots(tmp_path)
-    orchestrator = FakeProductionOrchestrator()
-    config = _config(
-        roots["workspace_root"],
-        now=_dt("2026-05-21T12:00:00Z"),
-        dry_run=False,
-        slurm_execution_enabled=True,
-        database_url=database_url,
-        object_store_root=roots["object_store_root"],
-        log_root=roots["log_root"],
-        runtime_root=roots["runtime_root"],
-        allowed_storage_roots=(tmp_path,),
-    )
-    scheduler = ProductionScheduler(
-        config,
-        registry=FakeRegistry([_model("model_a", "basin_a")]),
-        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        orchestrator_factory=lambda _source_id: orchestrator,
-    )
-
-    result = scheduler.run_once()
-
-    assert result.status == "submitted"
-    assert result.evidence["slurm_preflight"]["status"] == "ready"
-    assert not any(
-        blocker["code"].startswith("SLURM_PREFLIGHT_DATABASE_URL")
-        for blocker in result.evidence["slurm_preflight"]["blockers"]
-    )
-    assert result.evidence["counts"]["submitted_count"] == 1
-    assert len(orchestrator.calls) == 1
-
-
-def test_slurm_preflight_blocks_localhost_database_in_continuous_mode(tmp_path: Path) -> None:
-    roots = _slurm_roots(tmp_path)
-    orchestrator = FakeProductionOrchestrator()
-    config = _config(
-        roots["workspace_root"],
-        now=_dt("2026-05-21T12:00:00Z"),
-        dry_run=False,
-        continuous=True,
-        slurm_execution_enabled=True,
-        database_url="postgresql://nhms:secret@foo.localhost/nhms",
-        object_store_root=roots["object_store_root"],
-        log_root=roots["log_root"],
-        runtime_root=roots["runtime_root"],
-        allowed_storage_roots=(tmp_path,),
-    )
-    scheduler = ProductionScheduler(
-        config,
-        registry=FakeRegistry([_model("model_a", "basin_a")]),
-        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        orchestrator_factory=lambda _source_id: orchestrator,
-    )
-
-    results = scheduler.run_continuous(max_passes=1)
-
-    evidence = results[0].evidence["model_run_evidence"][0]
-    assert results[0].status == "preflight_blocked"
-    assert results[0].evidence["counts"]["submitted_count"] == 0
-    assert evidence["error_code"] == "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST"
-    assert orchestrator.calls == []
-
-
-def test_slurm_preflight_requires_database_url_not_pipeline_database_url(
-    monkeypatch: Any,
-    tmp_path: Path,
-) -> None:
-    roots = _slurm_roots(tmp_path)
-    monkeypatch.delenv("DATABASE_URL", raising=False)
-    monkeypatch.setenv("PIPELINE_DATABASE_URL", "postgresql://nhms:secret@db.prod.example/nhms")
-    orchestrator = FakeProductionOrchestrator()
-    config = _config(
-        roots["workspace_root"],
-        now=_dt("2026-05-21T12:00:00Z"),
-        dry_run=False,
-        slurm_execution_enabled=True,
-        object_store_root=roots["object_store_root"],
-        log_root=roots["log_root"],
-        runtime_root=roots["runtime_root"],
-        allowed_storage_roots=(tmp_path,),
-    )
-    scheduler = ProductionScheduler(
-        config,
-        registry=FakeRegistry([_model("model_a", "basin_a")]),
-        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        orchestrator_factory=lambda _source_id: orchestrator,
-    )
-
-    result = scheduler.run_once()
-
-    evidence = result.evidence["model_run_evidence"][0]
-    assert config.database_url is None
-    assert result.status == "preflight_blocked"
-    assert evidence["error_code"] == "SLURM_PREFLIGHT_DATABASE_URL_MISSING"
-    assert orchestrator.calls == []
-
-
+# #3251: the object-store MISSING / OUT_OF_ROOT and runtime-root MISSING arms
+# were deleted (rule (b)).  DB-free mode forces the scheduler root preflight
+# (``scheduler_config/config.py:424-428``), which judges those two roots against
+# the same ``allowed_storage_roots`` before the Slurm preflight runs, so these
+# Slurm verdicts are reachable only with ``require_runtime_roots`` off.  The
+# DB-free refusals are pinned by ``test_no_flag_invalid_env_roots_block_before_registry_adapter_or_submit``
+# and ``test_no_flag_out_of_approved_roots_block_before_registry_adapter_or_submit``.
 @pytest.mark.parametrize(
     ("root_overrides", "expected_code"),
     [
-        ({"object_store_root": None}, "SLURM_PREFLIGHT_OBJECT_STORE_ROOT_MISSING"),
-        ({"object_store_root": "outside"}, "SLURM_PREFLIGHT_OBJECT_STORE_ROOT_OUT_OF_ROOT"),
         ({"log_root": "missing"}, "SLURM_PREFLIGHT_LOG_ROOT_NOT_VISIBLE"),
-        ({"runtime_root": None}, "SLURM_PREFLIGHT_RUNTIME_ROOT_MISSING"),
     ],
 )
 def test_slurm_preflight_blocks_missing_out_of_root_or_not_visible_storage_roots(
     tmp_path: Path,
     root_overrides: dict[str, str | None],
     expected_code: str,
+    monkeypatch: Any,
 ) -> None:
     allowed_root = tmp_path / "allowed"
-    roots = _slurm_roots(allowed_root)
-    outside = tmp_path / "outside-object-store"
-    outside.mkdir()
+    roots = _db_free_slurm_roots(monkeypatch, allowed_root, generated_at=_dt("2026-05-21T12:00:00Z"))
     missing = allowed_root / "missing-logs"
     config_kwargs: dict[str, Any] = {
         "workspace_root": roots["workspace_root"],
@@ -25569,9 +25641,7 @@ def test_slurm_preflight_blocks_missing_out_of_root_or_not_visible_storage_roots
         "runtime_root": roots["runtime_root"],
     }
     for field, value in root_overrides.items():
-        if value == "outside":
-            config_kwargs[field] = outside
-        elif value == "missing":
+        if value == "missing":
             config_kwargs[field] = missing
         else:
             config_kwargs[field] = value
@@ -25579,10 +25649,10 @@ def test_slurm_preflight_blocks_missing_out_of_root_or_not_visible_storage_roots
     orchestrator = FakeProductionOrchestrator()
     config = _config(
         config_kwargs.pop("workspace_root"),
+        db_free=True,
         now=_dt("2026-05-21T12:00:00Z"),
         dry_run=False,
         slurm_execution_enabled=True,
-        database_url="postgresql://nhms:secret@db.prod.example/nhms",
         allowed_storage_roots=(allowed_root,),
         **config_kwargs,
     )
@@ -25602,15 +25672,18 @@ def test_slurm_preflight_blocks_missing_out_of_root_or_not_visible_storage_roots
     assert orchestrator.calls == []
 
 
-def test_slurm_preflight_allows_safe_template_env_and_submits_through_orchestrator(tmp_path: Path) -> None:
-    roots = _slurm_roots(tmp_path)
+def test_slurm_preflight_allows_safe_template_env_and_submits_through_orchestrator(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    roots = _db_free_slurm_roots(monkeypatch, tmp_path, generated_at=_dt("2026-05-21T12:00:00Z"))
     orchestrator = FakeProductionOrchestrator()
     config = _config(
         roots["workspace_root"],
+        db_free=True,
         now=_dt("2026-05-21T12:00:00Z"),
         dry_run=False,
         slurm_execution_enabled=True,
-        database_url="postgresql://nhms:secret@db.prod.example/nhms",
         object_store_root=roots["object_store_root"],
         log_root=roots["log_root"],
         runtime_root=roots["runtime_root"],
@@ -25632,8 +25705,11 @@ def test_slurm_preflight_allows_safe_template_env_and_submits_through_orchestrat
     assert result.evidence["counts"]["submitted_count"] == 1
     assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is True
     assert result.evidence["slurm_preflight"]["status"] == "ready"
+    # DB-free preflight evidence masks path-shaped env values
+    # (``scheduler_preflight.py:806``; was ``"prod/gfs_00"``) (#3251, rule (c));
+    # the submitted job env below still carries the value itself.
     assert result.evidence["slurm_preflight"]["checks"]["environment"]["sanitized"] == {
-        "NHMS_PROFILE": "prod/gfs_00",
+        "NHMS_PROFILE": "[local-path]",
         "NHMS_RUN_LABEL": "prod_gfs_00",
     }
     forcing_template = result.evidence["slurm_preflight"]["checks"]["templates"]["stage_templates"]["forcing"]
@@ -25651,7 +25727,7 @@ def test_slurm_preflight_passes_compute_runtime_env_without_download_adapter_env
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    roots = _slurm_roots(tmp_path)
+    roots = _db_free_slurm_roots(monkeypatch, tmp_path, generated_at=_dt("2026-05-21T12:00:00Z"))
     monkeypatch.setenv("IFS_OPEN_DATA_SOURCE", "aws")
     monkeypatch.setenv("IFS_OPEN_DATA_FALLBACK_SOURCES", "azure,google,ecmwf")
     monkeypatch.setenv("GFS_NOMADS_BASE_URL", "https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod")
@@ -25667,10 +25743,10 @@ def test_slurm_preflight_passes_compute_runtime_env_without_download_adapter_env
     orchestrator = FakeProductionOrchestrator()
     config = _config(
         roots["workspace_root"],
+        db_free=True,
         now=_dt("2026-05-21T12:00:00Z"),
         dry_run=False,
         slurm_execution_enabled=True,
-        database_url="postgresql://nhms:secret@db.prod.example/nhms",
         object_store_root=roots["object_store_root"],
         log_root=roots["log_root"],
         runtime_root=roots["runtime_root"],
@@ -25702,7 +25778,10 @@ def test_slurm_preflight_passes_compute_runtime_env_without_download_adapter_env
     }
     assert result.status == "submitted"
     sanitized = result.evidence["slurm_preflight"]["checks"]["environment"]["sanitized"]
-    for key, value in expected.items():
+    # DB-free preflight evidence masks path-shaped env values
+    # (``scheduler_preflight.py:806``; was the GRIB env root itself) (#3251,
+    # rule (c)); the submitted job env below still carries the value itself.
+    for key, value in {**expected, "NHMS_GRIB_ENV_ROOT": "[local-path]"}.items():
         assert sanitized[key] == value
     for key in blocked_download_env:
         assert key not in sanitized
@@ -25741,106 +25820,6 @@ def test_shud_timeout_seconds_survives_gateway_slurm_env_validation() -> None:
     # key reach the sbatch export lines.
     assert reserved_slurm_env_reason("SHUD_TIMEOUT_SECONDS") is None
     assert is_sensitive_slurm_env_key("SHUD_TIMEOUT_SECONDS") is False
-
-
-def test_slurm_preflight_ready_without_factory_uses_default_orchestrator_path(
-    monkeypatch: Any,
-    tmp_path: Path,
-) -> None:
-    roots = _slurm_roots(tmp_path)
-    constructed: list[dict[str, Any]] = []
-    calls: list[dict[str, Any]] = []
-
-    class DefaultPathOrchestrator:
-        stages = M3_STAGES
-
-        def __init__(self, *, config: Any, repository: Any, state_manager: Any, retry_service: Any = None) -> None:
-            constructed.append(
-                {
-                    "config": config,
-                    "repository": repository,
-                    "state_manager": state_manager,
-                    "retry_service": retry_service,
-                }
-            )
-            self.config = config
-            self.object_store = LocalObjectStore(config.object_store_root, config.object_store_prefix)
-
-        def orchestrate_cycle(
-            self,
-            source: str,
-            cycle_time: datetime,
-            basins: list[dict[str, Any]],
-        ) -> PipelineResult:
-            calls.append({"source": source, "cycle_time": cycle_time, "basins": basins})
-            stages = tuple(
-                StageRunResult(
-                    stage=stage.stage,
-                    job_type=stage.job_type,
-                    pipeline_job_id=f"default_job_{stage.stage}",
-                    slurm_job_id=f"default_slurm_{stage.stage}",
-                    status="succeeded",
-                )
-                for stage in M3_STAGES
-            )
-            return PipelineResult(
-                run_id=f"default_cycle_{source}_{format_cycle_time(cycle_time)}",
-                cycle_id=cycle_id_for(source, cycle_time),
-                status="complete",
-                stages=stages,
-            )
-
-    monkeypatch.setenv("WORKSPACE_ROOT", str(roots["workspace_root"]))
-    monkeypatch.setenv("OBJECT_STORE_ROOT", str(roots["object_store_root"]))
-    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms/default")
-    monkeypatch.setenv("SLURM_GATEWAY_URL", "http://slurm-gateway.internal:8000")
-    monkeypatch.setenv("FORECAST_SOURCE_ID", "IFS")
-    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "true")
-    monkeypatch.setenv("NHMS_FORECAST_WARM_START_REQUIRED_FROM", "2026-06-27T00:00:00Z")
-    monkeypatch.setenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", "forecast_state_save_qc")
-    monkeypatch.setattr(scheduler_module, "_orchestrator_repository_from_env", lambda: "repository-from-env")
-    monkeypatch.setattr(scheduler_module, "_retry_service_from_env", lambda: "retry-service-from-env")
-    monkeypatch.setattr(scheduler_module.StateManager, "from_env", staticmethod(lambda: "state-manager-from-env"))
-    monkeypatch.setattr(scheduler_module, "ForecastOrchestrator", DefaultPathOrchestrator)
-    config = _config(
-        roots["workspace_root"],
-        now=_dt("2026-05-21T12:00:00Z"),
-        dry_run=False,
-        slurm_execution_enabled=True,
-        database_url="postgresql://nhms:secret@db.prod.example/nhms",
-        object_store_root=roots["object_store_root"],
-        log_root=roots["log_root"],
-        runtime_root=roots["runtime_root"],
-        allowed_storage_roots=(tmp_path,),
-        slurm_job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
-    )
-    scheduler = ProductionScheduler(
-        config,
-        registry=FakeRegistry([_model("model_a", "basin_a")]),
-        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-    )
-
-    result = scheduler.run_once()
-
-    assert scheduler.orchestrator_factory is None
-    assert result.status == "submitted"
-    assert result.evidence["execution_boundary"] == "slurm_gateway_orchestration"
-    assert constructed[0]["retry_service"] == "retry-service-from-env"
-    assert result.evidence["counts"]["submitted_count"] == 1
-    assert result.evidence["slurm_preflight"]["status"] == "ready"
-    assert len(constructed) == 1
-    assert constructed[0]["repository"] == "repository-from-env"
-    assert constructed[0]["state_manager"] == "state-manager-from-env"
-    assert constructed[0]["config"].source_id == "gfs"
-    assert constructed[0]["config"].workspace_root == roots["workspace_root"].resolve()
-    assert constructed[0]["config"].object_store_root == roots["object_store_root"].resolve()
-    assert constructed[0]["config"].require_forecast_warm_start is True
-    assert constructed[0]["config"].forecast_warm_start_required_from == _dt("2026-06-27T00:00:00Z")
-    assert constructed[0]["config"].terminal_stage == "forecast_state_save_qc"
-    assert constructed[0]["config"].slurm_job_type_templates == dict(DEFAULT_JOB_TYPE_TEMPLATES)
-    assert constructed[0]["config"].slurm_gateway_url == "http://slurm-gateway.internal:8000"
-    assert calls[0]["source"] == "gfs"
-    assert calls[0]["basins"][0]["output_uri"].startswith("s3://nhms/default/runs/")
 
 
 def test_orchestrator_config_parses_strict_forecast_warm_start_env(
@@ -25912,17 +25891,18 @@ def test_slurm_preflight_rejects_unsafe_templates_and_environment_before_submiss
     tmp_path: Path,
     config_overrides: dict[str, Any],
     expected_code: str,
+    monkeypatch: Any,
 ) -> None:
-    roots = _slurm_roots(tmp_path)
+    roots = _db_free_slurm_roots(monkeypatch, tmp_path, generated_at=_dt("2026-05-21T12:00:00Z"))
     templates = dict(DEFAULT_JOB_TYPE_TEMPLATES)
     templates.update(config_overrides.pop("slurm_job_type_templates", {}))
     orchestrator = FakeProductionOrchestrator()
     config = _config(
         roots["workspace_root"],
+        db_free=True,
         now=_dt("2026-05-21T12:00:00Z"),
         dry_run=False,
         slurm_execution_enabled=True,
-        database_url="postgresql://nhms:secret@db.prod.example/nhms",
         object_store_root=roots["object_store_root"],
         log_root=roots["log_root"],
         runtime_root=roots["runtime_root"],
@@ -25948,16 +25928,16 @@ def test_slurm_preflight_rejects_unsafe_templates_and_environment_before_submiss
     assert orchestrator.calls == []
 
 
-def test_slurm_preflight_redacts_secret_url_values_in_evidence(tmp_path: Path) -> None:
-    roots = _slurm_roots(tmp_path)
+def test_slurm_preflight_redacts_secret_url_values_in_evidence(tmp_path: Path, monkeypatch: Any) -> None:
+    roots = _db_free_slurm_roots(monkeypatch, tmp_path, generated_at=_dt("2026-05-21T12:00:00Z"))
     secret_value = "s3://bucket/prod?token=supersecret"
     orchestrator = FakeProductionOrchestrator()
     config = _config(
         roots["workspace_root"],
+        db_free=True,
         now=_dt("2026-05-21T12:00:00Z"),
         dry_run=False,
         slurm_execution_enabled=True,
-        database_url="postgresql://nhms:secret@db.prod.example/nhms",
         object_store_root=roots["object_store_root"],
         log_root=roots["log_root"],
         runtime_root=roots["runtime_root"],
@@ -25983,16 +25963,16 @@ def test_slurm_preflight_redacts_secret_url_values_in_evidence(tmp_path: Path) -
     assert orchestrator.calls == []
 
 
-def test_slurm_preflight_redacts_reserved_env_override_without_submission(tmp_path: Path) -> None:
-    roots = _slurm_roots(tmp_path)
+def test_slurm_preflight_redacts_reserved_env_override_without_submission(tmp_path: Path, monkeypatch: Any) -> None:
+    roots = _db_free_slurm_roots(monkeypatch, tmp_path, generated_at=_dt("2026-05-21T12:00:00Z"))
     reserved_value = "/tmp/evil-manifest-index.json"
     orchestrator = FakeProductionOrchestrator()
     config = _config(
         roots["workspace_root"],
+        db_free=True,
         now=_dt("2026-05-21T12:00:00Z"),
         dry_run=False,
         slurm_execution_enabled=True,
-        database_url="postgresql://nhms:secret@db.prod.example/nhms",
         object_store_root=roots["object_store_root"],
         log_root=roots["log_root"],
         runtime_root=roots["runtime_root"],
@@ -26017,15 +25997,15 @@ def test_slurm_preflight_redacts_reserved_env_override_without_submission(tmp_pa
     assert orchestrator.calls == []
 
 
-def test_completed_duplicate_pipeline_is_skipped_before_submission(tmp_path: Path) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+def test_completed_duplicate_pipeline_is_skipped_before_submission(tmp_path: Path, monkeypatch: Any) -> None:
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     active_repository = FakeActiveRepository(active=False, completed=True)
     orchestrator = FakeProductionOrchestrator()
     scheduler = ProductionScheduler(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -26037,8 +26017,8 @@ def test_completed_duplicate_pipeline_is_skipped_before_submission(tmp_path: Pat
     assert orchestrator.calls == []
 
 
-def test_active_slurm_job_skip_prevents_duplicate_submission(tmp_path: Path) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+def test_active_slurm_job_skip_prevents_duplicate_submission(tmp_path: Path, monkeypatch: Any) -> None:
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     active_repository = FakeSlurmActiveRepository(
         active_jobs=[{"job_id": "job_forcing", "slurm_job_id": "7777", "stage": "forcing", "status": "running"}]
     )
@@ -26047,7 +26027,7 @@ def test_active_slurm_job_skip_prevents_duplicate_submission(tmp_path: Path) -> 
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -26065,7 +26045,7 @@ def test_cancel_active_slurm_calls_gateway_contract_without_replacement_submissi
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
-    roots = _slurm_roots(tmp_path)
+    roots = _db_free_slurm_roots(monkeypatch, tmp_path, generated_at=_dt("2026-05-21T12:00:00Z"))
     constructed: list[dict[str, Any]] = []
     cancel_calls: list[tuple[str, str]] = []
     reservation_seen_before_cancel: list[bool] = []
@@ -26085,7 +26065,7 @@ def test_cancel_active_slurm_calls_gateway_contract_without_replacement_submissi
 
         def cancel_active_cycle_jobs(self, cycle_id: str, *, reason: str) -> list[dict[str, Any]]:
             reservation_seen_before_cancel.append(
-                bool(list(roots["workspace_root"].glob("scheduler/evidence/*.pre_execution.json")))
+                bool(list(roots["evidence_root"].glob("*.pre_execution.json")))
             )
             cancel_calls.append((cycle_id, reason))
             return [
@@ -26107,12 +26087,18 @@ def test_cancel_active_slurm_calls_gateway_contract_without_replacement_submissi
     monkeypatch.setattr(scheduler_module, "ForecastOrchestrator", DefaultPathCancelOrchestrator)
     config = _config(
         roots["workspace_root"],
+        db_free=True,
         now=_dt("2026-05-21T12:00:00Z"),
         dry_run=False,
         cancel_active_slurm=True,
     )
-    active_repository = FakeSlurmActiveRepository(
-        active_jobs=[{"job_id": "job_forcing", "slurm_job_id": "7777", "stage": "forcing", "status": "running"}]
+    # The default orchestrator is the patched class above; it takes this
+    # repository (DB-free) and writes nothing, so the fake stands in for the
+    # file journal's write capability (#3251).
+    active_repository = _db_free_journal_stand_in(
+        FakeSlurmActiveRepository(
+            active_jobs=[{"job_id": "job_forcing", "slurm_job_id": "7777", "stage": "forcing", "status": "running"}]
+        )
     )
     scheduler = ProductionScheduler(
         config,
@@ -26150,7 +26136,9 @@ def test_cancel_active_slurm_calls_gateway_contract_without_replacement_submissi
     assert reservation_seen_before_cancel == [True]
     assert result.evidence["evidence_pre_execution"]["status"] == "reserved"
     assert len(constructed) == 1
-    assert constructed[0]["repository"] == "repository-from-env"
+    # DB-free mode hands the default orchestrator the active repository
+    # (``scheduler_core.py:522-526``; was ``"repository-from-env"``) (#3251, rule (c)).
+    assert constructed[0]["repository"] is active_repository
     assert constructed[0]["state_manager"] is None
     assert constructed[0]["config"].source_id == "gfs"
     assert constructed[0]["config"].object_store_root == roots["object_store_root"].resolve()
@@ -26159,6 +26147,7 @@ def test_cancel_active_slurm_calls_gateway_contract_without_replacement_submissi
 
 def test_cancel_active_slurm_exception_after_attempt_uses_unknown_mutation_outcome(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
     class CancelError(Exception):
         error_code = "PIPELINE_EVENT_WRITE_FAILED"
@@ -26171,11 +26160,21 @@ def test_cancel_active_slurm_exception_after_attempt_uses_unknown_mutation_outco
 
     orchestrator = RaisingCancelOrchestrator()
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False, cancel_active_slurm=True),
+        _db_free_pass_config(
+            monkeypatch,
+            tmp_path,
+            now=_dt("2026-05-21T12:00:00Z"),
+            dry_run=False,
+            cancel_active_slurm=True,
+        ),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=FakeSlurmActiveRepository(
-            active_jobs=[{"job_id": "job_forcing", "slurm_job_id": "7777", "stage": "forcing", "status": "running"}],
+        active_repository=_db_free_journal_stand_in(
+            FakeSlurmActiveRepository(
+                active_jobs=[
+                    {"job_id": "job_forcing", "slurm_job_id": "7777", "stage": "forcing", "status": "running"}
+                ],
+            )
         ),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
@@ -26221,7 +26220,7 @@ def test_filtered_cancel_active_slurm_finds_cycle_level_array_job_with_different
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
-    roots = _slurm_roots(tmp_path)
+    roots = _db_free_slurm_roots(monkeypatch, tmp_path, generated_at=_dt("2026-05-21T12:00:00Z"))
 
     class FilteredCancelOrchestrator:
         def __init__(self) -> None:
@@ -26276,12 +26275,13 @@ def test_filtered_cancel_active_slurm_finds_cycle_level_array_job_with_different
 
     config = _config(
         roots["workspace_root"],
+        db_free=True,
         now=_dt("2026-05-21T12:00:00Z"),
         dry_run=False,
         cancel_active_slurm=True,
         model_ids=("model_b",),
     )
-    active_repository = FilteredCycleArrayRepository()
+    active_repository = _db_free_journal_stand_in(FilteredCycleArrayRepository())
     orchestrator = FilteredCancelOrchestrator()
     scheduler = ProductionScheduler(
         config,
@@ -26313,7 +26313,7 @@ def test_cancel_active_slurm_runs_before_cycle_level_active_skip(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
-    roots = _slurm_roots(tmp_path)
+    roots = _db_free_slurm_roots(monkeypatch, tmp_path, generated_at=_dt("2026-05-21T12:00:00Z"))
     cancel_calls: list[tuple[str, str]] = []
     constructed: list[dict[str, Any]] = []
 
@@ -26355,12 +26355,18 @@ def test_cancel_active_slurm_runs_before_cycle_level_active_skip(
     monkeypatch.setattr(scheduler_module, "ForecastOrchestrator", DefaultPathCancelOrchestrator)
     config = _config(
         roots["workspace_root"],
+        db_free=True,
         now=_dt("2026-05-21T12:00:00Z"),
         dry_run=False,
         cancel_active_slurm=True,
     )
-    active_repository = ActiveCycleAndSlurmRepository(
-        active_jobs=[{"job_id": "job_forcing", "slurm_job_id": "7777", "stage": "forcing", "status": "running"}]
+    # The default orchestrator is the patched class above; it takes this
+    # repository (DB-free) and writes nothing, so the fake stands in for the
+    # file journal's write capability (#3251).
+    active_repository = _db_free_journal_stand_in(
+        ActiveCycleAndSlurmRepository(
+            active_jobs=[{"job_id": "job_forcing", "slurm_job_id": "7777", "stage": "forcing", "status": "running"}]
+        )
     )
     scheduler = ProductionScheduler(
         config,
@@ -26376,14 +26382,19 @@ def test_cancel_active_slurm_runs_before_cycle_level_active_skip(
     assert result.evidence["counts"]["submitted_count"] == 0
     assert result.evidence["slurm_cancellation_evidence"][0]["replacement_submitted"] is False
     assert cancel_calls == [("gfs_2026052106", "scheduler_cancel_requested")]
-    assert constructed[0]["retry_service"] == "retry-service-from-env"
+    # DB-free mode never builds the DB retry service for the default
+    # orchestrator; with a repository that is not the file journal it passes
+    # none (``scheduler_core.py:529-536``; was ``"retry-service-from-env"``)
+    # (#3251, rule (c)).
+    assert constructed[0]["retry_service"] is None
+    assert constructed[0]["repository"] is active_repository
 
 
 def test_cancel_active_slurm_gap_blocks_top_level_cancelled_status(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
-    roots = _slurm_roots(tmp_path)
+    roots = _db_free_slurm_roots(monkeypatch, tmp_path, generated_at=_dt("2026-05-21T12:00:00Z"))
 
     class GapCancelOrchestrator:
         stages = M3_STAGES
@@ -26413,12 +26424,18 @@ def test_cancel_active_slurm_gap_blocks_top_level_cancelled_status(
     monkeypatch.setattr(scheduler_module, "ForecastOrchestrator", GapCancelOrchestrator)
     config = _config(
         roots["workspace_root"],
+        db_free=True,
         now=_dt("2026-05-21T12:00:00Z"),
         dry_run=False,
         cancel_active_slurm=True,
     )
-    active_repository = FakeSlurmActiveRepository(
-        active_jobs=[{"job_id": "job_forcing", "slurm_job_id": "7777", "stage": "forcing", "status": "running"}]
+    # The default orchestrator is the patched class above; it takes this
+    # repository (DB-free) and writes nothing, so the fake stands in for the
+    # file journal's write capability (#3251).
+    active_repository = _db_free_journal_stand_in(
+        FakeSlurmActiveRepository(
+            active_jobs=[{"job_id": "job_forcing", "slurm_job_id": "7777", "stage": "forcing", "status": "running"}]
+        )
     )
     scheduler = ProductionScheduler(
         config,
@@ -26459,15 +26476,16 @@ def test_cancel_active_slurm_gap_blocks_top_level_cancelled_status(
 
 def test_active_cycle_orchestration_without_hydro_state_skips_all_candidates(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     active_repository = FakeActiveCycleOrchestrationRepository()
     orchestrator = FakeProductionOrchestrator()
     scheduler = ProductionScheduler(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a"), _model("model_b", "basin_b")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -26485,8 +26503,9 @@ def test_active_cycle_orchestration_without_hydro_state_skips_all_candidates(
 
 def test_active_cycle_orchestration_with_model_state_only_skips_active_model(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
 
     class ActiveCyclePerModelStateRepository(PerModelCandidateStateRepository):
         def __init__(self) -> None:
@@ -26523,7 +26542,7 @@ def test_active_cycle_orchestration_with_model_state_only_skips_active_model(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a"), _model("model_b", "basin_b")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -26542,15 +26561,16 @@ def test_active_cycle_orchestration_with_model_state_only_skips_active_model(
 def test_completed_hydro_state_is_skipped_as_completed_not_active(
     tmp_path: Path,
     hydro_status: str,
+    monkeypatch: Any,
 ) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     active_repository = FakeHydroStateRepository(hydro_status=hydro_status)
     orchestrator = FakeProductionOrchestrator()
     scheduler = ProductionScheduler(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -26566,8 +26586,9 @@ def test_completed_hydro_state_is_skipped_as_completed_not_active(
 def test_candidate_state_terminal_hydro_success_records_durable_skip_reason(
     tmp_path: Path,
     hydro_status: str,
+    monkeypatch: Any,
 ) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     active_repository = FakeCandidateStateRepository(
         {
             "hydro_status": hydro_status,
@@ -26583,7 +26604,7 @@ def test_candidate_state_terminal_hydro_success_records_durable_skip_reason(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -26602,7 +26623,7 @@ def test_candidate_state_terminal_hydro_success_records_durable_skip_reason(
     assert orchestrator.calls == []
 
 
-def test_terminal_candidate_state_is_recorded_before_not_ready_canonical_gate(tmp_path: Path) -> None:
+def test_terminal_candidate_state_is_recorded_before_not_ready_canonical_gate(tmp_path: Path, monkeypatch: Any) -> None:
     class NotReadyReadinessProvider:
         def __init__(self) -> None:
             self.calls = 0
@@ -26612,7 +26633,7 @@ def test_terminal_candidate_state_is_recorded_before_not_ready_canonical_gate(tm
             return {"status": "canonical_unavailable", "ready": False, "reason": "canonical_missing"}
 
     provider = NotReadyReadinessProvider()
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     active_repository = FakeCandidateStateRepository(
         {
             "hydro_status": "succeeded",
@@ -26627,7 +26648,7 @@ def test_terminal_candidate_state_is_recorded_before_not_ready_canonical_gate(tm
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         canonical_readiness_provider=provider,
         orchestrator_factory=lambda _source_id: FakeProductionOrchestrator(),
     )
@@ -26642,7 +26663,7 @@ def test_terminal_candidate_state_is_recorded_before_not_ready_canonical_gate(tm
     assert "canonical_readiness" not in skipped["state_evidence"]
 
 
-def test_active_slurm_state_is_recorded_before_not_ready_canonical_gate(tmp_path: Path) -> None:
+def test_active_slurm_state_is_recorded_before_not_ready_canonical_gate(tmp_path: Path, monkeypatch: Any) -> None:
     class NotReadyReadinessProvider:
         def __init__(self) -> None:
             self.calls = 0
@@ -26668,10 +26689,10 @@ def test_active_slurm_state_is_recorded_before_not_ready_canonical_gate(tmp_path
         [{"slurm_job_id": "7777", "status": "running", "model_id": "model_a"}],
     )
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         canonical_readiness_provider=provider,
         orchestrator_factory=lambda _source_id: FakeProductionOrchestrator(),
     )
@@ -26688,7 +26709,7 @@ def test_active_slurm_state_is_recorded_before_not_ready_canonical_gate(tmp_path
     assert active_repository.queries[0]["cycle_time"] == cycle_time
 
 
-def test_source_object_identity_is_reused_across_models_for_scheduler_pass(tmp_path: Path) -> None:
+def test_source_object_identity_is_reused_across_models_for_scheduler_pass(tmp_path: Path, monkeypatch: Any) -> None:
     class CountingAdapter(FakeAdapter):
         def __init__(self) -> None:
             super().__init__("gfs", [("2026-05-21T06:00:00Z", True)])
@@ -26709,10 +26730,10 @@ def test_source_object_identity_is_reused_across_models_for_scheduler_pass(tmp_p
     adapter = CountingAdapter()
     provider = ReadyProvider()
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=True),
+        _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=True),
         registry=FakeRegistry([_model("model_a", "basin_a"), _model("model_b", "basin_b")]),
         adapters={"gfs": adapter},
-        active_repository=FakeActiveRepository(active=False),
+        active_repository=_empty_file_journal(tmp_path / "workspace"),
         canonical_readiness_provider=provider,
         orchestrator_factory=lambda _source_id: FakeProductionOrchestrator(),
     )
@@ -26729,6 +26750,7 @@ def test_source_object_identity_is_reused_across_models_for_scheduler_pass(tmp_p
 
 def test_candidate_state_parse_failure_after_shud_success_restarts_at_parse_without_native_rerun(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
     # #1313 D4b #3: the theme ("restart at parse, never re-run native SHUD") is
     # preserved on the SYNTHESIZED-PLACEHOLDER domain.  The state records no error
@@ -26737,7 +26759,7 @@ def test_candidate_state_parse_failure_after_shud_success_restarts_at_parse_with
     # default is not evidence under the unknown-code clause and keeps the existing
     # resume.  The former recorded ``FAILED_PARSE`` + top-level ``retryable: True``
     # shape pinned exactly the two whitening surfaces this issue closes.
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     active_repository = FakeCandidateStateRepository(
         {
             "hydro_status": "failed",
@@ -26769,7 +26791,7 @@ def test_candidate_state_parse_failure_after_shud_success_restarts_at_parse_with
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -26804,12 +26826,13 @@ def test_db_shaped_downstream_failure_with_recorded_unknown_code_blocks(
     stage: str,
     error_code: str,
     expected_classifier: str,
+    monkeypatch: Any,
 ) -> None:
     # #1313 D4b #4: a DB-shaped state that genuinely records an unknown code
     # defaults it non-transient, and the spec's unknown-code clause forbids the
     # automatic resume it used to receive.  The ladder falls through to the
     # permanent-failure guard.
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     active_repository = FakeCandidateStateRepository(
         {
             "hydro_status": "succeeded",
@@ -26837,7 +26860,7 @@ def test_db_shaped_downstream_failure_with_recorded_unknown_code_blocks(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -26858,12 +26881,13 @@ def test_db_shaped_downstream_failure_with_recorded_unknown_code_blocks(
 def test_db_shaped_downstream_failure_after_shud_success_restarts_without_retryable_flag(
     tmp_path: Path,
     stage: str,
+    monkeypatch: Any,
 ) -> None:
     # #1313 D4b #4 (theme half): "a DB-shaped downstream failure restarts even
     # though the state carries no ``retryable`` flag" is preserved on the
     # SYNTHESIZED-PLACEHOLDER domain -- no error code is recorded anywhere the
     # reader scans, so it fabricates the stage default and the resume stands.
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     active_repository = FakeCandidateStateRepository(
         {
             "hydro_status": "succeeded",
@@ -26889,7 +26913,7 @@ def test_db_shaped_downstream_failure_after_shud_success_restarts_without_retrya
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -26908,8 +26932,8 @@ def test_db_shaped_downstream_failure_after_shud_success_restarts_without_retrya
     assert result.evidence["counts"]["submitted_count"] == 1
 
 
-def test_newer_terminal_hydro_success_skips_older_failed_parse_job(tmp_path: Path) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+def test_newer_terminal_hydro_success_skips_older_failed_parse_job(tmp_path: Path, monkeypatch: Any) -> None:
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     active_repository = FakeCandidateStateRepository(
         {
             "hydro_status": "published",
@@ -26943,7 +26967,7 @@ def test_newer_terminal_hydro_success_skips_older_failed_parse_job(tmp_path: Pat
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -26960,6 +26984,7 @@ def test_newer_terminal_hydro_success_skips_older_failed_parse_job(tmp_path: Pat
 def test_terminal_pipeline_success_is_not_overridden_by_manual_retry_marker(
     tmp_path: Path,
     marker_created_at: str | None,
+    monkeypatch: Any,
 ) -> None:
     events: list[dict[str, Any]] = []
     if marker_created_at is not None:
@@ -26976,7 +27001,7 @@ def test_terminal_pipeline_success_is_not_overridden_by_manual_retry_marker(
                 },
             }
         )
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     active_repository = FakeCandidateStateRepository(
         {
             "pipeline_status": "published",
@@ -27011,7 +27036,7 @@ def test_terminal_pipeline_success_is_not_overridden_by_manual_retry_marker(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -27024,8 +27049,8 @@ def test_terminal_pipeline_success_is_not_overridden_by_manual_retry_marker(
     assert orchestrator.calls == []
 
 
-def test_intermediate_pipeline_success_does_not_skip_terminal_candidate(tmp_path: Path) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+def test_intermediate_pipeline_success_does_not_skip_terminal_candidate(tmp_path: Path, monkeypatch: Any) -> None:
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     active_repository = FakeCandidateStateRepository(
         {
             "pipeline_status": "succeeded",
@@ -27046,7 +27071,7 @@ def test_intermediate_pipeline_success_does_not_skip_terminal_candidate(tmp_path
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -27057,8 +27082,8 @@ def test_intermediate_pipeline_success_does_not_skip_terminal_candidate(tmp_path
     assert orchestrator.calls
 
 
-def test_terminal_hydro_success_is_not_overridden_by_manual_retry_marker(tmp_path: Path) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+def test_terminal_hydro_success_is_not_overridden_by_manual_retry_marker(tmp_path: Path, monkeypatch: Any) -> None:
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     active_repository = FakeCandidateStateRepository(
         {
             "hydro_status": "published",
@@ -27092,7 +27117,7 @@ def test_terminal_hydro_success_is_not_overridden_by_manual_retry_marker(tmp_pat
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -27107,8 +27132,9 @@ def test_terminal_hydro_success_is_not_overridden_by_manual_retry_marker(tmp_pat
 
 def test_mixed_restart_and_fresh_candidates_are_executed_in_restart_compatible_cohorts(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     active_repository = PerModelCandidateStateRepository(
         {
             "model_a": {
@@ -27129,7 +27155,7 @@ def test_mixed_restart_and_fresh_candidates_are_executed_in_restart_compatible_c
         config,
         registry=FakeRegistry([_model("model_a", "basin_a"), _model("model_b", "basin_b")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -27146,8 +27172,9 @@ def test_mixed_restart_and_fresh_candidates_are_executed_in_restart_compatible_c
 
 def test_multi_candidate_restart_cohorts_are_candidate_scoped_and_second_scan_sees_active_truth(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     cycle_time = _dt("2026-05-21T06:00:00Z")
     restart_states = {
         "model_a": {
@@ -27215,7 +27242,7 @@ def test_multi_candidate_restart_cohorts_are_candidate_scoped_and_second_scan_se
         config,
         registry=FakeRegistry([_model("model_a", "basin_a"), _model("model_b", "basin_b")]),
         adapters={"gfs": FakeAdapter("gfs", [(cycle_time.isoformat(), True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -27240,7 +27267,7 @@ def test_multi_candidate_restart_cohorts_are_candidate_scoped_and_second_scan_se
     assert len(orchestrator.calls) == 1
 
 
-def test_sibling_active_restart_does_not_block_downstream_retry_candidate(tmp_path: Path) -> None:
+def test_sibling_active_restart_does_not_block_downstream_retry_candidate(tmp_path: Path, monkeypatch: Any) -> None:
     class SiblingActiveRestartRepository(PerModelCandidateStateRepository):
         def __init__(self) -> None:
             super().__init__(
@@ -27280,10 +27307,10 @@ def test_sibling_active_restart_does_not_block_downstream_retry_candidate(tmp_pa
     repository = SiblingActiveRestartRepository()
     orchestrator = FakeProductionOrchestrator()
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
         registry=FakeRegistry([_model("model_a", "basin_a"), _model("model_b", "basin_b")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=repository,
+        active_repository=_db_free_journal_stand_in(repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -27298,8 +27325,8 @@ def test_sibling_active_restart_does_not_block_downstream_retry_candidate(tmp_pa
     assert submitted_basin["orchestration_run_id"] == "cycle_gfs_2026052106_parse_model_b"
 
 
-def test_candidate_state_source_unavailable_is_retryable_enum_safe_evidence(tmp_path: Path) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), sources=("IFS",))
+def test_candidate_state_source_unavailable_is_retryable_enum_safe_evidence(tmp_path: Path, monkeypatch: Any) -> None:
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), sources=("IFS",))
     scheduler = ProductionScheduler(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
@@ -27316,7 +27343,7 @@ def test_candidate_state_source_unavailable_is_retryable_enum_safe_evidence(tmp_
     assert result.evidence["source_cycles"][0]["db_cycle_status_written"] is None
 
 
-def test_candidate_state_ifs_probe_failed_stays_retryable_and_redacted(tmp_path: Path) -> None:
+def test_candidate_state_ifs_probe_failed_stays_retryable_and_redacted(tmp_path: Path, monkeypatch: Any) -> None:
     signed_probe = (
         "ecmwf-opendata://user:password@aws/ifs/2026060800/"
         "ifs.t00z.f000.2t.grib2?token=super-secret&X-Amz-Signature=secret-signature"
@@ -27333,7 +27360,7 @@ def test_candidate_state_ifs_probe_failed_stays_retryable_and_redacted(tmp_path:
         }
         for source in ("aws", "azure", "google", "ecmwf")
     ]
-    config = _config(tmp_path, now=_dt("2026-06-08T06:00:00Z"), sources=("IFS",))
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-06-08T06:00:00Z"), sources=("IFS",))
     scheduler = ProductionScheduler(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
@@ -27395,8 +27422,17 @@ def test_candidate_state_ifs_probe_failed_stays_retryable_and_redacted(tmp_path:
     assert "secret-access-key" not in rendered
 
 
-def test_probe_failed_cycle_does_not_consume_source_budget_or_rewrite_as_unavailable(tmp_path: Path) -> None:
-    config = _config(tmp_path, now=_dt("2026-06-08T12:00:00Z"), sources=("IFS",), max_cycles_per_source=1)
+def test_probe_failed_cycle_does_not_consume_source_budget_or_rewrite_as_unavailable(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    config = _db_free_pass_config(
+        monkeypatch,
+        tmp_path,
+        now=_dt("2026-06-08T12:00:00Z"),
+        sources=("IFS",),
+        max_cycles_per_source=1,
+    )
     scheduler = ProductionScheduler(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
@@ -27444,8 +27480,17 @@ def test_probe_failed_cycle_does_not_consume_source_budget_or_rewrite_as_unavail
     assert deferred["selection_reason"] == "source_cycle_probe_failed_does_not_consume_source_budget"
 
 
-def test_rate_limited_cycle_does_not_consume_source_budget_or_rewrite_as_unavailable(tmp_path: Path) -> None:
-    config = _config(tmp_path, now=_dt("2026-06-08T12:00:00Z"), sources=("IFS",), max_cycles_per_source=1)
+def test_rate_limited_cycle_does_not_consume_source_budget_or_rewrite_as_unavailable(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    config = _db_free_pass_config(
+        monkeypatch,
+        tmp_path,
+        now=_dt("2026-06-08T12:00:00Z"),
+        sources=("IFS",),
+        max_cycles_per_source=1,
+    )
     attempted_sources = [
         {
             "source": "aws",
@@ -27503,12 +27548,13 @@ def test_rate_limited_cycle_does_not_consume_source_budget_or_rewrite_as_unavail
 
 
 @pytest.mark.parametrize("error_code", ["NODE_FAILURE", "SLURM_RESERVATION_LOST"])
-@pytest.mark.usefixtures("recorded_forcing_package_present")
+@pytest.mark.usefixtures("recorded_forcing_package_present_db_free")
 def test_candidate_state_transient_runtime_failure_retries_failed_scope_with_reuse_evidence(
     tmp_path: Path,
     error_code: str,
+    monkeypatch: Any,
 ) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     active_repository = FakeCandidateStateRepository(
         {
             "pipeline_status": "failed",
@@ -27527,7 +27573,7 @@ def test_candidate_state_transient_runtime_failure_retries_failed_scope_with_reu
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -27542,9 +27588,9 @@ def test_candidate_state_transient_runtime_failure_retries_failed_scope_with_reu
     assert result.evidence["counts"]["submitted_count"] == 1
 
 
-@pytest.mark.usefixtures("recorded_forcing_package_present")
-def test_candidate_state_out_of_memory_runtime_failure_requires_manual_retry(tmp_path: Path) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+@pytest.mark.usefixtures("recorded_forcing_package_present_db_free")
+def test_candidate_state_out_of_memory_runtime_failure_requires_manual_retry(tmp_path: Path, monkeypatch: Any) -> None:
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     active_repository = FakeCandidateStateRepository(
         {
             "pipeline_status": "failed",
@@ -27563,7 +27609,7 @@ def test_candidate_state_out_of_memory_runtime_failure_requires_manual_retry(tmp
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -27832,9 +27878,9 @@ def test_changed_model_package_refusal_sets_are_the_1161_lists_verbatim() -> Non
     assert scheduler_state_failure._CHANGED_MODEL_PACKAGE_NON_CAUSAL_CODES == frozenset({"OUT_OF_MEMORY"})
 
 
-@pytest.mark.usefixtures("recorded_forcing_package_present")
-def test_cold_start_quarantined_failure_recomputes_from_forecast(tmp_path: Path) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+@pytest.mark.usefixtures("recorded_forcing_package_present_db_free")
+def test_cold_start_quarantined_failure_recomputes_from_forecast(tmp_path: Path, monkeypatch: Any) -> None:
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     active_repository = FakeCandidateStateRepository(
         {
             "hydro_status": "failed",
@@ -27852,7 +27898,7 @@ def test_cold_start_quarantined_failure_recomputes_from_forecast(tmp_path: Path)
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -27885,7 +27931,7 @@ def test_downstream_qc_failure_without_forecast_output_recomputes_forecast(
     )
     monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
     monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     active_repository = FakeCandidateStateRepository(
         {
             "hydro_status": "failed",
@@ -27930,7 +27976,7 @@ def test_downstream_qc_failure_without_forecast_output_recomputes_forecast(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -27951,8 +27997,8 @@ def test_downstream_qc_failure_without_forecast_output_recomputes_forecast(
     assert state["retry_policy"]["override_reason"] == "missing_forecast_output_recompute"
 
 
-def test_warm_start_checkpoint_repair_does_not_auto_retry_in_production(tmp_path: Path) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+def test_warm_start_checkpoint_repair_does_not_auto_retry_in_production(tmp_path: Path, monkeypatch: Any) -> None:
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     active_repository = FakeCandidateStateRepository(
         {
             "hydro_status": "failed",
@@ -27967,7 +28013,7 @@ def test_warm_start_checkpoint_repair_does_not_auto_retry_in_production(tmp_path
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -28024,13 +28070,14 @@ def _candidate_scoped_attempt_row(stage: str, attempt: int, **overrides: Any) ->
         ("SLURM_RESERVATION_LOST", "retry_limit_exhausted"),
     ],
 )
-@pytest.mark.usefixtures("recorded_forcing_package_present")
+@pytest.mark.usefixtures("recorded_forcing_package_present_db_free")
 def test_candidate_state_permanent_or_exhausted_failure_blocks_auto_retry(
     tmp_path: Path,
     error_code: str,
     expected_reason: str,
+    monkeypatch: Any,
 ) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     active_repository = FakeCandidateStateRepository(
         {
             "pipeline_status": "failed",
@@ -28049,7 +28096,7 @@ def test_candidate_state_permanent_or_exhausted_failure_blocks_auto_retry(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -28067,9 +28114,12 @@ def test_candidate_state_permanent_or_exhausted_failure_blocks_auto_retry(
     assert orchestrator.calls == []
 
 
-@pytest.mark.usefixtures("recorded_forcing_package_present")
-def test_model_package_refresh_allows_automatic_retry_after_retry_limit_exhausted(tmp_path: Path) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+@pytest.mark.usefixtures("recorded_forcing_package_present_db_free")
+def test_model_package_refresh_allows_automatic_retry_after_retry_limit_exhausted(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     model = _model(
         "model_a",
         "basin_a",
@@ -28105,7 +28155,7 @@ def test_model_package_refresh_allows_automatic_retry_after_retry_limit_exhauste
         config,
         registry=FakeRegistry([model]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -28114,16 +28164,22 @@ def test_model_package_refresh_allows_automatic_retry_after_retry_limit_exhauste
     assert result.evidence["blocked_candidates"] == []
     assert result.evidence["counts"]["submitted_count"] == 1
     state = result.evidence["candidates"][0]["state_evidence"]
-    assert state["decision"] == "retry_after_model_package_refresh"
+    # DB-free mode carries strict warm-start evidence for every candidate
+    # (``scheduler_core.py:793-812``); a cold new model has no selected warm state
+    # to match the failed run's manifest, so the refresh retry is relabelled by
+    # the strict lane (``scheduler_candidates.py:2616-2650``; was
+    # ``"retry_after_model_package_refresh"``) and keeps its refresh evidence
+    # (#3251, rule (c)).
+    assert state["decision"] == "retry_strict_warm_start_retry_run_manifest_mismatch"
     assert state["retry_policy"]["automatic_retry_allowed"] is True
     assert state["retry_policy"]["manual_retry_required"] is False
     assert state["model_package_refresh"]["changed_fields"] == ["model_package_checksum", "model_package_uri"]
     assert orchestrator.calls[0]["basins"][0]["model_package_uri"] == "s3://nhms/models/model_a/new-package/package/"
 
 
-@pytest.mark.usefixtures("recorded_forcing_package_present")
-def test_same_model_package_still_blocks_after_retry_limit_exhausted(tmp_path: Path) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+@pytest.mark.usefixtures("recorded_forcing_package_present_db_free")
+def test_same_model_package_still_blocks_after_retry_limit_exhausted(tmp_path: Path, monkeypatch: Any) -> None:
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     package_uri = "s3://nhms/models/model_a/package/"
     package_checksum = "same-package-sha"
     model = _model(
@@ -28159,7 +28215,7 @@ def test_same_model_package_still_blocks_after_retry_limit_exhausted(tmp_path: P
         config,
         registry=FakeRegistry([model]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -28172,10 +28228,19 @@ def test_same_model_package_still_blocks_after_retry_limit_exhausted(tmp_path: P
     assert orchestrator.calls == []
 
 
-def test_missing_raw_manifest_after_successful_download_repairs_from_full_chain(tmp_path: Path) -> None:
+def test_missing_raw_manifest_after_successful_download_repairs_from_full_chain(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
     object_store_root = tmp_path / "object-store"
     object_store_root.mkdir()
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), sources=("IFS",), dry_run=False)
+    config = _db_free_pass_config(
+        monkeypatch,
+        tmp_path,
+        now=_dt("2026-05-21T12:00:00Z"),
+        sources=("IFS",),
+        dry_run=False,
+    )
     active_repository = FakeCandidateStateRepository(
         {
             "forecast_cycle": {
@@ -28232,7 +28297,7 @@ def test_missing_raw_manifest_after_successful_download_repairs_from_full_chain(
             ]
         ),
         adapters={"IFS": FakeAdapter("IFS", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -28251,13 +28316,19 @@ def test_missing_raw_manifest_after_successful_download_repairs_from_full_chain(
     assert orchestrator.calls
 
 
-def test_repaired_raw_manifest_allows_stale_downstream_failure_retry(tmp_path: Path) -> None:
+def test_repaired_raw_manifest_allows_stale_downstream_failure_retry(tmp_path: Path, monkeypatch: Any) -> None:
     object_store_root = tmp_path / "object-store"
     LocalObjectStore(str(object_store_root), object_store_prefix="s3://nhms").write_bytes_atomic(
         "raw/IFS/2026052106/manifest.json",
         b'{"source_id":"IFS"}',
     )
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), sources=("IFS",), dry_run=False)
+    config = _db_free_pass_config(
+        monkeypatch,
+        tmp_path,
+        now=_dt("2026-05-21T12:00:00Z"),
+        sources=("IFS",),
+        dry_run=False,
+    )
     active_repository = FakeCandidateStateRepository(
         {
             "forecast_cycle": {
@@ -28324,7 +28395,7 @@ def test_repaired_raw_manifest_allows_stale_downstream_failure_retry(tmp_path: P
             ]
         ),
         adapters={"IFS": FakeAdapter("IFS", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -29161,13 +29232,13 @@ def _durable_publish_failure_state(
     return state
 
 
-def _run_once_for_state(tmp_path: Path, state: Mapping[str, Any]) -> Any:
+def _run_once_for_state(monkeypatch: Any, tmp_path: Path, state: Mapping[str, Any]) -> Any:
     orchestrator = FakeProductionOrchestrator()
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=RawCandidateStateRepository(dict(state)),
+        active_repository=_db_free_journal_stand_in(RawCandidateStateRepository(dict(state))),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
     return scheduler.run_once()
@@ -29327,7 +29398,7 @@ def test_downstream_recorded_error_code_scoping_grid(state: dict[str, Any], expe
     assert scheduler_state_failure_module._downstream_recorded_error_code(state) == expected
 
 
-def test_stale_recovered_stage_code_does_not_flip_the_resume_domain(tmp_path: Path) -> None:
+def test_stale_recovered_stage_code_does_not_flip_the_resume_domain(tmp_path: Path, monkeypatch: Any) -> None:
     # #1420 geometry A: SHUD is done, publish failed with no code of its own, and
     # a convert row that was retried into success still carries
     # ``CONVERT_CANONICAL_FAILED``.  Before the scoping this stale code routed the
@@ -29339,7 +29410,7 @@ def test_stale_recovered_stage_code_does_not_flip_the_resume_domain(tmp_path: Pa
     assert scheduler_state_failure_module._downstream_recorded_error_code(state) is None
 
     decision = scheduler_module._candidate_state_decision(candidate, state)
-    result = _run_once_for_state(tmp_path, state)
+    result = _run_once_for_state(monkeypatch, tmp_path, state)
 
     assert decision is not None
     assert (decision.action, decision.reason) == ("retry", "resume_downstream_after_durable_shud")
@@ -29349,7 +29420,7 @@ def test_stale_recovered_stage_code_does_not_flip_the_resume_domain(tmp_path: Pa
     assert result.evidence["blocked_candidates"] == []
 
 
-def test_auto_retry_previous_error_does_not_flip_the_resume_domain(tmp_path: Path) -> None:
+def test_auto_retry_previous_error_does_not_flip_the_resume_domain(tmp_path: Path, monkeypatch: Any) -> None:
     # #1420 geometry B, the common shape: every candidate that was ever
     # auto-retried carries a ``previous_error``, so the broad scan turned "SHUD
     # computed, publish failed silently" into manual-intervention work.
@@ -29365,7 +29436,7 @@ def test_auto_retry_previous_error_does_not_flip_the_resume_domain(tmp_path: Pat
     assert scheduler_state_failure_module._downstream_recorded_error_code(state) is None
 
     decision = scheduler_module._candidate_state_decision(candidate, state)
-    result = _run_once_for_state(tmp_path, state)
+    result = _run_once_for_state(monkeypatch, tmp_path, state)
 
     assert decision is not None
     assert (decision.action, decision.reason) == ("retry", "resume_downstream_after_durable_shud")
@@ -29375,7 +29446,7 @@ def test_auto_retry_previous_error_does_not_flip_the_resume_domain(tmp_path: Pat
     assert result.evidence["skipped_candidates"] == []
 
 
-def test_downstream_resume_control_group_without_any_historical_code(tmp_path: Path) -> None:
+def test_downstream_resume_control_group_without_any_historical_code(tmp_path: Path, monkeypatch: Any) -> None:
     # #1420 control: the same base with no stale code anywhere resumes before and
     # after the scoping, which is what makes geometries A/B attributable to the
     # stale code alone.  (``test_downstream_resume_keeps_synthesized_placeholder
@@ -29386,7 +29457,7 @@ def test_downstream_resume_control_group_without_any_historical_code(tmp_path: P
     assert scheduler_state_failure_module._state_error_code(state) is None
 
     decision = scheduler_module._candidate_state_decision(candidate, state)
-    result = _run_once_for_state(tmp_path, state)
+    result = _run_once_for_state(monkeypatch, tmp_path, state)
 
     assert decision is not None
     assert (decision.action, decision.reason) == ("retry", "resume_downstream_after_durable_shud")
@@ -29411,7 +29482,7 @@ def test_stale_code_still_reaches_the_reason_code_text_surface() -> None:
     assert decision.evidence["failure"]["classifier"] == "unknown_failure"
 
 
-def test_stale_code_classifying_into_a_refused_classifier_still_refuses(tmp_path: Path) -> None:
+def test_stale_code_classifying_into_a_refused_classifier_still_refuses(tmp_path: Path, monkeypatch: Any) -> None:
     # #1420 I7 boundary: the placeholder domain has always refused its three
     # classifiers, and the stale code still reaches the classifier through the
     # text surface above.  So a recovered stage's ``OUT_OF_MEMORY`` residue lands
@@ -29426,7 +29497,7 @@ def test_stale_code_classifying_into_a_refused_classifier_still_refuses(tmp_path
     assert scheduler_state_failure_module._downstream_recorded_error_code(state) is None
 
     decision = scheduler_module._candidate_state_decision(candidate, state)
-    result = _run_once_for_state(tmp_path, state)
+    result = _run_once_for_state(monkeypatch, tmp_path, state)
 
     assert decision is not None
     assert (decision.action, decision.reason) == ("blocked", "permanent_failure_guard")
@@ -30925,10 +30996,12 @@ def test_raw_manifest_probe_fault_blocks_one_candidate_and_the_pass_survives(
     )
     orchestrator = FakeProductionOrchestrator()
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
         registry=FakeRegistry([_model("model_a", "basin_a"), _model("model_b", "basin_b")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=_PerModelCandidateStateRepository({"model_a": state, "model_b": {}}),
+        active_repository=_db_free_journal_stand_in(
+            _PerModelCandidateStateRepository({"model_a": state, "model_b": {}})
+        ),
         canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
@@ -31174,8 +31247,9 @@ def test_raw_manifest_abstention_keeps_permanent_refusals_blocked(
 
 def test_candidate_state_manual_retry_marker_allows_blocked_candidate_and_preserves_prior_reason(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     active_repository = FakeCandidateStateRepository(
         {
             "pipeline_status": "permanently_failed",
@@ -31193,7 +31267,7 @@ def test_candidate_state_manual_retry_marker_allows_blocked_candidate_and_preser
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -31214,11 +31288,12 @@ def test_candidate_state_manual_retry_marker_allows_blocked_candidate_and_preser
     assert result.evidence["counts"]["submitted_count"] == 1
 
 
-@pytest.mark.usefixtures("recorded_forcing_package_present")
+@pytest.mark.usefixtures("recorded_forcing_package_present_db_free")
 def test_db_shaped_transient_failure_uses_scheduler_retry_limit_without_state_retry_limit(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False, retry_limit=3)
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False, retry_limit=3)
     active_repository = FakeCandidateStateRepository(
         {
             "pipeline_status": "failed",
@@ -31234,7 +31309,7 @@ def test_db_shaped_transient_failure_uses_scheduler_retry_limit_without_state_re
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -31253,9 +31328,10 @@ def test_db_shaped_transient_failure_uses_scheduler_retry_limit_without_state_re
 def test_durable_downstream_permanent_or_exhausted_failure_blocks_until_manual_retry(
     tmp_path: Path,
     error_code: str,
+    monkeypatch: Any,
 ) -> None:
     retry_count = 3 if error_code == "SLURM_TIMEOUT" else 1
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False, retry_limit=3)
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False, retry_limit=3)
     active_repository = FakeCandidateStateRepository(
         {
             "hydro_status": "succeeded",
@@ -31273,7 +31349,7 @@ def test_durable_downstream_permanent_or_exhausted_failure_blocks_until_manual_r
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -31287,19 +31363,22 @@ def test_durable_downstream_permanent_or_exhausted_failure_blocks_until_manual_r
     assert orchestrator.calls == []
 
 
-def test_cancelled_candidate_requires_manual_retry_and_manual_marker_allows_retry(tmp_path: Path) -> None:
+def test_cancelled_candidate_requires_manual_retry_and_manual_marker_allows_retry(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
     cancelled_state = {
         "pipeline_status": "cancelled",
         "hydro_status": "cancelled",
         "retry_count": 1,
     }
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     blocked_orchestrator = FakeProductionOrchestrator()
     blocked_scheduler = ProductionScheduler(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=FakeCandidateStateRepository(cancelled_state),
+        active_repository=_db_free_journal_stand_in(FakeCandidateStateRepository(cancelled_state)),
         orchestrator_factory=lambda _source_id: blocked_orchestrator,
     )
 
@@ -31315,8 +31394,10 @@ def test_cancelled_candidate_requires_manual_retry_and_manual_marker_allows_retr
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=FakeCandidateStateRepository(
-            {**cancelled_state, "manual_retry": {"marker": True}, "prior_failure_reason": "cancelled"}
+        active_repository=_db_free_journal_stand_in(
+            FakeCandidateStateRepository(
+                {**cancelled_state, "manual_retry": {"marker": True}, "prior_failure_reason": "cancelled"}
+            )
         ),
         orchestrator_factory=lambda _source_id: retry_orchestrator,
     )
@@ -31331,8 +31412,9 @@ def test_cancelled_candidate_requires_manual_retry_and_manual_marker_allows_retr
 
 def test_candidate_state_cycle_aggregate_success_does_not_skip_failed_model_and_reuses_sibling(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     task_results = [
         {"task_id": 0, "array_task_id": 0, "model_id": "model_a", "status": "succeeded"},
         {
@@ -31390,7 +31472,7 @@ def test_candidate_state_cycle_aggregate_success_does_not_skip_failed_model_and_
         config,
         registry=FakeRegistry([_model("model_b", "basin_b")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -31406,8 +31488,8 @@ def test_candidate_state_cycle_aggregate_success_does_not_skip_failed_model_and_
     assert result.evidence["skipped_candidates"] == []
 
 
-def test_ambiguous_array_task_events_do_not_drive_retry_or_sibling_reuse(tmp_path: Path) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+def test_ambiguous_array_task_events_do_not_drive_retry_or_sibling_reuse(tmp_path: Path, monkeypatch: Any) -> None:
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     task_results = [
         {"task_id": 0, "array_task_id": 0, "status": "succeeded"},
         {
@@ -31464,7 +31546,7 @@ def test_ambiguous_array_task_events_do_not_drive_retry_or_sibling_reuse(tmp_pat
         config,
         registry=FakeRegistry([_model("model_b", "basin_b")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -31478,8 +31560,11 @@ def test_ambiguous_array_task_events_do_not_drive_retry_or_sibling_reuse(tmp_pat
     assert result.evidence["counts"]["submitted_count"] == 1
 
 
-def test_manual_retry_event_in_candidate_state_preserves_prior_reason_and_attempts(tmp_path: Path) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+def test_manual_retry_event_in_candidate_state_preserves_prior_reason_and_attempts(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     active_repository = FakeCandidateStateRepository(
         {
             "pipeline_status": "permanently_failed",
@@ -31511,7 +31596,7 @@ def test_manual_retry_event_in_candidate_state_preserves_prior_reason_and_attemp
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -31528,9 +31613,13 @@ def test_manual_retry_event_in_candidate_state_preserves_prior_reason_and_attemp
     assert result.evidence["counts"]["submitted_count"] == 1
 
 
-@pytest.mark.usefixtures("recorded_forcing_package_present")
-def test_candidate_state_rows_and_events_are_bounded_before_evidence_amplification(tmp_path: Path) -> None:
-    config = _config(
+@pytest.mark.usefixtures("recorded_forcing_package_present_db_free")
+def test_candidate_state_rows_and_events_are_bounded_before_evidence_amplification(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    config = _db_free_pass_config(
+        monkeypatch,
         tmp_path,
         now=_dt("2026-05-21T12:00:00Z"),
         dry_run=False,
@@ -31570,7 +31659,7 @@ def test_candidate_state_rows_and_events_are_bounded_before_evidence_amplificati
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: FakeProductionOrchestrator(),
     )
 
@@ -31662,8 +31751,10 @@ def test_candidate_state_bounded_evidence_owner_module_matches_scheduler_facade(
 
 def test_candidate_state_nested_task_results_are_bounded_before_evidence_and_scanning(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
-    config = _config(
+    config = _db_free_pass_config(
+        monkeypatch,
         tmp_path,
         now=_dt("2026-05-21T12:00:00Z"),
         dry_run=False,
@@ -31704,7 +31795,7 @@ def test_candidate_state_nested_task_results_are_bounded_before_evidence_and_sca
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: StrictNoSubmitOrchestrator(),
     )
 
@@ -31764,6 +31855,7 @@ def test_candidate_state_nested_task_results_do_not_scan_past_overflow_sentinel(
 
 def test_candidate_state_nested_task_results_outside_bound_do_not_drive_retry_or_evidence(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
     task_count = MAX_MODEL_RUN_STAGE_TASK_ROWS + 1
     task_results = [
@@ -31782,22 +31874,24 @@ def test_candidate_state_nested_task_results_outside_bound_do_not_drive_retry_or
     }
     orchestrator = FakeProductionOrchestrator()
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=RawCandidateStateRepository(
-            {
-                "pipeline_status": "failed",
-                "failed_stage": "forecast",
-                "error_code": "NODE_FAILURE",
-                "pipeline_events": [
-                    {
-                        "event_id": 21,
-                        "event_type": "status_change",
-                        "details": {"stage": "forecast", "task_results": task_results},
-                    }
-                ],
-            }
+        active_repository=_db_free_journal_stand_in(
+            RawCandidateStateRepository(
+                {
+                    "pipeline_status": "failed",
+                    "failed_stage": "forecast",
+                    "error_code": "NODE_FAILURE",
+                    "pipeline_events": [
+                        {
+                            "event_id": 21,
+                            "event_type": "status_change",
+                            "details": {"stage": "forecast", "task_results": task_results},
+                        }
+                    ],
+                }
+            )
         ),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
@@ -31818,13 +31912,15 @@ def test_candidate_state_nested_task_results_outside_bound_do_not_drive_retry_or
         ("running", "active_slurm_job"),
     ],
 )
-@pytest.mark.usefixtures("recorded_forcing_package_present")
+@pytest.mark.usefixtures("recorded_forcing_package_present_db_free")
 def test_latest_bounded_candidate_state_row_wins_over_older_truncated_rows(
     tmp_path: Path,
     latest_status: str,
     expected_reason: str,
+    monkeypatch: Any,
 ) -> None:
-    config = _config(
+    config = _db_free_pass_config(
+        monkeypatch,
         tmp_path,
         now=_dt("2026-05-21T12:00:00Z"),
         dry_run=False,
@@ -31877,7 +31973,7 @@ def test_latest_bounded_candidate_state_row_wins_over_older_truncated_rows(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -31889,8 +31985,9 @@ def test_latest_bounded_candidate_state_row_wins_over_older_truncated_rows(
     assert orchestrator.calls == []
 
 
-def test_latest_manual_retry_event_outside_oldest_first_cap_allows_candidate(tmp_path: Path) -> None:
-    config = _config(
+def test_latest_manual_retry_event_outside_oldest_first_cap_allows_candidate(tmp_path: Path, monkeypatch: Any) -> None:
+    config = _db_free_pass_config(
+        monkeypatch,
         tmp_path,
         now=_dt("2026-05-21T12:00:00Z"),
         dry_run=False,
@@ -31934,7 +32031,7 @@ def test_latest_manual_retry_event_outside_oldest_first_cap_allows_candidate(tmp
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -31958,13 +32055,14 @@ def test_latest_manual_retry_event_outside_oldest_first_cap_allows_candidate(tmp
         ("running", "active_slurm_job"),
     ],
 )
-@pytest.mark.usefixtures("recorded_forcing_package_present")
+@pytest.mark.usefixtures("recorded_forcing_package_present_db_free")
 def test_stale_manual_retry_marker_does_not_override_newer_blocking_truth(
     tmp_path: Path,
     latest_status: str,
     expected_reason: str,
+    monkeypatch: Any,
 ) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     latest_job = {
         "job_id": "job_latest",
         "run_id": "fcst_gfs_2026052106_model_a",
@@ -32016,7 +32114,7 @@ def test_stale_manual_retry_marker_does_not_override_newer_blocking_truth(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -32030,8 +32128,9 @@ def test_stale_manual_retry_marker_does_not_override_newer_blocking_truth(
 
 def test_newer_manual_retry_after_terminal_truth_allows_candidate_and_preserves_attempts(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     active_repository = FakeCandidateStateRepository(
         {
             "pipeline_status": "permanently_failed",
@@ -32075,7 +32174,7 @@ def test_newer_manual_retry_after_terminal_truth_allows_candidate_and_preserves_
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -32164,10 +32263,11 @@ def test_newer_manual_retry_marker_does_not_override_active_truth(
     tmp_path: Path,
     state: dict[str, Any],
     expected_reason: str,
+    monkeypatch: Any,
 ) -> None:
     state = dict(state)
     pipeline_events = list(state.pop("pipeline_events", []))
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     active_repository = FakeCandidateStateRepository(
         {
             **state,
@@ -32197,7 +32297,7 @@ def test_newer_manual_retry_marker_does_not_override_active_truth(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -32212,8 +32312,10 @@ def test_newer_manual_retry_marker_does_not_override_active_truth(
 
 def test_latest_unavailable_cycle_does_not_consume_source_budget_when_older_cycle_is_runnable(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
-    config = _config(
+    config = _db_free_pass_config(
+        monkeypatch,
         tmp_path,
         now=_dt("2026-05-21T18:00:00Z"),
         dry_run=False,
@@ -32236,7 +32338,7 @@ def test_latest_unavailable_cycle_does_not_consume_source_budget_when_older_cycl
                 ],
             )
         },
-        active_repository=FakeActiveRepository(active=False),
+        active_repository=_empty_file_journal(tmp_path / "workspace"),
         canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
@@ -32252,8 +32354,10 @@ def test_latest_unavailable_cycle_does_not_consume_source_budget_when_older_cycl
 
 def test_backfill_selects_oldest_incomplete_cycle_and_defers_later_gaps_for_warm_start(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
-    config = _config(
+    config = _db_free_pass_config(
+        monkeypatch,
         tmp_path,
         now=_dt("2026-05-21T18:00:00Z"),
         dry_run=False,
@@ -32274,7 +32378,7 @@ def test_backfill_selects_oldest_incomplete_cycle_and_defers_later_gaps_for_warm
                 ],
             )
         },
-        active_repository=FakeActiveRepository(active=False),
+        active_repository=_empty_file_journal(tmp_path / "workspace"),
         canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
@@ -32352,6 +32456,7 @@ def test_backfill_completion_ignores_direct_grid_variants_scoped_to_another_sour
     scheduler = ProductionScheduler(
         _config(
             tmp_path,
+            db_free=True,
             now=_dt("2026-05-21T18:00:00Z"),
             dry_run=False,
             backfill_enabled=True,
@@ -32382,8 +32487,10 @@ def test_backfill_completion_ignores_direct_grid_variants_scoped_to_another_sour
 
 def test_backfill_floor_lookback_window_to_cycle_boundary_for_warm_start_order(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
-    config = _config(
+    config = _db_free_pass_config(
+        monkeypatch,
         tmp_path,
         now=_dt("2026-06-06T16:24:00Z"),
         dry_run=False,
@@ -32405,7 +32512,7 @@ def test_backfill_floor_lookback_window_to_cycle_boundary_for_warm_start_order(
                 ],
             )
         },
-        active_repository=FakeActiveRepository(active=False),
+        active_repository=_empty_file_journal(tmp_path / "workspace"),
         canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
@@ -32428,8 +32535,10 @@ def test_backfill_floor_lookback_window_to_cycle_boundary_for_warm_start_order(
 
 def test_backfill_selects_global_oldest_cycle_across_sources_and_defers_later_cycles(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
-    config = _config(
+    config = _db_free_pass_config(
+        monkeypatch,
         tmp_path,
         now=_dt("2026-06-06T16:24:00Z"),
         sources=("gfs", "IFS"),
@@ -32457,7 +32566,7 @@ def test_backfill_selects_global_oldest_cycle_across_sources_and_defers_later_cy
                 ],
             ),
         },
-        active_repository=FakeActiveRepository(active=False),
+        active_repository=_empty_file_journal(tmp_path / "workspace"),
         canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
@@ -32473,8 +32582,10 @@ def test_backfill_selects_global_oldest_cycle_across_sources_and_defers_later_cy
 
 def test_backfill_defers_later_source_cycle_until_global_oldest_cycle_is_done(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
-    config = _config(
+    config = _db_free_pass_config(
+        monkeypatch,
         tmp_path,
         now=_dt("2026-06-06T16:24:00Z"),
         sources=("gfs", "IFS"),
@@ -32492,7 +32603,7 @@ def test_backfill_defers_later_source_cycle_until_global_oldest_cycle_is_done(
             "gfs": FakeAdapter("gfs", [("2026-05-30T00:00:00Z", True)]),
             "IFS": FakeAdapter("IFS", [("2026-05-30T06:00:00Z", True)]),
         },
-        active_repository=FakeActiveRepository(active=False),
+        active_repository=_empty_file_journal(tmp_path / "workspace"),
         canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
@@ -32514,8 +32625,10 @@ def test_backfill_defers_later_source_cycle_until_global_oldest_cycle_is_done(
 
 def test_backfill_selects_earliest_durable_incomplete_cycle_before_later_download_gap(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
-    config = _config(
+    config = _db_free_pass_config(
+        monkeypatch,
         tmp_path,
         now=_dt("2026-06-06T16:24:00Z"),
         dry_run=False,
@@ -32539,11 +32652,13 @@ def test_backfill_selects_earliest_durable_incomplete_cycle_before_later_downloa
                 ],
             )
         },
-        active_repository=PerCycleCandidateStateRepository(
-            {
-                "2026-05-30T00:00:00+00:00": {"hydro_status": "published"},
-                "2026-05-30T06:00:00+00:00": {"forecast_cycle_status": "forcing_ready"},
-            }
+        active_repository=_db_free_journal_stand_in(
+            PerCycleCandidateStateRepository(
+                {
+                    "2026-05-30T00:00:00+00:00": {"hydro_status": "published"},
+                    "2026-05-30T06:00:00+00:00": {"forecast_cycle_status": "forcing_ready"},
+                }
+            )
         ),
         canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
         orchestrator_factory=lambda _source_id: orchestrator,
@@ -32567,8 +32682,10 @@ def test_backfill_selects_earliest_durable_incomplete_cycle_before_later_downloa
 
 def test_backfill_skips_unavailable_gap_and_selects_oldest_available_for_warm_start(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
-    config = _config(
+    config = _db_free_pass_config(
+        monkeypatch,
         tmp_path,
         now=_dt("2026-05-21T18:00:00Z"),
         dry_run=False,
@@ -32593,7 +32710,7 @@ def test_backfill_skips_unavailable_gap_and_selects_oldest_available_for_warm_st
                 ],
             )
         },
-        active_repository=FakeActiveRepository(active=False),
+        active_repository=_empty_file_journal(tmp_path / "workspace"),
         canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
@@ -32618,6 +32735,7 @@ def test_backfill_skips_unavailable_gap_and_selects_oldest_available_for_warm_st
 
 def test_backfill_defers_a_newest_cycle_whose_raw_data_is_not_ready(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
     """#3225: a cycle inside the window but with incomplete raw data is deferred, not submitted.
 
@@ -32627,7 +32745,8 @@ def test_backfill_defers_a_newest_cycle_whose_raw_data_is_not_ready(
     later pass picks it up once its data completes.
     """
 
-    config = _config(
+    config = _db_free_pass_config(
+        monkeypatch,
         tmp_path,
         now=_dt("2026-05-21T18:00:00Z"),
         dry_run=False,
@@ -32650,7 +32769,7 @@ def test_backfill_defers_a_newest_cycle_whose_raw_data_is_not_ready(
                 ],
             )
         },
-        active_repository=FakeActiveRepository(active=False),
+        active_repository=_empty_file_journal(tmp_path / "workspace"),
         canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
@@ -32673,8 +32792,10 @@ def test_backfill_defers_a_newest_cycle_whose_raw_data_is_not_ready(
 
 def test_backfill_probe_failed_gap_keeps_retryable_evidence_and_does_not_consume_budget(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
-    config = _config(
+    config = _db_free_pass_config(
+        monkeypatch,
         tmp_path,
         now=_dt("2026-06-08T12:00:00Z"),
         sources=("IFS",),
@@ -32745,8 +32866,10 @@ def test_backfill_probe_failed_gap_keeps_retryable_evidence_and_does_not_consume
 
 def test_backfill_rate_limited_gap_keeps_retryable_evidence_and_does_not_consume_budget(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
-    config = _config(
+    config = _db_free_pass_config(
+        monkeypatch,
         tmp_path,
         now=_dt("2026-06-08T12:00:00Z"),
         sources=("IFS",),
@@ -32853,7 +32976,12 @@ def test_manual_retry_marker_bound_to_terminal_blocker_overrides_newer_blocker_t
     )
 
 
-def test_active_skip_and_cancel_evidence_redacts_secret_urls_and_error_messages(tmp_path: Path) -> None:
+def test_active_skip_and_cancel_evidence_redacts_secret_urls_and_error_messages(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    now = _dt("2026-05-21T12:00:00Z")
+    roots, _paths = _db_free_pass_env(monkeypatch, tmp_path, generated_at=now)
     secret_uri = "s3://bucket/logs/job.out?token=supersecret"
     secret_message = "failed callback https://user:pass@example.test/log?signature=abc token=rawsecret"
     active_jobs = [
@@ -32867,14 +32995,19 @@ def test_active_skip_and_cancel_evidence_redacts_secret_urls_and_error_messages(
         }
     ]
     skip_scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        _config(roots["workspace_root"], db_free=True, now=now, dry_run=False),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=FakeSlurmActiveRepository(active_jobs=active_jobs),
+        active_repository=_db_free_journal_stand_in(FakeSlurmActiveRepository(active_jobs=active_jobs)),
         orchestrator_factory=lambda _source_id: FakeProductionOrchestrator(),
     )
 
     skipped = skip_scheduler.run_once()
+
+    # #3251: the skip and cancel paths must actually run, or the redaction checks
+    # below pass on a preflight-blocked pass that never rendered the active job.
+    assert skipped.status == "planned"
+    assert len(skipped.evidence["skipped_candidates"]) == 1
 
     skipped_json = json.dumps(skipped.evidence)
     assert "supersecret" not in skipped_json
@@ -32892,14 +33025,16 @@ def test_active_skip_and_cancel_evidence_redacts_secret_urls_and_error_messages(
         ]
     )
     cancel_scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False, cancel_active_slurm=True),
+        _config(roots["workspace_root"], db_free=True, now=now, dry_run=False, cancel_active_slurm=True),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=FakeSlurmActiveRepository(active_jobs=active_jobs),
+        active_repository=_db_free_journal_stand_in(FakeSlurmActiveRepository(active_jobs=active_jobs)),
         orchestrator_factory=lambda _source_id: cancel_orchestrator,
     )
 
     cancelled = cancel_scheduler.run_once()
+
+    assert cancelled.status == "slurm_cancelled"
 
     cancelled_json = json.dumps(cancelled.evidence)
     assert "supersecret" not in cancelled_json
@@ -32908,7 +33043,7 @@ def test_active_skip_and_cancel_evidence_redacts_secret_urls_and_error_messages(
     assert "s3://bucket/logs/job.out?token" not in cancelled_json
 
 
-def test_orchestrator_exception_evidence_and_artifact_redact_secret_text(tmp_path: Path) -> None:
+def test_orchestrator_exception_evidence_and_artifact_redact_secret_text(tmp_path: Path, monkeypatch: Any) -> None:
     class SecretFailureOrchestrator(FakeProductionOrchestrator):
         def orchestrate_cycle(
             self,
@@ -32923,7 +33058,7 @@ def test_orchestrator_exception_evidence_and_artifact_redact_secret_text(tmp_pat
 
     orchestrator = SecretFailureOrchestrator()
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
         orchestrator_factory=lambda _source_id: orchestrator,
@@ -32971,7 +33106,10 @@ def test_orchestrator_exception_evidence_and_artifact_redact_secret_text(tmp_pat
     assert "[redacted]" in artifact_text
 
 
-def test_orchestrator_exception_evidence_records_an_attributable_traceback_tail(tmp_path: Path) -> None:
+def test_orchestrator_exception_evidence_records_an_attributable_traceback_tail(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
     """#1380 — a bare message string cannot locate the frame that raised.
 
     The 2026-08-14 pass recorded ``dictionary changed size during iteration``
@@ -32991,7 +33129,7 @@ def test_orchestrator_exception_evidence_records_an_attributable_traceback_tail(
             raise RuntimeError("dictionary changed size during iteration https://user:pass@example.test/x")
 
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
         orchestrator_factory=lambda _source_id: RaisingOrchestrator(),
@@ -33069,6 +33207,7 @@ def test_orchestrator_exception_traceback_tail_keeps_exactly_the_last_three_fram
 def test_returned_failed_pipeline_without_slurm_id_keeps_pipeline_write_proof(
     tmp_path: Path,
     result_status: str,
+    monkeypatch: Any,
 ) -> None:
     class ReturnedFailureNoSlurmOrchestrator(FakeProductionOrchestrator):
         def orchestrate_cycle(
@@ -33110,7 +33249,7 @@ def test_returned_failed_pipeline_without_slurm_id_keeps_pipeline_write_proof(
 
     orchestrator = ReturnedFailureNoSlurmOrchestrator()
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
         orchestrator_factory=lambda _source_id: orchestrator,
@@ -33155,6 +33294,7 @@ def test_returned_failed_pipeline_without_slurm_id_keeps_pipeline_write_proof(
 
 def test_returned_pipeline_with_slurm_id_without_pipeline_write_proof_keeps_pipeline_writes_unknown(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
     class ReturnedSlurmWithoutPipelineWriteOrchestrator(FakeProductionOrchestrator):
         def orchestrate_cycle(
@@ -33181,7 +33321,7 @@ def test_returned_pipeline_with_slurm_id_without_pipeline_write_proof_keeps_pipe
 
     orchestrator = ReturnedSlurmWithoutPipelineWriteOrchestrator()
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
         orchestrator_factory=lambda _source_id: orchestrator,
@@ -33210,7 +33350,7 @@ def test_returned_pipeline_with_slurm_id_without_pipeline_write_proof_keeps_pipe
         assert no_mutation["pipeline_event_writes"] == "unknown_after_attempt"
 
 
-def test_active_db_job_cancel_requested_calls_cancel_before_active_skip(tmp_path: Path) -> None:
+def test_active_db_job_cancel_requested_calls_cancel_before_active_skip(tmp_path: Path, monkeypatch: Any) -> None:
     active_state = {
         "pipeline_jobs": [
             {
@@ -33227,10 +33367,16 @@ def test_active_db_job_cancel_requested_calls_cancel_before_active_skip(tmp_path
     active_repository = CandidateAndActiveRepository(active_state, active_jobs)
     orchestrator = FakeProductionOrchestrator()
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False, cancel_active_slurm=True),
+        _db_free_pass_config(
+            monkeypatch,
+            tmp_path,
+            now=_dt("2026-05-21T12:00:00Z"),
+            dry_run=False,
+            cancel_active_slurm=True,
+        ),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -33242,7 +33388,7 @@ def test_active_db_job_cancel_requested_calls_cancel_before_active_skip(tmp_path
     assert orchestrator.calls == []
 
 
-def test_stale_active_db_job_terminal_slurm_sync_does_not_skip_forever(tmp_path: Path) -> None:
+def test_stale_active_db_job_terminal_slurm_sync_does_not_skip_forever(tmp_path: Path, monkeypatch: Any) -> None:
     class SyncingRepository(CandidateAndActiveRepository):
         def __init__(self) -> None:
             self.synced = False
@@ -33302,10 +33448,10 @@ def test_stale_active_db_job_terminal_slurm_sync_does_not_skip_forever(tmp_path:
 
     orchestrator = SyncingOrchestrator()
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=repository,
+        active_repository=_db_free_journal_stand_in(repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -33346,27 +33492,29 @@ def test_sync_cycle_statuses_blocks_before_sync_when_pre_execution_reservation_f
     now = _dt("2026-05-21T12:00:00Z")
     fixed_suffix = "reservation0"
     pass_id = f"scheduler_{format_cycle_time(now)}_{fixed_suffix}"
-    evidence_dir = tmp_path / "scheduler" / "evidence"
-    evidence_dir.mkdir(parents=True)
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=now, dry_run=False)
+    evidence_dir = Path(config.evidence_dir)
     (evidence_dir / f"{pass_id}.json").write_text("{}", encoding="utf-8")
     monkeypatch.setattr(scheduler_module, "uuid4", lambda: type("FixedUuid", (), {"hex": fixed_suffix})())
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=now, dry_run=False),
+        config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=SyncingRepository(
-            {
-                "pipeline_status": "running",
-                "pipeline_jobs": [
-                    {
-                        "job_id": "job_forcing",
-                        "status": "running",
-                        "stage": "forcing",
-                        "slurm_job_id": "7777",
-                    }
-                ],
-            },
-            [{"job_id": "job_forcing", "slurm_job_id": "7777", "status": "running", "stage": "forcing"}],
+        active_repository=_db_free_journal_stand_in(
+            SyncingRepository(
+                {
+                    "pipeline_status": "running",
+                    "pipeline_jobs": [
+                        {
+                            "job_id": "job_forcing",
+                            "status": "running",
+                            "stage": "forcing",
+                            "slurm_job_id": "7777",
+                        }
+                    ],
+                },
+                [{"job_id": "job_forcing", "slurm_job_id": "7777", "status": "running", "stage": "forcing"}],
+            )
         ),
         orchestrator_factory=lambda _source_id: SyncMustNotRunOrchestrator(),
     )
@@ -33384,7 +33532,7 @@ def test_sync_cycle_statuses_blocks_before_sync_when_pre_execution_reservation_f
     assert result.evidence["model_run_evidence"][0]["sync_attempted"] is False
 
 
-def test_sync_cycle_statuses_sees_pre_execution_reservation_before_mutating(tmp_path: Path) -> None:
+def test_sync_cycle_statuses_sees_pre_execution_reservation_before_mutating(tmp_path: Path, monkeypatch: Any) -> None:
     class SyncingRepository(CandidateAndActiveRepository):
         def __init__(self) -> None:
             self.synced = False
@@ -33431,7 +33579,8 @@ def test_sync_cycle_statuses_sees_pre_execution_reservation_before_mutating(tmp_
 
     class SyncingOrchestrator(FakeProductionOrchestrator):
         def sync_cycle_statuses(self, cycle_id: str) -> list[dict[str, Any]]:
-            reservation_seen_before_sync.append(bool(list(tmp_path.glob("scheduler/evidence/*.pre_execution.json"))))
+            # The DB-free env's evidence root (`_db_free_pass_env`).
+            reservation_seen_before_sync.append(bool(list(tmp_path.glob("workspace/evidence/*.pre_execution.json"))))
             repository.synced = True
             return [
                 {
@@ -33443,10 +33592,10 @@ def test_sync_cycle_statuses_sees_pre_execution_reservation_before_mutating(tmp_
             ]
 
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=repository,
+        active_repository=_db_free_journal_stand_in(repository),
         orchestrator_factory=lambda _source_id: SyncingOrchestrator(),
     )
 
@@ -33465,6 +33614,7 @@ def test_sync_cycle_statuses_sees_pre_execution_reservation_before_mutating(tmp_
 
 def test_sync_cycle_statuses_exception_after_attempt_persists_conservative_final_evidence(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
     class SyncError(Exception):
         error_code = "PUBLISHED_LOG_WRITE_FAILED"
@@ -33493,16 +33643,17 @@ def test_sync_cycle_statuses_exception_after_attempt_persists_conservative_final
 
     class RaisingSyncOrchestrator(FakeProductionOrchestrator):
         def sync_cycle_statuses(self, cycle_id: str) -> list[dict[str, Any]]:
-            reservation_seen_before_sync.append(bool(list(tmp_path.glob("scheduler/evidence/*.pre_execution.json"))))
+            # The DB-free env's evidence root (`_db_free_pass_env`).
+            reservation_seen_before_sync.append(bool(list(tmp_path.glob("workspace/evidence/*.pre_execution.json"))))
             sync_calls.append(cycle_id)
             raise SyncError("publish failed after durable sync")
 
     orchestrator = RaisingSyncOrchestrator()
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=SyncingRepository(),
+        active_repository=_db_free_journal_stand_in(SyncingRepository()),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -33543,7 +33694,10 @@ def test_sync_cycle_statuses_exception_after_attempt_persists_conservative_final
         assert evidence["no_mutation_proof"]["slurm_cancellation_called"] is False
 
 
-def test_sync_cycle_statuses_terminal_skip_promotes_sync_only_scheduler_status(tmp_path: Path) -> None:
+def test_sync_cycle_statuses_terminal_skip_promotes_sync_only_scheduler_status(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
     class SyncingRepository(CandidateAndActiveRepository):
         def __init__(self) -> None:
             self.synced = False
@@ -33599,10 +33753,10 @@ def test_sync_cycle_statuses_terminal_skip_promotes_sync_only_scheduler_status(t
 
     orchestrator = SyncingOrchestrator()
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=repository,
+        active_repository=_db_free_journal_stand_in(repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -33640,15 +33794,16 @@ def test_sync_cycle_statuses_terminal_skip_promotes_sync_only_scheduler_status(t
 def test_terminal_failed_or_cancelled_hydro_state_remains_candidate(
     tmp_path: Path,
     hydro_status: str,
+    monkeypatch: Any,
 ) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     active_repository = FakeHydroStateRepository(hydro_status=hydro_status)
     orchestrator = FakeProductionOrchestrator()
     scheduler = ProductionScheduler(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -33664,15 +33819,16 @@ def test_terminal_failed_or_cancelled_hydro_state_remains_candidate(
 def test_active_hydro_state_is_skipped_as_active(
     tmp_path: Path,
     hydro_status: str,
+    monkeypatch: Any,
 ) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     active_repository = FakeHydroStateRepository(hydro_status=hydro_status)
     orchestrator = FakeProductionOrchestrator()
     scheduler = ProductionScheduler(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -33685,15 +33841,15 @@ def test_active_hydro_state_is_skipped_as_active(
 
 
 @pytest.mark.parametrize("job_status", ["pending", "submitted", "running"])
-def test_active_cycle_pipeline_job_is_skipped_as_active(tmp_path: Path, job_status: str) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+def test_active_cycle_pipeline_job_is_skipped_as_active(tmp_path: Path, job_status: str, monkeypatch: Any) -> None:
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     active_repository = FakeHydroStateRepository(hydro_status="failed", pipeline_status=job_status)
     orchestrator = FakeProductionOrchestrator()
     scheduler = ProductionScheduler(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -33707,8 +33863,9 @@ def test_active_cycle_pipeline_job_is_skipped_as_active(tmp_path: Path, job_stat
 
 def test_unsubmitted_auto_retry_placeholder_does_not_keep_hydro_created_active(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     active_repository = FakeCandidateStateRepository(
         {
             "hydro_status": "created",
@@ -33746,7 +33903,7 @@ def test_unsubmitted_auto_retry_placeholder_does_not_keep_hydro_created_active(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -33762,15 +33919,19 @@ def test_unsubmitted_auto_retry_placeholder_does_not_keep_hydro_created_active(
     "job_status",
     ["succeeded", "partially_failed", "failed", "cancelled", "submission_failed", "permanently_failed", None],
 )
-def test_terminal_or_missing_pipeline_job_is_not_active(tmp_path: Path, job_status: str | None) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+def test_terminal_or_missing_pipeline_job_is_not_active(
+    tmp_path: Path,
+    job_status: str | None,
+    monkeypatch: Any,
+) -> None:
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     active_repository = FakeHydroStateRepository(hydro_status="failed", pipeline_status=job_status)
     orchestrator = FakeProductionOrchestrator()
     scheduler = ProductionScheduler(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-        active_repository=active_repository,
+        active_repository=_db_free_journal_stand_in(active_repository),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -33782,8 +33943,8 @@ def test_terminal_or_missing_pipeline_job_is_not_active(tmp_path: Path, job_stat
     assert len(orchestrator.calls) == 1
 
 
-def test_default_non_dry_run_blocks_before_mutation_without_safe_preflight(tmp_path: Path) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+def test_default_non_dry_run_blocks_before_mutation_without_safe_preflight(tmp_path: Path, monkeypatch: Any) -> None:
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     scheduler = ProductionScheduler(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a")]),
@@ -33806,10 +33967,13 @@ def test_default_non_dry_run_blocks_before_mutation_without_safe_preflight(tmp_p
     assert "output_uri" not in evidence
 
 
-def test_non_dry_run_qhh_candidate_executes_generic_m3_chain_without_qhh_scripts(tmp_path: Path) -> None:
+def test_non_dry_run_qhh_candidate_executes_generic_m3_chain_without_qhh_scripts(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
     now = _dt("2026-05-21T12:00:00Z")
     orchestrator = FakeProductionOrchestrator()
-    config = _config(tmp_path, now=now, dry_run=False)
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=now, dry_run=False)
     scheduler = ProductionScheduler(
         config,
         registry=FakeRegistry(
@@ -33862,6 +34026,7 @@ def test_non_dry_run_qhh_candidate_executes_generic_m3_chain_without_qhh_scripts
 
 def test_non_dry_run_output_uri_unavailable_sibling_is_terminal_preflight_evidence(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
     now = _dt("2026-05-21T12:00:00Z")
     submitted_model = _model("model_a", "basin_a")
@@ -33870,7 +34035,7 @@ def test_non_dry_run_output_uri_unavailable_sibling_is_terminal_preflight_eviden
         "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
     }
     orchestrator = FakeProductionOrchestrator(expose_object_store=False)
-    config = _config(tmp_path, now=now, dry_run=False)
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=now, dry_run=False)
     scheduler = ProductionScheduler(
         config,
         registry=FakeRegistry([submitted_model, _model("model_b", "basin_b")]),
@@ -33917,8 +34082,9 @@ def test_slurm_scheduler_rejects_secret_candidate_manifest_before_orchestrator_s
     tmp_path: Path,
     resource_profile: dict[str, Any],
     secret_text: str,
+    monkeypatch: Any,
 ) -> None:
-    roots = _slurm_roots(tmp_path)
+    roots = _db_free_slurm_roots(monkeypatch, tmp_path, generated_at=_dt("2026-05-21T12:00:00Z"))
     model = _model("model_a", "basin_a")
     model["resource_profile"] = {
         **model["resource_profile"],
@@ -33927,10 +34093,10 @@ def test_slurm_scheduler_rejects_secret_candidate_manifest_before_orchestrator_s
     orchestrator = StrictNoSubmitOrchestrator()
     config = _config(
         roots["workspace_root"],
+        db_free=True,
         now=_dt("2026-05-21T12:00:00Z"),
         dry_run=False,
         slurm_execution_enabled=True,
-        database_url="postgresql://nhms:secret@db.prod.example/nhms",
         object_store_root=roots["object_store_root"],
         log_root=roots["log_root"],
         runtime_root=roots["runtime_root"],
@@ -33954,8 +34120,11 @@ def test_slurm_scheduler_rejects_secret_candidate_manifest_before_orchestrator_s
     assert orchestrator.calls == []
 
 
-def test_slurm_scheduler_rejects_secret_output_uri_before_orchestrator_submission(tmp_path: Path) -> None:
-    roots = _slurm_roots(tmp_path)
+def test_slurm_scheduler_rejects_secret_output_uri_before_orchestrator_submission(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    roots = _db_free_slurm_roots(monkeypatch, tmp_path, generated_at=_dt("2026-05-21T12:00:00Z"))
     model = _model("model_a", "basin_a")
     model["resource_profile"] = {
         **model["resource_profile"],
@@ -33964,10 +34133,10 @@ def test_slurm_scheduler_rejects_secret_output_uri_before_orchestrator_submissio
     orchestrator = StrictNoSubmitOrchestrator()
     config = _config(
         roots["workspace_root"],
+        db_free=True,
         now=_dt("2026-05-21T12:00:00Z"),
         dry_run=False,
         slurm_execution_enabled=True,
-        database_url="postgresql://nhms:secret@db.prod.example/nhms",
         object_store_root=roots["object_store_root"],
         log_root=roots["log_root"],
         runtime_root=roots["runtime_root"],
@@ -34007,17 +34176,18 @@ def test_slurm_scheduler_scans_raw_model_package_uri_before_orchestrator_submiss
     tmp_path: Path,
     model_package_uri: str,
     secret_text: str,
+    monkeypatch: Any,
 ) -> None:
-    roots = _slurm_roots(tmp_path)
+    roots = _db_free_slurm_roots(monkeypatch, tmp_path, generated_at=_dt("2026-05-21T12:00:00Z"))
     model = _model("model_a", "basin_a")
     model["model_package_uri"] = model_package_uri
     orchestrator = StrictNoSubmitOrchestrator()
     config = _config(
         roots["workspace_root"],
+        db_free=True,
         now=_dt("2026-05-21T12:00:00Z"),
         dry_run=False,
         slurm_execution_enabled=True,
-        database_url="postgresql://nhms:secret@db.prod.example/nhms",
         object_store_root=roots["object_store_root"],
         log_root=roots["log_root"],
         runtime_root=roots["runtime_root"],
@@ -34046,17 +34216,18 @@ def test_slurm_scheduler_scans_raw_model_package_uri_before_orchestrator_submiss
 
 def test_slurm_scheduler_rejects_derived_secret_model_package_manifest_uri_before_orchestrator_submission(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
-    roots = _slurm_roots(tmp_path)
+    roots = _db_free_slurm_roots(monkeypatch, tmp_path, generated_at=_dt("2026-05-21T12:00:00Z"))
     model = _model("model_a", "basin_a")
     model["model_package_uri"] = "s3://bucket/models/model_a/package?X-Amz-Signature=supersecret"
     orchestrator = StrictNoSubmitOrchestrator()
     config = _config(
         roots["workspace_root"],
+        db_free=True,
         now=_dt("2026-05-21T12:00:00Z"),
         dry_run=False,
         slurm_execution_enabled=True,
-        database_url="postgresql://nhms:secret@db.prod.example/nhms",
         object_store_root=roots["object_store_root"],
         log_root=roots["log_root"],
         runtime_root=roots["runtime_root"],
@@ -34084,8 +34255,9 @@ def test_slurm_scheduler_rejects_derived_secret_model_package_manifest_uri_befor
 
 def test_slurm_scheduler_rejects_resource_profile_secret_key_before_orchestrator_submission(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
-    roots = _slurm_roots(tmp_path)
+    roots = _db_free_slurm_roots(monkeypatch, tmp_path, generated_at=_dt("2026-05-21T12:00:00Z"))
     raw_key = "s3://bucket/path?token=supersecret"
     model = _model("model_a", "basin_a")
     model["resource_profile"] = {
@@ -34095,10 +34267,10 @@ def test_slurm_scheduler_rejects_resource_profile_secret_key_before_orchestrator
     orchestrator = StrictNoSubmitOrchestrator()
     config = _config(
         roots["workspace_root"],
+        db_free=True,
         now=_dt("2026-05-21T12:00:00Z"),
         dry_run=False,
         slurm_execution_enabled=True,
-        database_url="postgresql://nhms:secret@db.prod.example/nhms",
         object_store_root=roots["object_store_root"],
         log_root=roots["log_root"],
         runtime_root=roots["runtime_root"],
@@ -34141,8 +34313,9 @@ def test_slurm_scheduler_rejects_resource_profile_secret_key_before_orchestrator
 def test_slurm_scheduler_rejects_resource_profile_directive_injection_before_orchestrator_submission(
     tmp_path: Path,
     resource_profile_update: dict[str, Any],
+    monkeypatch: Any,
 ) -> None:
-    roots = _slurm_roots(tmp_path)
+    roots = _db_free_slurm_roots(monkeypatch, tmp_path, generated_at=_dt("2026-05-21T12:00:00Z"))
     model = _model("model_a", "basin_a")
     model["resource_profile"] = {
         **model["resource_profile"],
@@ -34151,10 +34324,10 @@ def test_slurm_scheduler_rejects_resource_profile_directive_injection_before_orc
     orchestrator = StrictNoSubmitOrchestrator()
     config = _config(
         roots["workspace_root"],
+        db_free=True,
         now=_dt("2026-05-21T12:00:00Z"),
         dry_run=False,
         slurm_execution_enabled=True,
-        database_url="postgresql://nhms:secret@db.prod.example/nhms",
         object_store_root=roots["object_store_root"],
         log_root=roots["log_root"],
         runtime_root=roots["runtime_root"],
@@ -34196,8 +34369,9 @@ def test_slurm_scheduler_rejects_resource_profile_directive_injection_before_orc
 def test_slurm_scheduler_rejects_resource_profile_identity_collision_before_orchestrator_submission(
     tmp_path: Path,
     collision_key: str,
+    monkeypatch: Any,
 ) -> None:
-    roots = _slurm_roots(tmp_path)
+    roots = _db_free_slurm_roots(monkeypatch, tmp_path, generated_at=_dt("2026-05-21T12:00:00Z"))
     model = _model("model_a", "basin_a")
     model["resource_profile"] = {
         **model["resource_profile"],
@@ -34206,10 +34380,10 @@ def test_slurm_scheduler_rejects_resource_profile_identity_collision_before_orch
     orchestrator = StrictNoSubmitOrchestrator()
     config = _config(
         roots["workspace_root"],
+        db_free=True,
         now=_dt("2026-05-21T12:00:00Z"),
         dry_run=False,
         slurm_execution_enabled=True,
-        database_url="postgresql://nhms:secret@db.prod.example/nhms",
         object_store_root=roots["object_store_root"],
         log_root=roots["log_root"],
         runtime_root=roots["runtime_root"],
@@ -34239,8 +34413,8 @@ def test_slurm_scheduler_rejects_resource_profile_identity_collision_before_orch
     assert orchestrator.calls == []
 
 
-def test_slurm_scheduler_preserves_safe_manifest_fields_and_allowed_env(tmp_path: Path) -> None:
-    roots = _slurm_roots(tmp_path)
+def test_slurm_scheduler_preserves_safe_manifest_fields_and_allowed_env(tmp_path: Path, monkeypatch: Any) -> None:
+    roots = _db_free_slurm_roots(monkeypatch, tmp_path, generated_at=_dt("2026-05-21T12:00:00Z"))
     safe_package_uri = "s3://nhms-safe/models/model_a/package/"
     safe_resource_profile = {
         "runnable": True,
@@ -34260,10 +34434,10 @@ def test_slurm_scheduler_preserves_safe_manifest_fields_and_allowed_env(tmp_path
     orchestrator = FakeProductionOrchestrator()
     config = _config(
         roots["workspace_root"],
+        db_free=True,
         now=_dt("2026-05-21T12:00:00Z"),
         dry_run=False,
         slurm_execution_enabled=True,
-        database_url="postgresql://nhms:secret@db.prod.example/nhms",
         object_store_root=roots["object_store_root"],
         log_root=roots["log_root"],
         runtime_root=roots["runtime_root"],
@@ -34292,7 +34466,10 @@ def test_slurm_scheduler_preserves_safe_manifest_fields_and_allowed_env(tmp_path
     assert "DATABASE_URL" not in submitted_basin
 
 
-def test_non_dry_run_partial_cycle_marks_failed_candidate_without_fanning_success(tmp_path: Path) -> None:
+def test_non_dry_run_partial_cycle_marks_failed_candidate_without_fanning_success(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
     now = _dt("2026-05-21T12:00:00Z")
     orchestrator = FakeProductionOrchestrator(
         candidate_outcomes=(
@@ -34316,7 +34493,7 @@ def test_non_dry_run_partial_cycle_marks_failed_candidate_without_fanning_succes
         ),
         result_status="parsed_partial",
     )
-    config = _config(tmp_path, now=now, dry_run=False)
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=now, dry_run=False)
     scheduler = ProductionScheduler(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a"), _model("model_b", "basin_b")]),
@@ -34379,6 +34556,7 @@ _FORCED_RESUBMIT_VETO_FIXTURE = {
 
 def test_non_dry_run_mixed_cohort_veto_projects_top_level_field_on_vetoing_candidate(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
     """#1199: the receipt is a named top-level field on the vetoing row only."""
     now = _dt("2026-05-21T12:00:00Z")
@@ -34402,7 +34580,7 @@ def test_non_dry_run_mixed_cohort_veto_projects_top_level_field_on_vetoing_candi
         ),
         result_status="parsed_partial",
     )
-    config = _config(tmp_path, now=now, dry_run=False)
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=now, dry_run=False)
     scheduler = ProductionScheduler(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a"), _model("model_b", "basin_b")]),
@@ -34498,6 +34676,7 @@ def test_bounded_candidate_summary_retains_forced_resubmit_veto_fixed_shape() ->
 def test_non_dry_run_partial_cycle_counts_failed_alias_candidate_as_failed(
     tmp_path: Path,
     outcome_status: str,
+    monkeypatch: Any,
 ) -> None:
     now = _dt("2026-05-21T12:00:00Z")
     sibling_reason = f"forcing_task_{outcome_status}"
@@ -34524,7 +34703,7 @@ def test_non_dry_run_partial_cycle_counts_failed_alias_candidate_as_failed(
         result_status="parsed_partial",
     )
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=now, dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=now, dry_run=False),
         registry=FakeRegistry([_model("model_a", "basin_a"), _model("model_b", "basin_b")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
         orchestrator_factory=lambda _source_id: orchestrator,
@@ -34553,6 +34732,7 @@ def test_non_dry_run_partial_cycle_counts_failed_alias_candidate_as_failed(
 def test_non_dry_run_partial_cycle_marks_unavailable_or_cancelled_candidate_as_partial(
     tmp_path: Path,
     outcome_status: str,
+    monkeypatch: Any,
 ) -> None:
     now = _dt("2026-05-21T12:00:00Z")
     sibling_reason = f"forcing_task_{outcome_status}"
@@ -34578,7 +34758,7 @@ def test_non_dry_run_partial_cycle_marks_unavailable_or_cancelled_candidate_as_p
         ),
         result_status="parsed_partial",
     )
-    config = _config(tmp_path, now=now, dry_run=False)
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=now, dry_run=False)
     scheduler = ProductionScheduler(
         config,
         registry=FakeRegistry([_model("model_a", "basin_a"), _model("model_b", "basin_b")]),
@@ -34605,7 +34785,7 @@ def test_non_dry_run_partial_cycle_marks_unavailable_or_cancelled_candidate_as_p
     assert evidence_by_model["model_b"]["candidate_outcome"]["status"] == outcome_status
 
 
-def test_scheduler_evidence_redacts_signed_candidate_outcome_log_uri(tmp_path: Path) -> None:
+def test_scheduler_evidence_redacts_signed_candidate_outcome_log_uri(tmp_path: Path, monkeypatch: Any) -> None:
     secret_log_uri = "s3://nhms/runs/cycle/logs/2003_0.out?X-Amz-Signature=supersecret"
     orchestrator = FakeProductionOrchestrator(
         candidate_outcomes=(
@@ -34623,7 +34803,7 @@ def test_scheduler_evidence_redacts_signed_candidate_outcome_log_uri(tmp_path: P
         result_status="parsed_partial",
     )
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
         orchestrator_factory=lambda _source_id: orchestrator,
@@ -34639,17 +34819,20 @@ def test_scheduler_evidence_redacts_signed_candidate_outcome_log_uri(tmp_path: P
     assert "user:pass" not in evidence_text
 
 
-def test_scheduler_evidence_redacts_sensitive_runtime_payloads(tmp_path: Path) -> None:
-    roots = _slurm_roots(tmp_path)
+def test_scheduler_evidence_redacts_sensitive_runtime_payloads(tmp_path: Path, monkeypatch: Any) -> None:
+    roots = _db_free_slurm_roots(monkeypatch, tmp_path, generated_at=_dt("2026-05-21T12:00:00Z"))
     secret_database_url = "postgresql://nhms:supersecret@db.prod.example/nhms"
     secret_slurm_value = "s3://bucket/prod?X-Amz-Signature=supersecret"
+    # DB-free mode forbids a configured DATABASE_URL (its runtime preflight
+    # refuses the pass before the Slurm preflight), so the secret database URL
+    # rides only the exported Slurm env below (#3251).
     orchestrator = FakeProductionOrchestrator()
     config = _config(
         roots["workspace_root"],
+        db_free=True,
         now=_dt("2026-05-21T12:00:00Z"),
         dry_run=False,
         slurm_execution_enabled=True,
-        database_url=secret_database_url,
         object_store_root=roots["object_store_root"],
         log_root=roots["log_root"],
         runtime_root=roots["runtime_root"],
@@ -34681,8 +34864,9 @@ def test_scheduler_evidence_redacts_sensitive_runtime_payloads(tmp_path: Path) -
     assert "AWS_SECRET_ACCESS_KEY" not in evidence_text
 
 
-def test_issue_196_dry_run_evidence_has_stable_non_final_review_contract(tmp_path: Path) -> None:
-    config = _config(
+def test_issue_196_dry_run_evidence_has_stable_non_final_review_contract(tmp_path: Path, monkeypatch: Any) -> None:
+    config = _db_free_pass_config(
+        monkeypatch,
         tmp_path,
         now=_dt("2026-05-21T12:00:00Z"),
         model_ids=("model_a",),
@@ -34726,7 +34910,10 @@ def test_issue_196_dry_run_evidence_has_stable_non_final_review_contract(tmp_pat
     assert result.evidence["candidates"][0]["source_id"] == "gfs"
     assert result.evidence["candidates"][0]["cycle_id"] == "gfs_2026052106"
     assert result.evidence["candidates"][0]["model_id"] == "model_a"
-    assert result.evidence["artifact_path"] == str(result.artifact_path)
+    # Evidence-safe in DB-free mode (``scheduler_evidence.py:493-496``; was
+    # ``str(result.artifact_path)``); the file at ``result.artifact_path`` is the
+    # one ``persisted`` was read from (#3251, rule (c)).
+    assert result.evidence["artifact_path"] == "[local-path]"
     assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
     assert adapter.download_calls == 0
     assert persisted["schema_version"] == result.evidence["schema_version"]
@@ -34735,6 +34922,7 @@ def test_issue_196_dry_run_evidence_has_stable_non_final_review_contract(tmp_pat
 
 def test_issue_196_submitted_model_run_evidence_includes_artifacts_resources_and_quality(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
     orchestrator = FakeProductionOrchestratorWithStageEvidence(
         candidate_outcomes=(
@@ -34749,7 +34937,7 @@ def test_issue_196_submitted_model_run_evidence_includes_artifacts_resources_and
             },
         )
     )
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    config = _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     scheduler = ProductionScheduler(
         config,
         registry=FakeRegistry(
@@ -34793,6 +34981,7 @@ def test_issue_196_submitted_model_run_evidence_includes_artifacts_resources_and
 
 def test_issue_196_partial_and_blocked_model_run_evidence_redacts_secrets_and_records_blockers(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
     secret_log_uri = "s3://nhms/logs/forcing.out?X-Amz-Signature=supersecret"
     orchestrator = FakeProductionOrchestratorWithStageEvidence(
@@ -34823,7 +35012,7 @@ def test_issue_196_partial_and_blocked_model_run_evidence_redacts_secrets_and_re
         result_status="parsed_partial",
     )
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
         registry=FakeRegistry([_model("model_a", "basin_a"), _model("model_b", "basin_b")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
         orchestrator_factory=lambda _source_id: orchestrator,
@@ -34858,7 +35047,7 @@ def test_issue_196_partial_and_blocked_model_run_evidence_redacts_secrets_and_re
         assert raw_secret not in artifact_text
 
 
-def test_model_run_evidence_bounds_unmatched_large_array_task_rows(tmp_path: Path) -> None:
+def test_model_run_evidence_bounds_unmatched_large_array_task_rows(tmp_path: Path, monkeypatch: Any) -> None:
     class LargeArrayOrchestrator(FakeProductionOrchestrator):
         def orchestrate_cycle(
             self,
@@ -34894,7 +35083,7 @@ def test_model_run_evidence_bounds_unmatched_large_array_task_rows(tmp_path: Pat
             )
 
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
         registry=FakeRegistry(
             [
                 _model("model_a", "basin_a"),
@@ -34928,7 +35117,10 @@ def test_model_run_evidence_bounds_unmatched_large_array_task_rows(tmp_path: Pat
         assert summary["limit"] == MAX_MODEL_RUN_STAGE_TASK_ROWS
 
 
-def test_model_run_evidence_keeps_only_candidate_matched_large_array_task_rows(tmp_path: Path) -> None:
+def test_model_run_evidence_keeps_only_candidate_matched_large_array_task_rows(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
     class CandidateMatchedArrayOrchestrator(FakeProductionOrchestrator):
         def orchestrate_cycle(
             self,
@@ -34967,7 +35159,7 @@ def test_model_run_evidence_keeps_only_candidate_matched_large_array_task_rows(t
             )
 
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
         registry=FakeRegistry(
             [
                 _model("model_a", "basin_a"),
@@ -34996,7 +35188,7 @@ def test_model_run_evidence_keeps_only_candidate_matched_large_array_task_rows(t
         assert summary["matching"] == "candidate_identity"
 
 
-def test_model_run_evidence_caps_all_candidate_matched_array_task_rows(tmp_path: Path) -> None:
+def test_model_run_evidence_caps_all_candidate_matched_array_task_rows(tmp_path: Path, monkeypatch: Any) -> None:
     class ManyMatchedArrayOrchestrator(FakeProductionOrchestrator):
         def orchestrate_cycle(
             self,
@@ -35037,7 +35229,7 @@ def test_model_run_evidence_caps_all_candidate_matched_array_task_rows(tmp_path:
             )
 
     scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
         registry=FakeRegistry([_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
         orchestrator_factory=lambda _source_id: ManyMatchedArrayOrchestrator(),
@@ -35058,17 +35250,22 @@ def test_model_run_evidence_caps_all_candidate_matched_array_task_rows(tmp_path:
     assert len(model_evidence["resource_summary"]["task_accounting"]) == MAX_MODEL_RUN_STAGE_TASK_ROWS
 
 
-def test_issue_196_blocked_preflight_evidence_keeps_existing_consumers_stable(tmp_path: Path) -> None:
-    roots = _slurm_roots(tmp_path)
+def test_issue_196_blocked_preflight_evidence_keeps_existing_consumers_stable(tmp_path: Path, monkeypatch: Any) -> None:
+    roots = _db_free_slurm_roots(monkeypatch, tmp_path, generated_at=_dt("2026-05-21T12:00:00Z"))
     scheduler = ProductionScheduler(
         _config(
             roots["workspace_root"],
+            db_free=True,
             now=_dt("2026-05-21T12:00:00Z"),
             dry_run=False,
             slurm_execution_enabled=True,
-            database_url=None,
             object_store_root=roots["object_store_root"],
-            log_root=roots["log_root"],
+            # The Slurm preflight blocker: DB-free mode has no DATABASE_URL
+            # verdict (was ``database_url=None`` ->
+            # ``SLURM_PREFLIGHT_DATABASE_URL_MISSING``,
+            # ``scheduler_gateway.py:29-38``), so a log root the compute
+            # nodes cannot see stands in for it (#3251).
+            log_root=roots["log_root"] / "missing",
             runtime_root=roots["runtime_root"],
             allowed_storage_roots=(tmp_path,),
         ),
@@ -35085,99 +35282,26 @@ def test_issue_196_blocked_preflight_evidence_keeps_existing_consumers_stable(tm
     assert payload["counts"]["submitted_count"] == 0
     assert payload["readiness"]["final_production_readiness_claimed"] is False
     assert model_evidence["schema_version"] == MODEL_RUN_EVIDENCE_SCHEMA_VERSION
-    assert model_evidence["error_code"] == "SLURM_PREFLIGHT_DATABASE_URL_MISSING"
+    assert model_evidence["error_code"] == "SLURM_PREFLIGHT_LOG_ROOT_NOT_VISIBLE"
     assert model_evidence["submitted"] is False
     assert model_evidence["mutation_occurred"] is False
     assert model_evidence["artifact_refs"]["output_key"] == "runs/fcst_gfs_2026052106_model_a/output/"
     assert model_evidence["residual_blockers"][0]["quality_flag"] == "slurm_preflight_blocked"
 
 
-def test_plan_production_public_slurm_path_rejects_pipeline_database_url_only(
-    monkeypatch: Any,
-    tmp_path: Path,
-) -> None:
-    roots = _scheduler_env_roots(tmp_path)
-    _set_scheduler_root_env(monkeypatch, roots)
-    (roots["workspace_root"] / "scheduler" / "evidence").mkdir(parents=True)
-    log_root = roots["runtime_root"] / "slurm-logs"
-    log_root.mkdir()
-    monkeypatch.delenv("DATABASE_URL", raising=False)
-    monkeypatch.setenv("PIPELINE_DATABASE_URL", "postgresql://nhms:secret@db.prod.example/nhms")
-    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_ENABLED", "1")
-    monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
-    monkeypatch.setenv("SLURM_SHARED_LOG_ROOT", str(log_root))
-    monkeypatch.setenv("SLURM_GATEWAY_URL", "http://slurm-gateway.internal:8000")
-    monkeypatch.setattr(
-        "services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env",
-        lambda: FakeRegistry([_model("model_a", "basin_a")]),
-    )
-    monkeypatch.setattr(
-        "services.orchestrator.scheduler._default_adapters",
-        lambda: {"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-    )
-    monkeypatch.setattr(
-        "services.orchestrator.scheduler._active_repository_from_env",
-        lambda: FakeActiveRepository(active=False),
-    )
-    monkeypatch.setattr(
-        "services.orchestrator.scheduler._canonical_readiness_provider_from_env",
-        lambda: FakeCanonicalReadinessProvider(
-            {
-                ("gfs", _dt("2026-05-21T06:00:00Z")): {
-                    "status": "canonical_ready",
-                    "ready": True,
-                }
-            }
-        ),
-    )
-    monkeypatch.setattr(
-        scheduler_module,
-        "_now",
-        lambda _config: _dt("2026-05-21T12:00:00Z"),
-    )
-
-    payload = cli._plan_production(
-        sources=(),
-        lookback_hours=24,
-        cycle_lag_hours=0,
-        max_cycles_per_source=1,
-        model_ids=(),
-        basin_ids=(),
-        dry_run=False,
-        continuous=False,
-        interval_seconds=300.0,
-        max_passes=None,
-        workspace_root=str(roots["workspace_root"]),
-        lock_path=None,
-        evidence_dir=None,
-    )
-
-    assert payload["status"] == "preflight_blocked"
-    assert payload["counts"]["submitted_count"] == 0
-    assert payload["runtime_config"]["require_runtime_roots"] is True
-    assert payload["root_preflight"]["status"] == "ready"
-    assert payload["model_run_evidence"][0]["error_code"] == "SLURM_PREFLIGHT_DATABASE_URL_MISSING"
-
-
 def test_plan_production_no_flag_uses_env_roots_and_records_runtime_evidence(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
-    roots = _scheduler_env_roots(tmp_path)
+    # The full DB-free env (its journal root holds an empty file journal); the
+    # registry and adapters come in through the DB-free factories (#3251).
+    roots, _paths = _db_free_pass_env(monkeypatch, tmp_path, generated_at=_dt("2026-05-21T12:00:00Z"))
     monkeypatch.chdir(tmp_path)
-    _set_scheduler_root_env(monkeypatch, roots)
-    monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
-    monkeypatch.setattr(
-        "services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env",
-        lambda: FakeRegistry([_model("model_a", "basin_a")]),
-    )
-    monkeypatch.setattr(
-        "services.orchestrator.scheduler._default_adapters",
-        lambda: {"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
-    )
-    monkeypatch.setattr(
-        "services.orchestrator.scheduler._active_repository_from_env",
-        lambda: FakeActiveRepository(active=False),
+    monkeypatch.setenv("NHMS_SCHEDULER_BASIN_IDS", "basin_a")
+    _db_free_factories_return(
+        monkeypatch,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
     )
     monkeypatch.setattr(
         "services.orchestrator.scheduler._now",
@@ -35206,13 +35330,20 @@ def test_plan_production_no_flag_uses_env_roots_and_records_runtime_evidence(
     assert payload["dry_run"] is True
     assert payload["execution_mode"] == "dry_run"
     assert payload["root_preflight"]["status"] == "ready"
-    assert resolved_roots["workspace_root"]["path"] == str(roots["workspace_root"].resolve())
-    assert resolved_roots["object_store_root"]["path"] == str(roots["object_store_root"].resolve())
-    assert resolved_roots["published_artifact_root"]["path"] == str(roots["published_root"].resolve())
-    assert resolved_roots["lock_root"]["path"] == str(roots["lock_root"].resolve())
-    assert resolved_roots["evidence_root"]["path"] == str(roots["evidence_root"].resolve())
-    assert resolved_roots["runtime_root"]["path"] == str(roots["runtime_root"].resolve())
-    assert resolved_roots["temp_root"]["path"] == str(roots["temp_root"].resolve())
+    # Evidence-safe in DB-free mode (``scheduler_evidence.py:807-818``; each was
+    # the resolved env root) (#3251, rule (c)); the env roots are the ones the
+    # pass used: its artifact is under the env evidence root.
+    for root_name in (
+        "workspace_root",
+        "object_store_root",
+        "published_artifact_root",
+        "lock_root",
+        "evidence_root",
+        "runtime_root",
+        "temp_root",
+    ):
+        assert resolved_roots[root_name]["path"] == "[local-path]"
+    assert (roots["evidence_root"] / f"{payload['pass_id']}.json").is_file()
     assert runtime_config["service_role"] == "compute_control"
     assert runtime_config["require_runtime_roots"] is True
     assert runtime_config["dry_run"] is True
@@ -35320,8 +35451,10 @@ def test_plan_production_missing_workspace_root_no_flag_errors_without_app_works
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
+    monkeypatch.setenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", "true")
     monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
     monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
+    _db_free_factories_fail(monkeypatch, "a missing WORKSPACE_ROOT must fail before scheduler construction")
     monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
 
     with pytest.raises(ValueError, match="WORKSPACE_ROOT"):
@@ -35349,12 +35482,12 @@ def test_no_flag_missing_allowed_roots_blocks_before_registry_adapter_or_submit(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
-    roots = _scheduler_env_roots(tmp_path)
-    _set_scheduler_root_env(monkeypatch, roots)
+    roots, _paths = _db_free_pass_env(monkeypatch, tmp_path, generated_at=_dt("2026-05-21T12:00:00Z"))
     monkeypatch.delenv("NHMS_SCHEDULER_ALLOWED_ROOTS", raising=False)
     monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
     monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
     monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
+    _db_free_factories_fail(monkeypatch, "a refused DB-free pass must not construct the registry, adapters or journal")
     monkeypatch.setattr(
         "services.orchestrator.scheduler._active_repository_from_env",
         lambda: pytest.fail("missing scheduler allowlist must not construct active repository"),
@@ -35393,20 +35526,23 @@ def test_no_flag_missing_allowed_roots_blocks_before_registry_adapter_or_submit(
         blocker["code"] for blocker in payload["root_preflight"]["blockers"]
     }
     assert payload["no_mutation_proof"] == _expected_no_mutation_proof()
-    assert Path(payload["artifact_path"]).is_file()
+    # Evidence-safe in DB-free mode (``scheduler_evidence.py:493-496``; was the real
+    # path); the artifact is the pass's file under the evidence root (#3251, rule (c)).
+    assert payload["artifact_path"] == "[local-path]"
+    assert (Path(os.environ["NHMS_SCHEDULER_EVIDENCE_ROOT"]) / f"{payload['pass_id']}.json").is_file()
 
 
 def test_explicit_workspace_submit_missing_allowed_roots_blocks_before_registry_adapter_or_submit(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
-    roots = _scheduler_env_roots(tmp_path)
-    _set_scheduler_root_env(monkeypatch, roots)
+    roots, _paths = _db_free_pass_env(monkeypatch, tmp_path, generated_at=_dt("2026-05-21T12:00:00Z"))
     (roots["workspace_root"] / "scheduler" / "evidence").mkdir(parents=True)
     monkeypatch.delenv("NHMS_SCHEDULER_ALLOWED_ROOTS", raising=False)
     monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
     monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
     monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
+    _db_free_factories_fail(monkeypatch, "a refused DB-free pass must not construct the registry, adapters or journal")
     monkeypatch.setattr(
         "services.orchestrator.scheduler._active_repository_from_env",
         lambda: pytest.fail("explicit-root submit root preflight must not construct active repository"),
@@ -35447,7 +35583,10 @@ def test_explicit_workspace_submit_missing_allowed_roots_blocks_before_registry_
     }
     assert payload["counts"]["submitted_count"] == 0
     assert payload["no_mutation_proof"] == _expected_no_mutation_proof()
-    assert Path(payload["artifact_path"]).is_file()
+    # Evidence-safe in DB-free mode (``scheduler_evidence.py:493-496``; was the real
+    # path); the artifact is the pass's file under the evidence root (#3251, rule (c)).
+    assert payload["artifact_path"] == "[local-path]"
+    assert (roots["workspace_root"] / "scheduler" / "evidence" / f"{payload['pass_id']}.json").is_file()
 
 
 @pytest.mark.parametrize(
@@ -35466,13 +35605,13 @@ def test_no_flag_invalid_env_roots_block_before_registry_adapter_or_submit(
     broken_root: str,
     expected_code: str,
 ) -> None:
-    roots = _scheduler_env_roots(tmp_path)
-    _set_scheduler_root_env(monkeypatch, roots)
+    roots, _paths = _db_free_pass_env(monkeypatch, tmp_path, generated_at=_dt("2026-05-21T12:00:00Z"))
     monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
     broken_path = roots[broken_root]
     shutil.rmtree(broken_path)
     monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
     monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
+    _db_free_factories_fail(monkeypatch, "a refused DB-free pass must not construct the registry, adapters or journal")
     monkeypatch.setattr(
         "services.orchestrator.scheduler._active_repository_from_env",
         lambda: pytest.fail("blocked scheduler root preflight must not construct active repository"),
@@ -35505,29 +35644,24 @@ def test_no_flag_invalid_env_roots_block_before_registry_adapter_or_submit(
     if broken_root in {"workspace_root", "evidence_root"}:
         assert "artifact_path" not in payload
     else:
-        assert Path(payload["artifact_path"]).is_file()
+        # Evidence-safe in DB-free mode (``scheduler_evidence.py:493-496``; was the real
+        # path); the artifact is the pass's file under the evidence root (#3251, rule (c)).
+        assert payload["artifact_path"] == "[local-path]"
+        assert (Path(os.environ["NHMS_SCHEDULER_EVIDENCE_ROOT"]) / f"{payload['pass_id']}.json").is_file()
 
 
 def test_no_flag_missing_published_artifact_root_is_created_by_control_publish_stage(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
-    roots = _scheduler_env_roots(tmp_path)
-    _set_scheduler_root_env(monkeypatch, roots)
+    roots, _paths = _db_free_pass_env(monkeypatch, tmp_path, generated_at=_dt("2026-05-21T12:00:00Z"))
     shutil.rmtree(roots["published_root"])
     monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
-    monkeypatch.setattr(
-        "services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env",
-        lambda: FakeRegistry([_model("model_a", "basin_a")]),
-    )
     adapter = FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])
-    monkeypatch.setattr(
-        "services.orchestrator.scheduler._default_adapters",
-        lambda: {"gfs": adapter},
-    )
-    monkeypatch.setattr(
-        "services.orchestrator.scheduler._active_repository_from_env",
-        lambda: FakeActiveRepository(active=False),
+    _db_free_factories_return(
+        monkeypatch,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": adapter},
     )
     monkeypatch.setattr(
         "services.orchestrator.scheduler._now",
@@ -35555,15 +35689,13 @@ def test_no_flag_missing_published_artifact_root_is_created_by_control_publish_s
 
 def _plannable_no_flag_scheduler(monkeypatch: Any) -> FakeAdapter:
     monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
-    monkeypatch.setattr(
-        "services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env",
-        lambda: FakeRegistry([_model("model_a", "basin_a")]),
-    )
+    # DB-free (#3251): the registry and adapters come in through the DB-free
+    # factories; the env's (empty) file journal is the active repository.
     adapter = FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])
-    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", lambda: {"gfs": adapter})
-    monkeypatch.setattr(
-        "services.orchestrator.scheduler._active_repository_from_env",
-        lambda: FakeActiveRepository(active=False),
+    _db_free_factories_return(
+        monkeypatch,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": adapter},
     )
     monkeypatch.setattr(
         "services.orchestrator.scheduler._now",
@@ -35584,8 +35716,7 @@ def test_no_flag_missing_temp_root_is_created_0700_and_the_pass_proceeds(
 ) -> None:
     # #3061: node-22 lost NHMS_SCHEDULER_TEMP_ROOT on 2026-10-15 and every pass was
     # preflight_blocked on SCHEDULER_ROOT_TEMP_ROOT_NOT_FOUND for three weeks.
-    roots = _scheduler_env_roots(tmp_path)
-    _set_scheduler_root_env(monkeypatch, roots)
+    roots, _paths = _db_free_pass_env(monkeypatch, tmp_path, generated_at=_dt("2026-05-21T12:00:00Z"))
     shutil.rmtree(roots["temp_root"])
     adapter = _plannable_no_flag_scheduler(monkeypatch)
 
@@ -35599,7 +35730,11 @@ def test_no_flag_missing_temp_root_is_created_0700_and_the_pass_proceeds(
     assert temp_check["allow_create"] is True
     assert temp_check["created"] is True
     _assert_created_temp_root(roots["temp_root"])
-    persisted = json.loads(Path(payload["artifact_path"]).read_text(encoding="utf-8"))
+    # ``artifact_path`` is evidence-safe in DB-free mode; the artifact is the
+    # pass's file under the env evidence root.
+    persisted = json.loads(
+        (roots["evidence_root"] / f"{payload['pass_id']}.json").read_text(encoding="utf-8")
+    )
     assert persisted["root_preflight"]["checks"]["temp_root"]["created"] is True
     assert payload["no_mutation_proof"] == _expected_no_mutation_proof()
     assert adapter.download_calls == 0
@@ -35609,8 +35744,7 @@ def test_no_flag_existing_temp_root_is_left_untouched(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
-    roots = _scheduler_env_roots(tmp_path)
-    _set_scheduler_root_env(monkeypatch, roots)
+    roots, _paths = _db_free_pass_env(monkeypatch, tmp_path, generated_at=_dt("2026-05-21T12:00:00Z"))
     mode_before = stat.S_IMODE(roots["temp_root"].stat().st_mode)
     _plannable_no_flag_scheduler(monkeypatch)
 
@@ -35661,13 +35795,13 @@ def test_no_flag_refused_missing_temp_root_still_blocks_and_creates_nothing(
     shape: str,
     expected_code: str,
 ) -> None:
-    roots = _scheduler_env_roots(tmp_path / "approved")
-    _set_scheduler_root_env(monkeypatch, roots)
+    roots, _paths = _db_free_pass_env(monkeypatch, tmp_path / "approved", generated_at=_dt("2026-05-21T12:00:00Z"))
     temp_root, must_stay_absent = _temp_root_geometry(tmp_path, roots, shape)
     monkeypatch.setenv("NHMS_SCHEDULER_TEMP_ROOT", str(temp_root))
     monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
     monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
     monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
+    _db_free_factories_fail(monkeypatch, "a refused DB-free pass must not construct the registry, adapters or journal")
     monkeypatch.setattr(
         "services.orchestrator.scheduler._active_repository_from_env",
         lambda: pytest.fail("refused temp_root must not construct active repository"),
@@ -35699,8 +35833,7 @@ def test_temp_root_whose_parent_became_a_symlink_after_config_is_refused_and_not
     # the pass must not create anything through it.
     from services.orchestrator.scheduler_runtime import _scheduler_prepared_runtime_root_preflight
 
-    roots = _scheduler_env_roots(tmp_path)
-    _set_scheduler_root_env(monkeypatch, roots)
+    roots, _paths = _db_free_pass_env(monkeypatch, tmp_path, generated_at=_dt("2026-05-21T12:00:00Z"))
     parent = roots["temp_root"] / "parent"
     parent.mkdir()
     monkeypatch.setenv("NHMS_SCHEDULER_TEMP_ROOT", str(parent / "leaf"))
@@ -35844,14 +35977,20 @@ def test_bounded_evidence_keeps_the_temp_root_created_proof(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr("services.orchestrator.scheduler.MAX_EVIDENCE_BYTES", 2_400)
-    roots = _scheduler_env_roots(tmp_path)
-    _set_scheduler_root_env(monkeypatch, roots)
+    # 2_400 -> 4_500 (#3251): DB-free evidence carries the DB-free runtime proof,
+    # so the bounded core needs ~4_200 bytes; 4_500 is the budget the DB-free
+    # bounded tests use. The budget moves; the asserted fallback shape does not.
+    monkeypatch.setattr("services.orchestrator.scheduler.MAX_EVIDENCE_BYTES", 4_500)
+    roots, _paths = _db_free_pass_env(monkeypatch, tmp_path, generated_at=_dt("2026-05-21T12:00:00Z"))
     shutil.rmtree(roots["temp_root"])
     _plannable_no_flag_scheduler(monkeypatch)
 
     payload = _run_no_flag_plan()
-    persisted = json.loads(Path(payload["artifact_path"]).read_text(encoding="utf-8"))
+    # ``artifact_path`` is evidence-safe in DB-free mode; the artifact is the
+    # pass's file under the env evidence root.
+    persisted = json.loads(
+        (roots["evidence_root"] / f"{payload['pass_id']}.json").read_text(encoding="utf-8")
+    )
 
     assert persisted["status"] == "resource_limit_blocked"
     assert persisted["root_preflight"]["status"] == "ready"
@@ -35902,8 +36041,7 @@ def test_no_flag_out_of_approved_roots_block_before_registry_adapter_or_submit(
     expected_code: str,
     safe_evidence: bool,
 ) -> None:
-    roots = _scheduler_env_roots(tmp_path / "approved")
-    _set_scheduler_root_env(monkeypatch, roots)
+    roots, _paths = _db_free_pass_env(monkeypatch, tmp_path / "approved", generated_at=_dt("2026-05-21T12:00:00Z"))
     outside = tmp_path / "outside" / root_key
     outside.mkdir(parents=True)
     monkeypatch.setenv(env_key, str(outside))
@@ -35917,6 +36055,7 @@ def test_no_flag_out_of_approved_roots_block_before_registry_adapter_or_submit(
     monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
     monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
     monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
+    _db_free_factories_fail(monkeypatch, "a refused DB-free pass must not construct the registry, adapters or journal")
     monkeypatch.setattr(
         "services.orchestrator.scheduler._active_repository_from_env",
         lambda: pytest.fail("out-of-approved scheduler root must not construct active repository"),
@@ -35947,11 +36086,18 @@ def test_no_flag_out_of_approved_roots_block_before_registry_adapter_or_submit(
     assert payload["counts"]["submitted_count"] == 0
     assert payload["no_mutation_proof"] == _expected_no_mutation_proof()
     if safe_evidence:
-        assert Path(payload["artifact_path"]).is_file()
+        # Evidence-safe in DB-free mode (``scheduler_evidence.py:493-496``; was the real
+        # path); the artifact is the pass's file under the evidence root (#3251, rule (c)).
+        assert payload["artifact_path"] == "[local-path]"
+        assert (Path(os.environ["NHMS_SCHEDULER_EVIDENCE_ROOT"]) / f"{payload['pass_id']}.json").is_file()
     else:
         assert "artifact_path" not in payload
 
 
+# #3251, rule (c): the evidence/workspace arms were construction-time ValueErrors
+# (``evidence_dir must be ...``).  DB-free construction hands the value down
+# (``scheduler_config/path_modes.py:186-213``) and the root preflight refuses it
+# before the lock with the code below, writing no artifact.
 @pytest.mark.parametrize(
     ("root_key", "expected_code", "safe_evidence"),
     [
@@ -35960,8 +36106,8 @@ def test_no_flag_out_of_approved_roots_block_before_registry_adapter_or_submit(
         ("runtime_root", "SCHEDULER_ROOT_RUNTIME_ROOT_NOT_DIRECTORY", True),
         ("temp_root", "SCHEDULER_ROOT_TEMP_ROOT_NOT_DIRECTORY", True),
         ("lock_root", "SCHEDULER_ROOT_LOCK_ROOT_NOT_DIRECTORY", True),
-        ("evidence_root", "evidence_dir must be a directory", False),
-        ("workspace_root", "evidence_dir must be a safe directory", False),
+        ("evidence_root", "SCHEDULER_ROOT_EVIDENCE_ROOT_NOT_DIRECTORY", False),
+        ("workspace_root", "SCHEDULER_ROOT_WORKSPACE_ROOT_NOT_DIRECTORY", False),
     ],
 )
 def test_no_flag_file_roots_block_before_registry_adapter_or_submit(
@@ -35971,14 +36117,14 @@ def test_no_flag_file_roots_block_before_registry_adapter_or_submit(
     expected_code: str,
     safe_evidence: bool,
 ) -> None:
-    roots = _scheduler_env_roots(tmp_path)
-    _set_scheduler_root_env(monkeypatch, roots)
+    roots, _paths = _db_free_pass_env(monkeypatch, tmp_path, generated_at=_dt("2026-05-21T12:00:00Z"))
     target = roots[root_key]
     shutil.rmtree(target)
     target.write_text("not a directory\n", encoding="utf-8")
     monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
     monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
     monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
+    _db_free_factories_fail(monkeypatch, "a refused DB-free pass must not construct the registry, adapters or journal")
     monkeypatch.setattr(
         "services.orchestrator.scheduler._active_repository_from_env",
         lambda: pytest.fail("file scheduler root must not construct active repository"),
@@ -35988,34 +36134,24 @@ def test_no_flag_file_roots_block_before_registry_adapter_or_submit(
         lambda config: config.now or _dt("2026-05-21T12:00:00Z"),
     )
 
-    if root_key in {"evidence_root", "workspace_root"}:
-        with pytest.raises(ValueError, match=expected_code):
-            cli._plan_production(
-                sources=("gfs",),
-                lookback_hours=24,
-                cycle_lag_hours=0,
-                max_cycles_per_source=1,
-                model_ids=("model_a",),
-                basin_ids=(),
-                dry_run=True,
-                continuous=False,
-                interval_seconds=300.0,
-                max_passes=None,
-                workspace_root=None,
-                lock_path=None,
-                evidence_dir=None,
-            )
-        return
-
     payload = _run_no_flag_plan()
     assert payload["status"] == "preflight_blocked"
     assert expected_code in {blocker["code"] for blocker in payload["root_preflight"]["blockers"]}
     assert payload["counts"]["submitted_count"] == 0
     assert payload["no_mutation_proof"] == _expected_no_mutation_proof()
     if safe_evidence:
-        assert Path(payload["artifact_path"]).is_file()
+        # Evidence-safe in DB-free mode (``scheduler_evidence.py:493-496``; was the real
+        # path); the artifact is the pass's file under the evidence root (#3251, rule (c)).
+        assert payload["artifact_path"] == "[local-path]"
+        assert (Path(os.environ["NHMS_SCHEDULER_EVIDENCE_ROOT"]) / f"{payload['pass_id']}.json").is_file()
+    else:
+        assert "artifact_path" not in payload
 
 
+# #3251, rule (c): the evidence/workspace arms were construction-time ValueErrors
+# (``evidence_dir must be ...``).  DB-free construction hands the value down
+# (``scheduler_config/path_modes.py:186-213``) and the root preflight refuses it
+# before the lock with the code below, writing no artifact.
 @pytest.mark.parametrize(
     ("root_key", "expected_code", "safe_evidence"),
     [
@@ -36023,7 +36159,7 @@ def test_no_flag_file_roots_block_before_registry_adapter_or_submit(
         ("published_root", "SCHEDULER_ROOT_PUBLISHED_ARTIFACT_ROOT_SYMLINK", True),
         ("runtime_root", "SCHEDULER_ROOT_RUNTIME_ROOT_SYMLINK", True),
         ("temp_root", "SCHEDULER_ROOT_TEMP_ROOT_SYMLINK", True),
-        ("evidence_root", "evidence_dir must be under workspace_root", False),
+        ("evidence_root", "SCHEDULER_ROOT_EVIDENCE_ROOT_OUT_OF_WORKSPACE", False),
         ("workspace_root", "SCHEDULER_ROOT_WORKSPACE_ROOT_SYMLINK", False),
     ],
 )
@@ -36034,8 +36170,7 @@ def test_no_flag_symlink_final_component_blocks_before_registry_adapter_or_submi
     expected_code: str,
     safe_evidence: bool,
 ) -> None:
-    roots = _scheduler_env_roots(tmp_path)
-    _set_scheduler_root_env(monkeypatch, roots)
+    roots, _paths = _db_free_pass_env(monkeypatch, tmp_path, generated_at=_dt("2026-05-21T12:00:00Z"))
     target = roots[root_key]
     replacement_target = tmp_path / f"{root_key}-symlink-target"
     replacement_target.mkdir()
@@ -36044,6 +36179,7 @@ def test_no_flag_symlink_final_component_blocks_before_registry_adapter_or_submi
     monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
     monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
     monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
+    _db_free_factories_fail(monkeypatch, "a refused DB-free pass must not construct the registry, adapters or journal")
     monkeypatch.setattr(
         "services.orchestrator.scheduler._active_repository_from_env",
         lambda: pytest.fail("symlink scheduler root must not construct active repository"),
@@ -36053,36 +36189,24 @@ def test_no_flag_symlink_final_component_blocks_before_registry_adapter_or_submi
         lambda config: config.now or _dt("2026-05-21T12:00:00Z"),
     )
 
-    if root_key == "evidence_root":
-        with pytest.raises(ValueError, match=expected_code):
-            cli._plan_production(
-                sources=("gfs",),
-                lookback_hours=24,
-                cycle_lag_hours=0,
-                max_cycles_per_source=1,
-                model_ids=("model_a",),
-                basin_ids=(),
-                dry_run=True,
-                continuous=False,
-                interval_seconds=300.0,
-                max_passes=None,
-                workspace_root=None,
-                lock_path=None,
-                evidence_dir=None,
-            )
-        return
-
     payload = _run_no_flag_plan()
     assert payload["status"] == "preflight_blocked"
     assert expected_code in {blocker["code"] for blocker in payload["root_preflight"]["blockers"]}
     assert payload["counts"]["submitted_count"] == 0
     assert payload["no_mutation_proof"] == _expected_no_mutation_proof()
     if safe_evidence:
-        assert Path(payload["artifact_path"]).is_file()
+        # Evidence-safe in DB-free mode (``scheduler_evidence.py:493-496``; was the real
+        # path); the artifact is the pass's file under the evidence root (#3251, rule (c)).
+        assert payload["artifact_path"] == "[local-path]"
+        assert (Path(os.environ["NHMS_SCHEDULER_EVIDENCE_ROOT"]) / f"{payload['pass_id']}.json").is_file()
     else:
         assert "artifact_path" not in payload
 
 
+# #3251, rule (c): the evidence/workspace arms were construction-time ValueErrors
+# (``evidence_dir must be ...``).  DB-free construction hands the value down
+# (``scheduler_config/path_modes.py:186-213``) and the root preflight refuses it
+# before the lock with the code below, writing no artifact.
 @pytest.mark.parametrize(
     ("root_key", "expected_code", "safe_evidence"),
     [
@@ -36092,7 +36216,7 @@ def test_no_flag_symlink_final_component_blocks_before_registry_adapter_or_submi
         ("temp_root", "SCHEDULER_ROOT_TEMP_ROOT_NOT_WRITABLE", True),
         ("lock_root", "SCHEDULER_ROOT_LOCK_ROOT_NOT_WRITABLE", True),
         ("evidence_root", "SCHEDULER_ROOT_EVIDENCE_ROOT_NOT_WRITABLE", False),
-        ("workspace_root", "evidence_dir must be a safe directory", False),
+        ("workspace_root", "SCHEDULER_ROOT_WORKSPACE_ROOT_NOT_WRITABLE", False),
     ],
 )
 def test_no_flag_no_execute_or_not_writable_roots_block_before_registry_adapter_or_submit(
@@ -36102,14 +36226,14 @@ def test_no_flag_no_execute_or_not_writable_roots_block_before_registry_adapter_
     expected_code: str,
     safe_evidence: bool,
 ) -> None:
-    roots = _scheduler_env_roots(tmp_path)
-    _set_scheduler_root_env(monkeypatch, roots)
+    roots, _paths = _db_free_pass_env(monkeypatch, tmp_path, generated_at=_dt("2026-05-21T12:00:00Z"))
     target = roots[root_key]
     original_mode = stat.S_IMODE(target.stat().st_mode)
     target.chmod(0o600)
     monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
     monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
     monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
+    _db_free_factories_fail(monkeypatch, "a refused DB-free pass must not construct the registry, adapters or journal")
     monkeypatch.setattr(
         "services.orchestrator.scheduler._active_repository_from_env",
         lambda: pytest.fail("unusable scheduler root must not construct active repository"),
@@ -36120,24 +36244,6 @@ def test_no_flag_no_execute_or_not_writable_roots_block_before_registry_adapter_
     )
 
     try:
-        if root_key == "workspace_root":
-            with pytest.raises(ValueError, match=expected_code):
-                cli._plan_production(
-                    sources=("gfs",),
-                    lookback_hours=24,
-                    cycle_lag_hours=0,
-                    max_cycles_per_source=1,
-                    model_ids=("model_a",),
-                    basin_ids=(),
-                    dry_run=True,
-                    continuous=False,
-                    interval_seconds=300.0,
-                    max_passes=None,
-                    workspace_root=None,
-                    lock_path=None,
-                    evidence_dir=None,
-                )
-            return
         payload = cli._plan_production(
             sources=("gfs",),
             lookback_hours=24,
@@ -36161,7 +36267,10 @@ def test_no_flag_no_execute_or_not_writable_roots_block_before_registry_adapter_
     assert payload["counts"]["submitted_count"] == 0
     assert payload["no_mutation_proof"] == _expected_no_mutation_proof()
     if safe_evidence:
-        assert Path(payload["artifact_path"]).is_file()
+        # Evidence-safe in DB-free mode (``scheduler_evidence.py:493-496``; was the real
+        # path); the artifact is the pass's file under the evidence root (#3251, rule (c)).
+        assert payload["artifact_path"] == "[local-path]"
+        assert (Path(os.environ["NHMS_SCHEDULER_EVIDENCE_ROOT"]) / f"{payload['pass_id']}.json").is_file()
     else:
         assert "artifact_path" not in payload
 
@@ -36170,75 +36279,79 @@ def test_no_flag_out_of_bound_lock_and_evidence_roots_are_rejected_at_config(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
-    roots = _scheduler_env_roots(tmp_path)
-    _set_scheduler_root_env(monkeypatch, roots)
+    roots, _paths = _db_free_pass_env(monkeypatch, tmp_path, generated_at=_dt("2026-05-21T12:00:00Z"))
     monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
     monkeypatch.setenv("NHMS_SCHEDULER_LOCK_ROOT", str(tmp_path / "outside-locks"))
     (tmp_path / "outside-locks").mkdir()
 
-    with pytest.raises(ValueError, match="lock_path must be under workspace_root"):
-        cli._plan_production(
-            sources=("gfs",),
-            lookback_hours=24,
-            cycle_lag_hours=0,
-            max_cycles_per_source=1,
-            model_ids=(),
-            basin_ids=(),
-            dry_run=True,
-            continuous=False,
-            interval_seconds=300.0,
-            max_passes=None,
-            workspace_root=None,
-            lock_path=None,
-            evidence_dir=None,
-        )
+    _db_free_factories_fail(monkeypatch, "an out-of-workspace lock root must block before scheduler construction")
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._now",
+        lambda config: config.now or _dt("2026-05-21T12:00:00Z"),
+    )
+
+    payload = cli._plan_production(
+        sources=("gfs",),
+        lookback_hours=24,
+        cycle_lag_hours=0,
+        max_cycles_per_source=1,
+        model_ids=(),
+        basin_ids=(),
+        dry_run=True,
+        continuous=False,
+        interval_seconds=300.0,
+        max_passes=None,
+        workspace_root=None,
+        lock_path=None,
+        evidence_dir=None,
+    )
+
+    # Was a construction-time ValueError ("lock_path must be under
+    # workspace_root").  DB-free construction hands the value down
+    # (``scheduler_config/path_modes.py:168-183``) and the root preflight
+    # refuses it before the lock, naming the field (#3251, rule (c)).
+    assert payload["status"] == "preflight_blocked"
+    assert payload["lock"]["reason"] == "scheduler_root_preflight_blocked"
+    assert [(blocker["code"], blocker["field"]) for blocker in payload["root_preflight"]["blockers"]] == [
+        ("SCHEDULER_ROOT_LOCK_ROOT_OUT_OF_WORKSPACE", "lock_root")
+    ]
+    assert payload["no_mutation_proof"] == _expected_no_mutation_proof()
 
 
 def test_public_from_env_wires_active_repository(monkeypatch: Any, tmp_path: Path) -> None:
+    # DB-free (#3251): ``from_env`` takes the active repository from the DB-free
+    # journal factory (``scheduler_core.py:132-137``; was ``_active_repository_from_env``).
     active_repository = FakeActiveRepository(active=False)
-    monkeypatch.setattr("services.orchestrator.scheduler._active_repository_from_env", lambda: active_repository)
-    monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", lambda: FakeRegistry([]))
-    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", lambda: {})
+    _db_free_factories_return(
+        monkeypatch,
+        registry=FakeRegistry([]),
+        adapters={},
+        active_repository=active_repository,
+    )
 
-    scheduler = ProductionScheduler.from_env(_config(tmp_path, now=_dt("2026-05-21T12:00:00Z")))
+    scheduler = ProductionScheduler.from_env(
+        _db_free_pass_config(monkeypatch, tmp_path, now=_dt("2026-05-21T12:00:00Z"))
+    )
 
     assert scheduler.active_repository is active_repository
-
-
-def test_public_from_env_wires_forcing_producer_when_enabled(monkeypatch: Any, tmp_path: Path) -> None:
-    forcing_producer = FakeForcingProducer()
-    monkeypatch.setenv("NHMS_PRODUCTION_FORCING_ENABLED", "1")
-    monkeypatch.setattr(
-        "services.orchestrator.scheduler._active_repository_from_env",
-        lambda: FakeActiveRepository(active=False),
-    )
-    monkeypatch.setattr("services.orchestrator.scheduler._canonical_readiness_provider_from_env", lambda: None)
-    monkeypatch.setattr("services.orchestrator.scheduler._forcing_producer_from_env", lambda: forcing_producer)
-    monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", lambda: FakeRegistry([]))
-    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", lambda: {})
-
-    scheduler = ProductionScheduler.from_env(_config(tmp_path, now=_dt("2026-05-21T12:00:00Z")))
-
-    assert scheduler.config.forcing_production_enabled is True
-    assert scheduler.forcing_producer is forcing_producer
 
 
 def test_plan_production_cli_public_path_skips_active_duplicate(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
+    # DB-free (#3251): the full env, with the explicit workspace's derived lock
+    # and evidence roots in place (DB-free mode requires them to exist); the
+    # registry, adapters and active repository come in through the DB-free
+    # factories.
+    roots, _paths = _db_free_pass_env(monkeypatch, tmp_path, generated_at=_dt("2026-05-21T12:00:00Z"))
+    make_directory_with_explicit_mode(roots["workspace_root"] / "scheduler" / "evidence")
     monkeypatch.setenv("NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC", "0,6,12,18")
-    monkeypatch.setattr(
-        "services.orchestrator.scheduler._active_repository_from_env",
-        lambda: FakeActiveRepository(active=True),
-    )
-    monkeypatch.setattr(
-        "services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env",
-        lambda: FakeRegistry([_model("model_a", "basin_a")]),
-    )
-    monkeypatch.setattr(
-        "services.orchestrator.scheduler._default_adapters",
-        lambda: {"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+    _db_free_factories_return(
+        monkeypatch,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FakeActiveRepository(active=True),
     )
     monkeypatch.setattr(
         "services.orchestrator.scheduler._now",
@@ -36256,7 +36369,7 @@ def test_plan_production_cli_public_path_skips_active_duplicate(
         continuous=False,
         interval_seconds=300.0,
         max_passes=None,
-        workspace_root=str(tmp_path),
+        workspace_root=str(roots["workspace_root"]),
         lock_path=None,
         evidence_dir=None,
     )
@@ -36265,53 +36378,6 @@ def test_plan_production_cli_public_path_skips_active_duplicate(
     assert payload["skipped_candidates"][0]["reason"] == "active_duplicate_pipeline"
     assert payload["counts"]["skipped_candidate_count"] == 1
     assert payload["counts"]["submitted_count"] == 0
-
-
-def test_plan_production_click_missing_database_url_exits_cleanly_without_mutation(
-    monkeypatch: Any,
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("DATABASE_URL", raising=False)
-    monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
-    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
-    monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
-    monkeypatch.setattr("services.orchestrator.scheduler.ProductionScheduler.run_once", _unexpected_run_once)
-
-    try:
-        cli._click_main(["plan-production", "--workspace-root", str(tmp_path)])
-    except SystemExit as error:
-        rc = int(error.code or 0)
-    else:
-        rc = 0
-    captured = capsys.readouterr()
-
-    assert rc == 1
-    assert captured.out == ""
-    assert captured.err == "DATABASE_URL_MISSING: DATABASE_URL is required for orchestration.\n"
-    assert list((tmp_path / "scheduler").glob("*")) == []
-
-
-def test_plan_production_argparse_missing_database_url_exits_cleanly_without_mutation(
-    monkeypatch: Any,
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("DATABASE_URL", raising=False)
-    monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
-    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
-    monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
-    monkeypatch.setattr("services.orchestrator.scheduler.ProductionScheduler.run_once", _unexpected_run_once)
-
-    rc = cli._argparse_main(["plan-production", "--workspace-root", str(tmp_path)])
-    captured = capsys.readouterr()
-
-    assert rc == 1
-    assert captured.out == ""
-    assert captured.err == "DATABASE_URL_MISSING: DATABASE_URL is required for orchestration.\n"
-    assert list((tmp_path / "scheduler").glob("*")) == []
 
 
 def test_plan_production_cli_smoke_with_injected_scheduler(monkeypatch: Any, tmp_path: Path) -> None:
@@ -36410,7 +36476,7 @@ def test_plan_production_stdout_summary_mode_omits_full_evidence(
 
 
 def test_run_continuous_unbounded_keeps_only_latest_result(tmp_path: Path) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), interval_seconds=1)
+    config = _config(tmp_path, db_free=True, now=_dt("2026-05-21T12:00:00Z"), interval_seconds=1)
     scheduler = CountingScheduler(config, stop_after=3)
 
     with pytest.raises(StopIteration):
@@ -36421,7 +36487,7 @@ def test_run_continuous_unbounded_keeps_only_latest_result(tmp_path: Path) -> No
 
 
 def test_run_continuous_finite_within_cap_returns_pass_results(tmp_path: Path) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), interval_seconds=1)
+    config = _config(tmp_path, db_free=True, now=_dt("2026-05-21T12:00:00Z"), interval_seconds=1)
     scheduler = CountingScheduler(config, stop_after=10)
 
     results = scheduler.run_continuous(max_passes=3)
@@ -36431,7 +36497,7 @@ def test_run_continuous_finite_within_cap_returns_pass_results(tmp_path: Path) -
 
 
 def test_run_continuous_rejects_excessive_finite_passes(tmp_path: Path) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), interval_seconds=1)
+    config = _config(tmp_path, db_free=True, now=_dt("2026-05-21T12:00:00Z"), interval_seconds=1)
     scheduler = CountingScheduler(config, stop_after=10)
 
     with pytest.raises(ValueError, match="max_passes exceeds finite JSON output limit"):
@@ -36441,7 +36507,7 @@ def test_run_continuous_rejects_excessive_finite_passes(tmp_path: Path) -> None:
 
 
 def test_run_continuous_rejects_zero_finite_passes(tmp_path: Path) -> None:
-    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), interval_seconds=1)
+    config = _config(tmp_path, db_free=True, now=_dt("2026-05-21T12:00:00Z"), interval_seconds=1)
     scheduler = CountingScheduler(config, stop_after=10)
 
     with pytest.raises(ValueError, match="max_passes must be at least 1"):
@@ -36836,7 +36902,7 @@ def test_cli_rejects_non_positive_scheduler_max_cycles_env_before_scheduler_cons
 
 def test_production_scheduler_config_rejects_non_positive_max_cycles(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="max_cycles_per_source must be at least 1"):
-        _config(tmp_path, max_cycles_per_source=0)
+        _config(tmp_path, db_free=True, max_cycles_per_source=0)
 
 
 class SimpleResult:
@@ -37562,7 +37628,13 @@ class StrictNoSubmitOrchestrator(FakeProductionOrchestrator):
 
 class CountingScheduler(ProductionScheduler):
     def __init__(self, config: ProductionSchedulerConfig, *, stop_after: int) -> None:
-        super().__init__(config, registry=FakeRegistry([]), adapters={}, sleep=self._sleep)
+        super().__init__(
+            config,
+            registry=FakeRegistry([]),
+            adapters={},
+            active_repository=_empty_file_journal(Path(config.workspace_root)),
+            sleep=self._sleep,
+        )
         self.stop_after = stop_after
         self.pass_count = 0
         self.snapshots: list[int] = []
@@ -38248,30 +38320,28 @@ def test_db_free_runtime_preflight_accepts_matching_canonical_raw_authority(
     assert preflight["checks"]["NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT"]["authority_matches"] is True
 
 
+# #3251: retargeted onto the full DB-free env (rule (a)); was
+# `test_non_db_free_exact_repair_blocks_arbitrary_ready_raw_authority_before_lock`.
 @pytest.mark.parametrize("dry_run", [True, False], ids=("plan", "submit"))
-def test_non_db_free_exact_repair_blocks_arbitrary_ready_raw_authority_before_lock(
+def test_db_free_exact_repair_blocks_arbitrary_ready_raw_authority_before_lock(
     monkeypatch: Any,
     tmp_path: Path,
     dry_run: bool,
 ) -> None:
     cycle_time = _dt("2026-05-21T06:00:00Z")
-    canonical_root = tmp_path / "canonical-node22-object-store"
-    arbitrary_root = tmp_path / "alternate-ready-object-store"
-    canonical_root.mkdir()
+    roots, _paths = _db_free_pass_env(monkeypatch, tmp_path)
+    canonical_root = roots["object_store_root"]
+    arbitrary_root = roots["object_store_root"] / "alternate-ready-object-store"
     readiness = _write_missing_forcing_repair_raw_manifest(
         arbitrary_root,
         cycle_time=cycle_time,
     )
     assert readiness["status"] == "ready"
-    monkeypatch.setattr(
-        source_cycle_raw_manifest_module,
-        "NODE22_CANONICAL_NFS_RAW_AUTHORITY_ROOT",
-        canonical_root,
-        raising=False,
-    )
+    assert source_cycle_raw_manifest_module.NODE22_CANONICAL_NFS_RAW_AUTHORITY_ROOT == canonical_root
     monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
     config = _config(
-        tmp_path / "workspace",
+        roots["workspace_root"],
+        db_free=True,
         dry_run=dry_run,
         lookback_hours=0,
         max_cycles_per_source=1,
@@ -38281,7 +38351,6 @@ def test_non_db_free_exact_repair_blocks_arbitrary_ready_raw_authority_before_lo
         object_store_copyback_root=arbitrary_root,
         nfs_raw_manifest_root=arbitrary_root,
         nfs_raw_manifest_prefix="s3://nhms",
-        allowed_storage_roots=(tmp_path,),
     )
     orchestrator_calls: list[str] = []
     scheduler = ProductionScheduler(
@@ -38295,9 +38364,12 @@ def test_non_db_free_exact_repair_blocks_arbitrary_ready_raw_authority_before_lo
     result = scheduler.run_once()
     rendered = json.dumps({"preflight": preflight, "evidence": result.evidence}, sort_keys=True)
 
-    assert config.db_free_required is False
+    # #3251, rule (c): `db_free_required is False` -> `is True`, and the absent
+    # `database_url` check -> recorded-unconfigured (DB-free records it,
+    # `config.py:720-725`).
+    assert config.db_free_required is True
     assert preflight["status"] == "blocked"
-    assert "database_url" not in preflight["checks"]
+    assert preflight["checks"]["database_url"]["configured"] is False
     assert {
         blocker["field"]
         for blocker in preflight["blockers"]
@@ -38316,61 +38388,69 @@ def test_non_db_free_exact_repair_blocks_arbitrary_ready_raw_authority_before_lo
     assert str(canonical_root) not in rendered
 
 
-def test_non_db_free_non_repair_runtime_preflight_remains_not_required(tmp_path: Path) -> None:
-    arbitrary_root = tmp_path / "ordinary-object-store"
-    arbitrary_root.mkdir()
+# #3251, rule (c); was `test_non_db_free_non_repair_runtime_preflight_remains_not_required`.
+# Subject: the runtime preflight of a non-repair config with a non-canonical
+# raw-manifest prefix. Off DB-free mode it is the `not_required` arm
+# (`scheduler_config/config.py:710-717`); DB-free mode always runs it, and the
+# prefix stays unpinned without repair (`config.py:834-837`, `db_free.py:425-436`):
+# `== not_required` -> required, no blockers, prefix check not canonical-pinned.
+# The copyback/raw roots are the canonical ones: DB-free topology checks run
+# regardless of repair (`config.py:770-816`).
+def test_db_free_non_repair_runtime_preflight_does_not_pin_canonical_raw_manifest_prefix(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots, _paths = _db_free_pass_env(monkeypatch, tmp_path)
     config = _config(
-        tmp_path / "workspace",
-        object_store_copyback_root=arbitrary_root,
-        nfs_raw_manifest_root=arbitrary_root,
+        roots["workspace_root"],
+        db_free=True,
         nfs_raw_manifest_prefix="s3://ordinary-compatible-authority/alternate",
-        allowed_storage_roots=(tmp_path,),
     )
 
-    assert config.db_free_required is False
+    preflight = config.db_free_runtime_preflight()
+
+    assert config.db_free_required is True
     assert config.repair_missing_forcing is False
-    assert config.db_free_runtime_preflight() == {
-        "status": "not_required",
-        "required": False,
-        "blockers": [],
-        "checks": {},
+    assert preflight["status"] == "ready"
+    assert preflight["required"] is True
+    assert preflight["blockers"] == []
+    assert preflight["checks"]["NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX"] == {
+        "env": "NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX",
+        "configured": True,
+        "value": "[object-prefix]",
+        "scheme": "s3",
+        "supported": True,
+        "canonical_authority_required": False,
+        "authority_matches": None,
     }
 
 
+# #3251: retargeted onto the full DB-free env (rule (a)); was
+# `test_non_db_free_exact_repair_requires_canonical_raw_manifest_prefix_before_lock`.
 @pytest.mark.parametrize("dry_run", [True, False], ids=("plan", "submit"))
 @pytest.mark.parametrize(
     "manifest_prefix",
     ["s3://other", "s3://nhms/alternate"],
     ids=("other-authority", "nested-prefix"),
 )
-def test_non_db_free_exact_repair_requires_canonical_raw_manifest_prefix_before_lock(
+def test_db_free_exact_repair_requires_canonical_raw_manifest_prefix_before_lock(
     monkeypatch: Any,
     tmp_path: Path,
     dry_run: bool,
     manifest_prefix: str,
 ) -> None:
     cycle_time = _dt("2026-05-21T06:00:00Z")
-    canonical_root = tmp_path / "canonical-node22-object-store"
-    canonical_root.mkdir()
-    monkeypatch.setattr(
-        source_cycle_raw_manifest_module,
-        "NODE22_CANONICAL_NFS_RAW_AUTHORITY_ROOT",
-        canonical_root,
-        raising=False,
-    )
     monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
-    config = _config(
-        tmp_path / "workspace",
+    config = _db_free_pass_config(
+        monkeypatch,
+        tmp_path,
         dry_run=dry_run,
         lookback_hours=0,
         max_cycles_per_source=1,
         backfill_enabled=False,
         repair_missing_forcing=True,
         repair_missing_forcing_cycle_time=cycle_time,
-        object_store_copyback_root=canonical_root,
-        nfs_raw_manifest_root=canonical_root,
         nfs_raw_manifest_prefix=manifest_prefix,
-        allowed_storage_roots=(tmp_path,),
     )
     orchestrator_calls: list[str] = []
     scheduler = ProductionScheduler(
@@ -38384,7 +38464,8 @@ def test_non_db_free_exact_repair_requires_canonical_raw_manifest_prefix_before_
     result = scheduler.run_once()
     rendered = json.dumps({"preflight": preflight, "evidence": result.evidence}, sort_keys=True)
 
-    assert config.db_free_required is False
+    # #3251, rule (c): `db_free_required is False` -> `is True`.
+    assert config.db_free_required is True
     assert preflight["status"] == "blocked"
     prefix_check = preflight["checks"]["NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX"]
     assert prefix_check["canonical_authority_required"] is True
@@ -38402,35 +38483,28 @@ def test_non_db_free_exact_repair_requires_canonical_raw_manifest_prefix_before_
     assert manifest_prefix not in rendered
 
 
-def test_non_db_free_exact_repair_accepts_canonical_prefix_with_trailing_separator(
+# #3251: retargeted onto the full DB-free env (rule (a)); was
+# `test_non_db_free_exact_repair_accepts_canonical_prefix_with_trailing_separator`.
+def test_db_free_exact_repair_accepts_canonical_prefix_with_trailing_separator(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
     cycle_time = _dt("2026-05-21T06:00:00Z")
-    canonical_root = tmp_path / "canonical-node22-object-store"
-    canonical_root.mkdir()
-    monkeypatch.setattr(
-        source_cycle_raw_manifest_module,
-        "NODE22_CANONICAL_NFS_RAW_AUTHORITY_ROOT",
-        canonical_root,
-        raising=False,
-    )
-    config = _config(
-        tmp_path / "workspace",
+    config = _db_free_pass_config(
+        monkeypatch,
+        tmp_path,
         dry_run=True,
         lookback_hours=0,
         max_cycles_per_source=1,
         backfill_enabled=False,
         repair_missing_forcing=True,
         repair_missing_forcing_cycle_time=cycle_time,
-        object_store_copyback_root=canonical_root,
-        nfs_raw_manifest_root=canonical_root,
         nfs_raw_manifest_prefix="s3://nhms/",
-        allowed_storage_roots=(tmp_path,),
     )
 
     preflight = config.db_free_runtime_preflight()
 
+    assert config.db_free_required is True
     assert preflight["status"] == "ready"
     assert preflight["checks"]["NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX"] == {
         "env": "NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX",
@@ -39254,10 +39328,6 @@ def _unexpected_lock_acquire(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
     raise AssertionError("missing DATABASE_URL must fail before scheduler lock acquisition")
 
 
-def _unexpected_run_once(*_args: Any, **_kwargs: Any) -> SchedulerPassResult:
-    raise AssertionError("missing DATABASE_URL must fail before candidate or evidence work")
-
-
 def test_db_free_scheduler_config_parses_canonical_env_matrix(monkeypatch: Any, tmp_path: Path) -> None:
     _roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path)
 
@@ -39343,27 +39413,16 @@ def test_db_free_raw_manifest_discovery_ignores_stale_06_18_allowed_hours(
     assert {discovery.cycle_hour for discovery in discoveries} == {0, 12}
 
 
-def test_legacy_non_db_free_postgres_config_remains_valid(tmp_path: Path) -> None:
-    config = _config(
-        tmp_path,
-        database_url="postgresql://nhms:secret@db.prod.example/nhms",
-        scheduler_lock_backend="postgres",
-        scheduler_state_backend="postgres",
-        scheduler_registry_backend="postgres",
-        scheduler_canonical_readiness_backend="postgres",
-        scheduler_journal_backend="postgres",
-        scheduler_state_index_backend="postgres",
-    )
-
-    assert config.db_free_required is False
-    assert config.scheduler_lock_backend == "postgres"
-    assert config.scheduler_state_backend == "postgres"
-    assert config.scheduler_registry_backend == "postgres"
-
-
+# #3251, rule (b): `test_legacy_non_db_free_postgres_config_remains_valid` asserted
+# that postgres backend selectors stay valid; that holds only off DB-free mode --
+# the legacy normalization arm (`scheduler_config/config.py:665-671`) and the
+# selector checks gated on `scheduler_db_free_required` (`config.py:720,755-760`).
+# DB-free coverage:
+# `test_db_free_selector_misconfig_blocks_exact_field_before_lock[postgres-*]`.
 def test_legacy_scheduler_backend_uri_evidence_is_summarized(tmp_path: Path) -> None:
     config = _config(
         tmp_path,
+        db_free=True,
         scheduler_registry_backend="postgresql://nhms:supersecret@db.prod.example:55433/nhms?token=qhh",
     )
     evidence = scheduler_module._scheduler_runtime_config_evidence(config)
@@ -39378,7 +39437,7 @@ def test_legacy_scheduler_backend_uri_evidence_is_summarized(tmp_path: Path) -> 
 
 
 def test_legacy_scheduler_db_like_backend_text_evidence_is_summarized(tmp_path: Path) -> None:
-    config = _config(tmp_path, scheduler_registry_backend="postgresql+psycopg")
+    config = _config(tmp_path, db_free=True, scheduler_registry_backend="postgresql+psycopg")
     evidence = scheduler_module._scheduler_runtime_config_evidence(config)
     rendered = json.dumps(evidence, sort_keys=True)
 
