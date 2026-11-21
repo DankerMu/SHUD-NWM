@@ -7,18 +7,21 @@
 * every run manifest carries ``scheduler_db_free_required="true"``, so the gateway
   exports the DB-free worker switches even when the scheduler process lacks the
   variable;
-* each non-DB-free arm left in ``scheduler_core`` / ``scheduler_runtime`` raises
-  ``SchedulerModeInvariantError`` if a config ever reports ``False``.
+* the scheduler pass lease is always the file lease, whatever the lock backend or
+  ``database_url`` say;
+* a scheduler with no journal repository refuses with ``SchedulerModeInvariantError``
+  instead of falling back to a SQL repository.
 
-R2c-1 (#3256) deleted the SQL-factory arms and every other non-DB-free mode branch in
-``scheduler_core`` / ``scheduler_runtime`` except the PostgreSQL scheduler lease
-(``_build_scheduler_lease``, R2c-3) and the SQL reconcile store; R2c-2 (#3257) deleted
-the SQL reconcile store, so only the lease arm remains in the table below.
+R2c-1 (#3256) deleted the SQL-factory arms and the other non-DB-free mode branches,
+R2c-2 (#3257) the SQL reconcile store and R2c-3 (#3258) the PostgreSQL scheduler lease,
+so no non-DB-free arm is left: the one remaining typed refusal is
+``scheduler_core:_default_orchestrator_for``.
 """
 
 from __future__ import annotations
 
 import subprocess
+import sys
 import types
 from collections.abc import Callable
 from pathlib import Path
@@ -29,6 +32,7 @@ import pytest
 from packages.common.contracts.time_normalization import format_cycle_time
 from services.orchestrator import scheduler as scheduler_module
 from services.orchestrator import scheduler_candidate_runtime as scheduler_candidate_runtime_module
+from services.orchestrator import scheduler_lease as scheduler_lease_module
 from services.orchestrator import scheduler_runtime as scheduler_runtime_module
 from services.orchestrator.chain import CycleOrchestrationContext, OrchestratorConfig, StageDefinition
 from services.orchestrator.chain_manifests import build_cycle_stage_manifest
@@ -91,7 +95,6 @@ def _forbid_db_factories(monkeypatch: pytest.MonkeyPatch) -> None:
         scheduler_module.PsycopgModelRegistryStore, "from_env", staticmethod(_fail("PsycopgModelRegistryStore"))
     )
     monkeypatch.setattr(scheduler_module.StateManager, "from_env", staticmethod(_fail("StateManager.from_env")))
-    monkeypatch.setattr(scheduler_module, "PostgresSchedulerLease", _fail("PostgresSchedulerLease"))
 
 
 # --- 3.1 / 3.4: the env and the keyword no longer select the mode ------------------------
@@ -323,24 +326,24 @@ def test_candidate_runtime_evidence_shim_reports_db_free_without_a_config(tmp_pa
     assert str(artifact_path) not in repr(payload)
 
 
-# --- 3.2: every non-DB-free arm fails closed with the typed error ------------------------
+# --- 3.2 / 4.3: the typed refusal and the file-only scheduler lease ---------------------
 
 
 def test_scheduler_mode_invariant_error_is_a_direct_exception_subclass() -> None:
     from services.orchestrator.scheduler_mode_invariant import SchedulerModeInvariantError
 
-    error = SchedulerModeInvariantError(site="scheduler_core:_build_scheduler_lease")
+    error = SchedulerModeInvariantError(site="scheduler_core:_default_orchestrator_for")
 
     assert SchedulerModeInvariantError.__bases__ == (Exception,)
     assert not isinstance(error, ValueError | RuntimeError | OSError)
     assert error.code == _MODE_ERROR_CODE
-    assert error.site == "scheduler_core:_build_scheduler_lease"
+    assert error.site == "scheduler_core:_default_orchestrator_for"
     assert _MODE_ERROR_CODE in str(error)
-    assert "scheduler_core:_build_scheduler_lease" in str(error)
+    assert "scheduler_core:_default_orchestrator_for" in str(error)
 
 
-def _db_free_scheduler(tmp_path: Path, **kwargs: Any) -> Any:
-    config = _config(tmp_path, db_free=True, scheduler_journal_root=str(tmp_path / "journal"))
+def _db_free_scheduler(tmp_path: Path, *, config_kwargs: dict[str, Any] | None = None, **kwargs: Any) -> Any:
+    config = _config(tmp_path, db_free=True, scheduler_journal_root=str(tmp_path / "journal"), **(config_kwargs or {}))
     values: dict[str, Any] = {
         "registry": FakeRegistry([]),
         "adapters": {},
@@ -351,12 +354,6 @@ def _db_free_scheduler(tmp_path: Path, **kwargs: Any) -> Any:
     return _RealProductionScheduler(config, **values)
 
 
-def _report_db_backed(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Simulate a config that still reports the retired DB-backed mode."""
-
-    monkeypatch.setattr(ProductionSchedulerConfig, "db_free_required", property(lambda _self: False))
-
-
 def _assert_mode_error(excinfo: pytest.ExceptionInfo[BaseException], site: str) -> None:
     error = excinfo.value
     assert type(error).__name__ == _MODE_ERROR_NAME, repr(error)
@@ -365,38 +362,60 @@ def _assert_mode_error(excinfo: pytest.ExceptionInfo[BaseException], site: str) 
     assert getattr(error, "site", None) == site
 
 
-_SCHEDULER_ARMS: list[tuple[str, Callable[[Any], Any]]] = [
-    ("scheduler_core:_build_scheduler_lease", lambda scheduler: scheduler._build_scheduler_lease()),
-]
-
-
-@pytest.mark.parametrize(
-    ("site", "reach_arm"),
-    _SCHEDULER_ARMS,
-    ids=[f"{site}-{index}" for index, (site, _reach) in enumerate(_SCHEDULER_ARMS)],
+_DELETED_LEASE_NAMES = (
+    "PostgresSchedulerLease",
+    "_postgres_advisory_lock_key",
+    "RECONCILE_DB_CONNECT_TIMEOUT_SECONDS",
 )
-def test_non_db_free_arm_fails_closed_with_the_typed_error(
+
+
+def test_scheduler_lease_is_the_file_lease_even_for_a_postgres_lock_backend(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    site: str,
-    reach_arm: Callable[[Any], Any],
 ) -> None:
-    # A database URL and a reachable SQL path would make a swallowed arm look healthy;
-    # the typed error must surface before either is consulted.
-    scheduler = _db_free_scheduler(tmp_path)
-    _forbid_db_factories(monkeypatch)
-    monkeypatch.setattr(
-        "packages.common.state_manager.PsycopgStateSnapshotRepository.from_env",
-        staticmethod(lambda: pytest.fail("non-DB-free lineage arm reached its SQL try")),
+    # R2c-3 (#3258) deleted the PostgreSQL scheduler lease: a config that still names the
+    # postgres lock backend and carries a database URL gets the file lease, and taking it
+    # never imports a PostgreSQL driver.
+    monkeypatch.delenv("NHMS_SCHEDULER_LEASE_GUARD_MODE", raising=False)
+    monkeypatch.delenv("NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE", raising=False)
+    scheduler = _db_free_scheduler(
+        tmp_path,
+        config_kwargs={
+            "database_url": "postgresql://nhms:secret@db.invalid:5432/nhms",
+            "scheduler_lock_backend": "postgres",
+        },
     )
-    object.__setattr__(scheduler.config, "database_url", "postgresql://nhms:secret@db.invalid:5432/nhms")
-    _report_db_backed(monkeypatch)
+    config = scheduler.config
+    assert config.scheduler_lock_backend == "postgres"
+    assert config.database_url == "postgresql://nhms:secret@db.invalid:5432/nhms"
+    _forbid_db_factories(monkeypatch)
+    monkeypatch.setitem(sys.modules, "psycopg2", None)
+    monkeypatch.setitem(sys.modules, "psycopg", None)
 
-    with pytest.raises(Exception) as excinfo:
-        reach_arm(scheduler)
+    lease = scheduler._build_scheduler_lease()
 
-    _assert_mode_error(excinfo, site)
-    assert not Path(scheduler.config.lock_path).exists()
+    assert type(lease) is FileSchedulerLease
+    assert lease.lock_path == Path(config.lock_path)
+    assert lease.ttl_seconds == config.lock_ttl_seconds
+    assert lease.workspace_root == Path(config.workspace_root)
+    assert lease.acquired is False
+    assert not Path(config.lock_path).exists()
+
+    acquired = lease.acquire(pass_id="pass-file-only", started_at=_dt("2026-05-21T12:00:00Z"))
+    try:
+        assert acquired["acquired"] is True
+        assert acquired["lock_type"] == "file"
+        assert Path(config.lock_path).is_file()
+    finally:
+        lease.release(pass_id="pass-file-only")
+    assert not Path(config.lock_path).exists()
+
+    for name in _DELETED_LEASE_NAMES:
+        assert not hasattr(scheduler_module, name), name
+        assert not hasattr(scheduler_lease_module, name), name
+        assert name not in scheduler_lease_module.__all__
+        assert name not in scheduler_module._SCHEDULER_LEASE_COMPAT_REEXPORT_NAMES
+        assert name not in scheduler_module._SCHEDULER_LEASE_COMPAT_LOOKUP_NAMES
 
 
 def test_db_free_default_orchestrator_without_a_repository_fails_closed(

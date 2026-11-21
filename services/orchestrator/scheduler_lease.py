@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import socket
@@ -20,9 +19,6 @@ from packages.common.safe_fs_lock import open_lock_file_no_follow
 LOCK_OWNER = "production_scheduler"
 LOCK_SCHEMA_VERSION = 1
 MAX_LOCK_PAYLOAD_BYTES = 16_384
-# Bound production scheduler DB lock connects so a misconfigured/unreachable
-# database_url fails fast instead of hanging the scheduler pass.
-RECONCILE_DB_CONNECT_TIMEOUT_SECONDS = 5
 FILE_LEASE_GUARD_MODE_ENV = "NHMS_SCHEDULER_LEASE_GUARD_MODE"
 LEGACY_FILE_LOCK_GUARD_MODE_ENV = "NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE"
 
@@ -512,107 +508,6 @@ class FileSchedulerLease:
         return dict(value) if isinstance(value, Mapping) else {"raw": value}
 
 
-class PostgresSchedulerLease:
-    def __init__(
-        self,
-        database_url: str,
-        *,
-        lock_name: str,
-        display_lock_path: str,
-    ) -> None:
-        self.database_url = database_url
-        self.lock_name = lock_name
-        self.display_lock_path = display_lock_path
-        self.connection: Any | None = None
-        self.acquired = False
-        advisory_lock_key = _scheduler_compat_function(
-            "_postgres_advisory_lock_key",
-            _postgres_advisory_lock_key,
-        )
-        self.lock_key = advisory_lock_key(lock_name)
-
-    def acquire(self, *, pass_id: str, started_at: datetime) -> dict[str, Any]:
-        import psycopg2
-
-        del started_at
-        try:
-            connection = psycopg2.connect(
-                self.database_url,
-                connect_timeout=RECONCILE_DB_CONNECT_TIMEOUT_SECONDS,
-            )
-            connection.autocommit = True
-            with connection.cursor() as cursor:
-                cursor.execute("SELECT pg_try_advisory_lock(%s)", (self.lock_key,))
-                row = cursor.fetchone()
-            if not row or row[0] is not True:
-                connection.close()
-                return {
-                    "acquired": False,
-                    "contention": True,
-                    "lock_path": self.display_lock_path,
-                    "lock_type": "postgres_advisory",
-                    "reason": "postgres_advisory_lock_contended",
-                    "existing_lock": {"raw": None},
-                }
-        except Exception as error:
-            try:
-                connection.close()  # type: ignore[possibly-undefined]
-            except Exception:
-                pass
-            return {
-                "acquired": False,
-                "contention": True,
-                "lock_path": self.display_lock_path,
-                "lock_type": "postgres_advisory",
-                "reason": "postgres_advisory_lock_unavailable",
-                "error_type": type(error).__name__,
-                "existing_lock": {"raw": None},
-            }
-        self.connection = connection
-        self.acquired = True
-        return {
-            "acquired": True,
-            "contention": False,
-            "lock_path": self.display_lock_path,
-            "lock_type": "postgres_advisory",
-            "lease": {
-                "pass_id": pass_id,
-                "lock_key": self.lock_key,
-                "lock_name": self.lock_name,
-                "owner": LOCK_OWNER,
-                "schema_version": LOCK_SCHEMA_VERSION,
-            },
-        }
-
-    def renew(self, *, pass_id: str) -> bool:
-        del pass_id
-        return self.acquired and self.connection is not None
-
-    def release(self, *, pass_id: str) -> None:
-        del pass_id
-        connection = self.connection
-        self.connection = None
-        self.acquired = False
-        if connection is None:
-            return
-        try:
-            with connection.cursor() as cursor:
-                cursor.execute("SELECT pg_advisory_unlock(%s)", (self.lock_key,))
-        except Exception:
-            pass
-        finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
-
-
-def _postgres_advisory_lock_key(value: str) -> int:
-    digest = hashlib.blake2b(value.encode("utf-8"), digest_size=8).digest()
-    unsigned = int.from_bytes(digest, byteorder="big", signed=False)
-    return unsigned - (1 << 64) if unsigned >= (1 << 63) else unsigned
-
-
 def _file_lock_guard_mode() -> str:
     configured = os.getenv(FILE_LEASE_GUARD_MODE_ENV)
     if configured is None:
@@ -741,13 +636,10 @@ __all__ = [
     "LOCK_OWNER",
     "LOCK_SCHEMA_VERSION",
     "MAX_LOCK_PAYLOAD_BYTES",
-    "PostgresSchedulerLease",
-    "RECONCILE_DB_CONNECT_TIMEOUT_SECONDS",
     "UnsafeSchedulerLockError",
     "_LeaseHeartbeat",
     "_default_owner_liveness_probe",
     "_open_lock_parent_directory",
     "_open_regular_guard_file",
-    "_postgres_advisory_lock_key",
     "_unlink_lock_file",
 ]

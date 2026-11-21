@@ -50212,35 +50212,6 @@ def _read_lock(lock_path: Path) -> dict[str, Any]:
     return json.loads(lock_path.read_text(encoding="utf-8"))
 
 
-def test_postgres_advisory_lock_key_uses_scheduler_compat_monkeypatch(
-    monkeypatch: Any,
-) -> None:
-    lock_name = "production_scheduler"
-    database_url = "postgresql://nhms:secret@db.prod.example/nhms"
-    display_lock_path = "/workspace/locks/scheduler.lock"
-    expected_lock_key = scheduler_module._postgres_advisory_lock_key(lock_name)
-
-    normal_lease = scheduler_module.PostgresSchedulerLease(
-        database_url,
-        lock_name=lock_name,
-        display_lock_path=display_lock_path,
-    )
-    assert normal_lease.lock_key == expected_lock_key
-
-    monkeypatch.setattr(
-        "services.orchestrator.scheduler._postgres_advisory_lock_key",
-        lambda _value: 123,
-    )
-
-    patched_lease = scheduler_module.PostgresSchedulerLease(
-        database_url,
-        lock_name=lock_name,
-        display_lock_path=display_lock_path,
-    )
-
-    assert patched_lease.lock_key == 123
-
-
 def test_renew_bumps_heartbeat_seq_and_preserves_identity(tmp_path: Path) -> None:
     lock_path = tmp_path / "scheduler.lock"
     lease = FileSchedulerLease(lock_path, ttl_seconds=10, workspace_root=tmp_path)
