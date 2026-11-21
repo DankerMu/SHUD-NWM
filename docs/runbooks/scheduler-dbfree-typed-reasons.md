@@ -872,16 +872,16 @@ R2b 之后 scheduler 只有 DB-free 一种模式：`ProductionSchedulerConfig` �
 不再选模式（`unset` / `false` / `true` 结果相同），构造参数
 `scheduler_db_free_required=False` 照收但被忽略。#3256（R2c-1）已删除 SQL
 factory 分支和 `scheduler_core.py` / `scheduler_runtime.py` 里其余的非 DB-free
-模式分支，#3257（R2c-2）已删除 SQL reconcile store；还会抛
+模式分支，#3257（R2c-2）已删除 SQL reconcile store，#3258（R2c-3）已删除
+PostgreSQL scheduler lease（scheduler pass 只拿 file lease）；还会抛
 `SchedulerModeInvariantError`（直接继承 `Exception`，不是
-`ValueError` / `RuntimeError` / `OSError`）的只剩下表两处，带两个字段：
+`ValueError` / `RuntimeError` / `OSError`）的只剩下表一处，带两个字段：
 
 - `code`：固定 `scheduler_non_db_free_arm_reached`；
 - `site`：`<module>:<function>`，见下表。
 
 | `site` | 触发条件 | 何时抛 | 删除归属 |
 |---|---|---|---|
-| `scheduler_core:_build_scheduler_lease` | config 报告 `db_free_required=False` | 拿锁时（拿锁之前抛，不建 PostgreSQL lease） | R2c-3 删 PostgreSQL lease 时一并删除 |
 | `scheduler_core:_default_orchestrator_for` | scheduler 没有 journal repository（`active_repository is None`） | 候选执行时，此时 pass 已持锁 | 不是模式分支，group 4 不删 |
 
 它不是 evidence 里的 blocker，而是异常，直接抛到调用方（`nhms-pipeline`
@@ -889,11 +889,12 @@ CLI 以 traceback 退出），不写最终 pass evidence。`scheduler_core:_defa
 在候选执行时抛：异常经 `scheduler_execution` 的并发结果原样重抛，`run_once`
 的 `finally` 停心跳并释放锁。
 
-它也**不会**由运维 env 触发——env 设成 `false` 照样跑 DB-free。能触发它的只有代码缺陷：某个
-调用方传进来一个报告 `db_free_required=False` 的 config（duck-typed stub、
-被 patch 的属性），或一个 scheduler 在没有 journal repository 时去建
-orchestrator（`scheduler_core:_default_orchestrator_for`；以前这里会回落到
-`_orchestrator_repository_from_env()` 走 SQL，现在 fail closed）。
+它也**不会**由运维 env 触发——env 设成 `false` 照样跑 DB-free。能触发它的只有代码缺陷：
+一个 scheduler 在没有 journal repository 时去建 orchestrator
+（`scheduler_core:_default_orchestrator_for`；以前这里会回落到
+`_orchestrator_repository_from_env()` 走 SQL，现在 fail closed）。拿锁不再有
+typed refusal：`_build_scheduler_lease` 无条件返回 file lease，`NHMS_SCHEDULER_LOCK_BACKEND`
+设成 `postgres` 时由 selector preflight 在拿锁之前以 `db_free_selector_db_backed` 挡下。
 
 ### 与 selector / DATABASE_URL blocker 的区别
 

@@ -202,20 +202,6 @@ class ProductionScheduler:
         return scheduler_runtime.run_once(self)
 
     def _build_scheduler_lease(self) -> _scheduler.Any:
-        database_url = (self.config.database_url or "").strip()
-        if self.config.db_free_required:
-            return _scheduler.FileSchedulerLease(
-                _scheduler.Path(self.config.lock_path),
-                ttl_seconds=self.config.lock_ttl_seconds,
-                workspace_root=_scheduler.Path(self.config.workspace_root),
-            )
-        raise SchedulerModeInvariantError(site="scheduler_core:_build_scheduler_lease")
-        if self.config.scheduler_lock_backend == "postgres" and database_url:
-            return _scheduler.PostgresSchedulerLease(
-                database_url,
-                lock_name=f"nhms:production-scheduler:{_scheduler.Path(self.config.lock_path)}",
-                display_lock_path=str(self.config.lock_path),
-            )
         return _scheduler.FileSchedulerLease(
             _scheduler.Path(self.config.lock_path),
             ttl_seconds=self.config.lock_ttl_seconds,

@@ -58,15 +58,12 @@ from services.orchestrator.scheduler_lease import (  # noqa: F401
     LOCK_OWNER,
     LOCK_SCHEMA_VERSION,
     MAX_LOCK_PAYLOAD_BYTES,
-    RECONCILE_DB_CONNECT_TIMEOUT_SECONDS,
     FileSchedulerLease,
-    PostgresSchedulerLease,
     UnsafeSchedulerLockError,
     _default_owner_liveness_probe,
     _LeaseHeartbeat,
     _open_lock_parent_directory,
     _open_regular_guard_file,
-    _postgres_advisory_lock_key,
     _unlink_lock_file,
 )
 from services.orchestrator.scheduler_state import (  # noqa: F401
@@ -237,14 +234,11 @@ _SCHEDULER_LEASE_COMPAT_REEXPORT_NAMES = (
     "LOCK_OWNER",
     "LOCK_SCHEMA_VERSION",
     "MAX_LOCK_PAYLOAD_BYTES",
-    "PostgresSchedulerLease",
-    "RECONCILE_DB_CONNECT_TIMEOUT_SECONDS",
     "UnsafeSchedulerLockError",
     "_LeaseHeartbeat",
     "_default_owner_liveness_probe",
     "_open_lock_parent_directory",
     "_open_regular_guard_file",
-    "_postgres_advisory_lock_key",
     "_unlink_lock_file",
 )
 _SCHEDULER_LEASE_COMPAT_LOOKUP_NAMES = (
@@ -252,7 +246,6 @@ _SCHEDULER_LEASE_COMPAT_LOOKUP_NAMES = (
     "_unlink_lock_file",
     "_open_lock_parent_directory",
     "_open_regular_guard_file",
-    "_postgres_advisory_lock_key",
 )
 _SCHEDULER_LEASE_COMPAT_REEXPORT_MISSING = tuple(
     name for name in _SCHEDULER_LEASE_COMPAT_REEXPORT_NAMES if not hasattr(_scheduler_lease_module, name)

@@ -2,12 +2,10 @@
 
 ``ProductionSchedulerConfig.db_free_required`` is constant ``True``. R2c-1
 (#3256) deleted the SQL-factory arms and the other non-DB-free mode branches,
-and R2c-2 (#3257) deleted the SQL reconcile store. The one that remains, the
-PostgreSQL scheduler lease (``scheduler_core:_build_scheduler_lease``, R2c-3),
-raises this error if a config ever reports ``False`` (a duck-typed stub, a
-patched property), so the retired SQL path can never run silently.
-``scheduler_core:_default_orchestrator_for`` also raises it when the scheduler
-has no journal repository.
+R2c-2 (#3257) deleted the SQL reconcile store and R2c-3 (#3258) deleted the
+PostgreSQL scheduler lease, so no non-DB-free arm is left. The only raise site
+is ``scheduler_core:_default_orchestrator_for``: a scheduler with no journal
+repository refuses with this error instead of falling back to a SQL repository.
 
 It subclasses ``Exception`` directly, not ``ValueError`` / ``RuntimeError`` /
 ``OSError``, so the scheduler's narrower fail-safe handlers do not absorb it.
