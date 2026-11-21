@@ -117,7 +117,6 @@ class ProductionScheduler:
     ) -> None:
         self.config = config or _scheduler.ProductionSchedulerConfig()
         self._reconcile_store = reconcile_store
-        self._reconcile_store_build_error: str | None = None
         self._reconcile_comment_query = reconcile_comment_query
         self._reconcile_sacct_query = reconcile_sacct_query
         self.registry = registry if registry is not None else _db_free_file_registry_from_config(self.config)
@@ -231,11 +230,6 @@ class ProductionScheduler:
         from services.orchestrator import scheduler_runtime
 
         return scheduler_runtime._run_restart_reconcile(self, sacct_wait_sink=sacct_wait_sink)
-
-    def _reset_reconcile_store_after_error(self) -> None:
-        from services.orchestrator import scheduler_runtime
-
-        return scheduler_runtime._reset_reconcile_store_after_error(self)
 
     def _restart_reconcile_store(self) -> _scheduler.Any | None:
         from services.orchestrator import scheduler_runtime

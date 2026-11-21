@@ -12,8 +12,8 @@
 
 R2c-1 (#3256) deleted the SQL-factory arms and every other non-DB-free mode branch in
 ``scheduler_core`` / ``scheduler_runtime`` except the PostgreSQL scheduler lease
-(``_build_scheduler_lease``, R2c-3) and the SQL reconcile store
-(``_restart_reconcile_store``, R2c-2), so only those two arms remain in the table below.
+(``_build_scheduler_lease``, R2c-3) and the SQL reconcile store; R2c-2 (#3257) deleted
+the SQL reconcile store, so only the lease arm remains in the table below.
 """
 
 from __future__ import annotations
@@ -367,10 +367,6 @@ def _assert_mode_error(excinfo: pytest.ExceptionInfo[BaseException], site: str) 
 
 _SCHEDULER_ARMS: list[tuple[str, Callable[[Any], Any]]] = [
     ("scheduler_core:_build_scheduler_lease", lambda scheduler: scheduler._build_scheduler_lease()),
-    (
-        "scheduler_runtime:_restart_reconcile_store",
-        lambda scheduler: scheduler_runtime_module._restart_reconcile_store(scheduler),
-    ),
 ]
 
 
@@ -392,10 +388,6 @@ def test_non_db_free_arm_fails_closed_with_the_typed_error(
     monkeypatch.setattr(
         "packages.common.state_manager.PsycopgStateSnapshotRepository.from_env",
         staticmethod(lambda: pytest.fail("non-DB-free lineage arm reached its SQL try")),
-    )
-    monkeypatch.setattr(
-        "sqlalchemy.create_engine",
-        lambda *_args, **_kwargs: pytest.fail("non-DB-free reconcile arm reached its engine build"),
     )
     object.__setattr__(scheduler.config, "database_url", "postgresql://nhms:secret@db.invalid:5432/nhms")
     _report_db_backed(monkeypatch)

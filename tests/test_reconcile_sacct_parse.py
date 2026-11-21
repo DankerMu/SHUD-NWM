@@ -1,5 +1,4 @@
-"""Shape-validation tests for comment-based sacct row parsing (issue #300 LOW-2)
-and the dead-session engine-dispose path of the reconcile store reset (LOW-1).
+"""Shape-validation tests for comment-based sacct row parsing (issue #300 LOW-2).
 
 LOW-2: a malformed sacct JobID (e.g. leading ``_``) normalizes to ``""`` or a
 non-numeric string. The live comment-sacct row parser
@@ -63,53 +62,3 @@ def test_single_job_id_passes_through() -> None:
     (record,) = _index_comment_sacct_matches(_row("55555"))[_COMMENT]
     assert isinstance(record, SacctRecord)
     assert record.slurm_job_id == "55555"
-
-
-# --- LOW-1: dead-session engine dispose on reconcile-store reset ------------
-
-
-class _RecordingBind:
-    def __init__(self) -> None:
-        self.disposed = False
-
-    def dispose(self) -> None:
-        self.disposed = True
-
-
-class _DeadSession:
-    """Session whose rollback raises (connection truly dead)."""
-
-    def __init__(self, bind: _RecordingBind) -> None:
-        self._bind = bind
-        self.closed = False
-
-    def rollback(self) -> None:
-        raise RuntimeError("connection dead")
-
-    def get_bind(self) -> _RecordingBind:
-        return self._bind
-
-    def close(self) -> None:
-        self.closed = True
-
-
-class _FakeStore:
-    def __init__(self, session: _DeadSession) -> None:
-        self.session = session
-
-
-def test_reset_reconcile_store_disposes_dead_engine() -> None:
-    from services.orchestrator.scheduler import ProductionScheduler
-
-    bind = _RecordingBind()
-    session = _DeadSession(bind)
-    store = _FakeStore(session)
-
-    scheduler = ProductionScheduler.__new__(ProductionScheduler)
-    scheduler._reconcile_store = store  # type: ignore[attr-defined]
-
-    scheduler._reset_reconcile_store_after_error()
-
-    assert bind.disposed is True
-    assert session.closed is True
-    assert scheduler._reconcile_store is None  # type: ignore[attr-defined]
