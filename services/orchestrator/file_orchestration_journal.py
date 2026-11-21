@@ -73,11 +73,6 @@ from services.orchestrator.accepted_submit_identity import (
     normalize_slurm_accounting_submitted_at,
     ordered_cohort_members,
 )
-from services.orchestrator.chain_repository import (
-    COMPLETED_HYDRO_STATUSES,
-    DEFAULT_CANDIDATE_STATE_EVENT_LIMIT,
-    DEFAULT_CANDIDATE_STATE_JOB_LIMIT,
-)
 from services.orchestrator.chain_source_cycle import (
     _datetime_sort_key,
     _pipeline_job_truth_sort_key,
@@ -316,7 +311,12 @@ from services.orchestrator.scheduler_state_manual_retry import (
 )
 from services.orchestrator.scheduler_state_types import (
     ACTIVE_HYDRO_STATUSES,
+    DEFAULT_CANDIDATE_STATE_EVENT_LIMIT,
+    DEFAULT_CANDIDATE_STATE_JOB_LIMIT,
     HYDRO_RUN_CODE_CLEARING_STATUSES,
+)
+from services.orchestrator.scheduler_state_types import (
+    DURABLE_HYDRO_SUCCESS_STATUSES as COMPLETED_HYDRO_STATUSES,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -1481,10 +1481,10 @@ class FileOrchestrationJournalRepository:
         # only the candidate's own or model-less cohort completion may mark a
         # stale ACTIVE hydro placeholder as superseded.  A foreign named
         # completion is not this candidate's completion, so it cannot suppress
-        # the hydro-active arm — the DB counterpart's source/cycle/model ACTIVE
-        # hydro arm is a plain `UNION ALL` member with no terminal-suppression
-        # clause (`chain_repository.py:57-96`) and answers True on the same
-        # shape (#1472).
+        # the hydro-active arm — the former DB counterpart's (the SQL repository
+        # deleted by R3, #3260) source/cycle/model ACTIVE hydro arm was a plain
+        # `UNION ALL` member with no terminal-suppression clause and answered
+        # True on the same shape (#1472).
         has_terminal_completion = any(
             _job_is_terminal_success(job)
             and _job_is_current_terminal_completion(job)
@@ -1517,11 +1517,12 @@ class FileOrchestrationJournalRepository:
         # This gate answers a CANDIDATE-scoped question ("has THIS candidate
         # completed"), so another model's named cycle-run row is not completion
         # evidence here even though the shared row predicate (which also feeds
-        # the deliberately wider duplicate-submission gates) accepts it.  The DB
-        # counterpart reads `hydro.hydro_run` under a source/cycle/model
-        # three-key restriction (`chain_repository.py:98-111`) and never sees
-        # another model's job rows; this conjunct aligns the journal verdict's
-        # direction with it (#1302).  Model-less cohort rows stay cycle-wide.
+        # the deliberately wider duplicate-submission gates) accepts it.  The
+        # former DB counterpart (the SQL repository deleted by R3, #3260) read
+        # `hydro.hydro_run` under a source/cycle/model three-key restriction and
+        # never saw another model's job rows; this conjunct aligns the journal
+        # verdict's direction with it (#1302).  Model-less cohort rows stay
+        # cycle-wide.
         has_terminal_completion = any(
             _job_is_terminal_success(job)
             and _job_is_current_terminal_completion(job)
@@ -1962,8 +1963,8 @@ class FileOrchestrationJournalRepository:
         # carries a SECOND local application of it (`has_completed_pipeline`, #1302) for
         # the same reason: that predicate also feeds the cycle-level
         # duplicate-submission gates (`has_active_pipeline`,
-        # `active_slurm_jobs`), whose DB counterparts match the cycle run id
-        # UNCONDITIONALLY (`chain_repository.py:74-79` and `:177-181`), so those
+        # `active_slurm_jobs`), whose former DB counterparts (the SQL repository
+        # deleted by R3, #3260) matched the cycle run id UNCONDITIONALLY, so those
         # two gates keep answering wide.
         #
         # Row visibility and suppression authority are two different axes.  The
@@ -1973,12 +1974,11 @@ class FileOrchestrationJournalRepository:
         # terminal-completion SUPPRESSION AUTHORITY is candidate-scoped: a
         # foreign named exact cycle-run completion is not this candidate's
         # completion, so `has_active_pipeline`'s local terminal-completion
-        # conjunction excludes it — the DB counterpart's source/cycle/model
-        # ACTIVE hydro arm is a plain `UNION ALL` member with no terminal-
-        # suppression clause (`chain_repository.py:57-96`), and answers True on
-        # the composite shape (#1472).  `has_completed_pipeline` has no DB
-        # job-row counterpart at all (`chain_repository.py:98-111` reads
-        # `hydro.hydro_run` only) — but that DB gate's source/cycle/model
+        # conjunction excludes it — the former DB counterpart's source/cycle/model
+        # ACTIVE hydro arm was a plain `UNION ALL` member with no terminal-
+        # suppression clause, and answered True on the composite shape (#1472).
+        # `has_completed_pipeline` had no DB job-row counterpart at all (the SQL
+        # gate read `hydro.hydro_run` only) — but that DB gate's source/cycle/model
         # three-key restriction fixes the DIRECTION the journal side must answer
         # in, which is why the exclusion belongs there too rather than being
         # taken as licence for a wide answer.  Narrowing the shared predicate

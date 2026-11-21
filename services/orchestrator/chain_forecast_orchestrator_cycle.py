@@ -125,17 +125,6 @@ class ForecastOrchestratorCycleMixin:
         self._active_cycles: set[str] = set()
         self.duplicate_submission_skips: list[dict[str, _chain.Any]] = []
 
-    @classmethod
-    def from_env(cls) -> _chain.ForecastOrchestrator:
-        config = _chain.OrchestratorConfig.from_env()
-        retry_service = _chain._retry_service_from_env()
-        return cls(
-            config=config,
-            repository=_chain.PsycopgOrchestratorRepository.from_env(),
-            state_manager=_chain.StateManager.from_env(),
-            retry_service=retry_service,
-        )
-
     def orchestrate_cycle(
         self,
         source: str,

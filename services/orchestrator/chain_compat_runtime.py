@@ -105,10 +105,6 @@ def install_chain_runtime_compat() -> dict[str, object]:
         raise RuntimeError(
             f"chain manifest compatibility dependency bindings missing from facade: {', '.join(_CHAIN_MANIFEST_COMPAT_DEPENDENCY_BINDING_DRIFT)}"
         )
-    from services.orchestrator.chain_repository import PsycopgOrchestratorRepository
-
-    PsycopgOrchestratorRepository.__module__ = _chain.__name__
-    _chain.__dict__["PsycopgOrchestratorRepository"] = PsycopgOrchestratorRepository
     _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_LOCAL_REPOSITORY_MISSING = tuple(
         (
             name
@@ -156,27 +152,10 @@ def install_chain_runtime_compat() -> dict[str, object]:
         raise RuntimeError(
             f"chain persistence repository protocol methods missing from local protocol: {', '.join(_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_PROTOCOL_METHOD_MISSING)}"
         )
-    _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_IMPLEMENTATION_METHOD_MISSING = tuple(
-        (
-            name
-            for name in _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_IMPLEMENTATION_METHOD_NAMES
-            if not callable(getattr(PsycopgOrchestratorRepository, name, None))
-        )
-    )
-    if _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_IMPLEMENTATION_METHOD_MISSING:
-        raise RuntimeError(
-            f"chain persistence repository implementation methods missing from local implementation: {', '.join(_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_IMPLEMENTATION_METHOD_MISSING)}"
-        )
     _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_PROTOCOL_METHODS = _chain.MappingProxyType(
         {
             name: getattr(_chain.OrchestratorRepository, name)
             for name in _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_PROTOCOL_METHOD_NAMES
-        }
-    )
-    _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_IMPLEMENTATION_METHODS = _chain.MappingProxyType(
-        {
-            name: getattr(PsycopgOrchestratorRepository, name)
-            for name in _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_IMPLEMENTATION_METHOD_NAMES
         }
     )
 
@@ -475,7 +454,6 @@ def install_chain_runtime_compat() -> dict[str, object]:
         )
     del _chain_stage_execution_deps
     export_names = (
-        "PsycopgOrchestratorRepository",
         "_CHAIN_ARRAY_ACCOUNTING_COMPAT_DEPENDENCY_BINDING_DRIFT",
         "_CHAIN_ARRAY_ACCOUNTING_COMPAT_METHOD_FACADE_MISSING",
         "_CHAIN_ARRAY_ACCOUNTING_COMPAT_METHOD_FORWARDERS",
@@ -485,8 +463,6 @@ def install_chain_runtime_compat() -> dict[str, object]:
         "_CHAIN_MANIFEST_COMPAT_FORECAST_METHOD_FACADE_MISSING",
         "_CHAIN_MANIFEST_COMPAT_FORECAST_METHOD_FORWARDERS",
         "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_FORWARDER_CLASSIFICATION_DRIFT",
-        "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_IMPLEMENTATION_METHODS",
-        "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_IMPLEMENTATION_METHOD_MISSING",
         "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_LOCAL_REPOSITORIES",
         "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_LOCAL_REPOSITORY_MISSING",
         "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_LOCAL_REPOSITORY_OWNER_DRIFT",

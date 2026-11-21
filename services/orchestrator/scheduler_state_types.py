@@ -28,12 +28,12 @@ STATE_CANDIDATE_SCOPED_PROOF_FIELDS = (
 )
 STATE_STRONG_CANDIDATE_SCOPED_PROOF_FIELDS = STATE_CANDIDATE_SCOPED_PROOF_FIELDS
 ACTIVE_PIPELINE_STATUSES = set(_vocab.ACTIVE_PIPELINE_STATUSES)
-# THE single definition of "is this hydro run in flight?" — chain, chain_repository and
-# file_orchestration_journal all bind this very object. #1581's "pending"-less copies are
+# THE single definition of "is this hydro run in flight?" — chain and
+# file_orchestration_journal both bind this very object. #1581's "pending"-less copies are
 # adjudicated away: "pending" is what manual retry writes once the retry job is submitted.
 ACTIVE_HYDRO_STATUSES = set(_vocab.ACTIVE_HYDRO_STATUSES)
 # Scheduler durable-success predicate: "is the pipeline durably done?". THE single definition —
-# chain.COMPLETED_HYDRO_STATUSES, chain_repository.COMPLETED_HYDRO_STATUSES and
+# chain.COMPLETED_HYDRO_STATUSES, file_orchestration_journal.COMPLETED_HYDRO_STATUSES and
 # scheduler_state_failure._durable_shud_output_exists all read this very object (#1581).
 # Holds "complete" on top of the three members of the manual-retry refusal set in
 # services/orchestrator/retry.py, which answers the different question "may an operator retry this

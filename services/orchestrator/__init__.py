@@ -22,7 +22,6 @@ _CHAIN_EXPORTS = {
     "OrchestratorError",
     "PipelineAlreadyActiveError",
     "PipelineResult",
-    "PsycopgOrchestratorRepository",
     "StageRunResult",
     "scenario_for_source",
 }
@@ -33,7 +32,6 @@ __all__ = [
     "OrchestratorError",
     "PipelineAlreadyActiveError",
     "PipelineResult",
-    "PsycopgOrchestratorRepository",
     "StageRunResult",
     "PRODUCTION_CONTRACT_ID",
     "PRODUCTION_CONTRACT_SCHEMA_VERSION",

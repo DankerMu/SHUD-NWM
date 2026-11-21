@@ -235,12 +235,9 @@ if _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_ALIAS_DRIFT:
     raise RuntimeError(
         f"chain persistence direct alias drifted from owner module: {', '.join(_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_ALIAS_DRIFT)}"
     )
-_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_LOCAL_REPOSITORY_NAMES = (
-    "OrchestratorRepository",
-    "PsycopgOrchestratorRepository",
-)
+_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_LOCAL_REPOSITORY_NAMES = ("OrchestratorRepository",)
 _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_CHAIN_LOCAL_CLASSIFICATIONS = _chain.MappingProxyType(
-    {"OrchestratorRepository": "chain-local-protocol", "PsycopgOrchestratorRepository": "chain-local-implementation"}
+    {"OrchestratorRepository": "chain-local-protocol"}
 )
 _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_PROTOCOL_METHOD_NAMES = (
     "has_active_orchestration",
@@ -264,60 +261,6 @@ _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_PROTOCOL_METHOD_NAMES = (
     "insert_pipeline_event",
     "update_forecast_cycle_status",
     "list_stage_statuses",
-)
-_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_IMPLEMENTATION_METHOD_NAMES = (
-    "from_env",
-    "has_active_orchestration",
-    "has_active_pipeline",
-    "has_completed_pipeline",
-    "candidate_state",
-    "active_slurm_jobs",
-    "list_canonical_ready_cycles",
-    "list_forecast_model_ids",
-    "load_model_context",
-    "find_forcing_context",
-    "ensure_forecast_cycle",
-    "create_hydro_run",
-    "create_hydro_run_from_basin",
-    "update_hydro_run_status",
-    "upsert_pipeline_job",
-    "reserve_pipeline_job",
-    "reclaim_pipeline_job_reservation",
-    "bind_pipeline_job_reservation",
-    "query_candidate_state",
-    "update_pipeline_job_status",
-    "get_pipeline_job",
-    "query_pipeline_jobs_by_cycle",
-    "query_pipeline_jobs_by_run",
-    "query_pipeline_job_by_slurm_id",
-    "insert_pipeline_event",
-    "update_forecast_cycle_status",
-    "list_stage_statuses",
-)
-_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_LEGACY_IMPORT_TOKENS = _chain.MappingProxyType(
-    {
-        "services/orchestrator/scheduler_adapters.py": (
-            "from services.orchestrator.chain import PsycopgOrchestratorRepository",
-            "PsycopgOrchestratorRepository",
-            "return PsycopgOrchestratorRepository.from_env()",
-        )
-    }
-)
-_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_LEGACY_IMPORT_FUNCTION_TOKENS = _chain.MappingProxyType(
-    {
-        "services/orchestrator/scheduler_adapters.py": _chain.MappingProxyType(
-            {
-                "_active_repository_from_env": (
-                    "from services.orchestrator.chain import PsycopgOrchestratorRepository",
-                    "return PsycopgOrchestratorRepository.from_env()",
-                ),
-                "_orchestrator_repository_from_env": (
-                    "from services.orchestrator.chain import PsycopgOrchestratorRepository",
-                    "return PsycopgOrchestratorRepository.from_env()",
-                ),
-            }
-        )
-    }
 )
 _CHAIN_RETRY_COMPAT_ALIAS_NAMES = ("RetryConfig", "RetryService", "compute_backoff_seconds")
 _CHAIN_RETRY_COMPAT_ALIAS_OWNER_MISSING = tuple(

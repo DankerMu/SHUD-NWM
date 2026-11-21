@@ -37,8 +37,8 @@ statement timeout），**全程无人知道**：autopipe unit 没挂 `OnFailure=
   `OutputParsingError` 码（`RIVQDOWN_NOT_FOUND`、`RIVQDOWN_EMPTY`、`MODEL_RIVER_FILE_MALFORMED` 等，
   见 `workers/output_parser/`）——这些确定性失败恰恰是 #1781 那种永不自愈的形状，按
   `OUTPUT_PARSE_` 前缀过滤会正好把它们漏掉。node-27 上 `status='failed'` 的唯一写入者就是解析器：
-  另外能写 `failed` 的两处（`workers/shud_runtime/runtime.py`、
-  `services/orchestrator/chain_repository.py`）属 node-22 计算面，它不连任何活库；register 保留
+  另外能写 `failed` 的一处（`workers/shud_runtime/runtime.py`；SQL orchestration repository
+  曾是第二处，已随 R3 #3260 删除）属 node-22 计算面，它不连任何活库；register 保留
   status、forcing 段不写 `hydro_run`、publish 只写 `published`。所以被观察集不需要码过滤；
   2026-09-23 实测全库 `failed` 只有 2 行、都在存活界外（见 receipt
   [`backlog-probe-all-failed.txt`](../receipts/2026-09-23-issue-2529-parse-timeout-root-cause/backlog-probe-all-failed.txt)），

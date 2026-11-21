@@ -395,16 +395,4 @@ class _MetStoreCanonicalReadinessProvider:
         ).evidence
 
 
-def _active_repository_from_env() -> ActiveCandidateRepository:
-    from services.orchestrator.chain import PsycopgOrchestratorRepository
-
-    return PsycopgOrchestratorRepository.from_env()
-
-
-def _orchestrator_repository_from_env() -> Any:
-    from services.orchestrator.chain import PsycopgOrchestratorRepository
-
-    return PsycopgOrchestratorRepository.from_env()
-
-
 from services.orchestrator.scheduler_types import SchedulerCandidate  # noqa: E402

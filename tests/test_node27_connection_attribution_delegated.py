@@ -135,16 +135,9 @@ DELEGATED_CONNECT_CLOSURE: tuple[tuple[str, str, str, str], ...] = (
         "scripts/node27_autopipeline.py",
         "services/orchestrator/chain_compat_runtime.py",
         UNREACHABLE,
-        "static-only: services/orchestrator/chain.py is named by services/orchestrator/__init__.py:53 "
+        "static-only: services/orchestrator/chain.py is named by services/orchestrator/__init__.py:51 "
         "and by chain_forecast_execution.py; autopipeline never constructs ForecastOrchestrator or "
         "installs chain runtime",
-    ),
-    (
-        "scripts/node27_autopipeline.py",
-        "services/orchestrator/chain_repository.py",
-        UNREACHABLE,
-        "static-only through file_orchestration_journal.py in the chain.py import graph; autopipeline "
-        "never constructs PsycopgOrchestratorRepository or calls upsert_pipeline_job",
     ),
     (
         "scripts/node27_autopipeline.py",
@@ -222,28 +215,21 @@ DELEGATED_CONNECT_CLOSURE: tuple[tuple[str, str, str, str], ...] = (
         "services/orchestrator/chain_compat_runtime.py",
         UNREACHABLE,
         "static-only: services/orchestrator/chain.py is imported ONLY inside the module __getattr__ at "
-        "services/orchestrator/__init__.py:53, so it is absent from the display unit's runtime sys.modules",
-    ),
-    (
-        "apps/api/routes/hydro_display.py",
-        "services/orchestrator/chain_repository.py",
-        UNREACHABLE,
-        "static-only: reached only through chain_compat_runtime.py, itself behind the deferred chain "
-        "import in services/orchestrator/__init__.py:53",
+        "services/orchestrator/__init__.py:51, so it is absent from the display unit's runtime sys.modules",
     ),
     (
         "apps/api/routes/hydro_display.py",
         "services/tile_publisher/publisher.py",
         UNREACHABLE,
         "static-only: imported by services/orchestrator/chain.py, behind the deferred import in "
-        "services/orchestrator/__init__.py:53",
+        "services/orchestrator/__init__.py:51",
     ),
     (
         "apps/api/routes/hydro_display.py",
         "services/orchestrator/pipeline_job_provenance.py",
         UNREACHABLE,
         "import-only through services/orchestrator/chain_forecast_execution.py, itself behind the deferred "
-        "chain import in services/orchestrator/__init__.py:53; display routes never call the node-27 importer "
+        "chain import in services/orchestrator/__init__.py:51; display routes never call the node-27 importer "
         "and the node-22 publisher path opens no database connection",
     ),
     (
