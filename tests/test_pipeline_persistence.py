@@ -11,7 +11,8 @@ from tests.pipeline_job_orm_helpers import seed_pipeline_job
 
 def test_pipeline_job_crud_with_sqlite_ops_schema() -> None:
     with _store() as store:
-        job = store.create_job(
+        seed_pipeline_job(
+            store.session,
             job_id="job_1",
             run_id="run_1",
             cycle_id="gfs_2026050100",
@@ -21,10 +22,6 @@ def test_pipeline_job_crud_with_sqlite_ops_schema() -> None:
             stage="download",
             status="pending",
         )
-
-        assert job.job_id == "job_1"
-        assert job.status == "pending"
-        assert job.model_id == "model_a"
 
         updated = store.update_job_status(
             "job_1",

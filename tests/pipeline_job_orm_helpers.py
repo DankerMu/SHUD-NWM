@@ -4,10 +4,9 @@ Not a collectible test module. Tests that need ``pipeline_job`` rows in place,
 or a repository double that keeps the two-phase reservation semantics, use
 these helpers instead of the ``PipelineStore`` write methods ``create_job`` /
 ``reserve_job`` / ``reclaim_reservation`` / ``bind_reservation``, which R5
-deletes (``openspec/changes/redesign-orchestration-core`` task 7).
+deleted (``openspec/changes/redesign-orchestration-core`` task 7).
 
-Each function re-implements one of those methods with plain ORM statements and
-never calls it:
+Each function re-implements one of those methods with plain ORM statements:
 
 - ``seed_pipeline_job`` mirrors ``create_job``: same defaults, ``submitted_at``
   stamped with ``utc_now()`` unless the caller passes it (``None`` keeps it
@@ -30,8 +29,8 @@ these method names on its ``store`` argument (``reconcile_reserved_unbound_jobs`
 subclass: the four write methods go to the functions above, and only the
 read/update methods R5 keeps are delegated, by name.
 
-``tests/test_pipeline_job_orm_helpers.py`` pins each function against the
-original method; R5-2 deletes or rewrites those checks when the originals go.
+``tests/test_pipeline_job_orm_helpers.py`` pins each function to literal
+outcomes, recorded from the original methods before R5-2 deleted them.
 """
 
 from __future__ import annotations
@@ -230,7 +229,7 @@ class OrmPipelineStore:
         self.session = session
         self._kept = PipelineStore(session)
 
-    # The four write methods R5 deletes, re-implemented above.
+    # The four write methods R5 deleted from PipelineStore, re-implemented above.
     def create_job(self, **kwargs: Any) -> PipelineJob:
         return seed_pipeline_job(self.session, **kwargs)
 
