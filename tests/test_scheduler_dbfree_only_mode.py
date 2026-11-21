@@ -7,8 +7,13 @@
 * every run manifest carries ``scheduler_db_free_required="true"``, so the gateway
   exports the DB-free worker switches even when the scheduler process lacks the
   variable;
-* each non-DB-free arm left in ``scheduler_core`` / ``scheduler_runtime`` (R2c deletes
-  them) raises ``SchedulerModeInvariantError`` if a config ever reports ``False``.
+* each non-DB-free arm left in ``scheduler_core`` / ``scheduler_runtime`` raises
+  ``SchedulerModeInvariantError`` if a config ever reports ``False``.
+
+R2c-1 (#3256) deleted the SQL-factory arms and every other non-DB-free mode branch in
+``scheduler_core`` / ``scheduler_runtime`` except the PostgreSQL scheduler lease
+(``_build_scheduler_lease``, R2c-3) and the SQL reconcile store
+(``_restart_reconcile_store``, R2c-2), so only those two arms remain in the table below.
 """
 
 from __future__ import annotations
@@ -78,11 +83,8 @@ def _forbid_db_factories(monkeypatch: pytest.MonkeyPatch) -> None:
 
     for name in (
         "_active_repository_from_env",
-        "_canonical_readiness_provider_from_env",
-        "_forcing_producer_from_env",
         "_orchestrator_repository_from_env",
         "_retry_service_from_env",
-        "_default_adapters",
     ):
         monkeypatch.setattr(scheduler_module, name, _fail(name))
     monkeypatch.setattr(
@@ -365,47 +367,9 @@ def _assert_mode_error(excinfo: pytest.ExceptionInfo[BaseException], site: str) 
 
 _SCHEDULER_ARMS: list[tuple[str, Callable[[Any], Any]]] = [
     ("scheduler_core:_build_scheduler_lease", lambda scheduler: scheduler._build_scheduler_lease()),
-    ("scheduler_core:_orchestrator_for", lambda scheduler: scheduler._orchestrator_for("gfs")),
-    ("scheduler_core:_cancel_orchestrator_for", lambda scheduler: scheduler._cancel_orchestrator_for("gfs")),
-    (
-        "scheduler_core:_default_orchestrator_for",
-        lambda scheduler: scheduler._default_orchestrator_for("gfs", state_manager=None),
-    ),
-    ("scheduler_core:_lineage_provider", lambda scheduler: scheduler._lineage_provider()),
-    (
-        "scheduler_core:_db_free_strict_warm_start_required_for",
-        lambda scheduler: scheduler._db_free_strict_warm_start_required_for(object()),
-    ),
-    (
-        "scheduler_core:_strict_warm_start_for_candidate",
-        lambda scheduler: scheduler._strict_warm_start_for_candidate(object(), object()),
-    ),
-    (
-        "scheduler_core:_successor_warm_start_state_for_candidate",
-        lambda scheduler: scheduler._successor_warm_start_state_for_candidate(object(), object()),
-    ),
-    ("scheduler_runtime:run_once", lambda scheduler: scheduler.run_once()),
     (
         "scheduler_runtime:_restart_reconcile_store",
         lambda scheduler: scheduler_runtime_module._restart_reconcile_store(scheduler),
-    ),
-    (
-        "scheduler_runtime:_db_free_lock_evidence",
-        lambda scheduler: scheduler_runtime_module._db_free_lock_evidence(
-            scheduler.config, {"acquired": False, "contention": False}
-        ),
-    ),
-    (
-        "scheduler_runtime:_db_free_journal_mutation_blocked",
-        lambda scheduler: scheduler_runtime_module._db_free_journal_mutation_blocked(
-            scheduler.config, mutation_requested=True, repository=scheduler.active_repository
-        ),
-    ),
-    (
-        "scheduler_runtime:_db_free_journal_mutation_blocked",
-        lambda scheduler: scheduler_runtime_module._db_free_journal_mutation_blocked(
-            scheduler.config, mutation_requested=False
-        ),
     ),
 ]
 
@@ -441,40 +405,6 @@ def test_non_db_free_arm_fails_closed_with_the_typed_error(
 
     _assert_mode_error(excinfo, site)
     assert not Path(scheduler.config.lock_path).exists()
-
-
-def test_non_db_free_scheduler_construction_fails_closed(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    config = _config(tmp_path, db_free=True, scheduler_journal_root=str(tmp_path / "journal"))
-    _forbid_db_factories(monkeypatch)
-    _report_db_backed(monkeypatch)
-
-    with pytest.raises(Exception) as excinfo:
-        _RealProductionScheduler(
-            config,
-            registry=FakeRegistry([]),
-            adapters={},
-            active_repository=FileOrchestrationJournalRepository(tmp_path / "journal"),
-            canonical_readiness_provider=object(),
-        )
-
-    _assert_mode_error(excinfo, "scheduler_core:__init__")
-
-
-def test_non_db_free_from_env_fails_closed_before_any_factory(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    config = _config(tmp_path, db_free=True, scheduler_journal_root=str(tmp_path / "journal"))
-    _forbid_db_factories(monkeypatch)
-    _report_db_backed(monkeypatch)
-
-    with pytest.raises(Exception) as excinfo:
-        _RealProductionScheduler.from_env(config)
-
-    _assert_mode_error(excinfo, "scheduler_core:from_env")
 
 
 def test_db_free_default_orchestrator_without_a_repository_fails_closed(
@@ -551,3 +481,25 @@ def test_db_free_lineage_provider_keeps_its_file_index_branch(
     provider = scheduler._lineage_provider()
 
     assert provider is scheduler._db_free_state_index_provider()
+
+
+# --- R2c-1 (#3256, task 4.1): the SQL-path factories are deleted, not just unreachable -----
+
+_DELETED_SQL_FACTORY_NAMES = (
+    "_default_adapters",
+    "_canonical_readiness_provider_from_env",
+    "_forcing_producer_from_env",
+)
+
+
+@pytest.mark.parametrize("name", _DELETED_SQL_FACTORY_NAMES)
+def test_deleted_sql_factories_are_gone_from_the_facade_and_owner_modules(name: str) -> None:
+    from services.orchestrator import scheduler_adapters as scheduler_adapters_module
+    from services.orchestrator import scheduler_core as scheduler_core_module
+
+    assert not hasattr(scheduler_module, name)
+    assert not hasattr(scheduler_adapters_module, name)
+    assert not hasattr(scheduler_core_module, name)
+    # The DB-free adapter factory is the one that stays.
+    assert callable(scheduler_module._db_free_default_adapters)
+    assert scheduler_module._db_free_default_adapters is scheduler_adapters_module._db_free_default_adapters

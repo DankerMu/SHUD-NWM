@@ -520,9 +520,8 @@ def strict_warm_start_evidence(
     """Return §8-gated strict-warm-start evidence for ``candidate``.
 
     The core delegator (``ProductionScheduler._strict_warm_start_for_candidate``)
-    calls into this after checking ``db_free_required`` and the D8.9
-    completed-pipeline preflight so the §8 hook remains a pure function of
-    the scheduler + candidate + cycle triple.  Behavior mirrors what the
+    calls into this after the D8.9 completed-pipeline preflight so the §8
+    hook remains a pure function of the scheduler + candidate + cycle triple.  Behavior mirrors what the
     pre-split ``_strict_warm_start_for_candidate`` body did.
     """
     required_lead_hours = scheduler._required_warm_start_lead_hours(candidate, cycle)

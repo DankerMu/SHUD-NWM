@@ -218,8 +218,7 @@ def _db_free_journal_mutation_blocked(
     mutation_requested: bool,
     repository: Any | None = None,
 ) -> bool:
-    if not bool(getattr(config, "db_free_required", False)):
-        raise SchedulerModeInvariantError(site="scheduler_runtime:_db_free_journal_mutation_blocked")
+    del config
     if not bool(mutation_requested):
         return False
     return not bool(getattr(repository, "supports_writes", False))
@@ -304,10 +303,6 @@ def _scheduler_failed_count_from_execution(*args, **kwargs):
     return getattr(_scheduler, "_scheduler_failed_count_from_execution")(*args, **kwargs)
 
 
-def _scheduler_lock_evidence_root_preflight(*args, **kwargs):
-    return getattr(_scheduler, "_scheduler_lock_evidence_root_preflight")(*args, **kwargs)
-
-
 def _scheduler_mutation_proof(*args, **kwargs):
     return getattr(_scheduler, "_scheduler_mutation_proof")(*args, **kwargs)
 
@@ -385,9 +380,7 @@ def _write_new_regular_file(*args, **kwargs):
 
 
 def _db_free_lock_evidence(config: Any, value: Mapping[str, Any]) -> dict[str, Any]:
-    if not getattr(config, "db_free_required", False):
-        raise SchedulerModeInvariantError(site="scheduler_runtime:_db_free_lock_evidence")
-        return redact_payload(dict(value))
+    del config
     return _db_free_safe_lock_result(value)
 
 
@@ -628,25 +621,15 @@ def run_once(self) -> SchedulerPassResult:
                 evidence=evidence,
                 artifact_path=artifact_path,
             )
-        db_free_required = bool(getattr(self.config, "db_free_required", False))
-        if not db_free_required:
-            # R2b: every later ``db_free_required`` branch in this pass reads this
-            # local, so their non-DB-free arms are dead below (R2c deletes them).
-            raise SchedulerModeInvariantError(site="scheduler_runtime:run_once")
-        root_preflight = (
-            _scheduler_prepared_runtime_root_preflight(self.config)
-            if db_free_required
-            else _scheduler_lock_evidence_root_preflight(self.config)
-        )
+        root_preflight = _scheduler_prepared_runtime_root_preflight(self.config)
         if root_preflight["status"] == "blocked":
             lock_payload = {
                 "acquired": False,
                 "contention": False,
                 "lock_path": str(self.config.lock_path),
                 "reason": "scheduler_root_preflight_blocked",
+                "lock_type": "file",
             }
-            if db_free_required:
-                lock_payload["lock_type"] = "file"
             evidence = self._base_evidence(pass_id, started_at)
             evidence.update(
                 {
@@ -688,7 +671,7 @@ def run_once(self) -> SchedulerPassResult:
                             "acquired": False,
                             "contention": False,
                             "lock_path": str(self.config.lock_path),
-                            "lock_type": "file" if self.config.db_free_required else None,
+                            "lock_type": "file",
                             "reason": "db_free_runtime_preflight_blocked",
                         },
                     ),
@@ -734,8 +717,7 @@ def run_once(self) -> SchedulerPassResult:
                     "execution_boundary": "scheduler_lock_contended",
                 }
             )
-            if self.config.db_free_required:
-                evidence["db_free_runtime"] = db_free_preflight
+            evidence["db_free_runtime"] = db_free_preflight
             status = _evidence_status(evidence, "lock_contended")
             _finalize_timing_into_evidence(evidence, collector, status)
             artifact_path = self._write_evidence(pass_id, evidence)
@@ -755,7 +737,7 @@ def run_once(self) -> SchedulerPassResult:
                 None,
             )
             rollback_fence: Mapping[str, Any] | None = None
-            if db_free_required and callable(rollback_fence_reader):
+            if callable(rollback_fence_reader):
                 try:
                     rollback_fence = rollback_fence_reader()
                 except Exception:
@@ -840,48 +822,14 @@ def run_once(self) -> SchedulerPassResult:
                     artifact_path=artifact_path,
                 )
             progress_guard = _SchedulerProgressGuard(progress_guard_limit)
-            if not db_free_required:
-                root_preflight = _scheduler_prepared_runtime_root_preflight(self.config)
-            if not db_free_required and root_preflight["status"] == "blocked":
-                finished_at = _now(self.config)
-                evidence = self._base_evidence(pass_id, started_at)
-                evidence.update(
-                    {
-                        "status": "preflight_blocked",
-                        "finished_at": _format_utc(finished_at),
-                        "lock": lock_evidence,
-                        "root_preflight": root_preflight,
-                        "counts": _empty_counts(),
-                        "candidates": [],
-                        "blocked_candidates": [],
-                        "skipped_candidates": [],
-                        "duplicate_exclusions": list(self.config.source_exclusions),
-                        "model_discovery": _empty_model_discovery(),
-                        "source_cycles": [],
-                        "model_run_evidence": [],
-                        "slurm_cancellation_evidence": [],
-                        "no_mutation_proof": _no_mutation_proof(),
-                        "execution_boundary": "scheduler_root_preflight_blocked",
-                    }
-                )
-                status = _evidence_status(evidence, "preflight_blocked")
-                _finalize_timing_into_evidence(evidence, collector, status)
-                artifact_path = self._write_evidence(pass_id, evidence)
-                return SchedulerPassResult(
-                    pass_id=pass_id,
-                    status=status,
-                    evidence=evidence,
-                    artifact_path=artifact_path,
-                )
             # M24 §3A: before planning/submitting this pass, recover any jobs
             # stuck in the submit-crash window (reserved-unbound) and refresh
             # in-flight statuses from accounting. Comment-reconcile finds back a
             # crashed cohort's slurm_job_id so we never re-submit an already
             # in-flight cohort.
-            if self.config.db_free_required:
-                refresh_file_providers = getattr(self, "_refresh_db_free_file_providers", None)
-                if callable(refresh_file_providers):
-                    refresh_file_providers()
+            refresh_file_providers = getattr(self, "_refresh_db_free_file_providers", None)
+            if callable(refresh_file_providers):
+                refresh_file_providers()
             # SUB-2 D2 semantic: wrap the whole restart_reconcile call in a
             # slurm_wait span; the internals call ``sacct`` via injected
             # queriers so the wall-clock is dominated by subprocess-wait.

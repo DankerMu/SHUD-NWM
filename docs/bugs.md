@@ -197,9 +197,10 @@ retest_command: |-
 The old no-mutation proof covered execution candidates, not source discovery
 download/cache behavior. In DB-free mode discovery only reads manifests written
 by the download lane, so a dry run has nothing to download. The non-DB-free
-mode still uses the worker GFS/IFS adapters (`_default_adapters`), whose
-availability probe contacts the upstream source; that mode belongs to the
-dormant SQL orchestration path that #3227 reviews.
+mode used the worker GFS/IFS adapters through the scheduler's SQL default-adapter
+factory, whose availability probe contacts the upstream source; #3255 (R2b) made
+DB-free the only scheduler mode and #3256 (R2c-1) deleted that factory, so no
+scheduler pass builds those adapters any more.
 
 ### BUG-20260527-006: QHH-only `plan-production` hit Slurm Gateway HTTP 404
 

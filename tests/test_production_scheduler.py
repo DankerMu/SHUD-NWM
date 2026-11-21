@@ -883,12 +883,12 @@ def _db_free_factories_return(
     """Inject collaborators where no kwarg reaches the scheduler (#3251).
 
     ``ProductionScheduler.from_env`` / ``cli._plan_production`` construct the
-    scheduler themselves; in DB-free mode it takes its registry, adapters and
-    active repository from these factories (``scheduler_core.py:118-137``), the
-    counterparts of the ``PsycopgModelRegistryStore.from_env`` /
-    ``_default_adapters`` / ``_active_repository_from_env`` patches these tests
-    used before.  Without ``active_repository`` the env's (empty) file journal
-    is the active repository.
+    scheduler themselves; it takes its registry, adapters and active repository
+    from these factories (``ProductionScheduler.__init__`` in ``scheduler_core.py``),
+    the DB-free counterparts of the ``PsycopgModelRegistryStore.from_env`` /
+    SQL default-adapter / ``_active_repository_from_env`` patches these tests used
+    before (the SQL default-adapter factory was deleted in #3256).  Without
+    ``active_repository`` the env's (empty) file journal is the active repository.
     """
 
     monkeypatch.setattr(scheduler_core_module, "_db_free_file_registry_from_config", lambda _config: registry)
@@ -905,9 +905,9 @@ def _db_free_factories_fail(monkeypatch: Any, message: str) -> None:
     """The DB-free registry, adapter and journal factories fail the test if reached (#3251).
 
     The DB-free counterpart of the raising ``_unexpected_registry`` /
-    ``_unexpected_adapters`` / ``_active_repository_from_env`` patches, so a
-    "blocks before registry or adapter construction" assertion still proves
-    something in DB-free mode.
+    ``_active_repository_from_env`` patches (and of the SQL default-adapter patch
+    deleted with its factory in #3256), so a "blocks before registry or adapter
+    construction" assertion still proves something in DB-free mode.
     """
 
     def fail(_config: Any) -> Any:
@@ -23835,7 +23835,6 @@ def test_db_free_prelock_evidence_root_outside_workspace_skips_artifact_write(
     monkeypatch.setenv("NHMS_SCHEDULER_EVIDENCE_ROOT", str(outside_evidence_root))
     monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
     monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
-    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
 
     result = ProductionScheduler.from_env(
         ProductionSchedulerConfig(now=_dt("2026-05-21T12:00:00Z"))
@@ -35508,7 +35507,6 @@ def test_plan_production_missing_workspace_root_no_flag_errors_without_app_works
     monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
     monkeypatch.setenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", "true")
     monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
-    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
     _db_free_factories_fail(monkeypatch, "a missing WORKSPACE_ROOT must fail before scheduler construction")
     monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
 
@@ -35541,7 +35539,6 @@ def test_no_flag_missing_allowed_roots_blocks_before_registry_adapter_or_submit(
     monkeypatch.delenv("NHMS_SCHEDULER_ALLOWED_ROOTS", raising=False)
     monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
     monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
-    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
     _db_free_factories_fail(monkeypatch, "a refused DB-free pass must not construct the registry, adapters or journal")
     monkeypatch.setattr(
         "services.orchestrator.scheduler._active_repository_from_env",
@@ -35596,7 +35593,6 @@ def test_explicit_workspace_submit_missing_allowed_roots_blocks_before_registry_
     monkeypatch.delenv("NHMS_SCHEDULER_ALLOWED_ROOTS", raising=False)
     monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
     monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
-    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
     _db_free_factories_fail(monkeypatch, "a refused DB-free pass must not construct the registry, adapters or journal")
     monkeypatch.setattr(
         "services.orchestrator.scheduler._active_repository_from_env",
@@ -35665,7 +35661,6 @@ def test_no_flag_invalid_env_roots_block_before_registry_adapter_or_submit(
     broken_path = roots[broken_root]
     shutil.rmtree(broken_path)
     monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
-    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
     _db_free_factories_fail(monkeypatch, "a refused DB-free pass must not construct the registry, adapters or journal")
     monkeypatch.setattr(
         "services.orchestrator.scheduler._active_repository_from_env",
@@ -35855,7 +35850,6 @@ def test_no_flag_refused_missing_temp_root_still_blocks_and_creates_nothing(
     monkeypatch.setenv("NHMS_SCHEDULER_TEMP_ROOT", str(temp_root))
     monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
     monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
-    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
     _db_free_factories_fail(monkeypatch, "a refused DB-free pass must not construct the registry, adapters or journal")
     monkeypatch.setattr(
         "services.orchestrator.scheduler._active_repository_from_env",
@@ -36109,7 +36103,6 @@ def test_no_flag_out_of_approved_roots_block_before_registry_adapter_or_submit(
         monkeypatch.setenv("NHMS_SCHEDULER_EVIDENCE_ROOT", str(evidence_root))
     monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
     monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
-    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
     _db_free_factories_fail(monkeypatch, "a refused DB-free pass must not construct the registry, adapters or journal")
     monkeypatch.setattr(
         "services.orchestrator.scheduler._active_repository_from_env",
@@ -36178,7 +36171,6 @@ def test_no_flag_file_roots_block_before_registry_adapter_or_submit(
     target.write_text("not a directory\n", encoding="utf-8")
     monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
     monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
-    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
     _db_free_factories_fail(monkeypatch, "a refused DB-free pass must not construct the registry, adapters or journal")
     monkeypatch.setattr(
         "services.orchestrator.scheduler._active_repository_from_env",
@@ -36233,7 +36225,6 @@ def test_no_flag_symlink_final_component_blocks_before_registry_adapter_or_submi
     target.symlink_to(replacement_target, target_is_directory=True)
     monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
     monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
-    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
     _db_free_factories_fail(monkeypatch, "a refused DB-free pass must not construct the registry, adapters or journal")
     monkeypatch.setattr(
         "services.orchestrator.scheduler._active_repository_from_env",
@@ -36287,7 +36278,6 @@ def test_no_flag_no_execute_or_not_writable_roots_block_before_registry_adapter_
     target.chmod(0o600)
     monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
     monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
-    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
     _db_free_factories_fail(monkeypatch, "a refused DB-free pass must not construct the registry, adapters or journal")
     monkeypatch.setattr(
         "services.orchestrator.scheduler._active_repository_from_env",
@@ -39434,10 +39424,6 @@ def _unexpected_registry() -> FakeRegistry:
     raise AssertionError("missing DATABASE_URL must fail before registry construction")
 
 
-def _unexpected_adapters() -> dict[str, FakeAdapter]:
-    raise AssertionError("missing DATABASE_URL must fail before adapter construction")
-
-
 def _unexpected_lock_acquire(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
     raise AssertionError("missing DATABASE_URL must fail before scheduler lock acquisition")
 
@@ -39478,14 +39464,6 @@ def test_db_free_default_cycle_discovery_uses_nfs_raw_manifest_not_network_adapt
     monkeypatch.setenv("NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST", "true")
     monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT", str(roots["object_store_root"]))
     monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
-
-    def _network_adapters_must_not_be_built() -> dict[str, FakeAdapter]:
-        raise AssertionError("DB-free scheduler must not build network source adapters")
-
-    monkeypatch.setattr(
-        "services.orchestrator.scheduler._default_adapters",
-        _network_adapters_must_not_be_built,
-    )
 
     scheduler = _RealProductionScheduler(
         ProductionSchedulerConfig(now=cycle_time, dry_run=True),
@@ -39565,7 +39543,6 @@ def test_db_free_database_url_blocks_before_lock_or_factories(monkeypatch: Any, 
     monkeypatch.setenv("DATABASE_URL", "postgresql://nhms:supersecret@db.prod.example:55433/nhms")
     monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
     monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
-    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
     monkeypatch.setattr(
         "services.orchestrator.scheduler._active_repository_from_env",
         lambda: pytest.fail("DB-free DATABASE_URL blocker must not construct active repository"),
@@ -39603,7 +39580,6 @@ def test_db_free_selector_misconfig_blocks_exact_field_before_lock(
         monkeypatch.setenv(selector_env, selector_value)
     monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
     monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
-    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
 
     result = ProductionScheduler.from_env(ProductionSchedulerConfig()).run_once()
 
@@ -41163,7 +41139,7 @@ def test_valid_db_free_from_env_uses_file_registry_and_canonical_readiness_witho
 ) -> None:
     roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
     cycle_time = _dt("2026-05-21T12:00:00Z")
-    fixture = _write_db_free_file_provider_fixtures(
+    _write_db_free_file_provider_fixtures(
         monkeypatch,
         roots,
         paths,
@@ -41176,17 +41152,6 @@ def test_valid_db_free_from_env_uses_file_registry_and_canonical_readiness_witho
     monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT", str(roots["object_store_root"]))
     monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
     monkeypatch.setenv("NHMS_PRODUCTION_FORCING_ENABLED", "true")
-    monkeypatch.setattr(
-        "services.orchestrator.scheduler._default_adapters",
-        lambda: {
-            "gfs": FakeAdapter(
-                "gfs",
-                [("2026-05-21T12:00:00Z", True)],
-                policy_identity=fixture["policy_identity"],
-                source_object_identity=fixture["source_object_identity"],
-            )
-        },
-    )
 
     def fail_db_factory(*_args: Any, **_kwargs: Any) -> None:
         pytest.fail("DB-free file providers must not construct DB-backed factory")
@@ -41197,20 +41162,12 @@ def test_valid_db_free_from_env_uses_file_registry_and_canonical_readiness_witho
         lambda: pytest.fail("DB-free from_env must not construct DB-backed active repository"),
     )
     monkeypatch.setattr(
-        "services.orchestrator.scheduler._canonical_readiness_provider_from_env",
-        lambda: pytest.fail("DB-free from_env must not construct DB-backed readiness provider"),
-    )
-    monkeypatch.setattr(
         "services.orchestrator.scheduler._orchestrator_repository_from_env",
         lambda: pytest.fail("DB-free file providers must not construct orchestrator repository"),
     )
     monkeypatch.setattr(
         "services.orchestrator.scheduler._retry_service_from_env",
         lambda: pytest.fail("DB-free file providers must not construct retry service"),
-    )
-    monkeypatch.setattr(
-        "services.orchestrator.scheduler._forcing_producer_from_env",
-        lambda: pytest.fail("DB-free from_env must not construct forcing producer"),
     )
     monkeypatch.setattr("packages.common.met_store.PsycopgMetStore.from_env", staticmethod(fail_db_factory))
     monkeypatch.setattr(
@@ -45905,7 +45862,7 @@ def test_db_free_scheduler_fake_slurm_submission_writes_file_journal_without_dat
 
     roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
     cycle_time = _dt("2026-05-21T12:00:00Z")
-    fixture = _write_db_free_file_provider_fixtures(
+    _write_db_free_file_provider_fixtures(
         monkeypatch,
         roots,
         paths,
@@ -45918,17 +45875,6 @@ def test_db_free_scheduler_fake_slurm_submission_writes_file_journal_without_dat
     monkeypatch.setenv("NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST", "true")
     monkeypatch.setenv("NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT", str(roots["object_store_root"]))
     monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
-    monkeypatch.setattr(
-        "services.orchestrator.scheduler._default_adapters",
-        lambda: {
-            "gfs": FakeAdapter(
-                "gfs",
-                [("2026-05-21T12:00:00Z", True)],
-                policy_identity=fixture["policy_identity"],
-                source_object_identity=fixture["source_object_identity"],
-            )
-        },
-    )
     fake_slurm = ImmediateTerminalSlurmClient()
 
     def fail_db_factory(*_args: Any, **_kwargs: Any) -> None:
@@ -46143,7 +46089,6 @@ def test_db_free_runtime_root_run_once_blocks_before_lock(
     monkeypatch.setenv(root_env, str(outside_root))
     monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
     monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
-    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
     # The DB-free counterparts too (#3252), so "blocks before the lock" is not vacuous.
     _db_free_factories_fail(monkeypatch, "DB-free root preflight must block before registry/adapter/journal factories")
 

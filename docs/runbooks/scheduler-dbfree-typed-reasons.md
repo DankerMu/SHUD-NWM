@@ -1,8 +1,9 @@
 # Scheduler DB-Free Typed Reasons Runbook
 
 适用范围：node-22 上的 production scheduler。自 #3255（R2b）起它只有
-DB-free 一种模式，与 `NHMS_SCHEDULER_DB_FREE_REQUIRED` 的取值无关；state /
-registry / journal / state-index 全部走 file backend。node-22 不连任何活 DB，所有判定证据只
+DB-free 一种模式，与 `NHMS_SCHEDULER_DB_FREE_REQUIRED` 的取值无关（该变量
+不再是模式开关，只是 run manifest 与 Slurm 作业 env 的 job-env 契约，模板里
+保留为 `true`）；state / registry / journal / state-index 全部走 file backend。node-22 不连任何活 DB，所有判定证据只
 存在于 pass evidence JSON 与 file state-index 里，因此 typed reason 是唯一
 可靠的分诊入口。
 
@@ -869,27 +870,28 @@ run 在同一 run 目录里跑两遍（#2666：IFS 0925 12Z 的 57553 / 57637，
 R2b 之后 scheduler 只有 DB-free 一种模式：`ProductionSchedulerConfig` 把
 `scheduler_db_free_required` 固定为 `true`，`NHMS_SCHEDULER_DB_FREE_REQUIRED`
 不再选模式（`unset` / `false` / `true` 结果相同），构造参数
-`scheduler_db_free_required=False` 照收但被忽略。`scheduler_core.py` /
-`scheduler_runtime.py` 里残留的非 DB-free 分支（R2c 删除）一旦被走到，就抛
-`SchedulerModeInvariantError`（直接继承 `Exception`，不是 `ValueError` /
-`RuntimeError` / `OSError`），带两个字段：
+`scheduler_db_free_required=False` 照收但被忽略。#3256（R2c-1）已删除 SQL
+factory 分支和 `scheduler_core.py` / `scheduler_runtime.py` 里其余的非 DB-free
+模式分支；还会抛 `SchedulerModeInvariantError`（直接继承 `Exception`，不是
+`ValueError` / `RuntimeError` / `OSError`）的只剩下表三处，带两个字段：
 
 - `code`：固定 `scheduler_non_db_free_arm_reached`；
-- `site`：`<module>:<function>`，例如 `scheduler_runtime:run_once`、
-  `scheduler_core:__init__`、`scheduler_core:_default_orchestrator_for`。
+- `site`：`<module>:<function>`，见下表。
+
+| `site` | 触发条件 | 何时抛 | 删除归属 |
+|---|---|---|---|
+| `scheduler_core:_build_scheduler_lease` | config 报告 `db_free_required=False` | 拿锁时（拿锁之前抛，不建 PostgreSQL lease） | R2c-3 删 PostgreSQL lease 时一并删除 |
+| `scheduler_runtime:_restart_reconcile_store` | config 报告 `db_free_required=False` | restart reconcile 建 store 时 | R2c-2 删 SQL reconcile store 时一并删除 |
+| `scheduler_core:_default_orchestrator_for` | scheduler 没有 journal repository（`active_repository is None`） | 候选执行时，此时 pass 已持锁 | 不是模式分支，group 4 不删 |
 
 它不是 evidence 里的 blocker，而是异常，直接抛到调用方（`nhms-pipeline`
-CLI 以 traceback 退出），不写最终 pass evidence：
-
-- `scheduler_core:__init__` / `scheduler_core:from_env` /
-  `scheduler_runtime:run_once` 在拿锁之前抛；
-- `scheduler_core:_default_orchestrator_for` 在候选执行时抛，此时 pass 已持锁：
-  异常经 `scheduler_execution` 的并发结果原样重抛，`run_once` 的 `finally`
-  停心跳并释放锁。
+CLI 以 traceback 退出），不写最终 pass evidence。`scheduler_core:_default_orchestrator_for`
+在候选执行时抛：异常经 `scheduler_execution` 的并发结果原样重抛，`run_once`
+的 `finally` 停心跳并释放锁。
 
 它也**不会**由运维 env 触发——env 设成 `false` 照样跑 DB-free。能触发它的只有代码缺陷：某个
 调用方传进来一个报告 `db_free_required=False` 的 config（duck-typed stub、
-被 patch 的属性），或一个 DB-free scheduler 在没有 journal repository 时去建
+被 patch 的属性），或一个 scheduler 在没有 journal repository 时去建
 orchestrator（`scheduler_core:_default_orchestrator_for`；以前这里会回落到
 `_orchestrator_repository_from_env()` 走 SQL，现在 fail closed）。
 
