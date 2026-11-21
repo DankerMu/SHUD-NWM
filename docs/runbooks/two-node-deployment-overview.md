@@ -420,8 +420,10 @@ jq -c 'select(.record_type == "pipeline_event"
 
 - `NHMS_SERVICE_ROLE=compute_control`。
 - `DATABASE_URL` 只供 `compute-api` / rollback 使用；`scheduler-once` runtime env 中必须缺席。
-- `NHMS_SCHEDULER_DB_FREE_REQUIRED=true`，scheduler state/lock/registry/readiness/journal/state-index selectors
-  都是 `file`，对应 manifest/index/journal paths 非空且位于允许根内。
+- scheduler state/lock/registry/readiness/journal/state-index selectors 都是 `file`，对应
+  manifest/index/journal paths 非空且位于允许根内。`NHMS_SCHEDULER_DB_FREE_REQUIRED=true` 保留在模板里，
+  作为 job-env 契约（run manifest 与 Slurm 作业 env 一律带 `true`），不再是模式开关：自 #3255 起
+  scheduler 只有 DB-free 一种模式。
 - `WORKSPACE_ROOT`、`OBJECT_STORE_ROOT`、`NHMS_PUBLISHED_ARTIFACT_ROOT` 可写。
 - `NHMS_SCHEDULER_LOCK_ROOT` 和 `NHMS_SCHEDULER_EVIDENCE_ROOT` 位于 `WORKSPACE_ROOT` 内且可写。
 - `NHMS_SCHEDULER_ALLOWED_ROOTS` 非空，并覆盖 `WORKSPACE_ROOT`、`OBJECT_STORE_ROOT`、

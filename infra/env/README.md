@@ -165,9 +165,13 @@ unit → EnvironmentFile table above is the authority.
   compute-visible staging root; `NHMS_OBJECT_STORE_COPYBACK_ROOT` is the
   shared object-store mirror used after publish.
 - The production `scheduler-once` service is DB-free: `infra/compose.compute.yml`
-  does not pass `DATABASE_URL` to it. It must set
-  `NHMS_SCHEDULER_DB_FREE_REQUIRED=true`, every scheduler backend selector to
-  `file`, and the registry/readiness/journal/state-index path variables. On the
+  does not pass `DATABASE_URL` to it. It must set every scheduler backend
+  selector to `file` and the registry/readiness/journal/state-index path
+  variables. DB-free is the scheduler's only mode (#3255), so
+  `NHMS_SCHEDULER_DB_FREE_REQUIRED` no longer switches it; the templates keep
+  `NHMS_SCHEDULER_DB_FREE_REQUIRED=true` as the job-env contract (every run
+  manifest records `scheduler_db_free_required: "true"` and the gateway exports
+  the DB-free worker switches into the Slurm job env). On the
   live node-22 units those variables come from `compute.scheduler-dbfree.env`
   (tracked template `compute.scheduler-dbfree.env.example`), per the table
   above; `compute.example` carries the same key names for the compose lane only.
@@ -316,8 +320,9 @@ it on the next test run; do not restate a mandate in prose alone.
 #   KEY=value   the key must be present AND carry exactly this value
 #   KEY         the key must be present; the value is site-specific
 #
-# DB-free contract gate and file-backed selectors: every scheduler backend
-# selector is pinned to `file` and the DB-free gate to `true`.
+# DB-free job-env contract and file-backed selectors: every scheduler backend
+# selector is pinned to `file`, and NHMS_SCHEDULER_DB_FREE_REQUIRED to `true`
+# as the job-env contract (it no longer selects the scheduler mode, #3255).
 NHMS_SCHEDULER_DB_FREE_REQUIRED=true
 NHMS_SCHEDULER_LOCK_BACKEND=file
 NHMS_SCHEDULER_STATE_BACKEND=file

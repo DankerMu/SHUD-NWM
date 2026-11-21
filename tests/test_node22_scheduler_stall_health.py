@@ -4105,13 +4105,12 @@ def test_j11_the_root_blocked_boundary_is_the_literal_the_scheduler_writes() -> 
 
 def _assert_writer_parity(writer: str) -> None:
     pin = rf'"execution_boundary":\s*"{re.escape(probe.ROOT_BLOCKED_EXECUTION_BOUNDARY)}"'
-    # Two writer sites: the pre-lock DB-free branch node-22 runs, and the
-    # post-lock non-DB-free branch.  Both must stay in step; a new or removed
-    # site must be reviewed against the probe, not silently absorbed.
-    assert len(re.findall(pin, writer)) == 2, "scheduler_runtime.py root-blocked writer sites changed"
-    # The pre-lock site is the one node-22 runs: bound it by its lock payload
-    # reason and the pre-lock artifact writer call, so the post-lock site alone
-    # cannot keep this green.
+    # One writer site: the pre-lock DB-free branch node-22 runs (#3256 deleted
+    # the post-lock non-DB-free branch).  A new or removed site must be
+    # reviewed against the probe, not silently absorbed.
+    assert len(re.findall(pin, writer)) == 1, "scheduler_runtime.py root-blocked writer sites changed"
+    # Bound the site by its lock payload reason and the pre-lock artifact
+    # writer call, so a boundary written elsewhere cannot keep this green.
     start = writer.index('"reason": "scheduler_root_preflight_blocked"')
     end = writer.index("self._write_prelock_blocked_evidence(", start)
     assert re.search(pin, writer[start:end]), (

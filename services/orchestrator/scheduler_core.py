@@ -116,42 +116,25 @@ class ProductionScheduler:
         reconcile_sacct_query: _scheduler.Callable[[str], _scheduler.Any] | None = None,
     ) -> None:
         self.config = config or _scheduler.ProductionSchedulerConfig()
-        db_free_required = bool(getattr(self.config, "db_free_required", False))
-        if not db_free_required:
-            # R2b: every ``not db_free_required`` arm below is dead (R2c deletes them).
-            raise SchedulerModeInvariantError(site="scheduler_core:__init__")
         self._reconcile_store = reconcile_store
         self._reconcile_store_build_error: str | None = None
         self._reconcile_comment_query = reconcile_comment_query
         self._reconcile_sacct_query = reconcile_sacct_query
-        if db_free_required:
-            self.registry = registry if registry is not None else _db_free_file_registry_from_config(self.config)
-            self.adapters = dict(adapters if adapters is not None else _scheduler._db_free_default_adapters(self.config))
-        else:
-            self.registry = registry if registry is not None else _scheduler.PsycopgModelRegistryStore.from_env()
-            self.adapters = dict(adapters if adapters is not None else _scheduler._default_adapters())
+        self.registry = registry if registry is not None else _db_free_file_registry_from_config(self.config)
+        self.adapters = dict(adapters if adapters is not None else _scheduler._db_free_default_adapters(self.config))
         if active_repository is _DB_FREE_REPOSITORY_BLOCKED:
             # Preflight-blocked db-free pass: no repository, and in particular
             # no journal-root verification of a value the preflight rejected.
             self.active_repository = None
         elif active_repository is not None:
             self.active_repository = active_repository
-        elif db_free_required:
-            self.active_repository = _db_free_orchestration_repository_from_config(self.config)
         else:
-            self.active_repository = None
+            self.active_repository = _db_free_orchestration_repository_from_config(self.config)
         if (
             canonical_readiness_provider is _scheduler._CANONICAL_READINESS_PROVIDER_UNSET
             or canonical_readiness_provider is None
         ):
-            if db_free_required:
-                self.canonical_readiness_provider = _db_free_canonical_readiness_provider_from_config(self.config)
-            else:
-                self.canonical_readiness_provider = _scheduler._UnavailableCanonicalReadinessProvider(
-                    reason="canonical_readiness_provider_absent",
-                    dependency="canonical_readiness_provider",
-                    retryable=True,
-                )
+            self.canonical_readiness_provider = _db_free_canonical_readiness_provider_from_config(self.config)
         else:
             self.canonical_readiness_provider = canonical_readiness_provider
         self.forcing_producer = forcing_producer
@@ -177,57 +160,42 @@ class ProductionScheduler:
         self._lineage_cutover_cache: dict[
             tuple[str, str], _scheduler_lineage.LineageCutover | None
         ] = {}
-        # Sentinel-free: ``None`` means "not yet resolved"; a failed build is
-        # remembered as ``False`` so a missing DATABASE_URL is not retried
-        # once per (model, cycle).
+        # Sentinel-free: ``None`` means "not yet resolved"; a ``None`` provider
+        # is remembered as ``False`` so it is not re-resolved once per
+        # (model, cycle).
         self._lineage_provider_cache: _scheduler.Any = None
 
     @classmethod
     def from_env(cls, config: _scheduler.ProductionSchedulerConfig | None = None) -> _scheduler.ProductionScheduler:
         config = config or _scheduler.ProductionSchedulerConfig()
-        if config.db_free_required:
-            if (
-                config.require_runtime_roots
-                and _scheduler._scheduler_runtime_root_preflight(config)["status"] == "blocked"
-            ):
-                return cls(
-                    config=config,
-                    registry=_scheduler._BlockedModelRegistry(),
-                    adapters={},
-                    active_repository=_DB_FREE_REPOSITORY_BLOCKED,
-                    canonical_readiness_provider=_scheduler._UnavailableCanonicalReadinessProvider(
-                        reason="db_free_runtime_root_preflight_blocked",
-                        dependency="canonical_readiness_provider",
-                        retryable=True,
-                    ),
-                )
-            if config.db_free_runtime_preflight()["status"] == "blocked":
-                return cls(
-                    config=config,
-                    registry=_scheduler._BlockedModelRegistry(),
-                    adapters={},
-                    active_repository=_DB_FREE_REPOSITORY_BLOCKED,
-                    canonical_readiness_provider=_scheduler._UnavailableCanonicalReadinessProvider(
-                        reason="db_free_runtime_preflight_blocked",
-                        dependency="canonical_readiness_provider",
-                        retryable=True,
-                    ),
-                )
-            return cls(config=config)
-        raise SchedulerModeInvariantError(site="scheduler_core:from_env")
         if (
             config.require_runtime_roots
-            and _scheduler._scheduler_lock_evidence_root_preflight(config)["status"] == "blocked"
+            and _scheduler._scheduler_runtime_root_preflight(config)["status"] == "blocked"
         ):
-            return cls(config=config, registry=_scheduler._BlockedModelRegistry(), adapters={}, active_repository=None)
-        if config.require_runtime_roots and _scheduler._scheduler_runtime_root_preflight(config)["status"] == "blocked":
-            return cls(config=config, registry=_scheduler._BlockedModelRegistry(), adapters={}, active_repository=None)
-        return cls(
-            config=config,
-            active_repository=_scheduler._active_repository_from_env(),
-            canonical_readiness_provider=_scheduler._canonical_readiness_provider_from_env(),
-            forcing_producer=_scheduler._forcing_producer_from_env() if config.forcing_production_enabled else None,
-        )
+            return cls(
+                config=config,
+                registry=_scheduler._BlockedModelRegistry(),
+                adapters={},
+                active_repository=_DB_FREE_REPOSITORY_BLOCKED,
+                canonical_readiness_provider=_scheduler._UnavailableCanonicalReadinessProvider(
+                    reason="db_free_runtime_root_preflight_blocked",
+                    dependency="canonical_readiness_provider",
+                    retryable=True,
+                ),
+            )
+        if config.db_free_runtime_preflight()["status"] == "blocked":
+            return cls(
+                config=config,
+                registry=_scheduler._BlockedModelRegistry(),
+                adapters={},
+                active_repository=_DB_FREE_REPOSITORY_BLOCKED,
+                canonical_readiness_provider=_scheduler._UnavailableCanonicalReadinessProvider(
+                    reason="db_free_runtime_preflight_blocked",
+                    dependency="canonical_readiness_provider",
+                    retryable=True,
+                ),
+            )
+        return cls(config=config)
 
     def run_once(self) -> _scheduler.SchedulerPassResult:
         from services.orchestrator import scheduler_runtime
@@ -458,27 +426,20 @@ class ProductionScheduler:
     def _orchestrator_for(self, source_id: str) -> _scheduler.ForecastOrchestrator:
         if self.orchestrator_factory is not None:
             return self.orchestrator_factory(source_id)
-        if self.config.db_free_required:
-            state_manager = _db_free_state_manager_from_config(self.config)
-            return self._default_orchestrator_for(source_id, state_manager=state_manager)
-        raise SchedulerModeInvariantError(site="scheduler_core:_orchestrator_for")
-        return self._default_orchestrator_for(source_id, state_manager=_scheduler.StateManager.from_env())
+        state_manager = _db_free_state_manager_from_config(self.config)
+        return self._default_orchestrator_for(source_id, state_manager=state_manager)
 
     def _cancel_orchestrator_for(self, source_id: str) -> _scheduler.ForecastOrchestrator:
         if self.orchestrator_factory is not None:
             return self.orchestrator_factory(source_id)
-        if self.config.db_free_required:
-            return self._default_orchestrator_for(source_id, state_manager=None)
-        raise SchedulerModeInvariantError(site="scheduler_core:_cancel_orchestrator_for")
         return self._default_orchestrator_for(source_id, state_manager=None)
 
     def _default_orchestrator_for(
         self, source_id: str, *, state_manager: _scheduler.Any | None
     ) -> _scheduler.ForecastOrchestrator:
-        if not self.config.db_free_required or self.active_repository is None:
-            # R2b: the ``_orchestrator_repository_from_env()`` / ``_retry_service_from_env()``
-            # components of the expressions below are dead (R2c deletes them). A DB-free
-            # scheduler without a journal repository refuses instead of falling back to SQL.
+        if self.active_repository is None:
+            # A scheduler without a journal repository refuses instead of falling back
+            # to a SQL repository (#3255); there is no SQL repository factory to reach.
             raise SchedulerModeInvariantError(site="scheduler_core:_default_orchestrator_for")
         config = _scheduler.OrchestratorConfig.from_env()
         if self.config.slurm_execution_enabled:
@@ -533,19 +494,12 @@ class ProductionScheduler:
             )
         return _scheduler.ForecastOrchestrator(
             config=config,
-            repository=(
-                self.active_repository
-                if self.config.db_free_required and self.active_repository is not None
-                else _scheduler._orchestrator_repository_from_env()
-            ),
+            repository=self.active_repository,
             state_manager=state_manager,
             retry_service=(
                 _db_free_file_retry_service_from_env(self.active_repository)
-                if self.config.db_free_required
-                and isinstance(self.active_repository, _scheduler.FileOrchestrationJournalRepository)
+                if isinstance(self.active_repository, _scheduler.FileOrchestrationJournalRepository)
                 else None
-                if self.config.db_free_required
-                else _scheduler._retry_service_from_env()
             ),
         )
 
@@ -726,36 +680,23 @@ class ProductionScheduler:
         self,
         candidate: _scheduler.SchedulerCandidate,
     ) -> bool:
-        if not self.config.db_free_required:
-            raise SchedulerModeInvariantError(site="scheduler_core:_db_free_strict_warm_start_required_for")
         return _scheduler.OrchestratorConfig.from_env().strict_forecast_warm_start_required_for(
             candidate.cycle_time_utc
         )
 
     def _lineage_provider(self) -> _scheduler.Any | None:
-        """The plane-appropriate source of clone provenance for #1735.
+        """The source of clone provenance for #1735.
 
-        db-free: the file state-snapshot index repository the pass has
-        already loaded.  DB plane: the state-snapshot repository's
-        earliest-clone-row read.  A DB plane without a usable connection
-        yields ``None`` — "no lineage resolvable", which leaves every model
-        scored exactly as before this change — and the failure is remembered
-        so it is not retried once per (model, cycle).
+        The file state-snapshot index repository the pass has already loaded.
+        A provider that is ``None`` means "no lineage resolvable", which leaves
+        every model scored exactly as before #1735, and is remembered so it is
+        not retried once per (model, cycle).
         """
         if self._lineage_provider_cache is False:
             return None
         if self._lineage_provider_cache is not None:
             return self._lineage_provider_cache
-        if self.config.db_free_required:
-            provider: _scheduler.Any | None = self._db_free_state_index_provider()
-        else:
-            raise SchedulerModeInvariantError(site="scheduler_core:_lineage_provider")
-            from packages.common.state_manager import PsycopgStateSnapshotRepository
-
-            try:
-                provider = PsycopgStateSnapshotRepository.from_env()
-            except Exception:  # noqa: BLE001 — no DB reachable means no lineage
-                provider = None
+        provider: _scheduler.Any | None = self._db_free_state_index_provider()
         if provider is None:
             self._lineage_provider_cache = False
             return None
@@ -774,9 +715,9 @@ class ProductionScheduler:
             )
         except _scheduler_lineage.LineageResolutionError as error:
             # #1740: a FAILED resolution is not an answer, so it is NOT
-            # memoized — on the DB plane this dict is never cleared, so caching
-            # it would pin the pair to "no lineage" for the life of the
-            # process.  THIS CALL's semantics are unchanged (no lineage); a
+            # memoized — caching it would pin the pair to "no lineage" until
+            # the next file-provider refresh clears this dict.  THIS CALL's
+            # semantics are unchanged (no lineage); a
             # later call — the next pass, or another consumer in this same
             # pass — re-attempts it.  See scheduler_lineage's module docstring.
             _scheduler_lineage.log_lineage_resolution_failure(error)
@@ -807,8 +748,6 @@ class ProductionScheduler:
     def _strict_warm_start_for_candidate(
         self, candidate: _scheduler.SchedulerCandidate, cycle: _scheduler.SchedulerSourceCycle
     ) -> dict[str, _scheduler.Any] | None:
-        if not self.config.db_free_required:
-            raise SchedulerModeInvariantError(site="scheduler_core:_strict_warm_start_for_candidate")
         # D8.9 compat toggle: if the operator ran with strict warm-start OFF
         # and the journal already recognises a completed pipeline for this
         # cycle, defer to the pre-§8 terminal-skip path so admitting or
@@ -848,8 +787,6 @@ class ProductionScheduler:
         cycle: _scheduler.SchedulerSourceCycle,
     ) -> dict[str, _scheduler.Any] | None:
         del cycle
-        if not self.config.db_free_required:
-            raise SchedulerModeInvariantError(site="scheduler_core:_successor_warm_start_state_for_candidate")
         orchestrator_config = _scheduler.OrchestratorConfig.from_env()
         candidate_time = _scheduler._ensure_utc(candidate.cycle_time_utc)
         successor_time = self._next_allowed_cycle_time(candidate_time)

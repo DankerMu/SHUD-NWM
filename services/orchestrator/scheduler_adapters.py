@@ -177,16 +177,6 @@ class _UnavailableCanonicalReadinessProvider:
         )
 
 
-def _default_adapters() -> Mapping[str, CycleDiscoveryAdapter]:
-    from workers.data_adapters.gfs_adapter import GFSAdapter, GFSAdapterConfig
-    from workers.data_adapters.ifs_adapter import IFSAdapter, IFSAdapterConfig
-
-    return {
-        "gfs": GFSAdapter(config=GFSAdapterConfig(), repository=None),
-        "IFS": IFSAdapter(config=IFSAdapterConfig(), repository=None),
-    }
-
-
 class NfsRawManifestAdapterConfig:
     """Network-free source-cycle config backed by node-27 raw manifests."""
 
@@ -403,31 +393,6 @@ class _MetStoreCanonicalReadinessProvider:
             model_id=model_id,
             basin_id=basin_id,
         ).evidence
-
-
-def _canonical_readiness_provider_from_env() -> CanonicalReadinessProvider:
-    try:
-        from packages.common.met_store import PsycopgMetStore
-
-        return _MetStoreCanonicalReadinessProvider(PsycopgMetStore.from_env())
-    except ImportError:
-        return _UnavailableCanonicalReadinessProvider(
-            reason="canonical_readiness_dependency_unavailable",
-            dependency="canonical_readiness_provider",
-            retryable=True,
-        )
-    except Exception:
-        return _UnavailableCanonicalReadinessProvider(
-            reason="canonical_readiness_provider_unavailable",
-            dependency="canonical_readiness_provider",
-            retryable=True,
-        )
-
-
-def _forcing_producer_from_env() -> ForcingProducerRunner:
-    from workers.forcing_producer import ForcingProducer
-
-    return ForcingProducer.from_env()
 
 
 def _active_repository_from_env() -> ActiveCandidateRepository:

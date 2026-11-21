@@ -895,8 +895,8 @@ DISPLAY_UNIT_CONNECT_CLOSURE: tuple[tuple[str, str, str], ...] = (
         "this module at line 14; since #2921 model_registry imports packages.common.contracts.direct_grid, so "
         "`import apps.api.main` no longer loads it. PsycopgMetStore.from_env() is called only from worker/CLI "
         "factories -- workers/canonical_converter/converter.py:55, workers/data_adapters/{era5,gfs,ifs}_adapter.py "
-        "from_env, workers/forcing_producer/producer.py:487 (ForcingProducer.from_env) and "
-        "services/orchestrator/scheduler_adapters.py:413 -- none of which any display-unit route reaches",
+        "from_env and workers/forcing_producer/producer.py:487 (ForcingProducer.from_env) -- none of which "
+        "any display-unit route reaches",
     ),
     (
         "services/orchestrator/chain_compat_runtime.py",

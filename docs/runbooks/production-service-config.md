@@ -11,7 +11,7 @@
 ```text
 api: DATABASE_URL, AUTH_BACKEND, AUDIT_LOG_DESTINATION, CORS_ALLOWED_ORIGINS
 orchestrator: OBJECT_STORE_PREFIX, SLURM_GATEWAY_URL, WORKSPACE_ROOT
-scheduler_db_free: NHMS_SCHEDULER_DB_FREE_REQUIRED, NHMS_SCHEDULER_*_BACKEND=file, registry/readiness/journal/state-index paths
+scheduler_db_free: NHMS_SCHEDULER_*_BACKEND=file, registry/readiness/journal/state-index paths, NHMS_SCHEDULER_DB_FREE_REQUIRED=true (job-env contract, not a mode switch)
 slurm_gateway: SLURM_PARTITION, SLURM_ACCOUNT, SLURM_SHARED_LOG_ROOT, SBATCH_TEMPLATE_ROOT
 tile_publisher: TILE_OBJECT_PREFIX, TILE_LAYER_REGISTRY, TILE_ERROR_TOPIC
 frontend: VITE_API_BASE_URL, VITE_AUTH_MODE, VITE_MAP_STYLE_URL
