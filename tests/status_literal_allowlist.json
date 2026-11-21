@@ -38,7 +38,6 @@
   {"file": "services/orchestrator/file_orchestration_journal.py", "members": ["reservation_lost", "submission_failed"], "reason": "distinct-vocabulary"},
   {"file": "services/orchestrator/file_orchestration_migration.py", "members": ["cancelled", "failed", "partially_failed", "permanently_failed", "submission_failed"], "reason": "distinct-vocabulary"},
   {"file": "services/orchestrator/forcing_submit_identity.py", "members": ["complete", "published"], "reason": "distinct-vocabulary"},
-  {"file": "services/orchestrator/persistence.py", "members": ["reservation_lost", "submission_failed"], "reason": "distinct-vocabulary"},
   {"file": "services/orchestrator/persistence.py", "members": ["running", "submitted"], "reason": "distinct-vocabulary"},
   {"file": "services/orchestrator/pipeline_job_provenance.py", "members": ["cancelled", "complete", "failed", "partially_failed", "pending", "permanently_failed", "published", "queued", "reserved", "running", "skipped", "submission_failed", "submitted", "succeeded"], "reason": "distinct-vocabulary"},
   {"file": "services/orchestrator/reconcile_inflight.py", "members": ["cancelled", "failed", "partially_failed", "succeeded"], "reason": "distinct-vocabulary"},
