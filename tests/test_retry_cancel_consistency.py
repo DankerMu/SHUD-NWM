@@ -17,7 +17,6 @@ from sqlalchemy.pool import StaticPool
 from apps.api.main import app, create_app
 from apps.api.routes import pipeline as pipeline_routes
 from services.orchestrator.persistence import Base, PipelineEvent, PipelineJob, PipelineStore
-from services.orchestrator.retry import RetryConfig, RetryService
 from services.slurm_gateway.gateway import SlurmGatewayError
 from tests.pipeline_job_orm_helpers import seed_pipeline_job
 
@@ -887,8 +886,7 @@ def test_retry_auth_rbac_denied_paths_make_no_gateway_or_state_writes(
             error_code="NODE_FAILURE",
         )
         gateway = _MockGateway()
-        service = RetryService(store, RetryConfig(max_retries=3))
-        with _client(store, gateway=gateway, retry_service=service) as client:
+        with _client(store, gateway=gateway) as client:
             response = client.post(
                 "/api/v1/runs/run_retry_authz/retry",
                 headers={**(role_header or {}), "X-Request-ID": request_id},
@@ -1073,19 +1071,15 @@ class _client:
         store: PipelineStore,
         *,
         gateway: _MockGateway | None = None,
-        retry_service: RetryService | None = None,
     ) -> None:
         self.store = store
         self.gateway = gateway or _MockGateway()
-        self.retry_service = retry_service
         self.client: TestClient | None = None
         self.previous_allow_dev_role_header: str | None = None
 
     def __enter__(self) -> TestClient:
         app.dependency_overrides[pipeline_routes.get_pipeline_store] = lambda: self.store
         app.dependency_overrides[pipeline_routes.get_slurm_gateway] = lambda: self.gateway
-        if self.retry_service is not None:
-            app.dependency_overrides[pipeline_routes.get_retry_service] = lambda: self.retry_service
         self.previous_allow_dev_role_header = os.environ.get("ALLOW_DEV_ROLE_HEADER")
         os.environ["ALLOW_DEV_ROLE_HEADER"] = "true"
         self.client = TestClient(app)
@@ -1098,7 +1092,6 @@ class _client:
             os.environ["ALLOW_DEV_ROLE_HEADER"] = self.previous_allow_dev_role_header
         app.dependency_overrides.pop(pipeline_routes.get_pipeline_store, None)
         app.dependency_overrides.pop(pipeline_routes.get_slurm_gateway, None)
-        app.dependency_overrides.pop(pipeline_routes.get_retry_service, None)
         if self.client is not None:
             self.client.close()
 

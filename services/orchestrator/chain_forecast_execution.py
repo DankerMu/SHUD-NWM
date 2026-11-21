@@ -101,7 +101,6 @@ ForecastRunContext = _chain.ForecastRunContext
 Mapping = _chain.Mapping
 PipelineJob = _chain.PipelineJob
 PipelineResult = _chain.PipelineResult
-RetryService = _chain.RetryService
 Sequence = _chain.Sequence
 StageDefinition = _chain.StageDefinition
 StageRunResult = _chain.StageRunResult
@@ -823,8 +822,6 @@ def _retry_job_for_stage_result(
         job = get_job(result.pipeline_job_id)
         if job is not None:
             return job
-        if isinstance(service, RetryService):
-            return None
 
     get_pipeline_job = getattr(self.repository, "get_pipeline_job", None)
     if callable(get_pipeline_job):

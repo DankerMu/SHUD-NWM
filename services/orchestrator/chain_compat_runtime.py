@@ -162,32 +162,7 @@ def install_chain_runtime_compat() -> dict[str, object]:
     def _utcnow() -> _chain.datetime:
         return _chain.datetime.now(_chain.UTC)
 
-    def _retry_service_from_env() -> _chain.RetryService | None:
-        database_url = _chain.os.getenv("DATABASE_URL", "").strip()
-        if not database_url:
-            return None
-        from sqlalchemy import create_engine
-        from sqlalchemy.orm import Session
-
-        from packages.common.sqlalchemy_url import sqlalchemy_url
-
-        engine = create_engine(sqlalchemy_url(database_url), future=True)
-        session = Session(engine)
-        store = _chain.PipelineStore(session)
-        return _chain.RetryService(store, _chain.RetryConfig.from_settings(_chain.SlurmGatewaySettings()))
-
     _chain.__dict__["_utcnow"] = _utcnow
-    _chain.__dict__["_retry_service_from_env"] = _retry_service_from_env
-    _CHAIN_RETRY_COMPAT_LOCAL_FACTORY_MISSING = tuple(
-        (name for name in _CHAIN_RETRY_COMPAT_LOCAL_FACTORY_NAMES if not callable(_chain.__dict__.get(name)))
-    )
-    if _CHAIN_RETRY_COMPAT_LOCAL_FACTORY_MISSING:
-        raise RuntimeError(
-            f"chain retry local factories missing from facade: {', '.join(_CHAIN_RETRY_COMPAT_LOCAL_FACTORY_MISSING)}"
-        )
-    _CHAIN_RETRY_COMPAT_CHAIN_LOCAL_FACTORIES = _chain.MappingProxyType(
-        {name: _chain.__dict__[name] for name in _CHAIN_RETRY_COMPAT_LOCAL_FACTORY_NAMES}
-    )
     _CHAIN_WORKSPACE_LOG_COMPAT_METHOD_FACADE_MISSING = tuple(
         (
             name
@@ -472,11 +447,9 @@ def install_chain_runtime_compat() -> dict[str, object]:
         "_CHAIN_RESERVATION_COMPAT_METHOD_FACADE_MISSING",
         "_CHAIN_RESERVATION_COMPAT_OWNER_METHOD_FORWARDERS",
         "_CHAIN_RESERVATION_COMPAT_STAGE_EXECUTION_DEPENDENCY_BINDING_DRIFT",
-        "_CHAIN_RETRY_COMPAT_CHAIN_LOCAL_FACTORIES",
         "_CHAIN_RETRY_COMPAT_CHAIN_LOCAL_METHODS",
         "_CHAIN_RETRY_COMPAT_CONSTRUCTOR_CONFIG_DRIFT",
         "_CHAIN_RETRY_COMPAT_CONSTRUCTOR_PARAM_MISSING",
-        "_CHAIN_RETRY_COMPAT_LOCAL_FACTORY_MISSING",
         "_CHAIN_RETRY_COMPAT_LOCAL_METHOD_MISSING",
         "_CHAIN_STAGE_EXECUTION_COMPAT_FACADE_MISSING",
         "_CHAIN_TILE_PUBLISHER_COMPAT_STAGE_EXECUTION_DEPENDENCY_BINDING_DRIFT",
@@ -505,7 +478,6 @@ def install_chain_runtime_compat() -> dict[str, object]:
         "_CHAIN_WORKSPACE_LOG_COMPAT_METHOD_FORWARDERS",
         "_CHAIN_WORKSPACE_LOG_COMPAT_TOP_LEVEL_FACADE_MISSING",
         "_CHAIN_WORKSPACE_LOG_COMPAT_TOP_LEVEL_FORWARDERS",
-        "_retry_service_from_env",
         "_utcnow",
     )
     return {name: value for name, value in locals().items() if name in export_names}

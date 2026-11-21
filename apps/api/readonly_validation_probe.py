@@ -51,7 +51,6 @@ def run_manual_action_probes(run_id: str, *, database_url: str | None = None) ->
     with _temporary_env(validation_env):
         app = api_main.create_app(_display_app_env())
         app.dependency_overrides[pipeline_routes.get_pipeline_store] = forbidden_dependency
-        app.dependency_overrides[pipeline_routes.get_retry_service] = forbidden_dependency
         app.dependency_overrides[pipeline_routes.get_slurm_gateway] = forbidden_dependency
         with TestClient(app) as client:
             for action in ("retry", "cancel"):

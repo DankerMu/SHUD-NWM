@@ -103,8 +103,8 @@ is the only orchestration repository.
 #### Scenario: DB-free mode uses file-backed retry state
 
 - **WHEN** DB-free mode constructs a production orchestrator
-- **THEN** it uses a file-journal retry service instead of DB-backed
-  `_retry_service_from_env()` or SQLAlchemy `PipelineStore`
+- **THEN** it uses the file-journal retry service, never a DB-backed retry
+  service or SQLAlchemy `PipelineStore`
 - **AND** retry attempts, retry-limit exhaustion, manual repair markers, and
   permanent-failure state are represented in append-only file journal records.
 - **AND** manual repair markers that unblock scheduler retry decisions require

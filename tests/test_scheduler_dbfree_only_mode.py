@@ -85,8 +85,6 @@ def _forbid_db_factories(monkeypatch: pytest.MonkeyPatch) -> None:
 
         return _raise
 
-    for name in ("_retry_service_from_env",):
-        monkeypatch.setattr(scheduler_module, name, _fail(name))
     monkeypatch.setattr(
         scheduler_module.PsycopgModelRegistryStore, "from_env", staticmethod(_fail("PsycopgModelRegistryStore"))
     )

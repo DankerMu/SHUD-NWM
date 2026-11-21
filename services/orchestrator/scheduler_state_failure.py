@@ -311,10 +311,10 @@ def _state_error_code(state: Mapping[str, Any]) -> str | None:
 
 #: The three keys that carry a failure's OWN recorded code.  ``last_error`` /
 #: ``previous_error`` are deliberately absent: every real writer of those two is
-#: a retry-history event detail (``RetryService.schedule_auto_retry`` /
-#: ``mark_permanently_failed`` in retry.py -- the retired (#3157) manual-retry
-#: submit lane wrote them too, and its historical events still carry them -- and
-#: ``FileJournalRetryService.schedule_auto_retry`` / ``mark_permanently_failed``
+#: a retry-history event detail (the SQL retry service's ``schedule_auto_retry`` /
+#: ``mark_permanently_failed``, deleted by #3261, and the retired (#3157)
+#: manual-retry submit lane wrote them; their historical events still carry them --
+#: and ``FileJournalRetryService.schedule_auto_retry`` / ``mark_permanently_failed``
 #: / ``_mark_master_permanently_failed`` / ``record_manual_repair`` in
 #: file_orchestration_journal.py, whose retired (#3157) pending-row creator wrote
 #: them too), and

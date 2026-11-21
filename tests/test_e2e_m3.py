@@ -18,8 +18,12 @@ from packages.common.contracts.time_normalization import cycle_id_for, format_cy
 from packages.common.object_store import LocalObjectStore
 from services.orchestrator import chain as chain_module
 from services.orchestrator.chain import M3_STAGES, ForecastOrchestrator, OrchestratorConfig
-from services.orchestrator.persistence import Base, PipelineEvent, PipelineJob, PipelineStore
-from services.orchestrator.retry import RetryConfig, RetryService
+from services.orchestrator.file_orchestration_journal import (
+    FileJournalRetryService,
+    FileOrchestrationJournalRepository,
+)
+from services.orchestrator.persistence import Base, PipelineJob, PipelineStore
+from services.orchestrator.retry import RetryConfig
 from tests.test_orchestration_chain import FakeCycleSlurmClient
 
 
@@ -101,41 +105,54 @@ def test_e2e_m3_partial_success_continues_to_publish(tmp_path: Path, monkeypatch
 
 
 def test_e2e_m3_retry_chain(tmp_path: Path, monkeypatch: Any) -> None:
+    """A transient convert failure gets one automatic retry and the chain completes.
+
+    Driven on the file lane (#3261 deleted the SQL retry service): the production
+    ``FileJournalRetryService`` over ``FileOrchestrationJournalRepository``. The chain
+    ends at ``forcing``: these legacy basins carry no forecast-cohort identity, which
+    the journal requires for the forecast reservation, and the retry under test is
+    the cycle-scope ``convert`` stage.
+    """
+
     monkeypatch.setattr(chain_module.time, "sleep", lambda _seconds: None)
-    with _store() as store:
-        repository = _SqliteCycleRepository(store)
-        slurm = FakeCycleSlurmClient(
-            failures_before_success_by_stage={"convert": 1},
-            error_code_by_stage={"convert": "SLURM_TIMEOUT"},
-        )
-        retry_service = RetryService(store, RetryConfig(max_retries=1, backoff_schedule=[0]))
-        cycle_time = _dt("2026-05-01T12:00:00Z")
-        orchestrator = _orchestrator(tmp_path, repository, slurm, retry_service=retry_service)
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    slurm = FakeCycleSlurmClient(
+        failures_before_success_by_stage={"convert": 1},
+        error_code_by_stage={"convert": "SLURM_TIMEOUT"},
+    )
+    retry_service = FileJournalRetryService(repository, RetryConfig(max_retries=1, backoff_schedule=[0]))
+    cycle_time = _dt("2026-05-01T12:00:00Z")
+    orchestrator = _orchestrator(tmp_path, repository, slurm, retry_service=retry_service, terminal_stage="forcing")
 
-        result = orchestrator.orchestrate_cycle("GFS", cycle_time, _basins(2))
+    result = orchestrator.orchestrate_cycle("GFS", cycle_time, _basins(2))
 
-        assert result.status == "complete"
-        retry_jobs = [job for job in store.query_jobs_by_run(result.run_id) if job.retry_count == 1]
-        assert len(retry_jobs) == 1
-        assert retry_jobs[0].stage == "convert"
-        assert retry_jobs[0].status == "succeeded"
+    assert result.status == "succeeded"
+    assert [stage.status for stage in result.stages] == ["succeeded", "succeeded"]
+    assert [submission["stage"] for submission in slurm.submissions] == ["convert", "convert", "forcing"]
+    jobs = repository.query_pipeline_jobs_by_cycle(cycle_id_for("GFS", cycle_time))
+    retry_jobs = [job for job in jobs if job.get("retry_count") == 1]
+    assert len(retry_jobs) == 1
+    assert retry_jobs[0]["stage"] == "convert"
+    assert retry_jobs[0]["status"] == "succeeded"
 
-        retry_events = list(
-            store.session.scalars(
-                select(PipelineEvent).where(PipelineEvent.event_type == "retry").order_by(PipelineEvent.event_id.asc())
-            )
-        )
-        assert any(
-            event.details.get("trigger") == "auto" and event.details.get("retry_count") == 1 for event in retry_events
-        )
+    retry_events = [
+        event
+        for event in repository._cycle_rows(source_id="gfs", cycle_time=cycle_time, model_id=None).pipeline_events
+        if event["event_type"] == "retry"
+    ]
+    assert any(
+        event["details"].get("trigger") == "auto" and event["details"].get("retry_count") == 1
+        for event in retry_events
+    )
 
 
 def _orchestrator(
     tmp_path: Path,
-    repository: "_SqliteCycleRepository",
+    repository: Any,
     slurm: FakeCycleSlurmClient,
     *,
-    retry_service: RetryService | None = None,
+    retry_service: FileJournalRetryService | None = None,
+    terminal_stage: str | None = None,
 ) -> ForecastOrchestrator:
     object_root = tmp_path / "object-store"
     config = OrchestratorConfig(
@@ -144,6 +161,7 @@ def _orchestrator(
         object_store_prefix="s3://nhms",
         poll_interval_seconds=0,
         job_timeout_seconds=5,
+        terminal_stage=terminal_stage,
     )
     return ForecastOrchestrator(
         config=config,

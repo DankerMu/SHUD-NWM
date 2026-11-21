@@ -27,9 +27,9 @@ from sqlalchemy.pool import StaticPool
 
 from apps.api.main import create_app
 from apps.api.routes import pipeline as pipeline_routes
+from services.orchestrator import retry as retry_module
 from services.orchestrator.file_orchestration_journal import FileJournalRetryService
 from services.orchestrator.persistence import Base, PipelineEvent, PipelineJob, PipelineStore
-from services.orchestrator.retry import RetryConfig, RetryService
 from tests.pipeline_job_orm_helpers import seed_pipeline_job
 
 _RETRY_PATH = "/api/v1/runs/{run_id}/retry"
@@ -195,7 +195,6 @@ def test_authorized_control_retry_answers_manual_action_and_writes_nothing(
             overrides={
                 pipeline_routes.get_pipeline_store: lambda: seeded_store,
                 pipeline_routes.get_slurm_gateway: lambda: gateway,
-                pipeline_routes.get_retry_service: lambda: RetryService(seeded_store, RetryConfig()),
             },
         ) as client:
             response = client.post(_RETRY_PATH.format(run_id=_RUN_ID), headers={"X-User-Role": user_role})
@@ -256,7 +255,6 @@ def test_display_readonly_retry_keeps_its_display_409_first(monkeypatch: pytest.
         monkeypatch,
         overrides={
             pipeline_routes.get_pipeline_store: forbidden,
-            pipeline_routes.get_retry_service: forbidden,
             pipeline_routes.get_slurm_gateway: forbidden,
         },
     ) as client:
@@ -292,7 +290,8 @@ def test_retry_route_dependency_graph_constructs_no_store_service_or_gateway() -
     assert pipeline_routes.require_retry_action in calls
     assert pipeline_routes._validated_run_id in calls
     assert pipeline_routes.get_pipeline_store not in calls
-    assert pipeline_routes.get_retry_service not in calls
+    # R4 (#3261): the SQL retry-service provider no longer exists at all.
+    assert not hasattr(pipeline_routes, "get_retry_service")
     assert pipeline_routes.get_slurm_gateway not in calls
 
 
@@ -311,7 +310,8 @@ def test_retry_route_body_fails_closed_even_if_the_retired_dependency_is_overrid
 
 
 def test_manual_retry_submit_methods_are_retired_on_both_lanes() -> None:
-    assert not hasattr(RetryService, "attempt_manual_retry")
+    # R4 (#3261): the SQL lane's retry service class is gone entirely.
+    assert not hasattr(retry_module, "RetryService")
     assert not hasattr(FileJournalRetryService, "attempt_manual_retry")
     # The surviving marker lane is untouched.
     assert callable(FileJournalRetryService.record_manual_repair)

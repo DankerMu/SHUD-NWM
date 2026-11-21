@@ -47,8 +47,6 @@ from services.artifacts import (
 )
 from services.orchestrator.persistence import PipelineJob, PipelineStore
 from services.orchestrator.public_evidence import _public_evidence, _public_message
-from services.orchestrator.retry import RetryConfig, RetryService
-from services.slurm_gateway.config import SlurmGatewaySettings, get_settings
 from services.slurm_gateway.gateway import SlurmGateway, SlurmGatewayError
 
 router = APIRouter(prefix="/api/v1", tags=["pipeline"])
@@ -123,13 +121,6 @@ def get_pipeline_store() -> Generator[PipelineStore, None, None]:
         )
     with Session(_engine(database_url)) as session:
         yield PipelineStore(session)
-
-
-def get_retry_service(
-    store: PipelineStore = Depends(get_pipeline_store),
-    settings: SlurmGatewaySettings = Depends(get_settings),
-) -> RetryService:
-    return RetryService(store, RetryConfig.from_settings(settings))
 
 
 def get_slurm_gateway() -> SlurmGateway:

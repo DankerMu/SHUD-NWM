@@ -815,9 +815,6 @@ def test_display_retry_manual_action_409_preserved(monkeypatch: pytest.MonkeyPat
     display_app.dependency_overrides[pipeline_routes.get_pipeline_store] = _dependency_forbidden(
         "pipeline store must not be constructed"
     )
-    display_app.dependency_overrides[pipeline_routes.get_retry_service] = _dependency_forbidden(
-        "retry service must not be constructed"
-    )
     display_app.dependency_overrides[pipeline_routes.get_slurm_gateway] = _dependency_forbidden(
         "slurm gateway must not be constructed"
     )

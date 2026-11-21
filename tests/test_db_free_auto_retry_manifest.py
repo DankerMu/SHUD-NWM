@@ -2,8 +2,9 @@
 
 The scenario "automatic forecast retry runs without database url" (requirement "DB-free
 scheduler retry manifests preserve runtime mode") used to be pinned only by two
-``tests/test_retry.py`` cases that drove the retired ``RetryService`` submit helper. That method
-had no production caller and was deleted with the dead manual-retry closure. This file
+``tests/test_retry.py`` cases that drove the SQL retry service's retired submit helper (the
+service itself was deleted later, by #3261). That method had no production caller and was
+deleted with the dead manual-retry closure. This file
 pins the scenario on the path the DB-free scheduler actually takes:
 
 * ``scheduler_core.py`` ``_db_free_file_retry_service_from_env`` and the
