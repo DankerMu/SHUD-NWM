@@ -1672,8 +1672,8 @@ def test_foreign_model_cycle_run_row_stays_visible_to_the_duplicate_submission_g
 ) -> None:
     """Negative regression: the cycle-level gates keep their wider cycle-run visibility.
 
-    Their DB counterparts match the cycle run id unconditionally
-    (``chain_repository.py:74-79`` / ``:177-181``), so narrowing the shared row
+    Their former DB counterparts (the SQL repository deleted by R3, #3260) matched
+    the cycle run id unconditionally, so narrowing the shared row
     predicate would loosen ``active_duplicate_pipeline`` instead of aligning it.
     Same row shape the read-side pair excludes from the candidate state — the answer
     here must NOT move with it.
@@ -1703,7 +1703,7 @@ def test_foreign_model_cycle_run_row_no_longer_completes_the_candidate(tmp_path:
     A queued row is a vacuous input for ``has_completed_pipeline``; only a
     succeeded completion-stage row discriminates.  #1288 froze this answer at
     ``True`` because the DB side of this gate reads ``hydro.hydro_run`` alone
-    (``chain_repository.py:98-111``) and offered no job-row predicate to copy;
+    (in the SQL repository deleted by R3, #3260) and offered no job-row predicate to copy;
     #1302 unfroze it: the gate answers a candidate-scoped question, and that
     DB three-key (source/cycle/model) restriction is exactly the direction the
     journal side now aligns with — another model's completion is never this
@@ -1939,9 +1939,9 @@ def test_foreign_model_completion_row_leaves_the_duplicate_submission_gates_unch
     """Negative regression: the shared row predicate was NOT narrowed.
 
     On the very fixture whose completion verdict flips, the cycle-level
-    duplicate-submission gates keep seeing the foreign rows — their DB
-    counterparts match the cycle run id unconditionally
-    (``chain_repository.py:74-79`` / ``:177-181``).
+    duplicate-submission gates keep seeing the foreign rows — their former DB
+    counterparts (the SQL repository deleted by R3, #3260) matched the cycle run
+    id unconditionally.
     """
 
     cycle_time = _dt("2026-06-28T00:00:00Z")
@@ -1978,8 +1978,8 @@ def test_foreign_model_completion_row_no_longer_suppresses_the_hydro_active_arm(
     the UNnarrowed shared row predicate.  #1472 unfreezes it: the foreign row
     stays visible to the wide duplicate-submission scans but is not this
     candidate's completion evidence, so the ACTIVE hydro run answers ``True``
-    — matching the DB counterpart (``chain_repository.py:57-95``), a plain
-    UNION with no suppression clause.  ``has_completed_pipeline`` on the same
+    — matching the former DB counterpart (the SQL repository deleted by R3,
+    #3260), a plain UNION with no suppression clause.  ``has_completed_pipeline`` on the same
     fixture stays ``False``: this is the active gate's verdict, not the
     completion gate's.
     """
@@ -2055,7 +2055,8 @@ def test_pending_hydro_run_with_no_job_rows_is_active_on_the_journal_lane(tmp_pa
     ``"pending"`` is what manual retry writes to ``hydro_run`` once the retry
     job is submitted, so a candidate sitting at it is in flight.  Until this
     change the journal imported the ``"pending"``-less ``ACTIVE_HYDRO_STATUSES``
-    copy from ``chain_repository`` and answered ``False`` on this row, while
+    copy from the SQL repository module (deleted by R3, #3260) and answered
+    ``False`` on this row, while
     ``scheduler_state_decision`` -- reading the ``scheduler_state_types`` set --
     already answered "active" on the very same shape.
 
@@ -6006,12 +6007,6 @@ def test_db_free_scheduler_from_env_uses_file_journal_without_database_url(
     )
     monkeypatch.delenv("DATABASE_URL", raising=False)
 
-    def fail_db_factory(*_args: Any, **_kwargs: Any) -> Any:
-        raise AssertionError("DB-backed repository factory must not be called in DB-free read-side construction")
-
-    monkeypatch.setattr(scheduler_module, "_active_repository_from_env", fail_db_factory)
-    monkeypatch.setattr(scheduler_module, "_orchestrator_repository_from_env", fail_db_factory)
-
     scheduler = ProductionScheduler.from_env(
         ProductionSchedulerConfig(
             now=cycle_time,
@@ -6056,12 +6051,6 @@ def test_db_free_scheduler_from_env_run_once_uses_file_journal_active_slurm_evid
     )
     monkeypatch.delenv("DATABASE_URL", raising=False)
 
-    def fail_db_factory(*_args: Any, **_kwargs: Any) -> Any:
-        raise AssertionError("DB-backed repository factory must not be called in DB-free read-side construction")
-
-    monkeypatch.setattr(scheduler_module, "_active_repository_from_env", fail_db_factory)
-    monkeypatch.setattr(scheduler_module, "_orchestrator_repository_from_env", fail_db_factory)
-
     result = ProductionScheduler.from_env(
         ProductionSchedulerConfig(
             now=cycle_time,
@@ -6099,10 +6088,6 @@ def test_db_free_scheduler_status_sync_blocks_without_default_db_orchestrator(
     )
     monkeypatch.delenv("DATABASE_URL", raising=False)
 
-    def fail_db_orchestrator_factory(*_args: Any, **_kwargs: Any) -> Any:
-        raise AssertionError("DB-free status sync must not construct the default DB-backed orchestrator")
-
-    monkeypatch.setattr(scheduler_module, "_orchestrator_repository_from_env", fail_db_orchestrator_factory)
     monkeypatch.setattr(
         "services.orchestrator.chain.HttpSlurmGatewayClient",
         lambda _url, **_kwargs: _FailingSlurmGatewayClient(status_error_code="SLURM_STATUS_SYNC_FAILED"),
@@ -6154,10 +6139,6 @@ def test_db_free_scheduler_cancel_blocks_without_default_db_orchestrator(
     )
     monkeypatch.delenv("DATABASE_URL", raising=False)
 
-    def fail_db_orchestrator_factory(*_args: Any, **_kwargs: Any) -> Any:
-        raise AssertionError("DB-free cancellation must not construct the default DB-backed orchestrator")
-
-    monkeypatch.setattr(scheduler_module, "_orchestrator_repository_from_env", fail_db_orchestrator_factory)
     monkeypatch.setattr(
         "services.orchestrator.chain.HttpSlurmGatewayClient",
         lambda _url, **_kwargs: _FailingSlurmGatewayClient(cancel_error_code="SLURM_CANCEL_FAILED"),

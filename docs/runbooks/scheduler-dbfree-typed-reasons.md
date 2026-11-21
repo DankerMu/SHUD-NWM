@@ -892,7 +892,7 @@ CLI 以 traceback 退出），不写最终 pass evidence。`scheduler_core:_defa
 它也**不会**由运维 env 触发——env 设成 `false` 照样跑 DB-free。能触发它的只有代码缺陷：
 一个 scheduler 在没有 journal repository 时去建 orchestrator
 （`scheduler_core:_default_orchestrator_for`；以前这里会回落到
-`_orchestrator_repository_from_env()` 走 SQL，现在 fail closed）。拿锁不再有
+SQL orchestrator repository 工厂（已随 R3 #3260 删除），现在 fail closed）。拿锁不再有
 typed refusal：`_build_scheduler_lease` 无条件返回 file lease，`NHMS_SCHEDULER_LOCK_BACKEND`
 设成 `postgres` 时由 selector preflight 在拿锁之前以 `db_free_selector_db_backed` 挡下。
 

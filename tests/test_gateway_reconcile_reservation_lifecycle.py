@@ -260,45 +260,6 @@ def test_confirmed_absent_marks_reservation_lost() -> None:
     assert state["slurm_job_id"] is None
 
 
-def test_reserve_pipeline_job_sql_absorbs_all_unique_conflicts() -> None:
-    """The production reserve SQL must absorb ANY unique conflict (idempotency_key
-    unique index OR job_id primary key) via an untargeted ``ON CONFLICT DO
-    NOTHING``. A narrow ``ON CONFLICT (idempotency_key)`` would let a pre-existing
-    job_id row with a NULL idempotency_key slip past the partial index and raise
-    on the job_id PK, aborting the whole pass.
-
-    This guards the Postgres-only semantics deterministically at the SQL-text
-    level (real concurrency is covered by the node-22 integration run).
-
-    Counterfactual: revert FIX2 to the narrow target → this assertion goes red.
-    """
-
-    import ast
-    import inspect
-    import textwrap
-
-    from services.orchestrator.chain import PsycopgOrchestratorRepository
-
-    source = inspect.getsource(PsycopgOrchestratorRepository.reserve_pipeline_job)
-    # Assert against the executable SQL only, not the docstring (which legitimately
-    # names the narrow form to explain why it was rejected). Collect every string
-    # literal in the function body except the leading docstring.
-    func = ast.parse(textwrap.dedent(source)).body[0]
-    # The first body statement is the docstring expression; drop it so we assert
-    # only against executable string literals (the SQL).
-    body = func.body
-    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
-        body = body[1:]
-    sql_text = "\n".join(
-        node.value
-        for stmt in body
-        for node in ast.walk(stmt)
-        if isinstance(node, ast.Constant) and isinstance(node.value, str)
-    )
-    assert "ON CONFLICT DO NOTHING" in sql_text
-    assert "ON CONFLICT (idempotency_key)" not in sql_text
-
-
 def test_reserve_candidate_does_not_raise_on_job_id_pk_conflict(tmp_path: Any) -> None:
     """Behavior-level guard for FIX2: a pre-existing row with the SAME job_id but
     a NULL idempotency_key must make reserve_candidate report a clean loss

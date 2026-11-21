@@ -10,7 +10,8 @@ journal's test construction face on a lane that never validates
 
 #1581 left ``ACTIVE_HYDRO_STATUSES`` as three copies and this suite locked that
 divergence as UNADJUDICATED. It is adjudicated now: ``"pending"`` is active, the
-copies are gone, and the lock asserts identity across all six sites instead.
+copies are gone, and the lock asserts identity across all five sites instead
+(six until R3, #3260, deleted the SQL orchestration repository module).
 """
 
 from __future__ import annotations
@@ -24,7 +25,6 @@ import pytest
 
 from services.orchestrator import chain as chain_module
 from services.orchestrator import chain_forecast_trigger as chain_forecast_trigger_module
-from services.orchestrator import chain_repository as chain_repository_module
 from services.orchestrator import file_orchestration_journal as journal_module
 from services.orchestrator import scheduler_state_decision as scheduler_state_decision_module
 from services.orchestrator import scheduler_state_failure as scheduler_state_failure_module
@@ -138,15 +138,14 @@ def _hydro_run_status_enum_members() -> frozenset[str]:
 
 
 def test_durable_success_aliases_are_the_same_object() -> None:
-    """`chain` / `chain_repository` / journal / scheduler decision / trigger seam bind the one shared set."""
+    """`chain` / journal / scheduler decision / trigger seam bind the one shared set."""
 
     durable = scheduler_state_types_module.DURABLE_HYDRO_SUCCESS_STATUSES
     assert chain_module.COMPLETED_HYDRO_STATUSES is durable
-    assert chain_repository_module.COMPLETED_HYDRO_STATUSES is durable
-    # The journal's completed-pipeline probes (`:1280` / `:1361`) decide on the
-    # name its own `from services.orchestrator.chain_repository import ...` at
-    # `:72` bound, so the module attribute is the surface to pin, not the alias
-    # it was copied from.
+    # The journal's completed-pipeline probes decide on the name its own
+    # `from services.orchestrator.scheduler_state_types import
+    # DURABLE_HYDRO_SUCCESS_STATUSES as COMPLETED_HYDRO_STATUSES` binds, so the
+    # module attribute is the surface to pin, not the set it was bound from.
     assert journal_module.COMPLETED_HYDRO_STATUSES is durable
     # Same shape for the scheduler candidate decision at
     # `scheduler_state_decision:228`: a from-import binding of its own.
@@ -197,7 +196,6 @@ def test_every_member_is_a_declared_enum_member_except_complete() -> None:
 
     assert scheduler_state_types_module.ACTIVE_HYDRO_STATUSES <= enum_members
     assert chain_module.ACTIVE_HYDRO_STATUSES <= enum_members
-    assert chain_repository_module.ACTIVE_HYDRO_STATUSES <= enum_members
     assert journal_module.ACTIVE_HYDRO_STATUSES <= enum_members
 
     assert "complete" not in enum_members
@@ -231,10 +229,10 @@ def test_convergence_only_frequency_done_is_in_no_status_set() -> None:
 
 
 def test_active_hydro_statuses_are_the_same_object() -> None:
-    """The six sites bind ONE set, and `"pending"` is in it.
+    """The five sites bind ONE set, and `"pending"` is in it.
 
-    Six sites: the four binding sites -- ``scheduler_state_types`` (the
-    definition), ``chain``, ``chain_repository``, ``file_orchestration_journal``
+    Five sites: the three binding sites -- ``scheduler_state_types`` (the
+    definition), ``chain``, ``file_orchestration_journal``
     -- plus the two lanes that DECIDE on the set without re-exporting it:
     ``scheduler_state_decision`` (``:194``, the candidate-state active/duplicate
     verdict) and ``scheduler_state_manual_retry`` (``:524``, ``:729``, ``:885``,
@@ -244,8 +242,9 @@ def test_active_hydro_statuses_are_the_same_object() -> None:
     ``test_active_hydro_status_divergence_is_locked_not_adjudicated``, which
     asserted the very divergence this change removes. ``"pending"`` is the
     status manual retry writes to ``hydro_run`` once the retry job is submitted,
-    so it is in flight; the SQL active-pipeline probe and the file journal now
-    agree with the scheduler decision lane, which always counted it.
+    so it is in flight; the file journal (and, until R3 deleted it, the SQL
+    active-pipeline probe) now agrees with the scheduler decision lane, which
+    always counted it.
 
     Identity, not equality: two equal copies would keep an equality assertion
     green while each module decided on its own membership, which is exactly the
@@ -260,7 +259,6 @@ def test_active_hydro_statuses_are_the_same_object() -> None:
 
     active = scheduler_state_types_module.ACTIVE_HYDRO_STATUSES
     assert chain_module.ACTIVE_HYDRO_STATUSES is active
-    assert chain_repository_module.ACTIVE_HYDRO_STATUSES is active
     # The journal's own ``from ... import ACTIVE_HYDRO_STATUSES`` binding is the
     # surface its five decision sites read -- the ``has_active_pipeline`` probe
     # (``:1241``), the three attempt-scoped write paths

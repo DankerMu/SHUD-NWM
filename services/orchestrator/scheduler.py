@@ -48,10 +48,8 @@ from services.orchestrator.scheduler_adapters import (  # noqa: F401
     ForcingProducerRunner,
     ModelRegistryReader,
     ProductionOrchestratorFactory,
-    _active_repository_from_env,
     _db_free_default_adapters,
     _MetStoreCanonicalReadinessProvider,
-    _orchestrator_repository_from_env,
     _UnavailableCanonicalReadinessProvider,
 )
 from services.orchestrator.scheduler_lease import (  # noqa: F401

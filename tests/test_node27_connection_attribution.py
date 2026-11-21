@@ -890,7 +890,7 @@ DISPLAY_UNIT_CONNECT_CLOSURE: tuple[tuple[str, str, str], ...] = (
     (
         "packages/common/met_store.py",
         UNREACHABLE,
-        "static-only: apps/api/routes/pipeline.py -> services/orchestrator/__init__.py:53 (module __getattr__ "
+        "static-only: apps/api/routes/pipeline.py -> services/orchestrator/__init__.py:51 (module __getattr__ "
         "body) -> services/orchestrator/chain.py:17 -> workers/canonical_converter/converter.py, which imports "
         "this module at line 14; since #2921 model_registry imports packages.common.contracts.direct_grid, so "
         "`import apps.api.main` no longer loads it. PsycopgMetStore.from_env() is called only from worker/CLI "
@@ -902,26 +902,20 @@ DISPLAY_UNIT_CONNECT_CLOSURE: tuple[tuple[str, str, str], ...] = (
         "services/orchestrator/chain_compat_runtime.py",
         UNREACHABLE,
         "static-only: the single bridge is services/orchestrator/chain.py, imported ONLY inside "
-        "services/orchestrator/__init__.py:53 (the module __getattr__ body), so `import apps.api.main` leaves "
+        "services/orchestrator/__init__.py:51 (the module __getattr__ body), so `import apps.api.main` leaves "
         "services.orchestrator.chain out of sys.modules and this module is never executed by the unit",
-    ),
-    (
-        "services/orchestrator/chain_repository.py",
-        UNREACHABLE,
-        "static-only: reached only through services/orchestrator/chain_compat_runtime.py, itself behind the "
-        "deferred chain import in services/orchestrator/__init__.py:53; absent from the unit's runtime sys.modules",
     ),
     (
         "services/tile_publisher/publisher.py",
         UNREACHABLE,
         "static-only: imported by services/orchestrator/chain.py, which is behind the deferred import in "
-        "services/orchestrator/__init__.py:53; absent from the unit's runtime sys.modules",
+        "services/orchestrator/__init__.py:51; absent from the unit's runtime sys.modules",
     ),
     (
         "services/orchestrator/pipeline_job_provenance.py",
         UNREACHABLE,
         "import-only through services/orchestrator/chain_forecast_execution.py, itself behind the deferred "
-        "chain import in services/orchestrator/__init__.py:53; display routes never call the node-27 importer "
+        "chain import in services/orchestrator/__init__.py:51; display routes never call the node-27 importer "
         "and the node-22 publisher path opens no database connection",
     ),
 )

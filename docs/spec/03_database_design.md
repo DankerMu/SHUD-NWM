@@ -302,7 +302,7 @@ CREATE TABLE core.model_instance (
 > 生产调度器在 `NHMS_SCHEDULER_REGISTRY_BACKEND=file` 下是 DB-free 的
 > （env 文件 `compute.scheduler-dbfree.env`，node-22 不连活 DB），
 > 因此**两个 DB flag 它都够不着**；会读 DB 的那条路
-> （`services/orchestrator/chain_repository.py::PsycopgOrchestratorRepository.list_forecast_model_ids`，读 `core.model_instance`）属于 postgres backend。
+> （SQL orchestration repository 的 `list_forecast_model_ids`，读 `core.model_instance`）属于 postgres backend；该实现已随 R3（#3260）删除。
 >
 > 两个面**按设计不同步**。所以会出现这个看起来矛盾的实测组合
 > （node-27，2026-09-02，只读）：baseline `basins_*_shud` 行 **38 true / 6 false**，

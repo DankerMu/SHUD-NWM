@@ -1,7 +1,8 @@
 """Repository-method semantics pinned on the file-journal path (#3259, R3-1).
 
-Each test here is the file-journal twin of a ``PsycopgOrchestratorRepository``
-test in ``tests/test_orchestration_chain.py`` (named in its docstring): the SAME
+Each test here is the file-journal twin of a SQL-repository test that was in
+``tests/test_orchestration_chain.py`` (named in its docstring; R3, #3260, deleted the
+SQL repository and those tests): the SAME
 rows are written through the journal's write API
 (``append_historical_pipeline_job`` / ``append_historical_pipeline_event`` /
 ``append_historical_hydro_run`` / ``append_historical_forecast_cycle``) and the
@@ -1552,7 +1553,7 @@ def test_file_journal_active_slurm_jobs_includes_non_terminal_pipeline_rows(tmp_
 
 
 def _write_nfs_manifest(root: Path) -> None:
-    """The NFS raw manifest of ``tests/test_chain_repository_nfs_raw_manifest.py``."""
+    """The NFS raw manifest of the SQL-path NFS raw-manifest tests (R3-1 rows 41-42; deleted by R3, #3260)."""
 
     local_key = "raw/gfs/2026062612/gfs.t12z.f000.bundle.grib2"
     raw_file = root / local_key

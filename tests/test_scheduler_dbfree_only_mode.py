@@ -85,11 +85,7 @@ def _forbid_db_factories(monkeypatch: pytest.MonkeyPatch) -> None:
 
         return _raise
 
-    for name in (
-        "_active_repository_from_env",
-        "_orchestrator_repository_from_env",
-        "_retry_service_from_env",
-    ):
+    for name in ("_retry_service_from_env",):
         monkeypatch.setattr(scheduler_module, name, _fail(name))
     monkeypatch.setattr(
         scheduler_module.PsycopgModelRegistryStore, "from_env", staticmethod(_fail("PsycopgModelRegistryStore"))
@@ -423,8 +419,9 @@ def test_db_free_default_orchestrator_without_a_repository_fails_closed(
     tmp_path: Path,
 ) -> None:
     # Intended DB-free behaviour change (scheduler_core ``_default_orchestrator_for``):
-    # a DB-free scheduler with no journal repository used to fall back to
-    # ``_orchestrator_repository_from_env()``; it now refuses with the typed error.
+    # a DB-free scheduler with no journal repository used to fall back to the SQL
+    # orchestrator-repository factory (deleted by R3, #3260); it now refuses with the
+    # typed error.
     scheduler = _db_free_scheduler(tmp_path)
     scheduler.active_repository = None
     _forbid_db_factories(monkeypatch)

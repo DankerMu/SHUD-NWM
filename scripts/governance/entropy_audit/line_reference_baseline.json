@@ -117,11 +117,7 @@
     "packages/common/state_manager.py:394": 1
   },
   "services/orchestrator/file_orchestration_journal.py": {
-    "`:177": 1,
     "chain_manifests.py:386": 1,
-    "chain_repository.py:57-96": 2,
-    "chain_repository.py:74-79": 1,
-    "chain_repository.py:98-111": 2,
     "chain_repository_state.py:510-515": 1,
     "scheduler_backfill_predecessor.py:226": 1
   },

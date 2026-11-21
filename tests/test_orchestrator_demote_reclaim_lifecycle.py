@@ -584,22 +584,20 @@ def test_comment_less_reconcile_keeps_the_held_shape_and_never_infers_absence(
 
 
 def test_pg_repository_and_chain_facade_have_no_demote_capability() -> None:
-    """4.3: the #1564 demotion is file-journal-only; PostgreSQL surfaces gain nothing.
+    """4.3: the #1564 demotion is file-journal-only; shared surfaces gain nothing.
 
-    The operator demotion is deliberately absent from the PostgreSQL repository
-    implementation and from the shared ``OrchestratorRepository`` protocol /
-    chain facade, so no caller reaching a non-file-journal repository can ever
-    issue an ``operator_verified_absence`` demotion.
+    The operator demotion is deliberately absent from the shared
+    ``OrchestratorRepository`` protocol / chain facade, so no caller reaching a
+    non-file-journal repository can ever issue an ``operator_verified_absence``
+    demotion. (The PostgreSQL repository implementation it was also absent from
+    was deleted by R3, #3260.)
     """
 
     from services.orchestrator.chain import OrchestratorRepository
-    from services.orchestrator.chain_repository import PsycopgOrchestratorRepository
 
     assert not hasattr(OrchestratorRepository, "demote_operator_verified_reserved_job")
-    assert not hasattr(PsycopgOrchestratorRepository, "demote_operator_verified_reserved_job")
-    # The shared chain facade re-exports the same protocol / implementation.
+    # The shared chain facade re-exports the same protocol.
     from services.orchestrator import chain as chain_facade
 
     assert chain_facade.OrchestratorRepository is OrchestratorRepository
-    assert chain_facade.PsycopgOrchestratorRepository is PsycopgOrchestratorRepository
     assert not hasattr(chain_facade, "demote_operator_verified_reserved_job")
