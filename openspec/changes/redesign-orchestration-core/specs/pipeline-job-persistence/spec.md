@@ -49,14 +49,16 @@ collection.
 - **THEN** no PostgreSQL orchestrator inserts an `ops.pipeline_job` row for it
 - **AND** for a multi-basin cycle the file journal record and any node-27
   projection of it keep a null `model_id` and the cycle's own `run_id`
-  (`cycle_<source>_<cycle>` unless every basin shares one
-  `orchestration_run_id`)
+  (`cycle_<source>_<cycle>` unless the basins carry exactly one distinct
+  non-empty `orchestration_run_id`)
 - **AND** for a single-basin cycle the record carries the sole basin's
   `model_id` and, when that basin has one, its `orchestration_run_id`, so the
-  row counts as candidate scope rather than cycle scope
-  (`services/orchestrator/chain_runtime_utils.py` `_cycle_pipeline_job_model_id`
-  / `_cycle_orchestration_run_id`; `tests/test_production_scheduler.py`
-  `_decision_path_single_basin_cohort_job`).
+  row counts as candidate scope rather than cycle scope (stamp:
+  `services/orchestrator/chain_runtime_utils.py` `_cycle_pipeline_job_model_id`
+  / `_cycle_orchestration_run_id`; candidate scope of a stamped row:
+  `tests/test_production_scheduler.py`
+  `test_gate_open_fallback_floor_is_scoped_to_the_restarted_stage_family`,
+  `test_non_canonical_family_stage_fallback_floor_mints_the_next_attempt`).
 
 #### Scenario: sbatch submission fails
 
@@ -73,16 +75,20 @@ collection.
 
 The scheduler SHALL update the file journal job record when `sacct` returns a
 new status for the corresponding Slurm job; the file journal is the only
-store the scheduler synchronizes (DB-free is its only mode). Two paths write
-the status. The in-pass Gateway poll goes through
-`FileOrchestrationJournalRepository.update_pipeline_job_status`
+store the scheduler synchronizes (DB-free is its only mode). All status writes
+go through `FileOrchestrationJournalRepository.update_pipeline_job_status`;
+a field a caller does not pass is left unchanged, except that a success status
+clears an unpassed `error_code` / `error_message`. The in-pass Gateway poll
 (`services/orchestrator/chain_stage_execution.py` `_update_runtime_pipeline_status`)
-and records, with the status, each of `started_at`, `finished_at`,
-`exit_code`, `error_code`, `error_message` and `log_uri` that the Gateway
-reports (a field the Gateway does not report is left unchanged). Restart
-reconcile (`services/orchestrator/reconcile_inflight.py` `reconcile_inflight`)
-goes through `update_job_status` and records the status and, for a failure,
-the mapped `error_code` only; it does not record timestamps, exit codes or
+records, with the status, each of `started_at`, `finished_at`, `exit_code`,
+`error_code`, `error_message` and `log_uri` that the Gateway reports. The
+terminal status of a non-cohort array stage is written from its task
+aggregation instead (`services/orchestrator/chain_array_accounting.py`), with
+the aggregation's error code and message, and with `finished_at` falling back
+to the write time when the Gateway reports none. Restart reconcile
+(`services/orchestrator/reconcile_inflight.py` `reconcile_inflight_jobs`) goes
+through `update_job_status` and records the status and, for a failure, the
+mapped `error_code` only; it does not record timestamps, exit codes or
 `log_uri`. An accepted-submit forecast
 cohort instead takes the typed runtime transition and exact task accounting of
 the file-orchestration-journal requirement "Accepted forecast cohort
