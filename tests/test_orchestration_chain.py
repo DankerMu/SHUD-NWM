@@ -52,6 +52,12 @@ from services.orchestrator.persistence import Base, PipelineEvent, PipelineJob, 
 from services.orchestrator.retry import RetryConfig, RetryService
 from services.orchestrator.scheduler_state_types import DOWNSTREAM_RESTART_STAGES
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES
+from tests.pipeline_job_orm_helpers import (
+    orm_bind_reservation,
+    orm_reclaim_reservation,
+    orm_reserve_job,
+    seed_pipeline_job,
+)
 from workers.canonical_converter.converter import (
     GFS_REQUIRED_STANDARD_VARIABLES,
     expected_converter_version,
@@ -538,7 +544,8 @@ class StoreBackedCycleRepository(FakeCycleRepository):
     def upsert_pipeline_job(self, record: dict[str, Any]) -> dict[str, Any]:
         existing = self.store.get_job(record["job_id"])
         if existing is None:
-            job = self.store.create_job(
+            job = seed_pipeline_job(
+                self.store.session,
                 job_id=record["job_id"],
                 run_id=record.get("run_id"),
                 cycle_id=record.get("cycle_id"),
@@ -619,7 +626,8 @@ class StoreBackedCycleRepository(FakeCycleRepository):
         return previous, dict(record)
 
     def reserve_pipeline_job(self, record: dict[str, Any]) -> dict[str, Any] | None:
-        job = self.store.reserve_job(
+        job = orm_reserve_job(
+            self.store.session,
             job_id=record["job_id"],
             run_id=record.get("run_id"),
             cycle_id=record.get("cycle_id"),
@@ -644,7 +652,8 @@ class StoreBackedCycleRepository(FakeCycleRepository):
         status: str = "submitted",
         array_task_id: int | None = None,
     ) -> dict[str, Any] | None:
-        job = self.store.bind_reservation(
+        job = orm_bind_reservation(
+            self.store.session,
             idempotency_key,
             slurm_job_id=slurm_job_id,
             status=status,
@@ -660,7 +669,8 @@ class StoreBackedCycleRepository(FakeCycleRepository):
         # Mirror production: atomically take over a DEAD reservation
         # (slurm_job_id IS NULL AND status IN submission_failed/reservation_lost)
         # back to 'reserved'; a live row never matches.
-        job = self.store.reclaim_reservation(
+        job = orm_reclaim_reservation(
+            self.store.session,
             record["idempotency_key"],
             job_id=record.get("job_id"),
             run_id=record.get("run_id"),
@@ -14723,7 +14733,8 @@ def test_manual_retry_terminal_stage_submits_new_attempt_identity(tmp_path: Path
 
     store = _pipeline_store()
     repository = StoreBackedCycleRepository(store)
-    old_job = store.create_job(
+    old_job = seed_pipeline_job(
+        store.session,
         job_id="job_cycle_gfs_2026050100_convert",
         run_id="cycle_gfs_2026050100",
         cycle_id="gfs_2026050100",
@@ -14778,7 +14789,8 @@ def test_missing_forecast_output_retry_resubmits_lost_forecast_identity(tmp_path
 
     store = _pipeline_store()
     repository = StoreBackedCycleRepository(store)
-    old_job = store.create_job(
+    old_job = seed_pipeline_job(
+        store.session,
         job_id="job_cycle_gfs_2026050100_forecast_model_0_forecast",
         run_id="cycle_gfs_2026050100_forecast_model_0",
         cycle_id="gfs_2026050100",
@@ -14852,7 +14864,8 @@ def _wedged_marker_repository() -> tuple[PipelineStore, StoreBackedCycleReposito
         (_MARKER_BASE_JOB_ID, "6051", f"{_MARKER_RUN_ID}:forecast"),
         (f"{_MARKER_BASE_JOB_ID}_retry_1", "6052", f"{_MARKER_RUN_ID}:forecast:retry_1"),
     ):
-        job = store.create_job(
+        job = seed_pipeline_job(
+            store.session,
             job_id=job_id,
             run_id=_MARKER_RUN_ID,
             cycle_id="gfs_2026050100",
@@ -14989,7 +15002,8 @@ def test_manual_retry_evidence_only_fresh_marker_keeps_precise_attempt_identity(
 
     store = _pipeline_store()
     repository = StoreBackedCycleRepository(store)
-    old_job = store.create_job(
+    old_job = seed_pipeline_job(
+        store.session,
         job_id="job_cycle_gfs_2026050100_convert",
         run_id="cycle_gfs_2026050100",
         cycle_id="gfs_2026050100",
@@ -16084,7 +16098,8 @@ def _stacked_retry_repository() -> tuple[PipelineStore, list[dict[str, Any]], St
 
     store = _pipeline_store()
     repository = _ReserveRecordingRepository(store)
-    job = store.create_job(
+    job = seed_pipeline_job(
+        store.session,
         job_id=_STACKED_BASE_JOB_ID,
         run_id=_STACKED_RUN_ID,
         cycle_id="gfs_2026050100",
@@ -16497,7 +16512,8 @@ class _RaceSemanticsCycleRepository(StoreBackedCycleRepository):
     """
 
     def reserve_pipeline_job(self, record: dict[str, Any]) -> dict[str, Any] | None:
-        job = self.store.reserve_job(
+        job = orm_reserve_job(
+            self.store.session,
             job_id=record["job_id"],
             run_id=record.get("run_id"),
             cycle_id=record.get("cycle_id"),
@@ -16559,18 +16575,20 @@ def test_overlapping_pass_does_not_double_submit_real_submit_path(tmp_path: Path
     )
 
     # Prior overlapping pass already reserved AND bound this candidate (active,
-    # in flight). reserve_job wins; bind stamps a slurm_job_id + 'running'.
+    # in flight): the row its reserve + bind left, slurm-bound and 'running'.
     key = _cycle_stage_idempotency_key(context, stage)
-    store.reserve_job(
+    seed_pipeline_job(
+        store.session,
         job_id="prior_pass_job",
         run_id=context.run_id,
         cycle_id=context.cycle_id,
         job_type=stage.job_type,
+        slurm_job_id="90099",
         model_id=None,
         stage=stage.stage,
+        status="running",
         idempotency_key=key,
     )
-    store.bind_reservation(key, slurm_job_id="90099", status="running")
 
     # This (overlapping) pass goes through the real submit entry point; the
     # reserve gate must short-circuit to a typed skip with NO sbatch.
@@ -16633,16 +16651,18 @@ def test_skip_duplicate_submission_survives_expected_evidence_exception(
         active_basins=_basins(2),
     )
     key = _cycle_stage_idempotency_key(context, stage)
-    store.reserve_job(
+    seed_pipeline_job(
+        store.session,
         job_id="prior_pass_job",
         run_id=context.run_id,
         cycle_id=context.cycle_id,
         job_type=stage.job_type,
+        slurm_job_id="90099",
         model_id=None,
         stage=stage.stage,
+        status="running",
         idempotency_key=key,
     )
-    store.bind_reservation(key, slurm_job_id="90099", status="running")
 
     result, aggregation = orchestrator._submit_and_wait_cycle_stage(stage, context)
 
@@ -16685,16 +16705,18 @@ def test_skip_duplicate_submission_does_not_catch_arbitrary_exceptions(
         active_basins=_basins(2),
     )
     key = _cycle_stage_idempotency_key(context, stage)
-    store.reserve_job(
+    seed_pipeline_job(
+        store.session,
         job_id="prior_pass_job",
         run_id=context.run_id,
         cycle_id=context.cycle_id,
         job_type=stage.job_type,
+        slurm_job_id="90099",
         model_id=None,
         stage=stage.stage,
+        status="running",
         idempotency_key=key,
     )
-    store.bind_reservation(key, slurm_job_id="90099", status="running")
 
     with pytest.raises(RuntimeError, match="programming bug must surface"):
         orchestrator._submit_and_wait_cycle_stage(stage, context)

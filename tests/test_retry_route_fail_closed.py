@@ -30,6 +30,7 @@ from apps.api.routes import pipeline as pipeline_routes
 from services.orchestrator.file_orchestration_journal import FileJournalRetryService
 from services.orchestrator.persistence import Base, PipelineEvent, PipelineJob, PipelineStore
 from services.orchestrator.retry import RetryConfig, RetryService
+from tests.pipeline_job_orm_helpers import seed_pipeline_job
 
 _RETRY_PATH = "/api/v1/runs/{run_id}/retry"
 _RUN_ID = "run_retry_retired"
@@ -112,7 +113,8 @@ def seeded_store() -> Iterator[PipelineStore]:
         )
     session = Session(engine)
     store = PipelineStore(session)
-    job = store.create_job(
+    job = seed_pipeline_job(
+        store.session,
         job_id=_FAILED_JOB_ID,
         run_id=_RUN_ID,
         cycle_id="cycle_retry_retired",

@@ -6,6 +6,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session
 
 from services.orchestrator.persistence import Base, PipelineStore
+from tests.pipeline_job_orm_helpers import seed_pipeline_job
 
 
 def test_pipeline_job_crud_with_sqlite_ops_schema() -> None:
@@ -42,7 +43,8 @@ def test_pipeline_job_crud_with_sqlite_ops_schema() -> None:
 
 def test_terminal_pipeline_job_status_does_not_regress() -> None:
     with _store() as store:
-        store.create_job(
+        seed_pipeline_job(
+            store.session,
             job_id="job_1",
             run_id="run_1",
             cycle_id="gfs_2026050100",
@@ -61,7 +63,8 @@ def test_terminal_pipeline_job_status_does_not_regress() -> None:
 
 def test_permanently_failed_pipeline_job_status_is_sticky() -> None:
     with _store() as store:
-        store.create_job(
+        seed_pipeline_job(
+            store.session,
             job_id="job_1",
             run_id="run_1",
             cycle_id="gfs_2026050100",
@@ -82,7 +85,8 @@ def test_permanently_failed_pipeline_job_status_is_sticky() -> None:
 
 def test_pipeline_event_append_and_bidirectional_queries() -> None:
     with _store() as store:
-        store.create_job(
+        seed_pipeline_job(
+            store.session,
             job_id="job_download",
             run_id="run_1",
             cycle_id="gfs_2026050100",
@@ -92,7 +96,8 @@ def test_pipeline_event_append_and_bidirectional_queries() -> None:
             stage="download",
             status="succeeded",
         )
-        store.create_job(
+        seed_pipeline_job(
+            store.session,
             job_id="job_forecast",
             run_id="run_1",
             cycle_id="gfs_2026050100",

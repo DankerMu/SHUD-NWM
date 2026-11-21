@@ -16,6 +16,7 @@ from services.orchestrator.reconcile import (
     reconcile_inflight_jobs,
 )
 from tests.gateway_reconcile_helpers import _store
+from tests.pipeline_job_orm_helpers import seed_pipeline_job
 
 
 def _make_inflight_job(
@@ -29,7 +30,8 @@ def _make_inflight_job(
     model_id: str = "model_1",
     array_task_id: int | None = None,
 ) -> None:
-    job = store.create_job(
+    job = seed_pipeline_job(
+        store.session,
         job_id=job_id,
         run_id=run_id,
         cycle_id="cycle_1",

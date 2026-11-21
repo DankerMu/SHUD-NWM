@@ -19,6 +19,7 @@ from apps.api.routes import pipeline as pipeline_routes
 from services.orchestrator.persistence import Base, PipelineEvent, PipelineJob, PipelineStore
 from services.orchestrator.retry import RetryConfig, RetryService
 from services.slurm_gateway.gateway import SlurmGatewayError
+from tests.pipeline_job_orm_helpers import seed_pipeline_job
 
 HYDRO_RUN_STATUS_ENUM = {
     "created",
@@ -1159,7 +1160,8 @@ def _create_job(
     job_type: str = "run_shud_analysis",
     stage: str = "run",
 ) -> PipelineJob:
-    job = store.create_job(
+    job = seed_pipeline_job(
+        store.session,
         job_id=job_id,
         run_id=run_id,
         cycle_id=cycle_id,
