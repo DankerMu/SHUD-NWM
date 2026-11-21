@@ -47,9 +47,16 @@ collection.
 - **WHEN** the scheduler submits a cycle-level stage job (e.g.,
   `convert_canonical`, `publish_tiles`) that is not scoped to a specific basin
 - **THEN** no PostgreSQL orchestrator inserts an `ops.pipeline_job` row for it
-- **AND** the file journal record and any node-27 projection of it keep a null
-  `model_id` and the cycle's own `run_id`, as the DB-free scenario above
-  requires for cycle-scoped rows.
+- **AND** for a multi-basin cycle the file journal record and any node-27
+  projection of it keep a null `model_id` and the cycle's own `run_id`
+  (`cycle_<source>_<cycle>` unless every basin shares one
+  `orchestration_run_id`)
+- **AND** for a single-basin cycle the record carries the sole basin's
+  `model_id` and, when that basin has one, its `orchestration_run_id`, so the
+  row counts as candidate scope rather than cycle scope
+  (`services/orchestrator/chain_runtime_utils.py` `_cycle_pipeline_job_model_id`
+  / `_cycle_orchestration_run_id`; `tests/test_production_scheduler.py`
+  `_decision_path_single_basin_cohort_job`).
 
 #### Scenario: sbatch submission fails
 
@@ -66,11 +73,17 @@ collection.
 
 The scheduler SHALL update the file journal job record when `sacct` returns a
 new status for the corresponding Slurm job; the file journal is the only
-store the scheduler synchronizes (DB-free is its only mode). Status updates go
-through `FileOrchestrationJournalRepository.update_pipeline_job_status`
-(`services/orchestrator/chain_stage_execution.py` `_update_runtime_pipeline_status`),
-which records `started_at`, `finished_at`, `exit_code`, `error_code`,
-`error_message` and `log_uri` with the status; an accepted-submit forecast
+store the scheduler synchronizes (DB-free is its only mode). Two paths write
+the status. The in-pass Gateway poll goes through
+`FileOrchestrationJournalRepository.update_pipeline_job_status`
+(`services/orchestrator/chain_stage_execution.py` `_update_runtime_pipeline_status`)
+and records, with the status, each of `started_at`, `finished_at`,
+`exit_code`, `error_code`, `error_message` and `log_uri` that the Gateway
+reports (a field the Gateway does not report is left unchanged). Restart
+reconcile (`services/orchestrator/reconcile_inflight.py` `reconcile_inflight`)
+goes through `update_job_status` and records the status and, for a failure,
+the mapped `error_code` only; it does not record timestamps, exit codes or
+`log_uri`. An accepted-submit forecast
 cohort instead takes the typed runtime transition and exact task accounting of
 the file-orchestration-journal requirement "Accepted forecast cohort
 submission is reconciled exactly once". The node-27 derived projection SHALL
@@ -82,26 +95,26 @@ ordering match the journal record (`services/orchestrator/pipeline_job_provenanc
 #### Scenario: Slurm job transitions to RUNNING
 
 - **WHEN** `sacct` reports status `RUNNING` for a `slurm_job_id` whose journal job record is still in flight (`pending` or `submitted`)
-- **THEN** the scheduler SHALL set the journal job record's `status` to `running` (status transition: `tests/test_file_orchestration_journal.py` `test_file_orchestration_journal_exposes_restart_reconcile_store_interface`), recording the Slurm-reported start time as `started_at` and advancing `updated_at`
+- **THEN** the scheduler SHALL set the journal job record's `status` to `running` (status transition: `tests/test_file_orchestration_journal.py` `test_file_orchestration_journal_exposes_restart_reconcile_store_interface`) and advance `updated_at`; on the Gateway-poll path it also records the Gateway-reported start time as `started_at`
 
 #### Scenario: Slurm job completes successfully
 
 - **WHEN** `sacct` reports status `COMPLETED` with exit code 0 for a `slurm_job_id`
-- **THEN** the scheduler SHALL set the journal job record's `status` to `succeeded` (status transition: `tests/test_file_orchestration_journal.py` `test_file_orchestration_journal_pipeline_reservation_bind_event_and_terminal_guards`), recording the Slurm-reported end time as `finished_at` and exit code 0
+- **THEN** the scheduler SHALL set the journal job record's `status` to `succeeded` (status transition: `tests/test_file_orchestration_journal.py` `test_file_orchestration_journal_pipeline_reservation_bind_event_and_terminal_guards`); on the Gateway-poll path it also records the Gateway-reported `finished_at` and exit code 0
 
 #### Scenario: Slurm job fails
 
 - **WHEN** `sacct` reports status `FAILED`, `TIMEOUT`, or `NODE_FAIL` for a `slurm_job_id`
-- **THEN** the scheduler SHALL set the journal job record's `status` to `failed`, recording the end time, the reported exit code, the mapped error code (e.g., `SLURM_TIMEOUT`, `NODE_FAILURE`) and a human-readable message
+- **THEN** the scheduler SHALL set the journal job record's `status` to `failed` with the mapped error code (e.g., `SLURM_TIMEOUT`, `NODE_FAILURE`); on the Gateway-poll path it also records the Gateway-reported end time, exit code and error message
 - **AND** on the accepted-submit cohort route the same mapping comes from exact task accounting (`tests/test_gateway_reconcile_file_cohort_projection.py` `test_file_cohort_boot_fail_task_projects_failed_with_node_failure`)
 
 #### Scenario: Slurm job cancelled
 
 - **WHEN** `sacct` reports status `CANCELLED` for a `slurm_job_id`
-- **THEN** the scheduler SHALL set the journal job record's `status` to `cancelled`, recording `finished_at` and advancing `updated_at`
+- **THEN** the scheduler SHALL set the journal job record's `status` to `cancelled` and advance `updated_at`; on the Gateway-poll path it also records the Gateway-reported `finished_at`
 
 #### Scenario: log_uri populated on job completion
 
 - **WHEN** a Slurm job reaches a terminal status (`succeeded`, `failed`, `cancelled`)
-- **THEN** the scheduler SHALL record the Slurm output log location reported for the job (derived from the sbatch `--output` directive) as the journal job record's `log_uri`, and a placeholder SHALL NOT displace a real `log_uri` already recorded (`tests/test_file_orchestration_journal.py` `test_update_pipeline_job_status_placeholder_does_not_displace_a_real_log_uri`)
+- **THEN** on the Gateway-poll path the scheduler SHALL record the Slurm output log location reported for the job (derived from the sbatch `--output` directive) as the journal job record's `log_uri`, and a placeholder SHALL NOT displace a real `log_uri` already recorded (`tests/test_file_orchestration_journal.py` `test_update_pipeline_job_status_placeholder_does_not_displace_a_real_log_uri`)
 - **AND** in the DB-free display projection, a previously null `log_uri` MAY be enriched monotonically only when the source journal proves that exact task/log binding and the published artifact verifies (`tests/test_pipeline_job_provenance_importer.py` `test_importer_enriches_null_log_at_equal_source_version`).
