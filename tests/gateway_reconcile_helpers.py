@@ -22,6 +22,12 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from services.orchestrator.persistence import Base, PipelineJob, PipelineStore
+from tests.pipeline_job_orm_helpers import (
+    OrmPipelineStore,
+    orm_bind_reservation,
+    orm_reclaim_reservation,
+    orm_reserve_job,
+)
 
 
 def _authoritative_absence_query(
@@ -41,16 +47,19 @@ def _authoritative_absence_query(
 
 
 class _StoreRepo:
-    """Repository-shaped wrapper over PipelineStore for reservation tests.
+    """Repository-shaped wrapper over the ``pipeline_job`` table for reservation tests.
 
     Exposes the ``reserve_pipeline_job``/``bind_pipeline_job_reservation``/
     ``query_candidate_state`` surface the chain repository implements, backed by
     the in-memory store, so the durable two-phase protocol is exercised exactly
-    as production would.
+    as production would. The writes go through the ORM reservation doubles
+    (#3262), and ``.store`` is an ``OrmPipelineStore`` on the given session, so
+    a test that hands ``.store`` to production reconcile never reaches the
+    ``PipelineStore`` write methods.
     """
 
-    def __init__(self, store: PipelineStore) -> None:
-        self.store = store
+    def __init__(self, store: PipelineStore | OrmPipelineStore) -> None:
+        self.store = OrmPipelineStore(store.session)
 
     def query_candidate_state(self, idempotency_key: str):
         job = self.store.query_candidate_state(idempotency_key)
@@ -60,7 +69,8 @@ class _StoreRepo:
         # Mirror the production contract: INSERT ... ON CONFLICT DO NOTHING
         # RETURNING. A returned row == this caller won; None == a row already
         # existed. The unique idempotency_key index is the race backstop.
-        job = self.store.reserve_job(
+        job = orm_reserve_job(
+            self.store.session,
             job_id=record["job_id"],
             run_id=record.get("run_id"),
             cycle_id=record.get("cycle_id"),
@@ -77,7 +87,8 @@ class _StoreRepo:
         # Mirror the production conditional UPDATE: only a DEAD reservation
         # (slurm_job_id IS NULL AND status IN submission_failed/reservation_lost)
         # is re-claimed back to 'reserved'; a live row never matches.
-        job = self.store.reclaim_reservation(
+        job = orm_reclaim_reservation(
+            self.store.session,
             record["idempotency_key"],
             run_id=record.get("run_id"),
             cycle_id=record.get("cycle_id"),
@@ -95,7 +106,8 @@ class _StoreRepo:
         status: str = "submitted",
         array_task_id: int | None = None,
     ):
-        job = self.store.bind_reservation(
+        job = orm_bind_reservation(
+            self.store.session,
             idempotency_key,
             slurm_job_id=slurm_job_id,
             status=status,

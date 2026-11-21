@@ -462,6 +462,7 @@ def test_floor_derived_id_already_in_the_journal_keeps_the_minter_advancing(tmp_
     stage really submits (no ``skipped_duplicate_submission`` wedge).
     """
 
+    from tests.pipeline_job_orm_helpers import seed_pipeline_job
     from tests.test_orchestration_chain import (
         FakeCycleSlurmClient,
         StoreBackedCycleRepository,
@@ -474,7 +475,8 @@ def test_floor_derived_id_already_in_the_journal_keeps_the_minter_advancing(tmp_
     base = f"job_{run_id}_forecast"
     store = _pipeline_store()
     for job_id, row_run_id, slurm_job_id in ((base, run_id, "6051"), (f"{base}_retry_2", "legacy_run", "6053")):
-        job = store.create_job(
+        job = seed_pipeline_job(
+            store.session,
             job_id=job_id,
             run_id=row_run_id,
             cycle_id="gfs_2026050100",

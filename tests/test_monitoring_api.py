@@ -20,6 +20,7 @@ from apps.api.routes import pipeline as pipeline_routes
 from packages.common.contracts.time_normalization import cycle_id_for
 from services.orchestrator.persistence import Base, PipelineEvent, PipelineJob, PipelineStore
 from services.slurm_gateway.gateway import SlurmGatewayError
+from tests.pipeline_job_orm_helpers import seed_pipeline_job
 
 GENERIC_RETRY_JOB_TYPE = "forecast_qhh_stage"
 # #2308: the configured scheduler binary path and the workspace root — host text,
@@ -3444,7 +3445,8 @@ def _create_job(
     log_uri: str | None = None,
 ) -> PipelineJob:
     submitted = submitted_at or _cycle_time()
-    job = store.create_job(
+    job = seed_pipeline_job(
+        store.session,
         job_id=job_id,
         run_id=run_id,
         cycle_id=cycle_id,

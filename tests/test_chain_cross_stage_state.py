@@ -24,6 +24,7 @@ import pytest
 
 from services.orchestrator import chain_runtime_utils
 from services.orchestrator import scheduler_candidate_manifest as manifest_module
+from tests.pipeline_job_orm_helpers import seed_pipeline_job
 from tests.test_orchestration_chain import (
     FakeCycleRepository,
     FakeCycleSlurmClient,
@@ -412,7 +413,8 @@ def test_markerless_non_whitelisted_downstream_terminal_row_resumes_after_upstre
     repository = StoreBackedCycleRepository(store)
     run_id = "cycle_gfs_2026050100_forecast_model_0"
     parse_id = f"job_{run_id}_parse"
-    parse_row = store.create_job(
+    parse_row = seed_pipeline_job(
+        store.session,
         job_id=parse_id,
         run_id=run_id,
         cycle_id=_CYCLE_ID,
@@ -617,7 +619,8 @@ def test_db_legacy_forcing_row_without_member_identity_keeps_model_blind_resume(
 
     store = _pipeline_store()
     repository = StoreBackedCycleRepository(store)
-    store.create_job(
+    seed_pipeline_job(
+        store.session,
         job_id=_SHARED_FORCING,
         run_id=f"cycle_gfs_{_CYCLE}",
         cycle_id=_CYCLE_ID,

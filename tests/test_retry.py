@@ -28,6 +28,7 @@ from services.orchestrator.retry import (
     is_transient_error,
 )
 from services.orchestrator.scheduler_state_types import DOWNSTREAM_RESTART_STAGES, TRANSIENT_RETRY_REASON_CODES
+from tests.pipeline_job_orm_helpers import seed_pipeline_job
 
 _JOB_RETRY_SPEC_PATH = Path(__file__).resolve().parents[1] / "openspec" / "specs" / "job-retry-mechanism" / "spec.md"
 _SERVICES_ROOT = Path(__file__).resolve().parents[1] / "services"
@@ -734,7 +735,8 @@ def _create_job(
     job_type: str = "run_shud_analysis",
     stage: str = "run",
 ) -> PipelineJob:
-    job = store.create_job(
+    job = seed_pipeline_job(
+        store.session,
         job_id=job_id,
         run_id=run_id,
         cycle_id=cycle_id,
