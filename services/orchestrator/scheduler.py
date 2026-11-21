@@ -310,11 +310,6 @@ MAX_EVIDENCE_BYTES = _scheduler_evidence.MAX_EVIDENCE_BYTES
 MAX_CONTINUOUS_JSON_PASSES = 100
 MAX_MODEL_RUN_STAGE_TASK_ROWS = 16
 DEFAULT_CONCURRENT_SUBMIT_BOUND = 4
-# Cap a post-connect query hang in restart reconcile (mirrors
-# VALIDATION_STATEMENT_TIMEOUT_MS): a reachable-but-slow DB must not stall the
-# pass at reconcile time; best-effort reconcile swallows the timeout and the
-# pass proceeds to the DB-host preflight.
-RECONCILE_DB_STATEMENT_TIMEOUT_MS = 10_000
 SCHEDULER_EVIDENCE_SCHEMA_VERSION = _scheduler_evidence.SCHEDULER_EVIDENCE_SCHEMA_VERSION
 MODEL_RUN_EVIDENCE_SCHEMA_VERSION = _scheduler_evidence.MODEL_RUN_EVIDENCE_SCHEMA_VERSION
 SCHEDULER_EVIDENCE_CONTRACT_ID = _scheduler_evidence.SCHEDULER_EVIDENCE_CONTRACT_ID

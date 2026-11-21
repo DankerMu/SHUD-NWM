@@ -118,7 +118,6 @@ def test_guard_sees_the_known_engine_factories() -> None:
         "services/tile_publisher/forcing_copyback_backfill.py",
         "services/tile_publisher/publisher.py",
         "services/orchestrator/chain_compat_runtime.py",
-        "services/orchestrator/scheduler_runtime.py",
         "scripts/node27_coverage_freshness_alert.py",
         "scripts/node27_river_tile_coordinate_evidence.py",
         "tests/integration_helpers.py",

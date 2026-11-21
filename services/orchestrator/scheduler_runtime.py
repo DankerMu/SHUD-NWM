@@ -20,14 +20,11 @@ from services.orchestrator.file_orchestration_journal import (
 )
 from services.orchestrator.retention import WITHIN_RETENTION_WINDOW_REASON, RetentionConfig, run_retention
 from services.orchestrator.scheduler_lease import lease_heartbeat_interval_seconds
-from services.orchestrator.scheduler_mode_invariant import SchedulerModeInvariantError
 from services.orchestrator.scheduler_timing import SchedulerPassTiming
 
 _VALID_TIMING_LEVELS = frozenset({"pass", "stage", "candidate"})
 _PROGRESS_GUARD_REASON = "scheduler_progress_guard_blocked"
 
-RECONCILE_DB_CONNECT_TIMEOUT_SECONDS = _scheduler.RECONCILE_DB_CONNECT_TIMEOUT_SECONDS
-RECONCILE_DB_STATEMENT_TIMEOUT_MS = _scheduler.RECONCILE_DB_STATEMENT_TIMEOUT_MS
 MAX_EVIDENCE_BYTES = _scheduler_evidence_module.MAX_EVIDENCE_BYTES
 SchedulerEvidenceWriteError = _scheduler_evidence_module.SchedulerEvidenceWriteError
 SchedulerPassResult = _scheduler.SchedulerPassResult
@@ -1528,13 +1525,6 @@ def _run_restart_reconcile(
         return None
     store = self._restart_reconcile_store()
     if store is None:
-        build_error = getattr(self, "_reconcile_store_build_error", None)
-        if build_error is not None:
-            return {
-                "status": "skipped",
-                "reason": "reconcile_store_build_failed",
-                "error_type": build_error,
-            }
         return {"status": "skipped", "reason": "reconcile_store_unavailable"}
 
     from services.orchestrator.reconcile import (
@@ -1568,7 +1558,6 @@ def _run_restart_reconcile(
     except Exception as error:  # noqa: BLE001 - recovery must never abort the pass.
         evidence["status"] = "error"
         evidence["reserved_unbound_error"] = _restart_reconcile_error_message(error)
-        self._reset_reconcile_store_after_error()
     finally:
         if sacct_wait_sink is not None:
             reserved_delta_ms = (time.monotonic_ns() - reserved_call_start_ns) / 1_000_000.0
@@ -1585,7 +1574,6 @@ def _run_restart_reconcile(
     except Exception as error:  # noqa: BLE001 - recovery must never abort the pass.
         evidence["status"] = "error"
         evidence["inflight_error"] = _restart_reconcile_error_message(error)
-        self._reset_reconcile_store_after_error()
     finally:
         if sacct_wait_sink is not None:
             inflight_delta_ms = (time.monotonic_ns() - inflight_call_start_ns) / 1_000_000.0
@@ -1781,81 +1769,19 @@ def _restart_reconcile_error_token(token: str) -> str:
     return token
 
 
-def _reset_reconcile_store_after_error(self) -> None:
-    """Recover the cached reconcile session after a write/commit failure.
-
-    persistence commits with no rollback, so a failed commit leaves the
-    cached session in pending-rollback state; reusing it next pass (or in
-    the same pass's inflight segment) raises PendingRollbackError and
-    silently kills crash recovery for the daemon's lifetime. Roll the
-    session back to keep its connection reusable; only if rollback itself
-    fails (the connection is truly dead) dispose the engine pool and drop
-    the cache so the next pass rebuilds a clean store via
-    _restart_reconcile_store.
-    """
-
-    store = self._reconcile_store
-    if store is None:
-        return
-    try:
-        store.session.rollback()
-    except Exception:  # noqa: BLE001 - poisoned/dead session: dispose + drop so
-        # the next pass rebuilds a clean one via _restart_reconcile_store.
-        try:
-            bind = store.session.get_bind()
-            store.session.close()
-            if hasattr(bind, "dispose"):
-                bind.dispose()
-        except Exception:  # noqa: BLE001 - cleanup is best-effort; never abort the pass.
-            pass
-        self._reconcile_store = None
-
-
 def _restart_reconcile_store(self) -> Any | None:
     if self._reconcile_store is not None:
         return self._reconcile_store
-    if getattr(self.config, "db_free_required", False):
-        repository = getattr(self, "active_repository", None)
-        required_methods = (
-            "query_reserved_unbound_jobs",
-            "query_inflight_jobs",
-            "bind_reservation",
-            "update_job_status",
-        )
-        if repository is not None and all(hasattr(repository, method) for method in required_methods):
-            return repository
-        return None
-    raise SchedulerModeInvariantError(site="scheduler_runtime:_restart_reconcile_store")
-    database_url = (self.config.database_url or "").strip()
-    if not database_url:
-        return None
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import Session
-
-    from packages.common.sqlalchemy_url import sqlalchemy_url
-    from services.orchestrator.persistence import PipelineStore
-
-    # Best-effort: a malformed/unbuildable database_url must never abort the
-    # pass. make_url() raises synchronously inside create_engine for a bad
-    # DSN (sqlalchemy_url() parses with the same make_url, inside this try), so
-    # wrap the whole build. ZERO-LEAK: record only the exception
-    # class name (provably secret-free); the raw message embeds the DSN
-    # incl. password. The submit-path DB-host preflight still runs.
-    try:
-        engine = create_engine(
-            sqlalchemy_url(database_url),
-            future=True,
-            connect_args={
-                "connect_timeout": RECONCILE_DB_CONNECT_TIMEOUT_SECONDS,
-                "options": f"-c statement_timeout={RECONCILE_DB_STATEMENT_TIMEOUT_MS}",
-            },
-        )
-        self._reconcile_store = PipelineStore(Session(engine))
-    except Exception as error:  # noqa: BLE001 - build must never abort the pass.
-        self._reconcile_store_build_error = type(error).__name__
-        return None
-    self._reconcile_store_build_error = None
-    return self._reconcile_store
+    repository = getattr(self, "active_repository", None)
+    required_methods = (
+        "query_reserved_unbound_jobs",
+        "query_inflight_jobs",
+        "bind_reservation",
+        "update_job_status",
+    )
+    if repository is not None and all(hasattr(repository, method) for method in required_methods):
+        return repository
+    return None
 
 
 def _restart_reconcile_comment_query(self) -> Callable[[str], Any]:

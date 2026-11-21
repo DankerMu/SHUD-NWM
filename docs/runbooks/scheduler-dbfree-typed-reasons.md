@@ -872,8 +872,9 @@ R2b 之后 scheduler 只有 DB-free 一种模式：`ProductionSchedulerConfig` �
 不再选模式（`unset` / `false` / `true` 结果相同），构造参数
 `scheduler_db_free_required=False` 照收但被忽略。#3256（R2c-1）已删除 SQL
 factory 分支和 `scheduler_core.py` / `scheduler_runtime.py` 里其余的非 DB-free
-模式分支；还会抛 `SchedulerModeInvariantError`（直接继承 `Exception`，不是
-`ValueError` / `RuntimeError` / `OSError`）的只剩下表三处，带两个字段：
+模式分支，#3257（R2c-2）已删除 SQL reconcile store；还会抛
+`SchedulerModeInvariantError`（直接继承 `Exception`，不是
+`ValueError` / `RuntimeError` / `OSError`）的只剩下表两处，带两个字段：
 
 - `code`：固定 `scheduler_non_db_free_arm_reached`；
 - `site`：`<module>:<function>`，见下表。
@@ -881,7 +882,6 @@ factory 分支和 `scheduler_core.py` / `scheduler_runtime.py` 里其余的非 D
 | `site` | 触发条件 | 何时抛 | 删除归属 |
 |---|---|---|---|
 | `scheduler_core:_build_scheduler_lease` | config 报告 `db_free_required=False` | 拿锁时（拿锁之前抛，不建 PostgreSQL lease） | R2c-3 删 PostgreSQL lease 时一并删除 |
-| `scheduler_runtime:_restart_reconcile_store` | config 报告 `db_free_required=False` | restart reconcile 建 store 时 | R2c-2 删 SQL reconcile store 时一并删除 |
 | `scheduler_core:_default_orchestrator_for` | scheduler 没有 journal repository（`active_repository is None`） | 候选执行时，此时 pass 已持锁 | 不是模式分支，group 4 不删 |
 
 它不是 evidence 里的 blocker，而是异常，直接抛到调用方（`nhms-pipeline`
