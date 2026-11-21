@@ -10269,8 +10269,9 @@ def test_loop_stripped_retry_identity_peels_stacked_suffixes_and_stops_on_unpars
 
     Three cases, one per branch of ``split_retry_job_identity``'s termination rule:
 
-    * an unparsable tail (``_retry_active``, the SQL ``RetryService`` shape) makes the first
-      call return its input, so the loop stops immediately and the id is returned untouched --
+    * an unparsable tail (``_retry_active``, the shape the SQL retry service minted before
+      #3261 deleted it) makes the first call return its input, so the loop stops immediately
+      and the id is returned untouched --
       the stripper must never chew through a suffix it cannot parse;
     * an EMPTY tail (``job_x_retry_``) is the same branch reached through ``int("")``;
     * the stacked production shape (the node-27 archive's
@@ -10290,9 +10291,10 @@ def test_loop_stripped_retry_identity_peels_stacked_suffixes_and_stops_on_unpars
 
 
 def test_sql_retry_service_active_retry_marker_id_stays_fail_open() -> None:
-    """Non-regression: the SQL RetryService id shape is not cycle grammar and must fail OPEN.
+    """Non-regression: the SQL retry service id shape is not cycle grammar and must fail OPEN.
 
-    ``RetryService`` mints ``{run_id}_retry_active``; the cycle-grammar test rejects it before
+    The SQL retry service (deleted by #3261; its historical markers remain) minted
+    ``{run_id}_retry_active``; the cycle-grammar test rejects it before
     any stage reasoning happens, so the marker keeps the historical fail-open and a DB-path
     manual retry does not lose its operator attempt number.  (The loop-stripper is never
     reached on this path -- its own handling of the unparsable ``_retry_active`` tail is
@@ -26405,7 +26407,6 @@ def test_cancel_active_slurm_runs_before_cycle_level_active_skip(
     monkeypatch.setenv("WORKSPACE_ROOT", str(roots["workspace_root"]))
     monkeypatch.setenv("OBJECT_STORE_ROOT", str(roots["object_store_root"]))
     monkeypatch.setenv("SLURM_GATEWAY_URL", "http://slurm-gateway.internal:8000")
-    monkeypatch.setattr(scheduler_module, "_retry_service_from_env", lambda: "retry-service-from-env")
     monkeypatch.setattr(scheduler_module, "ForecastOrchestrator", DefaultPathCancelOrchestrator)
     config = _config(
         roots["workspace_root"],
@@ -26473,7 +26474,6 @@ def test_cancel_active_slurm_gap_blocks_top_level_cancelled_status(
     monkeypatch.setenv("WORKSPACE_ROOT", str(roots["workspace_root"]))
     monkeypatch.setenv("OBJECT_STORE_ROOT", str(roots["object_store_root"]))
     monkeypatch.setenv("SLURM_GATEWAY_URL", "http://slurm-gateway.internal:8000")
-    monkeypatch.setattr(scheduler_module, "_retry_service_from_env", lambda: "retry-service-from-env")
     monkeypatch.setattr(scheduler_module, "ForecastOrchestrator", GapCancelOrchestrator)
     config = _config(
         roots["workspace_root"],
@@ -41121,10 +41121,6 @@ def test_valid_db_free_from_env_uses_file_registry_and_canonical_readiness_witho
         pytest.fail("DB-free file providers must not construct DB-backed factory")
 
     monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
-    monkeypatch.setattr(
-        "services.orchestrator.scheduler._retry_service_from_env",
-        lambda: pytest.fail("DB-free file providers must not construct retry service"),
-    )
     monkeypatch.setattr("packages.common.met_store.PsycopgMetStore.from_env", staticmethod(fail_db_factory))
     monkeypatch.setattr(
         "packages.common.state_manager.PsycopgStateSnapshotRepository.from_env",
@@ -45081,10 +45077,6 @@ def test_db_free_orchestrator_uses_slurm_gateway_retry_config(
 
     monkeypatch.setattr(scheduler_module, "FileJournalRetryService", CapturingFileRetryService)
     monkeypatch.setattr(scheduler_module, "ForecastOrchestrator", CapturingForecastOrchestrator)
-    monkeypatch.setattr(
-        "services.orchestrator.scheduler._retry_service_from_env",
-        lambda: pytest.fail("DB-free orchestrator must not construct DB retry service"),
-    )
     scheduler = ProductionScheduler(
         ProductionSchedulerConfig(now=_dt("2026-05-21T12:00:00Z")),
         registry=object(),
@@ -45829,10 +45821,6 @@ def test_db_free_scheduler_fake_slurm_submission_writes_file_journal_without_dat
     monkeypatch.setattr(
         "services.orchestrator.scheduler._slurm_preflight",
         lambda _config: {"status": "ready", "enabled": True, "blockers": [], "checks": {}},
-    )
-    monkeypatch.setattr(
-        "services.orchestrator.scheduler._retry_service_from_env",
-        lambda: pytest.fail("DB-free fake Slurm submission must not construct DB retry service"),
     )
     monkeypatch.setattr("services.orchestrator.persistence.PipelineStore", fail_db_factory)
     monkeypatch.setattr(

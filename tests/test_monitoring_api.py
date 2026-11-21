@@ -2049,9 +2049,6 @@ def test_display_retry_returns_manual_action_without_gateway_or_store_dependenci
     display_app.dependency_overrides[pipeline_routes.get_pipeline_store] = _dependency_forbidden(
         "pipeline store must not be constructed"
     )
-    display_app.dependency_overrides[pipeline_routes.get_retry_service] = _dependency_forbidden(
-        "retry service must not be constructed"
-    )
     display_app.dependency_overrides[pipeline_routes.get_slurm_gateway] = _dependency_forbidden(
         "gateway must not be constructed"
     )
@@ -2077,9 +2074,6 @@ def test_display_retry_invalid_run_id_returns_existing_validation_error(monkeypa
     display_app = create_app(_display_env())
     display_app.dependency_overrides[pipeline_routes.get_pipeline_store] = _dependency_forbidden(
         "pipeline store must not be constructed"
-    )
-    display_app.dependency_overrides[pipeline_routes.get_retry_service] = _dependency_forbidden(
-        "retry service must not be constructed"
     )
     display_app.dependency_overrides[pipeline_routes.get_slurm_gateway] = _dependency_forbidden(
         "gateway must not be constructed"

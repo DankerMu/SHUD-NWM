@@ -262,7 +262,7 @@ _CHAIN_PERSISTENCE_REPOSITORY_COMPAT_PROTOCOL_METHOD_NAMES = (
     "update_forecast_cycle_status",
     "list_stage_statuses",
 )
-_CHAIN_RETRY_COMPAT_ALIAS_NAMES = ("RetryConfig", "RetryService", "compute_backoff_seconds")
+_CHAIN_RETRY_COMPAT_ALIAS_NAMES = ("RetryConfig", "compute_backoff_seconds")
 _CHAIN_RETRY_COMPAT_ALIAS_OWNER_MISSING = tuple(
     (name for name in _CHAIN_RETRY_COMPAT_ALIAS_NAMES if not hasattr(_chain.retry, name))
 )
@@ -302,12 +302,8 @@ _CHAIN_RETRY_COMPAT_LOCAL_METHOD_NAMES = (
     "_retry_partial_array_stage",
     "_release_retry_store_transaction",
 )
-_CHAIN_RETRY_COMPAT_LOCAL_FACTORY_NAMES = ("_retry_service_from_env",)
 _CHAIN_RETRY_COMPAT_CHAIN_LOCAL_CLASSIFICATIONS = _chain.MappingProxyType(
-    {
-        **{name: "chain-local-bridge" for name in _CHAIN_RETRY_COMPAT_LOCAL_METHOD_NAMES},
-        **{name: "chain-local-factory" for name in _CHAIN_RETRY_COMPAT_LOCAL_FACTORY_NAMES},
-    }
+    {name: "chain-local-bridge" for name in _CHAIN_RETRY_COMPAT_LOCAL_METHOD_NAMES}
 )
 _CHAIN_STAGE_CATALOG_COMPAT_REEXPORT_NAMES = (
     "ANALYSIS_STAGES",

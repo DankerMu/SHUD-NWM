@@ -242,12 +242,16 @@ def test_legacy_lane_downstream_parse_derives_its_own_attempt_after_upstream_res
     3 -> ``_retry_4``) instead of aiming at the occupied ``_parse_retry_1``.
     """
 
-    from services.orchestrator.retry import RetryConfig, RetryService
-    from tests.test_orchestration_chain import StoreBackedCycleRepository, _marker_claim_basins, _pipeline_store
+    from tests.test_orchestration_chain import (
+        FakeRetryService,
+        StoreBackedCycleRepository,
+        _marker_claim_basins,
+        _pipeline_store,
+    )
 
     store = _pipeline_store()
     repository = StoreBackedCycleRepository(store)
-    retry_service = RetryService(store, RetryConfig(max_retries=3, backoff_schedule=[0]))
+    retry_service = FakeRetryService(max_retries=3)
 
     def _round(label: str, client: FakeCycleSlurmClient) -> Any:
         orchestrator = _orchestrator(tmp_path / label, repository, client, retry_service=retry_service)

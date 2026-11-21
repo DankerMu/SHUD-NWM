@@ -74,6 +74,7 @@ from services.orchestrator.chain_forced_resubmit import (
 )
 from services.orchestrator.file_orchestration_journal import (
     OPERATOR_RECOVERY_ATTESTATION_FIELD,
+    FileJournalRetryService,
     FileOrchestrationJournalError,
 )
 from services.orchestrator.forcing_submit_identity import (
@@ -106,7 +107,7 @@ class ForecastOrchestratorCycleMixin:
         state_manager: _chain.StateManager | None = None,
         slurm_client: _chain.SlurmGatewayClient | None = None,
         object_store: _chain.LocalObjectStore | None = None,
-        retry_service: _chain.RetryService | None = None,
+        retry_service: FileJournalRetryService | None = None,
     ) -> None:
         self.config = config
         self.repository = repository
@@ -272,10 +273,11 @@ class ForecastOrchestratorCycleMixin:
             should_retry = getattr(self.retry_service, "should_auto_retry", None)
             if callable(should_retry) and not bool(should_retry(job)):
                 # Declining auto retry owns the permanent-failure mark (#1312).
-                # Gate on the SERVICE SHAPE, not on the method name: the
-                # store-less ``RetryService`` used by the db-free gate carries
-                # the same method but no persistence, and must keep returning
-                # None without marking and without raising.
+                # Gate on the SERVICE SHAPE, not on the method name: a
+                # retry service with no ``repository`` (the tests' store-less
+                # db-free gate fake) carries the same method but no
+                # persistence, and must keep returning None without marking
+                # and without raising.
                 if getattr(self.retry_service, "repository", None) is not None:
                     self._mark_declined_master_permanently_failed(job, current)
                 return None

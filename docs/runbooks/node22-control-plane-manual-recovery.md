@@ -461,7 +461,8 @@ marker 车道：它在 cycle 写锁内写 `manual_repair_requested` marker，不
 会留下一条 `status = pending`、`retry_count > 0`、`slurm_job_id` 为空、`manual_retry_marker = true` 的行（job id
 通常是 `<run_id>_retry_active`）。新代码不会再产生这种行，但历史行可能仍在。它写在哪里决定了它挡住什么：
 
-- **DB 车道**（`ops.pipeline_job`）：唯一的生产写入方是 DB 版 `RetryService.attempt_manual_retry`，只可能出现在带
+- **DB 车道**（`ops.pipeline_job`）：唯一的生产写入方曾是 DB 版 retry service 的 `attempt_manual_retry`（该方法 #3157 退役，
+  该 SQL retry service 整体已由 #3261 删除，此处为历史说明），只可能出现在带
   `DATABASE_URL` 的 compute_control / dev_monolith 上（例如回滚演练或隔离 E2E；node-22 生产不连 DB）。marker
   脚本读的是 file journal，**看不到**这条行，所以它不挡 marker 车道；API retry 也已退役，没有东西再因它返回
   `RETRY_CONFLICT`。它挡住的是同一 DB 环境里读 `ops.pipeline_job` 的 active 判定：`pending` 属于 active 集合，

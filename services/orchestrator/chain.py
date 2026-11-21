@@ -91,7 +91,7 @@ from services.orchestrator.reservation import (
     reserve_candidate,
     slurm_comment_for,
 )
-from services.orchestrator.retry import RetryConfig, RetryService, compute_backoff_seconds
+from services.orchestrator.retry import RetryConfig, compute_backoff_seconds
 from services.orchestrator.retry_identity import retry_suffix_attempt
 from services.orchestrator.scheduler_state_types import ACTIVE_HYDRO_STATUSES, DURABLE_HYDRO_SUCCESS_STATUSES
 from packages.common.contracts.time_normalization import (  # noqa: F401

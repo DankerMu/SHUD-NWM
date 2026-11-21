@@ -32,7 +32,6 @@ from services.orchestrator import scheduler_state as _scheduler_state_module
 from services.orchestrator.chain import (
     ForecastOrchestrator,
     OrchestratorConfig,
-    _retry_service_from_env,
     scenario_for_source,
 )
 from services.orchestrator.reservation import (

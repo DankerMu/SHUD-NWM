@@ -899,13 +899,6 @@ DISPLAY_UNIT_CONNECT_CLOSURE: tuple[tuple[str, str, str], ...] = (
         "any display-unit route reaches",
     ),
     (
-        "services/orchestrator/chain_compat_runtime.py",
-        UNREACHABLE,
-        "static-only: the single bridge is services/orchestrator/chain.py, imported ONLY inside "
-        "services/orchestrator/__init__.py:51 (the module __getattr__ body), so `import apps.api.main` leaves "
-        "services.orchestrator.chain out of sys.modules and this module is never executed by the unit",
-    ),
-    (
         "services/tile_publisher/publisher.py",
         UNREACHABLE,
         "static-only: imported by services/orchestrator/chain.py, which is behind the deferred import in "

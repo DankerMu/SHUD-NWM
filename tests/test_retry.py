@@ -4,22 +4,26 @@ import logging
 import re
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
-from sqlalchemy import create_engine, event, select
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from services.orchestrator import retry as retry_module
 from services.orchestrator import scheduler_state_types
-from services.orchestrator.persistence import Base, PipelineEvent, PipelineJob, PipelineStore
+from services.orchestrator.file_orchestration_journal import (
+    FileJournalRetryService,
+    FileOrchestrationJournalRepository,
+)
+from services.orchestrator.persistence import Base, PipelineJob, PipelineStore
 from services.orchestrator.retry import (
     MANUAL_RETRY_DURABLE_SUCCESS_STATUSES,
     NON_TRANSIENT_ERROR_CODES,
     TRANSIENT_ERROR_CODES,
     RetryConfig,
     RetryError,
-    RetryService,
     auto_retry_skipped_details,
     classify_failure,
     compute_backoff_seconds,
@@ -225,122 +229,6 @@ def test_backoff_calculation() -> None:
     assert compute_backoff_seconds(4, [5, 10]) == 10
 
 
-def test_should_auto_retry_transient() -> None:
-    with _store() as store:
-        job = _create_job(store, error_code="SLURM_TIMEOUT")
-        service = RetryService(store, RetryConfig(max_retries=3))
-
-        assert service.should_auto_retry(job) is True
-
-
-def test_should_auto_retry_poll_timeout() -> None:
-    with _store() as store:
-        job = _create_job(store, error_code="SLURM_JOB_TIMEOUT")
-        service = RetryService(store, RetryConfig(max_retries=3))
-
-        assert service.should_auto_retry(job) is True
-
-
-@pytest.mark.parametrize("error_code", ["INVALID_MANIFEST", "MALFORMED_INPUT", "POLICY_BLOCKED"])
-def test_should_auto_retry_non_transient(error_code: str) -> None:
-    with _store() as store:
-        job = _create_job(store, error_code=error_code)
-        service = RetryService(store, RetryConfig(max_retries=3))
-
-        assert service.should_auto_retry(job) is False
-        assert job.status == "failed"
-        assert _events(store) == []
-
-
-def test_should_auto_retry_max_reached() -> None:
-    with _store() as store:
-        job = _create_job(store, error_code="SLURM_TIMEOUT", retry_count=3)
-        service = RetryService(store, RetryConfig(max_retries=3))
-
-        assert service.should_auto_retry(job) is False
-        assert job.status == "failed"
-        assert _events(store) == []
-
-
-def test_out_of_memory_blocks_auto_retry_within_retry_limit() -> None:
-    with _store() as store:
-        job = _create_job(store, error_code="OUT_OF_MEMORY", retry_count=2)
-        service = RetryService(store, RetryConfig(max_retries=3))
-
-        policy = service.retry_policy_for_job(job)
-        updated = service.handle_failed_job(job)
-
-        assert policy["classifier"] == "resource_configuration"
-        assert policy["retryable"] is False
-        assert policy["permanent"] is True
-        assert policy["auto_retry"] is False
-        assert updated.job_id == job.job_id
-        assert updated.status == "permanently_failed"
-        assert updated.retry_count == 2
-        assert [event.event_type for event in _events(store)] == ["permanently_failed"]
-        event = _events(store)[0]
-        assert event.details["last_error"] == "OUT_OF_MEMORY"
-        assert event.details["failure"]["classifier"] == "resource_configuration"
-        assert event.details["failure"]["retryable"] is False
-        assert event.details["failure"]["permanent"] is True
-
-
-def test_handle_failed_job_transient() -> None:
-    with _store() as store:
-        job = _create_job(store, error_code="SLURM_TIMEOUT")
-        service = RetryService(store, RetryConfig(max_retries=3))
-
-        retry = service.handle_failed_job(job)
-
-        store.session.refresh(job)
-        assert retry.job_id == "job_1_retry_1"
-        assert retry.status == "pending"
-        assert retry.retry_count == 1
-        assert job.status == "failed"
-        assert job.retry_count == 0
-
-
-def test_handle_failed_job_non_transient() -> None:
-    with _store() as store:
-        job = _create_job(store, error_code="INVALID_MANIFEST")
-        service = RetryService(store, RetryConfig(max_retries=3))
-
-        updated = service.handle_failed_job(job)
-
-        assert updated.status == "permanently_failed"
-
-
-def test_handle_failed_job_exhausted() -> None:
-    with _store() as store:
-        job = _create_job(store, error_code="SLURM_TIMEOUT", retry_count=3)
-        service = RetryService(store, RetryConfig(max_retries=3))
-
-        updated = service.handle_failed_job(job)
-
-        assert updated.status == "permanently_failed"
-
-
-def test_out_of_memory_becomes_permanent_on_the_first_attempt() -> None:
-    with _store() as store:
-        job = _create_job(store, error_code="OUT_OF_MEMORY", retry_count=0)
-        service = RetryService(store, RetryConfig(max_retries=3))
-
-        updated = service.handle_failed_job(job)
-
-        assert updated.status == "permanently_failed"
-        assert updated.retry_count == 0
-        assert _jobs(store) == ["job_1"]
-        event = _events(store)[0]
-        assert event.event_type == "permanently_failed"
-        assert event.details["final_retry_count"] == 0
-        assert event.details["automatic_retry_stopped"] is True
-        assert event.details["failure"]["classifier"] == "resource_configuration"
-        assert event.details["failure"]["attempt"] == 0
-        assert event.details["failure"]["retryable"] is False
-        assert event.details["failure"]["permanent"] is True
-        assert event.details["failure"]["limit_exhausted"] is False
-
-
 def test_auto_retry_skipped_details_flags_non_transient_codes() -> None:
     for error_code in _spec_non_transient_error_codes():
         assert auto_retry_skipped_details(error_code) == {
@@ -398,281 +286,6 @@ def test_auto_retry_skipped_reason_literals_have_a_single_source() -> None:
         for literal in literals:
             counts[literal] += text.count(literal)
     assert counts == dict.fromkeys(literals, 1)
-
-
-@pytest.mark.parametrize("error_code", _spec_non_transient_error_codes())
-def test_permanently_failed_event_carries_auto_retry_skipped_for_non_transient_codes(
-    error_code: str,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    with _store() as store:
-        job = _create_job(store, error_code=error_code)
-        service = RetryService(store, RetryConfig(max_retries=3))
-
-        with caplog.at_level(logging.WARNING, logger=_RETRY_MODULE_LOGGER):
-            updated = service.handle_failed_job(job)
-
-        assert updated.status == "permanently_failed"
-        details = _events(store)[0].details
-        assert details["auto_retry_skipped"] is True
-        assert details["reason"] == "non_transient_error"
-        assert details["error_code"] == error_code
-        assert details["failure"]["retryable"] is False
-        assert _auto_retry_skipped_warnings(caplog) == []
-
-
-def test_permanently_failed_event_flags_an_unknown_error_code_and_warns_once(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    with _store() as store:
-        job = _create_job(store, error_code=_UNKNOWN_ERROR_CODE)
-        service = RetryService(store, RetryConfig(max_retries=3))
-
-        with caplog.at_level(logging.WARNING, logger=_RETRY_MODULE_LOGGER):
-            updated = service.handle_failed_job(job)
-
-        assert updated.status == "permanently_failed"
-        details = _events(store)[0].details
-        assert details["auto_retry_skipped"] is True
-        assert details["reason"] == "unknown_error_code_defaulted_non_transient"
-        assert details["error_code"] == _UNKNOWN_ERROR_CODE
-        assert details["failure"]["retryable"] is False
-        assert _auto_retry_skipped_warnings(caplog) == [_unknown_error_code_warning(_UNKNOWN_ERROR_CODE)]
-
-
-@pytest.mark.parametrize("error_code", _UNLISTED_PRODUCTION_ERROR_CODES)
-def test_unlisted_production_error_codes_default_to_the_unknown_reason_and_warn(
-    error_code: str,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Knowing acceptance: a real production code rides the unknown-default branch.
-
-    `SLURM_JOB_FAILED` is the gateway's catch-all for terminal Slurm states, pinned
-    onto neither classification list by tests/test_real_slurm_gateway.py, so it
-    produces reason `unknown_error_code_defaulted_non_transient` and the "add to
-    classification list" warning on every permanent failure — which is exactly what
-    spec.md's unknown-code scenario prescribes, so #1314 accepts it rather than
-    silencing it.  `SHUD_FAILED` shared this tuple until openspec change
-    retry-stage-failure-classification (#1462) classified the SHUD runtime family and
-    the canonical stage-failure family, so the tuple — and this test — now guard the
-    `SLURM_JOB_FAILED` ruling alone; that ruling stands and cannot be reversed by
-    accident.
-    """
-
-    assert error_code not in (TRANSIENT_ERROR_CODES | NON_TRANSIENT_ERROR_CODES)
-    with _store() as store:
-        job = _create_job(store, error_code=error_code)
-        service = RetryService(store, RetryConfig(max_retries=3))
-
-        with caplog.at_level(logging.WARNING, logger=_RETRY_MODULE_LOGGER):
-            updated = service.handle_failed_job(job)
-
-        assert updated.status == "permanently_failed"
-        details = _events(store)[0].details
-        assert details["auto_retry_skipped"] is True
-        assert details["reason"] == "unknown_error_code_defaulted_non_transient"
-        assert details["error_code"] == error_code
-        assert _auto_retry_skipped_warnings(caplog) == [_unknown_error_code_warning(error_code)]
-
-
-def test_permanently_failed_event_omits_auto_retry_skipped_when_the_budget_is_exhausted(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    with _store() as store:
-        job = _create_job(store, error_code="SLURM_TIMEOUT", retry_count=3)
-        service = RetryService(store, RetryConfig(max_retries=3))
-
-        with caplog.at_level(logging.WARNING, logger=_RETRY_MODULE_LOGGER):
-            updated = service.handle_failed_job(job)
-
-        assert updated.status == "permanently_failed"
-        details = _events(store)[0].details
-        assert "auto_retry_skipped" not in details
-        assert details["failure"]["limit_exhausted"] is True
-        assert _auto_retry_skipped_warnings(caplog) == []
-
-
-def test_permanently_failed_event_omits_auto_retry_skipped_without_a_recorded_error_code(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    with _store() as store:
-        job = _create_job(store, error_code=None)
-        service = RetryService(store, RetryConfig(max_retries=3))
-
-        with caplog.at_level(logging.WARNING, logger=_RETRY_MODULE_LOGGER):
-            updated = service.handle_failed_job(job)
-
-        assert updated.status == "permanently_failed"
-        details = _events(store)[0].details
-        assert "auto_retry_skipped" not in details
-        assert details["failure"]["reason_code"] == "UNKNOWN_FAILURE"
-        assert details["failure"]["limit_exhausted"] is False
-        assert _auto_retry_skipped_warnings(caplog) == []
-
-
-def test_non_transient_code_carries_auto_retry_skipped_even_at_the_retry_limit() -> None:
-    with _store() as store:
-        job = _create_job(store, error_code="OUT_OF_MEMORY", retry_count=3)
-        service = RetryService(store, RetryConfig(max_retries=3))
-
-        updated = service.handle_failed_job(job)
-
-        assert updated.status == "permanently_failed"
-        details = _events(store)[0].details
-        assert details["auto_retry_skipped"] is True
-        assert details["reason"] == "non_transient_error"
-        assert details["failure"]["limit_exhausted"] is True
-        assert details["failure"]["retryable"] is False
-
-
-def test_schedule_auto_retry() -> None:
-    with _store() as store:
-        job = _create_job(store, error_code="SLURM_TIMEOUT")
-        service = RetryService(store, RetryConfig(max_retries=3))
-
-        retry = service.schedule_auto_retry(job)
-
-        store.session.refresh(job)
-        assert retry.job_id != job.job_id
-        assert retry.job_id == "job_1_retry_1"
-        assert retry.run_id == job.run_id
-        assert retry.cycle_id == job.cycle_id
-        assert retry.job_type == job.job_type
-        assert retry.model_id == job.model_id
-        assert retry.stage == job.stage
-        assert retry.retry_count == 1
-        assert retry.status == "pending"
-        assert retry.slurm_job_id is None
-        assert job.status == "failed"
-        assert job.retry_count == 0
-        assert job.slurm_job_id == "123"
-        event = _events(store)[0]
-        assert event.event_type == "retry"
-        assert event.status_from == "failed"
-        assert event.status_to == "pending"
-
-
-def test_schedule_auto_retry_reuses_submission_failed_retry_without_slurm_binding() -> None:
-    with _store() as store:
-        job = _create_job(store, error_code="NODE_FAILURE", retry_count=1)
-        stale_retry = _create_job(
-            store,
-            job_id="job_1_retry_2",
-            run_id=job.run_id,
-            status="submission_failed",
-            error_code="SUBMIT_INTERRUPTED",
-            retry_count=2,
-        )
-        stale_retry.slurm_job_id = None
-        stale_retry.array_task_id = None
-        stale_retry.started_at = datetime(2026, 5, 1, 1, tzinfo=UTC)
-        stale_retry.finished_at = datetime(2026, 5, 1, 2, tzinfo=UTC)
-        stale_retry.exit_code = 1
-        stale_retry.error_message = "submission interrupted"
-        stale_retry.log_uri = "s3://logs/stale"
-        store.session.add(stale_retry)
-        store.session.commit()
-        service = RetryService(store, RetryConfig(max_retries=3))
-
-        retry = service.schedule_auto_retry(job)
-
-        assert retry.job_id == "job_1_retry_2"
-        assert retry.status == "pending"
-        assert retry.retry_count == 2
-        assert retry.slurm_job_id is None
-        assert retry.array_task_id is None
-        assert retry.started_at is None
-        assert retry.finished_at is None
-        assert retry.exit_code is None
-        assert retry.error_code is None
-        assert retry.error_message is None
-        assert retry.log_uri is None
-        assert [candidate.job_id for candidate in store.query_jobs_by_run(job.run_id)] == [
-            "job_1",
-            "job_1_retry_2",
-        ]
-        event = _events(store)[0]
-        assert event.event_type == "retry"
-        assert event.details["reused_existing_retry_job"] is True
-        assert event.details["previous_job_id"] == "job_1"
-
-
-def test_schedule_auto_retry_does_not_reuse_retry_with_slurm_binding() -> None:
-    with _store() as store:
-        job = _create_job(store, error_code="NODE_FAILURE", retry_count=1)
-        existing_retry = _create_job(
-            store,
-            job_id="job_1_retry_2",
-            run_id=job.run_id,
-            status="submission_failed",
-            error_code="SUBMIT_INTERRUPTED",
-            retry_count=2,
-        )
-        existing_retry.slurm_job_id = "slurm_existing_retry"
-        store.session.add(existing_retry)
-        store.session.commit()
-        service = RetryService(store, RetryConfig(max_retries=3))
-
-        with pytest.raises(RetryError) as exc_info:
-            service.schedule_auto_retry(job)
-
-        assert exc_info.value.code == "AUTO_RETRY_JOB_CONFLICT"
-        assert exc_info.value.details["retry_job_id"] == "job_1_retry_2"
-        assert exc_info.value.details["existing_slurm_job_id"] == "slurm_existing_retry"
-
-
-def test_schedule_auto_retry_on_a_retry_row_stacks_the_suffix() -> None:
-    """#2254 must-preserve: the DB producer appends ``_retry_<n>`` to the failed row's id.
-
-    Retrying ``job_1_retry_1`` therefore yields the stacked ``job_1_retry_1_retry_2``;
-    the chain's attempt numbering reads the last suffix of this shape.
-    """
-
-    with _store() as store:
-        job = _create_job(store, job_id="job_1_retry_1", error_code="NODE_FAILURE", retry_count=1)
-        service = RetryService(store, RetryConfig(max_retries=3))
-
-        retry = service.schedule_auto_retry(job)
-
-        assert retry.job_id == "job_1_retry_1_retry_2"
-        assert retry.retry_count == 2
-        assert retry.status == "pending"
-
-
-def test_mark_permanently_failed() -> None:
-    with _store() as store:
-        job = _create_job(store, error_code="SLURM_TIMEOUT", retry_count=3)
-        service = RetryService(store, RetryConfig(max_retries=3))
-
-        updated = service.mark_permanently_failed(job)
-
-        assert updated.status == "permanently_failed"
-        event = _events(store)[0]
-        assert event.event_type == "permanently_failed"
-        assert event.status_from == "failed"
-        assert event.status_to == "permanently_failed"
-        assert event.details["final_retry_count"] == 3
-        assert event.details["last_error"] == "SLURM_TIMEOUT"
-        assert event.details["automatic_retry_stopped"] is True
-        assert event.details["failure"]["classifier"] == "transient_slurm_runtime"
-        assert event.details["failure"]["limit_exhausted"] is True
-
-
-def test_audit_event_auto() -> None:
-    with _store() as store:
-        job = _create_job(store, error_code="STORAGE_WRITE_FAILED")
-        service = RetryService(store, RetryConfig(max_retries=3))
-
-        service.schedule_auto_retry(job)
-
-        event = _events(store)[0]
-        assert event.details["trigger"] == "auto"
-        assert event.details["retry_count"] == 1
-        assert event.details["previous_error"] == "STORAGE_WRITE_FAILED"
-        assert event.details["backoff_seconds"] == 60
-        assert event.details["previous_job_id"] == job.job_id
-        assert event.details["slurm_job_id"] is None
-        assert event.details["failure"]["classifier"] == "transient_slurm_runtime"
 
 
 def test_permanently_failed_override() -> None:
@@ -755,11 +368,352 @@ def _create_job(
     return job
 
 
-def _events(store: PipelineStore) -> list[PipelineEvent]:
-    statement = select(PipelineEvent).order_by(PipelineEvent.event_id.asc())
-    return list(store.session.scalars(statement))
+# --- File-lane retry service (#3261) ------------------------------------------------
+#
+# The SQL retry service and its tests were deleted by #3261 (R4). Each case below is
+# the same geometry driven through the surviving production retry service,
+# ``FileJournalRetryService`` over ``FileOrchestrationJournalRepository``, on a plain
+# (non accepted-submit master) row. The SQL cases whose exact geometry an existing
+# file-lane test already pins were deleted without a twin; the disposition table lives
+# in the #3261 PR body.
+
+_JOURNAL_CYCLE_TIME = datetime(2026, 6, 28, tzinfo=UTC)
+_JOURNAL_CYCLE_ID = "gfs_2026062800"
+_JOURNAL_RUN_ID = "fcst_gfs_2026062800_model_a"
 
 
-def _jobs(store: PipelineStore) -> list[str]:
-    statement = select(PipelineJob.job_id).order_by(PipelineJob.job_id.asc())
-    return [str(job_id) for job_id in store.session.scalars(statement)]
+def _journal_seed_job(
+    repository: FileOrchestrationJournalRepository,
+    *,
+    job_id: str = "job_1",
+    status: str = "failed",
+    error_code: str | None = "SLURM_TIMEOUT",
+    retry_count: int = 0,
+    slurm_job_id: str | None = "123",
+) -> dict[str, Any]:
+    record = {
+        "job_id": job_id,
+        "run_id": _JOURNAL_RUN_ID,
+        "cycle_id": _JOURNAL_CYCLE_ID,
+        "job_type": "run_shud_forecast_array",
+        "model_id": "model_a",
+        "status": "reserved",
+        "stage": "forecast",
+        "idempotency_key": f"gfs:{_JOURNAL_CYCLE_ID}:basin_a:{job_id}",
+        "candidate_id": "candidate_a",
+        "retry_count": retry_count,
+    }
+    assert repository.reserve_pipeline_job(record) is not None
+    if slurm_job_id is not None:
+        repository.bind_pipeline_job_reservation(record["idempotency_key"], slurm_job_id=slurm_job_id)
+    repository.update_pipeline_job_status(
+        job_id,
+        status,
+        error_code=error_code,
+        error_message=f"{error_code} failed" if error_code else None,
+        finished_at=_JOURNAL_CYCLE_TIME,
+    )
+    job = repository.get_pipeline_job(job_id)
+    assert job is not None
+    return job
+
+
+def _journal_failed_job(
+    tmp_path: Path,
+    **fields: Any,
+) -> tuple[FileOrchestrationJournalRepository, dict[str, Any]]:
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    return repository, _journal_seed_job(repository, **fields)
+
+
+def _journal_service(repository: FileOrchestrationJournalRepository, **config: Any) -> FileJournalRetryService:
+    return FileJournalRetryService(repository, RetryConfig(**{"max_retries": 3, **config}))
+
+
+def _journal_events(repository: FileOrchestrationJournalRepository) -> list[dict[str, Any]]:
+    state = repository.candidate_state(
+        source_id="gfs",
+        cycle_time=_JOURNAL_CYCLE_TIME,
+        model_id="model_a",
+        run_id=_JOURNAL_RUN_ID,
+        forcing_version_id="forc_gfs_2026062800_model_a",
+        candidate_id=f"gfs:{_JOURNAL_CYCLE_TIME.isoformat()}:model_a:forecast_gfs_deterministic",
+    )
+    assert state is not None
+    return [dict(event) for event in state["pipeline_events"]]
+
+
+def _journal_events_of(repository: FileOrchestrationJournalRepository, event_type: str) -> list[dict[str, Any]]:
+    return [event for event in _journal_events(repository) if event["event_type"] == event_type]
+
+
+def _journal_job_ids(repository: FileOrchestrationJournalRepository) -> list[str]:
+    return sorted(str(job["job_id"]) for job in repository.query_pipeline_jobs_by_cycle(_JOURNAL_CYCLE_ID))
+
+
+@pytest.mark.parametrize(
+    ("error_code", "retry_count", "expected"),
+    [
+        ("SLURM_TIMEOUT", 0, True),
+        ("SLURM_JOB_TIMEOUT", 0, True),
+        ("INVALID_MANIFEST", 0, False),
+        ("MALFORMED_INPUT", 0, False),
+        ("POLICY_BLOCKED", 0, False),
+        ("SLURM_TIMEOUT", 3, False),
+    ],
+)
+def test_file_lane_should_auto_retry_follows_the_retry_policy_and_writes_nothing(
+    tmp_path: Path,
+    error_code: str,
+    retry_count: int,
+    expected: bool,
+) -> None:
+    """Transient codes retry, non-transient codes and an exhausted budget do not."""
+
+    repository, job = _journal_failed_job(tmp_path, error_code=error_code, retry_count=retry_count)
+    events_before = _journal_events(repository)
+    service = _journal_service(repository)
+
+    assert service.should_auto_retry(job) is expected
+    assert repository.get_pipeline_job("job_1")["status"] == "failed"
+    assert _journal_events(repository) == events_before
+    assert _journal_job_ids(repository) == ["job_1"]
+
+
+def test_file_lane_out_of_memory_blocks_auto_retry_within_retry_limit(tmp_path: Path) -> None:
+    repository, job = _journal_failed_job(tmp_path, error_code="OUT_OF_MEMORY", retry_count=2)
+    service = _journal_service(repository)
+
+    policy = service.retry_policy_for_job(job)
+    updated = service.handle_failed_job(job)
+
+    assert policy["classifier"] == "resource_configuration"
+    assert policy["retryable"] is False
+    assert policy["permanent"] is True
+    assert policy["auto_retry"] is False
+    assert updated.job_id == "job_1"
+    assert updated.status == "permanently_failed"
+    assert updated.retry_count == 2
+    (event,) = _journal_events_of(repository, "permanently_failed")
+    assert _journal_events_of(repository, "retry") == []
+    assert event["details"]["last_error"] == "OUT_OF_MEMORY"
+    assert event["details"]["failure"]["classifier"] == "resource_configuration"
+    assert event["details"]["failure"]["retryable"] is False
+    assert event["details"]["failure"]["permanent"] is True
+
+
+def test_file_lane_handle_failed_job_transient_leaves_the_source_row(tmp_path: Path) -> None:
+    repository, job = _journal_failed_job(tmp_path, error_code="SLURM_TIMEOUT")
+    service = _journal_service(repository)
+
+    retry = service.handle_failed_job(job)
+
+    source = repository.get_pipeline_job("job_1")
+    assert retry.job_id == "job_1_retry_1"
+    assert retry.status == "pending"
+    assert retry.retry_count == 1
+    assert source["status"] == "failed"
+    assert source["retry_count"] == 0
+
+
+def test_file_lane_out_of_memory_becomes_permanent_on_the_first_attempt(tmp_path: Path) -> None:
+    repository, job = _journal_failed_job(tmp_path, error_code="OUT_OF_MEMORY", retry_count=0)
+    service = _journal_service(repository)
+
+    updated = service.handle_failed_job(job)
+
+    assert updated.status == "permanently_failed"
+    assert updated.retry_count == 0
+    assert _journal_job_ids(repository) == ["job_1"]
+    (event,) = _journal_events_of(repository, "permanently_failed")
+    assert event["details"]["final_retry_count"] == 0
+    assert event["details"]["automatic_retry_stopped"] is True
+    assert event["details"]["failure"]["classifier"] == "resource_configuration"
+    assert event["details"]["failure"]["attempt"] == 0
+    assert event["details"]["failure"]["retryable"] is False
+    assert event["details"]["failure"]["permanent"] is True
+    assert event["details"]["failure"]["limit_exhausted"] is False
+
+
+def test_file_lane_permanently_failed_event_flags_an_unknown_error_code_and_warns_once(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    repository, job = _journal_failed_job(tmp_path, error_code=_UNKNOWN_ERROR_CODE)
+    service = _journal_service(repository)
+
+    with caplog.at_level(logging.WARNING, logger=_RETRY_MODULE_LOGGER):
+        updated = service.handle_failed_job(job)
+
+    assert updated.status == "permanently_failed"
+    (event,) = _journal_events_of(repository, "permanently_failed")
+    assert event["details"]["auto_retry_skipped"] is True
+    assert event["details"]["reason"] == "unknown_error_code_defaulted_non_transient"
+    assert event["details"]["error_code"] == _UNKNOWN_ERROR_CODE
+    assert event["details"]["failure"]["retryable"] is False
+    assert _auto_retry_skipped_warnings(caplog) == [_unknown_error_code_warning(_UNKNOWN_ERROR_CODE)]
+
+
+@pytest.mark.parametrize("error_code", _UNLISTED_PRODUCTION_ERROR_CODES)
+def test_file_lane_unlisted_production_error_codes_default_to_the_unknown_reason_and_warn(
+    tmp_path: Path,
+    error_code: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Knowing acceptance (#1314) on the surviving lane: `SLURM_JOB_FAILED` rides the unknown default.
+
+    The gateway's catch-all is pinned onto neither classification list, so a permanent
+    failure carrying it records reason `unknown_error_code_defaulted_non_transient` and
+    emits the "add to classification list" warning once -- the spec's unknown-code
+    scenario, which #1314 accepts rather than silences.
+    """
+
+    assert error_code not in (TRANSIENT_ERROR_CODES | NON_TRANSIENT_ERROR_CODES)
+    repository, job = _journal_failed_job(tmp_path, error_code=error_code)
+    service = _journal_service(repository)
+
+    with caplog.at_level(logging.WARNING, logger=_RETRY_MODULE_LOGGER):
+        updated = service.handle_failed_job(job)
+
+    assert updated.status == "permanently_failed"
+    (event,) = _journal_events_of(repository, "permanently_failed")
+    assert event["details"]["auto_retry_skipped"] is True
+    assert event["details"]["reason"] == "unknown_error_code_defaulted_non_transient"
+    assert event["details"]["error_code"] == error_code
+    assert _auto_retry_skipped_warnings(caplog) == [_unknown_error_code_warning(error_code)]
+
+
+def test_file_lane_non_transient_code_carries_auto_retry_skipped_even_at_the_retry_limit(tmp_path: Path) -> None:
+    repository, job = _journal_failed_job(tmp_path, error_code="OUT_OF_MEMORY", retry_count=3)
+    service = _journal_service(repository)
+
+    updated = service.handle_failed_job(job)
+
+    assert updated.status == "permanently_failed"
+    (event,) = _journal_events_of(repository, "permanently_failed")
+    assert event["details"]["auto_retry_skipped"] is True
+    assert event["details"]["reason"] == "non_transient_error"
+    assert event["details"]["failure"]["limit_exhausted"] is True
+    assert event["details"]["failure"]["retryable"] is False
+
+
+def test_file_lane_schedule_auto_retry_copies_identity_and_leaves_the_source_row(tmp_path: Path) -> None:
+    repository, job = _journal_failed_job(tmp_path, error_code="SLURM_TIMEOUT")
+    service = _journal_service(repository)
+
+    retry = service.schedule_auto_retry(job)
+
+    source = repository.get_pipeline_job("job_1")
+    assert retry.job_id != job["job_id"]
+    assert retry.job_id == "job_1_retry_1"
+    assert retry.run_id == job["run_id"]
+    assert retry.cycle_id == job["cycle_id"]
+    assert retry.job_type == job["job_type"]
+    assert retry.model_id == job["model_id"]
+    assert retry.stage == job["stage"]
+    assert retry.retry_count == 1
+    assert retry.status == "pending"
+    assert retry.slurm_job_id is None
+    assert source["status"] == "failed"
+    assert source["retry_count"] == 0
+    assert source["slurm_job_id"] == "123"
+    (event,) = _journal_events_of(repository, "retry")
+    assert event["status_from"] == "failed"
+    assert event["status_to"] == "pending"
+
+
+def test_file_lane_schedule_auto_retry_reuses_submission_failed_retry_without_slurm_binding(
+    tmp_path: Path,
+) -> None:
+    repository, job = _journal_failed_job(tmp_path, error_code="NODE_FAILURE", retry_count=1)
+    stale_retry = {
+        **repository.get_pipeline_job("job_1"),
+        "job_id": "job_1_retry_2",
+        "status": "submission_failed",
+        "idempotency_key": f"gfs:{_JOURNAL_CYCLE_ID}:basin_a:job_1_retry_2",
+        "slurm_job_id": None,
+        "array_task_id": None,
+        "started_at": "2026-05-01T01:00:00Z",
+        "finished_at": "2026-05-01T02:00:00Z",
+        "exit_code": 1,
+        "retry_count": 2,
+        "error_code": "SUBMIT_INTERRUPTED",
+        "error_message": "submission interrupted",
+        "log_uri": "s3://logs/stale",
+    }
+    repository.upsert_pipeline_job(stale_retry)
+    service = _journal_service(repository)
+
+    retry = service.schedule_auto_retry(job)
+
+    assert retry.job_id == "job_1_retry_2"
+    assert retry.status == "pending"
+    assert retry.retry_count == 2
+    assert retry.slurm_job_id is None
+    assert retry.array_task_id is None
+    assert retry.started_at is None
+    assert retry.finished_at is None
+    assert retry.exit_code is None
+    assert retry.error_code is None
+    assert retry.error_message is None
+    assert retry.log_uri is None
+    assert _journal_job_ids(repository) == ["job_1", "job_1_retry_2"]
+    (event,) = _journal_events_of(repository, "retry")
+    assert event["details"]["reused_existing_retry_job"] is True
+    assert event["details"]["previous_job_id"] == "job_1"
+
+
+def test_file_lane_schedule_auto_retry_does_not_reuse_retry_with_slurm_binding(tmp_path: Path) -> None:
+    repository, job = _journal_failed_job(tmp_path, error_code="NODE_FAILURE", retry_count=1)
+    existing_retry = {
+        **repository.get_pipeline_job("job_1"),
+        "job_id": "job_1_retry_2",
+        "status": "submission_failed",
+        "idempotency_key": f"gfs:{_JOURNAL_CYCLE_ID}:basin_a:job_1_retry_2",
+        "slurm_job_id": "slurm_existing_retry",
+        "retry_count": 2,
+        "error_code": "SUBMIT_INTERRUPTED",
+    }
+    repository.upsert_pipeline_job(existing_retry)
+    service = _journal_service(repository)
+
+    with pytest.raises(RetryError) as exc_info:
+        service.schedule_auto_retry(job)
+
+    assert exc_info.value.code == "AUTO_RETRY_JOB_CONFLICT"
+    assert exc_info.value.details["retry_job_id"] == "job_1_retry_2"
+    assert exc_info.value.details["existing_slurm_job_id"] == "slurm_existing_retry"
+    assert _journal_events_of(repository, "retry") == []
+
+
+def test_file_lane_mark_permanently_failed_records_the_final_attempt(tmp_path: Path) -> None:
+    repository, job = _journal_failed_job(tmp_path, error_code="SLURM_TIMEOUT", retry_count=3)
+    service = _journal_service(repository)
+
+    updated = service.mark_permanently_failed(job)
+
+    assert updated.status == "permanently_failed"
+    (event,) = _journal_events_of(repository, "permanently_failed")
+    assert event["status_from"] == "failed"
+    assert event["status_to"] == "permanently_failed"
+    assert event["details"]["final_retry_count"] == 3
+    assert event["details"]["last_error"] == "SLURM_TIMEOUT"
+    assert event["details"]["automatic_retry_stopped"] is True
+    assert event["details"]["failure"]["classifier"] == "transient_slurm_runtime"
+    assert event["details"]["failure"]["limit_exhausted"] is True
+
+
+def test_file_lane_audit_event_auto(tmp_path: Path) -> None:
+    repository, job = _journal_failed_job(tmp_path, error_code="STORAGE_WRITE_FAILED")
+    service = _journal_service(repository)
+
+    service.schedule_auto_retry(job)
+
+    (event,) = _journal_events_of(repository, "retry")
+    assert event["details"]["trigger"] == "auto"
+    assert event["details"]["retry_count"] == 1
+    assert event["details"]["previous_error"] == "STORAGE_WRITE_FAILED"
+    assert event["details"]["backoff_seconds"] == 60
+    assert event["details"]["previous_job_id"] == "job_1"
+    assert event["details"]["slurm_job_id"] is None
+    assert event["details"]["failure"]["classifier"] == "transient_slurm_runtime"

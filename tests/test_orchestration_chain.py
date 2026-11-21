@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, get_type_hints
 
 import pytest
-from sqlalchemy import create_engine, event, select
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
@@ -47,7 +47,7 @@ from services.orchestrator.chain import (
     build_model_run_assembly,
 )
 from services.orchestrator.persistence import Base, PipelineEvent, PipelineJob, PipelineStore
-from services.orchestrator.retry import RetryConfig, RetryService
+from services.orchestrator.retry import RetryConfig
 from services.orchestrator.scheduler_state_types import DOWNSTREAM_RESTART_STAGES
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES
 from tests.pipeline_job_orm_helpers import (
@@ -1649,11 +1649,36 @@ def test_gateway_payload_missing_status_and_state_produces_failed_task() -> None
     assert aggregation.task_results[0].error_code == "NODE_FAILURE"
 
 
-class _DbFreeRetryGateService(RetryService):
-    """RetryService without a SQL store: the DB-free forecast-cohort gate shape."""
+class _DbFreeRetryGateService:
+    """A store-less retry service: the DB-free forecast-cohort gate shape.
+
+    It has neither ``repository`` nor ``store``, so the orchestrator-cycle decline
+    arm gates its permanent-failure mark on the service SHAPE
+    (``chain_forecast_orchestrator_cycle._schedule_cycle_stage_retry``) and must
+    return ``None`` without marking or raising. The policy is the production one:
+    both policy methods delegate to ``FileJournalRetryService`` (``classify_failure``
+    plus the ``permanently_failed`` check), never a hand-written answer. The write
+    methods explode, so a gate that reaches them fails the test.
+    """
 
     def __init__(self, *, max_retries: int = 3) -> None:
-        super().__init__(None, RetryConfig(max_retries=max_retries, backoff_schedule=[0]))  # type: ignore[arg-type]
+        self.config = RetryConfig(max_retries=max_retries, backoff_schedule=[0])
+
+    def retry_policy_for_job(self, job: Any) -> dict[str, Any]:
+        from services.orchestrator.file_orchestration_journal import FileJournalRetryService
+
+        return FileJournalRetryService.retry_policy_for_job(self, job)  # type: ignore[arg-type]
+
+    def should_auto_retry(self, job: Any) -> bool:
+        from services.orchestrator.file_orchestration_journal import FileJournalRetryService
+
+        return FileJournalRetryService.should_auto_retry(self, job)  # type: ignore[arg-type]
+
+    def mark_permanently_failed(self, job: Any) -> Any:
+        raise AssertionError("the store-less db-free gate must not mark a job permanently failed")
+
+    def handle_failed_job(self, job: Any) -> Any:
+        raise AssertionError("the store-less db-free gate must not handle a failed job")
 
 
 def _db_free_forecast_master_record(job_id: str, *, retry_count: Any) -> dict[str, Any]:
@@ -6085,47 +6110,66 @@ def test_partial_array_retry_only_resubmits_failed_basin_tasks(tmp_path: Path) -
 def test_partial_array_retry_persists_submission_under_retry_job_id_with_real_retry_service(
     tmp_path: Path,
 ) -> None:
-    store = _pipeline_store()
-    repository = StoreBackedCycleRepository(store)
+    """The production retry service persists a partial-array retry under its retry id.
+
+    Driven on the file lane (#3261 moved it off the deleted SQL retry service):
+    ``FileJournalRetryService`` over ``FileOrchestrationJournalRepository``. The
+    basins carry the production candidate identity (``fcst_*`` run ids, package
+    identity) the journal requires for the forecast cohort; the geometry is
+    otherwise unchanged.
+    """
+
+    from services.orchestrator.file_orchestration_journal import (
+        FileJournalRetryService,
+        FileOrchestrationJournalRepository,
+    )
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
     client = FakeCycleSlurmClient(
         array_results_by_stage={"forcing": [["succeeded", "failed", "succeeded"], ["succeeded"]]}
     )
-    retry_service = RetryService(store, RetryConfig(max_retries=1, backoff_schedule=[0]))
+    retry_service = FileJournalRetryService(repository, RetryConfig(max_retries=1, backoff_schedule=[0]))
     orchestrator = _orchestrator(tmp_path, repository, client, retry_service=retry_service)
+    basins = _basins(3)
+    for index, basin in enumerate(basins):
+        basin.update(
+            {
+                "run_id": f"fcst_gfs_2026050100_model_{index}",
+                "candidate_id": f"gfs:2026-05-01T00:00:00Z:model_{index}:forecast_gfs_deterministic",
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+            }
+        )
 
-    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(3))
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", basins)
 
-    retry_job = store.get_job("job_cycle_gfs_2026050100_forcing_retry_1")
+    retry_job_id = "job_cycle_gfs_2026050100_forcing_retry_1"
+    retry_job = repository.get_pipeline_job(retry_job_id)
     forcing_submissions = [submission for submission in client.submissions if submission["stage"] == "forcing"]
-    pending_retry_jobs = [
-        job.job_id
-        for job in store.session.scalars(select(PipelineJob).where(PipelineJob.status == "pending"))
-    ]
+    cycle_jobs = repository.query_pipeline_jobs_by_cycle("gfs_2026050100")
     assert result.status == "complete"
     assert retry_job is not None
-    assert retry_job.status == "succeeded"
-    assert retry_job.slurm_job_id == "2003"
-    assert retry_job.retry_count == 1
-    assert pending_retry_jobs == []
-    assert repository.jobs["job_cycle_gfs_2026050100_forcing_retry_1"]["slurm_job_id"] == "2003"
-    assert repository.jobs["job_cycle_gfs_2026050100_forcing_retry_1"]["status"] == "succeeded"
-    assert repository.jobs["job_cycle_gfs_2026050100_forcing"]["status"] == "partially_failed"
+    assert retry_job["status"] == "succeeded"
+    assert retry_job["slurm_job_id"] == "2003"
+    assert retry_job["retry_count"] == 1
+    assert [job["job_id"] for job in cycle_jobs if job["status"] == "pending"] == []
+    assert repository.get_pipeline_job("job_cycle_gfs_2026050100_forcing")["status"] == "partially_failed"
     assert [task["model_id"] for task in forcing_submissions[1]["tasks"]] == ["model_1"]
+    events = repository._cycle_rows(
+        source_id="gfs", cycle_time=_dt("2026-05-01T00:00:00Z"), model_id=None
+    ).pipeline_events
     retry_event = next(
-        event
-        for event in repository.events
-        if event["entity_id"] == "job_cycle_gfs_2026050100_forcing_retry_1"
-        and event["status_to"] == "succeeded"
+        event for event in events if event["entity_id"] == retry_job_id and event["status_to"] == "succeeded"
     )
     assert retry_event["details"]["task_results"][0]["array_task_id"] == 0
     assert retry_event["details"]["task_results"][0]["original_task_id"] == 1
     assert retry_event["details"]["task_results"][0]["model_id"] == "model_1"
-    assert retry_event["details"]["task_results"][0]["run_id"] == "run_1"
-    assert result.stages[1].pipeline_job_id == "job_cycle_gfs_2026050100_forcing_retry_1"
+    assert retry_event["details"]["task_results"][0]["run_id"] == "fcst_gfs_2026050100_model_1"
+    assert result.stages[1].pipeline_job_id == retry_job_id
     assert result.stages[2].task_results[1]["array_task_id"] == 1
     assert result.stages[2].task_results[1]["original_task_id"] == 1
     assert result.stages[2].task_results[1]["model_id"] == "model_1"
-    assert result.stages[2].task_results[1]["run_id"] == "run_1"
+    assert result.stages[2].task_results[1]["run_id"] == "fcst_gfs_2026050100_model_1"
     assert result.stages[2].task_results[1]["status"] == "succeeded"
 
 
@@ -11053,21 +11097,29 @@ def test_chain_retry_compat_facade_matches_owner_module_and_inventory(
 
     alias_names = legacy_chain._CHAIN_RETRY_COMPAT_ALIAS_NAMES
     local_method_names = legacy_chain._CHAIN_RETRY_COMPAT_LOCAL_METHOD_NAMES
-    local_factory_names = legacy_chain._CHAIN_RETRY_COMPAT_LOCAL_FACTORY_NAMES
     classifications = legacy_chain._CHAIN_RETRY_COMPAT_CHAIN_LOCAL_CLASSIFICATIONS
 
     assert len(alias_names) == len(set(alias_names))
+    # R4 (#3261): the SQL retry service, its env factory and the whole
+    # local-factory family are gone; only the bridge methods stay chain-local.
+    assert set(alias_names) == {"RetryConfig", "compute_backoff_seconds"}
+    assert set(classifications) == set(local_method_names)
+    for retired_name in (
+        "_CHAIN_RETRY_COMPAT_LOCAL_FACTORY_NAMES",
+        "_CHAIN_RETRY_COMPAT_LOCAL_FACTORY_MISSING",
+        "_CHAIN_RETRY_COMPAT_CHAIN_LOCAL_FACTORIES",
+        "_retry_service_from_env",
+    ):
+        assert not hasattr(legacy_chain, retired_name)
     assert legacy_chain._CHAIN_RETRY_COMPAT_ALIAS_OWNER_MISSING == ()
     assert legacy_chain._CHAIN_RETRY_COMPAT_ALIAS_FACADE_MISSING == ()
     assert legacy_chain._CHAIN_RETRY_COMPAT_ALIAS_DRIFT == ()
     assert legacy_chain._CHAIN_RETRY_COMPAT_CONSTRUCTOR_PARAM_MISSING == ()
     assert legacy_chain._CHAIN_RETRY_COMPAT_CONSTRUCTOR_CONFIG_DRIFT == ()
     assert legacy_chain._CHAIN_RETRY_COMPAT_LOCAL_METHOD_MISSING == ()
-    assert legacy_chain._CHAIN_RETRY_COMPAT_LOCAL_FACTORY_MISSING == ()
     assert set(legacy_chain._CHAIN_RETRY_COMPAT_OWNER_ALIASES) == set(alias_names)
     assert set(legacy_chain._CHAIN_RETRY_COMPAT_FACADE_ALIASES) == set(alias_names)
     assert set(legacy_chain._CHAIN_RETRY_COMPAT_CHAIN_LOCAL_METHODS) == set(local_method_names)
-    assert set(legacy_chain._CHAIN_RETRY_COMPAT_CHAIN_LOCAL_FACTORIES) == set(local_factory_names)
 
     for alias_name in alias_names:
         assert hasattr(retry, alias_name)
@@ -11081,9 +11133,6 @@ def test_chain_retry_compat_facade_matches_owner_module_and_inventory(
     for local_method_name in local_method_names:
         assert callable(getattr(legacy_chain.ForecastOrchestrator, local_method_name))
         assert classifications[local_method_name] == "chain-local-bridge"
-    for local_factory_name in local_factory_names:
-        assert callable(getattr(legacy_chain, local_factory_name))
-        assert classifications[local_factory_name] == "chain-local-factory"
 
     constructor_signature = inspect.signature(legacy_chain.ForecastOrchestrator.__init__)
     assert set(legacy_chain._CHAIN_RETRY_COMPAT_CONSTRUCTOR_PARAM_NAMES) == {"retry_service"}
@@ -11320,9 +11369,6 @@ def test_chain_retry_compat_facade_matches_owner_module_and_inventory(
         "in_transaction",
         "commit",
     ]
-
-    monkeypatch.delenv("DATABASE_URL", raising=False)
-    assert legacy_chain._retry_service_from_env() is None
 
     inventory_text = _chain_inventory_text()
     compat_tokens = sorted(name for name in vars(legacy_chain) if name.startswith("_CHAIN_RETRY_COMPAT_"))
@@ -14172,9 +14218,11 @@ _STACKED_BASE_JOB_ID = "job_cycle_gfs_2026050100_forecast_model_0_forecast"
 def _stacked_retry_repository() -> tuple[PipelineStore, list[dict[str, Any]], StoreBackedCycleRepository]:
     """``B``, ``B_retry_1``, ``B_retry_1_retry_2``, ``B_retry_1_retry_2_retry_3``, all terminal.
 
-    The retry rows are written by the real ``RetryService.handle_failed_job`` (the DB
-    producer that appends a suffix to the failed job's id).  Each new ``pending`` row is
-    then moved to a terminal ``failed`` bound to a Slurm id: otherwise the stage lookup
+    The rows are seeded directly in the shape the retired SQL retry service's
+    ``handle_failed_job`` produced (it appended ``_retry_<n>`` to the failed job's id;
+    the surviving producer's identical stacking is pinned by
+    ``tests/test_file_orchestration_journal.py::test_file_journal_auto_retry_on_a_retry_row_stacks_the_suffix``).
+    Each row is a terminal ``failed`` bound to a Slurm id: otherwise the stage lookup
     prefers the non-terminal row and resumes it instead of minting a retry id.
     """
 
@@ -14202,12 +14250,19 @@ def _stacked_retry_repository() -> tuple[PipelineStore, list[dict[str, Any]], St
     job.error_code = "NODE_FAILURE"
     store.session.add(job)
     store.session.commit()
-    retry_service = RetryService(store, RetryConfig(max_retries=3, backoff_schedule=[0]))
-    for slurm_job_id in ("7001", "7002", "7003"):
-        job = retry_service.handle_failed_job(job)
-        assert job.status == "pending"
-        job.status = "failed"
-        job.slurm_job_id = slurm_job_id
+    for retry_count, slurm_job_id in enumerate(("7001", "7002", "7003"), start=1):
+        job = seed_pipeline_job(
+            store.session,
+            job_id=f"{job.job_id}_retry_{retry_count}",
+            run_id=_STACKED_RUN_ID,
+            cycle_id="gfs_2026050100",
+            job_type="run_shud_forecast_array",
+            slurm_job_id=slurm_job_id,
+            model_id="model_0",
+            stage="forecast",
+            status="failed",
+            retry_count=retry_count,
+        )
         job.error_code = "NODE_FAILURE"
         store.session.add(job)
         store.session.commit()
@@ -15147,9 +15202,9 @@ def _nested_retry_skip_geometry(
 
     ``FakeRetryService(max_retries=2)`` is required for master's resubmission
     arm to be red at all: quota must admit a second nested attempt, and the
-    service must be permissive — the production ``RetryService`` classifies the
-    skip's ``error_code=None`` as a non-transient ``UNKNOWN_FAILURE`` and never
-    grants it.
+    service must be permissive — the production retry policy (``classify_failure``)
+    classifies the skip's ``error_code=None`` as a non-transient
+    ``UNKNOWN_FAILURE`` and never grants it.
     """
 
     from services.orchestrator.chain import _cycle_orchestration_run_id
@@ -16846,10 +16901,10 @@ def test_cycle_retry_decline_marks_the_master_row_permanently_failed(
 
 
 def test_cycle_retry_decline_without_journal_capability_does_not_mark_or_raise(tmp_path: Path) -> None:
-    """#1312 seam 3: the store-less ``RetryService`` shape is untouched.
+    """#1312 seam 3: the store-less retry-service shape is untouched.
 
-    It carries a same-named ``mark_permanently_failed`` that would explode on
-    its absent SQL store, so the mark is gated on the service SHAPE.
+    It carries a same-named ``mark_permanently_failed`` that explodes (it has no
+    ``repository`` and no ``store``), so the mark is gated on the service SHAPE.
     """
 
     job_id = "job_cycle_gfs_2026050100_forecast_retry_65"

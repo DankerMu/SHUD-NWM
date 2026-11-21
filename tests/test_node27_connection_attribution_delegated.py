@@ -133,14 +133,6 @@ DELEGATED_CONNECT_CLOSURE: tuple[tuple[str, str, str, str], ...] = (
     ),
     (
         "scripts/node27_autopipeline.py",
-        "services/orchestrator/chain_compat_runtime.py",
-        UNREACHABLE,
-        "static-only: services/orchestrator/chain.py is named by services/orchestrator/__init__.py:51 "
-        "and by chain_forecast_execution.py; autopipeline never constructs ForecastOrchestrator or "
-        "installs chain runtime",
-    ),
-    (
-        "scripts/node27_autopipeline.py",
         "services/tile_publisher/publisher.py",
         UNREACHABLE,
         "static-only: imported by services/orchestrator/chain.py on the node-22 publisher path; "
@@ -209,13 +201,6 @@ DELEGATED_CONNECT_CLOSURE: tuple[tuple[str, str, str, str], ...] = (
         "import-only, same verdict and reason as the unit-level row in "
         "tests/test_node27_connection_attribution.py: PsycopgMetStore.from_env() is called only from "
         "worker/CLI factories, none of which a display route reaches",
-    ),
-    (
-        "apps/api/routes/hydro_display.py",
-        "services/orchestrator/chain_compat_runtime.py",
-        UNREACHABLE,
-        "static-only: services/orchestrator/chain.py is imported ONLY inside the module __getattr__ at "
-        "services/orchestrator/__init__.py:51, so it is absent from the display unit's runtime sys.modules",
     ),
     (
         "apps/api/routes/hydro_display.py",
