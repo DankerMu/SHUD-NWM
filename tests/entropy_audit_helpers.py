@@ -107,13 +107,6 @@ def _route_authority_findings(root: Path) -> list[dict[str, object]]:
     return _findings_by_check(root, "stale-display-route-token")
 
 
-def _compatibility_facade_guard(root: Path, structural_base_ref: str) -> dict[str, object]:
-    report = _repo_report(root, structural_base_ref=structural_base_ref)
-    metadata = report["metadata"]
-    assert isinstance(metadata, dict)
-    guard = metadata["compatibility_facade_guard"]
-    assert isinstance(guard, dict)
-    return guard
 
 
 def _scoped_agent_context(root: Path) -> dict[str, object]:
@@ -147,39 +140,8 @@ def _scoped_agent_context_scope(root: Path, instruction_path: str) -> dict[str, 
     raise AssertionError(f"missing scoped context record for {instruction_path}")
 
 
-def _compatibility_facade_signals(
-    root: Path,
-    structural_base_ref: str,
-    signal_type: str,
-) -> list[dict[str, object]]:
-    guard = _compatibility_facade_guard(root, structural_base_ref)
-    signals = guard["signals"]
-    assert isinstance(signals, list)
-    return [
-        signal
-        for signal in signals
-        if isinstance(signal, dict) and signal["signal_type"] == signal_type
-    ]
 
 
-def _assert_compatibility_facade_report_only_finding(
-    root: Path,
-    structural_base_ref: str,
-    message_key: str,
-) -> None:
-    findings = [
-        finding
-        for finding in _findings_by_check(
-            root,
-            audit_repo_entropy.COMPATIBILITY_FACADE_GUARD_CHECK_ID,
-            structural_base_ref=structural_base_ref,
-        )
-        if message_key in str(finding["description"])
-    ]
-    assert findings, f"expected report-only finding with {message_key}"
-    assert findings[0]["check_id"] == audit_repo_entropy.COMPATIBILITY_FACADE_GUARD_CHECK_ID
-    assert findings[0]["gate_eligible"] is False
-    assert findings[0]["budget_counted"] is True
 
 
 def _route_authority_findings_by_token(
@@ -548,68 +510,8 @@ def _complete_historical_baseline_front_matter(body: str = "") -> str:
     """
 
 
-def _append_inventory_line(root: Path, relative_path: str, line: str) -> None:
-    path = root / relative_path
-    path.write_text(path.read_text(encoding="utf-8") + line + "\n", encoding="utf-8")
 
 
-def _setup_compatibility_facade_guard_fixture(root: Path) -> str:
-    _init_git(root)
-    _write(root / "services" / "orchestrator" / "scheduler_state.py", "\n")
-    _write(root / "services" / "orchestrator" / "chain_manifests.py", "\n")
-    _write(
-        root / "services" / "orchestrator" / "scheduler.py",
-        """
-        from __future__ import annotations
-
-        from services.orchestrator import scheduler_state as _scheduler_state
-
-        ExistingSchedulerAlias = _scheduler_state.ExistingSchedulerAlias
-
-        def existing_scheduler_forwarder(value: object) -> object:
-            return _scheduler_state.existing_scheduler_forwarder(value)
-        """,
-    )
-    _write(
-        root / "services" / "orchestrator" / "chain.py",
-        """
-        from __future__ import annotations
-
-        from services.orchestrator import chain_manifests
-
-        ExistingChainAlias = chain_manifests.ExistingChainAlias
-
-        def existing_chain_forwarder(value: object) -> object:
-            return chain_manifests.existing_chain_forwarder(value)
-        """,
-    )
-    _write(
-        root / "docs" / "governance" / "SCHEDULER_COMPATIBILITY_INVENTORY.md",
-        """
-        # Scheduler Compatibility Inventory
-
-        ## Guard Hook Seed
-
-        - ExistingSchedulerAlias
-        - existing_scheduler_forwarder
-        """,
-    )
-    _write(
-        root / "docs" / "governance" / "CHAIN_COMPATIBILITY_INVENTORY.md",
-        """
-        # Chain Compatibility Inventory
-
-        PipelineEvent appears here as owner-context prose only; it is not a
-        Guard Hook Seed selector until listed below.
-
-        ## Guard Hook Seed
-
-        - ExistingChainAlias
-        - existing_chain_forwarder
-        """,
-    )
-    _commit_all(root, "base facade inventories")
-    return _git_rev_parse(root, "HEAD")
 
 
 def _setup_agent_artifact_drift(root: Path) -> None:

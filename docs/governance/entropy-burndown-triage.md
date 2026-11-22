@@ -246,6 +246,9 @@ Current structural budget metadata:
 
 The report-only compatibility-facade guard is clean:
 
+Historical snapshot for #768: this audit check and the two inventory files in
+the table below were deleted in #3274.
+
 | Facade | Inventory | Status | Signal count |
 |---|---|---|---:|
 | scheduler | `docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md` | `ok` | 0 |

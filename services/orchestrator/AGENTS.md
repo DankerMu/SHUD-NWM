@@ -9,8 +9,6 @@ finding exactly as the glossary defines them.
 
 - `openspec/changes/governance-7-structural-entropy-controls/specs/scoped-agent-context-governance/spec.md`
 - `docs/runbooks/two-node-deployment-overview.md`
-- `docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md`
-- `docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md`
 - `openspec/glossary.md`
 
 `docs/runbooks/two-node-deployment-overview.md` is a runbook freshness anchor.
@@ -35,10 +33,9 @@ assignment without checking root `AGENTS.md` and `docs/governance/ROLE_BOUNDARY.
   `retry.py`, `persistence.py`, `production_contract.py`, or
   `packages/common/contracts/time_normalization.py`. Treat `chain.py` compatibility exports and
   monkeypatch paths as facade surface.
-- A new re-export, monkeypatch alias, forwarding wrapper, or local implementation
-  added to `scheduler.py` or `chain.py` must update the matching compatibility
-  inventory and keep the guard expectations testable. Do not grow facade surface
-  as an unrecorded shortcut.
+- A new facade name in `scheduler.py` or `chain.py` is an explicit import or
+  alias line; `tests/test_facade_name_resolution.py` must stay green. Do not
+  grow facade surface without a reader.
 
 ## State And Mutation Fences
 
@@ -64,15 +61,15 @@ uv run pytest -q tests/test_entropy_audit_*.py
 openspec validate --all --strict --no-interactive
 ```
 
-For scheduler facade or owner-module changes, use the relevant inventory command
-set, commonly:
+For scheduler facade or owner-module changes, run the focused scheduler suites,
+commonly:
 
 ```bash
 uv run pytest -q tests/test_production_scheduler.py tests/test_scheduler_backfill.py
 ```
 
-For chain facade or owner-module changes, use the relevant inventory command
-set, commonly:
+For chain facade or owner-module changes, run the focused chain suites,
+commonly:
 
 ```bash
 uv run pytest -q tests/test_orchestration_chain.py tests/test_retry_cancel_consistency.py

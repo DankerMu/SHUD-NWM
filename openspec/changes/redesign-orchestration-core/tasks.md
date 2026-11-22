@@ -2586,14 +2586,112 @@ Slice triage (F2-5, #3273, tasks 11.2, 11.3/11.4/11.5 scheduler side):
 
 ## 12. F3 — Delete the compatibility inventories and the facade guard
 
-- [ ] 12.1 Delete `docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md`, `docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md`, `scripts/governance/entropy_audit/facade_guard.py`, `COMPATIBILITY_FACADE_CONFIGS` (`schema.py:206-217`), and the helpers that use them (`scripts/governance/audit_repo_entropy.py:257-269,408,627,688-694`; `tests/entropy_audit_helpers.py:587,598`).
-- [ ] 12.2 Delete the facade-specific tests in `tests/test_entropy_audit_facade_guard_{forwarders,aliases}.py`, `tests/test_entropy_audit_instruction_inventory.py`, `tests/test_entropy_audit_report_contract.py` and `tests/test_entropy_audit_structural_budget.py`, and the inventory-text tests (`tests/test_production_scheduler.py:776-848`, `tests/test_orchestration_chain.py:841`).
-- [ ] 12.3 Remove the `compatibility facade` glossary term (`schema.py:227` `required_glossary_terms`, `openspec/glossary.md:17`). Update `services/orchestrator/AGENTS.md` (regenerate it from `instructions/agents/` if it is generated), `docs/governance/entropy-budget.md`, `entropy-burndown-triage.md:247`, `STRUCTURAL_FILE_DISPOSITION_INVENTORY.md:163-164,229-230` and `GOVERNANCE_8_FINAL_EVIDENCE_MAP.md:18-19`.
-- [ ] 12.4 Add the REMOVED delta for `compatibility-facade-governance`, the MODIFIED/REMOVED delta for `facade-shrink` ("Compatibility guard remains authoritative"), and the MODIFIED delta for `orchestrator-structural-burndown/spec.md:434-436`. Reword the comment at `services/orchestrator/chain_array_accounting.py:102` that names the inventories. Confirm with `grep -rni "compatibility inventory\|COMPATIBILITY_INVENTORY\|facade guard" docs scripts tests services --exclude='*.jsonl'` that nothing cites them. `openspec/specs/` is excluded because the deltas reach the main specs only at archive, and append-only `*.jsonl` logs are history.
-- [ ] 12.5 Verification: CI only, with the entropy audit report-only job green.
+- [x] 12.1 Delete `docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md`, `docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md`, `scripts/governance/entropy_audit/facade_guard.py`, `COMPATIBILITY_FACADE_CONFIGS` (`schema.py:206-217`), and the helpers that use them (`scripts/governance/audit_repo_entropy.py:257-269,408,627,688-694`; `tests/entropy_audit_helpers.py:587,598`).
+- [x] 12.2 Delete the facade-specific tests in `tests/test_entropy_audit_facade_guard_{forwarders,aliases}.py`, `tests/test_entropy_audit_instruction_inventory.py`, `tests/test_entropy_audit_report_contract.py` and `tests/test_entropy_audit_structural_budget.py`, and the inventory-text tests (`tests/test_production_scheduler.py:776-848`, `tests/test_orchestration_chain.py:841`).
+- [x] 12.3 Remove the `compatibility facade` glossary term (`schema.py:227` `required_glossary_terms`, `openspec/glossary.md:17`). Update `services/orchestrator/AGENTS.md` (regenerate it from `instructions/agents/` if it is generated), `docs/governance/entropy-budget.md`, `entropy-burndown-triage.md:247`, `STRUCTURAL_FILE_DISPOSITION_INVENTORY.md:163-164,229-230` and `GOVERNANCE_8_FINAL_EVIDENCE_MAP.md:18-19`.
+- [x] 12.4 Add the REMOVED delta for `compatibility-facade-governance`, the MODIFIED/REMOVED delta for `facade-shrink` ("Compatibility guard remains authoritative"), and the MODIFIED delta for `orchestrator-structural-burndown/spec.md:434-436`. Reword the comment at `services/orchestrator/chain_array_accounting.py:102` that names the inventories. Confirm with `grep -rni "compatibility inventory\|COMPATIBILITY_INVENTORY\|facade guard" docs scripts tests services --exclude='*.jsonl'` that nothing cites them. `openspec/specs/` is excluded because the deltas reach the main specs only at archive, and append-only `*.jsonl` logs are history.
+- [x] 12.5 Verification: CI only, with the entropy audit report-only job green.
 
 Suggested fixture level: compact - governance tooling and docs, no runtime code.
 Minimal mergeable slice: atomic - the inventories and the guard that reads them go together, or the guard fails on a missing file.
+
+Slice triage (F3-1, #3274, tasks 12.1-12.5):
+- Issue type: deletion (governance docs and tooling, their tests, spec deltas). Fixture level: compact (agree). There is no runtime code; the only service-side change is one comment. Width: one PR, atomic. The inventories and the guard that reads them go together.
+- Recon at f45e332b2 (`git grep -lni "compatibility inventory\|COMPATIBILITY_INVENTORY\|facade guard\|facade_guard\|COMPATIBILITY_FACADE"`, excluding `*.jsonl`). Hits per file:
+
+  | Group | File | Hits |
+  |---|---|---|
+  | Tooling | `scripts/governance/entropy_audit/facade_guard.py` | 80 |
+  | Tooling | `scripts/governance/audit_repo_entropy.py` | 53 |
+  | Tooling | `scripts/governance/entropy_audit/report.py` (`:43-46`, `:82-91`) | 10 |
+  | Tooling | `scripts/governance/entropy_audit/schema.py` | 3 |
+  | Tooling | `scripts/governance/entropy_audit/constants.py` (`:35` check id, `:142`, `:145`, `:246`) | 3 |
+  | Tooling | `scripts/ci/full_test_durations.json` (`:62-63`) | 2 |
+  | Tests | `tests/test_entropy_audit_facade_guard_aliases.py` | 89 |
+  | Tests | `tests/test_entropy_audit_facade_guard_forwarders.py` | 66 |
+  | Tests | `tests/test_entropy_audit_instruction_inventory.py` | 17 |
+  | Tests | `tests/entropy_audit_helpers.py` | 12 |
+  | Tests | `tests/test_entropy_audit_report_contract.py` | 6 |
+  | Tests | `tests/test_entropy_audit_structural_budget.py` | 2 |
+  | Tests | `tests/test_production_scheduler.py` | 1 |
+  | Tests | `tests/test_orchestration_chain.py` | 1 |
+  | Docs | `docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md` | 7 |
+  | Docs | `docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md` | 3 |
+  | Docs | `docs/governance/GOVERNANCE_8_FINAL_EVIDENCE_MAP.md` | 5 |
+  | Docs | `docs/governance/entropy-burndown-triage.md` | 4 |
+  | Docs | `docs/governance/STRUCTURAL_FILE_DISPOSITION_INVENTORY.md` | 4 |
+  | Docs | `services/orchestrator/AGENTS.md` (`:5`, `:12-13`, `:30`, `:36-40`, `:67`) | 2 |
+
+  - `tests/test_openapi_drift.py` also matches the wide pattern, but its "compatibility facade" is the OpenAPI `main` facade. That is unrelated and out of scope.
+  - The F3-owned test tokens are the inventory-text assertions: 53 quoted `_SCHEDULER_*` token lines in `tests/test_production_scheduler.py` and 28 `_CHAIN_*` lines in `tests/test_orchestration_chain.py`, together with the tests and helpers that read the inventory text (`_scheduler_inventory_text`, `_scheduler_inventory_governed_group_ids` and the chain equivalents). The `not hasattr(legacy_chain, "_CHAIN_RETRY_COMPAT_*")` absence probes (`tests/test_orchestration_chain.py:11017-11023`) are already subsumed by the 11.4 fresh-subprocess tests, so they are deleted too.
+- Spec deltas, written by the orchestrator before implementation:
+  - `specs/compatibility-facade-governance/spec.md` REMOVES all three requirements. `.openspec.yaml` gains `retire_capabilities: true`; a scratch `openspec archive` of the whole change succeeds and retires the capability.
+  - `specs/facade-shrink/spec.md` REMOVES "Compatibility guard remains authoritative".
+  - `specs/orchestrator-structural-burndown/spec.md` MODIFIES "Entropy audit enforcement and its corpus split without report drift". The inventory clauses at `:434-436` and in the scenario "the corpus collects identically…" are dropped, and `STRUCTURAL_FILE_DISPOSITION_INVENTORY.md` is named in their place.
+  - `specs/import-layering-guard/spec.md`, the existing MODIFIED delta from #3272, drops the clause that made the inventories own the contract modules.
+  - Accepted as is: `openspec/specs/gateway-reconcile-test-partitioning/spec.md:20` lists "compatibility-inventory" among the checks in a WHEN clause. With no such check left, the clause is vacuous, not false.
+- Changes (implementer):
+  1. **12.1.** Delete the following:
+     - both inventories and `facade_guard.py`;
+     - `COMPATIBILITY_FACADE_CONFIGS` (`schema.py`) and the facade dataclasses that only the guard uses;
+     - the guard constants (`constants.py:142`, `:145`, `:246`) and the `compatibility-facade-growth` check id (`:35`);
+     - the report wiring (`report.py:43-46`, `:82-91`), together with the matching markdown section and summary key. The report-contract test fixes the list of report keys, so remove the facade key from that list.
+     - the helpers in `audit_repo_entropy.py` that use any of the above, including `_mod_facade_guard` (`:47`, `:867`) and the facade entries in `__all__` (`:627-695`), and the matching helpers in `tests/entropy_audit_helpers.py`.
+
+     Keep `STRUCTURAL_COMPATIBILITY_PATTERN` (`constants.py:499`). It is the structural-budget scan, not the facade guard; if it turns out to be facade-only, say why in the PR.
+  2. **12.2.** Delete:
+     - `tests/test_entropy_audit_facade_guard_{forwarders,aliases}.py` whole, or only their facade parts if they also test something else (record which);
+     - the facade parts of `tests/test_entropy_audit_instruction_inventory.py`, `tests/test_entropy_audit_report_contract.py` and `tests/test_entropy_audit_structural_budget.py`;
+     - the inventory-text tests and helpers in `tests/test_production_scheduler.py` and `tests/test_orchestration_chain.py`. Where one test function mixes inventory-text assertions with behavioural ones, delete only the inventory part. No behavioural assertion is deleted.
+
+     Then drop the two facade-guard entries from `scripts/ci/full_test_durations.json`.
+
+     Mixed test files, where only the named lines change:
+     - `tests/test_entropy_audit_instruction_inventory.py`: the module docstring, and the two `See docs/governance/*_COMPATIBILITY_INVENTORY.md` fixture lines in `test_scoped_agent_context_reports_stale_scoped_context`. That test's assertion is only about the missing runbook.
+     - `tests/test_entropy_audit_report_contract.py`: `:80-93` (the guard block), `:132` (the check id) and `:260` (the section line).
+     - `tests/test_entropy_audit_structural_budget.py`: `:211` and `:216`.
+
+     Deleted whole: `test_compatibility_facade_guard_current_repo_passes_with_inventories`.
+
+     All 7 scheduler and 9 chain inventory-text tests are mixed. In each, cut the trailing inventory segment, including `test_chain_http_slurm_gateway_client_legacy_subclass_uses_owner_module` (find these with grep `_chain_inventory_text`), and drop the local variables that become dead (e.g. `expected_inventory_tokens` near `:10917`, F841).
+
+     The absence loop in `test_chain_retry_compat_facade_matches_owner_module_and_inventory` (`:11017-11023`) loses its three `_CHAIN_RETRY_COMPAT_*` entries, which the 11.4 `_COMPAT_` scans subsume. `assert not hasattr(legacy_chain, "_retry_service_from_env")` stays, because it is the repository's only pin for that name.
+  3. **12.3.** Keep the `compatibility facade` glossary term and its `required_glossary_terms` entry. Spec `scoped-agent-context-governance/spec.md:43-46` requires it, and `packages/common/AGENTS.md`, `reconcile.py` and `audit_repo_entropy.py` still use it. This deviates from design.md F3 and is recorded in the PR body. Rewrite `openspec/glossary.md:17` to: "| compatibility facade | A module that keeps old import, monkeypatch, or call surfaces stable while delegating behavior to real owner modules. Each name it serves is an explicit import or alias line; local bug fixes that do not add ownership surface are not facade growth. |" Rewrite `services/orchestrator/AGENTS.md` so it no longer cites the inventories or a guard. Its rule becomes: "a new facade name is an explicit import or alias line; `tests/test_facade_name_resolution.py` must stay green; do not grow facade surface without a reader". If `AGENTS.md` is generated, edit the source and regenerate.
+  4. Update the governance docs that cite the deleted files: `entropy-budget.md`, `entropy-burndown-triage.md`, `STRUCTURAL_FILE_DISPOSITION_INVENTORY.md` and `GOVERNANCE_8_FINAL_EVIDENCE_MAP.md`.
+     - Historical rows that only record past evidence may keep the name if a note says the file was deleted in #3274.
+     - Current-authority text must not point at a deleted file.
+     - Also fix the stale `scheduler_state_compat`, `scheduler_compat_runtime` and `_scheduler_compat_function` mentions that the #3273 reviewers listed in `STRUCTURAL_FILE_DISPOSITION_INVENTORY.md:35`, `:47` and `:161`.
+  5. **12.4.** Check the `chain_array_accounting.py` comment at `:99-105`. 48ade5279 already reworded it, so no change is expected.
+  6. **Carry-over docstrings.** `tests/test_facade_name_resolution.py`'s module docstring does not mention the inventories or the facade guard; confirm this, and no change is expected. Also confirm that `entropy-budget.md:15`'s "compatibility facade" names the audit script and not an inventory, so it stays. Carry-over #2 of `.workplans/3270/carry-overs.md` (silent synthetic forms, zero sites at HEAD) is closed by adding one docstring sentence that names those forms as uncollected. No code change.
+- Out of scope, filed as one follow-up issue by the orchestrator:
+  - the runtime carry-overs from #3292 and #3273: unify `scheduler_lease._scheduler_facade_function` with `_facade_seam`; teach the F1 guard `_facade_seam` literals; the aggregator-patch combination; and stating the two-seam boundary in the spec;
+  - `scheduler_candidate_runtime`'s seven values that no longer have a reader, and its namespace copy;
+  - the chain imports that are kept only so their names resolve;
+  - test names that still contain "compat".
+- Must preserve:
+  - Every other entropy-audit check behaves as before, under the evidence 3 rule.
+  - CI's entropy audit report-only job and the Production Topology Hard Gate stay green.
+  - No behavioural test assertion is deleted.
+  - No `file.py:NNN` line reference appears in shipped Python.
+- Risk packs: governance tooling (report schema consumers). Not selected: runtime, DB, Slurm.
+- Required evidence (`.workplans/3274/`):
+  1. `grep -rni "compatibility inventory\|COMPATIBILITY_INVENTORY\|facade guard" docs scripts tests services --exclude='*.jsonl'` returns nothing, apart from historical-row notes, each of which is listed. The historical-row exception (`GOVERNANCE_8_FINAL_EVIDENCE_MAP.md`, `entropy-burndown-triage.md`) departs from the issue's "returns nothing" and is recorded as a deviation in the PR body. In addition, `git grep -n "compatibility_facade\|COMPATIBILITY_FACADE\|compatibility-facade-growth\|_compatibility_inventory\|facade_guard" -- scripts tests services docs ':!*.jsonl'` returns nothing.
+  2. `ledger.md` lists every deleted test function, labelled "facade/inventory only" or "mixed, behavioural part kept" (with that test's id). It also gives the collected-test counts before and after for each touched test file.
+  3. CI's report-only commands run locally on f45e332b2 and on the branch tip: `uv run --no-sync python scripts/governance/audit_repo_entropy.py --format json --structural-base-ref f45e332b2`, the same with `--format markdown`, and `--mode hard-gate --format json` (exit 0). The diff must show:
+     - `metadata.compatibility_facade_guard` and the `## Compatibility Facade Guard` section are gone;
+     - `executed_check_families` loses exactly `compatibility-facade-growth`;
+     - the other stable metadata keys (as defined by `orchestrator-structural-burndown`) are equal;
+     - the set of findings check ids and the `module_heatmap` / `high_spread_patterns` key sets are equal;
+     - every remaining `findings` / `structural_file_budget` entry is attributed in `ledger.md` to a path this PR deleted or edited.
+  4. Clean runs of `uv run --no-sync ruff check . --no-cache`, `git diff --check`, `npx --yes markdownlint-cli2@0.17.2 "docs/**/*.md"` and `openspec validate redesign-orchestration-core --strict --no-interactive`.
+- Verification:
+  - Locally:
+    - every touched test file;
+    - `tests/test_entropy_audit_*.py`;
+    - `tests/test_facade_name_resolution.py` and `tests/test_orchestrator_first_import.py`;
+    - `tests/test_entropy_audit_line_references.py`.
+  - CI: the full sharded suite, with the entropy audit report-only job green.
+  - No node-27 or node-22 run: governance tooling only (12.5).
 
 ## 13. J0 — Characterization guard for the journal class
 

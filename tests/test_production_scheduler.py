@@ -920,17 +920,6 @@ def _db_free_factories_fail(monkeypatch: Any, message: str) -> None:
     monkeypatch.setattr(scheduler_core_module, "_db_free_orchestration_repository_from_config", fail)
 
 
-def _scheduler_inventory_text() -> str:
-    return (
-        Path(__file__).resolve().parents[1] / "docs" / "governance" / "SCHEDULER_COMPATIBILITY_INVENTORY.md"
-    ).read_text(encoding="utf-8")
-
-
-def _scheduler_inventory_governed_group_ids(inventory_text: str) -> tuple[str, ...]:
-    section = inventory_text.split("## Governed Groups", 1)[1].split("## Guard Hook Seed", 1)[0]
-    return tuple(line.split("`", 2)[1] for line in section.splitlines() if line.startswith("| `"))
-
-
 def test_M3_STAGES_PipelineResult_StageRunResult_legacy_exports_preserve_identity() -> None:
     import services.orchestrator.chain as legacy_chain
     from services.orchestrator import chain_stages, chain_types
@@ -1265,33 +1254,6 @@ def test_scheduler_state_compat_reexport_names_match_owner_module_and_inventory(
     for name in direct_names:
         assert getattr(scheduler_module, name) is getattr(scheduler_state_module, name)
 
-    inventory_text = _scheduler_inventory_text()
-    assert _scheduler_inventory_governed_group_ids(inventory_text) == (
-        "scheduler-state-monkeypatch-bindings",
-        "candidate-state-reexports",
-        "state-manager-facade-reexports",
-        "scheduler-lease-reexports",
-        "scheduler-types-reexport",
-        "scheduler-runtime-roots-forwarders",
-        "scheduler-config-reexport",
-        "scheduler-adapter-provider-reexports",
-        "discovery-compat-aliases",
-        "scheduler-model-discovery-forwarders",
-        "candidate-construction-compat-aliases",
-        "execution-restart-cohort-wrappers",
-        "scheduler-candidate-quality-forwarders",
-        "cancellation-status-proof-wrappers",
-        "scheduler-preflight-compat",
-        "scheduler-gateway-forwarders",
-    )
-    for token in (
-        "_SCHEDULER_STATE_COMPAT_REEXPORT_NAMES",
-        "_SCHEDULER_STATE_COMPAT_OWNER_REEXPORTS",
-        "_SCHEDULER_STATE_COMPAT_FACADE_REEXPORTS",
-        "_SCHEDULER_STATE_COMPAT_WRAPPER_NAMES",
-    ):
-        assert token in inventory_text
-
 
 def test_scheduler_lease_compat_reexport_names_match_owner_module_and_inventory() -> None:
     reexport_names = (
@@ -1320,15 +1282,6 @@ def test_scheduler_lease_compat_reexport_names_match_owner_module_and_inventory(
         assert getattr(scheduler_module, name) is getattr(scheduler_lease_module, name)
     for name in lookup_names:
         assert callable(getattr(scheduler_lease_module, name))
-
-    inventory_text = _scheduler_inventory_text()
-    for token in (
-        "_SCHEDULER_LEASE_COMPAT_REEXPORT_NAMES",
-        "_SCHEDULER_LEASE_COMPAT_OWNER_REEXPORTS",
-        "_SCHEDULER_LEASE_COMPAT_FACADE_REEXPORTS",
-        "_SCHEDULER_LEASE_COMPAT_LOOKUP_NAMES",
-    ):
-        assert token in inventory_text
 
 
 def test_scheduler_lease_compat_lookup_names_resolve_scheduler_monkeypatches(
@@ -1402,16 +1355,6 @@ def test_scheduler_discovery_compat_aliases_match_owner_module_and_inventory() -
         assert getattr(scheduler_module, facade_name) is getattr(scheduler_discovery_module, owner_name)
     for method_name in forwarder_names:
         assert hasattr(scheduler_module.ProductionScheduler, method_name)
-
-    inventory_text = _scheduler_inventory_text()
-    for token in (
-        "_SCHEDULER_DISCOVERY_COMPAT_ALIAS_OWNER_NAMES",
-        "_SCHEDULER_DISCOVERY_COMPAT_ALIAS_NAMES",
-        "_SCHEDULER_DISCOVERY_COMPAT_FORWARDER_NAMES",
-        "_SCHEDULER_DISCOVERY_COMPAT_OWNER_ALIASES",
-        "_SCHEDULER_DISCOVERY_COMPAT_FACADE_ALIASES",
-    ):
-        assert token in inventory_text
 
 
 def test_scheduler_discovery_compat_forwarders_delegate_to_owner_module(
@@ -1604,20 +1547,6 @@ def test_scheduler_candidate_compat_aliases_match_owner_module_and_inventory() -
     for method_name in forwarder_names:
         assert hasattr(scheduler_module.ProductionScheduler, method_name)
 
-    inventory_text = _scheduler_inventory_text()
-    for token in (
-        "_SCHEDULER_CANDIDATE_COMPAT_ALIAS_OWNER_NAMES",
-        "_SCHEDULER_CANDIDATE_COMPAT_ALIAS_NAMES",
-        "_SCHEDULER_CANDIDATE_COMPAT_FORWARDER_NAMES",
-        "_SCHEDULER_CANDIDATE_COMPAT_OWNER_MISSING",
-        "_SCHEDULER_CANDIDATE_COMPAT_FACADE_MISSING",
-        "_SCHEDULER_CANDIDATE_COMPAT_OWNER_ALIASES",
-        "_SCHEDULER_CANDIDATE_COMPAT_FACADE_ALIASES",
-    ):
-        assert token in inventory_text
-    for token in (*alias_owner_names, *forwarder_names):
-        assert token in inventory_text
-
 
 def test_scheduler_candidate_compat_forwarders_delegate_to_owner_module(
     monkeypatch: Any,
@@ -1714,21 +1643,6 @@ def test_scheduler_execution_compat_wrappers_match_owner_module_and_inventory() 
     for method_name, owner_name in forwarder_owner_names.items():
         assert hasattr(scheduler_execution_module, owner_name)
         assert hasattr(scheduler_module.ProductionScheduler, method_name)
-
-    inventory_text = _scheduler_inventory_text()
-    for token in (
-        "_SCHEDULER_EXECUTION_COMPAT_WRAPPER_OWNER_NAMES",
-        "_SCHEDULER_EXECUTION_COMPAT_WRAPPER_NAMES",
-        "_SCHEDULER_EXECUTION_COMPAT_FORWARDER_OWNER_NAMES",
-        "_SCHEDULER_EXECUTION_COMPAT_FORWARDER_NAMES",
-        "_SCHEDULER_EXECUTION_COMPAT_OWNER_MISSING",
-        "_SCHEDULER_EXECUTION_COMPAT_FACADE_MISSING",
-        "_SCHEDULER_EXECUTION_COMPAT_OWNER_WRAPPERS",
-        "_SCHEDULER_EXECUTION_COMPAT_FACADE_WRAPPERS",
-    ):
-        assert token in inventory_text
-    for token in (*wrapper_owner_names, *forwarder_owner_names):
-        assert token in inventory_text
 
 
 def test_scheduler_execution_compat_forwarders_delegate_to_owner_module(
@@ -2085,25 +1999,6 @@ def test_scheduler_evidence_compat_names_match_owner_module_and_inventory() -> N
     for facade_name, owner_name in wrapper_owner_names.items():
         assert hasattr(scheduler_evidence_module, owner_name)
         assert hasattr(scheduler_module, facade_name)
-
-    inventory_text = _scheduler_inventory_text()
-    for token in (
-        "_SCHEDULER_EVIDENCE_COMPAT_DIRECT_OWNER_NAMES",
-        "_SCHEDULER_EVIDENCE_COMPAT_DIRECT_NAMES",
-        "_SCHEDULER_EVIDENCE_COMPAT_FORWARDER_OWNER_NAMES",
-        "_SCHEDULER_EVIDENCE_COMPAT_FORWARDER_NAMES",
-        "_SCHEDULER_EVIDENCE_COMPAT_WRAPPER_OWNER_NAMES",
-        "_SCHEDULER_EVIDENCE_COMPAT_WRAPPER_NAMES",
-        "_SCHEDULER_EVIDENCE_COMPAT_OWNER_MISSING",
-        "_SCHEDULER_EVIDENCE_COMPAT_FACADE_MISSING",
-        "_SCHEDULER_EVIDENCE_COMPAT_OWNER_DIRECTS",
-        "_SCHEDULER_EVIDENCE_COMPAT_FACADE_DIRECTS",
-        "_SCHEDULER_EVIDENCE_COMPAT_OWNER_WRAPPERS",
-        "_SCHEDULER_EVIDENCE_COMPAT_FACADE_WRAPPERS",
-    ):
-        assert token in inventory_text
-    for token in (*direct_owner_names, *forwarder_owner_names, *wrapper_owner_names):
-        assert token in inventory_text
 
 
 def test_scheduler_evidence_compat_forwarders_delegate_to_owner_module(
@@ -2571,31 +2466,6 @@ def test_scheduler_cancellation_status_compat_names_match_owner_module_and_inven
         assert hasattr(scheduler_module.ProductionScheduler, method_name)
     for function_name in retained_function_names:
         assert hasattr(scheduler_module, function_name)
-
-    inventory_text = _scheduler_inventory_text()
-    for token in (
-        "_SCHEDULER_CANCELLATION_STATUS_COMPAT_WRAPPER_OWNER_NAMES",
-        "_SCHEDULER_CANCELLATION_STATUS_COMPAT_WRAPPER_NAMES",
-        "_SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_ALIAS_OWNER_NAMES",
-        "_SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_ALIAS_NAMES",
-        "_SCHEDULER_CANCELLATION_STATUS_COMPAT_RETAINED_LOCAL_METHOD_NAMES",
-        "_SCHEDULER_CANCELLATION_STATUS_COMPAT_RETAINED_LOCAL_FUNCTION_NAMES",
-        "_SCHEDULER_CANCELLATION_STATUS_COMPAT_OWNER_MISSING",
-        "_SCHEDULER_CANCELLATION_STATUS_COMPAT_FACADE_MISSING",
-        "_SCHEDULER_CANCELLATION_STATUS_COMPAT_RETAINED_LOCAL_OVERLAP",
-        "_SCHEDULER_CANCELLATION_STATUS_COMPAT_OWNER_WRAPPERS",
-        "_SCHEDULER_CANCELLATION_STATUS_COMPAT_FACADE_WRAPPERS",
-        "_SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_OWNER_ALIASES",
-        "_SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_FACADE_ALIASES",
-    ):
-        assert token in inventory_text
-    for token in (
-        *wrapper_owner_names,
-        *candidate_alias_owner_names,
-        *retained_method_names,
-        *retained_function_names,
-    ):
-        assert token in inventory_text
 
 
 def test_scheduler_cancellation_status_compat_wrappers_delegate_to_owner_module(

@@ -59,8 +59,6 @@
  "tests/test_e2e_m3.py": 0.157,
  "tests/test_entropy_audit_baseline_writer_safety.py": 3.218,
  "tests/test_entropy_audit_baseline_writer_summary.py": 34.025,
- "tests/test_entropy_audit_facade_guard_aliases.py": 5.76,
- "tests/test_entropy_audit_facade_guard_forwarders.py": 3.651,
  "tests/test_entropy_audit_instruction_inventory.py": 1.258,
  "tests/test_entropy_audit_line_references.py": 31.045,
  "tests/test_entropy_audit_report_contract.py": 60.087,

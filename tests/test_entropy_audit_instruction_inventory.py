@@ -1,19 +1,15 @@
-"""Guard-hook seeds and scoped instruction state (#1823 partition).
+"""Scoped instruction state (#1823 partition).
 
-The two compatibility-inventory guard-hook seed cases assert this repository's
-`docs/governance/{SCHEDULER,CHAIN}_COMPATIBILITY_INVENTORY.md` carry the owner,
-retention, removal-condition and verification metadata rows #712/#721 require;
-the `scoped_agent_context` cases cover the four governed `AGENTS.md` scopes --
+The `scoped_agent_context` cases cover the four governed `AGENTS.md` scopes --
 missing instructions, stale references, glossary linkage and wrapped
-verification commands.
+verification commands. #3274 deleted the two guard-hook seed cases together with
+the inventory files they read.
 
-This is the one partition that is not a byte-for-byte move. #1823 landed the two
-deferred #1809 items here (five expected commands migrated to the
-``tests/test_gateway_reconcile_*.py`` glob, matching the inventories after the
-frozen provenance literals were dropped) and repointed the verification-command
-literals off the deleted monolith onto ``tests/test_entropy_audit_*.py``, in
-lockstep with ``_ScopedAgentContextConfig.required_verification_commands`` and
-the four scoped ``AGENTS.md``. Both are substring needles
+This is the one partition that is not a byte-for-byte move. #1823 repointed the
+verification-command literals off the deleted monolith onto
+``tests/test_entropy_audit_*.py``, in lockstep with
+``_ScopedAgentContextConfig.required_verification_commands`` and the four scoped
+``AGENTS.md``. The commands are substring needles
 (``audit_repo_entropy._missing_text_needles``), so the fixture text and the
 config must migrate together or the scoped-context cases red on a command they
 themselves stopped naming.
@@ -38,165 +34,6 @@ from tests.entropy_audit_helpers import (
     _write,
 )
 
-
-def test_scheduler_compatibility_inventory_guard_hook_seed_has_required_metadata() -> None:
-    inventory_text = (
-        REPO_ROOT / "docs" / "governance" / "SCHEDULER_COMPATIBILITY_INVENTORY.md"
-    ).read_text(encoding="utf-8")
-    guard_text = audit_repo_entropy._compatibility_inventory_guard_hook_text(inventory_text)
-    expected_metadata = {
-        "scheduler-state-monkeypatch-bindings": (
-            "services.orchestrator.scheduler_state",
-            "uv run pytest -q tests/test_production_scheduler.py tests/test_scheduler_backfill.py",
-        ),
-        "candidate-state-reexports": (
-            "services.orchestrator.scheduler_state",
-            "uv run pytest -q tests/test_production_scheduler.py tests/test_scheduler_backfill.py",
-        ),
-        "scheduler-lease-reexports": (
-            "services.orchestrator.scheduler_lease",
-            "uv run pytest -q tests/test_production_scheduler.py tests/test_gateway_reconcile_*.py",
-        ),
-        "discovery-compat-aliases": (
-            "services.orchestrator.scheduler_discovery",
-            "uv run pytest -q tests/test_scheduler_backfill.py tests/test_production_scheduler.py",
-        ),
-        "candidate-construction-compat-aliases": (
-            "services.orchestrator.scheduler_candidates",
-            "uv run pytest -q tests/test_production_scheduler.py tests/test_scheduler_backfill.py",
-        ),
-        "execution-restart-cohort-wrappers": (
-            "services.orchestrator.scheduler_execution",
-            "uv run pytest -q tests/test_production_scheduler.py",
-        ),
-        "scheduler-evidence-write-compat": (
-            "services.orchestrator.scheduler_evidence",
-            "uv run pytest -q tests/test_production_scheduler.py",
-        ),
-        "cancellation-status-proof-wrappers": (
-            "services.orchestrator.scheduler_evidence",
-            "uv run pytest -q tests/test_production_scheduler.py",
-        ),
-    }
-
-    for command in (
-        "uv run pytest -q tests/test_entropy_audit_*.py",
-        "uv run pytest -q tests/test_production_scheduler.py "
-        "tests/test_scheduler_backfill.py tests/test_gateway_reconcile_*.py",
-        "openspec validate governance-8-module-deepening --strict --no-interactive",
-        "git diff --check",
-    ):
-        assert command in inventory_text
-
-    for group_id, (owner, command) in expected_metadata.items():
-        matches = [
-            line
-            for line in guard_text.splitlines()
-            if (line.startswith("- ") or line.startswith("| "))
-            and f"`{group_id}`" in line
-            and "verification command" in line
-        ]
-        assert len(matches) == 1, f"expected one #712 metadata row for {group_id}"
-        line = matches[0]
-        normalized = line.casefold()
-        assert owner in line
-        assert command in line
-        if group_id == "cancellation-status-proof-wrappers":
-            assert "_slurm_status_sync_failed_evidence" in line
-            assert "services.orchestrator.scheduler_candidates" in line
-        assert audit_repo_entropy._compatibility_inventory_has_owner_semantics(normalized)
-        assert audit_repo_entropy._compatibility_inventory_has_retention_semantics(normalized)
-        assert audit_repo_entropy._compatibility_inventory_has_removal_condition_semantics(normalized)
-        assert audit_repo_entropy._compatibility_inventory_has_verification_semantics(normalized)
-
-
-def test_chain_compatibility_inventory_guard_hook_seed_has_required_metadata() -> None:
-    inventory_text = (
-        REPO_ROOT / "docs" / "governance" / "CHAIN_COMPATIBILITY_INVENTORY.md"
-    ).read_text(encoding="utf-8")
-    guard_text = audit_repo_entropy._compatibility_inventory_guard_hook_text(inventory_text)
-    metadata_text = guard_text.split("Guard-hook metadata rows required by #721:", maxsplit=1)[1]
-    expected_metadata = {
-        "chain-stage-catalog-type-reexports": (
-            "services.orchestrator.chain_stages",
-            "uv run pytest -q tests/test_orchestration_chain.py "
-            "tests/test_production_scheduler.py tests/test_orchestrator.py "
-            "tests/test_real_slurm_gateway.py",
-        ),
-        "chain-stage-execution-forwarders": (
-            "services.orchestrator.chain_stage_execution",
-            "uv run pytest -q tests/test_orchestration_chain.py "
-            "tests/test_pipeline_logs_artifacts.py tests/test_e2e_m3.py",
-        ),
-        "chain-array-accounting-forwarders": (
-            "services.orchestrator.chain_array_accounting",
-            "uv run pytest -q tests/test_orchestration_chain.py tests/test_partial_success.py",
-        ),
-        "chain-manifest-forwarders": (
-            "services.orchestrator.chain_manifests",
-            "uv run pytest -q tests/test_orchestration_chain.py "
-            "tests/test_warm_start_chaining.py tests/test_production_scheduler.py",
-        ),
-        "chain-reservation-facade": (
-            "services.orchestrator.reservation",
-            "uv run pytest -q tests/test_gateway_reconcile_*.py tests/test_orchestration_chain.py",
-        ),
-        "chain-retry-facade": (
-            "services.orchestrator.retry",
-            "uv run pytest -q tests/test_retry.py tests/test_retry_cancel_consistency.py "
-            "tests/test_e2e_m3.py tests/test_orchestration_chain.py",
-        ),
-        "chain-tile-publisher-facade": (
-            "services.tile_publisher",
-            "uv run pytest -q tests/test_orchestration_chain.py "
-            "tests/test_pipeline_logs_artifacts.py",
-        ),
-        "chain-worker-adapter-facade": (
-            "workers.canonical_converter.converter",
-            "uv run pytest -q tests/test_ifs_forecast_integration.py "
-            "tests/test_source_identity.py tests/test_warm_start_chaining.py "
-            "tests/test_orchestration_chain.py",
-        ),
-        "chain-persistence-repository-facade": (
-            "services.orchestrator.persistence",
-            "uv run pytest -q tests/test_gateway_reconcile_*.py "
-            "tests/test_production_scheduler.py tests/test_retry_cancel_consistency.py "
-            "tests/test_real_database_integration.py",
-        ),
-    }
-
-    for command in (
-        "uv run pytest -q tests/test_entropy_audit_*.py",
-        "uv run pytest -q tests/test_orchestration_chain.py "
-        "tests/test_retry_cancel_consistency.py tests/test_gateway_reconcile_*.py",
-        "openspec validate governance-8-module-deepening --strict --no-interactive",
-        "git diff --check",
-    ):
-        assert command in inventory_text
-
-    for group_id, (owner, command) in expected_metadata.items():
-        matches = [
-            line
-            for line in metadata_text.splitlines()
-            if (line.startswith("- ") or line.startswith("| "))
-            and f"`{group_id}`" in line
-            and "verification command" in line
-        ]
-        assert len(matches) == 1, f"expected one #721 metadata row for {group_id}"
-        line = matches[0]
-        normalized = line.casefold()
-        assert owner in line
-        assert command in line
-        if group_id == "chain-worker-adapter-facade":
-            assert "workers.data_adapters.gfs_adapter" in line
-            assert "workers.data_adapters.ifs_adapter" in line
-            assert "services.orchestrator.chain" in line
-            assert "scenario_for_source" in line
-            assert "auto-trigger helpers" in line
-        assert audit_repo_entropy._compatibility_inventory_has_owner_semantics(normalized)
-        assert audit_repo_entropy._compatibility_inventory_has_retention_semantics(normalized)
-        assert audit_repo_entropy._compatibility_inventory_has_removal_condition_semantics(normalized)
-        assert audit_repo_entropy._compatibility_inventory_has_verification_semantics(normalized)
 
 def test_scoped_agent_context_current_repo_matches_scoped_instruction_state() -> None:
     context = _scoped_agent_context(REPO_ROOT)
@@ -270,8 +107,6 @@ def test_scoped_agent_context_reports_stale_scoped_context(tmp_path: Path) -> No
 
         See `openspec/glossary.md`.
         See `openspec/changes/governance-7-structural-entropy-controls/specs/scoped-agent-context-governance/spec.md`.
-        See `docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md`.
-        See `docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md`.
 
         Use the glossary terms active entrypoint, compatibility facade, current authority,
         and budget-counted finding when describing local ownership.

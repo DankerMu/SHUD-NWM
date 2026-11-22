@@ -208,12 +208,10 @@ def test_structural_file_budget_markdown_keeps_existing_report_sections(tmp_path
     markdown = audit_repo_entropy.render_markdown(report)
 
     assert "## Structural File Budget" in markdown
-    assert "## Compatibility Facade Guard" in markdown
     assert "## Entropy Heatmap" in markdown
     assert "## High-Spread Patterns" in markdown
     assert "## Prioritized Cleanup Targets" in markdown
     assert markdown.index("## Structural File Budget") < markdown.index("## Entropy Heatmap")
-    assert markdown.index("## Compatibility Facade Guard") < markdown.index("## Entropy Heatmap")
 
 def test_structural_ts_import_families_ignore_comments_and_string_literals() -> None:
     families = audit_repo_entropy._structural_ts_import_families(
