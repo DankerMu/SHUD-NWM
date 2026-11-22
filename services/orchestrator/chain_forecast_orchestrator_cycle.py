@@ -84,7 +84,9 @@ from services.orchestrator.forcing_submit_identity import (
     is_forcing_array_stage,
 )
 from services.orchestrator.retry_identity import (
+    MANUAL_RETRYABLE_STATUSES,
     RETRY_ATTEMPT_FLOORS_FIELD,
+    UPSTREAM_REFRESH_RETRYABLE_STATUSES,
     cohort_retry_attempt_floors,
     inline_retry_attempt,
     reservation_submission_attempt,
@@ -233,7 +235,7 @@ class ForecastOrchestratorCycleMixin:
         if context.retry_attempt is None:
             return False
         status = str(job.get("status") or "")
-        return status in {"failed", "submission_failed", "permanently_failed", "cancelled", "partially_failed"}
+        return status in MANUAL_RETRYABLE_STATUSES
 
     @staticmethod
     def _terminal_stage_can_retry_after_upstream_refresh(
@@ -242,7 +244,7 @@ class ForecastOrchestratorCycleMixin:
         if refreshed_upstream_finished_at is None:
             return False
         status = str(job.get("status") or "")
-        if status not in {"failed", "submission_failed", "partially_failed"}:
+        if status not in UPSTREAM_REFRESH_RETRYABLE_STATUSES:
             return False
         terminal_time = _chain._pipeline_job_terminal_time(job)
         return terminal_time is None or terminal_time <= refreshed_upstream_finished_at

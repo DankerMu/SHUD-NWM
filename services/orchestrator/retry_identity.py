@@ -8,7 +8,8 @@ suffix carried by the job id.  Production ids stack suffixes
 This module is the single owner of that parsing, and of the next-attempt
 formulas built on it (stage-scoped, floored, inline, reservation, current-master,
 non-master and manual paths), the stage attempt reads over already-read rows, the
-latest-row sort attempt, plus the cohort restart stage; it deliberately has
+latest-row sort attempt, the cohort restart stage, the default retry limit and
+the manual / upstream-refresh retryable status sets; it deliberately has
 no dependencies so both the DB-free journal and the scheduler read side can use
 it.  Its functions take plain data: callers keep their own topology (stage
 matching, stage canonicalization) and their own occupancy probe (``is_occupied``).
@@ -26,6 +27,22 @@ from typing import Any
 LOGGER = logging.getLogger(__name__)
 
 RETRY_JOB_ID_MARKER = "_retry_"
+
+#: Default retry limit.  ``scheduler_state_types`` re-exports it (the
+#: ``NHMS_SCHEDULER_RETRY_LIMIT`` default) and ``RetryConfig.max_retries``
+#: defaults to it; ``SlurmGatewaySettings.max_retries`` keeps an equal literal
+#: because the gateway must not import the orchestrator.
+DEFAULT_RETRY_LIMIT = 3
+
+#: Statuses a terminal stage row is manually retried from
+#: (``_terminal_stage_needs_manual_retry``).
+MANUAL_RETRYABLE_STATUSES = frozenset(
+    {"failed", "submission_failed", "permanently_failed", "cancelled", "partially_failed"}
+)
+
+#: Statuses a terminal stage row may be re-run from after its upstream refreshed
+#: (``_terminal_stage_can_retry_after_upstream_refresh``).
+UPSTREAM_REFRESH_RETRYABLE_STATUSES = frozenset({"failed", "submission_failed", "partially_failed"})
 
 MANUAL_RETRY_CLAIM_IGNORED_LOG_TOKEN = "MANUAL_RETRY_ATTEMPT_CLAIM_IGNORED"
 

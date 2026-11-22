@@ -13,11 +13,12 @@ Sections:
    delegate).
 3. Stage attempt reads (``scheduler_state_rows`` and ``_stage_job_sort_key``),
    and the scheduler-side manual new attempt.
-4. Limits (defaults and both env overrides).
+4. Limits (defaults and both env overrides; owner-held default limit and status sets).
 5. Stub-driven rows (A/E mint, N precedence, the ``failure_number - 1`` formula,
    the two ``rsplit`` increments, the journal non-master path, the master vs
    non-master pair).
-6. Status sets (the two inline sets vs ``retry.py``).
+6. Status sets (the two inline sets vs ``retry.py``; owner-held default limit and
+   status sets).
 7. Integration index (rows A-limit, B, C-sibling, G-K, O, P, journal manual
    path): input, expected outcome and the existing pin, asserted to exist by
    node id.
@@ -1084,7 +1085,7 @@ def test_manual_retry_new_attempt_pin_default_is_eager_at_1038() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 4. Limits (9.4)
+# 4. Limits (9.4): owner-held default limit and status sets
 # ---------------------------------------------------------------------------
 
 SCHEDULER_LIMIT_ENV = "NHMS_SCHEDULER_RETRY_LIMIT"
@@ -1216,6 +1217,105 @@ def test_limit_envs_are_independent_gateway_set(tmp_path: Path, monkeypatch: pyt
     _clear_limit_env(monkeypatch)
     monkeypatch.setenv(GATEWAY_LIMIT_ENV, "5")
     assert (_scheduler_retry_limit(tmp_path), _gateway_max_retries()) == (3, 5)
+
+
+# Owner-held default limit (9.4).  ``retry_identity`` owns ``DEFAULT_RETRY_LIMIT``;
+# ``scheduler_state_types`` re-exports it and ``RetryConfig.max_retries`` defaults
+# to it.  The gateway keeps its literal (it must not import the orchestrator), so
+# the parity rows below are what bind it to the owner.
+
+
+def test_owner_default_retry_limit() -> None:
+    assert retry_identity.DEFAULT_RETRY_LIMIT == 3
+    assert type(retry_identity.DEFAULT_RETRY_LIMIT) is int
+
+
+def test_retry_config_default_max_retries() -> None:
+    assert RetryConfig.__dataclass_fields__["max_retries"].default == 3
+    assert RetryConfig().max_retries == 3
+
+
+@pytest.mark.parametrize(
+    "read_default",
+    [
+        pytest.param(lambda: SlurmGatewaySettings.model_fields["max_retries"].default, id="field-default"),
+        pytest.param(lambda: SlurmGatewaySettings().max_retries, id="constructed"),
+    ],
+)
+def test_gateway_default_equals_owner_limit(monkeypatch: pytest.MonkeyPatch, read_default: Any) -> None:
+    _clear_limit_env(monkeypatch)
+    assert read_default() == retry_identity.DEFAULT_RETRY_LIMIT
+
+
+def _module_tree(relative_path: str) -> ast.Module:
+    return ast.parse((REPO_ROOT / relative_path).read_text(encoding="utf-8"))
+
+
+def _imports_owner_limit(tree: ast.Module) -> bool:
+    return any(
+        isinstance(node, ast.ImportFrom)
+        and node.module == "services.orchestrator.retry_identity"
+        and any(alias.name == "DEFAULT_RETRY_LIMIT" for alias in node.names)
+        for node in tree.body
+    )
+
+
+def _assert_retry_config_default_reads_the_owner(tree: ast.Module) -> None:
+    (retry_config,) = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "RetryConfig"]
+    (max_retries,) = [
+        node
+        for node in retry_config.body
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == "max_retries"
+    ]
+    assert isinstance(max_retries.value, ast.Name)
+    assert max_retries.value.id == "DEFAULT_RETRY_LIMIT"
+    assert _imports_owner_limit(tree)
+
+
+def _assert_state_types_reexports_the_owner(tree: ast.Module) -> None:
+    assigned = [
+        target.id
+        for node in tree.body
+        if isinstance(node, ast.Assign | ast.AnnAssign)
+        for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
+        if isinstance(target, ast.Name)
+    ]
+    assert "DEFAULT_RETRY_LIMIT" not in assigned
+    assert _imports_owner_limit(tree)
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "check"),
+    [
+        pytest.param("services/orchestrator/retry.py", _assert_retry_config_default_reads_the_owner, id="retry"),
+        pytest.param(
+            "services/orchestrator/scheduler_state_types.py",
+            _assert_state_types_reexports_the_owner,
+            id="scheduler_state_types",
+        ),
+    ],
+)
+def test_limit_defaults_read_the_owner(relative_path: str, check: Any) -> None:
+    check(_module_tree(relative_path))
+
+
+def _orchestrator_import_targets(path: Path, package: str) -> list[str]:
+    targets: list[str] = []
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Import):
+            targets.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            parts = package.split(".")
+            base = ".".join(parts[: len(parts) - node.level + 1]) if node.level else ""
+            module = ".".join(part for part in (base, node.module or "") if part)
+            targets.extend(f"{module}.{alias.name}" for alias in node.names)
+    owner = "services.orchestrator"
+    return [target for target in targets if target == owner or target.startswith(f"{owner}.")]
+
+
+def test_gateway_config_does_not_import_the_orchestrator() -> None:
+    path = REPO_ROOT / "services" / "slurm_gateway" / "config.py"
+    assert _orchestrator_import_targets(path, "services.slurm_gateway") == []
 
 
 # ---------------------------------------------------------------------------
@@ -1532,7 +1632,7 @@ def test_master_and_non_master_paths_diverge_on_the_same_input(tmp_path: Path) -
 
 
 # ---------------------------------------------------------------------------
-# 6. Status sets (9.4 / 9.6)
+# 6. Status sets (9.4 / 9.6): owner-held default limit and status sets
 # ---------------------------------------------------------------------------
 
 STATUS_VOCAB_UNION = frozenset(
@@ -1587,6 +1687,147 @@ def test_the_two_inline_status_sets_differ() -> None:
     assert manual != refresh
     assert manual - refresh == {"permanently_failed", "cancelled"}
     assert refresh - manual == set()
+
+
+# Owner-held status sets (9.4).  ``retry_identity`` owns both sets; the two
+# predicate sites read them by name.  ``retry.py``'s sets stay separate (#3319).
+
+
+def test_owner_manual_retryable_statuses() -> None:
+    assert retry_identity.MANUAL_RETRYABLE_STATUSES == MANUAL_RETRY_INLINE_SET
+    assert type(retry_identity.MANUAL_RETRYABLE_STATUSES) is frozenset
+
+
+def test_owner_upstream_refresh_retryable_statuses() -> None:
+    assert retry_identity.UPSTREAM_REFRESH_RETRYABLE_STATUSES == UPSTREAM_REFRESH_INLINE_SET
+    assert type(retry_identity.UPSTREAM_REFRESH_RETRYABLE_STATUSES) is frozenset
+
+
+def test_owner_manual_retryable_statuses_equal_manual_retry_source_statuses() -> None:
+    assert retry_identity.MANUAL_RETRYABLE_STATUSES == MANUAL_RETRY_SOURCE_STATUSES
+
+
+def test_owner_upstream_refresh_retryable_statuses_equal_failed_minus_permanently_failed() -> None:
+    assert retry_identity.UPSTREAM_REFRESH_RETRYABLE_STATUSES == FAILED_RETRY_STATUSES - {"permanently_failed"}
+
+
+_CYCLE_MODULE = "services.orchestrator.chain_forecast_orchestrator_cycle"
+
+
+def _manual_retry_verdict(status: str) -> bool:
+    context = SimpleNamespace(retry_attempt=1, active_basins=(), restart_stage=None)
+    return ForecastOrchestrator._terminal_stage_needs_manual_retry(
+        context, {"status": status, "slurm_job_id": "4000", "stage": "forecast"}
+    )
+
+
+def _upstream_refresh_verdict(status: str) -> bool:
+    return ForecastOrchestrator._terminal_stage_can_retry_after_upstream_refresh(
+        {"status": status}, refreshed_upstream_finished_at=datetime(2026, 5, 1, 6, tzinfo=UTC)
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "verdict"),
+    [
+        pytest.param("MANUAL_RETRYABLE_STATUSES", _manual_retry_verdict, id="manual"),
+        pytest.param("UPSTREAM_REFRESH_RETRYABLE_STATUSES", _upstream_refresh_verdict, id="upstream-refresh"),
+    ],
+)
+def test_terminal_stage_predicates_read_the_owner_names(
+    monkeypatch: pytest.MonkeyPatch, name: str, verdict: Any
+) -> None:
+    # Replacing the module global flips the verdict, so the site reads the
+    # owner name (an equal inline literal would keep the old verdict).
+    monkeypatch.setattr(f"{_CYCLE_MODULE}.{name}", frozenset({"succeeded"}))
+    assert verdict("succeeded") is True
+    assert verdict("failed") is False
+
+
+# Status-set delegate rows (9.4): the sets are owner-held, but the status
+# coercion (``str(job.get("status") or "")``) and the evaluation order stay at
+# the two predicate sites.  Values observed on the pre-move code.
+
+_MANUAL_JOB = {"slurm_job_id": "4000", "stage": "forecast"}
+
+
+@pytest.mark.parametrize(
+    ("job", "retry_attempt", "expected"),
+    [
+        pytest.param({**_MANUAL_JOB, "status": "failed"}, 0, True, id="failed-attempt-0"),
+        pytest.param({**_MANUAL_JOB, "status": "cancelled"}, 1, True, id="cancelled"),
+        pytest.param({**_MANUAL_JOB, "status": "permanently_failed"}, 1, True, id="permanently-failed"),
+        pytest.param({**_MANUAL_JOB, "status": "failed"}, None, False, id="failed-attempt-none"),
+        pytest.param({**_MANUAL_JOB, "status": "succeeded"}, 1, False, id="succeeded"),
+        pytest.param({**_MANUAL_JOB, "status": None}, 1, False, id="status-none"),
+        pytest.param({**_MANUAL_JOB, "status": "FAILED"}, 1, False, id="upper-case"),
+        pytest.param({**_MANUAL_JOB, "status": " failed"}, 1, False, id="leading-space"),
+        pytest.param(dict(_MANUAL_JOB), 1, False, id="status-missing"),
+        pytest.param({**_MANUAL_JOB, "status": 5}, 1, False, id="status-int"),
+        pytest.param({**_MANUAL_JOB, "status": "partially_failed"}, None, False, id="partially-failed-attempt-none"),
+        pytest.param({"status": "reservation_lost", "stage": "forecast"}, 1, False, id="reservation-lost-no-slurm-id"),
+    ],
+)
+def test_terminal_stage_needs_manual_retry_delegate(
+    job: dict[str, Any], retry_attempt: int | None, expected: bool
+) -> None:
+    context = SimpleNamespace(retry_attempt=retry_attempt, active_basins=(), restart_stage=None)
+    assert ForecastOrchestrator._terminal_stage_needs_manual_retry(context, job) is expected
+
+
+_REFRESHED_AT = datetime(2026, 5, 1, 6, tzinfo=UTC)
+_AT_REFRESH = "2026-05-01T06:00:00+00:00"
+_BEFORE_REFRESH = "2026-05-01T05:00:00+00:00"
+_AFTER_REFRESH = "2026-05-01T06:00:01+00:00"
+
+
+@pytest.mark.parametrize(
+    ("job", "refreshed", "expected"),
+    [
+        pytest.param({"status": "failed"}, _REFRESHED_AT, True, id="failed-no-time"),
+        pytest.param({"status": "failed", "finished_at": _AT_REFRESH}, _REFRESHED_AT, True, id="failed-at-refresh"),
+        pytest.param({"status": "failed", "finished_at": _BEFORE_REFRESH}, _REFRESHED_AT, True, id="failed-before"),
+        pytest.param(
+            {"status": "partially_failed", "finished_at": _BEFORE_REFRESH}, _REFRESHED_AT, True, id="partial-before"
+        ),
+        pytest.param({"status": "failed"}, None, False, id="refreshed-none"),
+        pytest.param({"status": "failed", "finished_at": _AFTER_REFRESH}, _REFRESHED_AT, False, id="failed-after"),
+        pytest.param(
+            {"status": "submission_failed", "finished_at": _AFTER_REFRESH}, _REFRESHED_AT, False, id="submission-after"
+        ),
+        pytest.param(
+            {"status": "permanently_failed", "finished_at": _BEFORE_REFRESH},
+            _REFRESHED_AT,
+            False,
+            id="permanently-failed-before",
+        ),
+        pytest.param({"status": "cancelled"}, _REFRESHED_AT, False, id="cancelled-no-time"),
+        pytest.param({"status": None}, _REFRESHED_AT, False, id="status-none"),
+        pytest.param({}, _REFRESHED_AT, False, id="status-missing"),
+        pytest.param({"status": "FAILED"}, _REFRESHED_AT, False, id="upper-case"),
+        pytest.param({"status": " failed"}, _REFRESHED_AT, False, id="leading-space"),
+        pytest.param({"status": 5}, _REFRESHED_AT, False, id="status-int"),
+        pytest.param({"status": ["failed"]}, _REFRESHED_AT, False, id="status-list"),
+        # The status check runs before the terminal-time parse.
+        pytest.param({"status": "cancelled", "finished_at": "x"}, _REFRESHED_AT, False, id="cancelled-unparseable"),
+        # The refreshed-time check runs before both.
+        pytest.param({"status": "failed", "finished_at": "x"}, None, False, id="refreshed-none-unparseable"),
+    ],
+)
+def test_terminal_stage_can_retry_after_upstream_refresh_delegate(
+    job: dict[str, Any], refreshed: datetime | None, expected: bool
+) -> None:
+    result = ForecastOrchestrator._terminal_stage_can_retry_after_upstream_refresh(
+        job, refreshed_upstream_finished_at=refreshed
+    )
+    assert result is expected
+
+
+def test_terminal_stage_can_retry_after_upstream_refresh_unparseable_time_raises() -> None:
+    with pytest.raises(ValueError):
+        ForecastOrchestrator._terminal_stage_can_retry_after_upstream_refresh(
+            {"status": "failed", "finished_at": "x"}, refreshed_upstream_finished_at=_REFRESHED_AT
+        )
 
 
 # ---------------------------------------------------------------------------
