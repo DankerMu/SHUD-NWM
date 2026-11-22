@@ -442,11 +442,7 @@ def reserve_pre_execution_evidence(
             error.details,
         )
     except (OSError, RuntimeError, ValueError) as error:
-        details = (
-            {"error_type": type(error).__name__}
-            if bool(getattr(context.config, "scheduler_db_free_required", False))
-            else {"error": str(error)}
-        )
+        details = {"error_type": type(error).__name__}
         return _call_reservation_blocked_payload(
             context,
             pass_id,
@@ -491,9 +487,7 @@ def write_evidence(
 
 
 def artifact_path_evidence(config: SchedulerEvidenceConfig, artifact_path: Path) -> str:
-    if bool(getattr(config, "scheduler_db_free_required", False)):
-        return "[local-path]"
-    return str(artifact_path)
+    return "[local-path]"
 
 
 def validate_evidence_artifact_name(artifact_name: str, *, artifact_path: Path) -> None:
@@ -800,16 +794,13 @@ def evidence_write_error_payload(
         if config is not None and artifact_path not in (None, ""):
             details["artifact_path"] = artifact_path_evidence(config, Path(str(artifact_path)))
         return {"reason": error.reason, **details}
-    if config is not None and bool(getattr(config, "scheduler_db_free_required", False)):
+    if config is not None:
         return {"reason": "evidence_write_failed", "error_type": type(error).__name__}
     return {"reason": "evidence_write_failed", "error": str(error)}
 
 
 def scheduler_resolved_runtime_roots(config: SchedulerEvidenceConfig) -> dict[str, Any]:
-    evidence_safe_paths = bool(
-        getattr(config, "scheduler_db_free_required", False)
-        or getattr(config, "repair_missing_forcing", False)
-    )
+    evidence_safe_paths = True
     return {
         "workspace_root": root_evidence_item(
             config.workspace_root,
@@ -904,29 +895,28 @@ def root_evidence_item(
 
 
 def scheduler_runtime_config_evidence(config: SchedulerEvidenceConfig) -> dict[str, Any]:
-    db_free_required = bool(getattr(config, "scheduler_db_free_required", False))
     payload = {
         "service_role": config.service_role,
         "require_runtime_roots": config.require_runtime_roots,
         "database_url_configured": bool(getattr(config, "database_url_configured", False)),
-        "scheduler_db_free_required": db_free_required,
+        "scheduler_db_free_required": True,
         "scheduler_state_backend": _scheduler_backend_evidence(
-            getattr(config, "scheduler_state_backend", None), db_free_required=db_free_required
+            getattr(config, "scheduler_state_backend", None)
         ),
         "scheduler_lock_backend": _scheduler_backend_evidence(
-            getattr(config, "scheduler_lock_backend", None), db_free_required=db_free_required
+            getattr(config, "scheduler_lock_backend", None)
         ),
         "scheduler_registry_backend": _scheduler_backend_evidence(
-            getattr(config, "scheduler_registry_backend", None), db_free_required=db_free_required
+            getattr(config, "scheduler_registry_backend", None)
         ),
         "scheduler_canonical_readiness_backend": _scheduler_backend_evidence(
-            getattr(config, "scheduler_canonical_readiness_backend", None), db_free_required=db_free_required
+            getattr(config, "scheduler_canonical_readiness_backend", None)
         ),
         "scheduler_journal_backend": _scheduler_backend_evidence(
-            getattr(config, "scheduler_journal_backend", None), db_free_required=db_free_required
+            getattr(config, "scheduler_journal_backend", None)
         ),
         "scheduler_state_index_backend": _scheduler_backend_evidence(
-            getattr(config, "scheduler_state_index_backend", None), db_free_required=db_free_required
+            getattr(config, "scheduler_state_index_backend", None)
         ),
         "dry_run": config.dry_run,
         "continuous": config.continuous,
@@ -959,18 +949,16 @@ def scheduler_runtime_config_evidence(config: SchedulerEvidenceConfig) -> dict[s
     return payload
 
 
-def _scheduler_backend_evidence(value: Any, *, db_free_required: bool) -> Any:
+def _scheduler_backend_evidence(value: Any) -> Any:
     if value in (None, ""):
         return value
     text = str(value).strip()
-    if db_free_required and text == "file":
+    if text == "file":
         return "file"
     try:
         parsed = urlparse(text)
     except ValueError:
-        if db_free_required:
-            return "[invalid-uri]"
-        return "[invalid-uri]" if ":" in text else text
+        return "[invalid-uri]"
     if parsed.scheme:
         scheme = parsed.scheme.lower()
         if scheme in _DB_FREE_DB_BACKEND_VALUES or "postgres" in scheme or "psycopg" in scheme:
@@ -979,9 +967,7 @@ def _scheduler_backend_evidence(value: Any, *, db_free_required: bool) -> Any:
     lower = text.lower()
     if lower in _DB_FREE_DB_BACKEND_VALUES or "postgres" in lower or "psycopg" in lower:
         return "[db-like]"
-    if db_free_required:
-        return "[non-file]"
-    return text
+    return "[non-file]"
 
 
 def open_evidence_directory(evidence_dir: Path, workspace_root: Path) -> int:

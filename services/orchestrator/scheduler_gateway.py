@@ -17,25 +17,16 @@ def _slurm_preflight(config: Any) -> dict[str, Any]:
 
     blockers: list[dict[str, Any]] = []
     checks: dict[str, Any] = {}
-    db_free_required = bool(getattr(config, "db_free_required", False))
 
-    if db_free_required:
-        checks["database"] = {
-            "configured": bool(getattr(config, "database_url_configured", False)),
-            "required": False,
-            "db_free_runtime": True,
-            "compute_node_reachable": "not_required",
-        }
-    else:
-        database_url = config.database_url
-        db_blocker = _scheduler._database_url_blocker(database_url)
-        checks["database"] = {
-            "configured": bool(database_url),
-            "host": _scheduler._database_host(database_url),
-            "compute_node_reachable": db_blocker is None,
-        }
-        if db_blocker is not None:
-            blockers.append(db_blocker)
+    # The Slurm preflight never consults DATABASE_URL: the scheduler runs DB-free
+    # only, and a configured one is refused before the lock by the DB-free runtime
+    # preflight (database_url_forbidden).
+    checks["database"] = {
+        "configured": bool(getattr(config, "database_url_configured", False)),
+        "required": False,
+        "db_free_runtime": True,
+        "compute_node_reachable": "not_required",
+    }
 
     roots = {
         "workspace_root": config.workspace_root,
@@ -43,9 +34,10 @@ def _slurm_preflight(config: Any) -> dict[str, Any]:
         "log_root": config.log_root,
         "runtime_root": config.runtime_root,
     }
-    # Unsafe allowed roots are reported before the per-root loop on purpose:
-    # dropping a root cascades into OUT_OF_ROOT verdicts below, so the root cause
-    # must lead the cascade it causes (a DATABASE_URL_* blocker may precede it).
+    # The allowed roots are adjudicated before the per-root loop: every root below
+    # is judged against that product. The adjudication admits an unresolvable root
+    # lexically, so its blocker list is empty; it is still extended first so any
+    # blocker it carried would lead the per-root verdicts it causes.
     allowed_roots, allowed_root_blockers = _scheduler._preflight_allowed_roots(config)
     blockers.extend(allowed_root_blockers)
     root_checks: dict[str, Any] = {}
@@ -54,23 +46,19 @@ def _slurm_preflight(config: Any) -> dict[str, Any]:
             field_name,
             value,
             allowed_roots,
-            evidence_safe_paths=db_free_required,
+            evidence_safe_paths=True,
         )
         root_checks[field_name] = root_check
         if blocker is not None:
             blockers.append(blocker)
     checks["storage_roots"] = root_checks
-    checks["allowed_roots"] = (
-        ["[local-path]" for _root in allowed_roots]
-        if db_free_required
-        else [str(root) for root in allowed_roots]
-    )
+    checks["allowed_roots"] = ["[local-path]" for _root in allowed_roots]
 
     template_check, template_blockers = _scheduler._slurm_template_allowlist_check(config)
     checks["templates"] = template_check
     blockers.extend(template_blockers)
 
-    env_check, env_blockers = _scheduler._slurm_env_check(config.slurm_env, evidence_safe_values=db_free_required)
+    env_check, env_blockers = _scheduler._slurm_env_check(config.slurm_env, evidence_safe_values=True)
     checks["environment"] = env_check
     blockers.extend(env_blockers)
 
@@ -82,7 +70,7 @@ def _slurm_preflight(config: Any) -> dict[str, Any]:
     checks["gateway"] = gateway_check
     blockers.extend(gateway_blockers)
 
-    grib_check, grib_blockers = _scheduler._slurm_grib_env_check(config, evidence_safe_paths=db_free_required)
+    grib_check, grib_blockers = _scheduler._slurm_grib_env_check(config, evidence_safe_paths=True)
     checks["grib_env"] = grib_check
     blockers.extend(grib_blockers)
 

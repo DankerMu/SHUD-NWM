@@ -134,7 +134,7 @@ def _check(
     workspace: Path,
     evidence_safe_paths: bool,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    # Mirrors the lock/evidence preflight's arguments for these three fields.
+    # Mirrors the runtime root preflight's arguments for these three fields.
     return scheduler_module._scheduler_root_check(
         field_name,
         value,
@@ -198,7 +198,9 @@ def test_loop_root_check_reason_and_key_set_match_the_non_loop_assembly(
     if spelling == "raw":
         value: Path | str = raw
     else:
-        value = _config_path_preserve_final_component_for_mode(raw, db_free_required=evidence_safe_paths)
+        # #3311 dropped the mode keyword: both rows run the one DB-free normaliser,
+        # whose product the evidence_safe_paths=True rows already pinned here.
+        value = _config_path_preserve_final_component_for_mode(raw)
         assert str(value) == f"{workspace}/{_NORMALISED_RELATIVE[shape]}"
     expected_reason, key_kind = _EXPECTED[(evidence_safe_paths, shape, spelling)]
     expected_keys = _reference_key_sets(
@@ -378,7 +380,9 @@ def test_self_loop_lock_root_reports_symlink_with_the_full_key_set(
     lock_root.symlink_to(lock_root)
     assert roots["lock_root"] == lock_root
 
-    preflight = scheduler_module._scheduler_lock_evidence_root_preflight(ProductionSchedulerConfig())
+    # #3311 retargeted this from the retired lock/evidence-only preflight; this env
+    # configures every root, so the runtime preflight's blocker list is unchanged.
+    preflight = scheduler_module._scheduler_runtime_root_preflight(ProductionSchedulerConfig())
 
     assert preflight["status"] == "blocked"
     assert [blocker["code"] for blocker in preflight["blockers"]] == ["SCHEDULER_ROOT_LOCK_ROOT_SYMLINK"]

@@ -307,8 +307,7 @@ SCHEDULER_EVIDENCE_OPEN_SPEC_CHANGE = _scheduler_evidence.SCHEDULER_EVIDENCE_OPE
 SCHEDULER_EVIDENCE_GITHUB_ISSUE = _scheduler_evidence.SCHEDULER_EVIDENCE_GITHUB_ISSUE
 # Slurm env / preflight validation constants (SLURM_ARRAY_STAGE_NAMES,
 # SAFE_SLURM_ENV_KEY_RE, SAFE_SLURM_ENV_VALUE_RE, SHELL_META_RE,
-# MAX_SLURM_ENV_VALUE_LENGTH, PRODUCTION_SLURM_ENV_PASSTHROUGH_KEYS,
-# LOCALHOST_NAMES, DATABASE_HOST_ALLOWED_RE) are owned solely by
+# MAX_SLURM_ENV_VALUE_LENGTH, PRODUCTION_SLURM_ENV_PASSTHROUGH_KEYS) are owned solely by
 # services.orchestrator.scheduler_preflight. This facade used to carry verbatim
 # copies that nothing imported, so a whitelist fix had to be applied twice;
 # import them from the owner module instead of re-adding literals here.

@@ -11,86 +11,18 @@ from packages.common.source_identity import normalize_source_id
 from services.orchestrator import scheduler as _scheduler
 
 
-def _scheduler_lock_evidence_root_preflight(config: Any) -> dict[str, Any]:
-    if not config.require_runtime_roots:
-        return _scheduler._scheduler_root_preflight_not_required(config)
-    evidence_safe_paths = bool(
-        getattr(config, "db_free_required", False)
-        or getattr(config, "repair_missing_forcing", False)
-    )
-    allowed_roots, allowed_roots_unsafe_blockers = _scheduler._scheduler_allowed_roots_and_blockers(config)
-    allowed_roots_check, allowed_roots_blocker = _scheduler._scheduler_allowed_roots_policy_check(
-        config,
-        allowed_roots,
-        evidence_safe_paths=evidence_safe_paths,
-    )
-    enforce_approved_roots = allowed_roots_blocker is None
-    checks: dict[str, Any] = {}
-    checks["allowed_roots_policy"] = allowed_roots_check
-    # Cause before consequence: "this root was dropped" precedes "no root left".
-    blockers: list[dict[str, Any]] = list(allowed_roots_unsafe_blockers)
-    if allowed_roots_blocker is not None:
-        blockers.append(allowed_roots_blocker)
-    workspace_root_preflight_path = config._workspace_root_preflight_path
-    for field_name, path, raw_path in (
-        (
-            "workspace_root",
-            config._workspace_root_preflight_path,
-            getattr(config, "_workspace_root_raw_preflight_path", config._workspace_root_preflight_path),
-        ),
-        (
-            "lock_root",
-            config._lock_root_preflight_path,
-            getattr(config, "_lock_root_raw_preflight_path", config._lock_root_preflight_path),
-        ),
-        (
-            "evidence_root",
-            config._evidence_root_preflight_path,
-            getattr(config, "_evidence_root_raw_preflight_path", config._evidence_root_preflight_path),
-        ),
-    ):
-        check, blocker = _scheduler._scheduler_root_check(
-            field_name,
-            path,
-            allowed_roots,
-            required=True,
-            must_exist=True,
-            allow_create=False,
-            require_approved_root=enforce_approved_roots and field_name == "workspace_root",
-            require_under_workspace=field_name in {"lock_root", "evidence_root"},
-            workspace_root=workspace_root_preflight_path,
-            evidence_safe_paths=evidence_safe_paths,
-            raw_value=raw_path,
-        )
-        checks[field_name] = check
-        if blocker is not None:
-            blockers.append(blocker)
-    return _scheduler._scheduler_root_preflight_payload(
-        config,
-        checks,
-        blockers,
-        evidence_safe_paths=evidence_safe_paths,
-        allowed_roots=allowed_roots,
-    )
-
-
 def _scheduler_runtime_root_preflight(config: Any) -> dict[str, Any]:
-    if not config.require_runtime_roots:
-        return _scheduler._scheduler_root_preflight_not_required(config)
-    evidence_safe_paths = bool(
-        getattr(config, "db_free_required", False)
-        or getattr(config, "repair_missing_forcing", False)
-    )
     allowed_roots, allowed_roots_unsafe_blockers = _scheduler._scheduler_allowed_roots_and_blockers(config)
     allowed_roots_check, allowed_roots_blocker = _scheduler._scheduler_allowed_roots_policy_check(
         config,
         allowed_roots,
-        evidence_safe_paths=evidence_safe_paths,
+        evidence_safe_paths=True,
     )
     enforce_approved_roots = allowed_roots_blocker is None
     checks: dict[str, Any] = {}
     checks["allowed_roots_policy"] = allowed_roots_check
-    # Cause before consequence: "this root was dropped" precedes "no root left".
+    # Cause before consequence: the adjudication's own blockers (always empty, it
+    # admits an unresolvable root lexically) precede the "no root left" policy one.
     blockers: list[dict[str, Any]] = list(allowed_roots_unsafe_blockers)
     if allowed_roots_blocker is not None:
         blockers.append(allowed_roots_blocker)
@@ -150,7 +82,7 @@ def _scheduler_runtime_root_preflight(config: Any) -> dict[str, Any]:
             require_approved_root=enforce_approved_roots and field_name not in {"lock_root", "evidence_root"},
             require_under_workspace=field_name in {"lock_root", "evidence_root"},
             workspace_root=workspace_root_preflight_path,
-            evidence_safe_paths=evidence_safe_paths,
+            evidence_safe_paths=True,
             raw_value=raw_path,
         )
         checks[field_name] = check
@@ -164,19 +96,9 @@ def _scheduler_runtime_root_preflight(config: Any) -> dict[str, Any]:
         config,
         checks,
         blockers,
-        evidence_safe_paths=evidence_safe_paths,
+        evidence_safe_paths=True,
         allowed_roots=allowed_roots,
     )
-
-
-def _scheduler_root_preflight_not_required(config: Any) -> dict[str, Any]:
-    return {
-        "status": "not_required",
-        "required": False,
-        "blockers": [],
-        "checks": {},
-        "allowed_roots": [str(root) for root in _scheduler._scheduler_allowed_roots(config)],
-    }
 
 
 def _scheduler_root_preflight_payload(
@@ -192,8 +114,8 @@ def _scheduler_root_preflight_payload(
     ``allowed_roots`` must be the very roots the arm adjudicated: re-deriving
     them here would be a second adjudication whose product can diverge from the
     first under filesystem races, yielding a self-contradictory payload (a
-    blocker saying a root was dropped next to a top-level ``allowed_roots`` that
-    still lists it). ``None`` keeps the historical self-derivation for callers
+    top-level ``allowed_roots`` that differs from the roots the checks were
+    judged against). ``None`` keeps the historical self-derivation for callers
     that have no adjudication of their own.
     """
 
@@ -489,7 +411,7 @@ def _scheduler_allowed_roots(config: Any) -> tuple[Path, ...]:
     """Effective approved containment bases (read-only view of the adjudication).
 
     The verdict itself lives in ``_scheduler_allowed_roots_and_blockers``; this
-    signature is kept for the payload/not-required evidence surfaces, which show
+    signature is kept for the payload evidence surface, which shows
     the same product without owning a blocker channel.
     """
 
@@ -505,18 +427,16 @@ def _scheduler_allowed_roots_and_blockers(config: Any) -> tuple[tuple[Path, ...]
     an errno-less ``RuntimeError`` on <=3.12, so the verdict has to come from
     the kernel errno of ``os.path.realpath(..., strict=True)``. ENOENT is NOT
     unsafe: a merely missing root (not created yet, NFS not mounted) keeps the
-    historical "admitted" semantics on both runtime modes and never produces a
-    blocker. Any other errno is tolerated lexically on db-free runtimes (PR #831)
-    and, on database-backed runtimes, drops the root from the effective allowed
-    roots so it can never serve as a phantom containment base, with a structured
-    ``SCHEDULER_ROOT_ALLOWED_ROOTS_<REASON>`` blocker explaining why.
+    historical "admitted" semantics and never produces a blocker. Any other errno
+    is tolerated lexically (PR #831): the scheduler runs DB-free only, and an
+    unresolvable root is legitimate configuration there. The blocker list is kept
+    in the signature for the preflight that leads its blockers with it; it is
+    always empty.
     """
 
     # ADR 0009 clause 3: same posture as _preflight_allowed_roots -- these products are
     # containment bases only and assert nothing about existence, while the path judged
     # against them is dereferenced by _scheduler_root_check's lstat below.
-    db_free_required = bool(getattr(config, "db_free_required", False))
-    evidence_safe_paths = bool(db_free_required or getattr(config, "repair_missing_forcing", False))
     roots: list[Path] = []
     blockers: list[dict[str, Any]] = []
     for value in config.allowed_storage_roots:
@@ -531,21 +451,12 @@ def _scheduler_allowed_roots_and_blockers(config: Any) -> tuple[tuple[Path, ...]
                 # reproduces the historical non-strict Path.resolve() product,
                 # including `<missing>/../<loop>` shapes.
                 root = Path(os.path.realpath(expanded))
-            elif db_free_required:
-                # PR #831 lexical-fallback tolerance, kept verbatim: on db-free
-                # runtimes an unresolvable root is legitimate configuration.
+            else:
+                # PR #831 lexical-fallback tolerance, kept verbatim: an
+                # unresolvable root is legitimate configuration.
                 root = expanded
                 if not root.is_absolute():
                     root = Path.cwd() / root
-            else:
-                blockers.append(
-                    _scheduler._scheduler_root_blocker(
-                        "allowed_roots",
-                        _scheduler._scheduler_root_os_error_reason(error),
-                        "[local-path]" if evidence_safe_paths else str(expanded),
-                    )
-                )
-                continue
         if root not in roots:
             roots.append(root)
     return tuple(roots), blockers
@@ -575,7 +486,7 @@ def _normalize_sources(sources: Sequence[str]) -> tuple[tuple[str, ...], list[di
 def _canonical_parent(path: Path) -> Path:
     """Canonicalise a path's parent segment on every supported CPython.
 
-    Same paradigm as _optional_config_path below: strict os.path.realpath, one
+    Same paradigm as _canonical_path below: strict os.path.realpath, one
     non-strict os.path.realpath fallback for every strict failure, and no
     verdict of its own -- the caller's containment check or the storage
     preflight classifies what comes back.  Path.resolve() cannot be used here
@@ -639,9 +550,10 @@ def _expanduser_or_verbatim(value: Path | str) -> Path:
     Config construction must not abort on that: classification of an unusable
     root belongs to the storage preflight, and an abort here produces no
     structured blocker at all.  Swallowing the throw and handing the raw value
-    on to the caller's own anchoring is exactly what the database-free arm does
-    in scheduler_config._expanduser_for_mode(..., db_free_required=True), so the
-    two database arms come out byte-identical on such input (#1549).
+    on to the caller's own anchoring is exactly what
+    scheduler_config._expanduser_for_mode does, so the compatibility helpers here
+    and the configuration's own path helpers come out byte-identical on such
+    input (#1549).
 
     This is deliberately the opposite direction from packages/common/safe_fs.py,
     which narrows the same bare throw into a structured refusal: that module is
@@ -669,41 +581,6 @@ def _confined_path(value: Path | str, workspace_root: Path, field_name: str) -> 
 def _reject_blank_config_path(value: Path | str | None, field_name: str) -> None:
     if isinstance(value, str) and value.strip() == "":
         raise ValueError(f"production scheduler {field_name} must not be blank")
-
-
-def _optional_config_path(value: Path | str | None) -> Path | None:
-    # ADR 0009 clause 3: the production consumer is the db-backed arm of
-    # scheduler_config/path_modes.py::_optional_config_path_for_mode, whose only caller
-    # turns this product into allowed_storage_roots -- a containment base that asserts
-    # nothing about existence and is never itself probed, while the path judged against
-    # it IS dereferenced first (_scheduler_root_check's path.lstat(),
-    # _storage_root_check's exists()/is_dir()). That lstat is of `path`, not of
-    # `allowed_roots`, which is why the containment-base clause is the one that holds
-    # here and not the downstream-dereference one.
-    if value in (None, ""):
-        return None
-    # A tilde whose home cannot be determined is kept verbatim rather than
-    # aborting construction, for the same reason the strict failure below is
-    # handed on: classification belongs to the preflight (#1549).
-    expanded = _expanduser_or_verbatim(value)
-    try:
-        return Path(os.path.realpath(expanded, strict=True))
-    except OSError:
-        # Classification belongs to the storage preflight, not to config
-        # construction: hand the canonicalised value down so
-        # _preflight_allowed_roots drops an unresolvable root and reports
-        # SLURM_PREFLIGHT_ALLOWED_STORAGE_ROOTS_UNSAFE_PATH on every supported
-        # CPython, instead of aborting the whole process on <=3.12.
-        #
-        # A single non-strict os.path.realpath() covers every strict failure:
-        # it never raises on 3.11-3.14 and reproduces the product of the old
-        # non-strict Path.resolve() verbatim -- POSIX order, symlinks first and
-        # `..` afterwards. Splitting on errno would buy nothing, because both
-        # would-be lanes converge on this same product; a lexical pass-through
-        # instead re-opens a 3.13+ vs <=3.12 divergence on `<file>/../<dir>`
-        # shapes, and normpath folding would erase symlink redirection and
-        # fabricate a root the operator never approved (design D2).
-        return Path(os.path.realpath(expanded))
 
 
 def _config_path_preserve_final_component(value: Path | str) -> Path:

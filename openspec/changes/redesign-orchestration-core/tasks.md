@@ -170,6 +170,7 @@ Slice triage (R2b, #3255, tasks 3.1-3.6):
 - [x] 4.3 Delete the PostgreSQL scheduler lease (`scheduler_core.py:241-250`, its `scheduler_lease.py` branch) and its tests (`PostgresSchedulerLease`, `_postgres_advisory_lock_key` in `tests/test_production_scheduler.py`).
 - [x] 4.4 Add the Appendix D R2c spec deltas. Update `infra/env/README.md` (:169, :321), `docs/runbooks/two-node-deployment-overview.md:423`, `docs/runbooks/scheduler-dbfree-typed-reasons.md:4` and `docs/runbooks/production-service-config.md:14` so the variable is described as the job-env contract, not a mode switch. `docs/runbooks/node22-db-retirement-runbook.md:51` (names `PsycopgOrchestratorRepository`) is updated in R3. Templates keep the variable.
 - [x] 4.5 Verification: on node-22, one idle pass and one submitting pass.
+- [ ] 4.6 Delete the remaining dead non-DB-free arms, the orphan `_scheduler_lock_evidence_root_preflight`, and their cascades, with the spec deltas (#3311, R2c follow-up). Verification: CI, plus node-27 for the two qhh integration files, plus one node-22 idle pass and one submitting pass.
 
 Suggested fixture level: expanded - the scheduler lease (concurrency) and the reconcile path.
 Minimal mergeable slice: 4.1 alone (factory arms and adapters); 4.2 and 4.3 follow as separate PRs, each green on its own, because the three arms share no code.
@@ -230,7 +231,7 @@ Slice triage (R2c-3, #3258, tasks 4.3, 4.5):
 - Delete (4.3):
   - `PostgresSchedulerLease`, `_postgres_advisory_lock_key`, `RECONCILE_DB_CONNECT_TIMEOUT_SECONDS` and the `psycopg2` import inside the class, with their `__all__` entries (`scheduler_lease.py:744-751`) and the `scheduler.py` imports, re-export and lookup entries; the pin test and the inventory row are updated to the reduced name sets.
   - In `_build_scheduler_lease`: the `database_url` read, the `db_free_required` gate, the raise and the unreachable tail; it returns the file lease unconditionally (same arguments).
-  - Kept: `scheduler_lock_backend` / `NHMS_SCHEDULER_LOCK_BACKEND` (config field, env templates, evidence key; the non-DB-free `{"file","postgres"}` validation in `config.py:674` is a dead False arm owned by #3311), `scheduler_mode_invariant.py` (the `_default_orchestrator_for` refusal still raises it), the compat lookup mechanism itself (renamed in F2).
+  - Kept: `scheduler_lock_backend` / `NHMS_SCHEDULER_LOCK_BACKEND` (config field, env templates, evidence key; the non-DB-free `{"file","postgres"}` validation in `config.py:674` is a dead False arm, deleted in 4.6 (#3311)), `scheduler_mode_invariant.py` (the `_default_orchestrator_for` refusal still raises it), the compat lookup mechanism itself (renamed in F2).
 - Tests (4.3): delete the `PostgresSchedulerLease` / `_postgres_advisory_lock_key` tests; drop the `PostgresSchedulerLease` patch from `_forbid_db_factories` (deleted name); delete the now-empty arm table and `test_non_db_free_arm_fails_closed_with_the_typed_error`, and any helper only it used (`_report_db_backed`, `_assert_mode_error` if orphaned); keep the `SchedulerModeInvariantError` contract test (`test_scheduler_mode_invariant_error_is_a_direct_exception_subclass`, `:332-339`) with its `site` string retargeted from `scheduler_core:_build_scheduler_lease` to `scheduler_core:_default_orchestrator_for` and `test_db_free_default_orchestrator_without_a_repository_fails_closed`. Add one test that `_build_scheduler_lease` returns a `FileSchedulerLease` even when the config carries a `database_url` and `scheduler_lock_backend="postgres"` (no PG import, no lock file before acquire), and that the deleted names are absent from `scheduler` / `scheduler_lease` (`not hasattr`). File-lock contention tests stay unchanged and green (acceptance criterion).
 - Folded in from the R2c-2 review: the `tests/test_scheduler_dbfree_only_mode.py:1-17` module docstring is rewritten to the end state (no arm table left; the one remaining typed refusal is `_default_orchestrator_for`); the stale `SCHEDULER_COMPATIBILITY_INVENTORY.md:125` claim that `tests/test_gateway_reconcile_*.py` imports `RECONCILE_DB_CONNECT_TIMEOUT_SECONDS` goes with the row update.
 - Docs and spec: `docs/runbooks/scheduler-dbfree-typed-reasons.md` drops the lease row (one site left); the `services/orchestrator/scheduler_mode_invariant.py:3-8` docstring is rewritten to the end state (`_default_orchestrator_for` is the only raise site); `docs/runbooks/node22-db-retirement-runbook.md:31,43` describe the retired PostgreSQL lock as history and stay (R3 owns that runbook). No new spec delta: `node22-dbfree-runtime` ("no PostgreSQL advisory lock is attempted") stays true; the implementer re-reads `openspec/specs/node22-dbfree-runtime/spec.md:40-80` and `production-scheduler-orchestration/spec.md:1560-1580` and reports any clause the deletion falsifies.
@@ -243,6 +244,232 @@ Slice triage (R2c-3, #3258, tasks 4.3, 4.5):
   4. Full suite plain green (proxy env unset); ruff; `openspec validate --strict`; CI full suite.
   4b. node-27 (D5: an integration-marked suite builds the changed code): `run_once` acquires the lease unconditionally (`scheduler_runtime.py:698`, before any `dry_run` gate), and `tests/test_qhh_production_bootstrap_scheduler.py` (integration) calls `run_once()`; so `-m integration tests/test_qhh_production_bootstrap_scheduler.py` runs on node-27 against a throwaway `nhms_it_*` DB. Expected: all pass; leftover `nhms_it_*` DBs = 0.
   5. node-22 (4.5): one idle pass and one submitting pass after the ff deploy at a pass boundary; expected `lock.lock_type == "file"` and the pass not `lock_contended`. node-22 steps through R2b `b316e32e0`, R2c-1 `133d8a529`, R2c-2 `7e33b58a5`, each with its own passes, before this slice's merge SHA; if not done when the PR is ready it merges with `Part of #3258` and 4.5 unticked.
+
+Slice triage (R2c-4, #3311, task 4.6):
+- Issue type: deletion. Behaviour is preserved for every real `ProductionSchedulerConfig`, because `db_free_required` is pinned True at `config.py:280-281`.
+  - Fixture level: expanded (agree). Triggers: shared scheduler config and evidence writer; facade and inventories; the project's orchestrator trigger (`openspec/project-profile.md:107`).
+  - Width: one PR. Three real dependencies keep it together: row 16 before 17, row 10 before the database cascade, and row 4 before `_optional_config_path`. The review surface is mostly mechanical: 36 kwarg removals plus about 11 test sites.
+- Governing invariant: for every real config, every evidence payload, blocker code, preflight verdict and canonicalised path is byte-identical before and after.
+  - Only the unreachable arms and the duck-typed-stub fallbacks go.
+  - `runtime_config.scheduler_db_free_required` and `db_free_runtime.required` keep reporting `true` (`tests/test_production_scheduler.py:15273`, `:38235-38236`).
+- Recon at 76f8f1319: all sites are in `services/orchestrator/` and are byte-identical to the issue's 55a964bbf, except the `scheduler_runtime.py` / `scheduler_core.py` callers. #3257/#3258/#3260/#3261 removed none of them.
+
+  | # | Site at HEAD | Note |
+  |---|---|---|
+  | 1 | `scheduler_config/config.py:432` | always True |
+  | 2 | `config.py:670` | dead tail `:673-676` |
+  | 3 | `config.py:706` | redundant operand |
+  | 4 | `path_modes.py:14, 54, 68, 160, 175, 196, 210` | all 7 still present |
+  | 5 | `path_modes.py:101` | dead arm `:101-118`, comment `:99-144` |
+  | 6 | `scheduler_config/db_free.py:129, :141` | dead else `:145-154`; no test asserts `db_free_allowed_root_unsafe` |
+  | 7 | `scheduler_runtime_roots.py:518, :519, :534` | dead else `:540-551`; `:519` is used only in that arm |
+  | 8 | `scheduler_runtime_roots.py:17-20, :80-83` | constant `evidence_safe_paths` |
+  | 9 | `scheduler_runtime_roots.py:15-16, :78-79` | `_scheduler_root_preflight_not_required` at `:172-179` |
+  | 10 | `scheduler_gateway.py:20, :22, :57, :65, :73, :85` | dead else `:29-38`; callers `scheduler_runtime.py:1142`, `scheduler_candidate_execution_evidence.py:342` |
+  | 11 | `scheduler_preflight.py:534, :553` | dead else `:559-567` |
+  | 12 | `scheduler_evidence.py:447` | |
+  | 13 | `scheduler_evidence.py:494` | |
+  | 14 | `scheduler_evidence.py:803` | only the flag conjunct is dead; the tail stays live for `config is None` (`scheduler_candidate_runtime.py:588-589`, `scheduler_evidence.py:623`) |
+  | 15 | `scheduler_evidence.py:809-812` | |
+  | 16 | `scheduler_evidence.py:907, :912-929, :962-984` | `:912` becomes the literal `True` |
+  | 17 | `scheduler_evidence_payload.py:959-972` | dead per the producer proof below |
+
+  - Other drift: `scheduler_core.py:171-172` and `cli.py:403`, `:451`.
+- Row 17 producer proof (in scope; delete after row 16):
+  1. Compaction is reached only through `bounded_evidence_payload` (`scheduler_evidence_payload.py:1482`) and the `_compact_required_bounded_field(s)` / `_compact_retained_bounded_field` paths (`:809-845`, `:1175-1181`). These run only on the evidence write path (DI at `scheduler_runtime.py:2146`).
+     - No `json.load`, `read_text` or `loads` appears in either evidence module, and no script calls the bounded functions.
+     - `operator_action_listing.py:756` reads a persisted `runtime_config` but never compacts it.
+     - So old on-disk evidence cannot reach compaction.
+  2. The only in-process producer is `scheduler_evidence.py:333-336` (the injected `_scheduler_runtime_config_evidence`, `scheduler_core.py:492`, or its default). It always emits `scheduler_db_free_required` (`:912`) and `db_free_runtime` when it is callable (`:956-958`). The retained-summary fallback `:1543` copies the same mapping.
+  3. The non-DB-free key list is a strict subset of the DB-free list. So any mapping that has no flag, no `database_url_configured` / `scheduler_*_backend` key and no `db_free_runtime` mapping compacts to the same dict either way. That covers the fixtures at `tests/test_production_scheduler.py:21414`, `:23496`, `:37737` and `tests/test_operator_action_listing.py:218`, `:1361`.
+  - The PR body restates this proof.
+- Change list:
+  - Rows 1, 3:
+    - Collapse to `True` / `bool(self.slurm_execution_enabled)`. The `require_runtime_roots` field and keyword stay accepted.
+    - Sibling, in scope: delete `cli.py:403`, the `:451` kwarg, and the `scheduler_core.py:171-172` conjunct. `git grep` finds no test asserting `require_runtime_roots` False.
+  - Row 2: the loop body becomes unconditional `object.__setattr__(self, attr, value)`. `_DB_FREE_SELECTOR_SPECS` keeps its tuple shape (unpacked at `:689`, `:710`, `:752`, re-exported).
+  - Rows 4, 5: drop the `db_free_required` parameter from every `path_modes.py` helper. Drop the kwarg from the 36 `config.py` call lines and `db_free.py:135, :180, :267`.
+    - `_expanduser_for_mode` keeps `except RuntimeError: return path`.
+    - The two require helpers swallow the error.
+    - `_confined_path_for_mode` keeps only its try/except body.
+    - `_resolve_config_path_for_mode` becomes one arm and keeps the `# ADR 0009 clause 1` marker in its body, which the family guard requires.
+    - Rewrite the comment: delete the "TEXTUALLY IDENTICAL ... retained deliberately" paragraph and its line ref; replace them with a one-paragraph clause-1 note that names the ADR 0009 amendment section.
+    - New comments must not add `file.py:NNN` references.
+    - The re-exports in `scheduler_config/__init__.py:151-190` are unchanged.
+  - Row 6: delete `db_free.py:129` and the else; `elif` becomes `else`. Keep the clause-1 marker and fix the docstring.
+  - Row 7: delete `:518`, `:519` and the else. Keep the clause-3 marker and fix the docstring.
+  - Row 8: `evidence_safe_paths=True` at both call-site groups. The parameter stays on `_scheduler_root_check` and its siblings (see Out of scope).
+  - Row 9: delete `roots.py:15-16`, `:78-79` and `_scheduler_root_preflight_not_required`, plus its forwarders `scheduler_candidate_runtime.py:499`, `:538`, `:868`.
+  - Row 10: the DB-free check body only.
+    - `evidence_safe_*` become the literal `True`, and `allowed_roots` is redacted.
+    - Fix the comment at `:46-48` ("a DATABASE_URL_* blocker may precede it").
+    - `database_url_forbidden` still blocks.
+  - Row 11: delete `:534`; `elif` becomes `else`. Keep the clause-3 marker.
+  - Rows 12, 13, 15: collapse to the DB-free arm:
+    - row 12 to `{"error_type": type(error).__name__}`;
+    - row 13 to `"[local-path]"`;
+    - row 15 to `evidence_safe_paths = True`.
+
+    The `config` parameters of `artifact_path_evidence` / `evidence_reservation_blocked_payload` stay (deviation).
+  - Row 14: `if config is not None:`. The tail stays.
+  - Row 16: `scheduler_runtime_config_evidence` writes `True`. `_scheduler_backend_evidence` drops its parameter, and its DB-free arm becomes unconditional.
+  - Row 17: delete the non-DB-free arm `:959-972`, leaving the DB-free compaction as the only return.
+  - Orphan `_scheduler_lock_evidence_root_preflight` (`roots.py:14-76`): delete it, its forwarders `scheduler_candidate_runtime.py:497`, `:536`, `:858`, and the inventory text.
+  - Cascades: delete each symbol whose last caller goes.
+    - From the database family:
+      - `_database_url_blocker` (`scheduler_preflight.py:366`, last caller `scheduler_gateway.py:31`);
+      - `_database_host` (`:391`);
+      - `_database_host_is_local` (`:408`);
+      - `_database_host_is_unsafe` (`:422`);
+      - `_normalize_database_host` (`:439`);
+      - `_is_unsafe_numeric_ipv4_like_host` (`:510`);
+      - `LOCALHOST_NAMES` (`:40`);
+      - `DATABASE_HOST_ALLOWED_RE` (`:50`).
+
+      Their forwarders and name lists go too: `scheduler_candidate_runtime.py:227-231`, `:238`, `:772`, `:774-776` (`:773` `_database_host_ip_address` stays), `:807`, `:815`. `tests/test_production_scheduler.py:1076-1077` `_PREFLIGHT_OWNED_CONSTANT_NAMES` drops the two constants.
+    - `_optional_config_path` (`roots.py:674`, last caller `path_modes.py:161`), plus forwarders `:512`, `:551`, `:819`.
+    - Inventory text: `SCHEDULER_COMPATIBILITY_INVENTORY.md:127`, `:136`, `:166`, `:287-291` (`:292`, the `_database_host_ip_address` guard-hook row, stays), `:298`.
+    - Kept, with reasons: `_database_host_ip_address` (`:446`) and its numeric-IPv4 helpers, live through `_gateway_self_reference_blocker` (`:140`); `_config_path_preserve_final_component`, `_config_path_relative_to_preserve_final`, `_optional_config_path_relative_to_preserve_final`, which are test-pinned (`test_production_scheduler.py:18441-18474`, `:18615`, `:18639`) and exercise `_canonical_parent`; the shim at `scheduler_candidate_runtime.py:578`, whose removal needs a DI signature change across `scheduler_evidence.py` hooks.
+  - Carry-overs from PR #3324 (round-3 review, documentation):
+    - (i) The T2-5 rule table `id-fstring` row: restore the constant-part qualifier "a constant part that fully matches `_retry_\d*` (including `_retry_` followed by a `FormattedValue`)". This is applied in this fixture.
+    - (ii) `tests/test_retry_accounting_ast_guard.py` docstring `:7-9`: drop "an entry would need a written reason and a deliberate edit here". The allowlist is empty, and a miss is closed by tightening the guard.
+    - (iii) Align "tightening the guard or by adding a row" (docstring `:121-126`, the T2-5 block) with the spec wording: a miss is recorded in the guard and closed by tightening it.
+- Orphan retarget (`_scheduler_lock_evidence_root_preflight` to `_scheduler_runtime_root_preflight`):
+  - For `workspace_root`, `lock_root` and `evidence_root`, `_scheduler_root_check` gets identical arguments (`roots.py:14-76` vs `:98-171`).
+  - The runtime variant also checks further roots and `service_role`, so a retargeted test asserts the projection of `blockers` / `checks` onto those three fields plus the `allowed_roots` blocker field, `checks["allowed_roots_policy"]` and the top-level `allowed_roots`, in relative order.
+  - Before deleting, an equivalence oracle runs both functions on the same configs and compares the projection. It is logged.
+- Tests. Labels follow `tasks.md:76-82`: (a) retarget, (b) delete, (c) assertion change.
+  - Retargets and deletions:
+    - (a) Lock/evidence call sites `tests/test_production_scheduler.py:18546`, `:18664`, `:18887`, `:20829`, `:20834`, `:21203`, `:21225` and `tests/test_scheduler_root_check_loop_convergence.py:381` move to the runtime preflight projection. Expected values are unchanged.
+    - (b) `:45886`: drop the lock lines; `runtime_preflight` already asserts.
+    - (b) `:47131`: drop the `lock_preflight` loop element.
+    - (b) `:46914-46917` and the `lock_evidence` param at `:47070`. `test_runtime_root_preflight_arms_adjudicate_allowed_roots_exactly_once` keeps the `runtime` param.
+    - (a) Stub attributes no seam reads any more: `_allowed_roots_config` (`:46398-46412`); `_AllowedRootsConfigStub.scheduler_db_free_required` / `db_free_required` (`:46855-46860`) and their kwarg callers; `_PreflightRootsConfigStub.db_free_required` (`:19445-19455`, `:19486-19490`) and `verdict(..., db_free=)` (`:19943-19950`).
+    - Row 5 test `test_db_free_and_db_backed_config_resolve_arms_agree_on_one_canonical_form` (`:18265-18268`): (b) drop `db_backed_arm` and the arm-parity assert; (a) keep `== loop` over the same shapes, rename the test without "db_backed", and fix the docstring.
+    - Drop `db_free_required=` from the path_modes kwarg sites `:18178`, `:18231`, `:18266`, `:18617-18619` and `tests/test_scheduler_root_check_loop_convergence.py:201`.
+      - The `evidence_safe_paths=False` ("db_backed") rows there call `_config_path_preserve_final_component_for_mode`. Re-observe their values after the change.
+      - Any value that moves is (c), listed as old → new and never weakened.
+    - Host-classifier tests `:25573-25612`: (b) delete both. Their subjects `_database_host_is_local` / `_database_host_is_unsafe` live only behind the deleted `scheduler_gateway.py:29-38` arm.
+      - No gateway test covers numeric IPv4 hosts; the only ones are `localhost` URLs at `:47598-47729` and `tests/test_cli_publish_qdown.py:286`.
+      - So add one parametrized `_gateway_self_reference_blocker` test (real backend, port == service port). Expected values were observed with `uv run --no-sync`:
+        - `127.1`, `2130706433` and `0` → `SLURM_GATEWAY_SELF_REFERENCE`;
+        - `0177.0.0.1` (parses to None) and `0xa9fe0101` (169.254.1.1) → no blocker.
+  - Unchanged (the assertions stay true and none is weakened):
+    - The `not in` assertions on False-arm-only codes (`:46395` users, `:46846` users, `:46310`).
+    - `SCHEDULER_ROOT_ALLOWED_ROOTS_MISSING` at `:35572`, `:35623`.
+    - `:38198` and `:18581-18601`: the keywords stay accepted.
+    - The fixtures at `:21414`, `:23496`, `:37737`.
+  - Stale test comments that name a deleted arm are updated.
+  - Stale service comments are updated:
+    - `scheduler_runtime_roots.py:578` names `_optional_config_path`;
+    - `scheduler_runtime_roots.py:640-644` says `db_free_required=True` and "two database arms";
+    - the `scheduler_preflight.py:520-528` docstring (row 11) says "unsafe on database-backed runtimes";
+    - `path_modes.py:119-122` says "aligned with the arm above".
+  - The `not in` assertions on the deleted False-arm codes become vacuous. They stay, and the PR body says so.
+  - Rule: every (b) names the DB-free test that covers it, or records "unreachable". Every (c) lists old → new.
+- Out of scope (reported):
+  - Second order: once rows 8, 10 and 15 are done, every production caller passes a constant `True` for `evidence_safe_paths` / `evidence_safe_values`. The consumers are `_scheduler_root_check`, `_scheduler_root_preflight_payload`, `_scheduler_allowed_roots_policy_check`, `_storage_root_check`, `_slurm_env_check` and `_slurm_grib_env_check`. Their False arms are then test-only (`tests/test_scheduler_root_check_loop_convergence.py:185-205`). This becomes a follow-up issue; the parameters stay.
+  - The orphan `_optional_config_path_relative_to_preserve_final`: follow-up.
+  - `SimpleNamespace(db_free_required=True)` at `tests/test_production_scheduler.py:24511`.
+  - `_MetStoreCanonicalReadinessProvider`, the qhh bootstrap tests, and the job-env contract (`chain_manifests.py:242`, `real_backend.py:1048`, `:2371`).
+- Spec / ADR / doc deltas:
+  - Spec deltas. `design.md:151` and `:236` require a delta for every main-spec passage that names what a deleting slice deletes. Appendix D omits these passages, so this slice adds them plus an Appendix D row. The orchestrator writes each as a MODIFIED block that keeps every scenario and states the DB-free end state, from the implementer's observation (Required evidence 7), not from inference. They go in this PR's final push.
+    - `slurm-array-runner-integration`, requirement "Slurm-first heavy execution", scenario "compute-node database preflight" (main `:10-14`). New text: the Slurm preflight does not consult `DATABASE_URL`. A configured one is refused before the lock by the DB-free runtime preflight (`database_url_forbidden`).
+    - Same spec, requirement "Array-capable model stages":
+      - The "unresolvable allowed storage root" passages (`:44-54`; rows 6, 7, 9, 11 and the orphan).
+      - "unresolvable general storage root at configuration construction" (`:56-62`; row 5).
+      - New text for both: one runtime; lexical admission without a blocker on every plane; ENOENT admitted; no not-required payload.
+    - Same spec, the requirements at `:169-221` (scenario `:178-182`) and `:223-253`. The row-4 re-raise at `path_modes.py:196`/`:210` is their last implementation. New text: construction hands the value down, and the root preflight refuses it (codes pinned at `tests/test_production_scheduler.py:18546`, `:18887`).
+    - `runtime-evidence-and-operations/spec.md:580`: "lock/evidence root preflight" becomes "runtime root preflight".
+    - `node22-dbfree-runtime/spec.md:83` stays true.
+    - The implementer greps `openspec/specs` for `database-backed|db-backed|lock/evidence|not-required|DATABASE_URL` and reports any other clause the deletion falsifies. The orchestrator then adds a delta for it.
+    - Outcome (written from `.workplans/3311/observed-behaviour.md`, rows 1-25; before and after byte-identical). The four requirements above are MODIFIED in `specs/slurm-array-runner-integration/spec.md`. `specs/runtime-evidence-and-operations/spec.md` is new and MODIFIES `:180-232` (tilde expansion; "the db-backed arm fails earlier"), `:233-365` (construction "aligned with the database-backed arm") and `:573-594` (`:580`).
+      - The R2b ADDED tilde requirement's sentence "Every other root field aborts earlier in the deliberate re-raise" is corrected: that re-raise was the database-backed arm's and is deleted here.
+      - The implementer's other hits F1-F4 (main `:72-132`) are already covered by R2b's MODIFIED delta, and F8 (`:308-312`) stays true.
+      - F9: the `:52` clause "the db-free selector's allowed-roots lane records its existing unresolvable-root rejection" had no implementation before this PR (the `retry.py` lane was deleted in #3157, f9dd24aad). The MODIFIED text drops it and states the observed admission without a blocker, under ADR 0009 clause 3.
+      - Reported, not in scope: `multibasin-state-idempotency/spec.md:10` ("database-backed or ..." candidate-state persistence).
+  - The tasks.md 4.6 line and this block. `:233` changes to "deleted in 4.6 (#3311)".
+  - `docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md`: the lines above.
+  - ADR 0009: one header line plus a trailing "修订（2026-11-22，#3311）" section. The orchestrator writes it; the precedents are `0002:5-41`, `0005:252`, `0007:47`, `0008:62`. It supersedes the "two arms" wording and the member count, which goes from 16 to 15 (`_optional_config_path` is deleted). The table stays as a historical snapshot.
+  - `line_reference_baseline.json` is keyed by (path, reference text), so a deletion never fails.
+    - Prune the stale `path_modes.py` entry (`scheduler_runtime_roots.py:576-590`) with `--write-baseline`, or leave it.
+    - Do not add new `file.py:NNN` references.
+  - `scheduler.py:311`: a governed-facade comment naming the two deleted constants. Leave it, or shrink it comment-only and re-run the facade audit.
+- Must preserve:
+  - Real-config evidence stays byte-identical: `[local-path]`, `error_type`, `scheduler_db_free_required: true`, `db_free_runtime.required`, and the compaction output.
+  - The `scheduler_db_free_required=` and `require_runtime_roots=` keywords stay accepted.
+  - The row-14 `config is None` tail.
+  - `database_url_forbidden`.
+  - `_scheduler_runtime_root_preflight`.
+  - The `evidence_safe_paths` parameter on `_scheduler_root_check`.
+  - The ADR 0009 markers in `_db_free_allowed_roots_and_blockers`, `_scheduler_allowed_roots_and_blockers`, `_preflight_allowed_roots` and `_resolve_config_path_for_mode`.
+  - The `_database_host_ip_address` family.
+  - The job-env contract.
+- Risk packs:
+  - Selected:
+    - Legacy compatibility: no coverage lost; each (b) names its covering test.
+    - Runtime/config contract: modes, selectors, preflight codes.
+    - Evidence/redaction: rows 10, 12-16.
+  - Not selected: schema, concurrency, cross-plane.
+- Required evidence:
+  1. A per-row table. For each arm deleted, give the DB-free test that covers it, or "no remaining test reaches it".
+  2. One mutation per touched module, each restored and hash-checked: reinstate or force the False arm, then show a DB-free test red or the arm unreachable.
+     - `path_modes.py`, `config.py` (row 1 `or False`), `db_free.py`, `scheduler_runtime_roots.py`, `scheduler_preflight.py` and `scheduler_gateway.py`.
+     - `scheduler_evidence.py`: expect `test_production_scheduler.py:15273` (`payload["runtime_config"]["scheduler_db_free_required"] is True`) and the evidence-write tests red.
+     - `scheduler_evidence_payload.py` (row 17).
+  3. The row-17 producer proof, restated in the PR body.
+  4. Acceptance greps:
+     - `git grep -nE 'getattr\((context\.)?config, "(scheduler_)?db_free_required", False\)' -- services` returns nothing.
+     - `git grep -n 'if not db_free_required' -- services/orchestrator/scheduler_config/path_modes.py` returns nothing.
+     - `git grep -nw` for `_scheduler_lock_evidence_root_preflight`, `_scheduler_root_preflight_not_required`, `_database_url_blocker` and `_optional_config_path` over `services docs/governance tests` returns nothing, except the `_optional_config_path` mention in the `tests/test_production_scheduler.py:18160` comment.
+     - `git grep -nw db_free_required -- services` leaves only `scheduler_config/config.py:280-281` (the local pin), the `db_free_required` property, and the `scheduler_mode_invariant.py:3` docstring.
+  5. The lock/evidence retarget equivalence oracle.
+  6. `uv run python scripts/governance/audit_repo_entropy.py --format json --structural-base-ref master` shows no `compatibility-facade-growth` for `scheduler.py` / `chain.py`, and no new line-reference finding.
+  7. Observed DB-free behaviour for each spec passage that needs a delta, logged before and after the change; the two must be identical. For each passage below, build a real `ProductionSchedulerConfig` from its scenario inputs (`tmp_path`, `slurm_execution_enabled=True` wherever the passage says "Slurm execution is enabled"). Record whether construction raises, the constructed field value, and per plane (`_slurm_preflight`, `_scheduler_runtime_root_preflight`, `db_free_runtime_preflight`) the blocker codes/fields and the allowed-roots evidence.
+     - `slurm-array-runner-integration` main `:10-14`: `DATABASE_URL` missing, localhost, and remote. Also record `run_once()` status, `execution_boundary` and `lock` reason, which back "refused before the lock".
+     - `:44-54`: an allowed root through a regular-file ancestor, an untraversable ancestor (non-root user), a symlink loop, and ENOENT, each with `repair_missing_forcing` false and true (`:52`). Record the storage preflight, the runtime-root preflight and the db-free selector lane.
+     - `:56-62`: a final-segment loop on the object-store / published-artifact / log / runtime / temp roots.
+     - `:178-182`: an in-workspace evidence-dir final-segment loop.
+     - `:223-253`: a workspace-root loop, a regular-file workspace root, an untraversable workspace root, and a lock-root loop (`:243-247`).
+     - `runtime-evidence-and-operations/spec.md:580`: a self-loop lock root through `_scheduler_runtime_root_preflight` (code and `checks.lock_root` key set).
+
+     Write the results as a table in `.workplans/3311/observed-behaviour.md` (gitignored) and restate the table in the PR body; each spec delta cites its row.
+- Verification (owner policy 2026-11-22: no local full suite).
+  - Local, the touched-module tests:
+    - `tests/test_production_scheduler.py`
+    - `tests/test_scheduler_root_check_loop_convergence.py`
+    - `tests/test_scheduler_dbfree_only_mode.py`
+    - `tests/test_scheduler_evidence_summary_lanes.py`
+    - `tests/test_operator_action_listing.py`
+    - `tests/test_preserve_final_component_loop_spelling.py`
+    - `tests/test_orchestrator_first_import.py`
+    - `tests/test_retry_accounting_table.py`
+  - Local, the source-scanning guards:
+    - `tests/test_path_canonicalization_family_guard.py` (critical)
+    - `tests/test_status_literal_scan.py`
+    - `tests/test_status_vocab_parity.py`
+    - `tests/test_entropy_audit_line_references.py`
+    - `tests/test_import_layering_guard.py`
+    - `tests/test_entropy_audit_facade_guard_aliases.py`
+    - `tests/test_entropy_audit_facade_guard_forwarders.py`
+    - `tests/test_entropy_audit_instruction_inventory.py`
+    - `tests/test_retry_accounting_ast_guard.py`
+    - `tests/test_file_orchestration_journal_facade.py`
+    - `tests/test_ci_shard_tests.py`
+  - Local, the rest: `uv run ruff check . --no-cache` and `openspec validate redesign-orchestration-core --strict --no-interactive`.
+  - CI: the full suite, every shard. This is the completeness gate.
+  - node-27: a fresh-process import check of all 57 `integration`-marked files at HEAD found two that import the touched modules: `tests/test_qhh_production_bootstrap_scheduler.py` and `tests/test_qhh_output_stream_type_integration.py`. Run `-m integration` over them on throwaway `nhms_it_*` DBs and expect 0 leftover DBs.
+  - node-22: this is a deleting PR, not a pure move, so it gets its own idle pass and submitting pass after the ff deploy (`design.md:226-227`). Compare the idle-pass evidence fields `runtime_config`, `artifact_path` and `[local-path]`.
+    - Following the R2c-2/R2c-3 precedent, if node-22 cannot run the passes before merge, the PR merges as `Part of #3311` with 4.6 unticked, and 4.6 is ticked once the passes are recorded.
+    - The PR body records that the CI full suite replaces the issue's acceptance criterion "`uv run pytest -q` full suite green" (owner decision 2026-11-22).
+- Review focus:
+  1. Every collapse keeps the DB-free half verbatim, including evidence strings and blocker order.
+  2. The ADR 0009 clause markers survive in the four authority members, and the guard message shows 15 members (the guard prints the count; it does not assert it).
+  3. The lock/evidence retarget projection equals the old output.
+  4. `evidence_safe_paths` is passed as the literal `True` wherever the flag used to be.
+  5. No test assertion is weakened. The row-5 change deletes only the arm-parity line.
+  6. Row 17 goes only with its proof, and after row 16.
+  7. Kept orphans are recorded with their reasons.
 
 ## 5. R3 — Delete `PsycopgOrchestratorRepository`
 
@@ -1582,7 +1809,7 @@ Slice triage (T2-5, #3269, tasks 9.5, 9.7):
 
     | Kind | Matches |
     |---|---|
-    | `id-fstring` | an f-string with a marker `FormattedValue`, or a constant part that is a marker. An f-string in the pattern position (`args[0]` / `pattern=`) of `re.compile` / `match` / `search` / `fullmatch` is exempt. |
+    | `id-fstring` | an f-string with a marker `FormattedValue`, or a constant part that fully matches `_retry_\d*` (including `_retry_` followed by a `FormattedValue`). An f-string in the pattern position (`args[0]` / `pattern=`) of `re.compile` / `match` / `search` / `fullmatch` is exempt. |
     | `id-concat` | `BinOp` `Add` with a marker operand; `Mod` with a marker template, or with a marker as a direct Tuple element or Dict value of the right operand (any left side) |
     | `id-format` | `.format` / `.format_map` whose receiver is a marker, or with a marker as a positional argument, a keyword value, a `**{...}` Dict value or a `format_map` Dict value |
     | `id-join` | `join` with the marker as receiver, or as a direct argument element. Elements are reached through List/Tuple/Set literals, `BinOp`, `IfExp` and `Starred`, but never through generators, comprehensions or calls. |
@@ -1608,7 +1835,7 @@ Slice triage (T2-5, #3269, tasks 9.5, 9.7):
   - Known misses. The guard is a syntactic heuristic, so this list gives examples and is not exhaustive.
     - The guard catches every form T2 removed (the 26 pre-T2 hits) and the construction, split and increment shapes in the table.
     - Each listed miss has a not-flagged bite row, so tightening one later is a deliberate edit.
-    - A miss found later is fixed by tightening the guard or by adding a row. It never needs an allowlist entry.
+    - A miss found later is recorded in the guard and closed by tightening it. It never needs an allowlist entry.
     - `f"{a}x_retry_{n}"`: the marker does not start a constant part. It is accepted so that unrelated text stays clean.
     - A counter read from row data plus one, e.g. `int(source.get("retry_count") or 0) + 1`. This is the pre-T2 non-master formula `file_orchestration_journal.py:12458`. It cannot be told apart from legitimate counters such as `file_orchestration_journal.py:3396` `submission_attempt + 1` and `scheduler_state_manual_retry.py:1127`.
     - A regex-group parse plus one: `int(re.match(r"(.*)_retry_(\d+)$", j).group(2)) + 1`.

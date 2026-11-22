@@ -284,15 +284,12 @@ class ProductionSchedulerConfig:
         _scheduler._reject_blank_config_path(self.evidence_dir, "evidence_dir")
         workspace_root_raw_preflight_path = _raw_config_path_preserve_components(
             self.workspace_root,
-            db_free_required=db_free_required,
         )
         workspace_root_preflight_path = _config_path_preserve_final_component_for_mode(
             self.workspace_root,
-            db_free_required=db_free_required,
         )
         workspace_root = _resolve_config_path_for_mode(
             workspace_root_preflight_path,
-            db_free_required=db_free_required,
         )
         object.__setattr__(self, "_workspace_root_raw_preflight_path", workspace_root_raw_preflight_path)
         object.__setattr__(self, "_workspace_root_preflight_path", workspace_root_preflight_path)
@@ -300,19 +297,16 @@ class ProductionSchedulerConfig:
         object_store_root_raw_preflight_path = _optional_raw_config_path_relative_to_preserve_components(
             self.object_store_root,
             workspace_root,
-            db_free_required=db_free_required,
         )
         object_store_root_preflight_path = _optional_config_path_relative_to_preserve_final_for_mode(
             self.object_store_root,
             workspace_root,
-            db_free_required=db_free_required,
         )
         object.__setattr__(
             self,
             "object_store_root",
             _resolve_optional_config_path_for_mode(
                 object_store_root_preflight_path,
-                db_free_required=db_free_required,
             ),
         )
         object.__setattr__(self, "_object_store_root_raw_preflight_path", object_store_root_raw_preflight_path)
@@ -320,19 +314,16 @@ class ProductionSchedulerConfig:
         published_artifact_root_raw_preflight_path = _optional_raw_config_path_relative_to_preserve_components(
             self.published_artifact_root,
             workspace_root,
-            db_free_required=db_free_required,
         )
         published_artifact_root_preflight_path = _optional_config_path_relative_to_preserve_final_for_mode(
             self.published_artifact_root,
             workspace_root,
-            db_free_required=db_free_required,
         )
         object.__setattr__(
             self,
             "published_artifact_root",
             _resolve_optional_config_path_for_mode(
                 published_artifact_root_preflight_path,
-                db_free_required=db_free_required,
             ),
         )
         object.__setattr__(
@@ -344,81 +335,70 @@ class ProductionSchedulerConfig:
         log_root_preflight_path = _optional_config_path_relative_to_preserve_final_for_mode(
             self.log_root,
             workspace_root,
-            db_free_required=db_free_required,
         )
         object.__setattr__(
             self,
             "log_root",
-            _resolve_optional_config_path_for_mode(log_root_preflight_path, db_free_required=db_free_required),
+            _resolve_optional_config_path_for_mode(log_root_preflight_path),
         )
         runtime_root_raw_preflight_path = _optional_raw_config_path_relative_to_preserve_components(
             self.runtime_root,
             workspace_root,
-            db_free_required=db_free_required,
         )
         runtime_root_preflight_path = _optional_config_path_relative_to_preserve_final_for_mode(
             self.runtime_root,
             workspace_root,
-            db_free_required=db_free_required,
         )
         object.__setattr__(
             self,
             "runtime_root",
-            _resolve_optional_config_path_for_mode(runtime_root_preflight_path, db_free_required=db_free_required),
+            _resolve_optional_config_path_for_mode(runtime_root_preflight_path),
         )
         object.__setattr__(self, "_runtime_root_raw_preflight_path", runtime_root_raw_preflight_path)
         object.__setattr__(self, "_runtime_root_preflight_path", runtime_root_preflight_path)
         temp_root_raw_preflight_path = _optional_raw_config_path_relative_to_preserve_components(
             self.temp_root,
             workspace_root,
-            db_free_required=db_free_required,
         )
         temp_root_preflight_path = _optional_config_path_relative_to_preserve_final_for_mode(
             self.temp_root,
             workspace_root,
-            db_free_required=db_free_required,
         )
         object.__setattr__(
             self,
             "temp_root",
-            _resolve_optional_config_path_for_mode(temp_root_preflight_path, db_free_required=db_free_required),
+            _resolve_optional_config_path_for_mode(temp_root_preflight_path),
         )
         object.__setattr__(self, "_temp_root_raw_preflight_path", temp_root_raw_preflight_path)
         object.__setattr__(self, "_temp_root_preflight_path", temp_root_preflight_path)
         scheduler_lock_root_raw_preflight_path = _optional_raw_config_path_relative_to_preserve_components(
             self.scheduler_lock_root,
             workspace_root,
-            db_free_required=db_free_required,
         )
         scheduler_lock_root_preflight_path = _optional_config_path_relative_to_preserve_final_for_mode(
             self.scheduler_lock_root,
             workspace_root,
-            db_free_required=db_free_required,
         )
         object.__setattr__(
             self,
             "scheduler_lock_root",
             _resolve_optional_config_path_for_mode(
                 scheduler_lock_root_preflight_path,
-                db_free_required=db_free_required,
             ),
         )
         scheduler_evidence_root_raw_preflight_path = _optional_raw_config_path_relative_to_preserve_components(
             self.scheduler_evidence_root,
             workspace_root,
-            db_free_required=db_free_required,
         )
         scheduler_evidence_root_preflight_path = _optional_config_path_relative_to_preserve_final_for_mode(
             self.scheduler_evidence_root,
             workspace_root,
-            db_free_required=db_free_required,
         )
         object.__setattr__(
             self,
             "scheduler_evidence_root",
             _resolve_optional_config_path_for_mode(
                 scheduler_evidence_root_preflight_path,
-                db_free_required=db_free_required,
             ),
         )
         object.__setattr__(self, "service_role", str(self.service_role).strip() if self.service_role else None)
@@ -426,13 +406,9 @@ class ProductionSchedulerConfig:
         database_url = database_url_raw.strip() if database_url_raw and database_url_raw.strip() else None
         object.__setattr__(self, "database_url", database_url)
         object.__setattr__(self, "database_url_configured", bool(self.database_url_configured or database_url_raw))
-        object.__setattr__(
-            self,
-            "require_runtime_roots",
-            bool(self.require_runtime_roots or db_free_required),
-        )
+        object.__setattr__(self, "require_runtime_roots", True)
         allowed_roots = tuple(
-            _optional_config_path_for_mode(root, db_free_required=db_free_required)
+            _optional_config_path_for_mode(root)
             for root in self.allowed_storage_roots
             if root
         )
@@ -562,7 +538,6 @@ class ProductionSchedulerConfig:
                 lock_root / "production-scheduler.lock",
                 workspace_root,
                 "lock_path",
-                db_free_required=db_free_required,
             )
             object.__setattr__(self, "_lock_root_raw_preflight_path", lock_root_raw_preflight_path)
             object.__setattr__(self, "_lock_root_preflight_path", lock_root_preflight_path)
@@ -571,24 +546,20 @@ class ProductionSchedulerConfig:
             lock_path_raw_preflight_path = _raw_config_path_relative_to_preserve_components(
                 self.lock_path,
                 workspace_root,
-                db_free_required=db_free_required,
             )
             lock_path_preflight_path = _config_path_relative_to_preserve_final_for_mode(
                 self.lock_path,
                 workspace_root,
-                db_free_required=db_free_required,
             )
             lock_path = _confined_path_for_mode(
                 self.lock_path,
                 workspace_root,
                 "lock_path",
-                db_free_required=db_free_required,
             )
             _require_under_workspace_for_mode(
                 lock_path,
                 workspace_root,
                 "lock_path",
-                db_free_required=db_free_required,
             )
             object.__setattr__(self, "_lock_root_raw_preflight_path", lock_path_raw_preflight_path.parent)
             object.__setattr__(self, "_lock_root_preflight_path", lock_path_preflight_path.parent)
@@ -613,13 +584,11 @@ class ProductionSchedulerConfig:
                 evidence_root,
                 workspace_root,
                 "evidence_dir",
-                db_free_required=db_free_required,
             )
             _require_safe_directory_final_component_for_mode(
                 evidence_dir,
                 workspace_root,
                 "evidence_dir",
-                db_free_required=db_free_required,
             )
             object.__setattr__(self, "_evidence_root_raw_preflight_path", evidence_root_raw_preflight_path)
             object.__setattr__(self, "_evidence_root_preflight_path", evidence_root_preflight_path)
@@ -628,30 +597,25 @@ class ProductionSchedulerConfig:
             evidence_dir_raw_preflight_path = _raw_config_path_relative_to_preserve_components(
                 self.evidence_dir,
                 workspace_root,
-                db_free_required=db_free_required,
             )
             evidence_dir_preflight_path = _config_path_relative_to_preserve_final_for_mode(
                 self.evidence_dir,
                 workspace_root,
-                db_free_required=db_free_required,
             )
             evidence_dir = _confined_path_for_mode(
                 self.evidence_dir,
                 workspace_root,
                 "evidence_dir",
-                db_free_required=db_free_required,
             )
             _require_under_workspace_for_mode(
                 evidence_dir,
                 workspace_root,
                 "evidence_dir",
-                db_free_required=db_free_required,
             )
             _require_safe_directory_final_component_for_mode(
                 evidence_dir,
                 workspace_root,
                 "evidence_dir",
-                db_free_required=db_free_required,
             )
             object.__setattr__(self, "_evidence_root_raw_preflight_path", evidence_dir_raw_preflight_path)
             object.__setattr__(self, "_evidence_root_preflight_path", evidence_dir_preflight_path)
@@ -664,16 +628,10 @@ class ProductionSchedulerConfig:
         return self.scheduler_db_free_required
 
     def _normalize_scheduler_backend_fields(self) -> None:
-        for attr, _env, legacy_default in _DB_FREE_SELECTOR_SPECS:
+        for attr, _env, _legacy_default in _DB_FREE_SELECTOR_SPECS:
             raw_value = getattr(self, attr)
             value = None if raw_value is None else str(raw_value).strip().lower()
-            if self.scheduler_db_free_required:
-                object.__setattr__(self, attr, value)
-                continue
-            normalized = value or legacy_default
-            if attr == "scheduler_lock_backend" and normalized not in {"file", "postgres"}:
-                raise ValueError("production scheduler scheduler_lock_backend must be 'file' or 'postgres'")
-            object.__setattr__(self, attr, normalized)
+            object.__setattr__(self, attr, value)
         for attr, _env, _kind in _DB_FREE_PATH_SPECS:
             raw_value = getattr(self, attr)
             value = None if raw_value is None else str(raw_value).strip()
@@ -703,7 +661,7 @@ class ProductionSchedulerConfig:
             "selectors": selectors,
             "paths": paths,
             "accepted_submit_ownership": {
-                "required": bool(self.scheduler_db_free_required and self.slurm_execution_enabled),
+                "required": bool(self.slurm_execution_enabled),
                 "user_configured": self.reconcile_slurm_user is not None,
                 "account_configured": self.reconcile_slurm_account is not None,
             },
