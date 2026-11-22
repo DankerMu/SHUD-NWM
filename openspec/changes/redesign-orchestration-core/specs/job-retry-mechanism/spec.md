@@ -61,7 +61,7 @@ input.
   `%` or `.format`, or `join`, or splits on that marker, or adds an integer literal to
   the result of any `retry_identity` function, of any call whose name contains
   `attempt` (the scheduler-state readers such as `_state_retry_attempt` and
-  `_fallback_previous_attempt`), or of `rsplit("_retry_", ...)`
+  `_fallback_previous_attempt`), or of a split on that marker
 - **THEN** an AST guard test fails and names the module and line
 - **AND** calls to the owner's parsers, regex matches and `in` membership tests on
   the marker that do not mint a new id or attempt are allowed.

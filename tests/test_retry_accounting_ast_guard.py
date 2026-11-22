@@ -21,30 +21,62 @@ Scope:
 
 A *marker* is any of:
 
-* a str constant that fully matches ``_retry_\\d*``;
-* a str constant containing ``(%[sdri]|\\})_retry_(%|\\{|\\d|$)`` (the ``%`` /
-  ``.format`` placeholder forms);
+* a str constant that starts with ``_retry_(%|\\{|\\d|$)``: the bare marker,
+  ``_retry_<digits>`` and the leading templates ``"_retry_%d"`` /
+  ``"_retry_{}"`` / ``"_retry_{n}"``;
+* a str constant containing
+  ``(%(\\([^)]*\\))?[-#0 +]*\\d*(\\.\\d+)?[sdriu]|\\})_retry_(%|\\{|\\d|$)``: the
+  ``%`` / ``.format`` placeholder forms, including width, keyed and positional
+  ones (``"%5s_retry_%03d"``, ``"%(b)s_retry_%(n)d"``, ``"{0}_retry_{1}"``);
 * the name ``RETRY_JOB_ID_MARKER``, or an attribute with that name;
-* a module-local alias, collected in a pre-pass from ``X = "_retry_"``,
-  ``X = RETRY_JOB_ID_MARKER`` and ``from ... import RETRY_JOB_ID_MARKER as M``.
+* an alias: a name bound by ``X = <marker>`` (``=`` or annotated ``=``, whose
+  value is a marker constant -- template constants included -- a marker name
+  or a marker attribute) or by ``from ... import RETRY_JOB_ID_MARKER as M``.
 
-Field names such as ``f"{stage}_retry_count"``, ``prefix +
-"_retry_attempt_floor"``, ``"{}_retry_limit".format(x)`` and
+Aliases are collected per scope, breadth-first, before the scope is scanned,
+so a use may precede its alias binding; a chained alias (``B = A``) resolves
+only when ``A`` is collected first in that order.  A module-level alias
+applies everywhere in the module, an alias bound in a ``def`` / ``async def``
+applies inside that function and the functions nested in it, and nowhere
+else: a local ``sep = "_retry_"`` does not turn another function's ``sep``
+parameter into a marker.
+A class body is not a scope of its own, so a class attribute alias applies
+in the class's enclosing scope (a fail-safe over-reach).
+
+Field names such as ``"_retry_count"``, ``f"{stage}_retry_count"``,
+``prefix + "_retry_attempt_floor"``, ``"%s_retry_count" % stage``,
+``"{}_retry_limit".format(x)``, ``key += "_retry_count"`` and
 ``k.removesuffix("_retry_count")`` are therefore not markers, and neither is
-unrelated text such as ``f"manual_retry_{key}"``.  ``"_retry_" in job_id`` and
-``re.compile(r"_retry_\\d+$")`` are parse / membership uses and never flag.
+unrelated text such as ``f"manual_retry_{key}"``.  ``"_retry_" in job_id``,
+``re.compile(r"_retry_\\d+$")`` and ``re.compile(f"{re.escape(base)}_retry_")``
+are parse / membership uses and never flag.
 
 Violation kinds (the failure message is ``path:lineno kind``):
 
 * ``id-fstring``: an f-string with a marker ``FormattedValue``, or with a
   constant part that is a marker (``_retry_`` followed by a ``FormattedValue``,
-  or a full ``_retry_\\d*`` part);
-* ``id-concat``: ``BinOp`` ``Add`` / ``Mod`` with a marker operand;
-* ``id-format``: ``.format`` / ``.format_map`` on a marker-bearing constant;
-* ``id-join``: ``join`` with the marker as receiver or anywhere in its args;
+  or a full ``_retry_\\d*`` part).  An f-string in the pattern position
+  (``args[0]`` or the ``pattern=`` keyword) of ``re.compile`` / ``re.match`` /
+  ``re.search`` / ``re.fullmatch`` (receiver: the name ``re``) is a regex, not
+  an id, and does not flag; anything nested inside it is still scanned.  An
+  f-string in any other argument -- the subject, ``string=`` -- is scanned as
+  usual, so ``re.fullmatch(PATTERN, f"{base}_retry_{n}")`` flags;
+* ``id-concat``: ``BinOp`` ``Add`` / ``Mod`` with a marker operand, or a
+  ``Mod`` whose left side is a str constant and whose right side has a marker
+  direct element (the right operand itself, a Tuple's elements or a Dict's
+  values): ``"%s%s%d" % (base, RETRY_JOB_ID_MARKER, n)``;
+* ``id-format``: ``.format`` / ``.format_map`` with a marker receiver (a
+  marker constant or an alias such as ``TPL = "{}_retry_{}"``), a marker
+  positional argument or keyword value, or -- for ``format_map`` -- a marker
+  value of a Dict literal argument;
+* ``id-join``: ``join`` with a marker receiver, or with an argument that is a
+  marker or a List / Tuple / Set literal with a marker element.  Generator and
+  comprehension arguments are not entered, so ``", ".join(j for j in ids if
+  RETRY_JOB_ID_MARKER in j)`` stays clean;
 * ``id-augassign``: ``x += <marker>``;
 * ``marker-split``: ``rsplit`` / ``split`` / ``partition`` / ``rpartition`` /
-  ``removesuffix`` / ``rstrip`` with a marker first argument;
+  ``removesuffix`` / ``rstrip`` with a marker first argument or ``sep=``
+  keyword;
 * ``parser+int``: ``BinOp`` ``Add`` of an int literal and an operand that
   derives from a reader, in either order;
 * ``parser+=int``: ``AugAssign`` ``Add`` of an int literal on a name that
@@ -61,7 +93,9 @@ The *reader set* needs no hand-maintained list:
   ``_retry_attempt_from_basins``) and their family with no list.
 
 An operand *derives from a reader* when its subtree (``ast.walk``) contains a
-call to a reader, a ``marker-split`` call, or a tainted name.  Taint is per
+call to a reader, a ``marker-split`` call, or a tainted name.  Because the
+reader may sit anywhere in that subtree, ``len(<reader>(...)) + 1`` flags too:
+a fail-safe over-flag, kept so that no wrapper can hide a reader.  Taint is per
 function (a module body, ``def``, ``async def`` or ``lambda`` each get a fresh
 scope) and name-based only.  A name is tainted when it is:
 
@@ -92,13 +126,24 @@ not-flagged bite row, so tightening one later is a deliberate edit:
   1``: the callee name is a string;
 * ``for`` / comprehension targets (never tainted), closures (taint does not
   cross the boundary), and ``sum(...)`` over reader results that does the
-  addition itself (``sum([reader(...)], 1)``: no ``BinOp``).
+  addition itself (``sum([reader(...)], 1)``: no ``BinOp``);
+* subscript-store taint: ``by[j] = retry_suffix_attempt(j)`` then
+  ``max(by.values()) + 1`` (a Subscript target binds nothing);
+* ``operator.add(<reader>(...), 1)``: the addition is a call, not a ``BinOp``;
+* an ``rfind`` / ``index`` offset plus slicing, e.g.
+  ``int(j[j.rfind("_retry_") + 7:]) + 1``: ``rfind`` / ``index`` are neither
+  splitters nor readers;
+* a ``join`` over a generator or a ``map(...)`` with the marker inside, e.g.
+  ``"".join(str(p) for p in (base, RETRY_JOB_ID_MARKER, n))``: ``id-join``
+  does not enter generator / call arguments, so that membership filters stay
+  clean.
 """
 
 from __future__ import annotations
 
 import ast
 import re
+from collections import deque
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 
@@ -114,14 +159,16 @@ _EXCLUDED_DIR_PARTS: frozenset[str] = frozenset(
     {"__pycache__", ".venv", "node_modules", ".mypy_cache", ".pytest_cache"}
 )
 
-MARKER_LITERAL = "_retry_"
 MARKER_NAME = "RETRY_JOB_ID_MARKER"
 
 _MARKER_CONSTANT = re.compile(r"_retry_\d*")
-_PLACEHOLDER_MARKER = re.compile(r"(%[sdri]|\})_retry_(%|\{|\d|$)")
+_LEADING_MARKER = re.compile(r"_retry_(%|\{|\d|$)")
+_PLACEHOLDER_MARKER = re.compile(r"(%(\([^)]*\))?[-#0 +]*\d*(\.\d+)?[sdriu]|\})_retry_(%|\{|\d|$)")
 
 _SPLITTERS: frozenset[str] = frozenset({"rsplit", "split", "partition", "rpartition", "removesuffix", "rstrip"})
 _CONTAINER_ADDERS: frozenset[str] = frozenset({"append", "extend", "add", "insert", "appendleft"})
+_REGEX_FUNCTIONS: frozenset[str] = frozenset({"compile", "match", "search", "fullmatch"})
+_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
 
 # The private scheduler-state readers behind the 9.3 sites.  They are not owner
 # functions; the ``attempt`` name rule covers them.  Pinned by module so that a
@@ -173,15 +220,27 @@ def _is_int_literal(node: ast.AST) -> bool:
 
 
 def _is_marker_text(value: str) -> bool:
-    return bool(_MARKER_CONSTANT.fullmatch(value) or _PLACEHOLDER_MARKER.search(value))
+    return bool(_LEADING_MARKER.match(value) or _PLACEHOLDER_MARKER.search(value))
+
+
+def _own_scope_nodes(scope: ast.Module | ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda) -> Iterator[ast.AST]:
+    """Breadth-first nodes of ``scope``'s body, not entering nested ``def`` / ``lambda`` bodies."""
+
+    queue: deque[ast.AST] = deque(scope.body if isinstance(scope.body, list) else [scope.body])
+    while queue:
+        node = queue.popleft()
+        yield node
+        if not isinstance(node, _SCOPE_NODES):
+            queue.extend(ast.iter_child_nodes(node))
 
 
 class _RetryAccountingScan(ast.NodeVisitor):
     def __init__(self, owner_readers: frozenset[str]) -> None:
         self.owner_readers = owner_readers
         self.hits: set[tuple[int, str]] = set()
-        self.marker_names: set[str] = {MARKER_NAME}
-        self.taint_scopes: list[set[str]] = [set()]
+        self.alias_scopes: list[set[str]] = []
+        self.taint_scopes: list[set[str]] = []
+        self.regex_fstrings: set[ast.JoinedStr] = set()
 
     # -- markers -------------------------------------------------------------
 
@@ -189,28 +248,23 @@ class _RetryAccountingScan(ast.NodeVisitor):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             return _is_marker_text(node.value)
         if isinstance(node, ast.Name):
-            return node.id in self.marker_names
+            return node.id == MARKER_NAME or any(node.id in aliases for aliases in self.alias_scopes)
         if isinstance(node, ast.Attribute):
             return node.attr == MARKER_NAME
         return False
 
-    def contains_marker(self, node: ast.AST) -> bool:
-        return any(self.is_marker(child) for child in ast.walk(node))
-
-    def _collect_marker_aliases(self, tree: ast.Module) -> None:
-        for node in ast.walk(tree):
+    def _collect_marker_aliases(self, scope: ast.Module | ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda) -> None:
+        aliases = self.alias_scopes[-1]
+        for node in _own_scope_nodes(scope):
             if isinstance(node, ast.ImportFrom):
-                self.marker_names.update(
-                    alias.asname for alias in node.names if alias.name == MARKER_NAME and alias.asname
-                )
-            elif isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
-                value = node.value
-                aliases_marker = (isinstance(value, ast.Constant) and value.value == MARKER_LITERAL) or (
-                    isinstance(value, (ast.Name, ast.Attribute)) and self.is_marker(value)
-                )
-                if aliases_marker:
-                    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-                    self.marker_names.update(t.id for t in targets if isinstance(t, ast.Name))
+                aliases.update(alias.asname for alias in node.names if alias.name == MARKER_NAME and alias.asname)
+            elif (
+                isinstance(node, (ast.Assign, ast.AnnAssign))
+                and isinstance(node.value, (ast.Constant, ast.Name, ast.Attribute))
+                and self.is_marker(node.value)
+            ):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                aliases.update(t.id for t in targets if isinstance(t, ast.Name))
 
     # -- readers and taint ---------------------------------------------------
 
@@ -219,11 +273,10 @@ class _RetryAccountingScan(ast.NodeVisitor):
 
     def is_marker_split(self, node: ast.Call) -> bool:
         func = node.func
-        return (
-            isinstance(func, ast.Attribute)
-            and func.attr in _SPLITTERS
-            and bool(node.args)
-            and self.is_marker(node.args[0])
+        if not (isinstance(func, ast.Attribute) and func.attr in _SPLITTERS):
+            return False
+        return (bool(node.args) and self.is_marker(node.args[0])) or any(
+            keyword.arg == "sep" and self.is_marker(keyword.value) for keyword in node.keywords
         )
 
     def derives_from_reader(self, node: ast.AST) -> bool:
@@ -240,16 +293,15 @@ class _RetryAccountingScan(ast.NodeVisitor):
             for target in targets:
                 self.taint_scopes[-1].update(_bound_names(target))
 
-    def _scoped(self, node: ast.AST) -> None:
+    def _scoped(self, node: ast.Module | ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda) -> None:
         self.taint_scopes.append(set())
-        self.generic_visit(node)
-        self.taint_scopes.pop()
-
-    visit_FunctionDef = visit_AsyncFunctionDef = visit_Lambda = _scoped
-
-    def visit_Module(self, node: ast.Module) -> None:
+        self.alias_scopes.append(set())
         self._collect_marker_aliases(node)
         self.generic_visit(node)
+        self.alias_scopes.pop()
+        self.taint_scopes.pop()
+
+    visit_Module = visit_FunctionDef = visit_AsyncFunctionDef = visit_Lambda = _scoped
 
     def visit_Assign(self, node: ast.Assign) -> None:
         self._bind(node.targets, node.value)
@@ -281,19 +333,33 @@ class _RetryAccountingScan(ast.NodeVisitor):
         self.hits.add((node.lineno, kind))
 
     def visit_JoinedStr(self, node: ast.JoinedStr) -> None:
-        for part in node.values:
-            if (
-                isinstance(part, ast.Constant)
-                and isinstance(part.value, str)
-                and _MARKER_CONSTANT.fullmatch(part.value)
-            ):
-                self._hit(node, "id-fstring")
-            elif isinstance(part, ast.FormattedValue) and self.is_marker(part.value):
-                self._hit(node, "id-fstring")
+        if node not in self.regex_fstrings:
+            for part in node.values:
+                if (
+                    isinstance(part, ast.Constant)
+                    and isinstance(part.value, str)
+                    and _MARKER_CONSTANT.fullmatch(part.value)
+                ):
+                    self._hit(node, "id-fstring")
+                elif isinstance(part, ast.FormattedValue) and self.is_marker(part.value):
+                    self._hit(node, "id-fstring")
         self.generic_visit(node)
 
+    def _builds_id(self, node: ast.BinOp) -> bool:
+        if not isinstance(node.op, (ast.Add, ast.Mod)):
+            return False
+        if self.is_marker(node.left) or self.is_marker(node.right):
+            return True
+        if not (
+            isinstance(node.op, ast.Mod) and isinstance(node.left, ast.Constant) and isinstance(node.left.value, str)
+        ):
+            return False
+        right = node.right
+        elements = right.elts if isinstance(right, ast.Tuple) else right.values if isinstance(right, ast.Dict) else []
+        return any(self.is_marker(element) for element in elements)
+
     def visit_BinOp(self, node: ast.BinOp) -> None:
-        if isinstance(node.op, (ast.Add, ast.Mod)) and (self.is_marker(node.left) or self.is_marker(node.right)):
+        if self._builds_id(node):
             self._hit(node, "id-concat")
         elif isinstance(node.op, ast.Add) and any(
             _is_int_literal(literal) and self.derives_from_reader(operand)
@@ -314,19 +380,31 @@ class _RetryAccountingScan(ast.NodeVisitor):
                 self._hit(node, "parser+=int")
         self.generic_visit(node)
 
+    @staticmethod
+    def _format_operands(node: ast.Call, func: ast.Attribute) -> Iterator[ast.AST]:
+        yield func.value
+        yield from node.args
+        yield from (keyword.value for keyword in node.keywords)
+        if func.attr == "format_map" and node.args and isinstance(node.args[0], ast.Dict):
+            yield from node.args[0].values
+
+    @staticmethod
+    def _join_elements(node: ast.Call, func: ast.Attribute) -> Iterator[ast.AST]:
+        yield func.value
+        for arg in node.args:
+            yield from arg.elts if isinstance(arg, (ast.List, ast.Tuple, ast.Set)) else [arg]
+
     def visit_Call(self, node: ast.Call) -> None:
         func = node.func
         if isinstance(func, ast.Attribute):
-            if (
-                func.attr in ("format", "format_map")
-                and isinstance(func.value, ast.Constant)
-                and isinstance(func.value.value, str)
-                and _is_marker_text(func.value.value)
+            if func.attr in _REGEX_FUNCTIONS and isinstance(func.value, ast.Name) and func.value.id == "re":
+                patterns = [*node.args[:1], *(keyword.value for keyword in node.keywords if keyword.arg == "pattern")]
+                self.regex_fstrings.update(arg for arg in patterns if isinstance(arg, ast.JoinedStr))
+            if func.attr in ("format", "format_map") and any(
+                self.is_marker(operand) for operand in self._format_operands(node, func)
             ):
                 self._hit(node, "id-format")
-            elif func.attr == "join" and (
-                self.is_marker(func.value) or any(self.contains_marker(arg) for arg in node.args)
-            ):
+            elif func.attr == "join" and any(self.is_marker(element) for element in self._join_elements(node, func)):
                 self._hit(node, "id-join")
             elif self.is_marker_split(node):
                 self._hit(node, "marker-split")
@@ -443,6 +521,93 @@ _MUST_FLAG: list[tuple[str, str, list[tuple[int, str]]]] = [
     ("plus1-walrus", "n = (a := effective_retry_attempt(j)) + 1", [(1, "parser+int")]),
     ("plus1-walrus-taint", "if (a := effective_retry_attempt(j)) > 0:\n    n = a + 1", [(2, "parser+int")]),
     ("plus1-private-reader-family", "n = _state_job_retry_attempt(s) + 1", [(1, "parser+int")]),
+    # Leading-marker templates.
+    ("percent-leading-template", 'suffix = "_retry_%d" % n', [(1, "id-concat")]),
+    ("format-leading-template", 'suffix = "_retry_{}".format(n)', [(1, "id-format")]),
+    ("format-leading-keyed", 'suffix = "_retry_{n}".format(n=n)', [(1, "id-format")]),
+    ("concat-percent-leading", 'job_id = base + "_retry_%d" % n', [(1, "id-concat")]),
+    ("augassign-percent-leading", 'job_id = base\njob_id += "_retry_%d" % n', [(2, "id-concat")]),
+    # Width, keyed and positional placeholders.
+    ("percent-width", 'job_id = "%5s_retry_%03d" % (base, n)', [(1, "id-concat")]),
+    ("percent-keyed", 'job_id = "%(b)s_retry_%(n)d" % {"b": base, "n": n}', [(1, "id-concat")]),
+    ("format-positional", 'job_id = "{0}_retry_{1}".format(base, n)', [(1, "id-format")]),
+    # The marker as a direct ``%`` / ``.format`` operand.
+    ("percent-marker-element", 'job_id = "%s%s%d" % (base, RETRY_JOB_ID_MARKER, n)', [(1, "id-concat")]),
+    ("percent-literal-element", 'job_id = "%s%s%d" % (base, "_retry_", n)', [(1, "id-concat")]),
+    (
+        "percent-dict-marker-value",
+        'job_id = "%(b)s%(m)s%(n)d" % {"b": base, "m": RETRY_JOB_ID_MARKER, "n": n}',
+        [(1, "id-concat")],
+    ),
+    ("format-marker-argument", 'job_id = "{}{}{}".format(base, RETRY_JOB_ID_MARKER, n)', [(1, "id-format")]),
+    ("format-marker-keyword", 'job_id = "{}{sep}{}".format(base, n, sep=RETRY_JOB_ID_MARKER)', [(1, "id-format")]),
+    ("format-map-template", 'job_id = "{b}_retry_{n}".format_map(d)', [(1, "id-format")]),
+    (
+        "format-map-marker-value",
+        'job_id = "{b}{m}{n}".format_map({"b": base, "m": RETRY_JOB_ID_MARKER, "n": n})',
+        [(1, "id-format")],
+    ),
+    # Splitters, including the ``sep=`` keyword.
+    ("rsplit-sep-keyword", "base, attempt = j.rsplit(sep=RETRY_JOB_ID_MARKER, maxsplit=1)", [(1, "marker-split")]),
+    (
+        "plus1-over-sep-keyword-split",
+        "n = int(j.rsplit(sep=RETRY_JOB_ID_MARKER, maxsplit=1)[1]) + 1",
+        [(1, "marker-split"), (1, "parser+int")],
+    ),
+    ("rpartition-literal", 'base, _, attempt = job_id.rpartition("_retry_")', [(1, "marker-split")]),
+    ("removesuffix-marker", "stem = job_id.removesuffix(RETRY_JOB_ID_MARKER)", [(1, "marker-split")]),
+    ("rstrip-literal", 'stem = job_id.rstrip("_retry_")', [(1, "marker-split")]),
+    # Aliases and their scopes.
+    ("module-template-alias", 'TPL = "{}_retry_{}"\n\n\ndef f(b, n):\n    return TPL.format(b, n)', [(5, "id-format")]),
+    ("local-template-alias", 'def f(b, n):\n    tpl = "%s_retry_%d"\n    return tpl % (b, n)', [(3, "id-concat")]),
+    (
+        "module-alias-in-function",
+        "SEP = RETRY_JOB_ID_MARKER\n\n\ndef f(b, n):\n    return b + SEP + str(n)",
+        [(5, "id-concat")],
+    ),
+    (
+        "local-alias-in-own-function",
+        'def f(b, n):\n    sep = "_retry_"\n    return b + sep + str(n)',
+        [(3, "id-concat")],
+    ),
+    (
+        "local-alias-in-nested-function",
+        'def f(b, n):\n    sep = "_retry_"\n\n    def g():\n        return b + sep + str(n)\n\n    return g',
+        [(5, "id-concat")],
+    ),
+    (
+        "class-body-alias-reaches-enclosing-scope",
+        'class C:\n    SEP = "_retry_"\n\n\ndef f(b, n):\n    return b + SEP + str(n)',
+        [(6, "id-concat")],
+    ),
+    ("chained-alias", 'A = "_retry_"\nB = A\njob_id = base + B + str(n)', [(3, "id-concat")]),
+    # ``join`` over a Tuple literal, and the narrowness of the regex exemption.
+    ("join-tuple-literal", 'job_id = "".join((base, "_retry_", str(n)))', [(1, "id-join")]),
+    ("fstring-into-non-re-match", 'ok = pattern.match(f"{base}_retry_{n}")', [(1, "id-fstring")]),
+    ("fstring-into-re-sub", 'import re\ns = re.sub("x", "y", f"{b}_retry_{n}")', [(2, "id-fstring")]),
+    ("fstring-into-re-subject", 'import re\nok = re.fullmatch(PATTERN, f"{base}_retry_{n}")', [(2, "id-fstring")]),
+    ("fstring-into-re-string-keyword", 'import re\nm = re.match(P, string=f"{base}_retry_{n}")', [(2, "id-fstring")]),
+    (
+        "regex-fstring-still-scans-inside",
+        'import re\np = re.compile(f"{base + RETRY_JOB_ID_MARKER}")',
+        [(2, "id-concat")],
+    ),
+    # Taint: other adders, annotated assignment, ``async def`` and ``lambda`` scopes.
+    ("plus1-set-add-taint", "s = set()\ns.add(retry_suffix_attempt(j))\nn = max(s) + 1", [(3, "parser+int")]),
+    (
+        "plus1-extend-taint",
+        "xs = []\nxs.extend([retry_suffix_attempt(j) for j in js])\nn = max(xs) + 1",
+        [(3, "parser+int")],
+    ),
+    ("plus1-annassign-taint", "a: int = effective_retry_attempt(j, c)\nn = a + 1", [(2, "parser+int")]),
+    (
+        "plus1-async-def-scope",
+        "async def f(j):\n    a = effective_retry_attempt(j)\n    return a + 1",
+        [(3, "parser+int")],
+    ),
+    ("plus1-lambda-scope", "f = lambda j: (a := effective_retry_attempt(j)) and a + 1", [(1, "parser+int")]),
+    # Documented fail-safe over-flag: the reader may sit anywhere in the operand.
+    ("plus1-len-of-reader-overflag", "n = len(cohort_retry_attempt_floors(b, s)) + 1", [(1, "parser+int")]),
 ]
 
 _MUST_NOT_FLAG: list[tuple[str, str]] = [
@@ -467,7 +632,31 @@ _MUST_NOT_FLAG: list[tuple[str, str]] = [
     ("field-name-concat", 'key = prefix + "_retry_attempt_floor"'),
     ("field-name-format", 'key = "{}_retry_limit".format(x)'),
     ("field-name-removesuffix", 'stem = k.removesuffix("_retry_count")'),
+    ("field-name-bare", 'FIELD = "_retry_count"\nkey = stage + FIELD'),
+    ("field-name-percent", 'key = "%s_retry_count" % stage'),
+    ("field-name-augassign", 'key = stage\nkey += "_retry_count"'),
+    ("join-generator", 's = ", ".join(str(x) for x in xs)'),
+    ("join-membership-filter", 's = ", ".join(j for j in ids if RETRY_JOB_ID_MARKER in j)'),
+    (
+        "local-alias-stays-in-its-function",
+        'def f(b):\n    sep = "_retry_"\n    return sep in b\n\n\ndef g(parts, sep):\n    return sep.join(parts) + sep',
+    ),
+    ("regex-fstring-compile", 'import re\nPATTERN = re.compile(f"{re.escape(base)}_retry_")'),
+    ("regex-fstring-match", 'import re\nm = re.match(f"^{re.escape(base)}_retry_{n}$", j)'),
+    ("regex-fstring-match-pattern-position", 'import re\nm = re.match(f"{re.escape(base)}_retry_", j)'),
+    ("regex-fstring-pattern-keyword", 'import re\nP = re.compile(pattern=f"{re.escape(base)}_retry_")'),
+    (
+        "async-def-taint-stays-in-scope",
+        "async def f(j):\n    a = effective_retry_attempt(j)\n    return a\n\n\nn = a + 1",
+    ),
+    ("lambda-taint-stays-in-scope", "f = lambda j: (a := effective_retry_attempt(j))\nn = a + 1"),
     # Documented misses, one row each.
+    ("miss-subscript-store-taint", "by[j] = retry_suffix_attempt(j)\nn = max(by.values()) + 1"),
+    ("miss-operator-add", "import operator\nn = operator.add(effective_retry_attempt(j), 1)"),
+    ("miss-rfind-slice", 'n = int(j[j.rfind("_retry_") + 7:]) + 1'),
+    ("miss-join-generator", 'job_id = "".join(str(p) for p in (base, RETRY_JOB_ID_MARKER, n))'),
+    ("miss-join-map", 'job_id = "".join(map(str, [base, RETRY_JOB_ID_MARKER, n]))'),
+    ("miss-index-slice", "n = int(j[j.index(RETRY_JOB_ID_MARKER) + len(RETRY_JOB_ID_MARKER) :]) + 1"),
     ("miss-marker-mid-constant", 'job_id = f"{a}x_retry_{n}"'),
     ("miss-row-data-counter", 'retry_count = int(source.get("retry_count") or 0) + 1'),
     ("miss-regex-group", 'import re\nn = int(re.match(r"(.*)_retry_(\\d+)$", j).group(2)) + 1'),

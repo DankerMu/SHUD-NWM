@@ -1611,6 +1611,23 @@ Slice triage (T2-5, #3269, tasks 9.5, 9.7):
     - A regex-group parse plus one: `int(re.match(r"(.*)_retry_(\d+)$", j).group(2)) + 1`.
     - A late-binding call through `getattr(_chain, "_retry_attempt_from_basins")(...) + 1`. The callee name is a string; `chain_forecast_control.py:61` has this shape today without a `+ 1`.
     - `for` / comprehension targets, closures, and `sum(...)` over reader results.
+    - Subscript-store taint: `by[j] = retry_suffix_attempt(j)`, then `max(by.values()) + 1`.
+    - `operator.add(reader(...), 1)`.
+    - `rfind` / `index` plus slicing, e.g. `int(j[j.rfind("_retry_") + 7:]) + 1`.
+  - Fail-safe over-flag, accepted: `len(<reader>(...)) + 1` flags, because the reader may appear anywhere in the operand subtree.
+  - Fix pass 1 (PR #3324 review) widened the matcher to cover:
+    - templates that start with the marker (`"_retry_%d" % n`, `"_retry_{}".format(n)`);
+    - width, keyed and positional placeholders before `_retry_`;
+    - the marker as a direct `%`-tuple, dict or `.format` / `.format_map` argument;
+    - splitter `sep=` keywords;
+    - module-level template constants.
+
+    It also narrowed three shapes that no longer flag:
+    - `join` inspects only its receiver and the direct elements of its argument, so membership filters inside generator arguments no longer flag;
+    - function-local aliases are scoped to their function;
+    - an f-string in the pattern position (`args[0]` or `pattern=`) of `re.compile` / `match` / `search` / `fullmatch` is a regex, not an id. An f-string in the subject position still flags.
+
+    The `join` narrowing adds two documented misses, each with a not-flagged row: a generator argument (`"".join(str(p) for p in (base, M, n))`) and a `map` argument (`"".join(map(str, [base, M, n]))`).
   - Each failure message is `path:lineno kind`, which names the module and line.
 - Scratch run at HEAD b494dc9a9 (`.workplans/3269/matcher.py` with the derived reader set): 0 hits over the scan roots. At 5570a72b4 (pre-T2, through `git show`): 26 hits in 7 files. They cover every T2 id-construction and marker-split site. The `+ 1` at `chain.py:857` is caught only through the container taint above, and `file_orchestration_journal.py:12458` only through the adjacent f-string. `_restart_stage_from_basins`, the 9.3 stage reads and the 9.4 limit/sets carry neither, and are outside the guard's reach. Bite set: 0 bad (`.workplans/3269/matcher.py`, final variant).
   - The 9.1/9.2 id and `+ 1` sites: `chain.py:843`, `chain_forecast_execution.py:655,660`, cycle `:288,289,673(x2),746(x2)`, `chain_runtime_utils.py:449,454,460,463,465`, `file_journal_retry_helpers.py:54,55`, `file_orchestration_journal.py:12459,12678`.
