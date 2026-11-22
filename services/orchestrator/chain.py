@@ -8,7 +8,6 @@ import re
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from types import MappingProxyType
 from typing import Any, Mapping, Protocol, Sequence
 
 import packages.common.contracts.time_normalization as _time_normalization_module
@@ -135,10 +134,6 @@ production_stage_for = chain_manifests.production_stage_for
 production_status_for = production_contract.production_status_for
 serialize_manifest_index = chain_manifests.serialize_manifest_index
 
-from services.orchestrator import chain_compat_static as _chain_compat_static
-
-globals().update(_chain_compat_static.CHAIN_COMPAT_STATIC_EXPORTS)
-
 
 def build_model_run_assembly(
     basin: Mapping[str, Any],
@@ -178,25 +173,6 @@ def _publish_quality_state(entry: Mapping[str, Any], *, cycle_id: str) -> dict[s
         model_run_stage_evidence=_model_run_stage_evidence,
     )
 
-
-_CHAIN_MANIFEST_COMPAT_TOP_LEVEL_FACADE_MISSING = tuple(
-    name for name in _CHAIN_MANIFEST_COMPAT_TOP_LEVEL_FORWARDER_NAMES if not callable(globals().get(name))
-)
-if _CHAIN_MANIFEST_COMPAT_TOP_LEVEL_FACADE_MISSING:
-    raise RuntimeError(
-        "chain manifest compatibility top-level forwarders missing from facade: "
-        f"{', '.join(_CHAIN_MANIFEST_COMPAT_TOP_LEVEL_FACADE_MISSING)}"
-    )
-_CHAIN_MANIFEST_COMPAT_TOP_LEVEL_FORWARDERS = MappingProxyType(
-    {
-        facade_name: getattr(chain_manifests, owner_name)
-        for facade_name, owner_name in zip(
-            _CHAIN_MANIFEST_COMPAT_TOP_LEVEL_FORWARDER_NAMES,
-            _CHAIN_MANIFEST_COMPAT_TOP_LEVEL_OWNER_FUNCTION_NAMES,
-            strict=True,
-        )
-    }
-)
 
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
 _SAFE_AREA_RE = re.compile(r"^[\d,.\-\s]+$")
@@ -844,9 +820,3 @@ def _next_retry_attempt_for_stage(
     # ``+ 1`` are ``retry_identity``'s.  Lazy: each job is matched before its id is read.
     job_ids = (job.get("job_id") for job in jobs if ForecastOrchestrator._job_matches_stage(job, stage))
     return retry_identity.next_stage_attempt(job_ids, base_job_id)
-
-
-
-from services.orchestrator import chain_compat_runtime as _chain_compat_runtime
-
-globals().update(_chain_compat_runtime.install_chain_runtime_compat())

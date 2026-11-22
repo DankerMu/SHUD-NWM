@@ -363,15 +363,15 @@ def _budget_capped_init(original: Any) -> Any:
 # ---------------------------------------------------------------------------
 # 4. The kept entrypoint stays caller-free (task 2.6 / design D8)
 # ---------------------------------------------------------------------------
-#: Where the name is ALLOWED to appear: the Protocol declaration, the file-journal
-#: lane definition and the protocol parity list (the SQL lane and its parity list
-#: went with R3, #3260).  #1734 recorded "leave"
+#: Where the name is ALLOWED to appear: the Protocol declaration and the
+#: file-journal lane definition (the SQL lane and its parity list went with R3,
+#: #3260; the chain protocol parity list went with the chain compat installers,
+#: #3272).  #1734 recorded "leave"
 #: for this entrypoint; the fact that keeps that decision cheap is that nothing
 #: in production calls it, and that fact is what rots silently.
 _ALLOWED_SLURM_ID_LOOKUP_SITES = {
     "services/orchestrator/chain.py",
     "services/orchestrator/file_orchestration_journal.py",
-    "services/orchestrator/chain_compat_static.py",
 }
 _PRODUCTION_ROOTS = ("services", "apps", "workers", "packages", "scripts")
 

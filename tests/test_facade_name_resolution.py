@@ -63,7 +63,9 @@ Not collected, because these are probes and not reads:
 * ``getattr(A, "X", default)``;
 * a non-literal name in a test source (``getattr(A, name)``,
   ``monkeypatch.setattr(A, name, ...)``): counted and reported.  Such a read
-  raises on its own once the name is gone.  The same holds for a facade path
+  raises on its own once the name is gone, unless it is a patch with
+  ``raising=False``: that one silently creates the name, and this guard does
+  not catch it.  The same holds for a facade path
   string that reaches a patch call through a variable (a parametrised target);
   those are listed in the report too.
 

@@ -99,10 +99,9 @@ def _default_dependencies() -> ArrayAccountingDependencies:
 # #1199 structural split: candidate-outcome / task-outcome / evidence
 # serialization ownership moved to ``chain_array_evidence``.  These thin
 # wrappers keep every pre-existing ``chain_array_accounting.*`` import and
-# monkeypatch path byte-identical (the compatibility inventory's
-# ``_CHAIN_ARRAY_ACCOUNTING_COMPAT_*`` name set requires these names on this
-# module), and they delegate through the SAME dependency injection so the
-# facade bindings in ``chain._array_accounting_dependencies()`` and the
+# monkeypatch path byte-identical (the chain facade's forwarders resolve these
+# names on this module), and they delegate through the SAME dependency
+# injection so the facade bindings in ``chain._array_accounting_dependencies()`` and the
 # module-local ``_default_dependencies()`` remain the single binding authority.
 # ---------------------------------------------------------------------------
 
