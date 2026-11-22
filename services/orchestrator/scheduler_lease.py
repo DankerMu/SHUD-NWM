@@ -39,7 +39,7 @@ def _format_utc(value: datetime) -> str:
     return _ensure_utc(value).isoformat().replace("+00:00", "Z")
 
 
-def _scheduler_compat_function(
+def _scheduler_facade_function(
     name: str,
     fallback: Callable[..., Any],
 ) -> Callable[..., Any]:
@@ -74,7 +74,7 @@ def _default_owner_liveness_probe(payload: Mapping[str, Any]) -> bool | None:
 
 
 def _compat_owner_liveness_probe(payload: Mapping[str, Any]) -> bool | None:
-    probe = _scheduler_compat_function(
+    probe = _scheduler_facade_function(
         "_default_owner_liveness_probe",
         _default_owner_liveness_probe,
     )
@@ -341,7 +341,7 @@ class FileSchedulerLease:
                             "lock_type": "file",
                             "existing_lock": reread,
                         }
-                unlink_lock_file = _scheduler_compat_function("_unlink_lock_file", _unlink_lock_file)
+                unlink_lock_file = _scheduler_facade_function("_unlink_lock_file", _unlink_lock_file)
                 unlink_lock_file(self.lock_path.name, parent_fd=parent_fd)
                 return self._acquire_locked(
                     pass_id=pass_id,
@@ -379,7 +379,7 @@ class FileSchedulerLease:
             with self._guarded() as parent_fd:
                 existing = self._read_existing_lock(parent_fd=parent_fd)
                 if existing.get("pass_id") == pass_id and existing.get("lease_token") == self.lease_token:
-                    unlink_lock_file = _scheduler_compat_function("_unlink_lock_file", _unlink_lock_file)
+                    unlink_lock_file = _scheduler_facade_function("_unlink_lock_file", _unlink_lock_file)
                     unlink_lock_file(self.lock_path.name, parent_fd=parent_fd)
         except UnsafeSchedulerLockError:
             pass
@@ -391,11 +391,11 @@ class FileSchedulerLease:
         import fcntl
 
         with self._operation_lock:
-            open_lock_parent_directory = _scheduler_compat_function(
+            open_lock_parent_directory = _scheduler_facade_function(
                 "_open_lock_parent_directory",
                 _open_lock_parent_directory,
             )
-            open_regular_guard_file = _scheduler_compat_function(
+            open_regular_guard_file = _scheduler_facade_function(
                 "_open_regular_guard_file",
                 _open_regular_guard_file,
             )

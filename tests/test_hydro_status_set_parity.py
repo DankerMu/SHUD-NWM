@@ -251,10 +251,9 @@ def test_active_hydro_statuses_are_the_same_object() -> None:
     drift that produced the ``"pending"``-less literals.
 
     Deliberately NOT pinned: the pure re-export surfaces that import the name
-    and never test membership against it -- ``scheduler.py:74``,
-    ``scheduler_state.py:157`` and the ``scheduler_state_compat.py:12``
-    ``__all__`` entry. A copy there decides nothing, so pinning them would
-    lock import plumbing rather than behaviour.
+    and never test membership against it -- the ``scheduler.py`` facade import
+    and the ``scheduler_state.py`` re-export. A copy there decides nothing, so
+    pinning them would lock import plumbing rather than behaviour.
     """
 
     active = scheduler_state_types_module.ACTIVE_HYDRO_STATUSES

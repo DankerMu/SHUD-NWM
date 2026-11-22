@@ -2,12 +2,11 @@
 
 ``services/orchestrator/scheduler.py`` and ``services/orchestrator/chain.py``
 are facades.  Owner modules read names through them (``_scheduler.X``,
-``_chain.X``) and tests patch names on them.  Today the compat installers
-(``globals().update(...)`` in both facades) put many of those names on the
-facade.  F2 (task 11) deletes the installers.  After that a name that an owner
-reads, or a test patches, must exist on the facade through an explicit import:
-otherwise the read raises ``AttributeError`` and a ``raising=False`` patch
-silently patches nothing.
+``_chain.X``) and tests patch names on them.  F2 (task 11) deleted the compat
+installers (``globals().update(...)``) from both facades, so a name that an
+owner reads, or a test patches, must exist on the facade through an explicit
+import or alias line: otherwise the read raises ``AttributeError`` and a
+``raising=False`` patch silently patches nothing.
 
 This is a static check that is meant to stay green across F2.  It collects
 every such name and asserts ``hasattr(importlib.import_module(facade), name)``.

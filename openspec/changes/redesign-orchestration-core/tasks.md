@@ -2146,15 +2146,15 @@ Slice triage (F1-2, #3271, tasks 10.1, 10.3):
   - Replace `globals().update(...)` at `chain.py:147-149,887-889` with explicit alias lines for every name the F1 guard requires.
   - Delete `chain_compat_static.py`, `chain_compat_runtime.py` and the chain-manifest forwarder self-check (`chain.py:~185-204`).
   - Add Guard Hook Seed rows to the chain inventory for every new explicit `_`-prefixed alias, with removal condition "deleted with the inventory in F3", so the facade guard stays at zero signals.
-- [ ] 11.2 Scheduler side.
+- [x] 11.2 Scheduler side.
   - Do the same for `scheduler.py:230-234,238-292,686,688-690`: `scheduler_compat_runtime.py`, `scheduler_candidate_runtime.EXPORTS`, `install_scheduler_state_compat`.
   - The installer is deleted; propagation runs through the owner function from 11.0c.
   - Add Guard Hook Seed rows to the scheduler inventory for every new explicit `_`-prefixed alias, as in 11.1.
   - `scheduler_lease._scheduler_compat_function` (`scheduler_lease.py:46-54`) stays a late-binding lookup, renamed without "compat".
-- [ ] 11.3 Remove the deleted modules from `FIRST_IMPORT_ALLOWLIST` (`tests/test_orchestrator_first_import.py:38-67`) and the path strings in `tests/test_sqlalchemy_driver_explicit.py:120`, `tests/test_node27_connection_attribution*.py` and `tests/test_file_journal_full_tree_budget_contract.py:374`. (chain side done, #3272)
-- [ ] 11.4 Test: importing `chain` / `scheduler` leaves no `_COMPAT_` name in either namespace, and the F1 guard stays green. (chain side done, #3272)
-- [ ] 11.5 Add the Appendix D F2 spec deltas for each side: chain side `chain-facade-deepening` and `import-layering-guard:23`; scheduler side `scheduler-facade-deepening` and `scheduler-discovery-evidence-owner-compat:31-40`. (chain side done, #3272)
-- [ ] 11.6 Verification: on node-22, one idle pass and one submitting pass for each PR of this group that changes production code (11.0c, 11.1, 11.2). (chain side done, #3272)
+- [x] 11.3 Remove the deleted modules from `FIRST_IMPORT_ALLOWLIST` (`tests/test_orchestrator_first_import.py:38-67`) and the path strings in `tests/test_sqlalchemy_driver_explicit.py:120`, `tests/test_node27_connection_attribution*.py` and `tests/test_file_journal_full_tree_budget_contract.py:374`. (chain #3272, scheduler #3273)
+- [x] 11.4 Test: importing `chain` / `scheduler` leaves no `_COMPAT_` name in either namespace, and the F1 guard stays green. (chain #3272, scheduler #3273)
+- [x] 11.5 Add the Appendix D F2 spec deltas for each side: chain side `chain-facade-deepening` and `import-layering-guard:23`; scheduler side `scheduler-facade-deepening` and `scheduler-discovery-evidence-owner-compat:31-40`. (chain #3272, scheduler #3273)
+- [ ] 11.6 Verification: on node-22, one idle pass and one submitting pass for each PR of this group that changes production code (11.0c, 11.1, 11.2). (chain side code done, #3272; node-22 D5 pending for #3292, #3272, #3273)
 
 Suggested fixture level: expanded - legacy compatibility surface and import-time behaviour.
 Minimal mergeable slice: 11.0a and 11.0b (test-only) first; 11.0c next; then 11.1 (chain side) and 11.2 (scheduler side), which are independent; neither facade imports the other's compat modules.
@@ -2442,7 +2442,7 @@ Slice triage (F2-4, #3272, tasks 11.1, 11.3/11.4/11.5/11.6 chain side):
 - Carry-overs:
   - `.workplans/3270/carry-overs.md` #1 is fixed here. The sentence "Such a read raises on its own once the name is gone" in `tests/test_facade_name_resolution.py`'s module docstring is softened to exclude `monkeypatch.setattr(..., raising=False)`. With the installers gone the guard is the only line of defence, so its docstring must be exact. This is a docstring-only edit.
   - `.workplans/3270/carry-overs.md` #2 (silent synthetic forms, 0 HEAD sites) is deferred to F3 (#3274), which owns the guard.
-- Ticks: this PR ticks 11.1 only. 11.3-11.6 are shared with the scheduler side; each is annotated "(chain side done, #3272)" and ticked when 11.2 (#3273) lands.
+- Ticks: this PR ticks 11.1 only. 11.3-11.5 are shared with the scheduler side; each is annotated "(chain side done, #3272)" and ticked when 11.2 (#3273) lands. 11.6 is ticked only once the node-22 D5 receipts for #3292, #3272 and #3273 all exist (corrected in #3273 per PR #3333 review).
 - Out of scope:
   - the scheduler side (11.2, #3273);
   - deleting or editing either compatibility inventory, unless a guard test fails without an edit. If one does, make the minimal edit and record it as a deviation;
@@ -2476,6 +2476,113 @@ Slice triage (F2-4, #3272, tasks 11.1, 11.3/11.4/11.5/11.6 chain side):
   - CI: the full sharded suite.
   - node-27: the integration-marked files that import `services.orchestrator.chain`, found with a fresh-process import check. The orchestrator runs them after the push.
   - node-22 (D5, 11.6 chain): its own idle pass and submitting pass after the ff deploy. Pending while node-22's mounts are down; #3272 stays open until then.
+
+Slice triage (F2-5, #3273, tasks 11.2, 11.3/11.4/11.5 scheduler side):
+- Issue type: refactor, deleting import-time installers and self-check tables. Fixture level: expanded (agree): legacy compatibility surface, import-time behaviour, and the late-binding monkeypatch surface used on every pass. Width: one PR, atomic.
+- Recon at a97491fc2 (in-process measurements, `tests/test_facade_name_resolution.py` `scan_tree()`):
+  - Installers in `services/orchestrator/scheduler.py`:
+    - `:222`/`:227` `install_scheduler_state_compat`. Since #3292 it installs 137 pass-through `functools.wraps` wrappers over names the facade already imports explicitly from `scheduler_state` (153 of the 154 `SCHEDULER_STATE_COMPAT_REEXPORT_NAMES`). The one name not imported explicitly is `_completed_upstream_stage_retry_evidence`, which only the `setdefault` loop installs. The installer also adds its `_SCHEDULER_STATE_COMPAT_*` tables.
+    - `:231-282`, facade-local lease tables: `_SCHEDULER_LEASE_COMPAT_{REEXPORT_NAMES,LOOKUP_NAMES,REEXPORT_MISSING,FACADE_MISSING,OWNER_REEXPORTS,FACADE_REEXPORTS,EXPORTS}`, plus their drift `raise`s and loop variables. The lease names themselves are explicit imports.
+    - `:673-675`: `globals().update(_scheduler_candidate_runtime.EXPORTS)`. It installs 182 keys: 13 `_COMPAT_` tables and 169 other names (159 functions: 136 defined in `scheduler_candidate_runtime`, whose `__module__` reads `services.orchestrator.scheduler` because of its namespace copy, 21 from `scheduler_preflight`, 1 each from `scheduler_candidates` and `scheduler_discovery`; plus 10 values).
+    - `:677-679`: `globals().update(_scheduler_compat_runtime.EXPORTS)`. It installs 38 keys: 34 `_COMPAT_` tables and 4 aliases. The aliases (`_accepted_horizon_from_hours`, `_source_forecast_hours`, `_source_object_identity`, `_source_policy_identity`) were already made explicit by #3271.
+  - F1 at a97491fc2: 1817 scheduler reads over 281 distinct names. 115 of the 169 non-table candidate-runtime names are required: 103 defined in `scheduler_candidate_runtime`, 11 in `scheduler_preflight`, 1 in `scheduler_discovery`. 31 of the 137 state-wrapper names are required. All 4 compat-runtime aliases are required, and they are already explicit.
+  - `.workplans/3270/carry-overs.md` #3: with all three installers removed and nothing added, the guard reports 528 unresolved reads across 13 owner modules. Removing only the EXPORTS line breaks facade import: `scheduler_compat_runtime` raises `RuntimeError` on `_source_horizon_metadata`. So the lines at `:675` and `:679` go together.
+  - F1 scans only `services/orchestrator` and `tests` (`tests/test_facade_name_resolution.py:104`). `apps`, `scripts`, `workers` and `packages` are not scanned.
+  - `scheduler_candidate_runtime.py:6` copies the namespace (`globals().update(_scheduler.__dict__)`) when it is imported mid-way through the facade. That is the owner's own snapshot, not facade installation, and it stays: late binding and `__module__` rewrites are out of scope. Importing it explicitly at the same point in `scheduler.py` keeps the timing.
+  - `scheduler_lease._scheduler_compat_function` (`scheduler_lease.py:42-50`, callers `:77`, `:344`, `:382`, `:394`, `:398`) is pinned by `tests/test_production_scheduler.py:1352`.
+  - Other readers:
+    - `tests/test_orchestrator_first_import.py:49-57` has `FIRST_IMPORT_ALLOWLIST` entries for `scheduler_candidate_runtime` and `scheduler_compat_runtime`. Both reasons cite "scheduler.py reads its EXPORTS".
+    - `tests/test_production_scheduler.py:963` and `:1264-1265`: the 11.0b pin says the facade binding is a distinct wrapper until 11.2.
+    - `tests/test_production_scheduler.py:1512-1564` imports `scheduler_compat_runtime`.
+    - `tests/test_production_scheduler.py:54732` imports from `scheduler_candidate_runtime`. That stays.
+    - `tests/test_scheduler_state_facade_seam.py`'s wrapper case.
+    - `services/orchestrator/scheduler_runtime_roots.py:537` is a comment.
+    - `tests/test_hydro_status_set_parity.py:255` is a docstring path.
+    - `docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md` and `STRUCTURAL_FILE_DISPOSITION_INVENTORY.md:47` are prose that F3 owns.
+- Changes:
+  1. **11.2, production.**
+     - Delete `scheduler.py:222` and `:227` and `services/orchestrator/scheduler_state_compat.py`.
+     - Add `_completed_upstream_stage_retry_evidence` to the explicit `scheduler_state` import block. It is read by `tests/test_production_scheduler.py:1257`/`:1264`.
+     - Delete the lease tables at `scheduler.py:231-282`, including their `raise`s and loop variables. Keep the explicit lease imports.
+     - Replace `:673-679` with an explicit `from services.orchestrator.scheduler_candidate_runtime import (...)` block at the same point in the file, over exactly the reader set below.
+       - Import a name from `scheduler_preflight` / `scheduler_discovery` / `scheduler_candidates` when its candidate-runtime binding is that module's object (`getattr(owner, v.__name__) is v`; `_source_horizon_metadata` is `source_horizon_metadata as _source_horizon_metadata`). Otherwise import it from `scheduler_candidate_runtime`. That gives 104 + 11 + 1 + 1 = 117 names.
+       - `__module__` cannot decide this: the namespace copy rewrites `__name__`, so every candidate-runtime function reports `services.orchestrator.scheduler`.
+       - Delete `services/orchestrator/scheduler_compat_runtime.py`.
+       - Delete `scheduler_candidate_runtime.EXPORTS` and its 13 `_COMPAT_` tables, plus any self-check that reads only them. Keep every function and value the explicit block or another module reads.
+     - Rename `scheduler_lease._scheduler_compat_function` to `_scheduler_facade_function`, a late-binding lookup with no "compat" in the name, and update its 5 callers. Its behaviour is unchanged.
+     - **Reader set.** It is the union of:
+       - the F1-required scheduler names after the deletion;
+       - every name a scanned test reaches through a positive `hasattr(<facade>, ...)` probe, or through a non-literal `getattr`/`setattr` over a literal name tuple. These are the F1 report's non-literal sites; negative probes such as `:1379` do not count. At a97491fc2 this adds `_slurm_status_sync_failed_evidence`, `_execution_mutation_value` and `_completed_upstream_stage_retry_evidence`;
+       - bare global loads inside `scheduler.py`'s own `def` bodies that resolve to an installed name. F1 skips them and F821 is noqa'd. Today the only one is `_normalize_allowed_cycle_hours_utc` at `:439`, which is already F1-required;
+       - every `scheduler.<name>` / `from services.orchestrator.scheduler import <name>` / `_scheduler.<name>` / string patch target in `apps scripts workers packages` (measured by the fixture review: none);
+       - the names in the `scheduler-facade-deepening` public entrypoints.
+
+       Dropping no-reader names is intended (design.md:192 and D6). `openspec/specs/facade-shrink/spec.md:13-20` ("old private names remain importable") is premised on an existing caller. The 10 preflight private names that leave have zero callers; `reader-set.md` says so in one line. No delta is needed.
+
+       A non-table name that is in no reader set leaves the facade. The ledger lists each one, and the PR body records the count.
+  2. **`_facade_seam` narrowing** (`.workplans/3292/carry-overs.md` #7. #6 and #10, the aggregator `scheduler_state` being patched, stay as at HEAD. Nothing patches the aggregator, so they are deferred to F3 (#3274) with #1-#2). The installer wrappers are gone, so the unpatched rule becomes identity only: `value is getattr(owner, name, None)`, with no `__wrapped__` unwrapping. A `functools.wraps(original)(spy)` patch on the facade is then seen as a patch. Update `tests/test_scheduler_state_facade_seam.py`:
+     - replace `test_facade_seam_treats_installer_wrapper_as_unpatched` with a case where a `functools.wraps(original)` spy counts as a patch;
+     - keep the direct re-export case;
+     - in `test_facade_seam_owner_module_patch_wins_while_facade_unpatched`, change `facade_binding.__wrapped__ is scheduler_state_module._object_manifest_is_missing` to `facade_binding is scheduler_state_module._object_manifest_is_missing`;
+     - rewrite the `_facade_seam` docstring sentence to: "A facade binding counts as a patch only when it is not the facade's own re-export of `scheduler_state.<name>` (identity)."
+  3. **Tests (11.3/11.4 scheduler).**
+     - `:1264-1265` flips to `getattr(scheduler_module, n) is getattr(scheduler_state_module, n)` over the same 137 literal names.
+     - `:963` and `:1512-1564`: retarget any import of a deleted module to the owner, or delete an assertion whose only subject was a deleted table. Use the F2-2 decision test (`tasks.md`, block F2-2).
+     - Remove the `scheduler_compat_runtime` `FIRST_IMPORT_ALLOWLIST` entry unconditionally. `test_orchestrator_first_import.py:99` requires the allowlist to be a subset of existing modules.
+     - Keep the `scheduler_candidate_runtime` entry, which the fixture review measured as still failing. Rewrite its reason to: "the facade's explicit `from services.orchestrator.scheduler_candidate_runtime import (...)` at its end re-enters this module mid-import (`ImportError: cannot import name ... from partially initialized module`)". Use the actual measured message.
+     - The three path-string files named in task 11.3 have no scheduler-side strings (re-grep gives 0).
+     - Fix the stale comment at `tests/test_production_scheduler.py:13655-13660` (#3292 carry-over #5).
+     - Add an 11.4 scheduler test function to `tests/test_orchestrator_first_import.py`, next to the chain one and reusing `_run_python`/`_probe`. In a fresh subprocess, `import services.orchestrator.scheduler` must leave no name containing `_COMPAT_` in `vars(scheduler)`, and no `services.orchestrator.scheduler_compat_runtime` / `scheduler_state_compat` in `sys.modules`. The F1 guard stays green.
+  4. **Guard Hook Seed rows.** Each new explicit `_`-prefixed facade import that the facade guard reports as a signal needs a single-line Guard Hook Seed row in `docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md`, with the removal condition "deleted with the inventory in F3".
+     - One row per owner module that lists its names in backticks is allowed. A line covers a signal if it contains any of the signal's tokens and carries owner, retention, removal-condition and verification metadata (`scripts/governance/entropy_audit/facade_guard.py:536-580`).
+     - The facade guard must report zero signals.
+     - No other inventory prose changes.
+  5. **11.5 scheduler, spec.**
+     - `scheduler-facade-deepening` is already in the change; confirm the code satisfies it. Carry-over #9 of `.workplans/3292/carry-overs.md` (the 2-seam propagation boundary stated in the spec or the guard) is deferred to F3 (#3274).
+     - Add `specs/scheduler-discovery-evidence-owner-compat/spec.md` to the change: a MODIFIED copy of the requirement holding the scenario at `:31-40`. It drops only `scheduler_compat_runtime` from the consumer list and adds "through an explicit import or alias line". The orchestrator writes it before implementation.
+  6. **Carry-overs applied here.**
+     - `.workplans/3272/carry-overs.md` #1: the opening docstring of `tests/test_facade_name_resolution.py` no longer says that either facade has installers.
+     - `.workplans/3272/carry-overs.md` #5: `tasks.md` 11.6 is reworded. The orchestrator does this.
+     - `.workplans/3272/carry-overs.md` #7: change `tests/test_node27_connection_attribution.py:894` from `chain.py:17` to `:16`, or drop the line number.
+  7. **Ledger** `.workplans/3273/selfchecks.md`. The fixture review counted 23 sites: state_compat 3, compat_runtime 11, candidate_runtime 4 (`:357-483`), and `scheduler.py:231-282` 5. Label every deleted `raise RuntimeError` in `scheduler_state_compat.py`, `scheduler_compat_runtime.py`, `scheduler_candidate_runtime.py` (table self-checks) and `scheduler.py:231-282` with the F2-4 labels (i)-(iv), under the F2-4 admissibility rule: (i) and (iii) only for existence checks, and an identity, binding, signature or `__module__` check needs (ii) with a test asserting the same relation, or (iv). Each behavioural (iv) gets a literal assertion in the 11.4 scheduler test.
+- Must preserve:
+  - Every scheduler name in the reader set resolves to the same object as at HEAD, with one exception: the 137 state names now bind the owner function directly instead of the pass-through wrapper.
+  - Unpatched behaviour is identical.
+  - The two `_facade_seam` seams behave as in #3292 for every patch form except the `wraps` spy. That form is now observed, which is the intended fix.
+  - The lease late-binding lookup behaves the same.
+  - The 53 quoted F3 token lines in `tests/test_production_scheduler.py` are byte-identical.
+  - No `file.py:NNN` line reference appears in shipped Python. There is no module-level `_utcnow`.
+- Out of scope:
+  - the chain side (done, #3333);
+  - inventories beyond the Guard Hook Seed rows (F3);
+  - `scheduler_candidate_runtime`'s own namespace copy and `__module__` values;
+  - unifying the lease lookup with `_facade_seam`, and teaching the F1 guard the seam literals. Both are deferred to F3 (#3274) with `.workplans/3292/carry-overs.md` #1-#2.
+- Risk packs: legacy compatibility (import and monkeypatch surface); import-time ordering (first import, mid-import snapshot); runtime rebinding (state wrappers removed). Not selected: DB, Slurm, evidence schema.
+- Required evidence (`.workplans/3273/`):
+  1. `reader-set.md`: the F1-required set before and after, the other-roots reader scan, and the final explicit import list. Names leaving the facade are listed with "no reader" proof.
+  2. `namespace-diff.md`. Each side runs in its own fresh process. For every `vars(scheduler)` key and every `dir(scheduler.ProductionScheduler)` name, record `(type name, __module__, __qualname__)`, plus an in-process `is` check against the owner. The only changes allowed are:
+     - removed `_scheduler_compat_runtime`, `_scheduler_candidate_runtime`, `install_scheduler_state_compat`, `_scheduler_state_compat_wrapper` and `MappingProxyType` if unused;
+     - removed `_COMPAT_` tables, 64 keys in all: 13 candidate-runtime, 34 compat-runtime, 10 state and 7 lease;
+     - removed no-reader names (listed);
+     - the 137 state names, each changed from wrapper to owner function (`is` owner after).
+  3. `f1-counts.log`: zero unresolved reads and no `_COMPAT_` name required, with distinct counts before and after. The fixture review's scratch run measured 1817 → 1816 reads and 281 distinct names for the production-only deletion.
+  4. `red-runs.log`, from working-tree source edits that are reverted afterwards:
+     - re-add `globals().update({"_SCHEDULER_X_COMPAT_Y": 1})` to `scheduler.py`;
+     - drop one required explicit import (F1 must fail);
+     - rebind one state name on the facade to a wrapper (the `:1264` identity test must fail);
+     - restore `__wrapped__` unwrapping in `_facade_seam` (the new wraps-spy case must fail).
+  5. `uv run --no-sync ruff check . --no-cache`, `git diff --check`, and `openspec validate redesign-orchestration-core --strict --no-interactive`.
+- Verification (owner policy 2026-11-22: no local full suite):
+  - Locally:
+    - `tests/test_production_scheduler.py`, `tests/test_scheduler_state_facade_seam.py`, `tests/test_scheduler_backfill.py`, `tests/test_completion_scoring_event_evidence.py` and `tests/test_scheduler_terminal_recency.py`;
+    - `tests/test_scheduler_dbfree_only_mode.py`, `tests/test_orchestrator_first_import.py` and `tests/test_facade_name_resolution.py`;
+    - the inventory and facade guards: `tests/test_entropy_audit_facade_guard_aliases.py`, `tests/test_entropy_audit_facade_guard_forwarders.py` and `tests/test_entropy_audit_instruction_inventory.py`;
+    - `tests/test_operator_action_status_closure.py` and `tests/test_entropy_audit_line_references.py`;
+    - every other test file that names a deleted module or a renamed symbol (re-grep).
+  - CI: the full sharded suite.
+  - node-27: the integration-marked files that import a touched module, found by a fresh-process import check. The orchestrator runs them after the push.
+  - node-22 (D5, 11.6 scheduler): its own idle pass and submitting pass after the ff deploy. Pending while node-22's mounts are down; #3273 stays open until then.
+- Ticks: this PR's final push ticks 11.2, 11.3, 11.4 and 11.5, because both sides are then done. 11.6 is ticked only when the node-22 D5 receipts for #3292, #3272 and #3273 all exist.
 
 ## 12. F3 — Delete the compatibility inventories and the facade guard
 

@@ -1261,8 +1261,7 @@ def test_scheduler_state_compat_reexport_names_match_owner_module_and_inventory(
     for name in reexport_names:
         assert hasattr(scheduler_state_module, name)
     for name in wrapper_names:
-        assert getattr(scheduler_module, name) is not getattr(scheduler_state_module, name)
-        assert callable(getattr(scheduler_module, name))
+        assert getattr(scheduler_module, name) is getattr(scheduler_state_module, name)
     for name in direct_names:
         assert getattr(scheduler_module, name) is getattr(scheduler_state_module, name)
 
@@ -1349,7 +1348,7 @@ def test_scheduler_lease_compat_lookup_names_resolve_scheduler_monkeypatches(
 
         with monkeypatch.context() as patch_context:
             patch_context.setattr(scheduler_module, name, patched)
-            assert scheduler_lease_module._scheduler_compat_function(name, fallback) is patched
+            assert scheduler_lease_module._scheduler_facade_function(name, fallback) is patched
 
 
 # #3311 deleted DATABASE_HOST_ALLOWED_RE and LOCALHOST_NAMES with the database
@@ -1510,7 +1509,6 @@ def test_production_scheduler_discovery_consumers_preserve_owner_identity() -> N
     binding.
     """
     from services.orchestrator import scheduler_candidate_runtime as candidate_runtime_module
-    from services.orchestrator import scheduler_compat_runtime as compat_runtime_module
     from services.orchestrator import scheduler_core as scheduler_core_module
     from services.orchestrator import scheduler_models as scheduler_models_module
     from services.orchestrator import scheduler_runtime as scheduler_runtime_module
@@ -1553,15 +1551,6 @@ def test_production_scheduler_discovery_consumers_preserve_owner_identity() -> N
     assert candidate_runtime_module._source_horizon_metadata is (
         scheduler_discovery_module.source_horizon_metadata
     ), "scheduler_candidate_runtime.py _source_horizon_metadata is not owner"
-
-    # scheduler_compat_runtime.py: every discovery compat facade alias resolves the
-    # CURRENT owner object.
-    for facade_name, owner_name in discovery_alias_owner_names.items():
-        assert getattr(
-            compat_runtime_module, facade_name
-        ) is getattr(
-            scheduler_discovery_module, owner_name
-        ), f"scheduler_compat_runtime.py facade alias {facade_name} is not owner {owner_name}"
 
     # scheduler_runtime.py: the import-time error alias is the owner.
     assert scheduler_runtime_module.SchedulerResourceLimitError is (
@@ -13654,11 +13643,10 @@ def test_file_kind_check_never_converts_a_present_verdict(
     # existing raw-manifest helper family relies on, so a check that flipped
     # absent-or-unresolvable would ripple far beyond this test.
     #
-    # The patch goes on ``scheduler_state_failure_module`` itself, NOT on the
-    # facade: compat propagates a facade patch into these modules only FOR THE
-    # DURATION of a call entered through a compat-wrapped facade function, and this
-    # test calls the probe directly.  A facade patch here would silently degrade
-    # into "the probe ran against the real store".
+    # The patch goes on ``scheduler_state_failure_module`` itself.  The probe reads
+    # ``_object_manifest_is_missing`` through ``_facade_seam``, which returns this
+    # module's binding while the facade is unpatched, so the owner patch is the
+    # one the probe calls.
     object_store_root = tmp_path / "object-store"
     object_store_root.mkdir()
     monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
