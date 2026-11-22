@@ -290,6 +290,9 @@
       "_with_latest_replay_order",
       "_with_replay_order"
     ],
+    "retention": [
+      "_FileJournalRetentionMixin"
+    ],
     "retry_helpers": [
       "MAX_OPERATOR_CHECKED_BY_LENGTH",
       "MAX_OPERATOR_VERIFICATION_NOTE_LENGTH",
@@ -508,6 +511,9 @@
         "paths": [
           "_iter_discovered_files",
           "_iter_retention_surface_files"
+        ],
+        "retention": [
+          "_FileJournalRetentionMixin"
         ]
       },
       "cluster": "facade"
