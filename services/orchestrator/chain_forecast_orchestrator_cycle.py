@@ -86,6 +86,8 @@ from services.orchestrator.forcing_submit_identity import (
 from services.orchestrator.retry_identity import (
     RETRY_ATTEMPT_FLOORS_FIELD,
     cohort_retry_attempt_floors,
+    inline_retry_attempt,
+    reservation_submission_attempt,
     retry_job_id,
     split_retry_job_identity,
 )
@@ -285,7 +287,7 @@ class ForecastOrchestratorCycleMixin:
             # clean, versioned reservation using the then-current basin cohort.
             # Do not let the legacy retry adapter clone a marker-free row.
             base_job_id, suffix_attempt = split_retry_job_identity(result.pipeline_job_id)
-            next_attempt = max(retry_count, suffix_attempt, failure_number - 1) + 1
+            next_attempt = inline_retry_attempt(retry_count, suffix_attempt, failure_number)
             next_job_id = retry_job_id(base_job_id, next_attempt)
             _chain.time.sleep(backoff_seconds)
             return next_job_id
@@ -664,16 +666,7 @@ class ForecastOrchestratorCycleMixin:
             getattr(self.repository, "supports_accepted_submit_reconcile", False)
             and _chain.chain_stage_execution.is_forecast_cohort_stage(stage)
         ):
-            submission_attempt = max(int(context.retry_attempt or 1), 1)
-            retry_marker = "_retry_"
-            if retry_marker in pipeline_job_id:
-                try:
-                    submission_attempt = max(
-                        submission_attempt,
-                        int(pipeline_job_id.rsplit(retry_marker, maxsplit=1)[1]) + 1,
-                    )
-                except ValueError:
-                    pass
+            submission_attempt = reservation_submission_attempt(pipeline_job_id, context.retry_attempt)
             members = canonical_forecast_cohort_members(
                 source_id=context.source_id,
                 cycle_time=context.cycle_time,
@@ -737,16 +730,7 @@ class ForecastOrchestratorCycleMixin:
             getattr(self.repository, "supports_accepted_submit_reconcile", False)
             and is_forcing_array_stage(stage)
         ):
-            submission_attempt = max(int(context.retry_attempt or 1), 1)
-            retry_marker = "_retry_"
-            if retry_marker in pipeline_job_id:
-                try:
-                    submission_attempt = max(
-                        submission_attempt,
-                        int(pipeline_job_id.rsplit(retry_marker, maxsplit=1)[1]) + 1,
-                    )
-                except ValueError:
-                    pass
+            submission_attempt = reservation_submission_attempt(pipeline_job_id, context.retry_attempt)
             expected_user = self.config.reconcile_slurm_user
             expected_account = self.config.reconcile_slurm_account
             if forcing_member_tasks is None:

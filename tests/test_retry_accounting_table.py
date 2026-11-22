@@ -8,7 +8,7 @@ reconciled here: this table is the baseline the T2 slices (tasks 9.1-9.7 of
 
 Sections:
 
-1. ``retry_identity`` and chain pure rows (Appendix A rows C, F, M, N, Q).
+1. ``retry_identity`` and chain pure rows (Appendix A rows C, F, L, M, N, Q).
 2. Id formatting (``retry_identity.retry_job_id`` and the ``_pipeline_retry_job_id``
    delegate).
 3. Stage attempt reads (``scheduler_state_rows`` and ``_stage_job_sort_key``).
@@ -17,7 +17,7 @@ Sections:
    the two ``rsplit`` increments, the journal non-master path, the master vs
    non-master pair).
 6. Status sets (the two inline sets vs ``retry.py``).
-7. Integration index (rows A-limit, B, C-sibling, G-L, O, P, journal manual
+7. Integration index (rows A-limit, B, C-sibling, G-K, O, P, journal manual
    path): input, expected outcome and the existing pin, asserted to exist by
    node id.
 """
@@ -36,10 +36,11 @@ from pydantic import ValidationError
 
 from packages.common import status_vocab
 from services.orchestrator import chain as _chain
-from services.orchestrator import chain_forecast_execution, scheduler_runtime_roots
+from services.orchestrator import chain_forecast_execution, retry_identity, scheduler_runtime_roots
 from services.orchestrator.chain import ForecastOrchestrator
 from services.orchestrator.chain_runtime_utils import (
     _pipeline_retry_job_id,
+    _restart_stage_from_basins,
     _retry_attempt_from_basins,
     _stage_job_sort_key,
 )
@@ -249,6 +250,97 @@ def test_m_next_retry_attempt_for_stage(jobs: list[dict[str, Any]], expected: in
 
 
 @pytest.mark.parametrize(
+    ("job_ids", "base_job_id", "expected"),
+    [
+        pytest.param(["B_retry_1_retry_2"], "B", 3, id="stacked-last-suffix"),
+        pytest.param(["B_retry_2", "B_retry_5"], "B", 6, id="max-plus-one"),
+        pytest.param(["B_retry_abc"], "B", 1, id="malformed-tail-is-0"),
+        pytest.param([None, ""], "B", 1, id="none-and-empty-ids"),
+        pytest.param(["C_retry_4"], "B", 1, id="other-prefix-excluded"),
+        pytest.param(["B_retry_0"], "B", 1, id="zero-suffix-excluded"),
+        pytest.param(["B_retry_-2"], "B", 1, id="negative-suffix-excluded"),
+        pytest.param([], "B", 1, id="no-ids"),
+    ],
+)
+def test_next_stage_attempt(job_ids: list[Any], base_job_id: str, expected: int) -> None:
+    assert retry_identity.next_stage_attempt(job_ids, base_job_id) == expected
+
+
+@pytest.mark.parametrize(
+    ("floors", "occupied", "expected", "calls"),
+    [
+        pytest.param([1], set(), 2, None, id="floor-plus-one"),
+        pytest.param([1, 3], set(), 4, None, id="max-floor-plus-one"),
+        pytest.param([0], set(), 1, None, id="zero-floor"),
+        pytest.param([2], {3}, 4, None, id="occupied-skipped"),
+        pytest.param([2], {3, 4}, 5, [3, 4, 5], id="occupied-run-skipped-in-order"),
+    ],
+)
+def test_mint_attempt(floors: list[int], occupied: set[int], expected: int, calls: list[int] | None) -> None:
+    probed: list[int] = []
+
+    def is_occupied(attempt: int) -> bool:
+        probed.append(attempt)
+        return attempt in occupied
+
+    assert retry_identity.mint_attempt(floors, is_occupied) == expected
+    if calls is not None:
+        assert probed == calls
+
+
+@pytest.mark.parametrize(
+    ("retry_count", "suffix_attempt", "failure_number", "expected"),
+    [
+        pytest.param(5, 1, 1, 6, id="retry-count"),
+        pytest.param(0, 4, 1, 5, id="suffix-attempt"),
+        pytest.param(0, 0, 7, 7, id="failure-number-minus-one"),
+        pytest.param(2, 2, 1, 3, id="master-strips-base"),
+        pytest.param(0, 0, 0, 1, id="all-zero"),
+    ],
+)
+def test_inline_retry_attempt(retry_count: int, suffix_attempt: int, failure_number: int, expected: int) -> None:
+    assert retry_identity.inline_retry_attempt(retry_count, suffix_attempt, failure_number) == expected
+
+
+STAGE_NAMES = ("convert", "forcing", "forecast", "parse", "state_save_qc", "publish")
+
+
+@pytest.mark.parametrize(
+    ("restart_stages", "expected"),
+    [
+        pytest.param(["parse", None, "forecast"], "forecast", id="L-earliest-marker-markerless-ignored"),
+        pytest.param(["forecast"], "forecast", id="L-ordinary-restart-kept"),
+        pytest.param(["publish", "convert"], "convert", id="L-earliest-of-two"),
+        pytest.param([None, None], None, id="L-all-markerless"),
+        pytest.param([], None, id="L-no-basins"),
+    ],
+)
+def test_l_restart_stage_from_basins(restart_stages: list[str | None], expected: str | None) -> None:
+    assert retry_identity.restart_stage_from_basins(restart_stages, STAGE_NAMES) == expected
+
+
+@pytest.mark.parametrize(
+    ("basins", "expected"),
+    [
+        pytest.param(
+            [{"restart_stage": "parse"}, {}, {"restart_stage": "forecast"}], "forecast", id="L-delegate-earliest"
+        ),
+        pytest.param([{"restart_stage": "parse_output"}], "parse", id="L-delegate-alias"),
+        pytest.param([{"restart_stage": "download"}], None, id="L-delegate-unknown-stage"),
+        pytest.param([{"restart_stage": ""}], None, id="L-delegate-empty"),
+        pytest.param([{}], None, id="L-delegate-markerless"),
+        pytest.param(
+            [{"restart_stage": "publish_tiles"}, {"restart_stage": "convert"}],
+            "convert",
+            id="L-delegate-alias-vs-earlier",
+        ),
+    ],
+)
+def test_l_restart_stage_from_basins_delegate(basins: list[dict[str, Any]], expected: str | None) -> None:
+    assert _restart_stage_from_basins(basins) == expected
+
+
+@pytest.mark.parametrize(
     ("basins", "expected"),
     [
         pytest.param([], None, id="N-no-basins"),
@@ -294,6 +386,19 @@ def test_q_effective_retry_attempt(job_id: str, recorded: Any, expected: int) ->
 
 
 @pytest.mark.parametrize(
+    ("job_id", "recorded", "expected"),
+    [
+        pytest.param("X_retry_3", 0, 4, id="Q-next-suffix-over-zero-count"),
+        pytest.param("X_retry_1", 5, 6, id="Q-next-count-over-suffix"),
+        pytest.param("X", "bad", 1, id="Q-next-non-int-count"),
+        pytest.param(None, None, 1, id="Q-next-none"),
+    ],
+)
+def test_q_next_effective_attempt(job_id: Any, recorded: Any, expected: int) -> None:
+    assert retry_identity.next_effective_attempt(job_id, recorded) == expected
+
+
+@pytest.mark.parametrize(
     ("current", "expected"),
     [
         pytest.param({"job_id": "X", "retry_count": 0}, ("X_retry_1", 1), id="Q-master-first-retry"),
@@ -308,7 +413,35 @@ def test_q_effective_retry_attempt(job_id: str, recorded: Any, expected: int) ->
     ],
 )
 def test_q_next_current_master_retry_identity(current: dict[str, Any], expected: tuple[str, int]) -> None:
-    assert _next_current_master_retry_identity(current) == expected
+    assert retry_identity.next_after_failure_master(current["job_id"], current.get("retry_count")) == expected
+
+
+@pytest.mark.parametrize(
+    "current",
+    [
+        {"job_id": "X", "retry_count": 0},
+        {"job_id": "X_retry_1", "retry_count": 1},
+        {"job_id": "X_retry_3", "retry_count": 0},
+        {"job_id": "X_retry_1_retry_2", "retry_count": None},
+        {"job_id": "X_retry_1", "retry_count": 5},
+    ],
+)
+def test_next_current_master_retry_identity_delegates_to_next_after_failure_master(current: dict[str, Any]) -> None:
+    assert _next_current_master_retry_identity(current) == retry_identity.next_after_failure_master(
+        current.get("job_id"), current.get("retry_count")
+    )
+
+
+@pytest.mark.parametrize(
+    ("job_id", "retry_count", "expected"),
+    [
+        pytest.param("job_1_retry_1", 1, ("job_1_retry_1_retry_2", 2), id="Q-non-master-stacks"),
+        pytest.param("job_1_retry_1", -1, ("job_1_retry_1_retry_0", 0), id="Q-non-master-negative-unclamped"),
+        pytest.param("job_1_retry_1", 0, ("job_1_retry_1_retry_1", 1), id="Q-non-master-zero"),
+    ],
+)
+def test_q_next_after_failure_non_master(job_id: str, retry_count: Any, expected: tuple[str, int]) -> None:
+    assert retry_identity.next_after_failure_non_master(job_id, retry_count) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -669,6 +802,25 @@ def test_ae_floored_cycle_stage_retry_job_id(
     assert observed == expected
 
 
+def test_e_floored_mint_probes_the_snapshot_before_the_journal() -> None:
+    lookups: list[str] = []
+
+    def get_pipeline_job(candidate: str) -> None:
+        lookups.append(candidate)
+        return None
+
+    stub_self = SimpleNamespace(repository=SimpleNamespace(get_pipeline_job=get_pipeline_job))
+    context = SimpleNamespace(run_id=RUN_ID, active_basins=[{"state_evidence": _floor_evidence("forecast", 2)}])
+    existing_jobs = [{"job_id": f"{FORECAST_BASE}_retry_3", "stage": "forecast"}]
+
+    observed = chain_forecast_execution._floored_cycle_stage_retry_job_id(
+        stub_self, context, FORECAST_STAGE, existing_jobs, f"{FORECAST_BASE}_retry_1"
+    )
+
+    assert observed == f"{FORECAST_BASE}_retry_4"
+    assert lookups == [f"{FORECAST_BASE}_retry_4"]
+
+
 _STACKED_FORECAST_ROWS = [
     {"job_id": f"{FORECAST_BASE}_retry_1", "stage": "forecast"},
     {"job_id": f"{FORECAST_BASE}_retry_1_retry_2", "stage": "forecast"},
@@ -827,6 +979,19 @@ def test_forcing_reservation_submission_attempt_increment(
     suffix: str, retry_attempt: int | None, expected: int
 ) -> None:
     assert _reserved_submission_attempt("forcing", f"{FORCING_BASE}{suffix}", retry_attempt) == expected
+
+
+@pytest.mark.parametrize(
+    ("suffix", "retry_attempt", "expected"),
+    [*_INCREMENT_ROWS, pytest.param("_retry_-3", None, 1, id="negative-tail")],
+)
+def test_reservation_submission_attempt(suffix: str, retry_attempt: int | None, expected: int) -> None:
+    assert retry_identity.reservation_submission_attempt(f"{FORECAST_BASE}{suffix}", retry_attempt) == expected
+
+
+def test_reservation_submission_attempt_non_int_claim_raises() -> None:
+    with pytest.raises(ValueError):
+        retry_identity.reservation_submission_attempt("X", "x")
 
 
 _JOURNAL_RUN_ID = "fcst_gfs_2026062800_model_a"
@@ -1024,14 +1189,6 @@ INDEX: tuple[dict[str, Any], ...] = (
         ),
     },
     {
-        "row": "L",
-        "input": "#2394/#2416: cohort restart stage from the basins' top-level restart_stage",
-        "expected": "markered members take the earliest stage, markerless members are ignored",
-        "pins": (
-            "tests/test_chain_cross_stage_state.py::test_restart_stage_from_basins_takes_earliest_marker_and_ignores_markerless_members",
-        ),
-    },
-    {
         "row": "O",
         "input": "#1201: a manual attempt claim with no active manual-retry decision",
         "expected": "the claim is ignored",
@@ -1081,7 +1238,6 @@ def test_index_rows_are_complete() -> None:
         "I",
         "J",
         "K",
-        "L",
         "O",
         "P",
         "journal-manual",

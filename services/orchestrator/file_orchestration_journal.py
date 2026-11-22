@@ -293,6 +293,8 @@ from services.orchestrator.retry_identity import (
     RETRY_ATTEMPT_FLOORS_FIELD,
     effective_retry_attempt,
     member_charged_retry_attempt,
+    next_after_failure_non_master,
+    next_effective_attempt,
     normalize_retry_attempt_floors,
 )
 from services.orchestrator.run_identity import (
@@ -12455,8 +12457,7 @@ class FileJournalRetryService:
         source = _file_retry_job_record(job)
         previous_error = source.get("error_code")
         status_from = str(source.get("status") or "")
-        next_retry_count = int(source.get("retry_count") or 0) + 1
-        retry_job_id = f"{source['job_id']}_retry_{next_retry_count}"
+        retry_job_id, next_retry_count = next_after_failure_non_master(source["job_id"], source.get("retry_count"))
         existing = self.repository.get_pipeline_job(retry_job_id)
         reused_existing_retry_job = False
         if existing is not None:
@@ -12673,9 +12674,9 @@ class FileJournalRetryService:
             # rows, so the durable per-stage attempt lives in the ``_retry_<n>`` job-id
             # suffix.  A suffix-only target (persisted count 0, suffix N) must emit N+1 --
             # not a stale attempt-one claim that overrides the recovered floor
-            # (#1577 round-1 cand-st-02).  ``effective_retry_attempt`` is the single owner
-            # of that derivation, used by ``_next_current_master_retry_identity``.
-            next_retry_count = effective_retry_attempt(failed_job["job_id"], failed_job.get("retry_count")) + 1
+            # (#1577 round-1 cand-st-02).  ``retry_identity.next_effective_attempt`` is the
+            # single owner of that derivation, shared with ``next_after_failure_master``.
+            next_retry_count = next_effective_attempt(failed_job["job_id"], failed_job.get("retry_count"))
             details: dict[str, Any] = {
                 "trigger": "manual",
                 "retry_count": next_retry_count,
