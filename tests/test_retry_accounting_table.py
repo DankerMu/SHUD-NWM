@@ -9,7 +9,8 @@ reconciled here: this table is the baseline the T2 slices (tasks 9.1-9.7 of
 Sections:
 
 1. ``retry_identity`` and chain pure rows (Appendix A rows C, F, M, N, Q).
-2. Id formatting (``_pipeline_retry_job_id``).
+2. Id formatting (``retry_identity.retry_job_id`` and the ``_pipeline_retry_job_id``
+   delegate).
 3. Stage attempt reads (``scheduler_state_rows`` and ``_stage_job_sort_key``).
 4. Limits (defaults and both env overrides).
 5. Stub-driven rows (A/E mint, N precedence, the ``failure_number - 1`` formula,
@@ -58,6 +59,7 @@ from services.orchestrator.retry_identity import (
     effective_retry_attempt,
     member_charged_retry_attempt,
     retry_attempt_floor,
+    retry_job_id,
     retry_suffix_attempt,
     split_retry_job_identity,
 )
@@ -310,7 +312,8 @@ def test_q_next_current_master_retry_identity(current: dict[str, Any], expected:
 
 
 # ---------------------------------------------------------------------------
-# 2. Id formatting (9.1)
+# 2. Id formatting (9.1): ``retry_identity.retry_job_id`` owns the format;
+#    ``_pipeline_retry_job_id`` is its delegate (parity rows)
 # ---------------------------------------------------------------------------
 
 
@@ -324,7 +327,30 @@ def test_q_next_current_master_retry_identity(current: dict[str, Any], expected:
     ],
 )
 def test_pipeline_retry_job_id(attempt: int, expected: str) -> None:
-    assert _pipeline_retry_job_id("base", attempt) == expected
+    assert retry_job_id("base", attempt) == expected
+
+
+@pytest.mark.parametrize(
+    ("base", "attempt", "expected"),
+    [
+        pytest.param("X_retry_1", 2, "X_retry_1_retry_2", id="stacked-base-kept"),
+        pytest.param("X_retry_3", 1, "X_retry_3_retry_1", id="base-not-stripped"),
+        pytest.param("base", "3", "base_retry_3", id="int-coercion"),
+        pytest.param("base", 88, "base_retry_88", id="large-attempt"),
+    ],
+)
+def test_retry_job_id_direct(base: str, attempt: Any, expected: str) -> None:
+    assert retry_job_id(base, attempt) == expected
+
+
+def test_retry_job_id_non_int_attempt_raises() -> None:
+    with pytest.raises(ValueError):
+        retry_job_id("base", "x")
+
+
+@pytest.mark.parametrize("attempt", [-1, 0, 1, 3])
+def test_pipeline_retry_job_id_delegates_to_retry_job_id(attempt: int) -> None:
+    assert _pipeline_retry_job_id("base", attempt) == retry_job_id("base", attempt)
 
 
 # ---------------------------------------------------------------------------
@@ -841,6 +867,7 @@ def _seed_non_master_failed_job(tmp_path: Path, *, job_id: str, retry_count: int
         pytest.param(0, 1, "job_1_retry_1_retry_2", 2, id="snapshot-count-read-not-durable"),
         pytest.param(0, 3, "job_1_retry_1_retry_4", 4, id="snapshot-count-larger"),
         pytest.param(5, 0, "job_1_retry_1_retry_1", 1, id="durable-count-ignored"),
+        pytest.param(0, -1, "job_1_retry_1_retry_0", 0, id="snapshot-negative-unclamped"),
     ],
 )
 def test_journal_non_master_auto_retry_reads_the_caller_snapshot_and_stacks(

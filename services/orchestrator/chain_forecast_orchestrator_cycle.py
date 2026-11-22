@@ -85,8 +85,8 @@ from services.orchestrator.forcing_submit_identity import (
 )
 from services.orchestrator.retry_identity import (
     RETRY_ATTEMPT_FLOORS_FIELD,
-    RETRY_JOB_ID_MARKER,
     cohort_retry_attempt_floors,
+    retry_job_id,
     split_retry_job_identity,
 )
 from services.orchestrator.scheduler_state_types import DOWNSTREAM_STAGE_ALIASES
@@ -286,7 +286,7 @@ class ForecastOrchestratorCycleMixin:
             # Do not let the legacy retry adapter clone a marker-free row.
             base_job_id, suffix_attempt = split_retry_job_identity(result.pipeline_job_id)
             next_attempt = max(retry_count, suffix_attempt, failure_number - 1) + 1
-            next_job_id = f"{base_job_id}{RETRY_JOB_ID_MARKER}{next_attempt}"
+            next_job_id = retry_job_id(base_job_id, next_attempt)
             _chain.time.sleep(backoff_seconds)
             return next_job_id
         handled = self.retry_service.handle_failed_job(job)
