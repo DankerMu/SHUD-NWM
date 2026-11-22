@@ -8,7 +8,6 @@ import os
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import MappingProxyType
 from typing import Any
 from uuid import uuid4 as _uuid4
 
@@ -112,6 +111,7 @@ from services.orchestrator.scheduler_state import (  # noqa: F401
     _coerce_int,
     _coerce_mapping_for_state,
     _coerce_optional_nonnegative_int,
+    _completed_upstream_stage_retry_evidence,
     _downstream_failure_restartable,
     _downstream_retry_evidence,
     _durable_shud_output_exists,
@@ -219,67 +219,9 @@ from services.orchestrator.scheduler_state import (  # noqa: F401
     _terminal_hydro_truth_supersedes_failure,
     _top_level_source_cycle_download_blocker,
 )
-from services.orchestrator.scheduler_state_compat import install_scheduler_state_compat
 from services.orchestrator.scheduler_timing import _now, _sleep
 from workers.data_adapters.base import CycleDiscovery
 from packages.common.contracts.time_normalization import cycle_id_for, format_cycle_time
-
-globals().update(install_scheduler_state_compat(globals(), _scheduler_state_module))
-
-# Compatibility re-exports for downstream imports and monkeypatch paths that
-# still target services.orchestrator.scheduler after lease extraction.
-_SCHEDULER_LEASE_COMPAT_REEXPORT_NAMES = (
-    "FileSchedulerLease",
-    "LOCK_OWNER",
-    "LOCK_SCHEMA_VERSION",
-    "MAX_LOCK_PAYLOAD_BYTES",
-    "UnsafeSchedulerLockError",
-    "_LeaseHeartbeat",
-    "_default_owner_liveness_probe",
-    "_open_lock_parent_directory",
-    "_open_regular_guard_file",
-    "_unlink_lock_file",
-)
-_SCHEDULER_LEASE_COMPAT_LOOKUP_NAMES = (
-    "_default_owner_liveness_probe",
-    "_unlink_lock_file",
-    "_open_lock_parent_directory",
-    "_open_regular_guard_file",
-)
-_SCHEDULER_LEASE_COMPAT_REEXPORT_MISSING = tuple(
-    name for name in _SCHEDULER_LEASE_COMPAT_REEXPORT_NAMES if not hasattr(_scheduler_lease_module, name)
-)
-_SCHEDULER_LEASE_COMPAT_FACADE_MISSING = tuple(
-    name for name in _SCHEDULER_LEASE_COMPAT_REEXPORT_NAMES if name not in globals()
-)
-if _SCHEDULER_LEASE_COMPAT_REEXPORT_MISSING:
-    raise RuntimeError(
-        "scheduler lease compatibility names missing from owner module: "
-        f"{', '.join(_SCHEDULER_LEASE_COMPAT_REEXPORT_MISSING)}"
-    )
-if _SCHEDULER_LEASE_COMPAT_FACADE_MISSING:
-    raise RuntimeError(
-        f"scheduler lease compatibility names missing from facade: {', '.join(_SCHEDULER_LEASE_COMPAT_FACADE_MISSING)}"
-    )
-_SCHEDULER_LEASE_COMPAT_OWNER_REEXPORTS = MappingProxyType(
-    {name: getattr(_scheduler_lease_module, name) for name in _SCHEDULER_LEASE_COMPAT_REEXPORT_NAMES}
-)
-_SCHEDULER_LEASE_COMPAT_FACADE_REEXPORTS = MappingProxyType(
-    {name: globals()[name] for name in _SCHEDULER_LEASE_COMPAT_REEXPORT_NAMES}
-)
-if set(getattr(_scheduler_lease_module, "__all__", ())) != set(_SCHEDULER_LEASE_COMPAT_REEXPORT_NAMES):
-    raise RuntimeError("scheduler lease compatibility names drifted from owner __all__")
-if not set(_SCHEDULER_LEASE_COMPAT_LOOKUP_NAMES).issubset(_SCHEDULER_LEASE_COMPAT_REEXPORT_NAMES):
-    raise RuntimeError("scheduler lease compatibility lookup names are not fully re-exported")
-for _scheduler_lease_direct_name, _scheduler_lease_owner_value in _SCHEDULER_LEASE_COMPAT_OWNER_REEXPORTS.items():
-    if _SCHEDULER_LEASE_COMPAT_FACADE_REEXPORTS[_scheduler_lease_direct_name] is not _scheduler_lease_owner_value:
-        raise RuntimeError(
-            f"scheduler lease direct re-export drifted from owner module: {_scheduler_lease_direct_name}"
-        )
-del _scheduler_lease_direct_name, _scheduler_lease_owner_value
-_SCHEDULER_LEASE_COMPAT_EXPORTS = tuple(
-    _SCHEDULER_LEASE_COMPAT_FACADE_REEXPORTS[name] for name in _SCHEDULER_LEASE_COMPAT_REEXPORT_NAMES
-)
 
 DEFAULT_PRODUCTION_SOURCES = ("gfs", "IFS")
 DEFAULT_ALLOWED_CYCLE_HOURS_UTC = (0, 12)
@@ -668,12 +610,128 @@ def _apply_candidate_warm_start_fields(manifest: dict[str, Any], candidate: Sche
     return scheduler_candidate_manifest._apply_candidate_warm_start_fields(manifest, candidate)
 
 
-
-
-from services.orchestrator import scheduler_candidate_runtime as _scheduler_candidate_runtime
-
-globals().update(_scheduler_candidate_runtime.EXPORTS)
-
-from services.orchestrator import scheduler_compat_runtime as _scheduler_compat_runtime
-
-globals().update(_scheduler_compat_runtime.EXPORTS)
+from services.orchestrator.scheduler_candidate_runtime import (  # noqa: F401
+    _blocked_pass_status,
+    _cancel_candidate_evidence_write_blocked_evidence,
+    _cancelled_job_pipeline_event_write,
+    _cancelled_job_pipeline_status_write,
+    _candidate_artifact_refs,
+    _candidate_display_evidence,
+    _candidate_evidence_write_blocked_evidence,
+    _candidate_execution_evidence,
+    _candidate_forcing_blocked_evidence,
+    _candidate_forcing_evidence,
+    _candidate_forcing_ready_evidence,
+    _candidate_identity_evidence,
+    _candidate_model_run_review_evidence,
+    _candidate_output_evidence,
+    _candidate_output_key,
+    _candidate_output_river_manifest,
+    _candidate_output_uri,
+    _candidate_preflight_blocked_evidence,
+    _candidate_product_counts,
+    _candidate_quality_states,
+    _candidate_residual_blockers,
+    _candidate_resource_summary,
+    _candidate_secret_manifest_blocked_evidence,
+    _candidate_slurm_preflight_blocked_evidence,
+    _candidate_station_count,
+    _candidate_station_ids,
+    _config_path_preserve_final_component,
+    _config_path_relative_to_preserve_final,
+    _confined_path,
+    _default_gateway_probe,
+    _directory_is_writable,
+    _empty_counts,
+    _empty_model_discovery,
+    _env_allowed_cycle_hours_utc,
+    _env_flag,
+    _env_int,
+    _env_path_list,
+    _evidence_reservation_blocked_payload,
+    _evidence_write_error_payload,
+    _execution_mutation_value,
+    _execution_write_proof,
+    _execution_write_proof_from_evidence,
+    _is_failed_model_run_status,
+    _is_non_submitted_terminal_or_unavailable_status,
+    _is_partial_candidate_evidence,
+    _merge_proof_values,
+    _model_package_manifest_uri,
+    _named_proof_value,
+    _nested_bool,
+    _no_mutation_proof,
+    _normalize_allowed_cycle_hours_utc,
+    _normalize_sources,
+    _open_evidence_directory,
+    _optional_config_path_relative_to,
+    _parse_allowed_cycle_hours_utc,
+    _pipeline_event_write_proof_value,
+    _pipeline_status_write_proof_value,
+    _positive_count,
+    _proof_mutation_value,
+    _reject_blank_config_path,
+    _require_evidence_artifact_available,
+    _require_safe_directory_final_component,
+    _require_under_workspace,
+    _resolve_optional_config_path,
+    _resource_metrics_from_mapping,
+    _resource_profile_evidence,
+    _restart_reconcile_proof,
+    _root_evidence_item,
+    _scheduler_allowed_roots,
+    _scheduler_allowed_roots_and_blockers,
+    _scheduler_allowed_roots_policy_check,
+    _scheduler_cancellation_status,
+    _scheduler_execution_boundary_from_cancellation,
+    _scheduler_failed_count_from_execution,
+    _scheduler_mutation_proof,
+    _scheduler_partial_count_from_execution,
+    _scheduler_pass_status_from_cancellation,
+    _scheduler_pass_status_from_execution,
+    _scheduler_resolved_runtime_roots,
+    _scheduler_root_blocker,
+    _scheduler_root_check,
+    _scheduler_root_os_error_reason,
+    _scheduler_root_preflight_payload,
+    _scheduler_runtime_config_evidence,
+    _scheduler_runtime_root_preflight,
+    _scheduler_service_role_check,
+    _slurm_cancellation_blocked_count,
+    _slurm_cancellation_proof,
+    _slurm_cancellation_proof_from_evidence,
+    _slurm_cancellation_unknown_count,
+    _slurm_cancelled_count,
+    _slurm_gateway_backend,
+    _slurm_gateway_check,
+    _slurm_preflight,
+    _slurm_resource_profile_blockers,
+    _slurm_status_sync_count,
+    _slurm_status_sync_failed,
+    _slurm_status_sync_mutated,
+    _slurm_status_sync_proof,
+    _slurm_status_sync_proof_from_candidates,
+    _slurm_status_sync_unknown_count,
+    _slurm_submit_proof_value,
+    _sync_candidate_evidence_write_blocked_evidence,
+    _write_new_regular_file,
+)
+from services.orchestrator.scheduler_preflight import (  # noqa: F401
+    _gateway_self_reference_blocker,
+    _in_process_gateway_probe,
+    _interpret_gateway_health,
+    _path_is_under_any,
+    _preflight_allowed_roots,
+    _production_slurm_env,
+    _slurm_env_check,
+    _slurm_grib_env_check,
+    _slurm_shud_executable_check,
+    _slurm_template_allowlist_check,
+    _storage_root_check,
+)
+from services.orchestrator.scheduler_candidates import (  # noqa: F401
+    _slurm_status_sync_failed_evidence,
+)
+from services.orchestrator.scheduler_discovery import (  # noqa: F401
+    source_horizon_metadata as _source_horizon_metadata,
+)

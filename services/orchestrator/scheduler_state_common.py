@@ -25,8 +25,8 @@ def _facade_seam(name: str, fallback: Callable[..., Any]) -> Callable[..., Any]:
     ``services.orchestrator.scheduler.<name>`` is observed inside the owner.  This is
     late binding, not bookkeeping: nothing is written to any module.
 
-    A facade binding counts as a patch only when it is neither the facade's own
-    re-export of ``scheduler_state.<name>`` nor a ``functools.wraps`` wrapper of it.
+    A facade binding counts as a patch only when it is not the facade's own
+    re-export of ``scheduler_state.<name>`` (identity).
     Without that check the always-callable unpatched facade binding would shadow a
     patch on the owner module, so a patch on the owner module still wins while the
     facade is unpatched.  When both are patched the facade patch wins.  The facade is
@@ -39,7 +39,7 @@ def _facade_seam(name: str, fallback: Callable[..., Any]) -> Callable[..., Any]:
         return fallback
     owner = sys.modules.get(_FACADE_OWNER_MODULE)
     unpatched = getattr(owner, name, None) if owner is not None else None
-    if getattr(value, "__wrapped__", value) is unpatched:
+    if value is unpatched:
         return fallback
     return value
 

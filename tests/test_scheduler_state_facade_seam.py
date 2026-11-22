@@ -1,13 +1,14 @@
 """The owner-side facade seam: ``scheduler_state_common._facade_seam``.
 
-The subject is the owner, not the facade wrapper.  The owner-path cases call the
-owner ``scheduler_state_decision._candidate_state_decision`` directly, so no facade
-wrapper is entered: a patch on ``services.orchestrator.scheduler`` is only observed
-because the owner reads the facade name at call time.
+The subject is the owner.  The owner-path cases call the owner
+``scheduler_state_decision._candidate_state_decision`` directly: a patch on
+``services.orchestrator.scheduler`` is only observed because the owner reads the
+facade name at call time.
 """
 
 from __future__ import annotations
 
+import functools
 import sys
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -193,15 +194,35 @@ def test_facade_seam_returns_callable_facade_patch_as_is(monkeypatch: Any) -> No
     assert _facade_seam("_state_active_jobs", scheduler_state_decision_module._state_active_jobs) is patched
 
 
-def test_facade_seam_treats_installer_wrapper_as_unpatched() -> None:
-    facade_binding = scheduler_module._state_active_jobs
+def test_facade_seam_treats_wraps_spy_as_patch(monkeypatch: Any) -> None:
     owner_binding = scheduler_state_module._state_active_jobs
+    calls: list[Mapping[str, Any]] = []
 
-    # The facade binding is the installer's ``functools.wraps`` wrapper of the
-    # owner function, not the owner function itself.
-    assert facade_binding is not owner_binding
-    assert facade_binding.__wrapped__ is owner_binding
-    assert _facade_seam("_state_active_jobs", owner_binding) is owner_binding
+    @functools.wraps(owner_binding)
+    def spy(state: Mapping[str, Any]) -> list[dict[str, Any]]:
+        calls.append(state)
+        return owner_binding(state)
+
+    def fallback(_state: Mapping[str, Any]) -> list[dict[str, Any]]:
+        return []
+
+    # Unpatched, the facade binding is the owner function itself.
+    assert scheduler_module._state_active_jobs is owner_binding
+    monkeypatch.setattr(scheduler_module, "_state_active_jobs", spy)
+
+    # A ``functools.wraps`` spy carries ``__wrapped__ is owner_binding`` but is not
+    # the facade's own re-export, so the seam returns it and the owner calls it.
+    assert spy.__wrapped__ is owner_binding
+    assert _facade_seam("_state_active_jobs", fallback) is spy
+    candidate = _candidate()
+    state = {
+        "candidate_id": candidate.candidate_id,
+        "run_id": candidate.run_id,
+        "forcing_version_id": candidate.forcing_version_id,
+        "pipeline_jobs": [],
+    }
+    scheduler_state_decision_module._candidate_state_decision(candidate, state)
+    assert len(calls) == 1
 
 
 def test_facade_seam_treats_direct_reexport_as_unpatched(monkeypatch: Any) -> None:
@@ -222,7 +243,7 @@ def test_facade_seam_owner_module_patch_wins_while_facade_unpatched(monkeypatch:
     monkeypatch.setattr(scheduler_state_failure_module, "_object_manifest_is_missing", owner_patch)
 
     facade_binding = scheduler_module._object_manifest_is_missing
-    assert facade_binding.__wrapped__ is scheduler_state_module._object_manifest_is_missing
+    assert facade_binding is scheduler_state_module._object_manifest_is_missing
     assert (
         _facade_seam("_object_manifest_is_missing", scheduler_state_failure_module._object_manifest_is_missing)
         is owner_patch

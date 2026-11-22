@@ -891,7 +891,7 @@ DISPLAY_UNIT_CONNECT_CLOSURE: tuple[tuple[str, str, str], ...] = (
         "packages/common/met_store.py",
         UNREACHABLE,
         "static-only: apps/api/routes/pipeline.py -> services/orchestrator/__init__.py:51 (module __getattr__ "
-        "body) -> services/orchestrator/chain.py:17 -> workers/canonical_converter/converter.py, which imports "
+        "body) -> services/orchestrator/chain.py:16 -> workers/canonical_converter/converter.py, which imports "
         "this module at line 14; since #2921 model_registry imports packages.common.contracts.direct_grid, so "
         "`import apps.api.main` no longer loads it. PsycopgMetStore.from_env() is called only from worker/CLI "
         "factories -- workers/canonical_converter/converter.py:55, workers/data_adapters/{era5,gfs,ifs}_adapter.py "

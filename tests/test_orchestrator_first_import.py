@@ -47,13 +47,12 @@ FIRST_IMPORT_ALLOWLIST: dict[str, str] = {
         "default argument _scheduler._CANONICAL_READINESS_PROVIDER_UNSET in ProductionScheduler.__init__"
     ),
     "services.orchestrator.scheduler_candidate_runtime": (
-        "namespace copy globals().update(_scheduler.__dict__) at line 6; scheduler.py reads its EXPORTS mid-import"
+        "the facade's explicit `from services.orchestrator.scheduler_candidate_runtime import (...)` at its end "
+        "re-enters this module mid-import (`ImportError: cannot import name '_blocked_pass_status' from partially "
+        "initialized module 'services.orchestrator.scheduler_candidate_runtime'`)"
     ),
     "services.orchestrator.scheduler_evidence_payload": (
         "default argument _scheduler_evidence.MAX_EVIDENCE_BYTES in bounded_evidence_payload"
-    ),
-    "services.orchestrator.scheduler_compat_runtime": (
-        "namespace copy globals().update(_scheduler.__dict__) at line 6; scheduler.py reads its EXPORTS mid-import"
     ),
 }
 
@@ -253,3 +252,38 @@ def test_chain_facade_installs_no_compat_tables_and_keeps_owner_identity() -> No
     assert probe["array_accounting_owner_not_callable"] == []
     assert probe["workspace_owner_not_callable"] == []
     assert probe["orchestrator_repository_is_class"] is True
+
+
+_SCHEDULER_SURFACE_PROBE = """
+import importlib, json, sys
+scheduler = importlib.import_module("services.orchestrator.scheduler")
+candidate_runtime = sys.modules["services.orchestrator.scheduler_candidate_runtime"]
+print(json.dumps({
+    "compat_names": sorted(name for name in vars(scheduler) if "_COMPAT_" in name),
+    "compat_modules": sorted(
+        name
+        for name in (
+            "services.orchestrator.scheduler_compat_runtime",
+            "services.orchestrator.scheduler_state_compat",
+        )
+        if name in sys.modules
+    ),
+    "candidate_runtime_has_exports": hasattr(candidate_runtime, "EXPORTS"),
+}))
+"""
+
+
+def test_scheduler_facade_installs_no_compat_tables() -> None:
+    """The scheduler facade carries no ``_COMPAT_`` self-check tables (#3273).
+
+    The state-compat installer, the lease tables and the two ``EXPORTS`` installs
+    are gone; every name the facade exposes is an explicit import or alias line.
+    The deleted import-time checks are covered by the facade's import and alias
+    lines or by the owner-identity tests in ``tests/test_production_scheduler.py``.
+    A fresh interpreter, so no earlier import masks this.
+    """
+    probe = _probe(_SCHEDULER_SURFACE_PROBE)
+
+    assert probe["compat_names"] == []
+    assert probe["compat_modules"] == []
+    assert probe["candidate_runtime_has_exports"] is False
