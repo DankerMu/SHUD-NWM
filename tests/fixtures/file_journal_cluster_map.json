@@ -82,6 +82,9 @@
       "_required_context_str",
       "_required_int"
     ],
+    "events": [
+      "_FileJournalEventsMixin"
+    ],
     "facade": [
       "COMMITTED_PROJECTION_FAULT_EVENT",
       "FILE_JOURNAL_LOCK_GUARD_MODE_ENV",
@@ -436,6 +439,9 @@
     "_utcnow": {
       "binding": "import",
       "callers": {
+        "events": [
+          "_FileJournalEventsMixin"
+        ],
         "facade": [
           "FileJournalRetryService",
           "FileOrchestrationJournalRepository",

@@ -2816,12 +2816,61 @@ Slice triage (J1, #3276, tasks 14.1-14.2):
 
 ## 15. J2 — Status/events and identity-blocked release mixins
 
-- [ ] 15.1 Move C17 into `file_journal_events.py`. A mixin with public methods carries `@_install_public_read_attribution`. J0 stays unchanged.
+- [x] 15.1 Move C17 into `file_journal_events.py`. A mixin with public methods carries `@_install_public_read_attribution`. J0 stays unchanged.
 - [ ] 15.2 Move C15 into `file_journal_release.py`. J0 stays unchanged.
 - [ ] 15.3 Verification: CI, then node-22 batch per D5.
 
 Suggested fixture level: expanded - moves persisted-state writer code.
 Minimal mergeable slice: 15.1 alone; 15.2 is its own PR.
+
+Slice triage (J2a, #3277, tasks 15.1, 15.3):
+- Issue type: refactor (pure move). Fixture level: expanded (agree): it moves pipeline-job status and event writers (persisted journal records). Width: one PR, atomic; 15.2 (C15) is its own PR (#3278).
+- Recon at db35158c6, J1 merged. The Appendix B range for C17 (6844-7134 at 54556b1e7) has shifted by about 90 lines; the HEAD ranges are below.
+  - C17 is 7 methods of `FileOrchestrationJournalRepository` in `services/orchestrator/file_orchestration_journal.py`, all undecorated:
+    - public, attribution-wrapped: `update_pipeline_job_status` `:6755-6827`, `insert_pipeline_event` `:6829-6873`, `append_historical_pipeline_event` `:6875-6918`, `update_forecast_cycle_status` `:6940-6961`, `list_stage_statuses` `:6963-7000`;
+    - private: `_pipeline_event_target` `:6920-6938`, `_list_stage_statuses_for_source` `:7002-7044`.
+  - Module-level names they read at runtime:
+    - Facade-defined: `FileOrchestrationJournalError`, `_historical_pipeline_event_row`.
+    - Facade-resident patched name (cluster map `patched`): `_utcnow`. It is also used elsewhere in the facade, so the facade keeps its import.
+    - Imported into the facade from owner modules: `packages.common.status_vocab` (`PIPELINE_JOB_SUCCESS`, `PIPELINE_JOB_TERMINAL_OVERRIDES`), `file_journal_candidates` (`_blocked_stage_status`, `_cycle_time_from_job`, `_pipeline_event_entity_type`, `_public_scheduler_row`, `_resolved_caller_evidence`, `_source_cycle_from_cycle_id`, `_source_id_from_job`), `file_journal_primitives` (`_cycle_id_for_file_source`, `_normalize_file_source_id`, `_required_safe_identity`, `_safe_identity_text`), `file_journal_paths._optional_safe_identity`, `file_journal_replay._db_compatible_stage_status_order_key`, `file_journal_retry_helpers._durable_error_message`, `scheduler_state._format_utc`, `accepted_submit_identity` (`accepted_submit_contract_is_current`, `accepted_submit_row_kind`), `chain_types.OrchestratorError`, `datetime`.
+    - Annotation-only: `Any`, `Mapping` (typing / collections.abc, not facade-defined).
+  - No `_UNSET` defaults.
+  - The rest of the class calls `self.update_pipeline_job_status`, which resolves through the MRO.
+  - Consumers:
+    - production: about 55 call sites through `repository.` / `self.repository.` instances (`chain_*`, `scheduler_*`, `file_orchestration_migration.py:1415`). The `chain.py` and `chain_forecast_orchestrator_runtime.py` defs of the same names are other classes.
+    - tests: instance-level `monkeypatch.setattr(repository, "insert_pipeline_event", ...)` at `tests/test_orchestration_chain.py:3909,4586,4757`. Test subclasses of the repository (`RecordingJournalRepository` in `test_orchestration_chain.py`, and others) may override these methods and call `super()`; both resolve through the MRO.
+    - No class-level patch of a C17 name.
+- Changes (implementer):
+  1. New `services/orchestrator/file_journal_events.py`: a module docstring, then `from __future__ import annotations`. It holds one top-level class, `_FileJournalEventsMixin`, decorated `@_install_public_read_attribution` (imported from `file_journal_read_attribution`). The class contains the 7 methods, moved verbatim: same bodies, decorators, signatures and docstrings; only name resolution changes.
+  2. Name resolution in the moved code:
+     - the patched name `_utcnow` is read as an attribute of the facade module at call time (a function-local `from services.orchestrator import file_orchestration_journal`, then `file_orchestration_journal._utcnow()`). It is never bound by import, at top level or in a function body;
+     - facade-defined names read at runtime (`FileOrchestrationJournalError`, `_historical_pipeline_event_row`) come from function-local imports from the facade, placed as the first statements of the body (none of the 7 methods has a docstring) and listing only the names that method's body reads at runtime. Facade-defined names used only in annotations, if any, go in one module-level `if TYPE_CHECKING:` block importing from the facade. The sibling must not import the facade at top level outside `TYPE_CHECKING` (circular import);
+     - `_utcnow` is not an owner-module import, even though the facade imports it from `time_normalization`: it stays a facade attribute read. Other names the facade itself imports from owner modules (stdlib, `typing`/`collections.abc`, `status_vocab`, other `file_journal_*` siblings, `scheduler_state`, `accepted_submit_identity`, `chain_types`) are imported at the sibling's top level from those owner modules.
+  3. The facade imports `_FileJournalEventsMixin` and declares `class FileOrchestrationJournalRepository(_FileJournalRetentionMixin, _FileJournalEventsMixin):`, keeping its own `@_install_public_read_attribution`. The 7 methods are deleted from the class body. `__all__` and every facade-defined name stay. Facade imports left unused by the move are removed (ruff F401), except a pinned J0 4(a) name or `_UNSET`, which keep `# noqa: F401` (tasks 14.1 carry-over). Names listed in `__all__` are never unused for ruff. Expected removals: `PIPELINE_JOB_SUCCESS`, `PIPELINE_JOB_TERMINAL_OVERRIDES`, `_db_compatible_stage_status_order_key`; `_blocked_stage_status` and `_pipeline_event_entity_type` stay because `__all__` lists them. Verify; do not assume.
+  4. Cluster map (`tests/test_file_journal_cluster_map.py` + `tests/fixtures/file_journal_cluster_map.json`): append `"events"` to `CLUSTERS`, add `clusters["events"] = ["_FileJournalEventsMixin"]`, and re-derive `patched[*].callers` with the module's own derivation. Expected: `_utcnow` gains `"events": ["_FileJournalEventsMixin"]`, and nothing else changes. Update the module docstring's cluster count and order sentence.
+  5. Any other repo guard that enumerates per-file entries and now sees code move from the facade to the new file is updated in the same diff, as a pure relocation of an existing entry listed in `moves.md`. Expected result: exactly one relocation. In `tests/status_literal_allowlist.json` the entry `{"file": "services/orchestrator/file_orchestration_journal.py", "members": ["cancelled", "failed", "succeeded"], "reason": "distinct-vocabulary"}` (the `update_pipeline_job_status` terminal guard; the facade has no other literal with those members) is re-keyed to `services/orchestrator/file_journal_events.py`, same members and reason, and placed between the `file_journal_candidates.py` and `file_journal_retry_helpers.py` rows (the scan enforces `(file, members)` order). Delete the facade row; do not keep both. The scan reads `git ls-files`, so before `git add` the only symptom is a stale facade row: relocate it, never just delete it. Nothing else relocates: `line_reference_baseline.json` (the facade's two entries sit outside C17), `pyproject.toml` per-file-ignores, the first-import allowlist, and the facade `__all__` consumer rule (no `__all__` name loses its last consumer) all stay unchanged.
+- Must preserve:
+  - `tests/fixtures/file_journal_class_surface.json` is byte-identical, and `tests/test_file_journal_class_surface.py` is unchanged and green (J0).
+  - `tests/test_file_journal_late_lookup_seams.py` is unchanged and green.
+  - No behaviour, signature, exception, log or on-disk format change. The method `FunctionDef`s are AST-identical to HEAD after the documented name-resolution rewrites, and evidence 1 proves it.
+  - No other cluster moves; the shared core stays; `_FileJournalRetentionMixin` is untouched.
+  - No `file.py:NNN` line reference is added in shipped Python.
+- Deviation (record in the PR body): the diff also edits `tests/test_file_journal_cluster_map.py` (`CLUSTERS` and its docstring), because the 13.2 registration rule requires it, and `tests/status_literal_allowlist.json` (one entry re-keyed to the new file, a pure relocation), and ticks 15.1 in `tasks.md`.
+- Out of scope: C15 (#3278) and the other clusters; renaming anything; moving facade-defined helpers such as `_historical_pipeline_event_row`; the J1 carry-overs (spec cluster count, retention seam test, `_cycle_write_owner` guard).
+- Required evidence (`.workplans/3277/`):
+  1. `ast-parity.md`: for each of the 7 methods, `ast.dump` of HEAD's whole `FunctionDef` (decorators, args, returns, body) versus the moved one, after normalising only the documented name-resolution rewrites (dropping the inserted function-local imports, and mapping `file_orchestration_journal._utcnow` → `_utcnow`); expect identical. Check `ast.get_docstring` on the un-normalised moved node equals HEAD's. Also confirm the facade diff only deletes those 7 methods, plus import-line and class-header edits.
+  2. `red-runs.log`, each a temporary edit reverted afterwards:
+     - (a) bind `_utcnow` by import in the sibling (top level or function body): the cluster-map late-lookup lint fails;
+     - (a') import `utc_now` from `packages.common.contracts.time_normalization` and call it directly: `test_patched_callers_match_the_ast` fails (`_utcnow` loses its events caller);
+     - (b) drop `@_install_public_read_attribution` from the mixin: J0 set 2 fails;
+     - (c) remove `"events"` from `CLUSTERS`: the 13.2 unregistered-sibling rule fails; the log names that message (the shape check's unknown-cluster-key failure also fires).
+  3. `moves.md`: the one allowlist relocation above, with the scan output before and after (run with a temporary `GIT_INDEX_FILE` that includes the new file).
+  4. `checks.log`: `uv run --no-sync ruff check . --no-cache`, `git diff --check`, `openspec validate redesign-orchestration-core --strict --no-interactive`, and the local test list. Re-run `git ls-files`-based scanners with a temporary `GIT_INDEX_FILE` that includes the new file.
+- Verification:
+  - Locally: `tests/test_file_journal_*.py`, `tests/test_file_orchestration_journal*.py`, `tests/test_orchestration_chain.py` (insert/update consumers and subclasses), `tests/test_file_journal_repository_semantics.py`, `tests/test_status_literal_scan.py`, `tests/test_status_vocab_parity.py`, `tests/test_import_layering_guard.py`, `tests/test_orchestrator_first_import.py`, `tests/test_facade_name_resolution.py`, `tests/test_operator_action_listing.py`, `tests/test_operator_action_status_closure.py`, and every test file that scans `services/**` or `tests/**` and names the facade or `file_journal_`.
+  - node-27: a fresh-process import check over all `integration`-marked files lists the files that import `services.orchestrator.file_orchestration_journal` or `services.orchestrator.file_journal_events`. After `mkdir -p /home/nwm/tmp && export TMPDIR=/home/nwm/tmp`, run `-m integration` over them on throwaway `nhms_it_*` DBs. Expected: all pass, 0 leftover DBs.
+  - CI: the full suite.
+  - node-22: the D5 pure-move batch (15.3).
 
 ## 16. J3 — Reclaim, operator and cohort-projection mixins
 
