@@ -50,9 +50,9 @@ DB-free replacements:
 3. Candidate and pipeline state:
    `PsycopgOrchestratorRepository.from_env()` supplied active-run,
    completed-run, candidate-state, pipeline-job, and pipeline-event semantics
-   until R3 (#3260) deleted it; the file journal is now the only source.
-   The scheduler needs a file-backed production journal or another DB-free
-   state source before `DATABASE_URL` can be removed.
+   until R3 (#3260) deleted it; the file journal is now the only source, so
+   this item no longer blocks removing `DATABASE_URL` (the other items in this
+   list are judged on their own).
 4. Warm-start/state snapshot lookup:
    `StateManager.from_env()` currently creates a `PsycopgStateSnapshotRepository`.
    Strict warm-start requires a DB-free state index for the exact successor

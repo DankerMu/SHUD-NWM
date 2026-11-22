@@ -1952,10 +1952,11 @@ class FileOrchestrationJournalRepository:
             if _is_model_less_cycle_scope_job(job, source_id=canonical_source_id, cycle_time=cycle_time)
             and str(job.get("stage") or "") in _CYCLE_SCOPE_COMPLETION_STAGES
         }
-        # Candidate-state membership mirrors the DB read path's candidate-state
-        # predicate (`chain_repository_state.py:510-515`), whose cycle-run clause
-        # carries `model_id IS NULL`: a row naming a FOREIGN model is not this
-        # candidate's row even when its run id is the cycle run id.  Without this
+        # Candidate-state membership (the `_is_foreign_model_cycle_scope_job`
+        # filter below) drops a cycle-run row that names a FOREIGN model: such a
+        # row is not this candidate's row even when its run id is the cycle run
+        # id.  The SQL repository deleted by R3 (#3260) applied the same rule
+        # through a `model_id IS NULL` cycle-run clause.  Without this
         # the foreign row - and the manual retry marker riding on it - would pin
         # this candidate's derived attempt to another model's `retry_count`
         # (#1288).

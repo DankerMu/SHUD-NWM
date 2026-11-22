@@ -40,10 +40,11 @@ ACTIVE_HYDRO_STATUSES = set(_vocab.ACTIVE_HYDRO_STATUSES)
 # run?" and is named distinctly on purpose (change durable-status-name-split — grep that name for
 # both sides). Do not merge the two.
 #
-# "complete" is kept as the one member outside the hydro.run_status enum (#1581 design D5). On the
-# DB lane it is dead: hydro.run_status is a closed enum (db/migrations/000003_enums.sql plus the
-# "pending" ADD VALUE in 000013) and has_completed_pipeline compares status::text, so the member
-# can never match. On the file-journal lane no production writer emits it, but
+# "complete" is kept as the one member outside the hydro.run_status enum (#1581 design D5). Until
+# R3 (#3260) deleted the SQL repository it was dead on the DB lane: hydro.run_status is a closed
+# enum (db/migrations/000003_enums.sql plus the "pending" ADD VALUE in 000013) and that
+# repository's has_completed_pipeline compared status::text, so the member could never match
+# there. On the file-journal lane no production writer emits it, but
 # _validate_hydro_run_identity constrains identity fields only and never the status, and the
 # journal's test construction face writes hydro_status="complete" — so dropping it would change
 # journal decisions there. tests/test_hydro_status_set_parity.py pins it as that single exception.
@@ -52,9 +53,10 @@ DURABLE_HYDRO_SUCCESS_STATUSES = set(_vocab.DURABLE_HYDRO_SUCCESS_STATUSES)
 # durable-output success set above, which answers a different question. Consumed by
 # file_orchestration_journal.update_hydro_run_status (the write at :2485 of 4f3fd89a) and, as
 # scheduler_state_failure._HYDRO_RUN_CODE_CLEARING_STATUSES, by _downstream_recorded_error_code.
-# The SQL backend's update_hydro_run_status only assigns when the incoming value is not None, so a
-# successful transition there leaves an older code in place: a code sitting on a run row in one of
-# these statuses is stale residue rather than the current failure's own record. Frozen because
+# Until R3 (#3260) deleted the SQL backend, its update_hydro_run_status only assigned when the
+# incoming value was not None, so a successful transition there left an older code in place: a code
+# sitting on a run row in one of these statuses was stale residue rather than the current failure's
+# own record. Frozen because
 # tests/test_production_scheduler.py pins the alias' top-level type.
 HYDRO_RUN_CODE_CLEARING_STATUSES = _vocab.HYDRO_RUN_CODE_CLEARING_STATUSES
 TERMINAL_PIPELINE_SUCCESS_STATUSES = set(_vocab.PIPELINE_JOB_SUCCESS)

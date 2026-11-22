@@ -1539,9 +1539,10 @@ def _foreign_model_cycle_run_fixture(
 def test_candidate_state_excludes_foreign_model_cycle_run_row_and_its_marker(tmp_path: Path) -> None:
     """#1288 read side: a foreign model's named cycle-run row is not this candidate's row.
 
-    Journal candidate-state membership must answer as the DB predicate does
-    (``chain_repository_state.py:510-515``, whose cycle-run clause carries
-    ``model_id IS NULL``).  The marker riding on that row has to leave in the SAME
+    Journal candidate-state membership drops a cycle-run row naming another model
+    (``file_journal_candidates._is_foreign_model_cycle_scope_job``; the SQL repository
+    deleted by R3, #3260, did the same through a ``model_id IS NULL`` cycle-run
+    clause).  The marker riding on that row has to leave in the SAME
     step: an orphaned ``pipeline_job`` event whose row is gone re-enters the pinning
     decision through the cycle-scope entity grammar.
     """
@@ -1639,8 +1640,9 @@ def test_model_less_cycle_scope_rows_stay_visible_to_every_candidate(tmp_path: P
 def test_candidate_own_named_cycle_run_row_keeps_visibility_and_pinning(tmp_path: Path) -> None:
     """Negative regression: the candidate's OWN named cycle-run row is untouched.
 
-    The DB predicate includes it through its ``model_id = %s`` clause
-    (``chain_repository_state.py:512``), so its marker keeps adopting and pinning.
+    ``file_journal_candidates._is_foreign_model_cycle_scope_job`` answers False for a row
+    naming the candidate's own model, so the row stays and its marker keeps adopting and
+    pinning.
     """
 
     cycle_time = _dt("2026-06-28T00:00:00Z")

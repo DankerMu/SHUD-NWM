@@ -605,7 +605,6 @@ _elapsed_hours = chain_runtime_utils._elapsed_hours
 _optional_int = chain_runtime_utils._optional_int
 _optional_str = chain_runtime_utils._optional_str
 _first_optional_int = chain_runtime_utils._first_optional_int
-_max_lead_hours_from_lineage = chain_runtime_utils._max_lead_hours_from_lineage
 _basin_max_lead_hours = chain_runtime_utils._basin_max_lead_hours
 _basin_has_prefilled_initial_state = chain_runtime_utils._basin_has_prefilled_initial_state
 _apply_initial_state_selection_to_basin = chain_runtime_utils._apply_initial_state_selection_to_basin
