@@ -170,10 +170,10 @@ Each R slice also:
   - The env overrides `NHMS_SCHEDULER_RETRY_LIMIT` and `SLURM_GATEWAY_MAX_RETRIES` keep their current readers; only the default moves.
   - Plain-data rows retarget to the owner functions with unchanged expected values, and row L becomes a plain-data row.
 - T2 adds an AST guard. Outside `retry_identity.py`:
-  - no f-string or concatenation may build an id from the `_retry_` literal or `RETRY_JOB_ID_MARKER`;
-  - no `+ 1` may be applied to the result of `split_retry_job_identity`, `retry_suffix_attempt`, `effective_retry_attempt` or `rsplit("_retry_", ...)`.
+  - no f-string, concatenation, `%` / `.format` or `join` may build an id from the `_retry_` literal or `RETRY_JOB_ID_MARKER`, and no code may split on that marker;
+  - no integer literal may be added to the result of any `retry_identity` function (the set is derived from the module, so a new owner function is covered automatically), of any call whose name contains `attempt`, or of a split on the marker.
 
-  Parsing calls are allowed. The allowlist starts empty, and any entry needs a written reason.
+  Calls to the owner's parsers, regex matches and `in` membership tests are allowed; splitting on the marker outside the owner is not. The allowlist starts empty, because T2 left no local site, and any entry needs a written reason.
 - The alternative, unifying the paths while moving them, was rejected because it mixes a behaviour change into a move.
 
 **D3. Narrow facade cleanup; late binding stays.** Re-decided by the owner after Stage 3 showed the facades are a production late-binding hub, not test-only.

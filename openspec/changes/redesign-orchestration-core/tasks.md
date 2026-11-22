@@ -441,7 +441,12 @@ Slice triage (T1, #3264, tasks 8.1-8.3):
   - The owner holds the default limit constant; `DEFAULT_RETRY_LIMIT` and `RetryConfig`'s default read it. `SlurmGatewaySettings.max_retries` keeps its literal default (the gateway must not import the orchestrator), and a parity test asserts that it equals the owner constant.
   - `NHMS_SCHEDULER_RETRY_LIMIT` and `SLURM_GATEWAY_MAX_RETRIES` keep their readers.
   - The two hard-coded status sets move to the owner unchanged.
-- [ ] 9.5 Add the AST guard (design.md D2) with an empty allowlist. It matches only `_retry_` / `RETRY_JOB_ID_MARKER` id construction, so other f-strings such as `f"manual_retry_{key}"` (`scheduler_state_manual_retry.py:914`) are not flagged.
+- [x] 9.5 Add the AST guard (design.md D2) with an empty allowlist: `tests/test_retry_accounting_ast_guard.py` fails on:
+  - id construction from `_retry_` / `RETRY_JOB_ID_MARKER` (f-string, concatenation, `%`, `.format`, `join`, `+=`);
+  - splitting on that marker;
+  - adding an integer literal to the result of a `retry_identity` function, of a call whose name contains `attempt`, or of a marker split.
+
+  Unrelated f-strings such as `f"manual_retry_{key}"` (`scheduler_state_manual_retry.py:914`) and membership tests are not flagged.
 - [x] 9.6 (after T1, independent of the guard) File the behaviour-change issue (#3319) for the non-master path and the status-set difference, citing the T1 rows it would edit.
 - [ ] 9.7 Verification: per PR, CI. The T1 table's expected values are unchanged in every PR. node-22 batch passes per D5.
 
@@ -460,7 +465,7 @@ Slice triage (T2-1, #3265, tasks 9.1, 9.6):
   4. `file_orchestration_journal.py:12458-12459` (`schedule_auto_retry`, non-master path): `next_retry_count = int(source.get("retry_count") or 0) + 1`; `retry_job_id = f"{source['job_id']}_retry_{next_retry_count}"`. The base is unstripped, so ids stack. The clamp is not a no-op here. `source["retry_count"]` is `_file_retry_job_int(job, "retry_count")` (`file_journal_retry_helpers.py:631-636,675`), which is `int(value or 0)` with no floor. Nothing between `schedule_auto_retry`'s entry (`:12394`) and `:12458` bounds it. The entry `handle_failed_job` (`:12345-12346`) gates only on `should_auto_retry` (`:12304-12305`). `classify_failure` (`retry.py:119-140`) blocks only on `attempt >= retry_limit`, so a negative attempt passes. Predicted from the arithmetic, not yet observed: a caller snapshot with `retry_count = -1` reaches `:12459` and yields `<id>_retry_0` with count 0. A clamped `retry_job_id` would yield `<id>_retry_1`, which also stops matching the persisted `retry_count` 0 (`:12486,12513`). Production producers write `retry_count >= 0` (`schemas/pipeline_job.schema.json:134-137` `minimum: 0`; journal mints are at least 1), but nothing in code enforces it on this path.
 
   Not id construction (parse or match only), so out of 9.1:
-  - `chain.py:843` `prefix = f"{base_job_id}_retry_"` (`startswith` match; 9.5 must not flag it);
+  - `chain.py:843` `prefix = f"{base_job_id}_retry_"` (`startswith` match). This line originally said 9.5 must not flag it. That is superseded by the T2-5 block: the guard as built flags it as `id-fstring`, and 9.2 deleted the site, so HEAD has no such line;
   - `db/migrations/000025_active_manual_retry_guard.sql:23` (`run_id || '_retry_'`): a SQL prefix match, invisible to the Python AST guard;
   - the `"_retry_"` marker literals at `chain_forecast_orchestrator_cycle.py:668,741` (9.2), `chain_runtime_utils.py:457` (9.3) and `scheduler_state_rows.py:886` (`"_retry_" in job_id`);
   - `operator_action_listing_held.py:100` (regex);
@@ -1543,6 +1548,161 @@ Slice triage (T2-4, #3268, task 9.4):
   4. The env readers and the `-1` handling are unchanged.
   5. The duplicates that stay are recorded as deliberate: `retry.py:65-66`, `file_orchestration_migration.py:80`, `chain_forecast_execution.py:327`. #3319 owns any unification.
   6. No T1 literal is edited, and no governed facade file is touched.
+
+Slice triage (T2-5, #3269, tasks 9.5, 9.7):
+- Issue type: test-only. The slice adds one AST guard test and a change-local spec/design reword. It changes no production file and no T1 value.
+- Fixture level: expanded, as the issue says ("the guard pins the owner boundary of persisted retry identity"). The guard decides which future PRs may build persisted job ids locally.
+- Minimal mergeable slice: atomic. It lands only because HEAD has 0 hits.
+- Depends on #3265–#3268, all merged; HEAD is b494dc9a9.
+- Governing invariant: outside `services/orchestrator/retry_identity.py`, no production module builds a retry job id from `_retry_` / `RETRY_JOB_ID_MARKER`, splits on that marker, or adds an int to a retry reader's result. The allowlist is empty.
+- Recon at b494dc9a9:
+  1. Marker references outside the owner that are parse or membership uses, not construction:
+     - `scheduler_state_rows.py:883` `"_retry_" in job_id`;
+     - `operator_action_listing_held.py:100` `re.compile(r"_retry_\d+$")`;
+     - `scheduler_state_manual_retry.py:914` `f"manual_retry_{key}"`, which is not an id.
+
+     No production file outside the owner names `RETRY_JOB_ID_MARKER`.
+  2. Reader results used outside the owner without `+ int`, which is legal: `chain_forecast_execution.py:651` (a comparison), `:871` (an assignment), `file_orchestration_journal.py:6440` (`max`), and `scheduler_state_rows.py:596,644,691`.
+  3. The scheduler-state readers behind the 9.3 sites are not owner functions: `_state_retry_attempt` (`scheduler_state_rows.py:517`), `_job_retry_attempt` (`scheduler_state_rows.py:633`), `_fallback_previous_attempt` (`scheduler_state_manual_retry.py:964`), and `_retry_attempt_from_basins` (`chain_runtime_utils.py:354`; `chain_forecast_control.py:60` is a late-binding forwarder of the same name). Their family (`_state_job_retry_attempt` `:608`, `_state_non_canonical_stage_retry_attempt` `:584`, `_state_flat_retry_attempt` `:601`, `_candidate_manual_retry_attempt` `scheduler.py:652`, `_manual_retry_new_attempt` `scheduler_state_manual_retry.py:1016`) is likewise private. Without them in the reader set, the guard misses `_fallback_previous_attempt(...) + 1`, which is the 9.3 `+ 1` geometry.
+- Guard design: `tests/test_retry_accounting_ast_guard.py`, following the house pattern of `tests/test_import_layering_guard.py`.
+  - Module docstring with scope and rules; `REPO_ROOT`; `_SCAN_ROOTS = ("apps", "db", "packages", "scripts", "services", "workers")`.
+  - `_EXCLUDED_DIR_PARTS` (`__pycache__ .venv node_modules .mypy_cache .pytest_cache`).
+  - A pure `find_hits(source) -> list[(lineno, kind)]`, plus a repo walker. A `SyntaxError` surfaces.
+  - `tests/` is out of scope, because T1 and the owner tests build ids on purpose.
+  - `services/orchestrator/retry_identity.py` is excluded by exact repo-relative path. It is the only exclusion.
+  - The allowlist is empty, so there is no allowlist file.
+  - Marker (current rules, after fix passes 1-2 of PR #3324). Any of:
+    - a str constant that starts with `_retry_` followed by `%`, `{`, a digit, or the end of the string;
+    - a str constant containing a `%` placeholder (with optional key, flags, width and precision) or a `}` immediately before such a `_retry_`;
+    - the name `RETRY_JOB_ID_MARKER`, or an attribute with that name;
+    - a scoped alias: an assignment or annotated assignment of a marker or template constant (`X = "_retry_"`, `TPL = "{}_retry_{}"`, `X = RETRY_JOB_ID_MARKER`), or `from ... import RETRY_JOB_ID_MARKER as M`. A module-level alias holds everywhere; a function-level alias holds in that function and the functions nested in it.
+
+    Field names such as `"_retry_count"`, `f"{stage}_retry_count"`, `prefix + "_retry_attempt_floor"`, `"{}_retry_limit".format(x)` and `k.removesuffix("_retry_count")` are therefore not markers.
+  - Violation kinds:
+
+    | Kind | Matches |
+    |---|---|
+    | `id-fstring` | an f-string with a marker `FormattedValue`, or a constant part that is a marker. An f-string in the pattern position (`args[0]` / `pattern=`) of `re.compile` / `match` / `search` / `fullmatch` is exempt. |
+    | `id-concat` | `BinOp` `Add` with a marker operand; `Mod` with a marker template, or with a marker as a direct Tuple element or Dict value of the right operand (any left side) |
+    | `id-format` | `.format` / `.format_map` whose receiver is a marker, or with a marker as a positional argument, a keyword value, a `**{...}` Dict value or a `format_map` Dict value |
+    | `id-join` | `join` with the marker as receiver, or as a direct argument element. Elements are reached through List/Tuple/Set literals, `BinOp`, `IfExp` and `Starred`, but never through generators, comprehensions or calls. |
+    | `id-augassign` | `x += <marker>` |
+    | `marker-split` | `rsplit` / `split` / `partition` / `rpartition` / `removesuffix` / `rstrip` with a marker as first argument or as `sep=` |
+    | `parser+int` | `BinOp Add` of an int literal and an operand that derives from a reader, in either order |
+    | `parser+=int` | `AugAssign Add` of an int on a name that derives from a reader |
+
+  - "Derives from a reader" means any of these appears in the operand subtree (`ast.walk`):
+    - a call to a reader;
+    - a `marker-split` call;
+    - a name assigned from such an expression earlier in the same function;
+    - a Name receiver of `append` / `extend` / `add` / `insert` / `appendleft` whose argument derives from a reader;
+    - the target of a `NamedExpr` whose value derives from a reader.
+
+    Taint is per function. It binds only `ast.Name` targets and the Names inside Tuple/List/Starred targets. The base of an Attribute or Subscript target is never tainted, and closures are not followed. The docstring states this limit.
+  - Reader set, which needs no hand-maintained owner list:
+    - every public function defined in `retry_identity`: the module's top-level `FunctionDef` names, read from the AST of `retry_identity.py`, not `_`-prefixed (see below);
+    - plus every call whose callee name (bare or attribute) contains `attempt`. This covers the four scheduler-state readers and their private family (Recon 3) with no list.
+    - Measured at b494dc9a9: 0 hits. A new owner function, or a new `*attempt*` helper, is covered automatically.
+    - A meta-test pins the four scheduler readers by module: `_state_retry_attempt` and `_job_retry_attempt` in `scheduler_state_rows`, `_fallback_previous_attempt` in `scheduler_state_manual_retry`, `_retry_attempt_from_basins` in `chain_runtime_utils`. Each still exists and is still matched by the rule.
+    - The owner set is enumerated from the module's top-level `FunctionDef` nodes (AST of `retry_identity.py`, not `_`-prefixed), not with `inspect.isfunction`, so a future decorator cannot hide a function.
+  - Known misses. The guard is a syntactic heuristic, so this list gives examples and is not exhaustive.
+    - The guard catches every form T2 removed (the 26 pre-T2 hits) and the construction, split and increment shapes in the table.
+    - Each listed miss has a not-flagged bite row, so tightening one later is a deliberate edit.
+    - A miss found later is fixed by tightening the guard or by adding a row. It never needs an allowlist entry.
+    - `f"{a}x_retry_{n}"`: the marker does not start a constant part. It is accepted so that unrelated text stays clean.
+    - A counter read from row data plus one, e.g. `int(source.get("retry_count") or 0) + 1`. This is the pre-T2 non-master formula `file_orchestration_journal.py:12458`. It cannot be told apart from legitimate counters such as `file_orchestration_journal.py:3396` `submission_attempt + 1` and `scheduler_state_manual_retry.py:1127`.
+    - A regex-group parse plus one: `int(re.match(r"(.*)_retry_(\d+)$", j).group(2)) + 1`.
+    - A late-binding call through `getattr(_chain, "_retry_attempt_from_basins")(...) + 1`. The callee name is a string; `chain_forecast_control.py:61` has this shape today without a `+ 1`.
+    - `for` / comprehension targets, closures, and `sum(...)` over reader results.
+    - Subscript-store taint: `by[j] = retry_suffix_attempt(j)`, then `max(by.values()) + 1`.
+    - `operator.add(reader(...), 1)`.
+    - `rfind` / `index` plus slicing, e.g. `int(j[j.rfind("_retry_") + 7:]) + 1`.
+  - Fail-safe over-flag, accepted: `len(<reader>(...)) + 1` flags, because the reader may appear anywhere in the operand subtree.
+  - Fix pass 1 (PR #3324 review) widened the matcher to cover:
+    - templates that start with the marker (`"_retry_%d" % n`, `"_retry_{}".format(n)`);
+    - width, keyed and positional placeholders before `_retry_`;
+    - the marker as a direct `%`-tuple, dict or `.format` / `.format_map` argument;
+    - splitter `sep=` keywords;
+    - module-level template constants.
+
+    It also narrowed three shapes that no longer flag:
+    - `join` inspects only its receiver and the direct elements of its argument, so membership filters inside generator arguments no longer flag;
+    - function-local aliases are scoped to their function;
+    - an f-string in the pattern position (`args[0]` or `pattern=`) of `re.compile` / `match` / `search` / `fullmatch` is a regex, not an id. An f-string in the subject position still flags.
+
+    The `join` narrowing adds two documented misses, each with a not-flagged row: a generator argument (`"".join(str(p) for p in (base, M, n))`) and a `map` argument (`"".join(map(str, [base, M, n]))`).
+  - Each failure message is `path:lineno kind`, which names the module and line.
+- Scratch run at HEAD b494dc9a9 (`.workplans/3269/matcher.py` with the derived reader set): 0 hits over the scan roots. At 5570a72b4 (pre-T2, through `git show`): 26 hits in 7 files. They cover every T2 id-construction and marker-split site. The `+ 1` at `chain.py:857` is caught only through the container taint above, and `file_orchestration_journal.py:12458` only through the adjacent f-string. `_restart_stage_from_basins`, the 9.3 stage reads and the 9.4 limit/sets carry neither, and are outside the guard's reach. Bite set: 0 bad (`.workplans/3269/matcher.py`, final variant).
+  - The 9.1/9.2 id and `+ 1` sites: `chain.py:843`, `chain_forecast_execution.py:655,660`, cycle `:288,289,673(x2),746(x2)`, `chain_runtime_utils.py:449,454,460,463,465`, `file_journal_retry_helpers.py:54,55`, `file_orchestration_journal.py:12459,12678`.
+  - The seven 9.3 manual sites: `scheduler_state_manual_retry.py:122,132,1021,1035,1037,1038,1039`.
+  - `scheduler_state_rows.py:517-656` is not flagged, because those stage reads use `max` and have no `+ 1`.
+- Tests (the guard is the deliverable). No existing test or T1 literal is touched.
+  - Repo scan: `find_hits` over every scanned file `== []`. Scan roots exist, and the scanned count is at least 400 (a floor, not an exact number).
+  - Bite rows, parametrised, each run through `find_hits` on a source string. Each kind gets at least one must-flag row; near-miss rows must not flag.
+    - Must flag:
+      - f-string with the literal, with the marker, and with a leading `_retry_` part;
+      - concat with the literal, with `RETRY_JOB_ID_MARKER`, and with `retry_identity.RETRY_JOB_ID_MARKER`;
+      - `%` and `.format`;
+      - join, with the marker as receiver and with the marker in the list;
+      - a local alias (`SEP = "_retry_"`) and an import-as;
+      - `+=` of the literal;
+      - `rsplit` with the literal, `rsplit(RETRY_JOB_ID_MARKER, maxsplit=1)`, `partition` and `split`;
+      - `+ 1` over `effective_retry_attempt(...)`, over an attribute call, in reversed order (`1 + _state_retry_attempt(...)`), and over `max(c, retry_suffix_attempt(j), f - 1)`;
+      - `split_retry_job_identity(j)[1] + 1`;
+      - a tainted local `a + 1` and `a += 1`;
+      - `_fallback_previous_attempt(...) + 1`;
+      - `int(j.rsplit("_retry_", 1)[1]) + 1`;
+      - `next_after_failure_master(j, c)[1] + 1`. Its name has no `attempt`, so only the derived owner set catches it. `next_effective_attempt(...) + 1` is also kept; the name rule catches it too.
+    - Must not flag:
+      - `f"manual_retry_{key}"`, `"_retry_" in job_id`, `re.compile(r"_retry_\d+$")`;
+      - counters (`seq + 1`, `recovered.get(s, 0) + 1`);
+      - a reader result passed to `max` or compared with `>`, and `- 1`;
+      - `retry_job_id(base, next_effective_attempt(...))`;
+      - `a, b = s.split(":")`;
+      - `f"decision retry_{x} for manual_retry_{y}"`, `CODE = "retry_strict_warm_start_x"`;
+      - taint that would have to cross a function boundary;
+      - the documented miss `f"{a}x_retry_{n}"`.
+  - Exclusion meta-test: the walker skips exactly `services/orchestrator/retry_identity.py`, and that file exists.
+  - Reader meta-test: the AST-derived owner set is non-empty and includes `effective_retry_attempt`. Each of the four scheduler readers is defined in the module named in the Reader-set bullet, and its name is matched by the `attempt` rule.
+  - Extra bite rows (from fixture review):
+    - must flag: `def f(jobs):\n    attempts = []\n    for j in jobs:\n        attempts.append(retry_suffix_attempt(j))\n    return max(attempts, default=0) + 1`, a walrus `(a := effective_retry_attempt(j)) + 1`, and `_state_job_retry_attempt(s) + 1`;
+    - must not flag: `def f(self, j):\n    self.a = effective_retry_attempt(j)\n    return self.count + 1`, `f"{stage}_retry_count"`, `prefix + "_retry_attempt_floor"`, `"{}_retry_limit".format(x)`, `k.removesuffix("_retry_count")`, and one row per documented miss, plus `def f(b, s):\n    for i, fl in enumerate(cohort_retry_attempt_floors(b, s)):\n        n = i + 1`
+  - Mutation evidence, run once and logged:
+    - Add `job_id = f"{base}_retry_{n}"` to a scanned production file. The repo test goes red and names the file and line. Restore it and check the hash.
+    - The same with `attempt = effective_retry_attempt(j, c) + 1`.
+    - Replace the AST-derived owner set with an empty set, so only the `attempt` name rule remains. The bite rows for `split_retry_job_identity(j)[1] + 1` and `next_after_failure_master(j, c)[1] + 1` go red. `next_effective_attempt(...) + 1` stays green through the name rule, which is expected.
+- Spec and design delta (change-local, `openspec/changes/redesign-orchestration-core/`):
+  - `specs/job-retry-mechanism/spec.md`:
+    - `:19-20`: "an injected occupied-id predicate for the floored mint" becomes "an injected occupancy predicate for the floored mint" (#3321 carry-over). `mint_attempt(floors, is_occupied)` takes the attempt number, and the site maps it to an id; the result is the same for every input.
+    - The guard scenario WHEN clause is widened to the guard's actual reach: f-string, concatenation, `%`/`.format` or `join`, splitting on the marker, and adding an integer literal to the result of any `retry_identity` function, of any call whose name contains `attempt`, or of a marker split. THEN is unchanged; AND is narrowed to owner parser calls, regex matches and membership tests, because splitting on the marker now fails.
+  - `design.md` D2 guard bullet: the same widening. It also says the allowlist is empty because T2 left no local site.
+  - `tasks.md`:
+    - 9.5 is ticked with the wording below (applied in the final push).
+    - 9.7 is NOT ticked here. Its evidence is the node-22 batches t2b2 (#3320–#3322, 649f4ee8b) and t2b3 (#3323), and that evidence is not recorded yet. A later PR's tasks.md edit ticks 9.7 citing the evidence files.
+    - The PR merges as `Part of #3269`, and the issue closes after 9.7.
+- Verification (owner policy 2026-11-22, no local full suite):
+  - Local:
+    - `uv run pytest -q tests/test_retry_accounting_ast_guard.py tests/test_retry_accounting_table.py`;
+    - the repo-wide guards that walk `tests/*.py`: `tests/test_import_layering_guard.py` (contract scan), `tests/test_file_orchestration_journal_facade.py`, `tests/test_file_journal_cluster_map.py` and `tests/test_ci_shard_tests.py`;
+    - `uv run ruff check . --no-cache`;
+    - `openspec validate redesign-orchestration-core --strict --no-interactive`;
+    - the mutations above.
+  - CI: the full suite, every shard.
+  - node-27: not needed. No integration-marked file imports the new test, and the test opens no DB.
+  - node-22: not needed. The slice is test-only, so it takes no D5 batch slot (`design.md:226-227`).
+    - D5 `:230` lists T2 as pure-move. This guard-only slice is the exception, and the PR body records it.
+    - The PR body also records that 9.7 is left unticked, against the issue AC "tick this slice's tasks".
+- Must preserve:
+  - `git diff --stat master -- services apps packages workers scripts db` is empty;
+  - `git diff master -- tests/test_retry_accounting_table.py` is empty;
+  - `retry_identity.py` is untouched.
+- Risk packs: Legacy compatibility (the guard encodes the owner boundary; covered by the scan, the bite rows and the mutations). Not selected: runtime packs (no runtime change).
+- Review focus:
+  1. The derived owner reader set and the four scheduler readers: a new owner function must be covered with no edit.
+  2. Each kind has a must-flag row and a near-miss row. Every listed miss has a not-flagged row, and the list is stated as non-exhaustive.
+  3. Taint stays per function and does not over-flag counters.
+  4. The spec and design wording matches what the guard enforces.
+  5. 9.7 is not ticked without recorded batch evidence.
 
 ## 10. F1 — Compat-defined production helpers move to owners; facade resolution guard
 
