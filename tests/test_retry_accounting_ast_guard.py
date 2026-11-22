@@ -5,8 +5,8 @@ retry identity: the ``<base>_retry_<n>`` job id and the attempt number in it.
 This guard parses every production ``*.py`` and fails on any module that
 builds such an id locally, splits on the marker, or adds an integer literal to
 a retry reader's result.  The allowlist is empty -- T2 (tasks 9.1-9.4) left no
-local site -- so there is no allowlist file; an entry would need a written
-reason and a deliberate edit here.
+local site -- and stays empty, so there is no allowlist file: a miss is
+recorded in the guard and closed by tightening it, never by an allowlist entry.
 
 Scope:
 
@@ -122,8 +122,8 @@ removed (the 26 pre-T2 hits at ``5570a72b4``) and the common construction,
 split and increment shapes listed above.  The misses below are known
 examples, and the list is not exhaustive.  Each listed miss has a not-flagged
 bite row, so tightening one later is a deliberate edit.  A new miss found
-later is fixed by tightening the guard or by adding a row; it never needs an
-allowlist entry.
+later is recorded in the guard (a listed miss with its not-flagged bite row)
+and closed by tightening the guard, never by an allowlist entry.
 
 Known misses:
 

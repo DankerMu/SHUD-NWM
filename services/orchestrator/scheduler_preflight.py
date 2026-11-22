@@ -37,17 +37,6 @@ PRODUCTION_SLURM_ENV_PASSTHROUGH_KEYS = (
     "NHMS_GRIB_SYSTEM_ECCODES",
     "SHUD_TIMEOUT_SECONDS",
 )
-LOCALHOST_NAMES = {
-    "localhost",
-    "localhost.localdomain",
-    "ip6-localhost",
-    "ip6-loopback",
-    "127.0.0.1",
-    "::1",
-    "0.0.0.0",
-    "::",
-}
-DATABASE_HOST_ALLOWED_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
 _GATEWAY_SELF_HOSTS = frozenset(
     {"localhost", "localhost.localdomain", "127.0.0.1", "::1", "0.0.0.0", "::", "ip6-localhost", "ip6-loopback"}
 )
@@ -363,86 +352,6 @@ def _slurm_grib_env_check(
     return redact_payload(checks), redact_payload(blockers)
 
 
-def _database_url_blocker(database_url: str | None) -> dict[str, Any] | None:
-    if not database_url:
-        return {
-            "code": "SLURM_PREFLIGHT_DATABASE_URL_MISSING",
-            "field": "DATABASE_URL",
-            "message": "Slurm execution requires a compute-node reachable DATABASE_URL before submission.",
-        }
-    host = _database_host(database_url)
-    if _database_host_is_unsafe(host):
-        return {
-            "code": "SLURM_PREFLIGHT_DATABASE_URL_UNSAFE_HOST",
-            "field": "DATABASE_URL",
-            "message": "Slurm execution rejects malformed or unsafe DATABASE_URL hosts.",
-            "host": host,
-        }
-    if _database_host_is_local(host):
-        return {
-            "code": "SLURM_PREFLIGHT_DATABASE_URL_LOCALHOST",
-            "field": "DATABASE_URL",
-            "message": "Slurm execution rejects localhost-only DATABASE_URL values.",
-            "host": host,
-        }
-    return None
-
-
-def _database_host(database_url: str | None) -> str | None:
-    if not database_url:
-        return None
-    try:
-        parsed = urlparse(database_url)
-    except ValueError:
-        return None
-    if parsed.scheme == "sqlite":
-        return "localhost"
-    try:
-        host = parsed.hostname
-        parsed.port
-    except ValueError:
-        return None
-    return host
-
-
-def _database_host_is_local(host: str | None) -> bool:
-    if host is None:
-        return True
-    normalized = _normalize_database_host(host)
-    if normalized in LOCALHOST_NAMES:
-        return True
-    if normalized.endswith(".localhost"):
-        return True
-    address = _database_host_ip_address(normalized)
-    if address is None:
-        return False
-    return address.is_loopback or address.is_unspecified
-
-
-def _database_host_is_unsafe(host: str | None) -> bool:
-    if host is None:
-        return True
-    normalized = _normalize_database_host(host)
-    if not normalized:
-        return True
-    if DATABASE_HOST_ALLOWED_RE.fullmatch(normalized) is None:
-        return True
-    address = _database_host_ip_address(normalized)
-    if address is not None and address.is_link_local:
-        return True
-    if ":" in normalized:
-        if address is None:
-            return True
-    return _is_unsafe_numeric_ipv4_like_host(normalized)
-
-
-def _normalize_database_host(host: str) -> str:
-    normalized = host.strip().lower()
-    if normalized.startswith("[") and normalized.endswith("]"):
-        normalized = normalized[1:-1]
-    return normalized.rstrip(".")
-
-
 def _database_host_ip_address(host: str) -> Any | None:
     try:
         return ip_address(host)
@@ -507,23 +416,18 @@ def _is_noncanonical_ipv4_part(part: str) -> bool:
     return len(part) > 1 and part.startswith("0")
 
 
-def _is_unsafe_numeric_ipv4_like_host(host: str) -> bool:
-    if not _is_numeric_ipv4_like_host(host):
-        return False
-    return _database_host_ip_address(host) is None
-
-
 def _preflight_allowed_roots(config: Any) -> tuple[tuple[Path, ...], list[dict[str, Any]]]:
     """Resolve the configured allowed storage roots and report unsafe ones.
 
     Strict resolution + errno split, same paradigm as ``_storage_root_check``:
     a symlink loop no longer raises from non-strict resolution on CPython
-    3.13+, so the unsafe verdict comes from the kernel errno. ENOENT is NOT
-    unsafe - a merely missing root (db-free NFS not mounted, or simply not
-    created yet) keeps the historical "admitted" semantics on both arms and
-    never produces a blocker. Any other errno is unsafe on database-backed
-    runtimes: the root is dropped from the effective allowed roots so it can
-    never serve as a phantom containment base, and a blocker explains why.
+    3.13+, so the errno decides the arm. ENOENT is NOT unsafe - a merely
+    missing root (db-free NFS not mounted, or simply not created yet) keeps the
+    historical "admitted" semantics and never produces a blocker. Any other errno
+    is tolerated lexically (PR #831): the scheduler runs DB-free only, and an
+    unresolvable root is legitimate configuration there. The blocker list is
+    kept in the signature for the Slurm preflight that extends its blockers with
+    it; it is always empty.
     """
 
     # ADR 0009 clause 3: these products serve only as containment bases and carry no
@@ -531,7 +435,6 @@ def _preflight_allowed_roots(config: Any) -> tuple[tuple[Path, ...], list[dict[s
     # _storage_root_check's `path.exists() and path.is_dir()` below, before any
     # containment verdict is committed.
     roots = list(config.allowed_storage_roots) or [Path(config.workspace_root)]
-    db_free = bool(getattr(config, "db_free_required", False))
     resolved: list[Path] = []
     blockers: list[dict[str, Any]] = []
     for root in roots:
@@ -550,22 +453,12 @@ def _preflight_allowed_roots(config: Any) -> tuple[tuple[Path, ...], list[dict[s
                 # <=3.12 when the `..`-collapsed tail meets a symlink loop
                 # behind the missing component (e.g. `gone/../loopdir`).
                 candidate = Path(os.path.realpath(expanded))
-            elif db_free:
-                # PR #831 lexical-fallback tolerance, kept verbatim: on db-free
-                # runtimes an unresolvable root is legitimate configuration.
+            else:
+                # PR #831 lexical-fallback tolerance, kept verbatim: an
+                # unresolvable root is legitimate configuration.
                 candidate = expanded
                 if not candidate.is_absolute():
                     candidate = Path.cwd() / candidate
-            else:
-                blockers.append(
-                    {
-                        "code": "SLURM_PREFLIGHT_ALLOWED_STORAGE_ROOTS_UNSAFE_PATH",
-                        "field": "allowed_storage_roots",
-                        "path": str(expanded),
-                        "message": "Slurm allowed storage root must be canonically resolvable.",
-                    }
-                )
-                continue
         if candidate not in resolved:
             resolved.append(candidate)
     return tuple(resolved), blockers

@@ -3,6 +3,7 @@
 - 状态：Accepted
 - 日期：2026-09-17
 - 关联：issue #1627（家族级裁定单，本 ADR 即其交付物）
+- 修订：2026-11-22（#3311，见文末「修订（2026-11-22，#3311）」。该节取代「子族定性」里 `_resolve_config_path_for_mode`「两条臂」的写法，以及普查「全部 16 个成员」这个计数）
 
 ## 背景
 
@@ -379,3 +380,25 @@ errno-less `RuntimeError`。即**两条臂在 ≤3.12 上都抛、在 3.13+ 上�
    `os.stat(..., follow_symlinks=False)`、`services/orchestrator/scheduler_evidence.py::open_evidence_directory`），
    phantom 值在那里是响亮的 ELOOP。关掉开关的代价是「配置错误表现为运行期 ELOOP
    而不是 preflight blocker」，属**可诊断性**降级，而那正是该开关存在的意义。
+
+## 修订（2026-11-22，#3311）
+
+> 上文说 `path_modes.py::_resolve_config_path_for_mode` 有「两条臂」、两臂「写法相同」，
+> 普查说成员共 16 个。这两处以本节为准。从句 1/2/3、守卫和已知限制的其余裁定都不变，
+> 正文保留，作为历史记录。
+
+- **调度器只剩 DB-free 一种构造。** 从 #3255 起 `scheduler_db_free_required` 恒为 True，
+  #3311 又删掉了 `not db_free_required` 那条臂。所以 `_resolve_config_path_for_mode` 只剩一条臂：
+  先 strict realpath，遇到 `except OSError` 就回退到非 strict。
+- **「两臂分写」的理由不再成立。** 当初两臂文本一样却分开写，是为了以后能各自重新裁定：
+  db-backed 臂的依据是 #1423 / PR #1522，db-free 臂的依据是已归档 change
+  `2026-08-20-db-free-loop-filtered-path-normalization` 的 design D8（「取齐」）。
+  db-backed 臂删掉以后，这个接缝就不用再维持了。剩下的这条臂依从句 1：8 个 root 字段在使用点会被
+  `open()`/`lstat()` 解引用。
+- **按 errno 分流仍未裁定。** 它和本次修订是正交的两件事。以后要加，直接改这一条臂即可。
+- **普查成员减为 15 个。** 普查表里 `scheduler_runtime_roots.py::_optional_config_path` 那一行（从句 3）所指的成员，
+  随该函数一起删除了：它唯一的调用方是已删的 `_optional_config_path_for_mode` 非 DB-free 臂。
+  表格本身是 `f1d17703f` 时的快照，原样保留，不做修改。
+  守卫 `_authority_set()` 实际算出的成员数由 16 变为 15（14 个 admit + 1 个 loop-filtered），以守卫输出为准；
+  上文「15 个走 admit」相应读作 14 个。
+- **守卫要求的标记仍在。** 守卫仍要求函数体内有 `ADR 0009 clause 1` 标记，合并后的单臂函数体保留了它。

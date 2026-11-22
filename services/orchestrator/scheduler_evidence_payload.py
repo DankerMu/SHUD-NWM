@@ -956,20 +956,6 @@ def _compact_runtime_config(value: Any) -> Any:
     if not isinstance(value, Mapping):
         return _bounded_retained_field_summary("runtime_config", value)
     db_free_runtime = value.get("db_free_runtime")
-    db_free_required = value.get("scheduler_db_free_required") is True or (
-        isinstance(db_free_runtime, Mapping) and db_free_runtime.get("required") is True
-    )
-    if not db_free_required:
-        return _compact_mapping(
-            value,
-            (
-                "service_role",
-                "require_runtime_roots",
-                "dry_run",
-                "allowed_cycle_hours_utc",
-                "slurm_array_concurrency_bound",
-            ),
-        )
     compact = _compact_mapping(
         value,
         (

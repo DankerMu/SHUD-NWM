@@ -1072,9 +1072,9 @@ def test_scheduler_lease_compat_lookup_names_resolve_scheduler_monkeypatches(
             assert scheduler_lease_module._scheduler_compat_function(name, fallback) is patched
 
 
+# #3311 deleted DATABASE_HOST_ALLOWED_RE and LOCALHOST_NAMES with the database
+# host classifiers, their only readers.
 _PREFLIGHT_OWNED_CONSTANT_NAMES = (
-    "DATABASE_HOST_ALLOWED_RE",
-    "LOCALHOST_NAMES",
     "MAX_SLURM_ENV_VALUE_LENGTH",
     "PRODUCTION_SLURM_ENV_PASSTHROUGH_KEYS",
     "SAFE_SLURM_ENV_KEY_RE",
@@ -18173,9 +18173,10 @@ def test_forcing_local_artifact_root_unresolvable_is_refused_by_the_repair_chann
 
 def _db_free_config_resolve(path: Path) -> Path:
     # #3250: the decision table below was written for the db-backed arm; the two
-    # arms are textually identical (``scheduler_config/path_modes.py:98-150``), so
-    # it now runs on the DB-free arm. The arm-parity pin further down keeps both.
-    return scheduler_config_module._resolve_config_path_for_mode(path, db_free_required=True)
+    # arms were textually identical, so it ran on the DB-free arm. #3311 deleted the
+    # db-backed arm, so ``_resolve_config_path_for_mode`` has one arm and no mode
+    # keyword left.
+    return scheduler_config_module._resolve_config_path_for_mode(path)
 
 
 def test_db_free_config_resolve_canonicalises_unresolvable_paths_without_raising(tmp_path: Path) -> None:
@@ -18228,27 +18229,25 @@ def test_db_free_config_resolve_arm_keeps_graceful_degradation_for_symlink_loop(
     # ``except (OSError, RuntimeError)`` arm handing back the input.
     loop = _symlink_loop_dir(tmp_path, "db-free-control-loop")
 
-    assert scheduler_config_module._resolve_config_path_for_mode(loop, db_free_required=True) == loop
+    assert scheduler_config_module._resolve_config_path_for_mode(loop) == loop
 
 
-def test_db_free_and_db_backed_config_resolve_arms_agree_on_one_canonical_form(tmp_path: Path) -> None:
+def test_config_resolve_folds_every_spelling_of_a_loop_to_one_canonical_form(tmp_path: Path) -> None:
     """#1400 AC-6, stated as what it actually requires: one canonical form.
 
     A foldable prefix is mandatory for this to have any content -- a bare
-    ``<realdir>/<loop>`` is already its own canonical form, so both arms return
-    it whatever they do internally.  ``<symdir>/<loop>`` and
-    ``<dir>/../<loop>`` are the shapes where the two primitives could disagree.
+    ``<realdir>/<loop>`` is already its own canonical form, so it comes back
+    unchanged whatever the resolver does internally.  ``<symdir>/<loop>`` and
+    ``<dir>/../<loop>`` are the shapes a resolver could fail to fold.
 
-    Honest scope of this test on THIS interpreter: on CPython 3.13+
-    ``Path.resolve(strict=False)`` IS non-strict ``os.path.realpath``, so the
-    two arms agreed before the change as well and this assertion cannot fail
-    locally.  Its discriminating power is on the CI 3.11 arm, where the old
-    db-free arm caught an errno-less ``RuntimeError`` and returned the value
-    unresolved while the database-backed arm returned the folded form.  Locally
-    the guarantee is structural instead, carried by
-    ``test_db_free_normalization_modules_call_resolve_only_where_allowlisted``:
-    with no ``.resolve()`` left in either arm, both can only reach the same
-    realpath primitive.
+    #3311 deleted the database-backed arm, so the old arm-parity assertion is
+    gone with it; what remains is the canonical form itself, over the same three
+    shapes.  Its discriminating power is on the CI 3.11 arm, where the old
+    ``Path.resolve(strict=False)`` caught an errno-less ``RuntimeError`` and
+    returned the value unresolved.  Locally the guarantee is also structural,
+    carried by ``test_db_free_normalization_modules_call_resolve_only_where_allowlisted``:
+    with no ``.resolve()`` left in the resolver, it can only reach the realpath
+    primitive.
     """
 
     canonical_tmp = Path(os.path.realpath(tmp_path))
@@ -18262,11 +18261,7 @@ def test_db_free_and_db_backed_config_resolve_arms_agree_on_one_canonical_form(t
     # the equalities below cannot be satisfied by lexical pass-through.
     assert all(shape != loop for shape in foldable)
     for value in (*foldable, loop):
-        db_free_arm = scheduler_config_module._resolve_config_path_for_mode(value, db_free_required=True)
-        db_backed_arm = scheduler_config_module._resolve_config_path_for_mode(value, db_free_required=False)
-
-        assert db_free_arm == db_backed_arm, value
-        assert db_free_arm == loop, value
+        assert scheduler_config_module._resolve_config_path_for_mode(value) == loop, value
 
 
 @pytest.mark.parametrize(
@@ -18396,6 +18391,24 @@ def _resolve_residue_env(monkeypatch: pytest.MonkeyPatch, workspace_root: Path) 
     monkeypatch.setenv("WORKSPACE_ROOT", str(workspace_root))
 
 
+# The roots the retired lock/evidence-only preflight judged, plus its allowed-roots
+# policy blocker.  #3311 deleted that preflight: ``_scheduler_runtime_root_preflight``
+# passes ``_scheduler_root_check`` identical arguments for these three roots (an
+# equivalence oracle compared the two on every retargeted call before the deletion),
+# and additionally judges the object-store / published / runtime / temp roots and the
+# service role.  ``_resolve_residue_env`` leaves those unset, so the projection keeps
+# the old expected values while the extra blockers are projected out.
+_LOCK_EVIDENCE_PLANE_FIELDS = frozenset({"workspace_root", "lock_root", "evidence_root", "allowed_roots"})
+
+
+def _lock_evidence_plane_blockers(preflight: Mapping[str, Any]) -> list[tuple[str, str]]:
+    return [
+        (blocker["code"], blocker["field"])
+        for blocker in preflight["blockers"]
+        if blocker["field"] in _LOCK_EVIDENCE_PLANE_FIELDS
+    ]
+
+
 def test_resolve_residue_confined_path_canonicalises_parent_segment_loop(tmp_path: Path) -> None:
     # Site ``scheduler_runtime_roots.py:558``.  The containment base itself is
     # the loop, so the parent chain of everything confined under it is
@@ -18503,7 +18516,7 @@ def test_resolve_residue_confined_path_keeps_non_loop_containment_refusal(tmp_pa
         # reads the kernel's ELOOP off lstat().  On the db-backed route that was
         # a construction-time ValueError naming ``evidence_dir`` and, after
         # #1545, the ``workspace_root`` knob and the offending path.  DB-free
-        # construction hands the value down instead (``scheduler_config/path_modes.py:186-213``)
+        # construction hands the value down instead (the ``path_modes`` require helpers)
         # and the root preflight answers before the lock with the same three
         # facts as structured blockers: the workspace root itself, and the lock
         # and evidence roots derived from it (#3250, rule (c)).
@@ -18543,11 +18556,11 @@ def test_resolve_residue_config_final_segment_loop_converges_to_structured_refus
     resolved_loop = Path(os.path.realpath(loop))
 
     config = ProductionSchedulerConfig()
-    preflight = scheduler_module._scheduler_lock_evidence_root_preflight(config)
+    preflight = scheduler_module._scheduler_runtime_root_preflight(config)
 
     assert config.db_free_required is True
     assert preflight["status"] == "blocked"
-    assert [(blocker["code"], blocker["field"]) for blocker in preflight["blockers"]] == expected_blockers
+    assert _lock_evidence_plane_blockers(preflight) == expected_blockers
     if root_env == "WORKSPACE_ROOT":
         # #1545's offending path, pinned on the config the preflight judged: the
         # evidence directory derived from the looping workspace root.
@@ -18562,8 +18575,8 @@ def test_resolve_residue_config_final_segment_loop_converges_to_structured_refus
 # directory can be determined.  Two production fields reach this module's own
 # bare expansions -- allowed_storage_roots and log_root -- and used to abort
 # construction there, producing no structured blocker at all.  Every other root
-# field aborts earlier in `_expanduser_for_mode`'s deliberate re-raise, which is
-# a standing design ruling and out of scope here.
+# field went through `_expanduser_for_mode`, whose database-backed re-raise was
+# deleted in #3311: it keeps the raw value on that throw, as the helpers here do.
 
 _UNKNOWN_HOME_ROOTS = "~nosuchuser_zz/roots"
 _UNKNOWN_HOME_LOGS = "~nosuchuser_zz/logs"
@@ -18608,15 +18621,14 @@ def test_expanduser_residue_preserve_final_component_helper_matches_db_free_arm(
     tmp_path: Path,
 ) -> None:
     # Compatibility-surface ledger item, not a live crash path: workspace_root
-    # re-raises earlier in `_expanduser_for_mode`, so this helper is asserted by
-    # calling it directly rather than through a field.
+    # never reaches this helper (configuration goes through `_expanduser_for_mode`
+    # instead), so it is asserted by calling it directly rather than through a field.
     monkeypatch.chdir(tmp_path)
 
     product = scheduler_module._config_path_preserve_final_component(_UNKNOWN_HOME_WORKSPACE)
 
     assert product == scheduler_config_module._config_path_preserve_final_component_for_mode(
         _UNKNOWN_HOME_WORKSPACE,
-        db_free_required=True,
     )
     assert product == Path(os.path.realpath(tmp_path)) / _UNKNOWN_HOME_WORKSPACE
 
@@ -18661,10 +18673,10 @@ def test_expanduser_residue_preflight_classifies_structurally(
         require_runtime_roots=True,
     )
 
-    preflight = scheduler_module._scheduler_lock_evidence_root_preflight(config)
+    preflight = scheduler_module._scheduler_runtime_root_preflight(config)
 
     assert preflight["status"] == "blocked"
-    assert [blocker["code"] for blocker in preflight["blockers"]] == [
+    assert [code for code, _field in _lock_evidence_plane_blockers(preflight)] == [
         "SCHEDULER_ROOT_WORKSPACE_ROOT_OUT_OF_APPROVED_ROOT",
         "SCHEDULER_ROOT_LOCK_ROOT_NOT_FOUND",
         "SCHEDULER_ROOT_EVIDENCE_ROOT_NOT_FOUND",
@@ -18874,7 +18886,7 @@ def test_final_segment_loop_refuses_on_the_construction_route(
     # guard's only two call sites are both `evidence_dir` in scheduler_config,
     # so this is the route an operator actually travels.  On the db-backed
     # route the guard's ValueError aborted construction; DB-free construction
-    # hands the loop down (``scheduler_config/path_modes.py:200-213``) and the
+    # hands the loop down (``path_modes._require_safe_directory_final_component_for_mode``) and the
     # root preflight refuses it before the lock as an evidence-root symlink
     # (#3250, rule (c)).
     workspace_root = Path(os.path.realpath(tmp_path)) / "workspace"
@@ -18884,12 +18896,12 @@ def test_final_segment_loop_refuses_on_the_construction_route(
     monkeypatch.setenv("NHMS_SCHEDULER_EVIDENCE_ROOT", str(loop))
 
     config = ProductionSchedulerConfig()
-    preflight = scheduler_module._scheduler_lock_evidence_root_preflight(config)
+    preflight = scheduler_module._scheduler_runtime_root_preflight(config)
 
     assert config.db_free_required is True
     assert config.evidence_dir == loop
     assert preflight["status"] == "blocked"
-    assert [(blocker["code"], blocker["field"]) for blocker in preflight["blockers"]] == [
+    assert _lock_evidence_plane_blockers(preflight) == [
         ("SCHEDULER_ROOT_LOCK_ROOT_NOT_FOUND", "lock_root"),
         ("SCHEDULER_ROOT_EVIDENCE_ROOT_SYMLINK", "evidence_root"),
     ]
@@ -19443,18 +19455,17 @@ def _tilde_residue_value(face: str, monkeypatch: pytest.MonkeyPatch) -> str:
 
 @dataclass(frozen=True)
 class _PreflightRootsConfigStub:
-    """Exactly the three attributes ``_preflight_allowed_roots`` reads.
+    """Exactly the two attributes ``_preflight_allowed_roots`` reads.
 
     A real ``ProductionSchedulerConfig`` cannot carry an unexpandable tilde this
     far: construction expands every root itself
-    (``scheduler_config._expanduser_for_mode``) and on db-backed runtimes
-    deliberately re-raises -- that arm is the already-fixed #1423/#1520 territory
-    and out of scope here.  This stub pins the preflight helper's own seam.
+    (``scheduler_config._expanduser_for_mode``).  This stub pins the preflight
+    helper's own seam.  #3311 dropped its ``db_free_required`` attribute: the
+    helper no longer reads a mode.
     """
 
     allowed_storage_roots: tuple[Path, ...]
     workspace_root: Path
-    db_free_required: bool
 
 
 @pytest.mark.parametrize("face", _TILDE_RESIDUE_FACES)
@@ -19486,7 +19497,6 @@ def test_tilde_residue_preflight_allowed_roots_is_admitted_by_the_existing_enoen
     config = _PreflightRootsConfigStub(
         allowed_storage_roots=(Path(value),),
         workspace_root=tmp_path,
-        db_free_required=True,
     )
 
     resolved, blockers = scheduler_preflight_module._preflight_allowed_roots(config)
@@ -19943,31 +19953,30 @@ def test_tilde_residue_preflight_allowed_roots_keeps_every_expandable_arm_verdic
     not_created_yet = home / "nfs-not-mounted-yet"
     loop = _symlink_loop_dir(home, "allowed-loop")
 
-    def verdict(root: Path, *, db_free: bool) -> tuple[Any, Any]:
+    def verdict(root: Path) -> tuple[Any, Any]:
         return scheduler_preflight_module._preflight_allowed_roots(
             _PreflightRootsConfigStub(
                 allowed_storage_roots=(root,),
                 workspace_root=tmp_path,
-                db_free_required=db_free,
             )
         )
 
-    # Plain expandable root.  (#3250: the plain and ENOENT verdicts are shared by
-    # both arms and are asserted on the DB-free arm; the db-backed unsafe-arm
-    # pin was deleted with that arm, ``scheduler_preflight.py:559-568``.)
-    assert verdict(Path("~/existing"), db_free=True) == ((Path(os.path.realpath(existing)),), [])
-    assert verdict(Path("~/existing"), db_free=True) == verdict(existing, db_free=True)
+    # Plain expandable root.  (#3250 moved the plain and ENOENT verdicts onto the
+    # DB-free arm and deleted the db-backed unsafe-arm pin; #3311 then deleted
+    # that arm, so the helper has no mode left.)
+    assert verdict(Path("~/existing")) == ((Path(os.path.realpath(existing)),), [])
+    assert verdict(Path("~/existing")) == verdict(existing)
     # ENOENT arm: a not-yet-created root keeps its admitted, lexically normalized
     # semantics.
-    assert verdict(Path("~/nfs-not-mounted-yet"), db_free=True) == (
+    assert verdict(Path("~/nfs-not-mounted-yet")) == (
         (Path(os.path.realpath(not_created_yet)),),
         [],
     )
-    assert verdict(Path("~/nfs-not-mounted-yet"), db_free=True) == verdict(not_created_yet, db_free=True)
-    # db-free lexical fallback arm (PR #831 tolerance): an unresolvable root is
-    # legitimate configuration there, and the EXPANDED value is what gets kept.
-    assert verdict(Path("~/allowed-loop-a"), db_free=True) == ((home / "allowed-loop-a",), [])
-    assert verdict(Path("~/allowed-loop-a"), db_free=True) == verdict(loop, db_free=True)
+    assert verdict(Path("~/nfs-not-mounted-yet")) == verdict(not_created_yet)
+    # Lexical fallback arm (PR #831 tolerance): an unresolvable root is
+    # legitimate configuration, and the EXPANDED value is what gets kept.
+    assert verdict(Path("~/allowed-loop-a")) == ((home / "allowed-loop-a",), [])
+    assert verdict(Path("~/allowed-loop-a")) == verdict(loop)
 
 
 def test_tilde_residue_storage_root_check_keeps_expandable_and_absolute_verdicts(
@@ -20814,8 +20823,10 @@ def test_duplicate_sources_and_cycles_emit_one_candidate_with_exclusion_evidence
 def test_explicit_paths_must_stay_under_workspace(tmp_path: Path, monkeypatch: Any) -> None:
     # Was a construction-time ValueError ("lock_path / evidence_dir must be under
     # workspace_root").  DB-free construction hands the value down
-    # (``scheduler_config/path_modes.py:168-197``) and the lock/evidence root
-    # preflight refuses it before the lock, naming the field (#3251, rule (c)).
+    # (``path_modes._require_under_workspace_for_mode``) and the runtime root preflight
+    # refuses it before the lock, naming the field (#3251, rule (c)).  #3311
+    # retargeted this from the retired lock/evidence-only preflight; this env
+    # configures every other root, so the full blocker list is unchanged.
     roots, _paths = _db_free_pass_env(monkeypatch, tmp_path)
     workspace_root = roots["workspace_root"]
     outside = tmp_path / "outside-scheduler.lock"
@@ -20826,12 +20837,12 @@ def test_explicit_paths_must_stay_under_workspace(tmp_path: Path, monkeypatch: A
     assert lock_config.lock_path == outside
     assert [
         (blocker["code"], blocker["field"])
-        for blocker in scheduler_module._scheduler_lock_evidence_root_preflight(lock_config)["blockers"]
+        for blocker in scheduler_module._scheduler_runtime_root_preflight(lock_config)["blockers"]
     ] == [("SCHEDULER_ROOT_LOCK_ROOT_OUT_OF_WORKSPACE", "lock_root")]
     assert evidence_config.evidence_dir == outside
     assert [
         (blocker["code"], blocker["field"])
-        for blocker in scheduler_module._scheduler_lock_evidence_root_preflight(evidence_config)["blockers"]
+        for blocker in scheduler_module._scheduler_runtime_root_preflight(evidence_config)["blockers"]
     ] == [("SCHEDULER_ROOT_EVIDENCE_ROOT_OUT_OF_WORKSPACE", "evidence_root")]
 
 
@@ -21187,9 +21198,11 @@ def test_scheduler_allowed_cycle_hours_default_is_00_12(tmp_path: Path, monkeypa
 
 def test_default_evidence_dir_symlink_cannot_escape_workspace(tmp_path: Path, monkeypatch: Any) -> None:
     # Was a construction-time ValueError; DB-free construction hands the value
-    # down (``scheduler_config/path_modes.py:198-213``) and the lock/evidence
-    # root preflight refuses the escaping evidence dir before the lock (#3251,
-    # rule (c)).  The default evidence dir needs no evidence-root env.
+    # down (``path_modes._require_safe_directory_final_component_for_mode``) and the runtime root
+    # preflight refuses the escaping evidence dir before the lock (#3251,
+    # rule (c); retargeted from the retired lock/evidence-only preflight by
+    # #3311, full blocker list unchanged).  The default evidence dir needs no
+    # evidence-root env.
     roots, _paths = _db_free_pass_env(monkeypatch, tmp_path)
     monkeypatch.delenv("NHMS_SCHEDULER_EVIDENCE_ROOT")
     workspace_root = roots["workspace_root"]
@@ -21200,7 +21213,7 @@ def test_default_evidence_dir_symlink_cannot_escape_workspace(tmp_path: Path, mo
     evidence_link.symlink_to(outside, target_is_directory=True)
 
     config = _config(workspace_root, db_free=True)
-    preflight = scheduler_module._scheduler_lock_evidence_root_preflight(config)
+    preflight = scheduler_module._scheduler_runtime_root_preflight(config)
 
     assert config.evidence_dir == evidence_link
     assert [(blocker["code"], blocker["field"]) for blocker in preflight["blockers"]] == [
@@ -21211,9 +21224,10 @@ def test_default_evidence_dir_symlink_cannot_escape_workspace(tmp_path: Path, mo
 
 def test_explicit_evidence_dir_symlink_cannot_escape_workspace(tmp_path: Path, monkeypatch: Any) -> None:
     # Was a construction-time ValueError; DB-free construction hands the value
-    # down (``scheduler_config/path_modes.py:198-213``) and the lock/evidence
-    # root preflight refuses the escaping evidence dir before the lock (#3251,
-    # rule (c)).
+    # down (``path_modes._require_safe_directory_final_component_for_mode``) and the runtime root
+    # preflight refuses the escaping evidence dir before the lock (#3251,
+    # rule (c); retargeted from the retired lock/evidence-only preflight by
+    # #3311, full blocker list unchanged).
     roots, _paths = _db_free_pass_env(monkeypatch, tmp_path)
     workspace_root = roots["workspace_root"]
     outside = tmp_path.parent / f"{tmp_path.name}-explicit-outside-evidence"
@@ -21222,7 +21236,7 @@ def test_explicit_evidence_dir_symlink_cannot_escape_workspace(tmp_path: Path, m
     evidence_link.symlink_to(outside, target_is_directory=True)
 
     config = _config(workspace_root, db_free=True, evidence_dir=evidence_link)
-    preflight = scheduler_module._scheduler_lock_evidence_root_preflight(config)
+    preflight = scheduler_module._scheduler_runtime_root_preflight(config)
 
     assert config.evidence_dir == evidence_link
     assert [(blocker["code"], blocker["field"]) for blocker in preflight["blockers"]] == [
@@ -25571,45 +25585,44 @@ def test_active_duplicate_pipeline_is_skipped_before_submission(tmp_path: Path, 
     assert result.evidence["counts"]["submitted_count"] == 0
 
 
+# #3311 deleted the two DATABASE_URL host classifiers with the database-backed
+# Slurm preflight arm that was their only caller.  Their numeric-IPv4 parsing
+# lives on through ``_database_host_ip_address``, whose remaining caller is the
+# gateway self-reference check, and no gateway test reached a numeric host --
+# so the loopback forms are pinned there instead.  Expected values are worked
+# from the address, not from the parser: ``127.1`` and ``2130706433``
+# (0x7F000001) are 127.0.0.1 and ``0`` is 0.0.0.0 (unspecified), all of which
+# loop back to this service; ``0xa9fe0101`` is 169.254.1.1 (link-local, not a
+# self-reference); ``0177.0.0.1`` is refused by the parser (a leading-zero
+# octet is not a base-0 integer), so it is not treated as loopback.
 @pytest.mark.parametrize(
-    "host",
+    ("host", "self_reference"),
     [
-        "localhost.",
-        "LOCALHOST",
-        "[::1]",
-        "0:0:0:0:0:0:0:1",
-        "ip6-localhost",
-        "ip6-loopback",
-        "foo.localhost.",
-        "127.1",
-        "2130706433",
-        "0",
+        ("127.1", True),
+        ("2130706433", True),
+        ("0", True),
+        ("0177.0.0.1", False),
+        ("0xa9fe0101", False),
     ],
 )
-def test_database_host_local_classifier_normalizes_localhost_equivalents(host: str) -> None:
-    assert scheduler_module._database_host_is_local(host) is True
-    assert scheduler_module._database_host_is_unsafe(host) is False
+def test_gateway_self_reference_blocker_classifies_numeric_ipv4_loopback_hosts(
+    host: str,
+    self_reference: bool,
+) -> None:
+    blocker, endpoint = scheduler_module._gateway_self_reference_blocker(
+        f"http://{host}:8000",
+        8000,
+        backend="real",
+    )
 
-
-@pytest.mark.parametrize(
-    "host",
-    [
-        "127.000.000.001",
-        "0177.0.0.1",
-        "169.254.1.1",
-        "fe80::1",
-        "169.254.1",
-        "169.254.257",
-        "0xa9fe0101",
-        "2851995905",
-        "169.254.0x101",
-        "bad host",
-        "bad::host",
-        "9999999999",
-    ],
-)
-def test_database_host_classifier_conservatively_blocks_unsafe_numeric_or_malformed_hosts(host: str) -> None:
-    assert scheduler_module._database_host_is_unsafe(host) is True
+    assert endpoint == {"host": host, "port": 8000}
+    if self_reference:
+        assert blocker is not None
+        assert blocker["code"] == "SLURM_GATEWAY_SELF_REFERENCE"
+        assert blocker["field"] == "SLURM_GATEWAY_URL"
+        assert (blocker["host"], blocker["port"]) == (host, 8000)
+    else:
+        assert blocker is None
 
 
 # #3251: the object-store MISSING / OUT_OF_ROOT and runtime-root MISSING arms
@@ -36123,7 +36136,7 @@ def test_no_flag_out_of_approved_roots_block_before_registry_adapter_or_submit(
 
 # #3251, rule (c): the evidence/workspace arms were construction-time ValueErrors
 # (``evidence_dir must be ...``).  DB-free construction hands the value down
-# (``scheduler_config/path_modes.py:186-213``) and the root preflight refuses it
+# (the ``path_modes`` require helpers) and the root preflight refuses it
 # before the lock with the code below, writing no artifact.
 @pytest.mark.parametrize(
     ("root_key", "expected_code", "safe_evidence"),
@@ -36172,7 +36185,7 @@ def test_no_flag_file_roots_block_before_registry_adapter_or_submit(
 
 # #3251, rule (c): the evidence/workspace arms were construction-time ValueErrors
 # (``evidence_dir must be ...``).  DB-free construction hands the value down
-# (``scheduler_config/path_modes.py:186-213``) and the root preflight refuses it
+# (the ``path_modes`` require helpers) and the root preflight refuses it
 # before the lock with the code below, writing no artifact.
 @pytest.mark.parametrize(
     ("root_key", "expected_code", "safe_evidence"),
@@ -36222,7 +36235,7 @@ def test_no_flag_symlink_final_component_blocks_before_registry_adapter_or_submi
 
 # #3251, rule (c): the evidence/workspace arms were construction-time ValueErrors
 # (``evidence_dir must be ...``).  DB-free construction hands the value down
-# (``scheduler_config/path_modes.py:186-213``) and the root preflight refuses it
+# (the ``path_modes`` require helpers) and the root preflight refuses it
 # before the lock with the code below, writing no artifact.
 @pytest.mark.parametrize(
     ("root_key", "expected_code", "safe_evidence"),
@@ -36320,7 +36333,7 @@ def test_no_flag_out_of_bound_lock_and_evidence_roots_are_rejected_at_config(
 
     # Was a construction-time ValueError ("lock_path must be under
     # workspace_root").  DB-free construction hands the value down
-    # (``scheduler_config/path_modes.py:168-183``) and the root preflight
+    # (``path_modes._confined_path_for_mode``) and the root preflight
     # refuses it before the lock, naming the field (#3251, rule (c)).
     assert payload["status"] == "preflight_blocked"
     assert payload["lock"]["reason"] == "scheduler_root_preflight_blocked"
@@ -45883,14 +45896,13 @@ def test_db_free_required_implies_strict_runtime_root_preflight(
 
     config = ProductionSchedulerConfig()
     runtime_preflight = scheduler_module._scheduler_runtime_root_preflight(config)
-    lock_preflight = scheduler_module._scheduler_lock_evidence_root_preflight(config)
 
+    # #3311 deleted the lock/evidence-only preflight; the runtime preflight below
+    # judges the same three roots and is the one the pass runs.
     assert config.require_runtime_roots is True
     assert runtime_preflight["required"] is True
     assert runtime_preflight["status"] == "ready"
     assert "service_role" in runtime_preflight["checks"]
-    assert lock_preflight["required"] is True
-    assert lock_preflight["status"] == "ready"
 
 
 @pytest.mark.parametrize(
@@ -46398,14 +46410,13 @@ _ALLOWED_ROOTS_UNSAFE_CODE = "SLURM_PREFLIGHT_ALLOWED_STORAGE_ROOTS_UNSAFE_PATH"
 def _allowed_roots_config(
     *roots: Path,
     workspace_root: Path,
-    db_free_required: bool = True,
 ) -> Any:
-    """Stand-in exposing only the three attributes the seam reads.
+    """Stand-in exposing only the two attributes the seam reads.
 
     Keeps the errno lanes of the preflight seam hermetic and version-stable.
-    The end-to-end anchors below still run the real config.  The mode is the
-    DB-free one the scheduler runs in (#3252); the database-backed drop arm
-    (``scheduler_preflight.py:559-568``) is no longer pinned here.
+    The end-to-end anchors below still run the real config.  The seam has no
+    mode any more: #3311 deleted its database-backed drop arm, so the stub no
+    longer carries ``db_free_required``.
     """
 
     from types import SimpleNamespace
@@ -46413,7 +46424,6 @@ def _allowed_roots_config(
     return SimpleNamespace(
         allowed_storage_roots=tuple(roots),
         workspace_root=workspace_root,
-        db_free_required=db_free_required,
     )
 
 
@@ -46437,12 +46447,12 @@ def test_preflight_allowed_roots_admits_not_a_directory_root_lexically_on_db_fre
 
 
 def test_preflight_allowed_roots_keeps_db_free_lexical_fallback_for_symlink_loop(tmp_path: Path) -> None:
-    # The db-free arm keeps the PR #831 lexical tolerance (an unmounted NFS
-    # root is legitimate configuration), so a loop root is admitted and
-    # produces no blocker.
+    # The seam keeps the PR #831 lexical tolerance (an unmounted NFS root is
+    # legitimate configuration), so a loop root is admitted and produces no
+    # blocker.
     loop = tmp_path / "allowed-loop"
     loop.symlink_to(loop)
-    config = _allowed_roots_config(loop, workspace_root=tmp_path, db_free_required=True)
+    config = _allowed_roots_config(loop, workspace_root=tmp_path)
 
     roots, blockers = scheduler_module._preflight_allowed_roots(config)
 
@@ -46857,17 +46867,12 @@ class _AllowedRootsConfigStub:
     shapes uniformly; the faults on disk stay real and no resolution primitive
     is mocked. The real-config integration anchors further down (the preflight
     arms and the dual-plane anchor) are what keep
-    this surface honest. The mode is the DB-free one the scheduler runs in
-    (#3252); the database-backed drop arms are no longer pinned here.
+    this surface honest. The seams have no mode any more: #3311 deleted their
+    database-backed drop arms, so the stub no longer carries a mode flag.
     """
 
     allowed_storage_roots: tuple[Path, ...]
-    scheduler_db_free_required: bool = True
     repair_missing_forcing: bool = False
-
-    @property
-    def db_free_required(self) -> bool:
-        return self.scheduler_db_free_required
 
 
 def _allowed_root_errno(root: Path) -> int | None:
@@ -46886,11 +46891,11 @@ def _runtime_roots_config(
     allowed_storage_roots: tuple[Path, ...],
     **kwargs: Any,
 ) -> ProductionSchedulerConfig:
-    """An explicitly DB-free config (#3252) whose runtime-root arms actually adjudicate.
+    """An explicitly DB-free config (#3252) whose runtime-root preflight actually adjudicates.
 
-    `require_runtime_roots=True` is mandatory here (DB-free mode also forces
-    it): without it both arms early-exit to the not-required payload and every
-    arm-level assertion below would be vacuous.
+    `require_runtime_roots=True` is kept explicit here (DB-free mode also forces
+    it).  #3311 deleted the not-required payload the preflight used to
+    early-exit to without it, along with the lock/evidence-only arm.
     """
 
     roots = _slurm_roots(tmp_path)
@@ -46909,12 +46914,6 @@ def _runtime_roots_config(
     }
     values.update(kwargs)
     return _gateway_config(roots["workspace_root"], db_free=True, **values)
-
-
-def _runtime_root_preflight_arm(arm: str) -> Any:
-    if arm == "lock_evidence":
-        return scheduler_module._scheduler_lock_evidence_root_preflight
-    return scheduler_module._scheduler_runtime_root_preflight
 
 
 # Site 1 (`_scheduler_allowed_roots_and_blockers`): the adjudication table.
@@ -46975,7 +46974,7 @@ def test_scheduler_allowed_roots_keeps_lexical_tolerance_for_loop_root_on_db_fre
     assert _allowed_root_errno(loop) == errno.ELOOP
 
     roots, blockers = scheduler_module._scheduler_allowed_roots_and_blockers(
-        _AllowedRootsConfigStub(allowed_storage_roots=(loop,), scheduler_db_free_required=True)
+        _AllowedRootsConfigStub(allowed_storage_roots=(loop,))
     )
 
     assert roots == (loop,)
@@ -47005,7 +47004,7 @@ def test_scheduler_allowed_roots_db_free_lexical_arm_is_distinguishable_from_res
     assert _allowed_root_errno(lexical_root) == errno.ENOTDIR
 
     roots, blockers = scheduler_module._scheduler_allowed_roots_and_blockers(
-        _AllowedRootsConfigStub(allowed_storage_roots=(lexical_root,), scheduler_db_free_required=True)
+        _AllowedRootsConfigStub(allowed_storage_roots=(lexical_root,))
     )
 
     assert roots == (lexical_root,)
@@ -47064,10 +47063,10 @@ def test_scheduler_allowed_roots_reader_returns_the_pair_functions_roots(
     assert blockers == []
 
 
-# Site 1 consumers: both runtime-root preflight arms.
+# Site 1 consumers: the runtime-root preflight (#3311 deleted the lock/evidence arm).
 
 
-@pytest.mark.parametrize("arm", ["lock_evidence", "runtime"])
+@pytest.mark.parametrize("arm", ["runtime"])
 def test_runtime_root_preflight_arms_adjudicate_allowed_roots_exactly_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -47098,7 +47097,9 @@ def test_runtime_root_preflight_arms_adjudicate_allowed_roots_exactly_once(
 
     monkeypatch.setattr(scheduler_module, "_scheduler_allowed_roots_and_blockers", counting_adjudicate)
 
-    preflight = _runtime_root_preflight_arm(arm)(config)
+    # #3311 deleted the lock/evidence-only arm and its parameter; ``runtime`` is
+    # the one arm left.
+    preflight = scheduler_module._scheduler_runtime_root_preflight(config)
 
     assert adjudications == [((loop, tmp_path), [])]
     assert preflight["allowed_roots"] == preflight["checks"]["allowed_roots_policy"]["allowed_roots"]
@@ -47128,14 +47129,14 @@ def test_storage_and_runtime_root_preflight_planes_agree_on_lexically_admitted_a
 
     slurm_preflight = scheduler_module._slurm_preflight(config)
     runtime_preflight = scheduler_module._scheduler_runtime_root_preflight(config)
-    lock_preflight = scheduler_module._scheduler_lock_evidence_root_preflight(config)
 
     # The two adjudication seams behind the planes produce the same roots...
     assert scheduler_module._preflight_allowed_roots(config) == ((loop, tmp_path), [])
     assert scheduler_module._scheduler_allowed_roots_and_blockers(config) == ((loop, tmp_path), [])
     assert slurm_preflight["checks"]["allowed_roots"] == ["[local-path]", "[local-path]"]
     assert _ALLOWED_ROOTS_UNSAFE_CODE not in {blocker["code"] for blocker in slurm_preflight["blockers"]}
-    for preflight in (runtime_preflight, lock_preflight):
+    # #3311 deleted the lock/evidence-only plane; the runtime plane is the one left.
+    for preflight in (runtime_preflight,):
         # ...and every plane publishes the same effective allowed roots, unblocked.
         assert preflight["allowed_roots"] == slurm_preflight["checks"]["allowed_roots"]
         assert preflight["checks"]["allowed_roots_policy"]["allowed_roots"] == (
@@ -47196,7 +47197,7 @@ def test_db_free_allowed_roots_lexical_arm_is_distinguishable_from_resolution(
     assert _allowed_root_errno(lexical_root) == errno.ENOTDIR
 
     roots, blockers = scheduler_config_module._db_free_allowed_roots_and_blockers(
-        _AllowedRootsConfigStub(allowed_storage_roots=(lexical_root,), scheduler_db_free_required=True)
+        _AllowedRootsConfigStub(allowed_storage_roots=(lexical_root,))
     )
 
     assert roots == (lexical_root,)
@@ -47214,7 +47215,7 @@ def test_db_free_allowed_roots_keeps_lexical_tolerance_for_loop_root(
     assert _allowed_root_errno(loop) == errno.ELOOP
 
     roots, blockers = scheduler_config_module._db_free_allowed_roots_and_blockers(
-        _AllowedRootsConfigStub(allowed_storage_roots=(loop,), scheduler_db_free_required=True)
+        _AllowedRootsConfigStub(allowed_storage_roots=(loop,))
     )
 
     assert roots == (loop,)

@@ -167,10 +167,7 @@ class ProductionScheduler:
     @classmethod
     def from_env(cls, config: _scheduler.ProductionSchedulerConfig | None = None) -> _scheduler.ProductionScheduler:
         config = config or _scheduler.ProductionSchedulerConfig()
-        if (
-            config.require_runtime_roots
-            and _scheduler._scheduler_runtime_root_preflight(config)["status"] == "blocked"
-        ):
+        if _scheduler._scheduler_runtime_root_preflight(config)["status"] == "blocked":
             return cls(
                 config=config,
                 registry=_scheduler._BlockedModelRegistry(),

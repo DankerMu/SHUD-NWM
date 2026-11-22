@@ -224,18 +224,12 @@ _in_process_gateway_probe = _scheduler_preflight._in_process_gateway_probe
 _scheduler_grib_env_root = _scheduler_preflight._scheduler_grib_env_root
 _default_grib_system_eccodes_probe = _scheduler_preflight._default_grib_system_eccodes_probe
 _slurm_grib_env_check = _scheduler_preflight._slurm_grib_env_check
-_database_url_blocker = _scheduler_preflight._database_url_blocker
-_database_host = _scheduler_preflight._database_host
-_database_host_is_local = _scheduler_preflight._database_host_is_local
-_database_host_is_unsafe = _scheduler_preflight._database_host_is_unsafe
-_normalize_database_host = _scheduler_preflight._normalize_database_host
 _database_host_ip_address = _scheduler_preflight._database_host_ip_address
 _parse_noncanonical_ipv4_address = _scheduler_preflight._parse_noncanonical_ipv4_address
 _is_noncanonical_numeric_ipv4_host = _scheduler_preflight._is_noncanonical_numeric_ipv4_host
 _is_numeric_ipv4_like_host = _scheduler_preflight._is_numeric_ipv4_like_host
 _is_ipv4_number_part = _scheduler_preflight._is_ipv4_number_part
 _is_noncanonical_ipv4_part = _scheduler_preflight._is_noncanonical_ipv4_part
-_is_unsafe_numeric_ipv4_like_host = _scheduler_preflight._is_unsafe_numeric_ipv4_like_host
 _preflight_allowed_roots = _scheduler_preflight._preflight_allowed_roots
 _storage_root_check = _scheduler_preflight._storage_root_check
 _path_is_under_any = _scheduler_preflight._path_is_under_any
@@ -494,9 +488,7 @@ def _no_mutation_proof() -> dict[str, bool]:
 
 _scheduler_runtime_roots_module = importlib.import_module("services.orchestrator.scheduler_runtime_roots")
 _SCHEDULER_RUNTIME_ROOTS_FORWARDER_NAMES = (
-    "_scheduler_lock_evidence_root_preflight",
     "_scheduler_runtime_root_preflight",
-    "_scheduler_root_preflight_not_required",
     "_scheduler_root_preflight_payload",
     "_scheduler_root_check",
     "_scheduler_root_blocker",
@@ -509,7 +501,6 @@ _SCHEDULER_RUNTIME_ROOTS_FORWARDER_NAMES = (
     "_normalize_sources",
     "_confined_path",
     "_reject_blank_config_path",
-    "_optional_config_path",
     "_config_path_preserve_final_component",
     "_config_path_relative_to_preserve_final",
     "_optional_config_path_relative_to_preserve_final",
@@ -533,9 +524,7 @@ def _scheduler_runtime_roots_forwarder(name: str) -> Callable[..., Any]:
     return forwarder
 
 
-_scheduler_lock_evidence_root_preflight = _scheduler_runtime_roots_forwarder("_scheduler_lock_evidence_root_preflight")
 _scheduler_runtime_root_preflight = _scheduler_runtime_roots_forwarder("_scheduler_runtime_root_preflight")
-_scheduler_root_preflight_not_required = _scheduler_runtime_roots_forwarder("_scheduler_root_preflight_not_required")
 _scheduler_root_preflight_payload = _scheduler_runtime_roots_forwarder("_scheduler_root_preflight_payload")
 _scheduler_root_check = _scheduler_runtime_roots_forwarder("_scheduler_root_check")
 _scheduler_root_blocker = _scheduler_runtime_roots_forwarder("_scheduler_root_blocker")
@@ -548,7 +537,6 @@ _scheduler_allowed_roots_and_blockers = _scheduler_runtime_roots_forwarder("_sch
 _normalize_sources = _scheduler_runtime_roots_forwarder("_normalize_sources")
 _confined_path = _scheduler_runtime_roots_forwarder("_confined_path")
 _reject_blank_config_path = _scheduler_runtime_roots_forwarder("_reject_blank_config_path")
-_optional_config_path = _scheduler_runtime_roots_forwarder("_optional_config_path")
 _config_path_preserve_final_component = _scheduler_runtime_roots_forwarder("_config_path_preserve_final_component")
 _config_path_relative_to_preserve_final = _scheduler_runtime_roots_forwarder("_config_path_relative_to_preserve_final")
 _optional_config_path_relative_to_preserve_final = _scheduler_runtime_roots_forwarder(
@@ -769,11 +757,7 @@ EXPORTS = {
         "_config_path_preserve_final_component",
         "_config_path_relative_to_preserve_final",
         "_confined_path",
-        "_database_host",
         "_database_host_ip_address",
-        "_database_host_is_local",
-        "_database_host_is_unsafe",
-        "_database_url_blocker",
         "_default_gateway_probe",
         "_default_grib_system_eccodes_probe",
         "_directory_is_writable",
@@ -804,7 +788,6 @@ EXPORTS = {
         "_is_noncanonical_numeric_ipv4_host",
         "_is_numeric_ipv4_like_host",
         "_is_partial_candidate_evidence",
-        "_is_unsafe_numeric_ipv4_like_host",
         "_merge_proof_values",
         "_model_package_manifest_uri",
         "_named_proof_value",
@@ -812,11 +795,9 @@ EXPORTS = {
         "_no_mutation_proof",
         "_nonempty_evidence_value",
         "_normalize_allowed_cycle_hours_utc",
-        "_normalize_database_host",
         "_normalize_sources",
         "_normalized_identity",
         "_open_evidence_directory",
-        "_optional_config_path",
         "_optional_config_path_relative_to",
         "_optional_config_path_relative_to_preserve_final",
         "_parse_allowed_cycle_hours_utc",
@@ -855,7 +836,6 @@ EXPORTS = {
         "_scheduler_gateway_forwarder",
         "_scheduler_gateway_module",
         "_scheduler_grib_env_root",
-        "_scheduler_lock_evidence_root_preflight",
         "_scheduler_mutation_proof",
         "_scheduler_partial_count_from_execution",
         "_scheduler_pass_status_from_cancellation",
@@ -865,7 +845,6 @@ EXPORTS = {
         "_scheduler_root_blocker",
         "_scheduler_root_check",
         "_scheduler_root_os_error_reason",
-        "_scheduler_root_preflight_not_required",
         "_scheduler_root_preflight_payload",
         "_scheduler_runtime_config_evidence",
         "_scheduler_runtime_root_preflight",
