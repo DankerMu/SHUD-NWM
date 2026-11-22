@@ -30,6 +30,7 @@ from services.orchestrator.retry_identity import (
     log_ignored_manual_retry_attempt_claim,
     restart_stage_from_basins,
     retry_job_id,
+    stage_job_sort_attempt,
 )
 from workers.canonical_converter.converter import expected_converter_version
 
@@ -448,18 +449,7 @@ def _pipeline_retry_job_id(base_job_id: str, attempt: int) -> str:
 
 def _stage_job_sort_key(job: Mapping[str, Any], stage: StageDefinition) -> tuple[int, int, datetime, datetime]:
     job_id = str(job.get("job_id") or "")
-    base_job_id = str(job_id).removesuffix("_retry_0")
-    persisted_attempt = _coerce_int(job.get("retry_count"), default=-1)
-    attempt = persisted_attempt if persisted_attempt >= 0 else 0
-    marker = "_retry_"
-    if persisted_attempt < 0 and marker in job_id:
-        try:
-            attempt = int(job_id.rsplit(marker, maxsplit=1)[1])
-        except ValueError:
-            attempt = 0
-        base_job_id = job_id.rsplit(marker, maxsplit=1)[0]
-    elif marker in job_id:
-        base_job_id = job_id.rsplit(marker, maxsplit=1)[0]
+    base_job_id, attempt = stage_job_sort_attempt(job_id, _coerce_int(job.get("retry_count"), default=-1))
     expected_suffix = f"_{stage.stage}"
     stage_match = (
         1

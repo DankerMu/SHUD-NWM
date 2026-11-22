@@ -7,7 +7,8 @@ suffix carried by the job id.  Production ids stack suffixes
 
 This module is the single owner of that parsing, and of the next-attempt
 formulas built on it (stage-scoped, floored, inline, reservation, current-master,
-non-master and manual paths) plus the cohort restart stage; it deliberately has
+non-master and manual paths), the stage attempt reads over already-read rows, the
+latest-row sort attempt, plus the cohort restart stage; it deliberately has
 no dependencies so both the DB-free journal and the scheduler read side can use
 it.  Its functions take plain data: callers keep their own topology (stage
 matching, stage canonicalization) and their own occupancy probe (``is_occupied``).
@@ -85,6 +86,44 @@ def effective_retry_attempt(job_id: str | None, recorded_count: Any = None) -> i
     return max(_coerce_attempt(recorded_count), retry_suffix_attempt(job_id))
 
 
+def stage_attempt(row_attempts: Iterable[int], floor: int | None = None) -> int:
+    """The stage attempt over row attempts the caller already read and scoped.
+
+    The largest of ``row_attempts`` (0 when there are none), raised to ``floor``
+    when one is given.  With no ``floor`` (the stage-less read and the
+    non-canonical arm) nothing is clamped, so negative recorded counts pass
+    through.
+    """
+
+    scanned = max(row_attempts, default=0)
+    if floor is None:
+        return scanned
+    return max(scanned, floor)
+
+
+def stage_job_sort_attempt(job_id: str, persisted_attempt: int) -> tuple[str, int]:
+    """The latest-row sort key's ``(base, attempt)`` for ``job_id``.
+
+    A non-negative ``persisted_attempt`` wins outright (no max with the suffix);
+    otherwise the attempt is the last suffix tail read with ``int()``, unclamped,
+    and an unparsable tail reads 0.  The base drops only the last suffix layer.
+    Deliberately not :func:`effective_retry_attempt`: the two differ today
+    (#3319 owns any behaviour change).
+    """
+
+    base_job_id = str(job_id).removesuffix("_retry_0")
+    attempt = persisted_attempt if persisted_attempt >= 0 else 0
+    if persisted_attempt < 0 and RETRY_JOB_ID_MARKER in job_id:
+        try:
+            attempt = int(job_id.rsplit(RETRY_JOB_ID_MARKER, maxsplit=1)[1])
+        except ValueError:
+            attempt = 0
+        base_job_id = job_id.rsplit(RETRY_JOB_ID_MARKER, maxsplit=1)[0]
+    elif RETRY_JOB_ID_MARKER in job_id:
+        base_job_id = job_id.rsplit(RETRY_JOB_ID_MARKER, maxsplit=1)[0]
+    return base_job_id, attempt
+
+
 def next_stage_attempt(job_ids: Iterable[Any], base_job_id: str) -> int:
     """The next stage-scoped attempt: one past the largest positive suffix under ``base_job_id``.
 
@@ -148,6 +187,17 @@ def next_effective_attempt(job_id: Any, recorded_count: Any) -> int:
     """One past :func:`effective_retry_attempt` (the current-master and manual paths)."""
 
     return effective_retry_attempt(job_id, recorded_count) + 1
+
+
+def next_manual_attempt(previous_attempt: int) -> int:
+    """The scheduler-side manual new attempt: one past ``previous_attempt``, unclamped.
+
+    Deliberately not :func:`next_effective_attempt` and never clamped: a negative
+    previous attempt yields a negative or zero new attempt today (#3319 owns any
+    behaviour change).
+    """
+
+    return previous_attempt + 1
 
 
 def next_after_failure_master(job_id: Any, recorded_count: Any) -> tuple[str, int]:

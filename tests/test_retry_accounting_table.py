@@ -11,7 +11,8 @@ Sections:
 1. ``retry_identity`` and chain pure rows (Appendix A rows C, F, L, M, N, Q).
 2. Id formatting (``retry_identity.retry_job_id`` and the ``_pipeline_retry_job_id``
    delegate).
-3. Stage attempt reads (``scheduler_state_rows`` and ``_stage_job_sort_key``).
+3. Stage attempt reads (``scheduler_state_rows`` and ``_stage_job_sort_key``),
+   and the scheduler-side manual new attempt.
 4. Limits (defaults and both env overrides).
 5. Stub-driven rows (A/E mint, N precedence, the ``failure_number - 1`` formula,
    the two ``rsplit`` increments, the journal non-master path, the master vs
@@ -65,6 +66,7 @@ from services.orchestrator.retry_identity import (
     split_retry_job_identity,
 )
 from services.orchestrator.scheduler_config.config import ProductionSchedulerConfig
+from services.orchestrator.scheduler_state_manual_retry import _manual_retry_markers, _manual_retry_new_attempt
 from services.orchestrator.scheduler_state_rows import (
     _job_retry_attempt,
     _state_retry_attempt,
@@ -539,10 +541,204 @@ def test_pipeline_retry_job_id_delegates_to_retry_job_id(attempt: int) -> None:
             0,
             id="stage-set-non-matching-row-adds-0",
         ),
+        # Stage-less read: recorded counts only, unclamped (negatives pass through).
+        pytest.param({"pipeline_jobs": [{"job_id": "j", "retry_count": -3}]}, None, -3, id="stage-none-negative-count"),
+        pytest.param(
+            {"pipeline_jobs": [{"job_id": "j", "retry_count": -3}, {"job_id": "k", "retry_count": -1}]},
+            None,
+            -1,
+            id="stage-none-negative-counts-max",
+        ),
+        pytest.param(
+            {"retry_attempt": 4, "attempt": 5, "retry_count": 6}, None, 4, id="stage-none-flat-retry-attempt-first"
+        ),
+        pytest.param({"attempt": 5, "retry_count": 6}, None, 5, id="stage-none-flat-attempt-second"),
+        pytest.param({"retry_attempt": "", "retry_count": 6}, None, 6, id="stage-none-flat-empty-skipped"),
+        pytest.param({"retry_count": "x"}, None, 0, id="stage-none-flat-non-int-0"),
+        pytest.param({"retry_count": -2}, None, -2, id="stage-none-flat-negative"),
+        pytest.param({}, None, 0, id="stage-none-empty-state"),
+        pytest.param(
+            {"retry_count": 7, "pipeline_jobs": [{"job_id": "j_forecast_retry_5", "stage": "forecast"}]},
+            "",
+            7,
+            id="stage-empty-string-reads-flat",
+        ),
+        # Canonical (stage-scoped) read: effective attempt per matching row, floored.
+        pytest.param(
+            {"pipeline_jobs": [{"job_id": "j_parse_retry_3", "stage": "parse"}]},
+            "parse_output",
+            3,
+            id="stage-alias-parse-output",
+        ),
+        pytest.param(
+            {"pipeline_jobs": [{"job_id": "j_retry_3", "stage": "run_shud_forecast"}]},
+            "forecast",
+            3,
+            id="row-stage-alias-run-shud-forecast",
+        ),
+        pytest.param(
+            {"pipeline_jobs": [{"job_id": "j_forecast_retry_1_retry_4", "stage": "forecast"}]},
+            "forecast",
+            4,
+            id="stage-set-stacked-last-suffix",
+        ),
+        pytest.param(
+            {"pipeline_jobs": [{"job_id": "j_forecast_retry_abc", "stage": "forecast", "retry_count": "x"}]},
+            "forecast",
+            0,
+            id="stage-set-malformed-suffix-non-int-count-0",
+        ),
+        pytest.param(
+            {"pipeline_jobs": [{"job_id": "j_forecast", "stage": "forecast", "retry_count": -4}]},
+            "forecast",
+            0,
+            id="stage-set-negative-count-floored-0",
+        ),
+        pytest.param({"stage_retry_attempt_floors": {"forecast": -2}}, "forecast", 0, id="stage-set-negative-floor-0"),
+        pytest.param(
+            {
+                "pipeline_jobs": [{"job_id": "j_forecast_retry_1", "stage": "forecast"}],
+                "stage_retry_attempt_floors": {"forecast": "x"},
+            },
+            "forecast",
+            1,
+            id="stage-set-non-int-floor-0",
+        ),
+        pytest.param(
+            {
+                "pipeline_jobs": [{"job_id": "j_forecast_retry_1", "stage": "forecast"}],
+                "stage_retry_attempt_floors": [5],
+            },
+            "forecast",
+            1,
+            id="stage-set-non-mapping-floors-0",
+        ),
+        pytest.param(
+            {"stage_retry_attempt_floors": {"forecast": "6"}}, "forecast", 6, id="stage-set-no-rows-str-floor"
+        ),
+        pytest.param(
+            {"pipeline_jobs": [{"job_id": "j_retry_2", "job_type": "forecast"}]},
+            "forecast",
+            2,
+            id="stage-set-legacy-job-type",
+        ),
+        pytest.param(
+            {
+                "pipeline_jobs": [
+                    {
+                        "job_id": "job_cycle_gfs_2026050100_forecast_retry_3",
+                        "stage": "forecast",
+                        "run_id": "cycle_gfs_2026050100",
+                    }
+                ]
+            },
+            "forecast",
+            3,
+            id="stage-set-cycle-scope-row-counted",
+        ),
+        pytest.param(
+            {
+                "job_limit": 1,
+                "pipeline_jobs": [
+                    {"job_id": "a", "stage": "forecast"},
+                    {"job_id": "b_retry_5", "stage": "forecast"},
+                ],
+            },
+            "forecast",
+            0,
+            id="stage-set-job-limit-window",
+        ),
+        # Non-canonical read: candidate-scope rows at the literal stage, no floor.
+        pytest.param(
+            {
+                "retry_count": 9,
+                "pipeline_jobs": [
+                    {
+                        "job_id": "j_download_retry_3",
+                        "stage": "download",
+                        "model_id": "m",
+                        "run_id": "fcst_gfs_2026050100_m",
+                        "retry_count": 1,
+                    }
+                ],
+            },
+            "download",
+            3,
+            id="non-canonical-flat-excluded",
+        ),
+        pytest.param(
+            {
+                "pipeline_jobs": [
+                    {
+                        "job_id": "job_cycle_gfs_2026050100_download_retry_3",
+                        "stage": "download",
+                        "run_id": "cycle_gfs_2026050100",
+                    }
+                ]
+            },
+            "download",
+            0,
+            id="non-canonical-cycle-scope-subtracted",
+        ),
+        pytest.param(
+            {"pipeline_jobs": [{"job_id": "x_download_retry_3", "stage": "download", "run_id": "fcst_gfs_x"}]},
+            "download",
+            3,
+            id="non-canonical-model-less-not-cycle-grammar",
+        ),
+        pytest.param({"retry_count": 9}, "download", 0, id="non-canonical-no-rows-0"),
+        pytest.param(
+            {
+                "pipeline_jobs": [
+                    {"job_id": "x_download_retry_2", "stage": "download", "model_id": "m", "retry_count": "x"}
+                ]
+            },
+            "download",
+            2,
+            id="non-canonical-non-int-count-suffix",
+        ),
+        pytest.param(
+            {"pipeline_jobs": [{"job_id": "j_forcing", "stage": "forcing", "retry_count": float("inf")}]},
+            "download",
+            0,
+            id="non-canonical-matches-before-coercing",
+        ),
     ],
 )
 def test_state_retry_attempt(state: dict[str, Any], stage: str | None, expected: int) -> None:
     assert _state_retry_attempt(state, stage=stage) == expected
+
+
+@pytest.mark.parametrize(
+    ("row_attempts", "floor", "expected"),
+    [
+        pytest.param([], None, 0, id="no-rows-no-floor-0"),
+        pytest.param([-3, -1], None, -1, id="no-floor-negatives-unclamped"),
+        pytest.param([2, 0, 5], None, 5, id="no-floor-max"),
+        pytest.param([], 4, 4, id="no-rows-floor"),
+        pytest.param([1], 4, 4, id="floor-above-rows"),
+        pytest.param([3], -2, 3, id="negative-floor-rows-win"),
+        pytest.param([], -2, 0, id="negative-floor-no-rows-0"),
+        pytest.param([0, 0], 0, 0, id="all-zero"),
+    ],
+)
+def test_stage_attempt(row_attempts: list[int], floor: int | None, expected: int) -> None:
+    assert retry_identity.stage_attempt(row_attempts, floor) == expected
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        pytest.param(
+            {"pipeline_jobs": [{"job_id": "a", "stage": "forcing", "retry_count": float("inf")}]},
+            id="non-matching-row-count-coerced",
+        ),
+        pytest.param({"stage_retry_attempt_floors": {"forecast": float("inf")}}, id="floor-coerced"),
+    ],
+)
+def test_state_retry_attempt_coerces_every_row_before_matching(state: dict[str, Any]) -> None:
+    with pytest.raises(OverflowError):
+        _state_retry_attempt(state, stage="forecast")
 
 
 @pytest.mark.parametrize(
@@ -559,10 +755,53 @@ def test_state_retry_attempt(state: dict[str, Any], stage: str | None, expected:
         pytest.param({"job_id": f"{FORECAST_BASE}_retry_-3"}, (1, -3), id="negative-tail-no-clamp"),
         pytest.param({"job_id": f"{FORECAST_BASE}_retry_0"}, (1, 0), id="retry-0-base-matches-stage"),
         pytest.param({"job_id": f"{FORCING_BASE}_retry_1"}, (0, 1), id="other-stage-no-match"),
+        # No ``stage`` / ``job_type``: ``stage_match`` comes only from the parsed base.
+        pytest.param({"job_id": f"{FORECAST_BASE}_retry_2", "retry_count": -1}, (1, 2), id="negative-count-suffix"),
+        pytest.param({"job_id": f"{FORECAST_BASE}_retry_2", "retry_count": "x"}, (1, 2), id="non-int-count-suffix"),
+        pytest.param({"job_id": f"{FORECAST_BASE}_retry_2", "retry_count": "3"}, (1, 3), id="str-count-wins"),
+        pytest.param({"job_id": f"{FORECAST_BASE}_retry_2", "retry_count": True}, (1, 1), id="bool-count-wins"),
+        pytest.param({"job_id": f"{FORECAST_BASE}_retry_2", "retry_count": 2.9}, (1, 2), id="float-count-truncated"),
+        pytest.param({"job_id": f"{FORECAST_BASE}_retry_1_retry_4"}, (0, 4), id="stacked-only-last-layer-stripped"),
+        pytest.param({"job_id": f"{FORECAST_BASE}_retry_"}, (1, 0), id="empty-tail-0"),
+        pytest.param({"job_id": FORECAST_BASE}, (1, 0), id="no-suffix-0"),
+        pytest.param({"job_id": None}, (0, 0), id="none-job-id"),
+        pytest.param({}, (0, 0), id="empty-row"),
+        pytest.param({"job_id": f"{FORECAST_BASE}_retry_0", "retry_count": 2}, (1, 2), id="retry-0-count-wins"),
+        pytest.param({"job_id": f"{FORECAST_BASE}_retry_ 7"}, (1, 7), id="space-padded-tail-int"),
+        pytest.param(
+            {"job_id": f"{FORECAST_BASE}_retry_2", "retry_count": 1}, (1, 1), id="count-present-base-stripped"
+        ),
     ],
 )
 def test_stage_job_sort_key(job: dict[str, Any], expected: tuple[int, int]) -> None:
     assert _stage_job_sort_key(job, FORECAST_STAGE)[:2] == expected
+
+
+def test_stage_job_sort_key_inf_count_raises() -> None:
+    with pytest.raises(OverflowError):
+        _stage_job_sort_key({"job_id": f"{FORECAST_BASE}_retry_2", "retry_count": float("inf")}, FORECAST_STAGE)
+
+
+@pytest.mark.parametrize(
+    ("job_id", "persisted_attempt", "expected"),
+    [
+        pytest.param("X_retry_2", 5, ("X", 5), id="count-wins"),
+        pytest.param("X_retry_2", 0, ("X", 0), id="zero-count-wins"),
+        pytest.param("X_retry_2", -1, ("X", 2), id="no-count-suffix"),
+        pytest.param("X_retry_abc", -1, ("X", 0), id="malformed-tail-0"),
+        pytest.param("X_retry_-3", -1, ("X", -3), id="negative-tail-no-clamp"),
+        pytest.param("X_retry_1_retry_4", -1, ("X_retry_1", 4), id="stacked-last-layer"),
+        pytest.param("X_retry_1_retry_4", 2, ("X_retry_1", 2), id="stacked-count-wins"),
+        pytest.param("X_retry_", -1, ("X", 0), id="empty-tail-0"),
+        pytest.param("X", -1, ("X", 0), id="no-suffix-no-count-0"),
+        pytest.param("", -1, ("", 0), id="empty-id"),
+        pytest.param("X_retry_0", 2, ("X", 2), id="retry-0-count-wins"),
+        pytest.param("X_retry_ 7", -1, ("X", 7), id="space-padded-tail-int"),
+        pytest.param("X", 3, ("X", 3), id="no-suffix-count"),
+    ],
+)
+def test_stage_job_sort_attempt(job_id: str, persisted_attempt: int, expected: tuple[str, int]) -> None:
+    assert retry_identity.stage_job_sort_attempt(job_id, persisted_attempt) == expected
 
 
 @pytest.mark.parametrize(
@@ -613,6 +852,235 @@ def test_stage_retry_attempt_floors() -> None:
     assert [source["job_id"] for source in sources["forecast"]] == ["b_forecast", "c_forecast_retry_3"]
     assert [source["job_id"] for source in sources["forcing"]] == ["d_forcing_retry_1"]
     assert set(sources) == {"forecast", "forcing"}
+
+
+@pytest.mark.parametrize(
+    ("jobs", "expected_floors", "expected_sources"),
+    [
+        pytest.param(
+            [{"job_id": "p_retry_2", "stage": "parse"}, {"job_id": "f_retry_1", "stage": "forecast"}],
+            [("parse", 2), ("forecast", 1)],
+            {"parse": ["p_retry_2"], "forecast": ["f_retry_1"]},
+            id="key-order-first-positive-insertion",
+        ),
+        pytest.param(
+            [{"job_id": "a_retry_1", "stage": "forecast"}, {"job_id": "b_retry_3", "stage": "forecast"}],
+            [("forecast", 3)],
+            {"forecast": ["b_retry_3"]},
+            id="higher-attempt-resets-contributors",
+        ),
+        pytest.param(
+            [{"job_id": "x", "stage": "download", "retry_count": float("inf")}],
+            [],
+            {},
+            id="non-canonical-inf-count-never-read",
+        ),
+    ],
+)
+def test_stage_retry_attempt_floors_order(
+    jobs: list[dict[str, Any]], expected_floors: list[tuple[str, int]], expected_sources: dict[str, list[str]]
+) -> None:
+    floors, sources = stage_retry_attempt_floors(jobs)
+
+    assert list(floors.items()) == expected_floors
+    assert {stage: [source["job_id"] for source in rows] for stage, rows in sources.items()} == expected_sources
+    assert list(sources) == [stage for stage, _attempt in expected_floors]
+
+
+def test_stage_retry_attempt_floors_canonical_inf_count_raises() -> None:
+    with pytest.raises(OverflowError):
+        stage_retry_attempt_floors([{"job_id": "x", "stage": "forecast", "retry_count": float("inf")}])
+
+
+@pytest.mark.parametrize(
+    ("previous_attempt", "expected"),
+    [
+        pytest.param(0, 1, id="zero"),
+        pytest.param(3, 4, id="positive"),
+        pytest.param(-2, -1, id="negative-unclamped"),
+        pytest.param(-3, -2, id="negative-stays-negative"),
+    ],
+)
+def test_next_manual_attempt(previous_attempt: int, expected: int) -> None:
+    assert retry_identity.next_manual_attempt(previous_attempt) == expected
+
+
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [
+        pytest.param({"manual_retry": {"marker": True}, "retry_count": 2}, [3], id="L122-flat-count"),
+        pytest.param(
+            {"manual_retry": {"marker": True}, "pipeline_jobs": [{"job_id": "j", "retry_count": -3}]},
+            [-2],
+            id="L122-rows-negative-unclamped",
+        ),
+        pytest.param(
+            {"manual_retry": {"marker": True, "new_attempt": "x"}, "retry_count": 2}, [3], id="L122-non-int-pin-default"
+        ),
+        pytest.param({"manual_retry": {"requested": True}, "retry_count": "x"}, [1], id="L122-requested-non-int-flat"),
+        pytest.param(
+            {"manual_retry": {"marker": True, "new_attempt": 7}, "retry_count": 2}, [7], id="L122-pinned-value-wins"
+        ),
+        pytest.param({"manual_retry": True, "retry_count": 2}, [3], id="L132-flat-count"),
+        pytest.param({"manual_retry": "yes"}, [1], id="L132-empty-state"),
+        pytest.param({"manual_retry": True, "retry_count": -1}, [0], id="L132-negative-flat-unclamped"),
+        pytest.param({"manual_retry_marker": True, "attempt": 4}, [5], id="L132-marker-key-flat-attempt"),
+    ],
+)
+def test_manual_retry_marker_default_attempt(state: dict[str, Any], expected: list[int]) -> None:
+    assert [marker["attempt"] for marker in _manual_retry_markers(state)] == expected
+
+
+def test_manual_retry_marker_default_attempt_is_eager() -> None:
+    def state(retry_count: Any) -> dict[str, Any]:
+        return {
+            "manual_retry": {"marker": True, "new_attempt": 7},
+            "pipeline_jobs": [{"job_id": "j", "retry_count": retry_count}],
+        }
+
+    # :122 -- the pinned ``new_attempt`` wins, yet the default is still computed.
+    assert [marker["attempt"] for marker in _manual_retry_markers(state(0))] == [7]
+    with pytest.raises(OverflowError):
+        _manual_retry_markers(state(float("inf")))
+
+
+_MANUAL_CYC = {
+    "job_id": "job_cycle_gfs_2026070100_download",
+    "run_id": "cycle_gfs_2026070100",
+    "model_id": None,
+    "stage": "download",
+    "status": "failed",
+    "retry_count": 4,
+    "updated_at": "2026-07-01T00:00:00Z",
+}
+_MANUAL_OWN = {
+    "job_id": "job_model_a_forecast",
+    "run_id": "fcst_gfs_2026070100_model_a",
+    "model_id": "model_a",
+    "stage": "forecast",
+    "status": "failed",
+    "retry_count": 0,
+    "updated_at": "2026-07-01T00:00:00Z",
+}
+
+
+def _manual_event(retry_count: Any) -> dict[str, Any]:
+    return {
+        "event_id": 9,
+        "entity_type": "pipeline_job",
+        "entity_id": "job_cycle_gfs_2026070100_download",
+        "event_type": "retry",
+        "created_at": "2026-07-01T01:00:00Z",
+        "details": {
+            "trigger": "manual",
+            "manual_retry_marker": True,
+            "retry_count": retry_count,
+            "created_at": "2026-07-01T01:00:00Z",
+            "previous_job_id": "job_cycle_gfs_2026070100_download",
+        },
+    }
+
+
+def _manual_state(failed_stage: str, retry_count: Any, **extra: Any) -> dict[str, Any]:
+    return {
+        "pipeline_status": "failed",
+        "retry_count": 0,
+        "failed_stage": failed_stage,
+        "pipeline_jobs": [dict(_MANUAL_CYC), dict(_MANUAL_OWN)],
+        "pipeline_events": [_manual_event(retry_count)],
+        **extra,
+    }
+
+
+_MANUAL_LIVE = {
+    "pipeline_jobs": [
+        {
+            "job_id": "job_fcst_gfs_2026050100_m_forecast_retry_5",
+            "stage": "forecast",
+            "status": "cancelled",
+            "model_id": "m",
+            "run_id": "fcst_gfs_2026050100_m",
+        }
+    ]
+}
+_MANUAL_LIVE2 = {
+    "pipeline_jobs": [
+        {
+            "job_id": "a_forecast_retry_2",
+            "stage": "forecast",
+            "status": "cancelled",
+            "model_id": "m",
+            "run_id": "fcst_gfs_2026050100_m",
+        },
+        {
+            "job_id": "a_convert_retry_4",
+            "stage": "convert",
+            "status": "cancelled",
+            "model_id": "m",
+            "run_id": "fcst_gfs_2026050100_m",
+        },
+    ]
+}
+_MANUAL_NAMED = {
+    "failed_stage": "forecast",
+    "pipeline_jobs": [
+        {
+            "job_id": "j_forecast_retry_9",
+            "stage": "forecast",
+            "status": "failed",
+            "model_id": "m",
+            "run_id": "fcst_gfs_2026050100_m",
+        }
+    ],
+}
+_MANUAL_NULL_PIN = {"manual_retry": {"marker": True, "new_attempt": None}}
+
+
+@pytest.mark.parametrize(
+    ("state", "previous_attempt", "expected"),
+    [
+        pytest.param({"manual_retry": {"marker": True, "new_attempt": "x"}}, 3, 4, id="L1021-non-int-pin-default"),
+        pytest.param({"manual_retry": {"marker": True, "new_attempt": 5}}, 0, 5, id="L1021-pinned-value-wins"),
+        pytest.param(_manual_state("download", ""), 3, 4, id="L1035-empty-count"),
+        pytest.param(_manual_state("download", ""), -2, 1, id="L1035-empty-count-negative-previous"),
+        pytest.param(_manual_state("forecast", 5), 3, 4, id="L1037-non-pinning"),
+        pytest.param(_manual_state("forecast", 5), -2, -1, id="L1037-non-pinning-negative-previous"),
+        pytest.param(_manual_state("download", "x", **_MANUAL_NULL_PIN), 3, 4, id="L1038-non-int-pin-default"),
+        pytest.param(_manual_state("download", 7, **_MANUAL_NULL_PIN), 0, 7, id="L1038-pinned-value-wins"),
+        pytest.param({}, 3, 4, id="L1039-empty-state"),
+        pytest.param({}, -2, -1, id="L1039-negative-previous-unclamped"),
+        pytest.param({}, 0, 1, id="L1039-zero-previous"),
+        pytest.param(_MANUAL_LIVE, 0, 6, id="L1039-family-floor-wins"),
+        pytest.param(_MANUAL_LIVE, 7, 8, id="L1039-previous-wins"),
+        pytest.param(_MANUAL_LIVE2, 0, 5, id="L1039-family-max"),
+        pytest.param(_MANUAL_NAMED, 3, 4, id="L1039-named-failed-stage-previous"),
+    ],
+)
+def test_manual_retry_new_attempt_sites(state: dict[str, Any], previous_attempt: int, expected: int) -> None:
+    assert _manual_retry_new_attempt(state, previous_attempt=previous_attempt) == expected
+
+
+def test_manual_retry_new_attempt_pin_default_is_eager_at_1021() -> None:
+    def state(retry_count: Any) -> dict[str, Any]:
+        return {
+            "manual_retry": {"marker": True, "new_attempt": 7},
+            "pipeline_jobs": [{**_MANUAL_LIVE["pipeline_jobs"][0], "retry_count": retry_count}],
+        }
+
+    assert _manual_retry_new_attempt(state(0), previous_attempt=0) == 7
+    with pytest.raises(OverflowError):
+        _manual_retry_new_attempt(state(float("inf")), previous_attempt=0)
+
+
+def test_manual_retry_new_attempt_pin_default_is_eager_at_1038() -> None:
+    def state(own_retry_count: Any) -> dict[str, Any]:
+        st = _manual_state("download", 7, **_MANUAL_NULL_PIN)
+        st["pipeline_jobs"][1]["retry_count"] = own_retry_count
+        return st
+
+    assert _manual_retry_new_attempt(state(0), previous_attempt=0) == 7
+    with pytest.raises(OverflowError):
+        _manual_retry_new_attempt(state(float("inf")), previous_attempt=0)
 
 
 # ---------------------------------------------------------------------------

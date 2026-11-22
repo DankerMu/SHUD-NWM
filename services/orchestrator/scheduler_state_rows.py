@@ -12,7 +12,7 @@ from services.orchestrator.production_contract import (
     PRODUCTION_EVIDENCE_CORRELATION_FIELDS,
     PRODUCTION_IDENTITY_FIELDS,
 )
-from services.orchestrator.retry_identity import effective_retry_attempt
+from services.orchestrator.retry_identity import effective_retry_attempt, stage_attempt
 from services.orchestrator.scheduler_state_common import (
     _coerce_int,
     _coerce_optional_nonnegative_int,
@@ -592,13 +592,10 @@ def _state_non_canonical_stage_retry_attempt(state: Mapping[str, Any], stage: st
     subtracted here; see ``_state_retry_attempt`` for why.
     """
 
-    return max(
-        (
-            effective_retry_attempt(job.get("job_id"), _coerce_int(job.get("retry_count"), default=0))
-            for job in _state_jobs(state)
-            if _job_stage_name(job) == stage and not _job_is_cycle_scope_row(job)
-        ),
-        default=0,
+    return stage_attempt(
+        effective_retry_attempt(job.get("job_id"), _coerce_int(job.get("retry_count"), default=0))
+        for job in _state_jobs(state)
+        if _job_stage_name(job) == stage and not _job_is_cycle_scope_row(job)
     )
 
 def _state_flat_retry_attempt(state: Mapping[str, Any]) -> int | None:
@@ -622,10 +619,10 @@ def _state_job_retry_attempt(state: Mapping[str, Any], canonical_stage: str | No
     """
 
     jobs = _state_jobs(state)
-    scanned = max((_job_retry_attempt(job, canonical_stage) for job in jobs), default=0)
+    row_attempts = [_job_retry_attempt(job, canonical_stage) for job in jobs]
     if canonical_stage is None:
-        return scanned
-    return max(scanned, _state_stage_retry_attempt_floor(state, canonical_stage))
+        return stage_attempt(row_attempts)
+    return stage_attempt(row_attempts, _state_stage_retry_attempt_floor(state, canonical_stage))
 
 def _state_stage_retry_attempt_floor(state: Mapping[str, Any], canonical_stage: str) -> int:
     floors = state.get(STAGE_RETRY_ATTEMPT_FLOORS_KEY) or {}
