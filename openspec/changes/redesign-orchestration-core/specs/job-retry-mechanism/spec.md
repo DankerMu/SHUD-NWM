@@ -16,7 +16,7 @@ and attempt accounting. It owns:
 Other modules SHALL delegate to the owner. The operator overrides
 `NHMS_SCHEDULER_RETRY_LIMIT` and `SLURM_GATEWAY_MAX_RETRIES` SHALL keep their
 current readers and precedence. The owner's functions SHALL take plain data.
-The only IO seam SHALL be an injected occupied-id predicate for the floored
+The only IO seam SHALL be an injected occupancy predicate for the floored
 mint. Moving a computation into the owner SHALL NOT change its result for any
 input.
 
@@ -57,11 +57,14 @@ input.
 #### Scenario: A call site computes an attempt locally
 
 - **WHEN** a module outside `retry_identity.py` builds a job id from the
-  `_retry_` literal or `RETRY_JOB_ID_MARKER` in an f-string or concatenation,
-  or adds to the result of `split_retry_job_identity`, `retry_suffix_attempt`,
-  `effective_retry_attempt`, or `rsplit("_retry_", ...)`
+  `_retry_` literal or `RETRY_JOB_ID_MARKER` in an f-string, concatenation,
+  `%` or `.format`, or `join`, or splits on that marker, or adds an integer literal to
+  the result of any `retry_identity` function, of any call whose name contains
+  `attempt` (the scheduler-state readers such as `_state_retry_attempt` and
+  `_fallback_previous_attempt`), or of `rsplit("_retry_", ...)`
 - **THEN** an AST guard test fails and names the module and line
-- **AND** parsing calls that do not mint a new id or attempt are allowed.
+- **AND** calls to the owner's parsers, regex matches and `in` membership tests on
+  the marker that do not mint a new id or attempt are allowed.
 
 ## MODIFIED Requirements
 
