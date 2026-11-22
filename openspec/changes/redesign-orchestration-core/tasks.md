@@ -2141,7 +2141,7 @@ Slice triage (F1-2, #3271, tasks 10.1, 10.3):
 
 - [x] 11.0a Chain side, test-only first: delete the test assertions that read `_CHAIN_*_COMPAT_*` tables (`tests/test_orchestration_chain.py`, including the inventory-text tests that also read tables at :1246, :1286, :12146, :12471; `tests/test_file_journal_read_blocked_consumers.py:255-257`). Inventory-text tests that read no table stay for F3.
 - [x] 11.0b Scheduler side, test-only first: delete the `_SCHEDULER_*_COMPAT_*` assertions, including `tests/test_production_scheduler.py:1086-1129` and the inventory-text tests that also read tables (e.g. `:816`). Inventory-text tests that read no table stay for F3.
-- [ ] 11.0c Scheduler state-compat patch propagation: rewrite the propagation in `scheduler_state_compat.py:169-219` as an explicit owner function, with a test that a patch on the facade is seen by the `scheduler_state_*` owners. The installer still runs.
+- [x] 11.0c Scheduler state-compat patch propagation: rewrite the propagation in `scheduler_state_compat.py:169-219` as an explicit owner function, with a test that a patch on the facade is seen by the `scheduler_state_*` owners. The installer still runs.
 - [ ] 11.1 Chain side.
   - Replace `globals().update(...)` at `chain.py:147-149,887-889` with explicit alias lines for every name the F1 guard requires.
   - Delete `chain_compat_static.py`, `chain_compat_runtime.py` and the chain-manifest forwarder self-check (`chain.py:~185-204`).
@@ -2292,6 +2292,102 @@ Slice triage (F2-2, #3291, task 11.0b):
     - the inventory and facade guards: `tests/test_entropy_audit_facade_guard_aliases.py`, `tests/test_entropy_audit_facade_guard_forwarders.py` and `tests/test_entropy_audit_instruction_inventory.py`
   - CI: the full sharded suite.
   - No node-27 or node-22 run: the change is test-only.
+
+Slice triage (F2-3, #3292, task 11.0c):
+- Issue type: refactor (production code, runtime rebinding). Fixture level: expanded (agree). The mechanism runs on every candidate-state call of every pass. Width: one PR, atomic (one mechanism).
+- Recon at cb814a249:
+  - The propagation is `install_scheduler_state_compat` (`scheduler_state_compat.py:169-233`), installed by `scheduler.py:227`. Every one of the 137 facade wrappers (`:221-227`) enters `compat_bindings` (`:203-219`). Under one module-global `RLock` (`:183`), that context manager loops over all 137 originals. For each name whose facade binding is neither the original nor its wrapper (`compat_override`, `:185-190`), it `setattr`s the facade value onto every loaded `services.orchestrator.scheduler_state*` module that has the name, plus the owner (`compat_target_modules`, `:192-201`). It restores the old values on exit.
+  - In production nothing patches the facade, so every override is `None`. Each state call only pays for the lock and the 137-name loop.
+  - Measured dependence (`.workplans/3292/`: `propprobe.py`, `rec.jsonl`, `probe-disable.log`, `probe-files.txt`).
+    - The probe is an in-process pytest plugin that replaces the `compat_override` closure cell. It was run over the 51 test files that reference `services.orchestrator.scheduler` (`probe-files.txt`).
+    - Record mode: 4457 passed, 20 skipped. Non-`None` overrides came from 45 tests and named only 3 names: `_candidate_state_decision` (168 calls), `_object_manifest_is_missing` (20) and `_state_active_jobs` (1).
+    - Disable mode (overrides forced to `None`): 3 failed, 4454 passed. All three failures are in `tests/test_production_scheduler.py`:
+      - `test_candidate_state_decision_scheduler_monkeypatch_active_jobs_compat` (`:5470`) patches `_state_active_jobs`;
+      - `test_candidate_state_decision_scheduler_monkeypatch_raw_manifest_repair_compat` (`:5500`) patches `_object_manifest_is_missing`;
+      - `test_repaired_raw_manifest_downstream_retry_stays_open_for_unknown_codes` (`:29146`) patches `_object_manifest_is_missing` through `_raw_manifest_decision` (`:28873`).
+    - The only owner-internal call sites that observe those patches are `scheduler_state_decision.py:138` (`active_jobs = _state_active_jobs(decision_state)`) and `scheduler_state_failure.py:1361` (`missing = _object_manifest_is_missing(candidate, value)`).
+    - `_candidate_state_decision` has no caller inside `scheduler_state_*`. Rebinding it there is observed by nothing.
+    - The probe sees only facade overrides. The converse dependence, tests that patch the owner module and rely on the direct global lookup at the seam, is `tests/test_production_scheduler.py:13362`, `:13411` and `:13667`, all on `scheduler_state_failure._object_manifest_is_missing`. `:13411` and `:13667` reach `:1361`; `:13362` returns before the probe. An AST scan of `tests/` and `scripts/` finds no other patch of `_state_active_jobs` or `_object_manifest_is_missing` on any module. Among the 137 names, only four are patched on the facade: those three plus `_canonical_downstream_stage` (`:1884`), which does not enter a state wrapper.
+  - An existing late-binding precedent is `scheduler_lease._scheduler_compat_function` (`scheduler_lease.py:42-50`). It does `sys.modules.get("services.orchestrator.scheduler")`, then `getattr(..., name, None)`, and falls back when the result is not callable. 11.2 renames it.
+- Design (D3: "patch propagation is kept as an explicit function in an owner module. It is late binding, not bookkeeping"):
+  - Add one owner function to `services/orchestrator/scheduler_state_common.py`:
+
+    ```python
+    _FACADE_MODULE = "services.orchestrator.scheduler"
+    _FACADE_OWNER_MODULE = "services.orchestrator.scheduler_state"
+
+
+    def _facade_seam(name: str, fallback: Callable[..., Any]) -> Callable[..., Any]:
+        """Return a monkeypatch on the scheduler facade's ``name`` at call time, else ``fallback``."""
+        facade = sys.modules.get(_FACADE_MODULE)
+        value = getattr(facade, name, None) if facade is not None else None
+        if not callable(value):
+            return fallback
+        owner = sys.modules.get(_FACADE_OWNER_MODULE)
+        unpatched = getattr(owner, name, None) if owner is not None else None
+        if getattr(value, "__wrapped__", value) is unpatched:
+            return fallback
+        return value
+    ```
+
+    A facade binding counts as a patch only when it is neither the facade's own re-export of `scheduler_state.<name>` nor the installer's `functools.wraps` wrapper of it. This is the `compat_override` rule (`scheduler_state_compat.py:185-190`).
+    - Without the rule, the always-callable wrapper would shadow patches on the owner module. `tests/test_production_scheduler.py:13411` and `:13667` patch `scheduler_state_failure._object_manifest_is_missing` directly and call `_artifact_uri_missing_status`.
+    - The rule also holds after 11.2, when the facade binds `scheduler_state.<name>` directly.
+    - The docstring says why: the facade is a monkeypatch surface (spec `scheduler-facade-deepening`, "Owner modules SHALL keep reading facade names at call time"), and a patch on the owner module still wins when the facade is unpatched.
+    - Precedence (fixture-review probe): unpatched gives the owner; facade-only gives the facade; owner-only gives the owner; both patched gives the facade (as the old `compat_override`); facade absent gives `fallback`.
+  - The two seams call through it:
+    - `scheduler_state_decision.py:138` becomes `_facade_seam("_state_active_jobs", _state_active_jobs)(decision_state)`;
+    - `scheduler_state_failure.py:1361` becomes `_facade_seam("_object_manifest_is_missing", _object_manifest_is_missing)(candidate, value)`.
+
+    Their comments say the name is a facade monkeypatch seam. No other call site changes. The seam list is exactly the measured dependence set.
+  - Strip the propagation from `install_scheduler_state_compat`. Delete `compat_override`, `compat_target_modules`, `compat_bindings`, the `RLock` and the `sys`/`contextmanager`/`RLock` imports, plus their 3 returned keys: `_SCHEDULER_STATE_COMPAT_LOCK`, `_scheduler_state_compat_override` and `_scheduler_state_compat_bindings`.
+    - The installer still runs and still installs a distinct `functools.wraps` wrapper per name. Each wrapper is now a plain pass-through, `return original(*args, **kwargs)`, so the 11.0b pin at `tests/test_production_scheduler.py:1264-1265` still holds until 11.2.
+    - The remaining returned keys and runtime checks (`:235-277`) are unchanged.
+  - Lock removal is behaviour-neutral. The wrapped names reached from the cohort thread pool (`scheduler_execution.py:410` → `reservation.py:387`) are pure helpers: `_ensure_utc`, `_format_utc`, `_evidence_safe`, `_candidate_production_identity`, `_candidate_canonical_product_id` and `_redact_secret_manifest_for_evidence`. The I/O-bearing names are wired at pass level (`scheduler_core.py:505-506,867-870`). With every override `None`, the lock serialised calls but guarded no state. A facade patch is now read per call, not `setattr` on shared modules, so no shared mutation is left to guard.
+  - `docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md:122`, group `scheduler-state-monkeypatch-bindings`, is the one prose edit, made by the implementer in the same PR:
+    - drop `_SCHEDULER_STATE_COMPAT_LOCK`, `_scheduler_state_compat_override` and `_scheduler_state_compat_bindings` from the names;
+    - say propagation is `scheduler_state_common._facade_seam` at the two seams;
+    - keep the group id, the four tokens asserted at `tests/test_production_scheduler.py:1289-1292`, the `:152` selector row and the `:171` Guard Hook Seed row byte-identical.
+- New test, in a new file `tests/test_scheduler_state_facade_seam.py`. Its subject is the owner, not the facade wrapper:
+  - Patch `services.orchestrator.scheduler._state_active_jobs`, then call the OWNER `scheduler_state_decision._candidate_state_decision` directly. The decision observes the patched jobs, as at `:5470`. This path never touches a facade wrapper, so it proves the owner reads the facade.
+  - The same for `_object_manifest_is_missing` through the owner's raw-manifest repair path. Reuse the geometry of `:5500`, built locally; do not import test helpers across files.
+  - `_facade_seam` unit cases:
+    - the facade absent from `sys.modules` (`monkeypatch.delitem(sys.modules, ..., raising=False)`) returns `fallback`;
+    - a non-callable facade attribute returns `fallback`;
+    - a callable patch is returned as is;
+    - an unpatched facade (its binding is the installer's wrapper of `scheduler_state.<name>`) returns `fallback`, including when `fallback` is a patch on the owner module;
+    - with both patched, the facade patch wins.
+- Must preserve:
+  - Every test outside the new file is unchanged. Unpatched production behaviour is unchanged: same decisions and evidence, and the facade still exposes the same names and wrapper objects.
+  - The three dependent tests stay green without edits.
+  - A patch on the owner module still wins when the facade is unpatched. `test_object_probe_store_error_is_contained_with_its_own_unsafe_reason` (`:13396`) and `test_file_kind_check_never_converts_a_present_verdict` (`:13647`) stay green without edits.
+  - `tests/test_facade_name_resolution.py` stays green.
+  - `git diff --stat master` touches only `scheduler_state_common.py`, `scheduler_state_decision.py`, `scheduler_state_failure.py`, `scheduler_state_compat.py`, the new test, the inventory row and the 11.0c tick.
+  - Deviation from the issue's PR boundary ("one owner module"): the seam call sites live in two owner modules besides the one that defines the function, plus the one inventory prose row (`docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md:122`; the facade guard reads only the Guard Hook Seed section, `scripts/governance/entropy_audit/facade_guard.py:537-546`). Recorded in the PR body.
+- Risk packs: legacy compatibility (monkeypatch surface), runtime rebinding / concurrency (lock removal). Not selected: DB, Slurm, evidence schema.
+- Out of scope:
+  - deleting the installer or its wrappers (11.2);
+  - renaming `scheduler_lease._scheduler_compat_function` (11.2);
+  - the chain side;
+  - teaching `tests/test_facade_name_resolution.py` the new helper. Its `sys.modules` lookup is not a facade binding, so the guard does not scan it (`tests/test_facade_name_resolution.py:79-80`). Do not replace it with `from services.orchestrator import scheduler`, which the guard would fail and which is a circular import.
+
+    Carry-over for 11.2/F3:
+    - unify `_facade_seam` with the lease helper when 11.2 renames it. The lease helper has no unpatched check, which is safe only while lease names are direct re-exports.
+    - have the F1 guard see both seams' literal names.
+- Required evidence:
+  1. Red runs, each with its log in `.workplans/3292/`:
+     - revert only the two seam call sites to direct calls: the three dependent tests and both owner-path cases in the new file fail;
+     - stub `_facade_seam` to always return `fallback`: the same failures;
+     - drop the unpatched check, so the facade binding is returned whenever it is callable: `:13396`, `:13647` and the new owner-patch unit case fail;
+     - green with the change.
+  2. Negative check: confirm with `git grep -n "compat_bindings\|compat_override\|RLock" -- services/orchestrator/scheduler_state_compat.py` returning nothing.
+  3. The four record-mode files green: `tests/test_production_scheduler.py`, `tests/test_completion_scoring_event_evidence.py`, `tests/test_scheduler_terminal_recency.py` and `tests/test_scheduler_backfill.py`. Also green: the new test, `tests/test_facade_name_resolution.py`, `tests/test_orchestrator_first_import.py`, and the inventory and facade guards (`tests/test_entropy_audit_facade_guard_aliases.py`, `tests/test_entropy_audit_facade_guard_forwarders.py`, `tests/test_entropy_audit_instruction_inventory.py`).
+  4. `uv run --no-sync ruff check . --no-cache`, `git diff --check`, and `openspec validate redesign-orchestration-core --strict --no-interactive`.
+- Verification (owner policy 2026-11-22: no local full suite):
+  - Locally: evidence 1-4.
+  - CI: the full sharded suite.
+  - node-27: the integration-marked files that import a touched module. The fresh-process import check over all 57 integration files at cb814a249 gives 16. The orchestrator runs them on throwaway `nhms_it_*` DBs after the push.
+  - node-22 (D5): its own idle pass and submitting pass after the ff deploy at a pass boundary. Pending while node-22's mounts are down; recorded as owed on #3292 like #3311.
 
 ## 12. F3 — Delete the compatibility inventories and the facade guard
 

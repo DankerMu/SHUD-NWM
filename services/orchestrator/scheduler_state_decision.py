@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any
 
 from packages.common.contracts.time_normalization import format_cycle_time
-from services.orchestrator.scheduler_state_common import _evidence_safe
+from services.orchestrator.scheduler_state_common import _evidence_safe, _facade_seam
 from services.orchestrator.scheduler_state_evidence_owner import _candidate_state_evidence
 from services.orchestrator.scheduler_state_failure import (
     MANUAL_RETRY_RESTART_STAGE_ADDED_FIELD,
@@ -135,7 +135,9 @@ def _candidate_state_decision_evaluated(
         if manual_capsule is not None
         else decision_state
     )
-    active_jobs = _state_active_jobs(decision_state)
+    # ``_state_active_jobs`` is a scheduler-facade monkeypatch seam: a patch on
+    # ``services.orchestrator.scheduler._state_active_jobs`` is read here at call time.
+    active_jobs = _facade_seam("_state_active_jobs", _state_active_jobs)(decision_state)
     if active_jobs:
         return CandidateStateDecision(
             "skip",
