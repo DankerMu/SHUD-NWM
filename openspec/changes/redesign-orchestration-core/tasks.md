@@ -121,7 +121,7 @@ Slice triage (R2a-0, #3286, task 2.0):
   - with a selector unset, it blocks with `db_free_selector_missing` before the lock;
   - the gateway's Slurm export env built from a manifest with `NHMS_SCHEDULER_DB_FREE_REQUIRED` unset in the scheduler process still carries `NHMS_CANONICAL_DB_FREE=true`, `NHMS_FORCING_DB_FREE=true` and the file registry backend (`real_backend.py:1048-1075`).
 - [x] 3.5 Add the Appendix D R2b spec deltas.
-- [ ] 3.6 Verification: on node-22, one idle pass and one submitting pass. The submitting pass's job env carries the DB-free worker switches, read from the job's env snapshot or sbatch script. On node-27, the integration-marked tests that construct the scheduler pass (`-m integration`, files that build `ProductionScheduler`).
+- [x] 3.6 Verification: on node-22, one idle pass and one submitting pass. The submitting pass's job env carries the DB-free worker switches, read from the job's env snapshot or sbatch script. On node-27, the integration-marked tests that construct the scheduler pass (`-m integration`, files that build `ProductionScheduler`).
 
 Suggested fixture level: expanded - production scheduler mode, the manifest contract and the cross-plane job env.
 Minimal mergeable slice: atomic - after group 2, the flip, the fail-closed arms and the manifest constant must land together, or a submitting pass could emit a manifest without the DB-free contract.
@@ -169,7 +169,7 @@ Slice triage (R2b, #3255, tasks 3.1-3.6):
 - [x] 4.2 Delete the SQL reconcile store, including its reset/dispose code, from `scheduler_runtime.py`. Delete `tests/test_gateway_reconcile_store_reset.py` and `tests/test_reconcile_sacct_parse.py::test_reset_reconcile_store_disposes_dead_engine` (:101-115).
 - [x] 4.3 Delete the PostgreSQL scheduler lease (`scheduler_core.py:241-250`, its `scheduler_lease.py` branch) and its tests (`PostgresSchedulerLease`, `_postgres_advisory_lock_key` in `tests/test_production_scheduler.py`).
 - [x] 4.4 Add the Appendix D R2c spec deltas. Update `infra/env/README.md` (:169, :321), `docs/runbooks/two-node-deployment-overview.md:423`, `docs/runbooks/scheduler-dbfree-typed-reasons.md:4` and `docs/runbooks/production-service-config.md:14` so the variable is described as the job-env contract, not a mode switch. `docs/runbooks/node22-db-retirement-runbook.md:51` (names `PsycopgOrchestratorRepository`) is updated in R3. Templates keep the variable.
-- [ ] 4.5 Verification: on node-22, one idle pass and one submitting pass.
+- [x] 4.5 Verification: on node-22, one idle pass and one submitting pass.
 
 Suggested fixture level: expanded - the scheduler lease (concurrency) and the reconcile path.
 Minimal mergeable slice: 4.1 alone (factory arms and adapters); 4.2 and 4.3 follow as separate PRs, each green on its own, because the three arms share no code.
@@ -249,7 +249,7 @@ Slice triage (R2c-3, #3258, tasks 4.3, 4.5):
 - [x] 5.1 Test-only PR first. For each `CapturingRepository(PsycopgOrchestratorRepository)` test and the candidate-state tests (`tests/test_orchestration_chain.py:8283-10049`), record whether it asserts SQL text (to delete in 5.2) or candidate-state semantics. For each semantics case, confirm `chain_repository_state.py` covers it on the file-journal path (`file_orchestration_journal.py:2025`), and migrate it if not.
 - [x] 5.2 Delete the Appendix C R3 symbols and their SQL-text tests, plus `tests/test_real_database_integration.py:339-502` (each test confirmed SQL-only on node-27). Keep the `OrchestratorRepository` protocol. Update the inventory text and tests.
 - [x] 5.3 Add the Appendix D R3 spec deltas, including the MODIFIED `file-orchestration-journal` contract-test requirement already in this change. Update `docs/runbooks/node22-db-retirement-runbook.md:51`, which names the deleted class.
-- [ ] 5.4 Verification: node-27 real-DB suites that remain pass. On node-22, one idle pass and one submitting pass.
+- [x] 5.4 Verification: node-27 real-DB suites that remain pass. On node-22, one idle pass and one submitting pass.
 
 Suggested fixture level: expanded - persistence layer deletion.
 Minimal mergeable slice: 5.1 as a test-only PR; then 5.2 + 5.3 + 5.4 as the deleting PR.
@@ -308,7 +308,7 @@ Slice triage (R3-2, #3260, tasks 5.2, 5.3, 5.4):
 - [x] 6.1 Delete the Appendix C R4 symbols. Keep every other name in `retry.py`, including `_auto_retry_job_can_be_reused` and `_safe_error_message` (`retry.py:405-415`).
 - [x] 6.2 Triage `tests/test_retry.py` test by test: delete the `RetryService`-class tests and keep the classify/backoff tests. Update the other Appendix C R4 test references. `check:api-types` stays clean (the OpenAPI document is unchanged).
 - [x] 6.3 Add the Appendix D R4 spec deltas.
-- [ ] 6.4 Verification: node-27 C2 receipt (display read routes PASS, deny-write PASS), because `readonly_validation_probe.py` changes. On node-22, one idle pass and one submitting pass.
+- [x] 6.4 Verification: node-27 C2 receipt (display read routes PASS, deny-write PASS), because `readonly_validation_probe.py` changes. On node-22, one idle pass and one submitting pass.
 
 Suggested fixture level: expanded - an API dependency provider and the display deny-write probe.
 Minimal mergeable slice: atomic - the service, its provider, its aliases (`chain.py:96`, `chain_forecast_execution.py:105`) and its only isinstance consumer are one component; deleting part of it fails at import.
@@ -344,7 +344,7 @@ Slice triage (R4, #3261, tasks 6.1-6.4):
 
 - [x] 7.1 Switch the fixtures that seed rows through `create_job` / `reserve_job` / `reclaim_reservation` / `bind_reservation` (Appendix C, R5 row) to ORM inserts. This is a test-only PR.
 - [x] 7.2 Delete the four methods. Test-only callers do not count as callers. Keep `update_job_status` and `insert_event` (cancel route).
-- [ ] 7.3 Verification: node-27 C2 receipt (read routes and deny-write); node-22 one idle pass and one submitting pass (D5 deleting slice). `tests/test_pipeline_persistence.py` runs on SQLite, so CI covers it.
+- [x] 7.3 Verification: node-27 C2 receipt (read routes and deny-write); node-22 one idle pass and one submitting pass (D5 deleting slice). `tests/test_pipeline_persistence.py` runs on SQLite, so CI covers it.
 
 Suggested fixture level: compact - deletion of unreferenced methods in one module plus fixture changes.
 Minimal mergeable slice: 7.1 first, test-only; then 7.2 + 7.3.
@@ -392,18 +392,45 @@ Slice triage (R5-2, #3263, tasks 7.2, 7.3):
 
 ## 8. T1 — Pin retry/attempt accounting in one table
 
-- [ ] 8.1 Add `tests/test_retry_accounting_table.py` with plain-data rows that call today's pure functions, wherever they live:
+- [x] 8.1 Add `tests/test_retry_accounting_table.py` with plain-data rows that call today's pure functions, wherever they live:
   - rows A–F, M, N and Q (design.md Appendix A);
   - the `rsplit("_retry_", 1)[1]) + 1` formulas (`chain_forecast_orchestrator_cycle.py:676-683`, `:750`);
   - the inline `failure_number - 1` term (`:296`);
   - the non-master path (`file_orchestration_journal.py:12455-12459`, pinned on the caller-snapshot `retry_count` it uses today);
   - the status-set difference between `chain_forecast_orchestrator_cycle.py:224,247` and `retry.py:67-78`, pinned as different;
   - the default limit, with `NHMS_SCHEDULER_RETRY_LIMIT` and `SLURM_GATEWAY_MAX_RETRIES` overrides.
-- [ ] 8.2 In the same file, add an index of integration rows G–L, O and P: each row's input and expected outcome, plus the existing test that pins it (Appendix A), asserted to exist by node id.
-- [ ] 8.3 Verification: CI only (test-only).
+- [x] 8.2 In the same file, add an index of integration rows G–L, O and P: each row's input and expected outcome, plus the existing test that pins it (Appendix A), asserted to exist by node id.
+- [x] 8.3 Verification: CI only (test-only).
 
 Suggested fixture level: compact - test-only.
 Minimal mergeable slice: atomic - one new test file.
+
+Slice triage (T1, #3264, tasks 8.1-8.3):
+- Issue type: test (characterization; no production change). Fixture level: compact (agree): one new test file, no production code. Recon at 9e7af1aee (`.workplans/3264/recon.md`, anchors corrected by fixture review); the anchors in this block replace the stale ones in 8.1 and Appendix A.
+- Governing invariant: the table pins what the code does today, divergences included, and is green on unchanged production code. A divergence is pinned as a divergence (two rows, same input where possible, different expected values), never reconciled. The table is the baseline T2 (9.1-9.7) must keep, so it covers every site T2 moves.
+- Recon anchors (HEAD): `retry_identity.py` `split_retry_job_identity:47`, `retry_suffix_attempt:63`, `effective_retry_attempt:69`, `retry_attempt_floor:75`, `normalize_retry_attempt_floors:89`, `cohort_retry_attempt_floors:115`, `member_charged_retry_attempt:128`, `has_active_manual_retry_decision:162`; `file_journal_retry_helpers.py:51-55` `_next_current_master_retry_identity` (id built at `:55`); `chain.py:837` `_next_retry_attempt_for_stage`; `chain_runtime_utils.py:356` `_retry_attempt_from_basins`, `:448` `_pipeline_retry_job_id`, `:452` `_stage_job_sort_key`; `chain_forecast_execution.py:571,624` mint (`max(floors)+1`, skip-forward loop ~`:655-660`); `chain_forecast_orchestrator_cycle.py:196` `_retry_cycle_stage_job_id`, `:234` / `:243` inline status sets, `:288` `max(retry_count, suffix_attempt, failure_number - 1) + 1` in `_schedule_cycle_stage_retry` (`:248`), `:668-675` / `:741-748` `submission_attempt` increments in `_reserve_cycle_stage` (evidence reaches `repository.reserve_pipeline_job` ~`:770-778`); `file_orchestration_journal.py:12456-12459` non-master `int(source.get("retry_count") or 0) + 1` with the unstripped id, `:12678` manual path `effective_retry_attempt(...) + 1`; `scheduler_state_rows.py:517` `_state_retry_attempt`, `:636` `_job_retry_attempt`, `:656` `stage_retry_attempt_floors`, `:725` `_state_retry_limit`; `retry.py:64-77` status sets, `:201,204` `RetryConfig`; `scheduler_state_types.py:11` `DEFAULT_RETRY_LIMIT`; `scheduler_config/config.py:175` `NHMS_SCHEDULER_RETRY_LIMIT` via `_env_int` (`scheduler_runtime_roots.py:754`); `services/slurm_gateway/config.py:60,66` (`SLURM_GATEWAY_MAX_RETRIES`; `get_settings()` is `lru_cache`d, so build `SlurmGatewaySettings()` directly).
+- Blast radius: `tests/test_retry_accounting_table.py` (new) only. No production file, no existing test, no conftest edit.
+- Pure rows (8.1), plain data, calling the real function:
+  - C (one-basin half): `retry_attempt_floor`. F: `cohort_retry_attempt_floors` + `member_charged_retry_attempt`. M: `split_retry_job_identity` / `retry_suffix_attempt` (stacked; malformed tail → attempt 0), `_next_retry_attempt_for_stage` with a minimal stage. N: `_retry_attempt_from_basins`. Q: `effective_retry_attempt`, `_next_current_master_retry_identity`.
+  - `_pipeline_retry_job_id` (9.1): attempt 0 / -1 / 1 / 3 → `_retry_1` / `_retry_1` / `_retry_1` / `_retry_3`.
+  - Stage attempt reads (9.3): `_state_retry_attempt` (`stage=None` → the flat `retry_count`; a stage set → the flat `retry_count` is excluded, only matching rows' suffixes and `stage_retry_attempt_floors` count, a non-matching stage row adds 0); `_stage_job_sort_key` (a persisted `retry_count` wins over the suffix; the suffix is parsed only when the count is missing; no clamp; `removesuffix("_retry_0")`; malformed tail → 0 — pinned as different from `effective_retry_attempt`'s max on the same input); `_job_retry_attempt` (stage None → recorded count only; non-matching stage → 0); `stage_retry_attempt_floors`.
+  - Limits (9.4): `DEFAULT_RETRY_LIMIT == 3`; `RetryConfig().max_retries == 3`; `_state_retry_limit` (`retry_limit` wins over `max_retries`; empty → `DEFAULT_RETRY_LIMIT`; non-int → 0); `NHMS_SCHEDULER_RETRY_LIMIT` unset / empty / non-int → 3, `5` → 5, `-1` → -1, at config construction; `SLURM_GATEWAY_MAX_RETRIES` unset → 3, `5` → 5, `-1` → validation error, through `RetryConfig.from_settings(SlurmGatewaySettings())`. Pinned divergences: `_state_retry_limit` non-int → 0 vs `_env_int` non-int → default; `-1` accepted by the scheduler env vs rejected by the gateway env; the two env vars independent (one set, the other unchanged).
+- Stub-driven rows (8.1), mandatory — if one cannot be reached with the stated stub, stop and report; it may not move to the index:
+  - A and E mint half: `_floored_cycle_stage_retry_job_id` with a stub self (`repository.get_pipeline_job`), context (`run_id`, `active_basins[*].state_evidence`) and stage.
+  - `_retry_cycle_stage_job_id` (N precedence, `:205-208`): `context.retry_attempt` set and positive (wins over stacked rows); `0` and absent (falsy: fall through to `_next_retry_attempt_for_stage`, driven with a non-empty `existing_jobs` so the result is `_retry_(max+1)`, not `_retry_1`); negative (the only value that reaches the `<= 0 → 1` clamp).
+  - `:288` (D): drive `_schedule_cycle_stage_retry` with `current` carrying `accepted_submit_contract_version` and a shape that classifies as `master`, `retry_service.should_auto_retry → True`, and `backoff_schedule=[0]` or a monkeypatched `_chain.time.sleep` (an empty list falls back to 60s). Three rows where `retry_count`, `suffix_attempt` and `failure_number - 1` each alone sets the result. Today the master strips the base (`_retry_N` → `_retry_(N+1)`), unlike Appendix A row D's `_retry_N_retry_M` wording — pin today's value.
+  - `:668-675` / `:741-748` increments: observe `submission_attempt` in the evidence passed to a stub `repository.reserve_pipeline_job`, with `supports_accepted_submit_reconcile=True`; the forcing branch also needs `forcing_member_tasks`. Rows: flat suffix, stacked suffix, malformed tail, `context.retry_attempt` larger than the suffix. Pin only the observed values (a negative-tail "difference" from `retry_suffix_attempt` is unobservable through the outer `max` and is not asserted).
+  - Journal non-master path (`:12456-12459`) on a `tmp_path` file journal: the caller-snapshot `retry_count` differs from the durable row's, proving the snapshot is read; the id stacks.
+  - Master vs non-master pair (9.6): the same input (`X_retry_1`, `retry_count=1`) through `_next_current_master_retry_identity` and the journal non-master path → `X_retry_2` vs `X_retry_1_retry_2`, pinned as different.
+- Status sets: observe `_terminal_stage_needs_manual_retry` (`:234`) with `context.retry_attempt` non-None, `active_basins=()`, a non-empty `slurm_job_id`, only `status` varying; and `_terminal_stage_can_retry_after_upstream_refresh` (`:243`) with `refreshed_upstream_finished_at` set and no terminal time, only `status` varying; iterate every status in the `status_vocab` union. Pin `:234` == `MANUAL_RETRY_SOURCE_STATUSES`, `:243` == `FAILED_RETRY_STATUSES - {"permanently_failed"}`, and the two as different. A status whose result comes from another branch under the fixed shape is a fixture error — stop and report.
+- Index (8.2): each row's input, expected outcome and pin node id(s), asserted to exist by parsing the target file (AST: a top-level `def test_<name>`), not by collection. Rows: A limit-blocks half (`tests/test_retry_mint_floor.py::test_prefix_switch_does_not_reset_the_minted_attempt_and_the_budget_blocks_on_time`, `::test_failure_lane_prefix_switch_stays_within_the_limit`); B (`::test_cohort_digest_changes_do_not_escape_the_budget`, `::test_failure_lane_cohort_digest_change_stays_within_the_limit`); C sibling half (`::test_sibling_model_retry_rows_do_not_raise_this_models_floor`); G-K (`tests/test_chain_cross_stage_state.py` per recon); L (`::test_restart_stage_from_basins_takes_earliest_marker_and_ignores_markerless_members`); O (`tests/test_orchestration_chain.py::test_manual_retry_claim_judgement_three_states`, `tests/test_production_scheduler.py::test_candidate_basin_manifest_mints_retry_attempt_only_under_active_manual_retry_decision`); P (`tests/test_orchestration_chain.py::test_file_journal_post_window_concurrent_public_cycles_submit_one_retry`; no dedicated pin exists — recorded as a gap in the PR body, not filled here); journal manual path `:12678` (9.2: `tests/test_file_orchestration_journal.py::test_file_journal_manual_repair_suffix_only_target_emits_next_durable_attempt`).
+- Must preserve: no production change (`git diff --stat master...HEAD -- services packages apps scripts` empty); every existing pin untouched.
+- Risk packs: Legacy compatibility (the rows are T2's baseline → one mutation per pinned function or inline formula turns its rows red, reverted); Config / project setup (env overrides → the limit rows, env set and restored by `monkeypatch`). Not selected: every other pack (test-only).
+- Required evidence:
+  1. The new file green on unchanged production code (`uv run pytest -q tests/test_retry_accounting_table.py`), with a row count per section and a map row → 9.x task it baselines.
+  2. One mutation per pinned function or inline formula (C, F, M, N, Q, `_pipeline_retry_job_id`, `_state_retry_attempt`, `_stage_job_sort_key`, `_job_retry_attempt`, `stage_retry_attempt_floors`, `_state_retry_limit`, `_env_int`, A/E mint, `_retry_cycle_stage_job_id`, `:288` per term, both increments, journal non-master, both status sets), each red, production file restored byte-for-byte (hash).
+  3. An index row whose node id is renamed fails the existence check (shown once, reverted).
+  4. ruff `--no-cache`; CI full suite (test-only: CI only, no node-27/node-22).
 
 ## 9. T2 — `retry_identity.py` becomes the owner
 
