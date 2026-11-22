@@ -159,10 +159,6 @@ def install_chain_runtime_compat() -> dict[str, object]:
         }
     )
 
-    def _utcnow() -> _chain.datetime:
-        return _chain.datetime.now(_chain.UTC)
-
-    _chain.__dict__["_utcnow"] = _utcnow
     _CHAIN_WORKSPACE_LOG_COMPAT_METHOD_FACADE_MISSING = tuple(
         (
             name
@@ -478,6 +474,5 @@ def install_chain_runtime_compat() -> dict[str, object]:
         "_CHAIN_WORKSPACE_LOG_COMPAT_METHOD_FORWARDERS",
         "_CHAIN_WORKSPACE_LOG_COMPAT_TOP_LEVEL_FACADE_MISSING",
         "_CHAIN_WORKSPACE_LOG_COMPAT_TOP_LEVEL_FORWARDERS",
-        "_utcnow",
     )
     return {name: value for name, value in locals().items() if name in export_names}

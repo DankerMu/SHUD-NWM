@@ -626,6 +626,7 @@ _parse_gateway_time = chain_runtime_utils._parse_gateway_time
 _ensure_utc = chain_runtime_utils._ensure_utc
 _format_time = chain_runtime_utils._format_time
 _format_time_or_none = chain_runtime_utils._format_time_or_none
+_utcnow = chain_runtime_utils._utcnow
 _template_export_lines = chain_runtime_utils._template_export_lines
 _python_runtime_export_lines = chain_runtime_utils._python_runtime_export_lines
 _response_json_or_text = chain_runtime_utils._response_json_or_text

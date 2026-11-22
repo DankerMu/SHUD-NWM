@@ -51,6 +51,7 @@ from services.orchestrator.scheduler_adapters import (  # noqa: F401
     _MetStoreCanonicalReadinessProvider,
     _UnavailableCanonicalReadinessProvider,
 )
+from services.orchestrator.scheduler_evidence import _bounded_evidence_payload, _evidence_status
 from services.orchestrator.scheduler_lease import (  # noqa: F401
     LOCK_OWNER,
     LOCK_SCHEMA_VERSION,
@@ -219,6 +220,7 @@ from services.orchestrator.scheduler_state import (  # noqa: F401
     _top_level_source_cycle_download_blocker,
 )
 from services.orchestrator.scheduler_state_compat import install_scheduler_state_compat
+from services.orchestrator.scheduler_timing import _now, _sleep
 from workers.data_adapters.base import CycleDiscovery
 from packages.common.contracts.time_normalization import cycle_id_for, format_cycle_time
 
@@ -372,6 +374,12 @@ del _scheduler_type
 
 
 SchedulerSourceCycle = _scheduler_discovery.SchedulerSourceCycle
+
+
+_source_forecast_hours = _scheduler_candidates._source_forecast_hours
+_source_policy_identity = _scheduler_candidates._source_policy_identity
+_source_object_identity = _scheduler_candidates._source_object_identity
+_accepted_horizon_from_hours = _scheduler_candidates._accepted_horizon_from_hours
 
 
 class _BlockedModelRegistry:

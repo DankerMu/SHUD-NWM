@@ -387,3 +387,7 @@ Chain runtime utility alias guard rows:
 - `_python_runtime_export_lines`: owner `services.orchestrator.chain_runtime_utils`; retention legacy runtime import; removal condition owner/public API migration; verification command: `uv run pytest -q tests/test_orchestration_chain.py`.
 - `_response_json_or_text`: owner `services.orchestrator.chain_runtime_utils`; retention legacy runtime import; removal condition owner/public API migration; verification command: `uv run pytest -q tests/test_orchestration_chain.py`.
 - `_error_code_from_response`: owner `services.orchestrator.chain_runtime_utils`; retention legacy runtime import; removal condition owner/public API migration; verification command: `uv run pytest -q tests/test_orchestration_chain.py`.
+
+F1-2 (#3271) moved-helper facade binding guard rows (explicit facade alias that replaces the `install_chain_runtime_compat` nested definition):
+
+- `_utcnow`: owner `services.orchestrator.chain_runtime_utils`; retention reason: late-binding facade read and monkeypatch path; removal condition: deleted with the inventory in F3; verification command: `uv run pytest -q tests/test_facade_name_resolution.py tests/test_orchestration_chain.py`.

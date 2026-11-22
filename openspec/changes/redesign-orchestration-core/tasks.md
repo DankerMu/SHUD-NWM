@@ -1988,7 +1988,7 @@ Slice triage (T2-5, #3269, tasks 9.5, 9.7):
 
 ## 10. F1 — Compat-defined production helpers move to owners; facade resolution guard
 
-- [ ] 10.1 Move `_now`, `_sleep`, `_bounded_evidence_payload` and `_evidence_status` (`scheduler_compat_runtime.py:195,208,311,315`) into a scheduler owner module. Keep the `_source_*` / `_accepted_horizon_from_hours` aliases (`:72-75`) as explicit aliases in `scheduler.py`. Move `_utcnow` (`chain_compat_runtime.py:209`) into a chain owner module. Each facade imports the moved names explicitly. Owners keep reading them through `_scheduler.` / `_chain.`. The entropy facade guard flags every new `_`-prefixed facade import (`scripts/governance/entropy_audit/facade_guard.py:110-142,505-568`), so add a Guard Hook Seed row for each new name to the matching compatibility inventory, with removal condition "deleted with the inventory in F3".
+- [x] 10.1 Move `_now`, `_sleep`, `_bounded_evidence_payload` and `_evidence_status` (`scheduler_compat_runtime.py:195,208,311,315`) into a scheduler owner module. Keep the `_source_*` / `_accepted_horizon_from_hours` aliases (`:72-75`) as explicit aliases in `scheduler.py`. Move `_utcnow` (`chain_compat_runtime.py:162-163`, nested in the installer) into a chain owner module. Each facade imports the moved names explicitly. Owners keep reading them through `_scheduler.` / `_chain.`. The entropy facade guard flags every new `_`-prefixed facade import (`scripts/governance/entropy_audit/facade_guard.py:110-142,505-568`), so add a Guard Hook Seed row for each new name to the matching compatibility inventory, with removal condition "deleted with the inventory in F3".
 - [x] 10.2 Add `tests/test_facade_name_resolution.py`. It statically collects every attribute read through `_scheduler.` / `_chain.` in `services/orchestrator/*.py`, and every name patched or read on `scheduler` / `chain` in `tests/`, and asserts that each one resolves on the imported facade.
 - [ ] 10.3 Verification: CI, then node-22 batch passes per D5.
 
@@ -2052,6 +2052,90 @@ Slice triage (F1-1, #3270, task 10.2):
     - `tests/test_retry_accounting_ast_guard.py`
     - `tests/test_ci_shard_tests.py`
   - CI's full sharded suite is the gate. Test-only, so no node-27 or node-22 run (D5).
+
+Slice triage (F1-2, #3271, tasks 10.1, 10.3):
+- Issue type: pure move. Fixture level: expanded (agree). Every scheduler pass calls these helpers, and the move changes the import surface of both facades.
+  - Width: one PR, atomic. It moves five helpers and adds explicit facade bindings.
+- Recon at 4330718cc. Task 10.1's `chain_compat_runtime.py:209` is stale; the location is `:162-163`.
+  - `scheduler_compat_runtime.py` starts with `globals().update(_scheduler.__dict__)` (`:6`). Every free name in its bodies is therefore a snapshot copy of the facade's dict at import time, not a live facade read.
+    - `_bounded_evidence_payload` (`:195-205`) reads `MAX_EVIDENCE_BYTES` and `_scheduler_evidence.bounded_evidence_payload`.
+    - `_evidence_status` (`:208-209`) reads `_scheduler_evidence.evidence_status`.
+    - `_now` (`:311-312`) reads `datetime` and `UTC`.
+    - `_sleep` (`:315-318`) does a local `import time`.
+    - All four are exported through `EXPORTS` (`:361-364`) and installed by `scheduler.py:671`.
+    - The two evidence wrappers are named in `_SCHEDULER_EVIDENCE_COMPAT_WRAPPER_OWNER_NAMES` (`:248-249`) and in `_SCHEDULER_EVIDENCE_COMPAT_FACADE_WRAPPERS` (`{name: globals()[name] …}`).
+    - The `_source_*` / `_accepted_horizon_from_hours` aliases are at `:72-75`.
+  - `chain_compat_runtime.install_chain_runtime_compat` defines `_utcnow` inside the installer (`:162-163`, body `_chain.datetime.now(_chain.UTC)`), sets `_chain.__dict__["_utcnow"]` (`:165`) and exports the name (`:481`).
+    - The installer calls `_chain._array_accounting_dependencies()` at `:253`, which reads `_utcnow` (`chain.py:670`), and it reads `_chain.__dict__["_utcnow"]` at `:258`.
+    - `chain.py:851` runs the installer. The owners (`chain_forecast_*`) read `_chain._utcnow`.
+  - `scheduler_runtime.py:126,174,263` already define `_bounded_evidence_payload`, `_evidence_status` and `_now` as `getattr(_scheduler, …)` forwarders. That rules `scheduler_runtime.py` out as a target, because a facade import from it would recurse.
+  - `tests/test_time_helper_consolidation.py` counts module-level `def`s matching `_?utc_?now` against `tests/time_helper_ceiling.json` (`ceiling: 0`).
+- Targets and bodies:
+  - `_bounded_evidence_payload` and `_evidence_status` go into `scheduler_evidence.py`. That module owns `MAX_EVIDENCE_BYTES`, `bounded_evidence_payload` and `evidence_status`, and it does not import the facade.
+    - `_bounded_evidence_payload(payload, *, reason, max_evidence_bytes=None)` returns `bounded_evidence_payload(payload, reason=reason, max_evidence_bytes=MAX_EVIDENCE_BYTES if max_evidence_bytes is None else max_evidence_bytes)`.
+    - `_evidence_status(evidence, fallback)` returns `evidence_status(evidence, fallback)`.
+    - Both stay `def` wrappers that read module globals at call time, not `x = y` aliases. That way the owner patches at `tests/test_production_scheduler.py:2187` and `:21421` are still observed.
+  - `_now` and `_sleep` go into `scheduler_timing.py`, which has stdlib imports only. The bodies are verbatim except that `_now`'s `config` parameter is annotated `Any`, so the module's imports are unchanged. A `TYPE_CHECKING` import of `ProductionSchedulerConfig` was tried and rejected: the static import-closure scan in `tests/test_node27_connection_attribution_delegated.py` follows `TYPE_CHECKING` blocks, and it would count the DB connect closure as widened.
+  - `_utcnow` goes into `chain_runtime_utils.py` as `from packages.common.contracts.time_normalization import utc_now as _utcnow  # noqa: F401 - re-exported to the chain facade`, on its own line next to that module's `format_iso_utc as _format_time` import. It is unused inside the module, so without the `noqa` ruff reports F401, and `ruff --fix` would delete it and break `import services.orchestrator.chain`.
+    - It must not be a module-level `def`: the time-helper ceiling would count it, whereas the current nested `_utcnow` is not counted.
+    - `utc_now` returns `datetime.now(UTC)` (`time_normalization.py:213-219`).
+    - `chain.py` binds it with `_utcnow = chain_runtime_utils._utcnow` in the alias block at `chain.py:576-632`.
+- Must preserve:
+  - The patch targets that tests and production actually use observe the same binding before and after. The implementer writes one row per (helper, free name) with the old binding, the new binding, and the patch targets in use that affect it.
+  - Recon backing this, re-grepped by the implementer:
+    - `MAX_EVIDENCE_BYTES`: the roughly 9 `scheduler.MAX_EVIDENCE_BYTES` facade patches do not reach this helper, either before (compat snapshot) or after (`scheduler_evidence` global). No test patches `scheduler_evidence.MAX_EVIDENCE_BYTES`.
+    - `bounded_evidence_payload` / `evidence_status`: a patch on `scheduler_evidence` is observed both before and after.
+    - `datetime` / `UTC`: no test patches `chain.datetime`, `chain.UTC`, `scheduler.datetime`, `scheduler_timing.*` or `time_normalization.*`, and no test uses freezegun.
+    - `"services.orchestrator.chain.time.sleep"` patches the global `time` module, which `_sleep` sees both before and after.
+  - Owners keep reading `_scheduler._now`, `_scheduler._sleep`, `_scheduler._bounded_evidence_payload`, `_scheduler._evidence_status` and `_chain._utcnow` through the facade, so the roughly 15 `"services.orchestrator.scheduler._now"`-style patches keep working.
+  - The facades bind the owners' objects: `scheduler._now is scheduler_timing._now`, `chain._utcnow is chain_runtime_utils._utcnow`, and likewise for the rest.
+  - The compat tables keep their content, and every compat-table test stays green unchanged. The compat module gets the moved names only from its `globals().update(_scheduler.__dict__)` snapshot.
+  - The `_source_*` / `_accepted_horizon_from_hours` aliases also become explicit alias lines in `scheduler.py`. The compat module keeps its own copies, because its tables read them.
+- Change list:
+  - Move the bodies as specified above. Delete them from the compat modules, including the `_chain.__dict__["_utcnow"] = …` line and the `_utcnow` export entry. Drop the four scheduler names from the compat `EXPORTS` tuple (`:361-364`).
+  - Add the explicit facade bindings in the top import blocks:
+    - `scheduler.py` gets `from services.orchestrator.scheduler_evidence import _bounded_evidence_payload, _evidence_status`, `from services.orchestrator.scheduler_timing import _now, _sleep`, and the four `_source_*` / `_accepted_horizon_from_hours` alias lines, all before `scheduler.py:665`.
+    - `chain.py` gets the `_utcnow` alias before `chain.py:849`.
+    - The compat module does not import the moved names.
+  - Add one single-line Guard Hook Seed row per new facade binding: 8 in `SCHEDULER_COMPATIBILITY_INVENTORY.md` and 1 in `CHAIN_COMPATIBILITY_INVENTORY.md`.
+    - Scheduler: `_now` and `_sleep` → `scheduler_timing`; `_bounded_evidence_payload` and `_evidence_status` → `scheduler_evidence`; `_source_forecast_hours`, `_source_policy_identity`, `_source_object_identity` and `_accepted_horizon_from_hours` → `scheduler_candidates`.
+    - Chain: `_utcnow` → `chain_runtime_utils`.
+    - Coverage is per physical line (`facade_guard.py:551-610`). Template: ``- `_now`: owner `services.orchestrator.scheduler_timing`; retention reason: late-binding facade read and monkeypatch path; removal condition: deleted with the inventory in F3; verification command: `uv run pytest -q tests/test_facade_name_resolution.py tests/test_production_scheduler.py`.`` The chain row uses `tests/test_orchestration_chain.py`.
+    - The spec deltas' "no compatibility inventory is edited" is F3's end state. Editing the inventory in F1 is the transition under `design.md:232`, and the PR body says so.
+  - Do not write `file.py:NNN` in comments in shipped Python; the hard-line-reference baseline checks for it.
+- Out of scope: deleting the compat modules, installers and tables (F2); replacing late binding. `.workplans/3270/carry-overs.md` is for F2.
+- Risk packs: Legacy compatibility (facade and monkeypatch surface); Runtime contract (the clock and evidence helpers on every pass). Not selected: schema, concurrency, cross-plane.
+- Required evidence:
+  1. The free-name table described above.
+  2. Identity checks in a fresh process, covering all five helpers and the four aliases.
+  3. The F1 guard green (`tests/test_facade_name_resolution.py`). The entropy facade guard shows no `compatibility-facade-growth` (`uv run --no-sync python scripts/governance/audit_repo_entropy.py --format json --structural-base-ref master`).
+  4. A mutation. In a scratch tree, delete `_now` from the new `scheduler_timing` import line in `scheduler.py`. `scheduler` still imports, and `tests/test_facade_name_resolution.py` goes red naming `_now`: the getattr read at `scheduler_runtime.py:264` and the `"services.orchestrator.scheduler._now"` patch-string sites (`tests/test_production_scheduler.py:24969` and 14 others). Restore the line and check the hash.
+     - Deleting the chain `_utcnow` alias instead makes `import services.orchestrator.chain` raise `NameError` during the installer. Record that as the expected failure mode, not as guard evidence.
+  5. ruff, `git diff --check`, `openspec validate`, and uv.lock unchanged.
+- Verification (owner policy 2026-11-22: no local full suite):
+  - Locally, run:
+    - `tests/test_facade_name_resolution.py`
+    - `tests/test_production_scheduler.py`
+    - `tests/test_orchestration_chain.py`
+    - `tests/test_scheduler_evidence_summary_lanes.py`
+    - `tests/test_time_helper_consolidation.py`
+    - the inventory and facade guards: `tests/test_entropy_audit_facade_guard_aliases.py`, `tests/test_entropy_audit_facade_guard_forwarders.py`, `tests/test_entropy_audit_instruction_inventory.py` and `tests/test_entropy_audit_line_references.py`
+    - `tests/test_import_layering_guard.py`
+    - `tests/test_orchestrator_first_import.py`
+    - every test that names the compat modules or a moved name (`git grep -lE "scheduler_compat_runtime|chain_compat_runtime|scheduler_timing|_utcnow|_bounded_evidence_payload|_evidence_status" -- tests`)
+  - CI: the full sharded suite.
+  - node-27:
+    - First, a fresh-process import check over all integration-marked files at HEAD (the `tasks.md:461` method).
+    - Then run `-m integration` over every file that imports the touched modules (at least `tests/test_qhh_production_bootstrap_scheduler.py`) on throwaway `nhms_it_*` DBs, after `mkdir -p /home/nwm/tmp && export TMPDIR=/home/nwm/tmp`.
+    - Expected: all pass, 0 leftover DBs.
+  - node-22: this is a pure move, so it joins the D5 pure-move batch: one idle and one submitting pass per batch of at most 3 merged PRs or one day.
+    - The open batch t2b3 holds #3323 (merged 2026-11-22T06:48Z). #3271 joins it if it merges the same day; otherwise it opens a new batch.
+    - node-22 is down (NFS mounts), so the PR merges as `Part of #3271`. 10.1 is ticked; 10.3 stays unticked until the batch passes are recorded, as with 9.7 / `Part of #3269`.
+- Review focus:
+  1. Import placement: both facades and the compat installers import cleanly, and the compat tables are unchanged.
+  2. The evidence wrappers read `scheduler_evidence` globals at call time, so the owner patches are observed.
+  3. `_utcnow` is an alias of `utc_now`, not a new module-level `def`.
+  4. The Guard Hook Seed rows have one physical line each with all metadata, and the audit shows no `compatibility-facade-growth`.
 
 ## 11. F2 — Delete installers and `_COMPAT_` tables
 

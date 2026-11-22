@@ -1045,6 +1045,23 @@ def evidence_status(evidence: Mapping[str, Any], fallback: str) -> str:
     return str(status) if status not in (None, "") else fallback
 
 
+def _bounded_evidence_payload(
+    payload: Mapping[str, Any],
+    *,
+    reason: str,
+    max_evidence_bytes: int | None = None,
+) -> dict[str, Any]:
+    return bounded_evidence_payload(
+        payload,
+        reason=reason,
+        max_evidence_bytes=MAX_EVIDENCE_BYTES if max_evidence_bytes is None else max_evidence_bytes,
+    )
+
+
+def _evidence_status(evidence: Mapping[str, Any], fallback: str) -> str:
+    return evidence_status(evidence, fallback)
+
+
 def empty_model_discovery() -> dict[str, Any]:
     return {
         "active_model_count": 0,
