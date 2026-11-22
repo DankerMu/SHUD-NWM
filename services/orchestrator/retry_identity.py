@@ -44,6 +44,15 @@ _MAX_RETRY_ATTEMPT_FLOOR_ENTRIES = 256
 _MAX_RETRY_ATTEMPT_FLOOR_MODEL_ID_LENGTH = 256
 
 
+def retry_job_id(base: str, attempt: int) -> str:
+    """Format the retry job id ``<base>_retry_<n>`` with ``n = max(int(attempt), 1)``.
+
+    ``base`` is used as given (not stripped), so a stacked base stays stacked.
+    """
+
+    return f"{base}{RETRY_JOB_ID_MARKER}{max(int(attempt), 1)}"
+
+
 def split_retry_job_identity(job_id: str | None) -> tuple[str, int]:
     """Split ``job_id`` into its retry base and the last ``_retry_<n>`` attempt.
 

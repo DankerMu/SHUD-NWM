@@ -18,7 +18,7 @@ Order, dependencies and verification follow design.md D1–D5. Appendix C says w
 - [x] 1.4 Delete `tests/test_analysis_pipeline.py`, the `AnalysisOrchestrator` assertions in `tests/test_orchestration_chain.py` (:37, :13364, :13376, :13547, :13746, :14210), and the writer-receipt case at `tests/test_gateway_reconcile_writer_receipts.py:134`.
 - [x] 1.5 CLI test: every remaining subcommand parses exactly as before, and `trigger-analysis` is an argparse usage error (exit 2).
 - [x] 1.6 (separate PR after 1.1–1.5; spec-only) Triage the remaining `analysis-run-pipeline` requirements (`:25-86`) against the worker analysis branches (e.g. `workers/output_parser/parser.py`, `run_type='analysis'`). For each requirement, add a REMOVED delta or rewrite it as a worker-only requirement in this change.
-- [ ] 1.7 Verification: on node-22 after deploy, one idle pass and one submitting pass. `cli.py` is the scheduler unit's entrypoint.
+- [x] 1.7 Verification: on node-22 after deploy, one idle pass and one submitting pass. `cli.py` is the scheduler unit's entrypoint.
 
 Suggested fixture level: expanded - removes a CLI subcommand on the scheduler's entrypoint module.
 Minimal mergeable slice: 1.1–1.5 + 1.7 (code deletion) - atomic: the subcommand, the only class it drives, its tests and orphans form one unreachable component; leaving any part keeps an import of a deleted module. 1.6 (spec triage) follows as its own spec-only PR.
@@ -434,19 +434,135 @@ Slice triage (T1, #3264, tasks 8.1-8.3):
 
 ## 9. T2 — `retry_identity.py` becomes the owner
 
-- [ ] 9.1 Id formatting. Add `retry_job_id(base, attempt)`, keeping the `max(attempt, 1)` clamp, and delegate the four hand-built sites that remain after R4 deletes `retry.py:~286`. Retarget their table rows.
-- [ ] 9.2 Attempt formulas. Add `next_stage_attempt`, `mint_attempt(..., is_occupied)`, `inline_retry_attempt`, `next_after_failure_master`, `next_after_failure_non_master` and `restart_stage_from_basins`, and delegate every call site: `chain.py:863`, `chain_forecast_execution.py:573,625`, `chain_forecast_orchestrator_cycle.py:296,676-683,750`, `file_journal_retry_helpers.py:51-54`, `file_orchestration_journal.py:12432,12455-12459,12678`, `chain_runtime_utils.py:329,356`. Row L becomes a plain-data row.
+- [x] 9.1 Id formatting. Add `retry_job_id(base, attempt)`, keeping the `max(attempt, 1)` clamp, and delegate the hand-built sites whose output the clamp cannot change: `chain_runtime_utils.py:448-449`, `chain_forecast_orchestrator_cycle.py:289`, `file_journal_retry_helpers.py:55`. The fourth, `file_orchestration_journal.py:12458-12459` (unclamped, stacking), is deferred to 9.2. Retarget their table rows.
+- [ ] 9.2 Attempt formulas. Add `next_stage_attempt`, `mint_attempt(..., is_occupied)`, `inline_retry_attempt`, `next_after_failure_master`, `next_after_failure_non_master` and `restart_stage_from_basins`, and delegate every call site: `chain.py:863`, `chain_forecast_execution.py:573,625`, `chain_forecast_orchestrator_cycle.py:296,676-683,750`, `file_journal_retry_helpers.py:51-54`, `file_orchestration_journal.py:12432,12455-12459,12678`, `chain_runtime_utils.py:329,356`. Row L becomes a plain-data row. `file_orchestration_journal.py:12458-12459` is also the last remaining hand-built id site: `next_after_failure_non_master` formats it inside the owner with today's unclamped arithmetic (pinned by T1 `snapshot-negative-unclamped`).
 - [ ] 9.3 Stage attempt reads. Add `stage_attempt` and delegate `scheduler_state_rows.py:517-656` and the `_stage_job_sort_key` parser.
 - [ ] 9.4 Limit and status sets.
   - The owner holds the default limit constant; `DEFAULT_RETRY_LIMIT` and `RetryConfig`'s default read it. `SlurmGatewaySettings.max_retries` keeps its literal default (the gateway must not import the orchestrator), and a parity test asserts that it equals the owner constant.
   - `NHMS_SCHEDULER_RETRY_LIMIT` and `SLURM_GATEWAY_MAX_RETRIES` keep their readers.
   - The two hard-coded status sets move to the owner unchanged.
 - [ ] 9.5 Add the AST guard (design.md D2) with an empty allowlist. It matches only `_retry_` / `RETRY_JOB_ID_MARKER` id construction, so other f-strings such as `f"manual_retry_{key}"` (`scheduler_state_manual_retry.py:914`) are not flagged.
-- [ ] 9.6 (after T1, independent of the guard) File the behaviour-change issue for the non-master path and the status-set difference, citing the T1 rows it would edit.
+- [x] 9.6 (after T1, independent of the guard) File the behaviour-change issue (#3319) for the non-master path and the status-set difference, citing the T1 rows it would edit.
 - [ ] 9.7 Verification: per PR, CI. The T1 table's expected values are unchanged in every PR. node-22 batch passes per D5.
 
 Suggested fixture level: expanded - persisted retry identity in a shared state machine.
 Minimal mergeable slice: 9.1 alone; 9.2, 9.3, 9.4 follow as separate PRs, and 9.5 lands last when no local formula remains.
+
+Slice triage (T2-1, #3265, tasks 9.1, 9.6):
+- Issue type: refactor (pure move; no output changes for any input). Fixture level: expanded (agree with the issue's expanded). Two expanded triggers apply. First, persisted or shared state (`issue-risk-contract.md:22`): every id this slice formats becomes a durable `pipeline_job.job_id` in the file journal, and every later suffix parser reads it. Second, the project's `orchestrator`/`pipeline`/state-machine trigger (`openspec/project-profile.md:107`). No new spec delta is needed. The change's `specs/job-retry-mechanism/spec.md:3-21` already ADDs "Retry and attempt accounting SHALL have one owner". That requirement lists "retry job id formatting" (`:8`) and says "Moving a computation into the owner SHALL NOT change its result for any input" (`:20-21`). design.md Appendix D (`:327-340`) has no T2 row. `grep -rnE '_retry_<|_retry_\{|retry job id|retry_job_id' openspec/specs` returns 16 hits (among them `slurm-job-chain/spec.md:345-376`, `job-retry-mechanism/spec.md:350,876,896-898,1009,1042,1079,1790,2098,2173,2184,2724`, `retry-stage-evidence-supersession/spec.md:40`, `orchestrator-structural-burndown/spec.md:569`); every one describes the id shape and none names the formatting function, so all stay true under a pure formatter move. #3284, the UUID scenario at `job-retry-mechanism/spec.md:203,222`, is out of scope: it is spec-only, it predates #3227 and it changes no code. Folding it in would add a MODIFIED delta to a code PR whose fixture says no delta. It may land before or after this slice.
+- Governing invariant: the three delegated sites (`chain_runtime_utils.py:448-449`, `chain_forecast_orchestrator_cycle.py:289`, `file_journal_retry_helpers.py:55`) format their ids through `retry_identity.retry_job_id`; `file_orchestration_journal.py:12458-12459` stays hand-built until 9.2 (which formats it unclamped inside `next_after_failure_non_master`), its value pinned by the new `snapshot-negative-unclamped` T1 row. Each delegating site returns byte-identical ids and counts to today for every input, including stacked bases, malformed suffixes and non-positive attempts. The T1 table (`tests/test_retry_accounting_table.py`) stays green with every expected value unchanged.
+- Recon at 5570a72b4. These anchors replace 9.1's "four hand-built sites that remain after R4 deletes `retry.py:~286`"; R4 merged in #3316. The sweep was `git grep -nE '_retry_\{|RETRY_JOB_ID_MARKER\}|\+ *"_retry_"|_retry_" *\+' -- services packages apps scripts workers`, widened with `git grep -nE "[\"']_retry_[\"']|_retry_%|_retry_\{\}"`, `git grep -n RETRY_JOB_ID_MARKER`, an untruncated sweep for every string literal containing `_retry_` in `services packages scripts workers infra apps/**/*.py`, and shell/template forms (`_retry_$`, `_retry_{{`, `_retry_%`) repo-wide outside tests, docs and openspec (empty). It found exactly four sites that build a retry id:
+  1. `chain_runtime_utils.py:448-449` `_pipeline_retry_job_id(base_job_id, attempt)` → `f"{base_job_id}_retry_{max(int(attempt), 1)}"`. This is the existing formatter and the only site that clamps. Its callers:
+     - `chain_forecast_orchestrator_cycle.py:211` (`_retry_cycle_stage_job_id`, row N, after its own `attempt <= 0 → 1` at `:209-210`);
+     - `chain_forecast_execution.py:657` (A/E skip-forward loop), through the late-bound wrapper `chain_forecast_execution.py:135-136` → facade alias `chain.py:593`.
+  2. `chain_forecast_orchestrator_cycle.py:288-289` (`_schedule_cycle_stage_retry`, current-master branch, row D): `next_attempt = max(retry_count, suffix_attempt, failure_number - 1) + 1`; `next_job_id = f"{base_job_id}{RETRY_JOB_ID_MARKER}{next_attempt}"`. `suffix_attempt` comes from `split_retry_job_identity` and is never below 0, so `next_attempt >= 1` and the clamp is a no-op.
+  3. `file_journal_retry_helpers.py:51-55` (`_next_current_master_retry_identity`, row Q): `retry_count = effective_retry_attempt(job_id, current.get("retry_count")) + 1`; `return f"{base_job_id}{RETRY_JOB_ID_MARKER}{retry_count}", retry_count`. `effective_retry_attempt` is never below 0 (`retry_identity.py:69-72`, `_coerce_attempt:155-158`), so the result is at least 1 and the clamp is a no-op. Callers: journal `:12335` (`handle_failed_job` master path) and `:12432` (`schedule_auto_retry` master path).
+  4. `file_orchestration_journal.py:12458-12459` (`schedule_auto_retry`, non-master path): `next_retry_count = int(source.get("retry_count") or 0) + 1`; `retry_job_id = f"{source['job_id']}_retry_{next_retry_count}"`. The base is unstripped, so ids stack. The clamp is not a no-op here. `source["retry_count"]` is `_file_retry_job_int(job, "retry_count")` (`file_journal_retry_helpers.py:631-636,675`), which is `int(value or 0)` with no floor. Nothing between `schedule_auto_retry`'s entry (`:12394`) and `:12458` bounds it. The entry `handle_failed_job` (`:12345-12346`) gates only on `should_auto_retry` (`:12304-12305`). `classify_failure` (`retry.py:119-140`) blocks only on `attempt >= retry_limit`, so a negative attempt passes. Predicted from the arithmetic, not yet observed: a caller snapshot with `retry_count = -1` reaches `:12459` and yields `<id>_retry_0` with count 0. A clamped `retry_job_id` would yield `<id>_retry_1`, which also stops matching the persisted `retry_count` 0 (`:12486,12513`). Production producers write `retry_count >= 0` (`schemas/pipeline_job.schema.json:134-137` `minimum: 0`; journal mints are at least 1), but nothing in code enforces it on this path.
+
+  Not id construction (parse or match only), so out of 9.1:
+  - `chain.py:843` `prefix = f"{base_job_id}_retry_"` (`startswith` match; 9.5 must not flag it);
+  - `db/migrations/000025_active_manual_retry_guard.sql:23` (`run_id || '_retry_'`): a SQL prefix match, invisible to the Python AST guard;
+  - the `"_retry_"` marker literals at `chain_forecast_orchestrator_cycle.py:668,741` (9.2), `chain_runtime_utils.py:457` (9.3) and `scheduler_state_rows.py:886` (`"_retry_" in job_id`);
+  - `operator_action_listing_held.py:100` (regex);
+  - `scheduler_state_manual_retry.py:914` `f"manual_retry_{key}"` (state key; the task's grep pattern matches it).
+
+  Tests outside the guard's scope: `tests/test_file_orchestration_journal.py:10819` (`f"{RETRY_JOB_ID_MARKER}{attempt}"`) and `apps/frontend/e2e/support/monitoring.mocked.ts:132` (mock fixture).
+- Blast radius:
+  - `services/orchestrator/retry_identity.py`: new `retry_job_id`. The module stays dependency-free.
+  - `chain_runtime_utils.py:448-449`: the body becomes a delegate.
+  - `chain_forecast_orchestrator_cycle.py:289`: delegates, and drops `RETRY_JOB_ID_MARKER` from the import at `:88`, which is its only other use. Ruff F401 would flag the leftover import.
+  - `file_journal_retry_helpers.py:55`: delegates, and drops `RETRY_JOB_ID_MARKER` from `:47`, its only other use. No test imports `RETRY_JOB_ID_MARKER` from either module (`git grep -n RETRY_JOB_ID_MARKER -- tests` hits only `test_file_orchestration_journal.py:10816`, which imports it from `retry_identity`).
+  - `tests/test_retry_accounting_table.py`.
+  - The umbrella `tasks.md`: this block, the 9.1/9.6 ticks, 9.1's wording (becomes: three hand-built sites delegated; `file_orchestration_journal.py:12458-12459` deferred to 9.2; the stale `retry.py:~286` reference dropped), and one line added to 9.2 naming `:12458-12459` as the remaining id-formatting site.
+
+  A wrong move would change persisted retry ids. That would split one stage's attempts across two id families, re-mint an occupied id, or let a stacked id lose a layer. Every budget read and suffix parser downstream would then miscount (#2254, #2404, #1845).
+- Non-goals:
+  - renaming or deleting `_pipeline_retry_job_id`. It is a facade name (`chain.py:593`) with a late-bound wrapper (`chain_forecast_execution.py:135-136`), a `docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md:353` row and five direct imports in `tests/test_production_scheduler.py` (`:51955,52298,52399,52882,53990`). That belongs to F1/F2.
+  - any attempt formula, including `:288`'s `max(...) + 1`, the helper's `effective + 1`, `:12458`'s `+ 1` and `:209-210`'s local clamp (all 9.2);
+  - stage attempt reads and `_stage_job_sort_key` (9.3);
+  - limits and status sets (9.4);
+  - the AST guard (9.5);
+  - unifying the master and non-master paths or the status sets (9.6 files the issue and changes nothing);
+  - #3284.
+- Sibling surfaces (must stay):
+  - every parser of the id shape: `split_retry_job_identity` / `retry_suffix_attempt` / `effective_retry_attempt` (`retry_identity.py:47-72`), `_next_retry_attempt_for_stage` (`chain.py:835-855`), `_stage_job_sort_key` (`chain_runtime_utils.py:452-468`), the `rsplit` increments (`chain_forecast_orchestrator_cycle.py:668-675,741-748`), `scheduler_state_rows.py:886` and `operator_action_listing_held.py:100`;
+  - the journal's occupied-id reuse check (`file_orchestration_journal.py:12460-12476`, `_file_auto_retry_job_can_be_reused`), which keys on the exact id string;
+  - the master routing at `:12335` / `:12432`;
+  - the facade alias and wrapper chain, `chain.py:593` → `chain_forecast_execution.py:135` → `:657`.
+- Change (9.1):
+  - `retry_identity.retry_job_id(base: str, attempt: int) -> str` returns `f"{base}{RETRY_JOB_ID_MARKER}{max(int(attempt), 1)}"`. This is byte-for-byte `_pipeline_retry_job_id`'s expression with the marker constant in place of the equal literal.
+    - The `int()` coercion is kept: `"3"` → `_retry_3`, and `"x"` raises `ValueError` as today.
+    - The base is not stripped or normalized, so a stacked base stays stacked.
+  - Delegations:
+    - `chain_runtime_utils._pipeline_retry_job_id(base_job_id, attempt)` stays a `def` with the same signature, and its body becomes `return retry_job_id(base_job_id, attempt)`. It is kept as a `def`, not a rebinding, so the facade/late-binding surface and `__name__` are unchanged.
+    - `chain_forecast_orchestrator_cycle.py:289` → `retry_job_id(base_job_id, next_attempt)`. Equal for every input, since `next_attempt >= 1`.
+    - `file_journal_retry_helpers.py:55` → `return retry_job_id(base_job_id, retry_count), retry_count`. Equal, since `retry_count >= 1`.
+  - Journal non-master `:12459` (decided: not delegated here): delegating it to the clamped `retry_job_id` changes the result when the snapshot `retry_count <= -1` (see Recon 4). That violates the governing invariant and the ADDED requirement's "for any input".
+    - Decided (orchestrator, option a): leave `:12458-12459` as is in this PR, and record the deviation from the issue's "four sites" in the PR body. 9.2 already lists `file_orchestration_journal.py:12455-12459` and moves the count and the id together into `next_after_failure_non_master`, which formats inside the owner with today's unclamped arithmetic. The 9.5 guard (empty allowlist) then catches the line if 9.2 misses it. This PR adds the negative-snapshot T1 row (Tests) so neither 9.2 nor a later clamp can change the value silently.
+- Tests (`tests/test_retry_accounting_table.py`):
+  - Retarget `test_pipeline_retry_job_id` (`:317-327`; ids `attempt-0-clamped`, `attempt-negative-clamped`, `attempt-1`, `attempt-3`) to call `retry_identity.retry_job_id("base", attempt)`, with expected values `base_retry_1` / `base_retry_1` / `base_retry_1` / `base_retry_3` unchanged. Update the section-2 header (`:313`) and the module docstring (`:12`).
+  - Add direct rows for `retry_job_id`:
+    - stacked base kept: `("X_retry_1", 2)` → `X_retry_1_retry_2`;
+    - no stripping: `("X_retry_3", 1)` → `X_retry_3_retry_1`;
+    - int coercion: `("base", "3")` → `base_retry_3`;
+    - large attempt: `("base", 88)` → `base_retry_88`;
+    - a non-int string raises `ValueError` (`("base", "x")`).
+  - Add a delegate-parity row: `_pipeline_retry_job_id("base", a) == retry_job_id("base", a)` for `a` in `{-1, 0, 1, 3}`. This keeps the facade name pinned without a second literal table.
+  - The rows that prove delegation keep calling their enclosing functions, with literal values unchanged:
+    - D: `test_d_schedule_cycle_stage_retry_failure_number_formula`, 4 rows;
+    - Q: `test_q_next_current_master_retry_identity`, 5 rows;
+    - A/E: `test_ae_floored_cycle_stage_retry_job_id`, through `_pipeline_retry_job_id`;
+    - N: `test_n_retry_cycle_stage_job_id_precedence`, through `_pipeline_retry_job_id`;
+    - the master half of `test_master_and_non_master_paths_diverge_on_the_same_input`.
+  - add a negative-snapshot row (pytest id `snapshot-negative-unclamped`) to `test_journal_non_master_auto_retry_reads_the_caller_snapshot_and_stacks`: durable 0, snapshot `-1`, expected `("job_1_retry_1_retry_0", 0)`. This is the arithmetic prediction. Pin the value or error observed on unchanged code first; if the journal rejects the id or count downstream, pin that error. This adds a row and changes no expected value.
+- Spec: no delta, with the grep evidence under "Issue type". Tick 9.1 in `tasks.md` (and 9.6 once the issue is filed) in the final push. add one line to 9.2 naming `:12458-12459` as the remaining id-formatting site.
+- Must preserve:
+  - every T1 expected value (`git diff master -- tests/test_retry_accounting_table.py` shows only retargets and added rows, no edited literal);
+  - every persisted id byte-for-byte: flat, stacked and clamped;
+  - `_pipeline_retry_job_id`'s name, signature, facade alias and late-binding wrapper;
+  - the five `test_production_scheduler.py` direct pins (`_retry_88`, `_retry_1`);
+  - `retry_identity.py` staying import-free of orchestrator modules.
+- Risk packs:
+  - Selected:
+    - Legacy compatibility / examples: persisted ids and the facade name. Covered by T1 unchanged, a format mutation turning every delegating row red, delegate parity, and `_pipeline_retry_job_id` kept.
+    - Concurrency / shared state / ordering: the id is the journal's occupancy key and identity across concurrent passes, rows E and K. Covered by the E rows and the K index pin, unchanged.
+  - Not selected:
+    - Public API (no route or OpenAPI change);
+    - Config (no env or default change; limits are 9.4);
+    - File IO (journal writes unchanged);
+    - Schema (`retry_count` and `job_id` columns unchanged);
+    - Auth;
+    - Resource limits;
+    - Error handling (the `ValueError` on a non-int attempt is pinned unchanged);
+    - Release / packaging (no dependency change);
+    - Documentation (the inventory row `:353` stays true: the owner of `_pipeline_retry_job_id` is still `chain_runtime_utils`).
+- Required evidence:
+  1. Baseline, before editing production. `retry_job_id` does not exist yet, so:
+     - run the new direct inputs (stacked base, no stripping, `"3"`, `88`, `"x"`) against `_pipeline_retry_job_id` and record today's values, then retarget them;
+     - add the negative-snapshot journal row as is;
+     - run `uv run pytest -q tests/test_retry_accounting_table.py` on unchanged code. Expected: green (162 + new rows).
+  2. After the change, the same command stays green. `git diff master -- tests/test_retry_accounting_table.py` shows no edited expected literal; list every changed line as retarget or added.
+  3. Format mutation: in `retry_identity.retry_job_id`, set the marker to `"_retryX_"`. Expected red:
+     - the 4 retargeted `test_pipeline_retry_job_id` rows and every direct row except the `ValueError` row;
+     - D (4) and Q (5);
+     - A/E: the 6 rows whose expected value is a minted id (`A-floor-plus-one`, `A-cohort-max-floor`, `A-none-job-id-with-floor`, `A-suffix-equal-floor`, `E-snapshot-occupied-skips`, `E-journal-and-snapshot-occupied-skip`);
+     - N (all 6);
+     - `test_master_and_non_master_paths_diverge_on_the_same_input`.
+
+     Expected green: the A pass-through rows (`A-no-floor-unchanged`, `A-no-floor-none-stays-none`, `A-suffix-above-floor`), the delegate-parity rows (both sides see the mutation) and the 3 journal non-master rows plus the new negative row. The journal rows staying green proves `:12459` was not delegated.
+
+     Run a second mutation that drops the clamp in `retry_job_id`. Expected red: only `attempt-0-clamped` and `attempt-negative-clamped`. `N-negative-clamped` stays green because `:209-210` clamps first, as T1's `mutations.log:196-199` RC2 equivalent already shows. Restore the file byte-for-byte (hash).
+  4. Residual grep: `git grep -nE '_retry_\{|RETRY_JOB_ID_MARKER\}|\+ *"_retry_"|_retry_" *\+' -- services packages apps scripts workers` must show exactly `retry_identity.py` (the `retry_job_id` line), `scheduler_state_manual_retry.py:914` (`manual_retry_{key}`, not an id) and `file_orchestration_journal.py:12459`. Nothing else.
+  5. Full local suite green (proxy env unset); `uv run ruff check . --no-cache`; `openspec validate redesign-orchestration-core --strict --no-interactive`; CI full suite, every shard.
+  6. node-27, per D5 "plus node-27 real-DB suites when those suites import the code". R4's 5b set was chosen for the display route, which this slice does not touch; the touched modules here are on the scheduler side. Run `-m integration tests/test_qhh_production_bootstrap_scheduler.py tests/test_real_database_integration.py` on throwaway `nhms_it_*` DBs. The first imports `ProductionScheduler` and, through it, chain and the journal; the second imports `apps.api.main`, so its transitive reach is not ruled out. `tests/test_orchestration_chain.py` no longer carries an integration marker at HEAD. Expected: all pass, with 0 leftover DBs.
+  7. node-22 (D5, pure move; this is task 9.7's cadence): ff deploy at a pass boundary, then one idle pass (`status=planned`, `restart_reconcile.status=completed`, `lock.lock_type=file`) and one submitting pass (`status=submitted`), in a batch of at most three merged pure-move PRs or one calendar day. 9.1 and 9.6 are ticked in the final push, with no trailing docs commit. Until the batch has run, the PR merges with `Part of #3265`.
+  8. Task 9.6: the behaviour-change issue is filed, citing the T1 test names it would edit (draft in `.workplans/3265/issue-9.6-draft.md`), and its URL is in the PR body.
+- Review focus:
+  1. Every delegated site is equal for all inputs, with the clamp proven a no-op at `:289` and `:55` by the lower bounds cited above, and the `int()` that `retry_job_id` adds proven a no-op there too (`next_attempt` is built from `int(retry_count)`, a `split_retry_job_identity` int and the int `failure_number` both callers pass, `chain_forecast_execution.py:327-330,944-946`; `effective_retry_attempt` returns an int). The journal `:12459` decision is applied as recorded, and its row pins today's negative-snapshot value.
+  2. `retry_job_id` keeps `int()` and does not strip the base.
+  3. No T1 literal is edited; retargets and additions only.
+  4. `_pipeline_retry_job_id` keeps its name, signature and facade/late-binding surface.
+  5. No unused `RETRY_JOB_ID_MARKER` import is left behind, and nothing outside the three sites changes.
 
 ## 10. F1 — Compat-defined production helpers move to owners; facade resolution guard
 

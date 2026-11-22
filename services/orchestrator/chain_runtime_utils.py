@@ -28,6 +28,7 @@ from services.orchestrator.chain_types import (
 from services.orchestrator.retry_identity import (
     has_active_manual_retry_decision,
     log_ignored_manual_retry_attempt_claim,
+    retry_job_id,
 )
 from workers.canonical_converter.converter import expected_converter_version
 
@@ -446,7 +447,7 @@ def _pipeline_job_id(run_id: str, stage: str) -> str:
 
 
 def _pipeline_retry_job_id(base_job_id: str, attempt: int) -> str:
-    return f"{base_job_id}_retry_{max(int(attempt), 1)}"
+    return retry_job_id(base_job_id, attempt)
 
 
 def _stage_job_sort_key(job: Mapping[str, Any], stage: StageDefinition) -> tuple[int, int, datetime, datetime]:
