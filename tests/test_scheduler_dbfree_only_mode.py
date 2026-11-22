@@ -408,8 +408,6 @@ def test_scheduler_lease_is_the_file_lease_even_for_a_postgres_lock_backend(
         assert not hasattr(scheduler_module, name), name
         assert not hasattr(scheduler_lease_module, name), name
         assert name not in scheduler_lease_module.__all__
-        assert name not in scheduler_module._SCHEDULER_LEASE_COMPAT_REEXPORT_NAMES
-        assert name not in scheduler_module._SCHEDULER_LEASE_COMPAT_LOOKUP_NAMES
 
 
 def test_db_free_default_orchestrator_without_a_repository_fails_closed(

@@ -2140,7 +2140,7 @@ Slice triage (F1-2, #3271, tasks 10.1, 10.3):
 ## 11. F2 — Delete installers and `_COMPAT_` tables
 
 - [x] 11.0a Chain side, test-only first: delete the test assertions that read `_CHAIN_*_COMPAT_*` tables (`tests/test_orchestration_chain.py`, including the inventory-text tests that also read tables at :1246, :1286, :12146, :12471; `tests/test_file_journal_read_blocked_consumers.py:255-257`). Inventory-text tests that read no table stay for F3.
-- [ ] 11.0b Scheduler side, test-only first: delete the `_SCHEDULER_*_COMPAT_*` assertions, including `tests/test_production_scheduler.py:1086-1129` and the inventory-text tests that also read tables (e.g. `:816`). Inventory-text tests that read no table stay for F3.
+- [x] 11.0b Scheduler side, test-only first: delete the `_SCHEDULER_*_COMPAT_*` assertions, including `tests/test_production_scheduler.py:1086-1129` and the inventory-text tests that also read tables (e.g. `:816`). Inventory-text tests that read no table stay for F3.
 - [ ] 11.0c Scheduler state-compat patch propagation: rewrite the propagation in `scheduler_state_compat.py:169-219` as an explicit owner function, with a test that a patch on the facade is seen by the `scheduler_state_*` owners. The installer still runs.
 - [ ] 11.1 Chain side.
   - Replace `globals().update(...)` at `chain.py:147-149,887-889` with explicit alias lines for every name the F1 guard requires.
@@ -2232,6 +2232,64 @@ Slice triage (F2-1, #3290, task 11.0a):
     - `tests/test_file_journal_read_blocked_consumers.py`
     - `tests/test_facade_name_resolution.py`
     - the inventory and facade guards: `tests/test_entropy_audit_facade_guard_aliases.py`, `tests/test_entropy_audit_facade_guard_forwarders.py`, `tests/test_entropy_audit_instruction_inventory.py`
+  - CI: the full sharded suite.
+  - No node-27 or node-22 run: the change is test-only.
+
+Slice triage (F2-2, #3291, task 11.0b):
+- Issue type: test (deletion and retarget). Fixture level: compact (agree). The PR is test-only, with no production code change, and touches one assertion family in two test files. D5 (`design.md:226-227`) makes F2's test-only parts CI only.
+- Recon at 06154fbb2:
+  - `git grep -nE "_SCHEDULER_[A-Z0-9_]*COMPAT_[A-Z0-9_]*" -- tests` gives 144 lines:
+    - 142 in `tests/test_production_scheduler.py`, in clusters `:964-1134`, `:1241-1340`, `:1421-1459`, `:1758-1834`, `:2261-2357`, `:2461` and `:58072`;
+    - 2 in `tests/test_scheduler_dbfree_only_mode.py:411-412` (`name not in _SCHEDULER_LEASE_COMPAT_{REEXPORT,LOOKUP}_NAMES`).
+  - The issue's `:816` and 11.0b's `:1086-1129` refs have drifted. The table-reading tests are the clusters above, re-grepped by the implementer.
+  - Unlike the chain side, the scheduler compat surfaces install behaviour as well as tables:
+    - `scheduler_candidate_runtime.EXPORTS` installs 165 non-table names (159 functions, the forwarders);
+    - `install_scheduler_state_compat` installs patch-propagating wrappers (`_SCHEDULER_STATE_COMPAT_WRAPPERS`), which 11.0c rewrites as an explicit owner function;
+    - `scheduler_compat_runtime.EXPORTS` installs 34 tables plus the 4 aliases that #3271 made explicit.
+
+    A table read can therefore be the only coverage of a forwarder or wrapper's behaviour. The decision test below keeps that coverage as a retarget.
+- Rules. Every assertion that reads a table gets exactly one label. The label names echo R2a (`tasks.md:76-82`), but the definitions below govern, and there is no (c). They are the same as F2-1's (#3290 block) with scheduler names:
+  - Decision test: substitute each table-derived name list with its HEAD literal. If a `_SCHEDULER_*_COMPAT_*` table, a `vars()` scan or another `_SCHEDULER_*` attribute is still an operand, or the assertion now compares only literals, the label is (b). Otherwise it is (a).
+  - **(b) delete.** The subject is the table or the self-check: contents, length or uniqueness, set equality between tables, `*_MISSING == ()`, `*_EXPORTS == tuple(...)`, `vars()` scans, `*_FACADE_{REEXPORTS,ALIASES,DIRECTS,WRAPPERS}[n] is getattr(scheduler_module, n)`, and `*_OWNER_{REEXPORTS,ALIASES,DIRECTS,WRAPPERS}[n] is getattr(owner, …)` / `*_ORIGINALS[n] is owner.n` (tautologies). The `*_FACADE_*` tables are import-time snapshots of the facade namespace. After their deletion, facade-is-owner identity is still asserted by the adjacent `getattr(scheduler_module, n) is getattr(owner, …)` lines (`:993`, `:1047`, `:1124`, `:1328`, `:1805`, `:2307`). The execution, evidence and cancellation wrappers are covered by the literal-driven delegate tests (`:1547`, `:2025`, `:2345`). A test left with no assertion is deleted whole.
+  - **(a) retarget.** The table only supplies names to a behavioural assertion about facade or owner objects. Replace the table read with a literal tuple or dict copied from the table's HEAD value; the behavioural assertion otherwise stays byte-identical. Cases:
+    - `getattr(scheduler_module, n) is getattr(owner, n)` loops, such as the `direct_names` loop and `:58072`'s discovery alias loop;
+    - `_SCHEDULER_STATE_COMPAT_WRAPPERS[n] is getattr(scheduler_module, n)` (`:991`) is the only one. Over the 137 literal wrapper names (the HEAD value of `_SCHEDULER_STATE_COMPAT_WRAPPER_NAMES`) it becomes `getattr(scheduler_module, n) is not getattr(scheduler_state_module, n)` plus `callable(getattr(scheduler_module, n))`. It pins that the facade binding is a distinct wrapper until 11.2 deletes the installer. It is not patch-propagation coverage.
+    - `hasattr(owner, n)` and `callable(getattr(scheduler_module.ProductionScheduler, n))` over table names;
+    - The patch-propagation checks that take names from a table: lease `:1064` and cancellation `:2357`/`:2460`. No state-compat propagation test exists at HEAD. That test belongs to 11.0c, and carry-over #3 is satisfied there, not here.
+  - `tests/test_scheduler_dbfree_only_mode.py:411-412` is (b). Facade and owner absence stay asserted by `:408-410`.
+  - Mechanics:
+    - The inventory loops over table-derived facade or method names (`:1342`, `:1461`, `:1836`, `:2340`) are (a). Replace the names with the test's local literals, reusing the literal dicts or tuples already introduced for the same test's (a) lines, e.g. `(*alias_owner_names, *forwarder_names)`. The scheduler side has no `vars()`/`compat_tokens` scan. Quoted `"_SCHEDULER_*"` token tuples are kept for F3 unchanged. Never materialise table names as literal `_SCHEDULER_*` strings.
+    - A loop or `inventory_text` binding left empty is deleted.
+    - Loop headers may drop variables that only fed deleted (b) lines (ruff B007).
+    - Where the test already has an `expected_*` literal equal to the table, reuse it.
+  - **Kept for F3.** Inventory-text assertions that only check a token string appears in the inventory doc read no table. They stay unchanged. Where such a test also has table-reading assertions, only those go.
+  - There are no `_SCHEDULER_*` absence probes at HEAD.
+  - Behaviour tests are otherwise unchanged. No assertion is weakened, and no behavioural assertion is deleted.
+- Out of scope:
+  - production code;
+  - the chain side (done in #3330);
+  - 11.0c (the state-compat propagation rewrite);
+  - inventory-text tests;
+  - `tests/test_facade_name_resolution.py`.
+- Carry-overs:
+  - `.workplans/3270/carry-overs.md` #3 (state-compat patch propagation) belongs to 11.0c.
+  - `.workplans/3290/carry-overs.md` #2 applies here too: the 53 token strings kept for F3 name tables that 11.2 deletes. F3 owns them.
+- Must preserve: `git diff --stat master -- services apps packages workers scripts db` is empty. Every behavioural assertion survives, either as it was or retargeted.
+  - Deviation: the issue says delete. Assertions whose subject is owner or facade behaviour are retargeted, per D3 "behaviour tests are unchanged". This is recorded in the PR body.
+- Risk packs: legacy compatibility (no coverage lost beyond the self-check tables). Not selected: everything else.
+- Required evidence:
+  1. A ledger at `.workplans/3291/ledger.md`. For each touched test it gives each table-reading assertion's label, old and new text for each (a), and the literal-equals-HEAD-table check for each (a) literal. The check is `uv run --no-sync python -c "import services.orchestrator.scheduler as s; assert s.<TABLE> == <literal>"` run at 06154fbb2, with its output pasted.
+  2. Before and after counts:
+     - the collected-test count of the two files;
+     - `git grep -nE "_SCHEDULER_[A-Z0-9_]*COMPAT_" -- tests`: 144 lines before (53 quoted inventory-token lines plus 91 table reads). After, exactly 53 lines remain, all quoted inventory-token strings in `tests/test_production_scheduler.py`. At 06154fbb2 they are at `:1015-1018`, `:1053-1056`, `:1130-1134`, `:1334-1340`, `:1452-1459`, `:1823-1834` and `:2326-2338`; the ledger lists the final lines. `tests/test_scheduler_dbfree_only_mode.py` has 0. No added diff line contains `_SCHEDULER_`. The collected-test count is expected to be unchanged, since no test is left without an assertion.
+  3. The touched files green; `tests/test_facade_name_resolution.py` green.
+  4. `uv run --no-sync ruff check . --no-cache`, `git diff --check`, and `openspec validate redesign-orchestration-core --strict --no-interactive`.
+- Verification (owner policy 2026-11-22: no local full suite):
+  - Locally, run:
+    - `tests/test_production_scheduler.py`
+    - `tests/test_scheduler_dbfree_only_mode.py`
+    - `tests/test_facade_name_resolution.py`
+    - the inventory and facade guards: `tests/test_entropy_audit_facade_guard_aliases.py`, `tests/test_entropy_audit_facade_guard_forwarders.py` and `tests/test_entropy_audit_instruction_inventory.py`
   - CI: the full sharded suite.
   - No node-27 or node-22 run: the change is test-only.
 
