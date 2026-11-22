@@ -2142,7 +2142,7 @@ Slice triage (F1-2, #3271, tasks 10.1, 10.3):
 - [x] 11.0a Chain side, test-only first: delete the test assertions that read `_CHAIN_*_COMPAT_*` tables (`tests/test_orchestration_chain.py`, including the inventory-text tests that also read tables at :1246, :1286, :12146, :12471; `tests/test_file_journal_read_blocked_consumers.py:255-257`). Inventory-text tests that read no table stay for F3.
 - [x] 11.0b Scheduler side, test-only first: delete the `_SCHEDULER_*_COMPAT_*` assertions, including `tests/test_production_scheduler.py:1086-1129` and the inventory-text tests that also read tables (e.g. `:816`). Inventory-text tests that read no table stay for F3.
 - [x] 11.0c Scheduler state-compat patch propagation: rewrite the propagation in `scheduler_state_compat.py:169-219` as an explicit owner function, with a test that a patch on the facade is seen by the `scheduler_state_*` owners. The installer still runs.
-- [ ] 11.1 Chain side.
+- [x] 11.1 Chain side.
   - Replace `globals().update(...)` at `chain.py:147-149,887-889` with explicit alias lines for every name the F1 guard requires.
   - Delete `chain_compat_static.py`, `chain_compat_runtime.py` and the chain-manifest forwarder self-check (`chain.py:~185-204`).
   - Add Guard Hook Seed rows to the chain inventory for every new explicit `_`-prefixed alias, with removal condition "deleted with the inventory in F3", so the facade guard stays at zero signals.
@@ -2151,10 +2151,10 @@ Slice triage (F1-2, #3271, tasks 10.1, 10.3):
   - The installer is deleted; propagation runs through the owner function from 11.0c.
   - Add Guard Hook Seed rows to the scheduler inventory for every new explicit `_`-prefixed alias, as in 11.1.
   - `scheduler_lease._scheduler_compat_function` (`scheduler_lease.py:46-54`) stays a late-binding lookup, renamed without "compat".
-- [ ] 11.3 Remove the deleted modules from `FIRST_IMPORT_ALLOWLIST` (`tests/test_orchestrator_first_import.py:38-67`) and the path strings in `tests/test_sqlalchemy_driver_explicit.py:120`, `tests/test_node27_connection_attribution*.py` and `tests/test_file_journal_full_tree_budget_contract.py:374`.
-- [ ] 11.4 Test: importing `chain` / `scheduler` leaves no `_COMPAT_` name in either namespace, and the F1 guard stays green.
-- [ ] 11.5 Add the Appendix D F2 spec deltas for each side: chain side `chain-facade-deepening` and `import-layering-guard:23`; scheduler side `scheduler-facade-deepening` and `scheduler-discovery-evidence-owner-compat:31-40`.
-- [ ] 11.6 Verification: on node-22, one idle pass and one submitting pass for each PR of this group that changes production code (11.0c, 11.1, 11.2).
+- [ ] 11.3 Remove the deleted modules from `FIRST_IMPORT_ALLOWLIST` (`tests/test_orchestrator_first_import.py:38-67`) and the path strings in `tests/test_sqlalchemy_driver_explicit.py:120`, `tests/test_node27_connection_attribution*.py` and `tests/test_file_journal_full_tree_budget_contract.py:374`. (chain side done, #3272)
+- [ ] 11.4 Test: importing `chain` / `scheduler` leaves no `_COMPAT_` name in either namespace, and the F1 guard stays green. (chain side done, #3272)
+- [ ] 11.5 Add the Appendix D F2 spec deltas for each side: chain side `chain-facade-deepening` and `import-layering-guard:23`; scheduler side `scheduler-facade-deepening` and `scheduler-discovery-evidence-owner-compat:31-40`. (chain side done, #3272)
+- [ ] 11.6 Verification: on node-22, one idle pass and one submitting pass for each PR of this group that changes production code (11.0c, 11.1, 11.2). (chain side done, #3272)
 
 Suggested fixture level: expanded - legacy compatibility surface and import-time behaviour.
 Minimal mergeable slice: 11.0a and 11.0b (test-only) first; 11.0c next; then 11.1 (chain side) and 11.2 (scheduler side), which are independent; neither facade imports the other's compat modules.
@@ -2388,6 +2388,94 @@ Slice triage (F2-3, #3292, task 11.0c):
   - CI: the full sharded suite.
   - node-27: the integration-marked files that import a touched module. The fresh-process import check over all 57 integration files at cb814a249 gives 16. The orchestrator runs them on throwaway `nhms_it_*` DBs after the push.
   - node-22 (D5): its own idle pass and submitting pass after the ff deploy at a pass boundary. Pending while node-22's mounts are down; recorded as owed on #3292 like #3311.
+
+Slice triage (F2-4, #3272, tasks 11.1, 11.3/11.4/11.5/11.6 chain side):
+- Issue type: refactor (deletion of import-time installers and self-check tables). Fixture level: expanded (agree): legacy compatibility surface and import-time behaviour. Width: one PR, atomic. After #3290 the chain installers have no remaining reader.
+- Recon at 0c16f184d:
+  - The installers:
+    - `chain.py:138-140` imports `chain_compat_static` and does `globals().update(_chain_compat_static.CHAIN_COMPAT_STATIC_EXPORTS)`;
+    - `chain.py:850-852` imports `chain_compat_runtime` and does `globals().update(_chain_compat_runtime.install_chain_runtime_compat())`;
+    - the facade-local self-check at `chain.py:182-199` covers `_CHAIN_MANIFEST_COMPAT_TOP_LEVEL_FACADE_MISSING` and its `RuntimeError`, plus `_CHAIN_MANIFEST_COMPAT_TOP_LEVEL_FORWARDERS`. `MappingProxyType` (`chain.py:11`) is used only there.
+  - What they install, measured in-process: 87 static keys and 49 runtime keys. Every key starts with `_CHAIN_` and contains `_COMPAT_`; no function, class or alias is installed. `chain_compat_runtime.py:6` copies `_chain.__dict__`'s `_CHAIN_*` names into its own namespace. Neither module `setattr`s anything onto `chain` or its classes.
+  - Their only behaviour beyond the tables is import-time self-checks: 33 `raise RuntimeError` in `chain_compat_static.py` and 27 in `chain_compat_runtime.py`. They check owner or facade names for missing, drift or callable status.
+  - F1 guard (`tests/test_facade_name_resolution.py` `scan_tree()`) at 0c16f184d: 955 chain reads over 172 distinct names. None starts with `_CHAIN_`, and none is supplied only by the installers. So 11.1's "explicit alias lines for every name the F1 guard requires" is the empty set, and no Guard Hook Seed row is added. The implementer re-runs this check after the deletion.
+  - Other readers:
+    - `tests/test_orchestrator_first_import.py:41-46` has `FIRST_IMPORT_ALLOWLIST` entries for both modules. `:47-49`, `chain_forecast_orchestrator_cycle`, cites `chain.py:889` calling the mixin's `_chain_stage_execution_dependencies()` mid-import, and that call is inside `install_chain_runtime_compat`.
+    - `tests/test_file_journal_full_tree_budget_contract.py:371-375` puts `chain_compat_static.py` in `_ALLOWED_SLURM_ID_LOOKUP_SITES`. Its `:260` names `query_pipeline_job_by_slurm_id`.
+    - A prose comment at `chain_array_accounting.py:103` cites "the compatibility inventory's `_CHAIN_ARRAY_ACCOUNTING_COMPAT_*` name set".
+    - `tests/test_orchestration_chain.py` keeps 28 quoted `_CHAIN_*` token lines, which F3 owns: inventory tokens at `:1256-1260`, `:10457-10461`, `:10918-10932` and absence probes `:11018-11020`. After this slice the probes are trivially true. They stay unchanged for F3; the new 11.4 test subsumes them.
+    - `docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md` names the tables and modules. F3 deletes it.
+  - `openspec/specs/import-layering-guard/spec.md:23` requires "`services/orchestrator/chain_compat_runtime.py` SHALL take its cycle-alias owner module from the contract module". The module is deleted.
+- Changes:
+  1. **11.1, production.**
+     - Delete `chain.py:138-140`, `:182-200` (the self-check and its trailing blank line) and `:850-852`, plus the `MappingProxyType` import at `:11`. `_SAFE_ID_RE` and `_SAFE_AREA_RE` at `:201-202` stay; `:522` reads `_SAFE_ID_RE`, and the `# ruff: noqa: F821` at `chain.py:1` would hide a `NameError`. `_publish_quality_state` and `build_model_run_assembly` stay.
+     - Delete `services/orchestrator/chain_compat_static.py` and `services/orchestrator/chain_compat_runtime.py`.
+     - Rewrite the `chain_array_accounting.py:103` comment so it names no `_COMPAT_` table. The thin wrappers stay: they keep the module-attribute import and monkeypatch paths.
+  2. **11.3 (chain).**
+     - Remove the two `FIRST_IMPORT_ALLOWLIST` entries.
+     - Re-measure each remaining entry whose reason cites the deleted installer. Remove an entry only if that module now imports first cleanly, per the test's own stale-entry rule if it has one; otherwise rewrite the reason to the current cause.
+     - Fixture-review probe: `chain_forecast_orchestrator_cycle` still fails first import, with the same error before and after (`cannot import name 'ForecastOrchestratorCycleMixin'`). It stays, with its reason rewritten to: "chain imports ForecastOrchestratorCycleMixin from this module as a ForecastOrchestrator base; a first import re-enters chain through the top-level `from services.orchestrator import chain as _chain` before the mixin class is defined".
+     - Remove `chain_compat_static.py` from `_ALLOWED_SLURM_ID_LOOKUP_SITES`.
+     - Re-run `git grep -nE "chain_compat_(static|runtime)" -- services scripts tests packages workers apps`. It must be empty, except a comment explaining a removal.
+  3. **11.4 (chain).** Add a test function in `tests/test_orchestrator_first_import.py`, reusing its fresh-subprocess helpers (`_run_python` and `_probe`):
+     - import `services.orchestrator.chain` in a fresh subprocess, so no earlier import masks the result, and assert that `vars(chain)` has no name containing `_COMPAT_`;
+     - assert that neither `services.orchestrator.chain_compat_static` nor `services.orchestrator.chain_compat_runtime` is in `sys.modules` after that import;
+     - assert reservation facade-is-owner identity over the literal names `ReservationResult`, `bind_reservation`, `reserve_candidate` and `slurm_comment_for`: `getattr(chain, n) is getattr(services.orchestrator.reservation, n)`. This is carry-over #1 of `.workplans/3290/carry-overs.md`; the guarantee was enforced only by the deleted raise loop `chain_compat_static.py:178-180`.
+     - F1 guard green.
+  4. **11.5 (chain), spec.**
+     - `chain-facade-deepening` is already in the change. Confirm the code satisfies its MODIFIED requirement text; no edit is expected.
+     - Add `specs/import-layering-guard/spec.md` to the change: a MODIFIED copy of the requirement "Contract SHALL remove the shims and empty the allowlist" with the `chain_compat_runtime.py` clause removed. The orchestrator writes it before implementation.
+  5. **Self-check ledger.** `.workplans/3272/selfchecks.md` covers each of the 60 deleted `raise RuntimeError` sites and the `chain.py:185` one. Each gets one label:
+     - (i) "the facade alias line raises `AttributeError` at import if the owner name is gone" (cite the `chain.py` line);
+     - (ii) "covered by a named behaviour test" (cite test id);
+     - (iii) "covered by the F1 guard";
+     - (iv) "uncovered".
+
+     Each (iv) whose subject is behaviour, such as a `ForecastOrchestrator` method that must stay callable or an owner and facade identity, gets a literal assertion in the 11.4 test. Each (iv) whose subject is the table itself is dropped with the table. Nothing is silently lost.
+
+     Labels (i) and (iii) are admissible only for existence checks: an owner or facade name is missing, or not callable. Any other kind of check needs (ii), citing a test that asserts the same relation (`is` or `==`), or (iv). That covers identity, `__all__`, field-fixture, dependency-binding, constructor-signature and `__module__` checks. (iii) is judged against the F1 set after the deletion, which has 160 names, not HEAD's 172.
+- Must preserve:
+  - Every chain name that resolved at HEAD still resolves to the same object. The exceptions are `_CHAIN_*_COMPAT_*`, `_chain_compat_static`, `_chain_compat_runtime` and `MappingProxyType`. Evidence 2 checks this.
+  - All behaviour tests are unchanged, except the allowlist and site-set edits above.
+  - The 28 F3 token lines are byte-identical.
+  - No `file.py:NNN` line reference appears in shipped Python comments. There is no module-level `_utcnow` def; `chain._utcnow` stays as `chain_runtime_utils._utcnow`.
+- Carry-overs:
+  - `.workplans/3270/carry-overs.md` #1 is fixed here. The sentence "Such a read raises on its own once the name is gone" in `tests/test_facade_name_resolution.py`'s module docstring is softened to exclude `monkeypatch.setattr(..., raising=False)`. With the installers gone the guard is the only line of defence, so its docstring must be exact. This is a docstring-only edit.
+  - `.workplans/3270/carry-overs.md` #2 (silent synthetic forms, 0 HEAD sites) is deferred to F3 (#3274), which owns the guard.
+- Ticks: this PR ticks 11.1 only. 11.3-11.6 are shared with the scheduler side; each is annotated "(chain side done, #3272)" and ticked when 11.2 (#3273) lands.
+- Out of scope:
+  - the scheduler side (11.2, #3273);
+  - deleting or editing either compatibility inventory, unless a guard test fails without an edit. If one does, make the minimal edit and record it as a deviation;
+  - the F3 token lines and the absence probes;
+  - `__module__` rewrites.
+- Risk packs: legacy compatibility (import surface), import-time ordering (first-import). Not selected: DB, Slurm, evidence schema, concurrency.
+- Required evidence (`.workplans/3272/`):
+  1. `selfchecks.md` (change 5).
+  2. Namespace diff, each side in its own fresh process.
+     - Record, for every key of `vars(chain)` and for every name in `dir(chain.ForecastOrchestrator)` (MRO-resolved via `getattr`), the triple `(type name, __module__, __qualname__)`. Where an owner exists, also record an in-process `is` check against it.
+     - Diff HEAD against after. The only removed `vars(chain)` keys are the 138 `_CHAIN_*_COMPAT_*` keys plus `_chain_compat_static`, `_chain_compat_runtime` and `MappingProxyType`.
+     - No other key or `ForecastOrchestrator` attribute is added, removed, or changes its record.
+  3. F1 guard after the deletion: zero unresolved reads, and no `_CHAIN_` name required.
+     - Reads drop from 955 to 835 and distinct names from 172 to 160.
+     - The 12 removed names are exactly those read only by the two deleted modules: `MappingProxyType`, `__dict__`, `_canonical_converter_module`, `_chain_stages_module`, `_chain_types_module`, `_tile_publisher_module`, `_tile_publisher_publisher_module`, `_time_normalization_module`, `persistence`, `production_contract`, `reservation` and `retry`.
+     - Each removed name except `MappingProxyType` still resolves on `chain`, per evidence 2.
+     - Any name the new 11.4 test adds is listed separately.
+  4. Red runs. Each is a source edit to `chain.py`, made in the working tree and reverted afterwards, because a rebinding inside the pytest process does not reach the subprocess:
+     - re-add `globals().update({"_CHAIN_X_COMPAT_Y": 1})`;
+     - separately, add `reserve_candidate = lambda *a, **k: None` near the end of `chain.py`.
+
+     Each makes the new 11.4 test fail. Confirm that `git diff` afterwards contains only the intended change.
+  5. `uv run --no-sync ruff check . --no-cache`, `git diff --check`, and `openspec validate redesign-orchestration-core --strict --no-interactive`.
+- Verification (owner policy 2026-11-22: no local full suite):
+  - Locally:
+    - `tests/test_orchestration_chain.py`, the new 11.4 test, `tests/test_facade_name_resolution.py` and `tests/test_orchestrator_first_import.py`;
+    - `tests/test_file_journal_full_tree_budget_contract.py` and `tests/test_file_journal_read_blocked_consumers.py`;
+    - `tests/test_import_layering_guard.py`;
+    - the inventory and facade guards: `tests/test_entropy_audit_facade_guard_aliases.py`, `tests/test_entropy_audit_facade_guard_forwarders.py` and `tests/test_entropy_audit_instruction_inventory.py`;
+    - every test file that imports `services.orchestrator.chain_*` or `chain` and names a deleted module (re-grep).
+  - CI: the full sharded suite.
+  - node-27: the integration-marked files that import `services.orchestrator.chain`, found with a fresh-process import check. The orchestrator runs them after the push.
+  - node-22 (D5, 11.6 chain): its own idle pass and submitting pass after the ff deploy. Pending while node-22's mounts are down; #3272 stays open until then.
 
 ## 12. F3 — Delete the compatibility inventories and the facade guard
 

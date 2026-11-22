@@ -38,14 +38,10 @@ SUBPROCESS_TIMEOUT_SECONDS = 120
 # #3032 deliberately left to a follow-up issue -- see
 # openspec/changes/entropy-followups-2026-10/design.md.
 FIRST_IMPORT_ALLOWLIST: dict[str, str] = {
-    "services.orchestrator.chain_compat_static": (
-        "builds CHAIN_COMPAT_STATIC_EXPORTS from _chain at import time, and chain.py:149 reads it mid-import"
-    ),
-    "services.orchestrator.chain_compat_runtime": (
-        "namespace copy of _chain.__dict__ at line 6; chain.py:889 calls install_chain_runtime_compat() mid-import"
-    ),
     "services.orchestrator.chain_forecast_orchestrator_cycle": (
-        "chain.py:889 calls the mixin's _chain_stage_execution_dependencies() mid-import, which reads _chain"
+        "chain imports ForecastOrchestratorCycleMixin from this module as a ForecastOrchestrator base; a first "
+        "import re-enters chain through the top-level `from services.orchestrator import chain as _chain` before "
+        "the mixin class is defined"
     ),
     "services.orchestrator.scheduler_core": (
         "default argument _scheduler._CANONICAL_READINESS_PROVIDER_UNSET in ProductionScheduler.__init__"
@@ -191,3 +187,69 @@ def test_chain_facade_is_identical_when_the_runtime_mixin_is_imported_first() ->
     for probe in (facade_first, split_first):
         assert probe["mixins"] == expected_mixins
         assert probe["mixins_are_owners"] == [True, True]
+
+
+_CHAIN_SURFACE_PROBE = """
+import importlib, json, sys
+chain = importlib.import_module("services.orchestrator.chain")
+reservation = importlib.import_module("services.orchestrator.reservation")
+array_accounting = importlib.import_module("services.orchestrator.chain_array_accounting")
+workspace = importlib.import_module("services.orchestrator.chain_workspace")
+array_accounting_owner_names = (
+    "basin_key", "basin_identifier", "basin_original_task_id", "record_array_task_outcomes",
+    "candidate_outcomes", "safe_candidate_outcome_payload", "parse_sacct_array_results",
+    "coerce_array_aggregation", "aggregation_from_task_results", "aggregation_error_code",
+    "aggregation_error_message", "sacct_extra_fields", "slurm_accounting_from_payload",
+    "resource_metrics_from_payload", "stage_task_result_evidence", "array_task_log_uri",
+    "array_task_status", "parse_slurm_exit_code", "aggregate_array_stage",
+    "require_complete_array_accounting", "record_cycle_stage_status_override",
+    "record_cycle_stage_accounting_event", "record_cycle_stage_accounting_gap", "apply_array_progress",
+    "context_array_log_uri",
+)
+workspace_owner_names = (
+    "log_uri_for_pipeline_job", "display_log_publication_for_stage", "display_log_publication_for_pipeline_job",
+    "try_publish_log_for_advertise", "log_persistence_error", "raise_publish_error_after_durable_update",
+    "persist_gateway_logs", "write_local_stage_log", "log_uri_for_stage", "published_log_path", "workspace_path",
+    "safe_workspace_write_bytes", "safe_workspace_read_bytes", "workspace_relative_parts",
+)
+print(json.dumps({
+    "compat_names": sorted(name for name in vars(chain) if "_COMPAT_" in name),
+    "compat_modules": sorted(name for name in sys.modules if name.startswith("services.orchestrator.chain_compat")),
+    "reservation_is_owner": {
+        name: getattr(chain, name) is getattr(reservation, name)
+        for name in ("ReservationResult", "bind_reservation", "reserve_candidate", "slurm_comment_for")
+    },
+    "array_accounting_owner_not_callable": [
+        name for name in array_accounting_owner_names if not callable(getattr(array_accounting, name, None))
+    ],
+    "workspace_owner_not_callable": [
+        name for name in workspace_owner_names if not callable(getattr(workspace, name, None))
+    ],
+    "orchestrator_repository_is_class": isinstance(getattr(chain, "OrchestratorRepository", None), type),
+}))
+"""
+
+
+def test_chain_facade_installs_no_compat_tables_and_keeps_owner_identity() -> None:
+    """The chain facade carries no ``_COMPAT_`` self-check tables (#3272).
+
+    The two installer modules that put them there are gone, and so are the
+    import-time checks they ran.  The checks that were not already covered by a
+    behaviour test are restated here as literal assertions: the reservation names
+    are the owner's objects, the owner functions the facade forwarders call at
+    call time still exist, and ``OrchestratorRepository`` is still a class.  A
+    fresh interpreter, so no earlier import masks this.
+    """
+    probe = _probe(_CHAIN_SURFACE_PROBE)
+
+    assert probe["compat_names"] == []
+    assert probe["compat_modules"] == []
+    assert probe["reservation_is_owner"] == {
+        "ReservationResult": True,
+        "bind_reservation": True,
+        "reserve_candidate": True,
+        "slurm_comment_for": True,
+    }
+    assert probe["array_accounting_owner_not_callable"] == []
+    assert probe["workspace_owner_not_callable"] == []
+    assert probe["orchestrator_repository_is_class"] is True
