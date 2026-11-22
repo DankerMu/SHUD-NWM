@@ -477,7 +477,7 @@ Slice triage (R2c-4, #3311, task 4.6):
 - [x] 5.2 Delete the Appendix C R3 symbols and their SQL-text tests, plus `tests/test_real_database_integration.py:339-502` (each test confirmed SQL-only on node-27). Keep the `OrchestratorRepository` protocol. Update the inventory text and tests.
 - [x] 5.3 Add the Appendix D R3 spec deltas, including the MODIFIED `file-orchestration-journal` contract-test requirement already in this change. Update `docs/runbooks/node22-db-retirement-runbook.md:51`, which names the deleted class.
 - [x] 5.4 Verification: node-27 real-DB suites that remain pass. On node-22, one idle pass and one submitting pass.
-- [ ] 5.5 Delete the SQL `candidate_state` body and the lineage max-lead-hours helper left orphaned by R3-2, and rewrite stale R3 prose, line references and DB-lane spec wording (#3315, R3 follow-up). Verification: CI, plus the issue's acceptance greps.
+- [x] 5.5 Delete the SQL `candidate_state` body and the lineage max-lead-hours helper left orphaned by R3-2, and rewrite stale R3 prose, line references and DB-lane spec wording (#3315, R3 follow-up). Verification: CI, plus the issue's acceptance greps. Done in PR #3327 (review round 1 clean; CI green).
 
 Suggested fixture level: expanded - persistence layer deletion.
 Minimal mergeable slice: 5.1 as a test-only PR; then 5.2 + 5.3 + 5.4 as the deleting PR.
@@ -1989,11 +1989,69 @@ Slice triage (T2-5, #3269, tasks 9.5, 9.7):
 ## 10. F1 — Compat-defined production helpers move to owners; facade resolution guard
 
 - [ ] 10.1 Move `_now`, `_sleep`, `_bounded_evidence_payload` and `_evidence_status` (`scheduler_compat_runtime.py:195,208,311,315`) into a scheduler owner module. Keep the `_source_*` / `_accepted_horizon_from_hours` aliases (`:72-75`) as explicit aliases in `scheduler.py`. Move `_utcnow` (`chain_compat_runtime.py:209`) into a chain owner module. Each facade imports the moved names explicitly. Owners keep reading them through `_scheduler.` / `_chain.`. The entropy facade guard flags every new `_`-prefixed facade import (`scripts/governance/entropy_audit/facade_guard.py:110-142,505-568`), so add a Guard Hook Seed row for each new name to the matching compatibility inventory, with removal condition "deleted with the inventory in F3".
-- [ ] 10.2 Add `tests/test_facade_name_resolution.py`. It statically collects every attribute read through `_scheduler.` / `_chain.` in `services/orchestrator/*.py`, and every name patched or read on `scheduler` / `chain` in `tests/`, and asserts that each one resolves on the imported facade.
+- [x] 10.2 Add `tests/test_facade_name_resolution.py`. It statically collects every attribute read through `_scheduler.` / `_chain.` in `services/orchestrator/*.py`, and every name patched or read on `scheduler` / `chain` in `tests/`, and asserts that each one resolves on the imported facade.
 - [ ] 10.3 Verification: CI, then node-22 batch passes per D5.
 
 Suggested fixture level: expanded - moves helpers every scheduler pass calls.
 Minimal mergeable slice: 10.2 alone first (the guard is green today); then 10.1 as a pure-move PR.
+
+Slice triage (F1-1, #3270, task 10.2):
+- Issue type: test. Fixture level: compact (agree). The PR adds one test file and changes no production code.
+  - Width: one PR. Atomic, and green today: the installers still run when the facades are imported, so every name resolves.
+- Purpose: this is the seam that lets F2 (task 11) delete the installers. After F2, a name that an owner reads through a facade, or that a test patches on it, must exist on the facade by an explicit import. If it does not, the read raises `AttributeError`, and a `raising=False` patch silently does nothing.
+- Recon at a306fd5e4:
+  - Owner modules bind facades as `from services.orchestrator import scheduler as _scheduler` (18 modules, including `scheduler_config/`) and `from services.orchestrator import chain as _chain` (11).
+  - Tests bind them under many aliases:
+    - `scheduler_module` (42 imports);
+    - `legacy_chain` (24);
+    - `chain_runtime`, `_chain_module`, `_chain`, `chain_module`, `chain_facade` and `chain`;
+    - a bare `import services.orchestrator.chain`.
+  - String targets like `"services.orchestrator.scheduler._now"` appear about 95 times over 15 distinct targets, some with nested attributes (`chain.time.monotonic`).
+  - `from services.orchestrator.(scheduler|chain) import X`: 122 sites.
+  - `raising=False` on these surfaces: 128.
+  - `assert not hasattr(<facade alias>, ...)`: 10.
+- The guard (`tests/test_facade_name_resolution.py`): AST-based and alias-aware per module, scanning `services/orchestrator/**/*.py` and `tests/**/*.py`.
+  - What counts as a facade binding:
+    - `from services.orchestrator import scheduler|chain [as A]`;
+    - `import services.orchestrator.scheduler|chain [as A]`;
+    - the bare dotted form `services.orchestrator.chain.X`.
+  - Collected reads, keyed on the first attribute after the facade:
+    - `A.X` loads and stores;
+    - `getattr(A, "X")` with no default;
+    - `setattr` / `monkeypatch.setattr` / `monkeypatch.delattr` / `mock.patch.object` / `patch.object` on `(A, "X", …)`;
+    - string targets `"services.orchestrator.scheduler.X[.…]"` / `"…chain.X[.…]"` in `monkeypatch.setattr` / `monkeypatch.delattr` / `mock.patch` / `patch`;
+    - `from services.orchestrator.scheduler|chain import X`.
+    - Owner string dispatch: in `services/orchestrator/**`, a module-local function whose body calls `getattr(A, <its own parameter>)` (today `_scheduler_call` at `scheduler_candidate_manifest.py:21` and `scheduler_candidate_execution_evidence.py:37`). Each call to it with a literal first argument is a read of that name. 16 of its 29 literal names exist on the facade only through `scheduler_candidate_runtime.EXPORTS`, which 11.2 deletes.
+    - A facade's imports from its own owner modules are not reads.
+  - Not collected, since these are probes and not reads:
+    - `hasattr(A, "X")`;
+    - `getattr(A, "X", default)`;
+    - a non-literal name in `tests/` (counted and reported; such a read raises on its own once the name goes).
+  - In `services/orchestrator/**`, a non-literal `getattr`/`setattr` on a facade binding that is not a recognised dispatch wrapper fails the guard. This is green today: the two wrapper sites are the only ones.
+  - `raising=False` patches ARE collected, because they are exactly the ones that go silent after F2. A target that does not resolve today goes into an exemption table inside the test only if the test deliberately injects a new attribute, and each entry carries a written reason and its site. The exemption table is empty at a306fd5e4. Any entry that resolves, or whose site is gone, fails the guard.
+  - Assertion: `hasattr(importlib.import_module("services.orchestrator.scheduler"|"…chain"), X)` holds for every collected name. A failure lists every unresolved `(facade, name, file:line)`.
+  - Meta-tests:
+    1. Bite rows. Synthetic sources are run through the collector. A row must flag each read form above with a name that does not exist. A local wrapper plus `_scheduler_call("_no_such_name_3270")` is flagged, and a bare `getattr(_scheduler, name)` in an owner source outside a wrapper is flagged. A row must not flag `hasattr`, a `getattr` default, a non-facade alias of the same spelling, or a name that resolves.
+    2. Coverage. Each facade yields at least one name in each of these forms: attribute load, from-import, literal `getattr`, `setattr(A, "X")` / `monkeypatch.setattr(A, "X")`, and string-target setattr. Owner string dispatch yields at least one on scheduler. Store, `delattr`, `patch.object`, `mock.patch` and bare-dotted have no AST site at a306fd5e4 and are covered only by bite rows. The counts are logged.
+- Out of scope: production code; the F1 helper moves (10.1); the F2 installer deletion.
+- Carry-over (orchestrator, in this PR's final push): tick 5.5 for #3315 / PR #3327 (`.workplans/3315/carry-overs.md`).
+- Must preserve: no production file changes. `git diff --stat master -- services apps packages workers scripts db` is empty.
+- Risk packs: Legacy compatibility (monkeypatch surface). Not selected: everything else.
+- Required evidence:
+  1. Green run at HEAD, logging the count of collected names per facade and per read form, plus the exemption table (expected empty).
+  2. Mutation A (F2's own operation): in a scratch copy of the tree, replace `chain.py:851` `globals().update(_chain_compat_runtime.install_chain_runtime_compat())` with `pass`. The facade still imports, and the guard is red naming `(chain, _utcnow, services/orchestrator/chain_forecast_orchestrator_cycle.py:443)` and the other `_utcnow` owner sites. The working tree is not touched.
+  3. Mutation B: in a scratch copy of `scheduler_candidate_manifest.py`, add `_scheduler_call("_no_such_name_3270")`; the guard is red naming `(scheduler, _no_such_name_3270, file:line)`.
+  4. The bite-row results.
+  5. ruff, `git diff --check`, `openspec validate`, and uv.lock unchanged.
+- Verification (owner policy 2026-11-22: no local full suite):
+  - Locally, run the new file plus these repo-wide guards (`test_import_layering_guard.py` and `test_retry_accounting_ast_guard.py` do not scan `tests/`; they are run as a cheap regression check):
+    - `tests/test_import_layering_guard.py`
+    - `tests/test_file_orchestration_journal_facade.py`
+    - `tests/test_entropy_audit_facade_guard_aliases.py`
+    - `tests/test_entropy_audit_facade_guard_forwarders.py`
+    - `tests/test_retry_accounting_ast_guard.py`
+    - `tests/test_ci_shard_tests.py`
+  - CI's full sharded suite is the gate. Test-only, so no node-27 or node-22 run (D5).
 
 ## 11. F2 — Delete installers and `_COMPAT_` tables
 
