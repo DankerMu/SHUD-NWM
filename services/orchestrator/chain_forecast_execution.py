@@ -33,6 +33,7 @@ from services.orchestrator.retry_identity import (
     RETRY_ATTEMPT_FLOORS_FIELD,
     cohort_retry_attempt_floors,
     effective_retry_attempt,
+    mint_attempt,
     normalize_retry_attempt_floors,
     retry_attempt_floor,
     retry_suffix_attempt,
@@ -652,12 +653,15 @@ def _floored_cycle_stage_retry_job_id(
     base_job_id = _pipeline_job_id(context.run_id, stage.stage)
     occupied = {str(job.get("job_id") or "") for job in existing_jobs}
     get_pipeline_job = getattr(self.repository, "get_pipeline_job", None)
-    attempt = max(floors) + 1
-    while True:
-        candidate = _pipeline_retry_job_id(base_job_id, attempt)
-        if candidate not in occupied and not (callable(get_pipeline_job) and get_pipeline_job(candidate) is not None):
-            return candidate
-        attempt += 1
+    # Occupied: the snapshot first, the journal only on a snapshot miss.
+    attempt = mint_attempt(
+        floors,
+        lambda a: (
+            (candidate := _pipeline_retry_job_id(base_job_id, a)) in occupied
+            or (callable(get_pipeline_job) and get_pipeline_job(candidate) is not None)
+        ),
+    )
+    return _pipeline_retry_job_id(base_job_id, attempt)
 
 
 def _nonempty_master_id(value: str | None) -> bool:

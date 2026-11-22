@@ -5,8 +5,12 @@ master rows, so the only durable per-stage attempt record is the ``_retry_<n>``
 suffix carried by the job id.  Production ids stack suffixes
 (``..._retry_1_retry_2``), so the LAST suffix is authoritative.
 
-This module is the single owner of that parsing; it deliberately has no
-dependencies so both the DB-free journal and the scheduler read side can use it.
+This module is the single owner of that parsing, and of the next-attempt
+formulas built on it (stage-scoped, floored, inline, reservation, current-master,
+non-master and manual paths) plus the cohort restart stage; it deliberately has
+no dependencies so both the DB-free journal and the scheduler read side can use
+it.  Its functions take plain data: callers keep their own topology (stage
+matching, stage canonicalization) and their own occupancy probe (``is_occupied``).
 It also owns the manual-retry claim judgement (#1201), for the same reason: the
 scheduler manifest minting point and the chain read side must share ONE
 predicate, and neither may import the other's layer.
@@ -15,7 +19,7 @@ predicate, and neither may import the other's layer.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
 LOGGER = logging.getLogger(__name__)
@@ -79,6 +83,106 @@ def effective_retry_attempt(job_id: str | None, recorded_count: Any = None) -> i
     """Return the effective attempt for a job: recorded count or id suffix, whichever is higher."""
 
     return max(_coerce_attempt(recorded_count), retry_suffix_attempt(job_id))
+
+
+def next_stage_attempt(job_ids: Iterable[Any], base_job_id: str) -> int:
+    """The next stage-scoped attempt: one past the largest positive suffix under ``base_job_id``.
+
+    The LAST ``_retry_<n>`` suffix is the attempt (stacked producer ids, #2254).
+    Suffix only, not ``retry_count``: an unparsable tail yields 0 and stays out of
+    the numbering.
+    """
+
+    prefix = f"{base_job_id}{RETRY_JOB_ID_MARKER}"
+    attempts: list[int] = []
+    for job_id in job_ids:
+        text = str(job_id or "")
+        if not text.startswith(prefix):
+            continue
+        attempt = retry_suffix_attempt(text)
+        if attempt > 0:
+            attempts.append(attempt)
+    return max(attempts, default=0) + 1
+
+
+def mint_attempt(floors: Sequence[int], is_occupied: Callable[[int], bool]) -> int:
+    """The floored mint: one past the largest floor, skipped forward past every occupied attempt.
+
+    ``floors`` must be non-empty.  ``is_occupied`` is called with each candidate
+    attempt in increasing order until it returns false (#1201: never reuse).
+    """
+
+    attempt = max(floors) + 1
+    while is_occupied(attempt):
+        attempt += 1
+    return attempt
+
+
+def inline_retry_attempt(retry_count: int, suffix_attempt: int, failure_number: int) -> int:
+    """The inline (same call) auto-retry attempt of a current master."""
+
+    return max(retry_count, suffix_attempt, failure_number - 1) + 1
+
+
+def reservation_submission_attempt(pipeline_job_id: str, retry_attempt: Any) -> int:
+    """The reservation's ``submission_attempt``: the claim (at least 1), raised past the id's last suffix.
+
+    A non-int claim raises ``ValueError``; a non-int suffix tail is ignored.  The
+    tail is parsed with ``rsplit`` + ``int``, not :func:`retry_suffix_attempt`
+    (no 0 floor; unobservable through the outer ``max``).
+    """
+
+    submission_attempt = max(int(retry_attempt or 1), 1)
+    if RETRY_JOB_ID_MARKER in pipeline_job_id:
+        try:
+            submission_attempt = max(
+                submission_attempt,
+                int(pipeline_job_id.rsplit(RETRY_JOB_ID_MARKER, maxsplit=1)[1]) + 1,
+            )
+        except ValueError:
+            pass
+    return submission_attempt
+
+
+def next_effective_attempt(job_id: Any, recorded_count: Any) -> int:
+    """One past :func:`effective_retry_attempt` (the current-master and manual paths)."""
+
+    return effective_retry_attempt(job_id, recorded_count) + 1
+
+
+def next_after_failure_master(job_id: Any, recorded_count: Any) -> tuple[str, int]:
+    """The current master's next retry identity: the stripped base, at the next effective attempt."""
+
+    text = str(job_id or "")
+    base, _suffix_attempt = split_retry_job_identity(text)
+    count = next_effective_attempt(text, recorded_count)
+    return retry_job_id(base, count), count
+
+
+def next_after_failure_non_master(job_id: Any, retry_count: Any) -> tuple[str, int]:
+    """A non-master auto retry's identity: ``job_id`` unstripped (stacks), count unclamped.
+
+    Deliberately not :func:`retry_job_id` / ``_coerce_attempt``: this path differs
+    from the master path today (#3319 owns any behaviour change).
+    """
+
+    count = int(retry_count or 0) + 1
+    return f"{job_id}{RETRY_JOB_ID_MARKER}{count}", count
+
+
+def restart_stage_from_basins(restart_stages: Iterable[str | None], stage_order: Sequence[str]) -> str | None:
+    """The earliest of the non-``None`` canonical ``restart_stages`` in ``stage_order``, or ``None``.
+
+    ``min`` is intentional: the cohort starts at the EARLIEST claim among the
+    members that carry a marker (run more, never less).  A stage missing from
+    ``stage_order`` sorts last.
+    """
+
+    stages = [stage for stage in restart_stages if stage is not None]
+    if not stages:
+        return None
+    order = {name: index for index, name in enumerate(stage_order)}
+    return min(stages, key=lambda stage: order.get(stage, len(order)))
 
 
 def retry_attempt_floor(state_evidence: Any, stage: str) -> int | None:

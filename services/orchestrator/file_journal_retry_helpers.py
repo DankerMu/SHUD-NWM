@@ -44,15 +44,12 @@ from services.orchestrator.file_journal_primitives import (
 )
 from services.orchestrator.public_evidence import _public_evidence, _public_message
 from services.orchestrator.retry import _safe_error_message
-from services.orchestrator.retry_identity import effective_retry_attempt, retry_job_id, split_retry_job_identity
+from services.orchestrator.retry_identity import next_after_failure_master
 from services.orchestrator.scheduler_state import _ensure_utc, _format_utc
 
 
 def _next_current_master_retry_identity(current: Mapping[str, Any]) -> tuple[str, int]:
-    job_id = str(current.get("job_id") or "")
-    base_job_id, _suffix_attempt = split_retry_job_identity(job_id)
-    retry_count = effective_retry_attempt(job_id, current.get("retry_count")) + 1
-    return retry_job_id(base_job_id, retry_count), retry_count
+    return next_after_failure_master(current.get("job_id"), current.get("retry_count"))
 
 
 def _json_bytes(payload: Mapping[str, Any]) -> bytes:

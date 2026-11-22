@@ -92,7 +92,7 @@ from services.orchestrator.reservation import (
     slurm_comment_for,
 )
 from services.orchestrator.retry import RetryConfig, compute_backoff_seconds
-from services.orchestrator.retry_identity import retry_suffix_attempt
+from services.orchestrator import retry_identity
 from services.orchestrator.scheduler_state_types import ACTIVE_HYDRO_STATUSES, DURABLE_HYDRO_SUCCESS_STATUSES
 from packages.common.contracts.time_normalization import (  # noqa: F401
     check_three_way_time_consistency,
@@ -840,21 +840,10 @@ def _next_retry_attempt_for_stage(
     base_job_id: str,
     stage: StageDefinition,
 ) -> int:
-    prefix = f"{base_job_id}_retry_"
-    attempts: list[int] = []
-    for job in jobs:
-        if not ForecastOrchestrator._job_matches_stage(job, stage):
-            continue
-        job_id = str(job.get("job_id") or "")
-        if not job_id.startswith(prefix):
-            continue
-        # The LAST ``_retry_<n>`` suffix is the attempt (stacked producer ids,
-        # #2254).  Suffix only, not ``retry_count``: an unparsable tail yields 0
-        # and must stay out of the numbering.
-        attempt = retry_suffix_attempt(job_id)
-        if attempt > 0:
-            attempts.append(attempt)
-    return max(attempts, default=0) + 1
+    # The stage filter is chain topology and stays here; the suffix scan and the
+    # ``+ 1`` are ``retry_identity``'s.  Lazy: each job is matched before its id is read.
+    job_ids = (job.get("job_id") for job in jobs if ForecastOrchestrator._job_matches_stage(job, stage))
+    return retry_identity.next_stage_attempt(job_ids, base_job_id)
 
 
 

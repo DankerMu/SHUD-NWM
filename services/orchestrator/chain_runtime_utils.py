@@ -28,6 +28,7 @@ from services.orchestrator.chain_types import (
 from services.orchestrator.retry_identity import (
     has_active_manual_retry_decision,
     log_ignored_manual_retry_attempt_claim,
+    restart_stage_from_basins,
     retry_job_id,
 )
 from workers.canonical_converter.converter import expected_converter_version
@@ -343,15 +344,10 @@ def _restart_stage_from_basins(basins: Sequence[Mapping[str, Any]]) -> str | Non
     ``(0, "full")`` cohort carries no marker at all.
     """
 
-    restart_stages: list[str] = []
-    for basin in basins:
-        restart_stage = _canonical_restart_stage(basin.get("restart_stage"))
-        if restart_stage is not None:
-            restart_stages.append(restart_stage)
-    if not restart_stages:
-        return None
-    stage_order = {stage.stage: index for index, stage in enumerate(STAGES)}
-    return min(restart_stages, key=lambda stage: stage_order.get(stage, len(stage_order)))
+    return restart_stage_from_basins(
+        (_canonical_restart_stage(basin.get("restart_stage")) for basin in basins),
+        tuple(stage.stage for stage in STAGES),
+    )
 
 
 def _retry_attempt_from_basins(basins: Sequence[Mapping[str, Any]]) -> int | None:
