@@ -5,7 +5,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
-from services.orchestrator.retry_identity import split_retry_job_identity
+from services.orchestrator.retry_identity import next_manual_attempt, split_retry_job_identity
 from services.orchestrator.scheduler_state_common import (
     _coerce_int,
     _coerce_mapping_for_state,
@@ -119,7 +119,7 @@ def _manual_retry_markers(state: Mapping[str, Any]) -> list[dict[str, Any]]:
                     state=state,
                     source="state",
                     order=-1,
-                    default_attempt=_state_retry_attempt(state) + 1,
+                    default_attempt=next_manual_attempt(_state_retry_attempt(state)),
                 )
             )
     elif marker is not None and bool(marker):
@@ -129,7 +129,7 @@ def _manual_retry_markers(state: Mapping[str, Any]) -> list[dict[str, Any]]:
                 state=state,
                 source="state",
                 order=-1,
-                default_attempt=_state_retry_attempt(state) + 1,
+                default_attempt=next_manual_attempt(_state_retry_attempt(state)),
             )
         )
     for order, event in enumerate(_state_events(state)):
@@ -1018,7 +1018,7 @@ def _manual_retry_new_attempt(state: Mapping[str, Any], *, previous_attempt: int
     for key in ("new_attempt", "retry_count"):
         value = manual.get(key)
         if value not in (None, ""):
-            return _coerce_int(value, default=_fallback_previous_attempt(state, previous_attempt) + 1)
+            return _coerce_int(value, default=next_manual_attempt(_fallback_previous_attempt(state, previous_attempt)))
     # The newest ADOPTED marker decides, and the scan is terminal there -- the same
     # termination rule ``_manual_retry_payload`` applies with its unconditional break, so the
     # two scanners cannot report different markers for one event list (#1289).  An absent or
@@ -1032,11 +1032,11 @@ def _manual_retry_new_attempt(state: Mapping[str, Any], *, previous_attempt: int
         details = event.get("details")
         value = details.get("retry_count")
         if value in (None, ""):
-            return _fallback_previous_attempt(state, previous_attempt) + 1
+            return next_manual_attempt(_fallback_previous_attempt(state, previous_attempt))
         if not _marker_event_pins_attempt(state, event):
-            return _fallback_previous_attempt(state, previous_attempt) + 1
-        return _coerce_int(value, default=_fallback_previous_attempt(state, previous_attempt) + 1)
-    return _fallback_previous_attempt(state, previous_attempt) + 1
+            return next_manual_attempt(_fallback_previous_attempt(state, previous_attempt))
+        return _coerce_int(value, default=next_manual_attempt(_fallback_previous_attempt(state, previous_attempt)))
+    return next_manual_attempt(_fallback_previous_attempt(state, previous_attempt))
 
 def _marker_recovered_candidate_stage(state: Mapping[str, Any]) -> str | None:
     """Recover a canonical stage from exact marker-to-source lineage (#1577).

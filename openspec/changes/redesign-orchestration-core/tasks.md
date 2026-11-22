@@ -436,7 +436,7 @@ Slice triage (T1, #3264, tasks 8.1-8.3):
 
 - [x] 9.1 Id formatting. Add `retry_job_id(base, attempt)`, keeping the `max(attempt, 1)` clamp, and delegate the hand-built sites whose output the clamp cannot change: `chain_runtime_utils.py:448-449`, `chain_forecast_orchestrator_cycle.py:289`, `file_journal_retry_helpers.py:55`. The fourth, `file_orchestration_journal.py:12458-12459` (unclamped, stacking), is deferred to 9.2. Retarget their table rows.
 - [x] 9.2 Attempt formulas. `retry_identity` gains `next_stage_attempt`, `mint_attempt(floors, is_occupied)`, `inline_retry_attempt`, `next_after_failure_master`, `next_after_failure_non_master`, `restart_stage_from_basins`, plus two names D2 does not list, `reservation_submission_attempt` and `next_effective_attempt` (needed by the 9.5 guard's empty allowlist). Delegated at HEAD cb5d3568b: `chain.py:837` `_next_retry_attempt_for_stage`, `chain_forecast_execution.py:624` floored mint (skip loop), `chain_forecast_orchestrator_cycle.py:288` and `:667-676` / `:740-749`, `file_journal_retry_helpers.py:51-55`, `file_orchestration_journal.py:12456-12459` (non-master, the last hand-built id site) and `:12678` (manual), `chain_runtime_utils.py:330` `_restart_stage_from_basins`. Deliberately not moved: `_mint_cycle_stage_retry_job_id` (`chain_forecast_execution.py:573`, composition only), `_retry_cycle_stage_job_id:206-210` (claim precedence, late binding), `_retry_attempt_from_basins` (`chain_runtime_utils.py:357`, no `+1`; its judgement already lives in the owner), and the floor-applies binding check (`chain_forecast_execution.py:650-651`). Row L becomes a plain-data row.
-- [ ] 9.3 Stage attempt reads. Add `stage_attempt` and delegate `scheduler_state_rows.py:517-656` and the `_stage_job_sort_key` parser.
+- [x] 9.3 Stage attempt reads. Add `stage_attempt(row_attempts, floor=None)` and delegate `scheduler_state_rows.py:517-656` (stage-less, canonical and non-canonical arms) and the `_stage_job_sort_key` parser (`stage_job_sort_attempt`), plus the seven scheduler-side manual `+ 1` sites in `scheduler_state_manual_retry.py` (`next_manual_attempt`, unclamped). Deliberately not moved: `stage_retry_attempt_floors`, `_job_retry_attempt`, and the `_fallback_previous_attempt` max.
 - [ ] 9.4 Limit and status sets.
   - The owner holds the default limit constant; `DEFAULT_RETRY_LIMIT` and `RetryConfig`'s default read it. `SlurmGatewaySettings.max_retries` keeps its literal default (the gateway must not import the orchestrator), and a parity test asserts that it equals the owner constant.
   - `NHMS_SCHEDULER_RETRY_LIMIT` and `SLURM_GATEWAY_MAX_RETRIES` keep their readers.
@@ -879,6 +879,434 @@ Slice triage (T2-2, #3266, task 9.2):
   3. No delegate is renamed or turned into a rebinding; late-bound `_chain.` reads stay; `chain.py` imports the module, not the symbol.
   4. The deviations are applied as recorded: the two extra owner names, the four non-moves, and no unused import left behind (F401).
   5. No T1 literal is edited except the sanctioned L removal from `INDEX` and from the completeness list.
+
+Slice triage (T2-3, #3267, task 9.3):
+- Issue type: refactor (a pure move: no output changes for any input). Fixture level: expanded, agreeing with the issue. The two T2 expanded triggers apply. First, persisted or shared state (`issue-risk-contract.md:22`): every stage attempt read here feeds a budget decision, a durable `retry_attempt_floor` / manual `new_attempt` in decision evidence, and the mint that turns into a `pipeline_job.job_id`. Second, the project's orchestrator/state-machine trigger (`openspec/project-profile.md:107`).
+  - Scope, by orchestrator decision on the issue (two comments): task 9.3's text (`scheduler_state_rows.py:517-656` and the `_stage_job_sort_key` parser), plus the scheduler-side manual new-attempt arithmetic, `scheduler_state_manual_retry.py:122,132` and `:1021-1039`.
+  - Minimal mergeable slice: atomic (agree). Three owner functions, each with its own rows and mutations. None depends on another's PR.
+  - The clean cut, if the orchestrator wants one: `next_manual_attempt` plus the manual-site rows (sections F and G under Tests) as a separate PR. It shares no helper with the stage reads; it only consumes `_state_retry_attempt`'s value. A split costs a D5 batch slot (at most three pure-move PRs per node-22 batch) and buys no extra verification.
+  - Decided (orchestrator): one PR.
+- Governing invariant: every attempt computation named in Change is done by one `retry_identity` function. Each delegating site returns the same value, or raises the same exception at the same point, as today for every input. That includes `None` and non-int counts, negative counts and tails, malformed, stacked and empty suffixes, missing stages, alias stages, non-canonical stages, non-Mapping or non-int floors, legacy rows without `stage`, and states without a flat key.
+  - Two divergences stay as separate code paths:
+    - `_stage_job_sort_key`'s attempt: a persisted count wins, no clamp, negative tail kept. It differs from `effective_retry_attempt`, which takes the max and floors at 0 (D2: no unification while moving).
+    - The stage-less read: recorded counts only, no clamp, so negatives pass through. It differs from the stage-scoped read, which goes through `effective_retry_attempt`, always `>= 0`.
+  - `retry_identity.py` stays stdlib-only.
+  - The T1 table stays green with every expected value unchanged.
+- Recon at HEAD a66dd8306 (9.1 and 9.2 merged). These anchors replace T1's.
+  1. Stage-scoped / flat dispatch, `scheduler_state_rows.py:517-582` `_state_retry_attempt(state, *, stage=None)`.
+     - `canonical_stage = _canonical_downstream_stage(stage)` (`:574`).
+     - Non-canonical and non-empty → `_state_non_canonical_stage_retry_attempt(state, str(stage))` (`:577`).
+     - `None` / `""` → `_state_flat_retry_attempt(state)` if not `None`, else `_state_job_retry_attempt(state, None)`.
+     - Canonical → `_state_job_retry_attempt(state, canonical_stage)`.
+     - Pure dispatch, no arithmetic.
+     - Name re-exported by `scheduler.py:198`, `scheduler_state.py:143`, `scheduler_state_compat.py:144` (`SCHEDULER_STATE_COMPAT_REEXPORT_NAMES`, wrapped by the installer: it needs `FunctionType` identity with the owner module's attr).
+     - Imported by name by `scheduler_candidates.py:48`, `scheduler_state_evidence_owner.py:29`, `scheduler_state_failure.py:54`, `scheduler_state_manual_retry.py:30`, and tests (`test_file_journal_repository_semantics.py:1694`, `test_orchestration_chain.py:18376`, `test_production_scheduler.py` x94, `test_file_orchestration_migration.py:980,1090`).
+     - No monkeypatch of it anywhere (`git grep` on `setattr(...` with `"_state_retry_attempt"` is empty).
+  2. Non-canonical arm, `:584-602` `_state_non_canonical_stage_retry_attempt(state, stage)`.
+     - `max((effective_retry_attempt(job.get("job_id"), _coerce_int(job.get("retry_count"), default=0)) for job in _state_jobs(state) if _job_stage_name(job) == stage and not _job_is_cycle_scope_row(job)), default=0)` (`:595-602`).
+     - Filter first, then coerce: a non-matching row's count is never coerced.
+     - Test import `test_production_scheduler.py` (1 hit).
+  3. Flat read, `:604-609` `_state_flat_retry_attempt(state)`.
+     - First of `retry_attempt` / `attempt` / `retry_count` not in `(None, "")` → `_coerce_int(value, default=0)`. Otherwise `None`.
+     - A key-precedence read of the state mapping, no arithmetic.
+  4. Row scan plus floor, `:611-628` `_state_job_retry_attempt(state, canonical_stage)`.
+     - `jobs = _state_jobs(state)` (`:624`; job-limit window).
+     - `scanned = max((_job_retry_attempt(job, canonical_stage) for job in jobs), default=0)` (`:625`).
+     - `None` stage → `scanned`. Otherwise `max(scanned, _state_stage_retry_attempt_floor(state, canonical_stage))` (`:628`). The floor is read after the scan.
+  5. Floor read, `:630-634` `_state_stage_retry_attempt_floor`.
+     - `state.get(STAGE_RETRY_ATTEMPT_FLOORS_KEY) or {}`; non-Mapping → 0; else `_coerce_int(floors.get(stage), default=0)`.
+     - Always returns an `int`, never `None`.
+  6. Per-row read, `:636-647` `_job_retry_attempt(job, canonical_stage)`.
+     - `recorded = _coerce_int(job.get("retry_count"), default=0)` (`:637`) runs FIRST for every row, before the stage check.
+     - `None` stage → `recorded` (raw, may be negative). Stage mismatch (`_canonical_downstream_stage(_job_stage_name(job)) != canonical_stage`) → 0. Otherwise `effective_retry_attempt(job.get("job_id"), recorded)` (`:647`).
+     - Its only formula is already the owner's `effective_retry_attempt`.
+     - Observed at a66dd8306: `_state_retry_attempt({"pipeline_jobs": [{"job_id": "a", "stage": "forcing", "retry_count": float("inf")}]}, stage="forecast")` raises `OverflowError`. A non-matching row's count is coerced and can raise. A filter-then-coerce delegate would return 0 instead, so it is not a pure move.
+  7. `:649-654` `_job_stage_name`: topology (`stage` then `job_type`). Imported by `scheduler_state_manual_retry.py:25`. Stays.
+  8. Floors producer, `:656-704` `stage_retry_attempt_floors(jobs)`.
+     - Per job: `stage = _canonical_downstream_stage(_job_stage_name(job))`; `None` → skip, so match first and the count is never read.
+     - Then `attempt = effective_retry_attempt(job.get("job_id"), job.get("retry_count"))` (`:694`, raw count, no `_coerce_int`).
+     - Ties join, `attempt < current or attempt <= 0` skips, `attempt > current` resets `floors[stage]` / `sources[stage] = []`.
+     - `sources[stage].append(_stage_retry_attempt_floor_source(job))` (`:703`) projects lazily, contributors only.
+     - Key order is first-positive-insertion; it is serialized into candidate state.
+     - Sole production caller `chain_repository_state.py:702`, over the untruncated, terminal-filtered `dict(job)` copies (`:671-672`). Consumer `scheduler_state_identity_filter.py:344` narrows by the recorded sources.
+     - Observed: a canonical row with `retry_count=inf` raises `OverflowError`, a non-canonical one does not.
+  9. Sort-key parser, `chain_runtime_utils.py:449-473` `_stage_job_sort_key(job, stage)`, `:450-462`:
+     ```python
+     job_id = str(job.get("job_id") or "")
+     base_job_id = str(job_id).removesuffix("_retry_0")
+     persisted_attempt = _coerce_int(job.get("retry_count"), default=-1)
+     attempt = persisted_attempt if persisted_attempt >= 0 else 0
+     marker = "_retry_"
+     if persisted_attempt < 0 and marker in job_id:
+         try:
+             attempt = int(job_id.rsplit(marker, maxsplit=1)[1])
+         except ValueError:
+             attempt = 0
+         base_job_id = job_id.rsplit(marker, maxsplit=1)[0]
+     elif marker in job_id:
+         base_job_id = job_id.rsplit(marker, maxsplit=1)[0]
+     ```
+     - Then `stage_match` from `job.get("stage")` / `job.get("job_type")` / `base_job_id.endswith(f"_{stage.stage}")`, plus terminal and created times (`:463-473`).
+     - The base feeds `stage_match`, so the parser yields `(base, attempt)`.
+     - Only the last layer is stripped: `{"job_id": f"{B}_retry_1_retry_4"}` with no stage field → `(0, 4)`.
+     - `_coerce_int` is the local `chain_runtime_utils.py:42` (facade alias `chain.py:576`): `int()` semantics (`True`→1, `2.9`→2, `"3"`→3, `"x"`/`None`→-1 default, `inf`→`OverflowError`), not `_coerce_attempt`.
+     - `removesuffix("_retry_0")` is dead in effect: whenever it changes the id, `marker in job_id` holds and a branch overwrites the base with the same value. This is T1's SK0 equivalent mutant (`.workplans/3264/mutations.log:121-127`).
+     - Callers: facade alias `chain.py:594`, late-bound wrapper `chain_forecast_cycle.py:78-79` (used at `:546`), inventory row `docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md:354`, test pins `tests/test_warm_start_chaining.py::test_released_reservation_reenters_only_through_a_higher_attempt_retry_row` (`:2624`) plus T1.
+     - No monkeypatch.
+  10. Manual default, `scheduler_state_manual_retry.py:111-149` `_manual_retry_markers`.
+      - `default_attempt=_state_retry_attempt(state) + 1` at `:122` (Mapping marker with `marker`/`requested`/`enabled`) and `:132` (truthy non-Mapping marker).
+      - Evaluated eagerly, even when the payload's `new_attempt` / `retry_count` / `attempt` wins in `_first_state_int` (`scheduler_state_common.py:49-54`, which uses `default or 0` for a non-int value).
+      - The stage-less read can be negative, so the default can be -2 (observed). The `+ 1` is unclamped.
+      - `_manual_retry_markers` / `_manual_retry_marker_record` are re-exported by `scheduler.py:158,160`, `scheduler_state.py:108,110`, and `scheduler_state_compat.py:104,106`.
+  11. Manual new attempt, `:1016-1039` `_manual_retry_new_attempt(state, *, previous_attempt)`. Seven `+ 1` sites:
+      - `:1021` `_coerce_int(value, default=_fallback_previous_attempt(state, previous_attempt) + 1)` for the payload's `new_attempt` / `retry_count`. The default is eager.
+      - `:1035` newest adopted marker, empty `retry_count`.
+      - `:1037` newest adopted marker, non-pinning.
+      - `:1038` newest adopted pinning marker; `_coerce_int(value, default=... + 1)`. Reachable only when the payload carries the key with `None`, e.g. the state's own `manual_retry: {"new_attempt": None}`, because `_manual_retry_payload:921-924` uses `setdefault`. Otherwise a pinning event resolves at `:1021`.
+      - `:1039` no adopted marker.
+      - Re-exported (`scheduler.py:161`, `scheduler_state.py:111`, compat `:107`). Caller `scheduler_state_failure.py:2252`. Pinned by roughly 100 asserts across `test_production_scheduler.py`, `test_file_orchestration_migration.py` and `test_file_orchestration_journal.py:1576,1666,3571`.
+      - `_fallback_previous_attempt` (`:964-1014`):
+        - lazy import of `scheduler_state_failure._candidate_failed_stage`;
+        - canonical failed stage → `previous_attempt`;
+        - otherwise `max([previous_attempt, *[_state_retry_attempt(state, stage=s) for s in _restarted_stage_family(state)]])` (`:1013-1014`);
+        - no `+ 1`;
+        - called directly by `tests/test_production_scheduler.py:8155` (parity, no literal);
+        - with an empty family and a negative `previous_attempt` it returns the negative value (observed `-2` → new attempt `-1`).
+      - Site reach of every row in Tests F/G was confirmed with `sys.settrace` on unchanged code (scratch script, not committed).
+  - Compatibility propagation (`scheduler_state_compat.py:169-235`):
+    - A patch of a `SCHEDULER_STATE_COMPAT_REEXPORT_NAMES` function on the `scheduler` facade is propagated, during wrapped calls, onto every `services.orchestrator.scheduler_state*` module that has that name. This includes `_coerce_int:56`, `_canonical_downstream_stage:55`, `_state_jobs:141` and `_state_retry_attempt:144`.
+    - `retry_identity` is outside that prefix, so anything those names do must stay a module-global lookup in the `scheduler_state_*` site.
+    - The only facade patch of one of them today is `test_production_scheduler.py:1605` (`_canonical_downstream_stage`, on the execution path, not an attempt read). The mechanism is still the contract.
+  - Governed facades: only `scheduler.py` and `chain.py` (`scripts/governance/entropy_audit/schema.py:206-217`). The guard scans definitions in those two files only (`facade_guard.py:144-170`). This slice edits neither.
+- Blast radius:
+  - Files changed:
+    - `services/orchestrator/retry_identity.py` (three new functions; still stdlib-only);
+    - `scheduler_state_rows.py` (`:595-602`, `:624-628` bodies; the `:15` import);
+    - `scheduler_state_manual_retry.py` (`:122`, `:132`, `:1021`, `:1035`, `:1037`, `:1038`, `:1039`; the `:8` import);
+    - `chain_runtime_utils.py` (`:451-462` body; the `:28-33` import);
+    - `tests/test_retry_accounting_table.py`;
+    - the umbrella `tasks.md` (this block, the 9.3 tick, the 9.3 wording).
+  - Not changed: `chain.py`, `scheduler.py`, `scheduler_state.py`, `scheduler_state_compat.py`, `chain_forecast_cycle.py`, `chain_repository_state.py`, both inventories. No import goes unused: `effective_retry_attempt` is still used at `scheduler_state_rows.py:597,647,694`, and `_coerce_int` is still used at `chain_runtime_utils.py:452` (now as the argument).
+  - A wrong move would change a stage budget read (a candidate blocked early or let past its limit), the latest-row choice for a stage (`_stage_job_sort_key` → warm-start / reservation re-entry), or a manual `new_attempt` that becomes a durable id. Each of these re-mints or skips an attempt (#1179, #1298, #1579, #1293, #1300, #1577).
+- Non-goals:
+  - any T1 expected value;
+  - unifying `_stage_job_sort_key`'s attempt with `effective_retry_attempt`, or clamping the stage-less read (D2; #3319 owns behaviour changes);
+  - deleting the dead `removesuffix("_retry_0")` (moved verbatim; report only);
+  - stage canonicalization, cycle-scope and stage-family judgement, or the job-limit window;
+  - limits and status sets (9.4);
+  - the AST guard (9.5);
+  - renaming or deleting any delegate, facade alias, compat re-export or late-bound wrapper (F1/F2);
+  - #3284.
+- Sibling surfaces (must stay):
+  - parsers `split_retry_job_identity` / `retry_suffix_attempt` / `effective_retry_attempt` / `_coerce_attempt` with their 0 floors;
+  - the 9.2 owner functions;
+  - topology and coercion helpers at their sites: `_canonical_downstream_stage`, `_job_stage_name`, `_job_is_cycle_scope_row`, `_state_jobs`, `_state_job_limit`, both `_coerce_int`s, `_first_state_int`, `_candidate_failed_stage`, `_restarted_stage_family`, `_marker_event_pins_attempt`, `_event_is_adopted_manual_retry_marker`;
+  - `_state_flat_retry_attempt` (key precedence), `_state_stage_retry_attempt_floor` (floor read), `_job_retry_attempt` (per-row read; see Change, "Deliberately not moved");
+  - `scheduler_state_identity_filter._narrow_stage_retry_attempt_floors` (consumer of the sources);
+  - the late-binding chain `chain.py:594` → `chain_forecast_cycle.py:78-79`;
+  - the compat installer's drift checks (`scheduler_state_compat.py:237-257`).
+  - Not attempt arithmetic (sweep of `+ 1` in `services/orchestrator/scheduler*.py`): `scheduler_state_manual_retry.py:1127` (recovered-stage counter), `scheduler_lease.py:250`, `scheduler_no_progress.py:270`, and the status tallies. The out-of-scope sites T2-2 reported (`chain_forecast_execution.py:866-876,327,944`, journal `:3394-3399`) are unchanged and still reported, not moved.
+- Change (9.3). Plain-data functions in `retry_identity.py`. Expressions are moved verbatim; inside the owner `"_retry_"` becomes the equal `RETRY_JOB_ID_MARKER`.
+  1. `stage_attempt(row_attempts: Iterable[int], floor: int | None = None) -> int`: `scanned = max(row_attempts, default=0)`; `floor is None` → `scanned`; otherwise `max(scanned, floor)`.
+     - Docstring: the stage attempt over row attempts the caller already read and scoped. With no `floor` (the stage-less read and the non-canonical arm) nothing is clamped, so negative recorded counts pass through.
+     - Delegate A, `_state_job_retry_attempt` (`:624-628`):
+       ```python
+       jobs = _state_jobs(state)
+       row_attempts = [_job_retry_attempt(job, canonical_stage) for job in jobs]
+       if canonical_stage is None:
+           return stage_attempt(row_attempts)
+       return stage_attempt(row_attempts, _state_stage_retry_attempt_floor(state, canonical_stage))
+       ```
+       - The list is materialized before the floor is read, so the order is unchanged: every row is coerced (`_job_retry_attempt`), then the floor.
+       - The `None` sentinel cannot collide, because `_state_stage_retry_attempt_floor` always returns an `int`.
+     - Delegate B, `_state_non_canonical_stage_retry_attempt` (`:595-602`): `return stage_attempt(<the same generator expression>)`. The generator's `if` filter clause (`_job_stage_name(job) == stage and not _job_is_cycle_scope_row(job)`) runs before its element expression (`_coerce_int(job.get("retry_count"), default=0)`) for each job, so a non-matching row's count is never coerced: match-before-coerce is unchanged. Tests B pins this with the non-canonical `inf` row → 0. With `floor=None`, `max(gen, default=0)` is unchanged.
+     - Rejected alternative: owner takes `(job_id, count)` pairs and the site filters first. That breaks the coerce-before-match order of Delegate A (the `OverflowError` row in Tests B).
+  2. `stage_job_sort_attempt(job_id: str, persisted_attempt: int) -> tuple[str, int]`: the `:451,453-462` block verbatim (`removesuffix("_retry_0")` kept as the literal), returning `(base_job_id, attempt)`.
+     - Delegate (`_stage_job_sort_key` stays a `def` with the same signature): `job_id = str(job.get("job_id") or "")`; `base_job_id, attempt = stage_job_sort_attempt(job_id, _coerce_int(job.get("retry_count"), default=-1))`; `stage_match` / times unchanged.
+     - Coercion stays at the site (the local `_coerce_int`, facade alias `chain.py:576`; `int()` semantics; the `OverflowError` raise stays there).
+     - Moving `removesuffix` after the `retry_count` read is unobservable (pure `str` op).
+     - The name is not in D2's list (deviation, like 9.2's two extra names).
+  3. `next_manual_attempt(previous_attempt: int) -> int` = `previous_attempt + 1`. Unclamped: it must not be `next_effective_attempt` or go near `retry_job_id`'s clamp (observed defaults -2, -1, 0).
+     - Delegates: `:122` and `:132` → `default_attempt=next_manual_attempt(_state_retry_attempt(state))`; `:1021`, `:1038` → `_coerce_int(value, default=next_manual_attempt(_fallback_previous_attempt(state, previous_attempt)))` (the default stays eager); `:1035`, `:1037`, `:1039` → `return next_manual_attempt(_fallback_previous_attempt(state, previous_attempt))`.
+     - `_state_retry_attempt` and `_fallback_previous_attempt` stay module-global lookups (compat propagation).
+     - The name is not in D2's list (deviation). The spec's "manual path" (`:9-10`) covers it.
+  - Decided (orchestrator), owner names: `stage_attempt` is the state-read aggregation, which matches spec `:11` "stage attempt reads over already-read rows". The parser gets `stage_job_sort_attempt`. One function cannot serve both, because their divergence is pinned (T1 `test_stage_job_sort_key_diverges_from_effective_retry_attempt`).
+  - How little of `:517-656` changes: under these recommendations, none of the three functions the task names there gets a body edit (`_state_retry_attempt`, `_job_retry_attempt`, `stage_retry_attempt_floors`). The only edits in the range are the bodies of `_state_non_canonical_stage_retry_attempt` (`:595-602`) and `_state_job_retry_attempt` (`:624-628`), which delegate their aggregation to `stage_attempt`.
+    - Their per-row attempt formula already lives in the owner: `effective_retry_attempt`, used at `:597,647,694`.
+    - What stays local is topology (stage matching and canonicalization, cycle scope, the job-limit window), coercion through compat-propagated `_coerce_int`, key precedence and contributor bookkeeping.
+    - 9.3's wording should say this plainly rather than "delegate `:517-656`".
+  - Deliberately not moved, each recorded in the PR body and in 9.3's wording:
+    - `_job_retry_attempt`. Decided (orchestrator): not moved, because there is nothing to move. Its formula is already `effective_retry_attempt`; the rest is scope (stage-less → raw recorded, mismatch → 0), and its coerce-first order is load-bearing. Alternative: a verbatim owner copy `stage_row_attempt(job_id, recorded, matches: bool | None)`, a fourth name D2 does not list, with no guard or spec requirement behind it.
+    - `_state_flat_retry_attempt` / `_state_stage_retry_attempt_floor`: key-precedence and floor reads of the state mapping through the compat-propagated `_coerce_int`, with no arithmetic.
+    - `_state_retry_attempt`: pure dispatch.
+    - `stage_retry_attempt_floors`. Decided (orchestrator): not moved.
+      - Its per-row attempt is already `effective_retry_attempt`. What is left is the tie-grouping that records contributor sources for the identity filter, with a lazy projection over the untruncated cycle-wide list.
+      - A plain-data owner would have to either take an injected projection (a second callable seam against spec `:18-20`'s letter) or defer the projection to the final contributors. Deferring changes which rows get projected; that is pure for the `dict(job)` copies the only production caller passes, but not "every input".
+      - Precedent: 9.2 left `_retry_attempt_from_basins` for the same reasons.
+      - Alternative: `stage_attempt_floors(rows: Iterable[tuple[str, Any, Any, T]]) -> tuple[dict[str, int], dict[str, list[T]]]` with raw-row payloads; the site projects afterwards and keeps match-before-`.get` order.
+    - `_fallback_previous_attempt`'s `max([previous_attempt, *family_floors])`. Decided (orchestrator): stays.
+      - It has no `+ 1` and floors over values the owner already computes through `_state_retry_attempt`.
+      - The family is the scope axis, and the function is called directly by a test.
+      - It cannot reuse `stage_attempt`: for an empty family and `previous_attempt=-2`, `max([-2])` is -2, but `stage_attempt([], -2)` is 0.
+  - Deviations, listed verbatim in the PR body and in 9.3's wording:
+    1. Two extra owner names D2 does not list: `stage_job_sort_attempt` and `next_manual_attempt` (beside D2's `stage_attempt`).
+    2. Manual-site scope: `scheduler_state_manual_retry.py:122,132,1021,1035,1037,1038,1039` are taken into 9.3 by orchestrator decision on #3267. They are not in 9.3's task text.
+    3. The non-moves: `_job_retry_attempt`, `_state_flat_retry_attempt`, `_state_stage_retry_attempt_floor`, `_state_retry_attempt` (dispatch), `stage_retry_attempt_floors`, and `_fallback_previous_attempt`'s `max`.
+    4. The existing section-3 T1 rows stay on their delegates (`test_state_retry_attempt`, `test_stage_job_sort_key`, `test_stage_job_sort_key_diverges_from_effective_retry_attempt`, `test_job_retry_attempt`, `test_stage_retry_attempt_floors`). D2, at `design.md:171`, says "Plain-data rows retarget to the owner functions". These rows cannot retarget, because the topology each row passes through stays at the site and the owner functions take already-scoped ints. The owner gets its own direct rows (A, C, E) instead.
+- Tests (`tests/test_retry_accounting_table.py`, section 3). The rule: no expected literal is edited. Every delegate row's expected value below was observed at a66dd8306 by the triage (`uv run --no-sync`, scratch scripts), and the implementer re-observes them in Required evidence 1. B/D/F/G call the delegates; A/C/E call the owner.
+  - Existing rows stay on their delegates, unchanged: `test_state_retry_attempt` (5), `test_stage_job_sort_key` (7), `test_stage_job_sort_key_diverges_from_effective_retry_attempt` (2), `test_job_retry_attempt` (4), `test_stage_retry_attempt_floors` (1). The delegate keeps the site's topology, so these rows still pass through it.
+  - No delegate-parity rows. 9.2 added parity rows only where it retargeted a literal table to the owner and still needed the helper name pinned. Here no row is retargeted: every delegate row (B, D, F, G, H) carries its own literal. A parity row (`delegate(x) == owner(site-scoped x)`) would stay green under every owner mutation, because both sides see it. It would also stay green under a site that stopped delegating but copied the formula, so it adds no red.
+  - A. `test_stage_attempt` (owner): `([], None)`→0; `([-3, -1], None)`→-1; `([2, 0, 5], None)`→5; `([], 4)`→4; `([1], 4)`→4; `([3], -2)`→3; `([], -2)`→0; `([0, 0], 0)`→0.
+  - B. `test_state_retry_attempt`, new rows (state, stage → expected):
+    - stage-less:
+      - `{"pipeline_jobs": [{"job_id": "j", "retry_count": -3}]}` → -3;
+      - the same with a second `-1` row → -1;
+      - `{"retry_attempt": 4, "attempt": 5, "retry_count": 6}` → 4;
+      - `{"attempt": 5, "retry_count": 6}` → 5;
+      - `{"retry_attempt": "", "retry_count": 6}` → 6;
+      - `{"retry_count": "x"}` → 0;
+      - `{"retry_count": -2}` → -2;
+      - `{}` → 0;
+      - flat 7 with a `j_forecast_retry_5` forecast row and `stage=""` → 7.
+    - canonical, `stage="forecast"` unless noted:
+      - `stage="parse_output"` over `j_parse_retry_3`/`parse` → 3;
+      - row stage `run_shud_forecast`, `j_retry_3` → 3;
+      - `j_forecast_retry_1_retry_4` → 4;
+      - `j_forecast_retry_abc` with `retry_count="x"` → 0;
+      - `j_forecast` with `retry_count=-4` → 0;
+      - no rows, floors `{"forecast": -2}` → 0;
+      - `{"pipeline_jobs": [{"job_id": "j_forecast_retry_1", "stage": "forecast"}], "stage_retry_attempt_floors": {"forecast": "x"}}` → 1;
+      - `{"pipeline_jobs": [{"job_id": "j_forecast_retry_1", "stage": "forecast"}], "stage_retry_attempt_floors": [5]}` → 1 (a non-Mapping floors value reads as floor 0, so the row's suffix 1 decides);
+      - no rows, floors `{"forecast": "6"}` → 6;
+      - `job_type="forecast"`, `j_retry_2` → 2;
+      - a cycle-scope `job_cycle_gfs_2026050100_forecast_retry_3` row (`run_id` `cycle_gfs_2026050100`) → 3 (counted);
+      - `job_limit=1`, rows `a` then `b_retry_5` → 0.
+    - non-canonical, `stage="download"`:
+      - `{"retry_count": 9, "pipeline_jobs": [{"job_id": "j_download_retry_3", "stage": "download", "model_id": "m", "run_id": "fcst_gfs_2026050100_m", "retry_count": 1}]}` → 3 (flat 9 excluded);
+      - `{"pipeline_jobs": [{"job_id": "job_cycle_gfs_2026050100_download_retry_3", "stage": "download", "run_id": "cycle_gfs_2026050100"}]}` → 0 (cycle-scope row subtracted);
+      - `{"pipeline_jobs": [{"job_id": "x_download_retry_3", "stage": "download", "run_id": "fcst_gfs_x"}]}` → 3 (model-less but not cycle grammar, so counted);
+      - `{"retry_count": 9}` → 0;
+      - `{"pipeline_jobs": [{"job_id": "x_download_retry_2", "stage": "download", "model_id": "m", "retry_count": "x"}]}` → 2;
+      - `{"pipeline_jobs": [{"job_id": "j_forcing", "stage": "forcing", "retry_count": float("inf")}]}` → 0, no raise (match-before-coerce: the `if` filter clause drops the row before `_coerce_int` sees `inf`; observed 0 at a66dd8306).
+
+    That is 27 rows. Plus `test_state_retry_attempt_coerces_every_row_before_matching`: a non-matching forcing row with `retry_count=float("inf")`, `stage="forecast"` → `pytest.raises(OverflowError)`; and an `inf` floor → `OverflowError` (2).
+  - C. `test_stage_job_sort_attempt` (owner, `(job_id, persisted)` → `(base, attempt)`):
+    - `("X_retry_2", 5)`→`("X", 5)`;
+    - `("X_retry_2", 0)`→`("X", 0)`;
+    - `("X_retry_2", -1)`→`("X", 2)`;
+    - `("X_retry_abc", -1)`→`("X", 0)`;
+    - `("X_retry_-3", -1)`→`("X", -3)`;
+    - `("X_retry_1_retry_4", -1)`→`("X_retry_1", 4)`;
+    - `("X_retry_1_retry_4", 2)`→`("X_retry_1", 2)`;
+    - `("X_retry_", -1)`→`("X", 0)`;
+    - `("X", -1)`→`("X", 0)`;
+    - `("", -1)`→`("", 0)`;
+    - `("X_retry_0", 2)`→`("X", 2)`;
+    - `("X_retry_ 7", -1)`→`("X", 7)`;
+    - `("X", 3)`→`("X", 3)`.
+
+    That is 13 rows (values from the verbatim block, executed in a scratch script).
+  - D. `test_stage_job_sort_key`, new rows (`FORECAST_BASE = B`, `[:2]`). None of these rows carries `stage` or `job_type`, so `stage_match` comes only from the returned base (the existing T1 rows with `stage` cannot discriminate the base):
+    - `B_retry_2` with count -1 → (1, 2);
+    - count `"x"` → (1, 2);
+    - count `"3"` → (1, 3);
+    - count `True` → (1, 1);
+    - count `2.9` → (1, 2);
+    - `B_retry_1_retry_4`, no stage → (0, 4);
+    - `B_retry_` → (1, 0);
+    - `B` → (1, 0);
+    - `job_id=None` → (0, 0);
+    - `{}` → (0, 0);
+    - `B_retry_0` with count 2 → (1, 2);
+    - `B_retry_ 7` → (1, 7);
+    - `B_retry_2` with count 1 and no stage field → (1, 1) (base stripped in the count-present branch).
+
+    That is 13 rows. Plus `retry_count=float("inf")` → `OverflowError` (1).
+  - E. `test_next_manual_attempt` (owner): 0→1, 3→4, -2→-1, -3→-2 (4).
+  - F. `test_manual_retry_marker_default_attempt` (`[m["attempt"] for m in _manual_retry_markers(state)]`):
+    - `:122`:
+      - `{"manual_retry": {"marker": True}, "retry_count": 2}`→[3];
+      - `{"manual_retry": {"marker": True}, "pipeline_jobs": [{"job_id": "j", "retry_count": -3}]}`→[-2];
+      - `{"manual_retry": {"marker": True, "new_attempt": "x"}, "retry_count": 2}`→[3];
+      - `{"manual_retry": {"requested": True}, "retry_count": "x"}`→[1];
+      - `{"manual_retry": {"marker": True, "new_attempt": 7}, "retry_count": 2}`→[7].
+    - `:132`:
+      - `{"manual_retry": True, "retry_count": 2}`→[3];
+      - `{"manual_retry": "yes"}`→[1];
+      - `{"manual_retry": True, "retry_count": -1}`→[0];
+      - `{"manual_retry_marker": True, "attempt": 4}`→[5].
+
+    That is 9 rows, each id naming its site line.
+    - Eager-default raise row, `:122`: `{"manual_retry": {"marker": True, "new_attempt": 7}, "pipeline_jobs": [{"job_id": "j", "retry_count": float("inf")}]}` → `pytest.raises(OverflowError)`.
+      - Observed at a66dd8306. The traceback runs `_manual_retry_markers:122` → `_state_retry_attempt:581` → `_state_job_retry_attempt:625` → `_job_retry_attempt:637` → `_coerce_int`.
+      - The pinned `new_attempt: 7` would win, so the raise proves the default is evaluated eagerly. The control with `retry_count: 0` → `[7]`.
+      - It turns red if a delegate makes the default lazy.
+  - G. `test_manual_retry_new_attempt_sites` (`_manual_retry_new_attempt(state, previous_attempt=p)`). The fixture states are built inline:
+    - Literal dicts, exactly as observed. They are derived from `tests/test_file_orchestration_migration.py:473-490`, where `_CYCLE_SCOPE_JOB` has `retry_count: 0`. Its pinning tests override that field (`{**_CYCLE_SCOPE_JOB, "retry_count": 4}`, `:591`), and the observation used the overridden 4. CYC's count reaches no G value, because CYC is a cycle-scope `download` row: it is outside the restarted family, and no canonical read matches `download`. Use the literal below, not an import from the migration test.
+      - `CYC = {"job_id": "job_cycle_gfs_2026070100_download", "run_id": "cycle_gfs_2026070100", "model_id": None, "stage": "download", "status": "failed", "retry_count": 4, "updated_at": "2026-07-01T00:00:00Z"}`;
+      - `OWN = {"job_id": "job_model_a_forecast", "run_id": "fcst_gfs_2026070100_model_a", "model_id": "model_a", "stage": "forecast", "status": "failed", "retry_count": 0, "updated_at": "2026-07-01T00:00:00Z"}` (identical to `:482-490`);
+      - `EVENT(rc) = {"event_id": 9, "entity_type": "pipeline_job", "entity_id": "job_cycle_gfs_2026070100_download", "event_type": "retry", "created_at": "2026-07-01T01:00:00Z", "details": {"trigger": "manual", "manual_retry_marker": True, "retry_count": rc, "created_at": "2026-07-01T01:00:00Z", "previous_job_id": "job_cycle_gfs_2026070100_download"}}` (the `:493-521` helper's shape with `previous_job_id` set);
+      - `ST(fs, rc) = {"pipeline_status": "failed", "retry_count": 0, "failed_stage": fs, "pipeline_jobs": [dict(CYC), dict(OWN)], "pipeline_events": [EVENT(rc)]}`;
+      - `LIVE = {"pipeline_jobs": [{"job_id": "job_fcst_gfs_2026050100_m_forecast_retry_5", "stage": "forecast", "status": "cancelled", "model_id": "m", "run_id": "fcst_gfs_2026050100_m"}]}`;
+      - `LIVE2 = {"pipeline_jobs": [{"job_id": "a_forecast_retry_2", "stage": "forecast", "status": "cancelled", "model_id": "m", "run_id": "fcst_gfs_2026050100_m"}, {"job_id": "a_convert_retry_4", "stage": "convert", "status": "cancelled", "model_id": "m", "run_id": "fcst_gfs_2026050100_m"}]}`;
+      - `NAMED = {"failed_stage": "forecast", "pipeline_jobs": [{"job_id": "j_forecast_retry_9", "stage": "forecast", "status": "failed", "model_id": "m", "run_id": "fcst_gfs_2026050100_m"}]}`.
+
+    Rows:
+    - `:1021`: `{"manual_retry": {"marker": True, "new_attempt": "x"}}`, p=3 → 4; `{"manual_retry": {"marker": True, "new_attempt": 5}}`, p=0 → 5.
+    - `:1035`: `ST("download", "")`, p=3 → 4 and p=-2 → 1.
+    - `:1037`: `ST("forecast", 5)`, p=3 → 4 and p=-2 → -1.
+    - `:1038`: `ST("download", "x")` plus `manual_retry={"marker": True, "new_attempt": None}`, p=3 → 4; the same with rc=7, p=0 → 7.
+    - `:1039`:
+      - `{}`, p=3/-2/0 → 4/-1/1;
+      - `LIVE` (its `job_fcst_gfs_2026050100_m_forecast_retry_5` row is `cancelled`, so `_candidate_failed_stage` names nothing and the family is `{"forecast"}`), p=0 → 6 and p=7 → 8;
+      - `LIVE2`, p=0 → 5;
+      - `NAMED`, p=3 → 4.
+
+    That is 15 rows, each id naming its site line.
+    - Eager-default raise row, `:1021`: `{"manual_retry": {"marker": True, "new_attempt": 7}, "pipeline_jobs": [{**LIVE["pipeline_jobs"][0], "retry_count": float("inf")}]}`, p=0 → `pytest.raises(OverflowError)`.
+      - Observed at a66dd8306. The traceback runs `_manual_retry_new_attempt:1021` → `_fallback_previous_attempt:1013` (family read `stage="forecast"`) → `_state_retry_attempt:582` → `_state_job_retry_attempt:625` → `_job_retry_attempt:637` → `_coerce_int`.
+      - The pinned `new_attempt: 7` would win (the control with `retry_count: 0` → 7), so the raise proves the default is evaluated eagerly.
+      - It turns red if a delegate makes the `:1021` default lazy.
+    - Eager-default raise row, `:1038`: `ST("download", 7)` with `manual_retry={"marker": True, "new_attempt": None}` and OWN's `retry_count` set to `float("inf")`, p=0 → `pytest.raises(OverflowError)`.
+      - Observed. The traceback runs `_manual_retry_new_attempt:1038` → `_fallback_previous_attempt:1013`.
+      - The pinned event count 7 would win: the control with OWN `retry_count: 0` → 7.
+    - Also observed: CYC `retry_count` 0 vs 4 gives identical values on every `ST` row (`[4, 1, 4, -1, 4, 7]`). That settles the migration-file reconciliation.
+  - H. `test_stage_retry_attempt_floors_order` (delegate; `stage_retry_attempt_floors` is not moved, Decided (orchestrator)):
+    - key order `["parse", "forecast"]` for rows `p_retry_2`/parse then `f_retry_1`/forecast;
+    - a higher attempt resets the contributors (`a_retry_1`, `b_retry_3` → sources `["b_retry_3"]`);
+    - a non-canonical `inf` count does not raise (`({}, {})`);
+    - a canonical `inf` count → `OverflowError`.
+
+    That is 4 rows. They pin the floors loop's match-first order and its contributor bookkeeping, which stay at the site (Decided (orchestrator): not moved).
+  - New rows total 99: A 8, B 29 (27 value rows + 2 raise rows), C 13, D 14, E 4, F 10 (9 + the `:122` raise row), G 17 (15 + the `:1021` and `:1038` raise rows), H 4. Of these, 25 call the not-yet-existing owner (A, C, E); 74 are delegate rows, green on unchanged code.
+  - Docstring section 3 (`:14`) gains "and the scheduler-side manual new attempt".
+- Spec: no delta.
+  - The change's `specs/job-retry-mechanism/spec.md:3-21` ADDs the owner requirement. It already lists "stage attempt reads over already-read rows" (`:11`) and the "manual" path (`:9-10`).
+  - "plain data" and the one `is_occupied` seam (`:18-20`): the three signatures take ints and a `str`.
+  - "SHALL NOT change its result for any input" (`:20-21`).
+  - Which scenario covers the stage reads: "Historical retry cases are pinned in one table" (`:23-42`), row "suffix-over-count when the recorded count is absent" (`:32`). That row is `_stage_job_sort_key`'s count-missing branch and the stage-scoped `effective_retry_attempt` read. Its "plain-data rows … equal what the pre-move code returns" (`:41-42`) is the B/D/F/G literal rows.
+  - The "Divergent paths are pinned as they are" scenario (`:44-55`) lists the non-master path, the `failure_number - 1` term, the two `rsplit` increments and the status-set difference. It does not list the two divergences this block's Governing invariant declares: the sort-key attempt vs `effective_retry_attempt`, and the unclamped stage-less read and manual `+ 1`.
+    - This still means no delta. A pure move changes no result, so it is bound by the requirement's "SHALL NOT change its result for any input" (`:20-21`). T1 already pins the sort-key divergence (`test_stage_job_sort_key_diverges_from_effective_retry_attempt`), and the new B/F/G rows pin the unclamped values.
+    - What the omission costs: a later unification of either divergence is not spec-bound to a behaviour-change issue the way the listed four are.
+    - Decided (orchestrator): no delta in this PR. If the orchestrator wants that binding, add one line per divergence to `:45-52`. It is the same change's ADDED requirement, so `openspec validate` is the only extra cost.
+  - The AST guard scenario (`:57-64`) does not match any 9.3 site: no `_retry_` id construction, and no `+ 1` on a parse call. 9.3 is required by D2 ownership and by `:11`, not by 9.5.
+  - design.md Appendix D has no T2 row. design.md `:49` ("`_stage_job_sort_key` is a third parser") stays true.
+  - `git grep` of the touched names over `openspec/specs`: one value-level hit, `job-retry-mechanism/spec.md:2281` (stage attempt from a raw projection), which stays true.
+  - `docs/runbooks/failed-basin-retry.md:165,171,254` name `_state_retry_attempt`, `stage_retry_attempt_floors` and `_stage_job_sort_key` as the deciding functions. They remain the entry points, so the lines stay true.
+  - `tasks.md`:
+    - tick 9.3 in the final push;
+    - reword 9.3 to the HEAD anchors;
+    - record the four Deviations (Change): the two extra owner names, the manual-site scope, the non-moves, and the section-3 T1 rows kept on their delegates.
+- Must preserve:
+  - every T1 expected value. `git diff master -- tests/test_retry_accounting_table.py` shows only added rows and docstring lines, each classified.
+  - every stage attempt, sort key and manual `new_attempt`, for every input, including the raise points;
+  - the delegates (body edited) stay `def`s with unchanged names and signatures: `_state_non_canonical_stage_retry_attempt`, `_state_job_retry_attempt`, `_stage_job_sort_key`, `_manual_retry_markers`, `_manual_retry_new_attempt`.
+  - untouched (byte-identical bodies, `git diff` shows no hunk in them): `_state_retry_attempt`, `_state_flat_retry_attempt`, `_state_stage_retry_attempt_floor`, `_job_retry_attempt`, `_job_stage_name`, `stage_retry_attempt_floors`, `_stage_retry_attempt_floor_source`, `_fallback_previous_attempt`, `_manual_retry_marker_record`.
+  - the compat installer's identity and drift checks (import of `services.orchestrator.scheduler` succeeds);
+  - `_coerce_int` / `_canonical_downstream_stage` / `_state_jobs` / `_state_retry_attempt` stay module-global lookups at their `scheduler_state_*` sites;
+  - `git diff --stat master -- services/orchestrator/chain.py services/orchestrator/scheduler.py services/orchestrator/scheduler_state.py services/orchestrator/scheduler_state_compat.py services/orchestrator/chain_forecast_cycle.py` is empty;
+  - coerce-before-match in `_state_job_retry_attempt`, match-before-coerce in the non-canonical arm and in the floors;
+  - the eager manual defaults;
+  - `retry_identity.py` imports only stdlib.
+- Risk packs:
+  - Selected:
+    - Legacy compatibility / examples: persisted-attempt-bearing reads, delegate names, compat re-exports and propagation, late binding. Covered by T1 unchanged, the delegate rows, per-function and per-site mutations, the empty facade diff, and the audit.
+    - Error handling / rollback / partial outputs: the three evaluation orders and their raise points. Covered by the `OverflowError` rows in B, D and H.
+  - Not selected:
+    - Concurrency (no occupancy probe in this slice);
+    - Public API;
+    - Config (9.4);
+    - File IO;
+    - Schema;
+    - Auth;
+    - Resource limits;
+    - Release;
+    - Documentation (runbook and inventory lines stay true).
+- Required evidence. Red/green sets below are predictions from the code. A different observed set means stop and report.
+  1. Baseline, before any production edit, at the recorded HEAD sha:
+     - `uv run pytest -q tests/test_retry_accounting_table.py` → green, 222 passed (the count at #3266 merge, `.workplans/3266/green-table.log`; re-observe).
+     - Add B, D, F, G and H first and run them on unchanged code → 74 passed, with the values above.
+     - Hash every production file to be edited (`sha256sum`).
+  2. Pre-change red: add A, C and E → 25 failed (`AttributeError` on `retry_identity.stage_attempt` / `stage_job_sort_attempt` / `next_manual_attempt`), everything else green.
+  3. After the change, the same command → 321 passed (222 + 99). Classify every table-file diff line as added or docstring.
+  4. Per-function mutations, each applied in the owner, run on the table file, then restored with a matching hash. M1–M3 were checked in a triage scratch simulation: the delegates were substituted in-process on unchanged code, no repo edit, over the B, F and G rows. The delegate matched today on every row, and M1–M3 turned red exactly the sets below.
+     - M1, `stage_attempt` drop the floor (`return max(scanned, floor)` → `return scanned`). Red: T1 `stage-set-floor-counts`; B no-rows `"6"`-floor; A `([], 4)`, `([1], 4)`. Green: B negative / non-int / non-Mapping floor rows, A `([3], -2)` / `([], -2)` / `([0, 0], 0)`.
+     - M2, `stage_attempt` clamp the floor-`None` branch (`max(scanned, 0)`). Red: B stage-less `-3` and `-1`; A `([-3, -1], None)`; F `:122` rows-negative (`[-2]`). Green: non-canonical rows (all `>= 0`) and G (the previous attempt is passed in).
+     - M3, `stage_attempt` floor-`None` branch `scanned + 1`. Red:
+       - T1 `stage-none-no-flat-recorded-counts-only`;
+       - B stage-less rows without a flat key (`-3`, `-1`, `{}`) and all six non-canonical value rows (including the non-canonical `inf` row, 0 → 1);
+       - A rows with `floor=None` (3);
+       - F `:122` rows-negative and `:132` `"yes"`.
+
+       Green: flat-key rows, canonical rows, G.
+     - M4, `stage_job_sort_attempt` `if persisted_attempt < 0 and marker in job_id` → `if marker in job_id` (T1 SK). Red:
+       - T1 `count-wins`, `zero-count-wins`, `count-wins-vs-max`;
+       - D count `"3"`, count `True`, `B_retry_0` count 2, count-1-no-stage;
+       - C `("X_retry_2", 5)`, `("X_retry_2", 0)`, `("X_retry_1_retry_4", 2)`, `("X_retry_0", 2)`.
+
+       Green: D count `2.9` (2 either way), C `("X", 3)`.
+     - M5, `stage_job_sort_attempt` drop the base strip in the `elif`. Red: D count `"3"`, count `True`, count `2.9`, count-1-no-stage (each `stage_match` 1 → 0); C `("X_retry_2", 5)`, `("X_retry_2", 0)`, `("X_retry_1_retry_4", 2)`. Green: every T1 row (the `[:2]` rows carry `stage`, and the divergence test reads `[1]` only), D count -1 / `"x"` (the `if` branch strips), C `("X_retry_0", 2)` (`removesuffix` covers it).
+     - M4–M6 and SK0 were checked in a triage scratch simulation: the verbatim block was run as the owner and the delegate rebuilt in-process, with no repo edit. The rebuilt delegate equalled `_stage_job_sort_key` on every T1 and D row. The red sets above are the observed ones; SK0 turned nothing red.
+     - M6, `stage_job_sort_attempt` clamp the tail (`max(int(...), 0)`). Red: T1 `negative-tail-no-clamp`, `negative-tail-vs-clamp`; C `("X_retry_-3", -1)`.
+     - M7, `next_manual_attempt` `+ 1` → `+ 2`. Red: E (4); every F and G row except the three where a pinned value wins (F `new_attempt: 7`, G `:1021` `new_attempt: 5`, G `:1038` rc=7). The three eager-default raise rows (F `:122`, G `:1021`, G `:1038`) stay green: they raise before the `+ 1`.
+     - Recorded, not required red: deleting `removesuffix("_retry_0")` in the owner is the SK0 equivalent mutant (stays green).
+  5. Per-site mutations, each a one-site revert to the bare value (`next_manual_attempt(X)` → `X`), seven runs:
+     - each turns red exactly its own F/G rows (minus the pinned-wins row at `:122`, `:1021` and `:1038`, and minus the eager-default raise rows, which raise either way);
+     - hashes restored.
+
+     This proves every site delegates and is reached.
+  6. Required existing pins green.
+     - The pin list is derived mechanically: 154 node ids at a66dd8306. An awk pass runs over every `tests/*.py` line that names a touched or in-scope function, and attributes the line to its enclosing top-level `def test_`.
+       - Per file: 113 in `test_production_scheduler.py`; 30 in `test_file_orchestration_migration.py`; 6 in `test_file_orchestration_journal.py`; 1 each in `test_file_journal_repository_semantics.py`, `test_operator_reentry_confirmation.py`, `test_orchestration_chain.py`, `test_scheduler_held_reservation_block.py` and `test_warm_start_chaining.py`.
+       - It includes `test_production_scheduler.py::test_projected_source_cycle_repair_gap_attempt_arithmetic_matches_the_control`, the only direct `_fallback_previous_attempt` caller.
+     - The triage's copies, `.workplans/3267/required-pins.txt` and `required-pins.cmd`, are gitignored (`.gitignore:55` `.workplans/`) and exist only in the orchestrator's local checkout. They never reach the PR, CI or node-27. The implementer re-derives the list with the command below, which is the same command as `required-pins.cmd`, inlined here:
+       ```bash
+       pat='_state_retry_attempt|_fallback_previous_attempt|_manual_retry_new_attempt|_manual_retry_markers|_manual_retry_marker_record|_latest_manual_retry_marker|stage_retry_attempt_floors|STAGE_RETRY_ATTEMPT_FLOORS_KEY|_stage_job_sort_key|_state_non_canonical_stage_retry_attempt|_job_retry_attempt|_manual_retry_requested|_manual_retry_state_evidence'
+       for f in $(git grep -lE "$pat" -- 'tests/*.py' | grep -v test_retry_accounting_table.py); do
+         awk -v F="$f" -v P="$pat" '/^(async )?def test_/ {match($0,/def test_[A-Za-z0-9_]+/); name=substr($0,RSTART+4,RLENGTH-4)} $0 ~ P && name!="" {print F"::"name}' "$f"
+       done | sort -u
+       ```
+     - Run the derived ids plus `tests/test_retry_mint_floor.py` with `uv run pytest -q`. Record the count of derived ids in the PR body: 154 at a66dd8306, on unchanged test files. A different count means a test file moved, so stop and report.
+     - The list is a lower bound: it misses tests that reach these functions only through a helper defined outside a test. The full suite (9) is the completeness evidence.
+  7. Residual greps, compared by content, not line:
+     - (a) the T2-2 id-construction grep. Baseline at a66dd8306 (run): `retry_identity.py:57,96,170`, `scheduler_state_manual_retry.py:914` (`manual_retry_{key}`, not an id). After: unchanged, because 9.3 builds no id.
+     - (b) the T2-2 formula grep. Baseline (run):
+       - `chain_runtime_utils.py:454`;
+       - `file_orchestration_journal.py:11376,11515,11544`;
+       - `retry_identity.py:27,105,115,140,150,169,250`;
+       - `scheduler_state_rows.py:886`.
+
+       After: baseline minus `chain_runtime_utils.py:454` (the `"_retry_"` literal). Remaining on purpose: the event-sequence counters, and `scheduler_state_rows.py:886` (a match).
+     - (c) the manual grep, the only evidence for these sites (the 9.5 guard does not match them): `git grep -nE '_state_retry_attempt\([^)]*\) *\+ *1|_fallback_previous_attempt\([^)]*\) *\+ *1|previous_attempt *\+ *1' -- services`. Baseline at a66dd8306 (run): exactly `scheduler_state_manual_retry.py:122,132,1021,1035,1037,1038,1039`. After: the seven manual lines gone, and the `next_manual_attempt` body line in `retry_identity.py` added (`previous_attempt + 1`).
+     - (d) `git grep -nE '"_retry_0"|removesuffix\("_retry' -- services`. Baseline: `chain_runtime_utils.py:451`. After: only the owner line.
+
+     Any other hit is a missed site.
+  8. Facade audit: no governed facade is touched (the Must-preserve `git diff --stat` is empty). `uv run python scripts/governance/audit_repo_entropy.py --format json --structural-base-ref master` → no `compatibility-facade-growth` signal for `services/orchestrator/scheduler.py` or `services/orchestrator/chain.py`.
+  9. Full local suite green (proxy env unset); `uv run ruff check . --no-cache`; `openspec validate redesign-orchestration-core --strict --no-interactive`; CI full suite, every shard.
+  10. node-27, per D5 "plus node-27 real-DB suites when those suites import the code".
+      - The import graph was checked at a66dd8306: each of the 57 `integration`-marked test files was imported in its own fresh `uv run --no-sync python` process, and `sys.modules` was checked for the four touched modules.
+      - Nine import all four, transitively: `test_display_coverage_residual_debt_integration.py`, `test_forecast_series_run_identity_pushdown_integration.py`, `test_hydro_run_parsed_at_integration.py`, `test_node27_autopipeline_published_reparse.py`, `test_pipeline_job_provenance_importer_integration.py`, `test_qhh_output_stream_type_integration.py`, `test_qhh_production_bootstrap_scheduler.py`, `test_river_identity_normalization_integration.py` and `test_river_timeseries_stats_index_choice_integration.py`.
+      - None of the other 48 `integration`-marked files imports any of the four touched modules: `scheduler_state_rows`, `scheduler_state_manual_retry`, `chain_runtime_utils`, `retry_identity`.
+        - Per-file fresh-process check, re-run at a66dd8306: 48 files × 0 modules, 9 × 4, no import error.
+        - There is no file that imports only one or two of the four, so the run list is exactly the nine.
+        - This includes `test_real_database_integration.py` (0 modules), so T2-2's pair is not this slice's set.
+      - On throwaway `nhms_it_*` DBs (`mkdir -p /home/nwm/tmp && export TMPDIR=/home/nwm/tmp`), run `-m integration` over those nine files.
+      - Expected: all pass, 0 leftover DBs. Run `df -h / /home` before and after.
+  11. node-22 (D5 pure-move batch, task 9.7): ff deploy at a pass boundary, then one idle pass (`status=planned`, `restart_reconcile.status=completed`, `lock.lock_type=file`) and one submitting pass (`status=submitted`), within a batch of at most three merged pure-move PRs or one day.
+      - Count 9.2 (#3321) into the batch if its batch has not run.
+      - 9.3 is ticked in the final push, with no trailing docs commit.
+      - The PR merges with `Part of #3267` until the batch has run.
+- Review focus:
+  1. Each delegate is equal for every input. In particular:
+     - `_state_job_retry_attempt` still coerces every row (the list is materialized) before reading the floor;
+     - the non-canonical arm keeps the generator's `if` filter clause ahead of the `_coerce_int` element expression (match-before-coerce; the non-canonical `inf` row stays 0);
+     - `stage_attempt` with `floor=None` never clamps;
+     - `stage_job_sort_attempt` keeps "count wins, `int()` tail, no clamp, `ValueError` → 0" and returns the base the site's `stage_match` uses;
+     - the manual defaults stay eager.
+  2. The divergences stay as code paths: the sort-key attempt vs `effective_retry_attempt`, and the unclamped stage-less read and manual `+ 1` vs the 0-floored parsers.
+  3. Topology and coercion stay at the sites as module-global lookups: compat propagation, the `chain.py:576` alias, the `inf` raise points.
+  4. The four Deviations (Change) are applied as recorded: two extra owner names, the manual-site scope, the non-moves, and the section-3 T1 rows kept on their delegates. No facade file changes.
+  5. No T1 literal is edited.
 
 ## 10. F1 — Compat-defined production helpers move to owners; facade resolution guard
 
