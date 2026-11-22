@@ -2761,12 +2761,58 @@ Slice triage (J0, #3275, tasks 13.1-13.3):
 
 ## 14. J1 — Retention mixin
 
-- [ ] 14.1 Move C18 (Appendix B) into `services/orchestrator/file_journal_retention.py` as a mixin that the class composes. The retention dataclasses stay importable from the facade. Update the cluster map. J0, `tests/test_file_journal_late_lookup_seams.py` and `tests/test_scheduler_journal_retention_archive.py` stay unchanged and green.
+- [x] 14.1 Move C18 (Appendix B) into `services/orchestrator/file_journal_retention.py` as a mixin that the class composes. The retention dataclasses stay importable from the facade. Update the cluster map. J0, `tests/test_file_journal_late_lookup_seams.py` and `tests/test_scheduler_journal_retention_archive.py` stay unchanged and green.
   - J1-J5 carry-over from J0 (#3275): set 1 renders a `_UNSET` default as `=facade._UNSET`, and set 4 requires every pinned 4(a) name (e.g. `FileJournalRetentionCycle*`, `OperatorBindReceipt`, `PERMANENT_FAILURE_SOURCE_STATUSES`) to keep resolving on the facade. When a slice moves such a name, or the last class-body use of `_UNSET`, out of the facade, the facade keeps the re-import with `# noqa: F401`. Adding it to `__all__` is not an option: `tests/test_file_orchestration_journal_facade.py` requires every `__all__` name to have a consumer. Facade-only imports (`COHORT_MEMBERSHIP_*`, `journal_read_lane`) may be dropped under F401 without touching set 4, whose live side counts only sibling imports already pinned as 4(a).
 - [ ] 14.2 Verification: CI, then node-22 batch per D5.
 
 Suggested fixture level: expanded - moves persisted-state writer code.
 Minimal mergeable slice: atomic - one cluster, pure move.
+
+Slice triage (J1, #3276, tasks 14.1-14.2):
+- Issue type: refactor (pure move). Fixture level: expanded (agree): it moves persisted-state writer code (retention removal unlinks journal files). Width: one PR, atomic.
+- Recon at 1a3c43c22. The Appendix B ranges (at 54556b1e7) have shifted by 2-3 lines; the HEAD ranges are below.
+  - C18 is 7 methods of `FileOrchestrationJournalRepository` in `services/orchestrator/file_orchestration_journal.py`:
+    - `discover_retention_cycles` `:1365-1390` (public, attribution-wrapped);
+    - `open_retention_cycle` `:1393-1453` (public, `@contextmanager`, in J0's skip list);
+    - `_discover_retention_cycles_unlocked` `:11789-11835`, `_inspect_retention_cycle_unlocked` `:11837-11910`, `_retention_cycle_members_unlocked` `:11912-11952`, `_retention_member_for_path` `:11954-11972`, `_remove_retention_members_unlocked` `:11974-12043`.
+  - Module-level names they read:
+    - Facade-defined: the five `FileJournalRetention*` dataclasses (`:979-1085`), `_RetentionDiscoveryBudget` (`:1289-1302`), `FileOrchestrationJournalError`.
+    - Facade-resident patched name (cluster map `patched`): `stat_no_follow`. It is also used outside C18, so the facade keeps its import.
+    - Imported into the facade from owner modules: `packages.common.safe_fs` (`SafeFilesystemError`, `read_bytes_durable_no_follow`, `unlink_no_follow_durable`), `file_journal_paths` (`_cycle_read_source_segments`, `_iter_retention_surface_files`, `_journal_segment_identity_from_path`, `_latest_identity_from_path`, `_relative_evidence`), `file_journal_primitives._normalize_file_source_id`, `file_journal_retry_helpers._job_blocks_rollback_quiescence`, `file_journal_candidates._released_identity_blocked_row`, `scheduler_state._ensure_utc`, `accepted_submit_identity.AcceptedSubmitEvidenceError`, `chain_types.OrchestratorError`, `format_cycle_time`, plus stdlib (`hashlib`, `stat`, `datetime`, `Path`, `contextmanager`, `Iterable`, `Sequence`).
+  - Consumers:
+    - production: `scheduler_journal_retention.py:392,438` and `scheduler_journal_restore.py:131`, both via the instance;
+    - tests: a class-level `monkeypatch.setattr(FileOrchestrationJournalRepository, "_remove_retention_members_unlocked", ...)` at `tests/test_scheduler_journal_retention_archive.py:269`, and instance-level patches at `tests/test_scheduler_journal_retention_planning.py:267,271`. Both resolve through the MRO.
+  - The retention dataclasses are imported from the facade by `scheduler_journal_retention.py:25-26`, `scheduler_journal_archive.py:33` and tests. `_RetentionDiscoveryBudget` is imported by `file_journal_paths.py:42` (under `TYPE_CHECKING`) and read as `file_orchestration_journal._RetentionDiscoveryBudget` by `tests/test_file_journal_late_lookup_seams.py:189`.
+- Changes (implementer):
+  1. New `services/orchestrator/file_journal_retention.py`, starting with `from __future__ import annotations`. It holds one top-level class, `_FileJournalRetentionMixin`, decorated `@_install_public_read_attribution` (imported from `file_journal_read_attribution`). The class contains the 7 methods, moved verbatim: same bodies, decorators, signatures and docstrings; only name resolution changes.
+  2. Name resolution in the moved code:
+     - the patched name `stat_no_follow` is read as an attribute of the facade module at call time (a function-local `from services.orchestrator import file_orchestration_journal`, then `file_orchestration_journal.stat_no_follow(...)`). It is never bound by import, at top level or in a function body;
+     - facade-defined names are resolved in two ways. Names used only in annotations (signature annotations, and local variable annotations such as `members: tuple[FileJournalRetentionMember, ...]`) come from one module-level `if TYPE_CHECKING:` block that imports them from the facade, as `file_journal_paths.py` does; at HEAD these are the five `FileJournalRetention*` classes. Names read at runtime come from function-local imports from the facade, placed immediately after the method docstring and listing only the names that method's body reads at runtime. Annotations stay byte-identical, so J0 set 1 is unchanged. The sibling must not import the facade at top level outside `TYPE_CHECKING` (circular import);
+     - names the facade itself imports from owner modules (stdlib, `safe_fs` except `stat_no_follow`, other `file_journal_*` siblings, `scheduler_state`, `accepted_submit_identity`, `chain_types`, `time_normalization`) are imported at the sibling's top level from those owner modules.
+  3. The facade imports `_FileJournalRetentionMixin` and declares `class FileOrchestrationJournalRepository(_FileJournalRetentionMixin):`, keeping its own `@_install_public_read_attribution`. The 7 methods are deleted from the class body. The retention dataclasses and `_RetentionDiscoveryBudget` stay in the facade unchanged, as does `__all__`. Facade imports left unused by the move are removed (ruff F401), except a pinned J0 4(a) name or `_UNSET`, which keep `# noqa: F401` (tasks 14.1 carry-over). Expected removals: `read_bytes_durable_no_follow` and `unlink_no_follow_durable` (from `safe_fs`), and `_iter_retention_surface_files` (from `file_journal_paths`). No `# noqa` is needed.
+  4. Cluster map (`tests/test_file_journal_cluster_map.py` + `tests/fixtures/file_journal_cluster_map.json`): add `"retention"` to `CLUSTERS` (end of the tuple), `clusters["retention"] = ["_FileJournalRetentionMixin"]`, and update `patched[*].callers` for every patched name the moved code references. Expected: `stat_no_follow` gains `"retention": ["_FileJournalRetentionMixin"]`. Re-derive the full set; do not guess. Update the module docstring's cluster count and order sentence.
+  5. Any other repo guard that enumerates per-file entries and now sees code move from the facade to the new file is updated in the same diff, as a pure relocation of an existing entry listed in `moves.md`. Expected result: "none". Check `tests/status_literal_allowlist.json`, `scripts/governance/entropy_audit/line_reference_baseline.json`, `pyproject.toml` per-file-ignores, and the first-import allowlist.
+- Must preserve:
+  - `tests/fixtures/file_journal_class_surface.json` is byte-identical, and `tests/test_file_journal_class_surface.py` is unchanged and green (J0).
+  - `tests/test_file_journal_late_lookup_seams.py` and `tests/test_scheduler_journal_retention_archive.py` are unchanged and green.
+  - No behaviour, signature, exception, log or on-disk format change. The method bodies are AST-identical to HEAD after name-resolution rewrites, and evidence 1 proves it.
+  - No other cluster moves; the shared core stays.
+  - No `file.py:NNN` line reference is added in shipped Python.
+- Deviation (record in the PR body): the diff also edits `tests/test_file_journal_cluster_map.py` (`CLUSTERS` and its docstring), because the 13.2 registration rule requires it, and ticks 14.1 in `tasks.md`.
+- Out of scope: moving the retention dataclasses; other clusters (J2-J5); renaming anything; the stale comment line references noted in #3275.
+- Required evidence (`.workplans/3276/`):
+  1. `ast-parity.md`: for each of the 7 methods, `ast.dump` of HEAD's whole `FunctionDef` (decorators, args, returns, body) versus the moved one, after normalising only the documented name-resolution rewrites (the inserted function-local import lines and `file_orchestration_journal.stat_no_follow` → `stat_no_follow`); expect identical. Check `ast.get_docstring` on the un-normalised moved node equals HEAD's. Also confirm the facade diff only deletes those 7 methods, plus import-line and class-header edits.
+  2. `red-runs.log`, each a temporary edit reverted afterwards:
+     - (a) bind `stat_no_follow` by top-level import in the sibling: the cluster-map late-lookup lint fails;
+     - (b) drop `@_install_public_read_attribution` from the mixin: J0 set 2 fails;
+     - (c) remove `"retention"` from `CLUSTERS`: the 13.2 unregistered-sibling rule fails; the log names that message (the shape check's unknown-cluster-key failure also fires).
+  3. `moves.md`: every guard and allowlist entry relocated under Change 5, or "none".
+  4. `checks.log`: `uv run --no-sync ruff check . --no-cache`, `git diff --check`, `openspec validate redesign-orchestration-core --strict --no-interactive`, and the local test list.
+- Verification:
+  - Locally: `tests/test_file_journal_*.py`, `tests/test_file_orchestration_journal*.py`, `tests/test_scheduler_journal_retention*.py` (these cover restore and archive), `tests/test_status_literal_scan.py`, `tests/test_status_vocab_parity.py`, `tests/test_import_layering_guard.py`, `tests/test_orchestrator_first_import.py`, `tests/test_facade_name_resolution.py`, and every test file that scans `services/**` or `tests/**` and names the facade or `file_journal_`.
+  - node-27: a fresh-process import check over all `integration`-marked files at HEAD (the `tasks.md` F-slice method) lists the files that import `services.orchestrator.file_orchestration_journal` or `services.orchestrator.file_journal_retention`. After `mkdir -p /home/nwm/tmp && export TMPDIR=/home/nwm/tmp`, run `-m integration` over them on throwaway `nhms_it_*` DBs. Expected: all pass, 0 leftover DBs.
+  - CI: the full suite.
+  - node-22: the D5 pure-move batch (14.2).
 
 ## 15. J2 — Status/events and identity-blocked release mixins
 

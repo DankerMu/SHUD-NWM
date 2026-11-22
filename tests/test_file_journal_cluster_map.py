@@ -2,9 +2,10 @@
 
 ``tests/fixtures/file_journal_cluster_map.json`` assigns every top-level
 definition of ``services/orchestrator/file_orchestration_journal.py`` to exactly
-one of eight clusters -- ``facade`` plus the seven extraction clusters in D7
-order (``context`` -> ``read_attribution`` -> ``primitives`` -> ``replay`` ->
-``candidates`` -> ``paths`` -> ``retry_helpers``) -- and records, for every
+one of nine clusters -- ``facade`` plus the eight extraction clusters, the
+seven of D7 in order (``context`` -> ``read_attribution`` -> ``primitives`` ->
+``replay`` -> ``candidates`` -> ``paths`` -> ``retry_helpers``) followed by the
+repository mixin ``retention`` -- and records, for every
 name a test monkeypatches on the facade module, how the facade binds it, which
 cluster owns it and which top-level units reference it.  Once this map is
 merged it is authoritative: extraction PRs (5.2+) move exactly the names it
@@ -72,6 +73,7 @@ CLUSTERS = (
     "candidates",
     "paths",
     "retry_helpers",
+    "retention",
 )
 EXTRACTION_ORDER = CLUSTERS[1:]
 BINDINGS = ("def", "class", "assign", "import")
